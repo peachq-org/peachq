@@ -21,6 +21,7 @@
 #include "qlang/q_console.h"  /* q_console_str/reset (timed-expr side effects); q_console_pipe_* (`\nonlegacy`) */
 #include "qlang/q_repl.h"     /* q_repl_mark_listener_active / q_repl_run_file */
 #include "qlang/q_pq.h"       /* q_pq_load — the `\l pq` embedded-stdlib gate */
+#include "qlang/q_env.h"      /* q_env_ctx_set — the K-tree context pointer (stage C wires reads) */
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk — the `.z.ts` timer callback */
 #include "qlang/q_parse.h"    /* q_parse — `\t expr` / `\ts expr` timing */
 #include "core/ipc.h"         /* ray_ipc_listen — `\p N` binds a listener */
@@ -64,7 +65,7 @@ ray_t* ray_gc_fn(ray_t** args, int64_t n);
  * context is a recorded rebuild-wave gap (scoping wave). */
 static char g_ctx[64];
 
-void q_sys_ctx_reset(void) { g_ctx[0] = '\0'; }
+void q_sys_ctx_reset(void) { g_ctx[0] = '\0'; q_env_ctx_set(0); }
 
 const char* q_sys_ctx_current(void) { return g_ctx; }
 
@@ -89,6 +90,7 @@ static int ctx_ident_ok(const char* p, size_t len) {
 static ray_t* ctx_switch(const char* name, size_t len) {
     if (len == 1 && name[0] == '.') {          /* `\d .` — back to root */
         g_ctx[0] = '\0';
+        q_env_ctx_set(0);
         return NULL;
     }
     /* One level below root only (kdb limitation, q4m3 §12.7): `.ident`. */
@@ -96,6 +98,7 @@ static ray_t* ctx_switch(const char* name, size_t len) {
         ctx_ident_ok(name + 1, len - 1)) {
         memcpy(g_ctx, name, len);
         g_ctx[len] = '\0';
+        q_env_ctx_set(ray_sym_intern_runtime(name, len));
         return NULL;
     }
     /* kdb signals the offending name itself: `\d .jab.util` -> '.jab.util */

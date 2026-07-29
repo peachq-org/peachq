@@ -25,8 +25,8 @@
 #include "qlang/ops/q_bang.h"
 #include "qlang/ops/q_dollar.h"
 #include "qlang/ops/q_index.h"
+#include "qlang/q_env.h"
 #include "lang/eval.h"
-#include "lang/env.h"
 #include "lang/internal.h"   /* call_lambda — bare engine-lambda application */
 #include "ops/ops.h"
 #include "table/dict.h"
@@ -1239,11 +1239,11 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
     ray_t* body = c[1];
     /* barrier frame: strictly-local resolution (function-notation.md) —
      * the body sees its params/locals and globals, never a caller frame */
-    if (ray_env_push_scope_barrier() != RAY_OK) return q_err(QE_STACK);
+    if (q_env_frame_push(1) != RAY_OK) return q_err(QE_STACK);
     for (int64_t i = 0; i < n; i++) {
         ray_t* p = q_index_elem_at(params, i);          /* sym atom */
         if (p && !RAY_IS_ERR(p)) {
-            ray_env_set_local(p->i64, args[i]);            /* retains */
+            q_env_local_set(p->i64, args[i]);              /* retains */
             ray_release(p);
         }
     }
@@ -1258,7 +1258,7 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
         r = nr;
     }
     g_frame_depth--;
-    ray_env_pop_scope();
+    q_env_frame_pop();
     return r;
 }
 
@@ -1325,7 +1325,7 @@ static ray_t* sym_head_apply(ray_t* head, ray_t** args, int64_t n) {
         }
         return q_err(QE_TYPE);              /* file handle: no apply */
     }
-    ray_t* v = ray_env_resolve(head->i64);           /* owned or NULL */
+    ray_t* v = q_env_resolve(head->i64);             /* owned or NULL */
     if (!v) return q_err(QE_TYPE);
     if (RAY_IS_ERR(v)) return v;
     if (v->type == -RAY_SYM) { ray_release(v); return q_err(QE_TYPE); }
@@ -1680,19 +1680,26 @@ static ray_t* name_lift(const q_op_t* row, ray_t** args, int64_t n, int dot) {
     if (s) ray_release(s);
     if (isfile) return q_err(QE_NYI);       /* `:path on-disk amend: file wave */
     int64_t id = args[0]->i64;
-    ray_t* cur = ray_env_get(id);                    /* borrowed global */
-    if (!cur || RAY_IS_ERR(cur)) return q_err(QE_DOMAIN);   /* not a handle */
-    ray_retain(cur);                                 /* the consumable ref */
-    int stole = ray_env_set(id, RAY_NULL_OBJ) == RAY_OK;    /* env drops its ref */
+    ray_t* cur = q_env_get(id);                      /* borrowed flat global */
+    int stole = 0;
+    if (cur && !RAY_IS_ERR(cur)) {
+        ray_retain(cur);                             /* the consumable ref */
+        stole = q_env_bind(id, RAY_NULL_OBJ) == RAY_OK;  /* env drops its ref */
+    } else if (q_env_ns_exists(id)) {
+        cur = q_env_ns_view(id);       /* owned namespace dict: amend, rebind */
+        if (!cur) return q_err(QE_DOMAIN);
+    } else {
+        return q_err(QE_DOMAIN);                     /* not a handle */
+    }
     ray_t* y = n == 4 ? args[3] : NULL;
     ray_t* r = dot ? q_index_amend_dot(cur, args[1], args[2], y)
                    : q_index_amend_at(cur, args[1], args[2], y);
     if (!r || RAY_IS_ERR(r)) {
-        if (stole) ray_env_set(id, cur);             /* restore the binding */
+        if (stole) q_env_bind(id, cur);              /* restore the binding */
         ray_release(cur);
         return r ? r : q_err(QE_TYPE);
     }
-    ray_err_t e = ray_env_set(id, r);                /* retains */
+    ray_err_t e = q_env_set(id, r);                  /* retains */
     ray_release(r);
     if (e != RAY_OK) return q_err(QE_ASSIGN);
     ray_retain(args[0]);

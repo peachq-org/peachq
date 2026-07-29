@@ -25,6 +25,7 @@
 #include "lang/internal.h"
 #include "ops/temporal.h"
 #include "lang/format.h"  /* ray_type_name (error context) */
+#include <string.h>       /* strlen/memcmp — accessor-roster spelling match */
 #include <time.h>
 
 /* ============================================================================
@@ -234,6 +235,32 @@ ray_t* ray_extract_mm_fn(ray_t* x) {
 ray_t* ray_extract_dd_fn(ray_t* x)     { return ray_temporal_extract(x, RAY_EXTRACT_DAY); }
 ray_t* ray_extract_dow_fn(ray_t* x)    { return ray_temporal_extract(x, RAY_EXTRACT_DOW); }
 ray_t* ray_extract_doy_fn(ray_t* x)    { return ray_temporal_extract(x, RAY_EXTRACT_DOY); }
+
+/* Dotted-segment sym → the unary accessor kernel (the extract wrappers
+ * above plus the date/time clocks); NULL when the segment is not an
+ * accessor.  THE spelling roster for dotted-walk resolvers. */
+ray_t* (*ray_temporal_accessor(int64_t sym_id))(ray_t*) {
+    static const struct { const char* nm; ray_t* (*fn)(ray_t*); } ACC[] = {
+        { "ss", ray_extract_ss_fn },   { "hh", ray_extract_hh_fn },
+        { "minute", ray_extract_minute_fn }, { "yyyy", ray_extract_yyyy_fn },
+        { "mm", ray_extract_mm_fn },   { "dd", ray_extract_dd_fn },
+        { "dow", ray_extract_dow_fn }, { "doy", ray_extract_doy_fn },
+        { "date", ray_date_clock_fn }, { "time", ray_time_clock_fn },
+    };
+    ray_t* s = ray_sym_str(sym_id);
+    if (!s) return NULL;
+    const char* p = ray_str_ptr(s);
+    size_t n = ray_str_len(s);
+    ray_t* (*fn)(ray_t*) = NULL;
+    for (size_t i = 0; p && i < sizeof ACC / sizeof *ACC; i++) {
+        if (strlen(ACC[i].nm) == n && memcmp(ACC[i].nm, p, n) == 0) {
+            fn = ACC[i].fn;
+            break;
+        }
+    }
+    ray_release(s);
+    return fn;
+}
 
 int ray_temporal_trunc_from_sym(int64_t sym_id) {
     ray_t* s = ray_sym_str(sym_id);

@@ -7,11 +7,9 @@
  * both cases.  The shared internal surface lives in q_registry_internal.h.
  * See q_registry.h for the registry contract. */
 #define _POSIX_C_SOURCE 200809L
-#define Q_OPS_ENV_GRANDFATHER /* grandfathered 2026-07-23: 2 env uses — q-index PR audit */
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/q_err.h"
 #include "qlang/q_type.h"  /* q_type_empty (the one typed-empty ctor), q_type_is_num_tag/_float_tag */
-#include "lang/env.h"      /* ray_env_get — q_env_call2 */
 #include "lang/eval.h"     /* ray_take_fn, ray_xbar_fn */
 #include "lang/internal.h" /* ray_iasc_fn/ray_idesc_fn, RAY_IS_TEMPORAL64, ray_error */
 #include "ops/ops.h"       /* ray_is_lazy, ray_lazy_materialize */
@@ -455,16 +453,5 @@ ray_t* q_fill_wrap(ray_t* x, ray_t* y) {
         if (isnull) ray_vec_set_null(out, i, true);
     }
     return out;
-}
-
-/* Call the env-bound BINARY builtin `nm` (the wrapper-over-env pattern:
- * some base fns — dict — are declared only in internal base headers, so the
- * wrapper routes through the audited env value instead of a frozen-header
- * include).  Borrowed args; returns owned. */
-ray_t* q_env_call2(const char* nm, ray_t* a, ray_t* b) {
-    ray_t* f = ray_env_get(ray_sym_intern(nm, strlen(nm)));
-    if (!f || f->type != RAY_BINARY)
-        return q_err(QE_TYPE);
-    return ((ray_binary_fn)(uintptr_t)f->i64)(a, b);
 }
 
