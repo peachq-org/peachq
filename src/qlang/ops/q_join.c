@@ -5,12 +5,11 @@
  * internal surface lives in q_registry_internal.h.  See q_registry.h for
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
-#define Q_OPS_ENV_GRANDFATHER /* grandfathered 2026-07-23: 2 env uses — q-index PR audit */
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/q_err.h"
 #include "qlang/ops/q_bang.h"  /* q_bang_enkey — keyed-result construction */
-#include "lang/env.h"      /* ray_env_get */
-#include "lang/eval.h"     /* ray_eval; ray_left_join_fn, ray_window_join*_fn */
+#include "qlang/eval/q_eval.h" /* q_eval_apply_value — pj rides q's own `+` */
+#include "lang/eval.h"     /* ray_left_join_fn, ray_window_join*_fn */
 #include "lang/internal.h" /* ray_asof_join_fn, ray_concat_fn, ray_vec_set_null, ray_error */
 #include "table/sym.h"     /* ray_sym_intern_runtime, RAY_SYM_W64 */
 #include <stdio.h>         /* snprintf */
@@ -276,19 +275,13 @@ static ray_t* qj_merge_col(ray_t* xc, ray_t* yc, const int64_t* fmap,
         ray_t* zf = q_fill_wrap(zero, gy);         /* 0^gathered (pj is numeric) */
         ray_release(zero);
         if (!zf || RAY_IS_ERR(zf)) { ray_release(gy); return zf ? zf : q_err(QE_TYPE); }
-        /* env `+` is ATOMIC — the raw fn pointer wants eval's broadcast, so
-         * apply (+; xc; zf) through ray_eval (vectors self-evaluate). */
-        ray_t* plus = ray_env_get(ray_sym_intern("+", 1));  /* borrowed */
+        /* xc + 0^gathered through q's own `+` (registry dyad + family lift
+         * owns the container broadcast — no base-eval detour) */
+        ray_t* plus = q_registry_lookup_name("+", 1, Q_DYADIC);   /* borrowed */
         if (!plus) { ray_release(zf); ray_release(gy); return q_err(QE_TYPE); }
-        ray_t* app = ray_list_new(3);
-        if (RAY_IS_ERR(app)) { ray_release(zf); ray_release(gy); return app; }
-        app = ray_list_append(app, plus);
-        if (!RAY_IS_ERR(app)) app = ray_list_append(app, xc);
-        if (!RAY_IS_ERR(app)) app = ray_list_append(app, zf);
+        ray_t* av[2] = { xc, zf };
+        r = q_eval_apply_value(plus, av, 2);
         ray_release(zf);
-        if (RAY_IS_ERR(app)) { ray_release(gy); return app; }
-        r = ray_eval(app);
-        ray_release(app);
     }
     ray_release(gy);
     return r;
@@ -828,7 +821,7 @@ ray_t* q_asof_wrap(ray_t* t, ray_t* d) {
         if (!cvals || RAY_IS_ERR(cvals)) { ray_release(okeys); return cvals ? cvals : q_err(QE_TYPE); }
         /* construct through the audited env dict builder (the same one `!`
          * uses) so the result is structurally identical to a `!`-made dict */
-        ray_t* r = q_env_call2("dict", okeys, cvals);
+        ray_t* r = ray_dict_fn(okeys, cvals);
         ray_release(okeys);
         ray_release(cvals);
         return r;

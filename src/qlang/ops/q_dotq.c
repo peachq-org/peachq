@@ -143,7 +143,7 @@ ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs) {
     (void)args; (void)nargs;                   /* `.Q.ops[]` / `.Q.ops x` — arg ignored */
     int n = 0;
     const q_op_t* ops = q_ops_table(&n);
-    ray_t* ns   = q_registry_qsrc_ns();            /* borrowed */
+    ray_t* ns   = q_registry_qsrc_ns();            /* owned, marker-free */
     ray_t* nsk  = ns ? ray_dict_keys(ns) : NULL;   /* borrowed */
     ray_t* nsv  = ns ? ray_dict_vals(ns) : NULL;   /* borrowed */
     int64_t nsn = nsk ? ray_len(nsk) : 0;
@@ -176,11 +176,12 @@ ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs) {
     }
     for (int64_t j = 0; j < nsn && ok; j++) {
         if (taken[j]) continue;
+        int64_t nm = ray_read_sym(ray_data(nsk), j, RAY_SYM, nsk->attrs);
         int64_t r = q_eval_apply_rank(ray_list_get(nsv, j));
-        dotq_ops_row(c, &ok, ray_read_sym(ray_data(nsk), j, RAY_SYM, nsk->attrs),
-                     "kw_prefix", r == 1, r == 2, 1, 0, "", "q");
+        dotq_ops_row(c, &ok, nm, "kw_prefix", r == 1, r == 2, 1, 0, "", "q");
     }
     free(taken);
+    if (ns) ray_release(ns);
     if (!ok) {
         for (int i = 0; i < DOTQ_OPS_NCOLS; i++)
             if (c[i] && !RAY_IS_ERR(c[i])) ray_release(c[i]);

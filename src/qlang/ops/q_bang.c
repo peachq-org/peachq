@@ -13,7 +13,7 @@
 #include "qlang/ops/q_bang.h"
 #include "qlang/q_err.h"
 #include "qlang/q_registry_internal.h"  /* q_hsym_wrap, q_attr_wrap, q_type_strict_i64,
-                                         * q_type_is_int_atom, q_type_iatom_val, q_table_flatten, q_env_call2 */
+                                         * q_type_is_int_atom, q_type_iatom_val, q_table_flatten */
 #include "qlang/q_builtins.h"   /* q_parse_builtin_fn, q_md5_fn, q_dotq_btoa_fn, q_dotq_sha1_fn */
 #include "qlang/net/q_json.h"       /* q_json_serialize (.j.j), q_json_deserialize (.j.k) */
 #include "qlang/net/q_wire.h"       /* q_wire_serialize/_deserialize/_compress, Q_WIRE_ASYNC */
@@ -24,6 +24,7 @@
 #include "qlang/q_sys.h"        /* q_sys_ts_apply — `-34!` (.Q.ts) */
 #include "qlang/net/q_net.h"   /* q_net_host / q_net_addr — `-12!`/`-13!` */
 #include "lang/eval.h"          /* ray_eval_get_restricted — `-7!` file gate */
+#include "lang/internal.h"      /* ray_dict_fn — the `!` dict kernel */
 #include <rayforce.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -257,7 +258,7 @@ static ray_t* bang_make_dict(ray_t* x, ray_t* y) {
                    ? (ray_retain(x), ray_retain(y), ray_dict_new(x, y))
                : ((ray_is_vec(x) || x->type == RAY_LIST) &&
                   (ray_is_vec(y) || y->type == RAY_LIST))
-                   ? q_env_call2("dict", x, y)
+                   ? ray_dict_fn(x, y)
                    : q_err(QE_TYPE);
     if (ex) ray_release(ex);
     if (ey) ray_release(ey);

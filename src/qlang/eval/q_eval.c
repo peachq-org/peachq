@@ -18,13 +18,12 @@
 #include "qlang/q_parse_internal.h"
 #include "qlang/q_ops.h"
 #include "qlang/q_registry.h"
-#define Q_OPS_ENV_GRANDFATHER /* legitimate owner: THE evaluator (name resolution/rebinding) */
 #include "qlang/q_registry_internal.h"   /* q_type_strict_i64 — the do-count judgment */
 #include "qlang/q_dotz.h"
+#include "qlang/q_env.h"
 #include "qlang/ops/q_index.h"
 #include "qlang/net/q_wirefile.h"  /* q_wirefile_read — `get `:file */
 #include "lang/eval.h"
-#include "lang/env.h"
 #include "ops/ops.h"
 #include <string.h>
 
@@ -97,7 +96,7 @@ static ray_t* resolve(int64_t id, const q_op_t** row_out) {
         }
         ray_release(nm);
     }
-    ray_t* v = ray_env_resolve(id);          /* owned (or an owned error) */
+    ray_t* v = q_env_resolve(id);            /* owned (or an owned error) */
     if (v) return v;
     v = q_dotz_resolve(id);                  /* owned */
     if (v) return v;
@@ -111,7 +110,7 @@ static ray_t* resolve(int64_t id, const q_op_t** row_out) {
             memcpy(full, ".q.", 3);
             memcpy(full + 3, p, n);
             ray_release(nm);
-            return ray_env_resolve(ray_sym_intern_runtime(full, n + 3));
+            return q_env_resolve(ray_sym_intern_runtime(full, n + 3));
         }
         ray_release(nm);
     }
@@ -221,9 +220,9 @@ static ray_t* indexed_assign(int is_global, ray_t* target, ray_t* opv,
         else {                                       /* cur consumed on success */
             int in_frame = !dotted && q_eval_apply_frame_depth() > 0;
             int local = in_frame &&
-                        (!is_global || ray_env_get_local(te[0]->i64) != NULL);
-            ray_err_t e2 = local ? ray_env_set_local(te[0]->i64, amended)
-                                 : ray_env_set(te[0]->i64, amended);
+                        (!is_global || q_env_local_get(te[0]->i64) != NULL);
+            ray_err_t e2 = local ? q_env_local_set(te[0]->i64, amended)
+                                 : q_env_set(te[0]->i64, amended);
             if (e2 != RAY_OK) ret = q_err(QE_ASSIGN);
             else if (!opv) { ray_retain(rv); ret = rv; }
             else ret = q_eval_apply_concrete(q_eval_apply_value(amended, idxv, k));
@@ -258,9 +257,9 @@ static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
     Q_ASSERT_CONCRETE(v);                  /* env-set tripwire */
     int in_frame = !dotted && q_eval_apply_frame_depth() > 0;
     int local = in_frame &&
-                (!is_global || ray_env_get_local(target->i64) != NULL);
-    ray_err_t err = local ? ray_env_set_local(target->i64, v)
-                          : ray_env_set(target->i64, v);
+                (!is_global || q_env_local_get(target->i64) != NULL);
+    ray_err_t err = local ? q_env_local_set(target->i64, v)
+                          : q_env_set(target->i64, v);
     if (err != RAY_OK) { ray_release(v); return q_err(QE_ASSIGN); }
     return v;
 }
@@ -446,8 +445,8 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
             ray_release(snm);
         }
     }
-    ray_err_t err = local ? ray_env_set_local(target->i64, nv)
-                          : ray_env_set(target->i64, nv);
+    ray_err_t err = local ? q_env_local_set(target->i64, nv)
+                          : q_env_set(target->i64, nv);
     if (err != RAY_OK) { ray_release(nv); return q_err(QE_ASSIGN); }
     return nv;                                       /* q returns the NEW value */
 }
