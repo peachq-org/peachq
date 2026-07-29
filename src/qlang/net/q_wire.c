@@ -11,7 +11,8 @@
 #include "table/sym.h"          /* ray_sym_vec_cell */
 #include "mem/heap.h"           /* RAY_ATTR_HAS_NULLS */
 #include "store/serde.h"        /* fn-serde hook getters (serde mode ext 200) */
-#include "lang/env.h"           /* ray_fn_name, ray_env_get */
+#include "qlang/q_env.h"        /* q_env_resolve — wire fn names resolve in q, never rayfall */
+#include "lang/env.h"           /* ray_fn_name */
 #include <stdint.h>
 #include <string.h>
 
@@ -567,10 +568,17 @@ static ray_t* rd_ext(rcur_t* c, uint8_t tag) {
             ray_t* hooked = rh(name);
             if (hooked) return hooked;    /* owned by contract */
         }
-        ray_t* fn = ray_env_get(ray_sym_intern(name, n));
-        if (!fn) return q_err(QE_NAME);
-        ray_retain(fn);
-        return fn;
+        /* q's surface only: the registry cell at the WIRE VALENCE (a QK_ENV
+         * snapshot IS the base value, so `+` round-trips pointer-identical),
+         * then the q env.  A rayfall-only name — e.g. a peer-supplied
+         * `.idx.bloom` — must NOT materialize. */
+        ray_t* fn = NULL;
+        if (valence != RAY_VARY)
+            fn = q_registry_lookup_name(name, n,                  /* borrowed */
+                     valence == RAY_UNARY ? Q_MONADIC : Q_DYADIC);
+        if (fn && fn->type == valence) { ray_retain(fn); return fn; }
+        fn = q_env_resolve(ray_sym_intern(name, n));              /* owned */
+        return fn ? fn : q_err(QE_NAME);
     }
     case Q_WIRE_EXT_LAMBDA: {             /* attrs + params + body (v4 shape) */
         if (!r_need(c, 1)) return trunc_err("lambda attrs");

@@ -175,7 +175,6 @@ ray_t* q_list_collapse(ray_t* l);                             /* also declared i
 /* q_typed_empty_like: declared in q_registry.h (env-safe reach) — used by: index, apply */
 ray_t* q_til_wrap(ray_t* x);                                  /* used by: registry, table */
 ray_t* q_fill_wrap(ray_t* x, ray_t* y);                       /* used by: registry, agg, join */
-ray_t* q_env_call2(const char* nm, ray_t* a, ray_t* b);       /* used by: join, table */
 
 /* ---- defined in ops/q_math.c ---- */
 ray_t* q_min2_wrap(ray_t* a, ray_t* b);                       /* used by: ops, registry */
