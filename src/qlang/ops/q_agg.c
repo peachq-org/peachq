@@ -7,8 +7,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/q_err.h"
-#include "lang/eval.h"     /* ray_sum_fn, ray_mul_fn — engine arms */
-#include "lang/internal.h" /* atomic_map_unary/binary, make_f64, is_collection, ray_error */
+#include "lang/eval.h"     /* ray_sum_fn, ray_avg_fn, ray_mul_fn — engine arms */
+#include "lang/internal.h" /* atomic_map_unary/binary, make_f64, is_collection, is_list, is_numeric, as_f64, ray_error */
 #include <math.h>          /* isnan, sqrt — sentinel-null discipline, mdev/cov */
 #include <stdlib.h>        /* malloc, free */
 
@@ -337,4 +337,22 @@ ray_t* q_sum_wrap(ray_t* x) {
         return acc;
     }
     return ray_sum_fn(x);
+}
+
+/* q `avg x` — a general LIST counts its nulls in the divisor ("If x is a mixed
+ * list, null items are treated as zero", ref/avg.md).  The VECTOR arm EXCLUDES
+ * them and stays the base kernel's: that divisor is rayfall's own tested
+ * contract (test/rfl/null/agg.rfl) and the one group.c's SQL AVG shares. */
+ray_t* q_avg_wrap(ray_t* x) {
+    if (is_list(x) && ray_len(x) > 0) {
+        int64_t n = ray_len(x);
+        ray_t** e = (ray_t**)ray_data(x);
+        double s = 0;
+        for (int64_t i = 0; i < n; i++) {
+            if (!is_numeric(e[i])) return q_err(QE_TYPE);
+            if (!RAY_ATOM_IS_NULL(e[i])) s += as_f64(e[i]);
+        }
+        return make_f64(s / (double)n);
+    }
+    return ray_avg_fn(x);
 }

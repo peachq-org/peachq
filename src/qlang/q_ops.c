@@ -339,7 +339,7 @@ static const q_op_t Q_OPS[] = {
      * accepts long vectors only, so asc cannot set it without regressing syms. */
     { "iasc",    QLEX_KW_PREFIX, QR_FN1("iasc", q_iasc_wrap),  QR_NONE,           NULL, 1, 0, "rowid", NULL },
     { "idesc",   QLEX_KW_PREFIX, QR_FN1("idesc", q_idesc_wrap), QR_NONE,          NULL, 1, 0, "rowid", NULL },
-    { "avg",     QLEX_KW_PREFIX, QR_ENV("avg"),                QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_MEAN },
+    { "avg",     QLEX_KW_PREFIX, QR_FN1("avg", q_avg_wrap),    QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_MEAN },
     { "floor",   QLEX_KW_PREFIX, QR_FN1A("floor", q_floor_wrap), QR_NONE,         NULL, 1, 0, "atomic", NULL },
     /* `distinct` must preserve FIRST-OCCURRENCE order (ref/distinct.md) where
      * rayfall's routes typed vectors through the sorting DAG group path —
