@@ -9,8 +9,7 @@
 #include "qlang/q_env.h"
 #include "qlang/q_registry_internal.h"
 #include "qlang/q_err.h"
-#include "qlang/q_type.h"         /* q_type_qname / _is_int_atom / _iatom_val — key's arms;
-                                  * q_type_is_fn / _is_table / _is_keyed — the \v|\f|\a split */
+#include "qlang/q_type.h"         /* q_type_is_fn / _is_table / _is_keyed — the \v|\f|\a split */
 #include "qlang/q_dotz.h"         /* the .z.* handler-slot arms of `set` */
 #include "qlang/net/q_wirefile.h" /* q_wirefile_write — the `:file set y form */
 #include "lang/internal.h"        /* ray_error */
@@ -42,6 +41,9 @@ static ray_t* env_boot;        /* bootstrap builtins: q_env_bind plain names,
 static int64_t g_ctx, g_ctx_seg;
 
 static int64_t env_marker(void) { return ray_sym_intern_runtime("", 0); }
+
+/* q_env_marker_sym — see q_env.h. */
+int64_t q_env_marker_sym(void) { return env_marker(); }
 
 static ray_t* env_marker_dict(void) {
     ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, 1);
@@ -580,88 +582,6 @@ void q_env_destroy(void) {
     if (env_ns)   { ray_release(env_ns);   env_ns   = NULL; }
     if (env_boot) { ray_release(env_boot); env_boot = NULL; }
     g_ctx = g_ctx_seg = 0;
-}
-
-/* q `key x` (ref/key.md) — dict keys, plus the name/namespace overloads:
- *   `` ` ``      -> root context roster (namespaces other than .z)
- *   `` `. ``     -> objects in the root (user variable names)
- *   `` `.foo ``  -> the context's keys (leading `` ` `` placeholder + members)
- *   `` `name ``  -> keys of the named dict; the sym itself if the name is
- *                   bound to a non-dict; `()` if unbound (context-aware)
- * File handles (`` `:path ``) are the file-I/O wave: 'nyi.  Everything else
- * non-dict stays a deferred 'type cell. */
-ray_t* q_key_wrap(ray_t* x) {
-    /* type of a vector (ref/key.md): `key 0#5` -> `long; a native string
-     * atom IS the provisional char vector -> `char; `key 10` -> til 10. */
-    if (x && ray_is_vec(x)) {
-        const char* nm = q_type_qname(x->type);
-        if (nm) return ray_sym(ray_sym_intern_runtime(nm, strlen(nm)));
-        /* unnamed vector types keep the deferred 'type tail below */
-    }
-    if (x && x->type == -RAY_STR)
-        return ray_sym(ray_sym_intern_runtime("char", 4));
-    if (q_type_is_int_atom(x) && !RAY_ATOM_IS_NULL(x) && q_type_iatom_val(x) >= 0)
-        return q_til_wrap(x);                       /* key n == til n */
-    if (x && x->type == -RAY_SYM) {
-        ray_t* s = ray_sym_str(x->i64);
-        if (!s) return q_err(QE_TYPE);
-        const char* nm = ray_str_ptr(s);
-        size_t l = ray_str_len(s);
-        if (l == 0) {
-            ray_release(s);
-            ray_t* r = q_env_ns_roster();
-            return r ? r : q_err(QE_WSFULL);
-        }
-        if (nm[0] == ':') {
-            ray_release(s);
-            return q_err(QE_NYI);
-        }
-        if (l == 1 && nm[0] == '.') {           /* `. — root objects, marker-free
-                                                 * (ref/key.md: `key `.` lists names
-                                                 * only; namespaces keep the marker) */
-            ray_release(s);
-            ray_t* root = q_env_resolve(x->i64);
-            if (!root || root->type != RAY_DICT) {
-                if (root) ray_release(root);
-                return q_err(QE_NYI);
-            }
-            ray_t* marker = ray_sym(ray_sym_intern_runtime("", 0));
-            if (!marker || RAY_IS_ERR(marker)) {
-                ray_release(root);
-                return marker ? marker : q_err(QE_WSFULL);
-            }
-            ray_t* bare = ray_dict_remove(root, marker);   /* consumes root */
-            ray_release(marker);
-            if (!bare || RAY_IS_ERR(bare)) return bare ? bare : q_err(QE_WSFULL);
-            ray_t* rk = ray_dict_keys(bare);
-            if (!rk) { ray_release(bare); return q_err(QE_TYPE); }
-            ray_retain(rk);
-            ray_release(bare);
-            return rk;
-        }
-        ray_release(s);
-        /* named variable / namespace: dict (incl. a context's dict) -> keys;
-         * bound -> the sym itself; unbound -> () (ref/key.md). */
-        ray_t* v = q_env_resolve(x->i64);
-        if (!v) return ray_list_new(1);         /* () — empty general list */
-        if (RAY_IS_ERR(v)) return v;
-        if (v->type == RAY_DICT) {
-            ray_t* k = ray_dict_keys(v);
-            if (!k) { ray_release(v); return q_err(QE_TYPE); }
-            ray_retain(k);
-            ray_release(v);
-            return k;
-        }
-        ray_release(v);
-        ray_retain(x);
-        return x;
-    }
-    if (!x || x->type != RAY_DICT)
-        return q_err(QE_TYPE);
-    ray_t* k = ray_dict_keys(x);                /* borrowed */
-    if (!k) return q_err(QE_TYPE);
-    ray_retain(k);
-    return k;
 }
 
 /* q `nam set y` (ref/get.md) — assign a global through a symbol handle:
