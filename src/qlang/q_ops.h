@@ -136,7 +136,14 @@ typedef struct q_op {
                                  * lifted rows set it (designated init; insert/upsert adopt later). */
     uint8_t      nested;        /* aggregate rows: the QNEST_* rank-2 sub-law above.  Trailing
                                  * field, zero-default (designated init). */
+    int8_t       kdb_op1;       /* kdb primitive code PLUS ONE (0 = none) — set via
+                                 * QKOP (q_ops.c), read via q_ops_kdb_op below. */
 } q_op_t;
+
+/* The row's kdb primitive code — the 101h/102h wire byte and `value +` -> 1 —
+ * or -1 when the verb has none.  The numbering is KX's FROZEN historical
+ * constant (javakdb c.java operator tables); openq never allocates into it. */
+static inline int q_ops_kdb_op(const struct q_op* row) { return (int)row->kdb_op1 - 1; }
 
 /* The manifest table; sets *n to its length.  Stable storage (static const). */
 const q_op_t* q_ops_table(int* n);
