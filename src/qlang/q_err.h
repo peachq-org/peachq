@@ -26,6 +26,11 @@ typedef enum {
  * so q-side display and the wire can render the full class name. */
 ray_t* q_err(q_err_e e);
 
+/* The NAME is the class — kdb signals the offending name itself for a bad or
+ * missing namespace (`\d .a.b` -> '.a.b, `\a .n` -> '.n, `tables `.n`).  The
+ * 7-byte error-code width truncates a longer name (by design). */
+ray_t* q_err_name(const char* p, size_t n);
+
 /* Full kdb class string for q-side rendering (display + wire): the stamped
  * enum's full name (dissolving the 7-byte 'mismatc' truncation), else the
  * stored 7-byte code for base-constructed errors.  NULL when not an error. */

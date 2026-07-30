@@ -42,8 +42,24 @@ int    q_env_ns_exists(int64_t path_sym);
  * caller.  OWNED; NULL if the name is not bound to a dict. */
 ray_t* q_env_ns_view(int64_t path_sym);
 
-/* `\d` current-context pointer — STORED only; stage C wires it into
- * resolution.  0 = root. */
+/* `<ns>.<member>` as one sym; ns 0 or `` `. `` leaves the member bare.  The
+ * K-tree's name-composition rule, for callers holding a namespace by name. */
+int64_t q_env_qualify(int64_t ns_sym, int64_t member_sym);
+
+/* A namespace's own members by value KIND (`\v` `\f` `\a`, `tables`) — sorted,
+ * never recursive; ns_sym 0 or `` `. `` is the root.  OWNED sym vector, or NULL
+ * when ns_sym names no namespace. */
+typedef enum { Q_ENV_NS_VARS, Q_ENV_NS_FNS, Q_ENV_NS_TABLES } q_env_ns_kind_t;
+ray_t* q_env_ns_names(int64_t ns_sym, q_env_ns_kind_t kind);
+
+/* `key ``: the root's namespaces in creation order, `.z` excluded
+ * (basics/syscmds.md §`\d`).  OWNED sym vector. */
+ray_t* q_env_ns_roster(void);
+
+/* `\d` current context (0 = root).  A RELATIVE name resolves in the context
+ * first and falls back to the root; an assignment lands IN the context, which
+ * is what CREATES it — `\d .s` alone does not (syscmds.md §`\d`: "a new
+ * namespace is created when an object is defined in it"). */
 void    q_env_ctx_set(int64_t ns_sym);
 int64_t q_env_ctx(void);
 

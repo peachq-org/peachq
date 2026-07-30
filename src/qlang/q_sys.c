@@ -21,7 +21,7 @@
 #include "qlang/q_console.h"  /* q_console_str/reset (timed-expr side effects); q_console_pipe_* (`\nonlegacy`) */
 #include "qlang/q_repl.h"     /* q_repl_mark_listener_active / q_repl_run_file */
 #include "qlang/q_pq.h"       /* q_pq_load — the `\l pq` embedded-stdlib gate */
-#include "qlang/q_env.h"      /* q_env_ctx_set — the K-tree context pointer (stage C wires reads) */
+#include "qlang/q_env.h"      /* q_env_ctx_set/_ctx + q_env_ns_names — `\d` and the `\v`/`\f`/`\a` rosters */
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk — the `.z.ts` timer callback */
 #include "qlang/q_parse.h"    /* q_parse — `\t expr` / `\ts expr` timing */
 #include "core/ipc.h"         /* ray_ipc_listen — `\p N` binds a listener */
@@ -58,19 +58,16 @@
  * collection is deferred (rule 9). */
 ray_t* ray_gc_fn(ray_t** args, int64_t n);
 
-/* ---- `\d` current-context POINTER + prompt (nothing more) ----------------
- * Dotted-name storage/resolution is the engine's env dicts, independent of
- * this state; `\d` today changes only the prompt and the `\d` getter —
- * qualifying UNQUALIFIED name resolution/assignment against the current
- * context is a recorded rebuild-wave gap (scoping wave). */
-static char g_ctx[64];
-
-void q_sys_ctx_reset(void) { g_ctx[0] = '\0'; q_env_ctx_set(0); }
-
-const char* q_sys_ctx_current(void) { return g_ctx; }
+/* ---- `\d` current context.  q_env is its ONE home (q_env.h: relative names
+ * resolve in it, assignments land in it); this file owns only its RENDERING, so
+ * a switch made anywhere — including inside a lambda, whose call boundary may
+ * restore the caller's — can never desync from what resolution actually uses. */
+void q_sys_ctx_reset(void) { q_env_ctx_set(0); }
 
 int q_sys_prompt(char* buf, size_t cap) {
-    int n = snprintf(buf, cap, "q%s)", g_ctx);
+    ray_t* s = ray_sym_str(q_env_ctx());          /* NULL at root */
+    int n = snprintf(buf, cap, "q%.*s)", s ? (int)ray_str_len(s) : 0,
+                     s ? ray_str_ptr(s) : "");
     return (n < 0 || (size_t)n >= cap) ? 0 : n;
 }
 
@@ -89,22 +86,16 @@ static int ctx_ident_ok(const char* p, size_t len) {
 
 static ray_t* ctx_switch(const char* name, size_t len) {
     if (len == 1 && name[0] == '.') {          /* `\d .` — back to root */
-        g_ctx[0] = '\0';
         q_env_ctx_set(0);
         return NULL;
     }
     /* One level below root only (kdb limitation, q4m3 §12.7): `.ident`. */
-    if (len >= 2 && len < sizeof g_ctx && name[0] == '.' &&
+    if (len >= 2 && len < 64 && name[0] == '.' &&
         ctx_ident_ok(name + 1, len - 1)) {
-        memcpy(g_ctx, name, len);
-        g_ctx[len] = '\0';
         q_env_ctx_set(ray_sym_intern_runtime(name, len));
         return NULL;
     }
-    /* kdb signals the offending name itself: `\d .jab.util` -> '.jab.util */
-    char cls[64];
-    snprintf(cls, sizeof cls, "%.*s", (int)(len < 63 ? len : 63), name);
-    return ray_error(cls, NULL);
+    return q_err_name(name, len);       /* `\d .jab.util` -> '.jab.util */
 }
 
 /* ---- `\S` random-seed state (moved from q_ns.c; \S is its only consumer) ----
@@ -235,14 +226,28 @@ static ray_t* pair_i64(int64_t a, int64_t b) {
 
 static ray_t* h_d(const char* arg, size_t alen) {
     if (alen == 0) {                             /* `\d` — show current */
-        const char* c = q_sys_ctx_current();
-        ray_t* s = (*c) ? ray_sym(ray_sym_intern(c, strlen(c)))
-                        : ray_sym(ray_sym_intern(".", 1));
+        int64_t ns = q_env_ctx();
+        ray_t* s = ray_sym(ns ? ns : ray_sym_intern(".", 1));
         /* DATA sym, not a name-ref: keeps its backtick in q_fmt (`.) */
         if (s && !RAY_IS_ERR(s)) s->attrs |= 0x20; /* Q_ATTR_QUOTED */
         return s;
     }
     return ctx_switch(arg, alen);                /* NULL (silent) or error */
+}
+
+/* `\v` variables / `\f` functions / `\a` tables (basics/syscmds.md) — the same
+ * roster under three value-kind filters, non-recursive, defaulting to the `\d`
+ * context, which need not exist yet (empty listing).  A NAMED missing namespace
+ * errors with the name: `\a .n` -> '.n, truncated past 7 bytes (the error-code
+ * width is by design). */
+static ray_t* h_vfa(char cmd, const char* arg, size_t alen) {
+    q_env_ns_kind_t kind = cmd == 'v' ? Q_ENV_NS_VARS
+                         : cmd == 'f' ? Q_ENV_NS_FNS : Q_ENV_NS_TABLES;
+    int64_t ns = alen ? ray_sym_intern_runtime(arg, alen) : q_env_ctx();
+    ray_t* out = q_env_ns_names(ns, kind);
+    if (out) return out;
+    if (alen == 0) return ray_sym_vec_new(RAY_SYM_W64, 1);
+    return q_err_name(arg, alen);
 }
 
 static ray_t* h_S(const char* arg, size_t alen) {
@@ -288,7 +293,8 @@ static ray_t* h_getset(size_t alen) {
  * (PLAN.md, Known defects): an empty listing is indistinguishable from "no views
  * defined", so `if[count views[];..]` gets a confidently wrong answer where 'nyi
  * was honest.  The namespace arg is accepted and ignored — nothing to filter.
- * Shape mirrors \a's empty listing (ns_members, q_ns.c): len 0, capacity 1. */
+ * `.q.views` IS this command, so the answer has one home.  Shape mirrors \a's
+ * empty listing: len 0, capacity 1. */
 static ray_t* h_b(void) {
     return ray_sym_vec_new(RAY_SYM_W64, 1);
 }
@@ -974,10 +980,7 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
             case 'd': return h_d(arg, alen);
             case 'v':                                            /* namespace vars      */
             case 'f':                                            /* namespace functions */
-            case 'a': return q_err(QE_NYI);             /* namespace tables —
-                                                                  * member enumeration
-                                                                  * re-lands with the
-                                                                  * scoping wave */
+            case 'a': return h_vfa(cmd[0], arg, alen);            /* namespace tables    */
             case 'S': return h_S(arg, alen);                     /* random seed         */
             case 'P': return h_P(arg, alen);                     /* display precision   */
             case 'c': return h_c(rest, restlen);                 /* console size        */

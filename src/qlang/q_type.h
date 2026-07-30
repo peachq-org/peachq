@@ -38,6 +38,10 @@ int q_type_is_num_tag(int8_t t);
  * Callers must handle NULL x themselves (base-verb fallback). */
 int8_t q_type_of(ray_t* x);
 
+/* Is x a FUNCTION value — the 100h–112h band (lambda, operator, iterator,
+ * projection, composition, derived)?  `\f`/`\v` partition a namespace on it. */
+int q_type_is_fn(ray_t* x);
+
 /* Vector tag -> kdb type name ("long"/"symbol"/...) or NULL (list/physical
  * STR); total over the value band. */
 const char* q_type_qname(int8_t t);

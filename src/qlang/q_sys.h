@@ -26,12 +26,10 @@ void q_sys_seed_init(void);
  * the next. */
 void q_sys_cfg_init(void);
 
-/* `\d` current-context POINTER (prompt + getter only — it does not yet
- * qualify name resolution; scoping wave).  reset = back to root (q_runtime
- * lifecycle); current = "" at root else the dotted name; prompt writes
+/* `\d` current context — STATE lives in q_env (q_env.h), this is its command
+ * surface.  reset = back to root (q_runtime lifecycle); prompt writes
  * "q)"/"q.foo)" into buf and returns its length (0 on overflow). */
 void        q_sys_ctx_reset(void);
-const char* q_sys_ctx_current(void);
 int         q_sys_prompt(char* buf, size_t cap);
 
 /* True iff a `\t N` timer is currently armed (interval > 0).  The `.z.ts`
