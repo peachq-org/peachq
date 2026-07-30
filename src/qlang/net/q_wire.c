@@ -5,7 +5,7 @@
 #include "qlang/q_err.h"      /* q_err / q_err_text — full error text on the wire */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_lambda_src / q_eval — lambda serde;
                                  * q_eval_apply_concrete — the IPC boundary force */
-#include "qlang/q_registry.h"   /* q_list_collapse */
+#include "qlang/q_registry.h"   /* q_list_collapse + the kdb_op identity pair */
 #include "qlang/q_parse.h"      /* q_parse — lambda decode (RUNTIME only) */
 #include "lang/eval.h"          /* ray_eval */
 #include "table/sym.h"          /* ray_sym_vec_cell */
@@ -108,13 +108,30 @@ static int w_sym_id(q_wire_wbuf_t* b, int64_t id) {
     return w_u8(b, 0);
 }
 
+/* kdb primitive: class byte (101 unary / 102 binary / 103 iterator) + code. */
+static int w_prim(q_wire_wbuf_t* b, uint8_t cls, uint8_t code) {
+    return (w_u8(b, cls) || w_u8(b, code)) ? -1 : 0;
+}
+
+/* lambda 100h context: the carrier's defining `\d` namespace, dotless like
+ * kdb's lambda structure spells it (eval/value.qcmd: `test`, not `.test`);
+ * NUL alone for root. */
+static int w_lambda_ctx(q_wire_wbuf_t* b, ray_t* ctx) {
+    ray_t* s = ctx ? ray_sym_str(ctx->i64) : NULL;    /* borrowed */
+    if (!s || RAY_IS_ERR(s)) return w_u8(b, 0);
+    const char* p = ray_str_ptr(s);
+    size_t n = ray_str_len(s);
+    if (n && p[0] == '.') { p++; n--; }
+    return w_cstr(b, p, n);
+}
+
 int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     if (b->err) return -1;
     /* serde mode: a C-NULL slot (v4 wrote marker 126, read back as the null
      * singleton) maps to (::) — identical to RAY_NULL_OBJ, matching v4's
      * read-side conflation.  The wire path refuses C NULL outright. */
     if (!x) {
-        if (b->serde) return (w_u8(b, 101) || w_u8(b, 0)) ? -1 : 0;
+        if (b->serde) return w_prim(b, 101, 0);
         return wbuf_fail(b, q_err(QE_TYPE));
     }
     if (g_wire_depth >= Q_WIRE_MAX_DEPTH)
@@ -130,18 +147,27 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         rc = (w_u8(b, 0x80) || w_cstr(b, text ? text : "", (size_t)tn)) ? -1 : 0;
         goto out;
     }
-    /* (::) generic null 101h */
+    /* (::) generic null — kdb's unary primitive 0 (the identity) */
     if (RAY_IS_NULL(x)) {
-        rc = (w_u8(b, 101) || w_u8(b, 0)) ? -1 : 0;
+        rc = w_prim(b, 101, 0);
         goto out;
     }
-    /* RAY_QFN carriers — lambdas serialize BY SOURCE as kdb 100h (context +
-     * source text; decode re-evaluates through q_parse -> q_eval); projection
-     * and derived-verb carriers are 'nyi on both wire and serde. */
+    /* RAY_QFN carriers — iterators are kdb 103h by adverb id (q_registry.h's
+     * canonical 0=' .. 5=\: order IS c.java's IterationOperator table);
+     * lambdas serialize BY SOURCE as kdb 100h (context + source text; decode
+     * re-evaluates through q_parse -> q_eval); projection and derived-verb
+     * carriers are 'nyi on both wire and serde. */
     if (x->type == RAY_QFN) {
+        int adv = q_eval_apply_iter_id(x);
+        if (!b->serde && adv >= 0) {
+            rc = w_prim(b, 103, (uint8_t)adv);
+            goto out;
+        }
         ray_t* src = q_eval_apply_lambda_src(x);      /* borrowed */
         if (!b->serde && src) {
-            rc = (w_u8(b, 100) || w_u8(b, 0) /* root context "" */ ||
+            ray_t* lctx = NULL;
+            q_eval_apply_lambda_parts(x, NULL, NULL, &lctx);
+            rc = (w_u8(b, 100) || w_lambda_ctx(b, lctx) ||
                   w_charvec(b, ray_str_ptr(src), (int64_t)ray_str_len(src))) ? -1 : 0;
             goto out;
         }
@@ -150,6 +176,15 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     }
 
     int8_t t = x->type;
+
+    /* fn values, wire mode: 101h/102h from the manifest row's kdb_op column.
+     * No row (aliased env snapshot, q_registry.h) or no code -> 'nyi. */
+    if (!b->serde && (t == RAY_UNARY || t == RAY_BINARY || t == RAY_VARY)) {
+        int code = q_registry_kdb_op_of(x);
+        rc = code >= 0 ? w_prim(b, t == RAY_UNARY ? 101 : 102, (uint8_t)code)
+                       : wbuf_fail(b, q_err(QE_NYI));
+        goto out;
+    }
 
     /* ---- serde-mode extension records (storage/journal; q_wire.h) ---- */
     if (b->serde) {
@@ -857,11 +892,23 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         ray_release(ast);
         return lam;
     }
-    case 101: {                                       /* (::) and unary primitives */
-        if (!r_need(c, 1)) return trunc_err("unary primitive");
+    case 101:                                         /* (::) / unary primitive */
+    case 102: {                                       /* binary primitive */
+        if (!r_need(c, 1)) return trunc_err("primitive code");
         uint8_t which = r_u8(c);
-        if (which == 0) return RAY_NULL_OBJ;
-        return q_err(QE_NYI);
+        if (t == 101 && which == 0) return RAY_NULL_OBJ;
+        ray_t* v = q_registry_kdb_op_value((int)which,
+                                           t == 101 ? Q_MONADIC : Q_DYADIC);
+        if (!v) return q_err(QE_NYI);
+        ray_retain(v);
+        return v;
+    }
+    case 103: {                                       /* iterator, by adverb id */
+        if (!r_need(c, 1)) return trunc_err("iterator code");
+        ray_t* v = q_registry_iter_value((int)r_u8(c));
+        if (!v) return q_err(QE_NYI);
+        ray_retain(v);
+        return v;
     }
     default:
         return q_err(QE_DOMAIN);
