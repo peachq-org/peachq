@@ -108,8 +108,9 @@ typedef enum {
                      * the nulls" (`max (1 2;0N 4)` is `1 4`, `min` is `0N 2`) */
     QNEST_MEAN,     /* QNEST_FOLD over `+`, scaled by the outer count — ref/avg.md
                      * "If x is a nested list, null items make the average null" */
-    QNEST_COLUMNS   /* agg each flip x: the 4.1t "traverse columns of tables and
-                     * general/anymap/nested lists" rule (ref/dev.md, ref/var.md) */
+    QNEST_COLUMNS   /* agg each flip x (on a DYAD, BOTH args' columns zipped):
+                     * the 4.1t "traverse columns of tables and general/anymap/
+                     * nested lists" rule (ref/dev.md, ref/var.md, ref/avg.md) */
 } q_nested_law;
 
 typedef struct q_op {
