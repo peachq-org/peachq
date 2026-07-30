@@ -232,11 +232,6 @@ ray_t* q_ajf0_wrap(ray_t** args, int64_t n);
 ray_t* q_wj_wrap(ray_t** args, int64_t n);
 ray_t* q_wj1_wrap(ray_t** args, int64_t n);
 
-/* Keyed-table lookup by a table of key rows (`y[select a,b from x]`) — the
- * keyed-table row-set lookup arm.  keytbl must carry ALL key columns by name;
- * extra columns ignored; keytbl row order preserved; miss => null row. */
-ray_t* q_join_keyed_lookup_rows(ray_t* kt, ray_t* keytbl);
-
 /* Universal table row indexing (uniform-structure-dispatch stage 0; defined
  * in ops/q_table.c).  q_table_at: t[idx] for an integer atom (-> the row
  * dict) or an integer vector (-> row gather, misses null-filled per the
