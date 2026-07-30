@@ -99,7 +99,16 @@ Q_MAIN_OBJ = $(BUILD_DIR)/src/qlang/qmain.o
 DEPS = $(LIB_OBJ:.o=.d) $(Q_MAIN_OBJ:.o=.d)
 
 .DEFAULT_GOAL := all
-all: $(Q_TARGET)
+all: git-merge-drivers $(Q_TARGET)
+
+# `merge=ours` on test/observed/** (.gitattributes) is NOT a git built-in the
+# way `union` is — without this per-clone config the attribute is silently
+# inert and the mirror conflicts on every overlapping branch.  Idempotent;
+# skipped outside a git checkout.
+.PHONY: git-merge-drivers
+git-merge-drivers:
+	@git rev-parse --git-dir >/dev/null 2>&1 && \
+	  git config merge.ours.driver true || true
 
 # Vendored TUs: not ours to fix, and -Wextra on them fails the build.
 $(BUILD_DIR)/third_party/%.o: third_party/%.c
