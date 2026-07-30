@@ -613,6 +613,52 @@ static ray_t* agg_nested(ray_t* fv, const q_op_t* row, ray_t* x) {
     return m;
 }
 
+/* a dyadic aggregate lifts over a dict (by its VALUES) or a nested list, and
+ * never over a table — basics/math.md's "Exceptions to the above" lists
+ * `wavg (tables)` / `wsum (tables)` while ref/{sum,avg}.md say each "applies
+ * to dictionaries"; a keyed table is a dict wearing a table's law. */
+static int agg2_lifts(ray_t* v) {
+    return (v->type == RAY_DICT && !q_type_is_keyed(v)) ||
+           q_type_any_nested_item(v);
+}
+
+/* THE dyadic rank-2 arm, spelled by ref/avg.md's own annotation on
+ * `(1 2;3 4) wavg (500 400;300 200)`: "this is (1 3 wavg 500 300; 2 4 wavg
+ * 400 200)" — the two args' COLUMNS zipped, a flat arg riding whole into
+ * every column (`1 2 wavg d`, same page). */
+static ray_t* agg2(ray_t* fv, const q_op_t* row, ray_t* x, ray_t* y) {
+    ray_t* vx = agg2_lifts(x) && x->type == RAY_DICT ? ray_dict_vals(x) : x;
+    ray_t* vy = agg2_lifts(y) && y->type == RAY_DICT ? ray_dict_vals(y) : y;
+    ray_t* fx = q_type_any_nested_item(vx) ? flip_of(vx) : NULL;
+    if (fx && RAY_IS_ERR(fx)) return fx;
+    ray_t* fy = q_type_any_nested_item(vy) ? flip_of(vy) : NULL;
+    if (fy && RAY_IS_ERR(fy)) { ray_release(fx); return fy; }
+    if (!fx && !fy) { ray_t* a[2] = { vx, vy }; return q_eval_apply(fv, row, a, 2); }
+    if (fx && fy && ray_len(fx) != ray_len(fy)) {
+        ray_release(fx); ray_release(fy);
+        return q_err(QE_LENGTH);
+    }
+    int64_t n = ray_len(fx ? fx : fy);
+    ray_t* out = ray_list_new(n > 0 ? n : 1);
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* xi = fx ? q_index_elem_at(fx, i) : vx;
+        ray_t* yi = fy ? q_index_elem_at(fy, i) : vy;
+        ray_t* a[2] = { xi, yi };
+        ray_t* r = q_eval_apply(fv, row, a, 2);
+        if (fx) ray_release(xi);
+        if (fy) ray_release(yi);
+        if (RAY_IS_ERR(r)) {
+            ray_release(out); ray_release(fx); ray_release(fy);
+            return r;
+        }
+        out = ray_list_append(out, r);
+        ray_release(r);
+    }
+    ray_release(fx);
+    ray_release(fy);
+    return q_eval_apply_collapse(out);
+}
+
 static ray_t* agg1(ray_t* fv, const q_op_t* row, ray_t* x) {
     if (x && x->type == RAY_DICT) {
         if (q_type_is_keyed(x)) return agg1(fv, row, ray_dict_vals(x));
@@ -1120,10 +1166,13 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
             if (n == 2 && fv->type == RAY_BINARY)
                 return atomic2((ray_binary_fn)(uintptr_t)fv->i64,
                                args[0], args[1]);
-        } else if (strcmp(fam, "aggregate") == 0 && n == 1 &&
-                   (is_container(args[0]) ||
-                    (row->nested && q_type_any_nested_item(args[0])))) {
-            return agg1(fv, row, args[0]);
+        } else if (strcmp(fam, "aggregate") == 0) {
+            if (n == 1 && (is_container(args[0]) ||
+                           (row->nested && q_type_any_nested_item(args[0]))))
+                return agg1(fv, row, args[0]);
+            if (n == 2 && row->nested &&
+                (agg2_lifts(args[0]) || agg2_lifts(args[1])))
+                return agg2(fv, row, args[0], args[1]);
         } else if (strcmp(fam, "map") == 0) {
             if (n == 1 && (is_container(args[0]) ||
                            q_type_any_nested_item(args[0])))
