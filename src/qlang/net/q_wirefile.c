@@ -343,7 +343,7 @@ static ray_t* wf_read_c(const uint8_t* buf, size_t len, ray_t* path, int derive)
     int64_t idx = nul - buf;
     size_t rule = (size_t)((idx + 8) & ~(int64_t)7);
     if (rule < WF_C_MIN) rule = WF_C_MIN;
-    size_t cand[2] = { rule, (size_t)(WF_C_MIN + 8 * ((idx - 3) / 8)) };
+    const size_t cand[2] = { rule, (size_t)(WF_C_MIN + 8 * ((idx - 3) / 8)) };
     size_t coff = 0;
     int hits = 0;
     for (int k = 0; k < 2; k++) {
