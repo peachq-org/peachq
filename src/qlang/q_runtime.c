@@ -114,6 +114,7 @@ void q_runtime_destroy(ray_runtime_t* rt) {
     q_handles_destroy();       /* drop handle records (open_args refs) before the env */
     q_dotz_destroy();          /* free the `.z.*` argv snapshots */
     q_registry_destroy();      /* free verb snapshots before the env goes away */
+    q_eval_syms_reset();       /* cached sym ids die with this runtime's sym table */
     q_env_destroy();           /* release q's K-tree before the heap dies */
     q_sys_ctx_reset();         /* drop the `\d` context with its runtime */
     q_console_pipe_disable();          /* reset the `\nonlegacy` display global — the

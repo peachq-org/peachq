@@ -89,6 +89,17 @@ ray_t* q_registry_lookup_row(int64_t sym_id, q_valence_t valence,
  * then dispatches on the value's own attrs (RAY_FN_ATOMIC) alone. */
 const struct q_op* q_registry_row_of(const ray_t* value, q_valence_t valence);
 
+/* True iff sym_id names a manifest row (any valence, values or not) — the
+ * sym-id twin of q_ops_is_reserved, O(1), for eval's assign gates.  False
+ * before q_registry_init. */
+int q_registry_is_reserved(int64_t sym_id);
+
+/* Borrowed value for a MANIFEST ROW at one valence — the row-pointer twin of
+ * q_registry_lookup; NULL when the row has no value at that valence (or the
+ * registry is down).  `row` MUST be a Q_OPS[] row (q_ops_find/q_ops_table) —
+ * static storage, so callers may hold one across calls. */
+ray_t* q_registry_row_value(const struct q_op* row, q_valence_t valence);
+
 /* Recover the q-surface provenance of a registry value (by pointer identity).
  * Returns true and fills *out on a hit; false if `value` is not a registry
  * value.  Consumed by the 2b formatter to print the original q glyph.
