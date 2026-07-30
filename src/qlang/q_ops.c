@@ -82,7 +82,11 @@
  * split SUBDIVIDES kdb's "uniform" class: uniform ops that are a pure
  * index-space gather (op t = t @ op til count t — reverse, rotate, sublist,
  * next/prev/xprev, take/drop) are `index` (L4); uniform ops that COMPUTE
- * per-position values (sums, fills, deltas, m-windows) are `map` (L2).
+ * per-position values (sums, fills, deltas, m-windows) are `map` (L2).  The
+ * map family's rank-2 law is SINGLE — `flip f each flip x`, the outer-axis
+ * scan (ref/sum.md sums list-of-lists, ref/max.md maxs over a dict), uniform
+ * across the whole roster — so unlike `aggregate` (QNEST_*) it needs no
+ * manifest column.
  *
  * DUAL-VALENCE rows carry ONE family (the deterministic-flag precedent): the
  * valence the structure-dispatch spec consumes (its §2/§6 family lists), the
