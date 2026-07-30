@@ -234,7 +234,7 @@ static ray_t* qj_fill_col(ray_t* xc, ray_t* gy, int64_t nx) {
     int64_t* idx2 = (int64_t*)malloc((size_t)(nx > 0 ? nx : 1) * sizeof(int64_t));
     if (!idx2) { ray_release(cat); return q_err(QE_WSFULL); }
     for (int64_t i = 0; i < nx; i++) {
-        ray_t* yi = qj_gen_item(gy, i);
+        ray_t* yi = q_join_gen_item(gy, i);
         if (!yi || RAY_IS_ERR(yi)) { free(idx2); ray_release(cat); return yi ? yi : q_err(QE_TYPE); }
         idx2[i] = qj_atom_is_qnull(yi) ? i : nx + i;
         ray_release(yi);
@@ -326,7 +326,7 @@ static ray_t* qj_norm_keys(ray_t* c) {
         ray_t* l = ray_list_new(n > 0 ? n : 1);
         if (RAY_IS_ERR(l)) return NULL;
         for (int64_t i = 0; i < n; i++) {
-            ray_t* e = qj_item(c, i);
+            ray_t* e = q_join_item(c, i);
             if (!e || RAY_IS_ERR(e) || e->type != -RAY_SYM) {
                 if (e && !RAY_IS_ERR(e)) ray_release(e);
                 else if (e) ray_release(e);
@@ -774,13 +774,13 @@ ray_t* q_asof_wrap(ray_t* t, ray_t* d) {
         ray_t* dt = ray_table_new(nk > 0 ? nk : 1);
         if (RAY_IS_ERR(dt)) return dt;
         for (int64_t i = 0; i < nk; i++) {
-            ray_t* ks = qj_item(dk, i);
+            ray_t* ks = q_join_item(dk, i);
             if (!ks || RAY_IS_ERR(ks) || ks->type != -RAY_SYM) {
                 if (ks) ray_release(ks);
                 ray_release(dt);
                 return q_err(QE_TYPE);
             }
-            ray_t* val = qj_item(dv, i);
+            ray_t* val = q_join_item(dv, i);
             if (!val || RAY_IS_ERR(val)) { ray_release(ks); ray_release(dt); return val ? val : q_err(QE_TYPE); }
             ray_t* l = ray_list_new(1);
             if (RAY_IS_ERR(l)) { ray_release(val); ray_release(ks); ray_release(dt); return l; }
@@ -809,7 +809,7 @@ ray_t* q_asof_wrap(ray_t* t, ray_t* d) {
             okeys = ray_vec_append(okeys, &nm);
             if (!okeys || RAY_IS_ERR(okeys)) { ray_release(ovals); ray_release(rows); return okeys ? okeys : q_err(QE_OOM); }
             ray_t* col = ray_table_get_col_idx(rows, ci);  /* borrowed */
-            ray_t* cell = qj_item(col, 0);
+            ray_t* cell = q_join_item(col, 0);
             if (!cell || RAY_IS_ERR(cell)) { ray_release(okeys); ray_release(ovals); ray_release(rows); return cell ? cell : q_err(QE_TYPE); }
             ovals = ray_list_append(ovals, cell);
             ray_release(cell);
@@ -993,5 +993,118 @@ ray_t* q_join_keyed_lookup_rows(ray_t* kt, ray_t* keytbl) {
     if (!fmap) return q_err(QE_WSFULL);
     ray_t* out = qj_table_gather_idx(kv, fmap, nx);
     free(fmap);
+    return out;
+}
+
+/* ---- generic item access (joins wave) -------------------------------------
+ * One boxed item of any sequence: strings iterate CHARS (1-char -RAY_STR
+ * cells, string-model shim), atoms behave as 1-item lists.  Owned result. */
+ray_t* q_join_item(ray_t* x, int64_t i) {
+    ray_t* ia = ray_i64(i);
+    ray_t* e = ray_at_fn(x, ia);
+    ray_release(ia);
+    return e;
+}
+
+ray_t* q_join_gen_item(ray_t* x, int64_t i) {
+    if (x->type == -RAY_STR) return ray_str(ray_str_ptr(x) + i, 1);
+    if (ray_is_atom(x)) { ray_retain(x); return x; }
+    return q_join_item(x, i);
+}
+
+/* generic item count matching q_join_gen_item (atoms 1, strings char count);
+ * -1 for non-sequences (dict). */
+int64_t q_join_gen_len(ray_t* x) {
+    if (!x) return -1;
+    if (x->type == -RAY_STR) return (int64_t)ray_str_len(x);
+    if (ray_is_atom(x)) return 1;
+    if (x->type == RAY_TABLE) return ray_table_nrows(x);
+    if (ray_is_vec(x) || x->type == RAY_LIST) return ray_len(x);
+    return -1;
+}
+
+/* q `x,y` join — table , record-dict appends the record (ref/join.md +
+ * ref/upsert.md: a simple table's Join of a matching record is the same
+ * append upsert performs).  Joins wave: non-conforming table,table is
+ * 'mismatch (ref/uj.md pins `s,t` -> 'mismatch; uj is the column-union
+ * generalization); keyed,keyed is the uj upsert merge (ref/coalesce.md
+ * `kt1,kt3`); and a base-concat 'type on list-joinable operands falls back
+ * to a GENERIC boxed list (kdb `,` never type-errors on a list join —
+ * ref/join.md `1 2,"a"`).  Every other operand pair delegates to base concat
+ * (register_binary("concat") == ray_concat_fn) byte-identically — dict,dict
+ * upsert-union and conforming table,table row-join already live there. */
+ray_t* q_join_wrap(ray_t* x, ray_t* y) {
+    if (x && y && x->type == RAY_TABLE && y->type == RAY_TABLE &&
+        !qj_same_schema(x, y))
+        return q_err(QE_MISMATCH);
+    if (q_type_is_keyed(x) && q_type_is_keyed(y))
+        return qj_ktbl_merge(x, y, 0);     /* upsert: y records win wholesale */
+    if (x && x->type == RAY_TABLE && y && y->type == RAY_DICT && !q_type_is_keyed(y))
+        return q_upsert_wrap(x, y);
+    /* A bare dict joins ONLY with a dict (ref/join.md: `10,d` -> 'type; base
+     * concat would wrongly DISTRIBUTE the scalar over the dict's values). */
+    {
+        int xd = x && x->type == RAY_DICT && !q_type_is_keyed(x);
+        int yd = y && y->type == RAY_DICT && !q_type_is_keyed(y);
+        if (xd != yd)
+            return q_err(QE_TYPE);
+    }
+    ray_t* r = ray_concat_fn(x, y);
+    if (r && !RAY_IS_ERR(r)) {
+        /* dict upsert-union: the merged VALUES unify like any join result
+         * (`~` is type-strict, so `(update c:3 from `a`b!1 2)~`a`b`c!1 2 3`
+         * needs vector values) */
+        if (q_type_is_dict(r) && !q_type_is_keyed(r)) {
+            ray_t* v = ray_dict_vals(r);                       /* borrowed */
+            ray_t* cv = v ? q_list_collapse(v) : NULL;         /* no-op off-list */
+            if (cv && !RAY_IS_ERR(cv) && cv != v) {
+                ray_t* k = ray_dict_keys(r);
+                ray_retain(k);                        /* dict_new consumes both */
+                ray_t* nd = ray_dict_new(k, cv);
+                ray_release(r);
+                return nd ? nd : q_err(QE_TYPE);
+            }
+            if (cv) ray_release(cv);
+            return r;
+        }
+        /* `()` is Join's IDENTITY and identity must not retype: base concat
+         * boxes the untyped empty into the result, so `(),2` came back 0h
+         * where kdb says 7h.  That is the seed the `,` accumulator starts from
+         * (ref/accumulators.md:264), so every partial inherited the boxing.
+         * The collapse home already leaves mixed lists (`1 2,"a"`) alone. */
+        ray_t* c = q_list_collapse(r);
+        ray_release(r);
+        return c;
+    }
+    if (!x || !y) return r;
+    /* boxed-list fallback — ONLY when a char/string operand is involved
+     * (ref/join.md "otherwise a mixed list"; ref/cross.md needs `2 10,"a"`
+     * -> (2;10;"a")).  Deliberately NARROW: banked ledgers pin `,:` appends
+     * of incompatible non-char items as 'type (assign/identity `x,:`a`,
+     * list/join `s,:5f`), and the wrapper cannot tell plain `,` from the
+     * in-place `,:` amend — so non-char incompatibles keep the base error
+     * (error beats a wrong answer; the wider kdb mixed-list rule is a
+     * deferred cell). */
+    int64_t nx = q_join_gen_len(x), ny = q_join_gen_len(y);
+    int x_chr = x->type == -RAY_STR || x->type == RAY_CHARV || x->type == -RAY_CHARV;
+    int y_chr = y->type == -RAY_STR || y->type == RAY_CHARV || y->type == -RAY_CHARV;
+    if (nx < 0 || ny < 0 || (!x_chr && !y_chr) ||
+        x->type == RAY_DICT || y->type == RAY_DICT ||
+        x->type == RAY_TABLE || y->type == RAY_TABLE)
+        return r;                          /* keep the base error */
+    ray_t* out = ray_list_new(nx + ny > 0 ? nx + ny : 1);
+    if (RAY_IS_ERR(out)) { if (r) ray_release(r); return out; }
+    for (int64_t i = 0; i < nx + ny; i++) {
+        ray_t* e = (i < nx) ? q_join_gen_item(x, i) : q_join_gen_item(y, i - nx);
+        if (!e || RAY_IS_ERR(e)) {
+            ray_release(out);
+            if (e) { if (r) ray_release(r); return e; }
+            return r;
+        }
+        out = ray_list_append(out, e);
+        ray_release(e);
+        if (RAY_IS_ERR(out)) { if (r) ray_release(r); return out; }
+    }
+    if (r) ray_release(r);
     return out;
 }
