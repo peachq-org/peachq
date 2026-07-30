@@ -814,6 +814,13 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
         ray_release(r);
         r = nr;
     }
+    /* explicit return `:x`: the QE_RETURN sentinel unwinds to HERE, the
+     * lambda boundary, and becomes the ordinary successful result */
+    if (RAY_IS_ERR(r) && q_err_is(r, QE_RETURN)) {
+        ray_error_free(r);
+        r = q_err_take();
+        if (!r) { ray_retain(RAY_NULL_OBJ); r = RAY_NULL_OBJ; }
+    }
     /* an explicit `\d` in the body is a SESSION directive and outlives the call
      * — only the implicit definition-context is unwound (namespace/switch.qcmd) */
     if (q_env_ctx() == lam_ctx) q_env_ctx_set(caller_ctx);
@@ -1182,17 +1189,25 @@ ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n) {
 }
 
 /* Trap (ref/apply.md): on error, a callable/null catch applies to the error
- * text, a noun catch is returned as the value.  Consumes r; e borrowed. */
+ * text, a noun catch is returned as the value.  Consumes r; e borrowed.
+ * QE_RETURN passes through UNTOUCHED — an explicit return is a successful
+ * return, never trappable (@[{:42};0;{x}] is 42), and its payload must
+ * survive to the lambda boundary that unwraps it. */
 static ray_t* trap_catch(ray_t* r, ray_t* e) {
     if (!r || !RAY_IS_ERR(r)) return r;
+    if (q_err_is(r, QE_RETURN)) return r;
     if (!q_eval_apply_is_fn(e) && !RAY_IS_NULL(e)) {
+        q_err_drop();                   /* swallow the payload with the error */
         ray_error_free(r);
         ray_retain(e);
         return e;
     }
-    const char* code = ray_err_code(r);
-    ray_t* msg = ray_charv(code ? code : "",
-                           code ? (int64_t)strlen(code) : 0);
+    ray_t* msg = q_err_take();          /* signal/name text, already a charv */
+    if (!msg) {
+        int64_t tn = 0;
+        const char* tp = q_err_text(r, &tn);
+        msg = ray_charv(tp ? tp : "", tn);
+    }
     ray_error_free(r);
     if (!msg || RAY_IS_ERR(msg)) return msg ? msg : q_err(QE_OOM);
     ray_t* c = q_eval_apply_concrete(q_eval_apply(e, NULL, &msg, 1));

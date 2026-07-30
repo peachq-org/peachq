@@ -6,6 +6,7 @@
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
+#include "qlang/q_err.h"    /* q_err_text / q_err_drop — error text + backstop */
 #include "qlang/q_sys.h"    /* q_sys_is_cmd / q_sys_line / q_sys_prompt */
 #include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
 #include "store/fileio.h"   /* ray_mkdir_p — --emit mirrors the source tree */
@@ -71,9 +72,11 @@ static void emit_row(qd_emit_t* em, const char* prompt, const char* input,
 /* Error rows emit kdb's own display (`'type`) so the transcript stays q. */
 static void emit_err(qd_emit_t* em, const char* prompt, const char* input,
                      ray_t* err) {
-    char buf[16];
-    const char* code = err ? (const char*)err->sdata : NULL;
-    snprintf(buf, sizeof buf, "'%.7s", code ? code : "error");
+    char buf[256];
+    int64_t tn = 0;
+    const char* text = err ? q_err_text(err, &tn) : NULL;
+    snprintf(buf, sizeof buf, "'%.*s",
+             (text && tn) ? (int)tn : 5, (text && tn) ? text : "error");
     emit_row(em, prompt, input, buf);
 }
 
@@ -105,9 +108,9 @@ static size_t prompt_prefix_len(const char* line) {
  * not support yet, so trailing lines are ignored by construction.
  *
  * Matching contract (see error_row_matches):
- *   - DEFAULT is STRICT: the error CLASS must equal the word after the quote
- *     ('type -> the error's 7-byte code "type").  This is the project thesis
- *     ("error text match kdb"); a row expecting 'type no longer passes on 'name.
+ *   - DEFAULT is STRICT: the error TEXT (payload or class, q_err_text) must
+ *     equal the word after the quote.  This is the project thesis ("error
+ *     text match kdb"); a row expecting 'type no longer passes on 'name.
  *   - `'error` is the sanctioned ANY-ERROR wildcard: kdb has no class named
  *     `error`, so a row whose first line is exactly `'error` matches ANY error.
  *     Use it for honest "this errors, class not doc-determinable" claims.
@@ -136,14 +139,16 @@ static int lenient_errors(void) {
     return e && *e && *e != '0';
 }
 
-/* Match an actual error object against an error-expectation row.  The error
- * class lives in the RAY_ERROR's sdata (same field q_repl prints). */
+/* Match an actual error object against an error-expectation row: the FULL
+ * error text (q_err_text: payload / class), exactly — 'missingName rows can
+ * only pass when the name itself is signalled. */
 static int error_row_matches(ray_t* err, const char* cls) {
     if (lenient_errors()) return 1;                     /* debug escape: any error */
     if (!cls[0]) return 1;                              /* bare `'`: any error */
     if (strcmp(cls, "error") == 0) return 1;            /* `'error` wildcard */
-    const char* code = (const char*)err->sdata;
-    return code && strncmp(code, cls, 7) == 0;
+    int64_t tn = 0;
+    const char* text = q_err_text(err, &tn);
+    return text && (size_t)tn == strlen(cls) && memcmp(text, cls, (size_t)tn) == 0;
 }
 
 /* Run one example; update result; report on failure when verbose. */
@@ -157,6 +162,7 @@ static void run_example(const char* input, const char* expect,
                         qdoc_result_t* r, qd_emit_t* em) {
     r->examples++;
     q_console_reset();   /* drop any show/0N! output from a prior example */
+    q_err_drop();        /* statement-entry payload backstop (q_repl twin) */
 
     /* Prompt pin: the transcript's prompt (`q)` / `q.foo)`) must match the
      * LIVE context prompt at this point — that is what tests the `\d` prompt
@@ -178,19 +184,21 @@ static void run_example(const char* input, const char* expect,
         ray_t* sr = q_sys_line(input, strlen(input), 1, got, sizeof got);
         r->parsed++;
         if (mode == QDOC_PARSE_ONLY) {
-            if (sr) ray_error_free(sr);
+            if (sr) { q_err_drop(); ray_error_free(sr); }
             classify(r, prompt_ok);
             return;
         }
-        char errcls[8];
+        char errcls[64];
         int want_error = expect_is_error(expect, errcls, sizeof errcls);
-        char gotcls[16];
+        char gotcls[72];
         int  was_err = 0;
         int ok;
         if (sr) {
             ok = want_error && error_row_matches(sr, errcls);
-            const char* code = (const char*)sr->sdata;
-            snprintf(gotcls, sizeof gotcls, "'%.7s", code ? code : "error");
+            int64_t tn = 0;
+            const char* text = q_err_text(sr, &tn);
+            snprintf(gotcls, sizeof gotcls, "'%.*s",
+                     (text && tn) ? (int)tn : 5, (text && tn) ? text : "error");
             was_err = 1;
             snprintf(got, sizeof got, "<error>");
             ray_error_free(sr);
@@ -243,7 +251,7 @@ static void run_example(const char* input, const char* expect,
     }
 
     if (getenv("QDOC_TRACE")) { char tb[256]; int tn = snprintf(tb, sizeof tb, "INPUT: %.200s\n", input); if (tn > 0) { ssize_t _w = write(2, tb, (size_t)tn); (void)_w; } }
-    char errcls[8];
+    char errcls[64];
     int want_error = expect_is_error(expect, errcls, sizeof errcls);
     int is_assign = q_parse_is_assign(ast);
     ray_t* res = q_eval(ast);
@@ -410,6 +418,11 @@ static qdoc_result_t run_path(const char* path, qdoc_mode_t mode,
              * a trailing prompt-only `q.nn)` line just pins its prompt. */
             have = 1;
         } else if (have) {
+            /* whole-line q comments (`/ …`) are transcript prose, never
+             * expected output — q output never emits them (observed mirror:
+             * zero `/ ` lines; a BARE `/` is real output — iterator display) */
+            if (line[0] == '/' && (line[1] == ' ' || line[1] == '\t'))
+                continue;
             size_t e = strlen(expect);
             if (e && e + 1 < QD_OUT) expect[e++] = '\n';
             size_t room = (e < QD_OUT) ? QD_OUT - 1 - e : 0;

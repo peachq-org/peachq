@@ -18,6 +18,7 @@ typedef enum {
     /* ---- OURS: admitted non-kdb classes ---- */
     QE_OOM, QE_IO, QE_NAME, QE_INDEX, QE_RESERVE, QE_INIT,
     QE_RANGE, QE_SCHEMA, QE_CORRUPT, QE_CANCEL, QE_VERSION,
+    QE_SIGNAL, QE_RETURN,   /* always payload-carrying; sdata never displayed */
     QE__COUNT
 } q_err_e;
 
@@ -26,14 +27,32 @@ typedef enum {
  * so q-side display and the wire can render the full class name. */
 ray_t* q_err(q_err_e e);
 
-/* The NAME is the class — kdb signals the offending name itself for a bad or
- * missing namespace (`\d .a.b` -> '.a.b, `\a .n` -> '.n, `tables `.n`).  The
- * 7-byte error-code width truncates a longer name (by design). */
+/* kdb signals the offending name itself (undefined `word` -> 'word, `\d .a.b`
+ * -> '.a.b): 'name-classed, full name as payload — untruncated on display. */
 ray_t* q_err_name(const char* p, size_t n);
 
-/* Full kdb class string for q-side rendering (display + wire): the stamped
- * enum's full name (dissolving the 7-byte 'mismatc' truncation), else the
- * stored 7-byte code for base-constructed errors.  NULL when not an error. */
+/* Classed error whose TEXT is `payload` (retained into the pending slot;
+ * caller keeps its ref).  Charv for signal/name; QE_RETURN carries any value. */
+ray_t* q_err_signal(q_err_e e, ray_t* payload);
+
+/* THE error-text resolution home (every consumer; none reimplements it):
+ * pending charv payload if set, else stamped class name, else sdata.
+ * Pointer valid until the payload is taken/dropped; NULL when not an error. */
+const char* q_err_text(ray_t* err, int64_t* len);
+
+/* Rebuild an error FROM text (wire decode): known class re-stamped, any
+ * other text payload-carried (the name-signal semantic). */
+ray_t* q_err_from_text(const char* p, size_t n);
+
+/* Transfer the pending payload out (owned; NULL if none) / clear it. */
+ray_t* q_err_take(void);
+void   q_err_drop(void);
+
+/* class test against the stamped enum (0 for base-constructed errors) */
+int q_err_is(ray_t* err, q_err_e e);
+
+/* Full class string for display + wire: the stamped enum's full name (no
+ * 7-byte 'mismatc' truncation), else sdata.  NULL when not an error. */
 const char* q_err_class(ray_t* err);
 
 #endif
