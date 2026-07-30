@@ -437,11 +437,6 @@ static qdoc_result_t run_path(const char* path, qdoc_mode_t mode,
     return r;
 }
 
-qdoc_result_t q_qdoc_run_file(const char* path, qdoc_mode_t mode,
-                            int verbose, FILE* out) {
-    return run_path(path, mode, verbose, out, NULL);
-}
-
 /* Suites whose output IS a clock or an allocation counter: they differ every
  * run, so emitting them would leave the committed tree permanently dirty and
  * train readers to ignore it.  Nothing diffable was ever in them. */

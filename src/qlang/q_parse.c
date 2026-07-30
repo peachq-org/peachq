@@ -1412,17 +1412,6 @@ static ray_t *qsql_build_dict(ray_t **aliases, ray_t **vals, int n) {
     return ray_dict_new(keys, valv);   /* consumes keys, valv */
 }
 
-int q_symvec_contains_id(ray_t *v, int64_t id) {
-    if (!v || v->type != RAY_SYM) return 0;
-    for (int64_t i = 0; i < ray_len(v); i++) {
-        ray_t *s = ray_sym_vec_cell(v, i);
-        if (!s) continue;
-        int64_t sid = ray_sym_intern_runtime(ray_str_ptr(s), ray_str_len(s));
-        if (sid == id) return 1;
-    }
-    return 0;
-}
-
 /* Build the exec By-phrase VALUE from a parsed by-column list.  kdb encodes an
  * exec By as a bare symbol (single group column) or symbol vector (multiple)
  * when the columns are unnamed bare column references — routed to the grouped-

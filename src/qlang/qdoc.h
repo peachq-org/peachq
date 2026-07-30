@@ -22,18 +22,15 @@ typedef struct {
 
 /* Run every example in `path` against the CURRENT rayforce runtime (the caller
  * owns it — one fresh runtime per file gives the "shared session per file"
- * default).  With verbose != 0, each failing example is written to `out`. */
-qdoc_result_t q_qdoc_run_file(const char* path, qdoc_mode_t mode,
-                            int verbose, FILE* out);
-
-/* As above, plus: write every MISMATCHING example's ACTUAL output to
+ * default).  With verbose != 0, each failing example is written to `out`.
+ * With emit_dir set, also write every MISMATCHING example's ACTUAL output to
  * <emit_dir>/<path> as a .qcmd-shaped transcript (errors as `'type`).  A file
  * that matches everywhere writes nothing, so the emit tree holds exactly the
  * corpus's current wrong answers — diff two of them to see what a change moved.
  * Mismatches only: a diff register, NOT a runnable transcript.  Paths mirror
  * the corpus root (test/q/list/take.qcmd -> <dir>/list/take.qcmd); a short list
  * of clock/counter-valued suites is skipped so the tree stays diff-stable.
- * emit_dir NULL/empty behaves exactly as q_qdoc_run_file. */
+ * emit_dir NULL/empty runs the file without emitting anything. */
 qdoc_result_t q_qdoc_run_file_emit(const char* path, qdoc_mode_t mode,
                                  int verbose, FILE* out, const char* emit_dir);
 
