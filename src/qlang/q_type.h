@@ -108,6 +108,9 @@ int q_type_is_dense_group_col(ray_t* c);
 /* The physical STR atom lane (string-C3): rank-wise a char LIST, not a scalar. */
 int q_type_is_str_atom(ray_t* x);
 
+/* a SYMBOL atom (-11h) — the twin of q_type_is_str_atom */
+int q_type_is_sym_atom(ray_t* x);
+
 /* Are v's ITEMS themselves collections — a list of lists rather than a flat run
  * of atoms?  THE rank axis: the search family reads it to pick a haystack's
  * search rank (find.md — a rank-n haystack looks for rank n-1 objects) and to
