@@ -290,9 +290,12 @@ static const q_op_t Q_OPS[] = {
     { "avgs",  QLEX_KW_PREFIX, QR_FN1("avgs", q_avgs_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },
     { "ratios",QLEX_KW_PREFIX, QR_FN1("ratios", q_ratios_wrap),QR_NONE,           NULL, 1, 0, "map", NULL },
     /* ---- weighted ---- wavg stays a wrapper: its q.q composition's
-     * bool-multiply path measured 16x slower. */
+     * bool-multiply path measured 16x slower, so the structure that
+     * composition would have given it is DECLARED: on a DYAD QNEST_COLUMNS is
+     * agg2's column zip.  `cor` declares none — basics/math.md excludes it
+     * outright, where wavg/wsum are excluded for TABLES only. */
     { "wsum",  QLEX_KW_INFIX,  QR_NONE,                        QR_QSRC("wsum"),   NULL, 1, 0, "aggregate", NULL, QKOP(29) },
-    { "wavg",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("wavg", q_wavg_wrap), NULL, 1, 0, "aggregate", NULL, QKOP(30) },
+    { "wavg",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("wavg", q_wavg_wrap), NULL, 1, 0, "aggregate", NULL, .nested = QNEST_COLUMNS, QKOP(30) },
     /* ---- statistical ---- kdb `var`/`dev` are POPULATION (/n); rayfall
      * `var`/`stddev` are SAMPLE (/n-1) and `var_pop`/`stddev_pop`/`dev` are
      * population — hence q `var`->`var_pop`, `svar`->`var`, `sdev`->`stddev`.
