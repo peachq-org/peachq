@@ -461,7 +461,8 @@ static ray_t* lambda_structure(ray_t* v) {
  * (incl. the enlisted constant ,`x) is doc-silent: 'nyi, never a guess. */
 ray_t* q_eval_value_wrap(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
-    if (RAY_IS_NULL(x)) { ray_retain(x); return x; }     /* value :: -> :: */
+    if (RAY_IS_NULL(x)) return ray_i64(0);   /* (::) IS unary primitive 0 —
+                                              * ref/value.md operator arm */
     if (x->type == -RAY_SYM) {
         ray_t* f = q_wirefile_read(x);       /* NULL unless a `:path sym */
         return f ? f : name_value(x, NULL);
@@ -508,6 +509,12 @@ ray_t* q_eval_value_wrap(ray_t* x) {
     if (x->type == RAY_QFN) {
         ray_t* st = lambda_structure(x);
         if (st) return st;                  /* NULL = a non-lambda carrier */
+    }
+    /* operator -> its kdb primitive code (ref/value.md; the manifest row is
+     * the identity, its kdb_op column the number) */
+    if (x->type == RAY_UNARY || x->type == RAY_BINARY || x->type == RAY_VARY) {
+        int code = q_registry_kdb_op_of(x);
+        if (code >= 0) return ray_i64(code);
     }
     return q_err(QE_NYI);       /* enumeration/projection/view arms: deferred */
 }

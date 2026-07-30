@@ -100,6 +100,19 @@ int q_registry_is_reserved(int64_t sym_id);
  * static storage, so callers may hold one across calls. */
 ray_t* q_registry_row_value(const struct q_op* row, q_valence_t valence);
 
+/* THE fn-value -> kdb primitive code home (`value +` and the wire's 101h/102h
+ * byte share it): the value's manifest row's kdb_op column, valence from the
+ * value's own rank (RAY_UNARY = the monadic cell).  -1 when the value has no
+ * row (aliased env snapshot) or the row no code. */
+int q_registry_kdb_op_of(const ray_t* value);
+
+/* The kdb_op column read BACKWARDS (the wire-decode direction): borrowed
+ * value of the first manifest row carrying primitive `code` with a value at
+ * `valence` — same-code rows are interchangeable spellings of ONE kdb
+ * primitive, glyph rows leading (101h code 13 decodes as `#:`, not `count`).
+ * NULL when no row serves it. */
+ray_t* q_registry_kdb_op_value(int code, q_valence_t valence);
+
 /* Recover the q-surface provenance of a registry value (by pointer identity).
  * Returns true and fills *out on a hit; false if `value` is not a registry
  * value.  Consumed by the 2b formatter to print the original q glyph.
