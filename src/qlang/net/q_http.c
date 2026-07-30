@@ -13,7 +13,6 @@
 #include "qlang/q_env.h"       /* q_env_get — `.h.HOME` / `.h.ty` */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_value — handler firing */
 #include "mem/sys.h"
-#include "table/dict.h"        /* ray_dict_find_sym — `.h.ty` override probe */
 #include "picohttpparser.h"
 #include <stdlib.h>
 #include <string.h>
