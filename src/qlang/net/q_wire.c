@@ -2,7 +2,7 @@
  * provenance: see q_wire.h.  No frozen-base file is touched: this is a
  * q-layer TU; `-8!`/`-9!` dispatch lives in q_registry.c's `!` wrapper. */
 #include "qlang/net/q_wire.h"
-#include "qlang/q_err.h"      /* q_err / q_err_class — full class on the wire */
+#include "qlang/q_err.h"      /* q_err / q_err_text — full error text on the wire */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_lambda_src / q_eval — lambda serde;
                                  * q_eval_apply_concrete — the IPC boundary force */
 #include "qlang/q_registry.h"   /* q_list_collapse */
@@ -122,11 +122,12 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     g_wire_depth++;
     int rc = -1;
 
-    /* error -128h — kdb sends the FULL class string (q_err_class recovers the
-     * untruncated name from the stamped enum, e.g. 'mismatch' not 'mismatc'). */
+    /* error -128h — kdb sends the FULL error text (q_err_text: signal/name
+     * payload, else the untruncated class name, e.g. 'mismatch' not 'mismatc'). */
     if (RAY_IS_ERR(x)) {
-        const char* code = q_err_class(x);
-        rc = (w_u8(b, 0x80) || w_cstr(b, code, strlen(code))) ? -1 : 0;
+        int64_t tn = 0;
+        const char* text = q_err_text(x, &tn);
+        rc = (w_u8(b, 0x80) || w_cstr(b, text ? text : "", (size_t)tn)) ? -1 : 0;
         goto out;
     }
     /* (::) generic null 101h */
@@ -659,14 +660,11 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         if (-t == 128) {                              /* error -128h (not a value tag) */
             const char* s; size_t n;
             if (r_cstr(c, &s, &n)) return trunc_err("error text");
-            char code[16];
-            if (n > sizeof code - 1) n = sizeof code - 1;
-            memcpy(code, s, n); code[n] = 0;
             /* mark a SUCCESSFULLY decoded top-level wire error so the frame
              * gate can still reject trailing junk (a decode FAILURE error
              * must not be masked by the trailing-bytes check). */
             if (g_wire_depth == c->depth0 + 1) c->top_err_ok = 1;
-            return ray_error(code, NULL);
+            return q_err_from_text(s, n);
         }
         /* switch the recovered POSITIVE tag; exhaustive over the value enum
          * (#209 — a new datatype must decode).  Out-of-band negatives fall to
