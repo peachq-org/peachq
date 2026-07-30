@@ -562,15 +562,23 @@ ray_t* q_eval_apply_manifest_value(const q_op_t* r, q_valence_t v,
     return val;
 }
 
-/* `agg each flip x` — literally: the 4.1t traverse-columns law (ref/dev.md,
- * ref/var.md), spelled with the same two primitives the docs spell it with */
-static ray_t* agg_columns(ray_t* fv, const q_op_t* row, ray_t* x) {
+/* `flip x` through the manifest value — the transpose the rank-2 laws lean on */
+static ray_t* flip_of(ray_t* x) {
     const q_op_t* frow = NULL;
     ray_t* fl = q_eval_apply_manifest_value(q_ops_find("flip", 4), Q_MONADIC, &frow);
     if (!fl) return q_err(QE_TYPE);
-    ray_t* f = q_eval_apply(fl, frow, &x, 1);   /* ragged input 'length here */
+    return q_eval_apply(fl, frow, &x, 1);       /* ragged input 'length here */
+}
+
+/* `f each flip x` — literally: the 4.1t traverse-columns law (ref/dev.md,
+ * ref/var.md), spelled with the same two primitives the docs spell it with; an
+ * optional held LEFT makes it `l f' flip x` for the dyadic m-window verbs */
+static ray_t* each_flip(ray_t* fv, const q_op_t* row, ray_t* l, ray_t* x) {
+    ray_t* f = flip_of(x);
     if (!f || RAY_IS_ERR(f)) return f ? f : q_err(QE_TYPE);
-    ray_t* r = q_adverb_apply(0 /* `'` each */, fv, row, &f, 1);
+    ray_t* a[2] = { l, f };
+    ray_t* r = l ? q_adverb_apply(0 /* `'` each */, fv, row, a, 2)
+                 : q_adverb_apply(0 /* `'` each */, fv, row, &f, 1);
     ray_release(f);
     return r;
 }
@@ -579,7 +587,7 @@ static ray_t* agg_columns(ray_t* fv, const q_op_t* row, ray_t* x) {
  * so null propagation is the DYAD's (basics/math.md "Aggregating nulls");
  * QNEST_MEAN scales that fold by the outer count (ref/avg.md). */
 static ray_t* agg_nested(ray_t* fv, const q_op_t* row, ray_t* x) {
-    if (row->nested == QNEST_COLUMNS) return agg_columns(fv, row, x);
+    if (row->nested == QNEST_COLUMNS) return each_flip(fv, row, NULL, x);
     const q_op_t* drow = NULL;
     ray_t* dv = q_eval_apply_manifest_value(q_ops_nested_dyad(row), Q_DYADIC, &drow);
     if (!dv) return q_err(QE_TYPE);
@@ -632,12 +640,14 @@ static ray_t* agg1(ray_t* fv, const q_op_t* row, ray_t* x) {
 
 /* ===== L2 map lift ======================================================= */
 
-static ray_t* map1(ray_t* fv, const q_op_t* row, ray_t* x) {
+static ray_t* map1(ray_t* fv, const q_op_t* row, ray_t* l, ray_t* x) {
     if (x && x->type == RAY_DICT) {
         ray_t* v = ray_dict_vals(x);
+        ray_t* a[2] = { l, v };                /* l, when held, rides along */
         ray_t* nv;
-        if (q_type_is_keyed(x)) nv = map1(fv, row, v);
-        else                     nv = q_eval_apply_concrete(q_eval_apply(fv, row, &v, 1));
+        if (q_type_is_keyed(x)) nv = map1(fv, row, l, v);
+        else                     nv = q_eval_apply_concrete(
+                                     q_eval_apply(fv, row, l ? a : &v, l ? 2 : 1));
         if (RAY_IS_ERR(nv)) return nv;
         ray_t* k = ray_dict_keys(x);
         ray_retain(k);
@@ -648,11 +658,23 @@ static ray_t* map1(ray_t* fv, const q_op_t* row, ray_t* x) {
         ray_t* out = ray_table_new(nc);
         for (int64_t c = 0; c < nc; c++) {
             ray_t* col = ray_table_get_col_idx(x, c);
-            ray_t* r = q_eval_apply_concrete(q_eval_apply(fv, row, &col, 1));
+            ray_t* a[2] = { l, col };
+            ray_t* r = q_eval_apply_concrete(
+                q_eval_apply(fv, row, l ? a : &col, l ? 2 : 1));
             if (RAY_IS_ERR(r)) { ray_release(out); return r; }
             out = ray_table_add_col(out, ray_table_col_name(x, c), r);
             ray_release(r);
         }
+        return out;
+    }
+    /* THE map-family rank-2 law: `flip f each flip x` — scan the OUTER axis
+     * (ref/sum.md sums list-of-lists, ref/max.md maxs over a dict); single and
+     * uniform across the roster, so no manifest column carries it */
+    if (q_type_any_nested_item(x)) {
+        ray_t* r = each_flip(fv, row, l, x);
+        if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_TYPE);
+        ray_t* out = flip_of(r);
+        ray_release(r);
         return out;
     }
     return q_err(QE_TYPE);
@@ -1083,9 +1105,15 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
                    (is_container(args[0]) ||
                     (row->nested && q_type_any_nested_item(args[0])))) {
             return agg1(fv, row, args[0]);
-        } else if (strcmp(fam, "map") == 0 && n == 1 &&
-                   is_container(args[0])) {
-            return map1(fv, row, args[0]);
+        } else if (strcmp(fam, "map") == 0) {
+            if (n == 1 && (is_container(args[0]) ||
+                           q_type_any_nested_item(args[0])))
+                return map1(fv, row, NULL, args[0]);
+            /* the dyadic m-window rows are window-then-data: lift on the DATA
+             * with the window/decay ATOM held (`2 mmax d`, ref/max.md) */
+            if (n == 2 && args[0]->type < 0 &&
+                (is_container(args[1]) || q_type_any_nested_item(args[1])))
+                return map1(fv, row, args[0], args[1]);
         } else if (strcmp(fam, "index") == 0) {
             /* as for `atomic`, a two-valence row's family describes the DYAD —
              * the monadic sibling (`#:` count, `_:` floor) derives no index */
