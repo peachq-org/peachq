@@ -7,6 +7,7 @@
  * name from the enum, so 'mismatch' is no longer truncated to 'mismatc'
  * q-side.  Base's own error path is untouched. */
 #include "qlang/q_err.h"
+#include <string.h>
 
 static const char* const q_err_names[QE__COUNT] = {
     [QE_TYPE]="type", [QE_LENGTH]="length", [QE_RANK]="rank",
@@ -25,12 +26,23 @@ static const char* const q_err_names[QE__COUNT] = {
     [QE_VERSION]="version",
 };
 
+/* A CLASSED error is a named one plus the enum stamp, so it composes on
+ * q_err_name — which leaves this file with the single call into the base
+ * builder (the bare-class ruling made physical). */
 ray_t* q_err(q_err_e e) {
     const char* cls = (unsigned)e < QE__COUNT ? q_err_names[e] : "error";
-    ray_t* err = ray_error(cls, NULL);
+    ray_t* err = q_err_name(cls, strlen(cls));
     if (RAY_IS_ERR(err) && err != RAY_OOM_OBJ)
         err->aux[0] = (uint8_t)(e + 1);
     return err;
+}
+
+ray_t* q_err_name(const char* p, size_t n) {
+    char cls[64];
+    size_t l = n < sizeof cls - 1 ? n : sizeof cls - 1;
+    memcpy(cls, p, l);
+    cls[l] = '\0';
+    return ray_error(cls, NULL);
 }
 
 const char* q_err_class(ray_t* err) {
