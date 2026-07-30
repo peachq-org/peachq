@@ -32,8 +32,37 @@
 
 static _Thread_local int g_depth;
 
-static int64_t sym_id_of(const char* s) {
-    return ray_sym_intern_runtime(s, strlen(s));
+/* Fixed sym ids, interned ONCE per runtime (the env.c ipc-hook-syms
+ * discipline).  Process-global like the registry itself — one live q runtime
+ * per process (__RUNTIME).  The sym table is recreated per runtime, so
+ * q_runtime_destroy resets via q_eval_syms_reset — a surviving cache would
+ * hand the next runtime stale ids and control forms would degrade to 'name. */
+typedef struct {
+    int64_t adv[6];
+    int64_t semi, colon, gcolon, dollar, kif, kwhile, kdo;
+    int     ready;
+} eval_syms_t;
+static eval_syms_t g_syms;
+
+static const eval_syms_t* syms(void) {
+    if (!g_syms.ready) {
+        for (int i = 0; i < 6; i++)
+            g_syms.adv[i] = ray_sym_intern_runtime(ADVERB_NAMES[i],
+                                                   strlen(ADVERB_NAMES[i]));
+        g_syms.semi   = ray_sym_intern_runtime(";", 1);
+        g_syms.colon  = ray_sym_intern_runtime(":", 1);
+        g_syms.gcolon = ray_sym_intern_runtime("::", 2);
+        g_syms.dollar = ray_sym_intern_runtime("$", 1);
+        g_syms.kif    = ray_sym_intern_runtime("if", 2);
+        g_syms.kwhile = ray_sym_intern_runtime("while", 5);
+        g_syms.kdo    = ray_sym_intern_runtime("do", 2);
+        g_syms.ready  = 1;
+    }
+    return &g_syms;
+}
+
+void q_eval_syms_reset(void) {
+    memset(&g_syms, 0, sizeof g_syms);
 }
 
 /* A sym ATOM in a tree is ALWAYS a name reference (parsetrees.md:80): the
@@ -58,15 +87,14 @@ static int is_hole(ray_t* x) {
 
 /* adverb id (0=' 1=/ 2=\ 3=': 4=/: 5=\:), else -1.  The parser emits the
  * ITERATOR VALUE, so that is the live reading; the sym spelling is still
- * honoured for hand-built trees.  Re-interned per call: the sym table is
- * recreated per runtime, so a static id cache goes stale across the C-unit
- * harness's runtimes (interning an existing spelling is a cheap hash hit). */
+ * honoured for hand-built trees. */
 static int adv_id(ray_t* x) {
     int it = q_eval_apply_iter_id(x);
     if (it >= 0) return it;
     if (!nameref(x)) return -1;
+    const eval_syms_t* S = syms();
     for (int i = 0; i < 6; i++)
-        if (x->i64 == sym_id_of(ADVERB_NAMES[i])) return i;
+        if (x->i64 == S->adv[i]) return i;
     return -1;
 }
 
@@ -81,27 +109,20 @@ static ray_t* name_error(int64_t id) {
  * NULL.  *row_out set when the hit came from the registry. */
 static ray_t* resolve(int64_t id, const q_op_t** row_out) {
     if (row_out) *row_out = NULL;
-    ray_t* nm = ray_sym_str(id);
-    if (nm) {
-        if (q_ops_find(ray_str_ptr(nm), (int)ray_str_len(nm))) {
-            const q_op_t* row = NULL;
-            ray_t* hit = q_registry_lookup_row(id, Q_MONADIC, &row);
-            if (!hit) hit = q_registry_lookup_row(id, Q_DYADIC, &row);
-            if (hit) {
-                ray_release(nm);
-                if (row_out) *row_out = row;
-                ray_retain(hit);
-                return hit;
-            }
-        }
-        ray_release(nm);
+    const q_op_t* row = NULL;
+    ray_t* hit = q_registry_lookup_row(id, Q_MONADIC, &row);
+    if (!hit) hit = q_registry_lookup_row(id, Q_DYADIC, &row);
+    if (hit) {
+        if (row_out) *row_out = row;
+        ray_retain(hit);
+        return hit;
     }
     ray_t* v = q_env_resolve(id);            /* owned (or an owned error) */
     if (v) return v;
     v = q_dotz_resolve(id);                  /* owned */
     if (v) return v;
     /* bare identifier -> `.q.<name>` (kdb: keywords ARE .q entries) */
-    nm = ray_sym_str(id);
+    ray_t* nm = ray_sym_str(id);
     if (nm) {
         const char* p = ray_str_ptr(nm);
         size_t n = ray_str_len(nm);
@@ -119,7 +140,7 @@ static ray_t* resolve(int64_t id, const q_op_t** row_out) {
 
 static ray_t* name_value(ray_t* sym, const q_op_t** row_out) {
     if (row_out) *row_out = NULL;
-    if (sym->i64 == sym_id_of("::")) return RAY_NULL_OBJ;
+    if (sym->i64 == syms()->gcolon) return RAY_NULL_OBJ;
     ray_t* v = resolve(sym->i64, row_out);
     return v ? v : name_error(sym->i64);
 }
@@ -198,12 +219,11 @@ static ray_t* indexed_assign(int is_global, ray_t* target, ray_t* opv,
     int64_t k = ray_len(target) - 1;
     if (k < 1 || k > EVAL_MAX_ARGS || !nameref(te[0]))
         return q_err(QE_NYI);
+    if (q_registry_is_reserved(te[0]->i64)) return q_err(QE_ASSIGN);
     ray_t* s = ray_sym_str(te[0]->i64);
     if (!s) return q_err(QE_TYPE);
-    int reserved = q_ops_is_reserved(ray_str_ptr(s), (int)ray_str_len(s));
     int dotted = ray_str_len(s) > 0 && ray_str_ptr(s)[0] == '.';
     ray_release(s);
-    if (reserved) return q_err(QE_ASSIGN);
     ray_t* rv = q_eval(rhs);
     if (RAY_IS_ERR(rv)) return rv;
     rv = q_eval_apply_concrete(rv);
@@ -244,13 +264,12 @@ static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
             return indexed_assign(is_global, target, NULL, rhs);
         return q_err(QE_NYI);
     }
+    if (q_registry_is_reserved(target->i64)) return q_err(QE_ASSIGN);
     ray_t* s = ray_sym_str(target->i64);
     if (!s) return q_err(QE_TYPE);
-    int reserved = q_ops_is_reserved(ray_str_ptr(s), (int)ray_str_len(s));
     int dotted = ray_str_len(s) > 0 && ray_str_ptr(s)[0] == '.';
     int zd_nyi = q_dotz_write_is_nyi(ray_str_ptr(s), ray_str_len(s));
     ray_release(s);
-    if (reserved) return q_err(QE_ASSIGN);
     if (zd_nyi) return q_err(QE_NYI);
     ray_t* v = q_eval_apply_concrete(q_eval(rhs));    /* boundary seam: assignment */
     if (RAY_IS_ERR(v)) return v;
@@ -363,7 +382,7 @@ static ray_t* cond_eval(ray_t** e, int64_t n) {
  * name-ref is matched by spelling. */
 static int dollar_head(ray_t* h) {
     if (!h) return 0;
-    if (nameref(h)) return h->i64 == sym_id_of("$");
+    if (nameref(h)) return h->i64 == syms()->dollar;
     if (h->type == RAY_BINARY) {
         const q_op_t* row = q_registry_row_of(h, Q_DYADIC);
         return row && row->name[0] == '$' && row->name[1] == '\0';
@@ -480,9 +499,6 @@ ray_t* q_eval(ray_t* node) {
     if (RAY_IS_ERR(node)) return node;
     if (ray_eval_is_interrupted()) return q_err(QE_STOP);
     if (++g_depth > EVAL_MAX_DEPTH) { g_depth--; return q_err(QE_LIMIT); }
-    int64_t id_semi   = sym_id_of(";");
-    int64_t id_colon  = sym_id_of(":");
-    int64_t id_gcolon = sym_id_of("::");
 
     ray_t* ret;
     if (node->type == -RAY_SYM) {
@@ -510,14 +526,15 @@ ray_t* q_eval(ray_t* node) {
         if (h == q_registry_list_value())  { ret = list_lit(e + 1, n - 1); goto out; }
 
         if (nameref(h)) {
-            if (h->i64 == id_semi) { ret = seq_eval(e + 1, n - 1); goto out; }
-            if ((h->i64 == id_colon || h->i64 == id_gcolon) && n == 3) {
-                ret = assign_eval(h->i64 == id_gcolon, e[1], e[2]);
+            const eval_syms_t* S = syms();
+            if (h->i64 == S->semi) { ret = seq_eval(e + 1, n - 1); goto out; }
+            if ((h->i64 == S->colon || h->i64 == S->gcolon) && n == 3) {
+                ret = assign_eval(h->i64 == S->gcolon, e[1], e[2]);
                 goto out;
             }
-            if (h->i64 == sym_id_of("if"))    { ret = if_eval(e + 1, n - 1, 0); goto out; }
-            if (h->i64 == sym_id_of("while")) { ret = if_eval(e + 1, n - 1, 1); goto out; }
-            if (h->i64 == sym_id_of("do"))    { ret = do_eval(e + 1, n - 1); goto out; }
+            if (h->i64 == S->kif)    { ret = if_eval(e + 1, n - 1, 0); goto out; }
+            if (h->i64 == S->kwhile) { ret = if_eval(e + 1, n - 1, 1); goto out; }
+            if (h->i64 == S->kdo)    { ret = do_eval(e + 1, n - 1); goto out; }
             if (n == 3) {
                 ray_t* ma = modassign_eval(h, e[1], e[2]);
                 if (ma) { ret = ma; goto out; }

@@ -35,6 +35,7 @@
 #include "qlang/ops/q_bang.h"               /* q_bang — the `!` row */
 #include "qlang/ops/q_dollar.h"             /* q_dollar — the `$` row */
 #include "qlang/ops/q_index.h"              /* q_index_assign_wrap — the `:` row */
+#include <assert.h>
 #include <string.h>
 
 /* ===== deterministic / sideeffect AUDIT (feat/q-ops-introspection) =========
@@ -656,13 +657,36 @@ int q_lex_is_kw_infix(const char* s, int len) {
     return 0;
 }
 
+/* spelling -> row, via a lazily built hash over the STATIC Q_OPS[] names —
+ * derived data that can never go stale, so no invalidation exists. */
+#define OPS_IDX_SLOTS 512   /* power of two; load <= 1/2 at the row cap */
+static int16_t ops_idx[OPS_IDX_SLOTS];
+static int     ops_idx_ready;
+
+static uint32_t ops_hash(const char* s, int len) {
+    uint32_t h = 2166136261u;                 /* FNV-1a */
+    for (int i = 0; i < len; i++) { h ^= (uint8_t)s[i]; h *= 16777619u; }
+    return h;
+}
+
 const q_op_t* q_ops_find(const char* s, int len) {
-    for (int i = 0; i < N_Q_OPS; i++) {
-        const char* nm = Q_OPS[i].name;
-        if ((int)strlen(nm) == len && memcmp(nm, s, (size_t)len) == 0)
-            return &Q_OPS[i];
+    if (!ops_idx_ready) {
+        assert(N_Q_OPS <= OPS_IDX_SLOTS / 2);
+        memset(ops_idx, 0xFF, sizeof ops_idx);   /* -1 fill */
+        for (int i = 0; i < N_Q_OPS; i++) {
+            uint32_t j = ops_hash(Q_OPS[i].name, (int)strlen(Q_OPS[i].name));
+            while (ops_idx[j & (OPS_IDX_SLOTS - 1)] >= 0) j++;
+            ops_idx[j & (OPS_IDX_SLOTS - 1)] = (int16_t)i;
+        }
+        ops_idx_ready = 1;
     }
-    return NULL;
+    for (uint32_t j = ops_hash(s, len);; j++) {
+        int16_t k = ops_idx[j & (OPS_IDX_SLOTS - 1)];
+        if (k < 0) return NULL;
+        const char* nm = Q_OPS[k].name;
+        if ((int)strlen(nm) == len && memcmp(nm, s, (size_t)len) == 0)
+            return &Q_OPS[k];
+    }
 }
 
 int q_ops_is_reserved(const char* s, int len) { return q_ops_find(s, len) != NULL; }

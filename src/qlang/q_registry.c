@@ -56,11 +56,106 @@ typedef struct {
     int         is_wrapper;
 } entry_t;
 
-/* Upper bound: every manifest row can contribute at most two entries. */
-static entry_t g_entries[2 * 256];  /* 2 slots per manifest row; grown 96->128 (list-verb 2026-07-06)->256 (2026-07-07: set-ops+sort+control-flow+atomic-math pushed the row count past 128) */
+/* Row cap: every manifest row can contribute at most two entries; every
+ * capacity below derives from this ONE constant.  Grown 96->128 (list-verb
+ * 2026-07-06)->256 (2026-07-07: set-ops+sort+control-flow+atomic-math pushed
+ * the row count past 128). */
+#define REG_ROW_CAP 256
+static entry_t g_entries[2 * REG_ROW_CAP];
 static int     g_count    = 0;
 static bool    g_inited   = false;
 static bool    g_building = false;   /* debug re-entry guard (see header note) */
+
+/* ---- O(1) resolution indexes -------------------------------------------
+ * Derived from the manifest/entries at init (rule 3: no second home for verb
+ * spellings) and torn down with the registry, so the cached sym ids die with
+ * the runtime's sym table.  Open-addressed, power of two, load <= 1/2 at
+ * the row/entry caps. */
+
+#define SYM_SLOTS (2 * REG_ROW_CAP)     /* keys: one per manifest row */
+typedef struct {
+    int64_t       sym_id;
+    const q_op_t* row;      /* non-NULL == occupied (every name IS a row) */
+    int16_t       ent[3];   /* [valence] -> g_entries idx, -1 = no value  */
+} sym_slot_t;
+static sym_slot_t g_sym_idx[SYM_SLOTS];
+static int        g_sym_used = 0;
+
+#define VAL_SLOTS (4 * REG_ROW_CAP)     /* keys: one per (value, valence) entry */
+typedef struct {
+    const ray_t*  value;    /* key (with valence); non-NULL == occupied */
+    const q_op_t* row;      /* NULL once aliased at this valence        */
+    q_valence_t   valence;
+    uint8_t       aliased;
+} val_slot_t;
+static val_slot_t g_val_idx[VAL_SLOTS];
+static int        g_val_used = 0;
+
+/* manifest-row index x valence -> g_entries idx (q_registry_row_value) */
+static const q_op_t* g_ops_base;
+static int           g_ops_n;
+static int16_t       g_row_ent[REG_ROW_CAP][3];
+
+static size_t idx_hash(uint64_t k, size_t mask) {
+    return (size_t)((k * 0x9E3779B97F4A7C15ull) >> 32) & mask;
+}
+
+static sym_slot_t* sym_slot(int64_t sym_id, int insert) {
+    for (size_t i = idx_hash((uint64_t)sym_id, SYM_SLOTS - 1);;
+         i = (i + 1) & (SYM_SLOTS - 1)) {
+        sym_slot_t* s = &g_sym_idx[i];
+        if (!s->row) {
+            if (!insert) return NULL;
+            g_sym_used++;
+            assert(g_sym_used <= SYM_SLOTS / 2);
+            s->sym_id = sym_id;
+            s->ent[Q_MONADIC] = s->ent[Q_DYADIC] = -1;
+            return s;   /* caller stamps ->row (the occupancy marker) */
+        }
+        if (s->sym_id == sym_id) return s;
+    }
+}
+
+static val_slot_t* val_slot(const ray_t* value, q_valence_t valence, int insert) {
+    if (!value) return NULL;
+    uint64_t k = (uint64_t)(uintptr_t)value ^ ((uint64_t)valence << 60);
+    for (size_t i = idx_hash(k, VAL_SLOTS - 1);; i = (i + 1) & (VAL_SLOTS - 1)) {
+        val_slot_t* s = &g_val_idx[i];
+        if (!s->value) {
+            if (!insert) return NULL;
+            g_val_used++;
+            assert(g_val_used <= VAL_SLOTS / 2);
+            s->value   = value;
+            s->valence = valence;
+            return s;
+        }
+        if (s->value == value && s->valence == valence) return s;
+    }
+}
+
+/* Register g_entries[idx] in every index.  The aliasing verdict is a static
+ * property of the built registry, computed HERE once, so q_registry_row_of
+ * is one probe yet still answers NULL for an aliased value (provenance). */
+static void idx_add_entry(int idx) {
+    entry_t* e = &g_entries[idx];
+    sym_slot_t* s = sym_slot(e->sym_id, 1);
+    s->row = e->row;
+    s->ent[e->valence] = (int16_t)idx;
+    val_slot_t* v = val_slot(e->value, e->valence, 1);
+    if (!v->aliased && !v->row) v->row = e->row;
+    else if (v->row != e->row) { v->row = NULL; v->aliased = 1; }
+    ptrdiff_t r = e->row - g_ops_base;
+    if (r >= 0 && r < g_ops_n) g_row_ent[r][e->valence] = (int16_t)idx;
+}
+
+static void idx_reset(void) {
+    memset(g_sym_idx, 0, sizeof g_sym_idx);
+    memset(g_val_idx, 0, sizeof g_val_idx);
+    memset(g_row_ent, 0xFF, sizeof g_row_ent);   /* -1 fill */
+    g_sym_used = g_val_used = 0;
+    g_ops_base = NULL;
+    g_ops_n    = 0;
+}
 
 /* ===== registry SPECIALS — internal (spelling-less) fn-values ==============
  * ONE plain data table drives the g_specials[] slots, the init build loop,
@@ -249,7 +344,7 @@ static ray_t* build_wrapper(const q_recipe_t* r) {
 /* Record one (name, valence) entry.  Returns RAY_OK, or RAY_ERR_DOMAIN if the
  * builder produced NULL/err for a non-QR_NONE recipe (audited source missing). */
 static ray_err_t add_entry(const q_op_t* op, q_valence_t valence,
-                           const q_recipe_t* r) {
+                           const q_recipe_t* r, int64_t sym_id) {
     /* Bootstrap invariant (codex #1): entries are only ever built inside
      * q_registry_init's build window, and a builder must never re-enter the
      * parser.  The builders below touch only ray_env_get / ray_fn_* — never
@@ -262,13 +357,14 @@ static ray_err_t add_entry(const q_op_t* op, q_valence_t valence,
     ray_t* val = (r->kind == QK_ENV) ? build_env(r->target) : build_wrapper(r);
     if (!val || RAY_IS_ERR(val)) return RAY_ERR_DOMAIN; /* fail-fast: audited bug */
     entry_t* e    = &g_entries[g_count++];
-    e->sym_id     = ray_sym_intern(op->name, strlen(op->name));
+    e->sym_id     = sym_id;
     e->valence    = valence;
     e->value      = val;
     e->row        = op;
     e->spelling   = op->name;
     e->lower_name = r->target;                          /* rayfall routing name */
     e->is_wrapper = (r->kind != QK_ENV);
+    idx_add_entry(g_count - 1);
     return RAY_OK;
 }
 
@@ -314,12 +410,20 @@ ray_err_t q_registry_init(void) {
     /* Cap check: g_entries sized for 2 per row.  Static roster, so this is a
      * build-time invariant, asserted for future growth. */
     assert(2 * n <= (int)(sizeof g_entries / sizeof g_entries[0]));
+    assert(n <= (int)(sizeof g_row_ent / sizeof g_row_ent[0]));
+    idx_reset();
+    g_ops_base = ops;
+    g_ops_n    = n;
     for (int i = 0; i < n; i++) {
         const q_op_t* op = &ops[i];
-        if (add_entry(op, Q_MONADIC, &op->mon)  != RAY_OK) {
+        int64_t sid = ray_sym_intern(op->name, strlen(op->name));
+        /* every manifest name gets a slot — reserved-ness by sym id, even for
+         * rows with no value at either valence (`any`/`all`) */
+        sym_slot(sid, 1)->row = op;
+        if (add_entry(op, Q_MONADIC, &op->mon, sid)  != RAY_OK) {
             g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
         }
-        if (add_entry(op, Q_DYADIC,  &op->dyad) != RAY_OK) {
+        if (add_entry(op, Q_DYADIC,  &op->dyad, sid) != RAY_OK) {
             g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
         }
     }
@@ -384,6 +488,7 @@ static ray_err_t bind_qsrc_one(const q_op_t* op, q_valence_t valence,
     e->spelling   = op->name;
     e->lower_name = r->target;
     e->is_wrapper = 1;
+    idx_add_entry(g_count - 1);
     return RAY_OK;
 }
 
@@ -418,10 +523,7 @@ ray_t* q_registry_qsrc_ns(void) {
 }
 
 ray_t* q_registry_lookup(int64_t sym_id, q_valence_t valence) {
-    for (int i = 0; i < g_count; i++)
-        if (g_entries[i].sym_id == sym_id && g_entries[i].valence == valence)
-            return g_entries[i].value;   /* borrowed */
-    return NULL;
+    return q_registry_lookup_row(sym_id, valence, NULL);
 }
 
 ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence) {
@@ -431,26 +533,32 @@ ray_t* q_registry_lookup_name(const char* s, size_t n, q_valence_t valence) {
 ray_t* q_registry_lookup_row(int64_t sym_id, q_valence_t valence,
                              const q_op_t** row_out) {
     if (row_out) *row_out = NULL;
-    for (int i = 0; i < g_count; i++) {
-        if (g_entries[i].sym_id == sym_id && g_entries[i].valence == valence) {
-            if (row_out) *row_out = g_entries[i].row;
-            return g_entries[i].value;   /* borrowed */
-        }
-    }
-    return NULL;
+    if (valence != Q_MONADIC && valence != Q_DYADIC) return NULL;
+    sym_slot_t* s = sym_slot(sym_id, 0);
+    if (!s || s->ent[valence] < 0) return NULL;
+    entry_t* e = &g_entries[s->ent[valence]];
+    if (row_out) *row_out = e->row;
+    return e->value;   /* borrowed */
+}
+
+int q_registry_is_reserved(int64_t sym_id) {
+    return sym_slot(sym_id, 0) != NULL;
+}
+
+ray_t* q_registry_row_value(const q_op_t* row, q_valence_t valence) {
+    if (!row || !g_ops_base || (valence != Q_MONADIC && valence != Q_DYADIC))
+        return NULL;
+    ptrdiff_t i = row - g_ops_base;   /* row is &Q_OPS[i] (see q_registry.h) */
+    if (i < 0 || i >= g_ops_n) return NULL;
+    int16_t e = g_row_ent[i][valence];
+    return e < 0 ? NULL : g_entries[e].value;   /* borrowed */
 }
 
 /* Exact for unique values; NULL when several rows alias one env object at
- * this valence (see q_registry.h).  Linear scan, same cost class as lookup. */
+ * this valence (see q_registry.h) — the verdict was settled at idx_add_entry. */
 const q_op_t* q_registry_row_of(const ray_t* value, q_valence_t valence) {
-    const q_op_t* row = NULL;
-    for (int i = 0; i < g_count; i++) {
-        if (g_entries[i].value != value || g_entries[i].valence != valence)
-            continue;
-        if (row && row != g_entries[i].row) return NULL;   /* aliased: ambiguous */
-        row = g_entries[i].row;
-    }
-    return row;
+    val_slot_t* s = val_slot(value, valence, 0);
+    return s ? s->row : NULL;
 }
 
 bool q_registry_provenance(const ray_t* value, q_provenance_t* out) {
@@ -491,4 +599,5 @@ void q_registry_destroy(void) {
         if (g_iters[a]) { ray_release(g_iters[a]); g_iters[a] = NULL; }
     g_count  = 0;
     g_inited = false;
+    idx_reset();   /* cached sym ids die with the runtime's sym table */
 }

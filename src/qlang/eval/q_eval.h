@@ -15,6 +15,11 @@ struct q_op;
 /* Walker over the RAW q_parse tree; returns OWNED (RAY_ERROR on failure). */
 ray_t* q_eval(ray_t* node);
 
+/* Drop the walker's once-per-runtime fixed-sym-id cache (control-form and
+ * adverb spellings).  q_runtime_destroy MUST call this: sym ids are not
+ * stable across runtimes, and a stale cache silently un-recognises if/while/do. */
+void q_eval_syms_reset(void);
+
 /* The apply module — THE one dispatch home: valence/rank, projections,
  * native adverbs + monomorphization, family lifts, kernel calls, result
  * construction.  Args BORROWED (C-NULL = elided hole), result OWNED;
