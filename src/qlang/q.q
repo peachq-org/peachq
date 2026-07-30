@@ -24,7 +24,9 @@
 / infix keywords (lexer row stays; registry cell rebound from these post-load)
 / `max 0,`/`max 1,` stand in for k's `0|`/`1|` (dyadic | lands in wave 3)
 .q.sublist:{$[2=count x;x[0]_((sum x)&count y)#y;0<=x;(x&count y)#y;(max 0,x+count y)_y]}
-.q.wsum:{sum x*"f"$y}
+/ ref/sum.md "equivalent to {sum x*y}", float ONLY "when both x and y are
+/ integer lists" — an atom operand is not a list, so it never promotes
+.q.wsum:{sum x*$[all (type x;type y)in 5 6 7h;"f"$y;y]}
 .q.cov:{avg[x*y]-avg[x]*avg y}
 .q.scov:{cov[x;y]*count[x]%-1+count x}
 .q.mavg:{(x msum y)%x mcount y}
