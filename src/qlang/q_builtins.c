@@ -16,7 +16,6 @@
 #include "qlang/ops/q_index.h" /* q_index_elem_at — the element-read home */
 #include "lang/env.h"       /* ray_fn_unary; ray_env_get = bootstrap catalogue reads */
 #include "lang/eval.h"      /* RAY_FN_NONE */
-#include "lang/format.h"    /* ray_fmt — q string cast */
 #include "table/sym.h"      /* ray_sym_vec_cell */
 #include "mem/sys.h"        /* ray_sys_alloc — remote-eval scratch */
 #include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
