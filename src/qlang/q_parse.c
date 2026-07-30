@@ -140,6 +140,26 @@ static ray_t *hole(void) {
     return x;
 }
 
+/* True iff v is a NAME-REF sym (unquoted -RAY_SYM) whose spelling is exactly s
+ * — the one home for the "read a sym back and compare it" walk the tree checks
+ * repeat (`;` statement heads, `:` alias heads, the `::` value, the join `,`). */
+static int sym_name_is(const ray_t *v, const char *s) {
+    if (!v || v->type != -RAY_SYM || (v->attrs & Q_ATTR_QUOTED)) return 0;
+    ray_t *str = ray_sym_str(v->i64);
+    if (!str) return 0;
+    size_t sl = strlen(s);
+    int r = ray_str_len(str) == sl && memcmp(ray_str_ptr(str), s, sl) == 0;
+    ray_release(str);
+    return r;
+}
+
+/* Append an already-interned symbol id to a RAY_SYM vector.  The id-taking
+ * twin of q_symvec_append: callers that hold an id must not round-trip it
+ * through the string table just to intern it back. */
+static ray_t *symvec_add(ray_t *vec, int64_t id) {
+    return ray_vec_append(vec, &id);
+}
+
 /* symbol literal (ATTR_QUOTED set) */
 static ray_t *symlit(const char *s, int len) {
     ray_t *x = ray_sym(ray_sym_intern_runtime(s, (size_t)len));
@@ -154,10 +174,7 @@ static ray_t *symlit(const char *s, int len) {
 static ray_t *noun_tree_value(ray_t *v) {
     if (!v || RAY_IS_ERR(v)) return v;
     if (v->type == -RAY_SYM && (v->attrs & Q_ATTR_QUOTED)) {
-        ray_t *vec = ray_sym_vec_new(RAY_SYM_W64, 1);
-        ray_t *s = ray_sym_str(v->i64);
-        vec = q_symvec_append(vec, ray_str_ptr(s), (int)ray_str_len(s));
-        ray_release(s);
+        ray_t *vec = symvec_add(ray_sym_vec_new(RAY_SYM_W64, 1), v->i64);
         ray_release(v);
         return vec;
     }
@@ -197,6 +214,23 @@ static ray_t *q_list(ray_t **xs, int n) {
         }
     }
     return l;
+}
+
+/* (head; e0; e1; …) — a fresh list of `head` followed by every element of the
+ * BORROWED list e.  `nul` fills an empty slot (NULL: keep the C NULL, which
+ * only the top-level statement list is allowed to carry). */
+static ray_t *cons_head(ray_t *head, ray_t *e, ray_t *(*nul)(void)) {
+    int64_t n = ray_len(e);
+    ray_t **es = (ray_t **)ray_data(e);
+    ray_t *w = ray_list_new(n + 1);
+    w = ray_list_append(w, head);
+    for (int64_t i = 0; i < n; i++) {
+        if (es[i] || !nul) { w = ray_list_append(w, es[i]); continue; }
+        ray_t *x = nul();
+        w = ray_list_append(w, x);
+        ray_release(x);
+    }
+    return w;
 }
 
 /* ===== verb / adverb tables ================================================== */
@@ -272,583 +306,14 @@ typedef struct { Token *t; int n; } Tokens;
  * input leaks the token array.  Updated as the scanner emits. */
 static Tokens g_toks = { NULL, 0 };
 
-/* ===== numeric-literal scanner (q datatypes) ================================
- * One literal is a space-separated run of magnitudes followed by at most one
- * trailing type letter (b/h/i/j/e/f), per qlang.g4: the magnitude is scanned
- * uniformly, the trailing letter fixes the type (no letter => long, or float
- * if any magnitude was fractional).  Nulls / integer infinities are Specials
- * that widen to the chosen type's sentinel. */
-
-/* q_tok_el_kind/q_tok_el live in q_tok.h (the scanner owns the element type). */
-
-/* q Specials: 0N/0n (null), 0W/0w (+inf), -0W/-0w (-inf).  Lowercase forces a
- * float context.  Returns bytes consumed (0 = not a Special). */
-static int scan_special(const char *s, int p, q_tok_el *out) {
-    int neg = (s[p] == '-');
-    int q = p + (neg ? 1 : 0);
-    if (s[q] != '0') return 0;
-    char k = s[q + 1];
-    if (k != 'N' && k != 'W' && k != 'n' && k != 'w') return 0;
-    int is_null = (k == 'N' || k == 'n');
-    if (neg && is_null) return 0;            /* -0N is not a literal */
-    out->forces_float = (k == 'n' || k == 'w');
-    out->i = 0; out->f = 0.0;
-    out->kind = is_null ? Q_TOK_EL_NULL : (neg ? Q_TOK_EL_NINF : Q_TOK_EL_PINF);
-    return (q + 2) - p;
-}
-
-
-/* Scan one magnitude at src[*p] into *out; return 1 on success, 0 on no match. */
-static int scan_one_num(const char *src, int *p, q_tok_el *out) {
-    out->forces_float = 0;
-    int used = scan_special(src, *p, out);
-    if (used) { *p += used; return 1; }
-
-    /* Temporal magnitudes (date/timestamp/datetime/month/time/timespan/
-     * second/minute) — q_tok.c is the single home; a malformed shape dies
-     * here with the scanner's message (invalid civil dates never fall back
-     * to the float mess). */
-    {
-        const char *terr = NULL;
-        int tm = q_tok_temporal(src, p, out, &terr);
-        if (tm < 0) q_die(terr);
-        if (tm) return 1;
-    }
-
-
-    /* Decide float vs int: a float magnitude contains '.' or an exponent among
-     * its own bytes (before the next whitespace / letter).  Peek the digit run. */
-    int q = *p;
-    if (src[q] == '-' || src[q] == '+') q++;
-    int is_float = 0, saw_digit = 0;
-    for (int r = q; ; r++) {
-        char c = src[r];
-        if (c >= '0' && c <= '9') { saw_digit = 1; continue; }
-        if (c == '.') { is_float = 1; continue; }
-        if ((c == 'e' || c == 'E') && saw_digit &&
-            (src[r + 1] == '+' || src[r + 1] == '-' ||
-             (src[r + 1] >= '0' && src[r + 1] <= '9'))) { is_float = 1; continue; }
-        break;
-    }
-    if (!saw_digit) return 0;
-
-    size_t rem = strlen(src + *p);
-    if (is_float) {
-        double v; size_t u = ray_parse_f64(src + *p, rem, &v);
-        if (u == 0) return 0;
-        *p += (int)u; out->kind = Q_TOK_EL_FLOAT; out->f = v; out->forces_float = 1;
-        return 1;
-    }
-    int64_t v; size_t u = ray_parse_i64(src + *p, rem, &v);
-    if (u == 0) return 0;
-    *p += (int)u; out->kind = Q_TOK_EL_INT; out->i = v;
-    return 1;
-}
-
-/* Widen the long sentinels/inf to a narrow int width (2 or 4 bytes). */
-static int64_t narrow_special(q_tok_el_kind k, int width) {
-    int64_t vmin = (width == 2) ? INT16_MIN : (width == 4) ? INT32_MIN : INT64_MIN;
-    int64_t vmax = (width == 2) ? INT16_MAX : (width == 4) ? INT32_MAX : INT64_MAX;
-    if (k == Q_TOK_EL_NULL) return vmin;
-    if (k == Q_TOK_EL_PINF) return vmax;
-    return -vmax;   /* Q_TOK_EL_NINF */
-}
-
-/* Resolve one element to an int64 in the given integer width.  Q_TOK_EL_DATE holds
- * its day count in .i (only reachable in the width-4 date context); Q_TOK_EL_MONTH
- * holds its month payload in .i (only reachable in the width-4 month
- * context — everywhere else it reverts to its float twin first). */
-static int64_t el_to_int(const q_tok_el *e, int width) {
-    if (e->kind == Q_TOK_EL_INT || e->kind == Q_TOK_EL_DATE || e->kind == Q_TOK_EL_TIME ||
-        e->kind == Q_TOK_EL_TS || e->kind == Q_TOK_EL_MONTH || e->kind == Q_TOK_EL_MINUTE ||
-        e->kind == Q_TOK_EL_SECOND || e->kind == Q_TOK_EL_TIMESPAN) return e->i;
-    if (e->kind == Q_TOK_EL_FLOAT) return (int64_t)e->f;
-    return narrow_special(e->kind, width);
-}
-
-/* Resolve one element to a double (float context).  Q_TOK_EL_MONTH must return its
- * float TWIN (.f), not the month payload — a bare `2000.01` is the float
- * 2000.01, and the payload (0) would silently replace it (review C1).
- * Q_TOK_EL_PINF/Q_TOK_EL_NINF (`0w`/`-0w`) are LIVE ±inf — the live-infinity
- * model (2026-07-28), reversing the 2026-07-09 canonicalization. */
-static double el_to_float(const q_tok_el *e) {
-    if (e->kind == Q_TOK_EL_NULL) return NULL_F64;
-    if (e->kind == Q_TOK_EL_PINF) return INFINITY;
-    if (e->kind == Q_TOK_EL_NINF) return -INFINITY;
-    if (e->kind == Q_TOK_EL_MONTH) return e->f;
-    return (e->kind == Q_TOK_EL_FLOAT) ? e->f : (double)e->i;
-}
-
-/* True iff this element is the float NULL — drives the vector null bitmap.
- * ±inf are live values, never nulls (live-infinity model 2026-07-28). */
-static int el_float_is_null(const q_tok_el *e) {
-    return e->kind == Q_TOK_EL_NULL;
-}
-
-/* Read an optional trailing type letter (b/h/i/j/e/f, plus gated d) at
- * src[*p].  The whole literal shares one type and q prints only ONE trailing
- * suffix (`0N 32767 -32767 42h` — there is no display for short infinity,
- * basics/datatypes.md:254-259).  We nonetheless ACCEPT a letter after every
- * element and require them to agree; rejecting the per-item form is deferred
- * to the grammar cluster (PLAN.md).
- *
- * `d` (date) is accepted ONLY after a Special or a date magnitude (0Nd, 0Wd,
- * -0Wd, 2000.01.01d) — never after plain digits, so corpus tokens like `3d`
- * keep parsing as `3` juxtaposed with the name `d` (no parse-display churn).
- * `t` (time) is gated the same way (0Nt, 0Wt, -0Wt, 09:30:00.000t) so `3t`
- * stays `3` juxtaposed with the name `t`, and `p` (timestamp) likewise (0Np,
- * 0Wp, -0Wp; plain-int forms like kdb's `0p`/`42p` are deferred with the
- * same no-churn rationale). */
-static void read_type_letter(const char *src, int *p, char *letter,
-                             const q_tok_el *last) {
-    char c = src[*p];
-    int date_ok = last && (last->kind == Q_TOK_EL_DATE || last->kind == Q_TOK_EL_NULL ||
-                           last->kind == Q_TOK_EL_PINF || last->kind == Q_TOK_EL_NINF);
-    int guid_ok = last && last->kind == Q_TOK_EL_NULL;   /* only 0Ng (guid has no inf) */
-    int time_ok = last && (last->kind == Q_TOK_EL_TIME || last->kind == Q_TOK_EL_NULL ||
-                           last->kind == Q_TOK_EL_PINF || last->kind == Q_TOK_EL_NINF);
-    int ts_ok = last && (last->kind == Q_TOK_EL_TS || last->kind == Q_TOK_EL_NULL ||
-                         last->kind == Q_TOK_EL_PINF || last->kind == Q_TOK_EL_NINF);
-    int month_ok = last && (last->kind == Q_TOK_EL_MONTH || last->kind == Q_TOK_EL_NULL ||
-                            last->kind == Q_TOK_EL_PINF || last->kind == Q_TOK_EL_NINF);
-    int minute_ok = last && (last->kind == Q_TOK_EL_MINUTE || last->kind == Q_TOK_EL_NULL ||
-                             last->kind == Q_TOK_EL_PINF || last->kind == Q_TOK_EL_NINF);
-    int second_ok = last && (last->kind == Q_TOK_EL_SECOND || last->kind == Q_TOK_EL_NULL ||
-                             last->kind == Q_TOK_EL_PINF || last->kind == Q_TOK_EL_NINF);
-    int timespan_ok = last && (last->kind == Q_TOK_EL_TIMESPAN || last->kind == Q_TOK_EL_NULL ||
-                               last->kind == Q_TOK_EL_PINF || last->kind == Q_TOK_EL_NINF);
-    int dt_ok = last && (last->kind == Q_TOK_EL_DT || last->kind == Q_TOK_EL_NULL ||
-                         last->kind == Q_TOK_EL_PINF || last->kind == Q_TOK_EL_NINF);
-    if (c && (strchr("bhijef", c) || (c == 'd' && date_ok) ||
-              (c == 'g' && guid_ok) || (c == 't' && time_ok) ||
-              (c == 'p' && ts_ok) || (c == 'm' && month_ok) ||
-              (c == 'u' && minute_ok) || (c == 'v' && second_ok) ||
-              (c == 'n' && timespan_ok) || (c == 'z' && dt_ok))) {
-        if (*letter && *letter != c) q_die("inconsistent numeric type suffix");
-        *letter = c;
-        (*p)++;
-    }
-}
-
-/* ---- byte literals (q type 4, char x) --------------------------------------
- * Glued `0x` enters byte-literal mode: consume the maximal hex-digit run.
- * Doc pins (CLEAN ROOM, qdocs/): basics/datatypes.md row 4 (`0x00`);
- * ref/sv.md `0x0 sv …` (single digit = atom); ref/read1.md `0#0x` (bare `0x`
- * = EMPTY byte vector); ref/sv.md `0x0102010201` (multi-digit = vector).
- * Derived (no doc pin, most defensible reading): an odd digit count left-pads
- * one zero nibble (generalizes the pinned `0x0` -> 0x00); uppercase hex
- * digits are accepted (display is always lowercase); a run terminated by a
- * letter / '_' / '.' (`0xzz`, `0x0az`, `0x1.5`) is a malformed constant.
- * Bytes have NO null / infinity / type letter (datatypes.md blank columns),
- * so the Specials and read_type_letter machinery is not involved. */
-static int is_hex_digit(char c) {
-    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
-           (c >= 'A' && c <= 'F');
-}
-static int hex_val(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    return c - 'A' + 10;
-}
-/* True iff src[p] starts a byte literal ("0x…" glued).  The sign-glue and
- * strand machinery use this to keep byte literals out of numeric strands
- * (`1 0x0a` is noun-noun juxtaposition, never a vector). */
-static int byte_lit_starts(const char *src, int p) {
-    return src[p] == '0' && src[p + 1] == 'x';
-}
-static ray_t *scan_byte_literal(const char *src, int *p) {
-    int q = *p + 2;                               /* past "0x" */
-    int d0 = q;
-    while (is_hex_digit(src[q])) q++;
-    int nd = q - d0;
-    char t = src[q];                              /* run terminator */
-    if ((t >= 'a' && t <= 'z') || (t >= 'A' && t <= 'Z') || t == '_' || t == '.')
-        q_die("bad number");                      /* 0xzz / 0x0az / 0x1.5 */
-    if (nd > 2 * MAX_VEC) q_die("numeric literal too long");
-    uint8_t bytes[MAX_VEC]; int nb = 0;
-    int i = d0;
-    if (nd & 1) bytes[nb++] = (uint8_t)hex_val(src[i++]);   /* left-pad nibble */
-    for (; i < q; i += 2)
-        bytes[nb++] = (uint8_t)((hex_val(src[i]) << 4) | hex_val(src[i + 1]));
-    *p = q;
-    if (nb == 1) return ray_u8(bytes[0]);
-    return ray_vec_from_raw(RAY_BYTE_ONLY, bytes, nb);   /* nb==0: empty byte vec */
-}
-
-/* Scan a full numeric literal (atom or vector) starting at src[*p]. */
+/* Whole literals (numeric / boolean / byte / guid / temporal) are scanned and
+ * BUILT by q_tok.c — the single string->value home the `$` Tok scanners already
+ * share.  Here it only has to become a token or a 'parse. */
 static ray_t *scan_num_literal(const char *src, int *p) {
-    if (byte_lit_starts(src, *p)) return scan_byte_literal(src, p);
-    int start = *p;
-    q_tok_el buf[MAX_VEC]; int m = 0;
-    char letter = 0;
-    if (!scan_one_num(src, p, &buf[m++])) q_die("bad number");
-    read_type_letter(src, p, &letter, &buf[m - 1]);
-    for (;;) {
-        int sp = *p;
-        while (CLASS[(uint8_t)src[sp]] & CL_WS) sp++;
-        if (sp == *p) break;                     /* no space => run ended */
-        if (byte_lit_starts(src, sp)) break;     /* byte literal: own noun */
-        q_tok_el e; int q = sp;
-        if (!scan_one_num(src, &q, &e)) break;   /* not another magnitude */
-        if (m >= MAX_VEC) q_die("numeric literal too long");
-        *p = q; buf[m++] = e;
-        read_type_letter(src, p, &letter, &buf[m - 1]);
-    }
-
-    /* Booleans: a 0/1 run ending in 'b' (spaces flattened). */
-    if (letter == 'b') {
-        uint8_t bits[MAX_VEC]; int nb = 0;
-        for (int i = start; i < *p - 1; i++) {
-            if (src[i] == ' ' || src[i] == '\t') continue;
-            if (src[i] != '0' && src[i] != '1') q_die("bad boolean literal");
-            if (nb >= MAX_VEC) q_die("boolean literal too long");
-            bits[nb++] = (uint8_t)(src[i] - '0');
-        }
-        if (nb == 0) q_die("bad boolean literal");
-        if (nb == 1) return ray_bool(bits[0]);
-        return ray_vec_from_raw(RAY_BOOL, bits, nb);
-    }
-
-    /* Guid context: a `g` suffix on a 0N Special (0Ng).  Guid's only literal is
-     * the null (basics/datatypes.md §Guid: "no literal entry for a guid"); every
-     * element must be Q_TOK_EL_NULL.  Atom -> typed null (16 zero bytes); a multi-0N
-     * run with the g suffix builds an all-null guid vector via the same
-     * strand-suffix rule as `1 2h` (derived). */
-    if (letter == 'g') {
-        for (int i = 0; i < m; i++)
-            if (buf[i].kind != Q_TOK_EL_NULL) q_die("bad number");
-        if (m == 1) return ray_typed_null(-RAY_GUID);
-        ray_t *vec = ray_vec_new(RAY_GUID, m);
-        if (vec && !RAY_IS_ERR(vec)) {
-            vec->len = m;
-            memset(ray_data(vec), 0, (size_t)m * 16);   /* all-null guids */
-        }
-        return vec;
-    }
-
-    /* Timestamp context: a `p` suffix (0Np / 0Wp / -0Wp) or any dateDtod
-     * magnitude.  kdb timestamp == i64 nanoseconds since 2000.01.01 (the
-     * base RAY_TIMESTAMP payload): Specials narrow width-8, a plain int is a
-     * raw ns count, an Q_TOK_EL_DATE strand-mate promotes days -> ns (saturating —
-     * checked BEFORE the date arm so a mixed date+timestamp strand promotes
-     * instead of truncating ns into an i32 date), a fractional magnitude or
-     * an Q_TOK_EL_TIME mate dies (unpinned corner: error beats a wrong answer). */
-    int is_ts = (letter == 'p');
-    for (int i = 0; i < m && !is_ts; i++)
-        if (buf[i].kind == Q_TOK_EL_TS) is_ts = 1;
-    if (is_ts) {
-        for (int i = 0; i < m; i++)
-            /* lowercase `0np` is the K-ism synonym of `0Np` — a typed null,
-             * not a fractional magnitude (see the date arm below). */
-            if (buf[i].kind == Q_TOK_EL_FLOAT || buf[i].kind == Q_TOK_EL_TIME ||
-                buf[i].kind == Q_TOK_EL_MINUTE || buf[i].kind == Q_TOK_EL_SECOND ||
-                buf[i].kind == Q_TOK_EL_TIMESPAN || buf[i].kind == Q_TOK_EL_DT ||
-                (buf[i].forces_float && buf[i].kind != Q_TOK_EL_NULL))
-                q_die("bad number");
-        int64_t t[MAX_VEC];
-        for (int i = 0; i < m; i++)
-            t[i] = (buf[i].kind == Q_TOK_EL_DATE)
-                 ? q_calendar_ts_compose(buf[i].i, 0)
-                 : el_to_int(&buf[i], 8);
-        if (m == 1) {
-            if (buf[0].kind == Q_TOK_EL_NULL) return ray_typed_null(-RAY_TIMESTAMP);
-            return ray_timestamp(t[0]);
-        }
-        ray_t *vec = ray_vec_from_raw(RAY_TIMESTAMP, t, m);
-        if (vec && !RAY_IS_ERR(vec)) {
-            for (int i = 0; i < m; i++)
-                if (buf[i].kind == Q_TOK_EL_NULL) ray_vec_set_null(vec, i, true);
-        }
-        return vec;
-    }
-
-    /* Date context: a `d` suffix (0Nd / 0Wd / -0Wd) or any yyyy.mm.dd
-     * magnitude.  kdb date == i32 days since 2000.01.01 (the base RAY_DATE
-     * payload), so Specials narrow to the width-4 sentinels and a plain int
-     * widens as a raw day count (the same rule Specials already follow in
-     * typed runs).  A fractional magnitude can never be a date. */
-    int is_date = (letter == 'd');
-    for (int i = 0; i < m && !is_date; i++)
-        if (buf[i].kind == Q_TOK_EL_DATE) is_date = 1;
-    if (is_date) {
-        for (int i = 0; i < m; i++)
-            /* forces_float on a NULL element is just the lowercase `0n` spelling
-             * (openq accepts `0nd` as a K-ism synonym of `0Nd`); it is a typed
-             * null, not a fractional magnitude, so it does NOT bar the date. */
-            if (buf[i].kind == Q_TOK_EL_FLOAT || buf[i].kind == Q_TOK_EL_TIME ||
-                buf[i].kind == Q_TOK_EL_MINUTE || buf[i].kind == Q_TOK_EL_SECOND ||
-                buf[i].kind == Q_TOK_EL_TIMESPAN || buf[i].kind == Q_TOK_EL_DT ||
-                (buf[i].forces_float && buf[i].kind != Q_TOK_EL_NULL))
-                q_die("bad number");
-        if (m == 1) {
-            if (buf[0].kind == Q_TOK_EL_NULL) return ray_typed_null(-RAY_DATE);
-            return ray_date(el_to_int(&buf[0], 4));
-        }
-        int32_t t[MAX_VEC];
-        for (int i = 0; i < m; i++) t[i] = (int32_t)el_to_int(&buf[i], 4);
-        ray_t *vec = ray_vec_from_raw(RAY_DATE, t, m);
-        if (vec && !RAY_IS_ERR(vec)) {
-            for (int i = 0; i < m; i++)
-                if (buf[i].kind == Q_TOK_EL_NULL) ray_vec_set_null(vec, i, true);
-        }
-        return vec;
-    }
-
-    /* Time context: a `t` suffix (0Nt / 0Wt / -0Wt) or any HH:MM:SS.mmm
-     * magnitude.  kdb time == i32 milliseconds of day (the base RAY_TIME
-     * payload) — identical shape to the date arm (Specials narrow width-4, a
-     * plain int is a raw ms count, a fractional magnitude can never be a
-     * time). */
-    int is_time = (letter == 't');
-    for (int i = 0; i < m && !is_time; i++)
-        if (buf[i].kind == Q_TOK_EL_TIME) is_time = 1;
-    if (is_time) {
-        for (int i = 0; i < m; i++)
-            /* lowercase `0nt` is the K-ism synonym of `0Nt` — a typed null, not
-             * a fractional magnitude (see the date arm above). */
-            if (buf[i].kind == Q_TOK_EL_FLOAT || buf[i].kind == Q_TOK_EL_DATE ||
-                buf[i].kind == Q_TOK_EL_MINUTE || buf[i].kind == Q_TOK_EL_SECOND ||
-                buf[i].kind == Q_TOK_EL_TIMESPAN || buf[i].kind == Q_TOK_EL_DT ||
-                (buf[i].forces_float && buf[i].kind != Q_TOK_EL_NULL))
-                q_die("bad number");
-        if (m == 1) {
-            if (buf[0].kind == Q_TOK_EL_NULL) return ray_typed_null(-RAY_TIME);
-            return ray_time(el_to_int(&buf[0], 4));
-        }
-        int32_t t[MAX_VEC];
-        for (int i = 0; i < m; i++) t[i] = (int32_t)el_to_int(&buf[i], 4);
-        ray_t *vec = ray_vec_from_raw(RAY_TIME, t, m);
-        if (vec && !RAY_IS_ERR(vec)) {
-            for (int i = 0; i < m; i++)
-                if (buf[i].kind == Q_TOK_EL_NULL) ray_vec_set_null(vec, i, true);
-        }
-        return vec;
-    }
-
-    /* Month context: ONLY the `m` suffix (0Nm / 0Wm / -0Wm / 2000.01m) — a
-     * month-shaped magnitude alone is NOT a commitment (bare `2000.01` is the
-     * float; Q_TOK_EL_MONTH elements revert to their float twins below).  kdb month
-     * == i32 months since 2000.01 (payload (y-2000)*12+(mo-1)): Specials
-     * narrow to the width-4 sentinels and a plain int widens as a raw month
-     * count (the date-arm rule).  A genuine fractional magnitude or a foreign
-     * temporal mate can never be a month. */
-    if (letter == 'm') {
-        for (int i = 0; i < m; i++)
-            /* Q_TOK_EL_MONTH itself carries forces_float=1 (the float-twin machinery)
-             * and is VALID here; lowercase `0nm` is the K-ism null synonym. */
-            if (buf[i].kind == Q_TOK_EL_FLOAT || buf[i].kind == Q_TOK_EL_DATE ||
-                buf[i].kind == Q_TOK_EL_TIME || buf[i].kind == Q_TOK_EL_TS ||
-                buf[i].kind == Q_TOK_EL_MINUTE || buf[i].kind == Q_TOK_EL_SECOND ||
-                buf[i].kind == Q_TOK_EL_TIMESPAN || buf[i].kind == Q_TOK_EL_DT ||
-                (buf[i].forces_float && buf[i].kind != Q_TOK_EL_MONTH &&
-                 buf[i].kind != Q_TOK_EL_NULL))
-                q_die("bad number");
-        if (m == 1) {
-            if (buf[0].kind == Q_TOK_EL_NULL) return ray_typed_null(-RAY_MONTH);
-            return ray_month(el_to_int(&buf[0], 4));
-        }
-        int32_t t[MAX_VEC];
-        for (int i = 0; i < m; i++) t[i] = (int32_t)el_to_int(&buf[i], 4);
-        ray_t *vec = ray_vec_from_raw(RAY_MONTH, t, m);
-        if (vec && !RAY_IS_ERR(vec)) {
-            for (int i = 0; i < m; i++)
-                if (buf[i].kind == Q_TOK_EL_NULL) ray_vec_set_null(vec, i, true);
-        }
-        return vec;
-    }
-
-    /* Minute context: a `u` suffix (0Nu / 0Wu / -0Wu) or any HH:MM
-     * magnitude.  kdb minute == i32 minutes since midnight
-     * (basics/datatypes.md row 17): Specials narrow to the width-4
-     * sentinels, a plain int widens as a raw minute count (the date-arm
-     * rule), a fractional magnitude or foreign temporal mate dies. */
-    {
-        int is_minute = (letter == 'u');
-        for (int i = 0; i < m && !is_minute; i++)
-            if (buf[i].kind == Q_TOK_EL_MINUTE) is_minute = 1;
-        if (is_minute) {
-            for (int i = 0; i < m; i++)
-                if (buf[i].kind == Q_TOK_EL_FLOAT || buf[i].kind == Q_TOK_EL_DATE ||
-                    buf[i].kind == Q_TOK_EL_TIME || buf[i].kind == Q_TOK_EL_TS ||
-                    buf[i].kind == Q_TOK_EL_MONTH || buf[i].kind == Q_TOK_EL_SECOND ||
-                    buf[i].kind == Q_TOK_EL_TIMESPAN || buf[i].kind == Q_TOK_EL_DT ||
-                    (buf[i].forces_float && buf[i].kind != Q_TOK_EL_NULL))
-                    q_die("bad number");
-            if (m == 1) {
-                if (buf[0].kind == Q_TOK_EL_NULL) return ray_typed_null(-RAY_MINUTE);
-                return ray_minute(el_to_int(&buf[0], 4));
-            }
-            int32_t t[MAX_VEC];
-            for (int i = 0; i < m; i++) t[i] = (int32_t)el_to_int(&buf[i], 4);
-            ray_t *vec = ray_vec_from_raw(RAY_MINUTE, t, m);
-            if (vec && !RAY_IS_ERR(vec)) {
-                for (int i = 0; i < m; i++)
-                    if (buf[i].kind == Q_TOK_EL_NULL) ray_vec_set_null(vec, i, true);
-            }
-            return vec;
-        }
-    }
-
-    /* Second context: a `v` suffix or any HH:MM:SS magnitude.  kdb second
-     * == i32 seconds since midnight (datatypes.md row 18). */
-    {
-        int is_second = (letter == 'v');
-        for (int i = 0; i < m && !is_second; i++)
-            if (buf[i].kind == Q_TOK_EL_SECOND) is_second = 1;
-        if (is_second) {
-            for (int i = 0; i < m; i++)
-                if (buf[i].kind == Q_TOK_EL_FLOAT || buf[i].kind == Q_TOK_EL_DATE ||
-                    buf[i].kind == Q_TOK_EL_TIME || buf[i].kind == Q_TOK_EL_TS ||
-                    buf[i].kind == Q_TOK_EL_MONTH || buf[i].kind == Q_TOK_EL_MINUTE ||
-                    buf[i].kind == Q_TOK_EL_TIMESPAN || buf[i].kind == Q_TOK_EL_DT ||
-                    (buf[i].forces_float && buf[i].kind != Q_TOK_EL_NULL))
-                    q_die("bad number");
-            if (m == 1) {
-                if (buf[0].kind == Q_TOK_EL_NULL) return ray_typed_null(-RAY_SECOND);
-                return ray_second(el_to_int(&buf[0], 4));
-            }
-            int32_t t[MAX_VEC];
-            for (int i = 0; i < m; i++) t[i] = (int32_t)el_to_int(&buf[i], 4);
-            ray_t *vec = ray_vec_from_raw(RAY_SECOND, t, m);
-            if (vec && !RAY_IS_ERR(vec)) {
-                for (int i = 0; i < m; i++)
-                    if (buf[i].kind == Q_TOK_EL_NULL) ray_vec_set_null(vec, i, true);
-            }
-            return vec;
-        }
-    }
-
-    /* Timespan context: an `n` suffix (0Nn / 0Wn / -0Wn) or any timespan
-     * magnitude (dD… / HH:MM:SS.f{4,9}).  kdb timespan == i64 nanoseconds
-     * (datatypes.md row 16): Specials narrow width-8, a plain int is a raw
-     * ns count (the timestamp-arm rule). */
-    {
-        int is_timespan = (letter == 'n');
-        for (int i = 0; i < m && !is_timespan; i++)
-            if (buf[i].kind == Q_TOK_EL_TIMESPAN) is_timespan = 1;
-        if (is_timespan) {
-            for (int i = 0; i < m; i++)
-                if (buf[i].kind == Q_TOK_EL_FLOAT || buf[i].kind == Q_TOK_EL_DATE ||
-                    buf[i].kind == Q_TOK_EL_TIME || buf[i].kind == Q_TOK_EL_TS ||
-                    buf[i].kind == Q_TOK_EL_MONTH || buf[i].kind == Q_TOK_EL_MINUTE ||
-                    buf[i].kind == Q_TOK_EL_SECOND || buf[i].kind == Q_TOK_EL_DT ||
-                    (buf[i].forces_float && buf[i].kind != Q_TOK_EL_NULL))
-                    q_die("bad number");
-            int64_t t[MAX_VEC];
-            for (int i = 0; i < m; i++) t[i] = el_to_int(&buf[i], 8);
-            if (m == 1) {
-                if (buf[0].kind == Q_TOK_EL_NULL) return ray_typed_null(-RAY_TIMESPAN);
-                return ray_timespan(t[0]);
-            }
-            ray_t *vec = ray_vec_from_raw(RAY_TIMESPAN, t, m);
-            if (vec && !RAY_IS_ERR(vec)) {
-                for (int i = 0; i < m; i++)
-                    if (buf[i].kind == Q_TOK_EL_NULL) ray_vec_set_null(vec, i, true);
-            }
-            return vec;
-        }
-    }
-
-    /* Datetime context: a `z` suffix (0Nz / 0Wz / -0Wz) or any dateTtod
-     * magnitude.  kdb datetime == f64 days since 2000.01.01, fraction = time
-     * of day (datatypes.md row 15; DEPRECATED in kdb, landed for drop-in
-     * fidelity).  0Nz is the NaN null; 0Wz/-0Wz are LIVE ±inf (live-infinity
-     * model 2026-07-28).  A plain int widens as a raw day count (the
-     * date-arm rule); a genuine fractional magnitude or a foreign temporal
-     * mate dies (error beats a wrong answer). */
-    {
-        int is_dt = (letter == 'z');
-        for (int i = 0; i < m && !is_dt; i++)
-            if (buf[i].kind == Q_TOK_EL_DT) is_dt = 1;
-        if (is_dt) {
-            for (int i = 0; i < m; i++)
-                if (buf[i].kind == Q_TOK_EL_FLOAT || buf[i].kind == Q_TOK_EL_DATE ||
-                    buf[i].kind == Q_TOK_EL_TIME || buf[i].kind == Q_TOK_EL_TS ||
-                    buf[i].kind == Q_TOK_EL_MONTH || buf[i].kind == Q_TOK_EL_MINUTE ||
-                    buf[i].kind == Q_TOK_EL_SECOND || buf[i].kind == Q_TOK_EL_TIMESPAN ||
-                    (buf[i].forces_float && buf[i].kind != Q_TOK_EL_NULL))
-                    q_die("bad number");
-            if (m == 1) {
-                if (buf[0].kind == Q_TOK_EL_PINF) return ray_datetime(INFINITY);
-                if (buf[0].kind == Q_TOK_EL_NINF) return ray_datetime(-INFINITY);
-                if (buf[0].kind != Q_TOK_EL_DT)   /* 0Nz -> the null */
-                    return ray_typed_null(-RAY_DATETIME);
-                return ray_datetime(buf[0].f);
-            }
-            double t[MAX_VEC];
-            for (int i = 0; i < m; i++)
-                t[i] = (buf[i].kind == Q_TOK_EL_DT) ? buf[i].f
-                     : (buf[i].kind == Q_TOK_EL_INT) ? (double)buf[i].i
-                     : (buf[i].kind == Q_TOK_EL_PINF) ? INFINITY
-                     : (buf[i].kind == Q_TOK_EL_NINF) ? -INFINITY
-                     : NULL_F64;             /* 0Nz -> NaN null slot */
-            ray_t *vec = ray_vec_from_raw(RAY_DATETIME, t, m);
-            if (vec && !RAY_IS_ERR(vec)) {
-                for (int i = 0; i < m; i++)
-                    if (buf[i].kind == Q_TOK_EL_NULL)
-                        ray_vec_set_null(vec, i, true);
-            }
-            return vec;
-        }
-    }
-
-    /* Float context: explicit e/f letter, or any fractional/lowercase-special. */
-    int is_float = (letter == 'e' || letter == 'f');
-    for (int i = 0; i < m && !is_float; i++)
-        if (buf[i].forces_float) is_float = 1;
-
-    if (is_float) {
-        int f32 = (letter == 'e');
-        if (m == 1) {
-            double v = el_to_float(&buf[0]);
-            return f32 ? ray_f32((float)v) : ray_f64(v);
-        }
-        int8_t type = f32 ? RAY_F32 : RAY_F64;
-        ray_t *vec;
-        if (f32) {
-            float t[MAX_VEC];
-            for (int i = 0; i < m; i++) t[i] = (float)el_to_float(&buf[i]);
-            vec = ray_vec_from_raw(type, t, m);
-        } else {
-            double t[MAX_VEC];
-            for (int i = 0; i < m; i++) t[i] = el_to_float(&buf[i]);
-            vec = ray_vec_from_raw(type, t, m);
-        }
-        if (vec && !RAY_IS_ERR(vec)) {
-            for (int i = 0; i < m; i++)
-                if (el_float_is_null(&buf[i])) ray_vec_set_null(vec, i, true);
-        }
-        return vec;
-    }
-
-    /* Integer context: h=i16, i=i32, j/none=i64. */
-    int width = (letter == 'h') ? 2 : (letter == 'i') ? 4 : 8;
-    if (m == 1) {
-        int64_t v = el_to_int(&buf[0], width);
-        if (width == 2) return ray_i16((int16_t)v);
-        if (width == 4) return ray_i32((int32_t)v);
-        return ray_i64(v);
-    }
-    ray_t *vec;
-    if (width == 8) {
-        int64_t t[MAX_VEC];
-        for (int i = 0; i < m; i++) t[i] = el_to_int(&buf[i], 8);
-        vec = ray_vec_from_raw(RAY_I64, t, m);
-    } else if (width == 4) {
-        int32_t t[MAX_VEC];
-        for (int i = 0; i < m; i++) t[i] = (int32_t)el_to_int(&buf[i], 4);
-        vec = ray_vec_from_raw(RAY_I32, t, m);
-    } else {
-        int16_t t[MAX_VEC];
-        for (int i = 0; i < m; i++) t[i] = (int16_t)el_to_int(&buf[i], 2);
-        vec = ray_vec_from_raw(RAY_I16, t, m);
-    }
-    /* Without HAS_NULLS a reduction cannot tell 0Ni/0Nh from data. */
-    if (vec && !RAY_IS_ERR(vec)) {
-        for (int i = 0; i < m; i++)
-            if (buf[i].kind == Q_TOK_EL_NULL) ray_vec_set_null(vec, i, true);
-    }
-    return vec;
+    const char *err = NULL;
+    ray_t *v = q_tok_literal(src, p, &err);
+    if (!v) q_die(err);
+    return v;
 }
 
 static Tokens scan(const char *src) {
@@ -890,7 +355,7 @@ static Tokens scan(const char *src) {
          * whitespace or start-of-input (`neg -1` applies neg to -1; `x -1`
          * indexes x at -1); it is the verb only when glued to a noun (a-1). */
         int neg_sign = (c == '-' && (CLASS[(uint8_t)src[p+1]] & CL_DIGIT) &&
-                        !byte_lit_starts(src, p + 1) &&   /* -0x0a: '-' stays the verb (bytes are unsigned) */
+                        !q_tok_byte_lit_starts(src, p + 1) &&   /* -0x0a: '-' stays the verb (bytes are unsigned) */
                         (!noun_pos || p == 0 || (CLASS[(uint8_t)src[p-1]] & CL_WS)));
 
         /* Leading-dot float literal: '.' glued to a digit starts a number
@@ -1027,10 +492,7 @@ static Tokens scan(const char *src) {
                 if (count == 0) {
                     first = symlit(src + s, p - s);
                 } else if (count == 1) {
-                    vec = ray_sym_vec_new(RAY_SYM_W64, 4);
-                    ray_t *fs = ray_sym_str(first->i64);
-                    vec = q_symvec_append(vec, ray_str_ptr(fs), (int)ray_str_len(fs));
-                    ray_release(fs);
+                    vec = symvec_add(ray_sym_vec_new(RAY_SYM_W64, 4), first->i64);
                     ray_release(first); first = NULL;
                     vec = q_symvec_append(vec, src + s, p - s);
                 } else {
@@ -1180,12 +642,9 @@ static ray_t *seq_of(ray_t *e) {
         ray_release(e);
         return only;
     }
-    ray_t *w = ray_list_new(n + 1);
     ray_t *semi = q_marker(";");
-    w = ray_list_append(w, semi);
+    ray_t *w = cons_head(semi, e, NULL);
     ray_release(semi);
-    ray_t **slots = (ray_t **)ray_data(e);
-    for (int64_t i = 0; i < n; i++) w = ray_list_append(w, slots[i]);
     ray_release(e);
     return w;
 }
@@ -1196,13 +655,7 @@ static ray_t *seq_of(ray_t *e) {
 void q_ast_fill_empty_stmts(ray_t *ast) {
     if (!ast || ast->type != RAY_LIST || ray_len(ast) < 2) return;
     ray_t **e = (ray_t **)ray_data(ast);
-    ray_t *h = e[0];
-    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return;
-    ray_t *s = ray_sym_str(h->i64);
-    if (!s) return;
-    int is_semi = (ray_str_len(s) == 1 && ray_str_ptr(s)[0] == ';');
-    ray_release(s);
-    if (!is_semi) return;
+    if (!sym_name_is(e[0], ";")) return;
     for (int64_t i = 1; i < ray_len(ast); i++)
         if (!e[i]) e[i] = ray_list_new(1);   /* len-0 general list: () */
 }
@@ -1213,15 +666,7 @@ void q_ast_fill_empty_stmts(ray_t *ast) {
 
 /* name atom (unquoted -RAY_SYM) whose interned spelling equals s */
 static int qtok_sym_is(const Token *tk, const char *s) {
-    if (tk->kind != T_NOUN || !tk->k || tk->k->type != -RAY_SYM ||
-        (tk->k->attrs & Q_ATTR_QUOTED))
-        return 0;
-    ray_t *str = ray_sym_str(tk->k->i64);
-    if (!str) return 0;
-    size_t sl = strlen(s);
-    int r = ray_str_len(str) == sl && memcmp(ray_str_ptr(str), s, sl) == 0;
-    ray_release(str);
-    return r;
+    return tk->kind == T_NOUN && sym_name_is(tk->k, s);
 }
 
 /* the qSQL query verbs routed through the unified real-parser path (parse_query).
@@ -1244,13 +689,7 @@ static int qtok_is_clause_kw(const Token *tk) {
 /* the dyadic bare join `,` verb token (NOT monadic enlist `,:`) — mirrors the
  * comma test in qsql_boundary (a len-1 T_VERB whose spelling is ","). */
 static int qtok_is_join_comma(const Token *tk) {
-    if (tk->kind != T_VERB || !tk->k || tk->k->type != -RAY_SYM)
-        return 0;
-    ray_t *str = ray_sym_str(tk->k->i64);
-    if (!str) return 0;
-    int r = ray_str_len(str) == 1 && ray_str_ptr(str)[0] == ',';
-    ray_release(str);
-    return r;
+    return tk->kind == T_VERB && sym_name_is(tk->k, ",");
 }
 
 /* qSQL interception (piece 3): if the cursor sits on a `select`/`delete`/
@@ -1419,12 +858,9 @@ static P parse_base(Parser *p) {
                  * name-ref whose spelling downstream elision checks
                  * (ql_is_hole) would turn into a projection hole.  Emit the
                  * self-evaluating null singleton; q_fmt prints it `::`. */
-                if (only->type == -RAY_SYM && !(only->attrs & Q_ATTR_QUOTED)) {
-                    ray_t *s = ray_sym_str(only->i64);
-                    int is_dcolon = s && ray_str_len(s) == 2 &&
-                                    ray_str_ptr(s)[0] == ':' && ray_str_ptr(s)[1] == ':';
-                    if (s) ray_release(s);
-                    if (is_dcolon) { ray_release(e); return (P){ R_NOUN, RAY_NULL_OBJ }; }
+                if (sym_name_is(only, "::")) {
+                    ray_release(e);
+                    return (P){ R_NOUN, RAY_NULL_OBJ };
                 }
                 ray_retain(only);
                 ray_release(e);
@@ -1445,12 +881,7 @@ static P parse_base(Parser *p) {
         {
             ray_t *lv = q_registry_list_value();
             if (lv) {
-                int64_t en = ray_len(e);
-                ray_t **es = (ray_t **)ray_data(e);
-                ray_t *w = ray_list_new(en + 1);
-                w = ray_list_append(w, lv);
-                for (int64_t i = 0; i < en; i++)
-                    w = ray_list_append(w, es[i]);
+                ray_t *w = cons_head(lv, e, NULL);
                 ray_release(e);
                 e = w;
             }
@@ -1536,16 +967,9 @@ static P parse_base(Parser *p) {
             expect(p, T_RBRACK, "expected ']' in compose '[…]'");
             ray_t *cv = q_registry_compose_value();
             if (!cv) q_die("compose: registry not initialized");
-            int64_t an = ray_len(args);
-            ray_t **as = (ray_t **)ray_data(args);
-            ray_t *w = ray_list_new(an + 1);
-            w = ray_list_append(w, cv);
-            for (int64_t i = 0; i < an; i++) {
-                if (as[i]) { w = ray_list_append(w, as[i]); }
-                /* `'[;]` elides to project the COMPOSE value itself — the
-                 * same projection hole a bracket call marks, not a `::` value */
-                else       { ray_t *nul = hole(); w = ray_list_append(w, nul); ray_release(nul); }
-            }
+            /* `'[;]` elides to project the COMPOSE value itself — the same
+             * projection hole a bracket call marks, not a `::` value */
+            ray_t *w = cons_head(cv, args, hole);
             ray_release(args);
             return (P){ R_NOUN, w };
         }
@@ -1973,11 +1397,7 @@ static ray_t *qsql_derive_alias(ray_t *expr) {
 /* Build a q name!expr dict from a column list (consumes the alias/val refs). */
 static ray_t *qsql_build_dict(ray_t **aliases, ray_t **vals, int n) {
     ray_t *keys = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
-    for (int i = 0; i < n; i++) {
-        ray_t *s = ray_sym_str(aliases[i]->i64);
-        keys = q_symvec_append(keys, ray_str_ptr(s), (int)ray_str_len(s));
-        ray_release(s);
-    }
+    for (int i = 0; i < n; i++) keys = symvec_add(keys, aliases[i]->i64);
     int all_sym = 1;
     for (int i = 0; i < n; i++)
         if (!(vals[i] && vals[i]->type == -RAY_SYM && (vals[i]->attrs & Q_ATTR_QUOTED)))
@@ -1985,11 +1405,7 @@ static ray_t *qsql_build_dict(ray_t **aliases, ray_t **vals, int n) {
     ray_t *valv;
     if (all_sym) {
         valv = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
-        for (int i = 0; i < n; i++) {
-            ray_t *s = ray_sym_str(vals[i]->i64);
-            valv = q_symvec_append(valv, ray_str_ptr(s), (int)ray_str_len(s));
-            ray_release(s);
-        }
+        for (int i = 0; i < n; i++) valv = symvec_add(valv, vals[i]->i64);
     } else {
         valv = ray_list_new(n > 0 ? n : 1);
         for (int i = 0; i < n; i++) valv = ray_list_append(valv, vals[i]);
@@ -2026,19 +1442,12 @@ static ray_t *qsql_exec_by(ray_t **bk, ray_t **bv, const int *bnamed, int nb) {
         if (nb == 1) {
             /* the tree QUOTES the group-by symbol constant (parsetrees.md):
              * one eval of `,`n` yields the functional b-value `n */
-            ray_t *s = ray_sym_str(bv[0]->i64);
-            b = ray_sym_vec_new(RAY_SYM_W64, 1);
-            b = q_symvec_append(b, ray_str_ptr(s), (int)ray_str_len(s));
-            ray_release(s);
+            b = symvec_add(ray_sym_vec_new(RAY_SYM_W64, 1), bv[0]->i64);
         } else {
             /* a by-symbol VECTOR constant is enlisted like every symvec in a
              * tree (parsetrees.md): ,`a`b evals once to the functional b */
             b = ray_sym_vec_new(RAY_SYM_W64, nb);
-            for (int i = 0; i < nb; i++) {
-                ray_t *s = ray_sym_str(bv[i]->i64);
-                b = q_symvec_append(b, ray_str_ptr(s), (int)ray_str_len(s));
-                ray_release(s);
-            }
+            for (int i = 0; i < nb; i++) b = symvec_add(b, bv[i]->i64);
             b = qsql_enlist(b);
         }
         for (int i = 0; i < nb; i++) { ray_release(bk[i]); ray_release(bv[i]); }
@@ -2153,13 +1562,7 @@ static ray_t *qsql_convert_expr(ray_t *x) {
 static int qsql_phrase_alias(ray_t *x, ray_t **name, ray_t **val) {
     if (!x || x->type != RAY_LIST || ray_len(x) != 3) return 0;
     ray_t **e = (ray_t **)ray_data(x);
-    ray_t *h = e[0];
-    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return 0;
-    ray_t *s = ray_sym_str(h->i64);
-    if (!s) return 0;
-    int is_colon = ray_str_len(s) == 1 && ray_str_ptr(s)[0] == ':';
-    ray_release(s);
-    if (!is_colon) return 0;
+    if (!sym_name_is(e[0], ":")) return 0;
     ray_t *t = e[1];
     if (!t || t->type != -RAY_SYM || (t->attrs & Q_ATTR_QUOTED)) return 0;
     *name = e[1];
@@ -2215,10 +1618,7 @@ static ray_t *qsql_norm_exec_a(ray_t *phrases) {
         ray_t *v = qsql_convert_expr(ph[0]);
         if (!v || RAY_IS_ERR(v)) return v;
         if (v->type == -RAY_SYM) {
-            ray_t *s = ray_sym_str(v->i64);
-            ray_t *sv = ray_sym_vec_new(RAY_SYM_W64, 1);
-            sv = q_symvec_append(sv, ray_str_ptr(s), (int)ray_str_len(s));
-            ray_release(s);
+            ray_t *sv = symvec_add(ray_sym_vec_new(RAY_SYM_W64, 1), v->i64);
             ray_release(v);
             return sv;
         }
@@ -2282,9 +1682,7 @@ static ray_t *qsql_norm_delete_a(ray_t *phrases) {
     for (int64_t i = 0; i < n; i++) {
         ray_t *x = ph[i];
         if (!x || x->type != -RAY_SYM) continue;     /* non-name (clone soft-fails) */
-        ray_t *s = ray_sym_str(x->i64);
-        a = q_symvec_append(a, ray_str_ptr(s), (int)ray_str_len(s));
-        ray_release(s);
+        a = symvec_add(a, x->i64);
     }
     return qsql_enlist(a);
 }
