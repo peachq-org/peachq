@@ -1203,8 +1203,8 @@ static P parse_e(Parser *p, QCtx ctx) {
     /* Lambda-body early return `:expr` (basics/function-notation.md): a bare
      * `:` at expression START inside a lambda body.  Infix assignment never
      * reaches here with a leading `:` (its lhs noun is consumed first), and
-     * `::` is len 2.  Emits (.q.ret expr) — early return under q_eval is a
-     * rebuild-wave gap (the node evals to a 'name red today). */
+     * `::` is len 2.  Emits (":";expr) — a char-atom head, NOT a verb or
+     * `.q` entry: kdb display shows lambdas verbatim, so no parse row pins it. */
     if (p->lambda_depth > 0) {
         Token *rt = cur(p);
         /* a LONE `:` (next token closes the expression) is the assign-verb
@@ -1215,12 +1215,14 @@ static P parse_e(Parser *p, QCtx ctx) {
             adv(p);
             P e = parse_e(p, ctx);
             ray_t *rhs = (e.role != R_NONE && e.v) ? e.v : q_null();
-            ray_t *xs[2] = { q_marker(".q.ret"), rhs };
+            ray_t *xs[2] = { ray_char(':'), rhs };
             return (P){ R_NOUN, q_list(xs, 2) };
         }
     }
     /* Signal `'expr` (ref/signal.md): a bare `'` adverb at expression start
-     * that is NOT the compose form `'[f;g]`.  Emits (.q.sig expr).  With
+     * that is NOT the compose form `'[f;g]`.  Emits ("'";expr) — a char-atom
+     * head distinct from the each-adverb value (f' -> (';`f)); Signal "is
+     * part of q syntax ... not an operator", so never a registry row.  With
      * nothing to signal (`(';/;\)`) the `'` is the ITERATOR VALUE instead. */
     {
         Token *st = cur(p);
@@ -1231,7 +1233,7 @@ static P parse_e(Parser *p, QCtx ctx) {
             adv(p);
             P e = parse_e(p, ctx);
             ray_t *rhs = (e.role != R_NONE && e.v) ? e.v : q_null();
-            ray_t *xs[2] = { q_marker(".q.sig"), rhs };
+            ray_t *xs[2] = { ray_char('\''), rhs };
             return (P){ R_NOUN, q_list(xs, 2) };
         }
     }

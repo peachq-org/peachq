@@ -238,8 +238,7 @@ static ray_t* h_d(const char* arg, size_t alen) {
 /* `\v` variables / `\f` functions / `\a` tables (basics/syscmds.md) — the same
  * roster under three value-kind filters, non-recursive, defaulting to the `\d`
  * context, which need not exist yet (empty listing).  A NAMED missing namespace
- * errors with the name: `\a .n` -> '.n, truncated past 7 bytes (the error-code
- * width is by design). */
+ * errors with the name: `\a .n` -> '.n (untruncated — q_err_name payload). */
 static ray_t* h_vfa(char cmd, const char* arg, size_t alen) {
     q_env_ns_kind_t kind = cmd == 'v' ? Q_ENV_NS_VARS
                          : cmd == 'f' ? Q_ENV_NS_FNS : Q_ENV_NS_TABLES;
