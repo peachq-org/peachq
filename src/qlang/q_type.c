@@ -66,6 +66,12 @@ int8_t q_type_of(ray_t* x) {
     return x->type;
 }
 
+int q_type_is_fn(ray_t* x) {
+    if (!x) return 0;
+    int8_t t = q_type_of(x);
+    return t >= 100 && t <= 112;
+}
+
 /* ---- tag <-> name vocabulary --------------------------------------------- */
 
 /* Vector tag -> kdb type name (`meta`/`key` type rows, empty-vec display).
