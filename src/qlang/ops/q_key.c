@@ -52,9 +52,13 @@ ray_t* q_key_name(int64_t sym) {
     }
     if (nm[0] == ':') { ray_release(s); return q_key_dir(sym); }
     int is_root = (l == 1 && nm[0] == '.');
+    int qualified = (nm[0] == '.');
     ray_release(s);
 
-    ray_t* v = q_env_resolve(sym);
+    /* ref/key.md: "interpreted relative to the current context if not fully
+     * qualified" — the existence test does NOT walk out to the root. */
+    int64_t look = qualified ? sym : q_env_qualify(q_env_ctx(), sym);
+    ray_t* v = q_env_resolve(look);
     if (!v) return ray_list_new(1);              /* unbound -> () */
     if (RAY_IS_ERR(v)) return v;
     if (!q_type_is_dict(v)) {                    /* bound non-dict -> the name */
