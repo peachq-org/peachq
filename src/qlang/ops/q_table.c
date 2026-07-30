@@ -432,26 +432,6 @@ ray_t* q_flip_wrap(ray_t* x) {
     return q_err(QE_RANK);
 }
 
-/* q `keys x` — key column names (empty sym vector if unkeyed; table by value
- * or by name). */
-ray_t* q_keys_wrap(ray_t* x) {
-    int64_t sym;
-    ray_t* t = q_table_operand(x, &sym);
-    if (!t) return q_err(QE_TYPE);
-    ray_t* out = ray_sym_vec_new(RAY_SYM_W64, 1);
-    if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
-    if (q_type_is_keyed(t)) {
-        ray_t* kt = ray_dict_keys(t);                     /* borrowed */
-        int64_t knc = ray_table_ncols(kt);
-        for (int64_t c = 0; c < knc; c++) {
-            int64_t nm = ray_table_col_name(kt, c);
-            out = ray_vec_append(out, &nm);
-            if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
-        }
-    }
-    return out;
-}
-
 /* q `x xkey y` — set key columns: reorder x-first, enkey count x (reuses
  * q_bang_enkey).  By-reference (y a name): rebind and return the name. */
 ray_t* q_xkey_wrap(ray_t* x, ray_t* y) {
