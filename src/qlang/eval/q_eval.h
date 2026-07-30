@@ -96,6 +96,9 @@ int    q_eval_apply_carrier_kind(const ray_t* v);   /* 0 = not a carrier */
 /* the value's arity as dispatch sees it; -1 when it has no fixed rank */
 int64_t q_eval_apply_rank(ray_t* v);
 int    q_eval_apply_frame_depth(void);              /* lambda frames live */
+/* BORROWED params/body/ctx (ctx NULL = root); 0 unless v is a lambda carrier */
+int    q_eval_apply_lambda_parts(ray_t* v, ray_t** params, ray_t** body,
+                                 ray_t** ctx);
 ray_t* q_eval_apply_lambda_src(ray_t* v);           /* BORROWED -RAY_STR source,
                                                      * NULL unless a lambda carrier
                                                      * (q_fmt display, q_wire 100h) */
