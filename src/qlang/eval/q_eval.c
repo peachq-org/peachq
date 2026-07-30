@@ -583,7 +583,7 @@ ray_t* q_eval(ray_t* node) {
                 }
                 ray_t* err = eval_args_rtl(e + 1, argc, argv);
                 if (err) { ray_release(F); ret = err; goto out; }
-                ret = q_eval_apply_adverb(adv, F, frow, argv, argc);
+                ret = q_adverb_apply(adv, F, frow, argv, argc);
                 release_args(argv, argc);
                 ray_release(F);
                 goto out;
