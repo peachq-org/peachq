@@ -554,6 +554,25 @@ ray_t* q_registry_row_value(const q_op_t* row, q_valence_t valence) {
     return e < 0 ? NULL : g_entries[e].value;   /* borrowed */
 }
 
+int q_registry_kdb_op_of(const ray_t* value) {
+    if (!value) return -1;
+    const q_op_t* row = q_registry_row_of(
+        value, value->type == RAY_UNARY ? Q_MONADIC : Q_DYADIC);
+    return row ? q_ops_kdb_op(row) : -1;
+}
+
+ray_t* q_registry_kdb_op_value(int code, q_valence_t valence) {
+    if (code < 0) return NULL;
+    int n = 0;
+    const q_op_t* ops = q_ops_table(&n);
+    for (int i = 0; i < n; i++) {
+        if (q_ops_kdb_op(&ops[i]) != code) continue;
+        ray_t* v = q_registry_row_value(&ops[i], valence);
+        if (v) return v;
+    }
+    return NULL;
+}
+
 /* Exact for unique values; NULL when several rows alias one env object at
  * this valence (see q_registry.h) — the verdict was settled at idx_add_entry. */
 const q_op_t* q_registry_row_of(const ray_t* value, q_valence_t valence) {
