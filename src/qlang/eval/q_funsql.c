@@ -814,6 +814,19 @@ static ray_t* update_dict(ray_t* a, ray_t* b, ray_t* c, ray_t* d) {
 /* is a the delete-columns shape: a non-empty symbol vector */
 static int is_symvec(ray_t* a) { return a && a->type == RAY_SYM; }
 
+/* `delete a from `.` / `![`.ns;();0b;`a`b]` — EXPUNGE (q4m3 §12.5).  A namespace
+ * is not a dict to rewrite: each name is unbound from the K-tree, so an emptied
+ * namespace survives (kdb keeps it in `key ``). */
+static ray_t* expunge_ns(int64_t ns, ray_t* names) {
+    int64_t n = ray_len(names);
+    for (int64_t i = 0; i < n; i++) {
+        int64_t member = ray_read_sym(ray_data(names), i, RAY_SYM, names->attrs);
+        int64_t full = q_env_qualify(ns, member);
+        if (full < 0 || q_env_unbind(full) != RAY_OK) return q_err(QE_ASSIGN);
+    }
+    return NULL;
+}
+
 static ray_t* bang_qsql(ray_t** args) {
     ray_t* tslot = args[0];
     ray_t* c = args[1];
@@ -823,6 +836,13 @@ static ray_t* bang_qsql(ray_t** args) {
     ray_t* src;
     if (tslot && tslot->type == -RAY_SYM) {
         name = tslot->i64;
+        if (is_symvec(a) && ray_len(a) > 0 && is_empty_gen(c) &&
+            q_env_ns_exists(name)) {
+            ray_t* e = expunge_ns(name, a);
+            if (e) return e;
+            ray_retain(tslot);
+            return tslot;
+        }
         src = q_env_resolve(name);
         if (!src) return q_err(QE_NAME);
         if (RAY_IS_ERR(src)) return src;
