@@ -1568,6 +1568,9 @@ static void q_fmt_body(ray_t* val) {
         size_t maxk = 0;
         /* uniform sym value column prints BARE (ref/apply.md); mixed keeps ` */
         int sym_col = v && v->type == RAY_SYM;
+        /* a typed vector OWNS its type, so its rows are ELEMENTS and drop the
+         * atom suffix (`5f` -> `b| 5`); a boxed ATOM keeps it (`xyz| 321f`) */
+        int vec_val = v && v->type > 0 && ray_is_vec(v);
         if (v && v->type == RAY_LIST && ray_len(v) > 0) {
             ray_t** vel = (ray_t**)ray_data(v);
             sym_col = 1;
@@ -1610,11 +1613,10 @@ static void q_fmt_body(ray_t* val) {
                 ray_t* ve = v ? ray_at_fn(v, ja) : NULL;
                 ray_release(ja);
                 if (ve && !RAY_IS_ERR(ve)) {
-                    /* len-1 strings render "c" NOT ,"c" (list/first pins `c| "h"`) */
-                    if (sym_col && ve->type == -RAY_SYM)
-                        fmt_dict_key(ve, vb, sizeof vb);
-                    else if (ve->type == -RAY_BOOL)
-                        /* bool ATOM rows BARE; vectors keep `100b` */
+                    /* len-1 strings render "c" NOT ,"c" (list/first pins `c| "h"`);
+                     * bool ATOM rows BARE, boxed bool vectors keep `100b` */
+                    if (vec_val || (sym_col && ve->type == -RAY_SYM) ||
+                        ve->type == -RAY_BOOL)
                         fmt_dict_key(ve, vb, sizeof vb);
                     else
                         q_fmt(ve, vb, sizeof vb);
