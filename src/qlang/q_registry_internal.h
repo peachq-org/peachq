@@ -117,17 +117,22 @@ ray_t* q_not_wrap(ray_t* x);
 ray_t* q_keys_wrap(ray_t* x);
 ray_t* q_xkey_wrap(ray_t* x, ray_t* y);
 ray_t* q_xgroup_wrap(ray_t* x, ray_t* y);
+ray_t* q_group_wrap(ray_t* x);
 ray_t* q_ungroup_wrap(ray_t* x);
+
+/* ---- defined in ops/q_insert.c ---- */
 ray_t* q_insert_wrap(ray_t* x, ray_t* y);
 ray_t* q_upsert_wrap(ray_t* x, ray_t* y);
-ray_t* q_join_wrap(ray_t* x, ray_t* y);                       /* also shared: index (splice, dict insert) */
-ray_t* q_except_wrap(ray_t* x, ray_t* y);
-ray_t* q_key_wrap(ray_t* x);
+
+/* ---- defined in ops/q_setops.c ---- */
 ray_t* q_distinct_wrap(ray_t* x);
-ray_t* q_group_wrap(ray_t* x);
 ray_t* q_union_wrap(ray_t* x, ray_t* y);
 ray_t* q_inter_wrap(ray_t* x, ray_t* y);
+ray_t* q_except_wrap(ray_t* x, ray_t* y);
 ray_t* q_cross_wrap(ray_t* x, ray_t* y);
+
+/* ---- defined in q_env.c (the name-facing pair) ---- */
+ray_t* q_key_wrap(ray_t* x);
 
 /* ===== 2. SHARED HELPERS — the lateral-dependency map =================== */
 
@@ -161,6 +166,10 @@ ray_t* q_sv_wrap(ray_t* x, ray_t* y);
 int qj_same_schema(ray_t* a, ray_t* b);                       /* used by: table */
 ray_t* qj_table_gather_idx(ray_t* t, const int64_t* idx, int64_t n);/* used by: table, list */
 ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode);           /* used by: list, table */
+ray_t* q_join_wrap(ray_t* x, ray_t* y);                       /* also shared: index (splice, dict insert), setops (cross) */
+ray_t* q_join_item(ray_t* x, int64_t i);                          /* used by: table, insert, setops */
+ray_t* q_join_gen_item(ray_t* x, int64_t i);                      /* used by: setops */
+int64_t q_join_gen_len(ray_t* x);                                 /* used by: setops */
 
 /* ---- defined in ops/q_attr.c ---- */
 ray_t* q_attr_wrap(ray_t* x);                                 /* used by: bang, registry */
@@ -189,8 +198,8 @@ void q_rand_seed(int64_t n);                                  /* used by: sys */
 ray_t* q_flip_wrap(ray_t* x);                                 /* used by: registry, list, math */
 ray_t* q_table_flatten(ray_t* y);                             /* used by: bang, join */
 ray_t* q_table_dict_vals(ray_t* d, int* owned);               /* used by: list */
-ray_t* qj_item(ray_t* x, int64_t i);                          /* used by: join */
-ray_t* qj_gen_item(ray_t* x, int64_t i);                      /* used by: join */
+
+/* ---- defined in q_env.c ---- */
 ray_t* q_setg_wrap(ray_t* x, ray_t* y);                       /* used by: dotz, lower, registry */
 ray_t* q_exit_wrap(ray_t* x);                                 /* used by: ops */
 
