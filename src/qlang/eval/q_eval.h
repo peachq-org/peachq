@@ -21,9 +21,9 @@ ray_t* q_eval(ray_t* node);
 void q_eval_syms_reset(void);
 
 /* The apply module — THE one dispatch home: valence/rank, projections,
- * native adverbs + monomorphization, family lifts, kernel calls, result
- * construction.  Args BORROWED (C-NULL = elided hole), result OWNED;
- * `row` is fv's manifest row when known, NULL otherwise. */
+ * family lifts, kernel calls, result construction; the native adverb engine
+ * it dispatches into lives in q_adverb.c.  Args BORROWED (C-NULL = elided
+ * hole), result OWNED; `row` is fv's manifest row when known, NULL otherwise. */
 ray_t* q_eval_apply(ray_t* fv, const struct q_op* row, ray_t** args, int64_t n);
 
 /* THE materialization boundary (materialization phase 1, design 2026-07-24):
@@ -43,9 +43,10 @@ void q_eval_apply_assert_concrete(ray_t* v);
 #define Q_ASSERT_CONCRETE(v) ((void)(v))
 #endif
 
-/* Native adverb application (adv: 0=' 1=/ 2=\ 3=': 4=/: 5=\:). */
-ray_t* q_eval_apply_adverb(int adv, ray_t* fv, const struct q_op* frow,
-                           ray_t** args, int64_t n);
+/* Native adverb application (adv: 0=' 1=/ 2=\ 3=': 4=/: 5=\:) — the
+ * q_adverb.c engine's one entry. */
+ray_t* q_adverb_apply(int adv, ray_t* fv, const struct q_op* frow,
+                      ray_t** args, int64_t n);
 
 /* The ONE value-apply entry (eval-tree vs value-object duality): apply an
  * already-EVALUATED head to already-evaluated args — fn values/carriers
@@ -99,7 +100,15 @@ ray_t* q_eval_apply_lambda_src(ray_t* v);           /* BORROWED -RAY_STR source,
                                                      * NULL unless a lambda carrier
                                                      * (q_fmt display, q_wire 100h) */
 
-/* Carrier display for q_fmt; returns 1 iff v was rendered as a carrier. */
-int q_eval_apply_carrier_fmt(ray_t* v, char* buf, size_t bufsz);
+/* Carrier read-out for display (q_fmt renders; slot layout stays opaque):
+ * BORROWED parts, NULL when v is not that carrier kind — deriv/proj head
+ * value + manifest spelling (NULL spelling = value head), composition's
+ * inner g, and a projection's slot count + bound arg (NULL arg = hole). */
+int         q_eval_apply_deriv_adv(ray_t* v);       /* adv id, -1 not deriv */
+const char* q_eval_apply_car_head_name(ray_t* v);
+ray_t*      q_eval_apply_car_head(ray_t* v);
+ray_t*      q_eval_apply_comp_inner(ray_t* v);
+int64_t     q_eval_apply_proj_nslots(ray_t* v);
+ray_t*      q_eval_apply_proj_arg(ray_t* v, int64_t i);
 
 #endif /* Q_EVAL_H */
