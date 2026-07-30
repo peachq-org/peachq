@@ -577,9 +577,9 @@ static ray_t* atomic2(ray_binary_fn f, ray_t* x, ray_t* y) {
 
 /* a manifest row's registry value at one valence (borrowed) + its row */
 static ray_t* manifest_value(const q_op_t* r, q_valence_t v, const q_op_t** out) {
-    return !r ? NULL
-              : q_registry_lookup_row(
-                    ray_sym_intern_runtime(r->name, strlen(r->name)), v, out);
+    ray_t* val = q_registry_row_value(r, v);
+    if (out) *out = val ? r : NULL;
+    return val;
 }
 
 /* `agg each flip x` — literally: the 4.1t traverse-columns law (ref/dev.md,
@@ -977,8 +977,7 @@ static const char* acc_mono_name(const q_op_t* frow, int keep) {
 static ray_t* acc_mono(const q_op_t* frow, int keep, const q_op_t** mrow) {
     const char* nm = acc_mono_name(frow, keep);
     if (!nm) return NULL;
-    ray_t* mv = q_registry_lookup_row(
-        ray_sym_intern_runtime(nm, strlen(nm)), Q_MONADIC, mrow);
+    ray_t* mv = manifest_value(q_ops_find(nm, (int)strlen(nm)), Q_MONADIC, mrow);
     return (mv && is_fnval(mv)) ? mv : NULL;
 }
 
