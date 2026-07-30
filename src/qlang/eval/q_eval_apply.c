@@ -76,14 +76,18 @@ static ray_t* car_put(ray_t* c, int64_t i, ray_t* child) {
     return q_err(QE_OOM);
 }
 
-/* lambda carrier: [params symvec, body list, src string] */
+/* lambda carrier: [params symvec, body list, src string, defining `\d` context]
+ * — the context is captured HERE, at parse time, because a lambda's unqualified
+ * globals belong to the namespace it was written in, not the one it is called
+ * from (ref/value.md: the globals list of `.test.f` reads `` `test`d`e ``).
+ * NULL slot = root. */
 ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
                                ray_t* src) {
     ray_t* b = ray_list_new(nbody > 0 ? nbody : 1);
     for (int64_t i = 0; i < nbody; i++)
         b = ray_list_append(b, body[i]);
     if (!b || RAY_IS_ERR(b)) return b ? b : q_err(QE_OOM);
-    ray_t* c = car_new(Q_EVAL_CAR_LAMBDA, 3);
+    ray_t* c = car_new(Q_EVAL_CAR_LAMBDA, 4);
     if (RAY_IS_ERR(c)) { ray_release(b); return c; }
     ray_t** s = car_slots(c);
     if (params) ray_retain(params);
@@ -91,7 +95,8 @@ ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
     s[1] = b;
     if (src) ray_retain(src);
     s[2] = src;
-    return c;
+    int64_t ctx = q_env_ctx();
+    return ctx ? car_put(c, 3, ray_sym(ctx)) : c;
 }
 
 /* deriv carrier: [F, F-row box, adv atom] */
@@ -1247,6 +1252,10 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
         }
     }
     g_frame_depth++;
+    /* the body runs in the namespace the lambda was DEFINED in, so a callee
+     * resolves its own globals, not its caller's (see q_eval_apply_lambda_new) */
+    int64_t caller_ctx = q_env_ctx(), lam_ctx = c[3] ? c[3]->i64 : 0;
+    q_env_ctx_set(lam_ctx);
     ray_t* r = RAY_NULL_OBJ;
     int64_t nb = ray_len(body);
     ray_t** bs = (ray_t**)ray_data(body);
@@ -1256,6 +1265,9 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
         ray_release(r);
         r = nr;
     }
+    /* an explicit `\d` in the body is a SESSION directive and outlives the call
+     * — only the implicit definition-context is unwound (namespace/switch.qcmd) */
+    if (q_env_ctx() == lam_ctx) q_env_ctx_set(caller_ctx);
     g_frame_depth--;
     q_env_frame_pop();
     return r;

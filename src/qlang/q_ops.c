@@ -456,6 +456,12 @@ static const q_op_t Q_OPS[] = {
      * path, which sorts — so it too is a wrapper, not a rename (audited:
      * `distinct 2 3 7 3 5 3` must be 2 3 7 5, env distinct gives 2 3 5 7). */
     { "key",     QLEX_KW_PREFIX, QR_FN1("key", q_key_wrap),    QR_NONE,           NULL, 1, 0, "structural", NULL },
+    /* `tables`/`views` are self-hosted in q.q over `\a`/`\b` (ref/tables.md,
+     * ref/view.md) — the any/all shape: the row reserves the name and fixes the
+     * lexical class, the VALUE comes from `.q`.  Family is the roster's: the
+     * argument is a namespace REFERENCE, never data to lift over. */
+    { "tables",  QLEX_KW_PREFIX, QR_NONE,                      QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "views",   QLEX_KW_PREFIX, QR_NONE,                      QR_NONE,           NULL, 1, 0, "structural", NULL },
     { "value",   QLEX_KW_PREFIX, QR_FN1("value", q_eval_value_wrap), QR_NONE,          NULL, 1, 0, "structural", NULL },
     /* q `get` is a SYNONYM of `value` (ref/get.md: "completely interchangeable")
      * — one home.  `nam set y` writes the named global (sym-handle assign /
