@@ -34,6 +34,5 @@ ray_t *q_null(void);
 ray_t *q_symvec_append(ray_t *vec, const char *s, int len);
 extern const char VERB_CHARS[];
 extern const char *ADVERB_NAMES[];
-int q_symvec_contains_id(ray_t *v, int64_t id);
 
 #endif
