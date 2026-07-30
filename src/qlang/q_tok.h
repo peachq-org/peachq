@@ -34,6 +34,18 @@ typedef struct { q_tok_el_kind kind; int64_t i; double f; int forces_float; } q_
  * caller dies — invalid civil dates/clocks never fall back to floats). */
 int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err);
 
+/* Scan ONE whole literal (atom or space-separated vector strand) at src[*p]:
+ * numeric, boolean, byte-hex, guid-null and every temporal type, including the
+ * trailing type letter.  Returns the OWNED value and advances *p, or NULL with
+ * *err set to the parse-error text (the caller raises 'parse).  The code
+ * parser's only literal entrance. */
+ray_t* q_tok_literal(const char* src, int* p, const char** err);
+
+/* True iff src[p] starts a byte literal ("0x…" glued).  The scanner's sign-glue
+ * and strand rules use it to keep byte literals out of numeric strands
+ * (`1 0x0a` is noun-noun juxtaposition, never a vector). */
+int q_tok_byte_lit_starts(const char* src, int p);
+
 /* Tok string scanners (ref/tok.md), shared by "D"$/"M"$/"T"$/"U"$/"V"$/"N"$/
  * "P"$/"Z"$/"G"$: each returns 1 and fills its payload on a shape match, 0
  * otherwise (the Tok caller yields the typed null — never an error).
