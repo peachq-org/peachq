@@ -8,16 +8,18 @@
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/q_err.h"
 #include "lang/eval.h"     /* ray_sum_fn, ray_avg_fn, ray_mul_fn — engine arms */
-#include "lang/internal.h" /* atomic_map_unary/binary, make_f64, is_collection, is_list, is_numeric, as_f64, ray_error */
+#include "lang/internal.h" /* atomic_map_binary, make_f64, is_list, is_numeric, as_f64 */
 #include <math.h>          /* isnan, sqrt — sentinel-null discipline, mdev/cov */
-#include <stdlib.h>        /* malloc, free */
+#include <string.h>        /* memcpy — the width-generic scan store */
 
 /* ===== Wave 5 — running / weighted / covariance aggregates ================
  * kdb ref/{sums,prds,maxs,mins,avgs,ratios,wsum,wavg,cov}.md.  Null discipline
- * per page: sum/sums treat null as 0, prd/prds as 1, avg/avgs EXCLUDE nulls,
- * max/min skip nulls (kdb shows -0W/0W for leading nulls — long ±infinity is
- * not representable in this engine's sentinel-null model, so those specific
- * rows are a documented lang-divergence). */
+ * per page: sum/sums treat null as 0, prd/prds as 1, avg/avgs EXCLUDE nulls.
+ * maxs/mins skip nulls and lead with the type's ∓infinity identity — owned by
+ * ray_type_inf, the same law as the src/ops/agg.c aggregates (maxs 0N 5 ->
+ * -0W 5).  mmax/mmin are ASYMMETRIC by kdb design: mmax replaces nulls after
+ * the first with the preceding max (ref/max.md), while for mmin a null IS the
+ * window minimum (ref/min.md) — do not fold them into one law. */
 
 /* Read element i of a numeric vector as a double; *isnull set for the typed
  * null sentinel (int MIN / NaN). */
@@ -54,35 +56,30 @@ int q_vec_is_num(ray_t* x) {
 
 typedef enum { RS_SUMS, RS_PRDS, RS_MAXS, RS_MINS, RS_AVGS } q_rs_kind;
 
-/* running max/min over the bytes of a q string (kdb `maxs "genie"`). */
-static ray_t* runscan_str(ray_t* x, q_rs_kind k) {
-    const char* p = ray_str_ptr(x);
-    size_t n = ray_str_len(x);
-    char stackb[256];
-    char* b = (n <= sizeof stackb) ? stackb : malloc(n ? n : 1);
-    if (!b) return q_err(QE_WSFULL);
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)p[i];
-        if (i == 0) b[i] = (char)c;
-        else b[i] = (k==RS_MAXS) ? (char)((unsigned char)b[i-1] > c ? (unsigned char)b[i-1] : c)
-                                 : (char)((unsigned char)b[i-1] < c ? (unsigned char)b[i-1] : c);
+/* running max/min over a byte-uniform vector — charv (kdb `maxs "genie"` ->
+ * "ggnnn") and u8 alike; bytes have no null, so no identity arm. */
+static ray_t* runscan_bytes(ray_t* x, q_rs_kind k) {
+    int64_t n = ray_len(x);
+    ray_t* out = ray_vec_new(x->type, n > 0 ? n : 1); out->len = n;
+    const uint8_t* p = (const uint8_t*)ray_data(x);
+    uint8_t* o = (uint8_t*)ray_data(out);
+    for (int64_t i = 0; i < n; i++) {
+        uint8_t c = p[i];
+        if (i && (k == RS_MAXS ? o[i-1] > c : o[i-1] < c)) c = o[i-1];
+        o[i] = c;
     }
-    ray_t* r = ray_str(b, n);
-    if (b != stackb) free(b);
-    return r;
+    return out;
 }
 
 static ray_t* runscan(ray_t* x, q_rs_kind k) {
     if (!x) return q_err(QE_TYPE);
-    if (x->type == -RAY_STR) {
-        if (k==RS_MAXS || k==RS_MINS) return runscan_str(x, k);
-        return q_err(QE_TYPE);
-    }
     if (ray_is_atom(x)) {                 /* atom returned unchanged (avgs->float) */
         if (k == RS_AVGS) { int nu; double v = q_velem_f(x, 0, &nu);
                             return nu ? ray_typed_null(-RAY_F64) : ray_f64(v); }
         ray_retain(x); return x;
     }
+    if ((k == RS_MAXS || k == RS_MINS) && ray_is_vec(x) && ray_is_bytelike(x->type))
+        return runscan_bytes(x, k);
     if (!q_vec_is_num(x)) return q_err(QE_TYPE);
     int64_t n = ray_len(x);
     if (k == RS_AVGS) {
@@ -97,28 +94,55 @@ static ray_t* runscan(ray_t* x, q_rs_kind k) {
         return out;
     }
     int isf = q_vec_is_float(x);
-    if (isf || k == RS_AVGS) {
+    if (k == RS_MAXS || k == RS_MINS) {
+        if (isf) {
+            ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1); out->len = n;
+            double* o = (double*)ray_data(out);
+            double m = (k == RS_MAXS) ? -INFINITY : INFINITY;   /* leading-null identity */
+            for (int64_t i = 0; i < n; i++) {
+                int nu; double v = q_velem_f(x, i, &nu);
+                if (!nu && (k == RS_MAXS ? v > m : v < m)) m = v;
+                o[i] = m;
+            }
+            return out;
+        }
+        ray_t* out = ray_vec_new(x->type, n > 0 ? n : 1); out->len = n;
+        char* o = (char*)ray_data(out);
+        int esz = ray_elem_size(x->type);
+        int64_t m = 0, inf = 0; int started = 0;
+        ray_type_inf(x->type, k == RS_MINS, &inf);   /* false only for BOOL (null-free) */
+        for (int64_t i = 0; i < n; i++) {
+            int nu; q_velem_f(x, i, &nu);
+            if (!nu) {
+                int64_t v = ray_vec_get_i64(x, i);   /* exact — ±0W survive (doubles round them to 0N) */
+                if (!started || (k == RS_MAXS ? v > m : v < m)) { m = v; started = 1; }
+            }
+            const char* src = (const char*)(started ? &m : &inf);
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+            src += sizeof(int64_t) - esz;   /* the narrow value sits in the HIGH bytes */
+#endif
+            memcpy(o + i * esz, src, esz);
+        }
+        return out;
+    }
+    if (isf) {
         ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1); out->len = n;
         double* o = (double*)ray_data(out);
-        double acc = (k==RS_PRDS) ? 1 : 0; int started = 0; double m = 0;
+        double acc = (k==RS_PRDS) ? 1 : 0;
         for (int64_t i = 0; i < n; i++) {
             int nu; double v = q_velem_f(x, i, &nu);
-            if (k==RS_SUMS) { acc += nu?0:v; o[i]=acc; }
-            else if (k==RS_PRDS) { acc *= nu?1:v; o[i]=acc; }
-            else { if (!nu) { if (!started){m=v;started=1;} else if (k==RS_MAXS?v>m:v<m) m=v; }
-                   if (started) o[i]=m; else { o[i]=0; ray_vec_set_null(out,i,true); } }
+            if (k==RS_SUMS) acc += nu?0:v; else acc *= nu?1:v;
+            o[i] = acc;
         }
         return out;
     }
     ray_t* out = ray_vec_new(RAY_I64, n > 0 ? n : 1); out->len = n;
     int64_t* o = (int64_t*)ray_data(out);
-    int64_t acc = (k==RS_PRDS) ? 1 : 0; int started = 0; int64_t m = 0;
+    int64_t acc = (k==RS_PRDS) ? 1 : 0;
     for (int64_t i = 0; i < n; i++) {
         int nu; double vd = q_velem_f(x, i, &nu); int64_t v = (int64_t)vd;
-        if (k==RS_SUMS) { acc += nu?0:v; o[i]=acc; }
-        else if (k==RS_PRDS) { acc *= nu?1:v; o[i]=acc; }
-        else { if (!nu) { if (!started){m=v;started=1;} else if (k==RS_MAXS?v>m:v<m) m=v; }
-               if (started) o[i]=m; else { o[i]=NULL_I64; ray_vec_set_null(out,i,true); } }
+        if (k==RS_SUMS) acc += nu?0:v; else acc *= nu?1:v;
+        o[i] = acc;
     }
     return out;
 }
@@ -237,8 +261,10 @@ ray_t* q_wavg_wrap(ray_t* x, ray_t* y) {
 }
 
 /* q sliding m-window family `N mf x` — window i covers x[max(0,i-N+1)..i].
- * msum treats null as 0; max/min/dev/count exclude nulls; N<=0 -> empty
- * window (sum/count 0, others null).  mavg is q.q-hosted (msum%mcount). */
+ * msum treats null as 0; max/dev/count exclude nulls (an all-null mmax window
+ * yields -0W, ref/max.md); for mmin a null IS the window minimum (ref/min.md
+ * — the mmax/mmin asymmetry).  N<=0: mmin returns y (ref/min.md); the rest
+ * keep the empty window (sum/count 0, others null).  mavg is q.q-hosted. */
 typedef enum { MW_SUM, MW_MAX, MW_MIN, MW_COUNT, MW_DEV } q_mw_kind;
 
 static ray_t* mwin(ray_t* nx, ray_t* x, q_mw_kind k) {
@@ -249,34 +275,49 @@ static ray_t* mwin(ray_t* nx, ray_t* x, q_mw_kind k) {
         if (x && ray_is_atom(x)) { ray_retain(x); return x; }
         return q_err(QE_TYPE);
     }
+    if (k == MW_MIN && N <= 0) { ray_retain(x); return x; }
     int64_t n = ray_len(x);
     int isf = q_vec_is_float(x);
     int8_t otype = (k==MW_SUM || k==MW_MAX || k==MW_MIN) ? (isf ? RAY_F64 : RAY_I64)
                  : (k==MW_COUNT) ? RAY_I64 : RAY_F64;
     ray_t* out = ray_vec_new(otype, n > 0 ? n : 1); out->len = n;
     void* o = ray_data(out);
+    int64_t neg_inf = 0;
+    ray_type_inf(RAY_I64, false, &neg_inf);
     for (int64_t i = 0; i < n; i++) {
         int64_t lo = (N > 0 && i - N + 1 > 0) ? i - N + 1 : 0;
         if (N <= 0) lo = i + 1;                  /* empty window */
-        double sum=0, sumsq=0, m=0; int64_t c=0; int started=0;
+        double sum=0, sumsq=0, m=0; int64_t c=0, im=0; int started=0, sawnull=0;
         for (int64_t j = lo; j <= i; j++) {
             int nu; double v = q_velem_f(x, j, &nu);
             if (k==MW_SUM) { if (!nu) sum += v; continue; }
-            if (nu) continue;
+            if (nu) { sawnull = 1; continue; }
             c++; sum += v; sumsq += v*v;
-            if (!started) { m=v; started=1; }
-            else if (k==MW_MAX ? v>m : v<m) m=v;
+            if (k==MW_MAX || k==MW_MIN) {
+                /* exact reads in the int lane — ±0W round to 0N through doubles */
+                int64_t jv = isf ? 0 : ray_vec_get_i64(x, j);
+                if (!started || (isf ? (k==MW_MAX ? v>m : v<m)
+                                     : (k==MW_MAX ? jv>im : jv<im))) { m=v; im=jv; }
+                started = 1;
+            }
         }
         if (otype == RAY_I64) {
             if (k==MW_SUM)   ((int64_t*)o)[i] = (int64_t)sum;
             else if (k==MW_COUNT) ((int64_t*)o)[i] = c;
-            else { if (started) ((int64_t*)o)[i] = (int64_t)m;   /* mmax/mmin */
-                   else { ((int64_t*)o)[i] = NULL_I64; ray_vec_set_null(out, i, true); } }
+            else if (k==MW_MIN && sawnull) { ((int64_t*)o)[i] = NULL_I64; ray_vec_set_null(out, i, true); }
+            else if (started) ((int64_t*)o)[i] = im;             /* mmax/mmin */
+            else if (k==MW_MAX && lo <= i) ((int64_t*)o)[i] = neg_inf;  /* all-null window */
+            else { ((int64_t*)o)[i] = NULL_I64; ray_vec_set_null(out, i, true); }
         } else {
             double r; int isnull = 0;
             switch (k) {
             case MW_SUM: r = sum; break;
-            case MW_MAX: case MW_MIN: if (started) r=m; else { r=0; isnull=1; } break;
+            case MW_MAX: case MW_MIN:
+                if (k==MW_MIN && sawnull) { r=0; isnull=1; }
+                else if (started) r=m;
+                else if (k==MW_MAX && lo <= i) r = -INFINITY;    /* all-null window */
+                else { r=0; isnull=1; }
+                break;
             case MW_DEV: if (c) { double mean=sum/(double)c; double var=sumsq/(double)c - mean*mean;
                                   r = var>0 ? sqrt(var) : 0; } else { r=0; isnull=1; } break;
             default: r = 0; break;
