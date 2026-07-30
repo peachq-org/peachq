@@ -9,6 +9,8 @@
 #include "qlang/q_registry_internal.h" /* q_str_text_bytes, q_type_strict_i64 */
 #include "qlang/q_console.h" /* q_console_write — 1/-1/2/-2 console handles */
 #include "qlang/q_dotz.h"   /* q_dotz_now_ns — the portable wall clock */
+#include "qlang/net/q_ws.h"          /* q_ws_client_open — `:ws:// sym handles */
+#include "qlang/net/q_http_client.h" /* q_http_client_raw — `:http:// sym handles */
 #include "lang/eval.h"       /* ray_eval_get_restricted, ray_at_fn */
 #include "lang/internal.h"   /* make_i64, ray_hsend_fn/ray_hpost_fn/ray_hclose_fn */
 #include "table/sym.h"       /* ray_sym_intern_runtime */
@@ -299,6 +301,49 @@ ray_t* q_handles_apply(int64_t qh, ray_t* y) {
                            : ray_hpost_fn(rawh, y);  /* async */
     ray_release(rawh);
     return r;
+}
+
+static int is_text_atom(ray_t* v) {
+    return v && (v->type == -RAY_STR || v->type == RAY_CHARV ||
+                 v->type == -RAY_CHARV);
+}
+
+/* The `:`-prefixed SYM arm of the same abstraction: protocol dispatch on the
+ * descriptor text — ws/wss and http/https clients, else one-shot sync IPC
+ * (ref/hopen.md): connect -> send -> close.  A file handle has no apply. */
+ray_t* q_handles_sym_apply(ray_t* head, ray_t** args, int64_t n) {
+    ray_t* s = ray_sym_str(head->i64);               /* borrowed */
+    const char* sp = ray_str_ptr(s);
+    size_t sl = ray_str_len(s);
+    if ((sl >= 6 && memcmp(sp, ":ws://", 6) == 0) ||
+        (sl >= 7 && memcmp(sp, ":wss://", 7) == 0)) {
+        if (n == 1 && is_text_atom(args[0]))
+            return q_ws_client_open(head, args[0]);
+        return q_err(QE_TYPE);
+    }
+    if ((sl >= 8 && memcmp(sp, ":http://", 8) == 0) ||
+        (sl >= 9 && memcmp(sp, ":https://", 9) == 0)) {
+        if (n == 1 && is_text_atom(args[0]))
+            return q_http_client_raw(head, args[0]);
+        return q_err(QE_TYPE);
+    }
+    if (n == 1 && args[0] &&
+        (args[0]->type == -RAY_STR || args[0]->type == RAY_CHARV)) {
+        ray_t* h = q_hopen_wrap(head);           /* owned fd handle or error */
+        if (!h || RAY_IS_ERR(h)) return h;
+        ray_t* r;
+        if (h->type == -RAY_I64 || h->type == -RAY_I32) {
+            int64_t qh = (h->type == -RAY_I64) ? h->i64 : (int64_t)h->i32;
+            r = q_handles_apply(qh, args[0]);    /* SYNC send */
+        } else {
+            r = q_err(QE_TYPE);
+        }
+        ray_t* c = q_hclose_wrap(h);             /* close regardless of r */
+        if (c) ray_release(c);
+        ray_release(h);
+        return r;
+    }
+    return q_err(QE_TYPE);              /* file handle: no apply */
 }
 
 /* ---- close -------------------------------------------------------------- */

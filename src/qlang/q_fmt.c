@@ -6,7 +6,8 @@
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
 #include "qlang/q_calendar.h" /* q_calendar_days_from_civil — date display domain */
 #include "qlang/q_registry_internal.h" /* q_type_qname — the guarded type-name home */
-#include "qlang/eval/q_eval.h" /* q_eval_apply_carrier_fmt — RAY_QFN display;
+#include "qlang/q_parse_internal.h" /* ADVERB_NAMES — the one adverb-spelling table */
+#include "qlang/eval/q_eval.h" /* carrier read-out accessors — RAY_QFN display;
                                 * q_eval_apply_concrete — the display boundary force */
 #include "lang/format.h"   /* ray_fmt */
 #include "lang/eval.h"     /* ray_at_fn — dict/table element access */
@@ -1234,6 +1235,74 @@ void q_fmt_console(ray_t* val, char* buf, size_t bufsz) {
     g_clip_active = 0;
 }
 
+/* RAY_QFN carrier display over the apply module's read-out accessors (the
+ * slot layout stays opaque): lambda = verbatim source, iterator/derived =
+ * head + adverb glyph, composition = "u g", projection = verbatim head +
+ * the bound-argument echo, holes empty — {x+y}[1;], +[;2] (kdb shape,
+ * owner ruling 2026-07-23).  Returns 1 iff v was rendered as a carrier. */
+static int carrier_fmt(ray_t* v, char* buf, size_t bufsz) {
+    int kind = q_eval_apply_carrier_kind(v);
+    if (!kind || bufsz == 0) return 0;
+    if (kind == Q_EVAL_CAR_LAMBDA) {
+        ray_t* src = q_eval_apply_lambda_src(v);
+        if (src)
+            snprintf(buf, bufsz, "%.*s", (int)ray_str_len(src),
+                     ray_str_ptr(src));
+        else
+            snprintf(buf, bufsz, "{..}");
+        return 1;
+    }
+    if (kind == Q_EVAL_CAR_ITER) {
+        int adv = q_eval_apply_iter_id(v);
+        snprintf(buf, bufsz, "%s",
+                 (adv >= 0 && adv < 6) ? ADVERB_NAMES[adv] : "");
+        return 1;
+    }
+    const char* nm = q_eval_apply_car_head_name(v);
+    ray_t* head = q_eval_apply_car_head(v);
+    if (kind == Q_EVAL_CAR_DERIV) {
+        int adv = q_eval_apply_deriv_adv(v);
+        char fb[128] = "";
+        if (nm) snprintf(fb, sizeof fb, "%s", nm);
+        else if (head) q_fmt(head, fb, sizeof fb);
+        snprintf(buf, bufsz, "%s%s", fb,
+                 (adv >= 0 && adv < 6) ? ADVERB_NAMES[adv] : "");
+        return 1;
+    }
+    if (kind == Q_EVAL_CAR_COMP) {
+        ray_t* g = q_eval_apply_comp_inner(v);
+        char ub[128] = "", gb[128] = "";
+        if (head) q_fmt(head, ub, sizeof ub);
+        if (g) q_fmt(g, gb, sizeof gb);
+        snprintf(buf, bufsz, "%s %s", ub, gb);
+        return 1;
+    }
+    char fb[256] = "";
+    if (nm) snprintf(fb, sizeof fb, "%s", nm);
+    else if (head) q_fmt(head, fb, sizeof fb);
+    size_t off = 0;
+    int64_t slots = q_eval_apply_proj_nslots(v);
+    #define PUT(...) do { \
+        if (off < bufsz) { \
+            int w = snprintf(buf + off, bufsz - off, __VA_ARGS__); \
+            off += (w > 0) ? (size_t)w : 0; \
+        } \
+    } while (0)
+    PUT("%s[", fb);
+    for (int64_t i = 0; i < slots; i++) {
+        if (i) PUT(";");
+        ray_t* a = q_eval_apply_proj_arg(v, i);
+        if (a) {
+            char ab[128] = "";
+            q_fmt(a, ab, sizeof ab);
+            PUT("%s", ab);
+        }
+    }
+    PUT("]");
+    #undef PUT
+    return 1;
+}
+
 static void q_fmt_body(ray_t* val) {
     if (!val) return;
 
@@ -1247,7 +1316,7 @@ static void q_fmt_body(ray_t* val) {
     if (val->type == RAY_QFN) {
         char cb[512];
         cb[0] = '\0';
-        if (q_eval_apply_carrier_fmt(val, cb, sizeof cb))
+        if (carrier_fmt(val, cb, sizeof cb))
             qe_puts(cb);
         return;
     }
