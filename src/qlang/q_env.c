@@ -1,12 +1,24 @@
-/* q_env — q's K-tree as NESTED DICTS.  See q_env.h for the model. */
+/* q_env — q's K-tree as NESTED DICTS.  See q_env.h for the model.
+ *
+ * The two NAME-FACING verbs live here rather than in ops/: `key` and `set`
+ * read and write the tree itself (root roster, context members, the settable
+ * .z handler slots, the one .ipc.on.* seam), so their bodies belong beside
+ * the tree, not beside the table kernels their dict arms happen to touch. */
 #define _POSIX_C_SOURCE 200809L
+#define Q_OPS_ENV_GRANDFATHER /* the .ipc.on.* six-slot callback seam: ray_env_set on hook syms only */
 #include "qlang/q_env.h"
+#include "qlang/q_registry_internal.h"
+#include "qlang/q_err.h"
+#include "qlang/q_type.h"         /* q_type_qname / _is_int_atom / _iatom_val — key's arms;
+                                  * q_type_is_fn / _is_table / _is_keyed — the \v|\f|\a split */
+#include "qlang/q_dotz.h"         /* the .z.* handler-slot arms of `set` */
+#include "qlang/net/q_wirefile.h" /* q_wirefile_write — the `:file set y form */
+#include "lang/internal.h"        /* ray_error */
 #include "table/sym.h"         /* ray_sym_intern_runtime, ray_sym_str, ray_read_sym */
 #include "table/dict.h"        /* ray_dict_* probes/upsert */
 #include "ops/linkop.h"        /* ray_link_has / ray_link_deref */
 #include "ops/temporal.h"      /* ray_temporal_accessor — the dotted accessor roster */
 #include "lang/env.h"          /* the SIX .ipc.on.* hook syms — the one rayfall-env seam */
-#include "qlang/q_type.h"      /* q_type_is_fn / _is_table / _is_keyed — the \v|\f|\a split */
 #include "mem/sys.h"
 #include <stdlib.h>            /* qsort — the member listings are sorted */
 #include <string.h>
@@ -568,4 +580,173 @@ void q_env_destroy(void) {
     if (env_ns)   { ray_release(env_ns);   env_ns   = NULL; }
     if (env_boot) { ray_release(env_boot); env_boot = NULL; }
     g_ctx = g_ctx_seg = 0;
+}
+
+/* q `key x` (ref/key.md) — dict keys, plus the name/namespace overloads:
+ *   `` ` ``      -> root context roster (namespaces other than .z)
+ *   `` `. ``     -> objects in the root (user variable names)
+ *   `` `.foo ``  -> the context's keys (leading `` ` `` placeholder + members)
+ *   `` `name ``  -> keys of the named dict; the sym itself if the name is
+ *                   bound to a non-dict; `()` if unbound (context-aware)
+ * File handles (`` `:path ``) are the file-I/O wave: 'nyi.  Everything else
+ * non-dict stays a deferred 'type cell. */
+ray_t* q_key_wrap(ray_t* x) {
+    /* type of a vector (ref/key.md): `key 0#5` -> `long; a native string
+     * atom IS the provisional char vector -> `char; `key 10` -> til 10. */
+    if (x && ray_is_vec(x)) {
+        const char* nm = q_type_qname(x->type);
+        if (nm) return ray_sym(ray_sym_intern_runtime(nm, strlen(nm)));
+        /* unnamed vector types keep the deferred 'type tail below */
+    }
+    if (x && x->type == -RAY_STR)
+        return ray_sym(ray_sym_intern_runtime("char", 4));
+    if (q_type_is_int_atom(x) && !RAY_ATOM_IS_NULL(x) && q_type_iatom_val(x) >= 0)
+        return q_til_wrap(x);                       /* key n == til n */
+    if (x && x->type == -RAY_SYM) {
+        ray_t* s = ray_sym_str(x->i64);
+        if (!s) return q_err(QE_TYPE);
+        const char* nm = ray_str_ptr(s);
+        size_t l = ray_str_len(s);
+        if (l == 0) {
+            ray_release(s);
+            ray_t* r = q_env_ns_roster();
+            return r ? r : q_err(QE_WSFULL);
+        }
+        if (nm[0] == ':') {
+            ray_release(s);
+            return q_err(QE_NYI);
+        }
+        if (l == 1 && nm[0] == '.') {           /* `. — root objects, marker-free
+                                                 * (ref/key.md: `key `.` lists names
+                                                 * only; namespaces keep the marker) */
+            ray_release(s);
+            ray_t* root = q_env_resolve(x->i64);
+            if (!root || root->type != RAY_DICT) {
+                if (root) ray_release(root);
+                return q_err(QE_NYI);
+            }
+            ray_t* marker = ray_sym(ray_sym_intern_runtime("", 0));
+            if (!marker || RAY_IS_ERR(marker)) {
+                ray_release(root);
+                return marker ? marker : q_err(QE_WSFULL);
+            }
+            ray_t* bare = ray_dict_remove(root, marker);   /* consumes root */
+            ray_release(marker);
+            if (!bare || RAY_IS_ERR(bare)) return bare ? bare : q_err(QE_WSFULL);
+            ray_t* rk = ray_dict_keys(bare);
+            if (!rk) { ray_release(bare); return q_err(QE_TYPE); }
+            ray_retain(rk);
+            ray_release(bare);
+            return rk;
+        }
+        ray_release(s);
+        /* named variable / namespace: dict (incl. a context's dict) -> keys;
+         * bound -> the sym itself; unbound -> () (ref/key.md). */
+        ray_t* v = q_env_resolve(x->i64);
+        if (!v) return ray_list_new(1);         /* () — empty general list */
+        if (RAY_IS_ERR(v)) return v;
+        if (v->type == RAY_DICT) {
+            ray_t* k = ray_dict_keys(v);
+            if (!k) { ray_release(v); return q_err(QE_TYPE); }
+            ray_retain(k);
+            ray_release(v);
+            return k;
+        }
+        ray_release(v);
+        ray_retain(x);
+        return x;
+    }
+    if (!x || x->type != RAY_DICT)
+        return q_err(QE_TYPE);
+    ray_t* k = ray_dict_keys(x);                /* borrowed */
+    if (!k) return q_err(QE_TYPE);
+    ray_retain(k);
+    return k;
+}
+
+/* q `nam set y` (ref/get.md) — assign a global through a symbol handle:
+ *   `a set 42        -> bind the global (dotted names create contexts)
+ *   `.foo set d      -> ordinary rebind, `:`-identical — the old namespace
+ *                       dict goes with the name (no splat: dict model)
+ *   `. set d         -> restore root variables from dict d
+ *   `:f set y        -> write a kdb+ flat file (q_wirefile_write)
+ * The splayed form and the compressed (file;lbs;alg;lvl) left-arguments are a
+ * later wave: 'nyi.  Returns the handle (kdb returns nam). */
+ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
+    if (!x || x->type != -RAY_SYM)
+        return q_err(QE_NYI);
+    ray_t* s = ray_sym_str(x->i64);
+    if (!s) return q_err(QE_TYPE);
+    const char* nm = ray_str_ptr(s);
+    size_t l = ray_str_len(s);
+    if (l == 0) {
+        ray_release(s);
+        return q_err(QE_TYPE);
+    }
+    if (nm[0] == ':') {                         /* file handle: q_wirefile writes it */
+        ray_release(s);
+        ray_t* r = q_wirefile_write(x, y);
+        return r ? r : q_err(QE_TYPE);
+    }
+    int is_root = (l == 1 && nm[0] == '.');
+    if (is_root && y && y->type == RAY_DICT) {
+        /* root restore: upsert each member as a plain global */
+        ray_t* dk = ray_dict_keys(y);           /* borrowed */
+        ray_t* dv = ray_dict_vals(y);           /* borrowed */
+        int64_t n = ray_dict_len(y);
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* k = q_join_item(dk, i);          /* owned */
+            ray_t* v = q_join_item(dv, i);          /* owned */
+            if (!k || RAY_IS_ERR(k) || k->type != -RAY_SYM || !v || RAY_IS_ERR(v)) {
+                if (k && !RAY_IS_ERR(k)) ray_release(k);
+                if (v && !RAY_IS_ERR(v)) ray_release(v);
+                ray_release(s);
+                return q_err(QE_TYPE);
+            }
+            ray_t* ks = ray_sym_str(k->i64);
+            int skip = !ks || ray_str_len(ks) == 0;   /* :: placeholder */
+            if (ks) ray_release(ks);
+            ray_err_t err = skip ? RAY_OK : q_env_set(k->i64, v);
+            ray_release(k);
+            ray_release(v);
+            if (err != RAY_OK) {
+                ray_release(s);
+                return ray_error(ray_err_code_str(err), "set: assign failed");
+            }
+        }
+        ray_release(s);
+        ray_retain(x);
+        return x;
+    }
+    if (is_root) {                              /* `. set non-dict: no reading */
+        ray_release(s);
+        return q_err(QE_TYPE);
+    }
+    /* Settable `.z.*` handler slots (`.z.ts`/`.z.exit`/`.z.p*`/`.z.w*`/`.z.ac`) —
+     * NOT `.ipc.on.*` hooks.  dotz.c owns the name->slot dispatch AND the
+     * {…}-carrier unwrap (call_fn1 fires a bare lambda); q_dotz_set declines any
+     * non-handler name so it falls through to the `.ipc.on.*`/plain-env path. */
+    if (q_dotz_write_is_nyi(nm, l)) {
+        ray_release(s);
+        return q_err(QE_NYI);
+    }
+    if (q_dotz_set(nm, l, y)) {
+        ray_release(s);
+        ray_retain(x);
+        return x;
+    }
+    /* kdb `.z.p*` connection-handler aliases write the `.ipc.on.*` slot that
+     * ipc.c's hook_lookup reads — the six-slot callback table stays in
+     * RAYFALL's env (the one deliberate seam; a direct `.ipc.on.*` set no
+     * longer reaches it, closing the write-side leak).  A q `{…}` binds
+     * AS-IS: RAY_QFN carriers fire through the value-apply seam (ipc.c
+     * hook_fire).  (hk computed BEFORE ray_release(s): `nm` points into `s`.) */
+    int hk = q_dotz_ipc_hook_index(nm, l);
+    ray_release(s);
+    ray_err_t err = hk >= 0 ? ray_env_set(ray_sym_ipc_hook(hk), y)
+                            : q_env_set(x->i64, y);
+    if (err != RAY_OK)
+        return ray_error(ray_err_code_str(err), "set: assign failed");
+    ray_retain(x);
+    return x;
 }
