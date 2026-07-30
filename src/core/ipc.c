@@ -81,6 +81,7 @@
 #include "mem/sys.h"
 #include "ops/ops.h"
 #include "store/journal.h"
+#include "qlang/q_err.h"  /* q_err_from_text (-128h decode) + q_err_drop backstop */
 #include "qlang/net/q_wire.h"
 #include "qlang/net/q_http.h"
 #include "qlang/net/q_ws.h"
@@ -553,15 +554,11 @@ static ray_t* ipc_decode_payload(const uint8_t* p, size_t plen, int swap,
 {
     if (is_wire_err) *is_wire_err = 0;
     if (plen == 0) return NULL;
-    if (p[0] == 0x80) {                     /* wire error -128h: 0x80 + code cstr */
+    if (p[0] == 0x80) {                     /* wire error -128h: 0x80 + text cstr */
         const uint8_t* nul = memchr(p + 1, 0, plen - 1);
         if (!nul || (size_t)(nul - p) != plen - 1) return NULL;
-        char code[16];
-        size_t n = (size_t)(nul - (p + 1));
-        if (n > sizeof code - 1) n = sizeof code - 1;
-        memcpy(code, p + 1, n); code[n] = 0;
         if (is_wire_err) *is_wire_err = 1;
-        return ray_error(code, NULL);
+        return q_err_from_text((const char*)(p + 1), (size_t)(nul - (p + 1)));
     }
     size_t consumed = 0;
     ray_t* v = q_wire_read_obj(p, plen, &consumed, swap);
@@ -583,6 +580,9 @@ static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
                         int swap, ray_t** out_result)
 {
     *out_result = NULL;
+    q_err_drop();   /* request-entry error-payload backstop (q_repl's twin) —
+                       a prior request's uncaught 'name text must not caption
+                       this request's unrelated error */
     ray_t* msg = ipc_decode_payload(payload, plen, swap, NULL);
     if (!msg) return -1;
 
