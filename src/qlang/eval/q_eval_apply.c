@@ -786,6 +786,18 @@ ray_t* q_eval_apply_lambda_src(ray_t* v) {
     return (src && src->type == -RAY_STR) ? src : NULL;
 }
 
+/* `value` on a lambda reads the same slots (ref/value.md `## Lambda`); the
+ * layout stays opaque, the scope analysis over body belongs to q_eval. */
+int q_eval_apply_lambda_parts(ray_t* v, ray_t** params, ray_t** body,
+                              ray_t** ctx) {
+    if (q_eval_apply_carrier_kind(v) != Q_EVAL_CAR_LAMBDA) return 0;
+    ray_t** c = car_slots(v);
+    if (params) *params = c[0];
+    if (body)   *body   = c[1];
+    if (ctx)    *ctx    = c[3];
+    return 1;
+}
+
 static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
     ray_t** c = car_slots(lam);
     ray_t* params = c[0];
