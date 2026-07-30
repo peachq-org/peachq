@@ -1375,9 +1375,8 @@ ray_t* q_key_wrap(ray_t* x) {
         size_t l = ray_str_len(s);
         if (l == 0) {
             ray_release(s);
-            /* `` ` `` roster synthesis died with q_ns (cutover 2026-07-23);
-             * a dict-namespace enumeration re-lands with the scoping wave */
-            return q_err(QE_NYI);
+            ray_t* r = q_env_ns_roster();
+            return r ? r : q_err(QE_WSFULL);
         }
         if (nm[0] == ':') {
             ray_release(s);

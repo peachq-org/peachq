@@ -73,9 +73,13 @@
 / ref/view.md: views[] is niladic, "views defined in the default namespace".
 .q.views:{system"b"}
 
-/ ---- wave 5 (ref/save.md) ----
+/ ---- wave 5 (ref/save.md, ref/load.md) ----
 / `[path/to/]v.ext`: get the global v, dispatch .ext through .h.tx, write with Save Text
 / (which creates parent dirs, overwrites, and returns the filename) — no formatting of its
-/ own, every byte comes from .h.tx/0:.  No .ext = the binary arm: 'nyi while `:f set x is
-/ (PLAN.md).  An .ext .h.tx does not key signals that ext (`xls: openq writes no Excel).
-.q.save:{f:{p:"." vs last "/" vs string x;$[2>count p;'`nyi;not (e:`$last p) in key .h.tx;'e;(hsym x) 0: .h.tx[e] get `$"." sv -1_p]};$[-11h=type x;f x;11h=type x;f each x;'`type]}
+/ own, every byte comes from .h.tx/0:.  No .ext IS the binary arm, and ref/save.md states
+/ its equivalence outright: `save `t` is `` `:t set t ``.  An .ext .h.tx does not key
+/ signals that ext (`xls: openq writes no Excel).
+.q.save:{f:{p:"." vs last "/" vs string x;$[2>count p;(hsym x) set get `$"." sv p;not (e:`$last p) in key .h.tx;'e;(hsym x) 0: .h.tx[e] get `$"." sv -1_p]};$[-11h=type x;f x;11h=type x;f each x;'`type]}
+/ ref/load.md: `load `t` is `t:get `:t` — the file's name IS the global's, and the name is
+/ returned.  The filesymbol and directory-recursion arms are deferred, never guessed.
+.q.load:{f:{$[":"=first string x;'`nyi;x set get hsym x]};$[-11h=type x;f x;11h=type x;f each x;'`type]}

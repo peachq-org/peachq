@@ -6,9 +6,12 @@
 #include "ops/linkop.h"        /* ray_link_has / ray_link_deref */
 #include "ops/temporal.h"      /* ray_temporal_accessor — the dotted accessor roster */
 #include "lang/env.h"          /* the SIX .ipc.on.* hook syms — the one rayfall-env seam */
+#include "qlang/q_type.h"      /* q_type_is_fn / _is_table / _is_keyed — the \v|\f|\a split */
 #include "mem/sys.h"
+#include <stdlib.h>            /* qsort — the member listings are sorted */
 #include <string.h>
 
+#define ENV_NAME_MAX 256
 #define ENV_SEG_MAX 64
 #define ENV_FRAME_MAX 2048
 #define ENV_FRAME_INLINE 16
@@ -21,7 +24,10 @@ static ray_t* env_root;        /* `.` — user root variables */
 static ray_t* env_ns;          /* ``  — top-level namespaces (nested dicts) */
 static ray_t* env_boot;        /* bootstrap builtins: q_env_bind plain names,
                                 * kept out of the user-visible `key `.` roster */
-static int64_t g_ctx = 0;
+/* `\d` context: the ns sym as given (`.jab`) plus its SEGMENT (`jab`), which is
+ * what env_ns is keyed by.  Deriving the segment once per `\d` keeps relative
+ * resolution to one extra dict probe and NO sym-table round trip (#359). */
+static int64_t g_ctx, g_ctx_seg;
 
 static int64_t env_marker(void) { return ray_sym_intern_runtime("", 0); }
 
@@ -78,6 +84,17 @@ static int env_segs(const char* p, size_t n, size_t start, int64_t* segs, int ma
 
 static size_t env_start(const char* p, size_t n) {
     return p[0] == '.' ? ((n > 1 && p[1] == '.') ? 2 : 1) : 0;
+}
+
+/* `\d .ns` re-roots a RELATIVE name: the context segment becomes the path's
+ * first step, so a write lands in — and thereby creates — the namespace.
+ * Returns the new segment count and re-points *home; k unchanged at root. */
+static int ctx_reroot(int64_t* segs, int k, ray_t*** home) {
+    if (!g_ctx_seg || k <= 0 || k >= ENV_SEG_MAX) return k;
+    memmove(segs + 1, segs, (size_t)k * sizeof *segs);
+    segs[0] = g_ctx_seg;
+    *home = &env_ns;
+    return k + 1;
 }
 
 ray_t* q_env_get(int64_t sym) {
@@ -167,10 +184,11 @@ static ray_err_t env_put(int64_t sym, ray_t* val, int boot_new) {
             e = env_store(start == 1 ? &env_ns : &env_root, segs, k, val);
         } else {
             ray_t** home = &env_root;
-            if (ray_dict_find_sym(env_root, segs[0]) < 0 &&
+            int nk = ctx_reroot(segs, k, &home);
+            if (nk == k && ray_dict_find_sym(env_root, segs[0]) < 0 &&
                 (ray_dict_find_sym(env_boot, segs[0]) >= 0 || boot_new))
                 home = &env_boot;
-            e = env_store(home, segs, k, val);
+            e = env_store(home, segs, nk, val);
         }
     }
     ray_release(s);
@@ -199,10 +217,14 @@ ray_err_t q_env_unbind(int64_t sym) {
         size_t start = env_start(p, n);
         ray_t** home = (p[0] == '.' && start == 1) ? &env_ns : &env_root;
         int k = env_segs(p, n, start, segs, ENV_SEG_MAX);
-        if (k > 0) {
-            if (p[0] != '.' && ray_dict_find_sym(*home, segs[0]) < 0 &&
+        if (k > 0 && p[0] != '.') {
+            int nk = ctx_reroot(segs, k, &home);
+            if (nk == k && ray_dict_find_sym(*home, segs[0]) < 0 &&
                 ray_dict_find_sym(env_boot, segs[0]) >= 0)
                 home = &env_boot;
+            k = nk;
+        }
+        if (k > 0) {
             ray_t* holder = *home;
             for (int i = 0; holder && i < k - 1; i++)
                 holder = ray_dict_probe_sym_borrowed(holder, segs[i]);
@@ -409,6 +431,10 @@ ray_t* q_env_resolve(int64_t sym) {
         base = ray_dict_probe_sym_borrowed(start == 1 ? env_ns : env_root, head);
     } else {
         base = frames_lookup(head);
+        if (!base && g_ctx_seg) {                   /* `\d .ns` shadows the root */
+            ray_t* nsd = ray_dict_probe_sym_borrowed(env_ns, g_ctx_seg);
+            if (nsd) base = ray_dict_probe_sym_borrowed(nsd, head);
+        }
         if (!base) base = ray_dict_probe_sym_borrowed(env_root, head);
         if (!base) base = ray_dict_probe_sym_borrowed(env_boot, head);
     }
@@ -421,9 +447,106 @@ ray_t* q_env_resolve(int64_t sym) {
     return r;
 }
 
+/* ---- introspection: rosters and member listings ---- */
+
+int64_t q_env_qualify(int64_t ns_sym, int64_t member_sym) {
+    if (!ns_sym) return member_sym;                     /* the root prefixes nothing */
+    const char* np; size_t nn;
+    ray_t* ns = name_str(ns_sym, &np, &nn);
+    if (!ns) return -1;
+    if (nn == 1 && np[0] == '.') { ray_release(ns); return member_sym; }
+    const char* mp; size_t mn;
+    ray_t* m = name_str(member_sym, &mp, &mn);
+    char buf[ENV_NAME_MAX];
+    int64_t r = -1;                     /* refusal: never a valid sym id */
+    if (m && nn + 1 + mn < sizeof buf) {
+        memcpy(buf, np, nn);
+        buf[nn] = '.';
+        memcpy(buf + nn + 1, mp, mn);
+        r = ray_sym_intern_runtime(buf, nn + 1 + mn);
+    }
+    if (m) ray_release(m);
+    ray_release(ns);
+    return r;
+}
+
+static int env_kind_match(q_env_ns_kind_t kind, ray_t* v) {
+    switch (kind) {
+    case Q_ENV_NS_FNS:    return q_type_is_fn(v);
+    case Q_ENV_NS_TABLES: return q_type_is_table(v) || q_type_is_keyed(v);
+    default:              return !q_type_is_fn(v);   /* `\v` keeps tables */
+    }
+}
+
+static int env_name_cmp(const void* a, const void* b) {
+    const char* pa; size_t la;
+    const char* pb; size_t lb;
+    ray_t* sa = name_str(*(const int64_t*)a, &pa, &la);
+    ray_t* sb = name_str(*(const int64_t*)b, &pb, &lb);
+    int c = 0;
+    if (sa && sb) {
+        c = memcmp(pa, pb, la < lb ? la : lb);
+        if (!c) c = (la > lb) - (la < lb);
+    }
+    if (sa) ray_release(sa);
+    if (sb) ray_release(sb);
+    return c;
+}
+
+/* d's own names as a fresh sym vector, the marker never among them.  MEMBERS
+ * are picked by value kind and sorted (`\v` `\f` `\a`); the NAMESPACE roster
+ * keeps creation order and drops `z` (basics/syscmds.md §`\d`). */
+static ray_t* env_dict_names(ray_t* d, q_env_ns_kind_t kind, int members) {
+    ray_t* dk = ray_dict_keys(d);
+    ray_t* dv = ray_dict_vals(d);
+    int64_t n = ray_dict_len(d);
+    if (!dk || dk->type != RAY_SYM || !dv || dv->type != RAY_LIST) return NULL;
+    int64_t* sel = (int64_t*)ray_sys_alloc(sizeof(int64_t) * (size_t)(n > 0 ? n : 1));
+    if (!sel) return NULL;
+    ray_t** vs = (ray_t**)ray_data(dv);
+    int64_t m = 0;
+    int64_t marker = env_marker(), zed = ray_sym_intern_runtime("z", 1);
+    for (int64_t i = 0; i < n; i++) {
+        int64_t id = ray_read_sym(ray_data(dk), i, RAY_SYM, dk->attrs);
+        if (id == marker) continue;
+        int keep = members ? env_kind_match(kind, vs[i])
+                           : (env_is_marked(vs[i]) && id != zed);
+        if (keep) sel[m++] = id;
+    }
+    if (members) qsort(sel, (size_t)m, sizeof *sel, env_name_cmp);
+    ray_t* out = ray_sym_vec_new(RAY_SYM_W64, m > 0 ? m : 1);
+    for (int64_t i = 0; i < m && out && !RAY_IS_ERR(out); i++)
+        out = ray_vec_append(out, &sel[i]);
+    ray_sys_free(sel);
+    return out;
+}
+
+ray_t* q_env_ns_names(int64_t ns_sym, q_env_ns_kind_t kind) {
+    ray_t* d = ns_sym ? q_env_get(ns_sym) : env_root;
+    if (!env_is_marked(d)) return NULL;
+    return env_dict_names(d, kind, 1);
+}
+
+ray_t* q_env_ns_roster(void) {
+    return env_ns ? env_dict_names(env_ns, Q_ENV_NS_VARS, 0) : NULL;
+}
+
 /* ---- lifecycle + context ---- */
 
-void    q_env_ctx_set(int64_t ns_sym) { g_ctx = ns_sym; }
+void q_env_ctx_set(int64_t ns_sym) {
+    if (ns_sym == g_ctx) return;
+    g_ctx = ns_sym;
+    g_ctx_seg = 0;
+    if (!ns_sym) return;
+    const char* p; size_t n;
+    ray_t* s = name_str(ns_sym, &p, &n);
+    if (!s) return;
+    /* one level below root only (`\d` enforces it — q4m3 §12.7) */
+    if (n > 1 && p[0] == '.' && !memchr(p + 1, '.', n - 1))
+        g_ctx_seg = ray_sym_intern_runtime(p + 1, n - 1);
+    ray_release(s);
+}
+
 int64_t q_env_ctx(void) { return g_ctx; }
 
 ray_err_t q_env_init(void) {
@@ -444,5 +567,5 @@ void q_env_destroy(void) {
     if (env_root) { ray_release(env_root); env_root = NULL; }
     if (env_ns)   { ray_release(env_ns);   env_ns   = NULL; }
     if (env_boot) { ray_release(env_boot); env_boot = NULL; }
-    g_ctx = 0;
+    g_ctx = g_ctx_seg = 0;
 }

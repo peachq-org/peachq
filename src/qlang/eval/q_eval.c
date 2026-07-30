@@ -509,6 +509,9 @@ ray_t* q_eval(ray_t* node) {
      * a 1-element sym vector in tree position IS the sym atom constant */
     if (sym_const(node)) {
         ret = q_index_elem_at(node, 0);
+        /* the unwrap is the enlist's inverse, so it must restore the DATA mark
+         * too: without it a verb-glyph sym (`. `+) prints as a bare name-ref */
+        if (ret && !RAY_IS_ERR(ret)) ret->attrs |= Q_ATTR_QUOTED;
         goto out;
     }
     if (node->type != RAY_LIST || ray_len(node) == 0) {
