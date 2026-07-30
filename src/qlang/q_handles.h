@@ -46,6 +46,11 @@ ray_t* q_handles_open(const char* path, size_t plen, int is_fifo);
  * Total over int handles. */
 ray_t* q_handles_apply(int64_t qh, ray_t* y);
 
+/* `` `:… `` sym-handle apply — the protocol arm (caller has checked the
+ * leading ':'): ws/wss and http/https clients, else one-shot sync IPC on a
+ * string argument; a file handle has no apply.  Args borrowed, result owned. */
+ray_t* q_handles_sym_apply(ray_t* head, ray_t** args, int64_t n);
+
 /* file/fifo -> close fd + deregister; else deregister + IPC close (dead
  * handle = tolerated no-op).  Caller gates restricted mode + validates qh>0. */
 ray_t* q_handles_close(int64_t qh);
