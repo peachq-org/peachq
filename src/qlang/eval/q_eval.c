@@ -25,6 +25,7 @@
 #include "qlang/net/q_wirefile.h"  /* q_wirefile_read — `get `:file */
 #include "lang/eval.h"
 #include "ops/ops.h"
+#include "table/sym.h"             /* ray_read_sym — sym vectors are width-adaptive */
 #include <string.h>
 
 #define EVAL_MAX_ARGS  60
@@ -287,6 +288,169 @@ static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
     return v;
 }
 
+/* ===== `value` on a lambda (ref/value.md `## Lambda`) ====================
+ * Published shape: (bytecode;params;locals;(namespace,globals);constants…;
+ * m;n;f;l;s).  A tree-walker has no bytecode and no source-position map, so
+ * slot 0 and m are EMPTY rather than invented; n/f/l keep the doc's own "not
+ * applicable" values (()/""/-1) until an assignment stamps a name and the
+ * loader carries a file.  Scope follows function-notation.md "Name scope" —
+ * the rule assign_eval implements: a `:` target is local for the WHOLE body,
+ * `::` and dotted targets are global, every other name is a global reference.
+ * Verbs are fn VALUES after parse so they never read as names, and a nested
+ * lambda carrier is opaque: its locals are its own. */
+
+typedef struct {
+    ray_t *loc, *glb, *ref, *con;
+    int    oom;
+} lam_scan_t;
+
+static int symvec_has(ray_t* v, int64_t id) {
+    if (!v || v->type != RAY_SYM) return 0;
+    const void* d = ray_data(v);
+    for (int64_t i = 0, n = ray_len(v); i < n; i++)
+        if (ray_read_sym(d, i, RAY_SYM, v->attrs) == id) return 1;
+    return 0;
+}
+
+static void sym_add(ray_t** v, int64_t id, int* oom) {
+    if (*oom || !*v || symvec_has(*v, id)) return;
+    ray_t* n = ray_vec_append(*v, &id);
+    if (!n) { *oom = 1; return; }
+    *v = n;
+}
+
+/* ray_sym_str is BORROWED (PLAN.md register, 2026-07-30) — no release here */
+static int sym_dotted(int64_t id) {
+    ray_t* s = ray_sym_str(id);
+    return s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == '.';
+}
+
+static int ctl_sym(int64_t id) {
+    const eval_syms_t* S = syms();
+    return id == S->semi || id == S->colon || id == S->gcolon ||
+           id == S->kif || id == S->kwhile || id == S->kdo;
+}
+
+static int fn_value(ray_t* x) {
+    return x && (x->type == RAY_LAMBDA || x->type == RAY_UNARY ||
+                 x->type == RAY_BINARY || x->type == RAY_VARY ||
+                 x->type == RAY_QFN);
+}
+
+static void lam_scan(ray_t* n, lam_scan_t* s) {
+    if (!n || s->oom || fn_value(n)) return;
+    if (nameref(n)) {
+        /* a keyword head is a verb, not a free global: the registry owns the
+         * name (assignment to it is 'assign), so it can never be a user's */
+        if (!ctl_sym(n->i64) && !is_hole(n) && !q_registry_is_reserved(n->i64))
+            sym_add(&s->ref, n->i64, &s->oom);
+        return;
+    }
+    if (n->type != RAY_LIST) {
+        ray_t* c = ray_list_append(s->con, n);
+        if (!c) { s->oom = 1; return; }
+        s->con = c;
+        return;
+    }
+    int64_t k = ray_len(n);
+    ray_t** e = (ray_t**)ray_data(n);
+    if (k == 0) return;
+    const eval_syms_t* S = syms();
+    if (k == 3 && nameref(e[0]) &&
+        (e[0]->i64 == S->colon || e[0]->i64 == S->gcolon)) {
+        if (nameref(e[1])) {
+            int global = e[0]->i64 == S->gcolon || sym_dotted(e[1]->i64);
+            sym_add(global ? &s->glb : &s->loc, e[1]->i64, &s->oom);
+        } else {
+            lam_scan(e[1], s);
+        }
+        lam_scan(e[2], s);
+        return;
+    }
+    /* the signal/return char-atom heads are syntax, not constants */
+    if (k == 2 && e[0] && e[0]->type == -RAY_CHARV &&
+        (e[0]->u8 == '\'' || e[0]->u8 == ':')) {
+        lam_scan(e[1], s);
+        return;
+    }
+    for (int64_t i = 0; i < k; i++) lam_scan(e[i], s);
+}
+
+/* the namespace slot prints bare (`test`d`e), so drop the context's dot */
+static int64_t ns_bare(ray_t* ctx) {
+    if (!ctx) return ray_sym_intern_runtime("", 0);
+    ray_t* s = ray_sym_str(ctx->i64);
+    if (!s) return ray_sym_intern_runtime("", 0);
+    const char* p = ray_str_ptr(s);
+    int64_t n = ray_str_len(s);
+    if (n > 0 && p[0] == '.') { p++; n--; }
+    return ray_sym_intern_runtime(p, (size_t)n);
+}
+
+static ray_t* list_put(ray_t* out, ray_t* v) {
+    if (!out) { ray_release(v); return NULL; }
+    if (!v) { ray_release(out); return NULL; }
+    ray_t* r = ray_list_append(out, v);
+    ray_release(v);
+    return r;
+}
+
+static ray_t* lambda_structure(ray_t* v) {
+    ray_t *params = NULL, *body = NULL, *ctx = NULL;
+    if (!q_eval_apply_lambda_parts(v, &params, &body, &ctx)) return NULL;
+
+    lam_scan_t s = { ray_sym_vec_new(RAY_SYM_W64, 4), ray_sym_vec_new(RAY_SYM_W64, 4),
+                     ray_sym_vec_new(RAY_SYM_W64, 4), ray_list_new(1), 0 };
+    if (!s.loc || !s.glb || !s.ref || !s.con) s.oom = 1;
+    lam_scan(body, &s);
+
+    /* a referenced name is global unless it is a parameter or a body local */
+    for (int64_t i = 0, n = s.ref ? ray_len(s.ref) : 0; i < n && !s.oom; i++) {
+        int64_t id = ray_read_sym(ray_data(s.ref), i, RAY_SYM, s.ref->attrs);
+        if (symvec_has(params, id) || symvec_has(s.loc, id)) continue;
+        sym_add(&s.glb, id, &s.oom);
+    }
+    ray_t* nsg = ray_sym_vec_new(RAY_SYM_W64, 1 + (s.glb ? ray_len(s.glb) : 0));
+    if (!nsg) s.oom = 1;
+    else {
+        int64_t id = ns_bare(ctx);
+        nsg = ray_vec_append(nsg, &id);
+        for (int64_t i = 0, n = s.glb ? ray_len(s.glb) : 0; i < n && nsg; i++) {
+            int64_t g = ray_read_sym(ray_data(s.glb), i, RAY_SYM, s.glb->attrs);
+            nsg = ray_vec_append(nsg, &g);
+        }
+        if (!nsg) s.oom = 1;
+    }
+
+    ray_t* out = s.oom ? NULL : ray_list_new(10);
+    ray_t* bc = ray_vec_new(RAY_BYTE_ONLY, 1);          /* no bytecode: 0x */
+    if (bc) bc->len = 0;
+    out = list_put(out, bc);
+    if (params) ray_retain(params);
+    out = list_put(out, params ? params : ray_sym_vec_new(RAY_SYM_W64, 1));
+    out = list_put(out, s.loc); s.loc = NULL;
+    out = list_put(out, nsg);   nsg = NULL;
+    for (int64_t i = 0, n = s.con ? ray_len(s.con) : 0; i < n && out; i++) {
+        ray_t* c = ((ray_t**)ray_data(s.con))[i];
+        ray_retain(c);
+        out = list_put(out, c);
+    }
+    ray_t* m = ray_vec_new(RAY_I64, 1);                 /* no position map */
+    if (m) m->len = 0;
+    out = list_put(out, m);
+    out = list_put(out, ray_list_new(1));               /* n: () — unnamed */
+    ray_t* fl = ray_vec_new(RAY_CHARV, 1);              /* f: "" */
+    if (fl) fl->len = 0;
+    out = list_put(out, fl);
+    out = list_put(out, ray_i64(-1));                   /* l: -1 */
+    ray_t* src = q_eval_apply_lambda_src(v);
+    out = list_put(out, src ? q_str_charv_of_str(src) : ray_vec_new(RAY_CHARV, 1));
+
+    ray_release(s.loc); ray_release(s.glb); ray_release(s.ref);
+    ray_release(s.con); ray_release(nsg);
+    return out ? out : q_err(QE_WSFULL);
+}
+
 /* `value`/`get` (ref/value.md; get is the synonym).  q `eval` needs no body
  * here — it is .q.eval:(-6!), the q_bang.c arm over q_eval.  value applies
  * ONCE, non-recursively: a string parses+evaluates in the current context, a
@@ -341,7 +505,11 @@ ray_t* q_eval_value_wrap(ray_t* x) {
         ray_release(fv);
         return r;
     }
-    return q_err(QE_NYI);       /* enumeration/lambda-structure/view arms: deferred */
+    if (x->type == RAY_QFN) {
+        ray_t* st = lambda_structure(x);
+        if (st) return st;                  /* NULL = a non-lambda carrier */
+    }
+    return q_err(QE_NYI);       /* enumeration/projection/view arms: deferred */
 }
 
 /* ===== control forms (basics/control.md, ref/{cond,if,do,while}.md) ======
