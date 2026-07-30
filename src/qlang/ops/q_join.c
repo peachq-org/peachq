@@ -959,43 +959,6 @@ static ray_t* qj_wj_core(ray_t** args, int64_t n, int mode) {
 ray_t* q_wj_wrap(ray_t** args, int64_t n)  { return qj_wj_core(args, n, 0); }
 ray_t* q_wj1_wrap(ray_t** args, int64_t n) { return qj_wj_core(args, n, 1); }
 
-/* ---- keyed-table lookup by key-table (q_apply: `y[select a,b from x]`) -----
- * Contract: keytbl must contain ALL of kt's key columns by name ('type
- * otherwise); extra keytbl columns are ignored; result preserves keytbl row
- * order (first match per row); a miss yields a null row. */
-ray_t* q_join_keyed_lookup_rows(ray_t* kt, ray_t* keytbl) {
-    if (!q_type_is_keyed(kt) || !keytbl || keytbl->type != RAY_TABLE)
-        return q_err(QE_TYPE);
-    ray_t* kk = ray_dict_keys(kt);                         /* borrowed */
-    ray_t* kv = ray_dict_vals(kt);                         /* borrowed */
-    ray_t* keys = qj_key_syms(kk);
-    if (!keys || RAY_IS_ERR(keys)) return keys ? keys : q_err(QE_TYPE);
-    /* all key columns must exist in keytbl (by name) */
-    {
-        int64_t nk = ray_len(keys);
-        ray_t** ke = (ray_t**)ray_data(keys);
-        for (int64_t i = 0; i < nk; i++)
-            if (!ray_table_get_col(keytbl, ke[i]->i64)) {
-                ray_release(keys);
-                return q_err(QE_TYPE);
-            }
-    }
-    ray_t* kflat = q_table_flatten(kt);
-    if (!kflat || RAY_IS_ERR(kflat)) { ray_release(keys); return kflat; }
-    qj_pair_t* pairs; ray_t* err;
-    int64_t np = qj_join_pairs(keytbl, kflat, keys, &pairs, &err);
-    ray_release(kflat);
-    if (np < 0) { ray_release(keys); return err; }
-    int64_t nx = ray_table_nrows(keytbl);
-    int64_t* fmap = qj_first_map(pairs, np, nx);
-    free(pairs);
-    ray_release(keys);
-    if (!fmap) return q_err(QE_WSFULL);
-    ray_t* out = qj_table_gather_idx(kv, fmap, nx);
-    free(fmap);
-    return out;
-}
-
 /* ---- generic item access (joins wave) -------------------------------------
  * One boxed item of any sequence: strings iterate CHARS (1-char -RAY_STR
  * cells, string-model shim), atoms behave as 1-item lists.  Owned result. */
