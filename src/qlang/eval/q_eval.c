@@ -98,9 +98,13 @@ static int adv_id(ray_t* x) {
     return -1;
 }
 
+/* ref/signal.md: an undefined word signals the word itself */
 static ray_t* name_error(int64_t id) {
-    (void)id;   /* kdb names the undefined sym; we emit bare 'name (recorded gap) */
-    return q_err(QE_NAME);
+    ray_t* s = ray_sym_str(id);
+    if (!s || RAY_IS_ERR(s)) return q_err(QE_NAME);
+    ray_t* e = q_err_name(ray_str_ptr(s), ray_str_len(s));
+    ray_release(s);
+    return e;
 }
 
 /* Name resolution with the base name hook INLINED (finding 6 / carve-eval
@@ -470,6 +474,38 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
     return nv;                                       /* q returns the NEW value */
 }
 
+/* Signal `'x` / explicit return `:x` — SYNTAX forms beside $/if/do/while,
+ * never verbs (ref/signal.md: "not an operator"). */
+
+/* `'x`: symbol atom or string, else 'stype (ref/signal.md Restrictions);
+ * signals the text */
+static ray_t* signal_eval(ray_t* expr) {
+    ray_t* v = q_eval_apply_concrete(q_eval(expr));
+    if (RAY_IS_ERR(v)) return v;
+    ray_t* txt = NULL;
+    if (v->type == RAY_CHARV) { ray_retain(v); txt = v; }
+    else if (v->type == -RAY_SYM) {
+        ray_t* s = ray_sym_str(v->i64);
+        if (s && !RAY_IS_ERR(s))
+            txt = ray_charv(ray_str_ptr(s), (int64_t)ray_str_len(s));
+    }
+    ray_release(v);
+    if (!txt || RAY_IS_ERR(txt)) return txt ? txt : q_err(QE_STYPE);
+    ray_t* r = q_err_signal(QE_SIGNAL, txt);
+    ray_release(txt);
+    return r;
+}
+
+/* `:x` rides the error-return path as a QE_RETURN sentinel that the
+ * lambda-apply boundary unwraps into an ordinary successful result */
+static ray_t* return_eval(ray_t* expr) {
+    ray_t* v = q_eval_apply_concrete(q_eval(expr));
+    if (RAY_IS_ERR(v)) return v;
+    ray_t* r = q_err_signal(QE_RETURN, v);
+    ray_release(v);
+    return r;
+}
+
 /* paren list literal: elements RTL, boxed build + collapse */
 static ray_t* list_lit(ray_t** e, int64_t n) {
     ray_t* argv[EVAL_MAX_ARGS];
@@ -542,6 +578,14 @@ ray_t* q_eval(ray_t* node) {
                 ray_t* ma = modassign_eval(h, e[1], e[2]);
                 if (ma) { ret = ma; goto out; }
             }
+        }
+
+        /* trees are DATA: the char-atom heads match by CONTENT, so an
+         * eval'd `("'";`e)` signals exactly like parsed source */
+        if (h && h->type == -RAY_CHARV && n == 2 &&
+            (h->u8 == '\'' || h->u8 == ':')) {
+            ret = h->u8 == '\'' ? signal_eval(e[1]) : return_eval(e[1]);
+            goto out;
         }
 
         {   /* bare (iterator;F) — the derived value; F resolves as the

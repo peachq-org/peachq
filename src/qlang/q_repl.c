@@ -10,7 +10,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/q_repl.h"
-#include "qlang/q_err.h"   /* q_err_class — full class name for console display */
+#include "qlang/q_err.h"   /* q_err_text — full error text for console display */
 #include "qlang/q_parse.h"
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
 #include "qlang/q_fmt.h"
@@ -251,6 +251,8 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
     if (n == 0)
         return;
 
+    q_err_drop();   /* statement-entry error-payload backstop (q_err.c head) */
+
     /* `\`-system-command line: the shared q_sys glue renders console side
      * effects + value into buf (value-or-throw; `\\`/exit act inside q_sys).
      * Console lines arrive '\n'-terminated, a rendered value does not — the
@@ -263,8 +265,11 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
             if (buf[strlen(buf) - 1] != '\n') fputc('\n', out);
         }
         if (sr) {
-            const char* code = q_err_class(sr);
-            fprintf(err, "error: %s\n", (code && *code) ? code : "syscmd");
+            int64_t tn = 0;
+            const char* text = q_err_text(sr, &tn);
+            fprintf(err, "error: %.*s\n",
+                    (text && tn) ? (int)tn : 6, (text && tn) ? text : "syscmd");
+            q_err_drop();
             ray_error_free(sr);
         }
         fflush(out);
@@ -305,8 +310,11 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
     }
 
     if (RAY_IS_ERR(r)) {
-        const char* code = q_err_class(r);
-        fprintf(err, "error: %s\n", (code && *code) ? code : "eval");
+        int64_t tn = 0;
+        const char* text = q_err_text(r, &tn);
+        fprintf(err, "error: %.*s\n",
+                (text && tn) ? (int)tn : 4, (text && tn) ? text : "eval");
+        q_err_drop();
         ray_error_free(r);
         return;
     }
