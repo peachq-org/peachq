@@ -14,6 +14,8 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/eval/q_eval.h"
+#include "qlang/eval/q_eval_internal.h"
+#include "qlang/eval/q_view.h"
 #include "qlang/q_err.h"
 #include "qlang/q_parse_internal.h"
 #include "qlang/q_ops.h"
@@ -123,7 +125,7 @@ static ray_t* resolve(int64_t id, const q_op_t** row_out) {
         return hit;
     }
     ray_t* v = q_env_resolve(id);            /* owned (or an owned error) */
-    if (v) return v;
+    if (v) return q_view_deref(v);           /* a view reference recalcs */
     v = q_dotz_resolve(id);                  /* owned */
     if (v) return v;
     /* bare identifier -> `.q.<name>` (kdb: keywords ARE .q entries) */
@@ -246,8 +248,10 @@ static ray_t* indexed_assign(int is_global, ray_t* target, ray_t* opv,
             int in_frame = !dotted && q_eval_apply_frame_depth() > 0;
             int local = in_frame &&
                         (!is_global || q_env_local_get(te[0]->i64) != NULL);
+            if (!local) q_view_set_index(idxv, k);   /* .z.vs y (ref/dotz.md) */
             ray_err_t e2 = local ? q_env_local_set(te[0]->i64, amended)
                                  : q_env_set(te[0]->i64, amended);
+            q_view_set_index(NULL, 0);               /* never leaks to the next set */
             if (e2 != RAY_OK) ret = q_err(QE_ASSIGN);
             else if (!opv) { ray_retain(rv); ret = rv; }
             else ret = q_eval_apply_concrete(q_eval_apply_value(amended, idxv, k));
@@ -304,7 +308,7 @@ typedef struct {
     int    oom;
 } lam_scan_t;
 
-static int symvec_has(ray_t* v, int64_t id) {
+int q_eval_symvec_has(ray_t* v, int64_t id) {
     if (!v || v->type != RAY_SYM) return 0;
     const void* d = ray_data(v);
     for (int64_t i = 0, n = ray_len(v); i < n; i++)
@@ -313,7 +317,7 @@ static int symvec_has(ray_t* v, int64_t id) {
 }
 
 static void sym_add(ray_t** v, int64_t id, int* oom) {
-    if (*oom || !*v || symvec_has(*v, id)) return;
+    if (*oom || !*v || q_eval_symvec_has(*v, id)) return;
     ray_t* n = ray_vec_append(*v, &id);
     if (!n) { *oom = 1; return; }
     *v = n;
@@ -325,24 +329,24 @@ static int sym_dotted(int64_t id) {
     return s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == '.';
 }
 
-static int ctl_sym(int64_t id) {
+int q_eval_ctl_sym(int64_t id) {
     const eval_syms_t* S = syms();
     return id == S->semi || id == S->colon || id == S->gcolon ||
            id == S->kif || id == S->kwhile || id == S->kdo;
 }
 
-static int fn_value(ray_t* x) {
+int q_eval_fn_value(ray_t* x) {
     return x && (x->type == RAY_LAMBDA || x->type == RAY_UNARY ||
                  x->type == RAY_BINARY || x->type == RAY_VARY ||
                  x->type == RAY_QFN);
 }
 
 static void lam_scan(ray_t* n, lam_scan_t* s) {
-    if (!n || s->oom || fn_value(n)) return;
+    if (!n || s->oom || q_eval_fn_value(n)) return;
     if (nameref(n)) {
         /* a keyword head is a verb, not a free global: the registry owns the
          * name (assignment to it is 'assign), so it can never be a user's */
-        if (!ctl_sym(n->i64) && !is_hole(n) && !q_registry_is_reserved(n->i64))
+        if (!q_eval_ctl_sym(n->i64) && !is_hole(n) && !q_registry_is_reserved(n->i64))
             sym_add(&s->ref, n->i64, &s->oom);
         return;
     }
@@ -441,7 +445,7 @@ static ray_t* lambda_structure(ray_t* v) {
     /* a referenced name is global unless it is a parameter or a body local */
     for (int64_t i = 0, n = s.ref ? ray_len(s.ref) : 0; i < n && !s.oom; i++) {
         int64_t id = ray_read_sym(ray_data(s.ref), i, RAY_SYM, s.ref->attrs);
-        if (symvec_has(params, id) || symvec_has(s.loc, id)) continue;
+        if (q_eval_symvec_has(params, id) || q_eval_symvec_has(s.loc, id)) continue;
         sym_add(&s.glb, id, &s.oom);
     }
     ray_t* nsg = ray_sym_vec_new(RAY_SYM_W64, 1 + (s.glb ? ray_len(s.glb) : 0));
@@ -540,6 +544,7 @@ ray_t* q_eval_value_wrap(ray_t* x) {
         ray_release(fv);
         return r;
     }
+    if (q_view_is(x)) return q_view_value4(x);   /* value`. `v — ref/value.md */
     if (x->type == RAY_QFN) {
         ray_t* st = lambda_structure(x);
         if (!st) st = carrier_value(x);
