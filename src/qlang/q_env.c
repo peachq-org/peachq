@@ -1,9 +1,9 @@
 /* q_env — q's K-tree as NESTED DICTS.  See q_env.h for the model.
  *
  * The two NAME-FACING verbs live here rather than in ops/: `key` and `set`
- * read and write the tree itself (root roster, context members, the settable
- * .z handler slots, the one .ipc.on.* seam), so their bodies belong beside
- * the tree, not beside the table kernels their dict arms happen to touch. */
+ * read and write the tree itself (root roster, context members, the one
+ * .ipc.on.* seam), so their bodies belong beside the tree, not beside the
+ * table kernels their dict arms happen to touch. */
 #define _POSIX_C_SOURCE 200809L
 #define Q_OPS_ENV_GRANDFATHER /* the .ipc.on.* six-slot callback seam: ray_env_set on hook syms only */
 #include "qlang/q_env.h"
@@ -179,7 +179,7 @@ static ray_err_t env_store(ray_t** home, const int64_t* segs, int nseg, ray_t* v
     if (!*home) return RAY_ERR_DOMAIN;
     ray_retain(*home);
     ray_t* nd = env_amend(*home, segs, nseg, 0, val);
-    if (!nd) return RAY_ERR_TYPE;
+    if (!nd) return RAY_ERR_DOMAIN;
     ray_release(*home);
     *home = nd;
     return RAY_OK;
@@ -188,8 +188,8 @@ static ray_err_t env_store(ray_t** home, const int64_t* segs, int nseg, ray_t* v
 static ray_err_t env_put(int64_t sym, ray_t* val, int boot_new) {
     const char* p; size_t n;
     ray_t* s = name_str(sym, &p, &n);
-    if (!s) return RAY_ERR_TYPE;
-    ray_err_t e = RAY_ERR_TYPE;
+    if (!s) return RAY_ERR_DOMAIN;
+    ray_err_t e = RAY_ERR_DOMAIN;
     int64_t segs[ENV_SEG_MAX];
     if (n > 0 && !(n == 1 && p[0] == '.')) {
         size_t start = env_start(p, n);
@@ -212,16 +212,58 @@ static ray_err_t env_put(int64_t sym, ray_t* val, int boot_new) {
 
 ray_err_t q_env_bind(int64_t sym, ray_t* val) { return env_put(sym, val, 1); }
 
-/* The six `.ipc.on.*` hook syms alias the `.z.p*` handlers over RAYFALL's env
- * (the one deliberate seam — src/core/ipc.c reads them from g_env at
- * dispatch).  Exactly these six route through; every other rayfall name is
- * unreachable from q. */
+/* `` `. `` names the root itself, so assigning a dict RESTORES its members as
+ * globals (ref/get.md `set`) — the ` -> :: marker is representation, skipped.
+ * Members go back through q_env_set, so each gets the same name policy. */
+static ray_err_t env_root_splat(ray_t* d) {
+    if (!d || d->type != RAY_DICT) return RAY_ERR_TYPE;
+    ray_t*  dk = ray_dict_keys(d);                  /* borrowed */
+    ray_t*  dv = ray_dict_vals(d);                  /* borrowed */
+    int64_t n = ray_dict_len(d), marker = env_marker();
+    ray_err_t e = RAY_OK;
+    for (int64_t i = 0; i < n && e == RAY_OK; i++) {
+        ray_t* k = q_join_item(dk, i);              /* owned */
+        ray_t* v = q_join_item(dv, i);              /* owned */
+        if (!k || RAY_IS_ERR(k) || k->type != -RAY_SYM || !v || RAY_IS_ERR(v))
+            e = RAY_ERR_TYPE;
+        else if (k->i64 != marker)
+            e = q_env_set(k->i64, v);
+        if (k && !RAY_IS_ERR(k)) ray_release(k);
+        if (v && !RAY_IS_ERR(v)) ray_release(v);
+    }
+    return e;
+}
+
+/* THE one write home: every q form that binds a name (`:` `::`, indexed and
+ * modified assign, `@`/`.` name-amend, `set`) lands here, so the whole name
+ * policy is stated once — the `` `. `` root splat, the `.z.p*` alias onto the
+ * six `.ipc.on.*` hook syms over RAYFALL's env (the one deliberate seam:
+ * src/core/ipc.c reads them from g_env at dispatch), the `.z.zd` refusal.
+ * Everything else is an ordinary tree amend, settable `.z.*` handlers
+ * included — they are plain globals their C fire sites read by name. */
 ray_err_t q_env_set(int64_t sym, ray_t* val) {
     if (!val) return q_env_unbind(sym);
     if (ray_sym_is_ipc_hook(sym)) return ray_env_set(sym, val);
+    const char* p; size_t n;
+    ray_t* s = name_str(sym, &p, &n);
+    if (!s) return RAY_ERR_DOMAIN;
+    int nyi  = q_dotz_write_is_nyi(p, n);
+    int hook = q_dotz_ipc_hook_index(p, n);
+    int root = n == 1 && p[0] == '.';
+    ray_release(s);
+    if (nyi) return RAY_ERR_NYI;
+    if (hook >= 0) return ray_env_set(ray_sym_ipc_hook(hook), val);
+    if (root) return env_root_splat(val);
     ray_err_t e = env_put(sym, val, 0);
     if (e == RAY_OK) q_view_on_global_set(sym);   /* invalidation + .z.vs */
     return e;
+}
+
+/* q_env_err — see q_env.h. */
+ray_t* q_env_err(ray_err_t e) {
+    if (e == RAY_ERR_NYI)  return q_err(QE_NYI);
+    if (e == RAY_ERR_TYPE) return q_err(QE_TYPE);
+    return q_err(QE_ASSIGN);
 }
 
 ray_err_t q_env_unbind(int64_t sym) {
@@ -592,89 +634,27 @@ void q_env_destroy(void) {
     g_ctx = g_ctx_seg = 0;
 }
 
-/* q `nam set y` (ref/get.md) — assign a global through a symbol handle:
- *   `a set 42        -> bind the global (dotted names create contexts)
- *   `.foo set d      -> ordinary rebind, `:`-identical — the old namespace
- *                       dict goes with the name (no splat: dict model)
- *   `. set d         -> restore root variables from dict d
- *   `:f set y        -> write a kdb+ flat file (q_wirefile_write)
- * The splayed form and the compressed (file;lbs;alg;lvl) left-arguments are a
- * later wave: 'nyi.  Returns the handle (kdb returns nam). */
+/* q `nam set y` (ref/get.md) — assign a global through a symbol handle.  It is
+ * `:`-identical by construction: the file handle (`:f set y -> a kdb+ flat
+ * file) is the ONE thing a source-level assignment cannot spell, and every
+ * other name goes to the shared write home.  The splayed form and the
+ * compressed (file;lbs;alg;lvl) left-arguments are a later wave: 'nyi.
+ * Returns the handle (kdb returns nam). */
 ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
     if (!x || x->type != -RAY_SYM)
         return q_err(QE_NYI);
     ray_t* s = ray_sym_str(x->i64);
     if (!s) return q_err(QE_TYPE);
-    const char* nm = ray_str_ptr(s);
     size_t l = ray_str_len(s);
-    if (l == 0) {
-        ray_release(s);
-        return q_err(QE_TYPE);
-    }
-    if (nm[0] == ':') {                         /* file handle: q_wirefile writes it */
-        ray_release(s);
+    int isfile = l > 0 && ray_str_ptr(s)[0] == ':';
+    ray_release(s);
+    if (l == 0) return q_err(QE_TYPE);
+    if (isfile) {
         ray_t* r = q_wirefile_write(x, y);
         return r ? r : q_err(QE_TYPE);
     }
-    int is_root = (l == 1 && nm[0] == '.');
-    if (is_root && y && y->type == RAY_DICT) {
-        /* root restore: upsert each member as a plain global */
-        ray_t* dk = ray_dict_keys(y);           /* borrowed */
-        ray_t* dv = ray_dict_vals(y);           /* borrowed */
-        int64_t n = ray_dict_len(y);
-        for (int64_t i = 0; i < n; i++) {
-            ray_t* k = q_join_item(dk, i);          /* owned */
-            ray_t* v = q_join_item(dv, i);          /* owned */
-            if (!k || RAY_IS_ERR(k) || k->type != -RAY_SYM || !v || RAY_IS_ERR(v)) {
-                if (k && !RAY_IS_ERR(k)) ray_release(k);
-                if (v && !RAY_IS_ERR(v)) ray_release(v);
-                ray_release(s);
-                return q_err(QE_TYPE);
-            }
-            ray_t* ks = ray_sym_str(k->i64);
-            int skip = !ks || ray_str_len(ks) == 0;   /* :: placeholder */
-            if (ks) ray_release(ks);
-            ray_err_t err = skip ? RAY_OK : q_env_set(k->i64, v);
-            ray_release(k);
-            ray_release(v);
-            if (err != RAY_OK) {
-                ray_release(s);
-                return ray_error(ray_err_code_str(err), "set: assign failed");
-            }
-        }
-        ray_release(s);
-        ray_retain(x);
-        return x;
-    }
-    if (is_root) {                              /* `. set non-dict: no reading */
-        ray_release(s);
-        return q_err(QE_TYPE);
-    }
-    /* Settable `.z.*` handler slots (`.z.ts`/`.z.exit`/`.z.p*`/`.z.w*`/`.z.ac`) —
-     * NOT `.ipc.on.*` hooks.  dotz.c owns the name->slot dispatch AND the
-     * {…}-carrier unwrap (call_fn1 fires a bare lambda); q_dotz_set declines any
-     * non-handler name so it falls through to the `.ipc.on.*`/plain-env path. */
-    if (q_dotz_write_is_nyi(nm, l)) {
-        ray_release(s);
-        return q_err(QE_NYI);
-    }
-    if (q_dotz_set(nm, l, y)) {
-        ray_release(s);
-        ray_retain(x);
-        return x;
-    }
-    /* kdb `.z.p*` connection-handler aliases write the `.ipc.on.*` slot that
-     * ipc.c's hook_lookup reads — the six-slot callback table stays in
-     * RAYFALL's env (the one deliberate seam; a direct `.ipc.on.*` set no
-     * longer reaches it, closing the write-side leak).  A q `{…}` binds
-     * AS-IS: RAY_QFN carriers fire through the value-apply seam (ipc.c
-     * hook_fire).  (hk computed BEFORE ray_release(s): `nm` points into `s`.) */
-    int hk = q_dotz_ipc_hook_index(nm, l);
-    ray_release(s);
-    ray_err_t err = hk >= 0 ? ray_env_set(ray_sym_ipc_hook(hk), y)
-                            : q_env_set(x->i64, y);
-    if (err != RAY_OK)
-        return ray_error(ray_err_code_str(err), "set: assign failed");
+    ray_err_t err = q_env_set(x->i64, y);
+    if (err != RAY_OK) return q_env_err(err);
     ray_retain(x);
     return x;
 }
