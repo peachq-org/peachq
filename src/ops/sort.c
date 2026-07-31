@@ -55,6 +55,14 @@ int sort_cmp(const sort_cmp_ctx_t* ctx, int64_t a, int64_t b) {
             double vb = ((double*)ray_data(col))[b];
             if (va < vb) cmp = -1;
             else if (va > vb) cmp = 1;
+        } else if (col->type == RAY_F32) {
+            /* F32 is excluded from the radix admission list, so EVERY f32
+             * sort lands on this comparator — without this arm cmp stays 0
+             * and the "sort" is the input order. */
+            float va = ((float*)ray_data(col))[a];
+            float vb = ((float*)ray_data(col))[b];
+            if (va < vb) cmp = -1;
+            else if (va > vb) cmp = 1;
         } else if (col->type == RAY_I64 || RAY_IS_TEMPORAL64(col->type)) {
             int64_t va = ((int64_t*)ray_data(col))[a];
             int64_t vb = ((int64_t*)ray_data(col))[b];
