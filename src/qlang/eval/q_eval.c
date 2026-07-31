@@ -511,9 +511,16 @@ ray_t* q_eval_value_wrap(ray_t* x) {
         memcpy(z, p, (size_t)n);
         z[n] = 0;
         ray_t* ast = q_parse(z);
+        if (!ast || RAY_IS_ERR(ast)) {
+            ray_free_raw(z);
+            return ast ? ast : q_err(QE_PARSE);
+        }
+        /* value of SOURCE TEXT is a statement, so `z::e` defines a view here
+         * just as it does at the repl seam — unlike eval of a parse TREE,
+         * which cannot carry the distinction (learn/views.md#parse). */
+        ray_t* r;
+        if (!q_view_intercept(ast, z, &r)) r = q_eval(ast);
         ray_free_raw(z);
-        if (!ast || RAY_IS_ERR(ast)) return ast ? ast : q_err(QE_PARSE);
-        ray_t* r = q_eval(ast);
         ray_release(ast);
         return r;
     }
