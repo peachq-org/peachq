@@ -262,7 +262,7 @@ static ray_t* view_define(int64_t name, ray_t* body, const char* txt,
                                                 * view the roster cannot see */
     ray_err_t e = q_env_set(name, c);
     ray_release(c);
-    if (e != RAY_OK) return q_err(QE_ASSIGN);
+    if (e != RAY_OK) return q_env_err(e);
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;
 }

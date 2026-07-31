@@ -1,7 +1,7 @@
 /* q_sys — see q_sys.h.  The unified `\`-command dispatcher: one line pre-parse
  * (command token / `:n` repeat suffix / first-arg token / whole argument
- * region) feeding a SWITCH on the command char (the q_dotz.c z_slot_ptr idiom),
- * each case calling its handler with only the arguments it needs.  A handler
+ * region) feeding a SWITCH on the command char, each case calling its handler
+ * with only the arguments it needs.  A handler
  * returns an OWNED value (NULL = silent) or an OWNED error — including `\\`
  * (q_sys_exit) and the unknown-token shell miss, both gated by the g_own_process
  * capability rather than by the caller.  \d owns the current-context state
@@ -977,8 +977,8 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
 
     /* Dispatch on the command TOKEN — a switch on the single command char in
      * the common case, a short length+char check for the multi-char forms
-     * (\ts \cd \nonlegacy).  Case-sensitive (\c ≠ \C), the q_dotz.c z_slot_ptr
-     * idiom.  Each case passes ONLY the arguments its handler needs (no uniform
+     * (\ts \cd \nonlegacy).  Case-sensitive (\c ≠ \C).  Each case passes ONLY
+     * the arguments its handler needs (no uniform
      * signature).  An unmatched single char (no case, no default) or any other
      * unrecognized token falls through to the shell-out; bare `\` is the silent
      * q/k toggle (deferred, no k mode). */

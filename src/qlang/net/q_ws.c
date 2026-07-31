@@ -6,7 +6,7 @@
 #include <rayforce.h>
 #include "qlang/net/q_ws.h"
 #include "qlang/net/q_http.h"      /* q_http_send_all — bounded sends */
-#include "qlang/q_dotz.h"      /* the `.z.ws`/`.z.wo`/`.z.wc` handler slots */
+#include "qlang/q_env.h"       /* q_env_get — the `.z.ws`/`.z.wo`/`.z.wc` handlers */
 #include "qlang/q_builtins.h"  /* q_dotq_sha1_fn / q_dotq_btoa_fn — accept key */
 #include "qlang/q_console.h"   /* q_console_str/_reset — drain handler output */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_value — handler firing */
@@ -205,7 +205,7 @@ static void ws_hook_fire(ray_t* fn, ray_t* arg, const char* name) {
 }
 
 void q_ws_on_open(int64_t qhandle) {
-    ray_t* fn = q_dotz_get(".z.wo", 5);             /* borrowed; NULL = unset (no default) */
+    ray_t* fn = q_env_get(ray_sym_intern_runtime(".z.wo", 5));   /* borrowed; NULL = unset (no default) */
     if (!fn) return;
     ray_t* h = ray_i32((int32_t)qhandle);
     ws_hook_fire(fn, h, ".z.wo");
@@ -213,7 +213,7 @@ void q_ws_on_open(int64_t qhandle) {
 }
 
 void q_ws_on_close(int64_t qhandle) {
-    ray_t* fn = q_dotz_get(".z.wc", 5);
+    ray_t* fn = q_env_get(ray_sym_intern_runtime(".z.wc", 5));
     if (!fn) return;
     ray_t* h = ray_i32((int32_t)qhandle);
     ws_hook_fire(fn, h, ".z.wc");
@@ -245,7 +245,7 @@ struct q_ws_conn {
  * may close us). */
 static void ws_dispatch(q_ws_conn_t* c, ray_sock_t fd, int opcode,
                         const uint8_t* p, size_t n) {
-    ray_t* fn = q_dotz_get(".z.ws", 5);             /* borrowed; NULL = unset */
+    ray_t* fn = q_env_get(ray_sym_intern_runtime(".z.ws", 5));   /* borrowed; NULL = unset */
     if (!fn) {
         if (opcode == Q_WS_OP_BIN && c->role == Q_WS_SERVER)
             ws_frame_send(fd, Q_WS_OP_BIN, p, n, Q_WS_DATA_SECS, 0);
