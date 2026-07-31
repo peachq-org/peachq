@@ -297,7 +297,7 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -9:  return h_deser(y);
         case -12: return q_net_host(y);
         case -13: return q_net_addr(y);
-        case -14: return q_io_csv_quote(y);
+        case -14: return q_io_filetext_csv_quote(y);
         case -15: return q_md5_fn(y);
         case -16: return h_refcnt(y);
         case -18: return h_zip(y);
