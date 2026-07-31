@@ -11,6 +11,7 @@
 #include "lang/eval.h"     /* ray_eq_fn/ray_neq_fn, ray_neg_fn */
 #include "lang/internal.h" /* atomic_map_unary, as_f64, is_numeric, is_temporal, make_f64 */
 #include "qlang/q_type.h"  /* q_type_as_i64 / q_type_is_numeric_or_temporal / q_type_is_bool */
+#include "qlang/eval/q_eval.h" /* carrier read-out: `~` decomposes function values */
 #include <math.h>          /* sin/cos/tan/asin/acos/atan, exp/log, floor/floorf, ceil/ceilf */
 #include <string.h>        /* memcmp, memcpy */
 #include <stdlib.h>        /* malloc, free */
@@ -342,6 +343,53 @@ ray_t* q_not_wrap(ray_t* x) {
     return r;
 }
 
+/* `~` on FUNCTION values (owner ruling 2026-07-31 — ref/match.md pins only
+ * data).  A function's identity is its STRUCTURE, never its object address or
+ * its bytes: a lambda IS its source plus its defining context, a derived
+ * function its iterator plus its operand, a projection its function plus its
+ * bound arguments, a composition its parts, an iterator its adverb id.
+ * Native fn values are registry snapshots (one per (row,valence)), so the
+ * pointer test at the head of q_match_rec already decides those. */
+static int match_carrier(ray_t* a, ray_t* b) {
+    int kind = q_eval_apply_carrier_kind(a);
+    if (kind != q_eval_apply_carrier_kind(b)) return 0;
+    switch (kind) {
+    case Q_EVAL_CAR_LAMBDA: {
+        ray_t *pa = NULL, *ba = NULL, *ca = NULL, *pb = NULL, *bb = NULL, *cb = NULL;
+        q_eval_apply_lambda_parts(a, &pa, &ba, &ca);
+        q_eval_apply_lambda_parts(b, &pb, &bb, &cb);
+        if (!q_match_rec(ca, cb)) return 0;
+        ray_t* sa = q_eval_apply_lambda_src(a);
+        ray_t* sb = q_eval_apply_lambda_src(b);
+        /* a source-less carrier (built by serde, not parsed) falls back to
+         * the parts the source would have produced */
+        if (sa && sb) return q_match_rec(sa, sb);
+        return q_match_rec(pa, pb) && q_match_rec(ba, bb);
+    }
+    case Q_EVAL_CAR_DERIV:
+        return q_eval_apply_deriv_adv(a) == q_eval_apply_deriv_adv(b) &&
+               q_match_rec(q_eval_apply_car_head(a), q_eval_apply_car_head(b));
+    case Q_EVAL_CAR_PROJ: {
+        int64_t n = q_eval_apply_proj_nslots(a);
+        if (n != q_eval_apply_proj_nslots(b)) return 0;
+        if (!q_match_rec(q_eval_apply_car_head(a), q_eval_apply_car_head(b)))
+            return 0;
+        for (int64_t i = 0; i < n; i++)      /* a hole is C NULL, and NULL~NULL */
+            if (!q_match_rec(q_eval_apply_proj_arg(a, i),
+                             q_eval_apply_proj_arg(b, i)))
+                return 0;
+        return 1;
+    }
+    case Q_EVAL_CAR_COMP:
+        return q_match_rec(q_eval_apply_car_head(a), q_eval_apply_car_head(b)) &&
+               q_match_rec(q_eval_apply_comp_inner(a), q_eval_apply_comp_inner(b));
+    case Q_EVAL_CAR_ITER:
+        return q_eval_apply_iter_id(a) == q_eval_apply_iter_id(b);
+    default:
+        return 0;
+    }
+}
+
 /* q `x~y` — recursive whole-value equivalence (kdb match): TYPE-strict
  * (`1~1f` is 0b), attribute-blind (`1 2 3~\`s#1 2 3` is 1b), sentinel nulls
  * compare equal (`0n~0n` is 1b — non-finites canonicalize to one payload).
@@ -360,6 +408,7 @@ int q_match_rec(ray_t* a, ray_t* b) {
         return a->obj && b->obj &&
                memcmp(ray_data(a->obj), ray_data(b->obj), 16) == 0;
     }
+    if (q_eval_apply_carrier_kind(a)) return match_carrier(a, b);
     if (ray_is_atom(a)) {
         /* inline-payload scalars ONLY (ray_is_atom also covers LAMBDA and
          * fn values, whose state is NOT in the union slot — those fall to
