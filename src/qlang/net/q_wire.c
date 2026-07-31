@@ -860,6 +860,19 @@ static ray_t* rd_obj_inner(rcur_t* c) {
     case 100: {                                       /* lambda: context + source */
         const char* ctx; size_t ctxn;
         if (r_cstr(c, &ctx, &ctxn)) return trunc_err("lambda context");
+        /* Owner ruling 2026-07-31: the sender's `\d` context is HONOURED, so an
+         * unqualified global in the body resolves against the RECEIVER's copy of
+         * that namespace.  Dotless on the wire, empty = root; a namespace we do
+         * not have is 'name — never auto-created, never a root fallback. */
+        int64_t ns = 0;
+        if (ctxn) {
+            char nb[64];
+            if (ctxn + 1 >= sizeof nb) return q_err(QE_NAME);
+            nb[0] = '.';
+            memcpy(nb + 1, ctx, ctxn);
+            ns = ray_sym_intern_runtime(nb, ctxn + 1);
+            if (!q_env_ns_exists(ns)) return q_err(QE_NAME);
+        }
         ray_t* src = rd_obj(c);
         if (!src || RAY_IS_ERR(src)) return src ? src : q_err(QE_DOMAIN);
         if (src->type == RAY_CHARV || src->type == -RAY_CHARV) {
@@ -885,11 +898,16 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         if (!z) { ray_release(src); return q_err(QE_WSFULL); }
         memcpy(z, sp, n); z[n] = 0;
         ray_release(src);
+        /* restored on EVERY exit: a leaked context would corrupt every later
+         * decode in this process. */
+        int64_t saved = q_env_ctx();
+        q_env_ctx_set(ns);
         ray_t* ast = q_parse(z);
         ray_free_raw(z);
-        if (!ast || RAY_IS_ERR(ast)) return ast ? ast : q_err(QE_PARSE);
-        ray_t* lam = q_eval(ast);
-        ray_release(ast);
+        ray_t* lam;
+        if (!ast || RAY_IS_ERR(ast)) lam = ast ? ast : q_err(QE_PARSE);
+        else { lam = q_eval(ast); ray_release(ast); }
+        q_env_ctx_set(saved);
         return lam;
     }
     case 101:                                         /* (::) / unary primitive */
