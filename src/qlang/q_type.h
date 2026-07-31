@@ -133,6 +133,10 @@ int q_type_is_iter(ray_t* v);
 /* q treats the null symbol ` AS null (base sym-0 is the empty symbol). */
 int q_type_is_null_sym(ray_t* x);
 
+/* Is this atom its type's ±infinity (0W / -0W / ±0w)?  RAY_ATOM_IS_NULL's twin
+ * at the far end of the lane; 0 for the types the docs pin no infinity for. */
+int q_type_is_inf(ray_t* x);
+
 /* q `null x` verb body — elementwise null test, owns the collapse. Registered
  * RAY_FN_NONE; keeps its _wrap name across the home move. */
 ray_t* q_null_wrap(ray_t* x);
