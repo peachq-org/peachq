@@ -160,11 +160,10 @@ static void idx_reset(void) {
 /* ===== registry SPECIALS — internal (spelling-less) fn-values ==============
  * ONE plain data table drives the g_specials[] slots, the init build loop,
  * the teardown release loop, and the borrowed-ref accessors below.  Since the
- * eval-rebuild cutover the survivors are PARSER-EMBEDDED MARKER heads that
- * the evaluator intercepts by pointer identity (the literal ctor in q_eval,
- * compose in the apply module) — the bodies never run, so all share spec_nyi.
+ * eval-rebuild cutover the survivor is the `'[f;g;…]` compose head, which the
+ * apply module claims by pointer identity, so its body never runs.
  * Accessors return BORROWED refs, NULL before init. */
-enum { SPEC_list, SPEC_compose, SPEC_N };
+enum { SPEC_compose, SPEC_N };
 
 enum spec_kind { SK_UNARY, SK_BINARY, SK_VARY };   /* -> ray_fn_unary/binary/vary */
 
@@ -176,9 +175,6 @@ static ray_t* spec_nyi(ray_t** args, int64_t n) {
 typedef struct { const char* wire; uint8_t kind; uint32_t flags; void* fn; } q_special_t;
 
 static const q_special_t SPECIALS[SPEC_N] = {
-    /* ctx constructor head: SPECIAL_FORM marker — q_eval builds the literal
-     * natively after intercepting it by pointer */
-    [SPEC_list]        = { "list",        SK_VARY, RAY_FN_SPECIAL_FORM, (void*)spec_nyi },
     /* compose `'[f;g;…]` head — the apply module's compose_apply claims it */
     [SPEC_compose]     = { "q.compose",   SK_VARY, RAY_FN_NONE,         (void*)spec_nyi },
 };
@@ -190,7 +186,11 @@ static ray_t* g_specials[SPEC_N];
  * singletons like the specials, so `~` settles them on pointer identity */
 static ray_t* g_iters[6];
 
-ray_t* q_registry_list_value(void)          { return g_specials[SPEC_list]; }          /* borrowed */
+/* the paren-literal ctor head: BORROWED alias of the `enlist` row's monadic
+ * entry (q_registry_init), cached because q_eval probes it on every list node */
+static ray_t* g_list_ctor;
+
+ray_t* q_registry_list_value(void)          { return g_list_ctor; }                    /* borrowed */
 ray_t* q_registry_compose_value(void)       { return g_specials[SPEC_compose]; }
 ray_t* q_registry_iter_value(int adv) {
     return (adv >= 0 && adv < 6) ? g_iters[adv] : NULL;
@@ -427,6 +427,10 @@ ray_err_t q_registry_init(void) {
             g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
         }
     }
+    /* the paren-literal ctor IS the `enlist` verb's value (ADR: one value, not
+     * a spelling-less twin), so the wire codec can read code 41 off its row */
+    g_list_ctor = q_registry_row_value(q_ops_find("enlist", 6), Q_MONADIC);
+    if (!g_list_ctor) { g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN; }
     /* internal (spelling-less) specials — ONE build loop over SPECIALS[]; the
      * failed-build error path is written once (RAY_FN_Q_LOWER stamped here). */
     for (int s = 0; s < SPEC_N; s++) {
@@ -554,11 +558,19 @@ ray_t* q_registry_row_value(const q_op_t* row, q_valence_t valence) {
     return e < 0 ? NULL : g_entries[e].value;   /* borrowed */
 }
 
-int q_registry_kdb_op_of(const ray_t* value) {
+int q_registry_kdb_op_of(const ray_t* value, q_valence_t* valence_out) {
     if (!value) return -1;
-    const q_op_t* row = q_registry_row_of(
-        value, value->type == RAY_UNARY ? Q_MONADIC : Q_DYADIC);
-    return row ? q_ops_kdb_op(row) : -1;
+    /* Probe the arity the ray type implies first, then the other one: a VARY
+     * value carries no arity (the `enlist` ctor and the overloaded glyphs are
+     * all ray_fn_vary), so the MANIFEST cell that holds the value is what says
+     * which primitive class it is — not the C signature it was built with. */
+    q_valence_t first = value->type == RAY_UNARY ? Q_MONADIC : Q_DYADIC;
+    q_valence_t other = first == Q_MONADIC ? Q_DYADIC : Q_MONADIC;
+    const q_op_t* row = q_registry_row_of(value, first);
+    if (!row) { row = q_registry_row_of(value, other); first = other; }
+    if (!row) return -1;
+    if (valence_out) *valence_out = first;
+    return q_ops_kdb_op(row);
 }
 
 ray_t* q_registry_kdb_op_value(int code, q_valence_t valence) {
@@ -610,6 +622,7 @@ bool q_registry_provenance(const ray_t* value, q_provenance_t* out) {
  * g_count, not g_inited, so a half-built table is fully released). */
 void q_registry_destroy(void) {
     ray_serde_set_fn_hooks(NULL, NULL);   /* hooks read g_entries — detach first */
+    g_list_ctor = NULL;                   /* borrowed from an entry released below */
     for (int i = 0; i < g_count; i++)
         if (g_entries[i].value) ray_release(g_entries[i].value);
     for (int s = 0; s < SPEC_N; s++)
