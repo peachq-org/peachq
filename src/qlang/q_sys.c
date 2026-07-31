@@ -31,6 +31,7 @@
 #include "core/timer.h"       /* ray_timers_create/add/del — `\t N` timer heap */
 #include "core/profile.h"     /* ray_profile_now_ns — `\t`/`\ts` wall clock */
 #include "lang/eval.h"        /* ray_eval / ray_eval_get_restricted — timing + guard */
+#include "lang/internal.h"    /* ray_getenv_fn / ray_setenv_fn — the getenv/setenv verbs */
 #include "ops/ops.h"          /* ray_is_lazy / ray_lazy_materialize — timed-expr result */
 #include <rayforce.h>
 #include "mem/heap.h"         /* ray_mem_stats / ray_mem_stats_t — `\w` reuse */
@@ -178,6 +179,18 @@ void q_sys_exit(int code) {
     q_repl_console_close();
     q_dotz_exit_fire(code);
     exit(code);
+}
+
+/* q `exit x` — terminate with exit code x (ref/exit.md; blocked during reval
+ * -> 'access, kdb-true).  All processing lives in q_sys_exit (fires `.z.exit`,
+ * capability-gated): under the doctest/wasm runtimes q_sys_exit returns and the
+ * verb is a silent null — the runner survives corpus `exit 0` rows. */
+ray_t* q_exit_wrap(ray_t* x) {
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (!q_type_is_int_atom(x) || RAY_ATOM_IS_NULL(x)) return q_err(QE_TYPE);
+    q_sys_exit((int)q_type_iatom_val(x));
+    ray_retain(RAY_NULL_OBJ);
+    return RAY_NULL_OBJ;
 }
 
 #ifndef PATH_MAX
@@ -1043,4 +1056,61 @@ ray_t* q_sys_line(const char* line, size_t n, int print_value,
         ray_release(v);
     }
     return NULL;
+}
+
+/* ---- the process-environment verbs: getenv / setenv --------------------
+ * (moved off ops/q_io.c 2026-07-31 — process environment, not files.) */
+
+/* q `getenv x` (ref/getenv.md) — x is a SYMBOL atom naming an environment
+ * variable; returns its value as a string, or "" when the variable is unset
+ * (kdb-true, and exactly what the base ray_getenv_fn already returns for a
+ * missing var).  The base primitive wants a -RAY_STR arg, so coerce the
+ * symbol's name to a string atom first — the ONLY divergence from the raw C,
+ * hence a wrapper rather than a QK_ENV rename.
+ * String-model seam: the result is a native -RAY_STR atom, so `type getenv`X`
+ * is -10h where kdb's char vector is 10h (a known, tracked divergence). */
+ray_t* q_getenv_wrap(ray_t* x) {
+    /* .os.getenv is RAY_FN_RESTRICTED; calling the C fn directly bypasses the
+     * eval-layer check, so re-assert it here (the q_hopen_wrap/file precedent). */
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (!x || x->type != -RAY_SYM)
+        return q_err(QE_TYPE);
+    ray_t* s = ray_sym_str(x->i64);                     /* borrowed */
+    if (!s) return q_err(QE_TYPE);
+    ray_t* name = ray_str(ray_str_ptr(s), ray_str_len(s));  /* owned -RAY_STR */
+    if (!name || RAY_IS_ERR(name)) return name ? name : q_err(QE_OOM);
+    ray_t* r = ray_getenv_fn(name);                     /* "" when unset */
+    ray_release(name);
+    return q_str_charv_out(r);
+}
+
+/* q `x setenv y` (ref/getenv.md#setenv) — x is a SYMBOL atom (the variable
+ * name), y is a string.  Sets the environment variable and returns generic
+ * null (kdb: setenv's result displays as nothing in the console).  The base
+ * ray_setenv_fn takes two -RAY_STR args and echoes y retained; coerce the sym
+ * name to a string, discard that echo, and return :: to match kdb. */
+static ray_t* setenv_impl(ray_t* x, ray_t* y);
+ray_t* q_setenv_wrap(ray_t* x, ray_t* y) {
+    ray_t* ys = q_str_in(y);
+    ray_t* r = setenv_impl(x, ys);
+    ray_release(ys);
+    return r;
+}
+static ray_t* setenv_impl(ray_t* x, ray_t* y) {
+    /* .os.setenv is RAY_FN_RESTRICTED; re-assert here (calling the C fn directly
+     * bypasses the eval-layer check — the q_hopen_wrap/file-wrapper precedent). */
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (!x || x->type != -RAY_SYM)
+        return q_err(QE_TYPE);
+    if (!y || y->type != -RAY_STR)
+        return q_err(QE_TYPE);
+    ray_t* s = ray_sym_str(x->i64);                     /* borrowed */
+    if (!s) return q_err(QE_TYPE);
+    ray_t* name = ray_str(ray_str_ptr(s), ray_str_len(s));  /* owned -RAY_STR */
+    if (!name || RAY_IS_ERR(name)) return name ? name : q_err(QE_OOM);
+    ray_t* r = ray_setenv_fn(name, y);                  /* echoes y, or error */
+    ray_release(name);
+    if (r && RAY_IS_ERR(r)) return r;
+    if (r) ray_release(r);                              /* discard echoed value */
+    return RAY_NULL_OBJ;                                /* kdb: setenv -> :: */
 }
