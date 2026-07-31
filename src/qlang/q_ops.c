@@ -157,11 +157,18 @@
  * 1998-2017 Kx Systems Inc., the cleared reference) — array index IS the
  * 101h/102h wire code.  The two tables coincide for 0..22 (the unary spelling
  * is the `:`-suffixed glyph) and their keyword tails are disjoint, so ONE
- * column serves both valences.  Keyword covers of the k unary glyphs (neg -:
- * count #: ... get .:) carry their glyph's code per basics/
- * exposed-infrastructure.md "Unary forms" + ref/value.md (`value each
- * (get;value)` -> 19 19).  Rows without a code (openq spellings, <=/>=/<>)
- * stay unset: the numbering is KX's frozen constant, never allocated into. */
+ * column serves both valences.
+ * THE KEYWORD-COVER RULE (uniform over BOTH valences): a q keyword that IS a k
+ * primitive under another spelling carries that primitive's code.  Unary covers
+ * per basics/exposed-infrastructure.md "Unary forms" + ref/value.md (`value
+ * each (get;value)` -> 19 19): neg -:, count #:, key/til !:, get/value .:, ...
+ * Dyadic covers per the ref page that names them SYNONYMS: `and` IS `&`
+ * (ref/lesser.md "Lesser and `and` are synonyms") and `or` IS `|`
+ * (ref/greater.md).  A keyword the docs call a WRAPPER for an operator rather
+ * than its synonym (mmu for `$`, ref/mmu.md) is a distinct value and stays
+ * unset; so does a same-page keyword with its own semantics (`cut` vs `_`).
+ * Rows without a code (openq spellings, <=/>=/<>) stay unset: the numbering is
+ * KX's frozen constant, never allocated into. */
 #define QKOP(n) .kdb_op1 = (int8_t)((n) + 1)
 /* Doc citations below name only the NON-derivable ones: unless a comment says
  * otherwise, a row's reference page is ref/<its own name>.md. */
@@ -228,8 +235,8 @@ static const q_op_t Q_OPS[] = {
     { "in",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("in", q_in_wrap), NULL, 1, 0, "rowid", NULL, QKOP(23) },
     /* Monadic cells stay QR_NONE: both are dyadic-only in q, so prefix `and x`
      * misses and eval falls through to rayfall's scalar special form. */
-    { "and",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2A("and", q_min2_wrap), NULL, 1, 0, "atomic", NULL },
-    { "or",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2A("or", q_max2_wrap), NULL, 1, 0, "atomic", NULL },
+    { "and",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2A("and", q_min2_wrap), NULL, 1, 0, "atomic", NULL, QKOP(5) },
+    { "or",    QLEX_KW_INFIX,  QR_NONE,                        QR_FN2A("or", q_max2_wrap), NULL, 1, 0, "atomic", NULL, QKOP(6) },
     /* `within` y is BOUNDS, not an operand conforming to x, so no lift law
      * fits: family `none`, wrapper takes whole args (border ruling: AUDIT). */
     { "within",QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("within", q_within_wrap), NULL, 1, 0, "none", NULL, QKOP(24) },
