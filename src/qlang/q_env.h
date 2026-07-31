@@ -24,10 +24,18 @@ ray_t* q_env_get(int64_t sym);
  * accessor roster.  OWNED result (or an owned error), NULL when undefined. */
 ray_t* q_env_resolve(int64_t sym);
 
-/* User assign: path-copy amend of the nested dicts.  Missing ancestors
- * conjure marked dicts (`.fee.fi.fo:42` creates `.fee`, `.fee.fi`); `.ns:d`
- * is an ordinary rebind of the one name — no subtree side effects. */
+/* THE write home every q assignment form reaches — `:`/`::`, indexed and
+ * modified assign, `@`/`.` name-amend, `set` — so the name policy is stated
+ * once: `` `. `` restores root variables from a dict, `.z.p*`/`.z.bm` alias the
+ * `.ipc.on.*` hook slots, `.z.zd` is refused, and every other name is a
+ * path-copy amend of the nested dicts.  Missing ancestors conjure marked dicts
+ * (`.fee.fi.fo:42` creates `.fee`, `.fee.fi`); `.ns:d` is an ordinary rebind of
+ * the one name — no subtree side effects. */
 ray_err_t q_env_set(int64_t sym, ray_t* val);
+
+/* The q error class a failed q_env_set means: 'nyi and 'type where the env
+ * raised them deliberately, else the assignment itself failed ('assign). */
+ray_t* q_env_err(ray_err_t e);
 
 /* Same amend, but a NEW plain name binds into the hidden builtin shed
  * (bootstrap writers stay out of the `key `.` roster). */
