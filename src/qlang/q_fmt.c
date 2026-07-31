@@ -9,6 +9,7 @@
 #include "qlang/q_parse_internal.h" /* ADVERB_NAMES — the one adverb-spelling table */
 #include "qlang/eval/q_eval.h" /* carrier read-out accessors — RAY_QFN display;
                                 * q_eval_apply_concrete — the display boundary force */
+#include "qlang/eval/q_view.h" /* q_view_text — a view displays as its text */
 #include "lang/format.h"   /* ray_fmt */
 #include "lang/eval.h"     /* ray_at_fn — dict/table element access */
 #include "ops/hash.h"    /* ray_hash_bytes — pipe digest distinct keys */
@@ -1243,6 +1244,13 @@ void q_fmt_console(ray_t* val, char* buf, size_t bufsz) {
 static int carrier_fmt(ray_t* v, char* buf, size_t bufsz) {
     int kind = q_eval_apply_carrier_kind(v);
     if (!kind || bufsz == 0) return 0;
+    if (kind == Q_EVAL_CAR_VIEW) {         /* `. `d shows the bare text: b+a */
+        ray_t* t = q_view_text(v);
+        snprintf(buf, bufsz, "%.*s", t ? (int)ray_len(t) : 0,
+                 t ? (const char*)ray_data(t) : "");
+        if (t) ray_release(t);
+        return 1;
+    }
     if (kind == Q_EVAL_CAR_LAMBDA) {
         ray_t* src = q_eval_apply_lambda_src(v);
         if (src)
