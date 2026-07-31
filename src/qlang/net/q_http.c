@@ -6,11 +6,10 @@
 #include <rayforce.h>
 #include "qlang/net/q_http.h"
 #include "qlang/net/q_gz.h"        /* q_gz_deflate — `form?` response gzip (#6) */
-#include "qlang/q_dotz.h"      /* q_dotz_zph — the `.z.ph` handler slot */
 #include "qlang/net/q_ws.h"        /* q_ws_handshake — the Upgrade hand-off */
 #include "qlang/html_assets_gen.h" /* q_html_assets[] — codegen'd from src/qlang/html/ */
 #include "qlang/q_console.h"   /* q_console_str/_reset — drain handler show output */
-#include "qlang/q_env.h"       /* q_env_get — `.h.HOME` / `.h.ty` */
+#include "qlang/q_env.h"       /* q_env_get — `.h.HOME` / `.h.ty`, the `.z.*` handlers */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_value — handler firing */
 #include "mem/sys.h"
 #include "picohttpparser.h"
@@ -178,11 +177,6 @@ static bool str_ieq(const char* s, size_t n, const char* lower_tok) {
 }
 
 
-/* `.h.*` reads come from q's env (flat keys, no VM dependency).  Borrowed. */
-static ray_t* http_env_get(int64_t sym_id) {
-    return q_env_get(sym_id);
-}
-
 /* Copy a q text value's bytes (charv / char atom / string atom, via
  * q_str_text_bytes — never a RAY_STR column) into out[] (NUL-terminated) iff every
  * byte is a safe, non-control character (>= 0x20 and != 0x7f).  Rejects CR/LF
@@ -230,7 +224,7 @@ bool q_http_zac_parse(const ray_t* r, int64_t* status_out,
 }
 
 const char* q_http_docroot(char* buf, size_t bufsz) {
-    ray_t* home = http_env_get(ray_sym_intern(".h.HOME", 7));  /* borrowed, NULL if unset */
+    ray_t* home = q_env_get(ray_sym_intern(".h.HOME", 7));     /* borrowed, NULL if unset */
     if (http_str_atom_safe(home, buf, bufsz)) return buf;
     if (bufsz > 4) { memcpy(buf, "html", 5); return buf; }     /* fallback (incl. NUL) */
     return "html";
@@ -246,7 +240,7 @@ const char* q_http_mime_lookup(const char* path, char* scratch, size_t scratchsz
                 unsigned char c = (unsigned char)dot[1 + i];
                 low[i] = (char)((c >= 'A' && c <= 'Z') ? c + 32 : c);
             }
-            ray_t* ty = http_env_get(ray_sym_intern(".h.ty", 5));  /* borrowed */
+            ray_t* ty = q_env_get(ray_sym_intern(".h.ty", 5));     /* borrowed */
             if (ty && !RAY_IS_ERR(ty) && ty->type == RAY_DICT) {
                 ray_t* key = ray_sym(ray_sym_intern(low, el));     /* owned atom */
                 ray_t* v   = key ? ray_dict_get(ty, key) : NULL;   /* owned or NULL (miss) */
@@ -648,7 +642,7 @@ static int zh_dispatch_call(ray_sock_t fd, const char* method, size_t mlen,
 static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
                         const struct phr_header* hdrs, size_t nh)
 {
-    ray_t* fn = q_dotz_get(".z.ph", 5);                  /* borrowed, NULL = unset */
+    ray_t* fn = q_env_get(ray_sym_intern_runtime(".z.ph", 5));   /* borrowed, NULL = unset */
     if (!fn) return -1;
     ray_retain(fn);                            /* handler may reassign .z.ph */
     if (tlen && target[0] == '/') { target++; tlen--; }
@@ -664,7 +658,7 @@ static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
  * every branch. */
 static void zpp_dispatch(ray_sock_t fd, const struct phr_header* hdrs, size_t nh)
 {
-    ray_t* fn = q_dotz_get(".z.pp", 5);                  /* borrowed, NULL = unset */
+    ray_t* fn = q_env_get(ray_sym_intern_runtime(".z.pp", 5));   /* borrowed, NULL = unset */
     if (!fn) { q_http_send_simple(fd, 501, "Not Implemented"); return; }
 
     int64_t cl = 0; bool have_cl = false;
@@ -718,7 +712,7 @@ static void zpm_dispatch(ray_sock_t fd, const char* method, size_t mlen,
                          const char* target, size_t tlen,
                          const struct phr_header* hdrs, size_t nh)
 {
-    ray_t* fn = q_dotz_get(".z.pm", 5);                  /* borrowed, NULL = unset */
+    ray_t* fn = q_env_get(ray_sym_intern_runtime(".z.pm", 5));   /* borrowed, NULL = unset */
     if (!fn) { q_http_send_simple(fd, 501, "Not Implemented"); return; }
     ray_retain(fn);                            /* handler may reassign .z.pm */
     if (tlen && target[0] == '/') { target++; tlen--; }
@@ -792,7 +786,7 @@ int q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
      * BYTE-IDENTICAL — 401 BEFORE parse (so a malformed authed request stays
      * 401, not 400).  A defined `.z.ac` owns the auth decision (its gate runs
      * after parse, below), so the pre-parse 401 is skipped when it is set. */
-    ray_t* ac = q_dotz_get(".z.ac", 5);                 /* borrowed; NULL = unset */
+    ray_t* ac = q_env_get(ray_sym_intern_runtime(".z.ac", 5));   /* borrowed; NULL = unset */
     if (!ac && auth_required) {
         q_http_send_simple(fd, 401, "Unauthorized");
         return 0;
