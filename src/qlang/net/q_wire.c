@@ -180,8 +180,9 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     /* fn values, wire mode: 101h/102h from the manifest row's kdb_op column.
      * No row (aliased env snapshot, q_registry.h) or no code -> 'nyi. */
     if (!b->serde && (t == RAY_UNARY || t == RAY_BINARY || t == RAY_VARY)) {
-        int code = q_registry_kdb_op_of(x);
-        rc = code >= 0 ? w_prim(b, t == RAY_UNARY ? 101 : 102, (uint8_t)code)
+        q_valence_t val = Q_DYADIC;
+        int code = q_registry_kdb_op_of(x, &val);
+        rc = code >= 0 ? w_prim(b, val == Q_MONADIC ? 101 : 102, (uint8_t)code)
                        : wbuf_fail(b, q_err(QE_NYI));
         goto out;
     }
