@@ -377,7 +377,7 @@ void q_builtins_register(void) {
     bind_unary("read0",  q_read0_wrap);
     bind_unary("read1",  q_read1_wrap);
     bind_unary("hdel",   q_hdel_wrap);
-    bind_value("csv",    ray_str(",", 1));
+    bind_value("csv",    ray_char(','));
     /* Table introspection — q-owned, snapshotted by the registry's QK_ENV rows
      * (q_ops.c) so the parser embeds these over the base env `meta`/(absent)
      * `cols`.  Bound BEFORE q_registry_init, like `string`/`show`. */
