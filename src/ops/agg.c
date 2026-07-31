@@ -225,6 +225,18 @@ static ray_t* agg_parted_minmax(ray_t* x, int want_max) {
     return agg_atom_i64_for_type(base, best_i);
 }
 
+/* Flat F32 min/max: e keeps its width (ref/min.md, ref/max.md); starting at
+ * the ±inf identity makes the empty/all-null result the real ±infinity for free. */
+static ray_t* agg_flat_f32_minmax(ray_t* x, int want_max) {
+    const float* d = (const float*)ray_data(x);
+    double best = want_max ? -INFINITY : INFINITY;
+    for (int64_t i = 0; i < x->len; i++) {
+        double v = d[i];
+        if (!isnan(v) && (want_max ? v > best : v < best)) best = v;
+    }
+    return ray_f32((float)best);
+}
+
 ray_t* ray_sum_fn(ray_t* x) {
     if (ray_is_lazy(x)) return ray_lazy_append(x, OP_SUM);
     if (RAY_IS_PARTED(x->type)) return agg_parted_sum(x);
@@ -238,6 +250,16 @@ ray_t* ray_sum_fn(ray_t* x) {
         /* Canonical admission: numeric + TIME (duration); DATE/TIMESTAMP are
          * absolute points and SYM/STR/GUID are non-numeric → type error. */
         if (!agg_type_admitted(OP_SUM, x->type)) return ray_error("type", "sum expects a numeric or time-duration vector, got %s", ray_type_name(x->type));
+        /* F32 keeps its width (ref/sum.md: domain e -> range e) — like every
+         * other narrow type it rides the flat path, not the DAG.  Accumulating
+         * in double then narrowing once is deliberate (better error than a
+         * float accumulator); unverifiable against kdb, do not "correct" it. */
+        if (x->type == RAY_F32) {
+            const float* d = (const float*)ray_data(x);
+            double s = 0.0;
+            for (int64_t i = 0; i < x->len; i++) if (!isnan(d[i])) s += d[i];
+            return ray_f32((float)s);
+        }
         /* Narrow/temporal types need specific return constructors that the
          * DAG executor doesn't provide — use scalar path for these. */
         if (x->type == RAY_I32 || x->type == RAY_I16 || ray_is_bytelike(x->type) ||
@@ -338,6 +360,15 @@ ray_t* ray_avg_fn(ray_t* x) {
         /* Canonical admission: numeric + temporal (→ F64); SYM/STR/GUID are
          * non-numeric → type error (the DAG path otherwise averaged raw ids). */
         if (!agg_type_admitted(OP_AVG, x->type)) return ray_error("type", "avg expects a numeric or temporal vector, got %s", ray_type_name(x->type));
+        /* F32 widens (ref/avg.md: domain e -> range f) on the flat path. */
+        if (x->type == RAY_F32) {
+            const float* d = (const float*)ray_data(x);
+            double s = 0.0;
+            int64_t cnt = 0;
+            for (int64_t i = 0; i < x->len; i++) if (!isnan(d[i])) { s += d[i]; cnt++; }
+            if (cnt == 0) return ray_typed_null(-RAY_F64);
+            return make_f64(s / (double)cnt);
+        }
         AGG_VEC_VIA_DAG(x, ray_avg);
     }
     if (!is_list(x)) return ray_error("type", "avg expects a numeric vector, atom, or list, got %s", ray_type_name(x->type));
@@ -401,6 +432,7 @@ ray_t* ray_min_fn(ray_t* x) {
                 }
             }
         }
+        if (x->type == RAY_F32) return agg_flat_f32_minmax(x, 0);
         AGG_VEC_VIA_DAG(x, ray_min_op);
     }
     if (!is_list(x)) return ray_error("type", "min expects a vector, atom, or list, got %s", ray_type_name(x->type));
@@ -464,6 +496,7 @@ ray_t* ray_max_fn(ray_t* x) {
                 }
             }
         }
+        if (x->type == RAY_F32) return agg_flat_f32_minmax(x, 1);
         AGG_VEC_VIA_DAG(x, ray_max_op);
     }
     if (!is_list(x)) return ray_error("type", "max expects a vector, atom, or list, got %s", ray_type_name(x->type));
@@ -509,6 +542,7 @@ ray_t* ray_first_fn(ray_t* x) {
          * DATE/TIME/TIMESTAMP/BOOL/U8 — bypass it. */
         if (x->type == RAY_SYM   || x->type == RAY_I32  || x->type == RAY_I16 ||
             x->type == RAY_GUID  || x->type == RAY_STR  || x->type == RAY_BOOL ||
+            x->type == RAY_F32   ||
             ray_is_bytelike(x->type) || RAY_IS_TEMPORAL32(x->type) ||
             x->type == RAY_TIMESTAMP) {
             int alloc = 0;
@@ -547,6 +581,7 @@ ray_t* ray_last_fn(ray_t* x) {
         /* See ray_first_fn for rationale on the type whitelist. */
         if (x->type == RAY_SYM   || x->type == RAY_I32  || x->type == RAY_I16 ||
             x->type == RAY_GUID  || x->type == RAY_STR  || x->type == RAY_BOOL ||
+            x->type == RAY_F32   ||
             ray_is_bytelike(x->type) || RAY_IS_TEMPORAL32(x->type) ||
             x->type == RAY_TIMESTAMP) {
             int alloc = 0;
@@ -578,6 +613,11 @@ static ray_t* vec_to_f64_scratch(ray_t* x, double** out_vals) {
     } else if (x->type == RAY_F64) {
         double* d = (double*)ray_data(x);
         for (int64_t i = 0; i < len; i++) { if (!ray_vec_is_null(x, i)) vals[cnt++] = d[i]; }
+    } else if (x->type == RAY_F32) {
+        /* float null IS the NaN payload (live-infinity model) — computed NaNs
+         * carry no HAS_NULLS attr, so the test is isnan, never the attr gate. */
+        float* d = (float*)ray_data(x);
+        for (int64_t i = 0; i < len; i++) { if (!isnan(d[i])) vals[cnt++] = (double)d[i]; }
     } else if (x->type == RAY_I32) {
         int32_t* d = (int32_t*)ray_data(x);
         for (int64_t i = 0; i < len; i++) { if (!ray_vec_is_null(x, i)) vals[cnt++] = (double)d[i]; }

@@ -56,6 +56,14 @@ int q_vec_is_num(ray_t* x) {
 
 typedef enum { RS_SUMS, RS_PRDS, RS_MAXS, RS_MINS, RS_AVGS } q_rs_kind;
 
+/* Width-generic float store: the scans accumulate in double but the result
+ * keeps the input's width (ref/sums.md: domain e -> range e), so an f32 out
+ * vector narrows on store — the float twin of the int lane's memcpy-by-esz. */
+static void runscan_store_f(char* o, int esz, int64_t i, double v) {
+    if (esz == 4) { float f = (float)v; memcpy(o + i * 4, &f, 4); }
+    else memcpy(o + i * 8, &v, 8);
+}
+
 /* running max/min over a byte-uniform vector — charv (kdb `maxs "genie"` ->
  * "ggnnn") and u8 alike; bytes have no null, so no identity arm. */
 static ray_t* runscan_bytes(ray_t* x, q_rs_kind k) {
@@ -96,13 +104,14 @@ static ray_t* runscan(ray_t* x, q_rs_kind k) {
     int isf = q_vec_is_float(x);
     if (k == RS_MAXS || k == RS_MINS) {
         if (isf) {
-            ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1); out->len = n;
-            double* o = (double*)ray_data(out);
+            ray_t* out = ray_vec_new(x->type, n > 0 ? n : 1); out->len = n;
+            char* o = (char*)ray_data(out);
+            int esz = ray_elem_size(x->type);
             double m = (k == RS_MAXS) ? -INFINITY : INFINITY;   /* leading-null identity */
             for (int64_t i = 0; i < n; i++) {
                 int nu; double v = q_velem_f(x, i, &nu);
                 if (!nu && (k == RS_MAXS ? v > m : v < m)) m = v;
-                o[i] = m;
+                runscan_store_f(o, esz, i, m);
             }
             return out;
         }
@@ -126,13 +135,14 @@ static ray_t* runscan(ray_t* x, q_rs_kind k) {
         return out;
     }
     if (isf) {
-        ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1); out->len = n;
-        double* o = (double*)ray_data(out);
+        ray_t* out = ray_vec_new(x->type, n > 0 ? n : 1); out->len = n;
+        char* o = (char*)ray_data(out);
+        int esz = ray_elem_size(x->type);
         double acc = (k==RS_PRDS) ? 1 : 0;
         for (int64_t i = 0; i < n; i++) {
             int nu; double v = q_velem_f(x, i, &nu);
             if (k==RS_SUMS) acc += nu?0:v; else acc *= nu?1:v;
-            o[i] = acc;
+            runscan_store_f(o, esz, i, acc);
         }
         return out;
     }
@@ -225,6 +235,8 @@ ray_t* q_prd_wrap(ray_t* x) {
             int nu; double v = q_velem_f(x, i, &nu);
             if (!nu) acc *= v;                         /* nulls are 1s */
         }
+        /* e in, e out (ref/prd.md) — width test, same axis as runscan_store_f */
+        if (ray_elem_size(x->type) == 4) return ray_f32((float)acc);
         return make_f64(acc);
     }
     int64_t acc = 1;
@@ -278,10 +290,13 @@ static ray_t* mwin(ray_t* nx, ray_t* x, q_mw_kind k) {
     if (k == MW_MIN && N <= 0) { ray_retain(x); return x; }
     int64_t n = ray_len(x);
     int isf = q_vec_is_float(x);
-    int8_t otype = (k==MW_SUM || k==MW_MAX || k==MW_MIN) ? (isf ? RAY_F64 : RAY_I64)
+    /* msum/mmax/mmin keep the input width (domain_dyadic.qcmd grids: e -> e);
+     * mcount -> j, mdev -> f (ref/count.md, ref/dev.md transcripts). */
+    int8_t otype = (k==MW_SUM || k==MW_MAX || k==MW_MIN) ? (isf ? x->type : RAY_I64)
                  : (k==MW_COUNT) ? RAY_I64 : RAY_F64;
     ray_t* out = ray_vec_new(otype, n > 0 ? n : 1); out->len = n;
     void* o = ray_data(out);
+    int oesz = ray_elem_size(otype);
     int64_t neg_inf = 0;
     ray_type_inf(RAY_I64, false, &neg_inf);
     for (int64_t i = 0; i < n; i++) {
@@ -322,7 +337,7 @@ static ray_t* mwin(ray_t* nx, ray_t* x, q_mw_kind k) {
                                   r = var>0 ? sqrt(var) : 0; } else { r=0; isnull=1; } break;
             default: r = 0; break;
             }
-            ((double*)o)[i] = r;
+            runscan_store_f((char*)o, oesz, i, r);
             if (isnull) ray_vec_set_null(out, i, true);
         }
     }
