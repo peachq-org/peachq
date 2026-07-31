@@ -548,7 +548,7 @@ ray_t* q_eval_value_wrap(ray_t* x) {
     /* operator -> its kdb primitive code (ref/value.md; the manifest row is
      * the identity, its kdb_op column the number) */
     if (x->type == RAY_UNARY || x->type == RAY_BINARY || x->type == RAY_VARY) {
-        int code = q_registry_kdb_op_of(x);
+        int code = q_registry_kdb_op_of(x, NULL);
         if (code >= 0) return ray_i64(code);
     }
     return q_err(QE_NYI);       /* enumeration/view/bare-iterator: deferred */
