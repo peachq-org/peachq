@@ -1245,6 +1245,23 @@ static P parse_e(Parser *p, QCtx ctx) {
         ray_t *q = try_parse_qsql(p);
         if (q) return (P){ R_NOUN, q };
     }
+    /* A colon-unary k glyph GLUED to an operand (`*:1 2 3`, `+:5`) is k, NOT q
+     * — q spells the monadic with its keyword (first, flip, count, …).  Owner
+     * ruling 2026-07-30: reject it at PARSE, so no tree ever exists and the
+     * direct and parse-then-eval paths cannot disagree.  Narrow by design: the
+     * isolated value (`+:`), bracket apply (`*:[x]`) and the parenthesised
+     * value (`(*:) x`) all reach here with a non-operand next token or a
+     * non-verb head, and are untouched.  `::`, `0:` and the two-glyph
+     * comparisons (`<=`) are excluded by the glyph+colon shape test. */
+    {
+        Token *ht = cur(p);
+        TKind nk = ht->kind == T_EOF ? T_EOF : p->t.t[p->pos + 1].kind;
+        if (ht->kind == T_VERB && ht->len == 2 && p->src[ht->start] != ':' &&
+            p->src[ht->start + 1] == ':' &&
+            strchr(VERB_CHARS, p->src[ht->start]) != NULL &&
+            (nk == T_NOUN || nk == T_LPAREN || nk == T_LBRACE))
+            q_die("k-unary glyph applied to a glued operand is not q");
+    }
     P t = parse_term(p, ctx);
     if (t.role == R_NONE) return EMPTY;
     return parse_e_from(p, t, ctx);
