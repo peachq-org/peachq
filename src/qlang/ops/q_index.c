@@ -320,8 +320,16 @@ static ray_t* store_level(ray_t* x, ray_t* i, ray_t* v) {
 
 static ray_t* index_r(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k);
 
-/* one owned element continued through the rest of the path */
+/* one owned element continued through the rest of the path; a FUNCTION landed
+ * on mid-path consumes ONE index as its argument — the ref/apply.md Index fold
+ * `((d@i[0])@i[1])@i[2]` makes each step Apply At */
 static ray_t* elem_rest(ray_t* e, ray_t* const* ix, int64_t k) {
+    while (e && !RAY_IS_ERR(e) && k > 0 && ix[0] && q_eval_apply_is_fn(e)) {
+        ray_t* a0 = ix[0];
+        ray_t* r = q_eval_apply_value(e, &a0, 1);
+        ray_release(e);
+        e = r; ix++; k--;
+    }
     if (!e || RAY_IS_ERR(e)) return e ? e : q_err(QE_TYPE);
     if (k == 0) return mat(e);
     ray_t* r = mat(index_r(e, ix[0], ix + 1, k - 1));
