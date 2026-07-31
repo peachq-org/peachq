@@ -22,8 +22,8 @@ ray_t* q_dotq_atob_fn(ray_t* x);
 ray_t* q_dotq_gz_fn(ray_t** args, int64_t argc);
 
 /* `-14!` quote escape: one CSV cell through 0:'s Save-Text quote rule
- * (ops/q_io.c; file-text.md embrace-on-delimiter/newline, '"' doubled). */
-ray_t* q_io_csv_quote(ray_t* x);
+ * (ops/q_io_filetext.c; file-text.md embrace-on-delimiter/newline, '"' doubled). */
+ray_t* q_io_filetext_csv_quote(ray_t* x);
 
 /* The string-verb bodies (ops/q_str.c): env-bound by q_builtins_register. */
 ray_t* q_upper_fn(ray_t* x);
