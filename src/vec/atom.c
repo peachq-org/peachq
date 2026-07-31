@@ -261,8 +261,12 @@ ray_t* ray_typed_null(int8_t type) {
         case -RAY_F64: case -RAY_DATETIME:             v->f64 = NULL_F64; break;
         case -RAY_F32:                                 v->f64 = (double)NULL_F32; break;
         case -RAY_I64: case -RAY_TIMESTAMP: case -RAY_TIMESPAN: v->i64 = NULL_I64; break;
-        case -RAY_I32: case -RAY_MONTH: case -RAY_DATE: case -RAY_TIME:
-        case -RAY_MINUTE: case -RAY_SECOND:            v->i32 = NULL_I32; break;
+        case -RAY_I32:                                 v->i32 = NULL_I32; break;
+        /* temporal32 payloads live in i64 — ray_date/ray_month/&co. take int64_t
+         * and store there, so the null must be built the same way.  RAY_I32 and
+         * RAY_I16 stay narrow because ray_i32/ray_i16 are narrow. */
+        case -RAY_MONTH: case -RAY_DATE: case -RAY_TIME:
+        case -RAY_MINUTE: case -RAY_SECOND:            v->i64 = NULL_I32; break;
         case -RAY_CHARV:                               v->u8  = 0x20; break;  /* char null = " " */
         case -RAY_I16:                                 v->i16 = NULL_I16; break;
         case -RAY_SYM:
