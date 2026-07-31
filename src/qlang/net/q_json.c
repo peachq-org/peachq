@@ -1,21 +1,24 @@
 /* q_json — openq's `.j` JSON namespace (ref/dotj.md).
  *
  * .j.j  serialize: hand-rolled recursive type-dispatch over ray_t -> compact
- *       JSON (no whitespace), one arm per q type.  Adding a datatype = one arm;
- *       an unimplemented type is a clean `'nyi` (the extension seam).
+ *       JSON (no whitespace).  Types JSON can express get a native arm; the
+ *       rest ship their q token as a string via j_tok_flags (json.k's law).
+ *       An unimplemented type is still a clean `'nyi` (the extension seam).
  * .j.k  deserialize: vendored yyjson (third_party/yyjson, MIT) does the raw
  *       tokenize/validate/unescape/number-parse; the node->ray_t mapping here
  *       owns the q-type semantics (object->dict, array->collapsed list,
- *       string->char-vector, number->float, true/false->bool,
- *       null/inf/-inf/nan->0n).
+ *       string->char-vector, number->float, true/false->bool, inf->0w,
+ *       null/nan->0n).
  *
- * openq float model: NaN/inf all canonicalize to 0n; 0w cannot exist, so the
- * kdb `inf`/`-inf` emit case is structurally impossible — openq emits `null`.
+ * Floats: NaN -> `null`, ±0w -> `inf`/`-inf` (dotj.md:47); the magnitude is
+ * q_fmt_float's, so `\P` governs JSON (syscmds.md:546).
  * Pure q-layer: no frozen-base edits. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/net/q_json.h"
 #include "qlang/q_err.h"
+#include "qlang/q_fmt.h"      /* q_fmt / q_fmt_float — the display + `\P` home */
 #include "qlang/q_registry.h" /* q_list_collapse */
+#include "qlang/q_type.h"     /* q_type_is_inf — the infinity lane */
 #include "lang/eval.h"        /* ray_at_fn — dict/table cell reads */
 #include "table/sym.h"        /* ray_sym_vec_cell */
 #include <rayforce.h>
@@ -97,29 +100,15 @@ static void jbuf_int(jbuf* b, long long v) {
     if (n > 0) jbuf_putn(b, t, (size_t)n);
 }
 
-/* Float -> JSON number.  NaN -> `null`; ±inf -> the bare `inf`/`-inf` tokens
- * (dotj.md anchor: `.j.j -0w 0 1 2 3 0w` -> `[-inf,0,1,2,3,inf]`).  Whole-
- * valued floats render WITHOUT a decimal point (the finite elements as
- * `0 1 2 3`).  Non-whole values use the shortest `%g` precision that
- * re-parses exactly — kdb-flavoured and guarantees fixed-point idempotence
- * (format o parse o format == format). */
+/* Float -> JSON number.  NaN -> `null`, ±inf -> `inf`/`-inf` (dotj.md:47).
+ * Finite values inherit q_fmt_float, so `\P` governs JSON (syscmds.md:546);
+ * f32=0 always — the `e` suffix is a q type marker, not JSON. */
 static void jbuf_flt(jbuf* b, double v) {
     if (isnan(v)) { jbuf_puts(b, "null"); return; }
     if (isinf(v)) { jbuf_puts(b, v < 0 ? "-inf" : "inf"); return; }
-    if (v == 0.0) { jbuf_putc(b, '0'); return; }        /* also normalises -0 */
-    if (v == floor(v) && fabs(v) < 1e15) {
-        char t[32];
-        int n = snprintf(t, sizeof t, "%.0f", v);
-        if (n > 0) jbuf_putn(b, t, (size_t)n);
-        return;
-    }
-    char t[40];
-    for (int p = 1; p <= 17; p++) {
-        int n = snprintf(t, sizeof t, "%.*g", p, v);
-        if (n > 0 && strtod(t, NULL) == v) { jbuf_putn(b, t, (size_t)n); return; }
-    }
-    int n = snprintf(t, sizeof t, "%.17g", v);
-    if (n > 0) jbuf_putn(b, t, (size_t)n);
+    char t[64];
+    q_fmt_float(v, 0, t, sizeof t);
+    jbuf_puts(b, t);
 }
 
 static void j_emit(jbuf* b, ray_t* x);
@@ -128,6 +117,44 @@ static void j_emit(jbuf* b, ray_t* x);
 static void j_nyi(jbuf* b, int8_t t) {
     (void)t;
     if (!b->nyi) b->nyi = 1;
+}
+
+/* json.k's `J[-t]@$x` (KxSystems/kdb e/json.k, Apache-2.0): types with no JSON
+ * counterpart ship their q TOKEN as a string.  DASH8 maps `.`->`-` inside
+ * `8#x` — POSITIONAL, which is why month keeps its `m` and a timestamp keeps
+ * both its `D` and its fractional dot.  ABSENT (the whole temporal family, and
+ * only it — a guid's null IS the zero UUID) sends 0N/0W/-0W to JSON `null`
+ * instead of leaking q syntax; owner ruling, see the suite header. */
+enum { JT_TOKEN = 1, JT_DASH8 = 2, JT_ABSENT = 4 };
+
+static int j_tok_flags(int8_t t) {
+    switch (t) {
+        case RAY_TIMESTAMP: case RAY_MONTH: case RAY_DATE: case RAY_DATETIME:
+            return JT_TOKEN | JT_DASH8 | JT_ABSENT;
+        case RAY_TIMESPAN: case RAY_MINUTE: case RAY_SECOND: case RAY_TIME:
+            return JT_TOKEN | JT_ABSENT;
+        case RAY_GUID: case RAY_BYTE_ONLY:
+            return JT_TOKEN;
+        default:
+            return 0;
+    }
+}
+
+/* One tokenised atom.  The token comes from q_fmt (the display home) —
+ * `string` would emit `0Ng` for a guid and signal on a byte vector. */
+static void j_tok(jbuf* b, ray_t* a, int flags) {
+    char t[64];
+    if (!a || RAY_IS_ERR(a)) { j_nyi(b, 0); return; }
+    if ((flags & JT_ABSENT) && (RAY_ATOM_IS_NULL(a) || q_type_is_inf(a))) {
+        jbuf_puts(b, "null");
+        return;
+    }
+    q_fmt(a, t, sizeof t);
+    size_t n = strlen(t);
+    if (flags & JT_DASH8)
+        for (size_t i = 0; i < n && i < 8; i++)
+            if (t[i] == '.') t[i] = '-';
+    jbuf_str(b, t, n);
 }
 
 /* One atom (x->type < 0). */
@@ -147,7 +174,11 @@ static void j_atom(jbuf* b, ray_t* x) {
             else   jbuf_str(b, "", 0);
             break;
         }
-        default: j_nyi(b, x->type); break;           /* byte, guid, temporal, ... */
+        default: {
+            int fl = j_tok_flags((int8_t)-x->type);
+            fl ? j_tok(b, x, fl) : j_nyi(b, x->type);
+            break;
+        }
     }
 }
 
@@ -282,9 +313,19 @@ static void j_vec(jbuf* b, ray_t* x) {
             }
             break;
         }
-        default:                                     /* byte, guid, temporal vectors */
-            j_nyi(b, x->type);
+        default: {                                   /* byte, guid, temporal vectors */
+            int fl = j_tok_flags(x->type);
+            if (!fl) { j_nyi(b, x->type); break; }
+            for (int64_t i = 0; i < n; i++) {
+                if (i) jbuf_putc(b, ',');
+                ray_t* ia = ray_i64(i);
+                ray_t* c  = ray_at_fn(x, ia);
+                ray_release(ia);
+                j_tok(b, c, fl);
+                ray_release(c);
+            }
             break;
+        }
     }
     if (!b->nyi) jbuf_putc(b, ']');
 }
