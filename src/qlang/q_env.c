@@ -11,6 +11,7 @@
 #include "qlang/q_err.h"
 #include "qlang/q_type.h"         /* q_type_is_fn / _is_table / _is_keyed — the \v|\f|\a split */
 #include "qlang/q_dotz.h"         /* the .z.* handler-slot arms of `set` */
+#include "qlang/eval/q_view.h"    /* view hooks: set/unbind invalidation, dot-'nyi */
 #include "qlang/net/q_wirefile.h" /* q_wirefile_write — the `:file set y form */
 #include "lang/internal.h"        /* ray_error */
 #include "table/sym.h"         /* ray_sym_intern_runtime, ray_sym_str, ray_read_sym */
@@ -218,7 +219,9 @@ ray_err_t q_env_bind(int64_t sym, ray_t* val) { return env_put(sym, val, 1); }
 ray_err_t q_env_set(int64_t sym, ray_t* val) {
     if (!val) return q_env_unbind(sym);
     if (ray_sym_is_ipc_hook(sym)) return ray_env_set(sym, val);
-    return env_put(sym, val, 0);
+    ray_err_t e = env_put(sym, val, 0);
+    if (e == RAY_OK) q_view_on_global_set(sym);   /* invalidation + .z.vs */
+    return e;
 }
 
 ray_err_t q_env_unbind(int64_t sym) {
@@ -266,6 +269,7 @@ ray_err_t q_env_unbind(int64_t sym) {
         }
     }
     ray_release(s);
+    if (e == RAY_OK) q_view_on_global_unbind(sym);   /* dependents go pending */
     return e;
 }
 
@@ -381,6 +385,10 @@ static ray_t* frames_lookup(int64_t sym) {
  * linked-column deref (errors surface), temporal accessor.  Owned result. */
 static ray_t* walk_segs(ray_t* v, int fresh, const char* p, size_t n, size_t pos) {
     while (v && pos < n) {
+        if (q_view_is(v)) {                  /* "Views do not support dot notation" */
+            if (fresh) ray_release(v);
+            return q_err(QE_NYI);
+        }
         size_t end = pos;
         while (end < n && p[end] != '.') end++;
         int64_t seg = ray_sym_intern_runtime(p + pos, end - pos);
@@ -486,13 +494,13 @@ int64_t q_env_qualify(int64_t ns_sym, int64_t member_sym) {
 
 static int env_kind_match(q_env_ns_kind_t kind, ray_t* v) {
     switch (kind) {
-    case Q_ENV_NS_FNS:    return q_type_is_fn(v);
+    case Q_ENV_NS_FNS:    return q_type_is_fn(v) && !q_view_is(v);   /* views: `\b` only */
     case Q_ENV_NS_TABLES: return q_type_is_table(v) || q_type_is_keyed(v);
     default:              return !q_type_is_fn(v);   /* `\v` keeps tables */
     }
 }
 
-static int env_name_cmp(const void* a, const void* b) {
+int q_env_name_cmp(const void* a, const void* b) {
     const char* pa; size_t la;
     const char* pb; size_t lb;
     ray_t* sa = name_str(*(const int64_t*)a, &pa, &la);
@@ -527,7 +535,7 @@ static ray_t* env_dict_names(ray_t* d, q_env_ns_kind_t kind, int members) {
                            : (env_is_marked(vs[i]) && id != zed);
         if (keep) sel[m++] = id;
     }
-    if (members) qsort(sel, (size_t)m, sizeof *sel, env_name_cmp);
+    if (members) qsort(sel, (size_t)m, sizeof *sel, q_env_name_cmp);
     ray_t* out = ray_sym_vec_new(RAY_SYM_W64, m > 0 ? m : 1);
     for (int64_t i = 0; i < m && out && !RAY_IS_ERR(out); i++)
         out = ray_vec_append(out, &sel[i]);
