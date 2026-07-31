@@ -1337,7 +1337,7 @@ static ray_t* name_lift(const q_op_t* row, ray_t** args, int64_t n, int dot) {
     }
     ray_err_t e = q_env_set(id, r);                  /* retains */
     ray_release(r);
-    if (e != RAY_OK) return q_err(QE_ASSIGN);
+    if (e != RAY_OK) return q_env_err(e);
     ray_retain(args[0]);
     return args[0];                                  /* the handle comes back */
 }
