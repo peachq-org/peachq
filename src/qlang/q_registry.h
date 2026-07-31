@@ -133,7 +133,7 @@ ray_t* q_attr_wrap(ray_t* x);
 
 /* File symbol -> OWNED RAY_STR filesystem path (leading ':' stripped), NULL
  * when x is not a `:path symbol atom.  The single home every file-touching
- * arm shares (q_io.c's own verbs, q_wirefile's on-disk reader). */
+ * arm shares (q_io.c's read verbs, q_io_filetext's `0:`, q_wirefile). */
 ray_t* q_io_file_path(ray_t* x);
 
 /* `read1 (f;off;want)`'s body, shared with q_wirefile the way q_io_file_path
@@ -264,7 +264,8 @@ ray_t* q_table_row_at(ray_t* t, int64_t row);
  * objects, one implementation). */
 ray_t* q_read0_wrap(ray_t* x);
 
-/* q `hopen`/`hclose` IPC client wrappers (feat/q-ipc-client; hsym Bundle 2b).
+/* q `hopen`/`hclose` wrappers (q_handles.c): IPC sockets plus the `:path` /
+ * `:fifo://path` filesystem transports (feat/q-ipc-client; hsym Bundle 2b).
  * Exposed so the apply module's one-shot sync request (`` `:host:port "query" ``) can
  * REUSE the exact hopen normalization + restricted gate + fd/selector handle
  * translation rather than duplicating them.  q_hopen_wrap: descriptor/port ->

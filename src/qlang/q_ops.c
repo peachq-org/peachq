@@ -460,7 +460,7 @@ static const q_op_t Q_OPS[] = {
     /* ---- File Text ---- `0:` is tokenized by the scanner's digit-colon arm and
      * dispatches on the LEFT operand's shape. Binary `1:`/`2:` are an
      * owner-ruled non-goal: NO row, they stay name-refs ('name). */
-    { "0:",     QLEX_GLYPH,     QR_NONE,                       QR_FN2("file-text", q_filetext_wrap), NULL, 1, 1, "none", NULL, QKOP(20) },
+    { "0:",     QLEX_GLYPH,     QR_NONE,                       QR_FN2("file-text", q_io_filetext_wrap), NULL, 1, 1, "none", NULL, QKOP(20) },
     { "hsym",   QLEX_KW_PREFIX, QR_FN1("hsym", q_hsym_wrap),   QR_NONE,           NULL, 1, 0, "atomic", NULL },
     { "read0",  QLEX_KW_PREFIX, QR_FN1("read0", q_read0_wrap), QR_NONE,           NULL, 1, 1, "none", NULL, QKOP(20) },
     { "read1",  QLEX_KW_PREFIX, QR_FN1("read1", q_read1_wrap), QR_NONE,           NULL, 1, 1, "none", NULL, QKOP(21) },

@@ -52,10 +52,13 @@ ray_t* q_avg_wrap(ray_t* x);
  * value could run, so these fire only on off-shape applications. */
 ray_t* q_hof_nyi_wrap(ray_t* f, ray_t* x);
 
-/* ---- defined in ops/q_io.c ---- */
-ray_t* q_filetext_wrap(ray_t* x, ray_t* y);
+/* ---- defined in ops/q_io_filetext.c ---- */
+ray_t* q_io_filetext_wrap(ray_t* x, ray_t* y);
+
+/* ---- defined in q_sys.c ---- */
 ray_t* q_setenv_wrap(ray_t* x, ray_t* y);
 ray_t* q_getenv_wrap(ray_t* x);
+ray_t* q_exit_wrap(ray_t* x);
 
 /* ---- defined in ops/q_str.c ---- */
 ray_t* q_like_wrap(ray_t* x, ray_t* pattern);
@@ -147,9 +150,12 @@ double q_velem_f(ray_t* x, int64_t i, int* isnull);           /* used by: list *
 int q_vec_is_float(ray_t* x);                                 /* used by: list */
 int q_vec_is_num(ray_t* x);                                   /* used by: list */
 
-/* ---- defined in ops/q_io.c ---- */
+/* ---- defined in q_handles.c ---- */
 ray_t* q_hopen_wrap(ray_t* x);                                /* used by: apply, registry */
 ray_t* q_hclose_wrap(ray_t* x);                               /* used by: apply, registry */
+
+/* ---- defined in ops/q_io.c ---- */
+ray_t* q_io_read_all(ray_t* pathstr);                         /* used by: io_filetext */
 ray_t* q_hsym_wrap(ray_t* x);                                 /* used by: bang, registry */
 ray_t* q_read0_wrap(ray_t* x);                                /* used by: builtins, registry */
 ray_t* q_read1_wrap(ray_t* x);                                /* used by: builtins, registry */
@@ -202,7 +208,6 @@ ray_t* q_table_dict_vals(ray_t* d, int* owned);               /* used by: list *
 
 /* ---- defined in q_env.c ---- */
 ray_t* q_setg_wrap(ray_t* x, ray_t* y);                       /* used by: dotz, lower, registry */
-ray_t* q_exit_wrap(ray_t* x);                                 /* used by: ops */
 
 /* Verb bodies must not touch the environment — name resolution/binding is
  * the evaluator's (and bootstrap's) domain.  Legitimate owners and the

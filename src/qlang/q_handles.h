@@ -3,7 +3,9 @@
  * abstraction: open/apply/close/read for q-opened file+fifo fds, apply/close
  * dispatch onto the IPC layer for sockets, and the fd-keyed registry of
  * open-time metadata (redacted at capture — a password never enters a record).
- * No other file branches on handle kind: q_apply.c / ops/q_io.c delegate here.
+ * No other file branches on handle kind — the apply module delegates here, and
+ * the `hopen`/`hclose` verb bodies live here too (moved off ops/q_io.c
+ * 2026-07-31; declared with the other registry entrypoints, not below).
  * The registry is purely internal — it drives dispatch and Phase-2 `-38!`. */
 #ifndef QLANG_Q_HANDLES_H
 #define QLANG_Q_HANDLES_H
