@@ -395,6 +395,40 @@ static ray_t* list_put(ray_t* out, ray_t* v) {
     return r;
 }
 
+/* borrowed item -> appended (ray_list_append RETAINS); NULL item is `::` */
+static ray_t* list_put_borrowed(ray_t* out, ray_t* v) {
+    return out ? ray_list_append(out, v ? v : RAY_NULL_OBJ) : NULL;
+}
+
+/* ref/value.md's three non-lambda carrier arms: a projection reads out as the
+ * "list: function followed by argument/s", a composition as the "list of
+ * composed values", a derived function as the bare "argument of the iterator".
+ * NULL = not one of those kinds (a bare iterator stays deferred). */
+static ray_t* carrier_value(ray_t* v) {
+    ray_t* h = q_eval_apply_car_head(v);
+    if (!h) return NULL;
+    switch (q_eval_apply_carrier_kind(v)) {
+    case Q_EVAL_CAR_DERIV:
+        ray_retain(h);
+        return h;
+    case Q_EVAL_CAR_COMP:
+        return list_put_borrowed(list_put_borrowed(ray_list_new(2), h),
+                                 q_eval_apply_comp_inner(v));
+    case Q_EVAL_CAR_PROJ: {
+        /* an ELIDED trailing slot is not a bound argument — `+[2]` fills the
+         * dyad's second slot with a hole but reads out as the 2-item (+;2) */
+        int64_t n = q_eval_apply_proj_nslots(v);
+        while (n > 0 && !q_eval_apply_proj_arg(v, n - 1)) n--;
+        ray_t* out = list_put_borrowed(ray_list_new(n + 1), h);
+        for (int64_t i = 0; i < n; i++)
+            out = list_put_borrowed(out, q_eval_apply_proj_arg(v, i));
+        return out;
+    }
+    default:
+        return NULL;
+    }
+}
+
 static ray_t* lambda_structure(ray_t* v) {
     ray_t *params = NULL, *body = NULL, *ctx = NULL;
     if (!q_eval_apply_lambda_parts(v, &params, &body, &ctx)) return NULL;
@@ -508,7 +542,8 @@ ray_t* q_eval_value_wrap(ray_t* x) {
     }
     if (x->type == RAY_QFN) {
         ray_t* st = lambda_structure(x);
-        if (st) return st;                  /* NULL = a non-lambda carrier */
+        if (!st) st = carrier_value(x);
+        if (st) return st;                  /* NULL = a bare iterator: deferred */
     }
     /* operator -> its kdb primitive code (ref/value.md; the manifest row is
      * the identity, its kdb_op column the number) */
@@ -516,7 +551,7 @@ ray_t* q_eval_value_wrap(ray_t* x) {
         int code = q_registry_kdb_op_of(x);
         if (code >= 0) return ray_i64(code);
     }
-    return q_err(QE_NYI);       /* enumeration/projection/view arms: deferred */
+    return q_err(QE_NYI);       /* enumeration/view/bare-iterator: deferred */
 }
 
 /* ===== control forms (basics/control.md, ref/{cond,if,do,while}.md) ======
