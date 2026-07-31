@@ -4,6 +4,7 @@
 #include "qlang/qdoc.h"
 #include "qlang/q_parse.h"
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
+#include "qlang/eval/q_view.h"   /* q_view_intercept — `x::e` at the row seam */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
 #include "qlang/q_err.h"    /* q_err_text / q_err_drop — error text + backstop */
@@ -225,7 +226,8 @@ static void run_example(const char* input, const char* expect,
         ray_t* past = q_parse(input);
         if (!RAY_IS_ERR(past)) {
             r->parsed++;
-            ray_t* pres = q_eval(past);
+            ray_t* pres;
+            if (!q_view_intercept(past, input, &pres)) pres = q_eval(past);
             ray_release(pres);
             ray_release(past);
         }
@@ -253,8 +255,12 @@ static void run_example(const char* input, const char* expect,
     if (getenv("QDOC_TRACE")) { char tb[256]; int tn = snprintf(tb, sizeof tb, "INPUT: %.200s\n", input); if (tn > 0) { ssize_t _w = write(2, tb, (size_t)tn); (void)_w; } }
     char errcls[64];
     int want_error = expect_is_error(expect, errcls, sizeof errcls);
-    int is_assign = q_parse_is_assign(ast);
-    ray_t* res = q_eval(ast);
+    ray_t* res;
+    int is_assign = 1;                     /* a view definition prints nothing */
+    if (!q_view_intercept(ast, input, &res)) {
+        is_assign = q_parse_is_assign(ast);
+        res = q_eval(ast);
+    }
     ray_release(ast);
     if (ray_is_lazy(res)) res = ray_lazy_materialize(res);
 
