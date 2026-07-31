@@ -12,6 +12,7 @@
 #include "qlang/q_registry.h"     /* q_list_collapse — q_null_wrap collapse */
 #include "core/types.h"           /* RAY_TYPE_COUNT — the tag-indexed matrix bound */
 #include <string.h>               /* memchr/memset — matrix bake-out (init only) */
+#include <math.h>                 /* isinf — the infinity lane */
 
 int64_t q_type_as_i64(ray_t* x) {
     if (RAY_IS_TEMPORAL32(-x->type)) return (int64_t)x->i32;
@@ -382,6 +383,19 @@ int q_type_is_iter(ray_t* v) {
 }
 
 /* ---- null axis (owner-ruled: null is not math) --------------------------- */
+
+/* RAY_ATOM_IS_NULL's twin at the other end of the lane: the float lanes carry a
+ * real ±Inf, the int-backed ones the ±ray_type_inf sentinel (rayforce.h owns
+ * the payload).  A type with no pinned infinity answers 0. */
+int q_type_is_inf(ray_t* x) {
+    if (!x || x->type >= 0) return 0;
+    int8_t t = (int8_t)-x->type;
+    if (t == RAY_F64 || t == RAY_F32 || t == RAY_DATETIME) return isinf(x->f64);
+    int64_t inf;
+    if (!ray_type_inf(t, true, &inf)) return 0;
+    int64_t v = q_type_as_i64(x);
+    return v == inf || v == -inf;
+}
 
 /* q treats the null symbol ` AS null — shared predicate (the `null` verb,
  * ops/q_vs_sv.c dispatch). */
