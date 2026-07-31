@@ -101,10 +101,11 @@ int q_registry_is_reserved(int64_t sym_id);
 ray_t* q_registry_row_value(const struct q_op* row, q_valence_t valence);
 
 /* THE fn-value -> kdb primitive code home (`value +` and the wire's 101h/102h
- * byte share it): the value's manifest row's kdb_op column, valence from the
- * value's own rank (RAY_UNARY = the monadic cell).  -1 when the value has no
- * row (aliased env snapshot) or the row no code. */
-int q_registry_kdb_op_of(const ray_t* value);
+ * byte share it): the value's manifest row's kdb_op column.  -1 when the value
+ * has no row (aliased env snapshot) or the row no code.  *valence_out (optional)
+ * gets the MANIFEST cell the value was found in — the 101h/102h class, which for
+ * an arity-less ray_fn_vary value the C signature cannot supply. */
+int q_registry_kdb_op_of(const ray_t* value, q_valence_t* valence_out);
 
 /* The kdb_op column read BACKWARDS (the wire-decode direction): borrowed
  * value of the first manifest row carrying primitive `code` with a value at
@@ -154,7 +155,11 @@ void q_registry_destroy(void);
  * natively; q_fmt renders it `enlist` (table literals need no marker — they
  * parse to plain dict-then-flip trees).
  *   list    — paren-list literal `(1;2;3)` (the head value is what
- *             distinguishes a literal from the shape-identical (v;i))
+ *             distinguishes a literal from the shape-identical (v;i)).  It IS
+ *             the `enlist` row's monadic value, NOT a spelling-less twin: one
+ *             value, so it carries a manifest row and thus a wire code, and
+ *             `(enlist)~first parse"(1 2;3 4)"` holds.  Applying it (each/
+ *             projection/`.`) runs real enlist — only a tree HEAD is intercepted.
  *   compose — `'[f;g;…]` bracket form (the apply module's compose_apply) */
 ray_t* q_registry_list_value(void);
 ray_t* q_registry_compose_value(void);

@@ -414,6 +414,11 @@ static const q_op_t Q_OPS[] = {
     /* rank == iasc iasc (ref/rank.md) — the grade family, rowid. */
     /* `raze` adds the kdb atom arm (`raze 42` -> ,42) over base ray_raze_fn. */
     { "raze",    QLEX_KW_PREFIX, QR_FN1("raze", q_raze_wrap),  QR_NONE,           NULL, 1, 0, "structural", NULL },
+    /* `enlist` is its OWN unary primitive 41, NOT a keyword cover for `,:` (12)
+     * — owner ruling 2026-07-30.  Its value IS the paren-literal ctor head, so
+     * the recipe must build a UNIQUE object: reusing `,`-monadic's env snapshot
+     * would alias both rows out of q_registry_row_of and cost BOTH their codes. */
+    { "enlist",  QLEX_KW_PREFIX, QR_FNV("enlist", q_enlist_wrap), QR_NONE,        NULL, 1, 0, "structural", NULL, QKOP(41) },
     { "sqrt",    QLEX_KW_PREFIX, QR_ENV("sqrt"),               QR_NONE,           NULL, 1, 0, "atomic", NULL, QKOP(32) },
     /* ---- atomic unary math: implement-via-libm, no rayfall counterpart ----
      * `ceiling` is the floor-wrapper twin (float->LONG), NOT rayfall `ceil`. */
