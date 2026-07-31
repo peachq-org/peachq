@@ -908,7 +908,8 @@ static ray_t* bang_qsql(ray_t** args) {
     ray_release(src);
     if (name >= 0 && r && !RAY_IS_ERR(r)) {
         /* name form (law 21): amend in place, hand back the name */
-        if (q_env_set(name, r) != RAY_OK) { ray_release(r); return q_err(QE_ASSIGN); }
+        ray_err_t e = q_env_set(name, r);
+        if (e != RAY_OK) { ray_release(r); return q_env_err(e); }
         ray_release(r);
         ray_retain(tslot);
         return tslot;

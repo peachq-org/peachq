@@ -3,6 +3,7 @@
 #define _POSIX_C_SOURCE 200809L   /* clock_gettime / gmtime_r for the clock producers */
 #endif
 #include "qlang/q_dotz.h"
+#include "qlang/q_env.h"       /* q_env_get — the settable handlers are globals */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_value — handler firing */
 #include "qlang/eval/q_view.h" /* q_view_zb — `.z.b` dependency dict */
 #include "qlang/q_sys.h"       /* q_sys_timer_active — stopped-timer no-op guard */
@@ -56,15 +57,6 @@ static int    g_argc       = 0;
 static char** g_argv       = NULL;
 static int    g_script_idx = -1;   /* argv index of the `*.q` script, or -1 */
 static bool   g_quiet      = false; /* `-q` on the command line (kdb .z.q) */
-static ray_t* g_zts        = NULL;  /* current `.z.ts` timer handler (owned), or NULL */
-static ray_t* g_zexit      = NULL;  /* current `.z.exit` process-exit handler */
-static ray_t* g_zph        = NULL;  /* current `.z.ph` HTTP-GET handler (owned) */
-static ray_t* g_zws        = NULL;  /* current `.z.ws` WS-message handler (owned) */
-static ray_t* g_zwo        = NULL;  /* current `.z.wo` WS-open handler (owned) */
-static ray_t* g_zwc        = NULL;  /* current `.z.wc` WS-close handler (owned) */
-static ray_t* g_zpp        = NULL;  /* current `.z.pp` HTTP-POST handler (owned) */
-static ray_t* g_zac        = NULL;  /* current `.z.ac` HTTP-auth handler (owned) */
-static ray_t* g_zpm        = NULL;  /* current `.z.pm` HTTP-methods handler (owned) */
 
 int q_dotz_ipc_hook_index(const char* name, size_t len) {
     if (len == 5 && memcmp(name, ".z.bm", 5) == 0)
@@ -296,15 +288,13 @@ int64_t q_dotz_now_ns(int local) {
 
 /* ---- `.z.ts` timer handler ------------------------------------------------
  * `.z.ts` is a SETTABLE handler fired on each `\t N` tick (server-initiated
- * periodic push).  It is NOT an `.ipc.on.*` connection hook, so it does not use
- * env.c's frozen ipc-hook carve-out — it lives in this q-layer slot, set via
- * q_setg_wrap and read back via q_dotz_resolve.  The single forwarding thunk
- * (zts_tick) is registered ONCE per `\t N` and resolves the CURRENT `.z.ts`
- * each fire, so re-assigning `.z.ts` takes effect with no re-registration. */
+ * periodic push) — an ordinary global, resolved by name at fire time, so any
+ * write form reaches it.  The single forwarding thunk (zts_tick) is registered
+ * ONCE per `\t N`, so re-assigning `.z.ts` needs no re-registration. */
 static ray_t* zts_tick(ray_t* tick) {
     (void)tick;                                  /* fire_expired's monotonic ms — kdb passes local ts */
     if (!q_sys_timer_active()) return NULL;      /* stopped (incl. reentrant \t 0) → no-op */
-    ray_t* fn = g_zts;
+    ray_t* fn = q_env_get(ray_sym_intern_runtime(".z.ts", 5));   /* borrowed */
     if (!fn) return NULL;                         /* .z.ts unset → no-op */
     ray_retain(fn);                               /* survive a re-assign mid-call */
     ray_t* ts = ray_timestamp(q_dotz_now_ns(1));       /* .z.P local timestamp arg */
@@ -322,41 +312,6 @@ static ray_t* zts_tick(ray_t* tick) {
     return r;                                      /* fire_expired frees/prints it */
 }
 
-/* The ONE home for the settable `.z.*` handler name->slot mapping: q_dotz_get
- * (the C fire consumers) and q_dotz_set (the write path) both route through it,
- * so nothing outside dotz.c needs per-slot functions.  Who FIRES each (never
- * from here): `.z.ts` the poll-loop timer, `.z.exit` q_sys_exit (q_sys.c),
- * `.z.ph`/`.z.pp`/`.z.ac`/`.z.pm` q_http.c, `.z.ws`/`.z.wo`/`.z.wc` q_ws.c. */
-static ray_t** z_slot_ptr(const char* nm, size_t l) {
-    if (l == 7 && memcmp(nm, ".z.exit", 7) == 0) return &g_zexit;
-    if (l != 5 || nm[0] != '.' || nm[1] != 'z' || nm[2] != '.') return NULL;
-    switch (nm[3]) {
-        case 'p': switch (nm[4]) { case 'h': return &g_zph;    /* .z.ph */
-                                   case 'p': return &g_zpp;    /* .z.pp */
-                                   case 'm': return &g_zpm; }  /* .z.pm */
-                  break;
-        case 'w': switch (nm[4]) { case 's': return &g_zws;    /* .z.ws */
-                                   case 'o': return &g_zwo;    /* .z.wo */
-                                   case 'c': return &g_zwc; }  /* .z.wc */
-                  break;
-        case 't': if (nm[4] == 's') return &g_zts; break;      /* .z.ts */
-        case 'a': if (nm[4] == 'c') return &g_zac; break;      /* .z.ac */
-    }
-    return NULL;
-}
-
-/* Read-back a settable handler by name — BORROWED, NULL = unset/not-a-handler.
- * The C fire consumers (q_http.c / q_ws.c) call this on their request/event
- * path (named lookup, not a hot loop); q_dotz_resolve retains it for q. */
-ray_t* q_dotz_get(const char* name, size_t len) {
-    ray_t** slot = z_slot_ptr(name, len);
-    return slot ? *slot : NULL;
-}
-
-/* Assign a settable handler by name — returns true iff `name` IS one (caller
- * then stops; else it falls to the `.ipc.on.*` / plain-env path).  Retains
- * its own ref; RAY_QFN carriers are stored AS-IS — the fire sites apply them
- * through q_eval_apply_value.  Passing NULL clears. */
 /* `.z.zd` is the compression setting (ref/dotz.md).  q_wirefile never writes a
  * compressed file, so accepting the assignment would yield a silently
  * uncompressed one — fail at the point of the mistake instead. */
@@ -364,20 +319,11 @@ bool q_dotz_write_is_nyi(const char* name, size_t len) {
     return len == 5 && memcmp(name, ".z.zd", 5) == 0;
 }
 
-bool q_dotz_set(const char* name, size_t len, ray_t* val) {
-    ray_t** slot = z_slot_ptr(name, len);
-    if (!slot) return false;
-    if (val) ray_retain(val);
-    if (*slot) ray_release(*slot);
-    *slot = val;
-    return true;
-}
-
 /* Call `.z.exit` (if set) with the exit code (ref/dotz.md: unary, arg = the
  * exit parameter; default = do nothing), then drain its show/0N! console
  * output to stdout — this runs moments before exit(), nothing else drains. */
 void q_dotz_exit_fire(int code) {
-    ray_t* fn = g_zexit;
+    ray_t* fn = q_env_get(ray_sym_intern_runtime(".z.exit", 7));   /* borrowed */
     if (!fn) return;
     ray_retain(fn);                      /* survive a re-assign mid-call */
     ray_t* arg = ray_i64(code);
@@ -424,10 +370,6 @@ const char* q_dotz_script_path(void) {
     return g_script_idx < 0 ? NULL : g_argv[g_script_idx];
 }
 
-/* Borrow a settable-handler slot for read-back: retained (owned) or NULL when
- * unset (NULL -> eval raises 'name, matching an unset name). */
-static ray_t* z_slot(ray_t* g) { if (g) ray_retain(g); return g; }
-
 ray_t* q_dotz_resolve(int64_t sym_id) {
     ray_t* name = ray_sym_str(sym_id);   /* BORROWED: cached arena string atom
                                           * (RAY_ATTR_ARENA); the ray_release
@@ -444,9 +386,8 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
     ray_t* out = NULL;
     /* Computed read-only `.z.*` — all 4-char names, dispatched on the char
      * after ".z.".  The per-name producers (z_*) are the single home and each
-     * returns an OWNED ref (rc>=1).  The len-5 settable-handler names
-     * (.z.ts/.z.ph/.z.ws/.z.wo/.z.wc/.z.pp/.z.ac/.z.pm) miss here and fall
-     * through to their g_z* read-backs below. */
+     * returns an OWNED ref (rc>=1).  The settable handlers are ordinary
+     * globals, so they never reach here: q_env_resolve already found them. */
     if (n == 4) {
         switch (p[3]) {
             /* multi-line producers keep their z_* home (argv/host/version logic) */
@@ -477,14 +418,8 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
         }
     }
 
-    /* Settable-handler read-back via the shared name->slot map (owned copy for
-     * q).  The `.z.p*` IPC hooks (.z.pg/.z.ps/.z.po/.z.pc/.z.pw) aren't handler
-     * slots — z_slot_ptr declines them and they fall to the `.ipc.on.*` aliases
-     * below. */
-    if (!out) out = z_slot(q_dotz_get(p, n));
-
     /* kdb `.z.p*` handler-alias READ-BACK: resolve to the SAME `.ipc.on.*` env
-     * slot the write path (q_setg_wrap) installs into — so `.z.pg` reflects a
+     * slot the write path (q_env_set) installs into — so `.z.pg` reflects a
      * `.ipc.on.sync:{…}` assignment and vice-versa.  An UNSET alias declines
      * (NULL -> eval raises 'name, matching an unset name); kdb's default-handler
      * exposure is deferred (see the plan's accepted decisions). */
@@ -501,15 +436,6 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
 }
 
 void q_dotz_destroy(void) {
-    if (g_zts) { ray_release(g_zts); g_zts = NULL; }   /* release the `.z.ts` handler */
-    if (g_zexit) { ray_release(g_zexit); g_zexit = NULL; }
-    if (g_zph) { ray_release(g_zph); g_zph = NULL; }
-    if (g_zws) { ray_release(g_zws); g_zws = NULL; }
-    if (g_zwo) { ray_release(g_zwo); g_zwo = NULL; }
-    if (g_zwc) { ray_release(g_zwc); g_zwc = NULL; }
-    if (g_zpp) { ray_release(g_zpp); g_zpp = NULL; }
-    if (g_zac) { ray_release(g_zac); g_zac = NULL; }
-    if (g_zpm) { ray_release(g_zpm); g_zpm = NULL; }
     g_argc       = 0;
     g_argv       = NULL;
     g_script_idx = -1;

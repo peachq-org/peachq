@@ -252,7 +252,7 @@ static ray_t* indexed_assign(int is_global, ray_t* target, ray_t* opv,
             ray_err_t e2 = local ? q_env_local_set(te[0]->i64, amended)
                                  : q_env_set(te[0]->i64, amended);
             q_view_set_index(NULL, 0);               /* never leaks to the next set */
-            if (e2 != RAY_OK) ret = q_err(QE_ASSIGN);
+            if (e2 != RAY_OK) ret = q_env_err(e2);
             else if (!opv) { ray_retain(rv); ret = rv; }
             else ret = q_eval_apply_concrete(q_eval_apply_value(amended, idxv, k));
             ray_release(amended);
@@ -277,9 +277,7 @@ static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
     ray_t* s = ray_sym_str(target->i64);
     if (!s) return q_err(QE_TYPE);
     int dotted = ray_str_len(s) > 0 && ray_str_ptr(s)[0] == '.';
-    int zd_nyi = q_dotz_write_is_nyi(ray_str_ptr(s), ray_str_len(s));
     ray_release(s);
-    if (zd_nyi) return q_err(QE_NYI);
     ray_t* v = q_eval_apply_concrete(q_eval(rhs));    /* boundary seam: assignment */
     if (RAY_IS_ERR(v)) return v;
     Q_ASSERT_CONCRETE(v);                  /* env-set tripwire */
@@ -288,7 +286,7 @@ static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
                 (!is_global || q_env_local_get(target->i64) != NULL);
     ray_err_t err = local ? q_env_local_set(target->i64, v)
                           : q_env_set(target->i64, v);
-    if (err != RAY_OK) { ray_release(v); return q_err(QE_ASSIGN); }
+    if (err != RAY_OK) { ray_release(v); return q_env_err(err); }
     return v;
 }
 
@@ -685,7 +683,7 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
     }
     ray_err_t err = local ? q_env_local_set(target->i64, nv)
                           : q_env_set(target->i64, nv);
-    if (err != RAY_OK) { ray_release(nv); return q_err(QE_ASSIGN); }
+    if (err != RAY_OK) { ray_release(nv); return q_env_err(err); }
     return nv;                                       /* q returns the NEW value */
 }
 
