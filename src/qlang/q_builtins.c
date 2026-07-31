@@ -6,6 +6,7 @@
 #include "qlang/q_err.h"
 #include "qlang/eval/q_eval.h" /* q_eval / q_eval_apply_value — THE eval pipeline */
 #include "qlang/q_parse.h"
+#include "qlang/eval/q_view.h"   /* q_view_intercept — `x::e` at the remote-source seam */
 #include "qlang/net/q_http_client.h" /* .Q.c.hg / .Q.c.hp — outbound HTTP client */
 #define Q_OPS_ENV_GRANDFATHER /* base-kernel snapshots (capture_base) read the bootstrap catalogue */
 #include "qlang/q_registry_internal.h" /* q_registry_init (shared; brings q_registry.h) */
@@ -251,13 +252,19 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
     memcpy(tmp, src, len);
     tmp[len] = '\0';
     ray_t* ast = q_parse(tmp);
-    ray_sys_free(tmp);
-    if (RAY_IS_ERR(ast)) return ast;
+    if (RAY_IS_ERR(ast)) { ray_sys_free(tmp); return ast; }
     /* A trailing assignment answers with the generic null, not the assigned
      * value (basics/ipc.md: `h"fn:{2+x}"` displays nothing) — the same
-     * q_parse_is_assign judgment q_repl.c/qdoc.c make. */
-    const int is_assign = q_parse_is_assign(ast);
-    ray_t* r = q_eval(ast);
+     * q_parse_is_assign judgment q_repl.c/qdoc.c make.  A view definition is
+     * one, and is intercepted here for the same reason: remote source text is
+     * a statement, so `h"z::b+c"` defines a view exactly as the line would. */
+    ray_t* r;
+    int is_assign = 1;
+    if (!q_view_intercept(ast, tmp, &r)) {
+        is_assign = q_parse_is_assign(ast);
+        r = q_eval(ast);
+    }
+    ray_sys_free(tmp);
     ray_release(ast);
     if (ray_is_lazy(r))
         r = ray_lazy_materialize(r);
