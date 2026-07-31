@@ -12,7 +12,7 @@
 #include "qlang/q_type.h"  /* q_type_empty (the one typed-empty ctor), q_type_is_num_tag/_float_tag */
 #include "lang/eval.h"     /* ray_take_fn, ray_xbar_fn */
 #include "lang/internal.h" /* ray_iasc_fn/ray_idesc_fn, RAY_IS_TEMPORAL64, ray_error */
-#include "qlang/ops/q_index.h" /* q_index_elem_at — the element read */
+#include "qlang/ops/q_index.h" /* q_index_elem_at — the element read; q_index_at — the gather */
 #include "table/sym.h"     /* ray_sym_intern_runtime, RAY_SYM_W64 */
 #include <stdint.h>        /* uintptr_t */
 #include <string.h>
@@ -158,9 +158,15 @@ ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto) {
     return tv;
 }
 
-/* q `raze x` — base ray_raze_fn plus the kdb atom arm: an atom comes back as
- * a 1-item list (ref/raze.md `raze 42` -> ,42).  Everything else delegates. */
+/* q `raze x` — base ray_raze_fn plus the kdb dict and atom arms: a dict razes
+ * its values, an atom comes back as a 1-item list (ref/raze.md `raze 42` ->
+ * ,42).  Everything else delegates. */
 ray_t* q_raze_wrap(ray_t* x) {
+    /* a dict razes its VALUES (ref/raze.md).  `raze` IS `,/` by DEFINITION
+     * only: the fold recopies its accumulator and measures ~70x slower, so the
+     * identity is pinned as a property row, never spelled as the call path. */
+    if (x && x->type == RAY_DICT && !q_type_is_keyed(x))
+        return ray_raze_fn(ray_dict_vals(x));
     /* strings are kdb char LISTS (rank 1) — never the atom arm */
     if (x && ray_is_atom(x) && x->type != -RAY_STR) {
         ray_t* l = ray_list_new(1);
@@ -204,6 +210,17 @@ ray_t* q_til_wrap(ray_t* x) {
  * ray_where_fn handles the boolean-mask form, so delegate for it and anything
  * else.  Result is a long vector (kdb).  Negative counts are 'domain. */
 ray_t* q_where_wrap(ray_t* x) {
+    /* a dict indexes its RANGE, not `til count d`: the keys gathered by
+     * `where value d` (ref/where.md, q_ops.c FAMILY AUDIT).  Recursing reaches
+     * the GENERAL integer law below, which is why no boolean arm is written —
+     * the mask is that law's 0/1 case. */
+    if (x && x->type == RAY_DICT && !q_type_is_keyed(x)) {
+        ray_t* idx = q_where_wrap(ray_dict_vals(x));
+        if (RAY_IS_ERR(idx)) return idx;
+        ray_t* keys = q_index_at(ray_dict_keys(x), &idx, 1);
+        ray_release(idx);
+        return keys;
+    }
     if (x && (x->type == RAY_I64 || x->type == RAY_I32 || x->type == RAY_I16)) {
         int64_t n = ray_len(x);
         int64_t total = 0;
