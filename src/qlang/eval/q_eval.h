@@ -83,7 +83,7 @@ int q_eval_apply_is_fn(ray_t* v);
  * slots in ray_data, kind in aux[0]; serde/wire refuse them via totality
  * fallbacks. */
 enum { Q_EVAL_CAR_LAMBDA = 1, Q_EVAL_CAR_PROJ = 2, Q_EVAL_CAR_DERIV = 3,
-       Q_EVAL_CAR_COMP = 4, Q_EVAL_CAR_ITER = 5 };
+       Q_EVAL_CAR_COMP = 4, Q_EVAL_CAR_ITER = 5, Q_EVAL_CAR_VIEW = 6 };
 ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
                                ray_t* src);
 ray_t* q_eval_apply_deriv_new(int adv, ray_t* fv, const struct q_op* frow);
