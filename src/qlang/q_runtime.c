@@ -17,6 +17,7 @@
 #include "qlang/q_console.h"  /* q_console_pipe_disable — reset the `\nonlegacy` display global per runtime */
 #include "qlang/q_parse.h"    /* q_parse — embedded-bootstrap loader */
 #include "qlang/eval/q_eval.h" /* q_eval — THE eval pipeline */
+#include "qlang/eval/q_view.h" /* q_view_reset — per-runtime view state */
 #include "qlang/dotq_gen.h"   /* OPENQ_BOOTSTRAP — codegen'd from src/qlang/{q,dotq}.q */
 #include "qlang/h_gen.h"      /* OPENQ_H_BOOTSTRAP — codegen'd from src/qlang/h.q (`.h` constants) */
 #include "qlang/j_gen.h"      /* OPENQ_J_BOOTSTRAP — codegen'd from src/qlang/j.q (`.j` JSON ns) */
@@ -115,6 +116,7 @@ void q_runtime_destroy(ray_runtime_t* rt) {
     q_dotz_destroy();          /* free the `.z.*` argv snapshots */
     q_registry_destroy();      /* free verb snapshots before the env goes away */
     q_eval_syms_reset();       /* cached sym ids die with this runtime's sym table */
+    q_view_reset();            /* view roster + cached sym ids likewise */
     q_env_destroy();           /* release q's K-tree before the heap dies */
     q_sys_ctx_reset();         /* drop the `\d` context with its runtime */
     q_console_pipe_disable();          /* reset the `\nonlegacy` display global — the

@@ -52,6 +52,10 @@ int64_t q_env_qualify(int64_t ns_sym, int64_t member_sym);
 typedef enum { Q_ENV_NS_VARS, Q_ENV_NS_FNS, Q_ENV_NS_TABLES } q_env_ns_kind_t;
 ray_t* q_env_ns_names(int64_t ns_sym, q_env_ns_kind_t kind);
 
+/* qsort comparator over int64 sym ids by NAME bytes (the `\v`/`\f`/`\a`
+ * ordering) — name ordering is env knowledge, shared with `\b`. */
+int q_env_name_cmp(const void* a, const void* b);
+
 /* The symbol that marks a dictionary as a NAMESPACE.  env's representation, so
  * env owns it: `key` strips it from the root (ops/q_key.c) and kdb prints it
  * for every other namespace (ref/key.md `key `.` beside `key `.q`). */

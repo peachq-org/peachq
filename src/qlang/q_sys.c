@@ -23,6 +23,7 @@
 #include "qlang/q_pq.h"       /* q_pq_load — the `\l pq` embedded-stdlib gate */
 #include "qlang/q_env.h"      /* q_env_ctx_set/_ctx + q_env_ns_names — `\d` and the `\v`/`\f`/`\a` rosters */
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk — the `.z.ts` timer callback */
+#include "qlang/eval/q_view.h" /* q_view_names — `\b` / `\B` */
 #include "qlang/q_parse.h"    /* q_parse — `\t expr` / `\ts expr` timing */
 #include "core/ipc.h"         /* ray_ipc_listen — `\p N` binds a listener */
 #include "core/poll.h"        /* ray_poll_get / deregister — `\p 0W`/`\p 0`; poll->timers */
@@ -288,27 +289,21 @@ static ray_t* h_S(const char* arg, size_t alen) {
  * arg-form as a silent no-op: the OUTPUT matches kdb's empty setter output, so
  * the frozen ledger rows that bank that silence (e.g. `\z 1`) stay green.  The
  * side-effect is a tracked gap; the GETTER form (no arg, which kdb prints a
- * value for) can't yet report the value → honest 'nyi.
- *
- * The remaining commands that print a VALUE even in their arg-form or are
- * getter-only — \B (pending views) — inline `q_err(QE_NYI)` in the
- * switch: there is no silent form to match, so 'nyi is both honest and non-
- * regressing, the observable "known but not implemented" signal distinct from
- * an unknown-token shell-out. */
+ * value for) can't yet report the value → honest 'nyi. */
 static ray_t* h_getset(size_t alen) {
     if (alen > 0) return NULL;                   /* setter/action form → silent */
     return q_err(QE_NYI);               /* getter form → not yet */
 }
 
-/* `\b` — views.  openq has no view mechanism; the owner ruling (2026-07-15) is
- * that \b always reports an empty list "for now".  This is a DELIBERATE LIE
- * (PLAN.md, Known defects): an empty listing is indistinguishable from "no views
- * defined", so `if[count views[];..]` gets a confidently wrong answer where 'nyi
- * was honest.  The namespace arg is accepted and ignored — nothing to filter.
- * `.q.views` IS this command, so the answer has one home.  Shape mirrors \a's
- * empty listing: len 0, capacity 1. */
-static ray_t* h_b(void) {
-    return ray_sym_vec_new(RAY_SYM_W64, 1);
+/* `\b` (views) / `\B` (pending views), basics/syscmds.md — q_view.c owns the
+ * roster; the ns arg defaults to the current context like \v/\f/\a, and views
+ * live only in the default namespace.  `.q.views` IS `system"b"`. */
+static ray_t* h_bB(int pending, const char* arg, size_t alen) {
+    int64_t ns = alen ? ray_sym_intern_runtime(arg, alen) : q_env_ctx();
+    ray_t* out = q_view_names(ns, pending);
+    if (out) return out;
+    if (alen == 0) return ray_sym_vec_new(RAY_SYM_W64, 1);
+    return q_err_name(arg, alen);
 }
 
 /* ---- Stage-3 implemented handlers -----------------------------------------
@@ -1006,8 +1001,8 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
             case 'l': return h_l(arg, alen);                     /* load q script       */
             case 'p': return h_p(arg, alen);                     /* listening port      */
             case 't': return h_t(arg, alen, rest, restlen, rep); /* timer / \t exp      */
-            case 'b': return h_b();                              /* views — empty (owner ruling) */
-            case 'B': return q_err(QE_NYI);             /* pending views — getter-only  */
+            case 'b': return h_bB(0, arg, alen);                 /* views               */
+            case 'B': return h_bB(1, arg, alen);                 /* pending views       */
             /* Silent setter/action form (arg present) → NULL; getter → 'nyi:
              * \z date-parse, \E TLS, \r replicate, \T timeout, \u user-pwd,
              * \x expunge, \1 stdout, \2 stderr, \_ hide-q-code. */

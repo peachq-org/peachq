@@ -13,6 +13,7 @@
 #include "qlang/q_err.h"   /* q_err_text — full error text for console display */
 #include "qlang/q_parse.h"
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
+#include "qlang/eval/q_view.h"   /* q_view_intercept — `x::e` at the line seam */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
 #include "qlang/q_sys.h"      /* q_sys_is_cmd / q_sys_line / q_sys_prompt */
@@ -283,8 +284,12 @@ static void run_one_line(const char* s, size_t n, FILE* out, FILE* err,
         return;
     }
 
-    int is_assign = q_parse_is_assign(ast);
-    ray_t* r = q_eval(ast);
+    ray_t* r;
+    int is_assign = 1;                     /* a view definition prints nothing */
+    if (!q_view_intercept(ast, s, &r)) {
+        is_assign = q_parse_is_assign(ast);
+        r = q_eval(ast);
+    }
     ray_release(ast);
     if (ray_is_lazy(r))
         r = ray_lazy_materialize(r);

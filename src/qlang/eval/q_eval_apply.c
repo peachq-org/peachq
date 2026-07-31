@@ -13,6 +13,7 @@
 
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_eval_internal.h"
+#include "qlang/eval/q_view.h"     /* view carriers apply as their value */
 #include "qlang/eval/q_funsql.h"  /* the `?`/`!` matrix entry points (fnv_matrix_value) */
 #include "qlang/q_err.h"
 #include "qlang/q_ops.h"
@@ -140,6 +141,23 @@ ray_t* q_eval_apply_proj_new(ray_t* fv, const q_op_t* row, ray_t** args,
         s[2 + i] = args[i];
     }
     return c;
+}
+
+/* view carrier: [body tree, deps symvec, text charv, cached|NULL]; the
+ * pending/in-recalc flags live in aux[1], owned by q_view.c */
+ray_t* q_eval_apply_view_new(ray_t* body, ray_t* deps, ray_t* text) {
+    ray_t* c = car_new(Q_EVAL_CAR_VIEW, 4);
+    if (RAY_IS_ERR(c)) return c;
+    c->aux[1] = 0;
+    ray_retain(body); car_slots(c)[0] = body;
+    ray_retain(deps); car_slots(c)[1] = deps;
+    ray_retain(text); car_slots(c)[2] = text;
+    return c;
+}
+
+ray_t** q_eval_apply_view_slots(ray_t* v) {
+    return q_eval_apply_carrier_kind(v) == Q_EVAL_CAR_VIEW
+               ? car_slots(v) : NULL;
 }
 
 /* composition carrier (ref/apply.md Composition): [u, g] — u unary */
@@ -1216,8 +1234,9 @@ ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
 /* ===== the public value-apply seam ======================================= */
 
 int q_eval_apply_is_fn(ray_t* v) {
+    int kind = q_eval_apply_carrier_kind(v);
     return q_eval_apply_is_fnval(v) || v->type == RAY_LAMBDA ||
-           q_eval_apply_carrier_kind(v) != 0;
+           (kind != 0 && kind != Q_EVAL_CAR_VIEW);
 }
 
 /* Ambivalent-operator promotion for value-apply: a bare operator resolves to
@@ -1241,6 +1260,13 @@ static ray_t* apply_valence_sibling(ray_t* head, int64_t n, const q_op_t** row) 
 
 ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n) {
     if (!head || RAY_IS_ERR(head)) return q_err(QE_TYPE);
+    if (q_view_is(head)) {                    /* applying a view applies its value */
+        ray_t* dv = q_view_deref_borrowed(head);
+        if (RAY_IS_ERR(dv)) return dv;
+        ray_t* r = q_eval_apply_value(dv, args, n);
+        ray_release(dv);
+        return r;
+    }
     if (q_eval_apply_is_fn(head)) {
         const q_op_t* row = NULL;
         if (q_eval_apply_is_fnval(head)) head = apply_valence_sibling(head, n, &row);

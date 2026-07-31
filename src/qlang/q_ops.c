@@ -31,6 +31,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* wrapper decls for the QR_FN* recipes (brings q_ops.h) */
 #include "qlang/eval/q_eval.h"              /* q_eval_at_wrap / q_eval_dot_wrap — the `@` `.` rows */
+#include "qlang/eval/q_view.h"              /* q_view_wrap — the `view` row */
 #include "qlang/eval/q_funsql.h"            /* q_funsql_ques_wrap / q_funsql_bang_wrap — `?` `!` */
 #include "qlang/ops/q_bang.h"               /* q_bang — the `!` row */
 #include "qlang/ops/q_dollar.h"             /* q_dollar — the `$` row */
@@ -372,6 +373,8 @@ static const q_op_t Q_OPS[] = {
      * REFERENCE, never data to lift over. */
     { "tables",  QLEX_KW_PREFIX, QR_NONE,                      QR_NONE,           NULL, 1, 0, "structural", NULL },
     { "views",   QLEX_KW_PREFIX, QR_NONE,                      QR_NONE,           NULL, 1, 0, "structural", NULL },
+    /* `view` takes a view by REFERENCE (ref/view.md) — never data to lift. */
+    { "view",    QLEX_KW_PREFIX, QR_FN1("view", q_view_wrap),  QR_NONE,           NULL, 1, 0, "none", NULL },
     { "value",   QLEX_KW_PREFIX, QR_FN1("value", q_eval_value_wrap), QR_NONE,          NULL, 1, 0, "structural", NULL, QKOP(19) },
     /* `get` is a SYNONYM of `value` (ref/get.md) — one home. `eval` has NO row:
      * q.q-hosted over its internal (.q.eval:(-6!)). */
