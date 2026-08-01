@@ -382,9 +382,47 @@ static ray_t* binary_elem(ray_binary_fn fn, ray_t* a, ray_t* b) {
     return fn(a, b);
 }
 
+/* eval.c's atomic_map_binary_op owns a DAG-executor fast path keyed on the
+ * opcode; this carve kept only its boxed loop, so `v+v` paid three heap atoms
+ * per element.  The gate below is a STRICT SUBSET of eval.c's can_dag, so the
+ * executor always takes it and base's boxed fallback — a second
+ * result-construction home — stays unreachable from here. */
+static uint16_t dag_op_of(ray_binary_fn f) {
+    uintptr_t p = (uintptr_t)f;
+    if (p == (uintptr_t)ray_add_fn) return OP_ADD;
+    if (p == (uintptr_t)ray_sub_fn) return OP_SUB;
+    if (p == (uintptr_t)ray_mul_fn) return OP_MUL;
+    if (p == (uintptr_t)ray_div_fn) return OP_DIV;
+    return 0;
+}
+
+/* F64 vectors only.  eval.c's gate also admits the int and temporal widths,
+ * but the executor computes in the machine width where the element kernels
+ * carry q's sentinel rules — int infinity (`0W+til 3`) and byte wraparound
+ * (`1-0x02` is 0xff) both diverge.  Float has no sentinel but NaN, which the
+ * HAS_NULLS bail already covers.  Scalars may be any plain numeric: they
+ * reach the executor as a promoted constant, exactly as the kernel reads them. */
+#define DAG_ATOMT(t) ((t)==RAY_I64||(t)==RAY_F64||(t)==RAY_I32||(t)==RAY_I16)
+
+static int dag_pair_ok(ray_t* l, ray_t* r, int lc, int rc) {
+    int lv = lc && ray_is_vec(l), rv = rc && ray_is_vec(r);
+    if ((lc && !lv) || (rc && !rv)) return 0;
+    if (!lv && !rv) return 0;
+    if (lv && (l->type != RAY_F64 || (l->attrs & RAY_ATTR_HAS_NULLS))) return 0;
+    if (rv && (r->type != RAY_F64 || (r->attrs & RAY_ATTR_HAS_NULLS))) return 0;
+    if (!lc && (!DAG_ATOMT((int8_t)-l->type) || RAY_ATOM_IS_NULL(l))) return 0;
+    if (!rc && (!DAG_ATOMT((int8_t)-r->type) || RAY_ATOM_IS_NULL(r))) return 0;
+    return 1;
+}
+#undef DAG_ATOMT
+
 static ray_t* map_binary(ray_binary_fn fn, ray_t* l, ray_t* r) {
     int lc = is_coll(l), rc = is_coll(r);
     if (!lc && !rc) return fn(l, r);
+    uint16_t dop = dag_op_of(fn);
+    if (dop && dag_pair_ok(l, r, lc, rc) &&
+        !(lc && rc && ray_len(l) != ray_len(r)))
+        return atomic_map_binary_op(fn, dop, l, r);
     int64_t len;
     if (lc && rc) {
         if (ray_len(l) != ray_len(r)) return q_err(QE_LENGTH);
