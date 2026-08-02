@@ -10,12 +10,12 @@
 #include "qlang/q_registry_internal.h" /* q_str_text_bytes, q_type_strict_i64 */
 #include "qlang/q_console.h" /* q_console_write — 1/-1/2/-2 console handles */
 #include "qlang/q_dotz.h"   /* q_dotz_now_ns — the portable wall clock */
+#include "qlang/io/q_io.h"   /* q_io_mkdir_parents — hopen creates missing directories */
 #include "qlang/net/q_ws.h"          /* q_ws_client_open — `:ws:// sym handles */
 #include "qlang/net/q_http_client.h" /* q_http_client_raw — `:http:// sym handles */
 #include "lang/eval.h"       /* ray_eval_get_restricted, ray_at_fn */
 #include "lang/internal.h"   /* make_i64, ray_hopen_fn/ray_hsend_fn/ray_hpost_fn/ray_hclose_fn */
 #include "table/sym.h"       /* ray_sym_intern_runtime, ray_sym_str */
-#include "store/fileio.h"    /* ray_mkdir_p — hopen creates missing directories */
 #include "core/ipc.h"        /* ray_ipc_handle_of_fd/fd_of_handle — q true-fd handle <-> selector id */
 #include <rayforce.h>
 #include <stdio.h>           /* snprintf — hopen descriptor normalization */
@@ -165,16 +165,9 @@ ray_t* q_handles_open(const char* path, size_t plen, int is_fifo) {
     char* p = (char*)malloc(plen + 1);
     if (!p) return q_err(QE_OOM);
     memcpy(p, path, plen); p[plen] = '\0';
-    if (!is_fifo) {                  /* hopen.md: a missing filepath "is created,
+    if (!is_fifo)                    /* hopen.md: a missing filepath "is created,
                                       * including directories" (fifos must exist) */
-        size_t cut = plen;
-        while (cut > 0 && p[cut - 1] != '/') cut--;
-        if (cut > 1) {
-            p[cut - 1] = '\0';
-            (void)ray_mkdir_p(p);
-            p[cut - 1] = '/';
-        }
-    }
+        q_io_mkdir_parents(p, plen);
     int flags = O_BINARY |           /* a handle writes/reads bytes VERBATIM */
                 (is_fifo ? O_RDONLY : (O_WRONLY | O_CREAT | O_APPEND));
     int fd = open(p, flags, 0666);
