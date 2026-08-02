@@ -29,6 +29,12 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err);
 /* Skip any pasted `q)` prompt(s): returns a pointer INTO s. */
 const char* q_ctx_strip_prompt(const char* s);
 
+/* Install the two callbacks the IPC layer evaluates a request through: source
+ * text (the seam above, but answering with a value instead of printing — hence
+ * a shared pipeline, not a shared function) and the kdb `(func;args)`
+ * value-apply, which is not source at all.  q_runtime owns the paired teardown. */
+void q_ctx_install_remote_hooks(void);
+
 /* ---- process lifecycle ----------------------------------------------------
  * A `\p N` (or startup `-p`) listener makes this process a server even if it
  * began as a client: like kdb, once it has a listener it keeps serving past
