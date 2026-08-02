@@ -128,16 +128,6 @@ ray_t* q_hclose_wrap(ray_t* x);
 ray_t* q_hsym_wrap(ray_t* x);
 ray_t* q_attr_wrap(ray_t* x);
 
-/* File symbol -> OWNED RAY_STR filesystem path (leading ':' stripped), NULL
- * when x is not a `:path symbol atom.  The single home every file-touching
- * arm shares (q_io.c's read verbs, q_io_filetext's `0:`, q_wirefile). */
-ray_t* q_io_file_path(ray_t* x);
-
-/* `read1 (f;off;want)`'s body, shared with q_wirefile the way q_io_file_path
- * is: OWNED RAY_BYTE_ONLY of up to `want` bytes from `off` (want < 0 = to EOF;
- * both clamped, so a short read is not an error). */
-ray_t* q_io_read_slice(ray_t* pathstr, int64_t off, int64_t want);
-
 /* q `enlist` vary wrapper (base ray_enlist_fn + dict -> 1-row table arm) —
  * env-bound by q_builtins_register before registry init so both `enlist`
  * and monadic `,` share it. */

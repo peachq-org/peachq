@@ -1,25 +1,24 @@
-/* ops/q_io_filetext.c — the q `0:` File Text surface: Save Text, Prepare Text,
+/* io/q_io_filetext.c — the q `0:` File Text surface: Save Text, Prepare Text,
  * Load CSV, Load Fixed, Key-Value Pairs, plus the `-14!` CSV-quote alias.
- * Oracle: ref/file-text.md (CLEAN ROOM).  Split out of ops/q_io.c (2026-07-31),
- * which keeps the path/byte layer this file stands on (q_io_file_path,
- * q_io_read_all) — the base-plus-specialization shape net/q_wire + q_wirefile
- * already use.  Binary file formats (`1:`/`2:`) are not implemented here yet.
+ * Oracle: ref/file-text.md (CLEAN ROOM).  Split out of io/q_io.c (2026-07-31),
+ * which keeps the byte core this file stands on (io/q_io.h) — the
+ * base-plus-specialization shape net/q_wire + q_wirefile already use.
+ * Binary file formats (`1:`/`2:`) are not implemented here yet.
  *
  * Ownership: helper inputs are BORROWED, helper outputs are OWNED by the
  * caller; on any partial failure a helper releases everything it allocated
  * before returning the error.
  *
- * RAY_FN_RESTRICTED note: the base file primitives carry the flag on their ENV
- * fn objects; calling the C functions directly bypasses the eval-layer check,
- * so every file-touching arm re-asserts ray_eval_get_restricted(). */
+ * RAY_FN_RESTRICTED note: nothing here touches the filesystem directly — the
+ * byte core owns both the access and the restricted-mode gate. */
 #define _POSIX_C_SOURCE 200809L
-#include "qlang/q_registry_internal.h" /* q_io_read_all, q_str_split_lines, q_list_collapse */
+#include "qlang/q_registry_internal.h" /* q_str_split_lines, q_list_collapse */
 #include "qlang/base/q_err.h"
+#include "qlang/io/q_io.h"  /* the byte core: paths, the slice read, the write */
 #include "qlang/ops/q_dollar.h" /* q_cast_designator, q_dollar_tok — Tok column parses */
 #include "qlang/q_builtins.h" /* q_string_fn — Prepare Text cell text; q_io_filetext_csv_quote decl */
-#include "lang/eval.h"      /* ray_eval_get_restricted, ray_write_file_fn, ray_at_fn */
+#include "lang/eval.h"      /* ray_at_fn */
 #include "table/sym.h"      /* ray_sym_intern_runtime, ray_sym_str */
-#include "store/fileio.h"   /* ray_mkdir_p — Save Text missing dirs */
 #include <stdlib.h>
 #include <string.h>
 
@@ -27,7 +26,6 @@
 static ray_t* ft_save_text(ray_t* fsym, ray_t* y) {
     ray_t* path = q_io_file_path(fsym);
     if (!path) return q_err(QE_TYPE);
-    if (ray_eval_get_restricted()) { ray_release(path); return q_err(QE_ACCESS); }
     if (!y || !(y->type == RAY_LIST || y->type == RAY_STR)) {
         ray_release(path);
         return q_err(QE_TYPE);
@@ -60,31 +58,10 @@ static ray_t* ft_save_text(ray_t* fsym, ray_t* y) {
         buf[w++] = '\n';
         ray_release(e);
     }
-    /* create missing parent directories (the doc's "any missing containing
-     * directories"); ray_mkdir_p is the shared portable impl. */
-    {
-        const char* pp = ray_str_ptr(path);
-        size_t pn = ray_str_len(path);
-        size_t cut = pn;
-        while (cut > 0 && pp[cut - 1] != '/') cut--;
-        if (cut > 1) {
-            char* dir = (char*)malloc(cut);
-            if (dir) {
-                memcpy(dir, pp, cut - 1);
-                dir[cut - 1] = '\0';
-                (void)ray_mkdir_p(dir);
-                free(dir);
-            }
-        }
-    }
-    ray_t* content = ray_str(buf, w);
+    ray_t* bad = q_io_write_all(path, buf, w);   /* owns the missing-directories law */
     free(buf);
-    if (!content || RAY_IS_ERR(content)) { ray_release(path); return content ? content : q_err(QE_OOM); }
-    ray_t* r = ray_write_file_fn(path, content);
     ray_release(path);
-    ray_release(content);
-    if (!r || RAY_IS_ERR(r)) return r;
-    ray_release(r);
+    if (bad) return bad;
     ray_retain(fsym);
     return fsym;
 }
@@ -279,6 +256,17 @@ static int8_t ft_tag(char c, int* is_str, int* is_skip) {
     return is_tok ? tag : 0;
 }
 
+/* A file slice as its rows.  The byte core streams just the slice, so the
+ * chunk form costs O(chunk) per call and not O(file). */
+static ray_t* ft_lines_of(ray_t* path, int64_t off, int64_t want) {
+    ray_t* b = q_io_read_slice(path, off, want, NULL);
+    if (!b || RAY_IS_ERR(b)) return b;
+    int64_t n = ray_len(b);
+    ray_t* rows = q_str_split_lines(n ? (const char*)ray_data(b) : "", (size_t)n);
+    ray_release(b);
+    return rows;
+}
+
 /* Normalize the RIGHT operand of Load CSV / Load Fixed into an OWNED
  * RAY_LIST of row strings.  *single = 1 for the one-string-no-newline form
  * (kdb returns a list of parsed ATOMS for it, not columns). */
@@ -298,35 +286,22 @@ static ray_t* ft_rows(ray_t* y, int* single) {
     if (y->type == -RAY_SYM) {
         ray_t* path = q_io_file_path(y);
         if (!path) return q_err(QE_TYPE);
-        ray_t* all = q_io_read_all(path);
+        ray_t* rows = ft_lines_of(path, 0, -1);
         ray_release(path);
-        if (!all || RAY_IS_ERR(all)) return all;
-        ray_t* rows = q_str_split_lines(ray_str_ptr(all), ray_str_len(all));
-        ray_release(all);
         return rows;
     }
     if (y->type == RAY_LIST || y->type == RAY_STR) {
         int64_t n = ray_len(y);
         ray_t** e = y->type == RAY_LIST ? (ray_t**)ray_data(y) : NULL;
-        /* (filesymbol; offset[; length]) chunk form */
+        /* (filesymbol; offset[; length]) chunk form — the read verbs' triple,
+         * clamped rather than 'domain (q_io.h). */
         if (e && n >= 2 && n <= 3 && e[0] && e[0]->type == -RAY_SYM) {
-            ray_t* path = q_io_file_path(e[0]);
-            if (!path) return q_err(QE_TYPE);
-            int64_t off, want = -1;
-            if (!q_type_strict_i64(e[1], &off) || (n == 3 && !q_type_strict_i64(e[2], &want))) {
-                ray_release(path);
-                return q_err(QE_TYPE);
-            }
-            ray_t* all = q_io_read_all(path);
+            ray_t* path;
+            int64_t off, want;
+            ray_t* bad = q_io_file_triple(e[0], e[1], n == 3 ? e[2] : NULL, 1, &path, &off, &want);
+            if (bad) return bad;
+            ray_t* rows = ft_lines_of(path, off, want);
             ray_release(path);
-            if (!all || RAY_IS_ERR(all)) return all;
-            const char* p = ray_str_ptr(all);
-            int64_t len = (int64_t)ray_str_len(all);
-            if (off < 0) off = 0;
-            if (off > len) off = len;
-            int64_t end = want >= 0 && off + want < len ? off + want : len;
-            ray_t* rows = q_str_split_lines(p + off, (size_t)(end - off));
-            ray_release(all);
             return rows;
         }
         /* list / str-vector of row strings */
