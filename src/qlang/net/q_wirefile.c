@@ -1,121 +1,17 @@
 /* q_wirefile — kdb+ on-disk reader (see q_wirefile.h). */
 #include "qlang/net/q_wirefile.h"
-#include "qlang/q_prim.h"
-#include "qlang/net/q_gz.h"
+#include "qlang/io/q_io.h"      /* the byte core: paths, the slice read, the write */
 #include "qlang/net/q_wire.h"
 #include "qlang/base/q_err.h"
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_concrete */
-#include "lang/eval.h"          /* ray_eval_get_restricted, ray_write_file_fn */
+#include "lang/eval.h"          /* ray_eval_get_restricted */
 #include "mem/heap.h"           /* RAY_ATTR_SORTED */
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
-#define ZIP_MAGIC     "kxzipped"
-#define ZIP_MAGIC_LEN 8
-#define ZIP_TRAIL_LEN 40
-#define ZIP_ENTRY_LEN 8
-
-enum { ZIP_NONE = 0, ZIP_IPC = 1, ZIP_GZIP = 2, ZIP_SNAPPY = 3, ZIP_ENCRYPTED = 16 };
-
-/* kb/file-compression.md: a power of 2 between 12 and 20. */
-#define ZIP_LOG2_MIN 12
-#define ZIP_LOG2_MAX 20
-
-typedef struct {
-    int64_t uncompressed;   /* plaintext bytes */
-    int64_t block_size;     /* logicalBlockSize in BYTES; -21! reports its log2 */
-    int64_t num_blocks;
-    int32_t compressed;     /* block bytes, excluding magic, index and trailer */
-    int32_t algorithm;
-    int32_t level;
-} zip_hdr_t;
-
 static int64_t wf_i64(const uint8_t* p) { int64_t v; memcpy(&v, p, 8); return v; }
 static int32_t wf_i32(const uint8_t* p) { int32_t v; memcpy(&v, p, 4); return v; }
-
-static int32_t zip_log2(int64_t v) {
-    int32_t k = 0;
-    while (v > 1) { v >>= 1; k++; }
-    return k;
-}
-
-/* Decode the fixed 40-byte trailer at `t`.  `file_len` is the whole file size,
- * which is what closes the layout arithmetic and makes a truncation
- * detectable.  Returns NULL on success, else an owned 'corrupt. */
-static ray_t* zip_trailer(const uint8_t* t, size_t file_len, zip_hdr_t* z) {
-    z->uncompressed = wf_i64(t);
-    z->block_size   = wf_i64(t + 16);
-    z->compressed   = wf_i32(t + 24);
-    z->algorithm    = wf_i32(t + 28);
-    z->num_blocks   = wf_i64(t + 32);
-    z->level        = 0;
-    size_t room = file_len - ZIP_MAGIC_LEN - ZIP_TRAIL_LEN;
-    if (z->uncompressed < 0 || z->compressed < 0 || z->num_blocks < 0 ||
-        (uint64_t)z->num_blocks > room / ZIP_ENTRY_LEN)
-        return q_err(QE_CORRUPT);
-    if ((size_t)z->compressed + (size_t)z->num_blocks * ZIP_ENTRY_LEN != room ||
-        wf_i32(t + 8) != ZIP_MAGIC_LEN + z->compressed)
-        return q_err(QE_CORRUPT);
-    return NULL;
-}
-
-static bool zip_is_wrapped(const uint8_t* buf, size_t len) {
-    return buf && len >= ZIP_MAGIC_LEN && memcmp(buf, ZIP_MAGIC, ZIP_MAGIC_LEN) == 0;
-}
-
-ray_t* q_wirefile_unzip(const uint8_t* buf, size_t len) {
-    if (!zip_is_wrapped(buf, len)) return NULL;
-    if (len < ZIP_MAGIC_LEN + ZIP_TRAIL_LEN) return q_err(QE_CORRUPT);
-    zip_hdr_t z;
-    ray_t* bad = zip_trailer(buf + len - ZIP_TRAIL_LEN, len, &z);
-    if (bad) return bad;
-    if (z.algorithm != ZIP_NONE && z.algorithm != ZIP_GZIP) return q_err(QE_NYI);
-    int32_t log2bs = zip_log2(z.block_size);
-    if (z.block_size != (int64_t)1 << log2bs ||
-        log2bs < ZIP_LOG2_MIN || log2bs > ZIP_LOG2_MAX)
-        return q_err(QE_CORRUPT);
-    /* Each block inflates to at most logicalBlockSize, so the trailer bounds its
-     * own uncompressedLength: a lying header cannot drive the allocation.  The
-     * ceiling is spelled out rather than (a+b-1)/b, which would overflow. */
-    int64_t need = z.uncompressed / z.block_size + (z.uncompressed % z.block_size ? 1 : 0);
-    if (need > z.num_blocks) return q_err(QE_CORRUPT);
-
-    const size_t end = ZIP_MAGIC_LEN + (size_t)z.compressed;
-    /* Algorithm 0 is the wrapper kdb still writes when compression did not pay;
-     * no corpus sample, so accept it only when the two lengths agree exactly. */
-    if (z.algorithm == ZIP_NONE) {
-        if ((int64_t)z.compressed != z.uncompressed) return q_err(QE_CORRUPT);
-        return ray_vec_from_raw(RAY_BYTE_ONLY, buf + ZIP_MAGIC_LEN, z.uncompressed);
-    }
-
-    uint8_t* dst = (uint8_t*)malloc(z.uncompressed > 0 ? (size_t)z.uncompressed : 1);
-    if (!dst) return q_err(QE_OOM);
-    size_t produced = 0, pos = ZIP_MAGIC_LEN;
-    int64_t blocks = 0;
-    while (produced < (size_t)z.uncompressed) {
-        size_t got = 0, used = 0;
-        const char* err = NULL;
-        if (pos >= end ||
-            q_gz_inflate_zlib(buf + pos, end - pos, dst + produced,
-                              (size_t)z.uncompressed - produced,
-                              &got, &used, &err) != 0 || used == 0 || got == 0) {
-            free(dst);
-            return q_err(QE_CORRUPT);
-        }
-        produced += got;
-        pos += used;
-        blocks++;
-    }
-    /* One zlib stream per block: fewer streams than numBlocks means the payload
-     * and the trailer disagree, however plausible the plaintext looks. */
-    ray_t* out = (produced == (size_t)z.uncompressed && pos == end &&
-                  blocks == z.num_blocks)
-                     ? ray_vec_from_raw(RAY_BYTE_ONLY, dst, z.uncompressed)
-                     : q_err(QE_CORRUPT);
-    free(dst);
-    return out;
-}
 
 /* ---- the on-disk shapes ------------------------------------------------- */
 
@@ -219,7 +115,7 @@ static int64_t wf_derive_count(size_t room, uint8_t esz, uint8_t attr) {
 static ray_t* wf_companion(ray_t* path) {
     ray_t* cp = wf_join(ray_str_ptr(path), ray_str_len(path), "#", 1);
     if (!cp) return q_err(QE_OOM);
-    ray_t* b = q_io_read_slice(cp, 0, -1);
+    ray_t* b = q_io_read_slice(cp, 0, -1, NULL);
     ray_release(cp);
     return b ? b : q_err(QE_IO);
 }
@@ -450,34 +346,14 @@ static ray_t* wf_read_path(ray_t* path, int follow) {
         return n && p[n - 1] == '/' ? wf_read_folder(p, n) : q_err(QE_IO);
     if (!S_ISREG(st.st_mode)) return q_err(QE_IO);
 
-    ray_t* head = q_io_read_slice(path, 0, ZIP_MAGIC_LEN);
-    if (!head || RAY_IS_ERR(head)) return head ? head : q_err(QE_IO);
-    const uint8_t* hp = (const uint8_t*)ray_data(head);
-    size_t hn = (size_t)ray_len(head);
-    int wrapped = zip_is_wrapped(hp, hn);
-    int known = wrapped || wf_sniff(hp, hn) != WF_UNKNOWN;
-    ray_release(head);
-    /* Only the sniff is positional: a value spans its file, and a compressed one
-     * cannot be inflated in part (the block index is not offsets). */
-    if (!known) return q_err(QE_TYPE);
-
-    ray_t* all = q_io_read_slice(path, 0, -1);
+    /* A value spans its whole file, so the read is never partial; the byte core
+     * resolves a kxzip container away and reports that it did, which is the one
+     * thing the image cannot say for itself (compression zeroes its count). */
+    int zipped = 0;
+    ray_t* all = q_io_read_slice(path, 0, -1, &zipped);
     if (!all || RAY_IS_ERR(all)) return all ? all : q_err(QE_IO);
-    const uint8_t* buf = (const uint8_t*)ray_data(all);
-    size_t len = (size_t)ray_len(all);
-    ray_t* r;
-    if (!wrapped) {
-        r = wf_read_image(buf, len, 0, follow ? path : NULL);
-    } else {
-        ray_t* plain = q_wirefile_unzip(buf, len);
-        if (!plain || RAY_IS_ERR(plain)) {
-            r = plain ? plain : q_err(QE_CORRUPT);
-        } else {
-            r = wf_read_image((const uint8_t*)ray_data(plain), (size_t)ray_len(plain), 1,
-                              follow ? path : NULL);
-            ray_release(plain);
-        }
-    }
+    ray_t* r = wf_read_image((const uint8_t*)ray_data(all), (size_t)ray_len(all),
+                             zipped, follow ? path : NULL);
     ray_release(all);
     return r;
 }
@@ -565,91 +441,10 @@ ray_t* q_wirefile_write(ray_t* x, ray_t* y) {
     ray_t* img = wf_write_image(y);
     ray_release(y);
     if (RAY_IS_ERR(img)) { ray_release(path); return img; }
-    ray_t* r = ray_write_file_fn(path, img);
+    ray_t* bad = q_io_write_all(path, ray_str_ptr(img), ray_str_len(img));
     ray_release(img);
     ray_release(path);
-    if (!r) return q_err(QE_IO);
-    if (RAY_IS_ERR(r)) return r;
-    ray_release(r);
+    if (bad) return bad;
     ray_retain(x);
     return x;
-}
-
-/* ---- `-21!` ------------------------------------------------------------- */
-
-static ray_t* zip_stats_dict(const zip_hdr_t* z, int64_t file_len) {
-    static const char* const names[] = { "compressedLength", "uncompressedLength",
-                                         "algorithm", "logicalBlockSize", "zipLevel" };
-    ray_t* vals[] = { ray_i64(file_len), ray_i64(z->uncompressed),
-                      ray_i32(z->algorithm), ray_i32(zip_log2(z->block_size)),
-                      ray_i32(z->level) };
-    int64_t n = (int64_t)(sizeof names / sizeof names[0]);
-    ray_t* k = ray_sym_vec_new(RAY_SYM_W64, n);
-    ray_t* v = ray_list_new(n);
-    for (int64_t i = 0; i < n; i++) {
-        int64_t id = ray_sym_intern(names[i], strlen(names[i]));
-        if (k && !RAY_IS_ERR(k)) k = ray_vec_append(k, &id);
-        if (v && !RAY_IS_ERR(v) && vals[i]) v = ray_list_append(v, vals[i]);
-        if (vals[i]) ray_release(vals[i]);
-    }
-    if (!k || RAY_IS_ERR(k) || !v || RAY_IS_ERR(v)) {
-        if (k && !RAY_IS_ERR(k)) ray_release(k);
-        if (v && !RAY_IS_ERR(v)) ray_release(v);
-        return q_err(QE_OOM);
-    }
-    return ray_dict_new(k, v);
-}
-
-/* The index entries are NOT block offsets — they are byte-identical across
- * every corpus file regardless of size.  Their second i32 is level<<8|algorithm,
- * the only field -21! needs from the index. */
-static int32_t zip_read_level(ray_t* path, int64_t file_len, const zip_hdr_t* z) {
-    if (z->num_blocks <= 0) return 0;
-    int64_t off = file_len - ZIP_TRAIL_LEN - z->num_blocks * ZIP_ENTRY_LEN;
-    ray_t* e = q_io_read_slice(path, off + 4, 4);
-    if (!e || RAY_IS_ERR(e)) return 0;
-    int32_t lvl = ray_len(e) == 4 ? (wf_i32((const uint8_t*)ray_data(e)) >> 8) & 0xff : 0;
-    ray_release(e);
-    return lvl;
-}
-
-ray_t* q_wirefile_stats(ray_t* x) {
-    if (!x || x->type != -RAY_SYM) return q_err(QE_TYPE);
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
-    ray_t* path = q_io_file_path(x);
-    if (!path) return q_err(QE_TYPE);
-    struct stat st;
-    if (stat(ray_str_ptr(path), &st) != 0 || !S_ISREG(st.st_mode)) {
-        ray_release(path);
-        return q_err(QE_IO);
-    }
-    int64_t file_len = (int64_t)st.st_size;
-    ray_t* head = q_io_read_slice(path, 0, ZIP_MAGIC_LEN);
-    if (!head || RAY_IS_ERR(head)) { ray_release(path); return head ? head : q_err(QE_IO); }
-    int wrapped = zip_is_wrapped((const uint8_t*)ray_data(head), (size_t)ray_len(head));
-    ray_release(head);
-    if (!wrapped) {
-        ray_release(path);
-        return ray_dict_new(ray_sym_vec_new(RAY_SYM_W64, 0), ray_list_new(0));
-    }
-    ray_t* r;
-    if (file_len < ZIP_MAGIC_LEN + ZIP_TRAIL_LEN) {
-        r = q_err(QE_CORRUPT);
-    } else {
-        ray_t* tail = q_io_read_slice(path, file_len - ZIP_TRAIL_LEN, ZIP_TRAIL_LEN);
-        if (!tail || RAY_IS_ERR(tail)) r = tail ? tail : q_err(QE_IO);
-        else if (ray_len(tail) != ZIP_TRAIL_LEN) { ray_release(tail); r = q_err(QE_CORRUPT); }
-        else {
-            zip_hdr_t z;
-            ray_t* bad = zip_trailer((const uint8_t*)ray_data(tail), (size_t)file_len, &z);
-            ray_release(tail);
-            if (bad) r = bad;
-            else {
-                z.level = zip_read_level(path, file_len, &z);
-                r = zip_stats_dict(&z, file_len);
-            }
-        }
-    }
-    ray_release(path);
-    return r;
 }
