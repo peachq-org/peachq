@@ -6,11 +6,11 @@
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
-#include "qlang/q_err.h"
+#include "qlang/base/q_err.h"
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home */
 #include "lang/eval.h"     /* ray_eq_fn/ray_neq_fn, ray_neg_fn */
 #include "lang/internal.h" /* atomic_map_unary, as_f64, is_numeric, is_temporal, make_f64 */
-#include "qlang/ops/q_type.h"  /* q_type_as_i64 / q_type_is_numeric_or_temporal / q_type_is_bool */
+#include "qlang/base/q_type.h"  /* q_type_as_i64 / q_type_is_numeric_or_temporal / q_type_is_bool */
 #include "qlang/eval/q_eval.h" /* carrier read-out: `~` decomposes function values */
 #include <math.h>          /* sin/cos/tan/asin/acos/atan, exp/log, floor/floorf, ceil/ceilf */
 #include <string.h>        /* memcmp, memcpy */
