@@ -13,7 +13,9 @@
  * get, set) tests -RAY_SYM itself before asking. */
 ray_t* q_io_file_path(ray_t* x);
 
-/* Bytes on disk, or -1 when the path will not stat. */
+/* How big the file IS, or -1 when the path will not stat: a kxzip container
+ * answers with its ORIGINAL file's length (ref/hcount.md), one that will not
+ * decode with its own. */
 int64_t q_io_file_size(ray_t* pathstr);
 
 /* read0/read1/`0:`'s `(file;offset[;length])`.  NULL with *path OWNED and
