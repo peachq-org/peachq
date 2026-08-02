@@ -99,6 +99,10 @@ int q_type_is_dense_group_col(ray_t* c);
 /* The physical STR atom lane (string-C3): rank-wise a char LIST, not a scalar. */
 int q_type_is_str_atom(ray_t* x);
 
+/* a q-visible CHAR atom (-10h).  Where a verb's doc says "a string", this is
+ * the shape to refuse: q does not promote an atom to a 1-item list. */
+int q_type_is_char_atom(ray_t* x);
+
 /* a SYMBOL atom (-11h) — the twin of q_type_is_str_atom */
 int q_type_is_sym_atom(ray_t* x);
 
