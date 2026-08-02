@@ -18,7 +18,7 @@
 #include "qlang/q_err.h"
 #include "qlang/q_fmt.h"      /* q_fmt / q_fmt_float — the display + `\P` home */
 #include "qlang/q_registry.h" /* q_list_collapse */
-#include "qlang/q_type.h"     /* q_type_is_inf — the infinity lane */
+#include "qlang/ops/q_type.h"     /* q_type_is_inf — the infinity lane */
 #include "lang/eval.h"        /* ray_at_fn — dict/table cell reads */
 #include "table/sym.h"        /* ray_sym_vec_cell */
 #include <rayforce.h>

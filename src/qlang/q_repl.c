@@ -16,7 +16,7 @@
 #include "qlang/eval/q_view.h"   /* q_view_intercept — `x::e` at the line seam */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
-#include "qlang/q_sys.h"      /* q_sys_is_cmd / q_sys_line / q_sys_prompt */
+#include "qlang/ops/q_sys.h"      /* q_sys_is_cmd / q_sys_line / q_sys_prompt */
 #include "app/term.h"       /* ray_term_* line editor + highlighter hook */
 #include "core/poll.h"      /* ray_poll_* — concurrent REPL + IPC event loop */
 #include "lang/eval.h"      /* ray_eval_is_interrupted */

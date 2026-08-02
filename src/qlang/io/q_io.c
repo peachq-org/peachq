@@ -11,7 +11,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* q_str_split_lines, q_type_strict_i64 */
 #include "qlang/q_err.h"
-#include "qlang/q_handles.h" /* q_handles_read1 — the fifo-handle read1 form */
+#include "qlang/io/q_handles.h" /* q_handles_read1 — the fifo-handle read1 form */
 #include "lang/eval.h"      /* ray_eval_get_restricted, ray_read_file_fn */
 #include "table/sym.h"      /* ray_sym_intern_runtime, ray_sym_vec_cell */
 #include <stdio.h>          /* fopen/fseek/fread — the slice reader; remove — hdel */
