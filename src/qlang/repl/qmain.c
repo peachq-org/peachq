@@ -21,6 +21,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/repl/q_repl.h"
+#include "qlang/q_ctx.h"   /* q_ctx_run_file — the -f/script door */
 #include "qlang/q_runtime.h"
 #include "qlang/q_dotz.h"
 #include "qlang/ops/q_sys.h"     /* q_sys_listen — single-homed listen+readback */
@@ -178,12 +179,12 @@ int main(int argc, char** argv) {
 
     int script_rc = 0;
     if (script)
-        script_rc = q_repl_run_file(script, stdout, stderr);
+        script_rc = q_ctx_run_file(script, stdout, stderr);
 
     if (script_rc != 0) {
         /* Startup script could not be opened/read — skip the REPL/server loop
          * and exit non-zero (kdb fails a bad `q file.q`; it must not silently
-         * succeed).  q_repl_run_file already printed the open error. */
+         * succeed).  q_ctx_run_file already printed the open error. */
     } else if (q_sys_listen_port() > 0 && poll) {
         /* A listener is LIVE — from startup `-p` OR a runtime/script `\p N` —
          * so serve, don't exit at a non-tty script end.  Keyed off the
