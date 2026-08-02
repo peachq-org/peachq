@@ -33,6 +33,13 @@
  * q layer (the apply module, wrappers, codecs). */
 ray_t* q_index_elem_at(ray_t* v, int64_t i);
 
+/* The rank axis, homed here because both read items through q_index_elem_at.
+ * is_nested: are v's ITEMS collections (a STR atom counts — kdb strings are
+ * char LISTS)?  any_nested_item: the same axis read for CONFORMABILITY — does
+ * ANY item make v rank-2 under flip, which is_nested (item 0 only) misses. */
+int q_index_is_nested(ray_t* v);
+int q_index_any_nested_item(ray_t* v);
+
 /* read at depth: x . ix[0..k) (k==0 -> x).  Borrows all; owned result. */
 ray_t* q_index_at(ray_t* x, ray_t* const* ix, int64_t k);
 
