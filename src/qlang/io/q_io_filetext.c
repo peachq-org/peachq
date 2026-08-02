@@ -14,7 +14,7 @@
  * so every file-touching arm re-asserts ray_eval_get_restricted(). */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* q_io_read_all, q_str_split_lines, q_list_collapse */
-#include "qlang/q_err.h"
+#include "qlang/base/q_err.h"
 #include "qlang/ops/q_dollar.h" /* q_cast_designator, q_dollar_tok — Tok column parses */
 #include "qlang/q_builtins.h" /* q_string_fn — Prepare Text cell text; q_io_filetext_csv_quote decl */
 #include "lang/eval.h"      /* ray_eval_get_restricted, ray_write_file_fn, ray_at_fn */

@@ -2,7 +2,7 @@
  * graduated family home like q_bang.c / q_dollar.c.  Evicted from
  * ops/q_math.c (2026-07-22). */
 #include "qlang/q_registry_internal.h" /* wrap decls + q_registry.h (q_str_in/q_str_charv_out) */
-#include "qlang/q_err.h"
+#include "qlang/base/q_err.h"
 #include "lang/internal.h" /* ray_error */
 #include "table/sym.h"     /* ray_sym_str, ray_sym_vec_cell, ray_sym_intern_runtime */
 #include <string.h>        /* memcmp, memcpy */

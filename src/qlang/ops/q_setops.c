@@ -6,8 +6,8 @@
  * beats a wrong answer. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h"
-#include "qlang/q_err.h"
-#include "qlang/ops/q_type.h"
+#include "qlang/base/q_err.h"
+#include "qlang/base/q_type.h"
 #include "qlang/ops/q_table.h"
 #include "lang/eval.h"       /* ray_except_fn, ray_sect_fn */
 #include "lang/internal.h"   /* ray_concat_fn */

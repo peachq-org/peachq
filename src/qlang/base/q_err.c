@@ -13,7 +13,7 @@
  * __VM->raise_val (only other writer: base ray_raise_fn, rayfall-only).
  * Consume discipline: trap takes or drops it, statement entry drops as
  * backstop — a stale payload would caption the NEXT error. */
-#include "qlang/q_err.h"
+#include "qlang/base/q_err.h"
 #include "core/runtime.h"   /* __VM->raise_val — the pending-payload slot */
 #include <string.h>
 

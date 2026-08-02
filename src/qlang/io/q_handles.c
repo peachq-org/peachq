@@ -6,7 +6,7 @@
  * transport open / kind dispatch / close they delegate to. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/io/q_handles.h"
-#include "qlang/q_err.h"
+#include "qlang/base/q_err.h"
 #include "qlang/q_registry_internal.h" /* q_str_text_bytes, q_type_strict_i64 */
 #include "qlang/q_console.h" /* q_console_write — 1/-1/2/-2 console handles */
 #include "qlang/q_dotz.h"   /* q_dotz_now_ns — the portable wall clock */

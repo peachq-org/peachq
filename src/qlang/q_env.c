@@ -8,8 +8,8 @@
 #define Q_OPS_ENV_GRANDFATHER /* the .ipc.on.* six-slot callback seam: ray_env_set on hook syms only */
 #include "qlang/q_env.h"
 #include "qlang/q_registry_internal.h"
-#include "qlang/q_err.h"
-#include "qlang/ops/q_type.h"         /* q_type_is_fn / _is_table / _is_keyed — the \v|\f|\a split */
+#include "qlang/base/q_err.h"
+#include "qlang/base/q_type.h"         /* q_type_is_fn / _is_table / _is_keyed — the \v|\f|\a split */
 #include "qlang/q_dotz.h"         /* the .z.* handler-slot arms of `set` */
 #include "qlang/eval/q_view.h"    /* view hooks: set/unbind invalidation, dot-'nyi */
 #include "qlang/net/q_wirefile.h" /* q_wirefile_write — the `:file set y form */

@@ -1,7 +1,7 @@
 /* q_calendar.c — the q calendar home: date/time arithmetic shared by the
  * literal scanner (q_parse), q_fmt display and the cast/Tok paths.  Pure
  * value functions; contracts in q_calendar.h (castcal split, 2026-07-22). */
-#include "qlang/q_calendar.h"
+#include "qlang/base/q_calendar.h"
 #include <stdint.h>
 
 /* Hinnant days_from_civil (public domain, http://howardhinnant.github.io/

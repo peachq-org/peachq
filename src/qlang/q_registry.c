@@ -30,7 +30,7 @@
 #define _POSIX_C_SOURCE 200809L
 #define Q_OPS_ENV_GRANDFATHER /* legitimate owner: registry QR_ENV recipes snapshot env values */
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
-#include "qlang/q_err.h"
+#include "qlang/base/q_err.h"
 #include "qlang/q_env.h"   /* q_env_get — q-bound builtins are snapshot sources too */
 #include "lang/env.h"      /* ray_env_get (bootstrap catalogue); ray_fn_unary/binary/vary */
 #include "lang/eval.h"     /* RAY_FN_ATOMIC/SPECIAL_FORM/Q_LOWER — attrs stamped on built values */
@@ -38,7 +38,7 @@
 #include "table/sym.h"     /* ray_sym_intern_runtime, RAY_SYM_W64 — name interning */
 #include "store/serde.h"   /* ray_serde_set_fn_hooks — fn-value serde round-trip */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_iter_new — the iterator carriers */
-#include "qlang/ops/q_type.h"  /* q_type_init — bakes the result-type matrix */
+#include "qlang/base/q_type.h"  /* q_type_init — bakes the result-type matrix */
 #include <assert.h>
 #include <stdint.h>        /* INT64_MAX */
 #include <stdio.h>         /* snprintf */

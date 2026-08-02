@@ -6,7 +6,7 @@
  * the shared internal surface lives in q_registry_internal.h. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
-#include "qlang/q_err.h"
+#include "qlang/base/q_err.h"
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home */
 #include "lang/internal.h" /* ray_rand_fn, ray_guid_fn, RAY_IS_TEMPORAL64, ray_error */
 #include "table/sym.h"     /* ray_sym_intern, RAY_SYM_W64 — sym generate */
