@@ -6,9 +6,9 @@
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_eval_internal.h"
 #include "qlang/q_env.h"
-#include "qlang/q_err.h"
+#include "qlang/base/q_err.h"
 #include "qlang/q_registry.h"
-#include "qlang/q_parse_internal.h"   /* Q_ATTR_HOLE */
+#include "qlang/parse/q_parse_internal.h"   /* Q_ATTR_HOLE */
 #include "mem/heap.h"                 /* RAY_ATTR_SORTED */
 #include "mem/sys.h"                  /* ray_sys_alloc/free — the roster */
 #include "table/sym.h"

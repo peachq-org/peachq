@@ -4,7 +4,7 @@
  * NOT public API — do not include outside src/qlang. */
 #ifndef Q_PARSE_INTERNAL_H
 #define Q_PARSE_INTERNAL_H
-#include "qlang/q_parse.h"
+#include "qlang/parse/q_parse.h"
 #include "qlang/q_registry.h"
 #include <setjmp.h>
 

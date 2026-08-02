@@ -6,8 +6,8 @@
  * `#`'s set-attribute arm in ops/q_takedrop.c. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
-#include "qlang/q_err.h"
-#include "qlang/ops/q_type.h"  /* q_type_* guards */
+#include "qlang/base/q_err.h"
+#include "qlang/base/q_type.h"  /* q_type_* guards */
 #include "ops/idxop.h"     /* .attr.* engine calls: ray_attr_*, RAY_IDX_*, RAY_MARK_* */
 #include "mem/heap.h"      /* RAY_ATTR_HAS_NULLS — sorted-vector null probe */
 #include "table/sym.h"     /* ray_sym_intern_runtime */
