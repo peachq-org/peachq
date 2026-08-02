@@ -461,8 +461,8 @@ static qdoc_result_t run_path(const char* path, qdoc_mode_t mode,
  * train readers to ignore it.  Nothing diffable was ever in them. */
 static const char* const emit_volatile[] = {
     "test/q/dotq/bv.qcmd",      "test/q/dotq/dpts.qcmd",
-    "test/q/dotq/fc.qcmd",      "test/q/io/file-text.qcmd",
-    "test/q/phrases/temp.qcmd", "test/q/syscmd/o.qcmd",
+    "test/q/dotq/fc.qcmd",      "test/q/phrases/temp.qcmd",
+    "test/q/syscmd/o.qcmd",
 };
 
 static int is_volatile(const char* path) {
