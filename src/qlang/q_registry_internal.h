@@ -56,8 +56,9 @@ ray_t* q_hof_nyi_wrap(ray_t* f, ray_t* x);
 /* ---- defined in ops/q_null.c ---- */
 ray_t* q_null_wrap(ray_t* x);
 
-/* ---- defined in ops/q_io_filetext.c ---- */
+/* ---- defined in io/q_io_filetext.c, io/q_io_filebinary.c ---- */
 ray_t* q_io_filetext_wrap(ray_t* x, ray_t* y);
+ray_t* q_io_filebinary_wrap(ray_t* x, ray_t* y);
 
 /* ---- defined in ops/q_sys.c ---- */
 ray_t* q_setenv_wrap(ray_t* x, ray_t* y);

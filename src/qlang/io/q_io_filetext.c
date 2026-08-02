@@ -772,6 +772,15 @@ static ray_t* io_filetext_impl(ray_t* x, ray_t* y);
  * charv model carries natively: char ATOM -> 1-char STR (bare delim); charv
  * len-1 -> boxed 1-list of a 1-char STR (the legacy enlisted form, header
  * row); other charv -> STR (types/kv spec); LIST -> per-element.  Owned. */
+/* The head of a LIST x is the TYPE STRING: a charv normalizes to plain text (no
+ * enlist-collapse — that rule belongs to the delimiter beside it, and applying
+ * it here lost the one-column load), and every other shape passes through for
+ * io_filetext_impl's -RAY_STR test to judge, so a char ATOM is refused. */
+static ray_t* ft_norm_types(ray_t* x) {
+    if (x && x->type == RAY_CHARV) return q_str_of_charv(x);
+    if (x) ray_retain(x);
+    return x;
+}
 static ray_t* ft_norm_x(ray_t* x) {
     if (x && x->type == -RAY_CHARV) { char c = (char)x->u8; return ray_str(&c, 1); }
     if (x && x->type == RAY_CHARV) {
@@ -792,7 +801,7 @@ static ray_t* ft_norm_x(ray_t* x) {
         ray_t* out = ray_list_new(n > 0 ? n : 1);
         if (!out || RAY_IS_ERR(out)) return out;
         for (int64_t i = 0; i < n; i++) {
-            ray_t* c = ft_norm_x(e[i]);
+            ray_t* c = i == 0 ? ft_norm_types(e[i]) : ft_norm_x(e[i]);
             if (!c) { ray_retain(e[i]); c = e[i]; }
             if (RAY_IS_ERR(c)) { ray_release(out); return c; }
             out = ray_list_append(out, c);
