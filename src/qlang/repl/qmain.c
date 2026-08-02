@@ -20,7 +20,7 @@
  * and are reused later.  See ARCHITECTURE.md and the MVP design doc. */
 #define _POSIX_C_SOURCE 200809L
 
-#include "qlang/q_repl.h"
+#include "qlang/repl/q_repl.h"
 #include "qlang/q_runtime.h"
 #include "qlang/q_dotz.h"
 #include "qlang/ops/q_sys.h"     /* q_sys_listen — single-homed listen+readback */

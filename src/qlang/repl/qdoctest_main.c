@@ -29,7 +29,7 @@
  * may drop a row (see the note in ledger()). */
 #define _POSIX_C_SOURCE 200809L
 
-#include "qlang/qdoc.h"
+#include "qlang/repl/qdoc.h"
 #include "qlang/q_runtime.h"
 #include <rayforce.h>
 #include <dirent.h>
