@@ -5,7 +5,7 @@
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/q_builtins.h"          /* q_count_long — the one count home */
 #include "qlang/q_err.h"
-#include "qlang/q_type.h"
+#include "qlang/ops/q_type.h"
 #include "lang/eval.h"     /* ray_take_fn — see take_kernel */
 #include "lang/internal.h" /* ray_enlist_fn — reshape's atom arm */
 #include "qlang/ops/q_index.h"

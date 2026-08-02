@@ -23,7 +23,7 @@
 #include "qlang/q_repl.h"
 #include "qlang/q_runtime.h"
 #include "qlang/q_dotz.h"
-#include "qlang/q_sys.h"     /* q_sys_listen — single-homed listen+readback */
+#include "qlang/ops/q_sys.h"     /* q_sys_listen — single-homed listen+readback */
 #include "qlang/q_console.h"  /* q_console_pipe_enable — the `--nonlegacy` display */
 #include "core/poll.h"
 #include "core/runtime.h"

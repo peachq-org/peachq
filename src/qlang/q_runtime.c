@@ -12,8 +12,8 @@
 #include "qlang/q_builtins.h"
 #include "qlang/q_registry.h"
 #include "qlang/q_dotz.h"     /* q_dotz_init/destroy — `.z.*` resolver */
-#include "qlang/q_sys.h"      /* q_sys_seed_init / q_sys_ctx_reset */
-#include "qlang/q_handles.h"  /* q_handles_init/destroy — the handle registry lifecycle */
+#include "qlang/ops/q_sys.h"      /* q_sys_seed_init / q_sys_ctx_reset */
+#include "qlang/io/q_handles.h"  /* q_handles_init/destroy — the handle registry lifecycle */
 #include "qlang/q_console.h"  /* q_console_pipe_disable — reset the `\nonlegacy` display global per runtime */
 #include "qlang/q_parse.h"    /* q_parse — embedded-bootstrap loader */
 #include "qlang/eval/q_eval.h" /* q_eval — THE eval pipeline */

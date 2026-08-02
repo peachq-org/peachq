@@ -13,7 +13,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h"
 #include "qlang/q_err.h"
-#include "qlang/q_type.h"       /* q_type_is_keyed / q_type_is_dense_group_col */
+#include "qlang/ops/q_type.h"       /* q_type_is_keyed / q_type_is_dense_group_col */
 #include "qlang/q_builtins.h"   /* q_ty_char — meta column letters */
 #include "qlang/q_env.h"
 #include "qlang/ops/q_table.h"

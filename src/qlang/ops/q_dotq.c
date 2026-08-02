@@ -5,7 +5,7 @@
 #include "qlang/q_builtins.h"   /* q_ty_char + this file's decls */
 #include "qlang/q_err.h"
 #include "qlang/q_ops.h"        /* q_ops_table — the .Q.ops source */
-#include "qlang/q_type.h"       /* q_type_is_keyed — .Q.qt keyed arm */
+#include "qlang/ops/q_type.h"       /* q_type_is_keyed — .Q.qt keyed arm */
 #include "qlang/q_fmt.h"        /* .Q.s — the q console display string */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_rank — .Q.ops q-side valence */
 #include "qlang/q_registry.h"   /* q_registry_qsrc_ns — the `.q` roster */

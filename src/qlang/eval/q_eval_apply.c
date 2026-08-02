@@ -19,9 +19,9 @@
 #include "qlang/q_ops.h"
 #include "qlang/q_builtins.h"  /* q_count_long — q `count` for C callers, hot lane */
 #include "qlang/q_registry.h"
-#include "qlang/q_type.h"     /* q_type_is_keyed — the type axis home */
+#include "qlang/ops/q_type.h"     /* q_type_is_keyed — the type axis home */
 #include "qlang/q_parse_internal.h"
-#include "qlang/q_handles.h"
+#include "qlang/io/q_handles.h"
 #include "qlang/ops/q_bang.h"
 #include "qlang/ops/q_dollar.h"
 #include "qlang/ops/q_index.h"
