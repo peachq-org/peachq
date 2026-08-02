@@ -1,12 +1,11 @@
-/* q_builtins — register q's own builtins into q's env (q_env), and install
- * the remote-eval hooks.  Rayfall's env is a bootstrap-only kernel catalogue:
- * capture_base and the registry snapshot it here, then q never consults it. */
+/* q_builtins — register q's own builtins into q's env (q_env).  Rayfall's env
+ * is a bootstrap-only kernel catalogue: capture_base and the registry snapshot
+ * it here, then q never consults it. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_builtins.h"
 #include "qlang/base/q_err.h"
-#include "qlang/eval/q_eval.h" /* q_eval / q_eval_apply_value — THE eval pipeline */
+#include "qlang/eval/q_eval.h" /* q_eval_value_wrap / the carrier predicates */
 #include "qlang/parse/q_parse.h"
-#include "qlang/eval/q_view.h"   /* q_view_intercept — `x::e` at the remote-source seam */
 #include "qlang/net/q_http_client.h" /* .Q.c.hg / .Q.c.hp — outbound HTTP client */
 #define Q_OPS_ENV_GRANDFATHER /* base-kernel snapshots (capture_base) read the bootstrap catalogue */
 #include "qlang/q_registry_internal.h" /* q_registry_init (shared; brings q_registry.h) */
@@ -14,12 +13,9 @@
 #include "qlang/ops/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
 #include "qlang/q_console.h"  /* q_console_show — show's display sink */
 #include "qlang/base/q_type.h"     /* q_type_of — the `type` verb's type-number home */
-#include "qlang/ops/q_index.h" /* q_index_elem_at — the element-read home */
 #include "lang/env.h"       /* ray_fn_unary; ray_env_get = bootstrap catalogue reads */
 #include "lang/eval.h"      /* RAY_FN_NONE */
 #include "table/sym.h"      /* ray_sym_vec_cell */
-#include "mem/sys.h"        /* ray_sys_alloc — remote-eval scratch */
-#include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
 #include <assert.h>
 #include <ctype.h>
@@ -254,136 +250,14 @@ static void bind_value(const char* name, ray_t* val) {
     ray_release(val);
 }
 
-/* Remote-source string eval (IPC request payloads, journal replay): the ONE
- * q pipeline, mirroring q_repl.c run_one_line — q_parse -> q_eval ->
- * materialize.  Buffered q console output (`show`, 0N!) is drained to the
- * SERVER's stdout after each eval (kdb prints show output on the server
- * console) and reset so it can't bleed into later requests.  Returns an
- * OWNED value; parse/eval errors return as owned errors (the IPC layer
- * serializes them as -128h responses). */
-static ray_t* remote_eval_str(const char* src, size_t len) {
-    /* A leading `\` is a system command, not q source: kdb runs a solo `\l`/`\p`
-     * received on the wire.  `system"X"` is exactly `\X`, so strip the `\` and
-     * reuse q_system_fn — single-homing q_sys_run, the restricted-mode guard,
-     * and the `\`-shell stdout capture.  A loaded script's `show`/0N! output
-     * is drained to the server console just like the q path. */
-    if (len > 0 && src[0] == '\\') {
-        ray_t* arg = ray_str(src + 1, len - 1);   /* the command minus its leading `\` */
-        if (!arg) return q_err(QE_OOM);
-        ray_t* r = q_system_fn(arg);
-        ray_release(arg);
-        { const char* con = q_console_str();
-          if (con && *con) fputs(con, stdout);
-          q_console_reset(); }
-        return r;
-    }
-    char* tmp = (char*)ray_sys_alloc(len + 1);
-    if (!tmp) return q_err(QE_OOM);
-    memcpy(tmp, src, len);
-    tmp[len] = '\0';
-    ray_t* ast = q_parse(tmp);
-    if (RAY_IS_ERR(ast)) { ray_sys_free(tmp); return ast; }
-    /* A trailing assignment answers with the generic null, not the assigned
-     * value (basics/ipc.md: `h"fn:{2+x}"` displays nothing) — the same
-     * q_parse_is_assign judgment q_repl.c/qdoc.c make.  A view definition is
-     * one, and is intercepted here for the same reason: remote source text is
-     * a statement, so `h"z::b+c"` defines a view exactly as the line would. */
-    ray_t* r;
-    int is_assign = 1;
-    if (!q_view_intercept(ast, tmp, &r)) {
-        is_assign = q_parse_is_assign(ast);
-        r = q_eval(ast);
-    }
-    ray_sys_free(tmp);
-    ray_release(ast);
-    if (ray_is_lazy(r))
-        r = ray_lazy_materialize(r);
-    { const char* con = q_console_str();
-      if (con && *con) fputs(con, stdout);
-      q_console_reset(); }
-    if (is_assign && !RAY_IS_ERR(r)) {   /* an error still propagates (-128h) */
-        ray_release(r);
-        ray_retain(RAY_NULL_OBJ);        /* owned return (q_sys.c's silent-null precedent) */
-        return RAY_NULL_OBJ;
-    }
-    return r;
-}
-
-/* Remote (func;args) value-apply (IPC request payloads): the kdb value/apply
- * wire shape — a SINGLE list-apply of the head to the already-evaluated tail
- * args, NEVER re-evaluating them (ADR-0004: value, not eval), through the ONE
- * public apply entry (q_eval_apply_value).  A sym/string head resolves/parses
- * to its value first.  `list` is BORROWED (the ipc layer releases it); the
- * result is OWNED.  Restricted mode needs no re-assert here: ipc_dispatch
- * sets it around the whole dispatch, and any restricted primitive reached by
- * the apply self-checks it. */
 /* keyword-HOF recipe stub (q_registry_internal.h note) */
 ray_t* q_hof_nyi_wrap(ray_t* f, ray_t* x) {
     (void)f; (void)x;
     return q_err(QE_NYI);
 }
 
-static ray_t* remote_apply(ray_t* list) {
-    if (!list || (list->type != RAY_LIST && !ray_is_vec(list)) ||
-        ray_len(list) < 1)
-        return q_err(QE_TYPE);
-    int64_t n = ray_len(list);
-    ray_t* head = q_index_elem_at(list, 0);            /* owned */
-    if (!head || RAY_IS_ERR(head)) return head ? head : q_err(QE_TYPE);
-    /* string-source head ("+", "{x*2}"): parse + eval to its value */
-    if (head->type == -RAY_STR || head->type == RAY_CHARV) {
-        const char* sp; int64_t sn;
-        if (q_str_text_bytes(head, &sp, &sn)) {
-            char* z = malloc((size_t)sn + 1);
-            if (!z) { ray_release(head); return q_err(QE_WSFULL); }
-            memcpy(z, sp, (size_t)sn);
-            z[sn] = '\0';
-            ray_t* ast = q_parse(z);
-            free(z);
-            ray_release(head);
-            if (RAY_IS_ERR(ast)) return ast;
-            head = q_eval(ast);
-            ray_release(ast);
-            if (RAY_IS_ERR(head)) return head;
-        }
-    } else if (head->type == -RAY_SYM) {   /* `sum -> its value (registry-first,
-                                            * the evaluator's resolution order) */
-        ray_t* v = q_eval_value_wrap(head);
-        if (RAY_IS_ERR(v)) { ray_release(head); return v; }
-        ray_release(head);
-        head = v;
-    }
-    ray_t* argv[8];
-    int64_t argc = n - 1;
-    if (argc > 8) { ray_release(head); return q_err(QE_RANK); }
-    for (int64_t i = 0; i < argc; i++) {
-        argv[i] = q_index_elem_at(list, i + 1);        /* owned */
-        if (!argv[i] || RAY_IS_ERR(argv[i])) {
-            ray_t* err = argv[i];
-            for (int64_t j = 0; j < i; j++) ray_release(argv[j]);
-            ray_release(head);
-            return err ? err : q_err(QE_TYPE);
-        }
-    }
-    ray_t* r;
-    if (argc == 0) {                                      /* (f) -> f[] = f@:: */
-        ray_t* nil = RAY_NULL_OBJ;
-        r = q_eval_apply_value(head, &nil, 1);
-    } else {
-        r = q_eval_apply_value(head, argv, argc);
-    }
-    if (r && ray_is_lazy(r)) r = ray_lazy_materialize(r);
-    for (int64_t j = 0; j < argc; j++) ray_release(argv[j]);
-    ray_release(head);
-    return r;
-}
-
 
 void q_builtins_register(void) {
-    /* Remote strings (IPC/journal) evaluate as q from now on. */
-    ray_eval_set_remote_str_fn(remote_eval_str);
-    /* Remote (func;args) value-apply (IPC): the one public apply entry. */
-    ray_eval_set_remote_apply_fn(remote_apply);
     bind_unary("parse", q_parse_builtin_fn);
     /* q keywords with no rayfall counterpart — q-owned env bindings (same
      * mechanism as `parse`), snapshotted by the registry as QK_ENV rows. */

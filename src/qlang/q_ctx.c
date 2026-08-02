@@ -11,11 +11,15 @@
 #include "qlang/eval/q_view.h"    /* q_view_intercept — `x::e` at the line seam */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
-#include "qlang/ops/q_sys.h"      /* q_sys_is_cmd / q_sys_line — the `\`-command door */
-#include "lang/eval.h"            /* ray_eval_is_interrupted */
+#include "qlang/q_prim.h"         /* q_str_text_bytes — the remote value-apply head */
+#include "qlang/ops/q_sys.h"      /* q_sys_is_cmd / q_sys_line / q_system_fn — the `\`-command door */
+#include "qlang/ops/q_index.h"    /* q_index_elem_at — the element-read home */
+#include "lang/eval.h"            /* ray_eval_is_interrupted, ray_eval_set_remote_*_fn */
+#include "mem/sys.h"              /* ray_sys_alloc — remote-eval scratch */
 #include "ops/ops.h"              /* ray_is_lazy, ray_lazy_materialize */
 #include "app/term.h"             /* ray_term_interrupted */
 #include <rayforce.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* The front end's terminal teardown, if one registered.  See q_ctx.h. */
@@ -220,6 +224,120 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err) {
 
     fclose(f);
     return 0;
+}
+
+/* ===== The remote doors (see q_ctx.h) =====
+ *
+ * q_ctx_run_line's pipeline, disposing of the result over the wire instead of
+ * to `out`; errors propagate as owned values the IPC layer serializes as -128h.
+ * Console output drains to the SERVER's stdout, then resets so it cannot bleed
+ * into the next request. */
+static ray_t* remote_eval_str(const char* src, size_t len) {
+    /* A leading `\` is a system command, not q source (kdb runs a solo `\l`/`\p`
+     * received on the wire).  `system"X"` is exactly `\X`, so strip and reuse
+     * q_system_fn — one home for q_sys_run, the restricted gate, `\`-shell capture. */
+    if (len > 0 && src[0] == '\\') {
+        ray_t* arg = ray_str(src + 1, len - 1);
+        if (!arg) return q_err(QE_OOM);
+        ray_t* r = q_system_fn(arg);
+        ray_release(arg);
+        { const char* con = q_console_str();
+          if (con && *con) fputs(con, stdout);
+          q_console_reset(); }
+        return r;
+    }
+    char* tmp = (char*)ray_sys_alloc(len + 1);
+    if (!tmp) return q_err(QE_OOM);
+    memcpy(tmp, src, len);
+    tmp[len] = '\0';
+    ray_t* ast = q_parse(tmp);
+    if (RAY_IS_ERR(ast)) { ray_sys_free(tmp); return ast; }
+    /* A trailing assignment answers with the generic null (basics/ipc.md:
+     * `h"fn:{2+x}"` displays nothing).  Remote source text is a STATEMENT, so a
+     * view definition is intercepted here exactly as a typed line would be. */
+    ray_t* r;
+    int is_assign = 1;
+    if (!q_view_intercept(ast, tmp, &r)) {
+        is_assign = q_parse_is_assign(ast);
+        r = q_eval(ast);
+    }
+    ray_sys_free(tmp);
+    ray_release(ast);
+    if (ray_is_lazy(r))
+        r = ray_lazy_materialize(r);
+    { const char* con = q_console_str();
+      if (con && *con) fputs(con, stdout);
+      q_console_reset(); }
+    if (is_assign && !RAY_IS_ERR(r)) {   /* an error still propagates (-128h) */
+        ray_release(r);
+        ray_retain(RAY_NULL_OBJ);
+        return RAY_NULL_OBJ;
+    }
+    return r;
+}
+
+/* The kdb value/apply wire shape — NOT a statement: ONE list-apply of the head to
+ * already-evaluated tail args, never re-evaluating them (ADR-0004: value, not
+ * eval), through the one public apply entry.  A sym/string head resolves/parses to
+ * its value first.  `list` is BORROWED (the ipc layer releases it); the result is
+ * OWNED.  Restricted mode needs no re-assert: ipc_dispatch sets it around the
+ * whole dispatch. */
+static ray_t* remote_apply(ray_t* list) {
+    if (!list || (list->type != RAY_LIST && !ray_is_vec(list)) ||
+        ray_len(list) < 1)
+        return q_err(QE_TYPE);
+    int64_t n = ray_len(list);
+    ray_t* head = q_index_elem_at(list, 0);            /* owned */
+    if (!head || RAY_IS_ERR(head)) return head ? head : q_err(QE_TYPE);
+    if (head->type == -RAY_STR || head->type == RAY_CHARV) {   /* "+" / "{x*2}" */
+        const char* sp; int64_t sn;
+        if (q_str_text_bytes(head, &sp, &sn)) {
+            char* z = malloc((size_t)sn + 1);
+            if (!z) { ray_release(head); return q_err(QE_WSFULL); }
+            memcpy(z, sp, (size_t)sn);
+            z[sn] = '\0';
+            ray_t* ast = q_parse(z);
+            free(z);
+            ray_release(head);
+            if (RAY_IS_ERR(ast)) return ast;
+            head = q_eval(ast);
+            ray_release(ast);
+            if (RAY_IS_ERR(head)) return head;
+        }
+    } else if (head->type == -RAY_SYM) {   /* `sum -> its value, registry-first */
+        ray_t* v = q_eval_value_wrap(head);
+        if (RAY_IS_ERR(v)) { ray_release(head); return v; }
+        ray_release(head);
+        head = v;
+    }
+    ray_t* argv[8];
+    int64_t argc = n - 1;
+    if (argc > 8) { ray_release(head); return q_err(QE_RANK); }
+    for (int64_t i = 0; i < argc; i++) {
+        argv[i] = q_index_elem_at(list, i + 1);        /* owned */
+        if (!argv[i] || RAY_IS_ERR(argv[i])) {
+            ray_t* err = argv[i];
+            for (int64_t j = 0; j < i; j++) ray_release(argv[j]);
+            ray_release(head);
+            return err ? err : q_err(QE_TYPE);
+        }
+    }
+    ray_t* r;
+    if (argc == 0) {                                      /* (f) -> f[] = f@:: */
+        ray_t* nil = RAY_NULL_OBJ;
+        r = q_eval_apply_value(head, &nil, 1);
+    } else {
+        r = q_eval_apply_value(head, argv, argc);
+    }
+    if (r && ray_is_lazy(r)) r = ray_lazy_materialize(r);
+    for (int64_t j = 0; j < argc; j++) ray_release(argv[j]);
+    ray_release(head);
+    return r;
+}
+
+void q_ctx_install_remote_hooks(void) {
+    ray_eval_set_remote_str_fn(remote_eval_str);
+    ray_eval_set_remote_apply_fn(remote_apply);
 }
 
 /* A `\p N` (or startup `-p`) listener makes this process a server even if it

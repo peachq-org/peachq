@@ -9,6 +9,7 @@
 #include "qlang/eval/q_eval.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_builtins.h"          /* q_count_long */
+#include "qlang/q_prim.h"              /* q_cols_fn */
 #include "qlang/q_registry_internal.h" /* q_take_wrap, q_where_wrap, q_flip_wrap, ... */
 #include "qlang/ops/q_bang.h"
 #include "qlang/ops/q_index.h"
