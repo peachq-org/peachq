@@ -114,12 +114,42 @@ static ray_t* id_fn(ray_t* x) {
 static ray_unary_fn g_base_type  = NULL;
 static ray_unary_fn g_base_count = NULL;
 
-/* q `type` verb: the type-number knowledge lives in q_type_of (the type
- * axis home); this arm keeps only the base-verb fallback for NULL x. */
+/* q `type` as the kdb short: FUNCTION values report 100h lambda / 102h
+ * operator / 103h iterator / 104h projection / 106+adv derived / 101h
+ * generic-null unary; every other value's internal tag ALREADY IS its kdb type
+ * number (long 7, sym 11, list 0, table 98, dict 99), atoms stored NEGATIVE.
+ * A native -RAY_STR string reports -10h (char ATOM) vs kdb's 10h char VECTOR —
+ * a recorded string-model divergence (ARCHITECTURE.md).  Carrier classification
+ * is the apply module's to answer, which is why this cannot sit in base/. */
+static int8_t type_of(ray_t* x) {
+    if (RAY_IS_NULL(x)) return 101;
+    switch (q_eval_apply_carrier_kind(x)) {
+    case Q_EVAL_CAR_LAMBDA: return 100;
+    case Q_EVAL_CAR_PROJ:   return 104;
+    case Q_EVAL_CAR_ITER:   return 103;
+    case Q_EVAL_CAR_DERIV: {
+        ray_t** c = (ray_t**)ray_data(x);
+        int adv = c[2] ? (int)c[2]->i64 : 0;
+        return (int8_t)(106 + (adv >= 0 && adv < 6 ? adv : 0));
+    }
+    default: break;
+    }
+    if (x->type == RAY_LAMBDA) return 100;
+    if (x->type == RAY_UNARY || x->type == RAY_BINARY || x->type == RAY_VARY)
+        return 102;
+    return x->type;
+}
+
 static ray_t* type_fn(ray_t* x) {
-    if (x) return ray_i16(q_type_of(x));
-    return g_base_type ? g_base_type(x)
+    if (x) return ray_i16(type_of(x));
+    return g_base_type ? g_base_type(x)      /* base-verb fallback for NULL x */
                        : q_err(QE_TYPE);
+}
+
+int q_type_is_fn(ray_t* x) {
+    if (!x) return 0;
+    int8_t t = type_of(x);
+    return t >= 100 && t <= 112;
 }
 
 /* ---- table introspection (type-output feature) --------------------------- */
