@@ -1,9 +1,9 @@
 /* q_wirefile — kdb+ on-disk reader (see q_wirefile.h). */
 #include "qlang/net/q_wirefile.h"
+#include "qlang/q_prim.h"
 #include "qlang/net/q_gz.h"
 #include "qlang/net/q_wire.h"
 #include "qlang/base/q_err.h"
-#include "qlang/q_registry.h"   /* q_io_file_path, q_io_read_slice */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_concrete */
 #include "lang/eval.h"          /* ray_eval_get_restricted, ray_write_file_fn */
 #include "mem/heap.h"           /* RAY_ATTR_SORTED */
