@@ -158,8 +158,7 @@ int q_vec_is_num(ray_t* x);                                   /* used by: list *
 ray_t* q_hopen_wrap(ray_t* x);                                /* used by: apply, registry */
 ray_t* q_hclose_wrap(ray_t* x);                               /* used by: apply, registry */
 
-/* ---- defined in ops/q_io.c ---- */
-ray_t* q_io_read_all(ray_t* pathstr);                         /* used by: io_filetext */
+/* ---- defined in io/q_io.c (the byte core itself is io/q_io.h) ---- */
 ray_t* q_hsym_wrap(ray_t* x);                                 /* used by: bang, registry */
 ray_t* q_read0_wrap(ray_t* x);                                /* used by: builtins, registry */
 ray_t* q_read1_wrap(ray_t* x);                                /* used by: builtins, registry */
