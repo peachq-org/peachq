@@ -11,9 +11,9 @@
 #define Q_OPS_ENV_GRANDFATHER /* base-kernel snapshots (capture_base) read the bootstrap catalogue */
 #include "qlang/q_registry_internal.h" /* q_registry_init (shared; brings q_registry.h) */
 #include "qlang/q_env.h"      /* q_env_bind — q's own name surface */
-#include "qlang/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
+#include "qlang/ops/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
 #include "qlang/q_console.h"  /* q_console_show — show's display sink */
-#include "qlang/q_type.h"     /* q_type_of — the `type` verb's type-number home */
+#include "qlang/ops/q_type.h"     /* q_type_of — the `type` verb's type-number home */
 #include "qlang/ops/q_index.h" /* q_index_elem_at — the element-read home */
 #include "lang/env.h"       /* ray_fn_unary; ray_env_get = bootstrap catalogue reads */
 #include "lang/eval.h"      /* RAY_FN_NONE */

@@ -9,7 +9,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/q_err.h"
-#include "qlang/q_type.h"  /* q_type_empty (the one typed-empty ctor), q_type_is_num_tag/_float_tag */
+#include "qlang/ops/q_type.h"  /* q_type_empty (the one typed-empty ctor), q_type_is_num_tag/_float_tag */
 #include "lang/eval.h"     /* ray_take_fn, ray_xbar_fn */
 #include "lang/internal.h" /* ray_iasc_fn/ray_idesc_fn, RAY_IS_TEMPORAL64, ray_error */
 #include "qlang/ops/q_index.h" /* q_index_elem_at — the element read; q_index_at — the gather */

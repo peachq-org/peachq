@@ -2,7 +2,7 @@
 #include "qlang/ops/q_key.h"
 #include "qlang/q_err.h"
 #include "qlang/q_env.h"              /* q_env_resolve / _ns_roster / _marker_sym */
-#include "qlang/q_type.h"             /* q_type_qname + the is_dict/is_str_atom/is_keyed probes */
+#include "qlang/ops/q_type.h"             /* q_type_qname + the is_dict/is_str_atom/is_keyed probes */
 #include "qlang/q_registry_internal.h" /* q_til_wrap — the til arm */
 #include "qlang/ops/q_table.h"        /* q_table_operand — `keys` takes a table by name */
 #include "lang/internal.h"            /* ray_fs_list_fn — the quarry's sorted directory listing */
