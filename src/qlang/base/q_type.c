@@ -312,6 +312,10 @@ int q_type_is_str_atom(ray_t* x) {
     return x && x->type == -RAY_STR;
 }
 
+int q_type_is_char_atom(ray_t* x) {
+    return x && x->type == -RAY_CHARV;
+}
+
 int q_type_is_sym_atom(ray_t* x) {
     return x && x->type == -RAY_SYM;
 }
