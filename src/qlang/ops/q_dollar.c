@@ -5,10 +5,10 @@
  * for reuse.  The per-target q_cast_* matrix lives here too; the int-atom
  * admission helpers and tag<->name vocabulary moved to q_type.c (q_type.h). */
 #include "qlang/ops/q_dollar.h"
-#include "qlang/ops/q_type.h"  /* int/float admission + q_type_rayname vocabulary */
-#include "qlang/q_err.h"
-#include "qlang/ops/q_tok.h"   /* q_tok — THE Tok entry */
-#include "qlang/q_calendar.h" /* q_calendar_ts_compose — date->timestamp cast */
+#include "qlang/base/q_type.h"  /* int/float admission + q_type_rayname vocabulary */
+#include "qlang/base/q_err.h"
+#include "qlang/parse/q_tok.h"   /* q_tok — THE Tok entry */
+#include "qlang/base/q_calendar.h" /* q_calendar_ts_compose — date->timestamp cast */
 #include "ops/temporal.h"  /* ray_temporal_extract — base calendar decomposition */
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "lang/eval.h"      /* ray_cast_fn */

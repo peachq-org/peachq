@@ -3,9 +3,9 @@
  * capture_base and the registry snapshot it here, then q never consults it. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_builtins.h"
-#include "qlang/q_err.h"
+#include "qlang/base/q_err.h"
 #include "qlang/eval/q_eval.h" /* q_eval / q_eval_apply_value — THE eval pipeline */
-#include "qlang/q_parse.h"
+#include "qlang/parse/q_parse.h"
 #include "qlang/eval/q_view.h"   /* q_view_intercept — `x::e` at the remote-source seam */
 #include "qlang/net/q_http_client.h" /* .Q.c.hg / .Q.c.hp — outbound HTTP client */
 #define Q_OPS_ENV_GRANDFATHER /* base-kernel snapshots (capture_base) read the bootstrap catalogue */
@@ -13,7 +13,7 @@
 #include "qlang/q_env.h"      /* q_env_bind — q's own name surface */
 #include "qlang/ops/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
 #include "qlang/q_console.h"  /* q_console_show — show's display sink */
-#include "qlang/ops/q_type.h"     /* q_type_of — the `type` verb's type-number home */
+#include "qlang/base/q_type.h"     /* q_type_of — the `type` verb's type-number home */
 #include "qlang/ops/q_index.h" /* q_index_elem_at — the element-read home */
 #include "lang/env.h"       /* ray_fn_unary; ray_env_get = bootstrap catalogue reads */
 #include "lang/eval.h"      /* RAY_FN_NONE */
