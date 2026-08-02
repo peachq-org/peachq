@@ -4,7 +4,7 @@
  * Evicted from q_builtins.c + ops/q_io.c so the registration hub registers
  * and the string domain lives once. */
 #include "qlang/q_registry_internal.h" /* wrap decls + the string-C3 boundary decls */
-#include "qlang/q_err.h"
+#include "qlang/base/q_err.h"
 #include "qlang/eval/q_eval.h"         /* q_eval_apply_is_fn / q_eval_apply_value — ssr fn replacement */
 #include "qlang/q_builtins.h"          /* the env-fn decls (q_string_fn, ...) */
 #include "qlang/q_fmt.h"               /* q_fmt_float — string's float leaf */

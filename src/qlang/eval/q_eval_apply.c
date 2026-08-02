@@ -15,12 +15,12 @@
 #include "qlang/eval/q_eval_internal.h"
 #include "qlang/eval/q_view.h"     /* view carriers apply as their value */
 #include "qlang/eval/q_funsql.h"  /* the `?`/`!` matrix entry points (fnv_matrix_value) */
-#include "qlang/q_err.h"
+#include "qlang/base/q_err.h"
 #include "qlang/q_ops.h"
 #include "qlang/q_builtins.h"  /* q_count_long — q `count` for C callers, hot lane */
 #include "qlang/q_registry.h"
-#include "qlang/ops/q_type.h"     /* q_type_is_keyed — the type axis home */
-#include "qlang/q_parse_internal.h"
+#include "qlang/base/q_type.h"     /* q_type_is_keyed — the type axis home */
+#include "qlang/parse/q_parse_internal.h"
 #include "qlang/io/q_handles.h"
 #include "qlang/ops/q_bang.h"
 #include "qlang/ops/q_dollar.h"
