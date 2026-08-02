@@ -20,7 +20,7 @@
 #define Q_REGISTRY_INTERNAL_H
 #include "qlang/q_registry.h"
 #include "qlang/q_ops.h"
-#include "qlang/q_type.h"   /* the type + null axes home — re-exported to ops/ */
+#include "qlang/ops/q_type.h"   /* the type + null axes home — re-exported to ops/ */
 
 /* ===== 1. REGISTRY ENTRYPOINTS — q_registry.c builders only ============= */
 

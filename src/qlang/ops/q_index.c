@@ -5,7 +5,7 @@
 #include "qlang/q_builtins.h"   /* q_builtins_count_long — THE count owner */
 #include "qlang/q_err.h"
 #include "qlang/q_registry_internal.h"
-#include "qlang/q_type.h"       /* the type/shape axes: keyed, nested, iter */
+#include "qlang/ops/q_type.h"       /* the type/shape axes: keyed, nested, iter */
 #include "lang/internal.h"   /* as_i64 — the int-atom payload accessor */
 #include "table/dict.h"
 #include <stdlib.h>

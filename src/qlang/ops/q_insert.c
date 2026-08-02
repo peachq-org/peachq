@@ -4,7 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h"
 #include "qlang/q_err.h"
-#include "qlang/q_type.h"
+#include "qlang/ops/q_type.h"
 #include "qlang/q_env.h"
 #include "qlang/ops/q_table.h"
 #include "qlang/ops/q_bang.h"  /* q_bang_enkey — the keying primitive */

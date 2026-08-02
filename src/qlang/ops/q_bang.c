@@ -21,7 +21,7 @@
 #include "qlang/eval/q_eval.h"  /* q_eval — `-6!` (internal.md: eval) */
 #include "qlang/q_fmt.h"        /* q_fmt_krepr — `-3!`, .Q.s1 */
 #include "qlang/q_console.h"    /* q_console_write — 0N! */
-#include "qlang/q_sys.h"        /* q_sys_ts_apply — `-34!` (.Q.ts) */
+#include "qlang/ops/q_sys.h"        /* q_sys_ts_apply — `-34!` (.Q.ts) */
 #include "qlang/net/q_net.h"   /* q_net_host / q_net_addr — `-12!`/`-13!` */
 #include "lang/eval.h"          /* ray_eval_get_restricted — `-7!` file gate */
 #include "lang/internal.h"      /* ray_dict_fn — the `!` dict kernel */

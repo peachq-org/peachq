@@ -21,7 +21,7 @@
 
 #include "qlang/q_parse.h"
 #include "qlang/q_err.h"
-#include "qlang/q_tok.h"    /* q_tok_temporal, q_tok_el — literal magnitudes */
+#include "qlang/ops/q_tok.h"    /* q_tok_temporal, q_tok_el — literal magnitudes */
 #include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
 #include "qlang/q_ops.h"      /* q_lex_is_kw_infix — static lexical manifest */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_is_fn, q_eval_apply_carrier_kind */
