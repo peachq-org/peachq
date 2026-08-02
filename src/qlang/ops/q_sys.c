@@ -15,7 +15,7 @@
   #include <ws2tcpip.h>      /* socklen_t */
 #endif
 #include "qlang/ops/q_sys.h"
-#include "qlang/q_err.h"
+#include "qlang/base/q_err.h"
 #include "qlang/eval/q_eval.h" /* q_eval / q_eval_dot_wrap — timing + .Q.ts */
 #include "qlang/q_fmt.h"      /* q_fmt_set_prec/q_fmt_prec (`\P`) */
 #include "qlang/q_console.h"  /* q_console_str/reset (timed-expr side effects); q_console_pipe_* (`\nonlegacy`) */
@@ -24,7 +24,7 @@
 #include "qlang/q_env.h"      /* q_env_ctx_set/_ctx + q_env_ns_names — `\d` and the `\v`/`\f`/`\a` rosters */
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk — the `.z.ts` timer callback */
 #include "qlang/eval/q_view.h" /* q_view_names — `\b` / `\B` */
-#include "qlang/q_parse.h"    /* q_parse — `\t expr` / `\ts expr` timing */
+#include "qlang/parse/q_parse.h"    /* q_parse — `\t expr` / `\ts expr` timing */
 #include "core/ipc.h"         /* ray_ipc_listen — `\p N` binds a listener */
 #include "core/poll.h"        /* ray_poll_get / deregister — `\p 0W`/`\p 0`; poll->timers */
 #include "core/runtime.h"     /* ray_runtime_get_poll — the runtime event poll */

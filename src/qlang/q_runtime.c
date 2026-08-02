@@ -15,7 +15,7 @@
 #include "qlang/ops/q_sys.h"      /* q_sys_seed_init / q_sys_ctx_reset */
 #include "qlang/io/q_handles.h"  /* q_handles_init/destroy — the handle registry lifecycle */
 #include "qlang/q_console.h"  /* q_console_pipe_disable — reset the `\nonlegacy` display global per runtime */
-#include "qlang/q_parse.h"    /* q_parse — embedded-bootstrap loader */
+#include "qlang/parse/q_parse.h"    /* q_parse — embedded-bootstrap loader */
 #include "qlang/eval/q_eval.h" /* q_eval — THE eval pipeline */
 #include "qlang/eval/q_view.h" /* q_view_reset — per-runtime view state */
 #include "qlang/dotq_gen.h"   /* OPENQ_BOOTSTRAP — codegen'd from src/qlang/{q,dotq}.q */

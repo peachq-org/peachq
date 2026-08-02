@@ -6,7 +6,7 @@
 #define _POSIX_C_SOURCE 200809L   /* getaddrinfo/getnameinfo under -std=c17 */
 #endif
 #include "qlang/net/q_net.h"
-#include "qlang/q_err.h"
+#include "qlang/base/q_err.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>

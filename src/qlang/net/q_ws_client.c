@@ -9,7 +9,7 @@
 #define _POSIX_C_SOURCE 200809L    /* clock_gettime / CLOCK_MONOTONIC */
 #endif
 #include <rayforce.h>
-#include "qlang/q_err.h"
+#include "qlang/base/q_err.h"
 #include "qlang/net/q_ws.h"
 #include "qlang/net/q_http_client.h"   /* q_http_url_t + connect/send seams (#223) */
 #include "qlang/q_builtins.h"      /* q_dotq_sha1_fn / q_dotq_btoa_fn */

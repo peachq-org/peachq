@@ -5,7 +5,7 @@
 #define _POSIX_C_SOURCE 200809L    /* clock_gettime / CLOCK_MONOTONIC */
 #endif
 #include <rayforce.h>
-#include "qlang/q_err.h"
+#include "qlang/base/q_err.h"
 #include "qlang/net/q_http_client.h"
 #include "qlang/net/q_gz.h"           /* transparent gzip inflate (Content-Encoding) */
 #include "lang/eval.h"            /* ray_eval_get_restricted — outbound gate */
