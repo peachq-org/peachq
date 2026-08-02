@@ -62,15 +62,12 @@ static inline int64_t q_count_long(ray_t* x) {
  * kept here; ops/q_dotq.c and ops/q_table.c consume it. */
 char q_ty_char(ray_t* x);
 
-/* The .Q introspection surface (ops/q_dotq.c) + table introspection
- * (ops/q_table.c): bound by q_builtins_register. */
+/* The .Q introspection surface (ops/q_dotq.c): bound by q_builtins_register. */
 ray_t* q_dotq_ty_fn(ray_t* x);
 ray_t* q_dotq_qt_fn(ray_t* x);
 ray_t* q_dotq_qp_fn(ray_t* x);
 ray_t* q_dotq_s_fn(ray_t* x);
 ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs);
-ray_t* q_cols_fn(ray_t* x);
-ray_t* q_meta_fn(ray_t* x);
 
 /* Is x a FUNCTION value — the 100h-112h band?  `\f`/`\v` partition a namespace
  * on it.  Lives beside the `type` verb: classifying a function carrier is the
