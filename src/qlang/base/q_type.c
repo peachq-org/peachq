@@ -4,12 +4,9 @@
  * q_math/q_table (the type + null knowledge) so each has ONE obvious home. */
 #include "qlang/base/q_type.h"
 #include "qlang/base/q_err.h"          /* q_err / QE_TYPE — the throwing gates */
-#include "qlang/eval/q_eval.h"    /* q_eval_apply_carrier_kind — fn-value type */
-#include "qlang/ops/q_index.h"    /* q_index_elem_at — THE element-read home */
 #include "lang/internal.h"        /* as_i64, is_numeric/is_temporal, is_collection,
                                    * atomic_map_unary, ray_nil_fn */
 #include "table/sym.h"            /* ray_sym_str — the null-symbol divergence */
-#include "qlang/q_registry.h"     /* q_list_collapse — q_null_wrap collapse */
 #include "core/types.h"           /* RAY_TYPE_COUNT — the tag-indexed matrix bound */
 #include <string.h>               /* memchr/memset — matrix bake-out (init only) */
 #include <math.h>                 /* isinf — the infinity lane */
@@ -36,41 +33,6 @@ int q_type_is_num_tag(int8_t t) {
     return t == RAY_BOOL || t == RAY_BYTE_ONLY || t == RAY_I16 || t == RAY_I32 || t == RAY_I64 ||
            t == RAY_F32 || t == RAY_F64 || t == -RAY_BOOL || t == -RAY_BYTE_ONLY || t == -RAY_I16 ||
            t == -RAY_I32 || t == -RAY_I64 || t == -RAY_F32 || t == -RAY_F64;
-}
-
-/* ---- the kdb type number of a value (the `type` verb's knowledge) --------- */
-
-/* q `type` as the kdb short: FUNCTION values report 100h lambda / 102h
- * operator / 103h iterator / 104h projection / 106+adv derived / 101h
- * generic-null unary; every other value's internal tag ALREADY IS its kdb
- * type number (include/rayforce.h:
- * long 7, sym 11, list 0, table 98, dict 99), atoms stored NEGATIVE. A native
- * -RAY_STR string reports -10h (char ATOM) vs kdb's 10h char VECTOR — a recorded
- * string-model divergence (ARCHITECTURE.md; cast/type-deferred.qcmd). Callers on
- * a NULL x keep their own base-verb fallback (q_builtins). */
-int8_t q_type_of(ray_t* x) {
-    if (RAY_IS_NULL(x)) return 101;
-    switch (q_eval_apply_carrier_kind(x)) {
-    case Q_EVAL_CAR_LAMBDA: return 100;
-    case Q_EVAL_CAR_PROJ:   return 104;
-    case Q_EVAL_CAR_ITER:   return 103;
-    case Q_EVAL_CAR_DERIV: {
-        ray_t** c = (ray_t**)ray_data(x);
-        int adv = c[2] ? (int)c[2]->i64 : 0;
-        return (int8_t)(106 + (adv >= 0 && adv < 6 ? adv : 0));
-    }
-    default: break;
-    }
-    if (x->type == RAY_LAMBDA) return 100;
-    if (x->type == RAY_UNARY || x->type == RAY_BINARY || x->type == RAY_VARY)
-        return 102;
-    return x->type;
-}
-
-int q_type_is_fn(ray_t* x) {
-    if (!x) return 0;
-    int8_t t = q_type_of(x);
-    return t >= 100 && t <= 112;
 }
 
 /* ---- tag <-> name vocabulary --------------------------------------------- */
@@ -354,28 +316,6 @@ int q_type_is_sym_atom(ray_t* x) {
     return x && x->type == -RAY_SYM;
 }
 
-/* ---- rank axis (contract: q_type.h) -------------------------------------- */
-
-int q_type_is_nested(ray_t* v) {
-    if (!v || ray_is_atom(v) || ray_len(v) == 0) return 0;
-    ray_t* e0 = q_index_elem_at(v, 0);
-    int r = e0 && !RAY_IS_ERR(e0) && (!ray_is_atom(e0) || q_type_is_str_atom(e0));
-    if (e0) ray_release(e0);
-    return r;
-}
-
-int q_type_any_nested_item(ray_t* v) {
-    if (!v || v->type != RAY_LIST) return 0;
-    int64_t n = ray_len(v);
-    for (int64_t i = 0; i < n; i++) {
-        ray_t* e = q_index_elem_at(v, i);
-        int c = e && !RAY_IS_ERR(e) && !ray_is_atom(e) && e->type != RAY_STR;
-        if (e) ray_release(e);
-        if (c) return 1;
-    }
-    return 0;
-}
-
 int q_type_is_iter(ray_t* v) {
     if (!v || RAY_IS_ERR(v)) return 0;
     return v->type == RAY_LIST || v->type == RAY_TABLE ||
@@ -406,32 +346,3 @@ int q_type_is_null_sym(ray_t* x) {
     return z;
 }
 
-/* q-layer null test: the base engine's `ray_nil_fn` treats sym id 0 as the
- * EMPTY symbol (a value, include/rayforce.h SYM case), but q treats the null
- * symbol `` ` `` AS null (`null \`` -> 1b).  This wrapper special-cases the
- * null symbol here in the q layer so the divergence stays out of base rayfall,
- * whose own paths rely on sym-0-as-empty.  Drives `q_null_wrap` for both the
- * atom path and the per-element `atomic_map_unary` recursion (nested lists /
- * symbol vectors reconstruct null-sym atoms via collection_elem). */
-static ray_t* nil_fn(ray_t* x) {
-    if (q_type_is_null_sym(x)) return ray_bool(true);
-    return ray_nil_fn(x);
-}
-
-/* q `null x` — elementwise null test.  Drives the engine's atomic `nil?`
- * (ray_nil_fn) through atomic_map_unary so it broadcasts over typed vectors
- * AND nested general lists at every depth; collection_elem reconstructs
- * typed-null atoms, so nulls are SEEN (unlike other atomics, which stay
- * null-avoiding via the dispatch guards).  Registered RAY_FN_NONE — NOT
- * ATOMIC — so it receives the whole argument here and owns the collapse: a
- * heterogeneous input list yields a homogeneous bool-atom run that
- * q_list_collapse folds to a bool vector (`null (1;\`a;2.5;"x")` -> 0000b),
- * while a nested list yields a list of bool VECTORS that q_list_collapse
- * leaves intact (multi-line, `null (0N 1;2 0N)` -> 10b / 01b). */
-ray_t* q_null_wrap(ray_t* x) {
-    ray_t* r = is_collection(x) ? atomic_map_unary(nil_fn, x) : nil_fn(x);
-    if (!r || RAY_IS_ERR(r) || r->type != RAY_LIST) return r;
-    ray_t* c = q_list_collapse(r);   /* owned: retains-or-builds */
-    ray_release(r);
-    return c;
-}

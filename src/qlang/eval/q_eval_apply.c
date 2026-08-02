@@ -675,7 +675,7 @@ static ray_t* agg_nested(ray_t* fv, const q_op_t* row, ray_t* x) {
  * to dictionaries"; a keyed table is a dict wearing a table's law. */
 static int agg2_lifts(ray_t* v) {
     return (v->type == RAY_DICT && !q_type_is_keyed(v)) ||
-           q_type_any_nested_item(v);
+           q_index_any_nested_item(v);
 }
 
 /* THE dyadic rank-2 arm, spelled by ref/avg.md's own annotation on
@@ -685,9 +685,9 @@ static int agg2_lifts(ray_t* v) {
 static ray_t* agg2(ray_t* fv, const q_op_t* row, ray_t* x, ray_t* y) {
     ray_t* vx = agg2_lifts(x) && x->type == RAY_DICT ? ray_dict_vals(x) : x;
     ray_t* vy = agg2_lifts(y) && y->type == RAY_DICT ? ray_dict_vals(y) : y;
-    ray_t* fx = q_type_any_nested_item(vx) ? flip_of(vx) : NULL;
+    ray_t* fx = q_index_any_nested_item(vx) ? flip_of(vx) : NULL;
     if (fx && RAY_IS_ERR(fx)) return fx;
-    ray_t* fy = q_type_any_nested_item(vy) ? flip_of(vy) : NULL;
+    ray_t* fy = q_index_any_nested_item(vy) ? flip_of(vy) : NULL;
     if (fy && RAY_IS_ERR(fy)) { ray_release(fx); return fy; }
     if (!fx && !fy) { ray_t* a[2] = { vx, vy }; return q_eval_apply(fv, row, a, 2); }
     if (fx && fy && ray_len(fx) != ray_len(fy)) {
@@ -736,7 +736,7 @@ static ray_t* agg1(ray_t* fv, const q_op_t* row, ray_t* x) {
         }
         return ray_dict_new(ks, q_eval_apply_collapse(vs));
     }
-    if (row && row->nested && q_type_any_nested_item(x)) return agg_nested(fv, row, x);
+    if (row && row->nested && q_index_any_nested_item(x)) return agg_nested(fv, row, x);
     return q_err(QE_TYPE);
 }
 
@@ -772,7 +772,7 @@ static ray_t* map1(ray_t* fv, const q_op_t* row, ray_t* l, ray_t* x) {
     /* THE map-family rank-2 law: `flip f each flip x` — scan the OUTER axis
      * (ref/sum.md sums list-of-lists, ref/max.md maxs over a dict); single and
      * uniform across the roster, so no manifest column carries it */
-    if (q_type_any_nested_item(x)) {
+    if (q_index_any_nested_item(x)) {
         ray_t* r = each_flip(fv, row, l, x);
         if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_TYPE);
         ray_t* out = flip_of(r);
@@ -1224,19 +1224,19 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
                                args[0], args[1]);
         } else if (strcmp(fam, "aggregate") == 0) {
             if (n == 1 && (is_container(args[0]) ||
-                           (row->nested && q_type_any_nested_item(args[0]))))
+                           (row->nested && q_index_any_nested_item(args[0]))))
                 return agg1(fv, row, args[0]);
             if (n == 2 && row->nested &&
                 (agg2_lifts(args[0]) || agg2_lifts(args[1])))
                 return agg2(fv, row, args[0], args[1]);
         } else if (strcmp(fam, "map") == 0) {
             if (n == 1 && (is_container(args[0]) ||
-                           q_type_any_nested_item(args[0])))
+                           q_index_any_nested_item(args[0])))
                 return map1(fv, row, NULL, args[0]);
             /* the dyadic m-window rows are window-then-data: lift on the DATA
              * with the window/decay ATOM held (`2 mmax d`, ref/max.md) */
             if (n == 2 && args[0]->type < 0 &&
-                (is_container(args[1]) || q_type_any_nested_item(args[1])))
+                (is_container(args[1]) || q_index_any_nested_item(args[1])))
                 return map1(fv, row, args[0], args[1]);
         } else if (strcmp(fam, "index") == 0) {
             /* as for `atomic`, a two-valence row's family describes the DYAD —

@@ -304,7 +304,7 @@ static int probe_is_rowlist(ray_t* dom, ray_t* y) {
     if (!y || y->type != RAY_LIST || ray_len(y) == 0) return 0;
     ray_t* y0 = ((ray_t**)ray_data(y))[0];
     if (!y0 || ray_is_atom(y0)) return 0;
-    return !q_type_is_nested(ray_table_get_col_idx(dom, 0));
+    return !q_index_is_nested(ray_table_get_col_idx(dom, 0));
 }
 
 /* probe_cols' fault code as the q error it means */
@@ -449,7 +449,7 @@ ray_t* q_search_find(ray_t* x, ray_t* y) {
     }
     if (x && (ray_is_vec(x) || x->type == RAY_LIST)) {          /* find */
         int64_t cnt = ray_len(x);
-        int x_ranked = x->type == RAY_LIST && q_type_is_nested(x);
+        int x_ranked = x->type == RAY_LIST && q_index_is_nested(x);
         if (x_ranked && y && y->type == RAY_LIST) {
             /* list-of-lists x, MIXED y: items of x matched with ITEMS of y
              * (`u?(2 3;\`ab)` -> 3 3 — never with the whole of y). */
@@ -475,7 +475,7 @@ ray_t* q_search_find(ray_t* x, ray_t* y) {
              * the doc's own transcript). */
             int64_t ny = ray_len(y);
             ray_t** e = (ray_t**)ray_data(y);
-            if (q_type_is_nested(y)) {
+            if (q_index_is_nested(y)) {
                 ray_t* out = ray_list_new(ny > 0 ? ny : 1);
                 if (RAY_IS_ERR(out)) return out;
                 for (int64_t j = 0; j < ny; j++) {
@@ -668,7 +668,7 @@ static ray_t* bin_search(ray_t* x, ray_t* y, int right) {
     if (!ray_is_vec(x) && x->type != RAY_LIST) return q_err(QE_TYPE);
     int64_t n = ray_len(x);
     int err = 0;
-    if (ray_is_atom(y) || q_type_is_nested(y) != q_type_is_nested(x)) {
+    if (ray_is_atom(y) || q_index_is_nested(y) != q_index_is_nested(x)) {
         int64_t r = bin_clamp(bin_probe(x, NULL, n, y, right, &err), n, right);
         return err ? q_err(QE_TYPE) : ray_i64(r);
     }
