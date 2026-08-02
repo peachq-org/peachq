@@ -6,12 +6,12 @@
 #endif
 #include <rayforce.h>
 #include "qlang/base/q_err.h"
+#include "qlang/q_prim.h"
 #include "qlang/net/q_http_client.h"
 #include "qlang/net/q_gz.h"           /* transparent gzip inflate (Content-Encoding) */
 #include "lang/eval.h"            /* ray_eval_get_restricted — outbound gate */
 #include "table/sym.h"           /* ray_sym_str — hsym text */
 #include "picohttpparser.h"
-#include "qlang/q_registry.h"   /* q_str_text_bytes — charv/legacy text accessor */
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
