@@ -52,10 +52,13 @@ ray_t* q_avg_wrap(ray_t* x);
  * value could run, so these fire only on off-shape applications. */
 ray_t* q_hof_nyi_wrap(ray_t* f, ray_t* x);
 
+/* ---- defined in ops/q_null.c ---- */
+ray_t* q_null_wrap(ray_t* x);
+
 /* ---- defined in ops/q_io_filetext.c ---- */
 ray_t* q_io_filetext_wrap(ray_t* x, ray_t* y);
 
-/* ---- defined in q_sys.c ---- */
+/* ---- defined in ops/q_sys.c ---- */
 ray_t* q_setenv_wrap(ray_t* x, ray_t* y);
 ray_t* q_getenv_wrap(ray_t* x);
 ray_t* q_exit_wrap(ray_t* x);

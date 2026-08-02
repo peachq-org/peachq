@@ -71,4 +71,9 @@ ray_t* q_dotq_s_fn(ray_t* x);
 ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs);
 ray_t* q_cols_fn(ray_t* x);
 ray_t* q_meta_fn(ray_t* x);
+
+/* Is x a FUNCTION value — the 100h-112h band?  `\f`/`\v` partition a namespace
+ * on it.  Lives beside the `type` verb: classifying a function carrier is the
+ * apply module's answer, so this cannot sit on the type axis in base/. */
+int q_type_is_fn(ray_t* x);
 #endif /* Q_BUILTINS_H */
