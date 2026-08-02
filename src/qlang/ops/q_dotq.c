@@ -84,7 +84,7 @@ ray_t* q_dotq_s_fn(ray_t* x) {
     if (!out) { free(buf); return q_err(QE_WSFULL); }
     memcpy(out, buf, len);
     out[len] = '\n';                                 /* console line terminator */
-    ray_t* r = ray_str(out, len + 1);
+    ray_t* r = ray_charv(out, len + 1);              /* 10h — RAY_STR is q-invisible */
     free(out);
     free(buf);
     return r;

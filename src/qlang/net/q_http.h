@@ -71,6 +71,12 @@ int q_http_send_all(ray_sock_t fd, const void* buf, size_t len, int secs);
 int q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
                    bool auth_required);
 
+/* (.Q.c.rd x) — read one docroot-relative path through the SAME hardened walk
+ * the built-in static server uses (per-segment openat/O_NOFOLLOW, Q_HTTP_MAX_FILE).
+ * Bytes as a char vector; `::` on refuse / miss / oversize.  h.q's default `.z.ph`
+ * reads the docroot through THIS, not `read1`, so no symlink can walk it out. */
+ray_t* q_http_read_doc_fn(ray_t* x);
+
 /* Structural parse of a `.z.ac` return value `(status; payload)` (ref/dotz.md):
  * item0 an integer atom (byte/short/int/long), item1 a RAY_STR atom.  On a
  * well-formed 2-item list writes *status_out and the payload ptr/len (aliasing
