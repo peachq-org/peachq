@@ -81,7 +81,7 @@
 #include "mem/sys.h"
 #include "ops/ops.h"
 #include "store/journal.h"
-#include "qlang/q_err.h"  /* q_err_from_text (-128h decode) + q_err_drop backstop */
+#include "qlang/base/q_err.h"  /* q_err_from_text (-128h decode) + q_err_drop backstop */
 #include "qlang/net/q_wire.h"
 #include "qlang/net/q_http.h"
 #include "qlang/net/q_ws.h"
