@@ -15,6 +15,7 @@
 #include "qlang/ops/q_sys.h"      /* q_sys_seed_init / q_sys_ctx_reset */
 #include "qlang/io/q_handles.h"  /* q_handles_init/destroy — the handle registry lifecycle */
 #include "qlang/q_console.h"  /* q_console_pipe_disable — reset the `\nonlegacy` display global per runtime */
+#include "qlang/q_ctx.h"      /* q_ctx_install_remote_hooks — the remote-door install half */
 #include "qlang/parse/q_parse.h"    /* q_parse — embedded-bootstrap loader */
 #include "qlang/eval/q_eval.h" /* q_eval — THE eval pipeline */
 #include "qlang/eval/q_view.h" /* q_view_reset — per-runtime view state */
@@ -93,6 +94,7 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
         q_sys_seed_init();     /* kdb constant-seed-at-startup contract (\S) */
         q_sys_cfg_init();      /* \P/\c/\C/\g/\o/\W/\e/\s defaults per runtime */
         q_handles_init();      /* fd-keyed handle registry (file/fifo/socket open-time) */
+        q_ctx_install_remote_hooks();  /* paired with the teardown in q_runtime_destroy */
         q_builtins_register();
         /* `.z.*` is an eval-time resolver, NOT a namespace: compute the
          * process-constant argv values once; q_eval resolves them directly
