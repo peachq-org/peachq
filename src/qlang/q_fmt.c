@@ -793,10 +793,14 @@ static void matrix_row_str(ray_t* row, int64_t nc, const int* w,
 
 /* e[0..n) is >=2 same-length alignable rows: a LEFT-aligned matrix (ref/mmu.md). */
 static int is_matrix(ray_t** e, int64_t n) {
-    if (n < 2) return 0;
+    if (n < 1) return 0;
     if (!matrix_row_ok(e[0])) return 0;
     int64_t w = ray_len(e[0]);
     if (w == 0) return 0;
+    /* One row is an enlist (`,1 2 3`) UNLESS it is also one column: a 1x1 drops
+     * its commas for the same reason `(1 2;3 4)` does — it is a matrix
+     * (ref/file-binary.md `show pi` -> 3.141593, while .Q.s1 keeps ",,"). */
+    if (n == 1 && w != 1) return 0;
     int all_charv = e[0]->type == RAY_CHARV;
     for (int64_t i = 1; i < n; i++) {
         if (!matrix_row_ok(e[i]) || ray_len(e[i]) != w) return 0;
@@ -1649,6 +1653,7 @@ static void q_fmt_body(ray_t* val) {
         /* a bare constructor (parse "()") is the empty-list application */
         if (n == 1 && e[0] == q_registry_list_value()) { qe_puts("()"); return; }
         if (n == 0) { qe_puts("()"); return; }
+        if (is_matrix(e, n)) { fmt_matrix(e, n); return; }
         if (n == 1) {                             /* enlist: ,x */
             char elem[2048]; elem[0] = '\0';
             q_fmt_krepr(e[0], elem, sizeof elem);
@@ -1656,7 +1661,6 @@ static void q_fmt_body(ray_t* val) {
             qe_puts(elem);
             return;
         }
-        if (is_matrix(e, n)) { fmt_matrix(e, n); return; }
         for (int64_t i = 0; i < n; i++) {
             if (qe_done()) break;                /* height cap hit — early exit */
             char elem[2048]; elem[0] = '\0';
