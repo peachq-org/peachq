@@ -10,6 +10,7 @@
 #endif
 #include <rayforce.h>
 #include "qlang/base/q_err.h"
+#include "qlang/q_prim.h"
 #include "qlang/net/q_ws.h"
 #include "qlang/net/q_http_client.h"   /* q_http_url_t + connect/send seams (#223) */
 #include "qlang/q_builtins.h"      /* q_dotq_sha1_fn / q_dotq_btoa_fn */
@@ -18,7 +19,6 @@
 #include "core/sock.h"
 #include "table/sym.h"             /* ray_sym_str */
 #include "picohttpparser.h"
-#include "qlang/q_registry.h"   /* q_str_text_bytes — charv/legacy text accessor */
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>

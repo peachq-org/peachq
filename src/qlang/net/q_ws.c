@@ -5,6 +5,7 @@
 #endif
 #include <rayforce.h>
 #include "qlang/net/q_ws.h"
+#include "qlang/q_prim.h"
 #include "qlang/net/q_http.h"      /* q_http_send_all — bounded sends */
 #include "qlang/q_env.h"       /* q_env_get — the `.z.ws`/`.z.wo`/`.z.wc` handlers */
 #include "qlang/q_builtins.h"  /* q_dotq_sha1_fn / q_dotq_btoa_fn — accept key */
@@ -14,7 +15,6 @@
 #include "picohttpparser.h"
 #include <string.h>
 #include <stdio.h>
-#include "qlang/q_registry.h"   /* q_str_text_bytes — charv/string text accessor */
 #include <time.h>
 #ifdef RAY_OS_WINDOWS
   #define WIN32_LEAN_AND_MEAN

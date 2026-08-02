@@ -3,6 +3,7 @@
  * recalc, not creation).  The env entry is the authority; the name roster
  * self-heals when a view is replaced or expunged. */
 #include "qlang/eval/q_view.h"
+#include "qlang/q_prim.h"
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_eval_internal.h"
 #include "qlang/q_env.h"
