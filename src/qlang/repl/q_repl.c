@@ -9,7 +9,7 @@
  *     pluggable ray_term_set_highlighter() hook. */
 #define _POSIX_C_SOURCE 200809L
 
-#include "qlang/q_repl.h"
+#include "qlang/repl/q_repl.h"
 #include "qlang/base/q_err.h"   /* q_err_text — full error text for console display */
 #include "qlang/parse/q_parse.h"
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */

@@ -4,9 +4,9 @@
 
 CC      ?= cc
 
-RAY_ENTRY_SRC = src/app/main.c src/qlang/qmain.c src/qlang/qdoctest_main.c
+RAY_ENTRY_SRC = src/app/main.c src/qlang/repl/qmain.c src/qlang/repl/qdoctest_main.c
 RAY_LIB_SRC   = $(filter-out $(RAY_ENTRY_SRC), $(wildcard src/*/*.c src/qlang/eval/*.c src/qlang/ops/*.c src/qlang/net/*.c src/qlang/io/*.c \
-                                            src/qlang/parse/*.c src/qlang/base/*.c))
+                                            src/qlang/parse/*.c src/qlang/base/*.c src/qlang/repl/*.c))
 
 RAY_VENDOR_SRC = third_party/yyjson/yyjson.c \
                  third_party/picohttpparser/picohttpparser.c \
@@ -71,7 +71,7 @@ DEFS    = -DRAY_VERSION_MAJOR=$(VERSION_MAJOR) -DRAY_VERSION_MINOR=$(VERSION_MIN
 # Changes daily, so scoped to the four objects that read it — otherwise every
 # cached object misses at midnight.
 DATE_DEF   = -DRAYFORCE_BUILD_DATE=\"$(BUILD_DATE)\"
-DATE_STEMS = $(addprefix $(BUILD_DIR)/,src/app/repl src/ops/system src/qlang/q_dotz src/qlang/qmain)
+DATE_STEMS = $(addprefix $(BUILD_DIR)/,src/app/repl src/ops/system src/qlang/q_dotz src/qlang/repl/qmain)
 $(addsuffix .o,$(DATE_STEMS)) $(addsuffix .win.o,$(DATE_STEMS)): DEFS += $(DATE_DEF)
 INCLUDES = $(RAY_INCLUDES)
 DEPFLAGS = -MMD -MP
@@ -96,7 +96,7 @@ LDFLAGS ?=
 
 LIB_SRC = $(RAY_LIB_SRC) $(RAY_VENDOR_SRC)
 LIB_OBJ    = $(addprefix $(BUILD_DIR)/,$(LIB_SRC:.c=.o))
-Q_MAIN_OBJ = $(BUILD_DIR)/src/qlang/qmain.o
+Q_MAIN_OBJ = $(BUILD_DIR)/src/qlang/repl/qmain.o
 DEPS = $(LIB_OBJ:.o=.d) $(Q_MAIN_OBJ:.o=.d)
 
 .DEFAULT_GOAL := all
