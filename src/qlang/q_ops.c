@@ -460,10 +460,12 @@ static const q_op_t Q_OPS[] = {
      * `h"query"` is handle-as-verb application, not a manifest row. */
     { "hopen",  QLEX_KW_PREFIX, QR_FN1("hopen", q_hopen_wrap),   QR_NONE, NULL, 1, 1, "none", NULL, QKOP(44) },
     { "hclose", QLEX_KW_PREFIX, QR_FN1("hclose", q_hclose_wrap), QR_NONE, NULL, 1, 1, "none", NULL },
-    /* ---- File Text ---- `0:` is tokenized by the scanner's digit-colon arm and
-     * dispatches on the LEFT operand's shape. Binary `1:`/`2:` are an
-     * owner-ruled non-goal: NO row, they stay name-refs ('name). */
+    /* ---- File Text / File Binary ---- both are tokenized by the scanner's
+     * digit-colon arm and dispatch on the LEFT operand's shape, so both are
+     * family "none" exception-catalogue members. `2:` (Dynamic Load) has no
+     * row and stays a name-ref ('name). */
     { "0:",     QLEX_GLYPH,     QR_NONE,                       QR_FN2("file-text", q_io_filetext_wrap), NULL, 1, 1, "none", NULL, QKOP(20) },
+    { "1:",     QLEX_GLYPH,     QR_NONE,                       QR_FN2("file-binary", q_io_filebinary_wrap), NULL, 1, 1, "none", NULL, QKOP(21) },
     { "hsym",   QLEX_KW_PREFIX, QR_FN1("hsym", q_hsym_wrap),   QR_NONE,           NULL, 1, 0, "atomic", NULL },
     { "read0",  QLEX_KW_PREFIX, QR_FN1("read0", q_read0_wrap), QR_NONE,           NULL, 1, 1, "none", NULL, QKOP(20) },
     { "read1",  QLEX_KW_PREFIX, QR_FN1("read1", q_read1_wrap), QR_NONE,           NULL, 1, 1, "none", NULL, QKOP(21) },
