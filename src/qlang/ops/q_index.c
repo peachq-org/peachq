@@ -61,6 +61,29 @@ ray_t* q_index_elem_at(ray_t* v, int64_t i) {
     return e;
 }
 
+/* The rank axis (contract: q_index.h) — both probes read items through
+ * q_index_elem_at, so they live at the element-read home rather than dragging
+ * it into base/. */
+int q_index_is_nested(ray_t* v) {
+    if (!v || ray_is_atom(v) || ray_len(v) == 0) return 0;
+    ray_t* e0 = q_index_elem_at(v, 0);
+    int r = e0 && !RAY_IS_ERR(e0) && (!ray_is_atom(e0) || q_type_is_str_atom(e0));
+    if (e0) ray_release(e0);
+    return r;
+}
+
+int q_index_any_nested_item(ray_t* v) {
+    if (!v || v->type != RAY_LIST) return 0;
+    int64_t n = ray_len(v);
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* e = q_index_elem_at(v, i);
+        int c = e && !RAY_IS_ERR(e) && !ray_is_atom(e) && e->type != RAY_STR;
+        if (e) ray_release(e);
+        if (c) return 1;
+    }
+    return 0;
+}
+
 /* one join operand for a single item: atoms join natively, else boxed */
 static ray_t* boxed1(ray_t* v) {
     if (ray_is_atom(v)) { ray_retain(v); return v; }
@@ -521,7 +544,7 @@ static ray_t* amend_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k,
     if (!i0 || RAY_IS_NULL(i0)) return amend_seq(x, NULL, rest, k, f, y);
     /* A collection index distributes — EXCEPT on a keyed table, where a flat one is
      * ONE compound key row, never a run of keys (#325): amend splits where reads do. */
-    int keyed_row = q_type_is_keyed(x) && i0->type != RAY_TABLE && !q_type_is_nested(i0);
+    int keyed_row = q_type_is_keyed(x) && i0->type != RAY_TABLE && !q_index_is_nested(i0);
     if (is_coll(i0) && !keyed_row) return amend_seq(x, i0, rest, k, f, y);
     if (k == 0) return leaf1(x, i0, f, y);
     ray_t* child = index_level(x, i0, 1);            /* absent path: 'index */
