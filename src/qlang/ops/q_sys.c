@@ -19,7 +19,7 @@
 #include "qlang/eval/q_eval.h" /* q_eval / q_eval_dot_wrap — timing + .Q.ts */
 #include "qlang/q_fmt.h"      /* q_fmt_set_prec/q_fmt_prec (`\P`) */
 #include "qlang/q_console.h"  /* q_console_str/reset (timed-expr side effects); q_console_pipe_* (`\nonlegacy`) */
-#include "qlang/repl/q_repl.h"     /* q_repl_mark_listener_active / q_repl_run_file */
+#include "qlang/q_ctx.h"           /* the engine context: `\l` source seam, listener flag, console teardown */
 #include "qlang/q_pq.h"       /* q_pq_load — the `\l pq` embedded-stdlib gate */
 #include "qlang/q_env.h"      /* q_env_ctx_set/_ctx + q_env_ns_names — `\d` and the `\v`/`\f`/`\a` rosters */
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk — the `.z.ts` timer callback */
@@ -177,7 +177,7 @@ void q_sys_exit(int code) {
     if (g_exiting) exit(g_exit_code);
     g_exiting  = 1;
     g_exit_code = code;
-    q_repl_console_close();
+    q_ctx_console_close();
     q_dotz_exit_fire(code);
     exit(code);
 }
@@ -349,7 +349,7 @@ uint16_t q_sys_listen(uint16_t port) {
     if (g_listen_sel >= 0) ray_poll_deregister(poll, g_listen_sel);
     g_listen_sel  = sel;
     g_listen_port = bound;                               /* authoritative — `system "p"` reports it */
-    q_repl_mark_listener_active();                       /* keep the process alive past stdin EOF */
+    q_ctx_mark_listener_active();                       /* keep the process alive past stdin EOF */
     return bound;
 }
 
@@ -364,7 +364,7 @@ uint16_t q_sys_listen_port(void) { return (uint16_t)g_listen_port; }
  *                        (fires ipc_on_close -> closes the fd), reset to 0.
  *   `\p N` (1..65535)  -> bind a kdb-protocol IPC listener on the runtime event
  *                        poll; the unified REPL loop (q_repl.c) serves it, and
- *                        q_repl_mark_listener_active keeps the process alive past
+ *                        q_ctx_mark_listener_active keeps the process alive past
  *                        stdin EOF (a client that `\p`s a port becomes a server).
  *   `\p 0W`            -> bind any OS-chosen free port, read it back via
  *                        getsockname and record it (mirrors startup `-p 0W`,
@@ -429,7 +429,7 @@ static int l_is_regular_readable(const char* p) {
  * then `$QHOME/name.q` — a fixtures/QHOME-style search root (the doctest runner
  * points QHOME at test/qscript).  An absolute path never gets QHOME prepended.
  * The resolved REGULAR readable file is executed line-at-a-time via the public
- * q_repl_run_file (multiline-aware; silent — kdb loads silently).  A
+ * q_ctx_run_file (multiline-aware; silent — kdb loads silently).  A
  * still-missing path or a DIRECTORY stays a silent no-op: this preserves the
  * banked `\l .` / `\l /tmp/db*` corpus rows (absent / directory targets) and
  * defers the directory / splayed-table / serialized-object load forms.  Getter
@@ -460,7 +460,7 @@ static ray_t* h_l(const char* arg, size_t alen) {
                 && l_is_regular_readable(cand)) { memcpy(found, cand, strlen(cand) + 1); ok = 1; }
         }
     }
-    if (ok) { q_repl_run_file(found, stdout, stderr); return NULL; }  /* disk hit — load (silent) */
+    if (ok) { q_ctx_run_file(found, stdout, stderr); return NULL; }  /* disk hit — load (silent) */
     /* openq: `\l pq` — the PeachQ stdlib gate. A dev-override disk file (the
      * a/b/c/d chain above) wins; else a cwd directory literally named `pq`
      * keeps existing dir semantics (no-op, below); ELSE the embedded stdlib.

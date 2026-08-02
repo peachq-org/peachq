@@ -6,9 +6,6 @@
 
 #include <stdio.h>
 
-/* Restore the live terminal and save history, if any.  Idempotent. */
-void q_repl_console_close(void);
-
 typedef struct ray_poll ray_poll_t;   /* fwd — full API in core/poll.h */
 
 /* Read q source lines from `in`, evaluating each and writing the console
@@ -48,12 +45,10 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
  * no echo, no auto-display of results) — only explicit side-effects (show/0N!)
  * are written to `out`, matching kdb script-load semantics.  Returns 0 on
  * success, non-zero if the file could not be opened. */
-int q_repl_run_file(const char* path, FILE* out, FILE* err);
 
 /* Mark this process as having an IPC listener (startup `-p` or a runtime `\p`).
  * The unified poll loop then keeps serving past stdin EOF instead of exiting —
  * a client that `\p`s a port becomes a long-lived server, like kdb/rayforce. */
-void q_repl_mark_listener_active(void);
 
 /* Strip pasted kdb `q)` console prompts from the front of an intake line and
  * return the advanced pointer.  Repeated exact `q)` only: `q)q)2+2` -> `2+2`,
@@ -62,6 +57,5 @@ void q_repl_mark_listener_active(void);
  * leading-whitespace trim — an indented line is not a prompt.  A console/loader
  * affordance, applied at line-intake (run_one_line), never in the parser.
  * Exposed for direct unit testing (test/q_repl_strip.c). */
-const char* q_repl_strip_prompt(const char* s);
 
 #endif /* Q_REPL_H */
