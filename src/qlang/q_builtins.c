@@ -7,6 +7,7 @@
 #include "qlang/eval/q_eval.h" /* q_eval_value_wrap / the carrier predicates */
 #include "qlang/parse/q_parse.h"
 #include "qlang/net/q_http_client.h" /* .Q.c.hg / .Q.c.hp — outbound HTTP client */
+#include "qlang/net/q_http.h"        /* .Q.c.rd — the hardened docroot read */
 #define Q_OPS_ENV_GRANDFATHER /* base-kernel snapshots (capture_base) read the bootstrap catalogue */
 #include "qlang/q_registry_internal.h" /* q_registry_init (shared; brings q_registry.h) */
 #include "qlang/q_env.h"      /* q_env_bind — q's own name surface */
@@ -370,6 +371,10 @@ void q_builtins_register(void) {
     bind_vary (".Q.c.hp", q_dotq_hp_fn);     /* HTTP POST [url;mime;body] (ref/dotq.md) */
     bind_vary (".Q.c.gz", q_dotq_gz_fn);     /* GZip ::/inflate/deflate (ref/dotq.md) */
     bind_value(".Q.c.res", q_registry_name_reserved_words());
+    /* `.Q.c.rd` — the hardened docroot read h.q's default `.z.ph` serves through.
+     * It sits in THIS tier, not under `.h`, because binding an `.h.*` name here
+     * would create `.h` ahead of `.q` and reorder `key `` ` ``. */
+    bind_unary(".Q.c.rd", q_http_read_doc_fn);
     /* .Q.pn stays UNBOUND (ref/dotq.md): `` `pn in key `.Q `` must be 0b — qStudio's safeCount relies on it. */
     /* .j JSON namespace (.j.j/.j.k/.j.jd) is defined in q — src/qlang/j.q, loaded
      * at q_runtime_create; the C homes are the `-31!`/`-29!` bangs (q_bang.c). */
