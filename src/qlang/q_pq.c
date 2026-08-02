@@ -4,7 +4,7 @@
  * deleted 2026-07-29 with the q-owned env: q no longer exposes rayfall. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_pq.h"
-#include "qlang/q_parse.h"     /* q_parse — the q eval pipeline */
+#include "qlang/parse/q_parse.h"     /* q_parse — the q eval pipeline */
 #include "qlang/eval/q_eval.h" /* q_eval — THE eval pipeline */
 #include "qlang/pq_gen.h"      /* OPENQ_PQ_BOOTSTRAP — codegen'd from src/qlang/pq.q */
 #include <rayforce.h>

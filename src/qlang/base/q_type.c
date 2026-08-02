@@ -2,8 +2,8 @@
  * the type-number / null axes, and the tag<->name vocabulary. Relocated out of
  * the frozen base header (lane extensions) and out of q_builtins/q_dollar/
  * q_math/q_table (the type + null knowledge) so each has ONE obvious home. */
-#include "qlang/ops/q_type.h"
-#include "qlang/q_err.h"          /* q_err / QE_TYPE — the throwing gates */
+#include "qlang/base/q_type.h"
+#include "qlang/base/q_err.h"          /* q_err / QE_TYPE — the throwing gates */
 #include "qlang/eval/q_eval.h"    /* q_eval_apply_carrier_kind — fn-value type */
 #include "qlang/ops/q_index.h"    /* q_index_elem_at — THE element-read home */
 #include "lang/internal.h"        /* as_i64, is_numeric/is_temporal, is_collection,

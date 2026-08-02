@@ -4,9 +4,9 @@
 #include "qlang/q_console.h"  /* q_console_pipe_* — the `--nonlegacy` display config */
 #include "qlang/q_builtins.h" /* q_builtins_count_long — THE count owner */
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
-#include "qlang/q_calendar.h" /* q_calendar_days_from_civil — date display domain */
+#include "qlang/base/q_calendar.h" /* q_calendar_days_from_civil — date display domain */
 #include "qlang/q_registry_internal.h" /* q_type_qname — the guarded type-name home */
-#include "qlang/q_parse_internal.h" /* ADVERB_NAMES — the one adverb-spelling table */
+#include "qlang/parse/q_parse_internal.h" /* ADVERB_NAMES — the one adverb-spelling table */
 #include "qlang/eval/q_eval.h" /* carrier read-out accessors — RAY_QFN display;
                                 * q_eval_apply_concrete — the display boundary force */
 #include "qlang/eval/q_view.h" /* q_view_text — a view displays as its text */

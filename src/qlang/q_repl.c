@@ -10,8 +10,8 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/q_repl.h"
-#include "qlang/q_err.h"   /* q_err_text — full error text for console display */
-#include "qlang/q_parse.h"
+#include "qlang/base/q_err.h"   /* q_err_text — full error text for console display */
+#include "qlang/parse/q_parse.h"
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
 #include "qlang/eval/q_view.h"   /* q_view_intercept — `x::e` at the line seam */
 #include "qlang/q_fmt.h"

@@ -16,8 +16,8 @@
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_eval_internal.h"
 #include "qlang/eval/q_view.h"
-#include "qlang/q_err.h"
-#include "qlang/q_parse_internal.h"
+#include "qlang/base/q_err.h"
+#include "qlang/parse/q_parse_internal.h"
 #include "qlang/q_ops.h"
 #include "qlang/q_registry.h"
 #include "qlang/q_registry_internal.h"   /* q_type_strict_i64 — the do-count judgment */

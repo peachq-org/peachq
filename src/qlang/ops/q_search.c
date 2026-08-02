@@ -14,8 +14,8 @@
  * bin/binr were written here 2026-07-25; they had no q-layer body before. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
-#include "qlang/q_err.h"
-#include "qlang/ops/q_type.h"  /* the type-axis home: the shape predicates and the int-lane reads */
+#include "qlang/base/q_err.h"
+#include "qlang/base/q_type.h"  /* the type-axis home: the shape predicates and the int-lane reads */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_value — within composes on `>=`/`<=`/`&` */
 #include "qlang/ops/q_index.h"  /* q_index_elem_at — THE element-read home */
 #include "lang/eval.h"     /* ray_in_fn, ray_find_fn */

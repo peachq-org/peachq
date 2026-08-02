@@ -6,7 +6,7 @@
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
-#include "qlang/q_err.h"
+#include "qlang/base/q_err.h"
 #include "lang/eval.h"     /* ray_sum_fn, ray_avg_fn, ray_mul_fn — engine arms */
 #include "lang/internal.h" /* atomic_map_binary, make_f64, is_list, is_numeric, as_f64 */
 #include <math.h>          /* isnan, sqrt — sentinel-null discipline, mdev/cov */

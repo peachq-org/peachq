@@ -7,7 +7,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/eval/q_funsql.h"
 #include "qlang/eval/q_eval.h"
-#include "qlang/q_err.h"
+#include "qlang/base/q_err.h"
 #include "qlang/q_builtins.h"          /* q_count_long */
 #include "qlang/q_registry_internal.h" /* q_take_wrap, q_where_wrap, q_flip_wrap, ... */
 #include "qlang/ops/q_bang.h"

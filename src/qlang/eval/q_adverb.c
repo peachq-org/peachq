@@ -7,11 +7,11 @@
  * refcount contract: args borrowed, result owned. */
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_eval_internal.h"
-#include "qlang/q_err.h"
+#include "qlang/base/q_err.h"
 #include "qlang/q_ops.h"       /* q_ops_find / acc_identity + the manifest columns */
 #include "qlang/q_registry.h"  /* q_registry_row_of, q_match_rec, q_typed_empty_like */
 #include "qlang/q_builtins.h"  /* q_count_long — q `count` for C callers, hot lane */
-#include "qlang/ops/q_type.h"
+#include "qlang/base/q_type.h"
 #include "qlang/ops/q_index.h" /* q_index_elem_at — the one element accessor */
 #include "table/dict.h"
 #include <string.h>

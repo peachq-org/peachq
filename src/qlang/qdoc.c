@@ -2,12 +2,12 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/qdoc.h"
-#include "qlang/q_parse.h"
+#include "qlang/parse/q_parse.h"
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
 #include "qlang/eval/q_view.h"   /* q_view_intercept — `x::e` at the row seam */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
-#include "qlang/q_err.h"    /* q_err_text / q_err_drop — error text + backstop */
+#include "qlang/base/q_err.h"    /* q_err_text / q_err_drop — error text + backstop */
 #include "qlang/ops/q_sys.h"    /* q_sys_is_cmd / q_sys_line / q_sys_prompt */
 #include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
 #include "store/fileio.h"   /* ray_mkdir_p — --emit mirrors the source tree */

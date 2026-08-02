@@ -6,7 +6,7 @@
  * Compiled only by Makefile.wasm with emcc; never part of the native build. */
 #define _POSIX_C_SOURCE 200809L   /* expose strdup (string.h) + setenv (stdlib.h) */
 #include "qlang/q_runtime.h"
-#include "qlang/q_parse.h"
+#include "qlang/parse/q_parse.h"
 #include "qlang/q_fmt.h"
 #include "qlang/ops/q_sys.h"  /* q_sys_is_cmd / q_sys_line — `\`-command glue */
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
