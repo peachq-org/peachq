@@ -33,15 +33,6 @@ int q_type_is_bool(ray_t* x);
 int q_type_is_float_tag(int8_t t);
 int q_type_is_num_tag(int8_t t);
 
-/* The kdb type number of a value (the `type` verb's knowledge): function
- * values map to 100h/102h/104h/106+adv, everything else IS its internal tag.
- * Callers must handle NULL x themselves (base-verb fallback). */
-int8_t q_type_of(ray_t* x);
-
-/* Is x a FUNCTION value — the 100h–112h band (lambda, operator, iterator,
- * projection, composition, derived)?  `\f`/`\v` partition a namespace on it. */
-int q_type_is_fn(ray_t* x);
-
 /* Vector tag -> kdb type name ("long"/"symbol"/...) or NULL (list/physical
  * STR); total over the value band. */
 const char* q_type_qname(int8_t t);
@@ -111,19 +102,9 @@ int q_type_is_str_atom(ray_t* x);
 /* a SYMBOL atom (-11h) — the twin of q_type_is_str_atom */
 int q_type_is_sym_atom(ray_t* x);
 
-/* Are v's ITEMS themselves collections — a list of lists rather than a flat run
- * of atoms?  THE rank axis: the search family reads it to pick a haystack's
- * search rank (find.md — a rank-n haystack looks for rank n-1 objects) and to
- * tell a record from a run of rows.  A STR atom counts as a collection: kdb
- * strings are char LISTS. */
-int q_type_is_nested(ray_t* v);
-
-/* The same axis read for CONFORMABILITY rather than for item rank: does ANY item
- * make v rank-2 under flip?  `flip` broadcasts atoms, so `(3;1 2)` is as rank-2
- * as `(1 2;3)` and the L3 aggregate lift must claim both — where is_nested,
- * probing item 0 only, sees a flat run.  A physical STR atom is storage, not a
- * rank-2 axis, so this one excludes it. */
-int q_type_any_nested_item(ray_t* v);
+/* The rank axis (q_index_is_nested / q_index_any_nested_item) lives at the
+ * element-read home, ops/q_index.h — both probes read items through
+ * q_index_elem_at. */
 
 /* THE iteration domain — what pairs one-for-one with a value's ITEMS.  A table
  * joins the collections here ("the items of a table are its rows", ref/count.md);
@@ -137,8 +118,5 @@ int q_type_is_null_sym(ray_t* x);
  * at the far end of the lane; 0 for the types the docs pin no infinity for. */
 int q_type_is_inf(ray_t* x);
 
-/* q `null x` verb body — elementwise null test, owns the collapse. Registered
- * RAY_FN_NONE; keeps its _wrap name across the home move. */
-ray_t* q_null_wrap(ray_t* x);
 
 #endif /* QLANG_Q_TYPE_H */

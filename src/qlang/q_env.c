@@ -9,7 +9,8 @@
 #include "qlang/q_env.h"
 #include "qlang/q_registry_internal.h"
 #include "qlang/base/q_err.h"
-#include "qlang/base/q_type.h"         /* q_type_is_fn / _is_table / _is_keyed — the \v|\f|\a split */
+#include "qlang/base/q_type.h"     /* q_type_is_table / _is_keyed — the \v|\a split */
+#include "qlang/q_builtins.h"      /* q_type_is_fn — the \f split (needs the apply module) */
 #include "qlang/q_dotz.h"         /* the .z.* handler-slot arms of `set` */
 #include "qlang/eval/q_view.h"    /* view hooks: set/unbind invalidation, dot-'nyi */
 #include "qlang/net/q_wirefile.h" /* q_wirefile_write — the `:file set y form */
