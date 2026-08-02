@@ -377,6 +377,43 @@ static void serve_embedded(ray_sock_t fd, const char* rel) {
         q_http_send_all(fd, body, len, Q_HTTP_SEND_SECS);
 }
 
+static void doc_close(int fd) {
+#ifndef RAY_OS_WINDOWS
+    close(fd);
+#else
+    _close(fd);
+#endif
+}
+
+ray_t* q_http_read_doc_fn(ray_t* x) {
+    const char* p; int64_t n;
+    if (!x || RAY_IS_ERR(x) || !q_str_text_bytes(x, &p, &n)) return RAY_NULL_OBJ;
+    if (n <= 0 || (size_t)n >= Q_HTTP_MAX_PATH) return RAY_NULL_OBJ;
+    char rel[Q_HTTP_MAX_PATH];
+    memcpy(rel, p, (size_t)n);
+    rel[n] = '\0';
+    int64_t size = 0;
+    int doc = q_http_open_doc(rel, (size_t)n, &size);
+    if (doc < 0) return RAY_NULL_OBJ;
+    if (size > Q_HTTP_MAX_FILE) { doc_close(doc); return RAY_NULL_OBJ; }
+    char*   buf = size ? (char*)ray_sys_alloc((size_t)size) : NULL;
+    int64_t got = (size && !buf) ? -1 : 0;
+    while (got >= 0 && got < size) {
+#ifndef RAY_OS_WINDOWS
+        int64_t r = (int64_t)read(doc, buf + got, (size_t)(size - got));
+#else
+        int64_t r = (int64_t)_read(doc, buf + got, (unsigned)(size - got));
+#endif
+        if (r <= 0) { got = -1; break; }
+        got += r;
+    }
+    doc_close(doc);
+    if (got < 0) { if (buf) ray_sys_free(buf); return RAY_NULL_OBJ; }
+    ray_t* out = ray_charv(buf ? buf : "", (int64_t)got);
+    if (buf) ray_sys_free(buf);
+    return out ? out : RAY_NULL_OBJ;
+}
+
 static void serve_file(ray_sock_t fd, const char* rel, size_t rl) {
     if (http_docroot_absent()) {         /* ALL-OR-NOTHING: no ./html -> embedded site */
         serve_embedded(fd, rel);
@@ -389,11 +426,7 @@ static void serve_file(ray_sock_t fd, const char* rel, size_t rl) {
         return;
     }
     if (size > Q_HTTP_MAX_FILE) {
-#ifndef RAY_OS_WINDOWS
-        close(doc);
-#else
-        _close(doc);
-#endif
+        doc_close(doc);
         q_http_send_simple(fd, 500, "Internal Server Error");
         return;
     }
@@ -409,11 +442,7 @@ static void serve_file(ray_sock_t fd, const char* rel, size_t rl) {
         if (r <= 0) { got = -1; break; }
         got += r;
     }
-#ifndef RAY_OS_WINDOWS
-    close(doc);
-#else
-    _close(doc);
-#endif
+    doc_close(doc);
     if (got < 0) {
         if (buf) ray_sys_free(buf);
         q_http_send_simple(fd, 500, "Internal Server Error");
@@ -601,11 +630,13 @@ static uint8_t* http_gzip_response(const char* resp, size_t len, size_t* out) {
  * VERBATIM.  Error/non-string -> 500.  Always returns 0 (a response was sent).
  * `method` (NULL for .z.ph/.z.pp) selects the 2- vs 3-item arg; `which` names
  * the handler for the log.  `may_gzip` (only the `.z.ph` GET path) enables the
- * `form?`-response gzip when the client offered Accept-Encoding + body >= 2000. */
+ * `form?`-response gzip when the client offered Accept-Encoding + body >= 2000.
+ * `may_decline` (GET only): a `::` return sends nothing and answers -1 = DECLINE. */
 static int zh_dispatch_call(ray_sock_t fd, const char* method, size_t mlen,
                             const char* text_p, size_t text_len,
                             const struct phr_header* hdrs, size_t nh,
-                            ray_t* fn, const char* which, bool may_gzip)
+                            ray_t* fn, const char* which, bool may_gzip,
+                            bool may_decline)
 {
     ray_t* arg = zh_build_arg(method, mlen, text_p, text_len, hdrs, nh);
     if (!arg) { q_http_send_simple(fd, 500, "Internal Server Error"); return 0; }
@@ -627,6 +658,7 @@ static int zh_dispatch_call(ray_sock_t fd, const char* method, size_t mlen,
         ray_release(r);
         return 0;
     } }
+    if (may_decline && r == RAY_NULL_OBJ) return -1;
     fprintf(stderr, "http: %s returned %s — sending 500\n", which,
             (r && RAY_IS_ERR(r)) ? "an error" : "a non-string");
     if (r) {
@@ -638,7 +670,7 @@ static int zh_dispatch_call(ray_sock_t fd, const char* method, size_t mlen,
 }
 
 /* `.z.ph` (HTTP GET) — requestText is the request target (leading '/' stripped).
- * 0 handled / -1 no handler set. */
+ * 0 handled / -1 no handler set OR the handler declined (`::`). */
 static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
                         const struct phr_header* hdrs, size_t nh)
 {
@@ -646,7 +678,7 @@ static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
     if (!fn) return -1;
     ray_retain(fn);                            /* handler may reassign .z.ph */
     if (tlen && target[0] == '/') { target++; tlen--; }
-    int r = zh_dispatch_call(fd, NULL, 0, target, tlen, hdrs, nh, fn, ".z.ph", true);
+    int r = zh_dispatch_call(fd, NULL, 0, target, tlen, hdrs, nh, fn, ".z.ph", true, true);
     ray_release(fn);
     return r;
 }
@@ -697,7 +729,7 @@ static void zpp_dispatch(ray_sock_t fd, const struct phr_header* hdrs, size_t nh
         }
     }
     zh_dispatch_call(fd, NULL, 0, body ? (const char*)body : "",
-                     have_cl ? (size_t)cl : 0, hdrs, nh, fn, ".z.pp", false);
+                     have_cl ? (size_t)cl : 0, hdrs, nh, fn, ".z.pp", false, false);
     if (body) ray_sys_free(body);
     ray_release(fn);
 }
@@ -716,7 +748,7 @@ static void zpm_dispatch(ray_sock_t fd, const char* method, size_t mlen,
     if (!fn) { q_http_send_simple(fd, 501, "Not Implemented"); return; }
     ray_retain(fn);                            /* handler may reassign .z.pm */
     if (tlen && target[0] == '/') { target++; tlen--; }
-    zh_dispatch_call(fd, method, mlen, target, tlen, hdrs, nh, fn, ".z.pm", false);
+    zh_dispatch_call(fd, method, mlen, target, tlen, hdrs, nh, fn, ".z.pm", false, false);
     ray_release(fn);
 }
 
