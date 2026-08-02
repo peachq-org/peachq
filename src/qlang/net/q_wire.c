@@ -2,6 +2,7 @@
  * provenance: see q_wire.h.  No frozen-base file is touched: this is a
  * q-layer TU; `-8!`/`-9!` dispatch lives in q_registry.c's `!` wrapper. */
 #include "qlang/net/q_wire.h"
+#include "qlang/q_prim.h"
 #include "qlang/base/q_err.h"      /* q_err / q_err_text — full error text on the wire */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_lambda_src / q_eval — lambda serde;
                                  * q_eval_apply_concrete — the IPC boundary force */
