@@ -17,7 +17,7 @@
 #include "qlang/q_builtins.h"   /* q_parse_builtin_fn, q_md5_fn, q_dotq_btoa_fn, q_dotq_sha1_fn */
 #include "qlang/net/q_json.h"       /* q_json_serialize (.j.j), q_json_deserialize (.j.k) */
 #include "qlang/net/q_wire.h"       /* q_wire_serialize/_deserialize/_compress, Q_WIRE_ASYNC */
-#include "qlang/net/q_wirefile.h"   /* q_wirefile_stats — `-21!` compression stats */
+#include "qlang/io/q_io.h"          /* the byte core: hcount's path+size, `-21!` stats */
 #include "qlang/eval/q_eval.h"  /* q_eval — `-6!` (internal.md: eval) */
 #include "qlang/q_fmt.h"        /* q_fmt_krepr — `-3!`, .Q.s1 */
 #include "qlang/q_console.h"    /* q_console_write — 0N! */
@@ -30,7 +30,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 /* ---- multi-statement handlers (VALUE-shaped: borrowed y, OWNED return) ----- */
 
@@ -93,31 +92,14 @@ static ray_t* h_refcnt(ray_t* y) {
 static ray_t* h_hcount(ray_t* y) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* xs = q_str_in(y);            /* charv path -> legacy STR form */
-    ray_t* path = NULL;                 /* OWNED RAY_STR, NUL-terminated */
-    const char* p = NULL;
-    size_t n = 0;
-    if (xs && xs->type == -RAY_SYM) {
-        ray_t* s = ray_sym_str(xs->i64);               /* borrowed */
-        if (s) { p = ray_str_ptr(s); n = ray_str_len(s); }
-    } else if (xs && xs->type == -RAY_STR) {
-        p = ray_str_ptr(xs);
-        n = ray_str_len(xs);
-    }
-    if (p) {                            /* empty path stats and fails -> 'io */
-        if (n > 0 && p[0] == ':') { p++; n--; }
-        path = ray_str(p, n);
-    }
+    /* hcount takes a PATH, not a file symbol: it reads a bare `x as one (an
+     * empty path stats and fails 'io) where the read verbs signal 'type. */
+    ray_t* txt = xs && xs->type == -RAY_SYM ? ray_sym_str(xs->i64) : xs;  /* borrowed */
+    ray_t* path = q_io_file_path(txt);
     ray_release(xs);
     if (!path) return q_err(QE_TYPE);
     if (RAY_IS_ERR(path)) return path;
-    int64_t sz = -1;
-#ifdef RAY_OS_WINDOWS
-    struct _stat64 st;                  /* 64-bit twin: st_size past 2 GiB */
-    if (_stat64(ray_str_ptr(path), &st) == 0) sz = (int64_t)st.st_size;
-#else
-    struct stat st;
-    if (stat(ray_str_ptr(path), &st) == 0) sz = (int64_t)st.st_size;
-#endif
+    int64_t sz = q_io_file_size(path);
     ray_release(path);
     if (sz < 0) return q_err(QE_IO);
     return ray_i64(sz);
@@ -307,7 +289,7 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -32: return q_dotq_btoa_fn(y);
         case -33: return q_dotq_sha1_fn(y);
         case -34: return h_timespace(y);
-        case -21: return q_wirefile_stats(y);
+        case -21: return q_io_zip_stats(y);
         case -35: return q_dotq_gz_fn(&y, 1);
 
         /* ---- placeholder inventory: known internal fn, not implemented -> 'nyi.
