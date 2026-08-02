@@ -44,7 +44,8 @@ ray_t* q_io_file_path(ray_t* x) {
     return ray_str(p, n);
 }
 
-int64_t q_io_file_size(ray_t* pathstr) {
+/* Bytes as the filesystem counts them; q_io_file_size adds the container law. */
+static int64_t io_stat_size(ray_t* pathstr) {
     const char* p = ray_str_ptr(pathstr);
     if (!p) return -1;
 #ifdef RAY_OS_WINDOWS
@@ -214,6 +215,40 @@ static ray_t* zip_trailer(const uint8_t* t, size_t file_len, zip_hdr_t* z) {
     return NULL;
 }
 
+/* The container trailer of a file whose on-disk length is `file_len`.  NULL
+ * with *found=0 when it carries no magic, NULL with *found=1 and `z` filled
+ * when it holds a well-formed container; else an owned error — 'io from the
+ * read, 'corrupt from a layout the magic promised and the trailer denies. */
+static ray_t* io_zip_hdr(ray_t* pathstr, int64_t file_len, zip_hdr_t* z, int* found) {
+    *found = 0;
+    int wrapped = 0;
+    ray_t* tail = io_read_raw(pathstr, file_len - ZIP_TRAIL_LEN, ZIP_TRAIL_LEN, &wrapped);
+    if (RAY_IS_ERR(tail)) return tail;
+    ray_t* bad = NULL;
+    if (wrapped) {
+        bad = file_len < ZIP_MAGIC_LEN + ZIP_TRAIL_LEN || ray_len(tail) != ZIP_TRAIL_LEN
+                  ? q_err(QE_CORRUPT)
+                  : zip_trailer((const uint8_t*)ray_data(tail), (size_t)file_len, z);
+        *found = bad == NULL;
+    }
+    ray_release(tail);
+    return bad;
+}
+
+/* ref/hcount.md: a compressed file's size is its ORIGINAL file's, so size is
+ * answered past the container exactly as q_io_read_slice answers "what bytes".
+ * Too small to hold one, or holding one that will not decode, and the on-disk
+ * length is all there is — the magic is a claim, and `-21!` is what signals. */
+int64_t q_io_file_size(ray_t* pathstr) {
+    int64_t n = io_stat_size(pathstr);
+    if (n < ZIP_MAGIC_LEN + ZIP_TRAIL_LEN) return n;
+    zip_hdr_t z;
+    int found = 0;
+    ray_t* bad = io_zip_hdr(pathstr, n, &z, &found);
+    if (bad) { ray_release(bad); return n; }
+    return found ? z.uncompressed : n;
+}
+
 ray_t* q_io_unzip(const uint8_t* buf, size_t len) {
     if (!buf || len < ZIP_MAGIC_LEN || memcmp(buf, ZIP_MAGIC, ZIP_MAGIC_LEN) != 0) return NULL;
     if (len < ZIP_MAGIC_LEN + ZIP_TRAIL_LEN) return q_err(QE_CORRUPT);
@@ -308,23 +343,16 @@ ray_t* q_io_zip_stats(ray_t* x) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* path = q_io_file_path(x);
     if (!path) return q_err(QE_TYPE);
-    int wrapped = 0;
-    int64_t file_len = q_io_file_size(path);
-    ray_t* tail = io_read_raw(path, file_len - ZIP_TRAIL_LEN, ZIP_TRAIL_LEN, &wrapped);
-    ray_t* r = NULL;
-    if (RAY_IS_ERR(tail)) r = tail;
-    else if (!wrapped) r = ray_dict_new(ray_sym_vec_new(RAY_SYM_W64, 0), ray_list_new(0));
-    else if (file_len < ZIP_MAGIC_LEN + ZIP_TRAIL_LEN ||
-             ray_len(tail) != ZIP_TRAIL_LEN) r = q_err(QE_CORRUPT);
-    if (!r) {
-        zip_hdr_t z;
-        r = zip_trailer((const uint8_t*)ray_data(tail), (size_t)file_len, &z);
-        if (!r) {
-            z.level = zip_read_level(path, file_len, &z);
-            r = zip_stats_dict(&z, file_len);
-        }
+    int64_t file_len = io_stat_size(path);       /* the CONTAINER's own length */
+    zip_hdr_t z;
+    int found = 0;
+    ray_t* r = io_zip_hdr(path, file_len, &z, &found);
+    if (!r && !found)                   /* not compressed -> the empty dict */
+        r = ray_dict_new(ray_sym_vec_new(RAY_SYM_W64, 0), ray_list_new(0));
+    else if (!r) {
+        z.level = zip_read_level(path, file_len, &z);
+        r = zip_stats_dict(&z, file_len);
     }
-    if (!RAY_IS_ERR(tail)) ray_release(tail);
     ray_release(path);
     return r;
 }
