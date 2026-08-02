@@ -15,9 +15,9 @@
  * Pure q-layer: no frozen-base edits. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/net/q_json.h"
+#include "qlang/q_prim.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_fmt.h"      /* q_fmt / q_fmt_float — the display + `\P` home */
-#include "qlang/q_registry.h" /* q_list_collapse */
 #include "qlang/base/q_type.h"     /* q_type_is_inf — the infinity lane */
 #include "lang/eval.h"        /* ray_at_fn — dict/table cell reads */
 #include "table/sym.h"        /* ray_sym_vec_cell */
