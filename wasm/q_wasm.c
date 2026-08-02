@@ -8,7 +8,7 @@
 #include "qlang/q_runtime.h"
 #include "qlang/q_parse.h"
 #include "qlang/q_fmt.h"
-#include "qlang/q_sys.h"  /* q_sys_is_cmd / q_sys_line — `\`-command glue */
+#include "qlang/ops/q_sys.h"  /* q_sys_is_cmd / q_sys_line — `\`-command glue */
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
 #include "ops/ops.h"      /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
