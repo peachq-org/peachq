@@ -1,7 +1,7 @@
 /* qdoc — see qdoc.h. */
 #define _POSIX_C_SOURCE 200809L
 
-#include "qlang/qdoc.h"
+#include "qlang/repl/qdoc.h"
 #include "qlang/parse/q_parse.h"
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
 #include "qlang/eval/q_view.h"   /* q_view_intercept — `x::e` at the row seam */
