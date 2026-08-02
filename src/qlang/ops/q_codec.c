@@ -3,7 +3,7 @@
  * q_builtins.c; the shared text-bytes probe lives here with its users. */
 #include "qlang/q_builtins.h"   /* the codec decls (q_md5_fn, q_dotq_*) */
 #include "qlang/base/q_err.h"
-#include "qlang/q_registry.h"   /* q_str_text_bytes */
+#include "qlang/q_prim.h"      /* q_str_text_bytes */
 #include "qlang/net/q_gz.h"         /* q_gz_deflate/inflate — .Q.c.gz seam */
 #include "lang/internal.h"      /* ray_error, ray_vec_from_raw */
 #include <string.h>

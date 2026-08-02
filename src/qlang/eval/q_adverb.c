@@ -6,6 +6,7 @@
  * here); derived evaluations call back out through q_eval_apply.  Same
  * refcount contract: args borrowed, result owned. */
 #include "qlang/eval/q_eval.h"
+#include "qlang/q_prim.h"
 #include "qlang/eval/q_eval_internal.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_ops.h"       /* q_ops_find / acc_identity + the manifest columns */

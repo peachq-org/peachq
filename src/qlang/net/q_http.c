@@ -5,6 +5,7 @@
 #endif
 #include <rayforce.h>
 #include "qlang/net/q_http.h"
+#include "qlang/q_prim.h"
 #include "qlang/net/q_gz.h"        /* q_gz_deflate — `form?` response gzip (#6) */
 #include "qlang/net/q_ws.h"        /* q_ws_handshake — the Upgrade hand-off */
 #include "qlang/html_assets_gen.h" /* q_html_assets[] — codegen'd from src/qlang/html/ */
@@ -32,7 +33,6 @@
   #include <errno.h>
 #endif
 #include <time.h>
-#include "qlang/q_registry.h"   /* q_str_text_bytes — charv/string text accessor */
 
 #define Q_HTTP_MAX_HEADERS 64
 #define Q_HTTP_MAX_PATH    1024

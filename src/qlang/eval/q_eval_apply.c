@@ -12,6 +12,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/eval/q_eval.h"
+#include "qlang/q_prim.h"
 #include "qlang/eval/q_eval_internal.h"
 #include "qlang/eval/q_view.h"     /* view carriers apply as their value */
 #include "qlang/eval/q_funsql.h"  /* the `?`/`!` matrix entry points (fnv_matrix_value) */
