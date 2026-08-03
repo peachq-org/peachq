@@ -322,21 +322,6 @@ void q_http_send_simple(ray_sock_t fd, int code, const char* reason) {
         q_http_send_all(fd, body, (size_t)bl, Q_HTTP_SEND_SECS);
 }
 
-/* True when there is NO docroot at all (the `.h.HOME`/"html" dir is absent, not a
- * missing file inside one) — drives the built-in landing page below. */
-static bool http_docroot_absent(void) {
-    char rootbuf[Q_HTTP_MAX_PATH];
-    const char* root = q_http_docroot(rootbuf, sizeof rootbuf);
-#ifndef RAY_OS_WINDOWS
-    int d = open(root, O_RDONLY | O_DIRECTORY);
-    if (d >= 0) { close(d); return false; }
-    return errno == ENOENT;
-#else
-    struct _stat64 st;
-    return !(_stat64(root, &st) == 0 && (st.st_mode & _S_IFMT) == _S_IFDIR);
-#endif
-}
-
 const unsigned char* q_http_asset_lookup(const char* path, size_t* len_out) {
     if (!path) return NULL;
     while (*path == '/') path++;                 /* strip leading slash(es) */
@@ -360,10 +345,11 @@ bool q_http_asset_at(size_t i, const char** path_out,
     return true;
 }
 
-/* Serve one request from the embedded table (no on-disk docroot). `rel` is the
- * respond()-normalized path (leading '/' stripped; "/" -> "index.html"). Hit ->
- * 200 with Content-Length + Content-Type (`.h.ty` override, else the C table);
- * miss -> 404. Fixed-table match: no filesystem, no traversal surface. */
+/* Serve one request from the embedded table (the on-disk docroot's fallback, per
+ * file). `rel` is the respond()-normalized path (leading '/' stripped; "/" ->
+ * "index.html"). Hit -> 200 with Content-Length + Content-Type (`.h.ty`
+ * override, else the C table); miss -> 404. Fixed-table match: no filesystem,
+ * no traversal surface. */
 static void serve_embedded(ray_sock_t fd, const char* rel) {
     size_t len = 0;
     const unsigned char* body = q_http_asset_lookup(rel, &len);
@@ -415,14 +401,10 @@ ray_t* q_http_read_doc_fn(ray_t* x) {
 }
 
 static void serve_file(ray_sock_t fd, const char* rel, size_t rl) {
-    if (http_docroot_absent()) {         /* ALL-OR-NOTHING: no ./html -> embedded site */
-        serve_embedded(fd, rel);
-        return;
-    }
     int64_t size = 0;
     int doc = q_http_open_doc(rel, rl, &size);
-    if (doc < 0) {                        /* docroot present but file missing -> 404 */
-        q_http_send_simple(fd, 404, "Not Found");
+    if (doc < 0) {          /* ADDITIVE: on-disk first, this file's embedded twin second */
+        serve_embedded(fd, rel);
         return;
     }
     if (size > Q_HTTP_MAX_FILE) {
