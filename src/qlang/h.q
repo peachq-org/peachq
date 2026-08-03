@@ -64,11 +64,17 @@
 .h.uh:{s:"%" vs x; raze (enlist first s),{("c"$"X"$2#x),2_x} each 1_s};
 .h.iso8601:{s:string "p"$x; (4#s),"-",(2#5_s),"-",(2#8_s),"T",11_s};
 
-/ Default web console; .h.wr/.h.wf/.h.wc/.h.wj/.h.ph are openq names. .h.wr renders under `\C`; .h.wf reads .h.HOME through .Q.c.rd (O_NOFOLLOW-hardened) and its `::` is the DECLINE q_http.c falls through on. `?expr` EVALS (.h.jx's own `value`); auth is the operator's via .z.ac/-u, which gate ahead of .z.ph.
+/ Default web console + download API; the .h.w* names are openq's. .h.wr renders under `\C`; .h.wf reads .h.HOME through .Q.c.rd (O_NOFOLLOW-hardened) and its `::` is the DECLINE q_http.c falls through on. .h.wg routes STATIC-FIRST, then .h.wd serializes the query through save's own .h.tx (`a.json?expr[off,lim`), joining a serializer's LINES but sending a BYTE-vector result verbatim (the xlsx/parquet shape). `?expr` EVALS (.h.jx's own `value`); auth is the operator's via .z.ac/-u, which gate ahead of .z.ph.
 .h.wr:{c:system"c"; system "c "," " sv string system"C"; r:@[.Q.s;x;{"'",x,"\n"}]; system "c "," " sv string c; -1_"\n" vs r};
 .h.jx:{[x;y] t:$[a:0>type r:value y;enlist r;r]; n:count t; e:0|n-32; enlist[(" " sv .h.ha'[("?[",/:string(0;0|x-32;e&x+32;e));("home";"up";"down";"end")]),(" ",string[n],"[",string[x],"]")],enlist[""],.h.wr $[a;r;32 sublist x _ t]};
 .h.wf:{d:.h.uh x; if[(any 32>"i"$d)|(any d in "\\:")|any ("/" vs d) in (,".";"..");:.h.hn["404 Not Found";`txt;"not found\n"]]; d:$[0=count d;"index.html";"/"=last d;d,"index.html";d]; b:.Q.c.rd d; $[(::)~b;(::);.h.hy[`$last "." vs d;b]]};
-.h.wj:{j:where x="["; d:$[count j;(1+last j)_x;""]; b:(0<count d)&all d in "0123456789"; e:$[b;(last j)#x;x]; l:.h.jx[$[b;"J"$d;0];e]; .h.hp (enlist ("?",(.h.hu e),"[") sv "?[" vs first l),.h.xs each 1_l};
+.h.wp:{j:where x="["; d:$[count j;(1+last j)_x;""]; p:"," vs d; b:(0<count j)&((count p) in 1 2)&(all 0<count each p)&all d in "0123456789,"; $[b;((last j)#x;"J"$p 0;$[2=count p;"J"$p 1;0N]);(x;0;0N)]};
+.h.wj:{g:.h.wp x; e:g 0; l:.h.jx[g 1;e]; .h.hp (enlist ("?",(.h.hu e),"[") sv "?[" vs first l),.h.xs each 1_l};
 .h.wc:{t:tables[]; $[0=count x;.h.hy[`html;.h.fram["openq";(string t),enlist 29#" ";("?.t";$[count t;"?",.h.hu string first t;"?.t"])]];x~".t";.h.hy[`html;.h.html[.h.logo,.h.br,$[count t;raze .h.hb'[("?",/:.h.hu each string t);.h.xs each string t],\:.h.br;"(no tables)"]]];.h.wj x]};
-.h.ph:{r:first x; i:r?"?"; b:(0=i)&0<count r; @[$[b;.h.wc;.h.wf];$[b;.h.uh 1_r;i#r];.h.he]};
+.h.wn:{[x;y;z;w] r:.h.hn[x;y;w]; n:((count r)-count w)-2; (n#r),(raze z,\:"\r\n"),"\r\n",w};
+.h.we:{[x;y] $[x~`json;.h.hn["400 Bad Request";`json;"{\"error\":",(.j.j y),"}"];.h.he y]};
+.h.wq:{[x;y] g:.h.wp y; r:value g 0; t:$[0>type r;enlist r;r]; n:count t; t:$[null g 2;(g 1)_t;(g 2) sublist (g 1)_t]; s:.h.tx[x] t; .h.wn["200 OK";x;enlist "X-Total-Count: ",string n;$[4h=type s;"c"$s;"\n" sv s]]};
+.h.wd:{[x;y] e:`$last "." vs .h.uh x; $[e in key .h.tx;@[.h.wq[e];.h.uh y;.h.we e];(::)]};
+.h.wg:{i:x?"?"; p:i#x; u:(1+i)_x; s:@[.h.wf;p;.h.he]; $[not (::)~s;s;0=count u;(::);.h.wd[p;u]]};
+.h.ph:{r:first x; i:r?"?"; $[(0=i)&0<count r;@[.h.wc;.h.uh 1_r;.h.he];.h.wg r]};
 .z.ph:.h.ph;
