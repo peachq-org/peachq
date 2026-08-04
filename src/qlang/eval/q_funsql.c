@@ -13,6 +13,7 @@
 #include "qlang/q_registry_internal.h" /* q_take_wrap, q_where_wrap, q_flip_wrap, ... */
 #include "qlang/ops/q_bang.h"
 #include "qlang/ops/q_index.h"
+#include "qlang/io/q_splay.h"          /* mapped splays: from materializes, writes 'splay */
 #include "qlang/q_env.h"
 #include "lang/internal.h"             /* ray_til_fn, ray_typed_null, ray_except_fn */
 #include "table/dict.h"                /* ray_dict_slots — keyed-table halves */
@@ -50,10 +51,59 @@ static ray_t* ques_from(ray_t* t) {
         ray_release(v);
         return r;
     }
+    if (q_splay_is(t)) { ray_retain(t); return t; }    /* lazy: columns gather on use */
     if (q_type_is_keyed(t)) return q_bang_enkey(0, t);
     if (q_type_is_dict(t)) return q_flip_wrap(t);
     if (q_type_is_table(t)) { ray_retain(t); return t; }
     return q_err(QE_TYPE);
+}
+
+/* one column of the from-value, OWNED (NULL = no such column) */
+static ray_t* from_col_owned(ray_t* t, int64_t nm) {
+    if (q_splay_is(t)) return q_splay_col(t, nm);
+    ray_t* c = ray_table_get_col(t, nm);
+    if (c) ray_retain(c);
+    return c;
+}
+
+/* rows of the from-value at idx: a mapped splay gathers per column through
+ * the authority seam (a full-length idx — always a subsequence of til n
+ * here — takes the whole column without a copy); a table rides the gather */
+static ray_t* from_rows(ray_t* t, ray_t* idx) {
+    if (!q_splay_is(t)) return gather(t, idx);
+    ray_t* keys = ray_dict_keys(t);
+    int64_t nc = ray_len(keys);
+    int full = q_count_long(idx) == q_count_long(t);
+    ray_t* tbl = ray_table_new(nc > 0 ? nc : 1);
+    if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_TYPE);
+    for (int64_t c = 0; c < nc; c++) {
+        int64_t id = ray_vec_get_sym_id(keys, c);
+        ray_t* g = q_splay_gather(t, id, full ? NULL : idx);   /* partial blocks */
+        if (!g || RAY_IS_ERR(g)) { ray_release(tbl); return g ? g : q_err(QE_TYPE); }
+        tbl = ray_table_add_col(tbl, id, g);
+        ray_release(g);
+        if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_TYPE);
+    }
+    return tbl;
+}
+
+/* flip of the from-value: a mapped splay answers its column dict, gathered
+ * whole per column (an update's merge holds every column by definition) */
+static ray_t* from_flip(ray_t* t) {
+    if (!q_splay_is(t)) return q_flip_wrap(t);
+    ray_t* keys = ray_dict_keys(t);
+    int64_t nc = ray_len(keys);
+    ray_t* vals = ray_list_new(nc > 0 ? nc : 1);
+    if (!vals || RAY_IS_ERR(vals)) return vals ? vals : q_err(QE_TYPE);
+    for (int64_t c = 0; c < nc; c++) {
+        ray_t* col = q_splay_col(t, ray_vec_get_sym_id(keys, c));
+        if (!col || RAY_IS_ERR(col)) { ray_release(vals); return col ? col : q_err(QE_TYPE); }
+        vals = ray_list_append(vals, col);
+        ray_release(col);
+        if (!vals || RAY_IS_ERR(vals)) return vals ? vals : q_err(QE_OOM);
+    }
+    ray_retain(keys);
+    return ray_dict_new(keys, vals);                   /* consumes both */
 }
 
 /* Law 4: THE evaluator runs the phrase inside one NON-barrier scope (qsql.md
@@ -61,12 +111,28 @@ static ray_t* ques_from(ray_t* t) {
 static ray_t* phrase_eval(ray_t* tree, ray_t* t, ray_t* idx) {
     if (q_env_frame_push(0) != RAY_OK) return q_err(QE_STACK);
     ray_t* err = NULL;
-    int64_t nc = ray_table_ncols(t);
-    for (int64_t c = 0; c < nc && !err; c++) {
-        ray_t* g = gather(ray_table_get_col_idx(t, c), idx);
-        if (!g || RAY_IS_ERR(g)) { err = g ? g : q_err(QE_TYPE); break; }
-        q_env_local_set(ray_table_col_name(t, c), g);        /* retains */
-        ray_release(g);
+    if (q_splay_is(t)) {
+        /* a mapped splay binds LAZY column refs — a name the phrase never
+         * uses never touches its file; funsql's idx is a subsequence of
+         * til n, so full length = identity = gather with :: (no copy) */
+        ray_t* keys = ray_dict_keys(t);
+        int64_t nc = ray_len(keys);
+        ray_t* use = q_count_long(idx) == q_count_long(t) ? RAY_NULL_OBJ : idx;
+        for (int64_t c = 0; c < nc && !err; c++) {
+            int64_t id = ray_vec_get_sym_id(keys, c);
+            ray_t* ref = q_splay_colref(t, id, use);
+            if (!ref || RAY_IS_ERR(ref)) { err = ref ? ref : q_err(QE_OOM); break; }
+            q_env_local_set(id, ref);                        /* retains */
+            ray_release(ref);
+        }
+    } else {
+        int64_t nc = ray_table_ncols(t);
+        for (int64_t c = 0; c < nc && !err; c++) {
+            ray_t* g = gather(ray_table_get_col_idx(t, c), idx);
+            if (!g || RAY_IS_ERR(g)) { err = g ? g : q_err(QE_TYPE); break; }
+            q_env_local_set(ray_table_col_name(t, c), g);    /* retains */
+            ray_release(g);
+        }
     }
     if (!err) q_env_local_set(ray_sym_intern_runtime("i", 1), idx);
     ray_t* r = err ? err : q_eval_apply_concrete(q_eval(tree));
@@ -148,7 +214,7 @@ static ray_t* sel_table(ray_t* a, ray_t* t, ray_t* idx) {
 /* Exec at b=() (law 11): () -> last row; sym/tree -> value; dict unconformed */
 static ray_t* exec_shape(ray_t* a, ray_t* t, ray_t* idx) {
     if (is_empty_gen(a)) {
-        ray_t* rows = gather(t, idx);
+        ray_t* rows = from_rows(t, idx);
         if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_TYPE);
         int64_t n = q_count_long(rows);
         ray_t* r = q_index_elem_at(rows, n > 0 ? n - 1 : 0);
@@ -344,7 +410,7 @@ static ray_t* by_select(ray_t* names, ray_t* trees, ray_t* a, ray_t* t,
     ray_t* r;
     if (is_empty_gen(a)) {                              /* last row per group */
         ray_t* li = by_last_idx(gidxs);
-        ray_t* rows = RAY_IS_ERR(li) ? li : gather(t, li);
+        ray_t* rows = RAY_IS_ERR(li) ? li : from_rows(t, li);
         if (!RAY_IS_ERR(li) && rows != li) ray_release(li);
         if (!rows || RAY_IS_ERR(rows)) r = rows ? rows : q_err(QE_TYPE);
         else {
@@ -469,14 +535,14 @@ static ray_t* ques_select(ray_t** args, int64_t n) {
     ray_t* a = args[3];
     ray_t* r;
     if (is_bool_atom(b, 0)) {
-        if (is_empty_gen(a))            r = gather(t, idx);         /* law 5/7 */
+        if (is_empty_gen(a))            r = from_rows(t, idx);         /* law 5/7 */
         else if (q_type_is_dict(a))     r = sel_table(a, t, idx);
         else                            r = q_err(QE_NYI);          /* matrix "-" */
     } else if (is_empty_gen(b)) {
         r = exec_shape(a, t, idx);
     } else if (is_bool_atom(b, 1)) {    /* b=1b: distinct of the rank-4 result */
         ray_t* sub;
-        if (is_empty_gen(a))            sub = gather(t, idx);
+        if (is_empty_gen(a))            sub = from_rows(t, idx);
         else if (q_type_is_dict(a))     sub = sel_table(a, t, idx);
         else                            sub = q_err(QE_NYI);
         if (!sub || RAY_IS_ERR(sub)) r = sub ? sub : q_err(QE_TYPE);
@@ -689,8 +755,10 @@ static ray_t* upd_amend(ray_t* cur, ray_t* rows, ray_t* v) {
  * have the type of the column being amended"; a result naming no element type
  * (a nested column) claims nothing either way. */
 static ray_t* upd_col_start(ray_t* t, int64_t nm, ray_t* v, int full) {
-    ray_t* cur = ray_table_get_col(t, nm);              /* borrowed or NULL */
-    if (cur && !(full && q_type_elem_tag(v))) { ray_retain(cur); return cur; }
+    ray_t* cur = from_col_owned(t, nm);                 /* owned or NULL */
+    if (RAY_IS_ERR(cur)) return cur;
+    if (cur && !(full && q_type_elem_tag(v))) return cur;
+    if (cur) ray_release(cur);
     return null_col_like(v, q_count_long(t));
 }
 
@@ -728,9 +796,9 @@ static ray_t* upd_cols(ray_t* a, ray_t* t, ray_t* idx, ray_t* gidxs) {
                 ray_release(v);
             }
             if (!err && !cur) {                          /* zero groups */
-                ray_t* c0 = ray_table_get_col(t, nm->i64);
-                if (c0) { ray_retain(c0); cur = c0; }
-                else err = q_err(QE_TYPE);
+                ray_t* c0 = from_col_owned(t, nm->i64);
+                if (c0 && !RAY_IS_ERR(c0)) cur = c0;
+                else err = c0 ? c0 : q_err(QE_TYPE);
             }
         }
         if (nm && !RAY_IS_ERR(nm)) ray_release(nm);
@@ -763,7 +831,7 @@ static ray_t* update_table(ray_t* a, ray_t* b, ray_t* t, ray_t* idx) {
     ray_t* nd = upd_cols(a, t, idx, gidxs);
     if (kt) { ray_release(gidxs); ray_release(kt); }
     if (!nd || RAY_IS_ERR(nd)) return nd ? nd : q_err(QE_TYPE);
-    ray_t* cd = q_flip_wrap(t);
+    ray_t* cd = from_flip(t);
     ray_t* merged = (cd && !RAY_IS_ERR(cd)) ? q_join_wrap(cd, nd) : cd;
     if (cd && !RAY_IS_ERR(cd) && merged != cd) ray_release(cd);
     ray_release(nd);
@@ -852,9 +920,17 @@ static ray_t* bang_qsql(ray_t** args) {
     } else {
         return q_err(QE_TYPE);
     }
+    /* A mapped splay refuses schema changes and every write-back — BOTH delete
+     * forms and the name form (kb/splayed-tables.md:350-354: `delete volume
+     * from `trade` and `trade: delete volume from trade` are each 'splay).  A
+     * value-form UPDATE is a plain query: the carrier flows into the table
+     * lane below, its columns gathering on use. */
+    if (q_splay_is(src)) {
+        if (name >= 0 || !q_type_is_dict(a)) { ray_release(src); return q_err(QE_SPLAY); }
+    }
     ray_t* r;
     int64_t nk = 0;                 /* keyed source: re-key the result */
-    if (q_type_is_dict(src) && !q_type_is_keyed(src)) {
+    if (q_type_is_dict(src) && !q_type_is_keyed(src) && !q_splay_is(src)) {
         if (q_type_is_dict(a))      r = update_dict(a, b, c, src);
         else if (is_symvec(a) && is_empty_gen(c)) r = dict_drop_keys(a, src);
         else                        r = q_err(QE_NYI);
@@ -864,7 +940,7 @@ static ray_t* bang_qsql(ray_t** args) {
             nk = ray_table_ncols(ray_dict_keys(src));
             t = q_bang_enkey(0, src);               /* law 24: unkey */
             if (!t || RAY_IS_ERR(t)) { ray_release(src); return t ? t : q_err(QE_TYPE); }
-        } else if (q_type_is_table(src)) {
+        } else if (q_type_is_table(src) || q_splay_is(src)) {
             ray_retain(t);
         } else {
             ray_release(src);

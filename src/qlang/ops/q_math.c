@@ -7,6 +7,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
+#include "qlang/io/q_splay.h"  /* match honors the 98h facade */
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home */
 #include "lang/eval.h"     /* ray_eq_fn/ray_neq_fn, ray_neg_fn */
 #include "lang/internal.h" /* atomic_map_unary, as_f64, is_numeric, is_temporal, make_f64 */
@@ -397,6 +398,18 @@ static int match_carrier(ray_t* a, ray_t* b) {
 int q_match_rec(ray_t* a, ray_t* b) {
     if (a == b) return 1;
     if (!a || !b) return 0;
+    /* a mapped splay IS a table (`type` answers 98h): match agrees with the
+     * facade — identical markers match outright, else the carrier side(s)
+     * materialize through the gather and the TABLES compare */
+    int sa = q_splay_is(a), sb = q_splay_is(b);
+    if (sa || sb) {
+        ray_t* ma = sa ? q_splay_table(a) : a;
+        ray_t* mb = sb ? q_splay_table(b) : b;
+        int r = ma && mb && !RAY_IS_ERR(ma) && !RAY_IS_ERR(mb) && q_match_rec(ma, mb);
+        if (sa && ma) { if (RAY_IS_ERR(ma)) ray_error_free(ma); else ray_release(ma); }
+        if (sb && mb) { if (RAY_IS_ERR(mb)) ray_error_free(mb); else ray_release(mb); }
+        return r;
+    }
     if (a->type != b->type) return 0;
     if (a->type == -RAY_SYM) return a->i64 == b->i64;
     if (a->type == -RAY_STR)

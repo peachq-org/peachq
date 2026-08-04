@@ -22,6 +22,13 @@ uint8_t* q_gz_deflate(const uint8_t* src, size_t src_len, int level,
 uint8_t* q_gz_inflate(const uint8_t* src, size_t src_len,
                       size_t* out_len, const char** err);
 
+/* Deflate src into ONE RFC 1950 zlib stream (kdb's kxzip block form — proven
+ * stock-zlib-shaped by the btick2 dissection; miniz's bitstream is valid zlib
+ * but not bit-identical to zlib's own beyond tiny inputs).  malloc'd buffer or
+ * NULL with *err as above.  level 0..9. */
+uint8_t* q_gz_deflate_zlib(const uint8_t* src, size_t src_len, int level,
+                           size_t* out_len, const char** err);
+
 /* Inflate ONE RFC 1950 zlib stream from src into out[0..out_cap), verifying
  * its adler32.  A zlib stream is self-terminating, so *consumed
  * reports the input bytes it used and anything after it is left untouched —
