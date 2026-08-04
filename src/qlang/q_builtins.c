@@ -14,6 +14,7 @@
 #include "qlang/ops/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
 #include "qlang/q_console.h"  /* q_console_show — show's display sink */
 #include "qlang/base/q_type.h"     /* q_type_of — the `type` verb's type-number home */
+#include "qlang/io/q_splay.h"      /* the lazy splayed-table authority: 98h, count */
 #include "lang/env.h"       /* ray_fn_unary; ray_env_get = bootstrap catalogue reads */
 #include "lang/eval.h"      /* RAY_FN_NONE */
 #include "table/sym.h"      /* ray_sym_vec_cell */
@@ -134,6 +135,7 @@ static int8_t type_of(ray_t* x) {
     if (x->type == RAY_LAMBDA) return 100;
     if (x->type == RAY_UNARY || x->type == RAY_BINARY || x->type == RAY_VARY)
         return 102;
+    if (x->type == RAY_DICT && q_splay_is(x)) return 98;   /* mapped splay IS a table */
     return x->type;
 }
 
@@ -194,8 +196,12 @@ char q_ty_char(ray_t* x) {
 ray_t* q_count_fn(ray_t* x) {
     if (x && q_eval_apply_is_fn(x)) return ray_i64(1);
     /* a mapping's count is its DOMAIN's count — one rule for a plain dict and a
-     * keyed table, whose domain is a table (borrowed ref: do not release). */
-    if (x && x->type == RAY_DICT) return q_count_fn(ray_dict_keys(x));
+     * keyed table, whose domain is a table (borrowed ref: do not release).  A
+     * mapped splay counts its ROWS: the first .d column's header count. */
+    if (x && x->type == RAY_DICT) {
+        if (q_splay_is(x)) return q_splay_count(x);
+        return q_count_fn(ray_dict_keys(x));
+    }
     return g_base_count ? g_base_count(x)
                         : q_err(QE_TYPE);
 }
@@ -210,7 +216,8 @@ int64_t q_builtins_count_long(ray_t* x) {
      * 15.4s when the adverb arms started routing through the boxed path).
      * Same answers as q_count_fn below, which still owns every other shape. */
     if (x && !RAY_IS_ERR(x) && !q_eval_apply_is_fn(x)) {
-        if (x->type == RAY_DICT)  return q_builtins_count_long(ray_dict_keys(x));
+        if (x->type == RAY_DICT && !q_splay_is(x))    /* a carrier rides the boxed tail */
+            return q_builtins_count_long(ray_dict_keys(x));
         if (x->type == RAY_TABLE) return ray_table_nrows(x);
         if (x->type == RAY_LIST || (ray_is_vec(x) && x->type != RAY_STR))
             return ray_len(x);
@@ -242,6 +249,12 @@ static void bind_unary(const char* name, ray_unary_fn fn) {
 
 static void bind_vary(const char* name, ray_vary_fn fn) {
     ray_t* obj = ray_fn_vary(name, RAY_FN_NONE, fn);
+    q_env_bind(ray_sym_intern(name, strlen(name)), obj);
+    ray_release(obj);
+}
+
+static void bind_binary(const char* name, ray_binary_fn fn) {
+    ray_t* obj = ray_fn_binary(name, RAY_FN_NONE, fn);
     q_env_bind(ray_sym_intern(name, strlen(name)), obj);
     ray_release(obj);
 }
@@ -368,6 +381,9 @@ void q_builtins_register(void) {
     for (size_t i = 0; i < sizeof dotq_c_unary / sizeof *dotq_c_unary; i++)
         bind_unary(dotq_c_unary[i].name, dotq_c_unary[i].fn);
     bind_vary (".Q.c.ops", q_dotq_ops_fn);   /* niladic .Q.ops[] + unary .Q.ops x */
+    bind_vary (".Q.c.w",   q_dotq_w_fn);     /* memory stats dict (ref/dotq.md) */
+    bind_binary(".Q.c.en", q_dotq_en_fn);    /* enumerate-varchar-cols shim (ref/dotq.md) */
+    bind_vary (".Q.c.zblocks", q_dotq_zblocks_fn); /* inflated-blocks witness (internal) */
     bind_vary (".Q.c.hp", q_dotq_hp_fn);     /* HTTP POST [url;mime;body] (ref/dotq.md) */
     bind_vary (".Q.c.gz", q_dotq_gz_fn);     /* GZip ::/inflate/deflate (ref/dotq.md) */
     bind_value(".Q.c.res", q_registry_name_reserved_words());

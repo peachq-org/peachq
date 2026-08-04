@@ -10,6 +10,7 @@
 #include "qlang/eval/q_eval.h" /* carrier read-out accessors — RAY_QFN display;
                                 * q_eval_apply_concrete — the display boundary force */
 #include "qlang/eval/q_view.h" /* q_view_text — a view displays as its text */
+#include "qlang/io/q_splay.h"  /* a mapped splay displays as its table */
 #include "lang/format.h"   /* ray_fmt */
 #include "lang/eval.h"     /* ray_at_fn — dict/table element access */
 #include "ops/hash.h"    /* ray_hash_bytes — pipe digest distinct keys */
@@ -1559,6 +1560,23 @@ static void q_fmt_body(ray_t* val) {
     if (val->type == RAY_TABLE) {
         q_fmt_table(val);
         return;
+    }
+
+    if (val->type == RAY_DICT && q_splay_is(val)) {  /* mapped splay: show the table */
+        /* a ROW-BUDGET prefix gather (`\c`): one row past the clip keeps the
+         * continuation marker honest while untouched rows stay on disk */
+        int64_t k = -1, cr = qe_clip_rows();
+        ray_t* cnt = cr > 0 ? q_splay_count(val) : NULL;
+        if (cnt && !RAY_IS_ERR(cnt) && cr + 1 < cnt->i64) k = cr + 1;
+        if (cnt && !RAY_IS_ERR(cnt)) ray_release(cnt);
+        else if (cnt) ray_error_free(cnt);
+        ray_t* mt = q_splay_prefix(val, k);
+        if (mt && !RAY_IS_ERR(mt)) {
+            q_fmt_table(mt);
+            ray_release(mt);
+            return;
+        }
+        if (mt) ray_error_free(mt);                  /* unreadable: the raw dict shows */
     }
 
     if (val->type == RAY_DICT) {            /* keyed table = table!table */

@@ -1141,6 +1141,9 @@ ray_t* ray_alloc(size_t data_size) {
  * ray_free
  * -------------------------------------------------------------------------- */
 
+static void (*g_mapped_free)(ray_t*) = NULL;
+void ray_free_set_mapped_fn(void (*fn)(ray_t* v)) { g_mapped_free = fn; }
+
 void ray_free(ray_t* v) {
     if (!v || RAY_IS_ERR(v)) return;
     if (v->attrs & RAY_ATTR_ARENA) return;  /* arena-owned, bulk-freed */
@@ -1187,6 +1190,13 @@ void ray_free(ray_t* v) {
         } else {
             ray_vm_unmap_file(v, 4096);
         }
+        if (h) RAY_STAT(h->stats.free_count++);
+        return;
+    }
+
+    /* Externally-mapped (mmod==3): the installing layer's munmap choke point */
+    if (v->mmod == 3) {
+        if (g_mapped_free) g_mapped_free(v);
         if (h) RAY_STAT(h->stats.free_count++);
         return;
     }

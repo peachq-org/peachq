@@ -129,3 +129,22 @@ int q_gz_inflate_zlib(const uint8_t* src, size_t src_len,
     *err = NULL;
     return 0;
 }
+
+uint8_t* q_gz_deflate_zlib(const uint8_t* src, size_t src_len, int level,
+                           size_t* out_len, const char** err) {
+    if (level < 0 || level > 9) { *err = "domain"; return NULL; }
+    mz_ulong cap = mz_compressBound((mz_ulong)src_len);
+    uint8_t* p = (uint8_t*)malloc(cap ? cap : 1);
+    if (!p) { *err = "wsfull"; return NULL; }
+    mz_ulong n = cap;
+    /* mz_compress2, not tdefl-to-heap: its stream is the one that matched the
+     * btick2 exemplars byte-for-byte on the anchor case (dissection §5). */
+    if (mz_compress2(p, &n, src, (mz_ulong)src_len, level) != MZ_OK) {
+        free(p);
+        *err = "wsfull";
+        return NULL;
+    }
+    *out_len = (size_t)n;
+    *err = NULL;
+    return p;
+}

@@ -43,4 +43,34 @@ ray_t* q_io_write_all(ray_t* pathstr, const void* bytes, size_t n);
 ray_t* q_io_unzip(const uint8_t* buf, size_t len);
 ray_t* q_io_zip_stats(ray_t* x);
 
+/* ---- container block access + write (PR #393 stage-1 dissection note) ---- */
+
+typedef struct {
+    int64_t  uncompressed;
+    int64_t  block_size;
+    int64_t  num_blocks;
+    int64_t  payload;      /* compressed bytes, magic excluded */
+    int32_t  algorithm;
+    int32_t  level;
+    int64_t* ends;         /* cumulative compressed END of each block; malloc'd */
+} q_io_zipmap_t;
+
+/* Parse a container's tail header + block boundaries into *zm (free the
+ * ends with q_io_zipmap_free).  NULL on success; 'type when the file is no
+ * container; 'corrupt/'nyi otherwise.  nb==1: the data area is the block;
+ * nb>1: the per-block length prefixes are skip-chained, bounds-checked. */
+ray_t* q_io_zip_open(ray_t* pathstr, q_io_zipmap_t* zm);
+void   q_io_zipmap_free(q_io_zipmap_t* zm);
+
+/* Inflate block k into dst.  The stream must terminate exactly at its recorded
+ * end and yield exactly the block's plain size — anything else is 'corrupt. */
+ray_t* q_io_zip_block(ray_t* pathstr, const q_io_zipmap_t* zm, int64_t k,
+                      uint8_t* dst, size_t cap);
+
+/* Write `img` as a container: 2^lbs blocks, each an independent zlib stream
+ * (gzip alg 2 only — others 'nyi; a deflate that does not pay writes the
+ * alg-0 wrapper).  NULL on success or an owned error. */
+ray_t* q_io_zip_write(ray_t* pathstr, const uint8_t* img, size_t n,
+                      int lbs, int alg, int lvl);
+
 #endif /* Q_IO_H */
