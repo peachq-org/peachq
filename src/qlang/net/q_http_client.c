@@ -13,6 +13,7 @@
 #include "lang/eval.h"            /* ray_eval_get_restricted — outbound gate */
 #include "table/sym.h"           /* ray_sym_str — hsym text */
 #include "picohttpparser.h"
+#include <limits.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -261,10 +262,18 @@ ray_sock_t q_http_client_connect(const char* host, uint16_t port,
 int q_http_client_send_all(ray_sock_t fd, const void* buf, size_t len,
                            int64_t deadline_ms)
 {
-    /* A TLS record cannot be split by a raw send(): the overlay owns framing,
-     * and its deadline is the socket's SO_SNDTIMEO (set by ray_sock_connect). */
-    if (ray_sock_io_active(fd))
-        return ray_sock_send(fd, buf, len) == (int64_t)len ? 0 : -1;
+    /* A TLS record cannot be split by a raw send(): the overlay owns framing, so
+     * the whole write goes through it — under THIS call's deadline, which the
+     * overlay reads back from ray_sock_set_timeout.  SO_SNDTIMEO alone does not
+     * reach the overlay's own poll waits. */
+    if (ray_sock_io_active(fd)) {
+        int64_t left = deadline_ms - now_ms();
+        if (left <= 0) return -1;
+        ray_sock_set_timeout(fd, left > INT_MAX ? INT_MAX : (int)left);
+        int64_t n = ray_sock_send(fd, buf, len);
+        ray_sock_set_timeout(fd, 0);
+        return n == (int64_t)len ? 0 : -1;
+    }
 
     const uint8_t* p = (const uint8_t*)buf; size_t rem = len;
     while (rem > 0) {

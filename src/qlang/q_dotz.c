@@ -228,6 +228,14 @@ static ray_t* z_w(void) {
     return ray_i32(fd < 0 ? 0 : (int32_t)fd);
 }
 
+/* `.z.e` — TLS status of the CURRENT connection handle (the same `.z.w` one),
+ * so a `.z.po` hook sees the client that just connected.  Outside any hook
+ * there is no connection, hence the empty dict (ref/dotz.md:216). */
+static ray_t* z_e(void) {
+    int64_t fd = ray_ipc_current_fd();
+    return q_tls_conn_info(fd < 0 ? RAY_INVALID_SOCK : (ray_sock_t)fd);
+}
+
 /* peachq version surface — reads the SAME compile-time macros the Makefile
  * injects for .sys.build (RAY_VERSION_MAJOR/MINOR, RAYFORCE_BUILD_DATE). */
 static ray_t* z_K(void) {   /* `.z.K` — version as a major.minor float (kdb .z.K) */
@@ -397,7 +405,7 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
             case 'k': out = z_k(); break;
             /* one-line producers inlined; q_dotz_now_ns(0)=UTC, (1)=local */
             case 'b': out = q_view_zb(); break;                                  /* .z.b view deps */
-            case 'e': out = q_tls_dotz_e(); break;                               /* .z.e TLS status */
+            case 'e': out = z_e(); break;                                        /* .z.e TLS status */
             case 'q': out = ray_bool(g_quiet); break;                            /* .z.q quiet */
             case 'i': out = ray_i64((int64_t)getpid()); break;                   /* .z.i pid   */
             case 'p': out = ray_timestamp(q_dotz_now_ns(0)); break;                   /* .z.p / .z.P */
