@@ -98,6 +98,7 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
         q_splay_init();        /* the lazy splayed-table registry (maps + column caches) */
         q_ctx_install_remote_hooks();  /* paired with the teardown in q_runtime_destroy */
         q_builtins_register();
+        q_eval_apply_init();   /* head-identity cache — needs the built registry */
         /* `.z.*` is an eval-time resolver, NOT a namespace: compute the
          * process-constant argv values once; q_eval resolves them directly
          * (no base name hook — one pipeline, cutover 2026-07-23). */
