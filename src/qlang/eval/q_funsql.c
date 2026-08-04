@@ -66,44 +66,35 @@ static ray_t* from_col_owned(ray_t* t, int64_t nm) {
     return c;
 }
 
-/* rows of the from-value at idx: a mapped splay gathers per column through
- * the authority seam (a full-length idx — always a subsequence of til n
- * here — takes the whole column without a copy); a table rides the gather */
-static ray_t* from_rows(ray_t* t, ray_t* idx) {
-    if (!q_splay_is(t)) return gather(t, idx);
-    ray_t* keys = ray_dict_keys(t);
-    int64_t nc = ray_len(keys);
-    int full = q_count_long(idx) == q_count_long(t);
-    ray_t* tbl = ray_table_new(nc > 0 ? nc : 1);
-    if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_TYPE);
-    for (int64_t c = 0; c < nc; c++) {
-        int64_t id = ray_vec_get_sym_id(keys, c);
-        ray_t* g = q_splay_gather(t, id, full ? NULL : idx);   /* partial blocks */
-        if (!g || RAY_IS_ERR(g)) { ray_release(tbl); return g ? g : q_err(QE_TYPE); }
-        tbl = ray_table_add_col(tbl, id, g);
-        ray_release(g);
-        if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_TYPE);
-    }
-    return tbl;
+/* funsql's idx starts as til n and only ever REFINES, so an identity idx is
+ * common — but `?[t;i;p]` hands USER i straight in, so identity is verified,
+ * never inferred from the length alone */
+static int idx_is_identity(ray_t* idx, int64_t n) {
+    if (!idx || idx->type != RAY_I64 || ray_len(idx) != n) return 0;
+    const int64_t* p = (const int64_t*)ray_data(idx);
+    for (int64_t j = 0; j < n; j++)
+        if (p[j] != j) return 0;
+    return 1;
 }
 
-/* flip of the from-value: a mapped splay answers its column dict, gathered
- * whole per column (an update's merge holds every column by definition) */
+/* rows of the from-value at idx: a mapped splay rides the authority's row
+ * gather; an identity idx takes the value itself without a copy */
+static ray_t* from_rows(ray_t* t, ray_t* idx) {
+    ray_t* use = idx_is_identity(idx, q_count_long(t)) ? NULL : idx;
+    if (q_splay_is(t)) return q_splay_rows(t, use);
+    if (!use) { ray_retain(t); return t; }
+    return gather(t, use);
+}
+
+/* flip of the from-value: a mapped splay answers `flip` of its full row
+ * gather (an update's merge holds every column by definition) */
 static ray_t* from_flip(ray_t* t) {
     if (!q_splay_is(t)) return q_flip_wrap(t);
-    ray_t* keys = ray_dict_keys(t);
-    int64_t nc = ray_len(keys);
-    ray_t* vals = ray_list_new(nc > 0 ? nc : 1);
-    if (!vals || RAY_IS_ERR(vals)) return vals ? vals : q_err(QE_TYPE);
-    for (int64_t c = 0; c < nc; c++) {
-        ray_t* col = q_splay_col(t, ray_vec_get_sym_id(keys, c));
-        if (!col || RAY_IS_ERR(col)) { ray_release(vals); return col ? col : q_err(QE_TYPE); }
-        vals = ray_list_append(vals, col);
-        ray_release(col);
-        if (!vals || RAY_IS_ERR(vals)) return vals ? vals : q_err(QE_OOM);
-    }
-    ray_retain(keys);
-    return ray_dict_new(keys, vals);                   /* consumes both */
+    ray_t* tbl = q_splay_rows(t, NULL);
+    if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_TYPE);
+    ray_t* d = q_flip_wrap(tbl);
+    ray_release(tbl);
+    return d;
 }
 
 /* Law 4: THE evaluator runs the phrase inside one NON-barrier scope (qsql.md
@@ -111,13 +102,13 @@ static ray_t* from_flip(ray_t* t) {
 static ray_t* phrase_eval(ray_t* tree, ray_t* t, ray_t* idx) {
     if (q_env_frame_push(0) != RAY_OK) return q_err(QE_STACK);
     ray_t* err = NULL;
+    int ident = idx_is_identity(idx, q_count_long(t));
     if (q_splay_is(t)) {
         /* a mapped splay binds LAZY column refs — a name the phrase never
-         * uses never touches its file; funsql's idx is a subsequence of
-         * til n, so full length = identity = gather with :: (no copy) */
+         * uses never touches its file; identity idx = gather with :: (no copy) */
         ray_t* keys = ray_dict_keys(t);
         int64_t nc = ray_len(keys);
-        ray_t* use = q_count_long(idx) == q_count_long(t) ? RAY_NULL_OBJ : idx;
+        ray_t* use = ident ? RAY_NULL_OBJ : idx;
         for (int64_t c = 0; c < nc && !err; c++) {
             int64_t id = ray_vec_get_sym_id(keys, c);
             ray_t* ref = q_splay_colref(t, id, use);
@@ -126,9 +117,13 @@ static ray_t* phrase_eval(ray_t* tree, ray_t* t, ray_t* idx) {
             ray_release(ref);
         }
     } else {
+        /* the same narrowing law in-memory: an identity idx binds the column
+         * ITSELF — the per-element gather here was the projection cliff that
+         * priced `select c1 from m` by the table's WIDTH (PLAN.md 2026-08-04) */
         int64_t nc = ray_table_ncols(t);
         for (int64_t c = 0; c < nc && !err; c++) {
-            ray_t* g = gather(ray_table_get_col_idx(t, c), idx);
+            ray_t* col = ray_table_get_col_idx(t, c);
+            ray_t* g = ident ? (ray_retain(col), col) : gather(col, idx);
             if (!g || RAY_IS_ERR(g)) { err = g ? g : q_err(QE_TYPE); break; }
             q_env_local_set(ray_table_col_name(t, c), g);    /* retains */
             ray_release(g);

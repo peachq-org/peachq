@@ -13,8 +13,7 @@
 #include "qlang/q_builtins.h"      /* q_type_is_fn — the \f split (needs the apply module) */
 #include "qlang/q_dotz.h"         /* the .z.* handler-slot arms of `set` */
 #include "qlang/eval/q_view.h"    /* view hooks: set/unbind invalidation, dot-'nyi */
-#include "qlang/net/q_wirefile.h" /* q_wirefile_write — the `:file set y form */
-#include "qlang/io/q_splay.h"     /* setg_file_y — a carrier set to a FILE writes its table */
+#include "qlang/io/q_io.h"        /* q_io_set — `set`'s file half */
 #include "lang/internal.h"        /* ray_error */
 #include "table/sym.h"         /* ray_sym_intern_runtime, ray_sym_str, ray_read_sym */
 #include "table/dict.h"        /* ray_dict_* probes/upsert */
@@ -635,84 +634,24 @@ void q_env_destroy(void) {
 }
 
 /* q `nam set y` (ref/get.md) — assign a global through a symbol handle.  It is
- * `:`-identical by construction: the file handle (`:f set y -> a kdb+ file,
- * `:dir/ -> a splayed table) is the ONE thing a source-level assignment cannot
- * spell, and every other name goes to the shared write home.  List left args:
- * (file;lbs;alg;lvl) compresses (ref/file-compression.md); (dir;sympath)
- * names the enum domain — the openq API extension the splay writer records.
+ * `:`-identical by construction: the file handle is the ONE thing a
+ * source-level assignment cannot spell.  This wrapper keeps ONLY the
+ * name-vs-path classification (env knowledge); every path-shaped target —
+ * `:f, the (file;lbs;alg;lvl) compression form, the (dir;sympath) domain
+ * overload — goes to q_io_set, which owns the on-disk-format classification.
  * Returns the handle (kdb returns nam). */
-static int setg_hsym(ray_t* v) {
-    if (!v || v->type != -RAY_SYM) return 0;
-    ray_t* s = ray_sym_str(v->i64);
-    int is = s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == ':';
-    if (s) ray_release(s);
-    return is;
-}
-
-/* A mapped splay SET to a file writes as the table it is (the 98h facade) —
- * materialization sits at THIS boundary, never inside the format writer.
- * Owned result; a name-target set still binds the carrier itself. */
-static ray_t* setg_file_y(ray_t* y) {
-    if (q_splay_is(y)) return q_splay_table(y);
-    ray_retain(y);
-    return y;
-}
-
 ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
-    if (x && x->type == RAY_LIST) {
-        int64_t n = ray_len(x);
-        ray_t** e = (ray_t**)ray_data(x);
-        if (n == 4 && setg_hsym(e[0])) {
-            int64_t lbs, alg, lvl;
-            if (!q_type_strict_i64(e[1], &lbs) || !q_type_strict_i64(e[2], &alg) ||
-                !q_type_strict_i64(e[3], &lvl))
-                return q_err(QE_TYPE);
-            ray_t* fy = setg_file_y(y);
-            if (!fy || RAY_IS_ERR(fy)) return fy ? fy : q_err(QE_TYPE);
-            /* an explicit alg (0 included) OVERRIDES `.z.zd` — 0 writes plain */
-            ray_t* r = q_wirefile_write_zip(e[0], fy, (int)lbs, (int)alg, (int)lvl);
-            ray_release(fy);
-            return r;
+    if (x && x->type == -RAY_SYM && !q_io_is_fsym(x)) {
+        ray_t* s = ray_sym_str(x->i64);
+        if (!s || ray_str_len(s) == 0) {   /* the empty sym is neither name nor path */
+            if (s) ray_release(s);
+            return q_err(QE_TYPE);
         }
-        if (n == 2 && setg_hsym(e[0]) && setg_hsym(e[1])) {
-            ray_t* fy = setg_file_y(y);
-            if (!fy || RAY_IS_ERR(fy)) return fy ? fy : q_err(QE_TYPE);
-            ray_t* r = q_wirefile_write_splay(e[0], e[1], fy, -1, -1, -1);
-            ray_release(fy);
-            return r;
-        }
-        return q_err(QE_NYI);
-    }
-    if (x && x->type == RAY_SYM && ray_len(x) == 2) {   /* (dir;sympath) collapses */
-        ray_t* d = ray_sym(ray_vec_get_sym_id(x, 0));
-        ray_t* s = ray_sym(ray_vec_get_sym_id(x, 1));
-        ray_t* fy = setg_file_y(y);
-        ray_t* r = !fy || RAY_IS_ERR(fy) ? (fy ? fy : q_err(QE_TYPE))
-                 : (setg_hsym(d) && setg_hsym(s))
-                       ? q_wirefile_write_splay(d, s, fy, -1, -1, -1)
-                       : q_err(QE_NYI);
-        if (fy && !RAY_IS_ERR(fy)) ray_release(fy);
         ray_release(s);
-        ray_release(d);              /* write_splay retained d when handing it back */
-        return r;
+        ray_err_t err = q_env_set(x->i64, y);
+        if (err != RAY_OK) return q_env_err(err);
+        ray_retain(x);
+        return x;
     }
-    if (!x || x->type != -RAY_SYM)
-        return q_err(QE_NYI);
-    ray_t* s = ray_sym_str(x->i64);
-    if (!s) return q_err(QE_TYPE);
-    size_t l = ray_str_len(s);
-    int isfile = l > 0 && ray_str_ptr(s)[0] == ':';
-    ray_release(s);
-    if (l == 0) return q_err(QE_TYPE);
-    if (isfile) {
-        ray_t* fy = setg_file_y(y);
-        if (!fy || RAY_IS_ERR(fy)) return fy ? fy : q_err(QE_TYPE);
-        ray_t* r = q_wirefile_write(x, fy);
-        ray_release(fy);
-        return r ? r : q_err(QE_TYPE);
-    }
-    ray_err_t err = q_env_set(x->i64, y);
-    if (err != RAY_OK) return q_env_err(err);
-    ray_retain(x);
-    return x;
+    return q_io_set(x, y);
 }

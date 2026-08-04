@@ -31,6 +31,16 @@ ray_t* q_io_file_triple(ray_t* fsym, ray_t* offv, ray_t* wantv, int clamp,
  * when asked, says whether one was. */
 ray_t* q_io_read_slice(ray_t* pathstr, int64_t off, int64_t want, int* zipped);
 
+/* Is x the file-symbol shape (a nonempty `:…` sym atom)?  The ONE home for
+ * the name-vs-path spelling — `set`'s env half asks it too. */
+int q_io_is_fsym(ray_t* x);
+
+/* `set`'s file half — every path-shaped target (q_env.c's q_setg_wrap keeps
+ * only name-vs-path).  Owns the on-disk-format classification: flat file,
+ * the 4-item compression form, the (dir;sympath) domain overload; a
+ * trailing-slash dir routes inside the writer.  Owned result. */
+ray_t* q_io_set(ray_t* x, ray_t* y);
+
 /* Create `path`'s missing parent directories — both file-creating doors promise
  * them (ref/file-text.md Save Text, ref/hopen.md).  q_io_write_all writes n
  * bytes over that law: NULL on success, else an owned 'access/'io. */
