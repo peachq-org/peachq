@@ -128,6 +128,13 @@ ray_t*    ray_scratch_realloc(ray_t* v, size_t new_data_size);
 
 ray_t*    ray_cow(ray_t* v);
 
+/* ===== Externally-mapped blocks (mmod==3) =====
+ * A block a higher layer mapped outside the heap (the q splay reader's
+ * mmap-backed columns).  ray_free routes its death to the installed hook —
+ * the layer's ONE munmap choke point — instead of the buddy allocator.
+ * ray_alloc_copy of such a block is an ordinary heap copy (mmod 0). */
+void ray_free_set_mapped_fn(void (*fn)(ray_t* v));
+
 /* ===== Memory Statistics ===== */
 
 typedef struct {
