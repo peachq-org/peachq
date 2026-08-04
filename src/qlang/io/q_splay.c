@@ -18,10 +18,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#ifndef RAY_OS_WINDOWS
-#include <sys/mman.h>
-#include <unistd.h>
-#include <fcntl.h>
+#ifdef RAY_OS_WINDOWS
+  #define WIN32_LEAN_AND_MEAN
+  #include <windows.h>
+#else
+  #include <sys/mman.h>
+  #include <unistd.h>
+  #include <fcntl.h>
 #endif
 
 typedef struct {
@@ -43,9 +46,13 @@ typedef struct {
 static splay_ent* g_ents = NULL;
 static int64_t    g_n = 0, g_cap = 0;
 
-/* THE munmap choke point's ledger: one row per live mapped column (the anon
- * guard page and the file pages are ONE reservation, ONE munmap). */
-typedef struct { ray_t* hdr; void* base; size_t total; } splay_region;
+/* ONE reservation: a guard block whose 16-byte TAIL carries the ray_t header's
+ * front, payload at base+guard — so kdb's byte-16 payload lands on header+32.
+ * `view` is the separately-unmapped Windows file view (POSIX leaves it NULL). */
+typedef struct { uint8_t* base; void* view; size_t guard, total; } splay_vm;
+
+/* THE unmap choke point's ledger: one row per live mapped column. */
+typedef struct { ray_t* hdr; splay_vm vm; } splay_region;
 static splay_region* g_regs = NULL;
 static int64_t g_regn = 0, g_regcap = 0;
 static int64_t g_mapped_bytes = 0;
@@ -54,18 +61,131 @@ static int64_t g_zblocks = 0;   /* cumulative blocks inflated — the laziness w
 
 static ray_t* g_colref_mark = NULL;   /* address-identity marker, per runtime */
 
-/* mmod==3 death (installed on ray_free): rc hit zero — munmap the region. */
+/* ---- the VM seam: the ONLY platform mechanics under the shared contract ----
+ * _mapfile lays `need` bytes of `path` copy-on-write after the guard (the file
+ * lane); _reserve/_commit take the whole plain size and materialize only a
+ * gather's blocks (the region lane); _release serves both, through the choke
+ * point below.  Each returns NULL or an owned error. */
+#ifdef RAY_OS_WINDOWS
+
+static size_t splay_gran(void) {
+    SYSTEM_INFO si; GetSystemInfo(&si); return (size_t)si.dwAllocationGranularity;
+}
+static size_t splay_page(void) {
+    SYSTEM_INFO si; GetSystemInfo(&si); return (size_t)si.dwPageSize;
+}
+
+static ray_t* splay_vm_mapfile(const char* path, size_t need, splay_vm* r) {
+    HANDLE fh = CreateFileA(path, GENERIC_READ,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (fh == INVALID_HANDLE_VALUE) return q_err(QE_IO);
+    LARGE_INTEGER sz;
+    if (!GetFileSizeEx(fh, &sz) || sz.QuadPart < 0 || (uint64_t)sz.QuadPart < need) {
+        CloseHandle(fh);
+        return q_err(QE_CORRUPT);
+    }
+    HANDLE mh = CreateFileMappingA(fh, NULL, PAGE_WRITECOPY, 0, 0, NULL);
+    CloseHandle(fh);
+    if (!mh) return q_err(QE_IO);
+    /* A view's address must be allocation-granular, so the guard is a whole
+     * granule and the placement is reserve-probe / release / re-take: nothing
+     * can steal the run in a single-threaded runtime, and a lost race only
+     * costs a retry. */
+    size_t g = splay_gran();
+    r->guard = g;
+    r->total = g + ((need + g - 1) / g) * g;
+    r->base = NULL; r->view = NULL;
+    for (int i = 0; i < 8 && !r->view; i++) {
+        uint8_t* p = (uint8_t*)VirtualAlloc(NULL, r->total, MEM_RESERVE, PAGE_NOACCESS);
+        if (!p) break;
+        /* a release that FAILS leaves a run this loop can no longer name —
+         * retrying past it only strands more address space */
+        if (!VirtualFree(p, 0, MEM_RELEASE)) break;
+        if (!VirtualAlloc(p, g, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)) continue;
+        r->view = MapViewOfFileEx(mh, FILE_MAP_COPY, 0, 0, need, p + g);
+        if (r->view) r->base = p;
+        else if (!VirtualFree(p, 0, MEM_RELEASE)) break;
+    }
+    CloseHandle(mh);
+    return r->view ? NULL : q_err(QE_OOM);
+}
+
+static ray_t* splay_vm_reserve(size_t need, splay_vm* r) {
+    size_t g = splay_page();
+    r->guard = g;
+    r->total = g + ((need + g - 1) / g) * g;
+    r->view = NULL;
+    r->base = (uint8_t*)VirtualAlloc(NULL, r->total, MEM_RESERVE, PAGE_READWRITE);
+    /* the header STRADDLES guard|payload, so the first payload page is
+     * committed up front — every other page waits for its block */
+    if (r->base && !VirtualAlloc(r->base, 2 * g, MEM_COMMIT, PAGE_READWRITE)) {
+        VirtualFree(r->base, 0, MEM_RELEASE);
+        r->base = NULL;
+    }
+    return r->base ? NULL : q_err(QE_OOM);
+}
+
+static ray_t* splay_vm_commit(const splay_vm* r, size_t off, size_t len) {
+    return VirtualAlloc(r->base + r->guard + off, len, MEM_COMMIT, PAGE_READWRITE)
+           ? NULL : q_err(QE_OOM);
+}
+
+static void splay_vm_release(const splay_vm* r) {
+    if (r->view) UnmapViewOfFile(r->view);
+    if (r->base) VirtualFree(r->base, 0, MEM_RELEASE);
+}
+
+#else
+
+static ray_t* splay_vm_reserve(size_t need, splay_vm* r) {
+    size_t g = (size_t)sysconf(_SC_PAGESIZE);
+    r->guard = g;
+    r->total = g + ((need + g - 1) / g) * g;
+    r->view = NULL;
+    r->base = (uint8_t*)mmap(NULL, r->total, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (r->base == MAP_FAILED) { r->base = NULL; return q_err(QE_OOM); }
+    return NULL;
+}
+
+/* anonymous pages are already backed — the region lane's commit is a no-op */
+static ray_t* splay_vm_commit(const splay_vm* r, size_t off, size_t len) {
+    (void)r; (void)off; (void)len;
+    return NULL;
+}
+
+static void splay_vm_release(const splay_vm* r) { munmap(r->base, r->total); }
+
+static ray_t* splay_vm_mapfile(const char* path, size_t need, splay_vm* r) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return q_err(QE_IO);
+    struct stat st;
+    if (fstat(fd, &st) != 0 || (size_t)st.st_size < need) {
+        close(fd);
+        return q_err(QE_CORRUPT);
+    }
+    ray_t* bad = splay_vm_reserve(need, r);
+    if (bad) { close(fd); return bad; }
+    void* fm = mmap(r->base + r->guard, need, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_FIXED, fd, 0);
+    close(fd);
+    if (fm == MAP_FAILED) { splay_vm_release(r); return q_err(QE_IO); }
+    return NULL;
+}
+
+#endif
+
+/* mmod==3 death (installed on ray_free): rc hit zero — release the region. */
 static void splay_region_free(ray_t* v) {
-#ifndef RAY_OS_WINDOWS
     for (int64_t i = 0; i < g_regn; i++) {
         if (g_regs[i].hdr != v) continue;
-        munmap(g_regs[i].base, g_regs[i].total);
-        g_mapped_bytes -= (int64_t)g_regs[i].total;
+        splay_vm_release(&g_regs[i].vm);
+        g_mapped_bytes -= (int64_t)g_regs[i].vm.total;
         g_reg_freed++;
         g_regs[i] = g_regs[--g_regn];   /* swap-remove */
         return;
     }
-#endif
     assert(!"mmod==3 block with no splay region row");
 }
 
@@ -80,9 +200,7 @@ void q_splay_init(void) {
 void q_splay_destroy(void) {
     /* the env died first, so every mapped vector already released its region */
     assert(g_regn == 0 && g_reg_created == g_reg_freed);
-#ifndef RAY_OS_WINDOWS
-    for (int64_t i = 0; i < g_regn; i++) munmap(g_regs[i].base, g_regs[i].total);
-#endif
+    for (int64_t i = 0; i < g_regn; i++) splay_vm_release(&g_regs[i].vm);
     free(g_regs);
     g_regs = NULL; g_regn = 0; g_regcap = 0; g_mapped_bytes = 0;
     ray_free_set_mapped_fn(NULL);
@@ -103,23 +221,24 @@ void q_splay_destroy(void) {
 int64_t q_splay_mapped_bytes(void) { return g_mapped_bytes; }
 int64_t q_splay_zblocks(void) { return g_zblocks; }
 
-#ifndef RAY_OS_WINDOWS
-static int splay_region_add(ray_t* hdr, void* base, size_t total) {
-    if (g_regn == g_regcap) {
-        int64_t nc = g_regcap ? g_regcap * 2 : 16;
-        splay_region* nr = (splay_region*)realloc(g_regs, (size_t)nc * sizeof *nr);
-        if (!nr) return 0;
-        g_regs = nr; g_regcap = nc;
-    }
-    g_regs[g_regn].hdr = hdr;
-    g_regs[g_regn].base = base;
-    g_regs[g_regn].total = total;
-    g_regn++;
-    g_mapped_bytes += (int64_t)total;
-    g_reg_created++;
+/* Reserve a ledger row up front: the row must exist BEFORE a header goes
+ * mmod==3, or a release would find no row and the region would leak. */
+static int splay_region_room(void) {
+    if (g_regn < g_regcap) return 1;
+    int64_t nc = g_regcap ? g_regcap * 2 : 16;
+    splay_region* nr = (splay_region*)realloc(g_regs, (size_t)nc * sizeof *nr);
+    if (!nr) return 0;
+    g_regs = nr; g_regcap = nc;
     return 1;
 }
-#endif
+
+static void splay_region_add(ray_t* hdr, const splay_vm* vm) {
+    g_regs[g_regn].hdr = hdr;
+    g_regs[g_regn].vm = *vm;
+    g_regn++;
+    g_mapped_bytes += (int64_t)vm->total;
+    g_reg_created++;
+}
 
 static int64_t splay_find(int64_t sym) {
     for (int64_t i = 0; i < g_n; i++) if (g_ents[i].sym == sym) return i;
@@ -318,52 +437,34 @@ static int splay_nullable(int8_t t) {
     }
 }
 
-/* Map a fixed-width column: kdb's payload starts at byte 16, a ray_t header
- * is 32 — the header overlays the tail of an anon guard page fused to the
- * file's MAP_PRIVATE first page.  NULL = no mapping on this platform. */
-static ray_t* splay_map(splay_ent* e, splay_col* c) {
-#ifdef RAY_OS_WINDOWS
-    (void)e; (void)c;
-    return NULL;
-#else
-    if (g_regn == g_regcap) {
-        int64_t nc = g_regcap ? g_regcap * 2 : 16;
-        splay_region* nr = (splay_region*)realloc(g_regs, (size_t)nc * sizeof *nr);
-        if (!nr) return q_err(QE_OOM);
-        g_regs = nr; g_regcap = nc;
-    }
-    ray_t* cp = splay_col_path(e, c->name);
-    if (!cp) return q_err(QE_OOM);
-    int fd = open(ray_str_ptr(cp), O_RDONLY);
-    ray_release(cp);
-    if (fd < 0) return q_err(QE_IO);
-    struct stat st;
-    uint8_t esz = ray_type_sizes[(uint8_t)c->h.tag];
-    size_t need = 16 + (size_t)c->h.count * esz;
-    if (fstat(fd, &st) != 0 || (size_t)st.st_size < need) {
-        close(fd);
-        return q_err(QE_CORRUPT);
-    }
-    size_t psz = (size_t)sysconf(_SC_PAGESIZE);
-    size_t total = psz + ((need + psz - 1) / psz) * psz;
-    uint8_t* base = (uint8_t*)mmap(NULL, total, PROT_READ | PROT_WRITE,
-                                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (base == MAP_FAILED) { close(fd); return q_err(QE_OOM); }
-    void* fm = mmap(base + psz, need, PROT_READ | PROT_WRITE,
-                    MAP_PRIVATE | MAP_FIXED, fd, 0);
-    close(fd);
-    if (fm == MAP_FAILED) { munmap(base, total); return q_err(QE_IO); }
-    ray_t* v = (ray_t*)(base + psz - 16);               /* data[] lands on byte 16 */
-    v->mmod  = 3;                                       /* rc-driven munmap */
+/* Lay the ray_t header over the guard's tail so the payload becomes its
+ * data[], and enrol the region — the ONE place a mapped column is born. */
+static ray_t* splay_hdr_over(const splay_vm* vm, splay_col* c) {
+    ray_t* v = (ray_t*)(vm->base + vm->guard - 16);     /* data[] lands on byte 16 */
+    v->mmod  = 3;                                       /* rc-driven release */
     v->order = 0;
     v->type  = c->h.tag;
     v->attrs = (uint8_t)((c->h.disk_attr == 1 ? RAY_ATTR_SORTED : 0) |
                          (splay_nullable(c->h.tag) ? RAY_ATTR_HAS_NULLS : 0));
     v->rc    = 1;                                       /* the caller's ref */
     v->len   = c->h.count;
-    if (!splay_region_add(v, base, total)) { munmap(base, total); return q_err(QE_OOM); }
+    splay_region_add(v, vm);
     return v;
-#endif
+}
+
+/* Map a fixed-width column: kdb's payload starts at byte 16, a ray_t header
+ * is 32 — the header overlays the guard's tail, the file's copy-on-write
+ * pages follow it. */
+static ray_t* splay_map(splay_ent* e, splay_col* c) {
+    if (!splay_region_room()) return q_err(QE_OOM);
+    ray_t* cp = splay_col_path(e, c->name);
+    if (!cp) return q_err(QE_OOM);
+    size_t need = 16 + (size_t)c->h.count * ray_type_sizes[(uint8_t)c->h.tag];
+    splay_vm vm;
+    ray_t* bad = splay_vm_mapfile(ray_str_ptr(cp), need, &vm);
+    ray_release(cp);
+    if (bad) return bad;
+    return splay_hdr_over(&vm, c);
 }
 
 /* The KX compressed-read model: reserve the full plain size as an anonymous
@@ -372,14 +473,7 @@ static ray_t* splay_map(splay_ent* e, splay_col* c) {
  * as a mapped column — one rc/munmap lifecycle, one ledger, and NOTHING is
  * retained between statements (kdb's "for the duration of that operation"). */
 static ray_t* splay_zip_col(splay_ent* e, splay_col* c, ray_t* idx) {
-#ifdef RAY_OS_WINDOWS
-    (void)idx;
-    ray_t* cp = splay_col_path(e, c->name);
-    if (!cp) return q_err(QE_OOM);
-    ray_t* v = q_wirefile_read_column(cp, NULL, NULL);  /* whole-decode fallback */
-    ray_release(cp);
-    return v ? v : q_err(QE_IO);
-#else
+    if (!splay_region_room()) return q_err(QE_OOM);
     ray_t* cp = splay_col_path(e, c->name);
     if (!cp) return q_err(QE_OOM);
     q_io_zipmap_t zm;
@@ -392,14 +486,11 @@ static ray_t* splay_zip_col(splay_ent* e, splay_col* c, ray_t* idx) {
         return q_err(QE_CORRUPT);
     }
     uint8_t* mark = (uint8_t*)calloc((size_t)nb, 1);
-    size_t psz = (size_t)sysconf(_SC_PAGESIZE);
-    size_t total = psz + (((size_t)unc + psz - 1) / psz) * psz;
-    uint8_t* base = mark ? (uint8_t*)mmap(NULL, total, PROT_READ | PROT_WRITE,
-                                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
-                         : MAP_FAILED;
-    if (base == MAP_FAILED) {
+    splay_vm vm;
+    bad = mark ? splay_vm_reserve((size_t)unc, &vm) : q_err(QE_OOM);
+    if (bad) {
         free(mark); q_io_zipmap_free(&zm); ray_release(cp);
-        return q_err(QE_OOM);
+        return bad;
     }
     if (!idx) {
         memset(mark, 1, (size_t)nb);
@@ -419,24 +510,16 @@ static ray_t* splay_zip_col(splay_ent* e, splay_col* c, ray_t* idx) {
         if (!mark[k]) continue;
         int64_t plain = unc - k * bs;
         if (plain > bs) plain = bs;
-        bad = q_io_zip_block(cp, &zm, k, base + psz + k * bs, (size_t)plain);
+        bad = splay_vm_commit(&vm, (size_t)(k * bs), (size_t)plain);
+        if (!bad) bad = q_io_zip_block(cp, &zm, k, vm.base + vm.guard + k * bs,
+                                       (size_t)plain);
         if (!bad) g_zblocks++;
     }
     free(mark);
     q_io_zipmap_free(&zm);
     ray_release(cp);
-    if (bad) { munmap(base, total); return bad; }
-    ray_t* v = (ray_t*)(base + psz - 16);               /* header AFTER the fills */
-    v->mmod  = 3;
-    v->order = 0;
-    v->type  = c->h.tag;
-    v->attrs = (uint8_t)((c->h.disk_attr == 1 ? RAY_ATTR_SORTED : 0) |
-                         (splay_nullable(c->h.tag) ? RAY_ATTR_HAS_NULLS : 0));
-    v->rc    = 1;
-    v->len   = c->h.count;
-    if (!splay_region_add(v, base, total)) { munmap(base, total); return q_err(QE_OOM); }
-    return v;
-#endif
+    if (bad) { splay_vm_release(&vm); return bad; }
+    return splay_hdr_over(&vm, c);                      /* header AFTER the fills */
 }
 
 /* Column by index, gathered at idx (NULL = whole) — the lanes: decode cache,
@@ -451,7 +534,7 @@ static ray_t* splay_col_gather_i(splay_ent* e, int64_t i, ray_t* idx) {
     } else if (c->h.zipped && c->h.mappable && !c->h.is_enum) {
         col = splay_zip_col(e, c, idx);
     } else if (c->h.mappable && !c->h.zipped) {
-        col = splay_map(e, c);                          /* NULL on Windows */
+        col = splay_map(e, c);
     }
     if (!col) {                                         /* decode lane, cached */
         ray_t* cp = splay_col_path(e, c->name);
