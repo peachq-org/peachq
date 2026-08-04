@@ -25,6 +25,7 @@
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk — the `.z.ts` timer callback */
 #include "qlang/eval/q_view.h" /* q_view_names — `\b` / `\B` */
 #include "qlang/parse/q_parse.h"    /* q_parse — `\t expr` / `\ts expr` timing */
+#include "qlang/net/q_tls.h"  /* q_tls_server_mode — `\E` */
 #include "core/ipc.h"         /* ray_ipc_listen — `\p N` binds a listener */
 #include "core/poll.h"        /* ray_poll_get / deregister — `\p 0W`/`\p 0`; poll->timers */
 #include "core/runtime.h"     /* ray_runtime_get_poll — the runtime event poll */
@@ -376,6 +377,14 @@ uint16_t q_sys_listen_port(void) { return (uint16_t)g_listen_port; }
  * inside q_sys_listen).  The getter reports the ACTUAL bound port (incl. the
  * `0W`-chosen one).  NO port is ANNOUNCED on any path — full kdb fidelity; a
  * supervisor/test reads the port back with the `\p`/`system "p"` getter. */
+/* `\E` — DISPLAY the TLS server mode as an int (syscmds.md documents no setter
+ * form; the mode is fixed by the `-E` command line).  A setter stays the silent
+ * no-op every other display-only `\`-command uses. */
+static ray_t* h_E(const char* arg, size_t alen) {
+    (void)arg;
+    return alen == 0 ? ray_i32(q_tls_server_mode()) : NULL;
+}
+
 static ray_t* h_p(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_listen_port);        /* getter -> `0i` default */
     /* `0W`/`0w` auto token (same shape as h_S's `0N` probe) — bind port 0. */
@@ -1003,10 +1012,11 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
             case 't': return h_t(arg, alen, rest, restlen, rep); /* timer / \t exp      */
             case 'b': return h_bB(0, arg, alen);                 /* views               */
             case 'B': return h_bB(1, arg, alen);                 /* pending views       */
+            case 'E': return h_E(arg, alen);                     /* TLS server mode     */
             /* Silent setter/action form (arg present) → NULL; getter → 'nyi:
-             * \z date-parse, \E TLS, \r replicate, \T timeout, \u user-pwd,
+             * \z date-parse, \r replicate, \T timeout, \u user-pwd,
              * \x expunge, \1 stdout, \2 stderr, \_ hide-q-code. */
-            case 'z': case 'E': case 'r': case 'T':
+            case 'z': case 'r': case 'T':
             case 'u': case 'x': case '1': case '2': case '_':
                 return h_getset(alen);
             /* \\ quit — q_sys_exit is capability-gated (a real process exits firing
