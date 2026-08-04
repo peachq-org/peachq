@@ -7,6 +7,7 @@
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_lambda_src / q_eval — lambda serde;
                                  * q_eval_apply_concrete — the IPC boundary force */
 #include "qlang/q_registry.h"   /* q_list_collapse + the kdb_op identity pair */
+#include "qlang/io/q_splay.h"   /* q_splay_is — the one admitted unconformed dict */
 #include "qlang/parse/q_parse.h"      /* q_parse — lambda decode (RUNTIME only) */
 #include "lang/eval.h"          /* ray_eval */
 #include "table/sym.h"          /* ray_sym_vec_cell */
@@ -829,6 +830,14 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         int64_t vl = v->type == RAY_TABLE ? ray_table_nrows(v)
                    : (ray_is_vec(v) || v->type == RAY_LIST) ? ray_len(v) : -1;
         if (kl < 0 || vl < 0 || kl != vl) {
+            /* the splay carrier is the ONE unconformed dict openq itself
+             * emits — q_splay_is (the recognition owner) gates the bypass */
+            if (k->type == RAY_SYM && v->type == -RAY_SYM) {
+                ray_t* d = ray_dict_new(k, v);        /* consumes both */
+                if (d && !RAY_IS_ERR(d) && q_splay_is(d)) return d;
+                if (d) ray_release(d);
+                return q_err(QE_LENGTH);
+            }
             ray_release(k); ray_release(v);
             return q_err(QE_LENGTH);
         }

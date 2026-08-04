@@ -19,6 +19,7 @@
 #include "qlang/ops/q_table.h"
 #include "qlang/ops/q_bang.h"   /* q_bang_enkey — xkey's keying primitive */
 #include "qlang/ops/q_index.h"  /* q_index_at / q_index_elem_at — group's key gathers */
+#include "qlang/io/q_splay.h"   /* mapped splays: cols/meta answer from headers */
 #include "lang/internal.h"      /* ray_group_fn */
 #include "ops/agg_engine.h"     /* agg_group_keys — the one dense group core */
 #include "table/sym.h"          /* ray_sym_intern_runtime, ray_sym_vec_cell, RAY_SYM_W64 */
@@ -692,11 +693,12 @@ static ray_t* table_colnames(ray_t* x) {
 }
 
 /* Resolve a by-name table operand (cols`t / meta`t): a -RAY_SYM naming a
- * global plain/keyed table resolves to it (borrowed); else x unchanged. */
+ * global plain/keyed/mapped-splay table resolves to it (borrowed); else x. */
 static ray_t* table_bi_deref(ray_t* x) {
     if (x && x->type == -RAY_SYM) {
         ray_t* g = q_env_get(x->i64);                   /* borrowed */
-        if (g && (g->type == RAY_TABLE || q_type_is_keyed(g))) return g;
+        if (g && (g->type == RAY_TABLE || q_type_is_keyed(g) || q_splay_is(g)))
+            return g;
     }
     return x;
 }
@@ -704,57 +706,80 @@ static ray_t* table_bi_deref(ray_t* x) {
 /* (cols x) — column names of a table as a symbol vector. */
 ray_t* q_cols_fn(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
-    return table_colnames(table_bi_deref(x));
+    ray_t* t = table_bi_deref(x);
+    if (q_splay_is(t)) {                    /* marker-first: the keys ARE the cols */
+        ray_t* k = ray_dict_keys(t);
+        ray_retain(k);
+        return k;
+    }
+    return table_colnames(t);
 }
 
-/* (meta x) — table metadata keyed by column name.  Builds the keyed table
- * (c) -> (t; f; a): `c` column names, `t` per-column type char (via the
- * single-home map), `f`/`a` blank (foreign-keys/attributes are out of scope).
+/* (meta x) — table metadata keyed by column name: (c) -> (t; f; a).  ONE
+ * builder over two per-column fact sources: an in-memory table's columns
+ * (t via q_ty_char, f/a blank) or a mapped splay's probed HEADERS — type from
+ * the type byte (enum `s`, nested upper-cased), attr `s` when the disk byte
+ * says sorted, never a data read; only a column whose header cannot name its
+ * type (a kxzip container, a shape-A non-vector) decodes once to answer.
  * The result is a RAY_DICT from a 1-col key table to a 3-col value table —
- * "a keyed table is just a dictionary from one table to another" (q_fmt
- * renders it `k| v`). */
+ * "a keyed table is just a dictionary from one table to another". */
 ray_t* q_meta_fn(ray_t* x) {
     ray_t* t = x ? table_bi_deref(x) : NULL;
-    if (!q_type_is_table(t) && !q_type_is_keyed(t)) return q_err(QE_TYPE);
-    ray_t* flat = q_table_flatten(t);
-    if (!flat || RAY_IS_ERR(flat)) return flat ? flat : q_err(QE_OOM);
-    int64_t nc = ray_table_ncols(flat);
+    int64_t nc = q_splay_ncols(t);
+    int splay = nc >= 0;
+    ray_t* flat = NULL;
+    if (!splay) {
+        if (!q_type_is_table(t) && !q_type_is_keyed(t)) return q_err(QE_TYPE);
+        flat = q_table_flatten(t);
+        if (!flat || RAY_IS_ERR(flat)) return flat ? flat : q_err(QE_OOM);
+        nc = ray_table_ncols(flat);
+    }
     int64_t cap = nc > 0 ? nc : 1;
     ray_t* cvec = ray_sym_vec_new(RAY_SYM_W64, cap);   /* c: names          */
     ray_t* fvec = ray_sym_vec_new(RAY_SYM_W64, cap);   /* f: blank per col  */
-    ray_t* avec = ray_sym_vec_new(RAY_SYM_W64, cap);   /* a: blank per col  */
+    ray_t* avec = ray_sym_vec_new(RAY_SYM_W64, cap);   /* a: `s or blank    */
     char stackt[64];
     char* tbuf = (cap <= (int64_t)sizeof stackt) ? stackt : (char*)malloc((size_t)cap);
-    if (!cvec || RAY_IS_ERR(cvec) || !fvec || RAY_IS_ERR(fvec) ||
-        !avec || RAY_IS_ERR(avec) || !tbuf) {
-        if (cvec && !RAY_IS_ERR(cvec)) ray_release(cvec);
-        if (fvec && !RAY_IS_ERR(fvec)) ray_release(fvec);
-        if (avec && !RAY_IS_ERR(avec)) ray_release(avec);
-        if (tbuf && tbuf != stackt) free(tbuf);
-        ray_release(flat);
-        return q_err(QE_WSFULL);
-    }
+    int ok = cvec && !RAY_IS_ERR(cvec) && fvec && !RAY_IS_ERR(fvec) &&
+             avec && !RAY_IS_ERR(avec) && tbuf;
+    ray_t* bad = NULL;
     int64_t blank = ray_sym_intern_runtime("", 0);
-    int ok = 1;
+    int64_t ssym  = ray_sym_intern_runtime("s", 1);
     for (int64_t c = 0; c < nc && ok; c++) {
-        int64_t nm = ray_table_col_name(flat, c);
-        ray_t* col = ray_table_get_col_idx(flat, c);   /* borrowed */
-        tbuf[c] = q_ty_char(col);
+        int64_t nm, a = blank;
+        char tc;
+        if (!splay) {
+            nm = ray_table_col_name(flat, c);
+            tc = q_ty_char(ray_table_get_col_idx(flat, c));   /* borrowed */
+        } else {
+            nm = q_splay_col_sym(t, c);
+            const q_wf_colhdr* h = q_splay_col_hdr(t, c);
+            tc = h->is_enum ? 's' : h->tag ? q_type_char(h->tag) : 0;
+            if (h->nested && tc) tc = (char)(tc - 'a' + 'A');
+            if (h->disk_attr == 1) a = ssym;
+            if (!tc) {                        /* opaque header: the decode answers */
+                ray_t* col = q_splay_col(t, nm);
+                if (!col || RAY_IS_ERR(col)) { bad = col; ok = 0; break; }
+                tc = q_ty_char(col);
+                ray_release(col);
+            }
+        }
+        tbuf[c] = tc ? tc : ' ';
         cvec = ray_vec_append(cvec, &nm);
         fvec = ray_vec_append(fvec, &blank);
-        avec = ray_vec_append(avec, &blank);
+        avec = ray_vec_append(avec, &a);
         if (!cvec || RAY_IS_ERR(cvec) || !fvec || RAY_IS_ERR(fvec) ||
             !avec || RAY_IS_ERR(avec)) ok = 0;
     }
-    ray_release(flat);
+    if (flat) ray_release(flat);
     ray_t* tstr = ok ? ray_str(tbuf, (size_t)nc) : NULL;
-    if (tbuf != stackt) free(tbuf);
+    if (tbuf && tbuf != stackt) free(tbuf);
     if (!ok || !tstr || RAY_IS_ERR(tstr)) {
         if (cvec && !RAY_IS_ERR(cvec)) ray_release(cvec);
         if (fvec && !RAY_IS_ERR(fvec)) ray_release(fvec);
         if (avec && !RAY_IS_ERR(avec)) ray_release(avec);
         if (tstr && !RAY_IS_ERR(tstr)) ray_release(tstr);
-        return q_err(QE_WSFULL);
+        return bad ? bad : q_err(QE_WSFULL);
     }
     /* key table: c ; value table: t f a  -> keyed table dict */
     ray_t* kt = ray_table_new(1);
