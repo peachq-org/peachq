@@ -9,6 +9,7 @@
 #include "qlang/q_prim.h"
 #include "qlang/net/q_http_client.h"
 #include "qlang/net/q_gz.h"           /* transparent gzip inflate (Content-Encoding) */
+#include "qlang/net/q_tls.h"          /* https — the TLS overlay on the socket */
 #include "lang/eval.h"            /* ray_eval_get_restricted — outbound gate */
 #include "table/sym.h"           /* ray_sym_str — hsym text */
 #include "picohttpparser.h"
@@ -260,6 +261,11 @@ ray_sock_t q_http_client_connect(const char* host, uint16_t port,
 int q_http_client_send_all(ray_sock_t fd, const void* buf, size_t len,
                            int64_t deadline_ms)
 {
+    /* A TLS record cannot be split by a raw send(): the overlay owns framing,
+     * and its deadline is the socket's SO_SNDTIMEO (set by ray_sock_connect). */
+    if (ray_sock_io_active(fd))
+        return ray_sock_send(fd, buf, len) == (int64_t)len ? 0 : -1;
+
     const uint8_t* p = (const uint8_t*)buf; size_t rem = len;
     while (rem > 0) {
         int64_t budget = deadline_ms - now_ms();
@@ -311,7 +317,9 @@ char* q_http_client_read_response(ray_sock_t fd, size_t* out_len,
         int64_t budget = deadline_ms - now_ms();
         if (budget <= 0) { e = "conn"; goto fail; }
         int wait = budget > 2000000000LL ? 2000000000 : (int)budget;
-        int rr = ray_sock_wait_readable(fd, wait);
+        /* Decrypted bytes already buffered in the overlay are invisible to
+         * poll(), so a readability wait would stall on the last record. */
+        int rr = ray_sock_io_pending(fd) ? 1 : ray_sock_wait_readable(fd, wait);
         if (rr == 0) { e = "conn"; goto fail; }          /* timeout */
         if (rr < 0)  { e = "conn"; goto fail; }
         if (grow(&buf, &cap, len + 8192) != 0) { e = "wsfull"; goto fail; }
@@ -412,7 +420,6 @@ static ray_t* http_do(ray_t* urlv, const char* mime, size_t mime_len,
         return q_err(QE_TYPE);
     q_http_url_t u;
     if (q_http_client_url_parse(urlbuf, un, &u) != 0) return q_err(QE_DOMAIN);
-    if (u.scheme == 1) return q_err(QE_NYI);        /* https: TLS tier */
 
     /* Authorization header (optional) */
     char authhdr[512]; authhdr[0] = '\0';
@@ -452,6 +459,7 @@ static ray_t* http_do(ray_t* urlv, const char* mime, size_t mime_len,
 
     int64_t deadline = now_ms() + Q_HTTP_TOTAL_MS;
     ray_t* result = NULL;
+    if (u.scheme == 1 && q_tls_client_start(fd, u.host, &err) != 0) goto done;
     if (q_http_client_send_all(fd, req, (size_t)rl, deadline) != 0) { err = "conn"; goto done; }
     if (mime && body_len &&
         q_http_client_send_all(fd, body, body_len, deadline) != 0) { err = "conn"; goto done; }
@@ -518,7 +526,6 @@ ray_t* q_http_client_raw(ray_t* hsym, ray_t* request) {
 
     q_http_url_t u;                       /* q_http_client_url_parse strips the ':' */
     if (q_http_client_url_parse(s, sn, &u) != 0) return q_err(QE_DOMAIN);
-    if (u.scheme == 1) return q_err(QE_NYI);        /* https: TLS tier */
 
     const char* err = "conn";
     ray_sock_t fd = q_http_client_connect(u.host, u.port, Q_HTTP_CONNECT_MS, &err);
@@ -526,6 +533,7 @@ ray_t* q_http_client_raw(ray_t* hsym, ray_t* request) {
 
     int64_t deadline = now_ms() + Q_HTTP_TOTAL_MS;
     ray_t* result = NULL;
+    if (u.scheme == 1 && q_tls_client_start(fd, u.host, &err) != 0) goto done;
     if (q_http_client_send_all(fd, reqp, (size_t)reqn,
                                deadline) != 0) { err = "conn"; goto done; }
     size_t rlen = 0;
