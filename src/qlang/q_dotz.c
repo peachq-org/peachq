@@ -312,13 +312,6 @@ static ray_t* zts_tick(ray_t* tick) {
     return r;                                      /* fire_expired frees/prints it */
 }
 
-/* `.z.zd` is the compression setting (ref/dotz.md).  q_wirefile never writes a
- * compressed file, so accepting the assignment would yield a silently
- * uncompressed one — fail at the point of the mistake instead. */
-bool q_dotz_write_is_nyi(const char* name, size_t len) {
-    return len == 5 && memcmp(name, ".z.zd", 5) == 0;
-}
-
 /* Call `.z.exit` (if set) with the exit code (ref/dotz.md: unary, arg = the
  * exit parameter; default = do nothing), then drain its show/0N! console
  * output to stdout — this runs moments before exit(), nothing else drains. */

@@ -25,6 +25,7 @@
 #include "qlang/q_env.h"
 #include "qlang/ops/q_index.h"
 #include "qlang/net/q_wirefile.h"  /* q_wirefile_read — `get `:file */
+#include "qlang/io/q_splay.h"      /* q_splay_get — `get `:dir/ maps, not reads */
 #include "lang/eval.h"
 #include "ops/ops.h"
 #include "table/sym.h"             /* ray_read_sym — sym vectors are width-adaptive */
@@ -500,6 +501,8 @@ ray_t* q_eval_value_wrap(ray_t* x) {
     if (RAY_IS_NULL(x)) return ray_i64(0);   /* (::) IS unary primitive 0 —
                                               * ref/value.md operator arm */
     if (x->type == -RAY_SYM) {
+        ray_t* m = q_splay_get(x);           /* NULL unless a `:dir/ table folder */
+        if (m) return m;
         ray_t* f = q_wirefile_read(x);       /* NULL unless a `:path sym */
         return f ? f : name_value(x, NULL);
     }
