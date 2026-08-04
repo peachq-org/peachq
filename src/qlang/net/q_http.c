@@ -46,6 +46,20 @@
  * 32 MiB body would wedge the poll loop — sock.c's loop + a deadline.  0/-1.
  * Exported (q_http.h): q_ws.c frames ride the same bounded-send policy. */
 int q_http_send_all(ray_sock_t fd, const void* buf, size_t len, int secs) {
+    /* A TLS record cannot be split by a raw send(): when a transport overlay is
+     * attached IT owns framing, so the whole write goes through it — the same
+     * rule q_http_client_send_all follows.  THIS function's `secs` is the
+     * bounded-send policy, so it must be handed to the overlay rather than
+     * dropped: otherwise attaching TLS would silently turn a bounded write into
+     * an unbounded one and a peer that stops reading would hold the poll
+     * thread forever. */
+    if (ray_sock_io_active(fd)) {
+        ray_sock_set_timeout(fd, secs * 1000);
+        int64_t n = ray_sock_send(fd, buf, len);
+        ray_sock_set_timeout(fd, 0);
+        return n == (int64_t)len ? 0 : -1;
+    }
+
     const uint8_t* p   = (const uint8_t*)buf;
     size_t         rem = len;
     time_t         end = time(NULL) + secs;
@@ -90,6 +104,17 @@ static int http_recv_n(ray_sock_t fd, uint8_t* buf, size_t want) {
     size_t got = 0;
     time_t end = time(NULL) + Q_HTTP_RECV_SECS;
     while (got < want) {
+        /* TLS: only the overlay can decrypt, and it reports "no plaintext yet"
+         * as EAGAIN exactly as a non-blocking socket does. */
+        if (ray_sock_io_active(fd)) {
+            int64_t n = ray_sock_recv(fd, buf + got, want - got);
+            if (n > 0) { got += (size_t)n; continue; }
+            if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) return -1;
+            time_t now = time(NULL);
+            if (now >= end) return -1;
+            if (ray_sock_wait_readable(fd, (int)((end - now) * 1000)) <= 0) return -1;
+            continue;
+        }
 #ifdef RAY_OS_WINDOWS
         int n = recv(fd, (char*)buf + got, (int)(want - got), 0);
         int e = (n < 0) ? WSAGetLastError() : 0;

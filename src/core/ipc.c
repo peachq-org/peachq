@@ -84,6 +84,8 @@
 #include "qlang/base/q_err.h"  /* q_err_from_text (-128h decode) + q_err_drop backstop */
 #include "qlang/net/q_wire.h"
 #include "qlang/net/q_http.h"
+#include "qlang/net/q_tls.h"   /* the `-E` accept-side handshake */
+#include "core/timer.h"        /* ray_time_now_ms — TLS negotiation deadlines */
 #include "qlang/net/q_ws.h"
 #include "qlang/eval/q_eval.h"   /* q_eval_apply_value — RAY_QFN hook firing */
 #include <string.h>
@@ -216,6 +218,8 @@ size_t ray_ipc_decompress(const uint8_t* src, size_t clen,
 #define RAY_IPC_PHASE_PAYLOAD   2
 #define RAY_IPC_PHASE_HTTP      3   /* sniffed as HTTP (kb/http.md same-port serving) */
 #define RAY_IPC_PHASE_WS        4   /* upgraded WebSocket (kb/websockets.md; q_ws.c) */
+#define RAY_IPC_PHASE_TLS       5   /* `-E` accept-side handshake, driven by poll events */
+#define RAY_IPC_TLS_HS_MS    5000   /* a negotiation that stalls this long is reaped */
 
 #define KDB_HDR_LEN 8
 #define KDB_MAX_MSG (256u * 1024u * 1024u)   /* 256MB frame guard */
@@ -335,6 +339,14 @@ static ray_poll_t* ipc_active_poll(void) {
 
 int64_t ray_ipc_current_handle(void) {
     return ipc_ctx_handle();
+}
+
+int64_t ray_ipc_current_fd(void) {
+    int64_t h = ipc_ctx_handle();
+    if (h < 0) return -1;
+    ray_poll_t* poll = ipc_active_poll();
+    ray_selector_t* sel = poll ? ray_poll_get(poll, h) : NULL;
+    return (sel && sel->type == RAY_SEL_SOCKET) ? sel->fd : -1;
 }
 
 /* Fetch the hook lambda if one is installed and is in fact a lambda.
@@ -716,6 +728,12 @@ typedef struct {
     bool             sync_ready;
     bool             sync_badmsg;   /* deposited resp is a local 'badmsg — waiter closes after consuming */
     ray_t*           sync_resp;
+    /* TLS mode (phase RAY_IPC_PHASE_TLS): when the negotiation must be done by,
+     * whether `-E 1`'s first-byte sniff has already chosen a protocol, and the
+     * opaque q_tls.c handshake cookie (NULL until the first ClientHello byte). */
+    int64_t          tls_deadline;
+    bool             tls_decided;
+    void*            tls_hs;
 } ray_ipc_conn_data_t;
 
 /* kdb's emit-compression gate for a connection: the peer negotiated
@@ -729,11 +747,65 @@ static ray_t* ipc_read_header(ray_poll_t* poll, ray_selector_t* sel);
 static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel);
 static ray_t* ipc_read_http(ray_poll_t* poll, ray_selector_t* sel);
 static ray_t* ipc_read_ws(ray_poll_t* poll, ray_selector_t* sel);
+static ray_t* ipc_read_tls(ray_poll_t* poll, ray_selector_t* sel);
 static void   ipc_on_close(ray_poll_t* poll, ray_selector_t* sel);
 
 /* Wrappers matching ray_io_fn signature for socket recv */
 static int64_t ipc_recv_fn(int64_t fd, uint8_t* buf, int64_t len) {
     return ray_sock_recv((ray_sock_t)fd, buf, (size_t)len);
+}
+
+/* Reap negotiations that have gone quiet.  Driven by accepts and by other
+ * connections' handshake events rather than a timer: the point is that a silent
+ * peer can never PARK the thread, and an attacker opening silent connections
+ * necessarily generates the accepts that sweep the earlier ones. */
+static void tls_hs_sweep(ray_poll_t* poll)
+{
+    int64_t now = ray_time_now_ms();
+    for (uint32_t i = 0; i < poll->n_sels; i++) {
+        ray_selector_t* s = poll->sels[i];
+        if (!s || s->rx.read_fn != ipc_read_tls || !s->data) continue;
+        ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)s->data;
+        if (cd->tls_deadline && now >= cd->tls_deadline)
+            ray_poll_deregister(poll, s->id);   /* NULLs the slot; safe to continue */
+    }
+}
+
+/* Negotiation finished (or `-E 1` chose plain): hand the connection to the
+ * ordinary kdb/HTTP handshake phase.  recv_fn is installed only NOW — during
+ * negotiation the selector deliberately carries none, so no backend tries to
+ * pump bytes out from under SSL_accept. */
+static void tls_hs_settle(ray_poll_t* poll, ray_selector_t* sel,
+                          ray_ipc_conn_data_t* cd)
+{
+    cd->phase        = RAY_IPC_PHASE_HANDSHAKE;
+    cd->tls_deadline = 0;
+    sel->rx.recv_fn  = ipc_recv_fn;
+    sel->rx.read_fn  = ipc_read_handshake;
+    ray_poll_rx_request(poll, sel, 1);
+}
+
+/* One non-blocking step of the `-E` accept-side negotiation, per readable
+ * event.  Never waits: SSL_accept drives off the poll, so a peer that connects
+ * and says nothing costs an idle fd until the sweep, not a stalled server. */
+static ray_t* ipc_read_tls(ray_poll_t* poll, ray_selector_t* sel)
+{
+    ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
+    ray_sock_t fd = (ray_sock_t)sel->fd;
+    tls_hs_sweep(poll);
+    if (!poll->sels[sel->id]) return NULL;      /* our own deadline expired */
+
+    if (q_tls_server_mode() == 1 && !cd->tls_decided) {
+        int k = q_tls_server_sniff(fd);
+        if (k < 0) return NULL;                 /* no byte yet — await another event */
+        cd->tls_decided = true;
+        if (k == 0) { tls_hs_settle(poll, sel, cd); return NULL; }
+    }
+    int r = q_tls_server_handshake(fd, &cd->tls_hs);
+    if (r == 0) return NULL;                    /* needs another event */
+    if (r < 0) { ray_poll_deregister(poll, sel->id); return NULL; }
+    tls_hs_settle(poll, sel, cd);
+    return NULL;
 }
 
 /* Accept callback — called when listener fd is readable */
@@ -747,7 +819,11 @@ static ray_t* ipc_accept(ray_poll_t* poll, ray_selector_t* sel)
                                     sizeof(ray_ipc_conn_data_t));
     if (!cd) { ray_sock_close(new_fd); return NULL; }
     memset(cd, 0, sizeof(*cd));
-    cd->phase = RAY_IPC_PHASE_HANDSHAKE;
+    /* `-E` decides which phase this connection starts in.  Mode 0 never enters
+     * the TLS phase at all, so the default server path is untouched. */
+    bool tls = q_tls_server_mode() != 0;
+    cd->phase = tls ? RAY_IPC_PHASE_TLS : RAY_IPC_PHASE_HANDSHAKE;
+    if (tls) cd->tls_deadline = ray_time_now_ms() + RAY_IPC_TLS_HS_MS;
     cd->listener_id = sel->id;
     cd->auth_required = (poll->auth_secret[0] != '\0');
     cd->restricted    = poll->restricted;
@@ -756,8 +832,8 @@ static ray_t* ipc_accept(ray_poll_t* poll, ray_selector_t* sel)
     ray_poll_reg_t reg = {0};
     reg.fd       = (int64_t)new_fd;
     reg.type     = RAY_SEL_SOCKET;
-    reg.recv_fn  = ipc_recv_fn;
-    reg.read_fn  = ipc_read_handshake;
+    reg.recv_fn  = tls ? NULL : ipc_recv_fn;
+    reg.read_fn  = tls ? ipc_read_tls : ipc_read_handshake;
     reg.close_fn = ipc_on_close;
     reg.data     = cd;
 
@@ -767,6 +843,8 @@ static ray_t* ipc_accept(ray_poll_t* poll, ray_selector_t* sel)
         ray_sys_free(cd);
         return NULL;
     }
+
+    if (tls) { tls_hs_sweep(poll); return NULL; }   /* no rx buffer while negotiating */
 
     /* The kdb creds line is NUL-terminated (variable length): accumulate
      * one byte at a time until the terminator. */
@@ -864,8 +942,14 @@ static ray_t* ipc_read_http(ray_poll_t* poll, ray_selector_t* sel)
     }
     if (cd->http_len >= 4 &&
         memcmp(cd->http_buf + cd->http_len - 4, "\r\n\r\n", 4) == 0) {
+        /* Expose the handle ctx across the handler, exactly as the `.z.wo`
+         * hook below does, so `.z.w`/`.z.e` resolve inside `.z.ph`. */
+        int64_t     hprev = ipc_ctx_handle();
+        ray_poll_t* hpp   = ipc_ctx_poll();
+        ipc_ctx_set(sel->id, poll);
         int up = q_http_respond((ray_sock_t)sel->fd, cd->http_buf, cd->http_len,
                                 cd->auth_required);
+        ipc_ctx_set(hprev, hpp);
         /* 1 = 101 sent (kb/websockets.md): switch this connection to the WS
          * frame pump.  Alloc failure after the 101 just closes (plan D13). */
         if (up == 1 && (cd->ws = q_ws_conn_new()) != NULL) {
@@ -1168,6 +1252,9 @@ static void ipc_on_close(ray_poll_t* poll, ray_selector_t* sel)
             else if (cd->sync_resp != RAY_NULL_OBJ) ray_release(cd->sync_resp);
             cd->sync_resp = NULL;
         }
+        /* A negotiation abandoned mid-flight still owns an SSL/ctx pair; a
+         * COMPLETED session is the overlay's and ray_sock_close frees that. */
+        q_tls_server_handshake_abort(&cd->tls_hs);
         ray_sys_free(sel->data);
         sel->data = NULL;
     }

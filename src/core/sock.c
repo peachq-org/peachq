@@ -168,17 +168,7 @@ static int sock_connect_one(ray_sock_t fd, const struct sockaddr* addr,
     ray_sock_set_blocking(fd);
 
     /* Apply the same budget as the handshake send/recv timeout. */
-#ifdef RAY_OS_WINDOWS
-    DWORD tv = (DWORD)timeout_ms;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
-#else
-    struct timeval tv;
-    tv.tv_sec  = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-#endif
+    ray_sock_set_timeout(fd, timeout_ms);
     return 0;
 }
 
@@ -251,6 +241,10 @@ int ray_sock_io_attach(ray_sock_t s, const ray_sock_io_t* io)
 }
 
 bool ray_sock_io_active(ray_sock_t s) { return io_find(s) != NULL; }
+
+void* ray_sock_io_ctx(ray_sock_t s) { ray_sock_io_t* io = io_find(s); return io ? io->ctx : NULL; }
+
+int ray_sock_io_timeout(ray_sock_t s) { ray_sock_io_t* io = io_find(s); return io ? io->timeout_ms : 0; }
 
 size_t ray_sock_io_pending(ray_sock_t s)
 {
@@ -345,10 +339,10 @@ bool ray_sock_is_loopback(ray_sock_t s)
     return true;                                            /* AF_UNIX / local */
 }
 
-int ray_sock_wait_readable(ray_sock_t s, int timeout_ms)
+static int sock_wait(ray_sock_t s, short ev, int timeout_ms)
 {
     /* Same wait primitive ray_sock_send uses for write-readiness. */
-    struct pollfd pfd = { .fd = s, .events = POLLIN };
+    struct pollfd pfd = { .fd = s, .events = ev };
     for (;;) {
 #ifdef RAY_OS_WINDOWS
         int n = WSAPoll(&pfd, 1, timeout_ms);
@@ -362,6 +356,40 @@ int ray_sock_wait_readable(ray_sock_t s, int timeout_ms)
         if (n == 0) return 0;
         return 1;  /* POLLIN/POLLHUP/POLLERR all mean "go recv" */
     }
+}
+
+int ray_sock_wait_readable(ray_sock_t s, int timeout_ms) { return sock_wait(s, POLLIN,  timeout_ms); }
+int ray_sock_wait_writable(ray_sock_t s, int timeout_ms) { return sock_wait(s, POLLOUT, timeout_ms); }
+
+int64_t ray_sock_peek(ray_sock_t s, void* buf, size_t len)
+{
+    for (;;) {
+#ifdef RAY_OS_WINDOWS
+        int n = recv(s, (char*)buf, (int)len, MSG_PEEK);
+#else
+        ssize_t n = recv(s, buf, len, MSG_PEEK);
+#endif
+        if (n < 0 && sock_errno() == EINTR) continue;
+        return (int64_t)n;
+    }
+}
+
+void ray_sock_set_timeout(ray_sock_t s, int ms)
+{
+    if (ms < 0) ms = 0;
+    ray_sock_io_t* io = io_find(s);
+    if (io) io->timeout_ms = ms;   /* the overlay obeys the caller's deadline too */
+#ifdef RAY_OS_WINDOWS
+    DWORD tv = (DWORD)ms;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+#else
+    struct timeval tv;
+    tv.tv_sec  = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
 }
 
 void ray_sock_close(ray_sock_t s)
