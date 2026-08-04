@@ -441,6 +441,12 @@ static ray_t* index_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
         if (!nx) nx = ray_at_fn(x, i0);
         return elem_rest(nx, rest, k);
     }
+    /* integer ROW application on a splay carrier rides the one row-gather
+     * (a carrier IS a table, so the dict law's `::`s would lie); every other
+     * index shape keeps the dict fallthrough */
+    if (k == 0 && x->type == RAY_DICT && q_splay_is(x) &&
+        (q_type_is_int_atom(i0) || q_type_is_int_vec(i0)))
+        return q_splay_rows(x, i0);
     if (is_coll(i0)) return index_map(x, i0, rest, k);
     return elem_rest(index_level(x, i0, 0), rest, k);
 }

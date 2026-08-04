@@ -1284,14 +1284,34 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
  * fusion) flip; the boundary seams then catch lazy at each observable edge. */
 #define Q_APPLY_MAX_ARGS 60   /* q_eval.c's EVAL_MAX_ARGS — the one arg cap */
 
-/* `first`/`last` over a whole-column colref gather ONE element instead — the
- * manifest row (or, on a row-less dispatch, the registry value) names the
- * verb, the gather seam does the rest (a compressed column then inflates one
- * covering block, the falsifier rows' law). */
-static ray_t* colref_ends(int lastp, ray_t* ref) {
-    ray_t* car; int64_t name; ray_t* idx;
-    q_splay_colref_parts(ref, &car, &name, &idx);
-    if (!RAY_IS_NULL(idx)) return NULL;
+/* idxproj — `first`/`last` AS INDEX CONVERSION, the one home: an end head
+ * over a whole-column colref or a carrier becomes a ONE-ROW gather (element
+ * 0 / n-1; result rank follows index rank, so a carrier answers the row
+ * dict).  Head identities are registry VALUES cached at init — #359: an
+ * identity you hold is never re-spelled through lookup_name on the hot path
+ * (`*`-monadic aliases `first`'s value, so it matches for free).  NULL = no
+ * conversion; a returned value (or error) IS the application's answer. */
+static ray_t* g_end_heads[2];              /* [0] `first` -> 0, [1] `last` -> n-1 */
+
+void q_eval_apply_init(void) {
+    g_end_heads[0] = q_registry_lookup_name("first", 5, Q_MONADIC);
+    g_end_heads[1] = q_registry_lookup_name("last", 4, Q_MONADIC);
+}
+
+static ray_t* idxproj(ray_t* head, ray_t* arg) {
+    int lastp;
+    if (head == g_end_heads[0] && head) lastp = 0;
+    else if (head == g_end_heads[1] && head) lastp = 1;
+    else return NULL;
+    ray_t* car = NULL; int64_t name = 0; ray_t* cidx = NULL;
+    if (q_splay_colref_is(arg)) {
+        q_splay_colref_parts(arg, &car, &name, &cidx);
+        if (!RAY_IS_NULL(cidx)) return NULL;          /* partial: generic path */
+    } else if (q_splay_is(arg)) {
+        car = arg;
+    } else {
+        return NULL;
+    }
     int64_t i = 0;
     if (lastp) {
         ray_t* cnt = q_splay_count(car);
@@ -1300,40 +1320,24 @@ static ray_t* colref_ends(int lastp, ray_t* ref) {
         ray_release(cnt);
         if (i < 0) return NULL;                       /* empty: the whole path */
     }
-    ray_t* iv = ray_vec_new(RAY_I64, 1);
-    if (!iv || RAY_IS_ERR(iv)) return iv ? iv : q_err(QE_OOM);
-    iv = ray_vec_append(iv, &i);
-    ray_t* g = iv && !RAY_IS_ERR(iv) ? q_splay_gather(car, name, iv) : NULL;
-    if (iv) ray_release(iv);
+    ray_t* ia = ray_i64(i);
+    if (!ia || RAY_IS_ERR(ia)) return ia ? ia : q_err(QE_OOM);
+    ray_t* g = (car == arg) ? q_splay_rows(car, ia)
+                            : q_splay_gather(car, name, ia);
+    ray_release(ia);
     return g ? g : q_err(QE_TYPE);
 }
 
 ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
+    if (n == 1 && args[0]) {
+        ray_t* one = idxproj(fv, args[0]);
+        if (one) return one;
+    }
     /* a splay colref arg forces HERE, the one dispatch entry — kernels,
      * adverbs, lambdas and projections all see the gathered column */
     int64_t i = 0;
     while (i < n && !q_splay_colref_is(args[i])) i++;
     if (i < n) {
-        if (n == 1) {
-            const char* nm = row && row->name ? row->name : NULL;
-            int fst, lst;                            /* monadic `*` IS first */
-            if (nm) {
-                fst = strcmp(nm, "first") == 0 || strcmp(nm, "*") == 0;
-                lst = !fst && strcmp(nm, "last") == 0;
-            } else {                                 /* row-less: value identity */
-                fst = fv == q_registry_lookup_name("first", 5, Q_MONADIC);
-                lst = !fst && fv == q_registry_lookup_name("last", 4, Q_MONADIC);
-            }
-            if (fst || lst) {
-                ray_t* one = colref_ends(lst, args[0]);
-                if (one && RAY_IS_ERR(one)) return one;
-                if (one) {
-                    ray_t* r = q_eval_apply_concrete(apply_inner(fv, row, &one, 1));
-                    ray_release(one);
-                    return r;
-                }
-            }
-        }
         if (n > Q_APPLY_MAX_ARGS) return q_err(QE_RANK);
         ray_t* fa[Q_APPLY_MAX_ARGS];
         for (int64_t j = 0; j < n; j++) {
