@@ -22,6 +22,7 @@
 #include <string.h>      /* memset / memcpy (real decompress) */
 
 int64_t ray_ipc_current_handle(void) { return -1; }
+int64_t ray_ipc_current_fd(void) { return -1; }
 
 int64_t ray_ipc_listen(ray_poll_t* poll, uint16_t port) {
     (void)poll; (void)port;
