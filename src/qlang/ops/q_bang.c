@@ -23,6 +23,7 @@
 #include "qlang/q_console.h"    /* q_console_write — 0N! */
 #include "qlang/ops/q_sys.h"        /* q_sys_ts_apply — `-34!` (.Q.ts) */
 #include "qlang/net/q_net.h"   /* q_net_host / q_net_addr — `-12!`/`-13!` */
+#include "qlang/net/q_tls.h"   /* q_tls_info — `-26!` */
 #include "lang/eval.h"          /* ray_eval_get_restricted — `-7!` file gate */
 #include "lang/internal.h"      /* ray_dict_fn — the `!` dict kernel */
 #include <rayforce.h>
@@ -291,6 +292,13 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -34: return h_timespace(y);
         case -21: return q_io_zip_stats(y);
         case -35: return q_dotq_gz_fn(&y, 1);
+        /* doc: `-26!handle` (stage B/C) or `-26!()`; `(-26!)[]` arrives as `::` */
+        case -26: {
+            if (q_type_is_int_atom(y)) return q_err(QE_NYI);
+            int cfg = y->type == RAY_NULL || y->type == RAY_UNARY ||
+                      (y->type == RAY_LIST && ray_len(y) == 0);
+            return cfg ? q_tls_info() : q_err(QE_TYPE);
+        }
 
         /* ---- placeholder inventory: known internal fn, not implemented -> 'nyi.
          * Kept as EXPLICIT cases so the -N! id map stays documented in code.
@@ -308,7 +316,6 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
                     * inside the fresh apply module so a nested value-apply of
                     * a restricted VARY cannot bypass it (codex r1/r2 P1).      */
         case -25:  /* async broadcast: IPC handles + loop                      */
-        case -26:  /* SSL: TLS                                                  */
         case -30:  /* deferred response: IPC + .z.w/.z.W                       */
         case -36:  /* load master key: OpenSSL/DARE                            */
         case -37:  /* .Q.prf0: code profiler                                    */

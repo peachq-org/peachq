@@ -6,6 +6,7 @@
 #include "qlang/q_env.h"       /* q_env_get — the settable handlers are globals */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_value — handler firing */
 #include "qlang/eval/q_view.h" /* q_view_zb — `.z.b` dependency dict */
+#include "qlang/net/q_tls.h"   /* q_tls_dotz_e — `.z.e` TLS connection status */
 #include "qlang/ops/q_sys.h"       /* q_sys_timer_active — stopped-timer no-op guard */
 #include "qlang/q_console.h"   /* q_console_str/_reset — drain .z.ts show/0N! output */
 #include "lang/cal.h"          /* ymd_to_date — build-date -> q date for .z.k */
@@ -396,6 +397,7 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
             case 'k': out = z_k(); break;
             /* one-line producers inlined; q_dotz_now_ns(0)=UTC, (1)=local */
             case 'b': out = q_view_zb(); break;                                  /* .z.b view deps */
+            case 'e': out = q_tls_dotz_e(); break;                               /* .z.e TLS status */
             case 'q': out = ray_bool(g_quiet); break;                            /* .z.q quiet */
             case 'i': out = ray_i64((int64_t)getpid()); break;                   /* .z.i pid   */
             case 'p': out = ray_timestamp(q_dotz_now_ns(0)); break;                   /* .z.p / .z.P */

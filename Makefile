@@ -85,8 +85,9 @@ RELEASE_CFLAGS = -fPIC $(WARNS) -std=$(STD) -O2 -march=$(RAY_MARCH) \
   -fassociative-math -ffp-contract=fast -fno-signed-zeros -fno-trapping-math
 
 UNAME_S := $(shell uname -s)
+# -ldl: OpenSSL is dlopen'd at runtime, never linked (see qlang/net/q_tls.c).
 ifeq ($(UNAME_S),Linux)
-  LIBS = -lm -lpthread
+  LIBS = -lm -lpthread -ldl
 else
   LIBS = -lm
 endif

@@ -223,8 +223,58 @@ ray_sock_t ray_sock_connect(const char* host, uint16_t port, int timeout_ms)
     return fd;
 }
 
+/* ---- overlay transport registry (see sock.h) ------------------------------
+ * Fixed table, linear scan, guarded by a count that is zero in every non-TLS
+ * process — so the hot IPC path pays one load and one predictable branch. */
+#define RAY_SOCK_IO_MAX 64
+static struct { ray_sock_t s; ray_sock_io_t io; } g_io[RAY_SOCK_IO_MAX];
+static int g_io_n = 0;
+
+static ray_sock_io_t* io_find(ray_sock_t s)
+{
+    if (g_io_n == 0 || s == RAY_INVALID_SOCK) return NULL;
+    for (int i = 0; i < RAY_SOCK_IO_MAX; i++)
+        if (g_io[i].io.ctx && g_io[i].s == s) return &g_io[i].io;
+    return NULL;
+}
+
+int ray_sock_io_attach(ray_sock_t s, const ray_sock_io_t* io)
+{
+    if (s == RAY_INVALID_SOCK || !io || !io->ctx) return -1;
+    ray_sock_io_detach(s);
+    for (int i = 0; i < RAY_SOCK_IO_MAX; i++) {
+        if (g_io[i].io.ctx) continue;
+        g_io[i].s = s; g_io[i].io = *io; g_io_n++;
+        return 0;
+    }
+    return -1;
+}
+
+bool ray_sock_io_active(ray_sock_t s) { return io_find(s) != NULL; }
+
+size_t ray_sock_io_pending(ray_sock_t s)
+{
+    ray_sock_io_t* io = io_find(s);
+    return (io && io->pending) ? io->pending(io->ctx) : 0;
+}
+
+void ray_sock_io_detach(ray_sock_t s)
+{
+    ray_sock_io_t* io = io_find(s);
+    if (!io) return;
+    void* ctx = io->ctx;
+    void (*fn)(void*) = io->close;
+    memset(io, 0, sizeof *io);      /* clear BEFORE the callback: close() must
+                                     * not see a half-live entry if it re-enters */
+    g_io_n--;
+    if (fn) fn(ctx);
+}
+
 int64_t ray_sock_send(ray_sock_t s, const void* buf, size_t len)
 {
+    ray_sock_io_t* ov = io_find(s);
+    if (ov) return ov->send(ov->ctx, buf, len);
+
     const uint8_t* p   = (const uint8_t*)buf;
     size_t         rem = len;
     while (rem > 0) {
@@ -256,6 +306,9 @@ int64_t ray_sock_send(ray_sock_t s, const void* buf, size_t len)
 
 int64_t ray_sock_recv(ray_sock_t s, void* buf, size_t len)
 {
+    ray_sock_io_t* ov = io_find(s);
+    if (ov) return ov->recv(ov->ctx, buf, len);
+
     for (;;) {
 #ifdef RAY_OS_WINDOWS
         int n = recv(s, (char*)buf, (int)len, 0);
@@ -314,6 +367,7 @@ int ray_sock_wait_readable(ray_sock_t s, int timeout_ms)
 void ray_sock_close(ray_sock_t s)
 {
     if (s == RAY_INVALID_SOCK) return;
+    ray_sock_io_detach(s);
 #ifdef RAY_OS_WINDOWS
     closesocket(s);
 #else
