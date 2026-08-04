@@ -39,6 +39,11 @@ ray_t* q_splay_count(ray_t* car);
 ray_t* q_splay_gather(ray_t* car, int64_t name, ray_t* idx);
 ray_t* q_splay_col(ray_t* car, int64_t sym);
 
+/* THE row-access law: rows at idx through the gather, result rank follows
+ * index rank — int vector (NULL = all) -> the table of those rows, int atom
+ * -> the row as a dict.  Owned result or error. */
+ray_t* q_splay_rows(ray_t* car, ray_t* idx);
+
 /* First-k-rows table through the gather (k < 0 = all rows; q_splay_table is
  * that spelling — display's row budget and set-of-carrier ride these). */
 ray_t* q_splay_prefix(ray_t* car, int64_t k);
