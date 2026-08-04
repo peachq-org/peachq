@@ -9,11 +9,17 @@
 #include "qlang/q_fmt.h"        /* .Q.s — the q console display string */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_rank — .Q.ops q-side valence */
 #include "qlang/q_registry.h"   /* q_registry_qsrc_ns — the `.q` roster */
+#include "qlang/io/q_splay.h"   /* q_splay_mapped_bytes/_zblocks — .Q.w, .Q.c.zblocks */
+#include "qlang/net/q_wirefile.h" /* q_wirefile_en — .Q.en's format-home body */
 #include "table/dict.h"         /* ray_dict_find_sym — the `.q` roster probe */
+#include "mem/heap.h"           /* ray_mem_stats — .Q.w's heap fields */
 #include "lang/internal.h"
 #include "table/sym.h"
 #include <string.h>
 #include <stdlib.h>
+#ifndef RAY_OS_WINDOWS
+#include <unistd.h>             /* sysconf — .Q.w's mphy */
+#endif
 
 
 /* (.Q.ty x) — LOWER char for a simple vector / string, UPPER for a uniform
@@ -197,4 +203,52 @@ ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs) {
         ray_release(c[i]);                /* ...but always drop our ref (add_col retains) */
     }
     return t;
+}
+
+/* (.Q.en[dom;t]) — the thin compat shim over the domain-append primitive
+ * (ref/dotq.md#en-enumerate-varchar-cols); the body lives at the format home. */
+ray_t* q_dotq_en_fn(ray_t* dom, ray_t* t) {
+    return q_wirefile_en(dom, t);
+}
+
+/* (.Q.c.zblocks[]) — cumulative compressed blocks inflated (internal witness:
+ * the splay-lazy suites assert per-gather deltas). */
+ray_t* q_dotq_zblocks_fn(ray_t** args, int64_t nargs) {
+    (void)args; (void)nargs;
+    return ray_i64(q_splay_zblocks());
+}
+
+/* (.Q.w[]) — memory stats as a dict (ref/dotq.md#w-memory-stats): the `\w`
+ * slots plus syms/symw.  mmap = the splay registry's LIVE mapped bytes (its
+ * region totals — what one munmap sweep would return); mphy = physical RAM;
+ * wmax 0 (no -w limit) and symw 0 (no cheap total) are recorded gaps. */
+ray_t* q_dotq_w_fn(ray_t** args, int64_t nargs) {
+    (void)args; (void)nargs;
+    ray_mem_stats_t st;
+    ray_mem_stats(&st);
+    int64_t mphy = 0;
+#ifndef RAY_OS_WINDOWS
+    long pages = sysconf(_SC_PHYS_PAGES), psz = sysconf(_SC_PAGE_SIZE);
+    if (pages > 0 && psz > 0) mphy = (int64_t)pages * (int64_t)psz;
+#endif
+    static const char* names[8] =
+        { "used", "heap", "peak", "wmax", "mmap", "mphy", "syms", "symw" };
+    int64_t vals[8] = {
+        (int64_t)st.bytes_allocated, (int64_t)st.sys_current,
+        (int64_t)st.peak_bytes, 0, q_splay_mapped_bytes(), mphy,
+        (int64_t)ray_sym_count(), 0,
+    };
+    ray_t* k = ray_sym_vec_new(RAY_SYM_W64, 8);
+    ray_t* v = ray_vec_new(RAY_I64, 8);
+    for (int i = 0; i < 8 && k && !RAY_IS_ERR(k) && v && !RAY_IS_ERR(v); i++) {
+        int64_t id = ray_sym_intern_runtime(names[i], strlen(names[i]));
+        k = ray_vec_append(k, &id);
+        if (k && !RAY_IS_ERR(k)) v = ray_vec_append(v, &vals[i]);
+    }
+    if (!k || RAY_IS_ERR(k) || !v || RAY_IS_ERR(v)) {
+        if (k && !RAY_IS_ERR(k)) ray_release(k);
+        if (v && !RAY_IS_ERR(v)) ray_release(v);
+        return q_err(QE_WSFULL);
+    }
+    return ray_dict_new(k, v);                          /* consumes both */
 }
