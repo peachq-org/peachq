@@ -48,6 +48,24 @@ ray_sock_t ray_sock_accept(ray_sock_t srv);
 ray_sock_t ray_sock_connect(const char* host, uint16_t port, int timeout_ms);
 int64_t    ray_sock_send(ray_sock_t s, const void* buf, size_t len);
 int64_t    ray_sock_recv(ray_sock_t s, void* buf, size_t len);
+
+/* Overlay transport: send/recv replacements a socket may carry, so every
+ * consumer of ray_sock_send/ray_sock_recv inherits TLS from one seam.  The
+ * implementation lives in the q layer (qlang/net/q_tls.c) — this file keeps no
+ * crypto and no link-time OpenSSL dependency.  MAIN-THREAD ONLY, as kdb also
+ * restricts TLS (kb/ssl.md). */
+typedef struct ray_sock_io_s {
+    void*   ctx;
+    int64_t (*send)(void* ctx, const void* buf, size_t len);
+    int64_t (*recv)(void* ctx, void* buf, size_t len);
+    void    (*close)(void* ctx);       /* frees ctx; must NOT close the fd */
+    size_t  (*pending)(void* ctx);     /* decrypted bytes poll() cannot see */
+} ray_sock_io_t;
+
+int    ray_sock_io_attach(ray_sock_t s, const ray_sock_io_t* io);  /* 0 / -1 full */
+bool   ray_sock_io_active(ray_sock_t s);
+size_t ray_sock_io_pending(ray_sock_t s);
+void   ray_sock_io_detach(ray_sock_t s);
 /* True when s's connected peer is a loopback/local endpoint (127.0.0.0/8,
  * ::1, ::ffff:127.x, or AF_UNIX).  kdb never compresses outbound messages on
  * a local link (basics/ipc.md); a getpeername failure returns true so the
