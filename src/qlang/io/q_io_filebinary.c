@@ -10,6 +10,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/io/q_io.h"
 #include "qlang/ops/q_dollar.h"  /* q_cast_designator, q_dollar_cast */
+#include "lang/eval.h"           /* ray_eval_get_restricted — compressed save */
 #include <stdlib.h>
 #include <string.h>
 
@@ -212,8 +213,27 @@ ray_t* q_io_filebinary_wrap(ray_t* x, ray_t* y) {
         int64_t n = ray_len(x);
         ray_t** e = (ray_t**)ray_data(x);
         if (n == 2) return fb_read(e[0], e[1], y);
-        /* (file;blockSize;algorithm;level) — ref/file-binary.md § Compression */
-        if (n == 4 && e[0] && e[0]->type == -RAY_SYM) return q_err(QE_NYI);
+        /* (file;blockSize;algorithm;level) — ref/file-binary.md § Compression:
+         * Save Binary's raw bytes through the container. */
+        if (n == 4 && e[0] && e[0]->type == -RAY_SYM) {
+            int64_t lbs, alg, lvl;
+            if (!q_type_strict_i64(e[1], &lbs) || !q_type_strict_i64(e[2], &alg) ||
+                !q_type_strict_i64(e[3], &lvl))
+                return q_err(QE_TYPE);
+            if (alg == 1 || alg == 3 || alg == 4 || alg == 5) return q_err(QE_NYI);
+            if (alg == 0) return fb_save(e[0], y);
+            if (!y || ray_is_atom(y) || y->type != RAY_BYTE_ONLY)
+                return q_err(QE_NYI);            /* raw-byte payloads only */
+            ray_t* path = q_io_file_path(e[0]);
+            if (!path) return q_err(QE_TYPE);
+            ray_t* bad = ray_eval_get_restricted() ? q_err(QE_ACCESS)
+                       : q_io_zip_write(path, (const uint8_t*)ray_data(y),
+                                        (size_t)ray_len(y), (int)lbs, (int)alg, (int)lvl);
+            ray_release(path);
+            if (bad) return bad;
+            ray_retain(e[0]);
+            return e[0];
+        }
     }
     return q_err(QE_TYPE);
 }
