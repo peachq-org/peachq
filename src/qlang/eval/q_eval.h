@@ -26,6 +26,10 @@ void q_eval_syms_reset(void);
  * hole), result OWNED; `row` is fv's manifest row when known, NULL otherwise. */
 ray_t* q_eval_apply(ray_t* fv, const struct q_op* row, ray_t** args, int64_t n);
 
+/* Post-registry bootstrap hook (q_runtime_create): caches the registry
+ * identities the apply hot path compares by pointer. */
+void q_eval_apply_init(void);
+
 /* THE materialization boundary (materialization phase 1, design 2026-07-24):
  * the ONE home for the force operation.  A lazy DAG handle is forced to a
  * concrete value; a concrete value (or error/NULL) passes through untouched.
