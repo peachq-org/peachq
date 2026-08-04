@@ -498,42 +498,65 @@ ray_t* q_splay_count(ray_t* car) {
     return ray_i64(e->cols[0].h.count);
 }
 
-/* First-k-rows table (k < 0 = every row), each column through the gather —
- * a zip column inflates only the prefix blocks, a mapped one touches only
- * the prefix pages.  q_splay_table is the k<0 case (display, set-of-carrier). */
-ray_t* q_splay_prefix(ray_t* car, int64_t k) {
-    ray_t* err = NULL;
-    splay_ent* e = splay_resolve(car, &err);
-    if (!e) return err ? err : q_err(QE_TYPE);
-    ray_t* idx = NULL;
-    if (k >= 0) {
-        idx = ray_vec_new(RAY_I64, k > 0 ? k : 1);
-        if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
-        for (int64_t i = 0; i < k; i++) idx = ray_vec_append(idx, &i);
-        if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
-    }
+/* every column gathered at idx (NULL = whole) into a table, the row-count
+ * agreement checked — the one loop rows/prefix/table all ride */
+static ray_t* splay_rows_tbl(splay_ent* e, ray_t* idx) {
     ray_t* tbl = ray_table_new(e->ncols > 0 ? e->ncols : 1);
-    if (!tbl || RAY_IS_ERR(tbl)) { if (idx) ray_release(idx); return tbl ? tbl : q_err(QE_OOM); }
+    if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_OOM);
     int64_t rows = -1;
     for (int64_t i = 0; i < e->ncols; i++) {
         ray_t* col = splay_col_gather_i(e, i, idx);
         if (!col || RAY_IS_ERR(col)) {
             ray_release(tbl);
-            if (idx) ray_release(idx);
             return col ? col : q_err(QE_IO);
         }
         int64_t n = ray_len(col);
         if (rows < 0) rows = n;
         if (n != rows) {
             ray_release(col); ray_release(tbl);
-            if (idx) ray_release(idx);
             return q_err(QE_CORRUPT);
         }
         tbl = ray_table_add_col(tbl, e->cols[i].name, col);
         ray_release(col);
-        if (!tbl || RAY_IS_ERR(tbl)) { if (idx) ray_release(idx); return tbl ? tbl : q_err(QE_OOM); }
+        if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_OOM);
     }
-    if (idx) ray_release(idx);
+    return tbl;
+}
+
+/* THE row-access law (result rank follows index rank, the index home's law):
+ * an int VECTOR (NULL = every row) answers the table of those rows, an int
+ * ATOM the row as a dict — each column through the gather seam, so a zip
+ * column inflates only the covering blocks. */
+ray_t* q_splay_rows(ray_t* car, ray_t* idx) {
+    ray_t* err = NULL;
+    splay_ent* e = splay_resolve(car, &err);
+    if (!e) return err ? err : q_err(QE_TYPE);
+    if (!idx || !q_type_is_int_atom(idx)) return splay_rows_tbl(e, idx);
+    ray_t* vals = ray_list_new(e->ncols > 0 ? e->ncols : 1);
+    if (!vals || RAY_IS_ERR(vals)) return vals ? vals : q_err(QE_OOM);
+    for (int64_t i = 0; i < e->ncols; i++) {
+        ray_t* v = splay_col_gather_i(e, i, idx);
+        if (!v || RAY_IS_ERR(v)) { ray_release(vals); return v ? v : q_err(QE_IO); }
+        vals = ray_list_append(vals, v);
+        ray_release(v);
+        if (!vals || RAY_IS_ERR(vals)) return vals ? vals : q_err(QE_OOM);
+    }
+    ray_t* cv = q_list_collapse(vals);
+    ray_release(vals);
+    if (!cv || RAY_IS_ERR(cv)) return cv ? cv : q_err(QE_TYPE);
+    ray_retain(e->keys);
+    return ray_dict_new(e->keys, cv);                   /* consumes both */
+}
+
+/* First-k-rows table (k < 0 = every row) — display's row budget rides this. */
+ray_t* q_splay_prefix(ray_t* car, int64_t k) {
+    if (k < 0) return q_splay_rows(car, NULL);
+    ray_t* idx = ray_vec_new(RAY_I64, k > 0 ? k : 1);
+    if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
+    for (int64_t i = 0; i < k; i++) idx = ray_vec_append(idx, &i);
+    if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
+    ray_t* tbl = q_splay_rows(car, idx);
+    ray_release(idx);
     return tbl;
 }
 
