@@ -12,7 +12,9 @@
 #include "qlang/q_registry_internal.h" /* q_str_split_lines, q_type_strict_i64 */
 #include "qlang/base/q_err.h"
 #include "qlang/io/q_handles.h" /* q_handles_read1 — the fifo-handle read form */
+#include "qlang/io/q_splay.h"   /* q_io_set: a carrier y writes as its table */
 #include "qlang/net/q_gz.h"     /* q_gz_inflate_zlib — the kxzip block codec */
+#include "qlang/net/q_wirefile.h" /* the format writers behind q_io_set */
 #include "lang/eval.h"      /* ray_eval_get_restricted */
 #include "store/fileio.h"   /* ray_mkdir_p — the parent directories a write promises */
 #include "table/sym.h"      /* ray_sym_intern_runtime, ray_sym_vec_cell */
@@ -634,6 +636,76 @@ static ray_t* read0_wrap_impl(ray_t* x) {
     }
     ray_release(b);
     return r;
+}
+
+/* ---- `set`'s FILE half (q_env.c's q_setg_wrap keeps name-vs-path only) ----
+ * One front door owning the on-disk-format classification: `:f flat (a
+ * trailing slash routes the writer to the splay dir), the 4-item
+ * (file;lbs;alg;lvl) compression form (ref/file-compression.md), and the
+ * (dir;sympath) domain overload — the openq API extension the splay writer
+ * records. */
+
+int q_io_is_fsym(ray_t* v) {
+    if (!v || v->type != -RAY_SYM) return 0;
+    ray_t* s = ray_sym_str(v->i64);
+    int is = s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == ':';
+    if (s) ray_release(s);
+    return is;
+}
+
+/* A mapped splay written to a file writes as the table it is (the 98h
+ * facade) — materialization sits at THIS boundary, never inside the format
+ * writer.  Owned result. */
+static ray_t* set_file_y(ray_t* y) {
+    if (q_splay_is(y)) return q_splay_table(y);
+    ray_retain(y);
+    return y;
+}
+
+ray_t* q_io_set(ray_t* x, ray_t* y) {
+    if (x && x->type == RAY_LIST) {
+        int64_t n = ray_len(x);
+        ray_t** e = (ray_t**)ray_data(x);
+        if (n == 4 && q_io_is_fsym(e[0])) {
+            int64_t lbs, alg, lvl;
+            if (!q_type_strict_i64(e[1], &lbs) || !q_type_strict_i64(e[2], &alg) ||
+                !q_type_strict_i64(e[3], &lvl))
+                return q_err(QE_TYPE);
+            ray_t* fy = set_file_y(y);
+            if (!fy || RAY_IS_ERR(fy)) return fy ? fy : q_err(QE_TYPE);
+            /* an explicit alg (0 included) OVERRIDES `.z.zd` — 0 writes plain */
+            ray_t* r = q_wirefile_write_zip(e[0], fy, (int)lbs, (int)alg, (int)lvl);
+            ray_release(fy);
+            return r;
+        }
+        if (n == 2 && q_io_is_fsym(e[0]) && q_io_is_fsym(e[1])) {
+            ray_t* fy = set_file_y(y);
+            if (!fy || RAY_IS_ERR(fy)) return fy ? fy : q_err(QE_TYPE);
+            ray_t* r = q_wirefile_write_splay(e[0], e[1], fy, -1, -1, -1);
+            ray_release(fy);
+            return r;
+        }
+        return q_err(QE_NYI);
+    }
+    if (x && x->type == RAY_SYM && ray_len(x) == 2) {   /* (dir;sympath) collapses */
+        ray_t* d = ray_sym(ray_vec_get_sym_id(x, 0));
+        ray_t* s = ray_sym(ray_vec_get_sym_id(x, 1));
+        ray_t* fy = set_file_y(y);
+        ray_t* r = !fy || RAY_IS_ERR(fy) ? (fy ? fy : q_err(QE_TYPE))
+                 : (q_io_is_fsym(d) && q_io_is_fsym(s))
+                       ? q_wirefile_write_splay(d, s, fy, -1, -1, -1)
+                       : q_err(QE_NYI);
+        if (fy && !RAY_IS_ERR(fy)) ray_release(fy);
+        ray_release(s);
+        ray_release(d);              /* write_splay retained d when handing it back */
+        return r;
+    }
+    if (!x || x->type != -RAY_SYM || !q_io_is_fsym(x)) return q_err(QE_NYI);
+    ray_t* fy = set_file_y(y);
+    if (!fy || RAY_IS_ERR(fy)) return fy ? fy : q_err(QE_TYPE);
+    ray_t* r = q_wirefile_write(x, fy);
+    ray_release(fy);
+    return r ? r : q_err(QE_TYPE);
 }
 
 /* q `hdel x` — ref/hdel.md.  Delete the file or (empty) folder named by the
