@@ -60,12 +60,22 @@ typedef struct ray_sock_io_s {
     int64_t (*recv)(void* ctx, void* buf, size_t len);
     void    (*close)(void* ctx);       /* frees ctx; must NOT close the fd */
     size_t  (*pending)(void* ctx);     /* decrypted bytes poll() cannot see */
+    /* The caller's send deadline, in ms, or <= 0 for unbounded — set through
+     * ray_sock_set_timeout so ONE call bounds the raw socket and the overlay
+     * alike.  Without it an overlay send would wait forever where the plain
+     * path it replaced was bounded, which is a bounded-send policy silently
+     * deleted by attaching TLS. */
+    int     timeout_ms;
 } ray_sock_io_t;
 
 int    ray_sock_io_attach(ray_sock_t s, const ray_sock_io_t* io);  /* 0 / -1 full */
 bool   ray_sock_io_active(ray_sock_t s);
 size_t ray_sock_io_pending(ray_sock_t s);
 void   ray_sock_io_detach(ray_sock_t s);
+/* The attached overlay's ctx, or NULL.  Only q_tls.c attaches overlays, so it
+ * alone may interpret this (per-handle `.z.e` / `-26!handle` read it back). */
+void*  ray_sock_io_ctx(ray_sock_t s);
+int    ray_sock_io_timeout(ray_sock_t s);   /* the bound above; 0 = unbounded */
 /* True when s's connected peer is a loopback/local endpoint (127.0.0.0/8,
  * ::1, ::ffff:127.x, or AF_UNIX).  kdb never compresses outbound messages on
  * a local link (basics/ipc.md); a getpeername failure returns true so the
@@ -74,6 +84,16 @@ bool       ray_sock_is_loopback(ray_sock_t s);
 /* Block until s is readable (or hung up).  timeout_ms < 0 = no timeout.
  * Returns 1 readable, 0 timed out, -1 error. */
 int        ray_sock_wait_readable(ray_sock_t s, int timeout_ms);
+int        ray_sock_wait_writable(ray_sock_t s, int timeout_ms);   /* same contract */
+/* Read without consuming (MSG_PEEK): bytes peeked, 0 peer closed, -1 error.
+ * The accept-side TLS mode sniff needs the first byte left in the kernel for
+ * OpenSSL (or for the plain protocol) to read again. */
+int64_t    ray_sock_peek(ray_sock_t s, void* buf, size_t len);
+/* Bound send/recv on s to ms: SO_SNDTIMEO/SO_RCVTIMEO for the raw socket AND
+ * the attached overlay's own waits (see ray_sock_io_t.timeout_ms), so one call
+ * expresses one policy whether or not the socket carries TLS.  ms <= 0 clears
+ * the bound.  Callers with a deadline are expected to clear it afterwards. */
+void       ray_sock_set_timeout(ray_sock_t s, int ms);
 void       ray_sock_close(ray_sock_t s);
 ray_err_t  ray_sock_set_nonblocking(ray_sock_t s);
 ray_err_t  ray_sock_set_blocking(ray_sock_t s);
