@@ -75,6 +75,12 @@ size_t ray_ipc_decompress(const uint8_t* src, size_t clen,
  * change. */
 int64_t ray_ipc_current_handle(void);
 
+/* The SOCKET fd behind the current connection, whatever protocol phase it is
+ * in (`.z.e` asks about the transport, not the IPC handle namespace, so this
+ * deliberately skips the send-target filter ray_ipc_fd_of_handle applies).
+ * -1 when no connection is on the stack. */
+int64_t ray_ipc_current_fd(void);
+
 /* ===== Poll-based IPC (new API) ===== */
 
 /* Register IPC listener on poll. Returns selector id or -1. */

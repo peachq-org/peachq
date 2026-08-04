@@ -26,6 +26,7 @@
 #include "qlang/q_dotz.h"
 #include "qlang/ops/q_sys.h"     /* q_sys_listen — single-homed listen+readback */
 #include "qlang/q_console.h"  /* q_console_pipe_enable — the `--nonlegacy` display */
+#include "qlang/net/q_tls.h"  /* q_tls_server_mode_set — the `-E` TLS server mode */
 #include "core/poll.h"
 #include "core/runtime.h"
 #include <rayforce.h>
@@ -59,6 +60,7 @@ int main(int argc, char** argv) {
     bool        port_auto = false;
     const char* auth_pw = NULL;
     bool        auth_restricted = false;
+    int         tls_mode = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--port") == 0) {
@@ -74,6 +76,15 @@ int main(int argc, char** argv) {
             }
             have_port = true;
             port_auto = (k == 2);
+        } else if (strcmp(argv[i], "-E") == 0) {
+            /* cmdline.md: 0 plain, 1 plain and TLS, 2 TLS only.  Strict like
+             * `-p`: a mistyped mode must not silently downgrade to plaintext. */
+            const char* spec = (i + 1 < argc) ? argv[++i] : "";
+            if (strlen(spec) != 1 || spec[0] < '0' || spec[0] > '2') {
+                fprintf(stderr, "q: invalid -E mode '%s' (expected 0, 1 or 2)\n", spec);
+                return 2;
+            }
+            tls_mode = spec[0] - '0';
         } else if (strcmp(argv[i], "--nonlegacy") == 0) {
             /* Opt IN to the pipe-table display (q_console.c).  Launch-only and
              * OFF by default: kdb-true legacy display stays the default, and one
@@ -87,6 +98,8 @@ int main(int argc, char** argv) {
             auth_restricted = true;
         }
     }
+
+    q_tls_server_mode_set(tls_mode);   /* before any listener can accept */
 
     ray_runtime_t* rt = q_runtime_create(argc, argv);
     if (!rt) { fprintf(stderr, "runtime init failed\n"); return 1; }
