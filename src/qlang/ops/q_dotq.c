@@ -252,3 +252,27 @@ ray_t* q_dotq_w_fn(ray_t** args, int64_t nargs) {
     }
     return ray_dict_new(k, v);                          /* consumes both */
 }
+
+/* (.Q.gc[]) — run garbage collection, return the bytes of heap handed back to
+ * the OS (ref/dotq.md#gc-garbage-collect; its own example returns 0 when
+ * nothing was).  The figure is the caller-heap pool-map delta across
+ * ray_heap_gc(): its pass 4 munmaps empty oversized pools — the only phase
+ * that shrinks the map (pass 5's madvise keeps it), so this is rough-but-
+ * honest.  Only ray_tl_heap is walked: reading other registry heaps' pool
+ * tables here would race their owners, and gc only reclaims worker-heap pools
+ * when workers are idle anyway — an undercount, never a fabrication. */
+static int64_t dotq_pool_bytes(void) {
+    ray_heap_t* h = ray_tl_heap;
+    int64_t total = 0;
+    for (uint32_t p = 0; h && p < h->pool_count; p++)
+        total += (int64_t)BSIZEOF(h->pools[p].pool_order);
+    return total;
+}
+
+ray_t* q_dotq_gc_fn(ray_t** args, int64_t nargs) {
+    (void)args; (void)nargs;
+    int64_t before = dotq_pool_bytes();
+    ray_heap_gc();
+    int64_t freed = before - dotq_pool_bytes();
+    return ray_i64(freed > 0 ? freed : 0);
+}
