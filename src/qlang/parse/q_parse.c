@@ -1127,9 +1127,12 @@ static P parse_base_q(Parser *p, QCtx ctx) {
         int is_by = qtok_sym_is(tk, "by"), is_from = qtok_sym_is(tk, "from"),
             is_where = qtok_sym_is(tk, "where");
         switch (ctx) {
-        case Q_SELECT: if (is_by || is_from) return EMPTY;
+        /* Before `from`, `where` cannot be the CLAUSE: ref/select.md's syntax
+         * puts it last (`… from texp [where pw]`), so it is the monadic VERB
+         * and `seq where cond` is the juxtaposition `seq[where cond]`. */
+        case Q_SELECT: if (is_by || is_from) return EMPTY; if (is_where) break;
                        q_die("qsql: unexpected keyword after select (expected by/from)");
-        case Q_BY:     if (is_from) return EMPTY; if (is_by) break;
+        case Q_BY:     if (is_from) return EMPTY; if (is_by || is_where) break;
                        q_die("qsql: unexpected keyword in by phrase (expected from)");
         case Q_FROM:   if (is_where) return EMPTY; if (is_from) break;
                        q_die("qsql: unexpected keyword after from (expected where)");
@@ -1398,8 +1401,22 @@ static inline int qsql_is_fn_value(const ray_t *v) {
  * (`sum a` -> `a`, `a` -> `a`).  Returns a fresh owned `sym, or NULL. */
 static ray_t *qsql_derive_alias(ray_t *expr) {
     if (!expr) return NULL;
-    if (expr->type == -RAY_SYM && (expr->attrs & Q_ATTR_QUOTED))
-        return qsql_colsym(expr->i64);
+    if (expr->type == -RAY_SYM && (expr->attrs & Q_ATTR_QUOTED)) {
+        /* a dotted reference keys its column by the LAST segment: `10 xbar
+         * time.minute` -> `minute` (ref/xbar.md:33, kb/programming-idioms.md:265) */
+        int64_t id = expr->i64;
+        ray_t *s = ray_sym_str(id);
+        if (s) {
+            const char *p = ray_str_ptr(s);
+            size_t n = ray_str_len(s), cut = 0;
+            for (size_t i = 0; i < n; i++)
+                if (p[i] == '.') cut = i + 1;
+            if (cut > 0 && cut < n)
+                id = ray_sym_intern_runtime(p + cut, (int64_t)(n - cut));
+            ray_release(s);
+        }
+        return qsql_colsym(id);
+    }
     if (expr->type == RAY_LIST) {
         int64_t n = ray_len(expr);
         ray_t **e = (ray_t **)ray_data(expr);
