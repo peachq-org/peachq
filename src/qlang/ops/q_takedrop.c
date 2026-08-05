@@ -172,6 +172,14 @@ static ray_t* take_unify(ray_t* r) {
 ray_t* q_take_wrap(ray_t* x, ray_t* y) {
     if (x && x->type == -RAY_SYM && y && ray_is_vec(y))
         return q_attr_set_dispatch(x, y);              /* `s#v — set attribute */
+    if (RAY_IS_NULL(y)) {   /* :: is an atom take fills from, but names no element lane */
+        ray_t* e = ray_list_new(1);
+        if (RAY_IS_ERR(e)) return e;
+        e = ray_list_append(e, y);
+        ray_t* r = RAY_IS_ERR(e) ? e : q_take_wrap(x, e);
+        if (!RAY_IS_ERR(e)) ray_release(e);
+        return r;
+    }
     if (q_type_is_int_vec(x) && ray_len(x) >= 2) return reshape(x, y);
     ray_t* es = q_funsql_entries_take(x, y);  /* dict keys / table cols / keyed */
     if (es) return es;
