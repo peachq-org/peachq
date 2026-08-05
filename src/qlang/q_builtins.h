@@ -77,4 +77,8 @@ ray_t* q_dotq_gc_fn(ray_t** args, int64_t nargs);
  * on it.  Lives beside the `type` verb: classifying a function carrier is the
  * apply module's answer, so this cannot sit on the type axis in base/. */
 int q_type_is_fn(ray_t* x);
+
+/* The q type NUMBER itself (the `type` verb's answer): >= 100 for function
+ * values, the raw tag otherwise.  The ordering law keys functions on it. */
+int8_t q_builtins_type_num(ray_t* x);
 #endif /* Q_BUILTINS_H */

@@ -869,14 +869,15 @@ static P parse_base(Parser *p) {
         }
         ray_t *e = parse_E(p, Q_NONE);
         expect(p, T_RPAREN, "expected ')'");
-        /* Inside parens an elided element is the generic null (kdb: `(;5)` is
-         * the 2-list (::;5)) — normalize the C-NULL slots parse_E preserves
-         * for top-level statements, so no NULL ever reaches ray_eval through
-         * a value expression (e.g. an assignment RHS). */
+        /* Inside parens an elided element is a projection HOLE — the literal
+         * becomes a projection of the list constructor ("omission of values
+         * results in projection", releases/ChangesIn4.1.md; the 8-item cap in
+         * basics/application.md is the function-rank cap), so `(1;;3) 7` fills
+         * while a list holding an explicit `::` value stays data and indexes. */
         if (ray_len(e) > 1) {
             ray_t **slots = (ray_t **)ray_data(e);
             for (int64_t i = 0; i < ray_len(e); i++) {
-                if (!slots[i]) { slots[i] = q_null(); continue; }
+                if (!slots[i]) { slots[i] = hole(); continue; }
                 /* a LONE glyph verb element is the operator VALUE — its
                  * dyadic row (`(+;7;3)` carries Add; eval (+;7;3) -> 10),
                  * the same bare-verb-as-value convention bracket slots use */

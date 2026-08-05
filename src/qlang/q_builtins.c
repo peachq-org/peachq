@@ -113,9 +113,9 @@ static ray_t* id_fn(ray_t* x) {
 static ray_unary_fn g_base_type  = NULL;
 static ray_unary_fn g_base_count = NULL;
 
-/* q `type` as the kdb short: FUNCTION values report 100h lambda / 102h
- * operator / 103h iterator / 104h projection / 106+adv derived / 101h
- * generic-null unary; every other value's internal tag ALREADY IS its kdb type
+/* q `type` as the kdb short: FUNCTION values report 100h lambda / 101h unary
+ * primitive (incl. the generic null) / 102h binary+overload primitive / 103h
+ * iterator / 104h projection / 106+adv derived; every other value's internal tag ALREADY IS its kdb type
  * number (long 7, sym 11, list 0, table 98, dict 99), atoms stored NEGATIVE.
  * A native -RAY_STR string reports -10h (char ATOM) vs kdb's 10h char VECTOR —
  * a recorded string-model divergence (ARCHITECTURE.md).  Carrier classification
@@ -134,8 +134,8 @@ static int8_t type_of(ray_t* x) {
     default: break;
     }
     if (x->type == RAY_LAMBDA) return 100;
-    if (x->type == RAY_UNARY || x->type == RAY_BINARY || x->type == RAY_VARY)
-        return 102;
+    if (x->type == RAY_UNARY) return 101;
+    if (x->type == RAY_BINARY || x->type == RAY_VARY) return 102;
     if (x->type == RAY_DICT && q_splay_is(x)) return 98;   /* mapped splay IS a table */
     return x->type;
 }
@@ -151,6 +151,8 @@ int q_type_is_fn(ray_t* x) {
     int8_t t = type_of(x);
     return t >= 100 && t <= 112;
 }
+
+int8_t q_builtins_type_num(ray_t* x) { return x ? type_of(x) : 0; }
 
 /* ---- table introspection (type-output feature) --------------------------- */
 /* The tag -> type-char map is q_type_char (q_type.c, the type-axis home). */
