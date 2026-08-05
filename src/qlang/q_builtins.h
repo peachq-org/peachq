@@ -71,6 +71,7 @@ ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs);
 ray_t* q_dotq_w_fn(ray_t** args, int64_t nargs);
 ray_t* q_dotq_en_fn(ray_t* dom, ray_t* t);
 ray_t* q_dotq_zblocks_fn(ray_t** args, int64_t nargs);
+ray_t* q_dotq_gc_fn(ray_t** args, int64_t nargs);
 
 /* Is x a FUNCTION value — the 100h-112h band?  `\f`/`\v` partition a namespace
  * on it.  Lives beside the `type` verb: classifying a function carrier is the

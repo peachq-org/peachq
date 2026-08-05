@@ -15,6 +15,7 @@
 #include "qlang/ops/q_sys.h"      /* q_sys_is_cmd / q_sys_line / q_system_fn — the `\`-command door */
 #include "qlang/ops/q_index.h"    /* q_index_elem_at — the element-read home */
 #include "lang/eval.h"            /* ray_eval_is_interrupted, ray_eval_set_remote_*_fn */
+#include "mem/heap.h"             /* ray_heap_gc — the `\g 1` statement-end collect */
 #include "mem/sys.h"              /* ray_sys_alloc — remote-eval scratch */
 #include "ops/ops.h"              /* ray_is_lazy, ray_lazy_materialize */
 #include "app/term.h"             /* ray_term_interrupted */
@@ -50,6 +51,17 @@ const char* q_ctx_strip_prompt(const char* s) {
     while (s[0] == 'q' && s[1] == ')' && s[2] != ')')
         s += 2;
     return s;
+}
+
+/* GC policy has ONE home: this statement seam, covering all three doors
+ * (run_line, remote_eval_str, remote_apply).  `\g 0` (deferred, the kdb
+ * default — basics/syscmds.md#g-garbage-collection-mode) collects NOTHING
+ * here, so the default path is byte-for-byte the pre-`\g` behaviour; `\g 1`
+ * (immediate) collects after every statement.  ray_heap_gc self-gates its
+ * cross-heap passes on ray_parallel_flag == 0, and a statement end is that
+ * state by construction. */
+static void ctx_statement_end(void) {
+    if (q_sys_gc_mode()) ray_heap_gc();
 }
 
 /* ===== Shared line processing =====
@@ -96,6 +108,7 @@ void q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
             ray_error_free(sr);
         }
         fflush(out);
+        ctx_statement_end();   /* a `\g 1` line collects at its own end (kdb: set runs gc) */
         return;
     }
 
@@ -133,6 +146,7 @@ void q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
         ray_term_clear_interrupt();
         if (RAY_IS_ERR(r)) ray_error_free(r); else ray_release(r);
         fprintf(err, "error: stop\n");
+        ctx_statement_end();
         return;
     }
 
@@ -143,6 +157,7 @@ void q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
                 (text && tn) ? (int)tn : 4, (text && tn) ? text : "eval");
         q_err_drop();
         ray_error_free(r);
+        ctx_statement_end();
         return;
     }
     /* q console silence: a (last-statement) assignment prints nothing; a
@@ -155,6 +170,7 @@ void q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
     }
     ray_release(r);
     fflush(out);
+    ctx_statement_end();
 }
 
 int q_ctx_run_file(const char* path, FILE* out, FILE* err) {
@@ -244,6 +260,7 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
         { const char* con = q_console_str();
           if (con && *con) fputs(con, stdout);
           q_console_reset(); }
+        ctx_statement_end();
         return r;
     }
     char* tmp = (char*)ray_sys_alloc(len + 1);
@@ -268,6 +285,7 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
     { const char* con = q_console_str();
       if (con && *con) fputs(con, stdout);
       q_console_reset(); }
+    ctx_statement_end();
     if (is_assign && !RAY_IS_ERR(r)) {   /* an error still propagates (-128h) */
         ray_release(r);
         ray_retain(RAY_NULL_OBJ);
@@ -332,6 +350,7 @@ static ray_t* remote_apply(ray_t* list) {
     if (r && ray_is_lazy(r)) r = ray_lazy_materialize(r);
     for (int64_t j = 0; j < argc; j++) ray_release(argv[j]);
     ray_release(head);
+    ctx_statement_end();
     return r;
 }
 
