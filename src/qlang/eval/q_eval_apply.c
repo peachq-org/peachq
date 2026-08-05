@@ -12,6 +12,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/eval/q_eval.h"
+#include "qlang/eval/q_dbg.h"  /* frame list + the error seams (basics/debug.md) */
 #include "qlang/q_prim.h"
 #include "qlang/eval/q_eval_internal.h"
 #include "qlang/eval/q_view.h"     /* view carriers apply as their value */
@@ -932,6 +933,7 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
         }
     }
     g_frame_depth++;
+    q_dbg_frame_push(lam);
     /* the body runs in the namespace the lambda was DEFINED in, so a callee
      * resolves its own globals, not its caller's (see q_eval_apply_lambda_new) */
     int64_t caller_ctx = q_env_ctx(), lam_ctx = c[3] ? c[3]->i64 : 0;
@@ -941,6 +943,9 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
     ray_t** bs = (ray_t**)ray_data(body);
     for (int64_t i = 0; i < nb; i++) {
         ray_t* nr = q_eval(bs[i]);
+        /* the lambda-boundary error seam: locals still live; a `:r` resume
+         * substitutes the statement's result and the body continues */
+        if (RAY_IS_ERR(nr)) nr = q_dbg_lambda_filter(nr);
         if (RAY_IS_ERR(nr)) { r = nr; break; }
         ray_release(r);
         r = nr;
@@ -955,6 +960,7 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
     /* an explicit `\d` in the body is a SESSION directive and outlives the call
      * — only the implicit definition-context is unwound (namespace/switch.qcmd) */
     if (q_env_ctx() == lam_ctx) q_env_ctx_set(caller_ctx);
+    q_dbg_frame_pop();
     g_frame_depth--;
     q_env_frame_pop();
     return r;
@@ -1328,7 +1334,8 @@ static ray_t* idxproj(ray_t* head, ray_t* arg) {
     return g ? g : q_err(QE_TYPE);
 }
 
-ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
+static ray_t* apply_dispatch(ray_t* fv, const q_op_t* row, ray_t** args,
+                             int64_t n) {
     if (n == 1 && args[0]) {
         ray_t* one = idxproj(fv, args[0]);
         if (one) return one;
@@ -1358,6 +1365,14 @@ ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
         return r;
     }
     return q_eval_apply_concrete(apply_inner(fv, row, args, n));
+}
+
+/* the ONE dispatch exit: the deepest apply to produce an error snapshots the
+ * live frames here (and, under `\e 1`, suspends into the debugger) */
+ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
+    ray_t* r = apply_dispatch(fv, row, args, n);
+    if (r && RAY_IS_ERR(r)) return q_dbg_filter(r, fv, args, n);
+    return r;
 }
 
 /* ===== the public value-apply seam ======================================= */
@@ -1429,6 +1444,7 @@ ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n) {
 static ray_t* trap_catch(ray_t* r, ray_t* e) {
     if (!r || !RAY_IS_ERR(r)) return r;
     if (q_err_is(r, QE_RETURN)) return r;
+    q_dbg_snapshot_clear();             /* a caught error's trace is spent */
     if (!q_eval_apply_is_fn(e) && !RAY_IS_NULL(e)) {
         q_err_drop();                   /* swallow the payload with the error */
         ray_error_free(r);
@@ -1507,7 +1523,9 @@ static ray_t* amend_value(ray_t** args, int64_t n, int dot) {
 ray_t* q_eval_at_wrap(ray_t** args, int64_t n) {
     if (n == 2) return q_eval_apply_concrete(q_eval_apply_value(args[0], &args[1], 1));
     if (n == 3 && q_eval_apply_is_fn(args[0])) {
+        q_dbg_trap_enter();             /* error-trap mode 0 inside the trap */
         ray_t* r = q_eval_apply_concrete(q_eval_apply_value(args[0], &args[1], 1));
+        q_dbg_trap_exit();
         return trap_catch(r, args[2]);
     }
     if (n == 3 || n == 4) return amend_value(args, n, 0);
@@ -1519,7 +1537,9 @@ ray_t* q_eval_at_wrap(ray_t** args, int64_t n) {
  * head Amend (i is the path list). */
 ray_t* q_eval_dot_wrap(ray_t** args, int64_t n) {
     if (n == 3 && q_eval_apply_is_fn(args[0])) {
+        q_dbg_trap_enter();
         ray_t* r = q_eval_dot_wrap(args, 2);
+        q_dbg_trap_exit();
         return trap_catch(r, args[2]);
     }
     if (n == 3 || n == 4) return amend_value(args, n, 1);
