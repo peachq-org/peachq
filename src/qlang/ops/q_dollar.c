@@ -858,8 +858,7 @@ ray_t* q_dollar(ray_t* t, ray_t* x) {
         return q_err(QE_NYI);
     }
     /* `10h$`/`` `char$``/`"c"$` all land here with is_tok=0 and reinterpret via
-     * q_dollar_cast; only the UPPERCASE char token `"C"$` carries is_tok=1 and
-     * stays a deferred char-Tok — q_tok's default errors 'nyi (pinned by the
-     * cast_tok_deferred unit test). */
+     * q_dollar_cast; the UPPERCASE char token `"C"$` carries is_tok=1 and Toks
+     * one char per field — `0:`'s char column (ref/file-text.md:369). */
     return is_tok ? q_dollar_tok(tag, x) : q_dollar_cast(tag, x);
 }

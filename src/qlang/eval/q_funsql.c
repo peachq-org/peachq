@@ -315,6 +315,16 @@ static ray_t* by_orig_idx(ray_t* idx, ray_t* gv, ray_t* ord) {
     return out;
 }
 
+/* Zero groups evaluate no phrase, so nothing carries the result column's type.
+ * The phrase's answer for a group of NO rows is that same evaluation at width
+ * zero — the one thing that can say what the column would have held. */
+static ray_t* by_empty_probe(ray_t* tree, ray_t* t) {
+    ray_t* gi = q_type_empty(RAY_I64);
+    ray_t* v = phrase_eval(tree, t, gi);
+    ray_release(gi);
+    return v ? v : q_err(QE_TYPE);
+}
+
 /* one a-phrase per group over its original rows; collapse (aggregates ->
  * vector, uniforms -> nested column) */
 static ray_t* by_col(ray_t* tree, ray_t* t, ray_t* gidxs) {
@@ -330,6 +340,16 @@ static ray_t* by_col(ray_t* tree, ray_t* t, ray_t* gidxs) {
     if (RAY_IS_ERR(out)) return out;
     ray_t* c = q_list_collapse(out);
     ray_release(out);
+    if (ng) return c;
+    /* enlisted, the probe IS the proto the empty column inherits from — an
+     * aggregate's atom gives a typed vector, a uniform's vector a nested one */
+    ray_t* v = by_empty_probe(tree, t);
+    if (RAY_IS_ERR(v)) { ray_release(c); return v; }
+    ray_t* proto = q_enlist_wrap(&v, 1);
+    ray_release(v);
+    if (RAY_IS_ERR(proto)) { ray_release(c); return proto; }
+    c = q_typed_empty_like(c, proto);
+    ray_release(proto);
     return c;
 }
 
@@ -791,9 +811,13 @@ static ray_t* upd_cols(ray_t* a, ray_t* t, ray_t* idx, ray_t* gidxs) {
                 ray_release(v);
             }
             if (!err && !cur) {                          /* zero groups */
-                ray_t* c0 = from_col_owned(t, nm->i64);
-                if (c0 && !RAY_IS_ERR(c0)) cur = c0;
-                else err = c0 ? c0 : q_err(QE_TYPE);
+                ray_t* v = by_empty_probe(tree, t);
+                if (RAY_IS_ERR(v)) err = v;
+                else {
+                    cur = upd_col_start(t, nm->i64, v, full);
+                    ray_release(v);
+                    if (RAY_IS_ERR(cur)) { err = cur; cur = NULL; }
+                }
             }
         }
         if (nm && !RAY_IS_ERR(nm)) ray_release(nm);
