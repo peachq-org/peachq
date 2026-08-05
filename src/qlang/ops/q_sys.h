@@ -36,6 +36,13 @@ int         q_sys_prompt(char* buf, size_t cap);
  * q_ctx statement seam — the one place that acts on it. */
 int q_sys_gc_mode(void);
 
+/* The live `\e` error-trap mode (0 abort / 1 suspend / 2 collect+abort),
+ * consumed by q_dbg's suspend gate and the q_ctx error display.  The setter
+ * is the qmain tty-console default (kdb: console default is 1); every other
+ * door keeps 0 so piped transcripts stay byte-stable. */
+int  q_sys_err_trap_mode(void);
+void q_sys_err_trap_set(int mode);
+
 /* True iff a `\t N` timer is currently armed (interval > 0).  The `.z.ts`
  * forwarding thunk (q_dotz.c) consults it to no-op after a reentrant `\t 0`
  * that could not delete the in-flight (popped) timer. */

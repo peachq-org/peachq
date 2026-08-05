@@ -8,6 +8,7 @@
 #include "qlang/base/q_err.h"     /* q_err_text / q_err_drop — the statement-entry backstop */
 #include "qlang/parse/q_parse.h"
 #include "qlang/eval/q_eval.h"
+#include "qlang/eval/q_dbg.h"     /* statement stash + `\e` trace display */
 #include "qlang/eval/q_view.h"    /* q_view_intercept — `x::e` at the line seam */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
@@ -87,6 +88,10 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
         return 0;
 
     q_err_drop();   /* statement-entry error-payload backstop (q_err.c head) */
+    /* debug seam: stash the statement (backtrace frame [0]) and mark whether
+     * this is a CONSOLE line — script loads / IPC (print_result 0) must never
+     * suspend (the gate-preserving constraint); restored on every exit path */
+    int dbg_prev = q_dbg_statement_begin(s, n, print_result);
 
     /* `\`-system-command line: the shared q_sys glue renders console side
      * effects + value into buf (value-or-throw; `\\`/exit act inside q_sys).
@@ -109,6 +114,7 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
         }
         fflush(out);
         ctx_statement_end();   /* a `\g 1` line collects at its own end (kdb: set runs gc) */
+        q_dbg_statement_end(dbg_prev);
         return 0;
     }
 
@@ -121,6 +127,7 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
         q_err_drop();
         int code = ast->aux[0] ? (int)ast->aux[0] : (int)QE_PARSE + 1;
         ray_error_free(ast);
+        q_dbg_statement_end(dbg_prev);
         return code;
     }
 
@@ -152,17 +159,28 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
         if (RAY_IS_ERR(r)) ray_error_free(r); else ray_release(r);
         fprintf(err, "error: stop\n");
         ctx_statement_end();
+        q_dbg_statement_end(dbg_prev);
         return 0;
     }
 
     if (RAY_IS_ERR(r)) {
-        int64_t tn = 0;
-        const char* text = q_err_text(r, &tn);
-        fprintf(err, "error: %.*s\n",
-                (text && tn) ? (int)tn : 4, (text && tn) ? text : "eval");
+        /* `\e 0` keeps the legacy one-liner (the banked-transcript display);
+         * `\e 1|2` shows 'class + frames; a debugger-reported error is silent
+         * (kdb: after `\` the console just returns to its prompt) */
+        if (q_dbg_reported(r)) {
+        } else if (q_sys_err_trap_mode() != 0) {
+            fflush(out);               /* echo/prompt land before the trace */
+            q_dbg_print_trace(err, r);
+        } else {
+            int64_t tn = 0;
+            const char* text = q_err_text(r, &tn);
+            fprintf(err, "error: %.*s\n",
+                    (text && tn) ? (int)tn : 4, (text && tn) ? text : "eval");
+        }
         q_err_drop();
         ray_error_free(r);
         ctx_statement_end();
+        q_dbg_statement_end(dbg_prev);
         return 0;
     }
     /* q console silence: a (last-statement) assignment prints nothing; a
@@ -176,6 +194,7 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
     ray_release(r);
     fflush(out);
     ctx_statement_end();
+    q_dbg_statement_end(dbg_prev);
     return 0;
 }
 
@@ -277,8 +296,15 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
     if (!tmp) return q_err(QE_OOM);
     memcpy(tmp, src, len);
     tmp[len] = '\0';
+    /* remote statements never suspend (console 0); the stash still gives a
+     * remote .Q.trp its `[0]` frame */
+    int dbg_prev = q_dbg_statement_begin(tmp, len, 0);
     ray_t* ast = q_parse(tmp);
-    if (RAY_IS_ERR(ast)) { ray_sys_free(tmp); return ast; }
+    if (RAY_IS_ERR(ast)) {
+        ray_sys_free(tmp);
+        q_dbg_statement_end(dbg_prev);
+        return ast;
+    }
     /* A trailing assignment answers with the generic null (basics/ipc.md:
      * `h"fn:{2+x}"` displays nothing).  Remote source text is a STATEMENT, so a
      * view definition is intercepted here exactly as a typed line would be. */
@@ -296,6 +322,7 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
       if (con && *con) fputs(con, stdout);
       q_console_reset(); }
     ctx_statement_end();
+    q_dbg_statement_end(dbg_prev);
     if (is_assign && !RAY_IS_ERR(r)) {   /* an error still propagates (-128h) */
         ray_release(r);
         ray_retain(RAY_NULL_OBJ);
