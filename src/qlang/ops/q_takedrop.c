@@ -188,6 +188,21 @@ ray_t* q_take_wrap(ray_t* x, ray_t* y) {
         n = q_type_ivec_get(x, 0);            /* V3.4: a rank-1 shape is n#y */
     else if (!q_type_strict_i64(x, &n))
         return take_unify(take_kernel(y, x));
+    /* take from an empty GENERAL list fills with its prototype — the empty
+     * list itself: `flip (5#.Q.res)!(5#())` must be a 0-row table
+     * (ref/dotq.md:1311); the typed twin `3#0#0` -> `0 0 0` already fills. */
+    if (y && y->type == RAY_LIST && ray_len(y) == 0 && n != 0 && n != NULL_I64) {
+        int64_t k = n < 0 ? -n : n;
+        ray_t* out = ray_list_new(k);
+        if (RAY_IS_ERR(out)) return out;
+        for (int64_t i = 0; i < k && !RAY_IS_ERR(out); i++) {
+            ray_t* e = ray_list_new(1);
+            if (RAY_IS_ERR(e)) { ray_release(out); return e; }
+            out = ray_list_append(out, e);
+            ray_release(e);
+        }
+        return out;
+    }
     return take_unify(take_run(y, n));
 }
 

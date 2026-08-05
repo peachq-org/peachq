@@ -17,13 +17,18 @@
  * `q)` prompt, route a `\`-command through q_sys, else parse -> view-intercept
  * -> eval -> flush console side effects -> report.  print_result echoes a
  * non-null non-assignment value (REPL); zero discards it (script load — kdb
- * scripts are silent but for explicit side effects). */
-void q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err, int print_result);
+ * scripts are silent but for explicit side effects).  Returns 0 when the line
+ * RAN (eval errors included — they were reported); else the PARSE error's
+ * q_err_e + 1 — the statement never ran. */
+int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err, int print_result);
 
 /* A file of q source under kdb script semantics: an INDENTED line continues the
  * previous logical one, blank/comment lines do not flush, `/`..`\` blocks skip,
  * and a trimmed singleton `\` exits the script.  Returns 1 if the file could
- * not be opened (error already printed), else 0. */
+ * not be opened (error already printed); 0 on a full load; else 1 + the
+ * run_line parse code — the load ABORTED at the first unparseable statement
+ * (kdb stops a script at the error; qsql.md:168's parse-time 'dup rides this,
+ * so a bad file alerts before its later statements ever run). */
 int q_ctx_run_file(const char* path, FILE* out, FILE* err);
 
 /* Skip any pasted `q)` prompt(s): returns a pointer INTO s. */
