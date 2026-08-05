@@ -465,7 +465,10 @@ static ray_t* h_l(const char* arg, size_t alen) {
                 && l_is_regular_readable(cand)) { memcpy(found, cand, strlen(cand) + 1); ok = 1; }
         }
     }
-    if (ok) { q_ctx_run_file(found, stdout, stderr); return NULL; }  /* disk hit — load (silent) */
+    if (ok) {   /* disk hit — load (silent); a parse-ABORTED load signals its class */
+        int rc = q_ctx_run_file(found, stdout, stderr);
+        return rc >= 2 ? q_err((q_err_e)(rc - 2)) : NULL;
+    }
     /* openq: `\l pq` — the PeachQ stdlib gate. A dev-override disk file (the
      * a/b/c/d chain above) wins; else a cwd directory literally named `pq`
      * keeps existing dir semantics (no-op, below); ELSE the embedded stdlib.
