@@ -186,12 +186,33 @@ static ray_t* sel_cols(ray_t* rng, ray_t* t, ray_t* idx, int conform) {
     return vals;
 }
 
+/* OWNER RULING 2026-08-05: qSQL must NEVER silently answer with duplicate
+ * output column names — `select res,pass,total,tim,path,gg:t.path,...` once
+ * produced two `tim` columns and the defect surfaced far downstream; default
+ * to 'dup.  STRICTER than kdb here, deliberately: basics/qsql.md:168 says kdb
+ * AUTO-ALIASES a collision WITHIN one phrase list (`select a,a`, `by c,c`)
+ * and rejects only cols-vs-groups (that half lives at the PARSE seam,
+ * q_parse.c, per the same doc line's "during parse").  These eval seams also
+ * cover the functional door (`?[t;();0b;`a`a!...]`).  Raw construction stays
+ * permissive — `` `p`o`p!1 2 3 `` and `flip` of such a dict are legal values,
+ * so `!`/`flip` must not learn this rule. */
+static int names_collide(ray_t* names) {
+    if (!names || names->type != RAY_SYM) return 0;
+    int64_t n = ray_len(names);
+    const int64_t* s = (const int64_t*)ray_data(names);
+    for (int64_t i = 1; i < n; i++)
+        for (int64_t j = 0; j < i; j++)
+            if (s[i] == s[j]) return 1;
+    return 0;
+}
+
 /* Law 8: a phrase-columns result table IS `flip names!cols` — and `flip` IS
  * the conform law, so a Select hands it the RAW phrase values: an atom beside
  * a column rides that column's length, and phrases that ALL gave atoms make
  * the one-row aggregate table (`select sum a from ([]a:1 2 3)` is a single 6,
  * basics/qsql.md).  A By key instead spans the rows, so it conforms first. */
 static ray_t* cols_table(ray_t* names, ray_t* rng, ray_t* t, ray_t* idx, int conform) {
+    if (names_collide(names)) return q_err(QE_DUP);
     ray_t* vals = sel_cols(rng, t, idx, conform);
     if (RAY_IS_ERR(vals)) return vals;
     ray_t* d = q_bang(names, vals);
@@ -270,6 +291,7 @@ static ray_t* limit_apply(ray_t* nspec, ray_t* r) {
 
 /* a value table from names + ready column list (no conform, no re-eval) */
 static ray_t* named_table(ray_t* names, ray_t* cols) {
+    if (names_collide(names)) return q_err(QE_DUP);
     ray_t* d = q_bang(names, cols);
     if (!d || RAY_IS_ERR(d)) return d ? d : q_err(QE_TYPE);
     ray_t* r = q_flip_wrap(d);
