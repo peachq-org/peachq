@@ -257,8 +257,8 @@ static int col_uniform_singleton(ray_t* col) {
 
 /* THE cell renderer — table, keyed table, dict and aligned row.  `blank_null` =
  * a COLUMN, where a null shows as a gap (ref/lj.md, ref/log.md:50-52); a general
- * list keeps its token.  EVERY cell is an element: the header names a table
- * column even when it is mixed, so no uniformity gate here. */
+ * list keeps its token.  A cell sheds the suffix only where the CONTAINER names
+ * the type — `col_uniform_type`, the same gate the dict rows use. */
 void q_fmt_cell(ray_t* col, int64_t row, int blank_null, char* out, size_t outsz) {
     out[0] = '\0';
     if (col && col->type == -RAY_STR) {     /* char-column shim: bare char */
@@ -285,7 +285,7 @@ void q_fmt_cell(ray_t* col, int64_t row, int blank_null, char* out, size_t outsz
         ray_release(c);
         return;
     }
-    if (!elem_tok(c, out, outsz)) {
+    if (!col_uniform_type(col) || !elem_tok(c, out, outsz)) {
         q_fmt(c, out, outsz);
         if (out[0] == ',' && col_uniform_singleton(col))
             memmove(out, out + 1, strlen(out));
@@ -437,6 +437,13 @@ void q_fmt_float(double v, int f32, char* out, size_t n) {
     snprintf(out, n, "%.48s%s", mag, f32 ? "e" : "");
 }
 
+/* An f32 token is payload + `e` (`0Ne`, `0we`, `1.5e`) — drop the letter where
+ * the CONTAINER prints it instead. */
+static void real_shed_e(char* out) {
+    size_t l = strlen(out);
+    if (l) out[l - 1] = '\0';
+}
+
 /* Digit-only token — the shape test behind the f64 `f` suffix (`256f`). */
 static int fmt_tok_is_bare_int(const char* tok) {
     if (*tok == '-') tok++;
@@ -545,7 +552,8 @@ static void ttok_elem(const q_ttok_t* r, ray_t* v, int64_t i,
     tok_via_atom(r->ctor(x), out, n);
 }
 
-/* THE display cell law (#367, ARCHITECTURE.md:436, ref/join.md:177): a cell is
+/* THE display cell law (#367, ARCHITECTURE.md "One predicate at every cell
+ * site", ref/join.md:177): a cell is
  * one ELEMENT, so it sheds the suffix naming a type its container already
  * carries (`1i`->`1`, `2017.05m`->`2017.05`, `1.5e`->`1.5`).  Intrinsic syntax
  * survives — the `0x` radix, guid/temporal punctuation, the sentinels.
@@ -565,10 +573,7 @@ static int elem_tok(ray_t* a, char* out, size_t n) {
     case -RAY_F64:
         q_fmt_float(a->f64, a->type == -RAY_F32, out, n);
         /* the container carries the `e`; a SENTINEL keeps its own (`0Ne`/`0we`) */
-        if (a->type == -RAY_F32 && isfinite(a->f64)) {
-            size_t l = strlen(out);
-            if (l) out[l - 1] = '\0';
-        }
+        if (a->type == -RAY_F32 && isfinite(a->f64)) real_shed_e(out);
         return 1;
     case -RAY_GUID: {
         const uint8_t* b16 = a->obj ? (const uint8_t*)ray_data(a->obj)
@@ -585,9 +590,11 @@ static int elem_tok(ray_t* a, char* out, size_t n) {
     }
 }
 
-/* A dict row has no header, so only a UNIFORM value names a type its rows may
- * shed — a typed vector, or a boxed list of one atom type (ref/apply.md's bare
- * sym column).  A general list keeps it (ARCHITECTURE.md:440, `xyz| 321f`). */
+/* THE cell-law predicate, asked at every cell site: does this container NAME a
+ * type its elements may shed?  A typed vector does, and so does a boxed list of
+ * one atom type (ref/apply.md's bare sym column).  A general list names none —
+ * `meta ([]a:(1;3f))` reports a blank `t` — so its elements keep their own
+ * (`xyz| 321f`, `([]a:(1;3f))` -> `3f`). */
 static int col_uniform_type(ray_t* col) {
     if (!col || col->type < 0) return 0;
     if (col->type != RAY_LIST) return 1;
@@ -599,7 +606,7 @@ static int col_uniform_type(ray_t* col) {
     return 1;
 }
 
-/* A dict key and a dict value row are both ELEMENTS of `col` (ARCHITECTURE.md:439).
+/* A dict key and a dict value row are both ELEMENTS of `col`.
  * The char atom is the exception: bare like a sym key but via char_esc, keeping
  * control/non-ASCII bytes safe (#320) — an escape a grid cell must not carry,
  * char_esc also quoting `"`. */
@@ -1546,13 +1553,17 @@ static void q_fmt_body(ray_t* val) {
             double v = is64 ? ((const double*)ray_data(val))[i]
                             : (double)((const float*)ray_data(val))[i];
             char e[64];
-            q_fmt_float(v, is64 ? 0 : 1, e, sizeof e);
+            q_fmt_float(v, !is64, e, sizeof e);
+            /* the f32 token minus its letter: `0N` — NOT f64's `0n` — 0w 1.5 */
+            if (!is64) real_shed_e(e);
             qe_join(e, i == 0);
             if (!fmt_tok_is_bare_int(e)) all_whole = 0;
         }
-        /* all-digit-token f64 vectors take ONE trailing `f` (`1 2 3f`); a
+        /* the real vector's `e` prints ONCE (tour/datatypes.md:36 `42 43 44e`);
+         * all-digit-token f64 vectors take ONE trailing `f` (`1 2 3f`), and a
          * clipped early exit's stale all_whole is swallowed past the dots */
-        if (is64 && all_whole) qe_putc('f');
+        if (!is64) qe_putc('e');
+        else if (all_whole) qe_putc('f');
         return;
     }
 
