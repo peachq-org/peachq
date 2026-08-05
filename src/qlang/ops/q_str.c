@@ -299,6 +299,11 @@ ray_t* q_lower_fn(ray_t* x) { return str_case_leaf(x, 0); }
  * passes through unchanged (`trim 42` -> 42). */
 static int str_is_ws(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
+static ray_t* str_trim_leaf(ray_t* x, int64_t mode);
+static ray_t* str_trim_col(void* ctx, ray_t* col) {
+    return str_trim_leaf(col, (int64_t)(intptr_t)ctx);
+}
+
 static ray_t* str_trim_leaf(ray_t* x, int64_t mode) {
     if (!x) return q_err(QE_TYPE);
     if (x->type == -RAY_STR) {
@@ -350,6 +355,32 @@ static ray_t* str_trim_leaf(ray_t* x, int64_t mode) {
         ray_release(r);
         return c;
     }
+    /* string-atomic (ref/trim.md "Implicit iteration"): a general list, dict
+     * or table recurses to string leaves; typed vectors keep the null-strip
+     * arm above, so (0N;1;2) does NOT strip — only `0N 1 2` does. */
+    if (x->type == RAY_LIST) {
+        int64_t n = ray_len(x);
+        ray_t* out = ray_list_new(n > 0 ? n : 1);
+        if (RAY_IS_ERR(out)) return out;
+        ray_t** e = (ray_t**)ray_data(x);
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* r = str_trim_leaf(e[i], mode);
+            if (RAY_IS_ERR(r)) { ray_release(out); return r; }
+            out = ray_list_append(out, r);
+            ray_release(r);
+            if (RAY_IS_ERR(out)) return out;
+        }
+        return out;
+    }
+    if (x->type == RAY_DICT) {
+        ray_t* nv = str_trim_leaf(ray_dict_vals(x), mode);
+        if (RAY_IS_ERR(nv)) return nv;
+        ray_t* k = ray_dict_keys(x);
+        ray_retain(k);                       /* dict_new consumes both */
+        return ray_dict_new(k, nv);
+    }
+    if (x->type == RAY_TABLE)
+        return q_table_map_cols(str_trim_col, (void*)(intptr_t)mode, x);
     ray_retain(x);              /* atom passthrough (trim 42 -> 42) */
     return x;
 }

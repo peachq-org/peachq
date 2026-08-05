@@ -73,8 +73,8 @@ static void ctx_statement_end(void) {
  * q-formatted to `out` (console auto-display).  When zero (script load) the
  * result is discarded — kdb scripts are silent except explicit side-effects
  * (show / 0N! / console writes), which still flush below. */
-void q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
-                    int print_result) {
+int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
+                   int print_result) {
     /* Drop any pasted `q)` console prompt(s) before anything else sees the
      * line — covers REPL (piped + interactive) and the `q file.q` loader, all
      * of which funnel through here.  Adjust n by the bytes we advanced past. */
@@ -84,7 +84,7 @@ void q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
         s = stripped;
     }
     if (n == 0)
-        return;
+        return 0;
 
     q_err_drop();   /* statement-entry error-payload backstop (q_err.c head) */
 
@@ -109,14 +109,19 @@ void q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
         }
         fflush(out);
         ctx_statement_end();   /* a `\g 1` line collects at its own end (kdb: set runs gc) */
-        return;
+        return 0;
     }
 
     ray_t* ast = q_parse(s);
     if (RAY_IS_ERR(ast)) {
-        fprintf(err, "parse error\n");
+        int64_t tn = 0;
+        const char* text = q_err_text(ast, &tn);   /* 'dup dies at parse (qsql.md:168) */
+        fprintf(err, "error: %.*s\n",
+                (text && tn) ? (int)tn : 5, (text && tn) ? text : "parse");
+        q_err_drop();
+        int code = ast->aux[0] ? (int)ast->aux[0] : (int)QE_PARSE + 1;
         ray_error_free(ast);
-        return;
+        return code;
     }
 
     ray_t* r;
@@ -147,7 +152,7 @@ void q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
         if (RAY_IS_ERR(r)) ray_error_free(r); else ray_release(r);
         fprintf(err, "error: stop\n");
         ctx_statement_end();
-        return;
+        return 0;
     }
 
     if (RAY_IS_ERR(r)) {
@@ -158,7 +163,7 @@ void q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
         q_err_drop();
         ray_error_free(r);
         ctx_statement_end();
-        return;
+        return 0;
     }
     /* q console silence: a (last-statement) assignment prints nothing; a
      * script load (print_result == 0) prints no result at all. */
@@ -171,6 +176,7 @@ void q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
     ray_release(r);
     fflush(out);
     ctx_statement_end();
+    return 0;
 }
 
 int q_ctx_run_file(const char* path, FILE* out, FILE* err) {
@@ -196,7 +202,11 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err) {
     int         in_block = 0;
     char        line[4096];
 
-    #define FLUSH() do { if (alen) { q_ctx_run_line(acc, alen, out, err, 0); alen = 0; acc[0] = '\0'; } } while (0)
+    /* a statement that fails to PARSE aborts the LOAD (kdb stops a script at
+     * the error; qsql.md:168's 'dup fires here, so a bad file never runs the
+     * statements after it).  Eval errors keep the historic continue. */
+    int lrc = 0;
+    #define FLUSH() do { if (alen) { lrc = q_ctx_run_line(acc, alen, out, err, 0); alen = 0; acc[0] = '\0'; } } while (0)
 
     while (fgets(line, sizeof line, f)) {
         size_t n = strlen(line);
@@ -225,7 +235,7 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err) {
         if (trim[0] == '/') continue;            /* comment-only line: ignored, no flush        */
 
         int is_cont = indented && alen > 0;
-        if (!is_cont) FLUSH();                    /* a fresh logical line: eval the prior one   */
+        if (!is_cont) { FLUSH(); if (lrc) break; }  /* fresh logical line: eval the prior one */
 
         /* append this physical line (join continuation fragments with '\n') */
         if (alen && alen + 1 < sizeof acc) acc[alen++] = '\n';
@@ -235,11 +245,11 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err) {
         alen += n;
         acc[alen] = '\0';
     }
-    FLUSH();                                       /* eval any pending logical line (incl. before a lone \) */
+    if (!lrc) FLUSH();                             /* eval any pending logical line (incl. before a lone \) */
     #undef FLUSH
 
     fclose(f);
-    return 0;
+    return lrc ? 1 + lrc : 0;
 }
 
 /* ===== The remote doors (see q_ctx.h) =====
