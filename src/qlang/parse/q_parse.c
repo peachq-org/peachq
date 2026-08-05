@@ -1511,7 +1511,8 @@ static ray_t *qsql_convert_expr(ray_t *x);
  * nested-list head is converted recursively.  Returns an OWNED value. */
 static ray_t *qsql_convert_head(ray_t *h) {
     if (h && h->type == RAY_LIST) return qsql_convert_expr(h);
-    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) {
+    if (!h || h->type != -RAY_SYM ||
+        (h->attrs & (Q_ATTR_QUOTED | Q_ATTR_HOLE))) {
         if (h) ray_retain(h);
         return h;                                  /* fn value / literal: as-is */
     }
@@ -1536,7 +1537,10 @@ static ray_t *qsql_convert_expr(ray_t *x) {
     if (!x) return q_null();
     if (x->type == -RAY_SYM) {
         /* `sym constants arrive pre-wrapped (,`sym) from noun_tree_value and
-         * pass through the tail below; a sym ATOM here is always a name-ref. */
+         * pass through the tail below; a sym ATOM here is always a name-ref.
+         * EXCEPT an elision hole, whose meaning rides Q_ATTR_HOLE, not its
+         * spelling: column-ising it turns `(+[;10]) c` into an application. */
+        if (x->attrs & Q_ATTR_HOLE) { ray_retain(x); return x; }
         ray_t *ev = NULL;                          /* standalone name-ref */
         ray_t *s = ray_sym_str(x->i64);
         if (s) { ev = q_registry_lookup_name(ray_str_ptr(s), ray_str_len(s),
