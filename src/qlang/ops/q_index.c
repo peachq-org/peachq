@@ -383,7 +383,9 @@ static ray_t* index_map(ray_t* x, ray_t* i, ray_t* const* rest, int64_t k) {
         out = ray_list_append(out, r);
         ray_release(r);
     }
-    return collapse(out);
+    /* at the terminal step the items ARE x's, so an empty gather keeps x's
+     * element type (`2 4 4 9 _ til 10` cuts to `` `long$() ``, ref/cut.md) */
+    return k == 0 ? q_typed_empty_like(collapse(out), x) : collapse(out);
 }
 
 /* Keyed-table read.  A keyed table is a dict whose domain is a TABLE, so the
