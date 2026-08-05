@@ -5,6 +5,7 @@
  * and the string domain lives once. */
 #include "qlang/q_registry_internal.h" /* wrap decls + the string-C3 boundary decls */
 #include "qlang/base/q_err.h"
+#include "qlang/base/q_type.h"         /* q_type_empty — like's empty answer is still boolean */
 #include "qlang/eval/q_eval.h"         /* q_eval_apply_is_fn / q_eval_apply_value — ssr fn replacement */
 #include "qlang/q_builtins.h"          /* the env-fn decls (q_string_fn, ...) */
 #include "qlang/q_fmt.h"               /* q_fmt_float — string's float leaf */
@@ -495,7 +496,10 @@ ray_t* q_like_wrap(ray_t* x, ray_t* pattern) {
     }
     if (x->type == RAY_LIST || x->type == RAY_SYM || x->type == RAY_STR) {
         int64_t n = ray_len(x);
-        ray_t* out = ray_list_new(n > 0 ? n : 1);
+        /* one boolean per item (ref/like.md Implicit iteration), and NONE is
+         * still boolean — an empty run gives collapse nothing to infer from */
+        if (n == 0) return q_type_empty(RAY_BOOL);
+        ray_t* out = ray_list_new(n);
         if (RAY_IS_ERR(out)) return out;
         for (int64_t i = 0; i < n; i++) {
             ray_t* ia = ray_i64(i);
