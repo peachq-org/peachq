@@ -8,6 +8,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
+#include "qlang/q_builtins.h"  /* q_builtins_type_num — the q type-id key */
+#include "qlang/eval/q_eval.h" /* carrier kind / iter id / lambda source */
 #include "qlang/ops/q_index.h" /* q_index_elem_at — THE element read */
 #include "lang/eval.h"     /* ray_at_fn, ray_xbar_fn */
 #include "lang/internal.h" /* ray_iasc_fn / ray_idesc_fn, as_f64 */
@@ -57,9 +59,12 @@ static ray_t* reindex_collapse(ray_t* vec, ray_t* grade) {
  * row is the anchor (`-1 -7 -7 -10 -10 -14h`), so this half is published, not
  * chosen.  The rest is ours: an atom sorts adjacent to, and BEFORE, the vector
  * of its own datatype, and the general list (0h) leads.  Injective over the tag
- * range, so equal keys mean equal types. */
+ * range, so equal keys mean equal types.  FUNCTION values key on their q type
+ * id (100h..) — community law, test/q/community/sort_functions.qcmd — which
+ * ascending |type| places after every data type (openq's own placement). */
 static int64_t ord_type_key(ray_t* x) {
-    int64_t t = x->type;
+    int64_t t = q_builtins_type_num(x);
+    if (t >= 100) return 2 * t;
     return t < 0 ? -2 * t : 2 * t + 1;
 }
 
@@ -70,8 +75,7 @@ static int64_t ord_type_key(ray_t* x) {
  * elements is not something a caller can depend on. */
 static int ord_unordered(int8_t t) {
     switch (t < 0 ? -t : t) {
-    case RAY_TABLE: case RAY_DICT: case RAY_NULL:
-    case RAY_LAMBDA: case RAY_UNARY: case RAY_BINARY: case RAY_VARY: case RAY_QFN:
+    case RAY_TABLE: case RAY_DICT:
         return 1;
     default:
         return 0;
@@ -81,6 +85,29 @@ static int ord_unordered(int8_t t) {
 static int ord_cmp(ray_t* a, ray_t* b);
 
 static int ord_cmp_i64(int64_t x, int64_t y) { return x < y ? -1 : x > y; }
+
+/* Within one function type: primitives compare by their manifest kdb_op
+ * identity number (`::` IS unary primitive 0), iterators by adverb id,
+ * lambdas by VERBATIM SOURCE (a recorded openq choice — kdb recurses the
+ * value structure, which pins bytecode); proj/comp/deriv carriers tie and
+ * the stable grade keeps input order. */
+static int64_t ord_fn_id(ray_t* x, int8_t qt) {
+    if (RAY_IS_NULL(x)) return 0;
+    if (qt == 103) return q_eval_apply_iter_id(x);
+    if (qt == 101 || qt == 102) return q_registry_kdb_op_of(x, NULL);
+    return 0;
+}
+
+static int ord_cmp_fn(ray_t* a, ray_t* b, int8_t qt) {
+    if (qt == 100) {
+        ray_t* sa = q_eval_apply_lambda_src(a);   /* borrowed; NULL on engine lambdas */
+        ray_t* sb = q_eval_apply_lambda_src(b);
+        if (!sa || !sb) return 0;
+        int c = ray_str_cmp(sa, sb);
+        return c < 0 ? -1 : c > 0;
+    }
+    return ord_cmp_i64(ord_fn_id(a, qt), ord_fn_id(b, qt));
+}
 
 /* Lexicographic over items, shorter-prefix-first.  Same-datatype byte vectors —
  * the string case — settle in one memcmp rather than n element reads. */
@@ -111,6 +138,7 @@ static int ord_cmp(ray_t* a, ray_t* b) {
     if (!a || !b) return a ? 1 : -1;
     int64_t ka = ord_type_key(a), kb = ord_type_key(b);
     if (ka != kb) return ka < kb ? -1 : 1;
+    if (ka >= 200) return ord_cmp_fn(a, b, (int8_t)(ka / 2));
     if (a->type < 0) {
         switch (-a->type) {
         case RAY_BOOL:   /* the one lane as_i64 has no explicit read for */

@@ -1025,29 +1025,13 @@ static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
     if (!(v->type == RAY_DICT || v->type == RAY_TABLE ||
           ray_is_vec(v) || v->type == RAY_LIST))
         return q_err(QE_TYPE);
-    /* a list with elided items applies as a function of that rank — args
-     * SUBSTITUTE into the null slots and the result stays a general list
-     * (basics/application.md "Applying a list with elided items") */
-    if (v->type == RAY_LIST) {
-        ray_t** it = (ray_t**)ray_data(v);
-        int64_t len = ray_len(v), nulls = 0;
-        for (int64_t j = 0; j < len; j++)
-            if (it[j] && RAY_IS_NULL(it[j])) nulls++;
-        if (nulls > 0) {
-            if (n != nulls) return q_err(QE_RANK);
-            ray_t* out = ray_list_new(len > 0 ? len : 1);
-            int64_t ai = 0;
-            for (int64_t j = 0; j < len; j++) {
-                ray_t* e = (it[j] && RAY_IS_NULL(it[j])) ? args[ai++] : it[j];
-                if (!e) e = RAY_NULL_OBJ;
-                ray_retain(e);
-                e = q_eval_apply_concrete(e);
-                if (RAY_IS_ERR(e)) { ray_release(out); return e; }
-                out = ray_list_append(out, e);
-                ray_release(e);
-            }
-            return out;
-        }
+    /* a lazy splay column thunk (io/q_splay.h colref) applies by BINDING the
+     * index into its idx slot; the gather seam forces it later — the same
+     * carrier-to-authority dispatch the handle arm above rides */
+    if (q_splay_colref_is(v) && n == 1 && args[0]) {
+        ray_t* car; int64_t nm; ray_t* idx;
+        q_splay_colref_parts(v, &car, &nm, &idx);
+        if (RAY_IS_NULL(idx)) return q_splay_colref(car, nm, args[0]);
     }
     if (n > APPLY_MAX_ARGS) return q_err(QE_RANK);
     ray_t* r = q_index_at(v, args, n);               /* the ONE index home */
