@@ -45,6 +45,15 @@ ray_err_t q_env_bind(int64_t sym, ray_t* val);
  * namespace survives as its marker dict (kdb keeps it in `key `). */
 ray_err_t q_env_unbind(int64_t sym);
 
+/* Drop the binding's OWN ref to `cur` — the slot parks at `::` — so a writer
+ * already holding `cur` becomes its sole owner and its amend mutates in place
+ * (ref/amend.md handle d).  Correctness never depends on it: rc decides at
+ * store time, so an alias still forces the copy.  Refuses unless the name is
+ * bound to exactly `cur` — a shadowed or walked read is not the slot the
+ * write rebinds.  1 = parked, and the caller MUST put a value back:
+ * q_env_set on success, q_env_bind to restore on error. */
+int q_env_take(int64_t sym, ray_t* cur);
+
 int    q_env_ns_exists(int64_t path_sym);
 /* The stored namespace dict itself (marker included), retained for the
  * caller.  OWNED; NULL if the name is not bound to a dict. */
@@ -87,5 +96,7 @@ ray_err_t q_env_frame_push(int barrier);
 void      q_env_frame_pop(void);
 ray_err_t q_env_local_set(int64_t sym, ray_t* val);
 ray_t*    q_env_local_get(int64_t sym);   /* TOP frame only; borrowed */
+int       q_env_local_take(int64_t sym, ray_t* cur);  /* q_env_take, TOP frame;
+                                                       * q_env_local_set puts back */
 
 #endif /* OPENQ_Q_ENV_H */
