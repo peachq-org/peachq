@@ -52,7 +52,12 @@ void q_wire_wbuf_free(q_wire_wbuf_t* b) {
     b->p = NULL; b->len = b->cap = 0; b->err = NULL;
 }
 
+/* Measure mode (`-22!`) counts here and nowhere else, which is what keeps it
+ * honest: it is the writer, not a mirror of it.  Sound only while the writer
+ * stays append-only — an emitter that reserved space and back-patched it would
+ * measure right and serialize wrong. */
 static int w_raw(q_wire_wbuf_t* b, const void* src, size_t n) {
+    if (b->measure) { b->len += n; return 0; }
     if (wbuf_reserve(b, n)) return -1;
     memcpy(b->p + b->len, src, n);
     b->len += n;
@@ -450,6 +455,23 @@ ray_t* q_wire_serialize(ray_t* x, uint8_t msgtype) {
     ray_t* out = ray_vec_from_raw(RAY_BYTE_ONLY, b.p, (int64_t)b.len);
     q_wire_wbuf_free(&b);
     return out;
+}
+
+ray_t* q_wire_serialize_len(ray_t* x) {
+    ray_retain(x);
+    x = q_eval_apply_concrete(x);
+    q_wire_wbuf_t b = { .measure = 1, .len = 8 };   /* 8 = the header q_wire_serialize emits */
+    int rc = q_wire_write_obj(&b, x);
+    ray_release(x);
+    if (rc) {
+        ray_t* e = b.err ? b.err : q_err(QE_TYPE);
+        b.err = NULL;
+        q_wire_wbuf_free(&b);
+        return e;
+    }
+    size_t len = b.len;
+    q_wire_wbuf_free(&b);
+    return len > INT32_MAX ? q_err(QE_LIMIT) : ray_i64((int64_t)len);
 }
 
 /* ==========================================================================
