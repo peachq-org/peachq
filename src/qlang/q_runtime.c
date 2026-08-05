@@ -12,6 +12,7 @@
 #include "qlang/q_builtins.h"
 #include "qlang/q_registry.h"
 #include "qlang/q_dotz.h"     /* q_dotz_init/destroy — `.z.*` resolver */
+#include "qlang/eval/q_dbg.h" /* q_dbg_reset — snapshot refs die with the runtime */
 #include "qlang/ops/q_sys.h"      /* q_sys_seed_init / q_sys_ctx_reset */
 #include "qlang/io/q_handles.h"  /* q_handles_init/destroy — the handle registry lifecycle */
 #include "qlang/io/q_splay.h"    /* q_splay_init/destroy — the splay registry lifecycle */
@@ -117,6 +118,7 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
 void q_runtime_destroy(ray_runtime_t* rt) {
     ray_eval_set_remote_str_fn(NULL);  /* remote strings fall back to rayfall */
     ray_eval_set_remote_apply_fn(NULL);/* (func;args) value-apply -> 'nyi w/o q runtime */
+    q_dbg_reset();             /* drop snapshot-retained lambdas before the env */
     q_handles_destroy();       /* drop handle records (open_args refs) before the env */
     q_dotz_destroy();          /* free the `.z.*` argv snapshots */
     q_registry_destroy();      /* free verb snapshots before the env goes away */
