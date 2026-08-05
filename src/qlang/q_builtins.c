@@ -5,6 +5,7 @@
 #include "qlang/q_builtins.h"
 #include "qlang/base/q_err.h"
 #include "qlang/eval/q_eval.h" /* q_eval_value_wrap / the carrier predicates */
+#include "qlang/eval/q_dbg.h"  /* .Q.c.trp/.Q.c.sbt/.Q.c.bt bodies (basics/debug.md) */
 #include "qlang/parse/q_parse.h"
 #include "qlang/net/q_http_client.h" /* .Q.c.hg / .Q.c.hp — outbound HTTP client */
 #include "qlang/net/q_http.h"        /* .Q.c.rd — the hardened docroot read */
@@ -387,6 +388,9 @@ void q_builtins_register(void) {
     bind_vary (".Q.c.zblocks", q_dotq_zblocks_fn); /* inflated-blocks witness (internal) */
     bind_vary (".Q.c.hp", q_dotq_hp_fn);     /* HTTP POST [url;mime;body] (ref/dotq.md) */
     bind_vary (".Q.c.gz", q_dotq_gz_fn);     /* GZip ::/inflate/deflate (ref/dotq.md) */
+    bind_vary (".Q.c.trp", q_dbg_trp_fn);    /* trap-at + backtrace (ref/dotq.md) */
+    bind_unary(".Q.c.sbt", q_dbg_sbt_fn);    /* string backtrace (ref/dotq.md) */
+    bind_vary (".Q.c.bt",  q_dbg_bt_fn);     /* dump backtrace (ref/dotq.md) */
     bind_value(".Q.c.res", q_registry_name_reserved_words());
     /* `.Q.c.rd` — the hardened docroot read h.q's default `.z.ph` serves through.
      * It sits in THIS tier, not under `.h`, because binding an `.h.*` name here

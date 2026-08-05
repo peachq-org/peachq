@@ -762,6 +762,10 @@ static ray_t* h_g(const char* arg, size_t alen) {
 
 int q_sys_gc_mode(void) { return (int)g_gc_mode; }
 
+int q_sys_err_trap_mode(void) { return (int)g_err_trap; }
+
+void q_sys_err_trap_set(int mode) { g_err_trap = (int32_t)mode; }
+
 /* `\o` — offset from UTC (hours; minutes if abs>23).  `\o`→`0N` (machine
  * offset), else the set value.  Temporal-display wiring is DEFERRED. */
 static ray_t* h_o(const char* arg, size_t alen) {
@@ -782,8 +786,10 @@ static ray_t* h_W(const char* arg, size_t alen) {
     return NULL;
 }
 
-/* `\e` — error-trap mode (0 off / 1 suspend / 2 dump).  `\e`→`0i`.  The trap
- * behaviour itself is DEFERRED. */
+/* `\e` — error-trap mode (0 off / 1 suspend / 2 dump).  `\e`→`0i`.  Openq
+ * default is 0 and `\e` governs the CONSOLE (kdb: console default 1, `\e`
+ * governs async/HTTP callbacks) — recorded pragmatic divergence, so existing
+ * transcripts keep today's one-line error display unless a session opts in. */
 static ray_t* h_e(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_err_trap);
     int64_t v;
