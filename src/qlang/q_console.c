@@ -16,6 +16,15 @@ void q_console_reset(void) { g_console_len = 0; if (g_console) g_console[0] = '\
 
 const char* q_console_str(void) { return g_console ? g_console : ""; }
 
+/* The host drains this buffer BETWEEN statements, so text a statement emits
+ * before it exits the process would die with it (openq issue #23). */
+void q_console_flush(void) {
+    if (!g_console_len) return;
+    fwrite(g_console, 1, g_console_len, stdout);
+    fflush(stdout);
+    q_console_reset();
+}
+
 static void console_append(const char* s, size_t n) {
     if (g_console_len + n + 1 > g_console_cap) {
         size_t nc = g_console_cap ? g_console_cap * 2 : 256;
