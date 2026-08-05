@@ -30,8 +30,8 @@
   #include <sys/stat.h>
   #include <sys/socket.h>
   #include <poll.h>
-  #include <errno.h>
 #endif
+#include <errno.h>   /* both platforms: ray_sock_recv maps WSA errors into errno */
 #include <time.h>
 
 #define Q_HTTP_MAX_HEADERS 64
