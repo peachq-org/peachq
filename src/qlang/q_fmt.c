@@ -240,6 +240,18 @@ static int col_uniform_type(ray_t* col);                 /* fwd — its precondi
 
 #define QF_MAXCOL 64
 
+/* THE inline-cell law (ref/trim.md, ref/dotq.md:1655): a dict row, a table
+ * cell and a list-row cell are ELEMENTS, and an element renders single-line —
+ * a nested general list via the k-repr renderer, never the top-level layout. */
+static int elem_is_nested_list(ray_t* e) {
+    return e && (e->type == RAY_LIST || e->type == RAY_STR);
+}
+
+static void fmt_elem_inline(ray_t* e, char* out, size_t cap) {
+    if (elem_is_nested_list(e)) q_fmt_krepr(e, out, cap);
+    else q_fmt(e, out, cap);
+}
+
 /* Uniformly-singleton nested column collapses (`1| 10`); mixed keeps `,50`. */
 static int col_uniform_singleton(ray_t* col) {
     if (!col || col->type != RAY_LIST) return 0;
@@ -286,7 +298,7 @@ void q_fmt_cell(ray_t* col, int64_t row, int blank_null, char* out, size_t outsz
         return;
     }
     if (!col_uniform_type(col) || !elem_tok(c, out, outsz)) {
-        q_fmt(c, out, outsz);
+        fmt_elem_inline(c, out, outsz);
         if (out[0] == ',' && col_uniform_singleton(col))
             memmove(out, out + 1, strlen(out));
     }
@@ -622,7 +634,7 @@ static void fmt_dict_elem(ray_t* col, ray_t* e, char* out, size_t cap) {
         }
         if (elem_tok(e, out, cap)) return;
     }
-    q_fmt(e, out, cap);
+    fmt_elem_inline(e, out, cap);
 }
 
 static void qe_join(const char* tok, int first) {
@@ -770,7 +782,7 @@ static void matrix_cell(ray_t* rv, int64_t c, int bare, int blank_null,
         } else
             fmt_qtext((const char*)ray_data(a), (size_t)ray_len(a), out, outsz);
     } else
-        q_fmt(a, out, outsz);
+        fmt_elem_inline(a, out, outsz);
 }
 
 static int matrix_row_ok(ray_t* r) {
@@ -779,11 +791,13 @@ static int matrix_row_ok(ray_t* r) {
     if (r->type == RAY_LIST) {
         ray_t** it = (ray_t**)ray_data(r);
         int64_t n = ray_len(r);
-        for (int64_t i = 0; i < n; i++)
-            if (!it[i] || RAY_IS_ERR(it[i]) ||
-                !(ray_is_atom(it[i]) || it[i]->type == RAY_CHARV) ||   /* strings are cells */
+        for (int64_t i = 0; i < n; i++) {
+            if (!it[i] || RAY_IS_ERR(it[i])) return 0;
+            if (elem_is_nested_list(it[i])) continue;   /* inline cell (ref/trim.md) */
+            if (!(ray_is_atom(it[i]) || it[i]->type == RAY_CHARV) ||   /* strings are cells */
                 RAY_IS_NULL(it[i]))
                 return 0;
+        }
         return 1;
     }
     return 0;
@@ -819,6 +833,10 @@ static int is_matrix(ray_t** e, int64_t n) {
      * its commas for the same reason `(1 2;3 4)` does — it is a matrix
      * (ref/file-binary.md `show pi` -> 3.141593, while .Q.s1 keeps ",,"). */
     if (n == 1 && w != 1) return 0;
+    /* the 1x1 comma-drop covers SCALAR cells only: `,,(in;`s)` keeps its commas */
+    if (n == 1 && e[0]->type == RAY_LIST &&
+        elem_is_nested_list(((ray_t**)ray_data(e[0]))[0]))
+        return 0;
     int all_charv = e[0]->type == RAY_CHARV;
     for (int64_t i = 1; i < n; i++) {
         if (!matrix_row_ok(e[i]) || ray_len(e[i]) != w) return 0;
@@ -1630,6 +1648,13 @@ static void q_fmt_body(ray_t* val) {
             is_matrix((ray_t**)ray_data(v), n)) {
             dnc = ray_len(((ray_t**)ray_data(v))[0]);
             dw  = matrix_widths((ray_t**)ray_data(v), n_size, dnc, 1, dstackw, 64);
+        } else if (v && v->type == RAY_LIST && ray_len(v) == n && n > 0) {
+            /* UNIFORM zero-length rows are zero padded columns — blank, where
+             * the ragged dict keeps `()` (ref/dotq.md:1322 vs :1655) */
+            ray_t** ve = (ray_t**)ray_data(v);
+            int64_t i = 0;
+            while (i < n && ve[i] && ve[i]->type == RAY_LIST && ray_len(ve[i]) == 0) i++;
+            if (i == n) { dnc = 0; dw = dstackw; }
         }
         for (int pass = 0; pass < 2; pass++) {
             int64_t n_pass = (pass == 0) ? n_size : n;
