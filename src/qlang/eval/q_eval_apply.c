@@ -1466,7 +1466,7 @@ static ray_t* name_lift(const q_op_t* row, ray_t** args, int64_t n, int dot) {
     int stole = 0;
     if (cur && !RAY_IS_ERR(cur)) {
         ray_retain(cur);                             /* the consumable ref */
-        stole = q_env_bind(id, RAY_NULL_OBJ) == RAY_OK;  /* env drops its ref */
+        stole = q_env_take(id, cur);                 /* env drops its ref */
     } else if (q_env_ns_exists(id)) {
         cur = q_env_ns_view(id);       /* owned namespace dict: amend, rebind */
         if (!cur) return q_err(QE_DOMAIN);
