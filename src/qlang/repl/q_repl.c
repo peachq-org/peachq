@@ -14,6 +14,7 @@
 #include "qlang/base/q_err.h"   /* q_err_text — full error text for console display */
 #include "qlang/parse/q_parse.h"
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
+#include "qlang/eval/q_dbg.h"    /* debug-loop line readers (basics/debug.md) */
 #include "qlang/eval/q_view.h"   /* q_view_intercept — `x::e` at the line seam */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
@@ -241,6 +242,8 @@ static int32_t no_continuation(const char* mbuf, int32_t mbuf_len,
     return 0;
 }
 
+static int repl_tty_dbg_read(const char* prompt, char* buf, size_t cap);
+
 static void repl_interactive(FILE* out, FILE* err) {
     ray_term_t* t = ray_term_create();
     if (!t) {
@@ -261,6 +264,7 @@ static void repl_interactive(FILE* out, FILE* err) {
      * at the prompt interrupts stay raw keypresses (0x03 clears the line);
      * ray_term_eval_begin below arms them only for the eval window. */
     ray_term_install_signals(t);
+    q_dbg_set_reader(repl_tty_dbg_read);   /* `\e 1` debugger over this editor */
 
     ray_term_begin(t);
     for (;;) {
@@ -311,6 +315,7 @@ static void repl_interactive(FILE* out, FILE* err) {
         ray_term_begin(t);
     }
 
+    q_dbg_set_reader(NULL);
     ray_hist_save(&t->hist, hist_path);
     ray_term_destroy(t);
     g_live_term = NULL;
@@ -502,6 +507,36 @@ static void poll_stdin_hup(ray_poll_t* poll, ray_selector_t* sel) {
     if (sel && sel->data) poll_stdin_eof(poll, sel, (q_poll_repl_t*)sel->data);
 }
 
+/* Append raw bytes to the line accumulator; returns the count consumed. */
+static size_t pipe_acc_push(q_poll_repl_t* c, const char* p, size_t n) {
+    size_t room = sizeof(c->acc) - 1 - c->acc_len;
+    if (n > room) n = room;
+    memcpy(c->acc + c->acc_len, p, n);
+    c->acc_len += n;
+    return n;
+}
+
+/* Pop one complete line off the accumulator FRONT into dst (no trailing
+ * newline), or -1 if none is buffered yet.  A full accumulator with no
+ * newline flushes as its own line — the same split the fgets loop's 4096
+ * buffer produced.  Lines stay IN the accumulator until popped, so a
+ * debugger suspension mid-line leaves the rest of the input intact for the
+ * nested read loop (repl_poll_dbg_read below). */
+static int pipe_pop_line(q_poll_repl_t* c, char* dst, size_t cap) {
+    size_t i = 0;
+    while (i < c->acc_len && c->acc[i] != '\n') i++;
+    int newline = (i < c->acc_len);
+    if (!newline && c->acc_len < sizeof(c->acc) - 1) return -1;
+    size_t n = i;
+    if (n >= cap) n = cap - 1;
+    memcpy(dst, c->acc, n);
+    dst[n] = '\0';
+    size_t consumed = newline ? i + 1 : c->acc_len;
+    memmove(c->acc, c->acc + consumed, c->acc_len - consumed);
+    c->acc_len -= consumed;
+    return (int)n;
+}
+
 static ray_t* poll_pipe_read(ray_poll_t* poll, ray_selector_t* sel) {
     q_poll_repl_t* c = (q_poll_repl_t*)sel->data;
     char tmp[1024];
@@ -521,20 +556,96 @@ static ray_t* poll_pipe_read(ray_poll_t* poll, ray_selector_t* sel) {
         return NULL;
     }
 
-    for (ssize_t i = 0; i < rd; i++) {
-        /* Overlong line (no newline within the buffer): flush it as its own
-         * line — the same split the fgets loop's 4096 buffer produced. */
-        if (tmp[i] == '\n' || c->acc_len >= sizeof(c->acc) - 1) {
-            if (tmp[i] != '\n')
-                c->acc[c->acc_len++] = tmp[i];
-            size_t n = c->acc_len;
-            c->acc_len = 0;
-            pipe_line(c, c->acc, n);
-        } else {
-            c->acc[c->acc_len++] = tmp[i];
-        }
+    size_t off = 0;
+    while (off < (size_t)rd) {
+        off += pipe_acc_push(c, tmp + off, (size_t)rd - off);
+        char line[4096];
+        int n;
+        while ((n = pipe_pop_line(c, line, sizeof line)) >= 0)
+            pipe_line(c, line, (size_t)n);
     }
     return NULL;
+}
+
+/* piped debug readers own the transcript shape: prompt, then input echo */
+static int pipe_dbg_echo(char* buf, int n) {
+    if (n < 0) return n;
+    fputs(buf, stdout);
+    fputc('\n', stdout);
+    fflush(stdout);
+    return n;
+}
+
+/* Debug-loop reader for the poll-piped console: drain buffered lines first,
+ * then block on stdin directly — the poll loop is parked beneath us on the C
+ * stack, so a plain read(2) cannot race it. */
+static int repl_poll_dbg_read(const char* prompt, char* buf, size_t cap) {
+    fputs(prompt, stdout);
+    fflush(stdout);
+    q_poll_repl_t* c = &g_q_poll_repl;
+    for (;;) {
+        int n = pipe_pop_line(c, buf, cap);
+        if (n >= 0) {
+            while (n && buf[n - 1] == '\r') buf[--n] = '\0';
+            return pipe_dbg_echo(buf, n);
+        }
+        char tmp[1024];
+        ssize_t rd = read(STDIN_FILENO, tmp, sizeof tmp);
+        if (rd <= 0) return -1;
+        size_t off = 0;
+        while (off < (size_t)rd)
+            off += pipe_acc_push(c, tmp + off, (size_t)rd - off);
+    }
+}
+
+/* Debug-loop reader for the interactive tty: run the SAME line editor the
+ * outer loop uses, nested — flip the terminal back to edit state, draw the
+ * debug prompt, feed bytes until a line, then re-arm the eval window before
+ * returning (Ctrl-C during the nested EVAL is the interrupt again).  SIGINT
+ * at the debug prompt clears the line and re-prompts (the repl.c prompt
+ * contract) — it never exits the process and never pops a debug level. */
+static int repl_tty_dbg_read(const char* prompt, char* buf, size_t cap) {
+    ray_term_t* t = g_live_term ? g_live_term : g_q_poll_repl.term;
+    if (!t) return -1;
+    ray_term_eval_end(t);
+    ray_term_set_prompt(t, prompt, (int32_t)strlen(prompt));
+    ray_term_begin(t);
+    int out = -1;
+    for (;;) {
+        int64_t sz = ray_term_getc(t);
+        if (sz <= 0) {
+            if (sz == -2) {
+                ray_term_clear_interrupt();
+                ray_eval_clear_interrupt();
+                t->comp_cycling = 0;
+                t->esc_state = 0;
+                t->buf_len = 0;
+                t->buf_pos = 0;
+                t->multiline_len = 0;
+                fputs("^C\n", stdout);
+                fflush(stdout);
+                ray_term_prompt(t);
+                continue;
+            }
+            break;                                     /* EOF: abort */
+        }
+        ray_t* line = ray_term_feed(t);
+        if (line == RAY_TERM_EOF)
+            break;
+        if (!line)
+            continue;
+        size_t n = ray_str_len(line);
+        if (n >= cap) n = cap - 1;
+        memcpy(buf, ray_str_ptr(line), n);
+        buf[n] = '\0';
+        ray_release(line);
+        out = (int)n;
+        break;
+    }
+    ray_term_clear_interrupt();
+    ray_eval_clear_interrupt();
+    ray_term_eval_begin(t);
+    return out;
 }
 
 int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
@@ -570,10 +681,13 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
         ray_term_install_signals(t);
         c->term = t;
         reg.read_fn = poll_tty_read;
+        q_dbg_set_reader(repl_tty_dbg_read);   /* `\e 1` debugger over this editor */
         reg.data_fn = poll_tty_data;
     } else {
         c->echo = 1;   /* piped transcript: echo input after the prompt */
         reg.read_fn = poll_pipe_read;
+        /* piped console: arm the `\e 1` debugger's nested line reader */
+        q_dbg_set_reader(repl_poll_dbg_read);
     }
 
     if (ray_poll_register(poll, &reg) < 0) {
@@ -593,10 +707,22 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
 
     ray_poll_run(poll);
 
+    q_dbg_set_reader(NULL);
     /* Loop exited with the console still live (e.g. a remote-initiated
      * exit): restore the terminal before returning. */
     poll_close_term(c);
     return 0;
+}
+
+/* Debug-loop reader for the fgets-piped console: the same FILE* buffering as
+ * the outer loop, so the nested read continues exactly where it stopped. */
+static int repl_fgets_dbg_read(const char* prompt, char* buf, size_t cap) {
+    fputs(prompt, stdout);
+    fflush(stdout);
+    if (!fgets(buf, (int)cap, stdin)) return -1;
+    size_t n = strlen(buf);
+    while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = '\0';
+    return pipe_dbg_echo(buf, (int)n);
 }
 
 void q_repl_run(FILE* in, FILE* out, FILE* err, int echo) {
@@ -611,6 +737,9 @@ void q_repl_run(FILE* in, FILE* out, FILE* err, int echo) {
      * identical so the qcmd transcript tests stay stable.  The prompt is
      * context-derived: `q)` at root, `q.foo)` after `\d .foo`. */
     char line[4096];
+
+    if (in == stdin)
+        q_dbg_set_reader(repl_fgets_dbg_read);
 
     for (;;) {
         char prompt[80];
@@ -628,6 +757,7 @@ void q_repl_run(FILE* in, FILE* out, FILE* err, int echo) {
         if (n == 0) continue;
         q_ctx_run_line(line, n, out, err, 1);
     }
+    q_dbg_set_reader(NULL);
 }
 
 /* Run a q startup script (`q file.q`): evaluate each line with NO `q)` prompt,

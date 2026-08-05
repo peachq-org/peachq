@@ -154,6 +154,11 @@ int main(int argc, char** argv) {
     }
 
     int stdin_tty = isatty(STDIN_FILENO);
+    /* kdb console default: error-trap mode 1 (suspend into the debugger) —
+     * TTY consoles only, so every piped/qdoc/script transcript keeps mode 0
+     * and stays byte-stable; `\e N` overrides at any time. */
+    if (stdin_tty)
+        q_sys_err_trap_set(1);
 
     /* Startup banner (kdb-style version + build date, via the same macros as
      * .z.K/.z.k).  GUARDRAIL: print ONLY on an interactive tty REPL and NOT

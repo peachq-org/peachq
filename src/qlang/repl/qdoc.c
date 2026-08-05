@@ -4,6 +4,7 @@
 #include "qlang/repl/qdoc.h"
 #include "qlang/parse/q_parse.h"
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
+#include "qlang/eval/q_dbg.h"    /* statement stash — .Q.trp/.Q.bt frame [0] */
 #include "qlang/eval/q_view.h"   /* q_view_intercept — `x::e` at the row seam */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
@@ -164,6 +165,8 @@ static void run_example(const char* input, const char* expect,
     r->examples++;
     q_console_reset();   /* drop any show/0N! output from a prior example */
     q_err_drop();        /* statement-entry payload backstop (q_repl twin) */
+    /* console 0: qdoc examples must never suspend (the runner has no reader) */
+    (void)q_dbg_statement_begin(input, strlen(input), 0);
 
     /* Prompt pin: the transcript's prompt (`q)` / `q.foo)`) must match the
      * LIVE context prompt at this point — that is what tests the `\d` prompt

@@ -6,6 +6,7 @@
 #include "qlang/q_env.h"       /* q_env_get — the settable handlers are globals */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_value — handler firing */
 #include "qlang/eval/q_view.h" /* q_view_zb — `.z.b` dependency dict */
+#include "qlang/eval/q_dbg.h"  /* q_dbg_zex/_zey — `.z.ex`/`.z.ey` (basics/debug.md) */
 #include "qlang/net/q_tls.h"   /* q_tls_dotz_e — `.z.e` TLS connection status */
 #include "qlang/ops/q_sys.h"       /* q_sys_timer_active — stopped-timer no-op guard */
 #include "qlang/q_console.h"   /* q_console_str/_reset — drain .z.ts show/0N! output */
@@ -419,6 +420,11 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
             case 'z': out = ray_datetime((double)q_dotz_now_ns(0) / (double)RAY_NS_PER_DAY); break; /* .z.z / .z.Z */
             case 'Z': out = ray_datetime((double)q_dotz_now_ns(1) / (double)RAY_NS_PER_DAY); break;
         }
+    } else if (n == 5 && p[3] == 'e') {
+        /* .z.ex / .z.ey — failed primitive + its args (basics/debug.md);
+         * unset (no snapshot) declines -> 'name, matching an unset callback */
+        if (p[4] == 'x') out = q_dbg_zex();
+        else if (p[4] == 'y') out = q_dbg_zey();
     }
 
     /* kdb `.z.p*` handler-alias READ-BACK: resolve to the SAME `.ipc.on.*` env
