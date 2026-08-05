@@ -240,6 +240,17 @@ static void run_example(const char* input, const char* expect,
 
     ray_t* ast = q_parse(input);
     if (RAY_IS_ERR(ast)) {
+        /* an error-expectation row a PARSE-time error satisfies passes WHOLE —
+         * 'dup dies during parse (qsql.md:168), and the transcript's
+         * observable IS the error */
+        char pcls[64];
+        if (mode != QDOC_PARSE_ONLY && expect_is_error(expect, pcls, sizeof pcls) &&
+            error_row_matches(ast, pcls)) {
+            ray_error_free(ast);
+            r->parsed++;
+            classify(r, 1);
+            return;
+        }
         classify(r, 0);
         emit_err(em, tprompt, input, ast);
         if (verbose) fprintf(out, "  q)%.200s\n    FAIL(parse)\n", input);

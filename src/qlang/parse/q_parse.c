@@ -43,9 +43,15 @@
  * kparser die()s (exit) on malformed input.  A REPL must not exit, so a
  * malformed parse longjmps back to q_parse, which returns a ray_error. */
 static jmp_buf q_err_jmp;
+static q_err_e g_die_class = QE_PARSE;   /* q_die_err overrides for one longjmp */
 
 static _Noreturn void q_die(const char *msg) {
     (void)msg;   /* class-only errors (bare 'parse); msg documents the call site */
+    longjmp(q_err_jmp, 1);
+}
+
+static _Noreturn void q_die_err(q_err_e cls) {
+    g_die_class = cls;
     longjmp(q_err_jmp, 1);
 }
 
@@ -717,6 +723,35 @@ static int sym_is_nameref(ray_t *v) {
     return v && v->type == -RAY_SYM && !(v->attrs & Q_ATTR_QUOTED);
 }
 
+/* pairwise duplicate WITHIN one W64 sym-id vector */
+static int symvec_ids_dup(ray_t *a) {
+    if (!a || a->type != RAY_SYM) return 0;
+    int64_t n = ray_len(a);
+    const int64_t *s = (const int64_t *)ray_data(a);
+    for (int64_t i = 1; i < n; i++)
+        for (int64_t j = 0; j < i; j++)
+            if (s[i] == s[j]) return 1;
+    return 0;
+}
+
+/* a select-COLUMN name colliding with a by-GROUP name — the cols/groups CROSS
+ * collision, which is what covers both of qsql.md:168's parse-error examples
+ * (`select b by b from t`, `select a,a by a from t`).  A collision WITHIN one
+ * list is NOT checked here: kdb auto-aliases it, openq rejects it at EVAL
+ * (the stricter owner ruling — see q_funsql.c names_collide). */
+static int qsql_cross_names_dup(ray_t *A, ray_t *B) {
+    ray_t *ka = A && A->type == RAY_DICT ? ray_dict_keys(A) : NULL;
+    ray_t *kb = B && B->type == RAY_DICT ? ray_dict_keys(B) : NULL;
+    if (!ka || ka->type != RAY_SYM || !kb || kb->type != RAY_SYM) return 0;
+    int64_t na = ray_len(ka), nb = ray_len(kb);
+    const int64_t *sa = (const int64_t *)ray_data(ka);
+    const int64_t *sb = (const int64_t *)ray_data(kb);
+    for (int64_t i = 0; i < na; i++)
+        for (int64_t j = 0; j < nb; j++)
+            if (sa[i] == sb[j]) return 1;
+    return 0;
+}
+
 /* the registry value for spelling s at valence v (q_embed's policy); q_parse
  * fails fast on a cold registry, so a miss cannot occur here */
 static ray_t *table_lit_head(const char *s, q_valence_t v) {
@@ -758,6 +793,13 @@ static ray_t *table_lit_dict(ray_t *defs) {
         keys = ray_vec_append(keys, &nm);
         if (ex) { vals = ray_list_append(vals, ex); }
         else    { ray_t *nul = q_null(); vals = ray_list_append(vals, nul); ray_release(nul); }
+    }
+    /* a dup column name in the LITERAL dies at parse like a select's
+     * (qsql/select_fixes.qcmd pins `([] a:1 2;a:3 4)` -> 'dup); the same
+     * names through raw `!`/`flip` stay legal — construction is permissive */
+    if (symvec_ids_dup(keys)) {
+        ray_release(keys); ray_release(vals); ray_release(defs);
+        q_die_err(QE_DUP);
     }
     ray_release(defs);
     return table_lit_bang(keys, vals);
@@ -1099,6 +1141,16 @@ static P parse_query(Parser *p) {
 
     if (c) { C = qsql_normalize_phrases(c, Q_WHERE, verb); ray_release(c); c = NULL; }
     else   { C = ray_list_new(0); }                /* no where -> () */
+
+    /* qsql.md:168: a cols-vs-groups collision "throws a 'dup names for
+     * cols/groups error during parse" — AT PARSE, so a script carrying the
+     * bug fails to LOAD and the operator is alerted before the code runs.
+     * A within-phrase collision is NOT this law's (kdb auto-aliases it;
+     * openq rejects it at eval — the q_funsql.c ruling). */
+    if (verb == QSQL_V_SELECT && qsql_cross_names_dup(A, B)) {
+        ray_release(A); ray_release(B); ray_release(C);
+        q_die_err(QE_DUP);
+    }
 
     /* the in-flight raw slots are now all NULL / consumed — retire the guard. */
     qsql_pend_pop(); qsql_pend_pop(); qsql_pend_pop(); qsql_pend_pop();
@@ -1778,7 +1830,8 @@ ray_t *q_qsql_normalize_probe(const char *src, int ctx, int verb) {
         qsql_pend_unwind();
         free_tokens(g_toks);
         g_toks.t = NULL; g_toks.n = 0;
-        return q_err(QE_PARSE);
+        q_err_e cls = g_die_class; g_die_class = QE_PARSE;
+        return q_err(cls);
     }
     Tokens ts = scan(src);
     Parser p = { .src = src, .t = ts, .pos = 0, .xyz_mask = NULL, .lambda_depth = 0 };
@@ -1861,7 +1914,8 @@ ray_t *q_parse(const char *src) {
         free_tokens(g_toks);
         g_toks.t = NULL;
         g_toks.n = 0;
-        return q_err(QE_PARSE);
+        q_err_e cls = g_die_class; g_die_class = QE_PARSE;
+        return q_err(cls);
     }
 
     Tokens ts = scan(src);

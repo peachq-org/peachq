@@ -50,10 +50,11 @@
 
 / ---- Command-line / environment (ref/dotq.md) ----
 .Q.x:();
-/ .Q.opt: argv -> dict; flags start "-", value = tokens up to next flag (0->();1->str;many->list); sets .Q.x.
-.Q.opt:{[a] a:$[10h=type a;enlist a;a]; .Q.x:(); $[count a;{[a] i:where {"-"~first x} each a; e:(1_i),count a; .Q.x:$[count i;(first i)#a;a]; k:`$1_'a i; j:til count i; k!{[a;i;e;j] s:(1+i j)_(e j)#a; $[1=count s;first s;s]}[a;i;e;]each j}[a];(`$())!()]};
+/ .Q.opt: argv -> dict; flags start "-", value = ALWAYS the list of tokens up to the next flag
+/ (never collapsed to a bare string at count 1 — `first each .Q.opt .z.x` is the documented idiom). Sets .Q.x.
+.Q.opt:{[a] a:$[10h=type a;enlist a;a]; .Q.x:(); $[count a;{[a] i:where {"-"~first x} each a; e:(1_i),count a; .Q.x:$[count i;(first i)#a;a]; k:`$1_'a i; j:til count i; k!{[a;i;e;j] (1+i j)_(e j)#a}[a;i;e;]each j}[a];(`$())!()]};
 / .Q.def: defaults + tok-typed coercion over .Q.opt output (typed null on absent value / bad coerce).
-.Q.def:{[d;o] key[d]!{[d;o;k] $[k in key o;$[10h=type o k;(type d k)$o k;first 0#d k];d k]}[d;o;]each key d};
+.Q.def:{[d;o] key[d]!{[d;o;k] $[k in key o;$[count o k;(type d k)$first o k;first 0#d k];d k]}[d;o;]each key d};
 
 / ---- Precision format (ref/dotq.md): thin wrappers over -27! (IEEE754 precision format) ----
 / .Q.f[x;y]: y to x decimals as a string. DECIMAL rounding (not -27!'s IEEE754): nudge y by a
