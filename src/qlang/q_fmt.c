@@ -232,7 +232,9 @@ static void ray_fallback(ray_t* val, char* buf, size_t bufsz) {
 
 void q_fmt(ray_t* val, char* buf, size_t bufsz);   /* fwd */
 void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz);   /* fwd (impl at EOF) */
-static size_t char_esc(unsigned char ch, char out[8]);   /* fwd — fmt_dict_key shares it */
+static size_t char_esc(unsigned char ch, char out[8]);   /* fwd — fmt_dict_elem shares it */
+static int elem_tok(ray_t* a, char* out, size_t n);      /* fwd — THE cell law, defined below */
+static int col_uniform_type(ray_t* col);                 /* fwd — its precondition */
 
 /* Tables: padded columns under a dashed rule, keyed tables put key columns left of `|`; NO trailing spaces. */
 
@@ -253,8 +255,11 @@ static int col_uniform_singleton(ray_t* col) {
 }
 
 
-/* One table cell: sym cells print WITHOUT the backtick (kdb `ibm`). */
-void q_fmt_cell(ray_t* col, int64_t row, char* out, size_t outsz) {
+/* THE cell renderer — table, keyed table, dict and aligned row.  `blank_null` =
+ * a COLUMN, where a null shows as a gap (ref/lj.md, ref/log.md:50-52); a general
+ * list keeps its token.  EVERY cell is an element: the header names a table
+ * column even when it is mixed, so no uniformity gate here. */
+void q_fmt_cell(ray_t* col, int64_t row, int blank_null, char* out, size_t outsz) {
     out[0] = '\0';
     if (col && col->type == -RAY_STR) {     /* char-column shim: bare char */
         size_t l = ray_str_len(col);
@@ -275,24 +280,12 @@ void q_fmt_cell(ray_t* col, int64_t row, char* out, size_t outsz) {
     ray_t* c  = ray_at_fn(col, ia);
     ray_release(ia);
     if (!c || RAY_IS_ERR(c)) { if (c) ray_release(c); return; }
-    if (ray_is_atom(c) && c->type != -RAY_STR && c->type != -RAY_SYM &&
-        RAY_ATOM_IS_NULL(c)) {
-        /* null cells are BLANK (ref/lj.md) — must precede the float branch */
+    if (blank_null && ray_is_atom(c) && c->type != -RAY_STR &&
+        c->type != -RAY_SYM && RAY_ATOM_IS_NULL(c)) {
         ray_release(c);
         return;
     }
-    if (c->type == -RAY_SYM) {
-        ray_t* s = ray_sym_str(c->i64);
-        if (s) { snprintf(out, outsz, "%.*s", (int)ray_str_len(s), ray_str_ptr(s));
-                 ray_release(s); }
-    } else if (c->type == -RAY_F64 || c->type == -RAY_F32) {
-        /* float cells drop the `f` — the column carries the type (`300`) */
-        if (RAY_ATOM_IS_NULL(c)) snprintf(out, outsz, c->type == -RAY_F32 ? "0Ne" : "0n");
-        else q_fmt_float(c->f64, c->type == -RAY_F32, out, outsz);  /* F32 atoms store f64 */
-    } else if (c->type == -RAY_BOOL) {
-        /* bool cells BARE (ref/greater-than.md:56-59) — no `b` suffix */
-        snprintf(out, outsz, "%d", c->u8 ? 1 : 0);
-    } else {
+    if (!elem_tok(c, out, outsz)) {
         q_fmt(c, out, outsz);
         if (out[0] == ',' && col_uniform_singleton(col))
             memmove(out, out + 1, strlen(out));
@@ -310,7 +303,7 @@ static void table_widths(ray_t* tbl, int64_t nc, int64_t nr,
         int w = (int)strlen(hdr[c]);
         ray_t* col = ray_table_get_col_idx(tbl, c);
         for (int64_t r = 0; r < nr; r++) {
-            char cb[64]; q_fmt_cell(col, r, cb, sizeof cb);
+            char cb[64]; q_fmt_cell(col, r, 1, cb, sizeof cb);
             int l = (int)strlen(cb); if (l > w) w = l;
         }
         widths[c] = w;
@@ -348,7 +341,7 @@ static void q_fmt_table(ray_t* tbl) {
     for (int64_t r = 0; r < nr; r++) {
         for (int64_t c = 0; c < nc; c++) {
             if (c) qe_putc(' ');
-            char cb[64]; q_fmt_cell(ray_table_get_col_idx(tbl, c), r, cb, sizeof cb);
+            char cb[64]; q_fmt_cell(ray_table_get_col_idx(tbl, c), r, 1, cb, sizeof cb);
             qe_pad(cb, widths[c]);
         }
         qe_trim();
@@ -383,13 +376,13 @@ static void fmt_keyed(ray_t* kt, ray_t* vt) {
     for (int64_t r = 0; r < nr; r++) {
         for (int64_t c = 0; c < knc; c++) {
             if (c) qe_putc(' ');
-            char cb[64]; q_fmt_cell(ray_table_get_col_idx(kt, c), r, cb, sizeof cb);
+            char cb[64]; q_fmt_cell(ray_table_get_col_idx(kt, c), r, 1, cb, sizeof cb);
             qe_pad(cb, kw[c]);
         }
         qe_putc('|'); qe_putc(' ');
         for (int64_t c = 0; c < vnc; c++) {
             if (c) qe_putc(' ');
-            char cb[64]; q_fmt_cell(ray_table_get_col_idx(vt, c), r, cb, sizeof cb);
+            char cb[64]; q_fmt_cell(ray_table_get_col_idx(vt, c), r, 1, cb, sizeof cb);
             qe_pad(cb, vw[c]);
         }
         qe_trim();
@@ -552,42 +545,77 @@ static void ttok_elem(const q_ttok_t* r, ray_t* v, int64_t i,
     tok_via_atom(r->ctor(x), out, n);
 }
 
-static void fmt_dict_key(ray_t* key, char* out, size_t cap) {
+/* THE display cell law (#367, ARCHITECTURE.md:436, ref/join.md:177): a cell is
+ * one ELEMENT, so it sheds the suffix naming a type its container already
+ * carries (`1i`->`1`, `2017.05m`->`2017.05`, `1.5e`->`1.5`).  Intrinsic syntax
+ * survives — the `0x` radix, guid/temporal punctuation, the sentinels.
+ * 0 = no element form; the caller renders the whole value. */
+static int elem_tok(ray_t* a, char* out, size_t n) {
     out[0] = '\0';
-    if (!key || RAY_IS_ERR(key)) return;
-
-    if (key->type == -RAY_SYM) {     /* bare, never backticked */
-        ray_t* s = ray_sym_str(key->i64);
-        if (s) {
-            snprintf(out, cap, "%.*s", (int)ray_str_len(s), ray_str_ptr(s));
-            ray_release(s);
+    if (!a || RAY_IS_ERR(a) || a->type >= 0) return 0;
+    const q_ttok_t* tr = ttok_find((int8_t)-a->type);
+    if (tr) { ttok_elem(tr, a, -1, out, n); return 1; }   /* no vsfx: month sheds `m` */
+    switch (a->type) {
+    case -RAY_BOOL:      snprintf(out, n, "%d", a->u8 ? 1 : 0);      return 1;
+    case -RAY_BYTE_ONLY: snprintf(out, n, "0x%02x", a->u8);          return 1;
+    case -RAY_I16:       int_tok((int64_t)a->i16, 2, 0, out, n);     return 1;
+    case -RAY_I32:       int_tok((int64_t)a->i32, 4, 0, out, n);     return 1;
+    case -RAY_I64:       int_tok(a->i64,          8, 0, out, n);     return 1;
+    case -RAY_F32:
+    case -RAY_F64:
+        q_fmt_float(a->f64, a->type == -RAY_F32, out, n);
+        /* the container carries the `e`; a SENTINEL keeps its own (`0Ne`/`0we`) */
+        if (a->type == -RAY_F32 && isfinite(a->f64)) {
+            size_t l = strlen(out);
+            if (l) out[l - 1] = '\0';
         }
-        return;
+        return 1;
+    case -RAY_GUID: {
+        const uint8_t* b16 = a->obj ? (const uint8_t*)ray_data(a->obj)
+                                    : (const uint8_t*)ray_data(a);
+        guid_tok(b16, out, n);
+        return 1;
     }
-    if (key->type == -RAY_CHARV) {   /* char-atom key bare `m|` (strips the quotes), sharing the char-escape path so control/non-ASCII bytes stay safe */
-        char e[8];
-        size_t el = char_esc(key->u8, e);
-        if (el < cap) { memcpy(out, e, el); out[el] = '\0'; }
-        return;
+    case -RAY_SYM: {
+        ray_t* s = ray_sym_str(a->i64);   /* borrowed — never released (sym.h:105) */
+        if (s) snprintf(out, n, "%.*s", (int)ray_str_len(s), ray_str_ptr(s));
+        return 1;
     }
-    if (key->type == -RAY_BOOL) {
-        snprintf(out, cap, "%d", key->u8 ? 1 : 0);
-        return;
+    default: return 0;
     }
-    if (key->type == -RAY_I16 || key->type == -RAY_I32 || key->type == -RAY_I64) {
-        int width = (key->type == -RAY_I16) ? 2 : (key->type == -RAY_I32) ? 4 : 8;
-        int64_t v = (key->type == -RAY_I16) ? (int64_t)key->i16
-                  : (key->type == -RAY_I32) ? (int64_t)key->i32
-                  : key->i64;
-        int_tok(v, width, 0, out, cap);
-        return;
-    }
-    if (key->type == -RAY_F32 || key->type == -RAY_F64) {
-        q_fmt_float(key->f64, key->type == -RAY_F32, out, cap);
-        return;
-    }
+}
 
-    q_fmt(key, out, cap);
+/* A dict row has no header, so only a UNIFORM value names a type its rows may
+ * shed — a typed vector, or a boxed list of one atom type (ref/apply.md's bare
+ * sym column).  A general list keeps it (ARCHITECTURE.md:440, `xyz| 321f`). */
+static int col_uniform_type(ray_t* col) {
+    if (!col || col->type < 0) return 0;
+    if (col->type != RAY_LIST) return 1;
+    int64_t n = ray_len(col);
+    if (n == 0) return 0;
+    ray_t** e = (ray_t**)ray_data(col);
+    for (int64_t i = 0; i < n; i++)
+        if (!e[i] || !ray_is_atom(e[i]) || e[i]->type != e[0]->type) return 0;
+    return 1;
+}
+
+/* A dict key and a dict value row are both ELEMENTS of `col` (ARCHITECTURE.md:439).
+ * The char atom is the exception: bare like a sym key but via char_esc, keeping
+ * control/non-ASCII bytes safe (#320) — an escape a grid cell must not carry,
+ * char_esc also quoting `"`. */
+static void fmt_dict_elem(ray_t* col, ray_t* e, char* out, size_t cap) {
+    out[0] = '\0';
+    if (!e || RAY_IS_ERR(e)) return;
+    if (col_uniform_type(col)) {
+        if (e->type == -RAY_CHARV) {
+            char esc[8];
+            size_t el = char_esc(e->u8, esc);
+            if (el < cap) { memcpy(out, esc, el); out[el] = '\0'; }
+            return;
+        }
+        if (elem_tok(e, out, cap)) return;
+    }
+    q_fmt(e, out, cap);
 }
 
 static void qe_join(const char* tok, int first) {
@@ -706,54 +734,36 @@ static int row_all_sym(ray_t* v) {
     return 1;
 }
 
-/* `bare` = row_all_sym(rv), computed ONCE per row by the caller. */
-static void matrix_cell(ray_t* rv, int64_t c, int bare, char* out, size_t outsz) {
+/* One cell of an aligned row.  A TYPED row's cell IS a column cell — same owner.
+ * Only the BOXED row differs: `bare` (row_all_sym, once per row by the caller)
+ * decides a sym's backtick, and a boxed atom keeps its suffix. */
+static void matrix_cell(ray_t* rv, int64_t c, int bare, int blank_null,
+                        char* out, size_t outsz) {
+    if (rv->type != RAY_LIST) { q_fmt_cell(rv, c, blank_null, out, outsz); return; }
     out[0] = '\0';
-    switch (rv->type) {
-    case RAY_I16: int_tok((int64_t)((const int16_t*)ray_data(rv))[c], 2, 0, out, outsz); break;
-    case RAY_I32: int_tok((int64_t)((const int32_t*)ray_data(rv))[c], 4, 0, out, outsz); break;
-    case RAY_I64: int_tok(((const int64_t*)ray_data(rv))[c],          8, 0, out, outsz); break;
-    case RAY_F32: q_fmt_float((double)((const float*)ray_data(rv))[c],  1, out, outsz); break;
-    case RAY_F64: q_fmt_float(((const double*)ray_data(rv))[c],         0, out, outsz); break;
-    case RAY_SYM: {
-        ray_t* s = ray_sym_vec_cell(rv, c);   /* borrowed -RAY_STR */
-        if (s) snprintf(out, outsz, "%.*s", (int)ray_str_len(s), ray_str_ptr(s));
-        break;
-    }
-    case RAY_CHARV: snprintf(out, outsz, "%c", ((const char*)ray_data(rv))[c]); break;
-    case RAY_LIST: {
-        /* boxed row of atoms: syms BARE, strings quoted (len-1 as ,"c") */
-        ray_t* a = ((ray_t**)ray_data(rv))[c];
-        if (!a) break;
-        if (a->type == -RAY_SYM) {
-            ray_t* s = ray_sym_str(a->i64);   /* borrowed */
-            const char* tick = bare ? "" : "`";
-            if (s) snprintf(out, outsz, "%s%.*s", tick,
-                            (int)ray_str_len(s), ray_str_ptr(s));
-        } else if (a->type == -RAY_STR) {
-            if (ray_str_len(a) == 1 && outsz > 1) {
-                out[0] = ',';
-                fmt_qstring(a, out + 1, outsz - 1);
-            } else
-                fmt_qstring(a, out, outsz);
-        } else if (a->type == -RAY_CHARV) {
-            fmt_qtext((const char*)&a->u8, 1, out, outsz);
-        } else if (a->type == RAY_CHARV) {
-            if (ray_len(a) == 1 && outsz > 1) {
-                out[0] = ',';
-                fmt_qtext((const char*)ray_data(a), 1, out + 1, outsz - 1);
-            } else
-                fmt_qtext((const char*)ray_data(a), (size_t)ray_len(a), out, outsz);
+    ray_t* a = ((ray_t**)ray_data(rv))[c];
+    if (!a) return;
+    if (a->type == -RAY_SYM) {
+        ray_t* s = ray_sym_str(a->i64);   /* borrowed */
+        const char* tick = bare ? "" : "`";
+        if (s) snprintf(out, outsz, "%s%.*s", tick,
+                        (int)ray_str_len(s), ray_str_ptr(s));
+    } else if (a->type == -RAY_STR) {
+        if (ray_str_len(a) == 1 && outsz > 1) {
+            out[0] = ',';
+            fmt_qstring(a, out + 1, outsz - 1);
         } else
-            q_fmt(a, out, outsz);
-        break;
-    }
-    default: {
-        const q_ttok_t* tr = ttok_find(rv->type);
-        if (tr) ttok_elem(tr, rv, c, out, outsz);
-        break;
-    }
-    }
+            fmt_qstring(a, out, outsz);
+    } else if (a->type == -RAY_CHARV) {
+        fmt_qtext((const char*)&a->u8, 1, out, outsz);
+    } else if (a->type == RAY_CHARV) {
+        if (ray_len(a) == 1 && outsz > 1) {
+            out[0] = ',';
+            fmt_qtext((const char*)ray_data(a), 1, out + 1, outsz - 1);
+        } else
+            fmt_qtext((const char*)ray_data(a), (size_t)ray_len(a), out, outsz);
+    } else
+        q_fmt(a, out, outsz);
 }
 
 static int matrix_row_ok(ray_t* r) {
@@ -773,15 +783,15 @@ static int matrix_row_ok(ray_t* r) {
 }
 
 /* One row into a buffer: cells space-joined, each padded to w[c] (w NULL =
- * unpadded); trailing pad trimmed.  THE row renderer, shared by the matrix,
- * the dict value column and the enlist arm. */
+ * unpadded); trailing pad trimmed.  THE row renderer for the dict value column,
+ * which IS a column — hence blank_null. */
 static void matrix_row_str(ray_t* row, int64_t nc, const int* w,
                            char* out, size_t outsz) {
     size_t pos = 0;
     int bare = row_all_sym(row);
     out[0] = '\0';
     for (int64_t c = 0; c < nc; c++) {
-        char cb[512]; matrix_cell(row, c, bare, cb, sizeof cb);
+        char cb[512]; matrix_cell(row, c, bare, 1, cb, sizeof cb);
         if (c && pos + 1 < outsz) out[pos++] = ' ';
         int l = (int)strlen(cb);
         int pad = w ? w[c] : l;
@@ -813,26 +823,30 @@ static int is_matrix(ray_t** e, int64_t n) {
     return !all_charv;
 }
 
-/* Column widths over nr rows; NULL on OOM.  Caller frees unless == stackw. */
-static int* matrix_widths(ray_t** e, int64_t nr, int64_t nc, int* stackw, int64_t stackn) {
+/* Column widths over nr rows; NULL on OOM.  Caller frees unless == stackw.
+ * `blank_null` must match the render pass or the grid misaligns. */
+static int* matrix_widths(ray_t** e, int64_t nr, int64_t nc, int blank_null,
+                          int* stackw, int64_t stackn) {
     int* w = (nc <= stackn) ? stackw : malloc((size_t)(nc > 0 ? nc : 1) * sizeof(int));
     if (!w) return NULL;
     for (int64_t c = 0; c < nc; c++) w[c] = 0;
     for (int64_t r = 0; r < nr; r++) {          /* rows outer: one row_all_sym each */
         int bare = row_all_sym(e[r]);
         for (int64_t c = 0; c < nc; c++) {
-            char cb[512]; matrix_cell(e[r], c, bare, cb, sizeof cb);
+            char cb[512]; matrix_cell(e[r], c, bare, blank_null, cb, sizeof cb);
             int l = (int)strlen(cb); if (l > w[c]) w[c] = l;
         }
     }
     return w;
 }
 
+/* A general list is not a column, so its null cells keep their token (no doc in
+ * the corpus blanks one) — blank_null 0 throughout. */
 static void fmt_matrix(ray_t** e, int64_t nr) {
     int64_t nc = ray_len(e[0]);
     /* no fixed column cap; clip-armed sizing scans showable rows only */
     int  stackw[64];
-    int* widths = matrix_widths(e, size_rows(nr), nc, stackw, 64);
+    int* widths = matrix_widths(e, size_rows(nr), nc, 0, stackw, 64);
     if (!widths) return;
     for (int64_t r = 0; r < nr; r++) {
         if (qe_done()) break;                    /* height cap hit — early exit */
@@ -840,7 +854,7 @@ static void fmt_matrix(ray_t** e, int64_t nr) {
         int bare = row_all_sym(e[r]);
         for (int64_t c = 0; c < nc; c++) {
             if (c) qe_putc(' ');
-            char cb[512]; matrix_cell(e[r], c, bare, cb, sizeof cb);
+            char cb[512]; matrix_cell(e[r], c, bare, 0, cb, sizeof cb);
             qe_pad(cb, widths[c]);                    /* left-align */
         }
         qe_trim();                                    /* no trailing spaces */
@@ -967,7 +981,7 @@ static void qp_widths(qp_col* cs, int64_t nc, int64_t shown, int* w) {
         if (t > m) m = t;
         for (int64_t r = 0; r < shown; r++) {
             char cb[QP_CELL];
-            q_fmt_cell(cs[c].col, r, cb, sizeof cb);
+            q_fmt_cell(cs[c].col, r, 1, cb, sizeof cb);
             int l = (int)strlen(cb);
             if (l > m) m = l;
         }
@@ -1037,7 +1051,7 @@ static int64_t qp_distinct(ray_t* col, int64_t nr, bool* capped) {
             h = ray_hash_bytes(d + i * esz, (size_t)esz);
         } else {
             char cb[QP_CELL];
-            q_fmt_cell(col, i, cb, sizeof cb);
+            q_fmt_cell(col, i, 1, cb, sizeof cb);
             h = ray_hash_bytes(cb, strlen(cb));
         }
         qp_ht_add(ht, &n, h);
@@ -1201,7 +1215,7 @@ static void fmt_pipe_render(ray_t* val, char* buf, size_t bufsz) {
 
     for (int64_t r = 0; r < shown; r++) {
         for (int64_t c = 0; c < nc; c++)
-            q_fmt_cell(cs[c].col, r, cells[c], QP_CELL);
+            q_fmt_cell(cs[c].col, r, 1, cells[c], QP_CELL);
         qp_cells(line, sizeof line, cells, w, nc);
         qp_line(&o, line, cols);
     }
@@ -1596,17 +1610,6 @@ static void q_fmt_body(ray_t* val) {
         int64_t n = k ? q_builtins_count_long(k) : 0;
         if (n < 0) n = 0;
         size_t maxk = 0;
-        /* uniform sym value column prints BARE (ref/apply.md); mixed keeps ` */
-        int sym_col = v && v->type == RAY_SYM;
-        /* a typed vector OWNS its type, so its rows are ELEMENTS and drop the
-         * atom suffix (`5f` -> `b| 5`); a boxed ATOM keeps it (`xyz| 321f`) */
-        int vec_val = v && v->type > 0 && ray_is_vec(v);
-        if (v && v->type == RAY_LIST && ray_len(v) > 0) {
-            ray_t** vel = (ray_t**)ray_data(v);
-            sym_col = 1;
-            for (int64_t i = 0; i < ray_len(v) && sym_col; i++)
-                if (!vel[i] || vel[i]->type != -RAY_SYM) sym_col = 0;
-        }
         int64_t n_size = size_rows(n);   /* clip-armed: size showable rows only */
         /* value rows column-align like a matrix (compare/lesser.qcmd `d&5`) */
         int  dstackw[64];
@@ -1615,7 +1618,7 @@ static void q_fmt_body(ray_t* val) {
         if (v && v->type == RAY_LIST && ray_len(v) == n &&
             is_matrix((ray_t**)ray_data(v), n)) {
             dnc = ray_len(((ray_t**)ray_data(v))[0]);
-            dw  = matrix_widths((ray_t**)ray_data(v), n_size, dnc, dstackw, 64);
+            dw  = matrix_widths((ray_t**)ray_data(v), n_size, dnc, 1, dstackw, 64);
         }
         for (int pass = 0; pass < 2; pass++) {
             int64_t n_pass = (pass == 0) ? n_size : n;
@@ -1624,7 +1627,7 @@ static void q_fmt_body(ray_t* val) {
                 ray_t* ke = ray_at_fn(k, ia);
                 ray_release(ia);
                 char kb[256]; kb[0] = '\0';
-                fmt_dict_key(ke, kb, sizeof kb);
+                fmt_dict_elem(k, ke, kb, sizeof kb);
                 if (ke && !RAY_IS_ERR(ke)) ray_release(ke);
                 size_t kl = strlen(kb);
                 if (pass == 0) {
@@ -1642,15 +1645,8 @@ static void q_fmt_body(ray_t* val) {
                 ray_t* ja = ray_i64(i);
                 ray_t* ve = v ? ray_at_fn(v, ja) : NULL;
                 ray_release(ja);
-                if (ve && !RAY_IS_ERR(ve)) {
-                    /* len-1 strings render "c" NOT ,"c" (list/first pins `c| "h"`);
-                     * bool ATOM rows BARE, boxed bool vectors keep `100b` */
-                    if (vec_val || (sym_col && ve->type == -RAY_SYM) ||
-                        ve->type == -RAY_BOOL)
-                        fmt_dict_key(ve, vb, sizeof vb);
-                    else
-                        q_fmt(ve, vb, sizeof vb);
-                }
+                /* len-1 strings render "c" NOT ,"c" (list/first pins `c| "h"`) */
+                if (ve && !RAY_IS_ERR(ve)) fmt_dict_elem(v, ve, vb, sizeof vb);
                 if (ve && !RAY_IS_ERR(ve)) ray_release(ve);
                 size_t need = (i ? 1 : 0) + maxk + 2 + strlen(vb);
                 if (!qe_fits(need)) break;
