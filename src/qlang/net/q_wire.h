@@ -92,6 +92,10 @@ enum { Q_WIRE_ASYNC = 0, Q_WIRE_SYNC = 1, Q_WIRE_RESP = 2 };
  * values, 'limit for >2GB frames). */
 ray_t* q_wire_serialize(ray_t* x, uint8_t msgtype);
 
+/* `-22!x`: the byte length q_wire_serialize would return, without building the
+ * frame.  Owned i64 atom, or the same 'nyi / 'limit errors. */
+ray_t* q_wire_serialize_len(ray_t* x);
+
 /* Deserialize a complete kdb IPC message.  Accepts either endianness
  * (header byte 0) and compressed frames (byte 2 == 1); the payload must
  * decode to exactly one object consuming the whole frame.  `bytes` must
@@ -118,6 +122,7 @@ typedef struct q_wire_wbuf {
     size_t   len, cap;
     ray_t*   err;      /* set on failure (owned RAY_ERROR) */
     int      serde;    /* serde mode: ext tags on, list collapse off */
+    int      measure;  /* measure mode: len counts the bytes, none are written */
 } q_wire_wbuf_t;
 
 /* Append x's payload bytes (no message header).  0 on success; -1 on

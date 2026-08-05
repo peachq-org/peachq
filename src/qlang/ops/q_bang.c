@@ -278,6 +278,7 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -6:  return q_eval(y);              /* internal.md: -6! is eval */
         case -7:  return h_hcount(y);
         case -8:  return q_wire_serialize(y, Q_WIRE_ASYNC);
+        case -22: return q_wire_serialize_len(y);
         case -9:  return h_deser(y);
         case -12: return q_net_host(y);
         case -13: return q_net_addr(y);
@@ -315,7 +316,6 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -11:  /* streaming execute: logging + .z.ps                        */
         case -19:  /* set / compress file (AMBIGUOUS doc — see PR Deferrals)    */
         case -20:  /* .Q.gc: garbage collect                                    */
-        case -22:  /* uncompressed length: serde length shortcut               */
         case -23:  /* memory map: mmap-backed objects                          */
         case -24:  /* reval: restricted eval — PARKED with `value` itself
                     * (eval-rebuild cutover); needs the RAY_FN_RESTRICTED gate
