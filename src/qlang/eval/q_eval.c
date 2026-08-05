@@ -286,17 +286,33 @@ static ray_t* indexed_assign(int is_global, ray_t* target, ray_t* opv,
     ray_t* cur = name_value(te[0], NULL);
     if (RAY_IS_ERR(cur)) ret = cur;
     if (!ret) {
+        int in_frame = !dotted && q_eval_apply_frame_depth() > 0;
+        int local = in_frame &&
+                    (!is_global || q_env_local_get(te[0]->i64) != NULL);
+        /* the binding this write REPLACES double-counts the value, so the
+         * amend would copy the whole vector: park it (q_env.h q_env_take) */
+        int stole = local ? q_env_local_take(te[0]->i64, cur)
+                          : q_env_take(te[0]->i64, cur);
         ray_t* amended = q_index_amend(cur, idxv, k, opv, rv);
-        if (RAY_IS_ERR(amended)) { ray_release(cur); ret = amended; }
+        if (RAY_IS_ERR(amended)) {
+            if (stole) {
+                if (local) q_env_local_set(te[0]->i64, cur);
+                else q_env_bind(te[0]->i64, cur);
+            }
+            ray_release(cur);
+            ret = amended;
+        }
         else {                                       /* cur consumed on success */
-            int in_frame = !dotted && q_eval_apply_frame_depth() > 0;
-            int local = in_frame &&
-                        (!is_global || q_env_local_get(te[0]->i64) != NULL);
             if (!local) q_view_set_index(idxv, k);   /* .z.vs y (ref/dotz.md) */
             ray_err_t e2 = local ? q_env_local_set(te[0]->i64, amended)
                                  : q_env_set(te[0]->i64, amended);
             q_view_set_index(NULL, 0);               /* never leaks to the next set */
-            if (e2 != RAY_OK) ret = q_env_err(e2);
+            /* a failed rebind must not leave the park visible as `::` (a local
+             * park cannot get here — its slot exists, so the set cannot fail) */
+            if (e2 != RAY_OK) {
+                if (stole && !local) q_env_bind(te[0]->i64, amended);
+                ret = q_env_err(e2);
+            }
             else if (!opv) { ray_retain(rv); ret = rv; }
             else ret = q_eval_apply_concrete(q_eval_apply_value(amended, idxv, k));
             ray_release(amended);
