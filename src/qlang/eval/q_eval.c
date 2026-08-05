@@ -24,6 +24,7 @@
 #include "qlang/q_dotz.h"
 #include "qlang/q_env.h"
 #include "qlang/ops/q_index.h"
+#include "qlang/ops/q_dollar.h"   /* q_dollar — the cast home `x.attr` rides */
 #include "qlang/net/q_wirefile.h"  /* q_wirefile_read — `get `:file */
 #include "qlang/io/q_splay.h"      /* q_splay_get — `get `:dir/ maps, not reads */
 #include "lang/eval.h"
@@ -146,10 +147,52 @@ static ray_t* resolve(int64_t id, const q_op_t** row_out) {
     return NULL;
 }
 
+/* Dot notation whose last segment names a cast target IS that cast:
+ * `time.minute` ~ `` `minute$time ``, `t.hh` ~ `` `hh$t `` (ref/cast.md
+ * Temporal, `` `year`dd`mm`hh`uu`ss$2015.10.28D03:55:58 ``).  The `$` home
+ * owns which designators exist — BOTH readings, the type targets and the
+ * `uu`/`year`/`week` components, so it is `$` entire and not q_dollar_cast.
+ *
+ * Runs LAST, after resolve(): the env walk's accessor roster (q_env.c
+ * walk_segs) keeps its owner-ruled `mm`/`minute`/`date`/`time`, and this
+ * reaches only what that roster never had — the spellings it records as
+ * parked, and bases that are a LOCAL (a qSQL column), which it never sees.
+ * Kept only when the cast SUCCEEDS, so nothing resolvable changes meaning.
+ *
+ * COUPLING: `$` falls through to q_dollar_enum for a sym it cannot read as a
+ * cast target — 'nyi today, so a miss still lands on the name error.  When
+ * enum domains land, gate this or `x.dom` will silently enumerate. */
+static ray_t* dot_cast(int64_t id) {
+    ray_t* nm = ray_sym_str(id);
+    if (!nm) return NULL;
+    const char* p = ray_str_ptr(nm);
+    size_t n = ray_str_len(nm), cut = 0;
+    for (size_t i = 0; i < n; i++)
+        if (p[i] == '.') cut = i;
+    ray_t* r = NULL;
+    if (cut > 0 && cut + 1 < n) {
+        /* the base must be a STORED name (global or qSQL-column local), never
+         * the registry or a `.z` builtin: `.z.p.year` is 'name until `.z.p` is
+         * assigned to a variable (temporal_dot_accessor.qcmd pins the oddity) */
+        ray_t* base = q_env_resolve(ray_sym_intern_runtime(p, (int64_t)cut));
+        if (base && !RAY_IS_ERR(base) && !q_view_is(base)) {
+            ray_t* attr = ray_sym(ray_sym_intern_runtime(p + cut + 1,
+                                                         (int64_t)(n - cut - 1)));
+            r = q_dollar(attr, base);
+            ray_release(attr);
+            if (r && RAY_IS_ERR(r)) { ray_release(r); r = NULL; }
+        }
+        if (base) ray_release(base);
+    }
+    ray_release(nm);
+    return r;
+}
+
 static ray_t* name_value(ray_t* sym, const q_op_t** row_out) {
     if (row_out) *row_out = NULL;
     if (sym->i64 == syms()->gcolon) return RAY_NULL_OBJ;
     ray_t* v = resolve(sym->i64, row_out);
+    if (!v) v = dot_cast(sym->i64);
     return v ? v : name_error(sym->i64);
 }
 
