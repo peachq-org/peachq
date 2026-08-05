@@ -278,9 +278,12 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
 
     /* Timespan D-form: digits 'D' [HH[:MM[:SS[.f{1,9}]]]] (interfaces
      * usage 0D00:05 / 0D00:00:10; day-count payload derived).  Only
-     * matches when 'D' is followed by exactly-2 clock digits whose next
-     * byte does not continue a name, or by a byte that cannot continue a
-     * name at all — `1D45x` stays a name juxtaposition and `0Dabc` stays
+     * matches when 'D' is followed by a 1- or 2-digit hour whose next byte
+     * does not continue a name (`0D0` is the one-digit spelling,
+     * learn/brief-introduction.md:38 `n?0D0`; a ONE-digit hour is a whole
+     * clock, so `0D8:30` is rejected — owner ruling 2026-08-05), or by a
+     * byte that cannot continue a name at all — `1D45x` stays a name
+     * juxtaposition, `1D4x` likewise on the same guard, and `0Dabc` stays
      * `0` + `Dabc` (the no-churn rule).  Hour overflow normalizes through
      * the ns count (`123D45` -> 124D21:…, the timestamp-arm D24 rule).
      * The date arm ran first, so `2000.01.01D…` never reaches here. */
@@ -295,10 +298,12 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
             int matched = 0;
             int64_t days = 0, tod_s = 0, ns = 0;
             for (int k = 0; k < dd; k++) days = days * 10 + (src[q + k] - '0');
-            if (hd == 2) {
-                int64_t h = (src[r] - '0') * 10 + (src[r + 1] - '0');
-                int e = r + 2;
+            if (hd == 1 || hd == 2) {
+                int64_t h = 0;
+                for (int k = 0; k < hd; k++) h = h * 10 + (src[r + k] - '0');
+                int e = r + hd;
                 int64_t mi = 0, ss = 0;
+                if (hd == 1 && src[e] == ':') { *err = "bad timespan"; return -1; }
                 if (src[e] == ':' && tok_dig_run(src, e + 1) == 2) {
                     mi = (src[e + 1] - '0') * 10 + (src[e + 2] - '0');
                     e += 3;
@@ -1166,6 +1171,11 @@ ray_t* q_tok(int8_t tag, const char* p, size_t len) {
         if (len == 0 || i != len || v > 0xff) return ray_u8(0);
         return ray_u8((uint8_t)v);
     }
+    case RAY_CHARV:
+        /* `"C"$` is the char column of `0:` (ref/file-text.md:369 `C char`),
+         * one char per field.  The pad strip above already ran, so an all-blank
+         * field lands on the char null — which IS `" "`. */
+        return len ? ray_char((uint8_t)p[0]) : ray_typed_null(-RAY_CHARV);
     case RAY_GUID: {
         /* Canonical 36-char UUID, else an IPv4/IPv6 address (tok.md #ip-address);
          * base ray_cast_fn "GUID" ERRORS on bad input, so parse here. */

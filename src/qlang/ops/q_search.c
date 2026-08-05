@@ -164,6 +164,12 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
             return out;
         }
     }
+    /* Against a non-list y the comparison is left-atomic (ref/in.md) — one
+     * boolean per item of x, and NONE is still boolean, where the base kernel
+     * answers the untyped `()` that no downstream `where` survives.  A STR y
+     * is excluded: it is a LIST of strings, seeking whole-x above. */
+    if (y->type != RAY_STR && !ray_is_atom(x) && ray_len(x) == 0)
+        return q_type_empty(RAY_BOOL);
     ray_t* r = ray_in_fn(x, y);
     /* 1-char string x: base char membership returns a 1-vec; kdb wants an
      * ATOM (`"x" in "a"` -> 0b). */
