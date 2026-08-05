@@ -56,11 +56,6 @@
   #include <netinet/in.h>
 #endif
 
-/* Reused base fn (src/ops/system.c), declared not edited (frozen-clean): the
- * gc trigger is a no-op stub returning 0 — `\g` reports the mode; real
- * collection is deferred (rule 9). */
-ray_t* ray_gc_fn(ray_t** args, int64_t n);
-
 /* ---- `\d` current context.  q_env is its ONE home (q_env.h: relative names
  * resolve in it, assignments land in it); this file owns only its RENDERING, so
  * a switch made anywhere — including inside a lambda, whose call boundary may
@@ -749,18 +744,20 @@ static ray_t* h_C(const char* rest, size_t restlen) {
     return NULL;
 }
 
-/* `\g` — garbage-collection mode.  `\g`→`0i`; `\g 0|1` sets it.  kdb calls
- * .Q.gc[] on a set; openq's ray_gc_fn is a no-op stub (real gc deferred). */
+/* `\g` — garbage-collection mode.  `\g`→`0i`; `\g 0|1` sets it.  The mode is
+ * ACTED ON solely at the q_ctx statement seam (ctx_statement_end) — kdb also
+ * runs .Q.gc[] on the set itself; a `\g 1` line gets that via the seam, a
+ * `\g 0` set-time collect is a recorded deferral (one place decides). */
 static ray_t* h_g(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_gc_mode);
     int64_t v;
     if (!parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
     if (v != 0 && v != 1) return NULL;               /* only 0|1 valid */
     g_gc_mode = (int32_t)v;
-    ray_t* g = ray_gc_fn(NULL, 0);                   /* stub call (reuse) */
-    if (g) ray_release(g);
     return NULL;
 }
+
+int q_sys_gc_mode(void) { return (int)g_gc_mode; }
 
 /* `\o` — offset from UTC (hours; minutes if abs>23).  `\o`→`0N` (machine
  * offset), else the set value.  Temporal-display wiring is DEFERRED. */

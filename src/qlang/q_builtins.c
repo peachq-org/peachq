@@ -382,6 +382,7 @@ void q_builtins_register(void) {
         bind_unary(dotq_c_unary[i].name, dotq_c_unary[i].fn);
     bind_vary (".Q.c.ops", q_dotq_ops_fn);   /* niladic .Q.ops[] + unary .Q.ops x */
     bind_vary (".Q.c.w",   q_dotq_w_fn);     /* memory stats dict (ref/dotq.md) */
+    bind_vary (".Q.c.gc",  q_dotq_gc_fn);    /* garbage collect (ref/dotq.md) */
     bind_binary(".Q.c.en", q_dotq_en_fn);    /* enumerate-varchar-cols shim (ref/dotq.md) */
     bind_vary (".Q.c.zblocks", q_dotq_zblocks_fn); /* inflated-blocks witness (internal) */
     bind_vary (".Q.c.hp", q_dotq_hp_fn);     /* HTTP POST [url;mime;body] (ref/dotq.md) */
