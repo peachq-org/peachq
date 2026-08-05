@@ -32,6 +32,10 @@ void q_sys_cfg_init(void);
 void        q_sys_ctx_reset(void);
 int         q_sys_prompt(char* buf, size_t cap);
 
+/* The live `\g` gc mode (0 deferred / 1 immediate).  Consumed ONLY by the
+ * q_ctx statement seam — the one place that acts on it. */
+int q_sys_gc_mode(void);
+
 /* True iff a `\t N` timer is currently armed (interval > 0).  The `.z.ts`
  * forwarding thunk (q_dotz.c) consults it to no-op after a reentrant `\t 0`
  * that could not delete the in-flight (popped) timer. */
