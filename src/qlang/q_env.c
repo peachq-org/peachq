@@ -213,6 +213,21 @@ static ray_err_t env_put(int64_t sym, ray_t* val, int boot_new) {
 
 ray_err_t q_env_bind(int64_t sym, ray_t* val) { return env_put(sym, val, 1); }
 
+/* q_env_take — see q_env.h.  The park is a plain bind, so it stays invisible
+ * to views: only the caller's rebind is an observable write.  Under `\d` a
+ * RELATIVE name reads from the root but writes into the context, so the slot
+ * q_env_get found is not the one a bind would park — refuse and let it copy. */
+int q_env_take(int64_t sym, ray_t* cur) {
+    if (!cur) return 0;
+    const char* p; size_t n;
+    ray_t* s = name_str(sym, &p, &n);
+    if (!s) return 0;
+    int relative = n > 0 && p[0] != '.';
+    ray_release(s);
+    if ((g_ctx_seg && relative) || q_env_get(sym) != cur) return 0;
+    return q_env_bind(sym, RAY_NULL_OBJ) == RAY_OK;
+}
+
 /* `` `. `` names the root itself, so assigning a dict RESTORES its members as
  * globals (ref/get.md `set`) — the ` -> :: marker is representation, skipped.
  * Members go back through q_env_set, so each gets the same name policy. */
@@ -408,6 +423,18 @@ ray_t* q_env_local_get(int64_t sym) {
     for (int32_t i = 0; i < f->n; i++)
         if (f->keys[i] == sym) return f->vals[i];
     return NULL;
+}
+
+int q_env_local_take(int64_t sym, ray_t* cur) {
+    if (g_fdepth <= 0 || !cur) return 0;
+    frame_t* f = &g_frames[g_fdepth - 1];
+    for (int32_t i = 0; i < f->n; i++) {
+        if (f->keys[i] != sym || f->vals[i] != cur) continue;
+        f->vals[i] = RAY_NULL_OBJ;              /* the singleton is retain-free */
+        ray_release(cur);
+        return 1;
+    }
+    return 0;
 }
 
 static ray_t* frames_lookup(int64_t sym) {
