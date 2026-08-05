@@ -25,7 +25,7 @@
 #include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
 #include "qlang/q_ops.h"      /* q_lex_is_kw_infix — static lexical manifest */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_is_fn, q_eval_apply_carrier_kind */
-#include "qlang/q_env.h"     /* q_env_get — qSQL phrase-head values */
+#include "qlang/q_env.h"     /* q_env_get — registry-alias qSQL phrase heads */
 #include "table/sym.h"       /* ray_sym_vec_cell — qSQL dict-key/col names */
 #include "core/numparse.h"   /* ray_parse_i64, ray_parse_f64 */
 #include <assert.h>
@@ -1493,9 +1493,9 @@ static ray_t *qsql_exec_by(ray_t **bk, ray_t **bv, const int *bnamed, int nb) {
  * glyph name-ref sym.  Both render identically through q_registry provenance
  * (q_fmt) and resolve identically in the engine (funsql_is_fn accepts the
  * value; the lowering walker embeds the bare glyph to the same value), so the
- * pass PRESERVES an applied fn-value head as-is.  Conversely a bare name-ref
- * APPLIED to an operand (`sum i`, `f price`) is a function call whose head must
- * be embedded as its registry/env value (else it would print `` `sum `` and the
+ * pass PRESERVES an applied fn-value head as-is.  Conversely a RESERVED verb
+ * APPLIED to an operand (`sum i`) is a function call whose head must be
+ * embedded as its registry value (else it would print `` `sum `` and the
  * engine would mistake it for a column); a name-ref STANDING ALONE is a column
  * symbol.  This is the crux we re-express here over the raw phrase trees. */
 
@@ -1504,11 +1504,15 @@ static ray_t *qsql_exec_by(ray_t **bk, ray_t **bv, const int *bnamed, int nb) {
 
 static ray_t *qsql_convert_expr(ray_t *x);
 
-/* An APPLIED phrase head: resolve a bare name-ref to its function VALUE
- * (registry MONADIC first — a reserved q verb — then the env), mirroring
- * qsql_term's head handling, so `sum i` / `f price` keep a fn-VALUE head.  A
- * head that is already a fn value (an embedded infix glyph) is PRESERVED; a
- * nested-list head is converted recursively.  Returns an OWNED value. */
+/* An APPLIED phrase head: a RESERVED q verb embeds as its registry MONADIC
+ * value (kdb shows `.q` definitions in full — funsql.md:730), including the
+ * env-bound alias spellings whose value IS a registry object (`not` ~
+ * q_builtins' `~:` share).  A USER name stays a name-ref: its meaning follows
+ * qsql.md:121-127's eval-time order (column, then enclosing local, then
+ * global — funsql.md:706 keeps variables as symbols in the tree), which a
+ * parse-time env snapshot cannot honour.  A head that is already a fn value
+ * (an embedded infix glyph) is PRESERVED; a nested-list head is converted
+ * recursively.  Returns an OWNED value. */
 static ray_t *qsql_convert_head(ray_t *h) {
     if (h && h->type == RAY_LIST) return qsql_convert_expr(h);
     if (!h || h->type != -RAY_SYM ||
@@ -1520,10 +1524,13 @@ static ray_t *qsql_convert_head(ray_t *h) {
     ray_t *s = ray_sym_str(h->i64);
     if (s) { ev = q_registry_lookup_name(ray_str_ptr(s), ray_str_len(s), Q_MONADIC);
              ray_release(s); }
-    if (!ev) ev = q_env_get(h->i64);               /* borrowed */
+    if (!ev) {
+        ray_t *b = q_env_get(h->i64);              /* borrowed */
+        if (b && q_registry_provenance(b, NULL)) ev = b;
+    }
     if (qsql_is_fn_value(ev)) { ray_retain(ev); return ev; }
     ray_retain(h);
-    return h;                                       /* not a fn: leave name-ref */
+    return h;                                       /* not a verb: leave name-ref */
 }
 
 /* Rewrite ONE raw phrase expr into the clone's leaf representation:
