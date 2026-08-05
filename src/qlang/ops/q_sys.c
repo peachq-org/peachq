@@ -180,6 +180,7 @@ void q_sys_exit(int code) {
     g_exit_code = code;
     q_ctx_console_close();
     q_dotz_exit_fire(code);
+    q_console_flush();   /* the host never gets its drain turn — issue #23 */
     exit(code);
 }
 

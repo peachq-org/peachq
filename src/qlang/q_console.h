@@ -14,6 +14,7 @@
 void        q_console_show(ray_t* val);   /* append q_fmt_console(val) + '\n' */
 const char* q_console_str(void);          /* buffered text ("" if empty) */
 void        q_console_reset(void);        /* clear the buffer */
+void        q_console_flush(void);        /* write + clear: the exit-path drain */
 void q_console_write(const char* s, size_t n);  /* raw bytes (kdb 1/-1 handles) */
 
 /* `--nonlegacy` pipe-table display: a deliberate kdb divergence, OFF by
