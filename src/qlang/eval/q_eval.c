@@ -615,7 +615,9 @@ ray_t* q_eval_value_wrap(ray_t* x) {
     if (x->type == RAY_QFN) {
         ray_t* st = lambda_structure(x);
         if (!st) st = carrier_value(x);
-        if (st) return st;                  /* NULL = a bare iterator: deferred */
+        if (st) return st;
+        int adv = q_eval_apply_iter_id(x);  /* a bare iterator IS its 103h code */
+        if (adv >= 0) return ray_i64(adv);
     }
     /* operator -> its kdb primitive code (ref/value.md; the manifest row is
      * the identity, its kdb_op column the number) */
@@ -788,17 +790,31 @@ static ray_t* return_eval(ray_t* expr) {
     return r;
 }
 
-/* paren list literal: elements RTL, boxed build + collapse */
+/* paren list literal: elements RTL, boxed build + collapse.  An ELIDED
+ * element is a projection HOLE: the literal is a projection of the list
+ * constructor ("omission of values results in projection",
+ * releases/ChangesIn4.1.md; >8 elided = 'rank, basics/application.md). */
 static ray_t* list_lit(ray_t** e, int64_t n) {
     ray_t* argv[EVAL_MAX_ARGS];
     if (n > EVAL_MAX_ARGS) return q_err(QE_LIMIT);
+    int64_t holes = 0;
     for (int64_t i = n - 1; i >= 0; i--) {
+        if (is_hole(e[i])) { argv[i] = NULL; holes++; continue; }
         argv[i] = e[i] ? q_eval_apply_concrete(q_eval(e[i])) : RAY_NULL_OBJ;
         if (RAY_IS_ERR(argv[i])) {
             ray_t* err = argv[i];
-            for (int64_t j = i + 1; j < n; j++) ray_release(argv[j]);
+            for (int64_t j = i + 1; j < n; j++)
+                if (argv[j]) ray_release(argv[j]);
             return err;
         }
+    }
+    if (holes > 0) {
+        if (holes > 8) { release_args(argv, n); return q_err(QE_RANK); }
+        ray_t* ctor = q_registry_list_value();
+        ray_t* pr = q_eval_apply_proj_new(ctor, q_registry_row_of(ctor, Q_MONADIC),
+                                          argv, n, n);
+        release_args(argv, n);
+        return pr;
     }
     ray_t* l = ray_list_new(n > 0 ? n : 1);
     for (int64_t i = 0; i < n; i++) {
