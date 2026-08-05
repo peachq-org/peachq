@@ -1559,7 +1559,7 @@ static void q_fmt_body(ray_t* val) {
             qe_join(e, i == 0);
             if (!fmt_tok_is_bare_int(e)) all_whole = 0;
         }
-        /* the real vector's `e` prints ONCE (tour/datatypes.md:36 `42 43 44e`);
+        /* the real vector's `e` prints ONCE (gpus.md:81 transcript `…64 81e`);
          * all-digit-token f64 vectors take ONE trailing `f` (`1 2 3f`), and a
          * clipped early exit's stale all_whole is swallowed past the dots */
         if (!is64) qe_putc('e');
