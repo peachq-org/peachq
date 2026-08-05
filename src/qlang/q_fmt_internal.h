@@ -13,6 +13,6 @@
 #include <stddef.h>
 
 /* One table cell of `col` at `row`, NUL-terminated into out[0..outsz). */
-void q_fmt_cell(ray_t* col, int64_t row, char* out, size_t outsz);
+void q_fmt_cell(ray_t* col, int64_t row, int blank_null, char* out, size_t outsz);
 
 #endif /* Q_FMT_INTERNAL_H */
