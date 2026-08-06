@@ -202,7 +202,7 @@ ray_t* q_bang_enkey(int64_t nkey, ray_t* y) {
  * (+:;(!;,`x;(enlist;e))) evaluates through this arm).  ()!() is the empty
  * dict; a keyed table is a table!table dict.  vals pass through as-is
  * (rayfall `dict` broadcasts/boxes). */
-static ray_t* bang_make_dict(ray_t* x, ray_t* y) {
+static ray_t* dict_pair(ray_t* x, ray_t* y) {
     if (q_builtins_count_long(x) != q_builtins_count_long(y))
         return q_err(QE_LENGTH);
     /* kdb's rule is TOTAL on equal counts (basics/dictsandtables.md): a table
@@ -234,18 +234,39 @@ static ray_t* bang_make_dict(ray_t* x, ray_t* y) {
         if (RAY_IS_ERR(ey)) { if (ex) ray_release(ex); return ey; }
         y = ey;
     }
-    /* Two typed vectors make a dict whose VALUES stay that vector: kdb has no
-     * boxed homogeneous list, so `type value `a`b!1 2` is 7h, not 0h.  rayfall's
-     * `dict` explodes every value into a RAY_LIST — right for a mixed y, wrong
-     * here, and the boxing survives into `~` (which compares the raw slots). */
-    ray_t* r = (ray_is_vec(x) && ray_is_vec(y))
-                   ? (ray_retain(x), ray_retain(y), ray_dict_new(x, y))
-               : ((ray_is_vec(x) || x->type == RAY_LIST) &&
-                  (ray_is_vec(y) || y->type == RAY_LIST))
-                   ? ray_dict_fn(x, y)
-                   : q_err(QE_TYPE);
+    /* No type test on either side: "the items of the key ... can be of any
+     * datatype" (ref/dict.md), and the count gate above plus the atom enlist
+     * already leave both sides n-item containers.  The sniff that used to sit
+     * here routed a general-list key through rayfall's `dict`, whose own
+     * "keys must be a vector" guard then rejected every mixed, nested or
+     * function-valued key ((1;::), (1;`a), (("ab";"cd"))). */
+    ray_retain(x);
+    ray_retain(y);
+    ray_t* r = ray_dict_new(x, y);
     if (ex) ray_release(ex);
     if (ey) ray_release(ey);
+    return r;
+}
+
+/* OWNER RULING 2026-08-05: ``!() is "a dict from 2 item symbol list, to two
+ * item general lists" — `type each value ``!()` answers `0 0h`.  The narrowest
+ * law giving that: an EMPTY GENERAL LIST value side CONFORMS to
+ * `(count x)#enlist()`, which is exactly #407's Take fill.
+ * The ruling speaks of a key LIST, so the conform asks for one — which rules
+ * out an ATOM key (owner ruling 2026-08-06: ``a!()` is NOT valid kdb; it takes
+ * the plain count law and signals what ``a!(1;2)` does), and with it the table
+ * and dict key sides.  A typed empty (`long$()) value side is untouched too. */
+static ray_t* bang_make_dict(ray_t* x, ray_t* y) {
+    int64_t nk = q_builtins_count_long(x);
+    int keylist = ray_is_vec(x) || x->type == RAY_LIST;
+    if (!keylist || nk <= 0 || y->type != RAY_LIST || ray_len(y) != 0)
+        return dict_pair(x, y);
+    ray_t* n = ray_i64(nk);
+    ray_t* filled = q_take_wrap(n, y);
+    ray_release(n);
+    if (RAY_IS_ERR(filled)) return filled;
+    ray_t* r = dict_pair(x, filled);
+    ray_release(filled);
     return r;
 }
 
