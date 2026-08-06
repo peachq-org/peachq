@@ -212,7 +212,7 @@ static ray_t* gen_temporal(int64_t n, ray_t* y) {
  * Result is a RAY_STR atom = the string model's char list (provisional,
  * ARCHITECTURE.md). */
 static ray_t* gen_chars(int64_t n) {
-    char stackb[1024];
+    char stackb[1024] = "";
     char* b = (n < (int64_t)sizeof stackb) ? stackb : malloc((size_t)n + 1);
     if (!b) return q_err(QE_WSFULL);
     for (int64_t i = 0; i < n; i++) b[i] = (char)('a' + rand() % 26);
