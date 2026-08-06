@@ -28,7 +28,6 @@
 /* ---- defined in q_parse.c ---- */
 ray_t *q_verb(char c);
 ray_t *q_verb_name(const char *s, int len);
-ray_t *q_marker(const char *s);
 ray_t *q_embed(ray_t *sym, q_valence_t val);
 ray_t *q_null(void);
 ray_t *q_symvec_append(ray_t *vec, const char *s, int len);
