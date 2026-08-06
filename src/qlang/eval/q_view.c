@@ -20,7 +20,7 @@
 #define VIEW_INRECALC 2u
 
 typedef struct {
-    int64_t semi, gcolon, zvs;
+    int64_t gcolon, zvs;
     int     ready;
 } view_syms_t;
 static view_syms_t g_syms;
@@ -32,7 +32,6 @@ static int      g_in_zvs;
 
 static const view_syms_t* vsyms(void) {
     if (!g_syms.ready) {
-        g_syms.semi   = ray_sym_intern_runtime(";", 1);
         g_syms.gcolon = ray_sym_intern_runtime("::", 2);
         g_syms.zvs    = ray_sym_intern_runtime(".z.vs", 5);
         g_syms.ready  = 1;
@@ -312,13 +311,13 @@ int q_view_intercept(ray_t* ast, const char* src, ray_t** out) {
     if (q_eval_apply_frame_depth() > 0) return 0;
     int64_t n = ray_len(ast);
     ray_t** e = (ray_t**)ray_data(ast);
-    if (n < 3 || !e[0] || e[0]->type != -RAY_SYM) return 0;
+    if (n < 3 || !e[0]) return 0;
     const view_syms_t* S = vsyms();
     ray_t* asn = NULL;
     int seq = 0;
-    if (e[0]->i64 == S->gcolon && n == 3) {
+    if (e[0]->type == -RAY_SYM && e[0]->i64 == S->gcolon && n == 3) {
         asn = ast;
-    } else if (e[0]->i64 == S->semi && e[1] && e[1]->type == RAY_LIST &&
+    } else if (q_ast_is_seq_head(e[0]) && e[1] && e[1]->type == RAY_LIST &&
                ray_len(e[1]) == 3) {
         ray_t** a1 = (ray_t**)ray_data(e[1]);
         if (a1[0] && a1[0]->type == -RAY_SYM && a1[0]->i64 == S->gcolon) {
