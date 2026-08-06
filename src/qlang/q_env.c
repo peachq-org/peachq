@@ -345,12 +345,22 @@ typedef struct {
     ray_t**  vals;
     int32_t  n, cap;
     uint8_t  barrier;
+    int32_t  saved_view;
     int64_t  keys_in[ENV_FRAME_INLINE];
     ray_t*   vals_in[ENV_FRAME_INLINE];
 } frame_t;
 
 static _Thread_local frame_t* g_frames;
 static _Thread_local int32_t g_fdepth, g_fcap;
+static _Thread_local int32_t g_fview = Q_ENV_FRAME_VIEW_OFF;
+
+int32_t q_env_frame_depth(void) { return g_fdepth; }
+
+int32_t q_env_frame_view(int32_t depth) {
+    int32_t prev = g_fview;
+    g_fview = depth;
+    return prev;
+}
 
 ray_err_t q_env_frame_push(int barrier) {
     if (g_fdepth >= ENV_FRAME_MAX) return RAY_ERR_OOM;
@@ -373,12 +383,15 @@ ray_err_t q_env_frame_push(int barrier) {
     f->cap = ENV_FRAME_INLINE;
     f->n = 0;
     f->barrier = (uint8_t)(barrier != 0);
+    f->saved_view = g_fview;
+    g_fview = Q_ENV_FRAME_VIEW_OFF;
     return RAY_OK;
 }
 
 void q_env_frame_pop(void) {
     if (g_fdepth <= 0) return;
     frame_t* f = &g_frames[--g_fdepth];
+    g_fview = f->saved_view;
     for (int32_t i = 0; i < f->n; i++)
         if (f->vals[i]) ray_release(f->vals[i]);
     if (f->keys != f->keys_in) ray_sys_free(f->keys);
@@ -438,7 +451,10 @@ int q_env_local_take(int64_t sym, ray_t* cur) {
 }
 
 static ray_t* frames_lookup(int64_t sym) {
-    for (int32_t d = g_fdepth - 1; d >= 0; d--) {
+    if (g_fview == Q_ENV_FRAME_VIEW_NONE) return NULL;
+    int32_t top = g_fdepth - 1;
+    if (g_fview >= 0 && g_fview < top) top = g_fview;
+    for (int32_t d = top; d >= 0; d--) {
         frame_t* f = &g_frames[d];
         for (int32_t i = 0; i < f->n; i++)
             if (f->keys[i] == sym) return f->vals[i];
@@ -654,6 +670,7 @@ ray_err_t q_env_init(void) {
 void q_env_destroy(void) {
     while (g_fdepth > 0) q_env_frame_pop();
     if (g_frames) { ray_sys_free(g_frames); g_frames = NULL; g_fcap = 0; }
+    g_fview = Q_ENV_FRAME_VIEW_OFF;
     if (env_root) { ray_release(env_root); env_root = NULL; }
     if (env_ns)   { ray_release(env_ns);   env_ns   = NULL; }
     if (env_boot) { ray_release(env_boot); env_boot = NULL; }
