@@ -16,6 +16,7 @@
 #include "qlang/ops/q_sys.h"      /* q_sys_seed_init / q_sys_ctx_reset */
 #include "qlang/io/q_handles.h"  /* q_handles_init/destroy — the handle registry lifecycle */
 #include "qlang/io/q_splay.h"    /* q_splay_init/destroy — the splay registry lifecycle */
+#include "qlang/io/q_duckdb.h"   /* q_duckdb_reset — close handles at teardown */
 #include "qlang/q_console.h"  /* q_console_pipe_disable — reset the `\nonlegacy` display global per runtime */
 #include "qlang/q_ctx.h"      /* q_ctx_install_remote_hooks — the remote-door install half */
 #include "qlang/parse/q_parse.h"    /* q_parse — embedded-bootstrap loader */
@@ -116,6 +117,7 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
 }
 
 void q_runtime_destroy(ray_runtime_t* rt) {
+    q_duckdb_reset();          /* close DuckDB handles/dbs (suite isolation) */
     ray_eval_set_remote_str_fn(NULL);  /* remote strings fall back to rayfall */
     ray_eval_set_remote_apply_fn(NULL);/* (func;args) value-apply -> 'nyi w/o q runtime */
     q_dbg_reset();             /* drop snapshot-retained lambdas before the env */
