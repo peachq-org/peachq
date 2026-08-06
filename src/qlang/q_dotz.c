@@ -408,6 +408,7 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
             case 'b': out = q_view_zb(); break;                                  /* .z.b view deps */
             case 'e': out = z_e(); break;                                        /* .z.e TLS status */
             case 'q': out = ray_bool(g_quiet); break;                            /* .z.q quiet */
+            case 's': out = q_dbg_self(); break;                                 /* .z.s self */
             case 'i': out = ray_i64((int64_t)getpid()); break;                   /* .z.i pid   */
             case 'p': out = ray_timestamp(q_dotz_now_ns(0)); break;                   /* .z.p / .z.P */
             case 'P': out = ray_timestamp(q_dotz_now_ns(1)); break;
