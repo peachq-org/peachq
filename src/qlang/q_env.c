@@ -601,7 +601,8 @@ int q_env_name_cmp(const void* a, const void* b) {
 
 /* d's own names as a fresh sym vector, the marker never among them.  MEMBERS
  * are picked by value kind and sorted (`\v` `\f` `\a`); the NAMESPACE roster
- * keeps creation order and drops `z` (basics/syscmds.md §`\d`). */
+ * keeps creation order and drops `z` (basics/syscmds.md §`\d`) plus `duckdb`
+ * (C-bound bridge ns — kdb has no counterpart, so `key `` ` `` stays kdb-shaped). */
 static ray_t* env_dict_names(ray_t* d, q_env_ns_kind_t kind, int members) {
     ray_t* dk = ray_dict_keys(d);
     ray_t* dv = ray_dict_vals(d);
@@ -612,11 +613,12 @@ static ray_t* env_dict_names(ray_t* d, q_env_ns_kind_t kind, int members) {
     ray_t** vs = (ray_t**)ray_data(dv);
     int64_t m = 0;
     int64_t marker = env_marker(), zed = ray_sym_intern_runtime("z", 1);
+    int64_t duck = ray_sym_intern_runtime("duckdb", 6);
     for (int64_t i = 0; i < n; i++) {
         int64_t id = ray_read_sym(ray_data(dk), i, RAY_SYM, dk->attrs);
         if (id == marker) continue;
         int keep = members ? env_kind_match(kind, vs[i])
-                           : (env_is_marked(vs[i]) && id != zed);
+                           : (env_is_marked(vs[i]) && id != zed && id != duck);
         if (keep) sel[m++] = id;
     }
     if (members) qsort(sel, (size_t)m, sizeof *sel, q_env_name_cmp);
