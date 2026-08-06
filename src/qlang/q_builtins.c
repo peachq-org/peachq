@@ -16,6 +16,7 @@
 #include "qlang/q_console.h"  /* q_console_show — show's display sink */
 #include "qlang/base/q_type.h"     /* q_type_of — the `type` verb's type-number home */
 #include "qlang/io/q_splay.h"      /* the lazy splayed-table authority: 98h, count */
+#include "qlang/io/q_duckdb.h"     /* q_duckdb_register — .duckdb bridge namespace */
 #include "lang/env.h"       /* ray_fn_unary; ray_env_get = bootstrap catalogue reads */
 #include "lang/eval.h"      /* RAY_FN_NONE */
 #include "table/sym.h"      /* ray_sym_vec_cell */
@@ -401,4 +402,7 @@ void q_builtins_register(void) {
     /* .Q.pn stays UNBOUND (ref/dotq.md): `` `pn in key `.Q `` must be 0b — qStudio's safeCount relies on it. */
     /* .j JSON namespace (.j.j/.j.k/.j.jd) is defined in q — src/qlang/j.q, loaded
      * at q_runtime_create; the C homes are the `-31!`/`-29!` bangs (q_bang.c). */
+    /* .duckdb bridge namespace — dotted env binds (the .Q.c.* pattern); the
+     * DuckDB library itself is dlopen'd lazily on first use (docs/duckdb-api.md). */
+    q_duckdb_register();
 }
