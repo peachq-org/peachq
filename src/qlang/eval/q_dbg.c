@@ -20,7 +20,9 @@
 #define DBG_EY_MAX   8
 
 static _Thread_local ray_t* g_live[DBG_LIVE_MAX];  /* borrowed lambda values */
+static _Thread_local int32_t g_live_env[DBG_LIVE_MAX];  /* their q_env frames */
 static _Thread_local int    g_live_depth;
+static _Thread_local int    g_cursor;              /* navigated frame, 0 = [0] */
 
 static char g_stmt[DBG_STMT_MAX];
 static int  g_console_stmt;
@@ -43,14 +45,22 @@ typedef struct {
 static dbg_snap_t g_snap;
 
 void q_dbg_frame_push(ray_t* lam) {
-    if (g_live_depth < DBG_LIVE_MAX) g_live[g_live_depth] = lam;
+    if (g_live_depth < DBG_LIVE_MAX) {
+        g_live[g_live_depth] = lam;
+        g_live_env[g_live_depth] = q_env_frame_depth() - 1;   /* its own frame */
+    }
     g_live_depth++;
 }
 
 /* frame i, 1-based; past the stored window the deepest stored lambda stands in */
-static ray_t* live_lam(int i) {
-    if (i > DBG_LIVE_MAX) i = DBG_LIVE_MAX;
-    return g_live[i - 1];
+static int live_clamp(int i) { return i > DBG_LIVE_MAX ? DBG_LIVE_MAX : i; }
+static ray_t* live_lam(int i) { return g_live[live_clamp(i) - 1]; }
+
+ray_t* q_dbg_self(void) {
+    if (g_live_depth <= 0) return NULL;
+    ray_t* lam = live_lam(g_live_depth);
+    ray_retain(lam);
+    return lam;
 }
 
 void q_dbg_frame_pop(void) { g_live_depth--; }
@@ -85,7 +95,7 @@ void q_dbg_set_reader(q_dbg_read_fn fn) { g_reader = fn; }
 
 void q_dbg_reset(void) {
     q_dbg_snapshot_clear();
-    g_live_depth = 0;
+    g_live_depth = g_cursor = 0;
     g_stmt[0] = '\0';
     g_console_stmt = g_trap_depth = g_dbg_depth = 0;
     g_reader = NULL;
@@ -197,19 +207,22 @@ static void dbg_show_console(void) {
     fflush(stdout);
 }
 
-/* error text + the deepest LIVE frame, kdb's suspension banner */
-static void dbg_banner(ray_t* err) {
+/* one backtrace-shaped line for frame `idx` (0 = the statement frame) */
+static void dbg_show_frame(int idx) {
+    char line[DBG_STMT_MAX + 160];
+    frame_line(line, sizeof line, idx, 0, idx > 0 ? live_lam(idx) : NULL,
+               g_stmt);
+    fputs(line, stderr);
+}
+
+/* error text + the frame the cursor sits on, kdb's suspension banner (and `&`) */
+static void dbg_banner(ray_t* err, int idx) {
     fflush(stdout);
     int64_t tn = 0;
     const char* text = q_err_text(err, &tn);
     fprintf(stderr, "'%.*s\n", (text && tn) ? (int)tn : 4,
             (text && tn) ? text : "eval");
-    if (g_live_depth > 0) {
-        char line[DBG_STMT_MAX + 160];
-        frame_line(line, sizeof line, g_live_depth, 0, live_lam(g_live_depth),
-                   g_stmt);
-        fputs(line, stderr);
-    }
+    if (g_live_depth > 0) dbg_show_frame(idx);
     fflush(stderr);
 }
 
@@ -261,12 +274,32 @@ static ray_t* dbg_eval(const char* src, int mode) {
     return NULL;
 }
 
+/* the deepest frame keeps the ordinary top-rooted walk; frame [0] has no locals.
+ * Past DBG_LIVE_MAX no env depth was stored, so rather than reroot at the
+ * clamped slot's UNRELATED frame we decline and stay where the walk already is. */
+static int32_t cursor_view(void) {
+    if (g_cursor >= g_live_depth || g_cursor > DBG_LIVE_MAX)
+        return Q_ENV_FRAME_VIEW_OFF;
+    if (g_cursor <= 0) return Q_ENV_FRAME_VIEW_NONE;
+    return g_live_env[g_cursor - 1];
+}
+
+/* dbg_eval with name READS rooted at the navigated frame; writes are untouched */
+static ray_t* dbg_eval_at(const char* src, int mode) {
+    int32_t prev = q_env_frame_view(cursor_view());
+    ray_t* r = dbg_eval(src, mode);
+    q_env_frame_view(prev);
+    return r;
+}
+
 /* Returns NULL to propagate err (\ or EOF), a value to resume (:r), or a new
  * error to signal from this frame ('err). */
 static ray_t* dbg_suspend(ray_t* err) {
     g_dbg_depth++;
+    int outer_cursor = g_cursor;
+    g_cursor = g_live_depth;
     dbg_show_console();
-    dbg_banner(err);
+    dbg_banner(err, g_cursor);
     ray_t* out = NULL;
     char line[DBG_LINE_MAX];
     char prompt[80];
@@ -276,16 +309,25 @@ static ray_t* dbg_suspend(ray_t* err) {
         if (n < 0) break;                                 /* EOF: abort */
         if (n == 0) continue;
         if (n == 1 && line[0] == '\\') break;             /* exit one level */
-        if (n == 1 && line[0] == '&') { dbg_banner(err); continue; }
+        if (n == 1 && line[0] == '&') { dbg_banner(err, g_cursor); continue; }
+        if (n == 1 && (line[0] == '`' || line[0] == '.')) {   /* up / down */
+            if (line[0] == '`') { if (g_cursor > 0) g_cursor--; }
+            else if (g_cursor < g_live_depth) g_cursor++;
+            fflush(stdout);
+            dbg_show_frame(g_cursor);
+            fflush(stderr);
+            continue;
+        }
         if (line[0] == ':') {                             /* :r — resume */
             ray_t* v = (n == 1) ? (ray_retain(RAY_NULL_OBJ), RAY_NULL_OBJ)
-                                : dbg_eval(line + 1, 1);
+                                : dbg_eval_at(line + 1, 1);
             if (v) { out = v; break; }
             continue;
         }
-        ray_t* v = dbg_eval(line, line[0] == '\'' ? 2 : 0);
+        ray_t* v = dbg_eval_at(line, line[0] == '\'' ? 2 : 0);
         if (v) { out = v; break; }                        /* 'err: re-signal */
     }
+    g_cursor = outer_cursor;
     g_dbg_depth--;
     return out;
 }
@@ -405,7 +447,7 @@ ray_t* q_dbg_bt_fn(ray_t** args, int64_t n) {
     (void)args; (void)n;                       /* .Q.bt[] — arg ignored */
     char line[DBG_STMT_MAX + 160];
     for (int i = g_live_depth; i >= 0; i--) {
-        int mark = g_dbg_depth > 0 && i == g_live_depth;
+        int mark = g_dbg_depth > 0 && i == g_cursor;   /* >> = the current frame */
         size_t ln = frame_line(line, sizeof line, i, mark,
                                i ? live_lam(i) : NULL, g_stmt);
         q_console_write(line, ln);
