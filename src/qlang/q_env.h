@@ -98,5 +98,14 @@ ray_err_t q_env_local_set(int64_t sym, ray_t* val);
 ray_t*    q_env_local_get(int64_t sym);   /* TOP frame only; borrowed */
 int       q_env_local_take(int64_t sym, ray_t* cur);  /* q_env_take, TOP frame;
                                                        * q_env_local_set puts back */
+int32_t   q_env_frame_depth(void);
+
+/* Debugger frame cursor (basics/debug.md navigation): ROOT the resolving walk at
+ * frame `depth`; _OFF = the top frame, _NONE = no frame at all (console [0]).  A
+ * frame push saves and clears it, so a call made from the debug prompt resolves
+ * in its own scope.  READS only — q_env_local_set stays on the top frame. */
+#define Q_ENV_FRAME_VIEW_OFF  (-1)
+#define Q_ENV_FRAME_VIEW_NONE (-2)
+int32_t   q_env_frame_view(int32_t depth);
 
 #endif /* OPENQ_Q_ENV_H */
