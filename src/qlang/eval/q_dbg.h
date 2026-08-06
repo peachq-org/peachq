@@ -42,6 +42,9 @@ ray_t* q_dbg_bt_fn(ray_t** args, int64_t n);    /* .Q.bt[] -> console dump */
 
 ray_t* q_dbg_zex(void);              /* owned failed-primitive value or NULL */
 ray_t* q_dbg_zey(void);              /* owned arg list or NULL */
+/* `.z.s` (ref/dotz.md#zs-self) — the executing lambda: the TOP live frame, so a
+ * suspended session sees the failing function.  NULL at top level. */
+ray_t* q_dbg_self(void);
 
 /* Console line reader for the suspend loop (front end installs; NULL = no
  * suspension possible).  The reader owns prompt display and echo — piped
