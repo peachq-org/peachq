@@ -862,9 +862,12 @@ ray_t* q_eval(ray_t* node) {
         /* literal-ctor interception seam (header note) */
         if (h == q_registry_list_value())  { ret = list_lit(e + 1, n - 1); goto out; }
 
+        /* the `;` statement sequence — a CHAR head, like `:` return and `'`
+         * signal below (q_parse.h: q_ast_is_seq_head is the one test) */
+        if (q_ast_is_seq_head(h)) { ret = seq_eval(e + 1, n - 1); goto out; }
+
         if (nameref(h)) {
             const eval_syms_t* S = syms();
-            if (h->i64 == S->semi) { ret = seq_eval(e + 1, n - 1); goto out; }
             if ((h->i64 == S->colon || h->i64 == S->gcolon) && n == 3) {
                 ret = assign_eval(h->i64 == S->gcolon, e[1], e[2]);
                 goto out;
