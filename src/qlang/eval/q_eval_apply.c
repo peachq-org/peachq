@@ -343,8 +343,14 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
             ray_release(probe);
             return ray_vec_new(t, 0);
         }
-        if (probe && RAY_IS_ERR(probe)) ray_error_free(probe);
-        else if (probe) ray_release(probe);
+        /* A probe answering a LIST per element (`string `a` is ,"a") makes the
+         * empty result the empty GENERAL list — no typed vector can hold lists,
+         * so `type string `symbol$()` is 0h, not 7h (ref/string.md). */
+        if (probe && !RAY_IS_ERR(probe)) {
+            ray_release(probe);
+            return ray_list_new(0);
+        }
+        if (probe) ray_error_free(probe);
         return ray_vec_new(RAY_I64, 0);
     }
 

@@ -10,6 +10,7 @@
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_dbg.h"     /* statement stash + `\e` trace display */
 #include "qlang/eval/q_view.h"    /* q_view_intercept — `x::e` at the line seam */
+#include "qlang/q_env.h"          /* q_env_ctx / _set — the load's `\d` save+restore */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
 #include "qlang/q_prim.h"         /* q_str_text_bytes — the remote value-apply head */
@@ -205,6 +206,13 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err) {
         return 1;
     }
 
+    /* OWNER RULING 2026-08-06: a load SAVES the caller's `\d` context and
+     * RESTORES it when the file runs to completion; a load that ABORTS leaves
+     * the context where the error left it (deliberate — that is what makes the
+     * failing namespace inspectable).  Every door rides this seam, so `\l`,
+     * `system "l …"` and `-f` all obey it from here. */
+    int64_t saved_ctx = q_env_ctx();
+
     /* kdb script semantics (learn/startingkdb/language.md):
      *  - an INDENTED line CONTINUES the previous logical line;
      *  - blank lines, whitespace-only lines, and comment lines (trimmed first
@@ -268,6 +276,7 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err) {
     #undef FLUSH
 
     fclose(f);
+    if (!lrc) q_env_ctx_set(saved_ctx);            /* completed: caller's `\d` back */
     return lrc ? 1 + lrc : 0;
 }
 
