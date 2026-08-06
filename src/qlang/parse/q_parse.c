@@ -84,11 +84,6 @@ static int q_is_kw_verb(const char *s, int len) {
     return q_lex_is_kw_infix(s, len);
 }
 
-/* marker heads ("{", ";"): name-ref syms */
-ray_t *q_marker(const char *s) {
-    return ray_sym(ray_sym_intern_runtime(s, strlen(s)));
-}
-
 /* An iterator IS a value (103h, basics/datatypes.md), so the scanner hands
  * the parser the immutable registry value rather than a name-ref marker —
  * term position, postfix position and `(/;+)` then agree by construction. */
@@ -636,7 +631,11 @@ static ray_t  *qsql_normalize_phrases(ray_t *phrase_list, QCtx origin, int verb)
  * name the codes. */
 enum { QSQL_V_SELECT, QSQL_V_EXEC, QSQL_V_UPDATE, QSQL_V_DELETE };
 
-/* Statement sequence: one -> its element; two+ -> (`;; ...).  Consumes e. */
+/* Statement sequence: one -> its element; two+ -> (";"; ...).  The head is the
+ * CHAR ";" (owner-reported kdb display: `parse "a:1;b:2"` shows `";"`, -10h) —
+ * the same char-atom head convention the `:` early-return and `'` signal nodes
+ * already use, and the reason `value parse` sees a datum here, not a name.
+ * Consumes e. */
 static ray_t *seq_of(ray_t *e) {
     int64_t n = ray_len(e);
     if (n == 1) {
@@ -646,11 +645,16 @@ static ray_t *seq_of(ray_t *e) {
         ray_release(e);
         return only;
     }
-    ray_t *semi = q_marker(";");
+    ray_t *semi = ray_char(';');
     ray_t *w = cons_head(semi, e, NULL);
     ray_release(semi);
     ray_release(e);
     return w;
+}
+
+/* the char-";" sequence head (see seq_of) */
+int q_ast_is_seq_head(const ray_t *h) {
+    return h && h->type == -RAY_CHARV && h->u8 == ';';
 }
 
 /* q_ast_fill_empty_stmts — see q_parse.h.  DATA-boundary twin of seq_of: the
@@ -659,7 +663,7 @@ static ray_t *seq_of(ray_t *e) {
 void q_ast_fill_empty_stmts(ray_t *ast) {
     if (!ast || ast->type != RAY_LIST || ray_len(ast) < 2) return;
     ray_t **e = (ray_t **)ray_data(ast);
-    if (!sym_name_is(e[0], ";")) return;
+    if (!q_ast_is_seq_head(e[0])) return;
     for (int64_t i = 1; i < ray_len(ast); i++)
         if (!e[i]) e[i] = ray_list_new(1);   /* len-0 general list: () */
 }
@@ -840,6 +844,19 @@ static P parse_base(Parser *p) {
         ray_t *v = tk->k; tk->k = NULL;
         adv(p);
         return (P){ R_VERB, v };
+    }
+    case T_LBRACK: {
+        /* Expression block `[e1;e2;…]` — the SAME `;` statement sequence a
+         * lambda body is, so it needs no eval machinery of its own (value =
+         * last expression's, generic null when empty; the brackets create no
+         * scope: docs-v1/ref/control.md "Expression list", q1.txt:1674).
+         * Only reached in expression-HEAD position — a `[` after a term is
+         * taken by parse_term's postfix loop, so kdb's argument-list-wins rule
+         * survives (`3+[…]` is still +'s arguments, not a block). */
+        adv(p);
+        ray_t *b = seq_of(parse_E(p, Q_NONE));
+        expect(p, T_RBRACK, "expected ']' closing expression block");
+        return (P){ R_NOUN, b ? b : RAY_NULL_OBJ };
     }
     case T_LPAREN: {
         adv(p);
@@ -1942,26 +1959,25 @@ ray_t *q_parse(const char *src) {
 
 /* q_parse_is_assign — see q_parse.h.  Head is the name-ref `:`/`::` (or the
  * modified-assign `<op>:`) with a name/indexed-name target; a `;` statement
- * sequence asks its last statement. */
+ * sequence (char head) asks its last statement. */
 int q_parse_is_assign(const ray_t *cast) {
     ray_t *ast = (ray_t *)cast;   /* read-only walk; ray_data lacks a const view */
     if (!ast || ast->type != RAY_LIST || ray_len(ast) < 1) return 0;
     ray_t **e = (ray_t **)ray_data(ast);
     ray_t *h = e[0];
+    if (q_ast_is_seq_head(h)) {
+        int64_t n = ray_len(ast);
+        return n >= 2 ? q_parse_is_assign(e[n - 1]) : 0;
+    }
     if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return 0;
     ray_t *s = ray_sym_str(h->i64);
     if (!s) return 0;
     const char *nm = ray_str_ptr(s);
     size_t l = ray_str_len(s);
-    int is_semi  = (l == 1 && nm[0] == ';');
     int is_colon = (l == 1 && nm[0] == ':') ||
                    (l == 2 && nm[0] == ':' && nm[1] == ':');
     int is_modasg = (l >= 2 && nm[l - 1] == ':' && nm[0] != ':');
     ray_release(s);
-    if (is_semi) {
-        int64_t n = ray_len(ast);
-        return n >= 2 ? q_parse_is_assign(e[n - 1]) : 0;
-    }
     if (!(is_colon || is_modasg) || ray_len(ast) != 3) return 0;
     ray_t *t = e[1];
     if (t && t->type == -RAY_SYM && !(t->attrs & Q_ATTR_QUOTED)) return 1;

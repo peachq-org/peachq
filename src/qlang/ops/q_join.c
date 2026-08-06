@@ -997,6 +997,16 @@ int64_t q_join_gen_len(ray_t* x) {
  * (register_binary("concat") == ray_concat_fn) byte-identically — dict,dict
  * upsert-union and conforming table,table row-join already live there. */
 ray_t* q_join_wrap(ray_t* x, ray_t* y) {
+    /* `()` is Join's IDENTITY (the seed the `,` accumulator starts from,
+     * ref/accumulators.md:264) and a TABLE is a list of records — joining zero
+     * records leaves it unchanged.  Base concat refuses the pair, so the law
+     * the collapse below already states for vectors is completed here: without
+     * it `c:(); c,:t` (lib/qunit/qunit.q's runNsTests) is 'type. */
+    if (x && y) {
+        ray_t* t = (x->type == RAY_LIST && ray_len(x) == 0)   ? y
+                 : (y->type == RAY_LIST && ray_len(y) == 0)   ? x : NULL;
+        if (t && t->type == RAY_TABLE) { ray_retain(t); return t; }
+    }
     if (x && y && x->type == RAY_TABLE && y->type == RAY_TABLE &&
         !qj_same_schema(x, y))
         return q_err(QE_MISMATCH);
