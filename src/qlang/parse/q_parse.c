@@ -94,6 +94,18 @@ static ray_t *iter_value(int adv) {
     return v;
 }
 
+/* THE MONADIC MARKER, one home.  A trailing `:` on a spelling whose remainder
+ * is a GLYPH manifest row is the unary-form marker (basics/variadic.md "The
+ * unary form can be selected with a suffixed colon"): `+:` `,:` `0::`.  Returns
+ * that row, or NULL when the spelling is not marked — which is what tells the
+ * marker apart from the two-char verbs (`<=`), from the digit-colon verbs' own
+ * bare spelling (`0:`), and from the colon adverbs (`':` `/:`, non-GLYPH rows). */
+static const q_op_t *marker_row(const char *nm, size_t len) {
+    if (len < 2 || nm[len - 1] != ':' || nm[0] == ':') return NULL;
+    const q_op_t *r = q_ops_find(nm, (int)len - 1);
+    return (r && r->lex == QLEX_GLYPH) ? r : NULL;
+}
+
 /* Embed the registry function VALUE for a verb sym at the given valence — the
  * 2b parser flip (`parse "2+3"` -> (+<fn>;2;3)).  A monadic-marked spelling
  * ("<g>:") probes the registry under the bare glyph.  On a miss the sym is
@@ -108,7 +120,9 @@ ray_t *q_embed(ray_t *sym, q_valence_t val) {
     /* `:`/`::` heads are assignment/return SYNTAX (the walker dispatches on
      * the colon sym); the `:` registry row serves operand position only */
     if (nm[0] == ':') { ray_release(s); return sym; }
-    if (val == Q_MONADIC && nl == 2 && nm[1] == ':') nl = 1;   /* "+:" -> "+" */
+    /* the marker IS the valence, so it wins over whatever the SITE asked for —
+     * `(*:)`, `*:[x]` and `@[|:;x]` all reach here as operands, asking dyadic */
+    if (marker_row(nm, nl)) { val = Q_MONADIC; nl--; }   /* "+:"->"+", "0::"->"0:" */
     ray_t *hit = q_registry_lookup_name(nm, nl, val);
     ray_release(s);
     if (!hit) return sym;
@@ -246,6 +260,24 @@ static int sym_is_glyph(ray_t *sym) {
     size_t l = ray_str_len(s);
     int r = (l >= 1 && l <= 2 && strchr(VERB_CHARS, nm[0]) != NULL &&
              (l == 1 || nm[1] == ':' || strchr(VERB_CHARS, nm[1]) != NULL));
+    /* the digit-colon verbs and their markers (`0:` `0::`) are glyphs too — the
+     * manifest, not VERB_CHARS, is what says so */
+    if (!r) {
+        const q_op_t *row = q_ops_find(nm, (int)l);
+        r = (row && row->lex == QLEX_GLYPH) || marker_row(nm, l) != NULL;
+    }
+    ray_release(s);
+    return r;
+}
+
+/* True iff a verb sym carries the MONADIC MARKER.  Standing INFIX that spelling
+ * is modified assignment (`x,:y` == `x:x,y`), which modassign_eval reads off the
+ * SYM — so that one site must not resolve it. */
+static int verb_marked(ray_t *sym) {
+    if (!sym || sym->type != -RAY_SYM || (sym->attrs & Q_ATTR_QUOTED)) return 0;
+    ray_t *s = ray_sym_str(sym->i64);
+    if (!s) return 0;
+    int r = marker_row(ray_str_ptr(s), ray_str_len(s)) != NULL;
     ray_release(s);
     return r;
 }
@@ -372,13 +404,14 @@ static Tokens scan(const char *src) {
          * manifest row the name stays a name-ref per the registry-miss rule).
          * A single digit glued to ':' can never start a clock literal (minute
          * / second / time / timespan all need tok_dig_run == 2 before ':'), so
-         * this is unambiguous.  `0::` is left alone (the second ':' would be
-         * a monadic marker / assign shape, not the verb). */
-        if ((c == '0' || c == '1' || c == '2') &&
-            src[p+1] == ':' && src[p+2] != ':') {
-            char nm[2] = { c, ':' };
-            p += 2;
-            EMIT(T_VERB, q_verb_name(nm, 2));
+         * this is unambiguous.  A second ':' is the MONADIC MARKER (`0::` read0,
+         * `1::` read1 — basics/exposed-infrastructure.md), never an assign: no
+         * q name starts with a digit, so there is nothing for it to assign to. */
+        if ((c == '0' || c == '1' || c == '2') && src[p+1] == ':') {
+            int marked = (src[p+2] == ':');
+            char nm[3] = { c, ':', ':' };
+            p += marked ? 3 : 2;
+            EMIT(T_VERB, q_verb_name(nm, marked ? 3 : 2));
             noun_pos = 0;
         }
         else if ((cl & CL_DIGIT) || neg_sign || dot_float) {
@@ -1371,7 +1404,8 @@ static P parse_e_from(Parser *p, P t, QCtx ctx) {
          * the same Q_ATTR_HOLE marker bracket elisions carry — an explicit
          * `::` operand stays plain and evaluates to the generic-null VALUE */
         ray_t *rhs = e.v ? e.v : hole();
-        u.v = q_embed(u.v, Q_DYADIC);          /* infix head: the dyadic row */
+        if (!verb_marked(u.v))
+            u.v = q_embed(u.v, Q_DYADIC);      /* infix head: the dyadic row */
         ray_t *xs[3] = { u.v, t.v, rhs };
         return (P){ R_NOUN, q_list(xs, 3) };
     }
@@ -1400,10 +1434,14 @@ static P parse_e_from(Parser *p, P t, QCtx ctx) {
     if (t.role == R_VERB) t.v = q_embed(t.v, Q_MONADIC);
     if (e.role == R_VERB && sym_is_glyph(e.v)) e.v = q_embed(e.v, Q_DYADIC);
     /* JUXTAPOSED paren-glyph on a DATA operand takes its unary meaning —
-     * `(,)2` is `,2`, `(-)5` is `-5` (owner ruling 2026-07-23); bracket-apply
-     * `+[10]` stays a projection (assign/apply-forms contract) and a fn-value
-     * operand keeps the dyad ((+)(*) pins (+;*) — parse/cases.tsv). */
-    if (t.role == R_NOUN && t.v && t.v->type == RAY_BINARY &&
+     * `(,)2` is `,2`, `(-)5` is `-5` (owner ruling 2026-07-23), `(!)10` is
+     * `til 10` and `(@)t` is `type t`; bracket-apply `+[10]` stays a projection
+     * (assign/apply-forms contract, ref/value.md `value +[2]`) and a fn-value
+     * operand keeps the dyad ((+)(*) pins (+;*) — parse/cases.tsv).  The
+     * MANIFEST decides: any dyadic row with a monadic cell has a unary form,
+     * whatever shape that cell's value takes (`%:` is a q.q projection). */
+    if (t.role == R_NOUN && t.v &&
+        (t.v->type == RAY_BINARY || t.v->type == RAY_VARY) &&
         e.role == R_NOUN && e.v &&
         !(e.v->type == RAY_UNARY || e.v->type == RAY_BINARY ||
           e.v->type == RAY_VARY)) {
@@ -1411,8 +1449,7 @@ static P parse_e_from(Parser *p, P t, QCtx ctx) {
         if (drow && drow->name) {
             ray_t *mv = q_registry_lookup_name(drow->name, strlen(drow->name),
                                                Q_MONADIC);
-            if (mv && (mv->type == RAY_UNARY || mv->type == RAY_BINARY ||
-                       mv->type == RAY_VARY)) {
+            if (mv && q_eval_apply_is_fn(mv)) {
                 ray_retain(mv);
                 ray_release(t.v);
                 t.v = mv;
