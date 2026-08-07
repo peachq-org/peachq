@@ -3,6 +3,7 @@
 
 #include "qlang/repl/qdoc.h"
 #include "qlang/parse/q_parse.h"
+#include "qlang/q_ctx.h"    /* q_ctx_lang_scan/_tree — x) transcript lines */
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
 #include "qlang/eval/q_dbg.h"    /* statement stash — .Q.trp/.Q.bt frame [0] */
 #include "qlang/eval/q_view.h"   /* q_view_intercept — `x::e` at the row seam */
@@ -226,8 +227,12 @@ static void run_example(const char* input, const char* expect,
     /* Transcript prompt out of sync with the live context: fail the row but
      * still execute the input so later rows see the intended state. */
     if (!prompt_ok) {
-        ray_t* past = q_parse(input);
-        if (!RAY_IS_ERR(past)) {
+        const char* xs = input; size_t xn = strlen(input);
+        char xl = q_ctx_lang_scan(&xs, &xn);
+        ray_t* past = xn == 0 ? NULL
+                    : (xl && xl != 'q') ? q_ctx_lang_tree(xl, xs, (int64_t)xn)
+                                        : q_parse(xs);
+        if (past && !RAY_IS_ERR(past)) {
             r->parsed++;
             ray_t* pres;
             if (!q_view_intercept(past, input, &pres)) pres = q_eval(past);
@@ -241,7 +246,21 @@ static void run_example(const char* input, const char* expect,
         return;
     }
 
-    ray_t* ast = q_parse(input);
+    const char* ls = input; size_t ln = strlen(input);
+    char lang = q_ctx_lang_scan(&ls, &ln);
+    if (lang && ln == 0) {                 /* bare `g)` line: silent no-op */
+        r->parsed++;
+        int lok = expect[0] == '\0';
+        classify(r, lok);
+        if (!lok) {
+            emit_row(em, tprompt, input, "");
+            if (verbose) fprintf(out, "  q)%.200s\n    FAIL(eval) got \"\" want \"%.200s\"\n",
+                                 input, expect);
+        }
+        return;
+    }
+    ray_t* ast = (lang && lang != 'q') ? q_ctx_lang_tree(lang, ls, (int64_t)ln)
+                                       : q_parse(ls);
     if (RAY_IS_ERR(ast)) {
         /* an error-expectation row a PARSE-time error satisfies passes WHOLE —
          * 'dup dies during parse (qsql.md:168), and the transcript's
