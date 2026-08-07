@@ -78,7 +78,7 @@
 .h.edsn:{.h.i.exw[.h.i.exz;.h.i.exs'[.h.i.exk key x;value x]]};
 
 / .h.tx: `json is the doc's printed source, JSON Lines; `xls is .h.ed (SpreadsheetML text, no zip).
-.h.tx:`raw`json`csv`txt`xml`xls!(enlist;{.j.j each $[.Q.qt x;0!x;x]};.h.cd;.h.td;.h.xd;.h.ed);
+.h.tx:`raw`json`csv`txt`xml`xls!((,:);{.j.j each $[.Q.qt x;0!x;x]};.h.cd;.h.td;.h.xd;.h.ed);
 
 .h.hug:{h:"0123456789abcdef"; c:"c"$til 256; c!{[s;h;c] i:"i"$c; $[c in s;enlist c;"%",h[i div 16],h[i mod 16]]}[x;h] each c};
 / Written as the natural dict lookup (ref/doth.md: .h.hug maps chars to their escapes); RED until dict lookup stops missing on `" "`, the char null — see doth-status.md.
