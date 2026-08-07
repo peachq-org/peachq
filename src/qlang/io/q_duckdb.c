@@ -1017,7 +1017,9 @@ static ray_t* qd_connect_fn(ray_t* x) {
         if (cfg_dict && cfg_dict->type != RAY_DICT) return q_err(QE_DUCKDB);
     }
     char text[512];
-    if (!qd_sym_text(spec, text, sizeof text)) return q_err(QE_DUCKDB);
+    if (!spec || RAY_IS_NULL(spec))            /* connect[] -> `:default: */
+        snprintf(text, sizeof text, ":default:");
+    else if (!qd_sym_text(spec, text, sizeof text)) return q_err(QE_DUCKDB);
 
     /* `:default: -> "" (the shared in-memory db); strip one leading colon */
     const char* path = text;
@@ -1517,6 +1519,30 @@ static ray_t* qd_select_wrap(ray_t** args, int64_t n) {
     return tbl;
 }
 
+/* .duckdb.sql[h;"..."] — run any statement (python-API parity): a result WITH
+ * columns converts per the default read mapping (no sidecar; unsupported
+ * column types error as ever); a column-less result (DDL) answers `::`. */
+static ray_t* qd_sql_wrap(ray_t** args, int64_t n) {
+    if (n != 2) return q_err(QE_RANK);
+    if (g_qd.state != 1) return q_err(QE_DUCKDB);
+    int slot = qd_resolve(args[0]);
+    if (slot < 0) return q_err(QE_DUCKDB);
+    const char* tp; int64_t tn;
+    if (!args[1] || !q_str_text_bytes(args[1], &tp, &tn)) return q_err(QE_DUCKDB);
+    qd_buf b = {0};
+    qd_putn(&b, tp, (size_t)tn);
+    if (b.oom) { qd_buf_free(&b); return q_err(QE_WSFULL); }
+    duck_result res;
+    ray_t* e = qd_run(slot, b.p, &res);
+    qd_buf_free(&b);
+    if (e) return e;
+    ray_t* out;
+    if (QAPI.column_count(&res) == 0) { ray_retain(RAY_NULL_OBJ); out = RAY_NULL_OBJ; }
+    else out = qd_result_to_table(&res, NULL, 0);
+    QAPI.destroy_result(&res);
+    return out;
+}
+
 /* ---- registration: dotted env binds (the .Q.c.* pattern) ---- */
 
 static void qd_bind_unary(const char* name, ray_unary_fn fn) {
@@ -1542,5 +1568,6 @@ void q_duckdb_register(void) {
     qd_bind_vary (".duckdb.get",         qd_get_wrap);
     qd_bind_vary (".duckdb.append",      qd_append_wrap);
     qd_bind_vary (".duckdb.select",      qd_select_wrap);
+    qd_bind_vary (".duckdb.sql",         qd_sql_wrap);
     qd_bind_vary (".duckdb.err",         qd_err_wrap);
 }
