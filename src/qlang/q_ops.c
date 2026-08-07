@@ -12,8 +12,15 @@
  *   - q `=`/`<>` dyadic wrap rayfall `==`/`!=` (char-string element-wise case);
  *     q `#`/`_` dyadic are arg-swap `take` / count-`drop` wrappers.
  *   - q `,` dyadic is join -> rayfall `concat`.
- * DEFERRED (QR_NONE — no clean rayfall target, do NOT guess): monadic `%`
- *   (reciprocal: no builtin).  Dyadic `&`/`|` are the q_min2_wrap/q_max2_wrap
+ *   - the GLYPH monadic cells ARE the k unary forms, rostered verbatim in
+ *     basics/exposed-infrastructure.md "Unary forms" (`!:` key/til, `#:` count,
+ *     `$:` string, `%:` reciprocal, `&:` where, `*:` first, `+:` flip, `,:`
+ *     enlist, `-:` neg, `.:` get, `0::` read0, `1::` read1, `<:` iasc, `=:`
+ *     group, `>:` idesc, `?:` distinct, `@:` type, `^:` null, `_:` floor, `|:`
+ *     reverse, `~:` not).  Each REUSES the keyword's own build — never a second
+ *     implementation of the verb.
+ * DEFERRED (QR_NONE — no clean rayfall target, do NOT guess):
+ *   Dyadic `&`/`|` are the q_min2_wrap/q_max2_wrap
  *   recipes (Lesser/Greater over ray_min2_fn/ray_max2_fn plus the ref/lesser.md
  *   result-type matrix) — the `and`/`or` keywords reuse them.  `any`/`all`
  *   keep QR_NONE rows to reserve the name and fix the lexical class, but they
@@ -182,7 +189,7 @@ static const q_op_t Q_OPS[] = {
     { "+",     QLEX_GLYPH,     QR_FN1("flip", q_flip_wrap),    QR_ENV("+"),       NULL, 1, 0, "atomic", "sum", .mono_scan = "sums", QKOP(1) },
     { "-",     QLEX_GLYPH,     QR_FN1A("neg", q_neg_wrap),     QR_ENV("-"),       NULL, 1, 0, "atomic", NULL, QKOP(2) },
     { "*",     QLEX_GLYPH,     QR_ENV("first"),                QR_ENV("*"),       NULL, 1, 0, "atomic", "prd", .mono_scan = "prds", QKOP(3) },
-    { "%",     QLEX_GLYPH,     QR_NONE,                        QR_ENV("/"),       NULL, 1, 0, "atomic", NULL, QKOP(4) },
+    { "%",     QLEX_GLYPH,     QR_QSRC("reciprocal"),          QR_ENV("/"),       NULL, 1, 0, "atomic", NULL, QKOP(4) },
     { "<",     QLEX_GLYPH,     QR_FN1("iasc", q_iasc_wrap),    QR_ENV("<"),       NULL, 1, 0, "atomic", NULL, QKOP(9) },
     { ">",     QLEX_GLYPH,     QR_FN1("idesc", q_idesc_wrap),  QR_ENV(">"),       NULL, 1, 0, "atomic", NULL, QKOP(10) },
     { "<=",    QLEX_GLYPH,     QR_NONE,                        QR_ENV("<="),      NULL, 1, 0, "atomic", NULL },
@@ -202,9 +209,8 @@ static const q_op_t Q_OPS[] = {
     /* `~` monadic not is ATOMIC on its own recipe, since `family` speaks for
      * the DYAD; Match reduces to one bool atom (near-border, see AUDIT). */
     { "~",     QLEX_GLYPH,     QR_FN1A("not", q_not_wrap),     QR_FN2("match", q_match_wrap), NULL, 1, 0, "aggregate", NULL, QKOP(15) },
-    /* `^` fill: "Fill is an atomic function" (ref/fill.md). Monadic `^x` is a
-     * deferred cell. */
-    { "^",     QLEX_GLYPH,     QR_NONE,                        QR_FN2("fill", q_fill_wrap), NULL, 1, 0, "atomic", NULL, QKOP(7) },
+    /* `^` fill: "Fill is an atomic function" (ref/fill.md). */
+    { "^",     QLEX_GLYPH,     QR_FN1("nil?", q_null_wrap),    QR_FN2("fill", q_fill_wrap), NULL, 1, 0, "atomic", NULL, QKOP(7) },
     /* ---- type-dispatch glyphs ---- */
     /* `!` family "structural" is DOCUMENTATION ONLY — no lift arm dispatches
      * on it. Monadic `!` is a K-ism superset of `key`. */
@@ -215,14 +221,14 @@ static const q_op_t Q_OPS[] = {
     /* `$` is MULTI-CONCEPT (Cast/Tok/Pad/mmu/enum) so family "none": no one
      * lift law fits, so each overload SELF-RECURSES with its own boundary
      * (ruling 2026-07-24). `$[c;t;f]` is a q_eval control form, not a row. */
-    { "$",     QLEX_GLYPH,     QR_NONE,                        QR_FN2("as", q_dollar), NULL, 1, 0, "none", NULL, QKOP(11) },
+    { "$",     QLEX_GLYPH,     QR_ENV("string"),               QR_FN2("as", q_dollar), NULL, 1, 0, "none", NULL, QKOP(11) },
     /* `:` Assign as an operand VALUE. Assignment/return stay SYNTAX — q_embed
      * never embeds a colon head, so this row is reachable only as an operand. */
     { ":",     QLEX_GLYPH,     QR_NONE,                        QR_FN2("assign", q_index_assign_wrap), NULL, 1, 0, "none", NULL, QKOP(0) },
     /* `@`/`.` family none: Apply/Index ARE the application machinery (spec §5),
      * not lifted. name_lift: a sym-atom d in the amend forms names a global. */
-    { "@",     QLEX_GLYPH,     QR_NONE,                        QR_FNV("at", q_eval_at_wrap),    NULL, 1, 1, "none", NULL, .name_lift = 1, QKOP(18) },
-    { ".",     QLEX_GLYPH,     QR_NONE,                        QR_FNV("apply", q_eval_dot_wrap), NULL, 1, 1, "none", NULL, .name_lift = 1, QKOP(19) },
+    { "@",     QLEX_GLYPH,     QR_ENV("type"),                 QR_FNV("at", q_eval_at_wrap),    NULL, 1, 1, "none", NULL, .name_lift = 1, QKOP(18) },
+    { ".",     QLEX_GLYPH,     QR_FN1("value", q_eval_value_wrap), QR_FNV("apply", q_eval_dot_wrap), NULL, 1, 1, "none", NULL, .name_lift = 1, QKOP(19) },
     /* ---- keyword-infix ---- */
     { "div",   QLEX_KW_INFIX,  QR_NONE,                        QR_ENV("div"),     NULL, 1, 0, "atomic", NULL, QKOP(31) },
     /* PURE RENAME: rayfall `%` IS floored modulo, sign following the divisor,
@@ -464,8 +470,8 @@ static const q_op_t Q_OPS[] = {
      * digit-colon arm and dispatch on the LEFT operand's shape, so both are
      * family "none" exception-catalogue members. `2:` (Dynamic Load) has no
      * row and stays a name-ref ('name). */
-    { "0:",     QLEX_GLYPH,     QR_NONE,                       QR_FN2("file-text", q_io_filetext_wrap), NULL, 1, 1, "none", NULL, QKOP(20) },
-    { "1:",     QLEX_GLYPH,     QR_NONE,                       QR_FN2("file-binary", q_io_filebinary_wrap), NULL, 1, 1, "none", NULL, QKOP(21) },
+    { "0:",     QLEX_GLYPH,     QR_FN1("read0", q_read0_wrap), QR_FN2("file-text", q_io_filetext_wrap), NULL, 1, 1, "none", NULL, QKOP(20) },
+    { "1:",     QLEX_GLYPH,     QR_FN1("read1", q_read1_wrap), QR_FN2("file-binary", q_io_filebinary_wrap), NULL, 1, 1, "none", NULL, QKOP(21) },
     { "hsym",   QLEX_KW_PREFIX, QR_FN1("hsym", q_hsym_wrap),   QR_NONE,           NULL, 1, 0, "atomic", NULL },
     { "read0",  QLEX_KW_PREFIX, QR_FN1("read0", q_read0_wrap), QR_NONE,           NULL, 1, 1, "none", NULL, QKOP(20) },
     { "read1",  QLEX_KW_PREFIX, QR_FN1("read1", q_read1_wrap), QR_NONE,           NULL, 1, 1, "none", NULL, QKOP(21) },
