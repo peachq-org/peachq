@@ -468,25 +468,30 @@ static Tokens scan(const char *src) {
                 p++;
                 int s = p;
                 if (src[p] == ':') {
-                    /* FILE symbol `:path (ref/file-text.md, hsym): a leading
-                     * ':' pulls ':' and '/' into the name so `:/tmp/a.txt is
-                     * ONE symbol.  Constrained to the leading-':' shape on
-                     * purpose (plan-review round 1): general handle symbols
-                     * (`fifo:x, `host:port) stay two tokens — that spelling
-                     * is a hard 'arity error today, so no green row can flip.
-                     * '-' is a path/name byte HERE only (`:/tmp/a-b.txt is
-                     * ONE symbol; greedy, so `:a-1 too) — a BARE symbol body
-                     * stays valid-name chars (alnum/_/.) per basics/syntax.md
-                     * (its non-name example `a-b!` needs the `"…" quoted
-                     * form), so `a-b / `a-`b keep meaning subtraction.
-                     * Spaced `:a - 1 stays subtraction (not glued). */
+                    /* FILE/handle symbol `:path — ':' '/' '-' are all path
+                     * bytes (ref/hopen.md `:localhost:5000, `:unix://5010). */
                     p++;
                     while ((CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) ||
                            src[p] == '.' || src[p] == ':' || src[p] == '/' ||
                            src[p] == '-')
                         p++;
                 } else {
-                    while ((CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) || src[p] == '.') p++;
+                    /* A BARE symbol takes ':' and '/' too (ref/doth.md .h.ha:
+                     * `http://www.example.com), but only where more body
+                     * follows — a trailing ':' is still the operator, and '-'
+                     * is never a bare-symbol byte (`a-b stays subtraction). */
+                    for (;;) {
+                        while ((CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) ||
+                               src[p] == '.')
+                            p++;
+                        int sep = p;
+                        while (src[sep] == ':' || src[sep] == '/') sep++;
+                        if (sep == p ||
+                            !((CLASS[(uint8_t)src[sep]] & (CL_ALPHA | CL_DIGIT)) ||
+                              src[sep] == '.'))
+                            break;
+                        p = sep;
+                    }
                 }
                 if (count == 0) {
                     first = symlit(src + s, p - s);
