@@ -5,6 +5,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/q_ctx.h"
+#include <ctype.h>           /* isalpha — the language-prefix scan */
 #include "qlang/base/q_err.h"     /* q_err_text / q_err_drop — the statement-entry backstop */
 #include "qlang/parse/q_parse.h"
 #include "qlang/eval/q_eval.h"
@@ -31,28 +32,35 @@ static void (*g_console_close)(void);
 void q_ctx_set_console_close(void (*fn)(void)) { g_console_close = fn; }
 void q_ctx_console_close(void) { if (g_console_close) g_console_close(); }
 
-/* Strip pasted kdb `q)` REPL prompts from the front of an intake line.
- *
- * kdb lets you paste a transcript line that still carries its `q)` console
- * prompt and it "just works" — the line-reader drops a leading `q)` before
- * parsing.  We mirror that here, and ONLY here (the line-intake layer), never
- * in q_parse: the strip is a console/loader affordance, not a language feature,
- * so a `q)` inside a lambda body, a string literal, or an argument to
- * `parse`/`value` must survive untouched — and it does, because run_one_line
- * only ever sees whole top-level intake lines (openq is line-at-a-time).
- *
- * Rule: repeated exact `q)` only.  The `s[2] != ')'` guard is what tells a
- * repeated prompt (`q)q)…`, strip) apart from the debug prompt (`q))…`, leave
- * alone).  Namespace prompts (`q.foo)`) and `k)` mode fail the `s[1] == ')'` /
- * `s[0] == 'q'` tests and are likewise left alone.  No leading-whitespace trim:
- * an indented line is not a prompt.  Returns the advanced pointer.
- *
- * Reads are in-bounds on any NUL-terminated string: s[1] is only reached when
- * s[0]=='q' (so s[0] != '\0'), and s[2] only when s[1]==')' (so s[1] != '\0'). */
-const char* q_ctx_strip_prompt(const char* s) {
-    while (s[0] == 'q' && s[1] == ')' && s[2] != ')')
-        s += 2;
-    return s;
+/* language-handler tree `(.X.e; "rest")`; `q`'s builtin handler is `value`.
+ * The head is a NAME ref, so an undefined handler fails as ordinary
+ * resolution (`'.g.e`) and a defined one applies through the one seam. */
+char q_ctx_lang_scan(const char** s, size_t* n) {
+    char lang = 0;
+    const char* p = *s;
+    size_t m = *n;
+    while (m >= 2 && isalpha((unsigned char)p[0]) && p[1] == ')' &&
+           !(m >= 3 && p[2] == ')')) {
+        lang = p[0];
+        p += 2;
+        m -= 2;
+    }
+    *s = p;
+    *n = m;
+    return lang;
+}
+
+ray_t* q_ctx_lang_tree(char letter, const char* p, int64_t n) {
+    char nm[5] = { '.', letter, '.', 'e', '\0' };
+    ray_t* hd = letter == 'q' ? ray_sym(ray_sym_intern_runtime("value", 5))
+                              : ray_sym(ray_sym_intern_runtime(nm, 4));
+    ray_t* arg = ray_charv(p, n);
+    ray_t* t = ray_list_new(2);
+    t = ray_list_append(t, hd);
+    ray_release(hd);
+    t = ray_list_append(t, arg);
+    ray_release(arg);
+    return t;
 }
 
 /* GC policy has ONE home: this statement seam, covering all three doors
@@ -77,14 +85,12 @@ static void ctx_statement_end(void) {
  * (show / 0N! / console writes), which still flush below. */
 int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
                    int print_result) {
-    /* Drop any pasted `q)` console prompt(s) before anything else sees the
-     * line — covers REPL (piped + interactive) and the `q file.q` loader, all
-     * of which funnel through here.  Adjust n by the bytes we advanced past. */
-    {
-        const char* stripped = q_ctx_strip_prompt(s);
-        n -= (size_t)(stripped - s);
-        s = stripped;
-    }
+    /* Language-handler prefixes (kdb `x)` lines, owner-ruled 2026-08-07):
+     * strip every leading `<letter>)` — pasted prompts included — and the
+     * RIGHTMOST letter is the language.  `q` (or none) evaluates as q; any
+     * other letter routes the rest VERBATIM to `.<letter>.e`; a bare prefix
+     * line is silent.  `q))` stays untouched (the debug prompt). */
+    char lang = q_ctx_lang_scan(&s, &n);
     if (n == 0)
         return 0;
 
@@ -98,7 +104,7 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
      * effects + value into buf (value-or-throw; `\\`/exit act inside q_sys).
      * Console lines arrive '\n'-terminated, a rendered value does not — the
      * append-if-missing keeps this byte-identical to the historic output. */
-    if (q_sys_is_cmd(s, n)) {
+    if ((!lang || lang == 'q') && q_sys_is_cmd(s, n)) {
         char buf[8192];
         ray_t* sr = q_sys_line(s, n, print_result, buf, sizeof buf);
         if (buf[0]) {
@@ -119,7 +125,8 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
         return 0;
     }
 
-    ray_t* ast = q_parse(s);
+    ray_t* ast = (lang && lang != 'q') ? q_ctx_lang_tree(lang, s, (int64_t)n)
+                                       : q_parse(s);
     if (RAY_IS_ERR(ast)) {
         int64_t tn = 0;
         const char* text = q_err_text(ast, &tn);   /* 'dup dies at parse (qsql.md:168) */

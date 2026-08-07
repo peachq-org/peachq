@@ -11,6 +11,8 @@
 
 #include <stdio.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <rayforce.h>       /* ray_t — q_ctx_lang_tree builds a q tree */
 
 /* ---- the statement seam ---------------------------------------------------
  * ONE line of q source, executed the way every door executes it: strip a pasted
@@ -31,8 +33,13 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err, int print_resu
  * so a bad file alerts before its later statements ever run). */
 int q_ctx_run_file(const char* path, FILE* out, FILE* err);
 
-/* Skip any pasted `q)` prompt(s): returns a pointer INTO s. */
-const char* q_ctx_strip_prompt(const char* s);
+/* Scan leading `<letter>)` prefixes off the (s; n) pair (rightmost letter wins;
+ * `q))` never matches).  Returns the language letter, 0 = none. */
+char q_ctx_lang_scan(const char** s, size_t* n);
+
+/* `(.X.e; "text")` application tree (`q` -> `value`) — the language-handler
+ * dispatch shared by the statement seam and the char-atom apply arm. */
+ray_t* q_ctx_lang_tree(char letter, const char* p, int64_t n);
 
 /* Install the two callbacks the IPC layer evaluates a request through: source
  * text (the seam above, but answering with a value instead of printing — hence
