@@ -14,10 +14,11 @@
  * `.q` entries (q_eval's bare-name `.q.<name>` fallback).
  * A registry miss still means "not resolvable at that valence."  Cells whose
  * q semantics have NO clean rayfall target stay QR_NONE rather than a guessed
- * binding — currently `|` dyadic (element-wise max), monadic `%` (reciprocal
- * glyph), monadic `$`/`@`/`.`/`^`, and the reserved `any`/`all` rows; qSQL
+ * binding — currently the reserved `any`/`all` rows and monadic `:`; qSQL
  * statement forms are parse shapes awaiting the plan-router wave, not
- * registry cells. */
+ * registry cells.  A GLYPH row's monadic cell is its k UNARY FORM
+ * (basics/exposed-infrastructure.md) and is OPERATIVE at one argument: see the
+ * unary-form rule in q_eval_apply.c. */
 #ifndef Q_OPS_H
 #define Q_OPS_H
 

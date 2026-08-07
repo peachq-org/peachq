@@ -1355,6 +1355,13 @@ static int carrier_fmt(ray_t* v, char* buf, size_t bufsz) {
     return 1;
 }
 
+/* a registry spelling that is a GLYPH (`+`, `%`, `0:`) rather than a keyword —
+ * glyphs take the `:` monadic marker on display, keywords never do */
+static int fn_glyph_spelling(const char* s) {
+    char c = s[0];
+    return !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
+}
+
 static void q_fmt_body(ray_t* val) {
     if (!val) return;
 
@@ -1364,8 +1371,18 @@ static void q_fmt_body(ray_t* val) {
         return;
     }
 
-    /* RAY_QFN carrier: lambda verbatim source / F+adverb / projection */
+    /* RAY_QFN carrier: lambda verbatim source / F+adverb / projection — EXCEPT
+     * that a k PRIMITIVE prints as its glyph whatever machinery implements it
+     * (`%:` is a q.q projection here; kdb still shows `%:` — `.q`reciprocal`,
+     * basics/funsql.md).  Keyword-spelled q.q definitions keep their source. */
     if (val->type == RAY_QFN) {
+        q_provenance_t gpv;
+        if (q_registry_provenance(val, &gpv) && gpv.spelling &&
+            fn_glyph_spelling(gpv.spelling)) {
+            qe_puts(gpv.spelling);
+            if (gpv.valence == Q_MONADIC) qe_putc(':');
+            return;
+        }
         char cb[512];
         cb[0] = '\0';
         if (carrier_fmt(val, cb, sizeof cb))
@@ -1442,10 +1459,9 @@ static void q_fmt_body(ray_t* val) {
         if (val == q_registry_list_value()) { qe_puts("enlist"); return; }
         q_provenance_t pv;
         if (q_registry_provenance(val, &pv) && pv.spelling && pv.spelling[0]) {
-            char c0 = pv.spelling[0];
-            int glyph = !((c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z'));
             qe_puts(pv.spelling);
-            if (pv.valence == Q_MONADIC && glyph) qe_putc(':');
+            if (pv.valence == Q_MONADIC && fn_glyph_spelling(pv.spelling))
+                qe_putc(':');
             return;
         }
     }
