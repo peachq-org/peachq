@@ -20,6 +20,7 @@
 #include "qlang/ops/q_bang.h"   /* q_bang_enkey — xkey's keying primitive */
 #include "qlang/ops/q_index.h"  /* q_index_at / q_index_elem_at — group's key gathers */
 #include "qlang/io/q_splay.h"   /* mapped splays: cols/meta answer from headers */
+#include "qlang/io/q_provider.h"  /* provider carriers: cols from the snapshot, meta via hooks */
 #include "lang/internal.h"      /* ray_group_fn */
 #include "ops/agg_engine.h"     /* agg_group_keys — the one dense group core */
 #include "table/sym.h"          /* ray_sym_intern_runtime, ray_sym_vec_cell, RAY_SYM_W64 */
@@ -697,7 +698,8 @@ static ray_t* table_colnames(ray_t* x) {
 static ray_t* table_bi_deref(ray_t* x) {
     if (x && x->type == -RAY_SYM) {
         ray_t* g = q_env_get(x->i64);                   /* borrowed */
-        if (g && (g->type == RAY_TABLE || q_type_is_keyed(g) || q_splay_is(g)))
+        if (g && (g->type == RAY_TABLE || q_type_is_keyed(g) || q_splay_is(g) ||
+                  q_provider_carrier_is(g)))
             return g;
     }
     return x;
@@ -707,7 +709,8 @@ static ray_t* table_bi_deref(ray_t* x) {
 ray_t* q_cols_fn(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     ray_t* t = table_bi_deref(x);
-    if (q_splay_is(t)) {                    /* marker-first: the keys ARE the cols */
+    if (q_splay_is(t) || q_provider_carrier_is(t)) {   /* the keys ARE the cols
+                                                      * (provider: the SNAPSHOT) */
         ray_t* k = ray_dict_keys(t);
         ray_retain(k);
         return k;
@@ -725,6 +728,7 @@ ray_t* q_cols_fn(ray_t* x) {
  * "a keyed table is just a dictionary from one table to another". */
 ray_t* q_meta_fn(ray_t* x) {
     ray_t* t = x ? table_bi_deref(x) : NULL;
+    if (q_provider_carrier_is(t)) return q_provider_carrier_meta(t);
     int64_t nc = q_splay_ncols(t);
     int splay = nc >= 0;
     ray_t* flat = NULL;

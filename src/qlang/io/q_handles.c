@@ -11,6 +11,7 @@
 #include "qlang/q_console.h" /* q_console_write — 1/-1/2/-2 console handles */
 #include "qlang/q_dotz.h"   /* q_dotz_now_ns — the portable wall clock */
 #include "qlang/io/q_io.h"   /* q_io_mkdir_parents — hopen creates missing directories */
+#include "qlang/io/q_provider.h" /* the `:pq:` virtual-table provider arms */
 #include "qlang/net/q_ws.h"          /* q_ws_client_open — `:ws:// sym handles */
 #include "qlang/net/q_http_client.h" /* q_http_client_raw — `:http:// sym handles */
 #include "lang/eval.h"       /* ray_eval_get_restricted, ray_at_fn */
@@ -158,6 +159,22 @@ static int dup_above_std(int fd) {
 static int dup_above_std(int fd) { return fcntl(fd, F_DUPFD, 3); }
 #endif
 
+/* A real fd (>= 3) reserved on the null device — a collision-free int in the
+ * one handle space with no I/O behind it (provider handles). */
+int q_handles_reserve_fd(void) {
+#ifdef RAY_OS_WINDOWS
+    int fd = open("NUL", O_RDONLY);
+#else
+    int fd = open("/dev/null", O_RDONLY);
+#endif
+    if (fd >= 0 && fd < 3) {
+        int hi = dup_above_std(fd);
+        close(fd);
+        fd = hi;
+    }
+    return fd;
+}
+
 /* POSIX open, NOT .ipc.open (IPC-only).  Handle = the real fd; registered so
  * apply/hclose/read1 recognise it.  Restricted mode refuses (writes the fs). */
 ray_t* q_handles_open(const char* path, size_t plen, int is_fifo) {
@@ -283,6 +300,10 @@ ray_t* q_handles_apply(int64_t qh, ray_t* y) {
             if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
             return q_err(QE_NYI);
         }
+        if (hk == Q_HANDLE_PROVIDER) {
+            if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+            return q_provider_apply(qh, y);
+        }
     }
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     if (qh == 0 || qh == INT64_MIN || qh == INT32_MIN)   /* console-0 / int nulls */
@@ -310,6 +331,8 @@ ray_t* q_handles_sym_apply(ray_t* head, ray_t** args, int64_t n) {
     ray_t* s = ray_sym_str(head->i64);               /* borrowed */
     const char* sp = ray_str_ptr(s);
     size_t sl = ray_str_len(s);
+    if (q_provider_spec_is(sp, sl))
+        return q_provider_sym_apply(head, args, n);
     if ((sl >= 6 && memcmp(sp, ":ws://", 6) == 0) ||
         (sl >= 7 && memcmp(sp, ":wss://", 7) == 0)) {
         if (n == 1 && is_text_atom(args[0]))
@@ -345,6 +368,7 @@ ray_t* q_handles_sym_apply(ray_t* head, ray_t** args, int64_t n) {
 
 ray_t* q_handles_close(int64_t qh) {
     int k = q_handles_kind(qh);
+    if (k == Q_HANDLE_PROVIDER) return q_provider_close(qh);
     if (k == Q_HANDLE_FILE || k == Q_HANDLE_FIFO) {
         close((int)qh);
         q_handles_deregister(qh);
@@ -387,8 +411,10 @@ ray_t* q_handles_read1(int64_t fd, ray_t* count) {
  * equivalent hsym SYMBOL (both with the kdb "::PORT"/":host:port" leading-colon
  * conventions — the leading-`:` scanner lexes `` `::5000 ``/`` `:host:port `` as
  * one colon-bearing symbol, so both surfaces reach hopen_norm_descriptor and
- * share ONE parser), or a 2-list (conn; timeout-ms).  A `:path` / `:fifo://path`
- * descriptor is NOT IPC — hopen_transport routes it to q_handles_open above.
+ * share ONE parser), or a 2-list (conn; timeout-ms).  A `:pq:` conn may also
+ * be a 3-list (conn; timeout; config) — the provider open triad.  A `:path` /
+ * `:fifo://path` descriptor is NOT IPC — hopen_transport routes it to
+ * q_handles_open above.
  * DEFERRED (clean 'nyi, not a silent TCP attempt): the transport schemes
  * `unix://` / `tcps://` / `unixs://`, which need a transport layer openq lacks,
  * and single-colon `` `fifo:path `` (kdb opens it non-blocking; see
@@ -500,12 +526,37 @@ ray_t* q_hopen_wrap(ray_t* x) {
     ray_release(xs);
     return r;
 }
+/* raw descriptor bytes of a string/hsym conn (borrowed), 0 otherwise.
+ * ray_sym_str returns the INTERNED string — never release it. */
+static int hopen_conn_text(ray_t* c, const char** ds, size_t* dn) {
+    if (c && c->type == -RAY_STR) { *ds = ray_str_ptr(c); *dn = ray_str_len(c); return 1; }
+    if (c && c->type == -RAY_SYM) {
+        ray_t* s = ray_sym_str(c->i64);
+        if (!s) return 0;
+        *ds = ray_str_ptr(s); *dn = ray_str_len(s);
+        return 1;
+    }
+    return 0;
+}
+
 static ray_t* hopen_wrap_impl(ray_t* x) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* conn      = x;
     ray_t* timeout   = NULL;
     ray_t* pair_conn = NULL;   /* owned when a pair was a typed int VECTOR */
     ray_t* pair_to   = NULL;
+    if (x && x->type == RAY_LIST && ray_len(x) >= 3) {
+        /* (conn; timeout; config) — the provider open triad ONLY; a socket
+         * hopen stays kdb's 2-list, so a non-provider 3-list keeps its 'type.
+         * The triad is FROZEN: a longer provider tuple is 'rank, never a
+         * silently dropped tail. */
+        ray_t** e = (ray_t**)ray_data(x);
+        const char* ds; size_t dn;
+        if (hopen_conn_text(e[0], &ds, &dn) && q_provider_spec_is(ds, dn)) {
+            if (ray_len(x) > 3) return q_err(QE_RANK);
+            return q_provider_hopen(ds, dn, e[1], e[2]);
+        }
+    }
     if (x && x->type == RAY_LIST && ray_len(x) == 2) {   /* (conn; timeout-ms) */
         ray_t** e = (ray_t**)ray_data(x);
         conn = e[0]; timeout = e[1];                     /* borrowed */
@@ -520,18 +571,22 @@ static ray_t* hopen_wrap_impl(ray_t* x) {
     /* File/FIFO transport (Phase 1): a `:path` / `:fifo://path` descriptor opens a
      * filesystem fd directly, never an IPC socket.  A bare int port / `::port` /
      * `:host:port` classifies IPC and falls through. */
-    if (conn && (conn->type == -RAY_STR || conn->type == -RAY_SYM)) {
-        const char* ds; size_t dn;
-        if (conn->type == -RAY_STR) { ds = ray_str_ptr(conn); dn = ray_str_len(conn); }
-        else { ray_t* s = ray_sym_str(conn->i64);              /* borrowed — do not release */
-               ds = s ? ray_str_ptr(s) : NULL; dn = s ? ray_str_len(s) : 0; }
+    const char* ds; size_t dn;
+    if (hopen_conn_text(conn, &ds, &dn)) {
+        if (q_provider_spec_is(ds, dn)) {
+            if (pair_conn) ray_release(pair_conn);
+            if (pair_to)   ray_release(pair_to);
+            return q_provider_hopen(ds, dn, timeout, NULL);   /* config absent -> :: */
+        }
         const char* path; size_t plen;
-        int ht = ds ? hopen_transport(ds, dn, &path, &plen) : HT_IPC;
+        int ht = hopen_transport(ds, dn, &path, &plen);
         if (ht != HT_IPC) {
             if (pair_conn) ray_release(pair_conn);
             if (pair_to)   ray_release(pair_to);
             if (ht == HT_FIFO_NYI)
                 return q_err(QE_NYI);
+            if (q_provider_ns_is(ds, dn))
+                return q_err(QE_DOMAIN);   /* the marker owns its file namespace */
             return q_handles_open(path, plen, ht == HT_FIFO);
         }
     }

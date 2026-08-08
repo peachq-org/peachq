@@ -982,27 +982,8 @@ static int qd_sym_text(ray_t* x, char* dst, size_t cap) {
     return 1;
 }
 
-/* f[] / f[::] only — extra real args are 'rank */
-static bool qd_niladic_ok(ray_t** args, int64_t n) {
-    return n == 0 || (n == 1 && (!args[0] || RAY_IS_NULL(args[0])));
-}
 
-/* .duckdb.err[] — last DuckDB-produced error text ("" when none); sticky:
- * overwritten by the next captured failure, cleared only at reset (the
- * simpler rule).  Never triggers the dlopen. */
-static ray_t* qd_err_wrap(ray_t** args, int64_t n) {
-    if (!qd_niladic_ok(args, n)) return q_err(QE_RANK);
-    return ray_charv(g_err_last, (int64_t)strlen(g_err_last));
-}
 
-/* .duckdb.version[] — library version (VARY: the niladic `[]` call shape). */
-static ray_t* qd_version_wrap(ray_t** args, int64_t n) {
-    if (!qd_niladic_ok(args, n)) return q_err(QE_RANK);
-    qd_load();
-    if (g_qd.state != 1) return q_err(QE_DUCKDB);
-    const char* v = QAPI.library_version();
-    return ray_charv(v ? v : "?", v ? (int64_t)strlen(v) : 1);
-}
 
 /* .duckdb.connect `:default: | `:path.duckdb | (`:path; configDict) */
 static ray_t* qd_connect_fn(ray_t* x) {
@@ -1122,35 +1103,6 @@ static ray_t* qd_close_fn(ray_t* x) {
     return RAY_NULL_OBJ;
 }
 
-static ray_t* qd_connections_wrap(ray_t** args, int64_t n) {
-    if (!qd_niladic_ok(args, n)) return q_err(QE_RANK);
-    if (g_qd.state != 1) { qd_load(); if (g_qd.state != 1) return q_err(QE_DUCKDB); }
-    ray_t* hv = ray_vec_new(RAY_I32, 4);
-    ray_t* pv = ray_list_new(4);
-    for (int i = 0; i < QD_MAX_CON; i++) {
-        if (!g_cons[i].live) continue;
-        int32_t h = qd_handle_of(i);
-        hv = ray_vec_append(hv, &h);
-        ray_t* cell = ray_charv(g_cons[i].display, (int64_t)strlen(g_cons[i].display));
-        if (cell && !RAY_IS_ERR(cell)) {
-            pv = ray_list_append(pv, cell);
-            ray_release(cell);
-        }
-        if (!hv || RAY_IS_ERR(hv) || !pv || RAY_IS_ERR(pv)) break;
-    }
-    ray_t* kt = ray_table_new(1);
-    kt = ray_table_add_col(kt, ray_sym_intern("h", 1), hv);
-    ray_release(hv);
-    ray_t* vt = ray_table_new(1);
-    vt = ray_table_add_col(vt, ray_sym_intern("path", 4), pv);
-    ray_release(pv);
-    if (!kt || RAY_IS_ERR(kt) || !vt || RAY_IS_ERR(vt)) {
-        if (kt && !RAY_IS_ERR(kt)) ray_release(kt);
-        if (vt && !RAY_IS_ERR(vt)) ray_release(vt);
-        return q_err(QE_WSFULL);
-    }
-    return ray_dict_new(kt, vt);   /* consumes both */
-}
 
 /* meta `t` char from a catalog data_type string (base name before '('). */
 static char qd_meta_char(const char* dt, size_t n) {
@@ -1439,85 +1391,7 @@ static ray_t* qd_append_wrap(ray_t** args, int64_t n) {
     return RAY_NULL_OBJ;
 }
 
-static int qd_sym_list(ray_t* x, ray_t** cells, int64_t cap, int64_t* out_n) {
-    if (!x) return 0;
-    if (x->type == -RAY_SYM) {
-        cells[0] = ray_sym_str(x->i64);   /* borrowed */
-        *out_n = 1;
-        return cells[0] != NULL;
-    }
-    if (x->type == RAY_SYM) {
-        int64_t n = x->len;
-        if (n > cap) return 0;
-        for (int64_t i = 0; i < n; i++) {
-            cells[i] = ray_sym_vec_cell(x, i);   /* borrowed */
-            if (!cells[i]) return 0;
-        }
-        *out_n = n;
-        return 1;
-    }
-    return 0;
-}
 
-/* .duckdb.select[h;`t;cols;tail] — cols ` = all else bare quoted names;
- * tail rides WHERE unless it starts ORDER/LIMIT/HAVING/OFFSET (then raw);
- * plain table out (the keyed shape is get's job). */
-static ray_t* qd_select_wrap(ray_t** args, int64_t n) {
-    if (n != 4) return q_err(QE_RANK);
-    if (g_qd.state != 1) return q_err(QE_DUCKDB);
-    int slot = qd_resolve(args[0]);
-    if (slot < 0) return q_err(QE_DUCKDB);
-    char tname[256];
-    if (!qd_sym_text(args[1], tname, sizeof tname)) return q_err(QE_DUCKDB);
-
-    ray_t* cols[256];
-    int64_t ncols = 0;
-    bool all = args[2] && args[2]->type == -RAY_SYM && args[2]->i64 == 0;   /* ` */
-    if (!all && !qd_sym_list(args[2], cols, 256, &ncols))
-        return q_err(QE_DUCKDB);
-
-    const char* tp; int64_t tn;
-    if (!args[3] || !q_str_text_bytes(args[3], &tp, &tn))
-        return q_err(QE_DUCKDB);
-
-    qd_buf b = {0};
-    qd_puts(&b, "SELECT ");
-    if (all) qd_puts(&b, "*");
-    else for (int64_t c = 0; c < ncols; c++) {
-        if (c) qd_puts(&b, ", ");
-        qd_put_ident(&b, ray_str_ptr(cols[c]), ray_str_len(cols[c]));
-    }
-    qd_puts(&b, " FROM ");
-    qd_put_ident(&b, tname, strlen(tname));
-
-    /* trim the tail; decide WHERE vs raw suffix */
-    while (tn && (*tp == ' ' || *tp == '\t')) { tp++; tn--; }
-    while (tn && (tp[tn - 1] == ' ' || tp[tn - 1] == '\t')) tn--;
-    if (tn) {
-        static const char* raws[] = { "ORDER", "LIMIT", "HAVING", "OFFSET" };
-        bool raw = false;
-        for (size_t i = 0; i < sizeof raws / sizeof *raws && !raw; i++) {
-            size_t kl = strlen(raws[i]);
-            if ((size_t)tn > kl && strncasecmp(tp, raws[i], kl) == 0 &&
-                (tp[kl] == ' ' || tp[kl] == '\t'))
-                raw = true;
-        }
-        qd_puts(&b, raw ? " " : " WHERE ");
-        qd_putn(&b, tp, (size_t)tn);
-    }
-    if (b.oom) { qd_buf_free(&b); return q_err(QE_WSFULL); }
-
-    qd_desc_t desc[256];
-    int64_t ndesc = qd_fetch_desc(slot, tname, desc, 256);
-
-    duck_result res;
-    ray_t* e = qd_run(slot, b.p, &res);
-    qd_buf_free(&b);
-    if (e) return e;
-    ray_t* tbl = qd_result_to_table(&res, desc, ndesc);
-    QAPI.destroy_result(&res);
-    return tbl;
-}
 
 /* .duckdb.sql[h;"..."] — run any statement (python-API parity): a result WITH
  * columns converts per the default read mapping (no sidecar; unsupported
@@ -1557,17 +1431,18 @@ static void qd_bind_vary(const char* name, ray_vary_fn fn) {
     ray_release(obj);
 }
 
+/* The INTERNAL native surface (`.duckdb.i.*`) the lib/duckdb.q provider hooks
+ * are written over — the connection, the typed round-trip and one raw exec.
+ * The public bespoke API (connect/sql/select/connections/version/err) was
+ * REPLACED 2026-08-07 by the `:pq:duckdb:` virtual-table surface, not wrapped.
+ * Registration fires from the `\l pq` gate, so the pre-gate env is kdb-clean. */
 void q_duckdb_register(void) {
     /* NO dlopen here — the library is resolved lazily on first use. */
-    qd_bind_vary (".duckdb.version",     qd_version_wrap);
-    qd_bind_unary(".duckdb.connect",     qd_connect_fn);
-    qd_bind_unary(".duckdb.close",       qd_close_fn);
-    qd_bind_vary (".duckdb.connections", qd_connections_wrap);
-    qd_bind_vary (".duckdb.meta",        qd_meta_wrap);
-    qd_bind_vary (".duckdb.set",         qd_set_wrap);
-    qd_bind_vary (".duckdb.get",         qd_get_wrap);
-    qd_bind_vary (".duckdb.append",      qd_append_wrap);
-    qd_bind_vary (".duckdb.select",      qd_select_wrap);
-    qd_bind_vary (".duckdb.sql",         qd_sql_wrap);
-    qd_bind_vary (".duckdb.err",         qd_err_wrap);
+    qd_bind_unary(".duckdb.i.open",   qd_connect_fn);
+    qd_bind_unary(".duckdb.i.close",  qd_close_fn);
+    qd_bind_vary (".duckdb.i.exec",   qd_sql_wrap);
+    qd_bind_vary (".duckdb.i.get",    qd_get_wrap);
+    qd_bind_vary (".duckdb.i.set",    qd_set_wrap);
+    qd_bind_vary (".duckdb.i.append", qd_append_wrap);
+    qd_bind_vary (".duckdb.i.meta",   qd_meta_wrap);
 }
