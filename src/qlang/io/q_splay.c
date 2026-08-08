@@ -4,6 +4,7 @@
  * rc-driven), the rest decode once and cache.  Single-threaded q layer. */
 #define _GNU_SOURCE            /* MAP_ANONYMOUS / MAP_FIXED */
 #include "qlang/io/q_splay.h"
+#include "qlang/io/q_provider.h" /* marker-first disambiguation: `:pq: is never a splay */
 #include "qlang/io/q_io.h"           /* q_io_file_path */
 #include "qlang/net/q_wirefile.h"
 #include "qlang/base/q_err.h"
@@ -291,6 +292,7 @@ int q_splay_is(ray_t* x) {
     if (!s) return 0;
     size_t n = ray_str_len(s);
     const char* p = ray_str_ptr(s);
+    if (q_provider_spec_is(p, n)) return 0;   /* `:pq:...:t/ is a PROVIDER carrier */
     return n >= 2 && p[0] == ':' && p[n - 1] == '/';
 }
 
