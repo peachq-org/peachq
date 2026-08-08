@@ -17,6 +17,7 @@ typedef enum {
     Q_HANDLE_FILE   = 0,
     Q_HANDLE_FIFO   = 1,
     Q_HANDLE_SOCKET = 2,
+    Q_HANDLE_PROVIDER = 3,   /* io/q_provider.h — a virtual-table provider connection */
 } q_handle_kind;
 
 void q_handles_init(void);
@@ -41,6 +42,10 @@ int64_t q_handles_user_sym(int64_t fd);
 /* Open a file (write/append) or fifo (read) fd and register it.  Owned int
  * handle atom (the real fd, >= 3) or error. */
 ray_t* q_handles_open(const char* path, size_t plen, int is_fifo);
+
+/* Reserve a real fd (>= 3) on the null device — collision-free in the one
+ * handle space by construction, no I/O behind it.  -1 on failure. */
+int q_handles_reserve_fd(void);
 
 /* `h x` dispatch by kind: console (1/-1/2/-2) text-write, FILE write (raw;
  * `neg h` appends '\n' per basics/handles.md), FIFO 'nyi (Phase-1 fifo is a

@@ -33,6 +33,11 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err, int print_resu
  * so a bad file alerts before its later statements ever run). */
 int q_ctx_run_file(const char* path, FILE* out, FILE* err);
 
+/* An in-memory STRING of q source under the SAME script semantics/returns as
+ * q_ctx_run_file — the embedded stdlib bundle (`\l pq`) rides this: one
+ * loader, one multiline law. */
+int q_ctx_run_src(const char* s, FILE* out, FILE* err);
+
 /* Scan leading `<letter>)` prefixes off the (s; n) pair (rightmost letter wins;
  * `q))` never matches).  Returns the language letter, 0 = none. */
 char q_ctx_lang_scan(const char** s, size_t* n);

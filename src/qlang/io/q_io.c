@@ -13,6 +13,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/io/q_handles.h" /* q_handles_read1 — the fifo-handle read form */
 #include "qlang/io/q_splay.h"   /* q_io_set: a carrier y writes as its table */
+#include "qlang/io/q_provider.h"  /* q_io_set: `:pq: targets route to .X.set */
 #include "qlang/net/q_gz.h"     /* q_gz_inflate_zlib — the kxzip block codec */
 #include "qlang/net/q_wirefile.h" /* the format writers behind q_io_set */
 #include "lang/eval.h"      /* ray_eval_get_restricted */
@@ -663,6 +664,8 @@ static ray_t* set_file_y(ray_t* y) {
 }
 
 ray_t* q_io_set(ray_t* x, ray_t* y) {
+    ray_t* pr = q_provider_write(x, y, 0);   /* `:pq: 4-seg coordinate -> .X.set */
+    if (pr) return pr;
     if (x && x->type == RAY_LIST) {
         int64_t n = ray_len(x);
         ray_t** e = (ray_t**)ray_data(x);
