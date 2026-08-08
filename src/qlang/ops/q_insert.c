@@ -8,6 +8,7 @@
 #include "qlang/q_env.h"
 #include "qlang/ops/q_table.h"
 #include "qlang/ops/q_bang.h"  /* q_bang_enkey — the keying primitive */
+#include "qlang/io/q_provider.h" /* upsert: `:pq: targets route to .X.upsert */
 #include "lang/internal.h"   /* ray_concat_fn, ray_typed_null */
 #include "table/sym.h"       /* ray_sym_intern_runtime, ray_sym_vec_cell */
 #include <string.h>
@@ -372,6 +373,8 @@ static ray_t* keyed_upsert_flat(ray_t* flat, int64_t nkey, ray_t* rows) {
  * key.  Value target returns the new table; a NAMED target rebinds the
  * global and returns the name (unbound name + table payload creates it). */
 ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
+    ray_t* pr = q_provider_write(x, y, 1);
+    if (pr) return pr;
     int64_t sym;
     ray_t* t = q_table_operand(x, &sym);
     if (!t) {

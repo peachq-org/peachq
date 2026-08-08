@@ -206,13 +206,22 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
     return 0;
 }
 
-int q_ctx_run_file(const char* path, FILE* out, FILE* err) {
-    FILE* f = fopen(path, "r");
-    if (!f) {
-        fprintf(err, "q: cannot open script '%s'\n", path);
-        return 1;
-    }
+/* Line source for the script runner: a FILE or an in-memory string — ONE
+ * multiline law for `\l file` and the embedded stdlib bundle (`\l pq`). */
+typedef struct { FILE* f; const char* p; } script_src_t;
 
+static char* script_gets(char* buf, int cap, script_src_t* s) {
+    if (s->f) return fgets(buf, cap, s->f);
+    if (!s->p || !*s->p) return NULL;
+    size_t n = 0, max = (size_t)cap - 1;
+    while (n < max && s->p[n] && s->p[n] != '\n') n++;
+    if (n < max && s->p[n] == '\n') n++;       /* keep the newline, fgets-like */
+    memcpy(buf, s->p, n); buf[n] = '\0';
+    s->p += n;
+    return buf;
+}
+
+static int ctx_run_script(script_src_t* src, FILE* out, FILE* err) {
     /* OWNER RULING 2026-08-06: a load SAVES the caller's `\d` context and
      * RESTORES it when the file runs to completion; a load that ABORTS leaves
      * the context where the error left it (deliberate — that is what makes the
@@ -242,7 +251,7 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err) {
     int lrc = 0;
     #define FLUSH() do { if (alen) { lrc = q_ctx_run_line(acc, alen, out, err, 0); alen = 0; acc[0] = '\0'; } } while (0)
 
-    while (fgets(line, sizeof line, f)) {
+    while (script_gets(line, sizeof line, src)) {
         size_t n = strlen(line);
         while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
         /* Strip TRAILING whitespace too, so a block delimiter with superfluous
@@ -282,9 +291,25 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err) {
     if (!lrc) FLUSH();                             /* eval any pending logical line (incl. before a lone \) */
     #undef FLUSH
 
-    fclose(f);
     if (!lrc) q_env_ctx_set(saved_ctx);            /* completed: caller's `\d` back */
     return lrc ? 1 + lrc : 0;
+}
+
+int q_ctx_run_file(const char* path, FILE* out, FILE* err) {
+    FILE* f = fopen(path, "r");
+    if (!f) {
+        fprintf(err, "q: cannot open script '%s'\n", path);
+        return 1;
+    }
+    script_src_t src = { .f = f, .p = NULL };
+    int rc = ctx_run_script(&src, out, err);
+    fclose(f);
+    return rc;
+}
+
+int q_ctx_run_src(const char* s, FILE* out, FILE* err) {
+    script_src_t src = { .f = NULL, .p = s };
+    return ctx_run_script(&src, out, err);
 }
 
 /* ===== The remote doors (see q_ctx.h) =====

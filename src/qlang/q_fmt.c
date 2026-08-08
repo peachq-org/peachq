@@ -11,6 +11,7 @@
                                 * q_eval_apply_concrete — the display boundary force */
 #include "qlang/eval/q_view.h" /* q_view_text — a view displays as its text */
 #include "qlang/io/q_splay.h"  /* a mapped splay displays as its table */
+#include "qlang/io/q_provider.h" /* a provider carrier displays as provider truth */
 #include "lang/format.h"   /* ray_fmt */
 #include "lang/eval.h"     /* ray_at_fn — dict/table element access */
 #include "ops/hash.h"    /* ray_hash_bytes — pipe digest distinct keys */
@@ -1636,6 +1637,17 @@ static void q_fmt_body(ray_t* val) {
             return;
         }
         if (mt) ray_error_free(mt);                  /* unreadable: the raw dict shows */
+    }
+
+    if (val->type == RAY_DICT && q_provider_carrier_is(val)) {
+        ray_t* mt = q_provider_carrier_table(val);     /* provider truth: show the table */
+        if (mt && !RAY_IS_ERR(mt) && mt->type == RAY_TABLE) {
+            q_fmt_table(mt);
+            ray_release(mt);
+            return;
+        }
+        if (mt && RAY_IS_ERR(mt)) ray_error_free(mt);   /* unreadable: the raw dict shows */
+        else if (mt) ray_release(mt);
     }
 
     if (val->type == RAY_DICT) {            /* keyed table = table!table */
