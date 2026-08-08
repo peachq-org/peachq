@@ -16,7 +16,7 @@
 #include "qlang/q_console.h"  /* q_console_show — show's display sink */
 #include "qlang/base/q_type.h"     /* q_type_of — the `type` verb's type-number home */
 #include "qlang/io/q_splay.h"      /* the lazy splayed-table authority: 98h, count */
-#include "qlang/io/q_duckdb.h"     /* q_duckdb_register — .duckdb bridge namespace */
+#include "qlang/io/q_provider.h"     /* provider carriers: 98h, count via provider */
 #include "lang/env.h"       /* ray_fn_unary; ray_env_get = bootstrap catalogue reads */
 #include "lang/eval.h"      /* RAY_FN_NONE */
 #include "table/sym.h"      /* ray_sym_vec_cell */
@@ -137,7 +137,8 @@ static int8_t type_of(ray_t* x) {
     if (x->type == RAY_LAMBDA) return 100;
     if (x->type == RAY_UNARY) return 101;
     if (x->type == RAY_BINARY || x->type == RAY_VARY) return 102;
-    if (x->type == RAY_DICT && q_splay_is(x)) return 98;   /* mapped splay IS a table */
+    if (x->type == RAY_DICT && (q_splay_is(x) || q_provider_carrier_is(x)))
+        return 98;                             /* a bound carrier IS a table */
     return x->type;
 }
 
@@ -204,6 +205,7 @@ ray_t* q_count_fn(ray_t* x) {
      * mapped splay counts its ROWS: the first .d column's header count. */
     if (x && x->type == RAY_DICT) {
         if (q_splay_is(x)) return q_splay_count(x);
+        if (q_provider_carrier_is(x)) return q_provider_carrier_count(x);
         return q_count_fn(ray_dict_keys(x));
     }
     return g_base_count ? g_base_count(x)
@@ -220,7 +222,7 @@ int64_t q_builtins_count_long(ray_t* x) {
      * 15.4s when the adverb arms started routing through the boxed path).
      * Same answers as q_count_fn below, which still owns every other shape. */
     if (x && !RAY_IS_ERR(x) && !q_eval_apply_is_fn(x)) {
-        if (x->type == RAY_DICT && !q_splay_is(x))    /* a carrier rides the boxed tail */
+        if (x->type == RAY_DICT && !q_splay_is(x) && !q_provider_carrier_is(x))
             return q_builtins_count_long(ray_dict_keys(x));
         if (x->type == RAY_TABLE) return ray_table_nrows(x);
         if (x->type == RAY_LIST || (ray_is_vec(x) && x->type != RAY_STR))
@@ -402,7 +404,6 @@ void q_builtins_register(void) {
     /* .Q.pn stays UNBOUND (ref/dotq.md): `` `pn in key `.Q `` must be 0b — qStudio's safeCount relies on it. */
     /* .j JSON namespace (.j.j/.j.k/.j.jd) is defined in q — src/qlang/j.q, loaded
      * at q_runtime_create; the C homes are the `-31!`/`-29!` bangs (q_bang.c). */
-    /* .duckdb bridge namespace — dotted env binds (the .Q.c.* pattern); the
-     * DuckDB library itself is dlopen'd lazily on first use (docs/duckdb-api.md). */
-    q_duckdb_register();
+    /* The `.duckdb.i.*` natives bind at the `\l pq` GATE (q_pq.c), not here:
+     * duckdb is a virtual-table provider, and the pre-gate env stays kdb-clean. */
 }
