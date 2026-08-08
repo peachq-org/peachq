@@ -14,6 +14,7 @@
 #include "qlang/ops/q_bang.h"
 #include "qlang/ops/q_index.h"
 #include "qlang/io/q_splay.h"          /* mapped splays: from materializes, writes 'splay */
+#include "qlang/io/q_provider.h"         /* provider carriers: qsql push / materialize */
 #include "qlang/q_env.h"
 #include "lang/internal.h"             /* ray_til_fn, ray_typed_null, ray_except_fn */
 #include "table/dict.h"                /* ray_dict_slots — keyed-table halves */
@@ -43,6 +44,8 @@ static ray_t* gather(ray_t* x, ray_t* idx) {
 /* From-resolve (law 24 + column-dict superset): sym -> env; keyed -> 0!; dict -> flip */
 static ray_t* ques_from(ray_t* t) {
     if (!t) return q_err(QE_TYPE);
+    ray_t* pm = q_provider_from_table(t);   /* carrier / `:pq: hsym: provider truth */
+    if (pm) return pm;
     if (t->type == -RAY_SYM) {
         ray_t* v = q_env_resolve(t->i64);
         if (!v) return q_err(QE_NAME);
@@ -562,6 +565,8 @@ static ray_t* by_exec_vec(ray_t* a, ray_t* t, ray_t* idx) {
 
 static ray_t* ques_select(ray_t** args, int64_t n) {
     if (n == 6) return q_err(QE_NYI);            /* rank 6: the wave-5 sort */
+    ray_t* pushed = q_provider_qsql_push(args, n); /* NULL: not provider / no qsql hook */
+    if (pushed) return pushed;
     ray_t* t = ques_from(args[0]);
     if (!t || RAY_IS_ERR(t)) return t ? t : q_err(QE_TYPE);
     ray_t* idx0 = til_count(t);
@@ -944,6 +949,12 @@ static ray_t* bang_qsql(ray_t** args) {
     ray_t* a = args[3];
     int64_t name = -1;
     ray_t* src;
+    {   /* by-NAME mutation of a provider coordinate: table form is phase-2
+         * ('nyi); a connection form in a table position is 'domain */
+        int form = q_provider_coord_sym_form(tslot);
+        if (form == 2) return q_err(QE_NYI);
+        if (form == 1) return q_err(QE_DOMAIN);
+    }
     if (tslot && tslot->type == -RAY_SYM) {
         name = tslot->i64;
         if (is_symvec(a) && ray_len(a) > 0 && is_empty_gen(c) &&
@@ -968,6 +979,15 @@ static ray_t* bang_qsql(ray_t** args) {
      * lane below, its columns gathering on use. */
     if (q_splay_is(src)) {
         if (name >= 0 || !q_type_is_dict(a)) { ray_release(src); return q_err(QE_SPLAY); }
+    }
+    /* a provider carrier: by-NAME mutation is phase-2 ('nyi); by VALUE the
+     * carrier materializes through the provider and updates locally */
+    if (q_provider_carrier_is(src)) {
+        if (name >= 0) { ray_release(src); return q_err(QE_NYI); }
+        ray_t* m = q_provider_carrier_table(src);
+        ray_release(src);
+        if (!m || RAY_IS_ERR(m)) return m ? m : q_err(QE_TYPE);
+        src = m;
     }
     ray_t* r;
     int64_t nk = 0;                 /* keyed source: re-key the result */

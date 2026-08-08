@@ -1,7 +1,7 @@
 / dotq.q — openq's embedded q bootstrap: the ".Q" utility namespace, authored from the
 / PUBLISHED qdocs (qdocs/, CC BY 4.0). A REAL .q file, embedded via build-time codegen
 / (tools/gen-bootstrap.sh -> src/qlang/dotq_gen.h) and loaded at the tail of q_runtime_create.
-/ Loader is line-at-a-time: each definition MUST be ONE line (some exceed 120 by necessity).
+/ Loaded through the script seam (q_ctx_run_src): full kdb script syntax, though most definitions stay one-liners.
 
 / ---- C-backed members: each delegates to its raw `.Q.c.*` primitive (bound in C before this loads; `.Q.c.*` is internal/unstable) ----
 .Q.id:.Q.c.id;
