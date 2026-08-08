@@ -15,39 +15,54 @@ RAY_VENDOR_SRC = third_party/yyjson/yyjson.c \
 # q_gz.c hand-rolls RFC 1952 framing: miniz has no gzip windowBits+16 mode.
 RAY_MINIZ_DEFS = -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_ARCHIVE_WRITING_APIS -DMINIZ_NO_STDIO
 
-RAY_INCLUDES = -Iinclude -Isrc \
+BUILD_DIR = build
+# Generated headers land in $(BUILD_DIR)/gen (never the source tree); its -I
+# sits AHEAD of -Isrc so every `#include "qlang/X_gen.h"` line stays byte-identical.
+GEN_DIR = $(BUILD_DIR)/gen
+
+RAY_INCLUDES = -Iinclude -I$(GEN_DIR) -Isrc \
                -Ithird_party/yyjson -Ithird_party/picohttpparser -Ithird_party/miniz
 
-RAY_GEN_HDRS = src/qlang/dotq_gen.h src/qlang/h_gen.h src/qlang/j_gen.h \
-               src/qlang/pq_gen.h src/qlang/html_assets_gen.h
+RAY_GEN_HDRS = $(GEN_DIR)/qlang/dotq_gen.h $(GEN_DIR)/qlang/h_gen.h \
+               $(GEN_DIR)/qlang/j_gen.h $(GEN_DIR)/qlang/lib_gen.h \
+               $(GEN_DIR)/qlang/html_assets_gen.h
 
 # q.q before dotq.q — dotq.q may use q.q keywords, never the reverse.
-src/qlang/dotq_gen.h: src/qlang/q.q src/qlang/dotq.q tools/gen-bootstrap.sh
+$(GEN_DIR)/qlang/dotq_gen.h: src/qlang/q.q src/qlang/dotq.q tools/gen-bootstrap.sh
+	@mkdir -p $(dir $@)
 	tools/gen-bootstrap.sh $@ src/qlang/q.q src/qlang/dotq.q
 
-src/qlang/h_gen.h: src/qlang/h.q tools/gen-bootstrap.sh
+$(GEN_DIR)/qlang/h_gen.h: src/qlang/h.q tools/gen-bootstrap.sh
+	@mkdir -p $(dir $@)
 	SYMBOL=OPENQ_H_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/h.q
 
-src/qlang/j_gen.h: src/qlang/j.q tools/gen-bootstrap.sh
+$(GEN_DIR)/qlang/j_gen.h: src/qlang/j.q tools/gen-bootstrap.sh
+	@mkdir -p $(dir $@)
 	SYMBOL=OPENQ_J_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/j.q
 
-src/qlang/pq_gen.h: src/qlang/pq.q tools/gen-bootstrap.sh
-	SYMBOL=OPENQ_PQ_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/pq.q
+# The standard library: lib/*.q TOP LEVEL ONLY (lib/qunit/ deliberately out),
+# sorted for determinism — the ANY-ORDER LAW makes the order semantically moot.
+# The directory itself is a prerequisite (spelled lib/. — bare `lib` is the
+# librayforce.a target): deleting/renaming a file bumps the dir mtime, which
+# the file-only list cannot see (the html-assets rule's law).
+LIB_Q_SRCS := $(sort $(wildcard lib/*.q))
+$(GEN_DIR)/qlang/lib_gen.h: lib/. $(LIB_Q_SRCS) tools/gen-bootstrap.sh
+	@mkdir -p $(dir $@)
+	SYMBOL=OPENQ_LIB_BOOTSTRAP tools/gen-bootstrap.sh $@ $(LIB_Q_SRCS)
 
 # Dirs in the prerequisite list: deleting an asset bumps its directory's mtime,
 # which a file-only list cannot see. A no-change make must not touch this rule.
 HTML_ASSET_DEPS := $(shell find src/qlang/html -type f -o -type d 2>/dev/null)
-src/qlang/html_assets_gen.h: tools/gen-assets.sh $(HTML_ASSET_DEPS)
+$(GEN_DIR)/qlang/html_assets_gen.h: tools/gen-assets.sh $(HTML_ASSET_DEPS)
+	@mkdir -p $(dir $@)
 	@tools/gen-assets.sh $@ src/qlang/html
-
-BUILD_DIR = build
 
 # Both suffixes: a .win.o inherits none of the .o target's prerequisites, which is
 # how the mingw build broke while the native one was already fixed.
 $(BUILD_DIR)/src/qlang/q_runtime.o $(BUILD_DIR)/src/qlang/q_runtime.win.o: \
-    src/qlang/dotq_gen.h src/qlang/h_gen.h src/qlang/j_gen.h
-$(BUILD_DIR)/src/qlang/q_pq.o   $(BUILD_DIR)/src/qlang/q_pq.win.o:   src/qlang/pq_gen.h
-$(BUILD_DIR)/src/qlang/net/q_http.o $(BUILD_DIR)/src/qlang/net/q_http.win.o: src/qlang/html_assets_gen.h
+    $(GEN_DIR)/qlang/dotq_gen.h $(GEN_DIR)/qlang/h_gen.h $(GEN_DIR)/qlang/j_gen.h
+$(BUILD_DIR)/src/qlang/q_pq.o   $(BUILD_DIR)/src/qlang/q_pq.win.o:   $(GEN_DIR)/qlang/lib_gen.h
+$(BUILD_DIR)/src/qlang/net/q_http.o $(BUILD_DIR)/src/qlang/net/q_http.win.o: $(GEN_DIR)/qlang/html_assets_gen.h
 
 STD      = c17
 Q_TARGET = q
@@ -189,7 +204,7 @@ win:
 
 clean::
 	-rm -rf $(BUILD_DIR)
-	-rm -f $(Q_TARGET) q.exe $(RAY_GEN_HDRS)
+	-rm -f $(Q_TARGET) q.exe
 
 version:
 	@echo $(RAY_VERSION)

@@ -1,11 +1,8 @@
-/ pq.q — the PeachQ stdlib. Loaded ONLY by the pq load-gate (never at
-/ q_runtime_create). The single visible PeachQ manifest — pure q since the
-/ .pq.c.* rayfall escape hatch was deleted (2026-07-29, q-owned env). Each
-/ member is ONE line — the loader (q_pq_load) evals line-at-a-time, skipping
-/ blank / comment lines. (Codegen: a backslash is
-/ emitted VERBATIM into the C string literal, so keep NONE here — only a valid
-/ C escape survives; an invalid one breaks the build.)
-system "nonlegacy 1";
+/ pq.q — the PeachQ stdlib namespace (.pq). lib/*.q is the standard-library
+/ tier: bundled sorted at build, loaded ONLY by the \l pq gate (never at
+/ q_runtime_create) through the multiline statement seam. THE ANY-ORDER LAW:
+/ top level is definitions only — no cross-lib calls execute at load time.
+/ Pure q since the .pq.c.* rayfall escape hatch was deleted (2026-07-29).
 .pq.version:.z.K;
 / .pq.dr — domain and range in the layout the ref pages publish, so ours diffs
 / by eye against theirs (after qdocs/docs/docs/tools.q, kx, CC BY 4.0).
