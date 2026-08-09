@@ -106,6 +106,9 @@ ray_t* q_table_row_at(ray_t* t, int64_t row);
  * q_cols_fn is qSQL's column-name home too. */
 ray_t* q_cols_fn(ray_t* x);
 ray_t* q_meta_fn(ray_t* x);
+/* THE ([c] t;f;a) meta-result assembler (consumes all four columns) — every
+ * meta producer rides it so the shape can never fork. */
+ray_t* q_meta_assemble(ray_t* cvec, ray_t* tstr, ray_t* fvec, ray_t* avec);
 
 /* q `read0 x` (feat/q-file-text) — exposed so q_builtins can ALSO env-bind it
  * for the bracket-call form `read0[(f;o)]` (the ssr/value precedent: two fn

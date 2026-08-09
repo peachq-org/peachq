@@ -406,8 +406,10 @@ static ray_t* qd_read_cells(ray_t* col, const qd_tmap_t* tm,
                 col = ray_vec_append(col, &v);
                 break;
             }
-            case RAY_I16: {
-                int16_t v = ((int16_t*)data)[r];
+            case RAY_I16: {      /* TINYINT widens losslessly to q short */
+                int16_t v = tm->dk_type == QDUCK_TYPE_TINYINT
+                                ? (int16_t)((int8_t*)data)[r]
+                                : ((int16_t*)data)[r];
                 if (!ok || v == NULL_I16) col = qd_append_null(col);
                 else                      col = ray_vec_append(col, &v);
                 break;
@@ -495,6 +497,11 @@ static ray_t* qd_read_cells(ray_t* col, const qd_tmap_t* tm,
             case RAY_TIMESTAMP: {  /* int64 ns epoch 1970 -> epoch 2000 */
                 int64_t v = ((int64_t*)data)[r];
                 if (!ok || v == NULL_I64) { col = qd_append_null(col); break; }
+                if (tm->dk_type == QDUCK_TYPE_TIMESTAMP) {   /* µs: exact else error */
+                    if (v > INT64_MAX / 1000 || v < INT64_MIN / 1000)
+                        { ray_release(col); return q_err(QE_DUCKDB); }
+                    v *= 1000;
+                }
                 if (v < INT64_MIN + QD_EPOCH_NS)     /* epoch shift underflow */
                     { ray_release(col); return q_err(QE_DUCKDB); }
                 int64_t q = v - QD_EPOCH_NS;
@@ -1104,31 +1111,25 @@ static ray_t* qd_close_fn(ray_t* x) {
 }
 
 
-/* meta `t` char from a catalog data_type string (base name before '('). */
-static char qd_meta_char(const char* dt, size_t n) {
+/* Catalog data_type string (base name before '(') -> canonical read row —
+ * THE one owner of catalog spellings, meta and schema-check both ride it. */
+static const qd_tmap_t* qd_catalog_row(const char* dt, size_t n) {
     size_t base = 0;
     while (base < n && dt[base] != '(') base++;
+    /* DuckDB spells REAL as FLOAT in catalog output */
+    if (base == 5 && strncmp(dt, "FLOAT", 5) == 0) { dt = "REAL"; base = 4; }
     for (size_t i = 0; i < QD_NTYPES; i++) {
         if (!QD_TYPES[i].read_canon) continue;
         if (strlen(QD_TYPES[i].sql) == base &&
             strncmp(QD_TYPES[i].sql, dt, base) == 0)
-            return QD_TYPES[i].meta_ch;
+            return &QD_TYPES[i];
     }
-    /* DuckDB spells REAL as FLOAT in catalog output */
-    if (base == 5 && strncmp(dt, "FLOAT", 5) == 0) return 'e';
-    return ' ';
+    return NULL;
 }
 
-static ray_t* qd_str_col_append(ray_t* col, const char* p, size_t n) {
-    if (!col || RAY_IS_ERR(col)) return col;
-    ray_t* cell = ray_charv(p ? p : "", (int64_t)n);
-    if (!cell || RAY_IS_ERR(cell)) { ray_release(col); return cell ? cell : q_err(QE_WSFULL); }
-    col = ray_list_append(col, cell);
-    ray_release(cell);
-    return col;
-}
-
-/* .duckdb.meta[h;`t] — keyed c | t dtype nullable default (physical view). */
+/* .duckdb.i.meta[h;`t] — kdb-exact ([c] t;f;a): t is the char of the column a
+ * fetch would yield (catalog row + descriptor refinement, the get law); f/a
+ * are uniformly the null sym — DuckDB has no fkey domain or attr concept. */
 static ray_t* qd_meta_wrap(ray_t** args, int64_t n) {
     if (n != 2) return q_err(QE_RANK);
     if (g_qd.state != 1) return q_err(QE_DUCKDB);
@@ -1137,9 +1138,12 @@ static ray_t* qd_meta_wrap(ray_t** args, int64_t n) {
     char tname[256];
     if (!qd_sym_text(args[1], tname, sizeof tname)) return q_err(QE_DUCKDB);
 
+    qd_desc_t desc[256];
+    int64_t ndesc = qd_fetch_desc(slot, tname, desc, 256);
+
     qd_buf b = {0};
-    qd_puts(&b, "SELECT column_name, data_type, is_nullable, column_default "
-                "FROM duckdb_columns() WHERE table_name = ");
+    qd_puts(&b, "SELECT column_name, data_type FROM duckdb_columns() "
+                "WHERE table_name = ");
     qd_put_strlit(&b, tname, strlen(tname));
     qd_puts(&b, " ORDER BY column_index");
     if (b.oom) { qd_buf_free(&b); return q_err(QE_WSFULL); }
@@ -1153,55 +1157,43 @@ static ray_t* qd_meta_wrap(ray_t** args, int64_t n) {
     if (!cat || RAY_IS_ERR(cat)) return cat;
 
     int64_t nrows = ray_table_nrows(cat);
-    if (nrows == 0) {
+    if (nrows == 0 || nrows > 256) {
         ray_release(cat);
         return q_err(QE_DUCKDB);
     }
-    ray_t* names    = ray_table_get_col_idx(cat, 0);  /* borrowed text col */
-    ray_t* dtypes   = ray_table_get_col_idx(cat, 1);
-    ray_t* nullable = ray_table_get_col_idx(cat, 2);  /* borrowed BOOL */
-    ray_t* defaults = ray_table_get_col_idx(cat, 3);
+    ray_t* names  = ray_table_get_col_idx(cat, 0);  /* borrowed text col */
+    ray_t* dtypes = ray_table_get_col_idx(cat, 1);
 
     ray_t* cvec = ray_sym_vec_new(RAY_SYM_W64, nrows);
-    ray_t* tvec = ray_vec_new(RAY_CHARV, nrows);   /* kdb meta: t is a CHAR column */
-    ray_t* dvec = ray_list_new(nrows);
-    ray_t* nvec = ray_vec_new(RAY_BOOL, nrows);
-    ray_t* fvec = ray_list_new(nrows);
+    ray_t* fvec = ray_sym_vec_new(RAY_SYM_W64, nrows);
+    ray_t* avec = ray_sym_vec_new(RAY_SYM_W64, nrows);
+    char tbuf[256];
+    int64_t blank = ray_sym_intern_runtime("", 0);
     for (int64_t i = 0; i < nrows; i++) {
-        size_t ln = 0, dl = 0, fl = 0;
+        size_t ln = 0, dl = 0;
         const char* nm = qd_text_cell(names, i, &ln);
+        const char* dt = qd_text_cell(dtypes, i, &dl);
+        char cname[256];
+        snprintf(cname, sizeof cname, "%.*s", (int)ln, nm ? nm : "");
+        const qd_tmap_t* tm = qd_catalog_row(dt ? dt : "", dl);
+        if (tm) tm = qd_pick_read_row(cname, tm->dk_type, desc, ndesc);
+        tbuf[i] = tm ? tm->meta_ch : ' ';
         int64_t id = ray_sym_intern_runtime(nm ? nm : "", ln);
         cvec = ray_vec_append(cvec, &id);
-        const char* dt = qd_text_cell(dtypes, i, &dl);
-        uint8_t tc = (uint8_t)qd_meta_char(dt ? dt : "", dl);
-        tvec = ray_vec_append(tvec, &tc);
-        dvec = qd_str_col_append(dvec, dt, dl);
-        uint8_t nu = nullable && nullable->type == RAY_BOOL
-                         ? *(uint8_t*)ray_vec_get(nullable, i) : 0;
-        nvec = ray_vec_append(nvec, &nu);
-        const char* fv = qd_text_cell(defaults, i, &fl);
-        fvec = qd_str_col_append(fvec, fv, fl);
+        fvec = ray_vec_append(fvec, &blank);
+        avec = ray_vec_append(avec, &blank);
     }
     ray_release(cat);
-
-    ray_t* kt = ray_table_new(1);
-    kt = ray_table_add_col(kt, ray_sym_intern("c", 1), cvec);
-    if (cvec && !RAY_IS_ERR(cvec)) ray_release(cvec);
-    ray_t* vt = ray_table_new(4);
-    struct { const char* nm; size_t l; ray_t* v; } vcols[] = {
-        { "t", 1, tvec }, { "dtype", 5, dvec },
-        { "nullable", 8, nvec }, { "default", 7, fvec },
-    };
-    for (size_t c = 0; c < 4; c++) {
-        vt = ray_table_add_col(vt, ray_sym_intern(vcols[c].nm, vcols[c].l), vcols[c].v);
-        if (vcols[c].v && !RAY_IS_ERR(vcols[c].v)) ray_release(vcols[c].v);
-    }
-    if (!kt || RAY_IS_ERR(kt) || !vt || RAY_IS_ERR(vt)) {
-        if (kt && !RAY_IS_ERR(kt)) ray_release(kt);
-        if (vt && !RAY_IS_ERR(vt)) ray_release(vt);
+    ray_t* tstr = ray_str(tbuf, (size_t)nrows);
+    if (!cvec || RAY_IS_ERR(cvec) || !fvec || RAY_IS_ERR(fvec) ||
+        !avec || RAY_IS_ERR(avec) || !tstr || RAY_IS_ERR(tstr)) {
+        if (cvec && !RAY_IS_ERR(cvec)) ray_release(cvec);
+        if (fvec && !RAY_IS_ERR(fvec)) ray_release(fvec);
+        if (avec && !RAY_IS_ERR(avec)) ray_release(avec);
+        if (tstr && !RAY_IS_ERR(tstr)) ray_release(tstr);
         return q_err(QE_WSFULL);
     }
-    return ray_dict_new(kt, vt);
+    return q_meta_assemble(cvec, tstr, fvec, avec);
 }
 
 /* set body over the flattened table: DDL + data + descriptor, ONE transaction. */
@@ -1341,11 +1333,8 @@ static ray_t* qd_schema_check(int slot, const char* tname, ray_t* tbl,
             ray_release(cat);
             return q_err(QE_DUCKDB);
         }
-        /* catalog spells REAL as FLOAT */
-        const char* want = tms[c]->sql;
-        int match = (dl == strlen(want) && strncmp(dt, want, dl) == 0) ||
-                    (strcmp(want, "REAL") == 0 && dl == 5 && strncmp(dt, "FLOAT", 5) == 0);
-        if (!match) {
+        const qd_tmap_t* cr = qd_catalog_row(dt ? dt : "", dl);
+        if (!cr || cr->dk_type != tms[c]->dk_type) {
             ray_release(cat);
             return q_err(QE_DUCKDB);
         }
@@ -1354,8 +1343,7 @@ static ray_t* qd_schema_check(int slot, const char* tname, ray_t* tbl,
                 continue;
             const qd_tmap_t* refined = qd_map_logical(desc[i].logical,
                                                       strlen(desc[i].logical));
-            if (refined && strlen(refined->sql) == dl &&
-                strncmp(refined->sql, dt, dl) == 0 &&
+            if (refined && refined->dk_type == cr->dk_type &&
                 strcmp(tms[c]->logical, refined->logical) != 0) {
                 ray_release(cat);
                 return q_err(QE_DUCKDB);
