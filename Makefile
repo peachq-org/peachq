@@ -12,6 +12,25 @@ RAY_VENDOR_SRC = third_party/yyjson/yyjson.c \
                  third_party/picohttpparser/picohttpparser.c \
                  third_party/miniz/miniz.c
 
+# libffi: generated configs are COMMITTED per target (third_party/libffi/README.openq.md),
+# so no configure step. Ports vendored: linux x86-64 native + win64 cross only —
+# other native hosts (macOS arm64) build WITHOUT libffi until their port is vendored.
+# ffi64.c/unix64.S are SysV-only; ffiw64.c/win64.S build on both vendored targets.
+UNAME_M := $(shell uname -m)
+LIBFFI_INC        = -Ithird_party/libffi/include -Ithird_party/libffi/src/x86
+FFI_INC           = -Ithird_party/libffi/config/linux-x86_64 $(LIBFFI_INC)
+FFI_WIN_INC       = -Ithird_party/libffi/config/win64 $(LIBFFI_INC)
+ifeq ($(shell uname -s)-$(UNAME_M),Linux-x86_64)
+LIBFFI_WIN_OBJ    = $(BUILD_DIR)/third_party/libffi/src/x86/win64.win.o
+RAY_VENDOR_SRC   += third_party/libffi/src/prep_cif.c \
+                    third_party/libffi/src/types.c \
+                    third_party/libffi/src/closures.c \
+                    third_party/libffi/src/tramp.c \
+                    third_party/libffi/src/x86/ffiw64.c
+LIBFFI_NATIVE_OBJ = $(addprefix $(BUILD_DIR)/third_party/libffi/src/x86/,ffi64.o unix64.o win64.o)
+QFFI_DEF          = -DRAY_FFI=1
+endif
+
 # q_gz.c hand-rolls RFC 1952 framing: miniz has no gzip windowBits+16 mode.
 RAY_MINIZ_DEFS = -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_ARCHIVE_WRITING_APIS -DMINIZ_NO_STDIO
 
@@ -111,7 +130,7 @@ CFLAGS  ?= $(RELEASE_CFLAGS)
 LDFLAGS ?=
 
 LIB_SRC = $(RAY_LIB_SRC) $(RAY_VENDOR_SRC)
-LIB_OBJ    = $(addprefix $(BUILD_DIR)/,$(LIB_SRC:.c=.o))
+LIB_OBJ    = $(addprefix $(BUILD_DIR)/,$(LIB_SRC:.c=.o)) $(LIBFFI_NATIVE_OBJ)
 Q_MAIN_OBJ = $(BUILD_DIR)/src/qlang/repl/qmain.o
 DEPS = $(LIB_OBJ:.o=.d) $(Q_MAIN_OBJ:.o=.d)
 
@@ -135,6 +154,21 @@ $(BUILD_DIR)/third_party/%.o: third_party/%.c
 $(BUILD_DIR)/third_party/miniz/miniz.o: third_party/miniz/miniz.c
 	@mkdir -p $(dir $@)
 	$(CC) -c $(filter-out -Wextra,$(CFLAGS)) -Wno-error $(RAY_MINIZ_DEFS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
+
+$(BUILD_DIR)/third_party/libffi/%.o: third_party/libffi/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -c $(filter-out -Wextra,$(CFLAGS)) -Wno-error $(DEPFLAGS) $(FFI_INC) -o $@ $<
+
+$(BUILD_DIR)/third_party/libffi/%.o: third_party/libffi/%.S
+	@mkdir -p $(dir $@)
+	$(CC) -c $(filter-out -Wextra,$(CFLAGS)) -Wno-error $(DEPFLAGS) $(FFI_INC) -o $@ $<
+
+# RAY_FFI comes ONLY from the host gate above: a host that doesn't link the
+# libffi objects compiles q_ffi.c (native AND win cross) as the 'nyi stub.
+$(BUILD_DIR)/src/qlang/io/q_ffi.o:     INCLUDES += $(FFI_INC)
+$(BUILD_DIR)/src/qlang/io/q_ffi.o:     DEFS += $(QFFI_DEF)
+$(BUILD_DIR)/src/qlang/io/q_ffi.win.o: INCLUDES += $(FFI_WIN_INC)
+$(BUILD_DIR)/src/qlang/io/q_ffi.win.o: DEFS += $(QFFI_DEF)
 
 # Header discipline, qlang-scoped: frozen base src/ must not need edits to pass.
 $(BUILD_DIR)/src/qlang/%.o: CFLAGS += -Wmissing-prototypes
@@ -178,7 +212,8 @@ WIN_CFLAGS  = $(WARNS) -std=$(STD) $(WIN_OPT) \
 WIN_LIBS    = -lws2_32 -lm
 # iocp_win.c provides ray_poll_* on Windows; linking the iocp.c stub too is a
 # multiple-definition error.
-WIN_LIB_OBJ    = $(filter-out $(BUILD_DIR)/src/core/iocp.win.o, $(addprefix $(BUILD_DIR)/,$(LIB_SRC:.c=.win.o)))
+WIN_LIB_OBJ    = $(filter-out $(BUILD_DIR)/src/core/iocp.win.o, $(addprefix $(BUILD_DIR)/,$(LIB_SRC:.c=.win.o))) \
+                 $(LIBFFI_WIN_OBJ)
 WIN_Q_MAIN_OBJ = $(Q_MAIN_OBJ:.o=.win.o)
 WIN_DEPS = $(WIN_LIB_OBJ:.o=.d) $(WIN_Q_MAIN_OBJ:.o=.d)
 
@@ -189,6 +224,14 @@ $(BUILD_DIR)/third_party/%.win.o: third_party/%.c
 $(BUILD_DIR)/third_party/miniz/miniz.win.o: third_party/miniz/miniz.c
 	@mkdir -p $(dir $@)
 	$(WIN_CC) -c $(filter-out -Wextra,$(WIN_CFLAGS)) -Wno-error $(RAY_MINIZ_DEFS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
+
+$(BUILD_DIR)/third_party/libffi/%.win.o: third_party/libffi/%.c
+	@mkdir -p $(dir $@)
+	$(WIN_CC) -c $(filter-out -Wextra,$(WIN_CFLAGS)) -Wno-error $(DEPFLAGS) $(FFI_WIN_INC) -o $@ $<
+
+$(BUILD_DIR)/third_party/libffi/%.win.o: third_party/libffi/%.S
+	@mkdir -p $(dir $@)
+	$(WIN_CC) -c $(filter-out -Wextra,$(WIN_CFLAGS)) -Wno-error $(DEPFLAGS) $(FFI_WIN_INC) -o $@ $<
 
 $(BUILD_DIR)/%.win.o: %.c
 	@mkdir -p $(dir $@)
