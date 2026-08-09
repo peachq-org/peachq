@@ -88,6 +88,7 @@
 #include "core/timer.h"        /* ray_time_now_ms — TLS negotiation deadlines */
 #include "qlang/net/q_ws.h"
 #include "qlang/eval/q_eval.h"   /* q_eval_apply_value — RAY_QFN hook firing */
+#include "qlang/q_dotz.h"        /* q_dotz_now_ns — connection open-time stamp */
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -734,6 +735,9 @@ typedef struct {
     int64_t          tls_deadline;
     bool             tls_decided;
     void*            tls_hs;
+    /* GMT open time (q_dotz_now_ns(0)), stamped at accept/connect/ws-register
+     * — the `opened` column of the q connection collector. */
+    int64_t          open_ns;
 } ray_ipc_conn_data_t;
 
 /* kdb's emit-compression gate for a connection: the peer negotiated
@@ -825,6 +829,7 @@ static ray_t* ipc_accept(ray_poll_t* poll, ray_selector_t* sel)
     cd->phase = tls ? RAY_IPC_PHASE_TLS : RAY_IPC_PHASE_HANDSHAKE;
     if (tls) cd->tls_deadline = ray_time_now_ms() + RAY_IPC_TLS_HS_MS;
     cd->listener_id = sel->id;
+    cd->open_ns = q_dotz_now_ns(0);
     cd->auth_required = (poll->auth_secret[0] != '\0');
     cd->restricted    = poll->restricted;
     cd->loopback      = ray_sock_is_loopback(new_fd);   /* emit-zip gate */
@@ -1698,6 +1703,32 @@ int64_t ray_ipc_handle_of_fd(int64_t fd)
     return -1;
 }
 
+/* Enumerate live handshake-complete IPC connections in the active poll —
+ * the SAME read_fn filter as conn_resolve, so exactly the handles the send
+ * paths accept are the ones the q connection collector lists. */
+int64_t ray_ipc_conn_list(ray_ipc_conn_info_t* out, int64_t cap)
+{
+    ray_poll_t* poll = ipc_active_poll();
+    if (!poll) return 0;
+    int64_t n = 0;
+    for (uint32_t i = 0; i < poll->n_sels; i++) {
+        ray_selector_t* sel = poll->sels[i];
+        if (!sel || sel->type != RAY_SEL_SOCKET || !sel->data) continue;
+        if (sel->rx.read_fn != ipc_read_header &&
+            sel->rx.read_fn != ipc_read_payload &&
+            sel->rx.read_fn != ipc_read_ws) continue;
+        ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
+        if (out && n < cap) {
+            out[n].fd      = sel->fd;
+            out[n].inbound = cd->listener_id >= 0;
+            out[n].ws      = sel->rx.read_fn == ipc_read_ws;
+            out[n].open_ns = cd->open_ns;
+        }
+        n++;
+    }
+    return n;
+}
+
 /* Drain whatever is available on one connection's socket through its rx
  * state machine WITHOUT blocking: fill the requested rx buffer, invoke
  * read_fn for each completed phase, repeat until the socket is dry.
@@ -1808,6 +1839,7 @@ int64_t ray_ipc_connect(const char* host, uint16_t port,
     memset(cd, 0, sizeof(*cd));
     cd->phase       = RAY_IPC_PHASE_HEADER;
     cd->listener_id = -1;               /* outbound — no lifecycle hooks */
+    cd->open_ns     = q_dotz_now_ns(0);
     cd->restricted  = poll->restricted; /* -U narrows pushed evals too */
     cd->peer_zip    = (common >= 1);    /* negotiated compression eligibility */
     cd->loopback    = ray_sock_is_loopback(fd);   /* emit-zip gate */
@@ -1852,6 +1884,7 @@ int64_t ray_ws_client_register(ray_sock_t fd, void* ws_conn)
     memset(cd, 0, sizeof(*cd));
     cd->phase       = RAY_IPC_PHASE_WS;
     cd->listener_id = -1;               /* outbound client — no `.z.wo` */
+    cd->open_ns     = q_dotz_now_ns(0);
     cd->restricted  = poll->restricted;
     cd->loopback    = ray_sock_is_loopback(fd);
     cd->ws          = ws_conn;

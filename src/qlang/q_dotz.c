@@ -10,6 +10,7 @@
 #include "qlang/net/q_tls.h"   /* q_tls_dotz_e — `.z.e` TLS connection status */
 #include "qlang/ops/q_sys.h"       /* q_sys_timer_active — stopped-timer no-op guard */
 #include "qlang/q_console.h"   /* q_console_str/_reset — drain .z.ts show/0N! output */
+#include "qlang/io/q_conn.h"   /* q_conn_zW/_zH — `.z.W`/`.z.H` collector views */
 #include "lang/cal.h"          /* ymd_to_date — build-date -> q date for .z.k */
 #include "lang/env.h"          /* ray_sym_ipc_hook / ray_env_get / ray_fn_unary */
 #include "lang/eval.h"         /* RAY_FN_NONE — .z.ts timer thunk attrs */
@@ -402,6 +403,8 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
             case 'u': out = z_u(); break;
             case 'a': out = z_a(); break;
             case 'w': out = z_w(); break;
+            case 'W': out = q_conn_zW(); break;
+            case 'H': out = q_conn_zH(); break;
             case 'K': out = z_K(); break;
             case 'k': out = z_k(); break;
             /* one-line producers inlined; q_dotz_now_ns(0)=UTC, (1)=local */
