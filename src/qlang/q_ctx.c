@@ -94,10 +94,10 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
     if (n == 0)
         return 0;
 
-    q_err_drop();   /* statement-entry error-payload backstop (q_err.c head) */
-    /* debug seam: stash the statement (backtrace frame [0]) and mark whether
-     * this is a CONSOLE line — script loads / IPC (print_result 0) must never
-     * suspend (the gate-preserving constraint); restored on every exit path */
+    /* The statement seam: frame-[0] text + whether this is a CONSOLE line
+     * (script loads / IPC never suspend), and the per-statement save/restore —
+     * the error-payload backstop (q_err.c head) rides it.  Every exit path ends
+     * it, so a NESTED statement gives this level its state back. */
     int dbg_prev = q_dbg_statement_begin(s, n, print_result);
 
     /* `\`-system-command line: the shared q_sys glue renders console side
@@ -337,7 +337,7 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
     if (!tmp) return q_err(QE_OOM);
     memcpy(tmp, src, len);
     tmp[len] = '\0';
-    /* remote statements never suspend (console 0); the stash still gives a
+    /* remote statements never suspend (console 0); the seam still gives a
      * remote .Q.trp its `[0]` frame */
     int dbg_prev = q_dbg_statement_begin(tmp, len, 0);
     ray_t* ast = q_parse(tmp);
