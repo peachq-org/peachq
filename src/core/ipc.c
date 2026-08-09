@@ -100,6 +100,7 @@
 #else
   #include <unistd.h>
   #include <sys/socket.h>
+  #include <netinet/in.h>   /* sockaddr_in/in6 + ntohl — peer-identity capture */
 #endif
 
 #if defined(__linux__)
@@ -738,12 +739,56 @@ typedef struct {
     /* GMT open time (q_dotz_now_ns(0)), stamped at accept/connect/ws-register
      * — the `opened` column of the q connection collector. */
     int64_t          open_ns;
+    /* Per-connection identity (.z.u/.z.a/.pq.conns): the handshake userid —
+     * the hs[] prefix, marked at creds parse BEFORE the auth hook fires (so
+     * `.z.u` is right inside `.z.pw`) but interned LAZILY on first ask, never
+     * for an unconsulted rejected handshake (auth probes must not grow the
+     * permanent symbol table) — and the peer endpoint, stamped at accept/
+     * connect. */
+    int64_t          user_sym;     /* lazy intern cache; -1 = not yet */
+    uint16_t         user_len;     /* userid = hs[0..user_len), when user_ok */
+    uint8_t          user_ok;
+    int32_t          peer_addr;    /* peer IPv4, host order; 0 = unknown */
+    uint8_t          peer_unix;    /* AF_UNIX peer */
 } ray_ipc_conn_data_t;
 
 /* kdb's emit-compression gate for a connection: the peer negotiated
  * compression AND the link is not loopback (basics/ipc.md). */
 static inline bool conn_zip_ok(const ray_ipc_conn_data_t* cd) {
     return cd->peer_zip && !cd->loopback;
+}
+
+/* The handshake userid, interned on FIRST ask only — an unconsulted
+ * rejected handshake never touches the permanent symbol table. */
+static int64_t conn_user_sym(ray_ipc_conn_data_t* cd) {
+    if (!cd->user_ok) return -1;
+    if (cd->user_sym < 0)
+        cd->user_sym = ray_sym_intern_runtime((const char*)cd->hs,
+                                              cd->user_len);
+    return cd->user_sym;
+}
+
+/* Stamp the peer endpoint via getpeername — host-order IPv4 by the SAME
+ * ntohl law as `.z.a` (q_dotz.c z_a); v4-mapped v6 unwraps exactly like
+ * ray_sock_is_loopback.  The one capture home for all three register sites. */
+static void conn_stamp_peer(ray_ipc_conn_data_t* cd, ray_sock_t fd) {
+    struct sockaddr_storage ss;
+    socklen_t slen = sizeof ss;
+    if (getpeername(fd, (struct sockaddr*)&ss, &slen) != 0) return;
+#ifdef AF_UNIX
+    if (ss.ss_family == AF_UNIX) { cd->peer_unix = 1; return; }
+#endif
+    if (ss.ss_family == AF_INET) {
+        const struct sockaddr_in* a4 = (const struct sockaddr_in*)&ss;
+        cd->peer_addr = (int32_t)ntohl(a4->sin_addr.s_addr);
+    } else if (ss.ss_family == AF_INET6) {
+        const struct sockaddr_in6* a6 = (const struct sockaddr_in6*)&ss;
+        if (IN6_IS_ADDR_V4MAPPED(&a6->sin6_addr)) {
+            uint32_t v4;
+            memcpy(&v4, a6->sin6_addr.s6_addr + 12, 4);
+            cd->peer_addr = (int32_t)ntohl(v4);
+        }
+    }
 }
 
 static ray_t* ipc_read_handshake(ray_poll_t* poll, ray_selector_t* sel);
@@ -833,6 +878,8 @@ static ray_t* ipc_accept(ray_poll_t* poll, ray_selector_t* sel)
     cd->auth_required = (poll->auth_secret[0] != '\0');
     cd->restricted    = poll->restricted;
     cd->loopback      = ray_sock_is_loopback(new_fd);   /* emit-zip gate */
+    cd->user_sym      = -1;
+    conn_stamp_peer(cd, new_fd);
 
     ray_poll_reg_t reg = {0};
     reg.fd       = (int64_t)new_fd;
@@ -867,7 +914,7 @@ static ray_t* ipc_accept(ray_poll_t* poll, ray_selector_t* sel)
  * with — its >= 1 bit is the peer's compression eligibility (basics/ipc.md
  * capability table). */
 static bool kdb_handshake_complete(ray_poll_t* poll, int64_t handle,
-                                   ray_sock_t fd,
+                                   ray_sock_t fd, ray_ipc_conn_data_t* cd,
                                    const uint8_t* hs, size_t hs_len,
                                    bool auth_required, const char* secret,
                                    uint8_t* out_common)
@@ -877,6 +924,14 @@ static bool kdb_handshake_complete(ray_poll_t* poll, int64_t handle,
     /* Capability byte: last pre-NUL byte when <= 6; older clients omit it
      * (creds are ASCII, so a control byte can only be the capability). */
     if (clen >= 1 && hs[clen - 1] <= 6) { cap = hs[clen - 1]; clen--; }
+
+    /* Mark the userid span before ANY hook fires — same colon split as
+     * hook_call_auth (no colon = no user).  cd==NULL: legacy fixture server. */
+    if (cd) {
+        const uint8_t* colon = clen ? memchr(hs, ':', clen) : NULL;
+        cd->user_len = (uint16_t)(colon ? (size_t)(colon - hs) : 0);
+        cd->user_ok  = 1;
+    }
 
     bool ok = true;
     if (auth_required)
@@ -1040,7 +1095,7 @@ static ray_t* ipc_read_handshake(ray_poll_t* poll, ray_selector_t* sel)
     }
 
     uint8_t neg_cap = 0;
-    if (!kdb_handshake_complete(poll, sel->id, (ray_sock_t)sel->fd,
+    if (!kdb_handshake_complete(poll, sel->id, (ray_sock_t)sel->fd, cd,
                                 cd->hs, cd->hs_len,
                                 cd->auth_required, poll->auth_secret,
                                 &neg_cap)) {
@@ -1346,7 +1401,7 @@ static void conn_on_handshake(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
      * the emit-compression policy — by design it never compresses (see the
      * send_response call below).  An intentional limitation of the legacy
      * path, not an assumed invariant; the negotiated capability is unused. */
-    if (!kdb_handshake_complete(NULL, (int64_t)(c - srv->conns), c->fd,
+    if (!kdb_handshake_complete(NULL, (int64_t)(c - srv->conns), c->fd, NULL,
                                 c->hs, c->hs_len, auth_req,
                                 srv->auth_secret, NULL)) {
         conn_close(srv, c);
@@ -1719,14 +1774,35 @@ int64_t ray_ipc_conn_list(ray_ipc_conn_info_t* out, int64_t cap)
             sel->rx.read_fn != ipc_read_ws) continue;
         ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
         if (out && n < cap) {
-            out[n].fd      = sel->fd;
-            out[n].inbound = cd->listener_id >= 0;
-            out[n].ws      = sel->rx.read_fn == ipc_read_ws;
-            out[n].open_ns = cd->open_ns;
+            out[n].fd        = sel->fd;
+            out[n].inbound   = cd->listener_id >= 0;
+            out[n].ws        = sel->rx.read_fn == ipc_read_ws;
+            out[n].open_ns   = cd->open_ns;
+            out[n].user_sym  = conn_user_sym(cd);
+            out[n].peer_addr = cd->peer_addr;
+            out[n].is_unix   = cd->peer_unix != 0;
         }
         n++;
     }
     return n;
+}
+
+bool ray_ipc_conn_identity(int64_t handle, ray_ipc_conn_ident_t* out)
+{
+    ray_poll_t* poll = ipc_active_poll();
+    ray_selector_t* sel = poll ? ray_poll_get(poll, handle) : NULL;
+    if (!sel || sel->type != RAY_SEL_SOCKET || !sel->data) return false;
+    /* conn_list's filter + the handshake phase (the `.z.u`-inside-`.z.pw` case) */
+    if (sel->rx.read_fn != ipc_read_handshake &&
+        sel->rx.read_fn != ipc_read_header &&
+        sel->rx.read_fn != ipc_read_payload &&
+        sel->rx.read_fn != ipc_read_ws) return false;
+    ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
+    out->user_sym  = conn_user_sym(cd);
+    out->peer_addr = cd->peer_addr;
+    out->is_unix   = cd->peer_unix != 0;
+    out->inbound   = cd->listener_id >= 0;
+    return true;
 }
 
 /* Drain whatever is available on one connection's socket through its rx
@@ -1843,6 +1919,8 @@ int64_t ray_ipc_connect(const char* host, uint16_t port,
     cd->restricted  = poll->restricted; /* -U narrows pushed evals too */
     cd->peer_zip    = (common >= 1);    /* negotiated compression eligibility */
     cd->loopback    = ray_sock_is_loopback(fd);   /* emit-zip gate */
+    cd->user_sym    = -1;
+    conn_stamp_peer(cd, fd);
 
     ray_sock_set_nonblocking(fd);
 
@@ -1888,6 +1966,8 @@ int64_t ray_ws_client_register(ray_sock_t fd, void* ws_conn)
     cd->restricted  = poll->restricted;
     cd->loopback    = ray_sock_is_loopback(fd);
     cd->ws          = ws_conn;
+    cd->user_sym    = -1;
+    conn_stamp_peer(cd, fd);
 
     ray_sock_set_nonblocking(fd);
 
