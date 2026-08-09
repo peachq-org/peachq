@@ -21,12 +21,14 @@ typedef enum { QDuckSuccess = 0, QDuckError = 1 } duck_state;
 /* duckdb_type ids the bridge dispatches on (values are ABI). */
 enum {
     QDUCK_TYPE_BOOLEAN      = 1,
+    QDUCK_TYPE_TINYINT      = 2,
     QDUCK_TYPE_SMALLINT     = 3,
     QDUCK_TYPE_INTEGER      = 4,
     QDUCK_TYPE_BIGINT       = 5,
     QDUCK_TYPE_UTINYINT     = 6,
     QDUCK_TYPE_FLOAT        = 10,
     QDUCK_TYPE_DOUBLE       = 11,
+    QDUCK_TYPE_TIMESTAMP    = 12,   /* int64 µs since 1970 */
     QDUCK_TYPE_DATE         = 13,
     QDUCK_TYPE_TIME         = 14,
     QDUCK_TYPE_VARCHAR      = 17,
