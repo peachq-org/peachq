@@ -18,7 +18,9 @@
 .duckdb.close:{[c] .duckdb.i.close c}
 / the sync flag is ignored: an in-process engine has no async lane (the same
 / treatment as open's timeout)
-.duckdb.call:{[c;q;sync] .duckdb.i.exec[c;q]}
+/ lastsql records the SQL last handed to the engine — the B2 pushdown-snapshot
+/ slot (test/observed/taq-sql); inert until a .duckdb.qsql translator emits SQL.
+.duckdb.call:{[c;q;sync] .duckdb.lastsql::q; .duckdb.i.exec[c;q]}
 / bind reads the column names off meta — ONE catalog lookup owns the query
 / and the column ORDER; a second duckdb_columns() spelling here would fork it.
 .duckdb.bind:{[c;t] (key .duckdb.i.meta[c;t])`c}
