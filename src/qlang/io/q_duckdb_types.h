@@ -35,7 +35,7 @@ static const qd_tmap_t QD_TYPES[] = {
     { RAY_I64,       QDUCK_TYPE_BIGINT,       "BIGINT",       "int64",     'j', true  },
     { RAY_F32,       QDUCK_TYPE_FLOAT,        "REAL",         "float32",   'e', true  },
     { RAY_F64,       QDUCK_TYPE_DOUBLE,       "DOUBLE",       "float64",   'f', true  },
-    { RAY_STR,       QDUCK_TYPE_VARCHAR,      "VARCHAR",      "utf8",      's', true  },
+    { RAY_STR,       QDUCK_TYPE_VARCHAR,      "VARCHAR",      "utf8",      'C', true  },
     { RAY_SYM,       QDUCK_TYPE_VARCHAR,      "VARCHAR",      "symbol",    's', false },
     { RAY_LIST,      QDUCK_TYPE_BLOB,         "BLOB",         "bytes",     'X', true  },
     { RAY_DATE,      QDUCK_TYPE_DATE,         "DATE",         "date",      'd', true  },
@@ -49,6 +49,9 @@ static const qd_tmap_t QD_TYPES[] = {
     { RAY_MINUTE,    QDUCK_TYPE_INTEGER,      "INTEGER",      "minute",    'u', false },
     { RAY_SECOND,    QDUCK_TYPE_INTEGER,      "INTEGER",      "second",    'v', false },
     { RAY_DATETIME,  QDUCK_TYPE_DOUBLE,       "DOUBLE",       "datetime",  'z', false },
+    /* read-side widenings for SQL-born columns; writes keep the rows above */
+    { RAY_I16,       QDUCK_TYPE_TINYINT,      "TINYINT",      "int8",      'h', true  },
+    { RAY_TIMESTAMP, QDUCK_TYPE_TIMESTAMP,    "TIMESTAMP",    "timestampus", 'p', true },
 };
 #define QD_NTYPES (sizeof QD_TYPES / sizeof *QD_TYPES)
 
