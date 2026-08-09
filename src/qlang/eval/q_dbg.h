@@ -13,11 +13,12 @@
 void q_dbg_frame_push(ray_t* lam);   /* borrowed; lambda application entry */
 void q_dbg_frame_pop(void);
 
-/* Statement seam: stash source + set the console flag; returns the previous
- * flag, restored by q_dbg_statement_end (nested \l / system "l").  A NULL s
- * clears the stash. */
-int  q_dbg_statement_begin(const char* s, size_t n, int console);
-void q_dbg_statement_end(int prev_console);
+/* Statement seam: the ONE per-statement save/restore — frame-[0] text, console
+ * flag, pending payload, snapshot.  A NESTED statement (`\l` inside one, a q))
+ * line, a remote callback) hands the level beneath back at _end; a top-level
+ * one saves nothing.  NULL src clears the text; the token is opaque. */
+int  q_dbg_statement_begin(const char* src, size_t n, int console);
+void q_dbg_statement_end(int tok);
 
 /* Inside @[;;]/.[;;]/.Q.trp protection: error-trap mode 0, never suspend. */
 void q_dbg_trap_enter(void);
@@ -31,6 +32,9 @@ ray_t* q_dbg_lambda_filter(ray_t* r);
 
 /* Seam display: 1 if the debugger already reported err (print nothing). */
 int  q_dbg_reported(ray_t* err);
+/* Apply-frame depth a `q))` statement runs at (0 = not suspended): those
+ * frames are parked BENEATH the prompt, not evaluating it. */
+int  q_dbg_prompt_frames(void);
 /* mode-2 uncaught display: 'text + numbered frames (no carets yet). */
 void q_dbg_print_trace(FILE* out, ray_t* err);
 void q_dbg_snapshot_clear(void);     /* a trap consumed the error */

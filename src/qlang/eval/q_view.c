@@ -6,6 +6,7 @@
 #include "qlang/q_prim.h"
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_eval_internal.h"
+#include "qlang/eval/q_dbg.h"         /* q_dbg_prompt_frames — the `q))` seam */
 #include "qlang/q_env.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_registry.h"
@@ -308,7 +309,7 @@ static int text_slice(const char* src, int64_t name, const char** txt,
 int q_view_intercept(ray_t* ast, const char* src, ray_t** out) {
     *out = NULL;
     if (!ast || ast->type != RAY_LIST) return 0;
-    if (q_eval_apply_frame_depth() > 0) return 0;
+    if (q_eval_apply_frame_depth() > q_dbg_prompt_frames()) return 0;
     int64_t n = ray_len(ast);
     ray_t** e = (ray_t**)ray_data(ast);
     if (n < 3 || !e[0]) return 0;

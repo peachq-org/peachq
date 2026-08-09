@@ -165,9 +165,6 @@ static void run_example(const char* input, const char* expect,
                         qdoc_result_t* r, qd_emit_t* em) {
     r->examples++;
     q_console_reset();   /* drop any show/0N! output from a prior example */
-    q_err_drop();        /* statement-entry payload backstop (q_repl twin) */
-    /* console 0: qdoc examples must never suspend (the runner has no reader) */
-    (void)q_dbg_statement_begin(input, strlen(input), 0);
 
     /* Prompt pin: the transcript's prompt (`q)` / `q.foo)`) must match the
      * LIVE context prompt at this point — that is what tests the `\d` prompt
@@ -425,7 +422,10 @@ static qdoc_result_t run_path(const char* path, qdoc_mode_t mode,
     char tprompt[80] = {0};
     int  have = 0;
 
-#define FLUSH() do { if (have) { run_example(input, expect, tprompt, mode, verbose, out, path, &r, em); \
+/* console 0: qdoc examples must never suspend (the runner has no reader) */
+#define FLUSH() do { if (have) { int dtok = q_dbg_statement_begin(input, strlen(input), 0); \
+                                 run_example(input, expect, tprompt, mode, verbose, out, path, &r, em); \
+                                 q_dbg_statement_end(dtok); \
                                  have = 0; expect[0] = '\0'; } } while (0)
 
     while (fgets(line, sizeof line, f)) {
