@@ -175,4 +175,17 @@ ray_t*    ray_ipc_send_verbose(int64_t handle, ray_t* msg);
 int64_t   ray_ipc_fd_of_handle(int64_t handle);
 int64_t   ray_ipc_handle_of_fd(int64_t fd);
 
+/* One live handshake-complete IPC socket (either direction) for the q
+ * connection collector (qlang/io/q_conn.c). */
+typedef struct {
+    int64_t fd;
+    bool    inbound;   /* accepted by a listener */
+    bool    ws;        /* WebSocket-upgraded */
+    int64_t open_ns;   /* GMT ns since 2000.01.01 at open; 0 = unknown */
+} ray_ipc_conn_info_t;
+
+/* Fill up to `cap` entries; returns the live-connection count (may exceed
+ * cap).  out==NULL/cap==0 is a count query. */
+int64_t   ray_ipc_conn_list(ray_ipc_conn_info_t* out, int64_t cap);
+
 #endif /* RAY_IPC_H */
