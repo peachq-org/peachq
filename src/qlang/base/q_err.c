@@ -91,11 +91,15 @@ ray_t* q_err_take(void) {
     return v;
 }
 
-void q_err_drop(void) {
-    if (__VM && __VM->raise_val) {
-        ray_release(__VM->raise_val);
-        __VM->raise_val = NULL;
+void q_err_drop(void) { q_err_put(NULL); }
+
+void q_err_put(ray_t* payload) {
+    if (!__VM) {
+        if (payload) ray_release(payload);
+        return;
     }
+    if (__VM->raise_val) ray_release(__VM->raise_val);
+    __VM->raise_val = payload;
 }
 
 int q_err_is(ray_t* err, q_err_e e) {

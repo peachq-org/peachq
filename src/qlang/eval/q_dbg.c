@@ -6,7 +6,7 @@
 #include "qlang/eval/q_eval.h"
 #include "qlang/base/q_err.h"
 #include "qlang/parse/q_parse.h"
-#include "qlang/q_fmt.h"
+#include "qlang/q_ctx.h"
 #include "qlang/q_console.h"
 #include "qlang/q_env.h"
 #include "qlang/ops/q_sys.h"
@@ -18,16 +18,19 @@
 #define DBG_STMT_MAX 4096
 #define DBG_LINE_MAX 4096
 #define DBG_EY_MAX   8
+#define DBG_NEST_MAX 8
+#define DBG_KEEP_ERR 2   /* _end token bit: this statement leaves with its own payload */
 
 static _Thread_local ray_t* g_live[DBG_LIVE_MAX];  /* borrowed lambda values */
 static _Thread_local int32_t g_live_env[DBG_LIVE_MAX];  /* their q_env frames */
 static _Thread_local int    g_live_depth;
 static _Thread_local int    g_cursor;              /* navigated frame, 0 = [0] */
 
-static char g_stmt[DBG_STMT_MAX];
+static char g_stmts[DBG_NEST_MAX][DBG_STMT_MAX];
 static int  g_console_stmt;
 static int  g_trap_depth;
 static int  g_dbg_depth;
+static int  g_prompt_frames;
 
 static q_dbg_read_fn g_reader;
 
@@ -35,14 +38,26 @@ typedef struct {
     ray_t* err;                    /* identity only — never dereferenced */
     ray_t* lam[DBG_SNAP_MAX];      /* retained, outermost first */
     int    depth;
-    char   stmt[DBG_STMT_MAX];
     ray_t* ex;                     /* retained failed-primitive value */
     ray_t* ey[DBG_EY_MAX];         /* retained args of the failed apply */
     int    eyn;
     int    reported;
 } dbg_snap_t;
 
-static dbg_snap_t g_snap;
+/* Statement state is per LEVEL, so a nested statement (a q)) line, a `\l`
+ * inside one, a remote callback) cannot take the level beneath its frame-[0]
+ * text, its snapshot or its pending error payload.  The LIVE snapshot is a slot
+ * INDEX, not a copy: a level reads the one it inherited until it errors and
+ * takes its own, so a q)) line still answers .z.ex/.z.ey.  Past DBG_NEST_MAX
+ * levels share the last slot: state loss, never corruption. */
+static dbg_snap_t g_snaps[DBG_NEST_MAX];
+static ray_t*     g_held[DBG_NEST_MAX];    /* the payload the level beneath had */
+static int8_t     g_outer[DBG_NEST_MAX];   /* the slot it was reading */
+static int        g_depth, g_snap_lvl;
+#define LVL(d)  ((d) <= 0 ? 0 : (d) < DBG_NEST_MAX ? (d) : DBG_NEST_MAX - 1)
+#define g_stmt  g_stmts[LVL(g_depth - 1)]
+#define g_snap  g_snaps[g_snap_lvl]
+#define snap_stmt g_stmts[g_snap_lvl]      /* the statement it was taken in */
 
 void q_dbg_frame_push(ray_t* lam) {
     if (g_live_depth < DBG_LIVE_MAX) {
@@ -72,21 +87,31 @@ void q_dbg_snapshot_clear(void) {
     memset(&g_snap, 0, sizeof g_snap);
 }
 
-int q_dbg_statement_begin(const char* s, size_t n, int console) {
-    q_dbg_snapshot_clear();
-    if (s) {
-        if (n >= sizeof g_stmt) n = sizeof g_stmt - 1;
-        memcpy(g_stmt, s, n);
-        g_stmt[n] = '\0';
-    } else {
-        g_stmt[0] = '\0';
-    }
-    int prev = g_console_stmt;
+int q_dbg_statement_begin(const char* src, size_t n, int console) {
+    int d = g_depth++;
+    if (d > 0 && d < DBG_NEST_MAX) {
+        g_held[d] = q_err_take();
+        g_outer[d] = (int8_t)g_snap_lvl;
+    } else if (!d) q_err_drop();   /* a stale payload would caption this error */
+    if (!g_dbg_depth) q_dbg_snapshot_clear();
+    if (n >= sizeof g_stmt) n = sizeof g_stmt - 1;
+    if (src && n) memcpy(g_stmt, src, n); else n = 0;
+    g_stmt[n] = '\0';
+    int prev = g_console_stmt ? 1 : 0;
     g_console_stmt = console;
     return prev;
 }
 
-void q_dbg_statement_end(int prev_console) { g_console_stmt = prev_console; }
+void q_dbg_statement_end(int tok) {
+    g_console_stmt = tok & 1;
+    int d = --g_depth;
+    if (d <= 0 || d >= DBG_NEST_MAX) return;
+    if (g_snap_lvl == d) q_dbg_snapshot_clear();   /* whatever this level took */
+    g_snap_lvl = g_outer[d];
+    if (tok & DBG_KEEP_ERR) { if (g_held[d]) ray_release(g_held[d]); }
+    else q_err_put(g_held[d]);
+    g_held[d] = NULL;
+}
 
 void q_dbg_trap_enter(void) { g_trap_depth++; }
 void q_dbg_trap_exit(void)  { g_trap_depth--; }
@@ -97,11 +122,9 @@ void q_dbg_reset(void) {
     q_dbg_snapshot_clear();
     g_live_depth = g_cursor = 0;
     g_stmt[0] = '\0';
-    g_console_stmt = g_trap_depth = g_dbg_depth = 0;
+    g_console_stmt = g_trap_depth = g_dbg_depth = g_prompt_frames = g_depth = 0;
     g_reader = NULL;
 }
-
-/* ---- frame lines ---- */
 
 /* the `g:` prefix — a display-time scan of the definition namespace's
  * functions recovers the global a frame's lambda is bound to */
@@ -158,9 +181,8 @@ static size_t frame_line(char* dst, size_t cap, int idx, int mark, ray_t* lam,
     return (n > 0 && (size_t)n < cap) ? (size_t)n : (cap ? cap - 1 : 0);
 }
 
-/* ---- snapshot ---- */
-
 static void snap_take(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
+    g_snap_lvl = LVL(g_depth - 1);   /* this level's own slot; an inherited one stands */
     q_dbg_snapshot_clear();
     g_snap.err = r;
     g_snap.depth = g_live_depth < DBG_SNAP_MAX ? g_live_depth : DBG_SNAP_MAX;
@@ -168,7 +190,6 @@ static void snap_take(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
         g_snap.lam[i] = g_live[i];
         ray_retain(g_snap.lam[i]);
     }
-    memcpy(g_snap.stmt, g_stmt, sizeof g_snap.stmt);
     if (fv) {
         g_snap.ex = fv;
         ray_retain(fv);
@@ -184,21 +205,25 @@ int q_dbg_reported(ray_t* err) {
     return g_snap.err == err && g_snap.reported;
 }
 
-void q_dbg_print_trace(FILE* out, ray_t* err) {
+int q_dbg_prompt_frames(void) { return g_dbg_depth > 0 ? g_prompt_frames : 0; }
+
+static void dbg_err_line(FILE* out, ray_t* err) {
     int64_t tn = 0;
     const char* text = q_err_text(err, &tn);
     fprintf(out, "'%.*s\n", (text && tn) ? (int)tn : 4,
             (text && tn) ? text : "eval");
+}
+
+void q_dbg_print_trace(FILE* out, ray_t* err) {
+    dbg_err_line(out, err);
     char line[DBG_STMT_MAX + 160];
     int depth = (g_snap.err == err) ? g_snap.depth : 0;
-    const char* stmt = (g_snap.err == err) ? g_snap.stmt : g_stmt;
+    const char* stmt = (g_snap.err == err) ? snap_stmt : g_stmt;
     for (int i = depth; i >= 0; i--) {
         frame_line(line, sizeof line, i, 0, i ? g_snap.lam[i - 1] : NULL, stmt);
         fputs(line, out);
     }
 }
-
-/* ---- the nested read-eval loop ---- */
 
 static void dbg_show_console(void) {
     const char* con = q_console_str();
@@ -218,10 +243,7 @@ static void dbg_show_frame(int idx) {
 /* error text + the frame the cursor sits on, kdb's suspension banner (and `&`) */
 static void dbg_banner(ray_t* err, int idx) {
     fflush(stdout);
-    int64_t tn = 0;
-    const char* text = q_err_text(err, &tn);
-    fprintf(stderr, "'%.*s\n", (text && tn) ? (int)tn : 4,
-            (text && tn) ? text : "eval");
+    dbg_err_line(stderr, err);
     if (g_live_depth > 0) dbg_show_frame(idx);
     fflush(stderr);
 }
@@ -230,48 +252,6 @@ static void dbg_prompt_str(char* p, size_t cap) {
     int n = q_sys_prompt(p, (int)cap - 16);
     for (int i = 0; i < g_dbg_depth && n + 1 < (int)cap; i++) p[n++] = ')';
     p[n] = '\0';
-}
-
-/* parse+eval one debug line in the SUSPENDED scope.  mode 0: interactive —
- * display, return NULL.  mode 1: `:r` — return the value silently.  mode 2:
- * `'err` — return the owned error to re-signal. */
-static ray_t* dbg_eval(const char* src, int mode) {
-    ray_t* ast = q_parse(src);
-    if (RAY_IS_ERR(ast)) {
-        fflush(stdout);
-        fprintf(stderr, "'parse\n");
-        fflush(stderr);
-        ray_error_free(ast);
-        return NULL;
-    }
-    int is_assign = q_parse_is_assign(ast);
-    ray_t* res = q_eval_apply_concrete(q_eval(ast));
-    ray_release(ast);
-    dbg_show_console();
-    if (RAY_IS_ERR(res)) {
-        if (mode == 2) return res;               /* propagate the signal */
-        if (!q_dbg_reported(res)) {
-            fflush(stdout);
-            int64_t tn = 0;
-            const char* text = q_err_text(res, &tn);
-            fprintf(stderr, "'%.*s\n", (text && tn) ? (int)tn : 4,
-                    (text && tn) ? text : "eval");
-            fflush(stderr);
-        }
-        q_err_drop();
-        ray_error_free(res);
-        return NULL;
-    }
-    if (mode == 1) return res;
-    if (!is_assign && !RAY_IS_NULL(res)) {
-        char buf[8192];
-        q_fmt_console(res, buf, sizeof buf);
-        fputs(buf, stdout);
-        fputc('\n', stdout);
-        fflush(stdout);
-    }
-    ray_release(res);
-    return NULL;
 }
 
 /* the deepest frame keeps the ordinary top-rooted walk; frame [0] has no locals.
@@ -284,12 +264,42 @@ static int32_t cursor_view(void) {
     return g_live_env[g_cursor - 1];
 }
 
-/* dbg_eval with name READS rooted at the navigated frame; writes are untouched */
-static ray_t* dbg_eval_at(const char* src, int mode) {
+/* Only `:r` and `'e` want a VALUE rather than a display, so only they bypass
+ * q_ctx_run_line — and so must open the statement seam themselves.  keep_err
+ * hands the error back to re-signal (it leaves carrying its OWN payload);
+ * otherwise it is reported here and NULL comes back (stay suspended). */
+static ray_t* dbg_value_at(const char* src, int keep_err) {
+    int tok = q_dbg_statement_begin(src, strlen(src), 1);
     int32_t prev = q_env_frame_view(cursor_view());
-    ray_t* r = dbg_eval(src, mode);
+    ray_t* r = q_parse(src);
+    if (!RAY_IS_ERR(r)) {
+        ray_t* ast = r;
+        r = q_eval_apply_concrete(q_eval(ast));
+        ray_release(ast);
+    }
     q_env_frame_view(prev);
+    dbg_show_console();
+    int resignal = RAY_IS_ERR(r) && keep_err;
+    if (RAY_IS_ERR(r) && !keep_err) {
+        if (!q_dbg_reported(r)) {
+            fflush(stdout);
+            dbg_err_line(stderr, r);
+            fflush(stderr);
+        }
+        ray_error_free(r);
+        r = NULL;
+    }
+    q_dbg_statement_end(resignal ? tok | DBG_KEEP_ERR : tok);
     return r;
+}
+
+/* Every other debug line is an ORDINARY statement through the ONE console
+ * seam — views, `x)` prefixes, system commands and display all behave as at
+ * `q)` — with name reads rooted at the navigated frame. */
+static void dbg_run_line(const char* line, size_t n) {
+    int32_t prev = q_env_frame_view(cursor_view());
+    q_ctx_run_line(line, n, stdout, stderr, 1);
+    q_env_frame_view(prev);
 }
 
 /* Returns NULL to propagate err (\ or EOF), a value to resume (:r), or a new
@@ -297,6 +307,8 @@ static ray_t* dbg_eval_at(const char* src, int mode) {
 static ray_t* dbg_suspend(ray_t* err) {
     g_dbg_depth++;
     int outer_cursor = g_cursor;
+    int outer_frames = g_prompt_frames;
+    g_prompt_frames = q_eval_apply_frame_depth();
     g_cursor = g_live_depth;
     dbg_show_console();
     dbg_banner(err, g_cursor);
@@ -306,6 +318,9 @@ static ray_t* dbg_suspend(ray_t* err) {
     for (;;) {
         dbg_prompt_str(prompt, sizeof prompt);
         int n = g_reader(prompt, line, sizeof line);
+        /* the debug-only tokens (basics/debug.md) peeled first; everything
+         * else is an ordinary statement — `\\` included, so it exits the
+         * PROCESS as at `q)`.  Lone `\` exits ONE level (ref/debug.md v1). */
         if (n < 0) break;                                 /* EOF: abort */
         if (n == 0) continue;
         if (n == 1 && line[0] == '\\') break;             /* exit one level */
@@ -320,19 +335,23 @@ static ray_t* dbg_suspend(ray_t* err) {
         }
         if (line[0] == ':') {                             /* :r — resume */
             ray_t* v = (n == 1) ? (ray_retain(RAY_NULL_OBJ), RAY_NULL_OBJ)
-                                : dbg_eval_at(line + 1, 1);
+                                : dbg_value_at(line + 1, 0);
             if (v) { out = v; break; }
             continue;
         }
-        ray_t* v = dbg_eval_at(line, line[0] == '\'' ? 2 : 0);
-        if (v) { out = v; break; }                        /* 'err: re-signal */
+        if (line[0] == '\'') {                            /* 'err — re-signal */
+            ray_t* v = dbg_value_at(line, 1);
+            if (v && RAY_IS_ERR(v)) { out = v; break; }
+            if (v) ray_release(v);
+            continue;
+        }
+        dbg_run_line(line, (size_t)n);
     }
     g_cursor = outer_cursor;
+    g_prompt_frames = outer_frames;
     g_dbg_depth--;
     return out;
 }
-
-/* ---- the two error seams ---- */
 
 static int dbg_suspendable(ray_t* r) {
     return g_reader && g_console_stmt && g_trap_depth == 0 &&
@@ -356,9 +375,7 @@ static ray_t* dbg_observe(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
             ray_error_free(r);
             return rep;                        /* resumed value or 'err */
         }
-        /* a nested session may have clobbered the snapshot: re-take it so the
-         * aborted error propagates as seen-and-reported, not fresh */
-        if (g_snap.err != r) snap_take(r, fv, args, n);
+        if (g_snap.err != r) snap_take(r, fv, args, n);   /* past DBG_NEST_MAX only */
         g_snap.reported = 1;
     }
     return r;
@@ -369,8 +386,6 @@ ray_t* q_dbg_filter(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
 }
 
 ray_t* q_dbg_lambda_filter(ray_t* r) { return dbg_observe(r, NULL, NULL, 0); }
-
-/* ---- .Q surface ---- */
 
 /* opaque backtrace object: a list of formatted frame-line strings (only
  * .Q.sbt's rendering is contract; kdb's object internals are undocumented) */
@@ -387,11 +402,11 @@ static ray_t* dbg_bt_object(void) {
     char line[DBG_STMT_MAX + 160];
     for (int i = g_snap.depth; i >= 1; i--) {   /* lambdas: [depth+1] .. [2] */
         size_t n = frame_line(line, sizeof line, i + 1, 0, g_snap.lam[i - 1],
-                              g_snap.stmt);
+                              snap_stmt);
         bt_append(&l, line, n ? n - 1 : 0);     /* strip \n */
     }
     bt_append(&l, "  [1]  (.Q.trp)", 15);
-    size_t n = frame_line(line, sizeof line, 0, 0, NULL, g_snap.stmt);
+    size_t n = frame_line(line, sizeof line, 0, 0, NULL, snap_stmt);
     bt_append(&l, line, n ? n - 1 : 0);
     return l;
 }
@@ -446,10 +461,12 @@ ray_t* q_dbg_sbt_fn(ray_t* x) {
 ray_t* q_dbg_bt_fn(ray_t** args, int64_t n) {
     (void)args; (void)n;                       /* .Q.bt[] — arg ignored */
     char line[DBG_STMT_MAX + 160];
+    /* suspended: [0] is the statement the LIVE frames belong to, not this line */
+    const char* stmt = g_dbg_depth > 0 ? snap_stmt : g_stmt;
     for (int i = g_live_depth; i >= 0; i--) {
         int mark = g_dbg_depth > 0 && i == g_cursor;   /* >> = the current frame */
         size_t ln = frame_line(line, sizeof line, i, mark,
-                               i ? live_lam(i) : NULL, g_stmt);
+                               i ? live_lam(i) : NULL, stmt);
         q_console_write(line, ln);
     }
     ray_retain(RAY_NULL_OBJ);
