@@ -44,9 +44,12 @@ const char* q_err_text(ray_t* err, int64_t* len);
  * other text payload-carried (the name-signal semantic). */
 ray_t* q_err_from_text(const char* p, size_t n);
 
-/* Transfer the pending payload out (owned; NULL if none) / clear it. */
+/* Transfer the pending payload out (owned; NULL if none) / clear it / put an
+ * OWNED one back (NULL clears) — the debugger restores the suspended error's
+ * text across a nested statement. */
 ray_t* q_err_take(void);
 void   q_err_drop(void);
+void   q_err_put(ray_t* payload);
 
 /* class test against the stamped enum (0 for base-constructed errors) */
 int q_err_is(ray_t* err, q_err_e e);

@@ -435,13 +435,14 @@ static int l_is_regular_readable(const char* p) {
  * points QHOME at test/qscript).  An absolute path never gets QHOME prepended.
  * The resolved REGULAR readable file is executed line-at-a-time via the public
  * q_ctx_run_file (multiline-aware; silent — kdb loads silently).  A
- * still-missing path or a DIRECTORY stays a silent no-op: this preserves the
- * banked `\l .` / `\l /tmp/db*` corpus rows (absent / directory targets) and
- * defers the directory / splayed-table / serialized-object load forms.  Getter
- * form (no arg) stays 'nyi.  `system "l …"` single-homes through here. */
+ * still-MISSING path signals the path as given (kdb: `\l nope.q` -> 'nope.q);
+ * an existing DIRECTORY stays a silent no-op — the banked `\l .` / `\l
+ * /tmp/db*` corpus rows target live dirs, and the directory / splayed-table /
+ * serialized-object load forms are deferred.  Getter form (no arg) stays
+ * 'nyi.  `system "l …"` single-homes through here. */
 static ray_t* h_l(const char* arg, size_t alen) {
     if (alen == 0) return q_err(QE_NYI);        /* `\l` (bare) — reload cwd, deferred */
-    if (alen >= PATH_MAX) return NULL;
+    if (alen >= PATH_MAX) return q_err_name(arg, alen);
     char lit[PATH_MAX];
     memcpy(lit, arg, alen); lit[alen] = '\0';
 
@@ -481,7 +482,9 @@ static ray_t* h_l(const char* arg, size_t alen) {
             return NULL;
         }
     }
-    return NULL;                                          /* missing/dir/unreadable — silent */
+    struct stat st;
+    if (stat(lit, &st) == 0 && S_ISDIR(st.st_mode)) return NULL;  /* dir load deferred */
+    return q_err_name(lit, alen);                         /* kdb: 'path as given */
 }
 
 /* ---- expression timing (`\t expr`, `\t:n`, `\ts expr`, `\ts:n`) ------------

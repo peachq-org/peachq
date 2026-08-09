@@ -193,16 +193,22 @@ ray_t* q_enlist_wrap(ray_t** args, int64_t n) {
     return ray_enlist_fn(args, n);
 }
 
-/* q `til` — kdb accepts a boolean (`til 1b` -> ,0); base ray_til_fn is
- * int-only.  Everything else (int atoms, the error paths) delegates. */
+/* q `til` — any non-negative integer atom (ref/til.md: bool/byte/short/int
+ * too); base ray_til_fn is i64-only, so narrower widths widen through the
+ * q_type_strict_i64 index lane MINUS its temporal admits — `til 09:30` is
+ * 'type in q (and a timestamp payload would ask for exabytes).  Error paths
+ * delegate unchanged. */
 ray_t* q_til_wrap(ray_t* x) {
-    if (x && x->type == -RAY_BOOL) {
-        ray_t* n = ray_i64(x->b8 ? 1 : 0);
-        ray_t* r = ray_til_fn(n);
-        ray_release(n);
-        return r;
-    }
-    return ray_til_fn(x);
+    int64_t n;
+    if (x && x->type == -RAY_BOOL) n = x->b8 ? 1 : 0;
+    else if (!x || x->type == -RAY_I64 ||
+             RAY_IS_TEMPORAL32(-x->type) || RAY_IS_TEMPORAL64(-x->type) ||
+             !q_type_strict_i64(x, &n))
+        return ray_til_fn(x);
+    ray_t* a = ray_i64(n);
+    ray_t* r = ray_til_fn(a);
+    ray_release(a);
+    return r;
 }
 
 /* q `where` / monadic `&` — an INTEGER vector repeats each index i, x[i] times
