@@ -182,10 +182,25 @@ typedef struct {
     bool    inbound;   /* accepted by a listener */
     bool    ws;        /* WebSocket-upgraded */
     int64_t open_ns;   /* GMT ns since 2000.01.01 at open; 0 = unknown */
+    int64_t user_sym;  /* interned handshake userid; -1 = none captured */
+    int32_t peer_addr; /* peer IPv4, host order (the .z.a law); 0 = unknown */
+    bool    is_unix;   /* peer is an AF_UNIX endpoint */
 } ray_ipc_conn_info_t;
 
 /* Fill up to `cap` entries; returns the live-connection count (may exceed
  * cap).  out==NULL/cap==0 is a count query. */
 int64_t   ray_ipc_conn_list(ray_ipc_conn_info_t* out, int64_t cap);
+
+/* Identity of ONE connection by rayfall handle (selector id — what
+ * ray_ipc_current_handle returns), for the connection-context .z.u/.z.a.
+ * Resolves during the handshake too, so `.z.u` is right inside `.z.pw`.
+ * false = handle is not a live IPC connection in the active poll. */
+typedef struct {
+    int64_t user_sym;  /* as ray_ipc_conn_info_t */
+    int32_t peer_addr;
+    bool    is_unix;
+    bool    inbound;
+} ray_ipc_conn_ident_t;
+bool      ray_ipc_conn_identity(int64_t handle, ray_ipc_conn_ident_t* out);
 
 #endif /* RAY_IPC_H */

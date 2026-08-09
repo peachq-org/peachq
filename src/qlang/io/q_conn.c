@@ -26,6 +26,7 @@ typedef struct {
     uint8_t       out;
     int64_t       user_sym;
     ray_t*        addr;       /* BORROWED charv; NULL = none */
+    int32_t       peer_addr;  /* inbound rows: peer IPv4 (host order); 0 = none */
     int64_t       provider_sym, alias_sym;
     int64_t       open_ns;    /* NULL_I64 = unknown */
 } conn_row;
@@ -59,12 +60,16 @@ static conn_row* conn_rows(int64_t* n_out) {
         r->out  = !infos[i].inbound;
         r->user_sym = esym;
         r->addr = NULL;
+        r->peer_addr = 0;
         r->provider_sym = esym; r->alias_sym = esym;
         r->open_ns = infos[i].open_ns ? infos[i].open_ns : NULL_I64;
         if (r->out) {                     /* hopen registered the descriptor */
             int64_t us = q_handles_user_sym(r->fd);
             if (us >= 0) r->user_sym = us;
             r->addr = q_handles_open_args(r->fd);
+        } else {                          /* IPC store: handshake user, peer IP */
+            if (infos[i].user_sym >= 0) r->user_sym = infos[i].user_sym;
+            if (!infos[i].is_unix) r->peer_addr = infos[i].peer_addr;
         }
     }
     free(infos);
@@ -76,6 +81,7 @@ static conn_row* conn_rows(int64_t* n_out) {
         r->kind = hi.kind;
         r->p    = ' ';
         r->f    = ' ';
+        r->peer_addr = 0;
         r->out  = hi.initiated_out != 0;
         r->user_sym = hi.user_sym >= 0 ? hi.user_sym : esym;
         r->addr = hi.open_args;
@@ -163,7 +169,19 @@ ray_t* q_conn_table(void) {
         c[7]  = ray_vec_append(c[7], &r->out);
         c[8]  = ray_vec_append(c[8], &r->user_sym);
         if (c[9] && !RAY_IS_ERR(c[9])) {
-            ray_t* a = r->addr ? r->addr : ray_charv("", 0);
+            ray_t* a = r->addr;
+            if (!a) {           /* inbound: dotted peer IP, IP-ONLY (no port —
+                                 * ephemeral, would break determinism) */
+                char ip[16];
+                int len = r->peer_addr
+                    ? snprintf(ip, sizeof ip, "%u.%u.%u.%u",
+                               ((uint32_t)r->peer_addr >> 24) & 255u,
+                               ((uint32_t)r->peer_addr >> 16) & 255u,
+                               ((uint32_t)r->peer_addr >> 8) & 255u,
+                               (uint32_t)r->peer_addr & 255u)
+                    : 0;
+                a = ray_charv(ip, len);
+            }
             c[9] = ray_list_append(c[9], a);
             if (!r->addr) ray_release(a);
         }
