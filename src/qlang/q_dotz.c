@@ -173,10 +173,19 @@ static ray_t* z_h(void) {   /* .z.h — host name as a symbol (gethostname) */
     return ray_sym(ray_sym_intern(host, strlen(host)));
 }
 
-/* .z.u — the OS username the process runs under (console handle-0 semantics:
- * "the userid under which the process is running").  NOT the -u/-U auth flag
- * (those are the access-control file, unrelated).  getpwuid then $USER/$LOGNAME. */
+/* .z.u — connection-context userid (ref/dotz.md): console/handle 0 = the OS
+ * username the process runs under (NOT the -u/-U auth flag — that's the
+ * access-control file); in a callback, server end (inbound) = the userid the
+ * client's hopen passed, client end (outbound) = the null sym.  Correct
+ * already inside .z.pw (user stamped at handshake parse, before the hook). */
 static ray_t* z_u(void) {
+    int64_t sel = ray_ipc_current_handle();
+    ray_ipc_conn_ident_t id;
+    if (sel >= 0 && ray_ipc_conn_identity(sel, &id)) {
+        int64_t s = (id.inbound && id.user_sym >= 0)
+                        ? id.user_sym : ray_sym_intern_runtime("", 0);
+        return ray_sym(s);
+    }
     const char* name = NULL;
 #ifndef RAY_OS_WINDOWS
     struct passwd* pw = getpwuid(getuid());
@@ -188,10 +197,16 @@ static ray_t* z_u(void) {
     return ray_sym(ray_sym_intern(name, strlen(name)));
 }
 
-/* .z.a — local IPv4 as a 32-bit int (kdb: `0x0 vs .z.a` yields the octets,
+/* .z.a — IPv4 as a 32-bit int (kdb: `0x0 vs .z.a` yields the octets,
  * most-significant first — i.e. host-order ntohl of the network address).
- * Resolve the primary IPv4 of the hostname; 0i if it cannot be determined. */
+ * In a callback: the PEER's IP (the client session, ref/dotz.md), 0i over a
+ * unix domain socket.  Otherwise the primary IPv4 of the hostname
+ * (== .Q.addr .z.h); 0i if it cannot be determined. */
 static ray_t* z_a(void) {
+    int64_t sel = ray_ipc_current_handle();
+    ray_ipc_conn_ident_t id;
+    if (sel >= 0 && ray_ipc_conn_identity(sel, &id))
+        return ray_i32(id.is_unix ? 0 : id.peer_addr);
     int32_t addr = 0;
     char host[256];
 #ifdef RAY_OS_WINDOWS
