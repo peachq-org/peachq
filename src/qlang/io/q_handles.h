@@ -39,6 +39,20 @@ int q_handles_kind(int64_t fd);
 ray_t*  q_handles_open_args(int64_t fd);
 int64_t q_handles_user_sym(int64_t fd);
 
+/* Enumeration for the connection collector (io/q_conn.c — the ONE walker). */
+typedef struct {
+    int64_t       fd;
+    q_handle_kind kind;
+    int           initiated_out;
+    int64_t       user_sym;
+    int64_t       open_time_ns;
+    ray_t*        open_args;   /* BORROWED */
+} q_handle_info_t;
+
+int64_t q_handles_count(void);
+/* Record `i` (0 <= i < count) into *out; 0 when out of range. */
+int q_handles_get(int64_t i, q_handle_info_t* out);
+
 /* Open a file (write/append) or fifo (read) fd and register it.  Owned int
  * handle atom (the real fd, >= 3) or error. */
 ray_t* q_handles_open(const char* path, size_t plen, int is_fifo);
