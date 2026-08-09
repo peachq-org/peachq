@@ -48,6 +48,9 @@ ray_t* q_provider_sym_apply(ray_t* head, ray_t** args, int64_t n);
  * reserved fd go away.  Owned :: like q_handles_close. */
 ray_t* q_provider_close(int64_t qh);
 
+/* provider/alias sym ids of a registered provider handle; 0 = no such fd */
+int    q_provider_info(int64_t fd, int64_t* provider, int64_t* alias);
+
 int    q_provider_carrier_is(ray_t* x);
 int    q_provider_coord_sym_is(ray_t* x);   /* -RAY_SYM spelling :pq:... */
 int    q_provider_coord_sym_form(ray_t* x); /* 0 none, 1 connection, 2 table (/) */

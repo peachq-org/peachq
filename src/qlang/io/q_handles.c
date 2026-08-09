@@ -141,6 +141,19 @@ int64_t q_handles_user_sym(int64_t fd) {
     return i < 0 ? -1 : g_recs[i].user_sym;
 }
 
+int64_t q_handles_count(void) { return g_n; }
+
+int q_handles_get(int64_t i, q_handle_info_t* out) {
+    if (i < 0 || i >= g_n) return 0;
+    out->fd            = g_recs[i].fd;
+    out->kind          = g_recs[i].kind;
+    out->initiated_out = g_recs[i].initiated_out;
+    out->user_sym      = g_recs[i].user_sym;
+    out->open_time_ns  = g_recs[i].open_time_ns;
+    out->open_args     = g_recs[i].open_args;
+    return 1;
+}
+
 /* ---- open: file/fifo transport (hopen `:path` / `:fifo://path`) ---------- */
 
 #ifndef O_BINARY

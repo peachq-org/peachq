@@ -325,6 +325,14 @@ ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config) 
     return ray_i64((int64_t)fd);
 }
 
+int q_provider_info(int64_t fd, int64_t* provider, int64_t* alias) {
+    prov_ent* e = find_fd(fd);
+    if (!e) return 0;
+    *provider = e->provider;
+    *alias    = e->alias;
+    return 1;
+}
+
 ray_t* q_provider_close(int64_t qh) {
     prov_ent* e = find_fd(qh);
     if (e) {

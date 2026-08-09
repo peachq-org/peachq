@@ -4,6 +4,10 @@
 / top level is definitions only — no cross-lib calls execute at load time.
 / Pure q since the .pq.c.* rayfall escape hatch was deleted (2026-07-29).
 .pq.version:.z.K;
+/ .pq.conns — every open connection, 13 cols; the single-letter p/f/z/n/m are
+/ DELIBERATELY the -38! names so kdb code ports, the readable columns are
+/ peachq additions (the kdb verbs -38!/.z.W/.z.H stay socket-only).
+.pq.conns:{.pq.i.conns[]}
 / .pq.dr — domain and range in the layout the ref pages publish, so ours diffs
 / by eye against theirs (after qdocs/docs/docs/tools.q, kx, CC BY 4.0).
 / Samples are rebuilt by CASTING each call, so a cast regression shows here.
