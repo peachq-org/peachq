@@ -708,6 +708,14 @@ static ray_t* table_bi_deref(ray_t* x) {
 /* (cols x) — column names of a table as a symbol vector. */
 ray_t* q_cols_fn(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
+    ray_t* car = q_provider_get_carrier(x);   /* `:pq: coordinate, splay symmetry */
+    if (car) {
+        if (RAY_IS_ERR(car)) return car;
+        ray_t* k = ray_dict_keys(car);
+        ray_retain(k);
+        ray_release(car);
+        return k;
+    }
     ray_t* t = table_bi_deref(x);
     if (q_splay_is(t) || q_provider_carrier_is(t)) {   /* the keys ARE the cols
                                                       * (provider: the SNAPSHOT) */
@@ -727,6 +735,13 @@ ray_t* q_cols_fn(ray_t* x) {
  * The result is a RAY_DICT from a 1-col key table to a 3-col value table —
  * "a keyed table is just a dictionary from one table to another". */
 ray_t* q_meta_fn(ray_t* x) {
+    ray_t* car = x ? q_provider_get_carrier(x) : NULL;   /* `:pq: coordinate */
+    if (car) {
+        if (RAY_IS_ERR(car)) return car;
+        ray_t* r = q_provider_carrier_meta(car);
+        ray_release(car);
+        return r;
+    }
     ray_t* t = x ? table_bi_deref(x) : NULL;
     if (q_provider_carrier_is(t)) return q_provider_carrier_meta(t);
     int64_t nc = q_splay_ncols(t);
@@ -785,7 +800,11 @@ ray_t* q_meta_fn(ray_t* x) {
         if (tstr && !RAY_IS_ERR(tstr)) ray_release(tstr);
         return bad ? bad : q_err(QE_WSFULL);
     }
-    /* key table: c ; value table: t f a  -> keyed table dict */
+    return q_meta_assemble(cvec, tstr, fvec, avec);
+}
+
+/* key table: c ; value table: t f a  -> keyed table dict (consumes all four) */
+ray_t* q_meta_assemble(ray_t* cvec, ray_t* tstr, ray_t* fvec, ray_t* avec) {
     ray_t* kt = ray_table_new(1);
     kt = ray_table_add_col(kt, ray_sym_intern("c", 1), cvec);
     ray_release(cvec);
