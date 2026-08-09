@@ -5,8 +5,6 @@
 / connection, the sidecar-lossless round-trip and one raw exec), which bind at
 / this same \l pq gate.  CONNID is the native int handle — no q-side state.
 / ANY-ORDER LAW: definitions only at top level.
-/ NO .duckdb.qsql: pushdown is a later stage; the host's materialize fallback
-/ is the correct phase-1 behaviour (always right by the residual invariant).
 
 / open[rest;timeout;config]: rest = the db path (`` `:default: `` = shared
 / in-memory); timeout is meaningless to an in-process engine and ignored;
@@ -36,3 +34,12 @@
 / identifiers double-quoted, a doubled inner quote escaping — the same law the
 / C side applies when it builds SQL.
 .duckdb.i.q:{[t] "\"",ssr[string t;"\"";"\"\""],"\""}
+
+/ .duckdb.qsql — THE B2 SEAM, deliberately naive: it exercises the .X.qsql
+/ contract (shared resolver, decline-on-unpush) but materializes and evaluates
+/ locally — behaviorally the host fallback.  The B2 SQL translator replaces
+/ ONLY .duckdb.i.push's body (emit SQL, run it, fill .duckdb.lastsql — inert
+/ until then).  Only the RESOLVER is trapped (unpushable -> :: -> host
+/ fallback); evaluation errors propagate — the query never runs twice.
+.duckdb.i.push:{[c;rt] (?) . (enlist .duckdb.get[c;rt 0]),1_rt}
+.duckdb.qsql:{[c;cl;tree] rt:@[.pq.i.resolveTree[cl];tree;{[e] ::}]; $[rt~(::);::;.duckdb.i.push[c;rt]]}

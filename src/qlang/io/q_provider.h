@@ -67,9 +67,12 @@ ray_t* q_provider_carrier_meta(ray_t* car);
 
 /* funsql seams.  from_table: carrier value or table-form hsym -> owned
  * materialized table (phase-1 residual law), NULL = not a provider.  qsql_push:
- * when the from-slot is a provider table and .X.qsql is defined, call it with the
- * functional args as a tree whose slot 0 is the BARE underlying name
- * (name-normalization law); NULL = not a provider or no qsql hook. */
+ * when the from-slot is a provider table and .X.qsql is defined, call
+ * .X.qsql[connid; cols; tree] — cols the provider-truth column list (one
+ * LIVE bind round-trip; embedded carrier keys are advisory and can be
+ * stale), tree the functional args with slot 0 the BARE underlying name
+ * (name-normalization law).  A `::` result means the hook DECLINED; that,
+ * a missing hook, or unavailable cols -> NULL (the materialize fallback). */
 ray_t* q_provider_from_table(ray_t* t);
 ray_t* q_provider_qsql_push(ray_t** args, int64_t n);
 
