@@ -649,6 +649,18 @@ ray_t* q_provider_from_table(ray_t* t) {
     return r;
 }
 
+/* the provider-truth column list for .X.qsql — ONE live bind round-trip at
+ * push time (a carrier's embedded keys are advisory and can be stale after
+ * remote schema drift — pushing on them substitutes a same-named client
+ * global for a NEW column); NULL = unavailable (host fallback) */
+static ray_t* qsql_cols(tref_t* tr) {
+    ray_t* cols = tref_hook(tr, "bind");
+    if (cols && RAY_IS_ERR(cols)) { ray_error_free(cols); return NULL; }
+    if (cols && cols->type == RAY_SYM) return cols;
+    if (cols) ray_release(cols);
+    return NULL;
+}
+
 ray_t* q_provider_qsql_push(ray_t** args, int64_t n) {
     tref_t tr; ray_t* err;
     if (n < 4 || n > PROV_MAX_ARGS) return NULL;
@@ -656,18 +668,22 @@ ray_t* q_provider_qsql_push(ray_t** args, int64_t n) {
     if (err) return err;
     ray_t* f = hook_fn(tr.c.e->provider, "qsql");
     if (!f) { tref_close(&tr); return NULL; }  /* host fallback: the residual law */
+    ray_t* cols = qsql_cols(&tr);
+    if (!cols) { ray_release(f); tref_close(&tr); return NULL; }
     ray_t* tree = ray_list_new(n);
     ray_t* nm = ray_sym(tr.name);
     tree = ray_list_append(tree, nm);          /* slot 0: the BARE underlying name */
     ray_release(nm);
     for (int64_t i = 1; i < n && !RAY_IS_ERR(tree); i++)
         tree = ray_list_append(tree, args[i]);
-    if (RAY_IS_ERR(tree)) { ray_release(f); tref_close(&tr); return tree; }
-    ray_t* cargs[2] = { tr.c.e->connid, tree };
-    ray_t* r = q_eval_apply_value(f, cargs, 2);
+    if (RAY_IS_ERR(tree)) { ray_release(f); ray_release(cols); tref_close(&tr); return tree; }
+    ray_t* cargs[3] = { tr.c.e->connid, cols, tree };
+    ray_t* r = q_eval_apply_value(f, cargs, 3);
     ray_release(f);
+    ray_release(cols);
     ray_release(tree);
     tref_close(&tr);
+    if (r && RAY_IS_NULL(r)) { ray_release(r); return NULL; }  /* hook declined */
     return r;
 }
 
