@@ -2,16 +2,11 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/repl/qdoc.h"
-#include "qlang/parse/q_parse.h"
-#include "qlang/q_ctx.h"    /* q_ctx_lang_scan/_tree — x) transcript lines */
-#include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
-#include "qlang/eval/q_dbg.h"    /* statement stash — .Q.trp/.Q.bt frame [0] */
-#include "qlang/eval/q_view.h"   /* q_view_intercept — `x::e` at the row seam */
-#include "qlang/q_fmt.h"
+#include "qlang/parse/q_parse.h"  /* q_parse — the parse pillar's only door */
+#include "qlang/q_ctx.h"    /* q_ctx_run_line — THE statement seam this runner drives */
 #include "qlang/q_console.h"
-#include "qlang/base/q_err.h"    /* q_err_text / q_err_drop — error text + backstop */
-#include "qlang/ops/q_sys.h"    /* q_sys_is_cmd / q_sys_line / q_sys_prompt */
-#include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
+#include "qlang/base/q_err.h"    /* q_err_drop — the parse pillar's backstop */
+#include "qlang/ops/q_sys.h"    /* q_sys_is_cmd / q_sys_prompt */
 #include "store/fileio.h"   /* ray_mkdir_p — --emit mirrors the source tree */
 #include <rayforce.h>
 #include <string.h>
@@ -72,17 +67,6 @@ static void emit_row(qd_emit_t* em, const char* prompt, const char* input,
     }
 }
 
-/* Error rows emit kdb's own display (`'type`) so the transcript stays q. */
-static void emit_err(qd_emit_t* em, const char* prompt, const char* input,
-                     ray_t* err) {
-    char buf[256];
-    int64_t tn = 0;
-    const char* text = err ? q_err_text(err, &tn) : NULL;
-    snprintf(buf, sizeof buf, "'%.*s",
-             (text && tn) ? (int)tn : 5, (text && tn) ? text : "error");
-    emit_row(em, prompt, input, buf);
-}
-
 /* Input-prompt prefix: `q)` or `q.<ident>)` (namespace transcripts after
  * `\d .foo` — basics/syscmds.md).  Strict: the ident must be
  * [A-Za-z][A-Za-z0-9_]* and the closing paren present, so ordinary output
@@ -111,8 +95,8 @@ static size_t prompt_prefix_len(const char* line) {
  * not support yet, so trailing lines are ignored by construction.
  *
  * Matching contract (see error_row_matches):
- *   - DEFAULT is STRICT: the error TEXT (payload or class, q_err_text) must
- *     equal the word after the quote.  This is the project thesis ("error
+ *   - DEFAULT is STRICT: the error TEXT the seam rendered (payload or class)
+ *     must equal the word after the quote.  This is the project thesis ("error
  *     text match kdb"); a row expecting 'type no longer passes on 'name.
  *   - `'error` is the sanctioned ANY-ERROR wildcard: kdb has no class named
  *     `error`, so a row whose first line is exactly `'error` matches ANY error.
@@ -142,16 +126,29 @@ static int lenient_errors(void) {
     return e && *e && *e != '0';
 }
 
-/* Match an actual error object against an error-expectation row: the FULL
- * error text (q_err_text: payload / class), exactly — 'missingName rows can
- * only pass when the name itself is signalled. */
-static int error_row_matches(ray_t* err, const char* cls) {
+/* Match the seam's rendered error line (`'text`) against an error-expectation
+ * row: the FULL text, exactly — 'missingName rows can only pass when the name
+ * itself is signalled. */
+static int error_row_matches(const char* line, const char* cls) {
     if (lenient_errors()) return 1;                     /* debug escape: any error */
     if (!cls[0]) return 1;                              /* bare `'`: any error */
     if (strcmp(cls, "error") == 0) return 1;            /* `'error` wildcard */
-    int64_t tn = 0;
-    const char* text = q_err_text(err, &tn);
-    return text && (size_t)tn == strlen(cls) && memcmp(text, cls, (size_t)tn) == 0;
+    return line[0] == '\'' && strcmp(line + 1, cls) == 0;
+}
+
+/* Run one transcript line through THE statement seam — the same
+ * q_ctx_run_line every other door calls — and hand back the exact bytes the
+ * REPL would have printed.  Caller frees both buffers.  Returns the seam's
+ * code: non-zero for a PARSE error, 0 for anything that ran. */
+static int qd_run_line(const char* input, char** obuf, char** ebuf) {
+    size_t on = 0, en = 0;
+    *obuf = *ebuf = NULL;
+    FILE* of = open_memstream(obuf, &on);
+    FILE* ef = open_memstream(ebuf, &en);
+    int rc = (of && ef) ? q_ctx_run_line(input, strlen(input), of, ef, 1) : 0;
+    if (of) fclose(of);
+    if (ef) fclose(ef);
+    return rc;
 }
 
 /* Run one example; update result; report on failure when verbose. */
@@ -161,10 +158,10 @@ static void classify(qdoc_result_t* r, int ok) {
 
 static void run_example(const char* input, const char* expect,
                         const char* tprompt, qdoc_mode_t mode,
-                        int verbose, FILE* out, const char* path,
-                        qdoc_result_t* r, qd_emit_t* em) {
+                        int verbose, FILE* out, qdoc_result_t* r,
+                        qd_emit_t* em) {
     r->examples++;
-    q_console_reset();   /* drop any show/0N! output from a prior example */
+    q_console_reset();   /* the parse pillar never reaches the seam's drain */
 
     /* Prompt pin: the transcript's prompt (`q)` / `q.foo)`) must match the
      * LIVE context prompt at this point — that is what tests the `\d` prompt
@@ -177,188 +174,71 @@ static void run_example(const char* input, const char* expect,
         prompt_ok = (strcmp(tprompt, live) == 0);
     }
 
-    /* `\`-system-command rows bypass the parser, like the REPL — same shared
-     * q_sys_line glue, no runner-side policy: this runtime never enables the
-     * process capability, so `\\`/`exit` rows are silent no-ops (the runner
-     * survives) and an unknown `\ls`/`\curl` row is silent, never a real shell. */
-    if (q_sys_is_cmd(input, strlen(input))) {
-        char got[QD_OUT];
-        ray_t* sr = q_sys_line(input, strlen(input), 1, got, sizeof got);
-        r->parsed++;
-        if (mode == QDOC_PARSE_ONLY) {
-            if (sr) { q_err_drop(); ray_error_free(sr); }
-            classify(r, prompt_ok);
-            return;
-        }
-        char errcls[64];
-        int want_error = expect_is_error(expect, errcls, sizeof errcls);
-        char gotcls[72];
-        int  was_err = 0;
-        int ok;
-        if (sr) {
-            ok = want_error && error_row_matches(sr, errcls);
-            int64_t tn = 0;
-            const char* text = q_err_text(sr, &tn);
-            snprintf(gotcls, sizeof gotcls, "'%.*s",
-                     (text && tn) ? (int)tn : 5, (text && tn) ? text : "error");
-            was_err = 1;
-            snprintf(got, sizeof got, "<error>");
-            ray_error_free(sr);
-        } else if (want_error) {
-            ok = 0;
-        } else {
-            char ng[QD_OUT], ne[QD_OUT];
-            normalize(got, ng, sizeof ng);
-            normalize(expect, ne, sizeof ne);
-            ok = (strcmp(ng, ne) == 0);
-        }
-        ok = ok && prompt_ok;
-        classify(r, ok);
-        if (!ok && prompt_ok) emit_row(em, tprompt, input, was_err ? gotcls : got);
-        if (!ok && verbose)
-            fprintf(out, "  q)%.200s\n    FAIL(syscmd%s) got \"%.200s\" want \"%.200s\"\n",
-                    input, prompt_ok ? "" : ":prompt", got, expect);
-        return;
-    }
-
-    /* Transcript prompt out of sync with the live context: fail the row but
-     * still execute the input so later rows see the intended state. */
-    if (!prompt_ok) {
-        const char* xs = input; size_t xn = strlen(input);
-        char xl = q_ctx_lang_scan(&xs, &xn);
-        ray_t* past = xn == 0 ? NULL
-                    : (xl && xl != 'q') ? q_ctx_lang_tree(xl, xs, (int64_t)xn)
-                                        : q_parse(xs);
-        if (past && !RAY_IS_ERR(past)) {
-            r->parsed++;
-            ray_t* pres;
-            if (!q_view_intercept(past, input, &pres)) pres = q_eval(past);
-            ray_release(pres);
-            ray_release(past);
-        }
-        classify(r, 0);
-        if (verbose)
-            fprintf(out, "  %s%.200s\n    FAIL(prompt) transcript prompt \"%s\" != live context\n",
-                    tprompt, input, tprompt);
-        return;
-    }
-
-    const char* ls = input; size_t ln = strlen(input);
-    char lang = q_ctx_lang_scan(&ls, &ln);
-    if (lang && ln == 0) {                 /* bare `g)` line: silent no-op */
-        r->parsed++;
-        int lok = expect[0] == '\0';
-        classify(r, lok);
-        if (!lok) {
-            emit_row(em, tprompt, input, "");
-            if (verbose) fprintf(out, "  q)%.200s\n    FAIL(eval) got \"\" want \"%.200s\"\n",
-                                 input, expect);
-        }
-        return;
-    }
-    ray_t* ast = (lang && lang != 'q') ? q_ctx_lang_tree(lang, ls, (int64_t)ln)
-                                       : q_parse(ls);
-    if (RAY_IS_ERR(ast)) {
-        /* an error-expectation row a PARSE-time error satisfies passes WHOLE —
-         * 'dup dies during parse (qsql.md:168), and the transcript's
-         * observable IS the error */
-        char pcls[64];
-        if (mode != QDOC_PARSE_ONLY && expect_is_error(expect, pcls, sizeof pcls) &&
-            error_row_matches(ast, pcls)) {
-            ray_error_free(ast);
-            r->parsed++;
-            classify(r, 1);
-            return;
-        }
-        classify(r, 0);
-        emit_err(em, tprompt, input, ast);
-        if (verbose) fprintf(out, "  q)%.200s\n    FAIL(parse)\n", input);
-        return;
-    }
-    r->parsed++;   /* parsed OK — count before eval, regardless of outcome */
+    /* The parse pillar is the ONE thing the seam cannot answer — it always
+     * evaluates — so it alone calls q_parse here.  `\`-command rows still RUN
+     * (through the seam): a transcript's `\d`/`\c` must land or every row
+     * after it is measured in the wrong context. */
     if (mode == QDOC_PARSE_ONLY) {
-        ray_release(ast);
-        classify(r, 1);
+        const char* ps = input;
+        size_t      pn = strlen(input);
+        char        lang = q_ctx_lang_scan(&ps, &pn);
+        int         ok = prompt_ok;
+        if (q_sys_is_cmd(input, strlen(input))) {
+            char *ob, *eb;
+            qd_run_line(input, &ob, &eb);
+            free(ob);
+            free(eb);
+            r->parsed++;
+        } else if (pn == 0) {                 /* bare `g)` prefix: silent no-op */
+            r->parsed++;
+            ok = ok && expect[0] == '\0';
+        } else if (lang && lang != 'q') {     /* `.X.e "…"` — never parsed as q */
+            r->parsed++;
+        } else {
+            ray_t* ast = q_parse(ps);
+            if (RAY_IS_ERR(ast)) { q_err_drop(); ray_error_free(ast); ok = 0; }
+            else { ray_release(ast); r->parsed++; }
+        }
+        classify(r, ok);
+        if (!ok && verbose)
+            fprintf(out, "  %s%.200s\n    FAIL(parse)\n", tprompt, input);
         return;
     }
 
     if (getenv("QDOC_TRACE")) { char tb[256]; int tn = snprintf(tb, sizeof tb, "INPUT: %.200s\n", input); if (tn > 0) { ssize_t _w = write(2, tb, (size_t)tn); (void)_w; } }
+
     char errcls[64];
-    int want_error = expect_is_error(expect, errcls, sizeof errcls);
-    ray_t* res;
-    int is_assign = 1;                     /* a view definition prints nothing */
-    if (!q_view_intercept(ast, input, &res)) {
-        is_assign = q_parse_is_assign(ast);
-        res = q_eval(ast);
-    }
-    ray_release(ast);
-    if (ray_is_lazy(res)) res = ray_lazy_materialize(res);
+    int  want_error = expect_is_error(expect, errcls, sizeof errcls);
 
-    /* An eval error is a failure — NOT empty output that could match an empty
-     * expected (otherwise every no-output example we can't run would falsely
-     * "match") — UNLESS the row is an error EXPECTATION ('type). */
-    if (RAY_IS_ERR(res)) {
-        if (want_error && error_row_matches(res, errcls)) {
-            ray_release(res);
-            classify(r, 1);
-            return;
-        }
-        char ne[QD_OUT];
-        normalize(expect, ne, sizeof ne);
-        emit_err(em, tprompt, input, res);
-        ray_release(res);
-        classify(r, 0);
-        if (verbose)
-            fprintf(out, "  q)%.200s\n    FAIL(eval) got \"<error>\" want \"%.200s\"\n",
-                    input, ne);
-        return;
-    }
-
-    /* an error-expectation row that did NOT error is a failure */
-    if (want_error) {
-        char got_ok[QD_OUT];
-        got_ok[0] = '\0';
-        if (!RAY_IS_NULL(res) && !is_assign) q_fmt(res, got_ok, sizeof got_ok);
-        ray_release(res);
-        emit_row(em, tprompt, input, got_ok);
-        classify(r, 0);
-        if (verbose)
-            fprintf(out, "  q)%.200s\n    FAIL(eval) got \"%.200s\" want error '%s\n",
-                    input, got_ok, errcls);
-        return;
-    }
-
-    char got[QD_OUT];
-    got[0] = '\0';
-    size_t gpos = 0;
-    /* show/0N! side-effect display comes FIRST (e.g. `f 2 3 5 7 3` prints the
-     * `show a` line then the returned sum). */
-    const char* con = q_console_str();
-    if (con && *con) {
-        gpos = strlen(con);
-        if (gpos >= sizeof got) gpos = sizeof got - 1;
-        memcpy(got, con, gpos);
-        got[gpos] = '\0';
-    }
-    q_console_reset();
-    /* q console silence: a (last-statement) assignment prints nothing.  Auto-
-     * echo uses the DISPLAY seam so an in-transcript `\c` clips output (c.qcmd);
-     * the fresh-per-file runtime arms `\c 25 80` by default (q_sys_cfg_init). */
-    if (!RAY_IS_NULL(res) && !is_assign) q_fmt_console(res, got + gpos, sizeof got - gpos);
-    ray_release(res);
+    char* ob = NULL;
+    char* eb = NULL;
+    int   rc      = qd_run_line(input, &ob, &eb);
+    int   errored = eb && *eb;
 
     char ng[QD_OUT], ne[QD_OUT];
-    normalize(got, ng, sizeof ng);
     normalize(expect, ne, sizeof ne);
-    if (strcmp(ng, ne) == 0) {
-        classify(r, 1);
+    int ok;
+    if (errored) {
+        /* the seam prints `'text` then the numbered frames; the frame and
+         * caret lines become checkable once the renderer carries carets */
+        snprintf(ng, sizeof ng, "%.*s", (int)strcspn(eb, "\n"), eb);
+        ok = want_error && error_row_matches(ng, errcls);
+        /* a PARSE error the row expected still counts as parsed — 'dup dies
+         * during parse (qsql.md:168) and the transcript's observable IS it */
+        if (rc == 0 || ok) r->parsed++;
     } else {
-        classify(r, 0);
-        emit_row(em, tprompt, input, got);
-        if (verbose)
-            fprintf(out, "  q)%.200s\n    FAIL(eval) got \"%.200s\" want \"%.200s\"\n",
-                    input, ng, ne);
+        r->parsed++;
+        normalize(ob ? ob : "", ng, sizeof ng);
+        ok = !want_error && strcmp(ng, ne) == 0;
     }
+    ok = ok && prompt_ok;
+    classify(r, ok);
+    if (!ok && prompt_ok) emit_row(em, tprompt, input, ng);
+    if (!ok && verbose)
+        fprintf(out, "  %s%.200s\n    FAIL(%s) got \"%.200s\" want \"%.200s\"\n",
+                tprompt, input, prompt_ok ? "eval" : "prompt", ng, ne);
+    free(ob);
+    free(eb);
 }
 
 static qdoc_result_t run_path(const char* path, qdoc_mode_t mode,
@@ -422,10 +302,8 @@ static qdoc_result_t run_path(const char* path, qdoc_mode_t mode,
     char tprompt[80] = {0};
     int  have = 0;
 
-/* console 0: qdoc examples must never suspend (the runner has no reader) */
-#define FLUSH() do { if (have) { int dtok = q_dbg_statement_begin(input, strlen(input), 0); \
-                                 run_example(input, expect, tprompt, mode, verbose, out, path, &r, em); \
-                                 q_dbg_statement_end(dtok); \
+#define FLUSH() do { if (have) { \
+                                 run_example(input, expect, tprompt, mode, verbose, out, &r, em); \
                                  have = 0; expect[0] = '\0'; } } while (0)
 
     while (fgets(line, sizeof line, f)) {
