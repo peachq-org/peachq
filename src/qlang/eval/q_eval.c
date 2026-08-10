@@ -1,7 +1,8 @@
 /* q_eval walker — see q_eval.h.  jq-EvalOp shape: visit -> resolve heads
  * (registry by valence, then env / `.z` / `.q`) -> eval-time forms (`;` seq,
  * `:`/`::`/`op:` assign, `$[c;t;f]` + if/do/while control,
- * literal-ctor interception) -> eval args RIGHT-to-left (#177: mid-line `x:e`
+ * literal-ctor interception) -> eval args RIGHT-to-left, THEN the head, which
+ * is the node's leftmost expression (#177 + basics/syntax.md: mid-line `x:e`
  * binds before a leftward read; error unwinds release the evaluated tail) ->
  * q_eval_apply.
  *
@@ -916,63 +917,40 @@ ray_t* q_eval(ray_t* node) {
             goto out;
         }
 
-        /* adverb-headed application ((adv;F); args...) — native, no HOF */
-        if (h && h->type == RAY_LIST && ray_len(h) == 2) {
-            int adv = adv_id(((ray_t**)ray_data(h))[0]);
-            if (adv >= 0) {
-                const q_op_t* frow = NULL;
-                ray_t* F = operand_value(((ray_t**)ray_data(h))[1], &frow);
-                if (RAY_IS_ERR(F)) { ret = F; goto out; }
-                int64_t argc = n - 1;
-                ray_t* argv[EVAL_MAX_ARGS];
-                if (argc > EVAL_MAX_ARGS) {
-                    ray_release(F);
-                    ret = q_err(QE_RANK);
-                    goto out;
-                }
-                ray_t* err = eval_args_rtl(e + 1, argc, argv);
-                if (err) { ray_release(F); ret = err; goto out; }
-                ret = q_adverb_apply(adv, F, frow, argv, argc);
-                release_args(argv, argc);
-                ray_release(F);
-                goto out;
-            }
-        }
-
         /* `$[c;t;f;...]` Cond — claimed BEFORE argument evaluation (lazy) */
         if (n >= 4 && dollar_head(h)) { ret = cond_eval(e + 1, n - 1); goto out; }
 
-        /* general application: resolve head, args RTL, one q_eval_apply */
+        /* THE application arm, strictly right to left (basics/syntax.md
+         * "Precedence and order of evaluation"): arguments first, then the
+         * HEAD — the node's LEFTMOST expression — so `a where (a:1 2 3)>1`
+         * reads what the argument just bound.  An adverb-headed node needs no
+         * arm of its own: q_eval of `(iter;F)` IS the derived value, and the
+         * apply module already routes a derived carrier to q_adverb_apply. */
+        int64_t argc = n - 1;
+        ray_t* argv[EVAL_MAX_ARGS];
+        if (argc > EVAL_MAX_ARGS) { ret = q_err(QE_RANK); goto out; }
+        ray_t* err = eval_args_rtl(e + 1, argc, argv);
+        if (err) { ret = err; goto out; }
+
         const q_op_t* row = NULL;
         ray_t* fv;
-        if (h && h->type == -RAY_SYM) {
+        if (!h) {
+            fv = q_err(QE_TYPE);
+        } else if (h->type == -RAY_SYM) {
             fv = name_value(h, &row);
-        } else if (h && (h->type == RAY_LIST || sym_const(h))) {
+        } else if (h->type == RAY_LIST || sym_const(h)) {
             fv = q_eval(h);
-        } else if (h) {
+        } else {
             ray_retain(h);                          /* embedded value / noun */
             fv = h;
             if (h->type == RAY_UNARY || h->type == RAY_BINARY ||
                 h->type == RAY_VARY) {
-                q_valence_t val = (n - 1 == 1) ? Q_MONADIC
-                                : (n - 1 == 2) ? Q_DYADIC : 0;
+                q_valence_t val = (argc == 1) ? Q_MONADIC
+                                : (argc == 2) ? Q_DYADIC : 0;
                 if (val) row = q_registry_row_of(h, val);
             }
-        } else {
-            ret = q_err(QE_TYPE);
-            goto out;
         }
-        if (RAY_IS_ERR(fv)) { ret = fv; goto out; }
-
-        int64_t argc = n - 1;
-        ray_t* argv[EVAL_MAX_ARGS];
-        if (argc > EVAL_MAX_ARGS) {
-            ray_release(fv);
-            ret = q_err(QE_RANK);
-            goto out;
-        }
-        ray_t* err = eval_args_rtl(e + 1, argc, argv);
-        if (err) { ray_release(fv); ret = err; goto out; }
+        if (RAY_IS_ERR(fv)) { release_args(argv, argc); ret = fv; goto out; }
         ret = q_eval_apply(fv, row, argv, argc);
         release_args(argv, argc);
         ray_release(fv);
