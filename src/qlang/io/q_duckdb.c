@@ -379,7 +379,7 @@ static ray_t* qd_read_cells(ray_t* col, const qd_tmap_t* tm,
     void*     data     = QAPI.vector_get_data(dv);
     uint64_t* validity = QAPI.vector_get_validity(dv);
     for (duck_idx_t r = 0; r < n; r++) {
-        bool ok = duck_validity_ok(validity, r);
+        bool ok = q_duckdb_validity_ok(validity, r);
         switch (tm->ray_type) {
             case RAY_BOOL: {
                 if (!ok) { ray_release(col); return q_err(QE_DUCKDB); }
@@ -433,16 +433,16 @@ static ray_t* qd_read_cells(ray_t* col, const qd_tmap_t* tm,
             case RAY_SYM: {      /* descriptor-refined VARCHAR: intern; NULL
                                   * collapses to ` like '' */
                 const duck_string_t* s = &((const duck_string_t*)data)[r];
-                int64_t id = ok ? ray_sym_intern_runtime(duck_string_data(s),
-                                                         duck_string_len(s))
+                int64_t id = ok ? ray_sym_intern_runtime(q_duckdb_string_data(s),
+                                                         q_duckdb_string_len(s))
                                 : ray_sym_intern_runtime("", 0);
                 col = ray_vec_append(col, &id);
                 break;
             }
             case RAY_STR: {      /* VARCHAR -> charv cell; NULL -> "" */
                 const duck_string_t* s = ok ? &((const duck_string_t*)data)[r] : NULL;
-                ray_t* cell = ray_charv(s ? duck_string_data(s) : "",
-                                        s ? (int64_t)duck_string_len(s) : 0);
+                ray_t* cell = ray_charv(s ? q_duckdb_string_data(s) : "",
+                                        s ? (int64_t)q_duckdb_string_len(s) : 0);
                 if (!cell || RAY_IS_ERR(cell)) { ray_release(col);
                     return cell ? cell : q_err(QE_WSFULL); }
                 col = ray_list_append(col, cell);   /* retains */
@@ -454,8 +454,8 @@ static ray_t* qd_read_cells(ray_t* col, const qd_tmap_t* tm,
                 if (!ok) cell = ray_vec_new(RAY_BYTE_ONLY, 1);
                 else {
                     const duck_string_t* s = &((const duck_string_t*)data)[r];
-                    uint32_t len = duck_string_len(s);
-                    cell = len ? ray_vec_from_raw(RAY_BYTE_ONLY, duck_string_data(s), len)
+                    uint32_t len = q_duckdb_string_len(s);
+                    cell = len ? ray_vec_from_raw(RAY_BYTE_ONLY, q_duckdb_string_data(s), len)
                                : ray_vec_new(RAY_BYTE_ONLY, 1);
                 }
                 if (!cell || RAY_IS_ERR(cell)) { ray_release(col); return cell; }
@@ -1180,7 +1180,7 @@ static ray_t* qd_meta_wrap(ray_t** args, int64_t n) {
         if (tstr && !RAY_IS_ERR(tstr)) ray_release(tstr);
         return q_err(QE_WSFULL);
     }
-    return q_meta_assemble(cvec, tstr, fvec, avec);
+    return q_table_meta_assemble(cvec, tstr, fvec, avec);
 }
 
 /* set body over the flattened table: DDL + data + descriptor, ONE transaction. */
