@@ -26,6 +26,7 @@
 #include "lang/internal.h"
 #include "core/types.h"
 #include "core/pool.h"
+#include "core/rand.h"      /* ray_rand_below — the roll draw */
 #include "mem/sys.h"
 #include "ops/hash.h"
 #include "ops/internal.h"   /* col_propagate_str_pool */
@@ -2149,7 +2150,9 @@ ray_t* ray_reverse_fn(ray_t* x) {
  * Binary search
  * ══════════════════════════════════════════ */
 
-/* (rand n max) → vector of n random i64 in [0, max) */
+/* (rand n max) → vector of n random i64 in [0, max), drawn unbiased from the ONE
+ * rng owner (core/rand.h).  A raw `% max` skewed the low residues and, on a
+ * 15-bit CRT, could not reach past 32767 at all (openq 2026-08-10). */
 ray_t* ray_rand_fn(ray_t* a, ray_t* b) {
     if (!ray_is_atom(a) || !ray_is_atom(b)) return ray_error("type", "rand: count and max must be atoms, got %s and %s", ray_type_name(a->type), ray_type_name(b->type));
     int64_t n, mx;
@@ -2165,7 +2168,7 @@ ray_t* ray_rand_fn(ray_t* a, ray_t* b) {
     ray_t* vec = ray_vec_new(RAY_I64, n);
     if (RAY_IS_ERR(vec)) return vec;
     int64_t* d = (int64_t*)ray_data(vec);
-    for (int64_t i = 0; i < n; i++) d[i] = (int64_t)(rand() % mx);
+    for (int64_t i = 0; i < n; i++) d[i] = (int64_t)ray_rand_below((uint64_t)mx);
     vec->len = n;
     return vec;
 }
