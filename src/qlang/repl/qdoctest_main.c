@@ -188,11 +188,11 @@ static int ledger(const char* results_path) {
 
         char*  buf = NULL;
         size_t bsz = 0;
-        FILE*  mem = qdoc_memopen(&buf, &bsz);
+        FILE*  mem = q_qdoc_memopen(&buf, &bsz);
         qdoc_result_t r = { .examples = 0 };
         if (mem) {
             r = run_file(path, mem);
-            qdoc_memclose(mem, &buf, &bsz);
+            q_qdoc_memclose(mem, &buf, &bsz);
         }
 
         g_tot.examples += r.examples;

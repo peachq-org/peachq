@@ -43,9 +43,9 @@ qdoc_result_t q_qdoc_run_file_emit(const char* path, qdoc_mode_t mode,
  * statement seam printed, since the seam speaks FILE* and nothing else.
  * `open_memstream` where the libc has it; mingw has neither it nor fmemopen
  * nor fopencookie, so there the stream is a temp file read back at close.
- * *buf is owned by the caller and readable only AFTER qdoc_memclose, which is
+ * *buf is owned by the caller and readable only AFTER q_qdoc_memclose, which is
  * the one legal close (a bare fclose strands the temp file on Windows). */
-FILE* qdoc_memopen(char** buf, size_t* len);
-void  qdoc_memclose(FILE* f, char** buf, size_t* len);
+FILE* q_qdoc_memopen(char** buf, size_t* len);
+void  q_qdoc_memclose(FILE* f, char** buf, size_t* len);
 
 #endif /* QDOC_H */
