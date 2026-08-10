@@ -318,7 +318,7 @@ int q_view_intercept(ray_t* ast, const char* src, ray_t** out) {
     int seq = 0;
     if (e[0]->type == -RAY_SYM && e[0]->i64 == S->gcolon && n == 3) {
         asn = ast;
-    } else if (q_ast_is_seq_head(e[0]) && e[1] && e[1]->type == RAY_LIST &&
+    } else if (q_parse_is_seq_head(e[0]) && e[1] && e[1]->type == RAY_LIST &&
                ray_len(e[1]) == 3) {
         ray_t** a1 = (ray_t**)ray_data(e[1]);
         if (a1[0] && a1[0]->type == -RAY_SYM && a1[0]->i64 == S->gcolon) {
