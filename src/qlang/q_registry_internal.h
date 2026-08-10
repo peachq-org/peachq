@@ -202,9 +202,6 @@ ray_t* q_max2_wrap(ray_t* a, ray_t* b);                       /* used by: ops, r
 /* q_match_rec: declared in q_registry.h (env-safe reach) — used by: table, apply */
 ray_t* q_match_wrap(ray_t* a, ray_t* b);                      /* used by: registry, table */
 
-/* ---- defined in ops/q_rand.c ---- */
-void q_rand_seed(int64_t n);                                  /* used by: sys */
-
 /* ---- defined in ops/q_table.c ---- */
 ray_t* q_flip_wrap(ray_t* x);                                 /* used by: registry, list, math */
 ray_t* q_table_flatten(ray_t* y);                             /* used by: bang, join */

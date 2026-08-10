@@ -33,6 +33,7 @@
 #include "store/part.h"
 #include "core/ipc.h"
 #include "core/poll.h"
+#include "core/rand.h"  /* ray_rand_u64 — the guid bits */
 #include "core/timer.h"
 
 /* Forward decls: keep this TU decoupled from core/runtime.h — only
@@ -369,35 +370,11 @@ ray_t* ray_fs_list_fn(ray_t* x) {
     return result;
 }
 
-/* xorshift64* — ~1ns per 64-bit word, vs rand()'s ~10ns for 1 byte.
- * Per-thread state seeded once with the result of rand() to keep the
- * (guid n) sequence varying across program runs (rand() is itself
- * seeded by the runtime).  v4 UUID quality only requires the version
- * and variant nibbles to be correct; the remaining 122 bits are
- * pseudo-random and xorshift64* is more than sufficient. */
-static __thread uint64_t guid_rng_state = 0;
-
-static inline uint64_t guid_rng_next(void) {
-    uint64_t x = guid_rng_state;
-    if (RAY_UNLIKELY(x == 0)) {
-        /* Mix rand() into a non-zero seed.  rand() returns ≤ 31 bits, so
-         * combine three calls plus an address-derived constant for
-         * thread-distinct initialisation. */
-        uint64_t a = (uint64_t)rand();
-        uint64_t b = (uint64_t)rand();
-        uint64_t c = (uint64_t)rand();
-        x = (a << 33) ^ (b << 17) ^ c ^ 0x9E3779B97F4A7C15ULL;
-        if (x == 0) x = 0x9E3779B97F4A7C15ULL;
-    }
-    x ^= x >> 12;
-    x ^= x << 25;
-    x ^= x >> 27;
-    guid_rng_state = x;
-    return x * 0x2545F4914F6CDD1DULL;
-}
-
 /* (guid n) -> generate n random GUIDs as GUID vector.
- * v4 UUID format: 122 random bits + 4 version-bits (0100) + 2 variant-bits (10). */
+ * v4 UUID format: 122 random bits + 4 version-bits (0100) + 2 variant-bits (10).
+ * Draws from the ONE rng owner (core/rand.h), which is what lets `\S` reproduce
+ * a guid sequence; the private xorshift64* this used to own could never be
+ * reached by a seed (openq 2026-08-10). */
 ray_t* ray_guid_fn(ray_t* n_arg) {
     if (!n_arg || !is_numeric(n_arg))
         return ray_error("type", "guid expects a numeric count, got %s", ray_type_name(n_arg->type));
@@ -410,8 +387,8 @@ ray_t* ray_guid_fn(ray_t* n_arg) {
     /* Two 64-bit RNG calls per UUID give 16 random bytes; then we just
      * stamp the version/variant nibbles. */
     for (int64_t i = 0; i < n; i++) {
-        uint64_t lo = guid_rng_next();
-        uint64_t hi = guid_rng_next();
+        uint64_t lo = ray_rand_u64();
+        uint64_t hi = ray_rand_u64();
         memcpy(data + i * 16, &lo, 8);
         memcpy(data + i * 16 + 8, &hi, 8);
         data[i * 16 + 6] = (data[i * 16 + 6] & 0x0F) | 0x40;  /* version 4 */
