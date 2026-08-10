@@ -8,6 +8,7 @@
 #include "qlang/io/q_duckdb.h" /* q_duckdb_register — the .duckdb.i.* natives */
 #include "qlang/io/q_conn.h"   /* q_conn_pq_register — the .pq.i.conns native */
 #include "qlang/io/q_ffi.h"    /* q_ffi_register — the .ffi.i.* natives */
+#include "qlang/ops/q_regex.h" /* q_regex_register — the .regexp.i.* natives */
 #include "qlang/lib_gen.h"     /* OPENQ_LIB_BOOTSTRAP — the codegen'd lib/ bundle */
 #include <stdio.h>
 
@@ -15,5 +16,6 @@ void q_pq_load(void) {
     q_duckdb_register();   /* before the bundle: lib/duckdb.q hooks call these */
     q_conn_pq_register();
     q_ffi_register();
+    q_regex_register();
     q_ctx_run_src(OPENQ_LIB_BOOTSTRAP, stdout, stderr);
 }
