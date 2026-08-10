@@ -149,6 +149,9 @@
  * `atomic` at STRING granularity — the elementwise unit is the whole string,
  * now a RAY_CHARV vector (string-C3; this audit predates C3 and is pure
  * metadata).  ss/ssr consume a whole string as a search domain -> `none`.
+ * rlike -> `none` for the same reason like is: a string IS a char vector, so no
+ * lift law can tell one subject from a collection of them, and the verb owns its
+ * own iteration (a string-boundary exception-catalogue member, q_regex.c).
  * Self-distributing exception: `$` is family `none` because it is MULTI-CONCEPT
  * (Cast/Tok/Pad/mmu/enum) — one glyph, no one lift law.  It receives WHOLE args
  * and each overload recurses with its OWN boundary (Cast leaves at typed
@@ -402,6 +405,9 @@ static const q_op_t Q_OPS[] = {
     { "like",    QLEX_KW_INFIX,  QR_NONE,                      QR_FN2("like", q_like_wrap), NULL, 1, 0, "none", NULL, QKOP(25) },
     { "ss",      QLEX_KW_INFIX,  QR_NONE,                      QR_FN2("ss", q_ss_wrap), NULL, 1, 0, "none", NULL, QKOP(27) },
     { "ssr",     QLEX_KW_PREFIX, QR_ENV("ssr"),                QR_NONE,           NULL, 1, 0, "none", NULL },
+    /* a peachq extension, so no kdb primitive code: RE2 partial match
+     * (user-docs/regex.md).  `.regexp.*` is stdlib q and has no row. */
+    { "rlike",   QLEX_KW_INFIX,  QR_NONE,                      QR_FN2("rlike", q_rlike_wrap), NULL, 1, 0, "none", NULL },
     { "show",    QLEX_KW_PREFIX, QR_ENV("show"),               QR_NONE,           NULL, 1, 1, "none", NULL },
     { "system",  QLEX_KW_PREFIX, QR_ENV("system"),             QR_NONE,           NULL, 1, 1, "none", NULL },
     /* `exit` is capability-gated so doctest/wasm runtimes survive it. */

@@ -53,6 +53,29 @@ ray_t* q_str_of_charv(ray_t* x);
  * char atom.  Borrowed pointer valid while x lives; false = not text. */
 bool q_str_text_bytes(ray_t* x, const char** p, int64_t* n);
 
+/* The same, widened to a SYM atom (which reads as its string, the null symbol
+ * as "") — "a symbol or character data is one subject", the rule the matching
+ * verbs share: like's glob, and rlike/.regex's patterns and subjects. */
+bool q_str_subject_bytes(ray_t* x, const char** p, int64_t* n);
+
+/* True iff x iterates as MANY subjects instead of being one piece of text: a
+ * general list, a symbol vector, a physical STR column (ref/like.md "Implicit
+ * iteration").  A charv vector is ONE subject, which is the whole subtlety. */
+bool q_str_subject_many(ray_t* x);
+
+/* THE implicit-iteration home for a per-subject function — `like`, `rlike` and
+ * every `.regexp` verb share it, so distributing over a collection is ONE call
+ * with the pattern compiled once rather than a q-level dispatch per element.
+ * A DICT keeps its keys and maps its values; a collection maps elementwise and
+ * collapses a homogeneous atom run; one piece of text goes straight to `one`.
+ * Everything else — a table, a nested collection, a non-text element — reaches
+ * `one`, whose 'type is the answer.  Which is why nesting is the CALLER's call:
+ * pass a re-entrant `one` to recurse (like), a strict one to reject (regexp).
+ * `empty_tag` types the answer for a collection of NONE, where collapse has
+ * nothing to infer from; 0 means a general list. */
+ray_t* q_str_subject_map(ray_t* x, ray_t* (*one)(ray_t* e, void* ctx), void* ctx,
+                         int8_t empty_tag);
+
 /* Boundary-out walk: CONSUMES r, returns owned.  -RAY_STR atom -> charv;
  * RAY_STR vector -> 0h list of charv; LIST/DICT values converted (in place
  * only at rc==1); TABLE (incl. keyed-table value side) passes untouched. */

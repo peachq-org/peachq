@@ -135,7 +135,7 @@ Q_MAIN_OBJ = $(BUILD_DIR)/src/qlang/repl/qmain.o
 DEPS = $(LIB_OBJ:.o=.d) $(Q_MAIN_OBJ:.o=.d)
 
 .DEFAULT_GOAL := all
-all: git-merge-drivers $(Q_TARGET)
+all: git-merge-drivers $(Q_TARGET) $(RE2_MODULE)
 
 # `merge=ours` on test/observed/** (.gitattributes) is NOT a git built-in the
 # way `union` is — without this per-clone config the attribute is silently
@@ -180,6 +180,44 @@ $(BUILD_DIR)/%.o: %.c
 
 $(Q_TARGET): $(LIB_OBJ) $(Q_MAIN_OBJ)
 	$(CC) $(CFLAGS) -o $@ $(LIB_OBJ) $(Q_MAIN_OBJ) $(LIBS) $(LDFLAGS)
+
+# --- libpqre2: the dlopen'd RE2 module (user-docs/regex.md) --------------------
+# The only C++ in the tree, fenced into its own shared object BY DESIGN: `./q`
+# stays pure C17 and links no libstdc++, and a missing module is answered with
+# 'regex rather than a broken binary.  So this is never a prerequisite of
+# $(Q_TARGET) — it is built alongside it, and only where a C++ compiler exists
+# (RE2_MODULE is empty otherwise, which is exactly what "C++ is optional" means).
+# The engine finds it on the q_re2.c ladder: $PEACHQ_RE2_LIB, $QHOME, the exe
+# dir (here), then the system path.
+CXX         ?= g++
+# The filename is the LOADER's, not a choice: q_re2.c's RE2_LIB_BASENAME is what
+# gets dlopen'd, so building libpqre2.so on a host that looks for a .dylib would
+# ship a module nothing can find.
+RE2_TARGET   = $(if $(filter Darwin,$(UNAME_S)),libpqre2.dylib,libpqre2.so)
+RE2_MODULE  := $(if $(shell command -v $(CXX) 2>/dev/null),$(RE2_TARGET),)
+RE2_SRC      = $(wildcard third_party/re2/re2/*.cc third_party/re2/util/*.cc)
+RE2_OBJ      = $(addprefix $(BUILD_DIR)/,$(RE2_SRC:.cc=.o)) \
+               $(BUILD_DIR)/src/qlang/io/q_re2_shim.o
+# -fvisibility=hidden keeps RE2 private: only the seven PQRE2_API entry points
+# are exported.  c++17 over upstream's c++11 — the shim uses nothing newer, but
+# the vendored sources build clean either way and c++17 is the tree's baseline.
+RE2_CXXFLAGS = -std=c++17 -O2 -fPIC -fvisibility=hidden -Ithird_party/re2 -Isrc
+
+$(BUILD_DIR)/third_party/re2/%.o: third_party/re2/%.cc
+	@mkdir -p $(dir $@)
+	$(CXX) -c $(RE2_CXXFLAGS) -w $(DEPFLAGS) -o $@ $<
+
+$(BUILD_DIR)/src/qlang/io/%.o: src/qlang/io/%.cc
+	@mkdir -p $(dir $@)
+	$(CXX) -c $(RE2_CXXFLAGS) $(WARNS) $(DEPFLAGS) -o $@ $<
+
+# The pin check runs at every relink: a re-vendored tree that still claims the
+# old digest fails HERE, not silently at match time (tools/re2-pin.sh).
+$(RE2_TARGET): $(RE2_OBJ)
+	@tools/re2-pin.sh
+	$(CXX) -shared -o $@ $(RE2_OBJ) -lpthread
+
+RE2_DEPS = $(RE2_OBJ:.o=.d)
 
 # --- Windows cross-build (mingw-w64): make win --------------------------------
 # RAY_OS_WINDOWS on the command line because some files test it before the
@@ -247,7 +285,7 @@ win:
 
 clean::
 	-rm -rf $(BUILD_DIR)
-	-rm -f $(Q_TARGET) q.exe
+	-rm -f $(Q_TARGET) q.exe $(RE2_TARGET)
 
 version:
 	@echo $(RAY_VERSION)
@@ -260,3 +298,4 @@ version:
 -include Makefile.dev
 
 -include $(DEPS)
+-include $(RE2_DEPS)

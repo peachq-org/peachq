@@ -18,6 +18,7 @@ typedef enum {
     /* ---- OURS: admitted non-kdb classes ---- */
     QE_OOM, QE_IO, QE_NAME, QE_INDEX, QE_RESERVE, QE_INIT,
     QE_RANGE, QE_SCHEMA, QE_CORRUPT, QE_CANCEL, QE_VERSION, QE_DUCKDB,
+    QE_REGEX,
     QE_SIGNAL, QE_RETURN,   /* always payload-carrying; sdata never displayed */
     QE__COUNT
 } q_err_e;
