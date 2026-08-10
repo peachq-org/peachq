@@ -89,6 +89,12 @@ ray_t* q_registry_lookup_row(int64_t sym_id, q_valence_t valence,
  * then dispatches on the value's own attrs (RAY_FN_ATOMIC) alone. */
 const struct q_op* q_registry_row_of(const ray_t* value, q_valence_t valence);
 
+/* Manifest row for an ADVERB OPERAND.  `+/` derives from the dyad, so the
+ * dyadic reading wins — but a monad-only verb (`sum`, `avg`, `first`) has no
+ * dyadic entry, and answering NULL there drops the row's `family` and with it
+ * the container lift the per-item apply needs (`sum each t`). */
+const struct q_op* q_registry_operand_row(const ray_t* value);
+
 /* True iff sym_id names a manifest row (any valence, values or not) — the
  * sym-id twin of q_ops_is_reserved, O(1), for eval's assign gates.  False
  * before q_registry_init. */
