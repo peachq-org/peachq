@@ -32,6 +32,8 @@ ray_t* q_maxs_wrap(ray_t* x);
 ray_t* q_mins_wrap(ray_t* x);
 ray_t* q_avgs_wrap(ray_t* x);
 ray_t* q_ratios_wrap(ray_t* x);
+ray_t* q_first_wrap(ray_t* x);
+ray_t* q_last_wrap(ray_t* x);
 ray_t* q_prd_wrap(ray_t* x);
 ray_t* q_wavg_wrap(ray_t* x, ray_t* y);
 ray_t* q_msum_wrap(ray_t* n, ray_t* x);
