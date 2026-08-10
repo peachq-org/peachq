@@ -1109,7 +1109,7 @@ static ray_t* iter_call(ray_t* it, ray_t** args, int64_t n) {
     if (n != 1) return q_err(QE_RANK);
     if (!args[0]) return q_eval_apply_proj_new(it, NULL, args, n, 1);
     const q_op_t* frow = q_eval_apply_is_fnval(args[0])
-                             ? q_registry_row_of(args[0], Q_DYADIC) : NULL;
+                             ? q_registry_operand_row(args[0]) : NULL;
     return q_eval_apply_deriv_new(q_eval_apply_iter_id(it), args[0], frow);
 }
 
@@ -1227,7 +1227,7 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
         if (adv >= 0) {
             const q_op_t* frow = NULL;
             if (q_eval_apply_is_fnval(args[0]))
-                frow = q_registry_row_of(args[0], Q_DYADIC);
+                frow = q_registry_operand_row(args[0]);
             return q_adverb_apply(adv, args[0], frow, args + 1, 1);
         }
     }

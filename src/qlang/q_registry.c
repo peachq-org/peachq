@@ -592,6 +592,11 @@ const q_op_t* q_registry_row_of(const ray_t* value, q_valence_t valence) {
     return s ? s->row : NULL;
 }
 
+const q_op_t* q_registry_operand_row(const ray_t* value) {
+    const q_op_t* row = q_registry_row_of(value, Q_DYADIC);
+    return row ? row : q_registry_row_of(value, Q_MONADIC);
+}
+
 bool q_registry_provenance(const ray_t* value, q_provenance_t* out) {
     /* Wrapper values are UNIQUE objects (born rc=1 per row) — pointer identity
      * is exact for them.  Pass-through/rename values ARE the shared env builtin
