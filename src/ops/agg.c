@@ -551,7 +551,7 @@ ray_t* ray_first_fn(ray_t* x) {
         AGG_VEC_VIA_DAG(x, ray_first);
     }
     if (!is_list(x)) return ray_error("type", "first: unsupported type %s", ray_type_name(x->type));
-    if (ray_len(x) == 0) return ray_list_new(0);  /* ()~first () (kdb) */
+    if (ray_len(x) == 0) return ray_typed_null(-RAY_I64);
     ray_t* elem = ((ray_t**)ray_data(x))[0];
     ray_retain(elem);
     return elem;
@@ -591,7 +591,7 @@ ray_t* ray_last_fn(ray_t* x) {
     }
     if (!is_list(x)) return ray_error("type", "last: unsupported type %s", ray_type_name(x->type));
     int64_t len = ray_len(x);
-    if (len == 0) return ray_list_new(0);         /* ()~last () (kdb) */
+    if (len == 0) return ray_typed_null(-RAY_I64);
     ray_t* elem = ((ray_t**)ray_data(x))[len - 1];
     ray_retain(elem);
     return elem;
