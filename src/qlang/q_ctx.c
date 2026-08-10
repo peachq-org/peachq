@@ -6,7 +6,7 @@
 
 #include "qlang/q_ctx.h"
 #include <ctype.h>           /* isalpha — the language-prefix scan */
-#include "qlang/base/q_err.h"     /* q_err_text / q_err_drop — the statement-entry backstop */
+#include "qlang/base/q_err.h"     /* q_err / q_err_drop — the statement-entry backstop */
 #include "qlang/parse/q_parse.h"
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_dbg.h"     /* statement stash + `\e` trace display */
@@ -74,6 +74,21 @@ static void ctx_statement_end(void) {
     if (q_sys_gc_mode()) ray_heap_gc();
 }
 
+/* THE error display: ONE home, ONE form for every statement error — kdb's
+ * `'class` line plus the numbered frames (q_dbg_print_trace).  `\e` selects
+ * CONTROL FLOW (abort / suspend / collect — basics/debug.md), never rendering,
+ * so `\e 0` and `\e 1` show the identical text.  A debugger-reported error is
+ * silent (kdb: after `\` the console just returns to its prompt).  Consumes
+ * the error. */
+static void ctx_show_err(FILE* out, FILE* err, ray_t* e) {
+    if (!q_dbg_reported(e)) {
+        fflush(out);               /* echo/prompt land before the trace */
+        q_dbg_print_trace(err, e);
+    }
+    q_err_drop();
+    ray_error_free(e);
+}
+
 /* ===== Shared line processing =====
  *
  * Parse + evaluate + print a single input line.  Used verbatim by both the
@@ -111,14 +126,7 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
             fputs(buf, out);
             if (buf[strlen(buf) - 1] != '\n') fputc('\n', out);
         }
-        if (sr) {
-            int64_t tn = 0;
-            const char* text = q_err_text(sr, &tn);
-            fprintf(err, "error: %.*s\n",
-                    (text && tn) ? (int)tn : 6, (text && tn) ? text : "syscmd");
-            q_err_drop();
-            ray_error_free(sr);
-        }
+        if (sr) ctx_show_err(out, err, sr);
         fflush(out);
         ctx_statement_end();   /* a `\g 1` line collects at its own end (kdb: set runs gc) */
         q_dbg_statement_end(dbg_prev);
@@ -127,14 +135,9 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
 
     ray_t* ast = (lang && lang != 'q') ? q_ctx_lang_tree(lang, s, (int64_t)n)
                                        : q_parse(s);
-    if (RAY_IS_ERR(ast)) {
-        int64_t tn = 0;
-        const char* text = q_err_text(ast, &tn);   /* 'dup dies at parse (qsql.md:168) */
-        fprintf(err, "error: %.*s\n",
-                (text && tn) ? (int)tn : 5, (text && tn) ? text : "parse");
-        q_err_drop();
+    if (RAY_IS_ERR(ast)) {                     /* 'dup dies at parse (qsql.md:168) */
         int code = ast->aux[0] ? (int)ast->aux[0] : (int)QE_PARSE + 1;
-        ray_error_free(ast);
+        ctx_show_err(out, err, ast);
         q_dbg_statement_end(dbg_prev);
         return code;
     }
@@ -165,28 +168,15 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
         ray_eval_clear_interrupt();
         ray_term_clear_interrupt();
         if (RAY_IS_ERR(r)) ray_error_free(r); else ray_release(r);
-        fprintf(err, "error: stop\n");
+        q_err_drop();              /* the discarded error's text never re-renders */
+        ctx_show_err(out, err, q_err(QE_STOP));
         ctx_statement_end();
         q_dbg_statement_end(dbg_prev);
         return 0;
     }
 
     if (RAY_IS_ERR(r)) {
-        /* `\e 0` keeps the legacy one-liner (the banked-transcript display);
-         * `\e 1|2` shows 'class + frames; a debugger-reported error is silent
-         * (kdb: after `\` the console just returns to its prompt) */
-        if (q_dbg_reported(r)) {
-        } else if (q_sys_err_trap_mode() != 0) {
-            fflush(out);               /* echo/prompt land before the trace */
-            q_dbg_print_trace(err, r);
-        } else {
-            int64_t tn = 0;
-            const char* text = q_err_text(r, &tn);
-            fprintf(err, "error: %.*s\n",
-                    (text && tn) ? (int)tn : 4, (text && tn) ? text : "eval");
-        }
-        q_err_drop();
-        ray_error_free(r);
+        ctx_show_err(out, err, r);
         ctx_statement_end();
         q_dbg_statement_end(dbg_prev);
         return 0;
