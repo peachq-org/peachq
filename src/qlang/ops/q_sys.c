@@ -30,6 +30,7 @@
 #include "core/poll.h"        /* ray_poll_get / deregister — `\p 0W`/`\p 0`; poll->timers */
 #include "core/runtime.h"     /* ray_runtime_get_poll — the runtime event poll */
 #include "core/numparse.h"    /* ray_parse_i64 — the shared engine int parser (reuse) */
+#include "core/rand.h"        /* ray_rand_seed — `\S` re-seeds THE stream */
 #include "core/timer.h"       /* ray_timers_create/add/del — `\t N` timer heap */
 #include "core/profile.h"     /* ray_profile_now_ns — `\t`/`\ts` wall clock */
 #include "lang/eval.h"        /* ray_eval / ray_eval_get_restricted — timing + guard */
@@ -44,7 +45,7 @@
 #include <limits.h>          /* PATH_MAX */
 #include <sys/stat.h>        /* stat / S_ISREG — `\l` regular-file gate */
 #include "qlang/q_registry.h" /* q_str_text_bytes / q_str_charv_out — charv text accessors */
-#include "qlang/q_registry_internal.h" /* q_rand_seed — the rng stream home */
+#include "qlang/q_registry_internal.h" /* q_exit_wrap + the q_type_* atom helpers */
 #ifndef RAY_OS_WINDOWS
 #include <sys/wait.h>        /* WIFEXITED / WEXITSTATUS — shell-capture status */
 #endif                       /* mingw has no <sys/wait.h>; _pclose gives the code directly */
@@ -97,16 +98,16 @@ static ray_t* ctx_switch(const char* name, size_t len) {
 }
 
 /* ---- `\S` random-seed state (moved from q_ns.c; \S is its only consumer) ----
- * The rand() stream CONTRACT (constant default seed, one stream, the guid
- * caveat) lives with q_rand_seed in ops/q_rand.c; \S here is the command
- * surface.  `\S` displays the LAST-INITIALIZED seed, never evolving rng
- * state; reading the live state (`\S 0N`, V3.6) has no libc counterpart
- * -> 'nyi. */
+ * kdb re-initializes its rng to the CONSTANT -314159i at startup
+ * (basics/syscmds.md) so scripts using Roll/Deal/rand repeat; the stream it
+ * seeds is core/rand.h's, shared by every `?` arm including guid.  `\S`
+ * displays the LAST-INITIALIZED seed, never evolving rng state; reading the
+ * live state (`\S 0N`, V3.6) is 'nyi. */
 static int32_t g_last_seed = -314159;
 
 void q_sys_seed_init(void) {
     g_last_seed = -314159;
-    q_rand_seed(-314159);
+    ray_rand_seed(-314159);
 }
 
 /* ---- Tier-2 config state (kdb `\`-command get/set) -------------------------
@@ -273,7 +274,7 @@ static ray_t* h_S(const char* arg, size_t alen) {
      * 2026-07-09). */
     if (v <= INT32_MIN || v > INT32_MAX)
         return q_err(QE_PARSE);
-    q_rand_seed(v);                              /* `\S n` — re-initialize */
+    ray_rand_seed(v);                            /* `\S n` — re-initialize */
     g_last_seed = (int32_t)v;
     return NULL;                                 /* silent, like `\d ns` */
 }
