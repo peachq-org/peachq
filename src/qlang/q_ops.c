@@ -191,7 +191,7 @@ static const q_op_t Q_OPS[] = {
      * family is the dyadic Add. */
     { "+",     QLEX_GLYPH,     QR_FN1("flip", q_flip_wrap),    QR_ENV("+"),       NULL, 1, 0, "atomic", "sum", .mono_scan = "sums", QKOP(1) },
     { "-",     QLEX_GLYPH,     QR_FN1A("neg", q_neg_wrap),     QR_ENV("-"),       NULL, 1, 0, "atomic", NULL, QKOP(2) },
-    { "*",     QLEX_GLYPH,     QR_ENV("first"),                QR_ENV("*"),       NULL, 1, 0, "atomic", "prd", .mono_scan = "prds", QKOP(3) },
+    { "*",     QLEX_GLYPH,     QR_FN1("first", q_first_wrap),  QR_ENV("*"),       NULL, 1, 0, "atomic", "prd", .mono_scan = "prds", QKOP(3) },
     { "%",     QLEX_GLYPH,     QR_QSRC("reciprocal"),          QR_ENV("/"),       NULL, 1, 0, "atomic", NULL, QKOP(4) },
     { "<",     QLEX_GLYPH,     QR_FN1("iasc", q_iasc_wrap),    QR_ENV("<"),       NULL, 1, 0, "atomic", NULL, QKOP(9) },
     { ">",     QLEX_GLYPH,     QR_FN1("idesc", q_idesc_wrap),  QR_ENV(">"),       NULL, 1, 0, "atomic", NULL, QKOP(10) },
@@ -347,8 +347,8 @@ static const q_op_t Q_OPS[] = {
      * (`til 1b` -> ,0) where base ray_til_fn is int-only. */
     { "til",     QLEX_KW_PREFIX, QR_FN1("til", q_til_wrap),    QR_NONE,           NULL, 1, 0, "none", NULL, QKOP(16) },
     { "count",   QLEX_KW_PREFIX, QR_ENV("count"),              QR_NONE,           NULL, 1, 0, "none",      NULL, QKOP(13) },
-    { "first",   QLEX_KW_PREFIX, QR_ENV("first"),              QR_NONE,           NULL, 1, 0, "aggregate", NULL, QKOP(3) },
-    { "last",    QLEX_KW_PREFIX, QR_ENV("last"),               QR_NONE,           NULL, 1, 0, "aggregate", NULL, QKOP(24) },
+    { "first",   QLEX_KW_PREFIX, QR_FN1("first", q_first_wrap),QR_NONE,           NULL, 1, 0, "aggregate", NULL, QKOP(3) },
+    { "last",    QLEX_KW_PREFIX, QR_FN1("last", q_last_wrap),  QR_NONE,           NULL, 1, 0, "aggregate", NULL, QKOP(24) },
     /* L4 index: a shift IS a gather by shifted indices (spec §2). `next`/`prev`
      * are its unit shifts, self-hosted in q.q — no rows. */
     { "xprev",   QLEX_KW_INFIX,  QR_NONE,                      QR_FN2("xprev", q_xprev_wrap), NULL, 1, 0, "index", NULL },
