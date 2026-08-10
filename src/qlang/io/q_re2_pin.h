@@ -6,10 +6,9 @@
  * matching a peachq predicate is meant to agree with — plus a digest of the
  * tree itself, which is what makes silent drift detectable at all.
  *
- * Two consumers, deliberately: q_re2_shim.cc compiles PQRE2_DUCKDB_PIN into
- * the module (so a stale module is refused at load), and tools/re2-pin.sh
- * checks PQRE2_SRC_SHA256 against the tree at every relink of the module.
- * Bumping RE2 means editing both lines here — see
+ * Two consumers, deliberately: PQRE2_DUCKDB_PIN is what `.regexp.version`
+ * reports, and tools/re2-pin.sh checks PQRE2_SRC_SHA256 against the tree at
+ * every rebuild of the RE2 archive.  Bumping RE2 means editing both lines — see
  * third_party/re2/README.openq.md for the recipe. */
 #ifndef Q_RE2_PIN_H
 #define Q_RE2_PIN_H
