@@ -34,7 +34,7 @@ endif
 # q_gz.c hand-rolls RFC 1952 framing: miniz has no gzip windowBits+16 mode.
 RAY_MINIZ_DEFS = -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_ARCHIVE_WRITING_APIS -DMINIZ_NO_STDIO
 
-BUILD_DIR = build
+BUILD_DIR ?= build
 # Generated headers land in $(BUILD_DIR)/gen (never the source tree); its -I
 # sits AHEAD of -Isrc so every `#include "qlang/X_gen.h"` line stays byte-identical.
 GEN_DIR = $(BUILD_DIR)/gen

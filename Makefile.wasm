@@ -2,18 +2,27 @@
 # Activate emscripten first: . ~/emsdk/emsdk_env.sh && make -f Makefile.wasm wasm
 
 CC  = emcc
+CXX = em++
+AR  = emar
 STD = c17
+# Objects under a root of their own: a wasm object and a native object of the
+# same TU must never claim one path. Set BEFORE the include, so every rule the
+# root Makefile defines is read at this root.
+BUILD_DIR = build/wasm
 
-# The build's source set and codegen; below is only how the BROWSER build differs.
+# The source set, the codegen, and the object/archive rules; below is only how
+# the BROWSER build differs.
 include Makefile
 .DEFAULT_GOAL := wasm
 
 # ipc.c is the TCP server: uncompilable under the wasm sysroot, unreachable from
-# the q eval path. wasm/ipc_stub.c satisfies the symbols the retained TUs need,
-# and wasm/re2_stub.c does the same for the C++ RE2 shim this C-only build omits.
-LIB_SRC = $(filter-out src/core/ipc.c, $(RAY_LIB_SRC))
-GLUE_SRC = wasm/q_wasm.c wasm/ipc_stub.c wasm/re2_stub.c
-SRC      = $(LIB_SRC) $(GLUE_SRC) $(RAY_VENDOR_SRC)
+# the q eval path. wasm/ipc_stub.c satisfies the symbols the retained TUs need.
+# libffi goes with it — its config headers are generated per NATIVE target, and
+# without RAY_FFI q_ffi.c is already the 'nyi stub.
+LIB_SRC  = $(filter-out src/core/ipc.c, $(RAY_LIB_SRC))
+GLUE_SRC = wasm/q_wasm.c wasm/ipc_stub.c
+SRC      = $(LIB_SRC) $(GLUE_SRC) $(filter-out third_party/libffi/%,$(RAY_VENDOR_SRC))
+QFFI_DEF =
 
 TARGET = peachq
 OUTDIR = wasm
@@ -35,6 +44,14 @@ CFLAGS = -Wall -std=$(STD) -O3 -msimd128 \
   -fassociative-math -ftree-vectorize -fno-math-errno \
   -funsafe-math-optimizations -funroll-loops
 
+# RE2 is the tree's only C++, and clang rejects -std=c17 on C++ input: the C and
+# the C++ compile separately (the root Makefile's own rules, through $(CXX)) and
+# the LINK is em++, which is what brings libc++ in. No -fPIC — nothing here is a
+# shared object.
+RE2_CXXFLAGS = -std=c++17 -O3 -msimd128 -fvisibility=hidden -Ithird_party/re2 -Isrc
+
+WASM_OBJ = $(addprefix $(BUILD_DIR)/,$(SRC:.c=.o))
+
 # malloc/free are exported because ccall's string marshalling needs them;
 # MODULARIZE emits a createPeachQ factory that loads in Node and the browser.
 #   --no-entry              — the glue has no main(); runtime inits lazily.
@@ -46,11 +63,22 @@ EMFLAGS = \
   -s EXPORT_NAME=createPeachQ \
   --no-entry
 
-wasm: $(RAY_GEN_HDRS) $(SRC)
+wasm: $(OUTDIR)/$(TARGET).js
+
+$(OUTDIR)/$(TARGET).js: $(WASM_OBJ) $(RE2_LIB)
 	@mkdir -p $(OUTDIR)
-	$(CC) $(CFLAGS) $(DEFS) $(INCLUDES) -o $(OUTDIR)/$(TARGET).js $(SRC) $(EMFLAGS)
+	$(CXX) -O3 -o $@ $(WASM_OBJ) $(RE2_LIB) $(EMFLAGS)
+
+# The emscripten glue uses syntax a pre-v18 node cannot parse; emsdk_env.sh
+# exports its own node as EMSDK_NODE.
+NODE ?= $(if $(EMSDK_NODE),$(EMSDK_NODE),node)
+
+wasm-smoke: $(OUTDIR)/$(TARGET).js
+	$(NODE) $(OUTDIR)/smoke.js
 
 clean::
 	-rm -f $(OUTDIR)/$(TARGET).js $(OUTDIR)/$(TARGET).wasm $(OUTDIR)/$(TARGET).data
 
-.PHONY: wasm clean
+.PHONY: wasm wasm-smoke clean
+
+-include $(WASM_OBJ:.o=.d)
