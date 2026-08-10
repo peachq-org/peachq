@@ -10,11 +10,6 @@
 
 .massive.setKey:{.massive.apikey::x;};
 
-/ .h.hu's own map, indexed by CODE: the char-keyed lookup never matches " "
-/ (PLAN.md defect), silently leaving spaces unescaped.  Delete once find is fixed.
-.massive.i.esc:value .h.hug .h.sc;
-.massive.enc:{[s] i:"i"$s; raze .massive.i.esc i+256*i<0};
-
 .massive.i.fmt:{[v] t:type v;
   $[10h=t;  v;
     -11h=t; string v;
@@ -24,10 +19,10 @@
     0h=t;   "," sv .massive.i.fmt each v;
     string v]};
 
-.massive.qs:{[d] "&" sv {[k;v] (.massive.enc string k),"=",.massive.enc .massive.i.fmt v}'[key d;value d]};
+.massive.qs:{[d] "&" sv {[k;v] (.h.hu string k),"=",.h.hu .massive.i.fmt v}'[key d;value d]};
 .massive.i.sep:{[u] u,$[any "?"=u;"&";"?"]};
 .massive.i.absurl:{[p] $[p like "http*";p;.massive.url,p]};
-.massive.i.withkey:{[u] (.massive.i.sep u),"apiKey=",.massive.enc .massive.apikey};
+.massive.i.withkey:{[u] (.massive.i.sep u),"apiKey=",.h.hu .massive.apikey};
 
 / Statuses the API returns on a good answer; anything else is signalled verbatim.
 .massive.ok:`OK`DELAYED;
