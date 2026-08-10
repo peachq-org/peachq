@@ -44,7 +44,8 @@
  * vtable keyed by collection type so the same set can probe a typed
  * vec or a boxed RAY_LIST without per-call boxing on the typed path.
  * Nulls aggregate into a separate null-bucket flag, mirroring atom_eq
- * (all nulls compare equal regardless of typed-null vs RAY_NULL_OBJ).
+ * (all OUT-OF-BAND nulls compare equal regardless of typed-null vs
+ * RAY_NULL_OBJ; a byte lane has none — see atom_is_oob_null).
  *
  * Load factor capped at 0.5; growth doubles capacity.
  * ══════════════════════════════════════════ */
@@ -716,8 +717,8 @@ ray_t* ray_apply_fn(ray_t** args, int64_t n) {
 
 /* Helper: compare two atoms for equality (value-based) */
 int atom_eq(ray_t* a, ray_t* b) {
-    int a_null = RAY_ATOM_IS_NULL(a);
-    int b_null = RAY_ATOM_IS_NULL(b);
+    int a_null = atom_is_oob_null(a);
+    int b_null = atom_is_oob_null(b);
     if (a_null && b_null) return 1;
     if (a_null || b_null) return 0;
     if (a->type != b->type) {
@@ -1136,7 +1137,7 @@ ray_t* ray_in_fn(ray_t* val, ray_t* vec) {
     if (ray_is_vec(vec) && ray_is_atom(val)) {
         int64_t len = vec->len;
         bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) != 0;
-        bool val_null = RAY_ATOM_IS_NULL(val);
+        bool val_null = atom_is_oob_null(val);
         if (has_nulls) {
             for (int64_t i = 0; i < len; i++) {
                 if (ray_vec_is_null(vec, i)) {
@@ -1952,7 +1953,7 @@ ray_t* ray_find_fn(ray_t* vec, ray_t* val) {
     if (ray_is_vec(vec)) {
         int64_t len = vec->len;
         bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) != 0;
-        bool val_null = RAY_ATOM_IS_NULL(val);
+        bool val_null = atom_is_oob_null(val);
 
         /* Hash-index fast path: integer-family needle against an indexed
          * integer-family column without nulls.  Float and cross-family
