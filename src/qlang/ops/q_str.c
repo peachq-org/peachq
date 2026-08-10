@@ -495,8 +495,7 @@ static bool str_pat_fixed(const char* p, size_t pn) {
     return pn > 0 && str_pat_stars(p, pn, at, 1) == 0;
 }
 
-/* The text of a value that IS one string — charv, char atom, or sym atom. */
-static bool str_pat_text(ray_t* x, const char** p, int64_t* n) {
+bool q_str_subject_bytes(ray_t* x, const char** p, int64_t* n) {
     if (x && x->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(x->i64);               /* borrowed */
         *p = s ? ray_str_ptr(s) : "";
@@ -506,49 +505,62 @@ static bool str_pat_text(ray_t* x, const char** p, int64_t* n) {
     return q_str_text_bytes(x, p, n);
 }
 
-static ray_t* str_like_leaf(ray_t* x, const char* pp, size_t pn) {
-    const char* sp; int64_t sn; bool m;
-    if (!str_pat_text(x, &sp, &sn)) return q_err(QE_TYPE);
-    if (!str_pat_like(sp, (size_t)sn, pp, pn, &m)) return q_err(QE_NYI);
-    return ray_bool(m);
+bool q_str_subject_many(ray_t* x) {
+    return x && (x->type == RAY_LIST || x->type == RAY_SYM || x->type == RAY_STR);
 }
 
-/* ref/like.md "Implicit iteration": lists of strings or symbols, and dicts
- * with them as values.  No doc row reaches a table, so a table is 'type. */
-ray_t* q_like_wrap(ray_t* x, ray_t* pattern) {
-    const char* pp; int64_t pn;
-    if (!x || !q_str_text_bytes(pattern, &pp, &pn)) return q_err(QE_TYPE);
+ray_t* q_str_subject_map(ray_t* x, ray_t* (*one)(ray_t* e, void* ctx), void* ctx,
+                         int8_t empty_tag) {
+    if (!x) return q_err(QE_TYPE);
     if (x->type == RAY_DICT) {
-        ray_t* v = q_like_wrap(ray_dict_vals(x), pattern);
+        ray_t* v = q_str_subject_map(ray_dict_vals(x), one, ctx, empty_tag);
         if (!v || RAY_IS_ERR(v)) return v;
         ray_t* k = ray_dict_keys(x);
         ray_retain(k);
         return ray_dict_new(k, v);
     }
-    if (x->type == RAY_LIST || x->type == RAY_SYM || x->type == RAY_STR) {
-        int64_t n = ray_len(x);
-        /* one boolean per item (ref/like.md Implicit iteration), and NONE is
-         * still boolean — an empty run gives collapse nothing to infer from */
-        if (n == 0) return q_type_empty(RAY_BOOL);
-        ray_t* out = ray_list_new(n);
+    if (!q_str_subject_many(x)) return one(x, ctx);
+    int64_t n = ray_len(x);
+    if (n == 0) return empty_tag ? q_type_empty(empty_tag) : ray_list_new(0);
+    ray_t* out = ray_list_new(n);
+    if (RAY_IS_ERR(out)) return out;
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* ia = ray_i64(i);
+        ray_t* e = ray_at_fn(x, ia);
+        ray_release(ia);
+        if (!e || RAY_IS_ERR(e)) { ray_release(out); return e; }
+        ray_t* r = one(e, ctx);
+        ray_release(e);
+        if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
+        out = ray_list_append(out, r);
+        ray_release(r);
         if (RAY_IS_ERR(out)) return out;
-        for (int64_t i = 0; i < n; i++) {
-            ray_t* ia = ray_i64(i);
-            ray_t* e = ray_at_fn(x, ia);
-            ray_release(ia);
-            if (!e || RAY_IS_ERR(e)) { ray_release(out); return e; }
-            ray_t* r = (x->type == RAY_LIST) ? q_like_wrap(e, pattern)
-                                             : str_like_leaf(e, pp, (size_t)pn);
-            ray_release(e);
-            if (!r || RAY_IS_ERR(r)) { ray_release(out); return r; }
-            out = ray_list_append(out, r);
-            ray_release(r);
-            if (RAY_IS_ERR(out)) return out;
-        }
-        ray_t* c = q_list_collapse(out);   /* homogeneous bool run -> bool vec */
-        ray_release(out);
-        return c;
     }
+    ray_t* c = q_list_collapse(out);   /* homogeneous bool run -> bool vec */
+    ray_release(out);
+    return c;
+}
+
+static ray_t* str_like_leaf(ray_t* x, const char* pp, size_t pn) {
+    const char* sp; int64_t sn; bool m;
+    if (!q_str_subject_bytes(x, &sp, &sn)) return q_err(QE_TYPE);
+    if (!str_pat_like(sp, (size_t)sn, pp, pn, &m)) return q_err(QE_NYI);
+    return ray_bool(m);
+}
+
+static ray_t* str_like_elem(ray_t* e, void* pattern) {
+    return q_like_wrap(e, (ray_t*)pattern);
+}
+
+/* ref/like.md "Implicit iteration": lists of strings or symbols, and dicts
+ * with them as values.  No doc row reaches a table, so a table is 'type.
+ * The elementwise callback is q_like_wrap itself, so a NESTED list keeps
+ * working (which regex's strict single-subject leaf deliberately does not). */
+ray_t* q_like_wrap(ray_t* x, ray_t* pattern) {
+    const char* pp; int64_t pn;
+    if (!x || !q_str_text_bytes(pattern, &pp, &pn)) return q_err(QE_TYPE);
+    if (x->type == RAY_DICT || q_str_subject_many(x))
+        return q_str_subject_map(x, str_like_elem, pattern, RAY_BOOL);
     return str_like_leaf(x, pp, (size_t)pn);
 }
 

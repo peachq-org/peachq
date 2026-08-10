@@ -69,6 +69,9 @@ ray_t* q_exit_wrap(ray_t* x);
 ray_t* q_like_wrap(ray_t* x, ray_t* pattern);
 ray_t* q_ss_wrap(ray_t* s, ray_t* p);
 
+/* ---- defined in ops/q_regex.c ---- */
+ray_t* q_rlike_wrap(ray_t* x, ray_t* pattern);
+
 /* ---- defined in ops/q_join.c ---- */
 ray_t* q_lj_wrap(ray_t* x, ray_t* y);
 ray_t* q_ljf_wrap(ray_t* x, ray_t* y);

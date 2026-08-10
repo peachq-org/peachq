@@ -18,6 +18,7 @@
 #include "qlang/io/q_provider.h"   /* q_provider_init/destroy — the provider registry lifecycle */
 #include "qlang/io/q_splay.h"    /* q_splay_init/destroy — the splay registry lifecycle */
 #include "qlang/io/q_duckdb.h"   /* q_duckdb_reset — close handles at teardown */
+#include "qlang/io/q_re2.h"      /* q_re2_reset — drop compiled patterns at teardown */
 #include "qlang/q_console.h"  /* q_console_pipe_disable — reset the `\nonlegacy` display global per runtime */
 #include "qlang/q_ctx.h"      /* remote-door install + q_ctx_run_src (the bootstrap loader) */
 #include "qlang/eval/q_eval.h" /* q_eval_syms_reset — per-runtime teardown */
@@ -89,6 +90,7 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
 
 void q_runtime_destroy(ray_runtime_t* rt) {
     q_duckdb_reset();          /* close DuckDB handles/dbs (suite isolation) */
+    q_re2_reset();             /* no compiled pattern outlives its runtime */
     ray_eval_set_remote_str_fn(NULL);  /* remote strings fall back to rayfall */
     ray_eval_set_remote_apply_fn(NULL);/* (func;args) value-apply -> 'nyi w/o q runtime */
     q_dbg_reset();             /* drop snapshot-retained lambdas before the env */
