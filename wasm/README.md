@@ -9,8 +9,9 @@ retargeted to this `src/`-based tree.
 
 | File          | Purpose                                                            |
 | ------------- | ------------------------------------------------------------------ |
-| `q_wasm.c`    | The browser C ABI. Drives openq's real pipeline (`q_parse` → `q_lower` → `ray_eval` → materialize → `q_fmt`). |
+| `q_wasm.c`    | The browser C ABI. Drives openq's real pipeline (`q_parse` → `q_eval` → materialize → `q_fmt`). |
 | `ipc_stub.c`  | Inert stubs for the handful of `ray_ipc_*` symbols retained TUs reference — a browser tab has no sockets. |
+| `smoke.js`    | The headless check: evaluates q in the built module and asserts the answers, regex most of all. |
 | `index.html`  | Self-contained REPL page. Loads `peachq.js`, `ccall`s the ABI.   |
 | `server.py`   | Stdlib preview server (correct `application/wasm` MIME).           |
 | `peachq.js` / `peachq.wasm` | Build artifacts (generated; git-ignored).       |
@@ -44,7 +45,8 @@ cd ~/emsdk && ./emsdk install latest && ./emsdk activate latest
 Then, from the repo root:
 
 ```sh
-make -f Makefile.wasm wasm      # -> wasm/peachq.js + wasm/peachq.wasm
+make -f Makefile.wasm wasm        # -> wasm/peachq.js + wasm/peachq.wasm
+make -f Makefile.wasm wasm-smoke  # build, then run the headless check
 ```
 
 ## Run
@@ -58,25 +60,27 @@ Type a q expression and press Enter — e.g. `2+3` → `5`, `til 5` → `0 1 2 3
 
 ### Headless check
 
-The emsdk-bundled node (v18+; the emscripten JS uses optional chaining that
-Node 12 can't parse) can drive the ABI directly:
-
 ```sh
-node -e '
-require("./wasm/peachq.js")().then(M => {
-  M.ccall("q_wasm_init","number",[],[]);
-  const p = M.ccall("q_wasm_eval","number",["string"],["2+3"]);
-  console.log("2+3 =>", M.UTF8ToString(p));
-  M.ccall("q_wasm_free",null,["number"],[p]);
-});'
-# 2+3 => 5
+make -f Makefile.wasm wasm-smoke
 ```
+
+`smoke.js` loads the module, initialises the runtime, evaluates real q and
+asserts each answer; its `CASES` list is what the check covers. It runs under
+the emsdk-bundled node (`$EMSDK_NODE` — the emscripten glue needs v18+);
+override with `make -f Makefile.wasm wasm-smoke NODE=/path/to/node`.
 
 ## Notes / constraints
 
 - **Native build unaffected.** This target compiles the same `RAY_LIB_SRC`
-  library sources with `emcc` instead of `clang`; it does not touch the root
-  `Makefile`, the frozen manifest, or any source file.
+  library sources with `emcc` instead of `clang`, into objects of its own under
+  `build/wasm/`; it touches no source file and nothing frozen.
+- **No libffi.** Its config headers are generated per NATIVE target, and a
+  browser tab has nothing to dlopen: the vendored sources are filtered out and
+  `q_ffi.c` compiles as the `'nyi` stub it already is without `RAY_FFI`.
+- **Two languages.** RE2 is compiled in here as it is on every other platform,
+  and it is C++: since clang rejects `-std=c17` on C++ input, the C and the C++
+  compile separately (the root `Makefile`'s own object and archive rules, at
+  this target's own `BUILD_DIR`) and the link is `em++`, which brings libc++ in.
 - **No networking.** `src/core/ipc.c` (TCP server/client, `select`/`fd_set`) is
   excluded from the WASM source set — it has no meaning in a browser and does
   not compile under emscripten's sysroot. `ipc_stub.c` satisfies the linker.
