@@ -295,7 +295,6 @@ static ray_t* regex_replace_fn(ray_t** args, int64_t n) {
  * regex_run — but it distributes over the same shared map. */
 static ray_t* regex_escape_fn(ray_t** args, int64_t n) {
     if (n != 1) return q_err(QE_RANK);
-    if (!q_re2_available()) return q_err(QE_REGEX);
     return q_str_subject_map(args[0], regex_escape_one, NULL, 0);
 }
 
