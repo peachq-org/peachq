@@ -28,12 +28,13 @@ unversioned snapshot of a fork. So:
 
 - the **pin is the DuckDB release** it came from, recorded in
   `src/qlang/io/q_re2_pin.h` and reported to q as `.regexp.version`;
-- the shim compiles that pin in, and the loader **refuses a module whose pin
-  differs from its own** — a stale `libpqre2.so` on the search path cannot
-  silently change what a pattern means;
 - **drift** in the tree itself is caught by a digest, since no version string
   can catch it: `tools/re2-pin.sh` recomputes the vendored-tree sha256 above and
-  runs at every relink of the module, failing the build when the two disagree.
+  runs at every rebuild of the RE2 archive, failing the build when the two
+  disagree.
+
+(A third mechanism — the pin compiled into both sides so a stale module was
+refused at load — went away with the module itself; see below.)
 
 ## Vendoring shape
 
@@ -55,14 +56,17 @@ friends) and the two Options with no inline spelling became ordinary functions �
 flag is `.regexp.replace_all` (replacing `g`).
 
 All 23 `.cc` files plus `src/qlang/io/q_re2_shim.cc` compile into
-`libpqre2.so` — a **separate shared object**, never linked into `./q`, because
-C++ is optional here by owner ruling: `./q` stays pure C17 and depends on no
-libstdc++. See the `libpqre2` block in `Makefile`. A missing module is answered
-with `'regex`, so a host with no C++ compiler builds and runs a `./q` that
-simply has no regex.
+`build/libpqre2.a`, which is **linked into the executable on every platform**
+(owner ruling 2026-08-10, reversing the dlopen'd-module design: it had no
+Windows build arm, so `q.exe` shipped with no regex at all). See the RE2 block
+in `Makefile`. `./q` therefore links a C++ runtime, and **a C++ compiler is now
+a build requirement**, not an optional extra.
 
-Windows is not built yet: a `pqre2.dll` will need `libstdc++-6.dll` shipped
-alongside `q.exe`, which is the decision that has to be made first.
+Windows cross-compiles the same sources with `x86_64-w64-mingw32-g++` and links
+`-static-libstdc++ -static-libgcc` plus a static libwinpthread, so `q.exe` still
+depends on nothing but KERNEL32/msvcrt/WS2_32. The POSIX-threads mingw flavour is
+required: RE2 uses `std::mutex`/`std::once_flag`, which the win32-threads
+libstdc++ does not define. On Debian/Ubuntu: `apt install g++-mingw-w64-x86-64`.
 
 ## Regeneration recipe (version bump)
 
@@ -79,7 +83,7 @@ grep -rl absl third_party/re2 && echo "STOP: abseil reappeared — not vendorabl
 tools/re2-pin.sh --print                   # the new tree digest
 # then edit src/qlang/io/q_re2_pin.h: PQRE2_DUCKDB_PIN + PQRE2_SRC_SHA256,
 # and the two hashes + the release above; finally
-make libpqre2.so && make q-test
+make && make q-test
 ```
 
 Bumping the pin changes `.regexp.version`, so
