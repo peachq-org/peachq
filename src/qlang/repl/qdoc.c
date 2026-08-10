@@ -16,19 +16,19 @@
 #include <limits.h>         /* PATH_MAX — Windows cwd-restore buffer */
 #include <sys/stat.h>       /* stat / S_ISDIR — QHOME fixtures-root probe */
 #if defined(_WIN32)
-#include <windows.h>        /* GetTempPathA / GetTempFileNameA — qdoc_memopen */
+#include <windows.h>        /* GetTempPathA / GetTempFileNameA — q_qdoc_memopen */
 #endif
 
 #define QD_IN   2048
 #define QD_OUT  8192
 
-/* ---- qdoc_memopen / qdoc_memclose (see qdoc.h) ---------------------------- */
+/* ---- q_qdoc_memopen / q_qdoc_memclose (see qdoc.h) ---------------------------- */
 
 #if defined(_WIN32)
 /* Two streams are live at once (stdout + stderr of one row); four is slack. */
 static struct { FILE* f; char path[MAX_PATH]; } g_memfiles[4];
 
-FILE* qdoc_memopen(char** buf, size_t* len) {
+FILE* q_qdoc_memopen(char** buf, size_t* len) {
     *buf = NULL;
     *len = 0;
     size_t slot = 0;
@@ -47,7 +47,7 @@ FILE* qdoc_memopen(char** buf, size_t* len) {
     return f;
 }
 
-void qdoc_memclose(FILE* f, char** buf, size_t* len) {
+void q_qdoc_memclose(FILE* f, char** buf, size_t* len) {
     if (!f) return;
     *buf = NULL;
     *len = 0;
@@ -71,9 +71,9 @@ void qdoc_memclose(FILE* f, char** buf, size_t* len) {
         }
 }
 #else
-FILE* qdoc_memopen(char** buf, size_t* len) { return open_memstream(buf, len); }
+FILE* q_qdoc_memopen(char** buf, size_t* len) { return open_memstream(buf, len); }
 
-void qdoc_memclose(FILE* f, char** buf, size_t* len) {
+void q_qdoc_memclose(FILE* f, char** buf, size_t* len) {
     (void)buf;
     (void)len;                      /* open_memstream fills both at fclose */
     if (f) fclose(f);
@@ -204,11 +204,11 @@ static int error_row_matches(const char* line, const char* cls) {
 static int qd_run_line(const char* input, char** obuf, char** ebuf) {
     size_t on = 0, en = 0;
     *obuf = *ebuf = NULL;
-    FILE* of = qdoc_memopen(obuf, &on);
-    FILE* ef = qdoc_memopen(ebuf, &en);
+    FILE* of = q_qdoc_memopen(obuf, &on);
+    FILE* ef = q_qdoc_memopen(ebuf, &en);
     int rc = (of && ef) ? q_ctx_run_line(input, strlen(input), of, ef, 1) : 0;
-    qdoc_memclose(of, obuf, &on);
-    qdoc_memclose(ef, ebuf, &en);
+    q_qdoc_memclose(of, obuf, &on);
+    q_qdoc_memclose(ef, ebuf, &en);
     return rc;
 }
 
