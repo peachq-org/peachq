@@ -31,7 +31,7 @@ static const char* const q_err_names[QE__COUNT] = {
     [QE_OOM]="oom", [QE_IO]="io", [QE_NAME]="name", [QE_INDEX]="index",
     [QE_RESERVE]="reserve", [QE_INIT]="init", [QE_RANGE]="range",
     [QE_SCHEMA]="schema", [QE_CORRUPT]="corrupt", [QE_CANCEL]="cancel",
-    [QE_VERSION]="version", [QE_DUCKDB]="duckdb",
+    [QE_VERSION]="version", [QE_DUCKDB]="duckdb", [QE_REGEX]="regex",
     [QE_SIGNAL]="signal", [QE_RETURN]="return",
 };
 
