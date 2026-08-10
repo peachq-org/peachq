@@ -102,3 +102,16 @@ size_t ray_ipc_decompress(const uint8_t* src, size_t clen, uint8_t* dst,
     ray_sys_free(decoded);
     return di;
 }
+
+/* The connection collector (q_conn.c) and the connection-context .z.u/.z.a
+ * (q_dotz.c) ask the poll for live IPC sockets. A browser tab has none: zero
+ * connections, and no identity to resolve. */
+int64_t ray_ipc_conn_list(ray_ipc_conn_info_t* out, int64_t cap) {
+    (void)out; (void)cap;
+    return 0;
+}
+
+bool ray_ipc_conn_identity(int64_t handle, ray_ipc_conn_ident_t* out) {
+    (void)handle; (void)out;
+    return false;
+}
