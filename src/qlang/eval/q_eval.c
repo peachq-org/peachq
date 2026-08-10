@@ -202,25 +202,28 @@ static ray_t* name_value(ray_t* sym, const q_op_t** row_out) {
 static ray_t* operand_value(ray_t* F, const q_op_t** row_out) {
     if (row_out) *row_out = NULL;
     if (!F) return q_err(QE_TYPE);
-    if (F->type == RAY_UNARY || F->type == RAY_BINARY || F->type == RAY_VARY) {
-        if (row_out) *row_out = q_registry_row_of(F, Q_DYADIC);
-        ray_retain(F);
-        return F;
-    }
+    ray_t* v;
     if (F->type == -RAY_SYM) {
         const q_op_t* row = NULL;
-        ray_t* v = q_registry_lookup_row(F->i64, Q_DYADIC, &row);
-        if (v && (v->type == RAY_UNARY || v->type == RAY_BINARY ||
-                  v->type == RAY_VARY)) {
+        ray_t* hit = q_registry_lookup_row(F->i64, Q_DYADIC, &row);
+        if (hit && (hit->type == RAY_UNARY || hit->type == RAY_BINARY ||
+                    hit->type == RAY_VARY)) {
             if (row_out) *row_out = row;
-            ray_retain(v);
-            return v;
+            ray_retain(hit);
+            return hit;
         }
-        return name_value(F, row_out);
+        v = name_value(F, row_out);
+    } else if (F->type == RAY_LIST) {
+        v = q_eval(F);
+    } else {
+        ray_retain(F);
+        v = F;
     }
-    if (F->type == RAY_LIST) return q_eval(F);
-    ray_retain(F);
-    return F;
+    /* the manifest row travels with the VALUE, however the operand was spelt:
+     * without it the derived call loses `family` and its container lift */
+    if (row_out && !*row_out && v && !RAY_IS_ERR(v))
+        *row_out = q_registry_operand_row(v);
+    return v;
 }
 
 /* args RIGHT-to-left into argv (owned; holes stay C-NULL).  On error the
