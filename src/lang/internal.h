@@ -92,6 +92,14 @@ static inline int is_numeric(ray_t* x) {
            ray_is_bytelike(-x->type) || x->type == -RAY_BOOL;
 }
 
+/* Null the atom's own lane keeps OUT OF BAND — one a vector's null test can see.
+ * The byte lanes have none: `" "` answers `null` (kdb-true) but to equality it is
+ * the ordinary byte 0x20.  A search that skips slots for a null needle must ask
+ * THIS, not RAY_ATOM_IS_NULL, or the char null becomes unmatchable. */
+static inline int atom_is_oob_null(const ray_t* x) {
+    return RAY_ATOM_IS_NULL(x) && !ray_is_bytelike(-x->type);
+}
+
 /* Check if an atom is a temporal type */
 static inline int is_temporal(ray_t* x) {
     return RAY_IS_TEMPORAL32(-x->type) || RAY_IS_TEMPORAL64(-x->type);

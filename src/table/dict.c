@@ -24,7 +24,7 @@
 #include "dict.h"
 #include "table.h"
 #include "table/sym.h"
-#include "lang/internal.h"   /* atom_eq for RAY_LIST key compares */
+#include "lang/internal.h"   /* atom_eq for RAY_LIST key compares; atom_is_oob_null for the null-key probe */
 #include <string.h>
 
 /* --------------------------------------------------------------------------
@@ -182,7 +182,7 @@ int64_t ray_dict_find_idx(ray_t* d, ray_t* key_atom) {
      * distinct buckets by ray_group_fn) would still resolve `(at d 0Nl)`
      * to the first non-null zero — re-introducing the conflation we just
      * fixed in grouping. */
-    bool key_is_null = RAY_ATOM_IS_NULL(key_atom);
+    bool key_is_null = atom_is_oob_null(key_atom);
     bool keys_have_nulls = (keys->attrs & RAY_ATTR_HAS_NULLS) != 0
                             || (keys->attrs & RAY_ATTR_SLICE);
     if (key_is_null) {

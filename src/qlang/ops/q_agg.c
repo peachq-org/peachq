@@ -1,5 +1,5 @@
-/* ops/q_agg.c — running/weighted/covariance/moving-window aggregates (wave 5)
- * and the list-arm sum wrapper
+/* ops/q_agg.c — running/weighted/covariance/moving-window aggregates (wave 5),
+ * the list-arm sum wrapper and the first/last index-miss adapters
  *
  * Split from q_registry.c (2026-07-14) — pure function moves; the shared
  * internal surface lives in q_registry_internal.h.  See q_registry.h for
@@ -7,7 +7,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
-#include "lang/eval.h"     /* ray_sum_fn, ray_avg_fn, ray_mul_fn — engine arms */
+#include "qlang/ops/q_index.h" /* q_index_at — first/last of an empty ride the miss law */
+#include "lang/eval.h"     /* ray_sum_fn, ray_avg_fn, ray_mul_fn, ray_first_fn, ray_last_fn — engine arms */
 #include "lang/internal.h" /* atomic_map_binary, make_f64, is_list, is_numeric, as_f64 */
 #include <math.h>          /* isnan, sqrt — sentinel-null discipline, mdev/cov */
 #include <string.h>        /* memcpy — the width-generic scan store */
@@ -371,6 +372,24 @@ ray_t* q_ema_wrap(ray_t* a, ray_t* x) {
     }
     return out;
 }
+
+/* q `first x` IS `x[0]` and `last x` IS `x[count[x]-1]`, so an EMPTY collection
+ * answers from the index miss law rather than from a second copy of it: `() 0`
+ * is `()`, a typed empty its own typed null.  Everything non-empty (and every
+ * lazy/DAG input) keeps the base aggregate, whose answer the index home agrees
+ * with by construction. */
+static ray_t* end_item(ray_t* x, int64_t i, ray_t* (*base)(ray_t*)) {
+    if (!x || RAY_IS_ERR(x) || ray_is_lazy(x) ||
+        !(x->type == RAY_LIST || ray_is_vec(x)) || ray_len(x) != 0)
+        return base(x);
+    ray_t* ia = ray_i64(i);
+    ray_t* r  = q_index_at(x, (ray_t* const[]){ ia }, 1);
+    ray_release(ia);
+    return r;
+}
+
+ray_t* q_first_wrap(ray_t* x) { return end_item(x, 0, ray_first_fn); }
+ray_t* q_last_wrap(ray_t* x)  { return end_item(x, -1, ray_last_fn); }
 
 /* q `sum x` — LIST arm sums the items (kdb: `sum(2013.03.15;18:55:40.686)`
  * is a timestamp; Load Fixed pins `sum("DT";8 9)0:enlist"…"`).  Non-lists
