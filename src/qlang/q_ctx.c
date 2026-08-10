@@ -309,6 +309,9 @@ int q_ctx_run_src(const char* s, FILE* out, FILE* err) {
  * Console output drains to the SERVER's stdout, then resets so it cannot bleed
  * into the next request. */
 static ray_t* remote_eval_str(const char* src, size_t len) {
+    /* OWNER RULING 2026-08-10: a request obeys ctx_run_script's law — restore the `\d`
+     * context on success (no client parks a shared server), leave it where an abort left it. */
+    int64_t saved_ctx = q_env_ctx();
     /* A leading `\` is a system command, not q source (kdb runs a solo `\l`/`\p`
      * received on the wire).  `system"X"` is exactly `\X`, so strip and reuse
      * q_system_fn — one home for q_sys_run, the restricted gate, `\`-shell capture. */
@@ -321,6 +324,7 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
           if (con && *con) fputs(con, stdout);
           q_console_reset(); }
         ctx_statement_end();
+        if (!RAY_IS_ERR(r)) q_env_ctx_set(saved_ctx);
         return r;
     }
     char* tmp = (char*)ray_sys_alloc(len + 1);
@@ -354,6 +358,7 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
       q_console_reset(); }
     ctx_statement_end();
     q_dbg_statement_end(dbg_prev);
+    if (!RAY_IS_ERR(r)) q_env_ctx_set(saved_ctx);
     if (is_assign && !RAY_IS_ERR(r)) {   /* an error still propagates (-128h) */
         ray_release(r);
         ray_retain(RAY_NULL_OBJ);
@@ -372,6 +377,7 @@ static ray_t* remote_apply(ray_t* list) {
     if (!list || (list->type != RAY_LIST && !ray_is_vec(list)) ||
         ray_len(list) < 1)
         return q_err(QE_TYPE);
+    int64_t saved_ctx = q_env_ctx();   /* same request law as remote_eval_str: an applied lambda may `system"d …"` */
     int64_t n = ray_len(list);
     ray_t* head = q_index_elem_at(list, 0);            /* owned */
     if (!head || RAY_IS_ERR(head)) return head ? head : q_err(QE_TYPE);
@@ -419,6 +425,7 @@ static ray_t* remote_apply(ray_t* list) {
     for (int64_t j = 0; j < argc; j++) ray_release(argv[j]);
     ray_release(head);
     ctx_statement_end();
+    if (!RAY_IS_ERR(r)) q_env_ctx_set(saved_ctx);
     return r;
 }
 
