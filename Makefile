@@ -275,8 +275,11 @@ $(BUILD_DIR)/%.win.o: %.c
 	@mkdir -p $(dir $@)
 	$(WIN_CC) -c $(WIN_CFLAGS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
+# --stack: mingw reserves 2MB, too little for the evaluator's 2048-deep guard to
+# fire before the native stack blows (`{.z.s[]}[]` killed q.exe instead of
+# signalling 'stack).  8MB matches the Linux default; it is RESERVE, not commit.
 q.exe: $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ)
-	$(WIN_CC) $(WIN_CFLAGS) -o $@ $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_LIBS)
+	$(WIN_CC) $(WIN_CFLAGS) -Wl,--stack,8388608 -o $@ $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_LIBS)
 
 # Recursive so the -j lands on the object rules even when the outer make is
 # serial (win-smoke and the bare `make win` both go through here).
