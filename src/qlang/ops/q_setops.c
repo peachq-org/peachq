@@ -68,17 +68,27 @@ ray_t* q_except_wrap(ray_t* x, ray_t* y) {
 }
 
 /* q `distinct x` / monadic `?` — unique items in FIRST-OCCURRENCE order
- * (kdb).  rayfall's distinct routes typed vectors through the DAG group
- * path, which SORTS — a rename would pin wrong answers, so this is a
- * match-based dedup (type-strict, nulls equal — the ~ semantics kdb's
- * distinct uses), collapsed back to a typed vector.  String operands are
- * a deferred cell (string model); atoms are kdb 'type. */
+ * (kdb), item equality being `~`: type-strict, nulls equal.
+ * A TYPED VECTOR's items share one type, so `~` and the group kernel's atom
+ * equality cannot disagree: its uniques are the KEYS OF ITS GROUPING, one hash
+ * pass, where the scan below is O(n*distinct).  A LIST is not safe there —
+ * group equates `1` with `1f`, `0n` with `0N`; `~` does not.  rayfall's own
+ * ray_distinct_fn is no use either: it SORTS.  String operands are a deferred
+ * cell (string model); atoms are kdb 'type. */
 ray_t* q_distinct_wrap(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (x->type == RAY_TABLE) return table_distinct(x);   /* row dedup */
     if (x->type == -RAY_STR)
         return q_err(QE_NYI);
-    if (!ray_is_vec(x) && x->type != RAY_LIST)
+    if (ray_is_vec(x)) {
+        ray_t* g = ray_group_fn(x);
+        if (!g || RAY_IS_ERR(g)) return g ? g : q_err(QE_TYPE);
+        ray_t* k = ray_dict_keys(g);
+        ray_retain(k);
+        ray_release(g);
+        return k;
+    }
+    if (x->type != RAY_LIST)
         return q_err(QE_TYPE);
     int64_t n = ray_len(x);
     ray_t* out = ray_list_new(n > 0 ? n : 1);
