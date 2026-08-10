@@ -9,9 +9,10 @@ include Makefile
 .DEFAULT_GOAL := wasm
 
 # ipc.c is the TCP server: uncompilable under the wasm sysroot, unreachable from
-# the q eval path. wasm/ipc_stub.c satisfies the symbols the retained TUs need.
+# the q eval path. wasm/ipc_stub.c satisfies the symbols the retained TUs need,
+# and wasm/re2_stub.c does the same for the C++ RE2 shim this C-only build omits.
 LIB_SRC = $(filter-out src/core/ipc.c, $(RAY_LIB_SRC))
-GLUE_SRC = wasm/q_wasm.c wasm/ipc_stub.c
+GLUE_SRC = wasm/q_wasm.c wasm/ipc_stub.c wasm/re2_stub.c
 SRC      = $(LIB_SRC) $(GLUE_SRC) $(RAY_VENDOR_SRC)
 
 TARGET = peachq

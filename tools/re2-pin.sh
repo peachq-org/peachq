@@ -4,8 +4,9 @@
 # RE2 as DuckDB vendors it has NO version marker of any kind, so a digest of the
 # tree is the only thing that makes drift detectable.  This computes it and
 # compares against PQRE2_SRC_SHA256 in src/qlang/io/q_re2_pin.h; the Makefile
-# runs it at every relink of libpqre2, so a tree that no longer matches its
-# recorded pin fails the build rather than quietly changing what a pattern means.
+# runs it at every rebuild of the RE2 archive, so a tree that no longer matches
+# its recorded pin fails the build rather than quietly changing what a pattern
+# means.
 #
 #   tools/re2-pin.sh          check (silent + exit 0 when they agree)
 #   tools/re2-pin.sh --print  print the digest, for updating the header

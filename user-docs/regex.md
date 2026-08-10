@@ -366,8 +366,10 @@ q).regexp.replace["a-b";"-";"\\1"]
 'regex
 ```
 
-Regex matching in a build with no RE2 module also signals `'regex` — the matcher is a separate
-shared object, so that `./q` itself needs no C++ runtime.
+There is no "regex is unavailable" state to distinguish it from. RE2 is compiled into the
+executable on every platform — Linux, macOS and Windows alike — so `'regex` always means the
+pattern, never the build. (`./q` therefore links a C++ runtime; on Windows it is linked
+statically, so `q.exe` still ships as a single file.)
 
 ## How this relates to `like`, `ss` and `ssr`
 

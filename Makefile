@@ -120,10 +120,13 @@ RELEASE_CFLAGS = -fPIC $(WARNS) -std=$(STD) -O2 -march=$(RAY_MARCH) \
 
 UNAME_S := $(shell uname -s)
 # -ldl: OpenSSL is dlopen'd at runtime, never linked (see qlang/net/q_tls.c).
+# $(RE2_LIB) + the C++ runtime ride here because every link line already ends in
+# $(LIBS) — including the bench rules, which link $(LIB_SRC) not $(LIB_OBJ).
+CXXLIB := $(if $(filter Darwin,$(UNAME_S)),-lc++,-lstdc++)
 ifeq ($(UNAME_S),Linux)
-  LIBS = -lm -lpthread -ldl
+  LIBS = -lm -lpthread -ldl $(RE2_LIB) $(CXXLIB)
 else
-  LIBS = -lm
+  LIBS = -lm $(RE2_LIB) $(CXXLIB)
 endif
 
 CFLAGS  ?= $(RELEASE_CFLAGS)
@@ -135,7 +138,7 @@ Q_MAIN_OBJ = $(BUILD_DIR)/src/qlang/repl/qmain.o
 DEPS = $(LIB_OBJ:.o=.d) $(Q_MAIN_OBJ:.o=.d)
 
 .DEFAULT_GOAL := all
-all: git-merge-drivers $(Q_TARGET) $(RE2_MODULE)
+all: git-merge-drivers $(Q_TARGET)
 
 # `merge=ours` on test/observed/** (.gitattributes) is NOT a git built-in the
 # way `union` is — without this per-clone config the attribute is silently
@@ -178,29 +181,17 @@ $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
-$(Q_TARGET): $(LIB_OBJ) $(Q_MAIN_OBJ)
-	$(CC) $(CFLAGS) -o $@ $(LIB_OBJ) $(Q_MAIN_OBJ) $(LIBS) $(LDFLAGS)
-
-# --- libpqre2: the dlopen'd RE2 module (user-docs/regex.md) --------------------
-# The only C++ in the tree, fenced into its own shared object BY DESIGN: `./q`
-# stays pure C17 and links no libstdc++, and a missing module is answered with
-# 'regex rather than a broken binary.  So this is never a prerequisite of
-# $(Q_TARGET) — it is built alongside it, and only where a C++ compiler exists
-# (RE2_MODULE is empty otherwise, which is exactly what "C++ is optional" means).
-# The engine finds it on the q_re2.c ladder: $PEACHQ_RE2_LIB, $QHOME, the exe
-# dir (here), then the system path.
+# --- RE2: the only C++ in the tree, linked into the binary --------------------
+# An ARCHIVE rather than a bare object list: every link line picks it up through
+# $(LIBS) alone, and members no caller reaches never enter the binary.
 CXX         ?= g++
-# The filename is the LOADER's, not a choice: q_re2.c's RE2_LIB_BASENAME is what
-# gets dlopen'd, so building libpqre2.so on a host that looks for a .dylib would
-# ship a module nothing can find.
-RE2_TARGET   = $(if $(filter Darwin,$(UNAME_S)),libpqre2.dylib,libpqre2.so)
-RE2_MODULE  := $(if $(shell command -v $(CXX) 2>/dev/null),$(RE2_TARGET),)
+RE2_LIB      = $(BUILD_DIR)/libpqre2.a
 RE2_SRC      = $(wildcard third_party/re2/re2/*.cc third_party/re2/util/*.cc)
 RE2_OBJ      = $(addprefix $(BUILD_DIR)/,$(RE2_SRC:.cc=.o)) \
                $(BUILD_DIR)/src/qlang/io/q_re2_shim.o
-# -fvisibility=hidden keeps RE2 private: only the seven PQRE2_API entry points
-# are exported.  c++17 over upstream's c++11 — the shim uses nothing newer, but
-# the vendored sources build clean either way and c++17 is the tree's baseline.
+# -fvisibility=hidden keeps RE2 out of the executable's dynamic symbol table.
+# c++17 over upstream's c++11 — the shim uses nothing newer, but the vendored
+# sources build clean either way and c++17 is the tree's baseline.
 RE2_CXXFLAGS = -std=c++17 -O2 -fPIC -fvisibility=hidden -Ithird_party/re2 -Isrc
 
 $(BUILD_DIR)/third_party/re2/%.o: third_party/re2/%.cc
@@ -211,13 +202,16 @@ $(BUILD_DIR)/src/qlang/io/%.o: src/qlang/io/%.cc
 	@mkdir -p $(dir $@)
 	$(CXX) -c $(RE2_CXXFLAGS) $(WARNS) $(DEPFLAGS) -o $@ $<
 
-# The pin check runs at every relink: a re-vendored tree that still claims the
-# old digest fails HERE, not silently at match time (tools/re2-pin.sh).
-$(RE2_TARGET): $(RE2_OBJ)
+# The pin check runs at every rebuild of the archive: a re-vendored tree that
+# still claims the old digest fails HERE, not silently at match time.
+$(RE2_LIB): $(RE2_OBJ)
 	@tools/re2-pin.sh
-	$(CXX) -shared -o $@ $(RE2_OBJ) -lpthread
+	$(AR) rcs $@ $(RE2_OBJ)
 
-RE2_DEPS = $(RE2_OBJ:.o=.d)
+RE2_DEPS = $(RE2_OBJ:.o=.d) $(WIN_RE2_OBJ:.o=.d)
+
+$(Q_TARGET): $(LIB_OBJ) $(Q_MAIN_OBJ) $(RE2_LIB)
+	$(CC) $(CFLAGS) -o $@ $(LIB_OBJ) $(Q_MAIN_OBJ) $(LIBS) $(LDFLAGS)
 
 # --- Windows cross-build (mingw-w64): make win --------------------------------
 # RAY_OS_WINDOWS on the command line because some files test it before the
@@ -245,9 +239,19 @@ WIN_OPT = -O2 -march=$(RAY_WIN_MARCH) -funroll-loops -fomit-frame-pointer \
   -fno-trapping-math
 WIN_CROSS  ?= x86_64-w64-mingw32-
 WIN_CC      = $(WIN_CROSS)gcc
+# The POSIX-threads flavour where the distro ships both: RE2 needs std::mutex
+# and std::once_flag, which mingw's win32-threads libstdc++ does not define.
+# Debian/Ubuntu: apt install g++-mingw-w64-x86-64.
+WIN_CXX    ?= $(firstword $(shell command -v $(WIN_CROSS)g++-posix 2>/dev/null) \
+                          $(WIN_CROSS)g++)
+WIN_AR      = $(WIN_CROSS)ar
 WIN_CFLAGS  = $(WARNS) -std=$(STD) $(WIN_OPT) \
   -DRAY_OS_WINDOWS=1 -D_WIN32_WINNT=0x0A00 -D__USE_MINGW_ANSI_STDIO=1
-WIN_LIBS    = -lws2_32 -lm
+WIN_CXXFLAGS = -std=c++17 $(WIN_OPT) -Ithird_party/re2 -Isrc
+WIN_RE2_LIB  = $(BUILD_DIR)/libpqre2.win.a
+WIN_RE2_OBJ  = $(addprefix $(BUILD_DIR)/,$(RE2_SRC:.cc=.win.o)) \
+               $(BUILD_DIR)/src/qlang/io/q_re2_shim.win.o
+WIN_LIBS    = $(WIN_RE2_LIB) -lws2_32 -lm
 # iocp_win.c provides ray_poll_* on Windows; linking the iocp.c stub too is a
 # multiple-definition error.
 WIN_LIB_OBJ    = $(filter-out $(BUILD_DIR)/src/core/iocp.win.o, $(addprefix $(BUILD_DIR)/,$(LIB_SRC:.c=.win.o))) \
@@ -275,11 +279,27 @@ $(BUILD_DIR)/%.win.o: %.c
 	@mkdir -p $(dir $@)
 	$(WIN_CC) -c $(WIN_CFLAGS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
+$(BUILD_DIR)/third_party/re2/%.win.o: third_party/re2/%.cc
+	@mkdir -p $(dir $@)
+	$(WIN_CXX) -c $(WIN_CXXFLAGS) -w $(DEPFLAGS) -o $@ $<
+
+$(BUILD_DIR)/src/qlang/io/%.win.o: src/qlang/io/%.cc
+	@mkdir -p $(dir $@)
+	$(WIN_CXX) -c $(WIN_CXXFLAGS) $(WARNS) $(DEPFLAGS) -o $@ $<
+
+$(WIN_RE2_LIB): $(WIN_RE2_OBJ)
+	@tools/re2-pin.sh
+	$(WIN_AR) rcs $@ $(WIN_RE2_OBJ)
+
 # --stack: mingw reserves 2MB, too little for the evaluator's 2048-deep guard to
 # fire before the native stack blows (`{.z.s[]}[]` killed q.exe instead of
 # signalling 'stack).  8MB matches the Linux default; it is RESERVE, not commit.
-q.exe: $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ)
-	$(WIN_CC) $(WIN_CFLAGS) -Wl,--stack,8388608 -o $@ $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_LIBS)
+# g++ drives the link (RE2 is C++) with $(WIN_OPT), not $(WIN_CFLAGS), whose
+# -std=c17 a C++ driver rejects.  The C++ runtime links STATICALLY — libstdc++,
+# libgcc, and the libwinpthread they pull in — so q.exe still ships as one file.
+q.exe: $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_RE2_LIB)
+	$(WIN_CXX) $(WIN_OPT) -Wl,--stack,8388608 -static-libstdc++ -static-libgcc \
+	  -o $@ $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_LIBS) -Wl,-Bstatic -lwinpthread
 
 # Recursive so the -j lands on the object rules even when the outer make is
 # serial (win-smoke and the bare `make win` both go through here).
@@ -288,7 +308,7 @@ win:
 
 clean::
 	-rm -rf $(BUILD_DIR)
-	-rm -f $(Q_TARGET) q.exe $(RE2_TARGET)
+	-rm -f $(Q_TARGET) q.exe
 
 version:
 	@echo $(RAY_VERSION)
