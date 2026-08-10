@@ -4,7 +4,12 @@
  * file, examples are taken from ```q fenced blocks; each line beginning with
  * `q)` is an input (the text after `q)`, forwarded VERBATIM — comments and
  * \-commands included), and the following non-`q)` lines are its expected
- * output.  A .qcmd file (no fences) is treated as one implicit block. */
+ * output.  A .qcmd file (no fences) is treated as one implicit block.
+ *
+ * Every row RUNS THROUGH THE PRODUCT — the statement seam the REPL, `\l` and
+ * `-f` share — and the gate compares the bytes the REPL would have printed.
+ * This runner owns only POLICY: the transcript-prompt pin, the parse pillar,
+ * row classification, whitespace normalization and the --emit mirror. */
 #ifndef QDOC_H
 #define QDOC_H
 
