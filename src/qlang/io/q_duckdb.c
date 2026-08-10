@@ -13,6 +13,7 @@
 #include "qlang/io/q_duckdb.h"
 #include "qlang/io/q_duckdb_api.h"
 #include "qlang/io/q_duckdb_types.h"
+#include "qlang/io/q_exedir.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_env.h"
 #include "qlang/q_prim.h"     /* q_str_text_bytes — text cells on the write path */
@@ -36,7 +37,6 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
-#include <unistd.h>
 #endif
 
 typedef struct { char* p; size_t len, cap; int oom; } qd_buf;
@@ -161,22 +161,6 @@ static void* qd_dlsym(void* dl, const char* name) {
 #define QD_LIB_BASENAME "libduckdb.so"
 #endif
 
-/* Exe dir + "/" QD_LIB_BASENAME (Linux /proc; Windows searches exe dir itself). */
-static void qd_origin_candidate(char* dst, size_t cap) {
-    dst[0] = '\0';
-#if defined(_WIN32)
-    (void)cap;
-#else
-    char exe[512];
-    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
-    if (n <= 0) return;
-    exe[n] = '\0';
-    char* slash = strrchr(exe, '/');
-    if (!slash) return;
-    *slash = '\0';
-    snprintf(dst, cap, "%s/%s", exe, QD_LIB_BASENAME);
-#endif
-}
 #endif /* !__EMSCRIPTEN__ */
 
 /* One load attempt; PEACHQ_DUCKDB_LIB set = EXCLUSIVE (no fallback). */
@@ -200,10 +184,13 @@ static void qd_load(void) {
             dl = qd_dlopen(cand);
         }
     }
-    if (!dl) {
-        char origin[600];
-        qd_origin_candidate(origin, sizeof origin);
-        if (origin[0]) dl = qd_dlopen(origin);
+    if (!dl) {                                  /* the module ships beside `q` */
+        char dir[512];
+        if (q_exedir(dir, sizeof dir)) {
+            char cand[600];
+            snprintf(cand, sizeof cand, "%s/%s", dir, QD_LIB_BASENAME);
+            dl = qd_dlopen(cand);
+        }
     }
     if (!dl) dl = qd_dlopen(QD_LIB_BASENAME);
     if (!dl) { g_qd.state = 2; return; }

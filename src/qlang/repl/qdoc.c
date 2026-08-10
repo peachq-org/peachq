@@ -15,9 +15,70 @@
 #include <fcntl.h>          /* open — per-file cwd containment (\cd / system"cd") */
 #include <limits.h>         /* PATH_MAX — Windows cwd-restore buffer */
 #include <sys/stat.h>       /* stat / S_ISDIR — QHOME fixtures-root probe */
+#if defined(_WIN32)
+#include <windows.h>        /* GetTempPathA / GetTempFileNameA — qdoc_memopen */
+#endif
 
 #define QD_IN   2048
 #define QD_OUT  8192
+
+/* ---- qdoc_memopen / qdoc_memclose (see qdoc.h) ---------------------------- */
+
+#if defined(_WIN32)
+/* Two streams are live at once (stdout + stderr of one row); four is slack. */
+static struct { FILE* f; char path[MAX_PATH]; } g_memfiles[4];
+
+FILE* qdoc_memopen(char** buf, size_t* len) {
+    *buf = NULL;
+    *len = 0;
+    size_t slot = 0;
+    while (slot < sizeof g_memfiles / sizeof *g_memfiles && g_memfiles[slot].f) slot++;
+    if (slot == sizeof g_memfiles / sizeof *g_memfiles) return NULL;
+    char  dir[MAX_PATH];
+    DWORD n = GetTempPathA((DWORD)sizeof dir, dir);
+    if (n == 0 || n >= sizeof dir) return NULL;
+    char path[MAX_PATH];
+    if (!GetTempFileNameA(dir, "qdc", 0, path)) return NULL;
+    FILE* f = fopen(path, "wb+");   /* binary: no CRLF translation, so the bytes
+                                     * captured are the bytes the seam wrote */
+    if (!f) { remove(path); return NULL; }
+    g_memfiles[slot].f = f;
+    snprintf(g_memfiles[slot].path, sizeof g_memfiles[slot].path, "%s", path);
+    return f;
+}
+
+void qdoc_memclose(FILE* f, char** buf, size_t* len) {
+    if (!f) return;
+    *buf = NULL;
+    *len = 0;
+    long n = (fflush(f) == 0 && fseek(f, 0, SEEK_END) == 0) ? ftell(f) : -1;
+    if (n >= 0) {
+        char* b = malloc((size_t)n + 1);
+        if (b) {
+            rewind(f);
+            size_t got = fread(b, 1, (size_t)n, f);
+            b[got] = '\0';
+            *buf   = b;
+            *len   = got;
+        }
+    }
+    fclose(f);
+    for (size_t i = 0; i < sizeof g_memfiles / sizeof *g_memfiles; i++)
+        if (g_memfiles[i].f == f) {
+            remove(g_memfiles[i].path);
+            g_memfiles[i].f = NULL;
+            break;
+        }
+}
+#else
+FILE* qdoc_memopen(char** buf, size_t* len) { return open_memstream(buf, len); }
+
+void qdoc_memclose(FILE* f, char** buf, size_t* len) {
+    (void)buf;
+    (void)len;                      /* open_memstream fills both at fclose */
+    if (f) fclose(f);
+}
+#endif
 
 /* Copy s into out without '\r' and with leading/trailing whitespace trimmed —
  * the spec's whitespace-insensitive compare (leading/trailing space, CRLF). */
@@ -143,11 +204,11 @@ static int error_row_matches(const char* line, const char* cls) {
 static int qd_run_line(const char* input, char** obuf, char** ebuf) {
     size_t on = 0, en = 0;
     *obuf = *ebuf = NULL;
-    FILE* of = open_memstream(obuf, &on);
-    FILE* ef = open_memstream(ebuf, &en);
+    FILE* of = qdoc_memopen(obuf, &on);
+    FILE* ef = qdoc_memopen(ebuf, &en);
     int rc = (of && ef) ? q_ctx_run_line(input, strlen(input), of, ef, 1) : 0;
-    if (of) fclose(of);
-    if (ef) fclose(ef);
+    qdoc_memclose(of, obuf, &on);
+    qdoc_memclose(ef, ebuf, &en);
     return rc;
 }
 

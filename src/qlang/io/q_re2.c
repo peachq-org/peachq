@@ -14,6 +14,7 @@
  * rather than silently changing what a predicate means. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/io/q_re2.h"
+#include "qlang/io/q_exedir.h"
 #include "qlang/io/q_re2_abi.h"
 #include "qlang/io/q_re2_pin.h"
 #include <stdio.h>
@@ -26,7 +27,6 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
-#include <unistd.h>
 #endif
 
 struct q_re2_prog {
@@ -80,28 +80,6 @@ static void* re2_dlsym(void* dl, const char* name) {
     return dlsym(dl, name);
 #endif
 }
-
-/* The module ships beside the binary, so the exe dir is a first-class
- * candidate (Windows searches it itself; Linux needs /proc).
- * PORTING NOTE: macOS has no /proc, so this step is inert there and the ladder
- * falls through to $QHOME / $PEACHQ_RE2_LIB / the system path — the SAME gap
- * q_duckdb.c has, which is why the fix is one shared exe-dir home for both
- * loaders (_NSGetExecutablePath under __APPLE__) rather than a copy here. */
-static void re2_origin_candidate(char* dst, size_t cap) {
-    dst[0] = '\0';
-#if defined(_WIN32)
-    (void)cap;
-#else
-    char    exe[512];
-    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
-    if (n <= 0) return;
-    exe[n]      = '\0';
-    char* slash = strrchr(exe, '/');
-    if (!slash) return;
-    *slash = '\0';
-    snprintf(dst, cap, "%s/%s", exe, RE2_LIB_BASENAME);
-#endif
-}
 #endif /* !__EMSCRIPTEN__ */
 
 static void re2_load(void) {
@@ -123,10 +101,13 @@ static void re2_load(void) {
             dl = re2_dlopen(cand);
         }
     }
-    if (!dl) {
-        char origin[600];
-        re2_origin_candidate(origin, sizeof origin);
-        if (origin[0]) dl = re2_dlopen(origin);
+    if (!dl) {                                  /* the module ships beside `q` */
+        char dir[512];
+        if (q_exedir(dir, sizeof dir)) {
+            char cand[600];
+            snprintf(cand, sizeof cand, "%s/%s", dir, RE2_LIB_BASENAME);
+            dl = re2_dlopen(cand);
+        }
     }
     if (!dl) dl = re2_dlopen(RE2_LIB_BASENAME);
     if (!dl) { g_re2.state = 2; return; }
