@@ -57,12 +57,12 @@ typedef struct {
 } duck_string_t;
 
 #define QDUCK_STRING_INLINE_MAX 12
-static inline const char* duck_string_data(const duck_string_t* s) {
+static inline const char* q_duckdb_string_data(const duck_string_t* s) {
     return s->value.inlined.length <= QDUCK_STRING_INLINE_MAX
                ? s->value.inlined.inlined
                : s->value.pointer.ptr;
 }
-static inline uint32_t duck_string_len(const duck_string_t* s) {
+static inline uint32_t q_duckdb_string_len(const duck_string_t* s) {
     return s->value.inlined.length;
 }
 
@@ -78,7 +78,7 @@ typedef struct {
 
 /* Validity bitmask (documented layout: 64 rows per word, bit set = valid);
  * decoded inline on read, official setter used on write. */
-static inline bool duck_validity_ok(const uint64_t* validity, duck_idx_t row) {
+static inline bool q_duckdb_validity_ok(const uint64_t* validity, duck_idx_t row) {
     return validity == NULL || (validity[row >> 6] & (1ULL << (row & 63))) != 0;
 }
 

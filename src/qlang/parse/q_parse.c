@@ -43,14 +43,14 @@
  * kparser die()s (exit) on malformed input.  A REPL must not exit, so a
  * malformed parse longjmps back to q_parse, which returns a ray_error. */
 static jmp_buf q_err_jmp;
-static q_err_e g_die_class = QE_PARSE;   /* q_die_err overrides for one longjmp */
+static q_err_e g_die_class = QE_PARSE;   /* die_err overrides for one longjmp */
 
 static _Noreturn void q_die(const char *msg) {
     (void)msg;   /* class-only errors (bare 'parse); msg documents the call site */
     longjmp(q_err_jmp, 1);
 }
 
-static _Noreturn void q_die_err(q_err_e cls) {
+static _Noreturn void die_err(q_err_e cls) {
     g_die_class = cls;
     longjmp(q_err_jmp, 1);
 }
@@ -691,7 +691,7 @@ static ray_t *seq_of(ray_t *e) {
 }
 
 /* the char-";" sequence head (see seq_of) */
-int q_ast_is_seq_head(const ray_t *h) {
+int q_parse_is_seq_head(const ray_t *h) {
     return h && h->type == -RAY_CHARV && h->u8 == ';';
 }
 
@@ -701,7 +701,7 @@ int q_ast_is_seq_head(const ray_t *h) {
 void q_ast_fill_empty_stmts(ray_t *ast) {
     if (!ast || ast->type != RAY_LIST || ray_len(ast) < 2) return;
     ray_t **e = (ray_t **)ray_data(ast);
-    if (!q_ast_is_seq_head(e[0])) return;
+    if (!q_parse_is_seq_head(e[0])) return;
     for (int64_t i = 1; i < ray_len(ast); i++)
         if (!e[i]) e[i] = ray_list_new(1);   /* len-0 general list: () */
 }
@@ -841,7 +841,7 @@ static ray_t *table_lit_dict(ray_t *defs) {
      * names through raw `!`/`flip` stay legal — construction is permissive */
     if (symvec_ids_dup(keys)) {
         ray_release(keys); ray_release(vals); ray_release(defs);
-        q_die_err(QE_DUP);
+        die_err(QE_DUP);
     }
     ray_release(defs);
     return table_lit_bang(keys, vals);
@@ -1205,7 +1205,7 @@ static P parse_query(Parser *p) {
      * openq rejects it at eval — the q_funsql.c ruling). */
     if (verb == QSQL_V_SELECT && qsql_cross_names_dup(A, B)) {
         ray_release(A); ray_release(B); ray_release(C);
-        q_die_err(QE_DUP);
+        die_err(QE_DUP);
     }
 
     /* the in-flight raw slots are now all NULL / consumed — retire the guard. */
@@ -2007,7 +2007,7 @@ int q_parse_is_assign(const ray_t *cast) {
     if (!ast || ast->type != RAY_LIST || ray_len(ast) < 1) return 0;
     ray_t **e = (ray_t **)ray_data(ast);
     ray_t *h = e[0];
-    if (q_ast_is_seq_head(h)) {
+    if (q_parse_is_seq_head(h)) {
         int64_t n = ray_len(ast);
         return n >= 2 ? q_parse_is_assign(e[n - 1]) : 0;
     }

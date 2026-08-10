@@ -800,11 +800,11 @@ ray_t* q_meta_fn(ray_t* x) {
         if (tstr && !RAY_IS_ERR(tstr)) ray_release(tstr);
         return bad ? bad : q_err(QE_WSFULL);
     }
-    return q_meta_assemble(cvec, tstr, fvec, avec);
+    return q_table_meta_assemble(cvec, tstr, fvec, avec);
 }
 
 /* key table: c ; value table: t f a  -> keyed table dict (consumes all four) */
-ray_t* q_meta_assemble(ray_t* cvec, ray_t* tstr, ray_t* fvec, ray_t* avec) {
+ray_t* q_table_meta_assemble(ray_t* cvec, ray_t* tstr, ray_t* fvec, ray_t* avec) {
     ray_t* kt = ray_table_new(1);
     kt = ray_table_add_col(kt, ray_sym_intern("c", 1), cvec);
     ray_release(cvec);
