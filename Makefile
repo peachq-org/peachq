@@ -46,6 +46,12 @@ RAY_GEN_HDRS = $(GEN_DIR)/qlang/dotq_gen.h $(GEN_DIR)/qlang/h_gen.h \
                $(GEN_DIR)/qlang/j_gen.h $(GEN_DIR)/qlang/lib_gen.h \
                $(GEN_DIR)/qlang/html_assets_gen.h
 
+# The generated set by NAME, for callers that need them without a link target
+# (Makefile.wasm assumes they exist). Naming the group, not one file, is what
+# keeps a new generated header from breaking the wasm release build.
+.PHONY: gen-headers
+gen-headers: $(RAY_GEN_HDRS)
+
 # q.q before dotq.q — dotq.q may use q.q keywords, never the reverse.
 $(GEN_DIR)/qlang/dotq_gen.h: src/qlang/q.q src/qlang/dotq.q tools/gen-bootstrap.sh
 	@mkdir -p $(dir $@)
