@@ -105,15 +105,6 @@ static int name_ok(const char* p, size_t n) {
     return 1;
 }
 
-/* R2: names no provider may take (namespaces the engine/stdlib own) */
-static int ds_reserved(const char* p, size_t n) {
-    static const char* const deny[] =
-        { "q", "Q", "h", "j", "z", "o", "m", "pq", "ipc", "ffi" };
-    for (size_t i = 0; i < sizeof deny / sizeof *deny; i++)
-        if (strlen(deny[i]) == n && memcmp(deny[i], p, n) == 0) return 1;
-    return 0;
-}
-
 typedef struct {
     seg_t ds, alias, cfg, tbl;   /* tbl.p == NULL -> connection form */
     int   is_table;
@@ -129,8 +120,7 @@ static ray_t* spec_parse(const char* s, size_t n, spec_t* sp) {
     sp->ds.p = s + 4;
     while (i < n && s[i] != ':') i++;
     sp->ds.n = i - 4;
-    if (!name_ok(sp->ds.p, sp->ds.n) || ds_reserved(sp->ds.p, sp->ds.n))
-        return q_err(QE_DOMAIN);
+    if (!name_ok(sp->ds.p, sp->ds.n)) return q_err(QE_DOMAIN);
     if (i < n) {
         sp->alias.p = s + ++i;
         size_t a0 = i;

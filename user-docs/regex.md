@@ -1,9 +1,9 @@
 # Regular expressions
 
-> **Status: proposed.** This document is the agreed design, written before the code. Every
-> example here is pinned as a test row in `test/q/aigenerated/regex_rlike.qcmd`, and those rows
-> are **red** until the engine lands. If an example here and the code ever disagree, this
-> document and that ledger are the specification.
+> **Status: implemented.** Every example here is pinned as a test row in
+> `test/q/aigenerated/regex_rlike.qcmd` (and the version pin in `regex_version.qcmd`), both
+> green. If an example here and the code ever disagree, this document and those ledgers are
+> the specification.
 
 peachq matches with [RE2](https://github.com/google/re2), the same engine DuckDB uses. RE2
 guarantees linear-time matching, so no pattern — however hostile or badly written — can hang a
@@ -16,7 +16,7 @@ the `ss`/`ssr` search verbs. Nothing here changes those.
 
 ## Loading
 
-The `.regex` namespace is part of the standard library:
+The `.regexp` namespace is part of the standard library:
 
 ```q
 q)\l pq
@@ -47,44 +47,54 @@ q)select from trade where sym rlike "^[A-C]"
 universal meaning of the name (MySQL, Hive, Spark and SQLite all use `RLIKE`/`REGEXP` this
 way).
 
-Being infix, `rlike` takes exactly two arguments and so has no options argument. Put flags in
-the pattern instead — see [Options](#options).
-
 ## Function reference
+
+Every function takes a fixed number of arguments, and the names below are literally the
+parameter names — typing a function's name prints its signature.
 
 | function | returns |
 |---|---|
-| `.regex.matches[s;p]` `[s;p;o]` | boolean — match anywhere |
-| `.regex.full_match[s;p]` `[s;p;o]` | boolean — the *entire* subject must match |
-| `.regex.extract[s;p]` `[s;p;o]` | the matched text, `""` if no match |
-| `.regex.groups[s;p]` `[s;p;o]` | the capture groups, `()` if no match |
-| `.regex.extract_all[s;p]` `[s;p;o]` | every non-overlapping match |
-| `.regex.replace[s;p;r]` `[s;p;r;o]` | first match replaced; `"g"` for all |
-| `.regex.split[s;p]` `[s;p;o]` | subject split on the pattern |
+| `.regexp.matches[subject;pattern]` | boolean — match anywhere |
+| `.regexp.full_match[subject;pattern]` | boolean — the *entire* subject must match |
+| `.regexp.extract[subject;pattern]` | the matched text, `""` if no match |
+| `.regexp.groups[subject;pattern]` | the first match's capture groups, `()` if no match |
+| `.regexp.groups_all[subject;pattern]` | one group-list per match |
+| `.regexp.extract_all[subject;pattern]` | every non-overlapping match |
+| `.regexp.replace[subject;pattern;replacement]` | the first match replaced |
+| `.regexp.replace_all[subject;pattern;replacement]` | every match replaced |
+| `.regexp.split[subject;pattern]` | subject split on the pattern |
+| `.regexp.escape[text]` | the pattern that matches `text` literally |
+| `.regexp.version` | the vendored RE2's version pin |
 
-`s` is the subject, `p` the pattern, `r` a replacement, `o` an options string.
+```q
+q).regexp.matches
+{[subject;pattern] .regexp.i.test[subject;pattern;0b]}
+```
+
+Coming from DuckDB SQL, swap the first `_` for a `.`: `regexp_matches` is `.regexp.matches`,
+`regexp_full_match` is `.regexp.full_match`, `regexp_extract_all` is `.regexp.extract_all`.
 
 ### Matching
 
 ```q
-q).regex.matches["abc";"b"]
+q).regexp.matches["abc";"b"]
 1b
-q).regex.full_match["abc";"b"]
+q).regexp.full_match["abc";"b"]
 0b
-q).regex.full_match["abc";"a.c"]
+q).regexp.full_match["abc";"a.c"]
 1b
 ```
 
-`.regex.matches` is `rlike` with an options argument available.
+`.regexp.matches` is `rlike` spelled as a function.
 
 ### Extracting
 
-`.regex.extract` gives the matched text; `.regex.groups` gives the capture groups:
+`.regexp.extract` gives the matched text; `.regexp.groups` gives the capture groups:
 
 ```q
-q).regex.extract["2026-08-10";"[0-9]{4}"]
+q).regexp.extract["2026-08-10";"[0-9]{4}"]
 "2026"
-q).regex.groups["2026-08-10";"([0-9]{4})-([0-9]{2})"]
+q).regexp.groups["2026-08-10";"([0-9]{4})-([0-9]{2})"]
 "2026"
 "08"
 ```
@@ -93,46 +103,100 @@ There is no group-number argument, because q can index a result. Take the group 
 name them all at once with a plain dict construction:
 
 ```q
-q)first .regex.groups["2026-08-10";"([0-9]{4})-([0-9]{2})"]
+q)first .regexp.groups["2026-08-10";"([0-9]{4})-([0-9]{2})"]
 "2026"
-q)`year`month!.regex.groups["2026-08-10";"([0-9]{4})-([0-9]{2})"]
+q)`year`month!.regexp.groups["2026-08-10";"([0-9]{4})-([0-9]{2})"]
 year | "2026"
 month| "08"
 ```
 
-`.regex.extract_all` returns every match rather than the first:
+A capture group that did not participate in the match reads as `""`. There is no limit on how
+many groups a pattern may have — the `\1`-`\9` limit below is about the *replacement* string,
+not the pattern.
+
+`.regexp.extract_all` returns every match rather than the first:
 
 ```q
-q).regex.extract_all["a1b22c";"[0-9]+"]
-"1"
+q).regexp.extract_all["a1b22c";"[0-9]+"]
+,"1"
 "22"
 ```
 
-RE2 supports up to nine capture groups.
+A one-character match displays as `,"1"` because it is a one-element *string*, not a character
+— the same display `"," vs "a1b"` gives. Every result here is a string, never a char atom.
+
+`.regexp.groups_all` gives one group-list per match, so selecting a group across every match is
+ordinary indexing:
+
+```q
+q).regexp.groups_all["a1 b22";"([a-z])([0-9]+)"]
+,"a" ,"1"
+,"b" "22"
+q).regexp.groups_all["a1 b22";"([a-z])([0-9]+)"][;1]
+,"1"
+"22"
+```
+
+That last line is DuckDB's `regexp_extract_all(subject, pattern, group)` — the second group of
+every match — without needing a group argument.
 
 ### Replacing and splitting
 
-`.regex.replace` replaces the first match; add `"g"` to replace all. `\1` to `\9` refer to
-capture groups:
+`.regexp.replace` replaces the first match, `.regexp.replace_all` every match. `\1` to `\9`
+refer to capture groups:
 
 ```q
-q).regex.replace["a-b-c";"-";"+"]
+q).regexp.replace["a-b-c";"-";"+"]
 "a+b-c"
-q).regex.replace["a-b-c";"-";"+";"g"]
+q).regexp.replace_all["a-b-c";"-";"+"]
 "a+b+c"
-q).regex.replace["John Smith";"(\\w+) (\\w+)";"\\2 \\1"]
+q).regexp.replace["John Smith";"(\\w+) (\\w+)";"\\2 \\1"]
 "Smith John"
 ```
 
 ```q
-q).regex.split["a,b,,c";","]
-"a"
-"b"
+q).regexp.split["a,b,,c";","]
+,"a"
+,"b"
 ""
-"c"
+,"c"
 ```
 
-A subject containing no match splits into itself: `.regex.split["abc";","]` is `enlist "abc"`.
+A subject containing no match splits into itself: `.regexp.split["abc";","]` is `enlist "abc"`.
+
+`split` follows DuckDB's `regexp_split_to_array` exactly, including its two non-obvious rules
+for patterns that can match nothing: a zero-width match at the *start of the remaining text* is
+not treated as a delimiter — it yields one character and the scan moves on — and once the
+remaining text is empty no further match is considered.
+
+```q
+q).regexp.split["abc";""]
+,"a"
+,"b"
+,"c"
+q).regexp.split["ab";"a*"]
+""
+,"b"
+```
+
+`extract_all`, by contrast, keeps every zero-width match — also DuckDB's answer
+(`regexp_extract_all('ab','a*')` is `[a, '', '']`). The two functions genuinely differ here.
+
+### Matching literal text
+
+`.regexp.escape` turns text into the pattern that matches it exactly:
+
+```q
+q).regexp.escape "1.5-2.0?"
+"1\\.5\\-2\\.0\\?"
+q).regexp.matches["a.c";.regexp.escape "."]
+1b
+q).regexp.matches["abc";.regexp.escape "."]
+0b
+```
+
+It composes with every function, and it is visible at the call site — which is why peachq has
+this rather than DuckDB's `l` (literal) option flag.
 
 ## Subjects, and how many answers you get back
 
@@ -147,14 +211,31 @@ collection of them:
 | **string** | `"word"` | **one answer** |
 | symbol list | `` `a`list `` | one per symbol |
 | list of strings | `("words";"other")` | one per string |
+| dictionary | `` `a`b!("x1";"yy") `` | one per value, keys kept |
+
+**Every** function distributes, not just the predicates — there is never a reason to write
+`each`:
 
 ```q
-q)"word" rlike "^w"
-1b
-q)("words";"other") rlike "^w"
-10b
-q)`AAPL`MSFT`IBM rlike "^[AM]"
+q).regexp.matches[`AAPL`MSFT`IBM;"^[AM]"]
 110b
+q).regexp.extract[("a1";"b22");"[0-9]+"]
+,"1"
+"22"
+q).regexp.replace_all[`x`y!("a-b";"c-d");"-";"+"]
+x| "a+b"
+y| "c+d"
+```
+
+Distributing is also the fast path: the pattern is compiled once and the whole collection is
+handled in a single call, where `each` would pay a q-level dispatch per element.
+
+An empty collection answers a **typed** empty, so a predicate over an empty column is still
+boolean:
+
+```q
+q).regexp.matches[0#`;"x"]
+`boolean$()
 ```
 
 **The one thing to watch:** a string is a list of characters, so `"word"` looks like a
@@ -166,12 +247,68 @@ An empty string is one empty subject, not zero subjects — `"" rlike "^$"` is `
 symbol behaves as the empty string, so a predicate always answers with a boolean and never
 injects a null into a `where` clause.
 
+### The collapse trap
+
+This one is q, not regex, and no amount of checking can catch it: **equal-length character
+atoms collapse into one string when they are written.**
+
+```q
+q)type ("k";"p")
+10h
+q)count ("k";"p")
+2
+```
+
+`("k";"p")` is *already* `"kp"` — a single two-character subject — before any function sees it.
+Unequal lengths stay two subjects:
+
+```q
+q).regexp.matches[("k";"p");"k"]
+1b
+q).regexp.matches[("k";"pp");"k"]
+10b
+```
+
+If a collection of one-character subjects matters, build it with `enlist each` or as symbols.
+
+### List results over a collection
+
+`extract_all`, `groups`, `groups_all` and `split` already return a *list* for a single subject,
+so over a collection they return a list of lists — and the type alone cannot tell you which
+you have:
+
+```q
+q).regexp.extract_all[("a1";"b22c33");"[0-9]+"]
+,,"1"
+("22";"33")
+```
+
+`each` has exactly the same ambiguity; distribution just makes it easier to reach. Know the
+shape of your subject.
+
+### What is rejected
+
+Anything not certainly text is `'type`: nesting deeper than one level, a collection with a
+non-text element, a dictionary with non-text values, a table.
+
+```q
+q).regexp.matches[(("a";"bb");("c";"dd"));"a"]
+'type
+q).regexp.matches[("ab";1);"a"]
+'type
+q).regexp.matches[([] a:1 2);"a"]
+'type
+```
+
+Accepting a shape is a one-way door; rejecting one is reversible. If a shape here should work,
+it can be added.
+
 ## Patterns
 
 Patterns are ordinary q strings, which means **a backslash must be doubled**:
 
 ```q
-q).regex.matches["a1";"\\d"]
+q).regexp.matches["a1";"\\d"]
 1b
 ```
 
@@ -183,65 +320,60 @@ alternation, groups, anchors, Perl classes (`\d \s \w`), and Unicode classes. RE
 deliberately omits backreferences within a pattern and lookaround assertions — the price of
 its linear-time guarantee. Full syntax reference: <https://github.com/google/re2/wiki/Syntax>.
 
-## Options
+Matching is UTF-8 aware. A pattern that can match *nothing* (`""`, `"x*"`) advances by a whole
+character rather than a byte, so `.regexp.split["aéb";""]` keeps `"é"` intact.
 
-The options argument is a string of single-character flags, matching DuckDB's spelling:
+## Flags
 
-| flag | meaning |
-|---|---|
-| `c` | case-sensitive (the default) |
-| `i` | case-insensitive |
-| `l` | treat the pattern as literal text, not as a regex |
-| `m` `n` `p` | newline-sensitive matching |
-| `s` | non-newline-sensitive matching |
-| `g` | replace every match (`.regex.replace` only) |
+**There is no options argument.** Flags go inside the pattern, where RE2 reads them itself:
 
 ```q
-q).regex.matches["ABC";"b"]
+q).regexp.matches["ABC";"b"]
 0b
-q).regex.matches["ABC";"b";"i"]
+q).regexp.matches["ABC";"(?i)b"]
 1b
-q).regex.matches["abc";"."]
-1b
-q).regex.matches["abc";".";"l"]
-0b
-q).regex.matches["a.c";".";"l"]
-1b
-```
-
-An unrecognised flag is an error rather than being quietly ignored, and so is `"g"` anywhere
-but `.regex.replace`.
-
-### Flags inside the pattern
-
-Most flags have an in-pattern form, which is how you get case-insensitivity out of `rlike`:
-
-```q
 q)"ABC" rlike "(?i)b"
 1b
 ```
 
-`(?i)` `(?s)` `(?m)` apply from that point on, and `(?i:...)` scopes to a group. Because a
-pattern can carry its own flags, `s rlike p` and `.regex.matches[s;p]` always agree for the
-same `p`.
+| flag | meaning |
+|---|---|
+| `(?i)` | case-insensitive |
+| `(?s)` | `.` matches newline |
+| `(?m)` | `^`/`$` match at line breaks |
 
-Two flags have no in-pattern form and are only available as options: **`l`** (literal) and
-**`g`** (global replace).
+They apply from that point on, and `(?i:...)` scopes to a group. Because a pattern carries its
+own flags, `subject rlike pattern` and `.regexp.matches[subject;pattern]` always agree for the
+same pattern — and an infix operator, which can only take two arguments, is as capable as the
+function.
+
+DuckDB spells these as a third string argument (`regexp_matches('ABC','b','i')`). It accepts
+the in-pattern form identically, so translation is a no-op: the flags travel inside the pattern
+string, which a query translator passes through verbatim. Of DuckDB's own 231 regexp calls
+across its test corpus, 27 use the options argument and only 2 — the `l` (literal) uses — could
+not be written in-pattern. Those get `.regexp.escape` instead, and `g` gets
+`.regexp.replace_all`, so nothing is lost and every function keeps a fixed arity.
 
 ## Errors
 
-An invalid pattern, an unknown flag, or `"g"` outside `.regex.replace` all signal `'regex`.
+`'regex` means one thing: a pattern RE2 will not compile, or a replacement string that does not
+fit its pattern.
 
 ```q
-q).regex.matches["abc";"("]
+q).regexp.matches["abc";"("]
+'regex
+q).regexp.replace["a-b";"-";"\\1"]
 'regex
 ```
+
+Regex matching in a build with no RE2 module also signals `'regex` — the matcher is a separate
+shared object, so that `./q` itself needs no C++ runtime.
 
 ## How this relates to `like`, `ss` and `ssr`
 
 They are unchanged and unrelated. `like` remains glob-style (`*` and `?`) and matches the
 whole subject; `ss` and `ssr` keep their own limited pattern grammar. Reach for `like` when a
-glob says what you mean, and `.regex`/`rlike` when it does not. There is deliberately no
+glob says what you mean, and `.regexp`/`rlike` when it does not. There is deliberately no
 overlap in behaviour between `like` and `rlike` beyond both returning booleans — notably
 `like` is whole-subject while `rlike` searches.
 
@@ -249,15 +381,18 @@ overlap in behaviour between `like` and `rlike` beyond both returning booleans �
 
 | DuckDB SQL | peachq |
 |---|---|
-| `regexp_matches(s, p)` | `.regex.matches[s;p]` or `s rlike p` |
-| `regexp_full_match(s, p)` | `.regex.full_match[s;p]` |
-| `regexp_extract(s, p)` | `.regex.extract[s;p]` |
-| `regexp_extract(s, p, n)` | `.regex.groups[s;p][n-1]` |
-| `regexp_extract(s, p, name_list)` | `` names!.regex.groups[s;p] `` |
-| `regexp_extract_all(s, p)` | `.regex.extract_all[s;p]` |
-| `regexp_replace(s, p, r)` | `.regex.replace[s;p;r]` |
-| `regexp_split_to_array(s, p)` | `.regex.split[s;p]` |
-| `regexp_split_to_table(s, p)` | `flip enlist .regex.split[s;p]` |
+| `regexp_matches(s, p)` | `.regexp.matches[subject;pattern]` or `subject rlike pattern` |
+| `regexp_full_match(s, p)` | `.regexp.full_match[subject;pattern]` |
+| `regexp_extract(s, p)` | `.regexp.extract[subject;pattern]` |
+| `regexp_extract(s, p, n)` | `.regexp.groups[subject;pattern][n-1]` |
+| `regexp_extract(s, p, name_list)` | `` names!.regexp.groups[subject;pattern] `` |
+| `regexp_extract_all(s, p)` | `.regexp.extract_all[subject;pattern]` |
+| `regexp_extract_all(s, p, n)` | `.regexp.groups_all[subject;pattern][;n-1]` |
+| `regexp_replace(s, p, r)` | `.regexp.replace[subject;pattern;replacement]` |
+| `regexp_replace(s, p, r, 'g')` | `.regexp.replace_all[subject;pattern;replacement]` |
+| `regexp_escape(s)` | `.regexp.escape[text]` |
+| `regexp_split_to_array(s, p)` | `.regexp.split[subject;pattern]` |
+| `regexp_split_to_table(s, p)` | `flip enlist .regexp.split[subject;pattern]` |
 
 Two differences worth knowing. DuckDB's `~` operator is `regexp_full_match`, whereas peachq's
 `rlike` searches — so `~` and `rlike` are **not** equivalents. And DuckDB has no
@@ -275,4 +410,15 @@ version bump can change matching at the edges, which is exactly the agreement be
 
 RE2 as DuckDB vendors it carries no version string of its own — it is an unversioned snapshot
 of a de-abseil'd fork — so the pin is expressed as the DuckDB release it came from, and
-`.regex.version` reports it.
+`.regexp.version` reports it:
+
+```q
+q).regexp.version
+"v1.4.5"
+```
+
+Because there is no version string, drift in the vendored source is caught by a digest of the
+tree instead, checked at build time (`third_party/re2/README.openq.md`). The DuckDB you connect
+to is only ever *compared*, never enforced: DuckDB is optional and you may legitimately point
+`PEACHQ_DUCKDB_LIB` at another release, so `.regexp.duckdb_match[handle]` answers whether an
+open connection agrees with our pin and leaves the judgement to you.
