@@ -37,6 +37,6 @@ void q_ast_fill_empty_stmts(ray_t* ast);
 
 /* True iff h is the statement-sequence HEAD — the char ";" (-10h), not a
  * symbol.  THE one test; q_eval's head dispatch and the parser both ask it. */
-int q_ast_is_seq_head(const ray_t* h);
+int q_parse_is_seq_head(const ray_t* h);
 
 #endif /* Q_PARSE_H */
