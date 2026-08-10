@@ -8,6 +8,7 @@
 #include "qlang/q_env.h"
 #include "qlang/ops/q_table.h"
 #include "qlang/ops/q_bang.h"  /* q_bang_enkey — the keying primitive */
+#include "qlang/ops/q_index.h" /* q_index_at — the out-of-range null read */
 #include "qlang/io/q_provider.h" /* upsert: `:pq: targets route to .X.upsert */
 #include "lang/internal.h"   /* ray_concat_fn, ray_typed_null */
 #include "table/sym.h"       /* ray_sym_intern_runtime, ray_sym_vec_cell */
@@ -39,8 +40,12 @@ static ray_t* null_cell_like(ray_t* col) {
     if (t == -RAY_STR || t == RAY_STR) return ray_str("", 0);
     if (ray_is_vec(col)) return ray_typed_null((int8_t)-t);
     if (ray_is_atom(col)) return ray_typed_null(t);
-    ray_retain(RAY_NULL_OBJ);                             /* list/empty column */
-    return RAY_NULL_OBJ;
+    /* A NESTED column's null cell is its OUT-OF-RANGE read — `("ab";"c")[5]`
+     * is `""`, so a filled string cell still counts 0 and casts to a null. */
+    ray_t* past = ray_i64(ray_len(col));
+    ray_t* cell = q_index_at(col, &past, 1);
+    ray_release(past);
+    return cell;
 }
 
 /* Normalize an insert/upsert payload y against the FLAT target schema.
@@ -86,6 +91,7 @@ static ray_t* rows_normalize(ray_t* flat, ray_t* y, int partial) {
             ray_t* acc = ray_list_new(nr > 0 ? nr : 1);
             for (int64_t r = 0; r < nr && !RAY_IS_ERR(acc); r++) {
                 ray_t* nl = null_cell_like(ray_table_get_col_idx(flat, c));
+                if (RAY_IS_ERR(nl)) { ray_release(acc); acc = nl; break; }
                 acc = ray_list_append(acc, nl);
                 ray_release(nl);
             }
