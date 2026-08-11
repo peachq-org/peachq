@@ -219,6 +219,12 @@ static int ctx_run_script(script_src_t* src, FILE* out, FILE* err) {
      * `system "l …"` and `-f` all obey it from here. */
     int64_t saved_ctx = q_env_ctx();
 
+    /* A load runs at TOP LEVEL (owner ruling 2026-08-11): suspend the caller's
+     * frames (env read floor + apply write floor), restored on EVERY exit,
+     * aborts included — unlike `\d`, lost locals are never inspectable state. */
+    int     saved_floor  = q_eval_apply_frame_floor(-1);
+    int32_t saved_ffloor = q_env_frame_floor(-1);
+
     /* kdb script semantics (learn/startingkdb/language.md):
      *  - an INDENTED line CONTINUES the previous logical line;
      *  - blank lines, whitespace-only lines, and comment lines (trimmed first
@@ -281,6 +287,8 @@ static int ctx_run_script(script_src_t* src, FILE* out, FILE* err) {
     if (!lrc) FLUSH();                             /* eval any pending logical line (incl. before a lone \) */
     #undef FLUSH
 
+    q_env_frame_floor(saved_ffloor);
+    q_eval_apply_frame_floor(saved_floor);
     if (!lrc) q_env_ctx_set(saved_ctx);            /* completed: caller's `\d` back */
     return lrc ? 1 + lrc : 0;
 }
