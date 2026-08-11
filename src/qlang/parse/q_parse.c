@@ -632,11 +632,26 @@ typedef struct {
     uint8_t *xyz_mask;
     /* >0 while parsing a lambda body — enables `:expr` early-return syntax */
     int lambda_depth;
+    /* recursive descents in flight — see Q_PARSE_MAX_DEPTH */
+    int depth;
 } Parser;
+
+/* The parser's recursion budget, charged by EVERY mutually-recursive descent
+ * so no one site can exhaust the C stack alone.  Roughly two charges per level
+ * of (…)/[…]/{…} and per term of `1+1+1+…`, so this supports nesting and flat
+ * chains a couple of hundred deep and answers anything past that with the
+ * 'limit q_eval already raises at EVAL_MAX_DEPTH. */
+#define Q_PARSE_MAX_DEPTH 512
 
 static Token *cur(Parser *p) { return &p->t.t[p->pos]; }
 static int    at(Parser *p, TKind k) { return cur(p)->kind == k; }
 static void   adv(Parser *p) { p->pos++; }
+
+/* Bounded by the token COUNT, not by the trailing-T_EOF convention: a line
+ * ending on the token under test must not read one past the array. */
+static TKind peek(Parser *p) {
+    return p->pos + 1 < p->t.n ? p->t.t[p->pos + 1].kind : T_EOF;
+}
 
 static void expect(Parser *p, TKind k, const char *msg) {
     if (at(p, k)) adv(p); else q_die(msg);
@@ -655,7 +670,9 @@ static int qtok_is_join_comma(const Token *tk);              /* dyadic bare `,` 
 
 static ray_t *parse_E(Parser *p, QCtx ctx);
 static P       parse_e(Parser *p, QCtx ctx);
+static P       parse_e_body(Parser *p, QCtx ctx);
 static P       parse_e_from(Parser *p, P t, QCtx ctx);
+static P       parse_e_from_body(Parser *p, P t, QCtx ctx);
 static P       parse_term(Parser *p, QCtx ctx);
 static P       parse_base(Parser *p);
 static P       parse_base_q(Parser *p, QCtx ctx);
@@ -1056,7 +1073,7 @@ static P parse_base(Parser *p) {
          * is not a term.  Emits (compose-value; f; g; …); parse_term's postfix
          * loop then applies any trailing `[args]`. */
         if (tk->len == 1 && p->src[tk->start] == '\'' &&
-            p->t.t[p->pos + 1].kind == T_LBRACK) {
+            peek(p) == T_LBRACK) {
             adv(p);                          /* consume ' */
             adv(p);                          /* consume [ */
             ray_t *args = parse_E(p, Q_NONE);
@@ -1081,7 +1098,7 @@ static P parse_base(Parser *p) {
     }
 }
 
-/* ===== parse_query die-path leak guard ======================================
+/* ===== the parser's die-path leak guard ======================================
  * parse_query allocates raw phrase lists (a/b/c) and the from-expression (t)
  * BEFORE it can q_die (empty by/where, missing from, trailing junk, or a nested
  * parse_e failure deeper in the clause).  q_die longjmps to q_parse's handler,
@@ -1090,14 +1107,21 @@ static P parse_base(Parser *p) {
  * it and release *slot for every in-flight ref.  LIFO: nested parse_phrase_list
  * / parse_query calls push and pop within their own frame, so the stack stays
  * balanced.  On the success path parse_query pops its own registrations (the
- * refs have by then been transferred into the result tree or released). */
-typedef struct qsql_pend { ray_t **slot; struct qsql_pend *prev; } qsql_pend_t;
+ * refs have by then been transferred into the result tree or released).
+ *
+ * The slot lives IN the frame, on the heap: longjmp resets the stack pointer,
+ * so the handler's own calls reuse the abandoned parser frames as it walks —
+ * a slot addressed into a caller's locals would be read after something else
+ * had overwritten it. */
+typedef struct qsql_pend { ray_t *v; struct qsql_pend *prev; } qsql_pend_t;
 static qsql_pend_t *g_qsql_pend = NULL;
 
-static void qsql_pend_push(ray_t **slot) {
+/* the caller's handle on its in-flight ref, valid until its pop */
+static ray_t **qsql_pend_push(void) {
     qsql_pend_t *f = (qsql_pend_t *)malloc(sizeof *f);
     if (!f) q_die("out of memory");
-    f->slot = slot; f->prev = g_qsql_pend; g_qsql_pend = f;
+    f->v = NULL; f->prev = g_qsql_pend; g_qsql_pend = f;
+    return &f->v;
 }
 static void qsql_pend_pop(void) {                 /* success: just unlink */
     qsql_pend_t *f = g_qsql_pend;
@@ -1108,7 +1132,7 @@ static void qsql_pend_pop(void) {                 /* success: just unlink */
 static void qsql_pend_unwind(void) {              /* q_die: release every ref */
     while (g_qsql_pend) {
         qsql_pend_t *f = g_qsql_pend;
-        if (f->slot && *f->slot) { ray_release(*f->slot); *f->slot = NULL; }
+        if (f->v) ray_release(f->v);
         g_qsql_pend = f->prev;
         free(f);
     }
@@ -1134,13 +1158,15 @@ static void qsql_pend_unwind(void) {              /* q_die: release every ref */
  * PARSES to a functional tree rather than falling back to the ordinary parser.
  * Task 3: all four verbs (select/exec/update/delete) reach this. */
 static P parse_query(Parser *p) {
-    ray_t *a = NULL, *b = NULL, *c = NULL, *t = NULL;   /* raw / from-expr refs */
     ray_t *A = NULL, *B = NULL, *C = NULL, *head = NULL, *node = NULL;
 
-    /* Register the in-flight raw slots for the q_die leak guard.  Pushed here
-     * (all NULL) so any die between here and the pops frees whatever is live. */
-    qsql_pend_push(&a); qsql_pend_push(&b);
-    qsql_pend_push(&c); qsql_pend_push(&t);
+    /* The raw phrase lists and the from-expression live in the q_die leak
+     * guard's own slots, taken here (all NULL) so any die between here and the
+     * pops frees whatever is live. */
+    ray_t **a = qsql_pend_push();      /* select phrases */
+    ray_t **b = qsql_pend_push();      /* by phrases    */
+    ray_t **c = qsql_pend_push();      /* where phrases */
+    ray_t **t = qsql_pend_push();      /* from-expr     */
 
     /* verb keyword (cursor is on it) */
     Token *vk = cur(p);
@@ -1151,30 +1177,30 @@ static P parse_query(Parser *p) {
     else verb = QSQL_V_DELETE;                     /* the only remaining verb */
     adv(p);                                        /* consume the verb keyword */
 
-    /* select-phrase list (a): stops at by / from */
-    a = parse_phrase_list(p, Q_SELECT);
+    /* select-phrase list: stops at by / from */
+    *a = parse_phrase_list(p, Q_SELECT);
 
-    /* optional by-phrase list (b): stops at from.  delete has NO By clause
+    /* optional by-phrase list: stops at from.  delete has NO By clause
      * (ref/delete.md's template omits it; kdb rejects at parse) */
     if (qtok_sym_is(cur(p), "by")) {
         if (verb == QSQL_V_DELETE) q_die("qsql: by is not a delete clause");
         adv(p);
-        b = parse_phrase_list(p, Q_BY);
-        if (ray_len(b) == 0) q_die("qsql: empty by phrase");
+        *b = parse_phrase_list(p, Q_BY);
+        if (ray_len(*b) == 0) q_die("qsql: empty by phrase");
     }
 
-    /* mandatory from + the from-expression (t) */
+    /* mandatory from + the from-expression */
     if (!qtok_sym_is(cur(p), "from")) q_die("qsql: expected from");
     adv(p);
     P tp = parse_e(p, Q_FROM);
     if (tp.role == R_NONE) q_die("qsql: expected table after from");
-    t = tp.v;
+    *t = tp.v;
 
-    /* optional where-phrase list (c): runs to the statement end */
+    /* optional where-phrase list: runs to the statement end */
     if (qtok_sym_is(cur(p), "where")) {
         adv(p);
-        c = parse_phrase_list(p, Q_WHERE);
-        if (ray_len(c) == 0) q_die("qsql: empty where phrase");
+        *c = parse_phrase_list(p, Q_WHERE);
+        if (ray_len(*c) == 0) q_die("qsql: empty where phrase");
     }
 
     /* terminator: only a statement boundary may follow a complete query */
@@ -1189,14 +1215,14 @@ static P parse_query(Parser *p) {
      * No q_die past this point, so the raw refs can be released as they are
      * consumed.  A (select-phrase) is verb-shaped by qsql_normalize_phrases
      * (empty select -> `()`, empty delete -> empty symvec, …). */
-    A = qsql_normalize_phrases(a, Q_SELECT, verb);
-    ray_release(a); a = NULL;
+    A = qsql_normalize_phrases(*a, Q_SELECT, verb);
+    ray_release(*a); *a = NULL;
 
-    if (b) { B = qsql_normalize_phrases(b, Q_BY, verb); ray_release(b); b = NULL; }
-    else   { B = (verb == QSQL_V_EXEC) ? ray_list_new(0) : ray_bool(0); }  /* no by */
+    if (*b) { B = qsql_normalize_phrases(*b, Q_BY, verb); ray_release(*b); *b = NULL; }
+    else    { B = (verb == QSQL_V_EXEC) ? ray_list_new(0) : ray_bool(0); } /* no by */
 
-    if (c) { C = qsql_normalize_phrases(c, Q_WHERE, verb); ray_release(c); c = NULL; }
-    else   { C = ray_list_new(0); }                /* no where -> () */
+    if (*c) { C = qsql_normalize_phrases(*c, Q_WHERE, verb); ray_release(*c); *c = NULL; }
+    else    { C = ray_list_new(0); }               /* no where -> () */
 
     /* qsql.md:168: a cols-vs-groups collision "throws a 'dup names for
      * cols/groups error during parse" — AT PARSE, so a script carrying the
@@ -1208,7 +1234,9 @@ static P parse_query(Parser *p) {
         die_err(QE_DUP);
     }
 
-    /* the in-flight raw slots are now all NULL / consumed — retire the guard. */
+    /* a/b/c are consumed; the from-expr moves out of its slot into the tree
+     * below, so take it before the pops free the frames holding all four. */
+    ray_t *from = *t;
     qsql_pend_pop(); qsql_pend_pop(); qsql_pend_pop(); qsql_pend_pop();
 
     /* the VALUE head (value-heads-at-parse): the same immutable registry cell
@@ -1218,7 +1246,7 @@ static P parse_query(Parser *p) {
                    Q_DYADIC);
     node = ray_list_new(5);
     node = ray_list_append(node, head); ray_release(head);
-    node = ray_list_append(node, t);    ray_release(t);
+    node = ray_list_append(node, from); ray_release(from);
     node = ray_list_append(node, C);    ray_release(C);
     node = ray_list_append(node, B);    ray_release(B);
     node = ray_list_append(node, A);    ray_release(A);
@@ -1310,7 +1338,25 @@ static P parse_term(Parser *p, QCtx ctx) {
     return t;
 }
 
+/* The two charged wrappers: every recursion cycle in the descent crosses
+ * parse_E, parse_e or parse_e_from, so charging these three bounds them all.
+ * die_err longjmps to q_parse's one setjmp, which abandons the whole Parser —
+ * an unwound-past decrement is unreachable, so no cleanup handler is needed. */
 static P parse_e(Parser *p, QCtx ctx) {
+    if (++p->depth > Q_PARSE_MAX_DEPTH) die_err(QE_LIMIT);
+    P r = parse_e_body(p, ctx);
+    p->depth--;
+    return r;
+}
+
+static P parse_e_from(Parser *p, P t, QCtx ctx) {
+    if (++p->depth > Q_PARSE_MAX_DEPTH) die_err(QE_LIMIT);
+    P r = parse_e_from_body(p, t, ctx);
+    p->depth--;
+    return r;
+}
+
+static P parse_e_body(Parser *p, QCtx ctx) {
     /* Lambda-body early return `:expr` (basics/function-notation.md): a bare
      * `:` at expression START inside a lambda body.  Infix assignment never
      * reaches here with a leading `:` (its lhs noun is consumed first), and
@@ -1320,7 +1366,7 @@ static P parse_e(Parser *p, QCtx ctx) {
         Token *rt = cur(p);
         /* a LONE `:` (next token closes the expression) is the assign-verb
          * OPERAND (`{@[x;1;:;"Z"]}`, ref/amend.md), not an early return */
-        TKind nk = p->t.t[p->pos + 1].kind;
+        TKind nk = peek(p);
         if (rt->kind == T_VERB && rt->len == 1 && p->src[rt->start] == ':' &&
             nk != T_SEMI && nk != T_RBRACK && nk != T_RPAREN && nk != T_RBRACE) {
             adv(p);
@@ -1337,7 +1383,7 @@ static P parse_e(Parser *p, QCtx ctx) {
      * nothing to signal (`(';/;\)`) the `'` is the ITERATOR VALUE instead. */
     {
         Token *st = cur(p);
-        TKind nk = st->kind == T_EOF ? T_EOF : p->t.t[p->pos + 1].kind;
+        TKind nk = peek(p);
         if (st->kind == T_ADVERB && st->len == 1 && p->src[st->start] == '\'' &&
             nk != T_LBRACK && nk != T_SEMI && nk != T_RPAREN &&
             nk != T_RBRACK && nk != T_RBRACE && nk != T_EOF) {
@@ -1366,7 +1412,7 @@ static P parse_e(Parser *p, QCtx ctx) {
      * comparisons (`<=`) are excluded by the glyph+colon shape test. */
     {
         Token *ht = cur(p);
-        TKind nk = ht->kind == T_EOF ? T_EOF : p->t.t[p->pos + 1].kind;
+        TKind nk = peek(p);
         if (ht->kind == T_VERB && ht->len == 2 && p->src[ht->start] != ':' &&
             p->src[ht->start + 1] == ':' &&
             strchr(VERB_CHARS, p->src[ht->start]) != NULL &&
@@ -1378,7 +1424,7 @@ static P parse_e(Parser *p, QCtx ctx) {
     return parse_e_from(p, t, ctx);
 }
 
-static P parse_e_from(Parser *p, P t, QCtx ctx) {
+static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
     Token *ut = cur(p);
     P u = parse_term(p, ctx);
 
@@ -1857,23 +1903,24 @@ static ray_t *qsql_normalize_phrases(ray_t *phrase_list, QCtx origin, int verb) 
  * uses.  Refcount: ray_list_append RETAINS, so the local ref is released in
  * both branches.  Returns an OWNED list ( `()` when the clause is empty). */
 static ray_t *parse_phrase_list(Parser *p, QCtx ctx) {
-    ray_t *lst = ray_list_new(0);
     /* A parse_e under a non-Q_NONE ctx can q_die (a misplaced clause keyword in
-     * parse_base_q); register the partial list so the longjmp handler frees it. */
-    qsql_pend_push(&lst);
+     * parse_base_q); hold the partial list where the longjmp handler frees it. */
+    ray_t **lst = qsql_pend_push();
+    *lst = ray_list_new(0);
     P first = parse_e(p, ctx);
     if (first.role != R_NONE) {
-        lst = ray_list_append(lst, first.v); ray_release(first.v);
+        *lst = ray_list_append(*lst, first.v); ray_release(first.v);
         while (qtok_is_join_comma(cur(p))) {
             adv(p);
             P f = parse_e(p, ctx);
             ray_t *v = (f.role == R_NONE) ? q_null() : f.v;
-            lst = ray_list_append(lst, v);
+            *lst = ray_list_append(*lst, v);
             ray_release(v);
         }
     }
-    qsql_pend_pop();                                 /* success: unlink, keep lst */
-    return lst;
+    ray_t *done = *lst;
+    qsql_pend_pop();                                 /* success: unlink, keep it */
+    return done;
 }
 
 /* ---- test hook (oracle unit test) ------------------------------------------
@@ -1904,23 +1951,33 @@ ray_t *q_qsql_normalize_probe(const char *src, int ctx, int verb) {
 }
 
 static ray_t *parse_E(Parser *p, QCtx ctx) {
-    ray_t *buf[MAX_VEC]; int n = 0;
-    buf[n++] = parse_e(p, Q_NONE).v;
-    while (at(p, T_SEMI)) {
+    /* Appended one at a time rather than staged through a MAX_VEC array: this
+     * frame is charged once per bracket level, so a 32KB local would exhaust
+     * the stack long before Q_PARSE_MAX_DEPTH.  ray_list_append stores a C
+     * NULL without retaining, so the list PRESERVES the C-NULL slots (unlike
+     * q_list, which normalises them to q_null()).  An empty statement — a
+     * whole-line comment, the `;;` between two expressions — is such a NULL;
+     * seq_of and the evaluator read it as a no-op that yields no output, where
+     * q_null() would print `::`. */
+    if (++p->depth > Q_PARSE_MAX_DEPTH) die_err(QE_LIMIT);
+    /* The FIRST expression is parsed before the list exists, so the die that
+     * ends a run of nested brackets — every level of it dies here, in its own
+     * first parse_e — strands nothing.  A die in a later `;` element still
+     * abandons that level's list: see PLAN.md on the die-path guard, which
+     * cannot hold this frame's slot. */
+    ray_t *v = parse_e(p, Q_NONE).v;
+    ray_t *l = ray_list_new(1);
+    int n = 0;
+    for (;;) {
+        l = ray_list_append(l, v);
+        if (v) ray_release(v);
+        n++;
+        if (!at(p, T_SEMI)) break;
         if (n >= MAX_VEC) q_die("too many ';'-separated expressions");
         adv(p);
-        buf[n++] = parse_e(p, Q_NONE).v;
+        v = parse_e(p, Q_NONE).v;
     }
-    /* Build the expression list PRESERVING C-NULL slots (unlike q_list, which
-     * normalises them to q_null()).  An empty statement — a whole-line comment
-     * or the `;;` between two expressions — is a C NULL here; seq_of and the
-     * evaluator treat that as a no-op that yields no output.  Normalising to
-     * q_null() would instead print `::`. */
-    ray_t *l = ray_list_new(n > 0 ? n : 1);
-    for (int i = 0; i < n; i++) {
-        l = ray_list_append(l, buf[i]);
-        if (buf[i]) ray_release(buf[i]);
-    }
+    p->depth--;
     return l;
 }
 
@@ -1968,8 +2025,7 @@ ray_t *q_parse(const char *src) {
     g_toks.n = 0;
     if (setjmp(q_err_jmp)) {
         /* q_die() longjmped here; free whatever the scanner had emitted, plus
-         * any in-flight qSQL from-expression token snapshots and any raw
-         * parse_query phrase/from-expr refs registered on the pending guard. */
+         * every ref the abandoned frames registered on the pending guard. */
         qsql_pend_unwind();
         free_tokens(g_toks);
         g_toks.t = NULL;
