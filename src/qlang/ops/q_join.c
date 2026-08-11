@@ -1071,7 +1071,7 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
      * ref/accumulators.md:264) and a TABLE is a list of records — joining zero
      * records leaves it unchanged.  Base concat refuses the pair, so the law
      * the collapse below already states for vectors is completed here: without
-     * it `c:(); c,:t` (lib/qunit/qunit.q's runNsTests) is 'type. */
+     * it `c:(); c,:t` (qlib/src/qunit.q's runNsTests) is 'type. */
     if (x && y) {
         ray_t* t = (x->type == RAY_LIST && ray_len(x) == 0)   ? y
                  : (y->type == RAY_LIST && ray_len(y) == 0)   ? x : NULL;
