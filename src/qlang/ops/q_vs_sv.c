@@ -94,7 +94,7 @@ static ray_t* bit_decompose(ray_t* y) {
     int w = 0; uint64_t bits = 0;
     switch (y->type) {
     case -RAY_BOOL: w = 1;  bits = y->b8 ? 1 : 0; break;
-    case -RAY_BYTE_ONLY: w = 8;  bits = (uint8_t)y->u8; break;
+    RAY_BYTE_ATOM_CASES: w = 8;  bits = (uint8_t)y->u8; break;
     case -RAY_I16:  w = 16; bits = (uint16_t)y->i16; break;
     case -RAY_I32:  w = 32; bits = (uint32_t)y->i32; break;
     case -RAY_I64:  w = 64; bits = (uint64_t)y->i64; break;
@@ -136,36 +136,33 @@ static ray_t* base_decompose_vec(ray_t* base, int64_t v) {
     return out;
 }
 
-static ray_t* vs_impl(ray_t* x, ray_t* y);
+/* each text overload converts its OWN args to the legacy -RAY_STR body and
+ * crosses results back as charv; a numeric head (0b/0x0/int base) sees its
+ * args unshimmed, so a char atom stays a byte (peachq-org/peachq#16) */
 ray_t* q_vs_wrap(ray_t* x, ray_t* y) {
-    /* charv args ride the legacy -RAY_STR body; results cross back as charv */
-    ray_t* xs = q_str_in(x); ray_t* ys = q_str_in(y);
-    if (xs != x || ys != y) {
-        ray_t* r = vs_impl(xs, ys);
+    if (!x || !y) return q_err(QE_TYPE);
+    /* --- substring split --- */
+    if (x->type == RAY_CHARV || x->type == -RAY_CHARV || x->type == -RAY_STR) {
+        ray_t* xs = q_str_in(x); ray_t* ys = q_str_in(y);
+        ray_t* r = (xs->type == -RAY_STR && ys->type == -RAY_STR)
+                 ? str_split(ray_str_ptr(ys), ray_str_len(ys),
+                             ray_str_ptr(xs), ray_str_len(xs))
+                 : q_err(QE_NYI);
         ray_release(xs); ray_release(ys);
         return q_str_charv_out(r);
     }
-    ray_release(xs); ray_release(ys);
-    return vs_impl(x, y);
-}
-static ray_t* vs_impl(ray_t* x, ray_t* y) {
-    if (!x || !y) return q_err(QE_TYPE);
-    /* --- string / newline split --- */
-    if (x->type == -RAY_STR) {
-        if (y->type != -RAY_STR)
-            return q_err(QE_NYI);
-        return str_split(ray_str_ptr(y), ray_str_len(y),
-                           ray_str_ptr(x), ray_str_len(x));
-    }
+    /* --- newline split / sym split (` vs) --- */
     if (q_type_is_null_sym(x)) {
-        if (y->type == -RAY_STR)
-            return q_str_split_lines(ray_str_ptr(y), ray_str_len(y));
         if (y->type == -RAY_SYM) return sym_split(y);
-        return q_err(QE_TYPE);
+        ray_t* ys = q_str_in(y);
+        if (ys->type != -RAY_STR) { ray_release(ys); return q_err(QE_TYPE); }
+        ray_t* r = q_str_split_lines(ray_str_ptr(ys), ray_str_len(ys));
+        ray_release(ys);
+        return q_str_charv_out(r);
     }
     /* --- byte encode (0x0 vs scalar) --- */
     if (x->type == -RAY_BYTE_ONLY) {
-        if (ray_is_atom(y) && y->type != -RAY_STR) return byte_encode(y);
+        if (ray_is_atom(y)) return byte_encode(y);
         return q_err(QE_NYI);
     }
     /* --- bit decompose (0b vs scalar) --- */
