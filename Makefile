@@ -12,7 +12,7 @@ RAY_VENDOR_SRC = third_party/yyjson/yyjson.c \
                  third_party/picohttpparser/picohttpparser.c \
                  third_party/miniz/miniz.c
 
-# libffi: generated configs are COMMITTED per target (third_party/libffi/README.openq.md),
+# libffi: generated configs are COMMITTED per target (third_party/libffi/README.peachq.md),
 # so no configure step. Ports vendored: linux x86-64 native + win64 cross only —
 # other native hosts (macOS arm64) build WITHOUT libffi until their port is vendored.
 # ffi64.c/unix64.S are SysV-only; ffiw64.c/win64.S build on both vendored targets.
@@ -59,11 +59,11 @@ $(GEN_DIR)/qlang/dotq_gen.h: src/qlang/q.q src/qlang/dotq.q tools/gen-bootstrap.
 
 $(GEN_DIR)/qlang/h_gen.h: src/qlang/h.q tools/gen-bootstrap.sh
 	@mkdir -p $(dir $@)
-	SYMBOL=OPENQ_H_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/h.q
+	SYMBOL=PEACHQ_H_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/h.q
 
 $(GEN_DIR)/qlang/j_gen.h: src/qlang/j.q tools/gen-bootstrap.sh
 	@mkdir -p $(dir $@)
-	SYMBOL=OPENQ_J_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/j.q
+	SYMBOL=PEACHQ_J_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/j.q
 
 # The standard library: lib/*.q TOP LEVEL ONLY (lib/qunit/ deliberately out),
 # sorted for determinism — the ANY-ORDER LAW makes the order semantically moot.
@@ -73,7 +73,7 @@ $(GEN_DIR)/qlang/j_gen.h: src/qlang/j.q tools/gen-bootstrap.sh
 LIB_Q_SRCS := $(sort $(wildcard lib/*.q))
 $(GEN_DIR)/qlang/lib_gen.h: lib/. $(LIB_Q_SRCS) tools/gen-bootstrap.sh
 	@mkdir -p $(dir $@)
-	SYMBOL=OPENQ_LIB_BOOTSTRAP tools/gen-bootstrap.sh $@ $(LIB_Q_SRCS)
+	SYMBOL=PEACHQ_LIB_BOOTSTRAP tools/gen-bootstrap.sh $@ $(LIB_Q_SRCS)
 
 # Dirs in the prerequisite list: deleting an asset bumps its directory's mtime,
 # which a file-only list cannot see. A no-change make must not touch this rule.

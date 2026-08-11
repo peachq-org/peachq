@@ -779,7 +779,7 @@ static int symvec_ids_dup(ray_t *a) {
 /* a select-COLUMN name colliding with a by-GROUP name — the cols/groups CROSS
  * collision, which is what covers both of qsql.md:168's parse-error examples
  * (`select b by b from t`, `select a,a by a from t`).  A collision WITHIN one
- * list is NOT checked here: kdb auto-aliases it, openq rejects it at EVAL
+ * list is NOT checked here: kdb auto-aliases it, peachq rejects it at EVAL
  * (the stricter owner ruling — see q_funsql.c names_collide). */
 static int qsql_cross_names_dup(ray_t *A, ray_t *B) {
     ray_t *ka = A && A->type == RAY_DICT ? ray_dict_keys(A) : NULL;
@@ -1202,7 +1202,7 @@ static P parse_query(Parser *p) {
      * cols/groups error during parse" — AT PARSE, so a script carrying the
      * bug fails to LOAD and the operator is alerted before the code runs.
      * A within-phrase collision is NOT this law's (kdb auto-aliases it;
-     * openq rejects it at eval — the q_funsql.c ruling). */
+     * peachq rejects it at eval — the q_funsql.c ruling). */
     if (verb == QSQL_V_SELECT && qsql_cross_names_dup(A, B)) {
         ray_release(A); ray_release(B); ray_release(C);
         die_err(QE_DUP);

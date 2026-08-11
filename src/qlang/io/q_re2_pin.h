@@ -9,7 +9,7 @@
  * Two consumers, deliberately: PQRE2_DUCKDB_PIN is what `.regexp.version`
  * reports, and tools/re2-pin.sh checks PQRE2_SRC_SHA256 against the tree at
  * every rebuild of the RE2 archive.  Bumping RE2 means editing both lines — see
- * third_party/re2/README.openq.md for the recipe. */
+ * third_party/re2/README.peachq.md for the recipe. */
 #ifndef Q_RE2_PIN_H
 #define Q_RE2_PIN_H
 

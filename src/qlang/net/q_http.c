@@ -1,5 +1,5 @@
 /* q_http — see q_http.h.  Behaviour pinned from qdocs kb/http.md + ref/dotz.md
- * (clean room); doc-unpinned details are openq-authored and recorded in the PR. */
+ * (clean room); doc-unpinned details are peachq-authored and recorded in the PR. */
 #ifndef RAY_OS_WINDOWS
   #define _GNU_SOURCE            /* openat / O_NOFOLLOW / O_DIRECTORY */
 #endif
@@ -692,7 +692,7 @@ static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
 
 /* `.z.pp` (HTTP POST) — the request body (read from the socket; the frozen
  * ipc.c accumulator stops at the header terminator) is requestText.  No `.z.pp`
- * set -> 501 (openq policy; ref/dotz.md pins no default).  Transfer-Encoding on
+ * set -> 501 (peachq policy; ref/dotz.md pins no default).  Transfer-Encoding on
  * the request -> 400 (chunked request bodies deferred).  Sends a response in
  * every branch. */
 static void zpp_dispatch(ray_sock_t fd, const struct phr_header* hdrs, size_t nh)
@@ -742,7 +742,7 @@ static void zpp_dispatch(ray_sock_t fd, const struct phr_header* hdrs, size_t nh
 }
 
 /* `.z.pm` (HTTP OPTIONS/PUT/DELETE/PATCH — ref/dotz.md) — 3-item
- * (methodSym; target; hdrDict) arg.  No `.z.pm` set -> 501 (openq policy;
+ * (methodSym; target; hdrDict) arg.  No `.z.pm` set -> 501 (peachq policy;
  * dotz.md pins no default).  requestText = the request-target with leading '/'
  * stripped (`.z.ph` normalization); PUT/PATCH request bodies are not read
  * (deferred — the connection is close-per-response, so unread bytes are dropped
@@ -767,7 +767,7 @@ static void zac_send_401(ray_sock_t fd) {
     static const char body[] = "401 Unauthorized\n";
     char hdr[192];
     int hl = snprintf(hdr, sizeof hdr,
-        "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"openq\"\r\n"
+        "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"peachq\"\r\n"
         "Content-Type: text/plain\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
         sizeof body - 1);
     if (hl > 0 && q_http_send_all(fd, hdr, (size_t)hl, Q_HTTP_SEND_SECS) == 0)
@@ -778,7 +778,7 @@ static void zac_send_401(ray_sock_t fd) {
  * `.z.ac` with (target; hdrDict) — target = request-target, leading '/' stripped
  * (header inspection is the documented job; the body is NOT read to feed auth).
  * Return protocol (dotz.md L129-166): 0 -> default 401 (reject); 1 -> proceed
- * (accept; the username -> `.z.u` is DEFERRED — openq `.z.u` is a computed
+ * (accept; the username -> `.z.u` is DEFERRED — peachq `.z.u` is a computed
  * producer); 2 -> send the custom response VERBATIM; 4 -> basic-auth fallback
  * (caller re-applies the -u/-U policy).  A malformed/error/unknown-status return
  * fails CLOSED (500, no handler).  Never logs the arg or the return payload. */
@@ -844,7 +844,7 @@ int q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
 
     /* `.z.ac` GATE — the single auth choke point.  Runs ONCE, after parse and
      * before EVERY method branch (POST/.z.pm/GET/WS-upgrade/static), so no
-     * request path can reach a handler ahead of it (openq policy; dotz.md is
+     * request path can reach a handler ahead of it (peachq policy; dotz.md is
      * silent on ordering + WS).  Accept -> fall through (bypassing the -u/-U
      * 401); reject/custom/error -> a response was sent; fallback -> re-apply the
      * listener's basic-auth policy (deferred to today's authed-401). */

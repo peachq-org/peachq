@@ -1,7 +1,7 @@
 /* q views (learn/views.md, ref/view.md) — the `name::expr` dependency
  * mechanism and its introspection surface.  q_view.c carries the design. */
-#ifndef OPENQ_Q_VIEW_H
-#define OPENQ_Q_VIEW_H
+#ifndef PEACHQ_Q_VIEW_H
+#define PEACHQ_Q_VIEW_H
 
 #include <rayforce.h>
 
@@ -24,4 +24,4 @@ void   q_view_on_global_unbind(int64_t sym);      /* invalidate only */
 void   q_view_set_index(ray_t** idxv, int64_t k); /* .z.vs y for an indexed assign */
 void   q_view_reset(void);                        /* runtime teardown */
 
-#endif /* OPENQ_Q_VIEW_H */
+#endif /* PEACHQ_Q_VIEW_H */

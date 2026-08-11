@@ -182,7 +182,7 @@ static int uniform_list(ray_t* x, int8_t* elt) {
 }
 
 /* type char of one value, as `.Q.ty`/`meta` see it.  Simple vector -> lower;
- * native string (-RAY_STR) -> 'c' (INTROSPECTION shim: openq stores a char
+ * native string (-RAY_STR) -> 'c' (INTROSPECTION shim: peachq stores a char
  * vector as one string atom); uniform list of vectors -> UPPER; else blank. */
 char q_ty_char(ray_t* x) {
     int8_t elt;

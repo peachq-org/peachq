@@ -111,7 +111,7 @@ enum {
 
 #define RAY_FN_COMPILED  0x40   /* lambda has been compiled to bytecode */
 
-/* openq: q-wrapper lowering marker — a TYPE-SCOPED alias of RAY_FN_COMPILED
+/* peachq: q-wrapper lowering marker — a TYPE-SCOPED alias of RAY_FN_COMPILED
  * (0x40), matching the codebase's existing 0x20 dual-use (RAY_FN_RESTRICTED on
  * fn values vs ATTR_QUOTED on -RAY_SYM atoms).  RAY_FN_COMPILED is set ONLY on
  * RAY_LAMBDA objects; `ray_head_is_fn_value` (below) inspects ONLY
@@ -202,7 +202,7 @@ ray_span_t ray_bc_dbg_get(ray_t* dbg, int32_t ip);
 /* Print a ray_t value to a FILE stream. */
 void ray_lang_print(FILE* fp, ray_t* val);
 
-/* openq: noun-head apply hook (piece 2c) — called from BOTH non-callable
+/* peachq: noun-head apply hook (piece 2c) — called from BOTH non-callable
  * failure sites (the tree-walk eval default arm and the VM generic-apply
  * default arm) with the EVALUATED head and EVALUATED args (all borrowed).
  * Returns an OWNED result, or NULL to decline — the caller then raises its
@@ -212,9 +212,9 @@ void ray_lang_print(FILE* fp, ray_t* val);
 typedef ray_t* (*ray_apply_hook_t)(ray_t* head, ray_t** args, int64_t n);
 void ray_eval_set_apply_hook(ray_apply_hook_t hook);
 
-/* openq: remote-source string evaluation (IPC request payloads, journal
+/* peachq: remote-source string evaluation (IPC request payloads, journal
  * replay).  A language layer may install a hook that owns the parse+eval
- * of remote SOURCE STRINGS (openq installs q_parse -> q_lower -> ray_eval
+ * of remote SOURCE STRINGS (peachq installs q_parse -> q_lower -> ray_eval
  * at q boot); without a hook the engine's own ray_eval_str runs (rayfall —
  * the engine binary's IPC dialect).  The hook receives the bytes and
  * length (NOT NUL-terminated) and returns an OWNED value. */
@@ -223,12 +223,12 @@ void   ray_eval_set_remote_str_fn(ray_remote_str_fn_t fn);
 bool   ray_eval_remote_str_installed(void);   /* q runtime present? (IPC text dialect) */
 ray_t* ray_eval_remote_str(const char* src, size_t len);
 
-/* openq: remote-source (func;args) VALUE-APPLY evaluation (IPC request
+/* peachq: remote-source (func;args) VALUE-APPLY evaluation (IPC request
  * payloads).  The kdb "value/apply" wire shape is a general list whose head is
  * the function (symbol / string source / value / lambda carrier) and whose tail
  * are ALREADY-EVALUATED data args.  A language layer installs a hook that does a
  * SINGLE application of the head to the args — NEVER a recursive ray_eval (a
- * value object is not a parse tree; ARCHITECTURE.md "eval vs value").  openq
+ * value object is not a parse tree; ARCHITECTURE.md "eval vs value").  peachq
  * installs a thin wrapper over the single-home q `value` at boot.  Without a
  * hook (pure rayfall — the engine binary has no value-apply IPC dialect) the
  * request SAFE-ERRORS `'nyi` rather than guessing an apply.  The hook receives
@@ -237,7 +237,7 @@ typedef ray_t* (*ray_remote_apply_fn_t)(ray_t* list);
 void   ray_eval_set_remote_apply_fn(ray_remote_apply_fn_t fn);
 ray_t* ray_eval_remote_apply(ray_t* list);
 
-/* openq: eval-time computed-name resolver (the `.z.*` mechanism).  Called at
+/* peachq: eval-time computed-name resolver (the `.z.*` mechanism).  Called at
  * every name-LOAD site (tree-walk atom deref + VM op_resolve/op_resolve_w)
  * when env resolution MISSES, BEFORE raising `'name`.  `.z` is NOT a namespace
  * or dict — the evaluator fills a `.z.<name>` reference with a computed value
@@ -398,7 +398,7 @@ ray_t* ray_raise_fn(ray_t* val);
 ray_t* ray_try_fn(ray_t* expr, ray_t* handler_expr);
 
 /* ── Call-head descriptor (ADR 0002 Option A) ──────────────────────────────
- * openq commits to one object model: a q parse tree is a `ray_t` whose call
+ * peachq commits to one object model: a q parse tree is a `ray_t` whose call
  * heads are function VALUES (`parse "2+3"` -> `(+<fn>; 2; 3)`).  rayfall's
  * compiler and query/DAG planner historically key on name-reference SYMBOL
  * heads (`-RAY_SYM`), so a value head would miss special-form detection and
@@ -438,7 +438,7 @@ static inline bool ray_head_is_fn_value(ray_t* head, int64_t* out_sym,
                 /* the canonical builtin object — name-route as today. */
                 *out_sym = sym;
             } else if (head->attrs & RAY_FN_Q_LOWER) {
-                /* An openq-blessed q wrapper: a value that is NOT the env
+                /* An peachq-blessed q wrapper: a value that is NOT the env
                  * binding of its aux-name but explicitly opts into routing by
                  * that canonical name (== != take drop), so it hits the same
                  * DAG op / decline as the like-named builtin.  Its own impl

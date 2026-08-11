@@ -7,8 +7,8 @@
  * a 'name — dotted access is value traversal, never name splitting.
  * Rayfall's env (src/lang/env.c) is a bootstrap-only kernel catalogue; q's
  * ONLY live seam into it is the six `.ipc.on.*` hook syms. */
-#ifndef OPENQ_Q_ENV_H
-#define OPENQ_Q_ENV_H
+#ifndef PEACHQ_Q_ENV_H
+#define PEACHQ_Q_ENV_H
 
 #include <rayforce.h>
 
@@ -108,4 +108,4 @@ int32_t   q_env_frame_depth(void);
 #define Q_ENV_FRAME_VIEW_NONE (-2)
 int32_t   q_env_frame_view(int32_t depth);
 
-#endif /* OPENQ_Q_ENV_H */
+#endif /* PEACHQ_Q_ENV_H */

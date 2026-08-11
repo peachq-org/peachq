@@ -1,7 +1,7 @@
 #!/bin/sh
 # gen-bootstrap.sh — turn the authored .q files into a generated C header that
-# exposes their bytes as `static const char OPENQ_BOOTSTRAP[]`. Part of the
-# openq embedded-bootstrap pipeline (ARCHITECTURE.md BIGDECISION): src/qlang/
+# exposes their bytes as `static const char PEACHQ_BOOTSTRAP[]`. Part of the
+# peachq embedded-bootstrap pipeline (ARCHITECTURE.md BIGDECISION): src/qlang/
 # q.q + dotq.q are the source of truth, this bakes them into the binary. DO NOT
 # edit the generated output — edit the .q sources and rebuild.
 #
@@ -23,8 +23,8 @@ if [ -n "${SYMBOL:-}" ]; then
     sym=$SYMBOL
     guard="${SYMBOL}_H"
 else
-    sym=OPENQ_BOOTSTRAP
-    guard=OPENQ_DOTQ_GEN_H
+    sym=PEACHQ_BOOTSTRAP
+    guard=PEACHQ_DOTQ_GEN_H
 fi
 
 # Escape each source line for a C string literal: strip a trailing CR (CRLF
