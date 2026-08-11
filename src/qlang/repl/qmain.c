@@ -172,7 +172,8 @@ int main(int argc, char** argv) {
 #else
         const char* build = "";
 #endif
-        printf("openq %d.%d %s\n", RAY_VERSION_MAJOR, RAY_VERSION_MINOR, build);
+        printf("peachq %d.%d %s https://peachq.org/\n",
+               RAY_VERSION_MAJOR, RAY_VERSION_MINOR, build);
         fflush(stdout);
     }
 

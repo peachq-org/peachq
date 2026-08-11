@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Zero-dependency static preview server for the openq WASM REPL.
+"""Zero-dependency static preview server for the peachq WASM REPL.
 
 Serves the wasm/ directory (index.html + peachq.js/.wasm) with the correct
 MIME type for .wasm so the browser streams/instantiates it. Stdlib only —
@@ -34,7 +34,7 @@ Handler.extensions_map[".wasm"] = "application/wasm"
 
 if __name__ == "__main__":
     with http.server.ThreadingHTTPServer(("", PORT), Handler) as httpd:
-        print(f"openq WASM REPL: http://localhost:{PORT}/  (serving {DIR})")
+        print(f"peachq WASM REPL: http://localhost:{PORT}/  (serving {DIR})")
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

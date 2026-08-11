@@ -24,7 +24,7 @@ ray_t* q_wirefile_read(ray_t* x);
  * fixed-width simple vectors, shape A otherwise — kdb's own choice, and what
  * makes it byte-identical to a file kdb wrote.  A trailing slash splays: per-
  * column flat files, sym columns AUTO-ENUMERATED against `dom` (NULL = the
- * table dir's parent, `.Q.en`'s geography; naming it is the openq 2-item-`set`
+ * table dir's parent, `.Q.en`'s geography; naming it is the peachq 2-item-`set`
  * API extension), nested char via the `#` companion, `.d` written last.
  * `.z.zd` (or the explicit zip triple, lbs >= 0) compresses data files; the
  * domain file NEVER compresses (KX's own concurrency retreat, kb page). */

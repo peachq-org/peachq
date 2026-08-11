@@ -42,7 +42,7 @@
  * /dev/urandom (a strong entropy source, RFC §5.3) on POSIX — clock+address is
  * the fallback (and the Windows rot-guard path).  A 4-byte key is inherently
  * 32-bit, so a birthday repeat after ~2^16 frames is intrinsic to the WS mask
- * size, not this generator.  An openq choice (masking is transparent); PR. */
+ * size, not this generator.  An peachq choice (masking is transparent); PR. */
 static __thread uint64_t ws_mask_rng = 0;
 static uint64_t ws_mask_seed(void) {
     uint64_t x;

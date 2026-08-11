@@ -1,5 +1,5 @@
 / regexp.q — THE public .regexp surface (user-docs/regex.md).
-/ Lambdas, not natives, so the surface is DISCOVERABLE: openq renders a lambda
+/ Lambdas, not natives, so the surface is DISCOVERABLE: peachq renders a lambda
 / from its verbatim source, so typing `.regexp.matches` prints the signature and
 / names its arguments, where a native prints as an opaque primitive.  The
 / parameter names here are the document's words — subject, pattern, replacement.

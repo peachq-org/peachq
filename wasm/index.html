@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>openq — q in your browser (WASM)</title>
+<title>peachq — q in your browser (WASM)</title>
 <style>
   html,body{height:100%;margin:0;background:#1e2124;color:#e6e6e6;
     font-family:'SF Mono','DejaVu Sans Mono',Menlo,Consolas,monospace;}
@@ -20,7 +20,7 @@
 </head>
 <body>
 <div id="wrap">
-  <header>openq WebAssembly REPL — type a q expression and press Enter
+  <header>peachq WebAssembly REPL — type a q expression and press Enter
     (e.g. <code>2+3</code>, <code>til 5</code>, <code>sum 1 2 3 4</code>)</header>
   <div id="out"></div>
   <div id="bar"><span id="prompt">q)</span><input id="inp" autofocus autocomplete="off" spellcheck="false"></div>
@@ -38,12 +38,12 @@
   }
 
   // MODULARIZE=1: the module is a factory returning a Promise that resolves
-  // to the ready runtime. Build it in Makefile.wasm as createOpenQ.
-  line('loading openq…', 'sys');
-  createOpenQ().then(mod => {
+  // to the ready runtime. Build it in Makefile.wasm as createPeachQ.
+  line('loading peachq…', 'sys');
+  createPeachQ().then(mod => {
     M = mod;
     M.ccall('q_wasm_init', 'number', [], []);
-    line('openq ready.', 'sys');
+    line('peachq ready.', 'sys');
     inp.focus();
   }).catch(e => line('failed to load wasm: ' + e, 'err'));
 

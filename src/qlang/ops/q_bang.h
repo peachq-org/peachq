@@ -10,7 +10,7 @@
  * in j.q/dotq.q), so a user rebind of the q name never touches the bang — kdb
  * keeps `-N!` the primitive UNDERNEATH the name.  Root keyword twins (`-1!`hsym,
  * `-5!`parse, ...) route to the same C fn the keyword uses (the keyword stays the
- * registry/builtin home).  Ids without an impl (or whose subsystem openq lacks —
+ * registry/builtin home).  Ids without an impl (or whose subsystem peachq lacks —
  * IPC/TLS/codec/enums/DARE) are EXPLICIT placeholder cases returning 'nyi; the
  * switch is the first-class inventory. */
 #ifndef Q_BANG_H

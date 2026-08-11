@@ -1,6 +1,6 @@
-/* q_wasm — the browser/JS entry points for openq's WebAssembly build.
+/* q_wasm — the browser/JS entry points for peachq's WebAssembly build.
  *
- * Exposes a tiny, stable C ABI that drives openq's real q pipeline
+ * Exposes a tiny, stable C ABI that drives peachq's real q pipeline
  * (q_parse -> q_eval -> materialize -> q_fmt), the same sequence
  * src/qlang/q_repl.c:run_one_line uses for the native REPL.
  * Compiled only by Makefile.wasm with emcc; never part of the native build. */

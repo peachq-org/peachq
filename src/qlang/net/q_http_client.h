@@ -1,6 +1,6 @@
 /* q_http_client — blocking outbound HTTP client for `.Q.hg` (GET) / `.Q.hp`
  * (POST).  Behaviour pinned from qdocs ref/dotq.md (clean room); doc-unpinned
- * details (timeouts, size cap, redirect + https-error policy) are openq-authored
+ * details (timeouts, size cap, redirect + https-error policy) are peachq-authored
  * and recorded in the PR.  Synchronous/blocking is kdb-true for these verbs.
  *
  * The connect + send + response-read seams are shaped for REUSE: the queued

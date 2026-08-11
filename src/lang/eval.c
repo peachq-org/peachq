@@ -92,21 +92,21 @@ void ray_eval_request_interrupt(void) { ray_request_interrupt(); }
 void ray_eval_clear_interrupt(void)   { ray_clear_interrupt(); }
 int  ray_eval_is_interrupted(void)    { return ray_interrupted(); }
 
-/* openq noun-head apply hook — see eval.h.  NULL = historic behaviour. */
+/* peachq noun-head apply hook — see eval.h.  NULL = historic behaviour. */
 static ray_apply_hook_t g_apply_hook = NULL;
 void ray_eval_set_apply_hook(ray_apply_hook_t hook) { g_apply_hook = hook; }
 
-/* openq remote-source string eval — see eval.h.  NULL = rayfall eval_str. */
+/* peachq remote-source string eval — see eval.h.  NULL = rayfall eval_str. */
 static ray_remote_str_fn_t g_remote_str_fn = NULL;
 void ray_eval_set_remote_str_fn(ray_remote_str_fn_t fn) { g_remote_str_fn = fn; }
 
-/* openq remote (func;args) value-apply — see eval.h.  NULL = no q runtime
+/* peachq remote (func;args) value-apply — see eval.h.  NULL = no q runtime
  * (pure rayfall), which has no value-apply IPC dialect, so a list request
  * safe-errors 'nyi rather than being coerced into an apply. */
 static ray_remote_apply_fn_t g_remote_apply_fn = NULL;
 void ray_eval_set_remote_apply_fn(ray_remote_apply_fn_t fn) { g_remote_apply_fn = fn; }
 
-/* openq eval-time computed-name resolver (`.z.*`) — see eval.h.  Consulted at
+/* peachq eval-time computed-name resolver (`.z.*`) — see eval.h.  Consulted at
  * every name-LOAD miss, before raising `'name`.  NULL = historic behaviour. */
 static ray_name_hook_t g_name_hook = NULL;
 void ray_eval_set_name_hook(ray_name_hook_t hook) { g_name_hook = hook; }
@@ -1029,7 +1029,7 @@ ray_t* call_fn1(ray_t* fn, ray_t* arg) {
         ray_t* args[1] = { arg };
         return call_lambda(fn, args, 1);
     }
-    /* openq: noun-head apply hook (third site — the OP_CALL1 fast path). */
+    /* peachq: noun-head apply hook (third site — the OP_CALL1 fast path). */
     if (g_apply_hook) {
         ray_t* args[1] = { arg };
         ray_t* r = g_apply_hook(fn, args, 1);
@@ -1081,7 +1081,7 @@ ray_t* call_fn2(ray_t* fn, ray_t* a, ray_t* b) {
         ray_unary_fn f = (ray_unary_fn)(uintptr_t)fn->i64;
         return f(a);
     }
-    /* openq: noun-head apply hook (the OP_CALL2 fast path). */
+    /* peachq: noun-head apply hook (the OP_CALL2 fast path). */
     if (g_apply_hook) {
         ray_t* args[2] = { a, b };
         ray_t* r = g_apply_hook(fn, args, 2);
@@ -1905,7 +1905,7 @@ op_resolve: {
     uint8_t idx = code[ip++];
     ray_t *name_obj = cpool[idx];
     ray_t *val = ray_env_resolve(name_obj->i64);
-    if (!val && g_name_hook) val = g_name_hook(name_obj->i64);  /* openq: `.z.*` */
+    if (!val && g_name_hook) val = g_name_hook(name_obj->i64);  /* peachq: `.z.*` */
     if (!val) goto vm_error_name;
     /* env_resolve returns an owned ref (rc >= 1); no extra retain needed.
      * It can also return a real error (e.g. nyi from a parted-target link
@@ -1921,7 +1921,7 @@ op_resolve_w: {
     ip += 2;
     ray_t *name_obj = cpool[idx];
     ray_t *val = ray_env_resolve(name_obj->i64);
-    if (!val && g_name_hook) val = g_name_hook(name_obj->i64);  /* openq: `.z.*` */
+    if (!val && g_name_hook) val = g_name_hook(name_obj->i64);  /* peachq: `.z.*` */
     if (!val) goto vm_error_name;
     if (RAY_IS_ERR(val)) { vm_err_obj = val; goto vm_error; }
     PUSH(val);
@@ -2039,7 +2039,7 @@ op_call2: {
         result = (fn == (ray_binary_fn)ray_eq_fn || fn == (ray_binary_fn)ray_neq_fn)
                  ? fn(left, right) : NULL;
         if (!result && g_apply_hook) {
-            /* openq: null-operand offer to the apply hook (see tree-walk
+            /* peachq: null-operand offer to the apply hook (see tree-walk
              * twin above); hook-decline keeps the historic 'type. */
             ray_t* hargs[2] = { left, right };
             result = g_apply_hook(fn_obj, hargs, 2);
@@ -2193,7 +2193,7 @@ op_callf: {
             for (int32_t i = 0; i < n; i++) ray_release(fn_args[i]);
             break;
         default:
-            /* openq: apply hook (see the tree-walk default arm) — fn_args are
+            /* peachq: apply hook (see the tree-walk default arm) — fn_args are
              * already evaluated owned refs here; hook borrows, we release. */
             if (g_apply_hook) {
                 result = g_apply_hook(fn_obj, fn_args, n);
@@ -3160,7 +3160,7 @@ ray_t* ray_eval(ray_t* obj) {
             }
 
             ray_t* val = ray_env_resolve(obj->i64);
-            /* openq: computed-name (`.z.*`) resolver fires on an env miss,
+            /* peachq: computed-name (`.z.*`) resolver fires on an env miss,
              * before `'name` — returns an OWNED value or NULL to decline. */
             if (!val && g_name_hook) val = g_name_hook(obj->i64);
             if (!val) {
@@ -3218,7 +3218,7 @@ ray_t* ray_eval(ray_t* obj) {
     if (head->type == -RAY_SYM) {
         ray_t* fn = ray_env_resolve(head->i64);
         if (!fn) {
-            /* openq: before raising 'name, offer the apply hook the UNRESOLVED
+            /* peachq: before raising 'name, offer the apply hook the UNRESOLVED
              * symbol head — q's namespace handles apply symbols that have no
              * env binding of their own (`` `.[`a] `` indexes the root context,
              * q4m3 §12).  Same evaluated-args discipline and cap as the
@@ -3363,7 +3363,7 @@ ray_t* ray_eval(ray_t* obj) {
                     ray_release(right);
                     ret = result; goto out;
                 }
-                /* openq: offer the null-operand application to the installed
+                /* peachq: offer the null-operand application to the installed
                  * apply hook (the q layer whitelists null-tolerant wrappers,
                  * e.g. `-8!(::)` serialize / `x~(::)` match); NULL return =
                  * historic 'type.  Additive: byte-identical without a hook. */
@@ -3445,7 +3445,7 @@ ray_t* ray_eval(ray_t* obj) {
             ret = result; goto out;
         }
         default: {
-            /* openq: offer the noun head to the apply hook (indexing, dict/
+            /* peachq: offer the noun head to the apply hook (indexing, dict/
              * table lookup, derived-verb application).  Args are evaluated
              * here — same discipline and cap as the LAMBDA arm — only on this
              * would-error path, so callable dispatch pays nothing.  A NULL

@@ -374,7 +374,7 @@ ray_t* ray_fs_list_fn(ray_t* x) {
  * v4 UUID format: 122 random bits + 4 version-bits (0100) + 2 variant-bits (10).
  * Draws from the ONE rng owner (core/rand.h), which is what lets `\S` reproduce
  * a guid sequence; the private xorshift64* this used to own could never be
- * reached by a seed (openq 2026-08-10). */
+ * reached by a seed (peachq 2026-08-10). */
 ray_t* ray_guid_fn(ray_t* n_arg) {
     if (!n_arg || !is_numeric(n_arg))
         return ray_error("type", "guid expects a numeric count, got %s", ray_type_name(n_arg->type));

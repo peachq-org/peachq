@@ -1,4 +1,4 @@
-/ dotq.q — openq's embedded q bootstrap: the ".Q" utility namespace, authored from the
+/ dotq.q — peachq's embedded q bootstrap: the ".Q" utility namespace, authored from the
 / PUBLISHED qdocs (qdocs/, CC BY 4.0). A REAL .q file, embedded via build-time codegen
 / (tools/gen-bootstrap.sh -> src/qlang/dotq_gen.h) and loaded at the tail of q_runtime_create.
 / Loaded through the script seam (q_ctx_run_src): full kdb script syntax, though most definitions stay one-liners.
@@ -37,7 +37,7 @@
 .Q.an:"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789";
 .Q.n:"0123456789";
 .Q.nA:"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-/ .Q.k (version number) / .Q.K (version date): openq's own, tracking .z.K/.z.k (from the VERSION file).
+/ .Q.k (version number) / .Q.K (version date): peachq's own, tracking .z.K/.z.k (from the VERSION file).
 .Q.k:.z.K;
 .Q.K:.z.k;
 / .Q.M: chunk size for .Q.dsftg (load-process-save); defaults to long infinity.
@@ -86,7 +86,7 @@
 .Q.s1:{-3!x};
 
 / ---- No-partition surface (ref/dotq.md) ----
-/ openq DOES NOT SUPPORT partitioned/segmented DBs — a PERMANENT divergence from kdb, not pending
+/ peachq DOES NOT SUPPORT partitioned/segmented DBs — a PERMANENT divergence from kdb, not pending
 / work: honest values where derivable, the empty DATE domain elsewhere, so a probe sees a well-typed
 / EMPTY date-partitioned HDB (`type .Q.pv` -> 14h) rather than a 'name error. `.Q.D` is conformant
 / to `.Q.P`, which has no segments here; `.Q.par` is a plain dir/partition/table join, no par.txt.
