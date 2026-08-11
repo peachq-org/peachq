@@ -154,18 +154,7 @@ static ray_t* cast_bool(ray_t* x) {
      * delegate: that re-enters the null-propagation being intercepted, which is
      * how 0Ng returned 0b while a non-null guid errored. */
     if (x->type < 0) return q_err(QE_TYPE);
-    /* base cast_vec_numeric has no F32 source arm for ANY target, so the q
-     * layer supplies it — exactly as the integer targets already do. */
-    if (x->type == RAY_F32) {
-        int64_t n = ray_len(x);
-        ray_t* out = ray_vec_new(RAY_BOOL, n > 0 ? n : 1);
-        if (RAY_IS_ERR(out)) return out;
-        out->len = n;
-        const float* f = (const float*)ray_data(x);
-        for (int64_t k = 0; k < n; k++) ((uint8_t*)ray_data(out))[k] = (f[k] != 0.0f);
-        return out;
-    }
-    return cast_delegate(RAY_BOOL, x);   /* other vectors: base's arm IS this law */
+    return cast_delegate(RAY_BOOL, x);   /* vectors (F32 included): base's arm IS this law */
 }
 
 /* char cast (`10h$`/`` `char$``/`"c"$`): reinterpret an integer/byte value as
@@ -192,6 +181,16 @@ static ray_t* cast_str(ray_t* x) {
             buf[i] = (char)q_type_ivec_get(x, i);
         ray_t* r = ray_str(buf, (size_t)n);
         free(buf);
+        return r;
+    }
+    /* float/real -> char rides the byte cast (`char$65e -> "A", cast.md:20
+     * designator row): cast_u8 owns the float rounding law. */
+    if (x && (x->type == -RAY_F64 || x->type == -RAY_F32 ||
+              x->type == RAY_F64  || x->type == RAY_F32)) {
+        ray_t* b = cast_u8(x);
+        if (!b || RAY_IS_ERR(b)) return b;
+        ray_t* r = cast_str(b);
+        ray_release(b);
         return r;
     }
     if (x && x->type == RAY_LIST) {          /* boxed list of int/byte -> string */
@@ -287,6 +286,39 @@ static ray_t* cast_int(int8_t tag, ray_t* x) {
             if      (tag == RAY_I64) ((int64_t*)ray_data(out))[i] = iv;
             else if (tag == RAY_I32) ((int32_t*)ray_data(out))[i] = (int32_t)iv;
             else                     ((int16_t*)ray_data(out))[i] = (int16_t)iv;
+            if (isnull) ray_vec_set_null(out, i, true);
+        }
+        return out;
+    }
+    /* Owner ruling 2026-08-11: an integral infinity NARROWING to a smaller int
+     * saturates to the target's ±0W (`int$0W -> 0Wi), extending the float-
+     * source law above.  Widening keeps the bit pattern (ref/cast.md:193-204
+     * pins `float$0Wh -> 32767f), nulls stay typed nulls, and finite out-of-
+     * range values still truncate — all via base's arms below. */
+    if (x && (x->type == -RAY_I64 || x->type == -RAY_I32) &&
+        ray_elem_size((int8_t)-x->type) > ray_elem_size(tag) && q_type_is_inf(x)) {
+        int64_t v = x->type == -RAY_I64 ? x->i64 : (int64_t)x->i32;
+        int64_t inf;
+        ray_type_inf(tag, v > 0, &inf);
+        return tag == RAY_I32 ? ray_i32((int32_t)inf) : ray_i16((int16_t)inf);
+    }
+    if (x && (x->type == RAY_I64 || x->type == RAY_I32) &&
+        ray_elem_size(x->type) > ray_elem_size(tag)) {
+        int64_t n = ray_len(x);
+        ray_t* out = ray_vec_new(tag, n);
+        if (RAY_IS_ERR(out)) return out;
+        out->len = n;
+        int is64 = (x->type == RAY_I64);
+        int64_t src_inf;
+        ray_type_inf(x->type, 1, &src_inf);
+        for (int64_t i = 0; i < n; i++) {
+            int64_t v = is64 ? ((const int64_t*)ray_data(x))[i]
+                             : (int64_t)((const int32_t*)ray_data(x))[i];
+            int isnull = ray_vec_is_null(x, i);
+            if (!isnull && (v == src_inf || v == -src_inf))
+                ray_type_inf(tag, v > 0, &v);
+            if (tag == RAY_I32) ((int32_t*)ray_data(out))[i] = (int32_t)v;
+            else                ((int16_t*)ray_data(out))[i] = (int16_t)v;
             if (isnull) ray_vec_set_null(out, i, true);
         }
         return out;
