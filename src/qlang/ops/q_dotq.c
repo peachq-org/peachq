@@ -23,13 +23,10 @@
 
 
 /* (.Q.ty x) — LOWER char for a simple vector / string, UPPER for a uniform
- * list of vectors, blank (" ") otherwise (ref/dotq.md).  Returns a 1-char
- * string (peachq has no char atom; `.Q.ty each` over strings therefore yields a
- * list of 1-char strings, not one packed char vector — the `"jc JC"` combined
- * example is a deferred string-model cell). */
+ * list of vectors, blank (" ") otherwise (ref/dotq.md).  A char ATOM, so
+ * `.Q.ty each` packs to one char vector ("jc JC" in the doc's own example). */
 ray_t* q_dotq_ty_fn(ray_t* x) {
-    char c = q_ty_char(x);
-    return ray_str(&c, 1);
+    return ray_char((uint8_t)q_ty_char(x));
 }
 
 /* (.Q.qt x) — is-table predicate (ref/dotq.md `qt`): 1b if x is a table
