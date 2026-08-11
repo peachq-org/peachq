@@ -178,7 +178,7 @@
  * (ref/greater.md).  A keyword the docs call a WRAPPER for an operator rather
  * than its synonym (mmu for `$`, ref/mmu.md) is a distinct value and stays
  * unset; so does a same-page keyword with its own semantics (`cut` vs `_`).
- * Rows without a code (openq spellings, <=/>=/<>) stay unset: the numbering is
+ * Rows without a code (peachq spellings, <=/>=/<>) stay unset: the numbering is
  * KX's frozen constant, never allocated into. */
 #define QKOP(n) .kdb_op1 = (int8_t)((n) + 1)
 /* Doc citations below name only the NON-derivable ones: unless a comment says
