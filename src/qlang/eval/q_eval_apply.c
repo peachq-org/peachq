@@ -4,7 +4,7 @@
  * construction; the native adverb/accumulator engine it dispatches into lives
  * in q_adverb.c (shared seam: q_eval_internal.h).  The atomic vector maps are
  * transcribed from the carve-eval quarry (base eval.c atomic_map_*): kept
- * empty-input zero-atom probe, typed-output probe, int-width promotion,
+ * empty-input probe, typed-output probe, int-width promotion,
  * boxed fallback, error-trim.  Kernel-library extraction of the base
  * atomic_map internals is pending; this q-side copy is the recorded choice.
  * Refcount contract: args borrowed, results owned; born rc=1, append
@@ -309,16 +309,29 @@ static int typed_out_ok(int8_t t) {
            RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t) || RAY_IS_TEMPORALF(t);
 }
 
-/* empty-input output-type probe */
-static ray_t* zero_atom(ray_t* coll) {
-    switch (coll ? coll->type : RAY_LIST) {
-        case RAY_F64:  return ray_f64(0.0);
-        case RAY_BOOL: return ray_bool(0);
-        case RAY_I32:  return ray_i32(0);
-        case RAY_I16:  return ray_i16(0);
-        case RAY_SYM:  return ray_sym(0);
-        default:       return ray_i64(0);
-    }
+static int probe_ok(ray_t* a) { return a && !RAY_IS_ERR(a) && ray_is_atom(a); }
+
+static void probe_drop(ray_t* a) {
+    if (a && RAY_IS_ERR(a)) ray_error_free(a);
+    else if (a) ray_release(a);
+}
+
+/* empty-input output-type probe: the stand-in carries the argument's OWN type,
+ * so the kernel takes its normal path for that type instead of answering for a
+ * fabricated long.  It must be a ZERO, not a typed null: `neg` shortcuts a null
+ * to itself ("a null has no sign", ref/neg.md) and would skip the b->i
+ * promotion its domain/range table sets.  q_dollar_cast is the one conversion
+ * home; the types it cannot reach from a long (sym, guid) have no zero but do
+ * have a canonical empty VALUE, which is what ray_typed_null returns for them.
+ * A general list has no type to read and falls back to the long. */
+static ray_t* probe_atom(ray_t* coll) {
+    ray_t* z = ray_i64(0);
+    if (!coll || !ray_is_vec(coll) || coll->type == RAY_STR) return z;
+    ray_t* a = q_dollar_cast(coll->type, z);
+    if (!probe_ok(a)) { probe_drop(a); a = ray_typed_null((int8_t)-coll->type); }
+    if (probe_ok(a)) { ray_release(z); return a; }
+    probe_drop(a);
+    return z;
 }
 
 /* ===== atomic vector maps (carved from base atomic_map_unary/_binary) ==== */
@@ -337,9 +350,19 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
     int is_boxed = (arg->type == RAY_LIST);
 
     if (len == 0) {
-        ray_t* z = zero_atom(arg);
+        ray_t* z = probe_atom(arg);
         ray_t* probe = (z && !RAY_IS_ERR(z)) ? fn(z) : NULL;
         if (z) ray_release(z);
+        /* A kernel narrower than its published domain rejects the argument's
+         * own type while still admitting a long (sqrt/exp/log take p m d n u v
+         * t per their domain/range tables; ours take only the numerics).  Ask
+         * the long before giving up, so the empty keeps the documented type. */
+        if (arg->type != RAY_LIST && (!probe || RAY_IS_ERR(probe))) {
+            probe_drop(probe);
+            ray_t* zl = ray_i64(0);
+            probe = probe_ok(zl) ? fn(zl) : NULL;
+            probe_drop(zl);
+        }
         if (probe && !RAY_IS_ERR(probe) && probe->type < 0) {
             int8_t t = (int8_t)(-probe->type);
             ray_release(probe);
@@ -352,7 +375,12 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
             ray_release(probe);
             return ray_list_new(0);
         }
+        /* The probe FAILED, so it named no type — and an untyped () carries
+         * none either, which leaves () the only honest answer (the sibling of
+         * q_index.c:miss_null).  A TYPED empty keeps the long: whether a
+         * rejecting kernel should propagate its error is a separate ruling. */
         if (probe) ray_error_free(probe);
+        if (arg->type == RAY_LIST) return ray_list_new(0);
         return ray_vec_new(RAY_I64, 0);
     }
 
@@ -458,11 +486,22 @@ static ray_t* map_binary(ray_binary_fn fn, ray_t* l, ray_t* r) {
     }
 
     if (len == 0) {
-        ray_t* la = lc ? zero_atom(l) : l;
-        ray_t* ra = rc ? zero_atom(r) : r;
+        ray_t* la = lc ? probe_atom(l) : l;
+        ray_t* ra = rc ? probe_atom(r) : r;
         ray_t* probe = (la && ra) ? fn(la, ra) : NULL;
         if (lc && la) ray_release(la);
         if (rc && ra) ray_release(ra);
+        /* same narrow-kernel retry as map_unary: `reciprocal` is 1%x, so the
+         * temporal domains ref/reciprocal.md publishes are reached through here */
+        if (((lc && l->type != RAY_LIST) || (rc && r->type != RAY_LIST)) &&
+            (!probe || RAY_IS_ERR(probe))) {
+            probe_drop(probe);
+            ray_t* lz = lc ? ray_i64(0) : l;
+            ray_t* rz = rc ? ray_i64(0) : r;
+            probe = (lz && rz) ? fn(lz, rz) : NULL;
+            if (lc) probe_drop(lz);
+            if (rc) probe_drop(rz);
+        }
         if (probe && !RAY_IS_ERR(probe) && probe->type < 0) {
             int8_t t = (int8_t)(-probe->type);
             ray_release(probe);
