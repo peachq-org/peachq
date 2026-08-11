@@ -37,6 +37,12 @@ ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto);
  * q_list_collapse) for the env-using apply module. */
 int q_match_rec(ray_t* a, ray_t* b);
 
+/* THE b -> i aggregate-width narrow (ref/sum.md, ref/prd.md domain tables): a long
+ * (or one-item-fold boolean) result of an additive fold over an all-boolean
+ * domain becomes int.  Consumes r.  DEFINED in ops/q_agg.c; declared here for
+ * the apply module's nested-fold arm and the adverb engine's seeded fold. */
+ray_t* q_agg_bool_narrow(ray_t* r);
+
 /* ---- string-C3 boundary conversion (spec Design §3: physical RAY_STR never
  * appears in q-space; values in flight are charv; columns stay pooled).
  * DEFINED in ops/q_str.c; declared here (env-safe public reach). ---- */
