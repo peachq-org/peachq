@@ -196,6 +196,13 @@ ray_t* q_registry_iter_value(int adv) {
     return (adv >= 0 && adv < 6) ? g_iters[adv] : NULL;
 }
 
+/* the inverse: which iterator IS this value (pointer identity), or -1 */
+int q_registry_iter_of(const ray_t* v) {
+    for (int a = 0; a < 6; a++)
+        if (v && g_iters[a] == v) return a;
+    return -1;
+}
+
 /* ---- shared q-name sanitization (.Q.id + construction clash repair) ------ */
 
 static int name_char_ok(char c) {
