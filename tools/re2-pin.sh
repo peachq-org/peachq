@@ -19,8 +19,8 @@ cd "$(dirname "$0")/.."
 PIN_H=src/qlang/io/q_re2_pin.h
 command -v sha256sum >/dev/null || exit 0
 
-# README.openq.md is OURS, not upstream's, so it is not part of what we pinned.
-actual=$(find third_party/re2 -type f ! -name 'README.openq.md' | LC_ALL=C sort |
+# README.peachq.md is OURS, not upstream's, so it is not part of what we pinned.
+actual=$(find third_party/re2 -type f ! -name 'README.peachq.md' | LC_ALL=C sort |
          xargs sha256sum | sha256sum | cut -d' ' -f1)
 
 [ "${1:-}" = "--print" ] && { echo "$actual"; exit 0; }
@@ -32,6 +32,6 @@ re2-pin: third_party/re2 does not match its recorded pin.
   recorded ($PIN_H): $want
   actual:                            $actual
 If you deliberately re-vendored RE2, update PQRE2_DUCKDB_PIN and
-PQRE2_SRC_SHA256 in that header (see third_party/re2/README.openq.md).
+PQRE2_SRC_SHA256 in that header (see third_party/re2/README.peachq.md).
 EOF
 exit 1

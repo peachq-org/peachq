@@ -1,6 +1,6 @@
 #!/bin/sh
 # gen-assets.sh — bake a source-tree asset folder into a generated C header as
-# byte arrays + a {path,bytes,len} lookup table. Part of the openq embedded
+# byte arrays + a {path,bytes,len} lookup table. Part of the peachq embedded
 # web-assets pipeline: src/qlang/html/ is the source of truth, this bakes it
 # into the binary (served by q_http.c when no on-disk ./html docroot exists).
 # Byte arrays (not string literals) so binary assets (.ico) embed losslessly.
@@ -17,7 +17,7 @@ set -eu
 
 out=$1
 root=$2
-guard=OPENQ_HTML_ASSETS_GEN_H
+guard=PEACHQ_HTML_ASSETS_GEN_H
 tmp="$out.tmp.$$"
 
 # Sorted relative paths of every regular file under $root (deterministic order).
