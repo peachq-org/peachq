@@ -643,7 +643,7 @@ static ray_t* read0_wrap_impl(ray_t* x) {
  * One front door owning the on-disk-format classification: `:f flat (a
  * trailing slash routes the writer to the splay dir), the 4-item
  * (file;lbs;alg;lvl) compression form (ref/file-compression.md), and the
- * (dir;sympath) domain overload — the openq API extension the splay writer
+ * (dir;sympath) domain overload — the peachq API extension the splay writer
  * records. */
 
 int q_io_is_fsym(ray_t* v) {

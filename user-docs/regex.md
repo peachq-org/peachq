@@ -420,7 +420,7 @@ q).regexp.version
 ```
 
 Because there is no version string, drift in the vendored source is caught by a digest of the
-tree instead, checked at build time (`third_party/re2/README.openq.md`). The DuckDB you connect
+tree instead, checked at build time (`third_party/re2/README.peachq.md`). The DuckDB you connect
 to is only ever *compared*, never enforced: DuckDB is optional and you may legitimately point
 `PEACHQ_DUCKDB_LIB` at another release, so `.regexp.duckdb_match[handle]` answers whether an
 open connection agrees with our pin and leaves the judgement to you.

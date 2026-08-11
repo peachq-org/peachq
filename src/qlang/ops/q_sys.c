@@ -118,7 +118,7 @@ void q_sys_seed_init(void) {
  *
  * BEHAVIOURAL SIDE-EFFECTS ARE MOSTLY DEFERRED (rule 9): `\c` NOW clips the q
  * console DISPLAY (width + height, applied by q_fmt.c's console emitter — see
- * q_fmt_console), but openq does not yet wrap `\C` HTTP output, run real gc
+ * q_fmt_console), but peachq does not yet wrap `\C` HTTP output, run real gc
  * for `\g`, apply `\o`/`\W` to temporal display, trap errors for `\e`, or
  * re-tune worker threads for `\s`.  Those commands store + report the kdb-true
  * value only; the effect itself is a tracked PLAN.md gap.  Faking a
@@ -471,7 +471,7 @@ static ray_t* h_l(const char* arg, size_t alen) {
         int rc = q_ctx_run_file(found, stdout, stderr);
         return rc >= 2 ? q_err((q_err_e)(rc - 2)) : NULL;
     }
-    /* openq: `\l pq` — the PeachQ stdlib gate. A dev-override disk file (the
+    /* peachq: `\l pq` — the PeachQ stdlib gate. A dev-override disk file (the
      * a/b/c/d chain above) wins; else a cwd directory literally named `pq`
      * keeps existing dir semantics (no-op, below); ELSE the embedded stdlib.
      * Every OTHER argument keeps its existing behaviour unchanged (the branch is
@@ -500,7 +500,7 @@ static ray_t* h_l(const char* arg, size_t alen) {
  * rule-6 prohibition is on registry BUILDERS, not a warm-registry handler.
  *
  * SPACE METRIC — DIVERGES FROM kdb (owner ruling 2026-07-14, best-effort):
- * kdb's `\ts` reports the PEAK transient workspace a computation touches; openq
+ * kdb's `\ts` reports the PEAK transient workspace a computation touches; peachq
  * reports the NET `ray_mem_stats().bytes_allocated` delta measured with the
  * final result still live (snapshot taken before release).  So an expression
  * whose result is retained (`til 100000`) shows a positive figure in the
@@ -722,7 +722,7 @@ static ray_t* h_w(size_t alen) {
  * `\C`→`36 2000`; a set coerces each value to [10,2000] (syscmds.md).  `\c`
  * clips the q console DISPLAY — its state, coercion and arming now live in
  * q_console.c (q_console_clip_set); this syscmd just forwards.  `\C` (HTTP
- * size) display wrapping is still DEFERRED (openq has no HTTP renderer yet),
+ * size) display wrapping is still DEFERRED (peachq has no HTTP renderer yet),
  * so clamp_cc coerces the `\C` values here. */
 static int64_t clamp_cc(int64_t v) {
     return v < 10 ? 10 : v > 2000 ? 2000 : v;
@@ -790,7 +790,7 @@ static ray_t* h_W(const char* arg, size_t alen) {
     return NULL;
 }
 
-/* `\e` — error-trap mode (0 off / 1 suspend / 2 dump).  `\e`→`0i`.  Openq
+/* `\e` — error-trap mode (0 off / 1 suspend / 2 dump).  `\e`→`0i`.  Peachq
  * default is 0 and `\e` governs the CONSOLE (kdb: console default 1, `\e`
  * governs async/HTTP callbacks) — recorded pragmatic divergence, so existing
  * transcripts keep today's one-line error display unless a session opts in. */
@@ -813,7 +813,7 @@ static ray_t* h_s(const char* arg, size_t alen) {
     return NULL;
 }
 
-/* `\nonlegacy` — pipe-table display toggle (openq; runtime twin of #198's
+/* `\nonlegacy` — pipe-table display toggle (peachq; runtime twin of #198's
  * launch-only `--nonlegacy`, reachable from the argv-less wasm REPL).  Bare form
  * shows the state as a boolean (`1b`/`0b`, like bare `\c`); `1`/`0`/`1b`/`0b`
  * sets it, silent.  A non-boolean arg is a bare `'type` (a boolean is expected). */
@@ -1039,7 +1039,7 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
     } else if (cmd_len == 2 && cmd[0] == 'c' && cmd[1] == 'd') {
         return h_cd(arg, alen);                                  /* change directory    */
     } else if (cmd_len == 9 && memcmp(cmd, "nonlegacy", 9) == 0) {
-        return h_nonlegacy(arg, alen);                          /* pipe-table toggle (openq) */
+        return h_nonlegacy(arg, alen);                          /* pipe-table toggle (peachq) */
     } else if (cmd_len == 0) {
         return NULL;                                            /* bare \ — silent q/k toggle */
     }
