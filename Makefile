@@ -65,8 +65,9 @@ $(GEN_DIR)/qlang/j_gen.h: src/qlang/j.q tools/gen-bootstrap.sh
 	@mkdir -p $(dir $@)
 	SYMBOL=PEACHQ_J_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/j.q
 
-# The standard library: lib/*.q TOP LEVEL ONLY (lib/qunit/ deliberately out),
-# sorted for determinism — the ANY-ORDER LAW makes the order semantically moot.
+# The standard library: lib/*.q TOP LEVEL ONLY — q that calls into the peachq C
+# surface. Portable q lives in qlib/ and is never embedded.  Sorted for
+# determinism — the ANY-ORDER LAW makes the order semantically moot.
 # The directory itself is a prerequisite (spelled lib/. — bare `lib` is the
 # librayforce.a target): deleting/renaming a file bumps the dir mtime, which
 # the file-only list cannot see (the html-assets rule's law).
