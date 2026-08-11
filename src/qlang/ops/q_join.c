@@ -7,6 +7,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
+#include "qlang/ops/q_table.h" /* the shape law + append behind the row-append home */
 #include "qlang/ops/q_bang.h"  /* q_bang_enkey — keyed-result construction */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_value — pj rides q's own `+` */
 #include "lang/eval.h"     /* ray_left_join_fn, ray_window_join*_fn */
@@ -39,7 +40,7 @@ static int qj_atom_is_qnull(ray_t* a) {
 }
 
 /* Same column-name schema, same order? */
-int qj_same_schema(ray_t* a, ray_t* b) {
+static int qj_same_schema(ray_t* a, ray_t* b) {
     int64_t nc = ray_table_ncols(a);
     if (nc != ray_table_ncols(b)) return 0;
     for (int64_t c = 0; c < nc; c++)
@@ -620,6 +621,75 @@ ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode) {
     return kr;
 }
 
+/* ---- the row-append home: upsert IS a spelling of Join ---------------------
+ * wp/permissions/index.md:387 defines upsert as .[;();,;]; ref/amend.md:66
+ * gives .[d;();v;y] <=> v[d;y].  So the VALUE work of upsert / `,:` /
+ * .[x;();,;y] / `x,y` on a table left is ONE operation: normalize the payload
+ * through the shape law, then compose — per-column concat on a plain table,
+ * the ONE keyed merge (qj_ktbl_merge) on a keyed one.  The keyed⊕keyed pair
+ * is the ONE corner where the spellings differ, and stays in q_join_wrap:
+ * `,` merges y's OWN columns (ref/join.md:140; list/join.qcmd pins x-only
+ * columns KEPT) where upsert normalizes to the full schema first
+ * (course/keyed-tables pins them BLANKED). */
+
+/* LAST record per key — upsert reads its payload in order, so a later
+ * duplicate key updates the earlier one (the tickerplant idiom
+ * `select by sym from x`, learn/startingkdb/tick.md:204, made explicit). */
+static ray_t* qj_rows_last_per_key(ray_t* rows, int64_t nkey) {
+    int64_t n = ray_table_nrows(rows);
+    if (n <= 1 || nkey <= 0) { ray_retain(rows); return rows; }
+    int64_t* gid = (int64_t*)malloc((size_t)n * sizeof(int64_t));
+    int64_t* rep = (int64_t*)malloc((size_t)n * sizeof(int64_t));
+    if (!gid || !rep) { free(gid); free(rep); return q_err(QE_WSFULL); }
+    int64_t ng = q_table_row_groups(rows, nkey, gid, rep);
+    if (ng < 0) { free(gid); free(rep); return q_err(QE_WSFULL); }
+    if (ng == n) { free(gid); free(rep); ray_retain(rows); return rows; }
+    for (int64_t i = 0; i < n; i++) rep[gid[i]] = i;
+    ray_t* r = qj_table_gather_idx(rows, rep, ng);
+    free(gid);
+    free(rep);
+    return r;
+}
+
+ray_t* q_join_table_upsert(ray_t* x, ray_t* y) {
+    int keyed = q_type_is_keyed(x);
+    int64_t nkey = keyed ? ray_table_ncols(ray_dict_keys(x)) : 0;
+    if (keyed && y && (y->type == RAY_TABLE || q_type_is_keyed(y))) {
+        /* ref/join.md:140 keyed strictness: a TABLE payload must carry every
+         * key column — a missing VALUE column null-fills, but a missing KEY
+         * column cannot name a row (course/keyed-tables pins 'mismatch). */
+        ray_t* kt = ray_dict_keys(x);                      /* borrowed */
+        ray_t* yf = q_table_flatten(y);
+        if (!yf || RAY_IS_ERR(yf)) return yf;
+        for (int64_t c = 0; c < nkey; c++)
+            if (q_table_col_index(yf, ray_table_col_name(kt, c)) < 0) {
+                ray_release(yf);
+                return q_err(QE_MISMATCH);
+            }
+        ray_release(yf);
+    }
+    ray_t* flat = q_table_flatten(x);
+    if (!flat || RAY_IS_ERR(flat)) return flat;
+    ray_t* rows = q_table_rows_normalize(flat, y, Q_ROWS_JOIN);
+    if (!rows || RAY_IS_ERR(rows)) { ray_release(flat); return rows ? rows : q_err(QE_OOM); }
+    if (!keyed) {
+        ray_t* nf = q_table_append(flat, rows);
+        ray_release(flat);
+        ray_release(rows);
+        return nf;
+    }
+    ray_release(flat);
+    ray_t* uniq = qj_rows_last_per_key(rows, nkey);
+    ray_release(rows);
+    if (!uniq || RAY_IS_ERR(uniq)) return uniq ? uniq : q_err(QE_OOM);
+    ray_t* ky = q_bang_enkey(nkey, uniq);
+    ray_release(uniq);
+    if (!ky || RAY_IS_ERR(ky)) return ky;
+    ray_t* r = qj_ktbl_merge(x, ky, 0);
+    ray_release(ky);
+    return r;
+}
+
 static ray_t* qj_uj_core(ray_t* x, ray_t* y, int mode) {
     if (!x || !y) return q_err(QE_TYPE);
     if (q_type_is_keyed(x) && q_type_is_keyed(y))
@@ -1007,12 +1077,10 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
                  : (y->type == RAY_LIST && ray_len(y) == 0)   ? x : NULL;
         if (q_type_is_table(t)) { ray_retain(t); return t; }
     }
-    if (q_type_is_table(x) && q_type_is_table(y) && !qj_same_schema(x, y))
-        return q_err(QE_MISMATCH);
     if (q_type_is_keyed(x) && q_type_is_keyed(y))
-        return qj_ktbl_merge(x, y, 0);     /* upsert: y records win wholesale */
-    if (q_type_is_table(x) && q_type_is_plain_dict(y))
-        return q_upsert_wrap(x, y);
+        return qj_ktbl_merge(x, y, 0);     /* raw: y's OWN columns update */
+    if ((q_type_is_table(x) || q_type_is_keyed(x)) && y)
+        return q_join_table_upsert(x, y);  /* every other payload: THE law */
     /* A bare dict joins ONLY with a dict (ref/join.md: `10,d` -> 'type; base
      * concat would wrongly DISTRIBUTE the scalar over the dict's values). */
     {

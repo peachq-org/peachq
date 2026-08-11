@@ -36,6 +36,20 @@ int64_t q_table_col_index(ray_t* t, int64_t nm);
  * by-value.  NULL => not a table. */
 ray_t* q_table_operand(ray_t* y, int64_t* sym_out);
 
+/* THE payload shape law: normalize an insert/upsert/Join payload y against a
+ * FLAT target schema into an owned plain table of new rows.  Two laws only:
+ * insert (ref/insert.md) is column-major on a square list and refuses absent
+ * columns; Join — and upsert/`,:`/.[x;();,;y], its spellings — is row-major
+ * under the ref/join.md:192 implicit-enlist rank rule and null-fills absent
+ * columns. */
+enum { Q_ROWS_INSERT, Q_ROWS_JOIN };
+ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law);
+
+/* Append normalized rows to a FLAT table: per-column base concat behind the
+ * q-level guards (0-row untyped columns adopt the payload's types; a TYPED
+ * column keeps kdb type-strictness). */
+ray_t* q_table_append(ray_t* flat, ray_t* rows);
+
 /* Most columns any one table verb will assemble at once (fixed accumulator
  * arrays); past it the verb returns 'limit. */
 #define Q_TABLE_MAX_COLS 64
