@@ -353,8 +353,15 @@ typedef struct {
 static _Thread_local frame_t* g_frames;
 static _Thread_local int32_t g_fdepth, g_fcap;
 static _Thread_local int32_t g_fview = Q_ENV_FRAME_VIEW_OFF;
+static _Thread_local int32_t g_ffloor;
 
 int32_t q_env_frame_depth(void) { return g_fdepth; }
+
+int32_t q_env_frame_floor(int32_t floor) {
+    int32_t prev = g_ffloor;
+    g_ffloor = floor < 0 ? g_fdepth : floor;
+    return prev;
+}
 
 int32_t q_env_frame_view(int32_t depth) {
     int32_t prev = g_fview;
@@ -454,7 +461,7 @@ static ray_t* frames_lookup(int64_t sym) {
     if (g_fview == Q_ENV_FRAME_VIEW_NONE) return NULL;
     int32_t top = g_fdepth - 1;
     if (g_fview >= 0 && g_fview < top) top = g_fview;
-    for (int32_t d = top; d >= 0; d--) {
+    for (int32_t d = top; d >= g_ffloor; d--) {
         frame_t* f = &g_frames[d];
         for (int32_t i = 0; i < f->n; i++)
             if (f->keys[i] == sym) return f->vals[i];

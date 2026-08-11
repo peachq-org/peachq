@@ -945,7 +945,22 @@ static ray_t* index_lift(ray_t* fv, ray_t** args, int64_t n) {
 /* ===== lambda application: frames over the engine scope stack ============ */
 
 static _Thread_local int g_frame_depth;
-int q_eval_apply_frame_depth(void) { return g_frame_depth; }
+static _Thread_local int g_frame_floor;
+
+/* Effective depth = frames above the FLOOR.  A script load raises the floor to
+ * the live depth (q_ctx.c ctx_run_script) so its statements bind globally, while
+ * push/pop stay on the REAL depth — a lambda the script calls still gets locals.
+ * Zeroing g_frame_depth instead would push that call into the caller's slot. */
+int q_eval_apply_frame_depth(void) {
+    int d = g_frame_depth - g_frame_floor;
+    return d > 0 ? d : 0;
+}
+
+int q_eval_apply_frame_floor(int floor) {
+    int prev = g_frame_floor;
+    g_frame_floor = floor < 0 ? g_frame_depth : floor;
+    return prev;
+}
 
 ray_t* q_eval_apply_lambda_src(ray_t* v) {
     if (q_eval_apply_carrier_kind(v) != Q_EVAL_CAR_LAMBDA) return NULL;

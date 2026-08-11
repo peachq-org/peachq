@@ -443,6 +443,9 @@ static int l_is_regular_readable(const char* p) {
  * 'nyi.  `system "l …"` single-homes through here. */
 static ray_t* h_l(const char* arg, size_t alen) {
     if (alen == 0) return q_err(QE_NYI);        /* `\l` (bare) — reload cwd, deferred */
+    /* hsym spelling `\l :path.q` (TimeStored pkg.q, qunitSurefire.q emit it);
+     * tolerant superset on the owner's say-so, 2026-08-11 */
+    if (alen >= 2 && arg[0] == ':') { arg++; alen--; }
     if (alen >= PATH_MAX) return q_err_name(arg, alen);
     char lit[PATH_MAX];
     memcpy(lit, arg, alen); lit[alen] = '\0';
