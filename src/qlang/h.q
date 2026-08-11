@@ -1,17 +1,17 @@
-/ h.q — openq's `.h` namespace, authored from the PUBLISHED qdocs (ref/doth.md, CC BY 4.0).
+/ h.q — peachq's `.h` namespace, authored from the PUBLISHED qdocs (ref/doth.md, CC BY 4.0).
 / ALWAYS-ON: baked in by tools/gen-bootstrap.sh -> h_gen.h, loaded at q_runtime_create after
 / q.q+dotq.q. One definition per line (no LITERAL newline in one). Absent: .h.ht (doth-status.md).
-/ NAMING RULE: `.h.` carries ONLY names ref/doth.md documents; everything openq invented is `.h.i.`.
+/ NAMING RULE: `.h.` carries ONLY names ref/doth.md documents; everything peachq invented is `.h.i.`.
 
 .h.br:"<br>";
 .h.c0:`024C7E;
 .h.c1:`958600;
 .h.d:" ";
-/ .h.logo: kdb ships the KX logo here; openq carries NO KX branding — peachq's instead (divergence).
+/ .h.logo: kdb ships the KX logo here; peachq carries NO KX branding — peachq's instead (divergence).
 .h.logo:"<a href=\"https://peachq.org\"><img src=\"https://peachq.org/img/peachq-logo.svg\" alt=\"peachq\" height=\"28\"></a>";
 / .h.HOME: doc'd as the root path with no fixed default; pinned to what #217's static server serves.
 .h.HOME:"html";
-/ .h.ty: the 7 doc-listed keys carry DOC values (csv/xml/xls thus differ from openq's C fallback — doc fidelity wins); the rest is #217's superset.
+/ .h.ty: the 7 doc-listed keys carry DOC values (csv/xml/xls thus differ from peachq's C fallback — doc fidelity wins); the rest is #217's superset.
 .h.ty:`htm`html`csv`txt`xml`xls`gif`css`js`mjs`png`jpg`jpeg`svg`ico`webp`json`pdf`wasm`woff`woff2!("text/html";"text/html";"text/comma-separated-values";"text/plain";"text/plain";"application/msexcel";"image/gif";"text/css";"application/javascript";"application/javascript";"image/png";"image/jpeg";"image/jpeg";"image/svg+xml";"image/x-icon";"image/webp";"application/json";"application/pdf";"application/wasm";"font/woff";"font/woff2");
 / .h.sa's own doc entry truncates its value; .h.html's HTML block prints it whole.
 .h.sa:"a{text-decoration:none}a:link{color:024C7E}a:visited{color:024C7E}a:active{color:958600}";
@@ -85,13 +85,13 @@
 .h.uh:{s:"%" vs x; raze (enlist first s),{("c"$"X"$2#x),2_x} each 1_s};
 .h.iso8601:{s:string "p"$x; (4#s),"-",(2#5_s),"-",(2#8_s),"T",11_s};
 
-/ Default web console + download API, all openq's own. .h.i.wr renders under `\C`; .h.i.wf reads .h.HOME through .Q.c.rd (O_NOFOLLOW-hardened) and its `::` is the DECLINE q_http.c falls through on. .h.i.wg routes STATIC-FIRST, then .h.i.wd serializes the query through save's own .h.tx (`a.json?expr[off,lim`), joining a serializer's LINES but sending a BYTE-vector result verbatim (the xlsx/parquet shape). `?expr` EVALS (.h.jx's own `value`); auth is the operator's via .z.ac/-u, which gate ahead of .z.ph.
+/ Default web console + download API, all peachq's own. .h.i.wr renders under `\C`; .h.i.wf reads .h.HOME through .Q.c.rd (O_NOFOLLOW-hardened) and its `::` is the DECLINE q_http.c falls through on. .h.i.wg routes STATIC-FIRST, then .h.i.wd serializes the query through save's own .h.tx (`a.json?expr[off,lim`), joining a serializer's LINES but sending a BYTE-vector result verbatim (the xlsx/parquet shape). `?expr` EVALS (.h.jx's own `value`); auth is the operator's via .z.ac/-u, which gate ahead of .z.ph.
 .h.i.wr:{c:system"c"; system "c "," " sv string system"C"; r:@[.Q.s;x;{"'",x,"\n"}]; system "c "," " sv string c; -1_"\n" vs r};
 .h.jx:{[x;y] t:$[a:0>type r:value y;enlist r;r]; n:count t; e:0|n-32; enlist[(" " sv .h.ha'[("?[",/:string(0;0|x-32;e&x+32;e));("home";"up";"down";"end")]),(" ",string[n],"[",string[x],"]")],enlist[""],.h.i.wr $[a;r;32 sublist x _ t]};
 .h.i.wf:{d:.h.uh x; if[(any 32>"i"$d)|(any d in "\\:")|any ("/" vs d) in (,".";"..");:.h.hn["404 Not Found";`txt;"not found\n"]]; d:$[0=count d;"index.html";"/"=last d;d,"index.html";d]; b:.Q.c.rd d; $[(::)~b;(::);.h.hy[`$last "." vs d;b]]};
 .h.i.wp:{j:where x="["; d:$[count j;(1+last j)_x;""]; p:"," vs d; b:(0<count j)&((count p) in 1 2)&(all 0<count each p)&all d in "0123456789,"; $[b;((last j)#x;"J"$p 0;$[2=count p;"J"$p 1;0N]);(x;0;0N)]};
 .h.i.wj:{g:.h.i.wp x; e:g 0; l:.h.jx[g 1;e]; .h.hp (enlist ("?",(.h.hu e),"[") sv "?[" vs first l),.h.xs each 1_l};
-.h.i.wc:{t:tables[]; $[0=count x;.h.hy[`html;.h.fram["openq";(string t),enlist 29#" ";("?.t";$[count t;"?",.h.hu string first t;"?.t"])]];x~".t";.h.hy[`html;.h.html[.h.logo,.h.br,$[count t;raze .h.hb'[("?",/:.h.hu each string t);.h.xs each string t],\:.h.br;"(no tables)"]]];.h.i.wj x]};
+.h.i.wc:{t:tables[]; $[0=count x;.h.hy[`html;.h.fram["peachq";(string t),enlist 29#" ";("?.t";$[count t;"?",.h.hu string first t;"?.t"])]];x~".t";.h.hy[`html;.h.html[.h.logo,.h.br,$[count t;raze .h.hb'[("?",/:.h.hu each string t);.h.xs each string t],\:.h.br;"(no tables)"]]];.h.i.wj x]};
 .h.i.wn:{[x;y;z;w] r:.h.hn[x;y;w]; n:((count r)-count w)-2; (n#r),(raze z,\:"\r\n"),"\r\n",w};
 .h.i.we:{[x;y] $[x~`json;.h.hn["400 Bad Request";`json;"{\"error\":",(.j.j y),"}"];.h.he y]};
 .h.i.wq:{[x;y] g:.h.i.wp y; r:value g 0; t:$[0>type r;enlist r;r]; n:count t; t:$[null g 2;(g 1)_t;(g 2) sublist (g 1)_t]; s:.h.tx[x] t; .h.i.wn["200 OK";x;enlist "X-Total-Count: ",string n;$[4h=type s;"c"$s;"\n" sv s]]};

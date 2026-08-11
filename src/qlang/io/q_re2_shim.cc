@@ -1,4 +1,4 @@
-// q_re2_shim — the ONLY C++ translation unit openq owns.  RE2 is linked into
+// q_re2_shim — the ONLY C++ translation unit peachq owns.  RE2 is linked into
 // the executable, so this is where C++ STOPS: everything RE2-shaped is confined
 // here and reached through the flat ABI in q_re2_abi.h.  No q types, no ray_t,
 // no allocation policy beyond the buffers `replace` and `escape` hand back.
