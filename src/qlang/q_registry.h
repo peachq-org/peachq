@@ -155,6 +155,7 @@ ray_t* q_registry_compose_value(void);
  * these for a `'`/`/`/`\`/`':`/`/:`/`\:` token in BOTH term and postfix
  * position, so `+/`, `(/;+)` and `(/)[+]` are one shape. */
 ray_t* q_registry_iter_value(int adv);
+int    q_registry_iter_of(const ray_t* v);
 
 /* q-name sanitization shared by .Q.id and peachq construction paths that must
  * repair name clashes.  q_registry_name_sanitize returns an interned symbol id for the
