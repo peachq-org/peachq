@@ -23,9 +23,9 @@
 #include "qlang/q_ctx.h"      /* remote-door install + q_ctx_run_src (the bootstrap loader) */
 #include "qlang/eval/q_eval.h" /* q_eval_syms_reset — per-runtime teardown */
 #include "qlang/eval/q_view.h" /* q_view_reset — per-runtime view state */
-#include "qlang/dotq_gen.h"   /* OPENQ_BOOTSTRAP — codegen'd from src/qlang/{q,dotq}.q */
-#include "qlang/h_gen.h"      /* OPENQ_H_BOOTSTRAP — codegen'd from src/qlang/h.q (`.h` constants) */
-#include "qlang/j_gen.h"      /* OPENQ_J_BOOTSTRAP — codegen'd from src/qlang/j.q (`.j` JSON ns) */
+#include "qlang/dotq_gen.h"   /* PEACHQ_BOOTSTRAP — codegen'd from src/qlang/{q,dotq}.q */
+#include "qlang/h_gen.h"      /* PEACHQ_H_BOOTSTRAP — codegen'd from src/qlang/h.q (`.h` constants) */
+#include "qlang/j_gen.h"      /* PEACHQ_J_BOOTSTRAP — codegen'd from src/qlang/j.q (`.j` JSON ns) */
 #include "qlang/q_env.h"      /* q_env_init/destroy — the q K-tree lifecycle */
 #include "lang/eval.h"        /* ray_eval_set_remote_* teardown */
 #include <rayforce.h>
@@ -74,9 +74,9 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
          * (no base name hook — one pipeline, cutover 2026-07-23). */
         q_dotz_init(argc, argv);
         /* the ORDERED core list: q.q before dotq.q (semantic), then .h, .j */
-        if (bootstrap_run(OPENQ_BOOTSTRAP,   "q.q+dotq.q") ||
-            bootstrap_run(OPENQ_H_BOOTSTRAP, "h.q") ||
-            bootstrap_run(OPENQ_J_BOOTSTRAP, "j.q")) {
+        if (bootstrap_run(PEACHQ_BOOTSTRAP,   "q.q+dotq.q") ||
+            bootstrap_run(PEACHQ_H_BOOTSTRAP, "h.q") ||
+            bootstrap_run(PEACHQ_J_BOOTSTRAP, "j.q")) {
             q_runtime_destroy(rt);
             return NULL;
         }

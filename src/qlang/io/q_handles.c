@@ -429,7 +429,7 @@ ray_t* q_handles_read1(int64_t fd, ray_t* count) {
  * `:fifo://path` descriptor is NOT IPC — hopen_transport routes it to
  * q_handles_open above.
  * DEFERRED (clean 'nyi, not a silent TCP attempt): the transport schemes
- * `unix://` / `tcps://` / `unixs://`, which need a transport layer openq lacks,
+ * `unix://` / `tcps://` / `unixs://`, which need a transport layer peachq lacks,
  * and single-colon `` `fifo:path `` (kdb opens it non-blocking; see
  * hopen_transport). */
 

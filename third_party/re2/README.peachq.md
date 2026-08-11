@@ -40,7 +40,7 @@ refused at load — went away with the module itself; see below.)
 
 The tree is **verbatim upstream**, pruned to `re2/`, `util/`, `LICENSE` and
 `AUTHORS`. No local patches, so a future re-vendor is a straight copy. Upstream's
-`CMakeLists.txt` is dropped: openq builds with a plain Makefile, and keeping a
+`CMakeLists.txt` is dropped: peachq builds with a plain Makefile, and keeping a
 build file nothing runs would only invite the belief that it does.
 
 `RE2_ON_VALGRIND` (which DuckDB's CMake defines) is deliberately NOT defined —

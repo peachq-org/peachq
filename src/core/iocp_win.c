@@ -1,4 +1,4 @@
-/* iocp_win.c — openq-owned Windows IOCP backend for the ray_poll_* interface.
+/* iocp_win.c — peachq-owned Windows IOCP backend for the ray_poll_* interface.
  *
  * Replaces the frozen ~60-line stub `src/core/iocp.c` (whose Windows object is
  * filtered out of the link in the Makefile; the stub file itself stays
@@ -39,7 +39,7 @@
  *       every turn, after completions/stdin/accepts are serviced — the exact
  *       epoll.c:165-266 shape, so `\t N` / `.z.ts` fire while the process is
  *       inside ray_poll_run (and ONLY then — no process keepalive, the
- *       deliberate openq departure pinned by PR #124).
+ *       deliberate peachq departure pinned by PR #124).
  *
  * Backend-private state lives in EXTENDED CONTAINER STRUCTS whose first member
  * is the frozen base struct (poll.h must not change; a file-scope id-keyed

@@ -1,6 +1,6 @@
 /* q_gz — RFC 1952 gzip framing over miniz raw deflate/inflate.
  *
- * miniz's zlib-compat layer has no gzip (windowBits+16) mode, so openq writes
+ * miniz's zlib-compat layer has no gzip (windowBits+16) mode, so peachq writes
  * the 10-byte gzip header, CRC-32, and ISIZE footer itself around miniz's raw
  * deflate stream.  This q_gz_deflate / q_gz_inflate pair is the seam a future
  * dlopen-system-zlib preference would swap inside — keep the interface clean. */

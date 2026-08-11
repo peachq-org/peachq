@@ -9,7 +9,7 @@
 ## Vendoring shape (the decision)
 
 **Pruned tree with per-target generated configs COMMITTED** — not the full autoconf
-source drop. Rationale: openq is a plain-Makefile, zero-dependency build; libffi's
+source drop. Rationale: peachq is a plain-Makefile, zero-dependency build; libffi's
 configure step exists to (a) pick the port sources and (b) generate `ffi.h` +
 `fficonfig.h`. Both are fully determined by our two fixed targets, so we ran configure
 once per target at vendoring time and committed the outputs. No autoconf, libtool, or

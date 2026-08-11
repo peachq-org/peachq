@@ -24,7 +24,7 @@
 
 /* (.Q.ty x) — LOWER char for a simple vector / string, UPPER for a uniform
  * list of vectors, blank (" ") otherwise (ref/dotq.md).  Returns a 1-char
- * string (openq has no char atom; `.Q.ty each` over strings therefore yields a
+ * string (peachq has no char atom; `.Q.ty each` over strings therefore yields a
  * list of 1-char strings, not one packed char vector — the `"jc JC"` combined
  * example is a deferred string-model cell). */
 ray_t* q_dotq_ty_fn(ray_t* x) {
@@ -39,11 +39,11 @@ ray_t* q_dotq_qt_fn(ray_t* x) {
 }
 
 /* (.Q.qp x) — is-partitioned predicate (ref/dotq.md `qp`): partitioned table
- * -> 1b, splayed table -> 0b, anything else -> 0 (a LONG, not a bool).  openq
+ * -> 1b, splayed table -> 0b, anything else -> 0 (a LONG, not a bool).  peachq
  * has no on-disk partitioned or splayed tables, so nothing in memory is either
  * — every value falls into the "anything else" arm and returns the long 0.
  * The doc's own `.Q.qp select from B -> 0` pins this: an in-memory table (as
- * openq's tables always are) is NOT splayed, so it returns 0 (long), not 0b. */
+ * peachq's tables always are) is NOT splayed, so it returns 0 (long), not 0b. */
 ray_t* q_dotq_qp_fn(ray_t* x) {
     (void)x;
     return ray_i64(0);
@@ -100,7 +100,7 @@ ray_t* q_dotq_s_fn(ray_t* x) {
  * (.Q.ops[]) materializes the roster fresh each call, so user code can query it
  * without any path into the immutable registry — mutating the returned table
  * cannot change how verbs resolve.  OWNER RULING 2026-07-14: lives under `.Q`
- * (openq extension beside .Q.qt/.Q.qp; kdb has no .Q.ops).
+ * (peachq extension beside .Q.qt/.Q.qp; kdb has no .Q.ops).
  * The surface has TWO homes and this is their UNION (`impl` says which):
  *   `c  a Q_OPS[] row (src/qlang/q_ops.c) carrying a C build recipe;
  *   `q  the definition is q source in q.q.  Prefix keywords defined there get

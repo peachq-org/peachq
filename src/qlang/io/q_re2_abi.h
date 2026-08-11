@@ -1,4 +1,4 @@
-/* q_re2_abi — the flat extern "C" seam between openq's C and the vendored RE2.
+/* q_re2_abi — the flat extern "C" seam between peachq's C and the vendored RE2.
  *
  * RE2 is C++ and its objects are linked straight into the executable, so this
  * is a COMPILE-TIME seam, not a module boundary: q_re2_shim.cc is the only C++

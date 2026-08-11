@@ -1,4 +1,4 @@
-/* q_json — openq's `.j` JSON namespace (ref/dotj.md).
+/* q_json — peachq's `.j` JSON namespace (ref/dotj.md).
  *
  * .j.j  serialize: hand-rolled recursive type-dispatch over ray_t -> compact
  *       JSON (no whitespace).  Types JSON can express get a native arm; the

@@ -198,7 +198,7 @@ ray_t* q_inter_wrap(ray_t* x, ray_t* y) {
  * concat) — rayfall has no cartesian primitive.  Atom operands behave as
  * one-item lists (each-left/right over an atom).  Deferred cells ('nyi,
  * never a wrong answer): string operands (kdb iterates a string's CHARS;
- * openq strings are -RAY_STR atoms — string model) and dict/table cross
+ * peachq strings are -RAY_STR atoms — string model) and dict/table cross
  * (kdb cross-joins tables). */
 ray_t* q_cross_wrap(ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);

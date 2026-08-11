@@ -1,4 +1,4 @@
-/* q_duckdb — openq's `.duckdb` namespace: the DuckDB bridge.  Contract, type
+/* q_duckdb — peachq's `.duckdb` namespace: the DuckDB bridge.  Contract, type
  * mapping and every decision: docs/duckdb-api.md (sidecar design:
  * docs/superpowers/specs/2026-07-14-duckdb-fidelity-design.md).
  *

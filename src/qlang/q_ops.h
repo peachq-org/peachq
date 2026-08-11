@@ -144,7 +144,7 @@ typedef struct q_op {
 
 /* The row's kdb primitive code — the 101h/102h wire byte and `value +` -> 1 —
  * or -1 when the verb has none.  The numbering is KX's FROZEN historical
- * constant (javakdb c.java operator tables); openq never allocates into it. */
+ * constant (javakdb c.java operator tables); peachq never allocates into it. */
 static inline int q_ops_kdb_op(const struct q_op* row) { return (int)row->kdb_op1 - 1; }
 
 /* The manifest table; sets *n to its length.  Stable storage (static const). */

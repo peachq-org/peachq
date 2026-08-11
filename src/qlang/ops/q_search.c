@@ -136,7 +136,7 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
         ray_release(outl);
         return c;
     }
-    /* STR-vector y (openq list-of-strings): whole-item membership -> atom */
+    /* STR-vector y (peachq list-of-strings): whole-item membership -> atom */
     if (y->type == RAY_STR && x->type == -RAY_STR)
         return ray_bool(seq_has_item(y, x) != 0);
     /* mixed numeric families (ref/in.md Mixed argument types): allowed only
