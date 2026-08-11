@@ -99,6 +99,11 @@ ray_t*    q_env_local_get(int64_t sym);   /* TOP frame only; borrowed */
 int       q_env_local_take(int64_t sym, ray_t* cur);  /* q_env_take, TOP frame;
                                                        * q_env_local_set puts back */
 int32_t   q_env_frame_depth(void);
+/* Read floor (< 0: floor at the current depth); returns the previous.  A
+ * script load suspends the caller this way (ctx_run_script) — the per-push
+ * cleared view below cannot: column scopes pushed during the load are
+ * barrier-free, and lookups must not walk past them into the caller. */
+int32_t   q_env_frame_floor(int32_t floor);
 
 /* Debugger frame cursor (basics/debug.md navigation): ROOT the resolving walk at
  * frame `depth`; _OFF = the top frame, _NONE = no frame at all (console [0]).  A
