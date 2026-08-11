@@ -389,8 +389,6 @@ ray_t* q_fills_wrap(ray_t* x) {
 
 static int is_sym_t(int8_t t) { return t == RAY_SYM || t == -RAY_SYM; }
 
-ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode);   /* joins wave */
-
 /* q `x^y` — fill: coalesce nulls in y with x (kdb `^`).  x may be an atom
  * (broadcast) or a same-length vector (element-wise).  Numeric result type:
  * F64 if EITHER operand is float, else I64 (the narrower-int-preserving lattice
