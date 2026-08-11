@@ -8,6 +8,7 @@
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
 #include "qlang/ops/q_index.h" /* q_index_at — first/last of an empty ride the miss law */
+#include "qlang/ops/q_dollar.h" /* q_dollar_cast — the b -> i aggregate narrow */
 #include "lang/eval.h"     /* ray_sum_fn, ray_avg_fn, ray_mul_fn, ray_first_fn, ray_last_fn — engine arms */
 #include "lang/internal.h" /* atomic_map_binary, make_f64, is_list, is_numeric, as_f64 */
 #include <math.h>          /* isnan, sqrt — sentinel-null discipline, mdev/cov */
@@ -147,13 +148,15 @@ static ray_t* runscan(ray_t* x, q_rs_kind k) {
         }
         return out;
     }
-    ray_t* out = ray_vec_new(RAY_I64, n > 0 ? n : 1); out->len = n;
-    int64_t* o = (int64_t*)ray_data(out);
+    /* b -> i (ref/sum.md, ref/prd.md domain tables) */
+    int8_t ot = (x->type == RAY_BOOL) ? RAY_I32 : RAY_I64;
+    ray_t* out = ray_vec_new(ot, n > 0 ? n : 1); out->len = n;
+    void* o = ray_data(out);
     int64_t acc = (k==RS_PRDS) ? 1 : 0;
     for (int64_t i = 0; i < n; i++) {
         int nu; double vd = q_velem_f(x, i, &nu); int64_t v = (int64_t)vd;
         if (k==RS_SUMS) acc += nu?0:v; else acc *= nu?1:v;
-        o[i] = acc;
+        if (ot == RAY_I32) ((int32_t*)o)[i] = (int32_t)acc; else ((int64_t*)o)[i] = acc;
     }
     return out;
 }
@@ -391,6 +394,20 @@ static ray_t* end_item(ray_t* x, int64_t i, ray_t* (*base)(ray_t*)) {
 ray_t* q_first_wrap(ray_t* x) { return end_item(x, 0, ray_first_fn); }
 ray_t* q_last_wrap(ray_t* x)  { return end_item(x, -1, ray_last_fn); }
 
+/* b -> i, the boolean-aggregate width law (ref/sum.md, ref/prd.md domain tables):
+ * an additive fold over an all-boolean domain narrows its long (or, for the
+ * one-item fold, still-boolean) result to int.  Consumes r. */
+ray_t* q_agg_bool_narrow(ray_t* r) {
+    if (!r || RAY_IS_ERR(r)) return r;
+    if (r->type == -RAY_I64 || r->type == RAY_I64 ||
+        r->type == -RAY_BOOL || r->type == RAY_BOOL) {
+        ray_t* c = q_dollar_cast(RAY_I32, r);
+        ray_release(r);
+        return c;
+    }
+    return r;
+}
+
 /* q `sum x` — LIST arm sums the items (kdb: `sum(2013.03.15;18:55:40.686)`
  * is a timestamp; Load Fixed pins `sum("DT";8 9)0:enlist"…"`).  Non-lists
  * keep the base vector aggregate. */
@@ -401,6 +418,9 @@ ray_t* q_sum_wrap(ray_t* x) {
         ray_t* plus = q_registry_lookup_name("+", 1, Q_DYADIC);   /* borrowed */
         if (!plus) return q_err(QE_TYPE);
         ray_t** e = (ray_t**)ray_data(x);
+        int allbool = 1;
+        for (int64_t i = 0; allbool && i < ray_len(x); i++)
+            allbool = e[i]->type == RAY_BOOL || e[i]->type == -RAY_BOOL;
         ray_t* acc = e[0];
         ray_retain(acc);
         for (int64_t i = 1; i < ray_len(x); i++) {
@@ -409,7 +429,7 @@ ray_t* q_sum_wrap(ray_t* x) {
             if (!nx || RAY_IS_ERR(nx)) return nx ? nx : q_err(QE_OOM);
             acc = nx;
         }
-        return acc;
+        return allbool ? q_agg_bool_narrow(acc) : acc;
     }
     return ray_sum_fn(x);
 }

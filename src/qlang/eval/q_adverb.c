@@ -243,6 +243,33 @@ static ray_t* acc_mono(const q_op_t* frow, int keep, const q_op_t** mrow) {
     return (mv && q_eval_apply_is_fnval(mv)) ? mv : NULL;
 }
 
+/* A SEEDED fold/scan over a boolean vector rides the mono kernel — the mono
+ * column IS the manifest's claim that `f/` reduces to that kernel, so
+ * `x f/ y` is f[x; mono y] — and the seed must not widen what the aggregate
+ * narrowed: b -> i (ref/sum.md domain table) makes `0+/01011b` answer 3i.
+ * NULL means "no mono claim, take the pairwise walk"; the re-narrow fires
+ * only when the KERNEL's own answer is int (its b -> i law, not ours). */
+static ray_t* acc_seeded_bool(ray_t* fv, const q_op_t* frow, ray_t* seed,
+                              ray_t* x, int keep) {
+    /* a Scan's collection seed broadcasts per STEP (an item per element would
+     * zip it against the scan vector instead) — pairwise walk keeps the shape */
+    if (keep && q_type_is_iter(seed)) return NULL;
+    const q_op_t* mrow = NULL;
+    ray_t* mv = acc_mono(frow, keep, &mrow);
+    if (!mv) return NULL;
+    ray_t* r0 = q_eval_apply(mv, mrow, &x, 1);
+    int narrowed = r0 && !RAY_IS_ERR(r0) &&
+                   (r0->type == -RAY_I32 || r0->type == RAY_I32);
+    if (!narrowed) {           /* not the b -> i kernel: the pairwise walk decides */
+        if (r0) ray_release(r0);
+        return NULL;
+    }
+    ray_t* av[2] = { seed, r0 };
+    ray_t* r = q_eval_apply(fv, frow, av, 2);
+    ray_release(r0);
+    return q_agg_bool_narrow(r);
+}
+
 /* Unary application of a non-unary value (:259): the seed is the value's
  * identity element when q knows one, else the first item — which is then the
  * first result. */
@@ -311,6 +338,10 @@ static ray_t* acc_apply(ray_t* fv, const q_op_t* frow, ray_t** args,
     }
     if (n == 1) return acc_unary(fv, frow, args[0], keep);
     if (rank >= 2 && n != rank) return q_err(QE_RANK);
+    if (n == 2 && args[1] && args[1]->type == RAY_BOOL && ray_len(args[1]) > 0) {
+        ray_t* r = acc_seeded_bool(fv, frow, args[0], args[1], keep);
+        if (r) return r;
+    }
     return acc_reduce(fv, frow, args[0], args + 1, n - 1, keep);
 }
 
