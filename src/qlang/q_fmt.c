@@ -14,6 +14,7 @@
 #include "qlang/io/q_provider.h" /* a provider carrier displays as provider truth */
 #include "lang/format.h"   /* ray_fmt */
 #include "lang/eval.h"     /* ray_at_fn — dict/table element access */
+#include "lang/internal.h" /* is_collection — THE boxed-list-or-typed-vector predicate */
 #include "ops/hash.h"    /* ray_hash_bytes — pipe digest distinct keys */
 #include "core/types.h"  /* ray_elem_size — pipe digest */
 
@@ -243,13 +244,9 @@ static int col_uniform_type(ray_t* col);                 /* fwd — its precondi
 
 /* THE inline-cell law (ref/trim.md, ref/dotq.md:1655): a dict row, a table
  * cell and a list-row cell are ELEMENTS, and an element renders single-line —
- * a nested general list via the k-repr renderer, never the top-level layout. */
-static int elem_is_nested_list(ray_t* e) {
-    return e && (e->type == RAY_LIST || e->type == RAY_STR);
-}
-
+ * every collection via the k-repr renderer, never the top-level layout. */
 static void fmt_elem_inline(ray_t* e, char* out, size_t cap) {
-    if (elem_is_nested_list(e)) q_fmt_krepr(e, out, cap);
+    if (is_collection(e)) q_fmt_krepr(e, out, cap);
     else q_fmt(e, out, cap);
 }
 
@@ -786,22 +783,28 @@ static void matrix_cell(ray_t* rv, int64_t c, int bare, int blank_null,
         fmt_elem_inline(a, out, outsz);
 }
 
+/* A boxed row aligns when its cells agree on ONE display class — all collections,
+ * or all atoms.  `((1 2;3);4 5)` agrees on neither and prints whole
+ * (math/atomic_nested), where `2 3 4#til 5` is all collections and grids
+ * (ref/take.md:86).  The char atom joins either class: it is an atom that prints
+ * string-shaped, so `(2;10;"a")` (joins/cross) and `("a";"dog ")` (ref/trim.md) align. */
 static int matrix_row_ok(ray_t* r) {
     if (!r || RAY_IS_ERR(r)) return 0;
     if (r->type > 0 && ray_is_vec(r) && matrix_alignable(r->type)) return 1;
-    if (r->type == RAY_LIST) {
-        ray_t** it = (ray_t**)ray_data(r);
-        int64_t n = ray_len(r);
-        for (int64_t i = 0; i < n; i++) {
-            if (!it[i] || RAY_IS_ERR(it[i])) return 0;
-            if (elem_is_nested_list(it[i])) continue;   /* inline cell (ref/trim.md) */
-            if (!(ray_is_atom(it[i]) || it[i]->type == RAY_CHARV) ||   /* strings are cells */
-                RAY_IS_NULL(it[i]))
-                return 0;
-        }
-        return 1;
+    if (r->type != RAY_LIST) return 0;
+    ray_t** it = (ray_t**)ray_data(r);
+    int64_t n = ray_len(r);
+    int row_nested = -1;
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* c = it[i];
+        if (!c || RAY_IS_ERR(c)) return 0;
+        if (c->type == -RAY_CHARV || c->type == -RAY_STR) continue;
+        int nested = is_collection(c);
+        if (!nested && (!ray_is_atom(c) || RAY_IS_NULL(c))) return 0;
+        if (row_nested < 0) row_nested = nested;
+        else if (row_nested != nested) return 0;
     }
-    return 0;
+    return 1;
 }
 
 /* One row into a buffer: cells space-joined, each padded to w[c] (w NULL =
@@ -836,7 +839,7 @@ static int is_matrix(ray_t** e, int64_t n) {
     if (n == 1 && w != 1) return 0;
     /* the 1x1 comma-drop covers SCALAR cells only: `,,(in;`s)` keeps its commas */
     if (n == 1 && e[0]->type == RAY_LIST &&
-        elem_is_nested_list(((ray_t**)ray_data(e[0]))[0]))
+        is_collection(((ray_t**)ray_data(e[0]))[0]))
         return 0;
     int all_charv = e[0]->type == RAY_CHARV;
     for (int64_t i = 1; i < n; i++) {
