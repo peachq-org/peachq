@@ -312,6 +312,252 @@ ray_t* q_table_bcast_col(ray_t* a, int64_t n) {
     return c;
 }
 
+/* Typed null cell matching a column's element type (missing-column fill). */
+static ray_t* null_cell_like(ray_t* col) {
+    if (!col) { ray_retain(RAY_NULL_OBJ); return RAY_NULL_OBJ; }
+    int8_t t = col->type;
+    if (t == RAY_SYM || t == -RAY_SYM) return ray_sym(ray_sym_intern_runtime("", 0));
+    if (t == -RAY_STR || t == RAY_STR) return ray_str("", 0);
+    if (ray_is_vec(col)) return ray_typed_null((int8_t)-t);
+    if (ray_is_atom(col)) return ray_typed_null(t);
+    /* A NESTED column's null cell is its OUT-OF-RANGE read — `("ab";"c")[5]`
+     * is `""`, so a filled string cell still counts 0 and casts to a null. */
+    ray_t* past = ray_i64(ray_len(col));
+    ray_t* cell = q_index_at(col, &past, 1);
+    ray_release(past);
+    return cell;
+}
+
+/* Normalize an insert/upsert/Join payload y against the FLAT target schema.
+ * Returns an OWNED plain table with the target's column names holding the
+ * new rows.  Forms (ref/insert.md, ref/upsert.md, ref/join.md):
+ *   - TABLE (plain/keyed): columns matched BY NAME.  Payload columns unknown
+ *     to the target -> 'mismatch (silent drop is never OK).  Target columns
+ *     absent from the payload: null-filled under Q_ROWS_JOIN, else
+ *     'mismatch (insert).
+ *   - LIST, insert law, count == ncols: columns-form — item i is column i,
+ *     atoms broadcast to the longest item (ref/insert.md is column-major).
+ *   - LIST/vector, Join law: row-major under the ref/join.md:192 rank rule —
+ *     a first-element ATOM makes y rank 1, one below the table's 2, so y is
+ *     implicitly enlisted as a single record; otherwise every item is a
+ *     record.  NEVER column-major: `a,:(`a`b;1 2)` is two ROWS (peachq#26).
+ *   - other LIST: records-form — every item a list/vector of ncols cells.
+ *   - DICT: one row, name-matched (strict: key set must be a subset AND
+ *     cover; Join: unknown keys ignored, missing columns null-filled).
+ *   - 1-column target: an atom/vector payload IS the column. */
+ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law) {
+    int partial = law == Q_ROWS_JOIN;
+    if (!y) return q_err(QE_TYPE);
+    int64_t nc = ray_table_ncols(flat);
+    if (nc <= 0) return q_err(QE_TYPE);
+    if (nc > 64) return q_err(QE_LIMIT);
+
+    if (y->type == RAY_TABLE || q_type_is_keyed(y)) {
+        ray_t* src = q_table_flatten(y);
+        if (!src || RAY_IS_ERR(src)) return src;
+        int64_t snc = ray_table_ncols(src);
+        for (int64_t c = 0; c < snc; c++) {
+            if (q_table_col_index(flat, ray_table_col_name(src, c)) < 0) {
+                ray_release(src);
+                return q_err(QE_MISMATCH);
+            }
+        }
+        int64_t nr = ray_table_nrows(src);
+        ray_t* out = ray_table_new(nc);
+        for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
+            int64_t nm = ray_table_col_name(flat, c);
+            int64_t sc = q_table_col_index(src, nm);
+            if (sc >= 0) {
+                out = ray_table_add_col(out, nm, ray_table_get_col_idx(src, sc));
+                continue;
+            }
+            if (!partial) { ray_release(out); ray_release(src); return q_err(QE_MISMATCH); }
+            ray_t* acc = ray_list_new(nr > 0 ? nr : 1);
+            for (int64_t r = 0; r < nr && !RAY_IS_ERR(acc); r++) {
+                ray_t* nl = null_cell_like(ray_table_get_col_idx(flat, c));
+                if (RAY_IS_ERR(nl)) { ray_release(acc); acc = nl; break; }
+                acc = ray_list_append(acc, nl);
+                ray_release(nl);
+            }
+            if (RAY_IS_ERR(acc)) { ray_release(out); ray_release(src); return acc; }
+            ray_t* cc = q_list_collapse(acc);
+            ray_release(acc);
+            if (!cc || RAY_IS_ERR(cc)) { ray_release(out); ray_release(src); return cc ? cc : q_err(QE_OOM); }
+            out = ray_table_add_col(out, nm, cc);
+            ray_release(cc);
+        }
+        ray_release(src);
+        return out;
+    }
+
+    if (y->type == RAY_DICT) {
+        ray_t* dk = ray_dict_keys(y);                     /* borrowed */
+        if (!dk || dk->type != RAY_SYM)
+            return q_err(QE_TYPE);
+        if (!partial) {
+            int64_t dn = ray_len(dk);
+            for (int64_t i = 0; i < dn; i++) {
+                /* borrowed domain atom — never released (table/sym.h) */
+                ray_t* s = ray_sym_vec_cell(dk, i);
+                int64_t id = s ? ray_sym_intern_runtime(ray_str_ptr(s), ray_str_len(s)) : 0;
+                if (q_table_col_index(flat, id) < 0) return q_err(QE_MISMATCH);
+            }
+        }
+        ray_t* out = ray_table_new(nc);
+        for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
+            int64_t nm = ray_table_col_name(flat, c);
+            ray_t* ka = ray_sym(nm);
+            ray_t* cellv = ray_dict_get(y, ka);           /* owned or NULL */
+            ray_release(ka);
+            if (!cellv) {
+                if (!partial) { ray_release(out); return q_err(QE_MISMATCH); }
+                cellv = null_cell_like(ray_table_get_col_idx(flat, c));
+            }
+            if (RAY_IS_ERR(cellv)) { ray_release(out); return cellv; }
+            ray_t* col = q_table_bcast_col(cellv, 1);
+            ray_release(cellv);
+            if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : q_err(QE_OOM); }
+            out = ray_table_add_col(out, nm, col);
+            ray_release(col);
+        }
+        return out;
+    }
+
+    if (nc == 1 && y->type != RAY_LIST) {
+        ray_t* col;
+        if (ray_is_atom(y)) col = q_table_bcast_col(y, 1);
+        else { ray_retain(y); col = y; }
+        if (!col || RAY_IS_ERR(col)) return col ? col : q_err(QE_OOM);
+        ray_t* out = ray_table_new(1);
+        if (!RAY_IS_ERR(out)) out = ray_table_add_col(out, ray_table_col_name(flat, 0), col);
+        ray_release(col);
+        return out;
+    }
+
+    if (y->type != RAY_LIST && !ray_is_vec(y))
+        return q_err(QE_TYPE);
+
+    int64_t ny = ray_len(y);
+    int single = 0;
+    if (law == Q_ROWS_JOIN && ny > 0) {
+        ray_t* f0 = q_join_item(y, 0);
+        if (!f0 || RAY_IS_ERR(f0)) return f0 ? f0 : q_err(QE_OOM);
+        single = ray_is_atom(f0);
+        ray_release(f0);
+    }
+
+    if (law == Q_ROWS_INSERT && ny == nc) {               /* columns-form */
+        int64_t L = -1;
+        for (int64_t c = 0; c < nc; c++) {
+            ray_t* it = q_join_item(y, c);
+            if (!it || RAY_IS_ERR(it)) return it ? it : q_err(QE_OOM);
+            if (!ray_is_atom(it)) {
+                int64_t l = ray_len(it);
+                if (L < 0) L = l;
+                else if (l != L) { ray_release(it); return q_err(QE_LENGTH); }
+            }
+            ray_release(it);
+        }
+        if (L < 0) L = 1;
+        ray_t* out = ray_table_new(nc);
+        for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
+            ray_t* it = q_join_item(y, c);
+            if (!it || RAY_IS_ERR(it)) { ray_release(out); return it ? it : q_err(QE_OOM); }
+            ray_t* col;
+            if (ray_is_atom(it)) { col = q_table_bcast_col(it, L); ray_release(it); }
+            else col = it;
+            if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : q_err(QE_OOM); }
+            out = ray_table_add_col(out, ray_table_col_name(flat, c), col);
+            ray_release(col);
+        }
+        return out;
+    }
+
+    /* records-form (single: y itself is the one implicitly-enlisted record) */
+    {
+        int64_t nrec = single ? 1 : ny;
+        ray_t* accs[64];
+        for (int64_t c = 0; c < nc; c++) {
+            accs[c] = ray_list_new(nrec > 0 ? nrec : 1);
+            if (RAY_IS_ERR(accs[c])) {
+                ray_t* e = accs[c];
+                for (int64_t j = 0; j < c; j++) ray_release(accs[j]);
+                return e;
+            }
+        }
+        ray_t* err = NULL;
+        for (int64_t r = 0; r < nrec && !err; r++) {
+            ray_t* rec = single ? (ray_retain(y), y) : q_join_item(y, r);
+            if (!rec || RAY_IS_ERR(rec) ||
+                !(ray_is_vec(rec) || rec->type == RAY_LIST) || ray_len(rec) != nc) {
+                if (rec && RAY_IS_ERR(rec)) err = rec;
+                else { if (rec) ray_release(rec); err = q_err(QE_LENGTH); }
+                break;
+            }
+            for (int64_t c = 0; c < nc && !err; c++) {
+                ray_t* cell = q_join_item(rec, c);
+                if (!cell || RAY_IS_ERR(cell)) { err = cell ? cell : q_err(QE_OOM); break; }
+                accs[c] = ray_list_append(accs[c], cell);
+                ray_release(cell);
+                if (RAY_IS_ERR(accs[c])) { err = accs[c]; accs[c] = NULL; }
+            }
+            ray_release(rec);
+        }
+        if (err) {
+            for (int64_t c = 0; c < nc; c++)
+                if (accs[c] && !RAY_IS_ERR(accs[c])) ray_release(accs[c]);
+            return err;
+        }
+        return q_table_cols_from_accs(flat, 0, accs, nc);
+    }
+}
+
+/* Append normalized rows to a flat table.  An EMPTY target (0 rows — e.g.
+ * `([]name:();age:())`) adopts the payload columns wholesale: that is how the
+ * first insert types an untyped empty schema (insert.qcmd `meta u`).  Column
+ * name set is the target's either way. */
+ray_t* q_table_append(ray_t* flat, ray_t* rows) {
+    int64_t nc = ray_table_ncols(flat);
+    if (ray_table_nrows(flat) == 0) {
+        /* untyped empty columns (RAY_LIST) adopt the payload type; a TYPED
+         * 0-row column keeps kdb type-strictness. */
+        if (ray_table_nrows(rows) > 0) {
+            for (int64_t c = 0; c < nc; c++) {
+                ray_t* oc = ray_table_get_col_idx(flat, c);
+                ray_t* pc = ray_table_get_col_idx(rows, c);
+                if (oc && pc && ray_is_vec(oc) && pc->type != oc->type)
+                    return q_err(QE_TYPE);
+            }
+        }
+        ray_t* out = ray_table_new(nc > 0 ? nc : 1);
+        for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++)
+            out = ray_table_add_col(out, ray_table_col_name(flat, c),
+                                    ray_table_get_col_idx(rows, c));
+        return out;
+    }
+    /* kdb type-strictness: appending into a simple typed column requires the
+     * SAME element type — `insert[`t;(`ferrari;8.22)]` into a long column is
+     * 'type, never a silent float promotion.  List (nested) target columns
+     * accept anything; 0-row payloads have nothing to check. */
+    if (ray_table_nrows(rows) > 0) {
+        for (int64_t c = 0; c < nc; c++) {
+            ray_t* oc = ray_table_get_col_idx(flat, c);
+            ray_t* pc = ray_table_get_col_idx(rows, c);
+            if (oc && pc && ray_is_vec(oc) && pc->type != oc->type)
+                return q_err(QE_TYPE);
+        }
+    }
+    ray_t* out = ray_table_new(nc > 0 ? nc : 1);
+    for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
+        ray_t* joined = ray_concat_fn(ray_table_get_col_idx(flat, c),
+                                             ray_table_get_col_idx(rows, c));
+        if (!joined || RAY_IS_ERR(joined)) { ray_release(out); return joined ? joined : q_err(QE_OOM); }
+        out = ray_table_add_col(out, ray_table_col_name(flat, c), joined);
+        ray_release(joined);
+    }
+    return out;
+}
+
 /* Resolve a table operand that may be BY NAME (-RAY_SYM naming a global).
  * Returns the borrowed target (env-owned, or the operand itself) and sets
  * *sym_out to the name id (or -1 for by-value).  NULL => not a table. */
