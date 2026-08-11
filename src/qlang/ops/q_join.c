@@ -1005,21 +1005,18 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
     if (x && y) {
         ray_t* t = (x->type == RAY_LIST && ray_len(x) == 0)   ? y
                  : (y->type == RAY_LIST && ray_len(y) == 0)   ? x : NULL;
-        if (t && t->type == RAY_TABLE) { ray_retain(t); return t; }
+        if (q_type_is_table(t)) { ray_retain(t); return t; }
     }
-    if (x && y && x->type == RAY_TABLE && y->type == RAY_TABLE &&
-        !qj_same_schema(x, y))
+    if (q_type_is_table(x) && q_type_is_table(y) && !qj_same_schema(x, y))
         return q_err(QE_MISMATCH);
     if (q_type_is_keyed(x) && q_type_is_keyed(y))
         return qj_ktbl_merge(x, y, 0);     /* upsert: y records win wholesale */
-    if (x && x->type == RAY_TABLE && y && y->type == RAY_DICT && !q_type_is_keyed(y))
+    if (q_type_is_table(x) && q_type_is_plain_dict(y))
         return q_upsert_wrap(x, y);
     /* A bare dict joins ONLY with a dict (ref/join.md: `10,d` -> 'type; base
      * concat would wrongly DISTRIBUTE the scalar over the dict's values). */
     {
-        int xd = x && x->type == RAY_DICT && !q_type_is_keyed(x);
-        int yd = y && y->type == RAY_DICT && !q_type_is_keyed(y);
-        if (xd != yd)
+        if (q_type_is_plain_dict(x) != q_type_is_plain_dict(y))
             return q_err(QE_TYPE);
     }
     ray_t* r = ray_concat_fn(x, y);
@@ -1062,8 +1059,8 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
     int x_chr = x->type == -RAY_STR || x->type == RAY_CHARV || x->type == -RAY_CHARV;
     int y_chr = y->type == -RAY_STR || y->type == RAY_CHARV || y->type == -RAY_CHARV;
     if (nx < 0 || ny < 0 || (!x_chr && !y_chr) ||
-        x->type == RAY_DICT || y->type == RAY_DICT ||
-        x->type == RAY_TABLE || y->type == RAY_TABLE)
+        q_type_is_dict(x) || q_type_is_dict(y) ||
+        q_type_is_table(x) || q_type_is_table(y))
         return r;                          /* keep the base error */
     ray_t* out = ray_list_new(nx + ny > 0 ? nx + ny : 1);
     if (RAY_IS_ERR(out)) { if (r) ray_release(r); return out; }
