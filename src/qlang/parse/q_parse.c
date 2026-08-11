@@ -55,6 +55,19 @@ static _Noreturn void die_err(q_err_e cls) {
     longjmp(q_err_jmp, 1);
 }
 
+/* kdb signals a refused k-unary glyph AS the class (`$42` -> '$, `+d` -> '+
+ * — basics/parsetrees.md, its own "//$ unary form disabled in q" note), the
+ * same offending-text-itself shape q_err_name carries for undefined names. */
+static char   g_die_name[2];
+static size_t g_die_name_n = 0;   /* nonzero: the handler answers q_err_name */
+
+static _Noreturn void die_name(const char *p, size_t n) {
+    if (n > sizeof g_die_name) n = sizeof g_die_name;
+    memcpy(g_die_name, p, n);
+    g_die_name_n = n;
+    longjmp(q_err_jmp, 1);
+}
+
 /* ===== ray_t leaf builders =================================================== */
 
 /* name reference (ATTR_QUOTED clear): resolved by eval */
@@ -1402,22 +1415,30 @@ static P parse_e_body(Parser *p, QCtx ctx) {
         ray_t *q = try_parse_qsql(p);
         if (q) return (P){ R_NOUN, q };
     }
-    /* A colon-unary k glyph GLUED to an operand (`*:1 2 3`, `+:5`) is k, NOT q
-     * — q spells the monadic with its keyword (first, flip, count, …).  Owner
-     * ruling 2026-07-30: reject it at PARSE, so no tree ever exists and the
-     * direct and parse-then-eval paths cannot disagree.  Narrow by design: the
-     * isolated value (`+:`), bracket apply (`*:[x]`) and the parenthesised
-     * value (`(*:) x`) all reach here with a non-operand next token or a
-     * non-verb head, and are untouched.  `::`, `0:` and the two-glyph
-     * comparisons (`<=`) are excluded by the glyph+colon shape test. */
+    /* A k-unary glyph applied to a juxtaposed operand is k, NOT q — q spells
+     * the monadic with its keyword (first, flip, count, …), the glyph wrapped
+     * ((,)2, (,/)x) or bracketed (,/[x]).  Owner rulings 2026-07-30 (the colon
+     * form `*:1 2 3`) and 2026-08-11 (the bare form `,2`, the derived `,/x`,
+     * and verb operands `+ -`): reject at PARSE, so no tree ever exists.  The
+     * SHAPE test covers every glyph — the leak was uniform, inherited from the
+     * kparser port — never a glyph list.  Excluded by shape: `:`-first
+     * spellings (assignment / early return / `::`), digit-colon verbs (`0:`),
+     * two-glyph comparisons (`<=`), and every non-operand next token past the
+     * adverb run, which keeps `+:` alone, `f:+/`, `,/[x]`, slots, postfix and
+     * the parenthesised values intact. */
     {
         Token *ht = cur(p);
-        TKind nk = peek(p);
-        if (ht->kind == T_VERB && ht->len == 2 && p->src[ht->start] != ':' &&
-            p->src[ht->start + 1] == ':' &&
-            strchr(VERB_CHARS, p->src[ht->start]) != NULL &&
-            (nk == T_NOUN || nk == T_LPAREN || nk == T_LBRACE))
-            q_die("k-unary glyph applied to a glued operand is not q");
+        char h0 = p->src[ht->start];
+        if (ht->kind == T_VERB && h0 != ':' && strchr(VERB_CHARS, h0) != NULL &&
+            (ht->len == 1 || (ht->len == 2 && p->src[ht->start + 1] == ':'))) {
+            int j = p->pos + 1;
+            while (j < p->t.n && p->t.t[j].kind == T_ADVERB) j++;
+            TKind nk = (j < p->t.n) ? p->t.t[j].kind : T_EOF;
+            /* kdb-published class: THE GLYPH ITSELF (`$42` -> '$, `+d` -> '+
+             * — basics/parsetrees.md "//$ unary form disabled in q") */
+            if (nk == T_NOUN || nk == T_LPAREN || nk == T_LBRACE || nk == T_VERB)
+                die_name(&p->src[ht->start], 1);
+        }
     }
     P t = parse_term(p, ctx);
     if (t.role == R_NONE) return EMPTY;
@@ -1445,6 +1466,20 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
     }
 
     if (t.role == R_NOUN && u.role == R_VERB) {
+        /* `1 2 3:x` — the bare `:` verb assigning INTO a literal.  q assigns
+         * to a name, an index/apply form, or a file/global SYMBOL (`\`:f.txt:
+         * "…"` is save-by-assignment, ref/save.md); a non-sym data literal
+         * lhs is the k identity monad leaking through the script seam
+         * ("x:1 2 3\n:x" joins to exactly this shape).  Names, call trees and
+         * sym constants pass; other atoms and typed vectors refuse.  Marked
+         * verbs (`x+:1`) and `::` are other spellings. */
+        if (sym_name_is(u.v, ":") &&
+            !(t.v->type == -RAY_SYM || t.v->type == RAY_SYM ||
+              t.v->type == RAY_LIST)) {
+            ray_release(t.v);
+            ray_release(u.v);
+            q_die("assignment needs a name or an index form on the left");
+        }
         P e = parse_e(p, ctx);
         /* postfix form (`1+`, `-15!`): the missing rhs is a projection HOLE,
          * the same Q_ATTR_HOLE marker bracket elisions carry — an explicit
@@ -1457,21 +1492,55 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
     }
 
     P e = parse_e_from(p, u, ctx);
-    /* Prefix application of a bare 1-char glyph verb is MONADIC: respell the
-     * head `+` -> `+:` so the tree displays kdb-style ((+:;1) for "+1") and
-     * the (name, MONADIC) registry row is addressable.  Marked verbs (+:)
-     * already carry the spelling; `:` respells to the generic `::`. */
+    /* `:` at prefix position respells to the generic `::` ((::;5) for ":5") —
+     * assignment syntax, not a manifest verb, so the k-unary law does not
+     * govern it.  Any OTHER bare glyph reaching here bypassed the
+     * expression-start check (`count - 5` — the `-` never stands at expression
+     * start): same law, same refusal.  The old respell-to-monadic grant this
+     * replaces is what let every glyph keep its k unary form. */
     if (t.role == R_VERB && t.v && t.v->type == -RAY_SYM &&
         !(t.v->attrs & Q_ATTR_QUOTED)) {
         ray_t *s = ray_sym_str(t.v->i64);
         if (s) {
             if (ray_str_len(s) == 1 && strchr(VERB_CHARS, ray_str_ptr(s)[0])) {
-                char nm[2] = { ray_str_ptr(s)[0], ':' };
-                ray_t *m = q_verb_name(nm, 2);
+                if (ray_str_ptr(s)[0] != ':') {
+                    char g = ray_str_ptr(s)[0];
+                    ray_release(s);
+                    ray_release(t.v);
+                    if (e.v) ray_release(e.v);
+                    die_name(&g, 1);
+                }
+                ray_t *m = q_verb_name("::", 2);
                 ray_release(t.v);
                 t.v = m;
             }
             ray_release(s);
+        }
+    }
+    /* A derived FUNCTION has no prefix-juxtaposed form in q, whatever its
+     * root — `,/x`, `f'1 2 3`, `{x}/1 2 3` are the permissive-grammar
+     * spellings; q requires the bracket (`f'[x]`) or the parens (`(f')x`).
+     * The upstream kparser kept the cleaner grammar KNOWINGLY and named the
+     * stricter q surface as the alternative; the owner ruled for the stricter
+     * surface (2026-08-11) — a deliberate departure, not a missed trim.
+     * Function-shaped roots only: a name-ref, registry value or lambda.  A
+     * DATA root stays (`y:2/ set y` — the glued-comment mistake — must keep
+     * parsing, qfuzz realistic/comment_swallows_code).  A node is DERIVED iff
+     * its head is one of the six immutable iterator singletons — identity,
+     * so a call tree like (enlist;{x}) is never mistaken for one.  Infix
+     * (`x f' y`) and bracket forms never carry R_VERB list heads here. */
+    if (t.role == R_VERB && t.v && t.v->type == RAY_LIST && ray_len(t.v) == 2) {
+        ray_t *root = ((ray_t **)ray_data(t.v))[1];
+        while (root && root->type == RAY_LIST && ray_len(root) == 2 &&
+               q_registry_iter_of(((ray_t **)ray_data(root))[0]) >= 0)
+            root = ((ray_t **)ray_data(root))[1];
+        if (q_registry_iter_of(((ray_t **)ray_data(t.v))[0]) >= 0 && root &&
+            ((root->type == -RAY_SYM && !(root->attrs & Q_ATTR_QUOTED)) ||
+             root->type == RAY_UNARY || root->type == RAY_BINARY ||
+             root->type == RAY_VARY || root->type == RAY_QFN)) {
+            ray_release(t.v);
+            if (e.v) ray_release(e.v);
+            q_die("a derived function applies with brackets or parens in q");
         }
     }
     /* Prefix glyph head embeds its MONADIC registry value; a bare glyph verb
@@ -1938,6 +2007,10 @@ ray_t *q_qsql_normalize_probe(const char *src, int ctx, int verb) {
         free_tokens(g_toks);
         g_toks.t = NULL; g_toks.n = 0;
         q_err_e cls = g_die_class; g_die_class = QE_PARSE;
+        if (g_die_name_n) {
+            size_t nn = g_die_name_n; g_die_name_n = 0;
+            return q_err_name(g_die_name, nn);
+        }
         return q_err(cls);
     }
     Tokens ts = scan(src);
@@ -2031,6 +2104,10 @@ ray_t *q_parse(const char *src) {
         g_toks.t = NULL;
         g_toks.n = 0;
         q_err_e cls = g_die_class; g_die_class = QE_PARSE;
+        if (g_die_name_n) {
+            size_t nn = g_die_name_n; g_die_name_n = 0;
+            return q_err_name(g_die_name, nn);
+        }
         return q_err(cls);
     }
 
