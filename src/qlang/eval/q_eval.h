@@ -99,7 +99,10 @@ int    q_eval_apply_iter_id(ray_t* v);
 int    q_eval_apply_carrier_kind(const ray_t* v);   /* 0 = not a carrier */
 /* the value's arity as dispatch sees it; -1 when it has no fixed rank */
 int64_t q_eval_apply_rank(ray_t* v);
-int    q_eval_apply_frame_depth(void);              /* lambda frames live */
+int    q_eval_apply_frame_depth(void);              /* lambda frames live (above the floor) */
+/* set the frame floor (< 0: floor at the current depth); returns the previous.
+ * A script load suspends the caller's frames for WRITES — ctx_run_script */
+int    q_eval_apply_frame_floor(int floor);
 /* BORROWED params/body/ctx (ctx NULL = root); 0 unless v is a lambda carrier */
 int    q_eval_apply_lambda_parts(ray_t* v, ray_t** params, ray_t** body,
                                  ray_t** ctx);
