@@ -21,7 +21,7 @@
  *   SOFTWARE.
  */
 
-/* openq Phase C: this file speaks the KDB IPC PROTOCOL (clean-room, from
+/* peachq Phase C: this file speaks the KDB IPC PROTOCOL (clean-room, from
  * qdocs/docs/docs/docs/basics/ipc.md + kb/serialization.md; javakdb c.java
  * is the cleared interactive reference — never a kdb+ binary).
  *
@@ -368,7 +368,7 @@ static ray_t* hook_lookup(int idx) {
 }
 
 /* Fire a hook value: q carriers go through the q value-apply entry, engine
- * lambdas through the base call path (ipc.c is openq-owned — the one
+ * lambdas through the base call path (ipc.c is peachq-owned — the one
  * core-file consumer of the q apply seam). */
 static ray_t* hook_fire(ray_t* fn, ray_t** args, int64_t n) {
     if (fn->type == RAY_QFN) return q_eval_apply_value(fn, args, n);

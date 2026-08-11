@@ -61,7 +61,7 @@ static ray_t* reindex_collapse(ray_t* vec, ray_t* grade) {
  * of its own datatype, and the general list (0h) leads.  Injective over the tag
  * range, so equal keys mean equal types.  FUNCTION values key on their q type
  * id (100h..) — community law, test/q/community/sort_functions.qcmd — which
- * ascending |type| places after every data type (openq's own placement). */
+ * ascending |type| places after every data type (peachq's own placement). */
 static int64_t ord_type_key(ray_t* x) {
     int64_t t = q_builtins_type_num(x);
     if (t >= 100) return 2 * t;
@@ -88,7 +88,7 @@ static int ord_cmp_i64(int64_t x, int64_t y) { return x < y ? -1 : x > y; }
 
 /* Within one function type: primitives compare by their manifest kdb_op
  * identity number (`::` IS unary primitive 0), iterators by adverb id,
- * lambdas by VERBATIM SOURCE (a recorded openq choice — kdb recurses the
+ * lambdas by VERBATIM SOURCE (a recorded peachq choice — kdb recurses the
  * value structure, which pins bytecode); proj/comp/deriv carriers tie and
  * the stable grade keeps input order. */
 static int64_t ord_fn_id(ray_t* x, int8_t qt) {

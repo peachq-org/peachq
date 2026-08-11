@@ -852,7 +852,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         int64_t vl = v->type == RAY_TABLE ? ray_table_nrows(v)
                    : (ray_is_vec(v) || v->type == RAY_LIST) ? ray_len(v) : -1;
         if (kl < 0 || vl < 0 || kl != vl) {
-            /* the splay carrier is the ONE unconformed dict openq itself
+            /* the splay carrier is the ONE unconformed dict peachq itself
              * emits — q_splay_is (the recognition owner) gates the bypass */
             if (k->type == RAY_SYM && v->type == -RAY_SYM) {
                 ray_t* d = ray_dict_new(k, v);        /* consumes both */

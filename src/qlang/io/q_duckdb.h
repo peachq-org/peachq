@@ -1,4 +1,4 @@
-/* q_duckdb — openq's `.duckdb` namespace (the DuckDB bridge).
+/* q_duckdb — peachq's `.duckdb` namespace (the DuckDB bridge).
  * See docs/duckdb-api.md and q_duckdb.c. */
 #ifndef Q_DUCKDB_H
 #define Q_DUCKDB_H

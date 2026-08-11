@@ -28,7 +28,7 @@ static int32_t wf_i32(const uint8_t* p) { int32_t v; memcpy(&v, p, 4); return v;
 #define WF_D_NAME 16   /* shape D: fd 20 + a 4096-byte page, domain name at +16 */
 #define WF_D_DESC 4080 /* ...whose last 16 bytes are a shape B header */
 #define WF_D_OFF  4096
-#define WF_ENUM_TYPE 20  /* kdb's enum; openq has none, so it resolves away to 11h */
+#define WF_ENUM_TYPE 20  /* kdb's enum; peachq has none, so it resolves away to 11h */
 #define WF_DOMAIN_LEVELS 4  /* a column copied out of its database fails, never walks to / */
 #define WF_NEST_BIAS 77  /* 77+n = mapped list of vectors of type n, elements in `<col>#` */
 #define WF_NEST_HI   96
@@ -59,7 +59,7 @@ static int wf_leaf_name(const char* s, size_t n) {
     return n && !memchr(s, '/', n) && !memchr(s, '\\', n);
 }
 
-/* An ALLOWLIST, not a cast: openq added types kdb never writes (RAY_SEL 20,
+/* An ALLOWLIST, not a cast: peachq added types kdb never writes (RAY_SEL 20,
  * RAY_STR 21) and RAY_SYM's width is adaptive, so raw disk bytes cannot carry
  * it.  Width stays ray_type_sizes' business — one source of truth. */
 static int8_t wf_simple_tag(uint8_t disk) {

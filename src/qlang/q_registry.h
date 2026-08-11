@@ -156,7 +156,7 @@ ray_t* q_registry_compose_value(void);
  * position, so `+/`, `(/;+)` and `(/)[+]` are one shape. */
 ray_t* q_registry_iter_value(int adv);
 
-/* q-name sanitization shared by .Q.id and openq construction paths that must
+/* q-name sanitization shared by .Q.id and peachq construction paths that must
  * repair name clashes.  q_registry_name_sanitize returns an interned symbol id for the
  * `.Q.id` atom rule.  q_name_dedup takes an already-sanitized/generated symbol
  * and resolves reserved-word and previous-name clashes by appending 1,2,...
