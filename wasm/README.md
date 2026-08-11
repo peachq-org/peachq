@@ -1,6 +1,6 @@
-# openq WebAssembly build
+# peachq WebAssembly build
 
-A browser-runnable q REPL: the openq engine (parser + q datatypes over the
+A browser-runnable q REPL: the peachq engine (parser + q datatypes over the
 rayforce array core) compiled to WebAssembly with emscripten, driven by a small
 self-contained web page. Mirrors upstream rayforce's `wasm.rayforcedb.com` demo,
 retargeted to this `src/`-based tree.
@@ -9,7 +9,7 @@ retargeted to this `src/`-based tree.
 
 | File          | Purpose                                                            |
 | ------------- | ------------------------------------------------------------------ |
-| `q_wasm.c`    | The browser C ABI. Drives openq's real pipeline (`q_parse` → `q_eval` → materialize → `q_fmt`). |
+| `q_wasm.c`    | The browser C ABI. Drives peachq's real pipeline (`q_parse` → `q_eval` → materialize → `q_fmt`). |
 | `ipc_stub.c`  | Inert stubs for the handful of `ray_ipc_*` symbols retained TUs reference — a browser tab has no sockets. |
 | `smoke.js`    | The headless check: evaluates q in the built module and asserts the answers, regex most of all. |
 | `index.html`  | Self-contained REPL page. Loads `peachq.js`, `ccall`s the ABI.   |

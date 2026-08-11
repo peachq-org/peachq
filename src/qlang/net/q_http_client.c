@@ -1,6 +1,6 @@
 /* q_http_client — see q_http_client.h.  Blocking `.Q.hg`/`.Q.hp` client.
  * Behaviour pinned from qdocs ref/dotq.md (clean room); the timeout, size-cap,
- * https-error and redirect policies are doc-unpinned openq choices (see PR). */
+ * https-error and redirect policies are doc-unpinned peachq choices (see PR). */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L    /* clock_gettime / CLOCK_MONOTONIC */
 #endif
@@ -122,7 +122,7 @@ static int hdr_ieq(const struct phr_header* h, const char* lower) {
     return 1;
 }
 /* A header value's trimmed body equals the single token `gzip` (case-insensitive).
- * Used for `Content-Encoding: gzip` — the only content coding openq inflates. */
+ * Used for `Content-Encoding: gzip` — the only content coding peachq inflates. */
 static int val_is_gzip(const char* v, size_t n) {
     size_t s = 0; while (s < n && (v[s] == ' ' || v[s] == '\t')) s++;
     size_t e = n; while (e > s && (v[e-1] == ' ' || v[e-1] == '\t')) e--;

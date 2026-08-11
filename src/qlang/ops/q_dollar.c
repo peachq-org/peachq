@@ -169,7 +169,7 @@ static ray_t* cast_bool(ray_t* x) {
 }
 
 /* char cast (`10h$`/`` `char$``/`"c"$`): reinterpret an integer/byte value as
- * chars, producing a native string (openq has no char-atom type distinct from
+ * chars, producing a native string (peachq has no char-atom type distinct from
  * a 1-char string).  The boxed-list arm packs into ONE string, so "c"$ must
  * beat q_dollar_cast's RAY_LIST distribution (which would build a list of
  * 1-char strings — q_list_collapse refuses to pack them). */
@@ -591,7 +591,7 @@ ray_t* q_dollar_pad(int64_t w, ray_t* x) {
     return pad_leaf(w, x);
 }
 
-/* Enumerate `x$y` (ref/enumerate.md: sym lhs naming a domain list) — openq has
+/* Enumerate `x$y` (ref/enumerate.md: sym lhs naming a domain list) — peachq has
  * no enum domains, so the whole form is a 'nyi stub awaiting them. */
 ray_t* q_dollar_enum(ray_t* x, ray_t* y) {
     (void)x; (void)y;

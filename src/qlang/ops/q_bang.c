@@ -79,9 +79,9 @@ static ray_t* h_s1(ray_t* y) {
 }
 
 /* -16!x — reference count of x.  DIVERGENCE: kdb returns the number of q-level
- * aliases bound to a variable (`a:b:c:1 2 3` -> 3); openq exposes the ray_t
+ * aliases bound to a variable (`a:b:c:1 2 3` -> 3); peachq exposes the ray_t
  * heap refcount, which counts internal owners, not source aliases.  The ledger
- * pins openq's ACTUAL number (smoked), and the PR Decisions flag the gap — we
+ * pins peachq's ACTUAL number (smoked), and the PR Decisions flag the gap — we
  * do NOT fabricate kdb's count. */
 static ray_t* h_refcnt(ray_t* y) {
     if (!y) return q_err(QE_TYPE);
