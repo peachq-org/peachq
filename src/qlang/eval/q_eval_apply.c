@@ -713,6 +713,15 @@ static ray_t* agg_nested(ray_t* fv, const q_op_t* row, ray_t* x) {
     ray_t* dv = q_eval_apply_manifest_value(q_ops_nested_dyad(row), Q_DYADIC, &drow);
     if (!dv) return q_err(QE_TYPE);
     int64_t n = ray_len(x);
+    /* an additive fold over an all-boolean domain narrows b -> i (ref/sum.md
+     * domain table): `sum (01b;10b)` is 1 1i, `sum enlist 01011b` int.  Row
+     * identity, the flip_of/QNEST_MEAN lookup precedent below. */
+    int allbool = drow && drow == q_ops_find("+", 1);
+    for (int64_t i = 0; allbool && i < n; i++) {
+        ray_t* e = q_index_elem_at(x, i);
+        allbool = e && (e->type == RAY_BOOL || e->type == -RAY_BOOL);
+        if (e) ray_release(e);
+    }
     ray_t* r = q_index_elem_at(x, 0);
     for (int64_t i = 1; i < n && r && !RAY_IS_ERR(r); i++) {
         ray_t* e = q_index_elem_at(x, i);
@@ -722,6 +731,7 @@ static ray_t* agg_nested(ray_t* fv, const q_op_t* row, ray_t* x) {
         ray_release(e);
         r = t;
     }
+    if (allbool && row->nested == QNEST_FOLD) r = q_agg_bool_narrow(r);
     if (row->nested != QNEST_MEAN || !r || RAY_IS_ERR(r))
         return r ? r : q_err(QE_TYPE);
     const q_op_t* prow = NULL;
