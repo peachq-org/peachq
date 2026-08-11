@@ -522,7 +522,7 @@ static ray_t* bio_take(void* bio) {
     char buf[512];
     int  n = A.BIO_read(bio, buf, (int)sizeof buf);
     A.BIO_free(bio);
-    return n > 0 ? ray_str(buf, (size_t)n) : NULL;
+    return n > 0 ? ray_charv(buf, (int64_t)n) : NULL;
 }
 
 static ray_t* asn1_time_str(const void* t) {
@@ -544,7 +544,7 @@ static ray_t* name_str(const void* name) {
     char buf[512];
     if (!name || !A.X509_NAME_oneline || !A.X509_NAME_oneline(name, buf, (int)sizeof buf))
         return NULL;
-    return ray_str(buf, strlen(buf));
+    return ray_charv(buf, (int64_t)strlen(buf));   /* `.z.e` is q-visible: charv, not RAY_STR */
 }
 
 /* Appends iff `v` is present, so an absent field simply does not appear —
