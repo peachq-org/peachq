@@ -263,13 +263,20 @@ ray_t* ray_sum_fn(ray_t* x) {
         /* Narrow/temporal types need specific return constructors that the
          * DAG executor doesn't provide — use scalar path for these. */
         if (x->type == RAY_I32 || x->type == RAY_I16 || ray_is_bytelike(x->type) ||
+            x->type == RAY_BOOL ||
             x->type == RAY_TIME || x->type == RAY_TIMESTAMP ||
             x->type == RAY_MINUTE || x->type == RAY_SECOND ||
             x->type == RAY_TIMESPAN) {
             int64_t n = x->len;
             bool has_nulls = (x->attrs & RAY_ATTR_HAS_NULLS) != 0;
             int64_t sum = 0;
-            if (x->type == RAY_I32) {
+            if (x->type == RAY_BOOL) {
+                /* b -> i (ref/sum.md domain table) — like i16/u8, a width
+                 * the DAG executor doesn't construct */
+                uint8_t* d = (uint8_t*)ray_data(x);
+                for (int64_t i = 0; i < n; i++) sum += d[i] != 0;
+                return make_i32((int32_t)sum);
+            } else if (x->type == RAY_I32) {
                 int32_t* d = (int32_t*)ray_data(x);
                 if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
                 else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
