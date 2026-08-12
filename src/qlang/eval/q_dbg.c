@@ -161,23 +161,30 @@ static int lam_global_name(ray_t* lam, char* buf, size_t cap) {
     return found;
 }
 
-/* one `  [i]  name:src` line; lam NULL = the statement frame (from stmt) */
+/* one `  [i]  file:line: name:src` line (basics/debug.md — file:line only "if
+ * such information is available"); lam NULL = the statement frame (from stmt) */
 static size_t frame_line(char* dst, size_t cap, int idx, int mark, ray_t* lam,
                          const char* stmt) {
     const char* src = stmt;
     size_t sn;
-    char name[128];
-    name[0] = '\0';
+    char name[128], floc[300];
+    name[0] = floc[0] = '\0';
     if (lam) {
         ray_t* s = q_eval_apply_lambda_src(lam);
         src = s ? ray_str_ptr(s) : "{}";
         sn = s ? ray_str_len(s) : 2;
         if (lam_global_name(lam, name, sizeof name - 1)) strcat(name, ":");
+        int64_t fs = 0, ln = -1;
+        q_eval_apply_lambda_prov(lam, NULL, &fs, &ln);
+        ray_t* fp = fs ? ray_sym_str(fs) : NULL;         /* borrowed */
+        if (fp)
+            snprintf(floc, sizeof floc, "%.*s:%lld: ", (int)ray_str_len(fp),
+                     ray_str_ptr(fp), (long long)ln);
     } else {
         sn = strlen(src);
     }
-    int n = snprintf(dst, cap, "%s[%d]  %s%.*s\n", mark ? ">>" : "  ", idx,
-                     name, (int)sn, src);
+    int n = snprintf(dst, cap, "%s[%d]  %s%s%.*s\n", mark ? ">>" : "  ", idx,
+                     floc, name, (int)sn, src);
     return (n > 0 && (size_t)n < cap) ? (size_t)n : (cap ? cap - 1 : 0);
 }
 
