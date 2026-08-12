@@ -1020,9 +1020,10 @@ static P parse_base(Parser *p) {
          * built AT PARSE (value-heads-at-parse; kdb parse of a lambda returns
          * the function atom).  src is the VERBATIM `{...}` span (kdb echoes
          * it byte-for-byte); params is a RAY_SYM vector — explicit signature,
-         * or x/y/z inferred by highest implicit used (min rank 1), or empty
-         * for `{[] ...}`.  No env capture: q lambdas resolve globals at CALL
-         * time (the carrier layout is q_eval_apply_lambda_new's). */
+         * x/y/z inferred by highest implicit used (min rank 1), or ONE
+         * null-named slot for `{[] ...}`.  No VALUE capture: globals
+         * resolve at CALL time, in the `\d` context the carrier records
+         * (q_eval_apply_lambda_new's layout). */
         int lb_start = tk->start;
         adv(p);
         ray_t *params = NULL;              /* NULL until signed / inferred */
@@ -1091,6 +1092,14 @@ static P parse_base(Parser *p) {
                 q_die("expected ']' after lambda signature");
             }
             adv(p);
+            /* `{[] ...}` is RANK 1 with an UNNAMEABLE slot: the null symbol is no
+             * variable's name, so a spare argument lands where no body can read it
+             * and `x` stays GLOBAL — default names come with OMITTING the signature
+             * (function-notation.md "Signature").  Owner ruling 2026-08-12. */
+            if (!ray_len(params)) {
+                int64_t nul = ray_sym_intern_runtime("", 0);
+                params = ray_vec_append(params, &nul);
+            }
         }
         uint8_t mine = 0;
         uint8_t *saved = p->xyz_mask;

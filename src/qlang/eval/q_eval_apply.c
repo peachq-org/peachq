@@ -1285,11 +1285,6 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
         ray_release(p);
         return c;
     }
-    /* f[] on a niladic lambda: the lone `::` argument means "no arguments"
-     * (learn/views.md `{[];}[]` evaluates) */
-    if (rank == 0 && n == 1 && args[0] && RAY_IS_NULL(args[0]) &&
-        kind == Q_EVAL_CAR_LAMBDA)
-        return lambda_call(fv, args, 0);
     if (rank >= 0 && n < rank) return q_eval_apply_proj_new(fv, row, args, n, rank);
     if (rank >= 0 && n > rank) return q_err(QE_RANK);
     /* a manifest FNV overload matrix applied below its minimum rank PROJECTS
