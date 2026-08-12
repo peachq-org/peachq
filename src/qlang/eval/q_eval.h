@@ -88,8 +88,10 @@ int q_eval_apply_is_fn(ray_t* v);
  * fallbacks. */
 enum { Q_EVAL_CAR_LAMBDA = 1, Q_EVAL_CAR_PROJ = 2, Q_EVAL_CAR_DERIV = 3,
        Q_EVAL_CAR_COMP = 4, Q_EVAL_CAR_ITER = 5, Q_EVAL_CAR_VIEW = 6 };
+/* types: i64 vector of declared kdb type nums parallel to params (0 = untyped
+ * slot), or NULL for an undecorated lambda; checked exactly on entry ('type) */
 ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
-                               ray_t* src);
+                               ray_t* src, ray_t* types);
 ray_t* q_eval_apply_deriv_new(int adv, ray_t* fv, const struct q_op* frow);
 /* An iterator IS a value (103h, basics/datatypes.md); a derived function is
  * that value applied to its ONE operand.  `_iter_id` reads the adverb id

@@ -21,6 +21,7 @@
 
 #include "qlang/parse/q_parse.h"
 #include "qlang/base/q_err.h"
+#include "qlang/base/q_type.h"
 #include "qlang/parse/q_tok.h"    /* q_tok_temporal, q_tok_el — literal magnitudes */
 #include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
 #include "qlang/q_ops.h"      /* q_lex_is_kw_infix — static lexical manifest */
@@ -1021,10 +1022,11 @@ static P parse_base(Parser *p) {
          * it byte-for-byte); params is a RAY_SYM vector — explicit signature,
          * or x/y/z inferred by highest implicit used (min rank 1), or empty
          * for `{[] ...}`.  No env capture: q lambdas resolve globals at CALL
-         * time (the carrier holds only params/body/src). */
+         * time (the carrier layout is q_eval_apply_lambda_new's). */
         int lb_start = tk->start;
         adv(p);
         ray_t *params = NULL;              /* NULL until signed / inferred */
+        ray_t *ptypes = NULL;              /* i64 kdb type nums, 0 = untyped slot */
         if (at(p, T_LBRACK)) {
             adv(p);
             params = ray_sym_vec_new(RAY_SYM_W64, 4);
@@ -1034,16 +1036,61 @@ static P parse_base(Parser *p) {
                     if (nt->kind != T_NOUN || !nt->k || nt->k->type != -RAY_SYM ||
                         (nt->k->attrs & Q_ATTR_QUOTED)) {
                         ray_release(params);
+                        if (ptypes) ray_release(ptypes);
                         q_die("expected parameter name in lambda signature");
                     }
                     int64_t id = nt->k->i64;
                     params = ray_vec_append(params, &id);
                     adv(p);
+                    /* `name:`c` type annotation (kx type-check pattern, 4.1+):
+                     * ONE quoted one-char sym; lowercase = atom (negative kdb
+                     * type num), uppercase = list.  Every other spelling —
+                     * bare identifier (kx's filter slot, reserved), sym-vector
+                     * union `j`J, long name `long, unknown char — dies at
+                     * DEFINITION so its grammar stays reachable later. */
+                    int64_t tnum = 0;
+                    if (cur(p)->kind == T_VERB && sym_name_is(cur(p)->k, ":")) {
+                        adv(p);
+                        Token *tt = cur(p);
+                        char tc = 0;
+                        if (tt->kind == T_NOUN && tt->k &&
+                            tt->k->type == -RAY_SYM &&
+                            (tt->k->attrs & Q_ATTR_QUOTED)) {
+                            ray_t *ts = ray_sym_str(tt->k->i64);
+                            if (ts) {
+                                if (ray_str_len(ts) == 1) tc = ray_str_ptr(ts)[0];
+                                ray_release(ts);
+                            }
+                        }
+                        int list = (tc >= 'A' && tc <= 'Z');
+                        int8_t tag = q_type_of_char(list ? (char)(tc - 'A' + 'a')
+                                                         : tc);
+                        if (!tag) {
+                            ray_release(params);
+                            if (ptypes) ray_release(ptypes);
+                            q_die("expected `<typechar> in lambda signature");
+                        }
+                        tnum = list ? tag : -tag;
+                        adv(p);
+                    }
+                    if (tnum && !ptypes) {
+                        ptypes = ray_vec_new(RAY_I64, 4);
+                        for (int64_t z = 1; z < ray_len(params); z++) {
+                            int64_t zero = 0;
+                            ptypes = ray_vec_append(ptypes, &zero);
+                        }
+                    }
+                    if (ptypes) ptypes = ray_vec_append(ptypes, &tnum);
                     if (at(p, T_SEMI)) { adv(p); continue; }
                     break;
                 }
             }
-            expect(p, T_RBRACK, "expected ']' after lambda signature");
+            if (!at(p, T_RBRACK)) {
+                ray_release(params);
+                if (ptypes) ray_release(ptypes);
+                q_die("expected ']' after lambda signature");
+            }
+            adv(p);
         }
         uint8_t mine = 0;
         uint8_t *saved = p->xyz_mask;
@@ -1071,9 +1118,10 @@ static P parse_base(Parser *p) {
          * retains every body expr, so a C NULL here would be fatal */
         for (int64_t i = 0; i < bn; i++)
             if (!bs[i]) bs[i] = q_null();
-        ray_t *fn = q_eval_apply_lambda_new(params, bs, bn, src);
+        ray_t *fn = q_eval_apply_lambda_new(params, bs, bn, src, ptypes);
         ray_release(src);
         ray_release(params);
+        if (ptypes) ray_release(ptypes);
         ray_release(e);
         return (P){ R_NOUN, fn };
     }

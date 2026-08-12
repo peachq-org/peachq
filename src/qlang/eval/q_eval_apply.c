@@ -79,18 +79,20 @@ static ray_t* car_put(ray_t* c, int64_t i, ray_t* child) {
     return q_err(QE_OOM);
 }
 
-/* lambda carrier: [params symvec, body list, src string, defining `\d` context]
- * — the context is captured HERE, at parse time, because a lambda's unqualified
+/* lambda carrier: [params symvec, body list, src string, defining `\d` context,
+ * declared types i64vec?] — the types slot exists only when a signature is
+ * annotated, so an undecorated lambda keeps the 4-slot carrier byte-for-byte.
+ * The context is captured HERE, at parse time, because a lambda's unqualified
  * globals belong to the namespace it was written in, not the one it is called
  * from (ref/value.md: the globals list of `.test.f` reads `` `test`d`e ``).
  * NULL slot = root. */
 ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
-                               ray_t* src) {
+                               ray_t* src, ray_t* types) {
     ray_t* b = ray_list_new(nbody > 0 ? nbody : 1);
     for (int64_t i = 0; i < nbody; i++)
         b = ray_list_append(b, body[i]);
     if (!b || RAY_IS_ERR(b)) return b ? b : q_err(QE_OOM);
-    ray_t* c = car_new(Q_EVAL_CAR_LAMBDA, 4);
+    ray_t* c = car_new(Q_EVAL_CAR_LAMBDA, types ? 5 : 4);
     if (RAY_IS_ERR(c)) { ray_release(b); return c; }
     ray_t** s = car_slots(c);
     if (params) ray_retain(params);
@@ -98,6 +100,10 @@ ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
     s[1] = b;
     if (src) ray_retain(src);
     s[2] = src;
+    if (types) {
+        ray_retain(types);
+        s[4] = types;
+    }
     int64_t ctx = q_env_ctx();
     return ctx ? car_put(c, 3, ray_sym(ctx)) : c;
 }
@@ -994,6 +1000,16 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
     ray_t** c = car_slots(lam);
     ray_t* params = c[0];
     ray_t* body = c[1];
+    /* declared-type check on ENTRY, the one check site (owner ruling
+     * 2026-08-12): exact against q `type`, no widening; a projection binds
+     * unchecked and fails HERE when finally applied */
+    if (ray_len(lam) > 4 && c[4]) {
+        const int64_t* tn = (const int64_t*)ray_data(c[4]);
+        int64_t nt = ray_len(c[4]);
+        for (int64_t i = 0; i < n && i < nt; i++)
+            if (tn[i] && q_builtins_type_num(args[i]) != (int8_t)tn[i])
+                return q_err(QE_TYPE);
+    }
     /* barrier frame: strictly-local resolution (function-notation.md) —
      * the body sees its params/locals and globals, never a caller frame */
     if (q_env_frame_push(1) != RAY_OK) return q_err(QE_STACK);
