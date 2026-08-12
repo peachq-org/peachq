@@ -279,7 +279,7 @@ ray_err_t q_env_set(int64_t sym, ray_t* val) {
             if (e == RAY_OK) q_view_on_global_set(sym);   /* invalidation + .z.vs */
         }
     }
-    if (e == RAY_OK) q_comment_on_global_set(sym);
+    if (e == RAY_OK) q_comment_on_global_set(sym, val);
     return e;
 }
 
