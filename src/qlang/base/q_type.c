@@ -111,6 +111,17 @@ char q_type_char(int8_t tag) {
     return 0;   /* SEL(20) etc.: no type char (unchanged) */
 }
 
+int8_t q_type_of_char(char c) {
+    /* derived by scanning q_type_char so the tag<->char map stays one owner;
+     * RAY_STR shares 'c' with CHARV and is skipped (physical, q-invisible) */
+    if (!c) return 0;   /* charless tags answer 0: never let 0 match one */
+    for (int t = 1; t < RAY_TYPE_COUNT; t++) {
+        if (t == RAY_STR) continue;
+        if (q_type_char((int8_t)t) == c) return (int8_t)t;
+    }
+    return 0;
+}
+
 /* ---- the mixed-pair result-type law (contract: q_type.h) ------------------
  * Distinct from base's promote() (ops/graph.c), which answers "what C lane do I
  * compute in" and collapses DATE to i32: this answers what the RESULT IS.
