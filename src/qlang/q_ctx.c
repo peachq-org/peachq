@@ -7,6 +7,7 @@
 #include "qlang/q_ctx.h"
 #include <ctype.h>           /* isalpha — the language-prefix scan */
 #include "qlang/base/q_err.h"     /* q_err / q_err_drop — the statement-entry backstop */
+#include "qlang/q_comment.h"          /* doc headers: the run above a definition */
 #include "qlang/parse/q_parse.h"
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_dbg.h"     /* statement stash + `\e` trace display */
@@ -152,6 +153,11 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
     if (ray_is_lazy(r))
         r = ray_lazy_materialize(r);
 
+    /* THE doc-capture fire point: a header claimed during this statement's eval
+     * reaches `.help.add` here — after the eval (never mid-eval) and BEFORE the
+     * drain below, so anything the q hook shows leaves with this statement. */
+    q_comment_stmt_end();
+
     /* flush any show/0N! side-effect display captured during eval */
     { const char* con = q_console_str();
       if (con && *con) fputs(con, out);
@@ -198,7 +204,7 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
 
 /* Line source for the script runner: a FILE or an in-memory string — ONE
  * multiline law for `\l file` and the embedded stdlib bundle (`\l pq`). */
-typedef struct { FILE* f; const char* p; } script_src_t;
+typedef struct { FILE* f; const char* p; int64_t file_sym; } script_src_t;
 
 static char* script_gets(char* buf, int cap, script_src_t* s) {
     if (s->f) return fgets(buf, cap, s->f);
@@ -240,6 +246,13 @@ static int ctx_run_script(script_src_t* src, FILE* out, FILE* err) {
     size_t      alen = 0;
     int         in_block = 0;
     char        line[4096];
+    int64_t     lineno = 0;
+
+    /* Doc headers ride this same classification — see q_comment.h.  Every arm
+     * below states what it means for the run: a blank line, a `/`..`\` block
+     * and any CONTINUATION line all end it, so a mid-body comment can never
+     * leak onto the next definition. */
+    q_comment_script_t dsaved = q_comment_script_begin(src->file_sym);
 
     /* a statement that fails to PARSE aborts the LOAD (kdb stops a script at
      * the error; qsql.md:168's 'dup fires here, so a bad file never runs the
@@ -248,6 +261,7 @@ static int ctx_run_script(script_src_t* src, FILE* out, FILE* err) {
     #define FLUSH() do { if (alen) { lrc = q_ctx_run_line(acc, alen, out, err, 0); alen = 0; acc[0] = '\0'; } } while (0)
 
     while (script_gets(line, sizeof line, src)) {
+        lineno++;
         size_t n = strlen(line);
         while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
         /* Strip TRAILING whitespace too, so a block delimiter with superfluous
@@ -268,13 +282,14 @@ static int ctx_run_script(script_src_t* src, FILE* out, FILE* err) {
             if (tlen == 1 && trim[0] == '\\') in_block = 0;   /* singleton \ closes; no flush */
             continue;
         }
-        if (tlen == 0) continue;                 /* blank/whitespace-only: ignored, no flush */
-        if (tlen == 1 && trim[0] == '/') { in_block = 1; continue; }   /* open block; no flush */
+        if (tlen == 0) { q_comment_break(); continue; }  /* blank/whitespace-only: ignored, no flush */
+        if (tlen == 1 && trim[0] == '/') { in_block = 1; q_comment_break(); continue; }  /* open block; no flush */
         if (tlen == 1 && trim[0] == '\\') break; /* singleton \ exits (post-loop FLUSH runs)  */
-        if (trim[0] == '/') continue;            /* comment-only line: ignored, no flush        */
+        if (trim[0] == '/') { q_comment_line(trim, tlen, lineno); continue; }  /* comment-only line: ignored, no flush */
 
         int is_cont = indented && alen > 0;
-        if (!is_cont) { FLUSH(); if (lrc) break; }  /* fresh logical line: eval the prior one */
+        if (is_cont) q_comment_break();                 /* a continuation cannot be documented */
+        else { FLUSH(); if (lrc) break; q_comment_fresh_line(lineno); }  /* eval the prior line, arm this one */
 
         /* append this physical line (join continuation fragments with '\n') */
         if (alen && alen + 1 < sizeof acc) acc[alen++] = '\n';
@@ -286,6 +301,7 @@ static int ctx_run_script(script_src_t* src, FILE* out, FILE* err) {
     }
     if (!lrc) FLUSH();                             /* eval any pending logical line (incl. before a lone \) */
     #undef FLUSH
+    q_comment_script_end(dsaved);
 
     q_env_frame_floor(saved_ffloor);
     q_eval_apply_frame_floor(saved_floor);
@@ -299,14 +315,17 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err) {
         fprintf(err, "q: cannot open script '%s'\n", path);
         return 1;
     }
-    script_src_t src = { .f = f, .p = NULL };
+    script_src_t src = { .f = f, .p = NULL,
+                         .file_sym = ray_sym_intern_runtime(path, strlen(path)) };
     int rc = ctx_run_script(&src, out, err);
     fclose(f);
     return rc;
 }
 
 int q_ctx_run_src(const char* s, FILE* out, FILE* err) {
-    script_src_t src = { .f = NULL, .p = s };
+    /* No path to attribute: the embedded bundles are ONE concatenated string,
+     * so their docs record the empty file. */
+    script_src_t src = { .f = NULL, .p = s, .file_sym = 0 };
     return ctx_run_script(&src, out, err);
 }
 
