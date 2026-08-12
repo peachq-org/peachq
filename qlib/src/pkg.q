@@ -24,7 +24,7 @@ loadq:{ [dirList]
 
 
 / find functions with a certain name pattern within the selected namespace
-/ @logEmpty If set to true write to log that no funcs found otherwise stay silent
+/ @param logEmpty (boolean) If set to true write to log that no funcs found otherwise stay silent
 findFuncs:{ [ns; pattern; logEmpty]
         fl:{x where x like y}[system "f ",string ns; pattern];
         if[logEmpty or 0<count fl; lg string[ns]," ",pattern," found: `","`" sv string fl];
