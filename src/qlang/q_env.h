@@ -63,6 +63,12 @@ ray_t* q_env_ns_view(int64_t path_sym);
  * K-tree's name-composition rule, for callers holding a namespace by name. */
 int64_t q_env_qualify(int64_t ns_sym, int64_t member_sym);
 
+/* The name a write to `sym` LANDS under: q_env_set is handed the name as
+ * WRITTEN and re-roots a RELATIVE one through the `\d` context, so only the
+ * tree can say which name was bound.  *ns (optional) is the namespace that
+ * name sits in — `` `. `` at the root. */
+int64_t q_env_fullname(int64_t sym, int64_t* ns);
+
 /* A namespace's own members by value KIND (`\v` `\f` `\a`, `tables`) — sorted,
  * never recursive; ns_sym 0 or `` `. `` is the root.  OWNED sym vector, or NULL
  * when ns_sym names no namespace. */
