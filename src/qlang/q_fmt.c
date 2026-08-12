@@ -327,6 +327,20 @@ static void table_grid(int64_t nc, const int* widths, char hdr[][64]) {
     }
 }
 
+static void grid_cells(ray_t* t, int64_t nc, const int* w, int64_t r) {
+    for (int64_t c = 0; c < nc; c++) {
+        if (c) qe_putc(' ');
+        char cb[64]; q_fmt_cell(ray_table_get_col_idx(t, c), r, 1, cb, sizeof cb);
+        qe_pad(cb, w[c]);
+    }
+}
+
+static void grid_rule(int64_t nc, const int* w) {
+    int total = (int)(nc - 1);
+    for (int64_t c = 0; c < nc; c++) total += w[c];
+    for (int i = 0; i < total; i++) qe_putc('-');
+}
+
 static int64_t size_rows(int64_t nr) {
     int64_t cr = qe_clip_rows();
     return (cr && cr < nr) ? cr : nr;
@@ -344,16 +358,10 @@ static void q_fmt_table(ray_t* tbl) {
     table_grid(nc, widths, hdr);
     qe_trim();
     qe_putc('\n');
-    int total = (int)(nc - 1);
-    for (int64_t c = 0; c < nc; c++) total += widths[c];
-    for (int i = 0; i < total; i++) qe_putc('-');
+    grid_rule(nc, widths);
     qe_putc('\n');
     for (int64_t r = 0; r < nr; r++) {
-        for (int64_t c = 0; c < nc; c++) {
-            if (c) qe_putc(' ');
-            char cb[64]; q_fmt_cell(ray_table_get_col_idx(tbl, c), r, 1, cb, sizeof cb);
-            qe_pad(cb, widths[c]);
-        }
+        grid_cells(tbl, nc, widths, r);
         qe_trim();
         if (r + 1 < nr) qe_putc('\n');
         if (qe_done()) break;                    /* height cap hit — early exit */
@@ -376,25 +384,15 @@ static void fmt_keyed(ray_t* kt, ray_t* vt) {
     table_grid(vnc, vw, vh);
     qe_trim();
     qe_putc('\n');
-    int kt_tot = (int)(knc - 1); for (int64_t c = 0; c < knc; c++) kt_tot += kw[c];
-    int vt_tot = (int)(vnc - 1); for (int64_t c = 0; c < vnc; c++) vt_tot += vw[c];
-    for (int i = 0; i < kt_tot; i++) qe_putc('-');
+    grid_rule(knc, kw);
     qe_putc('|'); qe_putc(' ');
-    for (int i = 0; i < vt_tot; i++) qe_putc('-');
+    grid_rule(vnc, vw);
     qe_trim();
     qe_putc('\n');
     for (int64_t r = 0; r < nr; r++) {
-        for (int64_t c = 0; c < knc; c++) {
-            if (c) qe_putc(' ');
-            char cb[64]; q_fmt_cell(ray_table_get_col_idx(kt, c), r, 1, cb, sizeof cb);
-            qe_pad(cb, kw[c]);
-        }
+        grid_cells(kt, knc, kw, r);
         qe_putc('|'); qe_putc(' ');
-        for (int64_t c = 0; c < vnc; c++) {
-            if (c) qe_putc(' ');
-            char cb[64]; q_fmt_cell(ray_table_get_col_idx(vt, c), r, 1, cb, sizeof cb);
-            qe_pad(cb, vw[c]);
-        }
+        grid_cells(vt, vnc, vw, r);
         qe_trim();
         if (r + 1 < nr) qe_putc('\n');
         if (qe_done()) break;                    /* height cap hit — early exit */
@@ -562,28 +560,42 @@ static void ttok_elem(const q_ttok_t* r, ray_t* v, int64_t i,
     tok_via_atom(r->ctor(x), out, n);
 }
 
-/* THE display cell law (#367, ARCHITECTURE.md "One predicate at every cell
- * site", ref/join.md:177): a cell is
- * one ELEMENT, so it sheds the suffix naming a type its container already
- * carries (`1i`->`1`, `2017.05m`->`2017.05`, `1.5e`->`1.5`).  Intrinsic syntax
- * survives — the `0x` radix, guid/temporal punctuation, the sentinels.
- * 0 = no element form; the caller renders the whole value. */
-static int elem_tok(ray_t* a, char* out, size_t n) {
+static void tok_append(char* out, size_t n, char c) {
+    size_t l = strlen(out);
+    if (l + 1 < n) { out[l] = c; out[l + 1] = '\0'; }
+}
+
+/* One token per atom.  `suffixed` = the VALUE form, which names its own type
+ * (`1h`, `1b`, `5f`, `2017.05m`); clear it for the ELEMENT form below.  A
+ * -RAY_SYM never reaches the value form — q_fmt_body backticks it first. */
+static int atom_tok(ray_t* a, int suffixed, char* out, size_t n) {
     out[0] = '\0';
     if (!a || RAY_IS_ERR(a) || a->type >= 0) return 0;
     const q_ttok_t* tr = ttok_find((int8_t)-a->type);
-    if (tr) { ttok_elem(tr, a, -1, out, n); return 1; }   /* no vsfx: month sheds `m` */
+    if (tr) {
+        ttok_elem(tr, a, -1, out, n);
+        if (suffixed && tr->vsfx) tok_append(out, n, tr->vsfx);
+        return 1;
+    }
     switch (a->type) {
-    case -RAY_BOOL:      snprintf(out, n, "%d", a->u8 ? 1 : 0);      return 1;
+    case -RAY_BOOL:      snprintf(out, n, "%d%s", a->u8 ? 1 : 0, suffixed ? "b" : "");
+                                                                     return 1;
     case -RAY_BYTE_ONLY: snprintf(out, n, "0x%02x", a->u8);          return 1;
-    case -RAY_I16:       int_tok((int64_t)a->i16, 2, 0, out, n);     return 1;
-    case -RAY_I32:       int_tok((int64_t)a->i32, 4, 0, out, n);     return 1;
+    case -RAY_I16:       int_tok((int64_t)a->i16, 2, suffixed ? 'h' : 0, out, n);
+                                                                     return 1;
+    case -RAY_I32:       int_tok((int64_t)a->i32, 4, suffixed ? 'i' : 0, out, n);
+                                                                     return 1;
     case -RAY_I64:       int_tok(a->i64,          8, 0, out, n);     return 1;
     case -RAY_F32:
-    case -RAY_F64:
-        q_fmt_float(a->f64, a->type == -RAY_F32, out, n);
+        /* the value form narrows through float first; the element form never has */
+        q_fmt_float(suffixed ? (double)(float)a->f64 : a->f64, 1, out, n);
         /* the container carries the `e`; a SENTINEL keeps its own (`0Ne`/`0we`) */
-        if (a->type == -RAY_F32 && isfinite(a->f64)) real_shed_e(out);
+        if (!suffixed && isfinite(a->f64)) real_shed_e(out);
+        return 1;
+    case -RAY_F64:
+        q_fmt_float(a->f64, 0, out, n);
+        /* digit-only tokens take `f` (`5f`); `3e+11` self-identifies */
+        if (suffixed && fmt_tok_is_bare_int(out)) tok_append(out, n, 'f');
         return 1;
     case -RAY_GUID: {
         const uint8_t* b16 = a->obj ? (const uint8_t*)ray_data(a->obj)
@@ -598,6 +610,16 @@ static int elem_tok(ray_t* a, char* out, size_t n) {
     }
     default: return 0;
     }
+}
+
+/* THE display cell law (#367, ARCHITECTURE.md "One predicate at every cell
+ * site", ref/join.md:177): a cell is
+ * one ELEMENT, so it sheds the suffix naming a type its container already
+ * carries (`1i`->`1`, `2017.05m`->`2017.05`, `1.5e`->`1.5`).  Intrinsic syntax
+ * survives — the `0x` radix, guid/temporal punctuation, the sentinels.
+ * 0 = no element form; the caller renders the whole value. */
+static int elem_tok(ray_t* a, char* out, size_t n) {
+    return atom_tok(a, 0, out, n);
 }
 
 /* THE cell-law predicate, asked at every cell site: does this container NAME a
@@ -701,18 +723,7 @@ static void fmt_qtext(const char* p, size_t n, char* buf, size_t bufsz) {
 }
 
 static void fmt_qstring(ray_t* val, char* buf, size_t bufsz) {
-    const char* p = ray_str_ptr(val);
-    size_t n = ray_str_len(val);
-    size_t w = 0;
-    if (w + 1 < bufsz) buf[w++] = '"';
-    for (size_t i = 0; i < n && w + 6 < bufsz; i++) {
-        char e[8];
-        size_t el = char_esc((unsigned char)p[i], e);
-        memcpy(buf + w, e, el);
-        w += el;
-    }
-    if (w + 1 < bufsz) buf[w++] = '"';
-    buf[w < bufsz ? w : bufsz - 1] = '\0';
+    fmt_qtext(ray_str_ptr(val), ray_str_len(val), buf, bufsz);
 }
 
 static void qe_qstring(ray_t* val) {
@@ -1471,45 +1482,8 @@ static void q_fmt_body(ray_t* val) {
     }
 
     {
-        char tok[64]; tok[0] = '\0';
-        const q_ttok_t* tr = (val->type < 0) ? ttok_find((int8_t)-val->type)
-                                             : NULL;
-        if (tr) {
-            ttok_elem(tr, val, -1, tok, sizeof tok);
-            qe_puts(tok);
-            if (tr->vsfx) qe_putc(tr->vsfx);
-            return;
-        }
-        switch (val->type) {
-        case -RAY_BOOL: qe_printf("%db", val->u8 ? 1 : 0);                 return;
-        case -RAY_BYTE_ONLY: qe_printf("0x%02x", val->u8);                      return;
-        case -RAY_I16:  int_tok((int64_t)val->i16, 2, 'h', tok, sizeof tok);
-                        qe_puts(tok);                                      return;
-        case -RAY_I32:  int_tok((int64_t)val->i32, 4, 'i', tok, sizeof tok);
-                        qe_puts(tok);                                      return;
-        case -RAY_I64:  int_tok(val->i64,          8, 0,   tok, sizeof tok);
-                        qe_puts(tok);                                      return;
-        case -RAY_GUID: {
-            const uint8_t* b16 = val->obj ? (const uint8_t*)ray_data(val->obj)
-                                          : (const uint8_t*)ray_data(val);
-            guid_tok(b16, tok, sizeof tok);
-            qe_puts(tok);
-            return;
-        }
-        case -RAY_F32:  q_fmt_float((float)val->f64, 1, tok, sizeof tok);
-                        qe_puts(tok);                                      return;
-        case -RAY_F64: {
-            /* digit-only tokens take `f` (`5f`); `3e+11` self-identifies */
-            q_fmt_float(val->f64, 0, tok, sizeof tok);
-            if (fmt_tok_is_bare_int(tok)) {
-                size_t l = strlen(tok);
-                if (l + 1 < sizeof tok) { tok[l] = 'f'; tok[l + 1] = '\0'; }
-            }
-            qe_puts(tok);
-            return;
-        }
-        default: break;
-        }
+        char tok[64];
+        if (atom_tok(val, 1, tok, sizeof tok)) { qe_puts(tok); return; }
     }
 
     if (val->type == RAY_BOOL) {            /* 1001b */
