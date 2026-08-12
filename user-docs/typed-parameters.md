@@ -13,7 +13,7 @@
 
 A q function signature has always told you how many arguments a function takes and what they
 are called. In peachq it can also tell you their **types**, which of them are **optional**,
-what their **defaults** are, and whether the function accepts **extra arguments** — and it
+what their **defaults** are, and whether the function accepts **extra arguments**, and it
 tells you all of that from the text of the signature alone, without running anything.
 
 ```q
@@ -27,14 +27,13 @@ q)quote[`IBM]
 That signature is a complete description of how to call `quote`. You do not have to read the
 body, and neither does your editor.
 
-## Why peachq supports a subset — and why that is the point
+## Why peachq supports a subset, and why that is the point
 
-kdb+ 4.1 introduced [pattern matching](https://code.kx.com/q/basics/pattern/), a broad feature
-covering list and dictionary destructuring, constant patterns, a pattern conditional, and
-**filter functions** — where a parameter annotation is an arbitrary q function that is *called*
-on the argument every time the function runs.
+The wider **pattern matching** family covers list and dictionary destructuring, constant
+patterns, a pattern conditional, and **filter functions**, where a parameter annotation is an
+arbitrary q function that is *called* on the argument every time the function runs.
 
-peachq implements one part of it deliberately: the **type-check pattern**, plus two extensions
+peachq implements one part of that deliberately: the **type-check pattern**, plus two extensions
 of its own (defaults and varargs) built to the same standard. The standard is:
 
 > **Everything in a signature is a literal or a type name. Nothing in a signature is code.**
@@ -42,16 +41,16 @@ of its own (defaults and varargs) built to the same standard. The standard is:
 That single rule is what makes the whole feature useful to tools:
 
 - **A linter can check your call sites.** Argument counts, argument types, unknown parameter
-  names and missing required arguments are all decidable by reading two pieces of text — the
-  signature and the call — with no evaluation and no execution risk.
+  names and missing required arguments are all decidable by reading two pieces of text, the
+  signature and the call, with no evaluation and no execution risk.
 - **An editor can complete and document as you type**, because the parameter list is data, not
   a program whose meaning depends on the state of the process.
 - **Errors arrive early.** A malformed or self-contradictory signature is reported when the
   file loads, not on the unlucky code path six months later.
-- **A signature is honest to anyone reading it** — a colleague, a reviewer, a code-generation
+- **A signature is honest to anyone reading it**: a colleague, a reviewer, a code-generation
   tool, or a model. There is no hidden behaviour to discover by running it.
 
-A filter function can express things a type name cannot — "a long between 0 and 100", "a
+A filter function can express things a type name cannot, such as "a long between 0 and 100" or "a
 non-empty table". peachq asks you to write those on the first line of the body instead, where
 they read as what they are: validation logic. The signature stays a description.
 
@@ -68,7 +67,7 @@ q)f[1f;2]
 ```
 
 Type checking is **exact**. A float is not accepted where a long is declared, and a long is not
-accepted where a float is declared — there is no automatic widening. If you want a float
+accepted where a float is declared: there is no automatic widening. If you want a float
 parameter, pass a float:
 
 ```q
@@ -81,7 +80,7 @@ q)price 42f
 
 ### Atoms and lists
 
-Following kdb+, **lowercase means an atom and uppercase means a list**:
+**Lowercase means an atom and uppercase means a list**:
 
 ```q
 q)atom:{[x:`j] x}
@@ -118,12 +117,12 @@ q)tplus[;1] each 1 2 3
 2 3 4
 ```
 
-Annotate where you want the narrowing — boundaries, public entry points, anything called from
+Annotate where you want the narrowing: boundaries, public entry points, anything called from
 somewhere you cannot see. Leave general-purpose internal functions unannotated.
 
 ### Type symbols
 
-The type character is the standard kdb+ one, lowercase for an atom and uppercase for a list:
+The type character is the standard one, lowercase for an atom and uppercase for a list:
 
 | symbol | type | | symbol | type | | symbol | type |
 |---|---|---|---|---|---|---|---|
@@ -150,7 +149,7 @@ q)g[1;2]
 3
 ```
 
-Defaults combine with types, and the default must satisfy the type it is declared against —
+Defaults combine with types, and the default must satisfy the type it is declared against:
 a signature that contradicts itself is rejected when the function is defined, not when it is
 called:
 
@@ -169,7 +168,7 @@ expressions, and they cannot refer to other parameters.
 q)f:{[x;y=1 2 3] y}      / fine
 q)f:{[x;y=x*2] y}        / 'parse
 q)f:{[x;y=count x] y}    / 'parse
-q)f:{[x;y=1+2] y}        / 'parse — a literal is a literal, not a computation
+q)f:{[x;y=1+2] y}        / 'parse, a literal is a literal, not a computation
 ```
 
 This is the rule that lets a tool report a function's defaults without running your code.
@@ -292,7 +291,7 @@ q).[f;`y!enlist 2]
 'param
 ```
 
-The rest parameter can be bound by name, and its value must be a list — it becomes the rest
+The rest parameter can be bound by name, and its value must be a list, since it becomes the rest
 list as given:
 
 ```q
@@ -307,26 +306,26 @@ q).[f1v;`x`rest!(1;(30;40))]
 
 | you get | when |
 |---|---|
-| `'parse` | the signature itself is not valid — reported when the function is **defined** |
+| `'parse` | the signature itself is not valid, reported when the function is **defined** |
 | `'type` | an argument does not match its declared type |
 | `'param` | an unknown or missing parameter name in a named apply |
 | `'rank` | too many arguments, and no rest parameter |
 
 The first row is the one that matters for tooling: **every signature mistake is a load-time
 error.** A bad type character, a computed default, a required parameter after an optional one,
-two rest parameters — none of these can reach production, because the file will not load.
+two rest parameters: none of these can reach production, because the file will not load.
 
 ## Not supported, on purpose
 
 | not supported | write this instead |
 |---|---|
-| filter functions — ``{[x:tempCheck] … }`` | validate on the first line of the body |
-| computed defaults — `{[x;y=x*2] … }` | compute in the body when the argument is absent |
-| destructuring — `{[(a;b);c] … }` | take the list and index it |
-| identifier types — `{[x:long] … }`, `{[c:int|long] … }` | use the type symbol, `` `j `` |
+| filter functions, ``{[x:tempCheck] … }`` | validate on the first line of the body |
+| computed defaults, `{[x;y=x*2] … }` | compute in the body when the argument is absent |
+| destructuring, `{[(a;b);c] … }` | take the list and index it |
+| identifier types, `{[x:long] … }`, `{[c:int|long] … }` | use the type symbol, `` `j `` |
 
 Each of these is rejected because it would put code, or a name that could mean anything, into a
-signature — and the signature is the part we promise you can read without running.
+signature, and the signature is the part we promise you can read without running.
 
 The identifier form is worth calling out: `int|long` is a perfectly good q *expression*, so
 accepting it in a type position would mean you could no longer tell a type from a variable by
@@ -334,7 +333,7 @@ looking. peachq keeps the type position to symbols so that never becomes a quest
 
 ## Planned
 
-These are reserved — they are errors today so they can be added later without changing the
+These are reserved: they are errors today so they can be added later without changing the
 meaning of any code you write now:
 
 ```q
@@ -343,20 +342,20 @@ meaning of any code you write now:
 {[x:`number] … }   / built-in type aliases
 ```
 
-Type aliases will be defined by peachq, not by users — an alias you would have to look up in
+Type aliases will be defined by peachq, not by users, since an alias you would have to look up in
 someone's source is exactly the thing this feature exists to avoid.
 
-## Using this with kdb+
+## Portability
 
-Type checks are **kdb+ 4.1 syntax**. A function annotated with types and nothing else runs on
-kdb+ 4.1 or later unchanged, and can be sent to a kdb+ process over IPC:
+Type checks are **standard q syntax**. A function annotated with types and nothing else runs
+unchanged on any q that supports them, and can be sent to such a process over IPC:
 
 ```q
 q)portable:{[x:`j;y:`f] x*y}
 ```
 
-Defaults, varargs and named apply are peachq extensions. kdb+ will not parse them, so a
-function using them cannot be forwarded to a kdb+ process.
+Defaults, varargs and named apply are peachq extensions. A q without them will not parse
+them, so a function using them cannot be forwarded to such a process.
 
 If you maintain code that must run on both, the line is per feature, not per file: annotate
 types freely, and keep defaults, varargs and named apply out of the shared parts.
