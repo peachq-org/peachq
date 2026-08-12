@@ -408,7 +408,9 @@ static ray_t* probe_atom(ray_t* coll) {
 /* ===== atomic vector maps (carved from base atomic_map_unary/_binary) ==== */
 
 static ray_t* atomic1(ray_unary_fn f, ray_t* x);
-static ray_t* atomic2(ray_binary_fn f, ray_t* x, ray_t* y);
+/* the manifest row travels down the L2 lift (as it does with an adverb
+ * operand, #443): its spelling keys the key-union fill (q_ops_identity, QI_FILL) */
+static ray_t* atomic2(ray_binary_fn f, const q_op_t* row, ray_t* x, ray_t* y);
 
 static ray_t* unary_elem(ray_unary_fn fn, ray_t* e) {
     if (RAY_IS_ERR(e)) return e;
@@ -499,11 +501,11 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
     return q_eval_apply_collapse(out);
 }
 
-static ray_t* binary_elem(ray_binary_fn fn, ray_t* a, ray_t* b) {
+static ray_t* binary_elem(ray_binary_fn fn, const q_op_t* row, ray_t* a, ray_t* b) {
     if (RAY_IS_ERR(a)) return a;
     if (RAY_IS_ERR(b)) return b;
     if (is_coll(a) || is_coll(b) || is_container(a) || is_container(b))
-        return atomic2(fn, a, b);
+        return atomic2(fn, row, a, b);
     return fn(a, b);
 }
 
@@ -541,7 +543,7 @@ static int dag_pair_ok(ray_t* l, ray_t* r, int lc, int rc) {
 }
 #undef DAG_ATOMT
 
-static ray_t* map_binary(ray_binary_fn fn, ray_t* l, ray_t* r) {
+static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r) {
     int lc = is_coll(l), rc = is_coll(r);
     if (!lc && !rc) return fn(l, r);
     uint16_t dop = dag_op_of(fn);
@@ -585,7 +587,7 @@ static ray_t* map_binary(ray_binary_fn fn, ray_t* l, ray_t* r) {
 
     ray_t* a0 = lc ? q_index_elem_at(l, 0) : l;
     ray_t* b0 = rc ? q_index_elem_at(r, 0) : r;
-    ray_t* e0 = binary_elem(fn, a0, b0);
+    ray_t* e0 = binary_elem(fn, row, a0, b0);
     if (lc && a0 != e0) ray_release(a0);
     if (rc && b0 != e0) ray_release(b0);
     if (RAY_IS_ERR(e0)) return e0;
@@ -640,7 +642,7 @@ static ray_t* map_binary(ray_binary_fn fn, ray_t* l, ray_t* r) {
     for (int64_t i = 1; i < len; i++) {
         ray_t* a = lc ? q_index_elem_at(l, i) : l;
         ray_t* b = rc ? q_index_elem_at(r, i) : r;
-        ray_t* e = binary_elem(fn, a, b);
+        ray_t* e = binary_elem(fn, row, a, b);
         if (lc && a != e) ray_release(a);
         if (rc && b != e) ray_release(b);
         if (RAY_IS_ERR(e)) { ray_release(out); return e; }
@@ -673,14 +675,17 @@ static ray_t* atomic1(ray_unary_fn f, ray_t* x) {
     return f(x);
 }
 
-/* dyadic dict-dict: key-union distribution (common keys combine,
- * singletons pass through) */
-static ray_t* atomic2_dicts(ray_binary_fn f, ray_t* x, ray_t* y) {
+/* dyadic dict-dict: key-union distribution.  Common keys combine; a key on one
+ * side only combines with the verb's identity element on the missing side when
+ * the identity FILLS (`d1-d2` is 0-y there, ref/subtract.md), else it passes
+ * through untouched (`d1%d2`, ref/divide.md; every identity-less verb). */
+static ray_t* atomic2_dicts(ray_binary_fn f, const q_op_t* row, ray_t* x, ray_t* y) {
     ray_t* uk = ray_union_fn(ray_dict_keys(x), ray_dict_keys(y));
     if (!uk || RAY_IS_ERR(uk)) return uk ? uk : q_err(QE_TYPE);
     int64_t n = ray_len(uk);
     ray_t* vx = ray_dict_vals(x);
     ray_t* vy = ray_dict_vals(y);
+    ray_t* id = row ? q_ops_identity(row->name, QI_FILL) : NULL;
     ray_t* out = ray_list_new(n > 0 ? n : 1);
     for (int64_t j = 0; j < n; j++) {
         ray_t* k = q_index_elem_at(uk, j);
@@ -691,9 +696,13 @@ static ray_t* atomic2_dicts(ray_binary_fn f, ray_t* x, ray_t* y) {
         if (ix >= 0 && iy >= 0) {
             ray_t* ex = q_index_elem_at(vx, ix);
             ray_t* ey = q_index_elem_at(vy, iy);
-            r = binary_elem(f, ex, ey);
+            r = binary_elem(f, row, ex, ey);
             if (r != ex) ray_release(ex);
             if (r != ey) ray_release(ey);
+        } else if (id) {
+            ray_t* e = q_index_elem_at(ix >= 0 ? vx : vy, ix >= 0 ? ix : iy);
+            r = ix >= 0 ? binary_elem(f, row, e, id) : binary_elem(f, row, id, e);
+            if (r != e) ray_release(e);
         } else if (ix >= 0) {
             r = q_index_elem_at(vx, ix);
         } else {
@@ -702,32 +711,34 @@ static ray_t* atomic2_dicts(ray_binary_fn f, ray_t* x, ray_t* y) {
         if (!r || RAY_IS_ERR(r)) {
             ray_release(out);
             ray_release(uk);
+            if (id) ray_release(id);
             return r ? r : q_err(QE_TYPE);
         }
         out = ray_list_append(out, r);
         ray_release(r);
     }
+    if (id) ray_release(id);
     return ray_dict_new(uk, q_eval_apply_collapse(out));
 }
 
-typedef struct { ray_binary_fn f; ray_t* other; int other_left; } a2ctx;
+typedef struct { ray_binary_fn f; const q_op_t* row; ray_t* other; int other_left; } a2ctx;
 
 static ray_t* atomic2_col(void* vctx, ray_t* col) {
     a2ctx* c = (a2ctx*)vctx;
-    return q_eval_apply_concrete(c->other_left ? atomic2(c->f, c->other, col)
-                                   : atomic2(c->f, col, c->other));
+    return q_eval_apply_concrete(c->other_left ? atomic2(c->f, c->row, c->other, col)
+                                   : atomic2(c->f, c->row, col, c->other));
 }
 
-static ray_t* atomic2(ray_binary_fn f, ray_t* x, ray_t* y) {
+static ray_t* atomic2(ray_binary_fn f, const q_op_t* row, ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);
     int xd = x->type == RAY_DICT, yd = y->type == RAY_DICT;
-    if (xd && yd) return atomic2_dicts(f, x, y);
+    if (xd && yd) return atomic2_dicts(f, row, x, y);
     if (xd || yd) {
         ray_t* d = xd ? x : y;
         ray_t* o = xd ? y : x;
         if (o->type == RAY_TABLE) return q_err(QE_NYI);
-        ray_t* nv = xd ? atomic2(f, ray_dict_vals(d), o)
-                       : atomic2(f, o, ray_dict_vals(d));
+        ray_t* nv = xd ? atomic2(f, row, ray_dict_vals(d), o)
+                       : atomic2(f, row, o, ray_dict_vals(d));
         if (RAY_IS_ERR(nv)) return nv;
         ray_t* k = ray_dict_keys(d);
         ray_retain(k);
@@ -738,10 +749,10 @@ static ray_t* atomic2(ray_binary_fn f, ray_t* x, ray_t* y) {
         ray_t* t = xt ? x : y;
         ray_t* o = xt ? y : x;
         if (o->type == RAY_TABLE || is_coll(o)) return q_err(QE_NYI);
-        a2ctx ctx = { f, o, !xt };
+        a2ctx ctx = { f, row, o, !xt };
         return q_table_map_cols(atomic2_col, &ctx, t);
     }
-    return map_binary(f, x, y);
+    return map_binary(f, row, x, y);
 }
 
 /* ===== L3 aggregate lift ================================================= */
@@ -1387,7 +1398,7 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
             if (n == 1 && fv->type == RAY_UNARY && row->dyad.kind == QK_NONE)
                 return atomic1((ray_unary_fn)(uintptr_t)fv->i64, args[0]);
             if (n == 2 && fv->type == RAY_BINARY)
-                return atomic2((ray_binary_fn)(uintptr_t)fv->i64,
+                return atomic2((ray_binary_fn)(uintptr_t)fv->i64, row,
                                args[0], args[1]);
         } else if (strcmp(fam, "aggregate") == 0) {
             if (n == 1 && (is_container(args[0]) ||
@@ -1421,7 +1432,7 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
         if (n == 2 && fv->type == RAY_BINARY &&
             (is_coll(args[0]) || is_coll(args[1]) ||
              is_container(args[0]) || is_container(args[1])))
-            return atomic2((ray_binary_fn)(uintptr_t)fv->i64,
+            return atomic2((ray_binary_fn)(uintptr_t)fv->i64, row,
                            args[0], args[1]);
     }
     return call_kernel(fv, args, n);
