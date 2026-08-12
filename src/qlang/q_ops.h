@@ -23,7 +23,7 @@
 #define Q_OPS_H
 
 #include <stddef.h>
-#include "rayforce.h"   /* ray_t (q_ops_acc_identity) */
+#include "rayforce.h"   /* ray_t (the q_ops_identity* accessors) */
 #include <stdint.h>
 
 /* Lexical class — how the scanner treats the token.  Only KW_INFIX is
@@ -150,15 +150,26 @@ static inline int q_ops_kdb_op(const struct q_op* row) { return (int)row->kdb_op
 /* The manifest table; sets *n to its length.  Stable storage (static const). */
 const q_op_t* q_ops_table(int* n);
 
-/* Accumulator identity element I for a verb spelling (ref/accumulators.md:
- * unary-seed + empty-Over) — manifest-owned metadata.  Owned result; NULL
- * when q knows none (callers fall back to the doc's generic-() rule). */
-ray_t* q_ops_acc_identity(const char* spelling);
-
 /* The manifest row named s[0..len), or NULL if the name is not a C-rostered
  * verb (q.q-hosted keywords have no row).  The one lookup into Q_OPS[] by
  * spelling (rule 3: never an env lookup by q spelling). */
 const q_op_t* q_ops_find(const char* s, int len);
+
+/* Which USE a q_ops_identity caller is — a parameter naming the asking site,
+ * never verb knowledge (which verbs seed/fill stays in the q_ops.c table).
+ * QI_VALUE: the bare element — empty-Over answer (accumulators.md), Each Prior
+ * seed (maps.md; ref/deltas.md "The predecessor of the first item is 0",
+ * ref/ratios.md "... is 1"), `x op: y` default (ref/assign.md:138).
+ * QI_SEED: a non-empty fold's seed — answered only for a two-sided identity
+ * (accumulators.md Unary application; `-`/`%` fold from the first item,
+ * ref/divide.md:38).  QI_FILL: a dict key-union's missing side — its own
+ * per-verb law (ref/subtract.md:46 vs ref/divide.md:65). */
+typedef enum { QI_VALUE, QI_SEED, QI_FILL } q_id_use_t;
+
+/* THE identity-element home: a small name-keyed table in q_ops.c BESIDE the
+ * manifest, never a Q_OPS[] column (ruling 2026-08-12).  Returns the OWNED
+ * element (rc=1), or NULL when q knows none for that use. */
+ray_t* q_ops_identity(const char* spelling, q_id_use_t use);
 
 /* The atomic-dyad row that folds `row`'s outer axis under QNEST_FOLD/QNEST_MEAN
  * — the `mono` column read BACKWARDS (`sum`->`+`, `max`->`|`), so the sub-law

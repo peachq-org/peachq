@@ -501,19 +501,47 @@ static const q_op_t Q_OPS[] = {
 #pragma GCC diagnostic pop
 #define N_Q_OPS ((int)(sizeof Q_OPS / sizeof Q_OPS[0]))
 
-/* The identity elements q knows (ref/accumulators.md:261-267 unary-seed,
- * 420-428 empty-Over; ref/maps.md:259-272 the Each Prior seed): the manifest
- * owns this per-verb knowledge, beside the rows it annotates — never a
- * spelling switch in a wrapper (rule 3). */
-ray_t* q_ops_acc_identity(const char* spelling) {
-    if (!spelling || !spelling[0] || spelling[1] != '\0') return NULL;
-    switch (spelling[0]) {
-    case '+': return ray_i64(0);
-    case '-': return ray_i64(0);
-    case '*': return ray_i64(1);
-    case ',': return ray_list_new(0);
-    default:  return NULL;
-    }
+/* ==== the identity elements q knows — a table BESIDE the manifest, never a
+ * Q_OPS[] column (ruling 2026-08-12: sparse per-verb facts get their own small
+ * name-keyed lookup).  The element is one law; whether it may SEED a non-empty
+ * fold and whether it FILLS a dict key-union's missing side are two
+ * independent doc-pinned axes — the `-`/`%` split proves neither is derivable
+ * from the value or from each other. ==== */
+typedef struct {
+    const char* name;   /* verb spelling, keyed by name so each row can cite its doc */
+    int8_t      val;    /* the element: 0/1 long, -1 = the generic empty () */
+    int8_t      seeds;  /* accumulators.md unary-seed: `(I f/x)~(f/)x` — two-sided identities only */
+    int8_t      fills;  /* dict key-union: identity applied on the missing side */
+} identity_t;
+
+static const identity_t IDENTITY[] = {
+    { "+",  0, 1, 1 },
+    { "-",  0, 0, 1 },   /* element: ref/deltas.md; seeds: (-/)x folds from x[0] (euler i506); fills: ref/subtract.md:46 (0-y) */
+    { "*",  1, 1, 1 },
+    { "%",  1, 0, 0 },   /* element: ref/ratios.md; seeds: ref/divide.md:38 ((%/)x is x[0]%x[1]); fills: ref/divide.md:65 (passes through) */
+    { ",", -1, 1, 0 },   /* seeds LIVE, not inert: `,` has no mono_scan, so `(,\)2 3 4` reaches the generic
+                          * fold and its first item is ,2 ONLY because () seeds the first evaluation
+                          * (accumulators.md:262).  fills UNSET: dict `,` is upsert, never element-wise */
+};
+
+static const identity_t* identity_row(const char* spelling) {
+    if (!spelling) return NULL;
+    for (size_t i = 0; i < sizeof IDENTITY / sizeof *IDENTITY; i++)
+        if (strcmp(IDENTITY[i].name, spelling) == 0) return &IDENTITY[i];
+    return NULL;
+}
+
+static ray_t* identity_value(const identity_t* r) {
+    if (!r) return NULL;
+    return r->val < 0 ? ray_list_new(0) : ray_i64(r->val);
+}
+
+ray_t* q_ops_identity(const char* spelling, q_id_use_t use) {
+    const identity_t* r = identity_row(spelling);
+    if (!r) return NULL;
+    if (use == QI_SEED && !r->seeds) return NULL;
+    if (use == QI_FILL && !r->fills) return NULL;
+    return identity_value(r);
 }
 
 const q_op_t* q_ops_table(int* n) {

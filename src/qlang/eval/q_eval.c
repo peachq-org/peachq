@@ -754,6 +754,12 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
     if (RAY_IS_ERR(rv)) return rv;
     const q_op_t* trow = NULL;
     ray_t* cur = name_value(target, &trow);
+    /* undefined name: the op's identity element is the default (ref/assign.md
+     * "Assign through operator"); an op without one keeps signalling 'name */
+    if (RAY_IS_ERR(cur) && q_err_is(cur, QE_NAME) && row) {
+        ray_t* id = q_ops_identity(row->name, QI_VALUE);
+        if (id) { q_err_drop(); ray_error_free(cur); cur = id; }
+    }
     if (RAY_IS_ERR(cur)) { ray_release(rv); return cur; }
     ray_t* av[2] = { cur, rv };
     ray_t* nv = q_eval_apply(opv, row, av, 2);
