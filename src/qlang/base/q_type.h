@@ -46,6 +46,10 @@ const char* q_type_rayname(int8_t tag);
  * char; `.Q.ty` uppercases it for a uniform list of vectors. */
 char q_type_char(int8_t tag);
 
+/* The reverse map: lowercase type char -> vector tag, 0 for no such char
+ * (typed-parameter signatures; the caller applies the case rule). */
+int8_t q_type_of_char(char c);
+
 /* THE q result-type law for a mixed-type pair — what TYPE the result carries
  * (`d&j` -> d), per the "Domain and range" matrix in ref/lesser.md.  Takes
  * VECTOR-form tags; 0 = the pair has no result type (the guid and symbol rows),
