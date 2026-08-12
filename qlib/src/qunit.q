@@ -66,6 +66,16 @@ doCheck:{ [checkPassed; failMsg]
     if[failFlag and not .qunit.ignoreAllExceptions;
         'failMsg];};
             
+checkTable:{ [actual; expectedTbl]
+    if[not .Q.qt expectedTbl; '"Expected must be table"];
+    a:actual; e:expectedTbl;
+    doCheck[.Q.qt actual; "expected an actual table"];
+    doCheck[(asc cols a)~asc cols e; "tables have same columns"];
+    doCheck[(count a)~count e; "tables have same number rows"];
+    doCheck[(meta a)~meta e; "tables have same meta"];
+    doCheck[(keys a)~keys e; "tables have same keys"];
+    };
+
 // Assert that actual and expected value are equal
 // @param actual An object representing the actual result value
 // @param expected An object representing the expected value
@@ -76,12 +86,41 @@ assertEquals:{ [actual; expected; msg]
     ar::`actual`expected`msg!(actual;expected;msg);
     if[a~e; :a];
     if[.Q.qt e;
-        doCheck[.Q.qt actual; "assertEquals expected an actual table"];
-        doCheck[(asc cols a)~asc cols e; "assertEquals tables have same columns"];
-        doCheck[(count a)~count e; "assertEquals tables have same number rows"];
+        checkTable[a;e];
         doCheck[all/[a=e]; "assertEquals tables have same data"];
         :a];
     assertThat[a;~;e;msg]};
+
+// Assert that actual and expected values are almost equal i.e. that floating types 8/9h are within a small specified difference.
+// @param actual An object representing the actual result value
+// @param expected An object representing the expected value
+// @param permittedDifferenceInFloats The permitted absolute difference in value between actual/expected. i.e. permittedDifferenceInFloats>=abs actual-expected
+// @return actual object
+assertAlmostEquals:{ [actual; expected; permittedDifferenceInFloats]
+    a:actual; e:expected;
+    ar::`actual`expected`msg!(actual;expected;"");
+    if[a~e; :a];
+    if[.Q.qt e;
+        checkTable[a;e];
+        .z.s[flip () xkey a; flip () xkey e; permittedDifferenceInFloats];
+        :a];
+    / Every branch below either BROADCASTS (a=e, abs a-e) or throws a raw length
+    / (flip), so 1f against 1.1 1.2f passes silently unless shape is checked here.
+    if[not[(type a)~type e] or not (count a)~count e;
+        doCheck[0b; "almost equal actual and expected are the same shape"];
+        :a];
+    if[99h=type e;
+        doCheck[key[a]~key e; "dict keys match"];
+        (.z.s[;;permittedDifferenceInFloats].)  each  flip (value a;value e);
+        :a];
+    if[0h=type e;
+        (.z.s[;;permittedDifferenceInFloats].)  each  flip (a;e);
+        :a];
+    / List or atoms with types<>0 left
+    $[(abs type a) in 8 9h;
+        doCheck[all/[?[null a;null e;permittedDifferenceInFloats >= abs a-e]]; "assertEquals data has big difference"];
+        doCheck[all/[a=e]; "Almost equal exact type match fail"]];
+    a};
 
 // Assert that the expectedFilename in the expectedPath contains a variable
 // that is equal to actual.
@@ -156,19 +195,36 @@ assertEmpty:{ [actual; msg]  assertThat[count actual;=;0; msg]};
 // @return actual object
 assertNotEmpty:{ [actual; msg]  assertThat[count actual;>;0; msg]};
 
+/ One line saying how the run went, for a reader who reads nothing else.
+/ Carries no timestamp, so two runs of the same suite diff to nothing.
+/ @param resultTbl Table as returned by runTests
+/ @return string
+verdict:{ [resultTbl]
+    p:sum `pass=resultTbl`status;
+    $[p=n:count resultTbl;
+        "=== PASS — ",string[p]," of ",string[n]," ===";
+        "=== FAILED — ",string[p]," of ",string[n]," passed, ",string[n-p]," failed ==="]};
+
 / Run all tests in selected namespaces, return table of pass/fails/timings.
 / @param nsList symbol list of namespaces that contains test e.g. `.mytests`yourtests
 / @return a table containing one row for each test, detailing if it passed/failed.
 / @throws nsNoExist If the namespace you selected does not exist.
-runTests:{ [nsList] 
+runTests:{ [nsList]
     l::("  ";"   ");
     lg "\r\n"; lg "########## .qunit.runTests `",("`" sv string (),nsList)," ##########";
     / no namespaces specified, find all ending with test
-    nsl:$[11h~abs type nsList; nsList; `$".",/:string a where (lower a:key `) like "*test"]; 
+    nsl:$[11h~abs type nsList; nsList; `$".",/:string a where (lower a:key `) like "*test"];
     a:raze runNsTests each (),nsl;
     if[0=count a; 'noTestsFound];
     // if no parameters actually used, remove the column
-    lg $[all ()~/:a`parameter; delete parameter from a; a]};
+    a:$[all ()~/:a`parameter; delete parameter from a; a];
+    / what failed goes first, and stays first: `error and `fail sort ahead of `pass
+    a:`status xasc a;
+    / the verdict leads so a long table cannot push it off the top, and trails so
+    / it is the last line on screen. The table between them is still the return.
+    v:verdict a;
+    1 v,"\r\n"; lg a; 1 v,"\r\n";
+    a};
         
 / find functions with a certain name pattern within the selected namespace
 / @logEmpty If set to true write to log that no funcs found otherwise stay silent
@@ -187,7 +243,9 @@ run:{@[value lg x;::;{'lg "setUpError",x}]};
 runNsTests:{ [ns]
     if[not (ns~`.) or (`$1_string ns) in key `; 'nsNoExist]; // can't find namespace
     currentNamespaceBeingTested::{$["."=first a:string x; `$1 _ a; x]} ns;
-    ff:findFuncs[ns;;1b];
+    / 0b: a sweep that found nothing says nothing. Every namespace announcing every
+    / fixture pattern it does not have is most of what buries the result table.
+    ff:findFuncs[ns;;0b];
     run each findFuncs[ns;"beforeParameters*";0b];
     pFunc:first findFuncs[ns;"parameters*";0b];
     pVals:$[0<count pFunc; @[run;pFunc;()]; ()];
