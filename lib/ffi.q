@@ -27,18 +27,18 @@
 
 / set errno, and answer what it was BEFORE the set.  Anything but an int atom reads without setting.
 / @param errnum (int) the new errno; omit to read without setting
-/ @returns (int) the PREVIOUS errno
+/ @return (int) the PREVIOUS errno
 .ffi.setErrno:{[errnum] .ffi.i.errno errnum}
 
 / this platform's shared-library extension, as a SYMBOL.
-/ @returns (symbol) `so, `dll or `dylib — a symbol, so ` sv `qr,.ffi.extension[] is `qr.so
+/ @return (symbol) `so, `dll or `dylib — a symbol, so ` sv `qr,.ffi.extension[] is `qr.so
 .ffi.extension:{[] ("wlm"!`dll`so`dylib) first string .z.o}
 
 / the width of a pointer on this platform, in bytes.
-/ @returns (int) 8i, or 4i on a 32-bit host
+/ @return (int) 8i, or 4i on a 32-bit host
 .ffi.ptrsize:{$[.z.o like "?32"; 4i; 8i]}
 
 / this platform's OS letter, as a CHAR — KX's `{[] first string .z.o}` verbatim, and what published examples branch on
 / with "l"=.ffi.os[].  ` sv `qr,.ffi.os[] is therefore 'type where the extension spelling works; use `$"qr",.ffi.os[].
-/ @returns (char) "l", "w" or "m"
+/ @return (char) "l", "w" or "m"
 .ffi.os:{[] first string .z.o}
