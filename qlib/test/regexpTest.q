@@ -1,5 +1,5 @@
 / RE2 regex conformance: the `rlike` keyword and the .regexp namespace.
-/ Sources: user-docs/regex.md, the published RE2 syntax
+/ Sources: user-docs/regexp.md, the published RE2 syntax
 / (github.com/google/re2/wiki/Syntax) and DuckDB's documented regexp semantics.
 / There is no options argument — flags live inside the pattern ((?i) (?s) (?m)) —
 / and the two RE2 options with no inline form are functions: .regexp.escape

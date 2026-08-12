@@ -1,122 +1,8 @@
 # Foreign functions (FFI)
 
-peachq calls C through the `.ffi` namespace: the [KX ffikdb](https://github.com/KxSystems/ffi) surface, spelling for
-spelling, over a vendored [libffi](https://sourceware.org/libffi/). The spellings are verbatim — `.ffi.bind`,
-`.ffi.callFunction`, `.ffi.cvar`, `.ffi.setErrno`, `.ffi.extension`, `.ffi.ptrsize`, `.ffi.os` — so published ffikdb
-examples run unchanged.
-
-**Read the next section before anything else.** Nearly every "my FFI call doesn't work" is one of two things: the calling
-convention, or a q list that collapsed. Both are below.
-
-## Calling a bound function
-
-**A bound function takes ONE list of arguments.** It is unary. You do not call it with the C function's arguments; you
-call it with a *list* of them, and you end that list with `::`.
-
-```q
-q)\l pq
-q)f:.ffi.bind[`libm.so.6`pow;"ff";"f"]
-q)f(2f;10f;::)
-1024f
-```
-
-The three spellings that look more natural all fail, and they all fail the same way:
-
-| you write | what the binding receives | result |
-|---|---|---|
-| `f[2f;10f]` | two arguments | `'rank` |
-| `f(2f;10f)` | one float **vector** — the list collapsed | `'rank` |
-| `f[(2f;10f)]` | the same collapsed vector | `'rank` |
-| `f(2f;10f;::)` | a general list of two floats | `1024f` |
-
-```q
-q)f[2f;10f]
-'rank
-q)f(2f;10f)
-'rank
-q)f[(2f;10f)]
-'rank
-q)f(2f;10f;::)
-1024f
-```
-
-### Why `::`
-
-The middle two rows are not an FFI rule at all — they are ordinary q. Same-type items written in a list collapse into a
-*vector*:
-
-```q
-q)type (2f;10f)
-9h
-```
-
-`9h` is a float vector: **one** value, of count 2. So `f(2f;10f)` hands the binding a single argument where it wanted
-two, and the answer is `'rank`. Adding `::` puts a non-float in the list, which stops the collapse and leaves a general
-list — and the binding drops the trailing `::` before marshalling. That is all the sentinel is for.
-
-This also explains the call that *seems* to work by accident. A mixed list cannot collapse, so `f(1;2;"testing")` needs
-no sentinel — right up until the day two of its arguments share a type.
-
-This is KX's convention, not a peachq invention: every published ffikdb example is written `f (a;b;c;::)`. (The same
-collapse rule bites character data in [`regex.md`](regex.md#the-collapse-trap), for the same reason.)
-
-### The peachq superset
-
-peachq also accepts the call **without** the sentinel when the bound arity already says how many arguments there are and
-the values cannot collapse into one:
-
-```q
-q)strlen:.ffi.bind[`strlen;"C";"i"]
-q)strlen "12345"
-5i
-```
-
-**This is a superset, not KX behaviour.** Write the `::` anyway: it is the spelling that is correct on both, and it is
-the only spelling whose meaning does not change the moment two arguments come to share a type.
-
-## The environment functions, and their three different return types
-
-These three report the host. They are the first thing most FFI code calls, and they do **not** all return the same kind
-of thing:
-
-| function | example | type |
-|---|---|---|
-| `.ffi.extension[]` | `` `so `` / `` `dll `` / `` `dylib `` | symbol, `-11h` |
-| `.ffi.os[]` | `"l"` / `"w"` / `"m"` | **char**, `-10h` |
-| `.ffi.ptrsize[]` | `8i` / `4i` | int, `-6h` |
-
-```q
-q).ffi.extension[]
-`so
-q).ffi.os[]
-"l"
-q).ffi.ptrsize[]
-8i
-q)type .ffi.extension[]
--11h
-q)type .ffi.os[]
--10h
-q)type .ffi.ptrsize[]
--6h
-```
-
-So building a platform-correct library name works — `.ffi.extension` returns a symbol, which is what `` ` sv `` joins:
-
-```q
-q)` sv `qr,.ffi.extension[]
-`qr.so
-```
-
-and the same idiom with `.ffi.os` does not, because a char is not a symbol:
-
-```q
-q)` sv `qr,.ffi.os[]
-'type
-```
-
-Both return types are KX's, kept deliberately: `.ffi.os` is `{[] first string .z.o}` verbatim, and published examples
-branch on it with `"l"=.ffi.os[]`, which would itself be `'type` against a symbol. If you want the OS letter *in* a
-symbol, convert it: `` `$ "qr", .ffi.os[] ``.
+peachq calls C through the `.ffi` namespace. It is the KX ffikdb surface, spelling for spelling, over a vendored libffi:
+`.ffi.bind`, `.ffi.callFunction`, `.ffi.cvar`, `.ffi.setErrno`, `.ffi.extension`, `.ffi.ptrsize` and `.ffi.os` all mean
+what they mean there, so published ffikdb examples run unchanged.
 
 ## Loading
 
@@ -132,8 +18,14 @@ Before the gate the namespace does not exist, so a pre-gate environment stays kd
 
 Both call C. The difference is *when* the work happens.
 
-`.ffi.bind[funcname;argtypes;returntype]` resolves the symbol and builds the call interface **once**, and hands back the
-unary function described above. Use it on anything hot.
+`.ffi.bind[funcname;argtypes;returntype]` resolves the symbol and builds the call interface **once**, then hands back a
+function you can call as often as you like. Use it on anything hot.
+
+```q
+q)f:.ffi.bind[`libm.so.6`pow;"ff";"f"]
+q)f(2f;10f;::)
+1024f
+```
 
 `.ffi.callFunction[returnfunc;arglist]` does that work on **every** call, and takes the argument list directly. Use it
 for a one-shot.
@@ -145,15 +37,23 @@ q).ffi.callFunction[("i";`abs)] (-7i;::)
 7i
 ```
 
+> **Warning: a bound function takes ONE list of arguments, and that list ends with `::`.**
+> It is unary, so `f[2f;10f]` is `'rank`. So is `f(2f;10f)`, because same-type items collapse into a vector and the
+> binding then sees one argument where it wanted two. Write `f(2f;10f;::)`. See
+> [Argument lists and the `::` sentinel](#argument-lists-and-the--sentinel).
+
 Two spellings name the function, and both `bind` and `callFunction` take them:
 
 | spelling | meaning |
 |---|---|
 | `` `strlen `` | a symbol already resolvable in the running process |
-| `` `libm.so.6`pow `` | an explicit library and symbol — the `dlopen` path |
+| `` `libm.so.6`pow `` | an explicit library and symbol, the `dlopen` path |
+
+A bare symbol resolves against the already-linked process, which is why `strlen`, `sprintf`, `qsort`, `getpid` and `pow`
+need no library name here. Name the library explicitly for anything that is not already loaded.
 
 `callFunction` and `cvar` accept a **third** spelling that `bind` does not: `("f";`sqrt)`, a return-type letter paired
-with either of the rows above. They need it because they are told nothing else about types — `callFunction` infers the
+with either of the rows above. They need it because they are told nothing else about types. `callFunction` infers the
 argument types from the values you pass, and with a bare symbol the return letter defaults to `"i"`. `bind` is given
 `returntype` as its own argument, so handing it the paired form instead is `'type`:
 
@@ -164,8 +64,47 @@ q).ffi.bind[("f";`sqrt);"f";"f"]
 
 Being told all the types up front is what lets `bind` build the interface once.
 
-A bare symbol resolves against the already-linked process, which is why `strlen`, `sprintf`, `qsort`, `getpid` and `pow`
-need no library name here. Name the library explicitly for anything that is not already loaded.
+### Argument lists and the `::` sentinel
+
+A binding is unary: it takes a list of the C function's arguments, terminated by `::`. The three spellings that look
+more natural all fail, and they all fail the same way:
+
+| you write | what the binding receives | result |
+|---|---|---|
+| `f[2f;10f]` | two arguments | `'rank` |
+| `f(2f;10f)` | one float **vector**, the list having collapsed | `'rank` |
+| `f[(2f;10f)]` | the same collapsed vector | `'rank` |
+| `f(2f;10f;::)` | a general list of two floats | `1024f` |
+
+The middle two rows are not an FFI rule at all. They are ordinary q: same-type items written in a list collapse into a
+*vector*.
+
+```q
+q)type (2f;10f)
+9h
+```
+
+`9h` is a float vector, so it is **one** value of count 2, and `f(2f;10f)` hands the binding a single argument where it
+wanted two. Adding `::` puts a non-float in the list, which stops the collapse and leaves a general list. The binding
+drops the trailing `::` before marshalling. That is all the sentinel is for.
+
+This also explains the call that *seems* to work by accident. A mixed list cannot collapse, so `f(1;2;"testing")` needs
+no sentinel, right up until the day two of its arguments come to share a type.
+
+The convention is KX's, not a peachq invention: every published ffikdb example is written `f (a;b;c;::)`. The same
+collapse rule bites character data in [`regexp.md`](regexp.md#the-collapse-trap), for the same reason.
+
+peachq also accepts the call **without** the sentinel when the bound arity already says how many arguments there are and
+the values cannot collapse into one:
+
+```q
+q)strlen:.ffi.bind[`strlen;"C";"i"]
+q)strlen "12345"
+5i
+```
+
+**That is a superset, not KX behaviour.** Write the `::` anyway: it is the spelling that is correct on both, and the
+only one whose meaning does not change the moment two arguments come to share a type.
 
 ## Type characters
 
@@ -187,8 +126,8 @@ q arguments.
 | `m` `d` `u` `v` `t` | `int` | month, date, minute, second, time |
 | `p` `n` | `long long` | timestamp, timespan |
 | `z` | `double` | datetime |
-| `r` | a raw pointer, passed as an int or long holding the address | — |
-| `k` | a callback — see below | — |
+| `r` | a raw pointer, passed as the address itself | int or long |
+| `k` | a callback (see [Callbacks](#callbacks)) | a `(function;"argtypes";"returntype")` tuple |
 | `" "` (space) | `void` | return only; the call answers `::` |
 | **uppercase** | **pointer to that type** | dereferenced on return |
 
@@ -201,7 +140,7 @@ q)labs (-7;::)
 7
 ```
 
-An empty `argtypes` is a zero-argument function. It still takes an argument list — the list is just the sentinel alone:
+An empty `argtypes` is a zero-argument function. It still takes an argument list; the list is just the sentinel alone:
 
 ```q
 q)b0:.ffi.bind[`getpid;"";"i"]
@@ -211,8 +150,8 @@ q).z.i=b0 (::)
 
 ## Pointers
 
-An uppercase letter is a pointer to the lowercase type. On return the pointer is dereferenced, and `C` — a
-NUL-terminated `char *` — comes back as a string:
+An uppercase letter is a pointer to the lowercase type. On return the pointer is dereferenced, and `C`, a NUL-terminated
+`char *`, comes back as a string:
 
 ```q
 q)sr:.ffi.bind[`strerror;"i";"C"]
@@ -236,7 +175,7 @@ q)(.ffi.callFunction[("i";`close)] (p 0;::)),.ffi.callFunction[("i";`close)] (p 
 ```
 
 Character vectors are the one place peachq diverges, as a compatible superset: a char vector is **auto-NUL-terminated
-through a copy** unless it already ends in an explicit `"\000"`. Only the explicit tail keeps the in-place contract —
+through a copy** unless it already ends in an explicit `"\000"`. Only the explicit tail keeps the in-place contract,
 which is exactly why an output buffer is built with one:
 
 ```q
@@ -249,7 +188,7 @@ q)"test 2.000000 0"~x til "j"$n
 ```
 
 A symbol atom marshals as `char *`. A symbol *vector* is different again: it crosses as a `char *[]` of copied strings,
-and what comes back is the **permutation** C left them in — which is what makes sorting one from C work:
+and what comes back is the **permutation** C left them in, which is what makes sorting one from C work:
 
 ```q
 q)s:`c`a`b
@@ -264,7 +203,7 @@ handle to give back later.
 ## Callbacks
 
 A q function crosses to C as a function pointer under the `k` letter. You pass it as the tuple
-`(function;"argtypes";"returntype")` — the argument letters describe what **C** will call it with:
+`(function;"argtypes";"returntype")`, where the argument letters describe what **C** will call it with:
 
 ```q
 q)cmp:{(x>y)-x<y}
@@ -299,9 +238,9 @@ q)qs (u;`int$count u;4i;({[x;y]`abc};"II";"i");::)
 'type
 ```
 
-Closures, like bindings, live until the process exits — KX parity.
+Closures, like bindings, live until the process exits, which is KX parity.
 
-## `cvar` — reading a C global
+## `cvar`, reading a C global
 
 `.ffi.cvar` takes the same shape `callFunction` takes for its function, and reads a variable instead of calling
 anything:
@@ -320,16 +259,59 @@ q){.ffi.setErrno 7i; .ffi.setErrno[]} []
 7i
 ```
 
+## Platform and environment
+
+These three report the host. They do **not** all return the same kind of thing:
+
+| function | example | type |
+|---|---|---|
+| `.ffi.extension[]` | `` `so `` / `` `dll `` / `` `dylib `` | symbol, `-11h` |
+| `.ffi.os[]` | `"l"` / `"w"` / `"m"` | **char**, `-10h` |
+| `.ffi.ptrsize[]` | `8i` / `4i` | int, `-6h` |
+
+```q
+q).ffi.extension[]
+`so
+q).ffi.os[]
+"l"
+q).ffi.ptrsize[]
+8i
+q)type .ffi.extension[]
+-11h
+q)type .ffi.os[]
+-10h
+q)type .ffi.ptrsize[]
+-6h
+```
+
+`.ffi.extension` returns a symbol, which is what `` ` sv `` joins, so building a platform-correct library name works:
+
+```q
+q)` sv `qr,.ffi.extension[]
+`qr.so
+```
+
+The same idiom with `.ffi.os` does not, because a char is not a symbol:
+
+```q
+q)` sv `qr,.ffi.os[]
+'type
+```
+
+Both return types are KX's, kept deliberately. `.ffi.os` is `{[] first string .z.o}` verbatim, and published examples
+branch on it with `"l"=.ffi.os[]`, which would itself be `'type` against a symbol. If you want the OS letter *in* a
+symbol, convert it: `` `$ "qr", .ffi.os[] ``.
+
 ## Errors
 
 peachq answers bare q error classes here. KX embeds a message string in the error text; we do not, which is a recorded
-divergence — the class is the contract.
+divergence. The class is the contract.
 
 | error | means |
 |---|---|
-| `'os` | the symbol did not resolve — wrong name, or the library is not loaded |
+| `'os` | the symbol did not resolve: wrong name, or the library is not loaded |
 | `'type` | a type letter outside the table, a malformed function spelling, or a value that will not convert |
-| `'rank` | the argument list is the wrong length — **this is where the collapse trap lands** |
+| `'rank` | the argument list is the wrong length, which is where the collapse trap lands |
 | `'limit` | `callFunction` was given more than 32 arguments (`bind` answers `'type` for more than 32 letters) |
 | `'nyi` | this build has no libffi |
 
@@ -342,16 +324,16 @@ q)strlen ("a\000";"b\000";::)
 'rank
 ```
 
-The vendored libffi links on Linux x86-64 and its Windows cross-build only. Everywhere else — macOS, the WebAssembly
-browser build — `.ffi` loads but every call answers `'nyi`. That is the one meaning of `'nyi` here: the build, never the
-arguments.
+The vendored libffi links on Linux x86-64 and its Windows cross-build only. Everywhere else, meaning macOS and the
+WebAssembly browser build, `.ffi` loads but every call answers `'nyi`. That is the one meaning of `'nyi` here: the
+build, never the arguments.
 
-## Where peachq matches KX, and where it is a superset
+## Compatibility with ffikdb
 
 | | |
 |---|---|
 | **Matches KX** | every public spelling; the one-argument-list calling convention and the `::` sentinel; the type letters; uppercase-is-a-pointer; numeric vectors crossing as in-place data pointers, and symbol vectors as a copied `char *[]` with the permutation written back; bindings and closures living until exit; `.ffi.extension` byte for byte |
 | **Superset** | the `::` may be omitted when the bound arity disambiguates and the arguments cannot collapse; char vectors auto-NUL-terminate through a copy unless an explicit `"\000"` tail is present; a q error inside a callback parks and propagates rather than longjmping; errors are bare classes with no embedded message |
 
-Nothing in the superset column changes the meaning of code written to the KX rules. If you write ffikdb-portable q —
-sentinel always, explicit NUL tails on buffers — it runs identically here.
+Nothing in the superset column changes the meaning of code written to the KX rules. If you write ffikdb-portable q, with
+the sentinel always and explicit NUL tails on buffers, it runs identically here.
