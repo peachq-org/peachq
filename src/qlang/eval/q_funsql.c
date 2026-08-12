@@ -41,8 +41,9 @@ static ray_t* gather(ray_t* x, ray_t* idx) {
     return q_eval_apply_value(x, &idx, 1);
 }
 
-/* From-resolve (law 24 + column-dict superset): sym -> env; keyed -> 0!; dict -> flip */
-static ray_t* ques_from(ray_t* t) {
+/* From-resolve (law 24 + column-dict superset): sym -> env; keyed -> 0!; dict -> flip.
+ * *nkey (optional, caller-initialised) reports the source's key width so a caller can re-key. */
+static ray_t* ques_from(ray_t* t, int64_t* nkey) {
     if (!t) return q_err(QE_TYPE);
     ray_t* pm = q_provider_from_table(t);   /* carrier / `:pq: hsym: provider truth */
     if (pm) return pm;
@@ -50,12 +51,15 @@ static ray_t* ques_from(ray_t* t) {
         ray_t* v = q_env_resolve(t->i64);
         if (!v) return q_err(QE_NAME);
         if (RAY_IS_ERR(v)) return v;
-        ray_t* r = ques_from(v);
+        ray_t* r = ques_from(v, nkey);
         ray_release(v);
         return r;
     }
     if (q_splay_is(t)) { ray_retain(t); return t; }    /* lazy: columns gather on use */
-    if (q_type_is_keyed(t)) return q_bang_enkey(0, t);
+    if (q_type_is_keyed(t)) {
+        if (nkey) *nkey = ray_table_ncols(ray_dict_keys(t));
+        return q_bang_enkey(0, t);
+    }
     if (q_type_is_dict(t)) return q_flip_wrap(t);
     if (q_type_is_table(t)) { ray_retain(t); return t; }
     return q_err(QE_TYPE);
@@ -567,7 +571,8 @@ static ray_t* ques_select(ray_t** args, int64_t n) {
     if (n == 6) return q_err(QE_NYI);            /* rank 6: the wave-5 sort */
     ray_t* pushed = q_provider_qsql_push(args, n); /* NULL: not provider / no qsql hook */
     if (pushed) return pushed;
-    ray_t* t = ques_from(args[0]);
+    int64_t nk = 0;                              /* keyed source: re-key the result */
+    ray_t* t = ques_from(args[0], &nk);
     if (!t || RAY_IS_ERR(t)) return t ? t : q_err(QE_TYPE);
     ray_t* idx0 = til_count(t);
     ray_t* idx = RAY_IS_ERR(idx0) ? idx0 : where_fold(args[1], t, idx0);
@@ -576,6 +581,8 @@ static ray_t* ques_select(ray_t** args, int64_t n) {
     ray_t* b = args[2];
     ray_t* a = args[3];
     ray_t* r;
+    /* only the by-less, phrase-less form returns the evaluated table expression (ref/select.md:47) */
+    if (!(is_bool_atom(b, 0) && is_empty_gen(a))) nk = 0;
     if (is_bool_atom(b, 0)) {
         if (is_empty_gen(a))            r = from_rows(t, idx);         /* law 5/7 */
         else if (q_type_is_dict(a))     r = sel_table(a, t, idx);
@@ -607,13 +614,18 @@ static ray_t* ques_select(ray_t** args, int64_t n) {
     ray_release(idx);
     ray_release(t);
     if (n >= 5) r = limit_apply(args[4], r);
+    if (nk > 0 && r && !RAY_IS_ERR(r)) {
+        ray_t* rk = q_bang_enkey(nk, r);
+        ray_release(r);
+        r = rk;
+    }
     return r;
 }
 
 
 /* Simple Exec `?[t;i;p]` (law 10): the phrase over t[i] */
 static ray_t* ques_simple_exec(ray_t* t, ray_t* i, ray_t* p) {
-    ray_t* rt = ques_from(t);
+    ray_t* rt = ques_from(t, NULL);
     if (!rt || RAY_IS_ERR(rt)) return rt ? rt : q_err(QE_TYPE);
     ray_t* r = phrase_eval(p, rt, i);
     ray_release(rt);
