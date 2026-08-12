@@ -1,4 +1,4 @@
-/ regexp.q — THE public .regexp surface (user-docs/regex.md).
+/ regexp.q — THE public .regexp surface (user-docs/regexp.md).
 / Lambdas, not natives, so the surface is DISCOVERABLE: peachq renders a lambda
 / from its verbatim source, so typing `.regexp.matches` prints the signature and
 / names its arguments, where a native prints as an opaque primitive.  The
