@@ -111,6 +111,14 @@ int    q_eval_apply_lambda_parts(ray_t* v, ray_t** params, ray_t** body,
 ray_t* q_eval_apply_lambda_src(ray_t* v);           /* BORROWED -RAY_STR source,
                                                      * NULL unless a lambda carrier
                                                      * (q_fmt display, q_wire 100h) */
+/* ref/value.md `n`/`f`/`l`: stamped ONCE, at the first global assignment
+ * (q_env_set -> q_comment_on_global_set); inner lambdas in the body get
+ * name+"@".  file_sym 0 = no file (REPL/bundle); the read-out hands the name
+ * BORROWED (charv or NULL), file 0 and line -1 when unset, 0 = not a lambda. */
+void q_eval_apply_lambda_name(ray_t* v, const char* name, int64_t nn,
+                              int64_t file_sym, int64_t line);
+int  q_eval_apply_lambda_prov(ray_t* v, ray_t** name, int64_t* file_sym,
+                              int64_t* line);
 
 /* Carrier read-out for display (q_fmt renders; slot layout stays opaque):
  * BORROWED parts, NULL when v is not that carrier kind — deriv/proj head
