@@ -539,11 +539,21 @@ static ray_t* lambda_structure(ray_t* v) {
     ray_t* m = ray_vec_new(RAY_I64, 1);                 /* no position map */
     if (m) m->len = 0;
     out = list_put(out, m);
-    out = list_put(out, ray_list_new(1));               /* n: () — unnamed */
-    ray_t* fl = ray_vec_new(RAY_CHARV, 1);              /* f: "" */
-    if (fl) fl->len = 0;
+    ray_t* nm = NULL;
+    int64_t fsym = 0, lno = -1;
+    q_eval_apply_lambda_prov(v, &nm, &fsym, &lno);
+    if (nm) {                                           /* n: name, () unnamed */
+        ray_retain(nm);
+        out = list_put(out, nm);
+    } else {
+        out = list_put(out, ray_list_new(1));
+    }
+    ray_t* fstr = fsym ? ray_sym_str(fsym) : NULL;      /* borrowed */
+    ray_t* fl = fstr ? ray_charv(ray_str_ptr(fstr), ray_str_len(fstr))
+                     : ray_vec_new(RAY_CHARV, 1);       /* f: file path or "" */
+    if (fl && !fstr) fl->len = 0;
     out = list_put(out, fl);
-    out = list_put(out, ray_i64(-1));                   /* l: -1 */
+    out = list_put(out, ray_i64(lno));                  /* l: line or -1 */
     ray_t* src = q_eval_apply_lambda_src(v);
     out = list_put(out, src ? q_str_charv_of_str(src) : ray_vec_new(RAY_CHARV, 1));
 
