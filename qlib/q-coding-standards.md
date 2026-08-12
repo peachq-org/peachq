@@ -67,8 +67,12 @@ than pad to a template. One honest line beats five generated ones.
 
 - A plain `/` comment line above the definition is the whole form. **No `###` or `#####` headings**,
   no banner rules.
-- **Only tags the reference parser knows**, in field order: `@param <name> (<type>) <description>`,
-  then `@returns`, `@throws`, `@see`. Never invent a tag — a tool cannot read it.
+- **`@param` is the only structurally special tag**: `@param <name> (<type>) <description>`, from
+  which the reference parser (qstudio's `man.q`) splits the name into a column of its own; `@author`
+  is its file-level counterpart. **Every other tag is stored generically as `(tag; value)`** —
+  `@return`, `@throws`, `@see`, `@website` are all equal to the parser, so an invented tag is kept
+  and displayed, not dropped. Prefer the conventional ones so readers and tools agree, and write
+  `@return`, never `@returns`, to match the rest of the tree.
 - **Types are the kdb type name, all lowercase**: `(int)`, `(long)`, `(symbol)`, `(symbol list)`,
   `(char)`, `(string)`, `(list)`, `(any)`. `(string)` for a char vector, never `(char list)`.
   **No CamelCase**: `(Integer)`, `(SymbolList)`, `(Dict)` are all out.
