@@ -1,10 +1,5 @@
 # Regular expressions
 
-> **Status: implemented.** Every example here is pinned as a test row in
-> `test/q/aigenerated/regex_rlike.qcmd` (and the version pin in `regex_version.qcmd`), both
-> green. If an example here and the code ever disagree, this document and those ledgers are
-> the specification.
-
 peachq matches with [RE2](https://github.com/google/re2), the same engine DuckDB uses. RE2
 guarantees linear-time matching, so no pattern — however hostile or badly written — can hang a
 query the way a backtracking engine can. It is also what makes a peachq predicate and the
