@@ -11,6 +11,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"     /* q_type_is_table / _is_keyed — the \v|\a split */
 #include "qlang/q_builtins.h"      /* q_type_is_fn — the \f split (needs the apply module) */
+#include "qlang/q_comment.h"          /* the armed doc header's one consumption point */
 #include "qlang/q_dotz.h"         /* the .z.* handler-slot arms of `set` */
 #include "qlang/eval/q_view.h"    /* view hooks: set/unbind invalidation, dot-'nyi */
 #include "qlang/io/q_io.h"        /* q_io_set — `set`'s file half */
@@ -256,20 +257,29 @@ static ray_err_t env_root_splat(ray_t* d) {
  * six `.ipc.on.*` hook syms over RAYFALL's env (the one deliberate seam:
  * src/core/ipc.c reads them from g_env at dispatch).  Everything else is an
  * ordinary tree amend, settable `.z.*` handlers and `.z.zd` included — plain
- * globals their C fire sites read by name (q_wirefile reads the zip triple). */
+ * globals their C fire sites read by name (q_wirefile reads the zip triple).
+ * The branches converge on `e` so that EVERY successful bind — hook aliases
+ * the tree amend never sees included — is a definition a doc header can name. */
 ray_err_t q_env_set(int64_t sym, ray_t* val) {
     if (!val) return q_env_unbind(sym);
-    if (ray_sym_is_ipc_hook(sym)) return ray_env_set(sym, val);
-    const char* p; size_t n;
-    ray_t* s = name_str(sym, &p, &n);
-    if (!s) return RAY_ERR_DOMAIN;
-    int hook = q_dotz_ipc_hook_index(p, n);
-    int root = n == 1 && p[0] == '.';
-    ray_release(s);
-    if (hook >= 0) return ray_env_set(ray_sym_ipc_hook(hook), val);
-    if (root) return env_root_splat(val);
-    ray_err_t e = env_put(sym, val, 0);
-    if (e == RAY_OK) q_view_on_global_set(sym);   /* invalidation + .z.vs */
+    ray_err_t e;
+    if (ray_sym_is_ipc_hook(sym)) {
+        e = ray_env_set(sym, val);
+    } else {
+        const char* p; size_t n;
+        ray_t* s = name_str(sym, &p, &n);
+        if (!s) return RAY_ERR_DOMAIN;
+        int hook = q_dotz_ipc_hook_index(p, n);
+        int root = n == 1 && p[0] == '.';
+        ray_release(s);
+        if (hook >= 0)   e = ray_env_set(ray_sym_ipc_hook(hook), val);
+        else if (root)   e = env_root_splat(val);
+        else {
+            e = env_put(sym, val, 0);
+            if (e == RAY_OK) q_view_on_global_set(sym);   /* invalidation + .z.vs */
+        }
+    }
+    if (e == RAY_OK) q_comment_on_global_set(sym);
     return e;
 }
 
@@ -581,6 +591,33 @@ int64_t q_env_qualify(int64_t ns_sym, int64_t member_sym) {
     if (m) ray_release(m);
     ray_release(ns);
     return r;
+}
+
+/* q_env_fullname — see q_env.h. */
+int64_t q_env_fullname(int64_t sym, int64_t* ns) {
+    const char* p; size_t n;
+    ray_t* s = name_str(sym, &p, &n);
+    int64_t full = sym;
+    if (s) {
+        if (n > 0 && p[0] != '.') {
+            int64_t q = q_env_qualify(g_ctx, sym);
+            if (q >= 0) full = q;
+        }
+        ray_release(s);
+    }
+    if (ns) {
+        size_t cut = 0;
+        ray_t* f = name_str(full, &p, &n);
+        if (f) {
+            for (size_t i = 0; i < n; i++) if (p[i] == '.') cut = i;
+            *ns = cut > 0 ? ray_sym_intern_runtime(p, cut)
+                          : ray_sym_intern_runtime(".", 1);
+            ray_release(f);
+        } else {
+            *ns = ray_sym_intern_runtime(".", 1);
+        }
+    }
+    return full;
 }
 
 static int env_kind_match(q_env_ns_kind_t kind, ray_t* v) {
