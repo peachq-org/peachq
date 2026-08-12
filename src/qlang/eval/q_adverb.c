@@ -9,7 +9,7 @@
 #include "qlang/q_prim.h"
 #include "qlang/eval/q_eval_internal.h"
 #include "qlang/base/q_err.h"
-#include "qlang/q_ops.h"       /* q_ops_find / acc_identity + the manifest columns */
+#include "qlang/q_ops.h"       /* q_ops_find + manifest columns + the identity-table accessors */
 #include "qlang/q_registry.h"  /* q_registry_row_of, q_match_rec, q_typed_empty_like */
 #include "qlang/q_builtins.h"  /* q_count_long — q `count` for C callers, hot lane */
 #include "qlang/base/q_type.h"
@@ -134,7 +134,7 @@ static ray_t* acc_empty(ray_t* fv, const q_op_t* frow, ray_t* seed, int keep,
         ray_retain(seed);
         return seed;
     }
-    ray_t* id = frow ? q_ops_acc_identity(frow->name) : NULL;
+    ray_t* id = frow ? q_ops_identity(frow->name, QI_VALUE) : NULL;
     if (id) return id;
     return has_mono ? NULL : q_typed_empty_like(ray_list_new(0), fv);
 }
@@ -294,7 +294,10 @@ static ray_t* acc_unary(ray_t* fv, const q_op_t* frow, ray_t* x, int keep) {
     } else if (mv)
         r = q_eval_apply(mv, mrow, &x, 1);
     else {
-        ray_t* id = frow ? q_ops_acc_identity(frow->name) : NULL;
+        /* only a two-sided identity may seed (accumulators.md Unary
+         * application); right-only ones fold from the first item: `(%/)x`
+         * is x[0]%x[1]%... (ref/divide.md), never (1%x[0])%... */
+        ray_t* id = frow ? q_ops_identity(frow->name, QI_SEED) : NULL;
         r = acc_reduce(fv, frow, id, &x, 1, keep);
         if (id) ray_release(id);
     }
@@ -438,7 +441,7 @@ static ray_t* prior_each(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
     ray_t* prev = seed;
     if (prev) ray_retain(prev);
     else {
-        prev = frow ? q_ops_acc_identity(frow->name) : NULL;
+        prev = frow ? q_ops_identity(frow->name, QI_VALUE) : NULL;
         if (!prev && ray_is_vec(x)) prev = ray_typed_null((int8_t)-x->type);
         /* `first 0#x` for a table is its all-null row — the out-of-range read */
         if (!prev && x->type == RAY_TABLE) prev = q_index_elem_at(x, q_count_long(x));
