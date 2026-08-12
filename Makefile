@@ -71,7 +71,10 @@ $(GEN_DIR)/qlang/j_gen.h: src/qlang/j.q tools/gen-bootstrap.sh
 # The directory itself is a prerequisite (spelled lib/. — bare `lib` is the
 # librayforce.a target): deleting/renaming a file bumps the dir mtime, which
 # the file-only list cannot see (the html-assets rule's law).
-LIB_Q_SRCS := $(sort $(wildcard lib/*.q))
+# help.q is PINNED FIRST, the one order that is not moot: it defines .help.add,
+# and the C script seam captures a file's doc headers only while that name is
+# bound. Sort order would put it third and silently drop duckdb.q/ffi.q's docs.
+LIB_Q_SRCS := lib/help.q $(filter-out lib/help.q,$(sort $(wildcard lib/*.q)))
 $(GEN_DIR)/qlang/lib_gen.h: lib/. $(LIB_Q_SRCS) tools/gen-bootstrap.sh
 	@mkdir -p $(dir $@)
 	SYMBOL=PEACHQ_LIB_BOOTSTRAP tools/gen-bootstrap.sh $@ $(LIB_Q_SRCS)
