@@ -1,10 +1,20 @@
-/* q_comment — WHICH comment run documents WHICH definition, and handing that
- * (fullname; ns; file; line; header) to q's `.help.add`.  peachq owns no doc
- * store in C (owner ruling): `.help` is pure q in lib/help.q and this file only
- * feeds it.
+/* q_comment — WHICH comment run documents WHICH definition, handed to q as
+ * NAMED positional arguments through two hooks: `.help.register_file[file;ns;
+ * header]` and `.help.register_definition[fullname;ns;file;line;header]`.
+ * peachq owns no doc store in C (owner ruling): `.help` is pure q in
+ * lib/help.q and this file only feeds it.
  *
  * The CONTRACT a driver owes: bracket each script, classify every physical
- * line, and end each statement — one comment run documents at most one name. */
+ * line, and end each statement — one comment run documents at most one name.
+ *
+ * register_file means "begin this file — replace everything previously known
+ * about it", and is called at EVERY script begin with an empty header, then
+ * again with the real header if the leading run resolves to one.  INVARIANT:
+ * the leading comment run always resolves BEFORE the first definition
+ * registers — on a break (blank line -> file header) or on code (-> it
+ * documents that definition, and no second register_file call happens).  So
+ * the second call can never wipe an already-registered definition, which is
+ * what makes two hooks safe where three looked needed. */
 #ifndef PEACHQ_Q_COMMENT_H
 #define PEACHQ_Q_COMMENT_H
 
@@ -23,7 +33,7 @@ void           q_comment_script_end(q_comment_script_t saved);
  * (blank line, block comment, continuation — which records the file's LEADING
  * run and drops any other), or arm it for the fresh logical line at `line` —
  * a leading run ending on CODE arms for that definition, never the file. */
-void q_comment_line(const char* p, size_t n, int64_t line);
+void q_comment_line(const char* p, size_t n);
 void q_comment_break(void);
 void q_comment_fresh_line(int64_t line);
 
@@ -34,7 +44,7 @@ void q_comment_fresh_line(int64_t line);
  * once, from the file+line this module already holds. */
 void q_comment_on_global_set(int64_t sym, ray_t* val);
 
-/* End of statement: hand any claimed record to `.help.add` (unbound = no-op).
+/* End of statement: hand any claimed record to its hook (unbound = no-op).
  * MUST be called between statements, never mid-eval, and before the console
  * drain so the hook's own output leaves with the statement. */
 void q_comment_stmt_end(void);
