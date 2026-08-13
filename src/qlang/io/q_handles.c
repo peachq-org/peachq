@@ -12,6 +12,7 @@
 #include "qlang/q_dotz.h"   /* q_dotz_now_ns — the portable wall clock */
 #include "qlang/io/q_io.h"   /* q_io_mkdir_parents — hopen creates missing directories */
 #include "qlang/io/q_provider.h" /* the `:pq:` virtual-table provider arms */
+#include "qlang/net/q_wirefile.h"    /* q_wirefile_append_path — typed handle append */
 #include "qlang/net/q_ws.h"          /* q_ws_client_open — `:ws:// sym handles */
 #include "qlang/net/q_http_client.h" /* q_http_client_raw — `:http:// sym handles */
 #include "lang/eval.h"       /* ray_eval_get_restricted, ray_at_fn */
@@ -307,7 +308,20 @@ ray_t* q_handles_apply(int64_t qh, ray_t* y) {
         int hk = q_handles_kind(afd);
         if (hk == Q_HANDLE_FILE) {
             if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
-            return raw_write(qh, y);
+            /* strings/bytes/lists keep the raw log-file law (ref/hopen.md:77,
+             * basics/handles.md:74); any other typed payload is a vector-file
+             * append (kb/performance-tips.md "append (2 3) to handle") */
+            if (y && (y->type == RAY_BYTE_ONLY || y->type == RAY_LIST ||
+                      y->type == RAY_STR || y->type == RAY_CHARV ||
+                      y->type == -RAY_STR || y->type == -RAY_CHARV))
+                return raw_write(qh, y);
+            ray_t* oa = q_handles_open_args(afd);           /* borrowed charv path */
+            if (!oa) return q_err(QE_TYPE);
+            ray_t* p = ray_str((const char*)ray_data(oa), (size_t)ray_len(oa));
+            if (!p) return q_err(QE_OOM);
+            ray_t* bad = q_wirefile_append_path(p, y);
+            ray_release(p);
+            return bad ? bad : make_i64(qh);
         }
         if (hk == Q_HANDLE_FIFO) {
             if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
@@ -339,7 +353,8 @@ static int is_text_atom(ray_t* v) {
 
 /* The `:`-prefixed SYM arm of the same abstraction: protocol dispatch on the
  * descriptor text — ws/wss and http/https clients, else one-shot sync IPC
- * (ref/hopen.md): connect -> send -> close.  A file handle has no apply. */
+ * (ref/hopen.md): connect -> send -> close.  A file-path SYM applies only
+ * through an opened handle (q_handles_apply's FILE arm). */
 ray_t* q_handles_sym_apply(ray_t* head, ray_t** args, int64_t n) {
     ray_t* s = ray_sym_str(head->i64);               /* borrowed */
     const char* sp = ray_str_ptr(s);
