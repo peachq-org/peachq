@@ -9,12 +9,14 @@
 #include "qlang/q_builtins.h"   /* q_count_long — nested column length */
 #include "qlang/ops/q_index.h"  /* q_index_elem_at — nested char elements */
 #include "qlang/io/q_splay.h"   /* q_splay_invalidate — an overwrite drops the entry */
-#include "qlang/eval/q_eval.h"  /* q_eval_apply_concrete */
+#include "qlang/eval/q_eval.h"  /* q_eval_apply_concrete, q_eval_apply_value */
+#include "qlang/q_registry.h"   /* the `,` value the append fallback composes on */
 #include "lang/eval.h"          /* ray_eval_get_restricted */
 #include "mem/heap.h"           /* RAY_ATTR_SORTED */
 #include <stdio.h>   /* fopen/fread — the header probe reads raw prefix bytes */
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>   /* ENOENT — append's write-if-absent arm */
 #include <sys/stat.h>
 
 static int64_t wf_i64(const uint8_t* p) { int64_t v; memcpy(&v, p, 8); return v; }
@@ -609,22 +611,175 @@ static ray_t* wf_put(ray_t* path, ray_t* img, int lbs, int alg, int lvl, int hdr
     return q_io_write_all(path, ray_str_ptr(img), ray_str_len(img));
 }
 
-static ray_t* wf_write_flat(ray_t* x, ray_t* y, int lbs, int alg, int lvl) {
-    ray_t* path = q_io_file_path(x);
-    if (!path) return NULL;
-    if (ray_eval_get_restricted()) { ray_release(path); return q_err(QE_ACCESS); }
+static ray_t* wf_write_flat_path(ray_t* path, ray_t* y, int lbs, int alg, int lvl) {
     ray_retain(y);
     y = q_eval_apply_concrete(y);              /* storage boundary: no lazy on disk */
     ray_t* img = wf_write_image(y);
     ray_release(y);
-    if (RAY_IS_ERR(img)) { ray_release(path); return img; }
+    if (RAY_IS_ERR(img)) return img;
     if (alg < 0 && !wf_zd(&lbs, &alg, &lvl)) alg = 0;
     ray_t* bad = wf_put(path, img, lbs, alg, lvl, 1);
     ray_release(img);
+    return bad;
+}
+
+static ray_t* wf_write_flat(ray_t* x, ray_t* y, int lbs, int alg, int lvl) {
+    ray_t* path = q_io_file_path(x);
+    if (!path) return NULL;
+    if (ray_eval_get_restricted()) { ray_release(path); return q_err(QE_ACCESS); }
+    ray_t* bad = wf_write_flat_path(path, y, lbs, alg, lvl);
     ray_release(path);
     if (bad) return bad;
     ray_retain(x);
     return x;
+}
+
+/* ---- the flat-append primitive (one kernel, three doors) ----------------
+ * `:f upsert y, .[`:f;();,;y] and file-handle apply all land here (the
+ * ref/amend.md Amend Entire law: .[d;();v;y] <=> v[d;y], so append is read
+ * -> `,` -> write, with the shape-B in-place arm as its optimization —
+ * kb/performance-tips.md:151).  A typed target takes only its own element
+ * type; only an untyped shape-A list/atom file delegates to the join home. */
+
+/* Elements at EOF, then the count: a tear leaves the old count (the reader
+ * ignores the tail) and the next append's exact-size check routes to the
+ * rewrite fallback.  Best-effort ordering, like every writer here (no fsync). */
+static ray_t* wf_append_inplace(ray_t* path, ray_t* v, int64_t count) {
+    size_t esz = ray_type_sizes[(uint8_t)v->type];
+    int64_t n = ray_len(v);
+    if (count > INT64_MAX - n) return q_err(QE_LIMIT);
+    FILE* fp = fopen(ray_str_ptr(path), "r+b");
+    if (!fp) return q_err(QE_IO);
+    int64_t nc = count + n;
+    int bad = fseek(fp, 0, SEEK_END) != 0 ||
+              fwrite(ray_data(v), esz, (size_t)n, fp) != (size_t)n ||
+              fflush(fp) != 0 || fseek(fp, 8, SEEK_SET) != 0 ||
+              fwrite(&nc, 8, 1, fp) != 1;
+    if (fclose(fp) != 0) bad = 1;
+    return bad ? q_err(QE_IO) : NULL;
+}
+
+/* Shape-A sym file: NUL-terminated names at EOF, ONE buffer/ONE write (no torn
+ * half-symbol), header count untouched — advisory, the reader scans to EOF. */
+static ray_t* wf_append_syms(ray_t* path, ray_t* y) {
+    int64_t n = y->type == -RAY_SYM ? 1 : ray_len(y);
+    size_t total = 0;
+    for (int64_t i = 0; i < n; i++) {
+        int64_t id = y->type == -RAY_SYM ? y->i64 : ray_vec_get_sym_id(y, i);
+        ray_t* nm = ray_sym_str(id);                     /* borrowed */
+        total += (nm ? ray_str_len(nm) : 0) + 1;
+    }
+    uint8_t* buf = (uint8_t*)malloc(total ? total : 1);
+    if (!buf) return q_err(QE_OOM);
+    uint8_t* w = buf;
+    for (int64_t i = 0; i < n; i++) {
+        int64_t id = y->type == -RAY_SYM ? y->i64 : ray_vec_get_sym_id(y, i);
+        ray_t* nm = ray_sym_str(id);
+        size_t l = nm ? ray_str_len(nm) : 0;
+        memcpy(w, nm ? ray_str_ptr(nm) : "", l);
+        w += l;
+        *w++ = 0;
+    }
+    FILE* fp = fopen(ray_str_ptr(path), "ab");
+    int bad = !fp || fwrite(buf, 1, total, fp) != total;
+    if (fp && fclose(fp) != 0) bad = 1;
+    free(buf);
+    return bad ? q_err(QE_IO) : NULL;
+}
+
+/* read -> `,` -> rewrite; a container is rewritten with its own parameters
+ * (alg 0 goes through (2;0), whose never-paying deflate re-emits the alg-0
+ * wrapper), a plain file stays plain — `.z.zd` never applies to a rewrite. */
+static ray_t* wf_append_rewrite(ray_t* path, ray_t* y, int zipped) {
+    ray_t* old = wf_read_path(path, 1, NULL);
+    if (!old || RAY_IS_ERR(old)) return old ? old : q_err(QE_IO);
+    if (old->type == RAY_TABLE || old->type == RAY_DICT || q_type_is_keyed(old)) {
+        ray_release(old);
+        return q_err(QE_TYPE);       /* serialized-table upsert: its own queued PR */
+    }
+    ray_t* join = q_registry_lookup_name(",", 1, Q_DYADIC);   /* borrowed */
+    if (!join) { ray_release(old); return q_err(QE_TYPE); }
+    ray_t* args[2] = { old, y };
+    ray_t* joined = q_eval_apply_concrete(q_eval_apply_value(join, args, 2));
+    ray_release(old);
+    if (!joined || RAY_IS_ERR(joined)) return joined ? joined : q_err(QE_TYPE);
+    int lbs = 0, alg = 0, lvl = 0;
+    if (zipped) {
+        q_io_zipmap_t zm;
+        ray_t* e = q_io_zip_open(path, &zm);
+        if (e) { ray_release(joined); return e; }
+        alg = zm.algorithm ? (int)zm.algorithm : 2;
+        lvl = zm.algorithm ? (int)zm.level : 0;
+        while ((1LL << lbs) < zm.block_size) lbs++;
+        q_io_zipmap_free(&zm);
+    }
+    ray_t* bad = wf_write_flat_path(path, joined, lbs, alg, lvl);
+    ray_release(joined);
+    return bad;
+}
+
+static ray_t* wf_append_path(ray_t* path, ray_t* y) {
+    if (!y) return q_err(QE_TYPE);
+    ray_retain(y);
+    y = q_eval_apply_concrete(y);
+    if (!y || RAY_IS_ERR(y)) return y ? y : q_err(QE_TYPE);
+    struct stat st;
+    errno = 0;
+    int have = stat(ray_str_ptr(path), &st) == 0;
+    if (!have && errno != ENOENT) { ray_release(y); return q_err(QE_IO); }
+    if (have && !S_ISREG(st.st_mode)) { ray_release(y); return q_err(QE_TYPE); }
+    ray_t* bad;
+    if (!have || st.st_size == 0) {   /* write-if-absent, ref/upsert.md:32 (hopen
+                                       * pre-creates a 0-byte file); atoms enlist */
+        ray_t* v = y->type < 0 ? q_enlist_wrap(&y, 1) : (ray_retain(y), y);
+        bad = !v || RAY_IS_ERR(v) ? (v ? v : q_err(QE_OOM))
+                                  : wf_write_flat_path(path, v, -1, -1, -1);
+        if (v && !RAY_IS_ERR(v) && v != bad) ray_release(v);
+        ray_release(y);
+        return bad;
+    }
+    q_wf_colhdr h;
+    ray_t* e = q_wirefile_probe(path, &h);
+    if (e) { ray_release(y); return e; }
+    if (h.is_enum) { ray_release(y); return q_err(QE_NYI); }   /* enum: won't-do */
+    if (h.tag && y->type != h.tag && y->type != -h.tag) {
+        ray_release(y);
+        return q_err(QE_TYPE);        /* a typed file keeps its element type */
+    }
+    if (!h.zipped && h.tag == RAY_SYM) {
+        uint8_t hd[4] = {0};
+        FILE* fp = fopen(ray_str_ptr(path), "rb");
+        int plain = fp && fread(hd, 1, 4, fp) == 4 && hd[3] == 0;
+        if (fp) fclose(fp);
+        bad = plain ? wf_append_syms(path, y) : wf_append_rewrite(path, y, 0);
+    } else if (!h.zipped && h.mappable && !h.nested && h.disk_attr == 0 &&
+               (int64_t)st.st_size ==
+                   WF_B_OFF + h.count * (int64_t)ray_type_sizes[(uint8_t)h.tag]) {
+        ray_t* v = y->type < 0 ? q_enlist_wrap(&y, 1) : (ray_retain(y), y);
+        bad = !v || RAY_IS_ERR(v) ? (v ? v : q_err(QE_OOM))
+                                  : wf_append_inplace(path, v, h.count);
+        if (v && !RAY_IS_ERR(v) && v != bad) ray_release(v);
+    } else {
+        bad = wf_append_rewrite(path, y, h.zipped);
+    }
+    ray_release(y);
+    return bad;
+}
+
+ray_t* q_wirefile_append(ray_t* x, ray_t* y) {
+    ray_t* path = q_io_file_path(x);
+    if (!path) return q_err(QE_TYPE);
+    if (ray_eval_get_restricted()) { ray_release(path); return q_err(QE_ACCESS); }
+    ray_t* bad = wf_append_path(path, y);
+    ray_release(path);
+    if (bad) return bad;
+    ray_retain(x);
+    return x;
+}
+
+ray_t* q_wirefile_append_path(ray_t* pathstr, ray_t* y) {
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    return wf_append_path(pathstr, y);
 }
 
 /* ---- the domain-append primitive (enumeration's only trace) ------------- */
