@@ -244,9 +244,9 @@ static int col_uniform_type(ray_t* col);                 /* fwd — its precondi
 
 /* THE inline-cell law (ref/trim.md, ref/dotq.md:1655): a dict row, a table
  * cell and a list-row cell are ELEMENTS, and an element renders single-line —
- * every collection via the k-repr renderer, never the top-level layout. */
+ * every NON-ATOM via the k-repr renderer, never the top-level layout. */
 static void fmt_elem_inline(ray_t* e, char* out, size_t cap) {
-    if (is_collection(e)) q_fmt_krepr(e, out, cap);
+    if (e && !RAY_IS_ERR(e) && !ray_is_atom(e)) q_fmt_krepr(e, out, cap);
     else q_fmt(e, out, cap);
 }
 
@@ -1764,12 +1764,21 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
             fmt_qtext((const char*)ray_data(val), (size_t)ray_len(val), buf, bufsz);
         return;
     }
+    if (val->type == RAY_TABLE) {                  /* `+`a`b!(..)` — ref/dotz.md:723, ref/dotq.md:308 */
+        ray_t* d = q_flip_wrap(val);               /* owned: the column dict */
+        if (d && RAY_IS_ERR(d)) ray_error_free(d); /* OOM only: fall through, never an empty repr */
+        else if (d) {
+            if (bufsz > 1) { buf[0] = '+'; q_fmt_krepr(d, buf + 1, bufsz - 1); }
+            ray_release(d);
+            return;
+        }
+    }
     if (val->type == RAY_DICT) {
-        /* dict inline `keys!vals` (`(,`a)!,1`); a KEYED TABLE keeps the
-         * q_fmt fallback (flip repr = tracked gap) */
+        /* dict inline `keys!vals` (`(,`a)!,1`); a KEYED TABLE falls out as `(+K)!+V` off the table arm
+         * (kb/pivoting-tables.md:86).  A splay/provider carrier IS its stored dict here — no gather, no `+`. */
         ray_t* kk = ray_dict_keys(val);
         ray_t* vv = ray_dict_vals(val);
-        if (kk && vv && !(kk->type == RAY_TABLE && vv->type == RAY_TABLE)) {
+        if (kk && vv) {
             /* boxed homogeneous runs collapse to typed vectors (`1 2`) */
             ray_t* ck = q_list_collapse(kk);   /* owned */
             ray_t* cv = q_list_collapse(vv);   /* owned */
@@ -1779,10 +1788,11 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
             q_fmt_krepr(cv, vb, sizeof vb);
             ray_release(ck);
             ray_release(cv);
-            /* left operand of `!` needs parens when compound so the string re-parses:
-             * an enlist `,x` or a `$`-form typed empty `` `long$() `` (else RTL binds `$` wrong) */
-            if (kb[0] == ',' || strchr(kb, '$')) snprintf(buf, bufsz, "(%s)!%s", kb, vb);
-            else                                 snprintf(buf, bufsz, "%s!%s", kb, vb);
+            /* left operand of `!` needs parens when compound so the string re-parses: an enlist `,x`, a flip
+             * `+x` (`(+(,`k)!,1 2 3)!+..`, kb/pivoting-tables.md:86), or a `$`-form typed empty `` `long$() ``
+             * (else RTL binds `$` wrong) */
+            if (kb[0] == ',' || kb[0] == '+' || strchr(kb, '$')) snprintf(buf, bufsz, "(%s)!%s", kb, vb);
+            else                                                 snprintf(buf, bufsz, "%s!%s", kb, vb);
             return;
         }
     }
