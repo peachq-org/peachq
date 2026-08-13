@@ -154,7 +154,7 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
         r = ray_lazy_materialize(r);
 
     /* THE doc-capture fire point: a header claimed during this statement's eval
-     * reaches `.help.add` here — after the eval (never mid-eval) and BEFORE the
+     * reaches its `.help` hook here — after the eval (never mid-eval) and BEFORE the
      * drain below, so anything the q hook shows leaves with this statement. */
     q_comment_stmt_end();
 
@@ -285,7 +285,7 @@ static int ctx_run_script(script_src_t* src, FILE* out, FILE* err) {
         if (tlen == 0) { q_comment_break(); continue; }  /* blank/whitespace-only: ignored, no flush */
         if (tlen == 1 && trim[0] == '/') { in_block = 1; q_comment_break(); continue; }  /* open block; no flush */
         if (tlen == 1 && trim[0] == '\\') break; /* singleton \ exits (post-loop FLUSH runs)  */
-        if (trim[0] == '/') { q_comment_line(trim, tlen, lineno); continue; }  /* comment-only line: ignored, no flush */
+        if (trim[0] == '/') { q_comment_line(trim, tlen); continue; }  /* comment-only line: ignored, no flush */
 
         int is_cont = indented && alen > 0;
         if (is_cont) q_comment_break();                 /* a continuation cannot be documented */
