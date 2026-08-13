@@ -3,7 +3,7 @@
  * run through q_eval under one NON-barrier column scope; Where is successive
  * refinement of an index vector; sel is `flip names!phrases`; limit composes
  * on take/drop; by rides the group core; update is dict update over Amend At;
- * delete is drop / complement select.  Order: From-Where-By-Select-Limit. */
+ * delete is drop / complement select.  Order: From-Where-Sort-Limit-By-Select. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/eval/q_funsql.h"
 #include "qlang/eval/q_eval.h"
@@ -257,7 +257,9 @@ static ray_t* exec_shape(ray_t* a, ray_t* t, ray_t* idx) {
     return phrase_eval(a, t, idx);
 }
 
-/* Rank 5 (law 9): n#r, pair (i;j) is j#i _ r; "up to n" clamps (ref/select.md) */
+/* Rank 5 (law 9): n#r, pair (i;j) is j#i _ r; "up to n" clamps (ref/select.md).
+ * r is the post-Where ROW INDEX, not the finished result — select.md:121 takes
+ * the first n rows BEFORE the Select phrase runs (divergent for aggregates). */
 static ray_t* limit_apply(ray_t* nspec, ray_t* r) {
     if (!r || RAY_IS_ERR(r)) return r;
     int64_t cnt = q_count_long(r);
@@ -567,8 +569,28 @@ static ray_t* by_exec_vec(ray_t* a, ray_t* t, ray_t* idx) {
 }
 
 
+/* Rank 6 (ref/select.md:112): permute the post-Where rows by `g cn` — g is
+ * APPLIED through the one apply path (iasc/idesc/`<:`/`>:`/any unary grader),
+ * never recognized from a catalogue. */
+static ray_t* sort_idx(ray_t* spec, ray_t* t, ray_t* idx) {
+    ray_t** e = (spec && spec->type == RAY_LIST && ray_len(spec) == 2)
+                    ? (ray_t**)ray_data(spec) : NULL;
+    if (!e || !e[0] || !e[1] || e[1]->type != -RAY_SYM) {
+        ray_release(idx);
+        return q_err(QE_TYPE);
+    }
+    ray_t* col = phrase_eval(e[1], t, idx);
+    if (!col || RAY_IS_ERR(col)) { ray_release(idx); return col ? col : q_err(QE_TYPE); }
+    ray_t* perm = q_eval_apply_value(e[0], &col, 1);
+    ray_release(col);
+    if (!perm || RAY_IS_ERR(perm)) { ray_release(idx); return perm ? perm : q_err(QE_TYPE); }
+    ray_t* r = gather(idx, perm);
+    ray_release(perm);
+    ray_release(idx);
+    return r;
+}
+
 static ray_t* ques_select(ray_t** args, int64_t n) {
-    if (n == 6) return q_err(QE_NYI);            /* rank 6: the wave-5 sort */
     ray_t* pushed = q_provider_qsql_push(args, n); /* NULL: not provider / no qsql hook */
     if (pushed) return pushed;
     int64_t nk = 0;                              /* keyed source: re-key the result */
@@ -577,6 +599,8 @@ static ray_t* ques_select(ray_t** args, int64_t n) {
     ray_t* idx0 = til_count(t);
     ray_t* idx = RAY_IS_ERR(idx0) ? idx0 : where_fold(args[1], t, idx0);
     if (idx != idx0 && !RAY_IS_ERR(idx0)) ray_release(idx0);
+    if (n == 6 && !RAY_IS_ERR(idx)) idx = sort_idx(args[5], t, idx);
+    if (n >= 5 && !RAY_IS_ERR(idx)) idx = limit_apply(args[4], idx);
     if (RAY_IS_ERR(idx)) { ray_release(t); return idx; }
     ray_t* b = args[2];
     ray_t* a = args[3];
@@ -613,7 +637,6 @@ static ray_t* ques_select(ray_t** args, int64_t n) {
     }
     ray_release(idx);
     ray_release(t);
-    if (n >= 5) r = limit_apply(args[4], r);
     if (nk > 0 && r && !RAY_IS_ERR(r)) {
         ray_t* rk = q_bang_enkey(nk, r);
         ray_release(r);
