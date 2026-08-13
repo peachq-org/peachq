@@ -1208,12 +1208,38 @@ static void qsql_pend_unwind(void) {              /* q_die: release every ref */
     }
 }
 
+/* select[…] sort spec `<c` / `>c` -> kdb's ENLISTED k-unary pair `,(<:;`c)`
+ * (extracted/basics/funsql.qcmd:391) — the registry VALUE at the head, never
+ * an iasc/idesc spelling; the enlist is the tree quote, so the pair reaches
+ * `?` as DATA in slot 6. */
+static int qtok_is_sort_glyph(const Token *tk) {
+    return tk->kind == T_VERB && (sym_name_is(tk->k, "<") || sym_name_is(tk->k, ">"));
+}
+
+static ray_t *qsql_sortspec(Parser *p) {
+    int desc = sym_name_is(cur(p)->k, ">");
+    adv(p);
+    Token *ct = cur(p);
+    if (ct->kind != T_NOUN || !ct->k || ct->k->type != -RAY_SYM ||
+        (ct->k->attrs & Q_ATTR_QUOTED))
+        q_die("qsql: expected column name after < / > in select[…]");
+    ray_t *xs[2] = { q_embed(q_verb(desc ? '>' : '<'), Q_MONADIC), ct->k };
+    ct->k = NULL;
+    adv(p);
+    ray_t *pair = q_list(xs, 2);
+    ray_t *l = ray_list_new(1);
+    l = ray_list_append(l, pair);
+    ray_release(pair);
+    return l;
+}
+
 /* parse_query: the UNIFIED qSQL query-tree parser.  Parses
  *     verb [phrases] [by L] from e [where L]
  * and emits the SAME functional 5-list the bespoke clones do — but building the
  * c/b/a slots by normalizing raw parse_e phrase lists (qsql_normalize_phrases)
  * instead of the clone's hand-rolled qsql_expr/qsql_term.  Slot order matches
- * the clones exactly: (head; t; c=where; b=by; a=phrases).
+ * the clones exactly: (head; t; c=where; b=by; a=phrases); a select[…] bracket
+ * appends n (slot 5) and the enlisted sort pair (slot 6).
  *
  *   head  `?` (select/exec) | `!` (update/delete)
  *   t     the from-expression (a bare name lowers by-name via ql_qsql's
@@ -1237,6 +1263,8 @@ static P parse_query(Parser *p) {
     ray_t **b = qsql_pend_push();      /* by phrases    */
     ray_t **c = qsql_pend_push();      /* where phrases */
     ray_t **t = qsql_pend_push();      /* from-expr     */
+    ray_t **lim = qsql_pend_push();    /* select[n] limit expr (slot 5) */
+    ray_t **ord = qsql_pend_push();    /* select[n;<c] sort spec (slot 6) */
 
     /* verb keyword (cursor is on it) */
     Token *vk = cur(p);
@@ -1247,6 +1275,34 @@ static P parse_query(Parser *p) {
     else verb = QSQL_V_DELETE;                     /* the only remaining verb */
     adv(p);                                        /* consume the verb keyword */
 
+    /* select[n] / select[m n] / select[n;<c] / select[<c] (ref/select.md:104-121):
+     * the bracket belongs to the TEMPLATE — limit expr -> slot 5 (0W when order
+     * alone), sort spec -> slot 6 — never to the phrase list. */
+    if (verb == QSQL_V_SELECT && at(p, T_LBRACK)) {
+        adv(p);
+        if (!qtok_is_sort_glyph(cur(p))) {
+            P le = parse_e(p, Q_NONE);
+            if (le.role == R_NONE) q_die("qsql: expected limit expression in select[…]");
+            *lim = le.v;
+            if (at(p, T_SEMI)) {
+                adv(p);
+                *ord = qsql_sortspec(p);
+            }
+        } else {
+            *ord = qsql_sortspec(p);
+            *lim = ray_i64(INT64_MAX);             /* order alone: n = 0W */
+        }
+        expect(p, T_RBRACK, "expected ']' closing select[…]");
+    }
+
+    /* `select distinct` claims the b slot (basics/funsql.md:161-175) — SELECT
+     * only: exec/update/delete keep distinct as an ordinary phrase verb, and
+     * `distinct:e` is a column alias, not the modifier */
+    int dist = verb == QSQL_V_SELECT && qtok_sym_is(cur(p), "distinct") &&
+               !(p->pos + 1 < p->t.n && p->t.t[p->pos + 1].kind == T_VERB &&
+                 sym_name_is(p->t.t[p->pos + 1].k, ":"));
+    if (dist) adv(p);
+
     /* select-phrase list: stops at by / from */
     *a = parse_phrase_list(p, Q_SELECT);
 
@@ -1254,6 +1310,7 @@ static P parse_query(Parser *p) {
      * (ref/delete.md's template omits it; kdb rejects at parse) */
     if (qtok_sym_is(cur(p), "by")) {
         if (verb == QSQL_V_DELETE) q_die("qsql: by is not a delete clause");
+        if (dist) q_die("qsql: distinct with by (b is one slot)");
         adv(p);
         *b = parse_phrase_list(p, Q_BY);
         if (ray_len(*b) == 0) q_die("qsql: empty by phrase");
@@ -1289,7 +1346,8 @@ static P parse_query(Parser *p) {
     ray_release(*a); *a = NULL;
 
     if (*b) { B = qsql_normalize_phrases(*b, Q_BY, verb); ray_release(*b); *b = NULL; }
-    else    { B = (verb == QSQL_V_EXEC) ? ray_list_new(0) : ray_bool(0); } /* no by */
+    else    { B = dist ? ray_bool(1)
+                       : (verb == QSQL_V_EXEC) ? ray_list_new(0) : ray_bool(0); } /* no by */
 
     if (*c) { C = qsql_normalize_phrases(*c, Q_WHERE, verb); ray_release(*c); *c = NULL; }
     else    { C = ray_list_new(0); }               /* no where -> () */
@@ -1304,22 +1362,26 @@ static P parse_query(Parser *p) {
         die_err(QE_DUP);
     }
 
-    /* a/b/c are consumed; the from-expr moves out of its slot into the tree
-     * below, so take it before the pops free the frames holding all four. */
+    /* a/b/c are consumed; the from-expr and the limit/order slots move out
+     * into the tree below, so take them before the pops free their frames. */
     ray_t *from = *t;
-    qsql_pend_pop(); qsql_pend_pop(); qsql_pend_pop(); qsql_pend_pop();
+    ray_t *limv = *lim, *ordv = *ord;
+    qsql_pend_pop(); qsql_pend_pop(); qsql_pend_pop();
+    qsql_pend_pop(); qsql_pend_pop(); qsql_pend_pop();
 
     /* the VALUE head (value-heads-at-parse): the same immutable registry cell
      * the functional spelling carries — never a bare sym name-ref */
     head = q_embed((verb == QSQL_V_SELECT || verb == QSQL_V_EXEC) ? q_verb('?')
                                                                   : q_verb('!'),
                    Q_DYADIC);
-    node = ray_list_new(5);
+    node = ray_list_new(limv ? (ordv ? 7 : 6) : 5);
     node = ray_list_append(node, head); ray_release(head);
     node = ray_list_append(node, from); ray_release(from);
     node = ray_list_append(node, C);    ray_release(C);
     node = ray_list_append(node, B);    ray_release(B);
     node = ray_list_append(node, A);    ray_release(A);
+    if (limv) { node = ray_list_append(node, limv); ray_release(limv); }
+    if (ordv) { node = ray_list_append(node, ordv); ray_release(ordv); }
     return (P){ R_NOUN, node };
 }
 
