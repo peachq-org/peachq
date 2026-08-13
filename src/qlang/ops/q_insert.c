@@ -11,6 +11,8 @@
 #include "qlang/ops/q_table.h"
 #include "qlang/ops/q_bang.h"  /* q_bang_enkey — the keying primitive */
 #include "qlang/io/q_provider.h" /* upsert: `:pq: targets route to .X.upsert */
+#include "qlang/io/q_io.h"       /* q_io_is_fsym — upsert's file-target classifier */
+#include "qlang/net/q_wirefile.h"
 
 /* Row count of a plain OR keyed table (keyed via its key table — never trust
  * ray_len on a string-atom column). */
@@ -83,6 +85,8 @@ ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
 ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
     ray_t* pr = q_provider_write(x, y, 1);
     if (pr) return pr;
+    if (q_io_is_fsym(x)) return q_wirefile_append(x, y);  /* file target: the one
+                                                           * flat-append kernel */
     int64_t sym;
     ray_t* t = q_table_operand(x, &sym);
     if (!t) {

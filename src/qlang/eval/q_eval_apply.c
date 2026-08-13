@@ -26,7 +26,9 @@
 #include "qlang/base/q_type.h"     /* q_type_is_keyed — the type axis home */
 #include "qlang/parse/q_parse_internal.h"
 #include "qlang/io/q_handles.h"
+#include "qlang/io/q_io.h"     /* q_io_set — Amend Entire `:` on a file target */
 #include "qlang/io/q_splay.h"  /* colrefs force at the apply/gather seam */
+#include "qlang/net/q_wirefile.h"  /* q_wirefile_append — Amend Entire `,` */
 #include "qlang/ops/q_bang.h"
 #include "qlang/ops/q_dollar.h"
 #include "qlang/ops/q_index.h"
@@ -1631,7 +1633,17 @@ static ray_t* name_lift(const q_op_t* row, ray_t** args, int64_t n, int dot) {
     ray_t* s = ray_sym_str(args[0]->i64);
     int isfile = s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == ':';
     if (s) ray_release(s);
-    if (isfile) return q_err(QE_NYI);       /* `:path on-disk amend: file wave */
+    if (isfile) {
+        /* Amend Entire on a file (ref/amend.md; kb/performance-tips.md:151-152):
+         * dot form, empty path — `,` appends, `:` sets.  Every other file amend
+         * shape stays 'nyi (the file wave's remaining edge). */
+        if (dot && n == 4 && args[1] && args[1]->type == RAY_LIST && ray_len(args[1]) == 0) {
+            const q_op_t* rep = q_registry_row_of(args[2], Q_DYADIC);
+            if (rep && rep == q_ops_find(",", 1)) return q_wirefile_append(args[0], args[3]);
+            if (rep && rep == q_ops_find(":", 1)) return q_io_set(args[0], args[3]);
+        }
+        return q_err(QE_NYI);
+    }
     int64_t id = args[0]->i64;
     ray_t* cur = q_env_get(id);                      /* borrowed flat global */
     int stole = 0;
