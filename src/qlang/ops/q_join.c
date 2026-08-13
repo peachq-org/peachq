@@ -609,7 +609,10 @@ ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode) {
         }
         free(uidx);
         if (!part2 || RAY_IS_ERR(part2)) { free(rmap); ray_release(part1); ray_release(yf); return part2 ? part2 : q_err(QE_TYPE); }
-        out = ray_concat_fn(part1, part2);
+        /* THE row-append home, not base table-concat: an untyped general
+         * column constrains nothing, so a typed payload must be accepted
+         * (base's table concat demands column types be equal). */
+        out = q_table_append(part1, part2);
         ray_release(part1);
         ray_release(part2);
     }
