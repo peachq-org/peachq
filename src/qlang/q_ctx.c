@@ -112,12 +112,13 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
 
     /* `?…` — the help doors (peachq): at the statement head, `?[` alone stays
      * CODE (funsql / vector conditional); ANY other `?` line rewrites to
-     * `.help.help"topic"` — `??` to `.help.full"topic"` (the full page) — so
-     * glyph topics (`?$`, `?!`) work too.  Topic = the first token, `"`/`\`
-     * escaped into the rewrite; bare `?` sends "" (.help.find matches all —
-     * the clipped directory).  Intercepted lines are kdb parse-error space,
+     * `.help.show"topic"` — `??` to `.help.full"topic"` (the full page) — so
+     * glyph topics (`?$`, `?!`) work too.  Both PRINT: `.help.text` is the
+     * value ladder and no door returns it.  Topic = the first token, `"`/`\`
+     * escaped into the rewrite; bare `?` sends "", which q answers with the
+     * index page.  Intercepted lines are kdb parse-error space,
      * so classic fidelity costs nothing; without `\l pq` the call answers
-     * '.help.help, which names the fix. */
+     * '.help.show, which names the fix. */
     if ((!lang || lang == 'q') && n >= 1 && s[0] == '?') {
         size_t t0 = 1;
         int    full = (t0 < n && s[t0] == '?');
@@ -127,7 +128,7 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
             size_t t1 = t0;
             while (t1 < n && !isspace((unsigned char)s[t1])) t1++;
             char hb[512];
-            int  hn = snprintf(hb, sizeof hb, ".help.%s\"", full ? "full" : "help");
+            int  hn = snprintf(hb, sizeof hb, ".help.%s\"", full ? "full" : "show");
             for (size_t i = t0; i < t1 && hn < (int)sizeof hb - 4; i++) {
                 if (s[i] == '"' || s[i] == '\\') hb[hn++] = '\\';
                 hb[hn++] = s[i];
