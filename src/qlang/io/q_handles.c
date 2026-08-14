@@ -8,15 +8,17 @@
 #include "qlang/io/q_handles.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_registry_internal.h" /* q_str_text_bytes, q_type_strict_i64 */
-#include "qlang/q_console.h" /* q_console_write — 1/-1/2/-2 console handles */
-#include "qlang/q_dotz.h"   /* q_dotz_now_ns — the portable wall clock */
+#include "qlang/q_console.h" /* q_console_write — the 1/-1 console handles */
+#include "qlang/q_dotz.h"   /* q_dotz_now_ns — the portable wall clock; q_dotz_resolve — `.z.ps` */
 #include "qlang/io/q_io.h"   /* q_io_mkdir_parents — hopen creates missing directories */
 #include "qlang/io/q_provider.h" /* the `:pq:` virtual-table provider arms */
 #include "qlang/net/q_wirefile.h"    /* q_wirefile_append_path — typed handle append */
 #include "qlang/net/q_ws.h"          /* q_ws_client_open — `:ws:// sym handles */
 #include "qlang/net/q_http_client.h" /* q_http_client_raw — `:http:// sym handles */
+#include "qlang/eval/q_eval.h"       /* q_eval_value_wrap / q_eval_apply_value — handle 0 IS `.z.ps`/value */
 #include "lang/eval.h"       /* ray_eval_get_restricted, ray_at_fn */
 #include "lang/internal.h"   /* make_i64, ray_hopen_fn/ray_hsend_fn/ray_hpost_fn/ray_hclose_fn */
+#include "core/runtime.h"    /* __VM->ipc_handle — the handle context handle 0 swaps */
 #include "table/sym.h"       /* ray_sym_intern_runtime, ray_sym_str */
 #include "core/ipc.h"        /* ray_ipc_handle_of_fd/fd_of_handle — q true-fd handle <-> selector id */
 #include <rayforce.h>
@@ -266,8 +268,27 @@ static ray_t* raw_write(int64_t qh, ray_t* y) {
     return q_err(QE_TYPE);
 }
 
-/* Console handles (kdb basics/handles.md): 1/-1 stdout, 2/-2 stderr, routed
- * to the q console sink; a NEGATIVE handle appends '\n' after each string. */
+/* `0 x` — basics/handles.md § Console: "evaluates .z.ps (which defaults to
+ * value) on x and returns the result", so a parse list `(+;2;2)` works as well
+ * as source text — both are what `value` already means.  The handle context is
+ * the CONSOLE's for the duration (ref/dotz.md: .z.w 0i, .z.u the process user),
+ * written straight through __VM as q_err.c writes raise_val — the base is frozen
+ * and owns no scoped setter.  DIVERGENCE (deliberate, kdb is silent): restricted
+ * mode DENIES it — `0".z.u"` IS the identity escape -b/-U exists to close. */
+static ray_t* console_eval_h(ray_t* y) {
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    ray_t* zps = q_dotz_resolve(ray_sym_intern(".z.ps", 5));   /* owned; NULL = the `value` default */
+    int64_t saved = __VM ? __VM->ipc_handle : -1;
+    if (__VM) __VM->ipc_handle = -1;                 /* -1 IS "no connection" — the console */
+    ray_t* r = zps ? q_eval_apply_value(zps, &y, 1) : q_eval_value_wrap(y);
+    if (__VM) __VM->ipc_handle = saved;
+    if (zps) ray_release(zps);
+    return r;
+}
+
+/* Console handles (kdb basics/handles.md): 1/-1 stdout, routed to the q console
+ * sink; a NEGATIVE handle appends '\n' after each string.  2/-2 are NOT here —
+ * stderr is fd 2, which raw_write already speaks. */
 static ray_t* console_write_h(int64_t qh, ray_t* y) {
     int nl = qh < 0;
     const char* yp; int64_t yn;
@@ -302,7 +323,9 @@ static ray_t* console_write_h(int64_t qh, ray_t* y) {
  * Those primitives are RAY_FN_RESTRICTED and called directly, so re-assert
  * restricted per arm (console handles stay usable under it). */
 ray_t* q_handles_apply(int64_t qh, ray_t* y) {
-    if (qh == 1 || qh == -1 || qh == 2 || qh == -2) return console_write_h(qh, y);
+    if (qh == 1 || qh == -1) return console_write_h(qh, y);
+    if (qh == 2 || qh == -2) return raw_write(qh, y);   /* stderr IS fd 2, `\2`-redirectable */
+    if (qh == 0) return console_eval_h(y);
     int64_t afd = (qh == INT64_MIN) ? 0 : (qh < 0 ? -qh : qh);   /* neg h = same fd */
     if (afd >= 3) {
         int hk = q_handles_kind(afd);
@@ -333,7 +356,7 @@ ray_t* q_handles_apply(int64_t qh, ray_t* y) {
         }
     }
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
-    if (qh == 0 || qh == INT64_MIN || qh == INT32_MIN)   /* console-0 / int nulls */
+    if (qh == INT64_MIN || qh == INT32_MIN)   /* int nulls are not handle 0 */
         return q_err(QE_TYPE);
     int64_t fd  = (qh > 0) ? qh : -qh;         /* q handle is the socket fd */
     int64_t raw = ray_ipc_handle_of_fd(fd);    /* fd -> poll selector id */
