@@ -65,17 +65,19 @@ $(GEN_DIR)/qlang/j_gen.h: src/qlang/j.q tools/gen-bootstrap.sh
 	@mkdir -p $(dir $@)
 	SYMBOL=PEACHQ_J_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/j.q
 
-# The standard library: lib/*.q TOP LEVEL ONLY — q that calls into the peachq C
-# surface. Portable q lives in qlib/ and is never embedded.  Sorted for
-# determinism — the ANY-ORDER LAW makes the order semantically moot.
-# The directory itself is a prerequisite (spelled lib/. — bare `lib` is the
-# librayforce.a target): deleting/renaming a file bumps the dir mtime, which
-# the file-only list cannot see (the html-assets rule's law).
+# The standard library, both halves: lib/*.q TOP LEVEL ONLY — q that calls into
+# the peachq C surface — and qlib/src/*.q, the PORTABLE half that must also run
+# on kx q.  Sorted for determinism — the ANY-ORDER LAW makes the order
+# semantically moot.
+# The directories themselves are prerequisites (lib/. spelled with the dot —
+# bare `lib` is the librayforce.a target): deleting/renaming a file bumps the
+# dir mtime, which the file-only list cannot see (the html-assets rule's law).
 # help.q is PINNED FIRST, the one order that is not moot: it defines .help.add,
 # and the C script seam captures a file's doc headers only while that name is
 # bound. Sort order would put it third and silently drop duckdb.q/ffi.q's docs.
-LIB_Q_SRCS := lib/help.q $(filter-out lib/help.q,$(sort $(wildcard lib/*.q)))
-$(GEN_DIR)/qlang/lib_gen.h: lib/. $(LIB_Q_SRCS) tools/gen-bootstrap.sh
+LIB_Q_SRCS := lib/help.q $(filter-out lib/help.q,$(sort $(wildcard lib/*.q))) \
+              $(sort $(wildcard qlib/src/*.q))
+$(GEN_DIR)/qlang/lib_gen.h: lib/. qlib/src $(LIB_Q_SRCS) tools/gen-bootstrap.sh
 	@mkdir -p $(dir $@)
 	SYMBOL=PEACHQ_LIB_BOOTSTRAP tools/gen-bootstrap.sh $@ $(LIB_Q_SRCS)
 
