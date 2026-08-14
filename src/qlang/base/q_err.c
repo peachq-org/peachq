@@ -15,6 +15,7 @@
  * backstop — a stale payload would caption the NEXT error. */
 #include "qlang/base/q_err.h"
 #include "core/runtime.h"   /* __VM->raise_val — the pending-payload slot */
+#include <stdio.h>
 #include <string.h>
 
 static const char* const q_err_names[QE__COUNT] = {
@@ -70,6 +71,22 @@ ray_t* q_err_from_text(const char* p, size_t n) {
         if (strlen(q_err_names[i]) == n && memcmp(q_err_names[i], p, n) == 0)
             return q_err((q_err_e)i);
     return q_err_name(p, n);
+}
+
+void q_err_detach(ray_t* e, q_err_sig_t* t) {
+    t->aux = e->aux[0];
+    const char* c = t->aux ? NULL : q_err_class(e);   /* unstamped: base 7-byte class */
+    snprintf(t->cls, sizeof t->cls, "%s", c ? c : "");
+    t->pv = q_err_take();
+}
+
+ray_t* q_err_resignal(q_err_sig_t* t) {
+    ray_t* e = t->pv ? q_err_signal(t->aux ? (q_err_e)(t->aux - 1) : QE_NAME, t->pv)
+             : t->aux ? q_err((q_err_e)(t->aux - 1))
+                      : q_err_from_text(t->cls, strlen(t->cls));
+    if (t->pv) ray_release(t->pv);
+    t->pv = NULL;
+    return e;
 }
 
 const char* q_err_text(ray_t* err, int64_t* len) {

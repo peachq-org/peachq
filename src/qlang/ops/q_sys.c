@@ -477,8 +477,11 @@ static ray_t* h_l(const char* arg, size_t alen) {
                 && l_is_regular_readable(cand)) { memcpy(found, cand, strlen(cand) + 1); ok = 1; }
         }
     }
-    if (ok) {   /* disk hit — load (silent); a parse-ABORTED load signals its class */
-        int rc = q_ctx_run_file(found, stdout, stderr);
+    if (ok) {   /* disk hit — load (silent); an ABORTED load signals: eval aborts
+                 * re-signal their text (already displayed), parse aborts their class */
+        ray_t* esig = NULL;
+        int rc = q_ctx_run_file(found, stdout, stderr, &esig);
+        if (esig) return esig;
         return rc >= 2 ? q_err((q_err_e)(rc - 2)) : NULL;
     }
     /* peachq: `\l pq` — the PeachQ stdlib gate. A dev-override disk file (the
@@ -488,10 +491,8 @@ static ray_t* h_l(const char* arg, size_t alen) {
      * scoped to the exact literal `pq`). */
     if (alen == 2 && arg[0] == 'p' && arg[1] == 'q') {
         struct stat st;
-        if (!(stat("pq", &st) == 0 && S_ISDIR(st.st_mode))) {   /* not a `pq` dir → embedded */
-            q_pq_load();
-            return NULL;
-        }
+        if (!(stat("pq", &st) == 0 && S_ISDIR(st.st_mode)))     /* not a `pq` dir → embedded */
+            return q_pq_load();
     }
     struct stat st;
     if (stat(lit, &st) == 0 && S_ISDIR(st.st_mode)) return NULL;  /* dir load deferred */
@@ -802,10 +803,10 @@ static ray_t* h_W(const char* arg, size_t alen) {
     return NULL;
 }
 
-/* `\e` — error-trap mode (0 off / 1 suspend / 2 dump).  `\e`→`0i`.  Peachq
- * default is 0 and `\e` governs the CONSOLE (kdb: console default 1, `\e`
- * governs async/HTTP callbacks) — recorded pragmatic divergence, so existing
- * transcripts keep today's one-line error display unless a session opts in. */
+/* `\e` — error trap CLIENTS (syscmds.md#e-error-trap-clients; owner ruling
+ * 2026-08-14: "local calls always suspend, \e should only be client calls").
+ * Governs the REMOTE door only: 0 abort+answer (default), 1 suspend on the
+ * server console, 2 stack to stderr + answer.  `\e`→`0i`. */
 static ray_t* h_e(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_err_trap);
     int64_t v;

@@ -5,6 +5,7 @@
  * syntax.  Nothing here runs at
  * q_runtime_create — the pre-gate env stays kdb-clean. */
 #include "qlang/q_pq.h"
+#include "qlang/base/q_err.h"  /* q_err — an aborted bundle load's re-signal */
 #include "qlang/q_ctx.h"       /* q_ctx_run_src — THE script seam */
 #include "qlang/io/q_duckdb.h" /* q_duckdb_register — the .duckdb.i.* natives */
 #include "qlang/io/q_conn.h"   /* q_conn_pq_register — the .pq.i.conns native */
@@ -15,12 +16,15 @@
 #include "qlang/lib_gen.h"     /* PEACHQ_LIB_BOOTSTRAP — the codegen'd lib/ + qlib/src bundle */
 #include <stdio.h>
 
-void q_pq_load(void) {
+ray_t* q_pq_load(void) {
     q_duckdb_register();   /* before the bundle: lib/duckdb.q hooks call these */
     q_conn_pq_register();
     q_console_pq_register();
     q_ffi_register();
     q_regex_register();
     q_strns_register();
-    q_ctx_run_src(PEACHQ_LIB_BOOTSTRAP, stdout, stderr);
+    ray_t* esig = NULL;
+    int rc = q_ctx_run_src(PEACHQ_LIB_BOOTSTRAP, stdout, stderr, &esig);
+    if (esig) return esig;
+    return rc >= 2 ? q_err((q_err_e)(rc - 2)) : NULL;
 }
