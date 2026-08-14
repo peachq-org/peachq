@@ -28,15 +28,18 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err, int print_resu
  * previous logical one, blank/comment lines do not flush, `/`..`\` blocks skip,
  * and a trimmed singleton `\` exits the script.  Returns 1 if the file's bytes
  * could not be READ (error already printed); 0 on a full load; else 1 + the
- * run_line parse code — the load ABORTED at the first unparseable statement
- * (kdb stops a script at the error; qsql.md:168's parse-time 'dup rides this,
- * so a bad file alerts before its later statements ever run). */
-int q_ctx_run_file(const char* path, FILE* out, FILE* err);
+ * failing statement's code — the load ABORTED at the first erroring statement,
+ * parse or eval alike (kdb stops a script at the error; at an interactive
+ * console an eval error may instead suspend into the `\e 1` debugger, and a
+ * resume continues the load).  On an EVAL abort, non-NULL esig receives an
+ * owned re-signal carrying the error's text, already displayed at the erroring
+ * line — `\l` raises it so the abort propagates out of nested loads. */
+int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig);
 
 /* An in-memory STRING of q source under the SAME script semantics/returns as
  * q_ctx_run_file — the embedded stdlib bundle (`\l pq`) rides this: one
  * loader, one multiline law. */
-int q_ctx_run_src(const char* s, FILE* out, FILE* err);
+int q_ctx_run_src(const char* s, FILE* out, FILE* err, ray_t** esig);
 
 /* Scan leading `<letter>)` prefixes off the (s; n) pair (rightmost letter wins;
  * `q))` never matches).  Returns the language letter, 0 = none. */

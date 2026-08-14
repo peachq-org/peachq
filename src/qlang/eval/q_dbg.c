@@ -19,7 +19,7 @@
 #define DBG_LINE_MAX 4096
 #define DBG_EY_MAX   8
 #define DBG_NEST_MAX 8
-#define DBG_KEEP_ERR 2   /* _end token bit: this statement leaves with its own payload */
+#define DBG_KEEP_ERR 4   /* _end token bit: this statement leaves with its own payload */
 
 static _Thread_local ray_t* g_live[DBG_LIVE_MAX];  /* borrowed lambda values */
 static _Thread_local int32_t g_live_env[DBG_LIVE_MAX];  /* their q_env frames */
@@ -88,6 +88,7 @@ void q_dbg_snapshot_clear(void) {
 }
 
 int q_dbg_statement_begin(const char* src, size_t n, int console) {
+    if (console < 0) console = g_console_stmt ? 2 : 0;   /* load line: inherit */
     int d = g_depth++;
     if (d > 0 && d < DBG_NEST_MAX) {
         g_held[d] = q_err_take();
@@ -97,13 +98,13 @@ int q_dbg_statement_begin(const char* src, size_t n, int console) {
     if (n >= sizeof g_stmt) n = sizeof g_stmt - 1;
     if (src && n) memcpy(g_stmt, src, n); else n = 0;
     g_stmt[n] = '\0';
-    int prev = g_console_stmt ? 1 : 0;
+    int prev = g_console_stmt;
     g_console_stmt = console;
     return prev;
 }
 
 void q_dbg_statement_end(int tok) {
-    g_console_stmt = tok & 1;
+    g_console_stmt = tok & 3;
     int d = --g_depth;
     if (d <= 0 || d >= DBG_NEST_MAX) return;
     if (g_snap_lvl == d) q_dbg_snapshot_clear();   /* whatever this level took */
@@ -247,11 +248,12 @@ static void dbg_show_frame(int idx) {
     fputs(line, stderr);
 }
 
-/* error text + the frame the cursor sits on, kdb's suspension banner (and `&`) */
+/* error text + the frame the cursor sits on, kdb's suspension banner (and `&`).
+ * With no lambda live (a load's top-level statement) frame [0] IS the frame. */
 static void dbg_banner(ray_t* err, int idx) {
     fflush(stdout);
     dbg_err_line(stderr, err);
-    if (g_live_depth > 0) dbg_show_frame(idx);
+    dbg_show_frame(idx);
     fflush(stderr);
 }
 
@@ -360,10 +362,11 @@ static ray_t* dbg_suspend(ray_t* err) {
     return out;
 }
 
+/* Local errors ALWAYS suspend (debug.md — no toggle); `\e` gates only whether
+ * the REMOTE door marks its statements console (q_ctx.c remote seams). */
 static int dbg_suspendable(ray_t* r) {
     return g_reader && g_console_stmt && g_trap_depth == 0 &&
-           q_sys_err_trap_mode() == 1 && q_eval_apply_frame_depth() > 0 &&
-           !q_err_is(r, QE_STOP);
+           q_eval_apply_frame_depth() > 0 && !q_err_is(r, QE_STOP);
 }
 
 static ray_t* dbg_observe(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
@@ -393,6 +396,33 @@ ray_t* q_dbg_filter(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
 }
 
 ray_t* q_dbg_lambda_filter(ray_t* r) { return dbg_observe(r, NULL, NULL, 0); }
+
+/* dbg_suspendable minus the lambda-frame requirement: the script statement IS
+ * a frame (debug.md#context — "system commands, including \l, correspond to
+ * individual debug stack frames").  Flag 2 keeps every non-load door out. */
+ray_t* q_dbg_load_filter(ray_t* r) {
+    if (!r || !RAY_IS_ERR(r) || q_err_is(r, QE_RETURN) || q_dbg_reported(r))
+        return NULL;
+    if (!(g_reader && g_console_stmt == 2 && g_trap_depth == 0 &&
+          !q_err_is(r, QE_STOP)))
+        return NULL;
+    if (g_snap.err != r) snap_take(r, NULL, NULL, 0);
+    ray_t* rep = dbg_suspend(r);
+    if (rep && !RAY_IS_ERR(rep)) {
+        q_err_drop();
+        q_dbg_snapshot_clear();
+    }
+    if (!rep) g_snap.reported = 1;
+    return rep;
+}
+
+void q_dbg_mark_reported(ray_t* e) {
+    if (g_depth <= 0) return;
+    g_snap_lvl = LVL(g_depth - 1);
+    q_dbg_snapshot_clear();
+    g_snap.err = e;
+    g_snap.reported = 1;
+}
 
 /* opaque backtrace object: a list of formatted frame-line strings (only
  * .Q.sbt's rendering is contract; kdb's object internals are undocumented) */
