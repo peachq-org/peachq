@@ -25,6 +25,7 @@
 #include "lang/env.h"       /* ray_env_has_name — live env-derived name highlight */
 #include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
+#include <ctype.h>          /* isalpha/isalnum — the hint's name-token scan */
 #include <stdlib.h>         /* getenv */
 #include <string.h>
 #include <errno.h>
@@ -244,6 +245,36 @@ static int32_t no_continuation(const char* mbuf, int32_t mbuf_len,
 
 static int repl_tty_dbg_read(const char* prompt, char* buf, size_t cap);
 
+/* Autosuggest: a submitted line that was exactly one name token with a
+ * .help one-liner arms the next prompt's hint — `?name / <one-liner>`, Tab/→
+ * accepting just the `?name` part.  The lookup is LOCAL (.help.oneline; no
+ * network) and absent .help (classic, no `\l pq`) simply never answers, so
+ * the prompt stays clean.  Anything else disarms. */
+static void repl_update_hint(ray_term_t* t, const char* s, size_t n) {
+    ray_term_set_hint(t, NULL, 0);
+    while (n && (s[n-1] == ' ' || s[n-1] == '\t' || s[n-1] == '\n')) n--;
+    while (n && (*s == ' ' || *s == '\t')) { s++; n--; }
+    if (n == 0 || n > 64) return;
+    if (!(isalpha((unsigned char)s[0]) || s[0] == '.')) return;
+    for (size_t i = 1; i < n; i++)
+        if (!(isalnum((unsigned char)s[i]) || s[i] == '.' || s[i] == '_')) return;
+    char src[96];
+    int  sl = snprintf(src, sizeof src, ".help.oneline\"%.*s\"", (int)n, s);
+    ray_t* ast = q_parse(src);
+    (void)sl;
+    if (RAY_IS_ERR(ast)) { ray_release(ast); return; }
+    ray_t* r = q_eval(ast);
+    ray_release(ast);
+    if (!RAY_IS_ERR(r) && r && r->type == RAY_CHARV && ray_len(r) > 0) {
+        char hint[256];
+        int  cmd = snprintf(hint, sizeof hint, "?%.*s", (int)n, s);
+        snprintf(hint + cmd, sizeof hint - (size_t)cmd, " / %.*s",
+                 (int)ray_len(r), (const char*)ray_data(r));
+        ray_term_set_hint(t, hint, cmd);
+    }
+    ray_release(r);
+}
+
 static void repl_interactive(FILE* out, FILE* err) {
     ray_term_t* t = ray_term_create();
     if (!t) {
@@ -305,6 +336,7 @@ static void repl_interactive(FILE* out, FILE* err) {
         ray_term_eval_begin(t);
         q_ctx_run_line(str, len, out, err, 1);
         ray_term_eval_end(t);
+        repl_update_hint(t, str, len);
         ray_release(line);
         /* `\d` may have switched context: refresh the prompt (q.foo). */
         {
@@ -313,6 +345,8 @@ static void repl_interactive(FILE* out, FILE* err) {
             ray_term_set_prompt(t, prompt, pl);
         }
         ray_term_begin(t);
+        if (t->hint_len > 0)
+            ray_term_redraw(t);   /* paint the hint before the first keypress */
     }
 
     q_dbg_set_reader(NULL);
@@ -427,6 +461,7 @@ static ray_t* poll_tty_data(ray_poll_t* poll, ray_selector_t* sel, void* data) {
 
     if (len == 0) {
         ray_release(line);
+        ray_term_set_hint(c->term, NULL, 0);   /* Enter dismisses the hint */
         ray_term_begin(c->term);
         return NULL;
     }
@@ -438,6 +473,7 @@ static ray_t* poll_tty_data(ray_poll_t* poll, ray_selector_t* sel, void* data) {
     ray_term_eval_begin(c->term);
     q_ctx_run_line(str, len, c->out, c->err, 1);
     ray_term_eval_end(c->term);
+    repl_update_hint(c->term, str, len);
     ray_release(line);
 
     /* `\d` may have switched context: refresh the prompt (q.foo). */
@@ -447,6 +483,8 @@ static ray_t* poll_tty_data(ray_poll_t* poll, ray_selector_t* sel, void* data) {
         ray_term_set_prompt(c->term, prompt, pl);
     }
     ray_term_begin(c->term);
+    if (c->term->hint_len > 0)
+        ray_term_redraw(c->term);   /* paint the hint before the first keypress */
     return NULL;
 }
 

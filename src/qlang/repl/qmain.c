@@ -25,7 +25,7 @@
 #include "qlang/q_runtime.h"
 #include "qlang/q_dotz.h"
 #include "qlang/ops/q_sys.h"     /* q_sys_listen — single-homed listen+readback */
-#include "qlang/q_console.h"  /* q_console_pipe_enable — the `--nonlegacy` display */
+#include "qlang/q_console.h"  /* q_console_pipe_enable — the modern pipe-table display */
 #include "qlang/net/q_tls.h"  /* q_tls_server_mode_set — the `-E` TLS server mode */
 #include "core/poll.h"
 #include "core/runtime.h"
@@ -58,6 +58,7 @@ int main(int argc, char** argv) {
     uint16_t    port = 0;
     bool        have_port = false;
     bool        port_auto = false;
+    bool        classic = false;
     const char* auth_pw = NULL;
     bool        auth_restricted = false;
     int         tls_mode = 0;
@@ -85,11 +86,12 @@ int main(int argc, char** argv) {
                 return 2;
             }
             tls_mode = spec[0] - '0';
-        } else if (strcmp(argv[i], "--nonlegacy") == 0) {
-            /* Opt IN to the pipe-table display (q_console.c).  Launch-only and
-             * OFF by default: kdb-true legacy display stays the default, and one
-             * process has exactly one display path. */
-            q_console_pipe_enable();
+        } else if (strcmp(argv[i], "-classic") == 0) {
+            /* Opt IN to classic kx-q mode: legacy table display and NO startup
+             * `\l pq`.  Launch-only; the default is modern (pipe-table display
+             * + stdlib loaded).  `\classic 1/0` re-toggles the display at
+             * runtime, but the startup load decision is made once, here. */
+            classic = true;
         } else if (strcmp(argv[i], "-u") == 0 && i + 1 < argc) {
             auth_pw = argv[++i];
             auth_restricted = false;
@@ -175,6 +177,19 @@ int main(int argc, char** argv) {
         printf("peachq %d.%d %s https://peachq.org/\n",
                RAY_VERSION_MAJOR, RAY_VERSION_MINOR, build);
         fflush(stdout);
+    }
+
+    /* Modern mode (the default): switch the console to the pipe-table display,
+     * auto-fit the console width (`\c 25 0N` — 0N re-resolves to the live
+     * terminal at each render, so a resize follows) and load the stdlib
+     * through THE `\l pq` gate — before the startup script, so `q file.q`
+     * scripts see `.pq`.  `-classic` skips all three (kdb-clean env, legacy
+     * display, kdb `\c 25 80`).  The non-tty script batch widen below still
+     * overrides. */
+    if (!classic) {
+        q_console_pipe_enable();
+        q_console_clip_set(25, NULL_I64);
+        q_ctx_run_line("\\l pq", 5, stdout, stderr, 0);
     }
 
     /* Startup script (`q file.q`): run it before the REPL / server loop.

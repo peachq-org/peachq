@@ -1,7 +1,7 @@
 /* q_fmt — the q-style value formatter (q_fmt.h); non-q shapes -> ray_fmt. */
 #include "qlang/q_fmt.h"
 #include "qlang/q_fmt_internal.h" /* q_fmt_cell — shared with the pipe renderer */
-#include "qlang/q_console.h"  /* q_console_pipe_* — the `--nonlegacy` display config */
+#include "qlang/q_console.h"  /* q_console_pipe_* — the modern display config */
 #include "qlang/q_builtins.h" /* q_builtins_count_long — THE count owner */
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
 #include "qlang/base/q_calendar.h" /* q_calendar_days_from_civil — date display domain */
@@ -926,7 +926,7 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
 /* ---- pipe-table display: a FORMATTING MODE (state lives in q_console.c).
  * Moved from the console split: the renderer is value->text, its sole caller
  * is q_fmt_console below — both entries are file-static. ---- */
-/* ---- `--nonlegacy` pipe-table mode --------------------------------------- */
+/* ---- modern pipe-table mode ---------------------------------------------- */
 
 #define QP_MAXCOL   64
 #define QP_CELL     64
@@ -1273,7 +1273,8 @@ static void fmt_pipe_render(ray_t* val, char* buf, size_t bufsz) {
 
 void q_fmt_console(ray_t* val, char* buf, size_t bufsz) {
     if (bufsz == 0 || !buf) return;
-    /* `--nonlegacy` (OFF by default): tables render as the pipe table.  Gated
+    /* Modern mode (armed by qmain/wasm unless `-classic`/`\classic 1`):
+     * tables render as the pipe table.  Gated
      * HERE — the console seam — and never in q_fmt_body, which the UNCLIPPED
      * q_fmt (`string`, `-3!`, CSV, every cell) shares and must keep legacy. */
     if (q_console_pipe_on() && fmt_pipe_is_table(val)) { fmt_pipe_render(val, buf, bufsz); return; }

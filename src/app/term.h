@@ -51,6 +51,7 @@
 #define KEYCODE_CTRL_E    0x05
 #define KEYCODE_CTRL_F    0x06
 #define KEYCODE_CTRL_K    0x0b
+#define KEYCODE_CTRL_L    0x0c
 #define KEYCODE_CTRL_N    0x0e
 #define KEYCODE_CTRL_P    0x10
 #define KEYCODE_CTRL_R    0x12
@@ -135,6 +136,13 @@ typedef struct ray_term {
     int32_t  ghost_len;
     int32_t  ghost_word_start; /* position in buf where the completed word starts */
     int32_t  ghost_word_len;   /* length of the prefix that was matched */
+    /* Host-armed hint (autosuggest at an EMPTY fresh prompt): full display
+     * text + how many leading bytes insert on accept (the command, never the
+     * `/ comment` tail).  Rendered through the ghost slot, so typing hides
+     * it; Tab / → accepts. */
+    char     hint[512];
+    int32_t  hint_len;
+    int32_t  hint_accept;
     /* Multi-source completion candidates */
     const char* comp_items[256];  /* borrowed pointers — valid until next collect */
     int32_t     comp_count;
@@ -183,6 +191,10 @@ void   ray_term_prompt(ray_term_t* term);
  * to restore the built-in highlighter.  Callers own the function; it must
  * outlive the term. */
 void   ray_term_set_highlighter(ray_term_t* term, ray_highlight_fn fn);
+
+/* Arm (or with NULL/"" clear) the empty-prompt hint; accept_len = leading
+ * bytes Tab/→ insert into the buffer. */
+void   ray_term_set_hint(ray_term_t* term, const char* text, int32_t accept_len);
 
 /* Install a pluggable multi-line continuation policy (see ray_continuation_fn).
  * Pass NULL to restore the built-in bracket counter. */
