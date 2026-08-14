@@ -66,34 +66,59 @@ typedef struct stat hist_stat_t;
  * ray_data() returns bytes immediately after the 32-byte ray_t header. */
 #define RAY_BLOCK_FROM_DATA(ptr) ((ray_t*)((char*)(ptr) - sizeof(ray_t)))
 
-/* Suppress -Wunused-result for terminal I/O writes to stdout. */
-#if !defined(RAY_OS_WINDOWS)
-static inline void term_write(const void* buf, size_t len) {
-    ssize_t r = write(STDOUT_FILENO, buf, len);
-    (void)r;
-}
-#else
-static inline void term_write(const void* buf, size_t len) {
-    int r = _write(1, buf, (unsigned int)len);
-    (void)r;
-}
-#endif
+/* ===== Transport seam ===== */
 
-/* ===== Signal handling ===== */
+/* The ONE writer: every byte the engine emits funnels through here.  A
+ * NULL write callback is the OS default — raw fd 1. */
+static void term_write(ray_term_t* term, const void* buf, size_t len) {
+    if (term->io.write) {
+        term->io.write(term->io.ctx, buf, len);
+        return;
+    }
+#if defined(RAY_OS_WINDOWS)
+    int r = _write(1, buf, (unsigned int)len);
+#else
+    ssize_t r = write(STDOUT_FILENO, buf, len);
+#endif
+    (void)r;
+}
+
+/* Sync point: orders the front end's stdio stream against our raw writes.
+ * Kept at the exact spots the engine historically called fflush(stdout). */
+static void term_flush(ray_term_t* term) {
+    if (term->io.flush) term->io.flush(term->io.ctx);
+    else fflush(stdout);
+}
+
+/* Redraw-time size poll; without a get_size hook the engine keeps the
+ * last pushed size (ray_term_set_size). */
+static void term_refresh_size(ray_term_t* term) {
+    int32_t w, h;
+    if (term->io.get_size && term->io.get_size(term->io.ctx, &w, &h)) {
+        term->term_width  = w;
+        term->term_height = h;
+    }
+}
+
+/* ===== Signal handling (OS console adapter) ===== */
 
 static volatile sig_atomic_t g_interrupted = 0;
 static ray_term_t* g_active_term = NULL;
 
-static void signal_handler(int sig) {
+void ray_term_request_interrupt(void) {
     g_interrupted = 1;
     ray_eval_request_interrupt();
+}
+
+static void signal_handler(int sig) {
+    ray_term_request_interrupt();
 #if defined(RAY_OS_WINDOWS)
     if (sig == SIGTERM) {
 #else
     if (sig == SIGTERM || sig == SIGQUIT) {
 #endif
         /* Restore terminal and exit for fatal signals */
-        if (g_active_term) {
+        if (g_active_term && g_active_term->owns_console) {
 #if defined(RAY_OS_WINDOWS)
             SetConsoleMode(g_active_term->h_stdin,  g_active_term->old_stdin_mode);
             SetConsoleMode(g_active_term->h_stdout, g_active_term->old_stdout_mode);
@@ -117,12 +142,11 @@ static void signal_handler(int sig) {
  * terminate (the SIGTERM/SIGQUIT analogue). */
 static BOOL WINAPI win_ctrl_handler(DWORD type) {
     if (type == CTRL_C_EVENT) {
-        g_interrupted = 1;
-        ray_eval_request_interrupt();
+        ray_term_request_interrupt();
         return TRUE;
     }
     if (type == CTRL_BREAK_EVENT || type == CTRL_CLOSE_EVENT) {
-        if (g_active_term) {
+        if (g_active_term && g_active_term->owns_console) {
             SetConsoleMode(g_active_term->h_stdin,  g_active_term->old_stdin_mode);
             SetConsoleMode(g_active_term->h_stdout, g_active_term->old_stdout_mode);
         }
@@ -133,7 +157,7 @@ static BOOL WINAPI win_ctrl_handler(DWORD type) {
 #endif
 
 static void atexit_handler(void) {
-    if (g_active_term) {
+    if (g_active_term && g_active_term->owns_console) {
 #if defined(RAY_OS_WINDOWS)
         SetConsoleMode(g_active_term->h_stdin,  g_active_term->old_stdin_mode);
         SetConsoleMode(g_active_term->h_stdout, g_active_term->old_stdout_mode);
@@ -211,40 +235,52 @@ void ray_term_eval_end(ray_term_t* term) {
 #endif
 }
 
-/* ===== Cursor helpers ===== */
+/* ===== Cursor helpers (engine-internal; every byte rides the transport) ===== */
 
-void ray_cursor_move_start(void) { putchar('\r'); }
-void ray_cursor_move_left(int32_t n)  { if (n > 0) printf("\033[%dD", n); }
-void ray_cursor_move_right(int32_t n) { if (n > 0) printf("\033[%dC", n); }
-void ray_cursor_move_up(int32_t n)    { if (n > 0) printf("\033[%dA", n); }
-void ray_cursor_move_down(int32_t n)  { if (n > 0) printf("\033[%dB", n); }
-void ray_line_clear(void)       { printf("\r\033[K"); }
-void ray_line_clear_below(void) { printf("\033[J"); }
-void ray_cursor_hide(void)      { printf("\033[?25l"); }
-void ray_cursor_show(void)      { printf("\033[?25h"); }
+static void cursor_csi(ray_term_t* t, int32_t n, char dir) {
+    char b[16];
+    if (n <= 0) return;
+    term_write(t, b, (size_t)snprintf(b, sizeof b, "\033[%d%c", n, dir));
+}
 
-/* ===== Terminal size ===== */
+static void cursor_move_start(ray_term_t* t)            { term_write(t, "\r", 1); }
+static void cursor_move_left(ray_term_t* t, int32_t n)  { cursor_csi(t, n, 'D'); }
+static void cursor_move_right(ray_term_t* t, int32_t n) { cursor_csi(t, n, 'C'); }
+static void cursor_move_up(ray_term_t* t, int32_t n)    { cursor_csi(t, n, 'A'); }
+static void cursor_move_down(ray_term_t* t, int32_t n)  { cursor_csi(t, n, 'B'); }
+static void line_clear_below(ray_term_t* t)             { term_write(t, "\033[J", 3); }
+static void cursor_hide(ray_term_t* t)                  { term_write(t, "\033[?25l", 6); }
+static void cursor_show(ray_term_t* t)                  { term_write(t, "\033[?25h", 6); }
 
-void ray_term_get_size(ray_term_t* term) {
+/* ===== Terminal size (OS console adapter) ===== */
+
+/* The one OS size probe — the io hook ray_term_create installs. */
+static int term_os_get_size(void* ctx, int32_t* width, int32_t* height) {
+    (void)ctx;
 #if defined(RAY_OS_WINDOWS)
     CONSOLE_SCREEN_BUFFER_INFO csbi;
-    if (GetConsoleScreenBufferInfo(term->h_stdout, &csbi)) {
-        term->term_width  = csbi.srWindow.Right - csbi.srWindow.Left + 1;
-        term->term_height = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
-    } else {
-        term->term_width  = 80;
-        term->term_height = 24;
+    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi)) {
+        *width  = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+        *height = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+        return 1;
     }
 #else
     struct winsize w;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0) {
-        term->term_width  = w.ws_col;
-        term->term_height = w.ws_row;
-    } else {
-        term->term_width  = 80;
-        term->term_height = 24;
+        *width  = w.ws_col;
+        *height = w.ws_row;
+        return 1;
     }
 #endif
+    *width  = 80;
+    *height = 24;
+    return 1;
+}
+
+void ray_term_set_size(ray_term_t* term, int32_t width, int32_t height) {
+    if (!term) return;
+    if (width  > 0) term->term_width  = width;
+    if (height > 0) term->term_height = height;
 }
 
 /* ===== Visual width ===== */
@@ -309,26 +345,43 @@ void ray_term_goto_position(ray_term_t* term, int32_t from_pos, int32_t to_pos) 
     int32_t row_diff = to_row - from_row;
     int32_t col_diff = to_col - from_col;
 
-    if (row_diff < 0) ray_cursor_move_up(-row_diff);
-    else if (row_diff > 0) ray_cursor_move_down(row_diff);
+    if (row_diff < 0) cursor_move_up(term, -row_diff);
+    else if (row_diff > 0) cursor_move_down(term, row_diff);
 
-    if (col_diff < 0) ray_cursor_move_left(-col_diff);
-    else if (col_diff > 0) ray_cursor_move_right(col_diff);
+    if (col_diff < 0) cursor_move_left(term, -col_diff);
+    else if (col_diff > 0) cursor_move_right(term, col_diff);
 
     term->last_cursor_row = to_row;
 }
 
 /* ===== Terminal create / destroy ===== */
 
-#if defined(RAY_OS_WINDOWS)
-
-ray_term_t* ray_term_create(void) {
+/* Engine-only constructor: binds the editor to a caller-supplied transport.
+ * No tty mode change, no signals, no history file — the front end owns all
+ * of that (a NULL/partial io falls back per ray_term_io_t). */
+ray_term_t* ray_term_create_io(const ray_term_io_t* io) {
     ray_t* block = ray_alloc(sizeof(ray_term_t));
     if (!block) return NULL;
     ray_term_t* term = (ray_term_t*)ray_data(block);
     memset(term, 0, sizeof(*term));
     term->_block = block;
+    if (io) term->io = *io;
 
+    term->term_width  = 80;
+    term->term_height = 24;
+    term->last_total_rows = 1;
+    ray_hist_create(&term->hist);
+    return term;
+}
+
+/* The OS-console door: default transport + raw mode + history file. */
+ray_term_t* ray_term_create(void) {
+    ray_term_t* term = ray_term_create_io(NULL);
+    if (!term) return NULL;
+    term->io.get_size = term_os_get_size;
+    term->owns_console = 1;
+
+#if defined(RAY_OS_WINDOWS)
     term->h_stdin  = GetStdHandle(STD_INPUT_HANDLE);
     term->h_stdout = GetStdHandle(STD_OUTPUT_HANDLE);
 
@@ -342,27 +395,39 @@ ray_term_t* ray_term_create(void) {
 
     GetConsoleMode(term->h_stdout, &term->old_stdout_mode);
     SetConsoleMode(term->h_stdout, term->old_stdout_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+#else
+    tcgetattr(STDIN_FILENO, &term->oldattr);
+    term->newattr = term->oldattr;
+    term->newattr.c_lflag &= ~(ICANON | ECHO | ISIG);
+    term->newattr.c_cc[VMIN]  = 1;
+    term->newattr.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &term->newattr);
+#endif
 
-    term->term_width  = 80;
-    term->term_height = 24;
-    term->last_total_rows = 1;
-    ray_term_get_size(term);
-    ray_hist_create(&term->hist);
+    term_refresh_size(term);
     ray_hist_load(&term->hist, NULL);
-
     return term;
 }
 
 void ray_term_destroy(ray_term_t* term) {
     if (!term) return;
     if (g_active_term == term) g_active_term = NULL;
-    ray_hist_save(&term->hist, NULL);
+    if (term->owns_console) ray_hist_save(&term->hist, NULL);
     ray_hist_destroy(&term->hist);
-    SetConsoleMode(term->h_stdin,  term->old_stdin_mode);
-    SetConsoleMode(term->h_stdout, term->old_stdout_mode);
+    if (term->owns_console) {
+#if defined(RAY_OS_WINDOWS)
+        SetConsoleMode(term->h_stdin,  term->old_stdin_mode);
+        SetConsoleMode(term->h_stdout, term->old_stdout_mode);
+#else
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &term->oldattr);
+#endif
+    }
     ray_free(term->_block);
 }
 
+/* The OS adapter's input pump: blocking read into term->input[0]; the
+ * engine itself only ever consumes that byte via ray_term_feed. */
+#if defined(RAY_OS_WINDOWS)
 int64_t ray_term_getc(ray_term_t* term) {
     char c;
     DWORD n;
@@ -371,42 +436,7 @@ int64_t ray_term_getc(ray_term_t* term) {
     term->input[0] = c;
     return (int64_t)n;
 }
-
-#else /* Unix */
-
-ray_term_t* ray_term_create(void) {
-    ray_t* block = ray_alloc(sizeof(ray_term_t));
-    if (!block) return NULL;
-    ray_term_t* term = (ray_term_t*)ray_data(block);
-    memset(term, 0, sizeof(*term));
-    term->_block = block;
-
-    tcgetattr(STDIN_FILENO, &term->oldattr);
-    term->newattr = term->oldattr;
-    term->newattr.c_lflag &= ~(ICANON | ECHO | ISIG);
-    term->newattr.c_cc[VMIN]  = 1;
-    term->newattr.c_cc[VTIME] = 0;
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &term->newattr);
-
-    term->term_width  = 80;
-    term->term_height = 24;
-    term->last_total_rows = 1;
-    ray_term_get_size(term);
-    ray_hist_create(&term->hist);
-    ray_hist_load(&term->hist, NULL);
-
-    return term;
-}
-
-void ray_term_destroy(ray_term_t* term) {
-    if (!term) return;
-    if (g_active_term == term) g_active_term = NULL;
-    ray_hist_save(&term->hist, NULL);
-    ray_hist_destroy(&term->hist);
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &term->oldattr);
-    ray_free(term->_block);
-}
-
+#else
 int64_t ray_term_getc(ray_term_t* term) {
     /* Simple blocking read — only called when poll confirms data ready,
      * or in fallback mode where VMIN=1 provides blocking behavior. */
@@ -421,8 +451,7 @@ int64_t ray_term_getc(ray_term_t* term) {
         return sz;  /* real error */
     }
 }
-
-#endif /* _WIN32 */
+#endif
 
 /* ===== History ===== */
 
@@ -1264,13 +1293,13 @@ int32_t ray_term_count_unmatched(ray_term_t* term) {
 
 void ray_term_prompt(ray_term_t* term) {
     if (term->prompt_override_len > 0) {
-        term_write(term->prompt_override, (size_t)term->prompt_override_len);
+        term_write(term, term->prompt_override, (size_t)term->prompt_override_len);
         term->prompt_len = term->prompt_override_vis;
         return;
     }
     if (term->prompt_prefix_len > 0)
-        term_write(term->prompt_prefix, (size_t)term->prompt_prefix_len);
-    term_write(PROMPT_STR, PROMPT_LEN);
+        term_write(term, term->prompt_prefix, (size_t)term->prompt_prefix_len);
+    term_write(term, PROMPT_STR, PROMPT_LEN);
     term->prompt_len = term->prompt_prefix_vis + PROMPT_VIS;
 }
 
@@ -1278,8 +1307,8 @@ void ray_term_continuation_prompt(ray_term_t* term) {
     /* Continuation prompt mirrors the prefix so multi-line input
      * stays visually aligned with the active session indicator. */
     if (term->prompt_prefix_len > 0)
-        term_write(term->prompt_prefix, (size_t)term->prompt_prefix_len);
-    term_write(CONT_PROMPT_STR, CONT_PROMPT_LEN);
+        term_write(term, term->prompt_prefix, (size_t)term->prompt_prefix_len);
+    term_write(term, CONT_PROMPT_STR, CONT_PROMPT_LEN);
     term->prompt_len = term->prompt_prefix_vis + CONT_PROMPT_VIS;
 }
 
@@ -1370,20 +1399,20 @@ void ray_term_redraw(ray_term_t* term) {
     /* Recompute ghost text on every redraw */
     ray_term_update_ghost(term);
 
-    ray_cursor_hide();
-    ray_term_get_size(term);
+    cursor_hide(term);
+    term_refresh_size(term);
 
     /* Move to start of first line */
-    printf("\r");
+    cursor_move_start(term);
     if (term->last_total_rows > 1) {
         for (int32_t i = 1; i < term->last_total_rows; i++) {
-            ray_cursor_move_up(1);
-            printf("\r");
+            cursor_move_up(term, 1);
+            cursor_move_start(term);
         }
     }
 
     /* Clear from cursor to end of screen */
-    printf("\033[J");
+    line_clear_below(term);
 
     /* Write prompt + highlighted buffer into temp buf, then single write */
     {
@@ -1446,8 +1475,8 @@ void ray_term_redraw(ray_term_t* term) {
                 hlen += g_post_len;
             }
         }
-        fflush(stdout);
-        term_write(hlbuf, (size_t)hlen);
+        term_flush(term);
+        term_write(term, hlbuf, (size_t)hlen);
     }
 
     /* Track rows used — include ghost text width for row calculation */
@@ -1465,12 +1494,12 @@ void ray_term_redraw(ray_term_t* term) {
      * ray_term_goto_position assumes cursor is at prompt + visual_width(buf, from_pos),
      * so we must first move back past any ghost text. */
     if (ghost_vis > 0)
-        ray_cursor_move_left(ghost_vis);
+        cursor_move_left(term, ghost_vis);
     ray_term_goto_position(term, term->buf_len, term->buf_pos);
 
 
-    ray_cursor_show();
-    fflush(stdout);
+    cursor_show(term);
+    term_flush(term);
 }
 
 /* ===== Search mode redraw ===== */
@@ -1481,24 +1510,24 @@ void ray_term_redraw(ray_term_t* term) {
 #define SEARCH_RESET      "\033[0m"
 
 static void ray_term_search_redraw(ray_term_t* term) {
-    ray_cursor_hide();
+    cursor_hide(term);
 
     /* Move to start */
-    printf("\r");
+    cursor_move_start(term);
     if (term->last_total_rows > 1) {
         for (int32_t i = 1; i < term->last_total_rows; i++) {
-            ray_cursor_move_up(1);
-            printf("\r");
+            cursor_move_up(term, 1);
+            cursor_move_start(term);
         }
     }
-    printf("\033[J");
-    fflush(stdout);
+    line_clear_below(term);
+    term_flush(term);
 
     /* Write search prompt: (search) `query`: matched_entry */
-    term_write(SEARCH_PROMPT, SEARCH_PROMPT_LEN);
+    term_write(term, SEARCH_PROMPT, SEARCH_PROMPT_LEN);
     if (term->search_len > 0)
-        term_write(term->search_buf, (size_t)term->search_len);
-    term_write("': ", 3);
+        term_write(term, term->search_buf, (size_t)term->search_len);
+    term_write(term, "': ", 3);
 
     /* Show matching entry with highlighted match substring */
     if (term->search_match_idx >= 0) {
@@ -1519,17 +1548,17 @@ static void ray_term_search_redraw(ray_term_t* term) {
         if (match_pos >= 0) {
             /* Before match */
             if (match_pos > 0)
-                term_write(entry, (size_t)match_pos);
+                term_write(term, entry, (size_t)match_pos);
             /* Highlighted match */
-            term_write(SEARCH_HIGHLIGHT, 4);
-            term_write(entry + match_pos, (size_t)term->search_len);
-            term_write(SEARCH_RESET, 4);
+            term_write(term, SEARCH_HIGHLIGHT, 4);
+            term_write(term, entry + match_pos, (size_t)term->search_len);
+            term_write(term, SEARCH_RESET, 4);
             /* After match */
             int32_t after = match_pos + term->search_len;
             if (after < elen)
-                term_write(entry + after, (size_t)(elen - after));
+                term_write(term, entry + after, (size_t)(elen - after));
         } else {
-            term_write(entry, (size_t)elen);
+            term_write(term, entry, (size_t)elen);
         }
     }
 
@@ -1546,10 +1575,10 @@ static void ray_term_search_redraw(ray_term_t* term) {
     int32_t cursor_col = SEARCH_PROMPT_LEN + term->search_len;
     int32_t end_col = total_vis;
     int32_t diff = end_col - cursor_col;
-    if (diff > 0) ray_cursor_move_left(diff);
+    if (diff > 0) cursor_move_left(term, diff);
 
-    ray_cursor_show();
-    fflush(stdout);
+    cursor_show(term);
+    term_flush(term);
 }
 
 /* ===== Event-driven line editing ===== */
@@ -1557,7 +1586,7 @@ static void ray_term_search_redraw(ray_term_t* term) {
 /* Show prompt and reset line state.  Called once per input line. */
 void ray_term_begin(ray_term_t* term) {
     ray_term_prompt(term);
-    fflush(stdout);
+    term_flush(term);
     term->buf_len = 0;
     term->buf_pos = 0;
     term->multiline_len = 0;
@@ -1684,9 +1713,9 @@ static ray_t* feed_search(ray_term_t* term, int skey) {
         term->buf_len = 0;
         term->buf_pos = 0;
         term->multiline_len = 0;
-        term_write("^C\n", 3);
+        term_write(term, "^C\n", 3);
         ray_term_prompt(term);
-        fflush(stdout);
+        term_flush(term);
         return NULL;
     }
 
@@ -1806,30 +1835,33 @@ static ray_t* feed_normal(ray_term_t* term, int key) {
                 term->multiline_len += term->buf_len;
                 term->multiline_buf[term->multiline_len++] = '\n';
             } else {
-                fprintf(stderr, "\ninput too long (max %d bytes)\n",
-                        TERM_BUF_SIZE - 1);
-                fflush(stderr);
+                char msg[64];
+                int n = snprintf(msg, sizeof msg,
+                                 "\ninput too long (max %d bytes)\n",
+                                 TERM_BUF_SIZE - 1);
+                term_write(term, msg, (size_t)n);
                 term->multiline_len = 0;
                 term->buf_len = 0;
                 term->buf_pos = 0;
                 ray_term_prompt(term);
-                fflush(stdout);
+                term_flush(term);
                 return NULL;
             }
             term->buf_len = 0;
             term->buf_pos = 0;
-            putchar('\n');
-            fflush(stdout);
+            term_write(term, "\n", 1);
+            term_flush(term);
             ray_term_continuation_prompt(term);
-            fflush(stdout);
+            term_flush(term);
             return NULL;
         }
         /* Redraw line without bracket highlights before submitting */
         term->ghost_len = 0;
         term->comp_cycling = 0;
         {
-            ray_cursor_hide();
-            printf("\r\033[J");
+            cursor_hide(term);
+            cursor_move_start(term);
+            line_clear_below(term);
             char hlbuf[TERM_BUF_SIZE * 8];
             int32_t hlen = 0;
             /* Mirror the redraw path: prepend the remote-REPL prefix
@@ -1857,13 +1889,13 @@ static ray_t* feed_normal(ray_term_t* term, int key) {
                 hlen += term_highlight(term, hlbuf + hlen,
                             (int32_t)sizeof(hlbuf) - hlen,
                             term->buf, term->buf_len, -1, -1);
-            fflush(stdout);
-            term_write(hlbuf, (size_t)hlen);
-            ray_cursor_show();
-            fflush(stdout);
+            term_flush(term);
+            term_write(term, hlbuf, (size_t)hlen);
+            cursor_show(term);
+            term_flush(term);
         }
-        putchar('\n');
-        fflush(stdout);
+        term_write(term, "\n", 1);
+        term_flush(term);
         if (term->multiline_len > 0) {
             if (term->multiline_len + term->buf_len < TERM_BUF_SIZE) {
                 memcpy(term->multiline_buf + term->multiline_len,
@@ -1886,8 +1918,8 @@ static ray_t* feed_normal(ray_term_t* term, int key) {
 
     case KEYCODE_CTRL_D: {
         if (term->buf_len == 0) {
-            putchar('\n');
-            fflush(stdout);
+            term_write(term, "\n", 1);
+            term_flush(term);
             return RAY_TERM_EOF;
         }
         if (term->buf_pos < term->buf_len) {
@@ -1907,8 +1939,8 @@ static ray_t* feed_normal(ray_term_t* term, int key) {
         /* Windows q exits on Ctrl-C at an idle prompt; keep line-clear
          * when there is typed input so a stray ^C can't lose it. */
         if (term->buf_len == 0 && term->multiline_len == 0) {
-            putchar('\n');
-            fflush(stdout);
+            term_write(term, "\n", 1);
+            term_flush(term);
             return RAY_TERM_EOF;
         }
 #endif
@@ -1917,9 +1949,9 @@ static ray_t* feed_normal(ray_term_t* term, int key) {
         term->buf_len = 0;
         term->buf_pos = 0;
         term->multiline_len = 0;
-        term_write("^C\n", 3);
+        term_write(term, "^C\n", 3);
         ray_term_prompt(term);
-        fflush(stdout);
+        term_flush(term);
         return NULL;
     }
 
@@ -1954,8 +1986,8 @@ static ray_t* feed_normal(ray_term_t* term, int key) {
     case KEYCODE_CTRL_L: {
         /* readline clear-screen: wipe the viewport (scrollback and history
          * untouched) and repaint the prompt + current line at the top. */
-        printf("\033[H\033[2J");
-        fflush(stdout);
+        term_write(term, "\033[H\033[2J", 7);
+        term_flush(term);
         term->last_total_rows = 1;
         ray_term_redraw(term);
         return NULL;

@@ -80,6 +80,19 @@ typedef int32_t (*ray_highlight_fn)(char* dst, int32_t dst_cap,
 typedef int32_t (*ray_continuation_fn)(const char* mbuf, int32_t mbuf_len,
                                        const char* buf, int32_t buf_len);
 
+/* The injectable console transport.  Every byte the engine emits goes
+ * through `write`; `flush` marks the points where the engine used to
+ * fflush(stdout) (ordering vs the front end's stdio stream); `get_size`
+ * is polled at each redraw.  Any member may be NULL: write falls back to
+ * fd 1, flush to fflush(stdout), get_size to keeping the current size
+ * (push it with ray_term_set_size instead). */
+typedef struct ray_term_io {
+    void (*write)(void* ctx, const void* buf, size_t len);
+    void (*flush)(void* ctx);
+    int  (*get_size)(void* ctx, int32_t* width, int32_t* height);
+    void* ctx;
+} ray_term_io_t;
+
 typedef struct ray_hist {
     char**   entries;
     int32_t  count;
@@ -164,22 +177,24 @@ typedef struct ray_term {
     ray_highlight_fn highlight_fn;
     /* Optional pluggable continuation policy; NULL → built-in counter. */
     ray_continuation_fn continuation_fn;
+    /* The console transport (see ray_term_io_t); zeroed = OS defaults. */
+    ray_term_io_t io;
+    /* 1 when ray_term_create set up the OS console (raw mode / console
+     * modes, history file): destroy and the fatal-signal path restore and
+     * save.  0 for ray_term_create_io terms. */
+    int32_t owns_console;
 } ray_term_t;
 
+/* The OS-console door: raw tty mode + history file + ioctl size polling.
+ * The engine itself never touches the OS — ray_term_create_io binds it to
+ * a caller-supplied transport instead (no tty, no signals, no history
+ * file; feed input by writing term->input[0] + ray_term_feed, push size
+ * with ray_term_set_size). */
 ray_term_t* ray_term_create(void);
+ray_term_t* ray_term_create_io(const ray_term_io_t* io);
 void       ray_term_destroy(ray_term_t* term);
 int64_t    ray_term_getc(ray_term_t* term);
-void       ray_term_get_size(ray_term_t* term);
-
-void ray_cursor_move_start(void);
-void ray_cursor_move_left(int32_t n);
-void ray_cursor_move_right(int32_t n);
-void ray_cursor_move_up(int32_t n);
-void ray_cursor_move_down(int32_t n);
-void ray_line_clear(void);
-void ray_line_clear_below(void);
-void ray_cursor_hide(void);
-void ray_cursor_show(void);
+void       ray_term_set_size(ray_term_t* term, int32_t width, int32_t height);
 
 int32_t ray_term_visual_width(const char* str, int32_t len);
 void    ray_term_goto_position(ray_term_t* term, int32_t from_pos, int32_t to_pos);
@@ -248,9 +263,11 @@ void    ray_term_continuation_prompt(ray_term_t* term);
 /* Signal handling — install handlers to restore terminal on exit */
 void ray_term_install_signals(ray_term_t* term);
 
-/* Global interrupt flag — set by SIGINT handler, checked by eval loop */
+/* Global interrupt flag — set by the SIGINT handler (or any adapter via
+ * ray_term_request_interrupt), checked by the eval loop */
 int  ray_term_interrupted(void);
 void ray_term_clear_interrupt(void);
+void ray_term_request_interrupt(void);
 
 /* Temporarily enable ISIG so Ctrl-C generates SIGINT during eval.
  * Call ray_term_eval_end() to restore raw mode after eval returns. */
