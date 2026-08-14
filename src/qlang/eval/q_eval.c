@@ -817,39 +817,48 @@ static ray_t* return_eval(ray_t* expr) {
 /* paren list literal: elements RTL, boxed build + collapse.  An ELIDED
  * element is a projection HOLE: the literal is a projection of the list
  * constructor ("omission of values results in projection",
- * releases/ChangesIn4.1.md; >8 elided = 'rank, basics/application.md). */
+ * releases/ChangesIn4.1.md; >8 elided = 'rank, basics/application.md).
+ * EVAL_MAX_ARGS bounds a CALL's arity, which a literal has none of, so the
+ * element buffer spills to the heap rather than capping the literal's length. */
 static ray_t* list_lit(ray_t** e, int64_t n) {
-    ray_t* argv[EVAL_MAX_ARGS];
-    if (n > EVAL_MAX_ARGS) return q_err(QE_LIMIT);
+    ray_t* stackv[EVAL_MAX_ARGS];
+    ray_t** argv = stackv;
+    if (n > EVAL_MAX_ARGS) {
+        argv = (ray_t**)ray_alloc_raw((size_t)n * sizeof *argv);
+        if (!argv) return q_err(QE_WSFULL);
+    }
+    ray_t* ret;
     int64_t holes = 0;
     for (int64_t i = n - 1; i >= 0; i--) {
         if (is_hole(e[i])) { argv[i] = NULL; holes++; continue; }
         argv[i] = e[i] ? q_eval_apply_concrete(q_eval(e[i])) : RAY_NULL_OBJ;
         if (RAY_IS_ERR(argv[i])) {
-            ray_t* err = argv[i];
+            ret = argv[i];
             for (int64_t j = i + 1; j < n; j++)
                 if (argv[j]) ray_release(argv[j]);
-            return err;
+            goto out;
         }
     }
     if (holes > 0) {
-        if (holes > 8) { release_args(argv, n); return q_err(QE_RANK); }
+        if (holes > 8) { release_args(argv, n); ret = q_err(QE_RANK); goto out; }
         ray_t* ctor = q_registry_list_value();
-        ray_t* pr = q_eval_apply_proj_new(ctor, q_registry_row_of(ctor, Q_MONADIC),
-                                          argv, n, n);
+        ret = q_eval_apply_proj_new(ctor, q_registry_row_of(ctor, Q_MONADIC), argv, n, n);
         release_args(argv, n);
-        return pr;
+        goto out;
     }
-    ray_t* l = ray_list_new(n > 0 ? n : 1);
-    for (int64_t i = 0; i < n; i++) {
-        Q_ASSERT_CONCRETE(argv[i]);        /* container-append tripwire */
-        l = ray_list_append(l, argv[i]);
+    {
+        ray_t* l = ray_list_new(n > 0 ? n : 1);
+        for (int64_t i = 0; i < n; i++) {
+            Q_ASSERT_CONCRETE(argv[i]);        /* container-append tripwire */
+            l = ray_list_append(l, argv[i]);
+        }
+        release_args(argv, n);
+        if (RAY_IS_ERR(l)) ret = l;
+        else { ret = q_list_collapse(l); ray_release(l); }
     }
-    release_args(argv, n);
-    if (RAY_IS_ERR(l)) return l;
-    ray_t* c = q_list_collapse(l);
-    ray_release(l);
-    return c;
+out:
+    if (argv != stackv) ray_free_raw(argv);
+    return ret;
 }
 
 ray_t* q_eval(ray_t* node) {
