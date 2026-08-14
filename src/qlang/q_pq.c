@@ -1,7 +1,8 @@
 /* q_pq — the `\l pq` standard-library gate.  ONE embedded bundle: every
- * top-level .q file under lib/ (sorted at build — the ANY-ORDER LAW makes
- * order moot), run through the multiline statement seam q_ctx_run_src, so
- * lib files carry ordinary kdb script syntax.  Nothing here runs at
+ * top-level .q file under lib/ AND under qlib/src (the portable half), sorted
+ * at build — the ANY-ORDER LAW makes order moot — run through the multiline
+ * statement seam q_ctx_run_src, so those files carry ordinary kdb script
+ * syntax.  Nothing here runs at
  * q_runtime_create — the pre-gate env stays kdb-clean. */
 #include "qlang/q_pq.h"
 #include "qlang/q_ctx.h"       /* q_ctx_run_src — THE script seam */
@@ -11,7 +12,7 @@
 #include "qlang/io/q_ffi.h"    /* q_ffi_register — the .ffi.i.* natives */
 #include "qlang/ops/q_regex.h" /* q_regex_register — the .regexp.i.* natives */
 #include "qlang/ops/q_strns.h" /* q_strns_register — the .str.i.* natives */
-#include "qlang/lib_gen.h"     /* PEACHQ_LIB_BOOTSTRAP — the codegen'd lib/ bundle */
+#include "qlang/lib_gen.h"     /* PEACHQ_LIB_BOOTSTRAP — the codegen'd lib/ + qlib/src bundle */
 #include <stdio.h>
 
 void q_pq_load(void) {
