@@ -59,6 +59,7 @@ int main(int argc, char** argv) {
     bool        have_port = false;
     bool        port_auto = false;
     bool        classic = false;
+    int         etrap_mode = -1;
     const char* auth_pw = NULL;
     bool        auth_restricted = false;
     int         tls_mode = 0;
@@ -86,6 +87,16 @@ int main(int argc, char** argv) {
                 return 2;
             }
             tls_mode = spec[0] - '0';
+        } else if (strcmp(argv[i], "-e") == 0) {
+            /* cmdline.md#-e-error-traps: startup `\e` (error trap clients).
+             * Strict like -E: a mistyped mode must not pass silently.  Applied
+             * AFTER q_runtime_create — cfg init resets the mode to 0. */
+            const char* spec = (i + 1 < argc) ? argv[++i] : "";
+            if (strlen(spec) != 1 || spec[0] < '0' || spec[0] > '2') {
+                fprintf(stderr, "q: invalid -e mode '%s' (expected 0, 1 or 2)\n", spec);
+                return 2;
+            }
+            etrap_mode = spec[0] - '0';
         } else if (strcmp(argv[i], "-classic") == 0) {
             /* Opt IN to classic kx-q mode: legacy table display and NO startup
              * `\l pq`.  Launch-only; the default is modern (pipe-table display
@@ -155,12 +166,10 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (etrap_mode >= 0)
+        q_sys_err_trap_set(etrap_mode);
+
     int stdin_tty = isatty(STDIN_FILENO);
-    /* kdb console default: error-trap mode 1 (suspend into the debugger) —
-     * TTY consoles only, so every piped/qdoc/script transcript keeps mode 0
-     * and stays byte-stable; `\e N` overrides at any time. */
-    if (stdin_tty)
-        q_sys_err_trap_set(1);
 
     /* Startup banner (kdb-style version + build date, via the same macros as
      * .z.K/.z.k).  GUARDRAIL: print ONLY on an interactive tty REPL and NOT
@@ -215,12 +224,13 @@ int main(int argc, char** argv) {
 
     int script_rc = 0;
     if (script)
-        script_rc = q_ctx_run_file(script, stdout, stderr);
+        script_rc = q_ctx_run_file(script, stdout, stderr, NULL);
 
     if (script_rc != 0) {
-        /* Startup script could not be opened/read — skip the REPL/server loop
-         * and exit non-zero (kdb fails a bad `q file.q`; it must not silently
-         * succeed).  q_ctx_run_file already printed the open error. */
+        /* Startup script could not be opened, or ABORTED at an error (parse or
+         * eval — the script seam's law): skip the REPL/server loop and exit
+         * non-zero (kdb fails a bad `q file.q`; it must not silently succeed).
+         * The open error / the statement's trace already printed. */
     } else if (q_sys_listen_port() > 0 && poll) {
         /* A listener is LIVE — from startup `-p` OR a runtime/script `\p N` —
          * so serve, don't exit at a non-tty script end.  Keyed off the

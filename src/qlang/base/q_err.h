@@ -45,6 +45,13 @@ const char* q_err_text(ray_t* err, int64_t* len);
  * other text payload-carried (the name-signal semantic). */
 ray_t* q_err_from_text(const char* p, size_t n);
 
+/* Detach an error's identity — class + pending payload — so it can be
+ * re-signalled AFTER seams that drop/restore the payload (a statement end);
+ * detach does not free `e`, re-signal releases the detached payload. */
+typedef struct { ray_t* pv; uint8_t aux; char cls[16]; } q_err_sig_t;
+void   q_err_detach(ray_t* e, q_err_sig_t* t);
+ray_t* q_err_resignal(q_err_sig_t* t);
+
 /* Transfer the pending payload out (owned; NULL if none) / clear it / put an
  * OWNED one back (NULL clears) — the debugger restores the suspended error's
  * text across a nested statement. */
