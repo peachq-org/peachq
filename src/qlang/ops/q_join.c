@@ -1071,14 +1071,15 @@ int64_t q_join_gen_len(ray_t* x) {
  * upsert-union and conforming table,table row-join already live there. */
 ray_t* q_join_wrap(ray_t* x, ray_t* y) {
     /* `()` is Join's IDENTITY (the seed the `,` accumulator starts from,
-     * ref/accumulators.md:264) and a TABLE is a list of records — joining zero
-     * records leaves it unchanged.  Base concat refuses the pair, so the law
-     * the collapse below already states for vectors is completed here: without
-     * it `c:(); c,:t` (qlib/src/qunit.q's runNsTests) is 'type. */
+     * ref/accumulators.md:264) for EVERY container, not just the ones base
+     * concat happens to accept: a table is a list of records and a dict a list
+     * of entries, so joining zero of them leaves either unchanged.  Without it
+     * `c:(); c,:t` (qlib/src/qunit.q's runNsTests) and `c,:d` are 'type — the
+     * dict pair reaching the bare-dict guard below. */
     if (x && y) {
         ray_t* t = (x->type == RAY_LIST && ray_len(x) == 0)   ? y
                  : (y->type == RAY_LIST && ray_len(y) == 0)   ? x : NULL;
-        if (q_type_is_table(t)) { ray_retain(t); return t; }
+        if (q_type_is_table(t) || q_type_is_dict(t)) { ray_retain(t); return t; }
     }
     if (q_type_is_keyed(x) && q_type_is_keyed(y))
         return qj_ktbl_merge(x, y, 0);     /* raw: y's OWN columns update */
