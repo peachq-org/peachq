@@ -16,7 +16,9 @@ void q_dbg_frame_pop(void);
 /* Statement seam: the ONE per-statement save/restore — frame-[0] text, console
  * flag, pending payload, snapshot.  A NESTED statement (`\l` inside one, a q))
  * line, a remote callback) hands the level beneath back at _end; a top-level
- * one saves nothing.  NULL src clears the text; the token is opaque. */
+ * one saves nothing.  NULL src clears the text; the token is opaque.
+ * console: 0 = never suspend, 1 = console statement, -1 = script-load line
+ * (inherits suspendability from the statement that asked for the load). */
 int  q_dbg_statement_begin(const char* src, size_t n, int console);
 void q_dbg_statement_end(int tok);
 
@@ -29,6 +31,13 @@ void q_dbg_trap_exit(void);
  * the frame still live (pre-pop). */
 ray_t* q_dbg_filter(ray_t* r, ray_t* fv, ray_t** args, int64_t n);
 ray_t* q_dbg_lambda_filter(ray_t* r);
+/* Statement-boundary seam for a load line's error (no lambda frame observed
+ * it): may suspend with frame [0] = the script statement.  NULL = abort the
+ * load; a plain value = `:r`, discard and continue; an error = `'e` re-signal. */
+ray_t* q_dbg_load_filter(ray_t* r);
+/* An aborting load's re-signal was already displayed at the erroring line:
+ * mark it (snapshot identity) so outer seams neither re-print nor re-suspend. */
+void q_dbg_mark_reported(ray_t* e);
 
 /* Seam display: 1 if the debugger already reported err (print nothing). */
 int  q_dbg_reported(ray_t* err);
