@@ -361,9 +361,13 @@ int q_type_is_null_sym(ray_t* x) {
     return sym_str_is_null(ray_sym_str(x->i64));
 }
 
-/* Element twin: base ray_vec_is_null short-circuits RAY_SYM to no-null. */
+/* Element twin: base ray_vec_is_null short-circuits RAY_SYM to no-null, and has
+ * no CHARV arm at all — the char null " " is an in-band ordinary byte, so only
+ * the ATOM lane (RAY_ATOM_IS_NULL) knew it. */
 int q_type_vec_is_null(ray_t* x, int64_t i) {
     if (x && x->type == RAY_SYM) return sym_str_is_null(ray_sym_vec_cell(x, i));
+    if (x && x->type == RAY_CHARV && i >= 0 && i < ray_len(x))
+        return ((const uint8_t*)ray_data(x))[i] == 0x20;
     return ray_vec_is_null(x, i);
 }
 

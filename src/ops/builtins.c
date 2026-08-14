@@ -2292,7 +2292,9 @@ ray_t* ray_enlist_fn(ray_t** args, int64_t n) {
             for (int64_t i = 0; i < n; i++) d[i] = args[i]->i64;
             break;
         }
-        case RAY_F64: {
+        /* DATETIME joins the f64 payload arm, not the temporal int ones:
+         * without it `enlist` fell to the boxed-list default (type 0h). */
+        case RAY_F64: RAY_TEMPORALF_CASES: {
             double* d = (double*)ray_data(vec);
             for (int64_t i = 0; i < n; i++) d[i] = args[i]->f64;
             break;

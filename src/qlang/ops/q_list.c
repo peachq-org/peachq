@@ -9,7 +9,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
-#include "qlang/base/q_type.h"  /* q_type_empty (the one typed-empty ctor), q_type_is_num_tag/_float_tag */
+#include "qlang/base/q_type.h"  /* q_type_empty (the one typed-empty ctor), q_type_common — `^`'s result-type law */
+#include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home fill conforms through */
 #include "lang/eval.h"     /* ray_take_fn, ray_xbar_fn */
 #include "lang/internal.h" /* ray_iasc_fn/ray_idesc_fn, RAY_IS_TEMPORAL64, ray_error */
 #include "qlang/ops/q_index.h" /* q_index_elem_at — the element read; q_index_at — the gather */
@@ -389,12 +390,27 @@ ray_t* q_fills_wrap(ray_t* x) {
 
 static int is_sym_t(int8_t t) { return t == RAY_SYM || t == -RAY_SYM; }
 
+/* Bring an operand to the fill's result tag as a VECTOR, so the select loop
+ * reads one uniform element array: the cast home owns every conversion
+ * (q_dollar.h's reuse mandate) and an already-right tag is retained untouched,
+ * which is what keeps an int-backed temporal off the double path. */
+static ray_t* fill_conform(int8_t rt, ray_t* v) {
+    ray_t* c;
+    if (q_type_elem_tag(v) == (int8_t)-rt) { ray_retain(v); c = v; }
+    else c = q_dollar_cast(rt, v);
+    if (!c || RAY_IS_ERR(c)) return c;
+    if (ray_is_atom(c)) { ray_t* e = ray_enlist_fn(&c, 1); ray_release(c); c = e; }
+    if (!c || RAY_IS_ERR(c)) return c;
+    if (c->type != rt) { ray_release(c); return q_err(QE_TYPE); }   /* never memcpy a boxed cell */
+    return c;
+}
+
 /* q `x^y` — fill: coalesce nulls in y with x (kdb `^`).  x may be an atom
- * (broadcast) or a same-length vector (element-wise).  Numeric result type:
- * F64 if EITHER operand is float, else I64 (the narrower-int-preserving lattice
- * is a deferred refinement — the `type` ledger rows that need it are blocked by
- * a separate `0n 2 3i` parse bug and split out).  Symbol fill is a distinct
- * path.  Dict / `fills` forward-fill / table / fill-scan forms are deferred. */
+ * (broadcast) or a same-length vector (element-wise).  The result type is THE
+ * mixed-pair law, q_type_common — ref/fill.md's "Domain and range" matrix is
+ * ref/lesser.md's but for the g and s diagonals, which are the sym lane below
+ * and the one added cell; a 0 answer means the pair has no fill.
+ * `fills` forward-fill and the fill-scan forms are elsewhere. */
 ray_t* q_fill_wrap(ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);
     /* keyed^keyed is the uj merge with fill semantics (ref/coalesce.md:
@@ -409,7 +425,7 @@ ray_t* q_fill_wrap(ray_t* x, ray_t* y) {
             return q_err(QE_TYPE);
         /* length follows y when it is a vector; a scalar y broadcasts to the
          * length of a vector x (`` `a`b`c^` `` -> 3 items), matching the
-         * numeric branch below. */
+         * typed branch below. */
         int64_t len = yatom ? (xatom ? 1 : ray_len(x)) : ray_len(y);
         if (!xatom && !yatom && ray_len(x) != len)
             return q_err(QE_LENGTH);
@@ -440,36 +456,41 @@ ray_t* q_fill_wrap(ray_t* x, ray_t* y) {
         return c;
     }
 
-    /* ---- numeric fill ---- */
-    if (!q_type_is_num_tag(x->type) || !q_type_is_num_tag(y->type))
-        return q_err(QE_TYPE);
-    int is_float = q_type_is_float_tag(x->type) || q_type_is_float_tag(y->type);
+    /* ---- typed fill ---- */
+    int8_t xt = (int8_t)-q_type_elem_tag(x), yt = (int8_t)-q_type_elem_tag(y);
+    int8_t rt = q_type_common(xt, yt);
+    if (!rt && xt == RAY_GUID && yt == RAY_GUID) rt = RAY_GUID;   /* the one cell ref/fill.md adds */
+    if (!rt) return q_err(QE_TYPE);
     int64_t len = yatom ? (xatom ? 1 : ray_len(x)) : ray_len(y);
     if (!xatom && !yatom && ray_len(x) != ray_len(y))
         return q_err(QE_LENGTH);
-    if (xatom && yatom) {                        /* scalar^scalar -> atom */
-        int yn; double yv = q_velem_f(y, 0, &yn);
-        if (!yn) return is_float ? ray_f64(yv) : ray_i64((int64_t)yv);
-        int xn; double xv = q_velem_f(x, 0, &xn);
-        if (xn) return ray_typed_null(is_float ? -RAY_F64 : -RAY_I64);
-        return is_float ? ray_f64(xv) : ray_i64((int64_t)xv);
+    ray_t* xc = fill_conform(rt, x);
+    if (!xc || RAY_IS_ERR(xc)) return xc;
+    ray_t* yc = fill_conform(rt, y);
+    if (!yc || RAY_IS_ERR(yc)) { ray_release(xc); return yc; }
+    if (ray_len(xc) < (xatom ? 1 : len) || ray_len(yc) < (yatom ? 1 : len)) {
+        ray_release(xc); ray_release(yc);        /* a cast may not keep the count */
+        return q_err(QE_LENGTH);
     }
-    ray_t* out = ray_vec_new(is_float ? RAY_F64 : RAY_I64, len > 0 ? len : 1);
-    if (RAY_IS_ERR(out)) return out;
+    ray_t* out = ray_vec_new(rt, len > 0 ? len : 1);
+    if (RAY_IS_ERR(out)) { ray_release(xc); ray_release(yc); return out; }
     out->len = len;
-    void* o = ray_data(out);
+    int64_t esz = ray_elem_size(rt);
+    const char *xd = (const char*)ray_data(xc), *yd = (const char*)ray_data(yc);
+    char* o = (char*)ray_data(out);
     for (int64_t i = 0; i < len; i++) {
-        int yn; double yv = yatom ? q_velem_f(y, 0, &yn) : q_velem_f(y, i, &yn);
-        double v; int isnull = 0;
-        if (!yn) v = yv;
-        else {
-            int xn; double xv = xatom ? q_velem_f(x, 0, &xn) : q_velem_f(x, i, &xn);
-            if (xn) { v = 0; isnull = 1; } else v = xv;
-        }
-        if (is_float) ((double*)o)[i] = isnull ? NULL_F64 : v;
-        else          ((int64_t*)o)[i] = isnull ? NULL_I64 : (int64_t)v;
-        if (isnull) ray_vec_set_null(out, i, true);
+        int64_t xi = xatom ? 0 : i, yi = yatom ? 0 : i;
+        int yn = q_type_vec_is_null(yc, yi);
+        memcpy(o + i * esz, (yn ? xd + xi * esz : yd + yi * esz), (size_t)esz);
+        if (yn && q_type_vec_is_null(xc, xi)) ray_vec_set_null(out, i, true);
     }
-    return out;
+    ray_release(xc);
+    ray_release(yc);
+    if (!(xatom && yatom)) return out;
+    ray_t* ia = ray_i64(0);                      /* scalar^scalar -> atom */
+    ray_t* a = ray_at_fn(out, ia);
+    ray_release(ia);
+    ray_release(out);
+    return a;
 }
 
