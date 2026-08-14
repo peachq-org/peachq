@@ -19,7 +19,7 @@
 #include "qlang/io/q_splay.h"    /* q_splay_init/destroy — the splay registry lifecycle */
 #include "qlang/io/q_duckdb.h"   /* q_duckdb_reset — close handles at teardown */
 #include "qlang/io/q_re2.h"      /* q_re2_reset — drop compiled patterns at teardown */
-#include "qlang/q_console.h"  /* q_console_pipe_disable — reset the `\nonlegacy` display global per runtime */
+#include "qlang/q_console.h"  /* q_console_pipe_disable — reset the `\classic` display global per runtime */
 #include "qlang/q_ctx.h"      /* remote-door install + q_ctx_run_src (the bootstrap loader) */
 #include "qlang/eval/q_eval.h" /* q_eval_syms_reset — per-runtime teardown */
 #include "qlang/eval/q_view.h" /* q_view_reset — per-runtime view state */
@@ -103,7 +103,7 @@ void q_runtime_destroy(ray_runtime_t* rt) {
     q_env_destroy();           /* release q's K-tree before the heap dies */
     q_splay_destroy();         /* munmap column regions AFTER every holder released */
     q_sys_ctx_reset();         /* drop the `\d` context with its runtime */
-    q_console_pipe_disable();          /* reset the `\nonlegacy` display global — the
+    q_console_pipe_disable();          /* reset the `\classic` display global — the
                                 * process-wide pipe mode never leaks into the next
                                 * runtime (fresh-per-file doctest, wasm re-init) */
     ray_runtime_destroy(rt);

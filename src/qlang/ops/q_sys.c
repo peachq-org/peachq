@@ -18,7 +18,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/eval/q_eval.h" /* q_eval / q_eval_dot_wrap — timing + .Q.ts */
 #include "qlang/q_fmt.h"      /* q_fmt_set_prec/q_fmt_prec (`\P`) */
-#include "qlang/q_console.h"  /* q_console_str/reset (timed-expr side effects); q_console_pipe_* (`\nonlegacy`) */
+#include "qlang/q_console.h"  /* q_console_str/reset (timed-expr side effects); q_console_pipe_* (`\classic`) */
 #include "qlang/q_ctx.h"           /* the engine context: `\l` source seam, listener flag, console teardown */
 #include "qlang/q_pq.h"       /* q_pq_load — the `\l pq` embedded-stdlib gate */
 #include "qlang/q_env.h"      /* q_env_ctx_set/_ctx + q_env_ns_names — `\d` and the `\v`/`\f`/`\a` rosters */
@@ -203,8 +203,9 @@ static int parse_i64(const char* s, size_t len, int64_t* out) {
 
 /* Parse up to `max` whitespace-separated base-10 integers from [s,s+len),
  * stopping at the first non-integer token (e.g. a trailing `/ comment`).
- * Returns the count stored into out[]. */
-static int parse_ints(const char* s, size_t len, int64_t* out, int max) {
+ * Returns the count stored into out[].  allow_null additionally accepts the
+ * `0N` token as NULL_I64 (the `\c` auto-size sentinel). */
+static int parse_ints_n(const char* s, size_t len, int64_t* out, int max, int allow_null) {
     int cnt = 0; size_t i = 0;
     while (cnt < max && i < len) {
         while (i < len && (s[i] == ' ' || s[i] == '\t')) i++;
@@ -212,10 +213,16 @@ static int parse_ints(const char* s, size_t len, int64_t* out, int max) {
         while (i < len && s[i] != ' ' && s[i] != '\t') i++;
         if (i == t0) break;
         int64_t v;
-        if (!parse_i64(s + t0, i - t0, &v)) break;
+        if (allow_null && i - t0 == 2 && s[t0] == '0' && s[t0 + 1] == 'N')
+            v = NULL_I64;
+        else if (!parse_i64(s + t0, i - t0, &v))
+            break;
         out[cnt++] = v;
     }
     return cnt;
+}
+static int parse_ints(const char* s, size_t len, int64_t* out, int max) {
+    return parse_ints_n(s, len, out, max, 0);
 }
 
 /* Build a two-element typed vector for the pair-valued getters (`\c`/`\C`). */
@@ -724,18 +731,20 @@ static ray_t* h_w(size_t alen) {
 /* `\c` / `\C` — console / HTTP display size (rows cols).  `\c`→`25 80`,
  * `\C`→`36 2000`; a set coerces each value to [10,2000] (syscmds.md).  `\c`
  * clips the q console DISPLAY — its state, coercion and arming now live in
- * q_console.c (q_console_clip_set); this syscmd just forwards.  `\C` (HTTP
- * size) display wrapping is still DEFERRED (peachq has no HTTP renderer yet),
- * so clamp_cc coerces the `\C` values here. */
+ * q_console.c (q_console_clip_set); this syscmd just forwards.  peachq
+ * extension: a `\c` axis may be `0N` — auto, fit the live terminal at render
+ * time — and the getter round-trips the SETTING (`25 0N`), not the resolved
+ * size.  `\C` (HTTP size) display wrapping is still DEFERRED (peachq has no
+ * HTTP renderer yet), so clamp_cc coerces the `\C` values here. */
 static int64_t clamp_cc(int64_t v) {
     return v < 10 ? 10 : v > 2000 ? 2000 : v;
 }
 static ray_t* h_c(const char* rest, size_t restlen) {
     int64_t p[2];
-    int cnt = parse_ints(rest, restlen, p, 2);
+    int cnt = parse_ints_n(rest, restlen, p, 2, 1);
     if (cnt == 0) {                                           /* getter */
-        int32_t r, c;
-        q_console_clip(&r, &c);
+        int64_t r, c;
+        q_console_clip_setting(&r, &c);
         return pair_i64(r, c);
     }
     if (cnt >= 2)                                             /* setter (coerces + arms) */
@@ -816,15 +825,17 @@ static ray_t* h_s(const char* arg, size_t alen) {
     return NULL;
 }
 
-/* `\nonlegacy` — pipe-table display toggle (peachq; runtime twin of #198's
- * launch-only `--nonlegacy`, reachable from the argv-less wasm REPL).  Bare form
- * shows the state as a boolean (`1b`/`0b`, like bare `\c`); `1`/`0`/`1b`/`0b`
- * sets it, silent.  A non-boolean arg is a bare `'type` (a boolean is expected). */
-static ray_t* h_nonlegacy(const char* arg, size_t alen) {
-    if (alen == 0) return ray_bool(q_console_pipe_on());     /* getter → 1b/0b */
+/* `\classic` — display-mode toggle (peachq; runtime twin of qmain's launch-only
+ * `-classic`, reachable from the argv-less wasm REPL).  `1` = classic kdb table
+ * display, `0` = modern pipe-table display (the default).  Display ONLY — the
+ * startup-time `\l pq` load is not replayed or undone.  Bare form shows the
+ * state as a boolean (`1b`/`0b`, like bare `\c`); `1`/`0`/`1b`/`0b` sets it,
+ * silent.  A non-boolean arg is a bare `'type` (a boolean is expected). */
+static ray_t* h_classic(const char* arg, size_t alen) {
+    if (alen == 0) return ray_bool(!q_console_pipe_on());    /* getter → 1b/0b */
     size_t n = (alen == 2 && arg[1] == 'b') ? 1 : alen;   /* strip the 1b/0b literal */
     if (n != 1 || (arg[0] != '0' && arg[0] != '1')) return q_err(QE_TYPE);
-    if (arg[0] == '1') q_console_pipe_enable(); else q_console_pipe_disable();
+    if (arg[0] == '1') q_console_pipe_disable(); else q_console_pipe_enable();
     return NULL;                                     /* setter: silent */
 }
 
@@ -1000,7 +1011,7 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
 
     /* Dispatch on the command TOKEN — a switch on the single command char in
      * the common case, a short length+char check for the multi-char forms
-     * (\ts \cd \nonlegacy).  Case-sensitive (\c ≠ \C).  Each case passes ONLY
+     * (\ts \cd \classic).  Case-sensitive (\c ≠ \C).  Each case passes ONLY
      * the arguments its handler needs (no uniform
      * signature).  An unmatched single char (no case, no default) or any other
      * unrecognized token falls through to the shell-out; bare `\` is the silent
@@ -1041,8 +1052,8 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
         return h_ts(alen, rest, restlen, rep);                   /* time and space      */
     } else if (cmd_len == 2 && cmd[0] == 'c' && cmd[1] == 'd') {
         return h_cd(arg, alen);                                  /* change directory    */
-    } else if (cmd_len == 9 && memcmp(cmd, "nonlegacy", 9) == 0) {
-        return h_nonlegacy(arg, alen);                          /* pipe-table toggle (peachq) */
+    } else if (cmd_len == 7 && memcmp(cmd, "classic", 7) == 0) {
+        return h_classic(arg, alen);                            /* display-mode toggle (peachq) */
     } else if (cmd_len == 0) {
         return NULL;                                            /* bare \ — silent q/k toggle */
     }
