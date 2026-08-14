@@ -12,9 +12,8 @@
 
 .help.i.str:{$[10h=abs type x;x;string x]}
 
-/ NOT built-in trim/rtrim, deliberately: peachq's trim strips tabs where kx's
-/ removes spaces only (an unpinned divergence inherited from the rayfall
-/ kernel), and a fix there would silently stop tab-indented @tags parsing.
+/ NOT built-in trim/rtrim, deliberately: trim strips the char null (" ") only,
+/ and @tag parsing wants " \t\n\r" so tab-indented tags still parse.
 .help.i.rstrip:{$[count i:where not x in " \t\n\r";(1+last i)#x;""]}
 .help.i.strip:{.help.i.rstrip $[count i:where not x in " \t\n\r";(first i)_x;""]}
 

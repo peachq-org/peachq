@@ -887,8 +887,8 @@ ray_t* exec_string_unary(ray_graph_t* g, ray_op_t* op) {
             for (size_t j = 0; j < out_len; j++) buf[j] = (char)tolower((unsigned char)sp[j]);
         } else { /* OP_TRIM */
             size_t start = 0, end = sl;
-            while (start < sl && isspace((unsigned char)sp[start])) start++;
-            while (end > start && isspace((unsigned char)sp[end - 1])) end--;
+            while (start < sl && sp[start] == ' ') start++;
+            while (end > start && sp[end - 1] == ' ') end--;
             out_len = end - start;
             memcpy(buf, sp + start, out_len);
         }
