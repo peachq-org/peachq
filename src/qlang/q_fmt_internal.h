@@ -1,6 +1,6 @@
 /* q_fmt internals shared with the pipe renderer (q_console.c).
  *
- * The ONE thing the nonlegacy render borrows from q_fmt.c: its table-CELL
+ * The ONE thing the modern render borrows from q_fmt.c: its table-CELL
  * renderer.  Cells must read identically in both modes (sym cells bare, bool
  * cells bare — the column carries the type, float cells without the `f`, null
  * cells blank), so the pipe table inherits it rather than forking a second
