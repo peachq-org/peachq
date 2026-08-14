@@ -8,6 +8,21 @@
 / DELIBERATELY the -38! names so kdb code ports, the readable columns are
 / peachq additions (the kdb verbs -38!/.z.W/.z.H stay socket-only).
 .pq.conns:{.pq.i.conns[]}
+
+/ the live terminal size — the same query, 25/80 fallback and [10,2000]
+/ coercion that resolve the `\c 0N` auto axes
+/ @return (long list) (rows;cols)
+.pq.termsize:{2#.pq.i.termsize[]}
+
+/ should stdout carry ANSI color?  PEACHQ_COLORS=0/1 overrides everything,
+/ then NO_COLOR (off), FORCE_COLOR (on), else a tty whose TERM is not dumb
+/ @return (boolean) 1b when color is safe
+.pq.cancolor:{
+  e:getenv`PEACHQ_COLORS;
+  $[e~enlist"1";1b;e~enlist"0";0b;
+    count getenv`NO_COLOR;0b;
+    count getenv`FORCE_COLOR;1b;
+    (0<last .pq.i.termsize[])and not "dumb"~getenv`TERM]}
 / .pq.dr — domain and range in the layout the ref pages publish, so ours diffs
 / by eye against theirs (after qdocs/docs/docs/tools.q, kx, CC BY 4.0).
 / Samples are rebuilt by CASTING each call, so a cast regression shows here.
