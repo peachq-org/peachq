@@ -275,6 +275,14 @@ static void repl_update_hint(ray_term_t* t, const char* s, size_t n) {
     ray_release(r);
 }
 
+/* First-session teach: an empty history means a fresh user — arm the empty-
+ * prompt ghost with the help door (Tab/→ accepts `?`).  Modern only (classic
+ * has no .help); the first evaluated line replaces or clears it. */
+static void repl_teach_hint(ray_term_t* t) {
+    if (t->hist.count == 0 && q_console_pipe_on())
+        ray_term_set_hint(t, "? / help", 1);
+}
+
 static void repl_interactive(FILE* out, FILE* err) {
     ray_term_t* t = ray_term_create();
     if (!t) {
@@ -297,7 +305,10 @@ static void repl_interactive(FILE* out, FILE* err) {
     ray_term_install_signals(t);
     q_dbg_set_reader(repl_tty_dbg_read);   /* `\e 1` debugger over this editor */
 
+    repl_teach_hint(t);
     ray_term_begin(t);
+    if (t->hint_len > 0)
+        ray_term_redraw(t);   /* paint the teach ghost before the first keypress */
     for (;;) {
         int64_t sz = ray_term_getc(t);
         if (sz <= 0) {
@@ -738,9 +749,12 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
         return -1;
     }
 
-    if (c->term)
+    if (c->term) {
+        repl_teach_hint(c->term);
         ray_term_begin(c->term);   /* draw the first prompt */
-    else
+        if (c->term->hint_len > 0)
+            ray_term_redraw(c->term);
+    } else
         pipe_prompt(c);
 
     ray_poll_run(poll);

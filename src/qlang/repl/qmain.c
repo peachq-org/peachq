@@ -176,6 +176,8 @@ int main(int argc, char** argv) {
 #endif
         printf("peachq %d.%d %s https://peachq.org/\n",
                RAY_VERSION_MAJOR, RAY_VERSION_MINOR, build);
+        if (!classic)
+            printf("\033[90mtype ? for help\033[0m\n");   /* modern only: classic has no .help */
         fflush(stdout);
     }
 
