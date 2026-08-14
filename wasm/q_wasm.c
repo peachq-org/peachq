@@ -9,6 +9,8 @@
 #include "qlang/parse/q_parse.h"
 #include "qlang/q_fmt.h"
 #include "qlang/ops/q_sys.h"  /* q_sys_is_cmd / q_sys_line — `\`-command glue */
+#include "qlang/q_console.h"  /* q_console_pipe_enable — the modern pipe-table display */
+#include "qlang/q_pq.h"       /* q_pq_load — the embedded stdlib bundle */
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
 #include "ops/ops.h"      /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
@@ -37,6 +39,15 @@ int q_wasm_init(void) {
         return 0;
     setenv("RAYFORCE_CORES", "0", 1);
     g_rt = q_runtime_create(0, NULL);
+    if (g_rt) {
+        /* Modern mode, same as an argv-less `./q`: pipe-table display + the
+         * embedded stdlib.  No argv in a browser, so no `-classic` opt-out;
+         * `\classic 1` re-toggles the display at runtime.  No terminal to
+         * query either, so no `\c 25 0N` auto width — a fixed 25 120. */
+        q_console_pipe_enable();
+        q_console_clip_set(25, 120);
+        q_pq_load();
+    }
     return g_rt ? 0 : 1;
 }
 
@@ -51,7 +62,7 @@ char* q_wasm_eval(const char* src) {
     if (!src)
         return strdup("");
 
-    /* `\`-commands (\c, \nonlegacy, \h, ...) run before the parser — the same
+    /* `\`-commands (\c, \classic, \h, ...) run before the parser — the same
      * shared q_sys_line glue the native REPL and `system "…"` use.  This
      * runtime never enables the process capability, so `\\` is a silent no-op
      * (nothing to quit in a browser) and an unknown `\token` is silent (no
@@ -92,7 +103,7 @@ char* q_wasm_eval(const char* src) {
     /* q console silence: a (last-statement) assignment prints nothing —
      * mirrors src/qlang/q_repl.c:run_one_line. */
     if (!RAY_IS_NULL(r) && !is_assign)
-        q_fmt_console(r, buf, sizeof buf);   /* obey \c / nonlegacy on auto-echo, as run_one_line does */
+        q_fmt_console(r, buf, sizeof buf);   /* obey \c / \classic on auto-echo, as run_one_line does */
     else
         buf[0] = '\0';
     ray_release(r);

@@ -110,6 +110,28 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
     if (n == 0)
         return 0;
 
+    /* `?topic` / `??topic` — the help doors (peachq): `?` glued to a NAME
+     * start rewrites the line to `.help.help"topic"` (the previewed ladder);
+     * `??` to `.help.full"topic"` (the full unclipped page).  First token
+     * only.  No operator use of `?` can match — `?[…]` funsql/cond, adverbed
+     * `?'[…]`/`?/:[…]`/`?\:[…]`, k-unary `?:` and bare `?`/`??` all continue
+     * to the parser — and every intercepted line is a parse error in kdb, so
+     * classic fidelity costs nothing.  Without `\l pq` the call answers
+     * '.help.help / '.help.full, which names the fix. */
+    if ((!lang || lang == 'q') && n >= 2 && s[0] == '?') {
+        size_t t0 = (n >= 3 && s[1] == '?') ? 2 : 1;
+        if (isalpha((unsigned char)s[t0]) || s[t0] == '.') {
+            size_t t1 = t0;
+            while (t1 < n && !isspace((unsigned char)s[t1]) &&
+                   s[t1] != '"' && s[t1] != '\\') t1++;
+            char hb[512];
+            int hn = snprintf(hb, sizeof hb, ".help.%s\"%.*s\"",
+                              t0 == 2 ? "full" : "help", (int)(t1 - t0), s + t0);
+            if (hn > 0 && (size_t)hn < sizeof hb)
+                return q_ctx_run_line(hb, (size_t)hn, out, err, print_result);
+        }
+    }
+
     /* The statement seam: frame-[0] text + whether this is a CONSOLE line
      * (script loads / IPC never suspend), and the per-statement save/restore —
      * the error-payload backstop (q_err.c head) rides it.  Every exit path ends
