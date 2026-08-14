@@ -20,6 +20,7 @@
 #include "qlang/q_fmt.h"      /* q_fmt_set_prec/q_fmt_prec (`\P`) */
 #include "qlang/q_console.h"  /* q_console_str/reset (timed-expr side effects); q_console_pipe_* (`\classic`) */
 #include "qlang/q_ctx.h"           /* the engine context: `\l` source seam, listener flag, console teardown */
+#include "qlang/io/q_io.h"    /* q_io_mkdir_parents — `\1`/`\2` create the path they name */
 #include "qlang/q_pq.h"       /* q_pq_load — the `\l pq` embedded-stdlib gate */
 #include "qlang/q_env.h"      /* q_env_ctx_set/_ctx + q_env_ns_names — `\d` and the `\v`/`\f`/`\a` rosters */
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk — the `.z.ts` timer callback */
@@ -41,8 +42,16 @@
 #include <stdlib.h>           /* system, malloc */
 #include <string.h>           /* strlen, memcpy, memcmp */
 #include <stdio.h>            /* popen / pclose — `system "…"` stdout capture */
-#include <unistd.h>          /* chdir / getcwd / access — `\cd`, `\l` */
+#include <unistd.h>          /* chdir / getcwd / access — `\cd`, `\l`; dup2 — `\1`/`\2` */
+#include <fcntl.h>           /* open — the `\1`/`\2` redirect target */
 #include <limits.h>          /* PATH_MAX */
+#ifdef RAY_OS_WINDOWS
+  #include <io.h>            /* msvcrt spells the POSIX descriptor calls with an underscore */
+  #define dup2 _dup2
+#endif
+#ifndef O_BINARY
+  #define O_BINARY 0         /* only Windows has a text mode to opt out of */
+#endif
 #include <sys/stat.h>        /* stat / S_ISREG — `\l` regular-file gate */
 #include "qlang/q_registry.h" /* q_str_text_bytes / q_str_charv_out — charv text accessors */
 #include "qlang/q_registry_internal.h" /* q_exit_wrap + the q_type_* atom helpers */
@@ -290,7 +299,7 @@ static ray_t* h_S(const char* arg, size_t alen) {
  * After the dedicated handlers below (\P \c \C \w \g \o \W \e \s, \l \cd \p,
  * \t \ts), h_getset serves the REMAINING commands whose SETTER / ACTION form
  * (arg present) prints NOTHING in kdb — date-parse (\z), file/name actions
- * (\x \r \1 \2 \_), and timeout/TLS/user config (\T \E \u).  We accept the
+ * (\x \r \_), and timeout/TLS/user config (\T \E \u).  We accept the
  * arg-form as a silent no-op: the OUTPUT matches kdb's empty setter output, so
  * the frozen ledger rows that bank that silence (e.g. `\z 1`) stay green.  The
  * side-effect is a tracked gap; the GETTER form (no arg, which kdb prints a
@@ -298,6 +307,26 @@ static ray_t* h_S(const char* arg, size_t alen) {
 static ray_t* h_getset(size_t alen) {
     if (alen > 0) return NULL;                   /* setter/action form → silent */
     return q_err(QE_NYI);               /* getter form → not yet */
+}
+
+/* `\1 file` / `\2 file` — basics/syscmds.md: files and intermediate directories
+ * created if necessary, output APPENDED to an existing one.  FD level (dup2),
+ * not a re-pointed FILE*, so every writer follows at once — the console drain,
+ * the q handle 2, a child inheriting the descriptor — and `\1 /dev/stdin`
+ * restores the default the way the doc says.  Getter form: still 'nyi. */
+static ray_t* h_redirect(int fd, const char* arg, size_t alen) {
+    if (alen == 0) return q_err(QE_NYI);
+    if (alen >= PATH_MAX) return q_err(QE_OS);
+    char path[PATH_MAX];
+    memcpy(path, arg, alen); path[alen] = '\0';
+    q_io_mkdir_parents(path, alen);
+    int f = open(path, O_BINARY | O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (f < 0) return q_err(QE_OS);
+    fflush(fd == 1 ? stdout : stderr);   /* buffered bytes belong to the OLD target */
+    if (f == fd) return NULL;            /* std fd was closed: open landed ON it, already done */
+    int rc = dup2(f, fd);
+    close(f);
+    return rc < 0 ? q_err(QE_OS) : NULL;
 }
 
 /* `\b` (views) / `\B` (pending views), basics/syscmds.md — q_view.c owns the
@@ -1039,11 +1068,13 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
             case 'b': return h_bB(0, arg, alen);                 /* views               */
             case 'B': return h_bB(1, arg, alen);                 /* pending views       */
             case 'E': return h_E(arg, alen);                     /* TLS server mode     */
+            case '1': return h_redirect(1, arg, alen);           /* stdout redirect     */
+            case '2': return h_redirect(2, arg, alen);           /* stderr redirect     */
             /* Silent setter/action form (arg present) → NULL; getter → 'nyi:
              * \z date-parse, \r replicate, \T timeout, \u user-pwd,
-             * \x expunge, \1 stdout, \2 stderr, \_ hide-q-code. */
+             * \x expunge, \_ hide-q-code. */
             case 'z': case 'r': case 'T':
-            case 'u': case 'x': case '1': case '2': case '_':
+            case 'u': case 'x': case '_':
                 return h_getset(alen);
             /* \\ quit — q_sys_exit is capability-gated (a real process exits firing
              * .z.exit; an embedder returns silently, kdb-true either way). */
