@@ -18,6 +18,7 @@
 #include "qlang/q_prim.h"         /* q_str_text_bytes — the remote value-apply head */
 #include "qlang/ops/q_sys.h"      /* q_sys_is_cmd / q_sys_line / q_system_fn — the `\`-command door */
 #include "qlang/ops/q_index.h"    /* q_index_elem_at — the element-read home */
+#include "qlang/io/q_io.h"        /* q_io_read_slice — THE byte core a load reads through */
 #include "lang/eval.h"            /* ray_eval_is_interrupted, ray_eval_set_remote_*_fn */
 #include "mem/heap.h"             /* ray_heap_gc — the `\g 1` statement-end collect */
 #include "mem/sys.h"              /* ray_sys_alloc — remote-eval scratch */
@@ -231,22 +232,21 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
     return 0;
 }
 
-/* Line source for the script runner: a FILE or an in-memory string — ONE
- * multiline law for `\l file` and the embedded stdlib bundle (`\l pq`). */
-typedef struct { FILE* f; const char* p; int64_t file_sym; } script_src_t;
+/* The script runner reads BYTES — `\l file` arrives through the q_io byte core
+ * and the embedded stdlib bundle (`\l pq`) is already a string, so one
+ * multiline law serves both with no second file-reading stack. */
+static int ctx_run_script(const char* src, size_t len, int64_t file_sym,
+                          FILE* out, FILE* err) {
+    if (!src) { src = ""; len = 0; }     /* an empty read owns no buffer; `src + len` must stay defined */
 
-static char* script_gets(char* buf, int cap, script_src_t* s) {
-    if (s->f) return fgets(buf, cap, s->f);
-    if (!s->p || !*s->p) return NULL;
-    size_t n = 0, max = (size_t)cap - 1;
-    while (n < max && s->p[n] && s->p[n] != '\n') n++;
-    if (n < max && s->p[n] == '\n') n++;       /* keep the newline, fgets-like */
-    memcpy(buf, s->p, n); buf[n] = '\0';
-    s->p += n;
-    return buf;
-}
+    /* ONE logical line, joined.  Bounded by the SOURCE: a physical line adds
+     * its own trimmed bytes plus at most the '\n' its own newline already paid
+     * for.  Heap, not static — a loaded script may `\l` another while this one
+     * still holds the line that invoked it.  Allocated before any global state
+     * is touched, so the failure exit has nothing to restore. */
+    char* acc = (char*)ray_sys_alloc(len + 2);
+    if (!acc) return 2 + (int)QE_OOM;
 
-static int ctx_run_script(script_src_t* src, FILE* out, FILE* err) {
     /* OWNER RULING 2026-08-06: a load SAVES the caller's `\d` context and
      * RESTORES it when the file runs to completion; a load that ABORTS leaves
      * the context where the error left it (deliberate — that is what makes the
@@ -271,34 +271,40 @@ static int ctx_run_script(script_src_t* src, FILE* out, FILE* err) {
      *    terminate the PROCESS via q_sys_exit (kdb-true).
      * Continuation fragments are joined with '\n' (now whitespace to the
      * scanner), so each fragment's trailing `/ comment` ends at its own newline. */
-    static char acc[1 << 16];               /* one logical line (joined) */
     size_t      alen = 0;
     int         in_block = 0;
-    char        line[4096];
+    const char* p = src;
+    const char* pend = src + len;
     int64_t     lineno = 0;
 
     /* Doc headers ride this same classification — see q_comment.h.  Every arm
      * below states what it means for the run: a blank line, a `/`..`\` block
      * and any CONTINUATION line all end it, so a mid-body comment can never
      * leak onto the next definition. */
-    q_comment_script_t dsaved = q_comment_script_begin(src->file_sym);
+    q_comment_script_t dsaved = q_comment_script_begin(file_sym);
 
     /* a statement that fails to PARSE aborts the LOAD (kdb stops a script at
      * the error; qsql.md:168's 'dup fires here, so a bad file never runs the
      * statements after it).  Eval errors keep the historic continue. */
     int lrc = 0;
-    #define FLUSH() do { if (alen) { lrc = q_ctx_run_line(acc, alen, out, err, 0); alen = 0; acc[0] = '\0'; } } while (0)
+    #define FLUSH() do { if (alen) { lrc = q_ctx_run_line(acc, alen, out, err, 0); alen = 0; } } while (0)
 
-    while (script_gets(line, sizeof line, src)) {
+    while (p < pend) {
+        const char* line = p;
+        const char* nl   = (const char*)memchr(p, '\n', (size_t)(pend - p));
+        size_t      n    = nl ? (size_t)(nl - line) : (size_t)(pend - line);
+        p = nl ? nl + 1 : pend;
         lineno++;
-        size_t n = strlen(line);
-        while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
+        /* The span is BORROWED (it IS the source's bytes), so every trim below
+         * moves the LENGTH, never writes a NUL — and nothing caps it.  The
+         * split already ate the '\n'; only a CRLF's '\r' can be left. */
+        while (n && line[n - 1] == '\r') n--;
         /* Strip TRAILING whitespace too, so a block delimiter with superfluous
          * blanks (`/   ` / `\   `) still classifies as a singleton and a code
          * line's insignificant trailing spaces don't skew anything (kdb ignores
          * superfluous blanks — language.md).  Trailing spaces inside a string
          * literal are safe: such a line ends with `"`, not whitespace. */
-        while (n && (line[n - 1] == ' ' || line[n - 1] == '\t')) line[--n] = '\0';
+        while (n && (line[n - 1] == ' ' || line[n - 1] == '\t')) n--;
 
         /* trimmed view (leading whitespace skipped) drives classification */
         size_t lead = 0;
@@ -321,12 +327,10 @@ static int ctx_run_script(script_src_t* src, FILE* out, FILE* err) {
         else { FLUSH(); if (lrc) break; q_comment_fresh_line(lineno); }  /* eval the prior line, arm this one */
 
         /* append this physical line (join continuation fragments with '\n') */
-        if (alen && alen + 1 < sizeof acc) acc[alen++] = '\n';
-        size_t room = (alen < sizeof acc) ? sizeof acc - 1 - alen : 0;
-        if (n > room) n = room;                   /* truncate pathological long line, never overflow */
+        if (alen) acc[alen++] = '\n';
         memcpy(acc + alen, line, n);
         alen += n;
-        acc[alen] = '\0';
+        acc[alen] = '\0';                          /* q_ctx_run_line's q_parse reads it as a C string */
     }
     if (!lrc) FLUSH();                             /* eval any pending logical line (incl. before a lone \) */
     #undef FLUSH
@@ -335,27 +339,30 @@ static int ctx_run_script(script_src_t* src, FILE* out, FILE* err) {
     q_env_frame_floor(saved_ffloor);
     q_eval_apply_frame_floor(saved_floor);
     if (!lrc) q_env_ctx_set(saved_ctx);            /* completed: caller's `\d` back */
+    ray_sys_free(acc);
     return lrc ? 1 + lrc : 0;
 }
 
 int q_ctx_run_file(const char* path, FILE* out, FILE* err) {
-    FILE* f = fopen(path, "r");
-    if (!f) {
+    size_t plen  = strlen(path);
+    ray_t* pathv = ray_str(path, plen);
+    ray_t* bytes = pathv ? q_io_read_slice(pathv, 0, -1, NULL) : NULL;
+    if (pathv) ray_release(pathv);
+    if (!bytes || RAY_IS_ERR(bytes)) {
+        if (bytes) { q_err_drop(); ray_error_free(bytes); }
         fprintf(err, "q: cannot open script '%s'\n", path);
         return 1;
     }
-    script_src_t src = { .f = f, .p = NULL,
-                         .file_sym = ray_sym_intern_runtime(path, strlen(path)) };
-    int rc = ctx_run_script(&src, out, err);
-    fclose(f);
+    int rc = ctx_run_script((const char*)ray_data(bytes), (size_t)ray_len(bytes),
+                            ray_sym_intern_runtime(path, plen), out, err);
+    ray_release(bytes);
     return rc;
 }
 
 int q_ctx_run_src(const char* s, FILE* out, FILE* err) {
     /* No path to attribute: the embedded bundles are ONE concatenated string,
      * so their docs record the empty file. */
-    script_src_t src = { .f = NULL, .p = s, .file_sym = 0 };
-    return ctx_run_script(&src, out, err);
+    return ctx_run_script(s, strlen(s), 0, out, err);
 }
 
 /* ===== The remote doors (see q_ctx.h) =====
