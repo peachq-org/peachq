@@ -100,8 +100,32 @@ static void ctx_show_err(FILE* out, FILE* err, ray_t* e) {
  * q-formatted to `out` (console auto-display).  When zero (script load) the
  * result is discarded — kdb scripts are silent except explicit side-effects
  * (show / 0N! / console writes), which still flush below. */
-int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
-                   int print_result) {
+
+/* A load line that ABORTS re-signals to whoever asked for the load: display
+ * once at this line, then DETACH the error's identity (else display's drop and
+ * q_dbg_statement_end's payload restore would destroy the text); the caller
+ * re-signals only after the statement seam has closed. */
+static int ctx_load_abort(ray_t* e, FILE* out, FILE* err, q_err_sig_t* t) {
+    if (!q_dbg_reported(e)) {
+        fflush(out);
+        q_dbg_print_trace(err, e);
+    }
+    q_err_detach(e, t);
+    ray_error_free(e);
+    return t->aux ? (int)t->aux : (int)QE_VALUE + 1;
+}
+
+static void ctx_load_esig(ray_t** esig, q_err_sig_t* t) {
+    if (esig) *esig = q_err_resignal(t);
+    else if (t->pv) { ray_release(t->pv); t->pv = NULL; }
+}
+
+/* in_load: this is a script-runner line — an eval error (or interrupt, or a
+ * failing `\`-command such as a nested `\l`) ABORTS the load: non-zero return
+ * plus the re-signal in *esig.  Non-load callers keep the historic contract
+ * (eval errors report and return 0). */
+static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
+                    int print_result, int in_load, ray_t** esig) {
     /* Language-handler prefixes (kdb `x)` lines, owner-ruled 2026-08-07):
      * strip every leading `<letter>)` — pasted prompts included — and the
      * RIGHTMOST letter is the language.  `q` (or none) evaluates as q; any
@@ -136,15 +160,16 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
             }
             hb[hn++] = '"';
             hb[hn] = '\0';
-            return q_ctx_run_line(hb, (size_t)hn, out, err, print_result);
+            return ctx_line(hb, (size_t)hn, out, err, print_result, in_load, esig);
         }
     }
 
-    /* The statement seam: frame-[0] text + whether this is a CONSOLE line
-     * (script loads / IPC never suspend), and the per-statement save/restore —
-     * the error-payload backstop (q_err.c head) rides it.  Every exit path ends
-     * it, so a NESTED statement gives this level its state back. */
-    int dbg_prev = q_dbg_statement_begin(s, n, print_result);
+    /* The statement seam: frame-[0] text + suspendability (IPC never suspends;
+     * a load line INHERITS it from the statement that asked for the load), and
+     * the per-statement save/restore — the error-payload backstop (q_err.c
+     * head) rides it.  Every exit path ends it, so a NESTED statement gives
+     * this level its state back. */
+    int dbg_prev = q_dbg_statement_begin(s, n, in_load ? -1 : print_result);
 
     /* `\`-system-command line: the shared q_sys glue renders console side
      * effects + value into buf (value-or-throw; `\\`/exit act inside q_sys).
@@ -156,6 +181,15 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
         if (buf[0]) {
             fputs(buf, out);
             if (buf[strlen(buf) - 1] != '\n') fputc('\n', out);
+        }
+        if (sr && in_load) {
+            q_err_sig_t t;
+            int code = ctx_load_abort(sr, out, err, &t);
+            fflush(out);
+            ctx_statement_end();
+            q_dbg_statement_end(dbg_prev);
+            ctx_load_esig(esig, &t);
+            return code;
         }
         if (sr) ctx_show_err(out, err, sr);
         fflush(out);
@@ -208,10 +242,32 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
         ctx_show_err(out, err, q_err(QE_STOP));
         ctx_statement_end();
         q_dbg_statement_end(dbg_prev);
+        if (in_load) {             /* a Ctrl-C aborts the load — never suspends */
+            if (esig) *esig = q_err(QE_STOP);
+            return (int)QE_STOP + 1;
+        }
         return 0;
     }
 
     if (RAY_IS_ERR(r)) {
+        if (in_load) {
+            ray_t* rep = q_dbg_load_filter(r);
+            if (rep && !RAY_IS_ERR(rep)) {     /* :r — discard, the load continues */
+                ray_error_free(r);
+                ray_release(rep);
+                fflush(out);
+                ctx_statement_end();
+                q_dbg_statement_end(dbg_prev);
+                return 0;
+            }
+            if (rep) { ray_error_free(r); r = rep; }   /* 'e — abort with the re-signal */
+            q_err_sig_t t;
+            int code = ctx_load_abort(r, out, err, &t);
+            ctx_statement_end();
+            q_dbg_statement_end(dbg_prev);
+            ctx_load_esig(esig, &t);
+            return code;
+        }
         ctx_show_err(out, err, r);
         ctx_statement_end();
         q_dbg_statement_end(dbg_prev);
@@ -232,11 +288,16 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
     return 0;
 }
 
+int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
+                   int print_result) {
+    return ctx_line(s, n, out, err, print_result, 0, NULL);
+}
+
 /* The script runner reads BYTES — `\l file` arrives through the q_io byte core
  * and the embedded stdlib bundle (`\l pq`) is already a string, so one
  * multiline law serves both with no second file-reading stack. */
 static int ctx_run_script(const char* src, size_t len, int64_t file_sym,
-                          FILE* out, FILE* err) {
+                          FILE* out, FILE* err, ray_t** esig) {
     if (!src) { src = ""; len = 0; }     /* an empty read owns no buffer; `src + len` must stay defined */
 
     /* ONE logical line, joined.  Bounded by the SOURCE: a physical line adds
@@ -283,11 +344,13 @@ static int ctx_run_script(const char* src, size_t len, int64_t file_sym,
      * leak onto the next definition. */
     q_comment_script_t dsaved = q_comment_script_begin(file_sym);
 
-    /* a statement that fails to PARSE aborts the LOAD (kdb stops a script at
-     * the error; qsql.md:168's 'dup fires here, so a bad file never runs the
-     * statements after it).  Eval errors keep the historic continue. */
+    /* ANY failing statement aborts the LOAD (kdb stops a script at the error;
+     * qsql.md:168's parse-time 'dup and a mid-file eval error both fire here,
+     * so a bad file never runs the statements after it).  At an interactive
+     * console the eval error may first SUSPEND into the debugger — ctx_line's
+     * load seam — and a `:r` resume continues the load instead of aborting. */
     int lrc = 0;
-    #define FLUSH() do { if (alen) { lrc = q_ctx_run_line(acc, alen, out, err, 0); alen = 0; } } while (0)
+    #define FLUSH() do { if (alen) { lrc = ctx_line(acc, alen, out, err, 0, 1, esig); alen = 0; } } while (0)
 
     while (p < pend) {
         const char* line = p;
@@ -339,11 +402,12 @@ static int ctx_run_script(const char* src, size_t len, int64_t file_sym,
     q_env_frame_floor(saved_ffloor);
     q_eval_apply_frame_floor(saved_floor);
     if (!lrc) q_env_ctx_set(saved_ctx);            /* completed: caller's `\d` back */
+    if (lrc && esig && *esig) q_dbg_mark_reported(*esig);
     ray_sys_free(acc);
     return lrc ? 1 + lrc : 0;
 }
 
-int q_ctx_run_file(const char* path, FILE* out, FILE* err) {
+int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig) {
     size_t plen  = strlen(path);
     ray_t* pathv = ray_str(path, plen);
     ray_t* bytes = pathv ? q_io_read_slice(pathv, 0, -1, NULL) : NULL;
@@ -354,15 +418,15 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err) {
         return 1;
     }
     int rc = ctx_run_script((const char*)ray_data(bytes), (size_t)ray_len(bytes),
-                            ray_sym_intern_runtime(path, plen), out, err);
+                            ray_sym_intern_runtime(path, plen), out, err, esig);
     ray_release(bytes);
     return rc;
 }
 
-int q_ctx_run_src(const char* s, FILE* out, FILE* err) {
+int q_ctx_run_src(const char* s, FILE* out, FILE* err, ray_t** esig) {
     /* No path to attribute: the embedded bundles are ONE concatenated string,
      * so their docs record the empty file. */
-    return ctx_run_script(s, strlen(s), 0, out, err);
+    return ctx_run_script(s, strlen(s), 0, out, err, esig);
 }
 
 /* ===== The remote doors (see q_ctx.h) =====
@@ -371,6 +435,17 @@ int q_ctx_run_src(const char* s, FILE* out, FILE* err) {
  * to `out`; errors propagate as owned values the IPC layer serializes as -128h.
  * Console output drains to the SERVER's stdout, then resets so it cannot bleed
  * into the next request. */
+
+/* `\e` error-trap-CLIENTS mode (syscmds.md#e-error-trap-clients) applied to a
+ * request: 1 = the statement is console-marked, so an error suspends on the
+ * server's console (the parked event loop is what blocks other requests);
+ * 2 = dump the stack to stderr for an untrapped error, still answer (V3.5). */
+static int remote_console(void)      { return q_sys_err_trap_mode() == 1 ? 1 : 0; }
+static void remote_err_dump(ray_t* r) {
+    if (r && RAY_IS_ERR(r) && q_sys_err_trap_mode() == 2)
+        q_dbg_print_trace(stderr, r);
+}
+
 static ray_t* remote_eval_str(const char* src, size_t len) {
     /* OWNER RULING 2026-08-10: a request obeys ctx_run_script's law — restore the `\d`
      * context on success (no client parks a shared server), leave it where an abort left it. */
@@ -381,12 +456,15 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
     if (len > 0 && src[0] == '\\') {
         ray_t* arg = ray_str(src + 1, len - 1);
         if (!arg) return q_err(QE_OOM);
+        int dbg_prev = q_dbg_statement_begin(src, len, remote_console());
         ray_t* r = q_system_fn(arg);
         ray_release(arg);
         { const char* con = q_console_str();
           if (con && *con) fputs(con, stdout);
           q_console_reset(); }
         ctx_statement_end();
+        remote_err_dump(r);
+        q_dbg_statement_end(dbg_prev);
         if (!RAY_IS_ERR(r)) q_env_ctx_set(saved_ctx);
         return r;
     }
@@ -394,12 +472,14 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
     if (!tmp) return q_err(QE_OOM);
     memcpy(tmp, src, len);
     tmp[len] = '\0';
-    /* remote statements never suspend (console 0); the seam still gives a
+    /* remote statements suspend only under `\e 1`; the seam always gives a
      * remote .Q.trp its `[0]` frame */
-    int dbg_prev = q_dbg_statement_begin(tmp, len, 0);
+    int dbg_prev = q_dbg_statement_begin(tmp, len, remote_console());
     ray_t* ast = q_parse(tmp);
     if (RAY_IS_ERR(ast)) {
         ray_sys_free(tmp);
+        remote_err_dump(ast);            /* `\e 2` covers parse errors too (no
+                                          * suspension: parse never suspends) */
         q_dbg_statement_end(dbg_prev);
         return ast;
     }
@@ -420,6 +500,7 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
       if (con && *con) fputs(con, stdout);
       q_console_reset(); }
     ctx_statement_end();
+    remote_err_dump(r);                  /* `\e 2`: trace before the seam closes */
     q_dbg_statement_end(dbg_prev);
     if (!RAY_IS_ERR(r)) q_env_ctx_set(saved_ctx);
     if (is_assign && !RAY_IS_ERR(r)) {   /* an error still propagates (-128h) */
@@ -436,7 +517,7 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
  * its value first.  `list` is BORROWED (the ipc layer releases it); the result is
  * OWNED.  Restricted mode needs no re-assert: ipc_dispatch sets it around the
  * whole dispatch. */
-static ray_t* remote_apply(ray_t* list) {
+static ray_t* remote_apply_body(ray_t* list) {
     if (!list || (list->type != RAY_LIST && !ray_is_vec(list)) ||
         ray_len(list) < 1)
         return q_err(QE_TYPE);
@@ -489,6 +570,15 @@ static ray_t* remote_apply(ray_t* list) {
     ray_release(head);
     ctx_statement_end();
     if (!RAY_IS_ERR(r)) q_env_ctx_set(saved_ctx);
+    return r;
+}
+
+/* The value-apply request under the same `\e` law; no source text for [0]. */
+static ray_t* remote_apply(ray_t* list) {
+    int dbg_prev = q_dbg_statement_begin(NULL, 0, remote_console());
+    ray_t* r = remote_apply_body(list);
+    remote_err_dump(r);
+    q_dbg_statement_end(dbg_prev);
     return r;
 }
 
