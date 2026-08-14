@@ -959,6 +959,25 @@ static void ray_term_update_ghost(ray_term_t* term) {
     }
     if (term->buf_len == 0) {
         term->comp_count = 0;
+        /* Empty fresh prompt: surface the host-armed hint through the ghost
+         * slot (render + row math come free), clipped to the live width on a
+         * UTF-8 boundary. */
+        if (term->hint_len > 0) {
+            int32_t max = term->hint_len;
+            if (term->term_width > 0) {
+                int32_t avail = term->term_width - term->prompt_len - 1;
+                if (avail < 0) avail = 0;
+                if (max > avail) max = avail;
+            }
+            while (max > 0 && max < term->hint_len &&
+                   (term->hint[max] & 0xC0) == 0x80) max--;
+            if (max > 0) {
+                memcpy(term->ghost, term->hint, (size_t)max);
+                term->ghost_len = max;
+                term->ghost_word_start = 0;
+                term->ghost_word_len = 0;
+            }
+        }
         return;
     }
 
@@ -1001,6 +1020,18 @@ static void ray_term_update_ghost(ray_term_t* term) {
 static void ray_term_accept_ghost(ray_term_t* term) {
     if (term->ghost_len <= 0)
         return;
+    if (term->buf_len == 0 && term->hint_len > 0) {
+        /* Hint accept: only the command prefix, never the `/ comment` tail. */
+        int32_t n = term->hint_accept;
+        if (n > term->hint_len) n = term->hint_len;
+        term->ghost_len = 0;
+        term->hint_len = 0;
+        if (n <= 0 || n >= TERM_BUF_SIZE)
+            return;
+        memcpy(term->buf, term->hint, (size_t)n);
+        term->buf_len = term->buf_pos = n;
+        return;
+    }
     if (term->buf_len + term->ghost_len >= TERM_BUF_SIZE)
         return;
 
@@ -1308,6 +1339,18 @@ void ray_term_set_continuation_fn(ray_term_t* term, ray_continuation_fn fn) {
     term->continuation_fn = fn;
 }
 
+void ray_term_set_hint(ray_term_t* term, const char* text, int32_t accept_len) {
+    if (!term) return;
+    term->hint_len = 0;
+    term->hint_accept = 0;
+    if (!text || !*text) return;
+    size_t n = strlen(text);
+    if (n >= sizeof term->hint) n = sizeof term->hint - 1;
+    memcpy(term->hint, text, n);
+    term->hint_len = (int32_t)n;
+    term->hint_accept = accept_len > (int32_t)n ? (int32_t)n : accept_len;
+}
+
 /* Dispatch to the caller-supplied highlighter when one is installed,
  * otherwise fall back to the built-in.  Both share term_highlight_into's
  * signature so the default path stays byte-identical. */
@@ -1592,28 +1635,45 @@ static ray_t* feed_escape(ray_term_t* term, int byte) {
     return NULL;
 }
 
+/* Copy the current search match into the edit buffer (cursor at end) and
+ * leave search mode — the accept-for-EDITING half of readline's i-search. */
+static void search_accept(ray_term_t* term) {
+    if (term->search_match_idx >= 0) {
+        const char* entry = term->hist.entries[term->search_match_idx];
+        int32_t len = (int32_t)strlen(entry);
+        if (len > TERM_BUF_SIZE - 1) len = TERM_BUF_SIZE - 1;
+        memcpy(term->buf, entry, (size_t)len);
+        term->buf_len = len;
+        term->buf_pos = len;
+    }
+    term->search_mode = 0;
+}
+
 /* Process one byte while in search mode.
  * Returns a line if search-then-Enter fires, NULL otherwise. */
 static ray_t* feed_search(ray_term_t* term, int skey) {
     if (skey == KEYCODE_RETURN) {
         /* Accept match into buffer, then submit via normal Enter path */
-        if (term->search_match_idx >= 0) {
-            const char* entry = term->hist.entries[term->search_match_idx];
-            int32_t len = (int32_t)strlen(entry);
-            if (len > TERM_BUF_SIZE - 1) len = TERM_BUF_SIZE - 1;
-            memcpy(term->buf, entry, (size_t)len);
-            term->buf_len = len;
-            term->buf_pos = len;
-        }
-        term->search_mode = 0;
+        search_accept(term);
         term->multiline_len = 0;
         return feed_normal(term, KEYCODE_RETURN);
     }
 
+    if (skey == KEYCODE_TAB || skey == KEYCODE_CTRL_E || skey == KEYCODE_CTRL_A) {
+        /* readline: Tab (or a line-motion key) ends the search keeping the
+         * match in the buffer for EDITING, never running it. */
+        search_accept(term);
+        if (skey == KEYCODE_CTRL_A) term->buf_pos = 0;
+        ray_term_redraw(term);
+        return NULL;
+    }
+
     if (skey == KEYCODE_ESCAPE) {
-        /* Exit search mode; escape sequence bytes will arrive later
-         * and be consumed by the escape state machine. */
-        term->search_mode = 0;
+        /* Exit search mode KEEPING the match for editing (readline: ESC and
+         * every movement key end the search).  An arrow/Home/End sequence's
+         * remaining bytes arrive next and now move within the accepted line. */
+        search_accept(term);
+        ray_term_redraw(term);
         term->esc_state = 1;  /* expect continuation byte */
         term->esc_buf_len = 0;
         return NULL;
@@ -1891,6 +1951,16 @@ static ray_t* feed_normal(ray_term_t* term, int key) {
         return NULL;
     }
 
+    case KEYCODE_CTRL_L: {
+        /* readline clear-screen: wipe the viewport (scrollback and history
+         * untouched) and repaint the prompt + current line at the top. */
+        printf("\033[H\033[2J");
+        fflush(stdout);
+        term->last_total_rows = 1;
+        ray_term_redraw(term);
+        return NULL;
+    }
+
     case KEYCODE_CTRL_W: {
         if (term->buf_pos > 0) {
             int32_t end = term->buf_pos;
@@ -1916,6 +1986,11 @@ static ray_t* feed_normal(ray_term_t* term, int key) {
     }
 
     case KEYCODE_TAB: {
+        if (term->buf_len == 0 && term->hint_len > 0 && term->ghost_len > 0) {
+            ray_term_accept_ghost(term);
+            ray_term_redraw(term);
+            return NULL;
+        }
         if (term->comp_cycling) {
             /* update_ghost (called from each redraw) resets comp_count to
              * 0 once the inserted word fully matches itself — without
