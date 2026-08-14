@@ -115,16 +115,27 @@
   $[any t~/:.help.index[]`qname;.help.i.get"help.md?q=",.h.hu t;""]}
 
 / one exact-name pass of the ladder: (local page;online page), either "".
+/ A PAGE (see the pages block at the foot of this file) never fetches: its
+/ member table IS the answer and the website is one static pointer line, so
+/ the whole page tier is offline by construction.
 .help.i.ladder:{[s] n:`$s;
-  ($[n in exec fullname from .help.funcs;.help.get n;""];.help.webfetch s)}
+  loc:$[n in exec fullname from .help.funcs;.help.get n;""];
+  p:.help.i.canon s;
+  $[null p;(loc;.help.webfetch s);("\n" sv (enlist $[count loc;loc;s]),.help.i.pagetext p;"")]}
 
-/ the help ladder as a VALUE (the IPC-friendly form): the local page for an
-/ exact captured name joined with the online page for an exact index topic;
-/ when both miss, .help.find — exactly one documented match answers ITS page,
-/ else the matching rows come back as a table to narrow by (empty = no match).
+/ `""`, `(::)` and the niladic `.help.show[]` all mean "show me the index".
+.help.i.blank:{[x] $[x~(::);1b;x~`;1b;10h=abs type x;0=count x;0b]}
+
+/ the help ladder as a VALUE (the IPC-friendly form), returning EVERYTHING the
+/ print form shows: the index for an empty pattern; else the local page for an
+/ exact captured name — with a page's blurb and member table appended — joined
+/ with the online page for an exact index topic; when both miss, .help.find —
+/ exactly one documented match answers ITS page, else the matching rows come
+/ back as a table to narrow by (empty = no match).
 / @param pattern (symbol|string) a name, or a pattern as .help.find takes it
 / @return (string|table) the help text, or the matching doc rows
 .help.text:{[pattern]
+  if[.help.i.blank pattern;:.help.i.index[]];
   lw:.help.i.ladder .help.i.str pattern;
   t:lw where 0<count each lw;
   if[count t;:"\n" sv t];
@@ -156,10 +167,13 @@
     out,:enlist $[cc;"\033[90m",x,"\033[0m";x]];
   "\n" sv out}
 
-/ the console door: the local page prints plainly; a fetched page renders as
-/ the gutter preview (.help.i.page); the find fallback as its page or table.
+/ THE printing door (`?`), and it returns null: the local page prints plainly, a
+/ fetched page as the gutter preview (.help.i.page), the find fallback as its
+/ page or table.  `.help.text` is the VALUE ladder — one contract per name, so
+/ a caller never has to guess whether it printed or answered.
 / @param pattern (symbol|string) a name, or a pattern as .help.find takes it
-.help.help:{[pattern]
+.help.show:{[pattern]
+  if[.help.i.blank pattern;-1 .help.i.index[];:(::)];
   s:.help.i.str pattern;
   lw:.help.i.ladder s;
   if[count first lw;-1 first lw];
@@ -168,7 +182,9 @@
     r:.help.find pattern;
     $[1=count m:distinct r`fullname;-1 .help.get first m;show r]];}
 
-/ the full unclipped ladder (`??topic`): plain text, no gutter, no preview.
+/ the OTHER printing door (`??`): the full unclipped ladder, plain text, no
+/ gutter, no preview.  Kept separate from .help.show because the two spellings
+/ mean different things at the prompt; both print, neither returns.
 .help.full:{[pattern] r:.help.text pattern; $[10h=type r;-1 r;show r];}
 
 / the basic datatype reference (ref/card.md shape), spelled by the engine:
@@ -215,7 +231,7 @@
 / >>> GENERATED from lib/help-builtins.tsv by `python3 tools/gen-help-builtins.py`
 / >>> edit the TSV, rerun (it splices this block in place), commit both.
 .help.i.r[`abs;"abs -5 3 -2                         / 5 3 2                   take the magnitude, dropping the sign"]
-.help.i.r[`aj;"aj[`sym`time;trade;quote]           /                         join the last quote at or before each trade time"]
+.help.i.r[`aj;"aj[`sym`time;trade;quote]           /                         as-of join: take the last y row at or before each x time"]
 .help.i.r[`aj0;"aj0[`sym`time;trade;quote]          /                         as-of join that keeps the matched row's own time"]
 .help.i.r[`ajf;"ajf[`sym`time;trade;quote]          /                         as-of join that fills nulls from the left table"]
 .help.i.r[`ajf0;"ajf0[`sym`time;trade;quote]         /                         as-of join filling nulls, keeping the matched time"]
@@ -223,23 +239,23 @@
 .help.i.r[`any;"any 1 2 3=1 20 30                   / 1b                      test whether at least one item is true"]
 .help.i.r[`and;"1010b and 1100b                     / 1000b                   take the lesser of two values - logical AND on booleans"]
 .help.i.r[`asc;"asc 2 1 3 2                         / 1 2 2 3                 sort a list, dictionary or table ascending"]
-.help.i.r[`iasc;"iasc 2 1 3                          / 1 0 2                   give the indices that would sort a list ascending"]
+.help.i.r[`iasc;"iasc 2 1 3                          / 1 0 2                   grade up: the indices that would sort a list ascending"]
 .help.i.r[`xasc;"`price xasc trade                   /                         sort a table ascending by the named columns"]
 .help.i.r[`asof;"trade asof `AAPL                    /                         take the last row of a table at or before a key value"]
 .help.i.r[`attr;"attr `s#1 3 4                       / `s                      report an object's attribute: s, u, p or g"]
-.help.i.r[`avg;"avg 1 2 3 4                         / 2.5                     take the arithmetic mean as a float"]
-.help.i.r[`avgs;"avgs 1 2 3 4                        / 1 1.5 2 2.5             take the running mean at every position"]
-.help.i.r[`mavg;"3 mavg 1 2 3 4 5                    / 1 1.5 2 3 4             take the mean over a sliding window of x items"]
+.help.i.r[`avg;"avg 1 2 3 4                         / 2.5                     take the average: the arithmetic mean, as a float"]
+.help.i.r[`avgs;"avgs 1 2 3 4                        / 1 1.5 2 2.5             take the running average at every position"]
+.help.i.r[`mavg;"3 mavg 1 2 3 4 5                    / 1 1.5 2 3 4             take the moving average over a sliding window of x items"]
 .help.i.r[`wavg;"1 2 3 wavg 10 20 30                 / 23.33333                take the mean of y weighted by x"]
 .help.i.r[`bin;"bin[1 3 5;4]                        / 1                       binary-search for the index of the last item up to y"]
 .help.i.r[`binr;"binr[1 3 5;4]                       / 2                       binary-search for the index of the first item from y"]
 .help.i.r[`ceiling;"ceiling 2.1 -2.1                    / 3 -2                    round up to the next whole number"]
 .help.i.r[`count;"count ([]a:1 2;b:3 4)               / 2                       count the items of a list, dictionary or table"]
-.help.i.r[`mcount;"3 mcount 1 2 3 4                    / 1 2 3 3                 count the non-null items in a sliding window"]
+.help.i.r[`mcount;"3 mcount 1 2 3 4                    / 1 2 3 3                 count the non-null items in a moving window of x items"]
 .help.i.r[`cols;"cols ([]a:1 2;b:3 4)                / `a`b                    list a table's column names"]
 .help.i.r[`xcol;"`x`y xcol ([]a:1 2;b:3 4)           / +`x`y!(1 2;3 4)         rename a table's leading columns"]
 .help.i.r[`xcols;"`b`a xcols ([]a:1 2;b:3 4)          / +`b`a!(3 4;1 2)         reorder a table's columns, the named ones first"]
-.help.i.r[`cor;"cor[1 2 3;2 4 7]                    / 0.9933993               measure how two lists correlate, from -1 to 1"]
+.help.i.r[`cor;"cor[1 2 3;2 4 7]                    / 0.9933993               measure the correlation of two lists, from -1 to 1"]
 .help.i.r[`cos;"cos 0 1                             / 1 0.5403023             take the cosine of an angle in radians"]
 .help.i.r[`acos;"acos 1                              / 0f                      take the arccosine, in radians"]
 .help.i.r[`cov;"cov[1 2 3;2 4 7]                    / 1.666667                measure the covariance of two lists"]
@@ -250,10 +266,10 @@
 .help.i.r[`delete;"delete b from ([]a:1 2;b:3 4)       / +(,`a)!,1 2             drop rows or columns from a table"]
 .help.i.r[`deltas;"deltas 1 4 9                        / 1 3 5                   take the difference between adjacent items"]
 .help.i.r[`desc;"desc 2 1 3                          / 3 2 1                   sort descending"]
-.help.i.r[`idesc;"idesc 2 1 3                         / 2 0 1                   give the indices that would sort a list descending"]
+.help.i.r[`idesc;"idesc 2 1 3                         / 2 0 1                   grade down: the indices that would sort a list descending"]
 .help.i.r[`xdesc;"`price xdesc trade                  /                         sort a table descending by the named columns"]
 .help.i.r[`dev;"dev 1 2 3 4                         / 1.118034                measure the standard deviation of a list"]
-.help.i.r[`mdev;"3 mdev 1 2 3 4                      /                         measure the standard deviation over a sliding window"]
+.help.i.r[`mdev;"3 mdev 1 2 3 4                      /                         measure the standard deviation over a moving window"]
 .help.i.r[`sdev;"sdev 1 2 3 4                        / 1.290994                measure the sample standard deviation"]
 .help.i.r[`differ;"differ 1 1 2 2 3                    / 10101b                  flag each item that differs from the one before it"]
 .help.i.r[`distinct;"distinct 1 2 1 3                    / 1 2 3                   keep the unique items, in first-seen order"]
@@ -261,7 +277,7 @@
 .help.i.r[`dsave;"`:db dsave `trade                   /                         write global tables to disk splayed and enumerated"]
 .help.i.r[`each;"count each (\"ab\";\"cde\")             / 2 3                     apply a function to every item separately"]
 .help.i.r[`peach;"count peach (\"ab\";\"cde\")            / 2 3                     apply a function to every item on secondary threads"]
-.help.i.r[`ej;"ej[`a;([]a:1 2);([]a:1 2;b:`x`y)]   / +`a`b!(1 2;`x`y)        join two tables on matching values of the named columns"]
+.help.i.r[`ej;"ej[`a;([]a:1 2);([]a:1 2;b:`x`y)]   / +`a`b!(1 2;`x`y)        equi join: match two tables on equal values of the named columns"]
 .help.i.r[`ema;"0.5 ema 1 2 3                       / 1 1.5 2.25              take the exponentially weighted moving average"]
 .help.i.r[`enlist;"enlist 1 2 3                        / ,1 2 3                  wrap the arguments as a single list"]
 .help.i.r[`eval;"eval parse \"2+3\"                    / 5                       evaluate a parse tree"]
@@ -269,7 +285,7 @@
 .help.i.r[`except;"1 2 3 4 except 2 4                  / 1 3                     drop from x every item that appears in y"]
 .help.i.r[`exec;"exec a from ([]a:1 2)               / 1 2                     read columns out of a table as values, not as a table"]
 .help.i.r[`exit;"exit 0                              /                         end the process with an exit code"]
-.help.i.r[`exp;"exp 1                               / 2.718282                raise e to a power"]
+.help.i.r[`exp;"exp 1                               / 2.718282                take the exponential: raise e to a power"]
 .help.i.r[`xexp;"2 xexp 10                           / 1024f                   raise x to the power y"]
 .help.i.r[`fby;"select from t where a=(max;a) fby b /                         compare each row against an aggregate of its group"]
 .help.i.r[`fills;"fills 1 0N 3 0N                     / 1 1 3 3                 replace each null with the last non-null before it"]
@@ -290,7 +306,7 @@
 .help.i.r[`hopen;"hopen `::5000                       /                         open a connection to a process, file or fifo"]
 .help.i.r[`hclose;"hclose h                            /                         close a connection handle"]
 .help.i.r[`hsym;"hsym `trade.csv                     / `:trade.csv             turn a symbol into a file or process handle symbol"]
-.help.i.r[`ij;"ij[([]a:1 2);([a:1 2]b:`x`y)]       / +`a`b!(1 2;`x`y)        keep the rows of x whose key matches y, adding y's columns"]
+.help.i.r[`ij;"ij[([]a:1 2);([a:1 2]b:`x`y)]       / +`a`b!(1 2;`x`y)        inner join: keep x's rows whose key matches y, adding y's columns"]
 .help.i.r[`ijf;"ijf[([]a:1 2);([a:1 2]b:`x`y)]      / +`a`b!(1 2;`x`y)        inner join that keeps x's values where y is null"]
 .help.i.r[`in;"2 in 1 2 3                          / 1b                      test whether each item of x appears in y"]
 .help.i.r[`insert;"t:([]a:1;b:`x);`t insert (2;`y)     / ,1                      append records to a table named by symbol"]
@@ -300,7 +316,7 @@
 .help.i.r[`keys;"keys ([a:1 2]b:3 4)                 / ,`a                     name a table's primary-key columns"]
 .help.i.r[`xkey;"`a xkey ([]a:1 2;b:3 4)             /                         make the named columns a table's primary key"]
 .help.i.r[`like;"\"quick\" like \"qu*\"                  / 1b                      match text against a glob pattern"]
-.help.i.r[`lj;"([]a:1 2)lj([a:1 2]b:`x`y)          / +`a`b!(1 2;`x`y)        add y's columns to x, matching on y's key"]
+.help.i.r[`lj;"([]a:1 2)lj([a:1 2]b:`x`y)          / +`a`b!(1 2;`x`y)        left join: add y's columns to x, matching on y's key"]
 .help.i.r[`ljf;"([]a:1 2)ljf([a:1 2]b:`x`y)         / +`a`b!(1 2;`x`y)        left join that keeps x's values where y is null"]
 .help.i.r[`load;"load `:trade                        /                         read a binary file or splayed table into a global"]
 .help.i.r[`rload;"rload `trade                        /                         read a splayed table from a directory of that name"]
@@ -309,18 +325,18 @@
 .help.i.r[`lower;"lower \"ABC\"                         / \"abc\"                   fold text or symbols to lower case"]
 .help.i.r[`upper;"upper \"abc\"                         / \"ABC\"                   fold text or symbols to upper case"]
 .help.i.r[`lsq;"(1 2#1 2f)lsq 2 2#1 0 0 1f          /                         solve x=y by least squares matrix divide"]
-.help.i.r[`max;"max 3 1 4                           / 4                       take the largest item"]
+.help.i.r[`max;"max 3 1 4                           / 4                       take the maximum: the largest item of a list"]
 .help.i.r[`maxs;"maxs 3 1 4                          / 3 3 4                   take the running maximum"]
-.help.i.r[`mmax;"2 mmax 3 1 4                        / 3 3 4                   take the maximum over a sliding window"]
+.help.i.r[`mmax;"2 mmax 3 1 4                        / 3 3 4                   take the maximum over a moving window of x items"]
 .help.i.r[`md5;"md5 \"hello\"                         /                         hash text with MD5, as bytes"]
 .help.i.r[`med;"med 1 2 3 100                       / 2.5                     take the median"]
 .help.i.r[`meta;"meta ([]a:1 2;b:`x`y)               /                         describe a table's columns: type, attribute and foreign key"]
-.help.i.r[`min;"min 3 1 4                           / 1                       take the smallest item"]
+.help.i.r[`min;"min 3 1 4                           / 1                       take the minimum: the smallest item of a list"]
 .help.i.r[`mins;"mins 3 1 4                          / 3 1 1                   take the running minimum"]
-.help.i.r[`mmin;"2 mmin 3 1 4                        / 3 1 1                   take the minimum over a sliding window"]
-.help.i.r[`mmu;"(2 2#1 0 0 1f)mmu 2 2#1 2 3 4f      / (1 2f;3 4f)             multiply two float matrices"]
-.help.i.r[`mod;"7 mod 3                             / 1                       take the remainder left by whole division"]
-.help.i.r[`neg;"neg 1 -2 3                          / -1 2 -3                 flip the sign"]
+.help.i.r[`mmin;"2 mmin 3 1 4                        / 3 1 1                   take the minimum over a moving window of x items"]
+.help.i.r[`mmu;"(2 2#1 0 0 1f)mmu 2 2#1 2 3 4f      / (1 2f;3 4f)             matrix multiply: multiply two float matrices"]
+.help.i.r[`mod;"7 mod 3                             / 1                       take the modulo: the remainder left by whole division"]
+.help.i.r[`neg;"neg 1 -2 3                          / -1 2 -3                 negate: flip the sign of every item"]
 .help.i.r[`next;"next 1 2 3                          / 2 3 0N                  shift each item one place earlier"]
 .help.i.r[`prev;"prev 1 2 3                          / 0N 1 2                  shift each item one place later"]
 .help.i.r[`xprev;"2 xprev 1 2 3 4                     / 0N 0N 1 2               take the item x places earlier"]
@@ -330,8 +346,8 @@
 .help.i.r[`over;"(+) over 1 2 3                      / 6                       reduce a list with a function, keeping only the last result"]
 .help.i.r[`scan;"(+) scan 1 2 3                      / 1 3 6                   accumulate a function along a list, keeping every step"]
 .help.i.r[`parse;"parse \"2+3\"                         / (+;2;3)                 turn source text into a parse tree"]
-.help.i.r[`pj;"pj[([]a:1 2;b:0 0);([a:1 2]b:1 2)]  / +`a`b!(1 2;1 2)         add y's matching numeric columns into x"]
-.help.i.r[`prd;"prd 1 2 3 4                         / 24                      multiply the items together"]
+.help.i.r[`pj;"pj[([]a:1 2;b:0 0);([a:1 2]b:1 2)]  / +`a`b!(1 2;1 2)         plus join: add y's matching numeric columns into x"]
+.help.i.r[`prd;"prd 1 2 3 4                         / 24                      take the product: multiply the items together"]
 .help.i.r[`prds;"prds 1 2 3 4                        / 1 2 6 24                take the running product"]
 .help.i.r[`prior;"(-) prior 1 4 9                     / 1 3 5                   apply a function to each item and the one before it"]
 .help.i.r[`rand;"rand 10                             /                         pick a random number below x, or an item from a list"]
@@ -352,13 +368,13 @@
 .help.i.r[`sin;"sin 0 1                             / 0 0.841471              take the sine of an angle in radians"]
 .help.i.r[`asin;"asin 1                              / 1.570796                take the arcsine, in radians"]
 .help.i.r[`sqrt;"sqrt 2 9                            / 1.414214 3              take the square root"]
-.help.i.r[`ss;"\"a cat\" ss \"at\"                     / ,3                      find every position where a pattern occurs in text"]
-.help.i.r[`ssr;"ssr[\"hello\";\"l\";\"L\"]                / \"heLLo\"                 replace every occurrence of a pattern in text"]
+.help.i.r[`ss;"\"a cat\" ss \"at\"                     / ,3                      string search: find every position where a pattern occurs"]
+.help.i.r[`ssr;"ssr[\"hello\";\"l\";\"L\"]                / \"heLLo\"                 string search and replace: swap every occurrence of a pattern"]
 .help.i.r[`string;"string 42                           / \"42\"                    render a value as text"]
 .help.i.r[`sublist;"2 sublist 1 2 3 4                   / 1 2                     take up to x items from the front, or a slice x[0] x[1]"]
 .help.i.r[`sum;"sum 1 2 3                           / 6                       add the items together"]
 .help.i.r[`sums;"sums 1 2 3                          / 1 3 6                   take the running total"]
-.help.i.r[`msum;"2 msum 1 2 3 4                      / 1 3 5 7                 total a sliding window of x items"]
+.help.i.r[`msum;"2 msum 1 2 3 4                      / 1 3 5 7                 take the moving sum: total a sliding window of x items"]
 .help.i.r[`wsum;"1 2 3 wsum 10 20 30                 / 140f                    total y weighted by x"]
 .help.i.r[`sv;"\",\" sv (\"ab\";\"cd\")                  / \"ab,cd\"                 join strings with a delimiter\n` sv `path`to`file                  / `path.to.file           join symbols into one dotted symbol\n2 sv 1 0 1 0b                       / 10                      evaluate digits y in base x\n` sv (`:/tmp;`a.txt)                /                         append a filename to a directory handle"]
 .help.i.r[`system;"system \"t\"                          /                         run a system command and take its output as a value"]
@@ -370,7 +386,7 @@
 .help.i.r[`ltrim;"ltrim \"  ab\"                        / \"ab\"                    drop blanks from the front of text"]
 .help.i.r[`rtrim;"rtrim \"ab  \"                        / \"ab\"                    drop blanks from the end of text"]
 .help.i.r[`type;"type 1 2 3                          / 7h                      report the type number of a value"]
-.help.i.r[`uj;"([]a:1 2)uj([]b:`x`y)               / +`a`b!(1 2 0N 0N;```x`y)join two tables, unioning their columns"]
+.help.i.r[`uj;"([]a:1 2)uj([]b:`x`y)               / +`a`b!(1 2 0N 0N;```x`y)union join: combine two tables, unioning their columns"]
 .help.i.r[`ujf;"([]a:1 2)ujf([]b:`x`y)              / +`a`b!(1 2 0N 0N;```x`y)union join that keeps x's values where y is null"]
 .help.i.r[`union;"1 2 3 union 3 4                     / 1 2 3 4                 join both lists and keep the distinct items"]
 .help.i.r[`ungroup;"ungroup ([]a:1 2;b:(1 2;3 4))       / +`a`b!(1 1 2 2;1 2 3 4) flatten a table whose cells hold lists"]
@@ -384,7 +400,7 @@
 .help.i.r[`vs;"\",\" vs \"a,b,c\"                      / (,\"a\";,\"b\";,\"c\")        split a string on a delimiter\n` vs `path.to.file                  / `path`to`file           split a dotted symbol, or a file handle, into parts\n10 vs 1234                          / 1 2 3 4                 take the digits of y in base x"]
 .help.i.r[`where;"where 1 0 1 1b                      / 0 2 3                   give the indices of the items that are true\nwhere 2 3                           / 0 0 1 1 1               repeat each index as many times as its count says"]
 .help.i.r[`within;"5 within 1 10                       / 1b                      test whether items fall inside a range, ends included"]
-.help.i.r[`wj;"wj[w;`sym`time;t;(q;(max;`bid))]    /                         aggregate y's rows over a window around each row of x"]
+.help.i.r[`wj;"wj[w;`sym`time;t;(q;(max;`bid))]    /                         window join: aggregate y's rows over a window around each x row"]
 .help.i.r[`wj1;"wj1[w;`sym`time;t;(q;(max;`bid))]   /                         window join counting only rows strictly inside the window"]
 .help.i.r[`xbar;"5 xbar 3 7 11 18                    / 0 5 10 15               round down to the nearest multiple of x"]
 .help.i.r[`xgroup;"`a xgroup ([]a:1 1 2;b:1 2 3)       /                         key a table by the named columns, grouping the rest"]
@@ -653,4 +669,139 @@
 .help.i.r[`$"\\:";"10 20+\\:1 2 3                       / (11 12 13;21 22 23)     apply to each item on the left - each left"]
 .help.i.r[`$"/";"(+/)1 2 3                           / 6                       reduce a list to one value - over\n10+/1 2 3                           / 16                      reduce from a starting value\n{x*2}/[3;1]                         / 8                       apply a function x times, or until it converges"]
 .help.i.r[`$"\\";"(+\\)1 2 3                           / 1 3 6                   accumulate along a list, keeping every step - scan\n10+\\1 2 3                           / 11 13 16                accumulate from a starting value"]
+.help.i.r[`$"-p";"q -p 5000                           /                         listen on a port for IPC and HTTP clients - also spelled --port"]
+.help.i.r[`$"-q";"q -q script.q                       /                         start quiet: no banner and no q) prompt"]
+.help.i.r[`$"-u";"q -u users.txt                      /                         load a user:password file and require a login"]
+.help.i.r[`$"-U";"q -U users.txt                      /                         as -u, and block remote file access and system commands"]
+.help.i.r[`$"-E";"q -E 1                              /                         set TLS server mode: 0 plain, 1 plain and TLS, 2 TLS only"]
+.help.i.r[`$"-classic";"q -classic                          /                         start in kx-classic mode: legacy display, no automatic \\l pq"]
+.help.i.r[`$"'type";"1+`a                                /                         a value has the wrong type for the operation"]
+.help.i.r[`$"'length";"1 2 3+1 2                           /                         the arguments do not conform in length"]
+.help.i.r[`$"'rank";"+[2;3;4]                            /                         a function was applied to the wrong number of arguments"]
+.help.i.r[`$"'domain";"til -1                              /                         an argument is outside the verb's domain"]
+.help.i.r[`$"'parse";"value \"1+(\"                         /                         the text is not valid q"]
+.help.i.r[`$"'assign";"cos:12                              /                         tried to redefine a reserved word"]
+.help.i.r[`$"'mismatch";"([]a:1),([]b:2)                     /                         the tables or dictionaries do not line up"]
+.help.i.r[`$"'insert";"t:([a:1j]b:2);`t insert(1j;3)       /                         a keyed insert would duplicate a key that is already there"]
+.help.i.r[`$"'limit";"f:{f x};f 1                         /                         an engine limit was hit - recursion depth, or a size cap"]
+.help.i.r[`$"'nyi";"3?`a                                /                         the operation makes sense but is not implemented yet"]
+.help.i.r[`$"'os";"system \"nosuchcommand\"              /                         the operating system refused the request"]
+.help.i.r[`$"'io";"read0 `:/no/such/file               /                         a file or handle could not be read or written"]
+.help.i.r[`$"'oom";"0W#2                                /                         the allocation failed - not enough memory"]
+.help.i.r[`started;"?started                            /                         learn q in one minute · page\n10 20 30 40                         / 10 20 30 40             a LIST is values side by side, no commas\n(10 20 30 40)1 3                    / 20 40                   index a list by position, counting from zero\n1 2 3+10                            / 11 12 13                verbs are atomic: they spread over a whole list\nsum 10 20 30                        / 60                      aggregates collapse a list to one value\n`a`b`c!10 20 30                     / `a`b`c!10 20 30         a DICTIONARY maps keys to values with !\n([]s:`a`b;p:10 20)                  / +`s`p!(`a`b;10 20)      a TABLE is a list of equal-length named columns\nselect from ([]p:10 20)where p>15   / +(,`p)!,,20             qsql picks rows and columns out of a table\n{x*2} 5                             / 10                      a FUNCTION is braces; x y z are its implicit arguments\n(+/)1 2 3 4                         / 10                      an ITERATOR: / folds a verb along a list\ncount each (\"ab\";\"cde\")             / 2 3                     each applies a verb item by item\n2#\"abcdef\"                          / \"ab\"                    # takes items; a string is a list of characters\n\"J\"$\"42\"                            / 42                      $ casts: \"J\" long, \"F\" float, \"D\" date, \"S\" symbol\n(\"SJ\";enlist\",\")0:(\"a,b\";\"x,1\")     / +`a`b!(,`x;,1)          0: parses delimited text into a table\n?types                              /                         keep going: ?types ?math ?joins ?strings ?temporal ?table"]
 / <<< end generated
+
+/ ---- pages -----------------------------------------------------------------
+/ A PAGE is a curated blurb over a member filter, and an ENTRY like any other
+/ name: .help.find matches it and .help.oneline answers it.  NAMES BEAT PAGES —
+/ an exact documented name always renders its own stack and the page's member
+/ table is APPENDED below it.  A PAGE NAME NEVER COLLIDES with a documented name
+/ (owner ruling, 2026-08-14): `table` is the page, `tables` stays the keyword.
+/ .help.i.pr enforces it defensively — it will not overwrite a documented name —
+/ but the spelling, not the guard, is what keeps the two apart.
+/ Empty members means "filter by this page's own name as a namespace prefix",
+/ which is also what any undeclared namespace with documented members gets.
+/ Empty summary means the page's BODY is its entry (`started`: its rows already
+/ lead with the page line), so the entry, not this table, is that summary's home.
+/ webtopic is the NEAREST ONLINE topic, and ` where none is close enough.  A URL
+/ is NEVER built from a page name: our names are ours (`types` is the site's
+/ `datatypes`, and `?types` used to point at a 404).  No mapping, no pointer.
+.help.i.pages:([page:`started`.z`.Q`.h`.j`adverbs`syscmds`cmdline`types`math`joins`strings`temporal`table]
+ summary:(
+  "";
+  "session and environment callbacks";
+  "database and utility toolkit";
+  "HTTP, markup and text helpers";
+  "JSON serialize and deserialize";
+  "iterators: ' /: \\: ': / \\";
+  "the \\ system commands";
+  "q command-line flags";
+  "the datatype reference table";
+  "arithmetic, statistics and rounding";
+  "as-of, equi, left and union joins";
+  "text: search, case, trim, split";
+  "dates, times and calendar arithmetic";
+  "tables and the qsql verbs: ?tables is the keyword");
+ webtopic:``dotz`dotq`doth`dotj`iterators`syscmds`cmdline`datatypes`math`joins``datatypes`qsql;
+ blurb:(
+  ();();();();();
+  ("an iterator modifies a verb: each item, each pair, each left, each right";"/ folds to one value, \\ keeps every step");
+  ("a \\ line is a command, not an expression; system \"c 25 200\" is its q form");
+  ("peachq honours the flags below; the other kdb+ flags are not implemented yet";"everything after the script name reaches the script as .z.x");
+  ("n is the type number and c the .Q.t character; a vector is n, an atom -n";"sz is bytes per item; sql is the nearest ANSI SQL type");
+  ("atomic verbs spread over a whole list; aggregates collapse one to a value";"an m- prefix is a moving window, an s- prefix a sample statistic");
+  ("aj is the as-of join: the last y row at or before each x time";"lj ij uj pj match on the RIGHT table's key columns");
+  ("a string is a char vector, so every list verb works on it";"peachq adds a python-shaped text namespace: ?.str");
+  ("temporal types are numbers: add a long to a date, subtract two timestamps";"?types has the literals, the nulls and the infinities");
+  ("a table is a flipped dictionary of equal-length named columns";"the functional forms of select and update are ?[t;..] and ![t;..]"));
+ members:(
+  `$();`$();`$();`$();`$();
+  (`each`peach`over`scan`prior),`$("'";"':";"/:";"\\:";"/";"\\");
+  `$"\\",/:("a";"b";"B";"c";"C";"cd";"d";"e";"E";"f";"g";"l";"o";"p";"P";"r";"s";"S";"t";"T";"ts";"u";"v";"w";"W";"x";"z";"1";"2";"_";"\\");
+  `$("-p";"-q";"-u";"-U";"-E";"-classic");
+  `$();
+  `abs`neg`signum`sqrt`exp`log`xexp`xlog`floor`ceiling`div`mod`sum`sums`prd`prds`avg`avgs`max`min`maxs`mins`med`dev`var`sdev`svar`cor`cov`deltas`ratios`within`rand`mmu;
+  (`aj`aj0`ajf`ajf0`asof`ej`ij`ijf`lj`ljf`pj`uj`ujf`wj`wj1),`$(",";"^");
+  (`like`lower`upper`trim`ltrim`rtrim`ss`ssr`string`vs`sv`md5),`$("$";"0:");
+  (`gtime`ltime`xbar`.Q.addmonths`.z.p`.z.P`.z.d`.z.D`.z.t`.z.T`.z.z`.z.Z),`$("\\W";"\\z");
+  `select`exec`update`delete`from`fby`cols`keys`xcol`xcols`xkey`xasc`xdesc`xgroup`ungroup`meta`tables`insert`upsert`csv`fkeys`flip`key`.Q.en`.Q.id))
+
+/ both spellings answer; one page renders.
+.help.i.alias:`iterators`tutorial!`adverbs`started
+.help.i.pagenames:key[.help.i.pages]`page
+
+/ documented fullnames under a namespace; `.i.` privates are not public surface.
+.help.i.nsmembers:{[ns] p:(string ns),".";
+  exec fullname from .help.funcs where (fullname like p,"*"), not fullname like "*.i.*"}
+
+/ a topic -> the page it names, or ` : curated page, alias, or ANY namespace
+/ that has documented members (so .pq, .str and a user's own come for free).
+.help.i.canon:{[s] n:`$s;
+  n:$[n in key .help.i.alias;.help.i.alias n;n];
+  $[n in .help.i.pagenames;n;(1<count s)and("."=first s)and count .help.i.nsmembers n;n;`]}
+
+/ THE column rhythm, byte-identical to tools/gen-help-builtins.py's layout.
+.help.i.line:{[call;meaning] $[36>count call;36$call;call," "],"/ ",(24$""),meaning}
+
+.help.i.pagemem:{[p] m:$[p in .help.i.pagenames;.help.i.pages[p;`members];`$()];
+  $[count m;m;"."=first string p;.help.i.nsmembers p;`$()]}
+
+/ one member row.  A builtin one-liner already names itself in its call column
+/ (its .help.funcs line is null); a CAPTURED doc comment is prose, so the name
+/ becomes its call — otherwise a namespace page lists sentences with no names.
+.help.i.memline:{[n] o:.help.oneline n;
+  $[null .help.funcs[n;`line];o;.help.i.line[string n;o]]}
+
+/ what an exact page match ADDS below the name's own entry line: the curated
+/ blurb, the member table (each member's dominant meaning), and at most ONE
+/ static pointer at the page's mapped online topic.  A page NEVER fetches — the
+/ pointer is string-built, and the index is only CONSULTED when a previous
+/ lookup already cached it, never fetched to check.
+.help.i.pagetext:{[p]
+  b:$[p in .help.i.pagenames;.help.i.pages[p;`blurb];()];
+  m:$[p~`types;"\n" vs .help.i.rstrip .Q.s .help.types[];.help.i.memline each .help.i.pagemem p];
+  r:("  ",/:b),($[(count b)and count m;enlist"";()]),"  ",/:m;
+  w:$[p in .help.i.pagenames;.help.i.pages[p;`webtopic];`];
+  if[null w;:r];
+  if[not ()~.help.i.ix;if[not any (string w)~/:.help.i.ix`qname;:r]];   / `and` would index the uncached ()
+  $[count .help.url;r,enlist"  more: ??",(string w)," or ",.help.url,"help?q=",.h.hu string w;r]}
+
+/ the index (bare `?`): the tutorial first, every row pasteable, `· page`
+/ marking a directory.  Every listed page HAS an entry, so its row is that
+/ entry's own line — one home per summary.  Layout is prose: order lives here.
+.help.i.index:{[]
+  row:{[p] "  ",.help.oneline p};
+  "\n" sv (enlist "peachq help · one line per meaning · ?name shows it · ??name shows it in full"),
+   (enlist row`started),
+   (enlist "  ",.help.i.line["?til";"try any name: ?max  ?.Q.en  ?$  ?'type  ?-p"]),
+   (row each `.z`.Q`.h`.j`adverbs`syscmds`cmdline`types),
+   enlist "  ",(count[.help.i.line["";""]]$"?math  ?joins  ?strings  ?temporal  ?table"),"topic pages"}
+
+/ page ENTRY rows, rendered from the registry summary.  Runs AFTER the generated
+/ block and NEVER overwrites an already-documented name — the defensive half of
+/ the no-collision rule, and what lets a page whose body IS its entry (`started`)
+/ be skipped here and carry its own summary.
+.help.i.pr:{[name;page] if[not name in exec fullname from .help.funcs;
+  .help.i.r[name;.help.i.line["?",string name;.help.i.pages[page;`summary]," · page"]]];}
+.help.i.pr'[.help.i.pagenames;.help.i.pagenames];
+.help.i.pr'[key .help.i.alias;value .help.i.alias];
