@@ -33,15 +33,15 @@
 #include <string.h>           /* memcpy, strchr, strlen — line split */
 
 /* One embedded core source through THE script seam (q_ctx_run_src), post-
- * registry (rule 6).  An UNPARSEABLE statement aborts the load (the seam's
- * script law) and the CALLER fails q_runtime_create loudly — never a runtime
- * whose core stopped mid-file.  Eval errors keep the script law's report-and-
- * continue (loud on stderr; the seam serves `\l` too, whose banked semantics
- * continue).  Non-zero = aborted. */
+ * registry (rule 6).  ANY erroring statement — parse or eval, the seam's one
+ * script law — aborts the load and the CALLER fails q_runtime_create loudly:
+ * never a runtime whose core stopped mid-file.  Non-zero = aborted. */
 static int bootstrap_run(const char* src, const char* what) {
-    int rc = q_ctx_run_src(src, stdout, stderr);
+    ray_t* esig = NULL;
+    int rc = q_ctx_run_src(src, stdout, stderr, &esig);
+    if (esig) ray_error_free(esig);
     if (rc)
-        fprintf(stderr, "q bootstrap: %s ABORTED at an unparseable statement — no runtime\n",
+        fprintf(stderr, "q bootstrap: %s ABORTED at an erroring statement — no runtime\n",
                 what);
     return rc;
 }
