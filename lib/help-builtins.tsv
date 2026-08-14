@@ -5,7 +5,7 @@
 # The RESULT column is NOT here - tools/gen-help-builtins.py witnesses it by running the call.
 # Longer explanations are the website's job (??topic). Edit this file, rerun the generator, commit both.
 abs	abs -5 3 -2	take the magnitude, dropping the sign
-aj	aj[`sym`time;trade;quote]	join the last quote at or before each trade time
+aj	aj[`sym`time;trade;quote]	as-of join: take the last y row at or before each x time
 aj0	aj0[`sym`time;trade;quote]	as-of join that keeps the matched row's own time
 ajf	ajf[`sym`time;trade;quote]	as-of join that fills nulls from the left table
 ajf0	ajf0[`sym`time;trade;quote]	as-of join filling nulls, keeping the matched time
@@ -13,23 +13,23 @@ all	all 1 2 3=1 2 4	test whether every item is true
 any	any 1 2 3=1 20 30	test whether at least one item is true
 and	1010b and 1100b	take the lesser of two values - logical AND on booleans
 asc	asc 2 1 3 2	sort a list, dictionary or table ascending
-iasc	iasc 2 1 3	give the indices that would sort a list ascending
+iasc	iasc 2 1 3	grade up: the indices that would sort a list ascending
 xasc	`price xasc trade	sort a table ascending by the named columns
 asof	trade asof `AAPL	take the last row of a table at or before a key value
 attr	attr `s#1 3 4	report an object's attribute: s, u, p or g
-avg	avg 1 2 3 4	take the arithmetic mean as a float
-avgs	avgs 1 2 3 4	take the running mean at every position
-mavg	3 mavg 1 2 3 4 5	take the mean over a sliding window of x items
+avg	avg 1 2 3 4	take the average: the arithmetic mean, as a float
+avgs	avgs 1 2 3 4	take the running average at every position
+mavg	3 mavg 1 2 3 4 5	take the moving average over a sliding window of x items
 wavg	1 2 3 wavg 10 20 30	take the mean of y weighted by x
 bin	bin[1 3 5;4]	binary-search for the index of the last item up to y
 binr	binr[1 3 5;4]	binary-search for the index of the first item from y
 ceiling	ceiling 2.1 -2.1	round up to the next whole number
 count	count ([]a:1 2;b:3 4)	count the items of a list, dictionary or table
-mcount	3 mcount 1 2 3 4	count the non-null items in a sliding window
+mcount	3 mcount 1 2 3 4	count the non-null items in a moving window of x items
 cols	cols ([]a:1 2;b:3 4)	list a table's column names
 xcol	`x`y xcol ([]a:1 2;b:3 4)	rename a table's leading columns
 xcols	`b`a xcols ([]a:1 2;b:3 4)	reorder a table's columns, the named ones first
-cor	cor[1 2 3;2 4 7]	measure how two lists correlate, from -1 to 1
+cor	cor[1 2 3;2 4 7]	measure the correlation of two lists, from -1 to 1
 cos	cos 0 1	take the cosine of an angle in radians
 acos	acos 1	take the arccosine, in radians
 cov	cov[1 2 3;2 4 7]	measure the covariance of two lists
@@ -41,10 +41,10 @@ cut	1 3 cut til 6	cut a list at each of the indices in x
 delete	delete b from ([]a:1 2;b:3 4)	drop rows or columns from a table
 deltas	deltas 1 4 9	take the difference between adjacent items
 desc	desc 2 1 3	sort descending
-idesc	idesc 2 1 3	give the indices that would sort a list descending
+idesc	idesc 2 1 3	grade down: the indices that would sort a list descending
 xdesc	`price xdesc trade	sort a table descending by the named columns
 dev	dev 1 2 3 4	measure the standard deviation of a list
-mdev	3 mdev 1 2 3 4	measure the standard deviation over a sliding window
+mdev	3 mdev 1 2 3 4	measure the standard deviation over a moving window
 sdev	sdev 1 2 3 4	measure the sample standard deviation
 differ	differ 1 1 2 2 3	flag each item that differs from the one before it
 distinct	distinct 1 2 1 3	keep the unique items, in first-seen order
@@ -52,7 +52,7 @@ div	7 div 2	divide and round the quotient down to a whole number
 dsave	`:db dsave `trade	write global tables to disk splayed and enumerated
 each	count each ("ab";"cde")	apply a function to every item separately
 peach	count peach ("ab";"cde")	apply a function to every item on secondary threads
-ej	ej[`a;([]a:1 2);([]a:1 2;b:`x`y)]	join two tables on matching values of the named columns
+ej	ej[`a;([]a:1 2);([]a:1 2;b:`x`y)]	equi join: match two tables on equal values of the named columns
 ema	0.5 ema 1 2 3	take the exponentially weighted moving average
 enlist	enlist 1 2 3	wrap the arguments as a single list
 eval	eval parse "2+3"	evaluate a parse tree
@@ -60,7 +60,7 @@ reval	reval parse "2+3"	evaluate a parse tree under the remote-client restrictio
 except	1 2 3 4 except 2 4	drop from x every item that appears in y
 exec	exec a from ([]a:1 2)	read columns out of a table as values, not as a table
 exit	exit 0	end the process with an exit code
-exp	exp 1	raise e to a power
+exp	exp 1	take the exponential: raise e to a power
 xexp	2 xexp 10	raise x to the power y
 fby	select from t where a=(max;a) fby b	compare each row against an aggregate of its group
 fills	fills 1 0N 3 0N	replace each null with the last non-null before it
@@ -83,7 +83,7 @@ hdel	hdel `:trade.csv	delete a file, or an empty directory
 hopen	hopen `::5000	open a connection to a process, file or fifo
 hclose	hclose h	close a connection handle
 hsym	hsym `trade.csv	turn a symbol into a file or process handle symbol
-ij	ij[([]a:1 2);([a:1 2]b:`x`y)]	keep the rows of x whose key matches y, adding y's columns
+ij	ij[([]a:1 2);([a:1 2]b:`x`y)]	inner join: keep x's rows whose key matches y, adding y's columns
 ijf	ijf[([]a:1 2);([a:1 2]b:`x`y)]	inner join that keeps x's values where y is null
 in	2 in 1 2 3	test whether each item of x appears in y
 insert	t:([]a:1;b:`x);`t insert (2;`y)	append records to a table named by symbol
@@ -96,7 +96,7 @@ key	key `:.	list the files in a directory
 keys	keys ([a:1 2]b:3 4)	name a table's primary-key columns
 xkey	`a xkey ([]a:1 2;b:3 4)	make the named columns a table's primary key
 like	"quick" like "qu*"	match text against a glob pattern
-lj	([]a:1 2)lj([a:1 2]b:`x`y)	add y's columns to x, matching on y's key
+lj	([]a:1 2)lj([a:1 2]b:`x`y)	left join: add y's columns to x, matching on y's key
 ljf	([]a:1 2)ljf([a:1 2]b:`x`y)	left join that keeps x's values where y is null
 load	load `:trade	read a binary file or splayed table into a global
 rload	rload `trade	read a splayed table from a directory of that name
@@ -105,18 +105,18 @@ xlog	2 xlog 8	take the logarithm of y in base x
 lower	lower "ABC"	fold text or symbols to lower case
 upper	upper "abc"	fold text or symbols to upper case
 lsq	(1 2#1 2f)lsq 2 2#1 0 0 1f	solve x=y by least squares matrix divide
-max	max 3 1 4	take the largest item
+max	max 3 1 4	take the maximum: the largest item of a list
 maxs	maxs 3 1 4	take the running maximum
-mmax	2 mmax 3 1 4	take the maximum over a sliding window
+mmax	2 mmax 3 1 4	take the maximum over a moving window of x items
 md5	md5 "hello"	hash text with MD5, as bytes
 med	med 1 2 3 100	take the median
 meta	meta ([]a:1 2;b:`x`y)	describe a table's columns: type, attribute and foreign key
-min	min 3 1 4	take the smallest item
+min	min 3 1 4	take the minimum: the smallest item of a list
 mins	mins 3 1 4	take the running minimum
-mmin	2 mmin 3 1 4	take the minimum over a sliding window
-mmu	(2 2#1 0 0 1f)mmu 2 2#1 2 3 4f	multiply two float matrices
-mod	7 mod 3	take the remainder left by whole division
-neg	neg 1 -2 3	flip the sign
+mmin	2 mmin 3 1 4	take the minimum over a moving window of x items
+mmu	(2 2#1 0 0 1f)mmu 2 2#1 2 3 4f	matrix multiply: multiply two float matrices
+mod	7 mod 3	take the modulo: the remainder left by whole division
+neg	neg 1 -2 3	negate: flip the sign of every item
 next	next 1 2 3	shift each item one place earlier
 prev	prev 1 2 3	shift each item one place later
 xprev	2 xprev 1 2 3 4	take the item x places earlier
@@ -126,8 +126,8 @@ or	1010b or 1100b	take the greater of two values - logical OR on booleans
 over	(+) over 1 2 3	reduce a list with a function, keeping only the last result
 scan	(+) scan 1 2 3	accumulate a function along a list, keeping every step
 parse	parse "2+3"	turn source text into a parse tree
-pj	pj[([]a:1 2;b:0 0);([a:1 2]b:1 2)]	add y's matching numeric columns into x
-prd	prd 1 2 3 4	multiply the items together
+pj	pj[([]a:1 2;b:0 0);([a:1 2]b:1 2)]	plus join: add y's matching numeric columns into x
+prd	prd 1 2 3 4	take the product: multiply the items together
 prds	prds 1 2 3 4	take the running product
 prior	(-) prior 1 4 9	apply a function to each item and the one before it
 rand	rand 10	pick a random number below x, or an item from a list
@@ -148,13 +148,13 @@ signum	signum -3 0 2	report the sign as -1, 0 or 1
 sin	sin 0 1	take the sine of an angle in radians
 asin	asin 1	take the arcsine, in radians
 sqrt	sqrt 2 9	take the square root
-ss	"a cat" ss "at"	find every position where a pattern occurs in text
-ssr	ssr["hello";"l";"L"]	replace every occurrence of a pattern in text
+ss	"a cat" ss "at"	string search: find every position where a pattern occurs
+ssr	ssr["hello";"l";"L"]	string search and replace: swap every occurrence of a pattern
 string	string 42	render a value as text
 sublist	2 sublist 1 2 3 4	take up to x items from the front, or a slice x[0] x[1]
 sum	sum 1 2 3	add the items together
 sums	sums 1 2 3	take the running total
-msum	2 msum 1 2 3 4	total a sliding window of x items
+msum	2 msum 1 2 3 4	take the moving sum: total a sliding window of x items
 wsum	1 2 3 wsum 10 20 30	total y weighted by x
 sv	"," sv ("ab";"cd")	join strings with a delimiter
 sv	` sv `path`to`file	join symbols into one dotted symbol
@@ -169,7 +169,7 @@ trim	trim "  ab  "	drop blanks from both ends of text
 ltrim	ltrim "  ab"	drop blanks from the front of text
 rtrim	rtrim "ab  "	drop blanks from the end of text
 type	type 1 2 3	report the type number of a value
-uj	([]a:1 2)uj([]b:`x`y)	join two tables, unioning their columns
+uj	([]a:1 2)uj([]b:`x`y)	union join: combine two tables, unioning their columns
 ujf	([]a:1 2)ujf([]b:`x`y)	union join that keeps x's values where y is null
 union	1 2 3 union 3 4	join both lists and keep the distinct items
 ungroup	ungroup ([]a:1 2;b:(1 2;3 4))	flatten a table whose cells hold lists
@@ -186,7 +186,7 @@ vs	10 vs 1234	take the digits of y in base x
 where	where 1 0 1 1b	give the indices of the items that are true
 where	where 2 3	repeat each index as many times as its count says
 within	5 within 1 10	test whether items fall inside a range, ends included
-wj	wj[w;`sym`time;t;(q;(max;`bid))]	aggregate y's rows over a window around each row of x
+wj	wj[w;`sym`time;t;(q;(max;`bid))]	window join: aggregate y's rows over a window around each x row
 wj1	wj1[w;`sym`time;t;(q;(max;`bid))]	window join counting only rows strictly inside the window
 xbar	5 xbar 3 7 11 18	round down to the nearest multiple of x
 xgroup	`a xgroup ([]a:1 1 2;b:1 2 3)	key a table by the named columns, grouping the rest
@@ -489,3 +489,37 @@ $	(2 2#1 0 0 1f)$1 2f	multiply a matrix by a matrix or vector
 /	{x*2}/[3;1]	apply a function x times, or until it converges
 \	(+\)1 2 3	accumulate along a list, keeping every step - scan
 \	10+\1 2 3	accumulate from a starting value
+-p	q -p 5000	listen on a port for IPC and HTTP clients - also spelled --port
+-q	q -q script.q	start quiet: no banner and no q) prompt
+-u	q -u users.txt	load a user:password file and require a login
+-U	q -U users.txt	as -u, and block remote file access and system commands
+-E	q -E 1	set TLS server mode: 0 plain, 1 plain and TLS, 2 TLS only
+-classic	q -classic	start in kx-classic mode: legacy display, no automatic \l pq
+'type	1+`a	a value has the wrong type for the operation
+'length	1 2 3+1 2	the arguments do not conform in length
+'rank	+[2;3;4]	a function was applied to the wrong number of arguments
+'domain	til -1	an argument is outside the verb's domain
+'parse	value "1+("	the text is not valid q
+'assign	cos:12	tried to redefine a reserved word
+'mismatch	([]a:1),([]b:2)	the tables or dictionaries do not line up
+'insert	t:([a:1j]b:2);`t insert(1j;3)	a keyed insert would duplicate a key that is already there
+'limit	f:{f x};f 1	an engine limit was hit - recursion depth, or a size cap
+'nyi	3?`a	the operation makes sense but is not implemented yet
+'os	system "nosuchcommand"	the operating system refused the request
+'io	read0 `:/no/such/file	a file or handle could not be read or written
+'oom	0W#2	the allocation failed - not enough memory
+started	?started	learn q in one minute · page
+started	10 20 30 40	a LIST is values side by side, no commas
+started	(10 20 30 40)1 3	index a list by position, counting from zero
+started	1 2 3+10	verbs are atomic: they spread over a whole list
+started	sum 10 20 30	aggregates collapse a list to one value
+started	`a`b`c!10 20 30	a DICTIONARY maps keys to values with !
+started	([]s:`a`b;p:10 20)	a TABLE is a list of equal-length named columns
+started	select from ([]p:10 20)where p>15	qsql picks rows and columns out of a table
+started	{x*2} 5	a FUNCTION is braces; x y z are its implicit arguments
+started	(+/)1 2 3 4	an ITERATOR: / folds a verb along a list
+started	count each ("ab";"cde")	each applies a verb item by item
+started	2#"abcdef"	# takes items; a string is a list of characters
+started	"J"$"42"	$ casts: "J" long, "F" float, "D" date, "S" symbol
+started	("SJ";enlist",")0:("a,b";"x,1")	0: parses delimited text into a table
+started	?types	keep going: ?types ?math ?joins ?strings ?temporal ?table
