@@ -353,11 +353,17 @@ int q_type_is_inf(ray_t* x) {
 }
 
 /* q treats the null symbol ` AS null — shared predicate (the `null` verb,
- * ops/q_vs_sv.c dispatch). */
+ * ops/q_vs_sv.c dispatch, the trim null-strip law). */
+static int sym_str_is_null(ray_t* s) { return s && ray_str_len(s) == 0; }
+
 int q_type_is_null_sym(ray_t* x) {
     if (!x || x->type != -RAY_SYM) return 0;
-    ray_t* s = ray_sym_str(x->i64);
-    int z = s && ray_str_len(s) == 0;
-    return z;
+    return sym_str_is_null(ray_sym_str(x->i64));
+}
+
+/* Element twin: base ray_vec_is_null short-circuits RAY_SYM to no-null. */
+int q_type_vec_is_null(ray_t* x, int64_t i) {
+    if (x && x->type == RAY_SYM) return sym_str_is_null(ray_sym_vec_cell(x, i));
+    return ray_vec_is_null(x, i);
 }
 
