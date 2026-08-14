@@ -24,6 +24,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>         /* read — `read0 0` takes its line straight off fd 0 */
 
 /* ---- paths, size, write ------------------------------------------------- */
 
@@ -607,11 +608,35 @@ static ray_t* read1_wrap_impl(ray_t* x) {
     return q_err(QE_TYPE);
 }
 
+/* ONE line off fd 0, delimiter removed (ref/read0.md § System or process
+ * handle).  Read a byte at a time on purpose: the REPL reads the SAME fd, so
+ * consuming past the newline would eat the statement after this one.  EOF
+ * before any byte yields the empty line. */
+static ray_t* io_stdin_line(void) {
+    char*  buf = NULL;
+    size_t n = 0, cap = 0;
+    char   c;
+    while (read(0, &c, 1) == 1 && c != '\n') {
+        if (n + 1 > cap) {
+            size_t nc = cap ? cap * 2 : 128;
+            char* nb = (char*)realloc(buf, nc);
+            if (!nb) { free(buf); return q_err(QE_OOM); }
+            buf = nb; cap = nc;
+        }
+        buf[n++] = c;
+    }
+    if (n && buf[n - 1] == '\r') n--;             /* a CRLF source loses both */
+    ray_t* r = ray_charv(buf ? buf : "", (int64_t)n);
+    free(buf);
+    return r;
+}
+
 /* q `read0 x` — ref/read0.md.  read0 IS read1's bytes decoded: a file symbol
  * splits into lines (LF/CRLF delimiters removed), `(f;o)` gives the chars to
  * EOF minus ONE trailing line break (the doc pins `read0(`:foo;6)` -> "world"
  * on a file ending \n), and `(f;o;n)`/`(fifo;n)` give exactly what was read.
- * Console (0) is deferred 'nyi.  Offsets accept 0 (superset of the doc). */
+ * Handle 0 is the CONSOLE: one line of text from stdin.  Offsets accept 0
+ * (superset of the doc). */
 static ray_t* read0_wrap_impl(ray_t* x);
 ray_t* q_read0_wrap(ray_t* x) {
     ray_t* xs = q_str_in(x);            /* charv args -> legacy STR forms */
@@ -620,6 +645,7 @@ ray_t* q_read0_wrap(ray_t* x) {
     return q_str_charv_out(r);              /* lines cross as char vectors */
 }
 static ray_t* read0_wrap_impl(ray_t* x) {
+    if (x && q_type_is_int_atom(x) && q_type_iatom_val(x) == 0) return io_stdin_line();
     ray_t* b = read1_wrap_impl(x);
     if (!b || RAY_IS_ERR(b)) return b;
     int64_t n = ray_len(b);
