@@ -119,8 +119,10 @@ int q_type_is_sym_atom(ray_t* x);
  * the INDEX law, reading a table as an axis pair, keeps its own is_coll. */
 int q_type_is_iter(ray_t* v);
 
-/* q treats the null symbol ` AS null (base sym-0 is the empty symbol). */
+/* q treats the null symbol ` AS null (base sym-0 is the empty symbol); the
+ * element form is ray_vec_is_null with that same reading restored for RAY_SYM. */
 int q_type_is_null_sym(ray_t* x);
+int q_type_vec_is_null(ray_t* x, int64_t i);
 
 /* Is this atom its type's ±infinity (0W / -0W / ±0w)?  RAY_ATOM_IS_NULL's twin
  * at the far end of the lane; 0 for the types the docs pin no infinity for. */

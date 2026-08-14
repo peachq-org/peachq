@@ -294,10 +294,11 @@ ray_t* q_upper_fn(ray_t* x) { return str_case_leaf(x, 1); }
 ray_t* q_lower_fn(ray_t* x) { return str_case_leaf(x, 0); }
 
 /* trim / ltrim / rtrim — mode 0=both, 1=leading only, 2=trailing only.
- * A string atom strips ASCII whitespace; a simple (non-string) vector strips
+ * ref/trim.md: strip leading/trailing NULLS, and the char null is " " ALONE —
+ * a tab shields everything inside it.  A simple (non-string) vector strips
  * leading/trailing NULLs (kdb's `trim 0N 0N 1 2 0N` -> 1 2); any other atom
  * passes through unchanged (`trim 42` -> 42). */
-static int str_is_ws(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
+static int str_is_nullch(char c) { return c == ' '; }
 
 static ray_t* str_trim_leaf(ray_t* x, int64_t mode);
 static ray_t* str_trim_col(void* ctx, ray_t* col) {
@@ -309,19 +310,19 @@ static ray_t* str_trim_leaf(ray_t* x, int64_t mode) {
     if (x->type == -RAY_STR) {
         const char* p = ray_str_ptr(x);
         size_t n = ray_str_len(x), a = 0, b = n;
-        if (mode != 2) while (a < b && str_is_ws(p[a])) a++;
-        if (mode != 1) while (b > a && str_is_ws(p[b - 1])) b--;
+        if (mode != 2) while (a < b && str_is_nullch(p[a])) a++;
+        if (mode != 1) while (b > a && str_is_nullch(p[b - 1])) b--;
         return ray_str(p + a, b - a);
     }
     if (x->type == -RAY_CHARV) {                 /* char atom: ws -> "", else itself */
-        if (str_is_ws((char)x->u8)) return ray_charv("", 0);
+        if (str_is_nullch((char)x->u8)) return ray_charv("", 0);
         ray_retain(x); return x;
     }
     if (x->type == RAY_CHARV) {                  /* char vector -> trimmed charv */
         const char* p = (const char*)ray_data(x);
         size_t n = (size_t)ray_len(x), a = 0, b = n;
-        if (mode != 2) while (a < b && str_is_ws(p[a])) a++;
-        if (mode != 1) while (b > a && str_is_ws(p[b - 1])) b--;
+        if (mode != 2) while (a < b && str_is_nullch(p[a])) a++;
+        if (mode != 1) while (b > a && str_is_nullch(p[b - 1])) b--;
         return ray_charv(p + a, (int64_t)(b - a));
     }
     if (x->type == RAY_STR) {   /* string vector -> trim each element */
@@ -331,8 +332,8 @@ static ray_t* str_trim_leaf(ray_t* x, int64_t mode) {
         for (int64_t i = 0; i < n; i++) {
             size_t sn; const char* p = ray_str_vec_get(x, i, &sn);
             size_t a = 0, b = p ? sn : 0;
-            if (mode != 2) while (a < b && str_is_ws(p[a])) a++;
-            if (mode != 1) while (b > a && str_is_ws(p[b - 1])) b--;
+            if (mode != 2) while (a < b && str_is_nullch(p[a])) a++;
+            if (mode != 1) while (b > a && str_is_nullch(p[b - 1])) b--;
             ray_t* r = ray_str(p ? p + a : "", b - a);
             out = ray_list_append(out, r);
             ray_release(r);
@@ -342,8 +343,8 @@ static ray_t* str_trim_leaf(ray_t* x, int64_t mode) {
     }
     if (ray_is_vec(x)) {        /* simple non-string vector -> strip NULL ends */
         int64_t n = ray_len(x), a = 0, b = n;
-        if (mode != 2) while (a < b && ray_vec_is_null(x, a)) a++;
-        if (mode != 1) while (b > a && ray_vec_is_null(x, b - 1)) b--;
+        if (mode != 2) while (a < b && q_type_vec_is_null(x, a)) a++;
+        if (mode != 1) while (b > a && q_type_vec_is_null(x, b - 1)) b--;
         if (a == 0 && b == n) { ray_retain(x); return x; }
         ray_t* idx = ray_vec_new(RAY_I64, b - a);
         if (RAY_IS_ERR(idx)) return idx;
