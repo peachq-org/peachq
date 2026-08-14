@@ -401,7 +401,8 @@ ray_term_t* ray_term_create(void) {
     term->newattr.c_lflag &= ~(ICANON | ECHO | ISIG);
     term->newattr.c_cc[VMIN]  = 1;
     term->newattr.c_cc[VTIME] = 0;
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &term->newattr);
+    /* TCSADRAIN, not TCSAFLUSH: input typed during startup (\l pq) must queue, not be discarded */
+    tcsetattr(STDIN_FILENO, TCSADRAIN, &term->newattr);
 #endif
 
     term_refresh_size(term);
