@@ -185,22 +185,18 @@ int main(int argc, char** argv) {
 #endif
         printf("peachq %d.%d %s https://peachq.org/\n",
                RAY_VERSION_MAJOR, RAY_VERSION_MINOR, build);
-        if (!classic)
-            printf("\033[90mtype ? for help\033[0m\n");   /* modern only: classic has no .help */
         fflush(stdout);
     }
 
-    /* Modern mode (the default): switch the console to the pipe-table display,
-     * auto-fit the console width (`\c 25 0N` — 0N re-resolves to the live
-     * terminal at each render, so a resize follows) and load the stdlib
-     * through THE `\l pq` gate — before the startup script, so `q file.q`
-     * scripts see `.pq`.  `-classic` skips all three (kdb-clean env, legacy
-     * display, kdb `\c 25 80`).  The non-tty script batch widen below still
-     * overrides. */
+    /* Modern mode (the default): switch the console to the pipe-table display
+     * and auto-fit the console width (`\c 25 0N` — 0N re-resolves to the live
+     * terminal at each render, so a resize follows).  The stdlib is NOT
+     * auto-loaded (owner 2026-08-14, startup cost): `\l pq` is explicit.
+     * `-classic` skips both (kdb-clean env, legacy display, kdb `\c 25 80`).
+     * The non-tty script batch widen below still overrides. */
     if (!classic) {
         q_console_pipe_enable();
         q_console_clip_set(25, NULL_I64);
-        q_ctx_run_line("\\l pq", 5, stdout, stderr, 0);
     }
 
     /* Startup script (`q file.q`): run it before the REPL / server loop.
