@@ -54,6 +54,11 @@ typedef struct {
     const char* spelling;    /* q surface name (static, from the manifest) */
     const char* lower_name;  /* canonical rayfall routing name             */
     int         is_wrapper;
+    const q_op_t* alias_of;  /* QK_ALIAS: the row this entry is a second NAME for,
+                              * else NULL.  An alias contributes a name and nothing
+                              * else, so the target row is what lookups dispatch on
+                              * and what the value index + provenance keep naming —
+                              * the alias can then never diverge from the glyph. */
 } entry_t;
 
 /* Row cap: every manifest row can contribute at most two entries; every
@@ -141,11 +146,23 @@ static void idx_add_entry(int idx) {
     sym_slot_t* s = sym_slot(e->sym_id, 1);
     s->row = e->row;
     s->ent[e->valence] = (int16_t)idx;
-    val_slot_t* v = val_slot(e->value, e->valence, 1);
-    if (!v->aliased && !v->row) v->row = e->row;
-    else if (v->row != e->row) { v->row = NULL; v->aliased = 1; }
+    if (!e->alias_of) {   /* a QK_ALIAS name must not blank the target's verdict */
+        val_slot_t* v = val_slot(e->value, e->valence, 1);
+        if (!v->aliased && !v->row) v->row = e->row;
+        else if (v->row != e->row) { v->row = NULL; v->aliased = 1; }
+    }
     ptrdiff_t r = e->row - g_ops_base;
     if (r >= 0 && r < g_ops_n) g_row_ent[r][e->valence] = (int16_t)idx;
+}
+
+/* The built entry for (row, valence), or NULL — the one read of g_row_ent. */
+static entry_t* row_entry(const q_op_t* row, q_valence_t valence) {
+    if (!row || !g_ops_base || (valence != Q_MONADIC && valence != Q_DYADIC))
+        return NULL;
+    ptrdiff_t i = row - g_ops_base;   /* row is &Q_OPS[i] (see q_registry.h) */
+    if (i < 0 || i >= g_ops_n) return NULL;
+    int16_t e = g_row_ent[i][valence];
+    return e < 0 ? NULL : &g_entries[e];
 }
 
 static void idx_reset(void) {
@@ -361,7 +378,14 @@ static ray_err_t add_entry(const q_op_t* op, q_valence_t valence,
     if (r->kind == QK_QSRC) return RAY_OK;              /* value comes from q.q —
                                                          * installed post-bootstrap
                                                          * by q_registry_bind_qsrc */
-    ray_t* val = (r->kind == QK_ENV) ? build_env(r->target) : build_wrapper(r);
+    /* QK_ALIAS shares the target's already-built value, so the target row must
+     * come EARLIER in the manifest; if it has not been built yet the lookup
+     * misses and init fails fast rather than binding a half-built registry. */
+    const entry_t* tgt = (r->kind == QK_ALIAS)
+        ? row_entry(q_ops_alias_target(op), valence) : NULL;
+    if (r->kind == QK_ALIAS && !tgt) return RAY_ERR_DOMAIN;
+    ray_t* val = tgt ? (ray_retain(tgt->value), tgt->value)
+               : (r->kind == QK_ENV) ? build_env(r->target) : build_wrapper(r);
     if (!val || RAY_IS_ERR(val)) return RAY_ERR_DOMAIN; /* fail-fast: audited bug */
     entry_t* e    = &g_entries[g_count++];
     e->sym_id     = sym_id;
@@ -369,8 +393,9 @@ static ray_err_t add_entry(const q_op_t* op, q_valence_t valence,
     e->value      = val;
     e->row        = op;
     e->spelling   = op->name;
-    e->lower_name = r->target;                          /* rayfall routing name */
-    e->is_wrapper = (r->kind != QK_ENV);
+    e->lower_name = tgt ? tgt->lower_name : r->target;  /* rayfall routing name */
+    e->is_wrapper = tgt ? tgt->is_wrapper : (r->kind != QK_ENV);
+    e->alias_of   = tgt ? tgt->row : NULL;
     idx_add_entry(g_count - 1);
     return RAY_OK;
 }
@@ -499,6 +524,7 @@ static ray_err_t bind_qsrc_one(const q_op_t* op, q_valence_t valence,
     e->spelling   = op->name;
     e->lower_name = r->target;
     e->is_wrapper = 1;
+    e->alias_of   = NULL;
     idx_add_entry(g_count - 1);
     return RAY_OK;
 }
@@ -548,7 +574,9 @@ ray_t* q_registry_lookup_row(int64_t sym_id, q_valence_t valence,
     sym_slot_t* s = sym_slot(sym_id, 0);
     if (!s || s->ent[valence] < 0) return NULL;
     entry_t* e = &g_entries[s->ent[valence]];
-    if (row_out) *row_out = e->row;
+    /* an alias name dispatches on the row it aliases, so `not x` and `~:x` take
+     * one path — the recipe shape (mon.atomic) and family live only there */
+    if (row_out) *row_out = e->alias_of ? e->alias_of : e->row;
     return e->value;   /* borrowed */
 }
 
@@ -557,12 +585,8 @@ int q_registry_is_reserved(int64_t sym_id) {
 }
 
 ray_t* q_registry_row_value(const q_op_t* row, q_valence_t valence) {
-    if (!row || !g_ops_base || (valence != Q_MONADIC && valence != Q_DYADIC))
-        return NULL;
-    ptrdiff_t i = row - g_ops_base;   /* row is &Q_OPS[i] (see q_registry.h) */
-    if (i < 0 || i >= g_ops_n) return NULL;
-    int16_t e = g_row_ent[i][valence];
-    return e < 0 ? NULL : g_entries[e].value;   /* borrowed */
+    entry_t* e = row_entry(row, valence);
+    return e ? e->value : NULL;   /* borrowed */
 }
 
 int q_registry_kdb_op_of(const ray_t* value, q_valence_t* valence_out) {
@@ -613,10 +637,12 @@ bool q_registry_provenance(const ray_t* value, q_provenance_t* out) {
      * an inherent limitation of the reuse-the-env-object design.  So: prefer the
      * unique WRAPPER entry (always correct); for an aliased pass-through, return
      * the first-registered spelling (2b's formatter disambiguates aliased
-     * pass-throughs from the parse-site glyph, not from this value-keyed API). */
+     * pass-throughs from the parse-site glyph, not from this value-keyed API).
+     * QK_ALIAS entries are skipped outright: they are a second NAME for a value
+     * whose provenance belongs to the row they alias. */
     int first = -1;
     for (int i = 0; i < g_count; i++) {
-        if (g_entries[i].value != value) continue;
+        if (g_entries[i].value != value || g_entries[i].alias_of) continue;
         if (g_entries[i].is_wrapper) { first = i; break; }   /* unique — exact */
         if (first < 0) first = i;                            /* remember first */
     }
