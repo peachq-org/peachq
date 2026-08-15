@@ -48,7 +48,8 @@
 
 /* ===== deterministic / sideeffect AUDIT (feat/q-ops-introspection) =========
  * Every row carries both flags explicitly (`deterministic`, `sideeffect`), the
- * common case being `1, 0`.  This block is the COMPLETE roster of the
+ * common case being `1, 0` — except a QK_ALIAS row, which declares NO metadata
+ * and whose readers resolve q_ops_alias_target.  This block is the roster of the
  * NON-default rows, audited mechanically against every manifest row (anything
  * unobvious doc-checked against qdocs/), and is exposed verbatim by `.Q.ops[]`.
  *
@@ -78,7 +79,8 @@
  * ========================================================================== */
 
 /* ===== FAMILY AUDIT (uniform-structure-dispatch stage 0 metadata) ==========
- * Every row carries a `family` (vocabulary: q_ops.h; spec: actionable-plans/
+ * Every row carries a `family` — QK_ALIAS rows excepted, which name one that
+ * does (vocabulary: q_ops.h; spec: actionable-plans/
  * 2026-07-15-uniform-structure-dispatch.md §2/§3).  OPERATIVE since the eval
  * rebuild: the apply module's family lifts dispatch on it (q_eval_apply.c, the
  * `fam` block), the `aggregate` rows adding a `nested` rank-2 sub-law
@@ -342,6 +344,14 @@ static const q_op_t Q_OPS[] = {
     { "prior", QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("prior", q_hof_nyi_wrap), "prior", 1, 0, "none", NULL },
     { "peach", QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("peach", q_hof_nyi_wrap), "map", 1, 0, "none", NULL },
     /* ---- keyword-prefix monads (pass-through/rename) ---- */
+    /* QR_ALIAS twins: reserved keyword spellings of a glyph's k unary form,
+     * SHARING its value — kdb prints `~:`/`@:` for them (basics/parsetrees.md
+     * qfind"~:" -> `not`hdel; :53-56 bare `type` -> @:), and both are reserved
+     * words (docs-v1/ref/elements.md).  These rows RESERVE the name and NAME the
+     * target; they declare no metadata of their own, so every reader resolves
+     * through q_ops_alias_target and nothing here can drift from `~`/`@`. */
+    { "not",     QLEX_KW_PREFIX, QR_ALIAS("~"),                QR_NONE,           NULL, 0, 0, NULL, NULL },
+    { "type",    QLEX_KW_PREFIX, QR_ALIAS("@"),                QR_NONE,           NULL, 0, 0, NULL, NULL },
     { "neg",     QLEX_KW_PREFIX, QR_FN1A("neg", q_neg_wrap),   QR_NONE,           NULL, 1, 0, "atomic", NULL, QKOP(2) },
     /* `til` takes no structure input (family none); kdb accepts a boolean
      * (`til 1b` -> ,0) where base ray_til_fn is int-only. */
@@ -592,6 +602,14 @@ const q_op_t* q_ops_find(const char* s, int len) {
 }
 
 int q_ops_is_reserved(const char* s, int len) { return q_ops_find(s, len) != NULL; }
+
+const q_op_t* q_ops_alias_target(const q_op_t* row) {
+    const q_recipe_t* r = !row ? NULL
+                        : row->mon.kind  == QK_ALIAS ? &row->mon
+                        : row->dyad.kind == QK_ALIAS ? &row->dyad
+                                                     : NULL;
+    return r ? q_ops_find(r->target, (int)strlen(r->target)) : NULL;
+}
 
 const q_op_t* q_ops_nested_dyad(const q_op_t* row) {
     /* QNEST_MEAN is the `+` fold scaled by the count, so it borrows sum's dyad */
