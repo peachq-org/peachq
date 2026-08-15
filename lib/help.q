@@ -197,13 +197,14 @@
   nul:(0b;0Ng;0x00;0Nh;0Ni;0N;0Ne;0n;" ";`;0Np;0Nm;0Nd;0Nz;0Nn;0Nu;0Nv;0Nt);
   inf:(0Wh;0Wi;0W;0We;0w;0Wp;0Wm;0Wd;0Wz;0Wn;0Wu;0Wv;0Wt);
   n:0h,abs type each nul;
-  ([]n;c:"*",.Q.t 1_n;
-    name:`list`boolean`guid`byte`short`int`long`real`float`char`symbol`timestamp`month`date`datetime`timespan`minute`second`time;
-    sz:0N 1 16 1 2 4 8 4 8 1 0N 8 4 4 8 8 4 4 4;
-    literal:("";"0b";"";"0x00";"0h";"0i";"0j";"0e";"0.0";"\" \"";"`";"dateDtimespan";"2000.01m";"2000.01.01";"dateTtime";"00:00:00.000000000";"00:00";"00:00:00";"00:00:00.000");
-    null:enlist[""],-3!'nul;
-    inf:@[count[n]#enlist"";n?abs type each inf;:;-3!'inf];
-    sql:("";"";"";"";"smallint";"int";"bigint";"real";"float";"";"varchar";"";"";"date";"timestamp";"";"";"";"time"))}
+  / `null` is a reserved word, so a table LITERAL cannot name that column — built from data instead
+  flip `n`c`name`sz`literal`null`inf`sql!(n;"*",.Q.t 1_n;
+    `list`boolean`guid`byte`short`int`long`real`float`char`symbol`timestamp`month`date`datetime`timespan`minute`second`time;
+    0N 1 16 1 2 4 8 4 8 1 0N 8 4 4 8 8 4 4 4;
+    ("";"0b";"";"0x00";"0h";"0i";"0j";"0e";"0.0";"\" \"";"`";"dateDtimespan";"2000.01m";"2000.01.01";"dateTtime";"00:00:00.000000000";"00:00";"00:00:00";"00:00:00.000");
+    enlist[""],-3!'nul;
+    @[count[n]#enlist"";n?abs type each inf;:;-3!'inf];
+    ("";"";"";"";"smallint";"int";"bigint";"real";"float";"";"varchar";"";"";"date";"timestamp";"";"";"";"time"))}
 
 / the one-line summary for a name — the first line of its lead description,
 / "" when undocumented.  The REPL hint renders `?name / <this>` and owns the
