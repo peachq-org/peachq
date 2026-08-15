@@ -47,9 +47,15 @@ typedef enum {
     QK_ENV,             /* reuse env builtin named `target` (pass-through/rename)*/
     QK_FN,              /* bespoke q-semantics wrapper: bind the row's fn per
                          * its arity/atomic fields (see q_recipe_t)             */
-    QK_QSRC             /* value is the q.q definition `.q.<target>`: skipped at
+    QK_QSRC,            /* value is the q.q definition `.q.<target>`: skipped at
                          * registry init (q.q loads after), installed by the
                          * post-bootstrap q_registry_bind_qsrc pass             */
+    QK_ALIAS            /* SHARE the value already built for row `target` at
+                         * THIS valence — a second reserved spelling, never a
+                         * second object (`not` is `~:`, `type` is `@:`).  The
+                         * alias contributes a NAME only: value identity
+                         * (display, wire op, provenance) stays with the target,
+                         * so the target row must precede the alias here.      */
 } q_build_kind;
 
 /* Wrapper-fn carrier for the manifest rows.  A generic function-pointer type
@@ -61,7 +67,8 @@ typedef void (*q_wrap_fn_t)(void);
 
 /* One (row, valence) build recipe.  `target` is the rayfall env name (QK_ENV)
  * or the canonical rayfall LOWERING name for a wrapper (QK_FN) — the aux-name
- * the compiler/query DAG route on (RAY_FN_Q_LOWER); NULL when QK_NONE. */
+ * the compiler/query DAG route on (RAY_FN_Q_LOWER) — or the ALIASED ROW's q
+ * spelling (QK_ALIAS); NULL when QK_NONE. */
 typedef struct {
     q_build_kind kind;
     const char*  target;
@@ -83,6 +90,7 @@ typedef struct {
  * point per overloaded glyph (`?` `!` `@` `.`) dispatching on call rank */
 #define QR_FNV(t, f)  { QK_FN,   (t),  (q_wrap_fn_t)(f),   0, 0 }
 #define QR_QSRC(t)    { QK_QSRC, (t),  NULL,               0, 0 }
+#define QR_ALIAS(t)   { QK_ALIAS,(t),  NULL,               0, 0 }
 
 /* One manifest row: a q verb, its lexical class, its monadic/dyadic build recipes
  * (QR_* above), and the introspection metadata surfaced verbatim as the `.Q.ops[]`
@@ -170,6 +178,12 @@ typedef enum { QI_VALUE, QI_SEED, QI_FILL } q_id_use_t;
  * manifest, never a Q_OPS[] column (ruling 2026-08-12).  Returns the OWNED
  * element (rc=1), or NULL when q knows none for that use. */
 ray_t* q_ops_identity(const char* spelling, q_id_use_t use);
+
+/* The row a QK_ALIAS row is a second spelling of, or NULL when `row` is not an
+ * alias.  An alias declares no metadata of its own — every dispatch and
+ * introspection column is the target's — so both the registry builder and
+ * `.Q.ops` resolve through here rather than reading a mirrored copy. */
+const q_op_t* q_ops_alias_target(const q_op_t* row);
 
 /* The atomic-dyad row that folds `row`'s outer axis under QNEST_FOLD/QNEST_MEAN
  * — the `mono` column read BACKWARDS (`sum`->`+`, `max`->`|`), so the sub-law
