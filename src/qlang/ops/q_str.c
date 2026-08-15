@@ -162,7 +162,7 @@ ray_t* q_str_charv_out(ray_t* r) {
 
 /* (string x) — q cast-to-string.  ATOM: a sym renders bare (`ibm -> "ibm"),
  * a string passes through, floats take the q float->text leaf (q_fmt_float),
- * remaining atoms reuse rayfall's formatter (string 42
+ * booleans the bare digit, remaining atoms reuse rayfall's formatter (string 42
  * -> "42").  VECTOR / LIST: q maps string over each item, yielding a LIST of
  * strings (`string 192 168 1 23` -> ("192";"168";"1";"23")) — the base
  * formatter would instead render the whole vector as one bracketed string. */
@@ -190,6 +190,8 @@ ray_t* q_string_fn(ray_t* x) {
         q_fmt_float(v, 0, tok, sizeof tok);   /* narrow reals like display does */
         return ray_charv(tok, (int64_t)strlen(tok));
     }
+    /* Not ray_fmt: rayfall would write "true"/"false", a rayfall literal q has no reader for. */
+    if (x->type == -RAY_BOOL) { char c = x->b8 ? '1' : '0'; return ray_charv(&c, 1); }
     if (!ray_is_vec(x)) return q_str_charv_out(ray_fmt(x, 0));   /* remaining atoms */
     /* vector: per-element string */
     int64_t n = ray_len(x);
