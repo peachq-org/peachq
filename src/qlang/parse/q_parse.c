@@ -786,14 +786,45 @@ static ray_t *try_parse_qsql(Parser *p) {
     return NULL;
 }
 
-/* ===== table literal -> kdb's dict-then-flip parse tree ====================
- * (owner ruling 2026-07-24).  Column-name rule: `c:e` -> c, a bare name-ref
- * keeps its name, anything else derives x (deduped x,x1,… by q_name_dedup —
- * cases.tsv row `([] til 10)`; ChangesIn4.1.md `([0;1;2])`). */
+/* ===== source bindings — the `name:expr` shape both column syntaxes read ====
+ * A table literal and a qSQL output alias write a column name the same way, so
+ * the node shape and the reserved-name law that governs it are read here once. */
 
 static int sym_is_nameref(ray_t *v) {
     return v && v->type == -RAY_SYM && !(v->attrs & Q_ATTR_QUOTED);
 }
+
+/* The (:;name;expr) node.  Rejects `::`, `+:` (a marked verb head) and a QUOTED
+ * lhs, so ``(`a:1)`` is not a binding. */
+static int binding_node(ray_t *x, ray_t **name, ray_t **val) {
+    if (!x || x->type != RAY_LIST || ray_len(x) != 3) return 0;
+    ray_t **e = (ray_t **)ray_data(x);
+    if (!sym_name_is(e[0], ":") || !sym_is_nameref(e[1])) return 0;
+    if (name) *name = e[1];
+    if (val)  *val  = e[2];
+    return 1;
+}
+
+/* Reserved-ness is LEXICAL — refused at a source binding, exactly as `null:5` is
+ * (owner ruling 2026-08-15: "columns cant be reserved words").  A name arriving
+ * as DATA never reaches here, so ``flip `null`b!(1 2;3 4)`` still builds the
+ * column and .Q.id keeps its repair job (ref/dotq.md:1308).  Answers rather than
+ * dies: each caller owns different refs at the point it can afford to longjmp. */
+static int bindings_have_reserved(ray_t *phrases) {
+    if (!phrases || phrases->type != RAY_LIST) return 0;
+    int64_t n = ray_len(phrases);
+    ray_t **ph = (ray_t **)ray_data(phrases);
+    for (int64_t i = 0; i < n; i++) {
+        ray_t *name = NULL;
+        if (binding_node(ph[i], &name, NULL) && q_registry_is_reserved(name->i64)) return 1;
+    }
+    return 0;
+}
+
+/* ===== table literal -> kdb's dict-then-flip parse tree ====================
+ * (owner ruling 2026-07-24).  Column-name rule: `c:e` -> c, a bare name-ref
+ * keeps its name, anything else derives x (deduped x,x1,… by q_name_dedup —
+ * cases.tsv row `([] til 10)`; ChangesIn4.1.md `([0;1;2])`). */
 
 /* pairwise duplicate WITHIN one W64 sym-id vector */
 static int symvec_ids_dup(ray_t *a) {
@@ -840,23 +871,18 @@ static ray_t *table_lit_bang(ray_t *a, ray_t *b) {
 static ray_t *table_lit_dict(ray_t *defs) {
     ray_t *lv = q_registry_list_value();
     if (!lv) q_die("table literal: registry not initialized");
+    if (bindings_have_reserved(defs)) { ray_release(defs); die_err(QE_ASSIGN); }
     int64_t n = ray_len(defs);
     ray_t **ds = (ray_t **)ray_data(defs);
-    int64_t id_colon = ray_sym_intern_runtime(":", 1);
-    int64_t id_x     = ray_sym_intern_runtime("x", 1);
+    int64_t id_x = ray_sym_intern_runtime("x", 1);
     ray_t *keys = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
     ray_t *vals = ray_list_new(n + 1);
     vals = ray_list_append(vals, lv);
     for (int64_t i = 0; i < n; i++) {
-        ray_t *d = ds[i], *ex = d;
+        ray_t *d = ds[i], *ex = d, *nmv = NULL;
         int64_t nm = -1;
-        if (d && d->type == RAY_LIST && ray_len(d) == 3) {
-            ray_t **de = (ray_t **)ray_data(d);
-            if (sym_is_nameref(de[0]) && de[0]->i64 == id_colon &&
-                sym_is_nameref(de[1])) {
-                nm = de[1]->i64;
-                ex = de[2];
-            }
+        if (binding_node(d, &nmv, &ex)) {
+            nm = nmv->i64;
         } else if (sym_is_nameref(d)) {
             nm = d->i64;
         }
@@ -1336,6 +1362,12 @@ static P parse_query(Parser *p) {
             end->kind != T_RPAREN && end->kind != T_RBRACE)
             q_die("qsql: unexpected token after query");
     }
+
+    /* An output alias is a source binding, so a reserved one dies like `null:5`.
+     * Asked while the raw phrases are still the pend guard's, which is what keeps
+     * the "no q_die past this point" invariant below true.  `where` is exempt —
+     * it names no column. */
+    if (bindings_have_reserved(*a) || bindings_have_reserved(*b)) die_err(QE_ASSIGN);
 
     /* ---- normalize the raw phrase lists into the clone's functional slots ---
      * No q_die past this point, so the raw refs can be released as they are
@@ -1933,19 +1965,6 @@ static ray_t *qsql_convert_expr(ray_t *x) {
     return x;
 }
 
-/* Detect a `(:;name;val)` alias node (`name:expr` in a select/exec phrase) from
- * the real parser; on success returns the borrowed name-ref and value. */
-static int qsql_phrase_alias(ray_t *x, ray_t **name, ray_t **val) {
-    if (!x || x->type != RAY_LIST || ray_len(x) != 3) return 0;
-    ray_t **e = (ray_t **)ray_data(x);
-    if (!sym_name_is(e[0], ":")) return 0;
-    ray_t *t = e[1];
-    if (!t || t->type != -RAY_SYM || (t->attrs & Q_ATTR_QUOTED)) return 0;
-    *name = e[1];
-    *val  = e[2];
-    return 1;
-}
-
 /* Fold a phrase list into a q name!expr DICT (select/update `a`, by-key `b`):
  * an alias phrase keys on its written name; a bare phrase derives its output
  * name via qsql_derive_alias, exactly as qsql_colspec does over the clone. */
@@ -1956,7 +1975,7 @@ static ray_t *qsql_norm_dict(ray_t *phrases) {
     int na = 0;
     for (int64_t i = 0; i < n && na < QSQL_MAXCOLS; i++) {
         ray_t *name = NULL, *val = NULL;
-        if (qsql_phrase_alias(ph[i], &name, &val)) {
+        if (binding_node(ph[i], &name, &val)) {
             aliases[na] = qsql_colsym(name->i64);
             vals[na]    = qsql_convert_expr(val);
         } else {
@@ -1990,7 +2009,7 @@ static ray_t *qsql_norm_exec_a(ray_t *phrases) {
     ray_t **ph = (ray_t **)ray_data(phrases);
     if (n == 0) return ray_list_new(0);
     ray_t *name = NULL, *val = NULL;
-    if (n == 1 && !qsql_phrase_alias(ph[0], &name, &val)) {
+    if (n == 1 && !binding_node(ph[0], &name, &val)) {
         ray_t *v = qsql_convert_expr(ph[0]);
         if (!v || RAY_IS_ERR(v)) return v;
         if (v->type == -RAY_SYM) {
@@ -2019,7 +2038,7 @@ static ray_t *qsql_norm_by(ray_t *phrases, int verb) {
     int nb = 0;
     for (int64_t i = 0; i < n && nb < QSQL_MAXCOLS; i++) {
         ray_t *name = NULL, *val = NULL;
-        if (qsql_phrase_alias(ph[i], &name, &val)) {
+        if (binding_node(ph[i], &name, &val)) {
             bk[nb] = qsql_colsym(name->i64);
             bv[nb] = qsql_convert_expr(val);
             bnamed[nb] = 1;
