@@ -9,7 +9,9 @@
 #include "qlang/io/q_splay.h"        /* mapped splays: column reads, writes 'splay */
 #include "lang/internal.h"   /* as_i64 — the int-atom payload accessor */
 #include "table/dict.h"
+#include "mem/heap.h"        /* ray_cow + the vec attr bits — scatter_store */
 #include <stdlib.h>
+#include <string.h>
 
 #define IDX_MAX_DEPTH 2048
 
@@ -486,14 +488,49 @@ static ray_t* leaf_apply(ray_t* f, ray_t* s, ray_t* y) {
     return r ? mat(r) : q_err(QE_TYPE);
 }
 
-/* y against an n-item selection: an atom broadcasts, a collection pairs 1:1
- * ('length otherwise, ref/amend.md); NULL stays NULL (ternary).  Pairing reads
- * the ITERATION domain, so a table of replacement ROWS pairs like any list. */
-static ray_t* conform(ray_t* y, int64_t n, int64_t j) {
-    if (!y) return NULL;
-    if (!q_type_is_iter(y)) { ray_retain(y); return y; }
-    if (q_builtins_count_long(y) != n) return q_err(QE_LENGTH);
-    return q_index_elem_at(y, j);
+/* amend_seq's plain-replace leaf with every fallible step hoisted ahead of the
+ * first write, so the in-place path needs no error-restore guard; COW still
+ * decides at store time, so a shared target (value form, alias) copies once
+ * exactly as before.  NULL = shape not covered (caller loops); errors leave
+ * x to the caller; x consumed on success. */
+static ray_t* scatter_store(ray_t* x, ray_t* sel, ray_t* y) {
+    if (!ray_is_vec(x) || x->type == RAY_SYM || x->type == RAY_STR) return NULL;
+    if (x->attrs & (RAY_ATTR_SLICE | RAY_ATTR_ARENA | RAY_ATTR_HAS_INDEX)) return NULL;
+    if (sel->type != RAY_I64 || (sel->attrs & RAY_ATTR_SLICE)) return NULL;
+    size_t esz = ray_type_sizes[(uint8_t)x->type];
+    if (!esz) return NULL;
+    int bc = ray_is_atom(y);
+    if (bc) {
+        if (!q_eval_apply_store_elem_ok(x->type)) return NULL;
+        if (!RAY_ATOM_IS_NULL(y) && (int8_t)-y->type != x->type) return NULL;
+    } else {
+        if (y->type != x->type || (y->attrs & RAY_ATTR_SLICE)) return NULL;
+    }
+    int64_t n = ray_len(sel), xn = ray_len(x);
+    if (n == 0) return x;                       /* conformability held by amend_seq */
+    if (sel == x || y == x) return NULL;        /* self-referential: keep the loop's snapshot */
+    const int64_t* ix = (const int64_t*)ray_data(sel);
+    for (int64_t j = 0; j < n; j++)
+        if (ix[j] < 0 || ix[j] >= xn) return q_err(QE_INDEX);
+    ray_t* nx = ray_cow(x);
+    if (!nx || RAY_IS_ERR(nx)) return nx ? nx : q_err(QE_OOM);
+    if (bc) {
+        for (int64_t j = 0; j < n; j++) q_eval_apply_store_elem(nx, ix[j], y);
+        return nx;
+    }
+    uint8_t* dst = (uint8_t*)ray_data(nx);
+    const uint8_t* src = (const uint8_t*)ray_data(y);
+    for (int64_t j = 0; j < n; j++)
+        memcpy(dst + (size_t)ix[j] * esz, src + (size_t)j * esz, esz);
+    /* the loop marks nulls per written ATOM (payload truth — validate.c law:
+     * a reserved sentinel needs HAS_NULLS); probe the written lanes with the
+     * gate open and keep the attr exactly when the loop would have set it */
+    uint8_t had = nx->attrs & RAY_ATTR_HAS_NULLS;
+    nx->attrs |= RAY_ATTR_HAS_NULLS;
+    int any = 0;
+    for (int64_t j = 0; j < n && !any; j++) any = ray_vec_is_null(nx, ix[j]);
+    if (!any && !had) nx->attrs &= (uint8_t)~RAY_ATTR_HAS_NULLS;
+    return nx;
 }
 
 /* Amend Entire: the selection is x itself.  x consumed on success. */
@@ -532,11 +569,27 @@ static ray_t* amend_seq(ray_t* x, ray_t* sel, ray_t* const* rest, int64_t k,
     ray_t* keys = (!sel && x->type == RAY_DICT) ? ray_dict_slots(x)[0] : NULL;
     if (keys) ray_retain(keys);                      /* outlives dict rebuilds */
     int64_t n = q_builtins_count_long(sel ? sel : keys ? keys : x);
+    /* THE length law, once per level (ref/amend.md errors; conformable.md: an
+     * atom conforms to everything, lists only at equal counts — so it must
+     * fire for n==0 too, which a per-iteration check never reaches).  Pairing
+     * reads the ITERATION domain, so a table of replacement ROWS pairs like
+     * any list.  Before the guard: the caller's on-error release stays right. */
+    if (y && q_type_is_iter(y) && q_builtins_count_long(y) != n) {
+        if (keys) ray_release(keys);
+        return q_err(QE_LENGTH);
+    }
+    if (sel && k == 0 && y &&
+        (!f || q_registry_row_of(f, Q_DYADIC) == q_ops_find(":", 1))) {
+        ray_t* r = scatter_store(x, sel, y);   /* registry `:` IS plain replace */
+        if (r) return r;
+    }
     ray_retain(x);                                   /* the error-restore guard */
     ray_t* cur = x;
     ray_t* err = NULL;
     for (int64_t j = 0; j < n && !err; j++) {
-        ray_t* yj = conform(y, n, j);
+        ray_t* yj = !y ? NULL                        /* ternary: no replacement */
+                  : !q_type_is_iter(y) ? (ray_retain(y), y)
+                  : q_index_elem_at(y, j);
         if (yj && RAY_IS_ERR(yj)) { err = yj; break; }
         ray_t* kj = sel  ? q_index_elem_at(sel, j)
                   : keys ? q_index_elem_at(keys, j)

@@ -71,8 +71,10 @@ ray_t* q_eval_dot_wrap(ray_t** args, int64_t n);
 ray_t* q_eval_value_wrap(ray_t* x);
 
 /* the ONE typed-vector element writer (result construction + amend leaves):
- * 0 on success, -1 when the width isn't reachable (callers splice). */
+ * 0 on success, -1 when the width isn't reachable (callers splice); _ok = the
+ * vec types it reaches, so gates stay in step with the writer. */
 int q_eval_apply_store_elem(ray_t* vec, int64_t i, ray_t* e);
+int q_eval_apply_store_elem_ok(int8_t t);
 
 /* THE truthiness home (owner ruling 2026-07-15): materialize -> exclude
  * float/real -> `"b"$` cast -> boolean ATOM; only 0 is false, nulls are true.

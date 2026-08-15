@@ -376,7 +376,7 @@ int q_eval_apply_store_elem(ray_t* vec, int64_t i, ray_t* e) {
     }
 }
 
-static int typed_out_ok(int8_t t) {
+int q_eval_apply_store_elem_ok(int8_t t) {
     return t == RAY_I64 || t == RAY_F64 || t == RAY_I32 || t == RAY_I16 ||
            t == RAY_BOOL || t == RAY_BYTE_ONLY || t == RAY_CHARV ||
            RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t) || RAY_IS_TEMPORALF(t);
@@ -465,7 +465,7 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
     if (RAY_IS_ERR(e0)) return e0;
 
     int8_t out_type = (int8_t)(-e0->type);
-    if (!is_boxed && ray_is_atom(e0) && typed_out_ok(out_type)) {
+    if (!is_boxed && ray_is_atom(e0) && q_eval_apply_store_elem_ok(out_type)) {
         ray_t* vec = ray_vec_new(out_type, len);
         if (RAY_IS_ERR(vec)) { ray_release(e0); return vec; }
         vec->len = len;
@@ -611,7 +611,7 @@ static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r
     }
     #undef INTT
 
-    if (!force_boxed && ray_is_atom(e0) && typed_out_ok(out_type)) {
+    if (!force_boxed && ray_is_atom(e0) && q_eval_apply_store_elem_ok(out_type)) {
         ray_t* vec = ray_vec_new(out_type, len);
         if (RAY_IS_ERR(vec)) { ray_release(e0); return vec; }
         vec->len = len;
