@@ -173,9 +173,12 @@ ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs) {
             bm = r == 1;
             bd = r == 2;
         }
+        /* an alias row declares no metadata — describe the verb it names */
+        const q_op_t* md = q_ops_alias_target(&ops[i]);
+        if (!md) md = &ops[i];
         dotq_ops_row(c, &ok, nm, dotq_lexclass_name(ops[i].lex), bm, bd,
-                     ops[i].deterministic != 0, ops[i].sideeffect != 0,
-                     ops[i].family, qi >= 0 ? "q" : "c");
+                     md->deterministic != 0, md->sideeffect != 0,
+                     md->family, qi >= 0 ? "q" : "c");
     }
     for (int64_t j = 0; j < nsn && ok; j++) {
         if (taken[j]) continue;

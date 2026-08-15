@@ -362,13 +362,6 @@ void q_builtins_register(void) {
             assert(v != NULL);
             q_env_bind(ray_sym_intern(nm, strlen(nm)), v);               /* retains */
         }
-        /* `not` is the keyword spelling of `~:` and must be the SAME value, not
-         * a second row: sharing one object keeps kdb's `~:` parse-tree spelling
-         * (provenance is value-keyed) and shadows base's `not`, which reduces a
-         * vector to one truthiness bool instead of ref/not.md's per-item 0b/1b. */
-        ray_t* nv = q_registry_lookup_name("~", 1, Q_MONADIC);
-        assert(nv != NULL);
-        q_env_bind(ray_sym_intern("not", 3), nv);
     }
     /* .Q.c.* — the raw C primitives behind the .Q namespace (internal/unstable).
      * dotq.q delegates each public `.Q.<name>` to these (rule 6, loaded next) →
