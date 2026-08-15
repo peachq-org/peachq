@@ -219,24 +219,37 @@
 .help.i.r:{[fullname;description]
   .help.register_definition[fullname;`$"."sv -1_"."vs string fullname;`;0N;description];}
 
-/ the doc rows whose fullname, tag, param or description match — a glob,
+/ the search terms of a pattern: whitespace splits it, each word becoming a
+/ `*word*` substring glob.  No word yields the one `*` an empty pattern has
+/ always meant.
+/ @param pattern (string) the lowercased pattern
+/ @return (list) one glob per term
+.help.i.globs:{[pattern]
+  w:@[pattern;where pattern in "\t\r\n";:;" "];
+  ts:ts where 0<count each ts:" " vs w;
+  {p:"*",x,"*";p where not (p="*")and"*"=next p} each $[count ts;ts;enlist ""]}
+
+/ the doc rows whose fullname, tag, param or description match — globs,
 / matched anywhere and case-insensitively, so a bare word is a substring
-/ search.  NAMES FIRST: a name hit is what the user asked for where a
-/ description hit is a guess, and each matched name collapses to the ONE row
-/ that stands for it (its lead line, which is how .help.args orders a name's
-/ rows) so ?str lists the .str functions, not their tags.  The NAME half skips
-/ `.i.` privates, as .help.i.nsmembers does; the description half is unchanged,
-/ so prose that names a private still finds it.
+/ search.  MANY WORDS ARE AN AND: a two-word query wants the rows answering to
+/ both, which no one contiguous phrase finds.  NAMES FIRST: a name hit is what
+/ the user asked for where a description hit is a guess, and each matched name
+/ collapses to the ONE row that stands for it (its lead line, which is how
+/ .help.args orders a name's rows) so ?str lists the .str functions, not their
+/ tags.  The NAME half wants every term in the name and skips `.i.` privates,
+/ as .help.i.nsmembers does; the other half takes each term in ANY field, the
+/ name included, so one term can name a row the other describes and prose
+/ naming a private still finds it.
 / @param pattern (string|symbol) the pattern
 / @return (table) the matching rows of .help.args, name matches first
 .help.find:{[pattern]
-  p:"*",lower[.help.i.str pattern],"*";
-  p:p where not (p="*")and"*"=next p;   / a user's own leading * would make ** — 'nyi here
+  ps:.help.i.globs lower .help.i.str pattern;
   t:.help.args;
   if[0=count t;:t];
-  nm:exec fullname from .help.funcs where lower[string fullname] like p, not fullname like "*.i.*";
+  nm:exec fullname from .help.funcs where all lower[string fullname] like/:ps, not fullname like "*.i.*";
   n:0!select first tag,first param,first description by fullname from t where fullname in nm;
-  d:t where((lower each string t`tag)like p)or((lower each string t`param)like p)or(lower each t`description)like p;
+  fs:(lower each string t`fullname;lower each string t`tag;lower each string t`param;lower each t`description);
+  d:t where all {[fs;p] any fs like\:p}[fs] each ps;
   n,d where not d[`fullname] in nm}
 
 / >>> GENERATED from lib/help-builtins.tsv by `python3 tools/gen-help-builtins.py`
