@@ -139,7 +139,8 @@ static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
      * CODE (funsql / vector conditional); ANY other `?` line rewrites to
      * `.help.show"topic"` — `??` to `.help.full"topic"` (the full page) — so
      * glyph topics (`?$`, `?!`) work too.  Both PRINT: `.help.text` is the
-     * value ladder and no door returns it.  Topic = the first token, `"`/`\`
+     * value ladder and no door returns it.  Topic = the rest of the line minus
+     * trailing blanks (a multi-word search is an AND — see .help.find), `"`/`\`
      * escaped into the rewrite; bare `?` sends "", which q answers with the
      * index page.  Intercepted lines are kdb parse-error space,
      * so classic fidelity costs nothing; without `\l pq` the call answers
@@ -150,8 +151,8 @@ static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
         t0 += full;
         while (t0 < n && (s[t0] == ' ' || s[t0] == '\t')) t0++;
         if (!(t0 < n && s[t0] == '[')) {
-            size_t t1 = t0;
-            while (t1 < n && !isspace((unsigned char)s[t1])) t1++;
+            size_t t1 = n;
+            while (t1 > t0 && isspace((unsigned char)s[t1 - 1])) t1--;
             char hb[512];
             int  hn = snprintf(hb, sizeof hb, ".help.%s\"", full ? "full" : "show");
             for (size_t i = t0; i < t1 && hn < (int)sizeof hb - 4; i++) {
