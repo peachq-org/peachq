@@ -471,7 +471,7 @@ static ray_t* list_put_borrowed(ray_t* out, ray_t* v) {
  * "list: function followed by argument/s", a composition as the "list of
  * composed values", a derived function as the bare "argument of the iterator".
  * NULL = not one of those kinds (a bare iterator stays deferred). */
-static ray_t* carrier_value(ray_t* v) {
+ray_t* q_eval_carrier_value(ray_t* v) {
     ray_t* h = q_eval_apply_car_head(v);
     if (!h) return NULL;
     switch (q_eval_apply_carrier_kind(v)) {
@@ -632,7 +632,7 @@ ray_t* q_eval_value_wrap(ray_t* x) {
     if (q_view_is(x)) return q_view_value4(x);   /* value`. `v — ref/value.md */
     if (x->type == RAY_QFN) {
         ray_t* st = lambda_structure(x);
-        if (!st) st = carrier_value(x);
+        if (!st) st = q_eval_carrier_value(x);
         if (st) return st;
         int adv = q_eval_apply_iter_id(x);  /* a bare iterator IS its 103h code */
         if (adv >= 0) return ray_i64(adv);
