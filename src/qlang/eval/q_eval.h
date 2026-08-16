@@ -133,4 +133,10 @@ ray_t*      q_eval_apply_comp_inner(ray_t* v);
 int64_t     q_eval_apply_proj_nslots(ray_t* v);
 ray_t*      q_eval_apply_proj_arg(ray_t* v, int64_t i);
 
+/* ref/value.md's carrier read-out, OWNED: a projection's (fn;arg…) with the
+ * trailing elided slots dropped and interior holes as (::), a composition's
+ * (u;g), a derived function's bare operand.  NULL for another kind AND for
+ * allocation failure, so decide the kind first if you must tell them apart. */
+ray_t* q_eval_carrier_value(ray_t* v);
+
 #endif /* Q_EVAL_H */
