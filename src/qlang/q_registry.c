@@ -589,6 +589,21 @@ ray_t* q_registry_row_value(const q_op_t* row, q_valence_t valence) {
     return e ? e->value : NULL;   /* borrowed */
 }
 
+/* One env kernel shared by two manifest rows (`count` and monadic `#`) has no
+ * EXACT row, but interchangeable spellings of one kdb primitive agree on the
+ * code — and the code is all the caller wanted.  Disagreement stays -1. */
+static int kdb_op_by_alias(const ray_t* value, q_valence_t valence) {
+    int n = 0, code = -1;
+    const q_op_t* ops = q_ops_table(&n);
+    for (int i = 0; i < n; i++) {
+        if (q_registry_row_value(&ops[i], valence) != value) continue;
+        int c = q_ops_kdb_op(&ops[i]);
+        if (c < 0 || (code >= 0 && c != code)) return -1;
+        code = c;
+    }
+    return code;
+}
+
 int q_registry_kdb_op_of(const ray_t* value, q_valence_t* valence_out) {
     if (!value) return -1;
     /* Probe the arity the ray type implies first, then the other one: a VARY
@@ -599,7 +614,13 @@ int q_registry_kdb_op_of(const ray_t* value, q_valence_t* valence_out) {
     q_valence_t other = first == Q_MONADIC ? Q_DYADIC : Q_MONADIC;
     const q_op_t* row = q_registry_row_of(value, first);
     if (!row) { row = q_registry_row_of(value, other); first = other; }
-    if (!row) return -1;
+    if (!row) {
+        int code = kdb_op_by_alias(value, Q_MONADIC);
+        first = Q_MONADIC;
+        if (code < 0) { code = kdb_op_by_alias(value, Q_DYADIC); first = Q_DYADIC; }
+        if (code >= 0 && valence_out) *valence_out = first;
+        return code;
+    }
     if (valence_out) *valence_out = first;
     return q_ops_kdb_op(row);
 }

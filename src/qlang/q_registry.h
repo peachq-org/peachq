@@ -107,8 +107,10 @@ int q_registry_is_reserved(int64_t sym_id);
 ray_t* q_registry_row_value(const struct q_op* row, q_valence_t valence);
 
 /* THE fn-value -> kdb primitive code home (`value +` and the wire's 101h/102h
- * byte share it): the value's manifest row's kdb_op column.  -1 when the value
- * has no row (aliased env snapshot) or the row no code.  *valence_out (optional)
+ * byte share it): the value's manifest row's kdb_op column, falling back for an
+ * aliased env snapshot (`count` and monadic `#` are one kernel) to the code its
+ * rows agree on.  -1 when no row claims the value, or they disagree, or the row
+ * has no code.  *valence_out (optional)
  * gets the MANIFEST cell the value was found in — the 101h/102h class, which for
  * an arity-less ray_fn_vary value the C signature cannot supply. */
 int q_registry_kdb_op_of(const ray_t* value, q_valence_t* valence_out);

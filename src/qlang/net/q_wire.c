@@ -162,8 +162,11 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     /* RAY_QFN carriers — iterators are kdb 103h by adverb id (q_registry.h's
      * canonical 0=' .. 5=\: order IS c.java's IterationOperator table);
      * lambdas serialize BY SOURCE as kdb 100h (context + source text; decode
-     * re-evaluates through q_parse -> q_eval); projection and derived-verb
-     * carriers are 'nyi on both wire and serde. */
+     * re-evaluates through q_parse -> q_eval); projection 104h, composition
+     * 105h and derived function 106h+adv carry ref/value.md's read-out, framed
+     * as K.java's KArrayBase writes it — a BARE int32 count, no attrs byte —
+     * with an Adverb's lone operand needing no count at all.  Serde still
+     * refuses every carrier: its records are a separately versioned format. */
     if (x->type == RAY_QFN) {
         int adv = q_eval_apply_iter_id(x);
         if (!b->serde && adv >= 0) {
@@ -176,6 +179,24 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
             q_eval_apply_lambda_parts(x, NULL, NULL, &lctx);
             rc = (w_u8(b, 100) || w_lambda_ctx(b, lctx) ||
                   w_charvec(b, ray_str_ptr(src), (int64_t)ray_str_len(src))) ? -1 : 0;
+            goto out;
+        }
+        int kind = b->serde ? 0 : q_eval_apply_carrier_kind(x);
+        if (kind == Q_EVAL_CAR_PROJ || kind == Q_EVAL_CAR_COMP ||
+            kind == Q_EVAL_CAR_DERIV) {
+            ray_t* body = q_eval_carrier_value(x);    /* owned */
+            if (!body) { rc = wbuf_fail(b, q_err(QE_WSFULL)); goto out; }
+            if (kind == Q_EVAL_CAR_DERIV) {
+                rc = (w_u8(b, (uint8_t)(106 + q_eval_apply_deriv_adv(x))) ||
+                      q_wire_write_obj(b, body)) ? -1 : 0;
+            } else {
+                int64_t n = ray_len(body);
+                rc = (w_u8(b, kind == Q_EVAL_CAR_PROJ ? 104 : 105) ||
+                      w_i32(b, (int32_t)n)) ? -1 : 0;
+                for (int64_t i = 0; i < n && !rc; i++)
+                    rc = q_wire_write_obj(b, ray_list_get(body, i));
+            }
+            ray_release(body);
             goto out;
         }
         rc = wbuf_fail(b, q_err(QE_NYI));
@@ -960,6 +981,55 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         if (!v) return q_err(QE_NYI);
         ray_retain(v);
         return v;
+    }
+    case 104:                                         /* projection */
+    case 105: {                                       /* composition */
+        /* Applying rebuilds both, so neither carrier's constructor is reached
+         * from here: a (::) is the hole that makes a head PROJECT, and the
+         * compose value folds the parts right to left. */
+        if (!r_need(c, 4)) return trunc_err("carrier count");
+        int32_t count = r_i32(c);
+        if (count < (t == 104 ? 1 : 2) || (uint64_t)count > c->rem)
+            return q_err(QE_DOMAIN);
+        ray_t* l = ray_list_new(count);               /* owns every element */
+        if (!l || RAY_IS_ERR(l)) return l ? l : q_err(QE_WSFULL);
+        for (int32_t i = 0; i < count; i++) {
+            ray_t* e = rd_obj(c);
+            if (!e || RAY_IS_ERR(e)) { ray_release(l); return e ? e : q_err(QE_DOMAIN); }
+            l = ray_list_append(l, e);
+            ray_release(e);
+            if (!l || RAY_IS_ERR(l)) return l ? l : q_err(QE_WSFULL);
+        }
+        ray_t** e = (ray_t**)ray_data(l);
+        ray_t* r;
+        if (t == 105) r = q_eval_apply_value(q_registry_compose_value(), e, count);
+        else {
+            /* args alias the list, so a decoded (::) becomes the C NULL apply
+             * reads as a hole without disowning it.  All-concrete args would
+             * CALL the head — remote code execution from a crafted frame — so
+             * the trailing hole the writer trims is restored first: with one
+             * hole present apply can only project, padding out to rank. */
+            ray_t** a = (ray_t**)ray_alloc_raw((size_t)count * sizeof *a);
+            if (!a) { ray_release(l); return q_err(QE_WSFULL); }
+            int32_t n = count - 1, holes = 0;
+            for (int32_t i = 1; i < count; i++)
+                if (!(a[i - 1] = RAY_IS_NULL(e[i]) ? NULL : e[i])) holes++;
+            if (!holes) a[n++] = NULL;
+            r = q_eval_apply_value(e[0], a, n);
+            ray_free_raw(a);
+        }
+        ray_release(l);
+        return r ? r : q_err(QE_DOMAIN);
+    }
+    case 106: case 107: case 108: case 109: case 110: case 111: {
+        /* applying the iterator recovers the manifest row that the family
+         * lift needs and that a lambda operand legitimately has none of */
+        ray_t* f = rd_obj(c);
+        if (!f || RAY_IS_ERR(f)) return f ? f : q_err(QE_DOMAIN);
+        ray_t* it = q_registry_iter_value(t - 106);   /* borrowed */
+        ray_t* r = it ? q_eval_apply_value(it, &f, 1) : q_err(QE_NYI);
+        ray_release(f);
+        return r ? r : q_err(QE_DOMAIN);
     }
     default:
         return q_err(QE_DOMAIN);
