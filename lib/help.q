@@ -44,21 +44,15 @@
 .help.i.args:{[fullname;header] r:.help.i.parse header;$[count r;((count r)#fullname;r[;0];r[;1];r[;2]);(`$();`$();`$();())]}
 .help.i.filetags:{[file;header] r:.help.i.parse header;$[count r;((count r)#file;r[;0];r[;3]);(`$();`$();())]}
 
-/ begin this file — replace everything previously known about it.  C calls
-/ this at every script begin with an empty header, and AGAIN with the real one
-/ if the leading run resolves to a file header; the q_comment.h invariant (the
-/ leading run resolves before any definition registers) makes the second
-/ clear a no-op wipe of nothing.  An empty header records no file row.
-/ .help.args rows carry no file, so the fullname set MUST be read out before
-/ the funcs rows are deleted.
+/ begin this file — UPSERT-ONLY: the store mirrors the SESSION, and `\l` never
+/ removes a definition, so `file` is provenance, never a key to clear over
+/ (definition rows replace per-fullname in register_definition).  This call
+/ replaces only what it re-inserts itself; with an empty header (every script
+/ begin) it is a pure no-op.
 .help.register_file:{[file;ns;header]
-  fl:file;
-  fns:exec fullname from .help.funcs where file=fl;
-  delete from `.help.args where fullname in fns;
-  delete from `.help.funcs where file=fl;
-  delete from `.help.filetags where file=fl;
-  delete from `.help.files where file=fl;
   if[count header;
+    fl:file;
+    delete from `.help.filetags where file=fl;
     `.help.files upsert (file;ns);
     `.help.filetags insert .help.i.filetags[file;header]]; }
 
