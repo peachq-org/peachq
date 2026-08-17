@@ -17,9 +17,7 @@
 
 typedef struct {
     int examples;   /* q) inputs found */
-    int passed;     /* matched */
-    int failed;     /* mismatched */
-    int skipped;    /* reserved; 0 for now */
+    int passed;     /* matched — mismatches are examples - passed */
 } qdoc_result_t;
 
 /* Run every example in `path` against the CURRENT rayforce runtime (the caller
