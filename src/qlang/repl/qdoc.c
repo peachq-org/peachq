@@ -2,11 +2,9 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/repl/qdoc.h"
-#include "qlang/parse/q_parse.h"  /* q_parse — the parse pillar's only door */
 #include "qlang/q_ctx.h"    /* q_ctx_run_line — THE statement seam this runner drives */
 #include "qlang/q_console.h"
-#include "qlang/base/q_err.h"    /* q_err_drop — the parse pillar's backstop */
-#include "qlang/ops/q_sys.h"    /* q_sys_is_cmd / q_sys_prompt */
+#include "qlang/ops/q_sys.h"    /* q_sys_prompt — the transcript prompt pin */
 #include "store/fileio.h"   /* ray_mkdir_p — --emit mirrors the source tree */
 #include <rayforce.h>
 #include <string.h>
@@ -218,11 +216,11 @@ static void classify(qdoc_result_t* r, int ok) {
 }
 
 static void run_example(const char* input, const char* expect,
-                        const char* tprompt, qdoc_mode_t mode,
+                        const char* tprompt,
                         int verbose, FILE* out, qdoc_result_t* r,
                         qd_emit_t* em) {
     r->examples++;
-    q_console_reset();   /* the parse pillar never reaches the seam's drain */
+    q_console_reset();
 
     /* Prompt pin: the transcript's prompt (`q)` / `q.foo)`) must match the
      * LIVE context prompt at this point — that is what tests the `\d` prompt
@@ -235,37 +233,6 @@ static void run_example(const char* input, const char* expect,
         prompt_ok = (strcmp(tprompt, live) == 0);
     }
 
-    /* The parse pillar is the ONE thing the seam cannot answer — it always
-     * evaluates — so it alone calls q_parse here.  `\`-command rows still RUN
-     * (through the seam): a transcript's `\d`/`\c` must land or every row
-     * after it is measured in the wrong context. */
-    if (mode == QDOC_PARSE_ONLY) {
-        const char* ps = input;
-        size_t      pn = strlen(input);
-        char        lang = q_ctx_lang_scan(&ps, &pn);
-        int         ok = prompt_ok;
-        if (q_sys_is_cmd(input, strlen(input))) {
-            char *ob, *eb;
-            qd_run_line(input, &ob, &eb);
-            free(ob);
-            free(eb);
-            r->parsed++;
-        } else if (pn == 0) {                 /* bare `g)` prefix: silent no-op */
-            r->parsed++;
-            ok = ok && expect[0] == '\0';
-        } else if (lang && lang != 'q') {     /* `.X.e "…"` — never parsed as q */
-            r->parsed++;
-        } else {
-            ray_t* ast = q_parse(ps);
-            if (RAY_IS_ERR(ast)) { q_err_drop(); ray_error_free(ast); ok = 0; }
-            else { ray_release(ast); r->parsed++; }
-        }
-        classify(r, ok);
-        if (!ok && verbose)
-            fprintf(out, "  %s%.200s\n    FAIL(parse)\n", tprompt, input);
-        return;
-    }
-
     if (getenv("QDOC_TRACE")) { char tb[256]; int tn = snprintf(tb, sizeof tb, "INPUT: %.200s\n", input); if (tn > 0) { ssize_t _w = write(2, tb, (size_t)tn); (void)_w; } }
 
     char errcls[64];
@@ -273,7 +240,7 @@ static void run_example(const char* input, const char* expect,
 
     char* ob = NULL;
     char* eb = NULL;
-    int   rc      = qd_run_line(input, &ob, &eb);
+    qd_run_line(input, &ob, &eb);
     int   errored = eb && *eb;
 
     char ng[QD_OUT], ne[QD_OUT];
@@ -284,11 +251,7 @@ static void run_example(const char* input, const char* expect,
          * caret lines become checkable once the renderer carries carets */
         snprintf(ng, sizeof ng, "%.*s", (int)strcspn(eb, "\n"), eb);
         ok = want_error && error_row_matches(ng, errcls);
-        /* a PARSE error the row expected still counts as parsed — 'dup dies
-         * during parse (qsql.md:168) and the transcript's observable IS it */
-        if (rc == 0 || ok) r->parsed++;
     } else {
-        r->parsed++;
         normalize(ob ? ob : "", ng, sizeof ng);
         ok = !want_error && strcmp(ng, ne) == 0;
     }
@@ -302,7 +265,7 @@ static void run_example(const char* input, const char* expect,
     free(eb);
 }
 
-static qdoc_result_t run_path(const char* path, qdoc_mode_t mode,
+static qdoc_result_t run_path(const char* path,
                               int verbose, FILE* out, qd_emit_t* em) {
     qdoc_result_t r = {0};
 
@@ -364,7 +327,7 @@ static qdoc_result_t run_path(const char* path, qdoc_mode_t mode,
     int  have = 0;
 
 #define FLUSH() do { if (have) { \
-                                 run_example(input, expect, tprompt, mode, verbose, out, &r, em); \
+                                 run_example(input, expect, tprompt, verbose, out, &r, em); \
                                  have = 0; expect[0] = '\0'; } } while (0)
 
     while (fgets(line, sizeof line, f)) {
@@ -450,12 +413,12 @@ static const char* emit_rel(const char* path) {
     return p ? p + 7 : path;
 }
 
-qdoc_result_t q_qdoc_run_file_emit(const char* path, qdoc_mode_t mode,
+qdoc_result_t q_qdoc_run_file_emit(const char* path,
                                  int verbose, FILE* out, const char* emit_dir) {
     if (!emit_dir || !*emit_dir || is_volatile(path))
-        return run_path(path, mode, verbose, out, NULL);
+        return run_path(path, verbose, out, NULL);
     qd_emit_t em = { .dir = emit_dir, .path = emit_rel(path) };
-    qdoc_result_t r = run_path(path, mode, verbose, out, &em);
+    qdoc_result_t r = run_path(path, verbose, out, &em);
     if (em.f) fclose(em.f);
     return r;
 }
