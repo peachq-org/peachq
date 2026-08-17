@@ -1,16 +1,16 @@
 /* qdoctest — validate the q examples embedded in markdown docs (and .qcmd
  * transcripts) against the q engine.
  *
- *   qdoctest [--syntax-only] [--verbose] [--skip-file PATH]
+ *   qdoctest [--verbose] [--skip-file PATH]
  *            [--qcmd-only] [--results PATH] [--emit DIR] FILE|DIR...
  *
  * --emit DIR: mirror each file's ACTUAL output for its MISMATCHING examples to
  * DIR/<path> (see qdoc.h).  Fully-matching files write nothing, so diffing two
  * emit trees shows exactly which examples a change moved.
  *
- * --syntax-only: only check each example parses (default: parse + eval + match
- * the expected output, whitespace-insensitive).  One fresh runtime per file
- * (shared session per file).  One line per file, plus a totals summary.
+ * Every example is evaluated and its output matched against the transcript,
+ * whitespace-insensitively.  One fresh runtime per file (shared session per
+ * file).  One line per file, plus a totals summary.
  *
  * --skip-file PATH: load newline-separated path fragments; any corpus file whose
  * path contains a fragment (substring/suffix match) is SKIPPED and counted as a
@@ -21,9 +21,9 @@
  * `.md` files (used by `make q-test-results` over test/q, where stray .md notes
  * like test/q/parse/SOURCES.md live beside the suites).
  *
- * --results PATH: ledger mode.  Runs every non-skipped file in EVAL_MATCH and
- * writes STRICTLY ONE line per file — passing or failing — as `<path>\tparse
- * P/N  eval E/N`, then a TOTAL summary line.  Paths are sorted for a stable
+ * --results PATH: ledger mode.  Runs every non-skipped file and writes STRICTLY
+ * ONE line per file — passing or failing — as `<path>\teval E/N`, then a TOTAL
+ * summary line.  Paths are sorted for a stable
  * diff, so `wc -l` (minus the TOTAL line) counts the discovered files.  This
  * ledger is a complete, UNFILTERED record: no ignore/expected-fail mechanism
  * may drop a row (see the note in ledger()). */
@@ -39,7 +39,6 @@
 
 extern void ray_runtime_destroy(ray_runtime_t* rt);
 
-static qdoc_mode_t   g_mode    = QDOC_EVAL_MATCH;
 static int           g_verbose = 0;
 static int           g_qcmd_only = 0;  /* --qcmd-only: collect *.qcmd, ignore .md */
 static const char*   g_emit    = NULL; /* --emit DIR: actual-output mirror */
@@ -132,7 +131,7 @@ static int is_doc(const char* path) {
 /* Run one file against a fresh runtime; verbose goes to `out`. */
 static qdoc_result_t run_file(const char* path, FILE* out) {
     ray_runtime_t* rt = q_runtime_create(0, NULL);   /* fresh per file */
-    qdoc_result_t r = q_qdoc_run_file_emit(path, g_mode,
+    qdoc_result_t r = q_qdoc_run_file_emit(path,
                                          g_verbose || out != stdout, out, g_emit);
     if (rt) q_runtime_destroy(rt);
     return r;
@@ -145,14 +144,12 @@ static void run_one(const char* path) {
     qdoc_result_t r = run_file(path, stdout);
 
     g_tot.examples += r.examples;
-    g_tot.parsed   += r.parsed;
     g_tot.passed   += r.passed;
     g_tot.failed   += r.failed;
     g_files++;
 
-    printf("%s %s: %d/%d %s\n", r.failed ? "FAIL" : "PASS", path,
-           g_mode == QDOC_PARSE_ONLY ? r.parsed : r.passed, r.examples,
-           g_mode == QDOC_PARSE_ONLY ? "parsed" : "ok");
+    printf("%s %s: %d/%d ok\n", r.failed ? "FAIL" : "PASS", path,
+           r.passed, r.examples);
 }
 
 static void walk(const char* path, void (*visit)(const char*)) {
@@ -196,7 +193,6 @@ static int ledger(const char* results_path) {
         }
 
         g_tot.examples += r.examples;
-        g_tot.parsed   += r.parsed;
         g_tot.passed   += r.passed;
         g_tot.failed   += r.failed;
         g_files++;
@@ -211,14 +207,12 @@ static int ledger(const char* results_path) {
          * test/q/coverage.csv — must NEVER filter a row out of this ledger.
          * Deferred-ness belongs to the GATE (test/test_qcmd.c), not to this
          * raw record; the scoreboard computes amber/red FROM these rows. */
-        fprintf(rf, "%s\tparse %d/%d  eval %d/%d\n",
-                path, r.parsed, r.examples, r.passed, r.examples);
+        fprintf(rf, "%s\teval %d/%d\n", path, r.passed, r.examples);
         free(buf);   /* verbose captured only to keep it off stdout; discarded */
     }
 
-    fprintf(rf, "--- TOTAL %d files | parse %d/%d | eval %d/%d | %d skipped\n",
-            g_files, g_tot.parsed, g_tot.examples,
-            g_tot.passed, g_tot.examples, g_skipped);
+    fprintf(rf, "--- TOTAL %d files | eval %d/%d | %d skipped\n",
+            g_files, g_tot.passed, g_tot.examples, g_skipped);
     fclose(rf);
     return 0;
 }
@@ -229,8 +223,7 @@ int main(int argc, char** argv) {
     int         ntargets = 0;
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--syntax-only"))  g_mode = QDOC_PARSE_ONLY;
-        else if (!strcmp(argv[i], "--verbose")) g_verbose = 1;
+        if (!strcmp(argv[i], "--verbose")) g_verbose = 1;
         else if (!strcmp(argv[i], "--qcmd-only")) g_qcmd_only = 1;
         else if (!strcmp(argv[i], "--skip-file") && i + 1 < argc)
             skip_load(argv[++i]);
@@ -243,7 +236,7 @@ int main(int argc, char** argv) {
     }
 
     if (!ntargets) {
-        fprintf(stderr, "usage: qdoctest [--syntax-only] [--verbose] "
+        fprintf(stderr, "usage: qdoctest [--verbose] "
                         "[--skip-file PATH] [--qcmd-only] [--results PATH] "
                         "[--emit DIR] FILE|DIR...\n");
         skip_free();
@@ -252,21 +245,15 @@ int main(int argc, char** argv) {
 
     int rc = 0;
     if (results_path) {
-        g_mode = QDOC_EVAL_MATCH;              /* ledger is always eval-match */
         for (int i = 0; i < ntargets; i++) walk(targets[i], paths_add);
         rc = ledger(results_path);
-        printf("qdoctest: %d/%d parsed, %d/%d ok across %d file(s), %d skipped "
-               "-> %s\n",
-               g_tot.parsed, g_tot.examples, g_tot.passed, g_tot.examples,
-               g_files, g_skipped, results_path);
+        printf("qdoctest: %d/%d ok across %d file(s), %d skipped -> %s\n",
+               g_tot.passed, g_tot.examples, g_files, g_skipped, results_path);
         paths_free();
     } else {
         for (int i = 0; i < ntargets; i++) walk(targets[i], run_one);
-        printf("---\nqdoctest: %d/%d examples %s across %d file(s), %d skipped\n",
-               g_mode == QDOC_PARSE_ONLY ? g_tot.parsed : g_tot.passed,
-               g_tot.examples,
-               g_mode == QDOC_PARSE_ONLY ? "parsed" : "ok",
-               g_files, g_skipped);
+        printf("---\nqdoctest: %d/%d examples ok across %d file(s), %d skipped\n",
+               g_tot.passed, g_tot.examples, g_files, g_skipped);
         rc = g_tot.failed ? 1 : 0;
     }
 
