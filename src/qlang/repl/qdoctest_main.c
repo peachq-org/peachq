@@ -145,10 +145,9 @@ static void run_one(const char* path) {
 
     g_tot.examples += r.examples;
     g_tot.passed   += r.passed;
-    g_tot.failed   += r.failed;
     g_files++;
 
-    printf("%s %s: %d/%d ok\n", r.failed ? "FAIL" : "PASS", path,
+    printf("%s %s: %d/%d ok\n", r.passed < r.examples ? "FAIL" : "PASS", path,
            r.passed, r.examples);
 }
 
@@ -194,7 +193,6 @@ static int ledger(const char* results_path) {
 
         g_tot.examples += r.examples;
         g_tot.passed   += r.passed;
-        g_tot.failed   += r.failed;
         g_files++;
 
         /* Strictly ONE line per file — PASSING FILES INCLUDED — so the row
@@ -254,7 +252,7 @@ int main(int argc, char** argv) {
         for (int i = 0; i < ntargets; i++) walk(targets[i], run_one);
         printf("---\nqdoctest: %d/%d examples ok across %d file(s), %d skipped\n",
                g_tot.passed, g_tot.examples, g_files, g_skipped);
-        rc = g_tot.failed ? 1 : 0;
+        rc = g_tot.passed < g_tot.examples ? 1 : 0;
     }
 
     skip_free();
