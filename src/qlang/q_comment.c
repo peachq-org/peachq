@@ -51,7 +51,7 @@ static void comment_claim(int64_t fullname, int64_t ns, ray_t* header, int64_t l
 
 /* A `.help.register_file[file;ns;header]` record — the leading comment run of
  * a file documents the FILE, not a value; the empty header is the script-begin
- * "replace everything previously known about this file" call. */
+ * "begin this file" call, a no-op in the upsert-only q store. */
 static void comment_claim_file(const char* hdr, size_t n) {
     int64_t ctx = q_env_ctx();
     ray_t* parts[3] = { ray_sym(g_file),
@@ -74,9 +74,8 @@ q_comment_script_t q_comment_script_begin(int64_t file_sym) {
     g_seen_code = 0;
     g_file_run = 0;
     g_file_run_done = 0;
-    /* Begin-file, unconditionally: the empty-header register_file call clears
-     * everything previously known about this file (fired at the next statement
-     * end; dropped there if the hook is unbound). */
+    /* Begin-file, unconditionally: the C protocol announces every script to
+     * the hook (fired at the next statement end; dropped there if unbound). */
     comment_claim_file("", 0);
     return saved;
 }
