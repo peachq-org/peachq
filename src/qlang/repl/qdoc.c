@@ -211,10 +211,6 @@ static int qd_run_line(const char* input, char** obuf, char** ebuf) {
 }
 
 /* Run one example; update result; report on failure when verbose. */
-static void classify(qdoc_result_t* r, int ok) {
-    if (ok) r->passed++; else r->failed++;
-}
-
 static void run_example(const char* input, const char* expect,
                         const char* tprompt,
                         int verbose, FILE* out, qdoc_result_t* r,
@@ -256,7 +252,7 @@ static void run_example(const char* input, const char* expect,
         ok = !want_error && strcmp(ng, ne) == 0;
     }
     ok = ok && prompt_ok;
-    classify(r, ok);
+    r->passed += (ok != 0);
     if (!ok && prompt_ok) emit_row(em, tprompt, input, ng);
     if (!ok && verbose)
         fprintf(out, "  %s%.200s\n    FAIL(%s) got \"%.200s\" want \"%.200s\"\n",
