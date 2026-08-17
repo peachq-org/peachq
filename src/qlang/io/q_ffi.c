@@ -12,6 +12,15 @@
  *   - the trailing (::) sentinel is accepted but not required when the
  *     bound arity disambiguates;
  *   - errors are bare q classes, never KX's embedded message strings.
+ * One recorded NARROWING, the only one: a bound uppercase letter is enforced
+ * against the argument's element lane (KX's own table defines uppercase as a
+ * vector of the SAME type, but does not check it), because the unchecked case
+ * is a silent wrong answer or an out-of-bounds write.  The unit checked is the
+ * C TYPE the letter names, not the q tag: the letter table gives i m d u v t
+ * one C type between them, so a date vector satisfies "I" exactly as it
+ * satisfies "D" — both are int*, and C cannot tell them apart.
+ * .ffi.callFunction is exempt by construction — its CIF is inferred from the
+ * values, so there is no independent declaration to compare against.
  * Callbacks (the 'k' letter, tuple (fn;"argtypes";"ret")): a q lambda becomes
  * a C pointer via ffi_closure; the closure re-enters THE evaluator through
  * q_eval_apply_value (its own interrupt/depth guards apply).  The error
@@ -214,7 +223,53 @@ static int qffi_atom_num(ray_t* a, int64_t* iv, double* fv, int* isf) {
     }
 }
 
+/* the lane an uppercase letter DECLARES its pointer points at.  NULL means
+ * there is nothing to check: every lowercase letter (a value, not a pointer),
+ * R and K (a raw address / an opaque object — no element type is meaningful),
+ * and G, whose lowercase twin rides ffi_type_pointer while the published
+ * letter table calls it a byte, so it has no trustworthy pointee. */
+static ffi_type* qffi_letter_pointee(char letter) {
+    if (letter < 'A' || letter > 'Z' || letter == 'R' || letter == 'K' || letter == 'G')
+        return NULL;
+    return qffi_letter_type((char)(letter + ('a' - 'A')), 0);
+}
+
+/* THE ray-tag -> C-lane map, unpromoted and sign-blind: |tag| is the width and
+ * kind of the atom and of the vector's element alike, so temporals answer their
+ * storage lane on purpose (a date IS an int32, which is why the letters sharing
+ * one C type are interchangeable).  NULL = no C scalar lane.  Both the pointee
+ * check and the inferred CIF read the tag axis THROUGH here, so a new type lands
+ * in one place. */
+static ffi_type* qffi_tag_lane(int8_t tag) {
+    switch (tag < 0 ? -tag : tag) {
+        case RAY_BOOL: case RAY_BYTE_ONLY: case RAY_CHARV: return &ffi_type_uint8;
+        case RAY_I16: return &ffi_type_sint16;
+        case RAY_I32: case RAY_MONTH: case RAY_DATE:
+        case RAY_MINUTE: case RAY_SECOND: case RAY_TIME: return &ffi_type_sint32;
+        case RAY_I64: case RAY_TIMESTAMP: case RAY_TIMESPAN: return &ffi_type_sint64;
+        case RAY_F32: return &ffi_type_float;
+        case RAY_F64: case RAY_DATETIME: return &ffi_type_double;
+        default: return NULL;
+    }
+}
+
+/* the lane the pointer this ARGUMENT marshals to actually points at: a vector
+ * hands over its elements, a sym atom and a char vector a char*, a sym vector
+ * a char*[].  NULL = it marshals as a value, not a pointer. */
+static ffi_type* qffi_arg_pointee(ray_t* a) {
+    if (a->type == -RAY_SYM) return &ffi_type_uint8;   /* an interned char* */
+    if (a->type == RAY_SYM) return &ffi_type_pointer;  /* the copied char*[] */
+    return a->type > 0 ? qffi_tag_lane(a->type) : NULL;
+}
+
 static ray_t* qffi_marshal_arg(qffi_ctx* c, int i, ray_t* a, char letter, ffi_type* ft) {
+    /* The CIF cannot tell I from J from F — every uppercase letter is the same
+     * ffi_type_pointer — so the LETTER is the only thing that pins the element
+     * type, and an unchecked mismatch reads or WRITES past the vector.  (::)
+     * is the one non-vector that stays legal: a NULL pointer suits any
+     * pointee, which is how an optional out-parameter is passed. */
+    ffi_type* pointee = qffi_letter_pointee(letter);
+    if (pointee && a->type != RAY_NULL && pointee != qffi_arg_pointee(a)) return q_err(QE_TYPE);
     qffi_slot* s = &c->slots[i];
     c->values[i] = s;
     if (letter == 'r') {
@@ -293,18 +348,12 @@ static ray_t* qffi_marshal_arg(qffi_ctx* c, int i, ray_t* a, char letter, ffi_ty
 
 /* the inferred (callFunction) CIF applies C integer default promotions —
  * narrow ints ride sint32; floats stay UNpromoted (KX parity: promoting
- * would break prototyped float callees reached through callFunction) */
+ * would break prototyped float callees reached through callFunction).  Only
+ * an ATOM has a value lane; everything else crosses as a pointer. */
 static ffi_type* qffi_type_of_value(ray_t* a) {
-    switch (a->type) {
-        case -RAY_BOOL: case -RAY_BYTE_ONLY: case -RAY_CHARV:
-        case -RAY_I16: return &ffi_type_sint32;
-        case -RAY_I32: case -RAY_MONTH: case -RAY_DATE:
-        case -RAY_MINUTE: case -RAY_SECOND: case -RAY_TIME: return &ffi_type_sint32;
-        case -RAY_I64: case -RAY_TIMESTAMP: case -RAY_TIMESPAN: return &ffi_type_sint64;
-        case -RAY_F32: return &ffi_type_float;
-        case -RAY_F64: case -RAY_DATETIME: return &ffi_type_double;
-        default: return &ffi_type_pointer;
-    }
+    ffi_type* t = a->type < 0 ? qffi_tag_lane(a->type) : NULL;
+    if (!t) return &ffi_type_pointer;
+    return t == &ffi_type_uint8 || t == &ffi_type_sint16 ? &ffi_type_sint32 : t;
 }
 
 /* ---- return wrapping ---------------------------------------------------- */
