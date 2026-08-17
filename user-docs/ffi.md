@@ -200,6 +200,43 @@ q)s
 The `r` letter takes an address you already hold as an int or long, for the case where a C function hands you an opaque
 handle to give back later.
 
+### The letter has to match the elements
+
+An uppercase letter is a pointer to a vector of **that** type, and `bind` enforces it: the letter is the only thing that
+can, because in the call interface `I`, `J` and `F` are all just "a pointer".
+
+```q
+q)ti:.ffi.bind[`libqr.so`take_ints;"Ii";" "]
+q)ti (1 2 3 4;4i;::)
+'type
+q)ti (1 2 3 4i;4i;::)
+```
+
+The long vector is `'type` because the C function reads `int`s: unchecked, it would have read the 32-byte long vector
+four bytes at a time and printed `1 0 2 0`. The same check catches the dangerous direction — an `int` vector under `"J"`,
+where a C function writing `long long`s writes 16 bytes past the end of the q object, silently.
+
+What is checked is the **C type** the letter names, not the q type. The table above gives `i` `m` `d` `u` `v` `t` one C
+type between them, so a date vector satisfies `"I"` exactly as it satisfies `"D"` — both are `int *`, and the C function
+cannot tell them apart. The same goes for `"J"` over a timestamp and `"F"` over a datetime.
+
+`R` and `K` are exempt: a raw address and a callback have no element type to check. Lowercase letters are exempt too,
+which is what keeps the `qsort` binding above working — it passes an int vector under `"l"`, and a `count` is a long
+atom under `"i"`.
+
+`C` accepts a string or a symbol atom, both of which are a `char *`. `S` wants a symbol **vector**, because it is a
+`char *[]`.
+
+`.ffi.callFunction` cannot make this check and never will. It is told no letters for its arguments — it infers the whole
+call interface from the values you pass — so there is no declaration to compare them against:
+
+```q
+q).ffi.callFunction[(" ";`libqr.so`take_ints)] (1 2 3 4;::)   / no letters, no check: C sees 1 0 2 0
+```
+
+Prefer `bind` for anything that takes a pointer, and if you do reach for `callFunction`, type its vectors explicitly
+(`1 2 3 4i`, not `1 2 3 4`).
+
 ## Callbacks
 
 A q function crosses to C as a function pointer under the `k` letter. You pass it as the tuple
@@ -310,7 +347,7 @@ divergence. The class is the contract.
 | error | means |
 |---|---|
 | `'os` | the symbol did not resolve: wrong name, or the library is not loaded |
-| `'type` | a type letter outside the table, a malformed function spelling, or a value that will not convert |
+| `'type` | a type letter outside the table, a malformed function spelling, a value that will not convert, or an argument whose element type does not match its uppercase letter |
 | `'rank` | the argument list is the wrong length, which is where the collapse trap lands |
 | `'limit` | `callFunction` was given more than 32 arguments (`bind` answers `'type` for more than 32 letters) |
 | `'nyi` | this build has no libffi |
@@ -334,6 +371,8 @@ build, never the arguments.
 |---|---|
 | **Matches KX** | every public spelling; the one-argument-list calling convention and the `::` sentinel; the type letters; uppercase-is-a-pointer; numeric vectors crossing as in-place data pointers, and symbol vectors as a copied `char *[]` with the permutation written back; bindings and closures living until exit; `.ffi.extension` byte for byte |
 | **Superset** | the `::` may be omitted when the bound arity disambiguates and the arguments cannot collapse; char vectors auto-NUL-terminate through a copy unless an explicit `"\000"` tail is present; a q error inside a callback parks and propagates rather than longjmping; errors are bare classes with no embedded message |
+| **Narrower** | a bound uppercase letter must match the C type of the argument's elements, and a non-vector under one (other than `::`) is `'type`. KX accepts the mismatch and reads or writes at the wrong stride — see [The letter has to match the elements](#the-letter-has-to-match-the-elements) |
 
 Nothing in the superset column changes the meaning of code written to the KX rules. If you write ffikdb-portable q, with
-the sentinel always and explicit NUL tails on buffers, it runs identically here.
+the sentinel always and explicit NUL tails on buffers, it runs identically here. The narrower row is the one place we
+reject what KX accepts, and only where KX's own table already says uppercase means a vector of the same type.
