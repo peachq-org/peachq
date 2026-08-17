@@ -7,14 +7,13 @@
  * The CONTRACT a driver owes: bracket each script, classify every physical
  * line, and end each statement — one comment run documents at most one name.
  *
- * register_file means "begin this file — replace everything previously known
- * about it", and is called at EVERY script begin with an empty header, then
- * again with the real header if the leading run resolves to one.  INVARIANT:
- * the leading comment run always resolves BEFORE the first definition
- * registers — on a break (blank line -> file header) or on code (-> it
- * documents that definition, and no second register_file call happens).  So
- * the second call can never wipe an already-registered definition, which is
- * what makes two hooks safe where three looked needed. */
+ * register_file means "begin this file" and is UPSERT-ONLY on the q side (the
+ * store mirrors the session — `\l` never removes): called at EVERY script
+ * begin with an empty header (a pure no-op there), then again with the real
+ * header if the leading run resolves to one.  INVARIANT: the leading comment
+ * run always resolves BEFORE the first definition registers — on a break
+ * (blank line -> file header) or on code (-> it documents that definition,
+ * and no second register_file call happens). */
 #ifndef PEACHQ_Q_COMMENT_H
 #define PEACHQ_Q_COMMENT_H
 
