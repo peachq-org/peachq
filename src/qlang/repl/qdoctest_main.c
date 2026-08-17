@@ -33,9 +33,11 @@
 #include "qlang/q_runtime.h"
 #include <rayforce.h>
 #include <dirent.h>
+#include <libgen.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 extern void ray_runtime_destroy(ray_runtime_t* rt);
 
@@ -49,6 +51,83 @@ static int           g_skipped = 0;   /* pages skipped via the skip-list */
 /* ---- skip-list ---------------------------------------------------------- */
 static char** g_skip    = NULL;
 static int    g_skip_n  = 0;
+
+/* ---- the corpus scratch cwd (tools/qscratch.sh owns the contract) -------- */
+/* Suites write fixtures cwd-relative, so a run started from the repo root drops
+ * them INTO the tree.  The gate runs every pillar from build/qtest-run; a direct
+ * run lands in the SAME dir, and SHARES the gate's when QTEST_RUNDIR names one
+ * (the pillars have cross-suite file dependencies, so re-init would wipe them).
+ * Corpus paths are made absolute before the chdir and printed root-relative, so
+ * ledger keys and PASS/FAIL lines read exactly as they did from the root. */
+static char g_root[2048] = "";
+static char g_run[2048]  = "";
+static char g_cwd[1000]  = "";   /* the CALLER's cwd — every argument names it */
+
+static char* abs_dup(const char* path) {
+    if (*path == '/' || !g_cwd[0]) return strdup(path);
+    size_t n = strlen(g_cwd) + strlen(path) + 2;
+    char*  out = malloc(n);
+    if (out) snprintf(out, n, "%s/%s", g_cwd, path);
+    return out;
+}
+
+static const char* disp(const char* path) {
+    const char* pfx[2] = { g_run, g_root };
+    for (int i = 0; i < 2; i++) {
+        size_t n = strlen(pfx[i]);
+        if (n && !strncmp(path, pfx[i], n) && path[n] == '/') return path + n + 1;
+    }
+    return path;
+}
+
+/* Resolve the scratch dir and chdir into it; a checkout without the script (a
+ * staged Windows corpus, an installed binary) keeps the caller's cwd. */
+static void run_dir_enter(const char* argv0) {
+    char self[4096], script[4096];
+    if (!getcwd(g_cwd, sizeof g_cwd)) return;
+    /* A truncated argv0 dirname()s to the WRONG root and every path we print is
+     * then silently mis-stripped, so refuse rather than guess. */
+    if (snprintf(self, sizeof self, "%s", argv0) >= (int)sizeof self) return;
+    /* chdir+getcwd is the normalizer: `../../../qdoctest` must yield the same
+     * root string a repo-root run gets, or disp() cannot strip it. */
+    if (chdir(dirname(self)) != 0) return;
+    /* We are standing in the binary's directory — neither the caller's cwd nor
+     * the scratch dir — so the restore must run even when getcwd failed. */
+    char* got = getcwd(g_root, sizeof g_root);
+    if (chdir(g_cwd) != 0 || !got) { g_root[0] = '\0'; return; }
+    snprintf(script, sizeof script, "%s/tools/qscratch.sh", g_root);
+    if (access(script, X_OK) != 0) { g_root[0] = '\0'; return; }
+
+    const char* env = getenv("QTEST_RUNDIR");
+    if (env && *env) {
+        snprintf(g_run, sizeof g_run, "%s", env);
+    } else {
+        char cmd[4096];
+        snprintf(cmd, sizeof cmd, "%s/tools/qscratch.sh init", g_root);
+        FILE* p = popen(cmd, "r");
+        if (!p) { g_run[0] = '\0'; }
+        else {
+            /* No newline means the path was truncated; a truncated prefix that
+             * happens to exist would silently run in the wrong tree. */
+            if (!fgets(g_run, sizeof g_run, p) || !strchr(g_run, '\n')) g_run[0] = '\0';
+            pclose(p);
+            g_run[strcspn(g_run, "\n")] = '\0';
+        }
+    }
+    /* Silence here would leave the corpus running in the caller's cwd, dropping
+     * fixture litter into the checkout — the whole defect this resolves. */
+    if (!g_run[0]) {
+        fprintf(stderr, "qdoctest: cannot resolve the scratch cwd — running in %s, "
+                        "fixtures will land there\n", g_cwd);
+        return;
+    }
+    if (chdir(g_run) != 0) {
+        fprintf(stderr, "qdoctest: cannot enter scratch cwd %s\n", g_run);
+        g_run[0] = '\0';
+        return;
+    }
+    if (!getcwd(g_run, sizeof g_run)) g_run[0] = '\0';   /* stale would mis-strip; disp() falls back to g_root */
+}
 
 static void skip_load(const char* path) {
     FILE* f = fopen(path, "r");
@@ -147,7 +226,7 @@ static void run_one(const char* path) {
     g_tot.passed   += r.passed;
     g_files++;
 
-    printf("%s %s: %d/%d ok\n", r.passed < r.examples ? "FAIL" : "PASS", path,
+    printf("%s %s: %d/%d ok\n", r.passed < r.examples ? "FAIL" : "PASS", disp(path),
            r.passed, r.examples);
 }
 
@@ -205,7 +284,7 @@ static int ledger(const char* results_path) {
          * test/q/coverage.csv — must NEVER filter a row out of this ledger.
          * Deferred-ness belongs to the GATE (test/test_qcmd.c), not to this
          * raw record; the scoreboard computes amber/red FROM these rows. */
-        fprintf(rf, "%s\teval %d/%d\n", path, r.passed, r.examples);
+        fprintf(rf, "%s\teval %d/%d\n", disp(path), r.passed, r.examples);
         free(buf);   /* verbose captured only to keep it off stdout; discarded */
     }
 
@@ -241,12 +320,23 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    char* owned[64 + 2] = {0};
+    int   nowned = 0;
+    run_dir_enter(argv[0]);
+    if (g_run[0]) {                        /* every path was given against the OLD cwd */
+        for (int i = 0; i < ntargets; i++)
+            if ((owned[nowned] = abs_dup(targets[i]))) targets[i] = owned[nowned++];
+        if (results_path && (owned[nowned] = abs_dup(results_path)))
+            results_path = owned[nowned++];
+        if (g_emit && (owned[nowned] = abs_dup(g_emit))) g_emit = owned[nowned++];
+    }
+
     int rc = 0;
     if (results_path) {
         for (int i = 0; i < ntargets; i++) walk(targets[i], paths_add);
         rc = ledger(results_path);
         printf("qdoctest: %d/%d ok across %d file(s), %d skipped -> %s\n",
-               g_tot.passed, g_tot.examples, g_files, g_skipped, results_path);
+               g_tot.passed, g_tot.examples, g_files, g_skipped, disp(results_path));
         paths_free();
     } else {
         for (int i = 0; i < ntargets; i++) walk(targets[i], run_one);
@@ -256,5 +346,6 @@ int main(int argc, char** argv) {
     }
 
     skip_free();
+    while (nowned) free(owned[--nowned]);
     return rc;
 }
