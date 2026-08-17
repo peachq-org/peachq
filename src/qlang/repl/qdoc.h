@@ -8,18 +8,15 @@
  *
  * Every row RUNS THROUGH THE PRODUCT — the statement seam the REPL, `\l` and
  * `-f` share — and the gate compares the bytes the REPL would have printed.
- * This runner owns only POLICY: the transcript-prompt pin, the parse pillar,
- * row classification, whitespace normalization and the --emit mirror. */
+ * This runner owns only POLICY: the transcript-prompt pin, row classification,
+ * whitespace normalization and the --emit mirror. */
 #ifndef QDOC_H
 #define QDOC_H
 
 #include <stdio.h>
 
-typedef enum { QDOC_PARSE_ONLY, QDOC_EVAL_MATCH } qdoc_mode_t;
-
 typedef struct {
     int examples;   /* q) inputs found */
-    int parsed;     /* examples that PARSED (regardless of eval outcome) */
     int passed;     /* matched */
     int failed;     /* mismatched */
     int skipped;    /* reserved; 0 for now */
@@ -36,7 +33,7 @@ typedef struct {
  * the corpus root (test/q/list/take.qcmd -> <dir>/list/take.qcmd); a short list
  * of clock/counter-valued suites is skipped so the tree stays diff-stable.
  * emit_dir NULL/empty runs the file without emitting anything. */
-qdoc_result_t q_qdoc_run_file_emit(const char* path, qdoc_mode_t mode,
+qdoc_result_t q_qdoc_run_file_emit(const char* path,
                                  int verbose, FILE* out, const char* emit_dir);
 
 /* A FILE* whose bytes land in memory — how this runner captures what the
