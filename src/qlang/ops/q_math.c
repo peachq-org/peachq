@@ -528,6 +528,11 @@ static int match_carrier(ray_t* a, ray_t* b) {
     }
 }
 
+/* ~'s float-leaf test: nulls of any type are equal, else the shared tolerance */
+static int match_tol_f64(double x, double y) {
+    return (isnan(x) && isnan(y)) || ray_cmp_tol_eq(x, y);
+}
+
 /* q `x~y` — recursive whole-value equivalence (kdb match): TYPE-strict
  * (`1~1f` is 0b), attribute-blind (`1 2 3~\`s#1 2 3` is 1b), sentinel nulls
  * compare equal (`0n~0n` is 1b — non-finites canonicalize to one payload).
@@ -564,9 +569,13 @@ int q_match_rec(ray_t* a, ray_t* b) {
          * fn values, whose state is NOT in the union slot — those fall to
          * the conservative-mismatch tail below). */
         switch (-a->type) {
+        case RAY_F32: case RAY_F64: RAY_TEMPORALF_CASES:
+            /* ~ is tolerant on real/float/datetime (precision.md "Use"); payload
+             * memcmp first so canonical nulls match without arithmetic */
+            if (memcmp(&a->i64, &b->i64, 8) == 0) return 1;
+            return match_tol_f64(a->f64, b->f64);
         case RAY_BOOL: RAY_BYTE_CASES: case RAY_I16: case RAY_I32: case RAY_I64:
-        case RAY_F32: case RAY_F64:
-        RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: RAY_TEMPORALF_CASES:
+        RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES:
             return memcmp(&a->i64, &b->i64, 8) == 0;   /* payload union */
         default:
             return 0;
@@ -589,8 +598,23 @@ int q_match_rec(ray_t* a, ray_t* b) {
                        : (a->type == RAY_I32 || a->type == RAY_F32) ? 4
                        : (a->type == RAY_I16) ? 2
                        : (a->type == RAY_BOOL || ray_is_bytelike(a->type)) ? 1 : 0;
-            if (esz)
-                return memcmp(ray_data(a), ray_data(b), (size_t)la * esz) == 0;
+            if (esz) {
+                if (memcmp(ray_data(a), ray_data(b), (size_t)la * esz) == 0) return 1;
+                /* float lanes fall to a tolerant element loop; exact lanes are decided */
+                if (a->type == RAY_F64 || RAY_IS_TEMPORALF(a->type)) {
+                    const double *xa = ray_data(a), *xb = ray_data(b);
+                    for (int64_t i = 0; i < la; i++)
+                        if (!match_tol_f64(xa[i], xb[i])) return 0;
+                    return 1;
+                }
+                if (a->type == RAY_F32) {
+                    const float *xa = ray_data(a), *xb = ray_data(b);
+                    for (int64_t i = 0; i < la; i++)
+                        if (!match_tol_f64((double)xa[i], (double)xb[i])) return 0;
+                    return 1;
+                }
+                return 0;
+            }
         }
         for (int64_t i = 0; i < la; i++) {
             ray_t* ia = ray_i64(i);

@@ -26,6 +26,24 @@
 #include "lang/format.h"   /* ray_type_name (error context) */
 
 #include <assert.h>
+#include <math.h>
+
+/* Comparison tolerance E=2^-43 (qdocs basics/precision.md): x=y iff |x-y| <= E*max(|x|,|y|),
+ * applied only where an operand is real/float/datetime — the finite-float lanes.  Exact
+ * equality first (±0w=±0w must answer without arithmetic; inf-inf is NaN), infinities then
+ * compare exactly (the law covers FINITE floats).  This is the exact inequality, NOT the
+ * integer-ULP approximation: ULP is a superset at binade bottoms, so it cannot be swapped
+ * in without re-checking the pinned band grid in test/q/aigenerated/compare_tolerance.qcmd. */
+int ray_cmp_tol_eq(double x, double y) {
+    if (x == y) return 1;
+    if (isinf(x) || isinf(y)) return 0;
+    return fabs(x - y) <= 0x1p-43 * fmax(fabs(x), fabs(y));
+}
+
+static inline int tol_lane(ray_t* x) {
+    return x->type == -RAY_F64 || x->type == -RAY_F32 || RAY_IS_TEMPORALF(-x->type);
+}
+static inline int tol_pair(ray_t* a, ray_t* b) { return tol_lane(a) || tol_lane(b); }
 
 /* Helper: compare char atom vs string atom.
  * Returns: -1 if no char/string pair, else memcmp-like result via *out. */
@@ -82,8 +100,10 @@ static inline int int_cmp_lane(ray_t* x) {
 #define INT_CMP_LANE(a, b, op) \
     if (int_cmp_lane(a) && int_cmp_lane(b)) return make_bool(as_i64(a) op as_i64(b) ? 1 : 0)
 
-/* Comparison */
-ray_t* ray_gt_fn(ray_t* a, ray_t* b) {
+/* Comparison.  `tol` — ordering is defined off the tolerance (`a>b` is `a>b and not a=b`),
+ * so inside the band < and > are both 0b, <= and >= both 1b; cmp_pick passes 0 (Lesser/
+ * Greater are absent from precision.md §Use — a tolerant pick returns the wrong OPERAND). */
+static ray_t* gt_impl(ray_t* a, ray_t* b, int tol) {
     { int c; if (char_str_cmp(a, b, &c) == 0) return make_bool(c > 0 ? 1 : 0); }
     if (a->type == -RAY_SYM && b->type == -RAY_SYM)
         return make_bool(sym_atom_cmp(a, b) > 0 ? 1 : 0);
@@ -107,10 +127,12 @@ ray_t* ray_gt_fn(ray_t* a, ray_t* b) {
     if (na) return make_bool(0);             /* null > X → false */
     if (nb) return make_bool(1);             /* X > null → true */
     INT_CMP_LANE(a, b, >);
-    return make_bool(as_f64(a) > as_f64(b) ? 1 : 0);
+    double x = as_f64(a), y = as_f64(b);
+    return make_bool((x > y && !(tol && tol_pair(a, b) && ray_cmp_tol_eq(x, y))) ? 1 : 0);
 }
+ray_t* ray_gt_fn(ray_t* a, ray_t* b) { return gt_impl(a, b, 1); }
 
-ray_t* ray_lt_fn(ray_t* a, ray_t* b) {
+static ray_t* lt_impl(ray_t* a, ray_t* b, int tol) {
     { int c; if (char_str_cmp(a, b, &c) == 0) return make_bool(c < 0 ? 1 : 0); }
     if (a->type == -RAY_SYM && b->type == -RAY_SYM)
         return make_bool(sym_atom_cmp(a, b) < 0 ? 1 : 0);
@@ -133,8 +155,10 @@ ray_t* ray_lt_fn(ray_t* a, ray_t* b) {
     if (na) return make_bool(1);             /* null < X → true */
     if (nb) return make_bool(0);             /* X < null → false */
     INT_CMP_LANE(a, b, <);
-    return make_bool(as_f64(a) < as_f64(b) ? 1 : 0);
+    double x = as_f64(a), y = as_f64(b);
+    return make_bool((x < y && !(tol && tol_pair(a, b) && ray_cmp_tol_eq(x, y))) ? 1 : 0);
 }
+ray_t* ray_lt_fn(ray_t* a, ray_t* b) { return lt_impl(a, b, 1); }
 
 ray_t* ray_gte_fn(ray_t* a, ray_t* b) {
     { int c; if (char_str_cmp(a, b, &c) == 0) return make_bool(c >= 0 ? 1 : 0); }
@@ -160,7 +184,8 @@ ray_t* ray_gte_fn(ray_t* a, ray_t* b) {
     if (na) return make_bool(0);             /* null >= X → false */
     if (nb) return make_bool(1);             /* X >= null → true */
     INT_CMP_LANE(a, b, >=);
-    return make_bool(as_f64(a) >= as_f64(b) ? 1 : 0);
+    double x = as_f64(a), y = as_f64(b);
+    return make_bool((x >= y || (tol_pair(a, b) && ray_cmp_tol_eq(x, y))) ? 1 : 0);
 }
 
 ray_t* ray_lte_fn(ray_t* a, ray_t* b) {
@@ -187,16 +212,17 @@ ray_t* ray_lte_fn(ray_t* a, ray_t* b) {
     if (na) return make_bool(1);             /* null <= X → true */
     if (nb) return make_bool(0);             /* X <= null → false */
     INT_CMP_LANE(a, b, <=);
-    return make_bool(as_f64(a) <= as_f64(b) ? 1 : 0);
+    double x = as_f64(a), y = as_f64(b);
+    return make_bool((x <= y || (tol_pair(a, b) && ray_cmp_tol_eq(x, y))) ? 1 : 0);
 }
 
 
-/* Lesser/Greater pick an OPERAND rather than deciding a bool, so they route
- * through the ordering above: min2/max2 can never disagree with </>.  These are
- * the eager twins of the OP_MIN2/OP_MAX2 DAG nodes (ops/graph.c), which had
- * builders but no kernel. */
+/* Lesser/Greater pick an OPERAND rather than deciding a bool, riding the EXACT
+ * ordering (tol=0): they are absent from precision.md §Use, and a tolerant pick
+ * would return the other, tolerantly-equal value.  Eager twins of the
+ * OP_MIN2/OP_MAX2 DAG nodes (ops/graph.c), which had builders but no kernel. */
 static ray_t* cmp_pick(ray_t* a, ray_t* b, int want_lt) {
-    ray_t* c = want_lt ? ray_lt_fn(a, b) : ray_gt_fn(a, b);
+    ray_t* c = want_lt ? lt_impl(a, b, 0) : gt_impl(a, b, 0);
     if (RAY_IS_ERR(c)) return c;
     ray_t* w = c->b8 ? a : b;
     ray_release(c);
@@ -228,7 +254,7 @@ ray_t* ray_eq_fn(ray_t* a, ray_t* b) {
     /* An f64-backed temporal (datetime) forces the FLOAT lane: as_i64 on it
      * would return the raw bit pattern (codex r2 P2). */
     if (is_float_op(a, b) || RAY_IS_TEMPORALF(-a->type) || RAY_IS_TEMPORALF(-b->type))
-        return make_bool(as_f64(a) == as_f64(b) ? 1 : 0);
+        return make_bool(ray_cmp_tol_eq(as_f64(a), as_f64(b)) ? 1 : 0);
     return make_bool(as_i64(a) == as_i64(b) ? 1 : 0);
 }
 
@@ -252,7 +278,7 @@ ray_t* ray_neq_fn(ray_t* a, ray_t* b) {
     if (!(is_numeric(a) || is_temporal(a) || RAY_IS_TEMPORALF(-a->type)) || !(is_numeric(b) || is_temporal(b) || RAY_IS_TEMPORALF(-b->type))) return ray_error("type", "<>: incomparable operand types, got %s and %s", ray_type_name(a->type), ray_type_name(b->type));
     /* f64-backed temporal: float lane (see ray_eq_fn). */
     if (is_float_op(a, b) || RAY_IS_TEMPORALF(-a->type) || RAY_IS_TEMPORALF(-b->type))
-        return make_bool(as_f64(a) != as_f64(b) ? 1 : 0);
+        return make_bool(ray_cmp_tol_eq(as_f64(a), as_f64(b)) ? 0 : 1);
     return make_bool(as_i64(a) != as_i64(b) ? 1 : 0);
 }
 

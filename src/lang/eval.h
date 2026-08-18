@@ -285,7 +285,9 @@ ray_t* ray_div_fn(ray_t* a, ray_t* b);
 ray_t* ray_idiv_fn(ray_t* a, ray_t* b);
 ray_t* ray_mod_fn(ray_t* a, ray_t* b);
 
-/* Comparison */
+/* Comparison — the tolerant-equality predicate (E=2^-43, cmp.c) shared by =/<>/orderings,
+ * q `~` (q_match_rec) and the DAG constant fold; float lanes only, gated by the caller. */
+int ray_cmp_tol_eq(double x, double y);
 ray_t* ray_gt_fn(ray_t* a, ray_t* b);
 ray_t* ray_lt_fn(ray_t* a, ray_t* b);
 ray_t* ray_gte_fn(ray_t* a, ray_t* b);
