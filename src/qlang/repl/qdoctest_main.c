@@ -34,6 +34,7 @@
 #include "core/timer.h"      /* ray_time_now_ms — the --verbose progress line */
 #include <rayforce.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <libgen.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -302,6 +303,12 @@ static int ledger(const char* results_path) {
 }
 
 int main(int argc, char** argv) {
+    /* A test runner may NEVER read the terminal: `read0 0` rows (test/q/io/read0,
+     * test/q/extracted/basics/handles) take their line straight off fd 0, so on a
+     * tty the whole gate blocks mid-run looking exactly like a hang.  Detaching fd
+     * 0 also makes a hand-run score identically to a piped/CI one. */
+    int ray_devnull = open("/dev/null", O_RDONLY);
+    if (ray_devnull >= 0) { dup2(ray_devnull, 0); if (ray_devnull > 0) close(ray_devnull); }
     const char* results_path = NULL;
     const char* targets[64];
     int         ntargets = 0;
