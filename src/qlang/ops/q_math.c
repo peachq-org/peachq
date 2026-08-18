@@ -1,5 +1,5 @@
 /* q_math.c — atomic unary/dyadic math (libm family, xexp/xlog), comparison
- * wrappers (= <> & ~), and neg/null
+ * wrappers (= <> & ~), neg/null, and the float-matrix verbs (mmu/inv/lsq)
  *
  * Split from q_registry.c (2026-07-14) — pure function moves; the shared
  * internal surface lives in q_registry_internal.h.  See q_registry.h for
@@ -263,6 +263,143 @@ ray_t* q_mmu_wrap(ray_t* x, ray_t* y) {
         od[k] = as_f64(d); ray_release(d);
     }
     if (ycols) ray_release(ycols);
+    return out;
+}
+
+/* inv/lsq factor in flat row-major scratch; results rebuild as the q_mmu_wrap shape. */
+static double* mat_flat(ray_t* m, int64_t rows, int64_t cols) {
+    double* a = (double*)malloc((size_t)(rows * cols) * sizeof(double));
+    if (!a) return NULL;
+    ray_t** rowv = (ray_t**)ray_data(m);
+    for (int64_t i = 0; i < rows; i++)
+        memcpy(a + i * cols, ray_data(rowv[i]), (size_t)cols * sizeof(double));
+    return a;
+}
+
+static ray_t* mat_rows_new(const double* a, int64_t rows, int64_t cols) {
+    ray_t* out = ray_list_new(rows > 0 ? rows : 1);
+    if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
+    for (int64_t i = 0; i < rows; i++) {
+        ray_t* row = ray_vec_from_raw(RAY_F64, a + i * cols, cols);
+        if (!row || RAY_IS_ERR(row)) { ray_release(out); return row ? row : q_err(QE_OOM); }
+        out = ray_list_append(out, row); ray_release(row);   /* append RETAINS */
+        if (RAY_IS_ERR(out)) return out;
+    }
+    return out;
+}
+
+/* q `inv x` — matrix inverse of a non-singular float matrix by LU decomposition
+ * with partial pivoting (ref/inv.md "Since V3.6 2017.09.26 inv uses LU
+ * decomposition"; float-only per ref/matrixes.md).  Right-looking elimination,
+ * then one permuted-identity solve per result column — this exact order
+ * reproduces the doc goldens' rounding noise (`a mmu inv a` off-diagonals).
+ * Singular pivot -> 'domain (undocumented; lsq's non-PD case matches). */
+ray_t* q_inv_wrap(ray_t* x) {
+    int64_t w;
+    int xc = q_mmu_class(x, &w);
+    if (xc == QMMU_BAD || xc == 0) return q_err(QE_TYPE);
+    if (xc == QMMU_RAGGED) return q_err(QE_LENGTH);
+    int64_t n = ray_len(x);
+    if (w != n) return q_err(QE_LENGTH);
+
+    double* a = mat_flat(x, n, n);
+    int64_t* piv = a ? (int64_t*)malloc((size_t)n * sizeof(int64_t)) : NULL;
+    double* r = piv ? (double*)malloc((size_t)(n * n + n) * sizeof(double)) : NULL;
+    if (!r) { free(piv); free(a); return q_err(QE_WSFULL); }
+    double* b = r + n * n;
+    for (int64_t i = 0; i < n; i++) piv[i] = i;
+
+    for (int64_t k = 0; k < n; k++) {
+        int64_t p = k;
+        for (int64_t i = k + 1; i < n; i++)
+            if (fabs(a[i * n + k]) > fabs(a[p * n + k])) p = i;
+        if (a[p * n + k] == 0.0) { free(r); free(piv); free(a); return q_err(QE_DOMAIN); }
+        if (p != k) {
+            for (int64_t j = 0; j < n; j++) { double t = a[k * n + j]; a[k * n + j] = a[p * n + j]; a[p * n + j] = t; }
+            int64_t t = piv[k]; piv[k] = piv[p]; piv[p] = t;
+        }
+        for (int64_t i = k + 1; i < n; i++) {
+            a[i * n + k] /= a[k * n + k];
+            for (int64_t j = k + 1; j < n; j++) a[i * n + j] -= a[i * n + k] * a[k * n + j];
+        }
+    }
+
+    for (int64_t c = 0; c < n; c++) {
+        for (int64_t i = 0; i < n; i++) b[i] = piv[i] == c ? 1.0 : 0.0;
+        for (int64_t i = 0; i < n; i++) {                    /* L (unit diag) forward */
+            double s = b[i];
+            for (int64_t j = 0; j < i; j++) s -= a[i * n + j] * b[j];
+            b[i] = s;
+        }
+        for (int64_t i = n - 1; i >= 0; i--) {               /* U backward */
+            double s = b[i];
+            for (int64_t j = i + 1; j < n; j++) s -= a[i * n + j] * b[j];
+            b[i] = s / a[i * n + i];
+        }
+        for (int64_t i = 0; i < n; i++) r[i * n + c] = b[i];
+    }
+
+    ray_t* out = mat_rows_new(r, n, n);
+    free(r); free(piv); free(a);
+    return out;
+}
+
+/* q `x lsq y` — least squares: R such that R mmu y best fits x, both float
+ * matrixes sharing a column count (ref/lsq.md: "lsq solves a normal equations
+ * matrix via Cholesky decomposition"; float-only per ref/matrixes.md).  NEVER
+ * `x mmu inv y` — that shortcut needs square y, and ref/lsq.md's own second
+ * example divides a 3x4 by a 3x4.  G = y mmu flip y, C = x mmu flip y (the
+ * existing kernels); G symmetric makes R G = C a per-row solve through the
+ * Cholesky factor.  Non-positive-definite G -> 'domain, the inv singular class. */
+ray_t* q_lsq_wrap(ray_t* x, ray_t* y) {
+    int64_t px, py;
+    int xc = q_mmu_class(x, &px), yc = q_mmu_class(y, &py);
+    if (xc == QMMU_BAD || yc == QMMU_BAD || xc == 0 || yc == 0) return q_err(QE_TYPE);
+    if (xc == QMMU_RAGGED || yc == QMMU_RAGGED) return q_err(QE_LENGTH);
+    if (px != py) return q_err(QE_LENGTH);
+    int64_t m = ray_len(x), n = ray_len(y);
+
+    ray_t* yt = q_flip_wrap(y);
+    if (!yt || RAY_IS_ERR(yt)) return yt ? yt : q_err(QE_OOM);
+    ray_t* gm = q_mmu_wrap(y, yt);                          /* n x n normal matrix */
+    if (!gm || RAY_IS_ERR(gm)) { ray_release(yt); return gm ? gm : q_err(QE_OOM); }
+    ray_t* cm = q_mmu_wrap(x, yt);                          /* m x n right-hand sides */
+    ray_release(yt);
+    if (!cm || RAY_IS_ERR(cm)) { ray_release(gm); return cm ? cm : q_err(QE_OOM); }
+
+    double* g = mat_flat(gm, n, n);
+    double* c = g ? mat_flat(cm, m, n) : NULL;
+    ray_release(gm); ray_release(cm);
+    if (!c) { free(g); return q_err(QE_WSFULL); }
+
+    for (int64_t i = 0; i < n; i++) {                        /* Cholesky G = L L' in place */
+        for (int64_t j = 0; j <= i; j++) {
+            double s = g[i * n + j];
+            for (int64_t k = 0; k < j; k++) s -= g[i * n + k] * g[j * n + k];
+            if (i == j) {
+                if (s <= 0.0) { free(c); free(g); return q_err(QE_DOMAIN); }
+                g[i * n + j] = sqrt(s);
+            } else
+                g[i * n + j] = s / g[j * n + j];
+        }
+    }
+
+    for (int64_t row = 0; row < m; row++) {                  /* per row: L z = c, L' r = z */
+        double* b = c + row * n;
+        for (int64_t i = 0; i < n; i++) {
+            double s = b[i];
+            for (int64_t k = 0; k < i; k++) s -= g[i * n + k] * b[k];
+            b[i] = s / g[i * n + i];
+        }
+        for (int64_t i = n - 1; i >= 0; i--) {
+            double s = b[i];
+            for (int64_t k = i + 1; k < n; k++) s -= g[k * n + i] * b[k];
+            b[i] = s / g[i * n + i];
+        }
+    }
+
+    ray_t* out = mat_rows_new(c, m, n);
+    free(c); free(g);
     return out;
 }
 
