@@ -54,9 +54,9 @@ bool q_sys_timer_active(void);
  * (the `0W` path).  On success: reads the ACTUAL bound port back via
  * getsockname, drops any previous listener (kdb listens on ONE port), sets the
  * authoritative `\p` getter state (`g_listen_port`, so `system "p"` reports the
- * real port after EITHER path) and marks the listener active, then returns the
- * bound port (>0).  On any failure (no poll, bind/listen, or readback) returns
- * 0 and leaves the previous listener intact — never advertises port 0.  Silent
+ * real port after EITHER path), then returns the bound port (>0).  On any
+ * failure (no poll, bind/listen, or readback) returns 0 and leaves the previous
+ * listener intact — never advertises port 0.  Silent
  * (prints nothing — full kdb port fidelity). */
 uint16_t q_sys_listen(uint16_t port);
 

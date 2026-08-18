@@ -587,12 +587,3 @@ void q_ctx_install_remote_hooks(void) {
     ray_eval_set_remote_str_fn(remote_eval_str);
     ray_eval_set_remote_apply_fn(remote_apply);
 }
-
-/* A `\p N` (or startup `-p`) listener makes this process a server even if it
- * began as a client: like rayforce/kdb, once it has a listener it keeps serving
- * past stdin EOF instead of exiting.  Set by the `\p` handler (ops/q_sys.c).
- * Platform-neutral (a plain flag), declared BEFORE the poll-only guard so the
- * POSIX event loop, the Windows serial path, and common code all see it. */
-static int g_listener_active = 0;
-void q_ctx_mark_listener_active(void) { g_listener_active = 1; }
-int  q_ctx_listener_active(void)      { return g_listener_active; }

@@ -55,13 +55,6 @@ ray_t* q_ctx_lang_tree(char letter, const char* p, int64_t n);
  * value-apply, which is not source at all.  q_runtime owns the paired teardown. */
 void q_ctx_install_remote_hooks(void);
 
-/* ---- process lifecycle ----------------------------------------------------
- * A `\p N` (or startup `-p`) listener makes this process a server even if it
- * began as a client: like kdb, once it has a listener it keeps serving past
- * stdin EOF instead of exiting. */
-void q_ctx_mark_listener_active(void);
-int  q_ctx_listener_active(void);
-
 /* Console teardown before exit.  The context knows only that SOMETHING may need
  * restoring before `.z.exit` runs (its 0N! output must land on a cooked
  * terminal); the front end that owns a terminal registers the how.  Unset —

@@ -30,32 +30,17 @@ void q_repl_run(FILE* in, FILE* out, FILE* err, int echo);
  * stdin_tty != 0 drives the line-editor console (same behaviour as
  * q_repl_run's interactive mode); 0 drives the piped transcript loop (prompt
  * + echo, identical output shape to the fgets loop).  `\\` / `exit x`
- * terminate inside the eval (q_sys_exit).  On stdin EOF: when have_listener != 0
- * the loop keeps running so IPC clients stay served (the daemon shape);
- * otherwise the loop exits.
+ * terminate inside the eval (q_sys_exit).  With NO `\p` listener live at that
+ * instant (q_sys_listen_port), stdin EOF ends the session — so a `\p 0` lets a
+ * former server go.  With one live it never does, and the two flavours differ
+ * because the EVENTS differ: a tty ^D is a soft eof (a byte; the tty stays
+ * readable) so the console survives and re-prompts, while a real EOF is final,
+ * so stdin leaves the poll and the process serves on as a daemon.
  *
  * Returns 0 after the poll loop has run and exited; -1 when stdin cannot be
  * poll-driven on this platform (Windows IOCP has no stdin selector; epoll
  * rejects a regular-file redirect) — the caller falls back to the serial
  * REPL-then-serve shape. */
-int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
-                    int stdin_tty, int have_listener);
-
-/* Run a q startup script (`q file.q`): evaluate each line silently (no prompt,
- * no echo, no auto-display of results) — only explicit side-effects (show/0N!)
- * are written to `out`, matching kdb script-load semantics.  Returns 0 on
- * success, non-zero if the file could not be opened. */
-
-/* Mark this process as having an IPC listener (startup `-p` or a runtime `\p`).
- * The unified poll loop then keeps serving past stdin EOF instead of exiting —
- * a client that `\p`s a port becomes a long-lived server, like kdb/rayforce. */
-
-/* Strip pasted kdb `q)` console prompts from the front of an intake line and
- * return the advanced pointer.  Repeated exact `q)` only: `q)q)2+2` -> `2+2`,
- * but the debug prompt `q))…`, namespace prompts `q.foo)`, and `k)` mode are
- * left untouched (the `s[2] != ')'` guard is what excludes `q))`).  No
- * leading-whitespace trim — an indented line is not a prompt.  A console/loader
- * affordance, applied at line-intake (run_one_line), never in the parser.
- * Exposed for direct unit testing (test/q_repl_strip.c). */
+int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err, int stdin_tty);
 
 #endif /* Q_REPL_H */

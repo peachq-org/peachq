@@ -248,8 +248,7 @@ int main(int argc, char** argv) {
         signal(SIGPIPE, SIG_IGN);   /* no SIGPIPE on Windows; send errors
                                      * surface as WSAECONNRESET instead */
 #endif
-        concurrent = (q_repl_run_poll(poll, stdout, stderr, stdin_tty,
-                                      /*have_listener=*/1) == 0);
+        concurrent = (q_repl_run_poll(poll, stdout, stderr, stdin_tty) == 0);
         if (!concurrent) {
             /* Fallback: a stdin the poll backend cannot watch (e.g. a
              * regular-file redirect under epoll).  Legacy serial shape. */
@@ -260,7 +259,8 @@ int main(int argc, char** argv) {
             } else {
                 fprintf(stderr, "no terminal — running in server-only mode\n");
             }
-            ray_poll_run(poll);
+            if (q_sys_listen_port() > 0)
+                ray_poll_run(poll);   /* serve iff the listener is still LIVE */
         }
     } else if (script && !stdin_tty) {
         /* Ran a startup script with no server on a non-tty (`q file.q
@@ -270,16 +270,18 @@ int main(int argc, char** argv) {
          * — unify on rayforce's run_interactive shape) so an idle client
          * services its open outbound IPC conns (server pushes dispatch the
          * instant they arrive, not only during a sync-send) and a runtime `\p`
-         * joins this poll.  have_listener=0 → the loop exits at stdin EOF, so a
-         * piped client still finishes.  Fall back to the blocking console where
+         * joins this poll — and is then LIVE, so EOF serves instead of exiting.
+         * A client that never `\p`s still finishes at EOF.  Fall back where
          * the poll backend can't watch stdin (regular-file redirect under
          * epoll; the IOCP backend watches every stdin kind). */
         int concurrent = 0;
         if (poll)
-            concurrent = (q_repl_run_poll(poll, stdout, stderr, stdin_tty,
-                                          /*have_listener=*/0) == 0);
-        if (!concurrent)
+            concurrent = (q_repl_run_poll(poll, stdout, stderr, stdin_tty) == 0);
+        if (!concurrent) {
             q_repl_run(stdin, stdout, stderr, !stdin_tty);
+            if (poll && q_sys_listen_port() > 0)
+                ray_poll_run(poll);   /* a runtime `\p` made this a server after all */
+        }
     }
 
     /* Natural end-of-session (stdin EOF / script end) is a process exit too:
