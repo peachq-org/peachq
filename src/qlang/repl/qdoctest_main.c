@@ -31,6 +31,7 @@
 
 #include "qlang/repl/qdoc.h"
 #include "qlang/q_runtime.h"
+#include "core/timer.h"      /* ray_time_now_ms — the --verbose progress line */
 #include <rayforce.h>
 #include <dirent.h>
 #include <libgen.h>
@@ -263,12 +264,18 @@ static int ledger(const char* results_path) {
 
         char*  buf = NULL;
         size_t bsz = 0;
+        int64_t t0 = ray_time_now_ms();
         FILE*  mem = q_qdoc_memopen(&buf, &bsz);
         qdoc_result_t r = { .examples = 0 };
         if (mem) {
             r = run_file(path, mem);
             q_qdoc_memclose(mem, &buf, &bsz);
         }
+        /* Ledger mode is otherwise SILENT for its whole run (minutes): --verbose
+         * mirrors each row to stderr as it lands, with the time that found it. */
+        if (g_verbose)
+            fprintf(stderr, "%-56s eval %4d/%-4d %6lldms\n", disp(path), r.passed,
+                    r.examples, (long long)(ray_time_now_ms() - t0));
 
         g_tot.examples += r.examples;
         g_tot.passed   += r.passed;
