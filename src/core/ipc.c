@@ -731,7 +731,7 @@ typedef struct {
     bool             sync_badmsg;   /* deposited resp is a local 'badmsg — waiter closes after consuming */
     ray_t*           sync_resp;
     /* TLS mode (phase RAY_IPC_PHASE_TLS): when the negotiation must be done by,
-     * whether `-E 1`'s first-byte sniff has already chosen a protocol, and the
+     * whether the first-byte sniff has already returned a verdict, and the
      * opaque q_tls.c handshake cookie (NULL until the first ClientHello byte). */
     int64_t          tls_deadline;
     bool             tls_decided;
@@ -849,11 +849,20 @@ static ray_t* ipc_read_tls(ray_poll_t* poll, ray_selector_t* sel)
     ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
     ray_sock_t fd = (ray_sock_t)sel->fd;
 
-    if (q_tls_server_mode() == 1 && !cd->tls_decided) {
+    int mode = q_tls_server_mode();
+    if (mode != 0 && !cd->tls_decided) {
         int k = q_tls_server_sniff(fd);
         if (k < 0) return NULL;                 /* no byte yet — await another event */
         cd->tls_decided = true;
-        if (k == 0) { tls_hs_settle(poll, sel, cd); return NULL; }
+        /* A ClientHello starts 0x16, so a first byte that isn't one (or EOF) can never
+         * become TLS.  The two modes take OPPOSITE actions on that verdict and must never
+         * be merged: `-E 1` falls back to plaintext, `-E 2` REFUSES here rather than
+         * stalling until the handshake deadline reaps it. */
+        if (k == 0) {
+            if (mode == 2) { ray_poll_deregister(poll, sel->id); return NULL; }
+            tls_hs_settle(poll, sel, cd);
+            return NULL;
+        }
     }
     int r = q_tls_server_handshake(fd, &cd->tls_hs);
     if (r == 0) return NULL;                    /* needs another event */
