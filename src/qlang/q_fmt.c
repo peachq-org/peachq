@@ -238,8 +238,7 @@ static size_t char_esc(unsigned char ch, char out[8]);   /* fwd — fmt_dict_ele
 static int elem_tok(ray_t* a, char* out, size_t n);      /* fwd — THE cell law, defined below */
 static int col_uniform_type(ray_t* col);                 /* fwd — its precondition */
 
-/* Tables: padded columns under a dashed rule, keyed tables put key columns left of `|`.
- * kx pads EVERY line to the rule width — the last column included — so a table's line lengths are flat. */
+/* Tables: padded columns under a dashed rule, keyed tables put key columns left of `|`; NO trailing spaces. */
 
 #define QF_MAXCOL 64
 
@@ -357,11 +356,13 @@ static void q_fmt_table(ray_t* tbl) {
     table_widths(tbl, nc, size_rows(nr), widths, hdr);
 
     table_grid(nc, widths, hdr);
+    qe_trim();
     qe_putc('\n');
     grid_rule(nc, widths);
     qe_putc('\n');
     for (int64_t r = 0; r < nr; r++) {
         grid_cells(tbl, nc, widths, r);
+        qe_trim();
         if (r + 1 < nr) qe_putc('\n');
         if (qe_done()) break;                    /* height cap hit — early exit */
     }
@@ -381,15 +382,18 @@ static void fmt_keyed(ray_t* kt, ray_t* vt) {
     table_grid(knc, kw, kh);
     qe_putc('|'); qe_putc(' ');
     table_grid(vnc, vw, vh);
+    qe_trim();
     qe_putc('\n');
     grid_rule(knc, kw);
     qe_putc('|'); qe_putc(' ');
     grid_rule(vnc, vw);
+    qe_trim();
     qe_putc('\n');
     for (int64_t r = 0; r < nr; r++) {
         grid_cells(kt, knc, kw, r);
         qe_putc('|'); qe_putc(' ');
         grid_cells(vt, vnc, vw, r);
+        qe_trim();
         if (r + 1 < nr) qe_putc('\n');
         if (qe_done()) break;                    /* height cap hit — early exit */
     }
