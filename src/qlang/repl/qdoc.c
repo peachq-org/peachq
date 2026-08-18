@@ -78,12 +78,17 @@ void q_qdoc_memclose(FILE* f, char** buf, size_t* len) {
 }
 #endif
 
-/* Copy s into out without '\r' and with leading/trailing whitespace trimmed —
- * the spec's whitespace-insensitive compare (leading/trailing space, CRLF). */
+/* Copy s into out without '\r' and with trailing whitespace trimmed on EVERY line,
+ * plus leading whitespace at the head — the spec's whitespace-insensitive compare.
+ * Table rows pad to the rule width (kx) and a markdown golden cannot carry those blanks. */
 static void normalize(const char* s, char* out, size_t osz) {
     size_t j = 0;
-    for (size_t i = 0; s[i] && j + 1 < osz; i++)
-        if (s[i] != '\r') out[j++] = s[i];
+    for (size_t i = 0; s[i] && j + 1 < osz; i++) {
+        if (s[i] == '\r') continue;
+        if (s[i] == '\n')
+            while (j > 0 && (out[j-1] == ' ' || out[j-1] == '\t')) j--;
+        out[j++] = s[i];
+    }
     out[j] = '\0';
     while (j > 0 && (out[j-1] == ' ' || out[j-1] == '\t' || out[j-1] == '\n'))
         out[--j] = '\0';
