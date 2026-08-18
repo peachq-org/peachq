@@ -10,7 +10,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/repl/q_repl.h"
-#include "qlang/q_ctx.h"        /* the statement seam + the listener flag */
+#include "qlang/q_ctx.h"        /* the statement + console-teardown seams */
 #include "qlang/base/q_err.h"   /* q_err_text — full error text for console display */
 #include "qlang/parse/q_parse.h"
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
@@ -18,7 +18,7 @@
 #include "qlang/eval/q_view.h"   /* q_view_intercept — `x::e` at the line seam */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
-#include "qlang/ops/q_sys.h"      /* q_sys_is_cmd / q_sys_line / q_sys_prompt */
+#include "qlang/ops/q_sys.h"      /* q_sys_is_cmd / q_sys_line / q_sys_prompt / q_sys_listen_port */
 #include "app/term.h"       /* ray_term_* line editor + highlighter hook */
 #include "core/poll.h"      /* ray_poll_* — concurrent REPL + IPC event loop */
 #include "lang/eval.h"      /* ray_eval_is_interrupted */
@@ -380,14 +380,14 @@ static void repl_interactive(FILE* out, FILE* err) {
  *            processed with the same prompt/echo shape as the fgets loop so
  *            the transcript is unchanged.
  * `\\` / `exit x` terminate inside the eval (q_sys_exit — kdb: process exit).
- * EOF keeps the loop serving IPC when a listener is live, else exits. */
+ * With a listener live, a tty ^D KEEPS the console (soft eof) and a real stdin
+ * EOF keeps serving with stdin dropped; with none, either ends the session. */
 
 
 typedef struct {
     ray_term_t* term;            /* tty console; NULL in piped mode / after teardown */
     FILE*       out;
     FILE*       err;
-    int         have_listener;   /* EOF → keep serving instead of exiting */
     int         eof_done;        /* stdin EOF handled once (EPOLLIN and/or EPOLLHUP) */
     char        hist_path[4108];
     /* piped mode */
@@ -420,6 +420,16 @@ static void repl_console_close(void) {
     }
 }
 
+/* A stdin that is really GONE (a closed pipe, a dead tty): a LIVE `\p` listener
+ * keeps the process serving with stdin dropped from the poll, else the session
+ * ends.  Must stay a QUERY — a snapshot or a latch regresses to #40/#41. */
+static void poll_serve_or_exit(ray_poll_t* poll, int64_t sel_id) {
+    if (q_sys_listen_port() > 0)
+        ray_poll_deregister(poll, sel_id);
+    else
+        ray_poll_exit(poll, 0);
+}
+
 /* --- tty flavour: same callbacks shape as repl.c's repl_read/repl_on_data --- */
 
 static ray_t* poll_tty_read(ray_poll_t* poll, ray_selector_t* sel) {
@@ -442,24 +452,27 @@ static ray_t* poll_tty_read(ray_poll_t* poll, ray_selector_t* sel) {
             ray_term_prompt(t);
             return NULL;
         }
-        goto eof;
+        goto stdin_gone;   /* the tty itself died — re-prompting would spin */
     }
 
     {
         ray_t* line = ray_term_feed(t);
-        if (line == RAY_TERM_EOF)
-            goto eof;
-        return line;   /* complete line (or NULL: keep accumulating) */
+        if (line != RAY_TERM_EOF)
+            return line;   /* complete line (or NULL: keep accumulating) */
     }
 
-eof:
-    /* Ctrl-D: restore the terminal; with a live listener keep serving IPC
-     * clients (the historic REPL-then-serve shape), else exit the loop. */
+    /* ^D is a SOFT eof — a byte, not a closed fd, so the tty stays readable and a
+     * serving process keeps its console rather than being stranded with a live
+     * listener and no reader (feed already echoed the newline; `\\`/`exit` stay the
+     * real quit).  ^D ONLY: Windows idle-prompt ^C shares this sentinel to QUIT. */
+    if (t->input[0] == KEYCODE_CTRL_D && q_sys_listen_port() > 0) {
+        ray_term_begin(t);
+        return NULL;
+    }
+
+stdin_gone:
     poll_close_term(c);
-    if (c->have_listener)
-        ray_poll_deregister(poll, sel->id);
-    else
-        ray_poll_exit(poll, 0);
+    poll_serve_or_exit(poll, sel->id);
     return NULL;
 }
 
@@ -529,9 +542,9 @@ static void pipe_line(q_poll_repl_t* c, char* line, size_t n) {
 /* Single-home stdin-EOF handling.  Reached from BOTH a draining read()==0
  * (EPOLLIN) and a bare EPOLLHUP (an empty pipe whose writer closed reports HUP
  * with NO EPOLLIN, so the read_fn never runs — see poll_stdin_hup).  Flush any
- * partial final line, then a CLIENT (no listener) exits the poll loop while a
- * SERVER deregisters stdin and keeps serving IPC.  Idempotent via eof_done so an
- * EPOLLIN|EPOLLHUP event can't double-process (double prompt / double-free). */
+ * partial final line, then hand the disposition to poll_serve_or_exit.  Idempotent
+ * via eof_done so an EPOLLIN|EPOLLHUP event can't double-process (double prompt
+ * / double-free). */
 static void poll_stdin_eof(ray_poll_t* poll, ray_selector_t* sel, q_poll_repl_t* c) {
     if (c->eof_done) return;
     c->eof_done = 1;
@@ -542,10 +555,7 @@ static void poll_stdin_eof(ray_poll_t* poll, ray_selector_t* sel, q_poll_repl_t*
     }
     fputc('\n', c->out);   /* fgets loop prints '\n' after the EOF prompt */
     fflush(c->out);
-    if (!c->have_listener && !q_ctx_listener_active())
-        ray_poll_exit(poll, 0);
-    else
-        ray_poll_deregister(poll, sel->id);   /* keep serving IPC (has a listener) */
+    poll_serve_or_exit(poll, sel->id);
 }
 
 /* stdin hangup handler (registered as the stdin selector's error_fn).  The
@@ -697,14 +707,12 @@ static int repl_tty_dbg_read(const char* prompt, char* buf, size_t cap) {
     return out;
 }
 
-int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err,
-                    int stdin_tty, int have_listener) {
+int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err, int stdin_tty) {
     q_ctx_set_console_close(repl_console_close);
     q_poll_repl_t* c = &g_q_poll_repl;
     memset(c, 0, sizeof *c);
     c->out = out;
     c->err = err;
-    c->have_listener = have_listener;
 
     ray_poll_reg_t reg = {0};
     reg.fd       = STDIN_FILENO;

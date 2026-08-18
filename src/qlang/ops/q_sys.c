@@ -19,7 +19,7 @@
 #include "qlang/eval/q_eval.h" /* q_eval / q_eval_dot_wrap — timing + .Q.ts */
 #include "qlang/q_fmt.h"      /* q_fmt_set_prec/q_fmt_prec (`\P`) */
 #include "qlang/q_console.h"  /* q_console_str/reset (timed-expr side effects); q_console_pipe_* (`\classic`) */
-#include "qlang/q_ctx.h"           /* the engine context: `\l` source seam, listener flag, console teardown */
+#include "qlang/q_ctx.h"           /* the engine context: `\l` source seam, console teardown */
 #include "qlang/io/q_io.h"    /* q_io_mkdir_parents — `\1`/`\2` create the path they name */
 #include "qlang/q_pq.h"       /* q_pq_load — the `\l pq` embedded-stdlib gate */
 #include "qlang/q_env.h"      /* q_env_ctx_set/_ctx + q_env_ns_names — `\d` and the `\v`/`\f`/`\a` rosters */
@@ -383,7 +383,6 @@ uint16_t q_sys_listen(uint16_t port) {
     if (g_listen_sel >= 0) ray_poll_deregister(poll, g_listen_sel);
     g_listen_sel  = sel;
     g_listen_port = bound;                               /* authoritative — `system "p"` reports it */
-    q_ctx_mark_listener_active();                       /* keep the process alive past stdin EOF */
     return bound;
 }
 
@@ -397,9 +396,9 @@ uint16_t q_sys_listen_port(void) { return (uint16_t)g_listen_port; }
  *   `\p 0`             -> stop listening: deregister the live listener selector
  *                        (fires ipc_on_close -> closes the fd), reset to 0.
  *   `\p N` (1..65535)  -> bind a kdb-protocol IPC listener on the runtime event
- *                        poll; the unified REPL loop (q_repl.c) serves it, and
- *                        q_ctx_mark_listener_active keeps the process alive past
- *                        stdin EOF (a client that `\p`s a port becomes a server).
+ *                        poll; the unified REPL loop (q_repl.c) serves it and
+ *                        reads this state at stdin EOF, so a client that `\p`s a
+ *                        port becomes a server and a `\p 0` stops being one.
  *   `\p 0W`            -> bind any OS-chosen free port, read it back via
  *                        getsockname and record it (mirrors startup `-p 0W`,
  *                        qmain.c — both call q_sys_listen) — what lets
@@ -696,9 +695,8 @@ static ray_t* h_t(const char* arg, size_t alen, const char* rest, size_t restlen
      * or an interactive/piped REPL (q_repl_run_poll → ray_poll_run pumps the
      * heap between reads).  A headless, listener-less process (`q script.q
      * </dev/null` with no `-p`) exits at end-of-input rather than blocking a
-     * server-only loop with nothing to serve — never a hang.  (Reusing the
-     * irreversible listener-active flag OR a timer-keepalive both stranded a
-     * `\t N`→`\t 0` process in an idle serve loop — codex r1/r2.) */
+     * server-only loop with nothing to serve — never a hang.  (A timer-keepalive
+     * stranded a `\t N`→`\t 0` process in an idle serve loop — codex r1/r2.) */
     return NULL;                                         /* silent */
 }
 
