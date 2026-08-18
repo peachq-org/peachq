@@ -337,8 +337,10 @@ static const q_op_t Q_OPS[] = {
     { "mcount",QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mcount", q_mcount_wrap), NULL, 1, 0, "map", NULL },
     { "mdev",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mdev", q_mdev_wrap), NULL, 1, 0, "map", NULL },
     { "ema",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("ema", q_ema_wrap), NULL, 1, 0, "map", NULL },
-    /* mmu owns its own shape logic (family none, like `@`/`.`). */
+    /* mmu/inv/lsq own their own shape logic (family none, like `@`/`.`). */
     { "mmu",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("mmu", q_mmu_wrap), NULL, 1, 0, "none", NULL },
+    { "inv",   QLEX_KW_PREFIX, QR_FN1("inv", q_inv_wrap),      QR_NONE,           NULL, 1, 0, "none", NULL },
+    { "lsq",   QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("lsq", q_lsq_wrap), NULL, 1, 0, "none", NULL },
     { "over",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("over", q_hof_nyi_wrap), "fold", 1, 0, "none", NULL },
     { "scan",  QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("scan-kw", q_hof_nyi_wrap), "scan", 1, 0, "none", NULL },
     { "prior", QLEX_KW_INFIX,  QR_NONE,                        QR_FN2("prior", q_hof_nyi_wrap), "prior", 1, 0, "none", NULL },
