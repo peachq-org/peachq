@@ -839,10 +839,15 @@ static void tls_hs_settle(ray_poll_t* poll, ray_selector_t* sel,
  * and says nothing costs an idle fd until the sweep, not a stalled server. */
 static ray_t* ipc_read_tls(ray_poll_t* poll, ray_selector_t* sel)
 {
+    /* The sweep may deregister — and free — THIS selector (our own deadline
+     * expired while we sat unreadable).  Re-validate by saved id, never through
+     * the pointer being validated (the epoll.c ray_poll_run idiom). */
+    int64_t id = sel->id;
+    tls_hs_sweep(poll);
+    if (id < 0 || (uint32_t)id >= poll->n_sels || !poll->sels[id]) return NULL;
+    sel = poll->sels[id];
     ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
     ray_sock_t fd = (ray_sock_t)sel->fd;
-    tls_hs_sweep(poll);
-    if (!poll->sels[sel->id]) return NULL;      /* our own deadline expired */
 
     if (q_tls_server_mode() == 1 && !cd->tls_decided) {
         int k = q_tls_server_sniff(fd);
