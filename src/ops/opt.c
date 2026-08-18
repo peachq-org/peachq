@@ -284,6 +284,8 @@ static ray_op_ext_t* ensure_ext_node(ray_graph_t* g, uint32_t node_id) {
     return ext;
 }
 
+int ray_cmp_tol_eq(double x, double y);   /* src/ops/cmp.c (decl: lang/eval.h) */
+
 static bool atom_to_numeric(ray_t* v, double* out_f, int64_t* out_i, bool* is_f64) {
     if (!v || !ray_is_atom(v)) return false;
     if (RAY_ATOM_IS_NULL(v)) return false;
@@ -465,14 +467,18 @@ static bool fold_binary_const(ray_graph_t* g, ray_op_t* node) {
                in executor. */
             double lv = l_is_f64 ? lf : (double)li;
             double rv = r_is_f64 ? rf : (double)ri;
+            /* float-lane folds share the comparison tolerance (cmp.c) so a folded
+             * predicate agrees with the eager kernels; integer folds stay exact */
+            bool tp = l_is_f64 || r_is_f64;
+            bool te = tp && ray_cmp_tol_eq(lv, rv);
             bool r = false;
             switch (node->opcode) {
-                case OP_EQ:  r = lv == rv; break;
-                case OP_NE:  r = lv != rv; break;
-                case OP_LT:  r = lv < rv; break;
-                case OP_LE:  r = lv <= rv; break;
-                case OP_GT:  r = lv > rv; break;
-                case OP_GE:  r = lv >= rv; break;
+                case OP_EQ:  r = tp ? te : lv == rv; break;
+                case OP_NE:  r = tp ? !te : lv != rv; break;
+                case OP_LT:  r = lv < rv && !te; break;
+                case OP_LE:  r = lv <= rv || te; break;
+                case OP_GT:  r = lv > rv && !te; break;
+                case OP_GE:  r = lv >= rv || te; break;
                 case OP_AND: r = (lv != 0.0) && (rv != 0.0); break;
                 case OP_OR:  r = (lv != 0.0) || (rv != 0.0); break;
                 default: return false;
