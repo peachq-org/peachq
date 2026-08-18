@@ -483,7 +483,7 @@ int q_tls_server_sniff(ray_sock_t fd) {
     uint8_t b = 0;
     int64_t n = ray_sock_peek(fd, &b, 1);
     if (n < 0) return -1;                       /* EAGAIN — nothing readable yet */
-    if (n == 0) return 0;                       /* peer closed: let plain see EOF */
+    if (n == 0) return 0;                       /* peer closed: no ClientHello, caller decides */
     return b == TLS_RECORD_HANDSHAKE;
 }
 

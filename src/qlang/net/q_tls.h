@@ -35,9 +35,9 @@ int q_tls_server_handshake(ray_sock_t fd, void** state);
  * A COMPLETED session is owned by the overlay and freed by ray_sock_close. */
 void q_tls_server_handshake_abort(void** state);
 
-/* `-E 1` serves both, so the first byte decides (a TLS record header, RFC 8446).
+/* Both non-zero `-E` modes decide on the first byte (a TLS record header, RFC 8446).
  * Peeks without consuming: -1 = nothing readable yet (wait for another event),
- * 0 = speak plain, 1 = speak TLS. */
+ * 0 = not a ClientHello — `-E 1` speaks plain, `-E 2` refuses — 1 = speak TLS. */
 int q_tls_server_sniff(ray_sock_t fd);
 
 ray_t* q_tls_info(void);              /* `(-26!)[]`      — basics/internal.md:350 */
