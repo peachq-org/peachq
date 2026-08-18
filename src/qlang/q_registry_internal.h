@@ -42,11 +42,15 @@ ray_t* q_mmin_wrap(ray_t* n, ray_t* x);
 ray_t* q_mcount_wrap(ray_t* n, ray_t* x);
 ray_t* q_mdev_wrap(ray_t* n, ray_t* x);
 ray_t* q_ema_wrap(ray_t* a, ray_t* x);
-ray_t* q_mmu_wrap(ray_t* x, ray_t* y);                        /* matrix multiply / dot product — used by: math, dollar */
-enum { QMMU_BAD = -1, QMMU_RAGGED = -2 };                     /* RAGGED is mmu-shaped: mmu owns its 'length */
-int q_mmu_class(ray_t* v, int64_t* first);                    /* 0 vec, 1 matrix, else QMMU_*; *first = count(-first) — used by: dollar */
 ray_t* q_sum_wrap(ray_t* x);
 ray_t* q_avg_wrap(ray_t* x);
+
+/* ---- defined in ops/q_math.c (float-matrix verbs) ---- */
+ray_t* q_mmu_wrap(ray_t* x, ray_t* y);                        /* matrix multiply / dot product — used by: math, dollar */
+ray_t* q_inv_wrap(ray_t* x);                                  /* matrix inverse (LU, partial pivoting) */
+ray_t* q_lsq_wrap(ray_t* x, ray_t* y);                        /* least squares (normal equations, Cholesky) */
+enum { QMMU_BAD = -1, QMMU_RAGGED = -2 };                     /* RAGGED is mmu-shaped: mmu owns its 'length */
+int q_mmu_class(ray_t* v, int64_t* first);                    /* 0 vec, 1 matrix, else QMMU_*; *first = count(-first) — used by: dollar */
 
 /* ---- defined in q_builtins.c ---- */
 /* 'nyi recipe stub (rule 3: rows keep their spellings).  q_hof_nyi_wrap:
