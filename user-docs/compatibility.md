@@ -37,6 +37,6 @@ one that only the interpreter can evaluate.
 - A trailing empty parameter (`{[x;]x}`) is not accepted; write the arity you mean.
 - Argument validation on entry is expressed as a **type** in the signature where a type suffices, and as an
   ordinary check in the body where it does not.
-- `test/q/extracted/basics/pattern.qcmd` is extracted from the kx documentation, so it covers the whole feature.
+- peachq's pattern-matching suite is extracted from the kx documentation, so it covers the whole feature.
   The rows for the unsupported forms are commented out rather than left red — a permanent red row asserts we
   intend to fix something, and here we do not. The remaining rows still run.
