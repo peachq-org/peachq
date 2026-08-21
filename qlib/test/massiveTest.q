@@ -3,7 +3,7 @@
 / suite fails and names it. Deliberately no fixture and no offline mode — a stored payload proves
 / only that we still parse the bytes captured last month. Endpoints, against the published Massive
 / REST reference: /v1/marketstatus/now, /v2/aggs/ticker/{t}/range, /v3/reference/tickers. The
-/ offline laws of .massive are pinned by test/q/massive/*.qcmd against a stubbed transport.
+/ offline laws of .massive are pinned by their own suites against a stubbed transport.
 system "d .massiveTest";
 
 / a length, never the key: assertThat prints `actual` into the report. It is also this namespace's

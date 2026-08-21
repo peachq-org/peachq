@@ -1,6 +1,6 @@
 / .path conformance: lexical path structure, and never storage.  Every assertion here is pure text
 / manipulation — no test creates, reads or removes a file, and no path below needs to exist.
-/ Sources: actionable-plans/2026-08-13-peachq-path-fs-safe-v1.md, and pathlib's parent/name/stem/suffix rules.
+/ Sources: the peachq .path/.fs safe-v1 design notes, and pathlib's parent/name/stem/suffix rules.
 / Errors are asserted by CLASS through assertThrows, never by pinning a stack trace.
 system "d .pathTest";
 
