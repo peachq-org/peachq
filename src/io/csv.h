@@ -53,7 +53,7 @@ typedef enum {
 } csv_type_t;
 
 /* Schema-only marker: the `INT` schema token resolves to this tag in the
- * RAY-type space carried by a `.csv.{read,splayed,parted}` schema vector.
+ * RAY-type space carried by a `.csv.read` schema vector.
  * It is NEVER a runtime vec type — before any column is allocated it is
  * replaced (csv.c) by the concrete narrowest width csv_resolve_int_width
  * picks for the column.  Value is distinct from every real RAY type
@@ -73,15 +73,6 @@ ray_t* ray_read_csv_opts(const char* path, char delimiter, bool header,
 ray_t* ray_read_csv_named_opts(const char* path, char delimiter, bool header,
                                const int8_t* col_types, int32_t n_types,
                                const int64_t* col_names, int32_t n_names);
-ray_err_t ray_csv_save_parted_named_opts(const char* path, char delimiter, bool header,
-                                         const int8_t* col_types, int32_t n_types,
-                                         const int64_t* col_names, int32_t n_names,
-                                         const char* root, const char* table_name,
-                                         int64_t rows_per_part);
-ray_err_t ray_csv_save_splayed_named_opts(const char* path, char delimiter, bool header,
-                                          const int8_t* col_types, int32_t n_types,
-                                          const int64_t* col_names, int32_t n_names,
-                                          const char* dir, int64_t rows_per_chunk);
 ray_err_t ray_write_csv(ray_t* table, const char* path);
 
 #endif /* RAY_CSV_H */
