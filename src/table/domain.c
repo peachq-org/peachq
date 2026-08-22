@@ -477,7 +477,7 @@ static bool dom_extend_from_file_locked(ray_sym_domain_t* d, size_t st_size) {
             if (lut) {
                 if (!dom_retire(d, lut)) {
                     fprintf(stderr, "rayforce: sym domain '%s': OOM retiring "
-                                    "runtime LUT after external extend — cannot "
+                                    "runtime LUT after external extend - cannot "
                                     "keep id translation consistent\n",
                             d->path ? d->path : "?");
                     abort();
@@ -821,7 +821,7 @@ static int64_t dom_append_locked(ray_sym_domain_t* d, uint32_t h,
     if (lut) {
         if (!dom_retire(d, lut)) {
             fprintf(stderr, "rayforce: sym domain '%s': OOM retiring runtime "
-                            "LUT after append — cannot keep id translation "
+                            "LUT after append - cannot keep id translation "
                             "consistent\n", d->path ? d->path : "?");
             abort();
         }

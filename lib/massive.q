@@ -1,4 +1,4 @@
-/ massive.q — q wrapper over the Massive market-data REST API.  \l lib/massive.q
+/ massive.q - q wrapper over the Massive market-data REST API.  \l lib/massive.q
 / Paths are passed WHOLE by the caller (the live surface mixes /v1, /v2 and /v3),
 / so no version prefix is ever baked into the transport.
 
@@ -45,7 +45,7 @@
 / THE ragged law, and its only home: uniform tables become one table over the union
 / of their columns, missing cells filled with the column's own null.  Ragged rows
 / within a page and ragged pages within a walk are the same irregularity at two
-/ granularities, so both come here — it cannot be right at one and wrong at the other.
+/ granularities, so both come here - it cannot be right at one and wrong at the other.
 .massive.i.mcol:{[ts;k]
   tpl:first 0#(first ts where {[k;t] k in cols t}[k] each ts)k;
   raze {[k;tpl;t] $[k in cols t;t k;count[t]#tpl]}[k;tpl] each ts};
@@ -72,7 +72,7 @@
   if[0=count k; :.massive.coerce r];
   .massive.coerce .massive.i.page r first k};
 
-/ Epoch coercion, one name list.  Aggregates carry ms, snapshots ns — told apart
+/ Epoch coercion, one name list.  Aggregates carry ms, snapshots ns - told apart
 / by magnitude, not by endpoint.  ISO strings arrive under a *_utc name.
 .massive.tcols:`t`updated;
 .massive.i.ns:1000000000000000;
@@ -103,7 +103,7 @@
 .massive.fetch:{[x] .massive.convert .massive.i.raw x};
 
 / next_url is followed internally into ONE table.  `max`/`maxpages` bound the pages
-/ FETCHED, never the rows KEPT — a page that arrived whole is returned whole, so the
+/ FETCHED, never the rows KEPT - a page that arrived whole is returned whole, so the
 / result may exceed `max` and an unpaginated response is never sliced.
 .massive.defaults:`max`maxpages!(10000;10);
 .massive.i.ctl:`max`maxpages;
@@ -118,7 +118,7 @@
 / Every walk exit reports through here, so `truncated` is ALWAYS readable after one.
 .massive.i.done:{[tr;n]
   .massive.envelope::.massive.envelope,(enlist `truncated)!enlist tr;
-  if[tr; -2 "massive: stopped after ",(string n)," page(s) with a next_url outstanding — it is in .massive.envelope"];};
+  if[tr; -2 "massive: stopped after ",(string n)," page(s) with a next_url outstanding - it is in .massive.envelope"];};
 
 .massive.i.walk:{[x;o]
   r:.massive.i.raw x;
