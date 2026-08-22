@@ -1,5 +1,5 @@
 / .path conformance: lexical path structure, and never storage.  Every assertion here is pure text
-/ manipulation — no test creates, reads or removes a file, and no path below needs to exist.
+/ manipulation - no test creates, reads or removes a file, and no path below needs to exist.
 / Sources: the peachq .path/.fs safe-v1 design notes, and pathlib's parent/name/stem/suffix rules.
 / Errors are asserted by CLASS through assertThrows, never by pinning a stack trace.
 system "d .pathTest";
@@ -7,7 +7,7 @@ system "d .pathTest";
 testPathAcceptsEveryInputForm:{
     .qunit.assertEquals[.path.path "foo/bar.csv"; `:foo/bar.csv; "a string becomes a path"];
     .qunit.assertEquals[.path.path `foo/bar.csv; `:foo/bar.csv; "a plain symbol becomes a path"];
-    .qunit.assertEquals[.path.path `:foo/bar.csv; `:foo/bar.csv; "a path is already a path — conversion is idempotent"];
+    .qunit.assertEquals[.path.path `:foo/bar.csv; `:foo/bar.csv; "a path is already a path - conversion is idempotent"];
     .qunit.assertEquals[.path.path "a"; `:a; "a one-character string is a path, not a char atom"];
     .qunit.assertEquals[.path.path "c"; `:c; "a char atom is a path too"];
     .qunit.assertEquals[type .path.path "foo/bar.csv"; -11h; "the canonical value is a symbol atom"]};
@@ -48,7 +48,7 @@ testWindowsDrivePathSurvivesEveryFunction:{
 / "c:" carrying a trailing slash.  Telling a drive from a directory needs a <letter>: heuristic, which is
 / the very shape rule 2 forbids, so v1 pins this reading rather than special-casing the separator.
 testBareDriveRootReadsAsADirectoryName:{
-    / `c: cannot be WRITTEN as a symbol literal — a trailing colon ends the token — so it is built.
+    / `c: cannot be WRITTEN as a symbol literal - a trailing colon ends the token - so it is built.
     .qunit.assertEquals[.path.string `:c:/; "c:/"; "the text is carried through untouched"];
     .qunit.assertEquals[.path.name `:c:/; `$"c:"; "the drive letter reads as the final component"];
     .qunit.assertEquals[.path.parent `:c:/; `:.; "and so it parents as a bare name, not as a root"]};
@@ -106,7 +106,7 @@ testEdgeShapes:{
     .qunit.assertEquals[.path.stem `:data/README; `README; "a suffixless name is all stem"];
     .qunit.assertEquals[.path.suffix `:data/archive.tar.gz; `.gz; "only the LAST dot makes the suffix"];
     .qunit.assertEquals[.path.stem `:data/archive.tar.gz; `archive.tar; "the earlier dots stay in the stem"];
-    .qunit.assertEquals[.path.suffix `:data/.bashrc; `; "a leading dot is not a suffix — pathlib's rule"];
+    .qunit.assertEquals[.path.suffix `:data/.bashrc; `; "a leading dot is not a suffix - pathlib's rule"];
     .qunit.assertEquals[.path.stem `:data/.bashrc; `.bashrc; "a dotfile is all stem"];
     .qunit.assertEquals[.path.suffix `:data/x.; `; "a trailing dot is not a suffix either"];
     .qunit.assertEquals[.path.name `:data/trades/; `trades; "a trailing slash does not make an empty name"];
@@ -116,7 +116,7 @@ testEdgeShapes:{
 
 testRoot:{
     .qunit.assertEquals[.path.path "/"; `:/; "the root converts"];
-    .qunit.assertEquals[.path.string `:/; enlist "/"; "the root is one slash — a one-character STRING, not the char atom"];
+    .qunit.assertEquals[.path.string `:/; enlist "/"; "the root is one slash - a one-character STRING, not the char atom"];
     .qunit.assertEquals[.path.parent `:/; `:/; "the root is its own parent"];
     .qunit.assertEquals[.path.name `:/; `; "the root has no name"];
     .qunit.assertEquals[.path.stem `:/; `; "the root has no stem"];
@@ -143,7 +143,7 @@ testJoin:{
     .qunit.assertEquals[.path.join (`:data;"trades";`quotes.csv); `:data/trades/quotes.csv; "mixed forms join"];
     .qunit.assertEquals[.path.join `:data`trades; `:data/trades; "a symbol vector is a component sequence"];
     .qunit.assertEquals[.path.join enlist `:data; `:data; "one component joins to itself"];
-    .qunit.assertEquals[.path.join enlist `:/; `:/; "one component keeps the root — its slash is the path, not a separator"];
+    .qunit.assertEquals[.path.join enlist `:/; `:/; "one component keeps the root - its slash is the path, not a separator"];
     .qunit.assertEquals[.path.join enlist `:c:/; `:c:/; "one component keeps a drive root the same way"];
     .qunit.assertEquals[.path.join (`:data/;`trades); `:data/trades; "a trailing slash does not double up"];
     .qunit.assertEquals[.path.join (`:data;`;`trades); `:data/trades; "an empty component collapses away"];
@@ -154,10 +154,10 @@ testJoin:{
 testLexicalOnly:{
     .qunit.assertEquals[.path.parent `:no/such/dir/file.csv; `:no/such/dir; "a nonexistent path still has a parent"];
     .qunit.assertEquals[.path.suffix `:no/such/file.csv; `.csv; "a nonexistent path still has a suffix"];
-    / `:~/… cannot be WRITTEN as a symbol literal — ~ ends the token — so the expected value is built.
-    .qunit.assertEquals[.path.path "~/notes.txt"; `$":~/notes.txt"; "~ is left alone — no expansion"];
+    / `:~/... cannot be WRITTEN as a symbol literal - ~ ends the token - so the expected value is built.
+    .qunit.assertEquals[.path.path "~/notes.txt"; `$":~/notes.txt"; "~ is left alone - no expansion"];
     .qunit.assertEquals[.path.name `$":~/notes.txt"; `notes.txt; "~ is an ordinary component"];
-    .qunit.assertEquals[.path.path "a/../b"; `:a/../b; "..  is left alone — no normalisation"];
+    .qunit.assertEquals[.path.path "a/../b"; `:a/../b; "..  is left alone - no normalisation"];
     .qunit.assertEquals[.path.name `:a/../b; `b; ".. is an ordinary component"];
     .qunit.assertEquals[.path.parent `:a/../b; `:a/..; "parent does not resolve .."];
     .qunit.assertEquals[.path.path "b.csv"; `:b.csv; "a relative path is never made absolute"];

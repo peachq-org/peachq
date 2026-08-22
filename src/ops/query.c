@@ -5748,7 +5748,7 @@ by_dict_done:
             if (!pred) {
                 ray_graph_free(g); ray_release(tbl);
                 return ray_error("domain",
-                    "WHERE predicate not supported by DAG compiler — "
+                    "WHERE predicate not supported by DAG compiler - "
                     "most common causes: arity mismatch "
                     "(e.g. `(in v)` instead of `(in col v)`), "
                     "unknown function name, unsupported special form, "
@@ -5969,7 +5969,7 @@ by_dict_done:
                 ray_sys_free(nearest_query_owned);
                 ray_graph_free(g); ray_release(tbl);
                 return ray_error("limit",
-                    "nearest: implicit projection exceeds 255 source columns — "
+                    "nearest: implicit projection exceeds 255 source columns - "
                     "specify output columns explicitly");
             }
             if (src_ncols > 0) {

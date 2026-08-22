@@ -5,7 +5,7 @@
 system "d .qunitTest";
 
 / doCheck THROWS on a failed check AND leaves failFlag set, so an assertion that
-/ must FAIL can only be observed by switching the throw off — and both globals
+/ must FAIL can only be observed by switching the throw off - and both globals
 / have to be put back, or this test's own verdict is the one that changes.
 didFail:{[assertion]
     ie:.qunit.ignoreAllExceptions; ff:.qunit.failFlag;

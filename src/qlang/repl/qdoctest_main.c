@@ -119,7 +119,7 @@ static void run_dir_enter(const char* argv0) {
     /* Silence here would leave the corpus running in the caller's cwd, dropping
      * fixture litter into the checkout — the whole defect this resolves. */
     if (!g_run[0]) {
-        fprintf(stderr, "qdoctest: cannot resolve the scratch cwd — running in %s, "
+        fprintf(stderr, "qdoctest: cannot resolve the scratch cwd - running in %s, "
                         "fixtures will land there\n", g_cwd);
         return;
     }

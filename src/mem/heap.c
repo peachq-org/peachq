@@ -1469,7 +1469,7 @@ void ray_heap_init(void) {
      * heap never came up.  Make both init failure modes loud. */
     if (!h) {
         fprintf(stderr, "ray_heap_init: ray_vm_alloc(%zu) failed (errno=%d %s) "
-                        "— heap not initialized\n",
+                        "- heap not initialized\n",
                 heap_sz, errno, strerror(errno));
         return;
     }
@@ -1479,7 +1479,7 @@ void ray_heap_init(void) {
     int id = heap_id_acquire();
     if (id < 0) {
         fprintf(stderr, "ray_heap_init: heap-ID pool exhausted "
-                        "— heap not initialized\n");
+                        "- heap not initialized\n");
         ray_vm_free(h, heap_sz);
         return;  /* ID pool exhausted */
     }

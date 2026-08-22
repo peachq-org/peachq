@@ -1001,8 +1001,10 @@ static int64_t qp_take(ray_t* t, qp_col* cs, int64_t at, int64_t max) {
 }
 
 /* Flatten val to columns (keyed table = key cols then value cols, one grid).
- * Returns the count TAKEN (<= max). */
-static int64_t qp_gather(ray_t* val, qp_col* cs, int64_t max, int64_t* nrows) {
+ * Returns the count TAKEN (<= max); *nkey = how many of those are KEY columns,
+ * already capped by max because it IS the key qp_take's return. */
+static int64_t qp_gather(ray_t* val, qp_col* cs, int64_t max, int64_t* nrows, int64_t* nkey) {
+    *nkey = 0;
     if (val->type == RAY_TABLE) {
         *nrows = ray_table_nrows(val);
         return qp_take(val, cs, 0, max);
@@ -1011,7 +1013,9 @@ static int64_t qp_gather(ray_t* val, qp_col* cs, int64_t max, int64_t* nrows) {
     ray_t* vv = ray_dict_vals(val);                  /* borrowed */
     int64_t kn = ray_table_nrows(kk), vn = ray_table_nrows(vv);
     *nrows = kn < vn ? kn : vn;
-    return qp_take(vv, cs, qp_take(kk, cs, 0, max), max);
+    int64_t nk = qp_take(kk, cs, 0, max);
+    *nkey = nk;
+    return qp_take(vv, cs, nk, max);
 }
 
 static void qp_widths(qp_col* cs, int64_t nc, int64_t shown, int* w) {
@@ -1190,11 +1194,14 @@ static int qp_digest(qp_col* cs, int64_t nc, int64_t nr, int32_t cols,
 
 /* ---- render -------------------------------------------------------------- */
 
-static void qp_bar(char* line, size_t lsz, const int* w, int64_t nc) {
+/* The rule line is the ONLY place a keyed table's key boundary shows: `=` fills
+ * the key columns, `-` the value columns, junctions stay `|` (owner ruling). */
+static void qp_bar(char* line, size_t lsz, const int* w, int64_t nc, int64_t nk) {
     size_t p = 0;
     if (p + 1 < lsz) line[p++] = '|';
     for (int64_t c = 0; c < nc; c++) {
-        for (int k = 0; k < w[c] + 2 && p + 1 < lsz; k++) line[p++] = '-';
+        char fill = c < nk ? '=' : '-';
+        for (int k = 0; k < w[c] + 2 && p + 1 < lsz; k++) line[p++] = fill;
         if (p + 1 < lsz) line[p++] = '|';
     }
     line[p] = '\0';
@@ -1219,8 +1226,8 @@ static void fmt_pipe_render(ray_t* val, char* buf, size_t bufsz) {
     int32_t cols = armed ? ccols : 0;
 
     qp_col  cs[QP_MAXCOL];
-    int64_t nr = 0;
-    int64_t nc = qp_gather(val, cs, QP_MAXCOL, &nr);
+    int64_t nr = 0, nk = 0;
+    int64_t nc = qp_gather(val, cs, QP_MAXCOL, &nr, &nk);
     if (nc <= 0) { qp_line(&o, "+`!()", cols); return; }
 
     /* Budget (spec decision 4): the WHOLE render fits `\c` rows, so the digest
@@ -1250,7 +1257,7 @@ static void fmt_pipe_render(ray_t* val, char* buf, size_t bufsz) {
     qp_cells(line, sizeof line, cells, w, nc);
     qp_line(&o, line, cols);
 
-    qp_bar(line, sizeof line, w, nc);
+    qp_bar(line, sizeof line, w, nc, nk);
     qp_line(&o, line, cols);
 
     for (int64_t r = 0; r < shown; r++) {

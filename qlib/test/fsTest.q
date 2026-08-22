@@ -1,6 +1,6 @@
 / .fs conformance: the read-safe filesystem subset, plus deletion bounded to the ONE object named.  The fixture is
 / rebuilt before every test and swept away after it, so the suite is order-independent and safe to reload.  It is
-/ built with `set` and `0:` and torn down with `hdel`, all standard kdb — nothing here calls .fs to test .fs.
+/ built with `set` and `0:` and torn down with `hdel`, all standard kdb - nothing here calls .fs to test .fs.
 / Errors are asserted by CLASS through assertThrows, never by pinning a stack trace.
 system "d .fsTest";
 
@@ -21,7 +21,7 @@ newdir:{[dir]
     {@[hdel;x;::]} each .fsTest.entries dir;
     dir};
 
-/ bottom-up removal, two levels deep — the fixture's depth.  Every hdel is trapped because a test may already have
+/ bottom-up removal, two levels deep - the fixture's depth.  Every hdel is trapped because a test may already have
 / deleted part of the tree, and the sweep must not care which.
 wipe:{[root]
     kids:.fsTest.entries root;
@@ -37,7 +37,7 @@ setUpTree:{
 tearDownTree:{.fsTest.wipe .fsTest.ROOT};
 
 / THE distinction the whole namespace rests on.  An empty directory and a missing path are BOTH empty, and only their
-/ TYPE tells them apart — so a `0=count key p` implementation would report the empty directory as missing.
+/ TYPE tells them apart - so a `0=count key p` implementation would report the empty directory as missing.
 testEmptyDirectoryIsNotMissing:{
     .qunit.assertEquals[type key .fsTest.EMPTY; 11h; "an empty directory keys to a TYPED empty"];
     .qunit.assertEquals[key .fsTest.EMPTY; `symbol$(); "and that typed empty is `symbol$()"];
@@ -81,7 +81,7 @@ testSize:{
 testRemoveDeletesOneFile:{
     .qunit.assertEquals[.fs.remove .fsTest.FILE; .fsTest.FILE; "a file is removed, and hdel answers its path"];
     .qunit.assertEquals[.fs.exists .fsTest.FILE; 0b; "so the file is gone"];
-    .qunit.assertTrue[.fs.isfile .fsTest.OTHER; "its neighbour is untouched — remove deletes the ONE object named"];
+    .qunit.assertTrue[.fs.isfile .fsTest.OTHER; "its neighbour is untouched - remove deletes the ONE object named"];
     .qunit.assertThrows[.fs.remove; .fsTest.GONE; "io*"; "a missing path is hdel's own 'io"]};
 
 / THE row: this is what fails if anyone ever makes remove recursive.  A populated directory must survive intact, and
@@ -90,7 +90,7 @@ testRemoveNeverDestroysADirectory:{
     .qunit.assertThrows[.fs.remove; .fsTest.FULL; "domain*"; "a POPULATED directory is refused"];
     .qunit.assertTrue[.fs.isdir .fsTest.FULL; "and it survives"];
     .qunit.assertEquals[asc key .fsTest.FULL; asc `note.txt`other.txt; "with every one of its files still in it"];
-    .qunit.assertThrows[.fs.remove; .fsTest.EMPTY; "domain*"; "an EMPTY directory is refused too — remove is the file verb"];
+    .qunit.assertThrows[.fs.remove; .fsTest.EMPTY; "domain*"; "an EMPTY directory is refused too - remove is the file verb"];
     .qunit.assertTrue[.fs.isdir .fsTest.EMPTY; "and it survives as well"]};
 
 testRmdir:{
@@ -99,7 +99,7 @@ testRmdir:{
     .qunit.assertThrows[.fs.rmdir; .fsTest.FULL; "io*"; "a POPULATED directory is hdel's own 'io, passed through"];
     .qunit.assertTrue[.fs.isdir .fsTest.FULL; "and it survives intact"];
     .qunit.assertEquals[asc key .fsTest.FULL; asc `note.txt`other.txt; "with its files untouched"];
-    .qunit.assertThrows[.fs.rmdir; .fsTest.FILE; "domain*"; "a file is refused — rmdir is the directory verb"];
+    .qunit.assertThrows[.fs.rmdir; .fsTest.FILE; "domain*"; "a file is refused - rmdir is the directory verb"];
     .qunit.assertTrue[.fs.isfile .fsTest.FILE; "and the file survives"];
     .qunit.assertThrows[.fs.rmdir; .fsTest.GONE; "io*"; "a missing path is hdel's own 'io"]};
 
@@ -120,7 +120,7 @@ testEveryInputFormCoerces:{
     .qunit.assertTrue[.fs.isdir "fsTestTree"; "a string"];
     .qunit.assertEquals[.fs.isdir ("fsTestTree";`fsTestTree); 11b; "a mixed list, elementwise"];
     .qunit.assertEquals[.fs.size "fsTestTree/full/note.txt"; 6; "a string reaches the same file a path does"];
-    .qunit.assertThrows[.fs.exists; 42; "type*"; "a long is not path-like — .path.path's own refusal"]};
+    .qunit.assertThrows[.fs.exists; 42; "type*"; "a long is not path-like - .path.path's own refusal"]};
 
 / Inherited from .path.path and not re-implemented here: a provider handle and a scheme URL are different KINDS of
 / object, which lexical path rules corrupt silently.

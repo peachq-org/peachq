@@ -1,15 +1,15 @@
-/ FFI conformance: the .ffi namespace — the KX ffikdb surface over libffi.
+/ FFI conformance: the .ffi namespace - the KX ffikdb surface over libffi.
 / Sources: user-docs/ffi.md and the published ffikdb corpus, adapted.
-/ PORTABILITY: portable q SYNTAX, and a conformance spec in the #459 sense — it
+/ PORTABILITY: portable q SYNTAX, and a conformance spec in the #459 sense - it
 / states the contract .ffi must satisfy, so it names .ffi as freely as
 / regexpTest.q names .regexp, and the harness loads the implementation.  Tests
 / that assert a peachq DIVERGENCE say so in their names: testExtension* for the
 / four supersets beyond KX (SentinelOptional, AutoNulTerminates,
 / CallbackErrorContract, BareErrorClasses), testStricter* for the one narrowing
-/ — the type letter enforced against the element type, which KX accepts — and
+/ - the type letter enforced against the element type, which KX accepts - and
 / those four are guarded by isPeachFfi so kx q skips them instead of failing.
-/ Foreign symbols are bound BARE wherever possible — they resolve against the
-/ already-linked process, so no library name appears — and the one test of the
+/ Foreign symbols are bound BARE wherever possible - they resolve against the
+/ already-linked process, so no library name appears - and the one test of the
 / explicit `lib`fn dlopen path derives its name from .ffi.os[], dogfooding the
 / function whose return type started this work.
 system "d .ffiTest";
@@ -28,19 +28,19 @@ pidSym:{$["w"=.ffi.os[]; `_getpid; `getpid]};
 / probed through setErrno, which allocates nothing: bindings are PERMANENT in
 / the engine, so probing with bind would burn a slot on every guarded test
 hasFfi:{`ok~@[{.ffi.setErrno[]; `ok};::;{[e] `no}]};
-noFfi:{.qunit.assertTrue[1b; "this build has no libffi — .ffi answers 'nyi, so the call surface is not asserted"]};
+noFfi:{.qunit.assertTrue[1b; "this build has no libffi - .ffi answers 'nyi, so the call surface is not asserted"]};
 
 / An uppercase letter means "pointer to a vector of THAT type", and the letter is the only
 / thing that can say which: in the call interface I, J and F are all just "a pointer".  peachq
-/ ENFORCES the letter against the argument's elements and answers 'type; KX does not — its
+/ ENFORCES the letter against the argument's elements and answers 'type; KX does not - its
 / getvalue takes the letter's q type as the target type and never compares it to the argument,
 / so a mismatched vector crosses as its raw payload and C reads at the wrong stride.  The
 / asserts that expect 'type are therefore peachq-only; the positive ones run on both.
 / .ffi.i.bind is the marker: KX's q/ffi.q binds .ffi.bind straight through 2: and has no
-/ .ffi.i.* layer at all, so the native exists only here — and it is itself an FFI question,
+/ .ffi.i.* layer at all, so the native exists only here - and it is itself an FFI question,
 / not an unrelated namespace sniff.
 isPeachFfi:{`ok~@[{.ffi.i.bind; `ok};::;{[e] `no}]};
-notPeachFfi:{.qunit.assertTrue[1b; "kx q accepts a letter/element mismatch — only peachq raises, so this is not asserted here"]};
+notPeachFfi:{.qunit.assertTrue[1b; "kx q accepts a letter/element mismatch - only peachq raises, so this is not asserted here"]};
 
 / ---- the platform tokens: three functions, three DIFFERENT return types ----
 
@@ -85,7 +85,7 @@ testBindExplicitLibrary:{
 testBindZeroArgs:{
     if[not hasFfi[]; :noFfi[]];
     b0:.ffi.bind[pidSym[];"";"i"];
-    .qunit.assertEquals[b0 (::); "i"$.z.i; "empty argtypes still takes an argument list — the sentinel alone"];
+    .qunit.assertEquals[b0 (::); "i"$.z.i; "empty argtypes still takes an argument list - the sentinel alone"];
     .qunit.assertEquals[b0 (::;::); "i"$.z.i; "the KX (::;::) spelling is tolerated"];
     .qunit.assertEquals[.ffi.callFunction[pidSym[]] (::;::); "i"$.z.i; "callFunction reaches a zero-arg function the same way"]};
 
@@ -139,7 +139,7 @@ testSymbolReturn:{
 / assertion is >=0 and the vector starts at -1 to prove the call wrote it.
 testIntVectorOutParameter:{
     if[not hasFfi[]; :noFfi[]];
-    if[not isLinux[]; :.qunit.assertTrue[1b; "pipe/close are POSIX — not asserted off Linux"]];
+    if[not isLinux[]; :.qunit.assertTrue[1b; "pipe/close are POSIX - not asserted off Linux"]];
     p:-1 -1i;
     .qunit.assertEquals[.ffi.callFunction[("i";`pipe)] (p;::); 0i; "pipe answers 0 on success"];
     .qunit.assertTrue[all p>=0; "and wrote both descriptors back into the q vector"];
@@ -149,7 +149,7 @@ testCvarReadsAGlobal:{
     if[not hasFfi[]; :noFfi[]];
     $[isLinux[];
       .qunit.assertTrue[0<.ffi.cvar ("r";`stdout); "cvar reads a C global as a raw pointer"];
-      .qunit.assertTrue[1b; "stdout is spelled __stdoutp on macOS and absent on Windows — not asserted here"]]};
+      .qunit.assertTrue[1b; "stdout is spelled __stdoutp on macOS and absent on Windows - not asserted here"]]};
 
 testSetErrno:{
     if[not hasFfi[]; :noFfi[]];
@@ -198,7 +198,7 @@ testCallbackReentrancy:{
     .qunit.assertEquals[w; 7 8 9i; "a callback that calls C itself is fine"]};
 
 / PEACHQ EXTENSION, deliberately beyond KX: a q error inside a callback PARKS
-/ rather than longjmping through C — the foreign call completes with neutral
+/ rather than longjmping through C - the foreign call completes with neutral
 / results and the error then propagates as the call's q result.
 testExtensionCallbackErrorContract:{
     if[not hasFfi[]; :noFfi[]];
@@ -217,7 +217,7 @@ testExtensionCallbackErrorContract:{
 / ---- the type letter against the element type ----
 
 / the portable half: a correctly typed vector crosses as an in-place data pointer, and the
-/ letters sharing one C type stay interchangeable — the table gives i m d u v t one C type
+/ letters sharing one C type stay interchangeable - the table gives i m d u v t one C type
 / between them, so a date vector is as good an int* as an int vector is
 testLetterMatchesElement:{
     if[not hasFfi[]; :noFfi[]];
@@ -245,7 +245,7 @@ testStringLetterPositives:{
     sl:.ffi.bind[`strlen;"C";"i"];
     .qunit.assertEquals[sl ("12345";::); 5i; "a char vector under C is a char*"];
     .qunit.assertEquals[sl (`abcdef;::); 6i; "and so is a symbol ATOM"];
-    / strtol answers a C long, which the l letter reads at size_t width — the same width only
+    / strtol answers a C long, which the l letter reads at size_t width - the same width only
     / where long and size_t agree, so the S positive is asserted on Linux as pipe/close are
     if[isLinux[];
         .qunit.assertEquals[.ffi.bind[`strtol;"CSi";"l"] ("42abc\000";1#`x;10;::); 42; "a symbol vector under S is the char*[] endptr argument"]]};
@@ -261,7 +261,7 @@ testLowercaseLettersUnchanged:{
     .ffi.bind[`memcpy;"IIi";"I"] (d2;1 2 3 4i;4*count d2;::);
     .qunit.assertEquals[d2; 1 2 3 4i; "and a long atom under lowercase i still coerces to int"]};
 
-/ PEACHQ STRICTER: the width bug — a long vector under I was read four bytes at a time, and
+/ PEACHQ STRICTER: the width bug - a long vector under I was read four bytes at a time, and
 / an int vector under J read, and in the out-parameter direction WROTE, past the q object
 testStricterWidthMismatch:{
     if[not hasFfi[]; :noFfi[]];
@@ -273,7 +273,7 @@ testStricterWidthMismatch:{
     .qunit.assertThrows[lng; (2#0i;1 2;16;::); "type"; "and as an out-parameter it is 'type instead of a write past the end"];
     .qunit.assertThrows[cp; (4#0i;1 2 3 4h;8;::); "type"; "a short vector under I is 'type"]};
 
-/ PEACHQ STRICTER: same width, wrong lane — long bit patterns read as doubles, and back
+/ PEACHQ STRICTER: same width, wrong lane - long bit patterns read as doubles, and back
 testStricterLaneMismatch:{
     if[not hasFfi[]; :noFfi[]];
     if[not isPeachFfi[]; :notPeachFfi[]];
@@ -282,7 +282,7 @@ testStricterLaneMismatch:{
     .qunit.assertThrows[.ffi.bind[`memcpy;"IIl";"I"]; (2#2000.01.01;2#0Np;8;::); "type"; "the shared-C-type leniency never crosses a width: a timestamp vector under I is 'type"]};
 
 / PEACHQ STRICTER: an ATOM under an uppercase letter wrote its VALUE into a slot the call
-/ interface declares a pointer, and C then dereferenced it — a crash, not a wrong answer
+/ interface declares a pointer, and C then dereferenced it - a crash, not a wrong answer
 testStricterAtomUnderPointer:{
     if[not hasFfi[]; :noFfi[]];
     if[not isPeachFfi[]; :notPeachFfi[]];
@@ -294,8 +294,8 @@ testStricterAtomUnderPointer:{
 testStricterStringLetterShapes:{
     if[not hasFfi[]; :noFfi[]];
     if[not isPeachFfi[]; :notPeachFfi[]];
-    .qunit.assertThrows[.ffi.bind[`strlen;"C";"i"]; (2#`ab;::); "type"; "a symbol VECTOR under C is 'type — that shape is char*[]"];
-    .qunit.assertThrows[.ffi.bind[`strtol;"CSi";"l"]; ("42abc\000";"zz";10;::); "type"; "a char vector under S is 'type — that shape is char*"]};
+    .qunit.assertThrows[.ffi.bind[`strlen;"C";"i"]; (2#`ab;::); "type"; "a symbol VECTOR under C is 'type - that shape is char*[]"];
+    .qunit.assertThrows[.ffi.bind[`strtol;"CSi";"l"]; ("42abc\000";"zz";10;::); "type"; "a char vector under S is 'type - that shape is char*"]};
 
 / ---- peachq extensions, named as such ----
 
@@ -306,7 +306,7 @@ testExtensionSentinelOptional:{
     .qunit.assertEquals[.ffi.bind[`strlen;"C";"i"] "12345"; 5i; "a one-argument binding needs no sentinel here"]};
 
 / a char vector auto-NUL-terminates through a COPY unless it already ends in
-/ "\000" — an explicit tail is what keeps the in-place mutation contract.
+/ "\000" - an explicit tail is what keeps the in-place mutation contract.
 testExtensionAutoNulTerminates:{
     if[not hasFfi[]; :noFfi[]];
     .qunit.assertEquals[.ffi.bind[`strlen;"C";"i"] ("12345";::); 5i; "a string with no NUL tail is copied and terminated"]};

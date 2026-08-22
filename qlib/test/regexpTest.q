@@ -1,7 +1,7 @@
 / RE2 regex conformance: the `rlike` keyword and the .regexp namespace.
 / Sources: user-docs/regexp.md, the published RE2 syntax
 / (github.com/google/re2/wiki/Syntax) and DuckDB's documented regexp semantics.
-/ There is no options argument — flags live inside the pattern ((?i) (?s) (?m)) —
+/ There is no options argument - flags live inside the pattern ((?i) (?s) (?m)) -
 / and the two RE2 options with no inline form are functions: .regexp.escape
 / (literal) and .regexp.replace_all (global).
 system "d .regexpTest";
@@ -68,7 +68,7 @@ testExtractAll:{
     .qunit.assertEquals[.regexp.extract_all["abc";"[0-9]"]; (); "no match answers an empty list"]};
 
 / one group-list PER match, so picking a group across every match is ordinary
-/ indexing — DuckDB spells that regexp_extract_all(s,p,group)
+/ indexing - DuckDB spells that regexp_extract_all(s,p,group)
 testGroupsAll:{
     .qunit.assertKnown[.regexp.groups_all["a1 b22";"([a-z])([0-9]+)"]; `groupsAll; "groups_all answers a group-list per match"];
     .qunit.assertEquals[.regexp.groups_all["a1 b22";"([a-z])([0-9]+)"][;1]; (enlist"1";"22"); "indexing at 1 takes the second group of every match"];
@@ -84,7 +84,7 @@ testSplit:{
     .qunit.assertEquals[.regexp.split["a,b,,c";","]; (enlist"a";enlist"b";"";enlist"c"); "an adjacent pair of delimiters yields an empty field"];
     .qunit.assertEquals[.regexp.split["abc";","]; enlist"abc"; "no delimiter answers the whole subject as one field"]};
 
-/ escape is RE2's QuoteMeta, replacing DuckDB's "l" option — an RE2::Options
+/ escape is RE2's QuoteMeta, replacing DuckDB's "l" option - an RE2::Options
 / property that could never have an in-pattern spelling. Composing beats a flag:
 / visible at the call site, and it works with every function.
 testEscape:{
@@ -139,7 +139,7 @@ testCollapseTrap:{
     .qunit.assertEquals[.regexp.matches[`k`p;"k"]; 10b; "symbols are the other way out"]};
 
 / split follows DUCKDB's algorithm exactly (verified against the v1.4.5
-/ library): a zero-width match at the REMAINDER's start is not a delimiter — it
+/ library): a zero-width match at the REMAINDER's start is not a delimiter - it
 / yields one character and moves on.
 testZeroWidthSplit:{
     .qunit.assertEquals[.regexp.split["abc";""]; (enlist"a";enlist"b";enlist"c"); "an empty pattern splits into characters"];
@@ -148,7 +148,7 @@ testZeroWidthSplit:{
     .qunit.assertEquals[.regexp.split["aéb";""]; (enlist"a";"é";enlist"b"); "RE2 matches in UTF-8, so that advance never cuts a multi-byte character in half"];
     .qunit.assertKnown[.regexp.split["aXbXc";"X*"]; `zeroWidthSplit; "zero-width matches interleave with the characters they skip"]};
 
-/ extract_all keeps EVERY zero-width match, which is also DuckDB's answer — the
+/ extract_all keeps EVERY zero-width match, which is also DuckDB's answer - the
 / two functions differ here and both are deliberate
 testZeroWidthExtractAll:{
     .qunit.assertEquals[.regexp.extract_all["a";"a*"]; (enlist"a";""); "the zero-width match past the end is kept"];

@@ -1,6 +1,6 @@
 / The one LIVE .massive gate: every assertion goes over the real Massive REST API, so a renamed
 / field or a changed type upstream fails the suite. Needs $MASSIVE_API_KEY exported; unset, the
-/ suite fails and names it. Deliberately no fixture and no offline mode — a stored payload proves
+/ suite fails and names it. Deliberately no fixture and no offline mode - a stored payload proves
 / only that we still parse the bytes captured last month. Endpoints, against the published Massive
 / REST reference: /v1/marketstatus/now, /v2/aggs/ticker/{t}/range, /v3/reference/tickers. The
 / offline laws of .massive are pinned by their own suites against a stubbed transport.
@@ -10,7 +10,7 @@ system "d .massiveTest";
 / only non-boolean result, which peachq needs until table `,` widens a typed column (PLAN.md).
 testApiKeyIsExported:{
     .qunit.assertThat[count .massive.apikey; >; 0;
-        "MASSIVE_API_KEY is not exported — the live massive tier cannot run"]};
+        "MASSIVE_API_KEY is not exported - the live massive tier cannot run"]};
 
 testMarketStatus:{
     s:.massive.status[];
