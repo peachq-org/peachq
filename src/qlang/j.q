@@ -3,7 +3,7 @@
 / .j.jd (x;d): .j.j, except d[`null0w]~1b maps 0w/-0w to null (ref/dotj.md).
 / d[`prec] is peachq's per-call `\P` (syscmds.md:546); absent = the live `\P`.
 / ref/dotj.md reserves `.j` for KX and publishes exactly j/k/jd, so both helpers
-/ are LOCALS.  `n` recurses by SELF-PASSING (`n[n;]`) — q lambdas do not see
+/ are LOCALS.  `n` recurses by SELF-PASSING (`n[n;]`) - q lambdas do not see
 / enclosing locals and peachq has no `.z.s`.  Its float arm also takes real (8h),
 / substituting 0Ne so a real vector stays real; the atom takes `$` because `?`
 / wants a boolean VECTOR.  `jp` is trapped so a signalling .j.j cannot strand `\P`.

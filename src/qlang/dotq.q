@@ -1,4 +1,4 @@
-/ dotq.q — peachq's embedded q bootstrap: the ".Q" utility namespace, authored from the
+/ dotq.q - peachq's embedded q bootstrap: the ".Q" utility namespace, authored from the
 / PUBLISHED qdocs (qdocs/, CC BY 4.0). A REAL .q file, embedded via build-time codegen
 / (tools/gen-bootstrap.sh -> src/qlang/dotq_gen.h) and loaded at the tail of q_runtime_create.
 / Loaded through the script seam (q_ctx_run_src): full kdb script syntax, though most definitions stay one-liners.
@@ -19,7 +19,7 @@
 .Q.btoa:-32!;
 .Q.atob:.Q.c.atob;
 .Q.sha1:-33!;
-/ .Q.host/.Q.addr: ref/dotq.md — the bang is the single C home (`-12!`/`-13!`, q.k spells them exactly so).
+/ .Q.host/.Q.addr: ref/dotq.md - the bang is the single C home (`-12!`/`-13!`, q.k spells them exactly so).
 .Q.host:-12!;
 .Q.addr:-13!;
 .Q.ops:.Q.c.ops;
@@ -54,7 +54,7 @@
 / ---- Command-line / environment (ref/dotq.md) ----
 .Q.x:();
 / .Q.opt: argv -> dict; flags start "-", value = ALWAYS the list of tokens up to the next flag
-/ (never collapsed to a bare string at count 1 — `first each .Q.opt .z.x` is the documented idiom). Sets .Q.x.
+/ (never collapsed to a bare string at count 1 - `first each .Q.opt .z.x` is the documented idiom). Sets .Q.x.
 .Q.opt:{[a] a:$[10h=type a;enlist a;a]; .Q.x:(); $[count a;{[a] i:where {"-"~first x} each a; e:(1_i),count a; .Q.x:$[count i;(first i)#a;a]; k:`$1_'a i; j:til count i; k!{[a;i;e;j] (1+i j)_(e j)#a}[a;i;e;]each j}[a];(`$())!()]};
 / .Q.def: defaults + tok-typed coercion over .Q.opt output (typed null on absent value / bad coerce).
 .Q.def:{[d;o] key[d]!{[d;o;k] $[k in key o;$[count o k;(type d k)$first o k;first 0#d k];d k]}[d;o;]each key d};
@@ -86,7 +86,7 @@
 .Q.s1:{-3!x};
 
 / ---- No-partition surface (ref/dotq.md) ----
-/ peachq DOES NOT SUPPORT partitioned/segmented DBs — a PERMANENT divergence from kdb, not pending
+/ peachq DOES NOT SUPPORT partitioned/segmented DBs - a PERMANENT divergence from kdb, not pending
 / work: honest values where derivable, the empty DATE domain elsewhere, so a probe sees a well-typed
 / EMPTY date-partitioned HDB (`type .Q.pv` -> 14h) rather than a 'name error. `.Q.D` is conformant
 / to `.Q.P`, which has no segments here; `.Q.par` is a plain dir/partition/table join, no par.txt.
@@ -102,19 +102,19 @@
 .Q.pt:0#`;
 .Q.pn:()!();
 .Q.vp:()!();
-/ .Q.bvi/.Q.MAP: nullary no-ops yielding `()` — kdb's generic null is neither `type`-able nor `~`-able here (PLAN.md defect).
+/ .Q.bvi/.Q.MAP: nullary no-ops yielding `()` - kdb's generic null is neither `type`-able nor `~`-able here (PLAN.md defect).
 .Q.bvi:{[] ()};
 .Q.MAP:{[] ()};
 
 / ---- File / pipe streaming (ref/dotq.md #fs-file-streaming/#fps-pipe-streaming; ref/read1.md ranged form) ----
-/ .Q.fsn: loop file y in z-byte lumps of complete "\n" records — the partial tail record carries into the
+/ .Q.fsn: loop file y in z-byte lumps of complete "\n" records - the partial tail record carries into the
 / next lump (no record split, no byte lost; a record longer than z grows the carry until its "\n" arrives),
 / apply unary x to each lump's record list, return hcount y. An unterminated final tail is still delivered.
 .Q.fsn:{[x;y;z] if[z<=0;'`domain]; n:hcount y; o:0; c:""; while[count b:read1(y;o;z); o+:count b; c,:"c"$b; i:last where c="\n"; if[not null i; x "\n" vs i#c; c:(i+1)_c]]; if[count c; x enlist c]; n};
 / .Q.fs/.Q.fps are DOCUMENTED as projections `.Q.fsn[;;131000]`, but currying a projection one arg
-/ at a time rank-errors here (the doc's own `.Q.fs[f]`:file shape; PLAN.md defect) — lambda until then.
+/ at a time rank-errors here (the doc's own `.Q.fs[f]`:file shape; PLAN.md defect) - lambda until then.
 .Q.fs:{[x;y] .Q.fsn[x;y;131000]};
-/ .Q.fpn: the same lump/carry loop over a fifo path — read1(h;z) blocks for data, empty read = writer
+/ .Q.fpn: the same lump/carry loop over a fifo path - read1(h;z) blocks for data, empty read = writer
 / closed = done. Doc-true composition; runs once hopen's fifo:// transport lands (today 'nyi there).
 .Q.fpn:{[x;y;z] if[z<=0;'`domain]; h:hopen`$":fifo://",1_string y; c:""; b:read1(h;z); while[count b; c,:"c"$b; i:last where c="\n"; if[not null i; x "\n" vs i#c; c:(i+1)_c]; b:read1(h;z)]; if[count c; x enlist c]; hclose h;};
 .Q.fps:{[x;y] .Q.fpn[x;y;131000]};

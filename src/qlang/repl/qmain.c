@@ -257,7 +257,7 @@ int main(int argc, char** argv) {
                                 "IPC only after EOF on this platform\n");
                 q_repl_run(stdin, stdout, stderr, 0);
             } else {
-                fprintf(stderr, "no terminal — running in server-only mode\n");
+                fprintf(stderr, "no terminal - running in server-only mode\n");
             }
             if (q_sys_listen_port() > 0)
                 ray_poll_run(poll);   /* serve iff the listener is still LIVE */

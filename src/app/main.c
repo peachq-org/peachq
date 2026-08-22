@@ -121,7 +121,7 @@ int main(int argc, char** argv) {
                 "  When stdin and stdout are both not a terminal (systemd\n"
                 "  Type=simple, Docker, nohup &, etc.), rayforce skips the\n"
                 "  REPL and runs only the IPC poll loop.  Redirect stdout\n"
-                "  and stderr to a file/journal — anything (println ...)\n"
+                "  and stderr to a file/journal - anything (println ...)\n"
                 "  prints from the server side goes there.  Example:\n"
                 "    nohup rayforce -p 5000 > rayforce.log 2>&1 &\n"
                 "    systemd:  StandardOutput=journal StandardError=journal\n",
@@ -235,7 +235,7 @@ int main(int argc, char** argv) {
 #ifndef RAY_OS_WINDOWS
         signal(SIGPIPE, SIG_IGN);
 #endif
-        fprintf(stderr, "no terminal — running in server-only mode\n");
+        fprintf(stderr, "no terminal - running in server-only mode\n");
         ray_poll_run(poll);
     } else {
         ray_repl_t* repl = ray_repl_create(poll);

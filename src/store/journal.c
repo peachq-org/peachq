@@ -386,7 +386,7 @@ ray_err_t ray_journal_recover(const char* base) {
         int64_t bind_errs = 0;
         for (int64_t i = 0; i < n; i++) {
             if (!keys || keys->type != RAY_SYM) {
-                fprintf(stderr, "log: WARN  snapshot key vector has type %d, expected RAY_SYM — dropping %lld bindings\n",
+                fprintf(stderr, "log: WARN  snapshot key vector has type %d, expected RAY_SYM - dropping %lld bindings\n",
                         keys ? (int)keys->type : -1, (long long)(n - i));
                 skipped += n - i;
                 break;
@@ -394,7 +394,7 @@ ray_err_t ray_journal_recover(const char* base) {
             int64_t sym_id = ((int64_t*)ray_data(keys))[i];
             ray_t* v = ray_list_get(vals, i);
             if (!v) {
-                fprintf(stderr, "log: WARN  snapshot value missing for sym %lld — skipping\n",
+                fprintf(stderr, "log: WARN  snapshot value missing for sym %lld - skipping\n",
                         (long long)sym_id);
                 skipped++;
                 continue;
@@ -451,7 +451,7 @@ ray_err_t ray_journal_recover(const char* base) {
         case RAY_JREPLAY_DESER:
         case RAY_JREPLAY_DECOMP: {
             fprintf(stderr,
-                    "log: ERROR replay failed at chunk %lld in %s: %s — framing\n"
+                    "log: ERROR replay failed at chunk %lld in %s: %s - framing\n"
                     "log:       was intact so this is content/code mismatch, NOT\n"
                     "log:       tail truncation.  Do NOT truncate the log; either\n"
                     "log:       fix the version skew or restore from .qdb backup.\n",

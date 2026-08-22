@@ -129,7 +129,7 @@ static void report_violation(const ray_t* v, int64_t idx) {
         "\n[null-invariant 16.4 VIOLATION] column type=%s (tag %d), len=%lld:\n"
         "  payload[%lld] is the type-correct null sentinel but "
         "RAY_ATTR_HAS_NULLS is NOT set.\n"
-        "  A producer wrote a sentinel without setting HAS_NULLS — "
+        "  A producer wrote a sentinel without setting HAS_NULLS - "
         "null-aware ops will treat it as a real value.\n"
         "  Fix: set RAY_ATTR_HAS_NULLS at the producer site that writes the "
         "sentinel.\n\n",

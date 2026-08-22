@@ -1172,7 +1172,7 @@ static P parse_base(Parser *p) {
             adv(p);                          /* consume ' */
             adv(p);                          /* consume [ */
             ray_t *args = parse_E(p, Q_NONE);
-            expect(p, T_RBRACK, "expected ']' in compose '[…]'");
+            expect(p, T_RBRACK, "expected ']' in compose '[...]'");
             ray_t *cv = q_registry_compose_value();
             if (!cv) q_die("compose: registry not initialized");
             /* `'[;]` elides to project the COMPOSE value itself — the same
@@ -1247,7 +1247,7 @@ static ray_t *qsql_sortspec(Parser *p) {
     Token *ct = cur(p);
     if (ct->kind != T_NOUN || !ct->k || ct->k->type != -RAY_SYM ||
         (ct->k->attrs & Q_ATTR_QUOTED))
-        q_die("qsql: expected column name after < / > in select[…]");
+        q_die("qsql: expected column name after < / > in select[...]");
     ray_t *xs[2] = { q_embed(q_verb(desc ? '>' : '<'), Q_MONADIC), ct->k };
     ct->k = NULL;
     adv(p);
@@ -1307,7 +1307,7 @@ static P parse_query(Parser *p) {
         adv(p);
         if (!qtok_is_sort_glyph(cur(p))) {
             P le = parse_e(p, Q_NONE);
-            if (le.role == R_NONE) q_die("qsql: expected limit expression in select[…]");
+            if (le.role == R_NONE) q_die("qsql: expected limit expression in select[...]");
             *lim = le.v;
             if (at(p, T_SEMI)) {
                 adv(p);
@@ -1317,7 +1317,7 @@ static P parse_query(Parser *p) {
             *ord = qsql_sortspec(p);
             *lim = ray_i64(INT64_MAX);             /* order alone: n = 0W */
         }
-        expect(p, T_RBRACK, "expected ']' closing select[…]");
+        expect(p, T_RBRACK, "expected ']' closing select[...]");
     }
 
     /* `select distinct` claims the b slot (basics/funsql.md:161-175) — SELECT
