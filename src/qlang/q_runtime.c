@@ -41,7 +41,7 @@ static int bootstrap_run(const char* src, const char* what) {
     int rc = q_ctx_run_src(src, stdout, stderr, &esig);
     if (esig) ray_error_free(esig);
     if (rc)
-        fprintf(stderr, "q bootstrap: %s ABORTED at an erroring statement — no runtime\n",
+        fprintf(stderr, "q bootstrap: %s ABORTED at an erroring statement - no runtime\n",
                 what);
     return rc;
 }
