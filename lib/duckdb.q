@@ -1,9 +1,9 @@
-/ duckdb.q — DuckDB as a virtual-table PROVIDER (`:pq:duckdb:alias:/path/db`,
+/ duckdb.q - DuckDB as a virtual-table PROVIDER (`:pq:duckdb:alias:/path/db`,
 / actionable-plans/2026-08-07-plugin-data-sources-tables.md).  These hooks ARE
 / the DuckDB surface: the bespoke .duckdb.connect/.sql/.select API was replaced
 / 2026-08-07, not wrapped.  Written over the internal natives .duckdb.i.* (the
 / connection, the sidecar-lossless round-trip and one raw exec), which bind at
-/ this same \l pq gate.  CONNID is the native int handle — no q-side state.
+/ this same \l pq gate.  CONNID is the native int handle - no q-side state.
 / ANY-ORDER LAW: definitions only at top level.
 
 / open[rest;timeout;config]: rest = the db path (`` `:default: `` = shared
@@ -16,10 +16,10 @@
 .duckdb.close:{[c] .duckdb.i.close c}
 / the sync flag is ignored: an in-process engine has no async lane (the same
 / treatment as open's timeout)
-/ lastsql records the SQL last handed to the engine — the B2 pushdown-snapshot
+/ lastsql records the SQL last handed to the engine - the B2 pushdown-snapshot
 / slot (test/observed/taq-sql); inert until a .duckdb.qsql translator emits SQL.
 .duckdb.call:{[c;q;sync] .duckdb.lastsql::q; .duckdb.i.exec[c;q]}
-/ bind reads the column names off meta — ONE catalog lookup owns the query
+/ bind reads the column names off meta - ONE catalog lookup owns the query
 / and the column ORDER; a second duckdb_columns() spelling here would fork it.
 .duckdb.bind:{[c;t] (key .duckdb.i.meta[c;t])`c}
 .duckdb.get:{[c;t] .duckdb.i.get[c;t]}
@@ -37,15 +37,15 @@
 / provider's own aggregate, and the host's fallback would have read every row.
 .duckdb.count:{[c;t] first .duckdb.i.exec[c; "SELECT COUNT(*) AS n FROM ",.duckdb.i.q t]`n}
 
-/ identifiers double-quoted, a doubled inner quote escaping — the same law the
+/ identifiers double-quoted, a doubled inner quote escaping - the same law the
 / C side applies when it builds SQL.
 .duckdb.i.q:{[t] "\"",ssr[string t;"\"";"\"\""],"\""}
 
-/ .duckdb.qsql — THE B2 SEAM, deliberately naive: it exercises the .X.qsql
+/ .duckdb.qsql - THE B2 SEAM, deliberately naive: it exercises the .X.qsql
 / contract (shared resolver, decline-on-unpush) but materializes and evaluates
-/ locally — behaviorally the host fallback.  The B2 SQL translator replaces
-/ ONLY .duckdb.i.push's body (emit SQL, run it, fill .duckdb.lastsql — inert
+/ locally - behaviorally the host fallback.  The B2 SQL translator replaces
+/ ONLY .duckdb.i.push's body (emit SQL, run it, fill .duckdb.lastsql - inert
 / until then).  Only the RESOLVER is trapped (unpushable -> :: -> host
-/ fallback); evaluation errors propagate — the query never runs twice.
+/ fallback); evaluation errors propagate - the query never runs twice.
 .duckdb.i.push:{[c;rt] (?) . (enlist .duckdb.get[c;rt 0]),1_rt}
 .duckdb.qsql:{[c;cl;tree] rt:@[.pq.i.resolveTree[cl];tree;{[e] ::}]; $[rt~(::);::;.duckdb.i.push[c;rt]]}

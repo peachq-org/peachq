@@ -1,4 +1,4 @@
-/ h.q — peachq's `.h` namespace, authored from the PUBLISHED qdocs (ref/doth.md, CC BY 4.0).
+/ h.q - peachq's `.h` namespace, authored from the PUBLISHED qdocs (ref/doth.md, CC BY 4.0).
 / ALWAYS-ON: baked in by tools/gen-bootstrap.sh -> h_gen.h, loaded at q_runtime_create after
 / q.q+dotq.q. One definition per line (no LITERAL newline in one). Absent: .h.ht (doth-status.md).
 / NAMING RULE: `.h.` carries ONLY names ref/doth.md documents; everything peachq invented is `.h.i.`.
@@ -7,11 +7,11 @@
 .h.c0:`024C7E;
 .h.c1:`958600;
 .h.d:" ";
-/ .h.logo: kdb ships the KX logo here; peachq carries NO KX branding — peachq's instead (divergence).
+/ .h.logo: kdb ships the KX logo here; peachq carries NO KX branding - peachq's instead (divergence).
 .h.logo:"<a href=\"https://peachq.org\"><img src=\"https://peachq.org/img/peachq-logo.svg\" alt=\"peachq\" height=\"28\"></a>";
 / .h.HOME: doc'd as the root path with no fixed default; pinned to what #217's static server serves.
 .h.HOME:"html";
-/ .h.ty: the 7 doc-listed keys carry DOC values (csv/xml/xls thus differ from peachq's C fallback — doc fidelity wins); the rest is #217's superset.
+/ .h.ty: the 7 doc-listed keys carry DOC values (csv/xml/xls thus differ from peachq's C fallback - doc fidelity wins); the rest is #217's superset.
 .h.ty:`htm`html`csv`txt`xml`xls`gif`css`js`mjs`png`jpg`jpeg`svg`ico`webp`json`pdf`wasm`woff`woff2!("text/html";"text/html";"text/comma-separated-values";"text/plain";"text/plain";"application/msexcel";"image/gif";"text/css";"application/javascript";"application/javascript";"image/png";"image/jpeg";"image/jpeg";"image/svg+xml";"image/x-icon";"image/webp";"application/json";"application/pdf";"application/wasm";"font/woff";"font/woff2");
 / .h.sa's own doc entry truncates its value; .h.html's HTML block prints it whole.
 .h.sa:"a{text-decoration:none}a:link{color:024C7E}a:visited{color:024C7E}a:active{color:958600}";
@@ -25,7 +25,7 @@
 .h.nbr:{.h.htc[`nobr;x]};
 .h.hc:{ssr[x;"<";"&lt;"]};
 .h.xs:{ssr[ssr[x;"&";"&amp;"];"<";"&lt;"]};
-/ .h.ha/.h.hb: a SYMBOL href is emitted bare, a STRING href quoted — both spellings doc-pinned.
+/ .h.ha/.h.hb: a SYMBOL href is emitted bare, a STRING href quoted - both spellings doc-pinned.
 .h.ha:{[x;y] "<a href=",$[-11h=type x;string x;"\"",x,"\""],">",y,"</a>"};
 .h.hb:{[x;y] "<a target=v href=",$[-11h=type x;string x;"\"",x,"\""],">",y,"</a>"};
 .h.html:{"<html><head><style>",.h.sa,.h.sb,"</style></head><body>",x,"</body></html>"};
@@ -41,12 +41,12 @@
 .h.hn:{[x;y;z] "HTTP/1.1 ",x,"\r\nContent-Type: ",$[y in key .h.ty;.h.ty y;"application/octet-stream"],"\r\nConnection: close\r\nContent-Length: ",(string count z),"\r\n\r\n",z};
 .h.hy:{[x;y] .h.hn["200 OK";x;y]};
 .h.he:{.h.hn["400 Bad Request";`txt;"'",.h.hc x]};
-/ .h.hp: the doc's response carries .h.sb ONLY — it is not .h.html (which also carries .h.sa).
+/ .h.hp: the doc's response carries .h.sb ONLY - it is not .h.html (which also carries .h.sa).
 .h.hp:{.h.hy[`html;"<html><head><style>",.h.sb,"</style></head><body>",.h.pre[x],"</body></html>"]};
 .h.ka:{$[0=x;"close";"keep-alive"]};
 .h.val:value;
 
-/ .h.cd joins NESTED columns' subitems with .h.d before Prepare Text (vectors / lists of strings only, ref/file-text.md); that pre-pass is .h.cd's OWN — .h.td, a bare `0:` call, has none.
+/ .h.cd joins NESTED columns' subitems with .h.d before Prepare Text (vectors / lists of strings only, ref/file-text.md); that pre-pass is .h.cd's OWN - .h.td, a bare `0:` call, has none.
 .h.cd:{"," 0: $[.Q.qt x;{flip (cols x)!{$[0h<>type x;x;10h=type first x;x;.h.d sv/: string each x]} each value flip x} 0!x;x]};
 .h.td:{"\t" 0: x};
 / .h.xd escapes cell text with .h.xs, as the printed source of `.h.tx[`xml]` does with `xs'`.
@@ -54,8 +54,8 @@
 .h.xt:{[x;y] .j.k each y};
 
 / Excel = SpreadsheetML 2003 TEXT, not xlsx. ref/doth.md pins DIFFERENT second attributes per entry point (.h.ed xmlns:o, .h.edsn xmlns:ss), so .h.ed is NOT .h.edsn on a one-key dict. Null=empty cell; a DateTime cell with NO ss:StyleID renders in Excel as a bare serial number, so every one carries one.
-/ SEQUENCE SCHEMA: <Column>s before <Row>s inside <Table>, then <WorksheetOptions>, then <AutoFilter> as Table's SIBLINGS. Misorder it and Excel refuses the whole file — which nothing here can detect, since an invalid workbook is still well-formed XML. .h.i.exp/.h.i.exf re-declare the excel namespace on themselves, so both entry points work without touching either pinned namespace list.
-/ .h.i.exm sanitises rather than trusts sheet names (Excel refuses one holding : \ / ? * [ ] , past 31 chars, empty, apostrophe-ended, or repeated — and a q table named with a slash is ordinary); .h.i.exn's ss:Width is POINTS, not characters (Excel's 8.43-char default is ~48pt), so a 36-char guid needs ~228 and emitting 36 would make it NARROWER.
+/ SEQUENCE SCHEMA: <Column>s before <Row>s inside <Table>, then <WorksheetOptions>, then <AutoFilter> as Table's SIBLINGS. Misorder it and Excel refuses the whole file - which nothing here can detect, since an invalid workbook is still well-formed XML. .h.i.exp/.h.i.exf re-declare the excel namespace on themselves, so both entry points work without touching either pinned namespace list.
+/ .h.i.exm sanitises rather than trusts sheet names (Excel refuses one holding : \ / ? * [ ] , past 31 chars, empty, apostrophe-ended, or repeated - and a q table named with a slash is ordinary); .h.i.exn's ss:Width is POINTS, not characters (Excel's 8.43-char default is ~48pt), so a 36-char guid needs ~228 and emitting 36 would make it NARROWER.
 .h.i.exq:{[x;y;z] "<Cell",x,"><Data ss:Type=\"",y,"\">",(.h.xs z),"</Data></Cell>"};
 .h.i.ext:{$[x=1h;"Boolean";x in 5 6 7 8 9h;"Number";x in 12 13 14 15h;"DateTime";"String"]};
 .h.i.exi:{$[x in 13 14h;" ss:StyleID=\"sD\"";x in 12 15h;" ss:StyleID=\"sDT\"";""]};
