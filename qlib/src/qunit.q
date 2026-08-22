@@ -202,8 +202,8 @@ assertNotEmpty:{ [actual; msg]  assertThat[count actual;>;0; msg]};
 verdict:{ [resultTbl]
     p:sum `pass=resultTbl`status;
     $[p=n:count resultTbl;
-        "=== PASS — ",string[p]," of ",string[n]," ===";
-        "=== FAILED — ",string[p]," of ",string[n]," passed, ",string[n-p]," failed ==="]};
+        "=== PASS - ",string[p]," of ",string[n]," ===";
+        "=== FAILED - ",string[p]," of ",string[n]," passed, ",string[n-p]," failed ==="]};
 
 / Run all tests in selected namespaces, return table of pass/fails/timings.
 / @param nsList symbol list of namespaces that contains test e.g. `.mytests`yourtests

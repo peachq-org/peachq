@@ -1,4 +1,4 @@
-/ q.q — self-hosted q keywords (kdb: keywords are `.q` entries from q.k).
+/ q.q - self-hosted q keywords (kdb: keywords are `.q` entries from q.k).
 / CONTRACT: one `.q.name:expr` per line; loads after registry init, before
 / dotq.q (which may use these names, never the reverse).  See q_runtime.c.
 
@@ -12,9 +12,9 @@
 .q.rand:{first 1?x}
 .q.deltas:(-':)
 .q.differ:{not(~':)x}
-/ ref/md5.md: verbatim q.k spelling — the -15! internal fn (q_bang.c -> q_md5_fn)
+/ ref/md5.md: verbatim q.k spelling - the -15! internal fn (q_bang.c -> q_md5_fn)
 .q.md5:(-15!)
-/ ref/hcount.md: file size in bytes — the -7! internal fn (q_bang.c -> h_hcount)
+/ ref/hcount.md: file size in bytes - the -7! internal fn (q_bang.c -> h_hcount)
 .q.hcount:(-7!)
 / ref/eval.md over basics/internal.md: eval IS the -6! internal (q_bang.c -> q_eval)
 .q.eval:(-6!)
@@ -25,17 +25,17 @@
 / `max 0,`/`max 1,` stand in for k's `0|`/`1|` (dyadic | lands in wave 3)
 .q.sublist:{$[2=count x;x[0]_((sum x)&count y)#y;0<=x;(x&count y)#y;(max 0,x+count y)_y]}
 / ref/sum.md "equivalent to {sum x*y}", float ONLY "when both x and y are
-/ integer lists" — an atom operand is not a list, so it never promotes
+/ integer lists" - an atom operand is not a list, so it never promotes
 .q.wsum:{sum x*$[all (type x;type y)in 5 6 7h;"f"$y;y]}
 .q.cov:{avg[x*y]-avg[x]*avg y}
 .q.scov:{cov[x;y]*count[x]%-1+count x}
 .q.mavg:{(x msum y)%x mcount y}
 / ref/fby.md prints the law: `(sum each dat group grp)grp`; x is the (aggr;d)
-/ pair.  Since V2.7 an aggregate may answer a LIST per group — then the results
+/ pair.  Since V2.7 an aggregate may answer a LIST per group - then the results
 / go back to their own rows, the raze un-permuted by iasc of the razed indices.
 .q.fby:{[x;y] g:group y; r:(first x) each (last x) g; $[0h>type first value r; r y; (raze value r) iasc raze value g]}
 
-/ ---- wave 3: the sort wave — every sort verb derives from the grade ----
+/ ---- wave 3: the sort wave - every sort verb derives from the grade ----
 / ref/asc.md: atom = already sorted (carries the RAY_STR atom too); 99h = dict AND keyed
 / table, entries gathered by the value grade (the non-key-column rule; .Q.ft would sort a
 / keyed table by its KEY cols).  No `s#: the attr-take arm takes longs only (PLAN.md).
@@ -48,19 +48,19 @@
 .q.xrank:{(x*rank y) div count y}
 / ref/asc.md: by the first column given, then the second within it = the grade of the named
 / columns, then ONE gather.  y a SYMBOL updates in place, returns the name (set returns its
-/ target).  t@/:x throws 'domain on a bad column — (flip t)x misses silently and truncates.
+/ target).  t@/:x throws 'domain on a bad column - (flip t)x misses silently and truncates.
 .q.xasc:{[x;y]$[-11h=type y;y set .q.xasc[x;get y];.Q.ft[{[x;t]t iasc flip x!t@/:x:$[0h>type x;1#x;x]}[x;];y]]}
 .q.xdesc:{[x;y]$[-11h=type y;y set .q.xdesc[x;get y];.Q.ft[{[x;t]t idesc flip x!t@/:x:$[0h>type x;1#x;x]}[x;];y]]}
 
 / ---- wave 3 (ref/cols.md) ----
-/ lifted via .Q.ft (defined later, in dotq.q — a lambda resolves it at call time);
+/ lifted via .Q.ft (defined later, in dotq.q - a lambda resolves it at call time);
 / names pair with the unchanged column values, so a bad rename/reorder goes ragged
 / at `!` and throws its own 'length (ref/cols.md: nonexistent key x -> 'length)
 .q.xcol:{[x;y] .Q.ft[{[x;t] c:cols t; flip ($[99h=type x;{[c;m](c^m c),(key m)except c}[c;$[98h=type key x;first each flip key x;x]];x,(count x)_c])!value flip t}[x;];y]}
 .q.xcols:{[x;y] .Q.ft[{[x;t] c:cols t; n:x,c except x; flip n!(flip t) n inter c}[x;];y]}
 
 / ---- wave 4: verbs with no kernel to lose ----
-/ ref/all-any.md: CAST then fold — (&/)1 2 3 is 1 (a raw min), but `all 1 2 3` is 1b.
+/ ref/all-any.md: CAST then fold - (&/)1 2 3 is 1 (a raw min), but `all 1 2 3` is 1b.
 / Three arms the fold cannot serve: 98h table "iterates over its columns and returns a
 / dictionary" (flip gives the 99h dict; each gives the doc's shape); an atom cast is an
 / atom ("a nonzero atom" -> 1b) and folding an atom throws; the empty list is the fold's
@@ -68,7 +68,7 @@
 / 'type, never a hand-written gate.  Bare all/any recurse via .q at call time.
 .q.all:{$[98h=type x;all each flip x;0h>type b:"b"$x;b;0=count b;1b;(&/)b]}
 .q.any:{$[98h=type x;any each flip x;0h>type b:"b"$x;b;0=count b;0b;(|/)b]}
-/ ref/tables.md "default is root namespace" — and bare `system"a"` lists the CURRENT
+/ ref/tables.md "default is root namespace" - and bare `system"a"` lists the CURRENT
 / context, so [] must pass `. itself.  f[] binds x to :: , and the kdb null-test
 / idiom `(::)~x` is the one total test.  A bad namespace throws \a's own error.
 .q.tables:{system"a ",string $[(::)~x;`.;x]}
@@ -77,11 +77,11 @@
 
 / ---- wave 5 (ref/save.md, ref/load.md) ----
 / `[path/to/]v.ext`: get the global v, dispatch .ext through .h.tx, write with Save Text
-/ (which creates parent dirs, overwrites, and returns the filename) — no formatting of its
+/ (which creates parent dirs, overwrites, and returns the filename) - no formatting of its
 / own, every byte comes from .h.tx/0:.  No .ext IS the binary arm, and ref/save.md states
 / its equivalence outright: `save `t` is `` `:t set t ``.  An .ext .h.tx does not key
 / signals that ext (`xls: peachq writes no Excel).
 .q.save:{f:{p:"." vs last "/" vs string x;$[2>count p;(hsym x) set get `$"." sv p;not (e:`$last p) in key .h.tx;'e;(hsym x) 0: .h.tx[e] get `$"." sv -1_p]};$[-11h=type x;f x;11h=type x;f each x;'`type]}
-/ ref/load.md: `load `t` is `t:get `:t` — the file's name IS the global's, and the name is
+/ ref/load.md: `load `t` is `t:get `:t` - the file's name IS the global's, and the name is
 / returned.  The filesymbol and directory-recursion arms are deferred, never guessed.
 .q.load:{f:{$[":"=first string x;'`nyi;x set get hsym x]};$[-11h=type x;f x;11h=type x;f each x;'`type]}

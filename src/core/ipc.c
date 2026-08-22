@@ -495,7 +495,7 @@ static int hook_call_auth(ray_poll_t* poll, int64_t handle,
 
     int ok;
     if (!r || RAY_IS_ERR(r)) {
-        fprintf(stderr, "ipc: .ipc.on.auth hook raised an error — rejecting\n");
+        fprintf(stderr, "ipc: .ipc.on.auth hook raised an error - rejecting\n");
         ok = 0;
     } else {
         ok = is_truthy(r) ? 1 : 0;
@@ -656,7 +656,7 @@ static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
                 .size    = (int64_t)plen,
             };
             if (ray_journal_write_bytes(&log_hdr, payload, (int64_t)plen) != RAY_OK) {
-                fprintf(stderr, "log: ERROR  journal write failed — refusing to evaluate\n");
+                fprintf(stderr, "log: ERROR  journal write failed - refusing to evaluate\n");
                 ray_release(msg);
                 *out_result = ray_error("io", "journal write failed; mutation refused");
                 return 0;
