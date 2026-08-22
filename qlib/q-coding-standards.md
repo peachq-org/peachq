@@ -80,6 +80,7 @@ than pad to a template. One honest line beats five generated ones.
   caller will trust. Limited means the code genuinely rejects everything else — go read it before
   you enumerate. Worked example: `.ffi.bind`'s `returntype` is `(char)`, not `(string)`, because
   `enlist "f"` is `'type`; but its `arglist` is `(any)`, because it really does take anything.
+- **Stdlib arguments accept `::` as the default universally, so qdocs never restate it** — document the real type, never the optionality.
 
 ## Comments in general
 
