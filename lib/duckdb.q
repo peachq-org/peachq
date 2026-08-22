@@ -27,6 +27,12 @@
 .duckdb.upsert:{[c;t;d] .duckdb.i.append[c;t;d]; t}
 .duckdb.meta:{[c;t] .duckdb.i.meta[c;t]}
 
+/ the DuckDB<->q type contract (the C QD_TYPES[] table) as data: one row per contract entry, columns
+/ dtype (the DDL spelling), ktype (the .duckdb.meta char), logical (the hub name), canon (whether a bare
+/ read of that DuckDB type produces this row).  Derive from it — never re-author the mapping q-side.
+/ @return (table) `dtype`ktype`logical`canon
+.duckdb.types:{[] .duckdb.i.types[]}
+
 / count/meta answer from cheap SQL, never a materialize: COUNT(*) is the
 / provider's own aggregate, and the host's fallback would have read every row.
 .duckdb.count:{[c;t] first .duckdb.i.exec[c; "SELECT COUNT(*) AS n FROM ",.duckdb.i.q t]`n}
