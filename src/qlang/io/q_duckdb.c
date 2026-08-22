@@ -1406,6 +1406,66 @@ static void qd_bind_vary(const char* name, ray_vary_fn fn) {
     ray_release(obj);
 }
 
+/* .duckdb.i.types[] — QD_TYPES[] projected as a q table `dtype`ktype`logical`canon.
+ * The C array is the ONE home of the mapping (append-only contract, fidelity spec
+ * 2026-07-14); q-side consumers DERIVE from this table, never re-author it.  Every
+ * row is included, ' '-meta rows too — filtering is the consumer's business. */
+static ray_t* qd_types_fn(ray_t** args, int64_t n) {
+    (void)args;
+    if (n != 1) return q_err(QE_RANK);
+    char kt[QD_NTYPES];
+    ray_t* dt = ray_list_new((int64_t)QD_NTYPES);
+    if (RAY_IS_ERR(dt)) return dt;
+    ray_t* lg = ray_list_new((int64_t)QD_NTYPES);
+    if (RAY_IS_ERR(lg)) { ray_release(dt); return lg; }
+    ray_t* cn = ray_list_new((int64_t)QD_NTYPES);
+    if (RAY_IS_ERR(cn)) { ray_release(dt); ray_release(lg); return cn; }
+    for (size_t i = 0; i < QD_NTYPES; i++) {
+        const qd_tmap_t* r = &QD_TYPES[i];
+        kt[i] = r->meta_ch;
+        ray_t* a = ray_sym(ray_sym_intern_runtime(r->sql, strlen(r->sql)));
+        dt = ray_list_append(dt, a);
+        ray_release(a);
+        a = ray_sym(ray_sym_intern_runtime(r->logical, strlen(r->logical)));
+        lg = ray_list_append(lg, a);
+        ray_release(a);
+        a = ray_bool(r->read_canon);
+        cn = ray_list_append(cn, a);
+        ray_release(a);
+        if (RAY_IS_ERR(dt) || RAY_IS_ERR(lg) || RAY_IS_ERR(cn)) break;
+    }
+    ray_t* bad = RAY_IS_ERR(dt) ? dt : RAY_IS_ERR(lg) ? lg : RAY_IS_ERR(cn) ? cn : NULL;
+    if (!bad) {
+        ray_t* v = q_list_collapse(dt);
+        ray_release(dt);
+        dt = v;
+        v = q_list_collapse(lg);
+        ray_release(lg);
+        lg = v;
+        v = q_list_collapse(cn);
+        ray_release(cn);
+        cn = v;
+        if (!dt || !lg || !cn) bad = q_err(QE_OOM);
+        else bad = RAY_IS_ERR(dt) ? dt : RAY_IS_ERR(lg) ? lg : RAY_IS_ERR(cn) ? cn : NULL;
+    }
+    ray_t* ktv = bad ? NULL : ray_charv(kt, (int64_t)QD_NTYPES);
+    if (!bad && RAY_IS_ERR(ktv)) bad = ktv;
+    ray_t* tbl = bad ? NULL : ray_table_new(4);
+    if (!bad && RAY_IS_ERR(tbl)) bad = tbl;
+    if (!bad) {
+        tbl = ray_table_add_col(tbl, ray_sym_intern_runtime("dtype", 5), dt);
+        if (!RAY_IS_ERR(tbl)) tbl = ray_table_add_col(tbl, ray_sym_intern_runtime("ktype", 5), ktv);
+        if (!RAY_IS_ERR(tbl)) tbl = ray_table_add_col(tbl, ray_sym_intern_runtime("logical", 7), lg);
+        if (!RAY_IS_ERR(tbl)) tbl = ray_table_add_col(tbl, ray_sym_intern_runtime("canon", 5), cn);
+        if (RAY_IS_ERR(tbl)) bad = tbl;
+    }
+    if (dt && dt != bad) ray_release(dt);
+    if (lg && lg != bad) ray_release(lg);
+    if (cn && cn != bad) ray_release(cn);
+    if (ktv && ktv != bad) ray_release(ktv);
+    return bad ? bad : tbl;
+}
+
 /* The INTERNAL native surface (`.duckdb.i.*`) the lib/duckdb.q provider hooks
  * are written over — the connection, the typed round-trip and one raw exec.
  * The public bespoke API (connect/sql/select/connections/version/err) was
@@ -1420,4 +1480,5 @@ void q_duckdb_register(void) {
     qd_bind_vary (".duckdb.i.set",    qd_set_wrap);
     qd_bind_vary (".duckdb.i.append", qd_append_wrap);
     qd_bind_vary (".duckdb.i.meta",   qd_meta_wrap);
+    qd_bind_vary (".duckdb.i.types",  qd_types_fn);
 }
