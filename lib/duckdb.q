@@ -29,7 +29,7 @@
 
 / the DuckDB<->q type contract (the C QD_TYPES[] table) as data: one row per contract entry, columns
 / dtype (the DDL spelling), ktype (the .duckdb.meta char), logical (the hub name), canon (whether a bare
-/ read of that DuckDB type produces this row).  Derive from it — never re-author the mapping q-side.
+/ read of that DuckDB type produces this row).  Derive from it - never re-author the mapping q-side.
 / @return (table) `dtype`ktype`logical`canon
 .duckdb.types:{[] .duckdb.i.types[]}
 
