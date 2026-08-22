@@ -1,8 +1,8 @@
 / .csv conformance: the incremental CSV reader (.csv.read / .csv.info).  Each test writes its own fixture
-/ inline with Save Text (`0:`) — the bytes sit next to the assertion that reads them — and only the one
+/ inline with Save Text (`0:`) - the bytes sit next to the assertion that reads them - and only the one
 / genuinely shared fixture (BASIC) lives in setUp.  Files land in the harness's wiped working directory, so
 / there is no teardown.  The embedded-newline rows are THE architecture pin: an RFC-4180 quoted field
-/ containing "\n" must load as one row — including when the quote straddles a read-chunk boundary (forced
+/ containing "\n" must load as one row - including when the quote straddles a read-chunk boundary (forced
 / tiny via the buffer_size option).  Errors are asserted by CLASS through assertThrows, never a stack trace.
 system "d .csvTest";
 
@@ -16,7 +16,7 @@ setUpBasic:{.csvTest.BASIC 0: ("a,b,c";"1,x,1.5";"2,y,2.5";"3,x,3.5")};
 
 testAccumulateReturnsTable:{
     t:.csv.read[.csvTest.BASIC;::;::;.csvTest.NOOPT];
-    .qunit.assertEquals[t; .csvTest.BASICTBL; "longs, floats — and text is ALWAYS a string column, never sym"]};
+    .qunit.assertEquals[t; .csvTest.BASICTBL; "longs, floats - and text is ALWAYS a string column, never sym"]};
 
 testTargetGlobalCreatesThenInserts:{
     / the fixture global is deleted from its namespace: a test lambda carries the .csvTest context,
@@ -49,7 +49,7 @@ testTypesDictOverride:{
     t:.csv.read[.csvTest.BASIC;::;(enlist `a)!enlist "s";.csvTest.NOOPT];
     .qunit.assertEquals[t; ([]a:`1`2`3;b:(enlist "x";enlist "y";enlist "x");c:1.5 2.5 3.5); "the override wins; untouched columns keep their sniff"]};
 
-/ the dict form reaches the SAME skip machinery as the string form's " " — a drop travels by name
+/ the dict form reaches the SAME skip machinery as the string form's " " - a drop travels by name
 testTypesDictDropsByName:{
     t:.csv.read[.csvTest.BASIC;::;(enlist `b)!enlist " ";.csvTest.NOOPT];
     .qunit.assertEquals[t; ([]a:1 2 3;c:1.5 2.5 3.5); "a \" \" dict value drops that column by name"];
@@ -142,7 +142,7 @@ testUnterminatedQuoteAborts:{
 
 / detect and parse share one validator per shape: whatever the sniffer types, its own parser must accept
 testNearMissShapesSniffAsText:{
-    / near-misses of float, date and time — the sniffer must call every one text
+    / near-misses of float, date and time - the sniffer must call every one text
     f:`:csvTestBadShape.csv 0: ("a,b,c";"1e,2026-02-31,12:99:00";"2e+,2026-02-30,25:00:00");
     t:.csv.read[f;::;::;.csvTest.NOOPT];
     .qunit.assertEquals[t; flip `a`b`c!(("1e";"2e+");("2026-02-31";"2026-02-30");("12:99:00";"25:00:00")); "a digit-less exponent, an impossible date and an out-of-range time are all text"];
@@ -166,7 +166,7 @@ testCrlfRows:{
 testCrOnlyRows:{
     f:`:csvTestCrOnly.csv 0: enlist "a,b\r1,2\r3,4";
     t:.csv.read[f;::;::;.csvTest.NOOPT];
-    .qunit.assertEquals[t; ([]a:1 3;b:2 4); "a bare CR terminates rows too — old-Mac endings are not one row"]};
+    .qunit.assertEquals[t; ([]a:1 3;b:2 4); "a bare CR terminates rows too - old-Mac endings are not one row"]};
 
 / a textual header cell over a NUMERIC column marks the header even when other header cells look numeric
 testPartlyNumericHeader:{
@@ -177,7 +177,7 @@ testPartlyNumericHeader:{
 testLongOverflowSniffsAsFloat:{
     f:`:csvTestBigInt.csv 0: ("n";"10000000000000000000");
     t:.csv.read[f;::;::;.csvTest.NOOPT];
-    .qunit.assertEquals[t; ([]n:enlist 1e19); "past the long domain the column reads as float — never a silent overflow"]};
+    .qunit.assertEquals[t; ([]n:enlist 1e19); "past the long domain the column reads as float - never a silent overflow"]};
 
 / the DEFAULT null is the EMPTY field only (DuckDB's default): NA/NULL/... are ordinary text until the
 / nullstr option lands, so under sniffing they make the column text, and under a frozen type they abort
@@ -206,7 +206,7 @@ testTargetReorderedColumnsLoadByName:{
     .csvTest.T2::([]a:enlist 1;b:enlist `x);
     f:`:csvTestTgtReorder.csv 0: ("b,a";"y,2";"z,3");
     .csv.read[f;`.csvTest.T2;::;.csvTest.NOOPT];
-    .qunit.assertEquals[.csvTest.T2; ([]a:1 2 3;b:`x`y`z); "reordered CSV columns land by name — and as syms, per the target"]};
+    .qunit.assertEquals[.csvTest.T2; ([]a:1 2 3;b:`x`y`z); "reordered CSV columns land by name - and as syms, per the target"]};
 
 / (iii) the subsetting rider: a CSV column the target lacks is never parsed, never materialized
 testTargetExtraColumnIgnored:{
@@ -222,7 +222,7 @@ testTargetKeyedTableUpserts:{
     .csvTest.K1::([k:`p`q] v:1 2);
     f:`:csvTestTgtKeyed.csv 0: ("k,v";"q,20";"r,30");
     .csv.read[f;`.csvTest.K1;::;.csvTest.NOOPT];
-    .qunit.assertEquals[.csvTest.K1; ([k:`p`q`r] v:1 20 30); "a keyed target routes through upsert — the key row updates"]};
+    .qunit.assertEquals[.csvTest.K1; ([k:`p`q`r] v:1 20 30); "a keyed target routes through upsert - the key row updates"]};
 
 / positional means position -> target COLUMN: the derived map carries the target's names too, so the
 / name-matching insert seam still lands the batch
@@ -233,14 +233,14 @@ testTargetHeaderlessLoadsPositionally:{
     .csv.read[f;`.csvTest.T6;::;.csvTest.NOOPT];
     .qunit.assertEquals[.csvTest.T6; ([]a:1.5 2 3;b:`x`y`z); "a headerless file takes the target's names and types by position"]};
 
-/ conformity beyond the subsetting rider is the insert seam's OWN contract — its class, not a csv one
+/ conformity beyond the subsetting rider is the insert seam's OWN contract - its class, not a csv one
 testTargetMissingColumnIsInsertsError:{
     @[{![`.csvTest;();0b;enlist x]};`T4;::];
     .csvTest.T4::([]a:enlist 1;b:enlist 2);
     f:`:csvTestTgtMissing.csv 0: (enlist "a";enlist "5");
     .qunit.assertThrows[.csv.read[;`.csvTest.T4;::;.csvTest.NOOPT]; f; "mismatch*"; "a missing column is insert's own 'mismatch"]};
 
-/ explicit types outrank the target only by AGREEING with it — a conflict is 'mismatch before any parse
+/ explicit types outrank the target only by AGREEING with it - a conflict is 'mismatch before any parse
 testTargetTypesConflictIsMismatch:{
     @[{![`.csvTest;();0b;enlist x]};`T5;::];
     .csvTest.T5::([]a:enlist 1.5);
@@ -264,4 +264,4 @@ testSummaryDictShape:{
     .qunit.assertEquals[s`rows; 3; "rows counts the data rows"];
     .qunit.assertEquals[s`rejected; 0; "nothing is rejected yet"];
     .qunit.assertEquals[s`ignored; 0#`x; "no target schema, so nothing was projected away"];
-    .qunit.assertEquals[s`types; `a`b`c!"j*f"; "types echoes the frozen schema — sniffed text is a string column"]};
+    .qunit.assertEquals[s`types; `a`b`c!"j*f"; "types echoes the frozen schema - sniffed text is a string column"]};

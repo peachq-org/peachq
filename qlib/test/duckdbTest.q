@@ -1,4 +1,4 @@
-/ .duckdb conformance: the type-contract projection .duckdb.types — the C QD_TYPES[] table surfaced as
+/ .duckdb conformance: the type-contract projection .duckdb.types - the C QD_TYPES[] table surfaced as
 / data.  A pure projection: no test here needs the DuckDB library, a connection, or a file, so the suite
 / runs wherever the stdlib loads.  Rows are pinned by CONTENT (the append-only contract rows), never by
 / position or total count, so contract additions extend the table without touching these tests.
@@ -20,7 +20,7 @@ testKnownRows:{
 / so `first` picks nothing arbitrary and the dict answers deterministically
 testCanonDerivation:{
     c:select from .duckdb.types[] where canon;
-    .qunit.assertEquals[count c; count distinct c`dtype; "one canon row per dtype — first is well-defined"];
+    .qunit.assertEquals[count c; count distinct c`dtype; "one canon row per dtype - first is well-defined"];
     d:(c`dtype)!c`ktype;
     .qunit.assertEquals[d`BIGINT; "j"; "the derived dtype->char dict answers"];
     .qunit.assertEquals[d`TIMESTAMP_NS; "p"; "and the temporal rows ride along"]};
