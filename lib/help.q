@@ -1,9 +1,9 @@
-/ help.q — the .help doc store: every doc comment the engine saw, queryable.
-/ PURE q by owner ruling — no C implements .help; the script seam only calls
+/ help.q - the .help doc store: every doc comment the engine saw, queryable.
+/ PURE q by owner ruling - no C implements .help; the script seam only calls
 / the two hooks below.  Re-pointing them is NOT a supported contract.
-/ Schema after qstudio's man.q.  Headers are parsed ON INGEST — only the
+/ Schema after qstudio's man.q.  Headers are parsed ON INGEST - only the
 / structured rows are stored, so a changed parse rule means "reload the file".
-/ Loaded FIRST in the bundle (Makefile LIB_Q_SRCS) — the one load order that
+/ Loaded FIRST in the bundle (Makefile LIB_Q_SRCS) - the one load order that
 / is not moot, since capture needs the hooks already bound.
 .help.funcs:([fullname:`$()] ns:`$(); file:`$(); line:`long$())
 .help.args:([] fullname:`$(); tag:`$(); param:`$(); description:())
@@ -21,10 +21,10 @@
 
 / header -> rows (tag;param;description;val), the lead description first under
 / a null tag: the lead is EVERY line before the first tag, a non-tag line
-/ after a tag continues THAT tag, and a bare @ is text, never a tag — so it
+/ after a tag continues THAT tag, and a bare @ is text, never a tag - so it
 / cannot collide with the lead row's null tag.  A NAME is split off for @param
 / and @exception only; every other tag, known or invented, is kept under its
-/ own name with its text unread — no whitelist, so no tag is ever dropped.
+/ own name with its text unread - no whitelist, so no tag is ever dropped.
 .help.i.parse:{[header]
   text:{[l] l:.help.i.strip l; l:$[count i:where not l="/";(first i)_l;""]; $[(count l)and (first l)in " \t";1_l;l]};
   istag:{[l] l:.help.i.strip l;(1<count l)and"@"=first l};
@@ -44,7 +44,7 @@
 .help.i.args:{[fullname;header] r:.help.i.parse header;$[count r;((count r)#fullname;r[;0];r[;1];r[;2]);(`$();`$();`$();())]}
 .help.i.filetags:{[file;header] r:.help.i.parse header;$[count r;((count r)#file;r[;0];r[;3]);(`$();`$();())]}
 
-/ begin this file — UPSERT-ONLY: the store mirrors the SESSION, and `\l` never
+/ begin this file - UPSERT-ONLY: the store mirrors the SESSION, and `\l` never
 / removes a definition, so `file` is provenance, never a key to clear over
 / (definition rows replace per-fullname in register_definition).  This call
 / replaces only what it re-inserts itself; with an empty header (every script
@@ -65,7 +65,7 @@
   delete from `.help.args where fullname=nm;
   `.help.args insert .help.i.args[fullname;header]; }
 
-/ one name's documentation as text — its description, then its tags.
+/ one name's documentation as text - its description, then its tags.
 / @param name (symbol|string) the fullname a definition was captured under
 / @return (string) the rendered page, or a one-line "no documentation" note
 .help.get:{[name]
@@ -86,12 +86,12 @@
 .help.url:"https://peachq.org/"
 .help.i.ix:()
 
-/ GET one path off .help.url — the ONE trapped door to the network the web
+/ GET one path off .help.url - the ONE trapped door to the network the web
 / tier uses; "" on any failure or when the tier is disabled.
 .help.i.get:{[path] $[count .help.url;@[{.Q.hg x};.help.url,path;{""}];""]}
 
 / the online topic index (help.csv: pagepath,qname,kind), fetched on FIRST
-/ use and cached for the session; offline caches as the empty table — reset
+/ use and cached for the session; offline caches as the empty table - reset
 / with .help.i.ix:() to retry after gaining net access.
 / @return (table) pagepath (string), qname (string), kind (symbol)
 .help.index:{[]
@@ -122,8 +122,8 @@
 
 / the help ladder as a VALUE (the IPC-friendly form), returning EVERYTHING the
 / print form shows: the index for an empty pattern; else the local page for an
-/ exact captured name — with a page's blurb and member table appended — joined
-/ with the online page for an exact index topic; when both miss, .help.find —
+/ exact captured name - with a page's blurb and member table appended - joined
+/ with the online page for an exact index topic; when both miss, .help.find -
 / exactly one documented match answers ITS page, else the matching rows come
 / back as a table to narrow by (empty = no match).
 / @param pattern (symbol|string) a name, or a pattern as .help.find takes it
@@ -137,11 +137,11 @@
   $[1=count m:distinct r`fullname;.help.get first m;r]}
 
 / render a fetched page for the console behind a `│ ` gutter, obeying the
-/ effective `\c` — its rows bound the preview, its cols clip each line
-/ (console `..` rule) — ending in a `.. N more` pointer (??topic / the
+/ effective `\c` - its rows bound the preview, its cols clip each line
+/ (console `..` rule) - ending in a `.. N more` pointer (??topic / the
 / website show everything).  ```q/```syntax block bodies get one tint, fence
 / lines the gutter grey.  .pq.termsize fills auto (`0N`) `\c` axes and
-/ .pq.cancolor gates ALL the ANSI — both soft by-name calls, so a host
+/ .pq.cancolor gates ALL the ANSI - both soft by-name calls, so a host
 / without .pq degrades to a plain 25x80 preview.
 .help.i.page:{[topic;md]
   ls:"\n" vs .help.i.rstrip md;
@@ -163,7 +163,7 @@
 
 / THE printing door (`?`), and it returns null: the local page prints plainly, a
 / fetched page as the gutter preview (.help.i.page), the find fallback as its
-/ page or table.  `.help.text` is the VALUE ladder — one contract per name, so
+/ page or table.  `.help.text` is the VALUE ladder - one contract per name, so
 / a caller never has to guess whether it printed or answered.
 / @param pattern (symbol|string) a name, or a pattern as .help.find takes it
 .help.show:{[pattern]
@@ -184,14 +184,14 @@
 / the basic datatype reference (ref/card.md shape), spelled by the engine:
 / the nulls and infinities are TYPED literals, n derives from their types,
 / c from .Q.t, the null/inf cells are their -3! renderings (so the table can
-/ never drift from what the display prints — 0Wh shows 32767h, doc-true),
+/ never drift from what the display prints - 0Wh shows 32767h, doc-true),
 / and the inf rows self-align by type number.
 / @return (table) n, c, name, sz (bytes), literal, null, inf, sql
 .help.types:{[]
   nul:(0b;0Ng;0x00;0Nh;0Ni;0N;0Ne;0n;" ";`;0Np;0Nm;0Nd;0Nz;0Nn;0Nu;0Nv;0Nt);
   inf:(0Wh;0Wi;0W;0We;0w;0Wp;0Wm;0Wd;0Wz;0Wn;0Wu;0Wv;0Wt);
   n:0h,abs type each nul;
-  / `null` is a reserved word, so a table LITERAL cannot name that column — built from data instead
+  / `null` is a reserved word, so a table LITERAL cannot name that column - built from data instead
   flip `n`c`name`sz`literal`null`inf`sql!(n;"*",.Q.t 1_n;
     `list`boolean`guid`byte`short`int`long`real`float`char`symbol`timestamp`month`date`datetime`timespan`minute`second`time;
     0N 1 16 1 2 4 8 4 8 1 0N 8 4 4 8 8 4 4 4;
@@ -200,7 +200,7 @@
     @[count[n]#enlist"";n?abs type each inf;:;-3!'inf];
     ("";"";"";"";"smallint";"int";"bigint";"real";"float";"";"varchar";"";"";"date";"timestamp";"";"";"";"time"))}
 
-/ the one-line summary for a name — the first line of its lead description,
+/ the one-line summary for a name - the first line of its lead description,
 / "" when undocumented.  The REPL hint renders `?name / <this>` and owns the
 / width clipping, so the line comes back untrimmed.
 / @param name (symbol|string) the fullname
@@ -209,7 +209,7 @@
   r:select description from .help.args where fullname=n,null tag;
   $[count r;first "\n" vs r[0;`description];""]}
 
-/ register one builtin's one-liner (repeated a LOT below — keep calls short).
+/ register one builtin's one-liner (repeated a LOT below - keep calls short).
 .help.i.r:{[fullname;description]
   .help.register_definition[fullname;`$"."sv -1_"."vs string fullname;`;0N;description];}
 
@@ -223,7 +223,7 @@
   ts:ts where 0<count each ts:" " vs w;
   {p:"*",x,"*";p where not (p="*")and"*"=next p} each $[count ts;ts;enlist ""]}
 
-/ the doc rows whose fullname, tag, param or description match — globs,
+/ the doc rows whose fullname, tag, param or description match - globs,
 / matched anywhere and case-insensitively, so a bare word is a substring
 / search.  MANY WORDS ARE AN AND: a two-word query wants the rows answering to
 / both, which no one contiguous phrase finds.  NAMES FIRST: a name hit is what
@@ -253,11 +253,11 @@
 
 / ---- pages -----------------------------------------------------------------
 / A PAGE is a curated blurb over a member filter, and an ENTRY like any other
-/ name: .help.find matches it and .help.oneline answers it.  NAMES BEAT PAGES —
+/ name: .help.find matches it and .help.oneline answers it.  NAMES BEAT PAGES -
 / an exact documented name always renders its own stack and the page's member
 / table is APPENDED below it.  A PAGE NAME NEVER COLLIDES with a documented name
 / (owner ruling, 2026-08-14): `table` is the page, `tables` stays the keyword.
-/ .help.i.pr enforces it defensively — it will not overwrite a documented name —
+/ .help.i.pr enforces it defensively - it will not overwrite a documented name -
 / but the spelling, not the guard, is what keeps the two apart.
 / Empty members means "filter by this page's own name as a namespace prefix",
 / which is also what any undeclared namespace with documented members gets.
@@ -328,13 +328,13 @@
 
 / one member row.  A builtin one-liner already names itself in its call column
 / (its .help.funcs line is null); a CAPTURED doc comment is prose, so the name
-/ becomes its call — otherwise a namespace page lists sentences with no names.
+/ becomes its call - otherwise a namespace page lists sentences with no names.
 .help.i.memline:{[n] o:.help.oneline n;
   $[null .help.funcs[n;`line];o;.help.i.line[string n;o]]}
 
 / what an exact page match ADDS below the name's own entry line: the curated
 / blurb, the member table (each member's dominant meaning), and at most ONE
-/ static pointer at the page's mapped online topic.  A page NEVER fetches — the
+/ static pointer at the page's mapped online topic.  A page NEVER fetches - the
 / pointer is string-built, and the index is only CONSULTED when a previous
 / lookup already cached it, never fetched to check.
 .help.i.pagetext:{[p]
@@ -348,7 +348,7 @@
 
 / the index (bare `?`): the tutorial first, every row pasteable, `· page`
 / marking a directory.  Every listed page HAS an entry, so its row is that
-/ entry's own line — one home per summary.  Layout is prose: order lives here.
+/ entry's own line - one home per summary.  Layout is prose: order lives here.
 .help.i.index:{[]
   row:{[p] "  ",.help.oneline p};
   "\n" sv (enlist "peachq help · one line per meaning · ?name shows it · ??name shows it in full"),
@@ -358,7 +358,7 @@
    enlist "  ",(count[.help.i.line["";""]]$"?math  ?joins  ?strings  ?temporal  ?table"),"topic pages"}
 
 / page ENTRY rows, rendered from the registry summary.  Runs AFTER the generated
-/ block and NEVER overwrites an already-documented name — the defensive half of
+/ block and NEVER overwrites an already-documented name - the defensive half of
 / the no-collision rule, and what lets a page whose body IS its entry (`started`)
 / be skipped here and carry its own summary.
 .help.i.pr:{[name;page] if[not name in exec fullname from .help.funcs;

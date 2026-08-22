@@ -666,7 +666,7 @@ static int zh_dispatch_call(ray_sock_t fd, const char* method, size_t mlen,
         return 0;
     } }
     if (may_decline && r == RAY_NULL_OBJ) return -1;
-    fprintf(stderr, "http: %s returned %s — sending 500\n", which,
+    fprintf(stderr, "http: %s returned %s - sending 500\n", which,
             (r && RAY_IS_ERR(r)) ? "an error" : "a non-string");
     if (r) {
         if (RAY_IS_ERR(r)) ray_error_free(r);
@@ -805,11 +805,11 @@ static int zac_gate(ray_sock_t fd, ray_t* fn, const char* target, size_t tlen,
             case 0: zac_send_401(fd);      break;   /* reject */
             case 2: q_http_send_all(fd, pay, paylen, Q_HTTP_SEND_SECS); break; /* custom */
             default:
-                fprintf(stderr, "http: .z.ac returned an unknown status — 500\n");
+                fprintf(stderr, "http: .z.ac returned an unknown status - 500\n");
                 q_http_send_simple(fd, 500, "Internal Server Error");
         }
     } else {
-        fprintf(stderr, "http: .z.ac returned %s — 500\n",
+        fprintf(stderr, "http: .z.ac returned %s - 500\n",
                 (r && RAY_IS_ERR(r)) ? "an error" : "a malformed value");
         q_http_send_simple(fd, 500, "Internal Server Error");
     }

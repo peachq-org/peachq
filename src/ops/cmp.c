@@ -80,7 +80,7 @@ int sym_atom_cmp(ray_t* a, ray_t* b) {
     if (a->i64 == b->i64) return 0;
     ray_t* sa = ray_sym_str(a->i64);
     ray_t* sb = ray_sym_str(b->i64);
-    assert(sa && sb && "sym_atom_cmp: corrupted intern table — "
+    assert(sa && sb && "sym_atom_cmp: corrupted intern table - "
                        "valid SYM atom must resolve to interned string");
     int r = ray_str_cmp(sa, sb);
     ray_release(sa);
