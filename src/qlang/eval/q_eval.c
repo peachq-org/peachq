@@ -574,6 +574,10 @@ ray_t* q_eval_value_wrap(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (RAY_IS_NULL(x)) return ray_i64(0);   /* (::) IS unary primitive 0 —
                                               * ref/value.md operator arm */
+    if (q_enum_is(x)) return q_enum_decay(x);   /* `value e` -> resolved values,
+                                                 * or bare positions for a
+                                                 * reference domain (R1/R4;
+                                                 * wp/foreign-keys.md:188-213) */
     if (x->type == -RAY_SYM) {
         ray_t* m = q_splay_get(x);           /* NULL unless a `:dir/ table folder */
         if (m) return m;
@@ -761,8 +765,17 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
         if (id) { q_err_drop(); ray_error_free(cur); cur = id; }
     }
     if (RAY_IS_ERR(cur)) { ray_release(rv); return cur; }
-    ray_t* av[2] = { cur, rv };
-    ray_t* nv = q_eval_apply(opv, row, av, 2);
+    ray_t* nv;
+    if (row && !strcmp(row->name, ",") && q_enum_is(cur)) {
+        /* `e,:y` ENFORCES the domain in place (R6: el,:`apple coerces,
+         * el,:`zz is 'cast) where plain `,` decays — the write path is the
+         * one that guards the column's meaning */
+        int64_t dom = q_enum_domain(cur);
+        nv = q_enum_stamp(q_enum_col_concat(cur, rv), dom);
+    } else {
+        ray_t* av[2] = { cur, rv };
+        nv = q_eval_apply(opv, row, av, 2);
+    }
     ray_release(cur);
     ray_release(rv);
     if (RAY_IS_ERR(nv)) return nv;
@@ -875,6 +888,19 @@ ray_t* q_eval(ray_t* node) {
     /* the enlisted sym-constant unwrap (parsetrees.md:26: eval enlist`x -> `x):
      * a 1-element sym vector in tree position IS the sym atom constant */
     if (sym_const(node)) {
+        /* a Q_ATTR_KEYLIST-marked node is the 1-col table-literal KEY (see
+         * q_parse_internal.h): a genuine 1-name LIST, not the enlisted atom —
+         * it evaluates to a fresh unmarked copy of itself, so `!` sees
+         * list!list and the mark never escapes into values */
+        if ((node->attrs & Q_ATTR_KEYLIST) && ray_vec_get_sym_id(node, 0) != 0) {
+            ret = ray_sym_vec_new(RAY_SYM_W64, 1);
+            if (ret && !RAY_IS_ERR(ret)) {
+                int64_t id = ray_vec_get_sym_id(node, 0);
+                ret = ray_vec_append(ret, &id);
+            }
+            if (!ret) ret = q_err(QE_OOM);
+            goto out;
+        }
         ret = q_index_elem_at(node, 0);
         /* the unwrap is the enlist's inverse, so it must restore the DATA mark
          * too: without it a verb-glyph sym (`. `+) prints as a bare name-ref */

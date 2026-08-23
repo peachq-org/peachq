@@ -8,7 +8,7 @@
 #include "qlang/q_prim.h"       /* q_str_text_bytes — nested char elements */
 #include "qlang/q_builtins.h"   /* q_count_long — nested column length */
 #include "qlang/ops/q_index.h"  /* q_index_elem_at — nested char elements */
-#include "qlang/io/q_splay.h"   /* q_splay_invalidate — an overwrite drops the entry */
+#include "qlang/io/q_splay.h"   /* q_splay_invalidate(_under) — writes drop stale map entries */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_concrete, q_eval_apply_value */
 #include "qlang/q_registry.h"   /* the `,` value the append fallback composes on */
 #include "lang/eval.h"          /* ray_eval_get_restricted */
@@ -20,7 +20,6 @@
 #include <sys/stat.h>
 
 static int64_t wf_i64(const uint8_t* p) { int64_t v; memcpy(&v, p, 8); return v; }
-static int32_t wf_i32(const uint8_t* p) { int32_t v; memcpy(&v, p, 4); return v; }
 
 /* ---- the on-disk shapes ------------------------------------------------- */
 
@@ -30,8 +29,7 @@ static int32_t wf_i32(const uint8_t* p) { int32_t v; memcpy(&v, p, 4); return v;
 #define WF_D_NAME 16   /* shape D: fd 20 + a 4096-byte page, domain name at +16 */
 #define WF_D_DESC 4080 /* ...whose last 16 bytes are a shape B header */
 #define WF_D_OFF  4096
-#define WF_ENUM_TYPE 20  /* kdb's enum; peachq has none, so it resolves away to 11h */
-#define WF_DOMAIN_LEVELS 4  /* a column copied out of its database fails, never walks to / */
+#define WF_ENUM_TYPE 20  /* kdb's enum — read enum-NATIVE as RAY_ENUM (20h) */
 #define WF_NEST_BIAS 77  /* 77+n = mapped list of vectors of type n, elements in `<col>#` */
 #define WF_NEST_HI   96
 
@@ -61,9 +59,10 @@ static int wf_leaf_name(const char* s, size_t n) {
     return n && !memchr(s, '/', n) && !memchr(s, '\\', n);
 }
 
-/* An ALLOWLIST, not a cast: peachq added types kdb never writes (RAY_SEL 20,
- * RAY_STR 21) and RAY_SYM's width is adaptive, so raw disk bytes cannot carry
- * it.  Width stays ray_type_sizes' business — one source of truth. */
+/* An ALLOWLIST, not a cast: peachq added a type kdb never writes (RAY_STR 21)
+ * and RAY_SYM's width is adaptive, so raw disk bytes cannot carry it; disk 20
+ * is the enum SHAPE marker, never a simple tag.  Width stays ray_type_sizes'
+ * business — one source of truth. */
 static int8_t wf_simple_tag(uint8_t disk) {
     switch (disk) {
     case RAY_BOOL: case RAY_GUID: case RAY_BYTE_ONLY: case RAY_I16:
@@ -180,68 +179,26 @@ static ray_t* wf_read_b(const uint8_t* buf, size_t len, int derive, ray_t* path)
     return v;
 }
 
-/* A preloaded enum domain (the splay registry's): a column enumerated against
- * `name` resolves on it instead of the directory walk-up. */
-typedef struct { const char* name; ray_t* dom; } wf_dom_hint;
+static ray_t* wf_read_path(ray_t* path, int follow);
 
-/* `follow` = may this read resolve REFERENCES to other files (the enum domain,
- * the `#` companion)?  A referenced file's own read says no and reaches the
- * readers with a NULL path, which is what keeps the walk flat. */
-static ray_t* wf_read_path(ray_t* path, int follow, const wf_dom_hint* hint);
-
-/* An enum names its domain, not its location.  Climb from the column's PARENT —
- * a table directory holds only columns, `quote/sym` among them. */
-static ray_t* wf_domain(ray_t* path, const char* name) {
-    size_t nn = strlen(name);
-    if (!wf_leaf_name(name, nn)) return q_err(QE_CORRUPT);
-    const char* p = ray_str_ptr(path);
-    size_t n = ray_str_len(path);
-    while (n && p[n - 1] != '/') n--;                  /* the column's own directory */
-    for (int lvl = 0; lvl < WF_DOMAIN_LEVELS && n; lvl++) {
-        n--;                                           /* climb one: the '/' ... */
-        while (n && p[n - 1] != '/') n--;               /* ...and the name before it */
-        if (!n) break;
-        ray_t* cand = wf_join(p, n, name, nn);
-        if (!cand) return q_err(QE_OOM);
-        ray_t* d = wf_is_file(cand) ? wf_read_path(cand, 0, NULL) : NULL;
-        ray_release(cand);
-        if (!d) continue;
-        if (!RAY_IS_ERR(d) && d->type != RAY_SYM) { ray_release(d); return q_err(QE_TYPE); }
-        return d;
-    }
-    return q_err(QE_IO);
-}
-
-/* C and D agree from the count on: count(8) then `w`-byte indices.  Sorted-by-
- * domain-position is not sorted-by-symbol, so the attribute cannot survive. */
-static ray_t* wf_read_enum(ray_t* path, const char* domain,
-                           const uint8_t* p, size_t room, uint8_t w,
-                           uint8_t attr, int derive, const wf_dom_hint* hint) {
+/* C and D agree from the count on: count(8) then `w`-byte indices.  The read
+ * is ENUM-NATIVE (2026-08-22 plan): widen the indices to i64, stamp the
+ * domain-NAME sym, return a 20h vector — the domain FILE is never touched
+ * here; resolution is lazy through the env (the root `sym` binds at splay
+ * registration, io/q_splay.c).  Sorted-by-domain-position is not sorted-by-
+ * symbol, so the attribute cannot survive. */
+static ray_t* wf_read_enum(const char* domain, const uint8_t* p, size_t room,
+                           uint8_t w, uint8_t attr, int derive) {
+    size_t nn = strlen(domain);
+    if (!wf_leaf_name(domain, nn)) return q_err(QE_CORRUPT);
     int64_t count = wf_i64(p);
     if (derive && count == 0) {
         count = wf_derive_count(room, w, attr);
         if (count < 0) return q_err(QE_NYI);
     }
     if (count < 0 || (uint64_t)count > room / w) return q_err(QE_CORRUPT);
-    if (!path) return q_err(QE_TYPE);
-    ray_t* dom;
-    if (hint && hint->dom && strcmp(domain, hint->name) == 0) {
-        dom = hint->dom;
-        ray_retain(dom);                       /* released below like a loaded one */
-    } else
-        dom = wf_domain(path, domain);
-    if (!dom || RAY_IS_ERR(dom)) return dom ? dom : q_err(QE_IO);
-    int64_t dlen = ray_len(dom);
-    ray_t* out = ray_sym_vec_new(RAY_SYM_W64, count);
-    const uint8_t* idx = p + 8;
-    for (int64_t i = 0; out && !RAY_IS_ERR(out) && i < count; i++) {
-        int64_t k = w == 4 ? wf_i32(idx + i * 4) : wf_i64(idx + i * 8);
-        if (k < 0 || k >= dlen) { ray_release(out); out = q_err(QE_CORRUPT); break; }
-        int64_t id = ray_vec_get_sym_id(dom, k);
-        out = ray_vec_append(out, &id);
-    }
-    ray_release(dom);
-    return out ? out : q_err(QE_OOM);
+    return q_enum_from_indices(ray_sym_intern_runtime(domain, nn),
+                               p + 8, count, w);
 }
 
 /* Two candidate count offsets: the terminator rounded up to the next 8-byte
@@ -274,23 +231,20 @@ static int wf_c_count_off(const uint8_t* buf, size_t avail, size_t len,
     return hits == 1;
 }
 
-static ray_t* wf_read_c(const uint8_t* buf, size_t len, ray_t* path, int derive,
-                        const wf_dom_hint* hint) {
+static ray_t* wf_read_c(const uint8_t* buf, size_t len, int derive) {
     size_t coff = 0;
     if (!wf_c_count_off(buf, len, len, derive, &coff)) return q_err(QE_CORRUPT);
-    return wf_read_enum(path, (const char*)buf + 1,
-                        buf + coff, len - coff - 8, 4, 0, derive, hint);
+    return wf_read_enum((const char*)buf + 1, buf + coff, len - coff - 8, 4, 0, derive);
 }
 
-static ray_t* wf_read_d(const uint8_t* buf, size_t len, ray_t* path, int derive,
-                        const wf_dom_hint* hint) {
+static ray_t* wf_read_d(const uint8_t* buf, size_t len, ray_t* path, int derive) {
     if (len < WF_D_OFF) return q_err(QE_CORRUPT);
     const uint8_t* desc = buf + WF_D_DESC;
     if (desc[2] != WF_ENUM_TYPE) return wf_read_b(desc, len - WF_D_DESC, derive, path);
     const uint8_t* nul = (const uint8_t*)memchr(buf + WF_D_NAME, 0, WF_D_DESC - WF_D_NAME);
     if (!nul || nul == buf + WF_D_NAME) return q_err(QE_CORRUPT);
-    return wf_read_enum(path, (const char*)buf + WF_D_NAME,
-                        desc + 8, len - WF_D_OFF, 8, desc[3], derive, hint);
+    return wf_read_enum((const char*)buf + WF_D_NAME,
+                        desc + 8, len - WF_D_OFF, 8, desc[3], derive);
 }
 
 /* The 2009 legacy ff 20 header and an fd page that is not 20 stay deferred. */
@@ -304,13 +258,12 @@ static wf_shape_t wf_sniff(const uint8_t* p, size_t n) {
     return WF_UNKNOWN;
 }
 
-static ray_t* wf_read_image(const uint8_t* buf, size_t len, int unzipped, ray_t* path,
-                            const wf_dom_hint* hint) {
+static ray_t* wf_read_image(const uint8_t* buf, size_t len, int unzipped, ray_t* path) {
     switch (wf_sniff(buf, len)) {
     case WF_A:     return wf_read_a(buf, len);
     case WF_B:     return wf_read_b(buf, len, unzipped, path);
-    case WF_C:     return wf_read_c(buf, len, path, unzipped, hint);
-    case WF_D:     return wf_read_d(buf, len, path, unzipped, hint);
+    case WF_C:     return wf_read_c(buf, len, unzipped);
+    case WF_D:     return wf_read_d(buf, len, path, unzipped);
     case WF_DEFER: return q_err(QE_NYI);
     case WF_UNKNOWN: break;
     }
@@ -334,7 +287,7 @@ static ray_t* wf_read_splay(const char* dir, size_t n, ray_t* dotd) {
         if (!cp) { bad = q_err(QE_OOM); break; }
         /* A name .d lists with no file behind it is a damaged table, not a
          * file someone asked for and missed. */
-        ray_t* col = wf_is_file(cp) ? wf_read_path(cp, 1, NULL) : q_err(QE_CORRUPT);
+        ray_t* col = wf_is_file(cp) ? wf_read_path(cp, 1) : q_err(QE_CORRUPT);
         ray_release(cp);
         if (RAY_IS_ERR(col)) { bad = col; break; }
         if (rows < 0) rows = ray_len(col);
@@ -354,7 +307,7 @@ static ray_t* wf_read_splay(const char* dir, size_t n, ray_t* dotd) {
 static ray_t* wf_read_folder(const char* dir, size_t n) {
     ray_t* dp = wf_join(dir, n, ".d", 2);
     if (!dp) return q_err(QE_OOM);
-    ray_t* dotd = wf_is_file(dp) ? wf_read_path(dp, 0, NULL) : q_err(QE_TYPE);
+    ray_t* dotd = wf_is_file(dp) ? wf_read_path(dp, 0) : q_err(QE_TYPE);
     ray_release(dp);
     if (RAY_IS_ERR(dotd)) return dotd;
     ray_t* r = dotd->type == RAY_SYM ? wf_read_splay(dir, n, dotd) : q_err(QE_CORRUPT);
@@ -362,7 +315,10 @@ static ray_t* wf_read_folder(const char* dir, size_t n) {
     return r;
 }
 
-static ray_t* wf_read_path(ray_t* path, int follow, const wf_dom_hint* hint) {
+/* `follow` = may this read resolve REFERENCES to other files (the `#`
+ * companion, nested arenas)?  A referenced file's own read says no and reaches
+ * the readers with a NULL path, which is what keeps the walk flat. */
+static ray_t* wf_read_path(ray_t* path, int follow) {
     const char* p = ray_str_ptr(path);
     size_t n = ray_str_len(path);
     struct stat st;
@@ -379,7 +335,7 @@ static ray_t* wf_read_path(ray_t* path, int follow, const wf_dom_hint* hint) {
     ray_t* all = q_io_read_slice(path, 0, -1, &zipped);
     if (!all || RAY_IS_ERR(all)) return all ? all : q_err(QE_IO);
     ray_t* r = wf_read_image((const uint8_t*)ray_data(all), (size_t)ray_len(all),
-                             zipped, follow ? path : NULL, hint);
+                             zipped, follow ? path : NULL);
     ray_release(all);
     return r;
 }
@@ -387,18 +343,13 @@ static ray_t* wf_read_path(ray_t* path, int follow, const wf_dom_hint* hint) {
 ray_t* q_wirefile_read(ray_t* x) {
     ray_t* path = q_io_file_path(x);
     if (!path) return NULL;
-    ray_t* r = ray_eval_get_restricted() ? q_err(QE_ACCESS) : wf_read_path(path, 1, NULL);
+    ray_t* r = ray_eval_get_restricted() ? q_err(QE_ACCESS) : wf_read_path(path, 1);
     ray_release(path);
     return r;
 }
 
-ray_t* q_wirefile_read_column(ray_t* pathstr, const char* domname, ray_t* dom) {
-    wf_dom_hint h = { domname, dom };
-    return wf_read_path(pathstr, 1, (domname && dom) ? &h : NULL);
-}
-
-ray_t* q_wirefile_domain(ray_t* colpath, const char* name) {
-    return wf_domain(colpath, name);
+ray_t* q_wirefile_read_column(ray_t* pathstr) {
+    return wf_read_path(pathstr, 1);
 }
 
 /* ---- the header probe (no payload read) --------------------------------- */
@@ -578,7 +529,30 @@ static ray_t* wf_write_a(ray_t* x) {
  * exactly wf_simple_tag's allowlist read backwards — one table, both
  * directions.  A tag it declines (RAY_SYM's adaptive width, RAY_SEL/RAY_STR
  * which kdb has no byte for, atoms, lists, dicts, tables) takes shape A. */
+static ray_t* wf_write_enum_img(ray_t* pos, const char* dn, size_t dnl);
+
+/* Image for a REFERENCE-shaped column — a 20h enum whose domain is anything
+ * but a bound SYMLIST (kb/linking-columns.md; FK enums, links, unbound alike):
+ * i64 positions + target-NAME header, no domain file.  The reader stamps the
+ * name back and deref/resolution stay lazy.  NULL = symlist-domain (the splay
+ * writer decays those into its auto-enumerate arm) or not an enum. */
+static ray_t* wf_ref_image(ray_t* x) {
+    if (x->type != RAY_ENUM) return NULL;
+    int64_t dom = q_enum_domain(x);
+    if (q_enum_domain_kind(dom, NULL) == Q_EDOM_SYMLIST) return NULL;
+    ray_t* nm = ray_sym_str(dom);
+    if (!nm || RAY_IS_ERR(nm)) return nm ? nm : q_err(QE_TYPE);
+    ray_t* pos = q_enum_positions(x);
+    if (!pos || RAY_IS_ERR(pos)) { ray_release(nm); return pos ? pos : q_err(QE_OOM); }
+    ray_t* img = wf_write_enum_img(pos, ray_str_ptr(nm), ray_str_len(nm));
+    ray_release(pos);
+    ray_release(nm);
+    return img;
+}
+
 static ray_t* wf_write_image(ray_t* x) {
+    ray_t* ref = wf_ref_image(x);
+    if (ref) return ref;
     uint8_t disk = x->type > 0 ? (uint8_t)wf_simple_tag((uint8_t)x->type) : 0;
     return disk ? wf_write_b(x, disk) : wf_write_a(x);
 }
@@ -628,6 +602,8 @@ static ray_t* wf_write_flat(ray_t* x, ray_t* y, int lbs, int alg, int lvl) {
     if (!path) return NULL;
     if (ray_eval_get_restricted()) { ray_release(path); return q_err(QE_ACCESS); }
     ray_t* bad = wf_write_flat_path(path, y, lbs, alg, lvl);
+    if (!bad)   /* a write inside a mapped dir stales its entry (link workflow) */
+        q_splay_invalidate_under(ray_str_ptr(path), ray_str_len(path));
     ray_release(path);
     if (bad) return bad;
     ray_retain(x);
@@ -691,7 +667,7 @@ static ray_t* wf_append_syms(ray_t* path, ray_t* y) {
  * (alg 0 goes through (2;0), whose never-paying deflate re-emits the alg-0
  * wrapper), a plain file stays plain — `.z.zd` never applies to a rewrite. */
 static ray_t* wf_append_rewrite(ray_t* path, ray_t* y, int zipped) {
-    ray_t* old = wf_read_path(path, 1, NULL);
+    ray_t* old = wf_read_path(path, 1);
     if (!old || RAY_IS_ERR(old)) return old ? old : q_err(QE_IO);
     if (old->type == RAY_TABLE || old->type == RAY_DICT || q_type_is_keyed(old)) {
         ray_release(old);
@@ -791,7 +767,7 @@ ray_t* q_wirefile_append_path(ray_t* pathstr, ray_t* y) {
 ray_t* q_wirefile_domain_extend(ray_t* dompathstr, ray_t* symv, ray_t** positions) {
     if (positions) *positions = NULL;
     if (!symv || symv->type != RAY_SYM) return q_err(QE_TYPE);
-    ray_t* dom = wf_is_file(dompathstr) ? wf_read_path(dompathstr, 0, NULL) : NULL;
+    ray_t* dom = wf_is_file(dompathstr) ? wf_read_path(dompathstr, 0) : NULL;
     if (dom && RAY_IS_ERR(dom)) return dom;
     if (dom && dom->type != RAY_SYM) { ray_release(dom); return q_err(QE_TYPE); }
     int64_t nold = dom ? ray_len(dom) : 0;
@@ -883,7 +859,9 @@ ray_t* q_wirefile_domain_extend(ray_t* dompathstr, ray_t* symv, ray_t** position
  * (fd 00 14 attr, count i64), i64 positions from 4096. */
 static ray_t* wf_write_enum_img(ray_t* pos, const char* dn, size_t dnl) {
     int64_t n = ray_len(pos);
-    if (!wf_leaf_name(dn, dnl) || dnl > WF_D_DESC - WF_D_NAME - 1)
+    if (!wf_leaf_name(dn, dnl) || dnl > 255)   /* the probe's q_wf_colhdr.domain
+                                                * cap — never write a name the
+                                                * reader must refuse (codex r3) */
         return q_err(QE_DOMAIN);
     size_t total = WF_D_OFF + (size_t)n * 8;
     uint8_t* buf = (uint8_t*)calloc(1, total);
@@ -1004,7 +982,22 @@ static ray_t* wf_write_splay_dir(ray_t* dirstr, ray_t* domsym, ray_t* y,
         ray_t* cp = wf_join(ray_str_ptr(dirstr), ray_str_len(dirstr),
                             ray_str_ptr(nm), ray_str_len(nm));
         if (!cp) { bad = q_err(QE_OOM); break; }
-        if (col->type == RAY_SYM) {                  /* auto-enumerate (fused) */
+        ray_t* dec = NULL;                           /* a SYMLIST-domain 20h column
+                                                      * writes as its resolved syms
+                                                      * and re-enumerates against
+                                                      * THIS dir's domain file (the
+                                                      * copy-a-splay idiom) */
+        ray_t* rimg = wf_ref_image(col);             /* FK/link: positions + name */
+        if (rimg && RAY_IS_ERR(rimg)) { bad = rimg; ray_release(cp); break; }
+        if (!rimg && col->type == RAY_ENUM) {
+            dec = q_enum_decay(col);
+            if (!dec || RAY_IS_ERR(dec)) { bad = dec ? dec : q_err(QE_TYPE); ray_release(cp); break; }
+            col = dec;
+        }
+        if (rimg) {
+            bad = wf_put(cp, rimg, lbs, alg, lvl, 1);
+            if (rimg != bad) ray_release(rimg);
+        } else if (col->type == RAY_SYM) {           /* auto-enumerate (fused) */
             if (!dompath) {
                 dompath = wf_domain_path(dirstr, domsym);
                 if (RAY_IS_ERR(dompath)) { bad = dompath; dompath = NULL; }
@@ -1029,6 +1022,7 @@ static ray_t* wf_write_splay_dir(ray_t* dirstr, ray_t* domsym, ray_t* y,
         } else {
             bad = q_err(QE_TYPE);                    /* kb: vectors/compound only */
         }
+        if (dec) ray_release(dec);
         ray_release(cp);
         if (!bad) {
             names = ray_vec_append(names, &id);
@@ -1116,7 +1110,7 @@ ray_t* q_wirefile_en(ray_t* dom, ray_t* t) {
             bad = q_wirefile_domain_extend(dompath, col, NULL);
     }
     if (!bad) {
-        ray_t* full = q_wirefile_read_column(dompath, NULL, NULL);
+        ray_t* full = q_wirefile_read_column(dompath);
         if (full && !RAY_IS_ERR(full) && full->type == RAY_SYM) {
             (void)q_env_set(ray_sym_intern_runtime("sym", 3), full);  /* retains */
             ray_release(full);
