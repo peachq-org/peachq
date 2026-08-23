@@ -25,9 +25,10 @@
 
 /* Element sizes indexed by type tag (kdb numbering).  Sparse designated
  * initializers: the kdb 1..19 band has one gap — 3 (kdb's short-of-3, no
- * rayfall type) — and RAY_SEL(20, variable layout), which default to 0: the
+ * rayfall type) — and RAY_SEL(113, variable layout), which default to 0: the
  * correct "no fixed element size" answer, so they need no explicit entry. */
 const uint8_t ray_type_sizes[256] = {
+    [RAY_ENUM]      = 8,   /* i64 domain positions (kdb 20h) */
     [RAY_LIST]      = 8,   /* pointer-sized (ray_t*) */
     [RAY_BOOL]      = 1,
     [RAY_GUID]      = 16,
