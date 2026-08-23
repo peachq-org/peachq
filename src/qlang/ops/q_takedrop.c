@@ -33,10 +33,14 @@ static ray_t* slice_at(ray_t* y, int64_t start, int64_t w, int64_t total,
     return r ? r : q_err(QE_TYPE);
 }
 
-/* `n#y` is a contiguous or CYCLIC run — a COPY, not a selection: no q_ home owns
- * it, and gathering |n| materialised indices instead costs a million i64s for
- * `1000000#v`.  Also the BOOLEAN count q_type_strict_i64 refuses (phrases). */
+/* `n#y` is a contiguous or CYCLIC run — a COPY, not a selection: gathering |n|
+ * materialised indices would cost a million i64s for `1000000#v`, so the plain
+ * shapes ride the engine kernel; only reference-carrying shapes (enum/link
+ * columns, tables holding them) pay the index walk, via the enum home.  Also
+ * the BOOLEAN count q_type_strict_i64 refuses (phrases). */
 static ray_t* take_kernel(ray_t* y, ray_t* n) {
+    ray_t* ref = q_enum_take(y, n);   /* reference-carrying shapes (enum home) */
+    if (ref) return ref;
     ray_t* r = ray_take_fn(y, n);
     return r ? r : q_err(QE_TYPE);
 }

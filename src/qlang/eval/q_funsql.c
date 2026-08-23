@@ -42,6 +42,8 @@ static ray_t* gather(ray_t* x, ray_t* idx) {
 }
 
 /* From-resolve (law 24 + column-dict superset): sym -> env; keyed -> 0!; dict -> flip.
+ * Enum columns flow through ENUMERATED (wp/foreign-keys.md:59-64) — a phrase that
+ * computes on one decays at its verb per the one apply-module law, never here.
  * *nkey (optional, caller-initialised) reports the source's key width so a caller can re-key. */
 static ray_t* ques_from(ray_t* t, int64_t* nkey) {
     if (!t) return q_err(QE_TYPE);
@@ -801,6 +803,7 @@ ray_t* q_funsql_dict_drop_keys(ray_t* keys, ray_t* d) { return dict_drop_keys(ke
 /* a fresh column of v's null, length n (update.md: a created column has
  * nulls wherever the Where phrase did not reach) */
 static ray_t* null_col_like(ray_t* v, int64_t n) {
+    if (v && q_enum_is(v)) return q_enum_null_col(q_enum_domain(v), n);
     int8_t ty = q_type_elem_tag(v);
     ray_t* na = ty ? ray_typed_null(ty) : NULL;
     if (!na) { na = RAY_NULL_OBJ; ray_retain(na); }
@@ -834,7 +837,10 @@ static ray_t* upd_amend(ray_t* cur, ray_t* rows, ray_t* v) {
 static ray_t* upd_col_start(ray_t* t, int64_t nm, ray_t* v, int full) {
     ray_t* cur = from_col_owned(t, nm);                 /* owned or NULL */
     if (RAY_IS_ERR(cur)) return cur;
-    if (cur && !(full && q_type_elem_tag(v))) return cur;
+    /* an enum phrase claims its type too (20h sits outside the ray_is_vec
+     * band, so elem-tag alone misses it): a full update re-types the column
+     * — `update `dom$col from `t`, the training doc's FK creation path */
+    if (cur && !(full && (q_type_elem_tag(v) || q_enum_is(v)))) return cur;
     if (cur) ray_release(cur);
     return null_col_like(v, q_count_long(t));
 }

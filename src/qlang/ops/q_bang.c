@@ -364,5 +364,16 @@ ray_t* q_bang(ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);
     if (q_type_is_int_atom(x))
         return q_bang_dispatch(RAY_ATOM_IS_NULL(x) ? NULL_I64 : q_type_iatom_val(x), y);
+    /* `x!y` Enumeration (ref/enumeration.md) — ENV-BLIND (R2, 2026-08-23):
+     * a sym-atom lhs with an int-family rhs ALWAYS constructs the reference
+     * (20h / -20h), whatever the name holds — symlist enum, FK, link and
+     * unbound are one structure resolved lazily.  Any other rhs is 'type:
+     * the atom-lhs dict lenience is retired (the table-literal key reaches
+     * here as a genuine LIST since the Q_ATTR_KEYLIST fix). */
+    if (q_type_is_sym_atom(x)) {
+        if (q_type_is_int_atom(y) || q_type_is_int_vec(y))
+            return q_enum_ref(x->i64, y);
+        return q_err(QE_TYPE);
+    }
     return bang_make_dict(x, y);
 }

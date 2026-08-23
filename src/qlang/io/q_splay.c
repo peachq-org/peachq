@@ -40,8 +40,7 @@ typedef struct {
     ray_t*     keys;      /* owned .d sym vector */
     splay_col* cols;
     int64_t    ncols;
-    ray_t*     domain;    /* owned loaded enum domain, or NULL */
-    char       domname[256];
+    char       domname[256];   /* enum domain name ("" = no enum columns) */
 } splay_ent;
 
 static splay_ent* g_ents = NULL;
@@ -213,7 +212,6 @@ void q_splay_destroy(void) {
         free(e->cols);
         if (e->keys)   ray_release(e->keys);
         if (e->dir)    ray_release(e->dir);
-        if (e->domain) ray_release(e->domain);
     }
     free(g_ents);
     g_ents = NULL; g_n = 0; g_cap = 0;
@@ -257,8 +255,22 @@ void q_splay_invalidate(int64_t sym) {
     free(e->cols);
     if (e->keys)   ray_release(e->keys);
     if (e->dir)    ray_release(e->dir);
-    if (e->domain) ray_release(e->domain);
     g_ents[i] = g_ents[--g_n];   /* swap-remove */
+}
+
+/* A flat write INSIDE a mapped directory makes that entry a lie too — the
+ * kb/linking-columns.md splayed-link workflow writes t1link and .d beside a
+ * live mapping, then remaps.  Drop every entry whose dir prefixes the path. */
+void q_splay_invalidate_under(const char* path, size_t n) {
+    for (int64_t i = 0; i < g_n; ) {
+        splay_ent* e = &g_ents[i];
+        const char* d = e->dir ? ray_str_ptr(e->dir) : NULL;
+        size_t dn = d ? ray_str_len(e->dir) : 0;
+        if (d && dn > 0 && dn <= n && memcmp(d, path, dn) == 0 &&
+            (d[dn - 1] == '/' || dn == n || path[dn] == '/'))
+            q_splay_invalidate(e->sym);              /* swap-remove: re-check i */
+        else i++;
+    }
 }
 
 /* dir + column name as an owned NUL-terminated RAY_STR path. */
@@ -279,6 +291,40 @@ static ray_t* splay_col_path(splay_ent* e, int64_t name) {
 static ray_t* splay_carrier(splay_ent* e) {
     ray_retain(e->keys);
     return ray_dict_new(e->keys, ray_sym(e->sym));      /* consumes both */
+}
+
+/* An enum names its domain, not its location: climb from the table directory
+ * (a column copied out of its database fails, never walks to /), read the
+ * domain FILE and bind it under its own name through q_env_set.  Best-effort:
+ * any miss leaves the name unbound and display falls back to raw indices.
+ * Re-run on every `get` of the carrier (bind-at-get), so touching another
+ * splay's domain between gets cannot leave THIS one resolving through it. */
+static void splay_bind_domain(splay_ent* e) {
+    const char* name = e->domname;
+    size_t nn = strlen(name);
+    if (!nn) return;
+    const char* p = ray_str_ptr(e->dir);
+    size_t n = ray_str_len(e->dir);                     /* trailing '/' kept */
+    for (int lvl = 0; lvl < 4 && n; lvl++) {
+        n--;                                            /* the '/' ... */
+        while (n && p[n - 1] != '/') n--;               /* ...and the name before it */
+        if (!n) break;
+        char buf[1024];
+        if (n + nn + 1 > sizeof buf) return;
+        memcpy(buf, p, n);
+        memcpy(buf + n, name, nn);
+        buf[n + nn] = '\0';
+        struct stat st;
+        if (stat(buf, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        ray_t* ps = ray_str(buf, n + nn);
+        ray_t* d = (ps && !RAY_IS_ERR(ps)) ? q_wirefile_read_column(ps) : NULL;
+        if (ps && !RAY_IS_ERR(ps)) ray_release(ps);
+        if (d && !RAY_IS_ERR(d) && d->type == RAY_SYM)
+            (void)q_env_set(ray_sym_intern_runtime(name, nn), d);   /* retains */
+        if (d && !RAY_IS_ERR(d)) ray_release(d);
+        else if (d) ray_error_free(d);
+        return;
+    }
 }
 
 /* Marker-first recognition: the VALUE alone answers — n sym keys against one
@@ -353,7 +399,7 @@ static ray_t* splay_open(int64_t sym, ray_t* dir, splay_ent** out) {
     ray_t* dps = ray_str(dp, dn + 2);
     free(dp);
     if (!dps) { splay_free_partial(&e); return q_err(QE_OOM); }
-    ray_t* dotd = q_wirefile_read_column(dps, NULL, NULL);
+    ray_t* dotd = q_wirefile_read_column(dps);
     ray_release(dps);
     if (!dotd || RAY_IS_ERR(dotd)) { splay_free_partial(&e); return dotd ? dotd : q_err(QE_IO); }
     if (dotd->type != RAY_SYM) { ray_release(dotd); splay_free_partial(&e); return q_err(QE_CORRUPT); }
@@ -385,29 +431,20 @@ static ray_t* splay_open(int64_t sym, ray_t* dir, splay_ent** out) {
             return q_err(QE_CORRUPT);
         }
     }
-    /* One domain per splay, loaded now so `sym` binds globally (recorded
-     * get-time divergence); a load failure defers to first touch. */
+    /* One domain per splay: its domain FILE binds as a global under its own
+     * name when the splay opens (and re-binds per get, splay_bind_domain) so
+     * display resolves; columns themselves stay positions.  A missing file
+     * just leaves the name unbound — display then shows raw indices. */
     for (int64_t i = 0; i < e.ncols; i++) {
         if (!e.cols[i].h.is_enum || !e.cols[i].h.domain[0]) continue;
-        ray_t* cp = splay_col_path(&e, e.cols[i].name);
-        if (!cp) break;
-        ray_t* dom = q_wirefile_domain(cp, e.cols[i].h.domain);
-        ray_release(cp);
-        if (dom && !RAY_IS_ERR(dom)) {
-            e.domain = dom;
-            strcpy(e.domname, e.cols[i].h.domain);
-            int64_t ds = ray_sym_intern_runtime(e.domname, strlen(e.domname));
-            (void)q_env_set(ds, dom);                   /* env retains */
-        } else if (dom) {
-            ray_error_free(dom);                        /* deferral must not leak it */
-        }
+        strcpy(e.domname, e.cols[i].h.domain);
+        splay_bind_domain(&e);
         break;
     }
     if (g_n == g_cap) {
         int64_t nc = g_cap ? g_cap * 2 : 8;
         splay_ent* ne = (splay_ent*)realloc(g_ents, (size_t)nc * sizeof *ne);
         if (!ne) {
-            if (e.domain) ray_release(e.domain);
             splay_free_partial(&e);
             return q_err(QE_OOM);
         }
@@ -423,6 +460,7 @@ ray_t* q_splay_get(ray_t* x) {
     ray_t* err = NULL;
     splay_ent* e = splay_resolve_sym(x->i64, &err);
     if (err) return err;
+    if (e) splay_bind_domain(e);                        /* bind-at-get refresh */
     return e ? splay_carrier(e) : NULL;
 }
 
@@ -541,11 +579,12 @@ static ray_t* splay_col_gather_i(splay_ent* e, int64_t i, ray_t* idx) {
     if (!col) {                                         /* decode lane, cached */
         ray_t* cp = splay_col_path(e, c->name);
         if (!cp) return q_err(QE_OOM);
-        col = q_wirefile_read_column(cp, e->domain ? e->domname : NULL, e->domain);
+        col = q_wirefile_read_column(cp);
         ray_release(cp);
         if (!col || RAY_IS_ERR(col)) return col ? col : q_err(QE_IO);
         c->cached = col;
-        if (c->h.count < 0 && (ray_is_vec(col) || col->type == RAY_LIST))
+        if (c->h.count < 0 &&
+            (ray_is_vec(col) || col->type == RAY_LIST || col->type == RAY_ENUM))
             c->h.count = ray_len(col);
         ray_retain(col);
     }
@@ -590,6 +629,9 @@ static ray_t* splay_rows_tbl(splay_ent* e, ray_t* idx) {
     if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_OOM);
     int64_t rows = -1;
     for (int64_t i = 0; i < e->ncols; i++) {
+        /* enum columns stay 20h in materialized rows too — kdb keeps them
+         * enumerated through select and row reads (wp/foreign-keys.md:59-64;
+         * phase-2 reversal of the phase-1 decay-at-the-boundary law) */
         ray_t* col = splay_col_gather_i(e, i, idx);
         if (!col || RAY_IS_ERR(col)) {
             ray_release(tbl);
@@ -620,7 +662,7 @@ ray_t* q_splay_rows(ray_t* car, ray_t* idx) {
     ray_t* vals = ray_list_new(e->ncols > 0 ? e->ncols : 1);
     if (!vals || RAY_IS_ERR(vals)) return vals ? vals : q_err(QE_OOM);
     for (int64_t i = 0; i < e->ncols; i++) {
-        ray_t* v = splay_col_gather_i(e, i, idx);
+        ray_t* v = splay_col_gather_i(e, i, idx);   /* row dict: enum cells stay -20h */
         if (!v || RAY_IS_ERR(v)) { ray_release(vals); return v ? v : q_err(QE_IO); }
         vals = ray_list_append(vals, v);
         ray_release(v);

@@ -552,6 +552,20 @@ int q_match_rec(ray_t* a, ray_t* b) {
         if (sb && mb) { if (RAY_IS_ERR(mb)) ray_error_free(mb); else ray_release(mb); }
         return r;
     }
+    /* one side enum, the other not: the enum compares as its VALUE IMAGE
+     * (resolved values, or bare positions for a reference domain — the decay
+     * law; the apply-level `~` already decays and the container walk must
+     * agree, e.g. a read-back splay table against its plain source).  An
+     * allocation error answers mismatch. */
+    int ea = a->type == RAY_ENUM || a->type == -RAY_ENUM;
+    int eb = b->type == RAY_ENUM || b->type == -RAY_ENUM;
+    if (ea != eb) {
+        ray_t* r = q_enum_val_image(ea ? a : b);
+        int m = r && !RAY_IS_ERR(r) && q_match_rec(ea ? r : a, ea ? b : r);
+        if (r && RAY_IS_ERR(r)) ray_error_free(r);
+        else if (r) ray_release(r);
+        return m;
+    }
     if (a->type != b->type) return 0;
     if (a->type == -RAY_SYM) return a->i64 == b->i64;
     if (a->type == -RAY_STR)
@@ -562,6 +576,24 @@ int q_match_rec(ray_t* a, ray_t* b) {
          * an 8-byte union memcmp would compare POINTERS (codex P2). */
         return a->obj && b->obj &&
                memcmp(ray_data(a->obj), ray_data(b->obj), 16) == 0;
+    }
+    if (a->type == RAY_ENUM || a->type == -RAY_ENUM) {
+        /* 20h sits outside the ray_is_vec band, so the container walk lands
+         * here (the apply-level `~` decays before the kernel; children of a
+         * table/list do not).  Same domain: positions decide.  Different
+         * domains: the resolved values decide (the decay law's answer). */
+        if (q_enum_domain(a) == q_enum_domain(b)) {
+            if (a->type == -RAY_ENUM) return a->i64 == b->i64;
+            int64_t la = ray_len(a);
+            return la == ray_len(b) &&
+                   memcmp(ray_data(a), ray_data(b), (size_t)la * 8) == 0;
+        }
+        ray_t* ra = q_enum_val_image(a);
+        ray_t* rb = q_enum_val_image(b);
+        int r = ra && rb && !RAY_IS_ERR(ra) && !RAY_IS_ERR(rb) && q_match_rec(ra, rb);
+        if (ra) { if (RAY_IS_ERR(ra)) ray_error_free(ra); else ray_release(ra); }
+        if (rb) { if (RAY_IS_ERR(rb)) ray_error_free(rb); else ray_release(rb); }
+        return r;
     }
     if (q_eval_apply_carrier_kind(a)) return match_carrier(a, b);
     if (ray_is_atom(a)) {

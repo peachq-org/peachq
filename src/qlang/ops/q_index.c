@@ -377,7 +377,24 @@ static ray_t* elem_rest(ray_t* e, ray_t* const* ix, int64_t k) {
 
 /* one result item per j — over the items of i (a collection index maps its
  * structure) or, when i is NULL (`::`), over the items of x themselves */
+
 static ray_t* index_map(ray_t* x, ray_t* i, ray_t* const* rest, int64_t k) {
+    /* terminal vector-by-i64-vector step: when every index is IN RANGE, the
+     * base typed-gather owner (gather_by_idx) does the run in one pass —
+     * the boxed walk below costs ~3 allocations a row, which is what made
+     * 1M-row link deref lose to lj (2026-08-23 perf round).  Any miss
+     * (OOB / null index -> the lane's null, the total-index law) keeps the
+     * boxed walk: the kernel gathers blind and owns no miss law. */
+    if (i && k == 0 && x && ray_is_vec(x) && i->type == RAY_I64) {
+        int64_t xn = ray_len(x), n = ray_len(i), j = 0;
+        const int64_t* ix = (const int64_t*)ray_data(i);
+        while (j < n && ix[j] >= 0 && ix[j] < xn) j++;
+        if (j == n && n > 0) {
+            ray_t* r = gather_by_idx(x, (int64_t*)ix, n);
+            if (r && !RAY_IS_ERR(r)) return r;
+            if (r) ray_release(r);              /* OOM etc: the boxed walk answers */
+        }
+    }
     ray_t* src = i ? i : x;
     int64_t n = ray_len(src);
     ray_t* out = ray_list_new(n > 0 ? n : 1);
@@ -470,6 +487,15 @@ static ray_t* index_r(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
 }
 
 ray_t* q_index_at(ray_t* x, ray_t* const* ix, int64_t k) {
+    /* indexing PRESERVES the enum (`e 0` -> -20h atom): index the positions,
+     * re-stamp the domain — the structural preserve set's index arm. */
+    if (x && x->type == RAY_ENUM) {
+        ray_t* p = q_enum_positions(x);
+        if (!p || RAY_IS_ERR(p)) return p ? p : q_err(QE_OOM);
+        ray_t* r = q_index_at(p, ix, k);
+        ray_release(p);
+        return q_enum_stamp(r, q_enum_domain(x));
+    }
     if (k <= 0) { ray_retain(x); return x; }
     return index_r(x, ix[0], ix + 1, k - 1);
 }
@@ -645,6 +671,23 @@ static ray_t* amend_r(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k,
 ray_t* q_index_amend(ray_t* x, ray_t* const* ix, int64_t k, ray_t* f, ray_t* y) {
     if (!x || RAY_IS_ERR(x)) return q_err(QE_TYPE);
     if (x->type == -RAY_SYM) return q_err(QE_DOMAIN);
+    /* enum target: index-assign enforces the domain — an in-domain sym coerces
+     * to its position, out-of-domain is 'cast (owner training `` el[0]:`oo ``);
+     * only plain `:` replacement is defined on 20h this phase. */
+    if (x->type == RAY_ENUM) {
+        if (f && q_registry_row_of(f, Q_DYADIC) != q_ops_find(":", 1))
+            return q_err(QE_TYPE);           /* NULL f IS plain replace */
+        ray_t* ny = q_enum_coerce(q_enum_domain(x), y);
+        if (!ny || RAY_IS_ERR(ny)) return ny ? ny : q_err(QE_TYPE);
+        ray_t* p = q_enum_positions(x);
+        if (!p || RAY_IS_ERR(p)) { ray_release(ny); return p ? p : q_err(QE_OOM); }
+        ray_t* r = q_index_amend(p, ix, k, f, ny);
+        ray_release(ny);
+        if (!r || RAY_IS_ERR(r)) { ray_release(p); return r ? r : q_err(QE_TYPE); }
+        r = q_enum_stamp(r, q_enum_domain(x));
+        if (r && !RAY_IS_ERR(r)) ray_release(x);         /* consumed on success */
+        return r;
+    }
     if (k <= 0 || (!is_coll(x) && x->type != RAY_DICT && x->type != RAY_TABLE))
         return amend_entire(x, f, y);
     return amend_r(x, ix[0], ix + 1, k - 1, f, y);

@@ -899,6 +899,9 @@ static ray_t *table_lit_dict(ray_t *defs) {
         ray_release(keys); ray_release(vals); ray_release(defs);
         die_err(QE_DUP);
     }
+    /* a 1-elem keys node is byte-identical to the enlisted-sym-ATOM constant
+     * (,`a) that q_eval unwraps — mark it as the genuine 1-name key LIST */
+    if (n == 1 && keys && !RAY_IS_ERR(keys)) keys->attrs |= Q_ATTR_KEYLIST;
     ray_release(defs);
     return table_lit_bang(keys, vals);
 }

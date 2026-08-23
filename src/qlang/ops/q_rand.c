@@ -229,6 +229,8 @@ static ray_t* deal_pick(int64_t n, ray_t* y) {
  *   gen_* above.  Deferred cells (error, never a wrong answer): short y,
  *   non-" " char pick (string model), deal of 0/0i. */
 ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
+    ray_t* ee = q_enum_extend_try(x, y);   /* `x?y` Enum Extend: sym handle ? syms */
+    if (ee) return ee;
     if (x && (x->type == RAY_DICT || q_type_is_table(x) ||
               ray_is_vec(x) || x->type == RAY_LIST))
         return q_search_find(x, y);         /* find / dict + keyed reverse lookup */
@@ -316,6 +318,8 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
             if (ray_str_len(y) == 1 && ray_str_ptr(y)[0] == ' ')
                 return gen_chars(n);
             return q_err(QE_NYI);
+        case RAY_ENUM:                          /* n?enum-atom: no generate law */
+            return q_err(QE_TYPE);
         case RAY_CHARV:                         /* char atom: only `" "` has a
              * roll law (-> .Q.a); pick-from-string is a stage-2+ cell. */
             if (deal) return q_err(QE_TYPE);

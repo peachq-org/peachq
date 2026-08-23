@@ -465,6 +465,7 @@ static const q_op_t Q_OPS[] = {
      * structural (spec §3; xgroup is a border ruling in the AUDIT). */
     { "flip",   QLEX_KW_PREFIX, QR_FN1("flip", q_flip_wrap),   QR_NONE,           NULL, 1, 0, "structural", NULL, QKOP(1) },
     { "keys",   QLEX_KW_PREFIX, QR_FN1("keys", q_keys_wrap),   QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "fkeys",  QLEX_KW_PREFIX, QR_FN1("fkeys", q_fkeys_wrap), QR_NONE,           NULL, 1, 0, "structural", NULL },
     { "ungroup",QLEX_KW_PREFIX, QR_FN1("ungroup", q_ungroup_wrap), QR_NONE,       NULL, 1, 0, "structural", NULL },
     { "xkey",   QLEX_KW_INFIX,  QR_NONE,                       QR_FN2("xkey", q_xkey_wrap), NULL, 1, 0, "structural", NULL },
     { "xcol",   QLEX_KW_INFIX,  QR_NONE,                       QR_QSRC("xcol"),   NULL, 1, 0, "structural", NULL },

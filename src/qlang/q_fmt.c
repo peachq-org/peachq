@@ -286,6 +286,34 @@ void q_fmt_cell(ray_t* col, int64_t row, int blank_null, char* out, size_t outsz
         }
         return;
     }
+    if (col && col->type == RAY_ENUM) {     /* enum cell by DOMAIN SHAPE (R5):
+                                             * value-list domain -> resolved
+                                             * value; reference/unbound -> the
+                                             * raw position */
+        if (row < 0 || row >= ray_len(col)) return;
+        int64_t p = ((const int64_t*)ray_data(col))[row];
+        if (p == NULL_I64) return;          /* null position: gap, like a null cell */
+        ray_t* e1 = q_enum_stamp(ray_i64(p), q_enum_domain(col));
+        ray_t* s = (e1 && !RAY_IS_ERR(e1)) ? q_enum_resolve(e1) : NULL;
+        if (e1 && !RAY_IS_ERR(e1)) ray_release(e1);
+        else if (e1) ray_error_free(e1);
+        if (s && RAY_IS_ERR(s)) { ray_error_free(s); s = NULL; }
+        if (s) {
+            if (s->type == -RAY_SYM) {      /* bare sym; other key types (an
+                                             * int-keyed FK domain) render as
+                                             * their value */
+                ray_t* nm = ray_sym_str(s->i64);
+                if (nm) {
+                    snprintf(out, outsz, "%.*s", (int)ray_str_len(nm), ray_str_ptr(nm));
+                    ray_release(nm);
+                }
+            } else
+                fmt_elem_inline(s, out, outsz);
+            ray_release(s);
+        } else
+            snprintf(out, outsz, "%lld", (long long)p);
+        return;
+    }
     ray_t* ia = ray_i64(row);
     ray_t* c  = ray_at_fn(col, ia);
     ray_release(ia);
@@ -1394,6 +1422,23 @@ static void q_fmt_body(ray_t* val) {
         return;
     }
 
+    /* enum, by DOMAIN SHAPE at render time (R5; basics/enumerations.md — the
+     * constructor is irrelevant): a value-list domain shows `d$ + the TOTAL-
+     * resolved values (OOB -> null); a reference or unbound domain shows
+     * `d! + the raw positions.  Never an error at display (owner oracle). */
+    if (q_enum_is(val)) {
+        ray_t* s = ray_sym_str(q_enum_domain(val));
+        qe_putc('`');
+        if (s) { qe_putn(ray_str_ptr(s), ray_str_len(s)); ray_release(s); }
+        ray_t* r = q_enum_resolve(val);
+        if (r && RAY_IS_ERR(r)) { ray_error_free(r); r = NULL; }
+        qe_putc(r ? '$' : '!');
+        if (!r) r = q_enum_positions(val);
+        if (r && !RAY_IS_ERR(r)) { q_fmt_body(r); ray_release(r); }
+        else if (r) ray_error_free(r);
+        return;
+    }
+
     /* RAY_QFN carrier: lambda verbatim source / F+adverb / projection — EXCEPT
      * that a k PRIMITIVE prints as its glyph whatever machinery implements it
      * (`%:` is a q.q projection here; kdb still shows `%:` — `.q`reciprocal`,
@@ -1770,6 +1815,20 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
             fmt_qtext((const char*)ray_data(val), 1, buf + 1, bufsz - 1);
         } else
             fmt_qtext((const char*)ray_data(val), (size_t)ray_len(val), buf, bufsz);
+        return;
+    }
+    if (q_enum_is(val)) {                          /* `d$values / `d!positions (R5) */
+        ray_t* r = q_enum_resolve(val);
+        if (r && RAY_IS_ERR(r)) { ray_error_free(r); r = NULL; }
+        ray_t* s = ray_sym_str(q_enum_domain(val));
+        size_t off = s ? (size_t)snprintf(buf, bufsz, "`%.*s%c",
+                                          (int)ray_str_len(s), ray_str_ptr(s),
+                                          r ? '$' : '!') : 0;
+        if (s) ray_release(s);
+        if (off >= bufsz) off = bufsz - 1;
+        if (!r) r = q_enum_positions(val);
+        if (r && !RAY_IS_ERR(r)) { q_fmt_krepr(r, buf + off, bufsz - off); ray_release(r); }
+        else if (r) ray_error_free(r);
         return;
     }
     if (val->type == RAY_TABLE) {                  /* `+`a`b!(..)` — ref/dotz.md:723, ref/dotq.md:308 */
