@@ -22,6 +22,16 @@
  * fn/lambda values only), and the marked node never survives lowering. */
 #define Q_ATTR_HOLE   0x40
 
+/* Q_ATTR_KEYLIST: flag on a 1-elem RAY_SYM VECTOR node — the 1-col table-literal
+ * KEY LIST (q_parse.c table_lit_dict).  That node is byte-identical to the
+ * enlisted-sym-ATOM constant (,`a — parsetrees.md:26 unwraps it), so this is the
+ * only signal that the node is a genuine 1-NAME LIST and `!` must see list!list.
+ * Numerically the Q_ATTR_HOLE bit (that one lives on -RAY_SYM atoms) and
+ * RAY_ATTR_HAS_NULLS — chosen because it has no display glyph and no serde
+ * footprint; q_eval answers a fresh unmarked copy, so it never escapes into
+ * values.  A node whose one sym is the NULL sym is never a key list. */
+#define Q_ATTR_KEYLIST 0x40
+
 #define MAX_VEC  4096
 #define MAX_NAME 256
 

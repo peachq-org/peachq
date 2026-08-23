@@ -18,6 +18,7 @@ void q_splay_destroy(void);
 /* Drop the entry behind a `:dir/ handle sym — the splay WRITER's hook, so an
  * in-process overwrite never serves stale headers or cached columns. */
 void q_splay_invalidate(int64_t sym);
+void q_splay_invalidate_under(const char* path, size_t n);   /* flat write inside a mapped dir */
 
 /* `get `:dir/` — NULL unless x is a `:path/ sym atom naming a directory with a
  * .d (the caller falls through to the flat reader); else an owned carrier or a

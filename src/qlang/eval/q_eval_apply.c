@@ -1200,7 +1200,9 @@ static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
         ray_release(t);
         return r;
     }
-    if (!(v->type == RAY_DICT || v->type == RAY_TABLE ||
+    /* an enum vector indexes like any vector (q_index_at's enum arm preserves
+     * 20h) — admit it past the container gate */
+    if (!(v->type == RAY_DICT || v->type == RAY_TABLE || v->type == RAY_ENUM ||
           ray_is_vec(v) || v->type == RAY_LIST))
         return q_err(QE_TYPE);
     /* a lazy splay column thunk (io/q_splay.h colref) applies by BINDING the
@@ -1297,6 +1299,134 @@ static ray_t* compose_apply(ray_t** args, int64_t n) {
     return r;
 }
 
+/* ===== enumerations (exception catalogue): decay-by-default ==============
+ * A 20h arg at a verb boundary either reaches an ENUM-AWARE arm untouched
+ * ($ cast, key, value, type, enlist, attr; amend forms go to the amend home),
+ * rides the structural PRESERVE set (take/drop/sublist/reverse/first/last/
+ * concat — strip to positions, apply, re-stamp the domain; indexing preserves
+ * via noun_index above), or DECAYS to its resolved symlist so kernels never
+ * meet tag 20 (2026-08-22 enum plan; ref/enumerate.md is the resolution law). */
+
+static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n);
+
+static ray_t* enum_strip_apply(ray_t* fv, const q_op_t* row, ray_t** args,
+                               int64_t n, int64_t at, int restamp) {
+    ray_t* p = q_enum_positions(args[at]);
+    if (!p || RAY_IS_ERR(p)) return p ? p : q_err(QE_OOM);
+    ray_t* av[2] = { args[0], n > 1 ? args[1] : NULL };
+    av[at] = p;
+    /* concrete before the stamp: an env kernel may answer a lazy handle */
+    ray_t* r = q_eval_apply_concrete(apply_inner(fv, row, av, n));
+    int64_t dom = q_enum_domain(args[at]);
+    ray_release(p);
+    return restamp ? q_enum_stamp(r, dom) : r;
+}
+
+/* `e,y`: ONLY a same-domain enum pair joins as positions and keeps 20h; every
+ * other operand pairing decays (NULL — R6: result type must not depend on
+ * values, so an in-domain sym promotes to 11h exactly like an out-of-domain
+ * one; the domain-ENFORCING append is `,:`, in modassign_eval). */
+static ray_t* enum_concat(ray_t* fv, const q_op_t* row, ray_t** args) {
+    if (!(q_enum_is(args[0]) && q_enum_is(args[1]) &&
+          q_enum_domain(args[0]) == q_enum_domain(args[1])))
+        return NULL;
+    int64_t dom = q_enum_domain(args[0]);
+    ray_t* side[2];
+    for (int i = 0; i < 2; i++) {
+        side[i] = q_enum_positions(args[i]);
+        if (!side[i] || RAY_IS_ERR(side[i])) {
+            if (i) ray_release(side[0]);
+            return side[i] ? side[i] : q_err(QE_OOM);
+        }
+    }
+    ray_t* r = q_eval_apply_concrete(apply_inner(fv, row, side, 2));
+    ray_release(side[0]);
+    ray_release(side[1]);
+    return q_enum_stamp(r, dom);
+}
+
+/* `=`/`<>`/`in` against an enum ride POSITION SPACE (owner amendment
+ * 2026-08-22): a sym constant translates to its position and the stored
+ * positions scan in place (q_enum_cmp — no gather, no materialization);
+ * same-domain enum pairs compare positions through the kernel.  NULL =
+ * cross-domain or non-sym shapes — the decay law stands for those. */
+static ray_t* enum_cmp_route(ray_t* fv, const q_op_t* row, ray_t** args, int op) {
+    int ex = q_enum_is(args[0]), ey = q_enum_is(args[1]);
+    if (ex && ey) {
+        if (q_enum_domain(args[0]) != q_enum_domain(args[1])) return NULL;
+        ray_t* side[2];
+        for (int i = 0; i < 2; i++) {
+            side[i] = q_enum_positions(args[i]);
+            if (!side[i] || RAY_IS_ERR(side[i])) {
+                if (i) ray_release(side[0]);
+                return side[i];
+            }
+        }
+        ray_t* r = q_eval_apply_concrete(apply_inner(fv, row, side, 2));
+        ray_release(side[0]);
+        ray_release(side[1]);
+        return r;
+    }
+    if (op <= 1)                         /* =/<> commute over position space */
+        return q_enum_cmp(ex ? args[0] : args[1], ex ? args[1] : args[0], op);
+    return ex ? q_enum_cmp(args[0], args[1], 2)      /* e in set */
+              : q_enum_cmp(args[1], args[0], 3);     /* y in e   */
+}
+
+static ray_t* enum_decay_apply(ray_t* fv, const q_op_t* row, ray_t** args,
+                               int64_t n) {
+    ray_t* av[APPLY_MAX_ARGS];
+    for (int64_t i = 0; i < n; i++) {
+        av[i] = args[i];
+        if (!q_enum_is(args[i])) continue;
+        av[i] = q_enum_decay(args[i]);
+        if (!av[i] || RAY_IS_ERR(av[i])) {
+            ray_t* e = av[i];
+            for (int64_t j = 0; j < i; j++)
+                if (av[j] != args[j]) ray_release(av[j]);
+            return e ? e : q_err(QE_TYPE);
+        }
+    }
+    ray_t* r = apply_inner(fv, row, av, n);
+    for (int64_t i = 0; i < n; i++)
+        if (av[i] != args[i]) ray_release(av[i]);
+    return r;
+}
+
+static ray_t* enum_route(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
+    const char* t = (n == 1) ? row->mon.target : row->dyad.target;
+    if (t) {
+        if (n == 1 && args[0]->type == -RAY_ENUM && !strcmp(t, "enlist"))
+            return enum_strip_apply(fv, row, args, n, 0, 1);   /* -20h atom ->
+                                                                * 1-elem 20h */
+        if (!strcmp(t, "as") || !strcmp(t, "key") || !strcmp(t, "value") ||
+            !strcmp(t, "type") || !strcmp(t, "enlist") || !strcmp(t, "attr") ||
+            !strcmp(t, "at") || !strcmp(t, "apply") || !strcmp(t, "show") ||
+            !strcmp(t, "dict") || !strcmp(t, "set-g"))
+            return NULL;      /* enum-aware arms (show/-3! render 20h itself;
+                               * enlist of a 20h VECTOR boxes like any list;
+                               * set writes the reference SHAPE, wf_ref_image) */
+        if (n == 1 && q_enum_is(args[0]) &&
+            (!strcmp(t, "reverse") || !strcmp(t, "first") || !strcmp(t, "last")))
+            return enum_strip_apply(fv, row, args, n, 0, 1);
+        if (n == 1 && q_enum_is(args[0]) && !strcmp(t, "count"))
+            return enum_strip_apply(fv, row, args, n, 0, 0);
+        if (n == 2 && q_enum_is(args[1]) &&
+            (!strcmp(t, "take") || !strcmp(t, "drop") || !strcmp(t, "sublist")))
+            return enum_strip_apply(fv, row, args, n, 1, 1);
+        if (n == 2 && !strcmp(t, "concat")) {
+            ray_t* r = enum_concat(fv, row, args);
+            if (r) return r;
+        }
+        if (n == 2 && (!strcmp(t, "==") || !strcmp(t, "!=") || !strcmp(t, "in"))) {
+            int op = !strcmp(t, "==") ? 0 : !strcmp(t, "!=") ? 1 : 2;
+            ray_t* r = enum_cmp_route(fv, row, args, op);
+            if (r) return r;
+        }
+    }
+    return enum_decay_apply(fv, row, args, n);
+}
+
 static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     if (!fv || RAY_IS_ERR(fv)) return q_err(QE_TYPE);
     if (ray_eval_is_interrupted()) return q_err(QE_STOP);
@@ -1382,6 +1512,16 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
             if (q_eval_apply_is_fnval(args[0]))
                 frow = q_registry_operand_row(args[0]);
             return q_adverb_apply(adv, args[0], frow, args + 1, 1);
+        }
+    }
+
+    /* enum args at a verb boundary: aware arm, preserve set, or decay */
+    if (row && n >= 1 && n <= 2) {
+        int has = 0;
+        for (int64_t i = 0; i < n && !has; i++) has = q_enum_is(args[i]);
+        if (has) {
+            ray_t* er = enum_route(fv, row, args, n);
+            if (er) return er;
         }
     }
 

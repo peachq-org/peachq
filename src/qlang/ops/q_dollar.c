@@ -44,6 +44,7 @@ int8_t q_cast_designator(ray_t* t, int* is_tok, int* is_identity) {
         case RAY_LIST:      /* 0h is Identity (cast.md:40): returns y unchanged */
             if (is_identity) *is_identity = 1;
             return 0;
+        case RAY_ENUM:      /* 20h names no cast target — enums are made by `d$y */
         case RAY_STR:       /* 21h: physical storage tag, never a q designator */
             return 0;
         }
@@ -464,6 +465,17 @@ static ray_t* cast_sym(ray_t* x) {
  * -Werror refuse to build a target no arm states. */
 ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
     if (is_empty_list(x)) return q_type_empty(tag);
+    /* enum SOURCE: int-family targets read the POSITIONS ("i"$e is unchanged
+     * by a domain edit — ref/enumerate.md); every other target sees the
+     * resolved symlist (the decay law: `$e -> syms, "c"/string via sym). */
+    if (q_enum_is(x)) {
+        ray_t* v = (tag == RAY_I16 || tag == RAY_I32 || tag == RAY_I64)
+                       ? q_enum_positions(x) : q_enum_decay(x);
+        if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_TYPE);
+        ray_t* r = q_dollar_cast(tag, v);
+        ray_release(v);
+        return r;
+    }
     /* Precedes the switch by ORDER, not preference: "c"$ packs a boxed list
      * into ONE string, so it must beat the per-tag arms AND the RAY_LIST
      * distribution below. */
@@ -502,6 +514,7 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
     case RAY_CHARV: break;                   /* hoisted above: packs boxed lists */
     case RAY_LIST: break;                    /* tag 0 is not a cast designator */
     case RAY_GUID: break;                    /* guid target: no base arm — deferred */
+    case RAY_ENUM: break;                    /* never a designator (q_cast_designator) */
     case RAY_STR:  break;                    /* physical tag: never a cast target */
     case RAY_F32:  return q_cast_real(x);    /* real: narrow base F64 cast to F32 */
     case RAY_BOOL: return cast_bool(x);
@@ -623,11 +636,9 @@ ray_t* q_dollar_pad(int64_t w, ray_t* x) {
     return pad_leaf(w, x);
 }
 
-/* Enumerate `x$y` (ref/enumerate.md: sym lhs naming a domain list) — peachq has
- * no enum domains, so the whole form is a 'nyi stub awaiting them. */
+/* Enumerate `x$y` (ref/enumerate.md: sym lhs naming a domain list). */
 ray_t* q_dollar_enum(ray_t* x, ray_t* y) {
-    (void)x; (void)y;
-    return q_err(QE_NYI);
+    return q_enum_dollar(x, y);
 }
 
 /* `$` as matrix multiply / dot product (ref/mmu.md: `$` is mmu's glyph form).

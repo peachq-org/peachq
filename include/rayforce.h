@@ -107,10 +107,15 @@ typedef enum {
     RAY_MINUTE    = 17,  /* Minutes since midnight (i32 payload) — kdb `u` */
     RAY_SECOND    = 18,  /* Seconds since midnight (i32 payload) — kdb `v` */
     RAY_TIME      = 19,
+    /* Enumeration (kdb 20h): i64 domain-position vector, atom = -20.  The
+     * domain-NAME sym id sits at aux bytes 8-15 (the link_target pattern —
+     * see ops/linkop.h); resolution is lazy through the q env at use time.
+     * Null = i64 sentinel.  Engine kernels never compute on it: the q apply
+     * module resolves or strips before dispatch (2026-08-22 enum plan). */
+    RAY_ENUM      = 20,
     /* PHYSICAL variable-length string storage (inline + pool), out-of-band at
-     * 21 next to RAY_SEL=20: never a q type — q-space sees charv; columns and
-     * engine internals keep pooled STR and convert at the q boundary
-     * (string-model spec Design §3). */
+     * 21: never a q type — q-space sees charv; columns and engine internals
+     * keep pooled STR and convert at the q boundary (string-model spec §3). */
     RAY_STR       = 21
 } ray_type_e;
 
@@ -542,7 +547,8 @@ static inline bool ray_atom_is_null_fn(const union ray_t* x) {
         }
         case RAY_I64:
         case RAY_TIMESTAMP:
-        case RAY_TIMESPAN:  return x->i64 == NULL_I64;
+        case RAY_TIMESPAN:
+        case RAY_ENUM:      return x->i64 == NULL_I64;
         case RAY_I32:
         case RAY_MONTH:
         case RAY_DATE:

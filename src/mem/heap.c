@@ -1341,8 +1341,10 @@ ray_t* ray_alloc_copy(ray_t* v) {
             /* Value band: exhaustive over (ray_type_e), no default, so a future
              * member can't land without stating its element-size lane here —
              * the alloc-copy data-loss trap this guards (CHARV rides
-             * RAY_BYTE_CASES; C-unit pinned in test/q_charv.c).  RAY_SEL(20)
-             * reaches the switch, matches no arm, keeps esz 0 — unchanged. */
+             * RAY_BYTE_CASES; C-unit pinned in test/q_charv.c).  RAY_SEL(113)
+             * reaches the switch, matches no arm, keeps esz 0 — unchanged.
+             * ENUM's 8-byte positions ride the co-list; the memcpy below also
+             * carries its aux-domain bytes, like SYM's domain pointer. */
             uint8_t esz = 0;
             switch ((ray_type_e)t) {
             case RAY_LIST: break;                    /* unreachable: filtered above */
@@ -1350,7 +1352,7 @@ ray_t* ray_alloc_copy(ray_t* v) {
             case RAY_I32: case RAY_I64: case RAY_F32: case RAY_F64:
             case RAY_STR: case RAY_SYM: case RAY_TIMESTAMP: case RAY_MONTH:
             case RAY_DATE: case RAY_DATETIME: case RAY_TIMESPAN: case RAY_MINUTE:
-            case RAY_SECOND: case RAY_TIME:
+            case RAY_SECOND: case RAY_TIME: case RAY_ENUM:
                 esz = ray_sym_elem_size(t, v->attrs);
                 break;
             }

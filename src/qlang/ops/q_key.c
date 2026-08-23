@@ -86,6 +86,9 @@ ray_t* q_key_name(int64_t sym) {
 }
 
 ray_t* q_key(ray_t* x) {
+    if (q_enum_is(x))                            /* `key e` -> the domain name
+                                                  * (ref/enumerate.md) */
+        return ray_sym(q_enum_domain(x));
     if (x && ray_is_vec(x)) {
         const char* nm = q_type_qname(x->type);
         if (nm) return ray_sym(ray_sym_intern_runtime(nm, strlen(nm)));

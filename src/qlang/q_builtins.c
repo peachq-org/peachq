@@ -187,7 +187,8 @@ static int uniform_list(ray_t* x, int8_t* elt) {
 char q_ty_char(ray_t* x) {
     int8_t elt;
     if (x && x->type == -RAY_STR) return 'c';                       /* char-vec shim */
-    if (x && ray_is_vec(x))       return q_type_char((int8_t)x->type);
+    if (x && (ray_is_vec(x) || x->type == RAY_ENUM))
+        return q_type_char((int8_t)x->type);        /* enum column: `s` (meta pin) */
     if (uniform_list(x, &elt)) {
         char lc = q_type_char(elt);
         return (char)(lc ? (lc - 'a' + 'A') : ' ');

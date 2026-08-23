@@ -52,6 +52,16 @@ static int qj_same_schema(ray_t* a, ray_t* b) {
  * column is a -RAY_STR atom (string model) — gathered char-by-char with a
  * blank for null; everything else goes through ray_at + collapse.  Owned. */
 static ray_t* qj_col_gather(ray_t* col, const int64_t* idx, int64_t n) {
+    if (col && col->type == RAY_ENUM) {          /* strip -> gather -> stamp:
+                                                  * the base paths are enum-blind
+                                                  * and 20h must survive a
+                                                  * group/distinct/merge gather */
+        ray_t* p = q_enum_positions(col);
+        if (!p || RAY_IS_ERR(p)) return p ? p : q_err(QE_OOM);
+        ray_t* g = qj_col_gather(p, idx, n);
+        ray_release(p);
+        return q_enum_stamp(g, q_enum_domain(col));
+    }
     if (col && col->type == -RAY_STR) {
         const char* sp = ray_str_ptr(col);
         int64_t sl = (int64_t)ray_str_len(col);
@@ -255,7 +265,10 @@ static ray_t* qj_fill_col(ray_t* xc, ray_t* gy, int64_t nx) {
 static ray_t* qj_merge_col(ray_t* xc, ray_t* yc, const int64_t* fmap,
                            int64_t nx, int mode) {
     if (mode == 0) {
-        ray_t* cat = ray_concat_fn(xc, yc);
+        /* an enum x-column rides strip->gather->stamp: the payload coerces
+         * into its domain first ('cast — the FK upsert law, training §2) */
+        int en = xc && xc->type == RAY_ENUM;
+        ray_t* cat = en ? q_enum_col_concat(xc, yc) : ray_concat_fn(xc, yc);
         if (!cat || RAY_IS_ERR(cat)) return cat ? cat : q_err(QE_TYPE);
         int64_t* idx2 = (int64_t*)malloc((size_t)(nx > 0 ? nx : 1) * sizeof(int64_t));
         if (!idx2) { ray_release(cat); return q_err(QE_WSFULL); }
@@ -264,7 +277,7 @@ static ray_t* qj_merge_col(ray_t* xc, ray_t* yc, const int64_t* fmap,
         ray_t* r = qj_col_gather(cat, idx2, nx);
         free(idx2);
         ray_release(cat);
-        return r;
+        return en ? q_enum_stamp(r, q_enum_domain(xc)) : r;
     }
     ray_t* gy = qj_col_gather(yc, fmap, nx);       /* miss -> null cell */
     if (!gy || RAY_IS_ERR(gy)) return gy ? gy : q_err(QE_TYPE);
@@ -593,6 +606,10 @@ ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode) {
             ray_t* col;
             if (yc) {
                 col = qj_col_gather(yc, uidx, nu);
+            } else if (ray_table_get_col_idx(part1, c) &&
+                       ray_table_get_col_idx(part1, c)->type == RAY_ENUM) {
+                /* x-only ENUM column: nu null positions, domain kept */
+                col = q_enum_null_col(q_enum_domain(ray_table_get_col_idx(part1, c)), nu);
             } else {
                 /* x-only column: nu nulls typed by part1's column */
                 int64_t* nid = (int64_t*)malloc((size_t)nu * sizeof(int64_t));
@@ -1036,6 +1053,12 @@ ray_t* q_wj1_wrap(ray_t** args, int64_t n) { return qj_wj_core(args, n, 1); }
  * One boxed item of any sequence: strings iterate CHARS (1-char -RAY_STR
  * cells, string-model shim), atoms behave as 1-item lists.  Owned result. */
 ray_t* q_join_item(ray_t* x, int64_t i) {
+    if (x && x->type == RAY_ENUM) {              /* base at is enum-blind: the
+                                                  * item is the -20h atom */
+        if (i < 0 || i >= ray_len(x)) return q_enum_null_atom(q_enum_domain(x));
+        return q_enum_stamp(ray_i64(((const int64_t*)ray_data(x))[i]),
+                            q_enum_domain(x));
+    }
     ray_t* ia = ray_i64(i);
     ray_t* e = ray_at_fn(x, ia);
     ray_release(ia);
