@@ -285,6 +285,14 @@ static ray_t* grade_table(ray_t* t, int desc) {
                 col = reindex_collapse(col, perm);          /* owned copy */
                 own = 1;
             }
+            if (col && !RAY_IS_ERR(col) && col->type == RAY_ENUM) {
+                ray_t* dc = q_enum_val_image(col); /* rows order by the resolved
+                                                    * values, or by position for
+                                                    * a reference domain */
+                if (own) ray_release(col);
+                col = dc;
+                own = 1;
+            }
             if (col && !RAY_IS_ERR(col) && col->type == RAY_LIST) {
                 ray_t* rk = ord_dense_rank(col);   /* the one type the kernel ignores */
                 if (own) ray_release(col);

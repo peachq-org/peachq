@@ -33,7 +33,10 @@ extern "C" {
 
 /* ===== Internal Type Constants ===== */
 
-#define RAY_SEL       20   /* selection bitmap (lazy filter); moved off kdb date=14 */
+#define RAY_SEL       96   /* selection bitmap (lazy filter); moved off kdb date=14,
+                            * then off enum=20 (2026-08-22) — parked beside
+                            * RAY_INDEX=97 in the internal band under 98/99.
+                            * NOT >=100: ray_is_atom claims that whole band. */
 
 /* Lazy DAG handle (atom-only; stored inline in aux region) */
 #define RAY_LAZY      104

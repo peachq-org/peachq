@@ -61,6 +61,8 @@ const char* q_type_qname(int8_t t) {
     case RAY_TIMESTAMP: return "timestamp";
     case RAY_DATETIME:  return "datetime";
     case RAY_CHARV: return "char";
+    case RAY_ENUM:  return "symbol";   /* enum columns present as symbol (meta `s`;
+                                        * grid header) — the domain is `key`'s job */
     case RAY_LIST: case RAY_STR: return NULL;   /* boxed / physical: unnamed */
     }
     return NULL;   /* unreachable: value band is exhausted above */
@@ -99,6 +101,8 @@ char q_type_char(int8_t tag) {
     case RAY_STR:       return 'c';   /* physical string storage: still char text */
     case RAY_CHARV:     return 'c';
     case RAY_SYM:       return 's';
+    case RAY_ENUM:      return 's';   /* meta type char stays `s` (wp/symfiles.md;
+                                       * SYM=11 precedes, so char->tag stays sym */
     case RAY_TIMESTAMP: return 'p';
     case RAY_MONTH:     return 'm';
     case RAY_DATE:      return 'd';

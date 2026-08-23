@@ -35,7 +35,7 @@
 
 /* Number of types (positive range): must be > max type ID.
  * Max data type = RAY_STR(21, physical string storage, out-of-band);
- * RAY_SEL(20) is the internal selection tag. */
+ * RAY_ENUM(20) is kdb's enum; RAY_SEL sits above at 96 (ops/ops.h). */
 #define RAY_TYPE_COUNT 22
 
 /* Type sizes lookup table (defined in types.c) */
