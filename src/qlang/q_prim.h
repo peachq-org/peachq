@@ -91,6 +91,42 @@ ray_t* q_str_charv_out(ray_t* r);
  * legacy form (charv/char atom -> -RAY_STR atom, LIST recursed). */
 ray_t* q_str_in(ray_t* x);
 
+/* ---- enumerations (kdb 20h; ops/q_enum.c — THE enum home).  ONE reference
+ * structure: a domain-name sym id (aux 8-15) paired with i64 positions —
+ * symlist enums, FK columns and index-link columns alike (2026-08-23 rework).
+ * Everything derives LAZILY from the domain's CURRENT shape via the one
+ * classifier below.  Callers: the apply module's routing, q_fmt, the $/?/!
+ * operator arms, amend coercion, wire + wirefile. */
+typedef enum {
+    Q_EDOM_UNBOUND,    /* name unbound */
+    Q_EDOM_SYMLIST,    /* symlist global — the classic enum domain */
+    Q_EDOM_KEYED1,     /* keyed table, one key column (FK; any key type) */
+    Q_EDOM_KEYEDN,     /* keyed table, compound key (compound FK) */
+    Q_EDOM_TABLE,      /* unkeyed table / mapped splay (link target) */
+    Q_EDOM_OTHER       /* bound to anything else */
+} q_edom_t;
+q_edom_t q_enum_domain_kind(int64_t dom, ray_t** vals); /* *vals = borrowed VALUE LIST (SYMLIST/KEYED1) */
+int     q_enum_is(ray_t* x);                       /* vec 20h / atom -20h */
+int64_t q_enum_domain(ray_t* x);                   /* domain-name sym id (slice-aware) */
+ray_t*  q_enum_stamp(ray_t* v, int64_t dom);       /* consumes owned i64 value -> enum */
+ray_t*  q_enum_positions(ray_t* e);                /* owned plain-i64 copy */
+ray_t*  q_enum_resolve(ray_t* e);                  /* owned TOTAL-resolved values; NULL = no value list */
+ray_t*  q_enum_val_image(ray_t* e);                /* resolved values, else positions; owned */
+ray_t*  q_enum_decay(ray_t* e);                    /* val image; an UNBOUND domain signals its name */
+ray_t*  q_enum_coerce(int64_t dom, ray_t* y);      /* values/enum/positions -> owned positions; 'cast/'type */
+ray_t*  q_enum_dollar(ray_t* x, ray_t* y);         /* `d$y  Enumerate (the one validator) */
+ray_t*  q_enum_extend_try(ray_t* x, ray_t* y);     /* `d?y  Enum Extend; NULL = not that shape */
+ray_t*  q_enum_ref(int64_t dom, ray_t* y);         /* `d!ints — env-blind reference construction (R2) */
+ray_t*  q_enum_from_indices(int64_t dom, const uint8_t* p, int64_t n, int w);
+ray_t*  q_enum_cmp(ray_t* e, ray_t* y, int op);    /* position-space =/<>/in scan; NULL = not that shape */
+ray_t*  q_enum_col_concat(ray_t* oc, ray_t* pc);   /* insert law: positions ++ coerced payload (plain i64) */
+ray_t*  q_enum_col_ingest(ray_t* oc, ray_t* pc);   /* empty schema column's first payload -> 20h */
+ray_t*  q_enum_deref(ray_t* v, int64_t fld);       /* v.fld reference gather; NULL = not referential */
+ray_t*  q_enum_take(ray_t* y, ray_t* n);           /* n#y for reference-carrying shapes; NULL = plain */
+char    q_enum_meta_f(ray_t* col, int64_t* f_out); /* meta f target + FK t-char override (0 = keep) */
+ray_t*  q_enum_null_atom(int64_t dom);             /* the ` null cell as -20h */
+ray_t*  q_enum_null_col(int64_t dom, int64_t n);   /* n null positions as a 20h column */
+
 /* Column attribute as kdb's single letter: 's'/'u'/'g'/'p', or 0 for none.
  * Reads the block markers/kind DIRECTLY (the kdb u#/p# policy is composed in the
  * q layer, not the rayfall-native engine `.attr.get`, so a hash-backed u#/p#

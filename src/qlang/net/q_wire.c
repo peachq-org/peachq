@@ -143,6 +143,17 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     }
     if (g_wire_depth >= Q_WIRE_MAX_DEPTH)
         return wbuf_fail(b, q_err(QE_LIMIT));
+    /* "Enumerations are automatically converted to values before sending
+     * through IPC" (kb/serialization.md:361) — wire type 20 is never emitted,
+     * serde included (an image must not depend on a session global).  A
+     * reference/unbound domain sends the bare positions (R7). */
+    if (q_enum_is(x)) {
+        ray_t* r = q_enum_val_image(x);
+        if (!r || RAY_IS_ERR(r)) return wbuf_fail(b, r ? r : q_err(QE_TYPE));
+        int rrc = q_wire_write_obj(b, r);
+        ray_release(r);
+        return rrc;
+    }
     g_wire_depth++;
     int rc = -1;
 
@@ -274,6 +285,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
          * tag so it is exhaustive over the value enum (#209 — a new datatype
          * must name its wire tag).  Out-of-band negatives fall to the nyi below. */
         switch ((ray_type_e)-t) {
+        case RAY_ENUM: break;   /* unreachable: decayed to syms at entry */
         case RAY_BOOL: rc = (w_u8(b, (uint8_t)-RAY_BOOL) || w_u8(b, x->b8 ? 1 : 0)) ? -1 : 0; goto out;
         case RAY_GUID: {
             static const uint8_t zero[16] = {0};
@@ -360,6 +372,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
 
     /* ---- value vectors — exhaustive over the value band (#209) ---- */
     switch ((ray_type_e)t) {
+    case RAY_ENUM: break;       /* unreachable: decayed to syms at entry */
     case RAY_BOOL: case RAY_BYTE_ONLY: case RAY_I16: case RAY_I32: case RAY_I64:
     case RAY_F32:  case RAY_F64: case RAY_GUID:
     case RAY_TIMESTAMP: case RAY_DATE: case RAY_TIME:
@@ -597,7 +610,7 @@ ray_t* q_wire_fixed_vec(int8_t t, const uint8_t* p, int64_t count, int swap) {
         for (int32_t i = 0; i < count; i++) if (e[i] == NULL_I16) { has_nulls = true; break; } } break;
     case RAY_I32: RAY_TEMPORAL32_CASES: { int32_t* e = (int32_t*)d;
         for (int32_t i = 0; i < count; i++) if (e[i] == NULL_I32) { has_nulls = true; break; } } break;
-    case RAY_I64: RAY_TEMPORAL64_CASES: { int64_t* e = (int64_t*)d;
+    case RAY_I64: RAY_TEMPORAL64_CASES: case RAY_ENUM: { int64_t* e = (int64_t*)d;
         for (int32_t i = 0; i < count; i++) if (e[i] == NULL_I64) { has_nulls = true; break; } } break;
     case RAY_F32: { float* e = (float*)d;
         for (int32_t i = 0; i < count; i++) if (e[i] != e[i]) { has_nulls = true; break; } } break;
@@ -751,6 +764,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
          * (#209 — a new datatype must decode).  Out-of-band negatives fall to
          * the domain error below. */
         switch ((ray_type_e)-t) {
+        case RAY_ENUM: break;   /* kdb never sends 20h; receiving it is an error */
         case RAY_BOOL: if (!r_need(c, 1)) return trunc_err("bool"); return ray_bool(r_u8(c) != 0);
         case RAY_GUID: {
             if (!r_need(c, 16)) return trunc_err("guid");

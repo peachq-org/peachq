@@ -1,6 +1,6 @@
 /* ops/q_table.c — the table primitives (flatten / row-at / map-cols / the
  * q_table.h family seam) and the shape verbs built on them:
- * flip, keys, xkey, xgroup, group, ungroup, cols, meta.
+ * flip, keys, xkey, xgroup, group, ungroup, cols, meta, fkeys.
  *
  * The rest of the family lives alongside: q_insert.c (insert/upsert),
  * q_setops.c (distinct/union/inter/except/cross), q_join.c (`,`), and the
@@ -276,19 +276,42 @@ int64_t q_table_row_groups(ray_t* t, int64_t ncmp, int64_t* gid, int64_t* rep) {
     int64_t nr = ray_table_nrows(t);
     int64_t ng = 0;
     int dense = ncmp >= 1 && ncmp <= 16 && nr > 0;
-    for (int64_t c = 0; c < ncmp && dense; c++)
-        dense = q_type_is_dense_group_col(ray_table_get_col_idx(t, c));
+    /* an ENUM key column groups by its POSITIONS (owner amendment 2026-08-22:
+     * no decay through the domain) — the i64 lane the dense core already
+     * hashes; sub[] holds the position views to release. */
+    ray_t* sub[16] = { 0 };
+    int64_t nsub = ncmp <= 16 ? ncmp : 0;   /* sub[] never fills past dense's cap */
+    for (int64_t c = 0; c < ncmp && dense; c++) {
+        ray_t* col = ray_table_get_col_idx(t, c);
+        if (col && col->type == RAY_ENUM) {
+            sub[c] = q_enum_positions(col);
+            if (!sub[c] || RAY_IS_ERR(sub[c])) {
+                if (sub[c]) ray_error_free(sub[c]);
+                sub[c] = NULL;
+                dense = 0;
+                break;
+            }
+            col = sub[c];
+        }
+        dense = q_type_is_dense_group_col(col);
+    }
     if (dense) {
         ray_t* kcols[16];
-        for (int64_t c = 0; c < ncmp; c++) kcols[c] = ray_table_get_col_idx(t, c);
+        for (int64_t c = 0; c < ncmp; c++)
+            kcols[c] = sub[c] ? sub[c] : ray_table_get_col_idx(t, c);
         agg_groups_t g;
-        if (agg_group_keys(kcols, (uint8_t)ncmp, nr, &g) != 0) return -1;
+        int bad = agg_group_keys(kcols, (uint8_t)ncmp, nr, &g) != 0;
+        for (int64_t c = 0; c < nsub; c++)
+            if (sub[c]) ray_release(sub[c]);
+        if (bad) return -1;
         for (int64_t r = 0; r < nr; r++) gid[r] = (int64_t)g.gids[r];
         ng = g.ngroups;
         for (int64_t j = 0; j < ng; j++) rep[j] = g.first_row[j];
         agg_groups_free(&g);
         return ng;
     }
+    for (int64_t c = 0; c < nsub; c++)
+        if (sub[c]) ray_release(sub[c]);
     for (int64_t r = 0; r < nr; r++) {
         int64_t g = -1;
         for (int64_t j = 0; j < ng && g < 0; j++)
@@ -316,6 +339,7 @@ ray_t* q_table_bcast_col(ray_t* a, int64_t n) {
 static ray_t* null_cell_like(ray_t* col) {
     if (!col) { ray_retain(RAY_NULL_OBJ); return RAY_NULL_OBJ; }
     int8_t t = col->type;
+    if (t == RAY_ENUM || t == -RAY_ENUM) return q_enum_null_atom(q_enum_domain(col));
     if (t == RAY_SYM || t == -RAY_SYM) return ray_sym(ray_sym_intern_runtime("", 0));
     if (t == -RAY_STR || t == RAY_STR) return ray_str("", 0);
     if (ray_is_vec(col)) return ray_typed_null((int8_t)-t);
@@ -520,37 +544,58 @@ ray_t* q_table_append(ray_t* flat, ray_t* rows) {
     int64_t nc = ray_table_ncols(flat);
     if (ray_table_nrows(flat) == 0) {
         /* untyped empty columns (RAY_LIST) adopt the payload type; a TYPED
-         * 0-row column keeps kdb type-strictness. */
+         * 0-row column keeps kdb type-strictness.  An ENUM schema column
+         * ingests through its domain instead (the FK write law); a LINKED
+         * column carries its mapping onto the adopted ints. */
         if (ray_table_nrows(rows) > 0) {
             for (int64_t c = 0; c < nc; c++) {
                 ray_t* oc = ray_table_get_col_idx(flat, c);
                 ray_t* pc = ray_table_get_col_idx(rows, c);
-                if (oc && pc && ray_is_vec(oc) && pc->type != oc->type)
+                if (oc && pc && ray_is_vec(oc) && oc->type != RAY_ENUM &&
+                    pc->type != oc->type)
                     return q_err(QE_TYPE);
             }
         }
         ray_t* out = ray_table_new(nc > 0 ? nc : 1);
-        for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++)
-            out = ray_table_add_col(out, ray_table_col_name(flat, c),
-                                    ray_table_get_col_idx(rows, c));
+        for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
+            ray_t* oc = ray_table_get_col_idx(flat, c);
+            ray_t* pc = ray_table_get_col_idx(rows, c);
+            ray_t* col;
+            if (oc && pc && oc->type == RAY_ENUM && ray_table_nrows(rows) > 0)
+                col = q_enum_col_ingest(oc, pc);
+            else { col = pc; if (col) ray_retain(col); }
+            if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : q_err(QE_TYPE); }
+            out = ray_table_add_col(out, ray_table_col_name(flat, c), col);
+            ray_release(col);
+        }
         return out;
     }
     /* kdb type-strictness: appending into a simple typed column requires the
      * SAME element type — `insert[`t;(`ferrari;8.22)]` into a long column is
      * 'type, never a silent float promotion.  List (nested) target columns
-     * accept anything; 0-row payloads have nothing to check. */
+     * accept anything; 0-row payloads have nothing to check; enum columns
+     * COERCE below instead ('cast is their law, training doc §2). */
     if (ray_table_nrows(rows) > 0) {
         for (int64_t c = 0; c < nc; c++) {
             ray_t* oc = ray_table_get_col_idx(flat, c);
             ray_t* pc = ray_table_get_col_idx(rows, c);
-            if (oc && pc && ray_is_vec(oc) && pc->type != oc->type)
+            if (oc && pc && ray_is_vec(oc) && oc->type != RAY_ENUM &&
+                pc->type != oc->type)
                 return q_err(QE_TYPE);
         }
     }
     ray_t* out = ray_table_new(nc > 0 ? nc : 1);
     for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
-        ray_t* joined = ray_concat_fn(ray_table_get_col_idx(flat, c),
-                                             ray_table_get_col_idx(rows, c));
+        ray_t* oc = ray_table_get_col_idx(flat, c);
+        ray_t* pc = ray_table_get_col_idx(rows, c);
+        ray_t* joined;
+        if (oc && oc->type == RAY_ENUM) {
+            joined = q_enum_col_concat(oc, pc);
+            if (joined && !RAY_IS_ERR(joined))
+                joined = q_enum_stamp(joined, q_enum_domain(oc));
+        } else {
+            joined = ray_concat_fn(oc, pc);
+        }
         if (!joined || RAY_IS_ERR(joined)) { ray_release(out); return joined ? joined : q_err(QE_OOM); }
         out = ray_table_add_col(out, ray_table_col_name(flat, c), joined);
         ray_release(joined);
@@ -1011,17 +1056,30 @@ ray_t* q_meta_fn(ray_t* x) {
     int64_t blank = ray_sym_intern_runtime("", 0);
     int64_t ssym  = ray_sym_intern_runtime("s", 1);
     for (int64_t c = 0; c < nc && ok; c++) {
-        int64_t nm, a = blank;
+        int64_t nm, a = blank, f = blank;
         char tc;
         if (!splay) {
             nm = ray_table_col_name(flat, c);
-            tc = q_ty_char(ray_table_get_col_idx(flat, c));   /* borrowed */
+            ray_t* col = ray_table_get_col_idx(flat, c);      /* borrowed */
+            tc = q_ty_char(col);
+            char fc = q_enum_meta_f(col, &f);   /* FK/link target + t override */
+            if (fc) tc = fc;
         } else {
             nm = q_splay_col_sym(t, c);
             const q_wf_colhdr* h = q_splay_col_hdr(t, c);
             tc = h->is_enum ? 's' : h->tag ? q_type_char(h->tag) : 0;
             if (h->nested && tc) tc = (char)(tc - 'a' + 'A');
             if (h->disk_attr == 1) a = ssym;
+            if (h->is_enum && h->domain[0]) {   /* a table-named domain is a
+                 * link/FK: env classification, never a data read */
+                ray_t* e1 = q_enum_stamp(ray_i64(0),
+                                ray_sym_intern_runtime(h->domain, strlen(h->domain)));
+                if (e1 && !RAY_IS_ERR(e1)) {
+                    char fc = q_enum_meta_f(e1, &f);
+                    if (fc) tc = fc;
+                }
+                if (e1) ray_release(e1);
+            }
             if (!tc) {                        /* opaque header: the decode answers */
                 ray_t* col = q_splay_col(t, nm);
                 if (!col || RAY_IS_ERR(col)) { bad = col; ok = 0; break; }
@@ -1031,7 +1089,7 @@ ray_t* q_meta_fn(ray_t* x) {
         }
         tbuf[c] = tc ? tc : ' ';
         cvec = ray_vec_append(cvec, &nm);
-        fvec = ray_vec_append(fvec, &blank);
+        fvec = ray_vec_append(fvec, &f);
         avec = ray_vec_append(avec, &a);
         if (!cvec || RAY_IS_ERR(cvec) || !fvec || RAY_IS_ERR(fvec) ||
             !avec || RAY_IS_ERR(avec)) ok = 0;
@@ -1047,6 +1105,51 @@ ray_t* q_meta_fn(ray_t* x) {
         return bad ? bad : q_err(QE_WSFULL);
     }
     return q_table_meta_assemble(cvec, tstr, fvec, avec);
+}
+
+/* (fkeys x) — ref/fkeys.md: the dictionary mapping foreign-key columns to
+ * their tables.  A foreign key is an enum column whose domain names a KEYED
+ * table (single-key or compound).  A link to an unkeyed table shows in meta's
+ * f but is "not strictly a foreign key" (kb/linking-columns.md) and stays
+ * out, as does a symlist-domain enum (no table). */
+ray_t* q_fkeys_wrap(ray_t* x) {
+    ray_t* t = x ? table_bi_deref(x) : NULL;
+    int splay = t && q_splay_is(t);
+    if (!t || (!splay && !q_type_is_table(t) && !q_type_is_keyed(t)))
+        return q_err(QE_TYPE);
+    ray_t* flat = splay ? NULL : q_table_flatten(t);
+    if (flat && RAY_IS_ERR(flat)) return flat;
+    int64_t nc = splay ? q_splay_ncols(t) : ray_table_ncols(flat);
+    ray_t* ks = ray_sym_vec_new(RAY_SYM_W64, nc > 0 ? nc : 1);
+    ray_t* vs = ray_sym_vec_new(RAY_SYM_W64, nc > 0 ? nc : 1);
+    for (int64_t c = 0; ks && vs && !RAY_IS_ERR(ks) && !RAY_IS_ERR(vs) && c < nc; c++) {
+        int64_t f = -1, nm;
+        if (!splay) {
+            q_enum_meta_f(ray_table_get_col_idx(flat, c), &f);
+            nm = ray_table_col_name(flat, c);
+        } else {                        /* header classification, no data read
+                                         * (the meta splay arm's trick) */
+            nm = q_splay_col_sym(t, c);
+            const q_wf_colhdr* h = q_splay_col_hdr(t, c);
+            if (!h || !h->is_enum || !h->domain[0]) continue;
+            ray_t* e1 = q_enum_stamp(ray_i64(0),
+                            ray_sym_intern_runtime(h->domain, strlen(h->domain)));
+            if (e1 && !RAY_IS_ERR(e1)) q_enum_meta_f(e1, &f);
+            if (e1) ray_release(e1);
+        }
+        ray_t* d = f >= 0 ? q_env_get(f) : NULL;         /* borrowed */
+        if (!d || RAY_IS_ERR(d) || !q_type_is_keyed(d)) continue;
+        ks = ray_vec_append(ks, &nm);
+        if (ks && !RAY_IS_ERR(ks)) vs = ray_vec_append(vs, &f);
+    }
+    if (flat) ray_release(flat);
+    if (!ks || RAY_IS_ERR(ks) || !vs || RAY_IS_ERR(vs)) {
+        if (ks && !RAY_IS_ERR(ks)) ray_release(ks);
+        if (vs && !RAY_IS_ERR(vs)) ray_release(vs);
+        return q_err(QE_OOM);
+    }
+    ray_t* r = ray_dict_new(ks, vs);                     /* consumes both */
+    return r ? r : q_err(QE_OOM);
 }
 
 /* key table: c ; value table: t f a  -> keyed table dict (consumes all four) */
