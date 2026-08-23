@@ -133,6 +133,7 @@ ray_t* q_not_wrap(ray_t* x);
 
 /* ---- defined in ops/q_table.c ---- */
 ray_t* q_keys_wrap(ray_t* x);
+ray_t* q_fkeys_wrap(ray_t* x);
 ray_t* q_xkey_wrap(ray_t* x, ray_t* y);
 ray_t* q_xgroup_wrap(ray_t* x, ray_t* y);
 ray_t* q_group_wrap(ray_t* x);

@@ -15,6 +15,7 @@
 #include "qlang/q_dotz.h"         /* the .z.* handler-slot arms of `set` */
 #include "qlang/eval/q_view.h"    /* view hooks: set/unbind invalidation, dot-'nyi */
 #include "qlang/io/q_io.h"        /* q_io_set — `set`'s file half */
+#include "qlang/q_prim.h"         /* q_enum_deref — FK/link dotted-walk gather */
 #include "lang/internal.h"        /* ray_error */
 #include "table/sym.h"         /* ray_sym_intern_runtime, ray_sym_str, ray_read_sym */
 #include "table/dict.h"        /* ray_dict_* probes/upsert */
@@ -495,14 +496,16 @@ static ray_t* walk_segs(ray_t* v, int fresh, const char* p, size_t n, size_t pos
         int64_t seg = ray_sym_intern_runtime(p + pos, end - pos);
         ray_t* next = NULL;
         int next_fresh = 0;
-        if (ray_link_has(v)) {
-            next = ray_link_deref(v, seg);
-            if (next && RAY_IS_ERR(next)) {
-                if (fresh) ray_release(v);
-                return next;
-            }
-            next_fresh = (next != NULL);
+        /* referential deref first — FK enums and link columns gather from
+         * their q-env target (q_enum_deref); ray_link_deref stays as the
+         * rayfall-env fallback for links whose target lives only there */
+        next = q_enum_deref(v, seg);
+        if (!next && ray_link_has(v)) next = ray_link_deref(v, seg);
+        if (next && RAY_IS_ERR(next)) {
+            if (fresh) ray_release(v);
+            return next;
         }
+        next_fresh = (next != NULL);
         if (!next) next = ray_container_probe_sym(v, seg);
         if (!next && v->type != RAY_DICT) {
             /* never on a dict: `.q.date` must not fire the date clock */

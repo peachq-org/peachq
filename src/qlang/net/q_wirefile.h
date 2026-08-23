@@ -73,13 +73,9 @@ typedef struct {
  * tag, 'corrupt inconsistent lengths, 'nyi recognized-but-deferred layouts. */
 ray_t* q_wirefile_probe(ray_t* pathstr, q_wf_colhdr* out);
 
-/* Read ONE column file (enums/nesting/compression resolve away).  When
- * `domname`/`dom` name a preloaded enum domain, a column enumerated against
- * that name uses it instead of the directory walk-up. */
-ray_t* q_wirefile_read_column(ray_t* pathstr, const char* domname, ray_t* dom);
-
-/* The enum-domain walk-up from a column's directory (owned sym vector or
- * error) — the registry loads a splay's domain once through this. */
-ray_t* q_wirefile_domain(ray_t* colpath, const char* name);
+/* Read ONE column file (nesting/compression resolve away; an enum column
+ * reads ENUM-NATIVE as a 20h vector naming its domain — resolution is lazy
+ * through the env, 2026-08-22 plan). */
+ray_t* q_wirefile_read_column(ray_t* pathstr);
 
 #endif /* Q_WIREFILE_H */

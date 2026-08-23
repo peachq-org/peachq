@@ -39,6 +39,11 @@ static ray_t* atom_run_collapse(ray_t* l) {
         for (int64_t i = 0; i < n; i++) vec = ray_vec_append(vec, &e[i]->i64);
         return vec;
     }
+    /* enum atoms collapse only within ONE domain (a mixed-domain run has no
+     * single 20h vector to become — it stays boxed) */
+    if (t == -RAY_ENUM)
+        for (int64_t i = 1; i < n; i++)
+            if (q_enum_domain(e[i]) != q_enum_domain(e[0])) { ray_retain(l); return l; }
 
     ray_t* vec = ray_vec_new(-t, n);
     if (RAY_IS_ERR(vec)) return vec;
@@ -69,6 +74,7 @@ static ray_t* atom_run_collapse(ray_t* l) {
         case RAY_I64:  case RAY_TIMESTAMP: case RAY_MONTH:
         case RAY_DATE: case RAY_TIMESPAN: case RAY_MINUTE:    case RAY_SECOND:
         case RAY_TIME: case RAY_LIST: case RAY_STR: case RAY_SYM:
+        case RAY_ENUM:                                        /* i64 positions */
                        break;
         }
         if (!appended) vec = ray_vec_append(vec, &e[i]->i64);   /* i64/temporal + out-of-enum */
@@ -76,6 +82,7 @@ static ray_t* atom_run_collapse(ray_t* l) {
         if (RAY_ATOM_IS_NULL(e[i])) { ray_vec_set_null(vec, i, true); nulls++; }
     }
     (void)nulls;
+    if (t == -RAY_ENUM) return q_enum_stamp(vec, q_enum_domain(e[0]));
     return vec;
 }
 
