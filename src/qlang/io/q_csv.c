@@ -78,6 +78,7 @@ typedef struct csv_st {
     char     datefmt[CSV_FMT_MAX];  /* dateformat / timestampformat options; empty = the default */
     char     tsfmt[CSV_FMT_MAX];    /* writer's-forms grammar, set = the format REPLACES it */
     int      header;              /* -1 = sniff, else forced 0/1 */
+    int64_t  skip_left;           /* records still to drop off the front */
     int      info_only;
     int      frozen;
     int64_t  sample, bufsz;
@@ -1169,6 +1170,8 @@ static ray_t* csv_freeze(csv_st* st) {
 static ray_t* csv_line(csv_st* st, const char* p, size_t n) {
     if (st->cmt && n && p[0] == st->cmt) return NULL;   /* a FIRST-byte comment line: requested dialect,
                                                          * skipped whole — never counted, never rejected */
+    if (st->skip_left) { st->skip_left--; return NULL; }   /* the placement IS the law: blanks count
+                                                            * toward skip, comments do not */
     if (n == 0) return NULL;                       /* empty lines are skipped */
     if (st->frozen) return st->info_only ? NULL : csv_parse_row(st, p, n);
     if (!st->sniff) {
@@ -1484,6 +1487,11 @@ static ray_t* csv_opts(csv_st* st, ray_t* opts) {
             else if (x <= 0) bad = q_err(QE_DOMAIN);
             else if (csv_sym_is(k->i64, "sample_size")) st->sample = x;
             else st->bufsz = x;
+        } else if (csv_sym_is(k->i64, "skip")) {
+            int64_t x;
+            if (!q_type_strict_i64(v, &x)) bad = q_err(QE_TYPE);
+            else if (x < 0) bad = q_err(QE_DOMAIN);   /* its own arm, not sample_size's: 0 is legal here */
+            else st->skip_left = x;
         } else if (csv_sym_is(k->i64, "ignore_errors") || csv_sym_is(k->i64, "null_padding") ||
                    csv_sym_is(k->i64, "strict_mode") || csv_sym_is(k->i64, "store_rejects")) {
             if (v->type != -RAY_BOOL) bad = q_err(QE_TYPE);
@@ -1498,7 +1506,7 @@ static ray_t* csv_opts(csv_st* st, ray_t* opts) {
                 st->store_rej = 1;                 /* naming the table opts in, like DuckDB */
             }
         } else {
-            /* skip/nullstr/all_varchar are ratified-but-later; they and
+            /* nullstr/all_varchar are ratified-but-later; they and
              * unknown keys signal alike — an option is NEVER silently ignored */
             bad = q_err(QE_OPTION);
         }
