@@ -329,8 +329,8 @@ testTimestampFractionParses:{
     .qunit.assertEquals[t; ([]ts:2000.01.01D12:00:00.123456789 2001.06.15D08:30:00.000000001 2002.03.04D00:00:00.100000000);
         "nanosecond fractions parse exactly, short ones pad"]};
 
-/ superseded by THE TZ POSTURE below: an explicit p never adopts an offset, so every offset SHAPE is a
-/ frozen-type miss and only the offsetless cell parses.  %z is the door that reads one (see the tz block)
+/ an explicit p never adopts an offset, so every offset SHAPE is a frozen-type miss and only the
+/ offsetless cell parses.  %z is the door that reads one (see the tz block below)
 testTimestampTzUnderExplicitP:{
     {[s] f:`:csvTestTsTz.csv 0: ("ts";s);
         .qunit.assertThrows[.csv.read[;::;enlist "p";()!()]; f; "csv*"; "an offset under explicit p misses: ",s]}
