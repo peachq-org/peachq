@@ -180,6 +180,7 @@ is never silently ignored**: an unknown key — or one that is recognised but no
 | `comment` | char | off | a line whose FIRST byte is this is skipped whole |
 | `sample_size` | long | 20480 | rows read to infer types, the header included |
 | `buffer_size` | long | 1048576 | read-chunk bytes |
+| `skip` | long | `0` | records dropped off the front before anything else reads them |
 | `dateformat` | string | off | strptime-subset format that REPLACES the built-in date grammar |
 | `timestampformat` | string | off | the same for timestamps, and the only place `%z` is accepted |
 | `ignore_errors` | boolean | `0b` | skip a bad row instead of aborting |
@@ -192,14 +193,52 @@ The format subset for `dateformat` / `timestampformat` is `%Y %y %m %d %H %M %S 
 digits; clock specifiers belong to `timestampformat` and are refused in `dateformat`; a format with no year is
 refused; anything outside the subset signals `'option`.
 
-`skip`, `nullstr` and `all_varchar` are recognised names that are **not implemented** — passing any of them
-signals `'option`, like an unknown key. There is no `encoding` option (see [Encoding](#encoding)).
+`nullstr` and `all_varchar` are recognised names that are **not implemented** — passing either signals
+`'option`, like an unknown key. There is no `encoding` option (see [Encoding](#encoding)).
 
 Degenerate combinations are refused up front rather than producing nonsense: the quote character cannot be the
 delimiter, a newline cannot be the delimiter, the comment character cannot collide with an explicit delimiter, and
 a multi-character `comment` is `'domain`.
 
 ## The laws you will actually feel
+
+### `skip` drops a preamble before anything else looks at the file
+
+Plenty of real files open with a title, a note or a run stamp before the data starts. Such a file is unloadable at
+any other option setting: the sniffer freezes a schema off the junk and every real row then rejects as
+`toomanycolumns`. `skip` drops that many records off the **front**, and everything downstream — the delimiter
+sniff, the header sniff, the type sniff — runs on what remains.
+
+```q
+q)`:pre.csv 1: "monthly report\nrun 2026-08-24\na,b\n1,2\n3,4\n";
+q).csv.read[`:pre.csv;::;::;(enlist `skip)!enlist 2]
+| a    | b    |
+| long | long |
+|------|------|
+| 1    | 2    |
+| 3    | 4    |
+```
+
+Three laws follow from where the counter sits, and they are worth knowing before you count lines by eye:
+
+- A **blank line counts** toward `skip`. Blank lines are file structure, so a preamble that ends in one needs a
+  `skip` that includes it.
+- A **comment line does not count**. `comment` is a dialect you asked for, and it is transparent everywhere: the
+  reader drops those lines before `skip` ever sees them, so the two options compose instead of fighting.
+- **Line numbers are physical.** A reject record's `line` is where the row sits in the file; `skip` renumbers
+  nothing.
+
+```q
+q)`:mix.csv 1: "# generated\nmonthly report\na,b\n1,2\n";
+q).csv.read[`:mix.csv;::;::;`comment`skip!("#";1)]
+| a    | b    |
+| long | long |
+|------|------|
+| 1    | 2    |
+```
+
+A negative `skip` is `'domain` — `0` is the default, not a degenerate value. Skipping past the last record leaves
+a stream that states no schema, and that signals `'csv`, exactly as a zero-byte file does.
 
 ### The delimiter is sniffed; the dialect is not
 
@@ -416,6 +455,10 @@ Against DuckDB `read_csv`, with the same options set:
 - We load where DuckDB refuses: invalid UTF-8 and Latin-1 payloads pass through as bytes.
 - A blank line is skipped here and is a row of nulls in DuckDB. A zero-byte file is `'csv` here and an invented
   one-column schema in DuckDB.
+- `skip` counts **records**, so a quoted multi-line record inside the skipped prefix counts once. DuckDB's skip
+  runs before its tokenizer and slices that record's physical lines, leaving a fragment as the first cell. One
+  carry scan cannot hold two contradictory notions of a line — the whole point of that scan being that a quoted
+  newline is not a row boundary — so we count records and DuckDB counts lines.
 - Quote, escape and comment dialects are never sniffed here; DuckDB's sniffer will try them.
 
 None of that is guesswork. `qlib/test/csvDiffTest.q` loads a corpus of some 500 files through both engines and
@@ -431,7 +474,7 @@ Deliberately unspecified for a first release — do not build on today's behavio
 - **Encodings beyond byte-transparent.** No encoding option; UTF-16 input is not decoded.
 - **Compressed input.** `.csv.gz` and friends are not fed through the reader.
 - **Zone names.** `%Z`, and any tzdata-backed conversion.
-- **`skip`, `nullstr`, `all_varchar`.** Named and refused, not implemented.
+- **`nullstr`, `all_varchar`.** Named and refused, not implemented.
 - **Non-comma delimiter files with junk lines.** Whether such a file refuses or falls back to a single column is
   not guaranteed either way today.
 - **Files carrying NUL bytes, and single-quote or backslash-escape dialects at defaults.** Some load, some refuse;
