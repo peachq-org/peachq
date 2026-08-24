@@ -26,6 +26,7 @@
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk — the `.z.ts` timer callback */
 #include "qlang/eval/q_view.h" /* q_view_names — `\b` / `\B` */
 #include "qlang/parse/q_parse.h"    /* q_parse — `\t expr` / `\ts expr` timing */
+#include "qlang/parse/q_tok.h" /* q_tok_date_order_set/_order — `\z` */
 #include "qlang/net/q_tls.h"  /* q_tls_server_mode — `\E` */
 #include "core/ipc.h"         /* ray_ipc_listen — `\p N` binds a listener */
 #include "core/poll.h"        /* ray_poll_get / deregister — `\p 0W`/`\p 0`; poll->timers */
@@ -162,6 +163,7 @@ void q_sys_cfg_init(void) {
     g_gc_mode   = 0;
     g_utc_offset = NULL_I64;     /* 0N — "use the machine offset" (deferred) */
     g_week_offset = 2;           /* Monday (0 = Saturday) */
+    q_tok_date_order_set(0);     /* `\z` — mm/dd/yyyy (state single-homed in q_tok.c) */
     g_err_trap  = 0;             /* trapping off */
     g_sec_threads = 0;           /* no secondary threads configured */
     g_timer_ms  = 0;             /* `\t` off per runtime */
@@ -820,6 +822,17 @@ static ray_t* h_o(const char* arg, size_t alen) {
     return NULL;
 }
 
+/* syscmds.md#z-date-parsing — the "D"$ date order; state lives in q_tok.c, the
+ * one date reader.  Out of range is a silent no-op, as for `\P`. */
+static ray_t* h_z(const char* arg, size_t alen) {
+    if (alen == 0) return ray_i64(q_tok_date_order());
+    int64_t v;
+    if (!parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
+    if (v < 0 || v > 1) return NULL;
+    q_tok_date_order_set((int)v);
+    return NULL;
+}
+
 /* `\W` — start-of-week offset (0 = Saturday, default 2 = Monday).  `\W`→`2i`.
  * Week-start wiring into temporal ops is DEFERRED. */
 static ray_t* h_W(const char* arg, size_t alen) {
@@ -1055,6 +1068,7 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
             case 'c': return h_c(rest, restlen);                 /* console size        */
             case 'C': return h_C(rest, restlen);                 /* HTTP display size   */
             case 'o': return h_o(arg, alen);                     /* offset from UTC     */
+            case 'z': return h_z(arg, alen);                     /* "D"$ date order     */
             case 'g': return h_g(arg, alen);                     /* gc mode             */
             case 's': return h_s(arg, alen);                     /* secondary threads   */
             case 'W': return h_W(arg, alen);                     /* week offset         */
@@ -1069,9 +1083,9 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
             case '1': return h_redirect(1, arg, alen);           /* stdout redirect     */
             case '2': return h_redirect(2, arg, alen);           /* stderr redirect     */
             /* Silent setter/action form (arg present) → NULL; getter → 'nyi:
-             * \z date-parse, \r replicate, \T timeout, \u user-pwd,
+             * \r replicate, \T timeout, \u user-pwd,
              * \x expunge, \_ hide-q-code. */
-            case 'z': case 'r': case 'T':
+            case 'r': case 'T':
             case 'u': case 'x': case '_':
                 return h_getset(alen);
             /* \\ quit — q_sys_exit is capability-gated (a real process exits firing
