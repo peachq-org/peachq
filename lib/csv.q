@@ -1,21 +1,27 @@
 / csv.q - THE public .csv surface: the incremental CSV reader (src/qlang/io/q_csv.c).
 / Lambdas, not natives, so the surface is DISCOVERABLE: typing `.csv.read` prints the signature and names its
-/ arguments.  The engine is a bytes-in / typed-rows-out core behind a chunked file driver: an RFC-4180 quoted
-/ field may span read chunks (or hold newlines) and still lands as one cell of one row.
+/ arguments.  The engine is a bytes-in / typed-rows-out core behind two chunked drivers - a file and an
+/ in-memory one (THE SOURCE LAW below) - so an RFC-4180 quoted field may span chunks (or hold newlines) and
+/ still lands as one cell of one row.
 / Column types FREEZE after the sniff sample; a later cell that fails its frozen type signals 'csv - never a
 / silent null.  An option is NEVER silently ignored: unknown (or not-yet-implemented) keys signal 'option.
 / The doc below is the NORMATIVE statement of the laws; user-docs/csv.md is the user-facing guide and restates
 / them with worked examples.  Where the two disagree this file wins, and the guide is the one that must change.
 / ANY-ORDER LAW: definitions only at top level.
 
-/ load a CSV file through the incremental core.
+/ load CSV through the incremental core - from a file, or from text already in memory.
 / A symbol or lambda target answers the summary dict `rows`rejected`chunks`ignored`types; otherwise the
 / table itself.  Parse types resolve as: explicit types > the existing target table's schema > the sniff -
 / an EXISTING symbol target fixes the per-column types from its meta (keyed targets upsert, unkeyed insert),
 / CSV columns it lacks are dropped and reported under `ignored`, and a headerless file maps to a target
 / positionally - complete map, no projection.  All other conformity (missing columns, types) is insert's
 / own contract.
-/ @param file (symbol) file symbol, e.g. `:trades.csv
+/ THE SOURCE LAW: a SYMBOL is a path, TEXT is content - never sniffed.  Text is one char vector (the
+/ whole payload, embedded newlines and all) or a list of them, DEFINED as join-with-newline-then-parse
+/ and NOT one element per record: only that reading rejoins a quoted field split across two elements.
+/ Text chunks at the same buffer_size a file is read at, so `chunks and the target's misc match either
+/ way; the BOM strip is the same, and an empty payload states no schema ('csv, the zero-byte law).
+/ @param file (symbol or string or string list) `:trades.csv, or the CSV text itself
 / @param target (symbol) a global table name each batch is inserted into (created when absent), or a rank-3
 / lambda {[tblData;errData;misc] ...} called once per batch - errData is that batch's reject records as a
 / table (line, column, error, csvLine; empty on a clean batch), misc the dict `chunk`rows (0-based batch
@@ -79,6 +85,6 @@
 / ADVISORY on text (csvguess-style): where low cardinality suggests a symbol column the dict says "s",
 / but .csv.read itself never syms a sniffed column - feed this dict back as types to adopt the advice.
 / Reads only the sniff sample (sample_size rows), so it does not validate the rest of the file.
-/ @param file (symbol) file symbol
+/ @param file (symbol or string or string list) the same source forms .csv.read takes
 / @param opts (dict) the same options dict .csv.read takes
 .csv.info:{[file;opts] .csv.i.info[file;opts]};

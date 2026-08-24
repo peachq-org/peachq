@@ -3,7 +3,8 @@
  * The core is bytes-in -> complete typed rows out + remainder carry: a feed appends to the carry, rows end
  * at an unquoted '\n' (RFC-4180 — a quoted field keeps its newlines, and may straddle any number of feeds),
  * and the incomplete tail waits for the next feed.  Nothing here assumes it knows the file size or can seek,
- * so a future decompressor can feed the same core; today's one driver is chunked q_io_read_slice reads.
+ * so a decompressor could feed the same core; today's two drivers are chunked q_io_read_slice reads and an
+ * in-memory payload sliced at that same chunk size (THE SOURCE LAW, at csv_run).
  *
  * Types FREEZE after the sniff sample (field parsers + the promote lattice + the sym-cardinality rule adapted
  * from src/io/csv.c): a later cell that fails its frozen type signals 'csv — never a silent null, never a
@@ -825,12 +826,12 @@ static char csv_type_canon(char c) {
 static ray_t* csv_types_apply(csv_st* st) {
     ray_t* ty = st->types_arg;
     if (!ty) return NULL;
-    if (ty->type == RAY_CHARV || ty->type == -RAY_CHARV) {
-        int64_t n = ty->type == RAY_CHARV ? ray_len(ty) : 1;
-        if (n != st->ncols) return q_err(QE_LENGTH);
-        const char* p = ty->type == RAY_CHARV ? (const char*)ray_data(ty) : (const char*)&ty->u8;
-        for (int64_t j = 0; j < n; j++) {
-            char c = csv_type_canon(p[j]);
+    const char* tp;
+    int64_t tn;
+    if (q_str_text_bytes(ty, &tp, &tn)) {
+        if (tn != st->ncols) return q_err(QE_LENGTH);
+        for (int64_t j = 0; j < tn; j++) {
+            char c = csv_type_canon(tp[j]);
             if (!c) return q_err(QE_TYPE);
             st->ctypes[j] = c;
         }
@@ -1469,10 +1470,10 @@ static ray_t* csv_opts(csv_st* st, ray_t* opts) {
             else bad = q_err(QE_TYPE);
         } else if (csv_sym_is(k->i64, "dateformat") || csv_sym_is(k->i64, "timestampformat")) {
             int is_ts = csv_sym_is(k->i64, "timestampformat");
-            if (v->type != RAY_CHARV && v->type != -RAY_CHARV) bad = q_err(QE_TYPE);
+            const char* fp;
+            int64_t fl;
+            if (!q_str_text_bytes(v, &fp, &fl)) bad = q_err(QE_TYPE);
             else {
-                int64_t fl = v->type == RAY_CHARV ? ray_len(v) : 1;
-                const char* fp = v->type == RAY_CHARV ? (const char*)ray_data(v) : (const char*)&v->u8;
                 if (fl <= 0 || fl >= CSV_FMT_MAX || !csv_fmt_valid(fp, (size_t)fl, is_ts))
                     bad = q_err(QE_OPTION);        /* outside the implemented strptime subset */
                 else {
@@ -1559,34 +1560,92 @@ static void csv_free(csv_st* st) {
     }
 }
 
-static ray_t* csv_run(csv_st* st, ray_t* file) {
+/* ONE chunk into the core, and the ONE batching law both drivers obey: the BOM rides only the
+ * first chunk, and a frozen sink drains what that chunk completed */
+static ray_t* csv_pump(csv_st* st, const char* p, int64_t n, int first) {
+    int64_t skip = (first && n >= 3 && !memcmp(p, "\xef\xbb\xbf", 3)) ? 3 : 0;
+    ray_t* bad = n > skip ? csv_feed(st, p + skip, n - skip) : NULL;
+    if (!bad && st->frozen && st->sink_kind && st->pend > 0) bad = csv_emit(st);
+    return bad;
+}
+
+/* the first chunk is at least the BOM's 3 bytes, so it can never straddle a tiny buffer */
+static int64_t csv_want(const csv_st* st, int64_t off) {
+    return (off == 0 && st->bufsz < 3) ? 3 : st->bufsz;
+}
+
+static ray_t* csv_run_file(csv_st* st, ray_t* file) {
     ray_t* path = q_io_file_path(file);
     if (!path) return q_err(QE_TYPE);
     int64_t off = 0;
     ray_t* bad = NULL;
     for (;;) {
-        /* the first read is at least the BOM's 3 bytes, so it can never straddle a tiny buffer */
-        int64_t want = (off == 0 && st->bufsz < 3) ? 3 : st->bufsz;
+        int64_t want = csv_want(st, off);
         ray_t* b = q_io_read_slice(path, off, want, NULL);
         if (!b) { bad = q_err(QE_OOM); break; }
         if (RAY_IS_ERR(b)) { bad = b; break; }
         int64_t got = ray_len(b);
-        const char* p = (const char*)ray_data(b);
-        int64_t skip = 0;
-        if (off == 0 && got >= 3 && !memcmp(p, "\xef\xbb\xbf", 3)) skip = 3;   /* a leading UTF-8 BOM */
-        if (got > skip) bad = csv_feed(st, p + skip, got - skip);
+        bad = csv_pump(st, (const char*)ray_data(b), got, off == 0);
         ray_release(b);
-        if (bad) break;
-        if (st->frozen && st->sink_kind && st->pend > 0) {
-            bad = csv_emit(st);
-            if (bad) break;
-        }
         off += got;
-        if (got < want || (st->info_only && st->frozen)) break;
+        if (bad || got < want || (st->info_only && st->frozen)) break;
     }
-    if (!bad) bad = csv_finish(st);
     ray_release(path);
     return bad;
+}
+
+/* the memory driver slices at the SAME bufsz the file driver reads at: `chunks` and the lambda
+ * target's `chunk`rows misc are q-observable, so the same bytes must batch the same either way */
+static ray_t* csv_run_mem(csv_st* st, const char* p, int64_t n) {
+    int64_t off = 0;
+    ray_t* bad = NULL;
+    for (;;) {
+        int64_t want = csv_want(st, off);
+        int64_t got = n - off < want ? n - off : want;
+        bad = csv_pump(st, p + off, got, off == 0);
+        off += got;
+        if (bad || got < want || (st->info_only && st->frozen)) break;
+    }
+    return bad;
+}
+
+/* the list-of-lines shape is JOIN-with-newline-then-parse, never one element per record: a quoted
+ * field spanning two elements rejoins before the carry ever sees it */
+static ray_t* csv_run_lines(csv_st* st, ray_t* x) {
+    int64_t n = ray_len(x), total = n ? n - 1 : 0;
+    ray_t** e = (ray_t**)ray_data(x);
+    const char* ep;
+    int64_t el;
+    for (int64_t i = 0; i < n; i++) {
+        if (!q_str_text_bytes(e[i], &ep, &el)) return q_err(QE_TYPE);
+        total += el;
+    }
+    char* buf = (char*)malloc((size_t)total + 1);
+    if (!buf) return q_err(QE_OOM);
+    int64_t at = 0;
+    for (int64_t i = 0; i < n; i++) {
+        q_str_text_bytes(e[i], &ep, &el);
+        if (i) buf[at++] = '\n';
+        memcpy(buf + at, ep, (size_t)el);
+        at += el;
+    }
+    ray_t* bad = csv_run_mem(st, buf, total);
+    free(buf);
+    return bad;
+}
+
+/* THE SOURCE LAW (lib/csv.q): a symbol is a PATH, text is CONTENT.  No sniffing - the caller's
+ * type states which, so `:x.csv can never be read as one line of CSV nor "a,b" as a filename. */
+static ray_t* csv_run(csv_st* st, ray_t* src) {
+    const char* p;
+    int64_t n;
+    ray_t* bad;
+    if (!src) return q_err(QE_TYPE);
+    if (src->type == -RAY_SYM) bad = csv_run_file(st, src);
+    else if (q_str_text_bytes(src, &p, &n)) bad = csv_run_mem(st, p, n);
+    else if (src->type == RAY_LIST) bad = csv_run_lines(st, src);
+    else return q_err(QE_TYPE);
+    return bad ? bad : csv_finish(st);
 }
 
 /* ---- results --------------------------------------------------------------- */
