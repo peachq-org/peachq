@@ -90,13 +90,13 @@ static bool ends_with_dot_q(const char* s) {
  * `-q`/`.z.q` quiet-mode probe.  Returns:
  *   Q_FLAG_NONE   not a recognized launcher flag (positional / script)
  *   Q_FLAG_BOOL   recognized flag consuming NO following token: -q
- *   Q_FLAG_VALUE  recognized flag consuming its FOLLOWING token: -p/--port/-u/-U
- * KEEP IN SYNC with qmain.c's arg-parse switch (it acts on -p/-u/-U and reads
+ *   Q_FLAG_VALUE  recognized flag consuming its FOLLOWING token: -e/-E/-z/-p/--port/-u/-U
+ * KEEP IN SYNC with qmain.c's arg-parse switch (which acts on them and reads
  * `.z.q` back via q_dotz_quiet()) — this classifier is the canonical list. */
 enum { Q_FLAG_NONE = 0, Q_FLAG_BOOL = 1, Q_FLAG_VALUE = 2 };
 static int flag_kind(const char* s) {
     if (strcmp(s, "-q") == 0 || strcmp(s, "-classic") == 0) return Q_FLAG_BOOL;
-    if (strcmp(s, "-e") == 0 || strcmp(s, "-E") == 0) return Q_FLAG_VALUE;
+    if (strcmp(s, "-e") == 0 || strcmp(s, "-E") == 0 || strcmp(s, "-z") == 0) return Q_FLAG_VALUE;
     if (strcmp(s, "-p") == 0 || strcmp(s, "--port") == 0 ||
         strcmp(s, "-u") == 0 || strcmp(s, "-U") == 0) return Q_FLAG_VALUE;
     return Q_FLAG_NONE;
