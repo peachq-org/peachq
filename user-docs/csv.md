@@ -420,8 +420,9 @@ Against DuckDB `read_csv`, with the same options set:
 
 None of that is guesswork. `qlib/test/csvDiffTest.q` loads a corpus of some 500 files through both engines and
 compares them cell by cell, and every difference it still carries is one of the named classes above. Files whose
-divergence is not one of those classes are no longer compared through both engines: they are pinned against
-peachq alone at the end of `qlib/test/csvTest.q`, or they left the corpus for the reasons in the next section.
+divergence is not one of those classes are not compared through both engines: they are pinned against
+peachq alone at the end of `qlib/test/csvTest.q`, or they are outside the corpus for the reasons in the next
+section.
 
 ## Undefined in this release
 
