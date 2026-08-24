@@ -16,7 +16,7 @@
 #include "qlang/io/q_exedir.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_env.h"
-#include "qlang/q_prim.h"     /* q_str_text_bytes — text cells on the write path */
+#include "qlang/q_prim.h"     /* q_str_text_bytes (write-path text cells) + q_table_meta_assemble */
 #include "lang/env.h"         /* ray_fn_unary / ray_fn_vary */
 #include "lang/eval.h"        /* RAY_FN_NONE, ray_at_fn */
 #include "table/sym.h"        /* ray_sym_vec_cell */
@@ -1183,16 +1183,16 @@ static ray_t* qd_meta_wrap(ray_t** args, int64_t n) {
         avec = ray_vec_append(avec, &blank);
     }
     ray_release(cat);
-    ray_t* tstr = ray_str(tbuf, (size_t)nrows);
+    ray_t* tvec = ray_charv(tbuf, nrows);
     if (!cvec || RAY_IS_ERR(cvec) || !fvec || RAY_IS_ERR(fvec) ||
-        !avec || RAY_IS_ERR(avec) || !tstr || RAY_IS_ERR(tstr)) {
+        !avec || RAY_IS_ERR(avec) || !tvec || RAY_IS_ERR(tvec)) {
         if (cvec && !RAY_IS_ERR(cvec)) ray_release(cvec);
         if (fvec && !RAY_IS_ERR(fvec)) ray_release(fvec);
         if (avec && !RAY_IS_ERR(avec)) ray_release(avec);
-        if (tstr && !RAY_IS_ERR(tstr)) ray_release(tstr);
+        if (tvec && !RAY_IS_ERR(tvec)) ray_release(tvec);
         return q_err(QE_WSFULL);
     }
-    return q_table_meta_assemble(cvec, tstr, fvec, avec);
+    return q_table_meta_assemble(cvec, tvec, fvec, avec);
 }
 
 /* set body over the flattened table: DDL + data + descriptor, ONE transaction. */

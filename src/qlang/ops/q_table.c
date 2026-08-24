@@ -1019,7 +1019,7 @@ ray_t* q_cols_fn(ray_t* x) {
 
 /* (meta x) — table metadata keyed by column name: (c) -> (t; f; a).  ONE
  * builder over two per-column fact sources: an in-memory table's columns
- * (t via q_ty_char, f/a blank) or a mapped splay's probed HEADERS — type from
+ * (t via q_ty_char, a via q_attr_letter) or a mapped splay's probed HEADERS — type from
  * the type byte (enum `s`, nested upper-cased), attr `s` when the disk byte
  * says sorted, never a data read; only a column whose header cannot name its
  * type (a kxzip container, a shape-A non-vector) decodes once to answer.
@@ -1047,7 +1047,7 @@ ray_t* q_meta_fn(ray_t* x) {
     int64_t cap = nc > 0 ? nc : 1;
     ray_t* cvec = ray_sym_vec_new(RAY_SYM_W64, cap);   /* c: names          */
     ray_t* fvec = ray_sym_vec_new(RAY_SYM_W64, cap);   /* f: blank per col  */
-    ray_t* avec = ray_sym_vec_new(RAY_SYM_W64, cap);   /* a: `s or blank    */
+    ray_t* avec = ray_sym_vec_new(RAY_SYM_W64, cap);   /* a: attr or blank  */
     char stackt[64];
     char* tbuf = (cap <= (int64_t)sizeof stackt) ? stackt : (char*)malloc((size_t)cap);
     int ok = cvec && !RAY_IS_ERR(cvec) && fvec && !RAY_IS_ERR(fvec) &&
@@ -1064,6 +1064,8 @@ ray_t* q_meta_fn(ray_t* x) {
             tc = q_ty_char(col);
             char fc = q_enum_meta_f(col, &f);   /* FK/link target + t override */
             if (fc) tc = fc;
+            char ac = q_attr_letter(col);
+            if (ac) a = ray_sym_intern_runtime(&ac, 1);
         } else {
             nm = q_splay_col_sym(t, c);
             const q_wf_colhdr* h = q_splay_col_hdr(t, c);
@@ -1095,16 +1097,16 @@ ray_t* q_meta_fn(ray_t* x) {
             !avec || RAY_IS_ERR(avec)) ok = 0;
     }
     if (flat) ray_release(flat);
-    ray_t* tstr = ok ? ray_str(tbuf, (size_t)nc) : NULL;
+    ray_t* tvec = ok ? ray_charv(tbuf, nc) : NULL;
     if (tbuf && tbuf != stackt) free(tbuf);
-    if (!ok || !tstr || RAY_IS_ERR(tstr)) {
+    if (!ok || !tvec || RAY_IS_ERR(tvec)) {
         if (cvec && !RAY_IS_ERR(cvec)) ray_release(cvec);
         if (fvec && !RAY_IS_ERR(fvec)) ray_release(fvec);
         if (avec && !RAY_IS_ERR(avec)) ray_release(avec);
-        if (tstr && !RAY_IS_ERR(tstr)) ray_release(tstr);
+        if (tvec && !RAY_IS_ERR(tvec)) ray_release(tvec);
         return bad ? bad : q_err(QE_WSFULL);
     }
-    return q_table_meta_assemble(cvec, tstr, fvec, avec);
+    return q_table_meta_assemble(cvec, tvec, fvec, avec);
 }
 
 /* (fkeys x) — ref/fkeys.md: the dictionary mapping foreign-key columns to
@@ -1152,13 +1154,15 @@ ray_t* q_fkeys_wrap(ray_t* x) {
     return r ? r : q_err(QE_OOM);
 }
 
-/* key table: c ; value table: t f a  -> keyed table dict (consumes all four) */
-ray_t* q_table_meta_assemble(ray_t* cvec, ray_t* tstr, ray_t* fvec, ray_t* avec) {
+/* key table: c ; value table: t f a  -> keyed table dict (consumes all four).
+ * tvec is a CHAR VECTOR: the letters are a computed value, so `where t="C"`
+ * reads them, and a physical RAY_STR here would answer 21h to every reader. */
+ray_t* q_table_meta_assemble(ray_t* cvec, ray_t* tvec, ray_t* fvec, ray_t* avec) {
     ray_t* kt = ray_table_new(1);
     kt = ray_table_add_col(kt, ray_sym_intern("c", 1), cvec);
     ray_release(cvec);
     ray_t* vt = ray_table_new(3);
-    vt = ray_table_add_col(vt, ray_sym_intern("t", 1), tstr); ray_release(tstr);
+    vt = ray_table_add_col(vt, ray_sym_intern("t", 1), tvec); ray_release(tvec);
     if (!RAY_IS_ERR(vt)) { vt = ray_table_add_col(vt, ray_sym_intern("f", 1), fvec); }
     ray_release(fvec);
     if (!RAY_IS_ERR(vt)) { vt = ray_table_add_col(vt, ray_sym_intern("a", 1), avec); }
