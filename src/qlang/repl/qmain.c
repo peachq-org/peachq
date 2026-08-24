@@ -27,6 +27,7 @@
 #include "qlang/ops/q_sys.h"     /* q_sys_listen — single-homed listen+readback */
 #include "qlang/q_console.h"  /* q_console_pipe_enable — the modern pipe-table display */
 #include "qlang/net/q_tls.h"  /* q_tls_server_mode_set — the `-E` TLS server mode */
+#include "qlang/parse/q_tok.h" /* q_tok_date_order_set — the `-z` date order */
 #include "core/poll.h"
 #include "core/runtime.h"
 #include <rayforce.h>
@@ -60,6 +61,7 @@ int main(int argc, char** argv) {
     bool        port_auto = false;
     bool        classic = false;
     int         etrap_mode = -1;
+    int         date_order = -1;
     const char* auth_pw = NULL;
     bool        auth_restricted = false;
     int         tls_mode = 0;
@@ -97,6 +99,15 @@ int main(int argc, char** argv) {
                 return 2;
             }
             etrap_mode = spec[0] - '0';
+        } else if (strcmp(argv[i], "-z") == 0) {
+            /* cmdline.md#-z-date-format: startup `\z`.  Must be applied after
+             * q_runtime_create — cfg init would reset the order to 0. */
+            const char* spec = (i + 1 < argc) ? argv[++i] : "";
+            if (strlen(spec) != 1 || spec[0] < '0' || spec[0] > '1') {
+                fprintf(stderr, "q: invalid -z mode '%s' (expected 0 or 1)\n", spec);
+                return 2;
+            }
+            date_order = spec[0] - '0';
         } else if (strcmp(argv[i], "-classic") == 0) {
             /* Opt IN to classic kx-q mode: legacy table display and NO startup
              * `\l pq`.  Launch-only; the default is modern (pipe-table display
@@ -168,6 +179,8 @@ int main(int argc, char** argv) {
 
     if (etrap_mode >= 0)
         q_sys_err_trap_set(etrap_mode);
+    if (date_order >= 0)
+        q_tok_date_order_set(date_order);
 
     int stdin_tty = isatty(STDIN_FILENO);
 

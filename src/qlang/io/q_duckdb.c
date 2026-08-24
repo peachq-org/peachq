@@ -153,6 +153,14 @@ static void* qd_dlsym(void* dl, const char* name) {
 #endif
 }
 
+static void qd_dlclose(void* dl) {
+#if defined(_WIN32)
+    FreeLibrary((HMODULE)dl);
+#else
+    dlclose(dl);
+#endif
+}
+
 #if defined(_WIN32)
 #define QD_LIB_BASENAME "duckdb.dll"
 #elif defined(__APPLE__)
@@ -163,9 +171,11 @@ static void* qd_dlsym(void* dl, const char* name) {
 
 #endif /* !__EMSCRIPTEN__ */
 
-/* One load attempt; PEACHQ_DUCKDB_LIB set = EXCLUSIVE (no fallback). */
+/* One load attempt; PEACHQ_DUCKDB_LIB set = EXCLUSIVE (no fallback).  Only
+ * SUCCESS latches: a failed attempt retries on the next open, so fixing the
+ * lib path (or the env var) works without restarting q. */
 static void qd_load(void) {
-    if (g_qd.state) return;
+    if (g_qd.state == 1) return;
 #if defined(__EMSCRIPTEN__)
     g_qd.state = 2;
     return;
@@ -200,6 +210,7 @@ static void qd_load(void) {
         if (!slots[i]) {
             g_qd.state = 2;
             memset(&g_qd.api, 0, sizeof g_qd.api);
+            qd_dlclose(dl);                     /* a retry re-opens; don't stack refcounts */
             return;
         }
     }
@@ -210,6 +221,7 @@ static void qd_load(void) {
         maj < 1 || (maj == 1 && min < 4)) {
         g_qd.state = 2;
         memset(&g_qd.api, 0, sizeof g_qd.api);
+        qd_dlclose(dl);
         return;
     }
     g_qd.dl = dl;
