@@ -717,12 +717,21 @@ ray_t* q_tok_literal(const char *src, int *p, const char **err) {
 
 /* ===== 2. `$` Tok whole-string scanners ===== */
 
+/* `\z` date order: 0 = mm/dd/yyyy, 1 = dd/mm/yyyy (syscmds.md#z-date-parsing).
+ * Homed here because q_tok_date is the ONE date-spelling reader; `\z` and -z call in. */
+static int g_date_order;
+void q_tok_date_order_set(int v) { g_date_order = v ? 1 : 0; }
+int q_tok_date_order(void) { return g_date_order; }
+
 /* "D"$ date-string scan (ref/tok.md date formats).  Supported subset:
  * yyyymmdd (8 digits, the doc's [yy]yymmdd with an unambiguous 4-digit year)
  * and yyyy.mm.dd / yyyy-mm-dd / yyyy/mm/dd (the doc's separator variants;
  * "D"$"2000-12-12" is letter-pinned).  Two-digit years and MMM month names
  * are deferred.  Returns 1 and fills y/m/d on a shape match; civil validity
- * is the caller's q_calendar_date_valid check. */
+ * is the caller's q_calendar_date_valid check.
+ * Year-first is unconditional; the slash day-order forms take their field order
+ * from `\z`.  Slash ONLY - syscmds.md spells the two orders mm/dd/yyyy and
+ * dd/mm/yyyy, so a dash or dot day-order form stays deferred like a 2-digit year. */
 int q_tok_date(const char* p, size_t len,
                        int64_t* y, int64_t* m, int64_t* d) {
     if (len == 8) {
@@ -741,6 +750,17 @@ int q_tok_date(const char* p, size_t len,
         *y = (p[0]-'0')*1000 + (p[1]-'0')*100 + (p[2]-'0')*10 + (p[3]-'0');
         *m = (p[5]-'0')*10 + (p[6]-'0');
         *d = (p[8]-'0')*10 + (p[9]-'0');
+        return 1;
+    }
+    if (len == 10 && p[2] == '/' && p[5] == '/') {
+        for (int i = 0; i < 10; i++) {
+            if (i == 2 || i == 5) continue;
+            if (p[i] < '0' || p[i] > '9') return 0;
+        }
+        int64_t a = (p[0]-'0')*10 + (p[1]-'0'), b = (p[3]-'0')*10 + (p[4]-'0');
+        *y = (p[6]-'0')*1000 + (p[7]-'0')*100 + (p[8]-'0')*10 + (p[9]-'0');
+        *m = g_date_order ? b : a;
+        *d = g_date_order ? a : b;
         return 1;
     }
     return 0;
@@ -866,8 +886,10 @@ static int tok_ip_guid(const char* p, size_t len, uint8_t out[16]) {
  *   - PACKED digits HHMMSSmmm (doc-pinned): "T"$"123456789" -> 12:34:56.789,
  *     "T"$"123456123987654" -> 12:34:56.123 (>=6 digits: HH MM SS then up to 3
  *     fractional; extra fractional digits ignored).
- *   - COLON HH:MM:SS[.f…] (derived — the natural literal spelling): the `.`
- *     fractional is optional; only its first 3 digits (millis) are used.
+ *   - COLON H…H:MM:SS[.f…] (derived — the natural literal spelling): the `.`
+ *     fractional is optional; only its first 3 digits (millis) are used.  The
+ *     hour field is UNCAPPED (derived: time is a duration and q's own display
+ *     writes 596:31:23.647 for 0Wt) — past the i32 ms domain is out-of-domain.
  * mm/ss must be < 60, else out-of-domain.  Returns 1 and fills *ms on success,
  * 0 on any shape/range mismatch (caller -> typed null 0Nt). */
 static int tok_all_digits(const char* p, size_t len) {
@@ -884,8 +906,12 @@ int q_tok_time(const char* p, size_t len, int32_t* ms) {
     if (has_colon) {
         size_t i = 0;
         int64_t hv = 0;
-        while (i < len && p[i] >= '0' && p[i] <= '9') { hv = hv * 10 + (p[i] - '0'); i++; }
-        if (i == 0 || i > 2 || i >= len || p[i] != ':') return 0;
+        while (i < len && p[i] >= '0' && p[i] <= '9') {
+            if (__builtin_mul_overflow(hv, (int64_t)10, &hv) ||
+                __builtin_add_overflow(hv, (int64_t)(p[i] - '0'), &hv)) return 0;
+            i++;
+        }
+        if (i == 0 || i >= len || p[i] != ':') return 0;
         i++;
         if (i + 2 > len || !tok_all_digits(p + i, 2) || i + 2 >= len || p[i + 2] != ':')
             return 0;
@@ -907,7 +933,11 @@ int q_tok_time(const char* p, size_t len, int32_t* ms) {
         }
         h = hv;
         if (mi >= 60 || s >= 60) return 0;
-        *ms = (int32_t)(h * 3600000 + mi * 60000 + s * 1000 + frac);
+        int64_t total;
+        if (__builtin_mul_overflow(h, (int64_t)3600000, &total) ||
+            __builtin_add_overflow(total, mi * 60000 + s * 1000 + frac, &total) ||
+            total > INT32_MAX) return 0;
+        *ms = (int32_t)total;
         return 1;
     }
     /* packed HHMMSSmmm: >=6 digits, first 6 = HHMMSS, next up to 3 = millis */
@@ -924,21 +954,28 @@ int q_tok_time(const char* p, size_t len, int32_t* ms) {
     return 0;
 }
 
-/* Clock scan for the duration Toks "U"$/"V"$/"N"$ -> ns.  Two forms
- * (the q_tok_time scheme generalised to ns):
+/* Clock scan for the duration Toks "U"$/"V"$/"N"$ -> (seconds, fractional ns).
+ * Two forms (the q_tok_time scheme generalised):
  *   - PACKED digits HHMMSS + up to 9 fractional digits right-padded
  *     (doc-pinned for "N": tok.md:200 "N"$"123456123987654" ->
  *     0D12:34:56.123987654); >=4 digits HHMM accepted with SS=0 (derived).
- *   - COLON H[H]:MM[:SS[.f{1..9}]] (derived — the literal spellings).
- * mm/ss must be < 60.  Returns 1 and fills *ns, else 0 (caller -> null). */
-int q_tok_clock_ns(const char* p, size_t len, int64_t* ns) {
+ *   - COLON H…H:MM[:SS[.f{1..9}]] (derived — the literal spellings; the hour
+ *     field is UNCAPPED, derived from q's own duration display writing
+ *     35791394:07 for 0Wu, whose ns exceeds i64 — hence the split return:
+ *     each caller composes in ITS unit and applies its payload domain).
+ * mm/ss must be < 60.  Returns 1 and fills secs + frac_ns, else 0 (-> null). */
+int q_tok_clock(const char* p, size_t len, int64_t* secs, int64_t* frac_ns) {
     int64_t h = 0, mi = 0, s = 0, frac = 0;
     int has_colon = 0;
     for (size_t i = 0; i < len; i++) if (p[i] == ':') { has_colon = 1; break; }
     if (has_colon) {
         size_t i = 0;
-        while (i < len && p[i] >= '0' && p[i] <= '9') { h = h * 10 + (p[i] - '0'); i++; }
-        if (i == 0 || i > 2 || i >= len || p[i] != ':') return 0;
+        while (i < len && p[i] >= '0' && p[i] <= '9') {
+            if (__builtin_mul_overflow(h, (int64_t)10, &h) ||
+                __builtin_add_overflow(h, (int64_t)(p[i] - '0'), &h)) return 0;
+            i++;
+        }
+        if (i == 0 || i >= len || p[i] != ':') return 0;
         i++;
         if (i + 2 > len || !tok_all_digits(p + i, 2)) return 0;
         mi = (p[i] - '0') * 10 + (p[i + 1] - '0');
@@ -970,8 +1007,17 @@ int q_tok_clock_ns(const char* p, size_t len, int64_t* ns) {
         } else if (len != 4) return 0;
     } else return 0;
     if (mi >= 60 || s >= 60) return 0;
-    *ns = (h * 3600 + mi * 60 + s) * 1000000000LL + frac;
+    if (__builtin_mul_overflow(h, (int64_t)3600, secs) ||
+        __builtin_add_overflow(*secs, mi * 60 + s, secs)) return 0;
+    *frac_ns = frac;
     return 1;
+}
+
+int q_tok_clock_ns(const char* p, size_t len, int64_t* ns) {
+    int64_t secs, frac;
+    return q_tok_clock(p, len, &secs, &frac) &&
+           !__builtin_mul_overflow(secs, 1000000000LL, ns) &&
+           !__builtin_add_overflow(*ns, frac, ns);
 }
 
 /* "N"$ timespan scan: an optional `<days>D` prefix (1D02:03:04.005006007)
@@ -1186,17 +1232,18 @@ ray_t* q_tok(int8_t tag, const char* p, size_t len) {
     }
     case RAY_MINUTE: {
         /* FLOOR to the containing minute (ref/tok.md:61 "U"$"12:13:14" ->
-         * 12:13; cast.md:168-170 truncation rule). */
-        int64_t ns;
-        if (!q_tok_clock_ns(p, len, &ns))
+         * 12:13; cast.md:168-170 truncation rule); past the i32 payload
+         * domain -> null (the tok.md out-of-domain contract). */
+        int64_t secs, frac;
+        if (!q_tok_clock(p, len, &secs, &frac) || secs / 60 > INT32_MAX)
             return ray_typed_null(-RAY_MINUTE);
-        return ray_minute(ns / 60000000000LL);
+        return ray_minute(secs / 60);
     }
     case RAY_SECOND: {
-        int64_t ns;
-        if (!q_tok_clock_ns(p, len, &ns))
+        int64_t secs, frac;
+        if (!q_tok_clock(p, len, &secs, &frac) || secs > INT32_MAX)
             return ray_typed_null(-RAY_SECOND);
-        return ray_second(ns / 1000000000LL);
+        return ray_second(secs);
     }
     case RAY_TIMESPAN: {
         int64_t ns;

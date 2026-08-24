@@ -51,9 +51,15 @@ int q_tok_byte_lit_starts(const char* src, int p);
  * otherwise (the Tok caller yields the typed null — never an error).
  * Grammars and derivations are documented at each definition. */
 int q_tok_date(const char* p, size_t len, int64_t* y, int64_t* m, int64_t* d);
+/* `\z` / -z: 0 = mm/dd/yyyy, 1 = dd/mm/yyyy, for the slash day-order forms only */
+void q_tok_date_order_set(int v);
+int q_tok_date_order(void);
 int q_tok_month(const char* p, size_t len, int64_t* months);   /* months since 2000.01 */
 int q_tok_time(const char* p, size_t len, int32_t* ms);
-int q_tok_clock_ns(const char* p, size_t len, int64_t* ns);
+/* the duration clock, split (secs, frac ns): the hour field is uncapped, so a
+ * caller composes in ITS unit — 0Wu's 35791394:07 overflows an ns intermediate */
+int q_tok_clock(const char* p, size_t len, int64_t* secs, int64_t* frac_ns);
+int q_tok_clock_ns(const char* p, size_t len, int64_t* ns);    /* checked ns compose of q_tok_clock */
 int q_tok_timespan_ns(const char* p, size_t len, int64_t* ns);
 int q_tok_ts(const char* p, size_t len, int64_t* out);
 int q_tok_uuid(const char* p, size_t len, uint8_t out[16]);

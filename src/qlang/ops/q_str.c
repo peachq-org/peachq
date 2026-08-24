@@ -180,6 +180,13 @@ ray_t* q_string_fn(ray_t* x) {
         return ray_charv((const char*)&x->u8, 1);
     /* NB a charv vector falls to the element-wise arm below: kdb `string
      * "cat"` -> (,"c";,"a";,"t") (ref/string.md:37-39). */
+    /* A NULL atom strings as the EMPTY string, every type (owner ruling
+     * 2026-08-22: nulls have no q-readable text form — ref/string.md pins no
+     * null spelling, and base's 0Nl/0Nf are rayfall literals, not q's).  This
+     * is what makes `csv 0:` write nulls as empty cells (Prepare Text renders
+     * cells through this fn).  Ordered AFTER the charv arm — the charv null
+     * IS the blank " ", a real character — and display keeps its 0N forms. */
+    if (RAY_ATOM_IS_NULL(x)) return ray_charv("", 0);
     /* Float atoms take THE q float->text leaf (q_fmt_float, \P-honouring) in
      * suffix-free mode — never rayfall's base formatter, whose ".0" padding /
      * 0Nf null are rayfall conventions, not q's.  0: Prepare Text inherits
