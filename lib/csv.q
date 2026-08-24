@@ -33,6 +33,13 @@
 / A blank physical line is SKIPPED (DuckDB emits a row of nulls).  A file with a header row and no data
 / rows loads as a zero-row table with the header's columns; a zero-byte file signals 'csv - a file that
 / states no schema does not get one invented (DuckDB invents a VARCHAR column0).
+/ THE SKIP LAW: skip drops that many records off the FRONT before anything else reads them, so every sniff -
+/ header, delimiter, types - runs on what remains.  A blank line COUNTS toward skip; a comment line does not
+/ (comment is dialect, transparent everywhere).  A quoted multi-line record counts ONCE, where DuckDB's skip
+/ runs before its tokenizer and slices the record's physical lines - a granted divergence, since one carry
+/ scan cannot hold two contradictory notions of a line.  Reject records keep PHYSICAL line numbers: skip
+/ renumbers nothing.  A negative skip signals 'domain (0 is the default, not a degenerate value), and
+/ skipping past the last record leaves a stream that states no schema - 'csv, exactly as a zero-byte file.
 / @param types (dict) column syms to type chars from "bjfsdtpmuvn", e.g. `a`b!"sj", overriding the sniff
 / per column (a " " value drops that column by name); or a type-char string "sj f" as the complete
 / schema, one char per column, " " dropping a column, "*" keeping strings
@@ -43,9 +50,10 @@
 / whole lines as ONE column; anything else - a polluted candidate, a stray junk line - keeps the loud
 / 'csv refusal.
 / @param opts (dict) DuckDB option vocabulary: delim (char), header (boolean), sample_size (long, sniff
-/ rows), buffer_size (long, read-chunk bytes), dateformat / timestampformat (string, strptime subset
-/ %Y %y %m %d %H %M %S %f %z - an explicit format REPLACES the built-in grammar for its type; day-first
-/ and month-first forms are ambiguous as forms, so without one they stay text.  %z (timestampformat only)
+/ rows), buffer_size (long, read-chunk bytes), skip (long, default 0, see THE SKIP LAW above), dateformat /
+/ timestampformat (string, strptime subset %Y %y %m %d %H %M %S %f %z - an explicit format REPLACES the
+/ built-in grammar for its type; day-first and month-first forms are ambiguous as forms, so without one
+/ they stay text.  %z (timestampformat only)
 / reads Z or +-HH[[:]MM] and applies it, storing UTC, DuckDB's own semantics; zone NAMES need tz data
 / this build does not carry, so %Z is not in the subset and signals 'option like any unknown specifier)
 / THE DIALECT OPTIONS (explicit only, NEVER sniffed - a non-default quote or comment dialect is always
