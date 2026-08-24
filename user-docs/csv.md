@@ -1,9 +1,9 @@
 # Reading CSV
 
-`.csv.read` loads a delimited text file into q. It is an incremental reader: the file is pulled through a fixed
-read buffer, so a huge file costs no more memory than a small one when you send the rows somewhere as they
-arrive. Column types are inferred from a sample of the first rows and then **frozen** — a later cell that does not
-fit its column's type is an error, never a silent null.
+`.csv.read` loads delimited text into q — from a file, or from a char vector you already hold. It is an
+incremental reader: the source is pulled through a fixed read buffer, so a huge file costs no more memory than a
+small one when you send the rows somewhere as they arrive. Column types are inferred from a sample of the first
+rows and then **frozen** — a later cell that does not fit its column's type is an error, never a silent null.
 
 This is a peachq extension. Standard q reads CSV with `0:`, which needs you to state every column type up front
 and gives no control over quoting, comments or bad rows. `0:` still works exactly as it always did; nothing here
@@ -26,8 +26,9 @@ q).csv.info
 {[file;opts] .csv.i.info[file;opts]}
 ```
 
-`.csv.read` always takes four arguments. Pass `::` for `target` and `types` when you have nothing to say about
-them, and `()!()` for an empty options dict:
+`.csv.read` always takes four arguments. The first is the source — a file symbol, or the CSV text itself (see
+the next section). Pass `::` for `target` and `types` when you have nothing to say about them, and `()!()` for an
+empty options dict:
 
 ```q
 q)`:trades.csv 0: ("sym,px,qty,dt";"AAPL,171.4,100,2024-01-15";"MSFT,402.3,250,2024-01-16");
@@ -50,6 +51,101 @@ q)meta t
 
 Note `sym`: **sniffed text is always a string column, never a symbol.** Interning has a cost, and the reader will
 not decide to pay it for you — ask with `types` (below) when you want symbols.
+
+## The source: a file, or the text itself
+
+The first argument is the source, and its **type** says which kind it is. There is no sniffing:
+
+> **A symbol is a path. A string is content, never a path.**
+
+So `` `:trades.csv `` always names a file, and `"trades.csv"` is always three fields of CSV text that happen to
+spell a filename. The rule is the same one `read0` uses, and the same one `qlib/src/path.q` keeps: a heuristic
+here would break every `` `:c:/temp/x.csv ``.
+
+In-memory text is what you want when the CSV never touched the disk — an HTTP or WebSocket body, an IPC payload,
+something you built in q. All of those arrive as char vectors, so they go straight in:
+
+```q
+q).csv.read["a,b\n1,2\n3,4\n";::;::;()!()]
+| a    | b    |
+| long | long |
+|------|------|
+| 1    | 2    |
+| 3    | 4    |
+q).csv.read["c"$read1 `:trades.csv;::;::;()!()]
+| sym    | px    | qty  | dt         |
+|        | float | long | date       |
+|--------|-------|------|------------|
+| "AAPL" | 171.4 | 100  | 2024.01.15 |
+| "MSFT" | 402.3 | 250  | 2024.01.16 |
+```
+
+Note `"c"$read1` rather than `read0`: `read1` gives you the bytes exactly as they sit on disk, where `read0`
+splits on line endings and normalises them. Anything the reader can do with a file it can do with those bytes.
+
+### One blob, or a list of lines
+
+Two text shapes are accepted:
+
+- **one char vector** — the whole payload, embedded newlines and all. This is the honest carrier, because the
+  reader's own unit is not a line: an RFC-4180 quoted field may contain newlines and span as many of them as it
+  likes.
+- **a list of char vectors** — defined as **join with `"\n"`, then parse**. It is *not* one element per record,
+  and it must not be: only the join reading survives a quoted field that got split across two elements.
+
+```q
+q).csv.read[("a,b";"1,2";"3,4");::;::;()!()]
+| a    | b    |
+| long | long |
+|------|------|
+| 1    | 2    |
+| 3    | 4    |
+q).csv.read[("a,b";"\"x";"y\",2");::;::;()!()]
+| a      | b    |
+|        | long |
+|--------|------|
+| "x\ny" | 2    |
+```
+
+The second is the discriminating case: three list elements, one header and **one** data row, whose first cell is
+the two-line string `"x\ny"`.
+
+Because `csv 0:` already answers a list of lines, a table round-trips through CSV without a file:
+
+```q
+q)t:([]a:1 2;b:2024.01.15 2024.01.16)
+q)csv 0: t
+"a,b"
+"1,2024-01-15"
+"2,2024-01-16"
+q).csv.read[csv 0: t;::;::;()!()]
+| a    | b          |
+| long | date       |
+|------|------------|
+| 1    | 2024.01.15 |
+| 2    | 2024.01.16 |
+```
+
+### What stays the same
+
+Everything below the source. Text is chunked at the same `buffer_size` a file is read at, so `chunks` in the
+summary and the `` `chunk`rows `` dict a lambda target receives are identical for the same bytes either way. A
+leading UTF-8 BOM is stripped. `skip`, `comment`, `delim`, the type freeze and the reject channel are unchanged,
+and a reject record's `line` is the physical line within the payload.
+
+An empty payload — `""` or `()` — signals `'csv`, exactly as a zero-byte file does: a source that states no
+schema does not get one invented for it.
+
+`.csv.info` takes the same source forms:
+
+```q
+q).csv.info["a,b\n1,2\n";()!()]
+a| j
+b| j
+```
+
+Byte vectors are not a source. `"c"$` them first — `` "c"$read1 `:f `` above is that conversion, and it is
+byte-exact.
 
 ## Targets: where the rows go
 
@@ -486,6 +582,7 @@ Deliberately unspecified for a first release — do not build on today's behavio
 - `'option` — an unknown option key, a recognised-but-unimplemented one, or an unknown format specifier
 - `'domain` — an option value out of range (a two-character comment, a delimiter colliding with the quote), or a
   `types` dict key naming no column
-- `'type` — an option value of the wrong type, or a target that is neither `::`, a symbol, nor a lambda
+- `'type` — a source that is neither a file symbol nor text, an option value of the wrong type, or a target that
+  is neither `::`, a symbol, nor a lambda
 - `'length` — a `types` string that does not cover every column
 - `'rank` — a lambda target that is not rank 3
