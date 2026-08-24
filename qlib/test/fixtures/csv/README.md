@@ -53,6 +53,8 @@ any of them with the recipe above if a later release defines the behaviour.
 
 ### Exclusions (every excluded path, by reason)
 
+Paths below are relative to the upstream `data/csv/` root. Entries from its `test/` subdirectory are written fully qualified (`data/csv/test/…`) so they are not mistaken for this repo's own `test/` tree.
+
 - **compressed** (28): compression is a deferred engine feature — these reds would measure nothing the workstream plans to fix
   - `auto/product_codes_HS17_V202301.csv.gz`
   - `broken/test.csv.zst`
@@ -73,11 +75,11 @@ any of them with the recipe above if a later release defines the behaviour.
   - `real/tmp2013-06-15.csv.gz`
   - `sequences.csv.gz`
   - `tenk.tsv.gz`
-  - `test/bgzf.gz`
-  - `test/concat.gz`
-  - `test/issue3562_assertion.csv.gz`
-  - `test/test_comp.csv.gz`
-  - `test/test_comp.csv.gzz`
+  - `data/csv/test/bgzf.gz`
+  - `data/csv/test/concat.gz`
+  - `data/csv/test/issue3562_assertion.csv.gz`
+  - `data/csv/test/test_comp.csv.gz`
+  - `data/csv/test/test_comp.csv.gzz`
   - `test_apple_financial.csv.gz`
   - `who.csv.gz`
   - `zstd/lineitem1k.tbl.zst`
@@ -136,16 +138,16 @@ any of them with the recipe above if a later release defines the behaviour.
   - `rejects/incorrect_columns/mix_columns.csv (22182B)`
   - `rejects/maximum_line/over_vector.csv (17611B)`
   - `stats_3_muta_10_21.csv (170845B)`
-  - `test/invalid_utf_big.csv (54652B)`
-  - `test/long_escaped_value.csv (30015B)`
-  - `test/long_escaped_value_unicode.csv (30009B)`
-  - `test/many_empty_lines.csv (20001B)`
-  - `test/no_newline_unicode.csv (20307B)`
-  - `test/test.csv (77780B)`
-  - `test/test_default.csv (23890B)`
-  - `test/test_long_line.csv (30014B)`
-  - `test/windows_newline.csv (357788B)`
-  - `test/windows_newline_empty.csv (40001B)`
+  - `data/csv/test/invalid_utf_big.csv (54652B)`
+  - `data/csv/test/long_escaped_value.csv (30015B)`
+  - `data/csv/test/long_escaped_value_unicode.csv (30009B)`
+  - `data/csv/test/many_empty_lines.csv (20001B)`
+  - `data/csv/test/no_newline_unicode.csv (20307B)`
+  - `data/csv/test/test.csv (77780B)`
+  - `data/csv/test/test_default.csv (23890B)`
+  - `data/csv/test/test_long_line.csv (30014B)`
+  - `data/csv/test/windows_newline.csv (357788B)`
+  - `data/csv/test/windows_newline_empty.csv (40001B)`
   - `test_default_option.csv (81934B)`
   - `test_default_option_2.csv (81934B)`
   - `timings.csv (118784B)`
@@ -183,7 +185,7 @@ any of them with the recipe above if a later release defines the behaviour.
   - `empty.csv`
   - `glob/empty/empty.csv`
   - `glob_dif_dialect/14166/empty.csv`
-  - `test/empty.csv`
+  - `data/csv/test/empty.csv`
 - **non-ascii-name** (3): a non-ASCII filename cannot fold to a distinct q test identifier; unicode CONTENT coverage rides other fixtures
   - `issue2628_中文.csv`
   - `中文/中.csv`
@@ -509,7 +511,7 @@ any of them with the recipe above if a later release defines the behaviour.
   - `multiple_files/more_columns/file_1.csv (first: multiple_files/different_order/file_1.csv)`
   - `multiple_files/more_columns/file_2.csv (first: multiple_files/different_order/file_2.csv)`
   - `pipe_delim.csv (first: auto/pipe_delim.csv)`
-  - `test/quoted_newline.csv (first: quoted_newline.csv)`
+  - `data/csv/test/quoted_newline.csv (first: quoted_newline.csv)`
   - `thousands_separator/simple.csv (first: comments/simple.csv)`
   - `unescaped_quotes/unescaped_quote.csv (first: headers/unescaped_quote.csv)`
   - `union-by-name/gabor/Post/part-1.csv (first: union-by-name/gabor/Comment/part-1.csv)`

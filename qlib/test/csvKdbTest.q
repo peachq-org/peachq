@@ -1,4 +1,4 @@
-/ .csv kdb-format CONTRACT suite (owner-ratified 2026-08-22, frozen under tools/frozen.manifest):
+/ .csv kdb-format CONTRACT suite (owner-ratified 2026-08-22, frozen under the repo frozen manifest):
 / THE LAW - the writer's text forms define the sniffer's grammar.  Whatever `csv 0:` writes, .csv.read
 / loads back TYPE-IDENTICAL with no types argument (Tier A), and the ambiguous forms (bool 1/0, whole
 / floats, syms) round-trip under meta-derived explicit types (Tier B).  The sniffer never guesses beyond
