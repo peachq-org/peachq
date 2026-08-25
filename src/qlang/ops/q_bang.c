@@ -50,34 +50,6 @@ static ray_t* h_zip(ray_t* y) {                         /* -18! compress bytes *
     return z;
 }
 
-/* -3!x — single-line string representation (== `.Q.s1`).  Routes to the
- * existing q_fmt_krepr single-line formatter and returns its buffer as a q
- * string (RAY_STR).  Byte-for-byte the same text `0N!x` shows.
- * q_fmt_krepr truncates silently into a caller buffer, so grow-and-retry until
- * the whole repr fits (kdb returns the full string) — cap the growth to stay
- * bounded.  (q_fmt_krepr still caps each NESTED-list element at its own 2048
- * internal buffer; that residual limit is shared with `0N!`/`.Q.s1` and out of
- * scope here.) */
-static ray_t* h_s1(ray_t* y) {
-    size_t cap = 8192;
-    char* buf = malloc(cap);
-    if (!buf) return q_err(QE_WSFULL);
-    for (;;) {
-        buf[0] = '\0';
-        q_fmt_krepr(y, buf, cap);
-        size_t len = strlen(buf);
-        if (len < cap - 1 || cap >= (1u << 24)) {   /* fit whole (or growth cap) */
-            ray_t* r = ray_charv(buf, (int64_t)len);
-            free(buf);
-            return r;
-        }
-        cap *= 2;
-        char* nb = realloc(buf, cap);
-        if (!nb) { free(buf); return q_err(QE_WSFULL); }
-        buf = nb;
-    }
-}
-
 /* -16!x — reference count of x.  DIVERGENCE: kdb returns the number of q-level
  * aliases bound to a variable (`a:b:c:1 2 3` -> 3); peachq exposes the ray_t
  * heap refcount, which counts internal owners, not source aliases.  The ledger
@@ -295,7 +267,7 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case NULL_I64: return bang_show(y);   /* 0N!x — debug print, pass through */
         case -1:  return q_hsym_wrap(y);
         case -2:  return q_attr_wrap(y);
-        case -3:  return h_s1(y);
+        case -3:  return q_fmt_krepr_charv(y);
         case -5:  return q_parse_builtin_fn(y);
         case -6:  return q_eval(y);              /* internal.md: -6! is eval */
         case -7:  return h_hcount(y);
