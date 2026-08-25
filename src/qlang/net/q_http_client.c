@@ -138,17 +138,18 @@ static int hdr_ieq(const struct phr_header* h, const char* lower) {
     }
     return 1;
 }
-/* A header value's trimmed body equals the single token `gzip` (case-insensitive).
- * Used for `Content-Encoding: gzip` — the only content coding peachq inflates. */
-static int val_is_gzip(const char* v, size_t n) {
+/* A header value's trimmed body is exactly one token (case-insensitive) — the
+ * `Content-Encoding` shapes that matter: `gzip` is the only coding peachq
+ * inflates, `identity` the only one that leaves the resource's own bytes. */
+static int val_is(const char* v, size_t n, const char* tok) {
     size_t s = 0; while (s < n && (v[s] == ' ' || v[s] == '\t')) s++;
     size_t e = n; while (e > s && (v[e-1] == ' ' || v[e-1] == '\t')) e--;
-    if (e - s != 4) return 0;
-    static const char* t = "gzip";
-    for (size_t k = 0; k < 4; k++) {
+    size_t tn = strlen(tok);
+    if (e - s != tn) return 0;
+    for (size_t k = 0; k < tn; k++) {
         unsigned char c = (unsigned char)v[s + k];
         if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + 32);
-        if (c != (unsigned char)t[k]) return 0;
+        if (c != (unsigned char)tok[k]) return 0;
     }
     return 1;
 }
@@ -241,14 +242,20 @@ int q_http_client_extract(char* buf, size_t len, int* status,
     if (status) *status = st;
     /* Content-Encoding: gzip -> caller inflates (headers read intact, before the
      * chunked in-place de-frame below; TE is the outer coding, dechunked first). */
-    if (gzip)
-        for (size_t i = 0; i < nh; i++)
-            if (h[i].name && hdr_ieq(&h[i], "content-encoding") &&
-                val_is_gzip(h[i].value, h[i].value_len)) { *gzip = 1; break; }
+    int gz = 0, coded = 0;
+    for (size_t i = 0; i < nh; i++)
+        if (h[i].name && hdr_ieq(&h[i], "content-encoding") &&
+            !val_is(h[i].value, h[i].value_len, "identity")) {
+            coded = 1;                                     /* br/deflate/gzip alike */
+            gz = val_is(h[i].value, h[i].value_len, "gzip");
+            break;
+        }
+    if (gzip) *gzip = gz;
 
     int chunked, have_cl, bodyless; int64_t cl;
     if (response_framing(st, h, nh, &chunked, &have_cl, &cl, &bodyless) != 0) return -1;
-    if (have_cl && clen) *clen = cl;
+    /* A coded length measures the coding, not the resource, so it can never seat a range. */
+    if (have_cl && clen && !coded) *clen = cl;
     if (no_body) bodyless = 1;        /* HEAD: the length describes a body never sent */
 
     char*  b   = buf + hl;
@@ -487,7 +494,7 @@ static ray_t* http_do(ray_t* urlv, const http_req_t* r)
     else              snprintf(hosthdr, sizeof hosthdr, "%s:%u", u.host, u.port);
 
     /* A range names bytes of the RESOURCE, so a content coding would move them —
-     * a ranged request never offers gzip. */
+     * a ranged request never offers gzip, nor does the HEAD that measures it. */
     char rangehdr[64]; rangehdr[0] = '\0';
     if (r->roff >= 0) {
         if (r->rlen < 0) snprintf(rangehdr, sizeof rangehdr, "Range: bytes=%lld-\r\n",
@@ -495,7 +502,7 @@ static ray_t* http_do(ray_t* urlv, const http_req_t* r)
         else snprintf(rangehdr, sizeof rangehdr, "Range: bytes=%lld-%lld\r\n",
                       (long long)r->roff, (long long)(r->roff + r->rlen - 1));
     }
-    const char* accept_enc = rangehdr[0] ? "" : "Accept-Encoding: gzip\r\n";
+    const char* accept_enc = (rangehdr[0] || r->head) ? "" : "Accept-Encoding: gzip\r\n";
 
     /* request head */
     char req[2048];
@@ -532,8 +539,9 @@ static ray_t* http_do(ray_t* urlv, const http_req_t* r)
     int st; const char* rbody; size_t rbl; int gz = 0;
     int ex = q_http_client_extract(resp, rlen, &st, &rbody, &rbl, &gz, r->head, r->clen);
     if (ex == 0 && r->status) *r->status = st;
-    if (ex == 0 && gz) {
-        /* transparent inflate — q_gz_inflate bounds output at 32 MiB (bomb guard). */
+    if (ex == 0 && gz && rbl) {
+        /* transparent inflate — q_gz_inflate bounds output at 32 MiB (bomb guard).
+         * An empty body (HEAD, or a coded 0-length answer) codes nothing to inflate. */
         size_t ilen = 0; const char* ierr = NULL;
         uint8_t* infl = q_gz_inflate((const uint8_t*)rbody, rbl, &ilen, &ierr);
         if (infl) { result = http_body(r, (const char*)infl, ilen); free(infl); }
@@ -579,9 +587,11 @@ static ray_t* http_status_body(ray_t* b, int status) {
  * user-docs/handles.md points 1 + 3: read0/read1 reach HTTP through the SAME seam
  * the file transport sits behind, and a ranged call really does send `Range:`.
  * One q-level read is one GET; a ranged one first asks HEAD for the length so the
- * clamp is q_io_clamp's law rather than a server's 416 discipline, and falls back
- * to clamping the GET's own answer where HEAD is refused (peachq's own listener
- * answers 501, as does any server that ignores `Range:` and replies 200). */
+ * clamp is q_io_clamp's law rather than a server's 416 discipline.  That HEAD is a
+ * BEST-EFFORT probe and can only ever improve the clamp: refused, failed outright,
+ * or answering with no length at all (peachq's listener answers 501; a CDN-fronted
+ * API answers chunked with no Content-Length), the read falls back to clamping the
+ * GET's own answer — which is the whole body when the server ignores `Range:`. */
 ray_t* q_http_client_read_slice(ray_t* url, int64_t off, int64_t want) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     int st = 0;
@@ -594,8 +604,7 @@ ray_t* q_http_client_read_slice(ray_t* url, int64_t off, int64_t want) {
     int hst = 0; int64_t total = -1;
     http_req_t hr = { .head = 1, .roff = -1, .status = &hst, .clen = &total };
     ray_t* h = http_do(url, &hr);
-    if (RAY_IS_ERR(h)) return h;                           /* transport failure: 'conn */
-    ray_release(h);
+    if (RAY_IS_ERR(h)) ray_error_free(h); else ray_release(h);
     if (hst >= 200 && hst < 300 && total >= 0) want = q_io_clamp(total, &off, want);
     if (want == 0) return ray_vec_from_raw(RAY_BYTE_ONLY, NULL, 0);
 
