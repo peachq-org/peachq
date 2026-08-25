@@ -5,9 +5,9 @@
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"  /* q_type_is_int_vec — the `.z.zd` triple */
 #include "qlang/q_env.h"        /* q_env_get — `.z.zd` lives as a plain global */
-#include "qlang/q_prim.h"       /* q_str_text_bytes — nested char elements */
+#include "qlang/q_prim.h"       /* q_str_text_bytes — nested CHAR rows */
 #include "qlang/q_builtins.h"   /* q_count_long — nested column length */
-#include "qlang/ops/q_index.h"  /* q_index_elem_at — nested char elements */
+#include "qlang/ops/q_index.h"  /* q_index_elem_at — nested row reads */
 #include "qlang/io/q_splay.h"   /* q_splay_invalidate(_under) — writes drop stale map entries */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_concrete, q_eval_apply_value */
 #include "qlang/q_registry.h"   /* the `,` value the append fallback composes on */
@@ -128,12 +128,15 @@ static ray_t* wf_companion(ray_t* path) {
     return b ? b : q_err(QE_IO);
 }
 
-/* N cumulative END offsets, element i spanning [off[i-1], off[i]).  Only 87
- * (char) is observed, and at width 1 an offset is indistinguishable from an
- * element index — every wider element type stays 'nyi rather than pick one. */
+/* N cumulative END offsets in companion BYTES, element i spanning
+ * [off[i-1], off[i]).  The format doc pins bytes for char (the last offset
+ * equals `#`'s size); byte offsets for wider elements are the PROJECT RULING
+ * of 2026-08-25 (splay plan, PR 1) — no published artifact carries one, so we
+ * write and read our own generalization.  A span must land on an element
+ * boundary. */
 static ray_t* wf_read_nested(int8_t elem, ray_t* path, const uint8_t* off, int64_t count) {
-    if (elem != RAY_CHARV) return q_err(QE_NYI);
     if (!path) return q_err(QE_TYPE);
+    uint8_t w = ray_type_sizes[(uint8_t)elem];
     ray_t* out = ray_list_new(count);
     if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
     ray_t* comp = wf_companion(path);
@@ -142,8 +145,10 @@ static ray_t* wf_read_nested(int8_t elem, ray_t* path, const uint8_t* off, int64
     int64_t size = ray_len(comp), prev = 0;
     for (int64_t i = 0; i < count; i++) {
         int64_t end = wf_i64(off + i * 8);
-        if (end < prev || end > size) { ray_release(out); out = q_err(QE_CORRUPT); break; }
-        ray_t* e = q_wire_fixed_vec(elem, data + prev, end - prev, 0);
+        if (end < prev || end > size || (end - prev) % w) {
+            ray_release(out); out = q_err(QE_CORRUPT); break;
+        }
+        ray_t* e = q_wire_fixed_vec(elem, data + prev, (end - prev) / w, 0);
         if (RAY_IS_ERR(e)) { ray_release(out); out = e; break; }
         out = ray_list_append(out, e);
         ray_release(e);
@@ -361,7 +366,6 @@ static ray_t* wf_probe_b(const uint8_t* hdr, q_wf_colhdr* out) {
     int nested = disk > WF_NEST_BIAS && disk <= WF_NEST_HI;
     int8_t tag = wf_simple_tag(nested ? (uint8_t)(disk - WF_NEST_BIAS) : disk);
     if (!tag) return q_err(QE_TYPE);
-    if (nested && tag != RAY_CHARV) return q_err(QE_NYI);      /* wf_read_nested's law */
     out->tag = tag;
     out->nested = (uint8_t)nested;
     out->disk_attr = hdr[3];
@@ -879,9 +883,21 @@ static ray_t* wf_write_enum_img(ray_t* pos, const char* dn, size_t dnl) {
     return s ? s : q_err(QE_OOM);
 }
 
-/* Nested char column pair: `<col>` = fe20 (77+10) + cumulative END offsets,
+/* One row's raw bytes for a nested write: char rows through the text accessor
+ * (charv/-STR/-charv alike), any other element type as its vector's payload. */
+static int wf_row_bytes(ray_t* e, int8_t elem, const char** p, int64_t* nbytes) {
+    if (!e || RAY_IS_ERR(e)) return 0;
+    if (elem == RAY_CHARV) return q_str_text_bytes(e, p, nbytes) ? 1 : 0;
+    if (e->type != elem) return 0;
+    *p = (const char*)ray_data(e);
+    *nbytes = ray_len(e) * (int64_t)ray_type_sizes[(uint8_t)elem];
+    return 1;
+}
+
+/* Nested column pair: `<col>` = fe20 (77+elem) + cumulative END offsets,
  * `<col>#` = the raw element bytes (headerless) — the read format, reversed. */
-static ray_t* wf_write_nested(ray_t* path, ray_t* col, int lbs, int alg, int lvl) {
+static ray_t* wf_write_nested(ray_t* path, ray_t* col, int8_t elem,
+                              int lbs, int alg, int lvl) {
     int64_t n = q_count_long(col);
     ray_t* offs = ray_vec_new(RAY_I64, n > 0 ? n : 1);
     size_t total = 0;
@@ -889,7 +905,7 @@ static ray_t* wf_write_nested(ray_t* path, ray_t* col, int lbs, int alg, int lvl
     for (int64_t i = 0; i < n && offs && !RAY_IS_ERR(offs) && !bad; i++) {
         ray_t* e = q_index_elem_at(col, i);
         const char* ep; int64_t el;
-        if (!e || RAY_IS_ERR(e) || !q_str_text_bytes(e, &ep, &el)) bad = q_err(QE_TYPE);
+        if (!wf_row_bytes(e, elem, &ep, &el)) bad = q_err(QE_TYPE);
         else {
             total += (size_t)el;
             int64_t end = (int64_t)total;
@@ -905,7 +921,7 @@ static ray_t* wf_write_nested(ray_t* path, ray_t* col, int lbs, int alg, int lvl
     for (int64_t i = 0; i < n; i++) {
         ray_t* e = q_index_elem_at(col, i);
         const char* ep; int64_t el;
-        if (e && !RAY_IS_ERR(e) && q_str_text_bytes(e, &ep, &el)) {
+        if (wf_row_bytes(e, elem, &ep, &el)) {
             memcpy(body + w, ep, (size_t)el);
             w += (size_t)el;
         }
@@ -914,7 +930,7 @@ static ray_t* wf_write_nested(ray_t* path, ray_t* col, int lbs, int alg, int lvl
     ray_t* img = wf_write_b(offs, RAY_I64);      /* i64 END offsets... */
     ray_release(offs);
     if (RAY_IS_ERR(img)) { free(body); return img; }
-    ((char*)ray_str_ptr(img))[2] = (char)(WF_NEST_BIAS + RAY_CHARV);  /* ...tagged 87 */
+    ((char*)ray_str_ptr(img))[2] = (char)(WF_NEST_BIAS + elem);  /* ...tagged 77+elem */
     bad = wf_put(path, img, lbs, alg, lvl, 1);
     ray_release(img);
     if (!bad) {
@@ -934,17 +950,29 @@ static ray_t* wf_write_nested(ray_t* path, ray_t* col, int lbs, int alg, int lvl
     return bad;
 }
 
-static int wf_col_is_nested(ray_t* col) {
+/* The compound-form classifier (kb/splayed-tables.md:80 — EVERY row a simple
+ * vector of ONE element type; never first-item, whose law belongs to meta and
+ * would corrupt a later divergent row).  Returns the element tag, 0 for not
+ * compound: sym rows and mixed rows are kx's anymap lane, deferred to 'type. */
+static int8_t wf_col_nested_tag(ray_t* col) {
     if (!col) return 0;
-    if (col->type == RAY_STR) return 1;
+    if (col->type == RAY_STR) return (int8_t)RAY_CHARV;
     if (col->type != RAY_LIST) return 0;
     int64_t n = ray_len(col);
     ray_t** e = (ray_t**)ray_data(col);
-    for (int64_t i = 0; i < n; i++)
-        if (!e[i] || (e[i]->type != RAY_CHARV && e[i]->type != -RAY_STR &&
-                      e[i]->type != -RAY_CHARV))
-            return 0;
-    return 1;
+    int8_t t0 = (int8_t)RAY_CHARV;               /* empty column: char, as before */
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* ei = e[i];
+        int8_t ti;
+        if (!ei) return 0;
+        if (ei->type == RAY_CHARV || ei->type == -RAY_STR || ei->type == -RAY_CHARV)
+            ti = (int8_t)RAY_CHARV;
+        else if (ei->type > 0 && wf_simple_tag((uint8_t)ei->type))
+            ti = (int8_t)ei->type;
+        else return 0;
+        if (i == 0) t0 = ti; else if (ti != t0) return 0;
+    }
+    return t0;
 }
 
 /* Domain path: named (2-item set), else `<parent-of-dir>/sym` — `.Q.en`'s
@@ -973,6 +1001,7 @@ static ray_t* wf_write_splay_dir(ray_t* dirstr, ray_t* domsym, ray_t* y,
     ray_t* bad = !names || RAY_IS_ERR(names) ? q_err(QE_OOM) : NULL;
     for (int64_t c = 0; c < nc && !bad; c++) {
         int64_t id = ray_table_col_name(y, c);
+        int8_t nt;
         ray_t* col = ray_table_get_col_idx(y, c);    /* borrowed */
         ray_t* nm = ray_sym_str(id);
         if (!col || !nm || !wf_leaf_name(ray_str_ptr(nm), ray_str_len(nm))) {
@@ -1013,8 +1042,8 @@ static ray_t* wf_write_splay_dir(ray_t* dirstr, ray_t* domsym, ray_t* y,
                 if (!RAY_IS_ERR(img) && img != bad) ray_release(img);
             }
             if (pos) ray_release(pos);
-        } else if (wf_col_is_nested(col)) {
-            bad = wf_write_nested(cp, col, lbs, alg, lvl);
+        } else if ((nt = wf_col_nested_tag(col))) {
+            bad = wf_write_nested(cp, col, nt, lbs, alg, lvl);
         } else if (col->type > 0 && wf_simple_tag((uint8_t)col->type)) {
             ray_t* img = wf_write_b(col, (uint8_t)col->type);
             bad = RAY_IS_ERR(img) ? img : wf_put(cp, img, lbs, alg, lvl, 1);
