@@ -77,15 +77,18 @@
 .h.ed:{.h.i.exw[.h.i.exo;enlist .h.i.exs[`Sheet1;x]]};
 .h.edsn:{.h.i.exw[.h.i.exz;.h.i.exs'[.h.i.exk key x;value x]]};
 
-/ .h.tx: `json is the doc's printed source, JSON Lines; `xls is .h.ed (SpreadsheetML text, no zip).
-.h.tx:`raw`json`csv`txt`xml`xls!((,:);{.j.j each $[.Q.qt x;0!x;x]};.h.cd;.h.td;.h.xd;.h.ed);
+/ .h.tx: `json is the doc's printed source, JSON Lines (doth.md:686); `xls is .h.ed (SpreadsheetML text, no zip).
+/ .h.i.tjs is doth.md:702's static form, selected by an argument of ONE general-list item: not a line list but ONE
+/ string, those same lines joined ",\n " and bracketed, so each row aligns under the "[".
+.h.i.tjs:{$[.Q.qt x;"[",(",\n " sv .j.j each 0!x),"]";.j.j x]};
+.h.tx:`raw`json`csv`txt`xml`xls!((,:);{$[.Q.qt x;.j.j each 0!x;(0h=type x)&1=count x;.h.i.tjs first x;.j.j each x]};.h.cd;.h.td;.h.xd;.h.ed);
 
 .h.hug:{h:"0123456789abcdef"; c:"c"$til 256; c!{[s;h;c] i:"i"$c; $[c in s;enlist c;"%",h[i div 16],h[i mod 16]]}[x;h] each c};
 .h.hu:{raze .h.hug[.h.sc] x};
 .h.uh:{s:"%" vs x; raze (enlist first s),{("c"$"X"$2#x),2_x} each 1_s};
 .h.iso8601:{s:string "p"$x; (4#s),"-",(2#5_s),"-",(2#8_s),"T",11_s};
 
-/ Default web console + download API, all peachq's own. .h.i.wr renders under `\C`; .h.i.wf reads .h.HOME through .Q.c.rd (O_NOFOLLOW-hardened) and its `::` is the DECLINE q_http.c falls through on. .h.i.wg routes STATIC-FIRST, then .h.i.wd serializes the query through save's own .h.tx (`a.json?expr[off,lim`), joining a serializer's LINES but sending a BYTE-vector result verbatim (the xlsx/parquet shape). `?expr` EVALS (.h.jx's own `value`); auth is the operator's via .z.ac/-u, which gate ahead of .z.ph.
+/ Default web console + download API, all peachq's own. .h.i.wr renders under `\C`; .h.i.wf reads .h.HOME through .Q.c.rd (O_NOFOLLOW-hardened) and its `::` is the DECLINE q_http.c falls through on. .h.i.wg routes STATIC-FIRST, then .h.i.wd serializes the query through save's own .h.tx (`a.json?expr[off,lim`), joining a serializer's LINES but sending a BYTE-vector (xlsx/parquet) or single-STRING (json's static form) result verbatim. `?expr` EVALS (.h.jx's own `value`); auth is the operator's via .z.ac/-u, which gate ahead of .z.ph.
 .h.i.wr:{c:system"c"; system "c "," " sv string system"C"; r:@[.Q.s;x;{"'",x,"\n"}]; system "c "," " sv string c; -1_"\n" vs r};
 .h.jx:{[x;y] t:$[a:0>type r:value y;enlist r;r]; n:count t; e:0|n-32; enlist[(" " sv .h.ha'[("?[",/:string(0;0|x-32;e&x+32;e));("home";"up";"down";"end")]),(" ",string[n],"[",string[x],"]")],enlist[""],.h.i.wr $[a;r;32 sublist x _ t]};
 .h.i.wf:{d:.h.uh x; if[(any 32>"i"$d)|(any d in "\\:")|any ("/" vs d) in (enlist ".";"..");:.h.hn["404 Not Found";`txt;"not found\n"]]; d:$[0=count d;"index.html";"/"=last d;d,"index.html";d]; b:.Q.c.rd d; $[(::)~b;(::);.h.hy[`$last "." vs d;b]]};
@@ -94,7 +97,7 @@
 .h.i.wc:{t:tables[]; $[0=count x;.h.hy[`html;.h.fram["peachq";(string t),enlist 29#" ";("?.t";$[count t;"?",.h.hu string first t;"?.t"])]];x~".t";.h.hy[`html;.h.html[.h.logo,.h.br,$[count t;raze .h.hb'[("?",/:.h.hu each string t);.h.xs each string t],\:.h.br;"(no tables)"]]];.h.i.wj x]};
 .h.i.wn:{[x;y;z;w] r:.h.hn[x;y;w]; n:((count r)-count w)-2; (n#r),(raze z,\:"\r\n"),"\r\n",w};
 .h.i.we:{[x;y] $[x~`json;.h.hn["400 Bad Request";`json;"{\"error\":",(.j.j y),"}"];.h.he y]};
-.h.i.wq:{[x;y] g:.h.i.wp y; r:value g 0; t:$[0>type r;enlist r;r]; n:count t; t:$[null g 2;(g 1)_t;(g 2) sublist (g 1)_t]; s:.h.tx[x] t; .h.i.wn["200 OK";x;enlist "X-Total-Count: ",string n;$[4h=type s;"c"$s;"\n" sv s]]};
+.h.i.wq:{[x;y] g:.h.i.wp y; r:value g 0; t:$[0>type r;enlist r;r]; n:count t; t:$[null g 2;(g 1)_t;(g 2) sublist (g 1)_t]; s:.h.tx[x] t; .h.i.wn["200 OK";x;enlist "X-Total-Count: ",string n;$[4h=type s;"c"$s;10h=type s;s;"\n" sv s]]};
 .h.i.wd:{[x;y] e:`$last "." vs .h.uh x; $[e in key .h.tx;@[.h.i.wq[e];.h.uh y;.h.i.we e];(::)]};
 .h.i.wg:{i:x?"?"; p:i#x; u:(1+i)_x; s:@[.h.i.wf;p;.h.he]; $[not (::)~s;s;0=count u;(::);.h.i.wd[p;u]]};
 .h.i.ph:{r:first x; i:r?"?"; $[(0=i)&0<count r;@[.h.i.wc;.h.uh 1_r;.h.he];.h.i.wg r]};
