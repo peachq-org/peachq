@@ -3,8 +3,9 @@
  * The core is bytes-in -> complete typed rows out + remainder carry: a feed appends to the carry, rows end
  * at an unquoted '\n' (RFC-4180 — a quoted field keeps its newlines, and may straddle any number of feeds),
  * and the incomplete tail waits for the next feed.  Nothing here assumes it knows the file size or can seek,
- * so a decompressor could feed the same core; today's two drivers are chunked q_io_read_slice reads and an
- * in-memory payload sliced at that same chunk size (THE SOURCE LAW, at csv_run).
+ * so a decompressor could feed the same core; today's two drivers are chunked resource-seam reads and an
+ * in-memory payload sliced at that same chunk size (THE SOURCE LAW, at csv_run).  The decoder names no
+ * transport (user-docs/handles.md point 7): it asks the seam whether repeated ranged pulls are cheap.
  *
  * Types FREEZE after the sniff sample (field parsers + the promote lattice + the sym-cardinality rule adapted
  * from src/io/csv.c): a later cell that fails its frozen type signals 'csv — never a silent null, never a
@@ -21,7 +22,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_value/_is_fn/_rank — the lambda-target seam */
 #include "qlang/io/q_csv.h"
-#include "qlang/io/q_io.h"      /* the byte core: paths + the slice read */
+#include "qlang/io/q_io.h"      /* the resource-read seam: paths + the slice read */
 #include "qlang/parse/q_tok.h"  /* the Tok scanners — THE spelling owners the sniffer delegates to */
 #include "qlang/q_env.h"        /* q_env_bind — the .csv.i.* bindings */
 #include "core/numparse.h"      /* ray_parse_i64/f64 */
@@ -1574,14 +1575,34 @@ static int64_t csv_want(const csv_st* st, int64_t off) {
     return (off == 0 && st->bufsz < 3) ? 3 : st->bufsz;
 }
 
-static ray_t* csv_run_file(csv_st* st, ray_t* file) {
+static ray_t* csv_run_mem(csv_st* st, const char* p, int64_t n);
+
+/* A resource that cannot serve cheap repeated ranges is fetched ONCE and handed to the memory driver — the
+ * pull loop below would otherwise become one round trip per chunk. */
+static ray_t* csv_run_whole(csv_st* st, ray_t* path) {
+    ray_t* b = q_io_resource_read(path, 0, -1);
+    if (!b) return q_err(QE_OOM);
+    if (RAY_IS_ERR(b)) return b;
+    int64_t n = ray_len(b);
+    ray_t* bad = csv_run_mem(st, n ? (const char*)ray_data(b) : "", n);
+    ray_release(b);
+    return bad;
+}
+
+static ray_t* csv_run_res(csv_st* st, ray_t* file) {
     ray_t* path = q_io_file_path(file);
     if (!path) return q_err(QE_TYPE);
+    ray_t* bad;
+    if (!q_io_resource_chunkable(path)) {
+        bad = csv_run_whole(st, path);
+        ray_release(path);
+        return bad;
+    }
     int64_t off = 0;
-    ray_t* bad = NULL;
+    bad = NULL;
     for (;;) {
         int64_t want = csv_want(st, off);
-        ray_t* b = q_io_read_slice(path, off, want, NULL);
+        ray_t* b = q_io_resource_read(path, off, want);
         if (!b) { bad = q_err(QE_OOM); break; }
         if (RAY_IS_ERR(b)) { bad = b; break; }
         int64_t got = ray_len(b);
@@ -1635,13 +1656,14 @@ static ray_t* csv_run_lines(csv_st* st, ray_t* x) {
 }
 
 /* THE SOURCE LAW (lib/csv.q): a symbol is a PATH, text is CONTENT.  No sniffing - the caller's
- * type states which, so `:x.csv can never be read as one line of CSV nor "a,b" as a filename. */
+ * type states which, so `:x.csv can never be read as one line of CSV nor "a,b" as a filename.  A symbol is a
+ * RESOURCE, not a file: which transport serves it is the seam's business, never the decoder's. */
 static ray_t* csv_run(csv_st* st, ray_t* src) {
     const char* p;
     int64_t n;
     ray_t* bad;
     if (!src) return q_err(QE_TYPE);
-    if (src->type == -RAY_SYM) bad = csv_run_file(st, src);
+    if (src->type == -RAY_SYM) bad = csv_run_res(st, src);
     else if (q_str_text_bytes(src, &p, &n)) bad = csv_run_mem(st, p, n);
     else if (src->type == RAY_LIST) bad = csv_run_lines(st, src);
     else return q_err(QE_TYPE);
@@ -1802,6 +1824,16 @@ static ray_t* csv_info_fn(ray_t** args, int64_t n) {
     ray_t* result = bad ? bad : csv_types_dict(st.names, st.ctypes, st.ncols);
     csv_free(&st);
     return result;
+}
+
+ray_t* q_csv_read_table(ray_t* src, char delim) {
+    csv_st st;
+    csv_init(&st);
+    if (delim) { st.delim = delim; st.delim_explicit = 1; }
+    ray_t* bad = csv_run(&st, src);
+    ray_t* out = bad ? bad : csv_flush_tbl(&st);
+    csv_free(&st);
+    return out;
 }
 
 static void csv_bind_fn(const char* name, ray_vary_fn fn) {

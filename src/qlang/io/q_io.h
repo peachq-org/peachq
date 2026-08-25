@@ -31,6 +31,24 @@ ray_t* q_io_file_triple(ray_t* fsym, ray_t* offv, ray_t* wantv, int clamp,
  * when asked, says whether one was. */
 ray_t* q_io_read_slice(ray_t* pathstr, int64_t off, int64_t want, int* zipped);
 
+/* THE range/EOF law, defined once for every transport (user-docs/handles.md
+ * point 4): an offset past EOF reads nothing, a length past EOF is a short read,
+ * want < 0 is to EOF.  *off is clamped in place; the return is what to take. */
+int64_t q_io_clamp(int64_t size, int64_t* off, int64_t want);
+
+/* THE resource-read seam beneath read0/read1: an `http(s)://` path reads over
+ * HTTP, anything else off the filesystem, under q_io_read_slice's contract
+ * unchanged.  q_io_resource_chunkable is what a DECODER asks instead of naming a
+ * transport — 0 means repeated ranged pulls are not cheap, so fetch once and
+ * slice.  Both take a q_io_file_path result (no leading ':'). */
+ray_t* q_io_resource_read(ray_t* pathstr, int64_t off, int64_t want);
+int q_io_resource_chunkable(ray_t* pathstr);
+
+/* Does this `:…` resource decode to a table by its recognised final suffix?
+ * NULL = no, and the caller falls back to q's own object load; else an OWNED
+ * table, or an owned error for a resource claimed and not decodable. */
+ray_t* q_io_resource_table(ray_t* fsym);
+
 /* Is x the file-symbol shape (a nonempty `:…` sym atom)?  The ONE home for
  * the name-vs-path spelling — `set`'s env half asks it too. */
 int q_io_is_fsym(ray_t* x);

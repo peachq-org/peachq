@@ -10,6 +10,7 @@
 #include "qlang/net/q_http_client.h"
 #include "qlang/net/q_gz.h"           /* transparent gzip inflate (Content-Encoding) */
 #include "qlang/net/q_tls.h"          /* https — the TLS overlay on the socket */
+#include "qlang/io/q_io.h"            /* q_io_clamp — ONE range/EOF law across transports */
 #include "lang/eval.h"            /* ray_eval_get_restricted — outbound gate */
 #include "table/sym.h"           /* ray_sym_str — hsym text */
 #include "picohttpparser.h"
@@ -52,15 +53,31 @@ static int scan_ok(const char* p, size_t n) {   /* no control / CR / LF bytes */
     return 1;
 }
 
+/* The two schemes this client speaks, and how far in the authority starts.
+ * -1 = neither; else 0 http / 1 https with *pfx set. */
+static int scheme_of(const char* s, size_t n, size_t* pfx) {
+    if (n >= 7 && memcmp(s, "http://", 7) == 0)  { *pfx = 7; return 0; }
+    if (n >= 8 && memcmp(s, "https://", 8) == 0) { *pfx = 8; return 1; }
+    return -1;
+}
+
+int q_http_client_scheme_is(const char* s, size_t n) {
+    size_t pfx;
+    return s && scheme_of(s, n, &pfx) >= 0;
+}
+
 int q_http_client_url_parse(const char* url, size_t n, q_http_url_t* out) {
     if (!url || !out) return -1;
     memset(out, 0, sizeof *out);
     if (n && url[0] == ':') { url++; n--; }        /* strip kdb handle ':' */
     if (!scan_ok(url, n)) return -1;               /* injection guard */
 
-    if (n >= 7 && memcmp(url, "http://", 7) == 0)       { out->scheme = 0; url += 7; n -= 7; out->port = 80; }
-    else if (n >= 8 && memcmp(url, "https://", 8) == 0) { out->scheme = 1; url += 8; n -= 8; out->port = 443; }
-    else return -1;
+    size_t pfx;
+    int sch = scheme_of(url, n, &pfx);
+    if (sch < 0) return -1;
+    out->scheme = sch;
+    out->port = sch ? 443 : 80;
+    url += pfx; n -= pfx;
 
     /* authority ends at the first '/', '?' or '#' */
     size_t a = 0;
@@ -212,9 +229,11 @@ static int chunked_complete(const char* body, size_t blen) {
 }
 
 int q_http_client_extract(char* buf, size_t len, int* status,
-                          const char** body, size_t* body_len, int* gzip)
+                          const char** body, size_t* body_len, int* gzip,
+                          int no_body, int64_t* clen)
 {
     if (gzip) *gzip = 0;
+    if (clen) *clen = -1;
     int minor, st; const char* msg; size_t msg_len, nh = Q_HTTP_MAX_HDRS;
     struct phr_header h[Q_HTTP_MAX_HDRS];
     int hl = phr_parse_response(buf, len, &minor, &st, &msg, &msg_len, h, &nh, 0);
@@ -229,6 +248,8 @@ int q_http_client_extract(char* buf, size_t len, int* status,
 
     int chunked, have_cl, bodyless; int64_t cl;
     if (response_framing(st, h, nh, &chunked, &have_cl, &cl, &bodyless) != 0) return -1;
+    if (have_cl && clen) *clen = cl;
+    if (no_body) bodyless = 1;        /* HEAD: the length describes a body never sent */
 
     char*  b   = buf + hl;
     size_t blen = len - (size_t)hl;
@@ -315,7 +336,7 @@ static int grow(char** buf, size_t* cap, size_t need) {
 }
 
 char* q_http_client_read_response(ray_sock_t fd, size_t* out_len,
-                                  int64_t deadline_ms, const char** err)
+                                  int64_t deadline_ms, const char** err, int no_body)
 {
     char*  buf = NULL; size_t cap = 0, len = 0;
     int    hdr_len = 0;          /* >0 once headers parsed */
@@ -359,6 +380,7 @@ char* q_http_client_read_response(ray_sock_t fd, size_t* out_len,
             if (response_framing(st, h, nh, &chunked, &have_cl, &cl, &bodyless) != 0) {
                 e = "conn"; goto fail;
             }
+            if (no_body) bodyless = 1;   /* HEAD: Content-Length describes a body never sent */
             hdr_len = hl;
         }
         /* completion checks */
@@ -419,16 +441,36 @@ static int url_of(ray_t* x, char* out, size_t outsz, size_t* n) {
     return 0;
 }
 
-/* Shared GET/POST driver.  mime/body non-NULL => POST.  Returns the body string
- * or a bare-class ray_error. */
-static ray_t* http_do(ray_t* urlv, const char* mime, size_t mime_len,
-                      const char* body, size_t body_len)
+/* One outbound request.  mime non-NULL => POST; `head` => HEAD.  roff >= 0 adds a
+ * `Range:` (rlen < 0 = open-ended) — always sent, never negotiated by probing
+ * `Accept-Ranges` first (the DuckDB policy measured in the 2026-08-24 brief). */
+typedef struct {
+    int         head;
+    const char* mime; size_t mime_len;
+    const char* body; size_t body_len;
+    int64_t     roff, rlen;
+    int         as_bytes;    /* result is RAY_BYTE_ONLY (read1's shape), not charv */
+    int*        status;      /* out, optional */
+    int64_t*    clen;        /* out, optional: the length a HEAD advertised, else -1 */
+} http_req_t;
+
+/* The body in the shape the caller asked for: read1 wants bytes, `.Q.hg` chars. */
+static ray_t* http_body(const http_req_t* r, const char* p, size_t n) {
+    return r->as_bytes ? ray_vec_from_raw(RAY_BYTE_ONLY, (const uint8_t*)p, (int64_t)n)
+                       : ray_charv(p, (int64_t)n);
+}
+
+/* Shared GET/HEAD/POST driver.  Returns the body (charv, or bytes when the caller
+ * asked) or a bare-class ray_error. */
+static ray_t* http_do(ray_t* urlv, const http_req_t* r)
 {
     char urlbuf[1280]; size_t un;
     if (url_of(urlv, urlbuf, sizeof urlbuf, &un) != 0)
         return q_err(QE_TYPE);
     q_http_url_t u;
     if (q_http_client_url_parse(urlbuf, un, &u) != 0) return q_err(QE_DOMAIN);
+    const char* mime = r->mime; size_t mime_len = r->mime_len;
+    const char* body = r->body; size_t body_len = r->body_len;
 
     /* Authorization header (optional) */
     char authhdr[512]; authhdr[0] = '\0';
@@ -444,6 +486,17 @@ static ray_t* http_do(ray_t* urlv, const char* mime, size_t mime_len,
     if (default_port) snprintf(hosthdr, sizeof hosthdr, "%s", u.host);
     else              snprintf(hosthdr, sizeof hosthdr, "%s:%u", u.host, u.port);
 
+    /* A range names bytes of the RESOURCE, so a content coding would move them —
+     * a ranged request never offers gzip. */
+    char rangehdr[64]; rangehdr[0] = '\0';
+    if (r->roff >= 0) {
+        if (r->rlen < 0) snprintf(rangehdr, sizeof rangehdr, "Range: bytes=%lld-\r\n",
+                                  (long long)r->roff);
+        else snprintf(rangehdr, sizeof rangehdr, "Range: bytes=%lld-%lld\r\n",
+                      (long long)r->roff, (long long)(r->roff + r->rlen - 1));
+    }
+    const char* accept_enc = rangehdr[0] ? "" : "Accept-Encoding: gzip\r\n";
+
     /* request head */
     char req[2048];
     int rl;
@@ -451,14 +504,14 @@ static ray_t* http_do(ray_t* urlv, const char* mime, size_t mime_len,
         if (!scan_ok(mime, mime_len)) return q_err(QE_DOMAIN);   /* injection guard */
         rl = snprintf(req, sizeof req,
             "POST %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n"
-            "Accept-Encoding: gzip\r\n"
+            "%s"
             "Content-Type: %.*s\r\nContent-Length: %zu\r\n%s\r\n",
-            u.path, hosthdr, (int)mime_len, mime, body_len, authhdr);
+            u.path, hosthdr, accept_enc, (int)mime_len, mime, body_len, authhdr);
     } else {
         rl = snprintf(req, sizeof req,
-            "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n"
-            "Accept-Encoding: gzip\r\n%s\r\n",
-            u.path, hosthdr, authhdr);
+            "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n"
+            "%s%s%s\r\n",
+            r->head ? "HEAD" : "GET", u.path, hosthdr, accept_enc, rangehdr, authhdr);
     }
     if (rl < 0 || (size_t)rl >= sizeof req) return q_err(QE_LIMIT);
 
@@ -474,18 +527,19 @@ static ray_t* http_do(ray_t* urlv, const char* mime, size_t mime_len,
         q_http_client_send_all(fd, body, body_len, deadline) != 0) { err = "conn"; goto done; }
 
     size_t rlen = 0;
-    char* resp = q_http_client_read_response(fd, &rlen, deadline, &err);
+    char* resp = q_http_client_read_response(fd, &rlen, deadline, &err, r->head);
     if (!resp) goto done;
     int st; const char* rbody; size_t rbl; int gz = 0;
-    int ex = q_http_client_extract(resp, rlen, &st, &rbody, &rbl, &gz);
+    int ex = q_http_client_extract(resp, rlen, &st, &rbody, &rbl, &gz, r->head, r->clen);
+    if (ex == 0 && r->status) *r->status = st;
     if (ex == 0 && gz) {
         /* transparent inflate — q_gz_inflate bounds output at 32 MiB (bomb guard). */
         size_t ilen = 0; const char* ierr = NULL;
         uint8_t* infl = q_gz_inflate((const uint8_t*)rbody, rbl, &ilen, &ierr);
-        if (infl) { result = ray_charv((const char*)infl, (int64_t)ilen); free(infl); }
+        if (infl) { result = http_body(r, (const char*)infl, ilen); free(infl); }
         else err = ierr ? ierr : "domain";
     }
-    else if (ex == 0) result = ray_charv(rbody, (int64_t)rbl);
+    else if (ex == 0) result = http_body(r, rbody, rbl);
     else if (ex == -2) err = "wsfull";
     else err = "conn";
     free(resp);
@@ -496,7 +550,8 @@ done:
 }
 
 ray_t* q_dotq_hg_fn(ray_t* x) {
-    return http_do(x, NULL, 0, NULL, 0);
+    http_req_t r = { .roff = -1 };
+    return http_do(x, &r);
 }
 
 ray_t* q_dotq_hp_fn(ray_t** args, int64_t nargs) {
@@ -506,7 +561,56 @@ ray_t* q_dotq_hp_fn(ray_t** args, int64_t nargs) {
     const char* mp; int64_t ml; const char* bp; int64_t bl;
     if (!mimev || !q_str_text_bytes(mimev, &mp, &ml)) return q_err(QE_TYPE);
     if (!bodyv || !q_str_text_bytes(bodyv, &bp, &bl)) return q_err(QE_TYPE);
-    return http_do(args[0], mp, (size_t)ml, bp, (size_t)bl);
+    http_req_t r = { .mime = mp, .mime_len = (size_t)ml,
+                     .body = bp, .body_len = (size_t)bl, .roff = -1 };
+    return http_do(args[0], &r);
+}
+
+/* A resource read answers a remote object that is not there the way it answers a
+ * missing file — 'io.  Resource policy, not client policy: `.Q.hg` above keeps
+ * handing back whatever the server said. */
+static ray_t* http_status_body(ray_t* b, int status) {
+    if (RAY_IS_ERR(b) || (status >= 200 && status < 300)) return b;
+    ray_release(b);
+    return q_err(QE_IO);
+}
+
+/* ---- the http transport under the resource-read seam (q_io_resource_read) ----
+ * user-docs/handles.md points 1 + 3: read0/read1 reach HTTP through the SAME seam
+ * the file transport sits behind, and a ranged call really does send `Range:`.
+ * One q-level read is one GET; a ranged one first asks HEAD for the length so the
+ * clamp is q_io_clamp's law rather than a server's 416 discipline, and falls back
+ * to clamping the GET's own answer where HEAD is refused (peachq's own listener
+ * answers 501, as does any server that ignores `Range:` and replies 200). */
+ray_t* q_http_client_read_slice(ray_t* url, int64_t off, int64_t want) {
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    int st = 0;
+    if (off <= 0 && want < 0) {                            /* whole object: one GET */
+        http_req_t r = { .roff = -1, .as_bytes = 1, .status = &st };
+        ray_t* b = http_do(url, &r);
+        return http_status_body(b, st);
+    }
+    if (off < 0) off = 0;
+    int hst = 0; int64_t total = -1;
+    http_req_t hr = { .head = 1, .roff = -1, .status = &hst, .clen = &total };
+    ray_t* h = http_do(url, &hr);
+    if (RAY_IS_ERR(h)) return h;                           /* transport failure: 'conn */
+    ray_release(h);
+    if (hst >= 200 && hst < 300 && total >= 0) want = q_io_clamp(total, &off, want);
+    if (want == 0) return ray_vec_from_raw(RAY_BYTE_ONLY, NULL, 0);
+
+    http_req_t r = { .roff = off, .rlen = want, .as_bytes = 1, .status = &st };
+    ray_t* b = http_do(url, &r);
+    if (RAY_IS_ERR(b)) return b;
+    if (st == 416) { ray_release(b); return ray_vec_from_raw(RAY_BYTE_ONLY, NULL, 0); }
+    b = http_status_body(b, st);
+    if (RAY_IS_ERR(b) || st == 206) return b;              /* 206: the body IS the slice */
+    int64_t at = off, n = ray_len(b);                      /* 200: Range ignored — slice here */
+    int64_t take = q_io_clamp(n, &at, want);
+    ray_t* out = ray_vec_from_raw(RAY_BYTE_ONLY,
+                                  take ? (const uint8_t*)ray_data(b) + at : NULL, take);
+    ray_release(b);
+    return out;
 }
 
 /* ---- low-level raw client (kb/http.md §low level HTTP request mechanism) ----
@@ -546,11 +650,11 @@ ray_t* q_http_client_raw(ray_t* hsym, ray_t* request) {
     if (q_http_client_send_all(fd, reqp, (size_t)reqn,
                                deadline) != 0) { err = "conn"; goto done; }
     size_t rlen = 0;
-    char* resp = q_http_client_read_response(fd, &rlen, deadline, &err);
+    char* resp = q_http_client_read_response(fd, &rlen, deadline, &err, 0);
     if (!resp) goto done;
     int st; const char* body; size_t body_len;
     /* raw client returns the response verbatim — no transparent gzip inflate (NULL) */
-    int ex = q_http_client_extract(resp, rlen, &st, &body, &body_len, NULL);
+    int ex = q_http_client_extract(resp, rlen, &st, &body, &body_len, NULL, 0, NULL);
     if (ex == 0) {
         size_t total = (size_t)(body - resp) + body_len;   /* headers + framed body */
         result = ray_charv(resp, (int64_t)total);
