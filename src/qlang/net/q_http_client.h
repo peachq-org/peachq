@@ -31,14 +31,21 @@ typedef struct {
  * dropped; query (`?...`) is kept in path.  Returns 0 ok, -1 malformed. */
 int q_http_client_url_parse(const char* url, size_t n, q_http_url_t* out);
 
+/* Does this URL text open with a scheme this client speaks?  THE one home for
+ * the spelling — a leading kdb ':' is NOT skipped, so strip it first. */
+int q_http_client_scheme_is(const char* s, size_t n);
+
 /* Extract the body from a COMPLETE response buffer (headers + framed body).
  * On success sets status and body/body_len (body points into buf; a chunked
  * body is de-framed IN PLACE, so buf is mutated).  When `gzip` is non-NULL it is
  * set to 1 iff the response carried `Content-Encoding: gzip` (caller inflates the
- * extracted body), else 0.  Returns 0 ok, -1 malformed, -2 decoded body exceeds
- * Q_HTTP_CLIENT_MAX. */
+ * extracted body), else 0.  `no_body` is the HEAD flag: the response is taken as
+ * complete at its headers, whatever length they advertise.  `clen`, when
+ * non-NULL, reports the advertised Content-Length (-1 = none).  Returns 0 ok,
+ * -1 malformed, -2 decoded body exceeds Q_HTTP_CLIENT_MAX. */
 int q_http_client_extract(char* buf, size_t len, int* status,
-                          const char** body, size_t* body_len, int* gzip);
+                          const char** body, size_t* body_len, int* gzip,
+                          int no_body, int64_t* clen);
 
 /* --- reusable blocking pipeline seams (also the WS-client hook) --- */
 
@@ -54,10 +61,12 @@ int q_http_client_send_all(ray_sock_t fd, const void* buf, size_t len,
 
 /* Read a whole HTTP response into a grown heap buffer, framing-aware (stops at
  * the Content-Length / chunked terminator; reads to EOF only when close-framed)
- * bounded by an absolute deadline + Q_HTTP_CLIENT_MAX.  Returns malloc'd buf
- * (caller frees) with *len set, or NULL with *err set (bare class word). */
+ * bounded by an absolute deadline + Q_HTTP_CLIENT_MAX.  `no_body` is the HEAD
+ * flag: the response is taken as complete at its headers, whatever length they
+ * advertise for a body that will never arrive.  Returns malloc'd buf (caller
+ * frees) with *len set, or NULL with *err set (bare class word). */
 char* q_http_client_read_response(ray_sock_t fd, size_t* len,
-                                  int64_t deadline_ms, const char** err);
+                                  int64_t deadline_ms, const char** err, int no_body);
 
 /* `.Q.c.hg` — GET; x is a string or symbol URL atom, returns the body string. */
 ray_t* q_dotq_hg_fn(ray_t* x);
@@ -74,5 +83,12 @@ ray_t* q_dotq_hp_fn(ray_t** args, int64_t nargs);
  * and the 32 MiB cap.  PROVISIONAL pre-C3: the return is a string ATOM.  hsym +
  * request are BORROWED; returns owned (or an owned bare-class ray_error). */
 ray_t* q_http_client_raw(ray_t* hsym, ray_t* request);
+
+/* The http transport beneath the resource-read seam (q_io_resource_read): `url`
+ * is a RAY_STR/charv `http(s)://…` with no leading ':'.  Obeys q_io_clamp's
+ * range/EOF law and the `-b` gate exactly as the file transport does; answers
+ * OWNED RAY_BYTE_ONLY, 'conn for a connect failure, 'io for a resource that is
+ * not there.  want < 0 = to EOF. */
+ray_t* q_http_client_read_slice(ray_t* url, int64_t off, int64_t want);
 
 #endif /* Q_HTTP_CLIENT_H */

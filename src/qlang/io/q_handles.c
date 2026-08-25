@@ -14,7 +14,7 @@
 #include "qlang/io/q_provider.h" /* the `:pq:` virtual-table provider arms */
 #include "qlang/net/q_wirefile.h"    /* q_wirefile_append_path — typed handle append */
 #include "qlang/net/q_ws.h"          /* q_ws_client_open — `:ws:// sym handles */
-#include "qlang/net/q_http_client.h" /* q_http_client_raw — `:http:// sym handles */
+#include "qlang/net/q_http_client.h" /* q_http_client_raw + the scheme spelling — `:http:// sym handles */
 #include "qlang/eval/q_eval.h"       /* q_eval_value_wrap / q_eval_apply_value — handle 0 IS `.z.ps`/value */
 #include "lang/eval.h"       /* ray_eval_get_restricted, ray_at_fn */
 #include "lang/internal.h"   /* make_i64, ray_hopen_fn/ray_hsend_fn/ray_hpost_fn/ray_hclose_fn */
@@ -390,8 +390,7 @@ ray_t* q_handles_sym_apply(ray_t* head, ray_t** args, int64_t n) {
             return q_ws_client_open(head, args[0]);
         return q_err(QE_TYPE);
     }
-    if ((sl >= 8 && memcmp(sp, ":http://", 8) == 0) ||
-        (sl >= 9 && memcmp(sp, ":https://", 9) == 0)) {
+    if (sl && sp[0] == ':' && q_http_client_scheme_is(sp + 1, sl - 1)) {
         if (n == 1 && is_text_atom(args[0]))
             return q_http_client_raw(head, args[0]);
         return q_err(QE_TYPE);
