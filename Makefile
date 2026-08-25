@@ -136,9 +136,9 @@ UNAME_S := $(shell uname -s)
 # $(LIBS) — including the bench rules, which link $(LIB_SRC) not $(LIB_OBJ).
 CXXLIB := $(if $(filter Darwin,$(UNAME_S)),-lc++,-lstdc++)
 ifeq ($(UNAME_S),Linux)
-  LIBS = -lm -lpthread -ldl $(RE2_LIB) $(CXXLIB)
+  LIBS = -lm -lpthread -ldl $(RE2_LIB) $(FMT_LIB) $(CXXLIB)
 else
-  LIBS = -lm $(RE2_LIB) $(CXXLIB)
+  LIBS = -lm $(RE2_LIB) $(FMT_LIB) $(CXXLIB)
 endif
 
 CFLAGS  ?= $(RELEASE_CFLAGS)
@@ -222,7 +222,32 @@ $(RE2_LIB): $(RE2_OBJ)
 
 RE2_DEPS = $(RE2_OBJ:.o=.d) $(WIN_RE2_OBJ:.o=.d)
 
-$(Q_TARGET): $(LIB_OBJ) $(Q_MAIN_OBJ) $(RE2_LIB)
+# --- fmt: the second vendored C++ archive, on the same terms as RE2 -----------
+# DuckDB's patched fmt, made standalone by the stub headers under
+# third_party/fmt/stub (see that tree's README.peachq.md).  The shim gets an
+# EXPLICIT rule rather than the RE2 pattern above so its include path is stated
+# where it is used; an explicit rule wins over a pattern rule.
+FMT_LIB      = $(BUILD_DIR)/libpqfmt.a
+FMT_OBJ      = $(BUILD_DIR)/third_party/fmt/format.o \
+               $(BUILD_DIR)/src/qlang/io/q_strfmt_shim.o
+FMT_CXXFLAGS = -std=c++17 -O2 -fPIC -fvisibility=hidden \
+               -Ithird_party/fmt/include -Ithird_party/fmt/stub -Isrc
+
+$(BUILD_DIR)/third_party/fmt/%.o: third_party/fmt/%.cc
+	@mkdir -p $(dir $@)
+	$(CXX) -c $(FMT_CXXFLAGS) -w $(DEPFLAGS) -o $@ $<
+
+$(BUILD_DIR)/src/qlang/io/q_strfmt_shim.o: src/qlang/io/q_strfmt_shim.cc
+	@mkdir -p $(dir $@)
+	$(CXX) -c $(FMT_CXXFLAGS) $(WARNS) $(DEPFLAGS) -o $@ $<
+
+$(FMT_LIB): $(FMT_OBJ)
+	@tools/fmt-pin.sh
+	$(AR) rcs $@ $(FMT_OBJ)
+
+FMT_DEPS = $(FMT_OBJ:.o=.d) $(WIN_FMT_OBJ:.o=.d)
+
+$(Q_TARGET): $(LIB_OBJ) $(Q_MAIN_OBJ) $(RE2_LIB) $(FMT_LIB)
 	$(CC) $(CFLAGS) -o $@ $(LIB_OBJ) $(Q_MAIN_OBJ) $(LIBS) $(LDFLAGS)
 
 # --- Windows cross-build (mingw-w64): make win --------------------------------
@@ -260,10 +285,14 @@ WIN_AR      = $(WIN_CROSS)ar
 WIN_CFLAGS  = $(WARNS) -std=$(STD) $(WIN_OPT) \
   -DRAY_OS_WINDOWS=1 -D_WIN32_WINNT=0x0A00 -D__USE_MINGW_ANSI_STDIO=1
 WIN_CXXFLAGS = -std=c++17 $(WIN_OPT) -Ithird_party/re2 -Isrc
+WIN_FMT_CXXFLAGS = -std=c++17 $(WIN_OPT) -Ithird_party/fmt/include -Ithird_party/fmt/stub -Isrc
 WIN_RE2_LIB  = $(BUILD_DIR)/libpqre2.win.a
 WIN_RE2_OBJ  = $(addprefix $(BUILD_DIR)/,$(RE2_SRC:.cc=.win.o)) \
                $(BUILD_DIR)/src/qlang/io/q_re2_shim.win.o
-WIN_LIBS    = $(WIN_RE2_LIB) -lws2_32 -lm
+WIN_FMT_LIB  = $(BUILD_DIR)/libpqfmt.win.a
+WIN_FMT_OBJ  = $(BUILD_DIR)/third_party/fmt/format.win.o \
+               $(BUILD_DIR)/src/qlang/io/q_strfmt_shim.win.o
+WIN_LIBS    = $(WIN_RE2_LIB) $(WIN_FMT_LIB) -lws2_32 -lm
 # iocp_win.c provides ray_poll_* on Windows; linking the iocp.c stub too is a
 # multiple-definition error.
 WIN_LIB_OBJ    = $(filter-out $(BUILD_DIR)/src/core/iocp.win.o, $(addprefix $(BUILD_DIR)/,$(LIB_SRC:.c=.win.o))) \
@@ -303,13 +332,25 @@ $(WIN_RE2_LIB): $(WIN_RE2_OBJ)
 	@tools/re2-pin.sh
 	$(WIN_AR) rcs $@ $(WIN_RE2_OBJ)
 
+$(BUILD_DIR)/third_party/fmt/%.win.o: third_party/fmt/%.cc
+	@mkdir -p $(dir $@)
+	$(WIN_CXX) -c $(WIN_FMT_CXXFLAGS) -w $(DEPFLAGS) -o $@ $<
+
+$(BUILD_DIR)/src/qlang/io/q_strfmt_shim.win.o: src/qlang/io/q_strfmt_shim.cc
+	@mkdir -p $(dir $@)
+	$(WIN_CXX) -c $(WIN_FMT_CXXFLAGS) $(WARNS) $(DEPFLAGS) -o $@ $<
+
+$(WIN_FMT_LIB): $(WIN_FMT_OBJ)
+	@tools/fmt-pin.sh
+	$(WIN_AR) rcs $@ $(WIN_FMT_OBJ)
+
 # --stack: mingw reserves 2MB, too little for the evaluator's 2048-deep guard to
 # fire before the native stack blows (`{.z.s[]}[]` killed q.exe instead of
 # signalling 'stack).  8MB matches the Linux default; it is RESERVE, not commit.
 # g++ drives the link (RE2 is C++) with $(WIN_OPT), not $(WIN_CFLAGS), whose
 # -std=c17 a C++ driver rejects.  The C++ runtime links STATICALLY — libstdc++,
 # libgcc, and the libwinpthread they pull in — so q.exe still ships as one file.
-q.exe: $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_RE2_LIB)
+q.exe: $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_RE2_LIB) $(WIN_FMT_LIB)
 	$(WIN_CXX) $(WIN_OPT) -Wl,--stack,8388608 -static-libstdc++ -static-libgcc \
 	  -o $@ $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_LIBS) -Wl,-Bstatic -lwinpthread
 
@@ -334,3 +375,4 @@ version:
 
 -include $(DEPS)
 -include $(RE2_DEPS)
+-include $(FMT_DEPS)

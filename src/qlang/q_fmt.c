@@ -5,6 +5,7 @@
 #include "qlang/q_builtins.h" /* q_builtins_count_long — THE count owner */
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
 #include "qlang/base/q_calendar.h" /* q_calendar_days_from_civil — date display domain */
+#include "qlang/base/q_err.h" /* QE_WSFULL — the allocating krepr's one failure */
 #include "qlang/q_registry_internal.h" /* q_type_qname — the guarded type-name home */
 #include "qlang/parse/q_parse_internal.h" /* ADVERB_NAMES — the one adverb-spelling table */
 #include "qlang/eval/q_eval.h" /* carrier read-out accessors — RAY_QFN display;
@@ -1915,4 +1916,24 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
         return;
     }
     q_fmt(val, buf, bufsz);
+}
+
+ray_t* q_fmt_krepr_charv(ray_t* val) {
+    size_t cap = 8192;
+    char*  buf = malloc(cap);
+    if (!buf) return q_err(QE_WSFULL);
+    for (;;) {
+        buf[0] = '\0';
+        q_fmt_krepr(val, buf, cap);
+        size_t len = strlen(buf);
+        if (len < cap - 1 || cap >= (1u << 24)) {   /* fit whole (or growth cap) */
+            ray_t* r = ray_charv(buf, (int64_t)len);
+            free(buf);
+            return r;
+        }
+        cap *= 2;
+        char* nb = realloc(buf, cap);
+        if (!nb) { free(buf); return q_err(QE_WSFULL); }
+        buf = nb;
+    }
 }

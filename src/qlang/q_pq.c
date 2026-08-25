@@ -13,7 +13,8 @@
 #include "qlang/io/q_csv.h"    /* q_csv_register — the .csv.i.* natives */
 #include "qlang/io/q_ffi.h"    /* q_ffi_register — the .ffi.i.* natives */
 #include "qlang/ops/q_regex.h" /* q_regex_register — the .regexp.i.* natives */
-#include "qlang/ops/q_strns.h" /* q_strns_register — the .str.i.* natives */
+#include "qlang/ops/q_strfmt.h" /* q_strfmt_register — the .str.i.printf/.format natives */
+#include "qlang/ops/q_strns.h" /* q_strns_register — the .str.i.* strip natives */
 #include "qlang/lib_gen.h"     /* PEACHQ_LIB_BOOTSTRAP — the codegen'd lib/ + qlib/src bundle */
 #include <stdio.h>
 
@@ -24,6 +25,7 @@ ray_t* q_pq_load(void) {
     q_ffi_register();
     q_csv_register();
     q_regex_register();
+    q_strfmt_register();
     q_strns_register();
     ray_t* esig = NULL;
     int rc = q_ctx_run_src(PEACHQ_LIB_BOOTSTRAP, stdout, stderr, &esig);

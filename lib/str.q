@@ -70,6 +70,21 @@
     suffix:.str.i.text suffix;
     $[0h=type s; .z.s[;suffix] each s; .str.endswith[s;suffix]; (neg count suffix)_ s; s]};
 
+/ THE message gate: a plain string only gets its doubled delimiter unescaped, its conversions NEVER read.
+.str.i.msg:{[msg;engine;unescape]
+    $[10h=type msg; unescape msg;
+      (0h=type msg) and 10h=type first msg; engine msg;
+      '`type]};
+
+/ C-style formatting.  Grammar and semantics are DuckDB's, so `%'d` groups with an APOSTROPHE and a comma is
+/ spelled `%,d`; the q supersets are `%r`, a permissive `%s`, and typed nulls rendering their q display.
+/ @param msg (any) a format string, or a general list of one plus its arguments
+.str.printf:{[msg] .str.i.msg[msg; .str.i.printf; ssr[;"%%";"%"]]};
+
+/ Python-style formatting, same message shape and same DuckDB engine: {} {0} {:>8.2f} {:,}.
+/ @param msg (any) a format string, or a general list of one plus its arguments
+.str.format:{[msg] .str.i.msg[msg; .str.i.format; {ssr[ssr[x;"{{";"{"];"}}";"}"]}]};
+
 / is every character a letter, and is there at least one?
 / @param s (any) a string, a symbol, or a list of either
 .str.isalpha:{[s]
