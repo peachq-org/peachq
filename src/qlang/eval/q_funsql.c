@@ -14,6 +14,7 @@
 #include "qlang/ops/q_bang.h"
 #include "qlang/ops/q_index.h"
 #include "qlang/io/q_splay.h"          /* mapped splays: from materializes, writes 'splay */
+#include "qlang/io/q_io.h"             /* q_io_is_fsym / q_io_resource_table — resource From-resolve */
 #include "qlang/io/q_provider.h"         /* provider carriers: qsql push / materialize */
 #include "qlang/q_env.h"
 #include "lang/internal.h"             /* ray_til_fn, ray_typed_null, ray_except_fn */
@@ -42,6 +43,10 @@ static ray_t* gather(ray_t* x, ray_t* idx) {
 }
 
 /* From-resolve (law 24 + column-dict superset): sym -> env; keyed -> 0!; dict -> flip.
+ * A `:...` RESOURCE resolves in the order user-docs/handles.md § Format inference sets:
+ * explicit provider, then a recognised tabular suffix, then q's own object load (which is
+ * what makes `:dir/` a splay and `:t` a serialized table) — an unrecognised one fails
+ * rather than being guessed, and a plain STRING is never a table source.
  * Enum columns flow through ENUMERATED (wp/foreign-keys.md:59-64) — a phrase that
  * computes on one decays at its verb per the one apply-module law, never here.
  * *nkey (optional, caller-initialised) reports the source's key width so a caller can re-key. */
@@ -49,6 +54,14 @@ static ray_t* ques_from(ray_t* t, int64_t* nkey) {
     if (!t) return q_err(QE_TYPE);
     ray_t* pm = q_provider_from_table(t);   /* carrier / `:pq: hsym: provider truth */
     if (pm) return pm;
+    if (q_io_is_fsym(t)) {
+        ray_t* v = q_io_resource_table(t);
+        if (!v) v = q_eval_value_wrap(t);
+        if (RAY_IS_ERR(v)) return v;
+        ray_t* r = ques_from(v, nkey);
+        ray_release(v);
+        return r;
+    }
     if (t->type == -RAY_SYM) {
         ray_t* v = q_env_resolve(t->i64);
         if (!v) return q_err(QE_NAME);

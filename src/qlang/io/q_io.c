@@ -14,8 +14,10 @@
 #include "qlang/io/q_handles.h" /* q_handles_read1 — the fifo-handle read form */
 #include "qlang/io/q_splay.h"   /* q_io_set: a carrier y writes as its table */
 #include "qlang/io/q_provider.h"  /* q_io_set: `:pq: targets route to .X.set */
+#include "qlang/io/q_csv.h"     /* the decoder behind a recognised tabular suffix */
 #include "qlang/net/q_gz.h"     /* q_gz_inflate_zlib — the kxzip block codec */
 #include "qlang/net/q_wirefile.h" /* the format writers behind q_io_set */
+#include "qlang/net/q_http_client.h" /* the http half of the resource-read seam */
 #include "lang/eval.h"      /* ray_eval_get_restricted */
 #include "store/fileio.h"   /* ray_mkdir_p — the parent directories a write promises */
 #include "table/sym.h"      /* ray_sym_intern_runtime, ray_sym_vec_cell */
@@ -91,9 +93,7 @@ ray_t* q_io_write_all(ray_t* pathstr, const void* bytes, size_t n) {
 #define ZIP_TRAIL_LEN 48   /* ONE fixed tail header — never per-block (dissection r2) */
 #define ZIP_PFX_LEN   8    /* nb>1: each block is prefixed by its compressed length */
 
-/* An offset past EOF reads nothing, a length past EOF is a short read, and
- * want < 0 is to EOF — the one clamp every read here shares. */
-static int64_t io_clamp(int64_t n, int64_t* off, int64_t want) {
+int64_t q_io_clamp(int64_t n, int64_t* off, int64_t want) {
     if (*off < 0) *off = 0;
     if (*off > n) *off = n;
     return (want < 0 || want > n - *off) ? n - *off : want;
@@ -120,7 +120,7 @@ static ray_t* io_read_raw(ray_t* pathstr, int64_t off, int64_t want, int* wrappe
                    fread(magic, 1, ZIP_MAGIC_LEN, fp) == ZIP_MAGIC_LEN &&
                    memcmp(magic, ZIP_MAGIC, ZIP_MAGIC_LEN) == 0;
     }
-    int64_t take = io_clamp((int64_t)st.st_size, &off, want);
+    int64_t take = q_io_clamp((int64_t)st.st_size, &off, want);
     uint8_t* buf = take > 0 ? (uint8_t*)malloc((size_t)take) : NULL;
     size_t got = 0;
     ray_t* out;
@@ -152,10 +152,48 @@ ray_t* q_io_read_slice(ray_t* pathstr, int64_t off, int64_t want, int* zipped) {
     if (RAY_IS_ERR(plain)) return plain;
     if (zipped) *zipped = 1;
     if (off == 0 && want < 0) return plain;
-    int64_t take = io_clamp(ray_len(plain), &off, want);
+    int64_t take = q_io_clamp(ray_len(plain), &off, want);
     out = ray_vec_from_raw(RAY_BYTE_ONLY, (const uint8_t*)ray_data(plain) + off, take);
     ray_release(plain);
     return out;
+}
+
+/* ---- the resource-read seam (user-docs/handles.md point 1) --------------- */
+
+/* A scheme-less path IS the file transport, so the only question is whether one
+ * the http client speaks is spelled out in front. */
+static int io_is_http(ray_t* pathstr) {
+    const char* p = ray_str_ptr(pathstr);
+    return q_http_client_scheme_is(p, p ? ray_str_len(pathstr) : 0);
+}
+
+int q_io_resource_chunkable(ray_t* pathstr) { return !io_is_http(pathstr); }
+
+/* The READ side of the on-disk-format classification q_io_set owns for writes,
+ * for the one format that decodes to a table by its name (user-docs/handles.md
+ * § Format inference: explicit provider or scheme, then explicit format API,
+ * then the recognised final suffix, then error — never Content-Type, never
+ * magic bytes).  NULL = no recognised tabular format, so the caller falls back
+ * to q's own object load; a REMOTE resource has no such fallback, so there an
+ * unrecognised suffix fails here rather than as a filesystem miss. */
+ray_t* q_io_resource_table(ray_t* fsym) {
+    ray_t* path = q_io_file_path(fsym);
+    if (!path) return NULL;
+    const char* p = ray_str_ptr(path);
+    size_t n = ray_str_len(path);
+    if (io_is_http(path))                       /* a query or fragment names no format */
+        for (size_t i = 0; i < n; i++) if (p[i] == '?' || p[i] == '#') { n = i; break; }
+    ray_t* out;
+    if (n > 4 && memcmp(p + n - 4, ".csv", 4) == 0)      out = q_csv_read_table(fsym, 0);
+    else if (n > 4 && memcmp(p + n - 4, ".tsv", 4) == 0) out = q_csv_read_table(fsym, '\t');
+    else out = q_io_resource_chunkable(path) ? NULL : q_err(QE_TYPE);
+    ray_release(path);
+    return out;
+}
+
+ray_t* q_io_resource_read(ray_t* pathstr, int64_t off, int64_t want) {
+    if (io_is_http(pathstr)) return q_http_client_read_slice(pathstr, off, want);
+    return q_io_read_slice(pathstr, off, want, NULL);
 }
 
 ray_t* q_io_file_triple(ray_t* fsym, ray_t* offv, ray_t* wantv, int clamp,
@@ -569,7 +607,7 @@ static ray_t* read1_wrap_impl(ray_t* x) {
     if (x && x->type == -RAY_SYM) {
         ray_t* path = q_io_file_path(x);
         if (!path) return q_err(QE_TYPE);
-        ray_t* r = q_io_read_slice(path, 0, -1, NULL);
+        ray_t* r = q_io_resource_read(path, 0, -1);
         ray_release(path);
         return r;
     }
@@ -591,7 +629,7 @@ static ray_t* read1_wrap_impl(ray_t* x) {
             int64_t off, want;
             ray_t* bad = q_io_file_triple(e[0], e[1], three ? e[2] : NULL, 0, &path, &off, &want);
             if (bad) return bad;
-            ray_t* r = q_io_read_slice(path, off, want, NULL);
+            ray_t* r = q_io_resource_read(path, off, want);
             ray_release(path);
             return r;
         }
