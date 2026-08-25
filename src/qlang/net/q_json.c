@@ -19,7 +19,12 @@
 #include "qlang/base/q_err.h"
 #include "qlang/q_fmt.h"      /* q_fmt / q_fmt_float — the display + `\P` home */
 #include "qlang/base/q_type.h"     /* q_type_is_inf — the infinity lane */
-#include "lang/eval.h"        /* ray_at_fn — dict/table cell reads */
+#include "lang/eval.h"        /* RAY_FN_NONE, ray_at_fn — dict/table cell reads */
+#include "qlang/ops/q_bang.h" /* q_bang_enkey — the unkey primitive */
+#include "qlang/ops/q_dollar.h"  /* q_dollar_cast / q_dollar_tok — the one conversion home */
+#include "qlang/io/q_io.h"       /* q_io_file_path + the resource-read seam */
+#include "qlang/q_env.h"         /* q_env_bind — the .j.i.* bindings */
+#include "lang/env.h"            /* ray_fn_vary */
 #include "table/sym.h"        /* ray_sym_vec_cell */
 #include <rayforce.h>
 #include "yyjson.h"
@@ -112,6 +117,7 @@ static void jbuf_flt(jbuf* b, double v) {
 }
 
 static void j_emit(jbuf* b, ray_t* x);
+static void j_table(jbuf* b, ray_t* x);
 
 /* An unimplemented type: latch the flag so the whole serialize fails 'nyi. */
 static void j_nyi(jbuf* b, int8_t t) {
@@ -207,11 +213,19 @@ static void j_key(jbuf* b, ray_t* k) {
     }
 }
 
-/* dict -> JSON object.  Keyed tables (keys is a TABLE) are deferred -> 'nyi. */
+/* dict -> JSON object.  A keyed table (keys is a TABLE) unkeys first and emits as a
+ * table, the `0!` in doth.md:686's printed `.h.tx[`json]` source. */
 static void j_dict(jbuf* b, ray_t* x) {
     ray_t* keys = ray_dict_keys(x);    /* borrowed */
     ray_t* vals = ray_dict_vals(x);    /* borrowed */
-    if (!keys || keys->type == RAY_TABLE) { j_nyi(b, x->type); return; }
+    if (!keys) { j_nyi(b, x->type); return; }
+    if (keys->type == RAY_TABLE) {
+        ray_t* flat = q_bang_enkey(0, x);
+        if (!flat || RAY_IS_ERR(flat)) { if (flat) ray_error_free(flat); j_nyi(b, x->type); return; }
+        j_table(b, flat);
+        ray_release(flat);
+        return;
+    }
     int64_t n = ray_len(keys);
     jbuf_putc(b, '{');
     for (int64_t i = 0; i < n; i++) {
@@ -371,16 +385,49 @@ ray_t* q_json_serialize(ray_t* x) {
 }
 
 /* ======================================================================== *
+ *  the written form — the lexical classification jk_node used to throw away
+ * ======================================================================== */
+
+/* The sniff lattice.  BOOL does NOT promote into the numbers: JSON states its
+ * types, so `true` beside `1` is a genuine mix, not a text ambiguity (DuckDB
+ * infers `json` for that column too).  JC_NONE = nothing but `null` observed. */
+typedef enum { JC_NONE = 0, JC_BOOL, JC_I64, JC_F64, JC_NATIVE } jc_t;
+
+/* A uint past int64 has no q integer, so it reads as a float. */
+static jc_t jr_kind(yyjson_val* v) {
+    switch (yyjson_get_type(v)) {
+        case YYJSON_TYPE_NULL: return JC_NONE;
+        case YYJSON_TYPE_BOOL: return JC_BOOL;
+        case YYJSON_TYPE_NUM:
+            if (yyjson_get_subtype(v) == YYJSON_SUBTYPE_REAL) return JC_F64;
+            return (yyjson_get_subtype(v) == YYJSON_SUBTYPE_UINT &&
+                    yyjson_get_uint(v) > (uint64_t)INT64_MAX) ? JC_F64 : JC_I64;
+        default: return JC_NATIVE;                   /* string, object, array */
+    }
+}
+
+static double jr_num(yyjson_val* v) {
+    if (yyjson_get_subtype(v) == YYJSON_SUBTYPE_REAL) return yyjson_get_real(v);
+    if (yyjson_get_subtype(v) == YYJSON_SUBTYPE_UINT) return (double)yyjson_get_uint(v);
+    return (double)yyjson_get_sint(v);
+}
+
+/* ======================================================================== *
  *  .j.k — deserialize (yyjson node -> ray_t)
  * ======================================================================== */
 
-static ray_t* jk_node(yyjson_val* v) {
+/* ONE walker, two number laws: `written` reads the lexical subtype yyjson kept
+ * (`1` a long, `1.0` a float) — `.j.read`'s law, at every depth.  `.j.k` passes 0
+ * and stays kdb's documented lossy converter. */
+static ray_t* j_node(yyjson_val* v, int written) {
     switch (yyjson_get_type(v)) {
         case YYJSON_TYPE_NULL:
             return ray_f64(NULL_F64);                    /* -> 0n */
         case YYJSON_TYPE_BOOL:
             return ray_bool(yyjson_get_bool(v));
         case YYJSON_TYPE_NUM: {
+            if (written)
+                return jr_kind(v) == JC_I64 ? ray_i64(yyjson_get_sint(v)) : ray_f64(jr_num(v));
             double d = yyjson_get_num(v);
             return isnan(d) ? ray_f64(NULL_F64) : ray_f64(d);  /* inf lives; nan -> 0n */
         }
@@ -393,7 +440,7 @@ static ray_t* jk_node(yyjson_val* v) {
             ray_t* lst = ray_list_new(n > 0 ? n : 1);
             if (RAY_IS_ERR(lst)) return lst;
             yyjson_arr_foreach(v, idx, max, e) {
-                ray_t* c = jk_node(e);
+                ray_t* c = j_node(e, written);
                 if (RAY_IS_ERR(c)) { ray_release(lst); return c; }
                 lst = ray_list_append(lst, c);           /* RETAINS c */
                 ray_release(c);                           /* drop local ref */
@@ -415,7 +462,7 @@ static ray_t* jk_node(yyjson_val* v) {
                 int64_t id = ray_sym_intern_runtime(yyjson_get_str(key), yyjson_get_len(key));
                 keys = ray_vec_append(keys, &id);
                 if (RAY_IS_ERR(keys)) { ray_release(vals); return keys; }
-                ray_t* cv = jk_node(val);
+                ray_t* cv = j_node(val, written);
                 if (RAY_IS_ERR(cv)) { ray_release(keys); ray_release(vals); return cv; }
                 vals = ray_list_append(vals, cv);          /* RETAINS cv */
                 ray_release(cv);
@@ -445,8 +492,475 @@ ray_t* q_json_deserialize(ray_t* x) {
         free(buf);
         return e;
     }
-    ray_t* r = jk_node(yyjson_doc_get_root(doc));
+    ray_t* r = j_node(yyjson_doc_get_root(doc), 0);
     yyjson_doc_free(doc);
     free(buf);
     return r;
+}
+
+/* ======================================================================== *
+ *  .j.read / .j.info — the reader.  WHY it is not .j.k: docs/superpowers/adr/0006.
+ * ======================================================================== */
+
+#define J_DEF_SAMPLE 20480            /* sniff RECORDS, the .csv.read default */
+
+typedef struct {
+    int64_t      sample;
+    int64_t*     names;
+    char*        chars;               /* the sniffed char per column — what .j.info reports */
+    char*        want;                /* the caller's types: 0 none, ' ' drop, '*' native, else a q type char */
+    int64_t      ncols;
+    yyjson_val** recs;
+    int64_t      nrecs;
+    int          bare;                /* the array-of-non-records form: ONE column, DuckDB's `json` */
+} jr_st;
+
+static void jr_free(jr_st* st) {
+    free(st->names);
+    free(st->chars);
+    free(st->want);
+    free(st->recs);
+}
+
+static jc_t jr_promote(jc_t a, jc_t b) {
+    if (a == JC_NONE) return b;
+    if (b == JC_NONE || a == b) return a;
+    if (a >= JC_I64 && a <= JC_F64 && b >= JC_I64 && b <= JC_F64) return a > b ? a : b;
+    return JC_NATIVE;
+}
+
+/* JC_NONE — a column of nothing but `null` — is a float column of 0n: `.j.k`'s
+ * own mapping for `null`, kept where inference has nothing to say. */
+static char jr_char(jc_t k) {
+    switch (k) {
+        case JC_BOOL:   return 'b';
+        case JC_I64:    return 'j';
+        case JC_NATIVE: return '*';
+        default:        return 'f';
+    }
+}
+
+static int64_t jr_find(const int64_t* names, int64_t n, int64_t nm) {
+    for (int64_t j = 0; j < n; j++)
+        if (names[j] == nm) return j;
+    return -1;
+}
+
+static int64_t jr_key_sym(yyjson_val* key) {
+    return ray_sym_intern_runtime(yyjson_get_str(key), yyjson_get_len(key));
+}
+
+/* ---- source ---------------------------------------------------------------- */
+
+/* THE SOURCE LAW: a SYMBOL is a resource, TEXT is content.  yyjson
+ * parses a buffer, so the document is materialized whichever way it arrives —
+ * and a leading UTF-8 BOM, which yyjson refuses, is stripped here. */
+static ray_t* jr_bytes(ray_t* src, char** out, int64_t* outn) {
+    const char* p = NULL;                            /* set by the two contiguous forms; the list form
+                                                      * writes *out itself, having nothing to point at */
+    ray_t* held = NULL;
+    int64_t n = 0;
+    *out = NULL;
+    *outn = 0;
+    if (!src) return q_err(QE_TYPE);
+    if (src->type == -RAY_SYM) {
+        ray_t* path = q_io_file_path(src);
+        if (!path) return q_err(QE_TYPE);
+        held = q_io_resource_read(path, 0, -1);
+        ray_release(path);
+        if (!held) return q_err(QE_OOM);
+        if (RAY_IS_ERR(held)) return held;
+        n = ray_len(held);
+        p = n ? (const char*)ray_data(held) : "";
+    } else if (!q_str_text_bytes(src, &p, &n)) {
+        if (src->type != RAY_LIST) return q_err(QE_TYPE);
+        int64_t cnt = ray_len(src);
+        ray_t** e = (ray_t**)ray_data(src);
+        for (int64_t i = 0; i < cnt; i++) {
+            const char* ep;
+            int64_t el;
+            if (!q_str_text_bytes(e[i], &ep, &el)) return q_err(QE_TYPE);
+            n += el + (i ? 1 : 0);
+        }
+        char* b = (char*)malloc((size_t)n + 1);
+        if (!b) return q_err(QE_WSFULL);
+        int64_t at = 0;
+        for (int64_t i = 0; i < cnt; i++) {
+            const char* ep;
+            int64_t el;
+            q_str_text_bytes(e[i], &ep, &el);
+            if (i) b[at++] = '\n';                   /* read0's list form joins, never one record per line */
+            if (el) memcpy(b + at, ep, (size_t)el);
+            at += el;
+        }
+        b[n] = 0;
+        *out = b;
+        p = NULL;
+    }
+    if (p) {
+        *out = (char*)malloc((size_t)n + 1);
+        if (*out) {
+            if (n) memcpy(*out, p, (size_t)n);
+            (*out)[n] = 0;
+        }
+    }
+    if (held) ray_release(held);
+    if (!*out) return q_err(QE_WSFULL);
+    if (n >= 3 && !memcmp(*out, "\xef\xbb\xbf", 3)) {
+        memmove(*out, *out + 3, (size_t)(n - 3) + 1);
+        n -= 3;
+    }
+    *outn = n;
+    return NULL;
+}
+
+/* ---- shape + schema -------------------------------------------------------- */
+
+/* THE TOP-LEVEL LAW: an object is one record, an array of objects is
+ * the records, any other array is DuckDB's single `json` column.  Nothing else is
+ * a table shape. */
+static ray_t* jr_records(jr_st* st, yyjson_val* root) {
+    if (yyjson_is_obj(root)) {
+        st->recs = (yyjson_val**)malloc(sizeof *st->recs);
+        if (!st->recs) return q_err(QE_WSFULL);
+        st->recs[0] = root;
+        st->nrecs = 1;
+        return NULL;
+    }
+    if (!yyjson_is_arr(root)) return q_err(QE_TYPE);
+    int64_t n = (int64_t)yyjson_arr_size(root);
+    st->recs = (yyjson_val**)malloc((size_t)(n > 0 ? n : 1) * sizeof *st->recs);
+    if (!st->recs) return q_err(QE_WSFULL);
+    st->bare = n == 0;
+    size_t idx, max;
+    yyjson_val* e;
+    yyjson_arr_foreach(root, idx, max, e) {
+        if (!yyjson_is_obj(e)) st->bare = 1;
+        st->recs[st->nrecs++] = e;
+    }
+    return NULL;
+}
+
+/* THE STAGE-1 KEY-SET LAW, one home for both passes: every record carries the SAME
+ * names as the schema, each exactly once.  .j.info runs it over its sample too, so a
+ * sniff never answers for a document the read would refuse. */
+static ray_t* jr_check_keys(const jr_st* st, yyjson_val* rec, char* seen) {
+    size_t idx, max;
+    yyjson_val *key, *val;
+    memset(seen, 0, (size_t)st->ncols);
+    yyjson_obj_foreach(rec, idx, max, key, val) {
+        int64_t j = jr_find(st->names, st->ncols, jr_key_sym(key));
+        if (j < 0) return q_err(QE_TYPE);
+        if (seen[j]) return q_err(QE_DUP);
+        seen[j] = 1;
+    }
+    for (int64_t j = 0; j < st->ncols; j++)
+        if (!seen[j]) return q_err(QE_TYPE);
+    return NULL;
+}
+
+static ray_t* jr_alloc_cols(jr_st* st, int64_t n) {
+    st->names = (int64_t*)malloc((size_t)n * sizeof *st->names);
+    st->chars = (char*)malloc((size_t)n);
+    st->want = (char*)calloc((size_t)n, 1);
+    if (!st->names || !st->chars || !st->want) return q_err(QE_WSFULL);
+    st->ncols = n;
+    return NULL;
+}
+
+/* Record 0 names the columns, in its own key order; every later record matches
+ * by NAME, so key order is free.  The schema FREEZES after `sample` records. */
+static ray_t* jr_schema(jr_st* st) {
+    int64_t lim = st->nrecs < st->sample ? st->nrecs : st->sample;
+    size_t idx, max;
+    yyjson_val *key, *val;
+    if (st->bare) {
+        ray_t* bad = jr_alloc_cols(st, 1);
+        if (bad) return bad;
+        st->names[0] = ray_sym_intern("json", 4);
+        jc_t k = JC_NONE;
+        for (int64_t i = 0; i < lim; i++) k = jr_promote(k, jr_kind(st->recs[i]));
+        st->chars[0] = jr_char(k);
+        return NULL;
+    }
+    int64_t nc = (int64_t)yyjson_obj_size(st->recs[0]);
+    if (!nc) return q_err(QE_TYPE);                  /* a record with no keys states no schema */
+    ray_t* bad = jr_alloc_cols(st, nc);
+    if (bad) return bad;
+    int64_t j = 0;
+    yyjson_obj_foreach(st->recs[0], idx, max, key, val) {
+        int64_t nm = jr_key_sym(key);
+        if (jr_find(st->names, j, nm) >= 0) return q_err(QE_DUP);
+        st->names[j++] = nm;
+    }
+    jc_t* k = (jc_t*)calloc((size_t)nc, sizeof *k);
+    char* seen = (char*)malloc((size_t)nc);
+    ray_t* err = (k && seen) ? NULL : q_err(QE_WSFULL);
+    for (int64_t i = 0; !err && i < lim; i++) {
+        if ((err = jr_check_keys(st, st->recs[i], seen))) break;
+        yyjson_obj_foreach(st->recs[i], idx, max, key, val) {
+            int64_t c = jr_find(st->names, nc, jr_key_sym(key));
+            k[c] = jr_promote(k[c], jr_kind(val));
+        }
+    }
+    for (int64_t c = 0; !err && c < nc; c++) st->chars[c] = jr_char(k[c]);
+    free(k);
+    free(seen);
+    return err;
+}
+
+/* ---- the caller's types ---------------------------------------------------- */
+
+static char jr_type_canon(char c) {
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    if (c == '*' || c == ' ') return c;
+    return q_type_of_char(c) ? c : 0;
+}
+
+static ray_t* jr_types(jr_st* st, ray_t* ty) {
+    const char* tp;
+    int64_t tn;
+    if (!ty) return NULL;
+    if (q_str_text_bytes(ty, &tp, &tn)) {
+        if (tn != st->ncols) return q_err(QE_LENGTH);
+        for (int64_t j = 0; j < tn; j++)
+            if (!(st->want[j] = jr_type_canon(tp[j]))) return q_err(QE_TYPE);
+        return NULL;
+    }
+    if (ty->type != RAY_DICT) return q_err(QE_TYPE);
+    ray_t* ks = ray_dict_keys(ty);
+    ray_t* vs = ray_dict_vals(ty);
+    int64_t n = ks ? ray_len(ks) : 0;
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* ia = ray_i64(i);
+        ray_t* k = ray_at_fn(ks, ia);
+        ray_t* v = ray_at_fn(vs, ia);
+        ray_release(ia);
+        ray_t* bad = NULL;
+        if (!k || !v || RAY_IS_ERR(k) || RAY_IS_ERR(v)) bad = q_err(QE_OOM);
+        else if (k->type != -RAY_SYM || v->type != -RAY_CHARV) bad = q_err(QE_TYPE);
+        else {
+            char c = jr_type_canon((char)v->u8);
+            int64_t j = jr_find(st->names, st->ncols, k->i64);
+            if (!c) bad = q_err(QE_TYPE);
+            else if (j < 0) bad = q_err(QE_DOMAIN);
+            else st->want[j] = c;
+        }
+        if (k && !RAY_IS_ERR(k)) ray_release(k);
+        if (v && !RAY_IS_ERR(v)) ray_release(v);
+        if (bad) return bad;
+    }
+    return NULL;
+}
+
+/* ---- build ----------------------------------------------------------------- */
+
+/* One cell under its FROZEN char.  A post-sample value the char cannot hold is
+ * 'type — never a silent null, the same posture .csv.read takes. */
+static ray_t* jr_cell(char c, yyjson_val* v) {
+    int nul = yyjson_is_null(v);
+    switch (c) {
+        case 'b':
+            if (nul) return ray_bool(0);             /* q booleans have no null */
+            if (!yyjson_is_bool(v)) return q_err(QE_TYPE);
+            return ray_bool(yyjson_get_bool(v));
+        case 'j':
+            if (nul) return ray_i64(NULL_I64);
+            if (jr_kind(v) != JC_I64) return q_err(QE_TYPE);
+            return ray_i64(yyjson_get_sint(v));
+        case 'f': {
+            if (nul) return ray_f64(NULL_F64);
+            jc_t k = jr_kind(v);
+            if (k != JC_I64 && k != JC_F64) return q_err(QE_TYPE);
+            return ray_f64(jr_num(v));
+        }
+        default:
+            return j_node(v, 1);
+    }
+}
+
+/* A column the caller TYPED is built natively and converted afterwards: the sniff it
+ * replaces must not still be able to refuse a cell on the way in — the freeze rule. */
+static char jr_build_char(const jr_st* st, int64_t j) {
+    char w = st->want[j];
+    return (w && w != ' ') ? '*' : st->chars[j];   /* "*" says the same thing: do not coerce */
+}
+
+static ray_t* jr_place(const jr_st* st, ray_t** acc, int64_t j, yyjson_val* v) {
+    ray_t* a = jr_cell(jr_build_char(st, j), v);
+    if (!a) return q_err(QE_OOM);
+    if (RAY_IS_ERR(a)) return a;
+    ray_t* l = ray_list_append(acc[j], a);           /* RETAINS a */
+    ray_release(a);
+    if (RAY_IS_ERR(l)) { acc[j] = NULL; return l; }
+    acc[j] = l;
+    return NULL;
+}
+
+/* A column of JSON strings, collapsed (RAY_STR) or not (a list of char vectors). */
+static int jr_col_is_text(ray_t* col) {
+    if (col->type == RAY_STR) return 1;
+    if (col->type != RAY_LIST || !ray_len(col)) return 0;
+    ray_t** e = (ray_t**)ray_data(col);
+    for (int64_t i = 0; i < ray_len(col); i++)
+        if (!e[i] || e[i]->type != RAY_CHARV) return 0;
+    return 1;
+}
+
+/* A type char PARSES text and CONVERTS everything else — so `d` on a JSON string
+ * reads the date the string spells, while `f` on a long column widens it.  Both
+ * halves are q_dollar's, the one conversion home. */
+static ray_t* jr_retype(char c, ray_t* col) {
+    int8_t tag = q_type_of_char(c);
+    return jr_col_is_text(col) ? q_dollar_tok(tag, col) : q_dollar_cast(tag, col);
+}
+
+static ray_t* jr_assemble(const jr_st* st, ray_t** acc) {
+    int64_t keep = 0;
+    for (int64_t j = 0; j < st->ncols; j++)
+        if (st->want[j] != ' ') keep++;
+    if (!keep) return q_err(QE_TYPE);                /* every column dropped is not a table */
+    ray_t* tbl = ray_table_new(keep);
+    if (RAY_IS_ERR(tbl)) return tbl;
+    for (int64_t j = 0; j < st->ncols; j++) {
+        if (st->want[j] == ' ') continue;
+        char bc = jr_build_char(st, j);              /* '*' is the string/nested COLUMN's list container */
+        ray_t* col = ray_len(acc[j]) ? q_list_collapse(acc[j])
+                                     : (bc == '*' ? ray_list_new(1) : q_type_empty(q_type_of_char(bc)));
+        if (col && !RAY_IS_ERR(col) && st->want[j] && st->want[j] != '*') {
+            ray_t* c2 = jr_retype(st->want[j], col);
+            ray_release(col);
+            col = c2;
+        }
+        if (!col || RAY_IS_ERR(col)) {
+            ray_release(tbl);
+            return col ? col : q_err(QE_OOM);
+        }
+        tbl = ray_table_add_col(tbl, st->names[j], col);
+        ray_release(col);
+        if (RAY_IS_ERR(tbl)) return tbl;
+    }
+    return tbl;
+}
+
+static ray_t* jr_build(const jr_st* st) {
+    ray_t** acc = (ray_t**)calloc((size_t)st->ncols, sizeof *acc);
+    char* seen = (char*)malloc((size_t)st->ncols);
+    ray_t* bad = (acc && seen) ? NULL : q_err(QE_WSFULL);
+    for (int64_t j = 0; !bad && j < st->ncols; j++) {
+        acc[j] = ray_list_new(st->nrecs > 0 ? st->nrecs : 1);
+        if (RAY_IS_ERR(acc[j])) { bad = acc[j]; acc[j] = NULL; }
+    }
+    size_t idx, max;
+    yyjson_val *key, *val;
+    for (int64_t i = 0; !bad && i < st->nrecs; i++) {
+        if (st->bare) { bad = jr_place(st, acc, 0, st->recs[i]); continue; }
+        if ((bad = jr_check_keys(st, st->recs[i], seen))) break;
+        yyjson_obj_foreach(st->recs[i], idx, max, key, val)
+            if ((bad = jr_place(st, acc, jr_find(st->names, st->ncols, jr_key_sym(key)), val))) break;
+    }
+    ray_t* r = bad ? bad : jr_assemble(st, acc);
+    for (int64_t j = 0; j < st->ncols; j++)
+        if (acc[j]) ray_release(acc[j]);
+    free(acc);
+    free(seen);
+    return r;
+}
+
+static ray_t* jr_info(const jr_st* st) {
+    ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, st->ncols);
+    if (RAY_IS_ERR(keys)) return keys;
+    for (int64_t j = 0; j < st->ncols; j++) {
+        keys = ray_vec_append(keys, &st->names[j]);
+        if (RAY_IS_ERR(keys)) return keys;
+    }
+    ray_t* vals = ray_charv(st->chars, st->ncols);
+    if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
+    return ray_dict_new(keys, vals);                 /* consumes both */
+}
+
+/* ---- options + the natives -------------------------------------------------- */
+
+static int jr_opt_is(int64_t sym, const char* name) { return sym == ray_sym_intern(name, strlen(name)); }
+
+static ray_t* jr_opts(jr_st* st, ray_t* opts) {
+    if (!opts) return NULL;
+    if (opts->type != RAY_DICT) return q_err(QE_TYPE);
+    ray_t* ks = ray_dict_keys(opts);
+    ray_t* vs = ray_dict_vals(opts);
+    int64_t n = ks ? ray_len(ks) : 0;
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* ia = ray_i64(i);
+        ray_t* k = ray_at_fn(ks, ia);
+        ray_t* v = ray_at_fn(vs, ia);
+        ray_release(ia);
+        ray_t* bad = NULL;
+        if (!k || !v || RAY_IS_ERR(k) || RAY_IS_ERR(v)) bad = q_err(QE_OOM);
+        else if (k->type != -RAY_SYM) bad = q_err(QE_TYPE);
+        else if (jr_opt_is(k->i64, "")) {
+            /* the empty-sym key is padding, value unread — the same short-dict
+             * idiom lib/csv.q legalizes, without weakening the never-ignored law */
+        } else if (jr_opt_is(k->i64, "sample_size")) {
+            int64_t x;
+            if (!q_type_strict_i64(v, &x)) bad = q_err(QE_TYPE);
+            else if (x <= 0) bad = q_err(QE_DOMAIN);
+            else st->sample = x;
+        } else if (jr_opt_is(k->i64, "format")) {
+            if (v->type != -RAY_SYM) bad = q_err(QE_TYPE);
+            else if (!jr_opt_is(v->i64, "array")) bad = q_err(QE_NYI);
+        } else {
+            bad = q_err(QE_OPTION);                  /* an option is NEVER silently ignored */
+        }
+        if (k && !RAY_IS_ERR(k)) ray_release(k);
+        if (v && !RAY_IS_ERR(v)) ray_release(v);
+        if (bad) return bad;
+    }
+    return NULL;
+}
+
+static ray_t* jr_read(ray_t* src, ray_t* types, ray_t* opts, int info_only) {
+    jr_st st = { .sample = J_DEF_SAMPLE };
+    char* buf = NULL;
+    int64_t n = 0;
+    yyjson_doc* doc = NULL;
+    ray_t* bad = jr_opts(&st, opts);
+    if (!bad) bad = jr_bytes(src, &buf, &n);
+    if (!bad && !(doc = yyjson_read_opts(buf, (size_t)n, YYJSON_READ_ALLOW_INF_AND_NAN, NULL, NULL)))
+        bad = q_err(QE_PARSE);
+    if (!bad) bad = jr_records(&st, yyjson_doc_get_root(doc));
+    if (!bad) bad = jr_schema(&st);
+    if (!bad && !info_only) bad = jr_types(&st, types);
+    ray_t* r = bad ? bad : (info_only ? jr_info(&st) : jr_build(&st));
+    if (doc) yyjson_doc_free(doc);
+    free(buf);
+    jr_free(&st);
+    return r;
+}
+
+static ray_t* jr_arg(ray_t* x) {
+    return (x && x->type != RAY_NULL) ? x : NULL;    /* :: and elided read as default */
+}
+
+/* .j.i.read[source;target;types;opts] */
+static ray_t* j_read_fn(ray_t** args, int64_t n) {
+    if (n != 4) return q_err(QE_RANK);
+    if (jr_arg(args[1])) return q_err(QE_NYI);       /* the rank is reserved; a target is refused, never ignored */
+    return jr_read(args[0], jr_arg(args[2]), jr_arg(args[3]), 0);
+}
+
+/* .j.i.info[source;opts] */
+static ray_t* j_info_fn(ray_t** args, int64_t n) {
+    if (n != 2) return q_err(QE_RANK);
+    return jr_read(args[0], NULL, jr_arg(args[1]), 1);
+}
+
+static void jr_bind_fn(const char* name, ray_vary_fn fn) {
+    ray_t* f = ray_fn_vary(name, RAY_FN_NONE, fn);
+    q_env_bind(ray_sym_intern(name, strlen(name)), f);
+    ray_release(f);
+}
+
+void q_json_register(void) {
+    jr_bind_fn(".j.i.read", j_read_fn);
+    jr_bind_fn(".j.i.info", j_info_fn);
 }
