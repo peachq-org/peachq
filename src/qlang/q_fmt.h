@@ -45,4 +45,7 @@ void q_fmt_float(double v, int f32, char* out, size_t n);
  * `,"c"` — the string-model conflation rule); vectors/atoms via q_fmt. */
 void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz);
 
+/* The ALLOCATING twin above, and the one `.Q.s1`/`-3!` body: grows until the whole repr fits.  Owned, or 'wsfull. */
+ray_t* q_fmt_krepr_charv(ray_t* val);
+
 #endif /* Q_FMT_H */
