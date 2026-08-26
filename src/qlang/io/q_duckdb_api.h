@@ -34,6 +34,7 @@ enum {
     QDUCK_TYPE_VARCHAR      = 17,
     QDUCK_TYPE_BLOB         = 18,
     QDUCK_TYPE_TIMESTAMP_NS = 22,   /* int64 ns since 1970 — q timestamp's pair */
+    QDUCK_TYPE_LIST         = 24,
     QDUCK_TYPE_UUID         = 27,
 };
 typedef int32_t duck_type;
@@ -47,6 +48,9 @@ typedef struct duck_appender_o*   duck_appender;
 typedef struct duck_logical_o*    duck_logical_type;
 
 typedef struct { uint64_t lower; int64_t upper; } duck_hugeint;  /* UUID storage */
+
+/* One LIST cell: a {start,count} window into the vector's flat child. */
+typedef struct { uint64_t offset; uint64_t length; } duck_list_entry;
 
 /* Inline-or-pointer string cell used inside VARCHAR/BLOB vectors. */
 typedef struct {
@@ -95,7 +99,6 @@ typedef struct {
     void       (*destroy_result)(duck_result* res);
     duck_idx_t (*column_count)(duck_result* res);
     const char* (*column_name)(duck_result* res, duck_idx_t col);
-    duck_type  (*column_type)(duck_result* res, duck_idx_t col);
     duck_data_chunk (*fetch_chunk)(duck_result res);          /* by value (ABI) */
     void       (*destroy_data_chunk)(duck_data_chunk* chunk);
     duck_idx_t (*data_chunk_get_size)(duck_data_chunk chunk);
@@ -122,6 +125,15 @@ typedef struct {
     void       (*duck_free)(void* p);
     duck_state (*appender_flush)(duck_appender app);  /* flush BEFORE destroy so
                                                        * deferred errors are readable */
+    /* LIST columns: the child type is carried by the logical type, the child
+     * data by a second vector the entries index into. */
+    duck_logical_type (*create_list_type)(duck_logical_type child);
+    duck_logical_type (*list_type_child_type)(duck_logical_type t);
+    duck_logical_type (*column_logical_type)(duck_result* res, duck_idx_t col);
+    duck_type  (*get_type_id)(duck_logical_type t);
+    duck_vector (*list_vector_get_child)(duck_vector vec);
+    duck_state (*list_vector_reserve)(duck_vector vec, duck_idx_t required);
+    duck_state (*list_vector_set_size)(duck_vector vec, duck_idx_t size);
 } duck_api_t;
 
 #endif /* Q_DUCKDB_API_H */
