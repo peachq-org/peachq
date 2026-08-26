@@ -1139,7 +1139,7 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
          * The collapse home already leaves mixed lists (`1 2,"a"`) alone. */
         ray_t* c = q_list_collapse(r);
         ray_release(r);
-        return c;
+        return q_attr_append_keep(x, c);   /* the append-retention law; consumes c */
     }
     if (!x || !y) return r;
     /* boxed-list fallback — ONLY when a char/string operand is involved
