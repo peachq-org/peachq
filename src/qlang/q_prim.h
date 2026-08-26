@@ -107,7 +107,9 @@ typedef enum {
 } q_edom_t;
 q_edom_t q_enum_domain_kind(int64_t dom, ray_t** vals); /* *vals = borrowed VALUE LIST (SYMLIST/KEYED1) */
 int     q_enum_is(ray_t* x);                       /* vec 20h / atom -20h */
-int64_t q_enum_domain(ray_t* x);                   /* domain-name sym id (slice-aware) */
+int64_t q_enum_domain(ray_t* x);                   /* domain-name sym id (slice-aware, letter masked) */
+char    q_enum_attr(ray_t* x);                     /* the 20h attribute letter, 0 = none */
+int     q_enum_attr_set(ray_t* x, char letter);    /* EXCLUSIVE x: stamp/clear the letter */
 ray_t*  q_enum_stamp(ray_t* v, int64_t dom);       /* consumes owned i64 value -> enum */
 ray_t*  q_enum_positions(ray_t* e);                /* owned plain-i64 copy */
 ray_t*  q_enum_resolve(ray_t* e);                  /* owned TOTAL-resolved values; NULL = no value list */
@@ -134,6 +136,7 @@ ray_t*  q_enum_null_col(int64_t dom, int64_t n);   /* n null positions as a 20h 
  * Shared by the `attr` verb wrapper AND q_fmt's `` `s#``/`u#``/`g#``/`p# ``
  * display prefix so both agree on one mapping.  Borrows v. */
 char q_attr_letter(ray_t* v);
+ray_t* q_attr_stamp_trusted(ray_t* v, char letter);   /* OWNED exclusive v: letter w/o verify or index */
 
 /* Set a column attribute via the q `#` surface (`s`/`u`/`g`/`p`, or 0 to clear).
  * The kdb u#/p# accelerator (find-hash + marker) is COMPOSED in the q layer here,

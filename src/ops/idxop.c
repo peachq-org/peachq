@@ -62,9 +62,11 @@ static int numeric_elem_size(int8_t t) {
     switch (t) {
     case RAY_BOOL: RAY_BYTE_CASES:                    return 1;
     case RAY_I16:                                     return 2;
-    case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_F32:  return 4;
-    case RAY_I64: case RAY_TIMESTAMP: case RAY_F64:            return 8;
-    default:                                          return 0;
+    case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_F32:
+    case RAY_MONTH: case RAY_MINUTE: case RAY_SECOND:          return 4;
+    case RAY_I64: case RAY_TIMESTAMP: case RAY_F64:
+    case RAY_TIMESPAN:                                         return 8;
+    default:                                          return 0;   /* DATETIME: f64-backed, hash lane unsafe */
     }
 }
 
@@ -117,12 +119,13 @@ static bool vec_is_ascending(const ray_t* v) {
         for (int64_t i = 1; i < n; i++) if (p[i] < p[i-1]) return false;
         return true;
     }
-    case RAY_I32: case RAY_DATE: case RAY_TIME: {  /* TIME is 4-byte int32 */
+    case RAY_I32: case RAY_DATE: case RAY_TIME:    /* 4-byte int32 lanes */
+    case RAY_MONTH: case RAY_MINUTE: case RAY_SECOND: {
         const int32_t* p = (const int32_t*)b;
         for (int64_t i = 1; i < n; i++) if (p[i] < p[i-1]) return false;
         return true;
     }
-    case RAY_I64: case RAY_TIMESTAMP: {
+    case RAY_I64: case RAY_TIMESTAMP: case RAY_TIMESPAN: {
         const int64_t* p = (const int64_t*)b;
         for (int64_t i = 1; i < n; i++) if (p[i] < p[i-1]) return false;
         return true;
@@ -2138,6 +2141,27 @@ ray_t* ray_attr_stamp_marker(ray_t* v, uint8_t mark) {
     if (!idx || RAY_IS_ERR(idx)) { ray_release(w); return idx ? idx : ray_error("oom", NULL); }
     ray_index_payload(idx)->markers = mark;
     return attach_finalize(w, idx);
+}
+
+/* In-place twin of ray_attr_stamp_marker: no cow, so an mmap-lane column is
+ * never copied off its map.  The caller either holds v exclusively (a fresh
+ * append result, a just-born mapped header) or has VERIFIED the assertion, in
+ * which case sharers seeing the marker is correct — it is true for them too.
+ * Consumers never treat the block as a live accelerator (kind NONE). */
+ray_t* ray_attr_mark_attach(ray_t* v, uint8_t mark) {
+    if (!v || RAY_IS_ERR(v)) return v ? v : ray_error("type", "attr: null");
+    if (v->attrs & RAY_ATTR_HAS_INDEX) {
+        ray_t* nb = clone_index_block(v->index);
+        if (!nb || RAY_IS_ERR(nb)) { ray_release(v); return nb ? nb : ray_error("oom", NULL); }
+        ray_release(v->index);
+        v->index = nb;
+        ray_index_payload(nb)->markers |= mark;
+        return v;
+    }
+    ray_t* idx = ray_index_alloc(RAY_IDX_NONE, v->type, v->len);
+    if (!idx || RAY_IS_ERR(idx)) { ray_release(v); return idx ? idx : ray_error("oom", NULL); }
+    ray_index_payload(idx)->markers = mark;
+    return attach_finalize(v, idx);
 }
 
 /* Neutral verification/classification wrappers exposed for the q layer to

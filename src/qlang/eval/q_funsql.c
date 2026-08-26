@@ -875,7 +875,14 @@ static ray_t* upd_cols(ray_t* a, ray_t* t, ray_t* idx, ray_t* gidxs) {
         } else if (!gidxs) {                             /* ungrouped */
             ray_t* v = phrase_eval(tree, t, idx);
             if (!v || RAY_IS_ERR(v)) err = v ? v : q_err(QE_TYPE);
-            else {
+            else if (full && (ray_is_vec(v) || v->type == RAY_ENUM || v->type == RAY_LIST) &&
+                     ray_len(v) == q_count_long(t)) {
+                cur = v;                 /* a FULL update ADOPTS the phrase column —
+                                          * `update `g#c from t` keeps the attribute
+                                          * (set-attribute.md apply form 3) */
+                ray_retain(cur);
+                ray_release(v);
+            } else {
                 cur = upd_amend(upd_col_start(t, nm->i64, v, full), idx, v);
                 if (RAY_IS_ERR(cur)) { err = cur; cur = NULL; }
                 ray_release(v);
