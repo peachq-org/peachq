@@ -595,7 +595,7 @@ ray_t* q_table_append(ray_t* flat, ray_t* rows) {
             if (joined && !RAY_IS_ERR(joined))
                 joined = q_enum_stamp(joined, q_enum_domain(oc));
         } else {
-            joined = ray_concat_fn(oc, pc);
+            joined = q_attr_append_keep(oc, ray_concat_fn(oc, pc));   /* consumes */
         }
         if (!joined || RAY_IS_ERR(joined)) { ray_release(out); return joined ? joined : q_err(QE_OOM); }
         out = ray_table_add_col(out, ray_table_col_name(flat, c), joined);
@@ -1078,7 +1078,6 @@ ray_t* q_meta_fn(ray_t* x) {
              avec && !RAY_IS_ERR(avec) && tbuf;
     ray_t* bad = NULL;
     int64_t blank = ray_sym_intern_runtime("", 0);
-    int64_t ssym  = ray_sym_intern_runtime("s", 1);
     for (int64_t c = 0; c < nc && ok; c++) {
         int64_t nm, a = blank, f = blank;
         char tc;
@@ -1095,7 +1094,9 @@ ray_t* q_meta_fn(ray_t* x) {
             const q_wf_colhdr* h = q_splay_col_hdr(t, c);
             tc = h->is_enum ? 's' : h->tag ? q_type_char(h->tag) : 0;
             if (h->nested && tc) tc = (char)(tc - 'a' + 'A');
-            if (h->disk_attr == 1) a = ssym;
+            char hc = h->disk_attr >= 1 && h->disk_attr <= 4 ? "\0supg"[h->disk_attr]
+                    : h->side_attr;
+            if (hc) a = ray_sym_intern_runtime(&hc, 1);
             if (h->is_enum && h->domain[0]) {   /* a table-named domain is a
                  * link/FK: env classification, never a data read */
                 ray_t* e1 = q_enum_stamp(ray_i64(0),

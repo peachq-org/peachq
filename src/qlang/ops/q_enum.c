@@ -14,6 +14,7 @@
 #include "qlang/io/q_splay.h"  /* q_splay_col — deref through a mapped-splay target */
 #include "table/dict.h"        /* ray_dict_slots — keyed-target halves at deref */
 #include "table/sym.h"
+#include <assert.h>
 #include <string.h>
 
 int q_enum_is(ray_t* x) {
@@ -21,16 +22,44 @@ int q_enum_is(ray_t* x) {
            (x->type == RAY_ENUM || x->type == -RAY_ENUM);
 }
 
+/* The TOP BYTE of the domain slot carries the enum's kdb attribute letter
+ * ('u'/'p'/'g', 0 = none): an enum cannot take an engine index block (aux 8-15
+ * IS the domain), so the letter rides the id.  Sym ids are intern-table
+ * indices, far below 2^56; every reader masks, every plain set clears — so a
+ * re-stamp DROPS the letter, matching "removed by any operation". */
+#define ENUM_ATTR_MASK 0xff00000000000000ULL
+
 /* Slice-aware: slice headers keep parent/offset in aux, so the domain rides the parent. */
 int64_t q_enum_domain(ray_t* x) {
     if (x->attrs & RAY_ATTR_SLICE) x = x->slice_parent;
-    int64_t dom;
-    memcpy(&dom, x->aux + 8, 8);
-    return dom;
+    uint64_t raw;
+    memcpy(&raw, x->aux + 8, 8);
+    return (int64_t)(raw & ~ENUM_ATTR_MASK);
 }
 
 static void enum_set_domain(ray_t* x, int64_t dom) {
+    assert(!((uint64_t)dom & ENUM_ATTR_MASK));   /* an id reaching the letter byte is a broken intern */
     memcpy(x->aux + 8, &dom, 8);
+}
+
+/* The letter of a 20h vector (0 = none).  A slice is an operation result, so
+ * it reads unattributed rather than borrowing the parent's letter. */
+char q_enum_attr(ray_t* x) {
+    if (!x || RAY_IS_ERR(x) || x->type != RAY_ENUM || (x->attrs & RAY_ATTR_SLICE)) return 0;
+    uint64_t raw;
+    memcpy(&raw, x->aux + 8, 8);
+    return (char)(raw >> 56);
+}
+
+/* Stamp/clear the letter on an EXCLUSIVELY-OWNED 20h vector (a plain domain
+ * set clears it, so any re-stamp is attribute-dropping by policy). */
+int q_enum_attr_set(ray_t* x, char letter) {
+    if (!x || RAY_IS_ERR(x) || x->type != RAY_ENUM || (x->attrs & RAY_ATTR_SLICE)) return 0;
+    uint64_t raw;
+    memcpy(&raw, x->aux + 8, 8);
+    raw = (raw & ~ENUM_ATTR_MASK) | ((uint64_t)(uint8_t)letter << 56);
+    memcpy(x->aux + 8, &raw, 8);
+    return 1;
 }
 
 /* Re-tag an OWNED i64 value (atom / I64 vector / list of those) as the enum of

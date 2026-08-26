@@ -21,6 +21,9 @@
 
 static int64_t wf_i64(const uint8_t* p) { int64_t v; memcpy(&v, p, 8); return v; }
 
+static ray_t* wf_read_path(ray_t* path, int follow);
+static ray_t* wf_write_a(ray_t* x);
+
 /* ---- the on-disk shapes ------------------------------------------------- */
 
 #define WF_A_OFF   8   /* shape A: ff 01 + the -9! payload */
@@ -75,9 +78,163 @@ static int8_t wf_simple_tag(uint8_t disk) {
 }
 
 /* kdb's disk attribute (0=none 1=s 2=u 3=p 4=g) COLLIDES with rayforce's attrs
- * bits — translate, never copy.  `u#/`p#/`g# drop undecoded (COL_DISK_ATTRS_MASK). */
-static void wf_apply_attr(ray_t* v, uint8_t disk_attr) {
-    if (v && !RAY_IS_ERR(v) && disk_attr == 1) v->attrs |= RAY_ATTR_SORTED;
+ * bits — translate, never copy.  The byte is TRUSTED (kdb trusts its own
+ * files; a lying byte is corrupt-class), so no O(n) verify and no index build:
+ * the trusted stamp attaches the marker-only letter, and any kx index trailer
+ * beyond count*width is simply never read. */
+static const char wf_attr_letter[5] = { 0, 's', 'u', 'p', 'g' };
+
+static ray_t* wf_apply_attr(ray_t* v, uint8_t disk_attr) {
+    if (!v || RAY_IS_ERR(v) || disk_attr < 1 || disk_attr > 4) return v;
+    return q_attr_stamp_trusted(v, wf_attr_letter[disk_attr]);
+}
+
+/* ---- the `.pqattr` sidecar: OUR on-disk carrier for u/p/g ----------------
+ * kdb's own u/p/g index trailer is not clean-room reproducible (the format doc
+ * records the dissection), and writing attr bytes 2/3/4 without it would hand
+ * kdb a file it misreads — so the kx byte stays s-only and the letter rides a
+ * VERSIONED sidecar dict `ver`attr`count`size`hash beside the data file (shape
+ * A).  count+size+hash bind it to the data-file generation: a rewritten data
+ * file stops validating and the letter is DROPPED, never fabricated.  Ordering
+ * is drop-sidecar / write-data / write-sidecar, so a crash loses a letter but
+ * cannot lie.  kdb reading our splay sees a plain attr-0 column. */
+#define WF_SIDECAR_EXT ".pqattr"
+#define WF_SIDECAR_EXTLEN 7
+
+static int wf_sidecar_applicable(ray_t* path) {   /* never a sidecar's sidecar */
+    size_t n = ray_str_len(path);
+    return n < WF_SIDECAR_EXTLEN ||
+           memcmp(ray_str_ptr(path) + n - WF_SIDECAR_EXTLEN, WF_SIDECAR_EXT,
+                  WF_SIDECAR_EXTLEN) != 0;
+}
+
+static ray_t* wf_sidecar_path(ray_t* path) {
+    return wf_join(ray_str_ptr(path), ray_str_len(path), WF_SIDECAR_EXT,
+                   WF_SIDECAR_EXTLEN);
+}
+
+static void wf_sidecar_drop(ray_t* path) {
+    if (!wf_sidecar_applicable(path)) return;
+    ray_t* sp = wf_sidecar_path(path);
+    if (!sp) return;
+    remove(ray_str_ptr(sp));                       /* ENOENT is the common case */
+    ray_release(sp);
+}
+
+/* FNV-1a over the data file's first and last (up to) 4096 bytes — the
+ * generation FINGERPRINT beside count+size: an external same-size rewrite
+ * flips it and the letter is dropped.  A middle-window-only change on a file
+ * beyond 8K stays theoretically invisible — the same trust class as kdb's own
+ * unverified attr byte.  -1 = unreadable (never validates). */
+static int64_t wf_sidecar_file_hash(const char* p, int64_t size) {
+    uint8_t buf[4096];
+    FILE* fp = fopen(p, "rb");
+    if (!fp) return -1;
+    uint64_t h = 0xcbf29ce484222325ULL;
+    size_t want = size < 4096 ? (size_t)size : 4096;
+    size_t got = fread(buf, 1, want, fp);
+    for (size_t i = 0; i < got; i++) { h ^= buf[i]; h *= 0x100000001b3ULL; }
+    int bad = got != want;
+    if (!bad && size > 4096) {
+        int64_t tail = size - 4096;
+        bad = fseek(fp, (long)tail, SEEK_SET) != 0 ||
+              (got = fread(buf, 1, 4096, fp)) != 4096;
+        for (size_t i = 0; i < got && !bad; i++) { h ^= buf[i]; h *= 0x100000001b3ULL; }
+    }
+    fclose(fp);
+    return bad ? -1 : (int64_t)(h >> 1);            /* non-negative */
+}
+
+static void wf_sidecar_write(ray_t* path, char letter, int64_t count) {
+    if (!wf_sidecar_applicable(path)) return;
+    struct stat st;
+    if (stat(ray_str_ptr(path), &st) != 0) return;
+    int64_t size = (int64_t)st.st_size;
+    int64_t hash = wf_sidecar_file_hash(ray_str_ptr(path), size);
+    if (hash < 0) return;                            /* letter lost, never lied */
+    ray_t* k = ray_sym_vec_new(RAY_SYM_W64, 5);
+    ray_t* v = ray_list_new(5);
+    if (!k || RAY_IS_ERR(k) || !v || RAY_IS_ERR(v)) goto out;
+    static const char* nm[5] = { "ver", "attr", "count", "size", "hash" };
+    for (int i = 0; i < 5; i++) {
+        int64_t id = ray_sym_intern_runtime(nm[i], strlen(nm[i]));
+        k = ray_vec_append(k, &id);
+        if (!k || RAY_IS_ERR(k)) goto out;
+    }
+    char l1[1] = { letter };
+    ray_t* cells[5] = { ray_i64(1), ray_sym(ray_sym_intern_runtime(l1, 1)),
+                        ray_i64(count), ray_i64(size), ray_i64(hash) };
+    for (int i = 0; i < 5; i++) {
+        v = v && !RAY_IS_ERR(v) ? ray_list_append(v, cells[i]) : v;
+        if (cells[i] && !RAY_IS_ERR(cells[i])) ray_release(cells[i]);
+    }
+    if (!v || RAY_IS_ERR(v)) goto out;
+    {
+        ray_t* d = ray_dict_new(k, v);             /* consumes both */
+        k = NULL; v = NULL;
+        if (!d || RAY_IS_ERR(d)) { if (d) ray_error_free(d); goto out; }
+        ray_t* img = wf_write_a(d);
+        ray_release(d);
+        if (RAY_IS_ERR(img)) { ray_error_free(img); goto out; }
+        ray_t* sp = wf_sidecar_path(path);
+        if (sp) {
+            ray_t* bad = q_io_write_all(sp, ray_str_ptr(img), ray_str_len(img));
+            if (bad) ray_error_free(bad);          /* best-effort: letter lost, never lied */
+            ray_release(sp);
+        }
+        ray_release(img);
+        return;
+    }
+out:
+    if (k && !RAY_IS_ERR(k)) ray_release(k);
+    if (v && !RAY_IS_ERR(v)) ray_release(v);
+}
+
+/* The validated sidecar letter for a data file of `count` elements and `size`
+ * bytes — 0 unless every field matches (unknown versions/letters ignored). */
+static char wf_sidecar_letter(ray_t* path, int64_t count, int64_t size) {
+    if (count < 0 || !wf_sidecar_applicable(path)) return 0;
+    ray_t* sp = wf_sidecar_path(path);
+    if (!sp) return 0;
+    struct stat st;
+    if (stat(ray_str_ptr(sp), &st) != 0 || !S_ISREG(st.st_mode)) {
+        ray_release(sp);
+        return 0;
+    }
+    ray_t* d = wf_read_path(sp, 0);
+    ray_release(sp);
+    if (!d || RAY_IS_ERR(d)) { if (d) ray_error_free(d); return 0; }
+    char letter = 0;
+    int64_t ver = 0, scount = -1, ssize = -1, shash = -1;
+    if (d->type == RAY_DICT) {
+        ray_t* dk = ray_dict_keys(d);
+        ray_t* dv = ray_dict_vals(d);
+        int64_t n = dk && dk->type == RAY_SYM ? ray_len(dk) : 0;
+        for (int64_t i = 0; i < n; i++) {
+            ray_t* nm = ray_sym_str(ray_vec_get_sym_id(dk, i));   /* borrowed */
+            ray_t* cell = dv && dv->type == RAY_LIST && i < ray_len(dv)
+                        ? ((ray_t**)ray_data(dv))[i] : NULL;
+            if (!nm || !cell) continue;
+            const char* s = ray_str_ptr(nm);
+            size_t sl = ray_str_len(nm);
+            if (sl == 3 && !memcmp(s, "ver", 3) && cell->type == -RAY_I64)
+                ver = cell->i64;
+            else if (sl == 4 && !memcmp(s, "attr", 4) && cell->type == -RAY_SYM) {
+                ray_t* ls = ray_sym_str(cell->i64);
+                if (ls && ray_str_len(ls) == 1) letter = ray_str_ptr(ls)[0];
+            } else if (sl == 5 && !memcmp(s, "count", 5) && cell->type == -RAY_I64)
+                scount = cell->i64;
+            else if (sl == 4 && !memcmp(s, "size", 4) && cell->type == -RAY_I64)
+                ssize = cell->i64;
+            else if (sl == 4 && !memcmp(s, "hash", 4) && cell->type == -RAY_I64)
+                shash = cell->i64;
+        }
+    }
+    ray_release(d);
+    if (ver != 1 || scount != count || ssize != size || shash < 0 ||
+        (letter != 'u' && letter != 'p' && letter != 'g'))
+        return 0;
+    return shash == wf_sidecar_file_hash(ray_str_ptr(path), size) ? letter : 0;
 }
 
 static ray_t* wf_syms_to_eof(const uint8_t* p, size_t len) {
@@ -99,11 +256,8 @@ static ray_t* wf_read_a(const uint8_t* buf, size_t len) {
     /* The symbol count is advisory in BOTH directions (`.Q.en appends without
      * rewriting it: 10 declared for 16 names, 0 for 55), so type 11 scans
      * NUL-terminated names to EOF instead of reaching the wire decoder. */
-    if (buf[2] == RAY_SYM) {
-        ray_t* v = wf_syms_to_eof(buf + WF_A_OFF, len - WF_A_OFF);
-        wf_apply_attr(v, buf[3]);
-        return v;
-    }
+    if (buf[2] == RAY_SYM)
+        return wf_apply_attr(wf_syms_to_eof(buf + WF_A_OFF, len - WF_A_OFF), buf[3]);
     size_t consumed = 0;
     ray_t* v = q_wire_read_obj(buf + 2, len - 2, &consumed, 0);
     if (v && !RAY_IS_ERR(v) && consumed != len - 2) { ray_release(v); return q_err(QE_CORRUPT); }
@@ -179,9 +333,7 @@ static ray_t* wf_read_b(const uint8_t* buf, size_t len, int derive, ray_t* path)
     }
     if (count < 0 || count > room) return q_err(QE_CORRUPT);
     if (nested) return wf_read_nested(tag, path, buf + WF_B_OFF, count);
-    ray_t* v = q_wire_fixed_vec(tag, buf + WF_B_OFF, count, 0);
-    wf_apply_attr(v, buf[3]);
-    return v;
+    return wf_apply_attr(q_wire_fixed_vec(tag, buf + WF_B_OFF, count, 0), buf[3]);
 }
 
 static ray_t* wf_read_path(ray_t* path, int follow);
@@ -202,8 +354,8 @@ static ray_t* wf_read_enum(const char* domain, const uint8_t* p, size_t room,
         if (count < 0) return q_err(QE_NYI);
     }
     if (count < 0 || (uint64_t)count > room / w) return q_err(QE_CORRUPT);
-    return q_enum_from_indices(ray_sym_intern_runtime(domain, nn),
-                               p + 8, count, w);
+    return wf_apply_attr(q_enum_from_indices(ray_sym_intern_runtime(domain, nn),
+                                             p + 8, count, w), attr);
 }
 
 /* Two candidate count offsets: the terminator rounded up to the next 8-byte
@@ -342,6 +494,12 @@ static ray_t* wf_read_path(ray_t* path, int follow) {
     ray_t* r = wf_read_image((const uint8_t*)ray_data(all), (size_t)ray_len(all),
                              zipped, follow ? path : NULL);
     ray_release(all);
+    /* flat sidecar consult: only an unattributed vector/enum can take the letter */
+    if (r && !RAY_IS_ERR(r) && !zipped && follow &&
+        (ray_is_vec(r) || r->type == RAY_ENUM) && !q_attr_letter(r)) {
+        char sl = wf_sidecar_letter(path, ray_len(r), (int64_t)st.st_size);
+        if (sl) r = q_attr_stamp_trusted(r, sl);
+    }
     return r;
 }
 
@@ -432,6 +590,7 @@ static ray_t* wf_probe_classify(const uint8_t* buf, size_t got, size_t fsz,
         memcpy(out->domain, buf + WF_D_NAME, nn);
         out->is_enum = 1;
         out->tag = RAY_SYM;
+        out->disk_attr = desc[3];
         out->count = wf_i64(desc + 8);
         if (derive && out->count == 0) {
             out->count = wf_derive_count(fsz - WF_D_OFF, 8, desc[3]);
@@ -478,7 +637,10 @@ ray_t* q_wirefile_probe(ray_t* pathstr, q_wf_colhdr* out) {
         q_io_zipmap_free(&zm);
         return e;
     }
-    return wf_probe_classify(buf, got, fsz, 0, out);
+    ray_t* e = wf_probe_classify(buf, got, fsz, 0, out);
+    if (!e && !out->disk_attr && !out->nested)
+        out->side_attr = wf_sidecar_letter(pathstr, out->count, (int64_t)fsz);
+    return e;
 }
 
 /* ---- the writer --------------------------------------------------------- */
@@ -557,6 +719,20 @@ static ray_t* wf_ref_image(ray_t* x) {
 static ray_t* wf_write_image(ray_t* x) {
     ray_t* ref = wf_ref_image(x);
     if (ref) return ref;
+    if (x->type == RAY_ENUM) {
+        /* a FLAT write of a symlist-domain 20h keeps the enum SHAPE (positions
+         * + domain name) — kx's own on-disk-attribute idiom rewrites a splay
+         * column in place ({x set `g#get x}`:t/s, owner speed-trick guide) and
+         * a decay to shape-A syms would break the splay it belongs to.  Only
+         * the splay DIRECTORY writer re-enumerates (the copy-a-splay idiom). */
+        ray_t* nm = ray_sym_str(q_enum_domain(x));           /* borrowed */
+        ray_t* pos = q_enum_positions(x);
+        if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_OOM);
+        ray_t* img = nm ? wf_write_enum_img(pos, ray_str_ptr(nm), ray_str_len(nm))
+                        : q_err(QE_TYPE);
+        ray_release(pos);
+        return img;
+    }
     uint8_t disk = x->type > 0 ? (uint8_t)wf_simple_tag((uint8_t)x->type) : 0;
     return disk ? wf_write_b(x, disk) : wf_write_a(x);
 }
@@ -592,11 +768,17 @@ static ray_t* wf_put(ray_t* path, ray_t* img, int lbs, int alg, int lvl, int hdr
 static ray_t* wf_write_flat_path(ray_t* path, ray_t* y, int lbs, int alg, int lvl) {
     ray_retain(y);
     y = q_eval_apply_concrete(y);              /* storage boundary: no lazy on disk */
+    char yl = q_attr_letter(y);
+    int64_t yn = ray_is_vec(y) || y->type == RAY_ENUM || y->type == RAY_LIST
+               ? ray_len(y) : -1;
     ray_t* img = wf_write_image(y);
     ray_release(y);
     if (RAY_IS_ERR(img)) return img;
     if (alg < 0 && !wf_zd(&lbs, &alg, &lvl)) alg = 0;
+    wf_sidecar_drop(path);                     /* drop / write-data / write-sidecar */
     ray_t* bad = wf_put(path, img, lbs, alg, lvl, 1);
+    if (!bad && alg <= 0 && yn >= 0 && (yl == 'u' || yl == 'p' || yl == 'g'))
+        wf_sidecar_write(path, yl, yn);
     ray_release(img);
     return bad;
 }
@@ -683,6 +865,13 @@ static ray_t* wf_append_rewrite(ray_t* path, ray_t* y, int zipped) {
     ray_t* joined = q_eval_apply_concrete(q_eval_apply_value(join, args, 2));
     ray_release(old);
     if (!joined || RAY_IS_ERR(joined)) return joined ? joined : q_err(QE_TYPE);
+    char jl = q_attr_letter(joined);   /* the in-memory law may keep u/g — disk keeps only s */
+    if (jl && jl != 's') {
+        ray_t* stripped = q_attr_set_letter(0, joined);   /* `#x — borrows, owned out */
+        ray_release(joined);
+        if (!stripped || RAY_IS_ERR(stripped)) return stripped ? stripped : q_err(QE_OOM);
+        joined = stripped;
+    }
     int lbs = 0, alg = 0, lvl = 0;
     if (zipped) {
         q_io_zipmap_t zm;
@@ -726,6 +915,8 @@ static ray_t* wf_append_path(ray_t* path, ray_t* y) {
         ray_release(y);
         return q_err(QE_TYPE);        /* a typed file keeps its element type */
     }
+    wf_sidecar_drop(path);   /* only `s` survives an append to disk (set-attribute.md:32);
+                              * dropped only once the append is really going to run */
     if (!h.zipped && h.tag == RAY_SYM) {
         uint8_t hd[4] = {0};
         FILE* fp = fopen(ray_str_ptr(path), "rb");
@@ -1011,6 +1202,9 @@ static ray_t* wf_write_splay_dir(ray_t* dirstr, ray_t* domsym, ray_t* y,
         ray_t* cp = wf_join(ray_str_ptr(dirstr), ray_str_len(dirstr),
                             ray_str_ptr(nm), ray_str_len(nm));
         if (!cp) { bad = q_err(QE_OOM); break; }
+        char cl = q_attr_letter(col);                /* before decay strips it */
+        int64_t cn = ray_is_vec(col) || col->type == RAY_ENUM ? ray_len(col) : -1;
+        wf_sidecar_drop(cp);
         ray_t* dec = NULL;                           /* a SYMLIST-domain 20h column
                                                       * writes as its resolved syms
                                                       * and re-enumerates against
@@ -1052,6 +1246,8 @@ static ray_t* wf_write_splay_dir(ray_t* dirstr, ray_t* domsym, ray_t* y,
             bad = q_err(QE_TYPE);                    /* kb: vectors/compound only */
         }
         if (dec) ray_release(dec);
+        if (!bad && alg <= 0 && cn >= 0 && (cl == 'u' || cl == 'p' || cl == 'g'))
+            wf_sidecar_write(cp, cl, cn);
         ray_release(cp);
         if (!bad) {
             names = ray_vec_append(names, &id);

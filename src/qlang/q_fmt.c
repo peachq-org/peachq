@@ -936,7 +936,8 @@ static void q_fmt_body(ray_t* val);   /* fwd */
 /* Attributed vectors get `` `s#`` (q_attr_letter — shared with `attr`); table columns stay bare via q_fmt_cell. */
 static void fmt_render(ray_t* val) {
     if (!val) return;
-    char al = q_attr_letter(val);              /* 0 unless an attributed vector */
+    char al = (ray_is_vec(val) || val->type == RAY_ENUM)
+            ? q_attr_letter(val) : 0;          /* lists/containers carry s invisibly (asc.md:33) */
     if (al) {
         qe_putc('`'); qe_putc(al); qe_putc('#');
     }
