@@ -38,8 +38,11 @@
 / ---- wave 3: the sort wave - every sort verb derives from the grade ----
 / ref/asc.md: atom = already sorted (carries the RAY_STR atom too); 99h = dict AND keyed
 / table, entries gathered by the value grade (the non-key-column rule; .Q.ft would sort a
-/ keyed table by its KEY cols).  No `s#: the attr-take arm takes longs only (PLAN.md).
-.q.asc:{$[0h>type x;x;99h=type x;(key x)[g]!(value x)g:iasc value x;x iasc x]}
+/ keyed table by its KEY cols).  asc.md:18-28 - s stamps the attribute via the producer
+/ seams .Q.c.sorted/.Q.c.parted: a lone table column takes `s#, several take `p# on the
+/ FIRST (asc.md's meta rows); a keyed table stamps its VALUE table only (`::` covers the
+/ plain-dict value).  desc.md:110 - desc sets NO attribute.
+.q.asc:{s:{$[98h<>type x;.Q.c.sorted x;0=count c:cols x;x;1=count c;@[x;first c;.Q.c.sorted];@[x;first c;.Q.c.parted]]};$[0h>type x;x;99h=type x;(key x)[g]!$[98h=type value x;s;::](value x)g:iasc value x;s $[(g:iasc x)~til count x;x;x g]]}
 .q.desc:{$[0h>type x;x;99h=type x;(key x)[g]!(value x)g:idesc value x;x idesc x]}
 / ref/rank.md: "the same as calling iasc twice on the list"
 .q.rank:{iasc iasc x}
@@ -49,7 +52,8 @@
 / ref/asc.md: by the first column given, then the second within it = the grade of the named
 / columns, then ONE gather.  y a SYMBOL updates in place, returns the name (set returns its
 / target).  t@/:x throws 'domain on a bad column - (flip t)x misses silently and truncates.
-.q.xasc:{[x;y]$[-11h=type y;y set .q.xasc[x;get y];.Q.ft[{[x;t]t iasc flip x!t@/:x:$[0h>type x;1#x;x]}[x;];y]]}
+/ asc.md:189 - the sorted attribute is set on the FIRST column given; xdesc sets none.
+.q.xasc:{[x;y]$[-11h=type y;y set .q.xasc[x;get y];.Q.ft[{[x;t]x:$[0h>type x;1#x;x];@[t iasc flip x!t@/:x;first x;.Q.c.sorted]}[x;];y]]}
 .q.xdesc:{[x;y]$[-11h=type y;y set .q.xdesc[x;get y];.Q.ft[{[x;t]t idesc flip x!t@/:x:$[0h>type x;1#x;x]}[x;];y]]}
 
 / ---- wave 3 (ref/cols.md) ----
