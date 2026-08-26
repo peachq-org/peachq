@@ -64,6 +64,7 @@ typedef struct {
     uint8_t is_enum;
     uint8_t zipped;
     uint8_t mappable;
+    char    side_attr;     /* validated `.pqattr` sidecar letter (u/p/g), else 0 */
     int64_t count;
     char    domain[256];   /* enum domain name, else "" */
 } q_wf_colhdr;
