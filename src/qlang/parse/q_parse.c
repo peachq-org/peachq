@@ -91,8 +91,8 @@ ray_t *q_verb_name(const char *s, int len) {
 /* Infix keyword verbs (q keyword functions usable between two nouns).  Derived
  * from the SINGLE-SOURCE op manifest (q_ops.c QLEX_KW_INFIX rows) — no longer a
  * hardcoded memcmp, and no runtime-registry dependency (the manifest is a
- * static table, and the scanner runs before eval).  The manifest's KW_INFIX
- * set is {div, each, in, within}. */
+ * static table, and the scanner runs before eval).  The set is 49 spellings
+ * wide, so what the scanner decides here it decides for all of them. */
 static int q_is_kw_verb(const char *s, int len) {
     return q_lex_is_kw_infix(s, len);
 }
@@ -360,6 +360,15 @@ static ray_t *scan_num_literal(const char *src, int *p) {
     return v;
 }
 
+/* A lone `:` next (past spaces) makes the token before it a source NAME, not an
+ * infix verb.  ref/index.md:81 publishes the assign-through-operator set as an
+ * explicit GLYPH list (`+: -: … ,:`); ref/assign.md scopes `x op:y` to "a binary
+ * OPERATOR", and its tip routes keywords to Amend At instead.  `::` binds no name. */
+static int lone_colon_next(const char *src, int p) {
+    while (src[p] == ' ' || src[p] == '\t') p++;
+    return src[p] == ':' && src[p + 1] != ':';
+}
+
 static Tokens scan(const char *src) {
     Token *toks = NULL;
     int n = 0, cap = 0;
@@ -443,9 +452,11 @@ static Tokens scan(const char *src) {
             }
             int len = p - start;
             if (len >= MAX_NAME) q_die("name too long");
-            /* Only reclassify as an infix verb in true infix position (after a
-             * noun); a prefix/standalone `div` stays a name-ref noun. */
-            if (noun_pos && q_is_kw_verb(src + start, len)) {
+            /* Only reclassify in true infix position (after a noun): a prefix,
+             * standalone or BINDING `div` stays a name-ref noun — else the
+             * reserved-name gate never sees a name to refuse, and the `:` is
+             * silently discarded (`w[1] div:3` computing `2 div 3`). */
+            if (noun_pos && !lone_colon_next(src, p) && q_is_kw_verb(src + start, len)) {
                 EMIT(T_VERB, q_verb_name(src + start, len));
                 noun_pos = 0;
             } else {
@@ -786,9 +797,9 @@ static ray_t *try_parse_qsql(Parser *p) {
     return NULL;
 }
 
-/* ===== source bindings — the `name:expr` shape both column syntaxes read ====
- * A table literal and a qSQL output alias write a column name the same way, so
- * the node shape and the reserved-name law that governs it are read here once. */
+/* ===== source column names — the two shapes both column syntaxes read ========
+ * A table literal and a qSQL clause name a column the same two ways: written
+ * `name:expr`, or a bare name-ref lending its own spelling (syntax.md:218). */
 
 static int sym_is_nameref(ray_t *v) {
     return v && v->type == -RAY_SYM && !(v->attrs & Q_ATTR_QUOTED);
@@ -805,18 +816,20 @@ static int binding_node(ray_t *x, ray_t **name, ray_t **val) {
     return 1;
 }
 
-/* Reserved-ness is LEXICAL — refused at a source binding, exactly as `null:5` is
- * (owner ruling 2026-08-15: "columns cant be reserved words").  A name arriving
- * as DATA never reaches here, so ``flip `null`b!(1 2;3 4)`` still builds the
- * column and .Q.id keeps its repair job (ref/dotq.md:1308).  Answers rather than
- * dies: each caller owns different refs at the point it can afford to longjmp. */
-static int bindings_have_reserved(ray_t *phrases) {
+/* Reserved-ness is LEXICAL — refused wherever SOURCE names a column, exactly as
+ * `null:5` is (owner ruling 2026-08-15: "columns cant be reserved words"), in
+ * BOTH spellings above.  A name arriving as DATA never reaches here, so
+ * ``flip `null`b!(1 2;3 4)`` still builds the column and .Q.id keeps its repair
+ * job (ref/dotq.md:1308).  Answers rather than dies: each caller owns different
+ * refs at the point it can afford to longjmp. */
+static int names_have_reserved(ray_t *phrases) {
     if (!phrases || phrases->type != RAY_LIST) return 0;
     int64_t n = ray_len(phrases);
     ray_t **ph = (ray_t **)ray_data(phrases);
     for (int64_t i = 0; i < n; i++) {
         ray_t *name = NULL;
-        if (binding_node(ph[i], &name, NULL) && q_registry_is_reserved(name->i64)) return 1;
+        if (!binding_node(ph[i], &name, NULL) && sym_is_nameref(ph[i])) name = ph[i];
+        if (name && q_registry_is_reserved(name->i64)) return 1;
     }
     return 0;
 }
@@ -871,7 +884,7 @@ static ray_t *table_lit_bang(ray_t *a, ray_t *b) {
 static ray_t *table_lit_dict(ray_t *defs) {
     ray_t *lv = q_registry_list_value();
     if (!lv) q_die("table literal: registry not initialized");
-    if (bindings_have_reserved(defs)) { ray_release(defs); die_err(QE_ASSIGN); }
+    if (names_have_reserved(defs)) { ray_release(defs); die_err(QE_ASSIGN); }
     int64_t n = ray_len(defs);
     ray_t **ds = (ray_t **)ray_data(defs);
     int64_t id_x = ray_sym_intern_runtime("x", 1);
@@ -1069,6 +1082,13 @@ static P parse_base(Parser *p) {
                         q_die("expected parameter name in lambda signature");
                     }
                     int64_t id = nt->k->i64;
+                    /* a binding position: the slot used to bind nothing and the
+                     * body resolved to the keyword */
+                    if (q_registry_is_reserved(id)) {
+                        ray_release(params);
+                        if (ptypes) ray_release(ptypes);
+                        die_err(QE_ASSIGN);
+                    }
                     params = ray_vec_append(params, &id);
                     adv(p);
                     /* `name:`c` type annotation (kx type-check pattern, 4.1+):
@@ -1366,11 +1386,12 @@ static P parse_query(Parser *p) {
             q_die("qsql: unexpected token after query");
     }
 
-    /* An output alias is a source binding, so a reserved one dies like `null:5`.
-     * Asked while the raw phrases are still the pend guard's, which is what keeps
+    /* An output alias — written or lent by a bare column name — is a source name,
+     * so a reserved one dies like `null:5` instead of silently vanishing from the
+     * item list.  Asked while the raw phrases are still the pend guard's, which keeps
      * the "no q_die past this point" invariant below true.  `where` is exempt —
      * it names no column. */
-    if (bindings_have_reserved(*a) || bindings_have_reserved(*b)) die_err(QE_ASSIGN);
+    if (names_have_reserved(*a) || names_have_reserved(*b)) die_err(QE_ASSIGN);
 
     /* ---- normalize the raw phrase lists into the clone's functional slots ---
      * No q_die past this point, so the raw refs can be released as they are
