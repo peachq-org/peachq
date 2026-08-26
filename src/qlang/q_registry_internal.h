@@ -195,6 +195,9 @@ int64_t q_join_gen_len(ray_t* x);                                 /* used by: se
 /* ---- defined in ops/q_attr.c ---- */
 ray_t* q_attr_wrap(ray_t* x);                                 /* used by: bang, registry */
 ray_t* q_attr_set_dispatch(ray_t* n, ray_t* vec);               /* used by: takedrop (`#`'s set-attribute arm) */
+ray_t* q_attr_stamp_sorted(ray_t* x);                         /* used by: builtins (.Q.c.sorted) */
+ray_t* q_attr_stamp_parted(ray_t* x);                         /* used by: builtins (.Q.c.parted) */
+ray_t* q_attr_append_keep(ray_t* x, ray_t* r);                /* used by: table (`,`, insert, upsert); CONSUMES r */
 /* q_attr_letter / q_attr_set_letter: declared in q_registry.h — used by: fmt, tests */
 
 /* ---- defined in ops/q_takedrop.c ---- */

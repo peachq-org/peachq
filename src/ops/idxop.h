@@ -92,6 +92,11 @@ typedef enum {
  * reserves the bit but ascribes no policy to it (ray_attr_get_fn does NOT read
  * it — rayfall parted comes from RAY_IDX_PART). */
 #define RAY_MARK_PARTED  0x04
+/* Neutral bit reservation for the kdb `` `g# `` (grouped) attribute IDENTITY,
+ * stamped and read back by the q layer exactly like RAY_MARK_PARTED above.
+ * Lets `g` survive where the hash does not (an append result, a mapped column
+ * read from a kdb attr byte) — a bare RAY_IDX_HASH still reads as `g`. */
+#define RAY_MARK_GROUPED 0x08
 
 /* The payload stored inside data[] of a RAY_INDEX ray_t. */
 typedef struct {
@@ -429,6 +434,7 @@ ray_t* ray_attr_drop_fn(ray_t* v);              /* (.attr.drop v) -> v cleared *
  * policy without engine-side attribute-name / error-text choices.  Pure
  * mechanism — no policy. */
 ray_t* ray_attr_stamp_marker(ray_t* v, uint8_t mark); /* borrow v -> owned; stamp marker bit */
+ray_t* ray_attr_mark_attach (ray_t* v, uint8_t mark); /* no cow — mutates v in place (see impl) */
 bool   ray_attr_verify_distinct(const ray_t* v);      /* all rows distinct? */
 bool   ray_attr_verify_contiguous(const ray_t* v);    /* each value one contiguous run? */
 int    ray_attr_numeric_class(int8_t t);              /* 0=float, 1=integer-family, -1=non-numeric */

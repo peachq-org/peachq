@@ -377,6 +377,9 @@ void q_builtins_register(void) {
         { ".Q.c.qt",   q_dotq_qt_fn   }, { ".Q.c.qp",   q_dotq_qp_fn   },
         { ".Q.c.s",    q_dotq_s_fn    }, { ".Q.c.atob", q_dotq_atob_fn },
         { ".Q.c.hg",   q_dotq_hg_fn   },   /* HTTP GET (ref/dotq.md) */
+        /* No public `.Q` twins — producer seams for q.q's asc/xasc, not keywords. */
+        { ".Q.c.sorted", q_attr_stamp_sorted },
+        { ".Q.c.parted", q_attr_stamp_parted },
     };
     for (size_t i = 0; i < sizeof dotq_c_unary / sizeof *dotq_c_unary; i++)
         bind_unary(dotq_c_unary[i].name, dotq_c_unary[i].fn);

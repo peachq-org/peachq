@@ -489,7 +489,12 @@ static ray_t* splay_hdr_over(const splay_vm* vm, splay_col* c) {
     v->rc    = 1;                                       /* the caller's ref */
     v->len   = c->h.count;
     splay_region_add(v, vm);
-    return v;
+    /* the trusted letter (kx attr byte, else our validated sidecar) — a heap
+     * marker block on the mapped header; ray_free releases it before the
+     * region choke point, so the ledger needs no new row */
+    char l = c->h.disk_attr >= 2 && c->h.disk_attr <= 4 ? "\0supg"[c->h.disk_attr]
+           : c->h.side_attr;
+    return l ? q_attr_stamp_trusted(v, l) : v;
 }
 
 /* Map a fixed-width column: kdb's payload starts at byte 16, a ray_t header

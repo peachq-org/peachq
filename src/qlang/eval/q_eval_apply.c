@@ -1412,8 +1412,11 @@ static ray_t* enum_route(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) 
         if (n == 1 && q_enum_is(args[0]) && !strcmp(t, "count"))
             return enum_strip_apply(fv, row, args, n, 0, 0);
         if (n == 2 && q_enum_is(args[1]) &&
-            (!strcmp(t, "take") || !strcmp(t, "drop") || !strcmp(t, "sublist")))
+            (!strcmp(t, "take") || !strcmp(t, "drop") || !strcmp(t, "sublist"))) {
+            if (!strcmp(t, "take") && args[0] && args[0]->type == -RAY_SYM)
+                return NULL;    /* `p#e — take's set-attribute arm is enum-aware */
             return enum_strip_apply(fv, row, args, n, 1, 1);
+        }
         if (n == 2 && !strcmp(t, "concat")) {
             ray_t* r = enum_concat(fv, row, args);
             if (r) return r;
