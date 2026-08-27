@@ -624,8 +624,10 @@ ray_t* q_table_operand(ray_t* y, int64_t* sym_out) {
  *   dict          -> table (sym keys; vector vals share one length L, atoms
  *                    broadcast to L; mismatched vector length -> 'length)
  *   list of lists -> transposed list (atom items broadcast)
- * Keyed tables, atoms, and an all-atom list are 'rank DEFERRED cells (the
- * all-atom arm is a choice, not verified kdb behaviour). */
+ * Keyed tables, atoms, and an ALL-ATOM dict or list are 'rank: "to define a
+ * 1-row table, enlist at least one of the column values" (basics/syntax.md:236)
+ * — so `([]a:1)` is an error, and qSQL's one-row aggregate exception is stated
+ * in q_funsql.c, not here.  An EMPTY dict is still the 0-column empty table. */
 ray_t* q_flip_wrap(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (x->type == RAY_TABLE) {
@@ -652,7 +654,7 @@ ray_t* q_flip_wrap(ray_t* x) {
         int64_t nc = ray_len(k);
         if (!(v->type == RAY_LIST || ray_is_vec(v)) || ray_len(v) != nc)
             return q_err(QE_LENGTH);
-        /* pass 1: L = shared vector length (atoms broadcast; all-atom -> 1) */
+        /* pass 1: L = shared vector length (atoms broadcast) */
         int64_t L = -1;
         for (int64_t c = 0; c < nc; c++) {
             ray_t* col = q_join_item(v, c);
@@ -664,7 +666,7 @@ ray_t* q_flip_wrap(ray_t* x) {
             }
             ray_release(col);
         }
-        if (L < 0) L = 1;
+        if (L < 0 && nc > 0) return q_err(QE_RANK);
         /* pass 2: build the table (atoms broadcast to L) */
         ray_t* out = ray_table_new(nc > 0 ? nc : 1);
         for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
