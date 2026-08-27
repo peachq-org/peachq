@@ -228,14 +228,36 @@ static int names_collide(ray_t* names) {
     return 0;
 }
 
+/* The AGGREGATE law (basics/qsql.md:430): phrases that ALL gave atoms make the
+ * ONE-row result table — `select sum a from ([]a:1 2 3)` is a single 6.  It is
+ * qSQL's law, not `flip`'s: an all-atom column dict is 'rank everywhere else,
+ * so a Select states the exception itself.  Consumes vals. */
+static ray_t* agg_conform(ray_t* vals) {
+    int64_t n = vals->type == RAY_LIST ? ray_len(vals) : 0;
+    if (n == 0) return vals;
+    ray_t** e = (ray_t**)ray_data(vals);
+    for (int64_t i = 0; i < n; i++)
+        if (!e[i] || !ray_is_atom(e[i])) return vals;
+    ray_t* out = ray_list_new(n);
+    for (int64_t i = 0; i < n && !RAY_IS_ERR(out); i++) {
+        ray_t* c = q_enlist_wrap(&e[i], 1);
+        if (!c || RAY_IS_ERR(c)) { ray_release(out); ray_release(vals); return c ? c : q_err(QE_OOM); }
+        out = ray_list_append(out, c);
+        ray_release(c);
+    }
+    ray_release(vals);
+    return out;
+}
+
 /* Law 8: a phrase-columns result table IS `flip names!cols` — and `flip` IS
  * the conform law, so a Select hands it the RAW phrase values: an atom beside
- * a column rides that column's length, and phrases that ALL gave atoms make
- * the one-row aggregate table (`select sum a from ([]a:1 2 3)` is a single 6,
- * basics/qsql.md).  A By key instead spans the rows, so it conforms first. */
+ * a column rides that column's length.  A By key instead spans the rows, so it
+ * conforms first; an all-atom phrase list takes the aggregate law above. */
 static ray_t* cols_table(ray_t* names, ray_t* rng, ray_t* t, ray_t* idx, int conform) {
     if (names_collide(names)) return q_err(QE_DUP);
     ray_t* vals = sel_cols(rng, t, idx, conform);
+    if (RAY_IS_ERR(vals)) return vals;
+    vals = agg_conform(vals);
     if (RAY_IS_ERR(vals)) return vals;
     ray_t* d = q_bang(names, vals);
     ray_release(vals);

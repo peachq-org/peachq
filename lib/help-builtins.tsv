@@ -86,7 +86,7 @@ hsym	hsym `trade.csv	turn a symbol into a file or process handle symbol
 ij	ij[([]a:1 2);([a:1 2]b:`x`y)]	inner join: keep x's rows whose key matches y, adding y's columns
 ijf	ijf[([]a:1 2);([a:1 2]b:`x`y)]	inner join that keeps x's values where y is null
 in	2 in 1 2 3	test whether each item of x appears in y
-insert	t:([]a:1;b:`x);`t insert (2;`y)	append records to a table named by symbol
+insert	t:([]a:1 2;b:`x`y);`t insert(3;`z)	append records to a table named by symbol
 inter	1 2 3 inter 2 3 4	keep the items that appear in both lists
 inv	inv 2 2#1 0 0 1f	invert a non-singular float matrix
 key	key `a`b!1 2	list a dictionary's keys
@@ -174,7 +174,7 @@ ujf	([]a:1 2)ujf([]b:`x`y)	union join that keeps x's values where y is null
 union	1 2 3 union 3 4	join both lists and keep the distinct items
 ungroup	ungroup ([]a:1 2;b:(1 2;3 4))	flatten a table whose cells hold lists
 update	update a:0 from ([]a:1 2)	add or amend the columns of a table
-upsert	t:([a:1]b:`x);`t upsert (1;`z)	append records, replacing any with a matching key
+upsert	t:([a:1 2]b:`x`y);`t upsert(1;`z)	append records, replacing any with a matching key
 value	value "2+3"	evaluate text, or unwrap a name, dictionary or function
 var	var 1 2 3 4	measure the variance
 svar	svar 1 2 3 4	measure the sample variance
@@ -501,8 +501,8 @@ $	(2 2#1 0 0 1f)$1 2f	multiply a matrix by a matrix or vector
 'domain	til -1	an argument is outside the verb's domain
 'parse	value "1+("	the text is not valid q
 'assign	cos:12	tried to redefine a reserved word
-'mismatch	([]a:1),([]b:2)	the tables or dictionaries do not line up
-'insert	t:([a:1j]b:2);`t insert(1j;3)	a keyed insert would duplicate a key that is already there
+'mismatch	([]a:1 2),([]b:3 4)	the tables or dictionaries do not line up
+'insert	t:([a:1 2j]b:3 4);`t insert(1j;5)	a keyed insert would duplicate a key that is already there
 'limit	f:{f x};f 1	an engine limit was hit - recursion depth, or a size cap
 'nyi	3?`a	the operation makes sense but is not implemented yet
 'os	system "nosuchcommand"	the operating system refused the request
