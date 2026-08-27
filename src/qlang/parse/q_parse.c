@@ -525,12 +525,12 @@ static Tokens scan(const char *src) {
                 p++;
                 int s = p;
                 if (src[p] == ':') {
-                    /* FILE/handle symbol `:path — ':' '/' '-' are all path
-                     * bytes (ref/hopen.md `:localhost:5000, `:unix://5010). */
+                    /* FILE/handle symbol `:path — ':' and '/' are path bytes
+                     * (ref/hopen.md `:localhost:5000, `:unix://5010), but '-'
+                     * is not: `:a-b is subtraction, hsym `$"a-b" the escape. */
                     p++;
                     while ((CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) ||
-                           src[p] == '.' || src[p] == ':' || src[p] == '/' ||
-                           src[p] == '-')
+                           src[p] == '.' || src[p] == ':' || src[p] == '/')
                         p++;
                 } else {
                     /* A BARE symbol takes ':' and '/' too (ref/doth.md .h.ha:
@@ -978,7 +978,9 @@ static P parse_base(Parser *p) {
             adv(p);                                   /* consume '[' */
             if (at(p, T_RBRACK)) {
                 expect(p, T_RBRACK, "expected ']' in table literal");
-                ray_t *cols = parse_E(p, Q_NONE);
+                /* `([])` is the ZERO-column empty table (qlib/src/unit.q:180
+                 * `tmpDirs:([])`), not one elided column auto-named x. */
+                ray_t *cols = at(p, T_RPAREN) ? ray_list_new(1) : parse_E(p, Q_NONE);
                 expect(p, T_RPAREN, "expected ')'");
                 return (P){ R_NOUN, table_lit_flip(cols) };
             }
