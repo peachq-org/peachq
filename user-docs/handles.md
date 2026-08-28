@@ -11,7 +11,7 @@ For example:
 ```q
 `:data/trades.csv
 `:localhost:5000
-`:http://example.com/trades.csv
+`:https://www.timestored.com/data/sample/dowjones.csv
 `:pq:duckdb:prod:/data/market.db
 ```
 
@@ -67,7 +67,7 @@ PeachQ generalises the idea:
 
 ```q
 select from `:trades.csv
-select from `:http://example.com/trades.csv
+select from `:https://www.timestored.com/data/sample/dowjones.csv
 select from `:pq:duckdb:prod:trade/
 ```
 
@@ -98,7 +98,7 @@ These concepts can compose.
 For example, the proposed:
 
 ```q
-select from `:http://example.com/trades.csv
+select from `:https://www.timestored.com/data/sample/dowjones.csv
 ```
 
 is conceptually:
@@ -205,14 +205,22 @@ For example:
 ```q
 select from `:trades.csv
 select from `:trades.tsv
+select from `:trades.json
+select from `:trades.jsonl
+select from `:trades.ndjson
 ```
 
-can select the CSV/TSV decoder from the file ending.
+can select the CSV/TSV or JSON decoder from the file ending.
+
+The ending is a **declaration**, not a hint, so it can carry more than the decoder's name. `.jsonl` and `.ndjson` say the
+file is JSON Lines and it is read that way; `.json` says only JSON, and the reader decides whether the file is one
+document or a stream. Nothing is inferred from the bytes: a `.jsonl` holding a single JSON array is an error rather than a
+quiet re-reading. [Reading JSON](json.md) covers framing.
 
 The same rule is intended to apply after transport resolution:
 
 ```q
-select from `:http://example.com/trades.csv
+select from `:https://www.timestored.com/data/sample/dowjones.csv
 ```
 
 The final `.csv` identifies the decoder after HTTP has retrieved the content.
@@ -253,7 +261,7 @@ PeachQ can use the CSV decoder to obtain a table and execute qSQL locally.
 For a future remote CSV:
 
 ```q
-select from `:http://example.com/trades.csv
+select from `:https://www.timestored.com/data/sample/dowjones.csv
 ```
 
 PeachQ owns the composition:
