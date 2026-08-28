@@ -1,119 +1,59 @@
 # Compatibility with kx q
 
-peachq aims to be a drop-in q replacement, measured by q-observable behaviour: `parse` display, `type`, error
-text. This page records the places where it deliberately differs, in **both** directions: things kx does that we
-have chosen not to replicate, and things peachq does that kx does not. Either way the reason is written down.
-This page is for choices we have made on purpose. Bugs and unfinished work are not divergences — they live in
-`PLAN.md`.
+peachq aims to be a drop-in q replacement, measured by q-observable behaviour: `parse` display, `type`, error text.
+This page is the index for someone moving code from kx q — what will not work as it did, and what is here that was
+not there before. One or two lines each, then a link to the page that covers it.
 
-## Pattern matching (kdb+ 4.1) — not replicated
+Everything here is deliberate. A behaviour that is simply broken is a bug, not a divergence, and is not listed.
 
-kdb+ 4.1 added pattern matching to assignment and to lambda parameters:
+## Not supported, or different
 
-```q
-(1):1                          / assert the right side matches the literal
-(1 2):1 3                      / 'match
-f:{[x;]x}                      / trailing empty parameter
-c2f:{[x:tempCheck]32+1.8*x}    / run tempCheck against the argument on entry
-```
+Ordered by how likely each is to stop a real migration.
 
-**peachq does not implement this and does not intend to.** The forms above signal `'parse`.
+| What | Consequence | More |
+|---|---|---|
+| **Partitioned and segmented databases** | Do not load. Splayed tables do. | below |
+| **Splayed and partitioned writing** | Reading kx on-disk format is in scope; writing it is not. | below |
+| **Pattern matching (kdb+ 4.1)** | The 4.1 assignment and parameter forms signal `'parse`. | [typed-parameters.md](typed-parameters.md) |
+| **Reserved words in name positions** | Refused wherever a name is bound, not only at `name:`. | below |
+| **Load CSV (`0:`)** | Unchanged, and still needs the full type string and a clean file. | [csv.md](csv.md) |
 
-The reason is not effort, it is who can read it. Pattern matching puts arbitrary *runtime* behaviour into a
-signature: `{[x:tempCheck] … }` means "call `tempCheck` on entry", so the only way to know what that function
-accepts is to execute q. Every tool outside the interpreter — an editor, an IDE's completion and hover, a linter,
-a doc generator, a code reviewer reading a diff — is then either blind or forced to embed a q runtime.
+**Partitioned and segmented databases.** This is the largest single gap for an existing kdb+ installation: a
+partitioned or segmented HDB does not load. Splayed tables do, including nested columns, attributes and kx
+compression.
 
-peachq takes the other route: a **static** signature that says what it means in its own text, and that anything
-can read cheaply without running code. That is [typed parameters](typed-parameters.md) — declared types,
-optional arguments, defaults, varargs — where a type is a name (``x:`j``), not a function call, so a signature
-can be checked by reading it.
+**Splayed and partitioned writing.** `.Q.dpft`, `dsave`, partitioned `set`, `save`'s binary arm, `rsave` and `-24!`
+are unavailable. Flat `set`, `` `:dir/ set `` and `.z.zd` all work. For large local storage the route is the
+`.duckdb` provider — see [Handles and resources](handles.md).
 
-We would rather have one description of a function's interface that every tool can use than a more expressive
-one that only the interpreter can evaluate.
-
-### What this means in practice
-
-- The assertion forms (`(1):1`, `(1 2):1 2`) have no peachq equivalent. Use `~` and a signal, or `.qunit`
-  asserts in tests.
-- A trailing empty parameter (`{[x;]x}`) is not accepted; write the arity you mean.
-- Argument validation on entry is expressed as a **type** in the signature where a type suffices, and as an
-  ordinary check in the body where it does not.
-- peachq's pattern-matching suite is extracted from the kx documentation, so it covers the whole feature.
-  The rows for the unsupported forms are commented out rather than left red — a permanent red row asserts we
-  intend to fix something, and here we do not. The remaining rows still run.
-
-## Reading data straight from a URL — an extension
-
-In kx q, a `` `: `` symbol that names a file is something you can read, and a `` `: `` symbol that names a
-host and port is something you can talk to. peachq keeps both of those meanings and adds a third: a `` `: ``
-symbol can name a resource **anywhere**, and the ordinary reading verbs will fetch it.
+**Pattern matching.** It will not be implemented; [typed parameters](typed-parameters.md) are the replacement for
+the part of it that declares what a function accepts. Since there is no equivalent form to link to:
 
 ```q
-q)2#read0 `:https://www.timestored.com/data/sample/iris.csv
-"sepal.length,sepal.width,petal.length,petal.width,variety"
-"5.1,3.5,1.4,0.2,Setosa"
+(1 2):1 3                      / 'match in kx 4.1; 'parse here
+c2f:{[x:tempCheck]32+1.8*x}    / runs tempCheck on entry in kx 4.1; 'parse here
 ```
 
-`read0` and `read1` mean exactly what they always meant — text and bytes — and their **ranged** forms work too,
-so you can read the middle of a remote file without downloading the rest:
+Use `~` and a signal in place of the assertion forms, a declared type in place of an entry check where a type
+suffices, and an ordinary check in the body where it does not.
 
-```q
-q)"c"$read1 (`:https://www.timestored.com/data/sample/iris.csv;0;41)
-"sepal.length,sepal.width,petal.length,pet"
-```
+**Reserved words in name positions.** `([] null)`, `select null from t`, `{[null] null}` and `w[1] div:3` all signal
+`'assign` where kx accepts them. Each was silently producing a broken table, or resolving to the keyword's own
+function instead of the binding.
 
-Behind that, peachq asks the server for exactly those bytes with an HTTP range request. A server that supports
-ranges answers with just them; one that does not sends the whole file and peachq takes the slice itself. Either
-way you get the same answer, and the same clamping rules a local file has always had — a short read at the end
-of the file is short, past the end is empty, and a negative offset is `'domain`.
+## Additions
 
-### Formats resolve on top of it
+| What | One line | More |
+|---|---|---|
+| **Reading CSV** — `.csv.read`, `.csv.info` | Type inference, quoting dialects, streaming targets, a reject channel. | [csv.md](csv.md) |
+| **Reading JSON** — `.j.read`, `.j.info` | A reader beside kdb's `.j.k` converter: written forms, a table, a schema. | [json.md](json.md) |
+| **The shared loader laws** | What a cell means, the freeze, the error classes, the tolerance levers. | [loading.md](loading.md), [bad-rows.md](bad-rows.md) |
+| **Resources at a URL** | A `` `: `` symbol can name a resource anywhere; `read0`, `read1` and qSQL resolve it. | [handles.md](handles.md) |
+| **Regular expressions** — `.regexp`, `rlike` | RE2-backed matching, extraction, replacement and splitting. | [regexp.md](regexp.md) |
+| **Typed parameters** | Declared types, optional arguments, defaults and varargs, read statically. | [typed-parameters.md](typed-parameters.md) |
+| **Foreign functions** — `.ffi` | Call into a shared library from q. | [ffi.md](ffi.md) |
+| **String helpers** — `.str` | `printf`/`format`, strip, prefix and suffix tests, character-class predicates. | at the REPL |
+| **DuckDB-backed storage** — `.duckdb` | Query it from q, and reach Parquet and S3 through it. | at the REPL |
 
-Because the transport is a separate idea from the format, everything that decodes a file works on a URL without
-knowing what a URL is:
-
-```q
-q)3#.csv.read[`:https://www.timestored.com/data/sample/iris.csv;::;::;()!()]
-| sepal.length | sepal.width | petal.length | petal.width | variety  |
-| float        | float       | float        | float       |          |
-|--------------|-------------|--------------|-------------|----------|
-| 5.1          | 3.5         | 1.4          | 0.2         | "Setosa" |
-| 4.9          | 3           | 1.4          | 0.2         | "Setosa" |
-| 4.7          | 3.2         | 1.3          | 0.2         | "Setosa" |
-```
-
-And qSQL resolves a CSV resource as a table, so a query can name the file itself — local or remote:
-
-```q
-q)select cnt:count i, avgLen:avg petal.length by variety from `:https://www.timestored.com/data/sample/iris.csv
-| variety      | cnt  | avgLen |
-|              | long | float  |
-|==============|------|--------|
-| "Setosa"     | 50   | 1.462  |
-| "Versicolor" | 50   | 4.26   |
-| "Virginica"  | 50   | 5.552  |
-
-q)select from `:trades.csv where sym=`AAPL
-```
-
-The trailing-slash convention is unchanged: `` `:dir/ `` is still a splayed table, and `` select from `:dir/ ``
-still means what it has always meant.
-
-### The rules we chose
-
-- **A symbol is a resource. A string is content.** `` `:x.csv `` names something to fetch; `"a,b\n1,2"` *is*
-  CSV, and `.csv.read` will decode it directly — handy when the bytes came from an HTTP body, a websocket, or
-  anywhere else. A plain string is never quietly treated as a filename.
-- **A recognised ending picks the decoder, and nothing else does.** `.csv` and `.tsv` resolve as tables. An
-  unrecognised ending signals rather than guessing — we do not sniff content types or magic bytes to decide what
-  your file is.
-- **`get` does not become format-aware.** Reading a resource and interpreting one are different questions, and
-  only qSQL and the explicit `.csv` API ask the second.
-- **Transport errors keep their own class.** A host that will not answer is `'conn`, not `'csv` — a network
-  problem never arrives disguised as a malformed file.
-
-### What is not here yet
-
-`s3://` and `zip://` are not supported. Parquet and S3 are reached through the DuckDB provider rather than
-implemented natively — see the storage notes — so `.parquet` is not a resolvable ending here.
+Everything above arrives with `\l pq`, except URL resources and `rlike`, which are always there. The two rows with
+no page of their own are documented by their own doc comments — type `.str.printf` or `.duckdb.open` at the prompt.
