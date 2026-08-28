@@ -88,6 +88,14 @@ miss in its own right.
 In JSON the same law also covers **keys**: the columns are the union of the keys the *sampled* records carry, so a
 key first seen after the sample is not a column, and signals `'type`.
 
+**A failed load into a table leaves a partial table.** The rows that had already been inserted stay inserted:
+`insert` is not transactional, and a reader streaming a file larger than memory has nothing to roll back to. Check
+`count` on the target after a failure, and prefer loading into a fresh name when you need all-or-nothing.
+
+One kind of failure never reaches this page at all. A bad **option** — a mistyped key, or an `xcol` naming a column
+the file does not have — is an argument error: it stops the load before a row is read, and no lever below turns it
+into a reject record. The levers govern bad rows; an option is not a row.
+
 ## The tolerance levers
 
 All default off. Each one lets a specific kind of bad row through; none of them suppresses the record.
