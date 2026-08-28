@@ -8,6 +8,15 @@
 ray_t* q_json_serialize(ray_t* x);    /* .j.j: value -> JSON string */
 ray_t* q_json_deserialize(ray_t* x);  /* .j.k: JSON string -> value */
 
+/* How a stream's records are FRAMED: the `format` option's three values, and the
+ * one thing a recognised suffix states (user-docs/json.md § Framing). */
+typedef enum { Q_JSON_AUTO = 0, Q_JSON_ARRAY, Q_JSON_ND } q_json_frame_t;
+
+/* THE C door on the reader: a JSON RESOURCE (any read0 identifier) or CONTENT
+ * decoded into a table under `frame`, independent of the `.j` namespace's
+ * binding.  Owned table, or an owned error. */
+ray_t* q_json_read_table(ray_t* src, q_json_frame_t frame);
+
 /* Bind the `.j.i.read` / `.j.i.info` natives lib/j.q's `.j.read` / `.j.info`
  * call.  At the `\l pq` GATE, not q_runtime_create: `.j` pre-gate is kdb's three. */
 void q_json_register(void);
