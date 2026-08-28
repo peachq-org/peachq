@@ -502,7 +502,6 @@ ray_t* q_json_deserialize(ray_t* x) {
 
 #define J_DEF_SAMPLE 20480            /* sniff RECORDS, the .csv.read default */
 
-enum { JF_AUTO = 0, JF_ARRAY, JF_ND };               /* the `format` option: how records are FRAMED */
 enum { JR_REC_AUTO = -1, JR_REC_NEVER = 0, JR_REC_ALWAYS = 1 };
 
 typedef struct { int key; int64_t v; } jr_step;      /* a SYMBOL indexes an object, a LONG an array */
@@ -889,9 +888,9 @@ static ray_t* jr_frame_nd(jr_st* st, char* buf, int64_t n) {
  * the root-kind law speaks; if it is not, the file is a stream.  A pretty-printed object is one
  * document, so auto reads it - which is why auto cannot be "does it start with [". */
 static ray_t* jr_frame(jr_st* st, char* buf, int64_t n) {
-    if (st->format == JF_ND) return jr_frame_nd(st, buf, n);
+    if (st->format == Q_JSON_ND) return jr_frame_nd(st, buf, n);
     yyjson_doc* doc = yyjson_read_opts(buf, (size_t)n, YYJSON_READ_ALLOW_INF_AND_NAN, NULL, NULL);
-    if (!doc) return st->format == JF_ARRAY ? q_err(QE_PARSE) : jr_frame_nd(st, buf, n);
+    if (!doc) return st->format == Q_JSON_ARRAY ? q_err(QE_PARSE) : jr_frame_nd(st, buf, n);
     if (!jr_hold(st, doc)) { yyjson_doc_free(doc); return q_err(QE_WSFULL); }
     yyjson_val* root = yyjson_doc_get_root(doc);
     ray_t* bad = jr_select(st, &root);
@@ -1523,9 +1522,9 @@ static ray_t* jr_opts(jr_st* st, ray_t* opts) {
             else st->sample = x;
         } else if (jr_opt_is(k->i64, "format")) {
             if (v->type != -RAY_SYM) bad = q_err(QE_TYPE);
-            else if (jr_opt_is(v->i64, "array")) st->format = JF_ARRAY;
-            else if (jr_opt_is(v->i64, "newline_delimited")) st->format = JF_ND;
-            else if (jr_opt_is(v->i64, "auto")) st->format = JF_AUTO;
+            else if (jr_opt_is(v->i64, "array")) st->format = Q_JSON_ARRAY;
+            else if (jr_opt_is(v->i64, "newline_delimited")) st->format = Q_JSON_ND;
+            else if (jr_opt_is(v->i64, "auto")) st->format = Q_JSON_AUTO;
             else bad = q_err(QE_NYI);
         } else if (jr_opt_is(k->i64, "records")) {
             if (v->type == -RAY_BOOL) st->records = v->u8 ? JR_REC_ALWAYS : JR_REC_NEVER;
@@ -1571,8 +1570,8 @@ static ray_t* jr_opts(jr_st* st, ray_t* opts) {
     return NULL;
 }
 
-static ray_t* jr_read(ray_t* src, ray_t* types, ray_t* opts, int info_only) {
-    jr_st st = { .sample = J_DEF_SAMPLE, .records = JR_REC_AUTO };
+static ray_t* jr_read(ray_t* src, ray_t* types, ray_t* opts, q_json_frame_t frame, int info_only) {
+    jr_st st = { .sample = J_DEF_SAMPLE, .records = JR_REC_AUTO, .format = frame };
     char* buf = NULL;
     int64_t n = 0;
     ray_t* bad = jr_opts(&st, opts);
@@ -1612,14 +1611,16 @@ static ray_t* jr_arg(ray_t* x) {
 static ray_t* j_read_fn(ray_t** args, int64_t n) {
     if (n != 4) return q_err(QE_RANK);
     if (jr_arg(args[1])) return q_err(QE_NYI);       /* the rank is reserved; a target is refused, never ignored */
-    return jr_read(args[0], jr_arg(args[2]), jr_arg(args[3]), 0);
+    return jr_read(args[0], jr_arg(args[2]), jr_arg(args[3]), Q_JSON_AUTO, 0);
 }
 
 /* .j.i.info[source;opts] */
 static ray_t* j_info_fn(ray_t** args, int64_t n) {
     if (n != 2) return q_err(QE_RANK);
-    return jr_read(args[0], NULL, jr_arg(args[1]), 1);
+    return jr_read(args[0], NULL, jr_arg(args[1]), Q_JSON_AUTO, 1);
 }
+
+ray_t* q_json_read_table(ray_t* src, q_json_frame_t frame) { return jr_read(src, NULL, NULL, frame, 0); }
 
 static void jr_bind_fn(const char* name, ray_vary_fn fn) {
     ray_t* f = ray_fn_vary(name, RAY_FN_NONE, fn);
