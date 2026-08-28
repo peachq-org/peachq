@@ -11,7 +11,7 @@
 #include "qlang/io/q_conn.h"   /* q_conn_pq_register — the .pq.i.conns native */
 #include "qlang/q_console.h"   /* q_console_pq_register — the .pq.i.termsize native */
 #include "qlang/io/q_csv.h"    /* q_csv_register — the .csv.i.* natives */
-#include "qlang/net/q_json.h"  /* q_json_register — the .j.i.* natives */
+#include "qlang/io/q_json.h"  /* q_json_register — the .j.i.* natives */
 #include "qlang/io/q_ffi.h"    /* q_ffi_register — the .ffi.i.* natives */
 #include "qlang/ops/q_regex.h" /* q_regex_register — the .regexp.i.* natives */
 #include "qlang/ops/q_strfmt.h" /* q_strfmt_register — the .str.i.printf/.format natives */
