@@ -14,7 +14,8 @@
 #include "qlang/io/q_handles.h" /* q_handles_read1 — the fifo-handle read form */
 #include "qlang/io/q_splay.h"   /* q_io_set: a carrier y writes as its table */
 #include "qlang/io/q_provider.h"  /* q_io_set: `:pq: targets route to .X.set */
-#include "qlang/io/q_csv.h"     /* the decoder behind a recognised tabular suffix */
+#include "qlang/io/q_csv.h"     /* the CSV/TSV decoder behind a recognised tabular suffix */
+#include "qlang/io/q_json.h"    /* the JSON decoder, and the framing a suffix declares to it */
 #include "qlang/net/q_gz.h"     /* q_gz_inflate_zlib — the kxzip block codec */
 #include "qlang/net/q_wirefile.h" /* the format writers behind q_io_set */
 #include "qlang/net/q_http_client.h" /* the http half of the resource-read seam */
@@ -169,8 +170,15 @@ static int io_is_http(ray_t* pathstr) {
 
 int q_io_resource_chunkable(ray_t* pathstr) { return !io_is_http(pathstr); }
 
+/* A suffix is FINAL and needs something in front of it: a resource named exactly
+ * `.json` is a dotfile, not a format claim.  Case-sensitive, like the names q writes. */
+static int io_suffix_is(const char* p, size_t n, const char* ext) {
+    size_t k = strlen(ext);
+    return n > k && memcmp(p + n - k, ext, k) == 0;
+}
+
 /* The READ side of the on-disk-format classification q_io_set owns for writes,
- * for the one format that decodes to a table by its name (user-docs/handles.md
+ * for the formats that decode to a table by their name (user-docs/handles.md
  * § Format inference: explicit provider or scheme, then explicit format API,
  * then the recognised final suffix, then error — never Content-Type, never
  * magic bytes).  NULL = no recognised tabular format, so the caller falls back
@@ -184,8 +192,11 @@ ray_t* q_io_resource_table(ray_t* fsym) {
     if (io_is_http(path))                       /* a query or fragment names no format */
         for (size_t i = 0; i < n; i++) if (p[i] == '?' || p[i] == '#') { n = i; break; }
     ray_t* out;
-    if (n > 4 && memcmp(p + n - 4, ".csv", 4) == 0)      out = q_csv_read_table(fsym, 0);
-    else if (n > 4 && memcmp(p + n - 4, ".tsv", 4) == 0) out = q_csv_read_table(fsym, '\t');
+    if (io_suffix_is(p, n, ".csv"))         out = q_csv_read_table(fsym, 0);
+    else if (io_suffix_is(p, n, ".tsv"))    out = q_csv_read_table(fsym, '\t');
+    else if (io_suffix_is(p, n, ".ndjson")) out = q_json_read_table(fsym, Q_JSON_ND);
+    else if (io_suffix_is(p, n, ".jsonl"))  out = q_json_read_table(fsym, Q_JSON_ND);
+    else if (io_suffix_is(p, n, ".json"))   out = q_json_read_table(fsym, Q_JSON_AUTO);
     else out = q_io_resource_chunkable(path) ? NULL : q_err(QE_TYPE);
     ray_release(path);
     return out;

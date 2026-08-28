@@ -99,6 +99,41 @@ whole file parses as one document, never whether it starts with `[`.
 A source carrying **no** document at all is `'parse`, not an empty table. `[]` states a shape and reads as zero
 records; whitespace states none, and we do not invent one.
 
+## `select` straight from a resource
+
+qSQL takes a JSON resource wherever it takes a table, and the file ending is what says so:
+
+```q
+q)select from `:trades.json
+| sym   | px    |
+|       | float |
+|-------|-------|
+| "aaa" | 1.5   |
+| "bbb" | 2.5   |
+q)select sym from `:trades.jsonl where px > 2
+| sym   |
+|       |
+|-------|
+| "bbb" |
+```
+
+This route asks for no standard library, and it works over every transport a `` `: `` symbol can name:
+`` select from `$":https://www.timestored.com/data/sample/price.json" ``. There is nowhere to state an option, because the ending is
+the only thing you say — reach for `.j.read` when you want `types`, `path` or the reject channel.
+
+**The ending declares the framing.** `.jsonl` and `.ndjson` state JSON Lines; `.json` states only JSON, so it reads
+under `` `auto `` and a `.json` holding JSON Lines loads. Saying it and meaning it are the same act, so an array
+inside a `.jsonl` is the refusal stating the framing by hand would give:
+
+```q
+q)select from `:array.jsonl
+'parse
+```
+
+The ending is matched exactly, case-sensitively, and on the path alone. `TRADES.JSON` and `trades.json.gz` name no
+format; a URL's query and fragment are not part of it, so a signed link still reads as JSON. An ending that names no
+format is never guessed at — [Handles and resources](handles.md) has the full order.
+
 ## Root shapes: what the document becomes
 
 Framing having decided where a document ends, its root kind decides what the rows are:

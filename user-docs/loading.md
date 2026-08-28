@@ -31,7 +31,7 @@ The first argument is the thing to read, and its **type** decides what it is. Th
 So `` `:trades.csv `` always names something to open, and `"trades.csv"` is always three fields of CSV text that
 happen to spell a filename. A heuristic here would break every `` `:c:/temp/x.csv ``.
 
-- **a symbol** — a local file, or a URL: `` `:trades.csv ``, `` `$":https://example.com/data.csv" ``. See
+- **a symbol** — a local file, or a URL: `` `:trades.csv ``, `` `$":https://www.timestored.com/data/sample/dowjones.csv" ``. See
   [Handles and resources](handles.md) for what a `` `: `` symbol can name.
 - **one char vector** — the whole payload, embedded newlines and all. This is what you want when the bytes never
   touched a disk: an HTTP or WebSocket body, an IPC payload, something you built in q.
