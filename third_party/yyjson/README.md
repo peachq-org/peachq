@@ -9,7 +9,7 @@
 
 openq's `.j.k` (JSON → q) uses yyjson to do the raw tokenize / validate / unescape /
 number-parse. The JSON-node → `ray_t` mapping (q-type semantics) lives in openq's own glue
-(`src/qlang/q_json.c`); yyjson only produces a validated DOM. Read flags enable
+(`src/qlang/io/q_json.c`); yyjson only produces a validated DOM. Read flags enable
 `YYJSON_READ_ALLOW_INF_AND_NAN` so openq can read JSON that kdb+ itself saved
 (`inf`/`-inf`/`nan`).
 

@@ -1,4 +1,4 @@
-/ massive.q - q wrapper over the Massive market-data REST API.  \l lib/massive.q
+/ massive.q - q wrapper over the Massive market-data REST API.  \l pq (it reads responses with .j.read)
 / Paths are passed WHOLE by the caller (the live surface mixes /v1, /v2 and /v3),
 / so no version prefix is ever baked into the transport.
 
@@ -34,43 +34,33 @@
   if[not (`$s) in .massive.ok; '`$s];
   r};
 
-/ The convert law: a payload LIST OF DICTS becomes a table (keys unioned, ragged
-/ rows null-filled); one dict stays that dict; non-dicts stay a list; no payload
-/ key stays the envelope dict.  Nested dicts are left NESTED.
+/ The convert law: the payload key is a PATH into the response, so .j.read reads the document AT it and
+/ the reader's laws do the rest - keys unioned, ragged rows null-filled, numbers in the form they were
+/ written in, nested dicts left NESTED.  A payload that is not records is handed back as it parsed (one
+/ dict stays that dict, non-dicts stay a list) and no payload key leaves the envelope dict: that shape
+/ policy is massive's, the tabling is the reader's.  The key is read off the RESPONSE, since
+/ .massive.fetch takes any path and no endpoint can be asked.
 .massive.pay:`results`tickers;
 
 .massive.i.paykey:{[r] .massive.pay where .massive.pay in key r};
-.massive.i.flat:{[rs] flip (key first rs)!flip value each rs};
 
-/ THE ragged law, and its only home: uniform tables become one table over the union
-/ of their columns, missing cells filled with the column's own null.  Ragged rows
-/ within a page and ragged pages within a walk are the same irregularity at two
-/ granularities, so both come here - it cannot be right at one and wrong at the other.
-.massive.i.mcol:{[ts;k]
-  tpl:first 0#(first ts where {[k;t] k in cols t}[k] each ts)k;
-  raze {[k;tpl;t] $[k in cols t;t k;count[t]#tpl]}[k;tpl] each ts};
+/ A RESPONSE is (text; parsed envelope), which is what .massive.i.raw builds - the reader needs the bytes and
+/ the shape decision needs the parse, so one value owns both and nothing downstream reads a global.
+/ .j.k has already said whether the payload is records: it collapses a uniform array of objects to a table
+/ and leaves a ragged one a list of dicts.  Both are records, and both are the reader's to build.
+.massive.i.pay:{[resp;k]
+  v:resp[1] k;
+  $[(98h=type v) or (0h=type v) and count[v] and all 99h=type each v;
+    .j.read[resp 0;::;::;(enlist `path)!enlist k]; v]};
 
+/ Ragged PAGES are ragged rows one granularity up, and uj is q's own name for the union.
 .massive.i.merge:{[ts]
   ts:ts where 0<count each ts;
-  if[0=count ts; :()];
-  if[1=count ts; :first ts];
-  if[not all 98h=type each ts; :raze ts];
-  ks:distinct raze cols each ts;
-  flip ks!.massive.i.mcol[ts] each ks};
+  $[0=count ts;();all 98h=type each ts;(uj/) ts;raze ts]};
 
-.massive.i.page:{[v]
-  if[98h=type v; :v];
-  if[not 0h=type v; :v];
-  if[0=count v; :v];
-  if[not all 99h=type each v; :v];
-  g:value group key each v;
-  (.massive.i.merge .massive.i.flat each v@/:g) iasc raze g};
-
-.massive.convert:{[r]
-  if[99h<>type r; :r];
-  k:.massive.i.paykey r;
-  if[0=count k; :.massive.coerce r];
-  .massive.coerce .massive.i.page r first k};
+.massive.convert:{[resp]
+  k:.massive.i.paykey resp 1;
+  .massive.coerce $[count k; .massive.i.pay[resp;first k]; resp 1]};
 
 / Epoch coercion, one name list.  Aggregates carry ms, snapshots ns - told apart
 / by magnitude, not by endpoint.  ISO strings arrive under a *_utc name.
@@ -96,9 +86,10 @@
   u:.massive.i.absurl a 0;
   q:.massive.qs a 1;
   u:$[count q;(.massive.i.sep u),q;u];
-  r:.j.k .Q.hg .massive.i.withkey u;
-  .massive.envelope::r;
-  .massive.check r};
+  t:.Q.hg .massive.i.withkey u;
+  .massive.envelope::.j.k t;
+  .massive.check .massive.envelope;
+  (t;.massive.envelope)};
 
 .massive.fetch:{[x] .massive.convert .massive.i.raw x};
 
@@ -122,15 +113,15 @@
 
 .massive.i.walk:{[x;o]
   r:.massive.i.raw x;
-  k:.massive.i.paykey r;
+  k:.massive.i.paykey r 1;
   u:.massive.i.nexturl[];
   if[(0=count u) or 0=count k; .massive.i.done[0b;1]; :.massive.convert r];
-  acc:enlist .massive.i.page r first k;
+  acc:enlist .massive.i.pay[r;first k];
   n:1;
   while[(0<count u) and (n<o`maxpages) and (o`max)>sum count each acc;
     r:.massive.i.raw u;
-    k:.massive.i.paykey r;
-    acc:$[count k;acc,enlist .massive.i.page r first k;acc];
+    k:.massive.i.paykey r 1;
+    acc:$[count k;acc,enlist .massive.i.pay[r;first k];acc];
     n+:1; u:.massive.i.nexturl[]];
   .massive.i.done[0<count u;n];
   .massive.coerce .massive.i.merge acc};
