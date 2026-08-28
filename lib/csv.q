@@ -31,11 +31,41 @@
 / hh:mm:ss second, 3-digit-fraction time and D-separated timespan - clock shapes promote per column up
 / the minute < second < time < timespan lattice.  It never guesses beyond a written form: bare 20260822
 / stays long, suffixless 2026.08 stays float, 1/0 stays long (type booleans and syms explicitly).
-/ THE TZ POSTURE (owner 2026-08-23): kdb parses no timezone, so a tz-suffixed cell (...+02:00, ...Z) is TEXT
-/ at defaults, bytes intact - never a silent shift.  An offset is read only where the caller asks with
-/ timestampformat's %z, and then it is APPLIED: the stored timestamp is UTC.  Under an explicit p with
-/ no format an offset cell is a frozen-type MISS ('csv, or a `cast reject under a continue-mode lever)
-/ - DuckDB's forced-TIMESTAMP path drops the offset silently; we refuse instead.
+/ THE \z DECLARATION (owner 2026-08-27): the slash/dash 4-digit-year day-order pairs (03/10/2024,
+/ 12-13-2004, and either with a seconds clock) SNIFF under the field order \z states - 0 month-first,
+/ 1 day-first, "D"$'s own switch.  A global \z is a declaration, not a guess, which is why honouring it
+/ keeps the never-guess law; a value the declared order cannot read sniffs text (the near-miss law), and
+/ a shape no declaration disambiguates - 2-digit years, single-digit fields, the dotted pair - stays
+/ text under either order.  A sniffed day-order column is therefore \z-dependent, as "D"$ already is.
+/ THE WRITER'S FORM IS THE GRAMMAR (owner 2026-08-27): two more shapes join it because q PRINTS them and
+/ so goal 1 - loading our own output - needs them.  A canonical 36-char uuid types g (the IPv4/IPv6 forms
+/ "G"$ also reads are the CAST's, not a written form, so they stay text and refuse under an explicit g).
+/ "0x" + EXACTLY two hex digits types x; longer stays text, because 0xFF0000 is a byte VECTOR and a cell
+/ holds one atom, and BARE hex stays text because 0a is likelier an identifier - the same call 007 gets.
+/ DuckDB's read_csv leaves a uuid VARCHAR and reads 0x0a as the decimal 10 while its OWN read_json types
+/ that uuid UUID and that byte VARCHAR: it disagrees with itself, so no verdict is parity with both, and
+/ goal 1 takes the CSV side.  Recorded as the guid / hexbyte grant classes in qlib/test/csvDiffTest.q.
+/ THE SENTINEL RULE (owner 2026-08-27): a digit run landing EXACTLY on 0W, -0W or 0N would read as q's
+/ infinity or null - a silently wrong meaning - so in the sample it demotes the column to text, and after
+/ the freeze it is the miss law: 'csv, or a `cast reject under a lever.  It is a per-WIDTH rule, so h and i
+/ refuse their own sentinel runs the way j refuses the long's.
+/ THE DECLARED VOCABULARY (owner 2026-08-27) is all 18 basic types, five of them reachable ONLY here because
+/ the sniff never claims them: h i e (narrower widths of a written number), c and z.  c is exactly ONE
+/ character - one cell is one atom, so a longer cell is a miss rather than a char VECTOR in a single cell,
+/ and text is what * is for.  z is p's cell read out as the legacy datetime: it accepts what p accepts and
+/ refuses what p refuses, while the SNIFFER still types a T-separated token p - declared beats sniffed.
+/ THE TZ POSTURE (owner 2026-08-23; explicit-p widened 2026-08-27): kdb parses no timezone, so a tz-suffixed
+/ cell (...+02:00, ...Z) is TEXT at defaults, bytes intact - never a silent shift.  An offset is read only
+/ where the caller asks with timestampformat's %z, and then it is APPLIED: the stored timestamp is UTC.
+/ Under an explicit p with no format a ZERO-offset tail - Z, z, +00:00 - parses, because the digits already
+/ ARE the UTC instant and nothing shifts, and so does minute resolution (2025-10-06T10:57); a NON-ZERO
+/ offset stays a frozen-type MISS ('csv, or a `cast reject under a continue-mode lever), as do -00:00
+/ (RFC 3339: offset UNKNOWN, not UTC) and compact ISO - DuckDB's forced-TIMESTAMP path drops the offset
+/ silently; we refuse instead.  THE LOADER-VS-CAST ASYMMETRY: the loaders accept more than the kx cast, and
+/ less - Z parses here while "P"$"...Z" stays 0Np (Tok is kdb-faithful and does not change), and T alone is
+/ a Tok boolean but loader text.  "X"$"0x0a" is 0x00 and STAYS 0x00 - Tok reads BARE hex, so the prefix
+/ makes it consume an invalid pair - while the loader reads the prefixed form, which is the one q writes.
+/ The same cell law serves .j.read: what a cell means is decided once.
 / A blank physical line is SKIPPED (DuckDB emits a row of nulls).  A file with a header row and no data
 / rows loads as a zero-row table with the header's columns; a zero-byte file signals 'csv - a file that
 / states no schema does not get one invented (DuckDB invents a VARCHAR column0).
@@ -46,7 +76,8 @@
 / scan cannot hold two contradictory notions of a line.  Reject records keep PHYSICAL line numbers: skip
 / renumbers nothing.  A negative skip signals 'domain (0 is the default, not a degenerate value), and
 / skipping past the last record leaves a stream that states no schema - 'csv, exactly as a zero-byte file.
-/ @param types (dict) column syms to type chars from "bjfsdtpmuvn", e.g. `a`b!"sj", overriding the sniff
+/ @param types (dict) column syms to type chars from the 18 basic types "bgxhijefcspmdznuvt", e.g. `a`b!"sj",
+/ overriding the sniff
 / per column (a " " value drops that column by name); or a type-char string "sj f" as the complete
 / schema, one char per column, " " dropping a column, "*" keeping strings
 / Without an explicit delim the delimiter is sniffed among "," ";" tab "|": a candidate qualifies only
@@ -58,8 +89,7 @@
 / @param opts (dict) DuckDB option vocabulary: delim (char), header (boolean), sample_size (long, sniff
 / rows), buffer_size (long, read-chunk bytes), skip (long, default 0, see THE SKIP LAW above), dateformat /
 / timestampformat (string, strptime subset %Y %y %m %d %H %M %S %f %z - an explicit format REPLACES the
-/ built-in grammar for its type; day-first and month-first forms are ambiguous as forms, so without one
-/ they stay text.  %z (timestampformat only)
+/ built-in grammar for its type, \z's day-order reading included.  %z (timestampformat only)
 / reads Z or +-HH[[:]MM] and applies it, storing UTC, DuckDB's own semantics; zone NAMES need tz data
 / this build does not carry, so %Z is not in the subset and signals 'option like any unknown specifier)
 / THE DIALECT OPTIONS (explicit only, NEVER sniffed - a non-default quote or comment dialect is always

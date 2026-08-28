@@ -560,10 +560,12 @@ static ray_t* qd_read_leaf(ray_t* col, const qd_tmap_t* tm,
                 col = ray_vec_append(col, &id);
                 break;
             }
-            case RAY_STR: {      /* VARCHAR -> charv cell; NULL -> "" */
+            case RAY_STR: {      /* VARCHAR -> charv cell; NULL -> 0n, the q null the JSON
+                                  * reader itself fills with, so '' stays a distinct VALUE */
                 const duck_string_t* s = ok ? &((const duck_string_t*)data)[r] : NULL;
-                ray_t* cell = ray_charv(s ? q_duckdb_string_data(s) : "",
-                                        s ? (int64_t)q_duckdb_string_len(s) : 0);
+                ray_t* cell = s ? ray_charv(q_duckdb_string_data(s),
+                                            (int64_t)q_duckdb_string_len(s))
+                                : ray_f64(NULL_F64);
                 if (!cell || RAY_IS_ERR(cell)) { ray_release(col);
                     return cell ? cell : q_err(QE_WSFULL); }
                 col = ray_list_append(col, cell);   /* retains */
@@ -633,8 +635,8 @@ static ray_t* qd_read_leaf(ray_t* col, const qd_tmap_t* tm,
     return col;
 }
 
-/* q has no null list, so a NULL cell degrades to the typed empty — a recorded
- * one-way loss. */
+/* A NULL LIST cell is 0n — the reader's own null-fill — where an EMPTY list stays (),
+ * so the two survive the crossing as the distinct values they are. */
 static ray_t* qd_read_col(ray_t* col, const qd_colmap_t* cm,
                           duck_vector dv, duck_idx_t from, duck_idx_t n) {
     if (cm->depth == 0) return qd_read_leaf(col, cm->leaf, dv, from, n);
@@ -646,9 +648,9 @@ static ray_t* qd_read_col(ray_t* col, const qd_colmap_t* cm,
     for (duck_idx_t r = from; r < from + n; r++) {
         bool       ok  = q_duckdb_validity_ok(validity, r);
         duck_idx_t len = ok ? (duck_idx_t)ent[r].length : 0;
-        ray_t*     cell = qd_new_col(&child, (int64_t)len);
-        if (cell && !RAY_IS_ERR(cell))
-            cell = qd_read_col(cell, &child, cv, ok ? (duck_idx_t)ent[r].offset : 0, len);
+        ray_t*     cell = ok ? qd_new_col(&child, (int64_t)len) : ray_f64(NULL_F64);
+        if (ok && cell && !RAY_IS_ERR(cell))
+            cell = qd_read_col(cell, &child, cv, (duck_idx_t)ent[r].offset, len);
         if (!cell || RAY_IS_ERR(cell)) {
             ray_release(col);
             return cell ? cell : q_err(QE_WSFULL);
