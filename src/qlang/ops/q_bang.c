@@ -15,7 +15,7 @@
 #include "qlang/q_registry_internal.h"  /* q_hsym_wrap, q_attr_wrap, q_type_strict_i64,
                                          * q_type_is_int_atom, q_type_iatom_val, q_table_flatten */
 #include "qlang/q_builtins.h"   /* q_parse_builtin_fn, q_md5_fn, q_dotq_btoa_fn, q_dotq_sha1_fn */
-#include "qlang/net/q_json.h"       /* q_json_serialize (.j.j), q_json_deserialize (.j.k) */
+#include "qlang/io/q_json.h"       /* q_json_serialize (.j.j), q_json_deserialize (.j.k) */
 #include "qlang/net/q_wire.h"       /* q_wire_serialize/_deserialize/_compress, Q_WIRE_ASYNC */
 #include "qlang/io/q_io.h"          /* the byte core: hcount's path+size, `-21!` stats */
 #include "qlang/io/q_conn.h"        /* q_conn_bang38 — `-38!` socket table */
