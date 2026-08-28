@@ -23,6 +23,7 @@
 #include "qlang/ops/q_bang.h" /* q_bang_enkey — the unkey primitive */
 #include "qlang/ops/q_dollar.h"  /* q_dollar_cast — the one conversion home */
 #include "qlang/io/q_io.h"       /* q_io_file_path + the resource-read seam */
+#include "qlang/io/q_loader.h"   /* the shared target seam: oracle + sink + the xcol rename */
 #include "qlang/q_env.h"         /* q_env_bind — the .j.i.* bindings */
 #include "lang/env.h"            /* ray_fn_vary */
 #include "table/sym.h"        /* ray_sym_vec_cell */
@@ -531,6 +532,13 @@ typedef struct {
     int64_t      rej_total;
     const char*  rej_class;           /* set at the failure site; non-NULL = the fault is rejectable */
     int64_t      rej_col;             /* the failing column's sym; 0 = a record-level fault */
+    q_loader_sink sink;               /* the target: schema oracle + batch sink */
+    ray_t*       xcol;                /* the xcol option, retained; NULL = no rename */
+    int64_t*     onames;              /* the OUTPUT names under a rename; NULL = the keys themselves.
+                                       * `names` stays the document's KEYS: records match by name */
+    char*        tchars;              /* per column: the TARGET's char, 0 where the target has no such column */
+    int64_t*     ign;                 /* document columns the target has no room for */
+    int64_t      nign;
 } jr_st;
 
 static void jr_free(jr_st* st) {
@@ -542,6 +550,11 @@ static void jr_free(jr_st* st) {
     free(st->want);
     free(st->recs);
     free(st->lines);
+    free(st->onames);
+    free(st->tchars);
+    free(st->ign);
+    q_loader_sink_free(&st->sink);
+    if (st->xcol) ray_release(st->xcol);
     for (int i = 0; i < 4; i++)
         if (st->rj[i]) ray_release(st->rj[i]);
 }
@@ -1070,6 +1083,47 @@ static ray_t* jr_types(jr_st* st, ray_t* ty) {
     return NULL;
 }
 
+/* ---- the target: the schema-oracle leg, which is not the sink ---------------- */
+
+/* the names the table CARRIES, which a rename separates from the keys it matches on */
+static const int64_t* jr_out(const jr_st* st) { return st->onames ? st->onames : st->names; }
+
+/* THE RENAME, BEFORE any target reconciliation — otherwise a column is dropped for not
+ * matching the target under the very name about to be changed.  Then the target's meta
+ * outranks the sniff (a column it lacks is dropped), and jr_types outranks that in turn. */
+static ray_t* jr_target(jr_st* st) {
+    if (st->xcol) {
+        st->onames = (int64_t*)malloc((size_t)st->ncols * sizeof(int64_t));
+        if (!st->onames) return q_err(QE_WSFULL);
+        memcpy(st->onames, st->names, (size_t)st->ncols * sizeof(int64_t));
+        ray_t* bad = q_loader_rename(st->xcol, st->onames, st->ncols);
+        if (bad) return bad;
+    }
+    if (!st->sink.has_schema) return NULL;
+    st->tchars = (char*)calloc((size_t)st->ncols, 1);
+    if (!st->tchars) return q_err(QE_WSFULL);
+    const int64_t* out = jr_out(st);
+    for (int64_t j = 0; j < st->ncols; j++) {
+        int64_t k = q_loader_sink_find(&st->sink, out[j]);
+        st->want[j] = k >= 0 ? (st->tchars[j] = st->sink.chars[k]) : ' ';
+    }
+    return NULL;
+}
+
+/* Explicit types must AGREE with the target where both speak — 'mismatch before a value is
+ * read — and what the reconciliation left dropped is the `ignored` report. */
+static ray_t* jr_reconcile(jr_st* st) {
+    if (!st->sink.has_schema) return NULL;
+    for (int64_t j = 0; j < st->ncols; j++)
+        if (st->tchars[j] && st->want[j] != ' ' && st->want[j] != st->tchars[j]) return q_err(QE_MISMATCH);
+    st->ign = (int64_t*)malloc((size_t)st->ncols * sizeof(int64_t));
+    if (!st->ign) return q_err(QE_WSFULL);
+    const int64_t* out = jr_out(st);
+    for (int64_t j = 0; j < st->ncols; j++)
+        if (st->want[j] == ' ' && !st->tchars[j]) st->ign[st->nign++] = out[j];
+    return NULL;
+}
+
 /* ---- build ----------------------------------------------------------------- */
 
 /* the shared cell parser signals 'csv; inside this reader that fit failure is
@@ -1367,7 +1421,7 @@ static ray_t* jr_assemble(const jr_st* st, ray_t** acc, yyjson_val*** vcol, int6
             ray_release(tbl);
             return col ? col : q_err(QE_OOM);
         }
-        tbl = ray_table_add_col(tbl, st->names[j], col);
+        tbl = ray_table_add_col(tbl, jr_out(st)[j], col);
         ray_release(col);
         if (RAY_IS_ERR(tbl)) return tbl;
     }
@@ -1540,6 +1594,13 @@ static ray_t* jr_opts(jr_st* st, ray_t* opts) {
             else st->null_pad = v->u8 != 0;          /* the key-union law already null-fills an omitted
                                                       * key, so this lever is inherently ON; accepted
                                                       * for .csv.read option parity, changing nothing */
+        } else if (jr_opt_is(k->i64, "xcol")) {
+            if (v->type != -RAY_SYM && v->type != RAY_SYM && v->type != RAY_DICT) bad = q_err(QE_TYPE);
+            else {
+                if (st->xcol) ray_release(st->xcol);
+                ray_retain(v);
+                st->xcol = v;
+            }
         } else if (jr_opt_is(k->i64, "rejects_table")) {
             if (v->type != -RAY_SYM) bad = q_err(QE_TYPE);
             else {
@@ -1570,17 +1631,58 @@ static ray_t* jr_opts(jr_st* st, ray_t* opts) {
     return NULL;
 }
 
-static ray_t* jr_read(ray_t* src, ray_t* types, ray_t* opts, q_json_frame_t frame, int info_only) {
+/* ONE document is ONE batch, so `chunks` is 1 and a lambda target is called exactly once */
+static ray_t* jr_emit(jr_st* st, ray_t* tbl) {
+    ray_t* ed = NULL;
+    if (st->sink.kind == 2) {
+        ed = jr_rejects_tbl(st);
+        if (!ed || RAY_IS_ERR(ed)) return ed ? ed : q_err(QE_OOM);
+    }
+    ray_t* bad = q_loader_sink_emit(&st->sink, tbl, ed, 0, ray_table_nrows(tbl));
+    if (ed) ray_release(ed);
+    return bad;
+}
+
+static ray_t* jr_summary(const jr_st* st, int64_t rows) {
+    const int64_t* out = jr_out(st);
+    int64_t nkeep = 0;
+    int64_t* kn = (int64_t*)malloc((size_t)st->ncols * sizeof(int64_t));
+    char* kc = (char*)malloc((size_t)st->ncols);
+    if (!kn || !kc) { free(kn); free(kc); return q_err(QE_WSFULL); }
+    for (int64_t j = 0; j < st->ncols; j++)
+        if (st->want[j] != ' ') {
+            kn[nkeep] = out[j];
+            kc[nkeep++] = st->want[j] ? st->want[j] : st->chars[j];
+        }
+    ray_t* td = q_loader_types_dict(kn, kc, nkeep);
+    free(kn);
+    free(kc);
+    if (!td || RAY_IS_ERR(td)) return td ? td : q_err(QE_OOM);
+    ray_t* iv = q_loader_syms(st->ign, st->nign);
+    if (RAY_IS_ERR(iv)) { ray_release(td); return iv; }
+    return q_loader_summary(rows, st->rej_total, 1, iv, td);
+}
+
+static ray_t* jr_read(ray_t* src, ray_t* target, ray_t* types, ray_t* opts, q_json_frame_t frame, int info_only) {
     jr_st st = { .sample = J_DEF_SAMPLE, .records = JR_REC_AUTO, .format = frame };
     char* buf = NULL;
     int64_t n = 0;
-    ray_t* bad = jr_opts(&st, opts);
+    ray_t* bad = info_only ? NULL : q_loader_sink_open(&st.sink, target);
+    if (!bad) bad = jr_opts(&st, opts);
     if (!bad) bad = jr_bytes(src, &buf, &n);
     if (!bad) bad = jr_frame(&st, buf, n);
     if (!bad) bad = jr_classify(&st);
     if (!bad) bad = jr_schema(&st);
+    if (!bad && !info_only) bad = jr_target(&st);
     if (!bad && !info_only) bad = jr_types(&st, types);
+    if (!bad && !info_only) bad = jr_reconcile(&st);
     ray_t* r = bad ? bad : (info_only ? jr_info(&st) : jr_build(&st));
+    if (r && !RAY_IS_ERR(r) && st.sink.kind) {
+        int64_t rows = ray_table_nrows(r);
+        ray_t* s = jr_emit(&st, r);
+        ray_release(r);
+        r = s ? s : jr_summary(&st, rows);
+    }
     if (r && !RAY_IS_ERR(r) && !info_only && st.store_rej) {
         /* one load, one audit: the stored table is REPLACED, empty on a clean load
          * (.csv.read's law; the name lands like any q assignment) */
@@ -1610,17 +1712,16 @@ static ray_t* jr_arg(ray_t* x) {
 /* .j.i.read[source;target;types;opts] */
 static ray_t* j_read_fn(ray_t** args, int64_t n) {
     if (n != 4) return q_err(QE_RANK);
-    if (jr_arg(args[1])) return q_err(QE_NYI);       /* the rank is reserved; a target is refused, never ignored */
-    return jr_read(args[0], jr_arg(args[2]), jr_arg(args[3]), Q_JSON_AUTO, 0);
+    return jr_read(args[0], jr_arg(args[1]), jr_arg(args[2]), jr_arg(args[3]), Q_JSON_AUTO, 0);
 }
 
 /* .j.i.info[source;opts] */
 static ray_t* j_info_fn(ray_t** args, int64_t n) {
     if (n != 2) return q_err(QE_RANK);
-    return jr_read(args[0], NULL, jr_arg(args[1]), Q_JSON_AUTO, 1);
+    return jr_read(args[0], NULL, NULL, jr_arg(args[1]), Q_JSON_AUTO, 1);
 }
 
-ray_t* q_json_read_table(ray_t* src, q_json_frame_t frame) { return jr_read(src, NULL, NULL, frame, 0); }
+ray_t* q_json_read_table(ray_t* src, q_json_frame_t frame) { return jr_read(src, NULL, NULL, NULL, frame, 0); }
 
 static void jr_bind_fn(const char* name, ray_vary_fn fn) {
     ray_t* f = ray_fn_vary(name, RAY_FN_NONE, fn);

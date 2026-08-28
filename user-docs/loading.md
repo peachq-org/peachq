@@ -20,7 +20,7 @@ half is this page. Per-option detail lives on the two format pages; what to do w
 
 ## The mental model
 
-Five beats, in order.
+Six beats, in order.
 
 ### 1. Pick a source
 
@@ -90,7 +90,34 @@ narrower widths of a written number, `c` is a char, and `z` is the legacy dateti
 
 An explicit type is a promise, not a hint. A cell that will not parse under it is a frozen-type miss.
 
-### 5. A row that does not fit stops the load, or goes to the reject channel
+### 5. You rename with `xcol`
+
+The file calls it `sym`; your table calls it `ticker`. The `xcol` option renames columns **on the way in**, so a
+streaming load into an existing table never needs a rename afterwards:
+
+```q
+q).csv.read["sym,price\nAAPL,1.5\n";::;::;(enlist `xcol)!enlist `sym`price!`ticker`px]
+| ticker | px    |
+|        | float |
+|--------|-------|
+| "AAPL" | 1.5   |
+```
+
+It takes exactly what the q verb [`xcol`](https://code.kx.com/q/ref/cols/) takes — a symbol vector renaming the
+first columns positionally, or a dict of old name to new name — and behaves exactly as that verb behaves, down to
+`'length` for a key naming no column. That error arrives before a single row is read, and it stays an error: the
+tolerance levers of beat 6 govern bad *rows*, and a mistyped option is not a row.
+
+Two orderings follow from this being a *post-parse* transform, and both matter:
+
+- **`types` keys on the file's names, never the renamed ones.** Rename applies after typing, so adding a rename
+  later never invalidates a `types` dict you already wrote. `.csv.info` and `.j.info` describe the file too — an
+  `xcol` in their options changes nothing they report, which is what keeps their answer feedable back as `types`.
+- **Rename happens before the target is consulted.** Loading into a table of `ticker`,`px` from a file headed
+  `sym`,`price` works: by the time the reader asks the target what it has room for, the columns already carry
+  their new names.
+
+### 6. A row that does not fit stops the load, or goes to the reject channel
 
 The default posture is strict: a bad row aborts. Tolerance is opt-in, per option, and **always counted** — a lever
 governs whether the load survives a bad row, never whether it is recorded. See [Bad rows](bad-rows.md).

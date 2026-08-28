@@ -14,6 +14,9 @@
 / and an empty payload signals 'csv, exactly as a zero-byte file does.
 / Column types FREEZE after the sniff sample: a later cell that fails its frozen type signals 'csv, never a silent
 / null and never a mid-load re-promotion.  Sniffed text is always a string column - ask for symbols with types.
+/ xcol RENAMES columns on the way in, taking exactly what the q verb xcol takes and applying it BEFORE the target
+/ is consulted - so a file headed sym,price loads straight into a table of ticker,px.  types keys on the FILE's
+/ names whatever the rename does, and a key naming no column in the file is xcol's own 'length.
 / An option is NEVER silently ignored: an unknown or unimplemented key signals 'option.
 / The DELIMITER is sniffed among "," ";" tab "|" (a candidate qualifies only if every sample row parses to the same
 / field count above one column; most columns wins, ties keep candidate order).  None qualifying, a one-column-SHAPED
@@ -31,7 +34,8 @@
 / `a`b!"sj", overriding the sniff per column; or a type-char string "sj f" as the complete schema, one char per
 / column.  " " drops a column, "*" keeps it as a string.  An explicit type is a promise: a cell that will not
 / parse under it is a frozen-type miss
-/ @param opts (dict) delim (char), header (boolean), sample_size (long, sniff rows), buffer_size (long,
+/ @param opts (dict) xcol (symbol vector renaming the first columns positionally, or a dict of file name to new
+/ name), delim (char), header (boolean), sample_size (long, sniff rows), buffer_size (long,
 / read-chunk bytes), skip (long, default 0: records - not physical lines - dropped off the FRONT before anything
 / else reads them, so every sniff runs on what remains; a blank line counts, a comment line does not, reject
 / records keep physical line numbers), dateformat / timestampformat (string, strptime subset
@@ -49,7 +53,8 @@
 / padded row recorded; strict_mode (boolean, default 1b) - 0b reads a field whose quotes cannot parse as literal
 / bytes to the next delimiter; store_rejects (boolean) continue AND store the reject records in a global table,
 / replaced per load; rejects_table (symbol, default `reject_errors) names it and implies store_rejects
-/ @throws option for an unknown or unimplemented option key; csv for a malformed file or a frozen-type miss
+/ @throws option for an unknown or unimplemented option key; csv for a malformed file or a frozen-type miss;
+/ length for an xcol key naming no column, before a row is read - a bad option is never a reject record
 / @example .csv.read["a,b\n1,2\n3,4\n";::;::;()!()]  /  two long columns, from text in memory
 / @example .csv.read[`:trades.csv;::;(enlist `sym)!enlist "s";()!()]  /  sym as symbols, the rest sniffed
 / @example .csv.read[`:trades.csv;`dest;::;(enlist `skip)!enlist 2]  /  past a 2-record preamble into `dest
@@ -60,7 +65,8 @@
 / exactly the shape .csv.read takes as its types argument, so it can be edited and fed straight back.
 / ADVISORY on text: where low cardinality suggests a symbol column the dict says "s", even though .csv.read
 / itself never syms a sniffed column - feeding the dict back is what adopts the advice.
-/ Reads only the sniff sample (sample_size rows), so it does not validate the rest of the file.
+/ Reads only the sniff sample (sample_size rows), so it does not validate the rest of the file.  It describes the
+/ FILE, so an xcol in opts is accepted and renames nothing here - which is what keeps the answer feedable back.
 / @param file (symbol or string or string list) the same source forms .csv.read takes
 / @param opts (dict) the same options dict .csv.read takes
 / @example .csv.info["a,b\n1,2\n";()!()]  /  `a`b!"jj"

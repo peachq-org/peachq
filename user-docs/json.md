@@ -38,8 +38,10 @@ q).j.read["[{\"a\":1},{\"a\":2}]";::;::;()!()]
 | 2    |
 ```
 
-`.j.read` takes four arguments — source, target, types, options. `target` is reserved for a future in-place load and
-signals `'nyi` for anything but `::`.
+`.j.read` takes four arguments — source, target, types, options — and `target` is the same contract
+[`.csv.read`'s is](csv.md#targets-where-the-rows-go): `::` hands the table back, a symbol names a global table the
+rows are inserted into, a rank-3 lambda takes the batch. One JSON document is one batch, so the lambda is called
+once and `chunks` is always `1`.
 
 Because the reader reads the form q writes, `.j.j` output round-trips unaided, temporals included:
 
@@ -310,6 +312,7 @@ The fourth argument is a dict. **An option is never silently ignored**: an unkno
 
 | Option | Type | Default | What it does |
 |---|---|---|---|
+| `xcol` | symbol vector or dict | off | renames columns on the way in, exactly as the `xcol` verb does |
 | `sample_size` | long | 20480 | records read to infer types |
 | `format` | symbol | `` `auto `` | how records are framed: `` `array ``, `` `newline_delimited ``, `` `auto `` |
 | `records` | boolean or symbol | `` `auto `` | `1b` every value is a record; `0b` never expand, never recurse |
@@ -321,7 +324,19 @@ The fourth argument is a dict. **An option is never silently ignored**: an unkno
 | `rejects_table` | symbol | `` `reject_errors `` | names that table, and implies `store_rejects` |
 | `null_padding` | boolean | `0b` | accepted for `.csv.read` parity; changes nothing, since the key union already null-fills |
 
-The format subset is the one [`.csv.read` validates](csv.md#formats-for-dates-and-timestamps).
+The format subset is the one [`.csv.read` validates](csv.md#formats-for-dates-and-timestamps), and `xcol` is the
+rename described on [Loading a file](loading.md#5-you-rename-with-xcol) — it applies before the target is consulted,
+so a document keyed `sym`,`price` loads straight into a table of `ticker`,`px`:
+
+```q
+q)t:([]ticker:0#`;px:0#0f)
+q).j.read["[{\"sym\":\"AAPL\",\"price\":1.5}]";`t;::;(enlist `xcol)!enlist `sym`price!`ticker`px]
+rows    | 1
+rejected| 0
+chunks  | 1
+ignored | `symbol$()
+types   | `ticker`px!"sf"
+```
 
 Three option names you may have seen elsewhere signal `'option` here and always will: `maximum_depth`,
 `map_inference_threshold` and `field_appearance_threshold`. They tune how deeply a nested value is flattened into
