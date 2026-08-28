@@ -22,6 +22,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_value/_is_fn/_rank — the lambda-target seam */
 #include "qlang/io/q_csv.h"
+#include "qlang/io/q_loader.h"  /* the shared target seam: oracle + sink + the xcol rename */
 #include "qlang/io/q_io.h"      /* the resource-read seam: paths + the slice read */
 #include "qlang/parse/q_tok.h"  /* the Tok scanners — THE spelling owners the sniffer delegates to */
 #include "qlang/q_env.h"        /* q_env_bind — the .csv.i.* bindings */
@@ -89,13 +90,10 @@ typedef struct csv_st {
     int64_t  nkept;
     ray_t**  acc;                 /* per kept column: RAY_LIST of parsed atoms */
     int64_t  pend, rows_total, batches;
-    int      sink_kind;           /* 0 return-table, 1 global name, 2 lambda */
-    ray_t*   sink;                /* borrowed */
+    q_loader_sink sink;           /* the target: schema oracle + batch sink */
     ray_t*   types_arg;           /* borrowed */
-    int      has_tgt, use_upsert; /* an EXISTING target table: its schema outranks the sniff */
-    int64_t* tgt_names;
-    char*    tgt_chars;
-    int64_t  tgt_n;
+    ray_t*   xcol;                /* the xcol option, retained; NULL = no rename */
+    int64_t* fnames;              /* the FILE's names, kept only under a rename: types keys on them */
     int64_t* ign;                 /* CSV columns the subsetting rider dropped */
     int64_t  nign;
     ray_t*   f_hdr;               /* freeze transients */
@@ -988,8 +986,9 @@ static ray_t* csv_types_apply(csv_st* st) {
             char c = csv_type_canon((char)v->u8);
             if (!c) bad = q_err(QE_TYPE);
             else {
+                const int64_t* look = st->fnames ? st->fnames : st->names;
                 int64_t j = 0;
-                while (j < st->ncols && st->names[j] != k->i64) j++;
+                while (j < st->ncols && look[j] != k->i64) j++;
                 if (j == st->ncols) bad = q_err(QE_DOMAIN);
                 else st->ctypes[j] = c;
             }
@@ -998,39 +997,6 @@ static ray_t* csv_types_apply(csv_st* st) {
         if (v && !RAY_IS_ERR(v)) ray_release(v);
         if (bad) return bad;
     }
-    return NULL;
-}
-
-static int64_t csv_tgt_find(const csv_st* st, int64_t name) {
-    for (int64_t k = 0; k < st->tgt_n; k++)
-        if (st->tgt_names[k] == name) return k;
-    return -1;
-}
-
-/* An EXISTING symbol target fixes the parse map: per-column chars from its meta
- * (key table first for a keyed target, which also routes emission to upsert).
- * A list/str column is the string COLUMN -> '*' (the tag<->char owner's chars
- * serve every other tag; one without a parser arm aborts 'csv at its first cell). */
-static ray_t* csv_target_schema(csv_st* st, ray_t* g) {
-    ray_t* parts[2] = { g, NULL };
-    if (q_type_is_keyed(g)) {
-        parts[0] = ray_dict_keys(g);
-        parts[1] = ray_dict_vals(g);
-        st->use_upsert = 1;
-    }
-    int64_t n = ray_table_ncols(parts[0]) + (parts[1] ? ray_table_ncols(parts[1]) : 0);
-    st->tgt_names = (int64_t*)malloc((size_t)n * sizeof(int64_t));
-    st->tgt_chars = (char*)malloc((size_t)n);
-    if (!st->tgt_names || !st->tgt_chars) return q_err(QE_WSFULL);
-    int64_t k = 0;
-    for (int p = 0; p < 2 && parts[p]; p++)
-        for (int64_t c = 0; c < ray_table_ncols(parts[p]); c++, k++) {
-            st->tgt_names[k] = ray_table_col_name(parts[p], c);
-            ray_t* col = ray_table_get_col_idx(parts[p], c);   /* borrowed */
-            st->tgt_chars[k] = (col->type == RAY_LIST || col->type == RAY_STR) ? '*' : q_type_char(col->type);
-        }
-    st->tgt_n = n;
-    st->has_tgt = 1;
     return NULL;
 }
 
@@ -1222,42 +1188,53 @@ static ray_t* csv_freeze(csv_st* st) {
         }
         free(b);
     }
+    /* THE RENAME, BEFORE any target reconciliation — otherwise a column is dropped for not
+     * matching the target under the very name about to be changed.  The file's own names are
+     * kept for the types dict, which keys on them whatever the rename does.  `.csv.info`
+     * describes the FILE, so it reports unrenamed names and stays feedable as types. */
+    if (st->xcol && !st->info_only) {
+        st->fnames = (int64_t*)malloc((size_t)nc * sizeof(int64_t));
+        if (!st->fnames) return q_err(QE_WSFULL);
+        memcpy(st->fnames, st->names, (size_t)nc * sizeof(int64_t));
+        bad = q_loader_rename(st->xcol, st->names, nc);
+        if (bad) return bad;
+    }
     int64_t first = header ? 1 : 0;
     for (int64_t j = 0; j < nc; j++)
         st->ctypes[j] = st->info_only ? csv_resolve_advised(st->f_ct[j], &st->f_card[j])
                                       : q_csv_resolve(st->f_ct[j]);
-    if (st->has_tgt) {
+    if (st->sink.has_schema) {
         /* the target's schema outranks the sniff: by NAME with a header (a CSV column
          * the target lacks is projected to ' ' — the subsetting rider), positionally
          * and projection-free without one — position MEANS the target column, so the
          * batch takes its name too and the name-matching insert seam still lands it */
         for (int64_t j = 0; j < nc; j++) {
-            int64_t k = csv_tgt_find(st, st->names[j]);
-            if (header) st->ctypes[j] = k >= 0 ? st->tgt_chars[k] : ' ';
-            else if (j < st->tgt_n) {
-                st->ctypes[j] = st->tgt_chars[j];
-                st->names[j] = st->tgt_names[j];
+            int64_t k = q_loader_sink_find(&st->sink, st->names[j]);
+            if (header) st->ctypes[j] = k >= 0 ? st->sink.chars[k] : ' ';
+            else if (j < st->sink.n) {
+                st->ctypes[j] = st->sink.chars[j];
+                st->names[j] = st->sink.names[j];
             }
         }
     }
     bad = csv_types_apply(st);
     if (bad) return bad;
-    if (st->has_tgt && st->types_arg) {
+    if (st->sink.has_schema && st->types_arg) {
         /* explicit types must AGREE with the target where both speak: any change
          * types_apply made to a target-mapped column is a conflict — 'mismatch
          * EARLY, before a single cell parses.  An explicit ' ' drop passes: the
          * missing column is then the insert seam's own contract to refuse. */
         for (int64_t j = 0; j < nc; j++) {
-            int64_t k = header ? csv_tgt_find(st, st->names[j]) : (j < st->tgt_n ? j : -1);
-            if (k >= 0 && st->ctypes[j] != ' ' && st->ctypes[j] != st->tgt_chars[k])
+            int64_t k = header ? q_loader_sink_find(&st->sink, st->names[j]) : (j < st->sink.n ? j : -1);
+            if (k >= 0 && st->ctypes[j] != ' ' && st->ctypes[j] != st->sink.chars[k])
                 return q_err(QE_MISMATCH);
         }
     }
-    if (st->has_tgt && header) {                   /* the rider's report: what never landed */
+    if (st->sink.has_schema && header) {           /* the rider's report: what never landed */
         st->ign = (int64_t*)malloc((size_t)nc * sizeof(int64_t));
         if (!st->ign) return q_err(QE_WSFULL);
         for (int64_t j = 0; j < nc; j++)
-            if (st->ctypes[j] == ' ' && csv_tgt_find(st, st->names[j]) < 0)
+            if (st->ctypes[j] == ' ' && q_loader_sink_find(&st->sink, st->names[j]) < 0)
                 st->ign[st->nign++] = st->names[j];
     }
     st->nkept = 0;
@@ -1493,60 +1470,19 @@ static ray_t* csv_flush_tbl(csv_st* st) {
     return tbl;
 }
 
-/* misc: the lambda target's extensible side-channel — 0-based chunk index + rows so far */
-static ray_t* csv_misc_dict(int64_t chunk, int64_t rows) {
-    static const char* const kn[2] = { "chunk", "rows" };
-    ray_t* kl = ray_list_new(2);
-    ray_t* vl = ray_list_new(2);
-    int64_t v[2] = { chunk, rows };
-    for (int i = 0; i < 2 && !RAY_IS_ERR(kl) && !RAY_IS_ERR(vl); i++) {
-        ray_t* k = ray_sym(ray_sym_intern_runtime(kn[i], strlen(kn[i])));
-        ray_t* x = ray_i64(v[i]);
-        kl = ray_list_append(kl, k);
-        vl = ray_list_append(vl, x);
-        ray_release(k);
-        ray_release(x);
-    }
-    if (RAY_IS_ERR(kl) || RAY_IS_ERR(vl)) {
-        ray_t* e = RAY_IS_ERR(kl) ? kl : vl;
-        if (!RAY_IS_ERR(kl)) ray_release(kl);
-        if (!RAY_IS_ERR(vl)) ray_release(vl);
-        return e;
-    }
-    ray_t* keys = q_list_collapse(kl);
-    ray_release(kl);
-    if (!keys || RAY_IS_ERR(keys)) { ray_release(vl); return keys ? keys : q_err(QE_OOM); }
-    ray_t* vals = q_list_collapse(vl);
-    ray_release(vl);
-    if (!vals || RAY_IS_ERR(vals)) { ray_release(keys); return vals ? vals : q_err(QE_OOM); }
-    return ray_dict_new(keys, vals);               /* consumes both */
-}
-
 static ray_t* csv_emit(csv_st* st) {
     ray_t* tbl = csv_flush_tbl(st);
     if (RAY_IS_ERR(tbl)) return tbl;
-    ray_t* r;
-    if (st->sink_kind == 1) r = st->use_upsert ? q_upsert_wrap(st->sink, tbl) : q_insert_wrap(st->sink, tbl);
-    else {
-        ray_t* ed = csv_rejects_tbl(st, st->rej_flushed);   /* THIS batch's records */
+    ray_t* ed = NULL;
+    if (st->sink.kind == 2) {
+        ed = csv_rejects_tbl(st, st->rej_flushed);          /* THIS batch's records */
         if (!ed || RAY_IS_ERR(ed)) { ray_release(tbl); return ed ? ed : q_err(QE_OOM); }
         st->rej_flushed = st->rej_total;
-        ray_t* misc = csv_misc_dict(st->batches - 1, st->rows_total);
-        if (!misc || RAY_IS_ERR(misc)) {
-            ray_release(tbl);
-            ray_release(ed);
-            return misc ? misc : q_err(QE_OOM);
-        }
-        ray_t* cargs[3] = { tbl, ed, misc };
-        r = q_eval_apply_value(st->sink, cargs, 3);
-        ray_release(ed);
-        ray_release(misc);
     }
+    ray_t* bad = q_loader_sink_emit(&st->sink, tbl, ed, st->batches - 1, st->rows_total);
+    if (ed) ray_release(ed);
     ray_release(tbl);
-    if (!r) return q_err(QE_OOM);
-    if (RAY_IS_ERR(r)) return r;
-    ray_release(r);
-    return NULL;
+    return bad;
 }
 
 /* ---- options + arguments --------------------------------------------------- */
@@ -1637,6 +1573,13 @@ static ray_t* csv_opts(csv_st* st, ray_t* opts) {
             else if (csv_sym_is(k->i64, "null_padding")) st->null_pad = v->u8 != 0;
             else if (csv_sym_is(k->i64, "strict_mode")) st->lenient = v->u8 == 0;
             else st->store_rej = v->u8 != 0;
+        } else if (csv_sym_is(k->i64, "xcol")) {
+            if (v->type != -RAY_SYM && v->type != RAY_SYM && v->type != RAY_DICT) bad = q_err(QE_TYPE);
+            else {
+                if (st->xcol) ray_release(st->xcol);
+                ray_retain(v);
+                st->xcol = v;
+            }
         } else if (csv_sym_is(k->i64, "rejects_table")) {
             if (v->type != -RAY_SYM) bad = q_err(QE_TYPE);
             else {
@@ -1678,9 +1621,10 @@ static void csv_free(csv_st* st) {
     free(st->f_ct);
     free(st->f_card);
     free(st->sniff_lines);
-    free(st->tgt_names);
-    free(st->tgt_chars);
+    free(st->fnames);
     free(st->ign);
+    q_loader_sink_free(&st->sink);
+    if (st->xcol) ray_release(st->xcol);
     if (st->sniff) ray_release(st->sniff);
     if (st->f_hdr) ray_release(st->f_hdr);
     for (int i = 0; i < 4; i++)
@@ -1702,7 +1646,7 @@ static void csv_free(csv_st* st) {
 static ray_t* csv_pump(csv_st* st, const char* p, int64_t n, int first) {
     int64_t skip = (first && n >= 3 && !memcmp(p, "\xef\xbb\xbf", 3)) ? 3 : 0;
     ray_t* bad = n > skip ? csv_feed(st, p + skip, n - skip) : NULL;
-    if (!bad && st->frozen && st->sink_kind && st->pend > 0) bad = csv_emit(st);
+    if (!bad && st->frozen && st->sink.kind && st->pend > 0) bad = csv_emit(st);
     return bad;
 }
 
@@ -1808,72 +1752,12 @@ static ray_t* csv_run(csv_st* st, ray_t* src) {
 
 /* ---- results --------------------------------------------------------------- */
 
-static ray_t* csv_types_dict(const int64_t* names, const char* chars, int64_t n) {
-    ray_t* kl = ray_list_new(n);
-    if (RAY_IS_ERR(kl)) return kl;
-    for (int64_t i = 0; i < n; i++) {
-        ray_t* s = ray_sym(names[i]);
-        kl = ray_list_append(kl, s);
-        ray_release(s);
-        if (RAY_IS_ERR(kl)) return kl;
-    }
-    ray_t* keys = q_list_collapse(kl);
-    ray_release(kl);
-    if (!keys || RAY_IS_ERR(keys)) return keys ? keys : q_err(QE_OOM);
-    ray_t* vals = ray_charv(chars, n);
-    if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
-    return ray_dict_new(keys, vals);               /* consumes both */
-}
-
-/* the rider-dropped CSV column names as a sym vector (typed-empty when none) */
-static ray_t* csv_ignored_syms(const csv_st* st) {
-    if (!st->nign) return ray_sym_vec_new(RAY_SYM_W64, 1);
-    ray_t* l = ray_list_new(st->nign);
-    if (RAY_IS_ERR(l)) return l;
-    for (int64_t i = 0; i < st->nign; i++) {
-        ray_t* s = ray_sym(st->ign[i]);
-        l = ray_list_append(l, s);
-        ray_release(s);
-        if (RAY_IS_ERR(l)) return l;
-    }
-    ray_t* v = q_list_collapse(l);
-    ray_release(l);
-    return v ? v : q_err(QE_OOM);
-}
-
 static ray_t* csv_summary(csv_st* st) {
-    ray_t* td = csv_types_dict(st->knames, st->kchars, st->nkept);
+    ray_t* td = q_loader_types_dict(st->knames, st->kchars, st->nkept);
     if (!td || RAY_IS_ERR(td)) return td ? td : q_err(QE_OOM);
-    ray_t* iv = csv_ignored_syms(st);
+    ray_t* iv = q_loader_syms(st->ign, st->nign);
     if (RAY_IS_ERR(iv)) { ray_release(td); return iv; }
-    static const char* const kn[] = { "rows", "rejected", "chunks", "ignored", "types" };
-    ray_t* kl = ray_list_new(5);
-    ray_t* vl = ray_list_new(5);
-    if (RAY_IS_ERR(kl) || RAY_IS_ERR(vl)) {
-        if (!RAY_IS_ERR(kl)) ray_release(kl);
-        if (!RAY_IS_ERR(vl)) ray_release(vl);
-        ray_release(td);
-        ray_release(iv);
-        return q_err(QE_OOM);
-    }
-    ray_t* vs[5] = { ray_i64(st->rows_total), ray_i64(st->rej_total), ray_i64(st->batches), iv, td };
-    for (int i = 0; i < 5 && !RAY_IS_ERR(kl) && !RAY_IS_ERR(vl); i++) {
-        ray_t* s = ray_sym(ray_sym_intern_runtime(kn[i], strlen(kn[i])));
-        kl = ray_list_append(kl, s);
-        ray_release(s);
-        vl = ray_list_append(vl, vs[i]);
-    }
-    for (int i = 0; i < 5; i++) ray_release(vs[i]);
-    if (RAY_IS_ERR(kl) || RAY_IS_ERR(vl)) {
-        ray_t* e = RAY_IS_ERR(kl) ? kl : vl;
-        if (!RAY_IS_ERR(kl)) ray_release(kl);
-        if (!RAY_IS_ERR(vl)) ray_release(vl);
-        return e;
-    }
-    ray_t* keys = q_list_collapse(kl);
-    ray_release(kl);
-    if (!keys || RAY_IS_ERR(keys)) { ray_release(vl); return keys ? keys : q_err(QE_OOM); }
-    return ray_dict_new(keys, vl);
+    return q_loader_summary(st->rows_total, st->rej_total, st->batches, iv, td);
 }
 
 /* ---- the natives ----------------------------------------------------------- */
@@ -1898,34 +1782,21 @@ static ray_t* csv_read_fn(ray_t** args, int64_t n) {
     if (n != 4) return q_err(QE_RANK);
     csv_st st;
     csv_init(&st);
-    ray_t* target = csv_arg_val(args[1]);
-    if (!target) st.sink_kind = 0;
-    else if (target->type == -RAY_SYM) { st.sink_kind = 1; st.sink = target; }
-    else if (q_eval_apply_is_fn(target)) {
-        if (q_eval_apply_rank(target) != 3) return q_err(QE_RANK);
-        st.sink_kind = 2;
-        st.sink = target;
-    } else return q_err(QE_TYPE);
     ray_t* ty = csv_arg_val(args[2]);
     if (ty && ty->type != RAY_CHARV && ty->type != -RAY_CHARV && ty->type != RAY_DICT)
         return q_err(QE_TYPE);
     st.types_arg = ty;
-    ray_t* bad = NULL;
-    if (st.sink_kind == 1) {
-        ray_t* g = q_env_get(target->i64);         /* the same resolution insert itself uses */
-        if (g && (g->type == RAY_TABLE || q_type_is_keyed(g)))
-            bad = csv_target_schema(&st, g);
-    }
+    ray_t* bad = q_loader_sink_open(&st.sink, csv_arg_val(args[1]));
     if (!bad) bad = csv_opts(&st, csv_arg_val(args[3]));
     if (!bad) bad = csv_run(&st, args[0]);
     ray_t* result = NULL;
     if (!bad) {
-        if (st.sink_kind == 0) result = csv_flush_tbl(&st);
+        if (st.sink.kind == 0) result = csv_flush_tbl(&st);
         else {
             /* flush the tail — a zero-row file still delivers its schema once, and a
              * lambda still receives a trailing all-rejected batch's errData */
             if (st.pend > 0 || st.batches == 0 ||
-                (st.sink_kind == 2 && st.rej_total > st.rej_flushed)) bad = csv_emit(&st);
+                (st.sink.kind == 2 && st.rej_total > st.rej_flushed)) bad = csv_emit(&st);
             if (!bad) result = csv_summary(&st);
         }
     }
@@ -1957,7 +1828,7 @@ static ray_t* csv_info_fn(ray_t** args, int64_t n) {
     st.info_only = 1;
     ray_t* bad = csv_opts(&st, csv_arg_val(args[1]));
     if (!bad) bad = csv_run(&st, args[0]);
-    ray_t* result = bad ? bad : csv_types_dict(st.names, st.ctypes, st.ncols);
+    ray_t* result = bad ? bad : q_loader_types_dict(st.names, st.ctypes, st.ncols);
     csv_free(&st);
     return result;
 }
