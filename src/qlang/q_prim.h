@@ -1,16 +1,17 @@
 /* q_prim — the q VALUE primitives: single-home helpers whose bodies live in
- * ops/ but whose callers are everywhere (eval, net, io, fmt, the tests).
+ * ops/ (and io/) but whose callers are everywhere (eval, net, io, fmt, the tests).
  *
  * They were declared in q_registry.h, which made every caller of a pure value
  * helper look like a consumer of the registry contract; the real reason was
  * reach — ops/q_registry_internal.h is poisoned (string-C3: bare RAY_U8), so
  * non-ops callers cannot include it.  This header is that reach, named for what
- * it carries.  Declarations only: nothing here is defined outside ops/. */
+ * it carries.  Declarations only: nothing here is defined outside ops/ and io/. */
 #ifndef Q_PRIM_H
 #define Q_PRIM_H
 
 #include <rayforce.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* Collapse a boxed RAY_LIST of homogeneous scalar atoms into the matching
@@ -128,6 +129,33 @@ ray_t*  q_enum_take(ray_t* y, ray_t* n);           /* n#y for reference-carrying
 char    q_enum_meta_f(ray_t* col, int64_t* f_out); /* meta f target + FK t-char override (0 = keep) */
 ray_t*  q_enum_null_atom(int64_t dom);             /* the ` null cell as -20h */
 ray_t*  q_enum_null_col(int64_t dom, int64_t n);   /* n null positions as a 20h column */
+
+/* The loader cell parser, DEFINED in io/q_csv.c: shape is per-format, what a cell
+ * MEANS is not, so `.j.read` reads `"2011-01-01"` as `.csv.read` reads those bytes.
+ * The bodies stay in q_csv.c because detect's claims and cell_atom's acceptances
+ * must move together — split them across files and they drift. */
+
+/* TWO ordered runs are load-bearing: BOOL < I64 < F64 (numeric promotion) and
+ * MINUTE < SECOND < TIME < TIMESPAN (the widest WRITTEN form wins, never truncation).
+ * GUID and BYTE join NEITHER run — they promote with nothing but themselves — and sit
+ * after TIMESPAN so both runs and CT_STR's dominance are untouched. */
+typedef enum { CT_UNKNOWN = 0, CT_BOOL, CT_I64, CT_F64, CT_DATE, CT_MONTH, CT_TS,
+               CT_MINUTE, CT_SECOND, CT_TIME, CT_TIMESPAN, CT_GUID, CT_BYTE, CT_STR } ct_t;
+
+#define Q_CSV_FMT_MAX 64
+
+/* the caller's dateformat / timestampformat overrides; pass a ZEROED value when
+ * neither is active — one representation of absence, never NULL */
+typedef struct { char datefmt[Q_CSV_FMT_MAX]; char tsfmt[Q_CSV_FMT_MAX]; } q_csv_fmt_t;
+
+int  q_csv_fmt_valid(const char* s, size_t n, int want_time);        /* the dateformat/timestampformat subset */
+ct_t q_csv_detect(const q_csv_fmt_t* fmt, const char* f, size_t n);  /* CT_UNKNOWN = a null token */
+ct_t q_csv_promote(ct_t cur, ct_t obs);      /* STR dominates: a mixed column is text */
+char q_csv_resolve(ct_t t);                  /* the frozen type char; the .csv.info 's' advice stays private */
+
+/* one cell -> an OWNED atom under the FROZEN type char, or 'csv.  Whatever
+ * q_csv_detect types this must accept: a second caller must not break that pairing. */
+ray_t* q_csv_cell_atom(const q_csv_fmt_t* fmt, char c, const char* f, size_t n);
 
 /* Column attribute as kdb's single letter: 's'/'u'/'g'/'p', or 0 for none.
  * Reads the block markers/kind DIRECTLY (the kdb u#/p# policy is composed in the

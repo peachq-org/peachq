@@ -213,9 +213,24 @@ A lambda of any other rank is refused with `'rank`. A target that is neither `::
 
 ## Types: overriding the sniff
 
-The third argument states types by hand. Type chars are drawn from `"bjfsdtpmuvn"` — boolean, long, float,
-symbol, date, time, timestamp, month, minute, second, timespan — plus two specials: `"*"` keeps the raw string,
-and `" "` **drops that column entirely**, so it is never parsed and never appears in the result.
+The third argument states types by hand. Type chars are the **18 basic types**, `"bgxhijefcspmdznuvt"` — boolean,
+guid, byte, short, int, long, real, float, char, symbol, timestamp, month, date, datetime, timespan, minute, second,
+time — plus two specials: `"*"` keeps the raw string, and `" "` **drops that column entirely**, so it is never parsed
+and never appears in the result. Anything else is `'type`.
+
+Five of those chars are reachable only this way, because the sniff never claims them: `h`, `i` and `e` are the
+narrower widths of a written number, `c` is a char, and `z` is the legacy datetime. Three carry a rule worth knowing:
+
+- **`c` is exactly one character.** One cell is one atom, so `a` reads as the char `"a"` and `ab` is a miss — two
+  characters would be a char *vector* in a single cell. An empty cell is the char null `" "`. A column of text is
+  what `*` is for.
+- **`z` is `p`'s cell, read out as a datetime.** The legacy datetime is spelled like a timestamp, so it accepts what
+  `p` accepts and refuses what `p` refuses (a non-zero offset included). The *sniffer* still types a `T`-separated
+  token as `p`, as it should: a declared type beats a sniffed one.
+- **`h` and `i` inherit the sentinel rule at their own width.** A digit run landing exactly on `0Wh`/`0Nh` (or the
+  `i` pair) is a miss, not a silent infinity — the same call the long already makes on `9223372036854775807`. `e`
+  is on the float lane instead, where a *written* `0w` is a legitimate form and reads as `0We`, exactly as under `f`:
+  the rule is about a digit run that lands on a sentinel, not about a value that is one.
 
 A **dict** names the columns it cares about and leaves the rest to the sniff:
 
@@ -388,23 +403,28 @@ It never guesses beyond a written form. `20260822` stays a long. `2026.08` stays
 ask for booleans and symbols explicitly. A leading-zero number like `030151360` stays text, because the zeros are
 data. A comma decimal (`1,53`) stays text, because the comma is a delimiter, not a decimal point.
 
-Most visibly, **day-order forms stay text**. `03/10/2024` and `12-13-2004` are ambiguous as *forms*, so the
-sniffer adopts neither reading and the column arrives as strings. One such cell holds the whole column text, even
-where every other cell is a clean ISO date:
+**Day-order forms follow `\z`.** `03/10/2024` and `12-13-2004` are ambiguous as *forms*, but a global `\z` is a
+*declaration* of the field order — `\z 0` month-first, `\z 1` day-first, the same system setting `"D"$` obeys —
+so the sniffer reads the slash and dash four-digit-year pairs under whichever order it states, and a seconds
+clock beside one composes into a timestamp (the date–time separator set is `D`, `T`, space or dash — the same
+set the year-first forms accept):
 
 ```q
 q)`:d.csv 0: ("a";"2024-03-08";"03/10/2024");
 q).csv.read[`:d.csv;::;::;()!()]
-| a            |
-|              |
-|--------------|
-| "2024-03-08" |
-| "03/10/2024" |
+| a          |
+| date       |
+|------------|
+| 2024.03.08 |
+| 2024.03.10 |
 ```
 
-There are two doors out. Declare the column `"d"` and the reader parses the slash form using the field order `\z`
-selects — `\z 0` month-first, `\z 1` day-first, the same system setting the rest of q obeys. Or state a
-`dateformat` and replace the grammar outright.
+The same bytes answer differently under the other declaration (`\z 1` reads that file's slash row as October 3),
+which makes a sniffed date column environment-dependent — already true of `"D"$`, and kx's own design. A value
+the declared order cannot read (`30-04-2024` under `\z 0`) sniffs text — the near-miss law, so a mixed column is
+safe by construction — and a shape the declaration cannot disambiguate stays text under either order: two-digit
+years (`12/17/23`), single-digit fields (`1/1/2020`), and the dotted pair (`10.20.2024`). A stated `dateformat`
+still replaces the grammar outright.
 
 ### Timezone suffixes stay text
 

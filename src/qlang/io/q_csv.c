@@ -25,6 +25,7 @@
 #include "qlang/io/q_io.h"      /* the resource-read seam: paths + the slice read */
 #include "qlang/parse/q_tok.h"  /* the Tok scanners — THE spelling owners the sniffer delegates to */
 #include "qlang/q_env.h"        /* q_env_bind — the .csv.i.* bindings */
+#include "qlang/q_prim.h"       /* ct_t + the q_csv_* cell-parser seam defined here */
 #include "core/numparse.h"      /* ray_parse_i64/f64 */
 #include "lang/env.h"           /* ray_fn_vary */
 #include "lang/eval.h"          /* RAY_FN_NONE, ray_at_fn */
@@ -49,20 +50,12 @@
 #define CSV_RJ_UNTERM   "unterminatedquote"
 #define CSV_RJ_PADDED   "padded"      /* a null_padding row: salvaged INTO the data, still audited */
 
-/* sniff lattice — TWO ordered runs are load-bearing: BOOL < I64 < F64 (numeric
- * promotion) and MINUTE < SECOND < TIME < TIMESPAN (the duration lattice:
- * the widest observed WRITTEN form wins, never truncation — kdb-formats law) */
-typedef enum { CT_UNKNOWN = 0, CT_BOOL, CT_I64, CT_F64, CT_DATE, CT_MONTH, CT_TS,
-               CT_MINUTE, CT_SECOND, CT_TIME, CT_TIMESPAN, CT_STR } ct_t;
-
-typedef struct {
+typedef struct q_csv_card {
     uint32_t h[CSV_CARD_CAP];
     uint16_t l[CSV_CARD_CAP];
     uint16_t distinct;
     uint32_t non_null;
 } card_t;
-
-#define CSV_FMT_MAX 64
 
 typedef struct { const char* p; size_t n; char* dyn; } csv_fld;
 
@@ -77,8 +70,8 @@ typedef struct csv_st {
     int      no_delim;            /* THE NARROWED FALLBACK: a one-column-shaped file loads whole lines */
     int      row_cut;             /* csv_field hit an unquoted comment char: the row ends here */
     int      scan_ct;             /* carry scan is inside a comment tail — opaque until the newline */
-    char     datefmt[CSV_FMT_MAX];  /* dateformat / timestampformat options; empty = the default */
-    char     tsfmt[CSV_FMT_MAX];    /* writer's-forms grammar, set = the format REPLACES it */
+    q_csv_fmt_t fmt;              /* dateformat / timestampformat options; empty = the default.
+                                   * Set, the format REPLACES the writer's-forms grammar. */
     int      header;              /* -1 = sniff, else forced 0/1 */
     int64_t  skip_left;           /* records still to drop off the front */
     int      info_only;
@@ -157,11 +150,45 @@ static int csv_bool_tok(const char* f, size_t n) {
     return -1;
 }
 
+/* Day-order aa-bb-yyyy: field order is `\z`'s DECLARATION (0 month-first, 1 day-first,
+ * syscmds.md#z-date-parsing), which is why the SNIFF may claim it (owner 2026-08-27) — a global
+ * `\z` declares the order, so reading it is not a guess.  Tok owns the doc-spelled SLASH pair;
+ * the loader adds only the dash files actually carry.  Dotted day-order, 2-digit years and
+ * single-digit fields stay text: the shape must be unambiguous before the order question arises. */
+static int csv_dayorder_date(const char* f, size_t n, int64_t* y, int64_t* m, int64_t* d) {
+    if (n != 10 || f[2] != '-' || f[5] != '-') return 0;
+    for (size_t i = 0; i < 10; i++) {
+        if (i == 2 || i == 5) continue;
+        if ((unsigned)(f[i] - '0') > 9) return 0;
+    }
+    int64_t a = (f[0] - '0') * 10 + f[1] - '0', b = (f[3] - '0') * 10 + f[4] - '0';
+    *y = (f[6] - '0') * 1000 + (f[7] - '0') * 100 + (f[8] - '0') * 10 + f[9] - '0';
+    *m = q_tok_date_order() ? b : a;
+    *d = q_tok_date_order() ? a : b;
+    return 1;
+}
+
 static int csv_date_cell(const char* f, size_t n, int32_t* out) {
     int64_t y, m, d;
-    if (!q_tok_date(f, n, &y, &m, &d) || !q_calendar_date_valid(y, m, d)) return 0;
+    if (!q_tok_date(f, n, &y, &m, &d) && !csv_dayorder_date(f, n, &y, &m, &d)) return 0;
+    if (!q_calendar_date_valid(y, m, d)) return 0;
     *out = (int32_t)q_calendar_days_from_civil(y, m, d);
     return 1;
+}
+
+/* One timestamp cell: Tok's year-first grammar first, else a day-order head composed with the
+ * writer's seconds clock (HH:MM:SS[.f], < 24h) over Tok's own separator set — the same date home
+ * reads the head, so whatever order `\z` declares holds for timestamps too. */
+static int csv_ts_cell(const char* f, size_t n, int64_t* out) {
+    if (q_tok_ts(f, n, out)) return 1;
+    int32_t dd;
+    if (n < 19 || !csv_date_cell(f, 10, &dd)) return 0;
+    if (!(f[10] == 'D' || f[10] == 'T' || f[10] == ' ' || f[10] == '-')) return 0;
+    const char* t = f + 11;
+    if (t[2] != ':' || t[5] != ':') return 0;
+    int64_t secs, frac;
+    if (!q_tok_clock(t, n - 11, &secs, &frac) || secs >= 86400) return 0;
+    return q_calendar_ts_compose_checked(dd, secs * 1000000000LL + frac, out);
 }
 
 static int csv_month_cell(const char* f, size_t n, int64_t* months) {
@@ -222,6 +249,50 @@ static ct_t csv_clock_class(const char* f, size_t n, int64_t* secs, int64_t* fra
     return t;
 }
 
+/* The LOADER 'p' grammar over Tok's (S8, owner 2026-08-27): a ZERO-offset tail —
+ * Z | z | +00:00 — strips, because the digits already ARE the UTC instant, and
+ * minute resolution (date sep hh:mm) composes.  A non-zero offset is an
+ * instruction to SHIFT and stays a miss (never a silent shift); so do -00:00
+ * (RFC 3339 §4.3: offset UNKNOWN, not UTC) and compact/basic ISO.  Tok is NOT
+ * widened: "P"$"…Z" stays 0Np (R9).  Reached only from the cell parser, so the
+ * SNIFF never claims these forms — they parse under an explicit or frozen 'p'. */
+static int csv_p_cell(const char* f, size_t n, int64_t* out) {
+    if (n && (f[n - 1] == 'Z' || f[n - 1] == 'z')) n--;
+    else if (n >= 6 && !memcmp(f + n - 6, "+00:00", 6)) n -= 6;
+    if (csv_ts_cell(f, n, out)) return 1;
+    if (n != 16 || !(f[4] == '.' || f[4] == '-' || f[4] == '/')) return 0;
+    if (!(f[10] == 'D' || f[10] == 'T' || f[10] == ' ' || f[10] == '-')) return 0;
+    int64_t y, mo, d;
+    if (!q_tok_date(f, 10, &y, &mo, &d) || !q_calendar_date_valid(y, mo, d)) return 0;
+    if ((unsigned)(f[11] - '0') > 9 || (unsigned)(f[12] - '0') > 9 || f[13] != ':' ||
+        (unsigned)(f[14] - '0') > 9 || (unsigned)(f[15] - '0') > 9) return 0;
+    int64_t hh = (f[11] - '0') * 10 + f[12] - '0', mm = (f[14] - '0') * 10 + f[15] - '0';
+    if (hh > 23 || mm > 59) return 0;
+    return q_calendar_ts_compose_checked(q_calendar_days_from_civil(y, mo, d),
+                                         (hh * 3600 + mm * 60) * 1000000000LL, out);
+}
+
+/* THE WRITER'S FORM IS THE WHOLE GRAMMAR (owner 2026-08-27).  q prints a byte as
+ * `0x` + exactly two hex digits and `.j.j` writes that, so that is what a cell may
+ * be.  LONGER stays text: `0xFF0000` is a byte VECTOR, which one cell cannot hold.
+ * BARE hex stays text too — `0a` is far likelier an identifier, the same call CSV
+ * already makes on `007` — so the `0x` prefix is what makes this unambiguous.
+ * The loader and the cast diverge here and stay diverged: `"X"$"0x0a"` is 0x00,
+ * because Tok reads BARE hex and the prefix makes it consume an invalid pair.
+ * Tok is not widened (R9); the loader reads the form q WRITES. */
+static int csv_byte_cell(const char* f, size_t n, uint8_t* out) {
+    if (n != 4 || f[0] != '0' || (f[1] | 0x20) != 'x') return 0;
+    unsigned v = 0;
+    for (size_t i = 2; i < 4; i++) {
+        char c = f[i];
+        int d = (c >= '0' && c <= '9') ? c - '0' : ((c | 0x20) >= 'a' && (c | 0x20) <= 'f') ? (c | 0x20) - 'a' + 10 : -1;
+        if (d < 0) return 0;
+        v = (v << 4) | (unsigned)d;
+    }
+    *out = (uint8_t)v;
+    return 1;
+}
+
 /* the D-separated (or, under a frozen 'n', any Tok-accepted clock) timespan */
 static int csv_timespan_cell(const char* f, size_t n, int64_t* ns) {
     int neg = n && f[0] == '-';
@@ -238,8 +309,9 @@ static int csv_timespan_cell(const char* f, size_t n, int64_t* ns) {
  * %z is DuckDB's own semantics: apply the row's own numeric offset, store UTC.
  * Zone NAMES (%Z) need tz data we do not ship, so they stay unknown --- */
 
-/* ok = 1; want_time lets a dateformat refuse clock specifiers */
-static int csv_fmt_valid(const char* s, size_t n, int want_time) {
+/* ok = 1; want_time lets a dateformat refuse clock specifiers.  Public: the JSON
+ * reader validates the same two options against the same subset (one cell home). */
+int q_csv_fmt_valid(const char* s, size_t n, int want_time) {
     int y = 0, mo = 0, d = 0;
     for (size_t i = 0; i < n; i++) {
         if (s[i] != '%') continue;
@@ -322,17 +394,17 @@ static int csv_f64_special(const char* f, size_t n, double* v) {
     return 1;
 }
 
-static ct_t csv_detect(const csv_st* st, const char* f, size_t n) {
+ct_t q_csv_detect(const q_csv_fmt_t* fmt, const char* f, size_t n) {
     if (csv_null_tok(f, n)) return CT_UNKNOWN;
     /* typed cells tolerate surrounding blanks (" 567" is a written long — kdb's
      * casts and DuckDB both read it); blanks-only is text, NEVER a null */
     while (n && f[0] == ' ') { f++; n--; }
     while (n && f[n - 1] == ' ') n--;
     if (n == 0) return CT_STR;
-    if (st->datefmt[0] || st->tsfmt[0]) {          /* an explicit format outranks every default claim */
+    if (fmt->datefmt[0] || fmt->tsfmt[0]) {          /* an explicit format outranks every default claim */
         int64_t dd, nn;
-        if (st->datefmt[0] && csv_fmt_cell(st->datefmt, f, n, &dd, &nn)) return CT_DATE;
-        if (st->tsfmt[0] && csv_fmt_cell(st->tsfmt, f, n, &dd, &nn)) return CT_TS;
+        if (fmt->datefmt[0] && csv_fmt_cell(fmt->datefmt, f, n, &dd, &nn)) return CT_DATE;
+        if (fmt->tsfmt[0] && csv_fmt_cell(fmt->tsfmt, f, n, &dd, &nn)) return CT_TS;
     }
     if (n == 3 && ((f[0] == 'n' || f[0] == 'N') ? ((f[1] == 'a' || f[1] == 'A') && (f[2] == 'n' || f[2] == 'N'))
                                                 : ((f[0] == 'i' || f[0] == 'I') && (f[1] == 'n' || f[1] == 'N') &&
@@ -367,20 +439,36 @@ static ct_t csv_detect(const csv_st* st, const char* f, size_t n) {
         if (*d0 == '0' && p - d0 > 1) return CT_STR;   /* 007 is an identifier, not a number (DuckDB agrees) */
         int64_t iv;
         size_t u = ray_parse_i64(f, n, &iv);
-        return u == n ? CT_I64 : CT_F64;           /* past the long domain it reads as float, like "F"$ */
+        if (u != n) return CT_F64;                 /* past the long domain it reads as float, like "F"$ */
+        /* R8: a digit run landing EXACTLY on 0W/-0W/0N would read as q's infinity or
+         * null — a silently wrong meaning — so in the sample it demotes to text */
+        return (iv == INT64_MAX || iv == -INT64_MAX || iv == INT64_MIN) ? CT_STR : CT_I64;
     }
     double fv;
     if (csv_f64_special(f, n, &fv)) return CT_F64;
+    /* GUID and BYTE sit AHEAD of the temporal shapes on purpose.  The two cannot
+     * shadow each other — the date-shaped head gate below wants a SEPARATOR at
+     * index 4, or at 2 AND 5 for the day-order pair, and a canonical uuid carries
+     * hex digits at all three (its first dash is at 8), so the shapes are disjoint
+     * by construction — but ordering them first keeps that independence from
+     * resting on the gate's exact spelling.  The IPv4/IPv6 forms `"G"$` also
+     * accepts stay Tok's: the loader grammar is the form q WRITES. */
+    {
+        uint8_t g[16];
+        if (q_tok_uuid(f, n, g)) return CT_GUID;
+        if (csv_byte_cell(f, n, g)) return CT_BYTE;
+    }
     /* the temporal shapes go through the SAME parsers the frozen phase uses:
-     * whatever this function types, csv_cell_atom must accept — a near-miss must
+     * whatever this function types, q_csv_cell_atom must accept — a near-miss must
      * sniff as text.  The numeric scan above already claimed every bare digit
      * run, so packed dates / unix-seconds stay longs (the never-guess law). */
-    if (n >= 10 && (f[4] == '.' || f[4] == '-' || f[4] == '/')) {
+    if (n >= 10 && ((f[4] == '.' || f[4] == '-' || f[4] == '/') ||
+                    ((f[2] == '/' || f[2] == '-') && f[5] == f[2]))) {
         int32_t d;
         int64_t v;
         if (n == 10 && csv_date_cell(f, n, &d))
-            return st->datefmt[0] ? CT_STR : CT_DATE;   /* an explicit dateformat OWNS the date shapes */
-        if (!st->tsfmt[0] && q_tok_ts(f, n, &v)) return CT_TS;
+            return fmt->datefmt[0] ? CT_STR : CT_DATE;   /* an explicit dateformat OWNS the date shapes */
+        if (!fmt->tsfmt[0] && csv_ts_cell(f, n, &v)) return CT_TS;
         return CT_STR;                             /* a date-shaped head with a bad tail */
     }
     if (n >= 7 && f[n - 1] == 'm') {
@@ -404,7 +492,7 @@ static ct_t csv_detect(const csv_st* st, const char* f, size_t n) {
     return CT_STR;
 }
 
-static ct_t csv_promote(ct_t cur, ct_t obs) {
+ct_t q_csv_promote(ct_t cur, ct_t obs) {
     if (cur == CT_UNKNOWN) return obs;
     if (obs == CT_UNKNOWN || cur == obs) return cur;
     if (cur == CT_STR || obs == CT_STR) return CT_STR;
@@ -429,12 +517,7 @@ static void csv_card_note(card_t* c, const char* f, size_t n) {
     c->non_null++;
 }
 
-/* Sniffed text is ALWAYS a string column: type-as-cardinality made same-shaped files
- * sniff different schemas and default-interned into the global sym table.  Sym-ness
- * is a schema decision, so the cardinality sample survives only as ADVICE — `advise`
- * (the .csv.info lane) answers 's' where the quarry's 64/80% rule suggests one, and
- * the read lane never syms on its own. */
-static char csv_resolve(ct_t t, const card_t* c, int advise) {
+char q_csv_resolve(ct_t t) {
     switch (t) {
         case CT_BOOL:     return 'b';
         case CT_I64:      return 'j';
@@ -446,26 +529,59 @@ static char csv_resolve(ct_t t, const card_t* c, int advise) {
         case CT_SECOND:   return 'v';
         case CT_TIME:     return 't';
         case CT_TIMESPAN: return 'n';
-        case CT_STR:
-            if (!advise) return '*';
-            return (c->non_null >= 64 && (uint32_t)c->distinct * 100u >= c->non_null * 80u) ? '*' : 's';
-        default:      return advise ? 's' : '*';   /* nothing observed */
+        case CT_GUID:     return 'g';
+        case CT_BYTE:     return 'x';
+        default:          return '*';              /* text, and nothing-observed */
     }
 }
 
+/* Sniffed text is ALWAYS a string column: type-as-cardinality made same-shaped files
+ * sniff different schemas and default-interned into the global sym table.  Sym-ness
+ * is a schema decision, so the cardinality sample survives only as ADVICE — the
+ * .csv.info lane answers 's' where the quarry's 64/80% rule suggests one, and the
+ * read lane never syms on its own.  Which is why it stays private: a second reader
+ * of the shared cell parser wants the type, never the schema advice. */
+static char csv_resolve_advised(ct_t t, const card_t* c) {
+    char base = q_csv_resolve(t);
+    if (base != '*') return base;
+    if (t != CT_STR) return 's';                   /* nothing observed */
+    return (c->non_null >= 64 && (uint32_t)c->distinct * 100u >= c->non_null * 80u) ? '*' : 's';
+}
+
 /* ---- the frozen-type cell parser ------------------------------------------- */
+
+/* one written digit run under an integer char; lim is that WIDTH's 0W.  R8 is a
+ * per-width rule: a run landing on 0N/+-0W would read as a q sentinel, so it is
+ * the frozen-type miss, never a silent infinity.  0 = not this cell's value. */
+static int csv_int_cell(const char* f, size_t n, int64_t lim, int64_t* out) {
+    size_t u = ray_parse_i64(f, n, out);
+    if (!u || u != n) return 0;
+    return *out <= lim - 1 && *out >= -(lim - 1);
+}
+
+/* the ns instant under the char that asked for it: p is the native payload, z the
+ * kdb-legacy fractional days, converted as Tok converts it (tok.md:222-227) */
+static ray_t* csv_instant_atom(char c, int64_t ns) {
+    return c == 'p' ? ray_timestamp(ns) : ray_datetime((double)ns / 86400000000000.0);
+}
 
 /* one cell -> an OWNED atom under its FROZEN type char, or 'csv.  The clock
  * columns accept their own class and every NARROWER one (the promote lattice
  * widened to the frozen char during the sample); a WIDER cell after the sample
  * is the frozen-type-miss law — 'csv, never a truncation. */
-static ray_t* csv_cell_atom(const csv_st* st, char c, const char* f, size_t n) {
+ray_t* q_csv_cell_atom(const q_csv_fmt_t* fmt, char c, const char* f, size_t n) {
     if (c == 's') return ray_sym(ray_sym_intern_runtime(f, n));
     if (c == '*') return ray_charv(f, (int64_t)n);
     if (csv_null_tok(f, n)) {
         if (c == 'b') return ray_bool(0);          /* q booleans have no null — "B"$"" is 0b */
+        if (c == 'x') return ray_u8(0);            /* nor bytes — "X"$"" is 0x00 */
         return ray_typed_null((int8_t)-q_type_of_char(c));
     }
+    /* a char cell is byte-literal - a blank IS its content, so the trim must not reach it - and
+     * EXACTLY one byte: a longer cell would be a char VECTOR, which one cell cannot hold (the byte
+     * arm's narrowness rule).  Nothing pairs with it: detect never claims char, so `c` is reachable
+     * only from an explicit types, and a text column is what `*` is for. */
+    if (c == 'c') return n == 1 ? ray_char((uint8_t)f[0]) : q_err(QE_CSV);
     while (n && f[0] == ' ') { f++; n--; }         /* the same blank tolerance the sniffer applies */
     while (n && f[n - 1] == ' ') n--;
     if (n == 0) return q_err(QE_CSV);              /* blanks-only under a typed column is the miss law */
@@ -475,22 +591,24 @@ static ray_t* csv_cell_atom(const csv_st* st, char c, const char* f, size_t n) {
             if (v < 0 && n == 1 && (f[0] == '0' || f[0] == '1')) v = f[0] == '1';
             return v < 0 ? q_err(QE_CSV) : ray_bool(v);
         }
-        case 'j': {
-            int64_t v;
-            size_t u = ray_parse_i64(f, n, &v);
-            return (u && u == n) ? ray_i64(v) : q_err(QE_CSV);
+        case 'h': case 'i': case 'j': {
+            int64_t v, lim = c == 'h' ? INT16_MAX : c == 'i' ? INT32_MAX : INT64_MAX;
+            if (!csv_int_cell(f, n, lim, &v)) return q_err(QE_CSV);
+            return c == 'h' ? ray_i16((int16_t)v) : c == 'i' ? ray_i32((int32_t)v) : ray_i64(v);
         }
-        case 'f': {
+        case 'e': case 'f': {
             double v;
-            if (csv_f64_special(f, n, &v)) return ray_f64(v);
-            size_t u = ray_parse_f64(f, n, &v);
-            if (!u || u != n) return q_err(QE_CSV);
-            return v != v ? ray_typed_null(-RAY_F64) : ray_f64(v);
+            if (!csv_f64_special(f, n, &v)) {
+                size_t u = ray_parse_f64(f, n, &v);
+                if (!u || u != n) return q_err(QE_CSV);
+                if (v != v) return ray_typed_null(c == 'e' ? -RAY_F32 : -RAY_F64);
+            }
+            return c == 'e' ? ray_f32((float)v) : ray_f64(v);
         }
         case 'd': {
-            if (st->datefmt[0]) {
+            if (fmt->datefmt[0]) {
                 int64_t dd, nn;
-                if (!csv_fmt_cell(st->datefmt, f, n, &dd, &nn)) return q_err(QE_CSV);
+                if (!csv_fmt_cell(fmt->datefmt, f, n, &dd, &nn)) return q_err(QE_CSV);
                 return ray_date((int32_t)dd);
             }
             int32_t d;
@@ -522,18 +640,30 @@ static ray_t* csv_cell_atom(const csv_st* st, char c, const char* f, size_t n) {
             if (!csv_timespan_cell(f, n, &ns)) return q_err(QE_CSV);
             return ray_timespan(ns);
         }
-        case 'p': {
+        case 'g': {
+            uint8_t b[16];
+            if (!q_tok_uuid(f, n, b)) return q_err(QE_CSV);
+            return ray_guid(b);
+        }
+        case 'x': {
+            uint8_t b;
+            if (!csv_byte_cell(f, n, &b)) return q_err(QE_CSV);
+            return ray_u8(b);
+        }
+        /* z is p's cell: the legacy datetime is SPELLED like a timestamp, and a DECLARED type beats
+         * the sniffed one - the sniffer still types a T-separated token p, as it should */
+        case 'p': case 'z': {
             int64_t v;
-            if (st->tsfmt[0] || st->datefmt[0]) {  /* a format date under 'p' reads as its midnight */
+            if (fmt->tsfmt[0] || fmt->datefmt[0]) {  /* a format date under 'p' reads as its midnight */
                 int64_t dd, nn;
-                if (st->tsfmt[0] && csv_fmt_cell(st->tsfmt, f, n, &dd, &nn))
-                    return ray_timestamp(dd * 86400000000000LL + nn);
-                if (st->datefmt[0] && csv_fmt_cell(st->datefmt, f, n, &dd, &nn))
-                    return ray_timestamp(dd * 86400000000000LL);
-                if (st->tsfmt[0]) return q_err(QE_CSV);
+                if (fmt->tsfmt[0] && csv_fmt_cell(fmt->tsfmt, f, n, &dd, &nn))
+                    return csv_instant_atom(c, dd * 86400000000000LL + nn);
+                if (fmt->datefmt[0] && csv_fmt_cell(fmt->datefmt, f, n, &dd, &nn))
+                    return csv_instant_atom(c, dd * 86400000000000LL);
+                if (fmt->tsfmt[0]) return q_err(QE_CSV);
             }
-            if (!q_tok_ts(f, n, &v)) return q_err(QE_CSV);
-            return ray_timestamp(v);
+            if (!csv_p_cell(f, n, &v)) return q_err(QE_CSV);
+            return csv_instant_atom(c, v);
         }
         default: return q_err(QE_CSV);
     }
@@ -686,7 +816,11 @@ static ray_t* csv_reject_note(csv_st* st, int64_t line, int64_t col, const char*
                      ray_sym(ray_sym_intern_runtime(cls, strlen(cls))), ray_charv(p, (int64_t)n) };
     ray_t* bad = NULL;
     for (int i = 0; i < 4; i++) {
-        if (!vs[i] || RAY_IS_ERR(vs[i])) { if (!bad) bad = vs[i] ? vs[i] : q_err(QE_OOM); continue; }
+        if (!vs[i] || RAY_IS_ERR(vs[i])) {
+            if (!bad) bad = vs[i] ? vs[i] : q_err(QE_OOM);
+            else if (vs[i]) ray_release(vs[i]);      /* a SECOND failure is still an owned value */
+            continue;
+        }
         if (!bad) {
             st->rj[i] = ray_list_append(st->rj[i], vs[i]);
             if (RAY_IS_ERR(st->rj[i])) {
@@ -749,8 +883,8 @@ static ray_t* csv_parse_row(csv_st* st, const char* p, size_t n) {
         for (int64_t j = 0; j < st->ncols && !bad; j++) {
             int64_t k = st->kidx[j];
             if (k < 0) continue;
-            ray_t* a = j < cnt ? csv_cell_atom(st, st->kchars[k], st->fields[j].p, st->fields[j].n)
-                               : csv_cell_atom(st, st->kchars[k], "", 0);   /* the pad: the empty-field null */
+            ray_t* a = j < cnt ? q_csv_cell_atom(&st->fmt, st->kchars[k], st->fields[j].p, st->fields[j].n)
+                               : q_csv_cell_atom(&st->fmt, st->kchars[k], "", 0);   /* the pad: the empty-field null */
             if (!a) bad = q_err(QE_OOM);
             else if (RAY_IS_ERR(a)) {
                 st->rej_class = CSV_RJ_CAST;
@@ -810,17 +944,17 @@ static ray_t* csv_row_detect(csv_st* st, const char* p, size_t n) {
         return tol ? NULL : q_err(QE_CSV);
     }
     for (int64_t j = 0; j < (cnt < st->ncols ? cnt : st->ncols); j++) {
-        st->f_ct[j] = csv_promote(st->f_ct[j], csv_detect(st, st->fields[j].p, st->fields[j].n));
+        st->f_ct[j] = q_csv_promote(st->f_ct[j], q_csv_detect(&st->fmt, st->fields[j].p, st->fields[j].n));
         csv_card_note(&st->f_card[j], st->fields[j].p, st->fields[j].n);
     }
     csv_fields_free(st);
     return NULL;
 }
 
-/* 'b'jfsdtpmuvn / '*' / ' ', upper case (the `0:` spelling) folded down; 0 = unknown */
+/* the loader cell grammar's chars + 's' / '*' / ' ', upper case (the `0:` spelling) folded down; 0 = unknown */
 static char csv_type_canon(char c) {
     if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-    return strchr("bjfsdtpmuvn* ", c) && c ? c : 0;
+    return strchr("bgxhijefcspmdznuvt* ", c) && c ? c : 0;   /* all 18 basic types (basics/datatypes.md) */
 }
 
 /* merge the user's types argument onto the sniffed chars */
@@ -1042,7 +1176,7 @@ static ray_t* csv_freeze(csv_st* st) {
          * DuckDB's rule) — demotions the data alone would never produce */
         int all_str = 1, demote = 0;
         for (int64_t j = 0; j < nc; j++) {
-            ct_t d0 = csv_detect(st, (const char*)ray_data(hf[j]), (size_t)ray_len(hf[j]));
+            ct_t d0 = q_csv_detect(&st->fmt, (const char*)ray_data(hf[j]), (size_t)ray_len(hf[j]));
             if (d0 != CT_STR && d0 != CT_UNKNOWN) all_str = 0;
             else if (d0 == CT_STR && st->f_ct[j] != CT_STR && (st->f_ct[j] != CT_UNKNOWN || m > 1))
                 demote = 1;
@@ -1089,7 +1223,9 @@ static ray_t* csv_freeze(csv_st* st) {
         free(b);
     }
     int64_t first = header ? 1 : 0;
-    for (int64_t j = 0; j < nc; j++) st->ctypes[j] = csv_resolve(st->f_ct[j], &st->f_card[j], st->info_only);
+    for (int64_t j = 0; j < nc; j++)
+        st->ctypes[j] = st->info_only ? csv_resolve_advised(st->f_ct[j], &st->f_card[j])
+                                      : q_csv_resolve(st->f_ct[j]);
     if (st->has_tgt) {
         /* the target's schema outranks the sniff: by NAME with a header (a CSV column
          * the target lacks is projected to ' ' — the subsetting rider), positionally
@@ -1475,10 +1611,10 @@ static ray_t* csv_opts(csv_st* st, ray_t* opts) {
             int64_t fl;
             if (!q_str_text_bytes(v, &fp, &fl)) bad = q_err(QE_TYPE);
             else {
-                if (fl <= 0 || fl >= CSV_FMT_MAX || !csv_fmt_valid(fp, (size_t)fl, is_ts))
+                if (fl <= 0 || fl >= Q_CSV_FMT_MAX || !q_csv_fmt_valid(fp, (size_t)fl, is_ts))
                     bad = q_err(QE_OPTION);        /* outside the implemented strptime subset */
                 else {
-                    char* dst = is_ts ? st->tsfmt : st->datefmt;
+                    char* dst = is_ts ? st->fmt.tsfmt : st->fmt.datefmt;
                     memcpy(dst, fp, (size_t)fl);
                     dst[fl] = 0;
                 }
