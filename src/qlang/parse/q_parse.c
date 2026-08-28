@@ -709,6 +709,7 @@ static ray_t  *qsql_normalize_phrases(ray_t *phrase_list, QCtx origin, int verb)
  * documentation).  Declared here so parse_query (above the normalize section) can
  * name the codes. */
 enum { QSQL_V_SELECT, QSQL_V_EXEC, QSQL_V_UPDATE, QSQL_V_DELETE };
+#define QSQL_MAXCOLS 256
 
 /* Statement sequence: one -> its element; two+ -> (";"; ...).  The head is the
  * CHAR ";" (owner-reported kdb display: `parse "a:1;b:2"` shows `";"`, -10h) —
@@ -1355,6 +1356,17 @@ static P parse_query(Parser *p) {
 
     /* select-phrase list: stops at by / from */
     *a = parse_phrase_list(p, Q_SELECT);
+    if (ray_len(*a) > QSQL_MAXCOLS) die_err(QE_LIMIT);
+
+    /* ref/delete.md:63: a delete phrase list is "a list of column names" —
+     * anything else once slipped through qsql_norm_delete_a as a silent skip,
+     * leaving an EMPTY name list, which deletes every row */
+    if (verb == QSQL_V_DELETE) {
+        int64_t dn = ray_len(*a);
+        ray_t **dp = (ray_t **)ray_data(*a);
+        for (int64_t i = 0; i < dn; i++)
+            if (!sym_is_nameref(dp[i])) q_die("qsql: delete takes column names");
+    }
 
     /* optional by-phrase list: stops at from.  delete has NO By clause
      * (ref/delete.md's template omits it; kdb rejects at parse) */
@@ -1364,6 +1376,7 @@ static P parse_query(Parser *p) {
         adv(p);
         *b = parse_phrase_list(p, Q_BY);
         if (ray_len(*b) == 0) q_die("qsql: empty by phrase");
+        if (ray_len(*b) > QSQL_MAXCOLS) die_err(QE_LIMIT);
     }
 
     /* mandatory from + the from-expression */
@@ -1397,7 +1410,10 @@ static P parse_query(Parser *p) {
 
     /* ---- normalize the raw phrase lists into the clone's functional slots ---
      * No q_die past this point, so the raw refs can be released as they are
-     * consumed.  A (select-phrase) is verb-shaped by qsql_normalize_phrases
+     * consumed (qsql_norm_delete_a's non-name die is unreachable from here —
+     * the delete prevalidation above already excludes that shape; only the
+     * normalize probe can reach it, and it pend-holds its list).  A
+     * (select-phrase) is verb-shaped by qsql_normalize_phrases
      * (empty select -> `()`, empty delete -> empty symvec, …). */
     A = qsql_normalize_phrases(*a, Q_SELECT, verb);
     ray_release(*a); *a = NULL;
@@ -1772,8 +1788,6 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
  * it does not recognise it sets *ok=0, and the caller restores the token
  * position and re-parses the statement the ordinary way (no parse regression). */
 
-#define QSQL_MAXCOLS 256
-
 /* a symbol-literal column reference `col (ATTR_QUOTED set) from an interned id */
 static ray_t *qsql_colsym(int64_t id) {
     ray_t *s = ray_sym(id);
@@ -1991,6 +2005,14 @@ static ray_t *qsql_convert_expr(ray_t *x) {
     return x;
 }
 
+/* an unnameable phrase is named x, deduped x1,x2,… against the names already
+ * assigned (qsql.md:234 "else as `x`") — NEVER silently dropped */
+static ray_t *qsql_alias_x(ray_t **aliases, int na) {
+    int64_t used[QSQL_MAXCOLS];
+    for (int j = 0; j < na; j++) used[j] = aliases[j]->i64;
+    return qsql_colsym(q_name_dedup(ray_sym_intern_runtime("x", 1), used, na, 0));
+}
+
 /* Fold a phrase list into a q name!expr DICT (select/update `a`, by-key `b`):
  * an alias phrase keys on its written name; a bare phrase derives its output
  * name via qsql_derive_alias, exactly as qsql_colspec does over the clone. */
@@ -2007,7 +2029,7 @@ static ray_t *qsql_norm_dict(ray_t *phrases) {
         } else {
             ray_t *v  = qsql_convert_expr(ph[i]);
             ray_t *al = qsql_derive_alias(v);
-            if (!al) { ray_release(v); continue; }  /* unnameable (clone soft-fails) */
+            if (!al) al = qsql_alias_x(aliases, na);
             /* kdb: a bare `select i` (the VIRTUAL row-index column) outputs
              * under the name `x`, not `i` (qsql.md — i is not a real column,
              * so the default rightmost-name alias does not apply). */
@@ -2071,7 +2093,7 @@ static ray_t *qsql_norm_by(ray_t *phrases, int verb) {
         } else {
             ray_t *v  = qsql_convert_expr(ph[i]);
             ray_t *al = qsql_derive_alias(v);
-            if (!al) { ray_release(v); continue; }
+            if (!al) al = qsql_alias_x(bk, nb);
             bk[nb] = al; bv[nb] = v; bnamed[nb] = 0;
         }
         nb++;
@@ -2102,7 +2124,12 @@ static ray_t *qsql_norm_delete_a(ray_t *phrases) {
     ray_t *a = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
     for (int64_t i = 0; i < n; i++) {
         ray_t *x = ph[i];
-        if (!x || x->type != -RAY_SYM) continue;     /* non-name (clone soft-fails) */
+        /* parse_query pre-validates; a skip here would silently empty the name
+         * list, which deletes every row */
+        if (!x || x->type != -RAY_SYM) {
+            ray_release(a);
+            q_die("qsql: delete takes column names");
+        }
         a = symvec_add(a, x->i64);
     }
     return qsql_enlist(a);
@@ -2125,26 +2152,43 @@ static ray_t *qsql_normalize_phrases(ray_t *phrase_list, QCtx origin, int verb) 
     }
 }
 
+/* THE clause-fragment refusal (owner ruling 2026-08-27): the comma stays the
+ * phrase separator, so in `a,\:2` the fragment after the split BEGINS with a
+ * bare adverb — no legitimate clause phrase does, and every silent-drop in the
+ * class started here.  Refuse at the split, in the one home all six clause
+ * positions ride (select/exec/update/delete phrases, by, where), rather than
+ * letting the fragment reach a normalizer that discards it.  The one adverb-led
+ * primary term, compose `'[f;g;…]`, stays a phrase. */
+static void phrase_head_guard(Parser *p) {
+    Token *tk = cur(p);
+    if (tk->kind == T_ADVERB &&
+        !(tk->len == 1 && p->src[tk->start] == '\'' && peek(p) == T_LBRACK))
+        q_die("qsql: clause phrase begins with an adverb");
+}
+
 /* Parse one comma-separated qSQL clause into a RAY_LIST of raw phrase trees via
  * the real expression parser, halting at the clause boundary (parse_base_q
- * returns EMPTY at a section keyword / the join comma).  An elided phrase (a
- * doubled comma) becomes the generic null `::`, as qsql_where's elided path
- * uses.  Refcount: ray_list_append RETAINS, so the local ref is released in
- * both branches.  Returns an OWNED list ( `()` when the clause is empty). */
+ * returns EMPTY at a section keyword / the join comma).  A separator comma must
+ * be FOLLOWED by a phrase — a trailing `select a, from t` dies rather than
+ * minting a phantom `::` phrase.  Refcount: ray_list_append RETAINS, so the
+ * local ref is released in both branches.  Returns an OWNED list ( `()` when
+ * the clause is empty). */
 static ray_t *parse_phrase_list(Parser *p, QCtx ctx) {
     /* A parse_e under a non-Q_NONE ctx can q_die (a misplaced clause keyword in
      * parse_base_q); hold the partial list where the longjmp handler frees it. */
     ray_t **lst = qsql_pend_push();
     *lst = ray_list_new(0);
+    phrase_head_guard(p);
     P first = parse_e(p, ctx);
     if (first.role != R_NONE) {
         *lst = ray_list_append(*lst, first.v); ray_release(first.v);
         while (qtok_is_join_comma(cur(p))) {
             adv(p);
+            phrase_head_guard(p);
             P f = parse_e(p, ctx);
-            ray_t *v = (f.role == R_NONE) ? q_null() : f.v;
-            *lst = ray_list_append(*lst, v);
-            ray_release(v);
+            if (f.role == R_NONE) q_die("qsql: empty phrase after ','");
+            *lst = ray_list_append(*lst, f.v);
+            ray_release(f.v);
         }
     }
     ray_t *done = *lst;
@@ -2175,8 +2219,13 @@ ray_t *q_qsql_normalize_probe(const char *src, int ctx, int verb) {
     }
     Tokens ts = scan(src);
     Parser p = { .src = src, .t = ts, .pos = 0, .xyz_mask = NULL, .lambda_depth = 0 };
-    ray_t *phrases = parse_phrase_list(&p, (QCtx)ctx);
-    ray_t *slot = qsql_normalize_phrases(phrases, (QCtx)ctx, verb);
+    /* pend-held across normalize: qsql_norm_delete_a can q_die on a non-name
+     * phrase (parse_query prevalidates; this probe does not) */
+    ray_t **ph = qsql_pend_push();
+    *ph = parse_phrase_list(&p, (QCtx)ctx);
+    ray_t *slot = qsql_normalize_phrases(*ph, (QCtx)ctx, verb);
+    ray_t *phrases = *ph;
+    qsql_pend_pop();
     ray_release(phrases);
     free_tokens(ts);
     g_toks.t = NULL; g_toks.n = 0;
