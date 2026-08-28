@@ -135,6 +135,26 @@ An explicit `types` that disagrees with the target signals `'mismatch` early rat
 A headerless file maps to an existing target **positionally**: complete map, no projection. Everything else about
 conformity — a missing column, a type that will not convert — is `insert`'s own contract and its own error.
 
+The table exists from the moment the schema is decided, not from the first row: a header-only file gives you a
+zero-row table with the right columns. And a load that fails part way through leaves what it had already inserted —
+`insert` is not transactional, and the reader does not pretend otherwise.
+
+When the file's column names are not your table's, rename them on the way in with the `xcol` option, which happens
+**before** the target is consulted:
+
+```q
+q)t:([]ticker:0#`;px:0#0f)
+q).csv.read["sym,price\nAAPL,1.5\nMSFT,2.5\n";`t;::;(enlist `xcol)!enlist `sym`price!`ticker`px]
+rows    | 2
+rejected| 0
+chunks  | 1
+ignored | `symbol$()
+types   | `ticker`px!"sf"
+```
+
+[Loading a file](loading.md#5-you-rename-with-xcol) has the rest: what `xcol` takes, and why `types` still keys on
+the file's own names.
+
 ### A lambda, called once per batch
 
 A rank-3 lambda `{[tblData;errData;misc] ...}` is called once per read batch. This is the streaming door: the rows
@@ -212,6 +232,7 @@ short-dict idiom `` ``delim!(::;";") `` works.
 
 | Option | Type | Default | What it does |
 |---|---|---|---|
+| `xcol` | symbol vector or dict | off | renames columns on the way in, exactly as the `xcol` verb does |
 | `delim` | char | sniffed | the field delimiter |
 | `header` | boolean | sniffed | force row 0 to be, or not be, the header |
 | `quote` | char | `"` | the quote character; `""` disables quoting, making quotes ordinary bytes |
