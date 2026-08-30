@@ -82,23 +82,18 @@ static bool ends_with_dot_q(const char* s) {
     return n >= 2 && s[n - 2] == '.' && s[n - 1] == 'q';
 }
 
-/* Launcher-flag classification — THE single home for which argv tokens the q
- * launcher (qmain.c) recognizes and consumes.  kdb consumes its recognized
- * options, so the `.z.x` view (args after the script) OMITS them while `.z.X`
- * (raw argv) keeps everything.  This same table drives the `*.q` script
- * locator (a value-flag's following token is a value, not the script) and the
- * `-q`/`.z.q` quiet-mode probe.  Returns:
- *   Q_FLAG_NONE   not a recognized launcher flag (positional / script)
- *   Q_FLAG_BOOL   recognized flag consuming NO following token: -q
- *   Q_FLAG_VALUE  recognized flag consuming its FOLLOWING token: -e/-E/-z/-p/--port/-u/-U
- * KEEP IN SYNC with qmain.c's arg-parse switch (which acts on them and reads
- * `.z.q` back via q_dotz_quiet()) — this classifier is the canonical list. */
+/* Launcher-flag classification — THE single home for which argv tokens the q launcher consumes (flags documented
+ * in user-docs/cmdline.md).  It drives the `.z.x` view (which OMITS them; `.z.X` stays raw), the `*.q` script
+ * locator (a value-flag's following token is a value, not the script) and the `-q`/`.z.q` quiet-mode probe.
+ * KEEP IN SYNC with qmain.c's arg-parse switch (which acts on them and reads `.z.q` back via q_dotz_quiet()) —
+ * this classifier is the canonical list. */
 enum { Q_FLAG_NONE = 0, Q_FLAG_BOOL = 1, Q_FLAG_VALUE = 2 };
 static int flag_kind(const char* s) {
     if (strcmp(s, "-q") == 0 || strcmp(s, "-classic") == 0) return Q_FLAG_BOOL;
     if (strcmp(s, "-e") == 0 || strcmp(s, "-E") == 0 || strcmp(s, "-z") == 0) return Q_FLAG_VALUE;
     if (strcmp(s, "-p") == 0 || strcmp(s, "--port") == 0 ||
         strcmp(s, "-u") == 0 || strcmp(s, "-U") == 0) return Q_FLAG_VALUE;
+    if (strcmp(s, "-eval") == 0 || strcmp(s, "-eval-before") == 0) return Q_FLAG_VALUE;
     return Q_FLAG_NONE;
 }
 
@@ -370,7 +365,10 @@ void q_dotz_init(int argc, char** argv) {
      * kdb-true for the non-flag args the increment-1 tests pass.) */
     g_script_idx = -1;
     for (int i = 1; i < argc; i++) {
-        if (i > 1 && flag_kind(argv[i - 1]) == Q_FLAG_VALUE) continue;  /* skip flag value */
+        int k = flag_kind(argv[i]);
+        if (k == Q_FLAG_VALUE) { i++; continue; }   /* stateful: skip flag AND its value — a VALUE spelled like a
+                                                     * flag (`-eval "-p"`) must not swallow the token after it */
+        if (k == Q_FLAG_BOOL) continue;
         if (ends_with_dot_q(argv[i])) { g_script_idx = i; break; }
     }
 
