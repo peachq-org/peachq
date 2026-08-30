@@ -17,6 +17,7 @@ Ordered by how likely each is to stop a real migration.
 | **Pattern matching (kdb+ 4.1)** | The 4.1 assignment and parameter forms signal `'parse`. | [typed-parameters.md](typed-parameters.md) |
 | **Reserved words in name positions** | Refused wherever a name is bound, not only at `name:`. | below |
 | **Load CSV (`0:`)** | Unchanged, and still needs the full type string and a clean file. | [csv.md](csv.md) |
+| **System commands and launch flags** | Some are unwired or no-ops; both pages mark every item against kx. | [cmdline.md](cmdline.md), [syscmds.md](syscmds.md) |
 
 **Partitioned and segmented databases.** This is the largest single gap for an existing kdb+ installation: a
 partitioned or segmented HDB does not load. Splayed tables do, including nested columns, attributes and kx
@@ -52,8 +53,9 @@ function instead of the binding.
 | **Regular expressions** — `.regexp`, `rlike` | RE2-backed matching, extraction, replacement and splitting. | [regexp.md](regexp.md) |
 | **Typed parameters** | Declared types, optional arguments, defaults and varargs, read statically. | [typed-parameters.md](typed-parameters.md) |
 | **Foreign functions** — `.ffi` | Call into a shared library from q. | [ffi.md](ffi.md) |
+| **Startup evaluation** — `-eval`, `-eval-before` | Run q text from argv after / before the startup script; no stdin piping. | [cmdline.md](cmdline.md) |
 | **String helpers** — `.str` | `printf`/`format`, strip, prefix and suffix tests, character-class predicates. | at the REPL |
 | **DuckDB-backed storage** — `.duckdb` | Query it from q, and reach Parquet and S3 through it. | at the REPL |
 
-Everything above arrives with `\l pq`, except URL resources and `rlike`, which are always there. The two rows with
+Everything above arrives with `\l pq`, except URL resources, `rlike` and the startup flags, which are always there. The two rows with
 no page of their own are documented by their own doc comments — type `.str.printf` or `.duckdb.open` at the prompt.
