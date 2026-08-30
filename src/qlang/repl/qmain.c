@@ -1,27 +1,11 @@
-/* q — a minimal q REPL: prompt with `q)`, parse each line to a rayforce ray_t
- * via q_parse, evaluate through the unmodified rayforce engine, print the
- * q-formatted result.  The loop itself lives in q_repl.c so the qcmd tests can
- * drive the identical console behaviour in-process.
- *
- * Phase C: `-p PORT` starts the kdb-protocol IPC listener (src/core/ipc.c) on
- * the runtime poll — `q -p 5001` is a kdb-style server.  `-u PW` / `-U PW`
- * arm the constant-time handshake auth (-U additionally restricts inbound
- * evals).  Service shape mirrors src/app/main.c: with `-p`, stdin (tty
- * console OR pipe) is registered on the SAME poll as the listener and one
- * event loop serves both CONCURRENTLY (q_repl_run_poll) — clients round-trip
- * while the REPL sits at its prompt.  stdin EOF (`</dev/null`, docker,
- * systemd) leaves the loop serving IPC only; `\\` exits.  Windows shares the
- * same shape: the IOCP backend delivers stdin readiness (console watcher
- * thread / PeekNamedPipe — see src/core/iocp_win.c), so `q.exe -p` serves
- * clients while the console sits at a live prompt too.
- *
- * Deliberately thin otherwise: no error traces, progress bar, remote session,
- * or piped bracket accumulation — those live in the (frozen) rayforce repl.c
- * and are reused later.  See ARCHITECTURE.md and the MVP design doc. */
+/* q — the launcher: arg parse, runtime/poll/listener bring-up, `-eval-before` texts, the startup script, `-eval`
+ * texts, then REPL / server / exit.  Flags are documented in user-docs/cmdline.md; q_dotz.c's flag_kind() is the
+ * canonical consumed-flag list.  The interactive loop lives in q_repl.c so the qcmd tests can drive the identical
+ * console behaviour in-process. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/repl/q_repl.h"
-#include "qlang/q_ctx.h"   /* q_ctx_run_file — the -f/script door */
+#include "qlang/q_ctx.h"   /* q_ctx_run_file/q_ctx_run_src — the script and -eval doors */
 #include "qlang/q_runtime.h"
 #include "qlang/q_dotz.h"
 #include "qlang/ops/q_sys.h"     /* q_sys_listen — single-homed listen+readback */
@@ -38,12 +22,8 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Parse a `-p` port spec.  Returns 1 → *out holds a concrete port in
- * 1..65535; 2 → the `0W` auto token (bind any OS-chosen free port); 0 →
- * invalid (non-numeric, out of range, negative, zero, or the `0N` null).
- * strtol with a full-consume + range check rejects `0N` / `abc` / `99999`
- * where the old `atoi` silently coerced them to 0 and fell through to a
- * plain REPL with no listener. */
+/* `-p` port spec: 1 → *out in 1..65535; 2 → the `0W` auto token; 0 → invalid.  strtol with a full-consume + range
+ * check — atoi silently coerced `0N`/`abc`/`99999` to 0 and fell through to a plain REPL with no listener. */
 static int parse_port_spec(const char* s, uint16_t* out) {
     if (strcmp(s, "0W") == 0 || strcmp(s, "0w") == 0) return 2;
     errno = 0;
@@ -66,6 +46,13 @@ int main(int argc, char** argv) {
     bool        auth_restricted = false;
     int         tls_mode = 0;
 
+    /* `-eval-before` / `-eval` texts, each list in argv order; order between the lists is by FLAG (before the
+     * startup script / after it), never by argv position.  argc bounds the counts. */
+    const char** eval_before = calloc((size_t)argc, sizeof *eval_before);
+    const char** eval_after  = calloc((size_t)argc, sizeof *eval_after);
+    int          n_before = 0, n_after = 0;
+    if (!eval_before || !eval_after) { fprintf(stderr, "q: out of memory\n"); return 1; }
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--port") == 0) {
             if (i + 1 >= argc) {
@@ -81,8 +68,7 @@ int main(int argc, char** argv) {
             have_port = true;
             port_auto = (k == 2);
         } else if (strcmp(argv[i], "-E") == 0) {
-            /* cmdline.md: 0 plain, 1 plain and TLS, 2 TLS only.  Strict like
-             * `-p`: a mistyped mode must not silently downgrade to plaintext. */
+            /* Strict like `-p`: a mistyped mode must not silently downgrade to plaintext. */
             const char* spec = (i + 1 < argc) ? argv[++i] : "";
             if (strlen(spec) != 1 || spec[0] < '0' || spec[0] > '2') {
                 fprintf(stderr, "q: invalid -E mode '%s' (expected 0, 1 or 2)\n", spec);
@@ -90,9 +76,7 @@ int main(int argc, char** argv) {
             }
             tls_mode = spec[0] - '0';
         } else if (strcmp(argv[i], "-e") == 0) {
-            /* cmdline.md#-e-error-traps: startup `\e` (error trap clients).
-             * Strict like -E: a mistyped mode must not pass silently.  Applied
-             * AFTER q_runtime_create — cfg init resets the mode to 0. */
+            /* Applied AFTER q_runtime_create — cfg init resets the mode to 0. */
             const char* spec = (i + 1 < argc) ? argv[++i] : "";
             if (strlen(spec) != 1 || spec[0] < '0' || spec[0] > '2') {
                 fprintf(stderr, "q: invalid -e mode '%s' (expected 0, 1 or 2)\n", spec);
@@ -100,8 +84,7 @@ int main(int argc, char** argv) {
             }
             etrap_mode = spec[0] - '0';
         } else if (strcmp(argv[i], "-z") == 0) {
-            /* cmdline.md#-z-date-format: startup `\z`.  Must be applied after
-             * q_runtime_create — cfg init would reset the order to 0. */
+            /* Applied AFTER q_runtime_create — cfg init resets the order to 0. */
             const char* spec = (i + 1 < argc) ? argv[++i] : "";
             if (strlen(spec) != 1 || spec[0] < '0' || spec[0] > '1') {
                 fprintf(stderr, "q: invalid -z mode '%s' (expected 0 or 1)\n", spec);
@@ -109,11 +92,14 @@ int main(int argc, char** argv) {
             }
             date_order = spec[0] - '0';
         } else if (strcmp(argv[i], "-classic") == 0) {
-            /* Opt IN to classic kx-q mode: legacy table display and NO startup
-             * `\l pq`.  Launch-only; the default is modern (pipe-table display
-             * + stdlib loaded).  `\classic 1/0` re-toggles the display at
-             * runtime, but the startup load decision is made once, here. */
             classic = true;
+        } else if (strcmp(argv[i], "-eval") == 0 || strcmp(argv[i], "-eval-before") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "q: %s requires a q source argument\n", argv[i]);
+                return 2;
+            }
+            if (strcmp(argv[i], "-eval") == 0) eval_after[n_after++] = argv[++i];
+            else                               eval_before[n_before++] = argv[++i];
         } else if (strcmp(argv[i], "-u") == 0 && i + 1 < argc) {
             auth_pw = argv[++i];
             auth_restricted = false;
@@ -219,21 +205,31 @@ int main(int argc, char** argv) {
     const char* script = q_dotz_script_path();
 
     /* `\c` console-size DISPLAY clipping is ARMED BY DEFAULT (q_sys_cfg_init)
-     * so a fresh interactive tty REPL and a piped `printf … | ./q` truncate at
-     * the 25 80 default (kdb-true).  The ONE carve-out: a PURE non-tty SCRIPT
-     * LOAD (`./q file.q </dev/null`, the qscript/daemon shape) is a BATCH
+     * so a fresh interactive tty REPL and a piped `printf … | ./q` (no script,
+     * no -eval) truncate at
+     * the 25 80 default (kdb-true).  The ONE carve-out: a non-tty SCRIPT
+     * LOAD (`./q file.q </dev/null`, the qscript/daemon shape — `-eval` texts
+     * are script source from argv, so they count) is a BATCH
      * context, NOT a display — widen the clip to the documented 2000 ceiling
      * (basics/syscmds.md `\c`: values coerce to [10,2000]) so the script's
      * `show`/`.z.f` (an absolute path, often > 80 chars) renders full-width.
      * kdb has no off-switch, so the ceiling IS the batch idiom.  A tty that
      * drops to the REPL after the script, or an explicit `\c` in the script,
      * resets/re-arms the size. */
-    if (script != NULL && !stdin_tty)
+    if ((script != NULL || n_before + n_after > 0) && !stdin_tty)
         q_console_clip_set(2000, 2000);
 
+    /* `-eval-before` / `-eval` texts are scripts whose source came from argv: same statement seam (q_ctx_run_src),
+     * same abort law, results NOT echoed.  An abort anywhere skips everything after it, REPL/server loop included. */
     int script_rc = 0;
-    if (script)
+    for (int i = 0; i < n_before && script_rc == 0; i++)
+        script_rc = q_ctx_run_src(eval_before[i], stdout, stderr, NULL);
+    if (script && script_rc == 0)
         script_rc = q_ctx_run_file(script, stdout, stderr, NULL);
+    for (int i = 0; i < n_after && script_rc == 0; i++)
+        script_rc = q_ctx_run_src(eval_after[i], stdout, stderr, NULL);
+    free(eval_before);
+    free(eval_after);
 
     if (script_rc != 0) {
         /* Startup script could not be opened, or ABORTED at an error (parse or
