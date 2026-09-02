@@ -138,9 +138,19 @@ static val_slot_t* val_slot(const ray_t* value, q_valence_t valence, int insert)
     }
 }
 
-/* Register g_entries[idx] in every index.  The aliasing verdict is a static
+/* Two rows can share one value at one valence (`reverse` and `|`-monadic are one
+ * env object).  A two-valence row's `family` describes its DYAD, so it is the wrong
+ * answer for the other valence: prefer the row that has no recipe at that other
+ * valence, and only a pair with no such winner stays undecidable. */
+static const q_op_t* row_prefer(const q_op_t* a, const q_op_t* b, q_valence_t v) {
+    int a1 = (v == Q_MONADIC) ? a->dyad.kind == QK_NONE : a->mon.kind == QK_NONE;
+    int b1 = (v == Q_MONADIC) ? b->dyad.kind == QK_NONE : b->mon.kind == QK_NONE;
+    return a1 == b1 ? NULL : (a1 ? a : b);
+}
+
+/* Register g_entries[idx] in every index.  The sharing verdict is a static
  * property of the built registry, computed HERE once, so q_registry_row_of
- * is one probe yet still answers NULL for an aliased value (provenance). */
+ * is one probe yet still answers NULL for a pair row_prefer cannot separate. */
 static void idx_add_entry(int idx) {
     entry_t* e = &g_entries[idx];
     sym_slot_t* s = sym_slot(e->sym_id, 1);
@@ -149,7 +159,11 @@ static void idx_add_entry(int idx) {
     if (!e->alias_of) {   /* a QK_ALIAS name must not blank the target's verdict */
         val_slot_t* v = val_slot(e->value, e->valence, 1);
         if (!v->aliased && !v->row) v->row = e->row;
-        else if (v->row != e->row) { v->row = NULL; v->aliased = 1; }
+        else if (v->row && v->row != e->row) {
+            const q_op_t* keep = row_prefer(v->row, e->row, e->valence);
+            if (keep) v->row = keep;
+            else { v->row = NULL; v->aliased = 1; }
+        }
     }
     ptrdiff_t r = e->row - g_ops_base;
     if (r >= 0 && r < g_ops_n) g_row_ent[r][e->valence] = (int16_t)idx;

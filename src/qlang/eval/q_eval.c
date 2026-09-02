@@ -997,14 +997,16 @@ ray_t* q_eval(ray_t* node) {
         } else {
             ray_retain(h);                          /* embedded value / noun */
             fv = h;
-            if (h->type == RAY_UNARY || h->type == RAY_BINARY ||
-                h->type == RAY_VARY) {
-                q_valence_t val = (argc == 1) ? Q_MONADIC
-                                : (argc == 2) ? Q_DYADIC : 0;
-                if (val) row = q_registry_row_of(h, val);
-            }
         }
         if (RAY_IS_ERR(fv)) { release_args(argv, argc); ret = fv; goto out; }
+        /* ONE recovery for every spelling of the head: a verb reached through a
+         * name, a variable or an expression keeps its family and its enum arm */
+        if (!row && (fv->type == RAY_UNARY || fv->type == RAY_BINARY ||
+                     fv->type == RAY_VARY)) {
+            q_valence_t val = (argc == 1) ? Q_MONADIC
+                            : (argc == 2) ? Q_DYADIC : 0;
+            if (val) row = q_registry_row_of(fv, val);
+        }
         ret = q_eval_apply(fv, row, argv, argc);
         release_args(argv, argc);
         ray_release(fv);
