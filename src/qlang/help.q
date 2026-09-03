@@ -1,14 +1,41 @@
 / help.q - the .help doc store: every doc comment the engine saw, queryable.
-/ PURE q by owner ruling - no C implements .help; the script seam only calls
-/ the two hooks below.  Re-pointing them is NOT a supported contract.
+/ PURE q by owner ruling - no C implements the STORE; C only classifies comment
+/ runs, calls the two hooks, and delivers the deferred builtin bundle behind the
+/ .help.i.loaddb native.  Re-pointing any of them is NOT a supported contract.
 / Schema after qstudio's man.q.  Headers are parsed ON INGEST - only the
 / structured rows are stored, so a changed parse rule means "reload the file".
-/ Loaded FIRST in the bundle (Makefile LIB_Q_SRCS) - the one load order that
-/ is not moot, since capture needs the hooks already bound.
+/ ALWAYS-ON: the core bootstrap loads this file (q_runtime.c), last of the
+/ ordered list, so the hooks are bound before the first file a user loads -
+/ capture is a listener, and a late listener has already missed its events.
+/ Only the generated builtin block is deferred: it lives in lib/help-db.q and
+/ FIRST HELP ACCESS is the one thing that loads it (owner 2026-09-03) - not boot,
+/ not `\l pq`.  Every READER calls .help.i.loaddb (get/text/find/i.index/show/
+/ full); .help.oneline does NOT, because it fires on every line typed and must
+/ never pull in a load as a side effect of typing.  So the REPL hint for a
+/ builtin is dark until the session's first real lookup, and live after it.
+/ THE C CONTRACT - renaming one of these five BREAKS C:
+/   .help.show / .help.full                q_sys.c      `\?topic` / `\??topic`
+/   .help.oneline                          q_repl.c     prompt hint, every line
+/   .help.register_file / _definition      q_comment.c  the two capture hooks
 .help.funcs:([fullname:`$()] ns:`$(); file:`$(); line:`long$())
-.help.args:([] fullname:`$(); tag:`$(); param:`$(); description:())
 .help.files:([file:`$()] ns:`$())
 .help.filetags:([] file:`$(); tag:`$(); val:())
+
+/ .help.args is DERIVED, never written: register_definition assigns one name's
+/ whole sub-table into .help.i.argsd and bumps the counter, and .help.args[]
+/ re-razes only when the counter has moved.  Delete-then-insert into a flat
+/ table rebuilt all four columns per call - 1694ms over 459 registrations
+/ against 170ms here.  argsp is the TYPED empty seed: `raze value ()!()` is a
+/ general list, which every `select from .help.args` would signal 'type on.
+.help.i.argsp:([] fullname:`$(); tag:`$(); param:`$(); description:())
+.help.i.argsd:()!()
+.help.i.counter:0
+.help.i.argsg:0
+.help.i.argsc:.help.i.argsp
+.help.args:{[] if[not .help.i.argsg=.help.i.counter;
+    .help.i.argsc::.help.i.argsp,raze value .help.i.argsd;
+    .help.i.argsg::.help.i.counter];
+  .help.i.argsc}
 
 .help.i.str:{$[10h=abs type x;x;string x]}
 
@@ -17,7 +44,9 @@
 .help.i.rstrip:{$[count i:where not x in " \t\n\r";(1+last i)#x;""]}
 .help.i.strip:{.help.i.rstrip $[count i:where not x in " \t\n\r";(first i)_x;""]}
 
-.help.i.join:{[lines] $[count i:where 0<count each lines;"\n" sv lines (first i)+til 1+(last i)-first i;""]}
+/ the slice is spelled #/_ , not index-by-til: `til` costs a flat ~0.6ms a call
+/ here (PLAN.md defect), and this runs several times per captured doc comment.
+.help.i.join:{[lines] $[count i:where 0<count each lines;"\n" sv (first i) _ (1+last i)#lines;""]}
 
 / header -> rows (tag;param;description;val), the lead description first under
 / a null tag: the lead is EVERY line before the first tag, a non-tag line
@@ -56,19 +85,19 @@
     `.help.files upsert (file;ns);
     `.help.filetags insert .help.i.filetags[file;header]]; }
 
-/ one documented definition; re-registering replaces its own rows only.  The
-/ derived args are unkeyed with many rows per name, so delete-then-insert is
-/ the idiom there, not a workaround.
+/ one documented definition; re-registering replaces its own rows only - the
+/ dict assign IS that replacement, and it keeps the name's original position
+/ (delete-then-insert moved a re-registered name to the end).
 .help.register_definition:{[fullname;ns;file;line;header]
-  nm:fullname;
   `.help.funcs upsert (fullname;ns;file;line);
-  delete from `.help.args where fullname=nm;
-  `.help.args insert .help.i.args[fullname;header]; }
+  .help.i.argsd::.help.i.argsd,enlist[fullname]!enlist flip `fullname`tag`param`description!.help.i.args[fullname;header];
+  .help.i.counter::1+.help.i.counter; }
 
 / one name's documentation as text - its description, then its tags.
 / @param name (symbol|string) the fullname a definition was captured under
 / @return (string) the rendered page, or a one-line "no documentation" note
 .help.get:{[name]
+  .help.i.loaddb[];
   render:{[n;r]
     tagline:{[t;p;d]
       h:"  @",string[t],$[null p;"";" ",string p];
@@ -79,7 +108,7 @@
     (enlist string n),($[count d;"  ",/:"\n" vs d;()]),($[count t;enlist"";()]),
      raze tagline'[t`tag;t`param;t`description]};
   n:`$.help.i.str name;
-  r:select tag,param,description from .help.args where fullname=n;
+  r:select tag,param,description from .help.args[] where fullname=n;
   $[count r;"\n" sv render[n;r];"no documentation for ",string n]}
 
 / the online docs base; "" disables the whole web tier (offline / tests).
@@ -129,6 +158,7 @@
 / @param pattern (symbol|string) a name, or a pattern as .help.find takes it
 / @return (string|table) the help text, or the matching doc rows
 .help.text:{[pattern]
+  .help.i.loaddb[];
   if[.help.i.blank pattern;:.help.i.index[]];
   lw:.help.i.ladder .help.i.str pattern;
   t:lw where 0<count each lw;
@@ -138,7 +168,7 @@
 
 / render a fetched page for the console behind a `│ ` gutter, obeying the
 / effective `\c` - its rows bound the preview, its cols clip each line
-/ (console `..` rule) - ending in a `.. N more` pointer (??topic / the
+/ (console `..` rule) - ending in a `.. N more` pointer (\??topic / the
 / website show everything).  ```q/```syntax block bodies get one tint, fence
 / lines the gutter grey.  .pq.termsize fills auto (`0N`) `\c` axes and
 / .pq.cancolor gates ALL the ANSI - both soft by-name calls, so a host
@@ -157,7 +187,7 @@
               ?[st[;0]&st[;1]&not fen;{"\033[36m",x,"\033[0m"}each ls;ls]]];
   out:$[cc;"\033[90m│ \033[0m";"│ "],/:ls;
   if[n>c 0;
-    x:".. ",string[n-c 0]," more lines: ??",topic,"  or  ",.help.url,"help?q=",.h.hu topic;
+    x:".. ",string[n-c 0]," more lines: \\??",topic,"  or  ",.help.url,"help?q=",.h.hu topic;
     out,:enlist $[cc;"\033[90m",x,"\033[0m";x]];
   "\n" sv out}
 
@@ -167,6 +197,7 @@
 / a caller never has to guess whether it printed or answered.
 / @param pattern (symbol|string) a name, or a pattern as .help.find takes it
 .help.show:{[pattern]
+  .help.i.loaddb[];
   if[.help.i.blank pattern;-1 .help.i.index[];:(::)];
   s:.help.i.str pattern;
   lw:.help.i.ladder s;
@@ -179,7 +210,7 @@
 / the OTHER printing door (`??`): the full unclipped ladder, plain text, no
 / gutter, no preview.  Kept separate from .help.show because the two spellings
 / mean different things at the prompt; both print, neither returns.
-.help.full:{[pattern] r:.help.text pattern; $[10h=type r;-1 r;show r];}
+.help.full:{[pattern] .help.i.loaddb[]; r:.help.text pattern; $[10h=type r;-1 r;show r];}
 
 / the basic datatype reference (ref/card.md shape), spelled by the engine:
 / the nulls and infinities are TYPED literals, n derives from their types,
@@ -201,16 +232,22 @@
     ("";"";"";"";"smallint";"int";"bigint";"real";"float";"";"varchar";"";"";"date";"timestamp";"";"";"";"time"))}
 
 / the one-line summary for a name - the first line of its lead description,
-/ "" when undocumented.  The REPL hint renders `?name / <this>` and owns the
+/ "" when undocumented.  The REPL hint renders `\?name / <this>` and owns the
 / width clipping, so the line comes back untrimmed.
 / @param name (symbol|string) the fullname
 .help.oneline:{[name]
   n:`$.help.i.str name;
-  r:select description from .help.args where fullname=n,null tag;
+  r:select description from .help.args[] where fullname=n,null tag;
   $[count r;first "\n" vs r[0;`description];""]}
 
-/ register one builtin's one-liner (repeated a LOT below - keep calls short).
+/ register one builtin's one-liner - the page entries below and every row of the
+/ generated lib/help-db.q call it, so keep the call short.  It NEVER overwrites a
+/ CAPTURED definition: the db loads at FIRST HELP ACCESS, by which time a user's own
+/ docs can already be in the store, and theirs win.  A null `line` is what marks a
+/ registration rather than a capture (.help.i.memline reads the same column), so the
+/ db still replaces the page entry it is meant to.
 .help.i.r:{[fullname;description]
+  if[not null .help.funcs[fullname;`line];:(::)];
   .help.register_definition[fullname;`$"."sv -1_"."vs string fullname;`;0N;description];}
 
 / the search terms of a pattern: whitespace splits it, each word becoming a
@@ -229,27 +266,23 @@
 / both, which no one contiguous phrase finds.  NAMES FIRST: a name hit is what
 / the user asked for where a description hit is a guess, and each matched name
 / collapses to the ONE row that stands for it (its lead line, which is how
-/ .help.args orders a name's rows) so ?str lists the .str functions, not their
+/ .help.args[] orders a name's rows) so ?str lists the .str functions, not their
 / tags.  The NAME half wants every term in the name and skips `.i.` privates,
 / as .help.i.nsmembers does; the other half takes each term in ANY field, the
 / name included, so one term can name a row the other describes and prose
 / naming a private still finds it.
 / @param pattern (string|symbol) the pattern
-/ @return (table) the matching rows of .help.args, name matches first
+/ @return (table) the matching rows of .help.args[], name matches first
 .help.find:{[pattern]
+  .help.i.loaddb[];
   ps:.help.i.globs lower .help.i.str pattern;
-  t:.help.args;
+  t:.help.args[];
   if[0=count t;:t];
   nm:exec fullname from .help.funcs where all lower[string fullname] like/:ps, not fullname like "*.i.*";
   n:0!select first tag,first param,first description by fullname from t where fullname in nm;
   fs:(lower each string t`fullname;lower each string t`tag;lower each string t`param;lower each t`description);
   d:t where all {[fs;p] any fs like\:p}[fs] each ps;
   n,d where not d[`fullname] in nm}
-
-/ >>> GENERATED from lib/help-builtins.tsv by `python3 tools/gen-help-builtins.py`
-/ >>> edit the TSV, rerun (it splices this block in place), commit both.
-/ >>> block deliberately EMPTY (owner 2026-08-14): the 459 registrations cost ~6s of every `\l pq`; rerun the gen to restore.
-/ <<< end generated
 
 / ---- pages -----------------------------------------------------------------
 / A PAGE is a curated blurb over a member filter, and an ENTRY like any other
@@ -281,7 +314,7 @@
   "as-of, equi, left and union joins";
   "text: search, case, trim, split";
   "dates, times and calendar arithmetic";
-  "tables and the qsql verbs: ?tables is the keyword");
+  "tables and the qsql verbs: \\?tables is the keyword");
  webtopic:``dotz`dotq`doth`dotj`iterators`syscmds`cmdline`datatypes`math`joins``datatypes`qsql;
  blurb:(
   ();();();();();
@@ -291,8 +324,8 @@
   ("n is the type number and c the .Q.t character; a vector is n, an atom -n";"sz is bytes per item; sql is the nearest ANSI SQL type");
   ("atomic verbs spread over a whole list; aggregates collapse one to a value";"an m- prefix is a moving window, an s- prefix a sample statistic");
   ("aj is the as-of join: the last y row at or before each x time";"lj ij uj pj match on the RIGHT table's key columns");
-  ("a string is a char vector, so every list verb works on it";"peachq adds a python-shaped text namespace: ?.str");
-  ("temporal types are numbers: add a long to a date, subtract two timestamps";"?types has the literals, the nulls and the infinities");
+  ("a string is a char vector, so every list verb works on it";"peachq adds a python-shaped text namespace: \\?.str");
+  ("temporal types are numbers: add a long to a date, subtract two timestamps";"\\?types has the literals, the nulls and the infinities");
   ("a table is a flipped dictionary of equal-length named columns";"the functional forms of select and update are ?[t;..] and ![t;..]"));
  members:(
   `$();`$();`$();`$();`$();
@@ -344,24 +377,25 @@
   w:$[p in .help.i.pagenames;.help.i.pages[p;`webtopic];`];
   if[null w;:r];
   if[not ()~.help.i.ix;if[not any (string w)~/:.help.i.ix`qname;:r]];   / `and` would index the uncached ()
-  $[count .help.url;r,enlist"  more: ??",(string w)," or ",.help.url,"help?q=",.h.hu string w;r]}
+  $[count .help.url;r,enlist"  more: \\??",(string w)," or ",.help.url,"help?q=",.h.hu string w;r]}
 
 / the index (bare `?`): the tutorial first, every row pasteable, `· page`
 / marking a directory.  Every listed page HAS an entry, so its row is that
 / entry's own line - one home per summary.  Layout is prose: order lives here.
 .help.i.index:{[]
+  .help.i.loaddb[];
   row:{[p] "  ",.help.oneline p};
-  "\n" sv (enlist "peachq help · one line per meaning · ?name shows it · ??name shows it in full"),
+  "\n" sv (enlist "peachq help · one line per meaning · \\?name shows it · \\??name shows it in full"),
    (enlist row`started),
-   (enlist "  ",.help.i.line["?til";"try any name: ?max  ?.Q.en  ?$  ?'type  ?-p"]),
+   (enlist "  ",.help.i.line["\\?til";"try any name: \\?max  \\?.Q.en  \\?$  \\?'type  \\?-p"]),
    (row each `.z`.Q`.h`.j`adverbs`syscmds`cmdline`types),
-   enlist "  ",(count[.help.i.line["";""]]$"?math  ?joins  ?strings  ?temporal  ?table"),"topic pages"}
+   enlist "  ",(count[.help.i.line["";""]]$"\\?math  \\?joins  \\?strings  \\?temporal  \\?table"),"topic pages"}
 
-/ page ENTRY rows, rendered from the registry summary.  Runs AFTER the generated
-/ block and NEVER overwrites an already-documented name - the defensive half of
-/ the no-collision rule, and what lets a page whose body IS its entry (`started`)
-/ be skipped here and carry its own summary.
+/ page ENTRY rows, rendered from the registry summary.  NEVER overwrites an
+/ already-documented name - the defensive half of the no-collision rule.  The
+/ generated block now loads LATER (lib/help-db.q), so a page whose body IS its
+/ entry (`started`) carries a bare `· page` line until that load replaces it.
 .help.i.pr:{[name;page] if[not name in exec fullname from .help.funcs;
-  .help.i.r[name;.help.i.line["?",string name;.help.i.pages[page;`summary]," · page"]]];}
+  .help.i.r[name;.help.i.line["\\?",string name;.help.i.pages[page;`summary]," · page"]]];}
 .help.i.pr'[.help.i.pagenames;.help.i.pagenames];
 .help.i.pr'[key .help.i.alias;value .help.i.alias];
