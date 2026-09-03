@@ -184,6 +184,10 @@ int main(int argc, char** argv) {
 #endif
         printf("peachq %d.%d %s https://peachq.org/\n",
                RAY_VERSION_MAJOR, RAY_VERSION_MINOR, build);
+        /* `\?` works in classic too (help is on the always-on bootstrap now), but
+         * classic is the kdb-clean env and the qscript runner forces it for
+         * byte-identical output — so the door is advertised only in modern. */
+        if (!classic) printf("\033[90mtype \\? for help\033[0m\n");
         fflush(stdout);
     }
 

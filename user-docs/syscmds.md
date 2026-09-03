@@ -11,6 +11,7 @@ listed behave as the reference body further down describes.
 
 | Command | In peachq |
 |---|---|
+| `\?` / `\??` | **peachq only** — the help doors. `\?topic` prints the one-line entry for a name (or, for a multi-word pattern, the doc rows that match it anywhere — many words are an AND); `\??topic` prints the full unclipped page; bare `\?` prints the index. The whole rest of the line is the topic, so glyphs and flags work (`\?$`, `\?0:`, `\?-p`). `system "?topic"` is the same door. The builtin help database is loaded on the session's FIRST help access, so the first `\?` of a session is slower than the rest. |
 | `\classic` | **peachq only** — toggle the legacy kx table display; answers `0b` on a default launch, `1b` under `-classic` (its launch twin). `\classic 1` / `\classic 0` sets it. |
 | `\x name` | **differs** — a silent no-op: the name is not expunged (`\x a` leaves `a` bound). |
 | `\_` | **differs** — the getter (client write-access check) answers `'nyi`; `\_ file` is accepted silently but scrambles nothing. |
