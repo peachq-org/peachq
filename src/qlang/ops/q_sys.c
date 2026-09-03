@@ -880,6 +880,48 @@ static ray_t* h_classic(const char* arg, size_t alen) {
     return NULL;                                     /* setter: silent */
 }
 
+/* `\?topic` / `\??topic` — the help doors (peachq), `system"?…"` with them.
+ * The whole rest of the line is the topic (many words are an AND — see
+ * .help.find), trailing blanks trimmed, `"`/`\` escaped into the rewrite; bare
+ * `\?` sends "", which .help.show answers with the index page.  Both doors
+ * PRINT and answer null — .help.text is the value ladder.  `p` starts at the
+ * first `?`. */
+static ray_t* h_help(const char* p, size_t n) {
+    size_t t0   = 1;
+    int    full = (t0 < n && p[t0] == '?');
+    t0 += (size_t)full;
+    while (t0 < n && (p[t0] == ' ' || p[t0] == '\t')) t0++;
+    size_t t1 = n;
+    while (t1 > t0 && (p[t1 - 1] == ' ' || p[t1 - 1] == '\t'
+                       || p[t1 - 1] == '\r' || p[t1 - 1] == '\n')) t1--;
+
+    size_t need = 16 + 2 * (t1 - t0);
+    char   stackbuf[512];
+    char*  s   = stackbuf;
+    ray_t* blk = NULL;
+    if (need > sizeof stackbuf) {
+        blk = ray_alloc(need);
+        if (!blk) return q_err(QE_OOM);
+        s = (char*)ray_data(blk);
+    }
+    int k = snprintf(s, need, ".help.%s\"", full ? "full" : "show");
+    for (size_t j = t0; j < t1; j++) {
+        if (p[j] == '"' || p[j] == '\\') s[k++] = '\\';
+        s[k++] = p[j];
+    }
+    s[k++] = '"';
+    s[k]   = '\0';
+
+    ray_t* ast = q_parse(s);
+    if (blk) ray_free(blk);
+    if (RAY_IS_ERR(ast)) return ast;
+    ray_t* r = q_eval(ast);
+    ray_release(ast);
+    if (RAY_IS_ERR(r)) return r;
+    ray_release(r);
+    return NULL;
+}
+
 /* Raw console shell for an unknown `\cmd` (capture=0): system(3), stdout
  * inherited, returns the raw status as a long (kdb-true `\foo`).  Capability-
  * gated: a runtime that does not own the process (doctest, wasm) does NOT
@@ -1015,6 +1057,12 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
     while (i < n && (line[i] == ' ' || line[i] == '\t')) i++;
     if (i >= n || line[i] != '\\') return q_err(QE_TYPE);  /* caller guard: q_sys_is_cmd */
     i++;
+
+    /* `\?topic` / `\??topic` — the help doors, handled BEFORE the command-token
+     * scan because a topic is arbitrary text (`\?0:` would break on the `:`
+     * repetition stop, `\?til` on nothing at all).  `system"?…"` is the same
+     * line, so both spellings land here. */
+    if (i < n && line[i] == '?') return h_help(line + i, n - i);
 
     /* Command token = run of chars that are neither whitespace nor `:`.  The
      * `:` stop resolves kdb's repetition suffix (\t:100, \ts:10000) to the base

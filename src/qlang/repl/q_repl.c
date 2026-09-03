@@ -246,10 +246,10 @@ static int32_t no_continuation(const char* mbuf, int32_t mbuf_len,
 static int repl_tty_dbg_read(const char* prompt, char* buf, size_t cap);
 
 /* Autosuggest: a submitted line that was exactly one name token with a
- * .help one-liner arms the next prompt's hint — `?name / <one-liner>`, Tab/→
- * accepting just the `?name` part.  The lookup is LOCAL (.help.oneline; no
- * network) and absent .help (classic, no `\l pq`) simply never answers, so
- * the prompt stays clean.  Anything else disarms. */
+ * .help one-liner arms the next prompt's hint — `\?name / <one-liner>`, Tab/→
+ * accepting just the `\?name` part.  The lookup is LOCAL (.help.oneline; no
+ * network) and it never loads the builtin help db, because it fires on EVERY
+ * line typed.  Anything else disarms. */
 static void repl_update_hint(ray_term_t* t, const char* s, size_t n) {
     ray_term_set_hint(t, NULL, 0);
     while (n && (s[n-1] == ' ' || s[n-1] == '\t' || s[n-1] == '\n')) n--;
@@ -267,7 +267,7 @@ static void repl_update_hint(ray_term_t* t, const char* s, size_t n) {
     ray_release(ast);
     if (!RAY_IS_ERR(r) && r && r->type == RAY_CHARV && ray_len(r) > 0) {
         char hint[256];
-        int  cmd = snprintf(hint, sizeof hint, "?%.*s", (int)n, s);
+        int  cmd = snprintf(hint, sizeof hint, "\\?%.*s", (int)n, s);
         snprintf(hint + cmd, sizeof hint - (size_t)cmd, " / %.*s",
                  (int)ray_len(r), (const char*)ray_data(r));
         ray_term_set_hint(t, hint, cmd);
@@ -276,11 +276,11 @@ static void repl_update_hint(ray_term_t* t, const char* s, size_t n) {
 }
 
 /* First-session teach: an empty history means a fresh user — arm the empty-
- * prompt ghost with the help door (Tab/→ accepts `?`).  Modern only (classic
- * has no .help); the first evaluated line replaces or clears it. */
+ * prompt ghost with the help door (Tab/→ accepts `\?`).  Modern only; the
+ * first evaluated line replaces or clears it. */
 static void repl_teach_hint(ray_term_t* t) {
     if (t->hist.count == 0 && q_console_pipe_on())
-        ray_term_set_hint(t, "? / help", 1);
+        ray_term_set_hint(t, "\\? / help", 2);
 }
 
 static void repl_interactive(FILE* out, FILE* err) {

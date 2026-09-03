@@ -43,7 +43,8 @@ RAY_INCLUDES = -Iinclude -I$(GEN_DIR) -Isrc \
                -Ithird_party/yyjson -Ithird_party/picohttpparser -Ithird_party/miniz
 
 RAY_GEN_HDRS = $(GEN_DIR)/qlang/dotq_gen.h $(GEN_DIR)/qlang/h_gen.h \
-               $(GEN_DIR)/qlang/j_gen.h $(GEN_DIR)/qlang/lib_gen.h \
+               $(GEN_DIR)/qlang/j_gen.h $(GEN_DIR)/qlang/help_gen.h \
+               $(GEN_DIR)/qlang/helpdb_gen.h $(GEN_DIR)/qlang/lib_gen.h \
                $(GEN_DIR)/qlang/html_assets_gen.h
 
 # The generated set by NAME, for callers that need them without a link target
@@ -65,6 +66,17 @@ $(GEN_DIR)/qlang/j_gen.h: src/qlang/j.q tools/gen-bootstrap.sh
 	@mkdir -p $(dir $@)
 	SYMBOL=PEACHQ_J_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/j.q
 
+# The .help machinery, always on and LAST of the ordered core list: the capture
+# hooks must be bound before the first file a user loads.  Its builtin DATA is a
+# separate bundle (lib/help-db.q), loaded on demand so bare boot never pays it.
+$(GEN_DIR)/qlang/help_gen.h: src/qlang/help.q tools/gen-bootstrap.sh
+	@mkdir -p $(dir $@)
+	SYMBOL=PEACHQ_HELP_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/help.q
+
+$(GEN_DIR)/qlang/helpdb_gen.h: lib/help-db.q tools/gen-bootstrap.sh
+	@mkdir -p $(dir $@)
+	SYMBOL=PEACHQ_HELPDB_BOOTSTRAP tools/gen-bootstrap.sh $@ lib/help-db.q
+
 # The standard library, both halves: lib/*.q TOP LEVEL ONLY — q that calls into
 # the peachq C surface — and qlib/src/*.q, the PORTABLE half that must also run
 # on kx q.  Sorted for determinism — the ANY-ORDER LAW makes the order
@@ -72,10 +84,9 @@ $(GEN_DIR)/qlang/j_gen.h: src/qlang/j.q tools/gen-bootstrap.sh
 # The directories themselves are prerequisites (lib/. spelled with the dot —
 # bare `lib` is the librayforce.a target): deleting/renaming a file bumps the
 # dir mtime, which the file-only list cannot see (the html-assets rule's law).
-# help.q is PINNED FIRST, the one order that is not moot: it defines .help.add,
-# and the C script seam captures a file's doc headers only while that name is
-# bound. Sort order would put it third and silently drop duckdb.q/ffi.q's docs.
-LIB_Q_SRCS := lib/help.q $(filter-out lib/help.q,$(sort $(wildcard lib/*.q))) \
+# help-db.q is EXCLUDED: it is the deferred builtin-help data, delivered by its
+# own embedded bundle behind .help.i.loaddb, which `\l pq` calls once.
+LIB_Q_SRCS := $(filter-out lib/help-db.q,$(sort $(wildcard lib/*.q))) \
               $(sort $(wildcard qlib/src/*.q))
 $(GEN_DIR)/qlang/lib_gen.h: lib/. qlib/src $(LIB_Q_SRCS) tools/gen-bootstrap.sh
 	@mkdir -p $(dir $@)
@@ -91,8 +102,10 @@ $(GEN_DIR)/qlang/html_assets_gen.h: tools/gen-assets.sh $(HTML_ASSET_DEPS)
 # Both suffixes: a .win.o inherits none of the .o target's prerequisites, which is
 # how the mingw build broke while the native one was already fixed.
 $(BUILD_DIR)/src/qlang/q_runtime.o $(BUILD_DIR)/src/qlang/q_runtime.win.o: \
-    $(GEN_DIR)/qlang/dotq_gen.h $(GEN_DIR)/qlang/h_gen.h $(GEN_DIR)/qlang/j_gen.h
-$(BUILD_DIR)/src/qlang/q_pq.o   $(BUILD_DIR)/src/qlang/q_pq.win.o:   $(GEN_DIR)/qlang/lib_gen.h
+    $(GEN_DIR)/qlang/dotq_gen.h $(GEN_DIR)/qlang/h_gen.h $(GEN_DIR)/qlang/j_gen.h \
+    $(GEN_DIR)/qlang/help_gen.h
+$(BUILD_DIR)/src/qlang/q_pq.o   $(BUILD_DIR)/src/qlang/q_pq.win.o:   $(GEN_DIR)/qlang/lib_gen.h \
+    $(GEN_DIR)/qlang/helpdb_gen.h
 $(BUILD_DIR)/src/qlang/net/q_http.o $(BUILD_DIR)/src/qlang/net/q_http.win.o: $(GEN_DIR)/qlang/html_assets_gen.h
 
 STD      = c17
