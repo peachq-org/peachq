@@ -212,8 +212,7 @@ ray_t* q_fill_wrap(ray_t* x, ray_t* y);                       /* used by: regist
 /* ---- defined in ops/q_math.c ---- */
 ray_t* q_min2_wrap(ray_t* a, ray_t* b);                       /* used by: ops, registry */
 ray_t* q_max2_wrap(ray_t* a, ray_t* b);                       /* used by: ops, registry */
-/* q_match_rec: declared in q_registry.h (env-safe reach) — used by: table, apply */
-ray_t* q_match_wrap(ray_t* a, ray_t* b);                      /* used by: registry, table */
+/* q_match_rec / q_match_wrap: declared in q_prim.h (env-safe reach) */
 
 /* ---- defined in ops/q_table.c ---- */
 ray_t* q_flip_wrap(ray_t* x);                                 /* used by: registry, list, math */
