@@ -230,7 +230,7 @@
     `$("nested sym enum";"table";"dictionary";"lambda";"unary primitive";"operator";"iterator";"projection";"composition";
        "f'";"f/";"f\\";"f':";"f/:";"f\\:";"dynamic load");
   sz:0N 1 16 1 2 4 8 4 8 1 0N 8 4 4 8 8 4 4 4,16#0N;
-  literal:(();0b;::;0x00;0h;0i;0j;0e;0.0;" ";`;2000.01.01D00:00:00.000000000;2000.01m;2000.01.01;
+  literal:(();0b;0Ng;0x00;0h;0i;0j;0e;0.0;" ";`;2000.01.01D00:00:00.000000000;2000.01m;2000.01.01;
            2000.01.01T00:00:00.000;00:00:00.000000000;00:00;00:00:00;00:00:00.000;
            ::;([]a:1 2);`a`b!1 2;{x};til;+;';+[2];::;(+');(+/);(+\);(-':);(+/:);(+\:);::);
   nul:(enlist[""],-3!'(0b;0Ng;0x00;0Nh;0Ni;0N;0Ne;0n;" ";`;0Np;0Nm;0Nd;0Nz;0Nn;0Nu;0Nv;0Nt)),16#enlist"";
@@ -330,7 +330,8 @@
   ("peachq honours the flags below; the other kdb+ flags are not implemented yet";"everything after the script name reaches the script as .z.x");
   ("n is the type number and c the .Q.t character; a vector is n, an atom -n";"sz is bytes per item; sql is the nearest ANSI SQL type";
    "0w and -0w are real infinities; the integer 0W and -0W are the type's bounds, not infinities";
-   "20-76 are enums and 78-96 are 77+t, a mapped list of lists of type t: ranges, so neither is a row");
+   "20-76 are enums and 78-96 are 77+t, a mapped list of lists of type t: ranges, so neither is a row";
+   "a guid's zero IS its null, so 0Ng is both its literal and its nul");
   ("atomic verbs spread over a whole list; aggregates collapse one to a value";"an m- prefix is a moving window, an s- prefix a sample statistic");
   ("aj is the as-of join: the last y row at or before each x time";"lj ij uj pj match on the RIGHT table's key columns");
   ("a string is a char vector, so every list verb works on it";"peachq adds a python-shaped text namespace: \\?.str");
