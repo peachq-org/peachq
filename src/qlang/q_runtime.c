@@ -26,6 +26,8 @@
 #include "qlang/dotq_gen.h"   /* PEACHQ_BOOTSTRAP — codegen'd from src/qlang/{q,dotq}.q */
 #include "qlang/h_gen.h"      /* PEACHQ_H_BOOTSTRAP — codegen'd from src/qlang/h.q (`.h` constants) */
 #include "qlang/j_gen.h"      /* PEACHQ_J_BOOTSTRAP — codegen'd from src/qlang/j.q (`.j` JSON ns) */
+#include "qlang/help_gen.h"   /* PEACHQ_HELP_BOOTSTRAP — codegen'd from src/qlang/help.q (`.help`) */
+#include "qlang/q_pq.h"       /* q_pq_helpdb_register / q_pq_reset — the on-demand help-db door */
 #include "qlang/q_env.h"      /* q_env_init/destroy — the q K-tree lifecycle */
 #include "lang/eval.h"        /* ray_eval_set_remote_* teardown */
 #include <rayforce.h>
@@ -73,10 +75,14 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
          * process-constant argv values once; q_eval resolves them directly
          * (no base name hook — one pipeline, cutover 2026-07-23). */
         q_dotz_init(argc, argv);
-        /* the ORDERED core list: q.q before dotq.q (semantic), then .h, .j */
+        q_pq_helpdb_register();  /* `.help.i.loaddb`, bound before help.q can call it */
+        /* the ORDERED core list: q.q before dotq.q (semantic), then .h, .j, and
+         * help.q LAST — its capture hooks bind before the first file a USER
+         * loads, which is the whole point of it being always-on. */
         if (bootstrap_run(PEACHQ_BOOTSTRAP,   "q.q+dotq.q") ||
             bootstrap_run(PEACHQ_H_BOOTSTRAP, "h.q") ||
-            bootstrap_run(PEACHQ_J_BOOTSTRAP, "j.q")) {
+            bootstrap_run(PEACHQ_J_BOOTSTRAP, "j.q") ||
+            bootstrap_run(PEACHQ_HELP_BOOTSTRAP, "help.q")) {
             q_runtime_destroy(rt);
             return NULL;
         }
@@ -89,6 +95,7 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
 }
 
 void q_runtime_destroy(ray_runtime_t* rt) {
+    q_pq_reset();              /* the help-db bundle reloads into the next runtime */
     q_duckdb_reset();          /* close DuckDB handles/dbs (suite isolation) */
     q_re2_reset();             /* no compiled pattern outlives its runtime */
     ray_eval_set_remote_str_fn(NULL);  /* remote strings fall back to rayfall */
