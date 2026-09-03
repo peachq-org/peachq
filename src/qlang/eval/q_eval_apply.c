@@ -1436,6 +1436,13 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
     if (n < 0 || n > APPLY_MAX_ARGS) return q_err(QE_RANK);
 
     int kind = q_eval_apply_carrier_kind(fv);
+    if (kind == Q_EVAL_CAR_ITER) return iter_call(fv, args, n);
+    /* ref/apply.md Composition: `u v w@` — a unary on an `@`/`.` projection (or a composition) COMPOSES rather
+     * than applying to the fn value.  A derived function has no fixed rank and its one-argument form IS its unary
+     * (`f over g@` composes, #42); a fixed rank >= 2 projects instead ("if projected as a unary by Apply") */
+    int64_t rank = rank_of(fv);
+    if (n == 1 && (rank == 1 || kind == Q_EVAL_CAR_DERIV) && comp_tail(args[0]))
+        return comp_new(fv, args[0]);
     if (kind == Q_EVAL_CAR_PROJ) return proj_call(fv, args, n);
     if (kind == Q_EVAL_CAR_DERIV) {
         ray_t** c = car_slots(fv);
@@ -1443,7 +1450,6 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
                                    args, n);
     }
     if (kind == Q_EVAL_CAR_COMP) return comp_call(fv, args, n);
-    if (kind == Q_EVAL_CAR_ITER) return iter_call(fv, args, n);
     if (!kind && !q_eval_apply_is_fnval(fv)) {
         /* the generic null is Identity: `(::) x` / `::[x]` returns x
          * (ref/identity.md) — 101h is a unary primitive, not a noun */
@@ -1456,15 +1462,9 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
         return noun_index(fv, args, n);
     }
 
-    /* ref/apply.md Composition: `u v w@` — a UNARY on an `@`/`.` projection
-     * (or a composition) COMPOSES rather than applying to the fn value */
-    if (n == 1 && fv->type == RAY_UNARY && comp_tail(args[0]))
-        return comp_new(fv, args[0]);
-
     int64_t holes = 0;
     for (int64_t i = 0; i < n; i++)
         if (!args[i]) holes++;
-    int64_t rank = rank_of(fv);
     if (holes > 0) {
         if (rank < 0) rank = n;   /* vary/deriv: project at the called rank */
         return q_eval_apply_proj_new(fv, row, args, n, rank);
@@ -1514,7 +1514,13 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
             const q_op_t* frow = NULL;
             if (q_eval_apply_is_fnval(args[0]))
                 frow = q_registry_operand_row(args[0]);
-            return q_adverb_apply(adv, args[0], frow, args + 1, 1);
+            /* `f over x` IS `(f/) x` (ref/accumulators.md "Keywords scan and over"): derive, then apply through
+             * this entry so the derived value meets the one composition gate */
+            ray_t* d = q_eval_apply_deriv_new(adv, args[0], frow);
+            if (RAY_IS_ERR(d)) return d;
+            ray_t* r = q_eval_apply(d, NULL, args + 1, 1);
+            ray_release(d);
+            return r;
         }
     }
 

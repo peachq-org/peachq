@@ -10,7 +10,7 @@
 #include "qlang/eval/q_eval_internal.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_ops.h"       /* q_ops_find + manifest columns + the identity-table accessors */
-#include "qlang/q_registry.h"  /* q_registry_row_of, q_match_rec, q_typed_empty_like */
+#include "qlang/q_registry.h"  /* q_registry_row_of */
 #include "qlang/q_builtins.h"  /* q_count_long — q `count` for C callers, hot lane */
 #include "qlang/base/q_type.h"
 #include "qlang/ops/q_index.h" /* q_index_elem_at — the one element accessor */
@@ -84,10 +84,11 @@ static ray_t* acc_converge(ray_t* fv, const q_op_t* frow, ray_t* x, int keep) {
     while (!err) {
         ray_t* nx = q_eval_apply(fv, frow, &cur, 1);
         if (RAY_IS_ERR(nx)) { err = nx; break; }
-        int stop = q_match_rec(nx, cur) || q_match_rec(nx, x0);
+        int stop = q_eval_apply_truthy(q_match_wrap(nx, cur), &err) ||
+                   (!err && q_eval_apply_truthy(q_match_wrap(nx, x0), &err));
         ray_release(cur);
         cur = nx;
-        if (stop) break;
+        if (err || stop) break;
         err = acc_push(&a, cur);
     }
     ray_release(cur);

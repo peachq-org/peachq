@@ -33,10 +33,10 @@ ray_t* q_table_map_cols(ray_t* (*colfn)(void* ctx, ray_t* col), void* ctx, ray_t
  * q_list_collapse) for the env-using apply module. */
 ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto);
 
-/* `~` as a C predicate — THE match home, so Converge's stop test inherits the
- * one comparison tolerance.  DEFINED in ops/q_math.c; declared here (like
- * q_list_collapse) for the env-using apply module. */
+/* `~` — THE match home (DEFINED in ops/q_math.c), as a C predicate and as the verb: the verb form is the LOUD
+ * entry, answering 'stack where the predicate can only answer mismatch, so Converge's stop test rides it. */
 int q_match_rec(ray_t* a, ray_t* b);
+ray_t* q_match_wrap(ray_t* a, ray_t* b);
 
 /* THE b -> i aggregate-width narrow (ref/sum.md, ref/prd.md domain tables): a long
  * (or one-item-fold boolean) result of an additive fold over an all-boolean
