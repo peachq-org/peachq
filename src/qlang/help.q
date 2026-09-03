@@ -212,24 +212,31 @@
 / mean different things at the prompt; both print, neither returns.
 .help.full:{[pattern] .help.i.loaddb[]; r:.help.text pattern; $[10h=type r;-1 r;show r];}
 
-/ the basic datatype reference (ref/card.md shape), spelled by the engine:
-/ the nulls and infinities are TYPED literals, n derives from their types,
-/ c from .Q.t, the null/inf cells are their -3! renderings (so the table can
-/ never drift from what the display prints - 0Wh shows 32767h, doc-true),
-/ and the inf rows self-align by type number.
-/ @return (table) n, c, name, sz (bytes), literal, null, inf, sql
-.help.types:{[]
-  nul:(0b;0Ng;0x00;0Nh;0Ni;0N;0Ne;0n;" ";`;0Np;0Nm;0Nd;0Nz;0Nn;0Nu;0Nv;0Nt);
-  inf:(0Wh;0Wi;0W;0We;0w;0Wp;0Wm;0Wd;0Wz;0Wn;0Wu;0Wv;0Wt);
-  n:0h,abs type each nul;
-  / `null` is a reserved word, so a table LITERAL cannot name that column - built from data instead
-  flip `n`c`name`sz`literal`null`inf`sql!(n;"*",.Q.t 1_n;
-    `list`boolean`guid`byte`short`int`long`real`float`char`symbol`timestamp`month`date`datetime`timespan`minute`second`time;
-    0N 1 16 1 2 4 8 4 8 1 0N 8 4 4 8 8 4 4 4;
-    ("";"0b";"";"0x00";"0h";"0i";"0j";"0e";"0.0";"\" \"";"`";"dateDtimespan";"2000.01m";"2000.01.01";"dateTtime";"00:00:00.000000000";"00:00";"00:00:00";"00:00:00.000");
-    enlist[""],-3!'nul;
-    @[count[n]#enlist"";n?abs type each inf;:;-3!'inf];
-    ("";"";"";"";"smallint";"int";"bigint";"real";"float";"";"varchar";"";"";"date";"timestamp";"";"";"";"time"))}
+/ the datatype reference, transcribed from basics/datatypes.md: a VALUE, not a
+/ function, because it is a constant - which pins help.q after dotq.q for .Q.t,
+/ and the bootstrap order already guarantees that.
+/ literal/pinf/ninf hold the VALUES, so a cell can never drift from what the
+/ display prints - 0Wh shows 32767h, doc-true - and `::` marks a type that has
+/ no such value, rendering blank, which is the right display for none.  `nul` is
+/ the one RENDERING column: q prints a typed null as a blank cell, and the typed
+/ null is anyway reconstructible from `n` by cast where its rendering is not.
+/ It is spelled `nul` because `null` is reserved - ([]null:..) signals 'assign.
+/ Rows 97-112 are the compound types; the RANGES (20-76 enums, 78-96 nested)
+/ are page prose, never rows.
+.help.types:([]
+  n:0 1 2 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 97 98 99 100 101 102 103 104 105 106 107 108 109 110 111 112h;
+  c:("*",.Q.t 1 2 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19),16#" ";
+  name:`list`boolean`guid`byte`short`int`long`real`float`char`symbol`timestamp`month`date`datetime`timespan`minute`second`time,
+    `$("nested sym enum";"table";"dictionary";"lambda";"unary primitive";"operator";"iterator";"projection";"composition";
+       "f'";"f/";"f\\";"f':";"f/:";"f\\:";"dynamic load");
+  sz:0N 1 16 1 2 4 8 4 8 1 0N 8 4 4 8 8 4 4 4,16#0N;
+  literal:(();0b;::;0x00;0h;0i;0j;0e;0.0;" ";`;2000.01.01D00:00:00.000000000;2000.01m;2000.01.01;
+           2000.01.01T00:00:00.000;00:00:00.000000000;00:00;00:00:00;00:00:00.000;
+           ::;([]a:1 2);`a`b!1 2;{x};til;+;';+[2];::;(+');(+/);(+\);(-':);(+/:);(+\:);::);
+  nul:(enlist[""],-3!'(0b;0Ng;0x00;0Nh;0Ni;0N;0Ne;0n;" ";`;0Np;0Nm;0Nd;0Nz;0Nn;0Nu;0Nv;0Nt)),16#enlist"";
+  pinf:(::;::;::;::;0Wh;0Wi;0W;0We;0w;::;::;0Wp;0Wm;0Wd;0Wz;0Wn;0Wu;0Wv;0Wt),16#enlist(::);
+  ninf:(::;::;::;::;-0Wh;-0Wi;-0W;-0We;-0w;::;::;-0Wp;-0Wm;-0Wd;-0Wz;-0Wn;-0Wu;-0Wv;-0Wt),16#enlist(::);
+  sql:("";"";"";"";"smallint";"int";"bigint";"real";"float";"";"varchar";"";"";"date";"timestamp";"";"";"";"time"),16#enlist"")
 
 / the one-line summary for a name - the first line of its lead description,
 / "" when undocumented.  The REPL hint renders `\?name / <this>` and owns the
@@ -321,7 +328,9 @@
   ("an iterator modifies a verb: each item, each pair, each left, each right";"/ folds to one value, \\ keeps every step");
   ("a \\ line is a command, not an expression; system \"c 25 200\" is its q form");
   ("peachq honours the flags below; the other kdb+ flags are not implemented yet";"everything after the script name reaches the script as .z.x");
-  ("n is the type number and c the .Q.t character; a vector is n, an atom -n";"sz is bytes per item; sql is the nearest ANSI SQL type");
+  ("n is the type number and c the .Q.t character; a vector is n, an atom -n";"sz is bytes per item; sql is the nearest ANSI SQL type";
+   "0w and -0w are real infinities; the integer 0W and -0W are the type's bounds, not infinities";
+   "20-76 are enums and 78-96 are 77+t, a mapped list of lists of type t: ranges, so neither is a row");
   ("atomic verbs spread over a whole list; aggregates collapse one to a value";"an m- prefix is a moving window, an s- prefix a sample statistic");
   ("aj is the as-of join: the last y row at or before each x time";"lj ij uj pj match on the RIGHT table's key columns");
   ("a string is a char vector, so every list verb works on it";"peachq adds a python-shaped text namespace: \\?.str");
@@ -372,8 +381,13 @@
 / lookup already cached it, never fetched to check.
 .help.i.pagetext:{[p]
   b:$[p in .help.i.pagenames;.help.i.pages[p;`blurb];()];
-  m:$[p~`types;"\n" vs .help.i.rstrip .Q.s .help.types[];.help.i.memline each .help.i.pagemem p];
-  r:("  ",/:b),($[(count b)and count m;enlist"";()]),"  ",/:m;
+  / the types page renders the two blocks basics/datatypes.md itself prints: one
+  / 35-row table would clip against \c and would carry six blank compound columns.
+  m:$[p~`types;
+    1_raze {(enlist""),"\n" vs .help.i.rstrip .Q.s x}each
+      (select from .help.types where n<20;select n,name,literal from .help.types where n>19);
+    .help.i.memline each .help.i.pagemem p];
+  r:("  ",/:b),($[(count b)and count m;enlist"";()]),.help.i.rstrip each"  ",/:m;
   w:$[p in .help.i.pagenames;.help.i.pages[p;`webtopic];`];
   if[null w;:r];
   if[not ()~.help.i.ix;if[not any (string w)~/:.help.i.ix`qname;:r]];   / `and` would index the uncached ()
