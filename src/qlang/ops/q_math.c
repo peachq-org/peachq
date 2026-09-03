@@ -537,7 +537,7 @@ static int match_tol_f64(double x, double y) {
  * (`1~1f` is 0b), attribute-blind (`1 2 3~\`s#1 2 3` is 1b), sentinel nulls
  * compare equal (`0n~0n` is 1b — non-finites canonicalize to one payload).
  * Unhandled types conservatively mismatch (kdb ~ never errors). */
-int q_match_rec(ray_t* a, ray_t* b) {
+static int match_rec(ray_t* a, ray_t* b) {
     if (a == b) return 1;
     if (!a || !b) return 0;
     /* a mapped splay IS a table (`type` answers 98h): match agrees with the
@@ -664,7 +664,22 @@ int q_match_rec(ray_t* a, ray_t* b) {
     return 0;
 }
 
+/* the walk is bounded where the value is not (IDX_MAX_DEPTH's ceiling, sized for the 8MB stack): the predicate
+ * answers mismatch, its conservative side; the verb reports the trip as 'stack (basics/errors.md) */
+#define MATCH_MAX_DEPTH 2048
+static _Thread_local int match_depth, match_deep;
+
+int q_match_rec(ray_t* a, ray_t* b) {
+    if (match_depth >= MATCH_MAX_DEPTH) { match_deep = 1; return 0; }
+    match_depth++;
+    int r = match_rec(a, b);
+    match_depth--;
+    return r;
+}
+
 ray_t* q_match_wrap(ray_t* a, ray_t* b) {
-    return ray_bool(q_match_rec(a, b));
+    match_deep = 0;
+    int r = q_match_rec(a, b);
+    return match_deep ? q_err(QE_STACK) : ray_bool(r);
 }
 
