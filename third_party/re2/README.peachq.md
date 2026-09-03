@@ -2,9 +2,9 @@
 
 - **Upstream, as we take it:** `third_party/re2` from the DuckDB source tree,
   https://github.com/duckdb/duckdb
-- **Version pin:** DuckDB **v1.4.5** (`duckdb-1.4.5.tar.gz`, GitHub release tag)
-- **Tarball sha256:** `29931ac91cf9077292773099a900c67be6d13b933978e176249b6e5b75b0b958`
-- **Vendored-tree sha256:** `fb94c254556b9794a060017e5d5af97f201bf2882dd9be43246647560ebded60`
+- **Version pin:** DuckDB **v1.5.5** (`v1.5.5.tar.gz`, GitHub release tag)
+- **Tarball sha256:** `f33155ff962e6e1e08fd1e9caffa487d4325aa60999e2eabc76feff534d6558b`
+- **Vendored-tree sha256:** `64705ec0efb60af16572736fc478b1ef89de4d264056dc7b29dd433d34eae7d1`
   (see *Drift* below)
 - **License:** BSD-3-Clause — `LICENSE` in this directory is upstream's, shipped
   verbatim, and also recorded under `docs/licenses/re2-LICENSE`. `AUTHORS` is
@@ -86,6 +86,8 @@ tools/re2-pin.sh --print                   # the new tree digest
 make && make q-test
 ```
 
-Bumping the pin changes `.regexp.version`, so
-`test/q/aigenerated/regex_version.qcmd` moves with it — that row is the pin's
-ledger.
+Bumping the pin changes `.regexp.version`, so every golden asserting it moves
+with it: `test/q/aigenerated/regex_version.qcmd` (the pin's ledger, and the row
+that also compares the pin against the DuckDB actually shipped) and
+`wasm/smoke.js`, which is outside `make q-test` and so fails later rather than
+in the gate. `grep -rn "$OLD_PIN"` before you call the bump done.
