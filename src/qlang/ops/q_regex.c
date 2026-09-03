@@ -164,7 +164,7 @@ static ray_t* regex_extract_all_one(ray_t* x, void* c) {
 /* Split scans the REMAINDER, not the whole subject — DuckDB's own algorithm
  * (string_split.cpp StringSplitter::Split), matched deliberately so the mapping
  * `.regexp.split` <-> regexp_split_to_array in the docs is true rather than
- * approximate.  Verified against the v1.4.5 library, which is also where the two
+ * approximate.  Verified against the v1.5.5 library, which is also where the two
  * non-obvious rules come from: a zero-width match at the remainder's START is not
  * a delimiter at all (it yields one character and moves on), and once the
  * remainder is empty no further match is considered.  Passing the remainder as

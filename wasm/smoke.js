@@ -24,7 +24,7 @@ const CASES = [
     ['.regexp.extract["order-1234";"[0-9]+"]', '"1234"'],
     ['.regexp.replace_all["a1b2";"[0-9]";"#"]', '"a#b#"'],
     ['.regexp.escape["a.b"]', '"a\\\\.b"'],
-    ['.regexp.version', '"v1.4.5"'],
+    ['.regexp.version', '"v1.5.5"'],
 ];
 
 require(path.join(__dirname, 'peachq.js'))().then((M) => {
