@@ -64,8 +64,8 @@ int q_handles_reserve_fd(void);
 /* `h x` dispatch by kind: console (1/-1/2/-2) text-write, FILE write (raw;
  * `neg h` appends '\n' per basics/handles.md), FIFO 'nyi (Phase-1 fifo is a
  * reader), SOCKET/unregistered -> IPC send (positive sync, negative async).
- * Total over int handles. */
-ray_t* q_handles_apply(int64_t qh, ray_t* y);
+ * `h` is the applied int/long atom (borrowed); a write echoes it, retained. */
+ray_t* q_handles_apply(ray_t* h, ray_t* y);
 
 /* `` `:… `` sym-handle apply — the protocol arm (caller has checked the
  * leading ':'): ws/wss and http/https clients, else one-shot sync IPC on a

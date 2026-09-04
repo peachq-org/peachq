@@ -272,7 +272,7 @@ ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config) 
         }
         live->connid = c;
         live->open3  = o3;
-        return ray_i64(live->fd);
+        return ray_i32((int32_t)live->fd);
     }
     int fd = q_handles_reserve_fd();
     if (fd < 0) { ray_release(o3); return q_err(QE_IO); }
@@ -312,7 +312,7 @@ ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config) 
     g_ents[g_n].open3    = o3;
     g_ents[g_n].connid   = c;
     g_n++;
-    return ray_i64((int64_t)fd);
+    return ray_i32(fd);
 }
 
 int q_provider_info(int64_t fd, int64_t* provider, int64_t* alias) {

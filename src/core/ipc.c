@@ -377,16 +377,23 @@ static ray_t* hook_fire(ray_t* fn, ray_t** args, int64_t n) {
     return call_lambda(fn, args, n);
 }
 
+/* The handle a hook receives: a q carrier (.z.po/.z.pc/.z.bm) gets the socket fd
+ * as an int — what `.z.w` answers and `.z.H` lists — while an engine lambda keeps
+ * the selector id `.ipc.post` / `.ipc.send` / `.ipc.close` expect. */
+static ray_t* hook_handle_arg(ray_t* fn, int64_t handle, int64_t fd) {
+    return fn->type == RAY_QFN ? make_i32((int32_t)fd) : make_i64(handle);
+}
+
 /* Call a single-arg hook for lifecycle events (on.open / on.close).
  * Errors are logged and swallowed — a buggy logging hook must never
  * wedge connection teardown.  `poll` is the poll the connection lives
  * in, exposed thread-locally so the hook body can use the handle with
  * `.ipc.post` / `.ipc.send` / `.ipc.close`; the legacy server path
  * passes NULL (its conn-index handles are not selector ids). */
-static void hook_call_lifecycle(ray_poll_t* poll, int idx, int64_t handle) {
+static void hook_call_lifecycle(ray_poll_t* poll, int idx, int64_t handle, int64_t fd) {
     ray_t* fn = hook_lookup(idx);
     if (!fn) return;
-    ray_t* arg = make_i64(handle);
+    ray_t* arg = hook_handle_arg(fn, handle, fd);
     if (!arg || RAY_IS_ERR(arg)) { if (arg) ray_release(arg); return; }
     int64_t prev = ipc_ctx_handle();
     ray_poll_t* prev_poll = ipc_ctx_poll();
@@ -410,7 +417,7 @@ static void hook_call_lifecycle(ray_poll_t* poll, int idx, int64_t handle) {
  * follows.  msgBytes = the (already-decompressed) payload bytes as a byte
  * vector, built only when a handler is installed.  Errors are logged and
  * swallowed like the lifecycle hooks. */
-static void hook_call_badmsg(ray_poll_t* poll, int64_t handle,
+static void hook_call_badmsg(ray_poll_t* poll, int64_t handle, int64_t fd,
                              const uint8_t* bytes, size_t len)
 {
     ray_t* fn = hook_lookup(IPC_HOOK_BADMSG);
@@ -419,7 +426,7 @@ static void hook_call_badmsg(ray_poll_t* poll, int64_t handle,
     if (!mb || RAY_IS_ERR(mb)) { if (mb) ray_error_free(mb); return; }
     memcpy(ray_data(mb), bytes, len);
     mb->len = (int64_t)len;
-    ray_t* h = make_i64(handle);
+    ray_t* h = hook_handle_arg(fn, handle, fd);
     if (!h || RAY_IS_ERR(h)) {
         if (h) ray_error_free(h);
         ray_release(mb);
@@ -1124,7 +1131,7 @@ static ray_t* ipc_read_handshake(ray_poll_t* poll, ray_selector_t* sel)
     /* Connection is now fully ready for inbound messages.  Fire
      * `.ipc.on.open` AFTER we've requested the next read, so a hook that
      * calls back into the server can't race the read pump. */
-    hook_call_lifecycle(poll, IPC_HOOK_OPEN, sel->id);
+    hook_call_lifecycle(poll, IPC_HOOK_OPEN, sel->id, sel->fd);
     return NULL;
 }
 
@@ -1204,7 +1211,7 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
         ray_t* obj = ipc_decode_payload(pdata, (size_t)plen, swap,
                                         &is_wire_err);
         if (!obj) {              /* malformed data structure — .z.bm (dotz.md) */
-            hook_call_badmsg(poll, id, pdata, (size_t)plen);          /* (1) */
+            hook_call_badmsg(poll, id, sel->fd, pdata, (size_t)plen);          /* (1) */
             if (payload) ray_poll_buf_free(payload);
             if (uz) ray_release(uz);
             /* the hook may itself have closed this handle — revalidate
@@ -1254,7 +1261,7 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
     ray_eval_set_restricted(prev_restricted);
 
     if (rc != 0) {           /* malformed data structure — .z.bm (dotz.md) */
-        hook_call_badmsg(poll, id, pdata, (size_t)plen);              /* (1) */
+        hook_call_badmsg(poll, id, sel->fd, pdata, (size_t)plen);              /* (1) */
         if (msgtype == RAY_IPC_MSG_SYNC) {
             /* bare 'badmsg to the requester (3) — the hook may have closed
              * this handle, so revalidate before writing to its fd */
@@ -1306,7 +1313,7 @@ static void ipc_on_close(ray_poll_t* poll, ray_selector_t* sel)
         if (cd->listener_id >= 0 &&
             (cd->phase == RAY_IPC_PHASE_HEADER ||
              cd->phase == RAY_IPC_PHASE_PAYLOAD)) {
-            hook_call_lifecycle(poll, IPC_HOOK_CLOSE, sel->id);
+            hook_call_lifecycle(poll, IPC_HOOK_CLOSE, sel->id, sel->fd);
         }
         if (cd->http_buf) {     /* HTTP-mode request accumulator */
             ray_sys_free(cd->http_buf);
@@ -1369,7 +1376,7 @@ static void conn_close(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
      * Keeps the pair balanced for the user. */
     if (c->phase == RAY_IPC_PHASE_HEADER ||
         c->phase == RAY_IPC_PHASE_PAYLOAD) {
-        hook_call_lifecycle(NULL, IPC_HOOK_CLOSE, (int64_t)(c - srv->conns));
+        hook_call_lifecycle(NULL, IPC_HOOK_CLOSE, (int64_t)(c - srv->conns), (int64_t)c->fd);
     }
 
 #if defined(__linux__)
@@ -1427,7 +1434,7 @@ static void conn_on_handshake(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
     c->rx_len  = 0;
     c->rx_need = KDB_HDR_LEN;
     c->phase   = RAY_IPC_PHASE_HEADER;
-    hook_call_lifecycle(NULL, IPC_HOOK_OPEN, (int64_t)(c - srv->conns));
+    hook_call_lifecycle(NULL, IPC_HOOK_OPEN, (int64_t)(c - srv->conns), (int64_t)c->fd);
 }
 
 static void conn_on_header(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
