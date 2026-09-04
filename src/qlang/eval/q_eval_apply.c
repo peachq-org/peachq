@@ -1176,10 +1176,8 @@ static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
     if (n < 1) return q_err(QE_RANK);
     /* handle-as-verb (`h x`): console/file/fifo/socket dispatch lives wholly
      * in q_handles_apply (the sole handle authority) */
-    if ((v->type == -RAY_I64 || v->type == -RAY_I32) && n == 1 && args[0]) {
-        int64_t qh = (v->type == -RAY_I64) ? v->i64 : (int64_t)v->i32;
-        return q_handles_apply(qh, args[0]);
-    }
+    if ((v->type == -RAY_I64 || v->type == -RAY_I32) && n == 1 && args[0])
+        return q_handles_apply(v, args[0]);
     if (v->type == -RAY_SYM) return sym_head_apply(v, args, n);
     if (v->type == -RAY_STR) {           /* stray physical string: convert, retry */
         ray_t* cv = q_str_charv_of_str(v);

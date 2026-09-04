@@ -141,7 +141,7 @@ ray_t* q_conn_table(void) {
     static const char* const names[13] = { "h", "kind", "p", "f", "z", "n",
         "m", "out", "user", "addr", "provider", "alias", "opened" };
     ray_t* c[13];
-    c[0]  = ray_vec_new(RAY_I64, cap);
+    c[0]  = ray_vec_new(RAY_I32, cap);
     c[1]  = ray_sym_vec_new(RAY_SYM_W64, cap);
     c[2]  = ray_vec_new(RAY_CHARV, cap);
     c[3]  = ray_vec_new(RAY_CHARV, cap);
@@ -159,7 +159,8 @@ ray_t* q_conn_table(void) {
         int64_t ks   = kind_sym(r->kind);
         int64_t nm   = r->kind == Q_HANDLE_SOCKET ? 0 : NULL_I64;
         uint8_t zf   = 0;
-        c[0]  = ray_vec_append(c[0], &r->fd);
+        int32_t fd   = (int32_t)r->fd;
+        c[0]  = ray_vec_append(c[0], &fd);
         c[1]  = ray_vec_append(c[1], &ks);
         c[2]  = ray_vec_append(c[2], &r->p);
         c[3]  = ray_vec_append(c[3], &r->f);

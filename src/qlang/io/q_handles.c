@@ -17,7 +17,7 @@
 #include "qlang/net/q_http_client.h" /* q_http_client_raw + the scheme spelling — `:http:// sym handles */
 #include "qlang/eval/q_eval.h"       /* q_eval_value_wrap / q_eval_apply_value — handle 0 IS `.z.ps`/value */
 #include "lang/eval.h"       /* ray_eval_get_restricted, ray_at_fn */
-#include "lang/internal.h"   /* make_i64, ray_hopen_fn/ray_hsend_fn/ray_hpost_fn/ray_hclose_fn */
+#include "lang/internal.h"   /* make_i32/make_i64, ray_hopen_fn/ray_hsend_fn/ray_hpost_fn/ray_hclose_fn */
 #include "core/runtime.h"    /* __VM->ipc_handle — the handle context handle 0 swaps */
 #include "table/sym.h"       /* ray_sym_intern_runtime, ray_sym_str */
 #include "core/ipc.h"        /* ray_ipc_handle_of_fd/fd_of_handle — q true-fd handle <-> selector id */
@@ -218,7 +218,7 @@ ray_t* q_handles_open(const char* path, size_t plen, int is_fifo) {
         return q_err(QE_OOM);
     }
     free(p);
-    return make_i64((int64_t)fd);
+    return make_i32(fd);
 }
 
 /* ---- apply: `h x` ------------------------------------------------------- */
@@ -238,7 +238,7 @@ static int write_all(int fd, const char* p, int64_t n) {
 /* Raw file write.  A POSITIVE handle writes the payload bytes verbatim — NO
  * newline framing (the primitive the streaming PR lacked); a NEGATIVE handle
  * appends '\n' after the string / after each list item (basics/handles.md:
- * `neg[h] x` appends x,"\n" / x,'"\n").  Returns the handle as applied. */
+ * `neg[h] x` appends x,"\n" / x,'"\n").  NULL on success, else the error. */
 static ray_t* raw_write(int64_t qh, ray_t* y) {
     int fd = (int)(qh < 0 ? -qh : qh);
     int nl = qh < 0;
@@ -248,7 +248,7 @@ static ray_t* raw_write(int64_t qh, ray_t* y) {
     if (yp) {
         if (yn > 0 && write_all(fd, yp, yn) < 0) return q_err(QE_IO);
         if (nl && write_all(fd, "\n", 1) < 0) return q_err(QE_IO);
-        return make_i64(qh);
+        return NULL;
     }
     if (y && (y->type == RAY_LIST || y->type == RAY_STR)) {
         int64_t m = ray_len(y);
@@ -263,7 +263,7 @@ static ray_t* raw_write(int64_t qh, ray_t* y) {
             ray_release(it);
             if (nl && write_all(fd, "\n", 1) < 0) return q_err(QE_IO);
         }
-        return make_i64(qh);
+        return NULL;
     }
     return q_err(QE_TYPE);
 }
@@ -288,7 +288,7 @@ static ray_t* console_eval_h(ray_t* y) {
 
 /* Console handles (kdb basics/handles.md): 1/-1 stdout, routed to the q console
  * sink; a NEGATIVE handle appends '\n' after each string.  2/-2 are NOT here —
- * stderr is fd 2, which raw_write already speaks. */
+ * stderr is fd 2, which raw_write already speaks.  NULL on success, else the error. */
 static ray_t* console_write_h(int64_t qh, ray_t* y) {
     int nl = qh < 0;
     const char* yp; int64_t yn;
@@ -313,7 +313,7 @@ static ray_t* console_write_h(int64_t qh, ray_t* y) {
         }
     } else
         return q_err(QE_TYPE);
-    return make_i64(qh);
+    return NULL;
 }
 
 /* The kind dispatch (q_handles.h contract).  File/fifo before IPC so a
@@ -321,10 +321,19 @@ static ray_t* console_write_h(int64_t qh, ray_t* y) {
  * writing it is a clean 'nyi, not an 'io.  A q handle IS the socket fd
  * (kdb-faithful, >= 3); translate to the poll selector id `.ipc.*` expect.
  * Those primitives are RAY_FN_RESTRICTED and called directly, so re-assert
- * restricted per arm (console handles stay usable under it). */
-ray_t* q_handles_apply(int64_t qh, ray_t* y) {
-    if (qh == 1 || qh == -1) return console_write_h(qh, y);
-    if (qh == 2 || qh == -2) return raw_write(qh, y);   /* stderr IS fd 2, `\2`-redirectable */
+ * restricted per arm (console handles stay usable under it).  A write "returns
+ * itself" (basics/handles.md:37): the applied atom, so `1 x` echoes 1 and an
+ * int handle echoes 3i — never a freshly minted atom of some other width. */
+static ray_t* echo(ray_t* h, ray_t* bad) {
+    if (bad) return bad;
+    ray_retain(h);
+    return h;
+}
+
+ray_t* q_handles_apply(ray_t* h, ray_t* y) {
+    int64_t qh = (h->type == -RAY_I64) ? h->i64 : (int64_t)h->i32;
+    if (qh == 1 || qh == -1) return echo(h, console_write_h(qh, y));
+    if (qh == 2 || qh == -2) return echo(h, raw_write(qh, y));   /* stderr IS fd 2, `\2`-redirectable */
     if (qh == 0) return console_eval_h(y);
     int64_t afd = (qh == INT64_MIN) ? 0 : (qh < 0 ? -qh : qh);   /* neg h = same fd */
     if (afd >= 3) {
@@ -337,14 +346,14 @@ ray_t* q_handles_apply(int64_t qh, ray_t* y) {
             if (y && (y->type == RAY_BYTE_ONLY || y->type == RAY_LIST ||
                       y->type == RAY_STR || y->type == RAY_CHARV ||
                       y->type == -RAY_STR || y->type == -RAY_CHARV))
-                return raw_write(qh, y);
+                return echo(h, raw_write(qh, y));
             ray_t* oa = q_handles_open_args(afd);           /* borrowed charv path */
             if (!oa) return q_err(QE_TYPE);
             ray_t* p = ray_str((const char*)ray_data(oa), (size_t)ray_len(oa));
             if (!p) return q_err(QE_OOM);
             ray_t* bad = q_wirefile_append_path(p, y);
             ray_release(p);
-            return bad ? bad : make_i64(qh);
+            return echo(h, bad);
         }
         if (hk == Q_HANDLE_FIFO) {
             if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
@@ -399,13 +408,9 @@ ray_t* q_handles_sym_apply(ray_t* head, ray_t** args, int64_t n) {
         (args[0]->type == -RAY_STR || args[0]->type == RAY_CHARV)) {
         ray_t* h = q_hopen_wrap(head);           /* owned fd handle or error */
         if (!h || RAY_IS_ERR(h)) return h;
-        ray_t* r;
-        if (h->type == -RAY_I64 || h->type == -RAY_I32) {
-            int64_t qh = (h->type == -RAY_I64) ? h->i64 : (int64_t)h->i32;
-            r = q_handles_apply(qh, args[0]);    /* SYNC send */
-        } else {
-            r = q_err(QE_TYPE);
-        }
+        ray_t* r = (h->type == -RAY_I64 || h->type == -RAY_I32)
+                 ? q_handles_apply(h, args[0])    /* SYNC send */
+                 : q_err(QE_TYPE);
         ray_t* c = q_hclose_wrap(h);             /* close regardless of r */
         if (c) ray_release(c);
         ray_release(h);
@@ -696,7 +701,7 @@ static ray_t* hopen_wrap_impl(ray_t* x) {
      * user).  The Phase-2 byte/msg counters + last-activity live in the frozen
      * read/write path and are NOT captured here. */
     (void)q_handles_register(fd, Q_HANDLE_SOCKET, 1, descbuf, desclen);  /* best-effort: the socket works via the IPC path regardless */
-    return make_i64(fd);
+    return make_i32((int32_t)fd);
 }
 
 /* q `hclose h` — validate the handle, then delegate the file/fifo-vs-IPC
