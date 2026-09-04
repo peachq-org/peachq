@@ -156,8 +156,8 @@ static ray_t* z_o(void) {   /* .z.o — OS/build symbol (l64/m64/w64 …), kdb-t
     return ray_sym(ray_sym_intern(os, strlen(os)));
 }
 
-/* .z.i — PID.  The published .z reference displays it with NO `i` suffix (a
- * long/-7h), unlike .z.a which shows the `i` suffix (int/-6h). */
+/* .z.i — PID, an INT (ref/dotz.md:403 says so in prose).  The doc's bare `23219`
+ * display is a pre-3.0 artifact, not evidence of a long. */
 
 static ray_t* z_h(void) {   /* .z.h — host name as a symbol (gethostname) */
     char host[256];
@@ -426,7 +426,7 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
             case 'e': out = z_e(); break;                                        /* .z.e TLS status */
             case 'q': out = ray_bool(g_quiet); break;                            /* .z.q quiet */
             case 's': out = q_dbg_self(); break;                                 /* .z.s self */
-            case 'i': out = ray_i64((int64_t)getpid()); break;                   /* .z.i pid   */
+            case 'i': out = ray_i32((int32_t)getpid()); break;                   /* .z.i pid   */
             case 'p': out = ray_timestamp(q_dotz_now_ns(0)); break;                   /* .z.p / .z.P */
             case 'P': out = ray_timestamp(q_dotz_now_ns(1)); break;
             case 'd': out = ray_date((int64_t)(q_dotz_now_ns(0) / RAY_NS_PER_DAY)); break;    /* .z.d / .z.D */
