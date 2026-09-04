@@ -1584,6 +1584,21 @@ static void ray_term_search_redraw(ray_term_t* term) {
 
 /* ===== Event-driven line editing ===== */
 
+/* The word boundary shared by kill-word and jump-word, so ^W and Ctrl-Left
+ * cannot disagree.  Deliberately is_alphanum, not find_word_start's dot-aware
+ * identifier scan: readline splits `.z.ph` too, and ^W parity is worth more. */
+static int32_t find_prev_word(const char* buf, int32_t pos) {
+    while (pos > 0 && !is_alphanum(buf[pos - 1])) pos--;
+    while (pos > 0 && is_alphanum(buf[pos - 1])) pos--;
+    return pos;
+}
+
+static int32_t find_next_word(const char* buf, int32_t pos, int32_t len) {
+    while (pos < len && !is_alphanum(buf[pos])) pos++;
+    while (pos < len && is_alphanum(buf[pos])) pos++;
+    return pos;
+}
+
 /* Show prompt and reset line state.  Called once per input line. */
 void ray_term_begin(ray_term_t* term) {
     ray_term_prompt(term);
@@ -1599,6 +1614,27 @@ void ray_term_begin(ray_term_t* term) {
 /* Forward declaration — feed_normal handles all normal-mode keys. */
 static ray_t* feed_normal(ray_term_t* term, int key);
 
+static int csi_params_match(const ray_term_t* term, const char* want) {
+    int32_t n = (int32_t)strlen(want);
+    return n == term->esc_buf_len && memcmp(term->esc_buf, want, (size_t)n) == 0;
+}
+
+/* A collected CSI sequence has reached its final byte.  Dispatch on the
+ * (parameters, final) pair — on the final byte alone a cursor-position report
+ * or a shift-arrow would read as movement.  Unrecognised: silently dropped. */
+static ray_t* csi_dispatch(ray_term_t* term, int final) {
+    if (final == 'D' || final == 'C') {
+        /* Ctrl / Alt arrow: xterm + Windows Terminal `1;5` / `1;3`, rxvt `5`. */
+        if (csi_params_match(term, "1;5") || csi_params_match(term, "1;3") || csi_params_match(term, "5"))
+            return feed_normal(term, final == 'D' ? -KEYCODE_WORD_LEFT : -KEYCODE_WORD_RIGHT);
+    }
+    /* Delete: Ctrl-D already owns forward-delete.  The bounds test keeps its
+     * empty-buffer arm (which returns EOF) out of reach. */
+    if (final == '~' && csi_params_match(term, "3") && term->buf_pos < term->buf_len)
+        return feed_normal(term, KEYCODE_CTRL_D);
+    return NULL;
+}
+
 /* Process one byte while in escape-sequence state.
  * Returns a line (via feed_normal) or NULL. */
 static ray_t* feed_escape(ray_term_t* term, int byte) {
@@ -1606,6 +1642,9 @@ static ray_t* feed_escape(ray_term_t* term, int byte) {
     case 1: /* Got ESC, waiting for [ or O */
         if (byte == '[') { term->esc_state = 2; return NULL; }
         if (byte == 'O') { term->esc_state = 3; return NULL; }
+        /* readline's Alt-b / Alt-f, and what macOS terminals send for Alt-arrow */
+        if (byte == 'b') { term->esc_state = 0; return feed_normal(term, -KEYCODE_WORD_LEFT); }
+        if (byte == 'f') { term->esc_state = 0; return feed_normal(term, -KEYCODE_WORD_RIGHT); }
         /* Bare ESC — cancel tab cycling if active */
         term->esc_state = 0;
         if (term->comp_cycling) {
@@ -1623,13 +1662,13 @@ static ray_t* feed_escape(ray_term_t* term, int byte) {
         case 'D': return feed_normal(term, -KEYCODE_LEFT);
         case 'H': return feed_normal(term, -KEYCODE_HOME);
         case 'F': return feed_normal(term, -KEYCODE_END);
-        case '3': term->esc_state = 4; return NULL; /* waiting for ~ */
         default:
-            /* Unknown CSI — if this is a final byte we are done */
+            /* A bare final byte we do not know: done.  Anything else opens a
+             * parameter run, collected by case 5 and dispatched on the pair. */
             if (byte >= 0x40 && byte <= 0x7E) return NULL;
-            /* Otherwise consume until final byte */
             term->esc_state = 5;
-            term->esc_buf_len = 0;
+            term->esc_buf[0] = (char)byte;
+            term->esc_buf_len = 1;
             return NULL;
         }
 
@@ -1637,28 +1676,19 @@ static ray_t* feed_escape(ray_term_t* term, int byte) {
         term->esc_state = 0;
         if (byte == 'H') return feed_normal(term, -KEYCODE_HOME);
         if (byte == 'F') return feed_normal(term, -KEYCODE_END);
+        if (byte == 'd') return feed_normal(term, -KEYCODE_WORD_LEFT);  /* rxvt Ctrl-Left */
+        if (byte == 'c') return feed_normal(term, -KEYCODE_WORD_RIGHT); /* rxvt Ctrl-Right */
         return NULL;
 
-    case 4: /* Got ESC [ 3, waiting for ~ (Delete key) */
-        term->esc_state = 0;
-        if (byte == '~') {
-            if (term->buf_pos < term->buf_len) {
-                int32_t next = find_next_utf8(term->buf, term->buf_pos, term->buf_len);
-                int32_t bytes = next - term->buf_pos;
-                memmove(term->buf + term->buf_pos,
-                        term->buf + term->buf_pos + bytes,
-                        (size_t)(term->buf_len - term->buf_pos - bytes));
-                term->buf_len -= bytes;
-                ray_term_redraw(term);
-            }
+    case 5: /* Collecting CSI parameters until the final byte */
+        if (byte >= 0x40 && byte <= 0x7E) {
+            term->esc_state = 0;
+            return csi_dispatch(term, byte);
         }
-        return NULL;
-
-    case 5: /* Consuming unknown CSI until final byte */
-        if (byte >= 0x40 && byte <= 0x7E)
-            term->esc_state = 0;
-        else if (++term->esc_buf_len > 8)
-            term->esc_state = 0;
+        /* Past capacity, stop STORING but keep CONSUMING: dropping out of the
+         * sequence here would leak its tail into the line as typed text. */
+        if (term->esc_buf_len < (int32_t)sizeof(term->esc_buf))
+            term->esc_buf[term->esc_buf_len++] = (char)byte;
         return NULL;
     }
     term->esc_state = 0;
@@ -1807,6 +1837,17 @@ static ray_t* feed_normal(ray_term_t* term, int key) {
             ray_term_redraw(term);
         } else if (term->ghost_len > 0) {
             ray_term_accept_ghost(term);
+            ray_term_redraw(term);
+        }
+        return NULL;
+    }
+
+    if (key == -KEYCODE_WORD_LEFT || key == -KEYCODE_WORD_RIGHT) {
+        int32_t p = key == -KEYCODE_WORD_LEFT
+                        ? find_prev_word(term->buf, term->buf_pos)
+                        : find_next_word(term->buf, term->buf_pos, term->buf_len);
+        if (p != term->buf_pos) {
+            term->buf_pos = p;
             ray_term_redraw(term);
         }
         return NULL;
@@ -1997,10 +2038,7 @@ static ray_t* feed_normal(ray_term_t* term, int key) {
     case KEYCODE_CTRL_W: {
         if (term->buf_pos > 0) {
             int32_t end = term->buf_pos;
-            while (term->buf_pos > 0 && !is_alphanum(term->buf[term->buf_pos - 1]))
-                term->buf_pos--;
-            while (term->buf_pos > 0 && is_alphanum(term->buf[term->buf_pos - 1]))
-                term->buf_pos--;
+            term->buf_pos = find_prev_word(term->buf, term->buf_pos);
             memmove(term->buf + term->buf_pos,
                     term->buf + end,
                     (size_t)(term->buf_len - end));
