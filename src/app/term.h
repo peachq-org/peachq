@@ -57,6 +57,10 @@
 #define KEYCODE_CTRL_R    0x12
 #define KEYCODE_CTRL_U    0x15
 #define KEYCODE_CTRL_W    0x17
+/* Synthetic: only ever decoded from a modified-arrow CSI or ESC b / ESC f, so
+ * they sit above 0xFF where no input byte can collide with them. */
+#define KEYCODE_WORD_LEFT  0x101
+#define KEYCODE_WORD_RIGHT 0x102
 
 #define TERM_BUF_SIZE 4096
 #define HIST_DEFAULT_CAP 256
@@ -171,8 +175,9 @@ typedef struct ray_term {
     char        multiline_buf[TERM_BUF_SIZE];
     int32_t     multiline_len;
     /* Escape sequence state machine (for event-driven feed) */
-    int32_t     esc_state;     /* 0=normal, 1=ESC, 2=ESC[, 3=ESCO, 4=ESC[3, 5=unknown CSI */
-    int32_t     esc_buf_len;   /* bytes accumulated in unknown CSI sequence */
+    int32_t     esc_state;     /* 0=normal, 1=ESC, 2=ESC[, 3=ESCO, 5=CSI params */
+    char        esc_buf[9];    /* CSI parameters, sans ESC[ and the final; full = stop storing */
+    int32_t     esc_buf_len;
     /* Optional pluggable syntax highlighter; NULL → use the built-in one. */
     ray_highlight_fn highlight_fn;
     /* Optional pluggable continuation policy; NULL → built-in counter. */
