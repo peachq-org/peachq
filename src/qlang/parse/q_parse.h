@@ -8,6 +8,7 @@
 
 #include <rayforce.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /* Parse q source into a ray_t AST tree.
  *
@@ -17,6 +18,11 @@
  *
  * Requires an initialised rayforce runtime (symbol interning). */
 ray_t* q_parse(const char* src);
+
+/* `(.X.e; "text")` application tree (`q` -> `value`) — the language-handler
+ * dispatch q_parse applies to a `<letter>)` prefix, shared with the char-atom
+ * apply arm (`"g" "4"`). */
+ray_t* q_parse_lang_tree(char letter, const char* p, int64_t n);
 
 /* Test probe (test/q_qsql_normalize.c): scan `src` as a bare clause phrase in
  * scan-context `ctx`, normalized to the `verb` slot shape.  Not on any runtime

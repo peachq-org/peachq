@@ -562,6 +562,38 @@ static ray_t* lambda_structure(ray_t* v) {
     return out ? out : q_err(QE_WSFULL);
 }
 
+/* THE statement home — see q_eval.h.  parse -> view intercept -> eval -> the
+ * assignment law, and every door that runs q TEXT (the repl line, `value` of a
+ * string, the IPC string request) gets its value from here.
+ *
+ * The assignment law is a STATEMENT law, never an eval-tree one: q_eval recurses
+ * on itself, so `(a:4)+1` is 5 and `x:a:4` still sets x to 4 — only the value the
+ * statement HANDS BACK is the generic null (owner ruling 2026-09-05).  A view
+ * definition answers the same way (learn/views.md#parse: only a statement can
+ * carry that distinction, which is why the intercept lives here and not in
+ * q_eval). */
+ray_t* q_eval_statement(const char* src, int* parsed) {
+    if (parsed) *parsed = 1;
+    ray_t* ast = q_parse(src);
+    if (!ast || RAY_IS_ERR(ast)) {
+        if (parsed) *parsed = 0;         /* the statement never ran — see q_eval.h */
+        return ast ? ast : q_err(QE_PARSE);
+    }
+    ray_t* r;
+    int silent = 1;
+    if (!q_view_intercept(ast, src, &r)) {
+        silent = q_parse_is_assign(ast);
+        r = q_eval(ast);
+    }
+    ray_release(ast);
+    if (silent && r && !RAY_IS_ERR(r)) {
+        ray_release(r);
+        ray_retain(RAY_NULL_OBJ);
+        r = RAY_NULL_OBJ;
+    }
+    return r;
+}
+
 /* `value`/`get` (ref/value.md; get is the synonym).  q `eval` needs no body
  * here — it is .q.eval:(-6!), the q_bang.c arm over q_eval.  value applies
  * ONCE, non-recursively: a string parses+evaluates in the current context, a
@@ -594,18 +626,8 @@ ray_t* q_eval_value_wrap(ray_t* x) {
         if (!z) return q_err(QE_WSFULL);
         memcpy(z, p, (size_t)n);
         z[n] = 0;
-        ray_t* ast = q_parse(z);
-        if (!ast || RAY_IS_ERR(ast)) {
-            ray_free_raw(z);
-            return ast ? ast : q_err(QE_PARSE);
-        }
-        /* value of SOURCE TEXT is a statement, so `z::e` defines a view here
-         * just as it does at the repl seam — unlike eval of a parse TREE,
-         * which cannot carry the distinction (learn/views.md#parse). */
-        ray_t* r;
-        if (!q_view_intercept(ast, z, &r)) r = q_eval(ast);
+        ray_t* r = q_eval_statement(z, NULL);
         ray_free_raw(z);
-        ray_release(ast);
         return r;
     }
     if (x->type == RAY_DICT) {

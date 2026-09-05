@@ -1,6 +1,6 @@
 /* q_repl — see q_repl.h.  Shared by the `q` binary and the qcmd test runner.
  *
- * Two console modes share one line-processing helper (run_one_line):
+ * Two console modes share one line-processing helper (q_ctx_run_line):
  *   - piped / redirected stdin (echo != 0): the original fgets loop, kept
  *     byte-for-byte identical so the qcmd transcript tests stay stable.
  *   - interactive TTY (echo == 0): real-reuses rayforce's line editor
@@ -18,7 +18,7 @@
 #include "qlang/eval/q_view.h"   /* q_view_intercept — `x::e` at the line seam */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
-#include "qlang/ops/q_sys.h"      /* q_sys_is_cmd / q_sys_line / q_sys_prompt / q_sys_listen_port */
+#include "qlang/ops/q_sys.h"      /* q_sys_prompt / q_sys_listen_port — the front end's two asks */
 #include "app/term.h"       /* ray_term_* line editor + highlighter hook */
 #include "core/poll.h"      /* ray_poll_* — concurrent REPL + IPC event loop */
 #include "lang/eval.h"      /* ray_eval_is_interrupted */
@@ -340,7 +340,7 @@ static void repl_interactive(FILE* out, FILE* err) {
 
         /* Interrupt window: Ctrl-C becomes SIGINT (POSIX, ISIG) or
          * CTRL_C_EVENT (Windows, processed input) ONLY while eval runs;
-         * both set the eval-interrupt flag run_one_line reports as 'stop.
+         * both set the eval-interrupt flag q_ctx_run_line reports as 'stop.
          * Keep this bracket tight — no early exits between begin and end. */
         ray_term_clear_interrupt();
         ray_eval_clear_interrupt();
@@ -491,7 +491,7 @@ static ray_t* poll_tty_data(ray_poll_t* poll, ray_selector_t* sel, void* data) {
     }
 
     /* Interrupt window: identical bracket to repl_interactive — Ctrl-C is
-     * SIGINT only while the eval runs; run_one_line reports it as 'stop. */
+     * SIGINT only while the eval runs; q_ctx_run_line reports it as 'stop. */
     ray_term_clear_interrupt();
     ray_eval_clear_interrupt();
     ray_term_eval_begin(c->term);

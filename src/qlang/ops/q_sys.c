@@ -3,8 +3,8 @@
  * region) feeding a SWITCH on the command char, each case calling its handler
  * with only the arguments it needs.  A handler
  * returns an OWNED value (NULL = silent) or an OWNED error — including `\\`
- * (q_sys_exit) and the unknown-token shell miss, both gated by the g_own_process
- * capability rather than by the caller.  \d owns the current-context state
+ * (q_sys_exit), gated by the g_own_process capability rather than by the
+ * caller, and the unknown-token shell miss.  \d owns the current-context state
  * here; \S owns its seed state here. */
 #define _POSIX_C_SOURCE 200809L
 /* winsock2.h must precede EVERY windows.h (core/profile.h pulls one in) or
@@ -40,7 +40,7 @@
 #include "ops/ops.h"          /* ray_is_lazy / ray_lazy_materialize — timed-expr result */
 #include <rayforce.h>
 #include "mem/heap.h"         /* ray_mem_stats / ray_mem_stats_t — `\w` reuse */
-#include <stdlib.h>           /* system, malloc */
+#include <stdlib.h>           /* malloc, free, exit — `\\` */
 #include <string.h>           /* strlen, memcpy, memcmp */
 #include <stdio.h>            /* popen / pclose — `system "…"` stdout capture */
 #include <unistd.h>          /* chdir / getcwd / access — `\cd`, `\l`; dup2 — `\1`/`\2` */
@@ -139,7 +139,7 @@ static int64_t g_utc_offset;              /* \o UTC offset    (default 0N)      
 static int32_t g_week_offset;             /* \W week offset   (default 2)       */
 static int32_t g_err_trap;                /* \e error trap    (default 0)       */
 static int32_t g_sec_threads;             /* \s secondary thr (default 0)       */
-static int     g_own_process;             /* this runtime may exit/shell process */
+static int     g_own_process;             /* this runtime may exit the process   */
 static int     g_exiting;                 /* .z.exit reentry guard */
 
 /* \t timer: current interval (ms; 0 = off) and the live timer id (-1 = none). */
@@ -922,30 +922,6 @@ static ray_t* h_help(const char* p, size_t n) {
     return NULL;
 }
 
-/* Raw console shell for an unknown `\cmd` (capture=0): system(3), stdout
- * inherited, returns the raw status as a long (kdb-true `\foo`).  Capability-
- * gated: a runtime that does not own the process (doctest, wasm) does NOT
- * execute and is SILENT — corpus `\ls`/`\curl` rows must never touch the
- * FS / network, and silence is kdb's display for a succeeding command (banked
- * rows like dict/key's `\mkdir foo` -> "" pin it).  `rem`/`rlen` is a SLICE
- * of the console line; copied NUL-terminated before system(). */
-static ray_t* sys_shell(const char* rem, size_t rlen) {
-    if (!g_own_process) return NULL;
-    char   stackbuf[1024];
-    char*  cmd = stackbuf;
-    ray_t* blk = NULL;
-    if (rlen + 1 > sizeof stackbuf) {
-        blk = ray_alloc(rlen + 1);
-        if (!blk) return q_err(QE_OOM);
-        cmd = (char*)ray_data(blk);
-    }
-    memcpy(cmd, rem, rlen);
-    cmd[rlen] = '\0';
-    int rc = system(cmd);
-    if (blk) ray_free(blk);
-    return ray_i64(rc);
-}
-
 /* Shell escape for the q `system "…"` STRING form.  Runs the command in the
  * current PROCESS cwd (popen -> /bin/sh -c) and captures its STDOUT as a q
  * LIST of character vectors, one per line, with the line feed and any
@@ -1019,7 +995,8 @@ static ray_t* sys_shell_capture(const char* rem, size_t rlen) {
 }
 
 /* The q-owned `system "…"` verb: prepend `\` and PASS THROUGH q_sys_run —
- * `system "X"` ≡ `\X` for every command, one path.  capture=1: an unknown
+ * `system "X"` ≡ `\X` for every command, one path, and since 2026-09-04 the
+ * `\X` LINE arrives here too (q_parse builds this application).  An unknown
  * token shells via popen, stdout -> list of char vectors.  `system` is a
  * restricted primitive under IPC reval (kdb blocks it) -> 'access. */
 ray_t* q_system_fn(ray_t* x) {
@@ -1040,22 +1017,16 @@ ray_t* q_system_fn(ray_t* x) {
     if (sl) memcpy(buf + 1, sp, sl);
     buf[sl + 1] = '\0';
 
-    ray_t* out = q_sys_run(buf, sl + 1, 1);
+    ray_t* out = q_sys_run(buf, sl + 1);
     if (blk) ray_free(blk);
     if (!out) { ray_retain(RAY_NULL_OBJ); return RAY_NULL_OBJ; }  /* silent -> generic null */
     return q_str_charv_out(out);            /* captured lines cross as char vectors */
 }
 
-bool q_sys_is_cmd(const char* line, size_t n) {
+ray_t* q_sys_run(const char* line, size_t n) {
     size_t i = 0;
     while (i < n && (line[i] == ' ' || line[i] == '\t')) i++;
-    return i < n && line[i] == '\\';
-}
-
-ray_t* q_sys_run(const char* line, size_t n, int capture) {
-    size_t i = 0;
-    while (i < n && (line[i] == ' ' || line[i] == '\t')) i++;
-    if (i >= n || line[i] != '\\') return q_err(QE_TYPE);  /* caller guard: q_sys_is_cmd */
+    if (i >= n || line[i] != '\\') return q_err(QE_TYPE);  /* q_system_fn prepends it */
     i++;
 
     /* `\?topic` / `\??topic` — the help doors, handled BEFORE the command-token
@@ -1151,33 +1122,7 @@ ray_t* q_sys_run(const char* line, size_t n, int capture) {
     }
 
     /* Unrecognized command → shell out on the raw remainder (token..EOL). */
-    return capture ? sys_shell_capture(line + rem0, n - rem0)
-                   : sys_shell(line + rem0, n - rem0);
-}
-
-/* See q_sys.h — the shared console glue.  Console side effects come FIRST in
- * buf, then the value (`\h`'s doc lines, `\t exp`'s show/0N! output precede a
- * result), matching the eval path's display order in every adapter. */
-ray_t* q_sys_line(const char* line, size_t n, int print_value,
-                  char* buf, size_t cap) {
-    if (cap) buf[0] = '\0';
-    ray_t* v = q_sys_run(line, n, 0);
-    const char* con = q_console_str();
-    size_t used = 0;
-    if (cap && con && *con) {
-        used = strlen(con);
-        if (used >= cap) used = cap - 1;
-        memcpy(buf, con, used);
-        buf[used] = '\0';
-    }
-    q_console_reset();
-    if (v && RAY_IS_ERR(v)) return v;
-    if (v) {
-        if (print_value && !RAY_IS_NULL(v) && used < cap)
-            q_fmt_console(v, buf + used, cap - used);
-        ray_release(v);
-    }
-    return NULL;
+    return sys_shell_capture(line + rem0, n - rem0);
 }
 
 /* ---- the process-environment verbs: getenv / setenv --------------------
