@@ -706,23 +706,9 @@ static bool cast_vec_relabel_compat(int8_t a, int8_t b) {
  *                       i.e. 1999-12-31, not 2000-01-01).
  *   TIMESTAMP → TIME : floor-mod by NS_PER_DAY then /1_000_000
  *                       (ns→ms within day, always in [0, 86_400_000)).
- * Plain `% / /` would truncate toward zero per C semantics and give
- * wrong components for pre-2000 timestamps; the helpers below give
- * Python-style floor semantics for a positive divisor. */
-#define NS_PER_DAY 86400000000000LL
-
-static inline int64_t ts_days_floor(int64_t ns) {
-    int64_t q = ns / NS_PER_DAY;
-    int64_t r = ns - q * NS_PER_DAY;
-    if (r < 0) q -= 1;
-    return q;
-}
-static inline int64_t ts_ns_in_day(int64_t ns) {
-    int64_t r = ns % NS_PER_DAY;
-    if (r < 0) r += NS_PER_DAY;
-    return r;
-}
-
+ * Plain `/ %` would truncate toward zero per C semantics and give wrong
+ * components for pre-2000 timestamps; ts_days_floor/ts_ns_in_day (lang/cal.h)
+ * give Python-style floor semantics for a positive divisor. */
 /* Element-wise cast worker: writes _dst_p[lo..hi) from _src_p[lo..hi).
  * Used by both the single-threaded fast path and the parallel dispatch.
  * Returns true on hit; false means caller falls back to the generic
@@ -1489,7 +1475,9 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             /* Floor to the containing day: cast.md:172 pins
              * "d"$2017.08.23T23:50:12 -> 2017.08.23 (the [) rule). */
             if (RAY_ATOM_IS_NULL(val)) return ray_typed_null(-RAY_DATE);
-            return ray_date((int64_t)floor(val->f64));
+            int64_t d, tod;
+            datetime_to_day_ns(val->f64, &d, &tod);
+            return ray_date(d);
         }
         if (val->type == -RAY_STR) {
             /* Parse "YYYY.MM.DD" format */
@@ -1549,11 +1537,12 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         }
         if (val->type == -RAY_DATE) return ray_time((int64_t)val->i32);
         if (val->type == -RAY_DATETIME) {
-            /* Time-of-day ms, floor (cast.md:168-170 truncation rule;
+            /* Time-of-day ms, the [) floor of the split's ns (cast.md:168-170;
              * :180 pins the "t"$datetime extraction). */
             if (RAY_ATOM_IS_NULL(val)) return ray_typed_null(-RAY_TIME);
-            double frac = val->f64 - floor(val->f64);
-            return ray_time((int64_t)floor(frac * 86400000.0));
+            int64_t d, tod;
+            datetime_to_day_ns(val->f64, &d, &tod);
+            return ray_time(tod / 1000000LL);
         }
         if (val->type == -RAY_TIMESTAMP)
             /* TIMESTAMP is ns since epoch; TIME stores ms-of-day.  Use
@@ -1724,15 +1713,10 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             return ray_timestamp(month_payload_as_days((int64_t)val->i32) * 86400000000000LL);
         }
         if (val->type == -RAY_DATETIME) {
-            /* Fractional days -> ns, rounded to the nearest ns (f64 grain
-             * is coarser than ns).  Out-of-range saturates to +-0Wp
-             * (datatypes.md:146: casting a datetime outside the timestamp
-             * year range results in +-0Wp). */
+            /* The datetime's integer form, saturating at +-0Wp (datatypes.md:146:
+             * a datetime outside the timestamp year range casts to +-0Wp). */
             if (RAY_ATOM_IS_NULL(val)) return ray_typed_null(-RAY_TIMESTAMP);
-            double ns = val->f64 * 86400000000000.0;
-            if (ns >= (double)INT64_MAX) return ray_timestamp(INT64_MAX);
-            if (ns <= -(double)INT64_MAX) return ray_timestamp(-INT64_MAX);
-            return ray_timestamp((int64_t)llround(ns));
+            return ray_timestamp(datetime_to_ns(val->f64));
         }
         /* ISO string -> timestamp: "YYYY-MM-DD[T ]HH:MM:SS[.nnn...]" or "YYYY.MM.DDDHH:MM:SS.nnn..." */
         if (val->type == -RAY_STR) {
