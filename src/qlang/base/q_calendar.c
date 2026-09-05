@@ -2,6 +2,7 @@
  * literal scanner (q_parse), q_fmt display and the cast/Tok paths.  Pure
  * value functions; contracts in q_calendar.h (castcal split, 2026-07-22). */
 #include "qlang/base/q_calendar.h"
+#include "lang/cal.h"   /* ts_compose_checked — THE days+tod -> ns law */
 #include <stdint.h>
 
 /* Hinnant days_from_civil (public domain, http://howardhinnant.github.io/
@@ -29,10 +30,7 @@ int q_calendar_date_valid(int64_t y, int64_t m, int64_t d) {
 /* Timestamp payload composition (see q_registry.h for the contract and the
  * boundary rationale). */
 int q_calendar_ts_compose_checked(int64_t days, int64_t tod_ns, int64_t* out) {
-    __int128 ns = (__int128)days * 86400000000000LL + tod_ns;
-    if (ns > INT64_MAX || ns < -(__int128)INT64_MAX) return 0;
-    *out = (int64_t)ns;
-    return 1;
+    return ts_compose_checked(days, tod_ns, out);
 }
 int64_t q_calendar_ts_compose(int64_t days, int64_t tod_ns) {
     int64_t ns;
