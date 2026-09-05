@@ -29,6 +29,7 @@
 #include "table/sym.h"       /* ray_sym_vec_cell — qSQL dict-key/col names */
 #include "core/numparse.h"   /* ray_parse_i64, ray_parse_f64 */
 #include <assert.h>
+#include <ctype.h>       /* isalpha — the `<letter>)` intake prefix */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2263,6 +2264,32 @@ static ray_t *parse_E(Parser *p, QCtx ctx) {
     return l;
 }
 
+/* ===== text intake =========================================================
+ *
+ * THE one home for what a BUFFER of q text means before it is q source: the
+ * `<letter>)` handler prefix (ref/parse.md:54-56 — `parse "k)!10"`) and the
+ * leading `\` console command.  Both answer with an ordinary application
+ * tree, so every door that takes text (repl, `value`, `parse`, the wire) sees
+ * the same thing from the same bytes. */
+
+/* `(name; text)` — head is a NAME ref, so an undefined handler fails as
+ * ordinary resolution (`'.g.e`).  Consumes `arg`. */
+static ray_t *intake_tree(const char *name, size_t nl, ray_t *arg) {
+    ray_t *hd = ray_sym(ray_sym_intern_runtime(name, nl));
+    ray_t *t = ray_list_new(2);
+    t = ray_list_append(t, hd);
+    ray_release(hd);
+    t = ray_list_append(t, arg);
+    ray_release(arg);
+    return t;
+}
+
+ray_t *q_parse_lang_tree(char letter, const char *p, int64_t n) {
+    char nm[5] = { '.', letter, '.', 'e', '\0' };
+    if (letter == 'q') return intake_tree("value", 5, ray_charv(p, n));
+    return intake_tree(nm, 4, ray_charv(p, n));
+}
+
 /* ===== public entry ========================================================== */
 
 ray_t *q_parse(const char *src) {
@@ -2271,35 +2298,34 @@ ray_t *q_parse(const char *src) {
      * bootstraps via q_runtime_create, which initializes the registry. */
     if (!q_registry_ready())
         return q_err(QE_INIT);
-    /* System-command line: a statement starting with '\' (kdb's column-0
-     * convention).  `\t`/`\ts expr` time the expression via the base `timeit`
-     * special form (kdb returns ms; timing rows are never byte-pinned).  Every
-     * other `\X ...` (namespace/precision/console/dir — session state we do not
-     * model) is accepted as a SILENT no-op so the line parses and runs rather
-     * than raising 'parse.  `\` / `\\` alone are also no-ops here (the REPL
-     * intercepts `\\` for exit before ever calling q_parse). */
+    /* Text intake, read ONCE at the START of the buffer — so a `q)` or `\` on a
+     * LATER line of multi-line text is q source and fails as such (owner ruling
+     * 2026-09-04; test/qscript/ipc/backslash_load_over_ipc pins it over the
+     * wire).  Every leading `<letter>)` is stripped and the RIGHTMOST letter is
+     * the language (`q))` is the debug prompt and never matches); a letter other
+     * than `q` routes the rest to `.X.e`, and a BARE prefix carries no text to
+     * hand anyone, so it is the empty statement.  A leading `\` (blanks skipped,
+     * as the console has always allowed) is `system "…"` — the same tree
+     * `parse "system \"p\""` builds, so `\X` and `system"X"` are one path
+     * (ref/system.md). */
     {
-        const char* s = src;
-        while (*s == ' ' || *s == '\t') s++;
-        if (*s == '\\') {
-            const char* c = s + 1;
-            while ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z')) c++;
-            size_t clen = (size_t)(c - (s + 1));
-            const char* rest = c;
-            while (*rest == ' ' || *rest == '\t') rest++;
-            int is_t  = (clen == 1 && s[1] == 't');
-            int is_ts = (clen == 2 && s[1] == 't' && s[2] == 's');
-            if ((is_t || is_ts) && *rest) {
-                size_t rl = strlen(rest);
-                char* buf = (char*)malloc(rl + 8);
-                if (!buf) return q_err(QE_WSFULL);
-                memcpy(buf, "timeit ", 7);
-                memcpy(buf + 7, rest, rl + 1);
-                ray_t* prog = q_parse(buf);      /* buf starts "timeit ": no recursion */
-                free(buf);
-                return prog;
-            }
-            return RAY_NULL_OBJ;                  /* no-op: parses + runs silently */
+        size_t n = strlen(src);
+        char lang = 0;
+        while (n >= 2 && isalpha((unsigned char)src[0]) && src[1] == ')' &&
+               !(n >= 3 && src[2] == ')')) {
+            lang = src[0];
+            src += 2;
+            n -= 2;
+        }
+        if (n && lang && lang != 'q') return q_parse_lang_tree(lang, src, (int64_t)n);
+        const char* b = src;
+        while (*b == ' ' || *b == '\t') b++;
+        if (*b == '\\') {
+            const char* r = b + 1;
+            int64_t rn = (int64_t)n - (r - src);
+            /* the q string-literal shape: one char is an ATOM (string-C3) */
+            return intake_tree("system", 6,
+                               rn == 1 ? ray_char((uint8_t)r[0]) : ray_charv(r, rn));
         }
     }
     init_class();
