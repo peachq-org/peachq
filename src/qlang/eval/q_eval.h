@@ -66,6 +66,17 @@ ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n);
 ray_t* q_eval_at_wrap(ray_t** args, int64_t n);
 ray_t* q_eval_dot_wrap(ray_t** args, int64_t n);
 
+/* THE statement home: NUL-terminated q TEXT -> its value, OWNED (an error
+ * value on failure).  parse -> view intercept -> eval -> the assignment law:
+ * a statement whose result is an assignment's — a view definition included —
+ * answers the generic null (owner ruling 2026-09-05, `value "a:4"` shows
+ * nothing while `value "a:b:4"` still sets both).  The console line, `value`
+ * of a string and the IPC string request all come here; a door adds only its
+ * own policy (display, `\d` restore, journal) on top.  Optional `parsed` is 0
+ * only when the text never became a statement — the console line's return code
+ * says "never ran" for a parse error and "ran and reported" for every other. */
+ray_t* q_eval_statement(const char* src, int* parsed);
+
 /* `value`/`get` one-apply body (ref/value.md); q `eval` is .q.eval:(-6!),
  * the q_bang.c internal arm over q_eval (basics/internal.md). */
 ray_t* q_eval_value_wrap(ray_t* x);

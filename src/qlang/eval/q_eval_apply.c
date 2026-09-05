@@ -14,7 +14,7 @@
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_dbg.h"  /* frame list + the error seams (basics/debug.md) */
 #include "qlang/q_prim.h"
-#include "qlang/q_ctx.h"     /* q_ctx_lang_tree — the char-atom language arm */
+#include "qlang/parse/q_parse.h"  /* q_parse_lang_tree — the char-atom language arm */
 #include "qlang/eval/q_eval_internal.h"
 #include "qlang/eval/q_view.h"     /* view carriers apply as their value */
 #include "qlang/eval/q_funsql.h"  /* the `?`/`!` matrix entry points (fnv_matrix_value) */
@@ -1188,12 +1188,12 @@ static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
     }
     /* char-atom application IS the language dispatch: `"q" "til 3"` -> value,
      * `"g" "4"` -> `.g.e "4"` (owner-ruled 2026-08-07; one tree with the
-     * statement seam, q_ctx_lang_tree) */
+     * statement seam, q_parse_lang_tree) */
     if (v->type == -RAY_CHARV && n == 1 && args[0] &&
         isalpha((unsigned char)v->u8)) {
         const char* tp; int64_t tn;
         if (!q_str_text_bytes(args[0], &tp, &tn)) return q_err(QE_TYPE);
-        ray_t* t = q_ctx_lang_tree((char)v->u8, tp, tn);
+        ray_t* t = q_parse_lang_tree((char)v->u8, tp, tn);
         ray_t* r = q_eval(t);
         ray_release(t);
         return r;

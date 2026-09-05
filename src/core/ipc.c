@@ -87,7 +87,7 @@
 #include "qlang/net/q_tls.h"   /* the `-E` accept-side handshake */
 #include "core/timer.h"        /* ray_time_now_ms — TLS negotiation deadlines */
 #include "qlang/net/q_ws.h"
-#include "qlang/eval/q_eval.h"   /* q_eval_apply_value — RAY_QFN hook firing */
+#include "qlang/eval/q_eval.h"   /* q_eval_apply_value — q hook firing */
 #include "qlang/q_dotz.h"        /* q_dotz_now_ns — connection open-time stamp */
 #include <string.h>
 #include <stdio.h>
@@ -351,8 +351,16 @@ int64_t ray_ipc_current_fd(void) {
     return (sel && sel->type == RAY_SEL_SOCKET) ? sel->fd : -1;
 }
 
-/* Fetch the hook lambda if one is installed and is in fact a lambda.
- * Non-lambda bindings (cleared via `set .ipc.on.X 0` or never bound)
+/* Is this a q value the q apply seam can apply?  A carrier, and every native —
+ * `.z.pg:value` is the documented default handler (ref/dotz.md:670), so a
+ * primitive must install exactly as `{value x}` does. */
+static bool hook_is_q(const ray_t* fn) {
+    return fn->type == RAY_QFN   || fn->type == RAY_UNARY ||
+           fn->type == RAY_BINARY || fn->type == RAY_VARY;
+}
+
+/* Fetch the hook if one is installed and is in fact applicable.
+ * Non-function bindings (cleared via `set .ipc.on.X 0` or never bound)
  * yield NULL — caller falls back to default behaviour.  Returns a
  * borrowed ref; do not release.  Sym IDs come from env.c's central
  * cache, so a runtime destroy/recreate cycle invalidates them in one
@@ -362,26 +370,25 @@ static ray_t* hook_lookup(int idx) {
     int64_t sym = ray_sym_ipc_hook(idx);
     if (sym < 0) return NULL;
     ray_t* fn = ray_env_get(sym);
-    /* rayfall lambdas AND q RAY_QFN carriers both fire (hook_fire below) */
-    if (!fn || (fn->type != RAY_LAMBDA && fn->type != RAY_QFN)) return NULL;
+    if (!fn || (fn->type != RAY_LAMBDA && !hook_is_q(fn))) return NULL;
     return fn;
 }
 
-/* Fire a hook value: q carriers go through the q value-apply entry, engine
+/* Fire a hook value: q values go through the q value-apply entry, engine
  * lambdas through the base call path (ipc.c is peachq-owned — the one
  * core-file consumer of the q apply seam). */
 static ray_t* hook_fire(ray_t* fn, ray_t** args, int64_t n) {
-    if (fn->type == RAY_QFN) return q_eval_apply_value(fn, args, n);
+    if (hook_is_q(fn)) return q_eval_apply_value(fn, args, n);
     if (n == 1) return call_fn1(fn, args[0]);
     if (n == 2) return call_fn2(fn, args[0], args[1]);
     return call_lambda(fn, args, n);
 }
 
-/* The handle a hook receives: a q carrier (.z.po/.z.pc/.z.bm) gets the socket fd
+/* The handle a hook receives: a q hook (.z.po/.z.pc/.z.bm) gets the socket fd
  * as an int — what `.z.w` answers and `.z.H` lists — while an engine lambda keeps
  * the selector id `.ipc.post` / `.ipc.send` / `.ipc.close` expect. */
 static ray_t* hook_handle_arg(ray_t* fn, int64_t handle, int64_t fd) {
-    return fn->type == RAY_QFN ? make_i32((int32_t)fd) : make_i64(handle);
+    return hook_is_q(fn) ? make_i32((int32_t)fd) : make_i64(handle);
 }
 
 /* Call a single-arg hook for lifecycle events (on.open / on.close).

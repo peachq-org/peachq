@@ -4,11 +4,11 @@
  * (working / silent get-set / 'nyi).
  * CONTRACT (value-or-throw, 2026-07-16): a syscmd RETURNS AN OWNED q value
  * (NULL = silent) or an OWNED error — callers never branch on result kinds.
- * Exit (`\\`, `exit x` → q_sys_exit) and the raw console shell (unknown `\cmd`)
- * are functions the shared path calls; whether they may act on the PROCESS is
- * the q_sys_own_process capability, OFF by default and enabled only by the
- * real `q` binary — so the one-process doctest runner and the argv-less wasm
- * REPL are safe with no caller-side policy.  Frozen-clean: no src/lang edits. */
+ * Exit (`\\`, `exit x` → q_sys_exit) is a function the shared path calls;
+ * whether it may act on the PROCESS is the q_sys_own_process capability, OFF by
+ * default and enabled only by the real `q` binary — so the one-process doctest
+ * runner and the argv-less wasm REPL cannot be exited out from under by a
+ * script.  Frozen-clean: no src/lang edits. */
 #ifndef Q_SYS_H
 #define Q_SYS_H
 
@@ -67,29 +67,17 @@ uint16_t q_sys_listen(uint16_t port);
  * the process in a listener-less server loop. */
 uint16_t q_sys_listen_port(void);
 
-/* The ONE caller guard: is this console line a `\`-command (first non-blank
- * char is `\`)?  Callers check this once, then get a value or an error. */
-bool   q_sys_is_cmd(const char* line, size_t n);
-
 /* Execute a `\`-command line: OWNED value (NULL = silent) or OWNED error.
- * capture=1 is the `system "…"` form — an unknown token shells via popen and
- * returns stdout as a list of char vectors ('os on nonzero exit); capture=0 is
- * the console form — an unknown token runs raw system(3) returning its status
- * as a long, gated by the process capability (off → silent no-op). */
-ray_t* q_sys_run(const char* line, size_t n, int capture);
+ * ONE setting for every door (owner ruling 2026-09-04: `\X` IS `system "X"`) —
+ * an unknown token shells via popen and returns stdout as a list of char
+ * vectors ('os on nonzero exit).  The intended caller is q_system_fn, which is
+ * where q_parse routes a leading-`\` line. */
+ray_t* q_sys_run(const char* line, size_t n);
 
-/* THE shared console glue (REPL / wasm / doctest): q_sys_run(capture=0), then
- * fill buf with the display text — drained console side effects first, then
- * (print_value) the value via q_fmt_console.  Returns NULL or the OWNED error;
- * buf then holds any console text that preceded it. */
-ray_t* q_sys_line(const char* line, size_t n, int print_value,
-                  char* buf, size_t cap);
-
-/* Capability: may `\`-commands act on the PROCESS (exit(3) via q_sys_exit; raw
- * console shell on an unknown `\cmd`)?  OFF by default and reset per runtime
- * (q_sys_cfg_init); only qmain.c enables it.  NOT gated: the `system "…"`
- * capture shell — a computation returning data, relied on by the doctest
- * corpus. */
+/* Capability: may `\`-commands exit(3) the PROCESS (via q_sys_exit)?  OFF by
+ * default and reset per runtime (q_sys_cfg_init); only qmain.c enables it.
+ * NOT gated: the shell miss — one capture path for `\cmd` and `system "cmd"`
+ * alike (owner ruling 2026-09-04), a computation returning data. */
 void   q_sys_own_process(bool on);
 
 /* The ONE process-exit home — `\\`, the `exit` verb, and remote `\\` all land
@@ -106,8 +94,8 @@ void   q_sys_exit(int code);
 ray_t* q_sys_ts_apply(ray_t* f, ray_t* args);
 
 /* The q-owned `system "…"` verb (bound by q_builtins_register as a QK_ENV row):
- * prepends `\` and passes straight through q_sys_run(capture=1), so
- * `system "X"` ≡ `\X` for every command — one path, no special cases. */
+ * prepends `\` and passes straight through q_sys_run, so `system "X"` ≡ `\X`
+ * for every command — one path, no special cases. */
 ray_t* q_system_fn(ray_t* x);
 
 #endif /* Q_SYS_H */
