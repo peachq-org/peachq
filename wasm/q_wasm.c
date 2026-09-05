@@ -1,21 +1,19 @@
 /* q_wasm — the browser/JS entry points for peachq's WebAssembly build.
  *
  * Exposes a tiny, stable C ABI that drives peachq's real q pipeline
- * (q_parse -> q_eval -> materialize -> q_fmt), the same sequence
- * src/qlang/q_repl.c:run_one_line uses for the native REPL.
+ * (q_eval_statement -> materialize -> q_fmt), the same sequence
+ * src/qlang/q_ctx.c:ctx_line uses for every native door.
  * Compiled only by Makefile.wasm with emcc; never part of the native build. */
 #define _POSIX_C_SOURCE 200809L   /* expose strdup (string.h) + setenv (stdlib.h) */
 #include "qlang/q_runtime.h"
-#include "qlang/parse/q_parse.h"
 #include "qlang/q_fmt.h"
-#include "qlang/ops/q_sys.h"  /* q_sys_is_cmd / q_sys_line — `\`-command glue */
-#include "qlang/q_console.h"  /* q_console_pipe_enable — the modern pipe-table display */
+#include "qlang/q_console.h"  /* pipe-table display, clip, and the side-effect drain */
 #include "qlang/q_pq.h"       /* q_pq_load — the embedded stdlib bundle */
-#include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
+#include "qlang/eval/q_eval.h"   /* q_eval_statement — THE statement home */
 #include "ops/ops.h"      /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
 #include <stdio.h>        /* snprintf */
-#include <stdlib.h>       /* malloc, free, setenv */
+#include <stdlib.h>       /* free, setenv */
 #include <string.h>       /* strdup */
 
 #ifdef __EMSCRIPTEN__
@@ -53,8 +51,9 @@ int q_wasm_init(void) {
 
 /* Evaluate one line of q source; return a freshly malloc'd, NUL-terminated
  * formatted result the caller must release with q_wasm_free. Errors are
- * returned as human-readable strings ("parse error", "error: <code>"), never
- * as a null pointer, so the JS side always has something to print. */
+ * returned as human-readable strings ("error: <class>", a parse failure being
+ * "error: parse"), never as a null pointer, so the JS side always has something
+ * to print. */
 EMSCRIPTEN_KEEPALIVE
 char* q_wasm_eval(const char* src) {
     if (!g_rt && q_wasm_init() != 0)
@@ -62,32 +61,13 @@ char* q_wasm_eval(const char* src) {
     if (!src)
         return strdup("");
 
-    /* `\`-commands (\c, \classic, \h, ...) run before the parser — the same
-     * shared q_sys_line glue the native REPL and `system "…"` use.  This
-     * runtime never enables the process capability, so `\\` is a silent no-op
-     * (nothing to quit in a browser) and an unknown `\token` is silent (no
-     * shell in a tab). */
-    if (q_sys_is_cmd(src, strlen(src))) {
-        char out[8192];
-        ray_t* sr = q_sys_line(src, strlen(src), 1, out, sizeof out);
-        if (sr) {
-            const char* code = (const char*)sr->sdata;
-            size_t off = strlen(out);
-            snprintf(out + off, sizeof out - off, "error: %s", (code && *code) ? code : "syscmd");
-            ray_error_free(sr);
-        }
-        return strdup(out);
-    }
-
-    ray_t* ast = q_parse(src);
-    if (RAY_IS_ERR(ast)) {
-        ray_release(ast);
-        return strdup("parse error");
-    }
-
-    int is_assign = q_parse_is_assign(ast);
-    ray_t* r = q_eval(ast);          /* THE pipeline — mirrors q_repl.c run_one_line */
-    ray_release(ast);
+    /* `\`-commands (\c, \classic, \h, ...) need no door of their own: q_parse
+     * turns a leading `\X` into the `system "X"` tree, so they ride the same
+     * pipeline as any other line.  `\\` stays a silent no-op (nothing to quit
+     * in a browser — the process capability is never enabled), and an unknown
+     * `\token` now answers whatever `system "token"` answers in a tab, which
+     * is what the owner ruling asked for: one path, not two. */
+    ray_t* r = q_eval_statement(src, NULL);   /* THE statement home ctx_line uses */
     if (ray_is_lazy(r))
         r = ray_lazy_materialize(r);
 
@@ -100,12 +80,17 @@ char* q_wasm_eval(const char* src) {
     }
 
     char buf[8192];
-    /* q console silence: a (last-statement) assignment prints nothing —
-     * mirrors src/qlang/q_repl.c:run_one_line. */
-    if (!RAY_IS_NULL(r) && !is_assign)
-        q_fmt_console(r, buf, sizeof buf);   /* obey \c / \classic on auto-echo, as run_one_line does */
-    else
-        buf[0] = '\0';
+    buf[0] = '\0';
+    /* side effects (show / 0N! / `\h`'s doc lines) come first, then the value —
+     * q_ctx.c ctx_line's display order */
+    { const char* con = q_console_str();
+      if (con && *con) snprintf(buf, sizeof buf, "%s", con);
+      q_console_reset(); }
+    /* q console silence: the generic null prints nothing, and that is what an
+     * assignment statement answers — mirrors q_ctx.c ctx_line. */
+    size_t used = strlen(buf);
+    if (!RAY_IS_NULL(r))
+        q_fmt_console(r, buf + used, sizeof buf - used);   /* obey \c / \classic on auto-echo */
     ray_release(r);
     return strdup(buf);
 }

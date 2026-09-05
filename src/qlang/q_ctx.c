@@ -1,11 +1,10 @@
 /* q_ctx — see q_ctx.h.  The engine context: the statement seam every door
  * shares, and the process state that outlives whichever door set it.  Split out
- * of q_repl.c (2026-08-02) — ops/ and parse/ both needed `\l`, and reaching
- * into repl/ for it made a verb depend on the front end. */
+ * of q_repl.c (2026-08-02) — ops/ needed `\l`, and reaching into repl/ for it
+ * made a verb depend on the front end. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/q_ctx.h"
-#include <ctype.h>           /* isalpha — the language-prefix scan */
 #include "qlang/base/q_err.h"     /* q_err / q_err_drop — the statement-entry backstop */
 #include "qlang/q_comment.h"          /* doc headers: the run above a definition */
 #include "qlang/parse/q_parse.h"
@@ -16,7 +15,7 @@
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
 #include "qlang/q_prim.h"         /* q_str_text_bytes — the remote value-apply head */
-#include "qlang/ops/q_sys.h"      /* q_sys_is_cmd / q_sys_line / q_system_fn — the `\`-command door */
+#include "qlang/ops/q_sys.h"      /* q_sys_gc_mode / q_sys_err_trap_mode — the statement-seam policy */
 #include "qlang/ops/q_index.h"    /* q_index_elem_at — the element-read home */
 #include "qlang/io/q_io.h"        /* q_io_read_slice — THE byte core a load reads through */
 #include "lang/eval.h"            /* ray_eval_is_interrupted, ray_eval_set_remote_*_fn */
@@ -33,37 +32,6 @@ static void (*g_console_close)(void);
 
 void q_ctx_set_console_close(void (*fn)(void)) { g_console_close = fn; }
 void q_ctx_console_close(void) { if (g_console_close) g_console_close(); }
-
-/* language-handler tree `(.X.e; "rest")`; `q`'s builtin handler is `value`.
- * The head is a NAME ref, so an undefined handler fails as ordinary
- * resolution (`'.g.e`) and a defined one applies through the one seam. */
-char q_ctx_lang_scan(const char** s, size_t* n) {
-    char lang = 0;
-    const char* p = *s;
-    size_t m = *n;
-    while (m >= 2 && isalpha((unsigned char)p[0]) && p[1] == ')' &&
-           !(m >= 3 && p[2] == ')')) {
-        lang = p[0];
-        p += 2;
-        m -= 2;
-    }
-    *s = p;
-    *n = m;
-    return lang;
-}
-
-ray_t* q_ctx_lang_tree(char letter, const char* p, int64_t n) {
-    char nm[5] = { '.', letter, '.', 'e', '\0' };
-    ray_t* hd = letter == 'q' ? ray_sym(ray_sym_intern_runtime("value", 5))
-                              : ray_sym(ray_sym_intern_runtime(nm, 4));
-    ray_t* arg = ray_charv(p, n);
-    ray_t* t = ray_list_new(2);
-    t = ray_list_append(t, hd);
-    ray_release(hd);
-    t = ray_list_append(t, arg);
-    ray_release(arg);
-    return t;
-}
 
 /* GC policy has ONE home: this statement seam, covering all three doors
  * (run_line, remote_eval_str, remote_apply).  `\g 0` (deferred, the kdb
@@ -126,12 +94,6 @@ static void ctx_load_esig(ray_t** esig, q_err_sig_t* t) {
  * (eval errors report and return 0). */
 static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
                     int print_result, int in_load, ray_t** esig) {
-    /* Language-handler prefixes (kdb `x)` lines, owner-ruled 2026-08-07):
-     * strip every leading `<letter>)` — pasted prompts included — and the
-     * RIGHTMOST letter is the language.  `q` (or none) evaluates as q; any
-     * other letter routes the rest VERBATIM to `.<letter>.e`; a bare prefix
-     * line is silent.  `q))` stays untouched (the debug prompt). */
-    char lang = q_ctx_lang_scan(&s, &n);
     if (n == 0)
         return 0;
 
@@ -142,49 +104,14 @@ static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
      * this level its state back. */
     int dbg_prev = q_dbg_statement_begin(s, n, in_load ? -1 : print_result);
 
-    /* `\`-system-command line: the shared q_sys glue renders console side
-     * effects + value into buf (value-or-throw; `\\`/exit act inside q_sys).
-     * Console lines arrive '\n'-terminated, a rendered value does not — the
-     * append-if-missing keeps this byte-identical to the historic output. */
-    if ((!lang || lang == 'q') && q_sys_is_cmd(s, n)) {
-        char buf[8192];
-        ray_t* sr = q_sys_line(s, n, print_result, buf, sizeof buf);
-        if (buf[0]) {
-            fputs(buf, out);
-            if (buf[strlen(buf) - 1] != '\n') fputc('\n', out);
-        }
-        if (sr && in_load) {
-            q_err_sig_t t;
-            int code = ctx_load_abort(sr, out, err, &t);
-            fflush(out);
-            ctx_statement_end();
-            q_dbg_statement_end(dbg_prev);
-            ctx_load_esig(esig, &t);
-            return code;
-        }
-        if (sr) ctx_show_err(out, err, sr);
-        fflush(out);
-        ctx_statement_end();   /* a `\g 1` line collects at its own end (kdb: set runs gc) */
-        q_dbg_statement_end(dbg_prev);
-        return 0;
-    }
-
-    ray_t* ast = (lang && lang != 'q') ? q_ctx_lang_tree(lang, s, (int64_t)n)
-                                       : q_parse(s);
-    if (RAY_IS_ERR(ast)) {                     /* 'dup dies at parse (qsql.md:168) */
-        int code = ast->aux[0] ? (int)ast->aux[0] : (int)QE_PARSE + 1;
-        ctx_show_err(out, err, ast);
+    int    parsed;
+    ray_t* r = q_eval_statement(s, &parsed);
+    if (!parsed) {                             /* 'dup dies at parse (qsql.md:168) */
+        int code = r->aux[0] ? (int)r->aux[0] : (int)QE_PARSE + 1;
+        ctx_show_err(out, err, r);
         q_dbg_statement_end(dbg_prev);
         return code;
     }
-
-    ray_t* r;
-    int is_assign = 1;                     /* a view definition prints nothing */
-    if (!q_view_intercept(ast, s, &r)) {
-        is_assign = q_parse_is_assign(ast);
-        r = q_eval(ast);
-    }
-    ray_release(ast);
     if (ray_is_lazy(r))
         r = ray_lazy_materialize(r);
 
@@ -244,9 +171,10 @@ static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
         q_dbg_statement_end(dbg_prev);
         return 0;
     }
-    /* q console silence: a (last-statement) assignment prints nothing; a
-     * script load (print_result == 0) prints no result at all. */
-    if (print_result && !RAY_IS_NULL(r) && !is_assign) {
+    /* q console silence: the generic null prints nothing, which is already what
+     * an assignment statement answers (q_eval_statement); a script load
+     * (print_result == 0) prints no result at all. */
+    if (print_result && !RAY_IS_NULL(r)) {
         char buf[8192];
         q_fmt_console(r, buf, sizeof buf);   /* obey \c on auto-echo display */
         fputs(buf, out);
@@ -421,24 +349,6 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
     /* OWNER RULING 2026-08-10: a request obeys ctx_run_script's law — restore the `\d`
      * context on success (no client parks a shared server), leave it where an abort left it. */
     int64_t saved_ctx = q_env_ctx();
-    /* A leading `\` is a system command, not q source (kdb runs a solo `\l`/`\p`
-     * received on the wire).  `system"X"` is exactly `\X`, so strip and reuse
-     * q_system_fn — one home for q_sys_run, the restricted gate, `\`-shell capture. */
-    if (len > 0 && src[0] == '\\') {
-        ray_t* arg = ray_str(src + 1, len - 1);
-        if (!arg) return q_err(QE_OOM);
-        int dbg_prev = q_dbg_statement_begin(src, len, remote_console());
-        ray_t* r = q_system_fn(arg);
-        ray_release(arg);
-        { const char* con = q_console_str();
-          if (con && *con) fputs(con, stdout);
-          q_console_reset(); }
-        ctx_statement_end();
-        remote_err_dump(r);
-        q_dbg_statement_end(dbg_prev);
-        if (!RAY_IS_ERR(r)) q_env_ctx_set(saved_ctx);
-        return r;
-    }
     char* tmp = (char*)ray_sys_alloc(len + 1);
     if (!tmp) return q_err(QE_OOM);
     memcpy(tmp, src, len);
@@ -446,25 +356,13 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
     /* remote statements suspend only under `\e 1`; the seam always gives a
      * remote .Q.trp its `[0]` frame */
     int dbg_prev = q_dbg_statement_begin(tmp, len, remote_console());
-    ray_t* ast = q_parse(tmp);
-    if (RAY_IS_ERR(ast)) {
-        ray_sys_free(tmp);
-        remote_err_dump(ast);            /* `\e 2` covers parse errors too (no
-                                          * suspension: parse never suspends) */
-        q_dbg_statement_end(dbg_prev);
-        return ast;
-    }
-    /* A trailing assignment answers with the generic null (basics/ipc.md:
-     * `h"fn:{2+x}"` displays nothing).  Remote source text is a STATEMENT, so a
-     * view definition is intercepted here exactly as a typed line would be. */
-    ray_t* r;
-    int is_assign = 1;
-    if (!q_view_intercept(ast, tmp, &r)) {
-        is_assign = q_parse_is_assign(ast);
-        r = q_eval(ast);
-    }
+    /* Remote source text is a STATEMENT like any other, so the assignment law
+     * and the view intercept both come from the one home — basics/ipc.md's
+     * `h"fn:{2+x}"` displays nothing because `value` answers nothing, not
+     * because the wire silences it.  A parse error needs no arm of its own here
+     * (it propagates as the -128h answer); only the `\e 2` dump is this door's. */
+    ray_t* r = q_eval_statement(tmp, NULL);
     ray_sys_free(tmp);
-    ray_release(ast);
     if (ray_is_lazy(r))
         r = ray_lazy_materialize(r);
     { const char* con = q_console_str();
@@ -474,12 +372,7 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
     remote_err_dump(r);                  /* `\e 2`: trace before the seam closes */
     q_dbg_statement_end(dbg_prev);
     if (!RAY_IS_ERR(r)) q_env_ctx_set(saved_ctx);
-    if (is_assign && !RAY_IS_ERR(r)) {   /* an error still propagates (-128h) */
-        ray_release(r);
-        ray_retain(RAY_NULL_OBJ);
-        return RAY_NULL_OBJ;
-    }
-    return r;
+    return r;                            /* an error propagates as the -128h answer */
 }
 
 /* The kdb value/apply wire shape — NOT a statement: ONE list-apply of the head to
