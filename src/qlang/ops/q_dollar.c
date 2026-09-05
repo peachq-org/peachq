@@ -10,6 +10,7 @@
 #include "qlang/parse/q_tok.h"   /* q_tok — THE Tok entry */
 #include "qlang/base/q_calendar.h" /* q_calendar_ts_compose — date->timestamp cast */
 #include "ops/temporal.h"  /* ray_temporal_extract — base calendar decomposition */
+#include "lang/cal.h"     /* THE datetime and timestamp splits */
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "lang/eval.h"      /* ray_cast_fn */
 #include "lang/internal.h"  /* ray_typed_null, ray_guid, ray_str_vec_get, ray_error */
@@ -695,14 +696,9 @@ static int component_valid(int8_t t, q_comp_e c) {
  * the ns multiply cannot overflow i64 at the inf sentinels. */
 static void temporal_parts(int8_t t, int64_t raw, double rawf,
                              int64_t* days, int64_t* tod_ns) {
-    const int64_t NSDAY = 86400000000000LL;
     switch ((ray_type_e)t) {
-    case RAY_TIMESTAMP: { int64_t d = raw / NSDAY, r = raw % NSDAY;
-        if (r < 0) { r += NSDAY; d--; } *days = d; *tod_ns = r; break; }
-    case RAY_DATETIME: { int64_t d = (int64_t)floor(rawf);   /* floor, not round:
-        ref/cast.md:168 narrowing truncates */
-        int64_t r = (int64_t)((rawf - (double)d) * (double)NSDAY);  /* [0,NSDAY) */
-        *days = d; *tod_ns = r; break; }
+    case RAY_TIMESTAMP: *days = ts_days_floor(raw); *tod_ns = ts_ns_in_day(raw); break;
+    case RAY_DATETIME:  datetime_to_day_ns(rawf, days, tod_ns); break;
     case RAY_DATE:  *days = raw; *tod_ns = 0; break;
     case RAY_MONTH: *days = month_payload_as_days(raw); *tod_ns = 0; break;
     case RAY_TIMESPAN: *days = 0; *tod_ns = raw; break;   /* signed duration ns */

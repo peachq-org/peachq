@@ -326,25 +326,19 @@ static void fmt_date(fmt_buf_t* b, int32_t val) {
     fmt_printf(b, "%04d.%02d.%02d", y, m, d);
 }
 
-/* DATETIME payload = f64 days since 2000.01.01, fraction = time of day.
- * kdb datetime renders at MILLISECOND precision (tok.md:227, cast.md:57) —
- * f64 resolution genuinely is ~microseconds-to-ms for current dates, so ms
- * is the honest display grain.  Round the time-of-day to ms and carry a
- * full-day overflow (rounding at 23:59:59.9995 bumps the date).  This is
- * THE single day/ms split — q_fmt delegates here via a temp atom (its
- * sentinel/out-of-range checks run first). */
+/* DATETIME renders at MILLISECOND precision (tok.md:227, cast.md:57): the ms
+ * grain is the [) floor of the split's ns, so 23:59:59.9995 stays on its own
+ * day.  q_fmt delegates here via a temp atom (its sentinel/out-of-range checks
+ * run first). */
 static void fmt_datetime(fmt_buf_t* b, double val) {
-    double dayf = floor(val);
-    int64_t ms = (int64_t)llround((val - dayf) * 86400000.0);
-    int64_t day = (int64_t)dayf;
-    if (ms >= 86400000LL) { day += 1; ms = 0; }
+    int64_t day, tod_ns;
+    datetime_to_day_ns(val, &day, &tod_ns);
+    int64_t ms = tod_ns / 1000000LL;
     int y, mo, d;
     date_to_ymd((int32_t)day, &y, &mo, &d);
-    int h  = (int)(ms / 3600000);
-    int mi = (int)(ms / 60000 % 60);
-    int sec = (int)(ms / 1000 % 60);
-    int mss = (int)(ms % 1000);
-    fmt_printf(b, "%04d.%02d.%02dT%02d:%02d:%02d.%03d", y, mo, d, h, mi, sec, mss);
+    fmt_printf(b, "%04d.%02d.%02dT%02d:%02d:%02d.%03d", y, mo, d,
+               (int)(ms / 3600000), (int)(ms / 60000 % 60),
+               (int)(ms / 1000 % 60), (int)(ms % 1000));
 }
 
 static void fmt_time(fmt_buf_t* b, int32_t val) {
