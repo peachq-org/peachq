@@ -44,15 +44,22 @@ uint64_t ray_join_dup_fallbacks = 0;
 
 /* ── Hash helper (shared by radix and chained HT join paths) ──────────── */
 
+/* The one bucket every null key hashes to.  Arbitrary: equality decides. */
+#define JOIN_NULL_HASH 0x9E3779B97F4A7C15ULL
+
 static uint64_t hash_row_keys(ray_t** key_vecs, uint8_t n_keys, int64_t row) {
     uint64_t h = 0;
     for (uint8_t k = 0; k < n_keys; k++) {
         ray_t* col = key_vecs[k];
         if (!col) continue;
-        /* NULL key — produce unique hash that won't match any other row */
-        if (ray_vec_is_null(col, row))
-            return h ^ ((uint64_t)row * 0x9E3779B97F4A7C15ULL);
         uint64_t kh;
+        /* A null key is an ORDINARY key: q matches on `~`, where `0N~0N` is 1b,
+         * so every null in a column hashes to ONE bucket (a per-row hash would
+         * scatter them and a value hash cannot carry NaN, the float null). */
+        if (ray_vec_is_null(col, row)) {
+            h = (k == 0) ? JOIN_NULL_HASH : ray_hash_combine(h, JOIN_NULL_HASH);
+            continue;
+        }
         if (col->type == RAY_F64) {
             kh = ray_hash_f64(((double*)ray_data(col))[row]);
         } else {
@@ -425,8 +432,9 @@ static inline bool join_keys_eq(ray_t* const* l_vecs, ray_t* const* r_vecs, uint
         ray_t* lc = l_vecs[k];
         ray_t* rc = r_vecs[k];
         if (!lc || !rc) return false;
-        /* NULL != NULL in join predicates */
-        if (ray_vec_is_null(lc, l) || ray_vec_is_null(rc, r)) return false;
+        /* null matches null, and nothing else (the `~` law, not SQL's) */
+        bool ln = ray_vec_is_null(lc, l), rn = ray_vec_is_null(rc, r);
+        if (ln || rn) { if (ln != rn) return false; continue; }
         if (lc->type == RAY_F64) {
             if (((double*)ray_data(lc))[l] != ((double*)ray_data(rc))[r]) return false;
         } else {
