@@ -27,6 +27,11 @@
 .duckdb.upsert:{[c;t;d] .duckdb.i.append[c;t;d]; t}
 .duckdb.meta:{[c;t] .duckdb.i.meta[c;t]}
 
+/ the message channel behind the bare 'duckdb: DuckDB's own text, or the bridge's reason (an unmapped column
+/ type, a rejected companion).  err[] is the last message on any connection, err[c] that connection's.
+/ @return (string)
+.duckdb.err:{.duckdb.i.err x}
+
 / the DuckDB<->q type contract (the C QD_TYPES[] table) as data: one row per contract entry, columns
 / dtype (the DDL spelling), ktype (the .duckdb.meta char), logical (the hub name), canon (whether a bare
 / read of that DuckDB type produces this row).  Derive from it - never re-author the mapping q-side.
