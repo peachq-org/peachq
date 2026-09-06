@@ -12,7 +12,6 @@
 #include "qlang/q_registry_internal.h" /* q_str_split_lines, q_type_strict_i64 */
 #include "qlang/base/q_err.h"
 #include "qlang/io/q_handles.h" /* q_handles_read1 — the fifo-handle read form */
-#include "qlang/io/q_splay.h"   /* q_io_set: a carrier y writes as its table */
 #include "qlang/io/q_provider.h"  /* q_io_set: `:pq: targets route to .X.set */
 #include "qlang/io/q_csv.h"     /* the CSV/TSV decoder behind a recognised tabular suffix */
 #include "qlang/io/q_json.h"    /* the JSON decoder, and the framing a suffix declares to it */
@@ -163,7 +162,7 @@ ray_t* q_io_read_slice(ray_t* pathstr, int64_t off, int64_t want, int* zipped) {
     ray_t* out = io_read_raw(pathstr, off, want, &wrapped);
     if (!wrapped || RAY_IS_ERR(out)) return out;
     /* This byte-slice door inflates the WHOLE container (block-granular
-     * reads live behind the splay gather); the offset addresses plaintext. */
+     * reads are the splay region's, io/q_splay.c); the offset addresses plaintext. */
     ray_release(out);
     ray_t* all = io_read_raw(pathstr, 0, -1, NULL);
     if (RAY_IS_ERR(all)) return all;
@@ -788,15 +787,6 @@ int q_io_is_fsym(ray_t* v) {
     return is;
 }
 
-/* A mapped splay written to a file writes as the table it is (the 98h
- * facade) — materialization sits at THIS boundary, never inside the format
- * writer.  Owned result. */
-static ray_t* set_file_y(ray_t* y) {
-    if (q_splay_is(y)) return q_splay_table(y);
-    ray_retain(y);
-    return y;
-}
-
 ray_t* q_io_set(ray_t* x, ray_t* y) {
     ray_t* pr = q_provider_write(x, y, 0);   /* `:pq: 4-seg coordinate -> .X.set */
     if (pr) return pr;
@@ -808,40 +798,26 @@ ray_t* q_io_set(ray_t* x, ray_t* y) {
             if (!q_type_strict_i64(e[1], &lbs) || !q_type_strict_i64(e[2], &alg) ||
                 !q_type_strict_i64(e[3], &lvl))
                 return q_err(QE_TYPE);
-            ray_t* fy = set_file_y(y);
-            if (!fy || RAY_IS_ERR(fy)) return fy ? fy : q_err(QE_TYPE);
             /* an explicit alg (0 included) OVERRIDES `.z.zd` — 0 writes plain */
-            ray_t* r = q_wirefile_write_zip(e[0], fy, (int)lbs, (int)alg, (int)lvl);
-            ray_release(fy);
-            return r;
+            return q_wirefile_write_zip(e[0], y, (int)lbs, (int)alg, (int)lvl);
         }
         if (n == 2 && q_io_is_fsym(e[0]) && q_io_is_fsym(e[1])) {
-            ray_t* fy = set_file_y(y);
-            if (!fy || RAY_IS_ERR(fy)) return fy ? fy : q_err(QE_TYPE);
-            ray_t* r = q_wirefile_write_splay(e[0], e[1], fy, -1, -1, -1);
-            ray_release(fy);
-            return r;
+            return q_wirefile_write_splay(e[0], e[1], y, -1, -1, -1);
         }
         return q_err(QE_NYI);
     }
     if (x && x->type == RAY_SYM && ray_len(x) == 2) {   /* (dir;sympath) collapses */
         ray_t* d = ray_sym(ray_vec_get_sym_id(x, 0));
         ray_t* s = ray_sym(ray_vec_get_sym_id(x, 1));
-        ray_t* fy = set_file_y(y);
-        ray_t* r = !fy || RAY_IS_ERR(fy) ? (fy ? fy : q_err(QE_TYPE))
-                 : (q_io_is_fsym(d) && q_io_is_fsym(s))
-                       ? q_wirefile_write_splay(d, s, fy, -1, -1, -1)
+        ray_t* r = (q_io_is_fsym(d) && q_io_is_fsym(s))
+                       ? q_wirefile_write_splay(d, s, y, -1, -1, -1)
                        : q_err(QE_NYI);
-        if (fy && !RAY_IS_ERR(fy)) ray_release(fy);
         ray_release(s);
         ray_release(d);              /* write_splay retained d when handing it back */
         return r;
     }
     if (!x || x->type != -RAY_SYM || !q_io_is_fsym(x)) return q_err(QE_NYI);
-    ray_t* fy = set_file_y(y);
-    if (!fy || RAY_IS_ERR(fy)) return fy ? fy : q_err(QE_TYPE);
-    ray_t* r = q_wirefile_write(x, fy);
-    ray_release(fy);
+    ray_t* r = q_wirefile_write(x, y);
     return r ? r : q_err(QE_TYPE);
 }
 
