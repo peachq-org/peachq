@@ -13,6 +13,7 @@
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_concrete, q_eval_apply_value */
 #include "qlang/q_registry.h"   /* the `,` value the append fallback composes on */
 #include "lang/eval.h"          /* ray_eval_get_restricted */
+#include "store/fileio.h"     /* ray_file_rename — THE platform-armed replace-by-rename */
 #include "mem/heap.h"           /* RAY_ATTR_SORTED */
 #include <stdio.h>   /* fopen/fread — the header probe reads raw prefix bytes */
 #include <stdlib.h>
@@ -759,14 +760,16 @@ static int wf_zd(int* lbs, int* alg, int* lvl) {
  * img carries a file-level count field — compression ZEROES it (the kdbfile
  * trap rows pin this; the reader derives it back from the plain length), so a
  * headerless companion passes 0 and stays untouched.  An EXISTING plain file
- * (the entry itself, never a link) is replaced by write-beside-and-rename: a
- * live mapping of the old file keeps its inode, where a truncate-in-place
- * would SIGBUS it, and a failed rename leaves the old file whole; any other
- * target keeps the direct write, so a directory or a link still answers as it
- * always did. */
+ * (never a link) with BYTES IN IT is replaced by `ray_file_rename` beside it: a
+ * live mapping keeps its inode where a truncate-in-place would SIGBUS it, and a
+ * failed move leaves the old file whole.  An EMPTY file has no mapped page to
+ * protect, so it keeps the direct write with every non-regular target — which is
+ * what lets `hopen`'s pre-created 0-byte file take its first append while the
+ * handle still holds it.  Windows refuses the move while the target is MAPPED
+ * (ref/hdel.md:44); that `'io` is the platform's limit, not ours. */
 static ray_t* wf_put(ray_t* path, ray_t* img, int lbs, int alg, int lvl, int hdr) {
     struct stat st;
-    int over = wf_lstat(ray_str_ptr(path), &st) == 0 && S_ISREG(st.st_mode);
+    int over = wf_lstat(ray_str_ptr(path), &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
     ray_t* tmp = over ? wf_join(ray_str_ptr(path), ray_str_len(path), ".tmp", 4) : NULL;
     if (over && !tmp) return q_err(QE_OOM);
     ray_t* dst = over ? tmp : path;
@@ -782,7 +785,7 @@ static ray_t* wf_put(ray_t* path, ray_t* img, int lbs, int alg, int lvl, int hdr
     } else
         bad = q_io_write_all(dst, ray_str_ptr(img), ray_str_len(img));
     if (over) {
-        if (!bad && rename(ray_str_ptr(tmp), ray_str_ptr(path)) != 0) bad = q_err(QE_IO);
+        if (!bad && ray_file_rename(ray_str_ptr(tmp), ray_str_ptr(path)) != RAY_OK) bad = q_err(QE_IO);
         if (bad) remove(ray_str_ptr(tmp));
         ray_release(tmp);
     }
