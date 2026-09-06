@@ -53,6 +53,10 @@ ray_t* q_splay_table(ray_t* car);
 /* Cumulative inflated-block count — the compressed lane's laziness witness. */
 int64_t q_splay_zblocks(void);
 
+/* The fault handler cannot raise: a torn block reads back zero-filled, this answers 1 ONCE for it (the apply
+ * answers 'corrupt) and re-arms the block so the next touch answers again. */
+int q_splay_fault_pending(void);
+
 /* The header facts meta reads: column count (-1 when car is no carrier), a
  * column's name sym, and its probed header (BORROWED; NULL out of range) —
  * the meta owner translates them to display letters. */

@@ -28,6 +28,15 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>         /* read — `read0 0` takes its line straight off fd 0 */
+#include <fcntl.h>          /* open — the kxzip block reader's descriptor */
+#include <errno.h>
+#ifdef RAY_OS_WINDOWS
+#include <io.h>             /* _get_osfhandle — the positional block read */
+#include <windows.h>
+#endif
+#ifndef O_BINARY
+#define O_BINARY 0          /* only Windows has a text mode to opt out of */
+#endif
 
 /* ---- paths, size, write ------------------------------------------------- */
 
@@ -75,6 +84,17 @@ void q_io_mkdir_parents(const char* path, size_t n) {
     free(dir);
 }
 
+int q_io_fwrite(FILE* fp, const void* bytes, size_t n) {
+    uint8_t buf[65536];
+    for (size_t off = 0; off < n; ) {
+        size_t c = n - off < sizeof buf ? n - off : sizeof buf;
+        memcpy(buf, (const uint8_t*)bytes + off, c);
+        if (fwrite(buf, 1, c, fp) != c) return -1;
+        off += c;
+    }
+    return 0;
+}
+
 ray_t* q_io_write_all(ray_t* pathstr, const void* bytes, size_t n) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     const char* p = ray_str_ptr(pathstr);
@@ -82,9 +102,9 @@ ray_t* q_io_write_all(ray_t* pathstr, const void* bytes, size_t n) {
     q_io_mkdir_parents(p, ray_str_len(pathstr));
     FILE* fp = fopen(p, "wb");
     if (!fp) return q_err(QE_IO);
-    size_t w = n ? fwrite(bytes, 1, n, fp) : 0;
+    int bad = q_io_fwrite(fp, bytes, n);
     fclose(fp);
-    return w == n ? NULL : q_err(QE_IO);
+    return bad ? q_err(QE_IO) : NULL;
 }
 
 /* ---- the reads ---------------------------------------------------------- */
@@ -463,33 +483,72 @@ ray_t* q_io_zip_open(ray_t* pathstr, q_io_zipmap_t* zm) {
     return NULL;
 }
 
-ray_t* q_io_zip_block(ray_t* pathstr, const q_io_zipmap_t* zm, int64_t k,
-                      uint8_t* dst, size_t cap) {
-    if (k < 0 || k >= zm->num_blocks) return q_err(QE_CORRUPT);
-    int64_t start = (k ? zm->ends[k - 1] : 0) +
-                    (zm->num_blocks > 1 ? ZIP_PFX_LEN : 0);
-    int64_t clen = zm->ends[k] - start;
+static int64_t zip_block_span(const q_io_zipmap_t* zm, int64_t k, int64_t* start) {
+    *start = (k ? zm->ends[k - 1] : 0) + (zm->num_blocks > 1 ? ZIP_PFX_LEN : 0);
+    return zm->ends[k] - *start;
+}
+
+size_t q_io_zipmap_maxblock(const q_io_zipmap_t* zm) {
+    int64_t mx = 0, start;
+    for (int64_t k = 0; k < zm->num_blocks; k++) {
+        int64_t c = zip_block_span(zm, k, &start);
+        if (c > mx) mx = c;
+    }
+    return (size_t)mx;
+}
+
+#ifdef RAY_OS_WINDOWS
+static ssize_t io_pread(int fd, void* buf, size_t n, int64_t off) {   /* ReadFile at an OVERLAPPED offset */
+    OVERLAPPED ov;
+    memset(&ov, 0, sizeof ov);
+    ov.Offset = (DWORD)off;
+    ov.OffsetHigh = (DWORD)(off >> 32);
+    DWORD got = 0;
+    if (!ReadFile((HANDLE)_get_osfhandle(fd), buf, (DWORD)(n > 0x7fffffff ? 0x7fffffff : n), &got, &ov))
+        return GetLastError() == ERROR_HANDLE_EOF ? 0 : -1;
+    return (ssize_t)got;
+}
+#else
+static ssize_t io_pread(int fd, void* buf, size_t n, int64_t off) {
+    return pread(fd, buf, n, (off_t)off);
+}
+#endif
+
+int q_io_zip_block_fd(int fd, const q_io_zipmap_t* zm, int64_t k,
+                      uint8_t* scratch, uint8_t* dst, size_t cap) {
+    if (k < 0 || k >= zm->num_blocks) return -1;
+    int64_t start, clen = zip_block_span(zm, k, &start);
     int64_t plain = zm->uncompressed - k * zm->block_size;
     if (plain > zm->block_size) plain = zm->block_size;
-    if (plain < 0 || (size_t)plain > cap) return q_err(QE_CORRUPT);
-    ray_t* raw = io_read_raw(pathstr, ZIP_MAGIC_LEN + start, clen, NULL);
-    if (!raw || RAY_IS_ERR(raw)) return raw ? raw : q_err(QE_IO);
-    ray_t* bad = NULL;
-    if (ray_len(raw) != clen) {
-        bad = q_err(QE_CORRUPT);
-    } else if (zm->algorithm == ZIP_NONE) {
-        if (clen != plain) bad = q_err(QE_CORRUPT);
-        else memcpy(dst, ray_data(raw), (size_t)plain);
-    } else {
-        size_t got = 0, used = 0;
-        const char* err = NULL;
-        if (q_gz_inflate_zlib((const uint8_t*)ray_data(raw), (size_t)clen,
-                              dst, (size_t)plain, &got, &used, &err) != 0 ||
-            used != (size_t)clen || got != (size_t)plain)
-            bad = q_err(QE_CORRUPT);     /* must terminate exactly at its end */
+    if (plain < 0 || (size_t)plain > cap || clen < 0) return -1;
+    for (int64_t got = 0; got < clen; ) {
+        ssize_t n = io_pread(fd, scratch + got, (size_t)(clen - got), ZIP_MAGIC_LEN + start + got);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return -2;
+        got += n;
     }
-    ray_release(raw);
-    return bad;
+    if (zm->algorithm == ZIP_NONE) {
+        if (clen != plain) return -1;
+        memcpy(dst, scratch, (size_t)plain);
+        return 0;
+    }
+    size_t got = 0, used = 0;
+    const char* err = NULL;
+    return q_gz_inflate_zlib(scratch, (size_t)clen, dst, (size_t)plain, &got, &used, &err) == 0 &&
+           used == (size_t)clen && got == (size_t)plain ? 0 : -1;   /* must terminate exactly at its end */
+}
+
+ray_t* q_io_zip_block(ray_t* pathstr, const q_io_zipmap_t* zm, int64_t k,
+                      uint8_t* dst, size_t cap) {
+    const char* p = ray_str_ptr(pathstr);
+    int fd = p ? open(p, O_RDONLY | O_BINARY) : -1;
+    if (fd < 0) return q_err(QE_IO);
+    size_t sc = q_io_zipmap_maxblock(zm);
+    uint8_t* scratch = (uint8_t*)malloc(sc ? sc : 1);
+    int rc = scratch ? q_io_zip_block_fd(fd, zm, k, scratch, dst, cap) : -3;
+    free(scratch);
+    close(fd);
+    return rc == 0 ? NULL : q_err(rc == -1 ? QE_CORRUPT : rc == -2 ? QE_IO : QE_OOM);
 }
 
 ray_t* q_io_zip_write(ray_t* pathstr, const uint8_t* img, size_t n,
