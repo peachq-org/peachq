@@ -42,6 +42,19 @@ suffices, and an ordinary check in the body where it does not.
 `'assign` where kx accepts them. Each was silently producing a broken table, or resolving to the keyword's own
 function instead of the binding.
 
+## Storage
+
+**Splayed tables map at `get` and `\l`, and stay mapped.** `` get `:dir/ `` is the flip of `` cols!`:dir/ `` as in
+kx — a table whose fixed-width columns are memory-mapped and whose compressed columns inflate a block on first
+touch — and the maps live as long as the value does, so a table bound by `\l` holds its maps for the session.
+`-3!t` prints `` +`a`b!`:dir/ ``, `flip t` is the dictionary, `value t` is the path, `.Q.qp t` is `0b`, and a table
+derived from it (`select`, `1#`, `,`, `update` by value) is plain.
+
+**Nested, string and enumerated columns are read into memory at `get`.** kx maps those lazily; peachq decodes them
+when the table is opened, so a splayed table with large string, nested or `sym` columns costs memory at load time,
+not at first touch. Fixed-width columns are mapped as in kx. The enumerated column stays an enumeration (`20h`),
+and its domain file binds under its own name at `get`.
+
 ## Additions
 
 | What | One line | More |

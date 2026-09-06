@@ -327,11 +327,11 @@ static ray_t* probe_err(int bad) { return q_err(bad == 2 ? QE_LENGTH : QE_TYPE);
 static int probe_cols(ray_t* x, ray_t* y, ray_t** pc, int64_t k, int64_t* m, int* rec) {
     if (ray_is_atom(y)) return -1;               /* find.md: a rank-2 x seeks rank-1 records */
     int rows = probe_is_rowlist(x, y);
-    ray_t* fy = (q_type_is_table(y) || rows) ? q_flip_wrap(y) : NULL;   /* owned */
+    ray_t* fy = q_type_is_table(y) ? q_table_to_dict(y) : rows ? q_flip_wrap(y) : NULL;   /* owned */
     ray_t* d = fy ? fy : y;
     ray_t* pn = q_type_is_plain_dict(d) ? ray_dict_keys(d) : NULL;  /* borrowed */
     ray_t* pv = pn ? ray_dict_vals(d) : d;
-    ray_t* fx = pn ? q_flip_wrap(x) : NULL;                         /* owned */
+    ray_t* fx = pn ? q_table_to_dict(x) : NULL;                     /* owned */
     ray_t* pos = fx && q_type_is_plain_dict(fx)
                      ? q_search_find(pn, ray_dict_keys(fx)) : NULL;
     if (fx) ray_release(fx);

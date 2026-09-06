@@ -7,7 +7,8 @@
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_lambda_src / q_eval — lambda serde;
                                  * q_eval_apply_concrete — the IPC boundary force */
 #include "qlang/q_registry.h"   /* q_list_collapse + the kdb_op identity pair */
-#include "qlang/io/q_splay.h"   /* q_splay_is — the one admitted unconformed dict */
+#include "qlang/io/q_splay.h"   /* a mapped splay travels as 98 over (99: cols; `:dir/) and re-opens */
+#include "qlang/io/q_io.h"      /* q_io_is_fsym — the one admitted unconformed dict */
 #include "qlang/parse/q_parse.h"      /* q_parse — lambda decode (RUNTIME only) */
 #include "lang/eval.h"          /* ray_eval */
 #include "table/sym.h"          /* ray_sym_vec_cell */
@@ -366,7 +367,13 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         rc = 0;
         for (int64_t i = 0; i < schema->len && rc == 0; i++)
             rc = w_sym_id(b, ids[i]);
-        if (rc == 0) rc = q_wire_write_obj(b, cols);
+        int64_t dir = q_splay_table_path(x);          /* a mapped splay travels as its flip's dict value */
+        if (rc == 0 && dir) {
+            ray_t* hs = ray_sym(dir);
+            rc = q_wire_write_obj(b, hs);
+            ray_release(hs);
+        } else if (rc == 0)
+            rc = q_wire_write_obj(b, cols);
         goto out;
     }
 
@@ -887,14 +894,8 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         int64_t vl = v->type == RAY_TABLE ? ray_table_nrows(v)
                    : (ray_is_vec(v) || v->type == RAY_LIST) ? ray_len(v) : -1;
         if (kl < 0 || vl < 0 || kl != vl) {
-            /* the splay carrier is the ONE unconformed dict peachq itself
-             * emits — q_splay_is (the recognition owner) gates the bypass */
-            if (k->type == RAY_SYM && v->type == -RAY_SYM) {
-                ray_t* d = ray_dict_new(k, v);        /* consumes both */
-                if (d && !RAY_IS_ERR(d) && q_splay_is(d)) return d;
-                if (d) ray_release(d);
-                return q_err(QE_LENGTH);
-            }
+            /* `cols!`:dir/` is the ONE unconformed dict `!` makes (ref/flip-splayed.md) */
+            if (k->type == RAY_SYM && q_io_is_fsym(v)) return ray_dict_new(k, v);   /* consumes both */
             ray_release(k); ray_release(v);
             return q_err(QE_LENGTH);
         }
@@ -913,6 +914,11 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         }
         ray_t* cols = rd_obj(c);
         if (!cols || RAY_IS_ERR(cols)) { ray_release(keys); return cols ? cols : q_err(QE_DOMAIN); }
+        if (cols->type == -RAY_SYM) {                 /* 98 over (99: cols; `:dir/): the mapping re-opens here */
+            ray_t* t = q_splay_flip(keys, cols->i64);
+            ray_release(keys); ray_release(cols);
+            return t ? t : q_err(QE_DOMAIN);
+        }
         if (cols->type != RAY_LIST || cols->len != keys->len) {
             ray_release(keys); ray_release(cols);
             return q_err(QE_DOMAIN);

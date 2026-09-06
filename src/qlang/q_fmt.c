@@ -11,7 +11,7 @@
 #include "qlang/eval/q_eval.h" /* carrier read-out accessors — RAY_QFN display;
                                 * q_eval_apply_concrete — the display boundary force */
 #include "qlang/eval/q_view.h" /* q_view_text — a view displays as its text */
-#include "qlang/io/q_splay.h"  /* a mapped splay displays as its table */
+#include "qlang/io/q_splay.h"  /* an unresolved flip displays as its k-form */
 #include "qlang/io/q_provider.h" /* a provider carrier displays as provider truth */
 #include "lang/format.h"   /* ray_fmt */
 #include "lang/eval.h"     /* ray_at_fn — dict/table element access */
@@ -1650,25 +1650,14 @@ static void q_fmt_body(ray_t* val) {
     }
 
     if (val->type == RAY_TABLE) {
-        q_fmt_table(val);
-        return;
-    }
-
-    if (val->type == RAY_DICT && q_splay_is(val)) {  /* mapped splay: show the table */
-        /* a ROW-BUDGET prefix gather (`\c`): one row past the clip keeps the
-         * continuation marker honest while untouched rows stay on disk */
-        int64_t k = -1, cr = qe_clip_rows();
-        ray_t* cnt = cr > 0 ? q_splay_count(val) : NULL;
-        if (cnt && !RAY_IS_ERR(cnt) && cr + 1 < cnt->i64) k = cr + 1;
-        if (cnt && !RAY_IS_ERR(cnt)) ray_release(cnt);
-        else if (cnt) ray_error_free(cnt);
-        ray_t* mt = q_splay_prefix(val, k);
-        if (mt && !RAY_IS_ERR(mt)) {
-            q_fmt_table(mt);
-            ray_release(mt);
+        if (q_splay_table_unresolved(val)) {   /* `+(,`a)!`:./s/` — ref/flip-splayed.md, no rows to grid */
+            char kb[2048];
+            q_fmt_krepr(val, kb, sizeof kb);
+            qe_puts(kb);
             return;
         }
-        if (mt) ray_error_free(mt);                  /* unreadable: the raw dict shows */
+        q_fmt_table(val);
+        return;
     }
 
     if (val->type == RAY_DICT && q_provider_carrier_is(val)) {
@@ -1694,6 +1683,12 @@ static void q_fmt_body(ray_t* val) {
     if (val->type == RAY_DICT) {            /* dict: `key| value` rows */
         ray_t* k = ray_dict_keys(val);          /* borrowed */
         ray_t* v = ray_dict_vals(val);          /* borrowed */
+        if (v && v->type == -RAY_SYM) {         /* `cols!`:dir/` has no value rows: its k-form (ref/flip-splayed.md) */
+            char kb[2048];
+            q_fmt_krepr(val, kb, sizeof kb);
+            qe_puts(kb);
+            return;
+        }
         /* entries, not slots: a TABLE domain (the iterators re-key onto one)
          * counts its rows, which ray_len does not report */
         int64_t n = k ? q_builtins_count_long(k) : 0;
@@ -1844,7 +1839,7 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
     }
     if (val->type == RAY_DICT) {
         /* dict inline `keys!vals` (`(,`a)!,1`); a KEYED TABLE falls out as `(+K)!+V` off the table arm
-         * (kb/pivoting-tables.md:86).  A splay/provider carrier IS its stored dict here — no gather, no `+`. */
+         * (kb/pivoting-tables.md:86).  A provider carrier IS its stored dict here — no gather, no `+`. */
         ray_t* kk = ray_dict_keys(val);
         ray_t* vv = ray_dict_vals(val);
         if (kk && vv) {

@@ -28,7 +28,7 @@
 #include "qlang/ops/q_dollar.h"   /* q_dollar — the cast home `x.attr` rides */
 #include "qlang/net/q_wirefile.h"  /* q_wirefile_read — `get `:file */
 #include "qlang/io/q_provider.h"   /* q_provider_get_carrier — `get `:pq:...:t/ */
-#include "qlang/io/q_splay.h"      /* q_splay_get — `get `:dir/ maps, not reads */
+#include "qlang/io/q_splay.h"      /* q_splay_get — `get `:dir/ maps; value/amend read the aux path */
 #include "lang/eval.h"
 #include "ops/ops.h"
 #include "table/sym.h"             /* ray_read_sym — sym vectors are width-adaptive */
@@ -290,6 +290,10 @@ static ray_t* indexed_assign(int is_global, ray_t* target, ray_t* opv,
     ray_t* ret = NULL;
     ray_t* cur = name_value(te[0], NULL);
     if (RAY_IS_ERR(cur)) ret = cur;
+    else if (q_splay_table_path(cur)) {          /* a mapped global takes no write (kb/splayed-tables.md:350) */
+        ray_release(cur);
+        ret = q_err(QE_SPLAY);
+    }
     if (!ret) {
         int in_frame = !dotted && q_eval_apply_frame_depth() > 0;
         int local = in_frame &&
@@ -610,6 +614,8 @@ ray_t* q_eval_value_wrap(ray_t* x) {
                                                  * or bare positions for a
                                                  * reference domain (R1/R4;
                                                  * wp/foreign-keys.md:188-213) */
+    if (x->type == RAY_TABLE && q_splay_table_path(x))   /* the flip's dict value: its hsym (ref/value.md:20) */
+        return ray_sym(q_splay_table_path(x));
     if (x->type == -RAY_SYM) {
         ray_t* m = q_splay_get(x);           /* NULL unless a `:dir/ table folder */
         if (m) return m;
