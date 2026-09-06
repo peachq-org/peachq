@@ -1,17 +1,15 @@
 /* q_splay — see q_splay.h.  Open splays keyed by the `:dir/ handle sym (the
  * q_handles.c pattern): open reads .d + column HEADERS and binds the domain;
- * data moves on gather — fixed columns mmap fresh per touch (mmod==3,
- * rc-driven), compressed ones inflate a block on first touch (the fault
- * handler), the rest decode once and cache.  Single-threaded q layer. */
+ * get builds the table — fixed columns mmap (mmod==3, rc-driven), compressed
+ * ones inflate a block on first touch (the fault handler), the rest decode.
+ * Single-threaded q layer. */
 #define _GNU_SOURCE            /* MAP_ANONYMOUS / MAP_FIXED */
 #include "qlang/io/q_splay.h"
-#include "qlang/io/q_provider.h" /* marker-first disambiguation: `:pq: is never a splay */
+#include "qlang/io/q_provider.h" /* `:pq: is never a splay directory */
 #include "qlang/io/q_io.h"           /* q_io_file_path */
 #include "qlang/net/q_wirefile.h"
 #include "qlang/base/q_err.h"
-#include "qlang/base/q_type.h"       /* int idx accessors — zip block coverage */
-#include "qlang/q_prim.h"            /* q_typed_empty_like — the gather's empty law */
-#include "qlang/ops/q_index.h"       /* q_index_at — the one gather home */
+#include "qlang/q_prim.h"            /* q_attr_stamp_trusted — the disk letter on a mapped header */
 #include "qlang/q_env.h"             /* q_env_set — the one global-set home */
 #include "lang/eval.h"               /* ray_eval_get_restricted */
 #include "table/sym.h"               /* ray_sym_intern_runtime, ray_sym_str */
@@ -36,11 +34,10 @@
 typedef struct {
     int64_t     name;     /* column sym id */
     q_wf_colhdr h;
-    ray_t*      cached;   /* owned decoded column (decode lane) */
 } splay_col;
 
 typedef struct {
-    int64_t    sym;       /* the `:dir/ handle sym — carrier value + key */
+    int64_t    sym;       /* the `:dir/ handle sym — the table's aux path + key */
     ray_t*     dir;       /* owned RAY_STR path, trailing slash kept */
     ray_t*     keys;      /* owned .d sym vector */
     splay_col* cols;
@@ -74,7 +71,8 @@ static int64_t g_reg_created = 0, g_reg_freed = 0;
 static int64_t g_zblocks = 0;   /* cumulative blocks inflated — the laziness witness */
 static volatile sig_atomic_t g_zfault = 0;   /* a fault-time inflate failed since the last ask */
 
-static ray_t* g_colref_mark = NULL;   /* address-identity marker, per runtime */
+/* The table block's 16 aux bytes (zeroed at construction, table.c): kind at [0], the `:dir/ sym at [8..15]. */
+enum { SPLAY_AUX_MAPPED = 1, SPLAY_AUX_UNRESOLVED = 2 };
 
 /* ---- the VM seam: the ONLY platform mechanics under the shared contract ----
  * _mapfile lays `need` bytes of `path` copy-on-write after the guard (the file
@@ -324,7 +322,6 @@ void q_splay_init(void) {
     g_ents = NULL; g_n = 0; g_cap = 0;
     g_regs = NULL; g_regn = 0; g_regcap = 0;
     g_mapped_bytes = 0; g_reg_created = 0; g_reg_freed = 0; g_zfault = 0;
-    g_colref_mark = ray_i64(0x5153504c);
     ray_free_set_mapped_fn(splay_region_free);
 #ifdef RAY_OS_WINDOWS
     g_veh = AddVectoredExceptionHandler(1, splay_veh);
@@ -352,11 +349,8 @@ void q_splay_destroy(void) {
     sigaction(SIGSEGV, &g_prev_segv, NULL);
     sigaction(SIGBUS, &g_prev_bus, NULL);
 #endif
-    if (g_colref_mark) { ray_release(g_colref_mark); g_colref_mark = NULL; }
     for (int64_t i = 0; i < g_n; i++) {
         splay_ent* e = &g_ents[i];
-        for (int64_t c = 0; c < e->ncols; c++)
-            if (e->cols[c].cached) ray_release(e->cols[c].cached);
         free(e->cols);
         if (e->keys)   ray_release(e->keys);
         if (e->dir)    ray_release(e->dir);
@@ -398,8 +392,6 @@ void q_splay_invalidate(int64_t sym) {
     int64_t i = splay_find(sym);
     if (i < 0) return;
     splay_ent* e = &g_ents[i];
-    for (int64_t c = 0; c < e->ncols; c++)
-        if (e->cols[c].cached) ray_release(e->cols[c].cached);
     free(e->cols);
     if (e->keys)   ray_release(e->keys);
     if (e->dir)    ray_release(e->dir);
@@ -436,11 +428,6 @@ static ray_t* splay_col_path(splay_ent* e, int64_t name) {
     return s;
 }
 
-static ray_t* splay_carrier(splay_ent* e) {
-    ray_retain(e->keys);
-    return ray_dict_new(e->keys, ray_sym(e->sym));      /* consumes both */
-}
-
 /* An enum names its domain, not its location: climb from the table directory
  * (a column copied out of its database fails, never walks to /), read the
  * domain FILE and bind it under its own name through q_env_set.  Best-effort:
@@ -475,19 +462,13 @@ static void splay_bind_domain(splay_ent* e) {
     }
 }
 
-/* Marker-first recognition: the VALUE alone answers — n sym keys against one
- * `:…/ hsym atom, a shape ordinary `!` refuses.  No registry consult. */
-int q_splay_is(ray_t* x) {
-    if (!x || x->type != RAY_DICT) return 0;
-    ray_t* k = ray_dict_keys(x);
-    ray_t* v = ray_dict_vals(x);
-    if (!k || !v || v->type != -RAY_SYM || k->type != RAY_SYM) return 0;
-    ray_t* s = ray_sym_str(v->i64);                     /* borrowed */
+/* Does `sym` spell a splay directory — `:…/`, and not a provider coordinate? */
+static int splay_dir_sym_is(int64_t sym) {
+    ray_t* s = ray_sym_str(sym);                        /* borrowed */
     if (!s) return 0;
     size_t n = ray_str_len(s);
     const char* p = ray_str_ptr(s);
-    if (q_provider_spec_is(p, n)) return 0;   /* `:pq:...:t/ is a PROVIDER carrier */
-    return n >= 2 && p[0] == ':' && p[n - 1] == '/';
+    return n >= 2 && p[0] == ':' && p[n - 1] == '/' && !q_provider_spec_is(p, n);
 }
 
 static ray_t* splay_open(int64_t sym, ray_t* dir, splay_ent** out);
@@ -521,12 +502,6 @@ static splay_ent* splay_resolve_sym(int64_t sym, ray_t** err) {
     splay_ent* e = NULL;
     *err = splay_open(sym, path, &e);                   /* consumes path */
     return e;
-}
-
-static splay_ent* splay_resolve(ray_t* car, ray_t** err) {
-    *err = NULL;
-    if (!q_splay_is(car)) return NULL;
-    return splay_resolve_sym(ray_dict_vals(car)->i64, err);
 }
 
 static void splay_free_partial(splay_ent* e) {
@@ -603,13 +578,21 @@ static ray_t* splay_open(int64_t sym, ray_t* dir, splay_ent** out) {
     return NULL;
 }
 
-ray_t* q_splay_get(ray_t* x) {
-    if (!x || x->type != -RAY_SYM) return NULL;
-    ray_t* err = NULL;
-    splay_ent* e = splay_resolve_sym(x->i64, &err);
-    if (err) return err;
-    if (e) splay_bind_domain(e);                        /* bind-at-get refresh */
-    return e ? splay_carrier(e) : NULL;
+
+static void splay_mark(ray_t* t, int64_t sym, uint8_t kind) {
+    t->aux[0] = kind;
+    memcpy(t->aux + 8, &sym, sizeof sym);
+}
+
+int64_t q_splay_table_path(ray_t* t) {
+    int64_t sym;
+    if (!t || t->type != RAY_TABLE || !t->aux[0]) return 0;
+    memcpy(&sym, t->aux + 8, sizeof sym);
+    return sym;
+}
+
+int q_splay_table_unresolved(ray_t* t) {
+    return t && t->type == RAY_TABLE && t->aux[0] == SPLAY_AUX_UNRESOLVED;
 }
 
 /* HAS_NULLS is PESSIMISTIC on sentinel-capable types: consumers read it as
@@ -662,22 +645,10 @@ static ray_t* splay_map(splay_ent* e, splay_col* c) {
 }
 
 /* The KX compressed-read model (kb/file-compression.md:150,171): the full plain size reserved, block 0 inflated up
- * front when the gather covers it (the ray_t header's tail lives in its first page, readable either way), every
- * other block on first touch through the fault handler — a kernel with no index plumbing pays only for the pages
- * it reads.  Same value kind as a mapped column: one rc/munmap lifecycle, one ledger, NOTHING retained between
- * statements (kdb's "for the duration of that operation"). */
-static int splay_zip_covers0(splay_col* c, ray_t* idx, const q_io_zipmap_t* zm) {
-    if (!idx || !(q_type_is_int_atom(idx) || q_type_is_int_vec(idx))) return 1;   /* whole, or an unknown shape */
-    int atom = q_type_is_int_atom(idx);
-    int64_t m = atom ? 1 : ray_len(idx), esz = ray_type_sizes[(uint8_t)c->h.tag];
-    for (int64_t j = 0; j < m; j++) {
-        int64_t i = atom ? q_type_iatom_val(idx) : q_type_ivec_get(idx, j);
-        if (i >= 0 && i < c->h.count && 16 + i * esz < zm->block_size) return 1;
-    }
-    return 0;
-}
-
-static ray_t* splay_zip_col(splay_ent* e, splay_col* c, ray_t* idx) {
+ * front (the ray_t header's tail lives in its first page), every other block on first touch through the fault
+ * handler — a kernel with no index plumbing pays only for the pages it reads.  Same value kind as a mapped column:
+ * one rc/munmap lifecycle, one ledger, the table's life. */
+static ray_t* splay_zip_col(splay_ent* e, splay_col* c) {
     if (!splay_region_room()) return q_err(QE_OOM);
     ray_t* cp = splay_col_path(e, c->name);
     if (!cp) return q_err(QE_OOM);
@@ -699,93 +670,43 @@ static ray_t* splay_zip_col(splay_ent* e, splay_col* c, ray_t* idx) {
     bad = r.scratch && r.blk ? splay_vm_reserve((size_t)unc, &r.vm) : q_err(QE_OOM);
     if (bad) { splay_region_drop(&r); return bad; }
     splay_vm_arm(&r.vm, r.vm.guard, r.vm.total - 2 * r.vm.guard);   /* page 0 stays readable for the header */
-    int rc = splay_zip_covers0(c, idx, &r.zm) ? splay_zip_touch(&r, 0) : 0;
+    int rc = splay_zip_touch(&r, 0);
     if (rc) { splay_region_drop(&r); return q_err(rc == -1 ? QE_CORRUPT : rc == -2 ? QE_IO : QE_OOM); }
     return splay_hdr_over(&r, c);                       /* header AFTER the fills */
 }
 
-/* Column by index, gathered at idx (NULL = whole) — the lanes: decode cache,
- * a FRESH map per touch, or the zip region with only idx's blocks inflated
- * (kdb's default lifetime — a query's maps/regions die at statement end). */
-static ray_t* splay_col_gather_i(splay_ent* e, int64_t i, ray_t* idx) {
+/* Column i whole — the lanes: the zip region with block 0 inflated, a fresh map, or a decode. */
+static ray_t* splay_col_read(splay_ent* e, int64_t i) {
     splay_col* c = &e->cols[i];
-    ray_t* col = NULL;
-    if (c->cached) {
-        ray_retain(c->cached);
-        col = c->cached;
-    } else if (c->h.zipped && c->h.mappable && !c->h.is_enum) {
-        col = splay_zip_col(e, c, idx);
-    } else if (c->h.mappable && !c->h.zipped) {
-        col = splay_map(e, c);
-    }
-    if (!col) {                                         /* decode lane, cached */
-        ray_t* cp = splay_col_path(e, c->name);
-        if (!cp) return q_err(QE_OOM);
-        col = q_wirefile_read_column(cp);
-        ray_release(cp);
-        if (!col || RAY_IS_ERR(col)) return col ? col : q_err(QE_IO);
-        c->cached = col;
-        if (c->h.count < 0 &&
-            (ray_is_vec(col) || col->type == RAY_LIST || col->type == RAY_ENUM))
-            c->h.count = ray_len(col);
-        ray_retain(col);
-    }
-    if (RAY_IS_ERR(col) || !idx) return col;
-    ray_t* g = q_typed_empty_like(q_index_at(col, &idx, 1), col);
-    ray_release(col);
-    if (q_splay_fault_pending()) {                      /* a torn block met through the gather's own read */
-        if (g && !RAY_IS_ERR(g)) ray_release(g);
-        return q_err(QE_CORRUPT);
-    }
-    return g ? g : q_err(QE_TYPE);
+    if (c->h.zipped && c->h.mappable && !c->h.is_enum) return splay_zip_col(e, c);
+    if (c->h.mappable && !c->h.zipped) return splay_map(e, c);
+    ray_t* cp = splay_col_path(e, c->name);
+    if (!cp) return q_err(QE_OOM);
+    ray_t* col = q_wirefile_read_column(cp);
+    ray_release(cp);
+    return col ? col : q_err(QE_IO);
 }
 
-ray_t* q_splay_gather(ray_t* car, int64_t name, ray_t* idx) {
-    ray_t* err = NULL;
-    splay_ent* e = splay_resolve(car, &err);
-    if (!e) return err;                                 /* NULL = no such folder */
-    for (int64_t i = 0; i < e->ncols; i++)
-        if (e->cols[i].name == name) return splay_col_gather_i(e, i, idx);
-    return NULL;
+static int64_t splay_col_find(splay_ent* e, int64_t name) {
+    for (int64_t i = 0; i < e->ncols; i++) if (e->cols[i].name == name) return i;
+    return -1;
 }
 
-ray_t* q_splay_col(ray_t* car, int64_t sym) {
-    return q_splay_gather(car, sym, NULL);
-}
-
-ray_t* q_splay_count(ray_t* car) {
-    ray_t* err = NULL;
-    splay_ent* e = splay_resolve(car, &err);
-    if (!e) return err ? err : q_err(QE_TYPE);
-    if (e->ncols == 0) return ray_i64(0);
-    if (e->cols[0].h.count < 0) {                       /* zipped/shape-A first col */
-        ray_t* v = splay_col_gather_i(e, 0, NULL);
-        if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_IO);
-        int64_t n = ray_len(v);
-        ray_release(v);
-        if (e->cols[0].h.count < 0) e->cols[0].h.count = n;
-    }
-    return ray_i64(e->cols[0].h.count);
-}
-
-/* every column gathered at idx (NULL = whole) into a table, the row-count
- * agreement checked — the one loop rows/prefix/table all ride */
-static ray_t* splay_rows_tbl(splay_ent* e, ray_t* idx) {
-    ray_t* tbl = ray_table_new(e->ncols > 0 ? e->ncols : 1);
+/* the named columns (cols NULL = every .d column) read whole into a table, the row-count agreement checked, the
+ * directory sym marked in aux; NULL when a name is not on disk (the caller's unresolved form) */
+static ray_t* splay_table(splay_ent* e, ray_t* cols) {
+    int64_t nc = cols ? ray_len(cols) : e->ncols;
+    ray_t* tbl = ray_table_new(nc > 0 ? nc : 1);
     if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_OOM);
     int64_t rows = -1;
-    for (int64_t i = 0; i < e->ncols; i++) {
-        /* enum columns stay 20h in materialized rows too — kdb keeps them
-         * enumerated through select and row reads (wp/foreign-keys.md:59-64;
-         * phase-2 reversal of the phase-1 decay-at-the-boundary law) */
-        ray_t* col = splay_col_gather_i(e, i, idx);
-        if (!col || RAY_IS_ERR(col)) {
-            ray_release(tbl);
-            return col ? col : q_err(QE_IO);
-        }
-        int64_t n = ray_len(col);
+    for (int64_t c = 0; c < nc; c++) {
+        int64_t i = cols ? splay_col_find(e, ray_vec_get_sym_id(cols, c)) : c;
+        if (i < 0) { ray_release(tbl); return NULL; }
+        ray_t* col = splay_col_read(e, i);
+        if (RAY_IS_ERR(col)) { ray_release(tbl); return col; }
+        int64_t n = ray_is_vec(col) || col->type == RAY_LIST || col->type == RAY_ENUM ? ray_len(col) : -1;
         if (rows < 0) rows = n;
-        if (n != rows) {
+        if (n < 0 || n != rows) {
             ray_release(col); ray_release(tbl);
             return q_err(QE_CORRUPT);
         }
@@ -793,93 +714,39 @@ static ray_t* splay_rows_tbl(splay_ent* e, ray_t* idx) {
         ray_release(col);
         if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_OOM);
     }
+    splay_mark(tbl, e->sym, SPLAY_AUX_MAPPED);
     return tbl;
 }
 
-/* THE row-access law (result rank follows index rank, the index home's law):
- * an int VECTOR (NULL = every row) answers the table of those rows, an int
- * ATOM the row as a dict — each column through the gather seam, so a zip
- * column inflates only the covering blocks. */
-ray_t* q_splay_rows(ray_t* car, ray_t* idx) {
+ray_t* q_splay_get(ray_t* x) {
+    if (!x || x->type != -RAY_SYM) return NULL;
     ray_t* err = NULL;
-    splay_ent* e = splay_resolve(car, &err);
-    if (!e) return err ? err : q_err(QE_TYPE);
-    if (!idx || !q_type_is_int_atom(idx)) return splay_rows_tbl(e, idx);
-    ray_t* vals = ray_list_new(e->ncols > 0 ? e->ncols : 1);
-    if (!vals || RAY_IS_ERR(vals)) return vals ? vals : q_err(QE_OOM);
-    for (int64_t i = 0; i < e->ncols; i++) {
-        ray_t* v = splay_col_gather_i(e, i, idx);   /* row dict: enum cells stay -20h */
-        if (!v || RAY_IS_ERR(v)) { ray_release(vals); return v ? v : q_err(QE_IO); }
-        vals = ray_list_append(vals, v);
-        ray_release(v);
-        if (!vals || RAY_IS_ERR(vals)) return vals ? vals : q_err(QE_OOM);
+    splay_ent* e = splay_resolve_sym(x->i64, &err);
+    if (err) return err;
+    if (!e) return NULL;
+    splay_bind_domain(e);                               /* bind-at-get refresh */
+    return splay_table(e, NULL);
+}
+
+ray_t* q_splay_flip(ray_t* cols, int64_t dirsym) {
+    if (!cols || cols->type != RAY_SYM || !splay_dir_sym_is(dirsym)) return NULL;
+    ray_t* err = NULL;
+    splay_ent* e = splay_resolve_sym(dirsym, &err);
+    if (err) return err;
+    if (e) {
+        splay_bind_domain(e);
+        ray_t* t = splay_table(e, cols);
+        if (t) return t;
     }
-    ray_t* cv = q_list_collapse(vals);
-    ray_release(vals);
-    if (!cv || RAY_IS_ERR(cv)) return cv ? cv : q_err(QE_TYPE);
-    ray_retain(e->keys);
-    return ray_dict_new(e->keys, cv);                   /* consumes both */
-}
-
-/* First-k-rows table (k < 0 = every row) — display's row budget rides this. */
-ray_t* q_splay_prefix(ray_t* car, int64_t k) {
-    if (k < 0) return q_splay_rows(car, NULL);
-    ray_t* idx = ray_vec_new(RAY_I64, k > 0 ? k : 1);
-    if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
-    for (int64_t i = 0; i < k; i++) idx = ray_vec_append(idx, &i);
-    if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
-    ray_t* tbl = q_splay_rows(car, idx);
-    ray_release(idx);
+    int64_t nc = ray_len(cols);                         /* unresolved: `()` per name, queried later */
+    ray_t* tbl = ray_table_new(nc > 0 ? nc : 1);
+    for (int64_t i = 0; i < nc && tbl && !RAY_IS_ERR(tbl); i++) {
+        ray_t* empty = ray_list_new(0);
+        if (!empty || RAY_IS_ERR(empty)) { ray_release(tbl); return empty ? empty : q_err(QE_OOM); }
+        tbl = ray_table_add_col(tbl, ray_vec_get_sym_id(cols, i), empty);
+        ray_release(empty);
+    }
+    if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_OOM);
+    splay_mark(tbl, dirsym, SPLAY_AUX_UNRESOLVED);
     return tbl;
-}
-
-ray_t* q_splay_table(ray_t* car) {
-    return q_splay_prefix(car, -1);
-}
-
-int64_t q_splay_ncols(ray_t* car) {
-    ray_t* err = NULL;
-    splay_ent* e = splay_resolve(car, &err);
-    if (err) ray_error_free(err);
-    return e ? e->ncols : -1;
-}
-
-int64_t q_splay_col_sym(ray_t* car, int64_t i) {
-    ray_t* err = NULL;
-    splay_ent* e = splay_resolve(car, &err);
-    if (err) ray_error_free(err);
-    return e && i >= 0 && i < e->ncols ? e->cols[i].name : -1;
-}
-
-const q_wf_colhdr* q_splay_col_hdr(ray_t* car, int64_t i) {
-    ray_t* err = NULL;
-    splay_ent* e = splay_resolve(car, &err);
-    if (err) ray_error_free(err);
-    return e && i >= 0 && i < e->ncols ? &e->cols[i].h : NULL;
-}
-
-/* ---- the lazy column reference (the funsql gather seam's thunk) ---------- */
-
-ray_t* q_splay_colref(ray_t* car, int64_t name, ray_t* idx) {
-    ray_t* l = ray_list_new(4);
-    if (!l || RAY_IS_ERR(l)) return l ? l : q_err(QE_OOM);
-    l = ray_list_append(l, g_colref_mark);
-    ray_t* nm = ray_sym(name);
-    l = l && !RAY_IS_ERR(l) ? ray_list_append(l, car) : l;
-    l = l && !RAY_IS_ERR(l) ? ray_list_append(l, nm) : l;
-    l = l && !RAY_IS_ERR(l) ? ray_list_append(l, idx ? idx : RAY_NULL_OBJ) : l;
-    ray_release(nm);
-    return l ? l : q_err(QE_OOM);
-}
-
-int q_splay_colref_is(ray_t* v) {
-    return v && g_colref_mark && v->type == RAY_LIST && ray_len(v) == 4 &&
-           ((ray_t**)ray_data(v))[0] == g_colref_mark;
-}
-
-void q_splay_colref_parts(ray_t* v, ray_t** car, int64_t* name, ray_t** idx) {
-    ray_t** e = (ray_t**)ray_data(v);
-    *car = e[1];
-    *name = e[2]->i64;
-    *idx = e[3];
 }

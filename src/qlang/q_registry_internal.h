@@ -216,6 +216,7 @@ ray_t* q_max2_wrap(ray_t* a, ray_t* b);                       /* used by: ops, r
 
 /* ---- defined in ops/q_table.c ---- */
 ray_t* q_flip_wrap(ray_t* x);                                 /* used by: registry, list, math */
+ray_t* q_table_to_dict(ray_t* x);                             /* used by: index, search, funsql */
 ray_t* q_table_flatten(ray_t* y);                             /* used by: bang, join */
 ray_t* q_table_dict_vals(ray_t* d, int* owned);               /* used by: list */
 

@@ -15,7 +15,6 @@
 #include "qlang/ops/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
 #include "qlang/q_console.h"  /* q_console_show — show's display sink */
 #include "qlang/base/q_type.h"     /* q_type_of — the `type` verb's type-number home */
-#include "qlang/io/q_splay.h"      /* the lazy splayed-table authority: 98h, count */
 #include "qlang/io/q_provider.h"     /* provider carriers: 98h, count via provider */
 #include "lang/env.h"       /* ray_fn_unary; ray_env_get = bootstrap catalogue reads */
 #include "lang/eval.h"      /* RAY_FN_NONE */
@@ -137,8 +136,8 @@ static int8_t type_of(ray_t* x) {
     if (x->type == RAY_LAMBDA) return 100;
     if (x->type == RAY_UNARY) return 101;
     if (x->type == RAY_BINARY || x->type == RAY_VARY) return 102;
-    if (x->type == RAY_DICT && (q_splay_is(x) || q_provider_carrier_is(x)))
-        return 98;                             /* a bound carrier IS a table */
+    if (x->type == RAY_DICT && q_provider_carrier_is(x))
+        return 98;                             /* a bound provider carrier IS a table */
     return x->type;
 }
 
@@ -202,10 +201,8 @@ char q_ty_char(ray_t* x) {
 ray_t* q_count_fn(ray_t* x) {
     if (x && q_eval_apply_is_fn(x)) return ray_i64(1);
     /* a mapping's count is its DOMAIN's count — one rule for a plain dict and a
-     * keyed table, whose domain is a table (borrowed ref: do not release).  A
-     * mapped splay counts its ROWS: the first .d column's header count. */
+     * keyed table, whose domain is a table (borrowed ref: do not release). */
     if (x && x->type == RAY_DICT) {
-        if (q_splay_is(x)) return q_splay_count(x);
         if (q_provider_carrier_is(x)) return q_provider_carrier_count(x);
         return q_count_fn(ray_dict_keys(x));
     }
@@ -223,7 +220,7 @@ int64_t q_builtins_count_long(ray_t* x) {
      * 15.4s when the adverb arms started routing through the boxed path).
      * Same answers as q_count_fn below, which still owns every other shape. */
     if (x && !RAY_IS_ERR(x) && !q_eval_apply_is_fn(x)) {
-        if (x->type == RAY_DICT && !q_splay_is(x) && !q_provider_carrier_is(x))
+        if (x->type == RAY_DICT && !q_provider_carrier_is(x))
             return q_builtins_count_long(ray_dict_keys(x));
         if (x->type == RAY_TABLE) return ray_table_nrows(x);
         if (x->type == RAY_LIST || (ray_is_vec(x) && x->type != RAY_STR))

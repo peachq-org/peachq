@@ -37,13 +37,10 @@ ray_t* q_dotq_qt_fn(ray_t* x) {
 
 /* (.Q.qp x) — is-partitioned predicate (ref/dotq.md `qp`): partitioned table
  * -> 1b, splayed table -> 0b, anything else -> 0 (a LONG, not a bool).  peachq
- * has no on-disk partitioned or splayed tables, so nothing in memory is either
- * — every value falls into the "anything else" arm and returns the long 0.
- * The doc's own `.Q.qp select from B -> 0` pins this: an in-memory table (as
- * peachq's tables always are) is NOT splayed, so it returns 0 (long), not 0b. */
+ * has no partitioned tables; a MAPPED splay is the table whose aux carries its
+ * directory, and a derived table is plain (`.Q.qp select from B -> 0`). */
 ray_t* q_dotq_qp_fn(ray_t* x) {
-    (void)x;
-    return ray_i64(0);
+    return q_splay_table_path(x) ? ray_bool(false) : ray_i64(0);
 }
 
 /* (.Q.s x) — x formatted to plain text as the console prints it (ref/dotq.md

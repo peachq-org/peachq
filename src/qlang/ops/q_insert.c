@@ -13,6 +13,7 @@
 #include "qlang/io/q_provider.h" /* upsert: `:pq: targets route to .X.upsert */
 #include "qlang/io/q_io.h"       /* q_io_is_fsym — upsert's file-target classifier */
 #include "qlang/net/q_wirefile.h"
+#include "qlang/io/q_splay.h"    /* a mapped global refuses by-name rows */
 
 /* Row count of a plain OR keyed table (keyed via its key table — never trust
  * ray_len on a string-atom column). */
@@ -47,6 +48,7 @@ ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
     }
     if (!(g->type == RAY_TABLE || q_type_is_keyed(g)))
         return q_err(QE_TYPE);
+    if (q_splay_table_path(g)) return q_err(QE_SPLAY);   /* a mapped global takes no rows (kb/splayed-tables.md:350) */
     int keyed = q_type_is_keyed(g);
     int64_t nkey = keyed ? ray_table_ncols(ray_dict_keys(g)) : 0;
     ray_t* flat = q_table_flatten(g);
@@ -98,6 +100,7 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
         }
         return q_err(QE_TYPE);
     }
+    if (sym >= 0 && q_splay_table_path(t)) return q_err(QE_SPLAY);
     ray_t* nt = q_join_table_upsert(t, y);
     if (!nt || RAY_IS_ERR(nt)) return nt;
     if (sym >= 0) {
