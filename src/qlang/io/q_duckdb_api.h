@@ -39,6 +39,18 @@ enum {
 };
 typedef int32_t duck_type;
 
+/* Every DuckDB type id by name — DuckDB's public DUCKDB_TYPE enum in ABI order, the ids above included.
+ * Spelled only into the message channel (an unmapped column's type); dispatch stays on the enum. */
+static inline const char* q_duckdb_type_name(duck_type t) {
+    static const char* const names[] = {
+        "INVALID", "BOOLEAN", "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "UTINYINT", "USMALLINT", "UINTEGER",
+        "UBIGINT", "FLOAT", "DOUBLE", "TIMESTAMP", "DATE", "TIME", "INTERVAL", "HUGEINT", "VARCHAR", "BLOB",
+        "DECIMAL", "TIMESTAMP_S", "TIMESTAMP_MS", "TIMESTAMP_NS", "ENUM", "LIST", "STRUCT", "MAP", "UUID", "UNION",
+        "BIT", "TIMETZ", "TIMESTAMPTZ", "UHUGEINT", "ARRAY", "ANY", "VARINT", "SQLNULL",
+    };
+    return t >= 0 && (size_t)t < sizeof names / sizeof *names ? names[t] : "?";
+}
+
 typedef struct duck_database_o*   duck_database;
 typedef struct duck_connection_o* duck_connection;
 typedef struct duck_config_o*     duck_config;
