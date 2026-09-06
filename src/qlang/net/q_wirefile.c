@@ -22,6 +22,7 @@
 #include <sys/stat.h>
 
 static int64_t wf_i64(const uint8_t* p) { int64_t v; memcpy(&v, p, 8); return v; }
+static uint32_t wf_u32(const uint8_t* p) { uint32_t v; memcpy(&v, p, 4); return v; }
 
 static ray_t* wf_read_path(ray_t* path, int follow);
 static ray_t* wf_write_a(ray_t* x);
@@ -30,6 +31,7 @@ static ray_t* wf_write_a(ray_t* x);
 
 #define WF_A_OFF   8   /* shape A: ff 01 + the -9! payload */
 #define WF_B_OFF  16   /* shape B: fe 20 type attr + 4 pad + count(8) */
+#define WF_L_OFF  16   /* legacy: ff 20 00 00 + u32 + type(4) + count(4) — 2009 writer */
 #define WF_C_MIN  16   /* shape C: fe + domain name; the count never lands before this */
 #define WF_D_NAME 16   /* shape D: fd 20 + a 4096-byte page, domain name at +16 */
 #define WF_D_DESC 4080 /* ...whose last 16 bytes are a shape B header */
@@ -318,6 +320,29 @@ static ray_t* wf_read_nested(int8_t elem, ray_t* path, const uint8_t* off, int64
     return out;
 }
 
+/* The 2009 32-bit layout (the format doc's `legacy` row; qspec fixtures are the
+ * witnesses): 4-byte type and count where B has 1-byte type and count(8), no attr
+ * byte, payload at 16 exactly like B — so the mmap lane serves it unchanged.
+ * The u32 at offset 4 is the same opaque stamp in every exemplar; not validated. */
+static ray_t* wf_legacy_hdr(const uint8_t* buf, size_t got, size_t fsz,
+                            int8_t* tag, int64_t* count) {
+    if (got < WF_L_OFF || fsz < WF_L_OFF || buf[2] || buf[3]) return q_err(QE_CORRUPT);
+    uint32_t dt = wf_u32(buf + 8);
+    *tag = dt <= 0xff ? wf_simple_tag((uint8_t)dt) : 0;
+    if (!*tag) return q_err(QE_TYPE);
+    *count = (int64_t)wf_u32(buf + 12);
+    if ((uint64_t)*count > (fsz - WF_L_OFF) / ray_type_sizes[(uint8_t)*tag])
+        return q_err(QE_CORRUPT);
+    return NULL;
+}
+
+static ray_t* wf_read_legacy(const uint8_t* buf, size_t len) {
+    int8_t tag = 0;
+    int64_t count = 0;
+    ray_t* e = wf_legacy_hdr(buf, len, len, &tag, &count);
+    return e ? e : q_wire_fixed_vec(tag, buf + WF_L_OFF, count, 0);
+}
+
 static ray_t* wf_read_b(const uint8_t* buf, size_t len, int derive, ray_t* path) {
     if (len < WF_B_OFF) return q_err(QE_CORRUPT);
     uint8_t disk = buf[2];
@@ -406,12 +431,12 @@ static ray_t* wf_read_d(const uint8_t* buf, size_t len, ray_t* path, int derive)
                         desc + 8, len - WF_D_OFF, 8, desc[3], derive);
 }
 
-/* The 2009 legacy ff 20 header and an fd page that is not 20 stay deferred. */
-typedef enum { WF_UNKNOWN, WF_A, WF_B, WF_C, WF_D, WF_DEFER } wf_shape_t;
+/* An fd page that is not 20 stays deferred. */
+typedef enum { WF_UNKNOWN, WF_A, WF_B, WF_C, WF_D, WF_LEGACY, WF_DEFER } wf_shape_t;
 
 static wf_shape_t wf_sniff(const uint8_t* p, size_t n) {
     if (n < 2) return WF_UNKNOWN;
-    if (p[0] == 0xff) return p[1] == 0x01 ? WF_A : WF_DEFER;
+    if (p[0] == 0xff) return p[1] == 0x01 ? WF_A : p[1] == 0x20 ? WF_LEGACY : WF_DEFER;
     if (p[0] == 0xfe) return p[1] == 0x20 ? WF_B : WF_C;
     if (p[0] == 0xfd) return p[1] == 0x20 ? WF_D : WF_DEFER;
     return WF_UNKNOWN;
@@ -419,11 +444,12 @@ static wf_shape_t wf_sniff(const uint8_t* p, size_t n) {
 
 static ray_t* wf_read_image(const uint8_t* buf, size_t len, int unzipped, ray_t* path) {
     switch (wf_sniff(buf, len)) {
-    case WF_A:     return wf_read_a(buf, len);
-    case WF_B:     return wf_read_b(buf, len, unzipped, path);
-    case WF_C:     return wf_read_c(buf, len, unzipped);
-    case WF_D:     return wf_read_d(buf, len, path, unzipped);
-    case WF_DEFER: return q_err(QE_NYI);
+    case WF_A:      return wf_read_a(buf, len);
+    case WF_B:      return wf_read_b(buf, len, unzipped, path);
+    case WF_C:      return wf_read_c(buf, len, unzipped);
+    case WF_D:      return wf_read_d(buf, len, path, unzipped);
+    case WF_LEGACY: return wf_read_legacy(buf, len);
+    case WF_DEFER:  return q_err(QE_NYI);
     case WF_UNKNOWN: break;
     }
     return q_err(QE_TYPE);
@@ -600,6 +626,12 @@ static ray_t* wf_probe_classify(const uint8_t* buf, size_t got, size_t fsz,
         }
         if (out->count < 0 ||
             (uint64_t)out->count > (fsz - WF_D_OFF) / 8) return q_err(QE_CORRUPT);
+        return NULL;
+    }
+    case WF_LEGACY: {                       /* payload at 16 like B: mmap serves it */
+        ray_t* e = wf_legacy_hdr(buf, got, fsz, &out->tag, &out->count);
+        if (e) return e;
+        out->mappable = 1;
         return NULL;
     }
     case WF_DEFER: return q_err(QE_NYI);
