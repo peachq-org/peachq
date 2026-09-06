@@ -27,7 +27,7 @@
 #include "qlang/parse/q_parse_internal.h"
 #include "qlang/io/q_handles.h"
 #include "qlang/io/q_io.h"     /* q_io_set — Amend Entire `:` on a file target */
-#include "qlang/io/q_splay.h"  /* colrefs force at the apply/gather seam */
+#include "qlang/io/q_splay.h"  /* q_splay_fault_pending; a mapped global refuses by-name amends */
 #include "qlang/net/q_wirefile.h"  /* q_wirefile_append — Amend Entire `,` */
 #include "qlang/ops/q_bang.h"
 #include "qlang/ops/q_dollar.h"
@@ -288,30 +288,17 @@ ray_t* q_eval_apply_collapse(ray_t* l) {          /* consumes l, returns owned *
     return c;
 }
 
-/* A lazily-bound splay column forces through the @[column;idx] gather seam
- * the moment anything consumes it — a phrase name nobody uses never touches
- * its file, a zip column inflates only idx's blocks.  Consumes r (the
- * q_eval_apply_concrete contract). */
-static ray_t* colref_force(ray_t* r) {
-    ray_t* car; int64_t name; ray_t* idx;
-    q_splay_colref_parts(r, &car, &name, &idx);
-    ray_t* g = q_splay_gather(car, name, RAY_IS_NULL(idx) ? NULL : idx);
-    ray_release(r);
-    return g ? g : q_err(QE_TYPE);
-}
-
 /* THE force home (materialization phase 1): the ONLY site that turns a lazy
  * DAG handle into a concrete value (ray_lazy_materialize CONSUMES its input and
  * is a no-op on a concrete value).  Errors/NULL pass through. */
 ray_t* q_eval_apply_concrete(ray_t* r) {
     if (r && ray_is_lazy(r)) return ray_lazy_materialize(r);
-    if (r && q_splay_colref_is(r)) return colref_force(r);
     return r;
 }
 
 #ifdef DEBUG
 void q_eval_apply_assert_concrete(ray_t* v) {
-    assert(!ray_is_lazy(v) && !q_splay_colref_is(v));
+    assert(!ray_is_lazy(v));
 }
 #endif
 
@@ -1203,14 +1190,6 @@ static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
     if (!(v->type == RAY_DICT || v->type == RAY_TABLE || v->type == RAY_ENUM ||
           ray_is_vec(v) || v->type == RAY_LIST))
         return q_err(QE_TYPE);
-    /* a lazy splay column thunk (io/q_splay.h colref) applies by BINDING the
-     * index into its idx slot; the gather seam forces it later — the same
-     * carrier-to-authority dispatch the handle arm above rides */
-    if (q_splay_colref_is(v) && n == 1 && args[0]) {
-        ray_t* car; int64_t nm; ray_t* idx;
-        q_splay_colref_parts(v, &car, &nm, &idx);
-        if (RAY_IS_NULL(idx)) return q_splay_colref(car, nm, args[0]);
-    }
     if (n > APPLY_MAX_ARGS) return q_err(QE_RANK);
     ray_t* r = q_index_at(v, args, n);               /* the ONE index home */
     if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_TYPE);
@@ -1592,89 +1571,10 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
  * makes phase 1 FULL materialization — no lazy handle ever becomes a q value.
  * Deleting the q_eval_apply_concrete call is exactly the phase-2 / Future B (partial
  * fusion) flip; the boundary seams then catch lazy at each observable edge. */
-#define Q_APPLY_MAX_ARGS 60   /* q_eval.c's EVAL_MAX_ARGS — the one arg cap */
-
-/* idxproj — `first`/`last` AS INDEX CONVERSION, the one home: an end head
- * over a whole-column colref or a carrier becomes a ONE-ROW gather (element
- * 0 / n-1; result rank follows index rank, so a carrier answers the row
- * dict).  Head identities are registry VALUES cached at init — #359: an
- * identity you hold is never re-spelled through lookup_name on the hot path
- * (`*`-monadic aliases `first`'s value, so it matches for free).  NULL = no
- * conversion; a returned value (or error) IS the application's answer. */
-static ray_t* g_end_heads[2];              /* [0] `first` -> 0, [1] `last` -> n-1 */
-
-void q_eval_apply_init(void) {
-    g_end_heads[0] = q_registry_lookup_name("first", 5, Q_MONADIC);
-    g_end_heads[1] = q_registry_lookup_name("last", 4, Q_MONADIC);
-}
-
-static ray_t* idxproj(ray_t* head, ray_t* arg) {
-    int lastp;
-    if (head == g_end_heads[0] && head) lastp = 0;
-    else if (head == g_end_heads[1] && head) lastp = 1;
-    else return NULL;
-    ray_t* car = NULL; int64_t name = 0; ray_t* cidx = NULL;
-    if (q_splay_colref_is(arg)) {
-        q_splay_colref_parts(arg, &car, &name, &cidx);
-        if (!RAY_IS_NULL(cidx)) return NULL;          /* partial: generic path */
-    } else if (q_splay_is(arg)) {
-        car = arg;
-    } else {
-        return NULL;
-    }
-    int64_t i = 0;
-    if (lastp) {
-        ray_t* cnt = q_splay_count(car);
-        if (!cnt || RAY_IS_ERR(cnt)) return cnt ? cnt : q_err(QE_TYPE);
-        i = cnt->i64 - 1;
-        ray_release(cnt);
-        if (i < 0) return NULL;                       /* empty: the whole path */
-    }
-    ray_t* ia = ray_i64(i);
-    if (!ia || RAY_IS_ERR(ia)) return ia ? ia : q_err(QE_OOM);
-    ray_t* g = (car == arg) ? q_splay_rows(car, ia)
-                            : q_splay_gather(car, name, ia);
-    ray_release(ia);
-    return g ? g : q_err(QE_TYPE);
-}
-
-static ray_t* apply_dispatch(ray_t* fv, const q_op_t* row, ray_t** args,
-                             int64_t n) {
-    if (n == 1 && args[0]) {
-        ray_t* one = idxproj(fv, args[0]);
-        if (one) return one;
-    }
-    /* a splay colref arg forces HERE, the one dispatch entry — kernels,
-     * adverbs, lambdas and projections all see the gathered column */
-    int64_t i = 0;
-    while (i < n && !q_splay_colref_is(args[i])) i++;
-    if (i < n) {
-        if (n > Q_APPLY_MAX_ARGS) return q_err(QE_RANK);
-        ray_t* fa[Q_APPLY_MAX_ARGS];
-        for (int64_t j = 0; j < n; j++) {
-            if (q_splay_colref_is(args[j])) {
-                ray_retain(args[j]);                  /* the frame's ref survives */
-                fa[j] = q_eval_apply_concrete(args[j]);
-                if (!fa[j] || RAY_IS_ERR(fa[j])) {
-                    for (int64_t k = 0; k < j; k++)
-                        if (fa[k] != args[k]) ray_release(fa[k]);
-                    return fa[j] ? fa[j] : q_err(QE_TYPE);
-                }
-            } else
-                fa[j] = args[j];
-        }
-        ray_t* r = q_eval_apply_concrete(apply_inner(fv, row, fa, n));
-        for (int64_t j = 0; j < n; j++)
-            if (fa[j] != args[j]) ray_release(fa[j]);
-        return r;
-    }
-    return q_eval_apply_concrete(apply_inner(fv, row, args, n));
-}
-
 /* the ONE dispatch exit: the deepest apply to produce an error snapshots the
  * live frames here (and, under `\e 1`, suspends into the debugger) */
 ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
-    ray_t* r = apply_dispatch(fv, row, args, n);
+    ray_t* r = q_eval_apply_concrete(apply_inner(fv, row, args, n));
     if (q_splay_fault_pending() && r && !RAY_IS_ERR(r)) {   /* a torn zip block under this apply's read */
         ray_release(r);
         r = q_err(QE_CORRUPT);
@@ -1712,23 +1612,6 @@ static ray_t* apply_valence_sibling(ray_t* head, int64_t n, const q_op_t** row) 
 
 ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n) {
     if (!head || RAY_IS_ERR(head)) return q_err(QE_TYPE);
-    if (q_splay_colref_is(head)) {            /* `ask[i]` in a phrase */
-        ray_t* car; int64_t name; ray_t* cidx;
-        q_splay_colref_parts(head, &car, &name, &cidx);
-        if (n == 1 && RAY_IS_NULL(cidx) &&
-            (q_type_is_int_atom(args[0]) || q_type_is_int_vec(args[0]))) {
-            /* int index straight into the gather — only the covering blocks;
-             * the index home already answers atom = element, vector = gather */
-            ray_t* g = q_splay_gather(car, name, args[0]);
-            return g ? g : q_err(QE_TYPE);
-        }
-        ray_retain(head);
-        ray_t* col = q_eval_apply_concrete(head);
-        if (!col || RAY_IS_ERR(col)) return col ? col : q_err(QE_TYPE);
-        ray_t* r = q_eval_apply_value(col, args, n);
-        ray_release(col);
-        return r;
-    }
     if (q_view_is(head)) {                    /* applying a view applies its value */
         ray_t* dv = q_view_deref_borrowed(head);
         if (RAY_IS_ERR(dv)) return dv;
@@ -1798,6 +1681,7 @@ static ray_t* name_lift(const q_op_t* row, ray_t** args, int64_t n, int dot) {
     int64_t id = args[0]->i64;
     ray_t* cur = q_env_get(id);                      /* borrowed flat global */
     int stole = 0;
+    if (q_splay_table_path(cur)) return q_err(QE_SPLAY);   /* a mapped global takes no write (kb/splayed-tables.md:350) */
     if (cur && !RAY_IS_ERR(cur)) {
         ray_retain(cur);                             /* the consumable ref */
         stole = q_env_take(id, cur);                 /* env drops its ref */
