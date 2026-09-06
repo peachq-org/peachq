@@ -814,7 +814,7 @@ static ray_t* wf_append_inplace(ray_t* path, ray_t* v, int64_t count) {
     if (!fp) return q_err(QE_IO);
     int64_t nc = count + n;
     int bad = fseek(fp, 0, SEEK_END) != 0 ||
-              fwrite(ray_data(v), esz, (size_t)n, fp) != (size_t)n ||
+              q_io_fwrite(fp, ray_data(v), esz * (size_t)n) != 0 ||
               fflush(fp) != 0 || fseek(fp, 8, SEEK_SET) != 0 ||
               fwrite(&nc, 8, 1, fp) != 1;
     if (fclose(fp) != 0) bad = 1;
