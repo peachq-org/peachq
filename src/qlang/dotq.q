@@ -69,8 +69,9 @@
 / ---- Value / table-dict (ref/dotq.md) ----
 / .Q.v: filepath -> splayed table (unsupported in-memory); other symbol -> global named x; else -> x.
 .Q.v:{$[-11h=type x;value x;x]};
-/ .Q.V: table -> dictionary of its column values (a table is a flipped column-dict).
-.Q.V:{flip x};
+/ .Q.V: table -> dictionary of its column values.  Spelled by name, not `flip x`: the flip of a mapped splayed
+/ table is `cols!`:dir/` (ref/flip-splayed.md), and every q.q verb that wants the columns rides this.
+.Q.V:{$[98h=type x;(cols x)!x cols x;flip x]};
 
 / ---- General-purpose utils (ref/dotq.md) ----
 .Q.dd:{` sv x,`$string y};
@@ -81,7 +82,7 @@
 / .Q.ft: apply f to a keyed table's simple (0!) form, re-key on the original key cols.
 .Q.ft:{[f;t] k:keys t; $[count k;k xkey f 0!t;f t]};
 / .Q.ff: append y's missing columns to table x as count[x] typed nulls (via column dicts).
-.Q.ff:{[x;y] dx:flip x; dy:flip y; nc:key[dy] except key dx; flip dx,nc!{[n;v](type v)$n#0N}[count x]each dy nc};
+.Q.ff:{[x;y] dx:.Q.V x; dy:.Q.V y; nc:key[dy] except key dx; flip dx,nc!{[n;v](type v)$n#0N}[count x]each dy nc};
 / .Q.s1: single-line string repr, a thin wrapper over the `-3!` internal fn.
 .Q.s1:{-3!x};
 

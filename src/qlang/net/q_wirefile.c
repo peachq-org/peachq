@@ -1,4 +1,5 @@
 /* q_wirefile — kdb+ on-disk reader (see q_wirefile.h). */
+#define _POSIX_C_SOURCE 200809L   /* lstat */
 #include "qlang/net/q_wirefile.h"
 #include "qlang/io/q_io.h"      /* the byte core: paths, the slice read, the write */
 #include "qlang/net/q_wire.h"
@@ -748,11 +749,28 @@ static int wf_zd(int* lbs, int* alg, int* lvl) {
     return *alg != 0;
 }
 
+#ifdef RAY_OS_WINDOWS
+#define wf_lstat stat     /* no symlink to tell apart */
+#else
+#define wf_lstat lstat
+#endif
+
 /* One data file: the image bytes, plain or through the container.  `hdr` says
  * img carries a file-level count field — compression ZEROES it (the kdbfile
  * trap rows pin this; the reader derives it back from the plain length), so a
- * headerless companion passes 0 and stays untouched. */
+ * headerless companion passes 0 and stays untouched.  An EXISTING plain file
+ * (the entry itself, never a link) is replaced by write-beside-and-rename: a
+ * live mapping of the old file keeps its inode, where a truncate-in-place
+ * would SIGBUS it, and a failed rename leaves the old file whole; any other
+ * target keeps the direct write, so a directory or a link still answers as it
+ * always did. */
 static ray_t* wf_put(ray_t* path, ray_t* img, int lbs, int alg, int lvl, int hdr) {
+    struct stat st;
+    int over = wf_lstat(ray_str_ptr(path), &st) == 0 && S_ISREG(st.st_mode);
+    ray_t* tmp = over ? wf_join(ray_str_ptr(path), ray_str_len(path), ".tmp", 4) : NULL;
+    if (over && !tmp) return q_err(QE_OOM);
+    ray_t* dst = over ? tmp : path;
+    ray_t* bad;
     if (alg > 0) {
         uint8_t* p = (uint8_t*)ray_str_ptr(img);     /* fresh image: safe to patch */
         size_t n = ray_str_len(img);
@@ -760,9 +778,15 @@ static ray_t* wf_put(ray_t* path, ray_t* img, int lbs, int alg, int lvl, int hdr
             memset(p + 8, 0, 8);
         if (hdr && n >= WF_D_OFF && p[0] == 0xfd && p[1] == 0x20)
             memset(p + WF_D_DESC + 8, 0, 8);
-        return q_io_zip_write(path, p, n, lbs, alg, lvl);
+        bad = q_io_zip_write(dst, p, n, lbs, alg, lvl);
+    } else
+        bad = q_io_write_all(dst, ray_str_ptr(img), ray_str_len(img));
+    if (over) {
+        if (!bad && rename(ray_str_ptr(tmp), ray_str_ptr(path)) != 0) bad = q_err(QE_IO);
+        if (bad) remove(ray_str_ptr(tmp));
+        ray_release(tmp);
     }
-    return q_io_write_all(path, ray_str_ptr(img), ray_str_len(img));
+    return bad;
 }
 
 static ray_t* wf_write_flat_path(ray_t* path, ray_t* y, int lbs, int alg, int lvl) {

@@ -11,7 +11,6 @@
 #include "lang/eval.h"     /* ray_take_fn — the empty-source take fill */
 #include "qlang/ops/q_index.h" /* q_index_at — the one TOTAL gather (resolve, deref) */
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — the one int-family widen (R2 construction) */
-#include "qlang/io/q_splay.h"  /* q_splay_col — deref through a mapped-splay target */
 #include "table/dict.h"        /* ray_dict_slots — keyed-target halves at deref */
 #include "table/sym.h"
 #include <assert.h>
@@ -127,7 +126,7 @@ q_edom_t q_enum_domain_kind(int64_t dom, ray_t** vals) {
         }
         return Q_EDOM_KEYEDN;
     }
-    if (d->type == RAY_TABLE || q_splay_is(d)) return Q_EDOM_TABLE;
+    if (d->type == RAY_TABLE) return Q_EDOM_TABLE;
     return Q_EDOM_OTHER;
 }
 
@@ -476,29 +475,12 @@ ray_t* q_enum_col_ingest(ray_t* oc, ray_t* pc) {
  * NULL = not referential / target unbound / no such field (callers fall
  * through); real errors propagate. */
 ray_t* q_enum_deref(ray_t* v, int64_t fld) {
-    if (!v || RAY_IS_ERR(v)) return NULL;
-    ray_t* forced = NULL;      /* a lazy splay column binds as a colref thunk;
-                                * force it (idx-narrowed: survivors only) so a
-                                * mapped link/FK column derefs like a live one */
-    if (q_splay_colref_is(v)) {
-        ray_t* car; int64_t nm; ray_t* idx;
-        q_splay_colref_parts(v, &car, &nm, &idx);
-        forced = q_splay_gather(car, nm, RAY_IS_NULL(idx) ? NULL : idx);
-        if (!forced || RAY_IS_ERR(forced)) { if (forced) ray_release(forced); return NULL; }
-        v = forced;
-        ray_t* r = q_enum_deref(v, fld);
-        ray_release(forced);
-        return r;
-    }
-    if (!q_enum_is(v)) return NULL;
+    if (!v || RAY_IS_ERR(v) || !q_enum_is(v)) return NULL;
     int64_t tgt = q_enum_domain(v);
     ray_t* t = q_env_get(tgt);
     if (!t || RAY_IS_ERR(t)) return NULL;
     ray_t* col = NULL;                                   /* owned */
-    if (q_splay_is(t)) {
-        col = q_splay_col(t, fld);
-        if (col && RAY_IS_ERR(col)) { ray_release(col); col = NULL; }
-    } else if (q_type_is_keyed(t)) {
+    if (q_type_is_keyed(t)) {
         ray_t* c = ray_table_get_col(ray_dict_slots(t)[0], fld);
         if (!c) c = ray_table_get_col(ray_dict_slots(t)[1], fld);
         if (c) { ray_retain(c); col = c; }

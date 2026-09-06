@@ -70,19 +70,18 @@ static ray_t* ques_from(ray_t* t, int64_t* nkey) {
         ray_release(v);
         return r;
     }
-    if (q_splay_is(t)) { ray_retain(t); return t; }    /* lazy: columns gather on use */
     if (q_type_is_keyed(t)) {
         if (nkey) *nkey = ray_table_ncols(ray_dict_keys(t));
         return q_bang_enkey(0, t);
     }
     if (q_type_is_dict(t)) return q_flip_wrap(t);
+    if (q_splay_table_unresolved(t)) return q_err(QE_IO);   /* `flip cols!`:missing/` fails when queried */
     if (q_type_is_table(t)) { ray_retain(t); return t; }
     return q_err(QE_TYPE);
 }
 
 /* one column of the from-value, OWNED (NULL = no such column) */
 static ray_t* from_col_owned(ray_t* t, int64_t nm) {
-    if (q_splay_is(t)) return q_splay_col(t, nm);
     ray_t* c = ray_table_get_col(t, nm);
     if (c) ray_retain(c);
     return c;
@@ -99,24 +98,16 @@ static int idx_is_identity(ray_t* idx, int64_t n) {
     return 1;
 }
 
-/* rows of the from-value at idx: a mapped splay rides the authority's row
- * gather; an identity idx takes the value itself without a copy */
+static ray_t* col_self(void* ctx, ray_t* col) { (void)ctx; ray_retain(col); return col; }
+
+/* rows of the from-value at idx: an identity idx takes the value itself without a copy — a mapped table as a
+ * fresh block over the same columns, so the result is derived and plain (ref/dotq.md `.Q.qp select from B` -> 0) */
 static ray_t* from_rows(ray_t* t, ray_t* idx) {
     ray_t* use = idx_is_identity(idx, q_count_long(t)) ? NULL : idx;
-    if (q_splay_is(t)) return q_splay_rows(t, use);
-    if (!use) { ray_retain(t); return t; }
-    return gather(t, use);
-}
-
-/* flip of the from-value: a mapped splay answers `flip` of its full row
- * gather (an update's merge holds every column by definition) */
-static ray_t* from_flip(ray_t* t) {
-    if (!q_splay_is(t)) return q_flip_wrap(t);
-    ray_t* tbl = q_splay_rows(t, NULL);
-    if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_TYPE);
-    ray_t* d = q_flip_wrap(tbl);
-    ray_release(tbl);
-    return d;
+    if (use) return gather(t, use);
+    if (q_splay_table_path(t)) return q_table_map_cols(col_self, NULL, t);
+    ray_retain(t);
+    return t;
 }
 
 /* Law 4: THE evaluator runs the phrase inside one NON-barrier scope (qsql.md
@@ -125,23 +116,10 @@ static ray_t* phrase_eval(ray_t* tree, ray_t* t, ray_t* idx) {
     if (q_env_frame_push(0) != RAY_OK) return q_err(QE_STACK);
     ray_t* err = NULL;
     int ident = idx_is_identity(idx, q_count_long(t));
-    if (q_splay_is(t)) {
-        /* a mapped splay binds LAZY column refs — a name the phrase never
-         * uses never touches its file; identity idx = gather with :: (no copy) */
-        ray_t* keys = ray_dict_keys(t);
-        int64_t nc = ray_len(keys);
-        ray_t* use = ident ? RAY_NULL_OBJ : idx;
-        for (int64_t c = 0; c < nc && !err; c++) {
-            int64_t id = ray_vec_get_sym_id(keys, c);
-            ray_t* ref = q_splay_colref(t, id, use);
-            if (!ref || RAY_IS_ERR(ref)) { err = ref ? ref : q_err(QE_OOM); break; }
-            q_env_local_set(id, ref);                        /* retains */
-            ray_release(ref);
-        }
-    } else {
-        /* the same narrowing law in-memory: an identity idx binds the column
-         * ITSELF — the per-element gather here was the projection cliff that
-         * priced `select c1 from m` by the table's WIDTH (PLAN.md 2026-08-04) */
+    {
+        /* the narrowing law: an identity idx binds the column ITSELF — the
+         * per-element gather here was the projection cliff that priced
+         * `select c1 from m` by the table's WIDTH (PLAN.md 2026-08-04) */
         int64_t nc = ray_table_ncols(t);
         for (int64_t c = 0; c < nc && !err; c++) {
             ray_t* col = ray_table_get_col_idx(t, c);
@@ -794,7 +772,7 @@ static ray_t* entries_select(ray_t* dom, ray_t* rng, ray_t* x, int drop) {
 /* a table IS `flip` of its column dict, so column take/drop is the entries law
  * with the flip on either side */
 static ray_t* cols_select(ray_t* x, ray_t* t, int drop) {
-    ray_t* fd = q_flip_wrap(t);                              /* owned */
+    ray_t* fd = q_table_to_dict(t);                          /* owned */
     if (!fd || RAY_IS_ERR(fd)) return fd ? fd : q_err(QE_TYPE);
     ray_t* nd = q_type_is_plain_dict(fd)
                     ? entries_select(ray_dict_keys(fd), ray_dict_vals(fd), x, drop)
@@ -960,7 +938,7 @@ static ray_t* update_table(ray_t* a, ray_t* b, ray_t* t, ray_t* idx) {
     ray_t* nd = upd_cols(a, t, idx, gidxs);
     if (kt) { ray_release(gidxs); ray_release(kt); }
     if (!nd || RAY_IS_ERR(nd)) return nd ? nd : q_err(QE_TYPE);
-    ray_t* cd = from_flip(t);
+    ray_t* cd = q_table_to_dict(t);
     ray_t* merged = (cd && !RAY_IS_ERR(cd)) ? q_join_wrap(cd, nd) : cd;
     if (cd && !RAY_IS_ERR(cd) && merged != cd) ray_release(cd);
     ray_release(nd);
@@ -1058,9 +1036,8 @@ static ray_t* bang_qsql(ray_t** args) {
     /* A mapped splay refuses schema changes and every write-back — BOTH delete
      * forms and the name form (kb/splayed-tables.md:350-354: `delete volume
      * from `trade` and `trade: delete volume from trade` are each 'splay).  A
-     * value-form UPDATE is a plain query: the carrier flows into the table
-     * lane below, its columns gathering on use. */
-    if (q_splay_is(src)) {
+     * value-form UPDATE is a plain query over the mapped columns. */
+    if (q_splay_table_path(src)) {
         if (name >= 0 || !q_type_is_dict(a)) { ray_release(src); return q_err(QE_SPLAY); }
     }
     /* a provider carrier: by-NAME mutation is phase-2 ('nyi); by VALUE the
@@ -1074,7 +1051,7 @@ static ray_t* bang_qsql(ray_t** args) {
     }
     ray_t* r;
     int64_t nk = 0;                 /* keyed source: re-key the result */
-    if (q_type_is_dict(src) && !q_type_is_keyed(src) && !q_splay_is(src)) {
+    if (q_type_is_dict(src) && !q_type_is_keyed(src)) {
         if (q_type_is_dict(a))      r = update_dict(a, b, c, src);
         else if (is_symvec(a) && is_empty_gen(c)) r = dict_drop_keys(a, src);
         else                        r = q_err(QE_NYI);
@@ -1084,7 +1061,7 @@ static ray_t* bang_qsql(ray_t** args) {
             nk = ray_table_ncols(ray_dict_keys(src));
             t = q_bang_enkey(0, src);               /* law 24: unkey */
             if (!t || RAY_IS_ERR(t)) { ray_release(src); return t ? t : q_err(QE_TYPE); }
-        } else if (q_type_is_table(src) || q_splay_is(src)) {
+        } else if (q_type_is_table(src)) {
             ray_retain(t);
         } else {
             ray_release(src);
