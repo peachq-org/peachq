@@ -821,6 +821,19 @@ ray_t* q_io_set(ray_t* x, ray_t* y) {
     return r ? r : q_err(QE_TYPE);
 }
 
+#ifdef RAY_OS_WINDOWS
+/* msvcrt remove() only unlinks FILES; the rmdir half POSIX remove(3) dispatches
+ * for free is RemoveDirectoryA, which likewise refuses a non-empty folder. */
+static int io_remove_any(const char* p) {
+    DWORD a = GetFileAttributesA(p);
+    if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY))
+        return RemoveDirectoryA(p) ? 0 : -1;
+    return remove(p);
+}
+#else
+#define io_remove_any remove
+#endif
+
 /* q `hdel x` — ref/hdel.md.  Delete the file or (empty) folder named by the
  * file symbol `:path and return x.  POSIX remove() dispatches unlink/rmdir, so
  * a folder is removed only when empty (the doc's "folders only if empty").  A
@@ -832,7 +845,7 @@ ray_t* q_hdel_wrap(ray_t* x) {
                                                             * file symbol it documents */
     ray_t* path = q_io_file_path(x);
     if (!path) return q_err(QE_TYPE);
-    int rc = remove(ray_str_ptr(path));  /* ray_str path is NUL-terminated */
+    int rc = io_remove_any(ray_str_ptr(path));  /* ray_str path is NUL-terminated */
     ray_release(path);
     if (rc != 0) return q_err(QE_IO);
     ray_retain(x);
