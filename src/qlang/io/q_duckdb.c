@@ -12,6 +12,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/io/q_duckdb.h"
 #include "qlang/io/q_duckdb_api.h"
+#include "qlang/io/q_duckdb_internal.h"
 #include "qlang/io/q_duckdb_types.h"
 #include "qlang/io/q_exedir.h"
 #include "qlang/base/q_err.h"
@@ -22,6 +23,7 @@
 #include "table/sym.h"        /* ray_sym_vec_cell */
 #include <rayforce.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,8 +40,6 @@
 #else
 #include <dlfcn.h>
 #endif
-
-typedef struct { char* p; size_t len, cap; int oom; } qd_buf;
 
 static int qd_buf_reserve(qd_buf* b, size_t extra) {
     if (b->oom) return 0;
@@ -59,10 +59,10 @@ static void qd_putn(qd_buf* b, const char* s, size_t n) {
     b->p[b->len] = '\0';
 }
 
-static void qd_puts(qd_buf* b, const char* s) { qd_putn(b, s, strlen(s)); }
+void qd_puts(qd_buf* b, const char* s) { qd_putn(b, s, strlen(s)); }
 
 /* SQL identifier: "name" with embedded " doubled. */
-static void qd_put_ident(qd_buf* b, const char* s, size_t n) {
+void qd_put_ident(qd_buf* b, const char* s, size_t n) {
     qd_putn(b, "\"", 1);
     for (size_t i = 0; i < n; i++) {
         if (s[i] == '"') qd_putn(b, "\"\"", 2);
@@ -72,7 +72,7 @@ static void qd_put_ident(qd_buf* b, const char* s, size_t n) {
 }
 
 /* SQL string literal: 'text' with embedded ' doubled. */
-static void qd_put_strlit(qd_buf* b, const char* s, size_t n) {
+void qd_put_strlit(qd_buf* b, const char* s, size_t n) {
     qd_putn(b, "'", 1);
     for (size_t i = 0; i < n; i++) {
         if (s[i] == '\'') qd_putn(b, "''", 2);
@@ -81,7 +81,7 @@ static void qd_put_strlit(qd_buf* b, const char* s, size_t n) {
     qd_putn(b, "'", 1);
 }
 
-static void qd_buf_free(qd_buf* b) { free(b->p); b->p = NULL; b->len = b->cap = 0; }
+void qd_buf_free(qd_buf* b) { free(b->p); b->p = NULL; b->len = b->cap = 0; }
 
 /* ---- loader: lazy dlopen + dlsym'd table ---- */
 
@@ -134,13 +134,12 @@ static const char* const QD_SYMS[] = {
 _Static_assert(sizeof(duck_api_t) == QD_NSYMS * sizeof(void*),
                "QD_SYMS[] must match duck_api_t, in order");
 
-static struct {
-    int        state;        /* 0 = untried, 1 = loaded, 2 = failed */
-    void*      dl;
-    duck_api_t api;
-} g_qd;
+duck_api_t qd_api;   /* THE dlsym'd table (declared in q_duckdb_internal.h) */
 
-#define QAPI (g_qd.api)
+static struct {
+    int   state;             /* 0 = untried, 1 = loaded, 2 = failed */
+    void* dl;
+} g_qd;
 
 #if !defined(__EMSCRIPTEN__)
 static void* qd_dlopen(const char* path) {
@@ -210,12 +209,12 @@ static void qd_load(void) {
     }
     if (!dl) dl = qd_dlopen(QD_LIB_BASENAME);
     if (!dl) { g_qd.state = 2; return; }
-    void** slots = (void**)&g_qd.api;
+    void** slots = (void**)&qd_api;
     for (size_t i = 0; i < QD_NSYMS; i++) {
         slots[i] = qd_dlsym(dl, QD_SYMS[i]);
         if (!slots[i]) {
             g_qd.state = 2;
-            memset(&g_qd.api, 0, sizeof g_qd.api);
+            memset(&qd_api, 0, sizeof qd_api);
             qd_dlclose(dl);                     /* a retry re-opens; don't stack refcounts */
             return;
         }
@@ -226,7 +225,7 @@ static void qd_load(void) {
     if (!ver || sscanf(ver, "v%d.%d", &maj, &min) != 2 ||
         maj < 1 || (maj == 1 && min < 4)) {
         g_qd.state = 2;
-        memset(&g_qd.api, 0, sizeof g_qd.api);
+        memset(&qd_api, 0, sizeof qd_api);
         qd_dlclose(dl);
         return;
     }
@@ -257,16 +256,21 @@ static struct {
     uint32_t        gen;         /* bumped on close — stale handles error */
     bool            live;
     char            display[512];/* original connect spec, for connections[] */
-    char            err[1024];   /* last DuckDB-produced error text */
+    char            err[1024];   /* last message behind a 'duckdb here: DuckDB's text or the bridge's reason */
 } g_cons[QD_MAX_CON];
+
+duck_connection qd_con(int slot) { return g_cons[slot].con; }
 
 /* most recent captured text, any connection — .duckdb.err[] reads this */
 static char g_err_last[1024];
 
-static void qd_err_stash(int slot, const char* msg) {
-    snprintf(g_err_last, sizeof g_err_last, "%s", msg ? msg : "");
-    if (slot >= 0)
-        snprintf(g_cons[slot].err, sizeof g_cons[slot].err, "%s", msg ? msg : "");
+/* THE message channel behind the bare 'duckdb: DuckDB's own text and the bridge's own reasons both land here */
+void qd_err_stash(int slot, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_err_last, sizeof g_err_last, fmt, ap);
+    va_end(ap);
+    if (slot >= 0) memcpy(g_cons[slot].err, g_err_last, sizeof g_err_last);
 }
 
 static int32_t qd_handle_of(int slot) {
@@ -308,451 +312,27 @@ void q_duckdb_reset(void) {
     memset(g_dbs, 0, sizeof g_dbs);
     g_err_last[0] = '\0';
 }
-
-static const qd_tmap_t* qd_map_logical(const char* name, size_t n) {
-    for (size_t i = 0; i < QD_NTYPES; i++)
-        if (strlen(QD_TYPES[i].logical) == n &&
-            memcmp(QD_TYPES[i].logical, name, n) == 0)
-            return &QD_TYPES[i];
-    return NULL;
+/* the bridge's own refusal: the reason to the message channel, the bare class to the caller */
+ray_t* qd_fail(int slot, const char* what, const char* why) {
+    qd_err_stash(slot, "%s: %s", what, why);
+    return q_err(QE_DUCKDB);
 }
-
-static bool qd_cell_is_text(ray_t* cell) {
-    const char* p; int64_t n;
-    return cell && q_str_text_bytes(cell, &p, &n);
-}
-
-static const qd_tmap_t* qd_map_read(duck_type t) {
-    for (size_t i = 0; i < QD_NTYPES; i++)
-        if (QD_TYPES[i].dk_type == t && QD_TYPES[i].read_canon) return &QD_TYPES[i];
-    return NULL;
-}
-
-/* The q column tag a row SURFACES as (utf8/bytes are 0h lists at q-space). */
-static int8_t qd_surface_type(const qd_tmap_t* tm) {
-    return (tm->ray_type == RAY_STR || tm->ray_type == RAY_LIST)
-               ? RAY_LIST : tm->ray_type;
-}
-
-/* ---- column map: a manifest row under N levels of DuckDB LIST.  QD_TYPES[] is
- * an append-only contract (fidelity spec 2026-07-14), so nesting is code over
- * the flat table — never rows in it. */
-
-#define QD_MAX_DEPTH 8
-
-typedef struct {
-    const qd_tmap_t* leaf;    /* the flat row at the bottom of the nest */
-    int              depth;   /* DuckDB LIST levels; 0 = a flat column */
-} qd_colmap_t;
-
-static int8_t qd_surface_of(const qd_colmap_t* cm) {
-    return cm->depth ? RAY_LIST : qd_surface_type(cm->leaf);
-}
-
-static ray_t* qd_new_col(const qd_colmap_t* cm, int64_t cap) {
-    if (cap < 1) cap = 1;
-    if (qd_surface_of(cm) == RAY_LIST) return ray_list_new(cap);
-    if (cm->leaf->ray_type == RAY_SYM) return ray_sym_vec_new(RAY_SYM_W64, cap);
-    return ray_vec_new(cm->leaf->ray_type, cap);
-}
-
-/* kdb spells a compound column with the UPPERCASE child char; a cell that is
- * itself a list (nested strings/bytes, depth >= 2) has no char at all. */
-static char qd_meta_char(const qd_colmap_t* cm) {
-    char c = cm->leaf->meta_ch;
-    if (cm->depth == 0) return c;
-    if (cm->depth > 1 || qd_surface_type(cm->leaf) == RAY_LIST) return ' ';
-    return c >= 'a' && c <= 'z' ? (char)(c - 'a' + 'A') : c;
-}
-
-/* The parameterized-name grammar: list(list(utf8)). */
-static void qd_logical_name(const qd_colmap_t* cm, char* buf, size_t cap) {
-    size_t off = 0;
-    for (int i = 0; i < cm->depth && off + 5 < cap; i++, off += 5) memcpy(buf + off, "list(", 5);
-    size_t ln = strlen(cm->leaf->logical);
-    if (off + ln < cap) { memcpy(buf + off, cm->leaf->logical, ln); off += ln; }
-    for (int i = 0; i < cm->depth && off + 1 < cap; i++) buf[off++] = ')';
-    buf[off] = '\0';
-}
-
-static bool qd_parse_logical(const char* s, qd_colmap_t* out) {
-    size_t n = strlen(s);
-    int depth = 0;
-    while (depth < QD_MAX_DEPTH && n > 6 && s[n - 1] == ')' &&
-           memcmp(s, "list(", 5) == 0) { s += 5; n -= 6; depth++; }
-    const qd_tmap_t* leaf = qd_map_logical(s, n);
-    if (!leaf) return false;
-    out->leaf  = leaf;
-    out->depth = depth;
-    return true;
-}
-
-/* q value -> column map (write direction).  A generic list is utf8 when EVERY
- * cell is text and bytes when every cell is a byte vector — those base cases
- * consume the level; otherwise it nests, and every cell must agree. */
-static bool qd_map_write(ray_t* v, int depth, qd_colmap_t* out) {
-    if (!v) return false;
-    if (v->type != RAY_LIST) {
-        for (size_t i = 0; i < QD_NTYPES; i++)
-            if (QD_TYPES[i].ray_type == v->type) {
-                out->leaf = &QD_TYPES[i];
-                out->depth = depth;
-                return true;
-            }
-        return false;
-    }
-    bool all_bytes = true, all_text = true;
-    for (int64_t i = 0; i < v->len && (all_bytes || all_text); i++) {
-        ray_t* cell = ray_list_get(v, i);
-        if (!cell) return false;
-        if (cell->type != RAY_BYTE_ONLY) all_bytes = false;
-        if (!qd_cell_is_text(cell))      all_text  = false;
-    }
-    if (all_bytes || all_text || v->len == 0) {
-        int8_t want = (all_bytes || v->len == 0) ? RAY_LIST : RAY_STR;
-        for (size_t i = 0; i < QD_NTYPES; i++)
-            if (QD_TYPES[i].ray_type == want && QD_TYPES[i].read_canon) {
-                out->leaf = &QD_TYPES[i];
-                out->depth = depth;
-                return true;
-            }
-        return false;
-    }
-    if (depth >= QD_MAX_DEPTH) return false;
-    bool have = false;
-    for (int64_t i = 0; i < v->len; i++) {
-        ray_t* cell = ray_list_get(v, i);
-        if (!cell || cell->type < 0) return false;      /* atom-bearing: fail loud */
-        if (cell->type == RAY_LIST && cell->len == 0) continue;   /* () carries no type */
-        qd_colmap_t cm;
-        if (!qd_map_write(cell, depth + 1, &cm)) return false;
-        if (!have) { *out = cm; have = true; }
-        else if (cm.leaf != out->leaf || cm.depth != out->depth) return false;
-    }
-    return have;
-}
-
-static bool qd_map_read_logical(duck_logical_type lt, qd_colmap_t* out) {
-    duck_logical_type cur = lt, owned = NULL;
-    int depth = 0;
-    while (cur && QAPI.get_type_id(cur) == QDUCK_TYPE_LIST && depth < QD_MAX_DEPTH) {
-        duck_logical_type child = QAPI.list_type_child_type(cur);
-        if (owned) QAPI.destroy_logical_type(&owned);
-        cur = owned = child;
-        depth++;
-    }
-    const qd_tmap_t* leaf = cur ? qd_map_read(QAPI.get_type_id(cur)) : NULL;
-    if (owned) QAPI.destroy_logical_type(&owned);
-    if (!leaf) return false;
-    out->leaf  = leaf;
-    out->depth = depth;
-    return true;
-}
-
-static duck_logical_type qd_make_logical(const qd_colmap_t* cm) {
-    duck_logical_type t = QAPI.create_logical_type(cm->leaf->dk_type);
-    for (int i = 0; i < cm->depth && t; i++) {
-        duck_logical_type nested = QAPI.create_list_type(t);   /* borrows the child */
-        QAPI.destroy_logical_type(&t);
-        t = nested;
-    }
-    return t;
-}
-
-/* ---- UUID <-> hugeint (upper word's sign bit flipped for ordering;
- * bytes are RFC-4122 big-endian) ---- */
-
-static void qd_uuid_to_bytes(duck_hugeint h, uint8_t* b) {
-    uint64_t hi = (uint64_t)h.upper ^ 0x8000000000000000ULL;
-    for (int i = 0; i < 8; i++) b[i]     = (uint8_t)(hi >> (56 - 8 * i));
-    for (int i = 0; i < 8; i++) b[8 + i] = (uint8_t)(h.lower >> (56 - 8 * i));
-}
-
-static duck_hugeint qd_bytes_to_uuid(const uint8_t* b) {
-    uint64_t hi = 0, lo = 0;
-    for (int i = 0; i < 8; i++) hi = (hi << 8) | b[i];
-    for (int i = 0; i < 8; i++) lo = (lo << 8) | b[8 + i];
-    duck_hugeint h;
-    h.upper = (int64_t)(hi ^ 0x8000000000000000ULL);
-    h.lower = lo;
-    return h;
-}
-
-static bool qd_guid_is_null(const uint8_t* b) {
-    for (int i = 0; i < 16; i++) if (b[i]) return false;
-    return true;
-}
-
-/* placeholder elem + set_null (sentinel + HAS_NULLS attr) */
-static ray_t* qd_append_null(ray_t* vec) {
-    int64_t zero[2] = { 0, 0 };   /* covers up to 16-byte (guid) elems */
-    vec = ray_vec_append(vec, zero);
-    if (!vec || RAY_IS_ERR(vec)) return vec;
-    ray_vec_set_null(vec, vec->len - 1, true);
-    return vec;
-}
-
-/* n elements of one DuckDB vector from row `from` -> the accumulating q column
- * (moved), or error.  THE read cell codec — every LIST child level lands here
- * too, so the epoch shifts and the in-band null law have one home. */
-static ray_t* qd_read_leaf(ray_t* col, const qd_tmap_t* tm,
-                           duck_vector dv, duck_idx_t from, duck_idx_t n) {
-    void*     data     = QAPI.vector_get_data(dv);
-    uint64_t* validity = QAPI.vector_get_validity(dv);
-    for (duck_idx_t r = from; r < from + n; r++) {
-        bool ok = q_duckdb_validity_ok(validity, r);
-        switch (tm->ray_type) {
-            case RAY_BOOL: {
-                if (!ok) { ray_release(col); return q_err(QE_DUCKDB); }
-                uint8_t v = ((uint8_t*)data)[r] ? 1 : 0;
-                col = ray_vec_append(col, &v);
-                break;
-            }
-            case RAY_BYTE_ONLY: {
-                if (!ok) { ray_release(col); return q_err(QE_DUCKDB); }
-                uint8_t v = ((uint8_t*)data)[r];
-                col = ray_vec_append(col, &v);
-                break;
-            }
-            case RAY_I16: {      /* TINYINT widens losslessly to q short */
-                int16_t v = tm->dk_type == QDUCK_TYPE_TINYINT
-                                ? (int16_t)((int8_t*)data)[r]
-                                : ((int16_t*)data)[r];
-                if (!ok || v == NULL_I16) col = qd_append_null(col);
-                else                      col = ray_vec_append(col, &v);
-                break;
-            }
-            case RAY_I32:
-            case RAY_MONTH:
-            case RAY_MINUTE:
-            case RAY_SECOND: {   /* month/minute/second: raw int32 counts */
-                int32_t v = ((int32_t*)data)[r];
-                if (!ok || v == NULL_I32) col = qd_append_null(col);
-                else                      col = ray_vec_append(col, &v);
-                break;
-            }
-            case RAY_I64:
-            case RAY_TIMESPAN: { /* timespan: raw ns rides BIGINT */
-                int64_t v = ((int64_t*)data)[r];
-                if (!ok || v == NULL_I64) col = qd_append_null(col);
-                else                      col = ray_vec_append(col, &v);
-                break;
-            }
-            case RAY_F32: {      /* live-infinity: ONLY NaN is null */
-                float v = ((float*)data)[r];
-                if (!ok || v != v) col = qd_append_null(col);
-                else               col = ray_vec_append(col, &v);
-                break;
-            }
-            case RAY_F64:
-            case RAY_DATETIME: { /* datetime: raw float days ride DOUBLE */
-                double v = ((double*)data)[r];
-                if (!ok || v != v) col = qd_append_null(col);
-                else               col = ray_vec_append(col, &v);
-                break;
-            }
-            case RAY_SYM: {      /* descriptor-refined VARCHAR: intern; NULL
-                                  * collapses to ` like '' */
-                const duck_string_t* s = &((const duck_string_t*)data)[r];
-                int64_t id = ok ? ray_sym_intern_runtime(q_duckdb_string_data(s),
-                                                         q_duckdb_string_len(s))
-                                : ray_sym_intern_runtime("", 0);
-                col = ray_vec_append(col, &id);
-                break;
-            }
-            case RAY_STR: {      /* VARCHAR -> charv cell; NULL -> 0n, the q null the JSON
-                                  * reader itself fills with, so '' stays a distinct VALUE */
-                const duck_string_t* s = ok ? &((const duck_string_t*)data)[r] : NULL;
-                ray_t* cell = s ? ray_charv(q_duckdb_string_data(s),
-                                            (int64_t)q_duckdb_string_len(s))
-                                : ray_f64(NULL_F64);
-                if (!cell || RAY_IS_ERR(cell)) { ray_release(col);
-                    return cell ? cell : q_err(QE_WSFULL); }
-                col = ray_list_append(col, cell);   /* retains */
-                ray_release(cell);
-                break;
-            }
-            case RAY_LIST: {     /* BLOB -> byte-vector cell; NULL -> 0x (empty) */
-                ray_t* cell;
-                if (!ok) cell = ray_vec_new(RAY_BYTE_ONLY, 1);
-                else {
-                    const duck_string_t* s = &((const duck_string_t*)data)[r];
-                    uint32_t len = q_duckdb_string_len(s);
-                    cell = len ? ray_vec_from_raw(RAY_BYTE_ONLY, q_duckdb_string_data(s), len)
-                               : ray_vec_new(RAY_BYTE_ONLY, 1);
-                }
-                if (!cell || RAY_IS_ERR(cell)) { ray_release(col); return cell; }
-                col = ray_list_append(col, cell);
-                ray_release(cell);
-                break;
-            }
-            case RAY_DATE: {
-                int32_t v = ((int32_t*)data)[r];
-                if (!ok) { col = qd_append_null(col); break; }
-                if (v < INT32_MIN + QD_EPOCH_DAYS)   /* epoch shift underflow */
-                    { ray_release(col); return q_err(QE_DUCKDB); }
-                int32_t q = v - QD_EPOCH_DAYS;
-                col = ray_vec_append(col, &q);
-                break;
-            }
-            case RAY_TIME: {     /* µs -> ms; sub-ms is unrepresentable, not
-                                  * truncatable — "exact else error" (codex) */
-                int64_t v = ((int64_t*)data)[r];
-                if (!ok) { col = qd_append_null(col); break; }
-                if (v % 1000) { ray_release(col); return q_err(QE_DUCKDB); }
-                int32_t q = (int32_t)(v / 1000);
-                col = ray_vec_append(col, &q);
-                break;
-            }
-            case RAY_TIMESTAMP: {  /* int64 ns epoch 1970 -> epoch 2000 */
-                int64_t v = ((int64_t*)data)[r];
-                if (!ok || v == NULL_I64) { col = qd_append_null(col); break; }
-                if (tm->dk_type == QDUCK_TYPE_TIMESTAMP) {   /* µs: exact else error */
-                    if (v > INT64_MAX / 1000 || v < INT64_MIN / 1000)
-                        { ray_release(col); return q_err(QE_DUCKDB); }
-                    v *= 1000;
-                }
-                if (v < INT64_MIN + QD_EPOCH_NS)     /* epoch shift underflow */
-                    { ray_release(col); return q_err(QE_DUCKDB); }
-                int64_t q = v - QD_EPOCH_NS;
-                col = ray_vec_append(col, &q);
-                break;
-            }
-            case RAY_GUID: {
-                if (!ok) { col = qd_append_null(col); break; }   /* NULL -> 0Ng */
-                uint8_t b[16];
-                qd_uuid_to_bytes(((const duck_hugeint*)data)[r], b);
-                col = ray_vec_append(col, b);
-                break;
-            }
-            default:
-                ray_release(col);
-                return q_err(QE_DUCKDB);
-        }
-        if (!col || RAY_IS_ERR(col))
-            return col ? col : q_err(QE_WSFULL);
-    }
-    return col;
-}
-
-/* A NULL LIST cell is 0n — the reader's own null-fill — where an EMPTY list stays (),
- * so the two survive the crossing as the distinct values they are. */
-static ray_t* qd_read_col(ray_t* col, const qd_colmap_t* cm,
-                          duck_vector dv, duck_idx_t from, duck_idx_t n) {
-    if (cm->depth == 0) return qd_read_leaf(col, cm->leaf, dv, from, n);
-    const qd_colmap_t child = { cm->leaf, cm->depth - 1 };
-    const duck_list_entry* ent = (const duck_list_entry*)QAPI.vector_get_data(dv);
-    uint64_t*   validity = QAPI.vector_get_validity(dv);
-    duck_vector cv       = QAPI.list_vector_get_child(dv);
-    if (!ent || !cv) { ray_release(col); return q_err(QE_DUCKDB); }
-    for (duck_idx_t r = from; r < from + n; r++) {
-        bool       ok  = q_duckdb_validity_ok(validity, r);
-        duck_idx_t len = ok ? (duck_idx_t)ent[r].length : 0;
-        ray_t*     cell = ok ? qd_new_col(&child, (int64_t)len) : ray_f64(NULL_F64);
-        if (ok && cell && !RAY_IS_ERR(cell))
-            cell = qd_read_col(cell, &child, cv, (duck_idx_t)ent[r].offset, len);
-        if (!cell || RAY_IS_ERR(cell)) {
-            ray_release(col);
-            return cell ? cell : q_err(QE_WSFULL);
-        }
-        col = ray_list_append(col, cell);   /* retains */
-        ray_release(cell);
-        if (!col || RAY_IS_ERR(col)) return col ? col : q_err(QE_WSFULL);
-    }
-    return col;
-}
-
-typedef struct {
-    char col[256];       /* data column name */
-    char logical[96];    /* logical-type name (validated against the manifest) */
-    bool iskey;          /* q keyed-table key column */
-} qd_desc_t;
-
-/* Descriptor refinement: a row refines the physical map IFF its logical exists
- * AND agrees on both carrier and LIST depth; anything else DEGRADES. */
-static void qd_refine(const char* cname, const qd_desc_t* desc, int64_t ndesc,
-                      qd_colmap_t* cm) {
-    for (int64_t i = 0; i < ndesc; i++) {
-        if (strcmp(desc[i].col, cname) != 0) continue;
-        qd_colmap_t ref;
-        if (qd_parse_logical(desc[i].logical, &ref) && ref.depth == cm->depth &&
-            ref.leaf->dk_type == cm->leaf->dk_type)
-            *cm = ref;
-        return;
-    }
-}
-
-/* duck_result -> q table (does NOT destroy the result); desc = _q_schema rows. */
-static ray_t* qd_result_to_table(duck_result* res, const qd_desc_t* desc,
-                                 int64_t ndesc) {
-    int64_t ncols = (int64_t)QAPI.column_count(res);
-    if (ncols == 0) { ray_retain(RAY_NULL_OBJ); return RAY_NULL_OBJ; }
-    if (ncols > 256) return q_err(QE_DUCKDB);
-
-    qd_colmap_t cms[256];
-    for (int64_t c = 0; c < ncols; c++) {
-        duck_logical_type lt = QAPI.column_logical_type(res, (duck_idx_t)c);
-        bool ok = lt && qd_map_read_logical(lt, &cms[c]);
-        if (lt) QAPI.destroy_logical_type(&lt);
-        if (!ok) return q_err(QE_DUCKDB);
-        qd_refine(QAPI.column_name(res, (duck_idx_t)c), desc, ndesc, &cms[c]);
-    }
-
-    ray_t* cols[256];
-    for (int64_t c = 0; c < ncols; c++) {
-        cols[c] = qd_new_col(&cms[c], 8);
-        if (!cols[c] || RAY_IS_ERR(cols[c])) {
-            for (int64_t k = 0; k < c; k++) ray_release(cols[k]);
-            return cols[c] ? cols[c] : q_err(QE_WSFULL);
-        }
-    }
-
-    duck_data_chunk chunk;
-    while ((chunk = QAPI.fetch_chunk(*res)) != NULL) {
-        duck_idx_t n = QAPI.data_chunk_get_size(chunk);
-        for (int64_t c = 0; c < ncols; c++) {
-            duck_vector dv = QAPI.data_chunk_get_vector(chunk, (duck_idx_t)c);
-            cols[c] = qd_read_col(cols[c], &cms[c], dv, 0, n);
-            if (!cols[c] || RAY_IS_ERR(cols[c])) {
-                ray_t* e = cols[c] ? cols[c] : q_err(QE_WSFULL);
-                for (int64_t k = 0; k < ncols; k++)
-                    if (k != c && cols[k]) ray_release(cols[k]);
-                QAPI.destroy_data_chunk(&chunk);
-                return e;
-            }
-        }
-        QAPI.destroy_data_chunk(&chunk);
-    }
-
-    ray_t* tbl = ray_table_new(ncols);
-    for (int64_t c = 0; c < ncols; c++) {
-        const char* nm = QAPI.column_name(res, (duck_idx_t)c);
-        tbl = ray_table_add_col(tbl, ray_sym_intern_runtime(nm, strlen(nm)), cols[c]);
-        ray_release(cols[c]);   /* add_col retains its own ref */
-        if (!tbl || RAY_IS_ERR(tbl)) {
-            for (int64_t k = c + 1; k < ncols; k++) ray_release(cols[k]);
-            return tbl ? tbl : q_err(QE_WSFULL);
-        }
-    }
-    return tbl;
-}
-
 /* Run one statement; error => owned 'duckdb (result destroyed), else fills
  * *out (caller destroys).  stash=0: internal probes never pollute err[]. */
-static ray_t* qd_run2(int slot, const char* sql, duck_result* out, int stash) {
+ray_t* qd_run2(int slot, const char* sql, duck_result* out, int stash) {
     if (QAPI.query(g_cons[slot].con, sql, out) != QDuckSuccess) {
-        if (stash) qd_err_stash(slot, QAPI.result_error(out));
+        if (stash) qd_err_stash(slot, "%s", QD_TEXT(QAPI.result_error(out)));
         QAPI.destroy_result(out);
         return q_err(QE_DUCKDB);
     }
     return NULL;
 }
 
-static ray_t* qd_run(int slot, const char* sql, duck_result* out) {
+ray_t* qd_run(int slot, const char* sql, duck_result* out) {
     return qd_run2(slot, sql, out, 1);
 }
 
-static ray_t* qd_exec_stmt(int slot, const char* sql) {
+ray_t* qd_exec_stmt(int slot, const char* sql) {
     duck_result res;
     ray_t* e = qd_run(slot, sql, &res);
     if (e) return e;
@@ -767,410 +347,6 @@ static void qd_rollback(int slot) {
     else
         QAPI.destroy_result(&res);
 }
-
-/* ---- _q_schema descriptor sidecar: ONE table per database, rows keyed
- * (tbl;col), shape `tbl col logical iskey valid v` — a REFINEMENT of the
- * physical catalog, never a second source of truth.  `valid` is reserved
- * for the wire arm (always '' here); v = format version 1; append-only. */
-
-#define QD_SCHEMA_TBL "_q_schema"
-
-static bool qd_reserved_name(const char* tname) {
-    return strcmp(tname, QD_SCHEMA_TBL) == 0;
-}
-
-static const char* qd_text_cell(ray_t* col, int64_t i, size_t* len) {
-    if (!col || col->type != RAY_LIST) return NULL;
-    void* pp = ray_vec_get(col, i);
-    ray_t* cell = pp ? *(ray_t**)pp : NULL;
-    if (!cell || cell->type != RAY_CHARV) return NULL;
-    *len = (size_t)ray_len(cell);
-    return (const char*)ray_data(cell);
-}
-
-/* Fetch a table's descriptor rows; ANY sidecar trouble degrades to 0 rows. */
-static int64_t qd_fetch_desc(int slot, const char* tname,
-                             qd_desc_t* out, int64_t cap) {
-    qd_buf b = {0};
-    qd_puts(&b, "SELECT col, logical, iskey FROM \"" QD_SCHEMA_TBL
-                "\" WHERE tbl = ");
-    qd_put_strlit(&b, tname, strlen(tname));
-    if (b.oom) { qd_buf_free(&b); return 0; }
-    duck_result res;
-    ray_t* e = qd_run2(slot, b.p, &res, 0);   /* probe: no-sidecar is normal */
-    qd_buf_free(&b);
-    if (e) { ray_release(e); return 0; }
-    ray_t* rows = qd_result_to_table(&res, NULL, 0);
-    QAPI.destroy_result(&res);
-    if (!rows || RAY_IS_ERR(rows) || rows->type != RAY_TABLE) {
-        if (rows) ray_release(rows);
-        return 0;
-    }
-    int64_t n = ray_table_nrows(rows);
-    if (n > cap) n = 0;
-    ray_t* cv = ray_table_get_col_idx(rows, 0);   /* borrowed text col */
-    ray_t* lv = ray_table_get_col_idx(rows, 1);
-    ray_t* kv = ray_table_get_col_idx(rows, 2);   /* borrowed BOOL */
-    for (int64_t i = 0; i < n; i++) {
-        size_t cl = 0, ll = 0;
-        const char* cn = qd_text_cell(cv, i, &cl);
-        const char* ln = qd_text_cell(lv, i, &ll);
-        snprintf(out[i].col, sizeof out[i].col, "%.*s", (int)cl, cn ? cn : "");
-        snprintf(out[i].logical, sizeof out[i].logical, "%.*s", (int)ll, ln ? ln : "");
-        out[i].iskey = kv && kv->type == RAY_BOOL &&
-                       *(uint8_t*)ray_vec_get(kv, i) != 0;
-    }
-    ray_release(rows);
-    return n;
-}
-
-/* One descriptor row to write (name is NOT NUL-terminated: ptr+len). */
-typedef struct {
-    const char* name;
-    size_t      namelen;
-    char        logical[96];
-    bool        iskey;
-} qd_descrow_t;
-
-/* Replace a table's descriptor rows (runs INSIDE the caller's transaction). */
-static ray_t* qd_write_desc_rows(int slot, const char* tname,
-                                 const qd_descrow_t* rows, int64_t n) {
-    ray_t* e = qd_exec_stmt(slot,
-        "CREATE TABLE IF NOT EXISTS \"" QD_SCHEMA_TBL "\"("
-        "tbl VARCHAR, col VARCHAR, logical VARCHAR, "
-        "iskey BOOLEAN, valid VARCHAR, v BIGINT)");
-    if (e) return e;
-
-    qd_buf b = {0};
-    qd_puts(&b, "DELETE FROM \"" QD_SCHEMA_TBL "\" WHERE tbl = ");
-    qd_put_strlit(&b, tname, strlen(tname));
-    if (b.oom) { qd_buf_free(&b); return q_err(QE_WSFULL); }
-    e = qd_exec_stmt(slot, b.p);
-    qd_buf_free(&b);
-    if (e) return e;
-
-    if (n == 0) return NULL;
-    qd_buf ins = {0};
-    qd_puts(&ins, "INSERT INTO \"" QD_SCHEMA_TBL "\" VALUES ");
-    for (int64_t i = 0; i < n; i++) {
-        if (i) qd_puts(&ins, ", ");
-        qd_puts(&ins, "(");
-        qd_put_strlit(&ins, tname, strlen(tname));
-        qd_puts(&ins, ", ");
-        qd_put_strlit(&ins, rows[i].name, rows[i].namelen);
-        qd_puts(&ins, ", ");
-        qd_put_strlit(&ins, rows[i].logical, strlen(rows[i].logical));
-        qd_puts(&ins, rows[i].iskey ? ", TRUE, '', 1)" : ", FALSE, '', 1)");
-    }
-    if (ins.oom) { qd_buf_free(&ins); return q_err(QE_WSFULL); }
-    e = qd_exec_stmt(slot, ins.p);
-    qd_buf_free(&ins);
-    return e;
-}
-
-/* Every column gets a row — identity refinements included (set path). */
-static ray_t* qd_write_desc(int slot, const char* tname, ray_t* tbl,
-                            const qd_colmap_t* cms, const bool* iskey) {
-    int64_t ncols = ray_table_ncols(tbl);
-    qd_descrow_t rows[256];
-    for (int64_t c = 0; c < ncols; c++) {
-        ray_t* nm = ray_sym_str(ray_table_col_name(tbl, c));   /* borrowed */
-        rows[c].name    = nm ? ray_str_ptr(nm) : "?";
-        rows[c].namelen = nm ? ray_str_len(nm) : 1;
-        rows[c].iskey   = iskey[c];
-        qd_logical_name(&cms[c], rows[c].logical, sizeof rows[c].logical);
-    }
-    return qd_write_desc_rows(slot, tname, rows, ncols);
-}
-
-/* Rebuild the keyed shape from VALIDATING iskey rows (keyedness has no
- * physical truth — no DuckDB PRIMARY KEY); all-key/no-key stay plain.
- * Consumes tbl. */
-static ray_t* qd_rekey(ray_t* tbl, const qd_desc_t* desc, int64_t ndesc) {
-    if (!tbl || RAY_IS_ERR(tbl) || tbl->type != RAY_TABLE) return tbl;
-    int64_t ncols = ray_table_ncols(tbl);
-    if (ncols > 256) return tbl;
-    bool iskey[256];
-    int64_t nkey = 0;
-    for (int64_t c = 0; c < ncols; c++) {
-        ray_t* nm  = ray_sym_str(ray_table_col_name(tbl, c));   /* borrowed */
-        ray_t* col = ray_table_get_col_idx(tbl, c);             /* borrowed */
-        iskey[c] = false;
-        for (int64_t i = 0; nm && col && i < ndesc; i++) {
-            if (strlen(desc[i].col) != ray_str_len(nm) ||
-                memcmp(desc[i].col, ray_str_ptr(nm), ray_str_len(nm)) != 0)
-                continue;
-            qd_colmap_t refined;
-            iskey[c] = desc[i].iskey && qd_parse_logical(desc[i].logical, &refined) &&
-                       qd_surface_of(&refined) == col->type;
-            break;
-        }
-        if (iskey[c]) nkey++;
-    }
-    if (nkey == 0 || nkey == ncols) return tbl;
-    ray_t* kt = ray_table_new(nkey);
-    ray_t* vt = ray_table_new(ncols - nkey);
-    for (int64_t c = 0; c < ncols; c++) {
-        ray_t** dst = iskey[c] ? &kt : &vt;
-        *dst = ray_table_add_col(*dst, ray_table_col_name(tbl, c),
-                                 ray_table_get_col_idx(tbl, c));  /* retains */
-    }
-    ray_release(tbl);
-    if (!kt || RAY_IS_ERR(kt) || !vt || RAY_IS_ERR(vt)) {
-        if (kt && !RAY_IS_ERR(kt)) ray_release(kt);
-        if (vt && !RAY_IS_ERR(vt)) ray_release(vt);
-        return q_err(QE_WSFULL);
-    }
-    return ray_dict_new(kt, vt);   /* consumes both */
-}
-
-static void qd_set_invalid(duck_vector dv, duck_idx_t r) {
-    QAPI.vector_ensure_validity_writable(dv);
-    QAPI.validity_set_row_invalid(QAPI.vector_get_validity(dv), r);
-}
-
-/* THE write cell codec: n elements of col from `base` into dv rows from `dst`. */
-static ray_t* qd_write_leaf(duck_vector dv, ray_t* col, const qd_tmap_t* tm,
-                            int64_t base, duck_idx_t dst, int64_t n) {
-    void* data = QAPI.vector_get_data(dv);
-    for (int64_t i = 0; i < n; i++) {
-        int64_t src = base + i;
-        duck_idx_t r = dst + (duck_idx_t)i;
-        switch (tm->ray_type) {
-            case RAY_BOOL:
-                ((uint8_t*)data)[r] = *(uint8_t*)ray_vec_get(col, src) ? 1 : 0;
-                break;
-            case RAY_BYTE_ONLY:
-                ((uint8_t*)data)[r] = *(uint8_t*)ray_vec_get(col, src);
-                break;
-            case RAY_I16: {
-                int16_t v = *(int16_t*)ray_vec_get(col, src);
-                if (v == NULL_I16) qd_set_invalid(dv, r);
-                else               ((int16_t*)data)[r] = v;
-                break;
-            }
-            case RAY_I32:
-            case RAY_MONTH:
-            case RAY_MINUTE:
-            case RAY_SECOND: {
-                int32_t v = *(int32_t*)ray_vec_get(col, src);
-                if (v == NULL_I32) qd_set_invalid(dv, r);
-                else               ((int32_t*)data)[r] = v;
-                break;
-            }
-            case RAY_I64:
-            case RAY_TIMESPAN: {
-                int64_t v = *(int64_t*)ray_vec_get(col, src);
-                if (v == NULL_I64) qd_set_invalid(dv, r);
-                else               ((int64_t*)data)[r] = v;
-                break;
-            }
-            case RAY_F32: {
-                float v = *(float*)ray_vec_get(col, src);
-                if (v != v) qd_set_invalid(dv, r);       /* 0Ne -> NULL */
-                else        ((float*)data)[r] = v;
-                break;
-            }
-            case RAY_F64:
-            case RAY_DATETIME: {
-                double v = *(double*)ray_vec_get(col, src);
-                if (v != v) qd_set_invalid(dv, r);       /* 0n/0Nz -> NULL */
-                else        ((double*)data)[r] = v;
-                break;
-            }
-            case RAY_SYM: {      /* ` (sym 0 / empty) writes '' — a value */
-                ray_t* s = ray_sym_vec_cell(col, src);   /* borrowed */
-                QAPI.vector_assign_string_element_len(dv, r,
-                        s ? ray_str_ptr(s) : "", s ? (duck_idx_t)ray_str_len(s) : 0);
-                break;
-            }
-            case RAY_STR: {      /* string column: text cells, or physical STR */
-                if (col->type == RAY_LIST) {
-                    ray_t* cell = ray_list_get(col, src);
-                    const char* tp; int64_t tn;
-                    if (!cell || !q_str_text_bytes(cell, &tp, &tn))
-                        return q_err(QE_DUCKDB);
-                    QAPI.vector_assign_string_element_len(dv, r, tp ? tp : "",
-                                                          (duck_idx_t)tn);
-                    break;
-                }
-                size_t len = 0;
-                const char* sp = ray_str_vec_get(col, src, &len);
-                QAPI.vector_assign_string_element_len(dv, r, sp ? sp : "",
-                                                      (duck_idx_t)len);
-                break;
-            }
-            case RAY_LIST: {     /* byte-vector cell -> BLOB */
-                ray_t* cell = ray_list_get(col, src);
-                if (!cell || cell->type != RAY_BYTE_ONLY)
-                    return q_err(QE_DUCKDB);
-                const char* bp = cell->len ? (const char*)ray_vec_get(cell, 0) : "";
-                QAPI.vector_assign_string_element_len(dv, r, bp,
-                                                      (duck_idx_t)cell->len);
-                break;
-            }
-            case RAY_DATE: {
-                int32_t v = *(int32_t*)ray_vec_get(col, src);
-                if (v == NULL_I32) { qd_set_invalid(dv, r); break; }
-                if (v > INT32_MAX - QD_EPOCH_DAYS)   /* epoch shift overflow */
-                    return q_err(QE_DUCKDB);
-                ((int32_t*)data)[r] = v + QD_EPOCH_DAYS;
-                break;
-            }
-            case RAY_TIME: {
-                int32_t v = *(int32_t*)ray_vec_get(col, src);
-                if (v == NULL_I32) qd_set_invalid(dv, r);
-                else               ((int64_t*)data)[r] = (int64_t)v * 1000;  /* ms -> µs */
-                break;
-            }
-            case RAY_TIMESTAMP: {
-                int64_t v = *(int64_t*)ray_vec_get(col, src);
-                if (v == NULL_I64) { qd_set_invalid(dv, r); break; }
-                if (v > INT64_MAX - QD_EPOCH_NS)     /* epoch shift overflow */
-                    return q_err(QE_DUCKDB);
-                ((int64_t*)data)[r] = v + QD_EPOCH_NS;
-                break;
-            }
-            case RAY_GUID: {
-                const uint8_t* b = (const uint8_t*)ray_vec_get(col, src);
-                if (qd_guid_is_null(b)) qd_set_invalid(dv, r);   /* 0Ng -> NULL */
-                else ((duck_hugeint*)data)[r] = qd_bytes_to_uuid(b);
-                break;
-            }
-            default:
-                return q_err(QE_DUCKDB);
-        }
-    }
-    return NULL;
-}
-
-/* One vector per LIST level, plus how much of it is already filled. */
-typedef struct { duck_vector vec; duck_idx_t used; } qd_level_t;
-
-/* count[l] += the flattened element count level l takes from this run. */
-static ray_t* qd_count_levels(ray_t* col, int depth, int64_t base, int64_t n,
-                              int64_t* count) {
-    for (int64_t i = 0; i < n; i++) {
-        ray_t* cell = ray_list_get(col, base + i);
-        if (!cell || cell->type < 0) return q_err(QE_DUCKDB);
-        int64_t len = ray_len(cell);
-        count[depth - 1] += len;
-        if (depth > 1) {
-            ray_t* e = qd_count_levels(cell, depth - 1, 0, len, count);
-            if (e) return e;
-        }
-    }
-    return NULL;
-}
-
-static ray_t* qd_write_nested(qd_level_t* lv, const qd_colmap_t* cm, int level,
-                              ray_t* col, int64_t base, duck_idx_t dst, int64_t n) {
-    duck_list_entry* ent = (duck_list_entry*)QAPI.vector_get_data(lv[level].vec);
-    if (!ent) return q_err(QE_DUCKDB);
-    for (int64_t i = 0; i < n; i++) {
-        ray_t* cell = ray_list_get(col, base + i);
-        if (!cell) return q_err(QE_DUCKDB);
-        int64_t    len = ray_len(cell);
-        duck_idx_t off = lv[level - 1].used;
-        ent[dst + (duck_idx_t)i].offset = off;
-        ent[dst + (duck_idx_t)i].length = (uint64_t)len;
-        lv[level - 1].used += (duck_idx_t)len;
-        ray_t* e = level > 1
-                       ? qd_write_nested(lv, cm, level - 1, cell, 0, off, len)
-                       : qd_write_leaf(lv[0].vec, cell, cm->leaf, 0, off, len);
-        if (e) return e;
-    }
-    return NULL;
-}
-
-/* Every LIST level is sized BEFORE any data pointer is taken: reserve
- * reallocates the child, so a half-written spine would dangle. */
-static ray_t* qd_write_col(duck_vector dv, ray_t* col, const qd_colmap_t* cm,
-                           int64_t base, int64_t n) {
-    if (cm->depth == 0) return qd_write_leaf(dv, col, cm->leaf, base, 0, n);
-    int64_t count[QD_MAX_DEPTH] = { 0 };
-    ray_t*  e = qd_count_levels(col, cm->depth, base, n, count);
-    if (e) return e;
-    qd_level_t lv[QD_MAX_DEPTH + 1];
-    lv[cm->depth].vec  = dv;
-    lv[cm->depth].used = 0;
-    for (int l = cm->depth - 1; l >= 0; l--) {
-        if (QAPI.list_vector_reserve(lv[l + 1].vec, (duck_idx_t)count[l]) != QDuckSuccess ||
-            QAPI.list_vector_set_size(lv[l + 1].vec, (duck_idx_t)count[l]) != QDuckSuccess)
-            return q_err(QE_DUCKDB);
-        lv[l].vec  = QAPI.list_vector_get_child(lv[l + 1].vec);
-        lv[l].used = 0;
-        if (!lv[l].vec) return q_err(QE_DUCKDB);
-    }
-    return qd_write_nested(lv, cm, cm->depth, col, base, 0, n);
-}
-
-/* Append a q table through the appender in vector-size chunks (cms[] pre-validated). */
-static ray_t* qd_append_table(int slot, const char* tname,
-                              ray_t* tbl, const qd_colmap_t* cms) {
-    int64_t ncols = ray_table_ncols(tbl);
-    int64_t nrows = ray_table_nrows(tbl);
-
-    duck_appender app = NULL;
-    if (QAPI.appender_create_ext(g_cons[slot].con, NULL, "main", tname, &app)
-            != QDuckSuccess) {
-        qd_err_stash(slot, QAPI.appender_error(app));
-        QAPI.appender_destroy(&app);
-        return q_err(QE_DUCKDB);
-    }
-
-    duck_logical_type ltypes[256];
-    for (int64_t c = 0; c < ncols; c++)
-        ltypes[c] = qd_make_logical(&cms[c]);
-    duck_data_chunk chunk = QAPI.create_data_chunk(ltypes, (duck_idx_t)ncols);
-
-    ray_t* err = NULL;
-    int64_t vecsz = (int64_t)QAPI.vector_size();
-    if (vecsz <= 0) vecsz = 2048;
-    for (int64_t base = 0; base < nrows && !err; base += vecsz) {
-        int64_t n = nrows - base < vecsz ? nrows - base : vecsz;
-        QAPI.data_chunk_reset(chunk);
-        for (int64_t c = 0; c < ncols && !err; c++) {
-            ray_t* col = ray_table_get_col_idx(tbl, c);   /* borrowed */
-            err = qd_write_col(QAPI.data_chunk_get_vector(chunk, (duck_idx_t)c),
-                               col, &cms[c], base, n);
-        }
-        if (!err) {
-            QAPI.data_chunk_set_size(chunk, (duck_idx_t)n);
-            if (QAPI.append_data_chunk(app, chunk) != QDuckSuccess) {
-                qd_err_stash(slot, QAPI.appender_error(app));
-                err = q_err(QE_DUCKDB);
-            }
-        }
-    }
-
-    QAPI.destroy_data_chunk(&chunk);
-    for (int64_t c = 0; c < ncols; c++) QAPI.destroy_logical_type(&ltypes[c]);
-
-    /* explicit flush first: destroy frees the error text (codex round 3) */
-    if (!err && QAPI.appender_flush(app) != QDuckSuccess) {
-        qd_err_stash(slot, QAPI.appender_error(app));
-        err = q_err(QE_DUCKDB);
-    }
-    if (QAPI.appender_destroy(&app) != QDuckSuccess && !err)
-        err = q_err(QE_DUCKDB);
-    return err;
-}
-
-/* Validate every column against the write manifest; fills tms.  Overlong names
- * would silently truncate in qd_desc_t and degrade refinement — rejected. */
-static ray_t* qd_check_table(ray_t* tbl, qd_colmap_t* cms) {
-    int64_t ncols = ray_table_ncols(tbl);
-    if (ncols > 256) return q_err(QE_DUCKDB);
-    for (int64_t c = 0; c < ncols; c++) {
-        ray_t* col = ray_table_get_col_idx(tbl, c);   /* borrowed */
-        ray_t* nm  = ray_sym_str(ray_table_col_name(tbl, c));
-        if (nm && ray_str_len(nm) >= 256) return q_err(QE_DUCKDB);
-        if (!col || !qd_map_write(col, 0, &cms[c])) return q_err(QE_DUCKDB);
-    }
-    return NULL;
-}
-
 static int qd_sym_text(ray_t* x, char* dst, size_t cap) {
     if (!x || x->type != -RAY_SYM) return 0;
     ray_t* s = ray_sym_str(x->i64);   /* borrowed */
@@ -1273,7 +449,7 @@ static ray_t* qd_connect_fn(ray_t* x) {
         duck_state st = QAPI.open_ext(norm[0] ? norm : NULL, &g_dbs[ds].db, cfg, &open_err);
         if (cfg) QAPI.destroy_config(&cfg);
         if (st != QDuckSuccess) {   /* connect-time failure: connection-less stash */
-            qd_err_stash(-1, open_err);
+            qd_err_stash(-1, "%s", QD_TEXT(open_err));
             if (open_err) QAPI.duck_free(open_err);
             return q_err(QE_DUCKDB);
         }
@@ -1303,28 +479,15 @@ static ray_t* qd_close_fn(ray_t* x) {
     return RAY_NULL_OBJ;
 }
 
-
-/* Catalog data_type string ('[]' suffixes = LIST levels, base name before '(')
- * -> column map — THE one owner of catalog spellings, meta and schema-check
- * both ride it. */
-static bool qd_catalog_col(const char* dt, size_t n, qd_colmap_t* out) {
-    int depth = 0;
-    while (n >= 2 && dt[n - 1] == ']' && dt[n - 2] == '[' && depth < QD_MAX_DEPTH)
-        { n -= 2; depth++; }
-    size_t base = 0;
-    while (base < n && dt[base] != '(') base++;
-    /* DuckDB spells REAL as FLOAT in catalog output */
-    if (base == 5 && strncmp(dt, "FLOAT", 5) == 0) { dt = "REAL"; base = 4; }
-    for (size_t i = 0; i < QD_NTYPES; i++) {
-        if (!QD_TYPES[i].read_canon) continue;
-        if (strlen(QD_TYPES[i].sql) == base &&
-            strncmp(QD_TYPES[i].sql, dt, base) == 0) {
-            out->leaf  = &QD_TYPES[i];
-            out->depth = depth;
-            return true;
-        }
+/* .duckdb.i.err[] — the last message behind a 'duckdb, any connection; [c] — that connection's */
+static ray_t* qd_err_fn(ray_t* x) {
+    const char* m = g_err_last;
+    if (x && !RAY_IS_NULL(x)) {
+        int slot = qd_resolve(x);
+        if (slot < 0) return q_err(QE_DUCKDB);
+        m = g_cons[slot].err;
     }
-    return false;
+    return ray_charv(m, (int64_t)strlen(m));
 }
 
 /* .duckdb.i.meta[h;`t] — kdb-exact ([c] t;f;a): t is the char of the column a
@@ -1352,7 +515,7 @@ static ray_t* qd_meta_wrap(ray_t** args, int64_t n) {
     ray_t* e = qd_run(slot, b.p, &res);
     qd_buf_free(&b);
     if (e) return e;
-    ray_t* cat = qd_result_to_table(&res, NULL, 0);
+    ray_t* cat = qd_result_to_table(slot, &res, NULL, 0);
     QAPI.destroy_result(&res);
     if (!cat || RAY_IS_ERR(cat)) return cat;
 
@@ -1396,40 +559,26 @@ static ray_t* qd_meta_wrap(ray_t** args, int64_t n) {
     }
     return q_table_meta_assemble(cvec, tvec, fvec, avec);
 }
-
 /* set body over the flattened table: DDL + data + descriptor, ONE transaction. */
 static ray_t* qd_set_impl(int slot, const char* tname, ray_t* tbl,
-                          const bool* iskey) {
+                          const bool* iskey, ray_t* const* masks) {
     qd_colmap_t tms[256];
     ray_t* e = qd_check_table(tbl, tms);
     if (e) return e;
 
-    int64_t ncols = ray_table_ncols(tbl);
     qd_buf b = {0};
-    qd_puts(&b, "CREATE OR REPLACE TABLE ");
-    qd_put_ident(&b, tname, strlen(tname));
-    qd_puts(&b, "(");
-    for (int64_t c = 0; c < ncols; c++) {
-        if (c) qd_puts(&b, ", ");
-        ray_t* nm = ray_sym_str(ray_table_col_name(tbl, c));   /* borrowed */
-        qd_put_ident(&b, nm ? ray_str_ptr(nm) : "?", nm ? ray_str_len(nm) : 1);
-        qd_puts(&b, " ");
-        qd_puts(&b, tms[c].leaf->sql);
-        for (int l = 0; l < tms[c].depth; l++) qd_puts(&b, "[]");
-    }
-    qd_puts(&b, ")");
+    qd_create_ddl(&b, tname, tbl, tms);
     if (b.oom) { qd_buf_free(&b); return q_err(QE_WSFULL); }
 
     if ((e = qd_exec_stmt(slot, "BEGIN TRANSACTION"))) { qd_buf_free(&b); return e; }
     if ((e = qd_exec_stmt(slot, b.p))) { qd_buf_free(&b); qd_rollback(slot); return e; }
     qd_buf_free(&b);
-    if ((e = qd_append_table(slot, tname, tbl, tms))) { qd_rollback(slot); return e; }
+    if ((e = qd_append_table(slot, tname, tbl, tms, masks))) { qd_rollback(slot); return e; }
     if ((e = qd_write_desc(slot, tname, tbl, tms, iskey))) { qd_rollback(slot); return e; }
     if ((e = qd_exec_stmt(slot, "COMMIT"))) { qd_rollback(slot); return e; }
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;
 }
-
 /* .duckdb.set[h;`t;tbl] — create-or-replace; a keyed table flattens
  * key-columns-first with iskey recorded (NO DuckDB PRIMARY KEY). */
 static ray_t* qd_set_wrap(ray_t** args, int64_t n) {
@@ -1468,7 +617,10 @@ static ray_t* qd_set_wrap(ray_t** args, int64_t n) {
         if (flat) ray_release(flat);
         return q_err(QE_DUCKDB);
     }
-    ray_t* r = qd_set_impl(slot, tname, tbl, iskey);
+    ray_t* masks[256];
+    ray_t* store = qd_strip_companions(slot, tbl, masks, iskey);
+    ray_t* r = RAY_IS_ERR(store) ? store : qd_set_impl(slot, tname, store, iskey, masks);
+    if (!RAY_IS_ERR(store)) ray_release(store);
     if (flat) ray_release(flat);
     return r;
 }
@@ -1491,74 +643,10 @@ static ray_t* qd_get_wrap(ray_t** args, int64_t n) {
     ray_t* e = qd_run(slot, b.p, &res);
     qd_buf_free(&b);
     if (e) return e;
-    ray_t* tbl = qd_result_to_table(&res, desc, ndesc);
+    ray_t* tbl = qd_result_to_table(slot, &res, desc, ndesc);
     QAPI.destroy_result(&res);
     return qd_rekey(tbl, desc, ndesc);
 }
-
-/* Append's schema check: names, order and canonical types must match the
- * catalog; a VALID descriptor row pins the LOGICAL type too (a string column
- * can't append into a symbol column). */
-static ray_t* qd_schema_check(int slot, const char* tname, ray_t* tbl,
-                              const qd_colmap_t* cms) {
-    qd_desc_t desc[256];
-    int64_t ndesc = qd_fetch_desc(slot, tname, desc, 256);
-    qd_buf b = {0};
-    qd_puts(&b, "SELECT column_name, data_type FROM duckdb_columns() "
-                "WHERE table_name = ");
-    qd_put_strlit(&b, tname, strlen(tname));
-    qd_puts(&b, " ORDER BY column_index");
-    if (b.oom) { qd_buf_free(&b); return q_err(QE_WSFULL); }
-    duck_result res;
-    ray_t* e = qd_run(slot, b.p, &res);
-    qd_buf_free(&b);
-    if (e) return e;
-    ray_t* cat = qd_result_to_table(&res, NULL, 0);
-    QAPI.destroy_result(&res);
-    if (!cat || RAY_IS_ERR(cat)) return cat;
-
-    int64_t nrows = ray_table_nrows(cat);
-    int64_t ncols = ray_table_ncols(tbl);
-    if (nrows == 0 || nrows != ncols) {
-        ray_release(cat);
-        return q_err(QE_DUCKDB);
-    }
-    ray_t* names  = ray_table_get_col_idx(cat, 0);   /* borrowed text cols */
-    ray_t* dtypes = ray_table_get_col_idx(cat, 1);
-    for (int64_t c = 0; c < ncols; c++) {
-        size_t nl = 0, dl = 0;
-        const char* nm = qd_text_cell(names, c, &nl);
-        const char* dt = qd_text_cell(dtypes, c, &dl);
-        ray_t* qn = ray_sym_str(ray_table_col_name(tbl, c));   /* borrowed */
-        size_t ql = qn ? ray_str_len(qn) : 0;
-        if (!nm || !qn || ql != nl || strncmp(nm, ray_str_ptr(qn), nl) != 0) {
-            ray_release(cat);
-            return q_err(QE_DUCKDB);
-        }
-        qd_colmap_t cr;
-        if (!qd_catalog_col(dt ? dt : "", dl, &cr) ||
-            cr.leaf->dk_type != cms[c].leaf->dk_type || cr.depth != cms[c].depth) {
-            ray_release(cat);
-            return q_err(QE_DUCKDB);
-        }
-        for (int64_t i = 0; i < ndesc; i++) {
-            if (strlen(desc[i].col) != nl || memcmp(desc[i].col, nm, nl) != 0)
-                continue;
-            qd_colmap_t refined;
-            if (qd_parse_logical(desc[i].logical, &refined) &&
-                refined.leaf->dk_type == cr.leaf->dk_type &&
-                refined.depth == cr.depth &&
-                (refined.leaf != cms[c].leaf || refined.depth != cms[c].depth)) {
-                ray_release(cat);
-                return q_err(QE_DUCKDB);
-            }
-            break;
-        }
-    }
-    ray_release(cat);
-    return NULL;
-}
-
 /* .duckdb.append[h;`t;tbl] — blind appender write, schema-checked, atomic. */
 static ray_t* qd_append_wrap(ray_t** args, int64_t n) {
     if (n != 3) return q_err(QE_RANK);
@@ -1571,14 +659,17 @@ static ray_t* qd_append_wrap(ray_t** args, int64_t n) {
     ray_t* tbl = args[2];
     if (!tbl || tbl->type != RAY_TABLE) return q_err(QE_DUCKDB);
 
+    ray_t* masks[256];
+    ray_t* store = qd_strip_companions(slot, tbl, masks, NULL);
+    if (RAY_IS_ERR(store)) return store;
     qd_colmap_t tms[256];
-    ray_t* e = qd_check_table(tbl, tms);
+    ray_t* e = qd_check_table(store, tms);
+    if (!e) e = qd_schema_check(slot, tname, store, tms);
+    if (!e) e = qd_exec_stmt(slot, "BEGIN TRANSACTION");
+    if (!e && (e = qd_append_table(slot, tname, store, tms, masks))) qd_rollback(slot);
+    if (!e && (e = qd_exec_stmt(slot, "COMMIT"))) qd_rollback(slot);
+    ray_release(store);
     if (e) return e;
-    if ((e = qd_schema_check(slot, tname, tbl, tms))) return e;
-
-    if ((e = qd_exec_stmt(slot, "BEGIN TRANSACTION"))) return e;
-    if ((e = qd_append_table(slot, tname, tbl, tms))) { qd_rollback(slot); return e; }
-    if ((e = qd_exec_stmt(slot, "COMMIT"))) { qd_rollback(slot); return e; }
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;
 }
@@ -1604,7 +695,7 @@ static ray_t* qd_sql_wrap(ray_t** args, int64_t n) {
     if (e) return e;
     ray_t* out;
     if (QAPI.column_count(&res) == 0) { ray_retain(RAY_NULL_OBJ); out = RAY_NULL_OBJ; }
-    else out = qd_result_to_table(&res, NULL, 0);
+    else out = qd_result_to_table(slot, &res, NULL, 0);
     QAPI.destroy_result(&res);
     return out;
 }
@@ -1685,13 +776,15 @@ static ray_t* qd_types_fn(ray_t** args, int64_t n) {
 
 /* The INTERNAL native surface (`.duckdb.i.*`) the lib/duckdb.q provider hooks
  * are written over — the connection, the typed round-trip and one raw exec.
- * The public bespoke API (connect/sql/select/connections/version/err) was
- * REPLACED 2026-08-07 by the `:pq:duckdb:` virtual-table surface, not wrapped.
+ * The public bespoke API (connect/sql/select/connections/version) was
+ * REPLACED 2026-08-07 by the `:pq:duckdb:` virtual-table surface, not wrapped;
+ * `.duckdb.err[]`, the message channel behind the bare 'duckdb, is the reader kept.
  * Registration fires from the `\l pq` gate, so the pre-gate env is kdb-clean. */
 void q_duckdb_register(void) {
     /* NO dlopen here — the library is resolved lazily on first use. */
     qd_bind_unary(".duckdb.i.open",   qd_connect_fn);
     qd_bind_unary(".duckdb.i.close",  qd_close_fn);
+    qd_bind_unary(".duckdb.i.err",    qd_err_fn);
     qd_bind_vary (".duckdb.i.exec",   qd_sql_wrap);
     qd_bind_vary (".duckdb.i.get",    qd_get_wrap);
     qd_bind_vary (".duckdb.i.set",    qd_set_wrap);
