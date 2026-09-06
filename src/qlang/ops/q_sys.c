@@ -21,6 +21,7 @@
 #include "qlang/q_console.h"  /* q_console_str/reset (timed-expr side effects); q_console_pipe_* (`\classic`) */
 #include "qlang/q_ctx.h"           /* the engine context: `\l` source seam, console teardown */
 #include "qlang/io/q_io.h"    /* q_io_mkdir_parents — `\1`/`\2` create the path they name */
+#include "qlang/io/q_mount.h" /* q_mount_dir — the `\l <dir>` forms */
 #include "qlang/q_pq.h"       /* q_pq_load — the `\l pq` embedded-stdlib gate */
 #include "qlang/q_env.h"      /* q_env_ctx_set/_ctx + q_env_ns_names — `\d` and the `\v`/`\f`/`\a` rosters */
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk — the `.z.ts` timer callback */
@@ -80,19 +81,6 @@ int q_sys_prompt(char* buf, size_t cap) {
     return (n < 0 || (size_t)n >= cap) ? 0 : n;
 }
 
-static int ctx_ident_ok(const char* p, size_t len) {
-    if (len == 0) return 0;
-    if (!((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')))
-        return 0;
-    for (size_t i = 1; i < len; i++) {
-        char c = p[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-              (c >= '0' && c <= '9') || c == '_'))
-            return 0;
-    }
-    return 1;
-}
-
 static ray_t* ctx_switch(const char* name, size_t len) {
     if (len == 1 && name[0] == '.') {          /* `\d .` — back to root */
         q_env_ctx_set(0);
@@ -100,7 +88,7 @@ static ray_t* ctx_switch(const char* name, size_t len) {
     }
     /* One level below root only (kdb limitation, q4m3 §12.7): `.ident`. */
     if (len >= 2 && len < 64 && name[0] == '.' &&
-        ctx_ident_ok(name + 1, len - 1)) {
+        q_env_ident_ok(name + 1, len - 1)) {
         q_env_ctx_set(ray_sym_intern_runtime(name, len));
         return NULL;
     }
@@ -474,10 +462,9 @@ static int l_is_regular_readable(const char* p) {
  * The resolved REGULAR readable file is executed line-at-a-time via the public
  * q_ctx_run_file (multiline-aware; silent — kdb loads silently).  A
  * still-MISSING path signals the path as given (kdb: `\l nope.q` -> 'nope.q);
- * an existing DIRECTORY stays a silent no-op — the banked `\l .` / `\l
- * /tmp/db*` corpus rows target live dirs, and the directory / splayed-table /
- * serialized-object load forms are deferred.  Getter form (no arg) stays
- * 'nyi.  `system "l …"` single-homes through here. */
+ * an existing DIRECTORY mounts through io/q_mount.c (splayed table / db root;
+ * `\l .` reloads data only).  Getter form (no arg) stays 'nyi.
+ * `system "l …"` single-homes through here. */
 static ray_t* h_l(const char* arg, size_t alen) {
     if (alen == 0) return q_err(QE_NYI);        /* `\l` (bare) — reload cwd, deferred */
     /* hsym spelling `\l :path.q` (TimeStored pkg.q, qunitSurefire.q emit it);
@@ -516,7 +503,7 @@ static ray_t* h_l(const char* arg, size_t alen) {
     }
     /* peachq: `\l pq` — the PeachQ stdlib gate. A dev-override disk file (the
      * a/b/c/d chain above) wins; else a cwd directory literally named `pq`
-     * keeps existing dir semantics (no-op, below); ELSE the embedded stdlib.
+     * keeps dir semantics (mounts, below); ELSE the embedded stdlib.
      * Every OTHER argument keeps its existing behaviour unchanged (the branch is
      * scoped to the exact literal `pq`). */
     if (alen == 2 && arg[0] == 'p' && arg[1] == 'q') {
@@ -525,7 +512,8 @@ static ray_t* h_l(const char* arg, size_t alen) {
             return q_pq_load();
     }
     struct stat st;
-    if (stat(lit, &st) == 0 && S_ISDIR(st.st_mode)) return NULL;  /* dir load deferred */
+    if (stat(lit, &st) == 0 && S_ISDIR(st.st_mode))       /* `\l .` = data-only reload */
+        return q_mount_dir(lit, !(alen == 1 && lit[0] == '.'));
     return q_err_name(lit, alen);                         /* kdb: 'path as given */
 }
 

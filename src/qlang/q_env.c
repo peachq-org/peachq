@@ -631,6 +631,19 @@ static int env_kind_match(q_env_ns_kind_t kind, ray_t* v) {
     }
 }
 
+int q_env_ident_ok(const char* p, size_t len) {
+    if (len == 0) return 0;
+    if (!((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')))
+        return 0;
+    for (size_t i = 1; i < len; i++) {
+        char c = p[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_'))
+            return 0;
+    }
+    return 1;
+}
+
 int q_env_name_cmp(const void* a, const void* b) {
     const char* pa; size_t la;
     const char* pb; size_t lb;
