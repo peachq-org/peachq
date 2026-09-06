@@ -1675,6 +1675,10 @@ static ray_t* apply_dispatch(ray_t* fv, const q_op_t* row, ray_t** args,
  * live frames here (and, under `\e 1`, suspends into the debugger) */
 ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     ray_t* r = apply_dispatch(fv, row, args, n);
+    if (q_splay_fault_pending() && r && !RAY_IS_ERR(r)) {   /* a torn zip block under this apply's read */
+        ray_release(r);
+        r = q_err(QE_CORRUPT);
+    }
     if (r && RAY_IS_ERR(r)) return q_dbg_filter(r, fv, args, n);
     return r;
 }

@@ -4,6 +4,7 @@
 #define Q_IO_H
 
 #include <rayforce.h>
+#include <stdio.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -65,6 +66,10 @@ ray_t* q_io_set(ray_t* x, ray_t* y);
 void q_io_mkdir_parents(const char* path, size_t n);
 ray_t* q_io_write_all(ray_t* pathstr, const void* bytes, size_t n);
 
+/* THE fwrite: n bytes through a bounded stack buffer, so a mapped-on-touch source (a compressed splay region)
+ * faults in the memcpy and the syscall never meets an unmapped page.  0, or -1 on a short write. */
+int q_io_fwrite(FILE* fp, const void* bytes, size_t n);
+
 /* A kxzip container held whole in memory: NULL = none (buf IS the plaintext),
  * else owned plaintext bytes, or 'corrupt/'nyi.  q_io_zip_stats is `-21!x` —
  * an owned five-key dict, EMPTY when the file carries no container. */
@@ -94,6 +99,12 @@ void   q_io_zipmap_free(q_io_zipmap_t* zm);
  * end and yield exactly the block's plain size — anything else is 'corrupt. */
 ray_t* q_io_zip_block(ray_t* pathstr, const q_io_zipmap_t* zm, int64_t k,
                       uint8_t* dst, size_t cap);
+
+/* The same block through an open fd (pread) into the caller's scratch (q_io_zipmap_maxblock bytes fit any block):
+ * allocation-free and async-signal-safe — the splay fault handler runs it.  0, -1 'corrupt, -2 'io. */
+size_t q_io_zipmap_maxblock(const q_io_zipmap_t* zm);
+int    q_io_zip_block_fd(int fd, const q_io_zipmap_t* zm, int64_t k,
+                         uint8_t* scratch, uint8_t* dst, size_t cap);
 
 /* Write `img` as a container: 2^lbs blocks, each an independent zlib stream
  * (gzip alg 2 only — others 'nyi; a deflate that does not pay writes the
