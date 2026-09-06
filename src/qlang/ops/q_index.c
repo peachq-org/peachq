@@ -6,7 +6,6 @@
 #include "qlang/base/q_err.h"
 #include "qlang/q_registry_internal.h"
 #include "qlang/base/q_type.h"       /* the type/shape axes: keyed, nested, iter */
-#include "qlang/io/q_splay.h"        /* mapped splays: column reads, writes 'splay */
 #include "lang/internal.h"   /* as_i64 — the int-atom payload accessor */
 #include "table/dict.h"
 #include "mem/heap.h"        /* ray_cow + the vec attr bits — scatter_store */
@@ -131,11 +130,6 @@ static ray_t* index_level(ray_t* x, ray_t* i, int write) {
     if (q_type_is_keyed(x)) return keyed_level(x, i, write);
     if (x->type == RAY_TABLE) return table_level(x, i, write);
     if (x->type == RAY_DICT) {
-        if (i && i->type == -RAY_SYM && q_splay_is(x)) {
-            if (write) return q_err(QE_SPLAY);       /* no write-through to a map */
-            ray_t* col = q_splay_col(x, i->i64);
-            if (col) return col;                     /* miss falls to the dict law */
-        }
         int64_t ki = ray_dict_find_idx(x, i);
         ray_t* vals = ray_dict_slots(x)[1];
         if (ki < 0) return write ? q_err(QE_INDEX) : miss_null(vals);
@@ -205,7 +199,6 @@ static ray_t* vec_store(ray_t* x, int64_t ix, ray_t* v, int strict) {
 /* store at a dict key: a hit updates the value, a miss INSERTS the pair
  * (ref/amend.md).  x consumed on success; key/v borrowed. */
 static ray_t* dict_store(ray_t* x, ray_t* key, ray_t* v) {
-    if (q_splay_is(x)) return q_err(QE_SPLAY);       /* errors leave x to the caller */
     ray_t* keys = ray_dict_slots(x)[0];
     ray_t* vals = ray_dict_slots(x)[1];
     int64_t ki = ray_dict_find_idx(x, key);
@@ -249,7 +242,7 @@ static ray_t* table_of_cols(ray_t* t, ray_t* fd, ray_t* nd) {
 
 static ray_t* table_level(ray_t* t, ray_t* i, int write) {
     if (i->type == -RAY_SYM) {
-        ray_t* fd = q_flip_wrap(t);
+        ray_t* fd = q_table_to_dict(t);
         if (!fd || RAY_IS_ERR(fd)) return fd ? fd : q_err(QE_TYPE);
         ray_t* r = index_level(fd, i, 1);    /* a table has no absent column */
         ray_release(fd);
@@ -266,7 +259,7 @@ static ray_t* table_level(ray_t* t, ray_t* i, int write) {
  * extends; at a row the same store run per column — `t[i]:d` is
  * `` t[key d; i]:value d ``, so a row dict addresses its OWN keys. */
 static ray_t* table_store(ray_t* t, ray_t* i, ray_t* v) {
-    ray_t* fd = q_flip_wrap(t);
+    ray_t* fd = q_table_to_dict(t);
     if (!fd || RAY_IS_ERR(fd)) return fd ? fd : q_err(QE_TYPE);
     if (i->type == -RAY_SYM) return table_of_cols(t, fd, store_level(fd, i, v));
     int64_t ix;
@@ -468,12 +461,6 @@ static ray_t* index_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
         if (!nx) nx = ray_at_fn(x, i0);
         return elem_rest(nx, rest, k);
     }
-    /* integer ROW application on a splay carrier rides the one row-gather
-     * (a carrier IS a table, so the dict law's `::`s would lie); every other
-     * index shape keeps the dict fallthrough */
-    if (k == 0 && x->type == RAY_DICT && q_splay_is(x) &&
-        (q_type_is_int_atom(i0) || q_type_is_int_vec(i0)))
-        return q_splay_rows(x, i0);
     if (is_coll(i0)) return index_map(x, i0, rest, k);
     return elem_rest(index_level(x, i0, 0), rest, k);
 }

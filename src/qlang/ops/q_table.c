@@ -19,7 +19,7 @@
 #include "qlang/ops/q_table.h"
 #include "qlang/ops/q_bang.h"   /* q_bang_enkey — xkey's keying primitive */
 #include "qlang/ops/q_index.h"  /* q_index_at / q_index_elem_at — group's key gathers */
-#include "qlang/io/q_splay.h"   /* mapped splays: cols/meta answer from headers */
+#include "qlang/io/q_splay.h"   /* q_splay_table_path / q_splay_flip — the flip law's two directions */
 #include "qlang/io/q_provider.h"  /* provider carriers: cols from the snapshot, meta via hooks */
 #include "qlang/io/q_io.h"      /* q_io_is_fsym / q_io_resource_table — cols of a decoded resource */
 #include "lang/internal.h"      /* ray_group_fn */
@@ -619,10 +619,32 @@ ray_t* q_table_operand(ray_t* y, int64_t* sym_out) {
     return NULL;
 }
 
+/* A table's column dict (colnames ! list-of-columns) — the table half of the flip law, and what every internal
+ * reader of a table's REAL columns (index, search, mmu, the funsql merges) composes on. */
+ray_t* q_table_to_dict(ray_t* x) {
+    int64_t nc = ray_table_ncols(x);
+    ray_t* k = ray_sym_vec_new(RAY_SYM_W64, nc > 0 ? nc : 1);
+    if (!k || RAY_IS_ERR(k)) return k ? k : q_err(QE_OOM);
+    ray_t* v = ray_list_new(nc > 0 ? nc : 1);
+    if (RAY_IS_ERR(v)) { ray_release(k); return v; }
+    for (int64_t c = 0; c < nc; c++) {
+        int64_t nm = ray_table_col_name(x, c);
+        k = ray_vec_append(k, &nm);
+        if (!k || RAY_IS_ERR(k)) { ray_release(v); return k ? k : q_err(QE_OOM); }
+        v = ray_list_append(v, ray_table_get_col_idx(x, c));   /* retains */
+        if (RAY_IS_ERR(v)) { ray_release(k); return v; }
+    }
+    return ray_dict_new(k, v);                        /* consumes both */
+}
+
+static ray_t* table_colnames(ray_t* x);
+
 /* q `flip x` / monadic `+` — transpose.
  *   table         -> dict (colnames ! list-of-columns)      [flip flip t ~ t]
+ *                    a MAPPED splay -> `cols!`:dir/` (ref/flip-splayed.md: the table IS the flip of that dict)
  *   dict          -> table (sym keys; vector vals share one length L, atoms
- *                    broadcast to L; mismatched vector length -> 'length)
+ *                    broadcast to L; mismatched vector length -> 'length);
+ *                    `cols!`:dir/` -> the mapped table (or the unresolved one)
  *   list of lists -> transposed list (atom items broadcast)
  * Keyed tables, atoms, and an ALL-ATOM dict or list are 'rank: "to define a
  * 1-row table, enlist at least one of the column values" (basics/syntax.md:236)
@@ -631,19 +653,11 @@ ray_t* q_table_operand(ray_t* y, int64_t* sym_out) {
 ray_t* q_flip_wrap(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (x->type == RAY_TABLE) {
-        int64_t nc = ray_table_ncols(x);
-        ray_t* k = ray_sym_vec_new(RAY_SYM_W64, nc > 0 ? nc : 1);
+        int64_t dir = q_splay_table_path(x);
+        if (!dir) return q_table_to_dict(x);
+        ray_t* k = table_colnames(x);
         if (!k || RAY_IS_ERR(k)) return k ? k : q_err(QE_OOM);
-        ray_t* v = ray_list_new(nc > 0 ? nc : 1);
-        if (RAY_IS_ERR(v)) { ray_release(k); return v; }
-        for (int64_t c = 0; c < nc; c++) {
-            int64_t nm = ray_table_col_name(x, c);
-            k = ray_vec_append(k, &nm);
-            if (!k || RAY_IS_ERR(k)) { ray_release(v); return k ? k : q_err(QE_OOM); }
-            v = ray_list_append(v, ray_table_get_col_idx(x, c));   /* retains */
-            if (RAY_IS_ERR(v)) { ray_release(k); return v; }
-        }
-        return ray_dict_new(k, v);                        /* consumes both */
+        return ray_dict_new(k, ray_sym(dir));             /* consumes both */
     }
     if (q_type_is_keyed(x)) return q_err(QE_RANK);
     if (x->type == RAY_DICT) {
@@ -651,6 +665,10 @@ ray_t* q_flip_wrap(ray_t* x) {
         ray_t* v = ray_dict_vals(x);                      /* borrowed */
         if (!k || k->type != RAY_SYM || !v)
             return q_err(QE_TYPE);
+        if (v->type == -RAY_SYM) {
+            ray_t* t = q_splay_flip(k, v->i64);
+            if (t) return t;
+        }
         int64_t nc = ray_len(k);
         if (!(v->type == RAY_LIST || ray_is_vec(v)) || ray_len(v) != nc)
             return q_err(QE_LENGTH);
@@ -992,8 +1010,7 @@ static ray_t* table_colnames(ray_t* x) {
 static ray_t* table_bi_deref(ray_t* x) {
     if (x && x->type == -RAY_SYM) {
         ray_t* g = q_env_get(x->i64);                   /* borrowed */
-        if (g && (g->type == RAY_TABLE || q_type_is_keyed(g) || q_splay_is(g) ||
-                  q_provider_carrier_is(g)))
+        if (g && (g->type == RAY_TABLE || q_type_is_keyed(g) || q_provider_carrier_is(g)))
             return g;
     }
     return x;
@@ -1019,8 +1036,7 @@ ray_t* q_cols_fn(ray_t* x) {
         return c;
     }
     ray_t* t = table_bi_deref(x);
-    if (q_splay_is(t) || q_provider_carrier_is(t)) {   /* the keys ARE the cols
-                                                      * (provider: the SNAPSHOT) */
+    if (q_provider_carrier_is(t)) {           /* the keys ARE the cols (the SNAPSHOT) */
         ray_t* k = ray_dict_keys(t);
         ray_retain(k);
         return k;
@@ -1043,14 +1059,9 @@ static char meta_ty_char(ray_t* x) {
     return lc ? (char)(lc - 'a' + 'A') : q_ty_char(x);
 }
 
-/* (meta x) — table metadata keyed by column name: (c) -> (t; f; a).  ONE
- * builder over two per-column fact sources: an in-memory table's columns
- * (t via q_ty_char, a via q_attr_letter) or a mapped splay's probed HEADERS — type from
- * the type byte (enum `s`, nested upper-cased), attr `s` when the disk byte
- * says sorted, never a data read; only a column whose header cannot name its
- * type (a kxzip container, a shape-A non-vector) decodes once to answer.
- * The result is a RAY_DICT from a 1-col key table to a 3-col value table —
- * "a keyed table is just a dictionary from one table to another". */
+/* (meta x) — table metadata keyed by column name: (c) -> (t; f; a) — t via q_ty_char, a via q_attr_letter (a
+ * mapped column carries its disk letter as a trusted stamp).  The result is a RAY_DICT from a 1-col key table to a
+ * 3-col value table — "a keyed table is just a dictionary from one table to another". */
 ray_t* q_meta_fn(ray_t* x) {
     ray_t* car = x ? q_provider_get_carrier(x) : NULL;   /* `:pq: coordinate */
     if (car) {
@@ -1061,15 +1072,10 @@ ray_t* q_meta_fn(ray_t* x) {
     }
     ray_t* t = x ? table_bi_deref(x) : NULL;
     if (q_provider_carrier_is(t)) return q_provider_carrier_meta(t);
-    int64_t nc = q_splay_ncols(t);
-    int splay = nc >= 0;
-    ray_t* flat = NULL;
-    if (!splay) {
-        if (!q_type_is_table(t) && !q_type_is_keyed(t)) return q_err(QE_TYPE);
-        flat = q_table_flatten(t);
-        if (!flat || RAY_IS_ERR(flat)) return flat ? flat : q_err(QE_OOM);
-        nc = ray_table_ncols(flat);
-    }
+    if (!q_type_is_table(t) && !q_type_is_keyed(t)) return q_err(QE_TYPE);
+    ray_t* flat = q_table_flatten(t);
+    if (!flat || RAY_IS_ERR(flat)) return flat ? flat : q_err(QE_OOM);
+    int64_t nc = ray_table_ncols(flat);
     int64_t cap = nc > 0 ? nc : 1;
     ray_t* cvec = ray_sym_vec_new(RAY_SYM_W64, cap);   /* c: names          */
     ray_t* fvec = ray_sym_vec_new(RAY_SYM_W64, cap);   /* f: blank per col  */
@@ -1078,44 +1084,16 @@ ray_t* q_meta_fn(ray_t* x) {
     char* tbuf = (cap <= (int64_t)sizeof stackt) ? stackt : (char*)malloc((size_t)cap);
     int ok = cvec && !RAY_IS_ERR(cvec) && fvec && !RAY_IS_ERR(fvec) &&
              avec && !RAY_IS_ERR(avec) && tbuf;
-    ray_t* bad = NULL;
     int64_t blank = ray_sym_intern_runtime("", 0);
     for (int64_t c = 0; c < nc && ok; c++) {
-        int64_t nm, a = blank, f = blank;
-        char tc;
-        if (!splay) {
-            nm = ray_table_col_name(flat, c);
-            ray_t* col = ray_table_get_col_idx(flat, c);      /* borrowed */
-            tc = meta_ty_char(col);
-            char fc = q_enum_meta_f(col, &f);   /* FK/link target + t override */
-            if (fc) tc = fc;
-            char ac = q_attr_letter(col);
-            if (ac) a = ray_sym_intern_runtime(&ac, 1);
-        } else {
-            nm = q_splay_col_sym(t, c);
-            const q_wf_colhdr* h = q_splay_col_hdr(t, c);
-            tc = h->is_enum ? 's' : h->tag ? q_type_char(h->tag) : 0;
-            if (h->nested && tc) tc = (char)(tc - 'a' + 'A');
-            char hc = h->disk_attr >= 1 && h->disk_attr <= 4 ? "\0supg"[h->disk_attr]
-                    : h->side_attr;
-            if (hc) a = ray_sym_intern_runtime(&hc, 1);
-            if (h->is_enum && h->domain[0]) {   /* a table-named domain is a
-                 * link/FK: env classification, never a data read */
-                ray_t* e1 = q_enum_stamp(ray_i64(0),
-                                ray_sym_intern_runtime(h->domain, strlen(h->domain)));
-                if (e1 && !RAY_IS_ERR(e1)) {
-                    char fc = q_enum_meta_f(e1, &f);
-                    if (fc) tc = fc;
-                }
-                if (e1) ray_release(e1);
-            }
-            if (!tc) {                        /* opaque header: the decode answers */
-                ray_t* col = q_splay_col(t, nm);
-                if (!col || RAY_IS_ERR(col)) { bad = col; ok = 0; break; }
-                tc = meta_ty_char(col);
-                ray_release(col);
-            }
-        }
+        int64_t a = blank, f = blank;
+        int64_t nm = ray_table_col_name(flat, c);
+        ray_t* col = ray_table_get_col_idx(flat, c);      /* borrowed */
+        char tc = meta_ty_char(col);
+        char fc = q_enum_meta_f(col, &f);   /* FK/link target + t override */
+        if (fc) tc = fc;
+        char ac = q_attr_letter(col);
+        if (ac) a = ray_sym_intern_runtime(&ac, 1);
         tbuf[c] = tc ? tc : ' ';
         cvec = ray_vec_append(cvec, &nm);
         fvec = ray_vec_append(fvec, &f);
@@ -1123,7 +1101,7 @@ ray_t* q_meta_fn(ray_t* x) {
         if (!cvec || RAY_IS_ERR(cvec) || !fvec || RAY_IS_ERR(fvec) ||
             !avec || RAY_IS_ERR(avec)) ok = 0;
     }
-    if (flat) ray_release(flat);
+    ray_release(flat);
     ray_t* tvec = ok ? ray_charv(tbuf, nc) : NULL;
     if (tbuf && tbuf != stackt) free(tbuf);
     if (!ok || !tvec || RAY_IS_ERR(tvec)) {
@@ -1131,7 +1109,7 @@ ray_t* q_meta_fn(ray_t* x) {
         if (fvec && !RAY_IS_ERR(fvec)) ray_release(fvec);
         if (avec && !RAY_IS_ERR(avec)) ray_release(avec);
         if (tvec && !RAY_IS_ERR(tvec)) ray_release(tvec);
-        return bad ? bad : q_err(QE_WSFULL);
+        return q_err(QE_WSFULL);
     }
     return q_table_meta_assemble(cvec, tvec, fvec, avec);
 }
@@ -1143,35 +1121,23 @@ ray_t* q_meta_fn(ray_t* x) {
  * out, as does a symlist-domain enum (no table). */
 ray_t* q_fkeys_wrap(ray_t* x) {
     ray_t* t = x ? table_bi_deref(x) : NULL;
-    int splay = t && q_splay_is(t);
-    if (!t || (!splay && !q_type_is_table(t) && !q_type_is_keyed(t)))
+    if (!t || (!q_type_is_table(t) && !q_type_is_keyed(t)))
         return q_err(QE_TYPE);
-    ray_t* flat = splay ? NULL : q_table_flatten(t);
-    if (flat && RAY_IS_ERR(flat)) return flat;
-    int64_t nc = splay ? q_splay_ncols(t) : ray_table_ncols(flat);
+    ray_t* flat = q_table_flatten(t);
+    if (!flat || RAY_IS_ERR(flat)) return flat ? flat : q_err(QE_OOM);
+    int64_t nc = ray_table_ncols(flat);
     ray_t* ks = ray_sym_vec_new(RAY_SYM_W64, nc > 0 ? nc : 1);
     ray_t* vs = ray_sym_vec_new(RAY_SYM_W64, nc > 0 ? nc : 1);
     for (int64_t c = 0; ks && vs && !RAY_IS_ERR(ks) && !RAY_IS_ERR(vs) && c < nc; c++) {
-        int64_t f = -1, nm;
-        if (!splay) {
-            q_enum_meta_f(ray_table_get_col_idx(flat, c), &f);
-            nm = ray_table_col_name(flat, c);
-        } else {                        /* header classification, no data read
-                                         * (the meta splay arm's trick) */
-            nm = q_splay_col_sym(t, c);
-            const q_wf_colhdr* h = q_splay_col_hdr(t, c);
-            if (!h || !h->is_enum || !h->domain[0]) continue;
-            ray_t* e1 = q_enum_stamp(ray_i64(0),
-                            ray_sym_intern_runtime(h->domain, strlen(h->domain)));
-            if (e1 && !RAY_IS_ERR(e1)) q_enum_meta_f(e1, &f);
-            if (e1) ray_release(e1);
-        }
+        int64_t f = -1;
+        q_enum_meta_f(ray_table_get_col_idx(flat, c), &f);
+        int64_t nm = ray_table_col_name(flat, c);
         ray_t* d = f >= 0 ? q_env_get(f) : NULL;         /* borrowed */
         if (!d || RAY_IS_ERR(d) || !q_type_is_keyed(d)) continue;
         ks = ray_vec_append(ks, &nm);
         if (ks && !RAY_IS_ERR(ks)) vs = ray_vec_append(vs, &f);
     }
-    if (flat) ray_release(flat);
+    ray_release(flat);
     if (!ks || RAY_IS_ERR(ks) || !vs || RAY_IS_ERR(vs)) {
         if (ks && !RAY_IS_ERR(ks)) ray_release(ks);
         if (vs && !RAY_IS_ERR(vs)) ray_release(vs);
