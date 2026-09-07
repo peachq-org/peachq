@@ -11,7 +11,7 @@
 #include "qlang/io/q_provider.h"
 #include "qlang/io/q_handles.h"
 #include "qlang/base/q_err.h"
-#include "qlang/base/q_type.h"     /* q_type_is_int_atom — the R4 timeout check */
+#include "qlang/base/q_type.h"     /* q_type_is_int_atom (R4 timeout); q_type_coord_mark — THE carrier mark */
 #include "qlang/q_env.h"
 #include "qlang/q_prim.h"          /* q_str_text_bytes, q_meta_fn */
 #include "qlang/q_builtins.h"      /* q_count_fn — the count fallback */
@@ -160,11 +160,19 @@ int q_provider_coord_sym_is(ray_t* x) {
     return sym_text(x, &p, &n) && q_provider_spec_is(p, n);
 }
 
-/* 0 = not a `:pq:` sym, 1 = connection form, 2 = table form (trailing '/') */
+/* 0 = not a `:pq:` sym, 1 = connection form, 2 = table form (trailing '/') — THE spelling test, on a bare sym id
+ * because the flip law reaches it from the wire and from a dict's value slot, neither of which has an atom in hand. */
+static int coord_sym_form(int64_t sym) {
+    ray_t* s = ray_sym_str(sym);               /* borrowed */
+    if (!s) return 0;
+    size_t n = ray_str_len(s);
+    const char* p = ray_str_ptr(s);
+    if (!q_provider_spec_is(p, n)) return 0;
+    return n > 4 && p[n - 1] == '/' ? 2 : 1;
+}
+
 int q_provider_coord_sym_form(ray_t* x) {
-    const char* p; size_t n;
-    if (!sym_text(x, &p, &n) || !q_provider_spec_is(p, n)) return 0;
-    return (n > 4 && p[n - 1] == '/') ? 2 : 1;
+    return x && x->type == -RAY_SYM ? coord_sym_form(x->i64) : 0;
 }
 
 
@@ -375,7 +383,11 @@ static void cref_close(cref_t* c) {
 }
 
 
-/* carrier `cols!`:pq:ds:alias:name/ — the splay dict shape, slash-marked */
+/* A carrier is a `cols!`:pq:…:t/` dict whose aux mark says it is the FLIP of that pair (ref/flip-splayed.md's law
+ * for a mapped splay, on a dict because a provider table has no columns until fetched) — so the same shape built by
+ * `!` stays plain 99h data.  q_type_coord_mark no-ops on the failed build, so no site guards it.
+ *
+ * carrier `cols!`:pq:ds:alias:name/ — the splay dict shape, slash-marked */
 static ray_t* carrier_make(int64_t provider, int64_t alias, int64_t name, ray_t* cols) {
     ray_t* ps = ray_sym_str(provider);         /* borrowed x3 */
     ray_t* as = ray_sym_str(alias);
@@ -387,8 +399,11 @@ static ray_t* carrier_make(int64_t provider, int64_t alias, int64_t name, ray_t*
                      (int)ray_str_len(as), ray_str_ptr(as),
                      (int)ray_str_len(ns), ray_str_ptr(ns));
     if (m <= 0 || m >= (int)sizeof buf) return q_err(QE_DOMAIN);
+    int64_t coord = ray_sym_intern_runtime(buf, (size_t)m);
     ray_retain(cols);
-    return ray_dict_new(cols, ray_sym(ray_sym_intern_runtime(buf, (size_t)m)));
+    ray_t* d = ray_dict_new(cols, ray_sym(coord));
+    q_type_coord_mark(d, Q_COORD_PROVIDER, coord);
+    return d;
 }
 
 /* .X.bind[connid; name] -> advisory column names -> the carrier */
@@ -499,13 +514,24 @@ ray_t* q_provider_sym_apply(ray_t* head, ray_t** args, int64_t n) {
 
 
 int q_provider_carrier_is(ray_t* x) {
-    if (!x || x->type != RAY_DICT) return 0;
-    ray_t* k = ray_dict_keys(x);
-    ray_t* v = ray_dict_vals(x);
-    if (!k || !v || v->type != -RAY_SYM || k->type != RAY_SYM) return 0;
-    const char* p; size_t n;
-    return sym_text(v, &p, &n) && q_provider_spec_is(p, n)
-           && n > 4 && p[n - 1] == '/';        /* carriers carry the table marker */
+    return q_type_coord_kind(x) == Q_COORD_PROVIDER;
+}
+
+ray_t* q_provider_flip(ray_t* cols, int64_t sym) {
+    if (!cols || cols->type != RAY_SYM || coord_sym_form(sym) != 2) return NULL;
+    ray_retain(cols);
+    ray_t* d = ray_dict_new(cols, ray_sym(sym));
+    q_type_coord_mark(d, Q_COORD_PROVIDER, sym);
+    return d;
+}
+
+ray_t* q_provider_unflip(ray_t* car) {
+    if (!q_provider_carrier_is(car)) return NULL;
+    ray_t* k = ray_dict_keys(car);
+    ray_t* v = ray_dict_vals(car);
+    ray_retain(k);
+    ray_retain(v);
+    return ray_dict_new(k, v);                 /* a fresh block: aux zero-inits, so the mark is gone */
 }
 
 /* a table reference = the connection resolution + the table name */
@@ -599,7 +625,9 @@ ray_t* q_provider_get_carrier(ray_t* x) {
     tref_close(&tr);
     if (!cols || RAY_IS_ERR(cols)) return cols ? cols : q_err(QE_TYPE);
     if (cols->type != RAY_SYM) { ray_release(cols); return q_err(QE_TYPE); }
-    return ray_dict_new(cols, ray_sym(x->i64));
+    ray_t* car = ray_dict_new(cols, ray_sym(x->i64));
+    q_type_coord_mark(car, Q_COORD_PROVIDER, x->i64);
+    return car;
 }
 
 /* the from-slot: carrier value, table-form hsym, or a name resolving to a

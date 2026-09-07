@@ -375,3 +375,25 @@ int q_type_vec_is_null(ray_t* x, int64_t i) {
     return ray_vec_is_null(x, i);
 }
 
+/* Only TABLE and DICT blocks zero-init aux (table.c / dict.c); on every other block those bytes already mean
+ * something else (rayforce.h:210), so the mark reads and writes ONLY those two. */
+static int coord_block(ray_t* x) {
+    return x && !RAY_IS_ERR(x) && (x->type == RAY_TABLE || x->type == RAY_DICT);
+}
+
+void q_type_coord_mark(ray_t* x, uint8_t kind, int64_t sym) {
+    if (!coord_block(x)) return;
+    x->aux[0] = kind;
+    memcpy(x->aux + 8, &sym, sizeof sym);
+}
+
+uint8_t q_type_coord_kind(ray_t* x) {
+    return coord_block(x) ? x->aux[0] : 0;
+}
+
+int64_t q_type_coord_sym(ray_t* x) {
+    int64_t sym;
+    if (!q_type_coord_kind(x)) return 0;
+    memcpy(&sym, x->aux + 8, sizeof sym);
+    return sym;
+}

@@ -1660,7 +1660,7 @@ static void q_fmt_body(ray_t* val) {
         return;
     }
 
-    if (val->type == RAY_DICT && q_provider_carrier_is(val)) {
+    if (q_provider_carrier_is(val)) {
         ray_t* mt = q_provider_carrier_table(val);     /* provider truth: show the table */
         if (mt && !RAY_IS_ERR(mt) && mt->type == RAY_TABLE) {
             q_fmt_table(mt);
@@ -1828,8 +1828,9 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
         else if (r) ray_error_free(r);
         return;
     }
-    if (val->type == RAY_TABLE) {                  /* `+`a`b!(..)` — ref/dotz.md:723, ref/dotq.md:308 */
-        ray_t* d = q_flip_wrap(val);               /* owned: the column dict */
+    /* whatever FLIPS to a dict prints as that flip: table, mapped splay, provider pointer alike — ref/dotq.md:308 */
+    if (val->type == RAY_TABLE || q_provider_carrier_is(val)) {
+        ray_t* d = q_flip_wrap(val);               /* owned: the column dict, or the pointer's plain pair */
         if (d && RAY_IS_ERR(d)) ray_error_free(d); /* OOM only: fall through, never an empty repr */
         else if (d) {
             if (bufsz > 1) { buf[0] = '+'; q_fmt_krepr(d, buf + 1, bufsz - 1); }
@@ -1839,7 +1840,7 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
     }
     if (val->type == RAY_DICT) {
         /* dict inline `keys!vals` (`(,`a)!,1`); a KEYED TABLE falls out as `(+K)!+V` off the table arm
-         * (kb/pivoting-tables.md:86).  A provider carrier IS its stored dict here — no gather, no `+`. */
+         * (kb/pivoting-tables.md:86). */
         ray_t* kk = ray_dict_keys(val);
         ray_t* vv = ray_dict_vals(val);
         if (kk && vv) {

@@ -9,6 +9,7 @@
 #include "qlang/io/q_io.h"           /* q_io_file_path */
 #include "qlang/net/q_wirefile.h"
 #include "qlang/base/q_err.h"
+#include "qlang/base/q_type.h"      /* q_type_coord_mark — THE aux mark that says "flipped from a coordinate" */
 #include "qlang/q_prim.h"            /* q_attr_stamp_trusted — the disk letter on a mapped header */
 #include "qlang/q_env.h"             /* q_env_set — the one global-set home */
 #include "lang/eval.h"               /* ray_eval_get_restricted */
@@ -70,9 +71,6 @@ static int64_t g_mapped_bytes = 0;
 static int64_t g_reg_created = 0, g_reg_freed = 0;
 static int64_t g_zblocks = 0;   /* cumulative blocks inflated — the laziness witness */
 static volatile sig_atomic_t g_zfault = 0;   /* a fault-time inflate failed since the last ask */
-
-/* The table block's 16 aux bytes (zeroed at construction, table.c): kind at [0], the `:dir/ sym at [8..15]. */
-enum { SPLAY_AUX_MAPPED = 1, SPLAY_AUX_UNRESOLVED = 2 };
 
 /* ---- the VM seam: the ONLY platform mechanics under the shared contract ----
  * _mapfile lays `need` bytes of `path` copy-on-write after the guard (the file
@@ -579,20 +577,13 @@ static ray_t* splay_open(int64_t sym, ray_t* dir, splay_ent** out) {
 }
 
 
-static void splay_mark(ray_t* t, int64_t sym, uint8_t kind) {
-    t->aux[0] = kind;
-    memcpy(t->aux + 8, &sym, sizeof sym);
-}
-
 int64_t q_splay_table_path(ray_t* t) {
-    int64_t sym;
-    if (!t || t->type != RAY_TABLE || !t->aux[0]) return 0;
-    memcpy(&sym, t->aux + 8, sizeof sym);
-    return sym;
+    uint8_t k = q_type_coord_kind(t);
+    return k == Q_COORD_SPLAY || k == Q_COORD_SPLAY_UNRESOLVED ? q_type_coord_sym(t) : 0;
 }
 
 int q_splay_table_unresolved(ray_t* t) {
-    return t && t->type == RAY_TABLE && t->aux[0] == SPLAY_AUX_UNRESOLVED;
+    return q_type_coord_kind(t) == Q_COORD_SPLAY_UNRESOLVED;
 }
 
 /* HAS_NULLS is PESSIMISTIC on sentinel-capable types: consumers read it as
@@ -714,7 +705,7 @@ static ray_t* splay_table(splay_ent* e, ray_t* cols) {
         ray_release(col);
         if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_OOM);
     }
-    splay_mark(tbl, e->sym, SPLAY_AUX_MAPPED);
+    q_type_coord_mark(tbl, Q_COORD_SPLAY, e->sym);
     return tbl;
 }
 
@@ -747,6 +738,6 @@ ray_t* q_splay_flip(ray_t* cols, int64_t dirsym) {
         ray_release(empty);
     }
     if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_OOM);
-    splay_mark(tbl, dirsym, SPLAY_AUX_UNRESOLVED);
+    q_type_coord_mark(tbl, Q_COORD_SPLAY_UNRESOLVED, dirsym);
     return tbl;
 }
