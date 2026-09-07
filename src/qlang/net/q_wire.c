@@ -8,6 +8,7 @@
                                  * q_eval_apply_concrete — the IPC boundary force */
 #include "qlang/q_registry.h"   /* q_list_collapse + the kdb_op identity pair */
 #include "qlang/io/q_splay.h"   /* a mapped splay travels as 98 over (99: cols; `:dir/) and re-opens */
+#include "qlang/io/q_provider.h" /* a provider pointer travels the same shape and rebinds */
 #include "qlang/io/q_io.h"      /* q_io_is_fsym — the one admitted unconformed dict */
 #include "qlang/parse/q_parse.h"      /* q_parse — lambda decode (RUNTIME only) */
 #include "lang/eval.h"          /* ray_eval */
@@ -346,8 +347,10 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
 
     /* ---- structural containers (recurse) — kept out of the value-enum switch ---- */
     if (t == RAY_DICT) {
-        /* generic recursion — keyed tables (dict of two tables) fall out */
+        /* generic recursion — keyed tables (dict of two tables) fall out.  A provider POINTER is a table to its
+         * peer, so it takes the mapped-splay envelope (98 over the same pair); the unmarked pair stays a dict. */
         ray_t** slots = (ray_t**)ray_data(x);
+        if (q_provider_carrier_is(x) && (w_u8(b, 98) || w_u8(b, 0))) goto out;
         rc = (w_u8(b, 99) || q_wire_write_obj(b, slots[0]) ||
               q_wire_write_obj(b, slots[1])) ? -1 : 0;
         goto out;
@@ -914,8 +917,10 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         }
         ray_t* cols = rd_obj(c);
         if (!cols || RAY_IS_ERR(cols)) { ray_release(keys); return cols ? cols : q_err(QE_DOMAIN); }
-        if (cols->type == -RAY_SYM) {                 /* 98 over (99: cols; `:dir/): the mapping re-opens here */
+        if (cols->type == -RAY_SYM) {                 /* 98 over (99: cols; hsym): the flip law, off the spelling —
+                                                       * `:dir/ re-opens the mapping, `:pq:…/ rebinds the pointer */
             ray_t* t = q_splay_flip(keys, cols->i64);
+            if (!t) t = q_provider_flip(keys, cols->i64);
             ray_release(keys); ray_release(cols);
             return t ? t : q_err(QE_DOMAIN);
         }
