@@ -97,16 +97,23 @@ static uint64_t numeric_key_word(const uint8_t* base, int8_t type, int64_t i) {
     return (uint64_t)k;
 }
 
-/* Returns true iff numeric vector v is non-descending.  v1 scope: rejects
- * (returns false) if any null or NaN is present — callers turn false into a
+static bool vec_has_null(const ray_t* v) {
+    if (!(v->attrs & RAY_ATTR_HAS_NULLS)) return false;   /* clear => none anywhere */
+    for (int64_t i = 0; i < v->len; i++)
+        if (ray_vec_is_null((ray_t*)v, i)) return true;
+    return false;
+}
+
+/* Returns true iff numeric vector v is non-descending under the total order in
+ * basics/comparison.md:186-204 — nulls compare EQUAL to each other and BELOW
+ * every value, so a leading run of nulls is sorted.  The integer sentinels are
+ * their type's minimum (NULL_I16/I32/I64 = INT*_MIN, and every temporal lane
+ * reuses one by width), so those scans need no null arm; the float lanes do,
+ * because every comparison against NaN is false.  Callers turn false into a
  * verify error.  Caller has already ensured numeric_elem_size(v->type) > 0. */
 static bool vec_is_ascending(const ray_t* v) {
     int64_t n = v->len;
     if (n < 2) return true;
-    if (v->attrs & RAY_ATTR_HAS_NULLS) {
-        for (int64_t i = 0; i < n; i++)
-            if (ray_vec_is_null((ray_t*)v, i)) return false;
-    }
     const uint8_t* b = (const uint8_t*)ray_data((ray_t*)v);
     switch (v->type) {
     case RAY_BOOL: RAY_BYTE_CASES: {
@@ -132,14 +139,18 @@ static bool vec_is_ascending(const ray_t* v) {
     }
     case RAY_F32: {
         const float* p = (const float*)b;
-        for (int64_t i = 0; i < n; i++) if (p[i] != p[i]) return false; /* NaN */
-        for (int64_t i = 1; i < n; i++) if (p[i] < p[i-1]) return false;
+        for (int64_t i = 1; i < n; i++) {
+            if (p[i-1] != p[i-1]) continue;                 /* null <= anything */
+            if (p[i] != p[i] || p[i] < p[i-1]) return false;
+        }
         return true;
     }
     case RAY_F64: {
         const double* p = (const double*)b;
-        for (int64_t i = 0; i < n; i++) if (p[i] != p[i]) return false; /* NaN */
-        for (int64_t i = 1; i < n; i++) if (p[i] < p[i-1]) return false;
+        for (int64_t i = 1; i < n; i++) {
+            if (p[i-1] != p[i-1]) continue;
+            if (p[i] != p[i] || p[i] < p[i-1]) return false;
+        }
         return true;
     }
     default: return false;
@@ -209,10 +220,7 @@ static bool vec_all_distinct(const ray_t* v) {
 static bool vec_is_parted_contiguous(const ray_t* v) {
     int64_t n = v->len;
     if (n < 2) return true;
-    if (v->attrs & RAY_ATTR_HAS_NULLS) {
-        for (int64_t i = 0; i < n; i++)
-            if (ray_vec_is_null((ray_t*)v, i)) return false;
-    }
+    if (vec_has_null(v)) return false;
     const uint8_t* base = (const uint8_t*)ray_data((ray_t*)v);
     uint64_t cap = next_pow2((uint64_t)n * 2 + 1);
     if (cap < 16) cap = 16;
@@ -1836,16 +1844,19 @@ static ray_t* ray_index_attach_part(ray_t** vp) {
     if (RAY_IS_ERR(v)) return v;
     int64_t n = v->len;
 
-    if (!vec_is_ascending(v))
+    /* numeric_key_word buckets a NaN per ROW, so two adjacent nulls would read as
+     * two value-blocks — this index needs the null-free column vec_is_ascending
+     * no longer insists on.  Same gate vec_is_parted_contiguous applies. */
+    if ((n >= 2 && vec_has_null(v)) || !vec_is_ascending(v))
         return ray_error("domain", "parted: column is not laid out as ascending value-blocks");
 
     const uint8_t* base = (const uint8_t*)ray_data(v);
     int es = numeric_elem_size(v->type);
 
-    /* Row i starts a new value-block iff it differs from i-1.  vec_is_ascending
-     * above already rejected any null/NaN, so numeric_key_word's NaN branch is
-     * unreachable here and its equality is exact for every accepted type.  Used
-     * by both the count and the fill loop so they cannot drift out of sync. */
+    /* Row i starts a new value-block iff it differs from i-1.  The gate above
+     * rejected any null/NaN, so numeric_key_word's NaN branch is unreachable
+     * here and its equality is exact for every accepted type.  Used by both the
+     * count and the fill loop so they cannot drift out of sync. */
     #define PART_NEW_BLOCK(i) \
         (numeric_key_word(base, v->type, (i)) != numeric_key_word(base, v->type, (i)-1))
 
