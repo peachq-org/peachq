@@ -44,8 +44,8 @@ ray_t* q_dotq_qp_fn(ray_t* x) {
 }
 
 /* (.Q.s x) — x formatted to plain text as the console prints it (ref/dotq.md
- * `.Q.s`), returned as a q string.  SINGLE-HOMES to q_fmt_console — the same
- * DISPLAY seam `show` uses (q_console_show = q_fmt_console + '\n') — so
+ * `.Q.s`), returned as a q string.  SINGLE-HOMES to q_fmt_console_alloc — the
+ * same DISPLAY seam `show` uses (q_console_show is it + '\n') — so
  * `.Q.s x` is byte-identical to what `show x` prints, INCLUDING the
  * line-terminating trailing newline, and OBEYS the `\c` console width/height
  * ("Obeys console width and height set by \c", ref/dotq.md) and `\P`
@@ -53,40 +53,16 @@ ray_t* q_dotq_qp_fn(ray_t* x) {
  * global console sink the REPL/qdoc host drains after each eval, so routing
  * through it would inject `.Q.s`'s text into the host's output — `.Q.s` must
  * be side-effect-free and RETURN the string.
- * The renderer truncates silently into a bounded buffer, so grow until the
- * rendered length CONVERGES (a larger buffer yields no more bytes).  NB
- * `len < cap-1` is NOT a reliable fit test: the renderer stops at an element
- * boundary when the buffer fills, so a truncated render can still leave room
- * at the tail (e.g. an unclipped `.Q.s til 5000` fills only ~8190 of 8192).
- * Convergence is reliable because the output length is monotonic
- * non-decreasing in buffer size — equal length after doubling means the whole
- * display fit.  Capped to stay bounded. */
+ * The buffer grows to fit: q_fmt_console_alloc is the console seam's one growth home. */
 ray_t* q_dotq_s_fn(ray_t* x) {
-    size_t cap = 8192;
-    char* buf = malloc(cap);
+    size_t len;
+    char*  buf = q_fmt_console_alloc(x, &len);       /* `.Q.s` OBEYS `\c` */
     if (!buf) return q_err(QE_WSFULL);
-    buf[0] = '\0';
-    q_fmt_console(x, buf, cap);                      /* `.Q.s` OBEYS `\c` */
-    size_t len = strlen(buf);
-    while (cap < (1u << 24)) {                       /* grow until length settles */
-        size_t ncap = cap * 2;
-        char* nb = realloc(buf, ncap);
-        if (!nb) { free(buf); return q_err(QE_WSFULL); }
-        buf = nb;
-        cap = ncap;
-        buf[0] = '\0';
-        q_fmt_console(x, buf, cap);
-        size_t nlen = strlen(buf);
-        if (nlen == len) break;                      /* converged: full display */
-        len = nlen;
-    }
-    char* out = malloc(len + 2);
-    if (!out) { free(buf); return q_err(QE_WSFULL); }
-    memcpy(out, buf, len);
-    out[len] = '\n';                                 /* console line terminator */
-    ray_t* r = ray_charv(out, len + 1);              /* 10h — RAY_STR is q-invisible */
-    free(out);
-    free(buf);
+    char* nb = realloc(buf, len + 2);
+    if (!nb) { free(buf); return q_err(QE_WSFULL); }
+    nb[len] = '\n';                                  /* console line terminator */
+    ray_t* r = ray_charv(nb, (int64_t)(len + 1));
+    free(nb);
     return r;
 }
 

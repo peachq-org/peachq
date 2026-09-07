@@ -57,6 +57,9 @@ typedef struct {
     size_t cap;   /* total bytes incl. the NUL */
     size_t pos;   /* write position */
     int    clip;  /* 1 = the (single) `\c`-armed console target */
+    int    trunc; /* bytes were dropped for want of room in THIS buffer (never the `\c` clip,
+                   * which shows itself as `..`); per-target, so a nested render into its own
+                   * staging array cannot make the caller's buffer look short */
 } qe_tgt;
 
 #define QE_MAX 128
@@ -83,14 +86,14 @@ static void qe_push(char* buf, size_t cap, int clip) {
     g_qe_n++;
     if (g_qe_n > QE_MAX) return;               /* absurd nesting: render empty */
     qe_tgt* t = &g_qe[g_qe_n - 1];
-    t->buf = buf; t->cap = cap; t->pos = 0; t->clip = clip;
+    t->buf = buf; t->cap = cap; t->pos = 0; t->clip = clip; t->trunc = 0;
     if (buf && cap > 0) buf[0] = '\0';
 }
 
 static void qe_raw(qe_tgt* t, const char* s, size_t n) {
     if (!t->buf || t->cap == 0) return;
     size_t avail = t->cap - 1 - t->pos;
-    if (n > avail) n = avail;
+    if (n > avail) { n = avail; t->trunc = 1; }
     memcpy(t->buf + t->pos, s, n);
     t->pos += n;
     t->buf[t->pos] = '\0';
@@ -112,7 +115,7 @@ static void qe_putc(char c) {
         if (t->buf && t->pos + 1 < t->cap) {
             t->buf[t->pos++] = c;
             t->buf[t->pos] = '\0';
-        }
+        } else if (t->buf) t->trunc = 1;
         return;
     }
     if (g_clip.stop) return;
@@ -154,11 +157,15 @@ static void qe_printf(const char* fmt, ...) {
     qe_putn(tmp, (size_t)n);
 }
 
-/* Fits? unclipped: whole-token buffer guard; clipped: only the height stop. */
+/* Fits? unclipped: whole-token buffer guard; clipped: only the height stop.  A refusal here
+ * SKIPS a whole token, so it must be reported: it leaves slack, and a caller that grew the
+ * buffer by comparing rendered lengths would read that as "the display fit". */
 static int qe_fits(size_t need) {
     qe_tgt* t = qe_top();
     if (t->clip) return !g_clip.stop;
-    return t->buf && t->pos + need + 1 <= t->cap;
+    if (t->buf && t->pos + need + 1 <= t->cap) return 1;
+    if (t->buf) t->trunc = 1;
+    return 0;
 }
 
 /* qe_done: height cap hit; qe_line_done: line over width — never before qe_trim. */
@@ -736,23 +743,29 @@ static size_t char_esc(unsigned char ch, char out[8]) {
     }
 }
 
-/* Quoted-text renderer over raw bytes — shared by the -RAY_STR atom form and
- * the charv vector/atom forms. */
-static void fmt_qtext(const char* p, size_t n, char* buf, size_t bufsz) {
+/* Quoted-text renderer over raw bytes — shared by the -RAY_STR atom form and the charv
+ * vector/atom forms.  Non-zero if it stopped short for want of room: the growth loops need that
+ * answer; the display cell callers, whose buffer is fixed by the `\c` grid, ignore it. */
+static int fmt_qtext(const char* p, size_t n, char* buf, size_t bufsz) {
+    if (bufsz == 0) return 1;                  /* nowhere to write, not even the NUL */
     size_t w = 0;
-    if (w + 1 < bufsz) buf[w++] = '"';
-    for (size_t i = 0; i < n && w + 6 < bufsz; i++) {
+    int cut = 0;
+    if (w + 1 < bufsz) buf[w++] = '"'; else cut = 1;
+    size_t i = 0;
+    for (; i < n && w + 6 < bufsz; i++) {
         char e[8];
         size_t el = char_esc((unsigned char)p[i], e);
         memcpy(buf + w, e, el);
         w += el;
     }
-    if (w + 1 < bufsz) buf[w++] = '"';
+    if (i < n) cut = 1;
+    if (w + 1 < bufsz) buf[w++] = '"'; else cut = 1;
     buf[w < bufsz ? w : bufsz - 1] = '\0';
+    return cut;
 }
 
-static void fmt_qstring(ray_t* val, char* buf, size_t bufsz) {
-    fmt_qtext(ray_str_ptr(val), ray_str_len(val), buf, bufsz);
+static int fmt_qstring(ray_t* val, char* buf, size_t bufsz) {
+    return fmt_qtext(ray_str_ptr(val), ray_str_len(val), buf, bufsz);
 }
 
 static void qe_qstring(ray_t* val) {
@@ -944,12 +957,21 @@ static void fmt_render(ray_t* val) {
     q_fmt_body(val);
 }
 
-/* Public entry, UNCLIPPED (`string`, `-3!`, CSV, recursive renders). */
-void q_fmt(ray_t* val, char* buf, size_t bufsz) {
+/* Render unclipped and report whether anything was dropped for want of room (see qe_tgt.trunc). */
+static void fmt_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
+    *trunc = 0;
     if (bufsz == 0 || !buf) return;
     qe_push(buf, bufsz, 0);
     fmt_render(val);
+    qe_tgt* t = qe_top();
     qe_pop();
+    *trunc = t->trunc;
+}
+
+/* Public entry, UNCLIPPED (`string`, `-3!`, CSV, recursive renders). */
+void q_fmt(ray_t* val, char* buf, size_t bufsz) {
+    int trunc;
+    fmt_into(val, buf, bufsz, &trunc);
 }
 
 /* Public entry, CONSOLE: the `\c` clip when armed; unarmed — or a parse tree — equals q_fmt. */
@@ -981,11 +1003,11 @@ static bool fmt_pipe_is_table(ray_t* val) {
 
 /* ---- output: one line at a time, under the `\c` cols width rule ---------- */
 
-typedef struct { char* buf; size_t cap; size_t pos; int64_t nlines; } qp_out;
+typedef struct { char* buf; size_t cap; size_t pos; int64_t nlines; int trunc; } qp_out;
 
 static void qp_raw(qp_out* o, const char* s, size_t n) {
     size_t avail = o->cap - 1 - o->pos;
-    if (n > avail) n = avail;
+    if (n > avail) { n = avail; o->trunc = 1; }
     memcpy(o->buf + o->pos, s, n);
     o->pos += n;
     o->buf[o->pos] = '\0';
@@ -1245,10 +1267,11 @@ static void qp_cells(char* line, size_t lsz, char (*cells)[QP_CELL],
     if (p + 1 < lsz) { line[p++] = '|'; line[p] = '\0'; }
 }
 
-static void fmt_pipe_render(ray_t* val, char* buf, size_t bufsz) {
+static void fmt_pipe_render(ray_t* val, char* buf, size_t bufsz, int* trunc) {
+    *trunc = 0;
     if (!buf || bufsz == 0) return;
     buf[0] = '\0';
-    qp_out o = { buf, bufsz, 0, 0 };
+    qp_out o = { buf, bufsz, 0, 0, 0 };
 
     int32_t crows = 0, ccols = 0;
     bool armed = q_console_clip(&crows, &ccols);
@@ -1258,7 +1281,7 @@ static void fmt_pipe_render(ray_t* val, char* buf, size_t bufsz) {
     qp_col  cs[QP_MAXCOL];
     int64_t nr = 0, nk = 0;
     int64_t nc = qp_gather(val, cs, QP_MAXCOL, &nr, &nk);
-    if (nc <= 0) { qp_line(&o, "+`!()", cols); return; }
+    if (nc <= 0) { qp_line(&o, "+`!()", cols); *trunc = o.trunc; return; }
 
     /* Budget (spec decision 4): the WHOLE render fits `\c` rows, so the digest
      * costs data rows rather than growing the output (crows-2 = legacy height). */
@@ -1297,30 +1320,33 @@ static void fmt_pipe_render(ray_t* val, char* buf, size_t bufsz) {
         qp_line(&o, line, cols);
     }
 
-    if (!clipped) return;
-    snprintf(line, sizeof line, "... (showing first %lld of %lld rows)",
-             (long long)shown, (long long)nr);
-    qp_line(&o, line, cols);
-    for (int i = 0; i < dn; i++) {
-        if (!i) qp_line(&o, "", cols);
-        qp_line(&o, dl[i], cols);
+    if (clipped) {
+        snprintf(line, sizeof line, "... (showing first %lld of %lld rows)",
+                 (long long)shown, (long long)nr);
+        qp_line(&o, line, cols);
+        for (int i = 0; i < dn; i++) {
+            if (!i) qp_line(&o, "", cols);
+            qp_line(&o, dl[i], cols);
+        }
     }
+    *trunc = o.trunc;
 }
 
 
-void q_fmt_console(ray_t* val, char* buf, size_t bufsz) {
+static void fmt_console_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
+    *trunc = 0;
     if (bufsz == 0 || !buf) return;
     /* Modern mode (armed by qmain/wasm unless `-classic`/`\classic 1`):
      * tables render as the pipe table.  Gated
      * HERE — the console seam — and never in q_fmt_body, which the UNCLIPPED
      * q_fmt (`string`, `-3!`, CSV, every cell) shares and must keep legacy. */
-    if (q_console_pipe_on() && fmt_pipe_is_table(val)) { fmt_pipe_render(val, buf, bufsz); return; }
+    if (q_console_pipe_on() && fmt_pipe_is_table(val)) { fmt_pipe_render(val, buf, bufsz, trunc); return; }
     int32_t rows = 0, cols = 0;
     int armed = q_console_clip(&rows, &cols) && !g_clip_active;
     if (armed && val && val->type == RAY_LIST && list_is_parse_tree(val, 0))
         armed = 0;                             /* parse display NEVER clips */
     if (!armed || rows < 10 || cols < 10 || cols > 2000) {
-        q_fmt(val, buf, bufsz);
+        fmt_into(val, buf, bufsz, trunc);
         return;
     }
     g_clip_active = 1;
@@ -1329,8 +1355,15 @@ void q_fmt_console(ray_t* val, char* buf, size_t bufsz) {
     g_clip.llen = g_clip.llog = g_clip.ltrail = 0;
     qe_push(buf, bufsz, 1);
     fmt_render(val);
+    qe_tgt* t = qe_top();
     qe_pop();
+    *trunc = t->trunc;
     g_clip_active = 0;
+}
+
+void q_fmt_console(ray_t* val, char* buf, size_t bufsz) {
+    int trunc;
+    fmt_console_into(val, buf, bufsz, &trunc);
 }
 
 /* RAY_QFN carrier display over the apply module's read-out accessors (the
@@ -1779,39 +1812,44 @@ static void q_fmt_body(ray_t* val) {
     qe_ray_fallback(val);
 }
 
-/* Bounded append for the krepr assemblers; returns the new write position
- * (reserves 2 bytes for a closing paren + NUL). */
-static size_t krepr_cat(char* buf, size_t bufsz, size_t pos, const char* s) {
-    size_t el = strlen(s);
-    if (pos + el + 2 > bufsz) el = bufsz > pos + 2 ? bufsz - pos - 2 : 0;
-    memcpy(buf + pos, s, el);
-    return pos + el;
+static void krepr_into(ray_t* val, char* buf, size_t bufsz, int* tr);   /* fwd — krepr_at recurses */
+
+/* One ELEMENT straight into the destination at `pos`, keeping the closing `)` and the NUL in
+ * reserve, and REPORTING through `tr`.  Staging it into a fixed array first capped the element AND
+ * severed its report, so the growth loop saw a settled length and stopped short of the value —
+ * the very trap this renderer's reporting exists to close. */
+static size_t krepr_at(char* buf, size_t bufsz, size_t pos, ray_t* e, int* tr) {
+    if (pos + 2 >= bufsz) { *tr = 1; return pos; }
+    krepr_into(e, buf + pos, bufsz - pos - 1, tr);
+    return pos + strlen(buf + pos);
 }
 
 /* Single-line k-repr (kdb `0N!x`, `-3!`, every list ITEM above): lists
- * inline `(a;b;c)` / `,x`; len-1 string conflation `,"c"`; else q_fmt. */
-void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
+ * inline `(a;b;c)` / `,x`; len-1 string conflation `,"c"`; else q_fmt.
+ * `tr` answers whether anything was dropped for want of room — EVERY write below reports, so a
+ * caller growing the buffer never has to guess from the rendered length. */
+static void krepr_into(ray_t* val, char* buf, size_t bufsz, int* tr) {
     if (bufsz == 0) return;
     buf[0] = '\0';
     if (!val) return;
     if (val->type == -RAY_STR) {
         if (ray_str_len(val) == 1 && bufsz > 1) {
             buf[0] = ',';
-            fmt_qstring(val, buf + 1, bufsz - 1);
+            *tr |= fmt_qstring(val, buf + 1, bufsz - 1);
         } else
-            fmt_qstring(val, buf, bufsz);
+            *tr |= fmt_qstring(val, buf, bufsz);
         return;
     }
     if (val->type == -RAY_CHARV) {                 /* char atom: "a" */
-        fmt_qtext((const char*)&val->u8, 1, buf, bufsz);
+        *tr |= fmt_qtext((const char*)&val->u8, 1, buf, bufsz);
         return;
     }
     if (val->type == RAY_CHARV) {                  /* charv: "abc" / ,"a" */
         if (ray_len(val) == 1 && bufsz > 1) {
             buf[0] = ',';
-            fmt_qtext((const char*)ray_data(val), 1, buf + 1, bufsz - 1);
+            *tr |= fmt_qtext((const char*)ray_data(val), 1, buf + 1, bufsz - 1);
         } else
-            fmt_qtext((const char*)ray_data(val), (size_t)ray_len(val), buf, bufsz);
+            *tr |= fmt_qtext((const char*)ray_data(val), (size_t)ray_len(val), buf, bufsz);
         return;
     }
     if (q_enum_is(val)) {                          /* `d$values / `d!positions (R5) */
@@ -1822,9 +1860,9 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
                                           (int)ray_str_len(s), ray_str_ptr(s),
                                           r ? '$' : '!') : 0;
         if (s) ray_release(s);
-        if (off >= bufsz) off = bufsz - 1;
+        if (off >= bufsz) { off = bufsz - 1; *tr = 1; }
         if (!r) r = q_enum_positions(val);
-        if (r && !RAY_IS_ERR(r)) { q_fmt_krepr(r, buf + off, bufsz - off); ray_release(r); }
+        if (r && !RAY_IS_ERR(r)) { krepr_into(r, buf + off, bufsz - off, tr); ray_release(r); }
         else if (r) ray_error_free(r);
         return;
     }
@@ -1833,7 +1871,7 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
         ray_t* d = q_flip_wrap(val);               /* owned: the column dict, or the pointer's plain pair */
         if (d && RAY_IS_ERR(d)) ray_error_free(d); /* OOM only: fall through, never an empty repr */
         else if (d) {
-            if (bufsz > 1) { buf[0] = '+'; q_fmt_krepr(d, buf + 1, bufsz - 1); }
+            if (bufsz > 1) { buf[0] = '+'; krepr_into(d, buf + 1, bufsz - 1, tr); } else *tr = 1;
             ray_release(d);
             return;
         }
@@ -1847,17 +1885,24 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
             /* boxed homogeneous runs collapse to typed vectors (`1 2`) */
             ray_t* ck = q_list_collapse(kk);   /* owned */
             ray_t* cv = q_list_collapse(vv);   /* owned */
-            char kb[2048]; kb[0] = '\0';
-            char vb[2048]; vb[0] = '\0';
-            q_fmt_krepr(ck, kb, sizeof kb);
-            q_fmt_krepr(cv, vb, sizeof vb);
-            ray_release(ck);
-            ray_release(cv);
             /* left operand of `!` needs parens when compound so the string re-parses: an enlist `,x`, a flip
              * `+x` (`(+(,`k)!,1 2 3)!+..`, kb/pivoting-tables.md:86), or a `$`-form typed empty `` `long$() ``
-             * (else RTL binds `$` wrong) */
-            if (kb[0] == ',' || kb[0] == '+' || strchr(kb, '$')) snprintf(buf, bufsz, "(%s)!%s", kb, vb);
-            else                                                 snprintf(buf, bufsz, "%s!%s", kb, vb);
+             * (else RTL binds `$` wrong).  The key lands ONE byte in, so its own rendered text answers that
+             * without a staging buffer that could not grow with the destination; unparenthesised, it shifts down. */
+            size_t kp = krepr_at(buf, bufsz, 1, ck, tr), kl = kp - 1, pos;
+            ray_release(ck);
+            if (kl && (buf[1] == ',' || buf[1] == '+' || memchr(buf + 1, '$', kl))) {
+                buf[0] = '(';
+                pos = kp;
+                if (pos + 1 < bufsz) buf[pos++] = ')'; else *tr = 1;
+            } else {
+                memmove(buf, buf + 1, kl);
+                pos = kl;
+            }
+            if (pos + 1 < bufsz) buf[pos++] = '!'; else *tr = 1;
+            pos = krepr_at(buf, bufsz, pos, cv, tr);
+            ray_release(cv);
+            buf[pos] = '\0';
             return;
         }
     }
@@ -1865,72 +1910,102 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
         int64_t n = ray_len(val);
         ray_t** e = (ray_t**)ray_data(val);
         if (n == 0 || (n == 1 && e[0] == q_registry_list_value())) {
-            snprintf(buf, bufsz, "()");
+            if ((size_t)snprintf(buf, bufsz, "()") >= bufsz) *tr = 1;
             return;
         }
-        if (n == 1 && bufsz > 1) {
-            buf[0] = ',';
-            q_fmt_krepr(e[0], buf + 1, bufsz - 1);
+        if (n == 1) {
+            if (bufsz > 1) { buf[0] = ','; krepr_into(e[0], buf + 1, bufsz - 1, tr); } else *tr = 1;
             return;
         }
         size_t pos = 0;
-        if (pos + 1 < bufsz) buf[pos++] = '(';
+        if (pos + 1 < bufsz) buf[pos++] = '('; else *tr = 1;
         for (int64_t i = 0; i < n; i++) {
-            if (i && pos + 1 < bufsz) buf[pos++] = ';';
-            char eb[2048]; eb[0] = '\0';
-            q_fmt_krepr(e[i], eb, sizeof eb);
-            pos = krepr_cat(buf, bufsz, pos, eb);
+            if (i) { if (pos + 1 < bufsz) buf[pos++] = ';'; else *tr = 1; }
+            pos = krepr_at(buf, bufsz, pos, e[i], tr);
         }
-        if (pos + 1 < bufsz) buf[pos++] = ')';
+        if (pos + 1 < bufsz) buf[pos++] = ')'; else *tr = 1;
         buf[pos] = '\0';
         return;
     }
     /* string vector inline: `("hello,world";,"1")` (ref/file-text.md:348) */
     if (val->type == RAY_STR && ray_is_vec(val)) {
         int64_t n = ray_len(val);
-        if (n == 0) { snprintf(buf, bufsz, "()"); return; }
+        if (n == 0) { if ((size_t)snprintf(buf, bufsz, "()") >= bufsz) *tr = 1; return; }
         size_t pos = 0;
-        if (pos + 1 < bufsz) buf[pos++] = (n == 1) ? ',' : '(';
+        if (pos + 1 < bufsz) buf[pos++] = (n == 1) ? ',' : '('; else *tr = 1;
         for (int64_t i = 0; i < n; i++) {
-            if (i && pos + 1 < bufsz) buf[pos++] = ';';
+            if (i) { if (pos + 1 < bufsz) buf[pos++] = ';'; else *tr = 1; }
             ray_t* ia = ray_i64(i);
             ray_t* it = ray_at_fn(val, ia);
             ray_release(ia);
             if (!it || RAY_IS_ERR(it)) { if (it) ray_release(it); break; }
-            char eb[2048];
+            if (pos + 2 >= bufsz) { *tr = 1; ray_release(it); break; }
+            size_t avail = bufsz - pos - 1;          /* same reserve krepr_at keeps */
             if (n > 1 && it->type == -RAY_STR && ray_str_len(it) == 1) {
-                eb[0] = ',';
-                fmt_qstring(it, eb + 1, sizeof eb - 1);
+                buf[pos] = ',';
+                *tr |= fmt_qstring(it, buf + pos + 1, avail - 1);
             } else if (it->type == RAY_CHARV || it->type == -RAY_CHARV) {
-                q_fmt_krepr(it, eb, sizeof eb);
+                krepr_into(it, buf + pos, avail, tr);
             } else
-                fmt_qstring(it, eb, sizeof eb);
+                *tr |= fmt_qstring(it, buf + pos, avail);
             ray_release(it);
-            pos = krepr_cat(buf, bufsz, pos, eb);
+            pos += strlen(buf + pos);
         }
-        if (n > 1 && pos + 1 < bufsz) buf[pos++] = ')';
+        if (n > 1) { if (pos + 1 < bufsz) buf[pos++] = ')'; else *tr = 1; }
         buf[pos] = '\0';
         return;
     }
-    q_fmt(val, buf, bufsz);
+    int t2;
+    fmt_into(val, buf, bufsz, &t2);
+    *tr |= t2;
 }
 
-ray_t* q_fmt_krepr_charv(ray_t* val) {
+static void fmt_krepr_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
+    *trunc = 0;
+    krepr_into(val, buf, bufsz, trunc);
+}
+
+void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
+    int tr;
+    fmt_krepr_into(val, buf, bufsz, &tr);
+}
+
+/* Growth cap: 16 MiB of rendered text.  A `\c`-armed display cannot approach it (rows*cols is
+ * capped at 2000*2000), so it binds only the deliberately unclipped paths. */
+#define FMT_GROW_MAX (1u << 24)
+
+/* THE growth home: render into a heap buffer big enough for the WHOLE display, and hand it over
+ * with *len set.  NULL means it could not be produced (allocation failure, or past the cap) —
+ * never a silent prefix.  Grows while the render REPORTS it dropped bytes, which every write into
+ * the DESTINATION now answers exactly: comparing rendered LENGTHS instead would be unsound, because
+ * the unclipped renderer SKIPS a whole token it cannot fit (qe_fits) and so can produce the same
+ * length at two capacities and far more at a third — a long enough symbol made `-3!` answer "".
+ * The report does NOT cover a renderer's own fixed per-ELEMENT staging in the DISPLAY grid: a
+ * bigger destination cannot fix a per-element cap, so reporting one would only run growth to the
+ * cap.  Those stagers are bounded by `\c` (cols <= 2000, and the clip cannot be switched off). */
+static char* fmt_grow(void (*render)(ray_t*, char*, size_t, int*), ray_t* val, size_t* len) {
     size_t cap = 8192;
     char*  buf = malloc(cap);
-    if (!buf) return q_err(QE_WSFULL);
+    if (!buf) return NULL;
     for (;;) {
-        buf[0] = '\0';
-        q_fmt_krepr(val, buf, cap);
-        size_t len = strlen(buf);
-        if (len < cap - 1 || cap >= (1u << 24)) {   /* fit whole (or growth cap) */
-            ray_t* r = ray_charv(buf, (int64_t)len);
-            free(buf);
-            return r;
-        }
-        cap *= 2;
-        char* nb = realloc(buf, cap);
-        if (!nb) { free(buf); return q_err(QE_WSFULL); }
+        int trunc = 0;
+        render(val, buf, cap, &trunc);
+        if (!trunc) { *len = strlen(buf); return buf; }
+        if (cap >= FMT_GROW_MAX) { free(buf); return NULL; }
+        char* nb = realloc(buf, cap * 2);
+        if (!nb) { free(buf); return NULL; }
         buf = nb;
+        cap *= 2;
     }
+}
+
+char* q_fmt_console_alloc(ray_t* val, size_t* len) { return fmt_grow(fmt_console_into, val, len); }
+
+ray_t* q_fmt_krepr_charv(ray_t* val) {
+    size_t len;
+    char*  buf = fmt_grow(fmt_krepr_into, val, &len);
+    if (!buf) return q_err(QE_WSFULL);
+    ray_t* r = ray_charv(buf, (int64_t)len);
+    free(buf);
+    return r;
 }
