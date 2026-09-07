@@ -227,6 +227,9 @@ int64_t ray_table_nrows(ray_t* tbl) {
     if (RAY_IS_PARTED(first_col->type) || first_col->type == RAY_MAPCOMMON)
         return ray_parted_nrows(first_col);
 
+    if (first_col->type == RAY_TABLE)
+        return ray_table_nrows(first_col);   /* its len-as-a-list, never its raw len (the slot pair, 2) */
+
     return first_col->len;
 }
 

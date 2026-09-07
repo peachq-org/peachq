@@ -682,7 +682,9 @@ ray_t* q_flip_wrap(ray_t* x) {
             ray_t* col = q_join_item(v, c);
             if (!col || RAY_IS_ERR(col)) return col ? col : q_err(QE_OOM);
             if (!ray_is_atom(col)) {
-                int64_t l = ray_len(col);
+                /* len-as-a-list: a 98h column measures its rows (raw len is the slot pair);
+                 * NOT q_count_long, whose base fallback errors on a 20h enum column */
+                int64_t l = col->type == RAY_TABLE ? ray_table_nrows(col) : ray_len(col);
                 if (L < 0) L = l;
                 else if (l != L) { ray_release(col); return q_err(QE_LENGTH); }
             }
