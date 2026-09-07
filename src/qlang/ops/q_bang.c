@@ -255,10 +255,12 @@ static ray_t* bang_make_dict(ray_t* x, ray_t* y) {
  * x through unchanged (ref/display.md; file-text.md pins the repr).  Borrowed y in,
  * OWNED y out — the retain balances the caller's release of the result. */
 static ray_t* bang_show(ray_t* y) {
-    char buf[8192]; buf[0] = '\0';
-    q_fmt_krepr(y, buf, sizeof buf);
-    q_console_write(buf, strlen(buf));
-    q_console_write("\n", 1);
+    ray_t* s = q_fmt_krepr_charv(y);          /* `0N!` and `-3!` are ONE text — so, one call */
+    if (RAY_IS_ERR(s)) return s;
+    int rc = q_console_write((const char*)ray_data(s), (size_t)ray_len(s));
+    rc |= q_console_write("\n", 1);
+    ray_release(s);
+    if (rc) return q_err(QE_WSFULL);
     ray_retain(y);
     return y;
 }
