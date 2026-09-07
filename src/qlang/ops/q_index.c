@@ -114,6 +114,19 @@ static ray_t* miss_null(ray_t* c) {
     return RAY_NULL_OBJ;
 }
 
+/* A step dictionary's miss: its keys carry `s (ref/apply.md:308 "A step dictionary has the sorted attribute set.
+ * Its keys are a sorted vector"), and a key outside the domain takes the value of the HIGHEST key below it — which
+ * is `bin` exactly, down to its -1 for a key below the domain.  A probe bin cannot order is DELIBERATELY not an
+ * error: it keeps the typed null the same probe already got from the plain dict, so only the in-domain gap moves. */
+static int64_t step_below(ray_t* keys, ray_t* i) {
+    if (!keys || !ray_is_vec(keys) || !(keys->attrs & RAY_ATTR_SORTED)) return -1;
+    ray_t* p = q_bin_wrap(keys, i);
+    if (!p || RAY_IS_ERR(p)) { if (p) ray_release(p); return -1; }
+    int64_t r = q_type_is_int_atom(p) ? q_type_iatom_val(p) : -1;
+    ray_release(p);
+    return r;
+}
+
 /* ===== the two level ops ================================================= */
 
 static ray_t* store_level(ray_t* x, ray_t* i, ray_t* v);
@@ -123,15 +136,16 @@ static ray_t* table_level(ray_t* t, ray_t* i, int write);
 static ray_t* keyed_level(ray_t* x, ray_t* i, int write);
 static ray_t* keyed_at(ray_t* x, ray_t* i);
 
-/* one atom-index READ step.  Dict = find-then-index-values (a key miss is
- * the values' typed null, NEVER positional); vec/list = elem or miss.  In
- * write mode a miss/OOB is 'index (a path must exist to be amended). */
+/* one atom-index READ step.  Dict = find-then-index-values (a key miss is the values' typed null on a plain dict
+ * and the step below on an `s# one, NEVER positional); vec/list = elem or miss.  In write mode a miss/OOB is
+ * 'index (a path must exist to be amended). */
 static ray_t* index_level(ray_t* x, ray_t* i, int write) {
     if (q_type_is_keyed(x)) return keyed_level(x, i, write);
     if (x->type == RAY_TABLE) return table_level(x, i, write);
     if (x->type == RAY_DICT) {
         int64_t ki = ray_dict_find_idx(x, i);
         ray_t* vals = ray_dict_slots(x)[1];
+        if (ki < 0 && !write) ki = step_below(ray_dict_slots(x)[0], i);
         if (ki < 0) return write ? q_err(QE_INDEX) : miss_null(vals);
         return q_index_elem_at(vals, ki);
     }
