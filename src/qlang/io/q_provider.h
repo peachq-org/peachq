@@ -5,9 +5,10 @@
  * registry maps the returned int handle <-> alias <-> (ds; open triad;
  * CONNID); providers are plain q namespaces (`.vtmock.open` / ...) reached by
  * NAME-GENERIC hook dispatch, and secrets die at hopen (only ":pq:ds:alias"
- * is ever stored for introspection).  Carriers are the splay shape — n sym
- * keys against ONE `:pq:ds:alias:t/ hsym atom — with ADVISORY columns: every
- * query and write goes back through the provider. */
+ * is ever stored for introspection).  A bound table is the splay POINTER —
+ * the flip of `cols!`:pq:ds:alias:t/`, carried as that dict with the aux mark
+ * (base/q_type.h) — and its columns are ADVISORY: every query and write goes back
+ * through the provider. */
 #ifndef QLANG_Q_PROVIDER_H
 #define QLANG_Q_PROVIDER_H
 #include <rayforce.h>
@@ -51,7 +52,12 @@ ray_t* q_provider_close(int64_t qh);
 /* provider/alias sym ids of a registered provider handle; 0 = no such fd */
 int    q_provider_info(int64_t fd, int64_t* provider, int64_t* alias);
 
-int    q_provider_carrier_is(ray_t* x);
+int    q_provider_carrier_is(ray_t* x);      /* a bound table = the MARKED dict; never a shape test */
+
+/* The flip law both ways (q_splay_flip's twin), each a FRESH block, NULL = not that shape: flip flip x ~ x. */
+ray_t* q_provider_flip(ray_t* cols, int64_t sym);     /* `cols!`:pq:…:t/` -> the pointer */
+ray_t* q_provider_unflip(ray_t* car);                 /* the pointer     -> that pair, plain */
+
 int    q_provider_coord_sym_is(ray_t* x);   /* -RAY_SYM spelling :pq:... */
 int    q_provider_coord_sym_form(ray_t* x); /* 0 none, 1 connection, 2 table (/) */
 
