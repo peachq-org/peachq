@@ -11,11 +11,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-void        q_console_show(ray_t* val);   /* append q_fmt_console(val) + '\n' */
+int         q_console_show(ray_t* val);   /* the whole display + '\n'; -1 = could not build it, or the sink refused */
 const char* q_console_str(void);          /* buffered text ("" if empty) */
 void        q_console_reset(void);        /* clear the buffer */
 void        q_console_flush(void);        /* write + clear: the exit-path drain */
-void q_console_write(const char* s, size_t n);  /* raw bytes (kdb 1/-1 handles) */
+int  q_console_write(const char* s, size_t n);  /* raw bytes (kdb 1/-1 handles); -1 = sink refused */
 
 /* Modern pipe-table display: a deliberate kdb divergence, the `./q`/wasm
  * DEFAULT (`-classic` at launch / `\classic 1` at runtime opt out; spec:

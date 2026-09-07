@@ -293,8 +293,8 @@ static ray_t* console_write_h(int64_t qh, ray_t* y) {
     int nl = qh < 0;
     const char* yp; int64_t yn;
     if (y && q_str_text_bytes(y, &yp, &yn)) {
-        q_console_write(yp, (size_t)yn);
-        if (nl) q_console_write("\n", 1);
+        if (q_console_write(yp, (size_t)yn) || (nl && q_console_write("\n", 1)))
+            return q_err(QE_WSFULL);
     } else if (y && (y->type == RAY_LIST || y->type == RAY_STR)) {
         int64_t m = ray_len(y);
         for (int64_t i = 0; i < m; i++) {
@@ -307,9 +307,9 @@ static ray_t* console_write_h(int64_t qh, ray_t* y) {
                 ray_release(it);
                 return q_err(QE_TYPE);
             }
-            q_console_write(ip, (size_t)in_);
-            if (nl) q_console_write("\n", 1);
+            int rc = q_console_write(ip, (size_t)in_) || (nl && q_console_write("\n", 1));
             ray_release(it);
+            if (rc) return q_err(QE_WSFULL);
         }
     } else
         return q_err(QE_TYPE);

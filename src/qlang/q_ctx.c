@@ -175,10 +175,15 @@ static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
      * an assignment statement answers (q_eval_statement); a script load
      * (print_result == 0) prints no result at all. */
     if (print_result && !RAY_IS_NULL(r)) {
-        char buf[8192];
-        q_fmt_console(r, buf, sizeof buf);   /* obey \c on auto-echo display */
-        fputs(buf, out);
-        fputc('\n', out);
+        size_t n;
+        char*  txt = q_fmt_console_alloc(r, &n);   /* obey \c on auto-echo display */
+        if (txt) {
+            fwrite(txt, 1, n, out);
+            fputc('\n', out);
+            free(txt);
+        } else {
+            ctx_show_err(out, err, q_err(QE_WSFULL));   /* a display we cannot build is an error */
+        }
     }
     ray_release(r);
     fflush(out);
