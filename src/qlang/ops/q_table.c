@@ -20,7 +20,7 @@
 #include "qlang/ops/q_bang.h"   /* q_bang_enkey — xkey's keying primitive */
 #include "qlang/ops/q_index.h"  /* q_index_at / q_index_elem_at — group's key gathers */
 #include "qlang/io/q_splay.h"   /* q_splay_table_path / q_splay_flip — the flip law's two directions */
-#include "qlang/io/q_provider.h"  /* provider carriers: cols from the snapshot, meta via hooks */
+#include "qlang/io/q_provider.h" /* the flip pair; carrier cols from the snapshot, meta via hooks */
 #include "qlang/io/q_io.h"      /* q_io_is_fsym / q_io_resource_table — cols of a decoded resource */
 #include "lang/internal.h"      /* ray_group_fn */
 #include "ops/agg_engine.h"     /* agg_group_keys — the one dense group core */
@@ -642,9 +642,10 @@ static ray_t* table_colnames(ray_t* x);
 /* q `flip x` / monadic `+` — transpose.
  *   table         -> dict (colnames ! list-of-columns)      [flip flip t ~ t]
  *                    a MAPPED splay -> `cols!`:dir/` (ref/flip-splayed.md: the table IS the flip of that dict)
+ *   POINTER dict  -> the same pair unmarked (a provider table is that flip too — q_provider.h)
  *   dict          -> table (sym keys; vector vals share one length L, atoms
  *                    broadcast to L; mismatched vector length -> 'length);
- *                    `cols!`:dir/` -> the mapped table (or the unresolved one)
+ *                    `cols!`:dir/` -> the mapped table, `cols!`:pq:…/` the bound provider pointer
  *   list of lists -> transposed list (atom items broadcast)
  * Keyed tables, atoms, and an ALL-ATOM dict or list are 'rank: "to define a
  * 1-row table, enlist at least one of the column values" (basics/syntax.md:236)
@@ -661,12 +662,15 @@ ray_t* q_flip_wrap(ray_t* x) {
     }
     if (q_type_is_keyed(x)) return q_err(QE_RANK);
     if (x->type == RAY_DICT) {
+        ray_t* u = q_provider_unflip(x);                  /* a provider POINTER flips back to its plain pair */
+        if (u) return u;
         ray_t* k = ray_dict_keys(x);                      /* borrowed */
         ray_t* v = ray_dict_vals(x);                      /* borrowed */
         if (!k || k->type != RAY_SYM || !v)
             return q_err(QE_TYPE);
-        if (v->type == -RAY_SYM) {
-            ray_t* t = q_splay_flip(k, v->i64);
+        if (v->type == -RAY_SYM) {                        /* ONE hsym-valued arm, dispatching on the spelling */
+            ray_t* t = q_splay_flip(k, v->i64);           /* `:dir/  -> the mapped table */
+            if (!t) t = q_provider_flip(k, v->i64);       /* `:pq:…/ -> the bound pointer */
             if (t) return t;
         }
         int64_t nc = ray_len(k);
