@@ -1,7 +1,7 @@
 /* q_console — console sink buffer + the modern pipe-table mode.  See
  * q_console.h for the contract; the value->string core stays in q_fmt.c. */
 #include "qlang/q_console.h"
-#include "qlang/q_fmt.h"               /* q_fmt_console — show's render; q_fmt — digest atoms */
+#include "qlang/q_fmt.h"               /* q_fmt_console_alloc — show's render */
 #include "core/ipc.h"                  /* ray_ipc_current_handle — handler write-through */
 #include "core/platform.h"             /* RAY_OS_WINDOWS — the `\c 0N` terminal query */
 #include "qlang/q_env.h"               /* q_env_bind — the .pq.i.termsize native */
@@ -34,37 +34,40 @@ void q_console_flush(void) {
     q_console_reset();
 }
 
-static void console_append(const char* s, size_t n) {
+static int console_append(const char* s, size_t n) {
     if (g_console_len + n + 1 > g_console_cap) {
         size_t nc = g_console_cap ? g_console_cap * 2 : 256;
         while (nc < g_console_len + n + 1) nc *= 2;
         char* nb = realloc(g_console, nc);
-        if (!nb) return;                       /* drop on OOM — best effort */
+        if (!nb) return -1;                    /* say so: a dropped append is lost display */
         g_console = nb; g_console_cap = nc;
     }
     memcpy(g_console + g_console_len, s, n);
     g_console_len += n;
     g_console[g_console_len] = '\0';
+    return 0;
 }
 
 /* g_console buffer for the host to drain; in an IPC handler (no host drain) straight to stdout, kdb's server-console behaviour. */
-static void console_emit(const char* s, size_t n) {
+static int console_emit(const char* s, size_t n) {
     if (ray_ipc_current_handle() >= 0) {
-        fwrite(s, 1, n, stdout);
-        fflush(stdout);
-    } else {
-        console_append(s, n);
+        size_t w = fwrite(s, 1, n, stdout);
+        fflush(stdout);                        /* a stream error is not OURS to escalate */
+        return w == n ? 0 : -1;
     }
+    return console_append(s, n);
 }
 
-void q_console_show(ray_t* val) {
-    char buf[8192]; buf[0] = '\0';
-    q_fmt_console(val, buf, sizeof buf);   /* `show` obeys the `\c` display clip */
-    console_emit(buf, strlen(buf));
-    console_emit("\n", 1);
+int q_console_show(ray_t* val) {
+    size_t n;
+    char*  txt = q_fmt_console_alloc(val, &n);   /* `show` obeys the `\c` display clip */
+    if (!txt) return -1;
+    int rc = console_emit(txt, n);
+    free(txt);
+    return console_emit("\n", 1) || rc;
 }
 
-void q_console_write(const char* s, size_t n) { console_emit(s, n); }
+int q_console_write(const char* s, size_t n) { return console_emit(s, n); }
 
 
 /* ---- pipe-mode STATE (the renderer lives in q_fmt.c — a formatting mode) ---- */

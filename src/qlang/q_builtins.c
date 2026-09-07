@@ -53,7 +53,7 @@ ray_t* q_parse_builtin_fn(ray_t* x) {
  * q_fmt.  qdoc/repl print nothing for the null result, so the row shows only
  * the buffered display. */
 static ray_t* show_fn(ray_t* x) {
-    q_console_show(x);
+    if (q_console_show(x)) return q_err(QE_WSFULL);
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;
 }
