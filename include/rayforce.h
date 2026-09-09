@@ -507,8 +507,11 @@ ray_t* ray_typed_null(int8_t type);
 #define NULL_I16  ((int16_t)INT16_MIN)
 #define NULL_I32  ((int32_t)INT32_MIN)
 #define NULL_I64  ((int64_t)INT64_MIN)
-#define NULL_F32  ((float)__builtin_nanf(""))
-#define NULL_F64  (__builtin_nan(""))
+/* The float nulls are the NEGATIVE quiet NaN — kdb's 0n/0Ne on the wire and on
+ * disk.  The sign is invisible to every reader (all null tests are isnan) but
+ * byte-visible to a kdb peer, so it must live here and not at a codec. */
+#define NULL_F32  (-(float)__builtin_nanf(""))
+#define NULL_F64  (-__builtin_nan(""))
 
 /* Per-type INFINITY payload — the sibling of ray_typed_null, sharing its
  * width groupings.  Integer-backed types only (the float lanes have real
