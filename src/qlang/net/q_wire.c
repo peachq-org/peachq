@@ -104,9 +104,10 @@ static int w_count(q_wire_wbuf_t* b, int64_t len) {
     return w_i32(b, (int32_t)len);
 }
 
-/* char vector object: 0x0a attrs count bytes */
-static int w_charvec(q_wire_wbuf_t* b, const char* s, int64_t n) {
-    if (w_u8(b, 10) || w_u8(b, 0) || w_count(b, n)) return -1;
+/* char vector object: 0x0a attrs count bytes.  Callers holding raw bytes rather than a value pass
+ * attrs 0 — there is nothing to read an attribute off. */
+static int w_charvec(q_wire_wbuf_t* b, const char* s, int64_t n, uint8_t attrs) {
+    if (w_u8(b, 10) || w_u8(b, attrs) || w_count(b, n)) return -1;
     return w_raw(b, s, (size_t)n);
 }
 
@@ -191,7 +192,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
             ray_t* lctx = NULL;
             q_eval_apply_lambda_parts(x, NULL, NULL, &lctx);
             rc = (w_u8(b, 100) || w_lambda_ctx(b, lctx) ||
-                  w_charvec(b, ray_str_ptr(src), (int64_t)ray_str_len(src))) ? -1 : 0;
+                  w_charvec(b, ray_str_ptr(src), (int64_t)ray_str_len(src), 0)) ? -1 : 0;
             goto out;
         }
         int kind = b->serde ? 0 : q_eval_apply_carrier_kind(x);
@@ -317,7 +318,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
             }
             /* wire: len 1 -> char atom (kdb "a"); else char vector.  q_wire.h. */
             if (n == 1) rc = (w_u8(b, 0xf6) || w_u8(b, (uint8_t)p[0])) ? -1 : 0;
-            else        rc = w_charvec(b, p, (int64_t)n);
+            else        rc = w_charvec(b, p, (int64_t)n, 0);
             goto out;
         }
         case RAY_SYM: rc = (w_u8(b, (uint8_t)-RAY_SYM) || w_sym_id(b, x->i64)) ? -1 : 0; goto out;
@@ -348,11 +349,14 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     /* ---- structural containers (recurse) — kept out of the value-enum switch ---- */
     if (t == RAY_DICT) {
         /* generic recursion — keyed tables (dict of two tables) fall out.  A provider POINTER is a table to its
-         * peer, so it takes the mapped-splay envelope (98 over the same pair); the unmarked pair stays a dict. */
+         * peer, so it takes the mapped-splay envelope (98 over the same pair); the unmarked pair stays a dict.
+         * A sorted dict is a TAG, not an attribute byte: 127 (kb/serialization.md:118). */
         ray_t** slots = (ray_t**)ray_data(x);
-        if (q_provider_carrier_is(x) && (w_u8(b, 98) || w_u8(b, 0))) goto out;
-        rc = (w_u8(b, 99) || q_wire_write_obj(b, slots[0]) ||
-              q_wire_write_obj(b, slots[1])) ? -1 : 0;
+        if (q_provider_carrier_is(x)) {
+            if (w_u8(b, 98) || w_u8(b, 0) || w_u8(b, 99)) goto out;
+        } else if (w_u8(b, q_attr_letter(x) == 's' ? 127 : 99))
+            goto out;
+        rc = (q_wire_write_obj(b, slots[0]) || q_wire_write_obj(b, slots[1])) ? -1 : 0;
         goto out;
     }
     if (t == RAY_TABLE) {
@@ -364,7 +368,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
             rc = wbuf_fail(b, q_err(QE_TYPE));
             goto out;
         }
-        if (w_u8(b, 98) || w_u8(b, 0) || w_u8(b, 99)) goto out;
+        if (w_u8(b, 98) || w_u8(b, q_attr_byte(x)) || w_u8(b, 99)) goto out;
         if (w_u8(b, (uint8_t)RAY_SYM) || w_u8(b, 0) || w_count(b, schema->len)) goto out;
         const int64_t* ids = (const int64_t*)ray_data(schema);
         rc = 0;
@@ -391,8 +395,8 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         /* fixed-width payloads are bit-identical to kdb on LE hosts.
          * serde mode carries HAS_NULLS (the reader rescans sentinel types,
          * but GUID nulls — all-zero payload — are only knowable from the
-         * flag); wire mode emits kdb's 0. */
-        uint8_t vattrs = b->serde ? (uint8_t)(x->attrs & RAY_ATTR_HAS_NULLS) : 0;
+         * flag); wire mode spends the same byte on kdb's attribute. */
+        uint8_t vattrs = b->serde ? (uint8_t)(x->attrs & RAY_ATTR_HAS_NULLS) : q_attr_byte(x);
         if (w_u8(b, (uint8_t)t) || w_u8(b, vattrs) || w_count(b, x->len)) goto out;
         uint8_t esz = ray_type_sizes[(uint8_t)t];
         const uint8_t* d = (const uint8_t*)ray_data(x);
@@ -415,17 +419,17 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     }
     case RAY_STR: {
         /* string column -> kdb list of char vectors (q_wire.h) */
-        if (w_u8(b, 0) || w_u8(b, 0) || w_count(b, x->len)) goto out;
+        if (w_u8(b, 0) || w_u8(b, q_attr_byte(x)) || w_count(b, x->len)) goto out;
         rc = 0;
         for (int64_t i = 0; i < x->len && rc == 0; i++) {
             size_t n = 0;
             const char* s = ray_str_vec_get(x, i, &n);
-            rc = w_charvec(b, s ? s : "", (int64_t)n);
+            rc = w_charvec(b, s ? s : "", (int64_t)n, 0);
         }
         goto out;
     }
     case RAY_SYM: {
-        if (w_u8(b, (uint8_t)RAY_SYM) || w_u8(b, 0) || w_count(b, x->len)) goto out;
+        if (w_u8(b, (uint8_t)RAY_SYM) || w_u8(b, q_attr_byte(x)) || w_count(b, x->len)) goto out;
         rc = 0;
         for (int64_t i = 0; i < x->len && rc == 0; i++) {
             ray_t* s = ray_sym_vec_cell(x, i);        /* borrowed; NULL = empty */
@@ -450,7 +454,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
             }
             if (cx && !RAY_IS_ERR(cx)) ray_release(cx);
         }
-        uint8_t attrs = b->serde ? (uint8_t)(x->attrs & ~RAY_ATTR_SLICE) : 0;
+        uint8_t attrs = b->serde ? (uint8_t)(x->attrs & ~RAY_ATTR_SLICE) : q_attr_byte(x);
         if (w_u8(b, 0) || w_u8(b, attrs) || w_count(b, x->len)) goto out;
         ray_t** e = (ray_t**)ray_data(x);
         rc = 0;
@@ -460,7 +464,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     }
     case RAY_CHARV:         /* char vector: raw kdb tag 10 (len-1 stays a VECTOR
                              * on the wire — the 1-char-string conflation is gone) */
-        rc = w_charvec(b, (const char*)ray_data(x), x->len);
+        rc = w_charvec(b, (const char*)ray_data(x), x->len, q_attr_byte(x));
         goto out;
     }
     /* value band exhausted above; an out-of-band tag (INDEX 97, or the sparse
@@ -637,10 +641,11 @@ ray_t* q_wire_fixed_vec(int8_t t, const uint8_t* p, int64_t count, int swap) {
     return v;
 }
 
-/* Fixed-width vector body: attrs(ignored) count payload. */
+/* Fixed-width vector body: attrs count payload — the byte means the kdb attribute on the wire and
+ * peachq's HAS_NULLS in serde mode, so the two modes read it apart. */
 static ray_t* rd_fixed_vec(rcur_t* c, int8_t t) {
     if (!r_need(c, 5)) return trunc_err("vector header");
-    uint8_t wattrs = r_u8(c);                         /* wire mode: ignored */
+    uint8_t wattrs = r_u8(c);
     int32_t count = r_i32(c);
     uint8_t esz = ray_type_sizes[(uint8_t)t];
     if (count < 0 || (uint64_t)count * esz > c->rem)
@@ -651,8 +656,11 @@ static ray_t* rd_fixed_vec(rcur_t* c, int8_t t) {
     c->rem -= (size_t)count * esz;
     /* serde mode: the flag also covers nulls the scan can't see (GUID
      * all-zero sentinel) — restore it from the frame. */
-    if (c->serde && (wattrs & RAY_ATTR_HAS_NULLS)) v->attrs |= RAY_ATTR_HAS_NULLS;
-    return v;
+    if (c->serde) {
+        if (wattrs & RAY_ATTR_HAS_NULLS) v->attrs |= RAY_ATTR_HAS_NULLS;
+        return v;
+    }
+    return q_attr_stamp_byte(v, wattrs);              /* owned exclusive; consumes v */
 }
 
 /* serde-mode extension records (q_wire.h band 200..236) */
@@ -837,7 +845,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         switch (t) {
         case RAY_SYM: {
             if (!r_need(c, 5)) return trunc_err("sym vector header");
-            (void)r_u8(c);
+            uint8_t wattrs = r_u8(c);
             int32_t count = r_i32(c);
             if (count < 0 || (uint64_t)count > c->rem)
                 return q_err(QE_DOMAIN);
@@ -850,7 +858,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
                 if (r_cstr(c, &s, &n)) { v->len = i; ray_release(v); return trunc_err("sym vector cell"); }
                 ids[i] = ray_sym_intern(s, n);
             }
-            return v;
+            return q_attr_stamp_byte(v, wattrs);      /* `u/`p/`g have no symbol carrier: DROPPED, never lied about */
         }
         default: {
             uint8_t esz = ray_type_sizes[(uint8_t)t];
@@ -885,7 +893,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         }
         ray_t* out = q_list_collapse(l);              /* owned; parser-identical shape */
         ray_release(l);
-        return out;
+        return q_attr_stamp_byte(out, attrs);
     }
     case 99: case 127: {                              /* dict / sorted dict */
         ray_t* k = rd_obj(c);
@@ -902,11 +910,15 @@ static ray_t* rd_obj_inner(rcur_t* c) {
             ray_release(k); ray_release(v);
             return q_err(QE_LENGTH);
         }
-        return ray_dict_new(k, v);                    /* consumes both */
+        /* 127 marks the dict itself; the key carries its own byte, but a peer that sends only the tag
+         * must not leave `attr` saying `s while the lookup refuses to step (ref/apply.md:308). */
+        if (t == 127) k = q_attr_stamp_trusted(k, 's');
+        ray_t* d = ray_dict_new(k, v);                /* consumes both */
+        return t == 127 ? q_attr_stamp_trusted(d, 's') : d;
     }
     case 98: {                                        /* table */
         if (!r_need(c, 2)) return trunc_err("table header");
-        (void)r_u8(c);                                /* attrs */
+        uint8_t wattrs = r_u8(c);
         if (r_u8(c) != 99)
             return q_err(QE_DOMAIN);
         ray_t* keys = rd_obj(c);
@@ -934,7 +946,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
                                     ray_list_get(cols, i));   /* col NOT consumed */
         ray_release(keys);
         ray_release(cols);
-        return tbl ? tbl : q_err(QE_WSFULL);
+        return tbl ? q_attr_stamp_byte(tbl, wattrs) : q_err(QE_WSFULL);
     }
     case 100: {                                       /* lambda: context + source */
         const char* ctx; size_t ctxn;

@@ -96,7 +96,9 @@ static bool tail_non_descending(ray_t* r, int64_t from) {
 ray_t* q_attr_stamp_trusted(ray_t* v, char letter) {
     if (!v || RAY_IS_ERR(v) || !letter) return v;
     if (letter == 's') {
-        if (ray_is_vec(v) && !(v->attrs & (RAY_ATTR_SLICE | RAY_ATTR_ARENA)) && v->rc == 1)
+        /* the carrier set MIRRORS q_attr_letter's sorted arm, or a stamp and a read disagree */
+        if ((ray_is_vec(v) || v->type == RAY_LIST || v->type == RAY_TABLE || v->type == RAY_DICT) &&
+            !(v->attrs & (RAY_ATTR_SLICE | RAY_ATTR_ARENA)) && v->rc == 1)
             v->attrs |= RAY_ATTR_SORTED;
         return v;
     }
@@ -111,6 +113,23 @@ ray_t* q_attr_stamp_trusted(ray_t* v, char letter) {
                  : letter == 'p' ? RAY_MARK_PARTED
                  : letter == 'g' ? RAY_MARK_GROUPED : 0;
     return mark ? ray_attr_mark_attach(v, mark) : v;
+}
+
+/* kdb spells an attribute as a BYTE — the same 0-4 on the wire (kb/serialization.md:39) and on disk —
+ * which COLLIDES with rayforce's attrs bits, so both directions translate through the letter above
+ * rather than copying the bitfield. */
+static const char attr_byte_letters[5] = { 0, 's', 'u', 'p', 'g' };
+
+uint8_t q_attr_byte(ray_t* v) {
+    char c = q_attr_letter(v);
+    for (uint8_t b = 1; b < 5; b++)
+        if (attr_byte_letters[b] == c) return b;
+    return 0;
+}
+
+ray_t* q_attr_stamp_byte(ray_t* v, uint8_t byte) {
+    if (!v || RAY_IS_ERR(v) || byte < 1 || byte > 4) return v;
+    return q_attr_stamp_trusted(v, attr_byte_letters[byte]);
 }
 
 /* Remap the engine's set-attribute failure codes to kdb's error text.  The
@@ -222,29 +241,21 @@ static ray_t* attr_set_table_s(ray_t* y) {
     return out;
 }
 
-/* Verified in-place p: true for every sharer (set-attribute.md:63's in-place law). */
-static void attr_stamp_inplace_p(ray_t* col) {
-    if (!ray_is_vec(col) || ray_attr_numeric_class(col->type) < 0 ||
-        (col->attrs & (RAY_ATTR_SLICE | RAY_ATTR_ARENA)))
-        return;
-    ray_retain(col);
-    ray_t* w = ray_attr_mark_attach(col, RAY_MARK_PARTED);   /* consumes; in place */
-    if (!w) return;
-    if (RAY_IS_ERR(w)) ray_error_free(w);
-    else ray_release(w);
-}
-
-/* `s#` on a KEYED table stamps the KEY table IN PLACE — :63 is why the :35-37
- * pin sees `s from an UNASSIGNED `s#t. */
+/* `s#` on a KEYED table stamps the KEY table IN PLACE (set-attribute.md:63 — why the :35-37 pin sees
+ * `s from an UNASSIGNED `s#t) and "copies the outer object" (:75), so the RESULT is a sorted dict
+ * while the argument keeps its own attribute.  The key table's first column is NOT parted:
+ * kb/serialization.md's keyed-table frame carries 00 there where the plain-table frame carries 03. */
 static ray_t* attr_set_keyed_s(ray_t* y) {
     ray_t* kt = ray_dict_keys(y);                            /* borrowed key TABLE */
     if (!kt || kt->type != RAY_TABLE || ray_table_ncols(kt) < 1) return q_err(QE_TYPE);
     ray_t* c0 = ray_table_get_col_idx(kt, 0);
     if (!c0 || !tail_non_descending(c0, 0)) return ray_error("s-fail", NULL);
-    attr_stamp_inplace_p(c0);
     kt->attrs |= RAY_ATTR_SORTED;
-    ray_retain(y);
-    return y;
+    ray_t* vals = ray_dict_vals(y);
+    ray_retain(kt); ray_retain(vals);
+    ray_t* d = ray_dict_new(kt, vals);                       /* consumes both */
+    if (d && !RAY_IS_ERR(d)) d->attrs |= RAY_ATTR_SORTED;
+    return d;
 }
 
 /* `s#` on a DICT: verify the key order (the step-function contract), stamp the

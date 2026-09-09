@@ -6,7 +6,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"  /* q_type_is_int_vec — the `.z.zd` triple */
 #include "qlang/q_env.h"        /* q_env_get — `.z.zd` lives as a plain global */
-#include "qlang/q_prim.h"       /* q_str_text_bytes — nested CHAR rows */
+#include "qlang/q_prim.h"       /* q_str_text_bytes — nested CHAR rows; q_attr_stamp_byte — the disk letter */
 #include "qlang/q_builtins.h"   /* q_count_long — nested column length */
 #include "qlang/ops/q_index.h"  /* q_index_elem_at — nested row reads */
 #include "qlang/io/q_splay.h"   /* q_splay_invalidate(_under) — writes drop stale map entries */
@@ -79,18 +79,6 @@ static int8_t wf_simple_tag(uint8_t disk) {
         return (int8_t)disk;
     default: return 0;
     }
-}
-
-/* kdb's disk attribute (0=none 1=s 2=u 3=p 4=g) COLLIDES with rayforce's attrs
- * bits — translate, never copy.  The byte is TRUSTED (kdb trusts its own
- * files; a lying byte is corrupt-class), so no O(n) verify and no index build:
- * the trusted stamp attaches the marker-only letter, and any kx index trailer
- * beyond count*width is simply never read. */
-static const char wf_attr_letter[5] = { 0, 's', 'u', 'p', 'g' };
-
-static ray_t* wf_apply_attr(ray_t* v, uint8_t disk_attr) {
-    if (!v || RAY_IS_ERR(v) || disk_attr < 1 || disk_attr > 4) return v;
-    return q_attr_stamp_trusted(v, wf_attr_letter[disk_attr]);
 }
 
 /* ---- the `.pqattr` sidecar: OUR on-disk carrier for u/p/g ----------------
@@ -261,7 +249,7 @@ static ray_t* wf_read_a(const uint8_t* buf, size_t len) {
      * rewriting it: 10 declared for 16 names, 0 for 55), so type 11 scans
      * NUL-terminated names to EOF instead of reaching the wire decoder. */
     if (buf[2] == RAY_SYM)
-        return wf_apply_attr(wf_syms_to_eof(buf + WF_A_OFF, len - WF_A_OFF), buf[3]);
+        return q_attr_stamp_byte(wf_syms_to_eof(buf + WF_A_OFF, len - WF_A_OFF), buf[3]);
     size_t consumed = 0;
     ray_t* v = q_wire_read_obj(buf + 2, len - 2, &consumed, 0);
     if (v && !RAY_IS_ERR(v) && consumed != len - 2) { ray_release(v); return q_err(QE_CORRUPT); }
@@ -360,7 +348,7 @@ static ray_t* wf_read_b(const uint8_t* buf, size_t len, int derive, ray_t* path)
     }
     if (count < 0 || count > room) return q_err(QE_CORRUPT);
     if (nested) return wf_read_nested(tag, path, buf + WF_B_OFF, count);
-    return wf_apply_attr(q_wire_fixed_vec(tag, buf + WF_B_OFF, count, 0), buf[3]);
+    return q_attr_stamp_byte(q_wire_fixed_vec(tag, buf + WF_B_OFF, count, 0), buf[3]);
 }
 
 static ray_t* wf_read_path(ray_t* path, int follow);
@@ -381,8 +369,8 @@ static ray_t* wf_read_enum(const char* domain, const uint8_t* p, size_t room,
         if (count < 0) return q_err(QE_NYI);
     }
     if (count < 0 || (uint64_t)count > room / w) return q_err(QE_CORRUPT);
-    return wf_apply_attr(q_enum_from_indices(ray_sym_intern_runtime(domain, nn),
-                                             p + 8, count, w), attr);
+    return q_attr_stamp_byte(q_enum_from_indices(ray_sym_intern_runtime(domain, nn),
+                                                p + 8, count, w), attr);
 }
 
 /* Two candidate count offsets: the terminator rounded up to the next 8-byte
