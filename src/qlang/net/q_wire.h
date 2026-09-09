@@ -105,9 +105,10 @@ ray_t* q_wire_serialize_len(ray_t* x);
 ray_t* q_wire_deserialize(ray_t* bytes);
 
 /* ---- Phase F compression codec (javakdb c.java scheme) ----
- * Compress a complete frame: returns the compressed frame when the input is
- * >2000 bytes AND compresses to under half, else the input retained
- * unchanged (kdb's threshold / give-up rules).  Owned RAY_U8 or RAY_ERROR. */
+ * Compress a complete frame: returns the compressed frame when its serialized
+ * data (the frame less its 8-byte header) exceeds 2000 bytes AND compresses to
+ * under half, else the input retained unchanged (kdb's threshold / give-up
+ * rules).  Owned RAY_U8 or RAY_ERROR. */
 ray_t* q_wire_compress(ray_t* frame);
 
 /* Decompress a compressed frame's payload (the bytes AFTER the 8-byte
