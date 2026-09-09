@@ -539,13 +539,11 @@ static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r
     if (dop && dag_pair_ok(l, r, lc, rc) &&
         !(lc && rc && ray_len(l) != ray_len(r)))
         return atomic_map_binary_op(fn, dop, l, r);
-    int64_t len;
-    if (lc && rc) {
-        if (ray_len(l) != ray_len(r)) return q_err(QE_LENGTH);
-        len = ray_len(l);
-    } else {
-        len = lc ? ray_len(l) : ray_len(r);
-    }
+    /* a length mismatch still probes the first pair, so an out-of-domain pair answers 'type before 'length
+     * (`"abac" xexp `a`b`a`); an empty side has no pair to probe and is 'length outright */
+    int mismatch = lc && rc && ray_len(l) != ray_len(r);
+    int64_t len = lc ? ray_len(l) : ray_len(r);
+    if (mismatch && (!ray_len(l) || !ray_len(r))) return q_err(QE_LENGTH);
 
     if (len == 0) {
         ray_t* la = lc ? probe_atom(l) : l;
@@ -580,6 +578,7 @@ static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r
     if (lc && a0 != e0) ray_release(a0);
     if (rc && b0 != e0) ray_release(b0);
     if (RAY_IS_ERR(e0)) return e0;
+    if (mismatch) { ray_release(e0); return q_err(QE_LENGTH); }
 
     int8_t out_type = (int8_t)(-e0->type);
     int force_boxed = (lc && l->type == RAY_LIST) || (rc && r->type == RAY_LIST);

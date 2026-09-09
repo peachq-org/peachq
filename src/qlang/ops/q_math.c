@@ -10,7 +10,7 @@
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home */
 #include "lang/eval.h"     /* ray_eq_fn/ray_neq_fn, ray_neg_fn */
 #include "lang/internal.h" /* atomic_map_unary, as_f64, is_numeric, is_temporal, make_f64 */
-#include "qlang/base/q_type.h"  /* q_type_as_i64 / q_type_is_numeric_or_temporal / q_type_is_bool */
+#include "qlang/base/q_type.h"  /* q_type_as_i64 / q_type_is_numeric_or_temporal / q_type_is_bool / q_type_is_char_atom */
 #include "qlang/eval/q_eval.h" /* carrier read-out: `~` decomposes function values */
 #include <math.h>          /* sin/cos/tan/asin/acos/atan, exp/log, floor/floorf, ceil/ceilf */
 #include <string.h>        /* memcmp, memcpy */
@@ -140,23 +140,18 @@ ray_t* q_neg_wrap(ray_t* x) {
     return ray_neg_fn(x);
 }
 
-/* ---- dyadic atomic math (feat/q-math-parse-display) ----------------------
- * q `x xexp y` — x to the power y as a FLOAT (ref/exp.md).  The doc pins the
- * COMPUTATION, not just the value: "The calculation is performed as
- * exp y * log x" (so `2 xexp 3` is 7.999…, NOT C pow's exact 8 — codex r1).
- * All the doc's edge rules fall out of the identity: x null or NEGATIVE ->
- * log NaN -> 0n; y null -> 0n; x=0,y>0 -> 0f; overflow +inf -> 0n via
- * make_f64 (single-null model; kdb shows 0w — documented divergence).
- * Domain is numeric-only: ref/exp.md's table rejects char args. */
+/* q `x xexp y` — x to the power y as a FLOAT (ref/exp.md).  The doc pins the COMPUTATION, not just the value: "The
+ * calculation is performed as exp y * log x", so `2 xexp 3` is 7.9999999999999982, NOT C pow's exact 8.  x null or
+ * negative -> log NaN -> 0n; y null -> 0n.  x=0 is the one point the identity misreads: exp(0 * -inf) is NaN where the
+ * page's "x non-negative -> x to the y" wants 0^0 = 1.  The published domain is `b x h i j e f` on both axes: char is
+ * refused although it shares the byte lane, and a null is refused by its TYPE before it is honoured as a null (0Ng). */
 ray_t* q_xexp_wrap(ray_t* x, ray_t* y) {
-    if (!x || !y) return q_err(QE_TYPE);
-    if (!is_numeric(x) && !RAY_ATOM_IS_NULL(x))
-        return q_err(QE_TYPE);
-    if (!is_numeric(y) && !RAY_ATOM_IS_NULL(y))
+    if (!x || !y || !is_numeric(x) || !is_numeric(y) || q_type_is_char_atom(x) || q_type_is_char_atom(y))
         return q_err(QE_TYPE);
     if (RAY_ATOM_IS_NULL(x) || RAY_ATOM_IS_NULL(y))
         return ray_typed_null(-RAY_F64);
-    return make_f64(exp(as_f64(y) * log(as_f64(x))));
+    double xf = as_f64(x), yf = as_f64(y);
+    return make_f64(xf == 0 && yf == 0 ? 1.0 : exp(yf * log(xf)));
 }
 
 /* q `x xlog y` — base-x logarithm of y as a FLOAT: log(yf)/log(xf) with both
