@@ -45,7 +45,7 @@ static ray_t* h_deser(ray_t* y) {                       /* -9! from bytes */
 static ray_t* h_zip(ray_t* y) {                         /* -18! compress bytes */
     ray_t* f = q_wire_serialize(y, Q_WIRE_ASYNC);
     if (!f || RAY_IS_ERR(f)) return f;
-    ray_t* z = q_wire_compress(f);      /* >2000b + under-half, else f unchanged */
+    ray_t* z = q_wire_compress(f);      /* size + under-half, else f unchanged */
     ray_release(f);
     return z;
 }
