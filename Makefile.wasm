@@ -44,11 +44,13 @@ CFLAGS = -Wall -std=$(STD) -O3 -msimd128 \
   -fassociative-math -ftree-vectorize -fno-math-errno \
   -funsafe-math-optimizations -funroll-loops
 
-# RE2 is the tree's only C++, and clang rejects -std=c17 on C++ input: the C and
-# the C++ compile separately (the root Makefile's own rules, through $(CXX)) and
-# the LINK is em++, which is what brings libc++ in. No -fPIC — nothing here is a
-# shared object.
+# RE2 and fmt are the tree's C++, and clang rejects -std=c17 on C++ input: the C
+# and the C++ compile separately (the root Makefile's own rules, through $(CXX))
+# and the LINK is em++, which is what brings libc++ in. No -fPIC — nothing here
+# is a shared object.
 RE2_CXXFLAGS = -std=c++17 -O3 -msimd128 -fvisibility=hidden -Ithird_party/re2 -Isrc
+FMT_CXXFLAGS = -std=c++17 -O3 -msimd128 -fvisibility=hidden \
+               -Ithird_party/fmt/include -Ithird_party/fmt/stub -Isrc
 
 WASM_OBJ = $(addprefix $(BUILD_DIR)/,$(SRC:.c=.o))
 
@@ -65,9 +67,9 @@ EMFLAGS = \
 
 wasm: $(OUTDIR)/$(TARGET).js
 
-$(OUTDIR)/$(TARGET).js: $(WASM_OBJ) $(RE2_LIB)
+$(OUTDIR)/$(TARGET).js: $(WASM_OBJ) $(RE2_LIB) $(FMT_LIB)
 	@mkdir -p $(OUTDIR)
-	$(CXX) -O3 -o $@ $(WASM_OBJ) $(RE2_LIB) $(EMFLAGS)
+	$(CXX) -O3 -o $@ $(WASM_OBJ) $(RE2_LIB) $(FMT_LIB) $(EMFLAGS)
 
 # The emscripten glue uses syntax a pre-v18 node cannot parse; emsdk_env.sh
 # exports its own node as EMSDK_NODE.
