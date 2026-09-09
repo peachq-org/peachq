@@ -1109,8 +1109,9 @@ int q_wire_write_obj_ex(q_wire_wbuf_t* b, ray_t* x, int serde) {
 /* ===== Phase F: compression codec ========================================
  * Transcribed from javakdb c.java compress()/uncompress() (Apache-2.0, the
  * cleared reference — kx documents the LZ scheme only by implementation).
- * A frame compresses only when >2000 bytes AND the result is under HALF the
- * original; otherwise the input ships unchanged (the give-up path).  Layout:
+ * A frame compresses only when its serialized data exceeds 2000 bytes AND the
+ * result is under HALF the original; otherwise the input ships unchanged (the
+ * give-up path).  Layout:
  * hdr[0..3] (byte2=1), compressed total @4, uncompressed total @8 (both
  * include the 8-byte header and follow the frame's endianness: read either
  * way, written to match the input frame's byte-0), token stream @12. */
@@ -1122,7 +1123,10 @@ ray_t* q_wire_compress(ray_t* frame) {
         return q_err(QE_TYPE);
     const uint8_t* y = (const uint8_t*)ray_data(frame);
     size_t t = (size_t)frame->len;
-    if (t <= 2000) { ray_retain(frame); return frame; }     /* kdb threshold */
+    /* basics/ipc.md gates compression on the serialized DATA exceeding 2000 bytes; the
+     * 8-byte message header is not data, so q ships a 2008-byte frame whole.  javakdb
+     * c.java gates on the whole frame (`wBuffPos>2000`) — a deliberate divergence. */
+    if (t <= 8 + 2000) { ray_retain(frame); return frame; }
     int be = (y[0] == 0x00);                                /* frame's byte order */
     size_t e = t / 2;                                       /* under-half cap */
     uint8_t* z = (uint8_t*)ray_alloc_raw(e);
