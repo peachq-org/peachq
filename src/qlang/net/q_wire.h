@@ -21,7 +21,7 @@
  *   atom     := typebyte(int8, negative) payload      ; no attribute byte
  *   vector   := typebyte(1..19) attrs(1) count(int32) payload
  *   list 0h  := 0x00 attrs(1) count(int32) object*
- *   dict 99h := 0x63 object(keys) object(vals)        ; 0x7f sorted reads same
+ *   dict 99h := 0x63 object(keys) object(vals)        ; 0x7f = the sorted (`s#) dict
  *   table    := 0x62 attrs(1) 0x63 symvector(names) list(columns)
  *   lambda   := 0x64 context-cstr(root = "\0") charvector(source)
  *   error    := 0x80 cstr(code)
@@ -45,8 +45,10 @@
  *     through raw in BOTH directions (live-infinity model 2026-07-28); the
  *     reader sets RAY_ATTR_HAS_NULLS when a decoded fixed-width vector
  *     contains sentinels (invariant 16.4, vec.h).
- *   - Attribute bytes emit as 0x00 (openq has no s/u/p/g attrs yet) and
- *     are ignored on read; sorted-dict 0x7f decodes as a plain dict.
+ *   - Attribute bytes carry kdb's letter (0 none, 1 `s, 2 `u, 3 `p, 4 `g) in
+ *     BOTH directions, DERIVED through q_attr_letter rather than copied from
+ *     the colliding attrs bitfield, and TRUSTED on read — no O(n) verify, no
+ *     index build.  A sorted dict is the 0x7f TAG, not an attribute byte.
  *   - Lambdas serialize their SOURCE text (the .q.lambda carrier's `src`);
  *     decoding re-evaluates it (q_parse → q_eval), so it
  *     requires a warm q registry (runtime-only, like the `value` wrapper).
