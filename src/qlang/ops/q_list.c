@@ -235,6 +235,8 @@ ray_t* q_where_wrap(ray_t* x) {
         ray_release(idx);
         return keys;
     }
+    /* an index is long whatever the input, and an empty has no 1s (owner ruling 2026-09-09; ref/where.md is silent) */
+    if (x && x->type == RAY_LIST && !ray_len(x)) return q_type_empty(RAY_I64);
     if (x && (x->type == RAY_I64 || x->type == RAY_I32 || x->type == RAY_I16)) {
         int64_t n = ray_len(x);
         int64_t total = 0;

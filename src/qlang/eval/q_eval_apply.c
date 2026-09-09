@@ -382,8 +382,7 @@ static void probe_drop(ray_t* a) {
  * to itself ("a null has no sign", ref/neg.md) and would skip the b->i
  * promotion its domain/range table sets.  q_dollar_cast is the one conversion
  * home; the types it cannot reach from a long (sym, guid) have no zero but do
- * have a canonical empty VALUE, which is what ray_typed_null returns for them.
- * A general list has no type to read and falls back to the long. */
+ * have a canonical empty VALUE, which is what ray_typed_null returns for them. */
 static ray_t* probe_atom(ray_t* coll) {
     ray_t* z = ray_i64(0);
     if (!coll || !ray_is_vec(coll) || coll->type == RAY_STR) return z;
@@ -412,6 +411,10 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
     int is_boxed = (arg->type == RAY_LIST);
 
     if (len == 0) {
+        /* An empty's type is carried by its container, not derived from elements it has none of: the probe
+         * below reads a TYPED empty's type off a stand-in, but the untyped () has no type to read, and a probe
+         * that accepts a fabricated long manufactures one — `neg ()` is () (basics/atomic.md:75). */
+        if (arg->type == RAY_LIST) return ray_list_new(0);
         ray_t* z = probe_atom(arg);
         ray_t* probe = (z && !RAY_IS_ERR(z)) ? fn(z) : NULL;
         if (z) ray_release(z);
@@ -419,7 +422,7 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
          * own type while still admitting a long (sqrt/exp/log take p m d n u v
          * t per their domain/range tables; ours take only the numerics).  Ask
          * the long before giving up, so the empty keeps the documented type. */
-        if (arg->type != RAY_LIST && (!probe || RAY_IS_ERR(probe))) {
+        if (!probe || RAY_IS_ERR(probe)) {
             probe_drop(probe);
             ray_t* zl = ray_i64(0);
             probe = probe_ok(zl) ? fn(zl) : NULL;
@@ -437,12 +440,9 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
             ray_release(probe);
             return ray_list_new(0);
         }
-        /* The probe FAILED, so it named no type — and an untyped () carries
-         * none either, which leaves () the only honest answer (the sibling of
-         * q_index.c:miss_null).  A TYPED empty keeps the long: whether a
+        /* The probe FAILED, so it named no type.  A TYPED empty keeps the long: whether a
          * rejecting kernel should propagate its error is a separate ruling. */
         if (probe) ray_error_free(probe);
-        if (arg->type == RAY_LIST) return ray_list_new(0);
         return ray_vec_new(RAY_I64, 0);
     }
 
@@ -546,6 +546,8 @@ static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r
     if (mismatch && (!ray_len(l) || !ray_len(r))) return q_err(QE_LENGTH);
 
     if (len == 0) {
+        /* the same carried-type law as map_unary: a generic () on either side is () (`2+()`, `\`ab+()`) */
+        if ((lc && l->type == RAY_LIST) || (rc && r->type == RAY_LIST)) return ray_list_new(0);
         ray_t* la = lc ? probe_atom(l) : l;
         ray_t* ra = rc ? probe_atom(r) : r;
         ray_t* probe = (la && ra) ? fn(la, ra) : NULL;
@@ -553,8 +555,7 @@ static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r
         if (rc && ra) ray_release(ra);
         /* same narrow-kernel retry as map_unary: `reciprocal` is 1%x, so the
          * temporal domains ref/reciprocal.md publishes are reached through here */
-        if (((lc && l->type != RAY_LIST) || (rc && r->type != RAY_LIST)) &&
-            (!probe || RAY_IS_ERR(probe))) {
+        if (!probe || RAY_IS_ERR(probe)) {
             probe_drop(probe);
             ray_t* lz = lc ? ray_i64(0) : l;
             ray_t* rz = rc ? ray_i64(0) : r;
