@@ -34,13 +34,13 @@
  *              total-len:int32] — total-len INCLUDES the header; both
  *              endiannesses are read, little-endian is emitted.  The
  *              256MB frame guard is enforced here.  Compressed inbound
- *              frames (byte 2 == 1, kdb's >2000-byte non-localhost rule)
- *              decompress via q_wire_uncompress_payload before routing —
- *              Phase F.  EMIT mirrors it: a frame is compressed on send
- *              (q_wire_compress) only when the peer negotiated compression
- *              (handshake capability >= 1) AND the link is not loopback —
- *              kdb's `zip && msgLen>2000 && !isLoopback` gate, with the
- *              >2000/under-half halves owned by q_wire_compress.
+ *              frames (byte 2 == 1) decompress via
+ *              q_wire_uncompress_payload before routing — Phase F.  EMIT
+ *              mirrors it: a frame is compressed on send (q_wire_compress)
+ *              only when the peer negotiated compression (handshake
+ *              capability >= 1) AND the link is not loopback — the
+ *              connection half of kdb's gate; the size and under-half
+ *              tests are q_wire_compress's, which owns the byte counts.
  *   payload    ONE q_wire object (src/qlang/q_wire.c, kb/serialization.md
  *              grammar).  Whole-payload consumption is enforced; trailing
  *              bytes are protocol corruption and close the connection.
@@ -523,7 +523,7 @@ static int hook_call_auth(ray_poll_t* poll, int64_t handle,
 
 /* Apply kdb's outbound compression policy to an already-serialized frame:
  * compress only when this connection qualifies (peer negotiated zip AND the
- * link is not loopback).  q_wire_compress owns the >2000-byte + under-half
+ * link is not loopback).  q_wire_compress owns the size and under-half
  * rules — it returns the frame unchanged (retained) when they do not hold,
  * and a compression error leaves the plain frame.  Consumes one ref of
  * `frame`, returns an owned frame (compressed or the original). */
