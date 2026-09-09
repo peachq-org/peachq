@@ -17,7 +17,10 @@
 #include <windows.h>        /* GetTempPathA / GetTempFileNameA — q_qdoc_memopen */
 #endif
 
-#define QD_IN   2048
+/* An input line is read into `line` first, so QD_IN under QD_OUT bought a truncated STATEMENT
+ * that still evaluated — a different program, scored as the row's own (test/q/integration/i513
+ * and the 1064-byte compressed wire frames both landed there). */
+#define QD_IN   8192
 #define QD_OUT  8192
 
 /* ---- q_qdoc_memopen / q_qdoc_memclose (see qdoc.h) ---------------------------- */
@@ -328,6 +331,18 @@ static qdoc_result_t run_path(const char* path,
 
     while (fgets(line, sizeof line, f)) {
         size_t n = strlen(line);
+        /* fgets SPLITS an over-long line: its head would RUN as the statement (assigning who
+         * knows what) and its tail be read as that row's expected output, both without a word.
+         * Draining first tells the two apart — a line that merely filled the buffer exactly
+         * loses nothing and is still a row. */
+        if (n && line[n-1] != '\n' && !feof(f)) {
+            int ch, lost = 0;
+            while ((ch = fgetc(f)) != EOF && ch != '\n') lost = 1;
+            if (lost) {
+                fprintf(stderr, "%s: line over %d bytes - split the row\n", path, QD_OUT - 1);
+                continue;
+            }
+        }
         while (n && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = '\0';
 
         if (!is_qcmd) {
@@ -348,7 +363,7 @@ static qdoc_result_t run_path(const char* path,
         if (pl) {
             FLUSH();
             snprintf(tprompt, sizeof tprompt, "%.*s", (int)(pl < 79 ? pl : 79), line);
-            snprintf(input, sizeof input, "%.2047s", line + pl);
+            snprintf(input, sizeof input, "%.*s", QD_IN - 1, line + pl);
             expect[0] = '\0';
             /* Empty and comment-only inputs stay examples — they always
              * were (parse to nothing, pass), so the committed floors hold;
