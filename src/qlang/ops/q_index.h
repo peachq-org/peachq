@@ -47,6 +47,16 @@ ray_t* q_index_at(ray_t* x, ray_t* const* ix, int64_t k);
  * else u[S] / v[S;y].  x consumed on success, the caller's on error. */
 ray_t* q_index_amend(ray_t* x, ray_t* const* ix, int64_t k, ray_t* f, ray_t* y);
 
+/* Amend Entire with `,` IN PLACE — a vector the caller owns outright (it
+ * parked the name; rc is the caller's question, not asked here) takes vector
+ * y of its own type where it stands.  growable: may it (type, letter, sym
+ * domain and width).  grow: do it — NULL on success with *px the vector,
+ * which may have MOVED; else an owned error with *px valid but partly grown.
+ * ungrow: back to length nx and the attrs bits `was` carried. */
+int    q_index_growable(ray_t* x, ray_t* y);
+ray_t* q_index_grow(ray_t** px, ray_t* y);
+void   q_index_ungrow(ray_t* x, int64_t nx, uint8_t was);
+
 /* `@[d;i;u]` / `@[d;i;v;vy]` — depth-1 (i is `enlist i` of the path,
  * ref/amend.md); `.[d;i;…]` — i IS the path list ('type otherwise). */
 ray_t* q_index_amend_at(ray_t* x, ray_t* i, ray_t* f, ray_t* y);
