@@ -156,8 +156,8 @@ static ray_t* index_level(ray_t* x, ray_t* i, int write) {
     return q_index_elem_at(x, ix);
 }
 
-/* (i#x),item,(i+1)_x — the store for shapes the element writer can't reach
- * (sym widths, re-generalizing dict values).  Borrows c/v; owned result. */
+/* (i#x),item,(i+1)_x — the store for a SAME-TYPE item the element writer cannot
+ * reach in place (a symbol too wide for the vector).  Borrows c/v; owned. */
 static ray_t* splice(ray_t* c, int64_t ix, ray_t* v) {
     ray_t* n0 = ray_i64(ix);
     ray_t* left = q_take_wrap(n0, c);
@@ -180,24 +180,28 @@ static ray_t* splice(ray_t* c, int64_t ix, ray_t* v) {
     return r ? r : q_err(QE_TYPE);
 }
 
+/* Can a SIMPLE list hold v as one item?  A general list holds anything; a typed
+ * vector takes an atom of its own type (a typed null passes as the sentinel).
+ * THE amend-write law, shared by the vector and dict-value stores. */
+static int elem_fits(ray_t* x, ray_t* v) {
+    if (!x || x->type == RAY_LIST) return 1;
+    if (!ray_is_vec(x) || x->type == RAY_STR) return 0;
+    return ray_is_atom(v) &&
+           (RAY_ATOM_IS_NULL(v) || (int8_t)-v->type == x->type);
+}
+
 /* store v as item ix of a list/typed vector.  x consumed on success, the
  * caller's on error; v borrowed.  rc decides at store time (ray_list_set /
- * ray_cow mutate iff sole owner).  strict = kdb vector amend ('type on a
- * mismatched leaf, ref/amend.md errors); dict values re-generalize instead. */
-static ray_t* vec_store(ray_t* x, int64_t ix, ray_t* v, int strict) {
+ * ray_cow mutate iff sole owner).  A mismatched leaf is 'type — ref/assign.md
+ * pins `s:1 2 3; s[1]:5f` -> 'type, and a dict's values are a simple list, so
+ * they inherit it (a differing item is refused, never re-generalized: only
+ * Join itself boxes, ref/join.md:33). */
+static ray_t* vec_store(ray_t* x, int64_t ix, ray_t* v) {
     if (x->type == RAY_LIST) {
         ray_t* nl = ray_list_set(x, ix, v);          /* cows; consumes on ok */
         return (nl && !RAY_IS_ERR(nl)) ? nl : q_err(QE_OOM);
     }
-    if (!ray_is_vec(x) || x->type == RAY_STR) return q_err(QE_TYPE);
-    int fits = ray_is_atom(v) &&
-               (RAY_ATOM_IS_NULL(v) || (int8_t)-v->type == x->type);
-    if (!fits) {
-        if (strict) return q_err(QE_TYPE);
-        ray_t* r = splice(x, ix, v);
-        if (r && !RAY_IS_ERR(r)) ray_release(x);
-        return r;
-    }
+    if (!elem_fits(x, v)) return q_err(QE_TYPE);
     ray_t* nx = ray_cow(x);                          /* rc==1 in place, else copy */
     if (!nx || RAY_IS_ERR(nx)) return nx ? nx : q_err(QE_OOM);
     if (q_eval_apply_store_elem(nx, ix, v) != 0) {
@@ -219,12 +223,13 @@ static ray_t* dict_store(ray_t* x, ray_t* key, ray_t* v) {
     ray_t *nk, *nv;
     if (ki >= 0) {
         ray_retain(vals);
-        nv = vec_store(vals, ki, v, 0);
+        nv = vec_store(vals, ki, v);
         if (!nv || RAY_IS_ERR(nv)) { ray_release(vals); return nv ? nv : q_err(QE_TYPE); }
         ray_retain(keys);
         nk = keys;
     } else {
         if (!ray_is_atom(key)) return q_err(QE_TYPE);
+        if (!elem_fits(vals, v)) return q_err(QE_TYPE);   /* same law on INSERT */
         nk = q_join_wrap(keys, key);
         if (!nk || RAY_IS_ERR(nk)) return nk ? nk : q_err(QE_TYPE);
         ray_t* ev = boxed1(v);
@@ -358,7 +363,7 @@ static ray_t* store_level(ray_t* x, ray_t* i, ray_t* v) {
     int64_t ix;
     if (!idx_i64(i, &ix)) return q_err(QE_TYPE);
     if (ix < 0 || ix >= ray_len(x)) return q_err(QE_INDEX);
-    return vec_store(x, ix, v, 1);
+    return vec_store(x, ix, v);
 }
 
 /* ===== the read recursion ================================================ */

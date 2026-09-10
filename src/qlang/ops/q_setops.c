@@ -10,7 +10,7 @@
 #include "qlang/base/q_type.h"
 #include "qlang/ops/q_table.h"
 #include "lang/eval.h"       /* ray_except_fn, ray_sect_fn */
-#include "lang/internal.h"   /* ray_concat_fn */
+#include "lang/internal.h"   /* ray_group_fn */
 #include <stdlib.h>
 
 /* Indices of x-rows [not] present in y (whole-row membership). */
@@ -110,25 +110,16 @@ ray_t* q_distinct_wrap(ray_t* x) {
     return c;
 }
 
-/* q `x union y` — `distinct x,y` (ref/union.md).  A wrapper because rayfall's
- * ray_union_fn KEEPS x-duplicates (it only filters y against x); kdb dedups
- * the whole join in first-occurrence order.  Reuses q join (`,` == rayfall
- * concat) + the q distinct wrapper above — no new set logic.  Operands the
- * distinct wrapper defers (strings, tables) defer here too: error, never a
- * wrong answer. */
+/* q `x union y` — literally `distinct x,y` (ref/union.md), composed from THE two
+ * q wrappers so it owns no set logic: join carries the mixed-list law
+ * (ref/join.md:33), distinct the first-occurrence order rayfall's ray_union_fn
+ * lacks (it keeps x-duplicates).  Whatever either wrapper defers, union defers. */
 ray_t* q_union_wrap(ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);
     /* keyed tables / dicts are deferred cells (mirror of the inter guard). */
     if (x->type == RAY_DICT || y->type == RAY_DICT)
         return q_err(QE_NYI);
-    if (x->type == RAY_TABLE && y->type == RAY_TABLE) {   /* distinct of t,u */
-        ray_t* j = ray_concat_fn(x, y);
-        if (!j || RAY_IS_ERR(j)) return j ? j : q_err(QE_OOM);
-        ray_t* r = table_distinct(j);
-        ray_release(j);
-        return r;
-    }
-    ray_t* j = ray_concat_fn(x, y);
+    ray_t* j = q_join_wrap(x, y);
     if (!j || RAY_IS_ERR(j)) return j;
     ray_t* r = q_distinct_wrap(j);
     ray_release(j);

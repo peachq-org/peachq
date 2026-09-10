@@ -803,6 +803,14 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
     } else {
         ray_t* av[2] = { cur, rv };
         nv = q_eval_apply(opv, row, av, 2);
+        /* ref/join.md Append: "If x contains a simple list, y must be an atom or
+         * simple list of the same type" — where plain `,` boxes.  Only this seam
+         * can tell the two apart; `q_join_wrap` sees the same operand pair. */
+        if (row && !strcmp(row->name, ",") && ray_is_vec(cur) &&
+            nv && !RAY_IS_ERR(nv) && nv->type != cur->type) {
+            ray_release(nv);
+            nv = q_err(QE_TYPE);
+        }
     }
     ray_release(cur);
     ray_release(rv);
