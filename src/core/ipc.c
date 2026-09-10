@@ -465,7 +465,7 @@ static void hook_call_badmsg(ray_poll_t* poll, int64_t handle, int64_t fd,
     }
 }
 
-/* Call the on.auth hook with (user, pass) string atoms.  Returns:
+/* Call the on.auth hook with (user, pass).  Returns:
  *  -  1 → hook ran and returned truthy; caller continues the handshake.
  *  -  0 → hook ran and returned falsy (or errored); caller rejects.
  *  - -1 → no hook installed; caller uses the existing pass-through.
@@ -487,11 +487,25 @@ static int hook_call_auth(ray_poll_t* poll, int64_t handle,
     size_t      plen  = colon ? (size_t)(cred_len - (size_t)(ppart - creds))
                               : cred_len;
 
-    /* Dialect seam (string-C3): with the q runtime installed, hooks are q
-     * code and receive char vectors; a pure-rayfall process keeps the
-     * legacy string atoms. */
+    /* Dialect seam: `.z.pw` receives "the user ID (as a symbol) and password
+     * (as a string)" (ref/dotz.md) — asymmetric, and the user is the same
+     * interned id `.z.u` answers with inside the hook, so a server's own
+     * ``u~`bob`` holds.  The password stays a char vector (string-C3); a
+     * pure-rayfall process keeps the legacy string atoms on both. */
     int q_dialect = ray_eval_remote_str_installed();
-    ray_t* u = q_dialect ? ray_charv(upart, (int64_t)ulen) : ray_str(upart, ulen);
+    ray_t* u;
+    if (q_dialect) {
+        /* Interning HERE, past the no-hook exit, keeps conn_user_sym's rule
+         * that an unconsulted handshake never grows the symbol table.  A
+         * failed intern is id -1, and ray_sym(-1) is a well-formed atom the
+         * RAY_IS_ERR guard below cannot see — so reject, or a hook shaped
+         * `{[u;p] not u in banned}` would ADMIT the unnameable. */
+        int64_t usym = ray_sym_intern_runtime(upart, ulen);
+        if (usym < 0) return 0;
+        u = ray_sym(usym);
+    } else {
+        u = ray_str(upart, ulen);
+    }
     ray_t* p = q_dialect ? ray_charv(ppart, (int64_t)plen) : ray_str(ppart, plen);
     if (!u || !p || RAY_IS_ERR(u) || RAY_IS_ERR(p)) {
         if (u && !RAY_IS_ERR(u)) ray_release(u);
