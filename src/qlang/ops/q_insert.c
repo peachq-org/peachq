@@ -82,8 +82,7 @@ ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
     if (keyed) { nt = q_bang_enkey(nkey, nf); ray_release(nf); }
     else nt = nf;
     if (!nt || RAY_IS_ERR(nt)) return nt;
-    ray_err_t e = q_env_set(x->i64, nt);                  /* retains */
-    if (e != RAY_OK && stole) q_env_bind(x->i64, nt);     /* the park must not stay visible as `::` */
+    ray_err_t e = q_env_settle(x->i64, stole, nt);        /* retains */
     ray_release(nt);
     return e == RAY_OK ? idx_range(before, added) : q_env_err(e);
 }
@@ -110,13 +109,22 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
         return q_err(QE_TYPE);
     }
     if (sym >= 0 && q_splay_table_path(t)) return q_err(QE_SPLAY);
-    ray_t* nt = q_join_table_upsert(t, y);
-    if (!nt || RAY_IS_ERR(nt)) return nt;
-    if (sym >= 0) {
-        q_env_set(sym, nt);                               /* retains */
-        ray_release(nt);
-        ray_retain(x);
-        return x;
+    if (sym < 0) return q_join_table_upsert(t, y, 0);
+    /* the binding this upsert REPLACES double-counts the table, so every
+     * column would copy: park it (q_env.h q_env_take) behind our own ref;
+     * a keyed t is rebuilt from its columns anyway */
+    ray_retain(t);
+    int stole = !q_type_is_keyed(t) && q_env_take(sym, t);
+    ray_t* nt = q_join_table_upsert(t, y, stole);
+    if (!nt || RAY_IS_ERR(nt)) {
+        if (stole) q_env_bind(sym, t);                    /* restore the binding */
+        ray_release(t);
+        return nt ? nt : q_err(QE_OOM);
     }
-    return nt;
+    ray_err_t e = q_env_settle(sym, stole, nt);           /* retains */
+    ray_release(t);
+    ray_release(nt);
+    if (e != RAY_OK) return q_env_err(e);
+    ray_retain(x);
+    return x;
 }

@@ -186,6 +186,12 @@ ray_t* q_attr_set_letter(char letter, ray_t* vec);
  * name-refs `ssr[a;b;c]`, so it resolves through the env, not the registry). */
 ray_t* q_ssr_wrap(ray_t** args, int64_t n);
 
+/* `x,:y` on a name — THE Append home, type law included (ref/join.md: a simple
+ * list takes only its own type, where `,` boxes).  exclusive = the caller PARKED
+ * the name and holds *px's only ref: *px is then CONSUMED on success, the
+ * caller's on error, and may have MOVED either way (re-read it).  Result owned. */
+ray_t* q_join_amend(ray_t** px, ray_t* y, int exclusive);
+
 /* q join family bracket forms (feat/q-joins-rebuild) — triadic/quaternary
  * prefix keywords env-bound by q_builtins_register (the ssr precedent):
  * ej[c;t1;t2], aj[c;t1;t2] + variants, wj/wj1[w;f;t;(q;aggs..)]. */

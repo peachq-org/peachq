@@ -186,7 +186,8 @@ ray_t* q_sv_wrap(ray_t* x, ray_t* y);
 /* ---- defined in ops/q_join.c ---- */
 ray_t* qj_table_gather_idx(ray_t* t, const int64_t* idx, int64_t n);/* used by: table, list */
 ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode);           /* used by: list (`^` fill mode) */
-ray_t* q_join_table_upsert(ray_t* x, ray_t* y);               /* THE value row-append home; used by: insert (upsert spelling) */
+ray_t* q_join_table_upsert(ray_t* x, ray_t* y, int exclusive);/* THE value row-append home; used by: insert (upsert spelling).
+                                                                 exclusive = the caller holds x's ONLY ref (a parked name) */
 ray_t* q_join_wrap(ray_t* x, ray_t* y);                       /* also shared: index (splice, dict insert), setops (cross, union) */
 ray_t* q_join_item(ray_t* x, int64_t i);                          /* used by: table, insert, setops */
 ray_t* q_join_gen_item(ray_t* x, int64_t i);                      /* used by: setops */
