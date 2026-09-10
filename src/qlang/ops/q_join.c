@@ -629,7 +629,7 @@ ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode) {
         /* THE row-append home, not base table-concat: an untyped general
          * column constrains nothing, so a typed payload must be accepted
          * (base's table concat demands column types be equal). */
-        out = q_table_append(part1, part2);
+        out = q_table_append(part1, part2, 0);
         ray_release(part1);
         ray_release(part2);
     }
@@ -693,7 +693,7 @@ ray_t* q_join_table_upsert(ray_t* x, ray_t* y) {
     ray_t* rows = q_table_rows_normalize(flat, y, Q_ROWS_JOIN);
     if (!rows || RAY_IS_ERR(rows)) { ray_release(flat); return rows ? rows : q_err(QE_OOM); }
     if (!keyed) {
-        ray_t* nf = q_table_append(flat, rows);
+        ray_t* nf = q_table_append(flat, rows, 0);
         ray_release(flat);
         ray_release(rows);
         return nf;
@@ -1139,7 +1139,7 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
          * The collapse home already leaves mixed lists (`1 2,"a"`) alone. */
         ray_t* c = q_list_collapse(r);
         ray_release(r);
-        return q_attr_append_keep(x, c);   /* the append-retention law; consumes c */
+        return x && ray_is_vec(x) ? q_attr_append_keep(q_attr_letter(x), ray_len(x), c) : c;   /* the retention law; consumes c */
     }
     if (!x || !y) return r;
     /* boxed-list fallback (ref/join.md:33 "The result is a vector if both
