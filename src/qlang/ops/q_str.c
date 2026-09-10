@@ -574,7 +574,9 @@ ray_t* q_like_wrap(ray_t* x, ray_t* pattern) {
     return str_like_leaf(x, pp, (size_t)pn);
 }
 
-/* 0-based start index of every match of p in s, overlapping (kdb-true). */
+/* 0-based start index of every NON-overlapping match of p in s, left to right: a match
+ * consumes its span and the scan resumes after it — ssr's scan, so a replace cannot
+ * corrupt overlapping text ("aaa" ss "aa" is ,0). */
 ray_t* q_ss_wrap(ray_t* s, ray_t* p) {
     const char* sp; int64_t sn64; const char* pp; int64_t pn64;
     if (!q_str_text_bytes(s, &sp, &sn64) || !q_str_text_bytes(p, &pp, &pn64))
@@ -584,12 +586,12 @@ ray_t* q_ss_wrap(ray_t* s, ray_t* p) {
     size_t w = str_pat_width(pp, pn);
     ray_t* out = ray_vec_new(RAY_I64, 8);
     if (RAY_IS_ERR(out)) return out;
-    for (size_t i = 0; i + w <= sn; i++) {
-        if (str_pat_run(sp, sn, i, pp, pn, NULL)) {
-            int64_t idx = (int64_t)i;
-            out = ray_vec_append(out, &idx);
-            if (RAY_IS_ERR(out)) return out;
-        }
+    for (size_t i = 0; i + w <= sn; ) {
+        if (!str_pat_run(sp, sn, i, pp, pn, NULL)) { i++; continue; }
+        int64_t idx = (int64_t)i;
+        out = ray_vec_append(out, &idx);
+        if (RAY_IS_ERR(out)) return out;
+        i += w;
     }
     return out;
 }

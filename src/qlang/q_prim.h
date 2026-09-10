@@ -207,7 +207,8 @@ ray_t* q_table_at(ray_t* t, ray_t* idx);
 ray_t* q_table_row_at(ray_t* t, int64_t row);
 
 /* `cols x` / `meta x` (ops/q_table.c) — env-bound by q_builtins_register, and
- * q_cols_fn is qSQL's column-name home too. */
+ * q_cols_fn is qSQL's column-name home too.  A dict answers with its keys; a
+ * keyed table answers with EVERY column, key ++ value. */
 ray_t* q_cols_fn(ray_t* x);
 ray_t* q_meta_fn(ray_t* x);
 /* THE ([c] t;f;a) meta-result assembler (consumes all four columns) — every
