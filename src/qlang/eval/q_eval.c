@@ -22,6 +22,7 @@
 #include "qlang/q_ops.h"
 #include "qlang/q_registry.h"
 #include "qlang/q_registry_internal.h"   /* q_type_strict_i64 — the do-count judgment */
+#include "qlang/q_prim.h"                /* q_join_amend — the `,:` home */
 #include "qlang/q_dotz.h"
 #include "qlang/q_env.h"
 #include "qlang/ops/q_index.h"
@@ -264,6 +265,13 @@ static ray_t* seq_eval(ray_t** e, int64_t n) {
     return r;
 }
 
+/* undo a park (q_env_take / q_env_local_take) on a failed write: the value
+ * read goes back into the slot the write would have rebound */
+static void unpark(int local, int64_t sym, ray_t* v) {
+    if (local) q_env_local_set(sym, v);
+    else q_env_bind(sym, v);
+}
+
 /* `a[i;…]:v` / `a[i;…]op:v` (ref/assign.md Indexed assign): rhs first, then
  * indices RTL; the write IS the one amend home — resolve the name, amend the
  * path (`a[i]op:v` ≡ .[a;i;op;v], so repeat-accumulation holds), rebind under
@@ -304,24 +312,16 @@ static ray_t* indexed_assign(int is_global, ray_t* target, ray_t* opv,
                           : q_env_take(te[0]->i64, cur);
         ray_t* amended = q_index_amend(cur, idxv, k, opv, rv);
         if (RAY_IS_ERR(amended)) {
-            if (stole) {
-                if (local) q_env_local_set(te[0]->i64, cur);
-                else q_env_bind(te[0]->i64, cur);
-            }
+            if (stole) unpark(local, te[0]->i64, cur);
             ray_release(cur);
             ret = amended;
         }
         else {                                       /* cur consumed on success */
             if (!local) q_view_set_index(idxv, k);   /* .z.vs y (ref/dotz.md) */
             ray_err_t e2 = local ? q_env_local_set(te[0]->i64, amended)
-                                 : q_env_set(te[0]->i64, amended);
+                                 : q_env_settle(te[0]->i64, stole, amended);
             q_view_set_index(NULL, 0);               /* never leaks to the next set */
-            /* a failed rebind must not leave the park visible as `::` (a local
-             * park cannot get here — its slot exists, so the set cannot fail) */
-            if (e2 != RAY_OK) {
-                if (stole && !local) q_env_bind(te[0]->i64, amended);
-                ret = q_env_err(e2);
-            }
+            if (e2 != RAY_OK) ret = q_env_err(e2);
             else if (!opv) { ray_retain(rv); ret = rv; }
             else ret = q_eval_apply_concrete(q_eval_apply_value(amended, idxv, k));
             ray_release(amended);
@@ -793,30 +793,6 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
         if (id) { q_err_drop(); ray_error_free(cur); cur = id; }
     }
     if (RAY_IS_ERR(cur)) { ray_release(rv); return cur; }
-    ray_t* nv;
-    if (row && !strcmp(row->name, ",") && q_enum_is(cur)) {
-        /* `e,:y` ENFORCES the domain in place (R6: el,:`apple coerces,
-         * el,:`zz is 'cast) where plain `,` decays — the write path is the
-         * one that guards the column's meaning */
-        int64_t dom = q_enum_domain(cur);
-        nv = q_enum_stamp(q_enum_col_concat(cur, rv), dom);
-    } else {
-        ray_t* av[2] = { cur, rv };
-        nv = q_eval_apply(opv, row, av, 2);
-        /* ref/join.md Append: "If x contains a simple list, y must be an atom or
-         * simple list of the same type" — where plain `,` boxes.  Only this seam
-         * can tell the two apart; `q_join_wrap` sees the same operand pair. */
-        if (row && !strcmp(row->name, ",") && ray_is_vec(cur) &&
-            nv && !RAY_IS_ERR(nv) && nv->type != cur->type) {
-            ray_release(nv);
-            nv = q_err(QE_TYPE);
-        }
-    }
-    ray_release(cur);
-    ray_release(rv);
-    if (RAY_IS_ERR(nv)) return nv;
-    nv = q_eval_apply_concrete(nv);
-    if (RAY_IS_ERR(nv)) return nv;
     int local = q_eval_apply_frame_depth() > 0;
     if (local) {
         ray_t* snm = ray_sym_str(target->i64);
@@ -825,8 +801,40 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
             ray_release(snm);
         }
     }
+    int join = row && !strcmp(row->name, ",");
+    int stole = 0;
+    ray_t* nv;
+    if (join && q_enum_is(cur)) {
+        /* `e,:y` ENFORCES the domain in place (R6: el,:`apple coerces,
+         * el,:`zz is 'cast) where plain `,` decays — the write path is the
+         * one that guards the column's meaning */
+        int64_t dom = q_enum_domain(cur);
+        nv = q_enum_stamp(q_enum_col_concat(cur, rv), dom);
+    } else if (join && !q_splay_table_path(cur)) {
+        /* `x,:y` on a name IS the by-name append (`x upsert y <=> x,y`), and
+         * the Append home (q_join_amend) owns its type law: park the binding
+         * as indexed_assign does so x can grow where it stands.  An enum
+         * payload decays first, as the apply catalogue would (`,` keeps 20h
+         * only for a same-domain pair, and that pair took the arm above) */
+        rv = q_eval_apply_concrete(rv);
+        if (!RAY_IS_ERR(rv) && q_enum_is(rv)) { ray_t* d = q_enum_decay(rv); ray_release(rv); rv = d; }
+        if (RAY_IS_ERR(rv)) { ray_release(cur); return rv; }
+        stole = local ? q_env_local_take(target->i64, cur)
+                      : q_env_take(target->i64, cur);
+        nv = q_join_amend(&cur, rv, stole);
+        if (stole && RAY_IS_ERR(nv)) unpark(local, target->i64, cur);
+        else if (stole) cur = NULL;                  /* consumed */
+    } else {
+        ray_t* av[2] = { cur, rv };
+        nv = q_eval_apply(opv, row, av, 2);
+    }
+    if (cur) ray_release(cur);
+    ray_release(rv);
+    if (RAY_IS_ERR(nv)) return nv;
+    nv = q_eval_apply_concrete(nv);
+    if (RAY_IS_ERR(nv)) return nv;
     ray_err_t err = local ? q_env_local_set(target->i64, nv)
-                          : q_env_set(target->i64, nv);
+                          : q_env_settle(target->i64, stole, nv);
     if (err != RAY_OK) { ray_release(nv); return q_env_err(err); }
     return nv;                                       /* q returns the NEW value */
 }

@@ -8,7 +8,8 @@
 #include "qlang/base/q_type.h"       /* the type/shape axes: keyed, nested, iter */
 #include "lang/internal.h"   /* as_i64 — the int-atom payload accessor */
 #include "table/dict.h"
-#include "mem/heap.h"        /* ray_cow + the vec attr bits — scatter_store */
+#include "mem/heap.h"        /* ray_cow + the vec attr bits — scatter_store, the grow bits */
+#include "table/sym.h"       /* ray_read_sym/ray_write_sym — a sym id in the target's own width */
 #include <stdlib.h>
 #include <string.h>
 
@@ -729,4 +730,57 @@ ray_t* q_index_assign_wrap(ray_t* x, ray_t* y) {
     (void)x;
     ray_retain(y);
     return y;
+}
+
+/* Amend Entire with `,` on a vector the writer owns outright: the cells go in
+ * through ray_vec_append, inside the slack the buddy block already holds, where
+ * base concat allocates na+nb and copies.  What base concat does and append
+ * does NOT is why the guard exists: a sym id is translated to the column's
+ * domain and widened (append memcpy's esz bytes — so the domain must match and
+ * every id fit); HAS_NULLS is derived from the result (so it is OR'd in here);
+ * a STR column merges pools; an index-backed u#/g#/p# letter is dropped by the
+ * first write and re-stamped by an allocation, which a later failure could
+ * not undo, so only `s` (re-derived by the retention law) is admitted. */
+int q_index_growable(ray_t* x, ray_t* y) {
+    if (!x || !y || !ray_is_vec(x) || x->type == RAY_STR || y->type != x->type || x->mmod ||
+        (x->attrs & (RAY_ATTR_SLICE | RAY_ATTR_ARENA | RAY_ATTR_HAS_LINK)) || (y->attrs & RAY_ATTR_SLICE))
+        return 0;
+    char lx = q_attr_letter(x);
+    if (lx && lx != 's') return 0;
+    if (x->type == RAY_SYM) {
+        if (ray_sym_vec_domain(x) != ray_sym_vec_domain(y)) return 0;
+        for (int64_t i = 0, n = ray_len(y); i < n; i++)
+            if (ray_sym_dict_width(ray_read_sym(ray_data(y), i, RAY_SYM, y->attrs) + 1) > (x->attrs & RAY_SYM_W_MASK))
+                return 0;
+    }
+    return 1;
+}
+
+ray_t* q_index_grow(ray_t** px, ray_t* y) {
+    ray_t* x = *px;
+    int64_t nx = ray_len(x);
+    char lx = q_attr_letter(x);
+    uint8_t esz = ray_sym_elem_size(y->type, y->attrs), xesz = ray_sym_elem_size(x->type, x->attrs);
+    int nulls = 0;
+    x->attrs &= (uint8_t)~RAY_ATTR_SORTED;               /* append keeps attrs; the law re-derives s */
+    for (int64_t i = 0, n = ray_len(y); i < n; i++) {
+        const void* elem = (const char*)ray_data(y) + i * esz;
+        int64_t id = 0;
+        if (esz != xesz) {
+            ray_write_sym(&id, 0, (uint64_t)ray_read_sym(ray_data(y), i, RAY_SYM, y->attrs), RAY_SYM, x->attrs);
+            elem = &id;
+        }
+        nulls |= ray_vec_is_null(y, i);
+        ray_t* nv = ray_vec_append(x, elem);
+        if (!nv || RAY_IS_ERR(nv)) { *px = x; return nv ? nv : q_err(QE_OOM); }
+        x = nv;
+    }
+    if (nulls) x->attrs |= RAY_ATTR_HAS_NULLS;
+    *px = q_attr_append_keep(lx, nx, x);
+    return NULL;
+}
+
+void q_index_ungrow(ray_t* x, int64_t nx, uint8_t was) {
+    x->len = nx;
+    x->attrs = (x->attrs & (uint8_t)~(RAY_ATTR_SORTED | RAY_ATTR_HAS_NULLS)) | (was & (RAY_ATTR_SORTED | RAY_ATTR_HAS_NULLS));
 }

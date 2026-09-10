@@ -51,8 +51,13 @@ ray_err_t q_env_unbind(int64_t sym);
  * store time, so an alias still forces the copy.  Refuses unless the name is
  * bound to exactly `cur` — a shadowed or walked read is not the slot the
  * write rebinds.  1 = parked, and the caller MUST put a value back:
- * q_env_set on success, q_env_bind to restore on error. */
+ * q_env_settle on success, q_env_bind to restore on error. */
 int q_env_take(int64_t sym, ray_t* cur);
+
+/* Complete a take: q_env_set through the one global-set home, and if THAT
+ * fails on a parked slot, q_env_bind the value so `::` never stays visible.
+ * `stole` is what q_env_take answered; the set's error is returned. */
+ray_err_t q_env_settle(int64_t sym, int stole, ray_t* val);
 
 int    q_env_ns_exists(int64_t path_sym);
 /* The stored namespace dict itself (marker included), retained for the
