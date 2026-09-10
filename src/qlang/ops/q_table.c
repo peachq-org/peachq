@@ -1117,14 +1117,14 @@ static ray_t* table_bi_deref(ray_t* x) {
     return x;
 }
 
-/* (cols x) — column names of a table as a symbol vector. */
+/* (cols x) — column names of a table as a symbol vector; a dict answers with its keys, which
+ * is what makes a carrier (a `cols!coordinate` dict) need no arm of its own here. */
 ray_t* q_cols_fn(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     ray_t* car = q_provider_get_carrier(x);   /* `:pq: coordinate, splay symmetry */
     if (car) {
         if (RAY_IS_ERR(car)) return car;
-        ray_t* k = ray_dict_keys(car);
-        ray_retain(k);
+        ray_t* k = q_cols_fn(car);
         ray_release(car);
         return k;
     }
@@ -1137,7 +1137,7 @@ ray_t* q_cols_fn(ray_t* x) {
         return c;
     }
     ray_t* t = table_bi_deref(x);
-    if (q_provider_carrier_is(t)) {           /* the keys ARE the cols (the SNAPSHOT) */
+    if (q_type_is_plain_dict(t)) {            /* the keys ARE the cols (a carrier's SNAPSHOT too) */
         ray_t* k = ray_dict_keys(t);
         ray_retain(k);
         return k;
