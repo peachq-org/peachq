@@ -20,6 +20,56 @@ static int tok_dig_run(const char *s, int p) {
     return n;
 }
 
+static int tok_name_byte(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+
+/* The clock after a date-or-day separator — ONE grammar for the p (`dateD…`), z (`dateT…`) and n (`intD…`)
+ * literals, which differ only in what precedes the separator and in payload resolution:
+ *     [HH[:MM[:SS]]][.f{1,9}]
+ * Every field defaults to zero, the bare separator included; the fraction is always the sub-second part, wherever it
+ * appears (`0D08:30.5` is 08:30:00.5); MM and SS cap at 59; HH is uncapped and normalises into the payload (`D99` is
+ * four days and three hours), so no arm caps the hour.  The hour is 1 or 2 digits bare but EXACTLY 2 when a colon
+ * follows — `D8:30` dies.  Nothing derives that: it is a tokenizer disambiguation rule, implemented as observed
+ * (owner transcript 2026-09-10); do not "fix" it.  Returns 1 with *e past the clock, 0 with *err on a malformed
+ * clock (3+ hour digits, a colon not followed by two digits, a field out of range, a dot after clock digits that
+ * brings no fraction digit, 10+ of them).  The byte after the clock is caller policy: a timestamp hands it to the
+ * literal builder (a type letter), a timespan yields to a name byte (`1D45x` stays a juxtaposition), and a dot
+ * after a BARE separator is not a clock byte at all (`0D.x` is a dotted name; the p/z arms die on it). */
+typedef struct { int64_t ns; int fields; int fd; } tok_clock;
+
+static int tok_clock_tail(const char *src, int *e, tok_clock *c, const char **err) {
+    int q = *e;
+    int64_t f[3] = {0, 0, 0};
+    *c = (tok_clock){0, 0, 0};
+    int hd = tok_dig_run(src, q);
+    if (hd > 2) { *err = "bad clock"; return 0; }
+    if (hd) {
+        for (int k = 0; k < hd; k++) f[0] = f[0] * 10 + (src[q + k] - '0');
+        q += hd;
+        c->fields = 1;
+        while (c->fields < 3 && src[q] == ':') {
+            if (hd != 2 || tok_dig_run(src, q + 1) != 2) { *err = "bad clock"; return 0; }
+            f[c->fields] = (src[q + 1] - '0') * 10 + (src[q + 2] - '0');
+            if (f[c->fields] >= 60) { *err = "bad clock"; return 0; }
+            q += 3;
+            c->fields++;
+        }
+    }
+    int64_t frac = 0;
+    if (src[q] == '.' && !tok_digit(src[q + 1]) && c->fields) { *err = "bad clock"; return 0; }
+    if (src[q] == '.' && tok_digit(src[q + 1])) {
+        c->fd = tok_dig_run(src, q + 1);
+        if (c->fd > 9) { *err = "bad clock"; return 0; }
+        for (int k = 0; k < c->fd; k++) frac = frac * 10 + (src[q + 1 + k] - '0');
+        for (int k = c->fd; k < 9; k++) frac *= 10;
+        q += 1 + c->fd;
+    }
+    c->ns = (f[0] * 3600 + f[1] * 60 + f[2]) * 1000000000LL + frac;
+    *e = q;
+    return 1;
+}
+
 /* ===== 1. literal magnitudes (the code parser's temporal arm) ===== */
 int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
     /* Date literal magnitude: strictly yyyy.mm.dd (every published spelling is zero-padded), next byte neither digit
@@ -41,65 +91,30 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
             int64_t d  = (src[q + 8] - '0') * 10 + (src[q + 9] - '0');
             if (!q_calendar_date_valid(y, mo, d)) { *err = "bad date"; return -1; }
             if (src[q + 10] == 'D') {
-                /* Timestamp literal: dateDtimespan (datatypes.md row 12).  Full clock HH:MM:SS required (cast.md pins
-                 * the fraction-less 2015.10.28D03:55:58 and the 9-digit 2014.11.22D17:43:40.123456789); 1..9 fraction
-                 * digits right-pad to ns.  After D is a TIMESPAN — no 24h cap, hours normalize through the ns count —
-                 * so only mm/ss >= 60 die.  Shorter tod forms (bare D / D12 / D12:00) are deferred; an invalid tod
-                 * dies rather than half-matching a date and stranding the tail (the invalid-civil-date rule). */
-                int r = q + 11;
-                if (!(tok_dig_run(src, r) == 2 && src[r + 2] == ':' &&
-                      tok_dig_run(src, r + 3) == 2 && src[r + 5] == ':' &&
-                      tok_dig_run(src, r + 6) == 2))
-                    { *err = "bad timestamp"; return -1; }
-                int64_t h  = (src[r]     - '0') * 10 + (src[r + 1] - '0');
-                int64_t mi = (src[r + 3] - '0') * 10 + (src[r + 4] - '0');
-                int64_t s  = (src[r + 6] - '0') * 10 + (src[r + 7] - '0');
-                if (mi >= 60 || s >= 60) { *err = "bad timestamp"; return -1; }
-                int64_t frac = 0;
-                int end = r + 8;
-                if (src[end] == '.') {
-                    int fd = tok_dig_run(src, end + 1);
-                    if (fd < 1 || fd > 9) { *err = "bad timestamp"; return -1; }
-                    for (int k = 0; k < fd; k++)
-                        frac = frac * 10 + (src[end + 1 + k] - '0');
-                    for (int k = fd; k < 9; k++) frac *= 10;
-                    end += 1 + fd;
-                }
-                int64_t tod = (h * 3600 + mi * 60 + s) * 1000000000LL + frac;
+                /* Timestamp literal: dateDclock (datatypes.md row 12; cast.md pins the full 2015.10.28D03:55:58 and
+                 * the 9-digit fraction, wp/iot-mqtt/index.md:753 passes the truncated `2021.03.05D0`).  A malformed
+                 * clock dies rather than half-matching a date and stranding the tail (the invalid-civil-date rule). */
+                int end = q + 11;
+                tok_clock c;
+                if (!tok_clock_tail(src, &end, &c, err) || src[end] == '.') { *err = "bad clock"; return -1; }
                 out->kind = Q_TOK_EL_TS;
-                out->i = q_calendar_ts_compose(q_calendar_days_from_civil(y, mo, d), tod);
+                out->i = q_calendar_ts_compose(q_calendar_days_from_civil(y, mo, d), c.ns);
                 if (neg) out->i = -out->i;
                 *p = end;
                 return 1;
             }
             if (src[q + 10] == 'T') {
-                /* Datetime literal: dateTtime (datatypes.md row 15).  Full clock HH:MM:SS required (cast.md:172 pins
-                 * the fraction-less 2017.08.23T23:50:12); 1..3 fraction digits right-pad to MILLISECONDS (tok.md:227
-                 * pins the .123 form).  Unlike the D arm the clock is a TIME OF DAY, so hours >= 24 die alongside
-                 * mm/ss >= 60.  Payload = f64 days since 2000.01.01, fraction = tod/86400000ms. */
-                int r = q + 11;
-                if (!(tok_dig_run(src, r) == 2 && src[r + 2] == ':' &&
-                      tok_dig_run(src, r + 3) == 2 && src[r + 5] == ':' &&
-                      tok_dig_run(src, r + 6) == 2))
+                /* Datetime literal: dateTclock (datatypes.md row 15; cast.md:172 pins the full 2017.08.23T23:50:12,
+                 * tok.md:227 the .123 form).  The same clock as the D arm — an hour >= 24 rolls into the next day
+                 * (owner 2026-09-10) — on a MILLISECOND carrier: 1..3 fraction digits, and a fraction on a truncated
+                 * clock (`T12.5`) dies because its reading is ambiguous at ms resolution — the one sanctioned exception
+                 * to the shared grammar (owner 2026-09-10), not an oversight.  Payload = f64 days since 2000.01.01. */
+                int end = q + 11;
+                tok_clock c;
+                if (!tok_clock_tail(src, &end, &c, err) || src[end] == '.' || c.fd > 3 || (c.fd && c.fields < 3))
                     { *err = "bad datetime"; return -1; }
-                int64_t h  = (src[r]     - '0') * 10 + (src[r + 1] - '0');
-                int64_t mi = (src[r + 3] - '0') * 10 + (src[r + 4] - '0');
-                int64_t sec = (src[r + 6] - '0') * 10 + (src[r + 7] - '0');
-                if (h >= 24 || mi >= 60 || sec >= 60) { *err = "bad datetime"; return -1; }
-                int64_t ms = 0;
-                int end = r + 8;
-                if (src[end] == '.') {
-                    int fd = tok_dig_run(src, end + 1);
-                    if (fd < 1 || fd > 3) { *err = "bad datetime"; return -1; }
-                    for (int k = 0; k < fd; k++)
-                        ms = ms * 10 + (src[end + 1 + k] - '0');
-                    for (int k = fd; k < 3; k++) ms *= 10;
-                    end += 1 + fd;
-                }
-                double tod = ((double)(h * 3600 + mi * 60 + sec) * 1000.0 +
-                              (double)ms) / 86400000.0;
                 out->kind = Q_TOK_EL_DT;
-                out->f = (double)q_calendar_days_from_civil(y, mo, d) + tod;
+                out->f = (double)q_calendar_days_from_civil(y, mo, d) + (double)(c.ns / 1000000) / 86400000.0;
                 if (neg) out->f = -out->f;   /* glued sign negates the payload (kdb date-literal rule; derived for T) */
                 *p = end;
                 return 1;
@@ -241,69 +256,31 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
         }
     }
 
-    /* Timespan D-form: digits 'D' [HH[:MM[:SS[.f{1,9}]]]] (interfaces usage 0D00:05 / 0D00:00:10; day-count payload
-     * derived).  Matches only when 'D' is followed by a 1- or 2-digit hour whose next byte does not continue a name
-     * (`0D0` is the one-digit spelling, learn/brief-introduction.md:38 `n?0D0`; a ONE-digit hour is a whole clock, so
-     * `0D8:30` is rejected — owner ruling 2026-08-05), or by a byte that cannot continue a name at all — `1D45x` and
-     * `1D4x` stay name juxtapositions, `0Dabc` stays `0` + `Dabc` (the no-churn rule).  Hour overflow normalizes
-     * through the ns count (`123D45` -> 124D21:…).  The date arm ran first, so `2000.01.01D…` never reaches here. */
+    /* Timespan D-form: digits 'D' clock (interfaces usage 0D00:05 / 0D00:00:10; `0D0` is the one-digit spelling,
+     * learn/brief-introduction.md:38 `n?0D0`; the bare `1D` day count is derived).  The clock is the shared tail; what
+     * is arm policy is the byte after it: a name byte means this was a name after all — `1D45x`, `1D4x`, `1D123` and
+     * `0Dabc` stay `int` + name juxtapositions (the no-churn rule) — and a bare `0D` also yields to '.' or ':' (`0D.x`
+     * is a dotted name).  Hour overflow normalises through the ns count (`123D45` -> 124D21:…).  The date arm ran
+     * first, so `2000.01.01D…` never reaches here. */
     {
         int q = *p;
         int neg = (src[q] == '-');
         if (neg) q++;
         int dd = tok_dig_run(src, q);
-        if (dd >= 1 && src[q + dd] == 'D') {
-            int r = q + dd + 1;
-            int hd = tok_dig_run(src, r);
-            int matched = 0;
-            int64_t days = 0, tod_s = 0, ns = 0;
-            for (int k = 0; k < dd; k++) days = days * 10 + (src[q + k] - '0');
-            if (hd == 1 || hd == 2) {
-                int64_t h = 0;
-                for (int k = 0; k < hd; k++) h = h * 10 + (src[r + k] - '0');
-                int e = r + hd;
-                int64_t mi = 0, ss = 0;
-                if (hd == 1 && src[e] == ':') { *err = "bad timespan"; return -1; }
-                if (src[e] == ':' && tok_dig_run(src, e + 1) == 2) {
-                    mi = (src[e + 1] - '0') * 10 + (src[e + 2] - '0');
-                    e += 3;
-                    if (src[e] == ':' && tok_dig_run(src, e + 1) == 2) {
-                        ss = (src[e + 1] - '0') * 10 + (src[e + 2] - '0');
-                        e += 3;
-                        if (src[e] == '.') {
-                            int fd = tok_dig_run(src, e + 1);
-                            if (fd < 1 || fd > 9) { *err = "bad timespan"; return -1; }
-                            for (int k = 0; k < fd; k++)
-                                ns = ns * 10 + (src[e + 1 + k] - '0');
-                            for (int k = fd; k < 9; k++) ns *= 10;
-                            e += 1 + fd;
-                        }
-                    }
-                }
-                if (mi >= 60 || ss >= 60) { *err = "bad timespan"; return -1; }
-                /* A name byte right after the clock digits means this was a name after all (e.g. 1D45x). */
-                if (!(tok_digit(src[e])) &&
-                    !((src[e] >= 'a' && src[e] <= 'z') ||
-                      (src[e] >= 'A' && src[e] <= 'Z') || src[e] == '_')) {
-                    tod_s = h * 3600 + mi * 60 + ss;
-                    out->kind = Q_TOK_EL_TIMESPAN;
-                    out->i = (days * 86400 + tod_s) * 1000000000LL + ns;
-                    if (neg) out->i = -out->i;
-                    *p = e;
-                    matched = 1;
-                }
-            } else if (hd == 0 &&
-                       !((src[r] >= 'a' && src[r] <= 'z') ||
-                         (src[r] >= 'A' && src[r] <= 'Z') ||
-                         src[r] == '_' || src[r] == '.' || src[r] == ':')) {
-                /* Bare dD day count (kdb 1D; derived — no doc example uses a bare form as input, PR-noted). */
+        if (dd >= 1 && src[q + dd] == 'D' && tok_dig_run(src, q + dd + 1) <= 2) {
+            int e = q + dd + 1;
+            tok_clock c;
+            if (!tok_clock_tail(src, &e, &c, err)) return -1;
+            int bare = !c.fields && !c.fd;
+            if (!tok_name_byte(src[e]) && !(bare && (src[e] == '.' || src[e] == ':'))) {
+                int64_t days = 0;
+                for (int k = 0; k < dd; k++) days = days * 10 + (src[q + k] - '0');
                 out->kind = Q_TOK_EL_TIMESPAN;
-                out->i = days * 86400000000000LL;
+                out->i = days * 86400000000000LL + c.ns;
                 if (neg) out->i = -out->i;
-                *p = q + dd + 1;
-                matched = 1;
+                *p = e;
+                return 1;
             }
-            if (matched) return 1;
         }
     }
     return 0;
