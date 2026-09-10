@@ -230,6 +230,12 @@ int q_env_take(int64_t sym, ray_t* cur) {
     return q_env_bind(sym, RAY_NULL_OBJ) == RAY_OK;
 }
 
+ray_err_t q_env_settle(int64_t sym, int stole, ray_t* val) {
+    ray_err_t e = q_env_set(sym, val);
+    if (e != RAY_OK && stole) q_env_bind(sym, val);
+    return e;
+}
+
 /* `` `. `` names the root itself, so assigning a dict RESTORES its members as
  * globals (ref/get.md `set`) — the ` -> :: marker is representation, skipped.
  * Members go back through q_env_set, so each gets the same name policy. */
