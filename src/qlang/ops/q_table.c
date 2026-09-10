@@ -537,11 +537,100 @@ ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law) {
     }
 }
 
+/* The in-place arm of q_table_append.  A table is NOT its data: after `t2:t`
+ * the table is shared at rc 2 while its columns sit at rc 1, so exclusivity is
+ * checked at BOTH levels, and each column is lifted out of its slot (the
+ * slot's ref becomes ours) before the first write — a shared column list
+ * would surface there as rc 2.  A column then grows inside the slack its
+ * buddy block already holds (ray_vec_append), where base concat allocates
+ * na+nb and copies every time.  NULL (nothing touched) unless every column is
+ * a plain heap vector of the payload's type: no slice/arena/mmap/link, no STR
+ * (pool merge), ENUM or LIST, and no letter but `s` — an index-backed `u#`/
+ * `g#`/`p#` is dropped by the first write and re-stamped by an allocation, so
+ * a later column's OOM could not put it back.  A sym payload must share the
+ * column's domain and fit its width: base concat translates and widens,
+ * append memcpy's esz bytes.  Every payload cell is checked BEFORE the first
+ * write; the write phase fails only on growth OOM, which puts every column
+ * back to its old length and attrs. */
+static ray_t* table_append_inplace(ray_t* flat, ray_t* rows) {
+    int64_t nc = ray_table_ncols(flat), nr = ray_table_nrows(rows), nx = ray_table_nrows(flat);
+    if (flat->rc != 1 || (flat->attrs & RAY_ATTR_ARENA) || nc > Q_TABLE_MAX_COLS || nr <= 0) return NULL;
+    char lx[Q_TABLE_MAX_COLS];
+    for (int64_t c = 0; c < nc; c++) {
+        ray_t* oc = ray_table_get_col_idx(flat, c);
+        ray_t* pc = ray_table_get_col_idx(rows, c);
+        if (!oc || !pc || !ray_is_vec(oc) || oc->type == RAY_STR || pc->type != oc->type || oc->rc != 1 ||
+            oc->mmod || (oc->attrs & (RAY_ATTR_SLICE | RAY_ATTR_ARENA | RAY_ATTR_HAS_LINK)) ||
+            (pc->attrs & RAY_ATTR_SLICE) || ray_len(pc) != nr)
+            return NULL;
+        lx[c] = q_attr_letter(oc);
+        if (lx[c] && lx[c] != 's') return NULL;
+        if (oc->type == RAY_SYM) {
+            if (ray_sym_vec_domain(oc) != ray_sym_vec_domain(pc)) return NULL;
+            for (int64_t i = 0; i < nr; i++)
+                if (ray_sym_dict_width(ray_read_sym(ray_data(pc), i, RAY_SYM, pc->attrs) + 1) >
+                    (oc->attrs & RAY_SYM_W_MASK))
+                    return NULL;
+        }
+    }
+    ray_t* col[Q_TABLE_MAX_COLS];
+    for (int64_t c = 0; c < nc; c++) {
+        col[c] = ray_table_get_col_idx(flat, c);
+        ray_retain(col[c]);
+        ray_table_set_col_idx(flat, c, RAY_NULL_OBJ);
+        if (col[c]->rc != 1) {
+            for (; c >= 0; c--) { ray_table_set_col_idx(flat, c, col[c]); ray_release(col[c]); }
+            return NULL;
+        }
+    }
+    ray_t* err = NULL;
+    uint8_t was[Q_TABLE_MAX_COLS];
+    int64_t touched = 0;
+    for (int64_t c = 0; c < nc && !err; c++, touched++) {
+        ray_t* pc = ray_table_get_col_idx(rows, c);
+        uint8_t esz = ray_sym_elem_size(pc->type, pc->attrs);
+        uint8_t oesz = ray_sym_elem_size(col[c]->type, col[c]->attrs);
+        int nulls = 0;
+        was[c] = col[c]->attrs;
+        col[c]->attrs &= (uint8_t)~RAY_ATTR_SORTED;      /* append keeps attrs; the law re-derives s */
+        for (int64_t i = 0; i < nr && !err; i++) {
+            const void* elem = (const char*)ray_data(pc) + i * esz;
+            int64_t id = 0;
+            if (esz != oesz) {                             /* the sym id in the column's own width */
+                ray_write_sym(&id, 0, (uint64_t)ray_read_sym(ray_data(pc), i, RAY_SYM, pc->attrs),
+                              RAY_SYM, col[c]->attrs);
+                elem = &id;
+            }
+            nulls |= ray_vec_is_null(pc, i);
+            ray_t* nv = ray_vec_append(col[c], elem);
+            if (!nv || RAY_IS_ERR(nv)) err = nv ? nv : q_err(QE_OOM);
+            else col[c] = nv;
+        }
+        if (nulls) col[c]->attrs |= RAY_ATTR_HAS_NULLS;
+    }
+    for (int64_t c = 0; c < nc; c++) {
+        if (err) {                                       /* the two bits the arm touches, restored */
+            if (c < touched) {
+                col[c]->len = nx;
+                col[c]->attrs = (col[c]->attrs & (uint8_t)~(RAY_ATTR_SORTED | RAY_ATTR_HAS_NULLS)) |
+                                (was[c] & (RAY_ATTR_SORTED | RAY_ATTR_HAS_NULLS));
+            }
+        }
+        else col[c] = q_attr_append_keep(lx[c], nx, col[c]);
+        ray_table_set_col_idx(flat, c, col[c]);
+        ray_release(col[c]);
+    }
+    if (err) return err;
+    flat->attrs &= (uint8_t)~RAY_ATTR_SORTED;            /* what a fresh concat result carries */
+    ray_retain(flat);
+    return flat;
+}
+
 /* Append normalized rows to a flat table.  An EMPTY target (0 rows — e.g.
  * `([]name:();age:())`) adopts the payload columns wholesale: that is how the
  * first insert types an untyped empty schema (insert.qcmd `meta u`).  Column
  * name set is the target's either way. */
-ray_t* q_table_append(ray_t* flat, ray_t* rows) {
+ray_t* q_table_append(ray_t* flat, ray_t* rows, int exclusive) {
     int64_t nc = ray_table_ncols(flat);
     if (ray_table_nrows(flat) == 0) {
         /* untyped empty columns (RAY_LIST) adopt the payload type; a TYPED
@@ -585,6 +674,10 @@ ray_t* q_table_append(ray_t* flat, ray_t* rows) {
                 return q_err(QE_TYPE);
         }
     }
+    if (exclusive) {
+        ray_t* r = table_append_inplace(flat, rows);
+        if (r) return r;
+    }
     ray_t* out = ray_table_new(nc > 0 ? nc : 1);
     for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
         ray_t* oc = ray_table_get_col_idx(flat, c);
@@ -594,8 +687,10 @@ ray_t* q_table_append(ray_t* flat, ray_t* rows) {
             joined = q_enum_col_concat(oc, pc);
             if (joined && !RAY_IS_ERR(joined))
                 joined = q_enum_stamp(joined, q_enum_domain(oc));
+        } else if (oc && ray_is_vec(oc)) {
+            joined = q_attr_append_keep(q_attr_letter(oc), ray_len(oc), ray_concat_fn(oc, pc));   /* consumes */
         } else {
-            joined = q_attr_append_keep(oc, ray_concat_fn(oc, pc));   /* consumes */
+            joined = ray_concat_fn(oc, pc);
         }
         if (!joined || RAY_IS_ERR(joined)) { ray_release(out); return joined ? joined : q_err(QE_OOM); }
         out = ray_table_add_col(out, ray_table_col_name(flat, c), joined);
