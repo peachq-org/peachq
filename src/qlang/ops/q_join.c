@@ -1142,18 +1142,14 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
         return q_attr_append_keep(x, c);   /* the append-retention law; consumes c */
     }
     if (!x || !y) return r;
-    /* boxed-list fallback — ONLY when a char/string operand is involved
-     * (ref/join.md "otherwise a mixed list"; ref/cross.md needs `2 10,"a"`
-     * -> (2;10;"a")).  Deliberately NARROW: banked ledgers pin `,:` appends
-     * of incompatible non-char items as 'type (assign/identity `x,:`a`,
-     * list/join `s,:5f`), and the wrapper cannot tell plain `,` from the
-     * in-place `,:` amend — so non-char incompatibles keep the base error
-     * (error beats a wrong answer; the wider kdb mixed-list rule is a
-     * deferred cell). */
+    /* boxed-list fallback (ref/join.md:33 "The result is a vector if both
+     * arguments are vectors or atoms of the same type; otherwise a mixed
+     * list").  Only 'type boxes — an enum-domain 'cast stays an error.  `,:`
+     * Append is type-strict instead, enforced at the write seam (q_eval.c
+     * modassign_eval), the only place that can tell `,:` from `,`. */
     int64_t nx = q_join_gen_len(x), ny = q_join_gen_len(y);
-    int x_chr = x->type == -RAY_STR || x->type == RAY_CHARV || x->type == -RAY_CHARV;
-    int y_chr = y->type == -RAY_STR || y->type == RAY_CHARV || y->type == -RAY_CHARV;
-    if (nx < 0 || ny < 0 || (!x_chr && !y_chr) ||
+    const char* cls = r ? q_err_class(r) : NULL;  /* base errors carry no q_err stamp */
+    if (nx < 0 || ny < 0 || !cls || strcmp(cls, "type") ||
         q_type_is_dict(x) || q_type_is_dict(y) ||
         q_type_is_table(x) || q_type_is_table(y))
         return r;                          /* keep the base error */
