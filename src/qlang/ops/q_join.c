@@ -9,6 +9,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/ops/q_table.h" /* the shape law + append behind the row-append home */
 #include "qlang/ops/q_bang.h"  /* q_bang_enkey — keyed-result construction */
+#include "qlang/ops/q_index.h" /* q_index_grow* — a parked vector grows where it stands */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_value — pj rides q's own `+` */
 #include "lang/eval.h"     /* ray_left_join_fn, ray_window_join*_fn */
 #include "lang/internal.h" /* ray_asof_join_fn, ray_concat_fn, ray_vec_set_null, ray_error */
@@ -671,7 +672,7 @@ static ray_t* qj_rows_last_per_key(ray_t* rows, int64_t nkey) {
     return r;
 }
 
-ray_t* q_join_table_upsert(ray_t* x, ray_t* y) {
+ray_t* q_join_table_upsert(ray_t* x, ray_t* y, int exclusive) {
     int keyed = q_type_is_keyed(x);
     int64_t nkey = keyed ? ray_table_ncols(ray_dict_keys(x)) : 0;
     if (keyed && y && (y->type == RAY_TABLE || q_type_is_keyed(y))) {
@@ -688,17 +689,19 @@ ray_t* q_join_table_upsert(ray_t* x, ray_t* y) {
             }
         ray_release(yf);
     }
-    ray_t* flat = q_table_flatten(x);
+    /* a plain x is its own flat and stays BORROWED: the retain q_table_flatten
+     * takes would be the second ref the exclusive append refuses */
+    ray_t* flat = keyed ? q_table_flatten(x) : x;
     if (!flat || RAY_IS_ERR(flat)) return flat;
     ray_t* rows = q_table_rows_normalize(flat, y, Q_ROWS_JOIN);
-    if (!rows || RAY_IS_ERR(rows)) { ray_release(flat); return rows ? rows : q_err(QE_OOM); }
     if (!keyed) {
-        ray_t* nf = q_table_append(flat, rows, 0);
-        ray_release(flat);
+        if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_OOM);
+        ray_t* nf = q_table_append(flat, rows, exclusive);
         ray_release(rows);
         return nf;
     }
     ray_release(flat);
+    if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_OOM);
     ray_t* uniq = qj_rows_last_per_key(rows, nkey);
     ray_release(rows);
     if (!uniq || RAY_IS_ERR(uniq)) return uniq ? uniq : q_err(QE_OOM);
@@ -1091,8 +1094,9 @@ int64_t q_join_gen_len(ray_t* x) {
  * to a GENERIC boxed list (kdb `,` never type-errors on a list join —
  * ref/join.md `1 2,"a"`).  Every other operand pair delegates to base concat
  * (register_binary("concat") == ray_concat_fn) byte-identically — dict,dict
- * upsert-union and conforming table,table row-join already live there. */
-ray_t* q_join_wrap(ray_t* x, ray_t* y) {
+ * upsert-union and conforming table,table row-join already live there.
+ * `exclusive` is q_join_amend's word (below) that x may grow in place. */
+static ray_t* join_core(ray_t* x, ray_t* y, int exclusive) {
     /* `()` is Join's IDENTITY (the seed the `,` accumulator starts from,
      * ref/accumulators.md:264) for EVERY container, not just the ones base
      * concat happens to accept: a table is a list of records and a dict a list
@@ -1107,7 +1111,7 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
     if (q_type_is_keyed(x) && q_type_is_keyed(y))
         return qj_ktbl_merge(x, y, 0);     /* raw: y's OWN columns update */
     if ((q_type_is_table(x) || q_type_is_keyed(x)) && y)
-        return q_join_table_upsert(x, y);  /* every other payload: THE law */
+        return q_join_table_upsert(x, y, exclusive);  /* every other payload: THE law */
     /* A bare dict joins ONLY with a dict (ref/join.md: `10,d` -> 'type; base
      * concat would wrongly DISTRIBUTE the scalar over the dict's values). */
     {
@@ -1145,8 +1149,8 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
     /* boxed-list fallback (ref/join.md:33 "The result is a vector if both
      * arguments are vectors or atoms of the same type; otherwise a mixed
      * list").  Only 'type boxes — an enum-domain 'cast stays an error.  `,:`
-     * Append is type-strict instead, enforced at the write seam (q_eval.c
-     * modassign_eval), the only place that can tell `,:` from `,`. */
+     * Append is type-strict instead: q_join_amend (below) refuses before it
+     * gets here, the only home that can tell `,:` from `,`. */
     int64_t nx = q_join_gen_len(x), ny = q_join_gen_len(y);
     const char* cls = r ? q_err_class(r) : NULL;  /* base errors carry no q_err stamp */
     if (nx < 0 || ny < 0 || !cls || strcmp(cls, "type") ||
@@ -1168,4 +1172,45 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
     }
     if (r) ray_release(r);
     return out;
+}
+
+ray_t* q_join_wrap(ray_t* x, ray_t* y) { return join_core(x, y, 0); }
+
+/* The vector half of q_join_amend, and where the Append law lives (ref/join.md
+ * `,:`: `s,:5f` is 'type where `s,5f` boxes; an EMPTY payload is the identity
+ * whatever its type, as plain `,` answers it).  The law is checked BEFORE any
+ * write, so *px is untouched for the caller's unpark.  A STR vector is storage
+ * for a general list of strings, which the law exempts.  NULL = join_core's. */
+static ray_t* join_vec_amend(ray_t** px, ray_t* y, int exclusive) {
+    ray_t* x = *px;
+    if (!x || !y || !ray_is_vec(x) || x->type == RAY_STR) return NULL;
+    if (y->type != x->type && y->type != -x->type)
+        return (y->type == RAY_LIST || ray_is_vec(y)) && ray_len(y) == 0 ? NULL : q_err(QE_TYPE);
+    if (!exclusive || x->rc != 1) return NULL;
+    ray_t* pv = y->type < 0 ? ray_enlist_fn(&y, 1) : y;
+    if (!pv || RAY_IS_ERR(pv)) return pv;
+    ray_t* r = NULL;
+    if (q_index_growable(x, pv)) {
+        int64_t nx = ray_len(x);
+        uint8_t was = x->attrs;
+        r = q_index_grow(&x, pv);
+        if (r) q_index_ungrow(x, nx, was);
+        else r = x;
+        *px = x;
+    }
+    if (pv != y) ray_release(pv);
+    return r;
+}
+
+/* `x,:y` on a name: the Append law, then the one join dispatch — exclusive
+ * (the caller parked x's name and so holds its only ref) lets a vector or a
+ * plain table grow in the slack its buddy block already holds, consuming *px.
+ * Exclusivity is the CALLER'S assertion, never inferred from a refcount: a
+ * borrowed arg at rc 1 may be the sole element of a list that owns it. */
+ray_t* q_join_amend(ray_t** px, ray_t* y, int exclusive) {
+    ray_t* r = join_vec_amend(px, y, exclusive);
+    if (r) return r;
+    r = join_core(*px, y, exclusive);
+    if (exclusive && r && !RAY_IS_ERR(r)) ray_release(*px);
+    return r;
 }
