@@ -170,13 +170,12 @@ static bool attr_no_dup_nulls(ray_t* v) {
 /* THE append-retention law (set-attribute.md:31-32, :94): s kept iff the tail
  * from x's LAST item is non-descending; u kept iff the RESULT re-passes the
  * apply-time distinctness law (the one uniqueness home); g always; p never.
- * x borrowed, r CONSUMED (rc==1 fresh); slices/arena refused. */
-ray_t* q_attr_append_keep(ray_t* x, ray_t* r) {
-    if (!x || !r || RAY_IS_ERR(r) || !ray_is_vec(x) || !ray_is_vec(r)) return r;
-    char lx = q_attr_letter(x);
-    if (!lx || lx == 'p' || q_attr_letter(r)) return r;
+ * Stated over x's letter and length, not x itself, so an append that grew x
+ * IN PLACE can apply it too (x's own letter is stale by then, its length the
+ * result's).  r CONSUMED (rc==1 fresh); slices/arena refused. */
+ray_t* q_attr_append_keep(char lx, int64_t nx, ray_t* r) {
+    if (!lx || lx == 'p' || !r || RAY_IS_ERR(r) || !ray_is_vec(r) || q_attr_letter(r)) return r;
     if (r->attrs & (RAY_ATTR_SLICE | RAY_ATTR_ARENA)) return r;
-    int64_t nx = ray_len(x);
     if (nx > ray_len(r)) return r;
     if (lx == 's') {
         if (!tail_non_descending(r, nx > 0 ? nx - 1 : 0)) return r;
