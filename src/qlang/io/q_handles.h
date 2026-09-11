@@ -61,11 +61,16 @@ ray_t* q_handles_open(const char* path, size_t plen, int is_fifo);
  * handle space by construction, no I/O behind it.  -1 on failure. */
 int q_handles_reserve_fd(void);
 
-/* `h x` dispatch by kind: console (1/-1/2/-2) text-write, FILE write (raw;
- * `neg h` appends '\n' per basics/handles.md), FIFO 'nyi (Phase-1 fifo is a
- * reader), SOCKET/unregistered -> IPC send (positive sync, negative async).
+/* `h x` dispatch by kind: console (1/-1/2/-2) text-write, FILE write (text and
+ * bytes raw, `neg h` appends '\n' per basics/handles.md; any other payload is
+ * records — the serialized append), FIFO 'nyi (Phase-1 fifo is a reader),
+ * SOCKET/unregistered -> IPC send (positive sync, negative async).
  * `h` is the applied int/long atom (borrowed); a write echoes it, retained. */
 ray_t* q_handles_apply(ray_t* h, ray_t* y);
+
+/* `0 x` — the console door (.z.ps if defined, else `value`): every message-to-
+ * self, and every chunk `-11!` replays, goes through it.  y borrowed, result owned. */
+ray_t* q_handles_console_eval(ray_t* y);
 
 /* `` `:… `` sym-handle apply — the protocol arm (caller has checked the
  * leading ':'): ws/wss and http/https clients, else one-shot sync IPC on a

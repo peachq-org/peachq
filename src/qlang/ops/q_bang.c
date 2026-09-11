@@ -19,6 +19,7 @@
 #include "qlang/net/q_wire.h"       /* q_wire_serialize/_deserialize/_compress, Q_WIRE_ASYNC */
 #include "qlang/io/q_io.h"          /* the byte core: hcount's path+size, `-21!` stats */
 #include "qlang/io/q_conn.h"        /* q_conn_bang38 — `-38!` socket table */
+#include "qlang/io/q_log.h"         /* q_log_replay — `-11!` streaming execute */
 #include "qlang/eval/q_eval.h"  /* q_eval — `-6!` (internal.md: eval) */
 #include "qlang/q_fmt.h"        /* q_fmt_krepr — `-3!`, .Q.s1 */
 #include "qlang/q_console.h"    /* q_console_write — 0N! */
@@ -295,6 +296,7 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -32: return q_dotq_btoa_fn(y);
         case -33: return q_dotq_sha1_fn(y);
         case -34: return h_timespace(y);
+        case -11: return q_log_replay(y);
         case -21: return q_io_zip_stats(y);
         case -35: return q_dotq_gz_fn(&y, 1);
         case -38: return q_conn_bang38(y);
@@ -317,7 +319,6 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
          * ruling; the comment carries the id's doc name / blocking reason.) */
         case -4:   /* tokens: scanner token list                                */
         case -10:  /* type enum: enumerations                                   */
-        case -11:  /* streaming execute: logging + .z.ps                        */
         case -19:  /* set / compress file (AMBIGUOUS doc — see PR Deferrals)    */
         case -20:  /* .Q.gc: garbage collect                                    */
         case -23:  /* memory map: mmap-backed objects                          */
