@@ -26,6 +26,10 @@ void q_eval_syms_reset(void);
  * hole), result OWNED; `row` is fv's manifest row when known, NULL otherwise. */
 ray_t* q_eval_apply(ray_t* fv, const struct q_op* row, ray_t** args, int64_t n);
 
+/* the same call for a parser-marked TRAIN node (Q_ATTR_TRAIN): the last arg is a deferred tail, so a unary head or
+ * a noun-headed infix COMPOSES onto it (`1~count@`, `(1b;)@-9!`); anything else applies as q_eval_apply would */
+ray_t* q_eval_apply_train(ray_t* fv, const struct q_op* row, ray_t** args, int64_t n);
+
 /* THE materialization boundary (materialization phase 1, design 2026-07-24):
  * the ONE home for the force operation.  A lazy DAG handle is forced to a
  * concrete value; a concrete value (or error/NULL) passes through untouched.
