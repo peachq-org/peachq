@@ -32,7 +32,8 @@ ray_t* q_wirefile_write(ray_t* x, ray_t* y);
 ray_t* q_wirefile_write_zip(ray_t* x, ray_t* y, int lbs, int alg, int lvl);
 
 /* The flat-append kernel behind ALL THREE append doors (`:f upsert y,
- * .[`:f;();,;y], file-handle apply): in-place on a plain shape-B vector file,
+ * .[`:f;();,;y], file-handle apply): in-place on a plain shape-B vector file
+ * and on a plain shape-A general list (the log-file record append),
  * read-`,`-rewrite otherwise (container state preserved), write-if-absent.
  * q_wirefile_append takes the file symbol and returns it (or an error); the
  * _path form borrows a RAY_STR path and answers NULL on success. */
@@ -55,7 +56,7 @@ ray_t* q_wirefile_en(ray_t* dom, ray_t* t);
 
 /* One column file's HEADER, no payload read.  `tag` is the element tag (0 when
  * only a decode can tell: a kxzip container, a shape-A non-vector); `count` is
- * the header count (-1 unknown); `mappable` marks a fixed-width uncompressed
+ * the header count (-1 unknown; a shape-A general list's int32); `mappable` marks a fixed-width uncompressed
  * simple vector whose payload starts at byte 16. */
 typedef struct {
     int8_t  tag;

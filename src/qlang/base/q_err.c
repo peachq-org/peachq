@@ -28,7 +28,7 @@ static const char* const q_err_names[QE__COUNT] = {
     [QE_STYPE]="stype", [QE_NOAMEND]="noamend", [QE_SPLAY]="splay",
     [QE_PAR]="par", [QE_PART]="part", [QE_STEP]="step", [QE_DUP]="dup",
     [QE_RESTRICTED]="restricted", [QE_ACCESS]="access", [QE_OS]="os",
-    [QE_CONN]="conn", [QE_WSFULL]="wsfull",
+    [QE_CONN]="conn", [QE_WSFULL]="wsfull", [QE_BADTAIL]="badtail",
     [QE_OOM]="oom", [QE_IO]="io", [QE_NAME]="name", [QE_INDEX]="index",
     [QE_RESERVE]="reserve", [QE_INIT]="init", [QE_RANGE]="range",
     [QE_SCHEMA]="schema", [QE_CORRUPT]="corrupt", [QE_CANCEL]="cancel",
