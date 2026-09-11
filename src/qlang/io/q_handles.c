@@ -275,7 +275,7 @@ static ray_t* raw_write(int64_t qh, ray_t* y) {
  * written straight through __VM as q_err.c writes raise_val — the base is frozen
  * and owns no scoped setter.  DIVERGENCE (deliberate, kdb is silent): restricted
  * mode DENIES it — `0".z.u"` IS the identity escape -b/-U exists to close. */
-static ray_t* console_eval_h(ray_t* y) {
+ray_t* q_handles_console_eval(ray_t* y) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* zps = q_dotz_resolve(ray_sym_intern(".z.ps", 5));   /* owned; NULL = the `value` default */
     int64_t saved = __VM ? __VM->ipc_handle : -1;
@@ -334,19 +334,19 @@ ray_t* q_handles_apply(ray_t* h, ray_t* y) {
     int64_t qh = (h->type == -RAY_I64) ? h->i64 : (int64_t)h->i32;
     if (qh == 1 || qh == -1) return echo(h, console_write_h(qh, y));
     if (qh == 2 || qh == -2) return echo(h, raw_write(qh, y));   /* stderr IS fd 2, `\2`-redirectable */
-    if (qh == 0) return console_eval_h(y);
+    if (qh == 0) return q_handles_console_eval(y);
     int64_t afd = (qh == INT64_MIN) ? 0 : (qh < 0 ? -qh : qh);   /* neg h = same fd */
     if (afd >= 3) {
         int hk = q_handles_kind(afd);
         if (hk == Q_HANDLE_FILE) {
             if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
-            /* strings/bytes/lists keep the raw log-file law (ref/hopen.md:77,
-             * basics/handles.md:74); any other typed payload is a vector-file
-             * append (kb/performance-tips.md "append (2 3) to handle") */
-            if (y && (y->type == RAY_BYTE_ONLY || y->type == RAY_LIST ||
-                      y->type == RAY_STR || y->type == RAY_CHARV ||
-                      y->type == -RAY_STR || y->type == -RAY_CHARV))
-                return echo(h, raw_write(qh, y));
+            /* text and bytes are raw; neg[h] keeps its line law over a list of
+             * strings (basics/handles.md:70-76); every other payload is records
+             * (kb/logging.md § Log writing) */
+            const char* tp; int64_t tn;
+            int raw = y && (y->type == RAY_BYTE_ONLY || q_str_text_bytes(y, &tp, &tn) ||
+                            (qh < 0 && (y->type == RAY_LIST || y->type == RAY_STR)));
+            if (raw) return echo(h, raw_write(qh, y));
             ray_t* oa = q_handles_open_args(afd);           /* borrowed charv path */
             if (!oa) return q_err(QE_TYPE);
             ray_t* p = ray_str((const char*)ray_data(oa), (size_t)ray_len(oa));

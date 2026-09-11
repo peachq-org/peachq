@@ -555,6 +555,7 @@ static ray_t* wf_probe_classify(const uint8_t* buf, size_t got, size_t fsz,
     case WF_A:                       /* full serialized value; count advisory */
         out->tag = wf_simple_tag(buf[2]) ? (int8_t)buf[2]
                  : buf[2] == RAY_SYM ? (int8_t)RAY_SYM : 0;
+        if (buf[2] == 0 && got >= WF_A_OFF) out->count = (int32_t)wf_u32(buf + 4);   /* a general list's items */
         return NULL;
     case WF_B: {
         if (got < WF_B_OFF || fsz < WF_B_OFF) return q_err(QE_CORRUPT);
@@ -850,22 +851,53 @@ static ray_t* wf_write_flat(ray_t* x, ray_t* y, int lbs, int alg, int lvl) {
  * kb/performance-tips.md:151).  A typed target takes only its own element
  * type; only an untyped shape-A list/atom file delegates to the join home. */
 
-/* Elements at EOF, then the count: a tear leaves the old count (the reader
- * ignores the tail) and the next append's exact-size check routes to the
- * rewrite fallback.  Best-effort ordering, like every writer here (no fsync). */
+/* Bytes at EOF, then the count field (each shape's own width and offset): a
+ * tear leaves the old count — the shape-B reader ignores the tail and the next
+ * append's exact-size check routes to the rewrite; a shape-A tail reads
+ * 'corrupt until -11!(-2;x) names the cut.  Best-effort ordering, like every
+ * writer here (no fsync). */
+static ray_t* wf_append_bytes(ray_t* path, const void* p, size_t n, long coff, const void* cnt, size_t cw) {
+    FILE* fp = fopen(ray_str_ptr(path), "r+b");
+    if (!fp) return q_err(QE_IO);
+    int bad = fseek(fp, 0, SEEK_END) != 0 || q_io_fwrite(fp, p, n) != 0 || fflush(fp) != 0 ||
+              fseek(fp, coff, SEEK_SET) != 0 || fwrite(cnt, cw, 1, fp) != 1;
+    if (fclose(fp) != 0) bad = 1;
+    return bad ? q_err(QE_IO) : NULL;
+}
+
 static ray_t* wf_append_inplace(ray_t* path, ray_t* v, int64_t count) {
     size_t esz = ray_type_sizes[(uint8_t)v->type];
     int64_t n = ray_len(v);
     if (count > INT64_MAX - n) return q_err(QE_LIMIT);
-    FILE* fp = fopen(ray_str_ptr(path), "r+b");
-    if (!fp) return q_err(QE_IO);
     int64_t nc = count + n;
-    int bad = fseek(fp, 0, SEEK_END) != 0 ||
-              q_io_fwrite(fp, ray_data(v), esz * (size_t)n) != 0 ||
-              fflush(fp) != 0 || fseek(fp, 8, SEEK_SET) != 0 ||
-              fwrite(&nc, 8, 1, fp) != 1;
-    if (fclose(fp) != 0) bad = 1;
-    return bad ? q_err(QE_IO) : NULL;
+    return wf_append_bytes(path, ray_data(v), esz * (size_t)n, 8, &nc, 8);
+}
+
+/* A plain shape-A general list: the new items' wire bodies at EOF and the
+ * int32 count at byte 4 bumped — O(1) per message, the tickerplant law
+ * (kb/logging.md).  A list's or vector's elements are the items; anything
+ * else (an atom, a dict, a table) is one item, as `,` onto a list treats it. */
+static ray_t* wf_append_a_list(ray_t* path, ray_t* y, int32_t count) {
+    int items = y->type == RAY_LIST || ray_is_vec(y) || y->type == RAY_ENUM;
+    int64_t n = items ? ray_len(y) : 1;
+    if (n > INT32_MAX - count) return q_err(QE_LIMIT);
+    q_wire_wbuf_t b = {0};
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* it = items ? q_index_elem_at(y, i) : (ray_retain(y), y);
+        if (!it || RAY_IS_ERR(it)) { q_wire_wbuf_free(&b); return it ? it : q_err(QE_OOM); }
+        int rc = q_wire_write_obj(&b, it);
+        ray_release(it);
+        if (rc) {
+            ray_t* e = b.err ? b.err : q_err(QE_TYPE);
+            b.err = NULL;
+            q_wire_wbuf_free(&b);
+            return e;
+        }
+    }
+    int32_t nc = count + (int32_t)n;
+    ray_t* bad = wf_append_bytes(path, b.p, b.len, 4, &nc, 4);
+    q_wire_wbuf_free(&b);
+    return bad;
 }
 
 /* Shape-A sym file: NUL-terminated names at EOF, ONE buffer/ONE write (no torn
@@ -970,6 +1002,8 @@ static ray_t* wf_append_path(ray_t* path, ray_t* y) {
         int plain = fp && fread(hd, 1, 4, fp) == 4 && hd[3] == 0;
         if (fp) fclose(fp);
         bad = plain ? wf_append_syms(path, y) : wf_append_rewrite(path, y, 0);
+    } else if (!h.zipped && h.tag == 0 && h.count >= 0) {
+        bad = wf_append_a_list(path, y, (int32_t)h.count);
     } else if (!h.zipped && h.mappable && !h.nested && h.disk_attr == 0 &&
                (int64_t)st.st_size ==
                    WF_B_OFF + h.count * (int64_t)ray_type_sizes[(uint8_t)h.tag]) {
