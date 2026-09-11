@@ -644,8 +644,11 @@ static void free_tokens(Tokens ts) {
 /* ===== parser ================================================================ */
 
 typedef enum { R_NONE, R_NOUN, R_VERB } Role;
-typedef struct { Role role; ray_t *v; } P;
-static const P EMPTY = { R_NONE, NULL };
+/* train: the rightmost verb has its right operand elided (`count@`, `-9!`) — a value that applies LATER, so what
+ * stands to its left COMPOSES onto it (ref/apply.md "u v w@", ref/compose.md "(0|+)").  Set only by the postfix
+ * build in parse_e_from_body and carried left through infix and juxtaposition; parens, brackets and lambdas end it. */
+typedef struct { Role role; ray_t *v; int train; } P;
+static const P EMPTY = { R_NONE, NULL, 0 };
 
 typedef struct {
     const char *src;
@@ -934,7 +937,7 @@ static P parse_base(Parser *p) {
      * restores on any non-template so ordinary operands are unaffected. */
     if (tk->kind == T_NOUN) {
         ray_t *q = try_parse_qsql(p);
-        if (q) return (P){ R_NOUN, q };
+        if (q) return (P){ R_NOUN, q, 0 };
         tk = cur(p);                /* pos unchanged on soft-fail, but re-fetch */
     }
     switch (tk->kind) {
@@ -950,12 +953,12 @@ static P parse_base(Parser *p) {
         }
         ray_t *v = noun_tree_value(tk->k); tk->k = NULL;
         adv(p);
-        return (P){ R_NOUN, v };
+        return (P){ R_NOUN, v, 0 };
     }
     case T_VERB: {
         ray_t *v = tk->k; tk->k = NULL;
         adv(p);
-        return (P){ R_VERB, v };
+        return (P){ R_VERB, v, 0 };
     }
     case T_LBRACK: {
         /* Expression block `[e1;e2;…]` — the SAME `;` statement sequence a
@@ -968,7 +971,7 @@ static P parse_base(Parser *p) {
         adv(p);
         ray_t *b = seq_of(parse_E(p, Q_NONE));
         expect(p, T_RBRACK, "expected ']' closing expression block");
-        return (P){ R_NOUN, b ? b : RAY_NULL_OBJ };
+        return (P){ R_NOUN, b ? b : RAY_NULL_OBJ, 0 };
     }
     case T_LPAREN: {
         adv(p);
@@ -984,7 +987,7 @@ static P parse_base(Parser *p) {
                  * `tmpDirs:([])`), not one elided column auto-named x. */
                 ray_t *cols = at(p, T_RPAREN) ? ray_list_new(1) : parse_E(p, Q_NONE);
                 expect(p, T_RPAREN, "expected ')'");
-                return (P){ R_NOUN, table_lit_flip(cols) };
+                return (P){ R_NOUN, table_lit_flip(cols), 0 };
             }
             ray_t *kcols = parse_E(p, Q_NONE);
             expect(p, T_RBRACK, "expected ']' in keyed table literal");
@@ -992,11 +995,11 @@ static P parse_base(Parser *p) {
             if (at(p, T_SEMI)) adv(p);
             if (at(p, T_RPAREN)) {
                 expect(p, T_RPAREN, "expected ')'");
-                return (P){ R_NOUN, table_lit_dict(kcols) };
+                return (P){ R_NOUN, table_lit_dict(kcols), 0 };
             }
             ray_t *vcols = parse_E(p, Q_NONE);
             expect(p, T_RPAREN, "expected ')'");
-            return (P){ R_NOUN, table_lit_bang(table_lit_flip(kcols), table_lit_flip(vcols)) };
+            return (P){ R_NOUN, table_lit_bang(table_lit_flip(kcols), table_lit_flip(vcols)), 0 };
         }
         ray_t *e = parse_E(p, Q_NONE);
         expect(p, T_RPAREN, "expected ')'");
@@ -1032,14 +1035,14 @@ static P parse_base(Parser *p) {
                  * self-evaluating null singleton; q_fmt prints it `::`. */
                 if (sym_name_is(only, "::")) {
                     ray_release(e);
-                    return (P){ R_NOUN, RAY_NULL_OBJ };
+                    return (P){ R_NOUN, RAY_NULL_OBJ, 0 };
                 }
                 ray_retain(only);
                 ray_release(e);
                 /* a parenthesized lone glyph verb `(+)` is the bare-verb VALUE
                  * (dyadic row); user names keep their name-ref. */
                 if (sym_is_glyph(only)) only = q_embed(only, Q_DYADIC);
-                return (P){ R_NOUN, only };
+                return (P){ R_NOUN, only, 0 };
             }
             ray_release(e);
             e = ray_list_new(1);   /* 0 elements -> empty list literal below */
@@ -1058,7 +1061,7 @@ static P parse_base(Parser *p) {
                 e = w;
             }
         }
-        return (P){ R_NOUN, e };
+        return (P){ R_NOUN, e, 0 };
     }
     case T_LBRACE: {
         /* Lambda literal `{[sig] stmt;...}` -> the RAY_QFN carrier VALUE,
@@ -1184,7 +1187,7 @@ static P parse_base(Parser *p) {
         ray_release(params);
         if (ptypes) ray_release(ptypes);
         ray_release(e);
-        return (P){ R_NOUN, fn };
+        return (P){ R_NOUN, fn, 0 };
     }
     case T_ADVERB: {
         /* Compose `'[f;g;…]` — the `'` adverb in BRACKET form composes
@@ -1206,14 +1209,14 @@ static P parse_base(Parser *p) {
              * projection hole a bracket call marks, not a `::` value */
             ray_t *w = cons_head(cv, args, hole);
             ray_release(args);
-            return (P){ R_NOUN, w };
+            return (P){ R_NOUN, w, 0 };
         }
         /* otherwise a bare iterator in TERM position is its own VALUE — the
          * `\` of `type each(…;\;…)` (basics/datatypes.md) */
         ray_t *iv = tk->k;
         tk->k = NULL;
         adv(p);
-        return (P){ R_NOUN, iv };
+        return (P){ R_NOUN, iv, 0 };
     }
     default:
         return EMPTY;
@@ -1456,7 +1459,7 @@ static P parse_query(Parser *p) {
     node = ray_list_append(node, A);    ray_release(A);
     if (limv) { node = ray_list_append(node, limv); ray_release(limv); }
     if (ordv) { node = ray_list_append(node, ordv); ray_release(ordv); }
-    return (P){ R_NOUN, node };
+    return (P){ R_NOUN, node, 0 };
 }
 
 /* Query-aware wrapper around the UNCHANGED parse_base.  Returns EMPTY (without
@@ -1579,7 +1582,7 @@ static P parse_e_body(Parser *p, QCtx ctx) {
             P e = parse_e(p, ctx);
             ray_t *rhs = (e.role != R_NONE && e.v) ? e.v : q_null();
             ray_t *xs[2] = { ray_char(':'), rhs };
-            return (P){ R_NOUN, q_list(xs, 2) };
+            return (P){ R_NOUN, q_list(xs, 2), 0 };
         }
     }
     /* Signal `'expr` (ref/signal.md): a bare `'` adverb at expression start
@@ -1597,7 +1600,7 @@ static P parse_e_body(Parser *p, QCtx ctx) {
             P e = parse_e(p, ctx);
             ray_t *rhs = (e.role != R_NONE && e.v) ? e.v : q_null();
             ray_t *xs[2] = { ray_char('\''), rhs };
-            return (P){ R_NOUN, q_list(xs, 2) };
+            return (P){ R_NOUN, q_list(xs, 2), 0 };
         }
     }
     /* qSQL interception (piece 3): a `select …` statement lowers to kdb's
@@ -1606,7 +1609,7 @@ static P parse_e_body(Parser *p, QCtx ctx) {
      * the ordinary parser — so previously-parseable selects never regress. */
     {
         ray_t *q = try_parse_qsql(p);
-        if (q) return (P){ R_NOUN, q };
+        if (q) return (P){ R_NOUN, q, 0 };
     }
     /* A k-unary glyph applied to a juxtaposed operand is k, NOT q — q spells
      * the monadic with its keyword (first, flip, count, …), the glyph wrapped
@@ -1636,6 +1639,13 @@ static P parse_e_body(Parser *p, QCtx ctx) {
     P t = parse_term(p, ctx);
     if (t.role == R_NONE) return EMPTY;
     return parse_e_from(p, t, ctx);
+}
+
+/* A node built ONTO a train tail (`1~` onto `count@`) is flagged Q_ATTR_TRAIN so the walker composes instead of
+ * applying; a postfix elision (`count@` itself) starts a train but stays an ordinary projection node. */
+static P train_node(ray_t *node, int postfix, int onto_train) {
+    if (onto_train && node && !RAY_IS_ERR(node)) node->attrs |= Q_ATTR_TRAIN;
+    return (P){ R_NOUN, node, postfix || onto_train };
 }
 
 static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
@@ -1681,7 +1691,7 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
         if (!verb_marked(u.v))
             u.v = q_embed(u.v, Q_DYADIC);      /* infix head: the dyadic row */
         ray_t *xs[3] = { u.v, t.v, rhs };
-        return (P){ R_NOUN, q_list(xs, 3) };
+        return train_node(q_list(xs, 3), !e.v, e.train);
     }
 
     P e = parse_e_from(p, u, ctx);
@@ -1765,7 +1775,7 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
         }
     }
     ray_t *xs[2] = { t.v, e.v };
-    return (P){ R_NOUN, q_list(xs, 2) };
+    return train_node(q_list(xs, 2), 0, e.train);
 }
 
 /* ===== qSQL SELECT parser (piece 3) =========================================
@@ -1999,6 +2009,7 @@ static ray_t *qsql_convert_expr(ray_t *x) {
                 ray_t *c = qsql_convert_expr(e[i]);
                 node = ray_list_append(node, c); ray_release(c);
             }
+            if (node && !RAY_IS_ERR(node)) node->attrs |= x->attrs & Q_ATTR_TRAIN;   /* the clone is a train too */
         }
         return node;
     }
