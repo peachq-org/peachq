@@ -497,18 +497,21 @@ size_t q_io_zipmap_maxblock(const q_io_zipmap_t* zm) {
 }
 
 #ifdef RAY_OS_WINDOWS
-static ssize_t io_pread(int fd, void* buf, size_t n, int64_t off) {   /* ReadFile at an OVERLAPPED offset */
+ssize_t q_io_pread(int fd, void* buf, size_t n, int64_t off) {   /* ReadFile at an OVERLAPPED offset */
     OVERLAPPED ov;
     memset(&ov, 0, sizeof ov);
     ov.Offset = (DWORD)off;
     ov.OffsetHigh = (DWORD)(off >> 32);
     DWORD got = 0;
-    if (!ReadFile((HANDLE)_get_osfhandle(fd), buf, (DWORD)(n > 0x7fffffff ? 0x7fffffff : n), &got, &ov))
-        return GetLastError() == ERROR_HANDLE_EOF ? 0 : -1;
+    if (!ReadFile((HANDLE)_get_osfhandle(fd), buf, (DWORD)(n > 0x7fffffff ? 0x7fffffff : n), &got, &ov)) {
+        if (GetLastError() == ERROR_HANDLE_EOF) return 0;
+        errno = EIO;                    /* the callers' EINTR retry must see a fresh errno */
+        return -1;
+    }
     return (ssize_t)got;
 }
 #else
-static ssize_t io_pread(int fd, void* buf, size_t n, int64_t off) {
+ssize_t q_io_pread(int fd, void* buf, size_t n, int64_t off) {
     return pread(fd, buf, n, (off_t)off);
 }
 #endif
@@ -521,7 +524,7 @@ int q_io_zip_block_fd(int fd, const q_io_zipmap_t* zm, int64_t k,
     if (plain > zm->block_size) plain = zm->block_size;
     if (plain < 0 || (size_t)plain > cap || clen < 0) return -1;
     for (int64_t got = 0; got < clen; ) {
-        ssize_t n = io_pread(fd, scratch + got, (size_t)(clen - got), ZIP_MAGIC_LEN + start + got);
+        ssize_t n = q_io_pread(fd, scratch + got, (size_t)(clen - got), ZIP_MAGIC_LEN + start + got);
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return -2;
         got += n;
