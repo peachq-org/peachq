@@ -1230,6 +1230,16 @@ static int comp_tail(ray_t* x) {
            (row->name[0] == '@' || row->name[0] == '.');
 }
 
+/* `a v g` composes the projection `v[a;]` onto g (`0|+`, `1~count@`): the one "project then compose" home */
+static ray_t* proj_compose(ray_t* fv, const q_op_t* row, ray_t* a, ray_t* g) {
+    ray_t* h[2] = { a, NULL };
+    ray_t* p = q_eval_apply_proj_new(fv, row, h, 2, 2);
+    if (RAY_IS_ERR(p)) return p;
+    ray_t* c = comp_new(p, g);
+    ray_release(p);
+    return c;
+}
+
 static ray_t* comp_call(ray_t* comp, ray_t** args, int64_t n) {
     ray_t** c = car_slots(comp);
     ray_t* inner = q_eval_apply(c[1], NULL, args, n);
@@ -1454,9 +1464,6 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
     if (row && !row->adverb_hof && n == 2 && row->name[1] == '\0' &&
         !strchr("@.,!~?", row->name[0]) && q_eval_apply_is_fn(args[1]) &&
         !q_eval_apply_is_fn(args[0])) {
-        ray_t* h[2] = { args[0], NULL };
-        ray_t* p = q_eval_apply_proj_new(fv, row, h, 2, 2);
-        if (RAY_IS_ERR(p)) return p;
         /* a bare glyph operand arrives as the MONADIC sibling (name
          * resolution prefers it) but q spells a bare glyph dyadic — `(0|+)`
          * is `0|` on Add, rank 2.  The glyph and its keyword monad share one
@@ -1469,9 +1476,7 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
                 ray_sym_intern_runtime(grow->name, 1), Q_DYADIC, &drow);
             if (sib && q_eval_apply_is_fnval(sib)) g = sib;
         }
-        ray_t* c = comp_new(p, g);
-        ray_release(p);
-        return c;
+        return proj_compose(fv, row, args[0], g);
     }
     if (rank >= 0 && n < rank) return q_eval_apply_proj_new(fv, row, args, n, rank);
     if (rank >= 0 && n > rank) return q_err(QE_RANK);
@@ -1581,6 +1586,22 @@ ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     }
     if (r && RAY_IS_ERR(r)) return q_dbg_filter(r, fv, args, n);
     return r;
+}
+
+/* A TRAIN node (Q_ATTR_TRAIN, parser-marked): the last argument is the tail the syntax defers, so a unary head
+ * composes onto it (`first asc@`, `u v w@`) and a noun-headed infix composes its projection (`1~count@`,
+ * `(1b;)@-9!`) — the same laws as the value gates in apply_inner, minus their guesses about what the value IS.
+ * A head that is not a function, or a fixed rank other than 1, applies as it always did. */
+ray_t* q_eval_apply_train(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
+    ray_t* g = args[n - 1];
+    if (fv && !RAY_IS_ERR(fv) && q_eval_apply_is_fn(fv) && g && q_eval_apply_is_fn(g)) {
+        int64_t rank = rank_of(fv);
+        if (n == 1 && (rank == 1 || q_eval_apply_carrier_kind(fv) == Q_EVAL_CAR_DERIV))
+            return comp_new(fv, g);
+        if (n == 2 && args[0] && (rank == 2 || rank < 0))
+            return proj_compose(fv, row, args[0], g);
+    }
+    return q_eval_apply(fv, row, args, n);
 }
 
 /* ===== the public value-apply seam ======================================= */
