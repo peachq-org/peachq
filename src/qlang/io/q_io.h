@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>   /* ssize_t */
 
 /* Sym-or-string -> OWNED RAY_STR path; a SYM must carry the file symbol's ':'
  * (stripped), a string may.  NULL otherwise: 'type, or fall through.  A string
@@ -99,6 +100,9 @@ void   q_io_zipmap_free(q_io_zipmap_t* zm);
  * end and yield exactly the block's plain size — anything else is 'corrupt. */
 ray_t* q_io_zip_block(ray_t* pathstr, const q_io_zipmap_t* zm, int64_t k,
                       uint8_t* dst, size_t cap);
+
+/* Portable positional read: pread, or ReadFile at an overlapped offset on Windows (errno set on failure). */
+ssize_t q_io_pread(int fd, void* buf, size_t n, int64_t off);
 
 /* The same block through an open fd (pread) into the caller's scratch (q_io_zipmap_maxblock bytes fit any block):
  * allocation-free and async-signal-safe — the splay fault handler runs it.  0, -1 'corrupt, -2 'io. */
