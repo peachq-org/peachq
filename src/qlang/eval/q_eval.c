@@ -1051,7 +1051,10 @@ ray_t* q_eval(ray_t* node) {
                             : (argc == 2) ? Q_DYADIC : 0;
             if (val) row = q_registry_row_of(fv, val);
         }
-        ret = q_eval_apply(fv, row, argv, argc);
+        /* a parser-marked TRAIN (`1~count@`): its rightmost operand is deferred, so the head composes onto it */
+        ret = (node->attrs & Q_ATTR_TRAIN) && argv[argc - 1]
+                  ? q_eval_apply_train(fv, row, argv, argc)
+                  : q_eval_apply(fv, row, argv, argc);
         release_args(argv, argc);
         ray_release(fv);
     }
