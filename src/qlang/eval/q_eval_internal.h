@@ -43,6 +43,14 @@ ray_t* q_eval_apply_lambda_locals(ray_t* v);
 ray_t* q_eval_apply_manifest_value(const struct q_op* r, q_valence_t v,
                                    const struct q_op** out);
 
+/* the dict-dict conformance law the atomic dyads distribute by: key union;
+ * common keys combine through `f`, a key on one side only takes the row's
+ * identity FILL where it has one, else passes through.  `f` borrows its two
+ * items and returns an owned value; x, y borrowed; result owned */
+typedef ray_t* (*q_eval_zip_fn)(void* ctx, ray_t* x, ray_t* y);
+ray_t* q_eval_apply_dict_zip(const struct q_op* row, ray_t* x, ray_t* y,
+                             q_eval_zip_fn f, void* ctx);
+
 /* an FNV overload-matrix row (`?` `!` `@` `.`) — its classic reading is the
  * DYAD, so `(!/)x` reduces at rank 2 */
 int q_eval_apply_fnv_matrix_row(const struct q_op* r);
