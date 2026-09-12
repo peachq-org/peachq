@@ -1,7 +1,8 @@
 /* q_http_client — blocking outbound HTTP client for `.Q.hg` (GET) / `.Q.hp`
  * (POST).  Behaviour pinned from qdocs ref/dotq.md (clean room); doc-unpinned
- * details (timeouts, size cap, redirect + https-error policy) are peachq-authored
- * and recorded in the PR.  Synchronous/blocking is kdb-true for these verbs.
+ * details (timeouts, size cap, https-error policy, and the redirect follow — 3xx
+ * followed cross-domain and across schemes, credentials dropped on a host change)
+ * are peachq-authored and recorded in the PR.  Synchronous/blocking is kdb-true.
  *
  * The connect + send + response-read seams are shaped for REUSE: the queued
  * WebSocket client rides q_http_client_connect + q_http_client_send_all for its
@@ -35,17 +36,22 @@ int q_http_client_url_parse(const char* url, size_t n, q_http_url_t* out);
  * the spelling — a leading kdb ':' is NOT skipped, so strip it first. */
 int q_http_client_scheme_is(const char* s, size_t n);
 
+/* A header value borrowed from a response buffer: p == NULL when absent. */
+typedef struct { const char* p; size_t n; } q_http_span_t;
+
 /* Extract the body from a COMPLETE response buffer (headers + framed body).
  * On success sets status and body/body_len (body points into buf; a chunked
  * body is de-framed IN PLACE, so buf is mutated).  When `gzip` is non-NULL it is
  * set to 1 iff the response carried `Content-Encoding: gzip` (caller inflates the
  * extracted body), else 0.  `no_body` is the HEAD flag: the response is taken as
  * complete at its headers, whatever length they advertise.  `clen`, when
- * non-NULL, reports the advertised Content-Length (-1 = none).  Returns 0 ok,
+ * non-NULL, reports the advertised Content-Length (-1 = none).  `location`, when
+ * non-NULL, receives the first `Location` header's value (into buf; p NULL when
+ * absent) — the redirect follow in http_do reads it, nothing else.  Returns 0 ok,
  * -1 malformed, -2 decoded body exceeds Q_HTTP_CLIENT_MAX. */
 int q_http_client_extract(char* buf, size_t len, int* status,
                           const char** body, size_t* body_len, int* gzip,
-                          int no_body, int64_t* clen);
+                          int no_body, int64_t* clen, q_http_span_t* location);
 
 /* --- reusable blocking pipeline seams (also the WS-client hook) --- */
 

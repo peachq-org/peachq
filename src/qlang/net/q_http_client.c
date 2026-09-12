@@ -1,6 +1,8 @@
 /* q_http_client — see q_http_client.h.  Blocking `.Q.hg`/`.Q.hp` client.
  * Behaviour pinned from qdocs ref/dotq.md (clean room); the timeout, size-cap,
- * https-error and redirect policies are doc-unpinned peachq choices (see PR). */
+ * https-error and redirect policies are doc-unpinned peachq choices (see PR):
+ * 3xx followed cross-domain and across schemes up to Q_HTTP_MAX_HOPS, credentials
+ * dropped on a host change, the raw client never following. */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L    /* clock_gettime / CLOCK_MONOTONIC */
 #endif
@@ -34,6 +36,7 @@
 #define Q_HTTP_TOTAL_MS   30000        /* whole send+read budget */
 #define Q_HTTP_MAX_HDRS   64
 #define Q_HTTP_HDR_CAP    (64 * 1024)  /* response header block cap (pre-body) */
+#define Q_HTTP_MAX_HOPS   10           /* redirect follows (urllib's number): 11 transactions, then the 3xx stands */
 
 /* ---- monotonic milliseconds (absolute-deadline arithmetic) ---- */
 static int64_t now_ms(void) {
@@ -231,10 +234,11 @@ static int chunked_complete(const char* body, size_t blen) {
 
 int q_http_client_extract(char* buf, size_t len, int* status,
                           const char** body, size_t* body_len, int* gzip,
-                          int no_body, int64_t* clen)
+                          int no_body, int64_t* clen, q_http_span_t* location)
 {
     if (gzip) *gzip = 0;
     if (clen) *clen = -1;
+    if (location) { location->p = NULL; location->n = 0; }
     int minor, st; const char* msg; size_t msg_len, nh = Q_HTTP_MAX_HDRS;
     struct phr_header h[Q_HTTP_MAX_HDRS];
     int hl = phr_parse_response(buf, len, &minor, &st, &msg, &msg_len, h, &nh, 0);
@@ -251,6 +255,11 @@ int q_http_client_extract(char* buf, size_t len, int* status,
             break;
         }
     if (gzip) *gzip = gz;
+    for (size_t i = 0; location && i < nh; i++)
+        if (h[i].name && hdr_ieq(&h[i], "location")) {
+            location->p = h[i].value; location->n = h[i].value_len;
+            break;
+        }
 
     int chunked, have_cl, bodyless; int64_t cl;
     if (response_framing(st, h, nh, &chunked, &have_cl, &cl, &bodyless) != 0) return -1;
@@ -467,8 +476,53 @@ static ray_t* http_body(const http_req_t* r, const char* p, size_t n) {
                        : ray_charv(p, (int64_t)n);
 }
 
-/* Shared GET/HEAD/POST driver.  Returns the body (charv, or bytes when the caller
- * asked) or a bare-class ray_error. */
+static int host_ieq(const char* a, const char* b) {   /* DNS names are case-insensitive */
+    for (; *a && *b; a++, b++) {
+        unsigned char x = (unsigned char)*a, y = (unsigned char)*b;
+        if (x >= 'A' && x <= 'Z') x = (unsigned char)(x + 32);
+        if (y >= 'A' && y <= 'Z') y = (unsigned char)(y + 32);
+        if (x != y) return 0;
+    }
+    return *a == *b;
+}
+
+/* Resolve a `Location` against the URL that answered it (RFC 3986 §5.2 reference
+ * forms: absolute, scheme-relative `//h/p`, path-absolute `/p`, relative `p`).  A
+ * foreign scheme (`ftp:`, `file:` — a ':' before any '/', '?' or '#') is refused
+ * rather than read as a path; dot segments are left to the server.  0 ok / -1 unresolvable
+ * (the caller falls out). */
+static int redirect_resolve(const q_http_url_t* cur, const char* loc, size_t n,
+                            q_http_url_t* out)
+{
+    while (n && (loc[0] == ' ' || loc[0] == '\t')) { loc++; n--; }
+    while (n && (loc[n-1] == ' ' || loc[n-1] == '\t')) n--;
+    if (n == 0 || loc[0] == ':') return -1;
+    size_t pfx;
+    if (scheme_of(loc, n, &pfx) >= 0) return q_http_client_url_parse(loc, n, out);
+    for (size_t i = 0; i < n && loc[i] != '/' && loc[i] != '?' && loc[i] != '#'; i++)
+        if (loc[i] == ':') return -1;
+    const char* sch = cur->scheme ? "https:" : "http:";
+    char buf[2560]; int w;
+    if (n >= 2 && loc[0] == '/' && loc[1] == '/')
+        w = snprintf(buf, sizeof buf, "%s%.*s", sch, (int)n, loc);
+    else if (loc[0] == '/')
+        w = snprintf(buf, sizeof buf, "%s//%s:%u%.*s", sch, cur->host, cur->port, (int)n, loc);
+    else {
+        size_t d = 0, q = 0;                            /* how much of the current path the reference keeps */
+        while (cur->path[q] && cur->path[q] != '?') q++;
+        if (loc[0] == '?') d = q;                       /* query-only: the whole path, a new query */
+        else if (loc[0] == '#') d = strlen(cur->path);  /* fragment-only: the same URL */
+        else for (size_t i = 0; i < q; i++) if (cur->path[i] == '/') d = i + 1;   /* its directory */
+        w = snprintf(buf, sizeof buf, "%s//%s:%u%.*s%.*s", sch, cur->host, cur->port,
+                     (int)d, cur->path, (int)n, loc);
+    }
+    if (w < 0 || (size_t)w >= sizeof buf) return -1;
+    return q_http_client_url_parse(buf, (size_t)w, out);
+}
+
+/* Shared GET/HEAD/POST driver — THE one place a 3xx is followed (`.Q.hg`, `.Q.hp`
+ * and the read0/read1 slice all ride it; q_http_client_raw does not).  Returns the
+ * body (charv, or bytes when the caller asked) or a bare-class ray_error. */
 static ray_t* http_do(ray_t* urlv, const http_req_t* r)
 {
     char urlbuf[1280]; size_t un;
@@ -478,20 +532,7 @@ static ray_t* http_do(ray_t* urlv, const http_req_t* r)
     if (q_http_client_url_parse(urlbuf, un, &u) != 0) return q_err(QE_DOMAIN);
     const char* mime = r->mime; size_t mime_len = r->mime_len;
     const char* body = r->body; size_t body_len = r->body_len;
-
-    /* Authorization header (optional) */
-    char authhdr[512]; authhdr[0] = '\0';
-    if (u.userinfo[0]) {
-        char enc[400];
-        if (b64(u.userinfo, strlen(u.userinfo), enc, sizeof enc) < 0)
-            return q_err(QE_LIMIT);
-        snprintf(authhdr, sizeof authhdr, "Authorization: Basic %s\r\n", enc);
-    }
-    /* Host: include non-default port */
-    char hosthdr[300];
-    int default_port = (u.scheme == 0 && u.port == 80) || (u.scheme == 1 && u.port == 443);
-    if (default_port) snprintf(hosthdr, sizeof hosthdr, "%s", u.host);
-    else              snprintf(hosthdr, sizeof hosthdr, "%s:%u", u.host, u.port);
+    if (mime && !scan_ok(mime, mime_len)) return q_err(QE_DOMAIN);   /* injection guard */
 
     /* A range names bytes of the RESOURCE, so a content coding would move them —
      * a ranged request never offers gzip, nor does the HEAD that measures it. */
@@ -504,57 +545,88 @@ static ray_t* http_do(ray_t* urlv, const http_req_t* r)
     }
     const char* accept_enc = (rangehdr[0] || r->head) ? "" : "Accept-Encoding: gzip\r\n";
 
-    /* request head */
-    char req[2048];
-    int rl;
-    if (mime) {
-        if (!scan_ok(mime, mime_len)) return q_err(QE_DOMAIN);   /* injection guard */
-        rl = snprintf(req, sizeof req,
-            "POST %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n"
-            "%s"
-            "Content-Type: %.*s\r\nContent-Length: %zu\r\n%s\r\n",
-            u.path, hosthdr, accept_enc, (int)mime_len, mime, body_len, authhdr);
-    } else {
-        rl = snprintf(req, sizeof req,
-            "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n"
-            "%s%s%s\r\n",
-            r->head ? "HEAD" : "GET", u.path, hosthdr, accept_enc, rangehdr, authhdr);
-    }
-    if (rl < 0 || (size_t)rl >= sizeof req) return q_err(QE_LIMIT);
+    int64_t deadline = now_ms() + Q_HTTP_TOTAL_MS;     /* ONE send+read budget across every hop */
+    for (int hops = 0;; hops++) {
+        /* Authorization header (optional) — rebuilt per hop from the hop's own userinfo */
+        char authhdr[512]; authhdr[0] = '\0';
+        if (u.userinfo[0]) {
+            char enc[400];
+            if (b64(u.userinfo, strlen(u.userinfo), enc, sizeof enc) < 0)
+                return q_err(QE_LIMIT);
+            snprintf(authhdr, sizeof authhdr, "Authorization: Basic %s\r\n", enc);
+        }
+        /* Host: include non-default port */
+        char hosthdr[300];
+        int default_port = (u.scheme == 0 && u.port == 80) || (u.scheme == 1 && u.port == 443);
+        if (default_port) snprintf(hosthdr, sizeof hosthdr, "%s", u.host);
+        else              snprintf(hosthdr, sizeof hosthdr, "%s:%u", u.host, u.port);
 
-    const char* err = "conn";
-    ray_sock_t fd = q_http_client_connect(u.host, u.port, Q_HTTP_CONNECT_MS, &err);
-    if (fd == RAY_INVALID_SOCK) return ray_error(err, NULL);
+        /* request head */
+        char req[2048];
+        int rl;
+        if (mime) {
+            rl = snprintf(req, sizeof req,
+                "POST %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n"
+                "%s"
+                "Content-Type: %.*s\r\nContent-Length: %zu\r\n%s\r\n",
+                u.path, hosthdr, accept_enc, (int)mime_len, mime, body_len, authhdr);
+        } else {
+            rl = snprintf(req, sizeof req,
+                "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n"
+                "%s%s%s\r\n",
+                r->head ? "HEAD" : "GET", u.path, hosthdr, accept_enc, rangehdr, authhdr);
+        }
+        if (rl < 0 || (size_t)rl >= sizeof req) return q_err(QE_LIMIT);
 
-    int64_t deadline = now_ms() + Q_HTTP_TOTAL_MS;
-    ray_t* result = NULL;
-    if (u.scheme == 1 && q_tls_client_start(fd, u.host, &err) != 0) goto done;
-    if (q_http_client_send_all(fd, req, (size_t)rl, deadline) != 0) { err = "conn"; goto done; }
-    if (mime && body_len &&
-        q_http_client_send_all(fd, body, body_len, deadline) != 0) { err = "conn"; goto done; }
+        const char* err = "conn";
+        ray_sock_t fd = q_http_client_connect(u.host, u.port, Q_HTTP_CONNECT_MS, &err);
+        if (fd == RAY_INVALID_SOCK) return ray_error(err, NULL);
 
-    size_t rlen = 0;
-    char* resp = q_http_client_read_response(fd, &rlen, deadline, &err, r->head);
-    if (!resp) goto done;
-    int st; const char* rbody; size_t rbl; int gz = 0;
-    int ex = q_http_client_extract(resp, rlen, &st, &rbody, &rbl, &gz, r->head, r->clen);
-    if (ex == 0 && r->status) *r->status = st;
-    if (ex == 0 && gz && rbl) {
-        /* transparent inflate — q_gz_inflate bounds output at 32 MiB (bomb guard).
-         * An empty body (HEAD, or a coded 0-length answer) codes nothing to inflate. */
-        size_t ilen = 0; const char* ierr = NULL;
-        uint8_t* infl = q_gz_inflate((const uint8_t*)rbody, rbl, &ilen, &ierr);
-        if (infl) { result = http_body(r, (const char*)infl, ilen); free(infl); }
-        else err = ierr ? ierr : "domain";
-    }
-    else if (ex == 0) result = http_body(r, rbody, rbl);
-    else if (ex == -2) err = "wsfull";
-    else err = "conn";
-    free(resp);
+        ray_t* result = NULL;
+        char* resp = NULL;
+        if (u.scheme == 1 && q_tls_client_start(fd, u.host, &err) != 0) goto done;
+        if (q_http_client_send_all(fd, req, (size_t)rl, deadline) != 0) { err = "conn"; goto done; }
+        if (mime && body_len &&
+            q_http_client_send_all(fd, body, body_len, deadline) != 0) { err = "conn"; goto done; }
+
+        size_t rlen = 0;
+        resp = q_http_client_read_response(fd, &rlen, deadline, &err, r->head);
+        if (!resp) goto done;
+        int st; const char* rbody; size_t rbl; int gz = 0; q_http_span_t loc;
+        int ex = q_http_client_extract(resp, rlen, &st, &rbody, &rbl, &gz, r->head, r->clen, &loc);
+        if (ex == 0 && r->status) *r->status = st;
+        if (ex == 0 && loc.p && hops < Q_HTTP_MAX_HOPS &&
+            (st == 301 || st == 302 || st == 303 || st == 307 || st == 308)) {
+            q_http_url_t nu;
+            if (redirect_resolve(&u, loc.p, loc.n, &nu) == 0) {
+                /* the requests/browser law: a POST survives only 307/308; else it becomes a GET.
+                 * Credentials follow the host, never the redirect: a target that names its own
+                 * userinfo wins, the same host keeps the original, a new host gets none. */
+                if (mime && st != 307 && st != 308) { mime = NULL; body = NULL; body_len = 0; }
+                if (!nu.userinfo[0] && host_ieq(nu.host, u.host))
+                    memcpy(nu.userinfo, u.userinfo, sizeof nu.userinfo);
+                u = nu;
+                free(resp); ray_sock_close(fd);
+                continue;
+            }
+        }
+        if (ex == 0 && gz && rbl) {
+            /* transparent inflate — q_gz_inflate bounds output at 32 MiB (bomb guard).
+             * An empty body (HEAD, or a coded 0-length answer) codes nothing to inflate. */
+            size_t ilen = 0; const char* ierr = NULL;
+            uint8_t* infl = q_gz_inflate((const uint8_t*)rbody, rbl, &ilen, &ierr);
+            if (infl) { result = http_body(r, (const char*)infl, ilen); free(infl); }
+            else err = ierr ? ierr : "domain";
+        }
+        else if (ex == 0) result = http_body(r, rbody, rbl);
+        else if (ex == -2) err = "wsfull";
+        else err = "conn";
 done:
-    ray_sock_close(fd);
-    if (result) return result;
-    return ray_error(err, NULL);
+        free(resp);
+        ray_sock_close(fd);
+        if (result) return result;
+        return ray_error(err, NULL);
+    }
 }
 
 ray_t* q_dotq_hg_fn(ray_t* x) {
@@ -663,7 +735,7 @@ ray_t* q_http_client_raw(ray_t* hsym, ray_t* request) {
     if (!resp) goto done;
     int st; const char* body; size_t body_len;
     /* raw client returns the response verbatim — no transparent gzip inflate (NULL) */
-    int ex = q_http_client_extract(resp, rlen, &st, &body, &body_len, NULL, 0, NULL);
+    int ex = q_http_client_extract(resp, rlen, &st, &body, &body_len, NULL, 0, NULL, NULL);
     if (ex == 0) {
         size_t total = (size_t)(body - resp) + body_len;   /* headers + framed body */
         result = ray_charv(resp, (int64_t)total);
