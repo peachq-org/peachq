@@ -115,41 +115,146 @@ static ray_t* miss_null(ray_t* c) {
     return RAY_NULL_OBJ;
 }
 
-/* A step dictionary's miss: its keys carry `s (ref/apply.md:308 "A step dictionary has the sorted attribute set.
- * Its keys are a sorted vector"), and a key outside the domain takes the value of the HIGHEST key below it — which
- * is `bin` exactly, down to its -1 for a key below the domain.  A probe bin cannot order is DELIBERATELY not an
- * error: it keeps the typed null the same probe already got from the plain dict, so only the in-domain gap moves. */
-static int64_t step_below(ray_t* keys, ray_t* i) {
-    if (!keys || !ray_is_vec(keys) || !(keys->attrs & RAY_ATTR_SORTED)) return -1;
-    ray_t* p = q_bin_wrap(keys, i);
-    if (!p || RAY_IS_ERR(p)) { if (p) ray_release(p); return -1; }
-    int64_t r = q_type_is_int_atom(p) ? q_type_iatom_val(p) : -1;
+/* ===== the level ops ====================================================== */
+
+static ray_t* store_level(ray_t* x, ray_t* i, ray_t* v);
+static ray_t* amend_seq(ray_t* x, ray_t* sel, ray_t* const* rest, int64_t k, ray_t* f, ray_t* y, int whole,
+                        const int64_t* dst);
+static ray_t* table_level(ray_t* t, ray_t* i, int write);
+static ray_t* table_store(ray_t* t, ray_t* i, ray_t* v);
+
+/* ----- the dict level: Find rules the selector -----------------------------
+ * "Dictionary indexing uses Find to search the keys: d[x] ~ v[k?x]" (basics/dictsandtables.md:145) and Find is
+ * rank-sensitive (ref/find.md), so the SHAPE of its answer is the rank ruling on a selector — an atom: the whole
+ * selector is one key; a vector: one key per item; a boxed list: nested selectors — and the indexer never splits a
+ * dict's selector itself.  A keyed table is a dict whose domain is a TABLE (kb/faq.md): the same law with the
+ * row-seeking Find, whose record answers are an atom and whose runs (a table, a list of rows) are a vector. */
+
+static ray_t* keyed_probe(ray_t* i) {                /* a table domain seeks rows: an atom is its one-column row */
+    if (ray_is_atom(i)) return ray_enlist_fn(&i, 1);
+    ray_retain(i);
+    return i;
+}
+
+/* The engine's typed scan for the commonest probe — a same-type atom on a typed key vector — where Find boxes an
+ * atom per element (280ns each under ASan: `d[k]` on a 20k-key dict went from 0.3ms to 5ms).  Only a HIT is
+ * trusted: the scan answers -1 for the types it does not cover (temporals), and Find owns every miss and every
+ * `u#` vector, whose hash it consults.  Owned, or NULL for Find to answer. */
+static ray_t* atom_pos(ray_t* x, ray_t* probe) {
+    ray_t* keys = ray_dict_slots(x)[0];
+    if (!ray_is_atom(probe) || !ray_is_vec(keys) || probe->type != -keys->type || (keys->attrs & RAY_ATTR_HAS_INDEX))
+        return NULL;
+    int64_t p = ray_dict_find_idx(x, probe);
+    return p >= 0 ? ray_i64(p) : NULL;
+}
+
+static ray_t* dict_pos(ray_t* x, ray_t* probe) {     /* Find over the domain; owned */
+    ray_t* keys = ray_dict_slots(x)[0];
+    ray_t* pos = atom_pos(x, probe);
+    if (pos) return pos;
+    ray_t* p = q_type_is_table(keys) ? keyed_probe(probe) : (ray_retain(probe), probe);
+    if (!p || RAY_IS_ERR(p)) return p ? p : q_err(QE_OOM);
+    pos = q_search_find(keys, p);
     ray_release(p);
+    return pos;
+}
+
+/* where ONE key sits — an owned i64 atom (Find's miss, the count, when absent) or Find's own error.  A LIST key
+ * on a list domain is boxed so Find matches it whole — which is what keeps it one key over `()` keys, where a bare
+ * list probe would split (no key to read a rank off); the mirror image of the table domain, which boxes its ATOM. */
+static ray_t* key_pos(ray_t* x, ray_t* key) {
+    ray_t* keys = ray_dict_slots(x)[0];
+    ray_t* pos = atom_pos(x, key);
+    if (pos) return pos;
+    ray_t* p = ray_is_atom(key) == q_type_is_table(keys) ? ray_enlist_fn(&key, 1) : (ray_retain(key), key);
+    if (!p || RAY_IS_ERR(p)) return p ? p : q_err(QE_OOM);
+    pos = q_search_find(keys, p);
+    ray_release(p);
+    if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_TYPE);
+    int64_t n = q_builtins_count_long(keys), r = n;
+    if (q_type_is_int_atom(pos)) r = q_type_iatom_val(pos);
+    else if (pos->type == RAY_I64 && ray_len(pos) == 1) r = ((const int64_t*)ray_data(pos))[0];
+    ray_release(pos);
+    return ray_i64(r >= 0 && r < n ? r : n);
+}
+
+/* A run's positions, from the ONE Find that ruled it (a re-find per item scans the domain each time: i060's
+ * 100k-key dict timed the gate out).  The sequential law survives — a key missed twice is appended by its first
+ * occurrence and hit by its repeats — which Find over the run itself settles.  pos consumed. */
+static ray_t* run_positions(ray_t* x, ray_t* sel, ray_t* pos) {
+    int64_t n0 = q_builtins_count_long(ray_dict_slots(x)[0]), m = ray_len(pos), added = 0;
+    int64_t* d = (int64_t*)ray_data(pos);
+    ray_t* first = q_search_find(sel, sel);
+    if (!first || RAY_IS_ERR(first) || first->type != RAY_I64 || ray_len(first) != m) {
+        ray_release(pos);
+        if (first && !RAY_IS_ERR(first)) { ray_release(first); first = NULL; }
+        return first ? first : q_err(QE_TYPE);
+    }
+    const int64_t* fj = (const int64_t*)ray_data(first);
+    for (int64_t j = 0; j < m; j++)
+        if (d[j] >= n0) d[j] = fj[j] == j ? n0 + added++ : d[fj[j]];
+    ray_release(first);
+    return pos;
+}
+
+/* A step dictionary's miss: its keys carry `s (ref/apply.md:308 "keys are a sorted vector") and a key outside the
+ * domain takes the value of the highest key below — `bin` exactly, down to its -1 (still a miss) below the domain —
+ * for "the items of i that are outside the domain", so a nested probe steps at its atoms.  pos consumed, probe
+ * borrowed; a probe bin cannot order keeps the miss it already has. */
+static ray_t* step_fill(ray_t* keys, ray_t* pos, ray_t* probe) {
+    int64_t n = ray_len(keys);
+    if (pos->type == RAY_LIST) {
+        for (int64_t j = 0, m = ray_len(pos); j < m; j++) {
+            ray_t* pj = q_index_elem_at(probe, j);
+            ray_t* nj = pj && !RAY_IS_ERR(pj) ? step_fill(keys, q_index_elem_at(pos, j), pj) : NULL;
+            if (pj) ray_release(pj);
+            if (!nj) continue;
+            ray_t* nl = ray_list_set(pos, j, nj);     /* cows; consumes pos on ok */
+            ray_release(nj);
+            if (!nl || RAY_IS_ERR(nl)) { ray_release(pos); return nl ? nl : q_err(QE_OOM); }
+            pos = nl;
+        }
+        return pos;
+    }
+    int atom = pos->type == -RAY_I64;
+    if (!atom && pos->type != RAY_I64) return pos;
+    int64_t m = atom ? 1 : ray_len(pos), miss = 0;
+    int64_t* d = atom ? &pos->i64 : (int64_t*)ray_data(pos);
+    for (int64_t j = 0; j < m && !miss; j++) miss = d[j] >= n;
+    if (!miss) return pos;
+    ray_t* b = q_bin_wrap(keys, probe);
+    if (b && !RAY_IS_ERR(b) && atom && b->type == -RAY_I64) { ray_release(pos); return b; }
+    if (b && !RAY_IS_ERR(b) && !atom && b->type == RAY_I64 && ray_len(b) == m) {
+        const int64_t* bd = (const int64_t*)ray_data(b);
+        for (int64_t j = 0; j < m; j++) if (d[j] >= n) d[j] = bd[j];
+    }
+    if (b) ray_release(b);
+    return pos;
+}
+
+/* (value d)@pos, pos being Find's answer: its miss, the count, gathers OUT OF RANGE into the typed null
+ * (ref/apply.md Index) — the null row for a table range (`` kt `Jack`London ``).  Consumes pos. */
+static ray_t* dict_read(ray_t* x, ray_t* pos, ray_t* probe) {
+    ray_t* keys = ray_dict_slots(x)[0];
+    if (ray_is_vec(keys) && (keys->attrs & RAY_ATTR_SORTED)) pos = step_fill(keys, pos, probe);
+    if (RAY_IS_ERR(pos)) return pos;
+    ray_t* r = q_index_at(ray_dict_slots(x)[1], &pos, 1);
+    ray_release(pos);
     return r;
 }
 
-/* ===== the two level ops ================================================= */
-
-static ray_t* store_level(ray_t* x, ray_t* i, ray_t* v);
-static ray_t* amend_seq(ray_t* x, ray_t* sel, ray_t* const* rest, int64_t k,
-                        ray_t* f, ray_t* y);
-static ray_t* table_level(ray_t* t, ray_t* i, int write);
-static ray_t* keyed_level(ray_t* x, ray_t* i, int write);
-static ray_t* keyed_at(ray_t* x, ray_t* i);
-
-/* one atom-index READ step.  Dict = find-then-index-values (a key miss is the values' typed null on a plain dict
- * and the step below on an `s# one, NEVER positional); vec/list = elem or miss.  In write mode a miss/OOB is
+/* one KEY-index READ step: dict = key_pos then dict_read; vec/list = elem or miss.  In write mode a miss/OOB is
  * 'index (a path must exist to be amended). */
 static ray_t* index_level(ray_t* x, ray_t* i, int write) {
-    if (q_type_is_keyed(x)) return keyed_level(x, i, write);
-    if (x->type == RAY_TABLE) return table_level(x, i, write);
     if (x->type == RAY_DICT) {
-        int64_t ki = ray_dict_find_idx(x, i);
-        ray_t* vals = ray_dict_slots(x)[1];
-        if (ki < 0 && !write) ki = step_below(ray_dict_slots(x)[0], i);
-        if (ki < 0) return write ? q_err(QE_INDEX) : miss_null(vals);
-        return q_index_elem_at(vals, ki);
+        ray_t* pos = key_pos(x, i);
+        if (RAY_IS_ERR(pos)) return pos;
+        if (!write) return dict_read(x, pos, i);
+        int64_t p = pos->i64;
+        ray_release(pos);
+        return p < q_builtins_count_long(ray_dict_slots(x)[0]) ? q_index_elem_at(ray_dict_slots(x)[1], p) : q_err(QE_INDEX);
     }
+    if (x->type == RAY_TABLE) return table_level(x, i, write);
     if (!is_coll(x)) return q_err(QE_TYPE);
     int64_t ix;
     if (!idx_i64(i, &ix)) return q_err(QE_TYPE);
@@ -215,25 +320,39 @@ static ray_t* vec_store(ray_t* x, int64_t ix, ray_t* v) {
     return nx;
 }
 
-/* store at a dict key: a hit updates the value, a miss INSERTS the pair
- * (ref/amend.md).  x consumed on success; key/v borrowed. */
-static ray_t* dict_store(ray_t* x, ray_t* key, ray_t* v) {
+/* store v at ONE key of dict x, p from key_pos: a hit rewrites the value — a row of a table range — and a miss
+ * APPENDS the pair, "assignment has upsert semantics" (ref/amend.md; ref/assign.md for a keyed table, whose new
+ * key is the row the probe names).  x consumed on success; key/v borrowed. */
+static ray_t* dict_put(ray_t* x, ray_t* key, int64_t p, ray_t* v) {
     ray_t* keys = ray_dict_slots(x)[0];
     ray_t* vals = ray_dict_slots(x)[1];
-    int64_t ki = ray_dict_find_idx(x, key);
+    int rows = vals->type == RAY_TABLE;
     ray_t *nk, *nv;
-    if (ki >= 0) {
+    if (p < q_builtins_count_long(keys)) {
         ray_retain(vals);
-        nv = vec_store(vals, ki, v);
+        if (rows) { ray_t* pa = ray_i64(p); nv = table_store(vals, pa, v); ray_release(pa); }
+        else nv = vec_store(vals, p, v);
         if (!nv || RAY_IS_ERR(nv)) { ray_release(vals); return nv ? nv : q_err(QE_TYPE); }
         ray_retain(keys);
         nk = keys;
     } else {
-        if (!ray_is_atom(key)) return q_err(QE_TYPE);
-        if (!elem_fits(vals, v)) return q_err(QE_TYPE);   /* same law on INSERT */
-        nk = q_join_wrap(keys, key);
+        ray_t* item;
+        if (q_type_is_table(keys)) {
+            ray_t* fk = q_flip_wrap(keys);
+            if (!fk || RAY_IS_ERR(fk)) return fk ? fk : q_err(QE_TYPE);
+            ray_t* probe = keyed_probe(key);
+            item = probe && !RAY_IS_ERR(probe) ? q_bang(ray_dict_keys(fk), probe) : probe;
+            ray_release(fk);
+            if (probe != item) ray_release(probe);
+        } else {
+            if (!elem_fits(vals, v)) return q_err(QE_TYPE);   /* same law on INSERT */
+            item = boxed1(key);
+        }
+        if (!item || RAY_IS_ERR(item)) return item ? item : q_err(QE_OOM);
+        nk = q_join_wrap(keys, item);
+        ray_release(item);
         if (!nk || RAY_IS_ERR(nk)) return nk ? nk : q_err(QE_TYPE);
-        ray_t* ev = boxed1(v);
+        ray_t* ev = rows ? (ray_retain(v), v) : boxed1(v);
         if (!ev || RAY_IS_ERR(ev)) { ray_release(nk); return ev ? ev : q_err(QE_OOM); }
         nv = q_join_wrap(vals, ev);
         ray_release(ev);
@@ -245,7 +364,7 @@ static ray_t* dict_store(ray_t* x, ray_t* key, ray_t* v) {
     return nd;
 }
 
-/* ===== table and keyed-table levels (the axis law: q_index.h) =============
+/* ===== the table level (the axis law: q_index.h) ==========================
  * "Tables are indexed first by row; second by column" (basics/syntax.md) plus
  * the `` t[`age] `` column shorthand, so the index TYPE picks the axis. */
 
@@ -287,80 +406,21 @@ static ray_t* table_store(ray_t* t, ray_t* i, ray_t* v) {
     int rowdict = v && q_type_is_plain_dict(v);
     ray_t* sel = ray_dict_keys(rowdict ? v : fd);
     ray_retain(sel);                         /* outlives the dict rebuilds */
-    ray_t* nd = amend_seq(fd, sel, &i, 1, NULL, rowdict ? ray_dict_vals(v) : v);
+    ray_t* nd = amend_seq(fd, sel, &i, 1, NULL, rowdict ? ray_dict_vals(v) : v, 1, NULL);
     ray_release(sel);
     return table_of_cols(t, fd, nd);
 }
 
-static ray_t* keyed_probe(ray_t* i) {
-    if (ray_is_atom(i)) return ray_enlist_fn(&i, 1);
-    ray_retain(i);
-    return i;
-}
-
-static int64_t keyed_pos(ray_t* x, ray_t* probe) {
-    ray_t* pos = q_search_find(ray_dict_slots(x)[0], probe);
-    if (!pos || RAY_IS_ERR(pos)) { if (pos) ray_release(pos); return -1; }
-    int64_t p = q_type_is_int_atom(pos) ? q_type_iatom_val(pos) : -1;
-    ray_release(pos);
-    return (p >= 0 && p < q_builtins_count_long(ray_dict_slots(x)[1])) ? p : -1;
-}
-
-static ray_t* keyed_level(ray_t* x, ray_t* i, int write) {
-    if (!write) return keyed_at(x, i);
-    ray_t* probe = keyed_probe(i);
-    if (!probe || RAY_IS_ERR(probe)) return probe ? probe : q_err(QE_OOM);
-    int64_t p = keyed_pos(x, probe);
-    ray_release(probe);
-    if (p < 0) return q_err(QE_INDEX);
-    return q_index_elem_at(ray_dict_slots(x)[1], p);
-}
-
-/* A HIT rewrites that row of the value table; a MISS EXTENDS both halves — a
- * keyed table IS a dictionary (kb/faq.md) and "assignment has upsert
- * semantics" for one (ref/assign.md), which is dict_store's law verbatim. */
-static ray_t* keyed_store(ray_t* x, ray_t* i, ray_t* v) {
-    ray_t* keys = ray_dict_slots(x)[0];
-    ray_t* vals = ray_dict_slots(x)[1];
-    ray_t* probe = keyed_probe(i);
-    if (!probe || RAY_IS_ERR(probe)) return probe ? probe : q_err(QE_OOM);
-    int64_t p = keyed_pos(x, probe);
-    ray_t *nk, *nv;
-    if (p >= 0) {
-        ray_t* pa = ray_i64(p);
-        ray_retain(vals);
-        nv = table_store(vals, pa, v);       /* consumes vals on success */
-        ray_release(pa);
-        if (!nv || RAY_IS_ERR(nv)) {
-            ray_release(vals); ray_release(probe);
-            return nv ? nv : q_err(QE_TYPE);
-        }
-        ray_retain(keys);
-        nk = keys;
-    } else {
-        ray_t* fk = q_flip_wrap(keys);       /* the key row the probe names */
-        if (!fk || RAY_IS_ERR(fk)) { ray_release(probe); return fk ? fk : q_err(QE_TYPE); }
-        ray_t* krow = q_bang(ray_dict_keys(fk), probe);
-        ray_release(fk);
-        if (!krow || RAY_IS_ERR(krow)) { ray_release(probe); return krow ? krow : q_err(QE_TYPE); }
-        nk = q_join_wrap(keys, krow);
-        ray_release(krow);
-        if (!nk || RAY_IS_ERR(nk)) { ray_release(probe); return nk ? nk : q_err(QE_TYPE); }
-        nv = q_join_wrap(vals, v);
-    }
-    ray_release(probe);
-    if (!nv || RAY_IS_ERR(nv)) { ray_release(nk); return nv ? nv : q_err(QE_TYPE); }
-    ray_t* nd = ray_dict_new(nk, nv);        /* consumes both */
-    if (!nd || RAY_IS_ERR(nd)) return nd ? nd : q_err(QE_TYPE);
-    ray_release(x);
-    return nd;
-}
-
-/* one atom-index WRITE step over the stores above */
+/* one KEY-index WRITE step: dict_put / table_store / vec_store */
 static ray_t* store_level(ray_t* x, ray_t* i, ray_t* v) {
-    if (q_type_is_keyed(x)) return keyed_store(x, i, v);
+    if (x->type == RAY_DICT) {
+        ray_t* pos = key_pos(x, i);
+        if (RAY_IS_ERR(pos)) return pos;
+        ray_t* r = dict_put(x, i, pos->i64, v);
+        ray_release(pos);
+        return r;
+    }
     if (x->type == RAY_TABLE) return table_store(x, i, v);
-    if (x->type == RAY_DICT) return dict_store(x, i, v);
     int64_t ix;
     if (!idx_i64(i, &ix)) return q_err(QE_TYPE);
     if (ix < 0 || ix >= ray_len(x)) return q_err(QE_INDEX);
@@ -426,30 +486,6 @@ static ray_t* index_map(ray_t* x, ray_t* i, ray_t* const* rest, int64_t k) {
     return k == 0 ? q_typed_empty_like(collapse(out), x) : collapse(out);
 }
 
-/* Keyed-table read.  A keyed table is a dict whose domain is a TABLE, so the
- * dict law reads through unchanged — `d[x] ~ v[k?x]`, "dictionary indexing uses
- * Find to search the keys" (basics/dictsandtables.md Indexing) — with the
- * table-domain Find doing the searching.
- *
- * kb/faq.md "Indexing a keyed table" gives the two forms and nothing else:
- * a SINGLE ROW of the key (`` ku `Tom`Lagos `` -> one dictionary, a flat list
- * carrying one element per key column) or a SUBLIST of it (a table, or a list
- * of key rows -> a table).  So a flat list is one COMPOUND key, never a run of
- * keys; `` s 2 3 `` is 'length because two elements do not make a one-column key
- * row (ref/dotq.md `.Q.ft`).  An atom is that same single row at width one.
- * Find's miss answer is the count, so an absent key gathers out of range and
- * yields the null row with no special case (`` kt `Jack`London ``). */
-static ray_t* keyed_at(ray_t* x, ray_t* i) {
-    ray_t* probe = keyed_probe(i);
-    if (!probe || RAY_IS_ERR(probe)) return probe ? probe : q_err(QE_OOM);
-    ray_t* pos = q_search_find(ray_dict_slots(x)[0], probe);
-    ray_release(probe);
-    if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_TYPE);
-    ray_t* r = q_index_at(ray_dict_slots(x)[1], &pos, 1);
-    ray_release(pos);
-    return r;
-}
-
 static ray_t* index_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
     if (!i0 || RAY_IS_NULL(i0)) {                    /* `::`: identity / all */
         /* `x[::]` IS x for every structure (ref/identity.md; ref/apply.md:151
@@ -463,18 +499,19 @@ static ray_t* index_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
         if (x->type == RAY_DICT || x->type == RAY_TABLE) return q_err(QE_NYI);
         return index_map(x, NULL, rest, k);
     }
-    /* a TABLE domain probes by ROW whatever the range holds (`group t` gathered
-     * into a plain column is still looked up by keyed_at's Find) */
-    if (x->type == RAY_DICT && q_type_is_table(ray_dict_slots(x)[0]))
-        return elem_rest(keyed_at(x, i0), rest, k);
-    /* Index AT a dictionary: `x[d] ~ (key d)!x[value d]` (ref/fby.md prints it
-     * as `dat group grp`).  Reads off the INDEX, so it outranks x's own shape. */
-    if (q_type_is_plain_dict(i0)) {
+    /* Index AT a dictionary: `x[d] ~ (key d)!x[value d]` (ref/fby.md prints it as `dat group grp`).  Reads off the
+     * INDEX, so it outranks x's own shape — except on a TABLE domain, where the dict IS a key row (kb/faq.md). */
+    if (q_type_is_plain_dict(i0) && !(x->type == RAY_DICT && q_type_is_table(ray_dict_slots(x)[0]))) {
         ray_t* v = index_r(x, ray_dict_slots(i0)[1], rest, k);
         if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_TYPE);
         ray_t* r = q_bang(ray_dict_slots(i0)[0], v);
         ray_release(v);
         return r;
+    }
+    if (x->type == RAY_DICT) {                       /* `d[x] ~ v[k?x]`, whatever shape x has */
+        ray_t* pos = dict_pos(x, i0);
+        if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_TYPE);
+        return elem_rest(dict_read(x, pos, i0), rest, k);
     }
     if (x->type == RAY_TABLE) {                      /* pure delegation */
         ray_t* nx = q_table_at(x, i0);
@@ -574,12 +611,12 @@ static ray_t* amend_entire(ray_t* x, ray_t* f, ray_t* y) {
     return nv;
 }
 
-/* leaf store at atom index i0: read S, apply, store (a dict key miss reads
- * the typed null and the store INSERTS — ref/amend.md) */
-static ray_t* leaf1(ray_t* x, ray_t* i0, ray_t* f, ray_t* y) {
+/* leaf store at ONE index i0: read S, apply, store (a dict key miss reads the typed null and the store INSERTS —
+ * ref/amend.md).  p >= 0 is a dict key's position the run's Find already settled; -1 looks it up here. */
+static ray_t* leaf1(ray_t* x, ray_t* i0, int64_t p, ray_t* f, ray_t* y) {
     ray_t* nv;
     if (f) {
-        ray_t* s = index_level(x, i0, 0);
+        ray_t* s = p >= 0 ? dict_read(x, ray_i64(p), i0) : index_level(x, i0, 0);
         if (!s || RAY_IS_ERR(s)) return s ? s : q_err(QE_TYPE);
         nv = leaf_apply(f, s, y);
         ray_release(s);
@@ -587,8 +624,20 @@ static ray_t* leaf1(ray_t* x, ray_t* i0, ray_t* f, ray_t* y) {
         nv = leaf_apply(NULL, NULL, y);
     }
     if (!nv || RAY_IS_ERR(nv)) return nv ? nv : q_err(QE_TYPE);
-    ray_t* r = store_level(x, i0, nv);
+    ray_t* r = p >= 0 ? dict_put(x, i0, p, nv) : store_level(x, i0, nv);
     ray_release(nv);
+    return r;
+}
+
+/* one index item at this level: the leaf, or the path continued through the child it names */
+static ray_t* amend_one(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k, ray_t* f, ray_t* y) {
+    if (k == 0) return leaf1(x, i0, -1, f, y);
+    ray_t* child = index_level(x, i0, 1);            /* absent path: 'index */
+    if (!child || RAY_IS_ERR(child)) return child ? child : q_err(QE_TYPE);
+    ray_t* nc = amend_r(child, rest[0], rest + 1, k - 1, f, y);
+    if (RAY_IS_ERR(nc)) { ray_release(child); return nc; }
+    ray_t* r = store_level(x, i0, nc);
+    ray_release(nc);
     return r;
 }
 
@@ -596,9 +645,11 @@ static ray_t* leaf1(ray_t* x, ray_t* i0, ray_t* f, ray_t* y) {
  * indices: dict keys / 0..n-1), so repeat-accumulation falls out.  x consumed
  * on success.  The retained guard keeps x alive across a mid-loop error and
  * STANDS IN for the ref a successful early step consumed — count-neutral
- * because every amend caller releases its ref on error. */
+ * because every amend caller releases its ref on error.  whole: the items ARE
+ * the indices (a dict's keys, a run Find ruled) and never distribute again;
+ * dst: a dict run's settled positions, one per item (run_positions). */
 static ray_t* amend_seq(ray_t* x, ray_t* sel, ray_t* const* rest, int64_t k,
-                        ray_t* f, ray_t* y) {
+                        ray_t* f, ray_t* y, int whole, const int64_t* dst) {
     ray_t* keys = (!sel && x->type == RAY_DICT) ? ray_dict_slots(x)[0] : NULL;
     if (keys) ray_retain(keys);                      /* outlives dict rebuilds */
     int64_t n = q_builtins_count_long(sel ? sel : keys ? keys : x);
@@ -629,7 +680,8 @@ static ray_t* amend_seq(ray_t* x, ray_t* sel, ray_t* const* rest, int64_t k,
                          : ray_i64(j);
         if (!kj || RAY_IS_ERR(kj)) err = kj ? kj : q_err(QE_OOM);
         else {
-            ray_t* nd = amend_r(cur, kj, rest, k, f, yj);
+            ray_t* nd = dst ? leaf1(cur, kj, dst[j], f, yj)
+                      : whole ? amend_one(cur, kj, rest, k, f, yj) : amend_r(cur, kj, rest, k, f, yj);
             ray_release(kj);
             if (RAY_IS_ERR(nd)) err = nd;
             else cur = nd;
@@ -648,19 +700,24 @@ static ray_t* amend_seq(ray_t* x, ray_t* sel, ray_t* const* rest, int64_t k,
 static ray_t* amend_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k,
                          ray_t* f, ray_t* y) {
     if (!is_coll(x) && x->type != RAY_DICT && x->type != RAY_TABLE) return q_err(QE_TYPE);
-    if (!i0 || RAY_IS_NULL(i0)) return amend_seq(x, NULL, rest, k, f, y);
-    /* A collection index distributes — EXCEPT on a keyed table, where a flat one is
-     * ONE compound key row, never a run of keys (#325): amend splits where reads do. */
-    int keyed_row = q_type_is_keyed(x) && i0->type != RAY_TABLE && !q_index_is_nested(i0);
-    if (is_coll(i0) && !keyed_row) return amend_seq(x, i0, rest, k, f, y);
-    if (k == 0) return leaf1(x, i0, f, y);
-    ray_t* child = index_level(x, i0, 1);            /* absent path: 'index */
-    if (!child || RAY_IS_ERR(child)) return child ? child : q_err(QE_TYPE);
-    ray_t* nc = amend_r(child, rest[0], rest + 1, k - 1, f, y);
-    if (RAY_IS_ERR(nc)) { ray_release(child); return nc; }
-    ray_t* r = store_level(x, i0, nc);
-    ray_release(nc);
-    return r;
+    if (!i0 || RAY_IS_NULL(i0)) return amend_seq(x, NULL, rest, k, f, y, 1, NULL);
+    if (x->type == RAY_DICT && !ray_is_atom(i0)) {   /* Find's ruling: one key, a run of keys, nested selectors */
+        ray_t* pos = dict_pos(x, i0);
+        if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_TYPE);
+        int rank = pos->type == -RAY_I64 ? 0 : pos->type == RAY_I64 ? 1 : pos->type == RAY_LIST ? 2 : -1;
+        if (rank == 1 && k == 0) {                   /* the run's leaf takes its positions from this one Find */
+            pos = run_positions(x, i0, pos);
+            if (RAY_IS_ERR(pos)) return pos;
+            ray_t* r = amend_seq(x, i0, rest, k, f, y, 1, (const int64_t*)ray_data(pos));
+            ray_release(pos);
+            return r;
+        }
+        ray_release(pos);
+        if (rank < 0) return q_err(QE_TYPE);
+        return rank ? amend_seq(x, i0, rest, k, f, y, rank == 1, NULL) : amend_one(x, i0, rest, k, f, y);
+    }
+    if (is_coll(i0)) return amend_seq(x, i0, rest, k, f, y, 0, NULL);   /* a collection index distributes */
+    return amend_one(x, i0, rest, k, f, y);
 }
 
 static ray_t* amend_r(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k,
