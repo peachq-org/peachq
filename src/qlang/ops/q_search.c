@@ -431,6 +431,17 @@ static int64_t list_find_item(ray_t* x, ray_t* v, int64_t cnt) {
     return cnt;
 }
 
+/* rank read down the first items: an atom 0, a list one more than its first item (an empty list 1; a string
+ * atom is a char list) — the axis find.md's "rank-sensitive" law compares on */
+static int find_depth(ray_t* v) {
+    if (!v || (ray_is_atom(v) && !q_type_is_str_atom(v))) return 0;
+    if (ray_len(v) == 0) return 1;
+    ray_t* e0 = q_index_elem_at(v, 0);
+    int d = 1 + find_depth(e0);
+    if (e0) ray_release(e0);
+    return d;
+}
+
 ray_t* q_search_find(ray_t* x, ray_t* y) {
     if (q_type_is_table(x)) return find_rows(x, y);
     /* kt?row — a keyed table IS keytable!valuetable, so the dict's reverse
@@ -455,48 +466,41 @@ ray_t* q_search_find(ray_t* x, ray_t* y) {
     }
     if (x && (ray_is_vec(x) || x->type == RAY_LIST)) {          /* find */
         int64_t cnt = ray_len(x);
-        int x_ranked = x->type == RAY_LIST && q_index_is_nested(x);
-        if (x_ranked && y && y->type == RAY_LIST) {
-            /* list-of-lists x, MIXED y: items of x matched with ITEMS of y
-             * (`u?(2 3;\`ab)` -> 3 3 — never with the whole of y). */
+        int xd = find_depth(x) - 1;                  /* the rank of x's items, read off the first (find.md) */
+        if (x->type == RAY_LIST && y && y->type == RAY_LIST && cnt > 0 && find_depth(y) == xd)
+            return ray_i64(list_find_item(x, y, cnt));   /* y IS one item's shape: whole, so x[x?x 0] round-trips */
+        if (y && y->type == RAY_LIST) {
+            /* Find is right-atomic to the rank of x's items ("x?y looks for objects of rank n-1", find.md): an
+             * item deeper than that rank is a run of them, found item by item — an atom item over a simple x
+             * HITS, as the older editions print `w?(10 5 -1;-8;3 17)` -> (0 3 4;1;2 7) (docs-v1 search.md:132,
+             * q1.txt:1046; the current page's miss is the divergence list/find.qcmd records) — and one at that
+             * rank is matched whole (`u?(2 3;\`ab)` -> 3 3, never the whole of y).  The answer keeps y's shape, a
+             * run of atoms collapsing to the index vector.  Empty x has no rank to read, so every item is one
+             * miss (D2: a list probe on `()` is item-wise). */
             int64_t ny = ray_len(y);
             ray_t** e = (ray_t**)ray_data(y);
-            ray_t* out = ray_vec_new(RAY_I64, ny > 0 ? ny : 1);
+            ray_t* out = ray_list_new(ny > 0 ? ny : 1);
             if (RAY_IS_ERR(out)) return out;
-            out->len = ny;
-            int64_t* o = (int64_t*)ray_data(out);
-            for (int64_t j = 0; j < ny; j++)
-                o[j] = e[j] ? list_find_item(x, e[j], cnt) : cnt;
-            return out;
-        }
-        if (x_ranked && y && !ray_is_atom(y) && ray_is_vec(y) && y->type != RAY_LIST) {
-            /* list-of-lists x, SIMPLE vector y: whole-y match (`u?10 2 -6`
-             * -> 1). */
-            return ray_i64(list_find_item(x, y, cnt));
-        }
-        if (x->type != RAY_LIST && ray_is_vec(x) && y && y->type == RAY_LIST) {
-            /* simple-vector x, list y whose first item is a list: RIGHT-
-             * ATOMIC item-by-item; an ATOM item in this mode is a rank
-             * mismatch and MISSES (w?rt: (10 5 -1;-8;3 17) -> (0 3 4;7;2 7),
-             * the doc's own transcript). */
-            int64_t ny = ray_len(y);
-            ray_t** e = (ray_t**)ray_data(y);
-            if (q_index_is_nested(y)) {
-                ray_t* out = ray_list_new(ny > 0 ? ny : 1);
+            for (int64_t j = 0; j < ny; j++) {
+                ray_t* rr;
+                if (!e[j] || cnt == 0)
+                    rr = ray_i64(cnt);
+                else if (xd > 0 && find_depth(e[j]) <= xd)
+                    rr = ray_i64(list_find_item(x, e[j], cnt));
+                else
+                    rr = q_search_find(x, e[j]);
+                if (!rr || RAY_IS_ERR(rr)) { ray_release(out); return rr; }
+                out = ray_list_append(out, rr);      /* retains */
+                ray_release(rr);
                 if (RAY_IS_ERR(out)) return out;
-                for (int64_t j = 0; j < ny; j++) {
-                    ray_t* rr;
-                    if (!e[j] || (ray_is_atom(e[j]) && e[j]->type != -RAY_STR))
-                        rr = ray_i64(cnt);           /* rank-0 item: miss */
-                    else
-                        rr = q_search_find(x, e[j]);
-                    if (!rr || RAY_IS_ERR(rr)) { ray_release(out); return rr; }
-                    out = ray_list_append(out, rr);  /* retains */
-                    ray_release(rr);
-                    if (RAY_IS_ERR(out)) return out;
-                }
-                return out;                          /* mixed shapes stay boxed */
             }
+            ray_t* c = q_list_collapse(out);
+            ray_release(out);
+            return c;
+        }
+        if (xd > 0 && y && !ray_is_atom(y) && y->type != RAY_LIST) {
+            /* list-of-lists x, SIMPLE vector y: whole-y match (`u?10 2 -6` -> 1). */
+            return ray_i64(list_find_item(x, y, cnt));
         }
         ray_t* i = ray_find_fn(x, y);
         if (!i || RAY_IS_ERR(i)) return i;
