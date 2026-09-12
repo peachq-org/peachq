@@ -34,6 +34,10 @@ ray_t** q_eval_apply_view_slots(ray_t* v);   /* NULL unless a view carrier */
 int q_eval_symvec_has(ray_t* v, int64_t id);
 int q_eval_fn_value(ray_t* x);
 int q_eval_ctl_sym(int64_t id);
+/* the parse-time locals of a lambda body, params excluded — OWNED symvec (ref/value.md `## Lambda`); built ONCE
+ * per lambda value by q_eval_apply_lambda_new, read back BORROWED (NULL unless a lambda carrier) */
+ray_t* q_eval_lambda_locals(ray_t* params, ray_t* body);
+ray_t* q_eval_apply_lambda_locals(ray_t* v);
 
 /* a manifest row's registry value at one valence (borrowed) + its row */
 ray_t* q_eval_apply_manifest_value(const struct q_op* r, q_valence_t v,

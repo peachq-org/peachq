@@ -199,6 +199,17 @@ static ray_t* name_value(ray_t* sym, const q_op_t** row_out) {
     return v ? v : name_error(sym->i64);
 }
 
+/* `<op>:` head -> the op's dyadic registry value (BORROWED) + row; NULL when h is not one */
+static ray_t* modassign_op(ray_t* h, const q_op_t** row) {
+    ray_t* s = ray_sym_str(h->i64);                       /* borrowed */
+    if (!s) return NULL;
+    const char* nm = ray_str_ptr(s);
+    size_t l = ray_str_len(s);
+    if (l < 2 || nm[l - 1] != ':' || nm[0] == ':') return NULL;
+    ray_t* opv = q_registry_lookup_row(ray_sym_intern_runtime(nm, l - 1), Q_DYADIC, row);
+    return (opv && (opv->type == RAY_UNARY || opv->type == RAY_BINARY || opv->type == RAY_VARY)) ? opv : NULL;
+}
+
 /* adverb operand -> VALUE (+ row): `+/` derives from the DYAD */
 static ray_t* operand_value(ray_t* F, const q_op_t** row_out) {
     if (row_out) *row_out = NULL;
@@ -265,6 +276,19 @@ static ray_t* seq_eval(ray_t** e, int64_t n) {
     return r;
 }
 
+/* ray_sym_str is BORROWED (PLAN.md register, 2026-07-30) — no release here */
+static int sym_dotted(int64_t id) {
+    ray_t* s = ray_sym_str(id);
+    return s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == '.';
+}
+
+/* THE locality law (function-notation.md "Name scope", owner ruling 2026-09-11): a non-dotted name is local iff the
+ * running lambda's frame holds it — its params and parse-time locals, seeded by lambda_call — else the write is
+ * global.  The depth gate keeps a script load (floor raised) and a view recalc global. */
+static int write_is_local(int64_t sym) {
+    return !sym_dotted(sym) && q_eval_apply_frame_depth() > 0 && q_env_local_get(sym) != NULL;
+}
+
 /* undo a park (q_env_take / q_env_local_take) on a failed write: the value
  * read goes back into the slot the write would have rebound */
 static void unpark(int local, int64_t sym, ray_t* v) {
@@ -275,19 +299,14 @@ static void unpark(int local, int64_t sym, ray_t* v) {
 /* `a[i;…]:v` / `a[i;…]op:v` (ref/assign.md Indexed assign): rhs first, then
  * indices RTL; the write IS the one amend home — resolve the name, amend the
  * path (`a[i]op:v` ≡ .[a;i;op;v], so repeat-accumulation holds), rebind under
- * the plain-assignment locality rule.  Plain form returns the assigned rhs;
+ * THE locality law (write_is_local).  Plain form returns the assigned rhs;
  * an op-assign values as the NEW a[i] (ref/assign.md: `1+a[2]+:5` is 8). */
-static ray_t* indexed_assign(int is_global, ray_t* target, ray_t* opv,
-                             ray_t* rhs) {
+static ray_t* indexed_assign(ray_t* target, ray_t* opv, ray_t* rhs) {
     ray_t** te = (ray_t**)ray_data(target);
     int64_t k = ray_len(target) - 1;
     if (k < 1 || k > EVAL_MAX_ARGS || !nameref(te[0]))
         return q_err(QE_NYI);
     if (q_registry_is_reserved(te[0]->i64)) return q_err(QE_ASSIGN);
-    ray_t* s = ray_sym_str(te[0]->i64);
-    if (!s) return q_err(QE_TYPE);
-    int dotted = ray_str_len(s) > 0 && ray_str_ptr(s)[0] == '.';
-    ray_release(s);
     ray_t* rv = q_eval(rhs);
     if (RAY_IS_ERR(rv)) return rv;
     rv = q_eval_apply_concrete(rv);
@@ -303,9 +322,7 @@ static ray_t* indexed_assign(int is_global, ray_t* target, ray_t* opv,
         ret = q_err(QE_SPLAY);
     }
     if (!ret) {
-        int in_frame = !dotted && q_eval_apply_frame_depth() > 0;
-        int local = in_frame &&
-                    (!is_global || q_env_local_get(te[0]->i64) != NULL);
+        int local = write_is_local(te[0]->i64);
         /* the binding this write REPLACES double-counts the value, so the
          * amend would copy the whole vector: park it (q_env.h q_env_take) */
         int stole = local ? q_env_local_take(te[0]->i64, cur)
@@ -332,27 +349,20 @@ static ray_t* indexed_assign(int is_global, ray_t* target, ray_t* opv,
     return ret;
 }
 
-/* `:`/`::` assignment.  `:` inside a lambda frame binds a local; `::` and
- * dotted names are global — UNLESS the `::` name is an argument or already
- * defined as a local, which assigns the local and leaves the global alone
- * (function-notation.md "Name scope").  Returns the assigned value. */
-static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
+/* `:`/`::` assignment — both take THE locality law: a `:` target is in the frame by construction (a parse-time
+ * local, seeded at entry), `::` on a param/local writes the local (function-notation.md "Name scope"), anything
+ * else is the global.  Returns the assigned value. */
+static ray_t* assign_eval(ray_t* target, ray_t* rhs) {
     if (!nameref(target)) {
         if (target && target->type == RAY_LIST && ray_len(target) >= 2)
-            return indexed_assign(is_global, target, NULL, rhs);
+            return indexed_assign(target, NULL, rhs);
         return q_err(QE_NYI);
     }
     if (q_registry_is_reserved(target->i64)) return q_err(QE_ASSIGN);
-    ray_t* s = ray_sym_str(target->i64);
-    if (!s) return q_err(QE_TYPE);
-    int dotted = ray_str_len(s) > 0 && ray_str_ptr(s)[0] == '.';
-    ray_release(s);
     ray_t* v = q_eval_apply_concrete(q_eval(rhs));    /* boundary seam: assignment */
     if (RAY_IS_ERR(v)) return v;
     Q_ASSERT_CONCRETE(v);                  /* env-set tripwire */
-    int in_frame = !dotted && q_eval_apply_frame_depth() > 0;
-    int local = in_frame &&
-                (!is_global || q_env_local_get(target->i64) != NULL);
+    int local = write_is_local(target->i64);
     ray_err_t err = local ? q_env_local_set(target->i64, v)
                           : q_env_set(target->i64, v);
     if (err != RAY_OK) { ray_release(v); return q_env_err(err); }
@@ -364,11 +374,13 @@ static ray_t* assign_eval(int is_global, ray_t* target, ray_t* rhs) {
  * m;n;f;l;s).  A tree-walker has no bytecode and no source-position map, so
  * slot 0 and m are EMPTY rather than invented; n/f/l keep the doc's own "not
  * applicable" values (()/""/-1) until an assignment stamps a name and the
- * loader carries a file.  Scope follows function-notation.md "Name scope" —
- * the rule assign_eval implements: a `:` target is local for the WHOLE body,
- * `::` and dotted targets are global, every other name is a global reference.
- * Verbs are fn VALUES after parse so they never read as names, and a nested
- * lambda carrier is opaque: its locals are its own. */
+ * loader carries a file.  Scope follows function-notation.md "Name scope": a
+ * `:` target is local for the WHOLE body (the CARRIER-BORNE locals slot,
+ * q_eval_lambda_locals — the same set lambda_call seeds), a `::` target is
+ * global unless the name is a local, dotted targets and every other name are
+ * global references.  Verbs are fn
+ * VALUES after parse so they never read as names, and a nested lambda carrier
+ * is opaque: its locals are its own. */
 
 typedef struct {
     ray_t *loc, *glb, *ref, *con;
@@ -388,12 +400,6 @@ static void sym_add(ray_t** v, int64_t id, int* oom) {
     ray_t* n = ray_vec_append(*v, &id);
     if (!n) { *oom = 1; return; }
     *v = n;
-}
-
-/* ray_sym_str is BORROWED (PLAN.md register, 2026-07-30) — no release here */
-static int sym_dotted(int64_t id) {
-    ray_t* s = ray_sym_str(id);
-    return s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == '.';
 }
 
 int q_eval_ctl_sym(int64_t id) {
@@ -418,6 +424,7 @@ static void lam_scan(ray_t* n, lam_scan_t* s) {
         return;
     }
     if (n->type != RAY_LIST) {
+        if (!s->con) return;
         ray_t* c = ray_list_append(s->con, n);
         if (!c) { s->oom = 1; return; }
         s->con = c;
@@ -438,6 +445,12 @@ static void lam_scan(ray_t* n, lam_scan_t* s) {
         lam_scan(e[2], s);
         return;
     }
+    /* `x op:y` READS x (only `x:y` declares a local); the `op:` head is registry spelling, never a name */
+    if (k == 3 && nameref(e[0]) && modassign_op(e[0], NULL)) {
+        lam_scan(e[1], s);
+        lam_scan(e[2], s);
+        return;
+    }
     /* the signal/return char-atom heads are syntax, not constants */
     if (k == 2 && e[0] && e[0]->type == -RAY_CHARV &&
         (e[0]->u8 == '\'' || e[0]->u8 == ':')) {
@@ -445,6 +458,20 @@ static void lam_scan(ray_t* n, lam_scan_t* s) {
         return;
     }
     for (int64_t i = 0; i < k; i++) lam_scan(e[i], s);
+}
+
+/* the `:` targets over the WHOLE body (function-notation.md:155 "identified on parsing"), params excluded */
+ray_t* q_eval_lambda_locals(ray_t* params, ray_t* body) {
+    lam_scan_t s = { ray_sym_vec_new(RAY_SYM_W64, 4), NULL, NULL, NULL, 0 };
+    if (!s.loc) return NULL;
+    lam_scan(body, &s);
+    ray_t* out = s.oom ? NULL : ray_sym_vec_new(RAY_SYM_W64, 4);
+    for (int64_t i = 0, n = out ? ray_len(s.loc) : 0; i < n && out; i++) {
+        int64_t id = ray_read_sym(ray_data(s.loc), i, RAY_SYM, s.loc->attrs);
+        if (!q_eval_symvec_has(params, id)) out = ray_vec_append(out, &id);
+    }
+    ray_release(s.loc);
+    return out;
 }
 
 /* the namespace slot prints bare (`test`d`e), so drop the context's dot */
@@ -503,16 +530,17 @@ ray_t* q_eval_carrier_value(ray_t* v) {
 static ray_t* lambda_structure(ray_t* v) {
     ray_t *params = NULL, *body = NULL, *ctx = NULL;
     if (!q_eval_apply_lambda_parts(v, &params, &body, &ctx)) return NULL;
+    ray_t* locals = q_eval_apply_lambda_locals(v);                          /* borrowed */
 
-    lam_scan_t s = { ray_sym_vec_new(RAY_SYM_W64, 4), ray_sym_vec_new(RAY_SYM_W64, 4),
-                     ray_sym_vec_new(RAY_SYM_W64, 4), ray_list_new(1), 0 };
-    if (!s.loc || !s.glb || !s.ref || !s.con) s.oom = 1;
+    lam_scan_t s = { NULL, ray_sym_vec_new(RAY_SYM_W64, 4), ray_sym_vec_new(RAY_SYM_W64, 4),
+                     ray_list_new(1), 0 };
+    if (!s.glb || !s.ref || !s.con) s.oom = 1;
     lam_scan(body, &s);
 
     /* a referenced name is global unless it is a parameter or a body local */
     for (int64_t i = 0, n = s.ref ? ray_len(s.ref) : 0; i < n && !s.oom; i++) {
         int64_t id = ray_read_sym(ray_data(s.ref), i, RAY_SYM, s.ref->attrs);
-        if (q_eval_symvec_has(params, id) || q_eval_symvec_has(s.loc, id)) continue;
+        if (q_eval_symvec_has(params, id) || q_eval_symvec_has(locals, id)) continue;
         sym_add(&s.glb, id, &s.oom);
     }
     ray_t* nsg = ray_sym_vec_new(RAY_SYM_W64, 1 + (s.glb ? ray_len(s.glb) : 0));
@@ -522,6 +550,7 @@ static ray_t* lambda_structure(ray_t* v) {
         nsg = ray_vec_append(nsg, &id);
         for (int64_t i = 0, n = s.glb ? ray_len(s.glb) : 0; i < n && nsg; i++) {
             int64_t g = ray_read_sym(ray_data(s.glb), i, RAY_SYM, s.glb->attrs);
+            if (q_eval_symvec_has(locals, g)) continue;     /* `w::9` on a body local writes the local */
             nsg = ray_vec_append(nsg, &g);
         }
         if (!nsg) s.oom = 1;
@@ -533,7 +562,8 @@ static ray_t* lambda_structure(ray_t* v) {
     out = list_put(out, bc);
     if (params) ray_retain(params);
     out = list_put(out, params ? params : ray_sym_vec_new(RAY_SYM_W64, 1));
-    out = list_put(out, s.loc); s.loc = NULL;
+    if (locals) ray_retain(locals);
+    out = list_put(out, locals ? locals : ray_sym_vec_new(RAY_SYM_W64, 1));
     out = list_put(out, nsg);   nsg = NULL;
     for (int64_t i = 0, n = s.con ? ray_len(s.con) : 0; i < n && out; i++) {
         ray_t* c = ((ray_t**)ray_data(s.con))[i];
@@ -561,8 +591,7 @@ static ray_t* lambda_structure(ray_t* v) {
     ray_t* src = q_eval_apply_lambda_src(v);
     out = list_put(out, src ? q_str_charv_of_str(src) : ray_vec_new(RAY_CHARV, 1));
 
-    ray_release(s.loc); ray_release(s.glb); ray_release(s.ref);
-    ray_release(s.con); ray_release(nsg);
+    ray_release(s.glb); ray_release(s.ref); ray_release(s.con); ray_release(nsg);
     return out ? out : q_err(QE_WSFULL);
 }
 
@@ -623,7 +652,16 @@ ray_t* q_eval_value_wrap(ray_t* x) {
                                                   * connection form -> 'domain */
         if (pc) return pc;
         ray_t* f = q_wirefile_read(x);       /* NULL unless a `:path sym */
-        return f ? f : name_value(x, NULL);
+        if (f) return f;
+        /* "the name of a GLOBAL variable" (ref/get.md:22): the caller's locals are behind the floor, as for a
+         * script load (ctx_run_script) — a lambda's own `t` never shadows the table `t` a name or a string asks for
+         * (function-notation.md:153 "strictly local: invisible to other functions applied during evaluation") */
+        int floor = q_eval_apply_frame_floor(-1);
+        int32_t ffloor = q_env_frame_floor(-1);
+        ray_t* v = name_value(x, NULL);
+        q_env_frame_floor(ffloor);
+        q_eval_apply_frame_floor(floor);
+        return v;
     }
     if (x->type == RAY_CHARV || x->type == -RAY_CHARV || x->type == -RAY_STR) {
         const char* p; int64_t n;
@@ -632,7 +670,11 @@ ray_t* q_eval_value_wrap(ray_t* x) {
         if (!z) return q_err(QE_WSFULL);
         memcpy(z, p, (size_t)n);
         z[n] = 0;
+        int floor = q_eval_apply_frame_floor(-1);
+        int32_t ffloor = q_env_frame_floor(-1);
         ray_t* r = q_eval_statement(z, NULL);
+        q_env_frame_floor(ffloor);
+        q_eval_apply_frame_floor(floor);
         ray_free_raw(z);
         return r;
     }
@@ -765,21 +807,12 @@ static ray_t* do_eval(ray_t** e, int64_t n) {
 /* modified assignment `x op: y` == `x: x op y` — head `<op>:` where op is a
  * registry dyad; name targets only (indexed mod-assign: rebuild wave) */
 static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
-    ray_t* s = ray_sym_str(h->i64);
-    if (!s) return NULL;
-    const char* nm = ray_str_ptr(s);
-    size_t l = ray_str_len(s);
-    if (l < 2 || nm[l - 1] != ':' || nm[0] == ':') { ray_release(s); return NULL; }
     const q_op_t* row = NULL;
-    ray_t* opv = q_registry_lookup_row(
-        ray_sym_intern_runtime(nm, l - 1), Q_DYADIC, &row);
-    ray_release(s);
-    if (!opv || !(opv->type == RAY_UNARY || opv->type == RAY_BINARY ||
-                  opv->type == RAY_VARY))
-        return NULL;                                 /* not an op: -> 'name path */
+    ray_t* opv = modassign_op(h, &row);
+    if (!opv) return NULL;                           /* not an op: -> 'name path */
     if (!nameref(target)) {
         if (target && target->type == RAY_LIST && ray_len(target) >= 2)
-            return indexed_assign(0, target, opv, rhs);
+            return indexed_assign(target, opv, rhs);
         return q_err(QE_NYI);
     }
     ray_t* rv = q_eval(rhs);
@@ -793,14 +826,7 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
         if (id) { q_err_drop(); ray_error_free(cur); cur = id; }
     }
     if (RAY_IS_ERR(cur)) { ray_release(rv); return cur; }
-    int local = q_eval_apply_frame_depth() > 0;
-    if (local) {
-        ray_t* snm = ray_sym_str(target->i64);
-        if (snm) {
-            if (ray_str_len(snm) > 0 && ray_str_ptr(snm)[0] == '.') local = 0;
-            ray_release(snm);
-        }
-    }
+    int local = write_is_local(target->i64);
     int join = row && !strcmp(row->name, ",");
     int stole = 0;
     ray_t* nv;
@@ -972,7 +998,7 @@ ray_t* q_eval(ray_t* node) {
         if (nameref(h)) {
             const eval_syms_t* S = syms();
             if ((h->i64 == S->colon || h->i64 == S->gcolon) && n == 3) {
-                ret = assign_eval(h->i64 == S->gcolon, e[1], e[2]);
+                ret = assign_eval(e[1], e[2]);
                 goto out;
             }
             if (h->i64 == S->kif)    { ret = if_eval(e + 1, n - 1, 0); goto out; }

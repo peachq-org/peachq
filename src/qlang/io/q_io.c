@@ -7,7 +7,7 @@
  * RAY_FN_RESTRICTED note: the base file primitives carry the flag on their ENV
  * fn objects; calling the C functions directly bypasses the eval-layer check,
  * so every file-touching arm re-asserts ray_eval_get_restricted(). */
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE            /* realpath */
 #include "qlang/io/q_io.h"
 #include "qlang/q_registry_internal.h" /* q_str_split_lines, q_type_strict_i64 */
 #include "qlang/base/q_err.h"
@@ -21,6 +21,7 @@
 #include "lang/eval.h"      /* ray_eval_get_restricted */
 #include "store/fileio.h"   /* ray_mkdir_p — the parent directories a write promises */
 #include "table/sym.h"      /* ray_sym_intern_runtime, ray_sym_vec_cell */
+#include <limits.h>         /* PATH_MAX — q_io_abs_path */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +39,20 @@
 #endif
 
 /* ---- paths, size, write ------------------------------------------------- */
+
+int q_io_abs_path(const char* path, char* abs, size_t cap) {
+    char full[PATH_MAX];
+#ifdef RAY_OS_WINDOWS
+    if (!_fullpath(full, path, sizeof full)) return 0;
+    for (char* p = full; *p; p++) if (*p == '\\') *p = '/';
+#else
+    if (!realpath(path, full)) return 0;
+#endif
+    size_t n = strlen(full);
+    if (n + 1 > cap) return 0;
+    memcpy(abs, full, n + 1);
+    return 1;
+}
 
 ray_t* q_io_file_path(ray_t* x) {
     const char* p;

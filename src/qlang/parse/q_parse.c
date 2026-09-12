@@ -580,8 +580,11 @@ static Tokens scan(const char *src) {
                     /* explicit monadic marker: keep it in the token name so the
                      * tree displays kdb-style (+: |: ::) and the parser embeds
                      * the monadic row.  `::` (c==':' marked) is also the q
-                     * generic null / global-assign verb — same spelling. */
+                     * generic null / global-assign verb — same spelling.
+                     * `x op::y` is the SAME op-assign head (interfaces/kafka.md:53
+                     * `data,::enlist msg`): a lambda body never sees a stray `:`. */
                     p++;
+                    if (c != ':' && src[p] == ':') p++;
                     char nm[2] = { c, ':' };
                     EMIT(T_VERB, q_verb_name(nm, 2));
                 } else {

@@ -1,7 +1,8 @@
 /* q_mount — see q_mount.h.  Binds ride q_env_set (the one global-set home, so views and
  * `.z.vs` see them), under an ABSOLUTE sym so a later `\cd` cannot orphan the mapping. */
-#define _GNU_SOURCE            /* realpath, strdup */
+#define _GNU_SOURCE            /* strdup */
 #include "qlang/io/q_mount.h"
+#include "qlang/io/q_io.h"      /* q_io_abs_path — the one path-resolution home */
 #include "qlang/io/q_splay.h"
 #include "qlang/net/q_wirefile.h"
 #include "qlang/base/q_err.h"
@@ -146,13 +147,7 @@ static ray_t* mount_root(const char* abs, size_t n, int scripts) {
 
 ray_t* q_mount_dir(const char* path, int scripts) {
     char abs[PATH_MAX];
-#ifdef RAY_OS_WINDOWS
-    if (!_fullpath(abs, path, sizeof abs)) return q_err(QE_OS);
-    for (char* p = abs; *p; p++) if (*p == '\\') *p = '/';
-    if (!mount_is_dir(abs)) return q_err(QE_OS);
-#else
-    if (!realpath(path, abs)) return q_err(QE_OS);
-#endif
+    if (!q_io_abs_path(path, abs, sizeof abs) || !mount_is_dir(abs)) return q_err(QE_OS);
     size_t n = strlen(abs);
     while (n > 1 && abs[n - 1] == '/') abs[--n] = '\0';
     /* the opened directory becomes the current directory (syscmds.md) */
