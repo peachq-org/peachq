@@ -331,8 +331,8 @@ ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
     if (!x || !ray_is_vec(x))
         return q_err(QE_NYI);
     int8_t t = x->type;
-    if (!(t == RAY_I16 || t == RAY_I32 || t == RAY_I64 || t == RAY_F32 || t == RAY_F64 ||
-          RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t) || RAY_IS_TEMPORALF(t)))
+    if (!(t == RAY_I16 || t == RAY_I32 || t == RAY_I64 || t == RAY_F32 || t == RAY_F64 || t == RAY_BOOL ||
+          ray_is_bytelike(t) || RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t) || RAY_IS_TEMPORALF(t)))
         return q_err(QE_NYI);
     int64_t len = ray_len(x);
     size_t esz = ray_type_sizes[(uint8_t)t];
@@ -344,13 +344,10 @@ ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
     int64_t sh = k >= 0 ? k : -k;
     if (sh > len) sh = len;
     int64_t keep = len - sh;
-    if (k >= 0) {                                    /* prev-by-n: head nulls */
-        if (keep > 0) memcpy(o + (size_t)sh * esz, in, (size_t)keep * esz);
-        for (int64_t i = 0; i < sh; i++) ray_vec_set_null(out, i, true);
-    } else {                                         /* next-by-n: tail nulls */
-        if (keep > 0) memcpy(o, in + (size_t)sh * esz, (size_t)keep * esz);
-        for (int64_t i = keep; i < len; i++) ray_vec_set_null(out, i, true);
-    }
+    int64_t vac = k >= 0 ? 0 : keep;                 /* prev-by-n vacates the head, next-by-n the tail */
+    if (keep > 0) memcpy(o + (size_t)(k >= 0 ? sh : 0) * esz, in + (size_t)(k >= 0 ? 0 : sh) * esz, (size_t)keep * esz);
+    memset(o + (size_t)vac * esz, 0, (size_t)sh * esz);   /* the bool/byte null; sentinel types overwrite below */
+    for (int64_t i = vac; i < vac + sh; i++) ray_vec_set_null(out, i, true);
     return out;
 }
 
