@@ -127,7 +127,7 @@ static ray_t* fb_decode(const char* ts, int64_t nt, ray_t* widths,
 static ray_t* fb_payload(ray_t* y) {
     if (!y) return q_err(QE_TYPE);
     if (y->type == -RAY_SYM) {
-        ray_t* path = q_io_file_path(y);
+        ray_t* path = q_io_path_operand(y);
         if (!path) return q_err(QE_TYPE);
         ray_t* b = q_io_read_slice(path, 0, -1, NULL);
         ray_release(path);
