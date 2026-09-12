@@ -324,7 +324,7 @@ static ray_t* acc_apply(ray_t* fv, const q_op_t* frow, ray_t** args,
         args[0]->type != RAY_TABLE && ray_len(args[0]) == 0)
         return q_typed_empty_like(ray_list_new(0), fv);
     int64_t rank = acc_rank(fv);
-    if (rank < 0 && q_eval_apply_fnv_matrix_row(frow)) rank = 2;   /* `(!/)x` reduces */
+    if (rank < 0 && n <= 2 && q_eval_apply_fnv_matrix_row(frow)) rank = 2;   /* `(!/)x` reduces */
     /* a variadic value reads as the UNARY form in both binary shapes:
      * `5 enlist\1` (:151) is Do-5 of unary enlist, not enlist[5;1].  Past two
      * arguments there is no unary reading left and a variadic ternary
@@ -349,28 +349,54 @@ static ray_t* acc_apply(ray_t* fv, const q_op_t* frow, ray_t** args,
     return acc_reduce(fv, frow, args[0], args + 1, n - 1, keep);
 }
 
+typedef struct { ray_t* fv; const q_op_t* frow; } map_zip_t;
+
+static ray_t* map_zip_apply(void* c, ray_t* x, ray_t* y) {
+    ray_t* av[2] = { x, y };
+    return q_eval_apply_concrete(q_eval_apply(((map_zip_t*)c)->fv, ((map_zip_t*)c)->frow, av, 2));
+}
+
 /* Each, Each Left and Each Right are ONE law (ref/maps.md: `x f\:y` is
  * `f[;y] each x`).  `mask` names the ITERATED positions — fixed by the
  * operator, never auto-detected — read at i; every other position is held
- * whole, and a non-collection in a masked slot leaves nothing to iterate. */
+ * whole, and a non-collection in a masked slot leaves nothing to iterate.
+ * An iterated dict is its values, re-keyed on the way out; two of them under
+ * a dyad conform by key through the atomic law (:66 "Each is redundant with
+ * atomic functions"), past a dyad their keys must match. */
 static ray_t* map_zip(ray_t* fv, const q_op_t* frow, ray_t** args, int64_t n,
                       uint64_t mask) {
     if (n < 1 || n > APPLY_MAX_ARGS) return q_err(QE_RANK);
     ray_t* av[APPLY_MAX_ARGS];
     uint64_t iter = 0;
     int64_t len = -1;
+    ray_t* dk = NULL;                 /* first iterated dict: the result's keys */
     ray_t* r = NULL;
     for (int64_t p = 0; p < n; p++) {
         ray_retain(args[p]);
         av[p] = q_eval_apply_concrete(args[p]);   /* an iterated DAG has no items */
-        if (!(mask >> p & 1) || !q_type_is_iter(av[p])) continue;
+        if (!(mask >> p & 1)) continue;
+        ray_t* dv = iter_dict_vals(av[p]);
+        if (dv) {
+            if (!dk) { dk = av[p]; ray_retain(dk); }
+            else if (!r && !q_match_rec(ray_dict_keys(dk), ray_dict_keys(av[p])))
+                r = n == 2 ? q_eval_apply_dict_zip(frow, dk, av[p], map_zip_apply, &(map_zip_t){ fv, frow })
+                           : q_err(QE_LENGTH);
+            ray_retain(dv);
+            ray_release(av[p]);
+            av[p] = dv;
+        }
+        if (!q_type_is_iter(av[p])) continue;
         iter |= (uint64_t)1 << p;
         /* the scan must run to the end so every av[p] is populated for the
-         * release below — so record the FIRST mismatch only (an error is an
-         * allocation the refcount system does not track: overwriting leaks) */
+         * release below — so record the FIRST verdict only (an owned error
+         * overwritten is an owned error leaked) */
         if (len < 0) len = q_count_long(av[p]);
         else if (len != q_count_long(av[p]) && !r) r = q_err(QE_LENGTH);
     }
+    int whole = r != NULL;                 /* a whole answer or an error: nothing to re-key */
+    /* values that are themselves a dict take the law again */
+    for (int64_t p = 0; !r && p < n; p++)
+        if (mask >> p & 1 && iter_dict_vals(av[p])) r = map_zip(fv, frow, av, n, mask);
     if (!r && len < 0) r = q_eval_apply(fv, frow, av, n);
     /* a map is uniform: an empty iterated side returns the GENERIC empty list
      * without an evaluation — `type (2*')til 0` is 0h, not 7h (ref/maps.md) */
@@ -391,13 +417,11 @@ static ray_t* map_zip(ray_t* fv, const q_op_t* frow, ray_t** args, int64_t n,
         r = RAY_IS_ERR(l) ? l : q_eval_apply_collapse(l);
     }
     for (int64_t p = 0; p < n; p++) ray_release(av[p]);
+    if (dk) {
+        if (!whole) r = dict_rekey(dk, r);
+        ray_release(dk);
+    }
     return r;
-}
-
-static ray_t* each1(ray_t* fv, const q_op_t* frow, ray_t* x) {
-    ray_t* dv = iter_dict_vals(x);
-    if (dv) return dict_rekey(x, each1(fv, frow, dv));
-    return map_zip(fv, frow, &x, 1, 1);
 }
 
 /* Case (ref/maps.md "Case"): an INTEGER VECTOR at the `'` head is not a value
@@ -489,14 +513,13 @@ ray_t* q_adverb_apply(int adv, ray_t* fv, const q_op_t* frow,
     if (adv == 1 || adv == 2) return acc_apply(fv, frow, args, n, adv == 2);
     if (adv == 0) {                                        /* `'` each */
         if (q_type_is_int_vec(fv)) return case_apply(fv, args, n);
-        if (n == 1) return each1(fv, frow, args[0]);
         return map_zip(fv, frow, args, n, ~(uint64_t)0);
     }
     if (adv == 3) {                                        /* `':` */
         /* a rank-1 value makes `':` Each Parallel, a rank-2 one Each Prior
          * (ref/maps.md); we have no secondary tasks, so parallel IS each */
         if (n == 1 && q_eval_apply_rank(fv) == 1)
-            return each1(fv, frow, args[0]);
+            return map_zip(fv, frow, args, 1, 1);
         if (n == 1) return prior_each(fv, frow, NULL, args[0]);
         if (n == 2) return prior_each(fv, frow, args[0], args[1]);
         return q_err(QE_RANK);
