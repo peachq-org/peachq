@@ -14,6 +14,10 @@
  * is taken as a RAW PATH, so a verb whose q surface is a file SYMBOL (hdel,
  * get, set) tests -RAY_SYM itself before asking. */
 ray_t* q_io_file_path(ray_t* x);
+/* A PATH operand: the file symbol with or without its colon, or a text path.  Only for verbs whose domain
+ * has no NAME form (read0/read1/0:/1:/hcount) — the get/set/`load`/`save` verbs keep q_io_file_path, where
+ * the colon is what tells a file from a global (ref/get.md). */
+ray_t* q_io_path_operand(ray_t* x);
 
 /* the absolute '/'-separated spelling of an EXISTING path into abs[cap]: canonical on POSIX (realpath — symlinks
  * resolved), lexical on Windows (_fullpath resolves no junction); 0 when it will not resolve or fit */
