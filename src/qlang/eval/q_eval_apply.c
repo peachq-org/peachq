@@ -671,7 +671,7 @@ static ray_t* atomic1(ray_unary_fn f, ray_t* x) {
  * side only combines with the verb's identity element on the missing side when
  * the identity FILLS (`d1-d2` is 0-y there, ref/subtract.md), else it passes
  * through untouched (`d1%d2`, ref/divide.md; every identity-less verb). */
-static ray_t* atomic2_dicts(ray_binary_fn f, const q_op_t* row, ray_t* x, ray_t* y) {
+ray_t* q_eval_apply_dict_zip(const q_op_t* row, ray_t* x, ray_t* y, q_eval_zip_fn f, void* ctx) {
     ray_t* uk = ray_union_fn(ray_dict_keys(x), ray_dict_keys(y));
     if (!uk || RAY_IS_ERR(uk)) return uk ? uk : q_err(QE_TYPE);
     int64_t n = ray_len(uk);
@@ -684,22 +684,16 @@ static ray_t* atomic2_dicts(ray_binary_fn f, const q_op_t* row, ray_t* x, ray_t*
         int64_t ix = ray_dict_find_idx(x, k);
         int64_t iy = ray_dict_find_idx(y, k);
         ray_release(k);
+        ray_t* ex = ix >= 0 ? q_index_elem_at(vx, ix) : NULL;
+        ray_t* ey = iy >= 0 ? q_index_elem_at(vy, iy) : NULL;
         ray_t* r;
-        if (ix >= 0 && iy >= 0) {
-            ray_t* ex = q_index_elem_at(vx, ix);
-            ray_t* ey = q_index_elem_at(vy, iy);
-            r = binary_elem(f, row, ex, ey);
-            if (r != ex) ray_release(ex);
-            if (r != ey) ray_release(ey);
-        } else if (id) {
-            ray_t* e = q_index_elem_at(ix >= 0 ? vx : vy, ix >= 0 ? ix : iy);
-            r = ix >= 0 ? binary_elem(f, row, e, id) : binary_elem(f, row, id, e);
-            if (r != e) ray_release(e);
-        } else if (ix >= 0) {
-            r = q_index_elem_at(vx, ix);
-        } else {
-            r = q_index_elem_at(vy, iy);
-        }
+        if (ex && RAY_IS_ERR(ex))      { r = ex; ex = NULL; }
+        else if (ey && RAY_IS_ERR(ey)) { r = ey; ey = NULL; }
+        else if (ex && ey)             r = f(ctx, ex, ey);
+        else if (id)                   r = ex ? f(ctx, ex, id) : f(ctx, id, ey);
+        else                           { r = ex ? ex : ey; ray_retain(r); }
+        if (ex) ray_release(ex);
+        if (ey) ray_release(ey);
         if (!r || RAY_IS_ERR(r)) {
             ray_release(out);
             ray_release(uk);
@@ -708,6 +702,11 @@ static ray_t* atomic2_dicts(ray_binary_fn f, const q_op_t* row, ray_t* x, ray_t*
         }
         out = ray_list_append(out, r);
         ray_release(r);
+        if (RAY_IS_ERR(out)) {
+            ray_release(uk);
+            if (id) ray_release(id);
+            return out;
+        }
     }
     if (id) ray_release(id);
     return ray_dict_new(uk, q_eval_apply_collapse(out));
@@ -721,10 +720,19 @@ static ray_t* atomic2_col(void* vctx, ray_t* col) {
                                    : atomic2(c->f, c->row, col, c->other));
 }
 
+static ray_t* atomic2_zip(void* vctx, ray_t* x, ray_t* y) {
+    ray_t* r = binary_elem(((a2ctx*)vctx)->f, ((a2ctx*)vctx)->row, x, y);
+    if (r == x || r == y) ray_retain(r);       /* binary_elem hands an error arg back unretained */
+    return r;
+}
+
 static ray_t* atomic2(ray_binary_fn f, const q_op_t* row, ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);
     int xd = x->type == RAY_DICT, yd = y->type == RAY_DICT;
-    if (xd && yd) return atomic2_dicts(f, row, x, y);
+    if (xd && yd) {
+        a2ctx c = { f, row, NULL, 0 };
+        return q_eval_apply_dict_zip(row, x, y, atomic2_zip, &c);
+    }
     if (xd || yd) {
         ray_t* d = xd ? x : y;
         ray_t* o = xd ? y : x;
