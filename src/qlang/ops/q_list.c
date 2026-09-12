@@ -105,7 +105,10 @@ static ray_t* dict_rows_table(ray_t* const* rows, int64_t n) {
         else if (!q_match_rec(k0, k)) return NULL;   /* same names, same order */
     }
     int64_t nc = ray_len(k0);
-    ray_t* cols = ray_list_new(nc > 0 ? nc : 1);
+    /* a run of dicts with NO keys is no table: with no column to take a length from it would answer for zero
+     * rows however many there are, and silently take every column beside it down with it */
+    if (nc < 1) return NULL;
+    ray_t* cols = ray_list_new(nc);
     if (RAY_IS_ERR(cols)) return cols;
     for (int64_t c = 0; c < nc; c++) {
         ray_t* col = ray_list_new(n);
@@ -194,7 +197,11 @@ ray_t* q_raze_wrap(ray_t* x) {
  * dict-rows builder.  Env-bound by q_builtins_register BEFORE registry init,
  * so the `,` monadic QK_ENV snapshot picks this wrapper up too. */
 ray_t* q_enlist_wrap(ray_t** args, int64_t n) {
-    if (n == 1 && args[0] && args[0]->type == RAY_DICT && !q_type_is_keyed(args[0])) {
+    ray_t* k = n == 1 && args[0] && args[0]->type == RAY_DICT && !q_type_is_keyed(args[0])
+                   ? ray_dict_keys(args[0]) : NULL;
+    /* an EMPTY dict spells no row: no zero-column table could hold the one this makes, so it enlists as the
+     * one-item list it is, leaving 'type to keys that are genuinely no table's names */
+    if (k && ray_len(k) > 0) {
         ray_t* t = dict_rows_table(args, 1);         /* non-sym keys are no table */
         return t ? t : q_err(QE_TYPE);
     }
