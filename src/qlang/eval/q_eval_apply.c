@@ -83,13 +83,14 @@ static ray_t* car_put(ray_t* c, int64_t i, ray_t* child) {
 
 /* lambda carrier: [params symvec, body list, src string, defining `\d` context,
  * declared types i64vec (NULL = undecorated), n name charv, f file sym, l line
- * i64] — 5..7 are the ref/value.md provenance slots, NULL until the first
- * global assignment stamps them (q_eval_apply_lambda_name).
+ * i64, locals symvec (q_eval_lambda_locals, params excluded)] — 5..7 are the
+ * ref/value.md provenance slots, NULL until the first global assignment stamps
+ * them (q_eval_apply_lambda_name).
  * The context is captured HERE, at parse time, because a lambda's unqualified
  * globals belong to the namespace it was written in, not the one it is called
  * from (ref/value.md: the globals list of `.test.f` reads `` `test`d`e ``).
  * NULL slot = root. */
-enum { LAM_NAME = 5, LAM_FILE = 6, LAM_LINE = 7, LAM_SLOTS = 8 };
+enum { LAM_NAME = 5, LAM_FILE = 6, LAM_LINE = 7, LAM_LOCALS = 8, LAM_SLOTS = 9 };
 
 ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
                                ray_t* src, ray_t* types) {
@@ -110,7 +111,9 @@ ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
         s[4] = types;
     }
     int64_t ctx = q_env_ctx();
-    return ctx ? car_put(c, 3, ray_sym(ctx)) : c;
+    if (ctx) c = car_put(c, 3, ray_sym(ctx));
+    if (RAY_IS_ERR(c)) return c;
+    return car_put(c, LAM_LOCALS, q_eval_lambda_locals(params, b));
 }
 
 static void lam_drop(ray_t* x) {
@@ -1049,6 +1052,10 @@ ray_t* q_eval_apply_lambda_src(ray_t* v) {
     return (src && src->type == -RAY_STR) ? src : NULL;
 }
 
+ray_t* q_eval_apply_lambda_locals(ray_t* v) {
+    return q_eval_apply_carrier_kind(v) == Q_EVAL_CAR_LAMBDA ? car_slots(v)[LAM_LOCALS] : NULL;
+}
+
 /* `value` on a lambda reads the same slots (ref/value.md `## Lambda`); the
  * layout stays opaque, the scope analysis over body belongs to q_eval. */
 int q_eval_apply_lambda_parts(ray_t* v, ray_t** params, ray_t** body,
@@ -1084,6 +1091,16 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
             q_env_local_set(p->i64, args[i]);              /* retains */
             ray_release(p);
         }
+    }
+    /* every parse-time local starts as () (function-notation.md:155); the builder excluded the params, so none is
+     * re-seeded.  All-or-nothing: a half-seeded frame would let a local fall through to the global */
+    ray_t* locals = c[LAM_LOCALS];
+    for (int64_t i = 0, nl = locals ? ray_len(locals) : 0; i < nl; i++) {
+        ray_t* e = ray_list_new(0);
+        ray_err_t se = e ? q_env_local_set(ray_read_sym(ray_data(locals), i, RAY_SYM, locals->attrs), e)
+                         : RAY_ERR_OOM;                                              /* retains */
+        if (e) ray_release(e);
+        if (se != RAY_OK) { q_env_frame_pop(); return q_err(QE_WSFULL); }
     }
     g_frame_depth++;
     q_dbg_frame_push(lam);

@@ -15,6 +15,10 @@
  * get, set) tests -RAY_SYM itself before asking. */
 ray_t* q_io_file_path(ray_t* x);
 
+/* the absolute '/'-separated spelling of an EXISTING path into abs[cap]: canonical on POSIX (realpath — symlinks
+ * resolved), lexical on Windows (_fullpath resolves no junction); 0 when it will not resolve or fit */
+int q_io_abs_path(const char* path, char* abs, size_t cap);
+
 /* How big the file IS, or -1 when the path will not stat: a kxzip container
  * answers with its ORIGINAL file's length (ref/hcount.md), one that will not
  * decode with its own. */

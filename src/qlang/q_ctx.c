@@ -24,6 +24,7 @@
 #include "ops/ops.h"              /* ray_is_lazy, ray_lazy_materialize */
 #include "app/term.h"             /* ray_term_interrupted */
 #include <rayforce.h>
+#include <limits.h>               /* PATH_MAX — the load's resolved file symbol */
 #include <stdlib.h>
 #include <string.h>
 
@@ -321,8 +322,10 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig) {
         fprintf(err, "q: cannot open script '%s'\n", path);
         return 1;
     }
+    char abs[PATH_MAX];
+    const char* fpath = q_io_abs_path(path, abs, sizeof abs) ? abs : path;   /* ref/value.md `f`: the FULL path */
     int rc = ctx_run_script((const char*)ray_data(bytes), (size_t)ray_len(bytes),
-                            ray_sym_intern_runtime(path, plen), out, err, esig);
+                            ray_sym_intern_runtime(fpath, strlen(fpath)), out, err, esig);
     ray_release(bytes);
     return rc;
 }
