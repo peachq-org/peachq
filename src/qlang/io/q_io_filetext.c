@@ -19,6 +19,7 @@
 #include "qlang/q_builtins.h" /* q_string_fn — Prepare Text cell text; q_io_filetext_csv_quote decl */
 #include "lang/eval.h"      /* ray_at_fn */
 #include "table/sym.h"      /* ray_sym_intern_runtime, ray_sym_str */
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -242,12 +243,15 @@ static ray_t* ft_prepare(char delim, ray_t* y) {
 /* ---- Load CSV / Load Fixed shared plumbing ------------------------------ */
 
 /* Type char -> Tok tag via THE cast home (q_cast_designator; upper case =
- * Tok).  '*' keeps the field a string, ' ' skips the column, unknown -> 0. */
+ * Tok).  '*' keeps the field a string, ' ' skips the column, unknown -> 0.
+ * Read case-insensitively: the doc spells the codes upper case, the tracked
+ * kdb programs (qdocs/misc/aoc/2022/day04.q, 2020/day02.q) spell them lower. */
 static int8_t ft_tag(char c, int* is_str, int* is_skip) {
     *is_str = 0; *is_skip = 0;
     if (c == ' ') { *is_skip = 1; return 0; }
     if (c == '*') { *is_str = 1; return 0; }
-    if (c < 'A' || c > 'Z') return 0;                      /* doc: upper case */
+    c = (char)toupper((unsigned char)c);
+    if (c < 'A' || c > 'Z') return 0;
     ray_t* d = ray_str(&c, 1);
     if (!d || RAY_IS_ERR(d)) return 0;
     int is_tok = 0;
@@ -284,7 +288,7 @@ static ray_t* ft_rows(ray_t* y, int* single) {
         return out;
     }
     if (y->type == -RAY_SYM) {
-        ray_t* path = q_io_file_path(y);
+        ray_t* path = q_io_path_operand(y);
         if (!path) return q_err(QE_TYPE);
         ray_t* rows = ft_lines_of(path, 0, -1);
         ray_release(path);
@@ -408,10 +412,11 @@ static ray_t* ft_parse_field(ray_t* field, int8_t tag, int is_str) {
     return q_dollar_tok(tag, field);
 }
 
-/* Collapse a column accumulator: '*' columns stay lists of strings; typed
+/* Collapse a column accumulator: '*' columns cross out as lists of char
+ * vectors HERE — a table column never meets the wrap's boundary walk; typed
  * columns Tok-parse (q_dollar_tok distributes over lists) then collapse. */
 static ray_t* ft_finish_col(ray_t* colacc, int8_t tag, int is_str) {
-    if (is_str) { ray_retain(colacc); return colacc; }
+    if (is_str) { ray_retain(colacc); return q_str_charv_out(colacc); }
     ray_t* parsed = q_dollar_tok(tag, colacc);
     if (!parsed || RAY_IS_ERR(parsed)) return parsed;
     ray_t* v = q_list_collapse(parsed);                     /* owned */
@@ -460,7 +465,7 @@ static ray_t* ft_load_csv(ray_t* types, ray_t* delimspec, ray_t* flag, ray_t* y)
     for (size_t j = 0; j < nt; j++) {
         tags[j] = ft_tag(ts[j], &fstr[j], &fskip[j]);
         if (!tags[j] && !fstr[j] && !fskip[j]) {
-            char bad = ts[j];
+            char bad = (char)toupper((unsigned char)ts[j]);
             free(tags); free(fstr); free(fskip);
             if (bad == 'C')
                 return q_err(QE_NYI);
@@ -826,7 +831,8 @@ static ray_t* io_filetext_impl(ray_t* x, ray_t* y) {
         const char* s = ray_str_ptr(x);
         size_t n = ray_str_len(x);
         if (n == 1) return ft_prepare(s[0], y);
-        if ((n == 3 || n == 4) && (s[0] == 'S' || s[0] == 'I' || s[0] == 'J'))
+        char k = (char)toupper((unsigned char)s[0]);
+        if ((n == 3 || n == 4) && (k == 'S' || k == 'I' || k == 'J'))
             return ft_kv(s, n, y);
         return q_err(QE_TYPE);
     }

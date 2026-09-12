@@ -74,6 +74,11 @@ ray_t* q_io_file_path(ray_t* x) {
     return ray_str(p, n);
 }
 
+ray_t* q_io_path_operand(ray_t* x) {
+    ray_t* s = x && x->type == -RAY_SYM ? ray_sym_str(x->i64) : x;   /* borrowed */
+    return q_io_file_path(s);
+}
+
 /* Bytes as the filesystem counts them; q_io_file_size adds the container law. */
 static int64_t io_stat_size(ray_t* pathstr) {
     const char* p = ray_str_ptr(pathstr);
@@ -243,7 +248,7 @@ ray_t* q_io_resource_read(ray_t* pathstr, int64_t off, int64_t want) {
 
 ray_t* q_io_file_triple(ray_t* fsym, ray_t* offv, ray_t* wantv, int clamp,
                         ray_t** path, int64_t* off, int64_t* want) {
-    *path = q_io_file_path(fsym);
+    *path = q_io_path_operand(fsym);
     if (!*path) return q_err(QE_TYPE);
     *want = -1;
     q_err_e e = QE_TYPE;
@@ -692,7 +697,7 @@ ray_t* q_read1_wrap(ray_t* x) {
 }
 static ray_t* read1_wrap_impl(ray_t* x) {
     if (x && x->type == -RAY_SYM) {
-        ray_t* path = q_io_file_path(x);
+        ray_t* path = q_io_path_operand(x);
         if (!path) return q_err(QE_TYPE);
         ray_t* r = q_io_resource_read(path, 0, -1);
         ray_release(path);

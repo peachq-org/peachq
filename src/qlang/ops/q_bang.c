@@ -68,10 +68,7 @@ static ray_t* h_refcnt(ray_t* y) {
 static ray_t* h_hcount(ray_t* y) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* xs = q_str_in(y);            /* charv path -> legacy STR form */
-    /* hcount takes a PATH, not a file symbol: it reads a bare `x as one (an
-     * empty path stats and fails 'io) where the read verbs signal 'type. */
-    ray_t* txt = xs && xs->type == -RAY_SYM ? ray_sym_str(xs->i64) : xs;  /* borrowed */
-    ray_t* path = q_io_file_path(txt);
+    ray_t* path = q_io_path_operand(xs);
     ray_release(xs);
     if (!path) return q_err(QE_TYPE);
     if (RAY_IS_ERR(path)) return path;
