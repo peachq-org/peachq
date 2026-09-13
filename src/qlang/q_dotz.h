@@ -33,6 +33,9 @@ ray_t* q_dotz_resolve(int64_t sym_id);
  * (`.z.pg` and `.ipc.on.sync`) resolve to ONE env slot. */
 int q_dotz_ipc_hook_index(const char* name, size_t len);
 
+/* THE list of `.z` names `\x` may expunge (owner ruling 2026-09-12 over basics/syscmds.md \x + ref/dotz.md). */
+bool q_dotz_expungeable(const char* name, size_t len);
+
 /* The settable `.z.*` handlers (`.z.ts`/`.z.exit`/`.z.ph`/`.z.pp`/`.z.pm`/
  * `.z.ac`/`.z.ws`/`.z.wo`/`.z.wc`) are ORDINARY globals: every write form
  * reaches them through q_env_set, and each fire site resolves the current
