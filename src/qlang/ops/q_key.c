@@ -51,6 +51,10 @@ ray_t* q_key_name(int64_t sym) {
         return r ? r : q_err(QE_WSFULL);
     }
     if (nm[0] == ':') { ray_release(s); return q_key_dir(sym); }
+    if (l == 2 && nm[0] == '.' && nm[1] == 'z') {   /* ref/dotz.md: a pseudo-namespace no key enumerates */
+        ray_release(s);
+        return ray_list_new(1);
+    }
     int is_root = (l == 1 && nm[0] == '.');
     int qualified = (nm[0] == '.');
     ray_release(s);
