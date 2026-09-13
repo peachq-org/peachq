@@ -24,7 +24,7 @@
 #include "qlang/io/q_mount.h" /* q_mount_dir — the `\l <dir>` forms */
 #include "qlang/q_pq.h"       /* q_pq_load — the `\l pq` embedded-stdlib gate */
 #include "qlang/q_env.h"      /* q_env_ctx_set/_ctx + q_env_ns_names — `\d` and the `\v`/`\f`/`\a` rosters */
-#include "qlang/q_dotz.h"     /* q_dotz_timer_thunk — the `.z.ts` timer callback */
+#include "qlang/q_dotz.h"     /* q_dotz_timer_thunk (`\t`), q_dotz_exit_fire (`\\`), q_dotz_expungeable (`\x`) */
 #include "qlang/eval/q_view.h" /* q_view_names — `\b` / `\B` */
 #include "qlang/parse/q_parse.h"    /* q_parse — `\t expr` / `\ts expr` timing */
 #include "qlang/parse/q_tok.h" /* q_tok_date_order_set/_order — `\z` */
@@ -286,10 +286,8 @@ static ray_t* h_S(const char* arg, size_t alen) {
 }
 
 /* ---- shared handlers for the still-unimplemented commands ------------------
- * After the dedicated handlers below (\P \c \C \w \g \o \W \e \s, \l \cd \p,
- * \t \ts), h_getset serves the REMAINING commands whose SETTER / ACTION form
- * (arg present) prints NOTHING in kdb — date-parse (\z), file/name actions
- * (\x \r \_), and timeout/TLS/user config (\T \E \u).  We accept the
+ * After the dedicated handlers, h_getset serves the REMAINING commands whose SETTER / ACTION form
+ * (arg present) prints NOTHING in kdb — \r replicate, \_ hide-q-code, \T timeout, \u user-pwd.  We accept the
  * arg-form as a silent no-op: the OUTPUT matches kdb's empty setter output, so
  * the frozen ledger rows that bank that silence (e.g. `\z 1`) stay green.  The
  * side-effect is a tracked gap; the GETTER form (no arg, which kdb prints a
@@ -297,6 +295,15 @@ static ray_t* h_S(const char* arg, size_t alen) {
 static ray_t* h_getset(size_t alen) {
     if (alen > 0) return NULL;                   /* setter/action form → silent */
     return q_err(QE_NYI);               /* getter form → not yet */
+}
+
+/* `\x name` (basics/syscmds.md expunge): unbind a `.z` callback so its runtime default resumes; any other name errors
+ * as `\l badfile` does. */
+static ray_t* h_x(const char* arg, size_t alen) {
+    if (alen == 0) return h_getset(alen);
+    if (!q_dotz_expungeable(arg, alen)) return q_err_name(arg, alen);
+    ray_err_t e = q_env_unbind(ray_sym_intern_runtime(arg, alen));
+    return e == RAY_OK ? NULL : q_env_err(e);
 }
 
 /* `\1 file` / `\2 file` — basics/syscmds.md: files and intermediate directories
@@ -1089,11 +1096,11 @@ ray_t* q_sys_run(const char* line, size_t n) {
             case 'E': return h_E(arg, alen);                     /* TLS server mode     */
             case '1': return h_redirect(1, arg, alen);           /* stdout redirect     */
             case '2': return h_redirect(2, arg, alen);           /* stderr redirect     */
+            case 'x': return h_x(arg, alen);                     /* expunge a .z callback */
             /* Silent setter/action form (arg present) → NULL; getter → 'nyi:
-             * \r replicate, \T timeout, \u user-pwd,
-             * \x expunge, \_ hide-q-code. */
+             * \r replicate, \T timeout, \u user-pwd, \_ hide-q-code. */
             case 'r': case 'T':
-            case 'u': case 'x': case '_':
+            case 'u': case '_':
                 return h_getset(alen);
             /* \\ quit — q_sys_exit is capability-gated (a real process exits firing
              * .z.exit; an embedder returns silently, kdb-true either way). */
