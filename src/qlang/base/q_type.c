@@ -302,7 +302,7 @@ int q_type_is_plain_dict(ray_t* x) {
 }
 
 /* Any dictionary, keyed table included — for laws on the entries axis that
- * cover both (group's dict arm, `!`'s equal-count totality). */
+ * cover both (group's dict arm, `!`'s refusal of a dict operand). */
 int q_type_is_dict(ray_t* x) {
     return x && x->type == RAY_DICT;
 }
