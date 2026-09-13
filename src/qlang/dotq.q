@@ -37,7 +37,7 @@
 .Q.an:"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789";
 .Q.n:"0123456789";
 .Q.nA:"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-/ .Q.k (version number) / .Q.K (version date): peachq's own, tracking .z.K/.z.k (from the VERSION file).
+/ .Q.k (version number) / .Q.K (version date): .Q.k follows .z.K (the kdb+ compatibility level, 5.0); .Q.K is our build date.
 .Q.k:.z.K;
 .Q.K:.z.k;
 / .Q.M: chunk size for .Q.dsftg (load-process-save); defaults to long infinity.
