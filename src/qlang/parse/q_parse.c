@@ -1014,12 +1014,7 @@ static P parse_base(Parser *p) {
         if (ray_len(e) > 1) {
             ray_t **slots = (ray_t **)ray_data(e);
             for (int64_t i = 0; i < ray_len(e); i++) {
-                if (!slots[i]) { slots[i] = hole(); continue; }
-                /* a LONE glyph verb element is the operator VALUE — its
-                 * dyadic row (`(+;7;3)` carries Add; eval (+;7;3) -> 10),
-                 * the same bare-verb-as-value convention bracket slots use */
-                if (sym_is_glyph(slots[i]))
-                    slots[i] = q_embed(slots[i], Q_DYADIC);
+                if (!slots[i]) slots[i] = hole();
             }
         }
         if (ray_len(e) == 1) {
@@ -1042,9 +1037,6 @@ static P parse_base(Parser *p) {
                 }
                 ray_retain(only);
                 ray_release(e);
-                /* a parenthesized lone glyph verb `(+)` is the bare-verb VALUE
-                 * (dyadic row); user names keep their name-ref. */
-                if (sym_is_glyph(only)) only = q_embed(only, Q_DYADIC);
                 return (P){ R_NOUN, only, 0 };
             }
             ray_release(e);
@@ -1512,22 +1504,7 @@ static P parse_term(Parser *p, QCtx ctx) {
             w = ray_list_append(w, t.v);
             ray_release(t.v);
             for (int64_t i = 0; i < en; i++) {
-                if (es[i]) {
-                    /* a LONE glyph verb filling a slot is the operator VALUE
-                     * — its dyadic row (`@[x;i;*;y]` passes Multiply), the
-                     * bare-verb-as-value convention parens use; `:` stays a
-                     * name-ref (q_embed's colon guard) */
-                    ray_t *slot = es[i];
-                    if (slot->type == -RAY_SYM && !(slot->attrs & Q_ATTR_QUOTED) &&
-                        sym_is_glyph(slot)) {
-                        ray_retain(slot);
-                        slot = q_embed(slot, Q_DYADIC);
-                        w = ray_list_append(w, slot);
-                        ray_release(slot);
-                    } else {
-                        w = ray_list_append(w, slot);
-                    }
-                }
+                if (es[i]) w = ray_list_append(w, es[i]);
                 /* an elided bracket slot is a projection hole (Q_ATTR_HOLE),
                  * distinct from an explicit `::` value in the same position */
                 else       { ray_t *nul = hole(); w = ray_list_append(w, nul); ray_release(nul); }
@@ -1655,7 +1632,13 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
     Token *ut = cur(p);
     P u = parse_term(p, ctx);
 
-    if (u.role == R_NONE) return t;
+    if (u.role == R_NONE) {
+        /* a LONE glyph is the bare-verb VALUE: the dyadic row, a suffixed-colon marker (`#:`) selecting the monad, bare
+         * `:`/`::` staying syntax syms (q_embed's guard).  Every expression end — `(+)`, slots, statements, lambda
+         * bodies, an assignment rhs — arrives here, so this is the ONE site beside the bracket head and adverb root. */
+        if (t.role == R_VERB && sym_is_glyph(t.v)) return (P){ R_NOUN, q_embed(t.v, Q_DYADIC), 0 };
+        return t;
+    }
 
     /* SPACED `x ::` is APPLICATION — `::` a noun operand, the generic-null
      * VALUE (owner ruling 2026-07-23: `(::)~value ::` is 1b); only GLUED
@@ -1749,11 +1732,8 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
             q_die("a derived function applies with brackets or parens in q");
         }
     }
-    /* Prefix glyph head embeds its MONADIC registry value; a bare glyph verb
-     * standing as the rhs OPERAND (`+ -` applies + to the - value) embeds its
-     * dyadic row (bare-verb-as-value convention). */
+    /* Prefix glyph head embeds its MONADIC registry value */
     if (t.role == R_VERB) t.v = q_embed(t.v, Q_MONADIC);
-    if (e.role == R_VERB && sym_is_glyph(e.v)) e.v = q_embed(e.v, Q_DYADIC);
     /* JUXTAPOSED paren-glyph on a DATA operand takes its unary meaning —
      * `(,)2` is `,2`, `(-)5` is `-5` (owner ruling 2026-07-23), `(!)10` is
      * `til 10` and `(@)t` is `type t`; bracket-apply `+[10]` stays a projection
