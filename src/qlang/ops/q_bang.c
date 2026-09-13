@@ -176,11 +176,8 @@ ray_t* q_bang_enkey(int64_t nkey, ray_t* y) {
 }
 
 /* q `x!y` — dict make.  One `count` gate covers vector!vector AND table!table
- * (rows).  An ATOM side enlists to its 1-item list — the SCALAR dict
- * (ref/key.md pins `key `a _ `a!1` -> `symbol$()`; the table-literal tree
- * (+:;(!;,`x;(enlist;e))) evaluates through this arm).  ()!() is the empty
- * dict; a keyed table is a table!table dict.  vals pass through as-is
- * (rayfall `dict` broadcasts/boxes). */
+ * (rows).  ()!() is the empty dict; a keyed table is a table!table dict.  vals
+ * pass through as-is (rayfall `dict` broadcasts/boxes). */
 static ray_t* dict_pair(ray_t* x, ray_t* y) {
     /* `cols!`:dir/` — n symbols against ONE hsym atom, the flip of a mapped splayed table (ref/flip-splayed.md);
      * the count gate does not apply */
@@ -194,6 +191,9 @@ static ray_t* dict_pair(ray_t* x, ray_t* y) {
         return q_err(QE_TYPE);
     if (q_builtins_count_long(x) != q_builtins_count_long(y))
         return q_err(QE_LENGTH);
+    /* nor is an atom (owner 2026-09-13): the 1-count match is no licence to enlist it */
+    if (x->type < 0 || y->type < 0)
+        return q_err(QE_TYPE);
     /* a table IS a list of rows: table!table is the keyed table, `t!list` keys by rows, `list!t` the xtab shape */
     if (q_type_is_table(x) || q_type_is_table(y)) {
         ray_retain(x);
@@ -208,30 +208,14 @@ static ray_t* dict_pair(ray_t* x, ray_t* y) {
         ray_retain(y);
         return ray_dict_new(x, y);               /* consumes both retains */
     }
-    ray_t* ex = NULL;
-    ray_t* ey = NULL;
-    if (x->type < 0) {                           /* data atom -> its 1-item list */
-        ex = q_enlist_wrap(&x, 1);
-        if (RAY_IS_ERR(ex)) return ex;
-        x = ex;
-    }
-    if (y->type < 0) {
-        ey = q_enlist_wrap(&y, 1);
-        if (RAY_IS_ERR(ey)) { if (ex) ray_release(ex); return ey; }
-        y = ey;
-    }
     /* No type test on either side: "the items of the key ... can be of any
-     * datatype" (ref/dict.md), and the count gate above plus the atom enlist
-     * already leave both sides n-item containers.  The sniff that used to sit
-     * here routed a general-list key through rayfall's `dict`, whose own
-     * "keys must be a vector" guard then rejected every mixed, nested or
-     * function-valued key ((1;::), (1;`a), (("ab";"cd"))). */
+     * datatype" (ref/dict.md).  The sniff that used to sit here routed a
+     * general-list key through rayfall's `dict`, whose own "keys must be a
+     * vector" guard then rejected every mixed, nested or function-valued key
+     * ((1;::), (1;`a), (("ab";"cd"))). */
     ray_retain(x);
     ray_retain(y);
-    ray_t* r = ray_dict_new(x, y);
-    if (ex) ray_release(ex);
-    if (ey) ray_release(ey);
-    return r;
+    return ray_dict_new(x, y);
 }
 
 /* OWNER RULING 2026-08-05: ``!() is "a dict from 2 item symbol list, to two
@@ -352,13 +336,13 @@ ray_t* q_bang(ray_t* x, ray_t* y) {
     if (q_type_is_int_atom(x))
         return q_bang_dispatch(RAY_ATOM_IS_NULL(x) ? NULL_I64 : q_type_iatom_val(x), y);
     /* `x!y` Enumeration (ref/enumeration.md) — ENV-BLIND (R2, 2026-08-23):
-     * a sym-atom lhs with an int-family rhs ALWAYS constructs the reference
-     * (20h / -20h), whatever the name holds — symlist enum, FK, link and
-     * unbound are one structure resolved lazily.  Any other rhs is 'type:
-     * the atom-lhs dict lenience is retired (the table-literal key reaches
-     * here as a genuine LIST since the Q_ATTR_KEYLIST fix). */
+     * a sym-atom lhs with an i/j rhs (atom or vector; owner 2026-09-13: not
+     * a short) ALWAYS constructs the reference (20h / -20h), whatever the
+     * name holds — symlist enum, FK, link and unbound are one structure
+     * resolved lazily.  Any other rhs is 'type. */
     if (q_type_is_sym_atom(x)) {
-        if (q_type_is_int_atom(y) || q_type_is_int_vec(y))
+        int8_t t = (int8_t)-q_type_elem_tag(y);
+        if (t == RAY_I64 || t == RAY_I32)
             return q_enum_ref(x->i64, y);
         return q_err(QE_TYPE);
     }
