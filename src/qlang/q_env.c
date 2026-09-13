@@ -12,7 +12,7 @@
 #include "qlang/base/q_type.h"     /* q_type_is_table / _is_keyed — the \v|\a split */
 #include "qlang/q_builtins.h"      /* q_type_is_fn — the \f split (needs the apply module) */
 #include "qlang/q_comment.h"          /* the armed doc header's one consumption point */
-#include "qlang/q_dotz.h"         /* the .z.* handler-slot arms of `set` */
+#include "qlang/q_dotz.h"         /* the .z.pX / .z.bm hook alias — one table for set AND unbind */
 #include "qlang/eval/q_view.h"    /* view hooks: set/unbind invalidation, dot-'nyi */
 #include "qlang/io/q_io.h"        /* q_io_set — `set`'s file half */
 #include "qlang/q_prim.h"         /* q_enum_deref — FK/link dotted-walk gather */
@@ -298,12 +298,16 @@ ray_t* q_env_err(ray_err_t e) {
 }
 
 ray_err_t q_env_unbind(int64_t sym) {
+    if (ray_sym_is_ipc_hook(sym)) return ray_env_set(sym, NULL);
     const char* p; size_t n;
     ray_t* s = name_str(sym, &p, &n);
     if (!s) return RAY_ERR_TYPE;
     ray_err_t e = RAY_OK;
     int64_t segs[ENV_SEG_MAX];
-    if (n > 0 && !(n == 1 && p[0] == '.')) {
+    int hook = q_dotz_ipc_hook_index(p, n);
+    if (hook >= 0) {
+        e = ray_env_set(ray_sym_ipc_hook(hook), NULL);
+    } else if (n > 0 && !(n == 1 && p[0] == '.')) {
         size_t start = env_start(p, n);
         ray_t** home = (p[0] == '.' && start == 1) ? &env_ns : &env_root;
         int k = env_segs(p, n, start, segs, ENV_SEG_MAX);
