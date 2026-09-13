@@ -18,6 +18,7 @@
 #include "qlang/q_env.h"
 #include "qlang/ops/q_table.h"
 #include "qlang/ops/q_bang.h"   /* q_bang_enkey — xkey's keying primitive */
+#include "qlang/ops/q_dollar.h" /* q_dollar_cast — the row-append home's int<->long leniency */
 #include "qlang/ops/q_index.h"  /* q_index_at / q_index_elem_at — group's key gathers */
 #include "qlang/io/q_splay.h"   /* q_splay_table_path / q_splay_flip — the flip law's two directions */
 #include "qlang/io/q_provider.h" /* the flip pair; carrier cols from the snapshot, meta via hooks */
@@ -369,7 +370,9 @@ static ray_t* null_cell_like(ray_t* col) {
  *   - other LIST: records-form — every item a list/vector of ncols cells.
  *   - DICT: one row, name-matched (strict: key set must be a subset AND
  *     cover; Join: unknown keys ignored, missing columns null-filled).
- *   - 1-column target: an atom/vector payload IS the column. */
+ *   - 1-column target: an ATOM is its one record; a bare vector is a record
+ *     of the wrong width -> 'length, never N rows (owner ruling 2026-09-13:
+ *     `t insert 7 8` signals, `t insert enlist 7 8` is the two-row form). */
 ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law) {
     int partial = law == Q_ROWS_JOIN;
     if (!y) return q_err(QE_TYPE);
@@ -448,10 +451,8 @@ ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law) {
         return out;
     }
 
-    if (nc == 1 && y->type != RAY_LIST) {
-        ray_t* col;
-        if (ray_is_atom(y)) col = q_table_bcast_col(y, 1);
-        else { ray_retain(y); col = y; }
+    if (nc == 1 && ray_is_atom(y)) {
+        ray_t* col = q_table_bcast_col(y, 1);
         if (!col || RAY_IS_ERR(col)) return col ? col : q_err(QE_OOM);
         ray_t* out = ray_table_new(1);
         if (!RAY_IS_ERR(out)) out = ray_table_add_col(out, ray_table_col_name(flat, 0), col);
@@ -581,74 +582,58 @@ static ray_t* table_append_inplace(ray_t* flat, ray_t* rows) {
 
 /* Append normalized rows to a flat table.  An EMPTY target (0 rows — e.g.
  * `([]name:();age:())`) adopts the payload columns wholesale: that is how the
- * first insert types an untyped empty schema (insert.qcmd `meta u`).  Column
- * name set is the target's either way. */
+ * first insert types an untyped empty schema (insert.qcmd `meta u`), and how a
+ * TYPED 0-row column takes what the strictness law let through.  Column name
+ * set is the target's either way. */
 ray_t* q_table_append(ray_t* flat, ray_t* rows, int exclusive) {
     int64_t nc = ray_table_ncols(flat);
-    if (ray_table_nrows(flat) == 0) {
-        /* untyped empty columns (RAY_LIST) adopt the payload type; a TYPED
-         * 0-row column keeps kdb type-strictness.  An ENUM schema column
-         * ingests through its domain instead (the FK write law); a LINKED
-         * column carries its mapping onto the adopted ints. */
-        if (ray_table_nrows(rows) > 0) {
-            for (int64_t c = 0; c < nc; c++) {
-                ray_t* oc = ray_table_get_col_idx(flat, c);
-                ray_t* pc = ray_table_get_col_idx(rows, c);
-                if (oc && pc && ray_is_vec(oc) && oc->type != RAY_ENUM &&
-                    pc->type != oc->type)
-                    return q_err(QE_TYPE);
-            }
-        }
-        ray_t* out = ray_table_new(nc > 0 ? nc : 1);
+    /* THE strictness law, one spelling whether the target has rows or not: a simple typed column takes the SAME
+     * element type — except int<->long, where the payload is cast TO THE COLUMN (kdb 2.x was 32-bit with `i` the
+     * default, 3.x 64-bit with `j`, and inserts come from outside, so KX kept i<->j working: owner ruling 2026-09-13;
+     * ref/insert.md:85 is silent).  Nothing else widens — `insert[`t;(`ferrari;8.22)]` into a long column is 'type
+     * (ref/join.md:186); a nested (list) target accepts anything; an enum column coerces in its own arm; a 0-row
+     * payload has nothing to check.  The payload is re-made with the cast columns under the target's names — and
+     * for an EMPTY target that remake IS the result, its ENUM schema columns ingested through their domain (the FK
+     * write law; a LINKED column carries its mapping onto the adopted ints). */
+    int empty = ray_table_nrows(flat) == 0, checked = ray_table_nrows(rows) > 0;
+    ray_t* typed = ray_table_new(nc > 0 ? nc : 1);
+    for (int64_t c = 0; c < nc && !RAY_IS_ERR(typed); c++) {
+        ray_t* oc = ray_table_get_col_idx(flat, c);
+        ray_t* col = ray_table_get_col_idx(rows, c);
+        if (oc && col && checked && oc->type == RAY_ENUM && empty)
+            col = q_enum_col_ingest(oc, col);
+        else if (oc && col && checked && ray_is_vec(oc) && oc->type != RAY_ENUM && col->type != oc->type)
+            col = (oc->type == RAY_I32 || oc->type == RAY_I64) && (col->type == RAY_I32 || col->type == RAY_I64)
+                ? q_dollar_cast(oc->type, col) : q_err(QE_TYPE);
+        else if (col) ray_retain(col);
+        if (!col || RAY_IS_ERR(col)) { ray_release(typed); return col ? col : q_err(QE_TYPE); }
+        typed = ray_table_add_col(typed, ray_table_col_name(flat, c), col);
+        ray_release(col);
+    }
+    if (empty || !typed || RAY_IS_ERR(typed)) return typed ? typed : q_err(QE_OOM);
+    rows = typed;                                                          /* owned from here */
+    ray_t* out = NULL;
+    if (!exclusive || !(out = table_append_inplace(flat, rows))) {
+        out = ray_table_new(nc > 0 ? nc : 1);
         for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
             ray_t* oc = ray_table_get_col_idx(flat, c);
             ray_t* pc = ray_table_get_col_idx(rows, c);
-            ray_t* col;
-            if (oc && pc && oc->type == RAY_ENUM && ray_table_nrows(rows) > 0)
-                col = q_enum_col_ingest(oc, pc);
-            else { col = pc; if (col) ray_retain(col); }
-            if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : q_err(QE_TYPE); }
-            out = ray_table_add_col(out, ray_table_col_name(flat, c), col);
-            ray_release(col);
-        }
-        return out;
-    }
-    /* kdb type-strictness: appending into a simple typed column requires the
-     * SAME element type — `insert[`t;(`ferrari;8.22)]` into a long column is
-     * 'type, never a silent float promotion.  List (nested) target columns
-     * accept anything; 0-row payloads have nothing to check; enum columns
-     * COERCE below instead ('cast is their law, training doc §2). */
-    if (ray_table_nrows(rows) > 0) {
-        for (int64_t c = 0; c < nc; c++) {
-            ray_t* oc = ray_table_get_col_idx(flat, c);
-            ray_t* pc = ray_table_get_col_idx(rows, c);
-            if (oc && pc && ray_is_vec(oc) && oc->type != RAY_ENUM &&
-                pc->type != oc->type)
-                return q_err(QE_TYPE);
+            ray_t* joined;
+            if (oc && oc->type == RAY_ENUM) {
+                joined = q_enum_col_concat(oc, pc);
+                if (joined && !RAY_IS_ERR(joined))
+                    joined = q_enum_stamp(joined, q_enum_domain(oc));
+            } else if (oc && ray_is_vec(oc)) {
+                joined = q_attr_append_keep(q_attr_letter(oc), ray_len(oc), ray_concat_fn(oc, pc));   /* consumes */
+            } else {
+                joined = ray_concat_fn(oc, pc);
+            }
+            if (!joined || RAY_IS_ERR(joined)) { ray_release(out); out = joined ? joined : q_err(QE_OOM); break; }
+            out = ray_table_add_col(out, ray_table_col_name(flat, c), joined);
+            ray_release(joined);
         }
     }
-    if (exclusive) {
-        ray_t* r = table_append_inplace(flat, rows);
-        if (r) return r;
-    }
-    ray_t* out = ray_table_new(nc > 0 ? nc : 1);
-    for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
-        ray_t* oc = ray_table_get_col_idx(flat, c);
-        ray_t* pc = ray_table_get_col_idx(rows, c);
-        ray_t* joined;
-        if (oc && oc->type == RAY_ENUM) {
-            joined = q_enum_col_concat(oc, pc);
-            if (joined && !RAY_IS_ERR(joined))
-                joined = q_enum_stamp(joined, q_enum_domain(oc));
-        } else if (oc && ray_is_vec(oc)) {
-            joined = q_attr_append_keep(q_attr_letter(oc), ray_len(oc), ray_concat_fn(oc, pc));   /* consumes */
-        } else {
-            joined = ray_concat_fn(oc, pc);
-        }
-        if (!joined || RAY_IS_ERR(joined)) { ray_release(out); return joined ? joined : q_err(QE_OOM); }
-        out = ray_table_add_col(out, ray_table_col_name(flat, c), joined);
-        ray_release(joined);
-    }
+    ray_release(rows);
     return out;
 }
 
