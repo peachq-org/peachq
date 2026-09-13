@@ -191,62 +191,48 @@ static inline int is_float_op(ray_t* a, ray_t* b) {
 
 /* RAY_ATOM_IS_NULL and ray_typed_null are in rayforce.h */
 
-/* Return a typed null for the promoted result type of two operands */
-static inline ray_t* null_for_promoted(ray_t* a, ray_t* b) {
-    if (a->type == -RAY_F64 || b->type == -RAY_F64)
-        return ray_typed_null(-RAY_F64);
-    if (a->type == -RAY_F32 || b->type == -RAY_F32)
-        return ray_typed_null(-RAY_F32);
-    if (a->type == -RAY_I64 || b->type == -RAY_I64)
-        return ray_typed_null(-RAY_I64);
-    if (a->type == -RAY_I32 || b->type == -RAY_I32)
-        return ray_typed_null(-RAY_I32);
-    if (a->type == -RAY_I16 || b->type == -RAY_I16)
-        return ray_typed_null(-RAY_I16);
-    return ray_typed_null(-RAY_I64);
-}
-
 /* ══════════════════════════════════════════
- * Type promotion
+ * Type promotion — ref/add.md:65 "Range and domains" (subtract.md:69 and
+ * multiply.md:86 are the same table); the one law every arith path calls
  * ══════════════════════════════════════════ */
 
-/* Determine the promoted integer result type for two numeric operands.
- * Returns atom type code (negative). */
+/* Integer cells, vector tags in and out: b x h i combine to i, any j to j.  A byte
+ * pair keeps its lane — string-C3 rules bytes byte-uniform (`0x01+0x02` is 0x03
+ * here, a recorded divergence from the table's 3i). */
+static inline int8_t arith_int_type(int8_t a, int8_t b) {
+    if (a == RAY_I64 || b == RAY_I64) return RAY_I64;
+    if (ray_is_bytelike(a) && ray_is_bytelike(b))
+        return (a == RAY_CHARV || b == RAY_CHARV) ? RAY_CHARV : RAY_BYTE_ONLY;
+    return RAY_I32;
+}
+
 static inline int8_t promote_int_type(ray_t* a, ray_t* b) {
-    if (a->type == -RAY_I64 || b->type == -RAY_I64) return -RAY_I64;
-    if (a->type == -RAY_I32 || b->type == -RAY_I32) return -RAY_I32;
-    if (ray_is_bytelike(-a->type) || ray_is_bytelike(-b->type)) {
-        /* u8 op u8 -> u8 (charv twin -> charv; char dominates a mixed pair),
-         * but u8 op i16 -> i16 etc */
-        if (ray_is_bytelike(-a->type) && ray_is_bytelike(-b->type))
-            return (a->type == -RAY_CHARV || b->type == -RAY_CHARV) ? -RAY_CHARV
-                                                                    : -RAY_BYTE_ONLY;
-        return (a->type == -RAY_I16 || b->type == -RAY_I16) ? -RAY_I16 : -RAY_I64;
-    }
-    if (a->type == -RAY_I16 || b->type == -RAY_I16) return -RAY_I16;
-    return -RAY_I64;
+    return (int8_t)-arith_int_type((int8_t)-a->type, (int8_t)-b->type);
 }
 
-/* Promote integer type following right-operand's type (integer-promotion convention for sub) */
-static inline int8_t promote_int_type_right(ray_t* a, ray_t* b) {
-    (void)a;
-    int8_t bt = b->type;
-    if (bt == -RAY_I32 || bt == -RAY_I16 || ray_is_bytelike(-bt) || bt == -RAY_I64)
-        return bt;
-    int8_t at = a->type;
-    if (at == -RAY_I32 || at == -RAY_I16 || ray_is_bytelike(-at) || at == -RAY_I64)
-        return at;
-    return -RAY_I64;
-}
-
-/* Float result type for a pair, ref/add.md "Range and domains" row/col `e`: real
- * with any int-family operand stays real, real with float widens to float.
- * Lives here, beside promote_int_type, because its only callers are the base
- * arith kernels — a q_type.c home would invert the link direction and split one
- * promotion law across two files. */
+/* Row/col `e`: real with any int-family operand stays real, real with float widens. */
 static inline int8_t promote_float_type(int8_t at, int8_t bt) {
     if (at == -RAY_F64 || bt == -RAY_F64) return -RAY_F64;
     return (at == -RAY_F32 || bt == -RAY_F32) ? -RAY_F32 : -RAY_F64;
+}
+
+static inline ray_t* null_for_promoted(ray_t* a, ray_t* b) {
+    return ray_typed_null(is_float_op(a, b) ? promote_float_type(a->type, b->type)
+                                            : promote_int_type(a, b));
+}
+
+/* ref/sum.md:212 and prd.md:115: an aggregate's range is its dyad's — b h i sum to i,
+ * j to j, e f and the durations keep their type.  Bytes stay j: `sum 0x0102` is
+ * deferred with the byte lane. */
+static inline int8_t agg_sum_type(int8_t t) {
+    if (t == RAY_BOOL || t == RAY_I16 || t == RAY_I32) return RAY_I32;
+    return ray_is_bytelike(t) ? RAY_I64 : t;
+}
+
+/* releases/ChangesIn3.3.md:22 "`+/I` will give 0Ni on overflow": an int-family SUM that leaves
+ * int32 range is the int null, never a wrapped value (the dyads and prd/sums/prds still wrap). */
+static inline int agg_sum_overflows(int8_t out_type, int64_t sum) {
+    return out_type == RAY_I32 && (sum < INT32_MIN || sum > INT32_MAX);
 }
 
 /* Result atom for a float lane.  The real arm narrows through `float`, so a real
@@ -266,6 +252,13 @@ static inline ray_t* make_typed_int(int8_t atom_type, int64_t val) {
     case -RAY_CHARV:     return ray_char((uint8_t)val);
     default:       return make_i64(val);
     }
+}
+
+/* sum/prd/sums/prds over an atom: the atom in the aggregate's range (`sum 1h` is 1i). */
+static inline ray_t* agg_atom_result(ray_t* x) {
+    int8_t rt = (int8_t)-agg_sum_type((int8_t)-x->type);
+    if (rt == x->type) { ray_retain(x); return x; }
+    return RAY_ATOM_IS_NULL(x) ? ray_typed_null(rt) : make_typed_int(rt, as_i64(x));
 }
 
 /* ══════════════════════════════════════════

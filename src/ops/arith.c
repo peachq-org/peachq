@@ -315,7 +315,7 @@ ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
         if (r == 0.0) r = 0.0; /* normalize -0.0 to +0.0 */
         return make_typed_float(promote_float_type(a->type, b->type), r);
     }
-    int8_t rt = promote_int_type_right(a, b);
+    int8_t rt = promote_int_type(a, b);
     return make_typed_int(rt, wrap_sub64(as_i64(a), as_i64(b)));
 }
 

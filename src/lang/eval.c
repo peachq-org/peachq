@@ -575,59 +575,6 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
     int force_boxed = (left_coll && left->type == RAY_LIST) ||
                       (right_coll && right->type == RAY_LIST);
 
-    /* When the probed result is a null atom, the fn already chose the correct
-     * result type (e.g., division returns left-operand-typed null).  Skip the
-     * wider-wins promotion so the typed null lands in the right vector type. */
-    int e0_null = RAY_ATOM_IS_NULL(e0);
-
-    /* When the probed result is a boolean (from comparison ops like ==, <, etc.),
-     * preserve the bool output type — do not promote to wider integer type. */
-    int e0_bool = (e0->type == -RAY_BOOL);
-
-    /* When LEFT is scalar broadcast to RIGHT vector, the output type follows
-     * the RIGHT vector's element type for integer types,
-     * unless float or temporal promotion is involved. */
-    if (!e0_null && !e0_bool && !left_coll && right_coll && ray_is_vec(right) && out_type != RAY_F64) {
-        int8_t vec_type = right->type;
-        /* Only override for integer family: if probed type is wider int, downcast */
-        int out_is_int = (out_type == RAY_I64 || out_type == RAY_I32 || out_type == RAY_I16 || out_type == RAY_BYTE_ONLY);
-        int vec_is_int = (vec_type == RAY_I64 || vec_type == RAY_I32 || vec_type == RAY_I16 || vec_type == RAY_BYTE_ONLY);
-        if (out_is_int && vec_is_int)
-            out_type = vec_type;
-        /* For temporal: only override if both are same temporal family */
-        if ((RAY_IS_TEMPORAL32(vec_type) || RAY_IS_TEMPORAL64(vec_type)) &&
-            out_type == vec_type)
-            out_type = vec_type; /* no-op, just keep it */
-    }
-    /* When LEFT is vector and RIGHT is scalar, output follows WIDER integer
-     * type between left vector and right scalar */
-    if (!e0_null && !e0_bool && left_coll && !right_coll && ray_is_vec(left) && out_type != RAY_F64 &&
-        ray_is_atom(right)) {
-        int8_t vt = left->type, st = -(right->type);
-        int vt_int = (vt == RAY_I64 || vt == RAY_I32 || vt == RAY_I16 || vt == RAY_BYTE_ONLY);
-        int st_int = (st == RAY_I64 || st == RAY_I32 || st == RAY_I16 || st == RAY_BYTE_ONLY);
-        int out_is_int = (out_type == RAY_I64 || out_type == RAY_I32 || out_type == RAY_I16 || out_type == RAY_BYTE_ONLY);
-        if (out_is_int && vt_int && st_int)
-            out_type = (vt >= st) ? vt : st; /* wider wins */
-    }
-    /* When both are vectors, output type follows wider integer type */
-    if (!e0_null && !e0_bool && left_coll && right_coll && ray_is_vec(left) && ray_is_vec(right) && out_type != RAY_F64) {
-        int8_t lt = left->type, rt = right->type;
-        int lt_int = (lt == RAY_I64 || lt == RAY_I32 || lt == RAY_I16 || lt == RAY_BYTE_ONLY);
-        int rt_int = (rt == RAY_I64 || rt == RAY_I32 || rt == RAY_I16 || rt == RAY_BYTE_ONLY);
-        if (lt_int && rt_int) {
-            /* Pick wider: I64 > I32 > I16 > U8 (using type tag ordering) */
-            out_type = (lt >= rt) ? lt : rt;
-        }
-    }
-
-    /* When LEFT is a vector collection, override i32 output to match the
-     * left vector type or i64 (e.g., [DATE]-DATE → i64, [i64]-i32 → i64).
-     * Keeps i32 only when left vector is actually i32. */
-    if (!e0_null && !e0_bool && out_type == RAY_I32 && left_coll && ray_is_vec(left) && left->type != RAY_I32) {
-        out_type = RAY_I64;
-    }
-
     /* DAG executor — for F64 and comparisons */
     if (!force_boxed && dag_opcode > 0) {
         int is_idiv = (dag_opcode == OP_MOD);
@@ -827,32 +774,7 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
         return vec;
     }
 
-    /* Determine scalar int type for list+scalar coercion.
-     * When a boxed list is combined with a scalar, integer results
-     * are coerced to the scalar's integer type (integer-promotion convention). */
-    int8_t scalar_int_type = 0;
-    if (force_boxed) {
-        ray_t* scalar = (!left_coll) ? left : (!right_coll ? right : NULL);
-        if (scalar && ray_is_atom(scalar)) {
-            int8_t st = scalar->type;
-            if (st == -RAY_I16 || st == -RAY_I32 || st == -RAY_I64 || st == -RAY_BYTE_ONLY)
-                scalar_int_type = st;
-        }
-    }
-
-    /* Coerce an integer atom to the scalar's integer type */
-    #define COERCE_TO_SCALAR(elem) do { \
-        if (scalar_int_type && ray_is_atom(elem) && elem->type != scalar_int_type && \
-            elem->type != -RAY_F64 && is_numeric(elem)) { \
-            int64_t _v = as_i64(elem); \
-            ray_t* _coerced = make_typed_int(scalar_int_type, _v); \
-            ray_release(elem); \
-            elem = _coerced; \
-        } \
-    } while(0)
-
     /* Fallback: boxed list for non-numeric output or mixed-type input */
-    COERCE_TO_SCALAR(e0);
     ray_t* result = ray_alloc(len * sizeof(ray_t*));
     if (!result) { ray_release(e0); return ray_error("oom", NULL); }
     result->type = RAY_LIST;
@@ -885,10 +807,8 @@ ray_t* atomic_map_binary_op(ray_binary_fn fn, uint16_t dag_opcode, ray_t* left, 
             ray_release(result);
             return elem;
         }
-        COERCE_TO_SCALAR(elem);
         out[i] = elem;
     }
-    #undef COERCE_TO_SCALAR
     return result;
 }
 
