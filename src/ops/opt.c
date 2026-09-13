@@ -71,39 +71,12 @@ bool ray_opt_no_group_pushdown = false;
  * This pass validates and propagates any missing types.
  * -------------------------------------------------------------------------- */
 
-static int8_t promote_type(int8_t a, int8_t b) {
-    if (a == RAY_STR || b == RAY_STR) return RAY_STR;
-    if (a == RAY_F64 || b == RAY_F64) return RAY_F64;
-    /* Treat SYM/TIMESTAMP/DATE/TIME as integer-class types */
-    if (a == RAY_I64 || b == RAY_I64 || a == RAY_SYM || b == RAY_SYM ||
-        a == RAY_TIMESTAMP || b == RAY_TIMESTAMP ||
-        a == RAY_TIMESPAN || b == RAY_TIMESPAN) return RAY_I64;
-    if (a == RAY_I32 || b == RAY_I32 ||
-        a == RAY_DATE || b == RAY_DATE || a == RAY_TIME || b == RAY_TIME ||
-        a == RAY_MONTH || b == RAY_MONTH ||
-        a == RAY_MINUTE || b == RAY_MINUTE ||
-        a == RAY_SECOND || b == RAY_SECOND) return RAY_I32;
-    if (a == RAY_I16 || b == RAY_I16) return RAY_I16;
-    if (a == RAY_CHARV || b == RAY_CHARV) return RAY_CHARV; /* chars ARE bytes; char tag dominates */
-    if (a == RAY_BYTE_ONLY || b == RAY_BYTE_ONLY) return RAY_BYTE_ONLY;
-    return RAY_BOOL;
-}
-
 static void infer_type_for_node(ray_graph_t* g, ray_op_t* node) {
     if (node->out_type == 0 && node->opcode != OP_SCAN && node->opcode != OP_CONST) {
-        /* Comparison and boolean ops always produce BOOL */
-        if (node->opcode >= OP_EQ && node->opcode <= OP_GE) {
-            node->out_type = RAY_BOOL;
-            return;
-        }
-        if (node->opcode == OP_AND || node->opcode == OP_OR) {
-            node->out_type = RAY_BOOL;
-            return;
-        }
         ray_op_t* in0 = op_child(g, node, 0);
         ray_op_t* in1 = op_child(g, node, 1);
         if (node->arity >= 2 && in0 && in1) {
-            node->out_type = promote_type(in0->out_type, in1->out_type);
+            node->out_type = ray_binop_out_type(node->opcode, in0->out_type, in1->out_type);
         } else if (node->arity >= 1 && in0) {
             node->out_type = in0->out_type;
         }
