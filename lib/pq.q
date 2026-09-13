@@ -3,7 +3,7 @@
 / q_runtime_create) through the multiline statement seam. THE ANY-ORDER LAW:
 / top level is definitions only - no cross-lib calls execute at load time.
 / Pure q since the .pq.c.* rayfall escape hatch was deleted (2026-07-29).
-.pq.version:.z.K;
+.pq.version:.z.v`version;
 / .pq.conns - every open connection, 13 cols; the single-letter p/f/z/n/m are
 / DELIBERATELY the -38! names so kdb code ports, the readable columns are
 / peachq additions (the kdb verbs -38!/.z.W/.z.H stay socket-only).

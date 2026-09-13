@@ -21,7 +21,7 @@
 #include "core/platform.h"     /* ray_thread_count — .z.c off Linux */
 #include <rayforce.h>
 #include <stdio.h>             /* snprintf / sscanf for the version producers */
-#include <stdlib.h>            /* strtod / getenv */
+#include <stdlib.h>            /* getenv — .z.v environment */
 #include <string.h>
 #include <time.h>             /* clock_gettime / gmtime_r / mktime — .z clock family */
 #include <unistd.h>          /* getpid / gethostname / getuid — .z.i/.z.h/.z.u */
@@ -281,20 +281,39 @@ static ray_t* z_e(void) {
 }
 
 /* peachq version surface — reads the SAME compile-time macros the Makefile
- * injects for .sys.build (RAY_VERSION_MAJOR/MINOR, RAYFORCE_BUILD_DATE). */
-static ray_t* z_K(void) {   /* `.z.K` — version as a major.minor float (kdb .z.K) */
-    char buf[32];
-    snprintf(buf, sizeof buf, "%d.%d", RAY_VERSION_MAJOR, RAY_VERSION_MINOR);
-    return ray_f64(strtod(buf, NULL));
-}
-static ray_t* z_k(void) {   /* `.z.k` — build/release date (kdb .z.k) */
-    int y = RAY_DATE_EPOCH, m = 1, d = 1;
+ * injects for .sys.build (RAYFORCE_VERSION = the VERSION file, RAYFORCE_BUILD_DATE). */
+static void z_build_ymd(int* y, int* m, int* d) {
+    *y = RAY_DATE_EPOCH; *m = 1; *d = 1;
 #ifdef RAYFORCE_BUILD_DATE
-    if (sscanf(RAYFORCE_BUILD_DATE, "%d-%d-%d", &y, &m, &d) != 3) {
-        y = RAY_DATE_EPOCH; m = 1; d = 1;
-    }
+    if (sscanf(RAYFORCE_BUILD_DATE, "%d-%d-%d", y, m, d) != 3) { *y = RAY_DATE_EPOCH; *m = 1; *d = 1; }
 #endif
+}
+/* `.z.K` is the kdb+ generation peachq claims compatibility with (ref/dotz.md:412), FIXED so framework gates
+ * (`.z.K>=4`) take their modern branches; it never encodes our release number — that is `.z.v`version`. */
+static ray_t* z_K(void) { return ray_f64(5.0); }
+static ray_t* z_k(void) {   /* `.z.k` — build/release date (kdb .z.k) */
+    int y, m, d;
+    z_build_ymd(&y, &m, &d);
     return ray_date(ymd_to_date(y, m, d));
+}
+static ray_t* z_v(void) {   /* `.z.v` — peachq's own version + environment, kdb-X's dict shape key-for-key */
+    static const char* const key[] = { "version", "QCFG", "QHOME", "QLIC", "QINIT", "QPATH" };
+    int  y, m, d;
+    char ver[64];
+    z_build_ymd(&y, &m, &d);
+    snprintf(ver, sizeof ver, "%s.%04d%02d%02d", RAYFORCE_VERSION, y, m, d);   /* the VERSION file verbatim */
+    const char* val[] = { ver, getenv("QCFG"), getenv("QHOME"), "", getenv("QINIT"), getenv("QPATH") };
+    ray_t* k = ray_sym_vec_new(RAY_SYM_W64, 6);
+    ray_t* v = ray_list_new(6);
+    for (int i = 0; i < 6; i++) {
+        int64_t     id = ray_sym_intern(key[i], strlen(key[i]));
+        const char* s  = val[i] ? val[i] : "";
+        ray_t*      c  = ray_charv(s, (int64_t)strlen(s));
+        k = ray_vec_append(k, &id);
+        v = ray_list_append(v, c);   /* append RETAINS */
+        ray_release(c);
+    }
+    return ray_dict_new(k, v);       /* consumes both */
 }
 
 /* ---- .z clock family (kdb .z.p/.z.P … lowercase=UTC, uppercase=local) -------
@@ -453,6 +472,7 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
             case 'H': out = q_conn_zH(); break;
             case 'K': out = z_K(); break;
             case 'k': out = z_k(); break;
+            case 'v': out = z_v(); break;
             /* one-line producers inlined; q_dotz_now_ns(0)=UTC, (1)=local */
             case 'b': out = q_view_zb(); break;                                  /* .z.b view deps */
             case 'e': out = z_e(); break;                                        /* .z.e TLS status */
