@@ -2,6 +2,9 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L   /* clock_gettime / gmtime_r for the clock producers */
 #endif
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+  #define _GNU_SOURCE             /* sched_getaffinity / CPU_COUNT — .z.c */
+#endif
 #include "qlang/q_dotz.h"
 #include "qlang/q_env.h"       /* q_env_get — the settable handlers are globals */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_value — handler firing */
@@ -15,6 +18,7 @@
 #include "lang/env.h"          /* ray_sym_ipc_hook / ray_env_get / ray_fn_unary */
 #include "lang/eval.h"         /* RAY_FN_NONE — .z.ts timer thunk attrs */
 #include "core/ipc.h"          /* ray_ipc_current_handle / ray_ipc_fd_of_handle — .z.w */
+#include "core/platform.h"     /* ray_thread_count — .z.c off Linux */
 #include <rayforce.h>
 #include <stdio.h>             /* snprintf / sscanf for the version producers */
 #include <stdlib.h>            /* strtod / getenv */
@@ -26,6 +30,9 @@
   #include <netdb.h>          /* getaddrinfo — .z.a local IPv4 */
   #include <netinet/in.h>     /* struct sockaddr_in */
   #include <arpa/inet.h>      /* ntohl */
+  #if defined(__linux__)
+    #include <sched.h>        /* sched_getaffinity / cpu_set_t — .z.c */
+  #endif
 #else
   #define WIN32_LEAN_AND_MEAN
   #include <winsock2.h>        /* gethostname/getaddrinfo/ntohl — .z.h/.z.a (winsock, needs WSAStartup) */
@@ -235,6 +242,21 @@ static ray_t* z_a(void) {
     return ray_i32(addr);
 }
 
+/* .z.c — the cores THIS PROCESS may use (learn/licensing.md:100), not the machine's: the affinity
+ * mask on Linux/Windows (`taskset -c 0 q` answers 1i); the online count elsewhere.  An int atom (owner ruling). */
+static ray_t* z_c(void) {
+    long n = 0;
+#if defined(__linux__)
+    cpu_set_t set;
+    if (sched_getaffinity(0, sizeof set, &set) == 0) n = CPU_COUNT(&set);
+#elif defined(_WIN32)
+    DWORD_PTR pm, sm;
+    if (GetProcessAffinityMask(GetCurrentProcess(), &pm, &sm)) for (; pm; pm &= pm - 1) n++;
+#endif
+    if (n <= 0) n = (long)ray_thread_count();
+    return ray_i32((int32_t)n);
+}
+
 /* .z.w — the current IPC connection handle, as the kdb int handle.  Inside a
  * server-side hook (.z.pg/.z.ps/.z.po/…) this is the CALLER's handle; OUTSIDE
  * any hook kdb yields 0i.  ray_ipc_current_handle() returns the internal
@@ -425,6 +447,7 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
             case 'h': out = z_h(); break;
             case 'u': out = z_u(); break;
             case 'a': out = z_a(); break;
+            case 'c': out = z_c(); break;
             case 'w': out = z_w(); break;
             case 'W': out = q_conn_zW(); break;
             case 'H': out = q_conn_zH(); break;
