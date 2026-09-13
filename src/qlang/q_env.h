@@ -27,7 +27,7 @@ ray_t* q_env_resolve(int64_t sym);
 /* THE write home every q assignment form reaches — `:`/`::`, indexed and
  * modified assign, `@`/`.` name-amend, `set` — so the name policy is stated
  * once: `` `. `` restores root variables from a dict, `.z.p*`/`.z.bm` alias the
- * `.ipc.on.*` hook slots, `.z.zd` is refused, and every other name is a
+ * `.ipc.on.*` hook slots, and every other name (`.z.zd` included) is a
  * path-copy amend of the nested dicts.  Missing ancestors conjure marked dicts
  * (`.fee.fi.fo:42` creates `.fee`, `.fee.fi`); `.ns:d` is an ordinary rebind of
  * the one name — no subtree side effects. */

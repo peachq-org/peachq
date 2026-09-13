@@ -77,6 +77,15 @@ int q_dotz_ipc_hook_index(const char* name, size_t len) {
     }
 }
 
+bool q_dotz_expungeable(const char* name, size_t len) {
+    static const char* const tails[] = { "pg", "ps", "po", "pc", "pw", "bm", "pi", "pq", "pd", "ph",
+                                         "pp", "pm", "ac", "wo", "wc", "ws", "ts", "exit", "vs", "zd" };
+    if (len < 5 || memcmp(name, ".z.", 3) != 0) return false;
+    for (size_t i = 0; i < sizeof tails / sizeof *tails; i++)
+        if (strlen(tails[i]) == len - 3 && memcmp(tails[i], name + 3, len - 3) == 0) return true;
+    return false;
+}
+
 static bool ends_with_dot_q(const char* s) {
     size_t n = strlen(s);
     return n >= 2 && s[n - 2] == '.' && s[n - 1] == 'q';
