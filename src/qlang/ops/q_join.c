@@ -1174,7 +1174,17 @@ static ray_t* join_core(ray_t* x, ray_t* y, int exclusive) {
     return out;
 }
 
-ray_t* q_join_wrap(ray_t* x, ray_t* y) { return join_core(x, y, 0); }
+/* Plain `,` ONLY: a 0-row table, keyed or not, beside a table is Join's identity — the other side AS-IS, before any
+ * column-name or type comparison (owner ruling 2026-09-13).  `,:` is the insert law (ref/join.md:154 "major
+ * differences … must match the types of the columns in x"), so it, insert and upsert CAST instead. */
+ray_t* q_join_wrap(ray_t* x, ray_t* y) {
+    if ((q_type_is_table(x) || q_type_is_keyed(x)) && (q_type_is_table(y) || q_type_is_keyed(y))) {
+        ray_t* t = ray_table_nrows(q_type_is_keyed(x) ? ray_dict_keys(x) : x) == 0 ? y
+                 : ray_table_nrows(q_type_is_keyed(y) ? ray_dict_keys(y) : y) == 0 ? x : NULL;
+        if (t) { ray_retain(t); return t; }
+    }
+    return join_core(x, y, 0);
+}
 
 /* The vector half of q_join_amend, and where the Append law lives (ref/join.md
  * `,:`: `s,:5f` is 'type where `s,5f` boxes; an EMPTY payload is the identity
