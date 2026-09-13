@@ -1,8 +1,6 @@
 /* q_bang — the single C home for the `!` verb.  Principles:
- *  - PURE value semantics: every function maps values -> values with no env or
- *    runtime state, so the whole `!` surface is unit-testable in isolation.
- *  - Amend-by-reference (`N!`name`) is deliberately NOT here — it needs global
- *    env read/write, so it belongs to a runtime amend layer, not the verb.
+ *  - Value semantics: values -> values, unit-testable in isolation.  The ONE env touch is the
+ *    documented `N!`name` amend, which rides q_table_operand + q_env_set exactly as xkey does.
  *  - q_bang_dispatch owns every INT left operand: 0N show, negative internal
  *    fns (the `-N!` home; q names delegate `name:-N!`), N>=0 enkey; else dict. 
  * 
@@ -15,6 +13,8 @@
 #include "qlang/q_registry_internal.h"  /* q_hsym_wrap, q_attr_wrap, q_type_strict_i64,
                                          * q_type_is_int_atom, q_type_iatom_val, q_table_flatten */
 #include "qlang/q_builtins.h"   /* q_parse_builtin_fn, q_md5_fn, q_dotq_btoa_fn, q_dotq_sha1_fn */
+#include "qlang/q_env.h"        /* q_env_set — the one global-set home (`N!`name`) */
+#include "qlang/ops/q_table.h"  /* q_table_operand — a table by value or by name */
 #include "qlang/io/q_json.h"       /* q_json_serialize (.j.j), q_json_deserialize (.j.k) */
 #include "qlang/net/q_wire.h"       /* q_wire_serialize/_deserialize/_compress, Q_WIRE_ASYNC */
 #include "qlang/io/q_io.h"          /* the byte core: hcount's path+size, `-21!` stats */
@@ -142,29 +142,37 @@ static ray_t* h_format(ray_t* arg) {
 
 /* ---- the non-negative band: enkey / dict-make ------------------------------ */
 
-/* q enkey/unkey `N!table`: 0 -> plain table (unkey), N>0 -> key the first N
- * columns into a keyed table (RAY_DICT keycols-table -> valcols-table).
- * Accepts a plain OR already-keyed table (re-keys).  Consumes nothing. */
+/* q enkey/unkey `N!t` (ref/enkey.md): 0 -> a plain table (a plain one answers itself), N>0 -> key the
+ * first N columns of a SIMPLE table — an already-keyed one is 'type, N >= column count 'length
+ * (ref/dict.md:66-68).  A table NAME amends the global and answers the name.  Consumes nothing. */
 ray_t* q_bang_enkey(int64_t nkey, ray_t* y) {
-    if (!y || (y->type != RAY_TABLE && !q_type_is_keyed(y)))
-        return q_err(QE_TYPE);
-    ray_t* flat = q_table_flatten(y);
-    if (!flat || RAY_IS_ERR(flat)) return flat;
-    int64_t nc = ray_table_ncols(flat);
-    if (nkey <= 0) return flat;                 /* unkey */
-    if (nkey >= nc) { ray_release(flat); return q_err(QE_LENGTH); }
-    ray_t* kt = ray_table_new(nkey);
-    ray_t* vt = ray_table_new(nc - nkey);
-    for (int64_t c = 0; c < nc && !RAY_IS_ERR(kt) && !RAY_IS_ERR(vt); c++) {
-        int64_t nm = ray_table_col_name(flat, c);
-        ray_t* col = ray_table_get_col_idx(flat, c);
-        if (c < nkey) kt = ray_table_add_col(kt, nm, col);
-        else          vt = ray_table_add_col(vt, nm, col);
+    int64_t sym;
+    ray_t* t = q_table_operand(y, &sym);
+    if (!t || (nkey > 0 && t->type != RAY_TABLE)) return q_err(QE_TYPE);
+    ray_t* r = q_table_flatten(t);
+    if (!r || RAY_IS_ERR(r)) return r;
+    if (nkey > 0) {
+        int64_t nc = ray_table_ncols(r);
+        if (nkey >= nc) { ray_release(r); return q_err(QE_LENGTH); }
+        ray_t* kt = ray_table_new(nkey);
+        ray_t* vt = ray_table_new(nc - nkey);
+        for (int64_t c = 0; c < nc && !RAY_IS_ERR(kt) && !RAY_IS_ERR(vt); c++) {
+            int64_t nm = ray_table_col_name(r, c);
+            ray_t* col = ray_table_get_col_idx(r, c);
+            if (c < nkey) kt = ray_table_add_col(kt, nm, col);
+            else          vt = ray_table_add_col(vt, nm, col);
+        }
+        ray_release(r);
+        if (RAY_IS_ERR(kt)) { ray_release(vt); return kt; }
+        if (RAY_IS_ERR(vt)) { ray_release(kt); return vt; }
+        r = ray_dict_new(kt, vt);
     }
-    ray_release(flat);
-    if (RAY_IS_ERR(kt)) { ray_release(vt); return kt; }
-    if (RAY_IS_ERR(vt)) { ray_release(kt); return vt; }
-    return ray_dict_new(kt, vt);
+    if (sym < 0) return r;
+    ray_err_t e = q_env_set(sym, r);                      /* retains */
+    ray_release(r);
+    if (e != RAY_OK) return q_env_err(e);
+    ray_retain(y);
+    return y;
 }
 
 /* q `x!y` — dict make.  One `count` gate covers vector!vector AND table!table
@@ -181,13 +189,13 @@ static ray_t* dict_pair(ray_t* x, ray_t* y) {
         ray_retain(y);
         return ray_dict_new(x, y);               /* consumes both retains */
     }
+    /* a dict is not a list (ref/dict.md:22, owner 2026-09-13): 'type, whatever its count says */
+    if (q_type_is_dict(x) || q_type_is_dict(y))
+        return q_err(QE_TYPE);
     if (q_builtins_count_long(x) != q_builtins_count_long(y))
         return q_err(QE_LENGTH);
-    /* kdb's rule is TOTAL on equal counts (basics/dictsandtables.md): a table
-     * or dict on either side pairs as-is — table!table is the keyed table,
-     * `t!list` keys by rows, `list!t` the xtab shape (ref/exec.md). */
-    if (q_type_is_table(x) || q_type_is_table(y) ||
-        q_type_is_dict(x) || q_type_is_dict(y)) {
+    /* a table IS a list of rows: table!table is the keyed table, `t!list` keys by rows, `list!t` the xtab shape */
+    if (q_type_is_table(x) || q_type_is_table(y)) {
         ray_retain(x);
         ray_retain(y);
         return ray_dict_new(x, y);               /* consumes both retains */

@@ -32,9 +32,8 @@ ray_t* q_bang(ray_t* x, ray_t* y);
  * dict-makes.  Borrowed `y`; returns an OWNED value or error. */
 ray_t* q_bang_dispatch(int64_t id, ray_t* y);
 
-/* q enkey/unkey `N!table`: nkey 0 -> plain table (unkey), N>0 -> key the first N
- * columns into a keyed table.  Accepts a plain OR already-keyed table (re-keys);
- * 'length if nkey >= column count.  Borrowed `y`; returns an OWNED value. */
+/* q enkey/unkey `N!t` (ref/enkey.md): 0 unkeys, N>0 keys the first N columns of a SIMPLE table (a keyed
+ * one is 'type); a table NAME amends the global and answers the name.  Borrowed `y`; OWNED result. */
 ray_t* q_bang_enkey(int64_t nkey, ray_t* y);
 
 #endif /* Q_BANG_H */
