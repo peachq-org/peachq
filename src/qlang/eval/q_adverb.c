@@ -364,9 +364,6 @@ static ray_t* map_zip(ray_t* fv, const q_op_t* frow, ray_t** args, int64_t n,
         else if (len != q_count_long(av[p]) && !r) r = q_err(QE_LENGTH);
     }
     int whole = r != NULL;                 /* a whole answer or an error: nothing to re-key */
-    /* values that are themselves a dict take the law again */
-    for (int64_t p = 0; !r && p < n; p++)
-        if (mask >> p & 1 && iter_dict_vals(av[p])) r = map_zip(fv, frow, av, n, mask);
     if (!r && len < 0) r = q_eval_apply(fv, frow, av, n);
     /* a map is uniform: an empty iterated side returns the GENERIC empty list
      * without an evaluation — `type (2*')til 0` is 0h, not 7h (ref/maps.md) */
