@@ -23,6 +23,7 @@
 
 #include "graph.h"
 #include "internal.h"   /* EXT_TRAIL, graph_alloc_ext_node_ex */
+#include "lang/internal.h"   /* arith_int_type */
 #include "store/csr.h"
 #include "store/hnsw.h"
 #include "mem/sys.h"
@@ -376,23 +377,34 @@ static ray_op_t* make_binary(ray_graph_t* g, uint16_t opcode, ray_op_t* a, ray_o
     return n;
 }
 
+/* The DAG's integer lanes: temporals and SYM ride their payload width. */
+static int8_t int_class(int8_t t) {
+    switch (t) {
+        case RAY_SYM: RAY_TEMPORAL64_CASES: return RAY_I64;
+        RAY_TEMPORAL32_CASES:               return RAY_I32;
+        default:                            return t;
+    }
+}
+
 /* Type promotion: BOOL < U8 < I16 < I32 < I64 < F64.
  * RAY_STR is its own type class — not promotable to numeric types. */
 static int8_t promote(int8_t a, int8_t b) {
     if (a == RAY_STR || b == RAY_STR) return RAY_STR;
     if (a == RAY_F64 || b == RAY_F64) return RAY_F64;
-    if (a == RAY_I64 || b == RAY_I64 || a == RAY_SYM || b == RAY_SYM ||
-        a == RAY_TIMESTAMP || b == RAY_TIMESTAMP ||
-        a == RAY_TIMESPAN || b == RAY_TIMESPAN) return RAY_I64;
-    if (a == RAY_I32 || b == RAY_I32 ||
-        a == RAY_DATE || b == RAY_DATE || a == RAY_TIME || b == RAY_TIME ||
-        a == RAY_MONTH || b == RAY_MONTH ||
-        a == RAY_MINUTE || b == RAY_MINUTE ||
-        a == RAY_SECOND || b == RAY_SECOND) return RAY_I32;
+    a = int_class(a); b = int_class(b);
+    if (a == RAY_I64 || b == RAY_I64) return RAY_I64;
+    if (a == RAY_I32 || b == RAY_I32) return RAY_I32;
     if (a == RAY_I16 || b == RAY_I16) return RAY_I16;
     if (a == RAY_CHARV || b == RAY_CHARV) return RAY_CHARV; /* chars ARE bytes; char tag dominates */
     if (a == RAY_BYTE_ONLY || b == RAY_BYTE_ONLY) return RAY_BYTE_ONLY;
     return RAY_BOOL;
+}
+
+/* + - * take their int cells from the one arith law (lang/internal.h). */
+static int8_t promote_arith(int8_t a, int8_t b) {
+    if (a == RAY_STR || b == RAY_STR) return RAY_STR;
+    if (a == RAY_F64 || b == RAY_F64) return RAY_F64;
+    return arith_int_type(int_class(a), int_class(b));
 }
 
 /* --------------------------------------------------------------------------
@@ -418,24 +430,28 @@ ray_op_t* ray_cast(ray_graph_t* g, ray_op_t* a, int8_t target_type) {
  * Binary element-wise ops
  * -------------------------------------------------------------------------- */
 
-/* Generic binary op constructor — opcode-driven, no switch/case needed by caller */
-ray_op_t* ray_binop(ray_graph_t* g, uint16_t opcode, ray_op_t* a, ray_op_t* b) {
-    int8_t out;
+int8_t ray_binop_out_type(uint16_t opcode, int8_t a, int8_t b) {
     switch (opcode) {
     case OP_EQ: case OP_NE: case OP_LT: case OP_LE:
     case OP_GT: case OP_GE: case OP_AND: case OP_OR:
-        out = RAY_BOOL; break;
+        return RAY_BOOL;
     case OP_DIV:
-        out = RAY_F64; break;
+        return RAY_F64;
+    case OP_ADD: case OP_SUB: case OP_MUL:
+        return promote_arith(a, b);
     default:
-        out = promote(a->out_type, b->out_type); break;
+        return promote(a, b);
     }
-    return make_binary(g, opcode, a, b, out);
 }
 
-ray_op_t* ray_add(ray_graph_t* g, ray_op_t* a, ray_op_t* b) { return make_binary(g, OP_ADD, a, b, promote(a->out_type, b->out_type)); }
-ray_op_t* ray_sub(ray_graph_t* g, ray_op_t* a, ray_op_t* b) { return make_binary(g, OP_SUB, a, b, promote(a->out_type, b->out_type)); }
-ray_op_t* ray_mul(ray_graph_t* g, ray_op_t* a, ray_op_t* b) { return make_binary(g, OP_MUL, a, b, promote(a->out_type, b->out_type)); }
+/* Generic binary op constructor — opcode-driven, no switch/case needed by caller */
+ray_op_t* ray_binop(ray_graph_t* g, uint16_t opcode, ray_op_t* a, ray_op_t* b) {
+    return make_binary(g, opcode, a, b, ray_binop_out_type(opcode, a->out_type, b->out_type));
+}
+
+ray_op_t* ray_add(ray_graph_t* g, ray_op_t* a, ray_op_t* b) { return ray_binop(g, OP_ADD, a, b); }
+ray_op_t* ray_sub(ray_graph_t* g, ray_op_t* a, ray_op_t* b) { return ray_binop(g, OP_SUB, a, b); }
+ray_op_t* ray_mul(ray_graph_t* g, ray_op_t* a, ray_op_t* b) { return ray_binop(g, OP_MUL, a, b); }
 ray_op_t* ray_div(ray_graph_t* g, ray_op_t* a, ray_op_t* b) { return make_binary(g, OP_DIV, a, b, RAY_F64); }
 ray_op_t* ray_idiv(ray_graph_t* g, ray_op_t* a, ray_op_t* b) { return make_binary(g, OP_IDIV, a, b, RAY_I64); }
 ray_op_t* ray_mod(ray_graph_t* g, ray_op_t* a, ray_op_t* b) { return make_binary(g, OP_MOD, a, b, promote(a->out_type, b->out_type)); }

@@ -237,15 +237,15 @@ static ray_t* agg_flat_f32_minmax(ray_t* x, int want_max) {
     return ray_f32((float)best);
 }
 
+static ray_t* sum_result(int8_t in_type, int64_t sum) {
+    int8_t t = agg_sum_type(in_type);
+    return agg_sum_overflows(t, sum) ? ray_typed_null(-RAY_I32) : make_typed_int((int8_t)-t, sum);
+}
+
 ray_t* ray_sum_fn(ray_t* x) {
     if (ray_is_lazy(x)) return ray_lazy_append(x, OP_SUM);
     if (RAY_IS_PARTED(x->type)) return agg_parted_sum(x);
-    if (ray_is_atom(x)) {
-        /* u8/i16 scalar sum promotes to i64 */
-        if (x->type == -RAY_BYTE_ONLY || x->type == -RAY_CHARV)  return make_i64((int64_t)x->u8);
-        if (x->type == -RAY_I16) return make_i64((int64_t)x->i16);
-        ray_retain(x); return x;
-    }
+    if (ray_is_atom(x)) return agg_atom_result(x);
     if (ray_is_vec(x)) {
         /* Canonical admission: numeric + TIME (duration); DATE/TIMESTAMP are
          * absolute points and SYM/STR/GUID are non-numeric → type error. */
@@ -271,26 +271,24 @@ ray_t* ray_sum_fn(ray_t* x) {
             bool has_nulls = (x->attrs & RAY_ATTR_HAS_NULLS) != 0;
             int64_t sum = 0;
             if (x->type == RAY_BOOL) {
-                /* b -> i (ref/sum.md domain table) — like i16/u8, a width
-                 * the DAG executor doesn't construct */
                 uint8_t* d = (uint8_t*)ray_data(x);
                 for (int64_t i = 0; i < n; i++) sum += d[i] != 0;
-                return make_i32((int32_t)sum);
+                return sum_result(x->type, sum);
             } else if (x->type == RAY_I32) {
                 int32_t* d = (int32_t*)ray_data(x);
                 if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
                 else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
-                return make_i64(sum);
+                return sum_result(x->type, sum);
             } else if (x->type == RAY_I16) {
                 int16_t* d = (int16_t*)ray_data(x);
                 if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
                 else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
-                return make_i64(sum);
+                return sum_result(x->type, sum);
             } else if (ray_is_bytelike(x->type)) {
                 uint8_t* d = (uint8_t*)ray_data(x);
                 if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
                 else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
-                return make_i64(sum);
+                return sum_result(x->type, sum);
             } else if (x->type == RAY_TIME) {
                 int32_t* d = (int32_t*)ray_data(x);
                 if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }

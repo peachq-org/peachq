@@ -300,10 +300,9 @@ static const q_op_t Q_OPS[] = {
      * aggregate, its documented behaviour is uniform (FAMILY AUDIT). */
     { "sums",  QLEX_KW_PREFIX, QR_FN1("sums", q_sums_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },
     { "prds",  QLEX_KW_PREFIX, QR_FN1("prds", q_prds_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },
-    /* QNEST_COLUMNS, not QNEST_FOLD: basics/math.md's null-preserving roster is
-     * `avg min max sum` — prd keeps nulls-as-1s nested (`prd (1 0N;2 3)` is
-     * `2 3`), which is the per-column law. */
-    { "prd",   QLEX_KW_PREFIX, QR_FN1("prd", q_prd_wrap),      QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_COLUMNS, QKOP(26) },
+    /* nested prd is the multiply-over fold (owner 2026-09-13: a one-item fold returns the item, `prd enlist 01011b`
+     * is 01011b like sum's); basics/math.md:173-178 names only avg min max sum as null-special */
+    { "prd",   QLEX_KW_PREFIX, QR_FN1("prd", q_prd_wrap),      QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_FOLD, QKOP(26) },
     { "maxs",  QLEX_KW_PREFIX, QR_FN1("maxs", q_maxs_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },
     { "mins",  QLEX_KW_PREFIX, QR_FN1("mins", q_mins_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },
     { "avgs",  QLEX_KW_PREFIX, QR_FN1("avgs", q_avgs_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },

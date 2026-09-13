@@ -2057,6 +2057,11 @@ static ray_t* reduction_extreme_result(ray_op_t* op, int8_t in_type, bool found,
     return reduction_i64_result(ival, out_type, out_type == RAY_SYM ? src : NULL);
 }
 
+static ray_t* reduction_sum_result(int64_t sum, int8_t in_type) {
+    int8_t t = agg_sum_type(in_type);
+    return agg_sum_overflows(t, sum) ? ray_typed_null(-RAY_I32) : reduction_i64_result(sum, t, NULL);
+}
+
 ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     if (!input || RAY_IS_ERR(input)) return input;
 
@@ -2092,9 +2097,7 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
             case OP_VAR_POP:    return ray_var_pop_fn(input);
             case OP_STDDEV:     return ray_stddev_fn(input);
             case OP_STDDEV_POP: return ray_stddev_pop_fn(input);
-            /* OP_PROD has no scalar builtin; prod of a single element is
-             * that element. */
-            case OP_PROD:       ray_retain(input); return input;
+            case OP_PROD:       return agg_atom_result(input);
             default:            return ray_error("type", "reduction: unsupported op %s on atom of type %s", ray_opcode_name(op->opcode), ray_type_name(input->type));
         }
     }
@@ -2214,8 +2217,8 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
 
         ray_t* result;
         switch (op->opcode) {
-            case OP_SUM:   result = in_type == RAY_F64 ? ray_f64(merged.sum_f) : (in_type == RAY_TIME ? ray_time(merged.sum_i) : ray_i64(merged.sum_i)); break;
-            case OP_PROD:  result = in_type == RAY_F64 ? ray_f64(merged.prod_f) : ray_i64(merged.prod_i); break;
+            case OP_SUM:   result = in_type == RAY_F64 ? ray_f64(merged.sum_f) : reduction_sum_result(merged.sum_i, in_type); break;
+            case OP_PROD:  result = in_type == RAY_F64 ? ray_f64(merged.prod_f) : reduction_i64_result(merged.prod_i, agg_sum_type(in_type), NULL); break;
             case OP_MIN:   result = reduction_extreme_result(op, in_type, merged.cnt > 0, merged.min_f, merged.min_i, input); break;
             case OP_MAX:   result = reduction_extreme_result(op, in_type, merged.cnt > 0, merged.max_f, merged.max_i, input); break;
             /* COUNT returns total length including nulls — matches ray_count_fn's
@@ -2253,8 +2256,8 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     if (sel_idx_block) ray_release(sel_idx_block);
 
     switch (op->opcode) {
-        case OP_SUM:   return in_type == RAY_F64 ? ray_f64(acc.sum_f) : (in_type == RAY_TIME ? ray_time(acc.sum_i) : ray_i64(acc.sum_i));
-        case OP_PROD:  return in_type == RAY_F64 ? ray_f64(acc.prod_f) : ray_i64(acc.prod_i);
+        case OP_SUM:   return in_type == RAY_F64 ? ray_f64(acc.sum_f) : reduction_sum_result(acc.sum_i, in_type);
+        case OP_PROD:  return in_type == RAY_F64 ? ray_f64(acc.prod_f) : reduction_i64_result(acc.prod_i, agg_sum_type(in_type), NULL);
         case OP_MIN:   return reduction_extreme_result(op, in_type, acc.cnt > 0, acc.min_f, acc.min_i, input);
         case OP_MAX:   return reduction_extreme_result(op, in_type, acc.cnt > 0, acc.max_f, acc.max_i, input);
         /* COUNT returns total length including nulls — matches ray_count_fn's
@@ -4011,20 +4014,17 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
                 out_type = RAY_F64; break;
             case OP_COUNT: out_type = RAY_I64; break;
             case OP_SUM: {
-                /* sum preserves TIME (a duration-like temporal): time+time is
-                 * a time, matching the scalar ray_sum_fn.  Other integer
-                 * families widen to I64; DATE/TIMESTAMP are rejected at
-                 * type-admission so never reach here.  The affine/linear SUM
-                 * fast paths leave agg_col NULL (they aggregate without
-                 * materializing the input vector), so recover the source type
-                 * from the aggregation input op when the vector is absent. */
+                /* The affine/linear SUM fast paths leave agg_col NULL (they
+                 * aggregate without materializing the input vector), so recover
+                 * the source type from the aggregation input op when the vector
+                 * is absent.  DATE/TIMESTAMP are rejected at type-admission. */
                 int8_t src_t = agg_col ? agg_col->type
                              : (op_node(g, ext->agg_ins[a]) ? op_node(g, ext->agg_ins[a])->out_type : 0);
-                out_type = is_f64 ? RAY_F64 : (src_t == RAY_TIME ? RAY_TIME : RAY_I64);
+                out_type = src_t ? agg_sum_type(src_t) : RAY_I64;
                 break;
             }
             case OP_PROD:
-                out_type = is_f64 ? RAY_F64 : RAY_I64; break;
+                out_type = agg_col ? agg_sum_type(agg_col->type) : RAY_I64; break;
             default:
                 out_type = agg_col ? agg_col->type : RAY_I64; break;
         }
@@ -4105,6 +4105,7 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
                         v = sum_i64[idx];
                         if (affine && affine[a].enabled)
                             v += affine[a].bias_i64 * counts[gi];
+                        if (agg_sum_overflows(out_type, v)) { v = int_null; ray_vec_set_null(new_col, gi, true); }
                         break;
                     case OP_PROD:
                         if (nn == 0) { v = int_null; ray_vec_set_null(new_col, gi, true); break; }
@@ -9152,20 +9153,17 @@ sequential_fallback:;
                 out_type = RAY_F64; break;
             case OP_COUNT: out_type = RAY_I64; break;
             case OP_SUM: {
-                /* sum preserves TIME (a duration-like temporal): time+time is
-                 * a time, matching the scalar ray_sum_fn.  Other integer
-                 * families widen to I64; DATE/TIMESTAMP are rejected at
-                 * type-admission so never reach here.  The affine/linear SUM
-                 * fast paths leave agg_col NULL (they aggregate without
-                 * materializing the input vector), so recover the source type
-                 * from the aggregation input op when the vector is absent. */
+                /* The affine/linear SUM fast paths leave agg_col NULL (they
+                 * aggregate without materializing the input vector), so recover
+                 * the source type from the aggregation input op when the vector
+                 * is absent.  DATE/TIMESTAMP are rejected at type-admission. */
                 int8_t src_t = agg_col ? agg_col->type
                              : (op_node(g, ext->agg_ins[a]) ? op_node(g, ext->agg_ins[a])->out_type : 0);
-                out_type = is_f64 ? RAY_F64 : (src_t == RAY_TIME ? RAY_TIME : RAY_I64);
+                out_type = src_t ? agg_sum_type(src_t) : RAY_I64;
                 break;
             }
             case OP_PROD:
-                out_type = is_f64 ? RAY_F64 : RAY_I64; break;
+                out_type = agg_col ? agg_sum_type(agg_col->type) : RAY_I64; break;
             default:
                 out_type = agg_col ? agg_col->type : RAY_I64; break;
         }

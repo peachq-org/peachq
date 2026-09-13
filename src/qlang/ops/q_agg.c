@@ -8,7 +8,6 @@
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
 #include "qlang/ops/q_index.h" /* q_index_at — first/last of an empty ride the miss law */
-#include "qlang/ops/q_dollar.h" /* q_dollar_cast — the b -> i aggregate narrow */
 #include "lang/eval.h"     /* ray_sum_fn, ray_avg_fn, ray_mul_fn, ray_first_fn, ray_last_fn — engine arms */
 #include "lang/internal.h" /* atomic_map_binary, make_f64, is_list, is_numeric, as_f64 */
 #include <math.h>          /* isnan, sqrt — sentinel-null discipline, mdev/cov */
@@ -83,9 +82,10 @@ static ray_t* runscan_bytes(ray_t* x, q_rs_kind k) {
 
 static ray_t* runscan(ray_t* x, q_rs_kind k) {
     if (!x) return q_err(QE_TYPE);
-    if (ray_is_atom(x)) {                 /* atom returned unchanged (avgs->float) */
+    if (ray_is_atom(x)) {                 /* maxs/mins keep the atom; avgs -> float */
         if (k == RS_AVGS) { int nu; double v = q_velem_f(x, 0, &nu);
                             return nu ? ray_typed_null(-RAY_F64) : ray_f64(v); }
+        if (k == RS_SUMS || k == RS_PRDS) return agg_atom_result(x);
         ray_retain(x); return x;
     }
     if ((k == RS_MAXS || k == RS_MINS) && ray_is_vec(x) && ray_is_bytelike(x->type))
@@ -148,14 +148,14 @@ static ray_t* runscan(ray_t* x, q_rs_kind k) {
         }
         return out;
     }
-    /* b -> i (ref/sum.md, ref/prd.md domain tables) */
-    int8_t ot = (x->type == RAY_BOOL) ? RAY_I32 : RAY_I64;
+    int8_t ot = agg_sum_type(x->type);
     ray_t* out = ray_vec_new(ot, n > 0 ? n : 1); out->len = n;
     void* o = ray_data(out);
     int64_t acc = (k==RS_PRDS) ? 1 : 0;
     for (int64_t i = 0; i < n; i++) {
         int nu; double vd = q_velem_f(x, i, &nu); int64_t v = (int64_t)vd;
-        if (k==RS_SUMS) acc += nu?0:v; else acc *= nu?1:v;
+        if (k==RS_SUMS) acc = (int64_t)((uint64_t)acc + (uint64_t)(nu?0:v));
+        else            acc = (int64_t)((uint64_t)acc * (uint64_t)(nu?1:v));
         if (ot == RAY_I32) ((int32_t*)o)[i] = (int32_t)acc; else ((int64_t*)o)[i] = acc;
     }
     return out;
@@ -190,44 +190,28 @@ ray_t* q_ratios_wrap(ray_t* x) {
     return out;
 }
 
-ray_t* q_fill_wrap(ray_t* x, ray_t* y);   /* fwd — prd's nulls-as-1 fill */
-
 /* q `prd x` — product aggregate, the multiply-over fold twin of prds (ref/prd.md):
- * an atom is returned unchanged; a numeric vector folds to its product with
- * NULLS TREATED AS 1s (`prd 2 3 0N 7` -> 42); a BOOL vector returns an int
- * (`prd 101b` -> 0i); a list of lists multiplies element-wise (`prd (1 2 3 4;
- * 2 3 5 7)` -> 2 6 15 28 — the fold over the registered atomic multiply).
+ * a numeric vector folds to its product with NULLS TREATED AS 1s (`prd 2 3 0N 7`
+ * -> 42) in the dyad's range (`prd 101b` -> 0i); a general list is the multiply-over fold of its
+ * items, as sum's list arm is the add-over fold (a one-item fold returns the item).
  * Non-numeric -> 'type. */
 ray_t* q_prd_wrap(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (x->type == -RAY_STR || x->type == RAY_SYM)
         return q_err(QE_TYPE);
-    if (ray_is_atom(x)) { ray_retain(x); return x; }   /* doc: atom unchanged */
-    if (x->type == RAY_LIST) {                         /* element-wise fold */
+    if (ray_is_atom(x)) return agg_atom_result(x);
+    if (x->type == RAY_LIST) {
         int64_t n = ray_len(x);
         ray_t** e = (ray_t**)ray_data(x);
         if (n == 0) return ray_i64(1);                 /* empty product (derived) */
-        /* Nulls are 1s here too (ref/prd.md's unconditional rule — codex r2:
-         * `prd (1 0N;2 3)` must be 2 3, not 2 0N), so every operand is
-         * null-filled with 1 (q `1^`) before it enters the multiply. */
-        ray_t* one = ray_i64(1);
-        ray_t* acc = q_fill_wrap(one, e[0]);
-        if (!acc || RAY_IS_ERR(acc)) { ray_release(one);
-                                       return acc ? acc : q_err(QE_TYPE); }
+        ray_t* acc = e[0];
+        ray_retain(acc);
         for (int64_t i = 1; i < n; i++) {
-            ray_t* fi = q_fill_wrap(one, e[i]);
-            if (!fi || RAY_IS_ERR(fi)) { ray_release(acc); ray_release(one);
-                                         return fi ? fi : q_err(QE_TYPE); }
-            /* ray_mul_fn is the ATOM kernel; atomic_map_binary is eval's
-             * broadcast (vector*vector, atom*vector, nested) around it. */
-            ray_t* nx = atomic_map_binary(ray_mul_fn, acc, fi);
-            ray_release(fi);
+            ray_t* nx = atomic_map_binary(ray_mul_fn, acc, e[i]);
             ray_release(acc);
-            if (!nx || RAY_IS_ERR(nx)) { ray_release(one);
-                                         return nx ? nx : q_err(QE_TYPE); }
+            if (!nx || RAY_IS_ERR(nx)) return nx ? nx : q_err(QE_TYPE);
             acc = nx;
         }
-        ray_release(one);
         return acc;
     }
     if (!q_vec_is_num(x))
@@ -246,10 +230,9 @@ ray_t* q_prd_wrap(ray_t* x) {
     int64_t acc = 1;
     for (int64_t i = 0; i < n; i++) {
         int nu; double v = q_velem_f(x, i, &nu);
-        if (!nu) acc *= (int64_t)v;
+        if (!nu) acc = (int64_t)((uint64_t)acc * (uint64_t)(int64_t)v);
     }
-    if (x->type == RAY_BOOL) return ray_i32((int32_t)acc);   /* prd 101b -> 0i */
-    return ray_i64(acc);
+    return make_typed_int((int8_t)-agg_sum_type(x->type), acc);
 }
 
 /* q `x wavg y` — weighted average (sum x*y) % sum x, pairs where EITHER side
@@ -394,20 +377,6 @@ static ray_t* end_item(ray_t* x, int64_t i, ray_t* (*base)(ray_t*)) {
 ray_t* q_first_wrap(ray_t* x) { return end_item(x, 0, ray_first_fn); }
 ray_t* q_last_wrap(ray_t* x)  { return end_item(x, -1, ray_last_fn); }
 
-/* b -> i, the boolean-aggregate width law (ref/sum.md, ref/prd.md domain tables):
- * an additive fold over an all-boolean domain narrows its long (or, for the
- * one-item fold, still-boolean) result to int.  Consumes r. */
-ray_t* q_agg_bool_narrow(ray_t* r) {
-    if (!r || RAY_IS_ERR(r)) return r;
-    if (r->type == -RAY_I64 || r->type == RAY_I64 ||
-        r->type == -RAY_BOOL || r->type == RAY_BOOL) {
-        ray_t* c = q_dollar_cast(RAY_I32, r);
-        ray_release(r);
-        return c;
-    }
-    return r;
-}
-
 /* q `sum x` — LIST arm sums the items (kdb: `sum(2013.03.15;18:55:40.686)`
  * is a timestamp; Load Fixed pins `sum("DT";8 9)0:enlist"…"`).  Non-lists
  * keep the base vector aggregate. */
@@ -418,9 +387,6 @@ ray_t* q_sum_wrap(ray_t* x) {
         ray_t* plus = q_registry_lookup_name("+", 1, Q_DYADIC);   /* borrowed */
         if (!plus) return q_err(QE_TYPE);
         ray_t** e = (ray_t**)ray_data(x);
-        int allbool = 1;
-        for (int64_t i = 0; allbool && i < ray_len(x); i++)
-            allbool = e[i]->type == RAY_BOOL || e[i]->type == -RAY_BOOL;
         ray_t* acc = e[0];
         ray_retain(acc);
         for (int64_t i = 1; i < ray_len(x); i++) {
@@ -429,7 +395,7 @@ ray_t* q_sum_wrap(ray_t* x) {
             if (!nx || RAY_IS_ERR(nx)) return nx ? nx : q_err(QE_OOM);
             acc = nx;
         }
-        return allbool ? q_agg_bool_narrow(acc) : acc;
+        return acc;
     }
     return ray_sum_fn(x);
 }

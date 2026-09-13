@@ -595,6 +595,7 @@ ray_op_t* ray_cast(ray_graph_t* g, ray_op_t* a, int8_t target_type);
 
 /* Generic binary op — opcode-driven dispatch, no switch/case */
 ray_op_t* ray_binop(ray_graph_t* g, uint16_t opcode, ray_op_t* a, ray_op_t* b);
+int8_t ray_binop_out_type(uint16_t opcode, int8_t a, int8_t b);
 
 /* Binary element-wise ops */
 ray_op_t* ray_add(ray_graph_t* g, ray_op_t* a, ray_op_t* b);
