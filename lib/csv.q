@@ -1,4 +1,7 @@
-/ csv.q - the .csv surface: .csv.read loads delimited text as a table, .csv.info reports the schema it would use.
+/ Read delimited text (CSV, TSV) as a table, from a file, a URL or text already in memory.
+/ `select from `:trades.csv` is the shortest spelling.  .csv.read[file;target;types;opts] also takes a target
+/ table (rows insert, its meta fixes the types), the column types as 0: letters ("SFJ"), and an options dict;
+/ .csv.info[file;opts] shows the schema it would sniff.  \?loaders has examples; user-docs/csv.md the detail.
 
 / Load delimited text as a table - from a file, a URL, or text already in memory.
 / A symbol or lambda target answers the summary dict `rows`rejected`chunks`ignored`types; otherwise the table

@@ -90,7 +90,7 @@ LIB_Q_SRCS := $(filter-out lib/help-db.q,$(sort $(wildcard lib/*.q))) \
               $(sort $(wildcard qlib/src/*.q))
 $(GEN_DIR)/qlang/lib_gen.h: lib/. qlib/src $(LIB_Q_SRCS) tools/gen-bootstrap.sh
 	@mkdir -p $(dir $@)
-	SYMBOL=PEACHQ_LIB_BOOTSTRAP tools/gen-bootstrap.sh $@ $(LIB_Q_SRCS)
+	SYMBOL=PEACHQ_LIB_FILES PER_FILE=1 tools/gen-bootstrap.sh $@ $(LIB_Q_SRCS)
 
 # Dirs in the prerequisite list: deleting an asset bumps its directory's mtime,
 # which a file-only list cannot see. A no-change make must not touch this rule.

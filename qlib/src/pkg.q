@@ -1,7 +1,8 @@
-/ PacKaGe Loading Functions
+/ pkg.q - package loading: .pkg.loadq[`:dirlist] loads every .q file under the directories, then runs each namespace's init*
 / The only public function intended to be called is .pkg.loadq[`:dirlist] 
 / That first loads all .q files in
 / Then runs init* from every namespace available in kdb
+
 system "d .pkg";
 
 / Question should errors be thrown or logged while loading

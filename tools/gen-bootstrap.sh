@@ -26,6 +26,11 @@ else
     sym=PEACHQ_BOOTSTRAP
     guard=PEACHQ_DOTQ_GEN_H
 fi
+# PER_FILE=1 keeps the file boundaries: `static const struct {name; src} SYMBOL[]`,
+# one entry per input, so the loader can run each as its own named script and the
+# doc capture attributes every file's header to that file (the flat blob lost all
+# but the first).  The escaping is the same awk, one string per entry.
+per_file=${PER_FILE:-}
 
 # Escape each source line for a C string literal: strip a trailing CR (CRLF
 # safety), backslash first, then double-quote; emit one "..\n" chunk per line
@@ -42,8 +47,16 @@ fi
 {
     printf '/* AUTO-GENERATED from %s by tools/gen-bootstrap.sh — DO NOT EDIT. */\n' "$*"
     printf '#ifndef %s\n#define %s\n' "$guard" "$guard"
-    printf 'static const char %s[] =\n' "$sym"
-    awk '
+    if [ -n "$per_file" ]; then
+        printf 'static const struct { const char* name; const char* src; } %s[] = {\n' "$sym"
+    else
+        printf 'static const char %s[] =\n' "$sym"
+    fi
+    awk -v per_file="$per_file" '
+        FNR == 1 && per_file {
+            if (NR > 1) print "},";
+            printf "{ \"%s\",\n", FILENAME;
+        }
         {
             sub(/\r$/, "");
             out = ""; n = length($0);
@@ -56,7 +69,7 @@ fi
             }
             printf "\"%s\\n\"\n", out;
         }
-        END { print ";" }
+        END { if (per_file) print "}};"; else print ";" }
     ' "$@"
     printf '#endif /* %s */\n' "$guard"
 } > "$out"
