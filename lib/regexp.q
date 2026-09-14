@@ -1,4 +1,7 @@
-/ regexp.q - THE public .regexp surface (user-docs/regexp.md).
+/ Regular expressions (RE2 syntax): .regexp.matches[subject;pattern], .extract, .groups,
+/ .replace[subject;pattern;replacement], .split[subject;pattern] and .escape[text].  subject may be one string
+/ or a list of them.  Flags go inside the pattern: (?i) (?s) (?m).  user-docs/regexp.md has the detail.
+/ @implNote THE public .regexp surface (user-docs/regexp.md).
 / Lambdas, not natives, so the surface is DISCOVERABLE: peachq renders a lambda
 / from its verbatim source, so typing `.regexp.matches` prints the signature and
 / names its arguments, where a native prints as an opaque primitive.  The
