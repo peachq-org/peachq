@@ -21,6 +21,7 @@
 #include "qlang/io/q_re2.h"      /* q_re2_reset — drop compiled patterns at teardown */
 #include "qlang/q_console.h"  /* q_console_pipe_disable — reset the `\classic` display global per runtime */
 #include "qlang/q_ctx.h"      /* remote-door install + q_ctx_run_src (the bootstrap loader) */
+#include "qlang/q_comment.h"  /* q_comment_boot — doc capture is inert over the core list */
 #include "qlang/eval/q_eval.h" /* q_eval_syms_reset — per-runtime teardown */
 #include "qlang/eval/q_view.h" /* q_view_reset — per-runtime view state */
 #include "qlang/dotq_gen.h"   /* PEACHQ_BOOTSTRAP — codegen'd from src/qlang/{q,dotq}.q */
@@ -40,7 +41,9 @@
  * never a runtime whose core stopped mid-file.  Non-zero = aborted. */
 static int bootstrap_run(const char* src, const char* what) {
     ray_t* esig = NULL;
+    q_comment_boot(1);
     int rc = q_ctx_run_src(src, stdout, stderr, &esig);
+    q_comment_boot(0);
     if (esig) ray_error_free(esig);
     if (rc)
         fprintf(stderr, "q bootstrap: %s ABORTED at an erroring statement - no runtime\n",

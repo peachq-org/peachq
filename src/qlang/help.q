@@ -7,12 +7,16 @@
 / ALWAYS-ON: the core bootstrap loads this file (q_runtime.c), last of the
 / ordered list, so the hooks are bound before the first file a user loads -
 / capture is a listener, and a late listener has already missed its events.
-/ Only the generated builtin block is deferred: it lives in lib/help-db.q and
-/ FIRST HELP ACCESS is the one thing that loads it (owner 2026-09-03) - not boot,
-/ not `\l pq`.  Every READER calls .help.i.loaddb (get/text/find/i.index/show/
-/ full); .help.oneline does NOT, because it fires on every line typed and must
-/ never pull in a load as a side effect of typing.  So the REPL hint for a
-/ builtin is dark until the session's first real lookup, and live after it.
+/ The bootstrap itself is NOT listened to: q_comment.c is inert over the core
+/ list, so nothing in this file (or q.q/.h/.j) is captured and the store is
+/ EMPTY after boot - this file's own public names are hand-written rows in
+/ lib/help-db.q, file-less and line-less like every other builtin.  That whole
+/ file, page entries included, is deferred: FIRST HELP ACCESS is the one thing
+/ that loads it (owner 2026-09-03) - not boot, not `\l pq`.  Every READER
+/ calls .help.i.loaddb (get/text/find/i.index/show/full); .help.oneline does
+/ NOT, because it fires on every line typed and must never pull in a load as
+/ a side effect of typing.  So the REPL hint for a builtin is dark until the
+/ session's first real lookup, and live after it.
 / THE C CONTRACT - renaming one of these five BREAKS C:
 /   .help.show / .help.full                q_sys.c      `\?topic` / `\??topic`
 /   .help.oneline                          q_repl.c     prompt hint, every line
@@ -90,12 +94,10 @@
 / (delete-then-insert moved a re-registered name to the end).
 .help.register_definition:{[fullname;ns;file;line;header]
   `.help.funcs upsert (fullname;ns;file;line);
-  .help.i.argsd::.help.i.argsd,enlist[fullname]!enlist flip `fullname`tag`param`description!.help.i.args[fullname;header];
+  .help.i.argsd,:enlist[fullname]!enlist flip `fullname`tag`param`description!.help.i.args[fullname;header];
   .help.i.counter::1+.help.i.counter; }
 
 / one name's documentation as text - its description, then its tags.
-/ @param name (symbol|string) the fullname a definition was captured under
-/ @return (string) the rendered page, or a one-line "no documentation" note
 .help.get:{[name]
   .help.i.loaddb[];
   render:{[n;r]
@@ -122,7 +124,6 @@
 / the online topic index (help.csv: pagepath,qname,kind), fetched on FIRST
 / use and cached for the session; offline caches as the empty table - reset
 / with .help.i.ix:() to retry after gaining net access.
-/ @return (table) pagepath (string), qname (string), kind (symbol)
 .help.index:{[]
   if[()~.help.i.ix;
     r:.help.i.get"help.csv";
@@ -131,8 +132,6 @@
 
 / the reference page (markdown) for one online-index topic; "" when offline,
 / disabled or not an index qname.
-/ @param topic (symbol|string) the topic as the online index names it
-/ @return (string) the page markdown, or ""
 .help.webfetch:{[topic]
   t:.help.i.str topic;
   $[any t~/:.help.index[]`qname;.help.i.get"help.md?q=",.h.hu t;""]}
@@ -155,8 +154,6 @@
 / with the online page for an exact index topic; when both miss, .help.find -
 / exactly one documented match answers ITS page, else the matching rows come
 / back as a table to narrow by (empty = no match).
-/ @param pattern (symbol|string) a name, or a pattern as .help.find takes it
-/ @return (string|table) the help text, or the matching doc rows
 .help.text:{[pattern]
   .help.i.loaddb[];
   if[.help.i.blank pattern;:.help.i.index[]];
@@ -195,7 +192,6 @@
 / fetched page as the gutter preview (.help.i.page), the find fallback as its
 / page or table.  `.help.text` is the VALUE ladder - one contract per name, so
 / a caller never has to guess whether it printed or answered.
-/ @param pattern (symbol|string) a name, or a pattern as .help.find takes it
 .help.show:{[pattern]
   .help.i.loaddb[];
   if[.help.i.blank pattern;-1 .help.i.index[];:(::)];
@@ -241,14 +237,13 @@
 / the one-line summary for a name - the first line of its lead description,
 / "" when undocumented.  The REPL hint renders `\?name / <this>` and owns the
 / width clipping, so the line comes back untrimmed.
-/ @param name (symbol|string) the fullname
 .help.oneline:{[name]
   n:`$.help.i.str name;
   r:select description from .help.args[] where fullname=n,null tag;
   $[count r;first "\n" vs r[0;`description];""]}
 
-/ register one builtin's one-liner - the page entries below and every row of the
-/ generated lib/help-db.q call it, so keep the call short.  It NEVER overwrites a
+/ register one builtin's one-liner - every row of lib/help-db.q, the page entries
+/ included, calls it, so keep the call short.  It NEVER overwrites a
 / CAPTURED definition: the db loads at FIRST HELP ACCESS, by which time a user's own
 / docs can already be in the store, and theirs win.  A null `line` is what marks a
 / registration rather than a capture (.help.i.memline reads the same column), so the
@@ -278,8 +273,6 @@
 / as .help.i.nsmembers does; the other half takes each term in ANY field, the
 / name included, so one term can name a row the other describes and prose
 / naming a private still finds it.
-/ @param pattern (string|symbol) the pattern
-/ @return (table) the matching rows of .help.args[], name matches first
 .help.find:{[pattern]
   .help.i.loaddb[];
   ps:.help.i.globs lower .help.i.str pattern;
@@ -407,10 +400,8 @@
    enlist "  ",(count[.help.i.line["";""]]$"\\?math  \\?joins  \\?strings  \\?temporal  \\?table"),"topic pages"}
 
 / page ENTRY rows, rendered from the registry summary.  NEVER overwrites an
-/ already-documented name - the defensive half of the no-collision rule.  The
-/ generated block now loads LATER (lib/help-db.q), so a page whose body IS its
-/ entry (`started`) carries a bare `· page` line until that load replaces it.
+/ already-documented name - the defensive half of the no-collision rule.
+/ lib/help-db.q calls it AFTER its generated block, so a page whose body IS its
+/ entry (`started`) already stands and keeps its generated line.
 .help.i.pr:{[name;page] if[not name in exec fullname from .help.funcs;
   .help.i.r[name;.help.i.line["\\?",string name;.help.i.pages[page;`summary]," · page"]]];}
-.help.i.pr'[.help.i.pagenames;.help.i.pagenames];
-.help.i.pr'[key .help.i.alias;value .help.i.alias];
