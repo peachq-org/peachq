@@ -542,18 +542,8 @@ ray_t* ray_first_fn(ray_t* x) {
     }
     if (ray_is_vec(x)) {
         if (ray_len(x) == 0) return ray_typed_null(-x->type);
-        /* For non-I64/F64 types route through collection_elem which
-         * preserves the element type.  The DAG path widens to i64 for
-         * DATE/TIME/TIMESTAMP/BOOL/U8 — bypass it. */
-        if (x->type == RAY_SYM   || x->type == RAY_I32  || x->type == RAY_I16 ||
-            x->type == RAY_GUID  || x->type == RAY_STR  || x->type == RAY_BOOL ||
-            x->type == RAY_F32   ||
-            ray_is_bytelike(x->type) || RAY_IS_TEMPORAL32(x->type) ||
-            x->type == RAY_TIMESTAMP) {
-            int alloc = 0;
-            return collection_elem(x, 0, &alloc);
-        }
-        AGG_VEC_VIA_DAG(x, ray_first);
+        int alloc = 0;
+        return collection_elem(x, 0, &alloc);
     }
     if (!is_list(x)) return ray_error("type", "first: unsupported type %s", ray_type_name(x->type));
     if (ray_len(x) == 0) return ray_typed_null(-RAY_I64);
@@ -583,16 +573,8 @@ ray_t* ray_last_fn(ray_t* x) {
     }
     if (ray_is_vec(x)) {
         if (ray_len(x) == 0) return ray_typed_null(-x->type);
-        /* See ray_first_fn for rationale on the type whitelist. */
-        if (x->type == RAY_SYM   || x->type == RAY_I32  || x->type == RAY_I16 ||
-            x->type == RAY_GUID  || x->type == RAY_STR  || x->type == RAY_BOOL ||
-            x->type == RAY_F32   ||
-            ray_is_bytelike(x->type) || RAY_IS_TEMPORAL32(x->type) ||
-            x->type == RAY_TIMESTAMP) {
-            int alloc = 0;
-            return collection_elem(x, ray_len(x) - 1, &alloc);
-        }
-        AGG_VEC_VIA_DAG(x, ray_last);
+        int alloc = 0;
+        return collection_elem(x, ray_len(x) - 1, &alloc);
     }
     if (!is_list(x)) return ray_error("type", "last: unsupported type %s", ray_type_name(x->type));
     int64_t len = ray_len(x);
