@@ -46,3 +46,20 @@ int64_t q_calendar_week_start(int64_t days) {
     int64_t dow = (((days + 5) % 7) + 7) % 7;   /* 0=Mon .. 6=Sun */
     return days - dow;
 }
+
+/* Hinnant civil_from_days (public domain), rebased 2000 the same way month_payload_as_days rebases the
+ * forward walk; only the year and month are kept, plus whether the day of month was 1. */
+int q_calendar_month_from_days(int64_t days, int64_t* payload) {
+    int64_t  z   = days + 10957 + 719468;
+    int64_t  era = (z >= 0 ? z : z - 146096) / 146097;
+    uint64_t doe = (uint64_t)(z - era * 146097);
+    uint64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int64_t  y   = (int64_t)yoe + era * 400;
+    uint64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    uint64_t mp  = (5 * doy + 2) / 153;
+    int64_t  d   = (int64_t)(doy - (153 * mp + 2) / 5 + 1);
+    int64_t  m   = (int64_t)(mp < 10 ? mp + 3 : mp - 9);
+    y += m <= 2;
+    *payload = 12 * (y - 2000) + m - 1;
+    return d == 1;
+}

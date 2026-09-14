@@ -189,7 +189,6 @@ ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode);           /* used by: list (
 ray_t* q_join_table_upsert(ray_t* x, ray_t* y, int exclusive);/* THE value row-append home; used by: insert (upsert spelling).
                                                                  exclusive = the caller holds x's ONLY ref (a parked name) */
 ray_t* q_join_wrap(ray_t* x, ray_t* y);                       /* also shared: index (splice, dict insert), setops (cross, union) */
-ray_t* q_join_item(ray_t* x, int64_t i);                          /* used by: table, insert, setops */
 ray_t* q_join_gen_item(ray_t* x, int64_t i);                      /* used by: setops */
 int64_t q_join_gen_len(ray_t* x);                                 /* used by: setops */
 

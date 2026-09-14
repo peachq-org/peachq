@@ -125,11 +125,17 @@ assertAlmostEquals:{ [actual; expected; permittedDifferenceInFloats]
 // Assert that the expectedFilename in the expectedPath contains a variable
 // that is equal to actual.
 // @param expectedFilename - Symbol - With filename containing binary kdb data with expected result.
+// @param msg Written above the rendering in the .txt, so a reviewer reads the value against its caption;
+//            capped at 2000 lines of 2000 chars, a final .. line saying anything was cut. Its first line is the log message.
 assertKnown:{ [actual; expectedFilename; msg]
     fn:`$$[":"=first p:string expectedFilename; 1 _ p; p];
     .Q.dd[actualPath;currentNamespaceBeingTested,fn] set actual;
-    .Q.dd[actualPath;currentNamespaceBeingTested,`$string[fn],".txt"] 0: enlist .Q.s actual;
-    assertEquals[actual; getKnown expectedFilename; msg] };
+    c:system "c"; system "c 2000 2000"; s:.Q.s actual; system "c "," " sv string c;
+    ln:$[count msg; "\n" vs msg; ()];
+    clipped:(2000<count ln) or any 2000<count each ln;
+    ln:(2000 sublist 2000 sublist/: ln),$[clipped; enlist ".."; ()];
+    .Q.dd[actualPath;currentNamespaceBeingTested,`$string[fn],".txt"] 0: ln,enlist s;
+    assertEquals[actual; getKnown expectedFilename; $[count ln; ln 0; msg]] };
     
 assertKnownRun:{ [func; arg]
     cleanName:{
@@ -214,7 +220,10 @@ runTests:{ [nsList]
     lg "\r\n"; lg "########## .qunit.runTests `",("`" sv string (),nsList)," ##########";
     / no namespaces specified, find all ending with test
     nsl:$[11h~abs type nsList; nsList; `$".",/:string a where (lower a:key `) like "*test"];
-    a:raze runNsTests each (),nsl;
+    / uj, not raze: a parameterised namespace's parameter column is typed, an ordinary one's holds (), and only
+    / uj joins the two either way round; a namespace with no tests answers () and must not reach it
+    results:runNsTests each (),nsl;
+    a:(uj/) results where 0<count each results;
     if[0=count a; 'noTestsFound];
     // if no parameters actually used, remove the column
     a:$[all ()~/:a`parameter; delete parameter from a; a];
@@ -259,11 +268,14 @@ runNsTests:{ [ns]
         testList: ff "test*";
         runRes: runTest each  testList;
         runRes:update parameter:(count testList)#enlist pVals idx from runRes;
-        c,:runRes;
+        / uj, not comma: peachq signals type joining a typed column onto a general one; for same-column tables they agree
+        c:$[count c; c uj runRes; runRes];
         run each ff "afterNamespace*";
         idx+:1];
     run each findFuncs[ns;"afterParameters*";0b];
-    $[count c; `status`name`result`actual`expected`msg`time`mem xcols update namespace:ns,name:testList from c; ()] };
+    if[0=count c; :()];
+    / c holds one block of testList rows per parameter, so the names cycle
+    `status`name`result`actual`expected`msg`time`mem xcols update namespace:ns,name:(count c)#testList from c };
     
 / for fully specified test function in namespace get its config dictionary.
 getConf:{ [fn]     

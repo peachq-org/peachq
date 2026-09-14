@@ -33,4 +33,8 @@ int64_t q_calendar_ts_compose(int64_t days, int64_t tod_ns);
  * ray_temporal_extract / a signed inline division; `week` has no base field. */
 int64_t q_calendar_week_start(int64_t days);
 
+/* The MONTH payload a day count since 2000.01.01 falls in — the inverse of base's month_payload_as_days
+ * (lang/internal.h), exact over a DATE payload's range.  Answers 1 when that day IS the first of the month. */
+int q_calendar_month_from_days(int64_t days, int64_t* payload);
+
 #endif /* Q_CALENDAR_H */
