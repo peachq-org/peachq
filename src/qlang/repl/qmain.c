@@ -45,6 +45,7 @@ int main(int argc, char** argv) {
     const char* auth_pw = NULL;
     bool        auth_restricted = false;
     int         tls_mode = 0;
+    bool        want_help = false;
 
     /* `-eval-before` / `-eval` texts, each list in argv order; order between the lists is by FLAG (before the
      * startup script / after it), never by argv position.  argc bounds the counts. */
@@ -93,6 +94,8 @@ int main(int argc, char** argv) {
             date_order = spec[0] - '0';
         } else if (strcmp(argv[i], "-classic") == 0) {
             classic = true;
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            want_help = true;
         } else if (strcmp(argv[i], "-eval") == 0 || strcmp(argv[i], "-eval-before") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "q: %s requires a q source argument\n", argv[i]);
@@ -163,6 +166,14 @@ int main(int argc, char** argv) {
         }
     }
 
+    /* `-h` / `--help` is the launcher's only when no script is named: `q app.q -h` is the app's flag, in .z.x.  The
+     * table is .help.cmdline, rendered by the same q as `\?cmdline`, so the C side carries no copy of it. */
+    if (want_help && !q_dotz_script_path()) {
+        q_console_clip_set(2000, 2000);
+        q_ctx_run_src(".help.usage[]", stdout, stderr, NULL);
+        q_sys_exit(0);
+    }
+
     if (etrap_mode >= 0)
         q_sys_err_trap_set(etrap_mode);
     if (date_order >= 0)
@@ -186,8 +197,18 @@ int main(int argc, char** argv) {
                RAY_VERSION_MAJOR, RAY_VERSION_MINOR, build);
         /* `\?` works in classic too (help is on the always-on bootstrap now), but
          * classic is the kdb-clean env and the qscript runner forces it for
-         * byte-identical output — so the door is advertised only in modern. */
-        if (!classic) printf("\033[90mtype \\? for help\033[0m\n");
+         * byte-identical output — so the doors are advertised only in modern.
+         * The commands are peach (256-color 215) unless NO_COLOR / PEACHQ_COLORS=0
+         * — the same off switches .pq.cancolor honours. */
+        if (!classic) {
+            const char* pc = getenv("PEACHQ_COLORS");
+            bool color = !(getenv("NO_COLOR") || (pc && strcmp(pc, "0") == 0));
+            const char* peach = color ? "\033[38;5;215m" : "";
+            const char* grey  = color ? "\033[90m" : "";
+            const char* off   = color ? "\033[0m" : "";
+            printf("%stype %s\\?%s%s for help · %s\\l pq%s%s loads the standard library%s\n",
+                   grey, peach, off, grey, peach, off, grey, off);
+        }
         fflush(stdout);
     }
 

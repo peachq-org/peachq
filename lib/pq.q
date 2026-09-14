@@ -1,8 +1,11 @@
-/ pq.q - the PeachQ stdlib namespace (.pq). lib/*.q is the standard-library
+/ The session itself: .pq.version, .pq.conns[] (every open connection and its alias), .pq.termsize[] (the live
+/ terminal size) and .pq.cancolor[] (whether stdout takes ANSI color).  Loaded by \l pq.
+/ @implNote The PeachQ stdlib namespace. lib/*.q is the standard-library
 / tier: bundled sorted at build, loaded ONLY by the \l pq gate (never at
 / q_runtime_create) through the multiline statement seam. THE ANY-ORDER LAW:
 / top level is definitions only - no cross-lib calls execute at load time.
 / Pure q since the .pq.c.* rayfall escape hatch was deleted (2026-07-29).
+
 .pq.version:.z.v`version;
 / .pq.conns - every open connection, 13 cols; the single-letter p/f/z/n/m are
 / DELIBERATELY the -38! names so kdb code ports, the readable columns are

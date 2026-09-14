@@ -1,5 +1,7 @@
-/ j.q - the .j JSON reader: .j.read loads a JSON document as a table, .j.info reports the schema it would use.
-/ .j.j and .j.k (serialize / deserialize a string) are always available; these two arrive with \l pq.
+/ Read JSON as a table: .j.read[source;target;types;opts] loads a document or JSON Lines from a file, a URL
+/ or a string; .j.info[source;opts] shows the schema it would use.  `select from `:data.json` is the shortest
+/ spelling.  .j.j and .j.k serialize and parse a value and need no \l pq.  \?loaders has examples.
+/ @implNote .j.j and .j.k (serialize / deserialize a string) are always available; these two arrive with \l pq.
 
 / The `#` fragment is SUGAR for the path option and reaches the same one mechanism.  It is read only on an
 / http(s) URL, where a fragment is client-side by RFC and the transport drops it anyway; a `#` in a file path

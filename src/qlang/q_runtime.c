@@ -78,6 +78,7 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
          * (no base name hook — one pipeline, cutover 2026-07-23). */
         q_dotz_init(argc, argv);
         q_pq_helpdb_register();  /* `.help.i.loaddb`, bound before help.q can call it */
+        q_console_help_register();   /* `.help.i.termsize` — help clips to the live terminal from boot */
         /* the ORDERED core list: q.q before dotq.q (semantic), then .h, .j, and
          * help.q LAST — its capture hooks bind before the first file a USER
          * loads, which is the whole point of it being always-on. */
