@@ -1,8 +1,9 @@
 / help-db.q - the BUILTIN help database: one .help.i.r registration per builtin
-/ name, generated from lib/help-builtins.tsv.  Split out of src/qlang/help.q so
-/ the always-on bootstrap carries the machinery and this file carries only data:
-/ FIRST HELP ACCESS is the one thing that loads it (owner 2026-09-03): every
-/ reader door calls .help.i.loaddb, boot does not, and neither does `\l pq`.
+/ name, generated from lib/help-builtins.tsv, then the page entries and help.q's
+/ own public names by hand.  Split out of src/qlang/help.q so the always-on
+/ bootstrap carries the machinery and this file carries only data: FIRST HELP
+/ ACCESS is the one thing that loads it (owner 2026-09-03): every reader door
+/ calls .help.i.loaddb, boot does not, and neither does `\l pq`.
 / >>> GENERATED from lib/help-builtins.tsv by `python3 tools/gen-help-builtins.py`
 / >>> edit the TSV, rerun (it splices this block in place), commit both.
 .help.i.r[`abs;"abs -5 3 -2                         / 5 3 2                   take the magnitude, dropping the sign"]
@@ -466,3 +467,69 @@
 .help.i.r[`$"'oom";"0W#2                                /                         the allocation failed - not enough memory"]
 .help.i.r[`started;"\\?started                           /                         learn q in one minute · page\n10 20 30 40                         / 10 20 30 40             a LIST is values side by side, no commas\n(10 20 30 40)1 3                    / 20 40                   index a list by position, counting from zero\n1 2 3+10                            / 11 12 13                verbs are atomic: they spread over a whole list\nsum 10 20 30                        / 60                      aggregates collapse a list to one value\n`a`b`c!10 20 30                     / `a`b`c!10 20 30         a DICTIONARY maps keys to values with !\n([]s:`a`b;p:10 20)                  / +`s`p!(`a`b;10 20)      a TABLE is a list of equal-length named columns\nselect from ([]p:10 20)where p>15   / +(,`p)!,,20             qsql picks rows and columns out of a table\n{x*2} 5                             / 10                      a FUNCTION is braces; x y z are its implicit arguments\n(+/)1 2 3 4                         / 10                      an ITERATOR: / folds a verb along a list\ncount each (\"ab\";\"cde\")             / 2 3                     each applies a verb item by item\n2#\"abcdef\"                          / \"ab\"                    # takes items; a string is a list of characters\n\"J\"$\"42\"                            / 42                      $ casts: \"J\" long, \"F\" float, \"D\" date, \"S\" symbol\n(\"SJ\";enlist\",\")0:(\"a,b\";\"x,1\")     / +`a`b!(,`x;,1)          0: parses delimited text into a table\n\\?types                             /                         keep going: \\?types \\?math \\?joins \\?strings \\?temporal \\?table"]
 / <<< end generated
+
+/ page ENTRY rows come after the generated block, so a page whose body IS its
+/ entry (`started`) keeps that line.
+.help.i.pr'[.help.i.pagenames;.help.i.pagenames];
+.help.i.pr'[key .help.i.alias;value .help.i.alias];
+
+/ help.q's OWN public surface, by hand: the bootstrap captures nothing, so its
+/ doc comments never reach the store - these rows are that documentation, kept
+/ in step with src/qlang/help.q by hand.  The FIRST line of each is a whole
+/ summary on its own: it is what .help.oneline and the REPL hint show.
+.help.i.r[`.help.funcs;"\n" sv (
+  "the doc store: one row per documented fullname";
+  "ns is its namespace; file and line say where it was captured, both null for a builtin row")]
+.help.i.r[`.help.files;"the documented files: one row per file header the capture saw, keyed by file"]
+.help.i.r[`.help.filetags;"a file header's tags: one row per @tag of every documented file"]
+.help.i.r[`.help.args;"\n" sv (
+  "every documented name's doc rows: fullname, tag, param, description";
+  "derived from the store on demand, re-razed only when a registration has moved .help.i.counter";
+  "@return (table) one row per lead description or @tag")]
+.help.i.r[`.help.get;"\n" sv (
+  "one name's documentation as text - its description, then its tags";
+  "@param name (symbol|string) the fullname a definition was captured under";
+  "@return (string) the rendered page, or a one-line \"no documentation\" note")]
+.help.i.r[`.help.url;"the online docs base; \"\" disables the whole web tier (offline / tests)"]
+.help.i.r[`.help.index;"\n" sv (
+  "the online topic index (help.csv: pagepath,qname,kind), fetched on first use";
+  "cached for the session; offline caches as the empty table - reset with .help.i.ix:()";
+  "to retry after gaining net access";
+  "@return (table) pagepath (string), qname (string), kind (symbol)")]
+.help.i.r[`.help.webfetch;"\n" sv (
+  "the reference page (markdown) for one online-index topic";
+  "\"\" when offline, disabled or not an index qname";
+  "@param topic (symbol|string) the topic as the online index names it";
+  "@return (string) the page markdown, or \"\"")]
+.help.i.r[`.help.text;"\n" sv (
+  "the help ladder as a VALUE (the IPC-friendly form): everything the print form shows";
+  "the index for an empty pattern; else the local page for an exact captured name - with";
+  "a page's blurb and member table appended - joined with the online page for an exact";
+  "index topic; when both miss, .help.find - exactly one documented match answers ITS";
+  "page, else the matching rows come back as a table to narrow by (empty = no match)";
+  "@param pattern (symbol|string) a name, or a pattern as .help.find takes it";
+  "@return (string|table) the help text, or the matching doc rows")]
+.help.i.r[`.help.show;"\n" sv (
+  "THE printing door, \\?name: prints the help ladder and returns null";
+  "the local page prints plainly, a fetched page as the gutter preview, the find";
+  "fallback as its page or table; .help.text is the same ladder as a VALUE";
+  "@param pattern (symbol|string) a name, or a pattern as .help.find takes it")]
+.help.i.r[`.help.full;"\n" sv (
+  "the OTHER printing door, \\??name: the full unclipped ladder, plain text";
+  "no gutter, no preview; both doors print and neither returns";
+  "@param pattern (symbol|string) a name, or a pattern as .help.find takes it")]
+.help.i.r[`.help.types;"\n" sv (
+  "the datatype reference table, transcribed from basics/datatypes.md";
+  "n c name sz literal nul pinf ninf sql per type: literal, pinf and ninf hold the VALUES,";
+  "nul is the rendering of the typed null, :: marks a type with no such value; rows 97-112";
+  "are the compound types, and the ranges (20-76 enums, 78-96 nested) are prose, not rows")]
+.help.i.r[`.help.oneline;"\n" sv (
+  "the one-line summary for a name: the first line of its lead description, \"\" when undocumented";
+  "@param name (symbol|string) the fullname")]
+.help.i.r[`.help.find;"\n" sv (
+  "the doc rows whose fullname, tag, param or description match a pattern";
+  "globs, matched anywhere and case-insensitively, so a bare word is a substring search;";
+  "many words are an AND, every term must match; names first, each matched name collapsed";
+  "to its lead row";
+  "@param pattern (string|symbol) the pattern";
+  "@return (table) the matching rows of .help.args[], name matches first")]
