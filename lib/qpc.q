@@ -1,4 +1,7 @@
-/ qpc.q - the `qpc` virtual-table provider: plain q IPC as a data source
+/ Another q process as a data source: h:hopen `:pq:qpc:alias:host:port connects, and from then on the alias
+/ names it - `:pq:qpc:alias "1+1" is a sync call, `:pq:qpc:alias:table/ is that process's table for get, set,
+/ upsert and qsql, with the query pushed to the peer.  \?handles has examples.
+/ @implNote The `qpc` virtual-table provider: plain q IPC as a data source
 / (`:pq:qpc:alias:host:port`, actionable-plans/2026-08-07-plugin-data-
 / sources-tables.md).  Standard-library tier (lib/*.q): loaded by the `\l pq`
 / gate, NOT on the always-on bootstrap - the engine reserves `.ipc.*`
@@ -6,6 +9,7 @@
 / namespace, so out of the box neither exists.  ANY-ORDER LAW: definitions
 / only at top level.  CONNID is the plain int handle hopen returned; qsql
 / pushes the resolved functional tree to the remote (below).
+
 / opt (the config dict) is ignored: plain q IPC has no open-time options yet
 .qpc.open:{[cfg;tmo;opt] $[null tmo; hopen `$":",cfg; hopen (`$":",cfg;tmo)]}
 .qpc.close:{[c] hclose c}

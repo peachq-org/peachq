@@ -40,6 +40,12 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig);
  * loader, one multiline law. */
 int q_ctx_run_src(const char* s, FILE* out, FILE* err, ray_t** esig);
 
+/* q_ctx_run_src for an embedded file that KEEPS its name: `\l pq` runs each
+ * lib/ file through this so the doc capture attributes the file's header to
+ * `name` (`lib/str.q`) and a lambda's `l` names it, as a `\l` of the real
+ * file would. */
+int q_ctx_run_named_src(const char* name, const char* s, FILE* out, FILE* err, ray_t** esig);
+
 /* Install the two callbacks the IPC layer evaluates a request through: source
  * text (the seam above, but answering with a value instead of printing — hence
  * a shared pipeline, not a shared function) and the kdb `(func;args)`

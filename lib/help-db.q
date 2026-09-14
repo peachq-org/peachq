@@ -407,7 +407,7 @@
 .help.i.r[`.h.xd;".h.xd ([]a:1 2)                     /                         render a table as an XML table"]
 .help.i.r[`.h.xmp;".h.xmp (\"a\";\"b\")                    / \"<xmp>a\\nb\\n</xmp>\"     render lines inside an HTML xmp element"]
 .help.i.r[`.h.xs;".h.xs \"a<b\"                         / \"a&lt;b\"                escape text for XML"]
-.help.i.r[`.h.xt;".h.xt[`json;enlist\"{}\"]             / +(`symbol$())!()        parse text of a given type into a value"]
+.help.i.r[`.h.xt;".h.xt[`json;enlist\"{}\"]             / ,(`symbol$())!()        parse text of a given type into a value"]
 .help.i.r[`.j.j;".j.j `a`b!1 2                       / \"{\\\"a\\\":1,\\\"b\\\":2}\"     render a value as JSON text"]
 .help.i.r[`.j.k;".j.k \"[1,2,3]\"                      / 1 2 3f                  parse JSON text into a value"]
 .help.i.r[`.j.jd;".j.jd (1b;0w)                       /                         render JSON, choosing how to write infinities"]
@@ -436,22 +436,16 @@
 .help.i.r[`$"$";"\"J\"$\"42\"                            / 42                      cast a value, or parse text, to a type\n$[1b;\"yes\";\"no\"]                    / \"yes\"                   choose between expressions - the conditional\n10$\"abc\"                            / \"abc       \"            pad text to a fixed width, on the right\n`sym$`a                             /                         enumerate symbols against a domain\n(2 2#1 0 0 1f)$1 2f                 / 1 2f                    multiply a matrix by a matrix or vector"]
 .help.i.r[`$"?";"1 2 3?2                             / 1                       find where a value first occurs, or the count if absent\n5?10                                /                         pick items at random, or deal x distinct ones\n?[([]a:1 2);();0b;(1#`a)!1#`a]      / +(,`a)!,1 2             query a table, as select does\n?[1 0 1b;`a;`b]                     / `a`b`a                  choose item by item - the vector conditional"]
 .help.i.r[`$"!";"`a`b!1 2                            / `a`b!1 2                make a dictionary from keys and values\n![([]a:1 2;b:3 4);();0b;1#`a]       / +(,`b)!,3 4             update or delete on a table, as update does\n0N!til 3                            / 0 1 2                   print a value and return it, for tracing"]
-.help.i.r[`$"@";"9 8 7@1 2                           / 8 7                     index a list, or apply a function\nv:1 2 3;@[v;1;:;9]                  / 1 9 3                   amend an item at an index\nr:@[{1+x};`a;{\"err\"}]               / \"err\"                   apply a function and catch any error"]
+.help.i.r[`$"@";"9 8 7@1 2                           / 8 7                     index a list, or apply a function\nv:1 2 3;@[v;1;:;9]                  / 1 9 3                   amend an item at an index\nr:@[{1+x};`a;{\"err\"}]               / ::                      apply a function and catch any error"]
 .help.i.r[`.;"(1 2;3 4) . 1 1                     / 4                       index at depth, one index per level\n.[+;(2;3)]                          / 5                       apply a function to a list of arguments\n.[(1 2;3 4);(0;1);:;9]              / (1 9;3 4)               amend at depth\n.[{x+y};(1;2);{\"err\"}]              / 3                       apply a function of any rank and catch any error"]
-.help.i.r[`$":";"a:42                                / 42                      bind a value to a name\nf:{:x*2}                            / {:x*2}                  return from a function early"]
-.help.i.r[`$"::";"a:1;v::a+1                          / 2                       define a view, recomputed when its inputs change\na::42                               / ::                      assign a global from inside a function\n(::)                                / ::                      name the identity function, and the generic null"]
+.help.i.r[`$":";"a:42                                / ::                      bind a value to a name\nf:{:x*2}                            / ::                      return from a function early"]
+.help.i.r[`$"::";"a:1;v::a+1                          / ::                      define a view, recomputed when its inputs change\na::42                               / ::                      assign a global from inside a function\n(::)                                / ::                      name the identity function, and the generic null"]
 .help.i.r[`$"'";",'[1 2;3 4]                         / (1 3;2 4)               pair up the arguments item by item - each"]
 .help.i.r[`$"':";"(-':)1 4 9                          / 1 3 5                   apply to each item and the one before - each prior"]
 .help.i.r[`$"/:";"1 2 3+/:10 20                       / (11 12 13;21 22 23)     apply to each item on the right - each right"]
 .help.i.r[`$"\\:";"10 20+\\:1 2 3                       / (11 12 13;21 22 23)     apply to each item on the left - each left"]
 .help.i.r[`$"/";"(+/)1 2 3                           / 6                       reduce a list to one value - over\n10+/1 2 3                           / 16                      reduce from a starting value\n{x*2}/[3;1]                         / 8                       apply a function x times, or until it converges"]
 .help.i.r[`$"\\";"(+\\)1 2 3                           / 1 3 6                   accumulate along a list, keeping every step - scan\n10+\\1 2 3                           / 11 13 16                accumulate from a starting value"]
-.help.i.r[`$"-p";"q -p 5000                           /                         listen on a port for IPC and HTTP clients - also spelled --port"]
-.help.i.r[`$"-q";"q -q script.q                       /                         start quiet: no banner and no q) prompt"]
-.help.i.r[`$"-u";"q -u users.txt                      /                         load a user:password file and require a login"]
-.help.i.r[`$"-U";"q -U users.txt                      /                         as -u, and block remote file access and system commands"]
-.help.i.r[`$"-E";"q -E 1                              /                         set TLS server mode: 0 plain, 1 plain and TLS, 2 TLS only"]
-.help.i.r[`$"-classic";"q -classic                          /                         start in kx-classic mode: legacy display, no automatic \\l pq"]
 .help.i.r[`$"'type";"1+`a                                /                         a value has the wrong type for the operation"]
 .help.i.r[`$"'length";"1 2 3+1 2                           /                         the arguments do not conform in length"]
 .help.i.r[`$"'rank";"+[2;3;4]                            /                         a function was applied to the wrong number of arguments"]
@@ -468,8 +462,82 @@
 .help.i.r[`started;"\\?started                           /                         learn q in one minute · page\n10 20 30 40                         / 10 20 30 40             a LIST is values side by side, no commas\n(10 20 30 40)1 3                    / 20 40                   index a list by position, counting from zero\n1 2 3+10                            / 11 12 13                verbs are atomic: they spread over a whole list\nsum 10 20 30                        / 60                      aggregates collapse a list to one value\n`a`b`c!10 20 30                     / `a`b`c!10 20 30         a DICTIONARY maps keys to values with !\n([]s:`a`b;p:10 20)                  / +`s`p!(`a`b;10 20)      a TABLE is a list of equal-length named columns\nselect from ([]p:10 20)where p>15   / +(,`p)!,,20             qsql picks rows and columns out of a table\n{x*2} 5                             / 10                      a FUNCTION is braces; x y z are its implicit arguments\n(+/)1 2 3 4                         / 10                      an ITERATOR: / folds a verb along a list\ncount each (\"ab\";\"cde\")             / 2 3                     each applies a verb item by item\n2#\"abcdef\"                          / \"ab\"                    # takes items; a string is a list of characters\n\"J\"$\"42\"                            / 42                      $ casts: \"J\" long, \"F\" float, \"D\" date, \"S\" symbol\n(\"SJ\";enlist\",\")0:(\"a,b\";\"x,1\")     / +`a`b!(,`x;,1)          0: parses delimited text into a table\n\\?types                             /                         keep going: \\?types \\?math \\?joins \\?strings \\?temporal \\?table"]
 / <<< end generated
 
-/ page ENTRY rows come after the generated block, so a page whose body IS its
-/ entry (`started`) keeps that line.
+/ the launcher flags, one entry per .help.cmdline row so `\?-p` answers: the
+/ table is the one home, the page (.help.i.cmdlines) the other reader.
+.help.i.r'[`$first each " " vs/:.help.cmdline`option;.help.i.line'["q ",/:.help.cmdline`option;.help.cmdline`what]];
+
+/ the extension SHOWCASE pages: each body IS its entry, in the tutorial's
+/ rhythm (call / result / meaning), the results run by hand on this build -
+/ they need `\l pq`, a library or a live peer, which the witness step cannot.
+.help.i.r[`ffi;"\n" sv .help.i.exline'[
+  ("\\?ffi";"\\l pq";"strlen:.ffi.bind[`strlen;\"C\";\"i\"]";"strlen (\"hello world\";::)";"strlen \"hello world\"";
+   "f:.ffi.bind[`libm.so.6`pow;\"ff\";\"f\"]";"f (2f;10f;::)";".ffi.callFunction[(\"f\";`sqrt)] (16f;::)";".ffi.bind[`getpid;\"\";\"i\"] (::)");
+  ("";"";"";"11i";"11i";"";"1024f";"4f";"");
+  ("call C from q: bind a symbol in any shared library as a q function · page";
+   ".ffi arrives with the standard library (the KX ffikdb surface, so its published examples run unchanged)";
+   "bind libc's strlen once: argument types \"C\" (a C string), return type \"i\" (an int)";
+   "a bound function takes ONE list of arguments, ending in :: so same-typed items cannot collapse into a vector";
+   "one argument may go bare - a peachq superset; the :: spelling is the one kx also accepts";
+   "name the library explicitly when it is not already linked into the process";
+   "two doubles in, a double out";
+   "callFunction resolves, calls and forgets: types inferred from the values, the return letter given";
+   "no arguments is the sentinel alone; uppercase letters are pointers, \"k\" a callback: \\?.ffi lists the surface")]];
+.help.i.r[`duckdb;"\n" sv .help.i.exline'[
+  ("\\?duckdb";"\\l pq";"h:hopen `:pq:duckdb:mkt:demo.duckdb";"n:1000";
+   "`:pq:duckdb:mkt:trade/ set ([] sym:n?`AAPL`MSFT; px:n?100f; sz:n?1000)";
+   "h \"SELECT sym, count(*) n FROM trade GROUP BY sym\"";"select vwap:sz wavg px by sym from `:pq:duckdb:mkt:trade/";
+   "t:get `:pq:duckdb:mkt:trade/";"-3!t";"count t";"meta t";".pq.conns[]";"hclose h");
+  ("";"";"";"";"`trade";"";"";"";"\"+`sym`px`sz!`:pq:duckdb:mkt:trade/\"";"1000";"";"";"");
+  ("DuckDB as a q data source: a database is a handle, its tables are q tables, qsql pushes down · page";
+   "the .duckdb namespace and the :pq:duckdb: provider arrive with the standard library";
+   "open (or create) a database file under the alias mkt: the alias names it from here on";
+   "";
+   "set writes a q table as a DuckDB table: symbols, floats and longs map to their SQL types";
+   "the handle takes SQL text, and the answer comes back as a q table";
+   "qsql on the resource path: the where, by and aggregate are pushed to DuckDB, only the result crosses";
+   "get answers a VIRTUAL table - nothing is read until a query needs it";
+   "the virtual table shows what it is: a flipped dict whose values are the resource";
+   "count, meta and select all work on it; .duckdb.types is the type map, \\?.duckdb the surface";
+   "";"every open connection, the provider and alias included";"")]];
+.help.i.r[`handles;"\n" sv .help.i.exline'[
+  ("\\?handles";"`:pq:duckdb:mkt:/data/market.duckdb";"h:hopen `:pq:qpc:bob:localhost:6000";"h \"tables[]\"";
+   "`:pq:qpc:bob \"1+1\"";"dow:get `:pq:qpc:bob:dowt/";"select from dow where Date=1915.04.01";
+   "select from `:trades.csv";"select from `:https://www.timestored.com/data/sample/iso10383_mic.csv";
+   "select from `:https://www.timestored.com/data/sample/types.json";".pq.conns[]";"hclose h");
+  ("";"";"";"";"2";"";"";"";"";"";"";"");
+  ("resource handles: a :pq: symbol names a resource by ALIAS, and a table resource stands in as a table · page";
+   "a resource specification: :pq: then the provider, an alias you choose, then what the provider needs";
+   "hopen answers the usual int - and the alias now names that connection for as long as it is open";
+   "the int is the kx spelling: a sync call over the wire";
+   "the alias is a handle too: a script names the peer, and no int can go stale in a variable";
+   "a trailing / marks a table resource: this one is a table on the peer, read through the alias";
+   "qsql on a remote table: the where, by and aggregate are pushed to the peer as one functional select";
+   "a file whose format is known decodes to a table: .csv .tsv .json - a URL is a transport, not a format";
+   "so an http(s) csv reads the same way: the exchange MIC codes, straight off the web";
+   "and json too - nested arrays stay nested lists; \\?loaders has the readers behind this";
+   "every open connection: kind, provider, alias, when it opened";
+   "close by the int; the alias goes with the connection")]];
+.help.i.r[`loaders;"\n" sv .help.i.exline'[
+  ("\\?loaders";"\\l pq";"`:demo.csv 0: (\"sym,px,sz\";\"AAPL,101.5,100\";\"MSFT,99.25,250\")";"select from `:demo.csv";
+   ".csv.info[`:demo.csv;()!()]";".csv.read[`:demo.csv;`trade;::;()!()]";".csv.read[`:demo.csv;::;\"SFJ\";()!()]";
+   ".j.read[`:demo.json;::;::;()!()]";".j.read[\"[{\\\"a\\\":1},{\\\"a\\\":2}]\";::;::;()!()]";
+   "select from `:https://www.timestored.com/data/sample/iso10383_mic.csv";
+   "select from `:https://www.timestored.com/data/sample/types.json");
+  ("";"";"`:demo.csv";"";"`sym`px`sz!\"sfj\"";"";"";"";"";"";"");
+  ("the csv and json readers: a file, a URL or text in memory becomes a table, types sniffed or given · page";
+   ".csv and .j.read arrive with the standard library (.j.j and .j.k are always there)";
+   "a small file to read";
+   "the shortest spelling: a .csv path is a table to qsql";
+   "the schema the reader would use: sniffed per column, S symbol F float J long";
+   "read into a NAMED table and answer a summary (rows, rejected, types); an existing table fixes the types from its meta";
+   "or give the types: the same letters 0: takes; the last argument is the options dict";
+   "JSON, the same shape: a document or JSON Lines, one table out";
+   "text already in memory reads too";
+   "a URL is fetched then decoded, so the web reads the same as the disk: every exchange's MIC code";
+   "the same for json: a document of records is a table, nested arrays stay nested lists")]];
+
+/ page ENTRY rows come after the generated block and the showcase bodies, so a
+/ page whose body IS its entry (`started`, the extension pages) keeps that line.
 .help.i.pr'[.help.i.pagenames;.help.i.pagenames];
 .help.i.pr'[key .help.i.alias;value .help.i.alias];
 

@@ -1,12 +1,14 @@
 /* q_pq — the `\l pq` standard-library gate.  ONE embedded bundle: every
  * top-level .q file under lib/ AND under qlib/src (the portable half), sorted
- * at build — the ANY-ORDER LAW makes order moot — run through the multiline
- * statement seam q_ctx_run_src, so those files carry ordinary kdb script
- * syntax.  Nothing here runs at
+ * at build — the ANY-ORDER LAW makes order moot — each run AS ITS OWN NAMED
+ * SCRIPT through the multiline statement seam (q_ctx_run_named_src), so those
+ * files carry ordinary kdb script syntax and keep their identity: the doc
+ * store's file column reads `lib/str.q`, and every file's header is captured
+ * (a flat concatenation kept only the first).  Nothing here runs at
  * q_runtime_create — the pre-gate env stays kdb-clean. */
 #include "qlang/q_pq.h"
 #include "qlang/base/q_err.h"  /* q_err — an aborted bundle load's re-signal */
-#include "qlang/q_ctx.h"       /* q_ctx_run_src — THE script seam */
+#include "qlang/q_ctx.h"       /* q_ctx_run_src / _named_src — THE script seam */
 #include "qlang/io/q_duckdb.h" /* q_duckdb_register — the .duckdb.i.* natives */
 #include "qlang/io/q_conn.h"   /* q_conn_pq_register — the .pq.i.conns native */
 #include "qlang/q_console.h"   /* q_console_pq_register — the .pq.i.termsize native */
@@ -16,7 +18,7 @@
 #include "qlang/ops/q_regex.h" /* q_regex_register — the .regexp.i.* natives */
 #include "qlang/ops/q_strfmt.h" /* q_strfmt_register — the .str.i.printf/.format natives */
 #include "qlang/ops/q_strns.h" /* q_strns_register — the .str.i.* strip natives */
-#include "qlang/lib_gen.h"     /* PEACHQ_LIB_BOOTSTRAP — the codegen'd lib/ + qlib/src bundle */
+#include "qlang/lib_gen.h"     /* PEACHQ_LIB_FILES — the codegen'd lib/ + qlib/src bundle, one entry per file */
 #include "qlang/helpdb_gen.h"  /* PEACHQ_HELPDB_BOOTSTRAP — the codegen'd lib/help-db.q */
 #include "qlang/q_env.h"       /* q_env_bind — the `.help.i.loaddb` binding */
 #include "lang/env.h"          /* ray_fn_unary — the `.help.i.loaddb` value */
@@ -72,7 +74,10 @@ ray_t* q_pq_load(void) {
     q_strfmt_register();
     q_strns_register();
     ray_t* esig = NULL;
-    int rc = q_ctx_run_src(PEACHQ_LIB_BOOTSTRAP, stdout, stderr, &esig);
+    int rc = 0;
+    size_t n = sizeof PEACHQ_LIB_FILES / sizeof *PEACHQ_LIB_FILES;
+    for (size_t i = 0; i < n && rc == 0; i++)
+        rc = q_ctx_run_named_src(PEACHQ_LIB_FILES[i].name, PEACHQ_LIB_FILES[i].src, stdout, stderr, &esig);
     if (esig) return esig;
     return rc >= 2 ? q_err((q_err_e)(rc - 2)) : NULL;
 }

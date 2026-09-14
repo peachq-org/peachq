@@ -535,6 +535,17 @@ ray_t* q_tok_literal(const char *src, int *p, const char **err) {
     *err = NULL;
     if (q_tok_byte_lit_starts(src, *p)) return lit_byte(src, p, err);
     int start = *p;
+    /* A glued 0/1 run ending in 'b' never goes through the integer parser: `00000000000000000000b` is 20 digits,
+     * one past what an int64 holds, and it is a boolean vector of any length. */
+    int nb1 = 0;
+    while (src[start + nb1] == '0' || src[start + nb1] == '1') nb1++;
+    if (nb1 && src[start + nb1] == 'b') {
+        if (nb1 > MAX_VEC) LIT_ERR("boolean literal too long");
+        uint8_t bits[MAX_VEC];
+        for (int i = 0; i < nb1; i++) bits[i] = (uint8_t)(src[start + i] - '0');
+        *p = start + nb1 + 1;
+        return nb1 == 1 ? ray_bool(bits[0]) : ray_vec_from_raw(RAY_BOOL, bits, nb1);
+    }
     q_tok_el buf[MAX_VEC]; int m = 0;
     char letter = 0;
     if (lit_magnitude(src, p, &buf[m++], err) != 1)

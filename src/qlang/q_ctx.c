@@ -331,9 +331,13 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig) {
 }
 
 int q_ctx_run_src(const char* s, FILE* out, FILE* err, ray_t** esig) {
-    /* No path to attribute: the embedded bundles are ONE concatenated string,
-     * so their docs record the empty file. */
+    /* No path to attribute: the core bundles are ONE concatenated string, so
+     * their docs record the empty file. */
     return ctx_run_script(s, strlen(s), 0, out, err, esig);
+}
+
+int q_ctx_run_named_src(const char* name, const char* s, FILE* out, FILE* err, ray_t** esig) {
+    return ctx_run_script(s, strlen(s), ray_sym_intern_runtime(name, strlen(name)), out, err, esig);
 }
 
 /* ===== The remote doors (see q_ctx.h) =====

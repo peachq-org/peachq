@@ -1,4 +1,8 @@
-/ massive.q - q wrapper over the Massive market-data REST API.  \l pq (it reads responses with .j.read)
+/ Market data from the Massive REST API (massive.com): bars, daily aggregates, snapshots, trades, quotes,
+/ tickers, splits, dividends, IPOs and news, each answered as a q table.  Set MASSIVE_API_KEY in the environment
+/ or call .massive.setKey.  .massive.bars[`AAPL;2026.08.01;2026.09.05;()!()] is a month of daily bars; the last argument
+/ of every call is an options dict (()!() for none) - `max`maxpages bound paging, other keys pass to the API.
+/ @implNote A q wrapper over the REST surface; \l pq (it reads responses with .j.read).
 / Paths are passed WHOLE by the caller (the live surface mixes /v1, /v2 and /v3),
 / so no version prefix is ever baked into the transport.
 
@@ -8,6 +12,7 @@
 .massive.i.nul:(0#`)!();
 .massive.envelope:.massive.i.nul;
 
+/ set the API key for this session; MASSIVE_API_KEY in the environment is read at load
 .massive.setKey:{.massive.apikey::x;};
 
 .massive.i.fmt:{[v] t:type v;
@@ -40,6 +45,8 @@
 / dict stays that dict, non-dicts stay a list) and no payload key leaves the envelope dict: that shape
 / policy is massive's, the tabling is the reader's.  The key is read off the RESPONSE, since
 / .massive.fetch takes any path and no endpoint can be asked.
+
+/ the response keys whose value is the payload (the table), in the order tried
 .massive.pay:`results`tickers;
 
 .massive.i.paykey:{[r] .massive.pay where .massive.pay in key r};
@@ -62,8 +69,9 @@
   k:.massive.i.paykey resp 1;
   .massive.coerce $[count k; .massive.i.pay[resp;first k]; resp 1]};
 
-/ Epoch coercion, one name list.  Aggregates carry ms, snapshots ns - told apart
-/ by magnitude, not by endpoint.  ISO strings arrive under a *_utc name.
+/ the response columns that are epoch timestamps, converted to q timestamps on the way in
+/ @implNote Aggregates carry ms, snapshots ns - told apart by magnitude, not by endpoint.
+/ ISO strings arrive under a *_utc name.
 .massive.tcols:`t`updated;
 .massive.i.ns:1000000000000000;
 .massive.i.ep:"j"$1970.01.01D00:00:00.000000000;
@@ -91,9 +99,11 @@
   .massive.check .massive.envelope;
   (t;.massive.envelope)};
 
+/ GET any API path ("/v3/reference/tickers", or (path;params dict)) and answer its payload as a table
 .massive.fetch:{[x] .massive.convert .massive.i.raw x};
 
-/ next_url is followed internally into ONE table.  `max`/`maxpages` bound the pages
+/ the default options every call starts from: `max rows and `maxpages pages before paging stops
+/ @implNote next_url is followed internally into ONE table.  `max`/`maxpages` bound the pages
 / FETCHED, never the rows KEPT - a page that arrived whole is returned whole, so the
 / result may exceed `max` and an unpaginated response is never sliced.
 .massive.defaults:`max`maxpages!(10000;10);
@@ -130,22 +140,35 @@
   o:.massive.opts[.massive.defaults;o];
   .massive.i.walk[(p;extra,.massive.i.params o);o]};
 
+/ every US stock's daily bar for one date; adj 1b for split-adjusted
 .massive.daily:{[dt;adj;o] .massive.i.paged["/v2/aggs/grouped/locale/us/market/stocks/",.massive.i.fmt dt;o;(enlist `adjusted)!enlist adj]};
 
 .massive.bardefaults:`mult`span`adjusted`limit!(1;`day;1b;5000);
+/ bars for a ticker from date f to date t; options `span (`day `hour `minute) and `mult set the bar size
 .massive.bars:{[s;f;t;o]
   o:.massive.opts[.massive.defaults,.massive.bardefaults;o];
   p:"/v2/aggs/ticker/",(.massive.i.fmt s),"/range/",(.massive.i.fmt o`mult),"/",(.massive.i.fmt o`span),"/",(.massive.i.fmt f),"/",.massive.i.fmt t;
   .massive.i.walk[(p;(key[o] except .massive.i.ctl,`mult`span)#o);o]};
 
+/ the previous day's open, high, low, close and volume for a ticker
 .massive.prevclose:{[s;o] .massive.i.paged["/v2/aggs/ticker/",(.massive.i.fmt s),"/prev";o;.massive.i.nul]};
+/ one ticker's open, high, low and close for one date
 .massive.ohlc:{[s;dt;o] .massive.fetch ("/v1/open-close/",(.massive.i.fmt s),"/",.massive.i.fmt dt;.massive.i.params .massive.opts[.massive.defaults;o])};
+/ the current snapshot (last trade, last quote, today's bar) for a list of tickers
 .massive.snap:{[syms;o] .massive.i.paged["/v2/snapshot/locale/us/markets/stocks/tickers";o;(enlist `tickers)!enlist .massive.i.fmt syms]};
+/ the reference list of tickers; filter with options such as `market`exchange`search
 .massive.tickers:{[o] .massive.i.paged["/v3/reference/tickers";o;.massive.i.nul]};
+/ stock splits; options such as `ticker`execution_date filter
 .massive.splits:{[o] .massive.i.paged["/v3/reference/splits";o;.massive.i.nul]};
+/ dividends; options such as `ticker`ex_dividend_date filter
 .massive.divs:{[o] .massive.i.paged["/v3/reference/dividends";o;.massive.i.nul]};
+/ IPOs; options such as `ticker`listing_date filter
 .massive.ipos:{[o] .massive.i.paged["/vX/reference/ipos";o;.massive.i.nul]};
+/ news articles; options such as `ticker`published_utc filter
 .massive.news:{[o] .massive.i.paged["/v2/reference/news";o;.massive.i.nul]};
+/ tick-level trades for a ticker; options such as `timestamp`limit bound the range
 .massive.trades:{[s;o] .massive.i.paged["/v3/trades/",.massive.i.fmt s;o;.massive.i.nul]};
+/ tick-level quotes for a ticker; options such as `timestamp`limit bound the range
 .massive.quotes:{[s;o] .massive.i.paged["/v3/quotes/",.massive.i.fmt s;o;.massive.i.nul]};
+/ is the market open now - the exchanges, their state and the server time
 .massive.status:{[] .massive.fetch "/v1/marketstatus/now"};

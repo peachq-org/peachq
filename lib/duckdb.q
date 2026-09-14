@@ -1,4 +1,8 @@
-/ duckdb.q - DuckDB as a virtual-table PROVIDER (`:pq:duckdb:alias:/path/db`,
+/ Query and write DuckDB databases from q: a database is a handle, its tables are q tables.
+/ h:hopen `:pq:duckdb:alias:/path/db opens (or creates) one; h "SELECT ..." runs SQL and answers a table;
+/ `:pq:duckdb:alias:table/ names a table for get, set, upsert and qsql, with select/where/by pushed down to
+/ DuckDB.  .duckdb.types[] is the type map, .duckdb.err[] the last error.  \?duckdb has examples.
+/ @implNote DuckDB as a virtual-table PROVIDER (`:pq:duckdb:alias:/path/db`,
 / actionable-plans/2026-08-07-plugin-data-sources-tables.md).  These hooks ARE
 / the DuckDB surface: the bespoke .duckdb.connect/.sql/.select API was replaced
 / 2026-08-07, not wrapped.  Written over the internal natives .duckdb.i.* (the
