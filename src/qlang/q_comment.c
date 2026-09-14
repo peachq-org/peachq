@@ -21,6 +21,7 @@ static int     g_seen_code;
 static int     g_file_run;           /* the run being read is the file's leading one */
 static int     g_file_run_done;
 static int     g_firing;
+static int     g_boot;               /* q_runtime_create's core list is loading: capture is inert */
 
 /* Interned per call, never cached: sym ids do not survive a runtime teardown,
  * and the test driver builds a fresh runtime per suite. */
@@ -30,7 +31,7 @@ static int64_t comment_def_sym(void)  { return ray_sym_intern_runtime(".help.reg
 /* Queue one hook record (its N owned parts are consumed).  A record short one
  * part would misdispatch at the fire point, so an alloc failure drops it whole. */
 static void comment_queue(ray_t** parts, int n) {
-    ray_t* rec = ray_list_new(n);
+    ray_t* rec = g_boot ? NULL : ray_list_new(n);
     for (int i = 0; i < n; i++) {
         if (!parts[i]) { if (rec) { ray_release(rec); rec = NULL; } continue; }
         if (rec) rec = ray_list_append(rec, parts[i]);
@@ -63,6 +64,8 @@ static void comment_claim_file(const char* hdr, size_t n) {
 static void comment_drop_pending(void) {
     if (g_pending) { ray_release(g_pending); g_pending = NULL; }
 }
+
+void q_comment_boot(int on) { g_boot = on; }
 
 q_comment_script_t q_comment_script_begin(int64_t file_sym) {
     q_comment_script_t saved = { g_file, g_stmt_line, g_seen_code,
@@ -118,9 +121,10 @@ void q_comment_fresh_line(int64_t line) {
     /* A leading run ending on CODE falls through to that definition; only a
      * BREAK-terminated leading run documents the file (q_comment_break). */
     if (g_file_run) { g_file_run = 0; g_file_run_done = 1; }
-    /* THE gate: the hook unbound (no `\l pq`, or the always-on core
-     * bootstrap, which runs before it) captures nothing at all. */
-    if (!n || !q_env_get(comment_def_sym())) return;
+    /* THE gate: the core bootstrap (help.q binds the hook mid-file, so the
+     * bound test alone would capture the rest of help.q) and an unbound hook
+     * both capture nothing at all. */
+    if (!n || g_boot || !q_env_get(comment_def_sym())) return;
     ray_t* hdr = ray_charv(g_acc, (int64_t)n);
     if (!hdr) return;
     g_pending = hdr;
