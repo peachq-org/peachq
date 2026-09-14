@@ -46,5 +46,9 @@ void q_console_clip_setting(int64_t* rows, int64_t* cols);
 /* Bind the `.pq.i.termsize` native (live terminal rows/cols) — called from
  * the `\l pq` gate, beside the other .pq.i.* registrars. */
 void q_console_pq_register(void);
+/* The same native as `.help.i.termsize`, bound at BOOT beside `.help.i.loaddb`:
+ * help clips to the live terminal before `\l pq`, and `.help` is already a
+ * peachq name in the pre-gate env. */
+void q_console_help_register(void);
 
 #endif /* Q_CONSOLE_H */

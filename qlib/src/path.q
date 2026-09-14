@@ -1,4 +1,6 @@
-/ path.q - THE .path surface: path structure as text, and never storage.  Nothing here opens, stats, expands `~`,
+/ Path structure as text, pathlib's names: .path.name, .path.stem, .path.suffix, .path.parent, .path.join and
+/ .path.string.  Nothing here touches the disk.
+/ @implNote THE .path surface: path structure as text, and never storage.  Nothing here opens, stats, expands `~`,
 / resolves a symlink or makes a path absolute.  Portable q - it must run on kx q as well as peachq, so it calls
 / nothing from the peachq C surface.  Names, and the stem/suffix rule, are pathlib's.
 / Three families live in `: symbols and only the FIRST is path-shaped: paths, IPC handles (`:host:port,

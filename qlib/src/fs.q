@@ -1,4 +1,6 @@
-/ fs.q - THE .fs surface: the read-safe view of the filesystem, plus deletion bounded to the objects NAMED - one hdel
+/ The filesystem: .fs.exists, .fs.isfile, .fs.isdir, .fs.size answer for a path, a symbol or a list of them;
+/ .fs.remove deletes the files named and .fs.rmdir the empty directories named - never anything below them.
+/ @implNote THE .fs surface: the read-safe view of the filesystem, plus deletion bounded to the objects NAMED - one hdel
 / per element, so a vector argument deletes exactly its own elements and never a level below any of them.  Every
 / path argument converts through .path.path, so .fs takes a string, a symbol or a path and inherits .path's refusal of
 / `:pq: provider handles and scheme:// URLs.  Portable q - key, hcount and hdel are all standard kdb, so nothing here

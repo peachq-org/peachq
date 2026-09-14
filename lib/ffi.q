@@ -1,4 +1,8 @@
-/ .ffi - calling C from q: the KX ffikdb surface verbatim over a vendored libffi (src/qlang/io/q_ffi.c), so published
+/ Call C from q: .ffi.bind[`name;"argtypes";"rettype"] turns a symbol in any shared library into a q function.
+/ Call it with one list of arguments ending in :: - f (2f;10f;::).  Name the library for one not already loaded:
+/ `libm.so.6`pow.  .ffi.callFunction[("f";`sqrt)] (16f;::) is the one-shot form.  Type letters are q's own
+/ (i j f C ...), uppercase for pointers, "k" a callback.  \?ffi has examples; user-docs/ffi.md the detail.
+/ @implNote The KX ffikdb surface verbatim over a vendored libffi (src/qlang/io/q_ffi.c), so published
 / ffikdb examples run unchanged.  Loaded by the `\l pq` gate.  Full doc: user-docs/ffi.md.
 / Lambdas, not natives, so the surface is DISCOVERABLE: a bound function prints the word `arglist`, which is the answer
 / to the question that sends people here.

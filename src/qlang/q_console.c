@@ -161,9 +161,10 @@ static ray_t* termsize_fn(ray_t* x) {
     return ray_vec_append(v, &tty);
 }
 
-void q_console_pq_register(void) {
-    static const char nm[] = ".pq.i.termsize";
+static void termsize_bind(const char* nm) {
     ray_t* obj = ray_fn_unary(nm, RAY_FN_NONE, termsize_fn);
     q_env_bind(ray_sym_intern(nm, strlen(nm)), obj);
     ray_release(obj);
 }
+void q_console_pq_register(void)   { termsize_bind(".pq.i.termsize"); }
+void q_console_help_register(void) { termsize_bind(".help.i.termsize"); }
