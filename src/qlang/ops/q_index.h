@@ -42,6 +42,7 @@ ray_t* q_index_elem_at(ray_t* v, int64_t i);
  * ANY item make v rank-2 under flip, which is_nested (item 0 only) misses. */
 int q_index_is_nested(ray_t* v);
 int q_index_any_nested_item(ray_t* v);
+int q_index_rank(ray_t* v);     /* ref/join.md:192: the recursive depth of the first element (`,:` enlists at +1) */
 
 /* read at depth: x . ix[0..k) (k==0 -> x).  Borrows all; owned result. */
 ray_t* q_index_at(ray_t* x, ray_t* const* ix, int64_t k);

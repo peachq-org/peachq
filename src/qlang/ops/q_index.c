@@ -75,6 +75,19 @@ int q_index_is_nested(ray_t* v) {
     return r;
 }
 
+/* ref/join.md:192's rank: the recursive depth of the first element — a dict's is its first value, a table's its
+ * first row, an empty list's 1, a string atom's 1 (a STR vector stores a list of strings). */
+int q_index_rank(ray_t* v) {
+    if (!v || RAY_IS_ERR(v)) return 0;
+    if (q_type_is_str_atom(v)) return 1;
+    if (ray_is_atom(v)) return 0;
+    ray_t* e = v->type == RAY_DICT ? q_index_elem_at(ray_dict_vals(v), 0)
+             : q_builtins_count_long(v) > 0 ? q_index_elem_at(v, 0) : NULL;
+    int r = 1 + q_index_rank(e);
+    if (e) ray_release(e);
+    return r;
+}
+
 int q_index_any_nested_item(ray_t* v) {
     if (!v || v->type != RAY_LIST) return 0;
     int64_t n = ray_len(v);
@@ -629,12 +642,82 @@ static ray_t* leaf1(ray_t* x, ray_t* i0, int64_t p, ray_t* f, ray_t* y) {
     return r;
 }
 
-/* one index item at this level: the leaf, or the path continued through the child it names */
+/* A completed level owns the homogeneity invariant (owner ruling 2026-09-14: amends and removals collapse, appends
+ * never do): a general list — or a dict's value list — that has become same-typed atoms is the typed vector.  Once
+ * per level, when its whole amend is done: per item would type the second item of `x[0 1]:(`b;2)`.  Consumes x. */
+static ray_t* level_collapse(ray_t* x) {
+    if (!x || RAY_IS_ERR(x)) return x;
+    ray_t* v = x->type == RAY_LIST ? x : x->type == RAY_DICT ? ray_dict_slots(x)[1] : NULL;
+    if (!v || v->type != RAY_LIST) return x;
+    ray_t* cv = q_list_collapse(v);
+    if (!cv || RAY_IS_ERR(cv) || cv == v) {          /* the amend stood; uncollapsed is a legal value */
+        if (cv && RAY_IS_ERR(cv)) ray_error_free(cv); else if (cv) ray_release(cv);
+        return x;
+    }
+    ray_t* nd = cv;
+    if (v != x) {
+        ray_retain(ray_dict_slots(x)[0]);
+        nd = ray_dict_new(ray_dict_slots(x)[0], cv);     /* consumes both, on failure too */
+        if (!nd || RAY_IS_ERR(nd)) { if (nd) ray_error_free(nd); return x; }
+    }
+    ray_release(x);
+    return nd;
+}
+
+/* The slot x's child at atom index i0 sits in, when the whole level is ours to write: x at rc 1 and the child at rc 1
+ * in a slot array only x holds (a list's own slots, a dict's value list, a table's column list).  A shared level
+ * anywhere answers NULL and the path-copying walk COWs it there, as ref/amend.md's other-references law says. */
+static ray_t** own_slot(ray_t* x, ray_t* i0) {
+    if (!x || !i0 || x->rc != 1 || (x->attrs & (RAY_ATTR_ARENA | RAY_ATTR_SLICE))) return NULL;
+    ray_t* l = x;
+    int64_t p = -1;
+    if (x->type == RAY_DICT || x->type == RAY_TABLE) {
+        l = ray_dict_slots(x)[1];
+        if (!l || l->type != RAY_LIST || l->rc != 1 || (l->attrs & (RAY_ATTR_ARENA | RAY_ATTR_SLICE))) return NULL;
+        if (x->type == RAY_TABLE) {
+            if (i0->type != -RAY_SYM) return NULL;
+            for (int64_t c = 0, n = ray_table_ncols(x); c < n && p < 0; c++)
+                if (ray_table_col_name(x, c) == i0->i64) p = c;
+        } else {
+            ray_t* pos = key_pos(x, i0);
+            if (!pos || RAY_IS_ERR(pos)) { if (pos) ray_release(pos); return NULL; }
+            p = pos->i64;
+            ray_release(pos);
+        }
+    } else if (x->type != RAY_LIST || !idx_i64(i0, &p)) return NULL;
+    if (p < 0 || p >= ray_len(l)) return NULL;
+    ray_t** slot = (ray_t**)ray_data(l) + p;
+    ray_t* c = *slot;
+    return c && !RAY_IS_ERR(c) && c->rc == 1 && !(c->attrs & (RAY_ATTR_ARENA | RAY_ATTR_SLICE)) ? slot : NULL;
+}
+
+/* one index item at this level: the leaf, or the path continued through the child it names.  An exclusive path
+ * lifts the child OUT of its slot (the slot's ref becomes the walk's, so rc 1 reaches the store and it writes where
+ * it stands) and puts the amended child back; a table names its column at either depth (the axis law). */
 static ray_t* amend_one(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k, ray_t* f, ray_t* y) {
-    if (k == 0) return leaf1(x, i0, -1, f, y);
+    if (k == 0) {
+        ray_t** slot = y && f && q_registry_row_of(f, Q_DYADIC) == q_ops_find(",", 1) ? own_slot(x, i0) : NULL;
+        if (!slot) return leaf1(x, i0, -1, f, y);
+        ray_t* child = *slot;                        /* `x[i],:y` grows the child where it stands */
+        *slot = NULL;
+        ray_t* r = q_join_grow(&child, y);
+        *slot = RAY_IS_ERR(r) ? child : r;
+        return RAY_IS_ERR(r) ? r : x;
+    }
+    ray_t* ci = rest[0];
+    ray_t** slot = own_slot(x, i0);
+    if (!slot && x->type == RAY_TABLE && ci && ci->type == -RAY_SYM && (slot = own_slot(x, ci)) != NULL) ci = i0;
+    if (slot) {
+        ray_t* child = *slot;
+        *slot = NULL;
+        ray_t* nc = amend_r(child, ci, rest + 1, k - 1, f, y);
+        if (RAY_IS_ERR(nc)) { *slot = child; return nc; }
+        *slot = level_collapse(nc);
+        return x;
+    }
     ray_t* child = index_level(x, i0, 1);            /* absent path: 'index */
     if (!child || RAY_IS_ERR(child)) return child ? child : q_err(QE_TYPE);
-    ray_t* nc = amend_r(child, rest[0], rest + 1, k - 1, f, y);
+    ray_t* nc = level_collapse(amend_r(child, rest[0], rest + 1, k - 1, f, y));
     if (RAY_IS_ERR(nc)) { ray_release(child); return nc; }
     ray_t* r = store_level(x, i0, nc);
     ray_release(nc);
@@ -754,7 +837,7 @@ ray_t* q_index_amend(ray_t* x, ray_t* const* ix, int64_t k, ray_t* f, ray_t* y) 
     }
     if (k <= 0 || (!is_coll(x) && x->type != RAY_DICT && x->type != RAY_TABLE))
         return amend_entire(x, f, y);
-    return amend_r(x, ix[0], ix + 1, k - 1, f, y);
+    return level_collapse(amend_r(x, ix[0], ix + 1, k - 1, f, y));
 }
 
 ray_t* q_index_amend_at(ray_t* x, ray_t* i, ray_t* f, ray_t* y) {
