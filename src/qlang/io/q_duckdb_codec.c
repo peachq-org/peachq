@@ -1459,12 +1459,13 @@ static ray_t* qd_rec_build(int slot, qd_racc_t* acc, const qd_colmap_t* cm, bool
     /* THE emit decision, per kind and over the whole column: the shape mirror always builds (the caller drops it
      * where nothing flagged), a zoned field's offsets always ship, and every other kind ships where some field,
      * at some depth, asked for it.  A MAP carries its companions on its VALUES — its keys are the mirror's own
-     * keys — so a key half that grows one has nowhere to put it. */
+     * keys — so a key half that grows one has nowhere to put it: refused, never read as the null (ruled 2026-09-15). */
     const qd_tmap_t* tmof[QD_NCOS] = { NULL };
     for (int k = 0; out && k < QD_NCOS; k++) {
         bool always = k == QD_CO_ISNULL || k == QD_CO_TZOFF;
         if (map && !always && acc->fcos[0].co[k].want && acc->fcos[0].co[k].need)
-            return q_duckdb_fail(slot, cm->leaf->logical, "a MAP's keys grow a companion its mirror cannot carry");
+            return q_duckdb_fail(slot, cm->leaf->logical, k == QD_CO_NOTNULL ? "a key on the q null pattern has no companion"
+                                                                             : "a MAP's keys grow a companion its mirror cannot carry");
         for (int i = map ? 1 : 0; i < r->n; i++) {
             if (!acc->fcos[i].co[k].want || !(always || acc->fcos[i].co[k].need)) continue;
             if (!out->co[k].want) tmof[k] = r->f[i].map.leaf;
