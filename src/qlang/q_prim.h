@@ -209,6 +209,10 @@ ray_t* q_wj1_wrap(ray_t** args, int64_t n);
 ray_t* q_table_at(ray_t* t, ray_t* idx);
 ray_t* q_table_row_at(ray_t* t, int64_t row);
 
+/* THE boxed item of any sequence (ops/q_join.c) — an owned atom off a typed vector, an enum item still
+ * stamped with its domain.  Homed here because the DuckDB record codec builds its dict cells from it. */
+ray_t* q_join_item(ray_t* x, int64_t i);
+
 /* `cols x` / `meta x` (ops/q_table.c) — env-bound by q_builtins_register, and
  * q_cols_fn is qSQL's column-name home too.  A dict answers with its keys; a
  * keyed table answers with EVERY column, key ++ value. */
