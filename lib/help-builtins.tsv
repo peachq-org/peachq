@@ -490,12 +490,6 @@ $	(2 2#1 0 0 1f)$1 2f	multiply a matrix by a matrix or vector
 /	{x*2}/[3;1]	apply a function x times, or until it converges
 \	(+\)1 2 3	accumulate along a list, keeping every step - scan
 \	10+\1 2 3	accumulate from a starting value
--p	q -p 5000	listen on a port for IPC and HTTP clients - also spelled --port
--q	q -q script.q	start quiet: no banner and no q) prompt
--u	q -u users.txt	load a user:password file and require a login
--U	q -U users.txt	as -u, and block remote file access and system commands
--E	q -E 1	set TLS server mode: 0 plain, 1 plain and TLS, 2 TLS only
--classic	q -classic	start in kx-classic mode: legacy display, no automatic \l pq
 'type	1+`a	a value has the wrong type for the operation
 'length	1 2 3+1 2	the arguments do not conform in length
 'rank	+[2;3;4]	a function was applied to the wrong number of arguments

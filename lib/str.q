@@ -1,4 +1,7 @@
-/ str.q - THE public .str surface: Python-shaped string helpers, so a user reuses the names they already know.
+/ Python-shaped string helpers: .str.strip lstrip rstrip, startswith endswith, removeprefix removesuffix,
+/ isalpha isdigit isalnum isspace isupper islower, and .str.printf / .str.format - Python's spellings and
+/ Python's semantics.  Every function takes one string or a list of strings, and a symbol reads as a string.
+/ @implNote THE public .str surface, so a user reuses the names they already know.
 / Python's exact SPELLINGS (isalpha, startswith, removeprefix - not the snake_case of qlib/q-coding-standards.md,
 / an owner-ratified departure for familiarity) and Python's exact SEMANTICS, with q idiom only where Python has no
 / opinion: a symbol reads wherever a string does, and everything works over a LIST of strings as readily as over one.

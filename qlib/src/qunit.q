@@ -1,4 +1,4 @@
-/ Unit testing for q similar to junit, cunit etc.       <br/>
+/ qunit.q - unit testing for q similar to junit, cunit etc.
 / Tests should be specified in their own file/namespace       <br/>
 / Actual test functions should then be named test* and contain assertions.       <br/>
 / <br/>
