@@ -38,8 +38,8 @@
  * ============================================================================ */
 
 typedef struct {
-    double sum_f, min_f, max_f, prod_f, first_f, last_f, sum_sq_f;
-    int64_t sum_i, min_i, max_i, prod_i, first_i, last_i, sum_sq_i;
+    double sum_f, min_f, max_f, prod_f, sum_sq_f;
+    int64_t sum_i, min_i, max_i, prod_i, sum_sq_i;
     /* Parallel f64 sum of the integer stream — used by AVG so the
      * mean of an i64 column whose sum exceeds 2^63 (e.g. ClickBench
      * UserID, signed values around ±9e18 × 10^7 rows) stays accurate
@@ -47,7 +47,6 @@ typedef struct {
     double sum_d;
     int64_t cnt;
     int64_t null_count;
-    bool has_first;
 } reduce_acc_t;
 
 static void reduce_acc_init(reduce_acc_t* acc) {
@@ -55,11 +54,11 @@ static void reduce_acc_init(reduce_acc_t* acc) {
      * (min of {+inf} is +inf), and cnt>0 — not the init sentinel — decides
      * whether anything was seen (live-infinity model, 2026-07-28). */
     acc->sum_f = 0; acc->min_f = INFINITY; acc->max_f = -INFINITY;
-    acc->prod_f = 1.0; acc->first_f = 0; acc->last_f = 0; acc->sum_sq_f = 0;
+    acc->prod_f = 1.0; acc->sum_sq_f = 0;
     acc->sum_i = 0; acc->min_i = INT64_MAX; acc->max_i = INT64_MIN;
-    acc->prod_i = 1; acc->first_i = 0; acc->last_i = 0; acc->sum_sq_i = 0;
+    acc->prod_i = 1; acc->sum_sq_i = 0;
     acc->sum_d = 0;
-    acc->cnt = 0; acc->null_count = 0; acc->has_first = false;
+    acc->cnt = 0; acc->null_count = 0;
 }
 
 /* Lexicographic SYM compare — resolves both sym_ids to strings and
@@ -117,33 +116,18 @@ static inline void out_col_adopt_str_pool(ray_t* dst, const ray_t* src) {
     }
 }
 /* Scan rows [optionally via sel] and return the winning row index for
- * op (OP_MIN/OP_MAX/OP_FIRST/OP_LAST), or -1 if every scanned row is null.
+ * op (OP_MIN/OP_MAX/OP_FIRST/OP_LAST), or -1 if the scan is empty or (min/max
+ * only) every scanned row is null — first/last are positional, null included.
  *
- * The element type (STR vs GUID) and the operator are resolved ONCE here,
- * before any loop — the inner loops carry no type/op switch.  first/last are
- * pure positional scans (no value comparison); min/max run a single
- * type-specialised compare loop whose direction (want_min) is hoisted out.
- * (sel/has_nulls remain a predictable per-row branch, exactly as the integer
- * reduce loops below do; the goal is no *type/op dispatch* inside the loop.) */
+ * The element type (STR vs GUID) and the direction (want_min) are resolved
+ * ONCE here, before the single type-specialised compare loop.  (sel/has_nulls
+ * remain a predictable per-row branch, exactly as the integer reduce loops
+ * below do; the goal is no *type/op dispatch* inside the loop.) */
 static int64_t wide_winner_row(ray_t* input, uint16_t op,
                                const int64_t* sel, int64_t scan_n,
                                bool has_nulls) {
-    /* first/last: positional — return the first/last non-null row, no compare. */
-    if (op == OP_FIRST) {
-        for (int64_t i = 0; i < scan_n; i++) {
-            int64_t row = sel ? sel[i] : i;
-            if (!has_nulls || !ray_vec_is_null(input, row)) return row;
-        }
-        return -1;
-    }
-    if (op == OP_LAST) {
-        for (int64_t i = scan_n - 1; i >= 0; i--) {
-            int64_t row = sel ? sel[i] : i;
-            if (!has_nulls || !ray_vec_is_null(input, row)) return row;
-        }
-        return -1;
-    }
-    /* min/max: one type-specialised compare loop, direction hoisted out. */
+    if (op == OP_FIRST) return scan_n > 0 ? (sel ? sel[0] : 0) : -1;
+    if (op == OP_LAST)  return scan_n > 0 ? (sel ? sel[scan_n - 1] : scan_n - 1) : -1;
     const bool want_min = (op == OP_MIN);
     int64_t best = -1;
     if (input->type == RAY_GUID) {
@@ -208,8 +192,7 @@ static ray_t* agg_wide_reduce(ray_t* input, uint16_t op,
             (acc)->sum_d   += (double)v; \
             if (v < (acc)->min_i) (acc)->min_i = v; \
             if (v > (acc)->max_i) (acc)->max_i = v; \
-            if (!(acc)->has_first) { (acc)->first_i = v; (acc)->has_first = true; } \
-            (acc)->last_i = v; (acc)->cnt++; \
+            (acc)->cnt++; \
         } \
     } while (0)
 
@@ -225,8 +208,7 @@ static ray_t* agg_wide_reduce(ray_t* input, uint16_t op,
             (acc)->sum_f += v; (acc)->sum_sq_f += v * v; (acc)->prod_f *= v; \
             if (v < (acc)->min_f) (acc)->min_f = v; \
             if (v > (acc)->max_f) (acc)->max_f = v; \
-            if (!(acc)->has_first) { (acc)->first_f = v; (acc)->has_first = true; } \
-            (acc)->last_f = v; (acc)->cnt++; \
+            (acc)->cnt++; \
         } \
     } while (0)
 
@@ -276,8 +258,7 @@ static void reduce_range(ray_t* input, int64_t start, int64_t end,
             acc->sum_d   += (double)v;
             if (v < acc->min_i) acc->min_i = v;
             if (v > acc->max_i) acc->max_i = v;
-            if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
-            acc->last_i = v; acc->cnt++;
+            acc->cnt++;
         }
         break;
     }
@@ -305,8 +286,7 @@ static void reduce_range(ray_t* input, int64_t start, int64_t end,
                 if (acc->cnt == 0) { acc->min_i = v; acc->max_i = v; }
                 else { if (sym_lex_lt(dom, v, acc->min_i)) acc->min_i = v;
                        if (sym_lex_gt(dom, v, acc->max_i)) acc->max_i = v; }
-                if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
-                acc->last_i = v; acc->cnt++;
+                acc->cnt++;
             }
         } else if (!has_nulls) {
             for (int64_t i = start; i < end; i++) {
@@ -317,8 +297,7 @@ static void reduce_range(ray_t* input, int64_t start, int64_t end,
                 if (acc->cnt == 0) { acc->min_i = v; acc->max_i = v; }
                 else { if (sym_lex_lt(dom, v, acc->min_i)) acc->min_i = v;
                        if (sym_lex_gt(dom, v, acc->max_i)) acc->max_i = v; }
-                if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
-                acc->last_i = v; acc->cnt++;
+                acc->cnt++;
             }
         } else if (!idx) {
             for (int64_t i = start; i < end; i++) {
@@ -329,8 +308,7 @@ static void reduce_range(ray_t* input, int64_t start, int64_t end,
                 if (acc->cnt == 0) { acc->min_i = v; acc->max_i = v; }
                 else { if (sym_lex_lt(dom, v, acc->min_i)) acc->min_i = v;
                        if (sym_lex_gt(dom, v, acc->max_i)) acc->max_i = v; }
-                if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
-                acc->last_i = v; acc->cnt++;
+                acc->cnt++;
             }
         } else {
             for (int64_t i = start; i < end; i++) {
@@ -342,8 +320,7 @@ static void reduce_range(ray_t* input, int64_t start, int64_t end,
                 if (acc->cnt == 0) { acc->min_i = v; acc->max_i = v; }
                 else { if (sym_lex_lt(dom, v, acc->min_i)) acc->min_i = v;
                        if (sym_lex_gt(dom, v, acc->max_i)) acc->max_i = v; }
-                if (!acc->has_first) { acc->first_i = v; acc->has_first = true; }
-                acc->last_i = v; acc->cnt++;
+                acc->cnt++;
             }
         }
         break;
@@ -394,9 +371,6 @@ static void reduce_merge(reduce_acc_t* dst, const reduce_acc_t* src, int8_t in_t
     }
     dst->cnt += src->cnt;
     dst->null_count += src->null_count;
-    /* reduce_merge does not merge first/last; caller handles these separately.
-     * Since workers process sequential ranges, worker 0's first is the global first,
-     * and the last worker's last is the global last. */
 }
 
 /* Hash mixing constants used by the count-distinct kernel and helpers. */
@@ -2136,45 +2110,26 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
         }
     }
 
-    /* Wide element types (STR/GUID) overflow the 8-byte reduce
-     * accumulators; resolve min/max/first/last by materialising the
-     * winning row instead.  COUNT keeps the generic length-based path. */
-    if (agg_is_wide_type(in_type) &&
-        (op->opcode == OP_MIN || op->opcode == OP_MAX ||
-         op->opcode == OP_FIRST || op->opcode == OP_LAST)) {
-        ray_t* r = agg_wide_reduce(input, op->opcode, sel_idx, scan_n, has_nulls);
+    /* first/last read the first/last scanned row, null included (ref/first.md:
+     * a positional selector, not a null-skipping aggregate). */
+    if (op->opcode == OP_FIRST || op->opcode == OP_LAST) {
+        int64_t i = op->opcode == OP_FIRST ? 0 : scan_n - 1;
+        int64_t row = sel_idx && scan_n > 0 ? sel_idx[i] : i;
         if (sel_idx_block) ray_release(sel_idx_block);
+        if (row < 0 || row >= len) return ray_typed_null(-in_type);
+        int alloc = 0;
+        ray_t* r = collection_elem(input, row, &alloc);
+        if (!alloc && !RAY_IS_ERR(r)) ray_retain(r);   /* a LIST cell is borrowed */
         return r;
     }
 
-    /* O(1) short-circuit: first/last on numeric columns don't need a
-     * full reduction pass.  Non-numeric types (STR, GUID) fall through
-     * to the serial reduction path below. */
-    if ((op->opcode == OP_FIRST || op->opcode == OP_LAST) &&
-        (in_type == RAY_I64 || in_type == RAY_F64 || in_type == RAY_I32 ||
-         in_type == RAY_I16 || in_type == RAY_BOOL || ray_is_bytelike(in_type) ||
-         in_type == RAY_TIMESTAMP || RAY_IS_TEMPORAL32(in_type) ||
-         in_type == RAY_SYM)) {
-        int64_t row = -1;
-        if (op->opcode == OP_FIRST) {
-            for (int64_t i = 0; i < scan_n; i++) {
-                int64_t r = sel_idx ? sel_idx[i] : i;
-                if (!has_nulls || !ray_vec_is_null(input, r)) { row = r; break; }
-            }
-        } else {
-            for (int64_t i = scan_n - 1; i >= 0; i--) {
-                int64_t r = sel_idx ? sel_idx[i] : i;
-                if (!has_nulls || !ray_vec_is_null(input, r)) { row = r; break; }
-            }
-        }
+    /* Wide element types (STR/GUID) overflow the 8-byte reduce
+     * accumulators; resolve min/max by materialising the winning row
+     * instead.  COUNT keeps the generic length-based path. */
+    if (agg_is_wide_type(in_type) && (op->opcode == OP_MIN || op->opcode == OP_MAX)) {
+        ray_t* r = agg_wide_reduce(input, op->opcode, sel_idx, scan_n, has_nulls);
         if (sel_idx_block) ray_release(sel_idx_block);
-        if (row < 0 || row >= len)
-            return ray_typed_null(-in_type);
-        void* base = ray_data(input);
-        if (in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type))
-            return reduction_f_result(((const double*)base)[row], in_type);
-        return reduction_i64_result(read_col_i64(base, row, in_type, input->attrs), in_type,
-                                    in_type == RAY_SYM ? input : NULL);
+        return r;
     }
 
     ray_pool_t* pool = ray_pool_get();
@@ -2194,25 +2149,8 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
         reduce_acc_init(&merged);
         merged = accs[0];
         for (uint32_t i = 1; i < nw; i++) {
-            if (!accs[i].has_first) continue;
+            if (accs[i].cnt == 0) continue;
             reduce_merge(&merged, &accs[i], in_type, ray_sym_vec_domain(input));
-        }
-        /* first = accs[first worker with data], last = accs[last worker with data] */
-        for (uint32_t i = 0; i < nw; i++) {
-            if (accs[i].has_first) {
-                if (in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type))
-                    merged.first_f = accs[i].first_f;
-                else merged.first_i = accs[i].first_i;
-                break;
-            }
-        }
-        for (int32_t i = (int32_t)nw - 1; i >= 0; i--) {
-            if (accs[i].has_first) {
-                if (in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type))
-                    merged.last_f = accs[i].last_f;
-                else merged.last_i = accs[i].last_i;
-                break;
-            }
         }
 
         ray_t* result;
@@ -2225,8 +2163,6 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
              * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
             case OP_COUNT: result = ray_i64(scan_n); break;
             case OP_AVG:   result = merged.cnt > 0 ? ray_f64((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? merged.sum_f / merged.cnt : merged.sum_d / merged.cnt) : ray_typed_null(-RAY_F64); break;
-            case OP_FIRST: result = merged.has_first ? ((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? reduction_f_result(merged.first_f, in_type) : reduction_i64_result(merged.first_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type); break;
-            case OP_LAST:  result = merged.has_first ? ((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? reduction_f_result(merged.last_f, in_type) : reduction_i64_result(merged.last_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type); break;
             case OP_VAR: case OP_VAR_POP:
             case OP_STDDEV: case OP_STDDEV_POP: {
                 bool insufficient = (op->opcode == OP_VAR || op->opcode == OP_STDDEV) ? merged.cnt <= 1 : merged.cnt <= 0;
@@ -2264,8 +2200,6 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
          * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
         case OP_COUNT: return ray_i64(scan_n);
         case OP_AVG:   return acc.cnt > 0 ? ray_f64((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? acc.sum_f / acc.cnt : acc.sum_d / acc.cnt) : ray_typed_null(-RAY_F64);
-        case OP_FIRST: return acc.has_first ? ((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? reduction_f_result(acc.first_f, in_type) : reduction_i64_result(acc.first_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type);
-        case OP_LAST:  return acc.has_first ? ((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? reduction_f_result(acc.last_f, in_type) : reduction_i64_result(acc.last_i, in_type, in_type == RAY_SYM ? input : NULL)) : ray_typed_null(-in_type);
         case OP_VAR: case OP_VAR_POP:
         case OP_STDDEV: case OP_STDDEV_POP: {
             bool insufficient = (op->opcode == OP_VAR || op->opcode == OP_STDDEV) ? acc.cnt <= 1 : acc.cnt <= 0;
@@ -3989,8 +3923,8 @@ static inline int64_t agg_int_null_sentinel_for(int8_t t);
 /* Unified agg result emitter — used by both DA and HT paths.
  * Arrays indexed by [gi * n_aggs + a], counts by [gi].  nn_counts (if
  * non-NULL) carries the per-(group, agg) non-null row count: AVG/VAR/
- * STDDEV use it as the divisor and MIN/MAX/PROD/FIRST/LAST emit a typed
- * null when it is zero.  Pass NULL to keep the legacy count[gid]-divisor
+ * STDDEV use it as the divisor and MIN/MAX/PROD emit a typed null when it
+ * is zero.  Pass NULL to keep the legacy count[gid]-divisor
  * behaviour (callers without HAS_NULLS aggs need not allocate it). */
 static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t* ext,
                               ray_t* const* agg_vecs, uint32_t grp_count,
@@ -4039,9 +3973,9 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
         for (uint32_t gi = 0; gi < grp_count; gi++) {
             size_t idx = (size_t)gi * n_aggs + a;
             /* nn_counts[idx] == 0 means the group is all-null for this
-             * agg column — null-aware operators (MIN/MAX/PROD/FIRST/LAST/
-             * AVG/VAR/STDDEV) must surface a typed null instead of leaking
-             * the accumulator seed (DBL_MAX / -DBL_MAX / 0). */
+             * agg column — null-aware operators (MIN/MAX/PROD/AVG/VAR/
+             * STDDEV) must surface a typed null instead of leaking the
+             * accumulator seed (DBL_MAX / -DBL_MAX / 0). */
             int64_t nn = nn_counts ? nn_counts[idx] : counts[gi];
             if (out_type == RAY_F64) {
                 double v;
@@ -4068,7 +4002,6 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
                         if (nn == 0) { v = NULL_F64; ray_vec_set_null(new_col, gi, true); break; }
                         v = is_f64 ? max_f64[idx] : (double)max_i64[idx]; break;
                     case OP_FIRST: case OP_LAST:
-                        if (nn == 0) { v = NULL_F64; ray_vec_set_null(new_col, gi, true); break; }
                         v = is_f64 ? sum_f64[idx] : (double)sum_i64[idx]; break;
                     case OP_VAR: case OP_VAR_POP:
                     case OP_STDDEV: case OP_STDDEV_POP: {
@@ -4117,9 +4050,11 @@ static void emit_agg_columns(ray_t** result, ray_graph_t* g, const ray_op_ext_t*
                     case OP_MAX:
                         if (nn == 0) { v = int_null; ray_vec_set_null(new_col, gi, true); break; }
                         v = max_i64[idx]; break;
-                    case OP_FIRST: case OP_LAST:
-                        if (nn == 0) { v = int_null; ray_vec_set_null(new_col, gi, true); break; }
-                        v = sum_i64[idx]; break;
+                    case OP_FIRST: case OP_LAST:   /* positional: the row read may itself be the null */
+                        v = sum_i64[idx];
+                        if (v == int_null && agg_col && (agg_col->attrs & RAY_ATTR_HAS_NULLS))
+                            ray_vec_set_null(new_col, gi, true);
+                        break;
                     default:       v = 0; break;
                 }
                 /* MIN/MAX/FIRST/LAST/PROD keep out_type = agg_col->type, so
@@ -4745,23 +4680,15 @@ static inline void scalar_accum_row(scalar_ctx_t* c, da_accum_t* acc, int64_t r)
                 if (nn) nn[a]++;
             }
         } else if (op == OP_FIRST) {
-            /* Only commit the value AND advance the "first non-null seen"
-             * marker when the row is non-null — otherwise a null at row 0
-             * would block every later non-null row. */
-            if (!is_null) {
-                bool first_seen = nn ? (nn[a] == 0) : (acc->count[0] == 1);
-                if (first_seen) {
-                    if (is_f) acc->sum[a].f = fv;
-                    else acc->sum[a].i = iv;
-                }
-                if (nn) nn[a]++;
-            }
-        } else if (op == OP_LAST) {
-            if (!is_null) {
+            if (acc->count[0] == 1) {
                 if (is_f) acc->sum[a].f = fv;
                 else acc->sum[a].i = iv;
-                if (nn) nn[a]++;
             }
+            if (nn) nn[a]++;
+        } else if (op == OP_LAST) {
+            if (is_f) acc->sum[a].f = fv;
+            else acc->sum[a].i = iv;
+            if (nn) nn[a]++;
         } else if (op == OP_MIN) {
             if (is_f) { if (fv == fv && fv < acc->min_val[a].f) acc->min_val[a].f = fv; }
             else if (c->agg_types[a] == RAY_SYM) {
@@ -4845,19 +4772,9 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
      * dispatch is work-stealing: tasks may be claimed by a single worker
      * out of index order, so rows do NOT arrive in monotonic order within
      * a worker.  Use explicit min/max comparison against r and update the
-     * stored value only when the new row beats the current bound.
-     *
-     * Multi-FIRST limitation: first_row[gid] is shared across all FIRST
-     * aggs in this group, so two FIRST aggs A and B on different columns
-     * with disjoint null patterns can race — whichever non-null lands
-     * first stakes first_row and the other agg never gets a chance.
-     * The result for the "loser" agg is a typed null (nn[idx] stays 0),
-     * which is strictly safer than leaking the 0 calloc seed but still
-     * not the true first-non-null value.  Fix would require per-(group,
-     * agg) first_row arrays — documented for future work. */
+     * stored value only when the new row beats the current bound. */
     bool fl_take_first = (acc->first_row && r < acc->first_row[gid]);
     bool fl_take_last  = (acc->last_row  && r > acc->last_row[gid]);
-    bool first_advanced = false, last_advanced = false;
 
     int64_t* nn = acc->nn_count;
     for (uint8_t a = 0; a < n_aggs; a++) {
@@ -4909,20 +4826,15 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
                 if (nn) nn[idx]++;
             }
         } else if (op == OP_FIRST) {
-            /* Only stake the first-row claim when this row's value for the
-             * agg column is actually non-null — a null prefix would block
-             * later non-null rows otherwise. */
-            if (fl_take_first && !is_null) {
+            if (fl_take_first) {
                 if (is_f) acc->sum[idx].f = fv;
                 else acc->sum[idx].i = iv;
-                first_advanced = true;
                 if (nn) nn[idx]++;
             }
         } else if (op == OP_LAST) {
-            if (fl_take_last && !is_null) {
+            if (fl_take_last) {
                 if (is_f) acc->sum[idx].f = fv;
                 else acc->sum[idx].i = iv;
-                last_advanced = true;
                 if (nn) nn[idx]++;
             }
         } else if (op == OP_MIN) {
@@ -4953,12 +4865,8 @@ static inline void da_accum_row(da_ctx_t* c, da_accum_t* acc, int32_t gid, int64
         }
     }
 
-    /* Commit row-index bounds only when an OP_FIRST/OP_LAST actually
-     * accepted this row's value.  An all-null row at the smallest index
-     * must NOT advance first_row[gid] — otherwise the next non-null row
-     * loses the FIRST race. */
-    if (first_advanced) acc->first_row[gid] = r;
-    if (last_advanced)  acc->last_row[gid]  = r;
+    if (fl_take_first) acc->first_row[gid] = r;
+    if (fl_take_last)  acc->last_row[gid]  = r;
 }
 
 static void da_accum_fn(void* ctx, uint32_t worker_id, int64_t start, int64_t end) {
@@ -5092,15 +5000,7 @@ static void da_merge_fn(void* ctx, uint32_t wid, int64_t start, int64_t end) {
                      * Fall back to count when nn_count is absent. */
                     int64_t mnn = merged->nn_count ? merged->nn_count[idx] : merged->count[s];
                     int64_t wnn = wa->nn_count ? wa->nn_count[idx] : wa->count[s];
-                    if (aop == OP_FIRST) {
-                        /* Keep worker 0 value; take from w only if merged has no non-null value */
-                        if (mnn == 0 && wnn > 0)
-                            merged->sum[idx] = wa->sum[idx];
-                    } else if (aop == OP_LAST) {
-                        /* Overwrite with last worker that has a non-null value */
-                        if (wnn > 0)
-                            merged->sum[idx] = wa->sum[idx];
-                    } else if (aop == OP_PROD) {
+                    if (aop == OP_PROD) {
                         if (wnn > 0) {
                             if (mnn == 0)
                                 merged->sum[idx] = wa->sum[idx];
@@ -7096,13 +6996,7 @@ da_path:;
                                 uint16_t aop = ext->agg_ops[a];
                                 int64_t mnn = merged->nn_count ? merged->nn_count[idx] : merged->count[s];
                                 int64_t wnn = wa->nn_count ? wa->nn_count[idx] : wa->count[s];
-                                if (aop == OP_FIRST) {
-                                    if (mnn == 0 && wnn > 0)
-                                        merged->sum[idx] = wa->sum[idx];
-                                } else if (aop == OP_LAST) {
-                                    if (wnn > 0)
-                                        merged->sum[idx] = wa->sum[idx];
-                                } else if (aop == OP_PROD) {
+                                if (aop == OP_PROD) {
                                     if (wnn > 0) {
                                         if (mnn == 0)
                                             merged->sum[idx] = wa->sum[idx];
