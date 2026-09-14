@@ -9,7 +9,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/ops/q_table.h" /* the shape law + append behind the row-append home */
 #include "qlang/ops/q_bang.h"  /* q_bang_enkey — keyed-result construction */
-#include "qlang/ops/q_index.h" /* q_index_grow* — a parked vector grows where it stands */
+#include "qlang/ops/q_index.h" /* q_index_grow* — a parked vector grows where it stands; q_index_rank — the `,:` rank rule */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_value — pj rides q's own `+` */
 #include "lang/eval.h"     /* ray_left_join_fn, ray_window_join*_fn */
 #include "lang/internal.h" /* ray_asof_join_fn, ray_concat_fn, ray_vec_set_null, ray_error */
@@ -1186,17 +1186,13 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
     return join_core(x, y, 0);
 }
 
-/* The vector half of q_join_amend, and where the Append law lives (ref/join.md
- * `,:`: `s,:5f` is 'type where `s,5f` boxes; an EMPTY payload is the identity
- * whatever its type, as plain `,` answers it).  The law is checked BEFORE any
- * write, so *px is untouched for the caller's unpark.  A STR vector is storage
- * for a general list of strings, which the law exempts.  NULL = join_core's. */
-static ray_t* join_vec_amend(ray_t** px, ray_t* y, int exclusive) {
+/* The vector half of q_join_grow: a vector at rc 1 takes a same-type atom or vector in the slack its buddy block
+ * already holds.  A STR vector is storage for a general list of strings, so it is the list half's.  NULL = not
+ * growable here; on error *px is x at its old length. */
+static ray_t* join_vec_grow(ray_t** px, ray_t* y) {
     ray_t* x = *px;
-    if (!x || !y || !ray_is_vec(x) || x->type == RAY_STR) return NULL;
-    if (y->type != x->type && y->type != -x->type)
-        return (y->type == RAY_LIST || ray_is_vec(y)) && ray_len(y) == 0 ? NULL : q_err(QE_TYPE);
-    if (!exclusive || x->rc != 1) return NULL;
+    if (!x || !y || !ray_is_vec(x) || x->type == RAY_STR || x->rc != 1) return NULL;
+    if (y->type != x->type && y->type != -x->type) return NULL;
     ray_t* pv = y->type < 0 ? ray_enlist_fn(&y, 1) : y;
     if (!pv || RAY_IS_ERR(pv)) return pv;
     ray_t* r = NULL;
@@ -1212,15 +1208,69 @@ static ray_t* join_vec_amend(ray_t** px, ray_t* y, int exclusive) {
     return r;
 }
 
-/* `x,:y` on a name: the Append law, then the one join dispatch — exclusive
- * (the caller parked x's name and so holds its only ref) lets a vector or a
- * plain table grow in the slack its buddy block already holds, consuming *px.
- * Exclusivity is the CALLER'S assertion, never inferred from a refcount: a
- * borrowed arg at rc 1 may be the sole element of a list that owns it. */
-ray_t* q_join_amend(ray_t** px, ray_t* y, int exclusive) {
-    ray_t* r = join_vec_amend(px, y, exclusive);
+/* The general-list half: a RAY_LIST at rc 1 takes each item of y through ray_list_append, in the slack its buddy
+ * block already holds, exactly as a typed vector does through ray_vec_append — a general list IS a pointer vector
+ * and pays the same amortised cost.  No collapse: an append is additive, so a list that could not collapse before
+ * cannot after (owner ruling 2026-09-14).  `()` is Join's identity (`x:(); x,:1` is 7h) and a dict, table or STR
+ * payload keeps join_core's law: NULL for both; on error *px is x at its old length. */
+static ray_t* join_list_grow(ray_t** px, ray_t* y) {
+    ray_t* x = *px;
+    if (!x || !y || x->type != RAY_LIST || ray_len(x) == 0 || x->rc != 1 || (x->attrs & (RAY_ATTR_SLICE | RAY_ATTR_ARENA)))
+        return NULL;
+    int one = ray_is_atom(y) && !q_type_is_str_atom(y);
+    if (!one && y->type != RAY_LIST && (!ray_is_vec(y) || y->type == RAY_STR)) return NULL;
+    int64_t nx = ray_len(x), n = one ? 1 : ray_len(y);
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* e = one ? (ray_retain(y), y) : q_index_elem_at(y, i);
+        ray_t* nl = e && !RAY_IS_ERR(e) ? ray_list_append(x, e) : e;
+        if (e) ray_release(e);
+        if (!nl || RAY_IS_ERR(nl)) {
+            ray_t** slots = (ray_t**)ray_data(x);
+            while (ray_len(x) > nx) ray_release(slots[--x->len]);
+            *px = x;
+            return nl ? nl : q_err(QE_OOM);
+        }
+        x = nl;
+    }
+    *px = x;
+    return x;
+}
+
+/* Plain `,` on a value the caller owns outright — `x[i],:y` is `x[i]: x[i],y` (ref/assign.md:113), the base form,
+ * so no Append law here: a vector or general list grows where it stands, everything else is q_join_wrap's answer.
+ * Consumes *px on success; on error *px is the caller's, unchanged in length. */
+ray_t* q_join_grow(ray_t** px, ray_t* y) {
+    ray_t* r = join_vec_grow(px, y);
+    if (!r) r = join_list_grow(px, y);
     if (r) return r;
-    r = join_core(*px, y, exclusive);
-    if (exclusive && r && !RAY_IS_ERR(r)) ray_release(*px);
+    r = q_join_wrap(*px, y);
+    if (r && !RAY_IS_ERR(r)) ray_release(*px);
+    return r;
+}
+
+/* `x,:y` on a name — the Append law (ref/join.md `,:`: `s,:5f` is 'type where `s,5f` boxes; an EMPTY payload is
+ * the identity whatever its type, as plain `,` answers it; a STR vector is a list of strings, exempt), checked
+ * BEFORE any write so *px is untouched for the caller's unpark; then the rank rule (ref/join.md:192), decided for
+ * EVERY general list, shared or exclusive, so both agree: x one rank above y enlists y.  Exclusive (the caller
+ * parked x's name and so holds its only ref) lets a vector, a general list or a plain table grow in the slack its
+ * buddy block already holds, consuming *px.  Exclusivity is the CALLER'S assertion, never inferred from a
+ * refcount: a borrowed arg at rc 1 may be the sole element of a list that owns it. */
+ray_t* q_join_amend(ray_t** px, ray_t* y, int exclusive) {
+    ray_t* x = *px;
+    if (x && y && ray_is_vec(x) && x->type != RAY_STR && y->type != x->type && y->type != -x->type &&
+        !((y->type == RAY_LIST || ray_is_vec(y)) && ray_len(y) == 0))
+        return q_err(QE_TYPE);
+    ray_t* py = y;
+    if (x && y && (x->type == RAY_LIST || x->type == RAY_STR) && ray_len(x) > 0 && q_index_rank(x) == q_index_rank(y) + 1) {
+        py = ray_enlist_fn(&y, 1);
+        if (!py || RAY_IS_ERR(py)) return py ? py : q_err(QE_OOM);
+    }
+    ray_t* r = exclusive ? join_vec_grow(px, py) : NULL;
+    if (!r && exclusive) r = join_list_grow(px, py);
+    if (!r) {
+        r = join_core(*px, py, exclusive);
+        if (exclusive && r && !RAY_IS_ERR(r)) ray_release(*px);
+    }
+    if (py != y) ray_release(py);
     return r;
 }

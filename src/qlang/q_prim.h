@@ -186,6 +186,9 @@ ray_t* q_ssr_wrap(ray_t** args, int64_t n);
  * caller's on error, and may have MOVED either way (re-read it).  Result owned. */
 ray_t* q_join_amend(ray_t** px, ray_t* y, int exclusive);
 
+/* Plain `,` (the `x[i],:y` leaf, no Append law) on a value the caller owns outright: same contract, grows in place. */
+ray_t* q_join_grow(ray_t** px, ray_t* y);
+
 /* q join family bracket forms (feat/q-joins-rebuild) — triadic/quaternary
  * prefix keywords env-bound by q_builtins_register (the ssr precedent):
  * ej[c;t1;t2], aj[c;t1;t2] + variants, wj/wj1[w;f;t;(q;aggs..)]. */
