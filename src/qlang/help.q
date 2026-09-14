@@ -41,7 +41,7 @@
     .help.i.argsg::.help.i.counter];
   .help.i.argsc}
 
-.help.i.str:{$[10h=abs type x;x;string x]}
+.help.i.str:{$[10h=type x;x;-10h=type x;enlist x;string x]}
 
 / NOT built-in trim/rtrim, deliberately: trim strips the char null (" ") only,
 / and @tag parsing wants " \t\n\r" so tab-indented tags still parse.
@@ -163,6 +163,14 @@
   r:.help.find pattern;
   $[1=count m:distinct r`fullname;.help.get first m;r]}
 
+/ the effective console (rows;cols): `\c`, its auto (`0N`) axes filled from
+/ the live terminal (.help.i.termsize, a C native bound at boot).
+.help.i.csize:{[] (2#.help.i.termsize[])^system"c"}
+
+/ lines clipped to the console width with the console's own `..` mark, so no
+/ printed help line ever wraps.
+.help.i.clip:{[ls] w:0|.help.i.csize[][1]-3; {[w;l]$[w<count l;((0|w-2)#l),"..";l]}[w] each ls}
+
 / render a fetched page for the console behind a `│ ` gutter, obeying the
 / effective `\c` - its rows bound the preview, its cols clip each line
 / (console `..` rule) - ending in a `.. N more` pointer (\??topic / the
@@ -172,10 +180,9 @@
 / without .pq degrades to a plain 25x80 preview.
 .help.i.page:{[topic;md]
   ls:"\n" vs .help.i.rstrip md;
-  c:@[{value[x][]};`.pq.termsize;25 80]^system"c";
+  c:.help.i.csize[];
   n:count ls;
-  ls:(n&c 0)#ls;
-  ls:{[w;l]$[w<count l;((0|w-2)#l),"..";l]}[0|c[1]-3] each ls;
+  ls:.help.i.clip (n&c 0)#ls;
   fen:ls like\:"```*";
   qf:{(x like "```q*")or x like "```syntax*"}each ls;
   st:{[s;f]$[f 0;$[s 0;00b;1b,f 1];s]}\[00b;fen,'qf];
@@ -188,25 +195,32 @@
     out,:enlist $[cc;"\033[90m",x,"\033[0m";x]];
   "\n" sv out}
 
-/ THE printing door (`?`), and it returns null: the local page prints plainly, a
-/ fetched page as the gutter preview (.help.i.page), the find fallback as its
-/ page or table.  `.help.text` is the VALUE ladder - one contract per name, so
-/ a caller never has to guess whether it printed or answered.
-.help.show:{[pattern]
+/ print text clipped to the console width; a table prints as itself.
+.help.i.out:{[r] $[10h=type r;-1 "\n" sv .help.i.clip "\n" vs r;show r];}
+
+.help.i.show:{[pattern]
   .help.i.loaddb[];
-  if[.help.i.blank pattern;-1 .help.i.index[];:(::)];
+  if[.help.i.blank pattern;:.help.i.out .help.i.index[]];
   s:.help.i.str pattern;
   lw:.help.i.ladder s;
-  if[count first lw;-1 first lw];
+  if[count first lw;.help.i.out first lw];
   if[count last lw;-1 .help.i.page[s;last lw]];
   if[0=sum count each lw;
     r:.help.find pattern;
-    $[1=count m:distinct r`fullname;-1 .help.get first m;show r]];}
+    $[1=count m:distinct r`fullname;.help.i.out .help.get first m;show r]];}
 
-/ the OTHER printing door (`??`): the full unclipped ladder, plain text, no
-/ gutter, no preview.  Kept separate from .help.show because the two spellings
-/ mean different things at the prompt; both print, neither returns.
-.help.full:{[pattern] .help.i.loaddb[]; r:.help.text pattern; $[10h=type r;-1 r;show r];}
+/ THE printing door (`?`), and it returns null: the local page prints plainly, a
+/ fetched page as the gutter preview (.help.i.page), the find fallback as its
+/ page or table.  `.help.text` is the VALUE ladder - one contract per name, so
+/ a caller never has to guess whether it printed or answered.  HELP NEVER
+/ ERRORS: every line prints clipped to the console width, and a failure
+/ anywhere prints one line and answers null.
+.help.show:{[pattern] @[.help.i.show;pattern;{[e] -1 "help: ",e;}];}
+
+/ the OTHER printing door (`??`): the full ladder, plain text, no gutter, no
+/ preview.  Kept separate from .help.show because the two spellings mean
+/ different things at the prompt; both print, neither returns.
+.help.full:{[pattern] @[{[p] .help.i.loaddb[]; .help.i.out .help.text p};pattern;{[e] -1 "help: ",e;}];}
 
 / the datatype reference, transcribed from basics/datatypes.md: a VALUE, not a
 / function, because it is a constant - which pins help.q after dotq.q for .Q.t,
@@ -234,19 +248,80 @@
   ninf:(::;::;::;::;-0Wh;-0Wi;-0W;-0We;-0w;::;::;-0Wp;-0Wm;-0Wd;-0Wz;-0Wn;-0Wu;-0Wv;-0Wt),16#enlist(::);
   sql:("";"";"";"";"smallint";"int";"bigint";"real";"float";"";"varchar";"";"";"date";"timestamp";"";"";"";"time"),16#enlist"")
 
+/ the command line, one row per flag (user-docs/cmdline.md is its prose):
+/ option is the flag with its parameter shape, syscmd the `\` command that
+/ reads or sets the same thing (` when none), supported whether peachq honours
+/ it, new whether kx q has no such flag.  A VALUE like .help.types, so
+/ `select from .help.cmdline where not supported` is the backlog.
+.help.cmdline:([]
+  option:("-b";"-c r c";"-C r c";"-e 0|1|2";"-E 0|1|2";"-g 0|1";"-l";"-L";"-m path";"-o N";"-p N";"-P N";"-q";
+          "-r :h:p";"-s N";"-S N";"-t N";"-T N";"-u file";"-U file";"-w N";"-W N";"-z 0|1";
+          "-classic";"-eval \"src\"";"-eval-before \"src\"";"-h | --help";"--port N");
+  syscmd:`$("\\_";"\\c";"\\C";"\\e";"\\E";"\\g";"";"";"";"\\o";"\\p";"\\P";"";"\\r";"\\s";"\\S";"\\t";"\\T";"\\u";
+            "";"";"\\W";"\\z";"\\classic";"";"";"\\?cmdline";"\\p");
+  supported:0101100000101000001100111111b;
+  new:      0000000000000000000000011111b;
+  what:("block client write-access";"console size: rows and columns";"HTTP display size";
+        "error-trap mode for client evals";"TLS server mode: 0 plain, 1 plain and TLS, 2 TLS only";"garbage-collection mode";
+        "log updates to a file";"as -l, synchronous";"memory domain";"offset from UTC in hours";
+        "listen on a port for IPC and HTTP clients; 0W picks a free port";"float display precision";
+        "quiet: no banner, and .z.q is 1b";"replicate from a primary";"secondary threads";"random seed";
+        "timer period in ms";"client query timeout in seconds";"password file, and restrict client evals";
+        "password file";"workspace memory limit in MB";"start-of-week offset";"date parse order: 0 mdy, 1 dmy";
+        "kx-classic mode: legacy table display, kdb-clean environment";
+        "run q text after the startup script";"run q text before the startup script";
+        "print this table and exit";"the long spelling of -p"))
+
+/ .help.cmdline as page lines: `q -flag`, then the marker (- not supported,
+/ * peachq only) and the \ command, then the meaning - padded as a table.
+.help.i.cmdlines:{[]
+  t:.help.cmdline;
+  calls:"q ",/:t`option;
+  mk:{[s;n] $[not s;"-";n;"*";" "]}'[t`supported;t`new];
+  {[w;c;m;y;o] (w$c)," / ",(11$m,string y),o}[max count each calls]'[calls;mk;t`syscmd;t`what]}
+
+/ `q -h`: the command-line page from this file alone - the builtin help db is
+/ never loaded for it, so it answers at boot speed.
+.help.usage:{[]
+  -1 "\n" sv (enlist "usage: q [file.q] [-option [parameters] ...]"),("  ",/:.help.i.pages[`cmdline;`blurb]),(enlist ""),"  ",/:.help.i.clip .help.i.cmdlines[];}
+
 / the one-line summary for a name - the first line of its lead description,
-/ "" when undocumented.  The REPL hint renders `\?name / <this>` and owns the
-/ width clipping, so the line comes back untrimmed.
+/ else of the header of the file documenting it as a NAMESPACE (so a bare
+/ `.massive` hints `\?.massive`), "" when neither.  The REPL hint renders
+/ `\?name / <this>` and owns the width clipping, so the line comes back untrimmed.
 .help.oneline:{[name]
   n:`$.help.i.str name;
   r:select description from .help.args[] where fullname=n,null tag;
-  $[count r;first "\n" vs r[0;`description];""]}
+  if[count r;:first "\n" vs r[0;`description]];
+  s:exec summary from .help.namespaces[] where ns=n;
+  $[count s;first s;""]}
+
+/ the namespace a file documents: the one most of its definitions bind into,
+/ else its stem (`lib/str.q` is `.str`) - register_file's ns is only the `\d`
+/ context, which every lib file leaves at `.`.
+.help.i.filens:{[f]
+  d:exec ns from .help.funcs where file=f;
+  $[count d;first key desc count each group d;`$".",first "." vs last "/" vs string f]}
+
+/ a header's one-liner: its first line, less the `name.q - ` lead the file
+/ convention opens with - the row it lands on already names the namespace.
+.help.i.nssum:{[f;v] l:first "\n" vs v; s:(last "/" vs string f)," - "; $[s~(count s)#l;(count s)_l;l]}
+
+/ every documented namespace: one row per file header the capture saw - the
+/ `\l pq` files and a user's own alike - with the header's one-liner.
+.help.namespaces:{[]
+  t:select file,val from .help.filetags where null tag;
+  select ns:.help.i.filens each file,file,summary:.help.i.nssum'[file;val] from t}
+
+/ a namespace page's blurb: the header comment of every file documenting it.
+.help.i.nsheader:{[p] fs:exec file from .help.namespaces[] where ns=p;
+  raze {"\n" vs x} each exec val from .help.filetags where file in fs,null tag}
 
 / register one builtin's one-liner - every row of lib/help-db.q, the page entries
 / included, calls it, so keep the call short.  It NEVER overwrites a
 / CAPTURED definition: the db loads at FIRST HELP ACCESS, by which time a user's own
 / docs can already be in the store, and theirs win.  A null `line` is what marks a
-/ registration rather than a capture (.help.i.memline reads the same column), so the
+/ registration rather than a capture (.help.i.memlines reads the same column), so the
 / db still replaces the page entry it is meant to.
 .help.i.r:{[fullname;description]
   if[not null .help.funcs[fullname;`line];:(::)];
@@ -299,7 +374,7 @@
 / webtopic is the NEAREST ONLINE topic, and ` where none is close enough.  A URL
 / is NEVER built from a page name: our names are ours (`types` is the site's
 / `datatypes`, and `?types` used to point at a 404).  No mapping, no pointer.
-.help.i.pages:([page:`started`.z`.Q`.h`.j`adverbs`syscmds`cmdline`types`math`joins`strings`temporal`table]
+.help.i.pages:([page:`started`.z`.Q`.h`.j`adverbs`syscmds`cmdline`types`math`joins`strings`temporal`table`ffi`duckdb`handles`loaders]
  summary:(
   "";
   "session and environment callbacks";
@@ -308,19 +383,21 @@
   "JSON serialize and deserialize";
   "iterators: ' /: \\: ': / \\";
   "the \\ system commands";
-  "q command-line flags";
+  "q command-line flags: .help.cmdline is the table";
   "the datatype reference table";
   "arithmetic, statistics and rounding";
   "as-of, equi, left and union joins";
   "text: search, case, trim, split";
   "dates, times and calendar arithmetic";
-  "tables and the qsql verbs: \\?tables is the keyword");
- webtopic:``dotz`dotq`doth`dotj`iterators`syscmds`cmdline`datatypes`math`joins``datatypes`qsql;
+  "tables and the qsql verbs: \\?tables is the keyword";
+  "";"";"";"");
+ webtopic:``dotz`dotq`doth`dotj`iterators`syscmds`cmdline`datatypes`math`joins``datatypes`qsql````;
  blurb:(
   ();();();();();
   ("an iterator modifies a verb: each item, each pair, each left, each right";"/ folds to one value, \\ keeps every step");
   ("a \\ line is a command, not an expression; system \"c 25 200\" is its q form");
-  ("peachq honours the flags below; the other kdb+ flags are not implemented yet";"everything after the script name reaches the script as .z.x");
+  ("the first token ending in .q is the startup script; what follows it and q does not consume is the script's .z.x";
+   "after / : the \\ command that reads or sets the same thing, * a peachq-only flag, - not implemented yet");
   ("n is the type number and c the .Q.t character; a vector is n, an atom -n";"sz is bytes per item; sql is the nearest ANSI SQL type";
    "0w and -0w are real infinities; the integer 0W and -0W are the type's bounds, not infinities";
    "20-76 are enums and 78-96 are 77+t, a mapped list of lists of type t: ranges, so neither is a row";
@@ -329,18 +406,20 @@
   ("aj is the as-of join: the last y row at or before each x time";"lj ij uj pj match on the RIGHT table's key columns");
   ("a string is a char vector, so every list verb works on it";"peachq adds a python-shaped text namespace: \\?.str");
   ("temporal types are numbers: add a long to a date, subtract two timestamps";"\\?types has the literals, the nulls and the infinities");
-  ("a table is a flipped dictionary of equal-length named columns";"the functional forms of select and update are ?[t;..] and ![t;..]"));
+  ("a table is a flipped dictionary of equal-length named columns";"the functional forms of select and update are ?[t;..] and ![t;..]");
+  ();();();());
  members:(
   `$();`$();`$();`$();`$();
   (`each`peach`over`scan`prior),`$("'";"':";"/:";"\\:";"/";"\\");
   `$"\\",/:("a";"b";"B";"c";"C";"cd";"d";"e";"E";"f";"g";"l";"o";"p";"P";"r";"s";"S";"t";"T";"ts";"u";"v";"w";"W";"x";"z";"1";"2";"_";"\\");
-  `$("-p";"-q";"-u";"-U";"-E";"-classic");
+  `$();
   `$();
   `abs`neg`signum`sqrt`exp`log`xexp`xlog`floor`ceiling`div`mod`sum`sums`prd`prds`avg`avgs`max`min`maxs`mins`med`dev`var`sdev`svar`cor`cov`deltas`ratios`within`rand`mmu;
   (`aj`aj0`ajf`ajf0`asof`ej`ij`ijf`lj`ljf`pj`uj`ujf`wj`wj1),`$(",";"^");
   (`like`lower`upper`trim`ltrim`rtrim`ss`ssr`string`vs`sv`md5),`$("$";"0:");
   (`gtime`ltime`xbar`.Q.addmonths`.z.p`.z.P`.z.d`.z.D`.z.t`.z.T`.z.z`.z.Z),`$("\\W";"\\z");
-  `select`exec`update`delete`from`fby`cols`keys`xcol`xcols`xkey`xasc`xdesc`xgroup`ungroup`meta`tables`insert`upsert`csv`fkeys`flip`key`.Q.en`.Q.id))
+  `select`exec`update`delete`from`fby`cols`keys`xcol`xcols`xkey`xasc`xdesc`xgroup`ungroup`meta`tables`insert`upsert`csv`fkeys`flip`key`.Q.en`.Q.id;
+  `$();`$();`$();`$()))
 
 / both spellings answer; one page renders.
 .help.i.alias:`iterators`tutorial!`adverbs`started
@@ -356,48 +435,71 @@
   n:$[n in key .help.i.alias;.help.i.alias n;n];
   $[n in .help.i.pagenames;n;(1<count s)and("."=first s)and count .help.i.nsmembers n;n;`]}
 
-/ THE column rhythm, byte-identical to tools/gen-help-builtins.py's layout.
-.help.i.line:{[call;meaning] $[36>count call;36$call;call," "],"/ ",(24$""),meaning}
+/ THE column rhythm, byte-identical to tools/gen-help-builtins.py's layout:
+/ call, the witnessed result, the meaning.
+.help.i.exline:{[call;result;meaning] $[36>count call;36$call;call," "],"/ ",(24$result),meaning}
+.help.i.line:{[call;meaning] .help.i.exline[call;"";meaning]}
 
 .help.i.pagemem:{[p] m:$[p in .help.i.pagenames;.help.i.pages[p;`members];`$()];
   $[count m;m;"."=first string p;.help.i.nsmembers p;`$()]}
 
-/ one member row.  A builtin one-liner already names itself in its call column
-/ (its .help.funcs line is null); a CAPTURED doc comment is prose, so the name
-/ becomes its call - otherwise a namespace page lists sentences with no names.
-.help.i.memline:{[n] o:.help.oneline n;
-  $[null .help.funcs[n;`line];o;.help.i.line[string n;o]]}
+/ a name's argument list as `[a;b]`, "" when it is not a lambda: what a
+/ reader most wants to know about a function is what to pass it.
+.help.i.sig:{[n] v:@[value;n;::]; $[100h=type v;"[",(";" sv string (value v)1),"]";""]}
+
+/ the member rows of a page.  A builtin one-liner already names itself in its
+/ call column (its .help.funcs line is null) and keeps the tutorial rhythm; a
+/ CAPTURED doc comment is prose, so its rows are a two-column table - the `\?`
+/ call with the argument list, then ` / ` and the description - padded only as
+/ wide as the widest call, since there is no result column to line up with.
+.help.i.memlines:{[ns]
+  c:{null .help.funcs[x;`line]} each ns;
+  b:.help.oneline each ns where c;
+  d:ns where not c;
+  calls:{"\\?",(string x),.help.i.sig x} each d;
+  w:max 0,count each calls;
+  b,{[w;c;o] (w$c)," / ",o}[w]'[calls;.help.oneline each d]}
 
 / what an exact page match ADDS below the name's own entry line: the curated
-/ blurb, the member table (each member's dominant meaning), and at most ONE
-/ static pointer at the page's mapped online topic.  A page NEVER fetches - the
-/ pointer is string-built, and the index is only CONSULTED when a previous
-/ lookup already cached it, never fetched to check.
+/ blurb (a namespace's is the header comment of the file documenting it), the
+/ member table (each member's dominant meaning), and at most ONE static pointer
+/ at the page's mapped online topic - the website only, since `\??` shows a
+/ page nothing `\?` did not.  A page NEVER fetches - the pointer is
+/ string-built, and the index is only CONSULTED when a previous lookup already
+/ cached it, never fetched to check.
 .help.i.pagetext:{[p]
-  b:$[p in .help.i.pagenames;.help.i.pages[p;`blurb];()];
+  b:($[p in .help.i.pagenames;.help.i.pages[p;`blurb];()]),.help.i.nsheader p;
   / the types page renders the two blocks basics/datatypes.md itself prints: one
   / 35-row table would clip against \c and would carry six blank compound columns.
   m:$[p~`types;
     1_raze {(enlist""),"\n" vs .help.i.rstrip .Q.s x}each
       (select from .help.types where n<20;select n,name,literal from .help.types where n>19);
-    .help.i.memline each .help.i.pagemem p];
+    p~`cmdline;.help.i.cmdlines[];
+    .help.i.memlines .help.i.pagemem p];
   r:("  ",/:b),($[(count b)and count m;enlist"";()]),.help.i.rstrip each"  ",/:m;
   w:$[p in .help.i.pagenames;.help.i.pages[p;`webtopic];`];
   if[null w;:r];
   if[not ()~.help.i.ix;if[not any (string w)~/:.help.i.ix`qname;:r]];   / `and` would index the uncached ()
-  $[count .help.url;r,enlist"  more: \\??",(string w)," or ",.help.url,"help?q=",.h.hu string w;r]}
+  $[count .help.url;r,enlist"  more: ",.help.url,"help?q=",.h.hu string w;r]}
 
 / the index (bare `?`): the tutorial first, every row pasteable, `· page`
 / marking a directory.  Every listed page HAS an entry, so its row is that
-/ entry's own line - one home per summary.  Layout is prose: order lives here.
+/ entry's own line - one home per summary.  Then every documented NAMESPACE
+/ the session holds (.help.namespaces: the `\l pq` files and the user's own),
+/ or the `\l pq` line while none is loaded.  Layout is prose: order lives here.
 .help.i.index:{[]
   .help.i.loaddb[];
   row:{[p] "  ",.help.oneline p};
+  ns:`ns xasc select from .help.namespaces[] where not ns in `.z`.Q`.h`.j;
+  ns:{[n;s] "  ",.help.i.line["\\?",string n;s]}'[ns`ns;ns`summary];
   "\n" sv (enlist "peachq help · one line per meaning · \\?name shows it · \\??name shows it in full"),
    (enlist row`started),
    (enlist "  ",.help.i.line["\\?til";"try any name: \\?max  \\?.Q.en  \\?$  \\?'type  \\?-p"]),
-   (row each `.z`.Q`.h`.j`adverbs`syscmds`cmdline`types),
-   enlist "  ",(count[.help.i.line["";""]]$"\\?math  \\?joins  \\?strings  \\?temporal  \\?table"),"topic pages"}
+   (row each `.z`.Q`.h`.j),
+   ($[count ns;ns;enlist "  ",.help.i.line["\\l pq";"load the standard library, then \\? lists its namespaces"]]),
+   (row each `adverbs`syscmds`cmdline`types),
+   (enlist "  ",(count[.help.i.line["";""]]$"\\?math  \\?joins  \\?strings  \\?temporal  \\?table"),"topic pages"),
+   enlist "  ",(count[.help.i.line["";""]]$"\\?ffi  \\?duckdb  \\?handles  \\?loaders"),"extensions: what peachq adds to q"}
 
 / page ENTRY rows, rendered from the registry summary.  NEVER overwrites an
 / already-documented name - the defensive half of the no-collision rule.
