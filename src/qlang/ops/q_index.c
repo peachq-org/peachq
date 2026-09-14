@@ -75,14 +75,14 @@ int q_index_is_nested(ray_t* v) {
     return r;
 }
 
-/* ref/join.md:192's rank: the recursive depth of the first element — a dict's is its first value, a table's its
- * first row, an empty list's 1, a string atom's 1 (a STR vector stores a list of strings). */
+/* ref/join.md:192's rank, the recursive depth of the first element.  An EMPTY container reads its type-shaped miss
+ * (a typed vector's null atom, a table's null row): rank is a property of TYPE, never of count; `()` stays 1 (#688). */
 int q_index_rank(ray_t* v) {
     if (!v || RAY_IS_ERR(v)) return 0;
     if (q_type_is_str_atom(v)) return 1;
     if (ray_is_atom(v)) return 0;
-    ray_t* e = v->type == RAY_DICT ? q_index_elem_at(ray_dict_vals(v), 0)
-             : q_builtins_count_long(v) > 0 ? q_index_elem_at(v, 0) : NULL;
+    ray_t* c = v->type == RAY_DICT ? ray_dict_vals(v) : v;
+    ray_t* e = c && c->type == RAY_LIST && ray_len(c) == 0 ? NULL : q_index_elem_at(c, 0);
     int r = 1 + q_index_rank(e);
     if (e) ray_release(e);
     return r;
