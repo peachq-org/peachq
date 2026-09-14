@@ -20,6 +20,9 @@
 #include <rayforce.h>
 #include <stddef.h>
 
+/* On over q_runtime_create's core list: nothing is armed, queued or fired. */
+void q_comment_boot(int on);
+
 /* One script's capture state; a nested load saves and restores it. */
 typedef struct {
     int64_t file, stmt_line;
