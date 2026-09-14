@@ -164,7 +164,7 @@ static ray_t* cut_at(ray_t* pos, ray_t* y) {
 
 /* kdb unifies a homogeneous take-of-mixed result to a typed vector (`~` is
  * type-strict per ref/match.md, yet misc/aoc/2016/day17.q's `3 3 in 2#'q`
- * terminates — so 2#(3;3;"s") must be 7h, not 0h) */
+ * terminates — so 2#(3;3;"s") must be 7h, not 0h); drop too (owner ruling 2026-09-14) */
 static ray_t* take_unify(ray_t* r) {
     if (!r || RAY_IS_ERR(r) || r->type != RAY_LIST) return r;
     ray_t* c = q_list_collapse(r);
@@ -270,7 +270,7 @@ ray_t* q_drop_wrap(ray_t* x, ray_t* y) {
      * past the ends where take wraps round (`5_0 1 2`) */
     int64_t keep = cnt - (k < 0 ? -k : k);
     if (keep < 0) keep = 0;
-    return take_run(y, k >= 0 ? -keep : keep);
+    return take_unify(take_run(y, k >= 0 ? -keep : keep));
 }
 
 /* q `n rotate x` — x read from item n, wrapping (ref/rotate.md) */
