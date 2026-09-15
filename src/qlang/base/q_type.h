@@ -33,6 +33,11 @@ int q_type_is_bool(ray_t* x);
 int q_type_is_float_tag(int8_t t);
 int q_type_is_num_tag(int8_t t);
 
+/* The one pair a typed lane takes across a type difference: int and long, either way.  An insert casts the
+ * payload column across it (owner ruling 2026-09-13) and Find reaches across it (owner ruling 2026-09-15) — the
+ * same pair, one owner.  Vector or atom tags. */
+int q_type_widens(int8_t a, int8_t b);
+
 /* Vector tag -> kdb type name ("long"/"symbol"/...) or NULL (list/physical
  * STR); total over the value band. */
 const char* q_type_qname(int8_t t);

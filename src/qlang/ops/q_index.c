@@ -1,6 +1,7 @@
 /* q_index — the one-code-path index/amend family (contract in q_index.h). */
 #include "qlang/ops/q_index.h"
 #include "qlang/ops/q_bang.h"   /* q_bang — the `!` verb, which rebuilds a selection */
+#include "qlang/ops/q_dollar.h" /* q_dollar_cast — the int/long miss cast to its domain */
 #include "qlang/eval/q_eval.h"
 #include "qlang/q_builtins.h"   /* q_builtins_count_long — THE count owner */
 #include "qlang/base/q_err.h"
@@ -639,14 +640,15 @@ static int run_fits(ray_t* x, ray_t* vy) {
 
 /* A key-type mismatch on a dict join is 'type, under `,` as under `,:` (owner ruling 2026-09-15: the join is a Find
  * over the keys and Find is type-specific): a key that MISSES is stored, so a typed domain must hold it — its own
- * type, elem_fits's law; whether a foreign key HITS is Find's law, asked once through dict_pos.  An empty domain
- * adopts the payload's key type. */
+ * type, elem_fits's law, or the int/long pair, cast to the domain as an insert casts its column (grow_misses);
+ * whether a foreign key HITS is Find's law, asked once through dict_pos.  An empty domain adopts the payload's key
+ * type. */
 static int misses_fit(ray_t* keys, ray_t* ky, const int64_t* d, int64_t m, int64_t n0) {
-    if (!n0 || !ray_is_vec(keys) || ky->type == keys->type) return 1;
+    if (!n0 || !ray_is_vec(keys) || ky->type == keys->type || q_type_widens(keys->type, ky->type)) return 1;
     for (int64_t j = 0; j < m; j++) {
         if (d[j] < n0) continue;
         ray_t* e = q_index_elem_at(ky, j);
-        int ok = e && !RAY_IS_ERR(e) && elem_fits(keys, e);
+        int ok = e && !RAY_IS_ERR(e) && (elem_fits(keys, e) || (ray_is_atom(e) && q_type_widens(keys->type, e->type)));
         if (e) ray_release(e);
         if (!ok) return 0;
     }
@@ -681,6 +683,12 @@ static ray_t* grow_misses(ray_t** nk, ray_t** nv, ray_t* ky, ray_t* vy, const in
     ray_t* mk = ray_is_vec(ky) ? q_index_at(ky, &mj, 1) : items(ky, f, added);
     ray_t* mv = ray_is_vec(vy) ? q_index_at(vy, &mj, 1) : items(vy, f, added);
     ray_release(mj);
+    int8_t kt = (*nk)->type;
+    if (mk && !RAY_IS_ERR(mk) && (kt == RAY_I32 || kt == RAY_I64) && mk->type != kt) {   /* the int/long miss */
+        ray_t* c = q_dollar_cast(kt, mk);
+        ray_release(mk);
+        mk = c;
+    }
     ray_t* err = !mk || RAY_IS_ERR(mk) ? (mk ? mk : q_err(QE_OOM))
                : !mv || RAY_IS_ERR(mv) ? (mv ? mv : q_err(QE_OOM)) : NULL;
     if (!err) {

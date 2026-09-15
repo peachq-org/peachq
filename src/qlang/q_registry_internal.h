@@ -110,6 +110,9 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y);
 /* ---- defined in ops/q_search.c ---- */
 ray_t* q_within_wrap(ray_t* x, ray_t* y);
 ray_t* q_in_wrap(ray_t* x, ray_t* y);
+/* May needle y reach the typed domain x under Find's type law (ref/find.md:42)?  The one gate `?`, `in` and
+ * `except` share; x a typed vector other than STR, y any value (a general list is admitted item by item). */
+int q_search_admits(ray_t* x, ray_t* y);
 ray_t* q_bin_wrap(ray_t* x, ray_t* y);
 ray_t* q_binr_wrap(ray_t* x, ray_t* y);
 

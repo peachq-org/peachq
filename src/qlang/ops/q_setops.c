@@ -64,6 +64,8 @@ ray_t* q_except_wrap(ray_t* x, ray_t* y) {
         ray_release(idx);
         return r;
     }
+    /* a typed x is Find's domain (ref/find.md:102 "Find is implicit in ... except"), so its type law rules here */
+    if (x && ray_is_vec(x) && x->type != RAY_STR && !q_search_admits(x, y)) return q_err(QE_TYPE);
     return ray_except_fn(x, y);
 }
 
