@@ -51,12 +51,20 @@ ray_t* q_index_at(ray_t* x, ray_t* const* ix, int64_t k);
  * else u[S] / v[S;y].  x consumed on success, the caller's on error. */
 ray_t* q_index_amend(ray_t* x, ray_t* const* ix, int64_t k, ray_t* f, ray_t* y);
 
+/* `x,y` for two plain dicts — THE dict write (ref/join.md:94 upsert): `keys?key y` once, then the hits store into
+ * the values and the misses grow both slots; a repeated key appends once and its last occurrence wins.  strict is
+ * Append's law (`,:`, ref/join.md:173: a value the slot cannot hold is 'type, nothing written); else Join's
+ * (ref/join.md:33: a mismatched slot boxes to a general list — the keys box either way).  A keyed table on either
+ * side is 'type here (its rows join elsewhere).  x consumed on success (written where it stands when it is the
+ * caller's only ref, its slots included; a shared level copies once), the caller's on error; y borrowed. */
+ray_t* q_index_dict_join(ray_t* x, ray_t* y, int strict);
+
 /* Amend Entire with `,` IN PLACE — a vector the caller owns outright (it
  * parked the name; rc is the caller's question, not asked here) takes vector
  * y of its own type where it stands.  growable: may it (type, letter, sym
  * domain and width).  grow: do it — NULL on success with *px the vector,
  * which may have MOVED; else an owned error with *px valid but partly grown.
- * ungrow: back to length nx and the attrs bits `was` carried. */
+ * ungrow: back to length nx and the attrs bits `was` carried; a general list only releases the items above nx. */
 int    q_index_growable(ray_t* x, ray_t* y);
 ray_t* q_index_grow(ray_t** px, ray_t* y);
 void   q_index_ungrow(ray_t* x, int64_t nx, uint8_t was);

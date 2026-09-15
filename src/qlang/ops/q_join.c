@@ -1090,11 +1090,11 @@ int64_t q_join_gen_len(ray_t* x) {
  * append upsert performs).  Joins wave: non-conforming table,table is
  * 'mismatch (ref/uj.md pins `s,t` -> 'mismatch; uj is the column-union
  * generalization); keyed,keyed is the uj upsert merge (ref/coalesce.md
- * `kt1,kt3`); and a base-concat 'type on list-joinable operands falls back
- * to a GENERIC boxed list (kdb `,` never type-errors on a list join —
- * ref/join.md `1 2,"a"`).  Every other operand pair delegates to base concat
- * (register_binary("concat") == ray_concat_fn) byte-identically — dict,dict
- * upsert-union and conforming table,table row-join already live there.
+ * `kt1,kt3`); dict,dict is the one dict write (q_index_dict_join, Join's
+ * boxing law) on a copy; and a base-concat 'type on list-joinable operands
+ * falls back to a GENERIC boxed list (kdb `,` never type-errors on a list
+ * join — ref/join.md `1 2,"a"`).  Every other operand pair delegates to base
+ * concat (register_binary("concat") == ray_concat_fn) byte-identically.
  * `exclusive` is q_join_amend's word (below) that x may grow in place. */
 static ray_t* join_core(ray_t* x, ray_t* y, int exclusive) {
     /* `()` is Join's IDENTITY (the seed the `,` accumulator starts from,
@@ -1114,28 +1114,15 @@ static ray_t* join_core(ray_t* x, ray_t* y, int exclusive) {
         return q_join_table_upsert(x, y, exclusive);  /* every other payload: THE law */
     /* A bare dict joins ONLY with a dict (ref/join.md: `10,d` -> 'type; base
      * concat would wrongly DISTRIBUTE the scalar over the dict's values). */
-    {
-        if (q_type_is_plain_dict(x) != q_type_is_plain_dict(y))
-            return q_err(QE_TYPE);
+    if (q_type_is_plain_dict(x) != q_type_is_plain_dict(y)) return q_err(QE_TYPE);
+    if (q_type_is_plain_dict(x)) {
+        ray_retain(x);                                /* the value form: the write lands on a copy */
+        ray_t* r = q_index_dict_join(x, y, 0);
+        if (RAY_IS_ERR(r)) ray_release(x);
+        return r;
     }
     ray_t* r = ray_concat_fn(x, y);
     if (r && !RAY_IS_ERR(r)) {
-        /* dict upsert-union: the merged VALUES unify like any join result
-         * (`~` is type-strict, so `(update c:3 from `a`b!1 2)~`a`b`c!1 2 3`
-         * needs vector values) */
-        if (q_type_is_dict(r) && !q_type_is_keyed(r)) {
-            ray_t* v = ray_dict_vals(r);                       /* borrowed */
-            ray_t* cv = v ? q_list_collapse(v) : NULL;         /* no-op off-list */
-            if (cv && !RAY_IS_ERR(cv) && cv != v) {
-                ray_t* k = ray_dict_keys(r);
-                ray_retain(k);                        /* dict_new consumes both */
-                ray_t* nd = ray_dict_new(k, cv);
-                ray_release(r);
-                return nd ? nd : q_err(QE_TYPE);
-            }
-            if (cv) ray_release(cv);
-            return r;
-        }
         /* `()` is Join's IDENTITY and identity must not retype: base concat
          * boxes the untyped empty into the result, so `(),2` came back 0h
          * where kdb says 7h.  That is the seed the `,` accumulator starts from
@@ -1225,8 +1212,7 @@ static ray_t* join_list_grow(ray_t** px, ray_t* y) {
         ray_t* nl = e && !RAY_IS_ERR(e) ? ray_list_append(x, e) : e;
         if (e) ray_release(e);
         if (!nl || RAY_IS_ERR(nl)) {
-            ray_t** slots = (ray_t**)ray_data(x);
-            while (ray_len(x) > nx) ray_release(slots[--x->len]);
+            q_index_ungrow(x, nx, x->attrs);
             *px = x;
             return nl ? nl : q_err(QE_OOM);
         }
@@ -1257,6 +1243,12 @@ ray_t* q_join_grow(ray_t** px, ray_t* y) {
  * refcount: a borrowed arg at rc 1 may be the sole element of a list that owns it. */
 ray_t* q_join_amend(ray_t** px, ray_t* y, int exclusive) {
     ray_t* x = *px;
+    if (q_type_is_plain_dict(x) && q_type_is_plain_dict(y)) {   /* 1: Append's strict law */
+        if (!exclusive) ray_retain(x);
+        ray_t* r = q_index_dict_join(x, y, 1);
+        if (!exclusive && RAY_IS_ERR(r)) ray_release(x);
+        return r;
+    }
     if (x && y && ray_is_vec(x) && x->type != RAY_STR && y->type != x->type && y->type != -x->type &&
         !((y->type == RAY_LIST || ray_is_vec(y)) && ray_len(y) == 0))
         return q_err(QE_TYPE);
