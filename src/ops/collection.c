@@ -732,6 +732,7 @@ int atom_eq(ray_t* a, ray_t* b) {
     case -RAY_I16:  return a->i16 == b->i16;
     RAY_BYTE_ATOM_CASES: return a->u8 == b->u8;
     case -RAY_F64:
+    case -RAY_DATETIME:
     case -RAY_F32:  return a->f64 == b->f64;   /* real atoms carry f64 too */
     case -RAY_BOOL: return a->b8 == b->b8;
     case -RAY_SYM:  return a->i64 == b->i64;
@@ -1898,6 +1899,131 @@ ray_t* ray_at_fn(ray_t* vec, ray_t* idx) {
     return elem;
 }
 
+/* Needle count up to which a same-type vector probe is one typed scan per needle rather than a hashset over the
+ * whole domain.  Measured on a 1M sym domain: the build ~30ns/slot, a scan ~0.2ns/slot, so the crossover is
+ * ~140 needles when every needle sits at the END; 64 keeps the scan side under half the build even then. */
+#define FIND_SCAN_NEEDLES 64
+
+/* One typed pass for an atom needle over a typed vector: atom_eq's law hoisted out of the loop.  A same-type
+ * slot compares raw payloads (a sym cell at its width, the needle re-expressed in a file domain first), a
+ * cross-type numeric pair compares as f64, and any other pair meets only at a null.  The row, or -1. */
+static int64_t find_scan(ray_t* vec, ray_t* val) {
+    int64_t n = vec->len;
+    bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) != 0;
+    const void* a = ray_data(vec);
+    if (atom_is_oob_null(val)) {
+        if (has_nulls) for (int64_t i = 0; i < n; i++) if (ray_vec_is_null(vec, i)) return i;
+        return -1;
+    }
+    if (!ray_is_atom(val)) return -1;
+#define FIND_SCAN(EQ) do {                                          \
+        if (has_nulls) {                                            \
+            for (int64_t i = 0; i < n; i++) {                       \
+                if (ray_vec_is_null(vec, i)) continue;              \
+                if (EQ) return i;                                   \
+            }                                                       \
+        } else {                                                    \
+            for (int64_t i = 0; i < n; i++)                         \
+                if (EQ) return i;                                   \
+        }                                                           \
+        return -1;                                                  \
+    } while (0)
+    if (val->type == -vec->type) {
+        switch (vec->type) {
+        case RAY_I64: RAY_TEMPORAL64_CASES: { int64_t v = val->i64; FIND_SCAN(((const int64_t*)a)[i] == v); }
+        case RAY_I32: RAY_TEMPORAL32_CASES: { int32_t v = val->i32; FIND_SCAN(((const int32_t*)a)[i] == v); }
+        case RAY_I16:                       { int16_t v = val->i16; FIND_SCAN(((const int16_t*)a)[i] == v); }
+        case RAY_BOOL:                      { bool v = val->b8;     FIND_SCAN(((const bool*)a)[i] == v); }
+        RAY_BYTE_CASES:                     { uint8_t v = val->u8;  FIND_SCAN(((const uint8_t*)a)[i] == v); }
+        case RAY_F64: RAY_TEMPORALF_CASES:  { double v = val->f64;  FIND_SCAN(((const double*)a)[i] == v); }
+        case RAY_F32:                       { double v = val->f64;  FIND_SCAN((double)((const float*)a)[i] == v); }
+        case RAY_GUID: {
+            const uint8_t* g = (const uint8_t*)ray_data(val->obj ? val->obj : val);
+            FIND_SCAN(memcmp((const uint8_t*)a + i * 16, g, 16) == 0);
+        }
+        case RAY_SYM: {
+            int64_t v = val->i64;
+            struct ray_sym_domain_s* dom = ray_sym_vec_domain(vec);
+            if (dom != ray_sym_runtime_domain()) {
+                ray_t* s = ray_sym_str(v);
+                v = s ? ray_sym_domain_find(dom, ray_str_ptr(s), ray_str_len(s)) : -1;
+                if (v < 0) return -1;
+            }
+            switch (vec->attrs & RAY_SYM_W_MASK) {
+            case RAY_SYM_W8:  FIND_SCAN(((const uint8_t*)a)[i] == v);
+            case RAY_SYM_W16: FIND_SCAN(((const uint16_t*)a)[i] == v);
+            case RAY_SYM_W32: FIND_SCAN(((const uint32_t*)a)[i] == v);
+            default:          FIND_SCAN(((const int64_t*)a)[i] == v);
+            }
+        }
+        case RAY_STR: {
+            const char* kp = ray_str_ptr(val);
+            size_t kl = ray_str_len(val);
+            for (int64_t i = 0; i < n; i++) {
+                if (has_nulls && ray_vec_is_null(vec, i)) continue;
+                size_t l = 0;
+                const char* p = ray_str_vec_get(vec, i, &l);
+                if ((p ? l : 0) == kl && (kl == 0 || memcmp(p, kp, kl) == 0)) return i;
+            }
+            return -1;
+        }
+        default: return -1;
+        }
+    }
+    if (!is_numeric(val)) return -1;
+    double v = as_f64(val);
+    switch (vec->type) {
+    case RAY_I64:   FIND_SCAN((double)((const int64_t*)a)[i] == v);
+    case RAY_I32:   FIND_SCAN((double)((const int32_t*)a)[i] == v);
+    case RAY_I16:   FIND_SCAN((double)((const int16_t*)a)[i] == v);
+    case RAY_BOOL:  FIND_SCAN((double)((const bool*)a)[i] == v);
+    RAY_BYTE_CASES: FIND_SCAN((double)((const uint8_t*)a)[i] == v);
+    case RAY_F64:   FIND_SCAN(((const double*)a)[i] == v);
+    case RAY_F32:   FIND_SCAN((double)((const float*)a)[i] == v);
+    default:        return -1;
+    }
+#undef FIND_SCAN
+}
+
+/* An atom needle over a typed vector: the index when the domain carries one, else the typed scan.  The row, or -1. */
+static int64_t find_atom(ray_t* vec, ray_t* val) {
+    bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) != 0;
+    bool val_null = atom_is_oob_null(val);
+
+    /* Hash-index fast path: integer-family needle against an indexed
+     * integer-family column without nulls.  Float and cross-family
+     * needles fall through to the scan (the scan owns promotion
+     * semantics; we do not replicate them here). */
+    if (!has_nulls && !val_null && ray_is_atom(val) && ray_index_has(vec)) {
+        int64_t needle = 0;
+        int eligible = 1;
+        switch (val->type) {
+        case -RAY_I64:
+        case -RAY_TIMESTAMP:
+        case -RAY_TIMESPAN:  needle = val->i64;              break;
+        case -RAY_I32:
+        case -RAY_DATE:
+        case -RAY_TIME:
+        case -RAY_MONTH:
+        case -RAY_MINUTE:
+        case -RAY_SECOND:    needle = (int64_t)val->i32;     break;
+        case -RAY_I16:       needle = (int64_t)val->i16;     break;
+        case -RAY_BOOL:
+        RAY_BYTE_ATOM_CASES: needle = (int64_t)val->b8;      break;
+        default:             eligible = 0;                   break;
+        }
+        if (eligible) {
+            ray_idx_consults[IDX_SITE_FIND]++;
+            int64_t row = ray_index_find_row(vec, needle);
+            if (row >= -1) {   /* -2 means not eligible — fall through */
+                ray_idx_hits[IDX_SITE_FIND]++;
+                return row;
+            }
+        }
+    }
+    return find_scan(vec, val);
+}
+
 /* (find vec val) — index of first occurrence, or -1 */
 ray_t* ray_find_fn(ray_t* vec, ray_t* val) {
     if (ray_is_lazy(vec)) vec = ray_lazy_materialize(vec);
@@ -1912,7 +2038,8 @@ ray_t* ray_find_fn(ray_t* vec, ray_t* val) {
         }
         return ray_typed_null(-RAY_I64);
     }
-    /* Vector val: (find vec [v1 v2]) → dense I64 [idx1 idx2], O(n+m) via hashset. */
+    /* Vector val: (find vec [v1 v2]) → dense I64 [idx1 idx2] — a few same-type needles scan (O(n·m), m small),
+     * the rest hash (O(n+m)). */
     if (is_collection(val) && !ray_is_atom(val)) {
         int64_t vlen = ray_len(val);
         ray_t* result = ray_vec_new(RAY_I64, vlen);
@@ -1921,8 +2048,17 @@ ray_t* ray_find_fn(ray_t* vec, ray_t* val) {
         int64_t* out = (int64_t*)ray_data(result);
         bool any_null = false;
 
-        /* Hash fast path: both sides typed vecs — O(n+m), mirrors ray_in_fn. */
-        if (ray_is_vec(val) && ray_is_vec(vec)) {
+        if (ray_is_vec(val) && ray_is_vec(vec) && val->type == vec->type && vlen <= FIND_SCAN_NEEDLES) {
+            for (int64_t j = 0; j < vlen; j++) {
+                int alloc = 0;
+                ray_t* e = collection_elem(val, j, &alloc);
+                int64_t row = find_atom(vec, e);
+                if (alloc) ray_release(e);
+                if (row < 0) { out[j] = NULL_I64; any_null = true; }
+                else out[j] = row;
+            }
+        } else if (ray_is_vec(val) && ray_is_vec(vec)) {
+            /* Hash fast path: both sides typed vecs — O(n+m), mirrors ray_in_fn. */
             hashset_t hs;
             if (!hashset_init(&hs, vec, vec->len)) { ray_release(result); return ray_error("oom", NULL); }
             for (int64_t j = 0; j < vec->len; j++) hashset_insert(&hs, j);
@@ -1949,71 +2085,9 @@ ray_t* ray_find_fn(ray_t* vec, ray_t* val) {
         if (any_null) result->attrs |= RAY_ATTR_HAS_NULLS;
         return result;
     }
-    /* Typed vector: search without boxing */
     if (ray_is_vec(vec)) {
-        int64_t len = vec->len;
-        bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) != 0;
-        bool val_null = atom_is_oob_null(val);
-
-        /* Hash-index fast path: integer-family needle against an indexed
-         * integer-family column without nulls.  Float and cross-family
-         * needles fall through to the scan (the scan owns promotion
-         * semantics; we do not replicate them here). */
-        if (!has_nulls && !val_null && ray_is_atom(val) && ray_index_has(vec)) {
-            int64_t needle = 0;
-            int eligible = 1;
-            switch (val->type) {
-            case -RAY_I64:
-            case -RAY_TIMESTAMP:
-            case -RAY_TIMESPAN:  needle = val->i64;              break;
-            case -RAY_I32:
-            case -RAY_DATE:
-            case -RAY_TIME:
-            case -RAY_MONTH:
-            case -RAY_MINUTE:
-            case -RAY_SECOND:    needle = (int64_t)val->i32;     break;
-            case -RAY_I16:       needle = (int64_t)val->i16;     break;
-            case -RAY_BOOL:
-            RAY_BYTE_ATOM_CASES: needle = (int64_t)val->b8;      break;
-            default:             eligible = 0;                   break;
-            }
-            if (eligible) {
-                ray_idx_consults[IDX_SITE_FIND]++;
-                int64_t row = ray_index_find_row(vec, needle);
-                if (row >= -1) {   /* -2 means not eligible — fall through */
-                    ray_idx_hits[IDX_SITE_FIND]++;
-                    if (row < 0)
-                        return ray_typed_null(-RAY_I64);
-                    return make_i64(row);
-                }
-            }
-        }
-
-        if (has_nulls) {
-            for (int64_t i = 0; i < len; i++) {
-                if (ray_vec_is_null(vec, i)) {
-                    if (val_null) return make_i64(i);
-                    continue;
-                }
-                if (val_null) continue;
-                int alloc = 0;
-                ray_t* elem = collection_elem(vec, i, &alloc);
-                int eq = atom_eq(elem, val);
-                if (alloc) ray_release(elem);
-                if (eq) return make_i64(i);
-            }
-        } else {
-            if (!val_null) {
-                for (int64_t i = 0; i < len; i++) {
-                    int alloc = 0;
-                    ray_t* elem = collection_elem(vec, i, &alloc);
-                    int eq = atom_eq(elem, val);
-                    if (alloc) ray_release(elem);
-                    if (eq) return make_i64(i);
-                }
-            }
-        }
-        return ray_typed_null(-RAY_I64);
+        int64_t row = find_atom(vec, val);
+        return row < 0 ? ray_typed_null(-RAY_I64) : make_i64(row);
     }
     ray_t* _bx = NULL;
     vec = unbox_vec_arg(vec, &_bx);
