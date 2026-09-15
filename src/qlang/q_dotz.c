@@ -109,7 +109,7 @@ static int flag_kind(const char* s) {
     if (strcmp(s, "-e") == 0 || strcmp(s, "-E") == 0 || strcmp(s, "-z") == 0) return Q_FLAG_VALUE;
     if (strcmp(s, "-p") == 0 || strcmp(s, "--port") == 0 ||
         strcmp(s, "-u") == 0 || strcmp(s, "-U") == 0) return Q_FLAG_VALUE;
-    if (strcmp(s, "-eval") == 0 || strcmp(s, "-eval-before") == 0) return Q_FLAG_VALUE;
+    if (strcmp(s, "-eval") == 0 || strcmp(s, "-eval-before") == 0 || strcmp(s, "-duckdb") == 0) return Q_FLAG_VALUE;
     return Q_FLAG_NONE;
 }
 

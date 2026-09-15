@@ -376,6 +376,16 @@ hclose h                                      / the one close door
 - The int fd shown as `h` in `.pq.conns[]` is the legacy form, for code that expects `hopen` to answer an int: it is
   accepted wherever the symbol is, and goes once nothing uses it.
 
+**The DuckDB link and `s)`.** The process has ONE DuckDB database — the main instance, whose own handle is
+`` `:pq:duckdb:main `` (listed by `.pq.conns[]`, answered by `.duckdb.main[]`; `hopen`/`hclose` refuse the alias, and
+`q -duckdb path` makes it a file). Every DuckDB alias is a catalog ATTACHed to it under the alias's name, shared by
+path. A q global bound to a DuckDB table — `` myt:get `:pq:duckdb:al:dt/ `` — becomes a same-named VIEW in main at the
+moment of assignment (a view, never a copy: `` `myt insert x `` writes through the provider and the next `s)` reads
+it); re-pointing the global re-points the view, any other value drops it, `` `.ns.t `` links under its full name.
+`s)SELECT count(*) FROM myt` is that view; `s)SELECT * FROM al.dt` reaches the alias's catalog qualified, and a bare
+`dt` is NOT visible (a bare name in `s)` is a q name). After `hclose` of the alias the view errors on use, as the
+pointer's own `get` does. `\?duckdb` and `docs/duckdb-api.md` have the rest; the q IPC provider defines no link.
+
 ## Compatibility principle
 
 PeachQ should preserve established kdb+/q meanings of handles wherever practical.
@@ -392,37 +402,9 @@ This gives existing q code the familiar compact syntax while allowing new code t
 
 ## For implementers: provider and qSQL contract
 
-A resolver determines whether a `:...` specification is an existing q resource, an inferred format, a transport/container composition, or an explicit
-`:pq:` provider.
-
-Providers implement only relevant hooks. The current vocabulary includes the lifecycle hooks `.X.i.open[alias;rest;timeout;config]` and
-`.X.i.close[token]` (called by the host alone: `hopen`/`hclose` are the doors, and the host keeps the only registry, alias to the provider's
-private token), the connection hooks `call` and `async`, and table hooks `bind`, `get`, `set`, `upsert`, `meta`, `count`, `qsql` — all
-token-keyed.
-
-`qsql` is the table-query seam:
-
-```q
-.provider.qsql:{[c;cl;tree] ...}
-```
-
-It receives provider context, the column environment, and the qSQL parse tree. A provider may execute the query itself, materialise and evaluate
-locally, or return `::` for host fallback.
-
-DuckDB uses this seam for provider-side query handling; q IPC can forward the resolved functional query remotely.
-
-Decoder-backed resources such as CSV produce a table for host qSQL. Transport and container resolution belongs to PeachQ, not the decoder; HTTP -> CSV
-and ZIP -> CSV are compositions.
-
-The implementation should preserve:
-
-```text
-resource specification
-    -> resolve transport/container/provider
-    -> obtain or expose table
-    -> optional provider qsql
-    -> host qSQL fallback
-```
+Writing a `:pq:` provider — the `.X` namespace, every hook the host calls (`.X.i.open`/`.X.i.close`, `call`/`async`,
+`bind`/`get`/`set`/`upsert`/`count`/`meta`/`qsql`, the link hooks `.X.i.link`/`.X.i.unlink`), which are required and
+which optional, and what the host guarantees — is its own page: `user-docs/resource-handle-implementer.md`.
 
 
 
