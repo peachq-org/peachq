@@ -1,24 +1,14 @@
 / Query and write DuckDB databases from q: a database is a handle, its tables are q tables.
-/ h:hopen `:pq:duckdb:alias:/path/db opens (or creates) one; h "SELECT ..." runs SQL and answers a table;
-/ `:pq:duckdb:alias:table/ names a table for get, set, upsert and qsql, with select/where/by pushed down to
-/ DuckDB.  .duckdb.types[] is the type map, .duckdb.err[] the last error.  \?duckdb has examples.
-/ @implNote DuckDB as a virtual-table PROVIDER (`:pq:duckdb:alias:/path/db`,
-/ actionable-plans/2026-08-07-plugin-data-sources-tables.md).  These hooks ARE
-/ the DuckDB surface: the bespoke .duckdb.connect/.sql/.select API was replaced
-/ 2026-08-07, not wrapped.  Written over the internal natives .duckdb.i.* (the
-/ connection, the sidecar-lossless round-trip and one raw exec), which bind at
-/ this same \l pq gate.  CONNID is the native int handle - no q-side state.
-/ ANY-ORDER LAW: definitions only at top level.
+/ h:hopen `:pq:duckdb:alias:/path/db opens (or creates) one and answers the alias symbol `:pq:duckdb:alias - the
+/ handle every public verb takes (.duckdb.exec[h;sql]); h "SELECT ..." runs SQL and answers a table; hclose h
+/ closes it.  `:pq:duckdb:alias:table/ names a table for get, set, upsert and qsql, with select/where/by pushed
+/ down to DuckDB.  .duckdb.types[] is the type map, .duckdb.err[] the last error.  \?duckdb has examples.
+/ @implNote DuckDB as a virtual-table PROVIDER (contract v3: the 2026-09-15 ADR § Handles).  These hooks ARE
+/ the DuckDB surface, written over the natives .duckdb.i.*, which bind at this same \l pq gate; the lifecycle
+/ hooks .duckdb.i.open[alias;rest;tmo;cfg] / .duckdb.i.close[token] ARE natives, called by the host alone
+/ (hopen/hclose are the only doors).  c below is the HANDLE (alias sym, or the legacy int), resolved to the
+/ native token in C - no q-side state.  ANY-ORDER LAW: definitions only at top level.
 
-/ open[rest;timeout;config]: rest = the db path (`` `:default: `` = shared
-/ in-memory); timeout is meaningless to an in-process engine and ignored;
-/ config rides the native's (path;configDict) form verbatim.
-.duckdb.open:{[rest;tmo;cfg]
-  p:`$$[0=count rest;":default:";":",rest];
-  $[99h=type cfg; .duckdb.i.open (p;cfg); .duckdb.i.open p]}
-
-/ closing the main connection forgets it, so the next .duckdb.main[] opens afresh
-.duckdb.close:{[c] if[c~.duckdb.i.mainc; .duckdb.i.mainc::0Ni]; .duckdb.i.close c}
 / the sync flag is ignored: an in-process engine has no async lane (the same
 / treatment as open's timeout)
 / lastsql records the SQL last handed to the engine - the B2 pushdown-snapshot
@@ -102,7 +92,8 @@
 .duckdb.i.push:{[c;rt] t:$[10h=type rt 0;.duckdb.exec[c;"SELECT * FROM ",rt 0];.duckdb.get[c;rt 0]]; (?) . (enlist t),1_rt}
 .duckdb.qsql:{[c;cl;tree] rt:@[.pq.i.resolveTree[cl];tree;{[e] ::}]; $[rt~(::);::;.duckdb.i.push[c;rt]]}
 
-/ the one connection the standard library's own doors (.parquet) run on: opened on first call, the same CONNID
-/ until closed.  Today a connection to the shared :default: db; a reserved instance is the ADR's A1 follow-up.
+/ the one connection the standard library's own doors (.parquet) run on: opened on first call, the same token
+/ for the life of the process - not a registered alias, so no handle names it.  Today a connection to the shared
+/ :default: db; a reserved instance is the ADR's A1 follow-up.
 .duckdb.i.mainc:0Ni
-.duckdb.main:{[] if[null .duckdb.i.mainc; .duckdb.i.mainc::.duckdb.open["default:";0N;::]]; .duckdb.i.mainc}
+.duckdb.main:{[] if[null .duckdb.i.mainc; .duckdb.i.mainc::.duckdb.i.open[`;"default:";0N;::]]; .duckdb.i.mainc}
