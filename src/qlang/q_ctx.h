@@ -59,4 +59,11 @@ void q_ctx_install_remote_hooks(void);
 void q_ctx_set_console_close(void (*fn)(void));
 void q_ctx_console_close(void);
 
+/* A tty owner NESTED inside the front end's (.termbox): its restore fires on
+ * every ERROR / 'stop statement end, before the trace prints, and FIRST in
+ * q_ctx_console_close — LIFO, its snapshot was taken inside the REPL's eval
+ * window.  A normal statement end never fires it: a script's init, loop and
+ * shutdown are separate statements.  The fn must be a no-op when idle. */
+void q_ctx_set_tty_restore(void (*fn)(void));
+
 #endif /* Q_CTX_H */
