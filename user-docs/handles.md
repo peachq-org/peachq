@@ -34,8 +34,9 @@ These capabilities overlap. They are not intended to form a rigid hierarchy of m
 | WebSocket endpoint | ```:ws://host/x``` | connect, then persistent framed messaging |
 | PeachQ provider | ```:pq:duckdb:prod:/data/db``` | provider-defined connection and table capabilities |
 
-An **opened handle** is different from a resource specification. For example, `hopen` on an IPC resource may return an integer handle. The `:...`
-value identifies the resource; the returned integer represents an opened connection to it.
+An **opened handle** is different from a resource specification. For example, `hopen` on an IPC resource returns an integer handle. The `:...`
+value identifies the resource; the returned integer represents an opened connection to it. `hopen` on a `:pq:` provider resource returns the
+**alias symbol** instead (see PeachQ providers below): the handle says what it is, and it is the same value the coordinate forms use.
 
 ## Resources as tables
 
@@ -352,6 +353,29 @@ A DuckDB-backed table can therefore resolve through the DuckDB provider rather t
 
 This also gives PeachQ an explicit escape hatch where inference from a normal path would be inappropriate.
 
+### Opening, using and closing a provider connection
+
+```q
+h:hopen `:pq:duckdb:prod:/data/market.db     / answers the alias symbol `:pq:duckdb:prod
+h "SELECT count(*) FROM trade"                / the handle applies like any q handle: text is a call
+h (`get;`trade)                               / a list names a provider hook
+hclose h                                      / the one close door
+```
+
+- `hopen` **answers the alias symbol** `` `:pq:<provider>:<alias> `` — not an int. The alias is **required**: a
+  handle needs a name, so `` hopen `:pq:duckdb::/data/market.db `` is `'domain`. The aliasless form is the one-shot
+  apply, `` `:pq:duckdb::/data/market.db "SELECT 1" `` (open, run, close, nothing registered).
+- The symbol IS the live connection: `` `:pq:duckdb:prod "SELECT 1" `` and `h "SELECT 1"` are the same call, and
+  the public verbs of a provider take it (`.duckdb.exec[h;sql]`). After `hclose h` the same symbol answers `'conn`.
+  Opening the same alias again re-points it in place and answers the same symbol.
+- `hclose h` is the only close door; a provider's own open/close are hooks the host calls, with no public spelling.
+- `.pq.conns[]` lists every open connection: `handle` is what `hclose` takes (the alias symbol for a provider row,
+  the int for a socket or file), `h` the fd, with `provider`, `alias` and `opened` beside them.
+- **Async is a hook call**: `h (`async; msg)` reaches the provider's `.X.async` — the q IPC provider defines it as
+  the async send; an in-process engine like DuckDB does not (`'.duckdb.async`). `neg` on the symbol stays q's `neg`.
+- The int fd shown as `h` in `.pq.conns[]` is the legacy form, for code that expects `hopen` to answer an int: it is
+  accepted wherever the symbol is, and goes once nothing uses it.
+
 ## Compatibility principle
 
 PeachQ should preserve established kdb+/q meanings of handles wherever practical.
@@ -371,8 +395,10 @@ This gives existing q code the familiar compact syntax while allowing new code t
 A resolver determines whether a `:...` specification is an existing q resource, an inferred format, a transport/container composition, or an explicit
 `:pq:` provider.
 
-Providers implement only relevant hooks. The current vocabulary includes connection hooks `open`, `close`, `call`, and table hooks `bind`, `get`,
-`set`, `upsert`, `meta`, `count`, `qsql`.
+Providers implement only relevant hooks. The current vocabulary includes the lifecycle hooks `.X.i.open[alias;rest;timeout;config]` and
+`.X.i.close[token]` (called by the host alone: `hopen`/`hclose` are the doors, and the host keeps the only registry, alias to the provider's
+private token), the connection hooks `call` and `async`, and table hooks `bind`, `get`, `set`, `upsert`, `meta`, `count`, `qsql` — all
+token-keyed.
 
 `qsql` is the table-query seam:
 

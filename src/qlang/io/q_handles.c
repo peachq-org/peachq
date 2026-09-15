@@ -467,9 +467,9 @@ ray_t* q_handles_read1(int64_t fd, ray_t* count) {
  * conventions — the leading-`:` scanner lexes `` `::5000 ``/`` `:host:port `` as
  * one colon-bearing symbol, so both surfaces reach hopen_norm_descriptor and
  * share ONE parser), or a 2-list (conn; timeout-ms).  A `:pq:` conn may also
- * be a 3-list (conn; timeout; config) — the provider open triad.  A `:path` /
- * `:fifo://path` descriptor is NOT IPC — hopen_transport routes it to
- * q_handles_open above.
+ * be a 3-list (conn; timeout; config) — the provider open triad — and answers
+ * the alias SYM, not an int (q_provider_hopen).  A `:path` / `:fifo://path`
+ * descriptor is NOT IPC — hopen_transport routes it to q_handles_open above.
  * DEFERRED (clean 'nyi, not a silent TCP attempt): the transport schemes
  * `unix://` / `tcps://` / `unixs://`, which need a transport layer peachq lacks,
  * and single-colon `` `fifo:path `` (kdb opens it non-blocking; see
@@ -571,7 +571,7 @@ static int hopen_transport(const char* s, size_t n, const char** path, size_t* p
     return HT_FILE;
 }
 
-/* q `hopen y` — connect, return an int handle.  Restricted connections must not
+/* q `hopen y` — connect: an int handle (a `:pq:` conn: its alias sym).  Restricted connections must not
  * open outbound sockets (the `.ipc.open` primitive is RAY_FN_RESTRICTED; calling
  * ray_hopen_fn directly bypasses the eval-layer check, so re-assert it here). */
 static ray_t* hopen_wrap_impl(ray_t* x);
@@ -705,10 +705,12 @@ static ray_t* hopen_wrap_impl(ray_t* x) {
 }
 
 /* q `hclose h` — validate the handle, then delegate the file/fifo-vs-IPC
- * dispatch to this file's q_handles_close.  Restricted connections are
- * refused, matching hopen / the handle-apply path. */
+ * dispatch to this file's q_handles_close; a SYM is a provider alias handle
+ * (what hopen `:pq:` answers).  Restricted connections are refused, matching
+ * hopen / the handle-apply path. */
 ray_t* q_hclose_wrap(ray_t* x) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (x && x->type == -RAY_SYM) return q_provider_close_sym(x);
     int64_t qh;
     if (!q_type_strict_i64(x, &qh) || RAY_ATOM_IS_NULL(x) || qh <= 0)
         return q_err(QE_TYPE);
