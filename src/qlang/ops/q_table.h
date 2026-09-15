@@ -58,8 +58,4 @@ ray_t* q_table_rows_typed(ray_t* flat, ray_t* rows);
  * `flat` itself, retained.  0 = today's copy, whatever the refcounts say. */
 ray_t* q_table_append(ray_t* flat, ray_t* rows, int exclusive);
 
-/* Most columns any one table verb will assemble at once (fixed accumulator
- * arrays); past it the verb returns 'limit. */
-#define Q_TABLE_MAX_COLS 64
-
 #endif

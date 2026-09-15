@@ -47,7 +47,7 @@ static ray_t* insert_keyed(int64_t sym, ray_t* g, ray_t* y) {
     if (!ky || RAY_IS_ERR(ky)) return ky;
     ray_retain(g);                                        /* ours across the park */
     int stole = q_env_take(sym, g);
-    ray_t* nt = q_index_keyed_put(g, ky, UINT64_MAX, Q_KEYED_INSERT, stole);
+    ray_t* nt = q_index_keyed_put(g, ky, NULL, Q_KEYED_INSERT, stole);
     ray_release(ky);
     if (!nt || RAY_IS_ERR(nt)) {
         if (stole) q_env_bind(sym, g);                    /* restore the binding */

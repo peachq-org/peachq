@@ -763,6 +763,7 @@ static ray_t* atomic2(ray_binary_fn f, const q_op_t* row, ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);
     int xd = x->type == RAY_DICT, yd = y->type == RAY_DICT;
     if (xd && yd) {
+        if (q_type_is_keyed(x) && q_type_is_keyed(y)) return f(x, y);   /* the zip has no row Find: the wrapper's pair */
         a2ctx c = { f, row, NULL, 0 };
         return q_eval_apply_dict_zip(row, x, y, atomic2_zip, &c);
     }
