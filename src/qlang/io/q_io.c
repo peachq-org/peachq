@@ -15,6 +15,7 @@
 #include "qlang/io/q_provider.h"  /* q_io_set: `:pq: targets route to .X.set */
 #include "qlang/io/q_csv.h"     /* the CSV/TSV decoder behind a recognised tabular suffix */
 #include "qlang/io/q_json.h"    /* the JSON decoder, and the framing a suffix declares to it */
+#include "qlang/eval/q_eval.h"  /* q_eval_call_name — the .parquet decoder is bound by `\l pq`, not linked */
 #include "qlang/net/q_gz.h"     /* q_gz_inflate_zlib — the kxzip block codec */
 #include "qlang/net/q_wirefile.h" /* the format writers behind q_io_set */
 #include "qlang/net/q_http_client.h" /* the http half of the resource-read seam */
@@ -216,6 +217,16 @@ static int io_suffix_is(const char* p, size_t n, const char* ext) {
     return n > k && memcmp(p + n - k, ext, k) == 0;
 }
 
+/* `.parquet.read[fsym;();()]` by name at call time: standard library, never linked; unbound is '.parquet.read */
+static ray_t* io_parquet_table(ray_t* fsym) {
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    ray_t* none = ray_list_new(0);
+    ray_t* args[3] = { fsym, none, none };
+    ray_t* out = q_eval_call_name(".parquet.read", 13, args, 3);
+    ray_release(none);
+    return out;
+}
+
 /* The READ side of the on-disk-format classification q_io_set owns for writes,
  * for the formats that decode to a table by their name (user-docs/handles.md
  * § Format inference: explicit provider or scheme, then explicit format API,
@@ -236,6 +247,7 @@ ray_t* q_io_resource_table(ray_t* fsym) {
     else if (io_suffix_is(p, n, ".ndjson")) out = q_json_read_table(fsym, Q_JSON_ND);
     else if (io_suffix_is(p, n, ".jsonl"))  out = q_json_read_table(fsym, Q_JSON_ND);
     else if (io_suffix_is(p, n, ".json"))   out = q_json_read_table(fsym, Q_JSON_AUTO);
+    else if (io_suffix_is(p, n, ".parquet")) out = io_parquet_table(fsym);
     else out = q_io_resource_chunkable(path) ? NULL : q_err(QE_TYPE);
     ray_release(path);
     return out;
