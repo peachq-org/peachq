@@ -62,17 +62,18 @@ ray_t* q_index_dict_join(ray_t* x, ray_t* y, int strict);
 /* THE keyed-table write — the dict write with table slots (ref/upsert.md §Keyed table; ref/join.md:140,274;
  * ref/insert.md:56).  y is a keyed table of x's schema (the door normalised it: q_table_rows_normalize then
  * `nkey!rows`).  `(key x)?key y` once — run_positions' law: a repeated key appends once, its last occurrence wins —
- * then the misses grow every column of both slots and the hits store per VALUE column whose bit is set in `hit`:
- * every column is replace-row (upsert: an omitted column was null-filled at the door, course/keyed-tables:82), the
- * payload's own columns is merge-columns (`,:` with a keyed payload retains the rest, ref/join.md:274).
+ * then the misses grow every column of both slots and the hits store per VALUE column `hit` names (a boolean per
+ * value column; NULL: every column — replace-row, upsert: an omitted column was null-filled at the door,
+ * course/keyed-tables:82; the payload's own columns is merge-columns: `,:` with a keyed payload retains the rest,
+ * ref/join.md:274).
  * Q_KEYED_INSERT refuses any hit ('insert) and appends every row in payload order.  The type gate is insert's
  * (q_table_rows_typed) over both parts before any write: a foreign type is 'type, int<->long casts to the column.
  * `exclusive` is the caller's word that x is its only ref: the write lands where x stands — its slots, their
  * columns — and the result is x retained; else x is untouched and a new dict answers, every level it shares copied
  * once.  Past the type check not transactional (an OOM mid-store leaves earlier stores standing), but consistent:
- * both slots always one length.  x/y borrowed. */
+ * both slots always one length.  x/y/hit borrowed. */
 enum { Q_KEYED_UPSERT, Q_KEYED_INSERT };
-ray_t* q_index_keyed_put(ray_t* x, ray_t* y, uint64_t hit, int mode, int exclusive);
+ray_t* q_index_keyed_put(ray_t* x, ray_t* y, ray_t* hit, int mode, int exclusive);
 
 /* Amend Entire with `,` IN PLACE — a vector the caller owns outright (it
  * parked the name; rc is the caller's question, not asked here) takes vector
