@@ -164,6 +164,9 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
             return out;
         }
     }
+    /* a typed domain of two or more items is Find's (ref/find.md:102 "Find is implicit in ... in"), so its type
+     * law rules here too; the atom and the 1-item y above keep in.md's "wider input type mix" */
+    if (ray_is_vec(y) && y->type != RAY_STR && ray_len(y) != 1 && !q_search_admits(y, x)) return q_err(QE_TYPE);
     /* Against a non-list y the comparison is left-atomic (ref/in.md) — one
      * boolean per item of x, and NONE is still boolean, where the base kernel
      * answers the untyped `()` that no downstream `where` survives.  A STR y
@@ -429,6 +432,27 @@ int64_t q_search_find_item(ray_t* x, ray_t* v, int64_t cnt) {
     return cnt;
 }
 
+/* Find is type-specific relative to x (ref/find.md:42; owner ruling 2026-09-15): a needle reaches a typed domain at
+ * the domain's own type or across the int/long pair (learn/python/examples/list.md:91 finds a long in an int
+ * vector), and is 'type otherwise; a general-list needle is a run under the rank law, so each item is asked, and
+ * an empty needle has nothing to compare.  The pairs the owner has not ruled keep the kernel's coercion: short in
+ * the integer family, real against float, byte against the integers, an enum on a sym domain.  x a typed vector,
+ * never STR. */
+int q_search_admits(ray_t* x, ray_t* y) {
+    if (!y) return 1;
+    if (y->type == RAY_LIST) {
+        ray_t** e = (ray_t**)ray_data(y);
+        for (int64_t i = 0, n = ray_len(y); i < n; i++) if (!q_search_admits(x, e[i])) return 0;
+        return 1;
+    }
+    if (y->type == RAY_STR) return x->type == RAY_CHARV;       /* a list of strings: char-vector items */
+    int8_t d = x->type, t = y->type == -RAY_STR ? RAY_CHARV : y->type < 0 ? (int8_t)-y->type : y->type;
+    if (t == d || t == RAY_ENUM || (ray_is_vec(y) && ray_len(y) == 0)) return 1;
+    int di = d == RAY_I16 || d == RAY_I32 || d == RAY_I64, ti = t == RAY_I16 || t == RAY_I32 || t == RAY_I64;
+    return (di && ti) || (di && t == RAY_BYTE_ONLY) || (ti && d == RAY_BYTE_ONLY) ||
+           (q_type_is_float_tag(d) && q_type_is_float_tag(t));
+}
+
 /* rank read down the first items: an atom 0, a list one more than its first item (an empty list 1; a string
  * atom is a char list) — the axis find.md's "rank-sensitive" law compares on */
 static int find_depth(ray_t* v) {
@@ -463,6 +487,7 @@ ray_t* q_search_find(ray_t* x, ray_t* y) {
         return keys_at(keys, i);
     }
     if (x && (ray_is_vec(x) || x->type == RAY_LIST)) {          /* find */
+        if (ray_is_vec(x) && x->type != RAY_STR && !q_search_admits(x, y)) return q_err(QE_TYPE);
         int64_t cnt = ray_len(x);
         int xd = find_depth(x) - 1;                  /* the rank of x's items, read off the first (find.md) */
         if (x->type == RAY_LIST && y && y->type == RAY_LIST && cnt > 0 && find_depth(y) == xd)
