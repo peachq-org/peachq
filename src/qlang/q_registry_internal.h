@@ -110,7 +110,6 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y);
 /* ---- defined in ops/q_search.c ---- */
 ray_t* q_within_wrap(ray_t* x, ray_t* y);
 ray_t* q_in_wrap(ray_t* x, ray_t* y);
-ray_t* q_search_find(ray_t* x, ray_t* y);                     /* used by: rand */
 ray_t* q_bin_wrap(ray_t* x, ray_t* y);
 ray_t* q_binr_wrap(ray_t* x, ray_t* y);
 

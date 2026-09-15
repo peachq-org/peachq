@@ -36,7 +36,6 @@
 #include "lang/eval.h"
 #include "lang/internal.h"   /* call_lambda — bare engine-lambda application */
 #include "ops/ops.h"
-#include "table/dict.h"
 #include "table/sym.h"
 #include <assert.h>
 #include <stdio.h>
@@ -671,21 +670,53 @@ static ray_t* atomic1(ray_unary_fn f, ray_t* x) {
  * side only combines with the verb's identity element on the missing side when
  * the identity FILLS (`d1-d2` is 0-y there, ref/subtract.md), else it passes
  * through untouched (`d1%d2`, ref/divide.md; every identity-less verb). */
+/* where every union key sits on one side: ONE Find over that side's domain (a miss is its count), so the zip is
+ * positional after two probes instead of a scan per key per side.  A general domain whose items mix ranks is
+ * outside Find's rank law (find.md; PLAN.md register 2026-09-15), so there each key is matched whole instead.
+ * uk borrowed; owned I64 or an owned error. */
+static ray_t* zip_pos(ray_t* keys, ray_t* uk) {
+    ray_t* p = q_search_find(keys, uk);
+    int64_t n = ray_len(uk);
+    if (!p || RAY_IS_ERR(p) || (p->type == RAY_I64 && ray_len(p) == n)) return p ? p : q_err(QE_TYPE);
+    ray_release(p);
+    if (keys->type != RAY_LIST) return q_err(QE_TYPE);
+    p = ray_vec_new(RAY_I64, n);
+    if (!p || RAY_IS_ERR(p)) return p ? p : q_err(QE_OOM);
+    p->len = n;
+    int64_t* d = (int64_t*)ray_data(p);
+    int64_t m = ray_len(keys);
+    for (int64_t j = 0; j < n; j++) {
+        ray_t* k = q_index_elem_at(uk, j);
+        if (!k || RAY_IS_ERR(k)) { ray_release(p); return k ? k : q_err(QE_TYPE); }
+        d[j] = q_search_find_item(keys, k, m);
+        ray_release(k);
+    }
+    return p;
+}
+
 ray_t* q_eval_apply_dict_zip(const q_op_t* row, ray_t* x, ray_t* y, q_eval_zip_fn f, void* ctx) {
     ray_t* uk = ray_union_fn(ray_dict_keys(x), ray_dict_keys(y));
     if (!uk || RAY_IS_ERR(uk)) return uk ? uk : q_err(QE_TYPE);
     int64_t n = ray_len(uk);
     ray_t* vx = ray_dict_vals(x);
     ray_t* vy = ray_dict_vals(y);
+    int64_t nx = q_count_long(ray_dict_keys(x)), ny = q_count_long(ray_dict_keys(y));
+    ray_t* px = n > 0 ? zip_pos(ray_dict_keys(x), uk) : NULL;
+    ray_t* py = n > 0 && !RAY_IS_ERR(px) ? zip_pos(ray_dict_keys(y), uk) : NULL;
+    if (RAY_IS_ERR(px) || RAY_IS_ERR(py)) {
+        ray_release(uk);
+        if (RAY_IS_ERR(px)) return px;
+        ray_release(px);
+        return py;
+    }
+    const int64_t* ix = px ? (const int64_t*)ray_data(px) : NULL;
+    const int64_t* iy = py ? (const int64_t*)ray_data(py) : NULL;
     ray_t* id = row ? q_ops_identity(row->name, QI_FILL) : NULL;
     ray_t* out = ray_list_new(n > 0 ? n : 1);
+    ray_t* bad = NULL;
     for (int64_t j = 0; j < n; j++) {
-        ray_t* k = q_index_elem_at(uk, j);
-        int64_t ix = ray_dict_find_idx(x, k);
-        int64_t iy = ray_dict_find_idx(y, k);
-        ray_release(k);
-        ray_t* ex = ix >= 0 ? q_index_elem_at(vx, ix) : NULL;
-        ray_t* ey = iy >= 0 ? q_index_elem_at(vy, iy) : NULL;
+        ray_t* ex = ix[j] < nx ? q_index_elem_at(vx, ix[j]) : NULL;
+        ray_t* ey = iy[j] < ny ? q_index_elem_at(vy, iy[j]) : NULL;
         ray_t* r;
         if (ex && RAY_IS_ERR(ex))      { r = ex; ex = NULL; }
         else if (ey && RAY_IS_ERR(ey)) { r = ey; ey = NULL; }
@@ -694,21 +725,19 @@ ray_t* q_eval_apply_dict_zip(const q_op_t* row, ray_t* x, ray_t* y, q_eval_zip_f
         else                           { r = ex ? ex : ey; ray_retain(r); }
         if (ex) ray_release(ex);
         if (ey) ray_release(ey);
-        if (!r || RAY_IS_ERR(r)) {
-            ray_release(out);
-            ray_release(uk);
-            if (id) ray_release(id);
-            return r ? r : q_err(QE_TYPE);
-        }
+        if (!r || RAY_IS_ERR(r)) { bad = r ? r : q_err(QE_TYPE); break; }
         out = ray_list_append(out, r);
         ray_release(r);
-        if (RAY_IS_ERR(out)) {
-            ray_release(uk);
-            if (id) ray_release(id);
-            return out;
-        }
+        if (RAY_IS_ERR(out)) { bad = out; out = NULL; break; }
     }
+    if (px) ray_release(px);
+    if (py) ray_release(py);
     if (id) ray_release(id);
+    if (bad) {
+        if (out) ray_release(out);
+        ray_release(uk);
+        return bad;
+    }
     return ray_dict_new(uk, q_eval_apply_collapse(out));
 }
 
