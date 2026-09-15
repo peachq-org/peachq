@@ -35,6 +35,21 @@ static bool qd_cell_is_0n(ray_t* cell) {
     return cell && cell->type == -RAY_F64 && RAY_ATOM_IS_NULL(cell);
 }
 
+/* ADR 15: a 0h column no cell of which votes a type is the emptied column at any depth, and only a declaration can
+ * say what it was — ONE predicate for both doors.  A column of 0n ALONE is not it: that is the loaders' text null,
+ * VARCHAR by the vote below, so a () cell is required. */
+bool q_duckdb_codec_untyped(ray_t* col) {
+    if (!col || col->type != RAY_LIST) return false;
+    bool hole = col->len == 0;
+    for (int64_t i = 0; i < col->len; i++) {
+        ray_t* cell = ray_list_get(col, i);
+        if (qd_cell_is_0n(cell)) continue;
+        if (!cell || cell->type != RAY_LIST || cell->len) return false;
+        hole = true;
+    }
+    return hole;
+}
+
 static const qd_tmap_t* qd_map_read(duck_type t) {
     for (size_t i = 0; i < QD_NTYPES; i++)
         if (QD_TYPES[i].dk_type == t && QD_TYPES[i].read_canon) return &QD_TYPES[i];
@@ -175,6 +190,14 @@ static bool qd_map_write(int slot, ray_t* v, int depth, qd_colmap_t* out, const 
         out->depth = depth;
         return out->leaf != NULL;
     }
+    /* an emptied string, nested-list and list-of-strings column are the SAME value: the BLOB this lands on is a
+     * placeholder for whatever declares it, never an answer of its own */
+    if (depth == 0 && q_duckdb_codec_untyped(v)) {
+        out->leaf  = qd_map_read(QDUCK_TYPE_BLOB);
+        out->depth = 0;
+        out->undet = true;
+        return out->leaf != NULL;
+    }
     bool all_bytes = true, all_text = true, all_dict = v->len > 0, atom = false, hole = false;
     int64_t voted = 0;
     for (int64_t i = 0; i < v->len && (all_bytes || all_text || all_dict); i++) {
@@ -197,18 +220,10 @@ static bool qd_map_write(int slot, ray_t* v, int depth, qd_colmap_t* out, const 
         for (int64_t i = 0; i < v->len && !strings; i++) strings = qd_cell_is_text(ray_list_get(v, i));
         if (strings) { if (why) *why = "an empty list among strings"; return false; }
     }
-    if (all_bytes || all_text || v->len == 0) {   /* all-null classifies as VARCHAR */
-        int8_t want = (v->len == 0 || (voted && all_bytes)) ? RAY_LIST : RAY_STR;
-        for (size_t i = 0; i < QD_NTYPES; i++)
-            if (QD_TYPES[i].ray_type == want && QD_TYPES[i].read_canon) {
-                out->leaf = &QD_TYPES[i];
-                out->depth = depth;
-                /* an emptied string, nested-list and list-of-strings column are the SAME value, (): the BLOB
-                 * this lands on is a placeholder for whatever declares it, never an answer of its own */
-                out->undet = v->len == 0 && depth == 0;
-                return true;
-            }
-        return false;
+    if (all_bytes || all_text) {   /* all-null classifies as VARCHAR */
+        out->leaf  = qd_map_read(voted && all_bytes ? QDUCK_TYPE_BLOB : QDUCK_TYPE_VARCHAR);
+        out->depth = depth;
+        return out->leaf != NULL;
     }
     if (depth >= QD_MAX_DEPTH) return false;
     bool have = false;
@@ -1655,15 +1670,16 @@ ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_
         tbl = RAY_NULL_OBJ;
         ray_retain(tbl);
     }
-    /* the same question a SECOND time, now that the rows are in (ADR 15): a column that turned out to be empty and
-     * surfaces as 0h keeps its type only through a row, so it earns one here even where its type alone needed none */
+    /* the same question a SECOND time, now that the rows are in (ADR 15): a column that turned out to be untyped —
+     * no rows, or every cell empty or NULL — keeps its type only through a row, so it earns one here even where its
+     * type alone needed none */
     if (!err && rows && !ddl) {
-        bool empty = ray_table_nrows(tbl) == 0;
         qd_desc_t* keep = q_duckdb_cols(ncols, sizeof *keep);   /* SHALLOW copies: `rows` still owns the strings */
         int64_t nkeep = 0;
         if (!keep) err = q_err(QE_WSFULL);
         for (int64_t c = 0; keep && c < ncols; c++) {
-            if (empty && !want[c]) want[c] = q_duckdb_schema_needs(&cms[c], rows[c].dtype, true) != 0;
+            if (!want[c] && !taken[c] && q_duckdb_codec_untyped(cols[c]))
+                want[c] = q_duckdb_schema_needs(&cms[c], rows[c].dtype, true) != 0;
             if (want[c] && !taken[c]) keep[nkeep++] = rows[c];
         }
         if (keep) {
@@ -2242,6 +2258,9 @@ static ray_t* qd_row_at(ray_t* v, int64_t i) {
 static bool qd_mirror_fits(const qd_colmap_t* cm, ray_t* v, ray_t* m) {
     if (!v || !m || RAY_IS_ERR(v) || RAY_IS_ERR(m)) return false;
     if (m->type == -RAY_BOOL) return true;
+    /* ADR 15: an untyped column's cells are all empty, so its mirror fits iff it fits an empty cell at EVERY depth
+     * the declaration might give it — an atom above, or nothing */
+    if (cm->undet) return ray_len(m) == 0 && (m->type == RAY_BOOL || m->type == RAY_LIST);
     if (cm->depth > 0) {
         /* a record cell is the TABLE its rows are, and so is the mirror standing beside it — the LEAF says so,
          * since a record whose fields are deferred (a UNION's, a MAP's) is one all the same */
@@ -3161,6 +3180,16 @@ static void qd_map_stage(qd_colmap_t* cm) {
     }
     const qd_tmap_t* canon = q_duckdb_codec_canon_leaf(cm->leaf->ray_type);
     if (canon) cm->leaf = canon;
+}
+
+/* The stage map a declaration alone can give an UNTYPED column (ADR 15): its shape as DuckDB reads it, every leaf
+ * the q carrier's canonical write row — the walk a declared record takes, without the rows to merge. */
+bool q_duckdb_codec_declared_stage_map(duck_logical_type lt, qd_colmap_t* out) {
+    duck_type   miss = 0;
+    const char* why  = NULL;
+    if (!qd_map_read_logical(lt, out, &miss, &why)) return false;
+    qd_map_stage(out);
+    return true;
 }
 
 /* The stage a DECLARED record takes: the declaration's fields, in its order, each spelled as the DATA spells it —
