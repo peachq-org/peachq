@@ -185,123 +185,43 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
     return r;
 }
 
-/* ===== row-wise search — the composite row key =============================
- * A table row is searched by DICTIONARY-ENCODING every column to dense integer
- * ranks and FUSING a row's ranks into one i64 key, so a row search becomes an
- * ordinary vector search.  No row hash table: the column primitives' match
- * semantics (`0N~0N` is true) are inherited rather than re-derived.
- *
- * The radix is 1+distinct, NEVER distinct.  An absent probe value ranks at
- * `count distinct` — find's miss answer — and that digit has to be unreachable
- * by any domain row or a miss collides with a real one: (a:1 2 1;b:`x`y`y)
- * fuses row 2 to key 2 at radix 2, exactly what a probe (99;`x) would carry.
- * The reserved digit is what keeps a miss a miss. */
+/* ===== row-wise search =====================================================
+ * A table row is searched IN PLACE: the row kernel (ray_find_rows_fn) walks the domain comparing key columns cell
+ * by cell under Find's own compare law, so `0N~0N` and the int/long widening are inherited and nothing proportional
+ * to the domain is built per call.  The q layer owns the probe's SHAPE (probe_cols) and the type gate. */
 
-/* `group x` through the apply seam.  Its keys ARE `distinct x` and its values
- * the rank classes, so ONE hashed pass yields the dictionary, the ranks and the
- * radix; `distinct`+`?` is two passes, the second a linear scan per item. */
-static ray_t* group_of(ray_t* x) {
-    ray_t* f = q_registry_lookup_name("group", 5, Q_MONADIC);   /* borrowed */
-    ray_t* av[1] = { x };
-    ray_t* r = f ? q_eval_apply_value(f, av, 1) : NULL;
-    return r ? r : q_err(QE_TYPE);
+/* A column as the row kernel reads it: an atom is its one-row column, an enumeration its values (q_enum owns the
+ * 20h representation; the kernel knows base types only).  Consumes c; owned. */
+static ray_t* row_col(ray_t* c) {
+    if (c && ray_is_atom(c)) { ray_t* v = ray_enlist_fn(&c, 1); ray_release(c); c = v; }
+    if (c && !RAY_IS_ERR(c) && q_enum_is(c)) { ray_t* v = q_enum_val_image(c); ray_release(c); c = v; }
+    return c ? c : q_err(QE_OOM);
 }
 
-/* The running key accumulator: n zeroed i64 slots, owned. */
-static ray_t* zero_keys(int64_t n) {
-    ray_t* v = ray_vec_new(RAY_I64, n > 0 ? n : 1);
-    if (RAY_IS_ERR(v)) return v;
-    v->len = n;
-    int64_t* d = (int64_t*)ray_data(v);
-    for (int64_t i = 0; i < n; i++) d[i] = 0;
-    return v;
-}
-
-/* Rank a domain column and the probe's values for it in ONE dictionary: the
- * domain's ranks invert `group`'s classes, the probe's come from finding it in
- * `key group`, so an absent probe value lands on *d.  Owned *dr (n long) and
- * *pr (m long, atoms broadcast); nonzero on failure. */
-static int rank_pair(ray_t* dcol, ray_t* pcol, int64_t n, int64_t m,
-                     ray_t** dr, ray_t** pr, int64_t* d) {
-    *dr = *pr = NULL;
-    ray_t* g = group_of(dcol);
-    if (!g || !q_type_is_plain_dict(g)) { if (g) ray_release(g); return -1; }
-    ray_t* dict = ray_dict_keys(g);                  /* borrowed */
-    ray_t* cls = ray_dict_vals(g);                   /* borrowed */
-    *d = dict ? ray_len(dict) : 0;
-    ray_t* rv = zero_keys(n);
-    if (RAY_IS_ERR(rv)) { ray_release(g); return -1; }
-    int64_t* rd = (int64_t*)ray_data(rv);
-    for (int64_t gi = 0; gi < *d; gi++) {
-        ray_t* c = q_index_elem_at(cls, gi);
-        if (!c || RAY_IS_ERR(c)) { if (c) ray_release(c); ray_release(rv); ray_release(g); return -1; }
-        int64_t cn = ray_is_atom(c) ? 1 : ray_len(c);
-        const int64_t* cp = ray_is_atom(c) ? &c->i64 : (const int64_t*)ray_data(c);
-        for (int64_t t = 0; t < cn; t++)
-            if (cp[t] >= 0 && cp[t] < n) rd[cp[t]] = gi;
-        ray_release(c);
-    }
-    ray_t* pf = q_search_find(dict, pcol);           /* miss -> *d, the reserved rank */
-    ray_release(g);
-    int one = pf && q_type_is_int_atom(pf);
-    int ok = one || (pf && !RAY_IS_ERR(pf) && q_type_is_int_vec(pf));
-    int64_t pn = ok && !one ? ray_len(pf) : 1;
-    if (!ok || (pn != m && pn != 1)) {
-        if (pf) ray_release(pf);
-        ray_release(rv);
-        return -1;
-    }
-    ray_t* pv = zero_keys(m);
-    if (RAY_IS_ERR(pv)) { ray_release(pf); ray_release(rv); return -1; }
-    int64_t* pd = (int64_t*)ray_data(pv);
-    for (int64_t i = 0; i < m; i++)
-        pd[i] = one ? q_type_iatom_val(pf) : q_type_ivec_get(pf, pn == 1 ? 0 : i);
-    ray_release(pf);
-    *dr = rv;
-    *pr = pv;
-    return 0;
-}
-
-/* Fold the first k columns of table x and the matching probe columns into ONE
- * i64 key each, in lockstep so both rank in the same dictionaries.  When the
- * next radix would overflow, the running key is re-densified through the same
- * ranking — which re-bounds the radix by the row count.  Owned *dk (n) and
- * *pk (m); nonzero on failure. */
-static int fuse_rows(ray_t* x, ray_t* const* pc, int64_t k, int64_t n, int64_t m,
-                     ray_t** dk, ray_t** pk) {
-    *dk = zero_keys(n);
-    *pk = zero_keys(m);
-    int64_t radix = 1;
-    int bad = RAY_IS_ERR(*dk) || RAY_IS_ERR(*pk);
-    for (int64_t j = 0; j < k && !bad; j++) {
-        ray_t *dr, *pr;
-        int64_t d;
-        if (rank_pair(ray_table_get_col_idx(x, j), pc[j], n, m, &dr, &pr, &d)) { bad = 1; break; }
-        if (radix > INT64_MAX / (d + 1)) {
-            ray_t *nd, *np;
-            int64_t d2;
-            if (rank_pair(*dk, *pk, n, m, &nd, &np, &d2)) {
-                ray_release(dr); ray_release(pr); bad = 1; break;
-            }
-            ray_release(*dk); ray_release(*pk);
-            *dk = nd; *pk = np; radix = d2 + 1;
-        }
-        int64_t* dd = (int64_t*)ray_data(*dk);
-        const int64_t* sd = (const int64_t*)ray_data(dr);
-        for (int64_t i = 0; i < n; i++) dd[i] += radix * sd[i];
-        int64_t* pd = (int64_t*)ray_data(*pk);
-        const int64_t* sp = (const int64_t*)ray_data(pr);
-        for (int64_t i = 0; i < m; i++) pd[i] += radix * sp[i];
-        radix *= d + 1;
-        ray_release(dr);
-        ray_release(pr);
-    }
-    if (bad) {
-        if (*dk) ray_release(*dk);
-        if (*pk) ray_release(*pk);
-        *dk = *pk = NULL;
+/* The domain's first k columns as the kernel reads them, each admitted against its probe column under Find's type
+ * law (ref/find.md:42; owner ruling 2026-09-15: a foreign-typed cell is 'type, int and long widen).  Owned dc[0..k);
+ * nonzero on a fault. */
+static int row_domain(ray_t* x, ray_t** dc, ray_t* const* pc, int64_t k) {
+    int bad = 0;
+    for (int64_t j = 0; j < k; j++) {
+        ray_t* c = ray_table_get_col_idx(x, j);
+        ray_retain(c);
+        dc[j] = row_col(c);
+        if (RAY_IS_ERR(dc[j]) || (ray_is_vec(dc[j]) && dc[j]->type != RAY_STR && !q_search_admits(dc[j], pc[j]))) bad = 1;
     }
     return bad;
+}
+
+/* Find's miss is `count x` (find.md) where the kernel answers 0N: the atom, and every item of a run.  Consumes i. */
+static ray_t* miss_is_count(ray_t* i, int64_t cnt) {
+    if (!i || RAY_IS_ERR(i)) return i;
+    if (ray_is_atom(i) && i->type == -RAY_I64 && RAY_ATOM_IS_NULL(i)) { ray_release(i); return ray_i64(cnt); }
+    if (i->type == RAY_I64) {
+        int64_t* d = (int64_t*)ray_data(i);          /* fresh rc=1 from find */
+        for (int64_t j = 0, n = ray_len(i); j < n; j++) if (d[j] == NULL_I64) d[j] = cnt;
+        i->attrs &= (uint8_t)~RAY_ATTR_HAS_NULLS;
+    }
+    return i;
 }
 
 /* find.md's rank law one level up: a boxed list whose ITEMS are rows is a RUN
@@ -325,8 +245,8 @@ static ray_t* probe_err(int bad) { return q_err(bad == 2 ? QE_LENGTH : QE_TYPE);
  * name the probe lacks lands out of range and refuses.  A list is positional.
  * *m gets the probe's row count and *rec whether it is a single RECORD, whose
  * answer is an atom rather than a run (find.md "a compatible record
- * (dictionary or list) or table").  Owned pc[0..k); nothing owned on a shape
- * mismatch, reported as 1 for a TYPE fault and 2 for an ARITY one. */
+ * (dictionary or list) or table").  Owned pc[0..k), each as the kernel reads it (row_col); nothing owned on a
+ * shape mismatch, reported as 1 for a TYPE fault and 2 for an ARITY one. */
 static int probe_cols(ray_t* x, ray_t* y, ray_t** pc, int64_t k, int64_t* m, int* rec) {
     if (ray_is_atom(y)) return -1;               /* find.md: a rank-2 x seeks rank-1 records */
     int rows = probe_is_rowlist(x, y);
@@ -363,6 +283,7 @@ static int probe_cols(ray_t* x, ray_t* y, ray_t** pc, int64_t k, int64_t* m, int
         if (!*rec && l != *m) bad = 2;                /* rows of unequal width */
         else { *rec = 0; *m = l; }
     }
+    for (int64_t j = 0; j < k && !bad; j++) bad = RAY_IS_ERR(pc[j] = row_col(pc[j]));
     if (bad)
         for (int64_t j = 0; j < got; j++) ray_release(pc[j]);
     if (fy) ray_release(fy);
@@ -379,27 +300,23 @@ static ray_t* row_answer(ray_t* r, int rec) {
     return ray_i64(v);
 }
 
-/* `t ? row` — the smallest row index of table x matching the probe
- * (find.md Searching tables); a miss is `count x`, both inherited from the
- * ordinary find over the fused keys. */
+/* `t ? row` — the smallest row index of table x matching the probe (find.md Searching tables); a miss is
+ * `count x`. */
 static ray_t* find_rows(ray_t* x, ray_t* y) {
     int64_t k = ray_table_ncols(x), n = ray_table_nrows(x);
     if (k <= 0 || !y) return q_err(QE_TYPE);
-    ray_t** pc = (ray_t**)malloc((size_t)k * sizeof *pc);
+    ray_t** pc = (ray_t**)calloc((size_t)k * 2, sizeof *pc);
     if (!pc) return q_err(QE_TYPE);
+    ray_t** dc = pc + k;
     int64_t m;
     int rec;
-    int bad_probe = probe_cols(x, y, pc, k, &m, &rec);
-    if (bad_probe) { free(pc); return probe_err(bad_probe); }
-    ray_t *dk, *pk;
-    int bad = fuse_rows(x, pc, k, n, m, &dk, &pk);
-    for (int64_t j = 0; j < k; j++) ray_release(pc[j]);
+    int bad = probe_cols(x, y, pc, k, &m, &rec);
+    if (bad) { free(pc); return probe_err(bad); }
+    bad = row_domain(x, dc, pc, k);
+    ray_t* r = bad ? q_err(QE_TYPE) : ray_find_rows_fn(dc, pc, k, m);
+    for (int64_t j = 0; j < 2 * k; j++) ray_release(pc[j]);
     free(pc);
-    if (bad) return q_err(QE_TYPE);
-    ray_t* r = q_search_find(dk, pk);
-    ray_release(dk);
-    ray_release(pk);
-    return row_answer(r, rec);
+    return row_answer(miss_is_count(r, n), rec);
 }
 
 /* ===== q `?` find ==========================================================
@@ -525,20 +442,7 @@ ray_t* q_search_find(ray_t* x, ray_t* y) {
             /* list-of-lists x, SIMPLE vector y: whole-y match (`u?10 2 -6` -> 1). */
             return ray_i64(q_search_find_item(x, y, cnt));
         }
-        ray_t* i = ray_find_fn(x, y);
-        if (!i || RAY_IS_ERR(i)) return i;
-        if (ray_is_atom(i) && i->type == -RAY_I64 && RAY_ATOM_IS_NULL(i)) {
-            ray_release(i);
-            return ray_i64(cnt);                    /* kdb: miss -> count x */
-        }
-        if (i->type == RAY_I64) {                   /* vector needle: per-elem */
-            int64_t n = ray_len(i);
-            int64_t* d = (int64_t*)ray_data(i);     /* fresh rc=1 from find */
-            for (int64_t j = 0; j < n; j++)
-                if (d[j] == NULL_I64) d[j] = cnt;
-            i->attrs &= (uint8_t)~RAY_ATTR_HAS_NULLS;
-        }
-        return i;
+        return miss_is_count(ray_find_fn(x, y), cnt);
     }
     return q_err(QE_TYPE);   /* unreachable: q_roll_wrap routes only find shapes here */
 }
@@ -617,61 +521,47 @@ static int64_t bin_clamp(int64_t r, int64_t n, int right) {
     return right && r >= n ? n - 1 : r;
 }
 
-/* `t bin row` — bin.md Tables: the LAST row of x whose leading k-1 values MATCH
- * the probe's and whose last value does not exceed it; `0N` when no row matches
- * the leading columns, or none within them is low enough.  Equality on the
- * leading columns is the fused row key; ORDER on the last column stays a binary
- * search, run over the positions of the matching equivalence class — which
- * `group` hands over directly, and within which bin.md requires that column
- * sorted.  Ranks are arbitrary labels, so they are never asked about order. */
+/* `t bin row` — bin.md Tables: the LAST row of x whose leading k-1 values MATCH the probe's and whose last value
+ * does not exceed it; `0N` when no row matches the leading columns, or none within them is low enough.  The
+ * equivalence classes come from the row Find over the leading columns (one pass for a run of probes); ORDER on the
+ * last column stays a binary search over each class's positions, within which bin.md requires that column sorted. */
 static ray_t* bin_rows(ray_t* x, ray_t* y, int right) {
     int64_t k = ray_table_ncols(x), n = ray_table_nrows(x);
     if (k <= 0 || !y) return q_err(QE_TYPE);
-    ray_t** pc = (ray_t**)malloc((size_t)k * sizeof *pc);
+    ray_t** pc = (ray_t**)calloc((size_t)k * 2, sizeof *pc);
     if (!pc) return q_err(QE_TYPE);
+    ray_t** dc = pc + k;
     int64_t m;
     int rec;
-    int bad_probe = probe_cols(x, y, pc, k, &m, &rec);
-    if (bad_probe) { free(pc); return probe_err(bad_probe); }
-    ray_t *dk, *pk;
-    int err = fuse_rows(x, pc, k - 1, n, m, &dk, &pk);
-    ray_t* g = err ? NULL : group_of(dk);
-    ray_t* gi = q_type_is_plain_dict(g) ? q_search_find(ray_dict_keys(g), pk) : NULL;
-    ray_t* out = zero_keys(m);
-    if (!gi || RAY_IS_ERR(gi) || !q_type_is_int_vec(gi) || RAY_IS_ERR(out)) err = 1;
-    if (!err) {
-        ray_t* cls = ray_dict_vals(g);               /* borrowed: class -> positions */
-        ray_t* last = ray_table_get_col_idx(x, k - 1);
-        int64_t ng = ray_len(ray_dict_keys(g));
-        int64_t* od = (int64_t*)ray_data(out);
-        for (int64_t i = 0; i < m && !err; i++) {
-            int64_t ci = q_type_ivec_get(gi, i);
-            od[i] = NULL_I64;
-            if (ci < 0 || ci >= ng) {                /* leading columns unmatched */
-                out->attrs |= RAY_ATTR_HAS_NULLS;
-                continue;
-            }
-            ray_t* c = q_index_elem_at(cls, ci);
-            ray_t* pv = ray_is_atom(pc[k - 1]) ? pc[k - 1] : q_index_elem_at(pc[k - 1], i);
-            if (!c || RAY_IS_ERR(c) || !pv || RAY_IS_ERR(pv)) err = 1;
-            else {
-                int64_t cn = ray_len(c);
-                const int64_t* sel = (const int64_t*)ray_data(c);
-                int64_t r = bin_probe(last, sel, cn, pv, right, &err);
-                if (!err && r >= 0 && r < cn) od[i] = sel[r];
-            else if (!err) out->attrs |= RAY_ATTR_HAS_NULLS;
-            }
-            if (c) ray_release(c);
-            if (pv && pv != pc[k - 1]) ray_release(pv);
-        }
+    int err = probe_cols(x, y, pc, k, &m, &rec);
+    if (err) { free(pc); return probe_err(err); }
+    err = row_domain(x, dc, pc, k - 1);
+    ray_t* last = ray_table_get_col_idx(x, k - 1);
+    ray_t* cls = err || k == 1 ? NULL : ray_find_rows_class_fn(dc, pc, k - 1, m);   /* no leading columns: one class */
+    ray_t* out = cls && RAY_IS_ERR(cls) ? cls : ray_vec_new(RAY_I64, m > 0 ? m : 1);
+    if (RAY_IS_ERR(out)) {                            /* the kernel's own error, propagated unmodified */
+        for (int64_t j = 0; j < 2 * k; j++) if (pc[j]) ray_release(pc[j]);
+        free(pc);
+        if (cls && cls != out) ray_release(cls);
+        return out;
     }
-    for (int64_t j = 0; j < k; j++) ray_release(pc[j]);
+    out->len = m;
+    for (int64_t i = 0; i < m && !err; i++) {
+        ray_t* sel = cls ? ((ray_t**)ray_data(cls))[i] : NULL;                       /* borrowed */
+        int64_t cn = sel ? ray_len(sel) : n;
+        const int64_t* sd = sel ? (const int64_t*)ray_data(sel) : NULL;
+        ray_t* pv = q_index_elem_at(pc[k - 1], ray_len(pc[k - 1]) == 1 ? 0 : i);
+        if (!pv || RAY_IS_ERR(pv)) err = 1;
+        int64_t r = err || cn == 0 ? -1 : bin_probe(last, sd, cn, pv, right, &err);
+        int64_t* od = (int64_t*)ray_data(out);
+        od[i] = !err && r >= 0 && r < cn ? (sd ? sd[r] : r) : NULL_I64;
+        if (od[i] == NULL_I64) out->attrs |= RAY_ATTR_HAS_NULLS;
+        if (pv) ray_release(pv);
+    }
+    for (int64_t j = 0; j < 2 * k; j++) if (pc[j]) ray_release(pc[j]);
     free(pc);
-    if (dk) ray_release(dk);
-    if (pk) ray_release(pk);
-    if (g) ray_release(g);
-    if (gi) ray_release(gi);
-    if (err) { if (!RAY_IS_ERR(out)) ray_release(out); return q_err(QE_TYPE); }
+    if (cls) ray_release(cls);
+    if (err) { ray_release(out); return q_err(QE_TYPE); }
     return row_answer(out, rec);
 }
 
