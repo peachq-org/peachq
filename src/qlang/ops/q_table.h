@@ -45,6 +45,11 @@ ray_t* q_table_operand(ray_t* y, int64_t* sym_out);
 enum { Q_ROWS_INSERT, Q_ROWS_JOIN };
 ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law);
 
+/* THE column strictness law (insert's, ref/insert.md:85; owner ruling 2026-09-13 int<->long): the normalized
+ * rows re-made with each column cast to the target's — an enum column coerces the payload into its domain — or
+ * 'type, before any write.  A 0-row payload passes.  Owned. */
+ray_t* q_table_rows_typed(ray_t* flat, ray_t* rows);
+
 /* Append normalized rows to a FLAT table: per-column base concat behind the
  * q-level guards (0-row untyped columns adopt the payload's types; a TYPED
  * column keeps kdb type-strictness).  `exclusive` is the caller's word that

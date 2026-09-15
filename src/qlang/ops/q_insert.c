@@ -10,6 +10,7 @@
 #include "qlang/q_env.h"
 #include "qlang/ops/q_table.h"
 #include "qlang/ops/q_bang.h"  /* q_bang_enkey — the keying primitive */
+#include "qlang/ops/q_index.h" /* q_index_keyed_put — THE keyed write, insert's no-hit mode */
 #include "qlang/io/q_provider.h" /* upsert: `:pq: targets route to .X.upsert */
 #include "qlang/io/q_io.h"       /* q_io_is_fsym — upsert's file-target classifier */
 #include "qlang/net/q_wirefile.h"
@@ -32,6 +33,33 @@ static ray_t* idx_range(int64_t start, int64_t n) {
     return v;
 }
 
+/* The keyed arm: the rows keyed to g's schema go through THE keyed write with no hit allowed — an existing key is
+ * 'insert (ref/insert.md:56), the misses grow both slots where the parked g stands. */
+static ray_t* insert_keyed(int64_t sym, ray_t* g, ray_t* y) {
+    ray_t* flat = q_table_flatten(g);
+    if (!flat || RAY_IS_ERR(flat)) return flat;
+    ray_t* rows = q_table_rows_normalize(flat, y, Q_ROWS_INSERT);
+    ray_release(flat);
+    if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_OOM);
+    int64_t before = any_nrows(g), added = ray_table_nrows(rows);
+    ray_t* ky = q_bang_enkey(ray_table_ncols(ray_dict_keys(g)), rows);
+    ray_release(rows);
+    if (!ky || RAY_IS_ERR(ky)) return ky;
+    ray_retain(g);                                        /* ours across the park */
+    int stole = q_env_take(sym, g);
+    ray_t* nt = q_index_keyed_put(g, ky, UINT64_MAX, Q_KEYED_INSERT, stole);
+    ray_release(ky);
+    if (!nt || RAY_IS_ERR(nt)) {
+        if (stole) q_env_bind(sym, g);                    /* restore the binding */
+        ray_release(g);
+        return nt ? nt : q_err(QE_OOM);
+    }
+    ray_err_t e = q_env_settle(sym, stole, nt);           /* retains */
+    ray_release(g);
+    ray_release(nt);
+    return e == RAY_OK ? idx_range(before, added) : q_env_err(e);
+}
+
 /* q `x insert y` / insert[x;y] — x MUST name a global (kdb insert is always
  * by reference).  Unbound name + table payload CREATES the global.  Keyed
  * target: key collision -> 'insert.  Returns inserted row indices. */
@@ -49,39 +77,26 @@ ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
     if (!(g->type == RAY_TABLE || q_type_is_keyed(g)))
         return q_err(QE_TYPE);
     if (q_splay_table_path(g)) return q_err(QE_SPLAY);   /* a mapped global takes no rows (kb/splayed-tables.md:350) */
-    int keyed = q_type_is_keyed(g);
-    int64_t nkey = keyed ? ray_table_ncols(ray_dict_keys(g)) : 0;
-    ray_t* flat = q_table_flatten(g);                     /* a plain g: g itself, retained */
-    if (!flat || RAY_IS_ERR(flat)) return flat;
+    if (q_type_is_keyed(g)) return insert_keyed(x->i64, g, y);
     /* the binding this insert REPLACES double-counts the table, so every
-     * column would copy: park it (q_env.h q_env_take).  flat's ref keeps g
-     * alive for the restore; a keyed g is rebuilt from its columns anyway. */
-    int stole = !keyed && q_env_take(x->i64, g);
-    ray_t* rows = q_table_rows_normalize(flat, y, Q_ROWS_INSERT);
-    ray_t* nf = rows && !RAY_IS_ERR(rows) ? NULL : rows ? rows : q_err(QE_OOM);
-    int64_t before = ray_table_nrows(flat), added = 0;
-    if (!nf) {
+     * column would copy: park it (q_env.h q_env_take) behind our own ref, which
+     * keeps g alive for the restore. */
+    ray_retain(g);
+    int stole = q_env_take(x->i64, g);
+    ray_t* rows = q_table_rows_normalize(g, y, Q_ROWS_INSERT);
+    ray_t* nt = rows && !RAY_IS_ERR(rows) ? NULL : rows ? rows : q_err(QE_OOM);
+    int64_t before = ray_table_nrows(g), added = 0;
+    if (!nt) {
         added = ray_table_nrows(rows);
-        if (keyed) {                                      /* collision -> 'insert */
-            ray_t* kt = ray_dict_keys(g);                 /* borrowed */
-            int64_t kn = ray_table_nrows(kt);
-            for (int64_t r = 0; r < added && !nf; r++)
-                for (int64_t e = 0; e < kn && !nf; e++)
-                    if (q_table_row_eq(rows, r, kt, e, nkey)) nf = q_err(QE_INSERT);
-        }
-        if (!nf) nf = q_table_append(flat, rows, stole);
+        nt = q_table_append(g, rows, stole);
         ray_release(rows);
     }
-    if (!nf || RAY_IS_ERR(nf)) {
-        if (stole) q_env_bind(x->i64, flat);              /* restore the binding */
-        ray_release(flat);
-        return nf ? nf : q_err(QE_OOM);
+    if (!nt || RAY_IS_ERR(nt)) {
+        if (stole) q_env_bind(x->i64, g);                 /* restore the binding */
+        ray_release(g);
+        return nt ? nt : q_err(QE_OOM);
     }
-    ray_release(flat);
-    ray_t* nt;
-    if (keyed) { nt = q_bang_enkey(nkey, nf); ray_release(nf); }
-    else nt = nf;
-    if (!nt || RAY_IS_ERR(nt)) return nt;
+    ray_release(g);
     ray_err_t e = q_env_settle(x->i64, stole, nt);        /* retains */
     ray_release(nt);
     return e == RAY_OK ? idx_range(before, added) : q_env_err(e);
@@ -111,10 +126,9 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
     if (sym >= 0 && q_splay_table_path(t)) return q_err(QE_SPLAY);
     if (sym < 0) return q_join_table_upsert(t, y, 0);
     /* the binding this upsert REPLACES double-counts the table, so every
-     * column would copy: park it (q_env.h q_env_take) behind our own ref;
-     * a keyed t is rebuilt from its columns anyway */
+     * column would copy: park it (q_env.h q_env_take) behind our own ref */
     ray_retain(t);
-    int stole = !q_type_is_keyed(t) && q_env_take(sym, t);
+    int stole = q_env_take(sym, t);
     ray_t* nt = q_join_table_upsert(t, y, stole);
     if (!nt || RAY_IS_ERR(nt)) {
         if (stole) q_env_bind(sym, t);                    /* restore the binding */

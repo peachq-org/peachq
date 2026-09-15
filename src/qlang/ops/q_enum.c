@@ -459,8 +459,9 @@ ray_t* q_enum_col_concat(ray_t* oc, ray_t* pc) {
     return (j && !RAY_IS_ERR(j)) ? j : (j ? j : q_err(QE_TYPE));
 }
 
-/* First insert into an EMPTY enum schema column: the payload coerces whole
- * and the column keeps 20h (wp:52-57's `` sym:`financials$() `` flow). */
+/* A payload column entering an enum column coerces whole and keeps 20h — the
+ * first insert into an EMPTY enum schema column (wp:52-57's `` sym:`financials$() ``
+ * flow) and the typed payload of every later insert alike. */
 ray_t* q_enum_col_ingest(ray_t* oc, ray_t* pc) {
     ray_t* cp = q_enum_coerce(q_enum_domain(oc), pc);
     if (!cp || RAY_IS_ERR(cp)) return cp ? cp : q_err(QE_TYPE);

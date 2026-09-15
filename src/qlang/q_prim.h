@@ -124,7 +124,7 @@ ray_t*  q_enum_ref(int64_t dom, ray_t* y);         /* `d!ints — env-blind refe
 ray_t*  q_enum_from_indices(int64_t dom, const uint8_t* p, int64_t n, int w);
 ray_t*  q_enum_cmp(ray_t* e, ray_t* y, int op);    /* position-space =/<>/in scan; NULL = not that shape */
 ray_t*  q_enum_col_concat(ray_t* oc, ray_t* pc);   /* insert law: positions ++ coerced payload (plain i64) */
-ray_t*  q_enum_col_ingest(ray_t* oc, ray_t* pc);   /* empty schema column's first payload -> 20h */
+ray_t*  q_enum_col_ingest(ray_t* oc, ray_t* pc);   /* a payload column coerced into oc's domain -> 20h */
 ray_t*  q_enum_deref(ray_t* v, int64_t fld);       /* v.fld reference gather; NULL = not referential */
 ray_t*  q_enum_take(ray_t* y, ray_t* n);           /* n#y for reference-carrying shapes; NULL = plain */
 char    q_enum_meta_f(ray_t* col, int64_t* f_out); /* meta f target + FK t-char override (0 = keep) */
