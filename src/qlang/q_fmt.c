@@ -1341,6 +1341,12 @@ static void fmt_console_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
      * HERE — the console seam — and never in q_fmt_body, which the UNCLIPPED
      * q_fmt (`string`, `-3!`, CSV, every cell) shares and must keep legacy. */
     if (q_console_pipe_on() && fmt_pipe_is_table(val)) { fmt_pipe_render(val, buf, bufsz, trunc); return; }
+    if (q_console_pipe_on() && q_provider_carrier_is(val)) {   /* a pointer IS a table here; unreadable -> legacy */
+        ray_t* mt = q_provider_carrier_table(val);
+        if (mt && !RAY_IS_ERR(mt) && mt->type == RAY_TABLE) { fmt_pipe_render(mt, buf, bufsz, trunc); ray_release(mt); return; }
+        if (mt && RAY_IS_ERR(mt)) ray_error_free(mt);
+        else if (mt) ray_release(mt);
+    }
     int32_t rows = 0, cols = 0;
     int armed = q_console_clip(&rows, &cols) && !g_clip_active;
     if (armed && val && val->type == RAY_LIST && list_is_parse_tree(val, 0))

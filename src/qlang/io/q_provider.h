@@ -49,9 +49,23 @@ int64_t q_provider_register_internal(const char* ds, const char* alias, ray_t* t
 /* The link seam (q_env_set / q_env_unbind): a carrier bound to a global is
  * .X.i.link[token; qname; table], one displaced or unbound is
  * .X.i.unlink[token; qname] — both OPTIONAL hooks, best-effort (the global is
- * already bound; a hook's error is dropped).  qname = the global's full name. */
-void q_provider_link(int64_t qname, ray_t* car);
-void q_provider_unlink(int64_t qname, ray_t* car);
+ * already bound; a hook's error is dropped).  qname = the global's full name.
+ * RAY_ERR_NYI (text pending) when the provider defines one without the other. */
+ray_err_t q_provider_link(int64_t qname, ray_t* car);
+ray_err_t q_provider_unlink(int64_t qname, ray_t* car);
+
+/* DuckDB->q is a LOAD (`\l` on a coordinate, .pq.i.load[h;tables]): the
+ * connection form loads the catalog through .X.i.load[token; tables] (() none,
+ * :: all, else the sym list), the table form that one table.  The alias must
+ * be LIVE ('conn), the hook defined ('nyi); the host binds each name it
+ * answers to its pointer at the ROOT, later-wins, and answers the names. */
+ray_t* q_provider_load(const char* s, size_t n, ray_t* tables);
+void   q_provider_pq_register(void);
+
+/* `hdel `:pq:ds:al:t/` drops the OBJECT through .X.i.hdel[token; t]; a q name
+ * bound to it stays bound.  NULL = not `:pq:; the connection form is 'domain,
+ * a dead alias 'conn, a provider without the hook 'nyi; answers x. */
+ray_t* q_provider_hdel(ray_t* x);
 
 /* `h y` on the LEGACY int handle (qh < 0 = async call).  Text -> .X.call,
  * sym atom -> .X.bind + carrier, list/sym-vector -> the named hook. */
