@@ -149,25 +149,11 @@ static ray_t* keyed_probe(ray_t* i) {                /* a table domain seeks row
     return i;
 }
 
-/* The engine's typed scan for the commonest probe — a same-type atom on a typed key vector — where Find boxes an
- * atom per element (280ns each under ASan: `d[k]` on a 20k-key dict went from 0.3ms to 5ms).  Only a HIT is
- * trusted: the scan answers -1 for the types it does not cover (temporals), and Find owns every miss and every
- * `u#` vector, whose hash it consults.  Owned, or NULL for Find to answer. */
-static ray_t* atom_pos(ray_t* x, ray_t* probe) {
-    ray_t* keys = ray_dict_slots(x)[0];
-    if (!ray_is_atom(probe) || !ray_is_vec(keys) || probe->type != -keys->type || (keys->attrs & RAY_ATTR_HAS_INDEX))
-        return NULL;
-    int64_t p = ray_dict_find_idx(x, probe);
-    return p >= 0 ? ray_i64(p) : NULL;
-}
-
 static ray_t* dict_pos(ray_t* x, ray_t* probe) {     /* Find over the domain; owned */
     ray_t* keys = ray_dict_slots(x)[0];
-    ray_t* pos = atom_pos(x, probe);
-    if (pos) return pos;
     ray_t* p = q_type_is_table(keys) ? keyed_probe(probe) : (ray_retain(probe), probe);
     if (!p || RAY_IS_ERR(p)) return p ? p : q_err(QE_OOM);
-    pos = q_search_find(keys, p);
+    ray_t* pos = q_search_find(keys, p);
     ray_release(p);
     return pos;
 }
@@ -177,11 +163,9 @@ static ray_t* dict_pos(ray_t* x, ray_t* probe) {     /* Find over the domain; ow
  * list probe would split (no key to read a rank off); the mirror image of the table domain, which boxes its ATOM. */
 static ray_t* key_pos(ray_t* x, ray_t* key) {
     ray_t* keys = ray_dict_slots(x)[0];
-    ray_t* pos = atom_pos(x, key);
-    if (pos) return pos;
     ray_t* p = ray_is_atom(key) == q_type_is_table(keys) ? ray_enlist_fn(&key, 1) : (ray_retain(key), key);
     if (!p || RAY_IS_ERR(p)) return p ? p : q_err(QE_OOM);
-    pos = q_search_find(keys, p);
+    ray_t* pos = q_search_find(keys, p);
     ray_release(p);
     if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_TYPE);
     int64_t n = q_builtins_count_long(keys), r = n;
