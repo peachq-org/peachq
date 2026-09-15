@@ -1663,6 +1663,22 @@ ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n) {
     return noun_index(head, args, n);
 }
 
+ray_t* q_eval_call_sym(int64_t sym, ray_t** args, int64_t argc) {
+    ray_t* f = q_env_resolve(sym);
+    if (!f || RAY_IS_ERR(f)) {
+        if (f) ray_error_free(f);
+        ray_t* s = ray_sym_str(sym);          /* borrowed */
+        return s ? q_err_name(ray_str_ptr(s), ray_str_len(s)) : q_err(QE_NAME);
+    }
+    ray_t* r = q_eval_apply_value(f, args, argc);
+    ray_release(f);
+    return r;
+}
+
+ray_t* q_eval_call_name(const char* name, size_t n, ray_t** args, int64_t argc) {
+    return q_eval_call_sym(ray_sym_intern_runtime(name, n), args, argc);
+}
+
 /* Trap (ref/apply.md): on error, a callable/null catch applies to the error
  * text, a noun catch is returned as the value.  Consumes r; e borrowed.
  * QE_RETURN passes through UNTOUCHED — an explicit return is a successful

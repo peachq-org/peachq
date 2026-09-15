@@ -16,7 +16,7 @@
 #include "qlang/q_prim.h"          /* q_str_text_bytes, q_meta_fn */
 #include "qlang/q_builtins.h"      /* q_count_fn — the count fallback */
 #include "qlang/q_registry.h"      /* q_registry_provenance — op value -> its spelling */
-#include "qlang/eval/q_eval.h"     /* q_eval_apply_value — THE apply seam */
+#include "qlang/eval/q_eval.h"     /* q_eval_apply_value / q_eval_call_sym — THE apply seam and its by-name front */
 #include "lang/eval.h"             /* ray_eval_get_restricted */
 #include "table/sym.h"             /* ray_sym_intern_runtime, ray_sym_str */
 #include <rayforce.h>
@@ -196,20 +196,11 @@ static ray_t* hook_fn(int64_t provider, const char* hook) {
     return v;
 }
 
-/* undefined hook = the ordinary name error for `.provider.hook` */
-static ray_t* hook_name_err(int64_t provider, const char* hook) {
-    int64_t s = hook_sym(provider, hook);
-    ray_t* ps = s >= 0 ? ray_sym_str(s) : NULL; /* borrowed */
-    if (!ps) return q_err(QE_NAME);
-    return q_err_name(ray_str_ptr(ps), ray_str_len(ps));
-}
-
+/* a REQUIRED hook: undefined is the ordinary name error for `.provider.hook` */
 static ray_t* hook_call(int64_t provider, const char* hook, ray_t** args, int64_t n) {
-    ray_t* f = hook_fn(provider, hook);
-    if (!f) return hook_name_err(provider, hook);
-    ray_t* r = q_eval_apply_value(f, args, n);
-    ray_release(f);
-    return r;
+    int64_t s = hook_sym(provider, hook);
+    if (s < 0) return q_err(QE_NAME);
+    return q_eval_call_sym(s, args, n);
 }
 
 

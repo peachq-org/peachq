@@ -17,7 +17,8 @@
   p:`$$[0=count rest;":default:";":",rest];
   $[99h=type cfg; .duckdb.i.open (p;cfg); .duckdb.i.open p]}
 
-.duckdb.close:{[c] .duckdb.i.close c}
+/ closing the main connection forgets it, so the next .duckdb.main[] opens afresh
+.duckdb.close:{[c] if[c~.duckdb.i.mainc; .duckdb.i.mainc::0Ni]; .duckdb.i.close c}
 / the sync flag is ignored: an in-process engine has no async lane (the same
 / treatment as open's timeout)
 / lastsql records the SQL last handed to the engine - the B2 pushdown-snapshot
@@ -97,5 +98,11 @@
 / ONLY .duckdb.i.push's body (emit SQL, run it, fill .duckdb.lastsql - inert
 / until then).  Only the RESOLVER is trapped (unpushable -> :: -> host
 / fallback); evaluation errors propagate - the query never runs twice.
-.duckdb.i.push:{[c;rt] (?) . (enlist .duckdb.get[c;rt 0]),1_rt}
+/ rt 0 is the RELATION: a sym names a table of c, a string is FROM-clause SQL (.parquet.read's read_parquet(...)).
+.duckdb.i.push:{[c;rt] t:$[10h=type rt 0;.duckdb.exec[c;"SELECT * FROM ",rt 0];.duckdb.get[c;rt 0]]; (?) . (enlist t),1_rt}
 .duckdb.qsql:{[c;cl;tree] rt:@[.pq.i.resolveTree[cl];tree;{[e] ::}]; $[rt~(::);::;.duckdb.i.push[c;rt]]}
+
+/ the one connection the standard library's own doors (.parquet) run on: opened on first call, the same CONNID
+/ until closed.  Today a connection to the shared :default: db; a reserved instance is the ADR's A1 follow-up.
+.duckdb.i.mainc:0Ni
+.duckdb.main:{[] if[null .duckdb.i.mainc; .duckdb.i.mainc::.duckdb.open["default:";0N;::]]; .duckdb.i.mainc}

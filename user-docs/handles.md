@@ -55,7 +55,7 @@ endpoint-, or member-like unless another rule, such as a recognised tabular file
 This gives PeachQ two clear routes into qSQL:
 
 1. An explicit table resource, normally signalled by a trailing `/`, such as a splay or virtual provider table.
-2. A file-like resource whose format is known to decode to a table, such as `.csv`, `.tsv`, `.json`, or planned `.parquet`.
+2. A file-like resource whose format is known to decode to a table, such as `.csv`, `.tsv`, `.json`, or `.parquet` (see [parquet.md](parquet.md)).
 
 Existing q supports operations such as:
 
@@ -434,5 +434,5 @@ Your order is good. I’d tighten it to this:
 12. Preserve trailing / as the explicit table/collection signal for splays and provider-backed tables.
 13. Keep provider resolution separate from file-format resolution: :pq:duckdb:.../ is a provider; .csv is a decoder.
 14. .qsql pushdown is optional; materialize-then-host-qSQL is a valid implementation.
-15. Avoid combined implementations like httpcsv, zipcsv, or s3parquet; those indicate abstraction leakage.
+15. Avoid combined implementations like httpcsv, zipcsv, or s3parquet; those indicate abstraction leakage. The one documented exception: a `.parquet` URL is handed to DuckDB, whose httpfs does the range reads a footer needs (parquet.md).
 
