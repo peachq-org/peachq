@@ -1382,11 +1382,10 @@ static ray_t* qd_cell_at(ray_t* col, int64_t i) {
 /* The dict of fields [from, from+cnt) at row i, in kind `co` — QD_CO_NONE the data itself, any other kind that
  * companion of each field.  A field with nothing to say in that kind takes its ABSENT MARKER, because the mirror
  * is keyed exactly like the value (ADR 16) and a key the value carries may not go missing from beside it.
- * A run of like dicts is a dict of dicts, never a table, so only atoms collapse. */
+ * The value side takes q's one collapse law: the wire cannot encode an uncollapsed run at any depth. */
 static ray_t* qd_rec_cell(qd_racc_t* acc, const qd_rec_t* r, int from, int cnt, int64_t i, int co) {
     ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, cnt);
     ray_t* vals = ray_list_new(cnt);
-    bool   box  = false;
     for (int k = from; k < from + cnt; k++) {
         ray_t*  src = co == QD_CO_NONE ? acc->col[k] : acc->fcos[k].co[co].acc;
         int64_t id  = ray_sym_intern_runtime(r->f[k].name, (int64_t)strlen(r->f[k].name));
@@ -1400,13 +1399,12 @@ static ray_t* qd_rec_cell(qd_racc_t* acc, const qd_rec_t* r, int from, int cnt, 
             if (vals && !RAY_IS_ERR(vals)) ray_release(vals);
             return q_err(QE_WSFULL);
         }
-        box  = box || v->type == RAY_DICT || v->type == RAY_TABLE;
         keys = ray_vec_append(keys, &id);
         vals = ray_list_append(vals, v);
         ray_release(v);
     }
-    ray_t* cv = box ? vals : q_list_collapse(vals);
-    if (cv != vals) ray_release(vals);
+    ray_t* cv = q_list_collapse(vals);
+    ray_release(vals);
     if (!keys || RAY_IS_ERR(keys) || !cv || RAY_IS_ERR(cv)) {
         if (keys && !RAY_IS_ERR(keys)) ray_release(keys);
         if (cv && !RAY_IS_ERR(cv)) ray_release(cv);

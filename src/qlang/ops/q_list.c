@@ -88,11 +88,10 @@ static ray_t* atom_run_collapse(ray_t* l) {
 
 /* THE dict-rows builder: n plain sym-keyed dicts with MATCHING keys are the
  * table they spell (basics/glossary.md — a table "is also a list of
- * dictionaries with the same keys").  Per key the cells gather into one column
- * typed by the ATOM-RUN collapse alone: homogeneous goes typed, anything else
- * stays a legal boxed column.  The row law must NOT recurse into the cells —
- * a table-valued column has no representation here and would break the flip's
- * length accounting.  NULL = not that shape, so the caller keeps its list. */
+ * dictionaries with the same keys").  Each column goes back through
+ * q_list_collapse: the wire cannot encode an uncollapsed inner run, so a value
+ * must equal its own round trip at every depth.  NULL = not that shape, so the
+ * caller keeps its list. */
 static ray_t* dict_rows_table(ray_t* const* rows, int64_t n) {
     if (n < 1) return NULL;
     ray_t* k0 = NULL;
@@ -122,7 +121,7 @@ static ray_t* dict_rows_table(ray_t* const* rows, int64_t n) {
             ray_release(cell);
         }
         if (RAY_IS_ERR(col)) { ray_release(cols); return col; }
-        ray_t* cc = atom_run_collapse(col);
+        ray_t* cc = q_list_collapse(col);
         ray_release(col);
         if (!cc || RAY_IS_ERR(cc)) { ray_release(cols); return cc ? cc : q_err(QE_TYPE); }
         cols = ray_list_append(cols, cc);
