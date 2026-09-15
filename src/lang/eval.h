@@ -341,6 +341,11 @@ ray_t* ray_sect_fn(ray_t* vec1, ray_t* vec2);
 ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj);
 ray_t* ray_at_fn(ray_t* vec, ray_t* idx);
 ray_t* ray_find_fn(ray_t* vec, ray_t* val);
+/* Find over rows.  dom: k columns of one length; probe: k columns of length m or 1 (broadcast).  ray_find_rows_fn:
+ * the smallest domain row equal to each probe row, 0N for a miss (an I64 vector of m).  ray_find_rows_class_fn:
+ * every such row per probe row in row order (a list of m I64 vectors).  Columns borrowed; owned result or error. */
+ray_t* ray_find_rows_fn(ray_t* const* dom, ray_t* const* probe, int64_t k, int64_t m);
+ray_t* ray_find_rows_class_fn(ray_t* const* dom, ray_t* const* probe, int64_t k, int64_t m);
 ray_t* ray_til_fn(ray_t* x);
 ray_t* ray_reverse_fn(ray_t* x);
 
