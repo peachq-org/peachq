@@ -239,10 +239,11 @@ ray_err_t q_env_bind(int64_t sym, ray_t* val) {
 }
 
 /* the link seam: the carrier a write displaced, then the one it bound, under the name the write LANDED on */
-static void env_link(int64_t sym, ray_t* old, ray_t* val) {
+static ray_err_t env_link(int64_t sym, ray_t* old, ray_t* val) {
     int64_t full = q_env_fullname(sym, NULL);
-    if (old) q_provider_unlink(full, old);
-    if (q_provider_carrier_is(val)) q_provider_link(full, val);
+    ray_err_t e = old ? q_provider_unlink(full, old) : RAY_OK;
+    if (e == RAY_OK && q_provider_carrier_is(val)) e = q_provider_link(full, val);
+    return e;
 }
 
 /* q_env_take — see q_env.h.  The park is a plain bind, so it stays invisible
@@ -316,7 +317,7 @@ ray_err_t q_env_set(int64_t sym, ray_t* val) {
             ray_t* old = env_carrier_take();
             if (e == RAY_OK) {
                 q_view_on_global_set(sym);   /* invalidation + .z.vs */
-                if (old || q_provider_carrier_is(val)) env_link(sym, old, val);
+                if (old || q_provider_carrier_is(val)) e = env_link(sym, old, val);
             }
             if (old) ray_release(old);
         }
@@ -385,7 +386,7 @@ ray_err_t q_env_unbind(int64_t sym) {
     ray_t* old = env_carrier_take();
     if (e == RAY_OK) {
         q_view_on_global_unbind(sym);   /* dependents go pending */
-        if (old) q_provider_unlink(q_env_fullname(sym, NULL), old);
+        if (old) e = q_provider_unlink(q_env_fullname(sym, NULL), old);
     }
     if (old) ray_release(old);
     return e;
@@ -677,7 +678,7 @@ int64_t q_env_fullname(int64_t sym, int64_t* ns) {
 static int env_kind_match(q_env_ns_kind_t kind, ray_t* v) {
     switch (kind) {
     case Q_ENV_NS_FNS:    return q_type_is_fn(v) && !q_view_is(v);   /* views: `\b` only */
-    case Q_ENV_NS_TABLES: return q_type_is_table(v) || q_type_is_keyed(v);
+    case Q_ENV_NS_TABLES: return q_type_is_table(v) || q_type_is_keyed(v) || q_provider_carrier_is(v);
     default:              return !q_type_is_fn(v);   /* `\v` keeps tables */
     }
 }
