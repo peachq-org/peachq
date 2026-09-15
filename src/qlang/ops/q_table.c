@@ -378,7 +378,6 @@ ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law) {
     if (!y) return q_err(QE_TYPE);
     int64_t nc = ray_table_ncols(flat);
     if (nc <= 0) return q_err(QE_TYPE);
-    if (nc > 64) return q_err(QE_LIMIT);
 
     if (y->type == RAY_TABLE || q_type_is_keyed(y)) {
         ray_t* src = q_table_flatten(y);
@@ -502,12 +501,14 @@ ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law) {
     /* records-form (single: y itself is the one implicitly-enlisted record) */
     {
         int64_t nrec = single ? 1 : ny;
-        ray_t* accs[64];
+        ray_t** accs = (ray_t**)malloc((size_t)nc * sizeof(ray_t*));
+        if (!accs) return q_err(QE_WSFULL);
         for (int64_t c = 0; c < nc; c++) {
             accs[c] = ray_list_new(nrec > 0 ? nrec : 1);
             if (RAY_IS_ERR(accs[c])) {
                 ray_t* e = accs[c];
                 for (int64_t j = 0; j < c; j++) ray_release(accs[j]);
+                free(accs);
                 return e;
             }
         }
@@ -532,9 +533,12 @@ ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law) {
         if (err) {
             for (int64_t c = 0; c < nc; c++)
                 if (accs[c] && !RAY_IS_ERR(accs[c])) ray_release(accs[c]);
+            free(accs);
             return err;
         }
-        return q_table_cols_from_accs(flat, 0, accs, nc);
+        ray_t* out = q_table_cols_from_accs(flat, 0, accs, nc);
+        free(accs);
+        return out;
     }
 }
 
@@ -546,24 +550,26 @@ ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law) {
  * (one home with `v,:x`); every cell is checked before the first write. */
 static ray_t* table_append_inplace(ray_t* flat, ray_t* rows) {
     int64_t nc = ray_table_ncols(flat), nr = ray_table_nrows(rows), nx = ray_table_nrows(flat);
-    if (flat->rc != 1 || (flat->attrs & RAY_ATTR_ARENA) || nc > Q_TABLE_MAX_COLS || nr <= 0) return NULL;
+    if (flat->rc != 1 || (flat->attrs & RAY_ATTR_ARENA) || nr <= 0) return NULL;
     for (int64_t c = 0; c < nc; c++) {
         ray_t* oc = ray_table_get_col_idx(flat, c);
         ray_t* pc = ray_table_get_col_idx(rows, c);
         if (!oc || !pc || oc->rc != 1 || ray_len(pc) != nr || !q_index_growable(oc, pc)) return NULL;
     }
-    ray_t* col[Q_TABLE_MAX_COLS];
+    ray_t** col = (ray_t**)malloc((size_t)nc * (sizeof(ray_t*) + 1));
+    if (!col) return NULL;
+    uint8_t* was = (uint8_t*)(col + nc);
     for (int64_t c = 0; c < nc; c++) {
         col[c] = ray_table_get_col_idx(flat, c);
         ray_retain(col[c]);
         ray_table_set_col_idx(flat, c, RAY_NULL_OBJ);
         if (col[c]->rc != 1) {
             for (; c >= 0; c--) { ray_table_set_col_idx(flat, c, col[c]); ray_release(col[c]); }
+            free(col);
             return NULL;
         }
     }
     ray_t* err = NULL;
-    uint8_t was[Q_TABLE_MAX_COLS];
     int64_t touched = 0;
     for (int64_t c = 0; c < nc && !err; c++, touched++) {
         was[c] = col[c]->attrs;
@@ -574,6 +580,7 @@ static ray_t* table_append_inplace(ray_t* flat, ray_t* rows) {
         ray_table_set_col_idx(flat, c, col[c]);
         ray_release(col[c]);
     }
+    free(col);
     if (err) return err;
     flat->attrs &= (uint8_t)~RAY_ATTR_SORTED;            /* what a fresh concat result carries */
     ray_retain(flat);

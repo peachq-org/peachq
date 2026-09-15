@@ -928,17 +928,16 @@ static ray_t* wf_append_syms(ray_t* path, ray_t* y) {
     return bad ? q_err(QE_IO) : NULL;
 }
 
-/* read -> `,` -> rewrite; a container is rewritten with its own parameters
+/* read -> join -> rewrite (`,` on a vector, `upsert` on a serialized table: the row law, ref/upsert.md:32); a
+ * container is rewritten with its own parameters
  * (alg 0 goes through (2;0), whose never-paying deflate re-emits the alg-0
  * wrapper), a plain file stays plain — `.z.zd` never applies to a rewrite. */
 static ray_t* wf_append_rewrite(ray_t* path, ray_t* y, int zipped) {
     ray_t* old = wf_read_path(path, 1);
     if (!old || RAY_IS_ERR(old)) return old ? old : q_err(QE_IO);
-    if (old->type == RAY_TABLE || old->type == RAY_DICT || q_type_is_keyed(old)) {
-        ray_release(old);
-        return q_err(QE_TYPE);       /* serialized-table upsert: its own queued PR */
-    }
-    ray_t* join = q_registry_lookup_name(",", 1, Q_DYADIC);   /* borrowed */
+    if (old->type == RAY_DICT && !q_type_is_keyed(old)) { ray_release(old); return q_err(QE_TYPE); }
+    int tbl = old->type == RAY_TABLE || q_type_is_keyed(old);
+    ray_t* join = tbl ? q_registry_lookup_name("upsert", 6, Q_DYADIC) : q_registry_lookup_name(",", 1, Q_DYADIC);
     if (!join) { ray_release(old); return q_err(QE_TYPE); }
     ray_t* args[2] = { old, y };
     ray_t* joined = q_eval_apply_concrete(q_eval_apply_value(join, args, 2));

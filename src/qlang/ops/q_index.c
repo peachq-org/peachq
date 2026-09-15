@@ -765,15 +765,16 @@ static ray_t* keyed_grow(ray_t** pt, ray_t* p, ray_t* mj) {
     return NULL;
 }
 
-/* every payload column named in hit stored at its position (store_run's law; an enum column through the amend's
- * enum arm — its positions copy, coerce, stamp), each on the column lifted out of its slot so it writes where it
- * stands at rc 1 — a shared column copies itself there, a shared header copies first.  NULL on success. */
-static ray_t* keyed_store(ray_t** pt, ray_t* p, ray_t* pos, uint64_t hit) {
+/* every payload column hit names (a boolean per column; NULL: every column) stored at its position (store_run's
+ * law; an enum column through the amend's enum arm — its positions copy, coerce, stamp), each on the column lifted
+ * out of its slot so it writes where it stands at rc 1 — a shared column copies itself there, a shared header
+ * copies first.  NULL on success. */
+static ray_t* keyed_store(ray_t** pt, ray_t* p, ray_t* pos, ray_t* hit) {
     ray_t* t = ray_cow(*pt);
     if (!t || RAY_IS_ERR(t)) return t ? t : q_err(QE_OOM);
     *pt = t;
     for (int64_t c = 0, nc = ray_table_ncols(t); c < nc; c++) {
-        if (!(hit & (1ULL << c))) continue;
+        if (hit && !((const bool*)ray_data(hit))[c]) continue;
         ray_t* col = ray_table_get_col_idx(t, c);
         ray_t* pc = ray_table_get_col_idx(p, c);
         ray_retain(col);
@@ -790,14 +791,14 @@ static ray_t* keyed_store(ray_t** pt, ray_t* p, ray_t* pos, uint64_t hit) {
     return NULL;
 }
 
-ray_t* q_index_keyed_put(ray_t* x, ray_t* y, uint64_t hit, int mode, int exclusive) {
+ray_t* q_index_keyed_put(ray_t* x, ray_t* y, ray_t* hit, int mode, int exclusive) {
     if (!q_type_is_keyed(x) || !q_type_is_keyed(y)) return q_err(QE_TYPE);
     ray_t** xs = ray_dict_slots(x);
     ray_t** ys = ray_dict_slots(y);
     int64_t n0 = ray_table_nrows(xs[0]), m = ray_table_nrows(ys[0]);
     int64_t nkc = ray_table_ncols(xs[0]), nvc = ray_table_ncols(xs[1]);
     if (ray_table_ncols(ys[0]) != nkc || ray_table_ncols(ys[1]) != nvc) return q_err(QE_TYPE);
-    if (nkc > Q_TABLE_MAX_COLS || nvc > Q_TABLE_MAX_COLS) return q_err(QE_LIMIT);
+    if (hit && (hit->type != RAY_BOOL || ray_len(hit) != nvc)) return q_err(QE_TYPE);
     if (m == 0) { ray_retain(x); return x; }
     ray_t* tk = q_table_rows_typed(xs[0], ys[0]);   /* the gate over both parts, before any write */
     if (RAY_IS_ERR(tk)) return tk;
@@ -812,18 +813,26 @@ ray_t* q_index_keyed_put(ray_t* x, ray_t* y, uint64_t hit, int mode, int exclusi
     for (int64_t j = 0; !err && j < m; j++) if (d[j] >= n0 + added) added = d[j] + 1 - n0;
     ray_t* mj = err || !added ? NULL : first_misses(d, m, n0, added);
     if (mj && RAY_IS_ERR(mj)) { err = mj; mj = NULL; }
-    if (err) { ray_release(tk); ray_release(tv); return err; }
+    uint8_t* was = err ? NULL : (uint8_t*)malloc((size_t)(nkc > 0 ? nkc : 1));
+    if (!err && !was) err = q_err(QE_WSFULL);
+    if (err) {
+        if (pos && err != pos) ray_release(pos);
+        if (mj) ray_release(mj);
+        ray_release(tk);
+        ray_release(tv);
+        return err;
+    }
     int excl = exclusive && x->rc == 1 && !(x->attrs & (RAY_ATTR_ARENA | RAY_ATTR_SLICE));
     ray_t* nk = xs[0];
     ray_t* nv = xs[1];
     if (excl) xs[0] = xs[1] = NULL;
     else { ray_retain(nk); ray_retain(nv); }
-    uint8_t was[Q_TABLE_MAX_COLS];
     for (int64_t c = 0; c < nkc; c++) was[c] = ray_table_get_col_idx(nk, c)->attrs;
     if (mj) err = keyed_grow(&nk, tk, mj);
     if (mj && !err && (err = keyed_grow(&nv, tv, mj)) != NULL)    /* both slots one length */
         for (int64_t c = 0; c < nkc; c++) q_index_ungrow(ray_table_get_col_idx(nk, c), n0, was[c]);
-    if (!err && hit) err = keyed_store(&nv, tv, pos, hit);
+    if (!err && mode != Q_KEYED_INSERT) err = keyed_store(&nv, tv, pos, hit);
+    free(was);
     ray_release(pos);
     ray_release(tk);
     ray_release(tv);
@@ -838,23 +847,26 @@ ray_t* q_index_keyed_put(ray_t* x, ray_t* y, uint64_t hit, int mode, int exclusi
     return nd ? nd : q_err(QE_OOM);
 }
 
-/* the value columns a dict row names, as the store mask (the rest keep their cell on a hit); a name no column
+/* the store mask of a dict row: the value columns it names (the rest keep their cell on a hit); a name no column
  * carries, or a repeated one, is the amend law's 'index — the path must exist */
-static ray_t* row_cols(ray_t* v, ray_t* row, uint64_t* hit) {
+static ray_t* row_cols(ray_t* v, ray_t* row) {
     int64_t named = 0, nc = ray_table_ncols(v);
-    *hit = 0;
-    if (nc > Q_TABLE_MAX_COLS) return q_err(QE_LIMIT);
+    ray_t* hit = ray_vec_new(RAY_BOOL, nc > 0 ? nc : 1);
+    if (!hit || RAY_IS_ERR(hit)) return hit ? hit : q_err(QE_OOM);
+    hit->len = nc;
+    bool* b = (bool*)ray_data(hit);
     for (int64_t c = 0; c < nc; c++) {
         ray_t* ka = ray_sym(ray_table_col_name(v, c));
         ray_t* cell = ray_dict_get(row, ka);
         ray_release(ka);
+        b[c] = cell != NULL;
         if (!cell) continue;
-        if (RAY_IS_ERR(cell)) return cell;
+        if (RAY_IS_ERR(cell)) { ray_release(hit); return cell; }
         ray_release(cell);
-        *hit |= 1ULL << c;
         named++;
     }
-    return named == ray_len(ray_dict_keys(row)) ? NULL : q_err(QE_INDEX);
+    if (named != ray_len(ray_dict_keys(row))) { ray_release(hit); return q_err(QE_INDEX); }
+    return hit;
 }
 
 /* the keyed table's run of one, `kt[k]:v` (ref/assign.md; amend_tables.qcmd): the key and the value each the one
@@ -862,17 +874,17 @@ static ray_t* row_cols(ray_t* v, ray_t* row, uint64_t* hit) {
  * hit and null on a miss; a list or an atom is the whole row.  x consumed on success. */
 static ray_t* keyed_put1(ray_t* x, ray_t* key, ray_t* v) {
     ray_t** xs = ray_dict_slots(x);
-    uint64_t hit = UINT64_MAX;
-    ray_t* err = q_type_is_plain_dict(v) ? row_cols(xs[1], v, &hit) : NULL;
-    if (err) return err;
+    ray_t* hit = q_type_is_plain_dict(v) ? row_cols(xs[1], v) : NULL;
+    if (hit && RAY_IS_ERR(hit)) return hit;
     ray_t* kr = q_table_rows_normalize(xs[0], key, Q_ROWS_JOIN);
-    if (!kr || RAY_IS_ERR(kr)) return kr ? kr : q_err(QE_TYPE);
-    ray_t* vr = q_table_rows_normalize(xs[1], v, Q_ROWS_JOIN);
-    if (!vr || RAY_IS_ERR(vr)) { ray_release(kr); return vr ? vr : q_err(QE_TYPE); }
-    ray_t* y = ray_dict_new(kr, vr);                 /* consumes both */
-    if (!y || RAY_IS_ERR(y)) return y ? y : q_err(QE_OOM);
-    ray_t* r = q_index_keyed_put(x, y, hit, Q_KEYED_UPSERT, x->rc == 1);
-    ray_release(y);
+    ray_t* vr = kr && !RAY_IS_ERR(kr) ? q_table_rows_normalize(xs[1], v, Q_ROWS_JOIN) : NULL;
+    ray_t* y = NULL;
+    if (!kr || RAY_IS_ERR(kr)) y = kr ? kr : q_err(QE_TYPE);
+    else if (!vr || RAY_IS_ERR(vr)) { ray_release(kr); y = vr ? vr : q_err(QE_TYPE); }
+    else y = ray_dict_new(kr, vr);                   /* consumes both */
+    ray_t* r = y && !RAY_IS_ERR(y) ? q_index_keyed_put(x, y, hit, Q_KEYED_UPSERT, x->rc == 1) : y ? y : q_err(QE_OOM);
+    if (y && !RAY_IS_ERR(y)) ray_release(y);
+    if (hit) ray_release(hit);
     if (!RAY_IS_ERR(r)) ray_release(x);
     return r;
 }
