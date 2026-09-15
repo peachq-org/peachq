@@ -36,9 +36,8 @@ typedef struct {
     int64_t provider;   /* sym id */
     int64_t alias;      /* sym id (never the empty name for a registered row) */
     int64_t handle;     /* sym id of the registered spelling `:pq:ds:alias` — what hopen answers */
-    ray_t*  open3;      /* owned (rest;timeout;config) triad — never exposed;
-                         * the host-owned-reconnect groundwork */
     ray_t*  connid;     /* owned: the TOKEN .provider.i.open returned */
+    int     internal;   /* the provider's own row (DuckDB's main): neither hopen nor hclose may touch it */
 } prov_ent;
 
 static prov_ent* g_ents = NULL;
@@ -54,7 +53,6 @@ void q_provider_init(void) {
 void q_provider_destroy(void) {
     for (int64_t i = 0; i < g_n; i++) {
         close((int)g_ents[i].fd);      /* teardown: no hooks, just the fd + refs */
-        if (g_ents[i].open3)  ray_release(g_ents[i].open3);
         if (g_ents[i].connid) ray_release(g_ents[i].connid);
     }
     free(g_ents);
@@ -206,8 +204,8 @@ static ray_t* hook_call(int64_t provider, const char* hook, ray_t** args, int64_
 }
 
 
-/* every open form normalizes here: the FROZEN triad (rest; timeout|0N;
- * config|::) — owned 3-list, the alias record keeps it beside CONNID */
+/* every open form normalizes here: the FROZEN triad (rest; timeout|0N; config|::) — owned 3-list, the hook's
+ * three trailing args; it dies with the call (hopen is where secrets die) */
 static ray_t* open3_make(seg_t rest, ray_t* timeout, ray_t* config) {
     ray_t* r = ray_list_new(3);
     if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_OOM);
@@ -244,6 +242,17 @@ static void conn_close(int64_t provider, ray_t* connid) {
     if (r) ray_release(r);
 }
 
+static prov_ent* ent_push(void) {
+    if (g_n == g_cap) {
+        int64_t nc = g_cap ? g_cap * 2 : 8;
+        prov_ent* ne = (prov_ent*)realloc(g_ents, (size_t)nc * sizeof *ne);
+        if (!ne) return NULL;
+        g_ents = ne; g_cap = nc;
+    }
+    memset(&g_ents[g_n], 0, sizeof g_ents[g_n]);
+    return &g_ents[g_n++];
+}
+
 ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     spec_t sp;
@@ -260,16 +269,16 @@ ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config) 
     ray_t* o3 = open3_make(sp.cfg, timeout, config);
     if (RAY_IS_ERR(o3)) return o3;
     prov_ent* live = find_alias(pid, aid);
+    if (live && live->internal) { ray_release(o3); return q_err(QE_DOMAIN); }
     if (live) {
         /* re-point the live alias: close old token, open new, swap — the
          * url-moved-don't-lose-tables affordance; carriers never notice */
         conn_close(pid, live->connid);
         ray_release(live->connid); live->connid = NULL;
-        ray_release(live->open3);  live->open3 = NULL;
         ray_t* c = NULL;
         ray_t* e = conn_open(pid, aid, o3, &c);
+        ray_release(o3);
         if (e) {                               /* open failed: the alias dies */
-            ray_release(o3);
             int64_t fd = live->fd;
             close((int)fd);
             q_handles_deregister(fd);
@@ -277,7 +286,6 @@ ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config) 
             return e;
         }
         live->connid = c;
-        live->open3  = o3;
         return ray_sym(live->handle);
     }
     int fd = q_handles_reserve_fd();
@@ -292,33 +300,45 @@ ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config) 
     }
     ray_t* c = NULL;
     ray_t* e = conn_open(pid, aid, o3, &c);
+    ray_release(o3);
     if (e) {
         q_handles_deregister(fd);
         close(fd);
-        ray_release(o3);
         return e;
     }
-    if (g_n == g_cap) {
-        int64_t nc = g_cap ? g_cap * 2 : 8;
-        prov_ent* ne = (prov_ent*)realloc(g_ents, (size_t)nc * sizeof *ne);
-        if (!ne) {
-            conn_close(pid, c);
-            ray_release(c);
-            q_handles_deregister(fd);
-            close(fd);
-            ray_release(o3);
-            return q_err(QE_OOM);
-        }
-        g_ents = ne; g_cap = nc;
+    prov_ent* ne = ent_push();
+    if (!ne) {
+        conn_close(pid, c);
+        ray_release(c);
+        q_handles_deregister(fd);
+        close(fd);
+        return q_err(QE_OOM);
     }
-    g_ents[g_n].fd       = fd;
-    g_ents[g_n].provider = pid;
-    g_ents[g_n].alias    = aid;
-    g_ents[g_n].handle   = ray_sym_intern_runtime(s, redlen);
-    g_ents[g_n].open3    = o3;
-    g_ents[g_n].connid   = c;
-    g_n++;
-    return ray_sym(g_ents[g_n - 1].handle);
+    ne->fd       = fd;
+    ne->provider = pid;
+    ne->alias    = aid;
+    ne->handle   = ray_sym_intern_runtime(s, redlen);
+    ne->connid   = c;
+    return ray_sym(ne->handle);
+}
+
+int64_t q_provider_register_internal(const char* ds, const char* alias, ray_t* token) {
+    char buf[PROV_NAME_MAX];
+    int m = snprintf(buf, sizeof buf, ":pq:%s:%s", ds, alias);
+    if (m <= 0 || m >= (int)sizeof buf || !token) return 0;
+    int fd = q_handles_reserve_fd();
+    if (fd < 0) return 0;
+    if (!q_handles_register(fd, Q_HANDLE_PROVIDER, 1, buf, (size_t)m)) { close(fd); return 0; }
+    prov_ent* ne = ent_push();
+    if (!ne) { q_handles_deregister(fd); close(fd); return 0; }
+    ray_retain(token);
+    ne->fd       = fd;
+    ne->provider = ray_sym_intern_runtime(ds, strlen(ds));
+    ne->alias    = ray_sym_intern_runtime(alias, strlen(alias));
+    ne->handle   = ray_sym_intern_runtime(buf, (size_t)m);
+    ne->connid   = token;
+    ne->internal = 1;
+    return ne->handle;
 }
 
 int q_provider_info(int64_t fd, int64_t* provider, int64_t* alias, int64_t* handle) {
@@ -364,19 +384,21 @@ ray_t* q_provider_token(ray_t* handle, const char* provider) {
     return e->connid;
 }
 
-static void ent_close(prov_ent* e) {
+/* the provider's own row outlives every user close */
+static ray_t* ent_close(prov_ent* e) {
+    if (e->internal) return q_err(QE_DOMAIN);
     conn_close(e->provider, e->connid);
     ray_release(e->connid);
-    if (e->open3) ray_release(e->open3);
     close((int)e->fd);
     q_handles_deregister(e->fd);
     *e = g_ents[--g_n];
+    return RAY_NULL_OBJ;
 }
 
 ray_t* q_provider_close(int64_t qh) {
     prov_ent* e = find_fd(qh);
-    if (e) ent_close(e);
-    else q_handles_deregister(qh);
+    if (e) return ent_close(e);
+    q_handles_deregister(qh);
     return RAY_NULL_OBJ;
 }
 
@@ -384,8 +406,7 @@ ray_t* q_provider_close_sym(ray_t* x) {
     prov_ent* e;
     ray_t* err = ref_find_sym(x, &e);
     if (err) return err;
-    if (e) ent_close(e);
-    return RAY_NULL_OBJ;
+    return e ? ent_close(e) : RAY_NULL_OBJ;
 }
 
 
@@ -412,8 +433,7 @@ static ray_t* cref_open(const spec_t* sp, cref_t* c) {
     ray_t* err = conn_open(pid, empty_sym(), o3, &conn);
     ray_release(o3);
     if (err) return err;
-    c->tmp = (prov_ent){ .fd = -1, .provider = pid, .alias = empty_sym(), .handle = empty_sym(),
-                         .open3 = NULL, .connid = conn };
+    c->tmp = (prov_ent){ .fd = -1, .provider = pid, .alias = empty_sym(), .handle = empty_sym(), .connid = conn };
     c->e = &c->tmp;
     c->is_tmp = 1;
     return NULL;
@@ -749,6 +769,42 @@ ray_t* q_provider_qsql_push(ray_t** args, int64_t n) {
     return r;
 }
 
+
+/* The link seam.  A REFERENCE carrier (a named alias) links: .X.i.link needs the live connection, .X.i.unlink drops
+ * by name and gets :: for a token once the alias is closed.  An aliasless coordinate is served by a connection that
+ * dies with the call, so there is nothing durable to point a link at.  Best-effort: the global is already bound, so
+ * a hook's error is dropped (the .z.vs shape) and a hook that binds a carrier itself does not re-enter. */
+static int g_in_link;
+
+static void link_hook(const char* hook, int64_t qname, ray_t* car) {
+    const char* p; size_t n;
+    spec_t sp;
+    if (g_in_link || !sym_text(ray_dict_vals(car), &p, &n)) return;
+    ray_t* pe = spec_parse(p, n, &sp);
+    if (pe) { ray_error_free(pe); return; }
+    if (!sp.is_table || !sp.alias.n) return;
+    int64_t pid = ray_sym_intern_runtime(sp.ds.p, sp.ds.n);
+    ray_t* f = hook_fn(pid, hook);
+    if (!f) return;
+    prov_ent* e = find_alias(pid, ray_sym_intern_runtime(sp.alias.p, sp.alias.n));
+    int link = strcmp(hook, "i.link") == 0;
+    if (e || !link) {
+        ray_t* qn = ray_sym(qname);
+        ray_t* tn = ray_sym(ray_sym_intern_runtime(sp.tbl.p, sp.tbl.n));
+        ray_t* args[3] = { e ? e->connid : RAY_NULL_OBJ, qn, tn };
+        g_in_link = 1;
+        ray_t* r = q_eval_apply_value(f, args, link ? 3 : 2);
+        g_in_link = 0;
+        if (r && RAY_IS_ERR(r)) { q_err_drop(); ray_error_free(r); }
+        else if (r) ray_release(r);
+        ray_release(qn);
+        ray_release(tn);
+    }
+    ray_release(f);
+}
+
+void q_provider_link(int64_t qname, ray_t* car)   { link_hook("i.link", qname, car); }
+void q_provider_unlink(int64_t qname, ray_t* car) { link_hook("i.unlink", qname, car); }
 
 ray_t* q_provider_write(ray_t* x, ray_t* y, int upsert) {
     const char* p; size_t n;

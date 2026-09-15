@@ -2,12 +2,16 @@
 / h:hopen `:pq:duckdb:alias:/path/db opens (or creates) one and answers the alias symbol `:pq:duckdb:alias - the
 / handle every public verb takes (.duckdb.exec[h;sql]); h "SELECT ..." runs SQL and answers a table; hclose h
 / closes it.  `:pq:duckdb:alias:table/ names a table for get, set, upsert and qsql, with select/where/by pushed
-/ down to DuckDB.  .duckdb.types[] is the type map, .duckdb.err[] the last error.  \?duckdb has examples.
-/ @implNote DuckDB as a virtual-table PROVIDER (contract v3: the 2026-09-15 ADR § Handles).  These hooks ARE
-/ the DuckDB surface, written over the natives .duckdb.i.*, which bind at this same \l pq gate; the lifecycle
-/ hooks .duckdb.i.open[alias;rest;tmo;cfg] / .duckdb.i.close[token] ARE natives, called by the host alone
-/ (hopen/hclose are the only doors).  c below is the HANDLE (alias sym, or the legacy int), resolved to the
-/ native token in C - no q-side state.  ANY-ORDER LAW: definitions only at top level.
+/ down to DuckDB.  There is ONE DuckDB database per process, `:pq:duckdb:main (.duckdb.main[]; q -duckdb path makes
+/ it a file): every alias is a catalog attached to it, and a q global bound to a DuckDB table is a same-named view
+/ in it, so s)SELECT ... runs SQL over q names, live.  .duckdb.types[] is the type map, .duckdb.err[] the last
+/ error.  \?duckdb has examples.
+/ @implNote DuckDB as a virtual-table PROVIDER (contract v3: the 2026-09-15 ADR § Handles; the instance and the
+/ link: § Main instance).  These hooks ARE the DuckDB surface, written over the natives .duckdb.i.*, which bind at
+/ this same \l pq gate; the lifecycle hooks .duckdb.i.open[alias;rest;tmo;cfg] / .duckdb.i.close[token] and the link
+/ hooks .duckdb.i.link[token;qname;table] / .duckdb.i.unlink[token;qname] ARE natives, called by the host alone
+/ (hopen/hclose are the only doors; the link fires at the global-set seam).  c below is the HANDLE (alias sym, or the
+/ legacy int), resolved to the native token in C - no q-side state.  ANY-ORDER LAW: definitions only at top level.
 
 / the sync flag is ignored: an in-process engine has no async lane (the same
 / treatment as open's timeout)
@@ -92,8 +96,14 @@
 .duckdb.i.push:{[c;rt] t:$[10h=type rt 0;.duckdb.exec[c;"SELECT * FROM ",rt 0];.duckdb.get[c;rt 0]]; (?) . (enlist t),1_rt}
 .duckdb.qsql:{[c;cl;tree] rt:@[.pq.i.resolveTree[cl];tree;{[e] ::}]; $[rt~(::);::;.duckdb.i.push[c;rt]]}
 
-/ the one connection the standard library's own doors (.parquet) run on: opened on first call, the same token
-/ for the life of the process - not a registered alias, so no handle names it.  Today a connection to the shared
-/ :default: db; a reserved instance is the ADR's A1 follow-up.
-.duckdb.i.mainc:0Ni
-.duckdb.main:{[] if[null .duckdb.i.mainc; .duckdb.i.mainc::.duckdb.i.open[`;"default:";0N;::]]; .duckdb.i.mainc}
+/ THE main instance's own handle, `:pq:duckdb:main: the one DuckDB database of the process (in-memory, or the file
+/ q -duckdb path / PEACHQ_DUCKDB_MAIN names), opened and registered on the first call - .pq.conns[] lists it, every
+/ alias is a catalog ATTACHed to it, and a q global bound to a DuckDB table is a same-named VIEW in it.  The
+/ standard library's own doors (.parquet, s)) run here; hopen/hclose refuse the alias.
+/ @return (symbol) `:pq:duckdb:main
+.duckdb.main:{[] .duckdb.i.main[]}
+
+/ s)SELECT ... - the custom-language handler kdb documents (.X.e receives the line after the prefix), on main: a
+/ q global bound to a DuckDB table is a bare name here, an alias's table is alias.table, a result prints as a table
+/ and a statement without one answers ::.  Errors are the bridge's 'duckdb, .duckdb.err[] the reason.
+.s.e:{[x] .duckdb.main[] x}

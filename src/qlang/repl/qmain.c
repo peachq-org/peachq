@@ -12,6 +12,7 @@
 #include "qlang/q_console.h"  /* q_console_pipe_enable — the modern pipe-table display */
 #include "qlang/net/q_tls.h"  /* q_tls_server_mode_set — the `-E` TLS server mode */
 #include "qlang/parse/q_tok.h" /* q_tok_date_order_set — the `-z` date order */
+#include "qlang/io/q_duckdb.h" /* q_duckdb_main_path_set — the `-duckdb` main database file */
 #include "core/poll.h"
 #include "core/runtime.h"
 #include <rayforce.h>
@@ -103,6 +104,12 @@ int main(int argc, char** argv) {
             }
             if (strcmp(argv[i], "-eval") == 0) eval_after[n_after++] = argv[++i];
             else                               eval_before[n_before++] = argv[++i];
+        } else if (strcmp(argv[i], "-duckdb") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "q: -duckdb requires a database file argument\n");
+                return 2;
+            }
+            q_duckdb_main_path_set(argv[++i]);
         } else if (strcmp(argv[i], "-u") == 0 && i + 1 < argc) {
             auth_pw = argv[++i];
             auth_restricted = false;

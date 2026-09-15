@@ -486,8 +486,10 @@
   ("\\?duckdb";"\\l pq";"h:hopen `:pq:duckdb:mkt:demo.duckdb";"n:1000";
    "`:pq:duckdb:mkt:trade/ set ([] sym:n?`AAPL`MSFT; px:n?100f; sz:n?1000)";
    "h \"SELECT sym, count(*) n FROM trade GROUP BY sym\"";"select vwap:sz wavg px by sym from `:pq:duckdb:mkt:trade/";
-   "t:get `:pq:duckdb:mkt:trade/";"-3!t";"count t";"meta t";".pq.conns[]";"hclose h");
-  ("";"";"";"";"`trade";"";"";"";"\"+`sym`px`sz!`:pq:duckdb:mkt:trade/\"";"1000";"";"";"");
+   "t:get `:pq:duckdb:mkt:trade/";"-3!t";"count t";"meta t";
+   "s)SELECT sym, count(*) n FROM t GROUP BY sym";"s)SELECT max(px) FROM mkt.trade";".duckdb.main[]";
+   ".pq.conns[]";"hclose h");
+  ("";"";"";"";"`trade";"";"";"";"\"+`sym`px`sz!`:pq:duckdb:mkt:trade/\"";"1000";"";"";"";"`:pq:duckdb:main";"";"");
   ("DuckDB as a q data source: a database is a handle, its tables are q tables, qsql pushes down · page";
    "the .duckdb namespace and the :pq:duckdb: provider arrive with the standard library";
    "open (or create) a database file under the alias mkt: hopen answers `:pq:duckdb:mkt, the alias as a handle";
@@ -498,13 +500,18 @@
    "get answers a VIRTUAL table - nothing is read until a query needs it";
    "the virtual table shows what it is: a flipped dict whose values are the resource";
    "count, meta and select all work on it; .duckdb.types is the type map, \\?.duckdb the surface";
-   "";"every open connection: handle is the alias sym (an int for a socket), with provider and alias";"hclose takes the sym")]];
+   "";
+   "s) is SQL on the main instance: a q global bound to a DuckDB table is a same-named VIEW there, live";
+   "an alias's table is reachable qualified - every alias is a catalog ATTACHed to the one main database";
+   "main's own handle: q -duckdb path (or PEACHQ_DUCKDB_MAIN) makes it a file; hopen and hclose refuse it";
+   "every open connection: handle is the alias sym (an int for a socket), with provider and alias";"hclose takes the sym")]];
 .help.i.r[`handles;"\n" sv .help.i.exline'[
   ("\\?handles";"`:pq:duckdb:mkt:/data/market.duckdb";"h:hopen `:pq:qpc:bob:localhost:6000";"h \"tables[]\"";
    "`:pq:qpc:bob \"1+1\"";"dow:get `:pq:qpc:bob:dowt/";"select from dow where Date=1915.04.01";
    "select from `:trades.csv";"select from `:https://www.timestored.com/data/sample/iso10383_mic.csv";
-   "select from `:https://www.timestored.com/data/sample/types.json";".pq.conns[]";"hclose h");
-  ("";"";"";"";"2";"";"";"";"";"";"";"");
+   "select from `:https://www.timestored.com/data/sample/types.json";
+   "t:get `:pq:duckdb:mkt:trade/";"s)SELECT count(*) n FROM t";".pq.conns[]";"hclose h");
+  ("";"";"";"";"2";"";"";"";"";"";"";"";"";"");
   ("resource handles: a :pq: symbol names a resource by ALIAS, and a table resource stands in as a table · page";
    "a resource specification: :pq: then the provider, an alias you choose, then what the provider needs";
    "hopen answers the alias symbol `:pq:qpc:bob - it names that connection for as long as it is open";
@@ -515,6 +522,8 @@
    "a file whose format is known decodes to a table: .csv .tsv .json - a URL is a transport, not a format";
    "so an http(s) csv reads the same way: the exchange MIC codes, straight off the web";
    "and json too - nested arrays stay nested lists; \\?loaders has the readers behind this";
+   "a DuckDB table bound to a q global is a same-named view on the main DuckDB instance...";
+   "...so s) runs SQL over the q name, live: \\?duckdb has the instance";
    "every open connection: handle, kind, provider, alias, when it opened";
    "close by the handle; the alias goes with the connection")]];
 .help.i.r[`loaders;"\n" sv .help.i.exline'[

@@ -60,6 +60,21 @@ static ray_t* insert_keyed(int64_t sym, ray_t* g, ray_t* y) {
     return e == RAY_OK ? idx_range(before, added) : q_env_err(e);
 }
 
+/* The rows of a global bound to a provider table go back through the provider (the host contract: every write
+ * does), by the carrier's own coordinate; the indices are the provider's count before, then the batch. */
+static ray_t* carrier_insert(ray_t* car, ray_t* y) {
+    if (!y || y->type != RAY_TABLE) return q_err(QE_TYPE);
+    ray_t* before = q_provider_carrier_count(car);
+    if (!before || RAY_IS_ERR(before)) return before ? before : q_err(QE_TYPE);
+    int64_t b0 = before->type == -RAY_I64 ? before->i64 : before->type == -RAY_I32 ? before->i32 : -1;
+    ray_release(before);
+    if (b0 < 0) return q_err(QE_TYPE);
+    ray_t* r = q_provider_write(ray_dict_vals(car), y, 1);
+    if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_TYPE);
+    ray_release(r);
+    return idx_range(b0, ray_table_nrows(y));
+}
+
 /* q `x insert y` / insert[x;y] — x MUST name a global (kdb insert is always
  * by reference).  Unbound name + table payload CREATES the global.  Keyed
  * target: key collision -> 'insert.  Returns inserted row indices. */
@@ -74,6 +89,7 @@ ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
         }
         return q_err(QE_TYPE);
     }
+    if (q_provider_carrier_is(g)) return carrier_insert(g, y);
     if (!(g->type == RAY_TABLE || q_type_is_keyed(g)))
         return q_err(QE_TYPE);
     if (q_splay_table_path(g)) return q_err(QE_SPLAY);   /* a mapped global takes no rows (kb/splayed-tables.md:350) */
@@ -112,6 +128,14 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
     if (pr) return pr;
     if (q_io_is_fsym(x)) return q_wirefile_append(x, y);  /* file target: the one
                                                            * flat-append kernel */
+    ray_t* car = x && x->type == -RAY_SYM ? q_env_get(x->i64) : x;   /* a carrier, named or as the value */
+    if (q_provider_carrier_is(car)) {
+        pr = q_provider_write(ray_dict_vals(car), y, 1);
+        if (!pr || RAY_IS_ERR(pr)) return pr ? pr : q_err(QE_TYPE);
+        ray_release(pr);
+        ray_retain(x);
+        return x;
+    }
     int64_t sym;
     ray_t* t = q_table_operand(x, &sym);
     if (!t) {
