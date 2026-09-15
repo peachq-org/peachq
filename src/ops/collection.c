@@ -155,7 +155,7 @@ static int hs_eq_rows(ray_t* a_src, int64_t ai, int8_t at, void* a_data,
                                 return ((const double*)a_data)[ai] == ((const double*)b_data)[bi];
             case RAY_F32:       return ((const float*)a_data)[ai] == ((const float*)b_data)[bi];
             RAY_TEMPORAL32_CASES:     return ((const int32_t*)a_data)[ai] == ((const int32_t*)b_data)[bi];
-            case RAY_TIMESTAMP: return ((const int64_t*)a_data)[ai] == ((const int64_t*)b_data)[bi];
+            RAY_TEMPORAL64_CASES: return ((const int64_t*)a_data)[ai] == ((const int64_t*)b_data)[bi];
             case RAY_SYM: {
                 /* Raw index equality is only meaningful within ONE id
                  * space — gate on domain identity (sym-domain Phase 2);
@@ -1904,26 +1904,29 @@ ray_t* ray_at_fn(ray_t* vec, ray_t* idx) {
  * ~140 needles when every needle sits at the END; 64 keeps the scan side under half the build even then. */
 #define FIND_SCAN_NEEDLES 64
 
-/* One typed pass for an atom needle over a typed vector: atom_eq's law hoisted out of the loop.  A same-type
- * slot compares raw payloads (a sym cell at its width, the needle re-expressed in a file domain first), a
- * cross-type numeric pair compares as f64, and any other pair meets only at a null.  The row, or -1. */
-static int64_t find_scan(ray_t* vec, ray_t* val) {
+/* The one bucket every null row cell hashes to (join.c's JOIN_NULL_HASH); equality decides. */
+#define ROW_NULL_HASH 0x9E3779B97F4A7C15ULL
+
+/* One typed pass for an atom needle over a typed vector, from `start`: atom_eq's law hoisted out of the loop.  A
+ * same-type slot compares raw payloads (a sym cell at its width, the needle re-expressed in a file domain first),
+ * a cross-type numeric pair compares as f64, and any other pair meets only at a null.  The row, or -1. */
+static int64_t find_scan(ray_t* vec, ray_t* val, int64_t start) {
     int64_t n = vec->len;
     bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) != 0;
     const void* a = ray_data(vec);
     if (atom_is_oob_null(val)) {
-        if (has_nulls) for (int64_t i = 0; i < n; i++) if (ray_vec_is_null(vec, i)) return i;
+        if (has_nulls) for (int64_t i = start; i < n; i++) if (ray_vec_is_null(vec, i)) return i;
         return -1;
     }
     if (!ray_is_atom(val)) return -1;
 #define FIND_SCAN(EQ) do {                                          \
         if (has_nulls) {                                            \
-            for (int64_t i = 0; i < n; i++) {                       \
+            for (int64_t i = start; i < n; i++) {                   \
                 if (ray_vec_is_null(vec, i)) continue;              \
                 if (EQ) return i;                                   \
             }                                                       \
         } else {                                                    \
-            for (int64_t i = 0; i < n; i++)                         \
+            for (int64_t i = start; i < n; i++)                     \
                 if (EQ) return i;                                   \
         }                                                           \
         return -1;                                                  \
@@ -1959,7 +1962,7 @@ static int64_t find_scan(ray_t* vec, ray_t* val) {
         case RAY_STR: {
             const char* kp = ray_str_ptr(val);
             size_t kl = ray_str_len(val);
-            for (int64_t i = 0; i < n; i++) {
+            for (int64_t i = start; i < n; i++) {
                 if (has_nulls && ray_vec_is_null(vec, i)) continue;
                 size_t l = 0;
                 const char* p = ray_str_vec_get(vec, i, &l);
@@ -2021,7 +2024,7 @@ static int64_t find_atom(ray_t* vec, ray_t* val) {
             }
         }
     }
-    return find_scan(vec, val);
+    return find_scan(vec, val, 0);
 }
 
 /* (find vec val) — index of first occurrence, or -1 */
@@ -2100,6 +2103,197 @@ ray_t* ray_find_fn(ray_t* vec, ray_t* val) {
     }
     if (_bx) ray_release(_bx);
     return ray_typed_null(-RAY_I64); /* 0Nl = not found */
+}
+
+/* ===== Find over ROWS ======================================================
+ * k domain columns searched as ONE row key, m probe rows given as k columns (a 1-item column broadcasts).  Rows
+ * meet cell by cell under Find's own compare law — the typed scan's for a single needle, the hashset's for many —
+ * and a null is an ordinary key value (`0N~0N`), meeting only another null.  Nothing is materialised per call. */
+
+static inline int64_t row_idx(ray_t* col, int64_t j) { return ray_len(col) == 1 ? 0 : j; }
+
+static inline int row_cell_null(ray_t* col, int64_t i) {
+    if (col->type != RAY_LIST) return ray_vec_is_null(col, i);
+    ray_t* e = ((ray_t**)ray_data(col))[i];
+    return !e || atom_is_oob_null(e);
+}
+
+static int row_cell_eq(ray_t* d, int64_t i, ray_t* p, int64_t j) {
+    int dn = row_cell_null(d, i), pn = row_cell_null(p, j);
+    if (dn || pn) return dn == pn;
+    return hs_eq_rows(d, i, d->type, ray_data(d), p, j, p->type, ray_data(p));
+}
+
+static int rows_eq(ray_t* const* d, int64_t i, ray_t* const* p, int64_t j, int64_t k) {
+    for (int64_t t = 0; t < k; t++)
+        if (!row_cell_eq(d[t], row_idx(d[t], i), p[t], row_idx(p[t], j))) return 0;
+    return 1;
+}
+
+/* Sym cells hash at their RUNTIME id so a file-domain column and its probe land in one bucket (join.c's law). */
+static uint64_t row_hash(ray_t* const* c, int64_t k, int64_t j) {
+    uint64_t h = 0;
+    for (int64_t t = 0; t < k; t++) {
+        ray_t* v = c[t];
+        int64_t i = row_idx(v, j);
+        uint64_t hc = row_cell_null(v, i)  ? ROW_NULL_HASH
+                    : v->type == RAY_SYM   ? ray_hash_i64(sym_cell_runtime_id(v, i))
+                                           : hs_hash_row(v, i, v->type, ray_data(v));
+        h = t ? ray_hash_combine(h, hc) : hc;
+    }
+    return h;
+}
+
+/* Candidates come from column 0's typed scan (the index for the first one); the other columns are checked in
+ * place at each, so a miss costs one pass over one column.  A boxed column 0 walks atom_eq.  *checks counts the
+ * candidates examined — the scan's cost beyond the pass, which a low-cardinality column 0 makes proportional to n.
+ * The row, -1 for none; a cell that cannot be read lands in *err (owned) with -1. */
+static int64_t row_scan(ray_t* const* d, ray_t* const* p, int64_t k, int64_t j, int64_t start, int64_t* checks,
+                        ray_t** err) {
+    ray_t* d0 = d[0];
+    int64_t n = ray_len(d0), hit = -1;
+    int alloc = 0;
+    ray_t* cell = collection_elem(p[0], row_idx(p[0], j), &alloc);
+    if (!cell || RAY_IS_ERR(cell)) { *err = cell ? cell : ray_error("oom", NULL); return -1; }
+    for (int64_t i = start; i < n; i++) {
+        if (d0->type == RAY_LIST) {
+            ray_t** e = (ray_t**)ray_data(d0);
+            while (i < n && !(e[i] ? atom_eq(e[i], cell) : atom_is_oob_null(cell))) i++;
+            if (i >= n) break;
+        } else if ((i = i ? find_scan(d0, cell, i) : find_atom(d0, cell)) < 0) break;
+        ++*checks;
+        if (rows_eq(d + 1, i, p + 1, j, k - 1)) { hit = i; break; }
+    }
+    if (alloc) ray_release(cell);
+    return hit;
+}
+
+/* the slot of row i of cols in a hash of PROBE rows: its owner probe, or HS_EMPTY */
+static uint64_t class_slot(const int64_t* slots, uint64_t mask, ray_t* const* probe, int64_t k, ray_t* const* cols,
+                           int64_t i) {
+    uint64_t s = row_hash(cols, k, i) & mask;
+    while (slots[s] != HS_EMPTY && !rows_eq(probe, slots[s], cols, i, k)) s = (s + 1) & mask;
+    return s;
+}
+
+/* n slots for an open-addressing table over up to `rows` entries; an allocation failure is the owned error */
+static ray_t* row_slots(int64_t rows, uint64_t* mask) {
+    int64_t cap = 16;
+    while (cap < rows * 2) cap *= 2;
+    ray_t* b = ray_alloc((size_t)cap * sizeof(int64_t));
+    if (!b) return ray_error("oom", NULL);
+    if (RAY_IS_ERR(b)) return b;
+    int64_t* slots = (int64_t*)ray_data(b);
+    for (int64_t i = 0; i < cap; i++) slots[i] = HS_EMPTY;
+    *mask = (uint64_t)cap - 1;
+    return b;
+}
+
+/* Every column typed on both sides — the precondition of hashing rows (a boxed column only scans). */
+static int rows_typed(ray_t* const* dom, ray_t* const* probe, int64_t k) {
+    for (int64_t t = 0; t < k; t++) if (!ray_is_vec(dom[t]) || !ray_is_vec(probe[t])) return 0;
+    return 1;
+}
+
+/* A few rows scan and many hash, at FIND_SCAN_NEEDLES as for a vector needle (a row's scan costs a needle's, the
+ * row hash more than the column hashset, so the crossover only rises with k).  The scan also hands over to the
+ * hash once its in-place checks exceed n — about a hash build's cost — which a low-cardinality column 0 reaches
+ * within a few rows. */
+ray_t* ray_find_rows_fn(ray_t* const* dom, ray_t* const* probe, int64_t k, int64_t m) {
+    int64_t n = ray_len(dom[0]), j = 0, checks = 0;
+    int typed = rows_typed(dom, probe, k);
+    ray_t* result = ray_vec_new(RAY_I64, m > 0 ? m : 1);
+    if (RAY_IS_ERR(result)) return result;
+    result->len = m;
+    int64_t* out = (int64_t*)ray_data(result);
+    bool any_null = false;
+    ray_t* err = NULL;
+    if (!typed || m <= FIND_SCAN_NEEDLES)
+        for (; j < m && (!typed || checks <= n); j++) {
+            int64_t r = row_scan(dom, probe, k, j, 0, &checks, &err);
+            if (err) { ray_release(result); return err; }
+            if (r < 0) { out[j] = NULL_I64; any_null = true; } else out[j] = r;
+        }
+    if (j < m) {
+        uint64_t mask;
+        ray_t* block = row_slots(n, &mask);
+        if (RAY_IS_ERR(block)) { ray_release(result); return block; }
+        int64_t* slots = (int64_t*)ray_data(block);
+        for (int64_t i = 0; i < n; i++) {                 /* the first of equal rows keeps its slot: Find's answer */
+            uint64_t s = class_slot(slots, mask, dom, k, dom, i);
+            if (slots[s] == HS_EMPTY) slots[s] = i;
+        }
+        for (; j < m; j++) {
+            int64_t r = slots[class_slot(slots, mask, dom, k, probe, j)];
+            if (r == HS_EMPTY) { out[j] = NULL_I64; any_null = true; } else out[j] = r;
+        }
+        ray_release(block);
+    }
+    if (any_null) result->attrs |= RAY_ATTR_HAS_NULLS;
+    return result;
+}
+
+/* The equivalence classes bin over a table searches within: for each probe row every domain row equal to it on
+ * the k columns, in row order, a LIST of m I64 vectors.  A few rows walk the scan twice (count, fill) under the
+ * same threshold and budget as above; the rest hash the PROBE rows and pass over the domain once (count, fill),
+ * so m rows cost O(n + m).  Equal probe rows among the hashed share one class. */
+ray_t* ray_find_rows_class_fn(ray_t* const* dom, ray_t* const* probe, int64_t k, int64_t m) {
+    int64_t n = ray_len(dom[0]), j = 0, checks = 0;
+    int typed = rows_typed(dom, probe, k);
+    ray_t* out = ray_list_new(m > 0 ? m : 1);
+    if (RAY_IS_ERR(out)) return out;
+    ray_t* err = NULL;
+    if (!typed || m <= FIND_SCAN_NEEDLES)
+        for (; j < m && (!typed || checks <= n); j++) {
+            int64_t cn = 0, t = 0;
+            for (int64_t r = row_scan(dom, probe, k, j, 0, &checks, &err); r >= 0; r = row_scan(dom, probe, k, j, r + 1, &checks, &err)) cn++;
+            ray_t* c = err ? err : ray_vec_new(RAY_I64, cn > 0 ? cn : 1);
+            if (RAY_IS_ERR(c)) { ray_release(out); return c; }
+            c->len = cn;
+            int64_t* cd = (int64_t*)ray_data(c);
+            for (int64_t r = row_scan(dom, probe, k, j, 0, &checks, &err); r >= 0; r = row_scan(dom, probe, k, j, r + 1, &checks, &err)) cd[t++] = r;
+            if (err) { ray_release(c); ray_release(out); return err; }
+            out = ray_list_append(out, c);
+            ray_release(c);
+            if (RAY_IS_ERR(out)) return out;
+        }
+    if (j == m) return out;
+    uint64_t mask;
+    ray_t* sb = row_slots(m - j, &mask);
+    ray_t* cb = RAY_IS_ERR(sb) ? sb : ray_alloc((size_t)m * sizeof(int64_t));
+    if (!cb || RAY_IS_ERR(cb)) {
+        ray_t* e = cb ? cb : ray_error("oom", NULL);
+        if (sb != e) ray_release(sb);
+        ray_release(out);
+        return e;
+    }
+    int64_t* slots = (int64_t*)ray_data(sb);
+    int64_t* cnt = (int64_t*)ray_data(cb);
+    for (int64_t i = j; i < m; i++) {                     /* the first of equal probe rows owns the class */
+        uint64_t s = class_slot(slots, mask, probe, k, probe, i);
+        if (slots[s] == HS_EMPTY) slots[s] = i;
+        cnt[i] = 0;
+    }
+    for (int64_t i = 0; i < n; i++) { int64_t c = slots[class_slot(slots, mask, probe, k, dom, i)]; if (c != HS_EMPTY) cnt[c]++; }
+    for (int64_t i = j; i < m && !RAY_IS_ERR(out); i++) {
+        int64_t c = slots[class_slot(slots, mask, probe, k, probe, i)];
+        ray_t* v = c == i ? ray_vec_new(RAY_I64, cnt[i] > 0 ? cnt[i] : 1) : ((ray_t**)ray_data(out))[c];
+        if (RAY_IS_ERR(v)) { ray_release(out); out = v; break; }
+        if (c == i) v->len = cnt[i];
+        out = ray_list_append(out, v);
+        if (c == i) ray_release(v);
+        cnt[i] = 0;
+    }
+    if (!RAY_IS_ERR(out)) {
+        ray_t** cls = (ray_t**)ray_data(out);
+        for (int64_t i = 0; i < n; i++) {
+            int64_t c = slots[class_slot(slots, mask, probe, k, dom, i)];
+            if (c != HS_EMPTY) ((int64_t*)ray_data(cls[c]))[cnt[c]++] = i;
+        }
+    }
+    ray_release(sb);
+    ray_release(cb);
+    return out;
 }
 
 /* (til n) — generate integer sequence [0, 1, ..., n-1] */
