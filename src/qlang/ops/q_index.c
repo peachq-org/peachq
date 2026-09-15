@@ -2,6 +2,7 @@
 #include "qlang/ops/q_index.h"
 #include "qlang/ops/q_bang.h"   /* q_bang — the `!` verb, which rebuilds a selection */
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — the int/long miss cast to its domain */
+#include "qlang/ops/q_table.h"  /* the keyed write's shape law and row-append home */
 #include "qlang/eval/q_eval.h"
 #include "qlang/q_builtins.h"   /* q_builtins_count_long — THE count owner */
 #include "qlang/base/q_err.h"
@@ -137,6 +138,7 @@ static ray_t* amend_seq(ray_t* x, ray_t* sel, ray_t* const* rest, int64_t k, ray
 static ray_t* table_level(ray_t* t, ray_t* i, int write);
 static ray_t* table_store(ray_t* t, ray_t* i, ray_t* v);
 static ray_t* dict_put1(ray_t* x, ray_t* key, int64_t p, ray_t* v);
+static ray_t* keyed_put1(ray_t* x, ray_t* key, ray_t* v);
 
 /* ----- the dict level: Find rules the selector -----------------------------
  * "Dictionary indexing uses Find to search the keys: d[x] ~ v[k?x]" (basics/dictsandtables.md:145) and Find is
@@ -331,57 +333,14 @@ static ray_t* vec_store(ray_t* x, int64_t ix, ray_t* v) {
     ray_t* nx = ray_cow(x);                          /* rc==1 in place, else copy */
     if (!nx || RAY_IS_ERR(nx)) return nx ? nx : q_err(QE_OOM);
     if (q_eval_apply_store_elem(nx, ix, v) != 0) {
-        ray_t* r = splice(nx, ix, v);                /* width unreachable: sym */
+        ray_t* r = splice(nx, ix, v);                /* a sym id past the vector's width */
         if (r && !RAY_IS_ERR(r)) { ray_release(nx); return r; }
         if (nx != x) { ray_release(nx); ray_retain(x); }
         return r ? r : q_err(QE_TYPE);
     }
     if (!RAY_ATOM_IS_NULL(v)) ray_vec_set_null(nx, ix, false);
+    q_attr_store_keep(nx, &ix, 1);
     return nx;
-}
-
-/* The keyed table's one-row put (a table domain or table values), p from key_pos: a hit rewrites the row and a miss
- * APPENDS the pair, its new key the row the probe names (ref/assign.md).  Rows join by their own law, so this stays
- * outside the one dict primitive (dict_put) until keyed tables come in scope.  x consumed on success; key/v borrowed. */
-static ray_t* keyed_put(ray_t* x, ray_t* key, int64_t p, ray_t* v) {
-    ray_t* keys = ray_dict_slots(x)[0];
-    ray_t* vals = ray_dict_slots(x)[1];
-    int rows = vals->type == RAY_TABLE;
-    ray_t *nk, *nv;
-    if (p < q_builtins_count_long(keys)) {
-        ray_retain(vals);
-        if (rows) { ray_t* pa = ray_i64(p); nv = table_store(vals, pa, v); ray_release(pa); }
-        else nv = vec_store(vals, p, v);
-        if (!nv || RAY_IS_ERR(nv)) { ray_release(vals); return nv ? nv : q_err(QE_TYPE); }
-        ray_retain(keys);
-        nk = keys;
-    } else {
-        ray_t* item;
-        if (q_type_is_table(keys)) {
-            ray_t* fk = q_flip_wrap(keys);
-            if (!fk || RAY_IS_ERR(fk)) return fk ? fk : q_err(QE_TYPE);
-            ray_t* probe = keyed_probe(key);
-            item = probe && !RAY_IS_ERR(probe) ? q_bang(ray_dict_keys(fk), probe) : probe;
-            ray_release(fk);
-            if (probe != item) ray_release(probe);
-        } else {
-            if (!elem_fits(vals, v)) return q_err(QE_TYPE);   /* same law on INSERT */
-            item = boxed1(key);
-        }
-        if (!item || RAY_IS_ERR(item)) return item ? item : q_err(QE_OOM);
-        nk = q_join_wrap(keys, item);
-        ray_release(item);
-        if (!nk || RAY_IS_ERR(nk)) return nk ? nk : q_err(QE_TYPE);
-        ray_t* ev = rows ? (ray_retain(v), v) : boxed1(v);
-        if (!ev || RAY_IS_ERR(ev)) { ray_release(nk); return ev ? ev : q_err(QE_OOM); }
-        nv = q_join_wrap(vals, ev);
-        ray_release(ev);
-        if (!nv || RAY_IS_ERR(nv)) { ray_release(nk); return nv ? nv : q_err(QE_TYPE); }
-    }
-    ray_t* nd = ray_dict_new(nk, nv);                /* consumes both */
-    if (!nd || RAY_IS_ERR(nd)) return nd ? nd : q_err(QE_TYPE);
-    ray_release(x);
-    return nd;
 }
 
 /* ===== the table level (the axis law: q_index.h) ==========================
@@ -434,6 +393,7 @@ static ray_t* table_store(ray_t* t, ray_t* i, ray_t* v) {
 /* one KEY-index WRITE step: dict_put1 / table_store / vec_store */
 static ray_t* store_level(ray_t* x, ray_t* i, ray_t* v) {
     if (x->type == RAY_DICT) {
+        if (q_type_is_keyed(x)) return keyed_put1(x, i, v);   /* the put finds its own row */
         ray_t* pos = key_pos(x, i);
         if (RAY_IS_ERR(pos)) return pos;
         ray_t* r = dict_put1(x, i, pos->i64, v);
@@ -606,6 +566,7 @@ static ray_t* scatter_store(ray_t* x, ray_t* sel, ray_t* y) {
     if (!nx || RAY_IS_ERR(nx)) return nx ? nx : q_err(QE_OOM);
     if (bc) {
         for (int64_t j = 0; j < n; j++) q_eval_apply_store_elem(nx, ix[j], y);
+        q_attr_store_keep(nx, ix, n);
         return nx;
     }
     uint8_t* dst = (uint8_t*)ray_data(nx);
@@ -620,6 +581,7 @@ static ray_t* scatter_store(ray_t* x, ray_t* sel, ray_t* y) {
     int any = 0;
     for (int64_t j = 0; j < n && !any; j++) any = ray_vec_is_null(nx, ix[j]);
     if (!any && !had) nx->attrs &= (uint8_t)~RAY_ATTR_HAS_NULLS;
+    q_attr_store_keep(nx, ix, n);
     return nx;
 }
 
@@ -669,17 +631,26 @@ static ray_t* items(ray_t* v, const int64_t* f, int64_t n) {
     return l;
 }
 
-/* The misses, each by its FIRST occurrence (a repeat hits the slot that occurrence appends), gathered and joined —
- * one grow per slot, in the slack at rc 1 or by the copy; a key-type mismatch boxes the keys (ref/join.md:33).
- * NULL on success with the grown slots in nk and nv; else the error with both back at n0. */
-static ray_t* grow_misses(ray_t** nk, ray_t** nv, ray_t* ky, ray_t* vy, const int64_t* d, int64_t m, int64_t n0,
-                          int64_t added) {
+/* the payload row of each miss's FIRST occurrence, in slot order (a repeat hits the slot that occurrence appends);
+ * owned */
+static ray_t* first_misses(const int64_t* d, int64_t m, int64_t n0, int64_t added) {
     ray_t* mj = ray_vec_new(RAY_I64, added);
     if (!mj || RAY_IS_ERR(mj)) return mj ? mj : q_err(QE_OOM);
     mj->len = added;
     int64_t* f = (int64_t*)ray_data(mj);
     for (int64_t i = 0; i < added; i++) f[i] = -1;
     for (int64_t j = 0; j < m; j++) if (d[j] >= n0 && f[d[j] - n0] < 0) f[d[j] - n0] = j;
+    return mj;
+}
+
+/* The misses gathered and joined — one grow per slot, in the slack at rc 1 or by the copy; a key-type mismatch
+ * boxes the keys (ref/join.md:33).  NULL on success with the grown slots in nk and nv; else the error with both
+ * back at n0. */
+static ray_t* grow_misses(ray_t** nk, ray_t** nv, ray_t* ky, ray_t* vy, const int64_t* d, int64_t m, int64_t n0,
+                          int64_t added) {
+    ray_t* mj = first_misses(d, m, n0, added);
+    if (RAY_IS_ERR(mj)) return mj;
+    const int64_t* f = (const int64_t*)ray_data(mj);
     ray_t* mk = ray_is_vec(ky) ? q_index_at(ky, &mj, 1) : items(ky, f, added);
     ray_t* mv = ray_is_vec(vy) ? q_index_at(vy, &mj, 1) : items(vy, f, added);
     ray_release(mj);
@@ -768,16 +739,156 @@ static ray_t* dict_put(ray_t* x, ray_t* ky, ray_t* vy, ray_t* pos, int strict) {
     return nd;
 }
 
+/* ===== THE keyed-table write (contract: q_index.h) ======================= */
+
+/* insert's positions (ref/insert.md:56): a hit is 'insert; every row takes its own new slot in payload order — a
+ * payload's own repeats are rows, as they are for a plain table.  pos consumed. */
+static ray_t* insert_positions(ray_t* pos, int64_t n0) {
+    int64_t* d = (int64_t*)ray_data(pos);
+    for (int64_t j = 0, m = ray_len(pos); j < m; j++) {
+        if (d[j] < n0) { ray_release(pos); return q_err(QE_INSERT); }
+        d[j] = n0 + j;
+    }
+    return pos;
+}
+
+/* one slot table grown by the payload rows mj names through THE row-append home — in the slack when the slot is
+ * ours at rc 1, else by the copy.  *pt replaced on success; NULL on success, else the error with *pt untouched. */
+static ray_t* keyed_grow(ray_t** pt, ray_t* p, ray_t* mj) {
+    ray_t* pm = q_index_at(p, &mj, 1);
+    if (!pm || RAY_IS_ERR(pm)) return pm ? pm : q_err(QE_OOM);
+    ray_t* g = q_table_append(*pt, pm, (*pt)->rc == 1);
+    ray_release(pm);
+    if (!g || RAY_IS_ERR(g)) return g ? g : q_err(QE_OOM);
+    ray_release(*pt);
+    *pt = g;
+    return NULL;
+}
+
+/* every payload column named in hit stored at its position (store_run's law; an enum column through the amend's
+ * enum arm — its positions copy, coerce, stamp), each on the column lifted out of its slot so it writes where it
+ * stands at rc 1 — a shared column copies itself there, a shared header copies first.  NULL on success. */
+static ray_t* keyed_store(ray_t** pt, ray_t* p, ray_t* pos, uint64_t hit) {
+    ray_t* t = ray_cow(*pt);
+    if (!t || RAY_IS_ERR(t)) return t ? t : q_err(QE_OOM);
+    *pt = t;
+    for (int64_t c = 0, nc = ray_table_ncols(t); c < nc; c++) {
+        if (!(hit & (1ULL << c))) continue;
+        ray_t* col = ray_table_get_col_idx(t, c);
+        ray_t* pc = ray_table_get_col_idx(p, c);
+        ray_retain(col);
+        ray_table_set_col_idx(t, c, RAY_NULL_OBJ);
+        ray_t* err = NULL;
+        if (q_enum_is(col)) {
+            ray_t* r = q_index_amend(col, &pos, 1, NULL, pc);
+            if (RAY_IS_ERR(r)) err = r; else col = r;
+        } else err = store_run(&col, pos, pc);
+        ray_table_set_col_idx(t, c, col);
+        ray_release(col);
+        if (err) return err;
+    }
+    return NULL;
+}
+
+ray_t* q_index_keyed_put(ray_t* x, ray_t* y, uint64_t hit, int mode, int exclusive) {
+    if (!q_type_is_keyed(x) || !q_type_is_keyed(y)) return q_err(QE_TYPE);
+    ray_t** xs = ray_dict_slots(x);
+    ray_t** ys = ray_dict_slots(y);
+    int64_t n0 = ray_table_nrows(xs[0]), m = ray_table_nrows(ys[0]);
+    int64_t nkc = ray_table_ncols(xs[0]), nvc = ray_table_ncols(xs[1]);
+    if (ray_table_ncols(ys[0]) != nkc || ray_table_ncols(ys[1]) != nvc) return q_err(QE_TYPE);
+    if (nkc > Q_TABLE_MAX_COLS || nvc > Q_TABLE_MAX_COLS) return q_err(QE_LIMIT);
+    if (m == 0) { ray_retain(x); return x; }
+    ray_t* tk = q_table_rows_typed(xs[0], ys[0]);   /* the gate over both parts, before any write */
+    if (RAY_IS_ERR(tk)) return tk;
+    ray_t* tv = q_table_rows_typed(xs[1], ys[1]);
+    if (RAY_IS_ERR(tv)) { ray_release(tk); return tv; }
+    ray_t* pos = dict_pos(x, tk);
+    if (pos && !RAY_IS_ERR(pos) && (pos->type != RAY_I64 || ray_len(pos) != m)) { ray_release(pos); pos = q_err(QE_TYPE); }
+    if (pos && !RAY_IS_ERR(pos)) pos = mode == Q_KEYED_INSERT ? insert_positions(pos, n0) : run_positions(x, tk, pos);
+    ray_t* err = !pos ? q_err(QE_OOM) : RAY_IS_ERR(pos) ? pos : NULL;
+    const int64_t* d = err ? NULL : (const int64_t*)ray_data(pos);
+    int64_t added = 0;
+    for (int64_t j = 0; !err && j < m; j++) if (d[j] >= n0 + added) added = d[j] + 1 - n0;
+    ray_t* mj = err || !added ? NULL : first_misses(d, m, n0, added);
+    if (mj && RAY_IS_ERR(mj)) { err = mj; mj = NULL; }
+    if (err) { ray_release(tk); ray_release(tv); return err; }
+    int excl = exclusive && x->rc == 1 && !(x->attrs & (RAY_ATTR_ARENA | RAY_ATTR_SLICE));
+    ray_t* nk = xs[0];
+    ray_t* nv = xs[1];
+    if (excl) xs[0] = xs[1] = NULL;
+    else { ray_retain(nk); ray_retain(nv); }
+    uint8_t was[Q_TABLE_MAX_COLS];
+    for (int64_t c = 0; c < nkc; c++) was[c] = ray_table_get_col_idx(nk, c)->attrs;
+    if (mj) err = keyed_grow(&nk, tk, mj);
+    if (mj && !err && (err = keyed_grow(&nv, tv, mj)) != NULL)    /* both slots one length */
+        for (int64_t c = 0; c < nkc; c++) q_index_ungrow(ray_table_get_col_idx(nk, c), n0, was[c]);
+    if (!err && hit) err = keyed_store(&nv, tv, pos, hit);
+    ray_release(pos);
+    ray_release(tk);
+    ray_release(tv);
+    if (mj) ray_release(mj);
+    if (excl) { xs[0] = nk; xs[1] = nv; }
+    if (err) {
+        if (!excl) { ray_release(nk); ray_release(nv); }
+        return err;
+    }
+    if (excl) { ray_retain(x); return x; }
+    ray_t* nd = ray_dict_new(nk, nv);                /* consumes both */
+    return nd ? nd : q_err(QE_OOM);
+}
+
+/* the value columns a dict row names, as the store mask (the rest keep their cell on a hit); a name no column
+ * carries, or a repeated one, is the amend law's 'index — the path must exist */
+static ray_t* row_cols(ray_t* v, ray_t* row, uint64_t* hit) {
+    int64_t named = 0, nc = ray_table_ncols(v);
+    *hit = 0;
+    if (nc > Q_TABLE_MAX_COLS) return q_err(QE_LIMIT);
+    for (int64_t c = 0; c < nc; c++) {
+        ray_t* ka = ray_sym(ray_table_col_name(v, c));
+        ray_t* cell = ray_dict_get(row, ka);
+        ray_release(ka);
+        if (!cell) continue;
+        if (RAY_IS_ERR(cell)) return cell;
+        ray_release(cell);
+        *hit |= 1ULL << c;
+        named++;
+    }
+    return named == ray_len(ray_dict_keys(row)) ? NULL : q_err(QE_INDEX);
+}
+
+/* the keyed table's run of one, `kt[k]:v` (ref/assign.md; amend_tables.qcmd): the key and the value each the one
+ * row of their slot's schema (q_table_rows_normalize) — a dict value names its columns, the rest retained on a
+ * hit and null on a miss; a list or an atom is the whole row.  x consumed on success. */
+static ray_t* keyed_put1(ray_t* x, ray_t* key, ray_t* v) {
+    ray_t** xs = ray_dict_slots(x);
+    uint64_t hit = UINT64_MAX;
+    ray_t* err = q_type_is_plain_dict(v) ? row_cols(xs[1], v, &hit) : NULL;
+    if (err) return err;
+    ray_t* kr = q_table_rows_normalize(xs[0], key, Q_ROWS_JOIN);
+    if (!kr || RAY_IS_ERR(kr)) return kr ? kr : q_err(QE_TYPE);
+    ray_t* vr = q_table_rows_normalize(xs[1], v, Q_ROWS_JOIN);
+    if (!vr || RAY_IS_ERR(vr)) { ray_release(kr); return vr ? vr : q_err(QE_TYPE); }
+    ray_t* y = ray_dict_new(kr, vr);                 /* consumes both */
+    if (!y || RAY_IS_ERR(y)) return y ? y : q_err(QE_OOM);
+    ray_t* r = q_index_keyed_put(x, y, hit, Q_KEYED_UPSERT, x->rc == 1);
+    ray_release(y);
+    if (!RAY_IS_ERR(r)) ray_release(x);
+    return r;
+}
+
 /* the run of one: an atom enlists to its typed vector (so the miss grows typed), anything else is one item of a
  * general list (enlist would make a table of a dict) */
 static ray_t* run1(ray_t* v) {
     return ray_is_atom(v) ? ray_enlist_fn(&v, 1) : ray_list_append(ray_list_new(1), v);
 }
 
-/* one key at settled position p: the run of one — or the keyed table's row put, whose slots are not lists */
+/* one key at settled position p: the run of one — or the keyed table's row put, which finds its own row.  A table
+ * domain over vector values is a dict (its keys grow by the row join); a table as the VALUE list is not written. */
 static ray_t* dict_put1(ray_t* x, ray_t* key, int64_t p, ray_t* v) {
     ray_t** slots = ray_dict_slots(x);
-    if (!is_coll(slots[0]) || !is_coll(slots[1])) return keyed_put(x, key, p, v);
+    if (q_type_is_keyed(x)) return keyed_put1(x, key, v);
+    if (!(is_coll(slots[0]) || q_type_is_table(slots[0])) || !is_coll(slots[1])) return q_err(QE_TYPE);
     ray_t* ky = run1(key);
     ray_t* vy = run1(v);
     ray_t* pos = ray_vec_new(RAY_I64, 1);
@@ -857,10 +968,10 @@ static ray_t* level_collapse(ray_t* x) {
     return nd;
 }
 
-/* The slot x's child at atom index i0 sits in, when the whole level is ours to write: x at rc 1 and the child at rc 1
- * in a slot array only x holds (a list's own slots, a dict's value list, a table's column list).  A shared level
- * anywhere answers NULL and the path-copying walk COWs it there, as ref/amend.md's other-references law says. */
-static ray_t** own_slot(ray_t* x, ray_t* i0) {
+/* The slot x's child at atom index i0 sits in, when the LEVEL is ours to write: x at rc 1 and its slot array (a
+ * list's own slots, a dict's value list, a table's column list) held by x alone.  The child itself may be shared —
+ * the store copies it where it stands (ray_cow, the consume convention).  NULL: the path-copying walk. */
+static ray_t** slot_of(ray_t* x, ray_t* i0) {
     if (!x || !i0 || x->rc != 1 || (x->attrs & (RAY_ATTR_ARENA | RAY_ATTR_SLICE))) return NULL;
     ray_t* l = x;
     int64_t p = -1;
@@ -880,17 +991,44 @@ static ray_t** own_slot(ray_t* x, ray_t* i0) {
     } else if (x->type != RAY_LIST || !idx_i64(i0, &p)) return NULL;
     if (p < 0 || p >= ray_len(l)) return NULL;
     ray_t** slot = (ray_t**)ray_data(l) + p;
-    ray_t* c = *slot;
-    return c && !RAY_IS_ERR(c) && c->rc == 1 && !(c->attrs & (RAY_ATTR_ARENA | RAY_ATTR_SLICE)) ? slot : NULL;
+    return *slot && !RAY_IS_ERR(*slot) ? slot : NULL;
+}
+
+/* slot_of when the child too is ours at rc 1 — what a grow in the slack (`x[i],:y`) needs; a shared level anywhere
+ * answers NULL and the path-copying walk COWs it there, as ref/amend.md's other-references law says. */
+static ray_t** own_slot(ray_t* x, ray_t* i0) {
+    ray_t** slot = slot_of(x, i0);
+    return slot && (*slot)->rc == 1 && !((*slot)->attrs & (RAY_ATTR_ARENA | RAY_ATTR_SLICE)) ? slot : NULL;
+}
+
+/* The column slot a keyed table's cell `kt[k;`c]` sits in — `V[`c;p]`, the table axis law one level down — when x
+ * and its value table are ours to write (the column copies itself at the store if shared); *pa is the row position,
+ * owned.  NULL (a miss, a shared level) leaves the path-copying walk to answer. */
+static ray_t** keyed_slot_of(ray_t* x, ray_t* key, ray_t* c, ray_t** pa) {
+    if (x->rc != 1 || (x->attrs & (RAY_ATTR_ARENA | RAY_ATTR_SLICE))) return NULL;
+    ray_t* pos = key_pos(x, key);
+    if (!pos || RAY_IS_ERR(pos)) { if (pos) ray_release(pos); return NULL; }
+    int64_t p = pos->i64;
+    ray_release(pos);
+    ray_t* v = ray_dict_slots(x)[1];
+    ray_t** vl = ray_dict_slots(v) + 1;
+    if (v->rc == 1 && (*vl)->rc != 1) {              /* flip's table shares the dict's list: ours once cowed */
+        ray_t* nl = ray_cow(*vl);
+        if (nl && RAY_IS_ERR(nl)) ray_error_free(nl); else if (nl) *vl = nl;
+    }
+    ray_t** slot = p < ray_table_nrows(v) ? slot_of(v, c) : NULL;
+    if (slot) *pa = ray_i64(p);
+    return slot;
 }
 
 /* one index item at this level: the leaf, or the path continued through the child it names.  An exclusive path
  * lifts the child OUT of its slot (the slot's ref becomes the walk's, so rc 1 reaches the store and it writes where
- * it stands) and puts the amended child back; a table names its column at either depth (the axis law). */
+ * it stands) and puts the amended child back; a table names its column at either depth (the axis law), a keyed
+ * table's cell is a column's. */
 static ray_t* amend_one(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k, ray_t* f, ray_t* y) {
     if (k == 0) {
         ray_t** slot = y && f && q_registry_row_of(f, Q_DYADIC) == q_ops_find(",", 1) ? own_slot(x, i0) : NULL;
-        if (!slot && x->type == RAY_DICT) {          /* one Find serves the read and the store */
+        if (!slot && q_type_is_plain_dict(x)) {      /* one Find serves the read and the store */
             ray_t* pos = key_pos(x, i0);
             if (RAY_IS_ERR(pos)) return pos;
             int64_t p = pos->i64;
@@ -905,12 +1043,17 @@ static ray_t* amend_one(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k, ray_
         return RAY_IS_ERR(r) ? r : x;
     }
     ray_t* ci = rest[0];
+    ray_t* pa = NULL;
     ray_t** slot = own_slot(x, i0);
-    if (!slot && x->type == RAY_TABLE && ci && ci->type == -RAY_SYM && (slot = own_slot(x, ci)) != NULL) ci = i0;
+    if (!slot && ci && ci->type == -RAY_SYM) {
+        if (x->type == RAY_TABLE && (slot = own_slot(x, ci)) != NULL) ci = i0;
+        else if (q_type_is_keyed(x) && (slot = keyed_slot_of(x, i0, ci, &pa)) != NULL) ci = pa;
+    }
     if (slot) {
         ray_t* child = *slot;
         *slot = NULL;
         ray_t* nc = amend_r(child, ci, rest + 1, k - 1, f, y);
+        if (pa) ray_release(pa);
         if (RAY_IS_ERR(nc)) { *slot = child; return nc; }
         *slot = level_collapse(nc);
         return x;
