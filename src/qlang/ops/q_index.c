@@ -135,6 +135,7 @@ static ray_t* amend_seq(ray_t* x, ray_t* sel, ray_t* const* rest, int64_t k, ray
                         const int64_t* dst);
 static ray_t* table_level(ray_t* t, ray_t* i, int write);
 static ray_t* table_store(ray_t* t, ray_t* i, ray_t* v);
+static ray_t* dict_put1(ray_t* x, ray_t* key, int64_t p, ray_t* v);
 
 /* ----- the dict level: Find rules the selector -----------------------------
  * "Dictionary indexing uses Find to search the keys: d[x] ~ v[k?x]" (basics/dictsandtables.md:145) and Find is
@@ -177,20 +178,41 @@ static ray_t* key_pos(ray_t* x, ray_t* key) {
 
 /* A run's positions, from the ONE Find that ruled it (a re-find per item scans the domain each time: i060's
  * 100k-key dict timed the gate out).  The sequential law survives — a key missed twice is appended by its first
- * occurrence and hit by its repeats — which Find over the run itself settles.  pos consumed. */
+ * occurrence and hit by its repeats — which Find over the run itself settles.  A run Find cannot rank (its answer
+ * not one position per item: a general list mixing ranks, the gap #701 registered) takes the same law one key at
+ * a time, whole — the whole-item lookup against a general-list domain, where Find splits a list item (the dict zip
+ * meets it the same way), key_pos against a typed one.  pos (Find's answer) consumed. */
 static ray_t* run_positions(ray_t* x, ray_t* sel, ray_t* pos) {
-    int64_t n0 = q_builtins_count_long(ray_dict_slots(x)[0]), m = ray_len(pos), added = 0;
-    int64_t* d = (int64_t*)ray_data(pos);
-    ray_t* first = q_search_find(sel, sel);
-    if (!first || RAY_IS_ERR(first) || first->type != RAY_I64 || ray_len(first) != m) {
+    ray_t* keys = ray_dict_slots(x)[0];
+    int64_t n0 = q_builtins_count_long(keys), m = q_builtins_count_long(sel), added = 0;
+    int whole = pos->type != RAY_I64 || ray_len(pos) != m;
+    ray_t* first = whole ? NULL : q_search_find(sel, sel);
+    if (whole || !first || RAY_IS_ERR(first) || first->type != RAY_I64 || ray_len(first) != m) {
         ray_release(pos);
         if (first && !RAY_IS_ERR(first)) { ray_release(first); first = NULL; }
-        return first ? first : q_err(QE_TYPE);
+        if (!whole || sel->type != RAY_LIST) return first ? first : q_err(QE_TYPE);
+        pos = ray_vec_new(RAY_I64, m);
+        if (RAY_IS_ERR(pos)) return pos;
+        pos->len = m;
     }
-    const int64_t* fj = (const int64_t*)ray_data(first);
-    for (int64_t j = 0; j < m; j++)
-        if (d[j] >= n0) d[j] = fj[j] == j ? n0 + added++ : d[fj[j]];
-    ray_release(first);
+    int64_t* d = (int64_t*)ray_data(pos);
+    const int64_t* fj = first ? (const int64_t*)ray_data(first) : NULL;
+    for (int64_t j = 0; j < m; j++) {
+        ray_t* kj = whole ? q_index_elem_at(sel, j) : NULL;
+        if (whole && (!kj || RAY_IS_ERR(kj))) { ray_release(pos); return kj ? kj : q_err(QE_OOM); }
+        if (whole) {
+            ray_t* pj = keys->type == RAY_LIST ? NULL : key_pos(x, kj);
+            if (RAY_IS_ERR(pj)) { ray_release(kj); ray_release(pos); return pj; }
+            d[j] = pj ? pj->i64 : q_search_find_item(keys, kj, n0);
+            if (pj) ray_release(pj);
+        }
+        if (d[j] >= n0) {
+            int64_t f = whole ? q_search_find_item(sel, kj, m) : fj[j];
+            d[j] = f == j ? n0 + added++ : d[f];
+        }
+        if (kj) ray_release(kj);
+    }
+    if (first) ray_release(first);
     return pos;
 }
 
@@ -317,10 +339,10 @@ static ray_t* vec_store(ray_t* x, int64_t ix, ray_t* v) {
     return nx;
 }
 
-/* store v at ONE key of dict x, p from key_pos: a hit rewrites the value — a row of a table range — and a miss
- * APPENDS the pair, "assignment has upsert semantics" (ref/amend.md; ref/assign.md for a keyed table, whose new
- * key is the row the probe names).  x consumed on success; key/v borrowed. */
-static ray_t* dict_put(ray_t* x, ray_t* key, int64_t p, ray_t* v) {
+/* The keyed table's one-row put (a table domain or table values), p from key_pos: a hit rewrites the row and a miss
+ * APPENDS the pair, its new key the row the probe names (ref/assign.md).  Rows join by their own law, so this stays
+ * outside the one dict primitive (dict_put) until keyed tables come in scope.  x consumed on success; key/v borrowed. */
+static ray_t* keyed_put(ray_t* x, ray_t* key, int64_t p, ray_t* v) {
     ray_t* keys = ray_dict_slots(x)[0];
     ray_t* vals = ray_dict_slots(x)[1];
     int rows = vals->type == RAY_TABLE;
@@ -408,12 +430,12 @@ static ray_t* table_store(ray_t* t, ray_t* i, ray_t* v) {
     return table_of_cols(t, fd, nd);
 }
 
-/* one KEY-index WRITE step: dict_put / table_store / vec_store */
+/* one KEY-index WRITE step: dict_put1 / table_store / vec_store */
 static ray_t* store_level(ray_t* x, ray_t* i, ray_t* v) {
     if (x->type == RAY_DICT) {
         ray_t* pos = key_pos(x, i);
         if (RAY_IS_ERR(pos)) return pos;
-        ray_t* r = dict_put(x, i, pos->i64, v);
+        ray_t* r = dict_put1(x, i, pos->i64, v);
         ray_release(pos);
         return r;
     }
@@ -600,6 +622,185 @@ static ray_t* scatter_store(ray_t* x, ray_t* sel, ray_t* y) {
     return nx;
 }
 
+/* ===== THE dict write (contract: q_index.h) ============================== */
+
+/* Append's law over a run (ref/join.md:173 "values of the same type"): every payload value is an item the slot can
+ * hold — elem_fits per item, a same-type vector whole. */
+static int run_fits(ray_t* x, ray_t* vy) {
+    if (x->type == RAY_LIST || vy->type == x->type) return 1;
+    for (int64_t j = 0, m = q_builtins_count_long(vy); j < m; j++) {
+        ray_t* e = q_index_elem_at(vy, j);
+        int ok = e && !RAY_IS_ERR(e) && elem_fits(x, e);
+        if (e) ray_release(e);
+        if (!ok) return 0;
+    }
+    return 1;
+}
+
+/* A key-type mismatch on a dict join is 'type, under `,` as under `,:` (owner ruling 2026-09-15: the join is a Find
+ * over the keys and Find is type-specific): a key that MISSES is stored, so a typed domain must hold it — its own
+ * type, elem_fits's law; whether a foreign key HITS is Find's law, asked once through dict_pos.  An empty domain
+ * adopts the payload's key type. */
+static int misses_fit(ray_t* keys, ray_t* ky, const int64_t* d, int64_t m, int64_t n0) {
+    if (!n0 || !ray_is_vec(keys) || ky->type == keys->type) return 1;
+    for (int64_t j = 0; j < m; j++) {
+        if (d[j] < n0) continue;
+        ray_t* e = q_index_elem_at(ky, j);
+        int ok = e && !RAY_IS_ERR(e) && elem_fits(keys, e);
+        if (e) ray_release(e);
+        if (!ok) return 0;
+    }
+    return 1;
+}
+
+/* v at the positions f[0..n) (f NULL: every item) as the general list of its items — the boxed gather, which never
+ * collapses (a run of row dicts would come back a table): Join's "otherwise a mixed list" (ref/join.md:33) on a
+ * slot a payload item cannot enter, and the miss items of a list or table payload.  Owned. */
+static ray_t* items(ray_t* v, const int64_t* f, int64_t n) {
+    ray_t* l = ray_list_new(n > 0 ? n : 1);
+    for (int64_t i = 0; i < n && !RAY_IS_ERR(l); i++) {
+        ray_t* e = q_index_elem_at(v, f ? f[i] : i);
+        if (!e || RAY_IS_ERR(e)) { ray_release(l); return e ? e : q_err(QE_OOM); }
+        l = ray_list_append(l, e);
+        ray_release(e);
+    }
+    return l;
+}
+
+/* The misses, each by its FIRST occurrence (a repeat hits the slot that occurrence appends), gathered and joined —
+ * one grow per slot, in the slack at rc 1 or by the copy; a key-type mismatch boxes the keys (ref/join.md:33).
+ * NULL on success with the grown slots in nk and nv; else the error with both back at n0. */
+static ray_t* grow_misses(ray_t** nk, ray_t** nv, ray_t* ky, ray_t* vy, const int64_t* d, int64_t m, int64_t n0,
+                          int64_t added) {
+    ray_t* mj = ray_vec_new(RAY_I64, added);
+    if (!mj || RAY_IS_ERR(mj)) return mj ? mj : q_err(QE_OOM);
+    mj->len = added;
+    int64_t* f = (int64_t*)ray_data(mj);
+    for (int64_t i = 0; i < added; i++) f[i] = -1;
+    for (int64_t j = 0; j < m; j++) if (d[j] >= n0 && f[d[j] - n0] < 0) f[d[j] - n0] = j;
+    ray_t* mk = ray_is_vec(ky) ? q_index_at(ky, &mj, 1) : items(ky, f, added);
+    ray_t* mv = ray_is_vec(vy) ? q_index_at(vy, &mj, 1) : items(vy, f, added);
+    ray_release(mj);
+    ray_t* err = !mk || RAY_IS_ERR(mk) ? (mk ? mk : q_err(QE_OOM))
+               : !mv || RAY_IS_ERR(mv) ? (mv ? mv : q_err(QE_OOM)) : NULL;
+    if (!err) {
+        uint8_t was = (*nk)->attrs;
+        ray_t* r = q_join_grow(nk, mk);
+        if (!r || RAY_IS_ERR(r)) err = r ? r : q_err(QE_OOM);
+        else {
+            *nk = r;
+            r = q_join_grow(nv, mv);
+            if (!r || RAY_IS_ERR(r)) { err = r ? r : q_err(QE_OOM); q_index_ungrow(*nk, n0, was); }
+            else *nv = r;
+        }
+    }
+    if (mk && !RAY_IS_ERR(mk)) ray_release(mk);
+    if (mv && !RAY_IS_ERR(mv)) ray_release(mv);
+    return err;
+}
+
+/* Every value at its settled position — a hit, or a miss's slot once grown (its first occurrence rewrites itself,
+ * a repeat overwrites it: last wins): one typed scatter when the shapes allow, else the item store; in place at rc 1
+ * either way.  NULL on success. */
+static ray_t* store_run(ray_t** nv, ray_t* pos, ray_t* vy) {
+    ray_t* r = scatter_store(*nv, pos, vy);
+    if (r && RAY_IS_ERR(r)) return r;
+    if (r) { *nv = r; return NULL; }
+    const int64_t* d = (const int64_t*)ray_data(pos);
+    for (int64_t j = 0, m = ray_len(pos); j < m; j++) {
+        ray_t* e = q_index_elem_at(vy, j);
+        if (!e || RAY_IS_ERR(e)) return e ? e : q_err(QE_OOM);
+        r = vec_store(*nv, d[j], e);
+        ray_release(e);
+        if (RAY_IS_ERR(r)) return r;
+        *nv = r;
+    }
+    return NULL;
+}
+
+/* THE dict write: the payload (ky;vy) at pos, the settled position of every item (run_positions' law: the misses
+ * take n0.. in first-occurrence order).  strict is Append's law (`,:`, ref/join.md:173: a value the slot cannot
+ * hold is 'type, checked before any write); else Join's (ref/join.md:33: the slot boxes).  A header at rc 1 is
+ * exclusive (own_slot's law): its slots are lifted, written where they stand — a shared slot copies itself at
+ * store time — and put back; a shared header gets a new one.  x consumed on success, the caller's on error —
+ * consistent (both slots one length) but, past the type check, not transactional: an OOM mid-store leaves the
+ * earlier stores standing, as #688's in-place amend does.  ky/vy borrowed; pos consumed. */
+static ray_t* dict_put(ray_t* x, ray_t* ky, ray_t* vy, ray_t* pos, int strict) {
+    ray_t** slots = ray_dict_slots(x);
+    int64_t n0 = q_builtins_count_long(slots[0]), m = ray_len(pos), added = 0;
+    const int64_t* d = (const int64_t*)ray_data(pos);
+    for (int64_t j = 0; j < m; j++) if (d[j] >= n0 + added) added = d[j] + 1 - n0;
+    if (m == 0) { ray_release(pos); return x; }
+    if (!misses_fit(slots[0], ky, d, m, n0) || (strict && !run_fits(slots[1], vy))) {
+        ray_release(pos);
+        return q_err(QE_TYPE);
+    }
+    int excl = x->rc == 1 && !(x->attrs & (RAY_ATTR_ARENA | RAY_ATTR_SLICE));
+    ray_t* nk = slots[0];
+    ray_t* nv = slots[1];
+    if (excl) slots[0] = slots[1] = NULL;
+    else { ray_retain(nk); ray_retain(nv); }
+    ray_t* err = NULL;
+    if (!strict && !run_fits(nv, vy)) {
+        ray_t* b = items(nv, NULL, ray_len(nv));
+        if (RAY_IS_ERR(b)) err = b;
+        else { ray_release(nv); nv = b; }
+    }
+    if (!err && added) err = grow_misses(&nk, &nv, ky, vy, d, m, n0, added);
+    if (!err) err = store_run(&nv, pos, vy);
+    ray_release(pos);
+    if (err || excl) {
+        if (excl) { slots[0] = nk; slots[1] = nv; }
+        else { ray_release(nk); ray_release(nv); }
+        return err ? err : x;
+    }
+    ray_t* nd = ray_dict_new(nk, nv);
+    if (!nd || RAY_IS_ERR(nd)) return nd ? nd : q_err(QE_OOM);
+    ray_release(x);
+    return nd;
+}
+
+/* the run of one: an atom enlists to its typed vector (so the miss grows typed), anything else is one item of a
+ * general list (enlist would make a table of a dict) */
+static ray_t* run1(ray_t* v) {
+    return ray_is_atom(v) ? ray_enlist_fn(&v, 1) : ray_list_append(ray_list_new(1), v);
+}
+
+/* one key at settled position p: the run of one — or the keyed table's row put, whose slots are not lists */
+static ray_t* dict_put1(ray_t* x, ray_t* key, int64_t p, ray_t* v) {
+    ray_t** slots = ray_dict_slots(x);
+    if (!is_coll(slots[0]) || !is_coll(slots[1])) return keyed_put(x, key, p, v);
+    ray_t* ky = run1(key);
+    ray_t* vy = run1(v);
+    ray_t* pos = ray_vec_new(RAY_I64, 1);
+    ray_t* r = NULL;
+    if (RAY_IS_ERR(ky)) r = ky;
+    else if (RAY_IS_ERR(vy)) r = vy;
+    else if (RAY_IS_ERR(pos)) r = pos;
+    if (!r) {
+        pos->len = 1;
+        ((int64_t*)ray_data(pos))[0] = p;
+        r = dict_put(x, ky, vy, pos, 1);
+    } else if (!RAY_IS_ERR(pos)) ray_release(pos);
+    if (!RAY_IS_ERR(ky)) ray_release(ky);
+    if (!RAY_IS_ERR(vy)) ray_release(vy);
+    return r;
+}
+
+ray_t* q_index_dict_join(ray_t* x, ray_t* y, int strict) {
+    ray_t** slots = ray_dict_slots(x);
+    ray_t* ky = ray_dict_slots(y)[0];
+    ray_t* vy = ray_dict_slots(y)[1];
+    if (!is_coll(slots[0]) || !is_coll(slots[1]) || !is_coll(ky) || !q_type_is_iter(vy)) return q_err(QE_TYPE);
+    int64_t m = ray_len(ky);
+    if (m == 0) return x;
+    ray_t* pos = dict_pos(x, ky);
+    if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_TYPE);
+    pos = run_positions(x, ky, pos);
+    if (RAY_IS_ERR(pos)) return pos;
+    return dict_put(x, ky, vy, pos, strict);
+}
+
 /* Amend Entire: the selection is x itself.  x consumed on success. */
 static ray_t* amend_entire(ray_t* x, ray_t* f, ray_t* y) {
     ray_t* nv = leaf_apply(f, x, y);
@@ -621,7 +822,7 @@ static ray_t* leaf1(ray_t* x, ray_t* i0, int64_t p, ray_t* f, ray_t* y) {
         nv = leaf_apply(NULL, NULL, y);
     }
     if (!nv || RAY_IS_ERR(nv)) return nv ? nv : q_err(QE_TYPE);
-    ray_t* r = p >= 0 ? dict_put(x, i0, p, nv) : store_level(x, i0, nv);
+    ray_t* r = p >= 0 ? dict_put1(x, i0, p, nv) : store_level(x, i0, nv);
     ray_release(nv);
     return r;
 }
@@ -681,6 +882,13 @@ static ray_t** own_slot(ray_t* x, ray_t* i0) {
 static ray_t* amend_one(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k, ray_t* f, ray_t* y) {
     if (k == 0) {
         ray_t** slot = y && f && q_registry_row_of(f, Q_DYADIC) == q_ops_find(",", 1) ? own_slot(x, i0) : NULL;
+        if (!slot && x->type == RAY_DICT) {          /* one Find serves the read and the store */
+            ray_t* pos = key_pos(x, i0);
+            if (RAY_IS_ERR(pos)) return pos;
+            int64_t p = pos->i64;
+            ray_release(pos);
+            return leaf1(x, i0, p, f, y);
+        }
         if (!slot) return leaf1(x, i0, -1, f, y);
         ray_t* child = *slot;                        /* `x[i],:y` grows the child where it stands */
         *slot = NULL;
@@ -775,6 +983,9 @@ static ray_t* amend_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k,
         if (rank == 1 && k == 0) {                   /* the run's leaf takes its positions from this one Find */
             pos = run_positions(x, i0, pos);
             if (RAY_IS_ERR(pos)) return pos;
+            ray_t** slots = ray_dict_slots(x);
+            if (!f && y && is_coll(y) && ray_len(y) == ray_len(pos) && is_coll(slots[0]) && is_coll(slots[1]))
+                return dict_put(x, i0, y, pos, 1);   /* `d[ks]:vs` IS `d,:ks!vs` */
             ray_t* r = amend_seq(x, i0, rest, k, f, y, 1, (const int64_t*)ray_data(pos));
             ray_release(pos);
             return r;
@@ -905,6 +1116,11 @@ ray_t* q_index_grow(ray_t** px, ray_t* y) {
 }
 
 void q_index_ungrow(ray_t* x, int64_t nx, uint8_t was) {
+    if (x->type == RAY_LIST) {
+        ray_t** slots = (ray_t**)ray_data(x);
+        while (ray_len(x) > nx) ray_release(slots[--x->len]);
+        return;
+    }
     x->len = nx;
     x->attrs = (x->attrs & (uint8_t)~(RAY_ATTR_SORTED | RAY_ATTR_HAS_NULLS)) | (was & (RAY_ATTR_SORTED | RAY_ATTR_HAS_NULLS));
 }
