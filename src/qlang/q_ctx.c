@@ -31,8 +31,15 @@
 /* The front end's terminal teardown, if one registered.  See q_ctx.h. */
 static void (*g_console_close)(void);
 
+static void (*g_tty_restore)(void);
+
 void q_ctx_set_console_close(void (*fn)(void)) { g_console_close = fn; }
-void q_ctx_console_close(void) { if (g_console_close) g_console_close(); }
+void q_ctx_set_tty_restore(void (*fn)(void))   { g_tty_restore = fn; }
+static void ctx_tty_restore(void) { if (g_tty_restore) g_tty_restore(); }
+void q_ctx_console_close(void) {
+    ctx_tty_restore();
+    if (g_console_close) g_console_close();
+}
 
 /* GC policy has ONE home: this statement seam, covering all three doors
  * (run_line, remote_eval_str, remote_apply).  `\g 0` (deferred, the kdb
@@ -52,6 +59,7 @@ static void ctx_statement_end(void) {
  * silent (kdb: after `\` the console just returns to its prompt).  Consumes
  * the error. */
 static void ctx_show_err(FILE* out, FILE* err, ray_t* e) {
+    ctx_tty_restore();
     if (!q_dbg_reported(e)) {
         fflush(out);               /* echo/prompt land before the trace */
         q_dbg_print_trace(err, e);
@@ -75,6 +83,7 @@ static void ctx_show_err(FILE* out, FILE* err, ray_t* e) {
  * q_dbg_statement_end's payload restore would destroy the text); the caller
  * re-signals only after the statement seam has closed. */
 static int ctx_load_abort(ray_t* e, FILE* out, FILE* err, q_err_sig_t* t) {
+    ctx_tty_restore();
     if (!q_dbg_reported(e)) {
         fflush(out);
         q_dbg_print_trace(err, e);
