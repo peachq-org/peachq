@@ -47,6 +47,7 @@ int main(int argc, char** argv) {
     bool        auth_restricted = false;
     int         tls_mode = 0;
     bool        want_help = false;
+    const char* duckdb_main = getenv("PEACHQ_DUCKDB_MAIN");
 
     /* `-eval-before` / `-eval` texts, each list in argv order; order between the lists is by FLAG (before the
      * startup script / after it), never by argv position.  argc bounds the counts. */
@@ -109,7 +110,7 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "q: -duckdb requires a database file argument\n");
                 return 2;
             }
-            q_duckdb_main_path_set(argv[++i]);
+            q_duckdb_main_path_set(duckdb_main = argv[++i]);
         } else if (strcmp(argv[i], "-u") == 0 && i + 1 < argc) {
             auth_pw = argv[++i];
             auth_restricted = false;
@@ -254,6 +255,9 @@ int main(int argc, char** argv) {
     /* `-eval-before` / `-eval` texts are scripts whose source came from argv: same statement seam (q_ctx_run_src),
      * same abort law, results NOT echoed.  An abort anywhere skips everything after it, REPL/server loop included. */
     int script_rc = 0;
+    /* a file-backed main loads its tables first, like `q dir/` — which implies `\l pq`, the loader's home */
+    if (duckdb_main && *duckdb_main)
+        script_rc = q_ctx_run_src("\\l pq\n.duckdb.load[.duckdb.main[];::]", stdout, stderr, NULL);
     for (int i = 0; i < n_before && script_rc == 0; i++)
         script_rc = q_ctx_run_src(eval_before[i], stdout, stderr, NULL);
     if (script && script_rc == 0)

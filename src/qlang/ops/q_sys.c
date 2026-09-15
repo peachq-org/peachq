@@ -22,6 +22,7 @@
 #include "qlang/q_ctx.h"           /* the engine context: `\l` source seam, console teardown */
 #include "qlang/io/q_io.h"    /* q_io_mkdir_parents — `\1`/`\2` create the path they name */
 #include "qlang/io/q_mount.h" /* q_mount_dir — the `\l <dir>` forms */
+#include "qlang/io/q_provider.h" /* q_provider_spec_is / _load — the `\l `:pq:…` form */
 #include "qlang/q_pq.h"       /* q_pq_load — the `\l pq` embedded-stdlib gate */
 #include "qlang/q_env.h"      /* q_env_ctx_set/_ctx + q_env_ns_names — `\d` and the `\v`/`\f`/`\a` rosters */
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk (`\t`), q_dotz_exit_fire (`\\`), q_dotz_expungeable (`\x`) */
@@ -471,9 +472,18 @@ static int l_is_regular_readable(const char* p) {
  * still-MISSING path signals the path as given (kdb: `\l nope.q` -> 'nope.q);
  * an existing DIRECTORY mounts through io/q_mount.c (splayed table / db root;
  * `\l .` reloads data only).  Getter form (no arg) stays 'nyi.
- * `system "l …"` single-homes through here. */
+ * `system "l …"` single-homes through here.  A `:pq:` coordinate (the sym
+ * spelling tolerated, as `\l :file` is) is a LOAD from a provider: the alias's
+ * catalog, or the one table the table form names (io/q_provider.c). */
 static ray_t* h_l(const char* arg, size_t alen) {
     if (alen == 0) return q_err(QE_NYI);        /* `\l` (bare) — reload cwd, deferred */
+    const char* co = arg + (alen && arg[0] == '`');
+    size_t con = alen - (size_t)(co - arg);
+    if (q_provider_spec_is(co, con)) {
+        ray_t* r = q_provider_load(co, con, RAY_NULL_OBJ);
+        if (r && !RAY_IS_ERR(r)) { ray_release(r); r = NULL; }
+        return r;
+    }
     /* hsym spelling `\l :path.q` (TimeStored pkg.q, qunitSurefire.q emit it);
      * tolerant superset on the owner's say-so, 2026-08-11 */
     if (alen >= 2 && arg[0] == ':') { arg++; alen--; }

@@ -386,6 +386,26 @@ it); re-pointing the global re-points the view, any other value drops it, `` `.n
 `dt` is NOT visible (a bare name in `s)` is a q name). After `hclose` of the alias the view errors on use, as the
 pointer's own `get` does. `\?duckdb` and `docs/duckdb-api.md` have the rest; the q IPC provider defines no link.
 
+**Loading and dropping — the sync law.** Anything done THROUGH q is in sync by construction: assigning, re-pointing
+or unbinding a pointer, `insert`/`upsert` on one, `hdel` of a coordinate — one global-set seam, one provider hook per
+verb. Anything done through the provider's own language is best effort, weighted to additions; nothing prints, and
+nothing is ever unbound behind your back.
+
+- **Provider → q is a LOAD, and `\l` is its verb.** `` \l `:pq:duckdb:al `` binds every table and view of the
+  alias's catalog as a pointer under its own name, at the root (the `\l dir` law), later-wins on names — a global
+  `dt` you had becomes the pointer; `` \l `:pq:duckdb:al:dt/ `` loads that one. `.duckdb.load[h;tables]` is the
+  verb form: `()` none, `::` all, else the names; it answers the names bound. The alias must be live (`'conn`): a
+  load never opens a connection. A loaded pointer links like any other, so its bare name is a q name in `s)`.
+  `q -duckdb path` loads main's tables at startup like `q dir/` — and so implies `\l pq`.
+- **`s)` after a `CREATE` or `ALTER` binds the NEW names** of main's own catalog (`CREATE TABLE … AS SELECT`
+  included); an existing global keeps its value — `\l` is the later-wins door, this one is add-only. Row writes need
+  nothing (a pointer reads live). `s)DROP TABLE x` leaves q's `x` bound: it errors on use with DuckDB's own text.
+- **`hdel` on a coordinate drops the OBJECT**: `` hdel `:pq:duckdb:al:dt/ `` is `DROP TABLE` (or `DROP VIEW`, by what
+  the name is); `` hdel `:pq:qpc:al:t/ `` deletes the table on the peer. A q name bound to it stays bound and errors
+  on use. The connection form is `'domain`, a dead alias `'conn`, a provider without the hook `'nyi`. Deleting the q
+  name (`delete dt from `.`) never drops the object — the splay precedent: deleting `` t:get `:db/t/ `` never removes
+  the directory.
+
 ## Compatibility principle
 
 PeachQ should preserve established kdb+/q meanings of handles wherever practical.

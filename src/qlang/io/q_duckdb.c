@@ -22,7 +22,7 @@
 #include "qlang/q_prim.h"     /* q_str_text_bytes (write-path text cells) + q_table_meta_assemble */
 #include "lang/env.h"         /* ray_fn_unary / ray_fn_vary */
 #include "lang/eval.h"        /* RAY_FN_NONE, ray_at_fn */
-#include "qlang/eval/q_eval.h"  /* q_eval_apply_value — the .duckdb.onsql hook */
+#include "qlang/eval/q_eval.h"  /* q_eval_call_sym — the .duckdb.onsql hook */
 #include "table/sym.h"        /* ray_sym_vec_cell */
 #include <rayforce.h>
 #include <math.h>
@@ -280,6 +280,7 @@ bool q_duckdb_available(void) {
 #define QD_SLOT_BITS 6           /* low 6 bits = slot (matches QD_MAX_CON) */
 #define QD_TOKEN_MARK (1 << 30)  /* on every token, so no token can spell a provider fd (a small positive int) */
 #define QD_MAIN_ALIAS "main"
+#define QD_LINK_MARK  "peachq link"   /* the COMMENT a link view carries: what tells it from a user's view of that name */
 
 /* ONE database per process (ADR 2026-09-15 § Main instance): in-memory, or the file `-duckdb`/PEACHQ_DUCKDB_MAIN
  * names.  Opened on first need, when it also takes its own connection — the visible handle `:pq:duckdb:main, on
@@ -392,8 +393,8 @@ static int g_in_onsql;
 static void sqllog_fire(int32_t conn, const char* sql, int64_t t, int64_t dur, bool ok, int64_t rows,
                         const char* err) {
     if (g_in_onsql) return;
-    ray_t* fn = q_env_get(ray_sym_intern(".duckdb.onsql", 13));           /* borrowed */
-    if (!fn || RAY_IS_ERR(fn)) return;
+    int64_t hook = ray_sym_intern(".duckdb.onsql", 13);
+    if (!q_env_get(hook)) return;                                        /* unbound: build nothing */
     static const char* const NAMES[QD_L_NCOL] = { "time", "dur", "ok", "conn", "rows", "sql", "err" };
     uint8_t okb = ok ? 1 : 0;
     ray_t* val[QD_L_NCOL];
@@ -424,20 +425,18 @@ static void sqllog_fire(int32_t conn, const char* sql, int64_t t, int64_t dur, b
     ray_t* rec = built ? ray_dict_new(kc, v) : NULL;                     /* consumes both */
     if (!built) { q_duckdb_drop(kc); q_duckdb_drop(v); return; }
     if (!rec || RAY_IS_ERR(rec)) { q_duckdb_drop(rec); return; }
-    ray_retain(fn);                                                      /* survive re-assign mid-call */
     g_in_onsql = 1;
     /* a handler that re-enters the bridge would clear the channel mid-call: the door that fired it keeps it */
     char keep[2][sizeof g_err_last];
     int  slot = conn == NULL_I32 ? -1 : (int)(conn & ((1 << QD_SLOT_BITS) - 1));
     memcpy(keep[0], g_err_last, sizeof g_err_last);
     if (slot >= 0) memcpy(keep[1], g_cons[slot].err, sizeof g_err_last);
-    ray_t* r = q_eval_apply_value(fn, &rec, 1);
+    ray_t* r = q_eval_call_sym(hook, &rec, 1);
     if (r && RAY_IS_ERR(r)) { q_err_drop(); ray_error_free(r); }
     else if (r) ray_release(r);
     memcpy(g_err_last, keep[0], sizeof g_err_last);
     if (slot >= 0) memcpy(g_cons[slot].err, keep[1], sizeof g_err_last);
     g_in_onsql = 0;
-    ray_release(fn);
     ray_release(rec);
 }
 
@@ -792,10 +791,11 @@ static ray_t* qd_main_fn(ray_t** args, int64_t n) {
 }
 
 /* .duckdb.i.link[token; qname; table] — the q global qname, bound to the table the token's connection sees, becomes
- * the same-named VIEW in main's own catalog: CREATE OR REPLACE VIEW "qname" AS SELECT * FROM "cat"."schema"."table".
- * A view, never a copy; once the catalog detaches it errors on use, as the pointer's own get does.  A pointer into
- * main's own catalog under the global's own name already IS that name there: nothing to make (the view would
- * collide with the table it names; DuckDB folds identifier case). */
+ * the same-named VIEW in main's own catalog: CREATE OR REPLACE VIEW "qname" AS SELECT * FROM "cat"."schema"."table",
+ * marked by its COMMENT so unlink and the loader can tell it from a user's view of that name.  A view, never a
+ * copy; once the catalog detaches it errors on use, as the pointer's own get does.  A pointer into main's own
+ * catalog under the global's own name already IS that name there: nothing to make (the view would collide with the
+ * table it names; DuckDB folds identifier case). */
 static ray_t* qd_link_wrap(ray_t** args, int64_t n) {
     int slot;
     qd_name_t name;
@@ -819,12 +819,18 @@ static ray_t* qd_link_wrap(ray_t** args, int64_t n) {
     e = b.oom ? q_err(QE_WSFULL) : q_duckdb_exec_stmt(g_main.slot, b.p);
     q_duckdb_buf_free(&b);
     if (e) return e;
+    q_duckdb_puts(&b, "COMMENT ON VIEW ");
+    q_duckdb_put_ident(&b, qn, strlen(qn));
+    q_duckdb_puts(&b, " IS '" QD_LINK_MARK "'");
+    e = b.oom ? q_err(QE_WSFULL) : q_duckdb_exec_stmt(g_main.slot, b.p);
+    q_duckdb_buf_free(&b);
+    if (e) return e;
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;
 }
 
 /* .duckdb.i.unlink[token; qname] — the token is not looked at: the view drops by name after its alias is closed too;
- * the probe is what keeps a self-pointer symmetric (the name is a table then, and DROP VIEW IF EXISTS would refuse it) */
+ * the marker probe is what keeps a self-pointer symmetric and a user's own view of that name standing */
 static ray_t* qd_unlink_wrap(ray_t** args, int64_t n) {
     char qn[256];
     ray_t* e = qd_door(args, n, 2, NULL);
@@ -832,7 +838,8 @@ static ray_t* qd_unlink_wrap(ray_t** args, int64_t n) {
     if (!qd_sym_text(args[1], qn, sizeof qn)) return q_duckdb_fail(-1, "unlink", "qname is not a symbol");
     if (!g_main.open) { ray_retain(RAY_NULL_OBJ); return RAY_NULL_OBJ; }
     qd_buf b = {0};
-    q_duckdb_puts(&b, "SELECT view_name FROM duckdb_views() WHERE NOT internal AND database_name = current_database() AND view_name = ");
+    q_duckdb_puts(&b, "SELECT view_name FROM duckdb_views() WHERE NOT internal AND database_name = current_database() "
+                      "AND comment = '" QD_LINK_MARK "' AND view_name = ");
     q_duckdb_put_strlit(&b, qn, strlen(qn));
     duck_result res;
     e = b.oom ? q_err(QE_WSFULL) : q_duckdb_run2(g_main.slot, b.p, &res, 0);
@@ -851,6 +858,37 @@ static ray_t* qd_unlink_wrap(ray_t** args, int64_t n) {
     }
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;
+}
+
+/* .duckdb.i.tables[c] — the LOADABLE names of the connection's catalog, sorted: the tables and views of its current
+ * schema (a bare name binds there) less the bridge's own (the _q_schema sidecar; the link views, each already a q
+ * name).  What .duckdb.load[h;::] binds. */
+static ray_t* qd_tables_fn(ray_t* x) {
+    int slot;
+    ray_t* e = qd_door(&x, 1, 1, &slot);
+    if (e) return e;
+    duck_result res;
+    e = q_duckdb_run2(slot, "SELECT table_name AS n FROM duckdb_tables() WHERE NOT internal AND database_name = current_database() "
+                            "AND schema_name = current_schema() UNION ALL SELECT view_name FROM duckdb_views() WHERE NOT internal "
+                            "AND database_name = current_database() AND schema_name = current_schema() AND coalesce(comment, '') <> '"
+                            QD_LINK_MARK "' ORDER BY 1", &res, 0);
+    if (e) return e;
+    ray_t* rows = q_duckdb_codec_result_to_table(slot, &res, NULL, 0, NULL);
+    QAPI.destroy_result(&res);
+    if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_WSFULL);
+    int64_t n = ray_table_nrows(rows);
+    ray_t* col = ray_table_get_col_idx(rows, 0);
+    ray_t* out = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
+    for (int64_t i = 0; i < n && out && !RAY_IS_ERR(out); i++) {
+        size_t ln = 0;
+        const char* t = q_duckdb_schema_text_cell(col, i, &ln);
+        qd_name_t nm;
+        if (!t || !q_duckdb_schema_name_parse(t, ln, &nm) || q_duckdb_schema_reserved_name(&nm)) continue;
+        int64_t id = ray_sym_intern_runtime(t, ln);
+        out = ray_vec_append(out, &id);
+    }
+    q_duckdb_drop(rows);
+    return out;
 }
 
 /* .duckdb.i.err[] — the last message behind a 'duckdb, any connection; [c] — that connection's */
@@ -1379,6 +1417,7 @@ void q_duckdb_register(void) {
     qd_bind_vary (".duckdb.i.main",   qd_main_fn);
     qd_bind_vary (".duckdb.i.link",   qd_link_wrap);
     qd_bind_vary (".duckdb.i.unlink", qd_unlink_wrap);
+    qd_bind_unary(".duckdb.i.tables", qd_tables_fn);
     qd_bind_unary(".duckdb.i.err",    qd_err_fn);
     qd_bind_vary (".duckdb.i.exec",   qd_sql_wrap);
     qd_bind_vary (".duckdb.i.execx",  qd_sqlx_wrap);
