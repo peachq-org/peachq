@@ -7,12 +7,12 @@
 #endif
 #include "qlang/q_dotz.h"
 #include "qlang/q_env.h"       /* q_env_get — the settable handlers are globals */
-#include "qlang/eval/q_eval.h" /* q_eval_apply_value — handler firing */
+#include "qlang/eval/q_eval.h" /* q_eval_call_sym — handler firing */
 #include "qlang/eval/q_view.h" /* q_view_zb — `.z.b` dependency dict */
 #include "qlang/eval/q_dbg.h"  /* q_dbg_zex/_zey — `.z.ex`/`.z.ey` (basics/debug.md) */
 #include "qlang/net/q_tls.h"   /* q_tls_dotz_e — `.z.e` TLS connection status */
 #include "qlang/ops/q_sys.h"       /* q_sys_timer_active — stopped-timer no-op guard */
-#include "qlang/q_console.h"   /* q_console_str/_reset — drain .z.ts show/0N! output */
+#include "qlang/q_console.h"   /* q_console_str/_reset — drain .z.ts/.z.exit show/0N! output */
 #include "qlang/io/q_conn.h"   /* q_conn_zW/_zH — `.z.W`/`.z.H` collector views */
 #include "lang/cal.h"          /* ymd_to_date — build-date -> q date for .z.k */
 #include "lang/env.h"          /* ray_sym_ipc_hook / ray_env_get / ray_fn_unary */
@@ -366,13 +366,11 @@ int64_t q_dotz_now_ns(int local) {
 static ray_t* zts_tick(ray_t* tick) {
     (void)tick;                                  /* fire_expired's monotonic ms — kdb passes local ts */
     if (!q_sys_timer_active()) return NULL;      /* stopped (incl. reentrant \t 0) → no-op */
-    ray_t* fn = q_env_get(ray_sym_intern_runtime(".z.ts", 5));   /* borrowed */
-    if (!fn) return NULL;                         /* .z.ts unset → no-op */
-    ray_retain(fn);                               /* survive a re-assign mid-call */
+    int64_t zts = ray_sym_intern_runtime(".z.ts", 5);
+    if (!q_env_get(zts)) return NULL;             /* .z.ts unset → no-op */
     ray_t* ts = ray_timestamp(q_dotz_now_ns(1));       /* .z.P local timestamp arg */
-    ray_t* r  = q_eval_apply_value(fn, &ts, 1);
+    ray_t* r  = q_eval_call_sym(zts, &ts, 1);
     ray_release(ts);
-    ray_release(fn);
     /* Drain any show/0N! console output the handler produced to the SERVER
      * stdout — the timer fires outside run_one_line / remote-eval / an IPC hook,
      * so nothing else drains q_console_str here; without this the output is
@@ -388,13 +386,11 @@ static ray_t* zts_tick(ray_t* tick) {
  * exit parameter; default = do nothing), then drain its show/0N! console
  * output to stdout — this runs moments before exit(), nothing else drains. */
 void q_dotz_exit_fire(int code) {
-    ray_t* fn = q_env_get(ray_sym_intern_runtime(".z.exit", 7));   /* borrowed */
-    if (!fn) return;
-    ray_retain(fn);                      /* survive a re-assign mid-call */
+    int64_t zexit = ray_sym_intern_runtime(".z.exit", 7);
+    if (!q_env_get(zexit)) return;
     ray_t* arg = ray_i64(code);
-    ray_t* r = q_eval_apply_value(fn, &arg, 1);
+    ray_t* r = q_eval_call_sym(zexit, &arg, 1);
     ray_release(arg);
-    ray_release(fn);
     if (r) ray_release(r);
     { const char* con = q_console_str();
       if (con && *con) { fputs(con, stdout); fflush(stdout); }

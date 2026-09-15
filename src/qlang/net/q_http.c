@@ -11,7 +11,7 @@
 #include "qlang/html_assets_gen.h" /* q_html_assets[] — codegen'd from src/qlang/html/ */
 #include "qlang/q_console.h"   /* q_console_str/_reset — drain handler show output */
 #include "qlang/q_env.h"       /* q_env_get — `.h.HOME` / `.h.ty`, the `.z.*` handlers */
-#include "qlang/eval/q_eval.h" /* q_eval_apply_value — handler firing */
+#include "qlang/eval/q_eval.h" /* q_eval_call_name — handler firing */
 #include "mem/sys.h"
 #include "picohttpparser.h"
 #include <stdlib.h>
@@ -632,23 +632,22 @@ static uint8_t* http_gzip_response(const char* resp, size_t len, size_t* out) {
     return o;
 }
 
-/* Shared `.z.ph`/`.z.pp`/`.z.pm` dispatch core (ref/dotz.md): call fn (BORROWED,
- * caller-retained) with the built arg, write its returned response string
- * VERBATIM.  Error/non-string -> 500.  Always returns 0 (a response was sent).
- * `method` (NULL for .z.ph/.z.pp) selects the 2- vs 3-item arg; `which` names
- * the handler for the log.  `may_gzip` (only the `.z.ph` GET path) enables the
- * `form?`-response gzip when the client offered Accept-Encoding + body >= 2000.
- * `may_decline` (GET only): a `::` return sends nothing and answers -1 = DECLINE. */
+/* Shared `.z.ph`/`.z.pp`/`.z.pm` dispatch core (ref/dotz.md): call the handler
+ * `which` names (the caller has checked it is set) with the built arg, write its
+ * returned response string VERBATIM.  Error/non-string -> 500.  Always returns 0
+ * (a response was sent).  `method` (NULL for .z.ph/.z.pp) selects the 2- vs
+ * 3-item arg.  `may_gzip` (only the `.z.ph` GET path) enables the `form?`-response
+ * gzip when the client offered Accept-Encoding + body >= 2000.  `may_decline`
+ * (GET only): a `::` return sends nothing and answers -1 = DECLINE. */
 static int zh_dispatch_call(ray_sock_t fd, const char* method, size_t mlen,
                             const char* text_p, size_t text_len,
                             const struct phr_header* hdrs, size_t nh,
-                            ray_t* fn, const char* which, bool may_gzip,
-                            bool may_decline)
+                            const char* which, bool may_gzip, bool may_decline)
 {
     ray_t* arg = zh_build_arg(method, mlen, text_p, text_len, hdrs, nh);
     if (!arg) { q_http_send_simple(fd, 500, "Internal Server Error"); return 0; }
 
-    ray_t* r = q_eval_apply_value(fn, &arg, 1);
+    ray_t* r = q_eval_call_name(which, strlen(which), &arg, 1);
     ray_release(arg);
     /* drain handler show/0N! to the server console (zts_tick pattern) */
     { const char* con = q_console_str();
@@ -681,13 +680,9 @@ static int zh_dispatch_call(ray_sock_t fd, const char* method, size_t mlen,
 static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
                         const struct phr_header* hdrs, size_t nh)
 {
-    ray_t* fn = q_env_get(ray_sym_intern_runtime(".z.ph", 5));   /* borrowed, NULL = unset */
-    if (!fn) return -1;
-    ray_retain(fn);                            /* handler may reassign .z.ph */
+    if (!q_env_get(ray_sym_intern_runtime(".z.ph", 5))) return -1;
     if (tlen && target[0] == '/') { target++; tlen--; }
-    int r = zh_dispatch_call(fd, NULL, 0, target, tlen, hdrs, nh, fn, ".z.ph", true, true);
-    ray_release(fn);
-    return r;
+    return zh_dispatch_call(fd, NULL, 0, target, tlen, hdrs, nh, ".z.ph", true, true);
 }
 
 /* `.z.pp` (HTTP POST) — the request body (read from the socket; the frozen
@@ -697,8 +692,7 @@ static int zph_dispatch(ray_sock_t fd, const char* target, size_t tlen,
  * every branch. */
 static void zpp_dispatch(ray_sock_t fd, const struct phr_header* hdrs, size_t nh)
 {
-    ray_t* fn = q_env_get(ray_sym_intern_runtime(".z.pp", 5));   /* borrowed, NULL = unset */
-    if (!fn) { q_http_send_simple(fd, 501, "Not Implemented"); return; }
+    if (!q_env_get(ray_sym_intern_runtime(".z.pp", 5))) { q_http_send_simple(fd, 501, "Not Implemented"); return; }
 
     int64_t cl = 0; bool have_cl = false;
     for (size_t i = 0; i < nh; i++) {
@@ -725,20 +719,18 @@ static void zpp_dispatch(ray_sock_t fd, const struct phr_header* hdrs, size_t nh
         }
     }
 
-    ray_retain(fn);                            /* handler may reassign .z.pp */
     uint8_t* body = NULL;
     if (have_cl && cl > 0) {
         body = (uint8_t*)ray_sys_alloc((size_t)cl);
-        if (!body) { ray_release(fn); q_http_send_simple(fd, 500, "Internal Server Error"); return; }
+        if (!body) { q_http_send_simple(fd, 500, "Internal Server Error"); return; }
         if (http_recv_n(fd, body, (size_t)cl) != 0) {
-            ray_sys_free(body); ray_release(fn);
+            ray_sys_free(body);
             q_http_send_simple(fd, 400, "Bad Request"); return;
         }
     }
     zh_dispatch_call(fd, NULL, 0, body ? (const char*)body : "",
-                     have_cl ? (size_t)cl : 0, hdrs, nh, fn, ".z.pp", false, false);
+                     have_cl ? (size_t)cl : 0, hdrs, nh, ".z.pp", false, false);
     if (body) ray_sys_free(body);
-    ray_release(fn);
 }
 
 /* `.z.pm` (HTTP OPTIONS/PUT/DELETE/PATCH — ref/dotz.md) — 3-item
@@ -751,12 +743,9 @@ static void zpm_dispatch(ray_sock_t fd, const char* method, size_t mlen,
                          const char* target, size_t tlen,
                          const struct phr_header* hdrs, size_t nh)
 {
-    ray_t* fn = q_env_get(ray_sym_intern_runtime(".z.pm", 5));   /* borrowed, NULL = unset */
-    if (!fn) { q_http_send_simple(fd, 501, "Not Implemented"); return; }
-    ray_retain(fn);                            /* handler may reassign .z.pm */
+    if (!q_env_get(ray_sym_intern_runtime(".z.pm", 5))) { q_http_send_simple(fd, 501, "Not Implemented"); return; }
     if (tlen && target[0] == '/') { target++; tlen--; }
-    zh_dispatch_call(fd, method, mlen, target, tlen, hdrs, nh, fn, ".z.pm", false, false);
-    ray_release(fn);
+    zh_dispatch_call(fd, method, mlen, target, tlen, hdrs, nh, ".z.pm", false, false);
 }
 
 /* Default 401 with a Basic challenge — the `.z.ac` reject arm (dotz.md L137)
@@ -774,7 +763,7 @@ static void zac_send_401(ray_sock_t fd) {
         q_http_send_all(fd, body, sizeof body - 1, Q_HTTP_SEND_SECS);
 }
 
-/* `.z.ac` auth gate (ref/dotz.md).  fn is BORROWED (caller-retained).  Runs
+/* `.z.ac` auth gate (ref/dotz.md); the caller has checked it is set.  Runs
  * `.z.ac` with (target; hdrDict) — target = request-target, leading '/' stripped
  * (header inspection is the documented job; the body is NOT read to feed auth).
  * Return protocol (dotz.md L129-166): 0 -> default 401 (reject); 1 -> proceed
@@ -783,14 +772,14 @@ static void zac_send_401(ray_sock_t fd) {
  * (caller re-applies the -u/-U policy).  A malformed/error/unknown-status return
  * fails CLOSED (500, no handler).  Never logs the arg or the return payload. */
 enum { ZAC_PROCEED = 0, ZAC_DONE = 1, ZAC_FALLBACK = 2 };
-static int zac_gate(ray_sock_t fd, ray_t* fn, const char* target, size_t tlen,
+static int zac_gate(ray_sock_t fd, const char* target, size_t tlen,
                     const struct phr_header* hdrs, size_t nh)
 {
     if (tlen && target[0] == '/') { target++; tlen--; }
     ray_t* arg = zh_build_arg(NULL, 0, target, tlen, hdrs, nh);
     if (!arg) { q_http_send_simple(fd, 500, "Internal Server Error"); return ZAC_DONE; }
 
-    ray_t* r = q_eval_apply_value(fn, &arg, 1);
+    ray_t* r = q_eval_call_name(".z.ac", 5, &arg, 1);
     ray_release(arg);
     { const char* con = q_console_str();     /* drain handler show/0N! */
       if (con && *con) { fputs(con, stdout); fflush(stdout); }
@@ -825,7 +814,7 @@ int q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
      * BYTE-IDENTICAL — 401 BEFORE parse (so a malformed authed request stays
      * 401, not 400).  A defined `.z.ac` owns the auth decision (its gate runs
      * after parse, below), so the pre-parse 401 is skipped when it is set. */
-    ray_t* ac = q_env_get(ray_sym_intern_runtime(".z.ac", 5));   /* borrowed; NULL = unset */
+    bool ac = q_env_get(ray_sym_intern_runtime(".z.ac", 5)) != NULL;
     if (!ac && auth_required) {
         q_http_send_simple(fd, 401, "Unauthorized");
         return 0;
@@ -849,9 +838,7 @@ int q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
      * 401); reject/custom/error -> a response was sent; fallback -> re-apply the
      * listener's basic-auth policy (deferred to today's authed-401). */
     if (ac) {
-        ray_retain(ac);                        /* handler may reassign .z.ac */
-        int g = zac_gate(fd, ac, target, tlen, hdrs, nh);
-        ray_release(ac);
+        int g = zac_gate(fd, target, tlen, hdrs, nh);
         if (g == ZAC_DONE) return 0;
         if (g == ZAC_FALLBACK && auth_required) {
             q_http_send_simple(fd, 401, "Unauthorized");
