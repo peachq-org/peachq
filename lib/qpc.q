@@ -22,6 +22,8 @@
 / cross the wire); sync sends so the remote's error propagates
 .qpc.set:{[c;t;d] c (`set;t;d); t}
 .qpc.upsert:{[c;t;d] c (`upsert;t;d); t}
+/ hdel `:pq:qpc:al:t/ drops the REMOTE table: the functional delete, so a parse-tree-only .z.pg accepts it
+.qpc.i.hdel:{[c;t] c (!;`.;();0b;enlist t); t}
 / qsql pushdown: resolve free vars via the shared walk (columns win; enclosing
 / locals are INVISIBLE to a pushed query - the value-of-string law), send the
 / functional message (?;name;...) - the remote q evaluates it natively.  qpc

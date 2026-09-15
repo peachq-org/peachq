@@ -50,7 +50,7 @@ column names the system command that reads or sets the same thing at runtime, wh
 | `-classic` | legacy kx table display, kdb-clean environment | **PEACHQ ONLY** | `\classic` |
 | `-eval "src"` | run q text **after** the startup script | **PEACHQ ONLY** | none |
 | `-eval-before "src"` | run q text **before** the startup script | **PEACHQ ONLY** | none |
-| `-duckdb path` | the main DuckDB database is this file, not memory | **PEACHQ ONLY** | none |
+| `-duckdb path` | the main DuckDB database is this file, not memory; its tables load at startup (implies `\l pq`) | **PEACHQ ONLY** | none |
 
 `-q`, `-L`, `-m`, `-eval`, `-eval-before` and `-duckdb` have no system-command equivalent.
 
@@ -63,9 +63,14 @@ bridge puts in main — the views that link q globals to DuckDB tables, `s)CREAT
 file, so a second `q -duckdb path` reads it back. DuckDB locks a database file per process: two live processes cannot
 share one. The flag is launcher-consumed (never in `.z.x`); `user-docs/handles.md` and `\?duckdb` have the instance.
 
+**`-duckdb path` loads main's tables at startup**, like `q dir/` loads a database directory: before the startup script
+runs, every table and view of the file becomes a q pointer under its own name (`tables[]` lists them, `s)` reads them),
+which implies `\l pq` — the loader is standard library, so the process starts with it loaded. `PEACHQ_DUCKDB_MAIN`
+does the same. A fresh in-memory main (no flag, no variable) loads nothing and stays untouched.
+
 ```bash
-q -duckdb work.duckdb -eval '\l pq' -eval 's)CREATE TABLE x AS SELECT 1 AS a'
-q -duckdb work.duckdb -eval '\l pq' -eval 's)SELECT * FROM x'      # a second process reads it
+q -duckdb work.duckdb -eval 's)CREATE TABLE x AS SELECT 1 AS a'
+q -duckdb work.duckdb -eval 'show tables[]' -eval 's)SELECT * FROM x'   # a second process: x is a q name already
 ```
 
 ## `-eval` and `-eval-before`

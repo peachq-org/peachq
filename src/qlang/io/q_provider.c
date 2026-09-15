@@ -19,6 +19,7 @@
 #include "qlang/q_registry.h"      /* q_registry_provenance — op value -> its spelling */
 #include "qlang/eval/q_eval.h"     /* q_eval_apply_value / q_eval_call_sym — THE apply seam and its by-name front */
 #include "lang/eval.h"             /* ray_eval_get_restricted */
+#include "lang/env.h"              /* ray_fn_vary — the .pq.i.load native */
 #include "table/sym.h"             /* ray_sym_intern_runtime, ray_sym_str */
 #include <rayforce.h>
 #include <stdio.h>
@@ -734,11 +735,12 @@ ray_t* q_provider_from_table(ray_t* t) {
 /* the provider-truth column list for .X.qsql — ONE live bind round-trip at
  * push time (a carrier's embedded keys are advisory and can be stale after
  * remote schema drift — pushing on them substitutes a same-named client
- * global for a NEW column); NULL = unavailable (host fallback) */
+ * global for a NEW column).  A bind ERROR is the answer, once: the fallback
+ * would only ask the same provider again through get (a dropped table said no
+ * already).  A non-list answer is unavailable (host fallback). */
 static ray_t* qsql_cols(tref_t* tr) {
     ray_t* cols = tref_hook(tr, "bind");
-    if (cols && RAY_IS_ERR(cols)) { ray_error_free(cols); return NULL; }
-    if (cols && cols->type == RAY_SYM) return cols;
+    if (cols && (RAY_IS_ERR(cols) || cols->type == RAY_SYM)) return cols;
     if (cols) ray_release(cols);
     return NULL;
 }
@@ -751,7 +753,7 @@ ray_t* q_provider_qsql_push(ray_t** args, int64_t n) {
     ray_t* f = hook_fn(tr.c.e->provider, "qsql");
     if (!f) { tref_close(&tr); return NULL; }  /* host fallback: the residual law */
     ray_t* cols = qsql_cols(&tr);
-    if (!cols) { ray_release(f); tref_close(&tr); return NULL; }
+    if (!cols || RAY_IS_ERR(cols)) { ray_release(f); tref_close(&tr); return cols; }
     ray_t* tree = ray_list_new(n);
     ray_t* nm = ray_sym(tr.name);
     tree = ray_list_append(tree, nm);          /* slot 0: the BARE underlying name */
@@ -773,21 +775,33 @@ ray_t* q_provider_qsql_push(ray_t** args, int64_t n) {
 /* The link seam.  A REFERENCE carrier (a named alias) links: .X.i.link needs the live connection, .X.i.unlink drops
  * by name and gets :: for a token once the alias is closed.  An aliasless coordinate is served by a connection that
  * dies with the call, so there is nothing durable to point a link at.  Best-effort: the global is already bound, so
- * a hook's error is dropped (the .z.vs shape) and a hook that binds a carrier itself does not re-enter. */
+ * a hook's error is dropped (the .z.vs shape) and a hook that binds a carrier itself does not re-enter.  The ONE
+ * error that rides out is the pair law: a provider defining one of i.link/i.unlink without the other is 'nyi at first
+ * use, reading as the missing hook's name (the `'.parquet.read` shape) — a leaked view is otherwise silent. */
 static int g_in_link;
 
-static void link_hook(const char* hook, int64_t qname, ray_t* car) {
+static ray_err_t hook_missing(int64_t provider, const char* hook) {
+    ray_t* hs = ray_sym_str(hook_sym(provider, hook));   /* borrowed; the text reads as the name, 'nyi-classed */
+    if (hs) q_err_put(ray_charv(ray_str_ptr(hs), (int64_t)ray_str_len(hs)));
+    return RAY_ERR_NYI;
+}
+
+static ray_err_t link_hook(const char* hook, int64_t qname, ray_t* car) {
     const char* p; size_t n;
     spec_t sp;
-    if (g_in_link || !sym_text(ray_dict_vals(car), &p, &n)) return;
+    if (g_in_link || !sym_text(ray_dict_vals(car), &p, &n)) return RAY_OK;
     ray_t* pe = spec_parse(p, n, &sp);
-    if (pe) { ray_error_free(pe); return; }
-    if (!sp.is_table || !sp.alias.n) return;
+    if (pe) { ray_error_free(pe); return RAY_OK; }
+    if (!sp.is_table || !sp.alias.n) return RAY_OK;
     int64_t pid = ray_sym_intern_runtime(sp.ds.p, sp.ds.n);
-    ray_t* f = hook_fn(pid, hook);
-    if (!f) return;
-    prov_ent* e = find_alias(pid, ray_sym_intern_runtime(sp.alias.p, sp.alias.n));
     int link = strcmp(hook, "i.link") == 0;
+    const char* other = link ? "i.unlink" : "i.link";
+    ray_t* f = hook_fn(pid, hook);
+    ray_t* g = hook_fn(pid, other);
+    if (g) ray_release(g);
+    if (!f != !g) { if (f) ray_release(f); return hook_missing(pid, f ? other : hook); }
+    if (!f) return RAY_OK;
+    prov_ent* e = find_alias(pid, ray_sym_intern_runtime(sp.alias.p, sp.alias.n));
     if (e || !link) {
         ray_t* qn = ray_sym(qname);
         ray_t* tn = ray_sym(ray_sym_intern_runtime(sp.tbl.p, sp.tbl.n));
@@ -801,10 +815,11 @@ static void link_hook(const char* hook, int64_t qname, ray_t* car) {
         ray_release(tn);
     }
     ray_release(f);
+    return RAY_OK;
 }
 
-void q_provider_link(int64_t qname, ray_t* car)   { link_hook("i.link", qname, car); }
-void q_provider_unlink(int64_t qname, ray_t* car) { link_hook("i.unlink", qname, car); }
+ray_err_t q_provider_link(int64_t qname, ray_t* car)   { return link_hook("i.link", qname, car); }
+ray_err_t q_provider_unlink(int64_t qname, ray_t* car) { return link_hook("i.unlink", qname, car); }
 
 ray_t* q_provider_write(ray_t* x, ray_t* y, int upsert) {
     const char* p; size_t n;
@@ -819,4 +834,100 @@ ray_t* q_provider_write(ray_t* x, ray_t* y, int upsert) {
     ray_release(nm);
     tref_close(&tr);
     return r;
+}
+
+ray_t* q_provider_hdel(ray_t* x) {
+    const char* p; size_t n;
+    if (!sym_text(x, &p, &n) || !q_provider_spec_is(p, n)) return NULL;
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    tref_t tr;
+    ray_t* err = tref_open(p, n, &tr);
+    if (err) return err;
+    ray_t* r = tref_hook_opt(&tr, "i.hdel");
+    tref_close(&tr);
+    if (!r) return q_err(QE_NYI);
+    if (RAY_IS_ERR(r)) return r;
+    ray_release(r);
+    ray_retain(x);
+    return x;
+}
+
+
+/* The load door.  The hook answers the NAMES (a sym atom, a sym vector, or an empty list) and the host binds them:
+ * the provider knows its catalog, the host owns the pointer (prov_bind) and the root — under `\d` a q-side `set`
+ * lands in the context, and a load defines tables in the root (the `\l dir` law). */
+static ray_t* load_names_ok(ray_t* names) {
+    if (!names || RAY_IS_ERR(names)) return names ? names : q_err(QE_TYPE);
+    if (names->type == RAY_SYM || (names->type == RAY_LIST && ray_len(names) == 0)) return NULL;
+    if (names->type != -RAY_SYM) { ray_release(names); return q_err(QE_TYPE); }
+    return NULL;
+}
+
+static ray_t* load_bind(prov_ent* e, int64_t name) {
+    ray_t* nm = ray_sym(name);
+    ray_t* car = prov_bind(e, nm);
+    ray_release(nm);
+    if (!car || RAY_IS_ERR(car)) return car ? car : q_err(QE_TYPE);
+    ray_err_t rc = q_env_set(name, car);
+    ray_release(car);
+    return rc == RAY_OK ? NULL : q_env_err(rc);
+}
+
+ray_t* q_provider_load(const char* s, size_t n, ray_t* tables) {
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (!tables || !(RAY_IS_NULL(tables) || tables->type == -RAY_SYM || tables->type == RAY_SYM ||
+                     (tables->type == RAY_LIST && ray_len(tables) == 0)))
+        return q_err(QE_TYPE);
+    spec_t sp;
+    ray_t* pe = spec_parse(s, n, &sp);
+    if (pe) return pe;
+    prov_ent* e;
+    ray_t* err = ref_find(&sp, &e);            /* LIVE alias only: a load never opens a transient connection */
+    if (err) return err;
+    if (!e) return q_err(QE_CONN);
+    ray_t* f = hook_fn(e->provider, "i.load");
+    if (!f) return q_err(QE_NYI);
+    ray_t* one = sp.is_table ? ray_sym(ray_sym_intern_runtime(sp.tbl.p, sp.tbl.n)) : NULL;
+    ray_t* args[2] = { e->connid, one ? one : tables };
+    prov_ent ent = *e;                         /* the hook may open or close aliases: the row can move */
+    ray_retain(ent.connid);
+    ray_t* names = q_eval_apply_value(f, args, 2);
+    ray_release(f);
+    if (one) ray_release(one);
+    err = load_names_ok(names);
+    if (err) { ray_release(ent.connid); return err; }
+    int64_t m = names->type == -RAY_SYM ? 1 : ray_len(names);
+    ray_t* out = ray_sym_vec_new(RAY_SYM_W64, m > 0 ? m : 1);
+    int64_t ctx = q_env_ctx();
+    q_env_ctx_set(0);
+    for (int64_t i = 0; i < m && !err; i++) {
+        int64_t id = names->type == -RAY_SYM ? names->i64 : ray_vec_get_sym_id(names, i);
+        err = load_bind(&ent, id);
+        if (!err) out = ray_vec_append(out, &id);
+    }
+    q_env_ctx_set(ctx);
+    ray_release(ent.connid);
+    ray_release(names);
+    if (err) { ray_release(out); return err; }
+    return out;
+}
+
+/* .pq.i.load[h; tables] — the handle (the alias sym, or the legacy int) spelled back to its coordinate */
+static ray_t* pq_load_fn(ray_t** args, int64_t n) {
+    if (n != 2) return q_err(QE_RANK);
+    ray_t* h = args[0];
+    int64_t fd = h && h->type == -RAY_I32 ? h->i32 : h && h->type == -RAY_I64 ? h->i64 : -1;
+    prov_ent* e = fd >= 0 ? find_fd(fd) : NULL;
+    ray_t* hs = e ? ray_sym(e->handle) : h;
+    const char* p; size_t pn;
+    ray_t* r = sym_text(hs, &p, &pn) ? q_provider_load(p, pn, args[1]) : q_err(QE_TYPE);
+    if (e) ray_release(hs);
+    return r;
+}
+
+void q_provider_pq_register(void) {
+    static const char nm[] = ".pq.i.load";
+    ray_t* obj = ray_fn_vary(nm, RAY_FN_NONE, pq_load_fn);
+    q_env_bind(ray_sym_intern(nm, strlen(nm)), obj);
+    ray_release(obj);
 }

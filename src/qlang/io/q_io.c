@@ -12,7 +12,7 @@
 #include "qlang/q_registry_internal.h" /* q_str_split_lines, q_type_strict_i64 */
 #include "qlang/base/q_err.h"
 #include "qlang/io/q_handles.h" /* q_handles_read1 — the fifo-handle read form */
-#include "qlang/io/q_provider.h"  /* q_io_set: `:pq: targets route to .X.set */
+#include "qlang/io/q_provider.h"  /* q_io_set: `:pq: targets route to .X.set; hdel: to .X.i.hdel */
 #include "qlang/io/q_csv.h"     /* the CSV/TSV decoder behind a recognised tabular suffix */
 #include "qlang/io/q_json.h"    /* the JSON decoder, and the framing a suffix declares to it */
 #include "qlang/eval/q_eval.h"  /* q_eval_call_name — the .parquet decoder is bound by `\l pq`, not linked */
@@ -873,11 +873,14 @@ static int io_remove_any(const char* p) {
  * file symbol `:path and return x.  POSIX remove() dispatches unlink/rmdir, so
  * a folder is removed only when empty (the doc's "folders only if empty").  A
  * missing path or non-empty folder surfaces 'io (the read0 ENOENT precedent).
- * WRITES the filesystem, so restricted mode refuses (the file-verb precedent). */
+ * WRITES the filesystem, so restricted mode refuses (the file-verb precedent).
+ * A `:pq:` table coordinate drops that OBJECT through its provider. */
 ray_t* q_hdel_wrap(ray_t* x) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     if (!x || x->type != -RAY_SYM) return q_err(QE_TYPE);  /* a DELETE takes only the
                                                             * file symbol it documents */
+    ray_t* pr = q_provider_hdel(x);
+    if (pr) return pr;
     ray_t* path = q_io_file_path(x);
     if (!path) return q_err(QE_TYPE);
     int rc = io_remove_any(ray_str_ptr(path));  /* ray_str path is NUL-terminated */
