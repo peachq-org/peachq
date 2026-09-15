@@ -41,8 +41,10 @@ best-effort.
 | `.X.set[token;name;data]` / `.X.upsert[token;name;data]` | `` `:pq:X:alias:t/ set x `` / `upsert x`; `insert`/`upsert` on a global bound to your table (through `upsert`) | required for that door |
 | `.X.count[token;name]` / `.X.meta[token;name]` | `count`/`meta` of a bound table | optional (host materialises through `get`) |
 | `.X.qsql[token;cols;tree]` | a qSQL statement over a bound table: `cols` the live column list, `tree` the functional form with slot 0 the BARE table name; answer the result, or `::` to decline to the host's materialise-and-evaluate fallback | optional |
-| `.X.i.link[token;qname;table]` | a carrier of yours is bound to a q global — at the one global-set seam, so `myt:get …`, `myt:h`t`, `.ns.t:…` and a `\d`-scoped assignment all reach it; `qname` is the global's FULL name, `table` the bare table name | optional |
-| `.X.i.unlink[token;qname]` | that global is replaced or unbound (`myt:1`, `delete myt from `.`); `token` is `::` once the alias is closed | optional |
+| `.X.i.link[token;qname;table]` | a carrier of yours is bound to a q global — at the one global-set seam, so `myt:get …`, `myt:h`t`, `.ns.t:…` and a `\d`-scoped assignment all reach it; `qname` is the global's FULL name, `table` the bare table name | optional, paired |
+| `.X.i.unlink[token;qname]` | that global is replaced or unbound (`myt:1`, `delete myt from `.`); `token` is `::` once the alias is closed | optional, paired |
+| `.X.i.load[token;tables]` | `` \l `:pq:X:alias `` (`tables` = `::`), `` \l `:pq:X:alias:t/ `` (`` enlist `t ``), `.pq.i.load[h;tables]` (as given: `()`, `::` or a symbol list): answer the NAMES to bind — a symbol list, `()` for none. The host makes each pointer through `bind` and binds it at the root, later-wins, and answers the names | optional (`'nyi`) |
+| `.X.i.hdel[token;name]` | `` hdel `:pq:X:alias:t/ ``: drop the OBJECT; the q name, if any, stays bound | optional (`'nyi`) |
 
 Any other name reaches you through the list door, `h (`name; args…)` → `.X.name[token; args…]`, except `i`, `open`
 and `close`, which the host keeps to itself.
@@ -50,8 +52,41 @@ and `close`, which the host keeps to itself.
 **The link hooks** are best-effort: the global is already bound when they run, so an error is dropped (the same shape
 as `.z.vs`), a hook that itself binds a carrier does not re-enter, and an aliasless (self-contained) carrier never
 links — it is served by a connection that dies with the call, so there is nothing durable to point at. `.X.i.link` is
-called only while the alias is live; `.X.i.unlink` always. The DuckDB provider uses them to keep a same-named VIEW of
-the table in its main instance (`docs/duckdb-api.md` § The instance); q IPC defines neither.
+called only while the alias is live; `.X.i.unlink` always. **They are a pair**: defining one without the other is
+`'nyi` at the first use of either, the error text the missing hook's name (`'.X.i.unlink`) — a leaked view is
+otherwise silent. The DuckDB provider uses them to keep a same-named VIEW of the table in its main instance
+(`docs/duckdb-api.md` § The instance); q IPC defines neither.
+
+## The verb → hook table, and the naming rule
+
+A hook is NAMED FOR THE Q VERB IT SERVES; `.i.` marks a hook only the host calls (lifecycle, the link seam, the
+loader, `hdel`) — a user never spells one, and the list door never reaches one. Required: `i.open`, `call`, `bind`,
+`get`; everything else is optional with a host fallback or `'nyi`.
+
+| q spelling | the host does | hook | required |
+|---|---|---|---|
+| `hopen `:pq:X:al:cfg` | registers alias → token, answers the alias symbol | `.X.i.open[alias;rest;timeout;config]` | yes |
+| `hclose h` | drops the registration | `.X.i.close[token]` | no (no-op) |
+| `h "text"` | text call | `.X.call[token;text;sync]` | yes |
+| `h (`async;msg)` | the async send | `.X.async[token;msg]` | no (`'.X.async`) |
+| `h`t`, `get `:pq:X:al:t/` | builds the pointer from the column names | `.X.bind[token;name]` | yes |
+| `select … from t`, `value t` | materialises | `.X.get[token;name]` | yes |
+| `?[t;…]` and every qSQL over a pointer | pushes the resolved functional tree | `.X.qsql[token;cols;tree]` | no (materialise) |
+| `` `:pq:X:al:t/ set x `` | the write | `.X.set[token;name;data]` | for that door |
+| `` `:pq:X:al:t/ upsert x ``, `` `t insert x `` / `` `t upsert x `` on a pointer global | the write-through | `.X.upsert[token;name;data]` | for that door |
+| `count t` | | `.X.count[token;name]` | no (materialise) |
+| `meta t` | | `.X.meta[token;name]` | no (materialise) |
+| `t:pointer` (any global-set) | announces the binding | `.X.i.link[token;qname;table]` | no, paired |
+| `t:1`, `delete t from `.` | announces the displacement | `.X.i.unlink[token;qname]` | no, paired |
+| `` \l `:pq:X:al ``, `` \l `:pq:X:al:t/ ``, `.pq.i.load[h;tables]` | binds the names answered, at the root | `.X.i.load[token;tables]` | no (`'nyi`) |
+| `` hdel `:pq:X:al:t/ `` | | `.X.i.hdel[token;name]` | no (`'nyi`) |
+| `s)CREATE …` / `s)ALTER …` | (DuckDB only) binds main's new names through `.pq.i.load` | `.duckdb.i.tables[h]` + `.duckdb.i.load` | — |
+
+**The sync law** (ADR § Sync law, owner 2026-09-16) the table serves: whatever is done THROUGH q — assigning,
+re-pointing or unbinding a pointer, `insert`/`upsert` on one, `hdel` of a coordinate — is in sync by construction
+(one global-set seam, one hook per verb). Whatever is done THROUGH the provider's own language is best effort,
+weighted to additions: DuckDB's `s)` binds the new names after a `CREATE`/`ALTER`; a drop on that side is the user's
+— the stale pointer stays bound and errors on use; nothing prints, nothing is unbound behind the user's back.
 
 `qsql` is the table-query seam: a provider may execute the query itself, materialise and evaluate locally, or return
 `::`. `.pq.i.resolveTree[cols;tree]` (`lib/pq.q`) is the shared resolver every implementation rides — free variables

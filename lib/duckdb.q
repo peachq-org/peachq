@@ -103,7 +103,32 @@
 / @return (symbol) `:pq:duckdb:main
 .duckdb.main:{[] .duckdb.i.main[]}
 
+/ load the handle's tables and views as q pointers, at the root, later-wins (\l `:pq:duckdb:al is the same door):
+/ tbls () none, :: all, else the names
+/ @return (symbol list) the names bound
+.duckdb.load:{[c;tbls] .pq.i.load[c;tbls]}
+/ the host's load hook answers the NAMES; the host binds them
+.duckdb.i.load:{[c;tbls] $[tbls~(::); .duckdb.i.tables c; (),tbls]}
+
+/ drop table t of the handle's catalog - a view when that is what t names; hdel `:pq:duckdb:al:t/ is this verb's
+/ spelling.  A q name bound to it stays bound and errors on use: deleting a q name never drops the object either.
+/ @return (symbol) t
+.duckdb.hdel:{[c;t] .duckdb.i.hdel[c;t]}
+.duckdb.i.hdel:{[c;t]
+  is_view:0<count .duckdb.i.exec[c;"SELECT 1 AS v FROM duckdb_views() WHERE NOT internal AND database_name = current_database() AND view_name = '",ssr[string t;"'";"''"],"'"];
+  .duckdb.i.exec[c;"DROP ",$[is_view;"VIEW ";"TABLE "],.duckdb.i.qname t]; t}
+
 / s)SELECT ... - the custom-language handler kdb documents (.X.e receives the line after the prefix), on main: a
 / q global bound to a DuckDB table is a bare name here, an alias's table is alias.table, a result prints as a table
-/ and a statement without one answers ::.  Errors are the bridge's 'duckdb, .duckdb.err[] the reason.
-.s.e:{[x] .duckdb.main[] x}
+/ and a statement without one answers ::.  Errors are the bridge's 'duckdb, .duckdb.err[] the reason.  After a
+/ CREATE or ALTER the NEW names of main's own catalog become q pointers (an existing global keeps its value; \l is
+/ the later-wins door); a DROP unbinds nothing - the stale pointer errors on use.
+.s.e:{[x] r:.duckdb.main[] x; if[(.s.i.head x) in ("CREATE";"ALTER"); .s.i.sync[]]; r}
+.s.i.sync:{[] h:.duckdb.main[]; .pq.i.load[h;.duckdb.i.tables[h] except key `.]}
+/ the statement's first word, past whitespace and -- or block comments, upper-cased: the classifier of the sync law
+/ (DuckDB reports CREATE TABLE AS as a row write, so the result's kind cannot serve)
+.s.i.head:{[s]
+  s:((s in " \t\r\n")?0b)_s;
+  if["--"~2#s; :.s.i.head (1+s?"\n")_s];
+  if["/*"~2#s; k:first where (s="*")&next s="/"; :$[null k;"";.s.i.head (2+k)_s]];
+  upper ((s in .Q.a,.Q.A)?0b)#s}

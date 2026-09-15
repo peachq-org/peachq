@@ -488,8 +488,10 @@
    "h \"SELECT sym, count(*) n FROM trade GROUP BY sym\"";"select vwap:sz wavg px by sym from `:pq:duckdb:mkt:trade/";
    "t:get `:pq:duckdb:mkt:trade/";"-3!t";"count t";"meta t";
    "s)SELECT sym, count(*) n FROM t GROUP BY sym";"s)SELECT max(px) FROM mkt.trade";".duckdb.main[]";
-   ".pq.conns[]";"hclose h");
-  ("";"";"";"";"`trade";"";"";"";"\"+`sym`px`sz!`:pq:duckdb:mkt:trade/\"";"1000";"";"";"";"`:pq:duckdb:main";"";"");
+   "\\l `:pq:duckdb:mkt";"s)CREATE TABLE tick AS SELECT sym FROM mkt.trade LIMIT 5";"count tick";
+   "hdel `:pq:duckdb:mkt:trade/";".pq.conns[]";"hclose h");
+  ("";"";"";"";"`trade";"";"";"";"\"+`sym`px`sz!`:pq:duckdb:mkt:trade/\"";"1000";"";"";"";"`:pq:duckdb:main";
+   "";"";"5";"`:pq:duckdb:mkt:trade/";"";"");
   ("DuckDB as a q data source: a database is a handle, its tables are q tables, qsql pushes down · page";
    "the .duckdb namespace and the :pq:duckdb: provider arrive with the standard library";
    "open (or create) a database file under the alias mkt: hopen answers `:pq:duckdb:mkt, the alias as a handle";
@@ -504,14 +506,19 @@
    "s) is SQL on the main instance: a q global bound to a DuckDB table is a same-named VIEW there, live";
    "an alias's table is reachable qualified - every alias is a catalog ATTACHed to the one main database";
    "main's own handle: q -duckdb path (or PEACHQ_DUCKDB_MAIN) makes it a file; hopen and hclose refuse it";
+   "DuckDB->q is a LOAD and \\l is its verb: every table of the alias is a q pointer now, at the root, later-wins";
+   "s) after a CREATE or ALTER binds the NEW names of main's catalog (a CTAS prints its Count); a DROP unbinds nothing";
+   "tick is a q name: .duckdb.load[h;tables] is the verb form of \\l, .duckdb.hdel[h;t] of hdel";
+   "hdel on a table coordinate drops the table (or view) itself; a q name bound to it stays and errors on use";
    "every open connection: handle is the alias sym (an int for a socket), with provider and alias";"hclose takes the sym")]];
 .help.i.r[`handles;"\n" sv .help.i.exline'[
   ("\\?handles";"`:pq:duckdb:mkt:/data/market.duckdb";"h:hopen `:pq:qpc:bob:localhost:6000";"h \"tables[]\"";
    "`:pq:qpc:bob \"1+1\"";"dow:get `:pq:qpc:bob:dowt/";"select from dow where Date=1915.04.01";
    "select from `:trades.csv";"select from `:https://www.timestored.com/data/sample/iso10383_mic.csv";
    "select from `:https://www.timestored.com/data/sample/types.json";
-   "t:get `:pq:duckdb:mkt:trade/";"s)SELECT count(*) n FROM t";".pq.conns[]";"hclose h");
-  ("";"";"";"";"2";"";"";"";"";"";"";"";"";"");
+   "t:get `:pq:duckdb:mkt:trade/";"s)SELECT count(*) n FROM t";"\\l `:pq:duckdb:mkt";"hdel `:pq:duckdb:mkt:trade/";
+   ".pq.conns[]";"hclose h");
+  ("";"";"";"";"2";"";"";"";"";"";"";"";"";"`:pq:duckdb:mkt:trade/";"";"");
   ("resource handles: a :pq: symbol names a resource by ALIAS, and a table resource stands in as a table · page";
    "a resource specification: :pq: then the provider, an alias you choose, then what the provider needs";
    "hopen answers the alias symbol `:pq:qpc:bob - it names that connection for as long as it is open";
@@ -524,6 +531,8 @@
    "and json too - nested arrays stay nested lists; \\?loaders has the readers behind this";
    "a DuckDB table bound to a q global is a same-named view on the main DuckDB instance...";
    "...so s) runs SQL over the q name, live: \\?duckdb has the instance";
+   "a provider's tables LOAD like a database directory: \\l on the alias binds every table as a pointer at the root";
+   "hdel on a table coordinate drops the object on the provider (a peer's table too); the q name, if any, stays bound";
    "every open connection: handle, kind, provider, alias, when it opened";
    "close by the handle; the alias goes with the connection")]];
 .help.i.r[`loaders;"\n" sv .help.i.exline'[

@@ -49,8 +49,11 @@ static ray_t* gather(ray_t* x, ray_t* idx) {
  * rather than being guessed, and a plain STRING is never a table source.
  * Enum columns flow through ENUMERATED (wp/foreign-keys.md:59-64) — a phrase that
  * computes on one decays at its verb per the one apply-module law, never here.
- * *nkey (optional, caller-initialised) reports the source's key width so a caller can re-key. */
-static ray_t* ques_from(ray_t* t, int64_t* nkey) {
+ * *nkey (optional, caller-initialised) reports the source's key width so a caller can re-key.
+ * A name resolving to a name is followed, but not forever: `x:`x` (or a hook's local `t` holding
+ * its own table name, seen from the debugger) is 'type, not a stack overflow. */
+#define QUES_FROM_HOPS 8
+static ray_t* ques_from_n(ray_t* t, int64_t* nkey, int hops) {
     if (!t) return q_err(QE_TYPE);
     ray_t* pm = q_provider_from_table(t);   /* carrier / `:pq: hsym: provider truth */
     if (pm) return pm;
@@ -58,15 +61,16 @@ static ray_t* ques_from(ray_t* t, int64_t* nkey) {
         ray_t* v = q_io_resource_table(t);
         if (!v) v = q_eval_value_wrap(t);
         if (RAY_IS_ERR(v)) return v;
-        ray_t* r = ques_from(v, nkey);
+        ray_t* r = ques_from_n(v, nkey, hops + 1);
         ray_release(v);
         return r;
     }
     if (t->type == -RAY_SYM) {
+        if (hops >= QUES_FROM_HOPS) return q_err(QE_TYPE);
         ray_t* v = q_env_resolve(t->i64);
         if (!v) return q_err(QE_NAME);
         if (RAY_IS_ERR(v)) return v;
-        ray_t* r = ques_from(v, nkey);
+        ray_t* r = ques_from_n(v, nkey, hops + 1);
         ray_release(v);
         return r;
     }
@@ -78,6 +82,9 @@ static ray_t* ques_from(ray_t* t, int64_t* nkey) {
     if (q_splay_table_unresolved(t)) return q_err(QE_IO);   /* `flip cols!`:missing/` fails when queried */
     if (q_type_is_table(t)) { ray_retain(t); return t; }
     return q_err(QE_TYPE);
+}
+
+static ray_t* ques_from(ray_t* t, int64_t* nkey) { return ques_from_n(t, nkey, 0);
 }
 
 /* one column of the from-value, OWNED (NULL = no such column) */
