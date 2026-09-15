@@ -3,7 +3,7 @@
 
 #include "qlang/q_comment.h"
 #include "qlang/q_env.h"        /* q_env_get / _ctx / _fullname / _frame_depth */
-#include "qlang/eval/q_eval.h"  /* q_eval_apply_value — the one apply seam */
+#include "qlang/eval/q_eval.h"  /* q_eval_call_sym — the by-name apply seam */
 #include <string.h>
 
 #define COMMENT_ACC_MAX 4096
@@ -181,14 +181,11 @@ void q_comment_stmt_end(void) {
         /* A 3-part record is a file's, a 5-part one a definition's — the hooks
          * take NAMED positional args, never one packed list. */
         int64_t hook = ray_len(r) == 3 ? comment_file_sym() : comment_def_sym();
-        ray_t* fn = q_env_get(hook);                 /* borrowed */
-        if (!fn) continue;
-        ray_retain(fn);
-        ray_t* res = q_eval_apply_value(fn, (ray_t**)ray_data(r), ray_len(r));
+        if (!q_env_get(hook)) continue;
+        ray_t* res = q_eval_call_sym(hook, (ray_t**)ray_data(r), ray_len(r));
         /* A doc-store failure is never a load failure: the record is
          * dropped and the script carries on. */
         if (res) { if (RAY_IS_ERR(res)) ray_error_free(res); else ray_release(res); }
-        ray_release(fn);
     }
     g_firing = 0;
     ray_release(recs);
