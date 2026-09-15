@@ -256,11 +256,11 @@
 .help.cmdline:([]
   option:("-b";"-c r c";"-C r c";"-e 0|1|2";"-E 0|1|2";"-g 0|1";"-l";"-L";"-m path";"-o N";"-p N";"-P N";"-q";
           "-r :h:p";"-s N";"-S N";"-t N";"-T N";"-u file";"-U file";"-w N";"-W N";"-z 0|1";
-          "-classic";"-eval \"src\"";"-eval-before \"src\"";"-h | --help";"--port N");
+          "-classic";"-eval \"src\"";"-eval-before \"src\"";"-h | --help";"--port N";"-duckdb path");
   syscmd:`$("\\_";"\\c";"\\C";"\\e";"\\E";"\\g";"";"";"";"\\o";"\\p";"\\P";"";"\\r";"\\s";"\\S";"\\t";"\\T";"\\u";
-            "";"";"\\W";"\\z";"\\classic";"";"";"\\?cmdline";"\\p");
-  supported:0101100000101000001100111111b;
-  new:      0000000000000000000000011111b;
+            "";"";"\\W";"\\z";"\\classic";"";"";"\\?cmdline";"\\p";"");
+  supported:01011000001010000011001111111b;
+  new:      00000000000000000000000111111b;
   what:("block client write-access";"console size: rows and columns";"HTTP display size";
         "error-trap mode for client evals";"TLS server mode: 0 plain, 1 plain and TLS, 2 TLS only";"garbage-collection mode";
         "log updates to a file";"as -l, synchronous";"memory domain";"offset from UTC in hours";
@@ -270,7 +270,8 @@
         "password file";"workspace memory limit in MB";"start-of-week offset";"date parse order: 0 mdy, 1 dmy";
         "kx-classic mode: legacy table display, kdb-clean environment";
         "run q text after the startup script";"run q text before the startup script";
-        "print this table and exit";"the long spelling of -p"))
+        "print this table and exit";"the long spelling of -p";
+        "the main DuckDB database is this file, not memory: \\?duckdb"))
 
 / .help.cmdline as page lines: `q -flag`, then the marker (- not supported,
 / * peachq only) and the \ command, then the meaning - padded as a table.

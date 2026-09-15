@@ -15,7 +15,7 @@
 #include "qlang/io/q_duckdb_internal.h"
 #include "qlang/io/q_duckdb_types.h"
 #include "qlang/io/q_exedir.h"
-#include "qlang/io/q_provider.h"  /* q_provider_token — the alias handle behind a public verb's c */
+#include "qlang/io/q_provider.h"  /* q_provider_token — the alias handle behind a public verb's c; _register_internal — main's row */
 #include "qlang/base/q_err.h"
 #include "qlang/q_env.h"
 #include "qlang/q_dotz.h"     /* q_dotz_now_ns — the sqllog clock */
@@ -275,21 +275,39 @@ bool q_duckdb_available(void) {
     return g_qd.state == 1;
 }
 
-#define QD_MAX_DB    32
+#define QD_MAX_CAT   32
 #define QD_MAX_CON   64
 #define QD_SLOT_BITS 6           /* low 6 bits = slot (matches QD_MAX_CON) */
 #define QD_TOKEN_MARK (1 << 30)  /* on every token, so no token can spell a provider fd (a small positive int) */
+#define QD_MAIN_ALIAS "main"
 
+/* ONE database per process (ADR 2026-09-15 § Main instance): in-memory, or the file `-duckdb`/PEACHQ_DUCKDB_MAIN
+ * names.  Opened on first need, when it also takes its own connection — the visible handle `:pq:duckdb:main, on
+ * which every ATTACH/DETACH/SET and every link view runs — and registers that handle with the host. */
 static struct {
-    char          path[512];     /* normalized: "" = in-memory (`:default:) */
     duck_database db;
-    int           refs;
-    bool          used;
-} g_dbs[QD_MAX_DB];
+    char          catalog[256];  /* current_database() of a fresh connection: the file stem, or memory */
+    int           slot;
+    int64_t       handle;        /* the sym id the host registered */
+    bool          open;
+} g_main;
+
+static char g_main_path[512];    /* the `-duckdb` path; "" = the env var, else in-memory */
+
+/* Every alias is an ATTACHed catalog NAMED BY THE ALIAS and shared by path: a second alias on the same file would
+ * be DuckDB's "Unique file handle conflict", so it USEs the first's catalog and the DETACH waits for the last
+ * connection (a DETACH from any connection kills the catalog for all).  Path "" is `:default:`, the shared
+ * in-memory catalog "default"; a one-shot on a file attaches under a generated name and detaches on the way out. */
+static struct {
+    char path[512];              /* as given, normalized only for `:default:` */
+    char name[256];
+    int  refs;
+    bool used;
+} g_cats[QD_MAX_CAT];
 
 static struct {
     duck_connection con;
-    int             dbslot;
+    int             cat;         /* the catalog this connection USEs; -1 = main's own */
     uint32_t        gen;         /* bumped on close — stale handles error */
     bool            live;
     char            err[1024];   /* last message behind a 'duckdb here: DuckDB's text or the bridge's reason */
@@ -427,29 +445,19 @@ void q_duckdb_stmt_note(int slot, const char* sql, int64_t t0, bool ok, int64_t 
     sqllog_fire(slot >= 0 ? qd_handle_of(slot) : NULL_I32, sql, t0, q_dotz_now_ns(0) - t0, ok, rows, err);
 }
 
-/* Close one live slot (disconnect; close the db on last ref). */
-static void qd_close_slot(int slot) {
-    if (!g_cons[slot].live) return;
-    QAPI.disconnect(&g_cons[slot].con);
-    g_cons[slot].live = false;
-    g_cons[slot].gen++;
-    int ds = g_cons[slot].dbslot;
-    if (ds >= 0 && g_dbs[ds].used && --g_dbs[ds].refs <= 0) {
-        QAPI.close(&g_dbs[ds].db);
-        g_dbs[ds].used = false;
-        g_dbs[ds].path[0] = '\0';
-    }
-}
-
 void q_duckdb_reset(void) {
     if (g_qd.state != 1) return;
-    for (int i = 0; i < QD_MAX_CON; i++) qd_close_slot(i);
+    for (int i = 0; i < QD_MAX_CON; i++) if (g_cons[i].live) QAPI.disconnect(&g_cons[i].con);
+    if (g_main.open) QAPI.close(&g_main.db);
     /* no q value outlives its runtime, so generations restart at 0 — the
      * next runtime (suite) sees deterministic handles (codex P1) */
     memset(g_cons, 0, sizeof g_cons);
-    memset(g_dbs, 0, sizeof g_dbs);
+    memset(g_cats, 0, sizeof g_cats);
+    memset(&g_main, 0, sizeof g_main);
     g_err_last[0] = '\0';
 }
+
+void q_duckdb_main_path_set(const char* path) { snprintf(g_main_path, sizeof g_main_path, "%s", path ? path : ""); }
 /* the bridge's own refusal: the reason to the message channel, the bare class to the caller */
 ray_t* q_duckdb_fail(int slot, const char* what, const char* why) {
     q_duckdb_err_stash(slot, "%s: %s", what, why);
@@ -531,99 +539,238 @@ static ray_t* qd_qname_fn(ray_t* x) {
     return r;
 }
 
+/* ---- the instance: main, the catalogs, the connections ---- */
+
+static int qd_free_slot(void) {
+    for (int i = 0; i < QD_MAX_CON; i++) if (!g_cons[i].live) return i;
+    return -1;
+}
+
+/* Open main: the file `-duckdb` named, else PEACHQ_DUCKDB_MAIN, else in-memory; cfg (consumed) carries the SET
+ * keys of the open that creates it, so an open-only setting reaches the one place DuckDB takes it. */
+static ray_t* qd_main_open(duck_config cfg) {
+    const char* path = g_main_path[0] ? g_main_path : getenv("PEACHQ_DUCKDB_MAIN");
+    if (path && !*path) path = NULL;
+    int slot = qd_free_slot();
+    if (slot < 0) { if (cfg) QAPI.destroy_config(&cfg); return q_duckdb_fail(-1, "open", "every connection slot is live"); }
+    char* open_err = NULL;
+    duck_state st = QAPI.open_ext(path, &g_main.db, cfg, &open_err);
+    if (cfg) QAPI.destroy_config(&cfg);
+    if (st != QDuckSuccess) {
+        q_duckdb_err_stash(-1, "%s", QD_TEXT(open_err));
+        if (open_err) QAPI.duck_free(open_err);
+        return q_err(QE_DUCKDB);
+    }
+    if (open_err) QAPI.duck_free(open_err);
+    if (QAPI.connect(g_main.db, &g_cons[slot].con) != QDuckSuccess) {
+        QAPI.close(&g_main.db);
+        return q_duckdb_fail(-1, "open", "duckdb_connect failed");
+    }
+    g_cons[slot].cat  = -1;
+    g_cons[slot].live = true;
+    g_main.slot = slot;
+    g_main.open = true;
+    duck_result res;
+    ray_t* e = q_duckdb_run2(slot, "SELECT current_database() AS d", &res, 0);
+    if (!e) {
+        ray_t* row = q_duckdb_codec_result_to_table(slot, &res, NULL, 0, NULL);
+        QAPI.destroy_result(&res);
+        if (row && !RAY_IS_ERR(row) && ray_table_nrows(row) == 1) {
+            size_t ln = 0;
+            const char* d = q_duckdb_schema_text_cell(ray_table_get_col_idx(row, 0), 0, &ln);
+            snprintf(g_main.catalog, sizeof g_main.catalog, "%.*s", (int)(d ? ln : 0), d ? d : "");
+        }
+        q_duckdb_drop(row);
+    } else q_duckdb_drop(e);
+    ray_t* tok = ray_i32(qd_handle_of(slot));
+    g_main.handle = q_provider_register_internal("duckdb", QD_MAIN_ALIAS, tok);
+    ray_release(tok);
+    if (g_main.handle) return NULL;
+    QAPI.disconnect(&g_cons[slot].con);
+    QAPI.close(&g_main.db);
+    memset(&g_cons[slot], 0, sizeof g_cons[slot]);
+    memset(&g_main, 0, sizeof g_main);
+    return q_duckdb_fail(-1, "open", "the host could not register the main handle");
+}
+
+static ray_t* qd_main_need(void) { return g_main.open ? NULL : qd_main_open(NULL); }
+
+/* the ATTACH options (docs: sql/statements/attach), case-insensitive; every other config key is a SET on main */
+static bool qd_attach_option(const char* k) {
+    static const char* const OPTS[] = { "READ_ONLY", "COMPRESS", "TYPE", "DEFAULT_TABLE", "BLOCK_SIZE", "ROW_GROUP_SIZE",
+                                        "STORAGE_VERSION", "ENCRYPTION_KEY", "ENCRYPTION_CIPHER", "RECOVERY_MODE" };
+    for (size_t i = 0; i < sizeof OPTS / sizeof *OPTS; i++) if (strcasecmp(k, OPTS[i]) == 0) return true;
+    return false;
+}
+
+/* text and symbols are quoted in SQL, numbers and booleans bare; the config API takes every value as text */
+static bool qd_cfg_text(ray_t* v, char* out, size_t cap, bool* quote) {
+    const char* tp; int64_t tn;
+    *quote = true;
+    if (!v) return false;
+    if (q_str_text_bytes(v, &tp, &tn)) { snprintf(out, cap, "%.*s", (int)tn, tp); return true; }
+    if (v->type == -RAY_SYM) {
+        ray_t* vs = ray_sym_str(v->i64);
+        if (!vs) return false;
+        snprintf(out, cap, "%.*s", (int)ray_str_len(vs), ray_str_ptr(vs));
+        return true;
+    }
+    *quote = false;
+    if (v->type == -RAY_I64)       snprintf(out, cap, "%lld", (long long)v->i64);
+    else if (v->type == -RAY_I32)  snprintf(out, cap, "%d", v->i32);
+    else if (v->type == -RAY_BOOL) snprintf(out, cap, "%s", v->b8 ? "true" : "false");
+    else if (v->type == -RAY_F64)  snprintf(out, cap, "%g", v->f64);
+    else return false;
+    return true;
+}
+
+static void qd_cfg_put(qd_buf* b, const char* t, bool quote) {
+    if (quote) q_duckdb_put_strlit(b, t, strlen(t));
+    else       q_duckdb_puts(b, t);
+}
+
+/* The config dict split by key (ADR: DuckDB has no per-database settings): ATTACH options into *attach as the
+ * parenthesised clause, every other key SET on main — through the open config when this open creates main, else
+ * as SET statements, so an open-only setting gets DuckDB's own refusal.  Owned error, else NULL. */
+static ray_t* qd_config_apply(ray_t* cfg, qd_buf* attach) {
+    ray_t* keys = ray_dict_keys(cfg);   /* borrowed */
+    ray_t* vals = ray_dict_vals(cfg);   /* borrowed */
+    int64_t np = ray_dict_len(cfg);
+    if (keys->type != RAY_SYM && np) return q_duckdb_fail(-1, "open", "a config key is not a symbol");
+    duck_config oc = NULL;
+    for (int64_t i = 0; i < np; i++) {
+        ray_t* ks = ray_sym_vec_cell(keys, i);
+        char k[128], t[256];
+        bool quote;
+        snprintf(k, sizeof k, "%.*s", ks ? (int)ray_str_len(ks) : 0, ks ? ray_str_ptr(ks) : "");
+        ray_t* iv = ray_i64(i);
+        ray_t* v = ray_at_fn(vals, iv);
+        ray_release(iv);
+        bool ok = qd_cfg_text(v, t, sizeof t, &quote);
+        if (v) ray_release(v);
+        ray_t* e = NULL;
+        if (!ok) e = q_duckdb_fail(-1, k, "a config value must be text, a symbol, a number or a boolean");
+        else if (qd_attach_option(k)) {
+            q_duckdb_puts(attach, attach->len ? ", " : "(");
+            q_duckdb_puts(attach, k);
+            q_duckdb_puts(attach, " ");
+            qd_cfg_put(attach, t, quote);
+        } else if (!g_main.open) {
+            if (!oc && QAPI.create_config(&oc) != QDuckSuccess) e = q_duckdb_fail(-1, "open", "duckdb_create_config failed");
+            else if (QAPI.set_config(oc, k, t) != QDuckSuccess) e = q_duckdb_fail(-1, k, "not a DuckDB config option");
+        } else {
+            qd_buf sb = {0};
+            q_duckdb_puts(&sb, "SET ");
+            q_duckdb_put_ident(&sb, k, strlen(k));
+            q_duckdb_puts(&sb, " = ");
+            qd_cfg_put(&sb, t, quote);
+            e = sb.oom ? q_err(QE_WSFULL) : q_duckdb_exec_stmt(g_main.slot, sb.p);
+            q_duckdb_buf_free(&sb);
+        }
+        if (e) { if (oc) QAPI.destroy_config(&oc); return e; }
+    }
+    if (attach->len) q_duckdb_puts(attach, ")");
+    if (attach->oom) { if (oc) QAPI.destroy_config(&oc); return q_err(QE_WSFULL); }
+    return g_main.open ? NULL : qd_main_open(oc);
+}
+
+static int qd_cat_find(const char* path) {
+    for (int i = 0; i < QD_MAX_CAT; i++) if (g_cats[i].used && strcmp(g_cats[i].path, path) == 0) return i;
+    return -1;
+}
+
+static int qd_cat_attach(const char* path, const char* name, const char* opts) {
+    int c = -1;
+    for (int i = 0; i < QD_MAX_CAT; i++) if (!g_cats[i].used) { c = i; break; }
+    if (c < 0) { q_duckdb_err_stash(-1, "open: every catalog slot is live"); return -1; }
+    qd_buf b = {0};
+    q_duckdb_puts(&b, "ATTACH ");
+    q_duckdb_put_strlit(&b, path[0] ? path : ":memory:", strlen(path[0] ? path : ":memory:"));
+    q_duckdb_puts(&b, " AS ");
+    q_duckdb_put_ident(&b, name, strlen(name));
+    if (opts[0]) { q_duckdb_puts(&b, " "); q_duckdb_puts(&b, opts); }
+    ray_t* e = b.oom ? q_err(QE_WSFULL) : q_duckdb_exec_stmt(g_main.slot, b.p);
+    q_duckdb_buf_free(&b);
+    if (e) { q_duckdb_drop(e); return -1; }
+    snprintf(g_cats[c].path, sizeof g_cats[c].path, "%s", path);
+    snprintf(g_cats[c].name, sizeof g_cats[c].name, "%s", name);
+    g_cats[c].refs = 0;
+    g_cats[c].used = true;
+    return c;
+}
+
+static void qd_cat_release(int c) {
+    if (c < 0 || !g_cats[c].used || --g_cats[c].refs > 0) return;
+    qd_buf b = {0};
+    q_duckdb_puts(&b, "DETACH ");
+    q_duckdb_put_ident(&b, g_cats[c].name, strlen(g_cats[c].name));
+    ray_t* e = b.oom ? NULL : q_duckdb_exec_stmt(g_main.slot, b.p);
+    if (e) q_duckdb_drop(e);
+    q_duckdb_buf_free(&b);
+    g_cats[c].used = false;
+}
+
+/* Close one live slot: disconnect, and the catalog it used goes with its last connection.  Main's own is closed
+ * only by q_duckdb_reset. */
+static void qd_close_slot(int slot) {
+    if (!g_cons[slot].live || (g_main.open && slot == g_main.slot)) return;
+    QAPI.disconnect(&g_cons[slot].con);
+    g_cons[slot].live = false;
+    g_cons[slot].gen++;
+    qd_cat_release(g_cons[slot].cat);
+}
+
 /* .duckdb.i.open[alias; rest; timeout; config] — the host's open hook.  rest is the coordinate's config text: the
- * db path, "default:" (or empty) = the shared in-memory db; timeout means nothing to an in-process engine; config
- * is :: or the DuckDB option dict.  The alias is unused until A1 names the catalog by it.  Answers the TOKEN. */
+ * db path, "default:" (or empty) = the shared in-memory catalog; timeout means nothing to an in-process engine;
+ * config is :: or the option dict (qd_config_apply).  The alias names the catalog the path is attached under; the
+ * empty alias is a one-shot, served under a generated name unless the path is already attached.  Answers the TOKEN. */
 static ray_t* qd_open_wrap(ray_t** args, int64_t n) {
     ray_t* e = qd_door(args, n, 4, NULL);
     if (e) return e;
+    char alias[256];
     const char* tp; int64_t tn;
+    if (!qd_sym_text(args[0], alias, sizeof alias)) return q_duckdb_fail(-1, "open", "alias is not a symbol");
+    if (strcmp(alias, QD_MAIN_ALIAS) == 0) return q_err(QE_DOMAIN);
     if (!q_str_text_bytes(args[1], &tp, &tn)) return q_duckdb_fail(-1, "open", "path is not text");
     if (tn >= 512) return q_duckdb_fail(-1, "open", "path is longer than 511 bytes");
-    ray_t* cfg_dict = args[3] && !RAY_IS_NULL(args[3]) ? args[3] : NULL;
-    if (cfg_dict && cfg_dict->type != RAY_DICT) return q_duckdb_fail(-1, "open", "config is not a dict");
-    char norm[512];
-    if (tn == 0 || (tn == 8 && memcmp(tp, "default:", 8) == 0)) norm[0] = '\0';
-    else snprintf(norm, sizeof norm, "%.*s", (int)tn, tp);
+    ray_t* cfg = args[3] && !RAY_IS_NULL(args[3]) ? args[3] : NULL;
+    if (cfg && cfg->type != RAY_DICT) return q_duckdb_fail(-1, "open", "config is not a dict");
+    char path[512];
+    if (tn == 0 || (tn == 8 && memcmp(tp, "default:", 8) == 0)) path[0] = '\0';
+    else snprintf(path, sizeof path, "%.*s", (int)tn, tp);
 
-    /* connection slot FIRST: capacity failure must not open/cache a db (codex P2) */
-    int slot = -1;
-    for (int i = 0; i < QD_MAX_CON; i++) if (!g_cons[i].live) { slot = i; break; }
-    if (slot < 0) return q_duckdb_fail(-1, "open", "every connection slot is live");
-
-    /* db cache by normalized path; config on an already-open db -> error */
-    int ds = -1;
-    for (int i = 0; i < QD_MAX_DB; i++)
-        if (g_dbs[i].used && strcmp(g_dbs[i].path, norm) == 0) { ds = i; break; }
-    if (ds >= 0 && cfg_dict && ray_dict_len(cfg_dict) > 0)
-        return q_duckdb_fail(-1, "open", "config on a database that is already open");
-    if (ds < 0) {
-        for (int i = 0; i < QD_MAX_DB; i++) if (!g_dbs[i].used) { ds = i; break; }
-        if (ds < 0) return q_duckdb_fail(-1, "open", "every database slot is live");
-
-        duck_config cfg = NULL;
-        if (cfg_dict && ray_dict_len(cfg_dict) > 0) {
-            if (QAPI.create_config(&cfg) != QDuckSuccess) return q_duckdb_fail(-1, "open", "duckdb_create_config failed");
-            ray_t* keys = ray_dict_keys(cfg_dict);   /* borrowed */
-            ray_t* vals = ray_dict_vals(cfg_dict);   /* borrowed */
-            int64_t np = ray_dict_len(cfg_dict);
-            for (int64_t i = 0; i < np; i++) {
-                char kbuf[128], vbuf[256];
-                kbuf[0] = vbuf[0] = '\0';
-                if (keys->type == RAY_SYM) {
-                    ray_t* ks = ray_sym_vec_cell(keys, i);
-                    if (ks) snprintf(kbuf, sizeof kbuf, "%.*s",
-                                     (int)ray_str_len(ks), ray_str_ptr(ks));
-                }
-                if (!kbuf[0]) {
-                    QAPI.destroy_config(&cfg);
-                    return q_duckdb_fail(-1, "open", "a config key is not a symbol");
-                }
-                ray_t* iv = ray_i64(i);
-                ray_t* v = ray_at_fn(vals, iv);
-                ray_release(iv);
-                if (v) {
-                    const char* tp; int64_t tn;
-                    if (q_str_text_bytes(v, &tp, &tn))
-                        snprintf(vbuf, sizeof vbuf, "%.*s", (int)tn, tp);
-                    else if (v->type == -RAY_SYM) {
-                        ray_t* vs = ray_sym_str(v->i64);
-                        if (vs) snprintf(vbuf, sizeof vbuf, "%.*s",
-                                         (int)ray_str_len(vs), ray_str_ptr(vs));
-                    }
-                    else if (v->type == -RAY_I64)  snprintf(vbuf, sizeof vbuf, "%lld", (long long)v->i64);
-                    else if (v->type == -RAY_I32)  snprintf(vbuf, sizeof vbuf, "%d", v->i32);
-                    else if (v->type == -RAY_BOOL) snprintf(vbuf, sizeof vbuf, "%s", v->b8 ? "true" : "false");
-                    else if (v->type == -RAY_F64)  snprintf(vbuf, sizeof vbuf, "%g", v->f64);
-                    ray_release(v);
-                }
-                if (QAPI.set_config(cfg, kbuf, vbuf) != QDuckSuccess) {
-                    QAPI.destroy_config(&cfg);
-                    return q_duckdb_fail(-1, kbuf, "not a DuckDB config option");
-                }
-            }
-        }
-        char* open_err = NULL;
-        duck_state st = QAPI.open_ext(norm[0] ? norm : NULL, &g_dbs[ds].db, cfg, &open_err);
-        if (cfg) QAPI.destroy_config(&cfg);
-        if (st != QDuckSuccess) {   /* connect-time failure: connection-less stash */
-            q_duckdb_err_stash(-1, "%s", QD_TEXT(open_err));
-            if (open_err) QAPI.duck_free(open_err);
-            return q_err(QE_DUCKDB);
-        }
-        if (open_err) QAPI.duck_free(open_err);
-        snprintf(g_dbs[ds].path, sizeof g_dbs[ds].path, "%s", norm);
-        g_dbs[ds].refs = 0;
-        g_dbs[ds].used = true;
+    qd_buf opts = {0};
+    e = cfg ? qd_config_apply(cfg, &opts) : qd_main_need();
+    if (e) { q_duckdb_buf_free(&opts); return e; }
+    /* connection slot FIRST: capacity failure must not attach a catalog (codex P2) */
+    int slot = qd_free_slot();
+    if (slot < 0) { q_duckdb_buf_free(&opts); return q_duckdb_fail(-1, "open", "every connection slot is live"); }
+    int cat = qd_cat_find(path);
+    if (cat >= 0 && opts.len) { q_duckdb_buf_free(&opts); return q_duckdb_fail(-1, "open", "ATTACH options on a catalog that is already attached"); }
+    if (cat < 0) {
+        static unsigned oneshot;
+        char name[256];
+        if (!path[0]) snprintf(name, sizeof name, "default");
+        else if (alias[0]) snprintf(name, sizeof name, "%s", alias);
+        else snprintf(name, sizeof name, "_t%u", ++oneshot);
+        cat = qd_cat_attach(path, name, opts.len ? opts.p : "");
     }
+    q_duckdb_buf_free(&opts);
+    if (cat < 0) return q_err(QE_DUCKDB);
 
-    if (QAPI.connect(g_dbs[ds].db, &g_cons[slot].con) != QDuckSuccess) {
-        if (g_dbs[ds].refs == 0) { QAPI.close(&g_dbs[ds].db); g_dbs[ds].used = false; }
+    if (QAPI.connect(g_main.db, &g_cons[slot].con) != QDuckSuccess) {
+        qd_cat_release(cat);
         return q_duckdb_fail(-1, "open", "duckdb_connect failed");
     }
-    g_dbs[ds].refs++;
-    g_cons[slot].dbslot = ds;
-    g_cons[slot].live   = true;
+    g_cats[cat].refs++;
+    g_cons[slot].cat  = cat;
+    g_cons[slot].live = true;
+    qd_buf b = {0};
+    q_duckdb_puts(&b, "USE ");
+    q_duckdb_put_ident(&b, g_cats[cat].name, strlen(g_cats[cat].name));
+    e = b.oom ? q_err(QE_WSFULL) : q_duckdb_exec_stmt(slot, b.p);
+    q_duckdb_buf_free(&b);
+    if (e) { qd_close_slot(slot); return e; }
     return ray_i32(qd_handle_of(slot));
 }
 
@@ -631,7 +778,77 @@ static ray_t* qd_close_fn(ray_t* x) {
     int slot;
     ray_t* e = qd_door(&x, 1, 1, &slot);
     if (e) return e;
+    if (g_main.open && slot == g_main.slot) return q_err(QE_DOMAIN);
     qd_close_slot(slot);
+    ray_retain(RAY_NULL_OBJ);
+    return RAY_NULL_OBJ;
+}
+
+/* .duckdb.i.main[] — the handle; a native rather than a q-cached token so the first call is what opens main */
+static ray_t* qd_main_fn(ray_t** args, int64_t n) {
+    ray_t* e = qd_door(args, n, 1, NULL);
+    if (!e) e = qd_main_need();
+    return e ? e : ray_sym(g_main.handle);
+}
+
+/* .duckdb.i.link[token; qname; table] — the q global qname, bound to the table the token's connection sees, becomes
+ * the same-named VIEW in main's own catalog: CREATE OR REPLACE VIEW "qname" AS SELECT * FROM "cat"."schema"."table".
+ * A view, never a copy; once the catalog detaches it errors on use, as the pointer's own get does.  A pointer into
+ * main's own catalog under the global's own name already IS that name there: nothing to make (the view would
+ * collide with the table it names; DuckDB folds identifier case). */
+static ray_t* qd_link_wrap(ray_t** args, int64_t n) {
+    int slot;
+    qd_name_t name;
+    char qn[256];
+    ray_t* e = qd_door(args, n, 3, &slot);
+    if (!e && !qd_sym_text(args[1], qn, sizeof qn)) e = q_duckdb_fail(slot, "link", "qname is not a symbol");
+    if (!e) e = qd_name_arg(slot, args[2], &name);
+    if (e) return e;
+    const char* cat = g_cons[slot].cat >= 0 ? g_cats[g_cons[slot].cat].name : g_main.catalog;
+    const char* schema = name.schema[0] ? name.schema : "main";
+    if (g_cons[slot].cat < 0 && strcasecmp(qn, name.part[name.n - 1]) == 0) { ray_retain(RAY_NULL_OBJ); return RAY_NULL_OBJ; }
+    qd_buf b = {0};
+    q_duckdb_puts(&b, "CREATE OR REPLACE VIEW ");
+    q_duckdb_put_ident(&b, qn, strlen(qn));
+    q_duckdb_puts(&b, " AS SELECT * FROM ");
+    q_duckdb_put_ident(&b, cat, strlen(cat));
+    q_duckdb_puts(&b, ".");
+    q_duckdb_put_ident(&b, schema, strlen(schema));
+    q_duckdb_puts(&b, ".");
+    q_duckdb_put_ident(&b, name.part[name.n - 1], strlen(name.part[name.n - 1]));
+    e = b.oom ? q_err(QE_WSFULL) : q_duckdb_exec_stmt(g_main.slot, b.p);
+    q_duckdb_buf_free(&b);
+    if (e) return e;
+    ray_retain(RAY_NULL_OBJ);
+    return RAY_NULL_OBJ;
+}
+
+/* .duckdb.i.unlink[token; qname] — the token is not looked at: the view drops by name after its alias is closed too;
+ * the probe is what keeps a self-pointer symmetric (the name is a table then, and DROP VIEW IF EXISTS would refuse it) */
+static ray_t* qd_unlink_wrap(ray_t** args, int64_t n) {
+    char qn[256];
+    ray_t* e = qd_door(args, n, 2, NULL);
+    if (e) return e;
+    if (!qd_sym_text(args[1], qn, sizeof qn)) return q_duckdb_fail(-1, "unlink", "qname is not a symbol");
+    if (!g_main.open) { ray_retain(RAY_NULL_OBJ); return RAY_NULL_OBJ; }
+    qd_buf b = {0};
+    q_duckdb_puts(&b, "SELECT view_name FROM duckdb_views() WHERE NOT internal AND database_name = current_database() AND view_name = ");
+    q_duckdb_put_strlit(&b, qn, strlen(qn));
+    duck_result res;
+    e = b.oom ? q_err(QE_WSFULL) : q_duckdb_run2(g_main.slot, b.p, &res, 0);
+    q_duckdb_buf_free(&b);
+    if (e) return e;
+    ray_t* hit = q_duckdb_codec_result_to_table(g_main.slot, &res, NULL, 0, NULL);
+    QAPI.destroy_result(&res);
+    bool is_view = hit && !RAY_IS_ERR(hit) && ray_table_nrows(hit) == 1;
+    q_duckdb_drop(hit);
+    if (is_view) {
+        q_duckdb_puts(&b, "DROP VIEW ");
+        q_duckdb_put_ident(&b, qn, strlen(qn));
+        e = b.oom ? q_err(QE_WSFULL) : q_duckdb_exec_stmt(g_main.slot, b.p);
+        q_duckdb_buf_free(&b);
+        if (e) return e;
+    }
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;
 }
@@ -1159,6 +1376,9 @@ void q_duckdb_register(void) {
     /* NO dlopen here — the library is resolved lazily on first use. */
     qd_bind_vary (".duckdb.i.open",   qd_open_wrap);
     qd_bind_unary(".duckdb.i.close",  qd_close_fn);
+    qd_bind_vary (".duckdb.i.main",   qd_main_fn);
+    qd_bind_vary (".duckdb.i.link",   qd_link_wrap);
+    qd_bind_vary (".duckdb.i.unlink", qd_unlink_wrap);
     qd_bind_unary(".duckdb.i.err",    qd_err_fn);
     qd_bind_vary (".duckdb.i.exec",   qd_sql_wrap);
     qd_bind_vary (".duckdb.i.execx",  qd_sqlx_wrap);

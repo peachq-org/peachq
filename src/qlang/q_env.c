@@ -15,6 +15,7 @@
 #include "qlang/q_dotz.h"         /* the .z.pX / .z.bm hook alias — one table for set AND unbind */
 #include "qlang/eval/q_view.h"    /* view hooks: set/unbind invalidation, dot-'nyi */
 #include "qlang/io/q_io.h"        /* q_io_set — `set`'s file half */
+#include "qlang/io/q_provider.h"  /* the link seam: q_provider_carrier_is, _link/_unlink — the HOST, never a provider */
 #include "qlang/q_prim.h"         /* q_enum_deref — FK/link dotted-walk gather */
 #include "lang/internal.h"        /* ray_error */
 #include "table/sym.h"         /* ray_sym_intern_runtime, ray_sym_str, ray_read_sym */
@@ -139,6 +140,21 @@ ray_t* q_env_get(int64_t sym) {
 
 /* ---- assignment: path-copy amend down the dict chain ---- */
 
+/* The provider carrier the last leaf amend or remove displaced, retained: the link seam's unlink reads it
+ * (q_env_set / q_env_unbind).  One probe + one mark test per write is the whole cost to an ordinary assignment. */
+static ray_t* g_carrier_displaced;
+
+static void env_carrier_displace(ray_t* holder, int64_t seg) {
+    ray_t* prev = ray_dict_probe_sym_borrowed(holder, seg);
+    if (prev && q_provider_carrier_is(prev)) { ray_retain(prev); g_carrier_displaced = prev; }
+}
+
+static ray_t* env_carrier_take(void) {
+    ray_t* d = g_carrier_displaced;
+    g_carrier_displaced = NULL;
+    return d;
+}
+
 /* Consumes d; owned result, NULL on failure.  Missing ancestors conjure
  * marked dicts (`.fee.fi.fo:42` creates `.fee`, `.fee.fi`); an existing
  * non-dict (or unreachable collapsed slot) intermediate refuses. */
@@ -151,6 +167,7 @@ static ray_t* env_amend(ray_t* d, const int64_t* segs, int nseg, int i, ray_t* v
     }
     ray_t* r;
     if (i == nseg - 1) {
+        env_carrier_displace(d, segs[i]);
         r = ray_dict_upsert(d, k, val);
     } else {
         ray_t* child = ray_dict_probe_sym_borrowed(d, segs[i]);
@@ -213,7 +230,20 @@ static ray_err_t env_put(int64_t sym, ray_t* val, int boot_new) {
     return e;
 }
 
-ray_err_t q_env_bind(int64_t sym, ray_t* val) { return env_put(sym, val, 1); }
+/* a bind is a park or a bootstrap write, invisible to the link seam as it is to views */
+ray_err_t q_env_bind(int64_t sym, ray_t* val) {
+    ray_err_t e = env_put(sym, val, 1);
+    ray_t* d = env_carrier_take();
+    if (d) ray_release(d);
+    return e;
+}
+
+/* the link seam: the carrier a write displaced, then the one it bound, under the name the write LANDED on */
+static void env_link(int64_t sym, ray_t* old, ray_t* val) {
+    int64_t full = q_env_fullname(sym, NULL);
+    if (old) q_provider_unlink(full, old);
+    if (q_provider_carrier_is(val)) q_provider_link(full, val);
+}
 
 /* q_env_take — see q_env.h.  The park is a plain bind, so it stays invisible
  * to views: only the caller's rebind is an observable write.  Under `\d` a
@@ -283,7 +313,12 @@ ray_err_t q_env_set(int64_t sym, ray_t* val) {
         else if (root)   e = env_root_splat(val);
         else {
             e = env_put(sym, val, 0);
-            if (e == RAY_OK) q_view_on_global_set(sym);   /* invalidation + .z.vs */
+            ray_t* old = env_carrier_take();
+            if (e == RAY_OK) {
+                q_view_on_global_set(sym);   /* invalidation + .z.vs */
+                if (old || q_provider_carrier_is(val)) env_link(sym, old, val);
+            }
+            if (old) ray_release(old);
         }
     }
     if (e == RAY_OK) q_comment_on_global_set(sym, val);
@@ -328,6 +363,7 @@ ray_err_t q_env_unbind(int64_t sym) {
                     if (key) ray_release(key);
                     e = RAY_ERR_OOM;
                 } else {
+                    env_carrier_displace(holder, segs[k - 1]);
                     ray_retain(holder);
                     ray_t* nd = ray_dict_remove(holder, key);
                     ray_release(key);
@@ -346,7 +382,12 @@ ray_err_t q_env_unbind(int64_t sym) {
         }
     }
     ray_release(s);
-    if (e == RAY_OK) q_view_on_global_unbind(sym);   /* dependents go pending */
+    ray_t* old = env_carrier_take();
+    if (e == RAY_OK) {
+        q_view_on_global_unbind(sym);   /* dependents go pending */
+        if (old) q_provider_unlink(q_env_fullname(sym, NULL), old);
+    }
+    if (old) ray_release(old);
     return e;
 }
 
