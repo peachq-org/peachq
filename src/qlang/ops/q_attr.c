@@ -64,10 +64,10 @@ ray_t* q_attr_stamp_sorted(ray_t* x) {
     return x;
 }
 
-/* True iff r[from..] is non-descending.  Composes `<=`/`min`/truthiness over
- * two zero-copy slice VIEWS, so it owns no type knowledge (symbols included). */
-static bool tail_non_descending(ray_t* r, int64_t from) {
-    int64_t m = ray_len(r) - from - 1;
+/* True iff r[from..from+n) is non-descending.  Composes `<=`/`min`/truthiness
+ * over two zero-copy slice VIEWS, so it owns no type knowledge (symbols included). */
+static bool non_descending(ray_t* r, int64_t from, int64_t n) {
+    int64_t m = n - 1;
     if (m < 1) return true;
     ray_t* a = ray_vec_slice(r, from, m);
     ray_t* b = ray_vec_slice(r, from + 1, m);
@@ -178,7 +178,7 @@ ray_t* q_attr_append_keep(char lx, int64_t nx, ray_t* r) {
     if (r->attrs & (RAY_ATTR_SLICE | RAY_ATTR_ARENA)) return r;
     if (nx > ray_len(r)) return r;
     if (lx == 's') {
-        if (!tail_non_descending(r, nx > 0 ? nx - 1 : 0)) return r;
+        if (!non_descending(r, nx > 0 ? nx - 1 : 0, ray_len(r) - (nx > 0 ? nx - 1 : 0))) return r;
         r = ray_cow(r);                 /* rc==1 here (fresh append result): in place */
         if (r && !RAY_IS_ERR(r)) r->attrs |= RAY_ATTR_SORTED;
         return r;
@@ -186,6 +186,18 @@ ray_t* q_attr_append_keep(char lx, int64_t nx, ray_t* r) {
     if (r->rc > 1 || ray_attr_numeric_class(r->type) < 0) return r;
     if (lx == 'u' && !(ray_attr_verify_distinct(r) && attr_no_dup_nulls(r))) return r;
     return q_attr_stamp_trusted(r, lx);
+}
+
+/* The store twin of the append law: s survives a store at pos[0..m) iff every written cell still sits between its
+ * neighbours (the same scan, one window per position).  An index-backed letter is #559's and untouched.  r is the
+ * writer's, already written. */
+void q_attr_store_keep(ray_t* r, const int64_t* pos, int64_t m) {
+    if (!r || !ray_is_vec(r) || !(r->attrs & RAY_ATTR_SORTED)) return;
+    int64_t n = ray_len(r);
+    for (int64_t j = 0; j < m; j++) {
+        int64_t from = pos[j] > 0 ? pos[j] - 1 : 0;
+        if (!non_descending(r, from, n - from < 3 ? n - from : 3)) { r->attrs &= (uint8_t)~RAY_ATTR_SORTED; return; }
+    }
 }
 
 /* Compose the kdb `u#`/`p#` accelerator on a cleared base column.  This is the
@@ -223,7 +235,7 @@ static ray_t* attr_set_table_s(ray_t* y) {
         ray_t* col = ray_table_get_col_idx(y, c);           /* borrowed */
         if (!col) { ray_release(out); return q_err(QE_TYPE); }
         if (c == 0) {
-            if (!tail_non_descending(col, 0)) { ray_release(out); return ray_error("s-fail", NULL); }
+            if (!non_descending(col, 0, ray_len(col))) { ray_release(out); return ray_error("s-fail", NULL); }
             ray_retain(col);
             ray_t* pc = ray_cow(col);                        /* copy-on-shared (:29) */
             if (!pc || RAY_IS_ERR(pc)) { ray_release(out); return pc ? pc : q_err(QE_OOM); }
@@ -248,7 +260,7 @@ static ray_t* attr_set_keyed_s(ray_t* y) {
     ray_t* kt = ray_dict_keys(y);                            /* borrowed key TABLE */
     if (!kt || kt->type != RAY_TABLE || ray_table_ncols(kt) < 1) return q_err(QE_TYPE);
     ray_t* c0 = ray_table_get_col_idx(kt, 0);
-    if (!c0 || !tail_non_descending(c0, 0)) return ray_error("s-fail", NULL);
+    if (!c0 || !non_descending(c0, 0, ray_len(c0))) return ray_error("s-fail", NULL);
     kt->attrs |= RAY_ATTR_SORTED;
     ray_t* vals = ray_dict_vals(y);
     ray_retain(kt); ray_retain(vals);
@@ -262,7 +274,7 @@ static ray_t* attr_set_keyed_s(ray_t* y) {
 static ray_t* attr_set_dict_s(ray_t* y) {
     ray_t* k = ray_dict_keys(y);                             /* borrowed */
     if (!k || !ray_is_vec(k)) return q_err(QE_TYPE);
-    if (!tail_non_descending(k, 0)) return ray_error("s-fail", NULL);
+    if (!non_descending(k, 0, ray_len(k))) return ray_error("s-fail", NULL);
     ray_retain(k);
     ray_t* nk = ray_cow(k);
     if (!nk || RAY_IS_ERR(nk)) return nk ? nk : q_err(QE_OOM);

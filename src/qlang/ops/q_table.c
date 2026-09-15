@@ -580,6 +580,33 @@ static ray_t* table_append_inplace(ray_t* flat, ray_t* rows) {
     return flat;
 }
 
+/* THE strictness law, one spelling whether the target has rows or not: a simple typed column takes the SAME
+ * element type — except int<->long, where the payload is cast TO THE COLUMN (kdb 2.x was 32-bit with `i` the
+ * default, 3.x 64-bit with `j`, and inserts come from outside, so KX kept i<->j working: owner ruling 2026-09-13;
+ * ref/insert.md:85 is silent).  Nothing else widens — `insert[`t;(`ferrari;8.22)]` into a long column is 'type
+ * (ref/join.md:186); a nested (list) target accepts anything; an enum column coerces the payload into its domain
+ * whole and keeps 20h (the FK write law; a LINKED column carries its mapping onto the adopted ints); a 0-row
+ * payload has nothing to check.  The payload re-made with the cast columns under the target's names, owned — for
+ * an EMPTY target that remake IS the appended table. */
+ray_t* q_table_rows_typed(ray_t* flat, ray_t* rows) {
+    int64_t nc = ray_table_ncols(flat);
+    int checked = ray_table_nrows(rows) > 0;
+    ray_t* typed = ray_table_new(nc > 0 ? nc : 1);
+    for (int64_t c = 0; c < nc && !RAY_IS_ERR(typed); c++) {
+        ray_t* oc = ray_table_get_col_idx(flat, c);
+        ray_t* col = ray_table_get_col_idx(rows, c);
+        if (oc && col && checked && oc->type == RAY_ENUM)
+            col = q_enum_col_ingest(oc, col);
+        else if (oc && col && checked && ray_is_vec(oc) && col->type != oc->type)
+            col = q_type_widens(oc->type, col->type) ? q_dollar_cast(oc->type, col) : q_err(QE_TYPE);
+        else if (col) ray_retain(col);
+        if (!col || RAY_IS_ERR(col)) { ray_release(typed); return col ? col : q_err(QE_TYPE); }
+        typed = ray_table_add_col(typed, ray_table_col_name(flat, c), col);
+        ray_release(col);
+    }
+    return typed ? typed : q_err(QE_OOM);
+}
+
 /* Append normalized rows to a flat table.  An EMPTY target (0 rows — e.g.
  * `([]name:();age:())`) adopts the payload columns wholesale: that is how the
  * first insert types an untyped empty schema (insert.qcmd `meta u`), and how a
@@ -587,29 +614,8 @@ static ray_t* table_append_inplace(ray_t* flat, ray_t* rows) {
  * set is the target's either way. */
 ray_t* q_table_append(ray_t* flat, ray_t* rows, int exclusive) {
     int64_t nc = ray_table_ncols(flat);
-    /* THE strictness law, one spelling whether the target has rows or not: a simple typed column takes the SAME
-     * element type — except int<->long, where the payload is cast TO THE COLUMN (kdb 2.x was 32-bit with `i` the
-     * default, 3.x 64-bit with `j`, and inserts come from outside, so KX kept i<->j working: owner ruling 2026-09-13;
-     * ref/insert.md:85 is silent).  Nothing else widens — `insert[`t;(`ferrari;8.22)]` into a long column is 'type
-     * (ref/join.md:186); a nested (list) target accepts anything; an enum column coerces in its own arm; a 0-row
-     * payload has nothing to check.  The payload is re-made with the cast columns under the target's names — and
-     * for an EMPTY target that remake IS the result, its ENUM schema columns ingested through their domain (the FK
-     * write law; a LINKED column carries its mapping onto the adopted ints). */
-    int empty = ray_table_nrows(flat) == 0, checked = ray_table_nrows(rows) > 0;
-    ray_t* typed = ray_table_new(nc > 0 ? nc : 1);
-    for (int64_t c = 0; c < nc && !RAY_IS_ERR(typed); c++) {
-        ray_t* oc = ray_table_get_col_idx(flat, c);
-        ray_t* col = ray_table_get_col_idx(rows, c);
-        if (oc && col && checked && oc->type == RAY_ENUM && empty)
-            col = q_enum_col_ingest(oc, col);
-        else if (oc && col && checked && ray_is_vec(oc) && oc->type != RAY_ENUM && col->type != oc->type)
-            col = q_type_widens(oc->type, col->type) ? q_dollar_cast(oc->type, col) : q_err(QE_TYPE);
-        else if (col) ray_retain(col);
-        if (!col || RAY_IS_ERR(col)) { ray_release(typed); return col ? col : q_err(QE_TYPE); }
-        typed = ray_table_add_col(typed, ray_table_col_name(flat, c), col);
-        ray_release(col);
-    }
-    if (empty || !typed || RAY_IS_ERR(typed)) return typed ? typed : q_err(QE_OOM);
+    ray_t* typed = q_table_rows_typed(flat, rows);
+    if (ray_table_nrows(flat) == 0 || RAY_IS_ERR(typed)) return typed;
     rows = typed;                                                          /* owned from here */
     ray_t* out = NULL;
     if (!exclusive || !(out = table_append_inplace(flat, rows))) {
