@@ -295,6 +295,8 @@ static bool qd_map_read_logical(duck_logical_type lt, qd_colmap_t* out, duck_typ
     out->leaf  = leaf;
     out->rec   = NULL;
     out->depth = depth;
+    /* a list of unsigned bytes lands on q's byte-vector shape, which is BLOB's: refused (ruled 2026-09-15) */
+    if (depth && *miss == QDUCK_TYPE_UTINYINT) { *why = "utinyint list: no q carrier distinct from BLOB"; leaf = NULL; }
     bool ok = leaf && !q_duckdb_codec_is_rec(leaf);
     if (leaf && !ok) ok = qd_rec_read_type(cur, *miss, out, miss, why);
     if (owned) QAPI.destroy_logical_type(&owned);
