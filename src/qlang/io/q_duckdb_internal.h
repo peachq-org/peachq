@@ -110,6 +110,8 @@ void   q_duckdb_codec_map_free(qd_colmap_t* cm);
 void   q_duckdb_codec_maps_free(qd_colmap_t* cms, int64_t n);
 void   q_duckdb_codec_spell_map(const qd_colmap_t* cm, qd_buf* b);
 ray_t* q_duckdb_codec_map_declared(int slot, ray_t* col, duck_logical_type lt, duck_type kind, qd_colmap_t* cm);
+bool   q_duckdb_codec_declared_stage_map(duck_logical_type lt, qd_colmap_t* out);
+bool   q_duckdb_codec_untyped(ray_t* col);
 bool   q_duckdb_codec_map_bits(ray_t* col, int depth, qd_colmap_t* cm);
 int64_t q_duckdb_codec_rec_rows(ray_t* col);
 
