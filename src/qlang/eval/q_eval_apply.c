@@ -361,6 +361,10 @@ int q_eval_apply_store_elem(ray_t* vec, int64_t i, ray_t* e) {
             ((bool*)ray_data(vec))[i] = e->b8; return 0;
         case RAY_BYTE_ONLY:
             ((uint8_t*)ray_data(vec))[i] = (uint8_t)qe_elem_i64(e); return 0;
+        case RAY_SYM:                                /* the atom's id is the RUNTIME domain's: only such a vector takes it */
+            if (e->type != -RAY_SYM || ray_sym_vec_domain(vec) != ray_sym_runtime_domain() ||
+                ray_sym_dict_width(e->i64 + 1) > (vec->attrs & RAY_SYM_W_MASK)) return -1;
+            ray_write_sym(ray_data(vec), i, (uint64_t)e->i64, RAY_SYM, vec->attrs); return 0;
         default: return -1;
     }
 }
