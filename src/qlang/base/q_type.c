@@ -35,6 +35,12 @@ int q_type_is_num_tag(int8_t t) {
            t == -RAY_I32 || t == -RAY_I64 || t == -RAY_F32 || t == -RAY_F64;
 }
 
+int q_type_widens(int8_t a, int8_t b) {
+    if (a < 0) a = (int8_t)-a;
+    if (b < 0) b = (int8_t)-b;
+    return a != b && (a == RAY_I32 || a == RAY_I64) && (b == RAY_I32 || b == RAY_I64);
+}
+
 /* ---- tag <-> name vocabulary --------------------------------------------- */
 
 /* Vector tag -> kdb type name (`meta`/`key` type rows, empty-vec display).

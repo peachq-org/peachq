@@ -603,8 +603,7 @@ ray_t* q_table_append(ray_t* flat, ray_t* rows, int exclusive) {
         if (oc && col && checked && oc->type == RAY_ENUM && empty)
             col = q_enum_col_ingest(oc, col);
         else if (oc && col && checked && ray_is_vec(oc) && oc->type != RAY_ENUM && col->type != oc->type)
-            col = (oc->type == RAY_I32 || oc->type == RAY_I64) && (col->type == RAY_I32 || col->type == RAY_I64)
-                ? q_dollar_cast(oc->type, col) : q_err(QE_TYPE);
+            col = q_type_widens(oc->type, col->type) ? q_dollar_cast(oc->type, col) : q_err(QE_TYPE);
         else if (col) ray_retain(col);
         if (!col || RAY_IS_ERR(col)) { ray_release(typed); return col ? col : q_err(QE_TYPE); }
         typed = ray_table_add_col(typed, ray_table_col_name(flat, c), col);
