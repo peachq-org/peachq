@@ -1,7 +1,7 @@
 /* q_conn — see q_conn.h.  Sockets come ONLY from the IPC walk (the liveness
  * authority — a stale q_handles socket record can never resurrect a dead
  * connection); q_handles enriches outbound sockets (user, redacted addr) and
- * contributes the non-socket rows; q_provider adds provider/alias detail.
+ * contributes the non-socket rows; q_provider adds provider/alias/handle detail.
  * Rows sort by fd.  n/m (unsent msgs/bytes) are 0 for sockets — TRUTHFUL:
  * there is no async output queue yet (Stage 2) — and the long null on rows
  * where the concept does not apply. */
@@ -28,6 +28,7 @@ typedef struct {
     ray_t*        addr;       /* BORROWED charv; NULL = none */
     int32_t       peer_addr;  /* inbound rows: peer IPv4 (host order); 0 = none */
     int64_t       provider_sym, alias_sym;
+    int64_t       handle_sym; /* provider rows: the alias sym hopen answered; -1 = the handle is the fd */
     int64_t       open_ns;    /* NULL_I64 = unknown */
 } conn_row;
 
@@ -61,7 +62,7 @@ static conn_row* conn_rows(int64_t* n_out) {
         r->user_sym = esym;
         r->addr = NULL;
         r->peer_addr = 0;
-        r->provider_sym = esym; r->alias_sym = esym;
+        r->provider_sym = esym; r->alias_sym = esym; r->handle_sym = -1;
         r->open_ns = infos[i].open_ns ? infos[i].open_ns : NULL_I64;
         if (r->out) {                     /* hopen registered the descriptor */
             int64_t us = q_handles_user_sym(r->fd);
@@ -85,10 +86,10 @@ static conn_row* conn_rows(int64_t* n_out) {
         r->out  = hi.initiated_out != 0;
         r->user_sym = hi.user_sym >= 0 ? hi.user_sym : esym;
         r->addr = hi.open_args;
-        r->provider_sym = esym; r->alias_sym = esym;
+        r->provider_sym = esym; r->alias_sym = esym; r->handle_sym = -1;
         r->open_ns = hi.open_time_ns;
         if (hi.kind == Q_HANDLE_PROVIDER)
-            (void)q_provider_info(hi.fd, &r->provider_sym, &r->alias_sym);
+            (void)q_provider_info(hi.fd, &r->provider_sym, &r->alias_sym, &r->handle_sym);
     }
     qsort(rows, (size_t)n, sizeof *rows, row_cmp);
     *n_out = n;
@@ -138,22 +139,23 @@ ray_t* q_conn_table(void) {
     conn_row* rows = conn_rows(&n);
     if (!rows) return q_err(QE_WSFULL);
     int64_t cap = n ? n : 1;
-    static const char* const names[13] = { "h", "kind", "p", "f", "z", "n",
+    static const char* const names[14] = { "h", "handle", "kind", "p", "f", "z", "n",
         "m", "out", "user", "addr", "provider", "alias", "opened" };
-    ray_t* c[13];
+    ray_t* c[14];
     c[0]  = ray_vec_new(RAY_I32, cap);
-    c[1]  = ray_sym_vec_new(RAY_SYM_W64, cap);
-    c[2]  = ray_vec_new(RAY_CHARV, cap);
+    c[1]  = ray_list_new(cap);
+    c[2]  = ray_sym_vec_new(RAY_SYM_W64, cap);
     c[3]  = ray_vec_new(RAY_CHARV, cap);
-    c[4]  = ray_vec_new(RAY_BOOL, cap);
-    c[5]  = ray_vec_new(RAY_I64, cap);
+    c[4]  = ray_vec_new(RAY_CHARV, cap);
+    c[5]  = ray_vec_new(RAY_BOOL, cap);
     c[6]  = ray_vec_new(RAY_I64, cap);
-    c[7]  = ray_vec_new(RAY_BOOL, cap);
-    c[8]  = ray_sym_vec_new(RAY_SYM_W64, cap);
-    c[9]  = ray_list_new(cap);
-    c[10] = ray_sym_vec_new(RAY_SYM_W64, cap);
+    c[7]  = ray_vec_new(RAY_I64, cap);
+    c[8]  = ray_vec_new(RAY_BOOL, cap);
+    c[9]  = ray_sym_vec_new(RAY_SYM_W64, cap);
+    c[10] = ray_list_new(cap);
     c[11] = ray_sym_vec_new(RAY_SYM_W64, cap);
-    c[12] = ray_vec_new(RAY_TIMESTAMP, cap);
+    c[12] = ray_sym_vec_new(RAY_SYM_W64, cap);
+    c[13] = ray_vec_new(RAY_TIMESTAMP, cap);
     for (int64_t i = 0; i < n; i++) {
         conn_row* r = &rows[i];
         int64_t ks   = kind_sym(r->kind);
@@ -161,15 +163,20 @@ ray_t* q_conn_table(void) {
         uint8_t zf   = 0;
         int32_t fd   = (int32_t)r->fd;
         c[0]  = ray_vec_append(c[0], &fd);
-        c[1]  = ray_vec_append(c[1], &ks);
-        c[2]  = ray_vec_append(c[2], &r->p);
-        c[3]  = ray_vec_append(c[3], &r->f);
-        c[4]  = ray_vec_append(c[4], &zf);
-        c[5]  = ray_vec_append(c[5], &nm);
+        if (c[1] && !RAY_IS_ERR(c[1])) {  /* what hclose takes: the alias sym for a provider, else the fd */
+            ray_t* hv = r->handle_sym >= 0 ? ray_sym(r->handle_sym) : ray_i32(fd);
+            c[1] = ray_list_append(c[1], hv);
+            ray_release(hv);
+        }
+        c[2]  = ray_vec_append(c[2], &ks);
+        c[3]  = ray_vec_append(c[3], &r->p);
+        c[4]  = ray_vec_append(c[4], &r->f);
+        c[5]  = ray_vec_append(c[5], &zf);
         c[6]  = ray_vec_append(c[6], &nm);
-        c[7]  = ray_vec_append(c[7], &r->out);
-        c[8]  = ray_vec_append(c[8], &r->user_sym);
-        if (c[9] && !RAY_IS_ERR(c[9])) {
+        c[7]  = ray_vec_append(c[7], &nm);
+        c[8]  = ray_vec_append(c[8], &r->out);
+        c[9]  = ray_vec_append(c[9], &r->user_sym);
+        if (c[10] && !RAY_IS_ERR(c[10])) {
             ray_t* a = r->addr;
             if (!a) {           /* inbound: dotted peer IP, IP-ONLY (no port —
                                  * ephemeral, would break determinism) */
@@ -183,15 +190,15 @@ ray_t* q_conn_table(void) {
                     : 0;
                 a = ray_charv(ip, len);
             }
-            c[9] = ray_list_append(c[9], a);
+            c[10] = ray_list_append(c[10], a);
             if (!r->addr) ray_release(a);
         }
-        c[10] = ray_vec_append(c[10], &r->provider_sym);
-        c[11] = ray_vec_append(c[11], &r->alias_sym);
-        c[12] = ray_vec_append(c[12], &r->open_ns);
+        c[11] = ray_vec_append(c[11], &r->provider_sym);
+        c[12] = ray_vec_append(c[12], &r->alias_sym);
+        c[13] = ray_vec_append(c[13], &r->open_ns);
     }
     free(rows);
-    return cols_table(c, names, 13);
+    return cols_table(c, names, 14);
 }
 
 ray_t* q_conn_zH(void) {
