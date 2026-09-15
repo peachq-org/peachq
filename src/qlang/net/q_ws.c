@@ -10,7 +10,7 @@
 #include "qlang/q_env.h"       /* q_env_get — the `.z.ws`/`.z.wo`/`.z.wc` handlers */
 #include "qlang/q_builtins.h"  /* q_dotq_sha1_fn / q_dotq_btoa_fn — accept key */
 #include "qlang/q_console.h"   /* q_console_str/_reset — drain handler output */
-#include "qlang/eval/q_eval.h" /* q_eval_apply_value — handler firing */
+#include "qlang/eval/q_eval.h" /* q_eval_call_name — handler firing */
 #include "mem/sys.h"
 #include "picohttpparser.h"
 #include <string.h>
@@ -189,10 +189,8 @@ static void ws_console_drain(void) {
     q_console_reset();
 }
 
-static void ws_hook_fire(ray_t* fn, ray_t* arg, const char* name) {
-    ray_retain(fn);                       /* survive a re-assign mid-call */
-    ray_t* r = q_eval_apply_value(fn, &arg, 1);
-    ray_release(fn);
+static void ws_hook_fire(const char* name, ray_t* arg) {
+    ray_t* r = q_eval_call_name(name, strlen(name), &arg, 1);
     ws_console_drain();
     if (r) {
         if (RAY_IS_ERR(r)) {              /* D2: log, keep the connection */
@@ -205,18 +203,16 @@ static void ws_hook_fire(ray_t* fn, ray_t* arg, const char* name) {
 }
 
 void q_ws_on_open(int64_t qhandle) {
-    ray_t* fn = q_env_get(ray_sym_intern_runtime(".z.wo", 5));   /* borrowed; NULL = unset (no default) */
-    if (!fn) return;
+    if (!q_env_get(ray_sym_intern_runtime(".z.wo", 5))) return;    /* unset: no default */
     ray_t* h = ray_i32((int32_t)qhandle);
-    ws_hook_fire(fn, h, ".z.wo");
+    ws_hook_fire(".z.wo", h);
     ray_release(h);
 }
 
 void q_ws_on_close(int64_t qhandle) {
-    ray_t* fn = q_env_get(ray_sym_intern_runtime(".z.wc", 5));
-    if (!fn) return;
+    if (!q_env_get(ray_sym_intern_runtime(".z.wc", 5))) return;
     ray_t* h = ray_i32((int32_t)qhandle);
-    ws_hook_fire(fn, h, ".z.wc");
+    ws_hook_fire(".z.wc", h);
     ray_release(h);
 }
 
@@ -245,8 +241,7 @@ struct q_ws_conn {
  * may close us). */
 static void ws_dispatch(q_ws_conn_t* c, ray_sock_t fd, int opcode,
                         const uint8_t* p, size_t n) {
-    ray_t* fn = q_env_get(ray_sym_intern_runtime(".z.ws", 5));   /* borrowed; NULL = unset */
-    if (!fn) {
+    if (!q_env_get(ray_sym_intern_runtime(".z.ws", 5))) {
         if (opcode == Q_WS_OP_BIN && c->role == Q_WS_SERVER)
             ws_frame_send(fd, Q_WS_OP_BIN, p, n, Q_WS_DATA_SECS, 0);
         else
@@ -261,7 +256,7 @@ static void ws_dispatch(q_ws_conn_t* c, ray_sock_t fd, int opcode,
         fprintf(stderr, "ws: message arg allocation failed\n");
         return;
     }
-    ws_hook_fire(fn, arg, ".z.ws");
+    ws_hook_fire(".z.ws", arg);
     ray_release(arg);
 }
 
