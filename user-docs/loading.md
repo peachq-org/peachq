@@ -262,4 +262,5 @@ almost certainly not what you want.
 
 - [Reading CSV](csv.md) — delimiters, quoting dialects, headers, `skip`, streaming targets.
 - [Reading JSON](json.md) — framing, root shapes, nesting, `path`.
+- [Reading parquet](parquet.md) — a different reader: DuckDB's, through the `.duckdb` bridge, with DuckDB's types.
 - [Bad rows](bad-rows.md) — the error classes, the frozen-type miss, and the tolerance levers.
