@@ -1,5 +1,5 @@
-/ The session itself: .pq.version, .pq.conns[] (every open connection and its alias), .pq.termsize[] (the live
-/ terminal size) and .pq.cancolor[] (whether stdout takes ANSI color).  Loaded by \l pq.
+/ The session itself: .pq.version, .pq.conns[] (every open connection: handle = the alias sym of a :pq: provider,
+/ else the fd int; its alias, when it opened), .pq.termsize[], .pq.cancolor[] (does stdout take ANSI color).  \l pq.
 / @implNote The PeachQ stdlib namespace. lib/*.q is the standard-library
 / tier: bundled sorted at build, loaded ONLY by the \l pq gate (never at
 / q_runtime_create) through the multiline statement seam. THE ANY-ORDER LAW:
@@ -7,9 +7,9 @@
 / Pure q since the .pq.c.* rayfall escape hatch was deleted (2026-07-29).
 
 .pq.version:.z.v`version;
-/ .pq.conns - every open connection, 13 cols; the single-letter p/f/z/n/m are
-/ DELIBERATELY the -38! names so kdb code ports, the readable columns are
-/ peachq additions (the kdb verbs -38!/.z.W/.z.H stay socket-only).
+/ .pq.conns - every open connection, 14 cols; the single-letter p/f/z/n/m are DELIBERATELY the -38! names so kdb
+/ code ports, the readable columns are peachq additions (the kdb verbs -38!/.z.W/.z.H stay socket-only); handle
+/ is what hclose takes (the alias sym of a provider, else the fd h).
 .pq.conns:{.pq.i.conns[]}
 
 / the live terminal size - the same query, 25/80 fallback and [10,2000]
