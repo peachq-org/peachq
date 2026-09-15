@@ -22,7 +22,7 @@
 #include "qlang/ops/q_index.h"  /* q_index_at / q_index_elem_at — group's key gathers */
 #include "qlang/io/q_splay.h"   /* q_splay_table_path / q_splay_flip — the flip law's two directions */
 #include "qlang/io/q_provider.h" /* the flip pair; carrier cols from the snapshot, meta via hooks */
-#include "qlang/io/q_io.h"      /* q_io_is_fsym / q_io_resource_table — cols of a decoded resource */
+#include "qlang/io/q_io.h"      /* q_io_is_fsym / q_io_resource_table — cols and meta of a decoded resource */
 #include "lang/internal.h"      /* ray_group_fn */
 #include "ops/agg_engine.h"     /* agg_group_keys — the one dense group core */
 #include "table/sym.h"          /* ray_sym_intern_runtime, ray_sym_vec_cell, RAY_SYM_W64 */
@@ -1108,6 +1108,13 @@ ray_t* q_meta_fn(ray_t* x) {
         ray_t* r = q_provider_carrier_meta(car);
         ray_release(car);
         return r;
+    }
+    ray_t* dec = x && q_io_is_fsym(x) ? q_io_resource_table(x) : NULL;
+    if (dec) {                                /* a resource that decodes to a table, as in q_cols_fn */
+        if (RAY_IS_ERR(dec)) return dec;
+        ray_t* m = q_meta_fn(dec);
+        ray_release(dec);
+        return m;
     }
     ray_t* t = x ? table_bi_deref(x) : NULL;
     if (q_provider_carrier_is(t)) return q_provider_carrier_meta(t);
