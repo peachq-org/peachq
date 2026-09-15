@@ -15,6 +15,7 @@
 #include "qlang/io/q_duckdb_internal.h"
 #include "qlang/io/q_duckdb_types.h"
 #include "qlang/io/q_exedir.h"
+#include "qlang/io/q_provider.h"  /* q_provider_token — the alias handle behind a public verb's c */
 #include "qlang/base/q_err.h"
 #include "qlang/q_env.h"
 #include "qlang/q_dotz.h"     /* q_dotz_now_ns — the sqllog clock */
@@ -277,6 +278,7 @@ bool q_duckdb_available(void) {
 #define QD_MAX_DB    32
 #define QD_MAX_CON   64
 #define QD_SLOT_BITS 6           /* low 6 bits = slot (matches QD_MAX_CON) */
+#define QD_TOKEN_MARK (1 << 30)  /* on every token, so no token can spell a provider fd (a small positive int) */
 
 static struct {
     char          path[512];     /* normalized: "" = in-memory (`:default:) */
@@ -290,7 +292,6 @@ static struct {
     int             dbslot;
     uint32_t        gen;         /* bumped on close — stale handles error */
     bool            live;
-    char            display[512];/* original connect spec, for connections[] */
     char            err[1024];   /* last message behind a 'duckdb here: DuckDB's text or the bridge's reason */
 } g_cons[QD_MAX_CON];
 
@@ -318,15 +319,21 @@ void   q_duckdb_err_rewind(int slot, size_t mark) {
 }
 
 static int32_t qd_handle_of(int slot) {
-    return (int32_t)((g_cons[slot].gen << QD_SLOT_BITS) | (uint32_t)slot);
+    return (int32_t)(QD_TOKEN_MARK | (g_cons[slot].gen << QD_SLOT_BITS) | (uint32_t)slot);
 }
 
+/* a public verb's c: the alias handle hopen answered (or its legacy int) resolves through the host to the token;
+ * a bare token (what .duckdb.main[] answers) decodes directly — the two int spaces are disjoint by the mark, so
+ * neither can be mistaken for the other.  -1 = no live connection. */
 static int qd_resolve(ray_t* h) {
     int64_t v;
+    ray_t* tok = q_provider_token(h, "duckdb");
+    if (tok) h = tok;
     if (h && h->type == -RAY_I32)      v = h->i32;
     else if (h && h->type == -RAY_I64) v = h->i64;
     else return -1;
-    if (v < 0) return -1;
+    if (v < 0 || !(v & QD_TOKEN_MARK)) return -1;
+    v &= ~(int64_t)QD_TOKEN_MARK;
     int slot = (int)(v & ((1 << QD_SLOT_BITS) - 1));
     uint32_t gen = (uint32_t)(v >> QD_SLOT_BITS);
     if (slot >= QD_MAX_CON || !g_cons[slot].live || g_cons[slot].gen != gen) return -1;
@@ -524,32 +531,20 @@ static ray_t* qd_qname_fn(ray_t* x) {
     return r;
 }
 
-/* .duckdb.connect `:default: | `:path.duckdb | (`:path; configDict) */
-static ray_t* qd_connect_fn(ray_t* x) {
-    ray_t* e = qd_door(NULL, 1, 1, NULL);
+/* .duckdb.i.open[alias; rest; timeout; config] — the host's open hook.  rest is the coordinate's config text: the
+ * db path, "default:" (or empty) = the shared in-memory db; timeout means nothing to an in-process engine; config
+ * is :: or the DuckDB option dict.  The alias is unused until A1 names the catalog by it.  Answers the TOKEN. */
+static ray_t* qd_open_wrap(ray_t** args, int64_t n) {
+    ray_t* e = qd_door(args, n, 4, NULL);
     if (e) return e;
-
-    ray_t* spec = x;
-    ray_t* cfg_dict = NULL;
-    if (x && x->type == RAY_LIST && x->len == 2) {
-        spec     = ((ray_t**)ray_data(x))[0];
-        cfg_dict = ((ray_t**)ray_data(x))[1];
-        if (cfg_dict && cfg_dict->type != RAY_DICT) return q_duckdb_fail(-1, "open", "config is not a dict");
-    }
-    char text[512];
-    if (!spec || RAY_IS_NULL(spec))            /* connect[] -> `:default: */
-        snprintf(text, sizeof text, ":default:");
-    else if (!qd_sym_text(spec, text, sizeof text)) return q_duckdb_fail(-1, "open", "path is not a symbol");
-
-    /* `:default: -> "" (the shared in-memory db); strip one leading colon */
-    const char* path = text;
+    const char* tp; int64_t tn;
+    if (!q_str_text_bytes(args[1], &tp, &tn)) return q_duckdb_fail(-1, "open", "path is not text");
+    if (tn >= 512) return q_duckdb_fail(-1, "open", "path is longer than 511 bytes");
+    ray_t* cfg_dict = args[3] && !RAY_IS_NULL(args[3]) ? args[3] : NULL;
+    if (cfg_dict && cfg_dict->type != RAY_DICT) return q_duckdb_fail(-1, "open", "config is not a dict");
     char norm[512];
-    if (strcmp(text, ":default:") == 0) norm[0] = '\0';
-    else {
-        if (path[0] == ':') path++;
-        if (!*path) return q_duckdb_fail(-1, "open", "path is empty");
-        snprintf(norm, sizeof norm, "%s", path);
-    }
+    if (tn == 0 || (tn == 8 && memcmp(tp, "default:", 8) == 0)) norm[0] = '\0';
+    else snprintf(norm, sizeof norm, "%.*s", (int)tn, tp);
 
     /* connection slot FIRST: capacity failure must not open/cache a db (codex P2) */
     int slot = -1;
@@ -629,7 +624,6 @@ static ray_t* qd_connect_fn(ray_t* x) {
     g_dbs[ds].refs++;
     g_cons[slot].dbslot = ds;
     g_cons[slot].live   = true;
-    snprintf(g_cons[slot].display, sizeof g_cons[slot].display, "%s", text);
     return ray_i32(qd_handle_of(slot));
 }
 
@@ -1163,7 +1157,7 @@ static ray_t* qd_types_fn(ray_t** args, int64_t n) {
  * Registration fires from the `\l pq` gate, so the pre-gate env is kdb-clean. */
 void q_duckdb_register(void) {
     /* NO dlopen here — the library is resolved lazily on first use. */
-    qd_bind_unary(".duckdb.i.open",   qd_connect_fn);
+    qd_bind_vary (".duckdb.i.open",   qd_open_wrap);
     qd_bind_unary(".duckdb.i.close",  qd_close_fn);
     qd_bind_unary(".duckdb.i.err",    qd_err_fn);
     qd_bind_vary (".duckdb.i.exec",   qd_sql_wrap);
