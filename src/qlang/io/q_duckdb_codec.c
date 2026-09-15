@@ -295,6 +295,8 @@ static bool qd_map_read_logical(duck_logical_type lt, qd_colmap_t* out, duck_typ
     out->leaf  = leaf;
     out->rec   = NULL;
     out->depth = depth;
+    /* a list of unsigned bytes lands on q's byte-vector shape, which is BLOB's: refused (ruled 2026-09-15) */
+    if (depth && *miss == QDUCK_TYPE_UTINYINT) { *why = "utinyint list: no q carrier distinct from BLOB"; leaf = NULL; }
     bool ok = leaf && !q_duckdb_codec_is_rec(leaf);
     if (leaf && !ok) ok = qd_rec_read_type(cur, *miss, out, miss, why);
     if (owned) QAPI.destroy_logical_type(&owned);
@@ -1459,12 +1461,13 @@ static ray_t* qd_rec_build(int slot, qd_racc_t* acc, const qd_colmap_t* cm, bool
     /* THE emit decision, per kind and over the whole column: the shape mirror always builds (the caller drops it
      * where nothing flagged), a zoned field's offsets always ship, and every other kind ships where some field,
      * at some depth, asked for it.  A MAP carries its companions on its VALUES — its keys are the mirror's own
-     * keys — so a key half that grows one has nowhere to put it. */
+     * keys — so a key half that grows one has nowhere to put it: refused, never read as the null (ruled 2026-09-15). */
     const qd_tmap_t* tmof[QD_NCOS] = { NULL };
     for (int k = 0; out && k < QD_NCOS; k++) {
         bool always = k == QD_CO_ISNULL || k == QD_CO_TZOFF;
         if (map && !always && acc->fcos[0].co[k].want && acc->fcos[0].co[k].need)
-            return q_duckdb_fail(slot, cm->leaf->logical, "a MAP's keys grow a companion its mirror cannot carry");
+            return q_duckdb_fail(slot, cm->leaf->logical, k == QD_CO_NOTNULL ? "a key on the q null pattern has no companion"
+                                                                             : "a MAP's keys grow a companion its mirror cannot carry");
         for (int i = map ? 1 : 0; i < r->n; i++) {
             if (!acc->fcos[i].co[k].want || !(always || acc->fcos[i].co[k].need)) continue;
             if (!out->co[k].want) tmof[k] = r->f[i].map.leaf;
@@ -2107,20 +2110,31 @@ static duck_logical_type qd_lt_under(duck_logical_type lt, int kind, int i) {
 
 /* the first field whose q type only a sidecar row could bring back (no bare read answers it) and whose declared
  * type does not read as it by itself (ENUM reads as symbol; VARCHAR does not) — a MAP's VARCHAR keys are exempt,
- * symbols being how the reader spells them */
-static bool qd_field_refined(const qd_colmap_t* cm, duck_logical_type lt, char* path, size_t cap, const char** type) {
-    duck_logical_type at = NULL;
+ * symbols being how the reader spells them — or (*legless, ruled 2026-09-15) whose declared type is rebuilt by a
+ * REMAP no cast leg reaches inside a record: BIT (no BOOLEAN[] cast) and TIME_NS (no BIGINT cast) */
+/* ONE spelling for every field a record cannot write back: a hi/raw/tzoff companion (2026-09-13) or a remap (2026-09-15) */
+static const char QD_NO_CAST_LEG[] = "a record's fields rebuild through no cast leg yet";
+static duck_type qd_legless_id(duck_logical_type t) {
+    duck_type id = t ? QAPI.get_type_id(t) : 0;
+    return id == QDUCK_TYPE_BIT || id == QDUCK_TYPE_TIME_NS ? id : 0;
+}
+static bool qd_field_refined(const qd_colmap_t* cm, duck_logical_type lt, char* path, size_t cap, const char** type,
+                             bool* legless) {
+    duck_logical_type at  = NULL;
+    duck_type         leg = qd_legless_id(lt);   /* a BIT sits where the q side sees one LIST level, so every level is judged */
     for (int d = 0; d < cm->depth && (d == 0 ? lt : at); d++) {
         duck_logical_type next = qd_lt_under(d ? at : lt, -1, 0);
         if (at) QAPI.destroy_logical_type(&at);
         at = next;
+        if (!leg) leg = qd_legless_id(at);
     }
     duck_logical_type here = cm->depth ? at : lt;
     bool refined = false;
     if (!cm->rec) {
         const qd_tmap_t* own = here ? qd_map_read(QAPI.get_type_id(here)) : NULL;
-        refined = !cm->leaf->read_canon && !(own && own->ray_type == cm->leaf->ray_type);
-        if (refined) *type = cm->leaf->logical;
+        *legless = leg != 0;
+        refined  = *legless || (!cm->leaf->read_canon && !(own && own->ray_type == cm->leaf->ray_type));
+        if (refined) *type = *legless ? q_duckdb_type_name(leg) : cm->leaf->logical;
     } else {
         size_t n   = strlen(path);
         bool   map = cm->leaf->dk_type == QDUCK_TYPE_MAP;
@@ -2129,7 +2143,7 @@ static bool qd_field_refined(const qd_colmap_t* cm, duck_logical_type lt, char* 
             if (map && i == 0 && !f->rec && !f->depth && f->leaf->ray_type == RAY_SYM) continue;
             snprintf(path + n, cap - n, "%s%s", n ? "." : "", cm->rec->f[i].name);
             duck_logical_type ft = qd_lt_under(here, (int)cm->leaf->dk_type, i);
-            refined = qd_field_refined(f, ft, path, cap, type);
+            refined = qd_field_refined(f, ft, path, cap, type, legless);
             if (ft) QAPI.destroy_logical_type(&ft);
         }
         if (!refined) path[n] = '\0';
@@ -2139,16 +2153,17 @@ static bool qd_field_refined(const qd_colmap_t* cm, duck_logical_type lt, char* 
 }
 
 /* the record law (ruled 2026-09-14): the sidecar's `logical` names no field, so a refined one is refused, never
- * read back as its carrier */
+ * read back as its carrier; and a field only a remap rebuilds joins the legless set (2026-09-15) */
 ray_t* q_duckdb_codec_check_fields(int slot, ray_t* tbl, int64_t c, duck_logical_type lt, const qd_colmap_t* cm) {
     char        path[512] = "";
     const char* type;
-    if (!cm->rec || !qd_field_refined(cm, lt, path, sizeof path, &type)) return NULL;
+    bool        legless = false;
+    if (!cm->rec || !qd_field_refined(cm, lt, path, sizeof path, &type, &legless)) return NULL;
     ray_t* nm = ray_sym_str(ray_table_col_name(tbl, c));   /* borrowed */
     char what[300], why[640];
     snprintf(what, sizeof what, "column %.*s", (int)(nm ? ray_str_len(nm) : 1), nm ? ray_str_ptr(nm) : "?");
-    snprintf(why, sizeof why, "field %s is %s %s - no q refinement inside a record", path,
-             strchr("aeiou", *type) ? "an" : "a", type);
+    snprintf(why, sizeof why, "field %s is %s %s - %s", path, strchr("aeiou", *type) ? "an" : "a", type,
+             legless ? QD_NO_CAST_LEG : "no q refinement inside a record");
     return q_duckdb_fail(slot, what, why);
 }
 
@@ -2369,7 +2384,7 @@ static ray_t* qd_store_companions(int slot, duck_result* res, int64_t ncols, con
         const qd_colmap_t* pcm = &cms[c];
         bool text = kind == QD_CO_RAW && q_duckdb_codec_raw_is_text(pcm->leaf->ray_type);
         int  lf   = kind < QD_CO_RAW ? RAY_BOOL : kind == QD_CO_TZOFF ? RAY_I32 : text ? RAY_STR : RAY_I64;
-        if (pcm->rec || cms[d].rec) return q_duckdb_fail(slot, what, "a record's fields rebuild through no cast leg yet");
+        if (pcm->rec || cms[d].rec) return q_duckdb_fail(slot, what, QD_NO_CAST_LEG);
         if (!qd_co_admissible(pcm, kind)) return q_duckdb_fail(slot, what, "no column of the parent's type grows it");
         if (cms[d].leaf->ray_type != lf || cms[d].depth != pcm->depth)
             return q_duckdb_fail(slot, what, kind < QD_CO_RAW ? "not a boolean column" : kind == QD_CO_TZOFF
@@ -2464,7 +2479,7 @@ static ray_t* qd_strip(int slot, ray_t* tbl, ray_t** masks, ray_t** offs, ray_t*
         }
         nest[c] = nest[c] && kind != QD_CO_ISNULL;   /* the mirror keeps its own slot; only the VALUE moves over */
         q_duckdb_codec_map_free(&pcm);
-        if (legless) return qd_reject(slot, nm, "a record's fields rebuild through no cast leg yet");
+        if (legless) return qd_reject(slot, nm, QD_NO_CAST_LEG);
         if (!shaped && (!col || col->type != (kind < QD_CO_RAW ? RAY_BOOL : text ? RAY_LIST : RAY_I64)))
             return qd_reject(slot, nm, kind < QD_CO_RAW ? "not a boolean column"
                                      : text ? "not a text column" : "not a long column");
