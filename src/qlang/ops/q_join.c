@@ -652,12 +652,13 @@ ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode) {
  * corner where the spellings differ: upsert normalizes to the full schema
  * (course/keyed-tables pins the omitted columns BLANKED on a hit) where `,:`
  * stores only y's OWN columns (ref/join.md:274; list/join.qcmd pins them
- * KEPT) — `merge` below — and plain `,` stays the keyed join (qj_ktbl_merge,
- * q_join_wrap). */
+ * KEPT) — `merge` below, under `,` and `,:` alike (ref/join.md:140: keyed Join
+ * is strict on the data columns too); the keyed JOIN home qj_ktbl_merge serves
+ * uj/ujf/^ alone. */
 static ray_t* table_upsert(ray_t* x, ray_t* y, int exclusive, int merge) {
     int keyed = q_type_is_keyed(x);
     int64_t nkey = keyed ? ray_table_ncols(ray_dict_keys(x)) : 0;
-    uint64_t hit = UINT64_MAX;
+    ray_t* hit = NULL;
     if (keyed && y && (y->type == RAY_TABLE || q_type_is_keyed(y))) {
         /* ref/join.md:140 keyed strictness: a TABLE payload must carry every
          * key column — a missing VALUE column null-fills, but a missing KEY
@@ -673,20 +674,19 @@ static ray_t* table_upsert(ray_t* x, ray_t* y, int exclusive, int merge) {
         if (merge && q_type_is_keyed(y)) {
             ray_t* vt = ray_dict_vals(x);
             int64_t nc = ray_table_ncols(vt);
-            if (!qj_same_schema(kt, ray_dict_keys(y)) || nc > Q_TABLE_MAX_COLS) {
-                ray_release(yf);
-                return q_err(nc > Q_TABLE_MAX_COLS ? QE_LIMIT : QE_TYPE);
-            }
-            hit = 0;
+            if (!qj_same_schema(kt, ray_dict_keys(y))) { ray_release(yf); return q_err(QE_TYPE); }
+            hit = ray_vec_new(RAY_BOOL, nc > 0 ? nc : 1);
+            if (!hit || RAY_IS_ERR(hit)) { ray_release(yf); return hit ? hit : q_err(QE_OOM); }
+            hit->len = nc;
             for (int64_t c = 0; c < nc; c++)
-                if (q_table_col_index(yf, ray_table_col_name(vt, c)) >= 0) hit |= 1ULL << c;
+                ((bool*)ray_data(hit))[c] = q_table_col_index(yf, ray_table_col_name(vt, c)) >= 0;
         }
         ray_release(yf);
     }
     /* a plain x is its own flat and stays BORROWED: the retain q_table_flatten
      * takes would be the second ref the exclusive append refuses */
     ray_t* flat = keyed ? q_table_flatten(x) : x;
-    if (!flat || RAY_IS_ERR(flat)) return flat;
+    if (!flat || RAY_IS_ERR(flat)) { if (hit) ray_release(hit); return flat; }
     ray_t* rows = q_table_rows_normalize(flat, y, Q_ROWS_JOIN);
     if (!keyed) {
         if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_OOM);
@@ -695,12 +695,11 @@ static ray_t* table_upsert(ray_t* x, ray_t* y, int exclusive, int merge) {
         return nf;
     }
     ray_release(flat);
-    if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_OOM);
-    ray_t* ky = q_bang_enkey(nkey, rows);
-    ray_release(rows);
-    if (!ky || RAY_IS_ERR(ky)) return ky;
-    ray_t* r = q_index_keyed_put(x, ky, hit, Q_KEYED_UPSERT, exclusive);
-    ray_release(ky);
+    ray_t* ky = rows && !RAY_IS_ERR(rows) ? q_bang_enkey(nkey, rows) : rows ? rows : q_err(QE_OOM);
+    if (rows && !RAY_IS_ERR(rows)) ray_release(rows);
+    ray_t* r = ky && !RAY_IS_ERR(ky) ? q_index_keyed_put(x, ky, hit, Q_KEYED_UPSERT, exclusive) : ky ? ky : q_err(QE_OOM);
+    if (ky && !RAY_IS_ERR(ky)) ray_release(ky);
+    if (hit) ray_release(hit);
     return r;
 }
 
@@ -1102,7 +1101,7 @@ static ray_t* join_core(ray_t* x, ray_t* y, int exclusive) {
         if (q_type_is_table(t) || q_type_is_dict(t)) { ray_retain(t); return t; }
     }
     if (q_type_is_keyed(x) && q_type_is_keyed(y))
-        return qj_ktbl_merge(x, y, 0);     /* raw: y's OWN columns update */
+        return table_upsert(x, y, exclusive, 1);      /* strict, y's OWN columns update (ref/join.md:140,274) */
     if ((q_type_is_table(x) || q_type_is_keyed(x)) && y)
         return q_join_table_upsert(x, y, exclusive);  /* every other payload: THE law */
     /* A bare dict joins ONLY with a dict (ref/join.md: `10,d` -> 'type; base
@@ -1240,11 +1239,6 @@ ray_t* q_join_amend(ray_t** px, ray_t* y, int exclusive) {
         if (!exclusive) ray_retain(x);
         ray_t* r = q_index_dict_join(x, y, 1);
         if (!exclusive && RAY_IS_ERR(r)) ray_release(x);
-        return r;
-    }
-    if (q_type_is_keyed(x) && q_type_is_keyed(y)) {             /* 2: a keyed payload's own columns (ref/join.md:274) */
-        ray_t* r = table_upsert(x, y, exclusive, 1);
-        if (exclusive && r && !RAY_IS_ERR(r)) ray_release(x);
         return r;
     }
     if (x && y && ray_is_vec(x) && x->type != RAY_STR && y->type != x->type && y->type != -x->type &&
