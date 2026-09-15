@@ -128,14 +128,68 @@ assertAlmostEquals:{ [actual; expected; permittedDifferenceInFloats]
 // @param msg Written above the rendering in the .txt, so a reviewer reads the value against its caption;
 //            capped at 2000 lines of 2000 chars, a final .. line saying anything was cut. Its first line is the log message.
 assertKnown:{ [actual; expectedFilename; msg]
+    assertEquals[actual; getKnown expectedFilename; saveActual[actual; expectedFilename; msg]] };
+
+// Write actual under actualPath as the binary a later run is compared to, and beside it the .txt a reviewer reads:
+// the msg lines, then the rendering under a widened console.
+// @return the log message: the first msg line, as the .txt carries it
+saveActual:{ [actual; expectedFilename; msg]
     fn:`$$[":"=first p:string expectedFilename; 1 _ p; p];
     .Q.dd[actualPath;currentNamespaceBeingTested,fn] set actual;
-    c:system "c"; system "c 2000 2000"; s:.Q.s actual; system "c "," " sv string c;
+    c:system "c"; system "c 2000 2000"; s:render actual; system "c "," " sv string c;
     ln:$[count msg; "\n" vs msg; ()];
     clipped:(2000<count ln) or any 2000<count each ln;
     ln:(2000 sublist 2000 sublist/: ln),$[clipped; enlist ".."; ()];
-    .Q.dd[actualPath;currentNamespaceBeingTested,`$string[fn],".txt"] 0: ln,enlist s;
-    assertEquals[actual; getKnown expectedFilename; $[count ln; ln 0; msg]] };
+    .Q.dd[actualPath;currentNamespaceBeingTested,`$string[fn],".txt"] 0: ln,s;
+    $[count ln; ln 0; msg]};
+
+/ a summary renders by section - .Q.s of the dict nests its tables unreadably - so a diff reads "count same, gold moved"
+render:{ [actual]
+    if[not isSummary actual; :enlist .Q.s actual];
+    sec:{-1 _ .Q.s x};
+    ("count ",string actual`count; sec actual`cols; "head"; sec actual`head; "tail"; sec actual`tail)};
+/ by shape, so a value handed to assertKnown is only ever taken for a summary when it is one
+isSummary:{$[99h=type x; (key[x]~`count`cols`head`tail) and @[{`c`t`f`a`hash~cols x`cols}; x; 0b]; 0b]};
+
+knownPrecision:1e-6; / the one number assertAlmostKnown works to: the hash rounds floats to this step, the sample is compared within it
+/ half-up to step y, staying float: no long overflow past ~9e12. mod nulls a null or an infinity, so x fills it back
+roundTo:{h:x+y%2; x^h-h mod y};
+/ the hash must forgive a float wherever assertAlmostEquals does: inside lists, dicts and nested tables too
+roundDeep:{
+    $[(abs type x) in 8 9h; roundTo[x;knownPrecision];
+      0h=type x; .z.s each x;
+      99h=type x; key[x]!.z.s value x;
+      98h=type x; flip .z.s flip x;
+      x]};
+
+/ the golden stored for a table. sublist keeps a keyed table's keys, and an empty table still pins its schema
+/ through typed-empty head and tail
+summarise:{ [t]
+    h:{md5 "c"$-8! .qunit.roundDeep x} each value flip 0!t;
+    `count`cols`head`tail!(count t; update hash:h from meta t; 10 sublist t; -10 sublist t)};
+
+/ a failed hash check leaves the two hashes in ar: the column is named by finding the actual one in cols, never by
+/ comparing the summaries again
+hashCol:{ [s; h]
+    if[not isSummary[s] and 4h=type h; :`$()];
+    exec c from 0!s[`cols] where hash~\:h};
+
+// assertKnown for big tables: a table is stored as its summary and compared under knownPrecision, so the golden
+// stays small and a float wobble below the step is not a difference; anything else is saved whole and compared
+// with assertAlmostEquals. Same arguments as assertKnown; the .txt beside the actual is by section.
+// Neither the return nor the report row carries the summary: same-keyed dicts down a result column ARE a table,
+// which then cannot join another namespace's results. The row shows a summary's cols table.
+// @return actual object
+assertAlmostKnown:{ [actual; expectedFilename; msg]
+    s:$[.Q.qt actual; summarise actual; actual];
+    m:saveActual[s; expectedFilename; msg];
+    / caught so a failed check still reports under its caption: assertAlmostEquals leaves msg empty
+    r:@[{(1b; assertAlmostEquals[x; y; .qunit.knownPrecision])}[s;]; getKnown expectedFilename; {(0b; x)}];
+    bad:hashCol[s; ar`actual];
+    ar::@[ar; `msg; :; m,$[count bad; " - hash moved: "," " sv string bad; ""]];
+    ar::@[ar; `actual`expected; {$[isSummary x; x`cols; x]}];
+    if[not r 0; 'r 1];
+    actual};
     
 assertKnownRun:{ [func; arg]
     cleanName:{
