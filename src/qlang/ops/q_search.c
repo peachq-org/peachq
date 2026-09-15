@@ -422,9 +422,7 @@ static ray_t* keys_at(ray_t* keys, ray_t* i) {
     return c;
 }
 
-/* First index of x (a boxed list) whose ITEM whole-matches v, else cnt
- * (the kdb miss).  Borrows both. */
-static int64_t list_find_item(ray_t* x, ray_t* v, int64_t cnt) {
+int64_t q_search_find_item(ray_t* x, ray_t* v, int64_t cnt) {
     ray_t** ex = (ray_t**)ray_data(x);
     for (int64_t i = 0; i < cnt; i++)
         if (ex[i] && v && (ex[i] == v || atom_eq(ex[i], v))) return i;
@@ -468,7 +466,7 @@ ray_t* q_search_find(ray_t* x, ray_t* y) {
         int64_t cnt = ray_len(x);
         int xd = find_depth(x) - 1;                  /* the rank of x's items, read off the first (find.md) */
         if (x->type == RAY_LIST && y && y->type == RAY_LIST && cnt > 0 && find_depth(y) == xd)
-            return ray_i64(list_find_item(x, y, cnt));   /* y IS one item's shape: whole, so x[x?x 0] round-trips */
+            return ray_i64(q_search_find_item(x, y, cnt));   /* y IS one item's shape: whole, so x[x?x 0] round-trips */
         if (y && y->type == RAY_LIST) {
             /* Find is right-atomic to the rank of x's items ("x?y looks for objects of rank n-1", find.md): an
              * item deeper than that rank is a run of them, found item by item — an atom item over a simple x
@@ -486,7 +484,7 @@ ray_t* q_search_find(ray_t* x, ray_t* y) {
                 if (!e[j] || cnt == 0)
                     rr = ray_i64(cnt);
                 else if (xd > 0 && find_depth(e[j]) <= xd)
-                    rr = ray_i64(list_find_item(x, e[j], cnt));
+                    rr = ray_i64(q_search_find_item(x, e[j], cnt));
                 else
                     rr = q_search_find(x, e[j]);
                 if (!rr || RAY_IS_ERR(rr)) { ray_release(out); return rr; }
@@ -500,7 +498,7 @@ ray_t* q_search_find(ray_t* x, ray_t* y) {
         }
         if (xd > 0 && y && !ray_is_atom(y) && y->type != RAY_LIST) {
             /* list-of-lists x, SIMPLE vector y: whole-y match (`u?10 2 -6` -> 1). */
-            return ray_i64(list_find_item(x, y, cnt));
+            return ray_i64(q_search_find_item(x, y, cnt));
         }
         ray_t* i = ray_find_fn(x, y);
         if (!i || RAY_IS_ERR(i)) return i;
