@@ -490,7 +490,7 @@
   ("";"";"";"";"`trade";"";"";"";"\"+`sym`px`sz!`:pq:duckdb:mkt:trade/\"";"1000";"";"";"");
   ("DuckDB as a q data source: a database is a handle, its tables are q tables, qsql pushes down · page";
    "the .duckdb namespace and the :pq:duckdb: provider arrive with the standard library";
-   "open (or create) a database file under the alias mkt: the alias names it from here on";
+   "open (or create) a database file under the alias mkt: hopen answers `:pq:duckdb:mkt, the alias as a handle";
    "";
    "set writes a q table as a DuckDB table: symbols, floats and longs map to their SQL types";
    "the handle takes SQL text, and the answer comes back as a q table";
@@ -498,7 +498,7 @@
    "get answers a VIRTUAL table - nothing is read until a query needs it";
    "the virtual table shows what it is: a flipped dict whose values are the resource";
    "count, meta and select all work on it; .duckdb.types is the type map, \\?.duckdb the surface";
-   "";"every open connection, the provider and alias included";"")]];
+   "";"every open connection: handle is the alias sym (an int for a socket), with provider and alias";"hclose takes the sym")]];
 .help.i.r[`handles;"\n" sv .help.i.exline'[
   ("\\?handles";"`:pq:duckdb:mkt:/data/market.duckdb";"h:hopen `:pq:qpc:bob:localhost:6000";"h \"tables[]\"";
    "`:pq:qpc:bob \"1+1\"";"dow:get `:pq:qpc:bob:dowt/";"select from dow where Date=1915.04.01";
@@ -507,16 +507,16 @@
   ("";"";"";"";"2";"";"";"";"";"";"";"");
   ("resource handles: a :pq: symbol names a resource by ALIAS, and a table resource stands in as a table · page";
    "a resource specification: :pq: then the provider, an alias you choose, then what the provider needs";
-   "hopen answers the usual int - and the alias now names that connection for as long as it is open";
-   "the int is the kx spelling: a sync call over the wire";
+   "hopen answers the alias symbol `:pq:qpc:bob - it names that connection for as long as it is open";
+   "the handle applies as in kx: a string is a sync call over the wire; h (`async;msg) is the async send";
    "the alias is a handle too: a script names the peer, and no int can go stale in a variable";
    "a trailing / marks a table resource: this one is a table on the peer, read through the alias";
    "qsql on a remote table: the where, by and aggregate are pushed to the peer as one functional select";
    "a file whose format is known decodes to a table: .csv .tsv .json - a URL is a transport, not a format";
    "so an http(s) csv reads the same way: the exchange MIC codes, straight off the web";
    "and json too - nested arrays stay nested lists; \\?loaders has the readers behind this";
-   "every open connection: kind, provider, alias, when it opened";
-   "close by the int; the alias goes with the connection")]];
+   "every open connection: handle, kind, provider, alias, when it opened";
+   "close by the handle; the alias goes with the connection")]];
 .help.i.r[`loaders;"\n" sv .help.i.exline'[
   ("\\?loaders";"\\l pq";"`:demo.csv 0: (\"sym,px,sz\";\"AAPL,101.5,100\";\"MSFT,99.25,250\")";"select from `:demo.csv";
    ".csv.info[`:demo.csv;()!()]";".csv.read[`:demo.csv;`trade;::;()!()]";".csv.read[`:demo.csv;::;\"SFJ\";()!()]";

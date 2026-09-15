@@ -1,14 +1,17 @@
 /* q_provider — the virtual-table HOST (actionable-plans/
- * 2026-08-07-plugin-data-sources-tables.md).  Grammar: connection form
- * `:pq:ds:alias:config` (hopen only) vs table form `:pq:ds:alias[:config]:t/`
- * (every table position — the trailing slash IS the table marker).  ONE
- * registry maps the returned int handle <-> alias <-> (ds; open triad;
- * CONNID); providers are plain q namespaces (`.vtmock.open` / ...) reached by
- * NAME-GENERIC hook dispatch, and secrets die at hopen (only ":pq:ds:alias"
- * is ever stored for introspection).  A bound table is the splay POINTER —
- * the flip of `cols!`:pq:ds:alias:t/`, carried as that dict with the aux mark
- * (base/q_type.h) — and its columns are ADVISORY: every query and write goes back
- * through the provider. */
+ * 2026-08-07-plugin-data-sources-tables.md; contract v3 = the 2026-09-15 ADR
+ * § Handles).  Grammar: connection form `:pq:ds:alias:config` (hopen only)
+ * vs table form `:pq:ds:alias[:config]:t/` (every table position — the
+ * trailing slash IS the table marker).  hopen answers the ALIAS SYMBOL
+ * `:pq:ds:alias`, and hopen/hclose are the only lifecycle doors: the host
+ * calls .ds.i.open[alias;rest;timeout;config] / .ds.i.close[token] and keeps
+ * the ONE registry alias <-> (ds; open triad; TOKEN; the legacy reserved fd);
+ * every other hook is token-keyed, reached by NAME-GENERIC dispatch off a
+ * plain q namespace, and secrets die at hopen (only ":pq:ds:alias" is ever
+ * stored).  A bound table is the splay POINTER — the flip of
+ * `cols!`:pq:ds:alias:t/`, carried as that dict with the aux mark
+ * (base/q_type.h) — and its columns are ADVISORY: every query and write goes
+ * back through the provider. */
 #ifndef QLANG_Q_PROVIDER_H
 #define QLANG_Q_PROVIDER_H
 #include <rayforce.h>
@@ -28,29 +31,38 @@ int q_provider_spec_is(const char* s, size_t n);
  * relative spelling stays the escape for real files). */
 int q_provider_ns_is(const char* s, size_t n);
 
-/* hopen `:pq:ds:alias[:config]` (CONNECTION form only — a table form is
- * 'domain) — an int handle in the one q_handles space (provider-kind), a live
- * alias re-pointed in place.  EVERY open form (bare sym, 2-list, 3-list,
- * one-shot sym-apply) normalizes to the FROZEN triad
- * .ds.open[config; timeout; opts] — timeout 0N when absent, opts :: when
- * absent (both borrowed here, may be NULL); any future open-time need rides
- * the opts dict, never a fourth argument. */
+/* hopen `:pq:ds:alias:config` (CONNECTION form only — a table form is
+ * 'domain, and the alias is REQUIRED: a sym handle needs a name) — the alias
+ * sym `:pq:ds:alias`, a live alias re-pointed in place (the same sym).  EVERY
+ * open form (bare sym, 2-list, 3-list, one-shot sym-apply) normalizes to the
+ * FROZEN tuple .ds.i.open[alias; config; timeout; opts] — alias ` for the
+ * one-shot, timeout 0N when absent, opts :: when absent (both borrowed here,
+ * may be NULL); any future open-time need rides the opts dict. */
 ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config);
 
-/* `h y` on a provider-kind handle (qh < 0 = async call).  Text -> .X.call,
+/* `h y` on the LEGACY int handle (qh < 0 = async call).  Text -> .X.call,
  * sym atom -> .X.bind + carrier, list/sym-vector -> the named hook. */
 ray_t* q_provider_apply(int64_t qh, ray_t* y);
+
+/* The token behind a handle of THIS provider — the alias sym or the legacy
+ * int — BORROWED; NULL when it is neither (dead, another provider's, junk).
+ * A token means something only to its own provider (qpc's is an IPC fd), so
+ * a native never decodes another's. */
+ray_t* q_provider_token(ray_t* handle, const char* provider);
 
 /* `` `:pq:... `` sym apply: a LIVE alias resolves to its connection, else
  * transient one-shot (open -> dispatch -> close, alias never registered). */
 ray_t* q_provider_sym_apply(ray_t* head, ray_t** args, int64_t n);
 
-/* hclose arm: .X.close[connid] (no-op if undefined), then the record and its
- * reserved fd go away.  Owned :: like q_handles_close. */
+/* hclose arms: .X.i.close[token] (no-op if undefined), then the record and
+ * its reserved fd go away.  Owned :: like q_handles_close; a dead alias sym
+ * is the same tolerated no-op as a dead int, a sym that is no connection
+ * REFERENCE (config, a table, no alias) 'domain, one that is not `:pq:` 'type. */
 ray_t* q_provider_close(int64_t qh);
+ray_t* q_provider_close_sym(ray_t* x);
 
-/* provider/alias sym ids of a registered provider handle; 0 = no such fd */
-int    q_provider_info(int64_t fd, int64_t* provider, int64_t* alias);
+/* provider/alias/handle sym ids of a registered provider fd; 0 = no such fd */
+int    q_provider_info(int64_t fd, int64_t* provider, int64_t* alias, int64_t* handle);
 
 int    q_provider_carrier_is(ray_t* x);      /* a bound table = the MARKED dict; never a shape test */
 

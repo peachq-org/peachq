@@ -1,19 +1,21 @@
-/ Another q process as a data source: h:hopen `:pq:qpc:alias:host:port connects, and from then on the alias
-/ names it - `:pq:qpc:alias "1+1" is a sync call, `:pq:qpc:alias:table/ is that process's table for get, set,
-/ upsert and qsql, with the query pushed to the peer.  \?handles has examples.
+/ Another q process as a data source: h:hopen `:pq:qpc:alias:host:port connects and answers the alias symbol
+/ `:pq:qpc:alias, which names it from then on - h "1+1" is a sync call, h (`async;"x::1") an async send,
+/ `:pq:qpc:alias:table/ is that process's table for get, set, upsert and qsql, with the query pushed to the peer;
+/ hclose h closes it.  \?handles has examples.
 / @implNote The `qpc` virtual-table provider: plain q IPC as a data source
-/ (`:pq:qpc:alias:host:port`, actionable-plans/2026-08-07-plugin-data-
-/ sources-tables.md).  Standard-library tier (lib/*.q): loaded by the `\l pq`
-/ gate, NOT on the always-on bootstrap - the engine reserves `.ipc.*`
-/ (restricted natives + `.ipc.on.*` event hooks) and real q has no such
-/ namespace, so out of the box neither exists.  ANY-ORDER LAW: definitions
-/ only at top level.  CONNID is the plain int handle hopen returned; qsql
-/ pushes the resolved functional tree to the remote (below).
+/ (`:pq:qpc:alias:host:port`, contract v3: the 2026-09-15 ADR § Handles).
+/ Standard-library tier (lib/*.q): loaded by the `\l pq` gate, NOT on the
+/ always-on bootstrap - the engine reserves `.ipc.*` (restricted natives +
+/ `.ipc.on.*` event hooks) and real q has no such namespace, so out of the box
+/ neither exists.  ANY-ORDER LAW: definitions only at top level.  The token
+/ is the plain int handle the inner hopen returned; qsql pushes the resolved
+/ functional tree to the remote (below).
 
-/ opt (the config dict) is ignored: plain q IPC has no open-time options yet
-.qpc.open:{[cfg;tmo;opt] $[null tmo; hopen `$":",cfg; hopen (`$":",cfg;tmo)]}
-.qpc.close:{[c] hclose c}
+/ the host-called lifecycle hooks: alias unused (a peer needs no name), opt ignored (no open-time options yet)
+.qpc.i.open:{[alias;cfg;tmo;opt] $[null tmo; hopen `$":",cfg; hopen (`$":",cfg;tmo)]}
+.qpc.i.close:{[c] hclose c}
 .qpc.call:{[c;q;sync] $[sync;c q;neg[c] q]}
+.qpc.async:{[c;msg] .qpc.call[c;msg;0b]}
 .qpc.bind:{[c;t] c "cols ",string t}
 .qpc.get:{[c;t] c string t}
 / writes ride the sym-head value form (`set - the set VALUE itself does not

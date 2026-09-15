@@ -1,12 +1,13 @@
-/* q_provider — see q_provider.h.  Grammar v2: connection form
- * `:pq:<ds>:<alias>:<config...>` (config VERBATIM, colons allowed, no
+/* q_provider — see q_provider.h.  Contract v3 over grammar v2: connection
+ * form `:pq:<ds>:<alias>:<config...>` (config VERBATIM, colons allowed, no
  * trailing slash) vs table form `:pq:<ds>:<alias>:<config...>:<table>/` —
  * the trailing slash IS the table marker (the splay `:dir/` law), and a
  * coordinate is syntactically committed to ONE role.  Names (ds, alias,
  * hooks, tables) obey R1 [a-zA-Z][a-zA-Z0-9_]*; empty alias = aliasless.
- * The handle int is a RESERVED real fd (dup of /dev/null), collision-free
- * in the one q_handles space by construction.  Hooks are resolved at CALL
- * time from the live q env; a hook's error propagates unmodified. */
+ * The handle is the alias SYM; its legacy int twin is a RESERVED real fd
+ * (dup of /dev/null), collision-free in the one q_handles space.  Hooks are
+ * resolved at CALL time from the live q env; a hook's error propagates
+ * unmodified. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/io/q_provider.h"
 #include "qlang/io/q_handles.h"
@@ -31,12 +32,13 @@
 typedef struct { const char* p; size_t n; } seg_t;
 
 typedef struct {
-    int64_t fd;         /* the reserved handle int (q_handles key) */
+    int64_t fd;         /* the reserved legacy int (q_handles key) */
     int64_t provider;   /* sym id */
     int64_t alias;      /* sym id (never the empty name for a registered row) */
+    int64_t handle;     /* sym id of the registered spelling `:pq:ds:alias` — what hopen answers */
     ray_t*  open3;      /* owned (rest;timeout;config) triad — never exposed;
                          * the host-owned-reconnect groundwork */
-    ray_t*  connid;     /* owned: whatever .provider.open returned */
+    ray_t*  connid;     /* owned: the TOKEN .provider.i.open returned */
 } prov_ent;
 
 static prov_ent* g_ents = NULL;
@@ -220,17 +222,22 @@ static ray_t* open3_make(seg_t rest, ray_t* timeout, ray_t* config) {
     return r;
 }
 
-/* .provider.open with the triad's three SEPARATE args (arity frozen at 3) */
-static ray_t* conn_open(int64_t provider, ray_t* open3, ray_t** connid_out) {
+/* .provider.i.open[alias; rest; timeout; config] — the alias FIRST (the connection's identity, never an option),
+ * then the triad's three SEPARATE args (arity frozen at 4) */
+static ray_t* conn_open(int64_t provider, int64_t alias, ray_t* open3, ray_t** connid_out) {
     *connid_out = NULL;
-    ray_t* c = hook_call(provider, "open", (ray_t**)ray_data(open3), 3);
+    ray_t** o3 = (ray_t**)ray_data(open3);
+    ray_t* a = ray_sym(alias);
+    ray_t* args[4] = { a, o3[0], o3[1], o3[2] };
+    ray_t* c = hook_call(provider, "i.open", args, 4);
+    ray_release(a);
     if (!c || RAY_IS_ERR(c)) return c ? c : q_err(QE_TYPE);
     *connid_out = c;
     return NULL;
 }
 
 static void conn_close(int64_t provider, ray_t* connid) {
-    ray_t* f = hook_fn(provider, "close");     /* optional: no-op if undefined */
+    ray_t* f = hook_fn(provider, "i.close");   /* optional: no-op if undefined */
     if (!f) return;
     ray_t* r = q_eval_apply_value(f, &connid, 1);
     ray_release(f);
@@ -243,24 +250,24 @@ ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config) 
     ray_t* pe = spec_parse(s, n, &sp);
     if (pe) return pe;
     if (sp.is_table) return q_err(QE_DOMAIN);  /* a table is never a connection */
+    if (!sp.alias.n) return q_err(QE_DOMAIN);  /* a sym handle needs a name: the aliasless form only one-shots */
     /* R4 — the HOST validates the open tuple, so providers never see junk */
     if (timeout && !q_type_is_int_atom(timeout)) return q_err(QE_TYPE);
     if (config && !RAY_IS_NULL(config) && config->type != RAY_DICT)
         return q_err(QE_TYPE);
     int64_t pid = ray_sym_intern_runtime(sp.ds.p, sp.ds.n);
-    int64_t aid = sp.alias.n ? ray_sym_intern_runtime(sp.alias.p, sp.alias.n)
-                             : empty_sym();
+    int64_t aid = ray_sym_intern_runtime(sp.alias.p, sp.alias.n);
     ray_t* o3 = open3_make(sp.cfg, timeout, config);
     if (RAY_IS_ERR(o3)) return o3;
     prov_ent* live = find_alias(pid, aid);
     if (live) {
-        /* re-point the live alias: close old CONNID, open new, swap — the
+        /* re-point the live alias: close old token, open new, swap — the
          * url-moved-don't-lose-tables affordance; carriers never notice */
         conn_close(pid, live->connid);
         ray_release(live->connid); live->connid = NULL;
         ray_release(live->open3);  live->open3 = NULL;
         ray_t* c = NULL;
-        ray_t* e = conn_open(pid, o3, &c);
+        ray_t* e = conn_open(pid, aid, o3, &c);
         if (e) {                               /* open failed: the alias dies */
             ray_release(o3);
             int64_t fd = live->fd;
@@ -271,21 +278,20 @@ ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config) 
         }
         live->connid = c;
         live->open3  = o3;
-        return ray_i32((int32_t)live->fd);
+        return ray_sym(live->handle);
     }
     int fd = q_handles_reserve_fd();
     if (fd < 0) { ray_release(o3); return q_err(QE_IO); }
     /* only ":pq:ds:alias" is registered — the config (credentials, urls)
-     * dies here (hopen is where secrets die) */
-    size_t redlen = (size_t)((sp.alias.p ? sp.alias.p + sp.alias.n
-                                         : sp.ds.p + sp.ds.n) - s);
+     * dies here (hopen is where secrets die) — and that spelling IS the handle */
+    size_t redlen = (size_t)(sp.alias.p + sp.alias.n - s);
     if (!q_handles_register(fd, Q_HANDLE_PROVIDER, 1, s, redlen)) {
         close(fd);
         ray_release(o3);
         return q_err(QE_OOM);
     }
     ray_t* c = NULL;
-    ray_t* e = conn_open(pid, o3, &c);
+    ray_t* e = conn_open(pid, aid, o3, &c);
     if (e) {
         q_handles_deregister(fd);
         close(fd);
@@ -308,30 +314,77 @@ ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config) 
     g_ents[g_n].fd       = fd;
     g_ents[g_n].provider = pid;
     g_ents[g_n].alias    = aid;
+    g_ents[g_n].handle   = ray_sym_intern_runtime(s, redlen);
     g_ents[g_n].open3    = o3;
     g_ents[g_n].connid   = c;
     g_n++;
-    return ray_i32(fd);
+    return ray_sym(g_ents[g_n - 1].handle);
 }
 
-int q_provider_info(int64_t fd, int64_t* provider, int64_t* alias) {
+int q_provider_info(int64_t fd, int64_t* provider, int64_t* alias, int64_t* handle) {
     prov_ent* e = find_fd(fd);
     if (!e) return 0;
     *provider = e->provider;
     *alias    = e->alias;
+    *handle   = e->handle;
     return 1;
+}
+
+/* the registered row an alias REFERENCE names: a NON-EMPTY alias with no
+ * config after it (inexpressible there).  NULL + *out NULL = a well-formed
+ * reference to no live alias; an owned error otherwise. */
+static ray_t* ref_find(const spec_t* sp, prov_ent** out) {
+    *out = NULL;
+    if (!sp->alias.n || sp->cfg.p) return q_err(QE_DOMAIN);
+    *out = find_alias(ray_sym_intern_runtime(sp->ds.p, sp->ds.n),
+                      ray_sym_intern_runtime(sp->alias.p, sp->alias.n));
+    return NULL;
+}
+
+/* the same for a HANDLE sym (connection form only) */
+static ray_t* ref_find_sym(ray_t* x, prov_ent** out) {
+    *out = NULL;
+    const char* p; size_t n;
+    if (!sym_text(x, &p, &n) || !q_provider_spec_is(p, n)) return q_err(QE_TYPE);
+    spec_t sp;
+    ray_t* pe = spec_parse(p, n, &sp);
+    if (pe) return pe;
+    return sp.is_table ? q_err(QE_DOMAIN) : ref_find(&sp, out);
+}
+
+ray_t* q_provider_token(ray_t* handle, const char* provider) {
+    prov_ent* e = NULL;
+    if (handle && (handle->type == -RAY_I32 || handle->type == -RAY_I64))
+        e = find_fd(handle->type == -RAY_I32 ? handle->i32 : handle->i64);
+    else {
+        ray_t* err = ref_find_sym(handle, &e);
+        if (err) ray_error_free(err);
+    }
+    if (!e || e->provider != ray_sym_intern_runtime(provider, strlen(provider))) return NULL;
+    return e->connid;
+}
+
+static void ent_close(prov_ent* e) {
+    conn_close(e->provider, e->connid);
+    ray_release(e->connid);
+    if (e->open3) ray_release(e->open3);
+    close((int)e->fd);
+    q_handles_deregister(e->fd);
+    *e = g_ents[--g_n];
 }
 
 ray_t* q_provider_close(int64_t qh) {
     prov_ent* e = find_fd(qh);
-    if (e) {
-        conn_close(e->provider, e->connid);
-        ray_release(e->connid);
-        if (e->open3) ray_release(e->open3);
-        close((int)e->fd);
-        *e = g_ents[--g_n];
-    }
-    q_handles_deregister(qh);
+    if (e) ent_close(e);
+    else q_handles_deregister(qh);
+    return RAY_NULL_OBJ;
+}
+
+ray_t* q_provider_close_sym(ray_t* x) {
+    prov_ent* e;
+    ray_t* err = ref_find_sym(x, &e);
+    if (err) return err;
+    if (e) ent_close(e);
     return RAY_NULL_OBJ;
 }
 
@@ -349,17 +402,17 @@ static ray_t* cref_open(const spec_t* sp, cref_t* c) {
     memset(c, 0, sizeof *c);
     int64_t pid = ray_sym_intern_runtime(sp->ds.p, sp->ds.n);
     if (sp->alias.n) {                         /* REFERENCE */
-        if (sp->cfg.p) return q_err(QE_DOMAIN);
-        c->e = find_alias(pid, ray_sym_intern_runtime(sp->alias.p, sp->alias.n));
+        ray_t* err = ref_find(sp, &c->e);
+        if (err) return err;
         return c->e ? NULL : q_err(QE_CONN);
     }
     ray_t* o3 = open3_make(sp->cfg, NULL, NULL);   /* SPEC: temp connection */
     if (RAY_IS_ERR(o3)) return o3;
     ray_t* conn = NULL;
-    ray_t* err = conn_open(pid, o3, &conn);
+    ray_t* err = conn_open(pid, empty_sym(), o3, &conn);
     ray_release(o3);
     if (err) return err;
-    c->tmp = (prov_ent){ .fd = -1, .provider = pid, .alias = empty_sym(),
+    c->tmp = (prov_ent){ .fd = -1, .provider = pid, .alias = empty_sym(), .handle = empty_sym(),
                          .open3 = NULL, .connid = conn };
     c->e = &c->tmp;
     c->is_tmp = 1;
@@ -448,7 +501,7 @@ static ray_t* prov_hook_list(prov_ent* e, ray_t* y) {
     ray_t* r;
     if (!hook) r = q_err(QE_TYPE);
     /* R1 kills dotted traversal (`i.exec`); `i` is the internals subspace and
-     * lifecycle (open/close) is HOST-only — never the generic list door */
+     * lifecycle (i.open/i.close) is HOST-only — never the generic list door */
     else if (!name_ok(hook, strlen(hook)) || strcmp(hook, "i") == 0 ||
              strcmp(hook, "open") == 0 || strcmp(hook, "close") == 0)
         r = q_err(QE_DOMAIN);

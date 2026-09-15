@@ -71,4 +71,4 @@ and its domain file binds under its own name at `get`.
 | **DuckDB-backed storage** — `.duckdb` | Query it from q, and reach Parquet and S3 through it. | at the REPL |
 
 Everything above arrives with `\l pq`, except URL resources, `rlike` and the startup flags, which are always there. The two rows with
-no page of their own are documented by their own doc comments — type `.str.printf` or `.duckdb.open` at the prompt.
+no page of their own are documented by their own doc comments — type `.str.printf` or `.duckdb.exec` at the prompt.
