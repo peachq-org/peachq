@@ -849,8 +849,28 @@ ray_t* q_duckdb_schema_declare(int slot, ray_t* tbl, qd_colmap_t* cms, qd_desc_t
             cms[c].undet = false;
             continue;
         }
-        /* an undetermined column IS empty, and asking with that carries the declaration even where the placeholder
-         * happens to spell it already ("BLOB") — which is what makes dtypes[c] below a sound "was it declared" */
+        /* ADR 15, the dtype leg: with no logical to adopt, the declared type's own shape is the carrier — walked as a
+         * declared record's is, its leaves canonical, so the cast leg below stays the one every full column takes.
+         * Over ROWS every cell is a (), a LIST, so the declaration must be one: a flat carrier would read the cells
+         * as atoms, and a record's fields live in cells a () spells none of.  Over no rows a record keeps the
+         * placeholder, whose leg binds CAST(NULL AS ...), which is sound exactly there. */
+        if (cms[c].undet && d->dtype[0]) {
+            duck_logical_type lt = NULL;
+            if ((e = qd_declared_logical(slot, d->dtype, &lt))) return e;
+            qd_colmap_t stage = { NULL, NULL, 0, false };
+            bool mapped = lt && q_duckdb_codec_declared_stage_map(lt, &stage);
+            if (lt) QAPI.destroy_logical_type(&lt);
+            bool rows = ray_table_nrows(tbl) > 0, rec = mapped && q_duckdb_codec_is_rec(stage.leaf);
+            const char* why = !mapped       ? "the declared type has no mapping"
+                            : rec           ? "a () cell spells no record: an empty record cell is an empty table"
+                            : !stage.depth  ? "a () cell is a list, so the declared type must be a LIST" : NULL;
+            bool adopt = mapped && !rec && !(rows && why);
+            if (adopt) { q_duckdb_codec_map_free(&cms[c]); cms[c] = stage; }
+            else if (mapped) q_duckdb_codec_map_free(&stage);
+            if (rows && why) return qd_declare_fail(slot, d, why);
+        }
+        /* a record still undetermined asks as the empty column it is, so the declaration is carried even where the
+         * placeholder happens to spell it — which is what makes dtypes[c] below a sound "was it declared" */
         if (d->dtype[0] && (q_duckdb_schema_needs(&cms[c], d->dtype, cms[c].undet) & QD_NEED_DTYPE)) dtypes[c] = d->dtype;
         /* ADR 12: a dict spells a STRUCT by itself, so a declared record's fields — which of the three it is, in
          * what order, and the ones no row is live in — are read off the DECLARATION, never off the rows. */
