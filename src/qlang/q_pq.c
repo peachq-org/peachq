@@ -15,6 +15,8 @@
 #include "qlang/io/q_csv.h"    /* q_csv_register — the .csv.i.* natives */
 #include "qlang/io/q_json.h"  /* q_json_register — the .j.i.* natives */
 #include "qlang/io/q_ffi.h"    /* q_ffi_register — the .ffi.i.* natives */
+#include "qlang/io/q_termbox.h" /* q_termbox_register — the .termbox.i.* natives */
+#include "qlang/io/q_beep.h"    /* q_beep_register — the .termbox.i.beep native */
 #include "qlang/ops/q_regex.h" /* q_regex_register — the .regexp.i.* natives */
 #include "qlang/ops/q_strfmt.h" /* q_strfmt_register — the .str.i.printf/.format natives */
 #include "qlang/ops/q_strns.h" /* q_strns_register — the .str.i.* strip natives */
@@ -68,6 +70,8 @@ ray_t* q_pq_load(void) {
     q_conn_pq_register();
     q_console_pq_register();
     q_ffi_register();
+    q_termbox_register();
+    q_beep_register();
     q_csv_register();
     q_json_register();
     q_regex_register();
