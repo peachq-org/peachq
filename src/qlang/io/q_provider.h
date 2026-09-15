@@ -5,7 +5,7 @@
  * trailing slash IS the table marker).  hopen answers the ALIAS SYMBOL
  * `:pq:ds:alias`, and hopen/hclose are the only lifecycle doors: the host
  * calls .ds.i.open[alias;rest;timeout;config] / .ds.i.close[token] and keeps
- * the ONE registry alias <-> (ds; open triad; TOKEN; the legacy reserved fd);
+ * the ONE registry alias <-> (ds; TOKEN; the legacy reserved fd);
  * every other hook is token-keyed, reached by NAME-GENERIC dispatch off a
  * plain q namespace, and secrets die at hopen (only ":pq:ds:alias" is ever
  * stored).  A bound table is the splay POINTER — the flip of
@@ -35,10 +35,23 @@ int q_provider_ns_is(const char* s, size_t n);
  * 'domain, and the alias is REQUIRED: a sym handle needs a name) — the alias
  * sym `:pq:ds:alias`, a live alias re-pointed in place (the same sym).  EVERY
  * open form (bare sym, 2-list, 3-list, one-shot sym-apply) normalizes to the
- * FROZEN tuple .ds.i.open[alias; config; timeout; opts] — alias ` for the
+ * FROZEN tuple .ds.i.open[alias; rest; timeout; config] — alias ` for the
  * one-shot, timeout 0N when absent, opts :: when absent (both borrowed here,
  * may be NULL); any future open-time need rides the opts dict. */
 ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config);
+
+/* A provider's OWN connection as a registered row (DuckDB's `:pq:ds:main`):
+ * listed by .pq.conns[], resolved like any alias, but hopen of that alias and
+ * hclose of the handle are 'domain.  Answers the handle sym id, 0 on failure;
+ * token is retained. */
+int64_t q_provider_register_internal(const char* ds, const char* alias, ray_t* token);
+
+/* The link seam (q_env_set / q_env_unbind): a carrier bound to a global is
+ * .X.i.link[token; qname; table], one displaced or unbound is
+ * .X.i.unlink[token; qname] — both OPTIONAL hooks, best-effort (the global is
+ * already bound; a hook's error is dropped).  qname = the global's full name. */
+void q_provider_link(int64_t qname, ray_t* car);
+void q_provider_unlink(int64_t qname, ray_t* car);
 
 /* `h y` on the LEGACY int handle (qh < 0 = async call).  Text -> .X.call,
  * sym atom -> .X.bind + carrier, list/sym-vector -> the named hook. */
