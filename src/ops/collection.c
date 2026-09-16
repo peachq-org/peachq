@@ -2064,14 +2064,21 @@ static int64_t find_atom(ray_t* vec, ray_t* val) {
     bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) != 0;
     bool val_null = atom_is_oob_null(val);
 
-    /* Hash-index fast path: integer-family needle against an indexed
-     * integer-family column without nulls.  Float and cross-family
-     * needles fall through to the scan (the scan owns promotion
+    /* Index fast path: integer-family needle against an indexed integer-family
+     * column without nulls, or a symbol against an indexed SYM column (the atom
+     * carries a runtime id; the column's domain says which id — a symbol the
+     * domain lacks is absent from every row, index or not).  Float and
+     * cross-family needles fall through to the scan (the scan owns promotion
      * semantics; we do not replicate them here). */
     if (!has_nulls && !val_null && ray_is_atom(val) && ray_index_has(vec)) {
         int64_t needle = 0;
         int eligible = 1;
         switch (val->type) {
+        case -RAY_SYM:
+            if (vec->type != RAY_SYM) { eligible = 0; break; }
+            needle = ray_index_sym_key(vec, val->i64);
+            if (needle < 0) return -1;
+            break;
         case -RAY_I64:
         case -RAY_TIMESTAMP:
         case -RAY_TIMESPAN:  needle = val->i64;              break;
