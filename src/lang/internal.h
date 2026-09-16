@@ -544,6 +544,9 @@ ray_t* ray_sect_fn(ray_t* vec1, ray_t* vec2);
 ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj);
 ray_t* ray_at_fn(ray_t* vec, ray_t* idx);
 ray_t* ray_find_fn(ray_t* vec, ray_t* val);
+/* [*lo, *hi) of a null-free RAY_ATTR_SORTED vector holding values in [a, b] (same-type atoms; b NULL = a); false
+ * when the lane does not apply — the scan owns promotion, nulls and every other type. */
+bool   ray_sorted_span(ray_t* vec, ray_t* a, ray_t* b, int64_t* lo, int64_t* hi);
 ray_t* ray_til_fn(ray_t* x);
 ray_t* ray_reverse_fn(ray_t* x);
 ray_t* ray_rand_fn(ray_t* a, ray_t* b);

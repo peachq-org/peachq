@@ -2351,3 +2351,41 @@ int64_t ray_index_find_row(ray_t* col, int64_t key) {
     }
     return min_rid;  /* -1 when nothing matched = key provably absent */
 }
+
+/* Kind-neutral fronts: the kind the column carries answers or declines, so a new kind lights up here alone. */
+
+/* atom_eq's cross-type law (collection.c): a temporal meets only its own type, the plain integers meet each other. */
+static bool plain_int(int8_t t) {
+    switch (t) { case RAY_BOOL: RAY_BYTE_CASES: case RAY_I16: case RAY_I32: case RAY_I64: return true; default: return false; }
+}
+
+bool ray_index_atom_key(const ray_t* col, const ray_t* atom, int64_t* key) {
+    if (!col || !atom || !ray_is_atom(atom) || !ray_is_vec((ray_t*)col)) return false;
+    if (atom->type != -col->type && !(plain_int(-atom->type) && plain_int(col->type))) return false;
+    switch (atom->type) {
+    case -RAY_I64: case -RAY_TIMESTAMP:                 *key = atom->i64;          return true;
+    case -RAY_I32: case -RAY_DATE: case -RAY_TIME:      *key = (int64_t)atom->i32; return true;
+    case -RAY_I16:                                      *key = (int64_t)atom->i16; return true;
+    case -RAY_BOOL: RAY_BYTE_ATOM_CASES:                *key = (int64_t)atom->b8;  return true;
+    default:                                            return false;
+    }
+}
+
+ray_t* ray_index_eq_rowsel(ray_t* col, int64_t key) {
+    if (ray_index_kind(col) == RAY_IDX_HASH) return ray_index_hash_eq_rowsel(col, key);
+    return NULL;
+}
+
+int ray_index_has_key(ray_t* col, int64_t key) {
+    if (!col || RAY_IS_ERR(col) || col->type == RAY_F32 || col->type == RAY_F64) return -2;
+    if (!idx_fresh_nonull(col, RAY_IDX_HASH)) return -2;
+    if (!hash_key_in_range(col->type, key)) return -2;
+    int64_t rid = -1;
+    ray_index_t* ix = hash_probe_setup(col, key, &rid);
+    if (!ix) return -2;
+    const int64_t* chn  = (const int64_t*)ray_data(ix->u.hash.chain);
+    const uint8_t* base = (const uint8_t*)ray_data(col);
+    for (; rid >= 0; rid = chn[rid] - 1)
+        if (hash_col_read_i64(base, col->type, rid) == key) return 1;
+    return 0;
+}

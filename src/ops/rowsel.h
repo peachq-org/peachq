@@ -162,9 +162,9 @@ ray_t* ray_rowsel_from_pred(ray_t* pred);
 /* Flatten a rowsel into a dense int64 array of global row indices,
  * sorted ascending.  Length of the array is `meta->total_pass`.
  *
- * Returned block is a ray_t* byte buffer whose ray_data() points to
- * an `int64_t[total_pass]`.  Consumer gets a raw pointer via
- * ray_data() and releases the block when done via ray_release.
+ * Returned block is an owned RAY_I64 vector of length total_pass (a
+ * q consumer takes it as an index vector; the engine consumers read
+ * ray_data() as `int64_t[total_pass]`).  Released via ray_release.
  * Returns NULL on OOM.
  *
  * Used by exec_group and similar consumers that can't cheaply walk

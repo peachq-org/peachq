@@ -17,7 +17,9 @@
 #include "qlang/io/q_io.h"             /* q_io_is_fsym / q_io_resource_table — resource From-resolve */
 #include "qlang/io/q_provider.h"         /* provider carriers: qsql push / materialize */
 #include "qlang/q_env.h"
-#include "lang/internal.h"             /* ray_til_fn, ray_typed_null, ray_except_fn */
+#include "lang/internal.h"             /* ray_til_fn, ray_typed_null, ray_except_fn, ray_sorted_span */
+#include "ops/idxop.h"                 /* the kind-neutral index fronts + routing counters */
+#include "ops/rowsel.h"                /* ray_rowsel_to_indices */
 #include "table/dict.h"                /* ray_dict_slots — keyed-table halves */
 #include <stdlib.h>
 
@@ -142,6 +144,175 @@ static ray_t* phrase_eval(ray_t* tree, ray_t* t, ray_t* idx) {
     return r;
 }
 
+/* idx[where r] — the one refinement step every constraint ends in.  Consumes r. */
+static ray_t* where_refine(ray_t* idx, ray_t* r) {
+    ray_t* w = (r && !RAY_IS_ERR(r)) ? q_where_wrap(r) : r;
+    if (r && w != r) ray_release(r);
+    ray_t* nidx = (w && !RAY_IS_ERR(w)) ? gather(idx, w) : w;
+    if (w && nidx != w) ray_release(w);
+    return nidx ? nidx : q_err(QE_TYPE);
+}
+
+static int idx_is_ascending(ray_t* idx) {
+    int64_t n = ray_len(idx);
+    const int64_t* p = (const int64_t*)ray_data(idx);
+    for (int64_t j = 1; j < n; j++)
+        if (p[j] < p[j - 1]) return 0;
+    return 1;
+}
+
+static ray_t* rows_new(int64_t n) {
+    ray_t* r = ray_vec_new(RAY_I64, n > 0 ? n : 1);
+    if (!RAY_IS_ERR(r)) r->len = n;
+    return r;
+}
+
+static ray_t* rows_span(int64_t lo, int64_t hi) {
+    ray_t* r = rows_new(hi > lo ? hi - lo : 0);
+    if (RAY_IS_ERR(r)) return r;
+    int64_t* d = (int64_t*)ray_data(r);
+    for (int64_t i = lo; i < hi; i++) d[i - lo] = i;
+    return r;
+}
+
+/* a front's rowsel (consumed; NULL = it declined) as the ascending id vector it flattens to */
+static ray_t* rows_of_rowsel(ray_t* sel) {
+    ray_t* r = sel ? ray_rowsel_to_indices(sel) : NULL;
+    if (sel) ray_rowsel_release(sel);
+    return r;
+}
+
+static int cmp_i64_pair(const void* a, const void* b) {
+    int64_t x = *(const int64_t*)a, y = *(const int64_t*)b;
+    return (x > y) - (x < y);
+}
+
+/* rows of a sorted column with a value in `set`: one span per needle, the spans ordered and merged (distinct values
+ * give disjoint spans, equal needles the same span); the `in` primitive's m <= n/32 guard, the scan past it */
+static ray_t* rows_sorted_in(ray_t* col, ray_t* set) {
+    int64_t m = ray_len(set), n = ray_len(col);
+    if (set->type != col->type || (set->attrs & RAY_ATTR_HAS_NULLS) || m > n / 32) return NULL;
+    int64_t* sp = (int64_t*)malloc(sizeof(int64_t) * 2 * (size_t)(m > 0 ? m : 1));
+    if (!sp) return NULL;
+    int64_t total = 0;
+    for (int64_t i = 0; i < m; i++) {
+        ray_t* e = q_index_elem_at(set, i);
+        int ok = e && !RAY_IS_ERR(e) && ray_sorted_span(col, e, NULL, &sp[2 * i], &sp[2 * i + 1]);
+        if (e) ray_release(e);
+        if (!ok) { free(sp); return NULL; }
+    }
+    qsort(sp, (size_t)m, 2 * sizeof(int64_t), cmp_i64_pair);
+    for (int64_t i = 0; i < m; i++)
+        if (i == 0 || sp[2 * i] != sp[2 * i - 2]) total += sp[2 * i + 1] - sp[2 * i];
+    ray_t* r = rows_new(total);
+    if (!RAY_IS_ERR(r)) {
+        int64_t* d = (int64_t*)ray_data(r);
+        for (int64_t i = 0, k = 0; i < m; i++)
+            if (i == 0 || sp[2 * i] != sp[2 * i - 2])
+                for (int64_t j = sp[2 * i]; j < sp[2 * i + 1]; j++) d[k++] = j;
+    }
+    free(sp);
+    return r;
+}
+
+typedef enum { WA_EQ, WA_IN, WA_WITHIN } where_attr_op;
+
+/* The rows of the FULL column a constraint keeps, off its attribute — NULL when no lane applies and the verb answers.
+ * The needle carries the column's own type (a widening pair is the verb's law) and nulls stay with the verb. */
+static ray_t* attr_rows(ray_t* col, ray_t* v, where_attr_op op) {
+    if (!v || RAY_IS_ERR(v) || (col->attrs & RAY_ATTR_HAS_NULLS)) return NULL;
+    int64_t key, lo, hi;
+    if (op == WA_IN) {
+        if (!ray_is_vec(v)) return NULL;
+        if (ray_index_has(col)) {
+            ray_idx_consults[IDX_SITE_FILTER_HASH]++;
+            ray_t* r = rows_of_rowsel(ray_index_in_rowsel(col, v));
+            if (r) { ray_idx_hits[IDX_SITE_FILTER_HASH]++; return r; }
+        }
+        if (!ray_attr_is_sorted(col)) return NULL;
+        ray_idx_consults[IDX_SITE_FILTER_RANGE]++;
+        ray_t* r = rows_sorted_in(col, v);
+        if (r) ray_idx_hits[IDX_SITE_FILTER_RANGE]++;
+        return r;
+    }
+    if (op == WA_WITHIN) {
+        if (!ray_is_vec(v) || ray_len(v) != 2 || !ray_attr_is_sorted(col)) return NULL;
+        ray_t* a = q_index_elem_at(v, 0);
+        ray_t* b = q_index_elem_at(v, 1);
+        ray_idx_consults[IDX_SITE_FILTER_RANGE]++;
+        int ok = a && b && !RAY_IS_ERR(a) && !RAY_IS_ERR(b) && ray_sorted_span(col, a, b, &lo, &hi);
+        if (a) ray_release(a);
+        if (b) ray_release(b);
+        if (!ok) return NULL;
+        ray_idx_hits[IDX_SITE_FILTER_RANGE]++;
+        return rows_span(lo, hi);
+    }
+    if (!ray_is_atom(v) || v->type != -col->type || atom_is_oob_null(v)) return NULL;
+    if (ray_index_has(col) && ray_index_atom_key(col, v, &key)) {
+        ray_idx_consults[IDX_SITE_FILTER_HASH]++;
+        ray_t* r = rows_of_rowsel(ray_index_eq_rowsel(col, key));
+        if (r) { ray_idx_hits[IDX_SITE_FILTER_HASH]++; return r; }
+    }
+    if (!ray_attr_is_sorted(col)) return NULL;
+    ray_idx_consults[IDX_SITE_FILTER_RANGE]++;
+    if (!ray_sorted_span(col, v, NULL, &lo, &hi)) return NULL;
+    ray_idx_hits[IDX_SITE_FILTER_RANGE]++;
+    return rows_span(lo, hi);
+}
+
+/* Law 6 over index rows: rows are over the FULL column, so the entries of idx among them are kept, in idx's order
+ * (both ascending, idx's duplicates kept).  Consumes rows. */
+static ray_t* idx_restrict(ray_t* idx, int ident, ray_t* rows) {
+    if (ident) return rows;
+    int64_t ni = ray_len(idx), nr = ray_len(rows), k = 0;
+    const int64_t* d = (const int64_t*)ray_data(idx);
+    const int64_t* r = (const int64_t*)ray_data(rows);
+    ray_t* out = rows_new(ni < nr ? ni : nr);
+    if (RAY_IS_ERR(out)) { ray_release(rows); return out; }
+    int64_t* o = (int64_t*)ray_data(out);
+    for (int64_t i = 0, j = 0; i < ni; i++) {
+        while (j < nr && r[j] < d[i]) j++;
+        if (j < nr && r[j] == d[i]) o[k++] = d[i];
+    }
+    out->len = k;
+    ray_release(rows);
+    return out;
+}
+
+/* A `col = x` / `x = col` / `col in x` / `col within x` constraint on an attributed column (set-attribute.md:127:
+ * the where clause is where `=`/`within` answer positions) takes its rows off the index.  A literal right operand
+ * is taken as is; any other is evaluated once, as the phrase would (right to left, same scope), and when no lane
+ * applies the verb runs on that value — so nothing evaluates twice.  NULL = not this shape, or idx is not an
+ * ascending subsequence: the phrase evaluates as before.  Mapped splays are the owner's deferral. */
+static ray_t* where_attr(ray_t* tree, ray_t* t, ray_t* idx) {
+    if (!tree || tree->type != RAY_LIST || ray_len(tree) != 3 || q_splay_table_path(t)) return NULL;
+    ray_t** e = (ray_t**)ray_data(tree);
+    if (!e[0] || !e[1] || !e[2]) return NULL;
+    where_attr_op op;
+    if      (e[0] == q_registry_lookup_name("=", 1, Q_DYADIC))      op = WA_EQ;
+    else if (e[0] == q_registry_lookup_name("in", 2, Q_DYADIC))     op = WA_IN;
+    else if (e[0] == q_registry_lookup_name("within", 6, Q_DYADIC)) op = WA_WITHIN;
+    else return NULL;
+    int swapped = op == WA_EQ && e[1]->type != -RAY_SYM && e[1]->type != RAY_LIST && e[2]->type == -RAY_SYM;
+    ray_t* cn = swapped ? e[2] : e[1];
+    ray_t* col = cn->type == -RAY_SYM ? ray_table_get_col(t, cn->i64) : NULL;       /* borrowed */
+    if (!col || !(ray_index_has(col) || ray_attr_is_sorted(col))) return NULL;
+    int64_t n = q_count_long(t);
+    int ident = idx_is_identity(idx, n);
+    if (!ident && !idx_is_ascending(idx)) return NULL;
+    ray_t* x = swapped ? e[1] : e[2];
+    ray_t* v = x->type == -RAY_SYM || x->type == RAY_LIST ? phrase_eval(x, t, idx) : q_eval(x);
+    if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_TYPE);
+    ray_t* rows = attr_rows(col, v, op);
+    if (rows) { ray_release(v); return RAY_IS_ERR(rows) ? rows : idx_restrict(idx, ident, rows); }
+    ray_t* cv = ident ? (ray_retain(col), col) : gather(col, idx);
+    ray_t* av[2] = { swapped ? v : cv, swapped ? cv : v };
+    ray_t* r = (cv && !RAY_IS_ERR(cv)) ? q_eval_apply_value(e[0], av, 2) : cv;
+    if (cv && r != cv) ray_release(cv);
+    ray_release(v);
+    return where_refine(idx, r);
+}
+
 /* Law 6: SUCCESSIVE refinement — each constraint sees only the rows the
  * previous ones kept; idx:=idx[where result]. */
 static ray_t* where_fold(ray_t* c, ray_t* t, ray_t* idx0) {
@@ -153,12 +324,9 @@ static ray_t* where_fold(ray_t* c, ray_t* t, ray_t* idx0) {
     int64_t n = ray_len(c);
     for (int64_t j = 0; j < n; j++) {
         ray_t* tree = q_index_elem_at(c, j);
-        ray_t* r = (tree && !RAY_IS_ERR(tree)) ? phrase_eval(tree, t, idx) : tree;
-        if (tree && r != tree) ray_release(tree);
-        ray_t* w = (r && !RAY_IS_ERR(r)) ? q_where_wrap(r) : r;
-        if (r && w != r) ray_release(r);
-        ray_t* nidx = (w && !RAY_IS_ERR(w)) ? gather(idx, w) : w;
-        if (w && nidx != w) ray_release(w);
+        ray_t* nidx = (tree && !RAY_IS_ERR(tree)) ? where_attr(tree, t, idx) : tree;
+        if (!nidx) nidx = where_refine(idx, phrase_eval(tree, t, idx));
+        if (tree && nidx != tree) ray_release(tree);
         ray_release(idx);
         if (!nidx || RAY_IS_ERR(nidx)) return nidx ? nidx : q_err(QE_TYPE);
         idx = nidx;
