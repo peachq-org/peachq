@@ -1049,35 +1049,35 @@ ray_t* ray_index_attach_hash(ray_t** vp) {
  * fp_fold_t).  Float keys are not supported here — equality on
  * F32/F64 has NaN / -0 semantics the unfused engine handles. */
 
+/* Every probe-side reader derives its width from the builder's one source, numeric_elem_size — a hand-written type
+ * list here once stopped at DATE/TIMESTAMP and answered "absent" on `u#` month/minute/second/timespan (#726). */
+static int int_elem_size(int8_t t) {
+    return (t == RAY_F32 || t == RAY_F64) ? 0 : numeric_elem_size(t);
+}
+
+/* atom_eq's cross-type law (collection.c): a temporal meets only its own type, the plain integers meet each other. */
+static bool plain_int(int8_t t) {
+    switch (t) { case RAY_BOOL: RAY_BYTE_CASES: case RAY_I16: case RAY_I32: case RAY_I64: return true; default: return false; }
+}
+static bool types_meet(int8_t a, int8_t b) { return a == b || (plain_int(a) && plain_int(b)); }
+
 static int hash_key_in_range(int8_t t, int64_t k) {
-    switch (t) {
-    case RAY_BOOL: RAY_BYTE_CASES:     return k >= 0 && k <= UINT8_MAX;
-    case RAY_I16:                      return k >= INT16_MIN && k <= INT16_MAX;
-    case RAY_I32: case RAY_DATE:
-    case RAY_TIME:                     return k >= INT32_MIN && k <= INT32_MAX;
-    case RAY_I64:
-    case RAY_TIMESTAMP:                return 1;
-    default:                           return 0;
+    switch (int_elem_size(t)) {
+    case 1:  return k >= 0 && k <= UINT8_MAX;
+    case 2:  return k >= INT16_MIN && k <= INT16_MAX;
+    case 4:  return k >= INT32_MIN && k <= INT32_MAX;
+    case 8:  return 1;
+    default: return 0;
     }
 }
 
-/* Read row `i` of a numeric column as int64 for equality compare. */
 static int64_t hash_col_read_i64(const uint8_t* base, int8_t t, int64_t i) {
-    int es;
-    switch (t) {
-    case RAY_BOOL: RAY_BYTE_CASES:     es = 1; break;
-    case RAY_I16:                      es = 2; break;
-    case RAY_I32: case RAY_DATE:
-    case RAY_TIME:                     es = 4; break;  /* TIME is 4-byte int32 */
-    case RAY_I64:
-    case RAY_TIMESTAMP:                es = 8; break;
-    default:                           return 0;
-    }
-    switch (es) {
+    switch (int_elem_size(t)) {
     case 1:  return (int64_t)base[i];
     case 2:  { int16_t v; memcpy(&v, base + i*2, 2); return (int64_t)v; }
     case 4:  { int32_t v; memcpy(&v, base + i*4, 4); return (int64_t)v; }
-    default: { int64_t v; memcpy(&v, base + i*8, 8); return v;          }
+    case 8:  { int64_t v; memcpy(&v, base + i*8, 8); return v;          }
+    default: return 0;
     }
 }
 
@@ -1343,20 +1343,6 @@ ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key) {
  * rowsel in one pass.
  * -------------------------------------------------------------------------- */
 
-/* Read element i of a set vec (integer-family only) as int64.  Mirrors
- * hash_col_read_i64 but operates on the set_vec type, not the column type. */
-static int64_t set_vec_read_i64(const uint8_t* base, int8_t t, int64_t i) {
-    switch (t) {
-    case RAY_BOOL: RAY_BYTE_CASES:     return (int64_t)base[i];
-    case RAY_I16:  { int16_t v; memcpy(&v, base + i*2, 2); return (int64_t)v; }
-    case RAY_I32: case RAY_DATE: case RAY_TIME:
-                   { int32_t v; memcpy(&v, base + i*4, 4); return (int64_t)v; }
-    case RAY_I64: case RAY_TIMESTAMP:
-                   { int64_t v; memcpy(&v, base + i*8, 8); return v; }
-    default:       return 0;
-    }
-}
-
 static int cmp_i64_plain(const void* a, const void* b) {
     int64_t x = *(const int64_t*)a;
     int64_t y = *(const int64_t*)b;
@@ -1379,6 +1365,7 @@ ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec) {
     if (set_is_float) return NULL;
     /* Check set type is integer-family (numeric_elem_size covers all int types) */
     if (numeric_elem_size(st) == 0) return NULL;
+    if (!types_meet(st, col->type)) return NULL;   /* a month set on a date column shares raw ints, never a value */
 
     int64_t set_len = set_vec->len;
     int64_t n       = col->len;
@@ -1393,7 +1380,7 @@ ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec) {
         const uint8_t* sb = (const uint8_t*)ray_data(set_vec);
         int64_t ulen = 0;
         for (int64_t i = 0; i < set_len; i++) {
-            int64_t v = set_vec_read_i64(sb, st, i);
+            int64_t v = hash_col_read_i64(sb, st, i);
             if (hash_key_in_range(col->type, v))
                 set_scratch[ulen++] = v;
         }
@@ -2588,21 +2575,16 @@ int64_t ray_index_find_row(ray_t* col, int64_t key) {
 
 /* Kind-neutral fronts: the kind the column carries answers or declines, so a new kind lights up here alone. */
 
-/* atom_eq's cross-type law (collection.c): a temporal meets only its own type, the plain integers meet each other. */
-static bool plain_int(int8_t t) {
-    switch (t) { case RAY_BOOL: RAY_BYTE_CASES: case RAY_I16: case RAY_I32: case RAY_I64: return true; default: return false; }
-}
-
 bool ray_index_atom_key(const ray_t* col, const ray_t* atom, int64_t* key) {
     if (!col || !atom || !ray_is_atom(atom) || !ray_is_vec((ray_t*)col)) return false;
-    if (atom->type != -col->type && !(plain_int(-atom->type) && plain_int(col->type))) return false;
-    switch (atom->type) {
-    case -RAY_I64: case -RAY_TIMESTAMP:                 *key = atom->i64;          return true;
-    case -RAY_I32: case -RAY_DATE: case -RAY_TIME:      *key = (int64_t)atom->i32; return true;
-    case -RAY_I16:                                      *key = (int64_t)atom->i16; return true;
-    case -RAY_BOOL: RAY_BYTE_ATOM_CASES:                *key = (int64_t)atom->b8;  return true;
-    case -RAY_SYM:                                      *key = ray_index_sym_key((ray_t*)col, atom->i64); return true;
-    default:                                            return false;
+    if (!types_meet(-atom->type, col->type)) return false;
+    if (atom->type == -RAY_SYM) { *key = ray_index_sym_key((ray_t*)col, atom->i64); return true; }
+    switch (int_elem_size(-atom->type)) {
+    case 1:  *key = (int64_t)atom->b8;  return true;
+    case 2:  *key = (int64_t)atom->i16; return true;
+    case 4:  *key = (int64_t)atom->i32; return true;
+    case 8:  *key = atom->i64;          return true;
+    default: return false;
     }
 }
 
