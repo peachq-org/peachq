@@ -73,7 +73,25 @@ typedef enum {
      * permitted on RAY_STR (it stores codes alongside the descriptors, leaving
      * the column's own representation untouched). */
     RAY_IDX_DICT       = 7,
+    /* Direct-addressed by the parent's own ids (a SYM vector is a dictionary-coded
+     * column: hashing an id to rediscover the dictionary is wasted work).  A
+     * two-level page table — id >> RAY_CODES_PAGE_LOG2 selects a page, pages are
+     * allocated on first touch — keeps a sparse id set from paying for the gap.
+     * One kind carries all three kdb letters (see the codes arm below); heap-only. */
+    RAY_IDX_CODES      = 8,
 } ray_idx_kind_t;
+
+/* 4096 ids per page: 32 KB of int64 slots, so a dense domain costs one directory
+ * entry per 4096 ids and a column over ids {3, 1000000} costs two pages, not 8 MB. */
+#define RAY_CODES_PAGE_LOG2 12
+#define RAY_CODES_PAGE      (1 << RAY_CODES_PAGE_LOG2)
+
+/* What a CODES index keeps per id; the value is the slot count (see the codes arm). */
+typedef enum {
+    RAY_CODES_UNIQUE  = 1,      /* [first]              every id on one row */
+    RAY_CODES_PARTED  = 2,      /* [start, len]         every id one contiguous run */
+    RAY_CODES_GROUPED = 3,      /* [head, tail, count]  + a row-ordered next chain */
+} ray_codes_layout_t;
 
 /* Marker bits stored in ray_index_t.markers (block-resident attributes
  * that have no dedicated attrs bit).  sorted lives in attrs (RAY_ATTR_SORTED),
@@ -172,6 +190,19 @@ typedef struct {
             ray_t*   first_occ; /* RAY_I32 vec, n_distinct entries: first-occ row  */
             int64_t  n_distinct;
         } dict;
+        struct {                /* RAY_IDX_CODES */
+            /* dir[id >> PAGE_LOG2] = 1 + the page's base offset into slots (0 = no
+             * row carries an id on that page).  A page holds PAGE * layout int64
+             * slots, one group per id, "row+1" encoded (0 = absent) except the
+             * PARTED len, a plain count.  GROUPED: next[row] = the next row with the
+             * same id (row+1, 0 = end), so rows chain in ascending order and the
+             * tail slot makes a later append an O(1) insert. */
+            ray_t*   dir;       /* RAY_I64 vec */
+            ray_t*   slots;     /* RAY_I64 vec */
+            ray_t*   next;      /* RAY_I64 vec, parent->len entries (GROUPED only, else NULL) */
+            uint8_t  layout;    /* ray_codes_layout_t = slots per id */
+            uint8_t  _pad[7];
+        } codes;
     } u;
 } ray_index_t;
 
@@ -200,9 +231,9 @@ void ray_idx_stats_init(void);   /* atexit dump when RAY_IDX_STATS set */
 
 /* ===== Attach / Detach ===== */
 
-/* Build an accelerator and attach.  Numeric types only for v1
- * (BOOL/U8/I16/I32/I64/F32/F64/DATE/TIME/TIMESTAMP — RAY_STR/RAY_SYM/RAY_GUID
- * deferred until the str_pool displacement sweep is complete).
+/* Build an accelerator and attach.  Numeric types only for these kinds
+ * (BOOL/U8/I16/I32/I64/F32/F64/DATE/TIME/TIMESTAMP); RAY_STR takes only DICT,
+ * RAY_SYM only CODES (ray_index_attach_codes), RAY_GUID nothing yet.
  * On success, *vp is the (possibly new) parent vector with HAS_INDEX set.
  * On failure, *vp is unchanged and a RAY_ERROR is returned. */
 ray_t* ray_index_attach_zone (ray_t** vp);
@@ -228,6 +259,19 @@ ray_t* ray_index_attach_dict(ray_t** vp);
 
 /* Attach an already-built standalone RAY_INDEX object (zero-copy on rc=1). */
 ray_t* ray_index_attach_built(ray_t** vp, ray_t* idx);
+
+/* Build a RAY_IDX_CODES index of the given layout on a RAY_SYM vector and attach
+ * it.  The build IS the verify: a repeated id under UNIQUE, or an id whose run
+ * resumes after a gap under PARTED, returns a "domain" error with *vp untouched.
+ * Ids are read at the vector's own width; the key is the id VALUE, in the vector's
+ * OWN domain (runtime or file — the index never asks which). */
+ray_t* ray_index_attach_codes(ray_t** vp, ray_codes_layout_t layout);
+
+/* The id a runtime-domain symbol atom denotes in `col`'s domain, or -1 when the
+ * column's file domain has no such string (then no row can equal it).  For a
+ * runtime-domain column the id passes through.  ray_index_atom_key's -RAY_SYM
+ * arm is this, so a consumer keys a symbol like any other atom. */
+int64_t ray_index_sym_key(ray_t* col, int64_t runtime_id);
 
 /* ── Inline on-disk index region (kdb+-style, zero-copy mmap) ──
  * ray_index_inline_size: bytes the region occupies (32-aligned ray_t blocks).
@@ -332,6 +376,9 @@ ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key);
  * the hash-eq path: F32/F64 NaN/-0 semantics belong to the scan kernel).
  *
  * set_vec must be an integer-family typed vec; other set types → NULL.
+ * A CODES column takes a RAY_SYM set instead (each cell resolved into the
+ * column's domain); its per-id row lists are merged, so that lane has no
+ * row-selectivity guard — only the stack cap on distinct keys (idxop.c).
  *
  * Returns:
  *   - A fresh rowsel block (rc=1) on success — install on g->selection.
@@ -355,7 +402,8 @@ ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec);
  *   -2    → not eligible; caller falls back to the scan.
  *
  * Uses idx_fresh_nonull: null-bearing columns fall back (-2) so the
- * scan correctly surfaces null-equality searches. */
+ * scan correctly surfaces null-equality searches.  A CODES column answers
+ * from its first-row slot (key = an id in the column's domain). */
 int64_t ray_index_find_row(ray_t* col, int64_t key);
 
 /* Kind-neutral fronts: a consumer asks by value and the column's kind answers or declines (NULL / -2).  atom_key is
@@ -409,7 +457,8 @@ ray_t* ray_index_distinct_ids(ray_t* col, int64_t* out_count);
 /* ===== Internal helpers (used by retain/release/detach in heap.c
  * and by mutation paths in vec.c) ===== */
 
-/* Release the saved-aux pointers carried by a RAY_INDEX ray_t.
+/* Release the saved-aux pointers carried by a RAY_INDEX ray_t (a SYM parent's
+ * domain ref rides here while the index is attached).
  * Invoked from ray_release_owned_refs when the index ray_t is freed. */
 void ray_index_release_saved(ray_index_t* ix);
 
