@@ -394,5 +394,6 @@ version:
 -include Makefile.dev
 
 -include $(DEPS)
+-include $(WIN_DEPS)
 -include $(RE2_DEPS)
 -include $(FMT_DEPS)

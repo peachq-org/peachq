@@ -11,11 +11,12 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#if !defined(_WIN32)
-#include <strings.h>          /* strcasecmp / strncasecmp */
+#if defined(_WIN32)
+/* mingw's <string.h> declares strcasecmp/strncasecmp as inline wrappers over _stricmp/_strnicmp; a `#define
+ * strcasecmp _stricmp` seen first turns that wrapper into `_stricmp(){return _stricmp();}` — a hang at -O2 */
+#include <string.h>
 #else
-#define strcasecmp  _stricmp
-#define strncasecmp _strnicmp
+#include <strings.h>          /* strcasecmp / strncasecmp */
 #endif
 
 /* ---- q_duckdb.c: the loaded table, the connection slots, the message channel ---- */
