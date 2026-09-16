@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #if defined(__EMSCRIPTEN__)
 /* no dynamic loading in the wasm build — loader is a constant failure */
@@ -545,11 +546,29 @@ static int qd_free_slot(void) {
     return -1;
 }
 
+/* THE config every open of main starts from.  A fat install ships `extensions/` beside `q` (the release's
+ * `<dir>/v<ver>/<platform>/<name>.duckdb_extension` tree): that directory becomes DuckDB's extension_directory and
+ * autoinstall goes off, so LOAD/autoload find the bundle and never reach for the network.  No such directory (a thin
+ * install) leaves both at DuckDB's defaults.  The caller's own keys land after these, so they win. */
+static duck_state qd_config_new(duck_config* out) {
+    duck_state st = QAPI.create_config(out);
+    if (st != QDuckSuccess) return st;
+    char exe[512], dir[600];
+    struct stat sb;
+    if (!q_exedir(exe, sizeof exe)) return st;
+    snprintf(dir, sizeof dir, "%s/extensions", exe);
+    if (stat(dir, &sb) != 0 || !S_ISDIR(sb.st_mode)) return st;
+    QAPI.set_config(*out, "extension_directory", dir);
+    QAPI.set_config(*out, "autoinstall_known_extensions", "false");
+    return st;
+}
+
 /* Open main: the file `-duckdb` named, else PEACHQ_DUCKDB_MAIN, else in-memory; cfg (consumed) carries the SET
  * keys of the open that creates it, so an open-only setting reaches the one place DuckDB takes it. */
 static ray_t* qd_main_open(duck_config cfg) {
     const char* path = g_main_path[0] ? g_main_path : getenv("PEACHQ_DUCKDB_MAIN");
     if (path && !*path) path = NULL;
+    if (!cfg && qd_config_new(&cfg) != QDuckSuccess) cfg = NULL;
     int slot = qd_free_slot();
     if (slot < 0) { if (cfg) QAPI.destroy_config(&cfg); return q_duckdb_fail(-1, "open", "every connection slot is live"); }
     char* open_err = NULL;
@@ -655,7 +674,7 @@ static ray_t* qd_config_apply(ray_t* cfg, qd_buf* attach) {
             q_duckdb_puts(attach, " ");
             qd_cfg_put(attach, t, quote);
         } else if (!g_main.open) {
-            if (!oc && QAPI.create_config(&oc) != QDuckSuccess) e = q_duckdb_fail(-1, "open", "duckdb_create_config failed");
+            if (!oc && qd_config_new(&oc) != QDuckSuccess) e = q_duckdb_fail(-1, "open", "duckdb_create_config failed");
             else if (QAPI.set_config(oc, k, t) != QDuckSuccess) e = q_duckdb_fail(-1, k, "not a DuckDB config option");
         } else {
             qd_buf sb = {0};

@@ -1,10 +1,9 @@
 # Resource handles — the provider implementer's page
 
 The user-facing model is `user-docs/handles.md`; this page is for whoever writes a `:pq:` PROVIDER — a q namespace
-`.X` whose hooks the host (`src/qlang/io/q_provider.c`) calls by NAME. A user names your provider in a coordinate,
-`` `:pq:X:alias:… ``, and never calls a hook directly. The contract is v3 (`actionable-plans/2026-09-15-duckdb-sql-parquet-adr.md`
-§ Handles and § Main instance); `lib/qpc.q` (q IPC), `lib/duckdb.q` and the test fixture `test/q/provider/vtmock.q`
-are the three implementations to read beside it.
+`.X` whose hooks the host calls by NAME. A user names your provider in a coordinate, `` `:pq:X:alias:… ``, and never
+calls a hook directly. The contract is v3; `lib/qpc.q` (q IPC) and `lib/duckdb.q` are the two shipped implementations
+to read beside it.
 
 ## The model in one paragraph
 
