@@ -63,6 +63,7 @@ typedef struct {
     int  n;
     char schema[256];               /* resolved: given, else the session's */
     char key[QD_NAME_PARTS * 258];  /* the sidecar's row key, the IDENTITY of those parts (q_duckdb_schema_name_resolve) */
+    bool temp;                      /* one of the bridge's TEMP tables: in `temp`, which current_database() never names */
 } qd_name_t;
 
 /* ---- column map: a manifest row under N levels of DuckDB LIST.  QD_TYPES[] is
@@ -143,6 +144,7 @@ ray_t* q_duckdb_codec_strip_companions(int slot, ray_t* tbl, ray_t** masks, ray_
 /* ---- q_duckdb_schema.c: the sidecar, the catalog spellings, the DDL, the envelope's schema ---- */
 
 #define QD_STAGE_TBL "_q_stage"       /* the temp table a declared type is staged in, then CAST out of */
+#define QD_STAGING_TBL "_q_staging"   /* the reserved temp table lib/parquet.q stages a q table in; set may name it */
 #define QD_NEED_LOGICAL 1
 #define QD_NEED_DTYPE   2
 
@@ -158,6 +160,7 @@ int64_t     q_duckdb_schema_fetch_desc(int slot, const qd_name_t* nm, qd_desc_t*
 void        q_duckdb_schema_desc_free(qd_desc_t* d, int64_t n);
 ray_t*      q_duckdb_schema_write_desc(int slot, const qd_name_t* nm, ray_t* tbl, const qd_colmap_t* cms,
                                        const bool* iskey, const qd_enum_t* en, const char* const* dtypes);
+void        q_duckdb_schema_drop_desc(int slot, const qd_name_t* nm);
 ray_t*      q_duckdb_schema_rekey(ray_t* tbl, const qd_desc_t* desc, int64_t ndesc);
 bool        q_duckdb_schema_catalog_col(const char* dt, size_t n, qd_colmap_t* out);
 void        q_duckdb_schema_create_ddl(qd_buf* b, const qd_name_t* nm, ray_t* tbl, const qd_colmap_t* cms, bool temp);
