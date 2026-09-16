@@ -161,16 +161,45 @@ static bool attr_no_dup_nulls(ray_t* v) {
     return true;
 }
 
-/* THE append-retention law (set-attribute.md:31-32, :94): s kept iff the tail
- * from x's LAST item is non-descending; u/g/p dropped — extending the hash on
- * append is the lifecycle programme's step 3, and a letter without its hash is
- * never held.  Stated over x's letter and length, not x itself, so an append
- * that grew x IN PLACE can apply it too (x's own letter is stale by then, its
- * length the result's).  r CONSUMED (rc==1 fresh); slices/arena refused. */
-ray_t* q_attr_append_keep(char lx, int64_t nx, ray_t* r) {
-    if (lx != 's' || !r || RAY_IS_ERR(r) || !ray_is_vec(r) || q_attr_letter(r)) return r;
-    if (r->attrs & (RAY_ATTR_SLICE | RAY_ATTR_ARENA)) return r;
-    if (nx > ray_len(r)) return r;
+/* A copying writer's block for the law: a clone, so the source keeps its own while the result's is extended.
+ * NULL when no extension could keep the letter (not u/g, or a mapped block). */
+ray_t* q_attr_index_clone(ray_t* x) {
+    char l = q_attr_letter(x);
+    if ((l != 'u' && l != 'g') || !ray_index_has(x) || x->index->mmod == 1 ||
+        (ray_index_payload(x->index)->markers & RAY_MARK_MMAP))
+        return NULL;
+    ray_t* c = ray_index_clone(x->index);
+    if (c && RAY_IS_ERR(c)) { ray_error_free(c); return NULL; }
+    return c;
+}
+
+/* A kdb u# holds at most ONE null (attr_no_dup_nulls); the hash skips nulls, so a null among the new rows is judged
+ * here: the letter survives iff the whole vector still holds at most one. */
+static bool u_nulls_ok(ray_t* r, int64_t nx) {
+    for (int64_t i = nx, n = ray_len(r); i < n; i++)
+        if (ray_vec_is_null(r, i)) return attr_no_dup_nulls(r);
+    return true;
+}
+
+/* THE append-retention law (set-attribute.md:31-32, :94; the table in docs/attributes-status.md): s kept iff the
+ * tail from x's LAST item is non-descending; u/g kept iff the index EXTENDS over the new rows (a u repeat drops
+ * the letter, no error); p dropped.  Stated over x's letter, length and DETACHED block (idx, owned, consumed —
+ * NULL when nothing could be kept), not x itself, so an append that grew x IN PLACE applies it too (x's own
+ * letter is stale by then, its length the result's).  r CONSUMED (rc==1 fresh); slices/arena refused. */
+ray_t* q_attr_append_keep(char lx, int64_t nx, ray_t* idx, ray_t* r) {
+    bool vec = r && !RAY_IS_ERR(r) && ray_is_vec(r) && !q_attr_letter(r) && !(r->attrs & (RAY_ATTR_SLICE | RAY_ATTR_ARENA))
+            && nx <= ray_len(r);
+    if (lx == 'u' || lx == 'g') {
+        if (idx && vec && (lx == 'g' || u_nulls_ok(r, nx)) && ray_index_extend(idx, r, nx) == 1) {
+            ray_t* e = ray_index_attach_built(&r, idx);
+            if (e && !RAY_IS_ERR(e)) return e;
+            if (e) ray_error_free(e);
+        }
+        if (idx) ray_release(idx);
+        return r;
+    }
+    if (idx) ray_release(idx);
+    if (lx != 's' || !vec) return r;
     if (!non_descending(r, nx > 0 ? nx - 1 : 0, ray_len(r) - (nx > 0 ? nx - 1 : 0))) return r;
     r = ray_cow(r);                 /* rc==1 here (fresh append result): in place */
     if (r && !RAY_IS_ERR(r)) r->attrs |= RAY_ATTR_SORTED;
@@ -178,8 +207,8 @@ ray_t* q_attr_append_keep(char lx, int64_t nx, ray_t* r) {
 }
 
 /* The store twin of the append law: s survives a store at pos[0..m) iff every written cell still sits between its
- * neighbours (the same scan, one window per position).  An index-backed letter is #559's and untouched.  r is the
- * writer's, already written. */
+ * neighbours (the same scan, one window per position).  An index-backed letter left with its index at the write
+ * (ray_vec_set drops it — the table's amend cell).  r is the writer's, already written. */
 void q_attr_store_keep(ray_t* r, const int64_t* pos, int64_t m) {
     if (!r || !ray_is_vec(r) || !(r->attrs & RAY_ATTR_SORTED)) return;
     int64_t n = ray_len(r);

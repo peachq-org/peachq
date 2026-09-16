@@ -11,6 +11,7 @@
 #include "lang/internal.h"   /* as_i64 — the int-atom payload accessor */
 #include "table/dict.h"
 #include "mem/heap.h"        /* ray_cow + the vec attr bits — scatter_store, the grow bits */
+#include "ops/idxop.h"       /* ray_index_has / ray_index_drop — the block held across the grow */
 #include "table/sym.h"       /* ray_read_sym/ray_write_sym — a sym id in the target's own width */
 #include <stdlib.h>
 #include <string.h>
@@ -1236,15 +1237,12 @@ ray_t* q_index_assign_wrap(ray_t* x, ray_t* y) {
  * does NOT is why the guard exists: a sym id is translated to the column's
  * domain and widened (append memcpy's esz bytes — so the domain must match and
  * every id fit); HAS_NULLS is derived from the result (so it is OR'd in here);
- * a STR column merges pools; an index-backed u#/g#/p# letter is dropped by the
- * first write and re-stamped by an allocation, which a later failure could
- * not undo, so only `s` (re-derived by the retention law) is admitted. */
+ * a STR column merges pools.  An index-backed letter is admitted: its block is
+ * lifted off before the first write and the retention law extends or drops it. */
 int q_index_growable(ray_t* x, ray_t* y) {
     if (!x || !y || !ray_is_vec(x) || x->type == RAY_STR || y->type != x->type || x->mmod ||
         (x->attrs & (RAY_ATTR_SLICE | RAY_ATTR_ARENA | RAY_ATTR_HAS_LINK)) || (y->attrs & RAY_ATTR_SLICE))
         return 0;
-    char lx = q_attr_letter(x);
-    if (lx && lx != 's') return 0;
     if (x->type == RAY_SYM) {
         if (ray_sym_vec_domain(x) != ray_sym_vec_domain(y)) return 0;
         for (int64_t i = 0, n = ray_len(y); i < n; i++)
@@ -1254,10 +1252,14 @@ int q_index_growable(ray_t* x, ray_t* y) {
     return 1;
 }
 
+/* ray_vec_append drops any index it finds, so a u/g/p block is lifted off x and held across the appends; the
+ * retention law extends it onto the grown vector or lets it go.  Failure anywhere leaves x bare. */
 ray_t* q_index_grow(ray_t** px, ray_t* y) {
     ray_t* x = *px;
     int64_t nx = ray_len(x);
     char lx = q_attr_letter(x);
+    ray_t* held = ray_index_has(x) ? x->index : NULL;
+    if (held) { ray_retain(held); ray_index_drop(&x); }
     uint8_t esz = ray_sym_elem_size(y->type, y->attrs), xesz = ray_sym_elem_size(x->type, x->attrs);
     int nulls = 0;
     x->attrs &= (uint8_t)~RAY_ATTR_SORTED;               /* append keeps attrs; the law re-derives s */
@@ -1270,20 +1272,22 @@ ray_t* q_index_grow(ray_t** px, ray_t* y) {
         }
         nulls |= ray_vec_is_null(y, i);
         ray_t* nv = ray_vec_append(x, elem);
-        if (!nv || RAY_IS_ERR(nv)) { *px = x; return nv ? nv : q_err(QE_OOM); }
+        if (!nv || RAY_IS_ERR(nv)) { if (held) ray_release(held); *px = x; return nv ? nv : q_err(QE_OOM); }
         x = nv;
     }
     if (nulls) x->attrs |= RAY_ATTR_HAS_NULLS;
-    *px = q_attr_append_keep(lx, nx, x);
+    *px = q_attr_append_keep(lx, nx, held, x);
     return NULL;
 }
 
+/* A block extended over rows the rollback removes goes with them: the letter is lost, never held at a stale length. */
 void q_index_ungrow(ray_t* x, int64_t nx, uint8_t was) {
     if (x->type == RAY_LIST) {
         ray_t** slots = (ray_t**)ray_data(x);
         while (ray_len(x) > nx) ray_release(slots[--x->len]);
         return;
     }
+    if (ray_index_has(x)) ray_index_drop(&x);
     x->len = nx;
     x->attrs = (x->attrs & (uint8_t)~(RAY_ATTR_SORTED | RAY_ATTR_HAS_NULLS)) | (was & (RAY_ATTR_SORTED | RAY_ATTR_HAS_NULLS));
 }

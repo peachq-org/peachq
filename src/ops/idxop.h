@@ -260,6 +260,11 @@ ray_t* ray_index_attach_dict(ray_t** vp);
 /* Attach an already-built standalone RAY_INDEX object (zero-copy on rc=1). */
 ray_t* ray_index_attach_built(ray_t** vp, ray_t* idx);
 
+/* A standalone copy of a block: children shared by retain, a SYM parent's domain ref taken once more. */
+ray_t* ray_index_clone(ray_t* blk);
+/* Rows [old_len, len) of vec into a DETACHED block built for old_len: 1 extended (attach-ready), 0 a UNIQUE repeat, -1 declined/OOM. */
+int ray_index_extend(ray_t* idx, ray_t* vec, int64_t old_len);
+
 /* Build a RAY_IDX_CODES index of the given layout on a RAY_SYM vector and attach
  * it.  The build IS the verify: a repeated id under UNIQUE, or an id whose run
  * resumes after a gap under PARTED, returns a "domain" error with *vp untouched.

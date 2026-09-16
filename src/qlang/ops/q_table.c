@@ -636,7 +636,7 @@ ray_t* q_table_append(ray_t* flat, ray_t* rows, int exclusive) {
                 if (joined && !RAY_IS_ERR(joined))
                     joined = q_enum_stamp(joined, q_enum_domain(oc));
             } else if (oc && ray_is_vec(oc)) {
-                joined = q_attr_append_keep(q_attr_letter(oc), ray_len(oc), ray_concat_fn(oc, pc));   /* consumes */
+                joined = q_attr_append_keep(q_attr_letter(oc), ray_len(oc), q_attr_index_clone(oc), ray_concat_fn(oc, pc));
             } else {
                 joined = ray_concat_fn(oc, pc);
             }
