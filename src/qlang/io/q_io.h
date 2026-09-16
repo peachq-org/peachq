@@ -47,10 +47,12 @@ ray_t* q_io_read_slice(ray_t* pathstr, int64_t off, int64_t want, int* zipped);
 int64_t q_io_clamp(int64_t size, int64_t* off, int64_t want);
 
 /* THE resource-read seam beneath read0/read1: an `http(s)://` path reads over
- * HTTP, anything else off the filesystem, under q_io_read_slice's contract
- * unchanged.  q_io_resource_chunkable is what a DECODER asks instead of naming a
- * transport — 0 means repeated ranged pulls are not cheap, so fetch once and
- * slice.  Both take a q_io_file_path result (no leading ':'). */
+ * HTTP, a scheme DuckDB's httpfs speaks (s3:// gcs:// hf:// …) through
+ * `.duckdb.i.read1` by name (restricted → 'access; the whole object, sliced here),
+ * anything else off the filesystem, under q_io_read_slice's contract unchanged.
+ * q_io_resource_chunkable is what a DECODER asks instead of naming a transport
+ * — 0 means repeated ranged pulls are not cheap, so fetch once and slice.  Both
+ * take a q_io_file_path result (no leading ':'). */
 ray_t* q_io_resource_read(ray_t* pathstr, int64_t off, int64_t want);
 int q_io_resource_chunkable(ray_t* pathstr);
 
