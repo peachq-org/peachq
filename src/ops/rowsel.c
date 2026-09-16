@@ -415,6 +415,8 @@ ray_t* ray_rowsel_to_indices(ray_t* sel) {
 
     ray_t* block = ray_alloc((size_t)total_pass * sizeof(int64_t));
     if (!block) return NULL;
+    block->type = RAY_I64;
+    block->len  = total_pass;
     int64_t* out = (int64_t*)ray_data(block);
 
     if (total_pass == 0 || n_segs == 0) return block;

@@ -358,6 +358,13 @@ ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec);
  * scan correctly surfaces null-equality searches. */
 int64_t ray_index_find_row(ray_t* col, int64_t key);
 
+/* Kind-neutral fronts: a consumer asks by value and the column's kind answers or declines (NULL / -2).  atom_key is
+ * the key an atom presents to col's index under atom_eq's cross-type law, in the widths the probes read
+ * (MONTH/MINUTE/SECOND/TIMESPAN decline); has_key stops at the first hit. */
+bool   ray_index_atom_key(const ray_t* col, const ray_t* atom, int64_t* key);
+ray_t* ray_index_eq_rowsel(ray_t* col, int64_t key);
+int    ray_index_has_key(ray_t* col, int64_t key);
+
 /* ===== Sort-index range probe =====
  *
  * Build a rowsel from a binary search over the sort-index permutation for
