@@ -370,8 +370,8 @@ bool ray_index_bloom_absent(ray_t* col, int64_t key);
  *
  * Eligibility (and the canonical hashing used) match
  * ray_index_attach_hash: every integer-family width numeric_elem_size admits.
- * Floats are intentionally not supported — equality on F32/F64
- * has NaN / -0 semantics the unfused compare kernel handles. */
+ * A float-family column declines here: its key is a canonical word, which
+ * only ray_index_atom_key hands out — probe it through ray_index_eq_rowsel. */
 ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key);
 
 /* ===== Hash-index IN probe =====
@@ -398,8 +398,8 @@ ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec);
  * Returns the minimum row id where the column value equals `key`, or
  * -1 when the index proves the key is absent (provably-no-match).
  * Returns -2 when the column is not eligible: no hash index, stale,
- * float-family column, or out-of-eligibility condition — caller must
- * fall back to the linear scan.
+ * or out-of-eligibility condition — caller must fall back to the
+ * linear scan.
  *
  * Contract:
  *   >= 0  → key found; this is the FIRST (minimum) row id match.
@@ -413,8 +413,9 @@ int64_t ray_index_find_row(ray_t* col, int64_t key);
 
 /* Kind-neutral fronts: a consumer asks by value and the column's kind answers or declines (NULL / -2).  atom_key is
  * the key an atom presents to col's index under atom_eq's cross-type law: an int-backed atom by the width
- * numeric_elem_size gives (floats and DATETIME decline), a symbol as its id in col's domain; has_key stops at the
- * first hit. */
+ * numeric_elem_size gives, a float-family atom (real, float, datetime) as the canonical word the builder hashed
+ * (-0.0 is 0.0; a NaN declines — its rows are per-row buckets), a symbol as its id in col's domain.  The three
+ * probes below (and find_row) take THAT key and no other; has_key stops at the first hit. */
 bool   ray_index_atom_key(const ray_t* col, const ray_t* atom, int64_t* key);
 ray_t* ray_index_eq_rowsel(ray_t* col, int64_t key);
 int    ray_index_has_key(ray_t* col, int64_t key);
@@ -499,6 +500,6 @@ ray_t* ray_attr_stamp_marker(ray_t* v, uint8_t mark); /* borrow v -> owned; stam
 ray_t* ray_attr_mark_attach (ray_t* v, uint8_t mark); /* no cow — mutates v in place (see impl) */
 bool   ray_attr_verify_distinct(const ray_t* v);      /* all rows distinct? */
 bool   ray_attr_verify_contiguous(const ray_t* v);    /* each value one contiguous run? */
-int    ray_attr_numeric_class(int8_t t);              /* 0=float, 1=integer-family, -1=non-numeric */
+int    ray_attr_numeric_class(int8_t t);              /* 1=numeric (int and float families), -1=non-numeric */
 
 #endif /* RAY_IDXOP_H */

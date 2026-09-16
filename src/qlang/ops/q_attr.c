@@ -222,9 +222,9 @@ void q_attr_store_keep(ray_t* r, const int64_t* pos, int64_t m) {
  * kdb's null policy, p contiguous, g nothing), build the index on the block,
  * set the identity marker.  A SYMBOL vector is already id-coded, so its index
  * is the direct-addressed CODES kind (its build is the verify; the domain
- * pointer stays in place beside it).  Integer-family only for u/p otherwise —
- * the hash find lane declines floats (idxop.h:324), so a float letter would be
- * a badge; g keeps the engine's float hash.  The engine attach contract: *vp is
+ * pointer stays in place beside it).  Every other numeric vector — the float
+ * family included — takes the hash, probed by the builder's canonical word.
+ * The engine attach contract: *vp is
  * the caller's owned live vector, cow'd when shared; NULL on success, else an
  * owned RAW engine error with *vp untouched (the `#` door remaps it). */
 static ray_t* attr_build(ray_t** vp, char letter) {
@@ -237,8 +237,7 @@ static ray_t* attr_build(ray_t** vp, char letter) {
         ray_index_payload((*vp)->index)->markers |= mark;
         return NULL;
     }
-    int cls = ray_is_vec(v) ? ray_attr_numeric_class(v->type) : -1;
-    if (cls < 0 || (cls == 0 && letter != 'g')) return q_err(QE_TYPE);
+    if (!ray_is_vec(v) || ray_attr_numeric_class(v->type) < 0) return q_err(QE_TYPE);
     bool ok = letter == 'u' ? (ray_attr_verify_distinct(v) && attr_no_dup_nulls(v))
             : letter == 'p' ? ray_attr_verify_contiguous(v) : true;
     if (!ok) return q_err(QE_DOMAIN);
@@ -396,10 +395,7 @@ ray_t* q_attr_set_dispatch(ray_t* n, ray_t* vec) {
         return letter == '?' ? q_err(QE_TYPE) : attr_set_enum(letter, vec);
     switch (letter) {
     case 0:   return ray_attr_drop_fn(vec);          /* `#vec -> drop all */
-    case 'u': case 'p':
-        if (vec && ray_attr_numeric_class(vec->type) == 0) return q_err(QE_NYI);   /* no float find lane */
-        /* fall through */
-    case 'g': {
+    case 'u': case 'p': case 'g': {
         ray_t* r = ray_attr_drop_fn(vec);            /* `` `x# `` REPLACES any prior attribute: cleared base, owned */
         if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_OOM);
         ray_t* e = attr_build(&r, letter);

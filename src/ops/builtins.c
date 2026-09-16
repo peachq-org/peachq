@@ -3032,7 +3032,7 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
         switch (b->type) {
         case RAY_I64: RAY_TEMPORAL64_CASES: case RAY_SYM:
             ((int64_t*)ray_data(result))[0] = a->i64; break;
-        case RAY_F64:
+        case RAY_F64: RAY_TEMPORALF_CASES:
             ((double*)ray_data(result))[0] = a->f64; break;
         case RAY_F32:
             ((float*)ray_data(result))[0] = (float)a->f64; break;
@@ -3085,7 +3085,7 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
         switch (a->type) {
         case RAY_I64: RAY_TEMPORAL64_CASES: case RAY_SYM:
             ((int64_t*)ray_data(result))[na] = b->i64; break;
-        case RAY_F64:
+        case RAY_F64: RAY_TEMPORALF_CASES:
             ((double*)ray_data(result))[na] = b->f64; break;
         case RAY_F32:
             ((float*)ray_data(result))[na] = (float)b->f64; break;
@@ -3121,7 +3121,7 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
             ((int64_t*)ray_data(result))[0] = a->i64;
             ((int64_t*)ray_data(result))[1] = b->i64;
             break;
-        case RAY_F64:
+        case RAY_F64: RAY_TEMPORALF_CASES:
             ((double*)ray_data(result))[0] = a->f64;
             ((double*)ray_data(result))[1] = b->f64;
             break;
