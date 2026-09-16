@@ -166,7 +166,8 @@ comes back as DuckDB reads it. There is no q-side cast table: the restore is the
 `/name.parquet?expr` door both go through `.h.tx[`parquet]`, which answers the file's BYTES (`.parquet.i.bytes`:
 a write to a temp file, `read1`, `hdel`); `save` writes them with `1:`, the door sends them verbatim. Before `\l pq`
 the entry signals `'.parquet.i.bytes`, the name it could not find, and `` `:f.parquet set t `` signals
-`'.parquet.write`.
+`'.parquet.write`. `` get `:f.parquet `` is `.parquet.read[`:f.parquet;();()]` — the same table `select from` reads,
+materialised (kx signals `'type` there).
 
 ### S3
 
