@@ -28,6 +28,7 @@
 #include "vec/vec.h"
 #include "table/table.h"
 #include "table/sym.h"
+#include "table/domain.h"
 #include "lang/eval.h"
 #include "ops/ops.h"
 #include "ops/rowsel.h"
@@ -271,20 +272,29 @@ static ray_t* ray_index_alloc(ray_idx_kind_t kind, int8_t parent_type, int64_t p
  * Saved-aux retain / release
  *
  * The 16 byte snapshot preserves the parent's original aux-union bytes
- * across attach/detach.  Since index attach is restricted to numeric
- * types (see prepare_attach), the snapshot contains either:
- *   - all-zero bytes (no link, no nulls), or
- *   - bytes 8-15 hold an int64 link_target (HAS_LINK on I32/I64 cols).
- * Neither case carries an owning ray_t* reference, so retain/release
- * are no-ops.  The functions remain to preserve the heap.c / vec.c
- * call sites symmetric with the pre-migration layout. */
+ * across attach/detach.  Numeric parents leave nothing owned in it (bytes
+ * 8-15 are at most an int64 link_target).  A RAY_SYM parent's bytes 8-15
+ * are its domain pointer, and the parent's own free path stops at the
+ * HAS_INDEX branch (heap.c) without releasing it — so while attached the
+ * domain ref lives HERE: attach transfers it into the snapshot without a
+ * retain, a sole-owner detach moves it back by zeroing the snapshot, and a
+ * shared detach / block clone takes one more ref for the second holder.
+ * The runtime singleton is immortal, so both are no-ops for it. */
+
+static struct ray_sym_domain_s* saved_sym_domain(const ray_index_t* ix) {
+    struct ray_sym_domain_s* d = NULL;
+    if (ix->parent_type == RAY_SYM) memcpy(&d, ix->saved_aux + 8, sizeof d);
+    return d;
+}
 
 void ray_index_release_saved(ray_index_t* ix) {
-    (void)ix;
+    struct ray_sym_domain_s* d = saved_sym_domain(ix);
+    if (d) ray_sym_domain_release(d);
 }
 
 void ray_index_retain_saved(ray_index_t* ix) {
-    (void)ix;
+    struct ray_sym_domain_s* d = saved_sym_domain(ix);
+    if (d) ray_sym_domain_retain(d);
 }
 
 /* --------------------------------------------------------------------------
@@ -332,6 +342,12 @@ void ray_index_release_payload(ray_index_t* ix) {
         if (ix->u.dict.first_occ && !RAY_IS_ERR(ix->u.dict.first_occ)) ray_release(ix->u.dict.first_occ);
         ix->u.dict.codes = ix->u.dict.first_occ = NULL;
         break;
+    case RAY_IDX_CODES:
+        if (ix->u.codes.dir   && !RAY_IS_ERR(ix->u.codes.dir))   ray_release(ix->u.codes.dir);
+        if (ix->u.codes.slots && !RAY_IS_ERR(ix->u.codes.slots)) ray_release(ix->u.codes.slots);
+        if (ix->u.codes.next  && !RAY_IS_ERR(ix->u.codes.next))  ray_release(ix->u.codes.next);
+        ix->u.codes.dir = ix->u.codes.slots = ix->u.codes.next = NULL;
+        break;
     case RAY_IDX_ZONE:
     case RAY_IDX_NONE:
         break;
@@ -371,6 +387,11 @@ void ray_index_retain_payload(ray_index_t* ix) {
         if (ix->u.dict.codes  && !RAY_IS_ERR(ix->u.dict.codes))  ray_retain(ix->u.dict.codes);
         if (ix->u.dict.first_occ && !RAY_IS_ERR(ix->u.dict.first_occ)) ray_retain(ix->u.dict.first_occ);
         break;
+    case RAY_IDX_CODES:
+        if (ix->u.codes.dir   && !RAY_IS_ERR(ix->u.codes.dir))   ray_retain(ix->u.codes.dir);
+        if (ix->u.codes.slots && !RAY_IS_ERR(ix->u.codes.slots)) ray_retain(ix->u.codes.slots);
+        if (ix->u.codes.next  && !RAY_IS_ERR(ix->u.codes.next))  ray_retain(ix->u.codes.next);
+        break;
     case RAY_IDX_ZONE:
     case RAY_IDX_NONE:
         break;
@@ -391,7 +412,7 @@ static ray_t* clone_index_block(ray_t* blk) {
     ray_index_t* dst = ray_index_payload(nb);
     memcpy(dst, src, sizeof(ray_index_t));   /* kind, markers, saved_aux, union */
     ray_index_retain_payload(dst);           /* child vectors now referenced twice */
-    ray_index_retain_saved(dst);             /* no-op for numeric, kept symmetric */
+    ray_index_retain_saved(dst);             /* a SYM parent's domain ref, once more */
     return nb;
 }
 
@@ -603,9 +624,10 @@ static ray_t* attach_finalize(ray_t* parent, ray_t* idx) {
      * via ray_vec_is_null (sentinel-based), which is unaffected by the
      * index pointer overlay at bytes 0-7. */
     parent->index    = idx;
-    /* _idx_pad (bytes 8-15) aliases str_pool on a RAY_STR parent — NEVER clear
-     * it there, or we'd null the column's string pool.  HAS_LINK uses it too. */
-    if (!(parent->attrs & RAY_ATTR_HAS_LINK) && parent->type != RAY_STR)
+    /* _idx_pad (bytes 8-15) aliases str_pool on a RAY_STR parent and sym_domain on
+     * a RAY_SYM one — NEVER clear it there (ray_sym_vec_domain reads it in place
+     * while indexed).  HAS_LINK uses it too. */
+    if (!(parent->attrs & RAY_ATTR_HAS_LINK) && parent->type != RAY_STR && parent->type != RAY_SYM)
         parent->_idx_pad = NULL;
     parent->attrs   |= RAY_ATTR_HAS_INDEX;
     return parent;
@@ -614,7 +636,7 @@ static ray_t* attach_finalize(ray_t* parent, ray_t* idx) {
 /* Validate + COW + drop existing index.  Returns the (possibly new) parent
  * pointer and updates *vp.  On error returns a RAY_ERROR; caller must
  * propagate without further modifying *vp. */
-static ray_t* prepare_attach_ex(ray_t** vp, const char* what, bool allow_str) {
+static ray_t* prepare_attach_ex(ray_t** vp, const char* what, int8_t extra_type) {
     if (!vp || !*vp || RAY_IS_ERR(*vp))
         return ray_error("type", "%s: null/error vector", what);
     ray_t* v = *vp;
@@ -631,16 +653,16 @@ static ray_t* prepare_attach_ex(ray_t** vp, const char* what, bool allow_str) {
     if (!v || RAY_IS_ERR(v)) return v;
     *vp = v;
     /* Numeric vectors carry any index kind; STR carries only RAY_IDX_DICT (the
-     * codes live alongside the descriptors — the column representation is
-     * untouched).  allow_str gates that one exception. */
-    if (numeric_elem_size(v->type) == 0 && !(allow_str && v->type == RAY_STR)) {
+     * codes live alongside the descriptors) and SYM only RAY_IDX_CODES — each
+     * caller names the one non-numeric type its kind admits. */
+    if (numeric_elem_size(v->type) == 0 && !(extra_type && v->type == extra_type)) {
         return ray_error("nyi", "%s: only numeric vectors supported (got type %d)",
                          what, (int)v->type);
     }
     return v;
 }
 static ray_t* prepare_attach(ray_t** vp, const char* what) {
-    return prepare_attach_ex(vp, what, false);
+    return prepare_attach_ex(vp, what, 0);
 }
 
 ray_t* ray_index_attach_zone(ray_t** vp) {
@@ -827,14 +849,15 @@ ray_t* ray_index_dict_compute(ray_t* v) {
 ray_t* ray_index_attach_built(ray_t** vp, ray_t* idx) {
     if (!idx || RAY_IS_ERR(idx) || idx->type != RAY_INDEX)
         return ray_error("type", "attach_built: not an index object");
-    bool is_dict = (ray_index_payload(idx)->kind == RAY_IDX_DICT);
-    ray_t* v = prepare_attach_ex(vp, "index", is_dict);   /* rc=1 → ray_cow no-op */
+    uint8_t kind = ray_index_payload(idx)->kind;
+    int8_t extra = kind == RAY_IDX_DICT ? RAY_STR : kind == RAY_IDX_CODES ? RAY_SYM : 0;
+    ray_t* v = prepare_attach_ex(vp, "index", extra);   /* rc=1 → ray_cow no-op */
     if (RAY_IS_ERR(v)) return v;
     return attach_finalize(v, idx);
 }
 
 ray_t* ray_index_attach_dict(ray_t** vp) {
-    ray_t* v = prepare_attach_ex(vp, "dict", true);
+    ray_t* v = prepare_attach_ex(vp, "dict", RAY_STR);
     if (RAY_IS_ERR(v)) return v;
     ray_t* idx = ray_index_dict_compute(v);
     if (!idx || RAY_IS_ERR(idx)) return idx ? idx : ray_error("oom", NULL);
@@ -872,6 +895,10 @@ static int idx_child_slots(ray_index_t* ix, ray_t** slots[3]) {
         slots[n++] = &ix->u.part.lens; break;
     case RAY_IDX_DICT:
         slots[n++] = &ix->u.dict.codes; slots[n++] = &ix->u.dict.first_occ; break;
+    case RAY_IDX_CODES:
+        slots[n++] = &ix->u.codes.dir; slots[n++] = &ix->u.codes.slots;
+        if (ix->u.codes.next) slots[n++] = &ix->u.codes.next;
+        break;
     default: break;  /* RAY_IDX_ZONE: scalars only, no child vecs */
     }
     return n;
@@ -1336,7 +1363,10 @@ static int cmp_i64_plain(const void* a, const void* b) {
     return (x > y) - (x < y);
 }
 
+static ray_t* codes_in_rowsel(ray_t* col, ray_t* set_vec);
+
 ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec) {
+    if (idx_fresh(col, RAY_IDX_CODES)) return codes_in_rowsel(col, set_vec);
     /* Gate: integer-family column with fresh hash index, no nulls. */
     if (!idx_fresh_nonull(col, RAY_IDX_HASH)) return NULL;
     bool col_is_float = (col->type == RAY_F32 || col->type == RAY_F64);
@@ -1908,6 +1938,198 @@ static ray_t* ray_index_attach_part(ray_t** vp) {
 }
 
 /* --------------------------------------------------------------------------
+ * Codes index — row lists direct-addressed by the parent's own ids
+ *
+ * Layout in idxop.h (the codes arm).  The build is one pass per stage over
+ * the ids, read at the vector's width, and doubles as the layout's verify:
+ * UNIQUE fails on a second row for an id, PARTED on an id whose run resumes.
+ * -------------------------------------------------------------------------- */
+
+static ray_t* i64_zeroed(int64_t n) {
+    ray_t* v = ray_vec_new(RAY_I64, n > 0 ? n : 1);
+    if (!v || RAY_IS_ERR(v)) return v;
+    v->len = n;
+    if (n > 0) memset(ray_data(v), 0, (size_t)n * sizeof(int64_t));
+    return v;
+}
+
+ray_t* ray_index_attach_codes(ray_t** vp, ray_codes_layout_t layout) {
+    int per_id = (int)layout;
+    if (per_id < RAY_CODES_UNIQUE || per_id > RAY_CODES_GROUPED) return ray_error("domain", "codes: invalid layout");
+    ray_t* v = prepare_attach_ex(vp, "codes", RAY_SYM);
+    if (RAY_IS_ERR(v)) return v;
+    if (v->type != RAY_SYM)
+        return ray_error("nyi", "codes: symbol vectors only (got type %d)", (int)v->type);
+
+    int64_t n = v->len;
+    const void* data = ray_data(v);
+    uint8_t at = v->attrs;
+    int64_t max_id = -1, dc = ray_sym_domain_count(ray_sym_vec_domain(v));
+    for (int64_t i = 0; i < n; i++) {
+        int64_t id = ray_read_sym(data, i, RAY_SYM, at);
+        if (id < 0 || id >= dc)               /* bounds the directory: no id, no page */
+            return ray_error("domain", "codes: id %lld at row %lld outside the domain", (long long)id, (long long)i);
+        if (id > max_id) max_id = id;
+    }
+    int64_t n_dir = max_id < 0 ? 0 : (max_id >> RAY_CODES_PAGE_LOG2) + 1;
+    ray_t* dir = i64_zeroed(n_dir);
+    if (!dir || RAY_IS_ERR(dir)) return dir ? dir : ray_error("oom", NULL);
+    int64_t* d = (int64_t*)ray_data(dir);
+    for (int64_t i = 0; i < n; i++)
+        d[ray_read_sym(data, i, RAY_SYM, at) >> RAY_CODES_PAGE_LOG2] = 1;
+    int64_t n_slots = 0;
+    for (int64_t p = 0; p < n_dir; p++)
+        if (d[p]) { d[p] = 1 + n_slots; n_slots += RAY_CODES_PAGE * per_id; }
+    ray_t* slots = i64_zeroed(n_slots);
+    ray_t* next  = layout == RAY_CODES_GROUPED ? i64_zeroed(n) : NULL;
+    if (!slots || RAY_IS_ERR(slots) || (layout == RAY_CODES_GROUPED && (!next || RAY_IS_ERR(next)))) {
+        ray_release(dir);
+        if (slots && !RAY_IS_ERR(slots)) ray_release(slots);
+        if (next && !RAY_IS_ERR(next)) ray_release(next);
+        return ray_error("oom", NULL);
+    }
+    int64_t* sl = (int64_t*)ray_data(slots);
+    int64_t* nx = next ? (int64_t*)ray_data(next) : NULL;
+    for (int64_t i = 0; i < n; i++) {
+        int64_t id = ray_read_sym(data, i, RAY_SYM, at);
+        int64_t* s = sl + (d[id >> RAY_CODES_PAGE_LOG2] - 1) + (id & (RAY_CODES_PAGE - 1)) * per_id;
+        bool ok = true;
+        if (layout == RAY_CODES_UNIQUE) { ok = s[0] == 0; s[0] = i + 1; }
+        else if (layout == RAY_CODES_PARTED) {
+            if (s[0] == 0) { s[0] = i + 1; s[1] = 1; }
+            else if (s[0] - 1 + s[1] == i) s[1]++;
+            else ok = false;
+        } else {
+            if (s[0] == 0) { s[0] = s[1] = i + 1; s[2] = 1; }
+            else { nx[s[1] - 1] = i + 1; s[1] = i + 1; s[2]++; }
+        }
+        if (!ok) {
+            ray_release(dir); ray_release(slots);
+            return ray_error("domain", "codes: layout %d violated at row %lld", per_id, (long long)i);
+        }
+    }
+    ray_t* idx = ray_index_alloc(RAY_IDX_CODES, v->type, n);
+    if (!idx || RAY_IS_ERR(idx)) {
+        ray_release(dir); ray_release(slots);
+        if (next) ray_release(next);
+        return idx ? idx : ray_error("oom", NULL);
+    }
+    ray_index_t* ix = ray_index_payload(idx);
+    ix->u.codes.dir    = dir;
+    ix->u.codes.slots  = slots;
+    ix->u.codes.next   = next;
+    ix->u.codes.layout = (uint8_t)layout;
+    return attach_finalize(v, idx);
+}
+
+int64_t ray_index_sym_key(ray_t* col, int64_t runtime_id) {
+    struct ray_sym_domain_s* dom = ray_sym_vec_domain(col);
+    if (dom == ray_sym_runtime_domain()) return runtime_id;
+    ray_t* s = ray_sym_str(runtime_id);                    /* borrowed */
+    return s ? ray_sym_domain_find(dom, ray_str_ptr(s), ray_str_len(s)) : -1;
+}
+
+/* The slots of `id`, or NULL when no row carries it. */
+static const int64_t* codes_slots(const ray_index_t* ix, int64_t id) {
+    if (id < 0) return NULL;
+    int64_t p = id >> RAY_CODES_PAGE_LOG2;
+    if (p >= ix->u.codes.dir->len) return NULL;
+    int64_t base = ((const int64_t*)ray_data(ix->u.codes.dir))[p];
+    if (!base) return NULL;
+    const int64_t* s = (const int64_t*)ray_data(ix->u.codes.slots) + (base - 1)
+                     + (id & (RAY_CODES_PAGE - 1)) * ix->u.codes.layout;
+    return s[0] ? s : NULL;
+}
+
+/* Returns the row count of `id`; when `out` is given, also copies that many row ids into it, ascending. */
+static int64_t codes_copy_rows(const ray_index_t* ix, int64_t id, int64_t* out) {
+    const int64_t* s = codes_slots(ix, id);
+    if (!s) return 0;
+    switch (ix->u.codes.layout) {
+    case RAY_CODES_UNIQUE: if (out) out[0] = s[0] - 1; return 1;
+    case RAY_CODES_PARTED: if (out) for (int64_t k = 0; k < s[1]; k++) out[k] = s[0] - 1 + k; return s[1];
+    default: {
+        const int64_t* nx = (const int64_t*)ray_data(ix->u.codes.next);
+        if (out) for (int64_t r = s[0] - 1, k = 0; r >= 0; r = nx[r] - 1) out[k++] = r;
+        return s[2];
+    }
+    }
+}
+
+static ray_t* codes_eq_rowsel(ray_t* col, int64_t key) {
+    if (!idx_fresh(col, RAY_IDX_CODES)) return NULL;
+    ray_index_t* ix = ray_index_payload(col->index);
+    int64_t m = codes_copy_rows(ix, key, NULL);
+    if (m == 0) return rowsel_from_sorted_ids(col->len, NULL, 0);
+    ray_t* buf = ray_alloc(m * (int64_t)sizeof(int64_t));
+    if (!buf) return NULL;
+    codes_copy_rows(ix, key, (int64_t*)ray_data(buf));
+    ray_t* block = rowsel_from_sorted_ids(col->len, (const int64_t*)ray_data(buf), m);
+    ray_release(buf);
+    return block;
+}
+
+/* Cell i of a SYM set vector as an id in `col`'s domain (-1 = absent): a cell is a
+ * position in the SET's own domain, which need not be the column's or the runtime's. */
+static int64_t codes_set_key(ray_t* col, ray_t* set_vec, int64_t i) {
+    int64_t pos = ray_read_sym(ray_data(set_vec), i, RAY_SYM, set_vec->attrs);
+    struct ray_sym_domain_s* sd = ray_sym_vec_domain(set_vec);
+    if (sd == ray_sym_runtime_domain()) return ray_index_sym_key(col, pos);
+    if (sd == ray_sym_vec_domain(col)) return pos;
+    ray_t* str = ray_sym_domain_str(sd, pos);                             /* borrowed */
+    return str ? ray_sym_domain_find(ray_sym_vec_domain(col), ray_str_ptr(str), ray_str_len(str)) : -1;
+}
+
+/* IN over a CODES column: the set's symbols resolve to ids, each id's rows are
+ * already ascending, so the union is a k-way merge — no hashing, no sort, no
+ * row-selectivity guard.  The merge picks each next row by a linear scan of the
+ * k cursors (O(k * matches)) and keys/counts/cursors sit on the stack, so k is
+ * capped; 64 is an unbenchmarked cap (four stack arrays, 2 KiB), sets past it
+ * take the scan. */
+#define CODES_IN_STACK_KEYS 64
+static ray_t* codes_in_rowsel(ray_t* col, ray_t* set_vec) {
+    if (!set_vec || RAY_IS_ERR(set_vec) || set_vec->type != RAY_SYM) return NULL;
+    if (set_vec->len > CODES_IN_STACK_KEYS) return NULL;
+    ray_index_t* ix = ray_index_payload(col->index);
+    int64_t n = col->len, ids[CODES_IN_STACK_KEYS], cnt[CODES_IN_STACK_KEYS], ku = 0, total = 0;
+    for (int64_t i = 0; i < set_vec->len; i++) {
+        int64_t id = codes_set_key(col, set_vec, i);
+        int64_t j = 0;
+        while (j < ku && ids[j] != id) j++;
+        if (j < ku) continue;
+        int64_t c = codes_copy_rows(ix, id, NULL);
+        if (c == 0) continue;
+        ids[ku] = id; cnt[ku] = c; ku++; total += c;
+    }
+    if (total == 0) return rowsel_from_sorted_ids(n, NULL, 0);
+    ray_t* runs = ray_alloc(total * (int64_t)sizeof(int64_t));
+    ray_t* out  = ku > 1 ? ray_alloc(total * (int64_t)sizeof(int64_t)) : NULL;
+    if (!runs || (ku > 1 && !out)) { if (runs) ray_release(runs); return NULL; }
+    int64_t* rb = (int64_t*)ray_data(runs);
+    int64_t off[CODES_IN_STACK_KEYS], end[CODES_IN_STACK_KEYS];
+    for (int64_t j = 0, o = 0; j < ku; j++) {
+        off[j] = o; end[j] = o + cnt[j];
+        codes_copy_rows(ix, ids[j], rb + o);
+        o = end[j];
+    }
+    const int64_t* rows = rb;
+    if (ku > 1) {
+        int64_t* ob = (int64_t*)ray_data(out);
+        for (int64_t k = 0; k < total; k++) {
+            int64_t best = -1;
+            for (int64_t j = 0; j < ku; j++)
+                if (off[j] < end[j] && (best < 0 || rb[off[j]] < rb[off[best]])) best = j;
+            ob[k] = rb[off[best]++];
+        }
+        rows = ob;
+    }
+    ray_t* block = rowsel_from_sorted_ids(n, rows, total);
+    ray_release(runs);
+    if (out) ray_release(out);
+    return block;
+}
+
+/* --------------------------------------------------------------------------
  * Detach (drop)
  *
  * Restore the parent's 16-byte aux union from the saved snapshot, then
@@ -1971,6 +2193,7 @@ static const char* kind_name(ray_idx_kind_t k) {
     case RAY_IDX_CHUNK_ZONE: return "chunk_zone";
     case RAY_IDX_PART:       return "part";
     case RAY_IDX_DICT:       return "dict";
+    case RAY_IDX_CODES:      return "codes";
     default:                 return "none";
     }
 }
@@ -2068,6 +2291,13 @@ ray_t* ray_index_info(ray_t* v) {
         break;
     case RAY_IDX_DICT:
         r = dict_append_sym_i64(&keys, &vals, "n_distinct", ix->u.dict.n_distinct);
+        if (RAY_IS_ERR(r)) goto fail;
+        break;
+    case RAY_IDX_CODES:
+        r = dict_append_sym_i64(&keys, &vals, "layout", (int64_t)ix->u.codes.layout);
+        if (RAY_IS_ERR(r)) goto fail;
+        r = dict_append_sym_i64(&keys, &vals, "n_pages",
+                                ix->u.codes.slots->len / (RAY_CODES_PAGE * ix->u.codes.layout));
         if (RAY_IS_ERR(r)) goto fail;
         break;
     case RAY_IDX_NONE:
@@ -2324,6 +2554,10 @@ ray_t* ray_attr_set_fn(ray_t* name, ray_t* v) {
 int64_t ray_index_find_row(ray_t* col, int64_t key) {
     /* Float-family: equality has NaN/-0 semantics owned by the scan kernel. */
     if (!col || RAY_IS_ERR(col)) return -2;
+    if (idx_fresh(col, RAY_IDX_CODES)) {
+        const int64_t* s = codes_slots(ray_index_payload(col->index), key);
+        return s ? s[0] - 1 : -1;   /* first / start / head: the minimum row either way */
+    }
     int8_t t = col->type;
     if (t == RAY_F32 || t == RAY_F64) return -2;
 
@@ -2367,17 +2601,20 @@ bool ray_index_atom_key(const ray_t* col, const ray_t* atom, int64_t* key) {
     case -RAY_I32: case -RAY_DATE: case -RAY_TIME:      *key = (int64_t)atom->i32; return true;
     case -RAY_I16:                                      *key = (int64_t)atom->i16; return true;
     case -RAY_BOOL: RAY_BYTE_ATOM_CASES:                *key = (int64_t)atom->b8;  return true;
+    case -RAY_SYM:                                      *key = ray_index_sym_key((ray_t*)col, atom->i64); return true;
     default:                                            return false;
     }
 }
 
 ray_t* ray_index_eq_rowsel(ray_t* col, int64_t key) {
-    if (ray_index_kind(col) == RAY_IDX_HASH) return ray_index_hash_eq_rowsel(col, key);
+    if (ray_index_kind(col) == RAY_IDX_HASH)  return ray_index_hash_eq_rowsel(col, key);
+    if (ray_index_kind(col) == RAY_IDX_CODES) return codes_eq_rowsel(col, key);
     return NULL;
 }
 
 int ray_index_has_key(ray_t* col, int64_t key) {
     if (!col || RAY_IS_ERR(col) || col->type == RAY_F32 || col->type == RAY_F64) return -2;
+    if (idx_fresh(col, RAY_IDX_CODES)) return codes_slots(ray_index_payload(col->index), key) != NULL;
     if (!idx_fresh_nonull(col, RAY_IDX_HASH)) return -2;
     if (!hash_key_in_range(col->type, key)) return -2;
     int64_t rid = -1;
