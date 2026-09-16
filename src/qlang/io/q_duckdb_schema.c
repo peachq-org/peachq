@@ -76,6 +76,7 @@ bool q_duckdb_schema_name_parse(const char* s, size_t n, qd_name_t* out) {
         }
     }
     out->key[0] = '\0';
+    out->temp = out->n == 1 && (strcmp(out->part[0], QD_STAGE_TBL) == 0 || strcmp(out->part[0], QD_STAGING_TBL) == 0);
     return true;
 }
 
@@ -110,6 +111,7 @@ void q_duckdb_schema_name_resolve(int slot, qd_name_t* nm) {
         if (row && !RAY_IS_ERR(row)) ray_release(row);
     }
     if (nm->n >= 2) memcpy(nm->schema, nm->part[nm->n - 2], strlen(nm->part[nm->n - 2]) + 1);
+    if (nm->temp) memcpy(nm->schema, "main", 5);   /* the temp catalog has the one schema, whatever the session's */
     qd_buf b = {0};
     if (nm->n == 3 && !(strlen(nm->part[0]) == strlen(db) && qd_fold_eq(nm->part[0], db, strlen(db)))) {
         q_duckdb_put_ident(&b, nm->part[0], strlen(nm->part[0]));
@@ -134,10 +136,12 @@ void q_duckdb_schema_put_name(qd_buf* b, const qd_name_t* nm) {
 
 /* The catalog predicate for one name: the last part is the table, the parts before it schema then database.
  * A one-part name pins the session's database and schema, which is where `SELECT * FROM "t"` resolves it —
- * without that, a same-named table in another schema doubles the columns the caller sees. */
+ * without that, a same-named table in another schema doubles the columns the caller sees.  The bridge's own temp
+ * tables pin `temp` instead: a bare name reaches it first, and current_database() never names it. */
 void q_duckdb_schema_put_catalog_where(qd_buf* b, const qd_name_t* nm) {
     static const char* const col[QD_NAME_PARTS] = { "database_name", "schema_name", "table_name" };
-    if (nm->n == 1) q_duckdb_puts(b, "database_name = current_database() AND schema_name = current_schema() AND ");
+    if (nm->n == 1) q_duckdb_puts(b, nm->temp ? "database_name = 'temp' AND schema_name = 'main' AND "
+                                              : "database_name = current_database() AND schema_name = current_schema() AND ");
     for (int i = 0; i < nm->n; i++) {
         if (i) q_duckdb_puts(b, " AND ");
         q_duckdb_puts(b, col[QD_NAME_PARTS - nm->n + i]);
@@ -240,6 +244,25 @@ typedef struct {
     size_t      domlen;
 } qd_descrow_t;
 
+/* THE one spelling of "this table's descriptor rows, gone"; stash = 0 is the probe form (no sidecar is no rows). */
+static ray_t* qd_desc_rows_delete(int slot, const char* tname, int stash) {
+    qd_buf b = {0};
+    q_duckdb_puts(&b, "DELETE FROM " QD_SCHEMA_REF " WHERE tbl = ");
+    q_duckdb_put_strlit(&b, tname, strlen(tname));
+    if (b.oom) { q_duckdb_buf_free(&b); return q_err(QE_WSFULL); }
+    duck_result res;
+    ray_t* e = q_duckdb_run2(slot, b.p, &res, stash);
+    q_duckdb_buf_free(&b);
+    if (!e) QAPI.destroy_result(&res);
+    return e;
+}
+
+/* Drop a table's descriptor rows with the table (hdel): a catalog with no sidecar yet has none to drop. */
+void q_duckdb_schema_drop_desc(int slot, const qd_name_t* nm) {
+    ray_t* e = qd_desc_rows_delete(slot, nm->key, 0);
+    if (e) ray_error_free(e);
+}
+
 /* Replace a table's descriptor rows (runs INSIDE the caller's transaction). */
 static ray_t* qd_write_desc_rows(int slot, const char* tname,
                                  const qd_descrow_t* rows, int64_t n) {
@@ -250,14 +273,7 @@ static ray_t* qd_write_desc_rows(int slot, const char* tname,
     if (!e) e = q_duckdb_exec_stmt(slot, "ALTER TABLE " QD_SCHEMA_REF " ADD COLUMN IF NOT EXISTS dtype VARCHAR");
     if (!e) e = q_duckdb_exec_stmt(slot, "ALTER TABLE " QD_SCHEMA_REF " ADD COLUMN IF NOT EXISTS attr VARCHAR");
     if (!e) e = q_duckdb_exec_stmt(slot, "ALTER TABLE " QD_SCHEMA_REF " ADD COLUMN IF NOT EXISTS enumdom VARCHAR");
-    if (e) return e;
-
-    qd_buf b = {0};
-    q_duckdb_puts(&b, "DELETE FROM " QD_SCHEMA_REF " WHERE tbl = ");
-    q_duckdb_put_strlit(&b, tname, strlen(tname));
-    if (b.oom) { q_duckdb_buf_free(&b); return q_err(QE_WSFULL); }
-    e = q_duckdb_exec_stmt(slot, b.p);
-    q_duckdb_buf_free(&b);
+    if (!e) e = qd_desc_rows_delete(slot, tname, 1);
     if (e) return e;
 
     qd_buf ins = {0};

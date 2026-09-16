@@ -3,16 +3,16 @@
 / .file_metadata, .kv_metadata and .bloom_probe answer DuckDB's own tables verbatim.  `select from `:x.parquet` and
 / `:x.parquet set t are the shortest spellings; save `t.parquet rides .h.tx.  \?.parquet lists the verbs;
 / user-docs/parquet.md has the detail.
-/ @implNote THE SHIM LAW: every verb is SQL through .duckdb.exec - the metadata verbs and a bare read on
-/ .duckdb.main[], staging on `:pq:duckdb:parquet_stage, a DuckDB-based table on its own connection - every value
-/ crosses the .duckdb codec untouched, and there is no parquet C.  A file written from a table with a sidecar carries
-/ q_schema in its key-value metadata: those sidecar rows in .duckdb.getx's vocabulary (col dtype logical iskey), as
-/ JSON; a read finds the key and restores through the codec's declared-schema leg, a file without it (foreign, or
-/ from a SQL-created table) comes back as DuckDB reads it (text is text, never symbols).  Staging is the reserved
-/ alias `:pq:duckdb:parquet_stage on the shared in-memory catalog: a q table is .duckdb.set there and dropped after
-/ the COPY.  A failed call leaves its staging for the next call to reclaim, because every bridge door clears
-/ .duckdb.err[] and the reason must survive the signal.  DuckDB's httpfs is the transport for a URL, the one
-/ exception to handles.md rule 15.  A missing library or file is the bare 'duckdb, .duckdb.err[] the reason.
+/ @implNote THE SHIM LAW: every verb is SQL through .duckdb.exec on .duckdb.main[] - a DuckDB-based table on its own
+/ connection - every value crosses the .duckdb codec untouched, and there is no parquet C.  A file written from a
+/ table with a sidecar carries q_schema in its key-value metadata: those sidecar rows in .duckdb.getx's vocabulary
+/ (col dtype logical iskey), as JSON; a read finds the key and restores through the codec's declared-schema leg, a
+/ file without it (foreign, or from a SQL-created table) comes back as DuckDB reads it (text is text, never symbols).
+/ Staging is the reserved TEMP table _q_staging of main's connection (connection-scoped, so stage, fill, read and
+/ drop share it): a q table is .duckdb.set there and .duckdb.hdel'd after the COPY.  A failed call leaves its staging
+/ for the next call's CREATE OR REPLACE to reclaim, because every bridge door clears .duckdb.err[] and the reason
+/ must survive the signal.  DuckDB's httpfs is the transport for a URL, the one exception to handles.md rule 15.  A
+/ missing library or file is the bare 'duckdb, .duckdb.err[] the reason.
 / ANY-ORDER LAW: definitions only at top level.
 
 / a SQL literal: bool, int, float, sym, string and sym list have a spelling; anything else is 'type
@@ -53,15 +53,12 @@
   r:.duckdb.exec[c;"SELECT decode(value) AS v FROM parquet_kv_metadata(",(.parquet.i.file file),") WHERE decode(key) = 'q_schema' LIMIT 1"];
   $[count r;first r`v;""]}
 
-.parquet.i.stage:{[] hopen `:pq:duckdb:parquet_stage:}
-.parquet.i.unstage:{[c] .duckdb.hdel[c;`_parquet]; hclose c}
-
-/ the sidecar rows of table t on c, in the envelope's vocabulary: the physical type comes from the catalog and the
-/ column name is matched under the codec's ASCII fold; () when the catalog has no sidecar
+/ the sidecar rows of table t on c, in the envelope's vocabulary: the physical type comes from the catalog (temp's
+/ for the staging table) and the column name is matched under the codec's ASCII fold; () when the catalog has no sidecar
 .parquet.i.schema:{[c;t]
   k:.parquet.i.lit lower string t;
   if[0=first (.duckdb.exec[c;"SELECT count(*) AS n FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = 'main' AND table_name = '_q_schema'"])`n; :()];
-  .duckdb.exec[c;"SELECT c.column_name AS col, c.data_type AS dtype, s.logical, s.iskey FROM main._q_schema s JOIN duckdb_columns() c ON c.database_name = current_database() AND c.schema_name = 'main' AND c.table_name = ",(.parquet.i.lit string t)," AND translate(c.column_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = s.col WHERE s.tbl = ",k," AND s.col <> '' ORDER BY c.column_index"]}
+  .duckdb.exec[c;"SELECT c.column_name AS col, c.data_type AS dtype, s.logical, s.iskey FROM main._q_schema s JOIN duckdb_columns() c ON c.database_name = ",$[t=`_q_staging;"'temp'";"current_database()"]," AND c.schema_name = 'main' AND c.table_name = ",(.parquet.i.lit string t)," AND translate(c.column_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = s.col WHERE s.tbl = ",k," AND s.col <> '' ORDER BY c.column_index"]}
 
 / a provider-bound table is the marked dict whose flip holds the coordinate; a DuckDB one splits into (connection;
 / table) - the last segment is the table, the rest the handle; anything else answers ()
@@ -85,21 +82,21 @@
   if[98h<>type table; '`type];
   if[count ct:.parquet.i.coord table;
     .parquet.i.copy[ct 0;"(SELECT * FROM ",(.duckdb.i.qname ct 1),")";file;.parquet.i.schema . ct;opts]; :file];
-  c:.parquet.i.stage[]; .duckdb.set[c;`_parquet;$[-11h=type value flip table;select from table;table]];
-  .parquet.i.copy[c;.duckdb.i.qname `_parquet;file;.parquet.i.schema[c;`_parquet];opts];
-  .parquet.i.unstage c; file}
+  c:.duckdb.main[]; .duckdb.set[c;`_q_staging;$[-11h=type value flip table;select from table;table]];
+  .parquet.i.copy[c;.duckdb.i.qname `_q_staging;file;.parquet.i.schema[c;`_q_staging];opts];
+  .duckdb.hdel[c;`_q_staging]; file}
 
 / restore a file's q types: the staging table is .duckdb.set from a 0-row all-() table with the envelope (every
 / column's physical type from DESCRIBE, the logical from q_schema), so the codec lays the DDL and the sidecar rows
 / itself; the rows then move inside DuckDB and .duckdb.get's declared-schema leg reads them back
 .parquet.i.restore:{[rel;kv;query]
-  c:.parquet.i.stage[];
+  c:.duckdb.main[];
   ds:update col:`$col from .duckdb.exec[c;"SELECT column_name AS col, column_type AS dtype FROM (DESCRIBE SELECT * FROM ",rel,")"];
   env:ds lj `col xkey select col:`$col, logical:`$logical, iskey from .j.k kv;
-  .duckdb.set[c;`_parquet;(flip (env`col)!(count env)#enlist ();env)];
-  .duckdb.exec[c;"INSERT INTO ",(.duckdb.i.qname `_parquet)," SELECT * FROM ",rel];
-  r:$[.parquet.i.none query;.duckdb.get[c;`_parquet];.duckdb.i.push[c;.pq.i.resolveTree[env`col;(enlist `_parquet),eval each 2_query]]];
-  .parquet.i.unstage c; r}
+  .duckdb.set[c;`_q_staging;(flip (env`col)!(count env)#enlist ();env)];
+  .duckdb.exec[c;"INSERT INTO ",(.duckdb.i.qname `_q_staging)," SELECT * FROM ",rel];
+  r:$[.parquet.i.none query;.duckdb.get[c;`_q_staging];.duckdb.i.push[c;.pq.i.resolveTree[env`col;(enlist `_q_staging),eval each 2_query]]];
+  .duckdb.hdel[c;`_q_staging]; r}
 
 / query is a parsed select tree whose table position is ignored.  It rides the one qSQL seam every provider does
 / (.pq.i.resolveTree over the relation's columns, then .duckdb.i.push) - never an evaluator of its own.  eval of
