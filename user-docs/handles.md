@@ -142,7 +142,10 @@ These operations ask different questions of a resource.
 get `:some-resource
 ```
 
-asks for the resource using its normal q `get` semantics. For ordinary file paths, `get` retains existing q object-loading semantics.
+asks for the resource using its normal q `get` semantics. For ordinary file paths, `get` retains existing q
+object-loading semantics, with one addition: a file whose ending names a table format `select from` reads (`.csv`,
+`.tsv`, `.json`, `.jsonl`, `.ndjson`, `.parquet`) answers that table, so `` get `:trades.csv `` is
+`` select from `:trades.csv `` materialised.
 
 ```q
 read0 `:some-resource
@@ -188,8 +191,8 @@ HTTP transport
 
 HTTP table selection is a **proposal/planned extension**, not a statement of current support.
 
-The important rule is that `get` does not become CSV-aware merely because a URL ends in `.csv`. `read0` and `read1` retrieve resource content, while
-the **table resolver used by qSQL** performs format interpretation.
+The important rule is that `read0` and `read1` retrieve resource content, while the **table resolver used by qSQL**
+performs format interpretation — and `get` asks that resolver, never a resolver of its own.
 
 ## Format inference
 
@@ -234,7 +237,10 @@ select from `:trades.dat
 
 PeachQ should fail rather than guess.
 
-The existing `get`, `read0`, and `read1` behaviours remain independent of table-format inference.
+`get` (and `value`, its synonym) asks the same resolver ahead of the q binary reader: a recognised ending answers the
+table, no recognised ending is the q object load as in kx, and a missing file is the reader's own error (`'io`). kx
+signals `'type` for any non-kdb file there, so no working kx program changes meaning. `read0` and `read1` remain
+independent of table-format inference.
 
 The same ending selects the WRITER. `` `:f.EXT set t `` writes the format `.h.tx` names for `EXT` — every `.h.tx`
 key: `csv`, `txt`, `xml`, `xls` and `json` through peachq's own writers (the lines `save` would write, so
@@ -242,7 +248,8 @@ key: `csv`, `txt`, `xml`, `xls` and `json` through peachq's own writers (the lin
 must be a table (`'type` otherwise); no recognised ending is the binary form as in kx, and a dotfile such as
 `` `:.json `` is not a format claim. This is a documented divergence from kx, where the same `set` writes the q
 binary form under any name. To a remote scheme (`s3://`, `gcs://`, `az://`, `hf://`) only parquet writes today;
-the other formats arrive with the transport law (B3).
+the other formats arrive with the transport law (B3). The read set is the reader's, not `.h.tx`'s: `xml`, `xls`, `txt`
+and `raw` have writers and no reader, so `` get `:f.xml `` stays `'type`.
 
 Applications that know an ambiguously named file is CSV can use the explicit CSV API rather than relying on qSQL inference.
 
