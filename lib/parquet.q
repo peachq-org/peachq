@@ -12,41 +12,22 @@
 / drop share it): a q table is .duckdb.set there and .duckdb.hdel'd after the COPY.  A failed call leaves its staging
 / for the next call's CREATE OR REPLACE to reclaim, because every bridge door clears .duckdb.err[] and the reason
 / must survive the signal.  DuckDB's httpfs is the transport for a URL, the one exception to handles.md rule 15.  A
-/ missing library or file is the bare 'duckdb, .duckdb.err[] the reason.
+/ missing library or file is the bare 'duckdb, .duckdb.err[] the reason.  The SQL spelling (.duckdb.i.lit / ident /
+/ none / opts / file) is the bridge's, shared with its secret and transport verbs.
 / ANY-ORDER LAW: definitions only at top level.
 
-/ a SQL literal: bool, int, float, sym, string and sym list have a spelling; anything else is 'type
-.parquet.i.lit:{[v]
-  $[-1h=type v;$[v;"true";"false"];
-    (type v) in -5 -6 -7 -8 -9h;string v;
-    -11h=type v;.parquet.i.lit string v;
-    10h=type v;"'",ssr[v;"'";"''"],"'";
-    11h=type v;"[",(", " sv .parquet.i.lit each v),"]";
-    '`type]}
-
 / the file: a `:path symbol (leading colon dropped, a glob or URL passes verbatim) or a list of them
-.parquet.i.file:{[f]
-  $[-11h=type f;.parquet.i.lit $[":"=first s:string f;1_s;s];
-    11h=type f;"[",(", " sv .parquet.i.file each f),"]";
-    '`type]}
-
-/ () or ()!() or (::) as opts or query = none
-.parquet.i.none:{[x] any x~/:(();()!();(::))}
-
-/ an identifier is the one unquoted text in the SQL, so anything else is 'type, never spliced
-.parquet.i.ident:{[k] s:string k; if[not (0<count s)&all s in .Q.an; '`type]; s}
-/ opts as (key;value) pairs through f, or none; a dict with symbol keys is the only shape
-.parquet.i.opts:{[f;opts] $[.parquet.i.none opts;();(99h=type opts)and 11h=type key opts;f'[key opts;value opts];'`type]}
+.parquet.i.file:{[f] $[-11h=type f;.duckdb.i.file f;11h=type f;"[",(", " sv .parquet.i.file each f),"]";'`type]}
 / read_parquet's key=value
-.parquet.i.opt:{[k;v] .parquet.i.ident[k],"=",.parquet.i.lit v}
+.parquet.i.opt:{[k;v] .duckdb.i.ident[k],"=",.duckdb.i.lit v}
 / COPY's KEY value: a sym list is an identifier list (PARTITION_BY (a, b)), a dict is a struct (FIELD_IDS {a: 1})
 .parquet.i.copyval:{[v]
-  $[11h=type v;"(",(", " sv .parquet.i.ident each v),")";
-    99h=type v;"{",(", " sv {[k;x] .parquet.i.ident[k],": ",.parquet.i.copyval x}'[key v;value v]),"}";
-    .parquet.i.lit v]}
+  $[11h=type v;"(",(", " sv .duckdb.i.ident each v),")";
+    99h=type v;"{",(", " sv {[k;x] .duckdb.i.ident[k],": ",.parquet.i.copyval x}'[key v;value v]),"}";
+    .duckdb.i.lit v]}
 
 / read_parquet(file, key=value, ...): every opts key rides verbatim, so an unknown one is DuckDB's binder error
-.parquet.i.rel:{[file;opts] "read_parquet(",(", " sv (enlist .parquet.i.file file),.parquet.i.opts[.parquet.i.opt;opts]),")"}
+.parquet.i.rel:{[file;opts] "read_parquet(",(", " sv (enlist .parquet.i.file file),.duckdb.i.opts[.parquet.i.opt;opts]),")"}
 
 / the q_schema text a file carries, "" when none (a foreign file, or one written from a table without a sidecar)
 .parquet.i.kv:{[c;file]
@@ -56,9 +37,9 @@
 / the sidecar rows of table t on c, in the envelope's vocabulary: the physical type comes from the catalog (temp's
 / for the staging table) and the column name is matched under the codec's ASCII fold; () when the catalog has no sidecar
 .parquet.i.schema:{[c;t]
-  k:.parquet.i.lit lower string t;
+  k:.duckdb.i.lit lower string t;
   if[0=first (.duckdb.exec[c;"SELECT count(*) AS n FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = 'main' AND table_name = '_q_schema'"])`n; :()];
-  .duckdb.exec[c;"SELECT c.column_name AS col, c.data_type AS dtype, s.logical, s.iskey FROM main._q_schema s JOIN duckdb_columns() c ON c.database_name = ",$[t=`_q_staging;"'temp'";"current_database()"]," AND c.schema_name = 'main' AND c.table_name = ",(.parquet.i.lit string t)," AND translate(c.column_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = s.col WHERE s.tbl = ",k," AND s.col <> '' ORDER BY c.column_index"]}
+  .duckdb.exec[c;"SELECT c.column_name AS col, c.data_type AS dtype, s.logical, s.iskey FROM main._q_schema s JOIN duckdb_columns() c ON c.database_name = ",$[t=`_q_staging;"'temp'";"current_database()"]," AND c.schema_name = 'main' AND c.table_name = ",(.duckdb.i.lit string t)," AND translate(c.column_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = s.col WHERE s.tbl = ",k," AND s.col <> '' ORDER BY c.column_index"]}
 
 / a provider-bound table is the marked dict whose flip holds the coordinate; a DuckDB one splits into (connection;
 / table) - the last segment is the table, the rest the handle; anything else answers ()
@@ -70,8 +51,8 @@
 
 / COPY rel TO file (FORMAT PARQUET, KV_METADATA {q_schema: '...'}, opts): no key when the schema is empty
 .parquet.i.copy:{[c;rel;file;sc;opts]
-  kv:$[count sc;enlist "KV_METADATA {q_schema: ",(.parquet.i.lit .j.j sc),"}";()];
-  o:.parquet.i.opts[{[k;v] .parquet.i.ident[k]," ",.parquet.i.copyval v};opts];
+  kv:$[count sc;enlist "KV_METADATA {q_schema: ",(.duckdb.i.lit .j.j sc),"}";()];
+  o:.duckdb.i.opts[{[k;v] .duckdb.i.ident[k]," ",.parquet.i.copyval v};opts];
   .duckdb.exec[c;"COPY ",rel," TO ",(.parquet.i.file file)," (",(", " sv (enlist "FORMAT PARQUET"),kv,o),")"]}
 
 / write table to file (a directory `:out/ for partition_by; an s3:// URL passes through) and answer file.  A DuckDB-
@@ -95,7 +76,7 @@
   env:ds lj `col xkey select col:`$col, logical:`$logical, iskey from .j.k kv;
   .duckdb.set[c;`_q_staging;(flip (env`col)!(count env)#enlist ();env)];
   .duckdb.exec[c;"INSERT INTO ",(.duckdb.i.qname `_q_staging)," SELECT * FROM ",rel];
-  r:$[.parquet.i.none query;.duckdb.get[c;`_q_staging];.duckdb.i.push[c;.pq.i.resolveTree[env`col;(enlist `_q_staging),eval each 2_query]]];
+  r:$[.duckdb.i.none query;.duckdb.get[c;`_q_staging];.duckdb.i.push[c;.pq.i.resolveTree[env`col;(enlist `_q_staging),eval each 2_query]]];
   .duckdb.hdel[c;`_q_staging]; r}
 
 / query is a parsed select tree whose table position is ignored.  It rides the one qSQL seam every provider does
@@ -103,9 +84,9 @@
 / each slot lands the functional-form values the host hands that seam (a parsed where slot is ,,(>;`a;`lim))
 .parquet.read:{[file;opts;query]
   rel:.parquet.i.rel[file;opts]; c:.duckdb.main[];
-  if[not .parquet.i.none query; if[not (?)~query 0; '`type]];
+  if[not .duckdb.i.none query; if[not (?)~query 0; '`type]];
   if[count kv:.parquet.i.kv[c;file]; :.parquet.i.restore[rel;kv;query]];
-  if[.parquet.i.none query; :.duckdb.exec[c;"SELECT * FROM ",rel]];
+  if[.duckdb.i.none query; :.duckdb.exec[c;"SELECT * FROM ",rel]];
   cl:cols .duckdb.exec[c;"SELECT * FROM ",rel," LIMIT 0"];
   .duckdb.i.push[c;.pq.i.resolveTree[cl;(enlist rel),eval each 2_query]]}
 
@@ -125,5 +106,5 @@
 .parquet.kv_metadata:{[file] .parquet.i.fn["parquet_kv_metadata";file]}
 / parquet_bloom_probe(file, 'column', value): per row group, whether its bloom filter excludes the value
 .parquet.bloom_probe:{[file;column;val]
-  args:", " sv (.parquet.i.file file;.parquet.i.lit column;.parquet.i.lit val);
+  args:", " sv (.parquet.i.file file;.duckdb.i.lit column;.duckdb.i.lit val);
   .duckdb.exec[.duckdb.main[];"SELECT * FROM parquet_bloom_probe(",args,")"]}

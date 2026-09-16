@@ -89,7 +89,7 @@ When resolving data resources, it is useful to separate four concepts.
 
 | Concept | Examples | Responsibility |
 |---|---|---|
-| **Transport** | file, HTTP, HTTPS, S3 | Obtain underlying bytes or content; where possible support ranged `read0` / `read1` |
+| **Transport** | file, HTTP, HTTPS, S3 (and the other DuckDB-carried schemes) | Obtain underlying bytes or content; where possible support ranged `read0` / `read1` |
 | **Container** | ZIP | Expose a member or child resource |
 | **Format / decoder** | CSV, TSV, JSON, Parquet | Convert content into a logical value such as a table |
 | **Query provider** | DuckDB, q IPC provider | Expose table/query semantics directly, potentially with pushdown |
@@ -134,6 +134,64 @@ ZIP support and `zip://` syntax are **planned, not currently supported**.
 This separation is important. HTTP is not a CSV provider: it is a transport. ZIP is not a table format: it is a container. CSV describes how the final
 content is decoded.
 
+### Remote schemes: DuckDB is the transport
+
+`http(s)://` is peachq's own HTTP client. Every other remote scheme is carried by DuckDB's `httpfs` extension — the
+**transport law**: DuckDB is the transport for every scheme it speaks and peachq does not, and a format is decoded by
+whoever owns its meaning.
+
+| Scheme | Transport | Notes |
+|---|---|---|
+| `s3://` (`s3a://`, `s3n://`) | DuckDB httpfs | anonymous for a public bucket; credentials are DuckDB secrets (below) |
+| `gcs://`, `gs://` | DuckDB httpfs | Google Cloud Storage, through its S3-compatible endpoint |
+| `r2://` | DuckDB httpfs | Cloudflare R2 (always needs a secret) |
+| `hf://` | DuckDB httpfs | Hugging Face Hub: `hf://datasets/<owner>/<dataset>/<path>` |
+| `az://` | — | **not supported** (needs DuckDB's separate `azure` extension; handed to DuckDB untested) |
+
+What decodes the bytes is unchanged by the scheme:
+
+```q
+select from `:s3://bucket/trades.csv      / DuckDB fetches the object, peachq's CSV decoder reads it
+select from `:hf://datasets/o/d/x.jsonl   / likewise JSON Lines
+read0 `:s3://bucket/notes.txt              / the lines
+read1 `:s3://bucket/blob.bin               / the bytes
+get `:s3://bucket/trades.csv               / the same table select from reads
+select from `:s3://bucket/x.parquet        / parquet is DuckDB's format: read_parquet on the URL, in place
+```
+
+csv, tsv, json, jsonl, `read0`, `read1` and `get` see the bytes DuckDB's `read_blob('url')` returns — peachq's
+decoders are THE parser of what a cell means, and a second type inference (DuckDB's CSV reader) would disagree with
+them. Parquet is the one format DuckDB owns, so it is read in place with pushdown ([parquet.md](parquet.md)).
+
+`read_blob` fetches the **whole object**: a ranged `read1 (`:s3://…;offset;length)` slices that in memory, so it costs
+the object, not the range. On any URL the query string and `#fragment` are not part of the format claim, so
+`` `:…/k.csv?X-Amz-Signature=… `` is still CSV — a presigned S3 URL is an `https://` URL and travels on peachq's own
+client; the same spelling on `s3://` is handed to DuckDB verbatim. An unrecognised ending on a remote resource is
+`'type` — there is no q-object fallback to fetch. A glob names several objects: `` select from `:s3://b/*.parquet ``
+reads them all (DuckDB's door), while `read0`/`read1`/csv/json read ONE resource and answer `'domain`.
+
+Writes follow the same law. `` `:s3://bucket/x.parquet set t `` is DuckDB's `COPY TO`; `` `:s3://bucket/x.csv set t ``
+(and `.json`, `.txt`, `.xml`, `.xls` — every `.h.tx` key that produces lines) writes peachq's own lines through
+DuckDB as a dumb line transport (`.duckdb.i.write0`), byte for byte what the same `set` writes to a local file, so
+`select from` reads them back. The lines must be UTF-8 (DuckDB text is). A `.h.tx` entry that produces BYTES has no
+remote transport (`'nyi`); parquet does not reach that arm.
+
+Credentials are DuckDB secrets on the main instance, through the standard library:
+
+```q
+\l pq
+.duckdb.secret[`aws;`s3;`key_id`secret`region!("AKIA…";"…";"eu-west-1")]   / CREATE OR REPLACE SECRET aws (TYPE s3, KEY_ID '…', …)
+.duckdb.secret[`aws;`s3;`provider`persistent!(`credential_chain;1b)]        / CREATE PERSISTENT SECRET, the AWS SDK chain
+.duckdb.secrets[]                                                          / name type provider persistent storage scope — never the values
+.duckdb.secret[`aws;`;::]                                                  / DROP SECRET aws
+```
+
+Opts ride verbatim as `KEY value` clauses (a string or symbol quoted, a bool or number bare), so DuckDB's own
+documentation of a secret type is the reference and an unknown key is DuckDB's own refusal (`'duckdb`, `.duckdb.err[]`
+the reason). The `httpfs` extension autoloads on first use — a fresh box fetches it from DuckDB's repository once, and
+a failed load is the same `'duckdb` with `.duckdb.err[]` saying why. In restricted mode (`-U`) every remote door is
+`'access` before DuckDB is asked.
+
 ## `get`, `read0`, `read1`, and `select`
 
 These operations ask different questions of a resource.
@@ -162,8 +220,9 @@ read0 (`:some-resource;offset;length)
 read1 (`:some-resource;offset;length)
 ```
 
-Offsets are resource byte offsets. A transport that supports native range reads, such as HTTP or S3, may satisfy these operations without fetching the
-whole object. A transport that does not support efficient ranges may fall back to fetching and slicing.
+Offsets are resource byte offsets. A transport that supports native range reads, such as HTTP, may satisfy these operations without fetching the
+whole object. A transport that does not support efficient ranges falls back to fetching and slicing — the DuckDB-carried schemes (`s3://`
+and the rest of § Remote schemes) do, since `read_blob` answers the whole object.
 
 For HTTP, the intended PeachQ direction is therefore:
 
@@ -247,8 +306,8 @@ key: `csv`, `txt`, `xml`, `xls` and `json` through peachq's own writers (the lin
 `` select from `:f.csv `` reads them back), `parquet` through `.parquet.write` (see [parquet.md](parquet.md)). `t`
 must be a table (`'type` otherwise); no recognised ending is the binary form as in kx, and a dotfile such as
 `` `:.json `` is not a format claim. This is a documented divergence from kx, where the same `set` writes the q
-binary form under any name. To a remote scheme (`s3://`, `gcs://`, `az://`, `hf://`) only parquet writes today;
-the other formats arrive with the transport law (B3). The read set is the reader's, not `.h.tx`'s: `xml`, `xls`, `txt`
+binary form under any name. To a remote scheme (`s3://`, `gcs://`, `hf://`) the same endings write the same bytes,
+through DuckDB (§ Remote schemes). The read set is the reader's, not `.h.tx`'s: `xml`, `xls`, `txt`
 and `raw` have writers and no reader, so `` get `:f.xml `` stays `'type`.
 
 Applications that know an ambiguously named file is CSV can use the explicit CSV API rather than relying on qSQL inference.

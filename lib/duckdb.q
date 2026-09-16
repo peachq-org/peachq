@@ -5,7 +5,9 @@
 / down to DuckDB.  There is ONE DuckDB database per process, `:pq:duckdb:main (.duckdb.main[]; q -duckdb path makes
 / it a file): every alias is a catalog attached to it, and a q global bound to a DuckDB table is a same-named view
 / in it, so s)SELECT ... runs SQL over q names, live.  .duckdb.types[] is the type map, .duckdb.err[] the last
-/ error.  \?duckdb has examples.
+/ error.  DuckDB's httpfs is also the transport for s3:// gcs:// hf:// (read0, read1, select from and set on a URL
+/ just work), with credentials as DuckDB secrets: .duckdb.secret[name;type;opts] and .duckdb.secrets[].  \?duckdb has
+/ examples.
 / @implNote DuckDB as a virtual-table PROVIDER (contract v3: the 2026-09-15 ADR § Handles; the instance and the
 / link: § Main instance).  These hooks ARE the DuckDB surface, written over the natives .duckdb.i.*, which bind at
 / this same \l pq gate; the lifecycle hooks .duckdb.i.open[alias;rest;tmo;cfg] / .duckdb.i.close[token] and the link
@@ -47,6 +49,66 @@
 / type produces this row), needs (what an envelope row must carry: none, logical, dtype, both).  Derive from it.
 / @return (table) `dtype`ktype`logical`canon`needs
 .duckdb.types:{[] .duckdb.i.types[]}
+
+/ ---- SQL spelling: the one home for what a q value looks like inside a statement (.parquet builds on these) ----
+
+/ a SQL literal: bool, int, float, sym, string and sym list have a spelling; anything else is 'type
+.duckdb.i.lit:{[v]
+  $[-1h=type v;$[v;"true";"false"];
+    (type v) in -5 -6 -7 -8 -9h;string v;
+    -11h=type v;.duckdb.i.lit string v;
+    10h=type v;"'",ssr[v;"'";"''"],"'";
+    11h=type v;"[",(", " sv .duckdb.i.lit each v),"]";
+    '`type]}
+/ an identifier is the one unquoted text in the SQL, so anything else is 'type, never spliced
+.duckdb.i.ident:{[k] s:string k; if[not (0<count s)&all s in .Q.an; '`type]; s}
+/ () or ()!() or (::) as an opts or query argument = none
+.duckdb.i.none:{[v] any v~/:(();()!();(::))}
+/ opts as (key;value) pairs through f, or none; a dict with symbol keys is the only shape
+.duckdb.i.opts:{[f;opts] $[.duckdb.i.none opts;();(99h=type opts)and 11h=type key opts;f'[key opts;value opts];'`type]}
+/ a resource as a literal: a `:path symbol (leading colon dropped, a URL verbatim) or a string
+.duckdb.i.file:{[f] .duckdb.i.lit $[-11h=type f;$[":"=first s:string f;1_s;s];10h=type f;f;'`type]}
+
+/ ---- the transport (ADR 2026-09-15 § B3): httpfs carries the bytes of a remote scheme, our decoders own their
+/ meaning.  HOST-ONLY hooks, named for the q verb they serve (the A1.1 naming law): the core's read0/read1/select-from
+/ doors call i.read1 by name for s3:// gcs:// hf://, `:url.EXT set t calls i.write0 - never a user's spelling ----
+
+/ the whole object as bytes (read_blob; a ranged read1 slices in memory) - exactly what read1 answers for a file.
+/ DuckDB globs the URL: no row is 'io (read1's class for a missing file; a remote miss is DuckDB's 'duckdb), several
+/ rows are 'domain - the byte doors read ONE resource, globbing is the parquet door's
+/ @return (bytes)
+.duckdb.i.read1:{[url]
+  r:.duckdb.exec[.duckdb.main[];"SELECT content FROM read_blob(",(.duckdb.i.file url),")"];
+  if[0=count r; '`io]; if[1<count r; '`domain]; first r`content}
+/ write lines (a format's .h.tx text) to url: staged as one VARCHAR column on _q_staging and COPYd unquoted and
+/ unescaped, so the bytes are the lines joined by \n plus a trailing \n - what 0: writes.  Lines are UTF-8 (the
+/ codec's law); the staging is dropped after
+/ @return url
+.duckdb.i.write0:{[url;lines]
+  if[not all 10h=type each lines; '`type];
+  c:.duckdb.main[]; .duckdb.set[c;`_q_staging;([] line:lines)];
+  .duckdb.exec[c;"COPY (SELECT line FROM ",(.duckdb.i.qname `_q_staging),") TO ",(.duckdb.i.file url)," (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '')"];
+  .duckdb.hdel[c;`_q_staging]; url}
+
+/ ---- credentials are DuckDB secrets (duckdb.org/docs/configuration/secrets_manager), on main ----
+
+/ CREATE OR REPLACE [PERSISTENT] SECRET name (TYPE typ, KEY value, ...): opts ride verbatim as KEY value clauses (a
+/ string or sym quoted, a bool or number bare - the COPY-option shape), so an unknown key is DuckDB's own refusal; the
+/ key `persistent (a bool) picks the persistent form and is no clause.  opts (::) or () DROPs the secret, persistent
+/ or not, and typ is not consulted.  A persistent secret lands in DuckDB's own store, outside q
+/ @return name
+.duckdb.secret:{[name;typ;opts]
+  c:.duckdb.main[]; n:.duckdb.i.ident name;
+  if[.duckdb.i.none opts;
+    p:first exec persistent from .duckdb.secrets[] where name~\:n;
+    .duckdb.exec[c;"DROP ",$[p;"PERSISTENT ";""],"SECRET ",n]; :name];
+  if[not (99h=type opts)and 11h=type key opts; '`type];
+  per:$[`persistent in key opts;opts`persistent;0b]; opts:(enlist `persistent) _ opts;
+  cl:(enlist "TYPE ",.duckdb.i.ident typ),.duckdb.i.opts[{[k;v] .duckdb.i.ident[k]," ",.duckdb.i.lit v};opts];
+  .duckdb.exec[c;"CREATE OR REPLACE ",$[per;"PERSISTENT ";""],"SECRET ",n," (",(", " sv cl),")"]; name}
+/ what duckdb_secrets() shows, minus the secret values: scope is the list of URL prefixes the secret covers
+/ @return (table) name type provider persistent storage scope
+.duckdb.secrets:{[] .duckdb.exec[.duckdb.main[];"SELECT name, type, provider, persistent, storage, scope FROM duckdb_secrets()"]}
 
 / ---- the diagnostics ----
 

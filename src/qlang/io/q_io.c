@@ -15,7 +15,7 @@
 #include "qlang/io/q_provider.h"  /* q_io_set: `:pq: targets route to .X.set; hdel: to .X.i.hdel */
 #include "qlang/io/q_csv.h"     /* the CSV/TSV decoder behind a recognised tabular suffix */
 #include "qlang/io/q_json.h"    /* the JSON decoder, and the framing a suffix declares to it */
-#include "qlang/eval/q_eval.h"  /* q_eval_call_name — the .parquet decoder and writer are bound by `\l pq`, not linked */
+#include "qlang/eval/q_eval.h"  /* q_eval_call_name — the .parquet doors and the .duckdb transport are bound by `\l pq`, not linked */
 #include "qlang/q_env.h"        /* q_env_get — `.h.tx`, the format table `set` reads at call time */
 #include "qlang/net/q_gz.h"     /* q_gz_inflate_zlib — the kxzip block codec */
 #include "qlang/net/q_wirefile.h" /* the format writers behind q_io_set */
@@ -177,6 +177,15 @@ static ray_t* io_read_raw(ray_t* pathstr, int64_t off, int64_t want, int* wrappe
     return out;
 }
 
+/* `want` bytes from `off` of an OWNED whole, under q_io_clamp's law; consumes the whole */
+static ray_t* io_slice(ray_t* all, int64_t off, int64_t want) {
+    if (off == 0 && want < 0) return all;
+    int64_t take = q_io_clamp(ray_len(all), &off, want);
+    ray_t* out = ray_vec_from_raw(RAY_BYTE_ONLY, (const uint8_t*)ray_data(all) + off, take);
+    ray_release(all);
+    return out;
+}
+
 ray_t* q_io_read_slice(ray_t* pathstr, int64_t off, int64_t want, int* zipped) {
     if (zipped) *zipped = 0;
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
@@ -193,11 +202,7 @@ ray_t* q_io_read_slice(ray_t* pathstr, int64_t off, int64_t want, int* zipped) {
     if (!plain) return q_err(QE_CORRUPT);       /* magic promised what unzip denies */
     if (RAY_IS_ERR(plain)) return plain;
     if (zipped) *zipped = 1;
-    if (off == 0 && want < 0) return plain;
-    int64_t take = q_io_clamp(ray_len(plain), &off, want);
-    out = ray_vec_from_raw(RAY_BYTE_ONLY, (const uint8_t*)ray_data(plain) + off, take);
-    ray_release(plain);
-    return out;
+    return io_slice(plain, off, want);
 }
 
 /* ---- the resource-read seam (user-docs/handles.md point 1) --------------- */
@@ -209,7 +214,39 @@ static int io_is_http(ray_t* pathstr) {
     return q_http_client_scheme_is(p, p ? ray_str_len(pathstr) : 0);
 }
 
-int q_io_resource_chunkable(ray_t* pathstr) { return !io_is_http(pathstr); }
+/* the remote schemes DuckDB's extensions speak and this file does not (ADR 2026-09-15 § B3): the bytes come and go
+ * through .duckdb.i.read1 / .duckdb.i.write0, bound by `\l pq` like the .parquet doors; az:// is handed over, unsupported */
+static int io_is_remote(ray_t* pathstr) {
+    static const char* const S[] = { "s3://", "s3a://", "s3n://", "gcs://", "gs://", "r2://", "hf://", "az://" };
+    const char* p = ray_str_ptr(pathstr);
+    size_t n = p ? ray_str_len(pathstr) : 0;
+    for (size_t i = 0; i < sizeof S / sizeof *S; i++)
+        if (n > strlen(S[i]) && memcmp(p, S[i], strlen(S[i])) == 0) return 1;
+    return 0;
+}
+
+static int io_is_url(ray_t* pathstr) { return io_is_http(pathstr) || io_is_remote(pathstr); }
+
+int q_io_resource_chunkable(ray_t* pathstr) { return !io_is_url(pathstr); }
+
+/* the length of the path that carries a format claim: on a URL a query or fragment names no format */
+static size_t io_claim_len(ray_t* pathstr) {
+    const char* p = ray_str_ptr(pathstr);
+    size_t n = ray_str_len(pathstr);
+    if (io_is_url(pathstr)) for (size_t i = 0; i < n; i++) if (p[i] == '?' || p[i] == '#') return i;
+    return n;
+}
+
+/* read_blob fetches the whole object, so a ranged read slices in memory (user-docs/handles.md § Remote schemes) */
+static ray_t* io_remote_read(ray_t* pathstr, int64_t off, int64_t want) {
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    ray_t* url = q_str_charv_of_str(pathstr);
+    ray_t* all = q_eval_call_name(".duckdb.i.read1", 15, &url, 1);
+    ray_release(url);
+    if (!all || RAY_IS_ERR(all)) return all;
+    if (all->type != RAY_BYTE_ONLY) { ray_release(all); return q_err(QE_TYPE); }
+    return io_slice(all, off, want);
+}
 
 /* A suffix is FINAL and needs something in front of it: a resource named exactly
  * `.json` is a dotfile, not a format claim.  Case-sensitive, like the names q writes. */
@@ -239,9 +276,7 @@ ray_t* q_io_resource_table(ray_t* fsym) {
     ray_t* path = q_io_file_path(fsym);
     if (!path) return NULL;
     const char* p = ray_str_ptr(path);
-    size_t n = ray_str_len(path);
-    if (io_is_http(path))                       /* a query or fragment names no format */
-        for (size_t i = 0; i < n; i++) if (p[i] == '?' || p[i] == '#') { n = i; break; }
+    size_t n = io_claim_len(path);
     ray_t* out;
     if (io_suffix_is(p, n, ".csv"))         out = q_csv_read_table(fsym, 0);
     else if (io_suffix_is(p, n, ".tsv"))    out = q_csv_read_table(fsym, '\t');
@@ -249,13 +284,14 @@ ray_t* q_io_resource_table(ray_t* fsym) {
     else if (io_suffix_is(p, n, ".jsonl"))  out = q_json_read_table(fsym, Q_JSON_ND);
     else if (io_suffix_is(p, n, ".json"))   out = q_json_read_table(fsym, Q_JSON_AUTO);
     else if (io_suffix_is(p, n, ".parquet")) out = io_parquet_table(fsym);
-    else out = q_io_resource_chunkable(path) ? NULL : q_err(QE_TYPE);
+    else out = io_is_url(path) ? q_err(QE_TYPE) : NULL;
     ray_release(path);
     return out;
 }
 
 ray_t* q_io_resource_read(ray_t* pathstr, int64_t off, int64_t want) {
     if (io_is_http(pathstr)) return q_http_client_read_slice(pathstr, off, want);
+    if (io_is_remote(pathstr)) return io_remote_read(pathstr, off, want);
     return q_io_read_slice(pathstr, off, want, NULL);
 }
 
@@ -815,14 +851,6 @@ static ray_t* read0_wrap_impl(ray_t* x) {
  * (ref/file-compression.md), and the (dir;sympath) domain overload — the
  * peachq API extension the splay writer records. */
 
-/* the schemes DuckDB's httpfs speaks and this file does not: parquet goes out through COPY TO, nothing else can */
-static int io_remote_scheme(const char* p, size_t n) {
-    static const char* const S[] = { "s3://", "gcs://", "az://", "hf://" };
-    for (size_t i = 0; i < sizeof S / sizeof *S; i++)
-        if (n > strlen(S[i]) && memcmp(p, S[i], strlen(S[i])) == 0) return 1;
-    return 0;
-}
-
 /* the final suffix of the last path segment as a sym id; -1 when there is none or the segment is a dotfile */
 static int64_t io_ext_sym(const char* p, size_t n) {
     size_t i = n;
@@ -834,13 +862,13 @@ static int64_t io_ext_sym(const char* p, size_t n) {
 /* `:f.EXT set t — the format `.h.tx` keys EXT as (owner ruling 2026-09-16; the write half of the suffix law
  * q_io_resource_table reads by).  `.h.tx` is read from the env at call time, so a user-added entry lights up; the
  * entry's lines are written by 0:'s law, its bytes by 1:'s.  `.parquet` goes straight to .parquet.write (COPY TO —
- * s3 included), by name like the read door; every other format to a remote scheme is 'nyi.  NULL = no format
- * claim, so the caller writes the binary form. */
+ * s3 included), by name like the read door; lines to a remote scheme go through .duckdb.i.write0 the same way, and
+ * bytes to one have no transport ('nyi).  NULL = no format claim, so the caller writes the binary form. */
 static ray_t* io_set_format(ray_t* x, ray_t* y) {
     ray_t* path = q_io_file_path(x);
     if (!path) return NULL;
-    int64_t ext = io_ext_sym(ray_str_ptr(path), ray_str_len(path));
-    int remote = io_remote_scheme(ray_str_ptr(path), ray_str_len(path));
+    int64_t ext = io_ext_sym(ray_str_ptr(path), io_claim_len(path));
+    int remote = io_is_remote(path);
     ray_release(path);
     if (ext == ray_sym_intern_runtime("parquet", 7)) {
         if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
@@ -850,7 +878,6 @@ static ray_t* io_set_format(ray_t* x, ray_t* y) {
         ray_release(none);
         return out;
     }
-    if (remote) return q_err(QE_NYI);
     ray_t* tx = ext < 0 ? NULL : q_env_get(ray_sym_intern_runtime(".h.tx", 5));   /* borrowed */
     if (!tx || tx->type != RAY_DICT || ray_dict_keys(tx)->type != RAY_SYM) return NULL;
     ray_t* keys = ray_dict_keys(tx);
@@ -861,7 +888,10 @@ static ray_t* io_set_format(ray_t* x, ray_t* y) {
     if (!y || y->type != RAY_TABLE) return q_err(QE_TYPE);
     ray_t* r = q_eval_apply_value(ray_list_get(ray_dict_vals(tx), i), &y, 1);
     if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_OOM);
-    ray_t* out = r->type == RAY_BYTE_ONLY ? q_io_filebinary_wrap(x, r) : q_io_filetext_wrap(x, r);
+    ray_t* out;
+    if (r->type == RAY_BYTE_ONLY) out = remote ? q_err(QE_NYI) : q_io_filebinary_wrap(x, r);
+    else if (remote) { ray_t* args[2] = { x, r }; out = q_eval_call_name(".duckdb.i.write0", 16, args, 2); }
+    else out = q_io_filetext_wrap(x, r);
     ray_release(r);
     return out;
 }

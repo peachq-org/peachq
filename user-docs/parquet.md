@@ -172,6 +172,17 @@ materialised (kx signals `'type` there).
 
 ### S3
 
-`` `:s3://bucket/x.parquet set t `` and `.parquet.write[`$":s3://bucket/x.parquet";t;()]` `COPY` through httpfs
-(credentials are DuckDB's: `CREATE SECRET` on `.duckdb.main[]`). The other formats to an `s3://`, `gcs://`, `az://`
-or `hf://` target wait on a byte transport for writes (B3).
+`` `:s3://bucket/x.parquet set t `` and `.parquet.write[`$":s3://bucket/x.parquet";t;()]` `COPY` through httpfs;
+`select from `:s3://bucket/x.parquet` and `.parquet.read` hand the URL to `read_parquet` the same way (`gcs://`,
+`hf://` and the rest of [handles.md § Remote schemes](handles.md#remote-schemes-duckdb-is-the-transport) alike). A
+public bucket needs nothing; otherwise credentials are DuckDB secrets on `.duckdb.main[]`, through the shim:
+
+```q
+.duckdb.secret[`aws;`s3;`key_id`secret`region!("AKIA…";"…";"eu-west-1")]   / CREATE OR REPLACE SECRET aws (TYPE s3, …)
+.duckdb.secret[`aws;`s3;`provider`persistent!(`credential_chain;1b)]        / the SDK chain, persisted in DuckDB's store
+.duckdb.secrets[]                                                          / what duckdb_secrets() shows, never the values
+.duckdb.secret[`aws;`;::]                                                  / DROP
+```
+
+The other formats to a remote target write too: `` `:s3://bucket/x.csv set t `` writes peachq's own csv lines
+through DuckDB as a line transport, so parquet is the only remote write DuckDB decodes.
