@@ -542,8 +542,10 @@
    "select from `:https://www.timestored.com/data/sample/iso10383_mic.csv";
    "select from `:https://www.timestored.com/data/sample/types.json";
    "select from `:test/data/parquet/gold_vs_bitcoin.parquet";
-   ".parquet.read[`:test/data/parquet/gold_vs_bitcoin.parquet;();parse \"select max gold by 0D01 xbar time from t\"]");
-  ("";"";"`:demo.csv";"";"`sym`px`sz!\"sfj\"";"";"";"";"";"";"";"";"");
+   ".parquet.read[`:test/data/parquet/gold_vs_bitcoin.parquet;();parse \"select max gold by 0D01 xbar time from t\"]";
+   ".parquet.write[`:demo.parquet;select from `:demo.csv;enlist[`compression]!enlist `zstd]";
+   "meta select from `:demo.parquet");
+  ("";"";"`:demo.csv";"";"`sym`px`sz!\"sfj\"";"";"";"";"";"";"";"";"";"`:demo.parquet";"");
   ("the csv and json readers: a file, a URL or text in memory becomes a table, types sniffed or given · page";
    ".csv and .j.read arrive with the standard library (.j.j and .j.k are always there)";
    "a small file to read";
@@ -556,7 +558,9 @@
    "a URL is fetched then decoded, so the web reads the same as the disk: every exchange's MIC code";
    "the same for json: a document of records is a table, nested arrays stay nested lists";
    "and parquet, read by DuckDB through the .duckdb bridge: text is text, a TIMESTAMP is a p; a URL goes to DuckDB's httpfs";
-   ".parquet.read[file;opts;query]: read_parquet options ride verbatim, the query is a parsed select the file answers")]];
+   ".parquet.read[file;opts;query]: read_parquet options ride verbatim, the query is a parsed select the file answers";
+   "write one: COPY options ride verbatim (compression, row_group_size, partition_by); `:demo.parquet set t is the same write";
+   "a file we wrote reads back typed through the q_schema it carries (symbols stay symbols, strings strings); save `t.parquet rides .h.tx")]];
 
 / page ENTRY rows come after the generated block and the showcase bodies, so a
 / page whose body IS its entry (`started`, the extension pages) keeps that line.

@@ -236,6 +236,14 @@ PeachQ should fail rather than guess.
 
 The existing `get`, `read0`, and `read1` behaviours remain independent of table-format inference.
 
+The same ending selects the WRITER. `` `:f.EXT set t `` writes the format `.h.tx` names for `EXT` — every `.h.tx`
+key: `csv`, `txt`, `xml`, `xls` and `json` through peachq's own writers (the lines `save` would write, so
+`` select from `:f.csv `` reads them back), `parquet` through `.parquet.write` (see [parquet.md](parquet.md)). `t`
+must be a table (`'type` otherwise); no recognised ending is the binary form as in kx, and a dotfile such as
+`` `:.json `` is not a format claim. This is a documented divergence from kx, where the same `set` writes the q
+binary form under any name. To a remote scheme (`s3://`, `gcs://`, `az://`, `hf://`) only parquet writes today;
+the other formats arrive with the transport law (B3).
+
 Applications that know an ambiguously named file is CSV can use the explicit CSV API rather than relying on qSQL inference.
 
 PeachQ should not initially make HTTP `Content-Type`, magic-byte sniffing, or other heuristics part of this contract. They can be considered later
