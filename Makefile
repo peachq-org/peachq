@@ -1,6 +1,7 @@
 # peachq — build ./q from source.
-#   make            # optimized
-#   ./q -p 5000     # kdb-wire server
+#   make                        # optimized
+#   make q RAY_CXX_STATIC=1     # Linux: the C++ runtime linked in, glibc the only dynamic dependency
+#   ./q -p 5000                 # kdb-wire server
 
 CC      ?= cc
 
@@ -148,6 +149,12 @@ UNAME_S := $(shell uname -s)
 # $(RE2_LIB) + the C++ runtime ride here because every link line already ends in
 # $(LIBS) — including the bench rules, which link $(LIB_SRC) not $(LIB_OBJ).
 CXXLIB := $(if $(filter Darwin,$(UNAME_S)),-lc++,-lstdc++)
+# The glibc-dynamic release: q must dlopen libduckdb.so (static musl cannot), so it links dynamically — but with
+# libstdc++/libgcc IN, so a system's own C++ runtime version never decides whether q starts.  Spelled on the lib,
+# not as -static-libstdc++: that flag is g++'s, and this link is driven by $(CC) with an explicit -lstdc++.
+ifeq ($(UNAME_S)-$(RAY_CXX_STATIC),Linux-1)
+  CXXLIB := -Wl,-Bstatic -lstdc++ -Wl,-Bdynamic -static-libgcc
+endif
 ifeq ($(UNAME_S),Linux)
   LIBS = -lm -lpthread -ldl $(RE2_LIB) $(FMT_LIB) $(CXXLIB)
 else

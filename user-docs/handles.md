@@ -148,6 +148,12 @@ whoever owns its meaning.
 | `hf://` | DuckDB httpfs | Hugging Face Hub: `hf://datasets/<owner>/<dataset>/<path>` |
 | `az://` | — | **not supported** (needs DuckDB's separate `azure` extension; handed to DuckDB untested) |
 
+`httpfs` (and `aws`, the credential chain) are DuckDB extensions. The `-duckdb` release archive bundles both beside
+`q`, pinned to the bundled DuckDB, and `q` points DuckDB at that `extensions/` directory with auto-install off — so
+every scheme above works offline, with no download at first use. With a DuckDB library you supplied yourself (the
+standard archive plus `PEACHQ_DUCKDB_LIB`, or a system DuckDB), DuckDB's own defaults apply: the first remote read
+auto-installs `httpfs` from `extensions.duckdb.org` into `~/.duckdb`, which needs the network once.
+
 What decodes the bytes is unchanged by the scheme:
 
 ```q

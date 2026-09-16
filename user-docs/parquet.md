@@ -7,9 +7,9 @@ The `.parquet` namespace arrives with `\l pq`; without the DuckDB library every 
 
 ```q
 q)\l pq
-q)select from `:test/data/parquet/gold_vs_bitcoin.parquet          / the shortest spelling
-q).parquet.read[`:test/data/parquet/gold_vs_bitcoin.parquet;();()]
-q)meta `:test/data/parquet/gold_vs_bitcoin.parquet
+q)select from `:data/gold_vs_bitcoin.parquet          / the shortest spelling
+q).parquet.read[`:data/gold_vs_bitcoin.parquet;();()]
+q)meta `:data/gold_vs_bitcoin.parquet
 c      | t f a
 -------| -----
 time   | p
@@ -66,7 +66,7 @@ symbols), `TIMESTAMP_MICROS` is `p`, `DATE` is `d`, `INT64` is `j`, `DOUBLE` is 
 names come through as-is, spaces and parentheses included:
 
 ```q
-q)meta .parquet.read[`:test/data/parquet/bank_failures.parquet;();()]
+q)meta .parquet.read[`:data/bank_failures.parquet;();()]
 c             | t f a
 --------------| -----
 c1            | j
