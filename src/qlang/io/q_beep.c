@@ -97,16 +97,15 @@ static void beep_play(int hz, int ms) {
 #elif defined(__APPLE__)
 
 /* UNVERIFIED (no mac in the tree): the reference's AudioUnit render-callback path over a dlopen'd
- * AudioToolbox, the framework's structs and constants declared locally; libdispatch is in libSystem. */
+ * AudioToolbox, the framework's structs and constants declared locally; libdispatch is in libSystem
+ * (its SDK header — hand prototypes conflicted with Xcode 26's, the v0.83 macOS build break). */
+#include <dispatch/dispatch.h>
 typedef struct { uint32_t type, sub, manu, flags, mask; } au_desc;
 typedef struct { double rate; uint32_t fmt, flags, bpp, fpp, bpf, cpf, bpc, res; } au_stream;
 typedef struct { uint32_t ch, bytes; void* data; } au_buf;
 typedef struct { uint32_t n; au_buf b[1]; } au_buflist;
 typedef int32_t (*au_render)(void*, uint32_t*, const void*, uint32_t, uint32_t, au_buflist*);
 typedef struct { au_render proc; void* ref; } au_cb;
-void* dispatch_semaphore_create(long);
-long  dispatch_semaphore_wait(void*, uint64_t);
-long  dispatch_semaphore_signal(void*);
 
 static struct {
     int state;
