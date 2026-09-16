@@ -5,7 +5,7 @@
  * (ops/q_takedrop.c), q.q's asc/xasc via `.Q.c.sorted`/`.Q.c.parted`, the three
  * append verbs via q_table.c, and the wire decoder via q_attr_stamp_byte.
  * The lifecycle rule (ARCHITECTURE.md 2026-09-16): a u/g/p letter exists only
- * with its hash on the same block — attr_build is the ONE place that mints one;
+ * with its index on the same block — attr_build is the ONE place that mints one;
  * `s` needs no index and is the one letter a caller may vouch for.
  * Design: docs/attributes-status.md. */
 #define _POSIX_C_SOURCE 200809L
@@ -190,14 +190,24 @@ void q_attr_store_keep(ray_t* r, const int64_t* pos, int64_t m) {
 }
 
 /* THE one place a u/g/p letter is minted: verify the layout (u distinct with
- * kdb's null policy, p contiguous, g nothing), build the find-hash on the block,
- * set the identity marker.  Integer-family only for u/p — the hash find lane
- * declines floats (idxop.h:324), so a float letter would be a badge; g keeps
- * the engine's float hash.  The engine attach contract: *vp is the caller's
- * owned live vector, cow'd when shared; NULL on success, else an owned RAW
- * engine error with *vp untouched (the `#` door remaps it). */
+ * kdb's null policy, p contiguous, g nothing), build the index on the block,
+ * set the identity marker.  A SYMBOL vector is already id-coded, so its index
+ * is the direct-addressed CODES kind (its build is the verify; the domain
+ * pointer stays in place beside it).  Integer-family only for u/p otherwise —
+ * the hash find lane declines floats (idxop.h:324), so a float letter would be
+ * a badge; g keeps the engine's float hash.  The engine attach contract: *vp is
+ * the caller's owned live vector, cow'd when shared; NULL on success, else an
+ * owned RAW engine error with *vp untouched (the `#` door remaps it). */
 static ray_t* attr_build(ray_t** vp, char letter) {
     ray_t* v = *vp;
+    uint8_t mark = letter == 'u' ? RAY_MARK_UNIQUE : letter == 'p' ? RAY_MARK_PARTED : RAY_MARK_GROUPED;
+    if (ray_is_vec(v) && v->type == RAY_SYM) {
+        ray_t* e = ray_index_attach_codes(vp, letter == 'u' ? RAY_CODES_UNIQUE
+                                            : letter == 'p' ? RAY_CODES_PARTED : RAY_CODES_GROUPED);
+        if (RAY_IS_ERR(e)) return e;
+        ray_index_payload((*vp)->index)->markers |= mark;
+        return NULL;
+    }
     int cls = ray_is_vec(v) ? ray_attr_numeric_class(v->type) : -1;
     if (cls < 0 || (cls == 0 && letter != 'g')) return q_err(QE_TYPE);
     bool ok = letter == 'u' ? (ray_attr_verify_distinct(v) && attr_no_dup_nulls(v))
@@ -205,8 +215,7 @@ static ray_t* attr_build(ray_t** vp, char letter) {
     if (!ok) return q_err(QE_DOMAIN);
     ray_t* e = ray_index_attach_hash(vp);
     if (RAY_IS_ERR(e)) return e;
-    uint8_t mark = letter == 'u' ? RAY_MARK_UNIQUE : letter == 'p' ? RAY_MARK_PARTED : 0;
-    if (mark) ray_index_payload((*vp)->index)->markers |= mark;   /* the attach's own block: no clone */
+    if (letter != 'g') ray_index_payload((*vp)->index)->markers |= mark;   /* the attach's own block: no clone */
     return NULL;
 }
 
