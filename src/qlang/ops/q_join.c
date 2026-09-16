@@ -1122,7 +1122,8 @@ static ray_t* join_core(ray_t* x, ray_t* y, int exclusive) {
          * The collapse home already leaves mixed lists (`1 2,"a"`) alone. */
         ray_t* c = q_list_collapse(r);
         ray_release(r);
-        return x && ray_is_vec(x) ? q_attr_append_keep(q_attr_letter(x), ray_len(x), c) : c;   /* the retention law; consumes c */
+        if (!x || !ray_is_vec(x)) return c;
+        return q_attr_append_keep(q_attr_letter(x), ray_len(x), q_attr_index_clone(x), c);   /* the retention law; consumes c */
     }
     if (!x || !y) return r;
     /* boxed-list fallback (ref/join.md:33 "The result is a vector if both

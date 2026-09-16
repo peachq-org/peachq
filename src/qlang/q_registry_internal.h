@@ -199,7 +199,9 @@ ray_t* q_attr_wrap(ray_t* x);                                 /* used by: bang, 
 ray_t* q_attr_set_dispatch(ray_t* n, ray_t* vec);               /* used by: takedrop (`#`'s set-attribute arm) */
 ray_t* q_attr_stamp_sorted(ray_t* x);                         /* used by: builtins (.Q.c.sorted) */
 ray_t* q_attr_stamp_parted(ray_t* x);                         /* used by: builtins (.Q.c.parted) */
-ray_t* q_attr_append_keep(char lx, int64_t nx, ray_t* r);      /* used by: table (`,`, insert, upsert); x's letter+length, CONSUMES r */
+ray_t* q_attr_append_keep(char lx, int64_t nx, ray_t* idx, ray_t* r); /* used by: join, table, index; x's letter + length +
+                                                                 OWNED detached block (or NULL); CONSUMES idx and r */
+ray_t* q_attr_index_clone(ray_t* x);                          /* used by: join, table — the copy path's owned block for the law */
 void   q_attr_store_keep(ray_t* r, const int64_t* pos, int64_t m); /* used by: index (the store law); s re-derived at the written cells */
 /* q_attr_letter / q_attr_set_letter: declared in q_registry.h — used by: fmt, tests */
 

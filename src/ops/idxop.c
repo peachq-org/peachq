@@ -176,6 +176,30 @@ static uint64_t next_pow2(uint64_t n) {
     return p;
 }
 
+static ray_t* i64_zeroed(int64_t n) {
+    ray_t* v = ray_vec_new(RAY_I64, n > 0 ? n : 1);
+    if (!v || RAY_IS_ERR(v)) return v;
+    v->len = n;
+    if (n > 0) memset(ray_data(v), 0, (size_t)n * sizeof(int64_t));
+    return v;
+}
+
+/* One more row on an index child; ray_vec_append's own doubling keeps a run of appends amortised O(1). */
+static int i64_push(ray_t** pv, int64_t x) {
+    ray_t* nv = ray_vec_append(*pv, &x);
+    if (!nv || RAY_IS_ERR(nv)) { if (nv) ray_error_free(nv); return 0; }
+    *pv = nv;
+    return 1;
+}
+
+/* A child still shared with the block this one was cloned from is copied before the first write. */
+static int own_child(ray_t** pc) {
+    ray_t* c = ray_cow(*pc);
+    if (!c || RAY_IS_ERR(c)) { if (c) ray_error_free(c); return 0; }
+    *pc = c;
+    return 1;
+}
+
 /* True iff all non-null rows are distinct.  Open-addressing probe over a
  * power-of-two table sized ~2x the row count.  v1: numeric vectors only.
  * Returns false on OOM so the caller raises a verify error (conservative). */
@@ -398,13 +422,13 @@ void ray_index_retain_payload(ray_index_t* ix) {
     }
 }
 
-/* Deep-clone a RAY_INDEX block, sharing (retaining) its payload child vectors.
+/* Clone a RAY_INDEX block, sharing (retaining) its payload child vectors.
  * ray_alloc_copy CANNOT be used here: a RAY_INDEX block's type (97) is outside
  * the vector-type range, so ray_alloc_copy computes data_size==0 and copies
  * only the 32-byte header, silently dropping the ray_index_t payload (kind,
  * markers, child pointers).  Used when a marker must be set on an index block
  * that is shared after copy-on-write. */
-static ray_t* clone_index_block(ray_t* blk) {
+ray_t* ray_index_clone(ray_t* blk) {
     ray_index_t* src = ray_index_payload(blk);
     ray_t* nb = ray_index_alloc((ray_idx_kind_t)src->kind, src->parent_type,
                                 src->built_for_len);
@@ -981,56 +1005,77 @@ ray_t* ray_index_inline_map(uint8_t* region) {
  * parent->data[rid] == k, on miss step rid = chain[rid] - 1.
  * -------------------------------------------------------------------------- */
 
-ray_t* ray_index_attach_hash(ray_t** vp) {
-    ray_t* v = prepare_attach(vp, "hash");
-    if (RAY_IS_ERR(v)) return v;
-
-    int64_t n = v->len;
+/* The table + chain over rows [0, upto) of v, sized for `sized_for` rows, written into ix's hash arm: the attach
+ * builds over everything; an extension past HASH_LOAD_MAX_PCT rebuilds over what it has indexed so far, then
+ * continues.  NULL on success, else an owned error with ix untouched. */
+static ray_t* hash_build(ray_t* v, int64_t upto, int64_t sized_for, ray_index_t* ix) {
     /* Capacity: at least 8, at most 2*n.  Power of two for cheap masking. */
-    uint64_t cap = next_pow2((uint64_t)(n < 4 ? 8 : 2 * n));
+    uint64_t cap = next_pow2((uint64_t)(sized_for < 4 ? 8 : 2 * sized_for));
     if (cap < 8) cap = 8;
-
-    ray_t* table = ray_vec_new(RAY_I64, (int64_t)cap);
+    ray_t* table = i64_zeroed((int64_t)cap);
     if (!table || RAY_IS_ERR(table)) return table ? table : ray_error("oom", NULL);
-    table->len = (int64_t)cap;
-    memset(ray_data(table), 0, (size_t)cap * sizeof(int64_t));
-
-    ray_t* chain = ray_vec_new(RAY_I64, n > 0 ? n : 1);
-    if (!chain || RAY_IS_ERR(chain)) {
-        ray_release(table);
-        return chain ? chain : ray_error("oom", NULL);
-    }
-    chain->len = n;
-    if (n > 0) memset(ray_data(chain), 0, (size_t)n * sizeof(int64_t));
-
+    ray_t* chain = i64_zeroed(upto);
+    if (!chain || RAY_IS_ERR(chain)) { ray_release(table); return chain ? chain : ray_error("oom", NULL); }
     int64_t* tbl = (int64_t*)ray_data(table);
     int64_t* chn = (int64_t*)ray_data(chain);
     const uint8_t* base = (const uint8_t*)ray_data(v);
     int64_t n_keys = 0;
     uint64_t mask = cap - 1;
-
-    for (int64_t i = 0; i < n; i++) {
+    for (int64_t i = 0; i < upto; i++) {
         if (ray_vec_is_null(v, i)) continue;
-        uint64_t h = mix64(numeric_key_word(base, v->type, i));
-        uint64_t slot = h & mask;
+        uint64_t slot = mix64(numeric_key_word(base, v->type, i)) & mask;
         chn[i] = tbl[slot];     /* link previous head into chain */
         tbl[slot] = i + 1;      /* this row becomes new head */
         n_keys++;
     }
-
-    ray_t* idx = ray_index_alloc(RAY_IDX_HASH, v->type, n);
-    if (!idx || RAY_IS_ERR(idx)) {
-        ray_release(table);
-        ray_release(chain);
-        return idx ? idx : ray_error("oom", NULL);
-    }
-    ray_index_t* ix = ray_index_payload(idx);
     ix->u.hash.table  = table;
     ix->u.hash.chain  = chain;
     ix->u.hash.mask   = mask;
     ix->u.hash.n_keys = n_keys;
+    return NULL;
+}
 
+ray_t* ray_index_attach_hash(ray_t** vp) {
+    ray_t* v = prepare_attach(vp, "hash");
+    if (RAY_IS_ERR(v)) return v;
+
+    int64_t n = v->len;
+    ray_t* idx = ray_index_alloc(RAY_IDX_HASH, v->type, n);
+    if (!idx || RAY_IS_ERR(idx)) return idx ? idx : ray_error("oom", NULL);
+    ray_t* e = hash_build(v, n, n, ray_index_payload(idx));
+    if (e) { ray_release(idx); return e; }
     return attach_finalize(v, idx);
+}
+
+/* Chains stay short up to this load; the rebuild sizes for the whole vector, so a run of appends amortises to O(1). */
+#define HASH_LOAD_MAX_PCT 70
+
+/* Rows [from, len) of v go into the hash, probed first under the UNIQUE marker.  1 extended, 0 a duplicate, -1 OOM. */
+static int hash_extend(ray_index_t* ix, ray_t* v, int64_t from) {
+    if (!own_child(&ix->u.hash.table)) return -1;
+    const uint8_t* base = (const uint8_t*)ray_data(v);
+    for (int64_t i = from; i < v->len; i++) {
+        if ((uint64_t)(ix->u.hash.n_keys + 1) * 100 > (ix->u.hash.mask + 1) * HASH_LOAD_MAX_PCT) {
+            ray_index_t nb = *ix;
+            ray_t* e = hash_build(v, i, v->len, &nb);
+            if (e) { ray_error_free(e); return -1; }
+            ray_index_release_payload(ix);
+            ix->u.hash = nb.u.hash;
+        }
+        if (!i64_push(&ix->u.hash.chain, 0)) return -1;
+        if (ray_vec_is_null(v, i)) continue;
+        int64_t* tbl = (int64_t*)ray_data(ix->u.hash.table);
+        int64_t* chn = (int64_t*)ray_data(ix->u.hash.chain);
+        uint64_t kw = numeric_key_word(base, v->type, i);
+        uint64_t slot = mix64(kw) & ix->u.hash.mask;
+        if (ix->markers & RAY_MARK_UNIQUE)
+            for (int64_t r = tbl[slot] - 1; r >= 0; r = chn[r] - 1)
+                if (numeric_key_word(base, v->type, r) == kw) return 0;
+        chn[i] = tbl[slot];
+        tbl[slot] = i + 1;
+        ix->u.hash.n_keys++;
+    }
+    return 1;
 }
 
 /* --------------------------------------------------------------------------
@@ -1932,14 +1977,6 @@ static ray_t* ray_index_attach_part(ray_t** vp) {
  * UNIQUE fails on a second row for an id, PARTED on an id whose run resumes.
  * -------------------------------------------------------------------------- */
 
-static ray_t* i64_zeroed(int64_t n) {
-    ray_t* v = ray_vec_new(RAY_I64, n > 0 ? n : 1);
-    if (!v || RAY_IS_ERR(v)) return v;
-    v->len = n;
-    if (n > 0) memset(ray_data(v), 0, (size_t)n * sizeof(int64_t));
-    return v;
-}
-
 ray_t* ray_index_attach_codes(ray_t** vp, ray_codes_layout_t layout) {
     int per_id = (int)layout;
     if (per_id < RAY_CODES_UNIQUE || per_id > RAY_CODES_GROUPED) return ray_error("domain", "codes: invalid layout");
@@ -2114,6 +2151,57 @@ static ray_t* codes_in_rowsel(ray_t* col, ray_t* set_vec) {
     ray_release(runs);
     if (out) ray_release(out);
     return block;
+}
+
+/* Rows [from, len) of v into the CODES index: UNIQUE sets the first-row slot (taken -> 0, a duplicate), GROUPED
+ * links onto the tail; a first-seen page is allocated as the build would have.  PARTED is not extendable (-1). */
+static int codes_extend(ray_index_t* ix, ray_t* v, int64_t from) {
+    int per_id = ix->u.codes.layout;
+    if (per_id == RAY_CODES_PARTED) return -1;
+    if (!own_child(&ix->u.codes.dir) || !own_child(&ix->u.codes.slots) || (ix->u.codes.next && !own_child(&ix->u.codes.next)))
+        return -1;
+    int64_t dc = ray_sym_domain_count(ray_sym_vec_domain(v));
+    for (int64_t i = from; i < v->len; i++) {
+        int64_t id = ray_read_sym(ray_data(v), i, RAY_SYM, v->attrs);
+        if (id < 0 || id >= dc) return -1;
+        int64_t p = id >> RAY_CODES_PAGE_LOG2;
+        while (ix->u.codes.dir->len <= p)
+            if (!i64_push(&ix->u.codes.dir, 0)) return -1;
+        int64_t* d = (int64_t*)ray_data(ix->u.codes.dir);
+        if (!d[p]) {
+            d[p] = 1 + ix->u.codes.slots->len;
+            for (int64_t k = 0; k < RAY_CODES_PAGE * per_id; k++)
+                if (!i64_push(&ix->u.codes.slots, 0)) return -1;
+        }
+        int64_t* s = (int64_t*)ray_data(ix->u.codes.slots) + (d[p] - 1) + (id & (RAY_CODES_PAGE - 1)) * per_id;
+        if (per_id == RAY_CODES_UNIQUE) {
+            if (s[0]) return 0;
+            s[0] = i + 1;
+            continue;
+        }
+        if (!i64_push(&ix->u.codes.next, 0)) return -1;
+        int64_t* nx = (int64_t*)ray_data(ix->u.codes.next);
+        if (s[0] == 0) { s[0] = s[1] = i + 1; s[2] = 1; }
+        else { nx[s[1] - 1] = i + 1; s[1] = i + 1; s[2]++; }
+    }
+    return 1;
+}
+
+int ray_index_extend(ray_t* idx, ray_t* vec, int64_t old_len) {
+    if (!idx || RAY_IS_ERR(idx) || idx->type != RAY_INDEX || idx->mmod == 1 || !vec || RAY_IS_ERR(vec) || !ray_is_vec(vec))
+        return -1;
+    ray_index_t* ix = ray_index_payload(idx);
+    if ((ix->markers & RAY_MARK_MMAP) || ix->parent_type != vec->type || ix->built_for_len != old_len || old_len > vec->len)
+        return -1;
+    int r = -1;
+    if (ix->kind == RAY_IDX_HASH) r = hash_extend(ix, vec, old_len);
+    else if (ix->kind == RAY_IDX_CODES && saved_sym_domain(ix) == ray_sym_vec_domain(vec)) r = codes_extend(ix, vec, old_len);
+    if (r != 1) return r;
+    ix->built_for_len = vec->len;
+    ray_index_release_saved(ix);          /* the snapshot was the parent it came off; the attach takes a fresh one */
+    memset(ix->saved_aux, 0, 16);
+    ix->saved_attrs = 0;
+    return 1;
 }
 
 /* --------------------------------------------------------------------------
@@ -2357,7 +2445,7 @@ ray_t* ray_attr_stamp_marker(ray_t* v, uint8_t mark) {
         /* Post-cow w->index is SHARED with the original (ray_cow retains the
          * block, it does not deep-copy it).  Clone it before mutating markers
          * so the original's block is untouched.  Then the clone is sole-owned. */
-        ray_t* nb = clone_index_block(w->index);
+        ray_t* nb = ray_index_clone(w->index);
         if (!nb || RAY_IS_ERR(nb)) { ray_release(w); return nb ? nb : ray_error("oom", NULL); }
         ray_release(w->index);
         w->index = nb;
@@ -2379,7 +2467,7 @@ ray_t* ray_attr_stamp_marker(ray_t* v, uint8_t mark) {
 ray_t* ray_attr_mark_attach(ray_t* v, uint8_t mark) {
     if (!v || RAY_IS_ERR(v)) return v ? v : ray_error("type", "attr: null");
     if (v->attrs & RAY_ATTR_HAS_INDEX) {
-        ray_t* nb = clone_index_block(v->index);
+        ray_t* nb = ray_index_clone(v->index);
         if (!nb || RAY_IS_ERR(nb)) { ray_release(v); return nb ? nb : ray_error("oom", NULL); }
         ray_release(v->index);
         v->index = nb;
@@ -2425,7 +2513,7 @@ static ray_t* attr_set_unique(ray_t* v) {
         /* Post-cow w->index is SHARED with the original (ray_cow retains the
          * block, it does not deep-copy it).  Clone it before mutating markers
          * so the original's block is untouched.  Then the clone is sole-owned. */
-        ray_t* nb = clone_index_block(w->index);
+        ray_t* nb = ray_index_clone(w->index);
         if (!nb || RAY_IS_ERR(nb)) { ray_release(w); return nb ? nb : ray_error("oom", NULL); }
         ray_release(w->index);
         w->index = nb;
