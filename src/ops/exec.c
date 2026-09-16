@@ -1065,6 +1065,12 @@ ray_t* exec_in_to_selection(ray_graph_t* g, ray_op_t* pred, int64_t nrows,
  * Recursive executor
  * ============================================================================ */
 
+/* A column the DAG's decoded predicates may consult an index on: flat, and never datetime — its index is keyed by
+ * a canonical float word only ray_index_atom_key hands out, which the integer keys decoded here never are. */
+static bool idx_col_eligible(const ray_t* col) {
+    return !RAY_IS_PARTED(col->type) && col->type != RAY_MAPCOMMON && col->type != RAY_DATETIME;
+}
+
 /* Decode a comparison predicate `pred_op` against g->table.  When the
  * predicate has shape (cmp_op col_scan const) and `col_scan` resolves to
  * a column in g->table that is non-parted, non-MAPCOMMON, write the column
@@ -1102,8 +1108,7 @@ static int idx_filter_decode(ray_graph_t* g, ray_op_t* pred_op,
     ray_t* tbl = g->table;
     if (!tbl) return 0;
     ray_t* col = ray_table_get_col(tbl, lext->sym);
-    if (!col || RAY_IS_ERR(col)) return 0;
-    if (RAY_IS_PARTED(col->type) || col->type == RAY_MAPCOMMON) return 0;
+    if (!col || RAY_IS_ERR(col) || !idx_col_eligible(col)) return 0;
 
     ray_t* cv = rext->literal;
     if (!cv) return 0;
@@ -1186,8 +1191,7 @@ static int idx_filter_in_decode(ray_graph_t* g, ray_op_t* pred_op,
     ray_t* tbl = g->table;
     if (!tbl) return 0;
     ray_t* col = ray_table_get_col(tbl, lext->sym);
-    if (!col || RAY_IS_ERR(col)) return 0;
-    if (RAY_IS_PARTED(col->type) || col->type == RAY_MAPCOMMON) return 0;
+    if (!col || RAY_IS_ERR(col) || !idx_col_eligible(col)) return 0;
 
     *out_col     = col;
     *out_set_lit = rext->literal;
