@@ -232,7 +232,7 @@ void ray_idx_stats_init(void);   /* atexit dump when RAY_IDX_STATS set */
 /* ===== Attach / Detach ===== */
 
 /* Build an accelerator and attach.  Numeric types only for these kinds
- * (BOOL/U8/I16/I32/I64/F32/F64/DATE/TIME/TIMESTAMP); RAY_STR takes only DICT,
+ * (every type numeric_elem_size admits: the integer family, F32/F64 and the int-backed temporals); RAY_STR takes only DICT,
  * RAY_SYM only CODES (ray_index_attach_codes), RAY_GUID nothing yet.
  * On success, *vp is the (possibly new) parent vector with HAS_INDEX set.
  * On failure, *vp is unchanged and a RAY_ERROR is returned. */
@@ -364,7 +364,7 @@ bool ray_index_bloom_absent(ray_t* col, int64_t key);
  *     range key.  Caller must fall back to the full scan path.
  *
  * Eligibility (and the canonical hashing used) match
- * ray_index_attach_hash: BOOL/U8/I16/I32/I64/DATE/TIME/TIMESTAMP.
+ * ray_index_attach_hash: every integer-family width numeric_elem_size admits.
  * Floats are intentionally not supported — equality on F32/F64
  * has NaN / -0 semantics the unfused compare kernel handles. */
 ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key);
@@ -407,8 +407,9 @@ ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec);
 int64_t ray_index_find_row(ray_t* col, int64_t key);
 
 /* Kind-neutral fronts: a consumer asks by value and the column's kind answers or declines (NULL / -2).  atom_key is
- * the key an atom presents to col's index under atom_eq's cross-type law, in the widths the probes read
- * (MONTH/MINUTE/SECOND/TIMESPAN decline); has_key stops at the first hit. */
+ * the key an atom presents to col's index under atom_eq's cross-type law: an int-backed atom by the width
+ * numeric_elem_size gives (floats and DATETIME decline), a symbol as its id in col's domain; has_key stops at the
+ * first hit. */
 bool   ray_index_atom_key(const ray_t* col, const ray_t* atom, int64_t* key);
 ray_t* ray_index_eq_rowsel(ray_t* col, int64_t key);
 int    ray_index_has_key(ray_t* col, int64_t key);
