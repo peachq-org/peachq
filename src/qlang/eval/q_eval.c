@@ -30,6 +30,7 @@
 #include "qlang/net/q_wirefile.h"  /* q_wirefile_read — `get `:file */
 #include "qlang/io/q_provider.h"   /* q_provider_get_carrier — `get `:pq:...:t/ */
 #include "qlang/io/q_splay.h"      /* q_splay_get — `get `:dir/ maps; value/amend read the aux path */
+#include "qlang/io/q_io.h"         /* q_io_resource_table — `get `:f.csv reads the format the ending names */
 #include "lang/eval.h"
 #include "ops/ops.h"
 #include "table/sym.h"             /* ray_read_sym — sym vectors are width-adaptive */
@@ -651,6 +652,8 @@ ray_t* q_eval_value_wrap(ray_t* x) {
         ray_t* pc = q_provider_get_carrier(x);   /* `:pq:...:t/ -> the carrier;
                                                   * connection form -> 'domain */
         if (pc) return pc;
+        ray_t* rt = q_io_resource_table(x);  /* `:f.csv etc.: the ending `select from` speaks */
+        if (rt) return rt;
         ray_t* f = q_wirefile_read(x);       /* NULL unless a `:path sym */
         if (f) return f;
         /* "the name of a GLOBAL variable" (ref/get.md:22): the caller's locals are behind the floor, as for a

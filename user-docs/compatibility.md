@@ -34,6 +34,12 @@ name. The read side already worked that way (`` select from `:f.csv ``); the wri
 is not a table signals `'type` under those endings; a path with no recognised ending is the binary form as in kx.
 See [Handles and resources](handles.md) § Format inference and [parquet.md](parquet.md).
 
+**`get` reads the format the suffix names.** `` get `:f.csv `` (and `value`) answers the table `` select from `:f.csv ``
+reads, for every ending `select from` speaks (`.csv .tsv .json .jsonl .ndjson .parquet`), where kx signals `'type`
+for any file that is not a kdb+ data file. An error becomes a value, so no working kx program changes meaning. A path
+with no recognised ending is the kdb+ file read as in kx; an ending with a writer and no reader (`.xml`, `.xls`,
+`.txt`) is `'type` as in kx.
+
 **Pattern matching.** It will not be implemented; [typed parameters](typed-parameters.md) are the replacement for
 the part of it that declares what a function accepts. Since there is no equivalent form to link to:
 
