@@ -545,9 +545,14 @@ typedef struct {
     int    top_err_ok;  /* the TOP-LEVEL object decoded as a wire -128h error */
     int    depth0;      /* g_wire_depth at cursor creation (top-level marker) */
     int    serde;       /* serde mode: ext band on, list collapse off */
+    int    disk;        /* an image off disk: u/g/p bytes dropped, `s` kept */
 } rcur_t;
 
 static int r_need(rcur_t* c, size_t n) { return c->rem >= n; }
+
+static ray_t* rd_attr(rcur_t* c, ray_t* v, uint8_t byte) {
+    return c->disk && byte != 1 ? v : q_attr_stamp_byte(v, byte);
+}
 
 static uint8_t r_u8(rcur_t* c) { uint8_t v = c->p[0]; c->p++; c->rem--; return v; }
 
@@ -660,7 +665,7 @@ static ray_t* rd_fixed_vec(rcur_t* c, int8_t t) {
         if (wattrs & RAY_ATTR_HAS_NULLS) v->attrs |= RAY_ATTR_HAS_NULLS;
         return v;
     }
-    return q_attr_stamp_byte(v, wattrs);              /* owned exclusive; consumes v */
+    return rd_attr(c, v, wattrs);                     /* owned exclusive; consumes v */
 }
 
 /* serde-mode extension records (q_wire.h band 200..236) */
@@ -858,7 +863,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
                 if (r_cstr(c, &s, &n)) { v->len = i; ray_release(v); return trunc_err("sym vector cell"); }
                 ids[i] = ray_sym_intern(s, n);
             }
-            return q_attr_stamp_byte(v, wattrs);      /* `u/`p/`g have no symbol carrier: DROPPED, never lied about */
+            return rd_attr(c, v, wattrs);             /* `u/`p/`g have no symbol carrier: DROPPED, never lied about */
         }
         default: {
             uint8_t esz = ray_type_sizes[(uint8_t)t];
@@ -893,7 +898,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         }
         ray_t* out = q_list_collapse(l);              /* owned; parser-identical shape */
         ray_release(l);
-        return q_attr_stamp_byte(out, attrs);
+        return rd_attr(c, out, attrs);
     }
     case 99: case 127: {                              /* dict / sorted dict */
         ray_t* k = rd_obj(c);
@@ -946,7 +951,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
                                     ray_list_get(cols, i));   /* col NOT consumed */
         ray_release(keys);
         ray_release(cols);
-        return tbl ? q_attr_stamp_byte(tbl, wattrs) : q_err(QE_WSFULL);
+        return tbl ? rd_attr(c, tbl, wattrs) : q_err(QE_WSFULL);
     }
     case 100: {                                       /* lambda: context + source */
         const char* ctx; size_t ctxn;
@@ -1083,7 +1088,7 @@ static ray_t* rd_obj(rcur_t* c) {
 }
 
 ray_t* q_wire_read_obj_ex(const uint8_t* buf, size_t len, size_t* consumed,
-                          int swap, int serde) {
+                          int swap, int mode) {
     /* public contract: `swap` = frame is big-endian (see q_wire.h) */
     rcur_t c = {0};
     c.p = buf;
@@ -1091,7 +1096,8 @@ ray_t* q_wire_read_obj_ex(const uint8_t* buf, size_t len, size_t* consumed,
     c.frame_be = (swap != 0);
     c.swap = (swap != 0) != (Q_WIRE_HOST_BE != 0);
     c.depth0 = g_wire_depth;
-    c.serde = serde;
+    c.serde = (mode & Q_WIRE_READ_SERDE) != 0;
+    c.disk = (mode & Q_WIRE_READ_DISK) != 0;
     ray_t* r = rd_obj(&c);
     if (consumed) *consumed = len - c.rem;
     return r;

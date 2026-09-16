@@ -165,13 +165,13 @@ ray_t* q_csv_cell_atom(const q_csv_fmt_t* fmt, char c, const char* f, size_t n);
  * Shared by the `attr` verb wrapper AND q_fmt's `` `s#``/`u#``/`g#``/`p# ``
  * display prefix so both agree on one mapping.  Borrows v. */
 char q_attr_letter(ray_t* v);
-ray_t* q_attr_stamp_trusted(ray_t* v, char letter);   /* OWNED exclusive v: letter w/o verify or index */
+ray_t* q_attr_stamp_trusted(ray_t* v, char letter);   /* OWNED v: the caller's word for `s`; any other letter dropped */
+ray_t* q_attr_rebuild(ray_t* v, char letter);         /* OWNED v: verify + hash u/g/p, drop what cannot build (decode door) */
 
 /* kdb's attribute BYTE (0 none, 1 `s, 2 `u, 3 `p, 4 `g) — one spelling shared by the IPC wire
  * (kb/serialization.md:39) and the kx on-disk header.  It COLLIDES with rayforce's attrs bits, so both
  * directions go through the letter above and never copy the bitfield.  q_attr_byte borrows v;
- * q_attr_stamp_byte takes an OWNED exclusive v and TRUSTS the byte (a lying one is corrupt-class), so
- * no O(n) verify and no index build. */
+ * q_attr_stamp_byte is the WIRE decoder's door onto q_attr_rebuild (the disk readers keep `s` alone). */
 uint8_t q_attr_byte(ray_t* v);
 ray_t* q_attr_stamp_byte(ray_t* v, uint8_t byte);
 

@@ -10,7 +10,6 @@
 #include "qlang/net/q_wirefile.h"
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"      /* q_type_coord_mark — THE aux mark that says "flipped from a coordinate" */
-#include "qlang/q_prim.h"            /* q_attr_stamp_trusted — the disk letter on a mapped header */
 #include "qlang/q_env.h"             /* q_env_set — the one global-set home */
 #include "lang/eval.h"               /* ray_eval_get_restricted */
 #include "table/sym.h"               /* ray_sym_intern_runtime, ray_sym_str */
@@ -612,12 +611,7 @@ static ray_t* splay_hdr_over(const splay_region* r, splay_col* c) {
     v->rc    = 1;                                       /* the caller's ref */
     v->len   = c->h.count;
     splay_region_add(v, r);
-    /* the trusted letter (kx attr byte, else our validated sidecar) — a heap
-     * marker block on the mapped header; ray_free releases it before the
-     * region choke point, so the ledger needs no new row */
-    char l = c->h.disk_attr >= 2 && c->h.disk_attr <= 4 ? "\0supg"[c->h.disk_attr]
-           : c->h.side_attr;
-    return l ? q_attr_stamp_trusted(v, l) : v;
+    return v;   /* a disk u/g/p byte or sidecar letter is dropped: no index rides the map (ARCHITECTURE.md 2026-09-16) */
 }
 
 /* Map a fixed-width column: kdb's payload starts at byte 16, a ray_t header
