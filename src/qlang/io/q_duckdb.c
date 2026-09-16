@@ -860,6 +860,36 @@ static ray_t* qd_unlink_wrap(ray_t** args, int64_t n) {
     return RAY_NULL_OBJ;
 }
 
+/* .duckdb.i.hdel[c; t] — drop the OBJECT t names (a view when that is what it is, else a table) and, with a table,
+ * its sidecar rows: the one key law spells them, so nothing of a dropped table outlives it in _q_schema. */
+static ray_t* qd_hdel_wrap(ray_t** args, int64_t n) {
+    int slot;
+    qd_name_t name;
+    ray_t* e = qd_door(args, n, 2, &slot);
+    if (!e) e = qd_name_arg(slot, args[1], &name);
+    if (e) return e;
+    qd_buf b = {0};
+    q_duckdb_puts(&b, "SELECT 1 AS v FROM duckdb_views() WHERE NOT internal AND database_name = current_database() "
+                      "AND view_name = ");
+    q_duckdb_put_strlit(&b, name.part[name.n - 1], strlen(name.part[name.n - 1]));
+    duck_result res;
+    e = b.oom ? q_err(QE_WSFULL) : q_duckdb_run(slot, b.p, &res);
+    q_duckdb_buf_free(&b);
+    if (e) return e;
+    ray_t* hit = q_duckdb_codec_result_to_table(slot, &res, NULL, 0, NULL);
+    QAPI.destroy_result(&res);
+    bool is_view = hit && !RAY_IS_ERR(hit) && ray_table_nrows(hit) > 0;
+    q_duckdb_drop(hit);
+    q_duckdb_puts(&b, is_view ? "DROP VIEW " : "DROP TABLE ");
+    q_duckdb_schema_put_name(&b, &name);
+    e = b.oom ? q_err(QE_WSFULL) : q_duckdb_exec_stmt(slot, b.p);
+    q_duckdb_buf_free(&b);
+    if (e) return e;
+    if (!is_view) q_duckdb_schema_drop_desc(slot, &name);
+    ray_retain(args[1]);
+    return args[1];
+}
+
 /* .duckdb.i.tables[c] — the LOADABLE names of the connection's catalog, sorted: the tables and views of its current
  * schema (a bare name binds there) less the bridge's own (the _q_schema sidecar; the link views, each already a q
  * name).  What .duckdb.load[h;::] binds. */
@@ -1016,17 +1046,17 @@ static ray_t* qd_write_rows(int slot, const qd_name_t* nm, ray_t* tbl, const qd_
     ray_t* e = NULL;
     qd_buf b = {0};
     if (create || cast) {
-        q_duckdb_schema_create_ddl(&b, target, img, cast ? scms : tms, cast);
+        q_duckdb_schema_create_ddl(&b, target, img, cast ? scms : tms, target->temp);
         e = b.oom ? q_err(QE_WSFULL) : q_duckdb_exec_stmt(slot, b.p);
         q_duckdb_buf_free(&b);
     }
-    if (!e) e = q_duckdb_codec_append_table(slot, target, cast, img, cast ? scms : tms, cast ? smasks : masks,
+    if (!e) e = q_duckdb_codec_append_table(slot, target, target->temp, img, cast ? scms : tms, cast ? smasks : masks,
                                            cast ? skeeps : keeps);
     if (cast) ray_release(img);
     free(scms);
     if (e || !cast) return e;
     if ((e = q_duckdb_schema_exact_check(slot, tbl, tms, dtypes, masks, offs, keeps))) return e;
-    q_duckdb_puts(&b, create ? "CREATE OR REPLACE TABLE " : "INSERT INTO ");
+    q_duckdb_puts(&b, !create ? "INSERT INTO " : nm->temp ? "CREATE OR REPLACE TEMP TABLE " : "CREATE OR REPLACE TABLE ");
     q_duckdb_schema_put_name(&b, nm);
     q_duckdb_puts(&b, create ? " AS " : " ");
     if ((e = q_duckdb_schema_cast_select(slot, &b, tbl, tms, dtypes, masks, offs, keeps, QD_STAGE_TBL)))
@@ -1417,6 +1447,7 @@ void q_duckdb_register(void) {
     qd_bind_vary (".duckdb.i.main",   qd_main_fn);
     qd_bind_vary (".duckdb.i.link",   qd_link_wrap);
     qd_bind_vary (".duckdb.i.unlink", qd_unlink_wrap);
+    qd_bind_vary (".duckdb.i.hdel",   qd_hdel_wrap);
     qd_bind_unary(".duckdb.i.tables", qd_tables_fn);
     qd_bind_unary(".duckdb.i.err",    qd_err_fn);
     qd_bind_vary (".duckdb.i.exec",   qd_sql_wrap);

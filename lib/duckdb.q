@@ -110,13 +110,10 @@
 / the host's load hook answers the NAMES; the host binds them
 .duckdb.i.load:{[c;tbls] $[tbls~(::); .duckdb.i.tables c; (),tbls]}
 
-/ drop table t of the handle's catalog - a view when that is what t names; hdel `:pq:duckdb:al:t/ is this verb's
-/ spelling.  A q name bound to it stays bound and errors on use: deleting a q name never drops the object either.
+/ drop table t of the handle's catalog with its sidecar rows (native: the key law is the codec's) - a view when that
+/ is what t names; hdel `:pq:duckdb:al:t/ is this verb's spelling.  A q name bound to it stays bound and errors on use
 / @return (symbol) t
 .duckdb.hdel:{[c;t] .duckdb.i.hdel[c;t]}
-.duckdb.i.hdel:{[c;t]
-  is_view:0<count .duckdb.i.exec[c;"SELECT 1 AS v FROM duckdb_views() WHERE NOT internal AND database_name = current_database() AND view_name = '",ssr[string t;"'";"''"],"'"];
-  .duckdb.i.exec[c;"DROP ",$[is_view;"VIEW ";"TABLE "],.duckdb.i.qname t]; t}
 
 / s)SELECT ... - the custom-language handler kdb documents (.X.e receives the line after the prefix), on main: a
 / q global bound to a DuckDB table is a bare name here, an alias's table is alias.table, a result prints as a table

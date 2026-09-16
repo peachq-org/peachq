@@ -96,8 +96,8 @@ q).parquet.file_metadata[f]`num_rows
 ,517
 ```
 
-The metadata verbs and a bare read run on `.duckdb.main[]`, the one DuckDB database of the process; a write, and a
-read that restores q types, stage on the reserved connection `` `:pq:duckdb:parquet_stage `` (below).
+Every verb runs on `.duckdb.main[]`, the one DuckDB database of the process; a write, and a read that restores q
+types, stage on its reserved TEMP table `_q_staging` (below).
 
 ## Writing parquet
 
@@ -117,8 +117,8 @@ q)t ~ select from `:x.parquet
 `s3://` URL is handed to DuckDB's httpfs as a read URL is. A non-symbol file is `'type`.
 
 **table** is a plain table; a keyed table or anything else is `'type`. A q table is staged through `.duckdb.set`
-on the reserved connection `` `:pq:duckdb:parquet_stage `` (the shared in-memory catalog) and `COPY`ed out, and the
-staging is dropped after the write. A table bound to a DuckDB pointer (`` get `:pq:duckdb:al:t/ ``) is copied
+as `_q_staging` — a TEMP table of main's connection, reserved for this, that never enters a `-duckdb` file — and
+`COPY`ed out, and the staging is dropped after the write. A table bound to a DuckDB pointer (`` get `:pq:duckdb:al:t/ ``) is copied
 in place — `COPY (SELECT * FROM t) TO ...` on its own connection, no q round trip. A table bound to any other
 provider is materialised through q first.
 
@@ -143,9 +143,10 @@ The options DuckDB documents for a parquet `COPY`: `compression` (`uncompressed`
 `parquet_version` (`V1`, `V2`), `field_ids`, `partition_by`, `write_partition_columns`, `per_thread_output`,
 `filename_pattern`, `file_size_bytes`, `overwrite`, `overwrite_or_ignore`, `append`, `use_tmp_file`.
 
-A failed write leaves its staging in place — `.pq.conns[]` shows `` `:pq:duckdb:parquet_stage `` — until the next
-`.parquet` call reclaims it. That is deliberate: every bridge call clears `.duckdb.err[]`, and the reason for the
-failure is worth more than a tidy catalog.
+A failed write leaves `_q_staging` in place until the next `.parquet` call reclaims it. That is deliberate: every
+bridge call clears `.duckdb.err[]`, and the reason for the failure is worth more than a tidy catalog. The name is
+reserved for the bridge: `.duckdb.load` and `s)` never bind it, `.duckdb.set` takes it (that is how `.parquet`
+stages), and whatever you put there yourself the next `.parquet` call replaces.
 
 ### The `q_schema` law: what we write, we read back exactly
 
