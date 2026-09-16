@@ -17,6 +17,7 @@ Ordered by how likely each is to stop a real migration.
 | **Pattern matching (kdb+ 4.1)** | The 4.1 assignment and parameter forms signal `'parse`. | [typed-parameters.md](typed-parameters.md) |
 | **Reserved words in name positions** | Refused wherever a name is bound, not only at `name:`. | below |
 | **Load CSV (`0:`)** | Unchanged, and still needs the full type string and a clean file. | [csv.md](csv.md) |
+| **`set` to a `.csv`/`.json`/`.txt`/`.xml`/`.xls`/`.parquet` path** | Writes that format, not the q binary form; `t` must be a table. | below |
 | **System commands and launch flags** | Some are unwired or no-ops; both pages mark every item against kx. | [cmdline.md](cmdline.md), [syscmds.md](syscmds.md) |
 
 **Partitioned and segmented databases.** This is the largest single gap for an existing kdb+ installation: a
@@ -26,6 +27,12 @@ compression.
 **Splayed and partitioned writing.** `.Q.dpft`, `dsave`, partitioned `set`, `save`'s binary arm, `rsave` and `-24!`
 are unavailable. Flat `set`, `` `:dir/ set `` and `.z.zd` all work. For large local storage the route is the
 `.duckdb` provider — see [Handles and resources](handles.md).
+
+**`set` writes the format the suffix names.** `` `:f.csv set t `` writes CSV (the lines `save` writes),
+`` `:f.parquet set t `` writes parquet, and so on for every `.h.tx` key, where kx writes the q binary form under any
+name. The read side already worked that way (`` select from `:f.csv ``); the write side now matches it. A value that
+is not a table signals `'type` under those endings; a path with no recognised ending is the binary form as in kx.
+See [Handles and resources](handles.md) § Format inference and [parquet.md](parquet.md).
 
 **Pattern matching.** It will not be implemented; [typed parameters](typed-parameters.md) are the replacement for
 the part of it that declares what a function accepts. Since there is no equivalent form to link to:
@@ -69,6 +76,7 @@ and its domain file binds under its own name at `get`.
 | **Startup evaluation** — `-eval`, `-eval-before` | Run q text from argv after / before the startup script; no stdin piping. | [cmdline.md](cmdline.md) |
 | **String helpers** — `.str` | `printf`/`format`, strip, prefix and suffix tests, character-class predicates. | at the REPL |
 | **DuckDB-backed storage** — `.duckdb` | Query it from q, and reach Parquet and S3 through it. | at the REPL |
+| **Parquet** — `.parquet.read`, `.parquet.write` | Read and write parquet through DuckDB; q types survive the round trip. | [parquet.md](parquet.md) |
 
 Everything above arrives with `\l pq`, except URL resources, `rlike` and the startup flags, which are always there. The two rows with
 no page of their own are documented by their own doc comments — type `.str.printf` or `.duckdb.exec` at the prompt.

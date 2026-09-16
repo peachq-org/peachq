@@ -81,11 +81,11 @@
 
 / ---- wave 5 (ref/save.md, ref/load.md) ----
 / `[path/to/]v.ext`: get the global v, dispatch .ext through .h.tx, write with Save Text
-/ (which creates parent dirs, overwrites, and returns the filename) - no formatting of its
-/ own, every byte comes from .h.tx/0:.  No .ext IS the binary arm, and ref/save.md states
-/ its equivalence outright: `save `t` is `` `:t set t ``.  An .ext .h.tx does not key
-/ signals that ext (`xls: peachq writes no Excel).
-.q.save:{f:{p:"." vs last "/" vs string x;$[2>count p;(hsym x) set get `$"." sv p;not (e:`$last p) in key .h.tx;'e;(hsym x) 0: .h.tx[e] get `$"." sv -1_p]};$[-11h=type x;f x;11h=type x;f each x;'`type]}
+/ (which creates parent dirs, overwrites, and returns the filename), or with Save Binary
+/ when the entry answers bytes (`parquet) - no formatting of its own, every byte comes from
+/ .h.tx/0:/1:.  No .ext IS the binary arm, and ref/save.md states its equivalence outright:
+/ `save `t` is `` `:t set t ``.  An .ext .h.tx does not key signals that ext (`xlsx).
+.q.save:{f:{p:"." vs last "/" vs string x;$[2>count p;(hsym x) set get `$"." sv p;not (e:`$last p) in key .h.tx;'e;4h=type r:.h.tx[e] get `$"." sv -1_p;(hsym x) 1: r;(hsym x) 0: r]};$[-11h=type x;f x;11h=type x;f each x;'`type]}
 / ref/load.md: `load `t` is `t:get `:t` - the file's name IS the global's, and the name is
 / returned.  The filesymbol and directory-recursion arms are deferred, never guessed.
 .q.load:{f:{$[":"=first string x;'`nyi;x set get hsym x]};$[-11h=type x;f x;11h=type x;f each x;'`type]}

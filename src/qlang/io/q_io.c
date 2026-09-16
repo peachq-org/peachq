@@ -15,7 +15,8 @@
 #include "qlang/io/q_provider.h"  /* q_io_set: `:pq: targets route to .X.set; hdel: to .X.i.hdel */
 #include "qlang/io/q_csv.h"     /* the CSV/TSV decoder behind a recognised tabular suffix */
 #include "qlang/io/q_json.h"    /* the JSON decoder, and the framing a suffix declares to it */
-#include "qlang/eval/q_eval.h"  /* q_eval_call_name — the .parquet decoder is bound by `\l pq`, not linked */
+#include "qlang/eval/q_eval.h"  /* q_eval_call_name — the .parquet decoder and writer are bound by `\l pq`, not linked */
+#include "qlang/q_env.h"        /* q_env_get — `.h.tx`, the format table `set` reads at call time */
 #include "qlang/net/q_gz.h"     /* q_gz_inflate_zlib — the kxzip block codec */
 #include "qlang/net/q_wirefile.h" /* the format writers behind q_io_set */
 #include "qlang/net/q_http_client.h" /* the http half of the resource-read seam */
@@ -809,10 +810,61 @@ static ray_t* read0_wrap_impl(ray_t* x) {
 
 /* ---- `set`'s FILE half (q_env.c's q_setg_wrap keeps name-vs-path only) ----
  * One front door owning the on-disk-format classification: `:f flat (a
- * trailing slash routes the writer to the splay dir), the 4-item
- * (file;lbs;alg;lvl) compression form (ref/file-compression.md), and the
- * (dir;sympath) domain overload — the peachq API extension the splay writer
- * records. */
+ * trailing slash routes the writer to the splay dir; a `.h.tx` suffix routes
+ * it to that format), the 4-item (file;lbs;alg;lvl) compression form
+ * (ref/file-compression.md), and the (dir;sympath) domain overload — the
+ * peachq API extension the splay writer records. */
+
+/* the schemes DuckDB's httpfs speaks and this file does not: parquet goes out through COPY TO, nothing else can */
+static int io_remote_scheme(const char* p, size_t n) {
+    static const char* const S[] = { "s3://", "gcs://", "az://", "hf://" };
+    for (size_t i = 0; i < sizeof S / sizeof *S; i++)
+        if (n > strlen(S[i]) && memcmp(p, S[i], strlen(S[i])) == 0) return 1;
+    return 0;
+}
+
+/* the final suffix of the last path segment as a sym id; -1 when there is none or the segment is a dotfile */
+static int64_t io_ext_sym(const char* p, size_t n) {
+    size_t i = n;
+    while (i > 0 && p[i - 1] != '/' && p[i - 1] != '.') i--;
+    if (i == n || i < 2 || p[i - 1] != '.' || p[i - 2] == '/') return -1;
+    return ray_sym_intern_runtime(p + i, n - i);
+}
+
+/* `:f.EXT set t — the format `.h.tx` keys EXT as (owner ruling 2026-09-16; the write half of the suffix law
+ * q_io_resource_table reads by).  `.h.tx` is read from the env at call time, so a user-added entry lights up; the
+ * entry's lines are written by 0:'s law, its bytes by 1:'s.  `.parquet` goes straight to .parquet.write (COPY TO —
+ * s3 included), by name like the read door; every other format to a remote scheme is 'nyi.  NULL = no format
+ * claim, so the caller writes the binary form. */
+static ray_t* io_set_format(ray_t* x, ray_t* y) {
+    ray_t* path = q_io_file_path(x);
+    if (!path) return NULL;
+    int64_t ext = io_ext_sym(ray_str_ptr(path), ray_str_len(path));
+    int remote = io_remote_scheme(ray_str_ptr(path), ray_str_len(path));
+    ray_release(path);
+    if (ext == ray_sym_intern_runtime("parquet", 7)) {
+        if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+        ray_t* none = ray_list_new(0);
+        ray_t* args[3] = { x, y, none };
+        ray_t* out = q_eval_call_name(".parquet.write", 14, args, 3);
+        ray_release(none);
+        return out;
+    }
+    if (remote) return q_err(QE_NYI);
+    ray_t* tx = ext < 0 ? NULL : q_env_get(ray_sym_intern_runtime(".h.tx", 5));   /* borrowed */
+    if (!tx || tx->type != RAY_DICT || ray_dict_keys(tx)->type != RAY_SYM) return NULL;
+    ray_t* keys = ray_dict_keys(tx);
+    int64_t i = 0, n = ray_len(keys);
+    while (i < n && ray_vec_get_sym_id(keys, i) != ext) i++;
+    if (i == n) return NULL;
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (!y || y->type != RAY_TABLE) return q_err(QE_TYPE);
+    ray_t* r = q_eval_apply_value(ray_list_get(ray_dict_vals(tx), i), &y, 1);
+    if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_OOM);
+    ray_t* out = r->type == RAY_BYTE_ONLY ? q_io_filebinary_wrap(x, r) : q_io_filetext_wrap(x, r);
+    ray_release(r);
+    return out;
+}
 
 int q_io_is_fsym(ray_t* v) {
     if (!v || v->type != -RAY_SYM) return 0;
@@ -852,7 +904,8 @@ ray_t* q_io_set(ray_t* x, ray_t* y) {
         return r;
     }
     if (!x || x->type != -RAY_SYM || !q_io_is_fsym(x)) return q_err(QE_NYI);
-    ray_t* r = q_wirefile_write(x, y);
+    ray_t* r = io_set_format(x, y);
+    if (!r) r = q_wirefile_write(x, y);
     return r ? r : q_err(QE_TYPE);
 }
 
