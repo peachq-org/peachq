@@ -79,9 +79,11 @@
 
 / .h.tx: `json is the doc's printed source, JSON Lines (doth.md:686); `xls is .h.ed (SpreadsheetML text, no zip).
 / .h.i.tjs is doth.md:702's static form, selected by an argument of ONE general-list item: not a line list but ONE
-/ string, those same lines joined ",\n " and bracketed, so each row aligns under the "[".
+/ string, those same lines joined ",\n " and bracketed, so each row aligns under the "[".  `parquet answers BYTES
+/ (save writes them with 1:, the download door sends them verbatim) through .parquet.i.bytes, bound by \l pq and
+/ resolved by name at call time: unbound, the entry signals '.parquet.i.bytes.
 .h.i.tjs:{$[.Q.qt x;"[",(",\n " sv .j.j each 0!x),"]";.j.j x]};
-.h.tx:`raw`json`csv`txt`xml`xls!((,:);{$[.Q.qt x;.j.j each 0!x;(0h=type x)&1=count x;.h.i.tjs first x;.j.j each x]};.h.cd;.h.td;.h.xd;.h.ed);
+.h.tx:`raw`json`csv`txt`xml`xls`parquet!((,:);{$[.Q.qt x;.j.j each 0!x;(0h=type x)&1=count x;.h.i.tjs first x;.j.j each x]};.h.cd;.h.td;.h.xd;.h.ed;{.parquet.i.bytes x});
 
 .h.hug:{h:"0123456789abcdef"; c:"c"$til 256; c!{[s;h;c] i:"i"$c; $[c in s;enlist c;"%",h[i div 16],h[i mod 16]]}[x;h] each c};
 .h.hu:{raze .h.hug[.h.sc] x};
