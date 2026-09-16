@@ -1012,6 +1012,8 @@ ray_t* ray_distinct_fn(ray_t* x) {
     return result;
 }
 
+static int attr_contains(ray_t* vec, ray_t* val);
+
 /* (in val vec) — check membership */
 ray_t* ray_in_fn(ray_t* val, ray_t* vec) {
     if (ray_is_lazy(val)) val = ray_lazy_materialize(val);
@@ -1073,6 +1075,21 @@ ray_t* ray_in_fn(ray_t* val, ray_t* vec) {
             if (RAY_IS_ERR(result)) return result;
             result->len = vlen;
             bool* out = (bool*)ray_data(result);
+            /* an attributed domain answers each needle in O(1) / O(log n) instead of an O(n) hashset build; the
+             * sorted lane is only worth it while m log n stays under n, hence the m*32 guard */
+            if (!(val->attrs & RAY_ATTR_HAS_NULLS) &&
+                (ray_index_has(vec) || (ray_attr_is_sorted(vec) && vlen <= vec->len / 32))) {
+                int64_t i = 0;
+                for (; i < vlen; i++) {
+                    int alloc = 0;
+                    ray_t* e = collection_elem(val, i, &alloc);
+                    int r = attr_contains(vec, e);
+                    if (alloc) ray_release(e);
+                    if (r < 0) break;
+                    out[i] = r != 0;
+                }
+                if (i == vlen) return result;
+            }
             hashset_t hs;
             if (!hashset_init(&hs, vec, vec->len)) {
                 ray_release(result);
@@ -1139,6 +1156,8 @@ ray_t* ray_in_fn(ray_t* val, ray_t* vec) {
         int64_t len = vec->len;
         bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) != 0;
         bool val_null = atom_is_oob_null(val);
+        int lane = has_nulls || val_null ? -1 : attr_contains(vec, val);
+        if (lane >= 0) return make_bool(lane);
         if (has_nulls) {
             for (int64_t i = 0; i < len; i++) {
                 if (ray_vec_is_null(vec, i)) {
@@ -1988,6 +2007,58 @@ static int64_t find_scan(ray_t* vec, ray_t* val, int64_t start) {
 #undef FIND_SCAN
 }
 
+/* First i with vec[i] >= key (upper=0) or > key (upper=1) over a sorted null-free vector of the widths below; -1
+ * on any other type.  The needle carries the vector's own type, so each lane compares one storage width. */
+static int64_t sorted_bound(ray_t* vec, ray_t* key, int upper) {
+    const void* a = ray_data(vec);
+    int64_t lo = 0, hi = vec->len;
+#define SORTED_BOUND(T, K) do {                                                          \
+        const T* p = (const T*)a;                                                        \
+        while (lo < hi) {                                                                \
+            int64_t mid = lo + (hi - lo) / 2;                                            \
+            if (upper ? p[mid] <= (K) : p[mid] < (K)) lo = mid + 1; else hi = mid;       \
+        }                                                                                \
+        return lo;                                                                       \
+    } while (0)
+    switch (vec->type) {
+    case RAY_I64: RAY_TEMPORAL64_CASES: SORTED_BOUND(int64_t, key->i64);
+    case RAY_I32: RAY_TEMPORAL32_CASES: SORTED_BOUND(int32_t, key->i32);
+    case RAY_I16:                       SORTED_BOUND(int16_t, key->i16);
+    case RAY_BOOL:                      SORTED_BOUND(bool,    key->b8);
+    RAY_BYTE_CASES:                     SORTED_BOUND(uint8_t, key->u8);
+    case RAY_F64: RAY_TEMPORALF_CASES:  SORTED_BOUND(double,  key->f64);
+    case RAY_F32:                       SORTED_BOUND(float,   key->f64);
+    default:                            return -1;
+    }
+#undef SORTED_BOUND
+}
+
+bool ray_sorted_span(ray_t* vec, ray_t* a, ray_t* b, int64_t* lo, int64_t* hi) {
+    if (!ray_attr_is_sorted(vec) || (vec->attrs & RAY_ATTR_HAS_NULLS)) return false;
+    if (!a || !ray_is_atom(a) || a->type != -vec->type || atom_is_oob_null(a)) return false;
+    if (b && (!ray_is_atom(b) || b->type != -vec->type || atom_is_oob_null(b))) return false;
+    *lo = sorted_bound(vec, a, 0);
+    if (*lo < 0) return false;
+    *hi = sorted_bound(vec, b ? b : a, 1);
+    return true;
+}
+
+/* `val` a member of the attributed vector `vec`: 1/0 through the index (hash first, then the sorted lane), -1 when no
+ * lane applies — the scan owns nulls, promotion and every other type. */
+static int attr_contains(ray_t* vec, ray_t* val) {
+    int64_t key, lo, hi;
+    if (ray_index_has(vec) && ray_index_atom_key(vec, val, &key)) {
+        ray_idx_consults[IDX_SITE_IN]++;
+        int r = ray_index_has_key(vec, key);
+        if (r >= 0) { ray_idx_hits[IDX_SITE_IN]++; return r; }
+    }
+    if (ray_attr_is_sorted(vec)) {
+        ray_idx_consults[IDX_SITE_IN]++;
+        if (ray_sorted_span(vec, val, NULL, &lo, &hi)) { ray_idx_hits[IDX_SITE_IN]++; return hi > lo; }
+    }
+    return -1;
+}
+
 /* An atom needle over a typed vector: the index when the domain carries one, else the typed scan.  The row, or -1. */
 static int64_t find_atom(ray_t* vec, ray_t* val) {
     bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) != 0;
@@ -2023,6 +2094,11 @@ static int64_t find_atom(ray_t* vec, ray_t* val) {
                 return row;
             }
         }
+    }
+    if (ray_attr_is_sorted(vec)) {
+        ray_idx_consults[IDX_SITE_FIND]++;
+        int64_t lo, hi;
+        if (ray_sorted_span(vec, val, NULL, &lo, &hi)) { ray_idx_hits[IDX_SITE_FIND]++; return hi > lo ? lo : -1; }
     }
     return find_scan(vec, val, 0);
 }
