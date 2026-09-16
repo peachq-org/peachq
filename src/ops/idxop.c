@@ -66,17 +66,20 @@ static int numeric_elem_size(int8_t t) {
     case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_F32:
     case RAY_MONTH: case RAY_MINUTE: case RAY_SECOND:          return 4;
     case RAY_I64: case RAY_TIMESTAMP: case RAY_F64:
-    case RAY_TIMESPAN:                                         return 8;
-    default:                                          return 0;   /* DATETIME: f64-backed, hash lane unsafe */
+    case RAY_TIMESPAN: case RAY_DATETIME:                      return 8;
+    default:                                          return 0;
     }
 }
 
-/* Read row i of a numeric vector as a 64-bit hash-input word.  Mirrors the
- * canonical-equality semantics in the rest of the codebase: -0.0 / +0.0
- * collapse, NaNs route per-row (caller treats NaN as its own bucket). */
+/* The float family: real (widened to double), float and datetime (an f64 of days). */
+static bool float_family(int8_t t) { return t == RAY_F32 || t == RAY_F64 || t == RAY_DATETIME; }
+
+/* Read row i of a numeric vector as a 64-bit hash-input word — THE one representation law, on the build side and
+ * the probe side alike, so the index's equality is the scan's: -0.0 / +0.0 collapse, a NaN routes per-row (its own
+ * bucket, which is why a NaN needle never probes). */
 static uint64_t numeric_key_word(const uint8_t* base, int8_t type, int64_t i) {
     int es = numeric_elem_size(type);
-    if (type == RAY_F32 || type == RAY_F64) {
+    if (float_family(type)) {
         double v;
         if (es == 4) { float t; memcpy(&t, base + i*4, 4); v = (double)t; }
         else         {           memcpy(&v, base + i*8, 8);                }
@@ -146,7 +149,7 @@ static bool vec_is_ascending(const ray_t* v) {
         }
         return true;
     }
-    case RAY_F64: {
+    case RAY_F64: case RAY_DATETIME: {
         const double* p = (const double*)b;
         for (int64_t i = 1; i < n; i++) {
             if (p[i-1] != p[i-1]) continue;
@@ -1091,22 +1094,28 @@ static int hash_extend(ray_index_t* ix, ray_t* v, int64_t from) {
  * when T's storage width covers it without truncation — i.e. asking
  * for `u8_col == 300` would never match, so we fail eligibility and
  * the caller falls back to the scan (which folds out-of-range via
- * fp_fold_t).  Float keys are not supported here — equality on
- * F32/F64 has NaN / -0 semantics the unfused engine handles. */
+ * fp_fold_t).  A float-family column's key IS its canonical word
+ * (ray_index_atom_key hands it out), so a chain row compares by the
+ * builder's numeric_key_word on both sides. */
 
 /* Every probe-side reader derives its width from the builder's one source, numeric_elem_size — a hand-written type
  * list here once stopped at DATE/TIMESTAMP and answered "absent" on `u#` month/minute/second/timespan (#726). */
 static int int_elem_size(int8_t t) {
-    return (t == RAY_F32 || t == RAY_F64) ? 0 : numeric_elem_size(t);
+    return float_family(t) ? 0 : numeric_elem_size(t);
 }
 
-/* atom_eq's cross-type law (collection.c): a temporal meets only its own type, the plain integers meet each other. */
+/* atom_eq's cross-type law (collection.c): a temporal meets only its own type, the plain integers meet each other,
+ * real and float meet as doubles (the scan widens the real; so does numeric_key_word). */
 static bool plain_int(int8_t t) {
     switch (t) { case RAY_BOOL: RAY_BYTE_CASES: case RAY_I16: case RAY_I32: case RAY_I64: return true; default: return false; }
 }
-static bool types_meet(int8_t a, int8_t b) { return a == b || (plain_int(a) && plain_int(b)); }
+static bool plain_float(int8_t t) { return t == RAY_F32 || t == RAY_F64; }
+static bool types_meet(int8_t a, int8_t b) {
+    return a == b || (plain_int(a) && plain_int(b)) || (plain_float(a) && plain_float(b));
+}
 
 static int hash_key_in_range(int8_t t, int64_t k) {
+    if (float_family(t)) return 1;
     switch (int_elem_size(t)) {
     case 1:  return k >= 0 && k <= UINT8_MAX;
     case 2:  return k >= INT16_MIN && k <= INT16_MAX;
@@ -1139,10 +1148,23 @@ static uint64_t hash_key_bits(int es, int64_t key) {
     }
 }
 
-/* Validate eligibility, return the index payload + computed start row.
+/* An in-range key as the word the builder hashed for the column: a float-family key already is one. */
+static uint64_t probe_key_word(int8_t t, int64_t key) {
+    return float_family(t) ? (uint64_t)key : hash_key_bits(numeric_elem_size(t), key);
+}
+
+/* A float-family value as its probe word; false for a NaN (the scan's). */
+static bool float_key_word(double v, uint64_t* w) {
+    v = clear_neg_zero(v);
+    if (v != v) return false;
+    memcpy(w, &v, 8);
+    return true;
+}
+
+/* Validate eligibility, return the index payload + computed start row and the key's word.
  * On miss leaves *start = -1 so the caller can short-circuit. */
 static ray_index_t* hash_probe_setup(ray_t* col, int64_t key,
-                                     int64_t* start_rid) {
+                                     int64_t* start_rid, uint64_t* kw) {
     *start_rid = -1;
     if (!col || RAY_IS_ERR(col) || !ray_is_vec(col)) return NULL;
     if (!(col->attrs & RAY_ATTR_HAS_INDEX) || !col->index) return NULL;
@@ -1153,8 +1175,8 @@ static ray_index_t* hash_probe_setup(ray_t* col, int64_t key,
     if (numeric_elem_size(col->type) == 0) return NULL;
     if (!ix->u.hash.table || !ix->u.hash.chain) return NULL;
 
-    uint64_t h = mix64(hash_key_bits(numeric_elem_size(col->type), key));
-    uint64_t slot = h & ix->u.hash.mask;
+    *kw = probe_key_word(col->type, key);
+    uint64_t slot = mix64(*kw) & ix->u.hash.mask;
     const int64_t* tbl = (const int64_t*)ray_data(ix->u.hash.table);
     *start_rid = tbl[slot] - 1;
     return ix;
@@ -1201,7 +1223,7 @@ ray_zone_class_t ray_index_zone_class(ray_t* col, uint16_t cmp_op,
     ray_index_t* ix = ray_index_payload(col->index);
 
     /* Dispatch to integer or float path based on column type. */
-    bool is_float = (col->type == RAY_F32 || col->type == RAY_F64);
+    bool is_float = float_family(col->type);
     bool is_int   = !is_float && (numeric_elem_size(col->type) > 0);
     if (!is_float && !is_int) return RAY_ZONE_UNKNOWN;
 
@@ -1322,13 +1344,15 @@ ray_t* ray_index_empty_rowsel(int64_t n) {
     return rowsel_from_sorted_ids(n, NULL, 0);
 }
 
-ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key) {
+/* The rows equal to `key`, the column's word (ray_index_atom_key's output; an integer VALUE on the int lanes). */
+static ray_t* hash_eq_rowsel(ray_t* col, int64_t key) {
     /* Sanity precheck — idx_fresh validates parted/nulls/kind/staleness;
      * hash_probe_setup below also validates key-range, elem-size, and
      * payload pointers, so these checks are complementary. */
     if (!idx_fresh(col, RAY_IDX_HASH)) return NULL;
     int64_t rid = -1;
-    ray_index_t* ix = hash_probe_setup(col, key, &rid);
+    uint64_t kw = 0;
+    ray_index_t* ix = hash_probe_setup(col, key, &rid, &kw);
     if (!ix) return NULL;
 
     int64_t n = col->len;
@@ -1350,7 +1374,7 @@ ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key) {
     int64_t* matches = (int64_t*)ray_data(match_hdr);
 
     while (rid >= 0) {
-        if (hash_col_read_i64(base, t, rid) == key) {
+        if (numeric_key_word(base, t, rid) == kw) {
             if (mcnt == mcap) {
                 int64_t new_cap = mcap * 2;
                 if (new_cap > n) new_cap = n + 1;  /* defensive bound */
@@ -1388,54 +1412,58 @@ ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key) {
  * rowsel in one pass.
  * -------------------------------------------------------------------------- */
 
-static int cmp_i64_plain(const void* a, const void* b) {
-    int64_t x = *(const int64_t*)a;
-    int64_t y = *(const int64_t*)b;
+static int cmp_u64_plain(const void* a, const void* b) {
+    uint64_t x = *(const uint64_t*)a;
+    uint64_t y = *(const uint64_t*)b;
     return (x > y) - (x < y);
 }
 
 static ray_t* codes_in_rowsel(ray_t* col, ray_t* set_vec);
 
+/* Element i of a probe set as the column's word; false when it can meet no row. */
+static bool set_elem_word(const uint8_t* sb, int8_t st, int64_t i, int8_t col_t, uint64_t* w) {
+    if (float_family(st)) {
+        double v;
+        if (st == RAY_F32) { float f; memcpy(&f, sb + i*4, 4); v = (double)f; }
+        else               {          memcpy(&v, sb + i*8, 8);                }
+        return float_key_word(v, w);
+    }
+    int64_t v = hash_col_read_i64(sb, st, i);
+    if (!hash_key_in_range(col_t, v)) return false;
+    *w = hash_key_bits(numeric_elem_size(col_t), v);
+    return true;
+}
+
 ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec) {
     if (idx_fresh(col, RAY_IDX_CODES)) return codes_in_rowsel(col, set_vec);
-    /* Gate: integer-family column with fresh hash index, no nulls. */
+    /* Gate: numeric column with fresh hash index, no nulls; a numeric non-atom set that meets its type. */
     if (!idx_fresh_nonull(col, RAY_IDX_HASH)) return NULL;
-    bool col_is_float = (col->type == RAY_F32 || col->type == RAY_F64);
-    if (col_is_float) return NULL;
-
-    /* set_vec must be a non-atom integer-family vec. */
     if (!set_vec || RAY_IS_ERR(set_vec) || ray_is_atom(set_vec)) return NULL;
     int8_t st = set_vec->type;
-    bool set_is_float = (st == RAY_F32 || st == RAY_F64);
-    if (set_is_float) return NULL;
-    /* Check set type is integer-family (numeric_elem_size covers all int types) */
     if (numeric_elem_size(st) == 0) return NULL;
     if (!types_meet(st, col->type)) return NULL;   /* a month set on a date column shares raw ints, never a value */
 
     int64_t set_len = set_vec->len;
     int64_t n       = col->len;
 
-    /* Canonicalize set: copy to int64 scratch, sort, unique, drop out-of-range. */
-    int64_t* set_scratch = NULL;
-    ray_t*   set_hdr     = NULL;
+    /* Canonicalize set: its elements as the column's words, sorted, unique, the unmeetable dropped. */
+    uint64_t* set_scratch = NULL;
+    ray_t*    set_hdr     = NULL;
     if (set_len > 0) {
-        set_hdr = ray_alloc(set_len * (int64_t)sizeof(int64_t));
+        set_hdr = ray_alloc(set_len * (int64_t)sizeof(uint64_t));
         if (!set_hdr) return NULL;
-        set_scratch = (int64_t*)ray_data(set_hdr);
+        set_scratch = (uint64_t*)ray_data(set_hdr);
         const uint8_t* sb = (const uint8_t*)ray_data(set_vec);
         int64_t ulen = 0;
-        for (int64_t i = 0; i < set_len; i++) {
-            int64_t v = hash_col_read_i64(sb, st, i);
-            if (hash_key_in_range(col->type, v))
-                set_scratch[ulen++] = v;
-        }
+        for (int64_t i = 0; i < set_len; i++)
+            if (set_elem_word(sb, st, i, col->type, &set_scratch[ulen])) ulen++;
         if (ulen == 0) {
             /* All elements out of range — no possible matches. */
             ray_release(set_hdr);
             return rowsel_from_sorted_ids(n, NULL, 0);
         }
         /* Sort and deduplicate. */
-        qsort(set_scratch, (size_t)ulen, sizeof(int64_t), cmp_i64_plain);
+        qsort(set_scratch, (size_t)ulen, sizeof(uint64_t), cmp_u64_plain);
         int64_t wlen = 1;
         for (int64_t i = 1; i < ulen; i++)
             if (set_scratch[i] != set_scratch[i-1])
@@ -1459,7 +1487,6 @@ ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec) {
     const uint8_t* base = (const uint8_t*)ray_data(col);
     uint64_t mask = ix->u.hash.mask;
     int8_t t  = col->type;
-    int    es = numeric_elem_size(t);
 
     /* Shared match buffer: starts at 16, grows by doubling, capped at n. */
     int64_t mcap = 16;
@@ -1475,12 +1502,11 @@ ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec) {
     int64_t guard = (n > 64) ? n / 4 : n;
 
     for (int64_t si = 0; si < set_len; si++) {
-        int64_t key = set_scratch[si];
-        /* Bucket head for this key — same kbits/mix64 the builder used. */
-        int64_t rid = tbl[mix64(hash_key_bits(es, key)) & mask] - 1;
+        uint64_t kw = set_scratch[si];
+        int64_t rid = tbl[mix64(kw) & mask] - 1;
 
         while (rid >= 0) {
-            if (hash_col_read_i64(base, t, rid) == key) {
+            if (numeric_key_word(base, t, rid) == kw) {
                 /* Grow match buffer if needed. */
                 if (mcnt == mcap) {
                     int64_t new_cap = mcap * 2;
@@ -1617,7 +1643,7 @@ ray_t* ray_index_range_rowsel(ray_t* col, uint16_t cmp_op,
     if (!idx_fresh_nonull(col, RAY_IDX_SORT)) return NULL;
 
     /* Consistency check: is_float must agree with the column's type family. */
-    bool col_is_float = (col->type == RAY_F32 || col->type == RAY_F64);
+    bool col_is_float = float_family(col->type);
     if ((bool)is_float != col_is_float) return NULL;
 
     ray_index_t* ix = ray_index_payload(col->index);
@@ -1702,10 +1728,9 @@ bool ray_index_bloom_absent(ray_t* col, int64_t key) {
     /* idx_fresh_nonull: freshness + kind + no-null gate. */
     if (!idx_fresh_nonull(col, RAY_IDX_BLOOM)) return false;
 
-    /* Integer-family only in v1.  F32/F64 equality has NaN/-0 semantics
-     * that the unfused kernel handles; skip bloom for float columns. */
+    /* Integer-family only in v1: the exec.c caller hands an integer VALUE, never a float word. */
     int8_t t = col->type;
-    if (t == RAY_F32 || t == RAY_F64) return false;
+    if (float_family(t)) return false;
 
     /* Derive kbits: mirror numeric_key_word for an integer scalar key.
      * numeric_key_word uses the raw bit pattern of the storage width; for
@@ -2485,11 +2510,7 @@ ray_t* ray_attr_mark_attach(ray_t* v, uint8_t mark) {
  * choices into the engine.  They carry NO policy — pure mechanism. */
 bool ray_attr_verify_distinct(const ray_t* v) { return vec_all_distinct(v); }
 bool ray_attr_verify_contiguous(const ray_t* v) { return vec_is_parted_contiguous(v); }
-int ray_attr_numeric_class(int8_t t) {
-    if (t == RAY_F32 || t == RAY_F64) return 0;
-    if (numeric_elem_size(t) > 0) return 1;
-    return -1;
-}
+int ray_attr_numeric_class(int8_t t) { return numeric_elem_size(t) > 0 ? 1 : -1; }
 
 /* unique: verify distinctness, then set a block-resident marker bit.  If the
  * column already carries an index block, clone it (it is shared post-cow) and
@@ -2627,14 +2648,12 @@ ray_t* ray_attr_set_fn(ray_t* name, ray_t* v) {
  * -------------------------------------------------------------------------- */
 
 int64_t ray_index_find_row(ray_t* col, int64_t key) {
-    /* Float-family: equality has NaN/-0 semantics owned by the scan kernel. */
     if (!col || RAY_IS_ERR(col)) return -2;
     if (idx_fresh(col, RAY_IDX_CODES)) {
         const int64_t* s = codes_slots(ray_index_payload(col->index), key);
         return s ? s[0] - 1 : -1;   /* first / start / head: the minimum row either way */
     }
     int8_t t = col->type;
-    if (t == RAY_F32 || t == RAY_F64) return -2;
 
     /* idx_fresh_nonull: freshness + kind check + null-bearing gate. */
     if (!idx_fresh_nonull(col, RAY_IDX_HASH)) return -2;
@@ -2643,7 +2662,8 @@ int64_t ray_index_find_row(ray_t* col, int64_t key) {
     if (!hash_key_in_range(t, key)) return -1;
 
     int64_t start_rid = -1;
-    ray_index_t* ix = hash_probe_setup(col, key, &start_rid);
+    uint64_t kw = 0;
+    ray_index_t* ix = hash_probe_setup(col, key, &start_rid, &kw);
     if (!ix) return -2;   /* unexpected failure after eligibility passed */
 
     const int64_t* chn  = (const int64_t*)ray_data(ix->u.hash.chain);
@@ -2652,7 +2672,7 @@ int64_t ray_index_find_row(ray_t* col, int64_t key) {
     int64_t min_rid = -1;
     int64_t rid = start_rid;
     while (rid >= 0) {
-        if (hash_col_read_i64(base, t, rid) == key) {
+        if (numeric_key_word(base, t, rid) == kw) {
             if (min_rid < 0 || rid < min_rid)
                 min_rid = rid;
         }
@@ -2667,6 +2687,12 @@ bool ray_index_atom_key(const ray_t* col, const ray_t* atom, int64_t* key) {
     if (!col || !atom || !ray_is_atom(atom) || !ray_is_vec((ray_t*)col)) return false;
     if (!types_meet(-atom->type, col->type)) return false;
     if (atom->type == -RAY_SYM) { *key = ray_index_sym_key((ray_t*)col, atom->i64); return true; }
+    if (float_family(-atom->type)) {                 /* real atoms carry f64 too; the key is the word's bits */
+        uint64_t w;
+        if (!float_key_word(atom->f64, &w)) return false;
+        memcpy(key, &w, 8);
+        return true;
+    }
     switch (int_elem_size(-atom->type)) {
     case 1:  *key = (int64_t)atom->b8;  return true;
     case 2:  *key = (int64_t)atom->i16; return true;
@@ -2676,23 +2702,30 @@ bool ray_index_atom_key(const ray_t* col, const ray_t* atom, int64_t* key) {
     }
 }
 
+/* The rayfall DAG's door hands an integer VALUE, which is no float-family column's word: it declines there. */
+ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key) {
+    if (!col || RAY_IS_ERR(col) || float_family(col->type)) return NULL;
+    return hash_eq_rowsel(col, key);
+}
+
 ray_t* ray_index_eq_rowsel(ray_t* col, int64_t key) {
-    if (ray_index_kind(col) == RAY_IDX_HASH)  return ray_index_hash_eq_rowsel(col, key);
+    if (ray_index_kind(col) == RAY_IDX_HASH)  return hash_eq_rowsel(col, key);
     if (ray_index_kind(col) == RAY_IDX_CODES) return codes_eq_rowsel(col, key);
     return NULL;
 }
 
 int ray_index_has_key(ray_t* col, int64_t key) {
-    if (!col || RAY_IS_ERR(col) || col->type == RAY_F32 || col->type == RAY_F64) return -2;
+    if (!col || RAY_IS_ERR(col)) return -2;
     if (idx_fresh(col, RAY_IDX_CODES)) return codes_slots(ray_index_payload(col->index), key) != NULL;
     if (!idx_fresh_nonull(col, RAY_IDX_HASH)) return -2;
     if (!hash_key_in_range(col->type, key)) return -2;
     int64_t rid = -1;
-    ray_index_t* ix = hash_probe_setup(col, key, &rid);
+    uint64_t kw = 0;
+    ray_index_t* ix = hash_probe_setup(col, key, &rid, &kw);
     if (!ix) return -2;
     const int64_t* chn  = (const int64_t*)ray_data(ix->u.hash.chain);
     const uint8_t* base = (const uint8_t*)ray_data(col);
     for (; rid >= 0; rid = chn[rid] - 1)
-        if (hash_col_read_i64(base, col->type, rid) == key) return 1;
+        if (numeric_key_word(base, col->type, rid) == kw) return 1;
     return 0;
 }
