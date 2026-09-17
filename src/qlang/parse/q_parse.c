@@ -449,7 +449,7 @@ static Tokens scan(const char *src) {
         else if (((cl & CL_ALPHA) && c != '_') ||
                  (c == '.' && (CLASS[(uint8_t)src[p+1]] & CL_ALPHA))) {
             while (CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) p++;
-            while (src[p] == '.' && (CLASS[(uint8_t)src[p+1]] & CL_ALPHA)) {
+            while (src[p] == '.' && (CLASS[(uint8_t)src[p+1]] & (CL_ALPHA | CL_DIGIT))) {
                 p++;
                 while (CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) p++;
             }
