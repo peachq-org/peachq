@@ -81,6 +81,9 @@ int8_t q_type_elem_tag(ray_t* x);
 int q_type_strict_i64(ray_t* x, int64_t* out);
 int q_type_strict_f64(ray_t* x, double* out);
 
+/* The Take/Drop count slot: the strict set plus a bool atom (0/1). */
+int q_type_count_i64(ray_t* x, int64_t* out);
+
 /* Throwing gate for terminal sites: NULL on success, else the bare 'type. */
 ray_t* q_type_i64_or_err(ray_t* x, int64_t* out, const char* what);
 
