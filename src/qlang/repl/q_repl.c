@@ -284,10 +284,53 @@ static void repl_teach_hint(ray_term_t* t) {
         ray_term_set_hint(t, "\\? / help", 2);
 }
 
+/* The tty's eval window: Ctrl-C is SIGINT (POSIX, ISIG) / CTRL_C_EVENT (Windows) ONLY between begin and end — no
+ * early exits inside the bracket; end re-derives the prompt (`\d` switched context; the debugger left `q))`). */
+static void tty_eval_begin(ray_term_t* t) {
+    ray_term_clear_interrupt();
+    ray_eval_clear_interrupt();
+    ray_term_eval_begin(t);
+}
+
+static void tty_eval_end(ray_term_t* t) {
+    ray_term_eval_end(t);
+    char prompt[80];
+    int  pl = q_sys_prompt(prompt, sizeof prompt);
+    ray_term_set_prompt(t, prompt, pl);
+}
+
+static const char* const* g_startup;   /* q_repl_prime's queue; taken by the first tty loop to run */
+
+void q_repl_prime(const char* const* startup) { g_startup = startup; }
+
+static const char* const* startup_take(void) {
+    const char* const* s = g_startup;
+    g_startup = NULL;
+    return s;
+}
+
+static void tty_startup(ray_term_t* t, FILE* out, FILE* err) {
+    int rc = 0;
+    for (const char* const* s = startup_take(); s && *s && rc == 0; s++) {   /* an abort skips the rest, as in batch */
+        tty_eval_begin(t);
+        rc = q_ctx_run_console_src(*s, out, err);
+        tty_eval_end(t);
+    }
+}
+
+/* no editor: the queue runs the non-tty way — the script seam, an abort exits non-zero as `q file.q </dev/null` does */
+static void batch_startup(FILE* out, FILE* err) {
+    for (const char* const* s = startup_take(); s && *s; s++) {
+        int rc = q_ctx_run_src(*s, out, err, NULL);
+        if (rc) q_sys_exit(rc);
+    }
+}
+
 static void repl_interactive(FILE* out, FILE* err) {
     ray_term_t* t = ray_term_create();
     if (!t) {
         fprintf(err, "q: terminal init failed\n");
+        batch_startup(out, err);
         return;
     }
 
@@ -306,6 +349,7 @@ static void repl_interactive(FILE* out, FILE* err) {
     ray_term_install_signals(t);
     q_dbg_set_reader(repl_tty_dbg_read);   /* `\e 1` debugger over this editor */
 
+    tty_startup(t, out, err);
     repl_teach_hint(t);
     ray_term_begin(t);
     if (t->hint_len > 0)
@@ -339,23 +383,11 @@ static void repl_interactive(FILE* out, FILE* err) {
         const char* str = ray_str_ptr(line);
         size_t len = ray_str_len(line);
 
-        /* Interrupt window: Ctrl-C becomes SIGINT (POSIX, ISIG) or
-         * CTRL_C_EVENT (Windows, processed input) ONLY while eval runs;
-         * both set the eval-interrupt flag q_ctx_run_line reports as 'stop.
-         * Keep this bracket tight — no early exits between begin and end. */
-        ray_term_clear_interrupt();
-        ray_eval_clear_interrupt();
-        ray_term_eval_begin(t);
+        tty_eval_begin(t);
         q_ctx_run_line(str, len, out, err, 1);
-        ray_term_eval_end(t);
+        tty_eval_end(t);
         repl_update_hint(t, str, len);
         ray_release(line);
-        /* `\d` may have switched context: refresh the prompt (q.foo). */
-        {
-            char prompt[80];
-            int pl = q_sys_prompt(prompt, sizeof prompt);
-            ray_term_set_prompt(t, prompt, pl);
-        }
         ray_term_begin(t);
         if (t->hint_len > 0)
             ray_term_redraw(t);   /* paint the hint before the first keypress */
@@ -491,22 +523,11 @@ static ray_t* poll_tty_data(ray_poll_t* poll, ray_selector_t* sel, void* data) {
         return NULL;
     }
 
-    /* Interrupt window: identical bracket to repl_interactive — Ctrl-C is
-     * SIGINT only while the eval runs; q_ctx_run_line reports it as 'stop. */
-    ray_term_clear_interrupt();
-    ray_eval_clear_interrupt();
-    ray_term_eval_begin(c->term);
+    tty_eval_begin(c->term);
     q_ctx_run_line(str, len, c->out, c->err, 1);
-    ray_term_eval_end(c->term);
+    tty_eval_end(c->term);
     repl_update_hint(c->term, str, len);
     ray_release(line);
-
-    /* `\d` may have switched context: refresh the prompt (q.foo). */
-    {
-        char prompt[80];
-        int  pl = q_sys_prompt(prompt, sizeof prompt);
-        ray_term_set_prompt(c->term, prompt, pl);
-    }
     ray_term_begin(c->term);
     if (c->term->hint_len > 0)
         ray_term_redraw(c->term);   /* paint the hint before the first keypress */
@@ -759,6 +780,7 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err, int stdin_tty) {
     }
 
     if (c->term) {
+        tty_startup(c->term, out, err);
         repl_teach_hint(c->term);
         ray_term_begin(c->term);   /* draw the first prompt */
         if (c->term->hint_len > 0)

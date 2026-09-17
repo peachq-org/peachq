@@ -15,6 +15,11 @@ yours to read back as `.z.x` (`.z.X` keeps the raw command line). The flags that
 today are `-e -E -p -q -z`; `-c` is applied but not yet removed from `.z.x`, and `-u`/`-U` are applied but with
 their meanings swapped against kdb (a known defect). Everything else is in the table below.
 
+**A failing startup script** follows kx: when stdin is a terminal the script is the console's first `\l`, so the
+erroring statement suspends into the `q))` debugger with the session up — `:` resumes the load at the next
+statement, `\` abandons it and returns to `q)`. When stdin is not a terminal (`q file.q </dev/null`, a pipe, a
+supervisor) the load aborts at the error and the process exits non-zero; that batch contract is unchanged.
+
 ## Every option
 
 The **status** column is the point of this table: **same** = behaves as the kx documentation describes, **DIFFERS** =
@@ -87,8 +92,10 @@ The text is **a script whose source came from argv**, not a console line, so scr
 
 - **Silent.** Results are not echoed. `q -eval "2+2"` prints nothing; print with `show` or `-1`.
 - **Multiline text and `\`-commands work**, under the same script semantics a `.q` file gets.
-- **An error aborts.** The text stops at the first erroring statement, everything after it is skipped — the startup
-  script and the session loop included — and the process exits non-zero, exactly like a failing startup script.
+- **An error aborts.** The text stops at the first erroring statement and everything after it is skipped — exactly
+  like a failing startup script: on a non-terminal stdin the process exits non-zero (a `-eval-before` error also
+  skips the script); on a terminal a `-eval` text runs after the script as a console-initiated script, so its error
+  suspends into `q))` and `\` returns to the prompt.
 
 **Order is named by the flag, not by argv position.** Every `-eval-before` runs before the startup script and every
 `-eval` after it; repeats of the same flag run left-to-right. So `q s.q -eval "A" -eval-before "B"` runs B, then

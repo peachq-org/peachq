@@ -358,6 +358,13 @@ int q_ctx_run_named_src(const char* name, const char* s, FILE* out, FILE* err, r
     return ctx_run_script(s, strlen(s), ray_sym_intern_runtime(name, strlen(name)), 1, out, err, esig);
 }
 
+int q_ctx_run_console_src(const char* s, FILE* out, FILE* err) {
+    int tok = q_dbg_statement_begin(s, strlen(s), 1);   /* the statement the load's lines inherit console-ness from */
+    int rc  = ctx_run_script(s, strlen(s), 0, 0, out, err, NULL);   /* argv text: silent, as q_ctx_run_src */
+    q_dbg_statement_end(tok);
+    return rc;
+}
+
 /* ===== The remote doors (see q_ctx.h) =====
  *
  * q_ctx_run_line's pipeline, disposing of the result over the wire instead of
