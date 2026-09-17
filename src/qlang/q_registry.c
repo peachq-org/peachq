@@ -29,6 +29,7 @@
  * parser-flip enforcement extends. */
 #define _POSIX_C_SOURCE 200809L
 #define Q_OPS_ENV_GRANDFATHER /* legitimate owner: registry QR_ENV recipes snapshot env values */
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
 #include "qlang/q_env.h"   /* q_env_get — q-bound builtins are snapshot sources too */

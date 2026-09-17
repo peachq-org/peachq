@@ -1,6 +1,7 @@
 /* q_mount — see q_mount.h.  Binds ride q_env_set (the one global-set home, so views and
  * `.z.vs` see them), under an ABSOLUTE sym so a later `\cd` cannot orphan the mapping. */
 #define _GNU_SOURCE            /* strdup */
+#include "qlang/q_count.h"
 #include "qlang/io/q_mount.h"
 #include "qlang/io/q_io.h"      /* q_io_abs_path — the one path-resolution home */
 #include "qlang/io/q_splay.h"

@@ -4,6 +4,7 @@
  * reader has the logical types in hand, honoured by the writer through a CAST.
  * All of it REFINES the physical catalog; none of it is a second source of truth.
  * Contract and decisions: docs/duckdb-api.md. */
+#include "qlang/q_count.h"
 #include "qlang/io/q_duckdb_internal.h"
 #include "qlang/io/q_duckdb_api.h"
 #include "qlang/io/q_duckdb_types.h"
@@ -82,7 +83,7 @@ bool q_duckdb_schema_name_parse(const char* s, size_t n, qd_name_t* out) {
 
 static void qd_one_cell(ray_t* row, int64_t col, char* buf, size_t cap) {
     size_t n = 0;
-    const char* p = row && row->type == RAY_TABLE && ray_table_nrows(row) == 1
+    const char* p = row && row->type == RAY_TABLE && q_count(row) == 1
                         ? q_duckdb_schema_text_cell(ray_table_get_col_idx(row, col), 0, &n) : NULL;
     snprintf(buf, cap, "%.*s", (int)(p ? n : 0), p ? p : "");
 }
@@ -182,7 +183,7 @@ const char* q_duckdb_schema_text_cell(ray_t* col, int64_t i, size_t* len) {
     void* pp = ray_vec_get(col, i);
     ray_t* cell = pp ? *(ray_t**)pp : NULL;
     if (!cell || cell->type != RAY_CHARV) return NULL;
-    *len = (size_t)ray_len(cell);
+    *len = (size_t) q_count(cell);
     return (const char*)ray_data(cell);
 }
 
@@ -205,7 +206,7 @@ int64_t q_duckdb_schema_fetch_desc(int slot, const qd_name_t* nm, qd_desc_t** ou
         q_duckdb_err_rewind(slot, mark);
         return 0;
     }
-    int64_t    n = ray_table_nrows(rows);
+    int64_t    n = q_count(rows);
     qd_desc_t* d = n ? calloc((size_t)n, sizeof *d) : NULL;
     if (!d) n = 0;
     ray_t* cv = ray_table_get_col_idx(rows, 0);   /* borrowed text col */
@@ -479,7 +480,7 @@ ray_t* q_duckdb_schema_check(int slot, const qd_name_t* nm, ray_t* tbl,
     QAPI.destroy_result(&res);
     if (!cat || RAY_IS_ERR(cat)) return cat;
 
-    int64_t nrows = ray_table_nrows(cat);
+    int64_t nrows = q_count(cat);
     int64_t ncols = ray_table_ncols(tbl);
     ray_t* names  = ray_table_get_col_idx(cat, 0);   /* borrowed text cols */
     if (nrows == 0 || nrows != ncols) {
@@ -737,7 +738,7 @@ ray_t* q_duckdb_schema_desc_parse(int slot, ray_t* schema, qd_desc_t** out, int6
     ray_t* dv = ray_table_get_col(schema, ray_sym_intern_runtime("dtype", 5));
     ray_t* lv = ray_table_get_col(schema, ray_sym_intern_runtime("logical", 7));
     if (!cv || !dv) return qd_schema_fail(slot, "schema needs col and dtype columns");
-    int64_t    rows = ray_table_nrows(schema);
+    int64_t    rows = q_count(schema);
     qd_desc_t* d    = q_duckdb_cols(rows, sizeof *d);
     if (!d) return q_err(QE_WSFULL);
     ray_t* e = NULL;
@@ -876,7 +877,7 @@ ray_t* q_duckdb_schema_declare(int slot, ray_t* tbl, qd_colmap_t* cms, qd_desc_t
             qd_colmap_t stage = { NULL, NULL, 0, false };
             bool mapped = lt && q_duckdb_codec_declared_stage_map(lt, &stage);
             if (lt) QAPI.destroy_logical_type(&lt);
-            bool rows = ray_table_nrows(tbl) > 0, rec = mapped && q_duckdb_codec_is_rec(stage.leaf);
+            bool rows = q_count(tbl) > 0, rec = mapped && q_duckdb_codec_is_rec(stage.leaf);
             const char* why = !mapped       ? "the declared type has no mapping"
                             : rec           ? "a () cell spells no record: an empty record cell is an empty table"
                             : !stage.depth  ? "a () cell is a list, so the declared type must be a LIST" : NULL;
@@ -1483,7 +1484,7 @@ ray_t* q_duckdb_schema_exact_check(int slot, ray_t* tbl, const qd_colmap_t* cms,
         QAPI.destroy_result(&res);
         if (!got || RAY_IS_ERR(got)) { q_duckdb_buf_free(&dt); return got ? got : q_err(QE_WSFULL); }
         ray_t* cnt = got->type == RAY_TABLE ? ray_table_get_col_idx(got, 0) : NULL;   /* borrowed */
-        int64_t n = cnt && cnt->type == RAY_I64 && cnt->len ? *(int64_t*)ray_vec_get(cnt, 0) : -1;
+        int64_t n = cnt && cnt->type == RAY_I64 && q_count(cnt) ? *(int64_t*)ray_vec_get(cnt, 0) : -1;
         ray_release(got);
         if (n == 0) { q_duckdb_buf_free(&dt); continue; }
         char what[300], why[400];

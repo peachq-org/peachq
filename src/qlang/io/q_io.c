@@ -8,6 +8,7 @@
  * fn objects; calling the C functions directly bypasses the eval-layer check,
  * so every file-touching arm re-asserts ray_eval_get_restricted(). */
 #define _GNU_SOURCE            /* realpath */
+#include "qlang/q_count.h"
 #include "qlang/io/q_io.h"
 #include "qlang/q_registry_internal.h" /* q_str_split_lines, q_type_strict_i64 */
 #include "qlang/base/q_err.h"
@@ -15,7 +16,7 @@
 #include "qlang/io/q_provider.h"  /* q_io_set: `:pq: targets route to .X.set; hdel: to .X.i.hdel */
 #include "qlang/io/q_csv.h"     /* the CSV/TSV decoder behind a recognised tabular suffix */
 #include "qlang/io/q_json.h"    /* the JSON decoder, and the framing a suffix declares to it */
-#include "qlang/eval/q_eval.h"  /* q_eval_call_name — the .parquet doors and the .duckdb transport are bound by `\l pq`, not linked */
+#include "qlang/eval/q_eval.h"  /* q_eval_apply_call_name — the .parquet doors and the .duckdb transport are bound by `\l pq`, not linked */
 #include "qlang/q_env.h"        /* q_env_get — `.h.tx`, the format table `set` reads at call time */
 #include "qlang/net/q_gz.h"     /* q_gz_inflate_zlib — the kxzip block codec */
 #include "qlang/net/q_wirefile.h" /* the format writers behind q_io_set */
@@ -180,7 +181,7 @@ static ray_t* io_read_raw(ray_t* pathstr, int64_t off, int64_t want, int* wrappe
 /* `want` bytes from `off` of an OWNED whole, under q_io_clamp's law; consumes the whole */
 static ray_t* io_slice(ray_t* all, int64_t off, int64_t want) {
     if (off == 0 && want < 0) return all;
-    int64_t take = q_io_clamp(ray_len(all), &off, want);
+    int64_t take = q_io_clamp(q_count(all), &off, want);
     ray_t* out = ray_vec_from_raw(RAY_BYTE_ONLY, (const uint8_t*)ray_data(all) + off, take);
     ray_release(all);
     return out;
@@ -197,7 +198,8 @@ ray_t* q_io_read_slice(ray_t* pathstr, int64_t off, int64_t want, int* zipped) {
     ray_release(out);
     ray_t* all = io_read_raw(pathstr, 0, -1, NULL);
     if (RAY_IS_ERR(all)) return all;
-    ray_t* plain = q_io_unzip((const uint8_t*)ray_data(all), (size_t)ray_len(all));
+    ray_t* plain = q_io_unzip((const uint8_t*)ray_data(all),
+                              (size_t) q_count(all));
     ray_release(all);
     if (!plain) return q_err(QE_CORRUPT);       /* magic promised what unzip denies */
     if (RAY_IS_ERR(plain)) return plain;
@@ -241,7 +243,7 @@ static size_t io_claim_len(ray_t* pathstr) {
 static ray_t* io_remote_read(ray_t* pathstr, int64_t off, int64_t want) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* url = q_str_charv_of_str(pathstr);
-    ray_t* all = q_eval_call_name(".duckdb.i.read1", 15, &url, 1);
+    ray_t* all = q_eval_apply_call_name(".duckdb.i.read1", 15, &url, 1);
     ray_release(url);
     if (!all || RAY_IS_ERR(all)) return all;
     if (all->type != RAY_BYTE_ONLY) { ray_release(all); return q_err(QE_TYPE); }
@@ -260,7 +262,7 @@ static ray_t* io_parquet_table(ray_t* fsym) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* none = ray_list_new(0);
     ray_t* args[3] = { fsym, none, none };
-    ray_t* out = q_eval_call_name(".parquet.read", 13, args, 3);
+    ray_t* out = q_eval_apply_call_name(".parquet.read", 13, args, 3);
     ray_release(none);
     return out;
 }
@@ -370,7 +372,7 @@ static ray_t* io_zip_hdr(ray_t* pathstr, int64_t file_len, zip_hdr_t* z, int* fo
     if (RAY_IS_ERR(tail)) return tail;
     ray_t* bad = NULL;
     if (wrapped) {
-        bad = file_len < ZIP_MAGIC_LEN + ZIP_TRAIL_LEN || ray_len(tail) != ZIP_TRAIL_LEN
+        bad = file_len < ZIP_MAGIC_LEN + ZIP_TRAIL_LEN || q_count(tail) != ZIP_TRAIL_LEN
                   ? q_err(QE_CORRUPT)
                   : zip_trailer((const uint8_t*)ray_data(tail), (size_t)file_len, z);
         *found = bad == NULL;
@@ -529,7 +531,7 @@ ray_t* q_io_zip_open(ray_t* pathstr, q_io_zipmap_t* zm) {
         int64_t pos = 0, ok = 1;
         for (int64_t k = 0; ok && k < z.num_blocks; k++) {
             ray_t* pfx = io_read_raw(pathstr, ZIP_MAGIC_LEN + pos, ZIP_PFX_LEN, NULL);
-            if (!pfx || RAY_IS_ERR(pfx) || ray_len(pfx) != ZIP_PFX_LEN) {
+            if (!pfx || RAY_IS_ERR(pfx) || q_count(pfx) != ZIP_PFX_LEN) {
                 if (pfx && !RAY_IS_ERR(pfx)) ray_release(pfx);
                 q_io_zipmap_free(zm);
                 return pfx && RAY_IS_ERR(pfx) ? pfx : q_err(QE_IO);
@@ -716,7 +718,7 @@ static ray_t* hsym_wrap_impl(ray_t* x) {
         return ray_sym(hsym_id(p, n));
     }
     if (x && x->type == RAY_SYM) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* out = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
         if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
         for (int64_t i = 0; i < n; i++) {
@@ -756,15 +758,15 @@ static ray_t* read1_wrap_impl(ray_t* x) {
      * int VECTOR (not a RAY_LIST) — the fifo-handle streaming form `.Q.fpn` uses.
      * q_handles_read1 answers NULL unless fd is a registered fifo (a Phase-1
      * file handle is a write/append fd — read a file via `read1 `:path`). */
-    if (x && q_type_is_int_vec(x) && ray_len(x) == 2) {
+    if (x && q_type_is_int_vec(x) && q_count(x) == 2) {
         ray_t* c = ray_i64(q_type_ivec_get(x, 1));
         ray_t* r = q_handles_read1(q_type_ivec_get(x, 0), c);
         ray_release(c);
         if (r) return r;
     }
-    if (x && x->type == RAY_LIST && (ray_len(x) == 2 || ray_len(x) == 3)) {
+    if (x && x->type == RAY_LIST && (q_count(x) == 2 || q_count(x) == 3)) {
         ray_t** e = (ray_t**)ray_data(x);
-        int three = ray_len(x) == 3;
+        int three = q_count(x) == 3;
         if (e[0] && e[0]->type == -RAY_SYM) {
             ray_t* path;
             int64_t off, want;
@@ -827,14 +829,14 @@ static ray_t* read0_wrap_impl(ray_t* x) {
     if (x && q_type_is_int_atom(x) && q_type_iatom_val(x) == 0) return io_stdin_line();
     ray_t* b = read1_wrap_impl(x);
     if (!b || RAY_IS_ERR(b)) return b;
-    int64_t n = ray_len(b);
+    int64_t n = q_count(b);
     const char* p = n ? (const char*)ray_data(b) : "";
     ray_t* r;
     if (x->type == -RAY_SYM) {
         r = q_str_split_lines(p, (size_t)n);
     } else {
         ray_t** e = x->type == RAY_LIST ? (ray_t**)ray_data(x) : NULL;
-        if (e && ray_len(x) == 2 && e[0] && e[0]->type == -RAY_SYM) {   /* (f;o): to EOF */
+        if (e && q_count(x) == 2 && e[0] && e[0]->type == -RAY_SYM) {   /* (f;o): to EOF */
             if (n && p[n - 1] == '\n') n--;
             if (n && p[n - 1] == '\r') n--;
         }
@@ -874,14 +876,14 @@ static ray_t* io_set_format(ray_t* x, ray_t* y) {
         if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
         ray_t* none = ray_list_new(0);
         ray_t* args[3] = { x, y, none };
-        ray_t* out = q_eval_call_name(".parquet.write", 14, args, 3);
+        ray_t* out = q_eval_apply_call_name(".parquet.write", 14, args, 3);
         ray_release(none);
         return out;
     }
     ray_t* tx = ext < 0 ? NULL : q_env_get(ray_sym_intern_runtime(".h.tx", 5));   /* borrowed */
     if (!tx || tx->type != RAY_DICT || ray_dict_keys(tx)->type != RAY_SYM) return NULL;
     ray_t* keys = ray_dict_keys(tx);
-    int64_t i = 0, n = ray_len(keys);
+    int64_t i = 0, n = q_count(keys);
     while (i < n && ray_vec_get_sym_id(keys, i) != ext) i++;
     if (i == n) return NULL;
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
@@ -890,7 +892,7 @@ static ray_t* io_set_format(ray_t* x, ray_t* y) {
     if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_OOM);
     ray_t* out;
     if (r->type == RAY_BYTE_ONLY) out = remote ? q_err(QE_NYI) : q_io_filebinary_wrap(x, r);
-    else if (remote) { ray_t* args[2] = { x, r }; out = q_eval_call_name(".duckdb.i.write0", 16, args, 2); }
+    else if (remote) { ray_t* args[2] = { x, r }; out = q_eval_apply_call_name(".duckdb.i.write0", 16, args, 2); }
     else out = q_io_filetext_wrap(x, r);
     ray_release(r);
     return out;
@@ -908,7 +910,7 @@ ray_t* q_io_set(ray_t* x, ray_t* y) {
     ray_t* pr = q_provider_write(x, y, 0);   /* `:pq: 4-seg coordinate -> .X.set */
     if (pr) return pr;
     if (x && x->type == RAY_LIST) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t** e = (ray_t**)ray_data(x);
         if (n == 4 && q_io_is_fsym(e[0])) {
             int64_t lbs, alg, lvl;
@@ -923,7 +925,7 @@ ray_t* q_io_set(ray_t* x, ray_t* y) {
         }
         return q_err(QE_NYI);
     }
-    if (x && x->type == RAY_SYM && ray_len(x) == 2) {   /* (dir;sympath) collapses */
+    if (x && x->type == RAY_SYM && q_count(x) == 2) {   /* (dir;sympath) collapses */
         ray_t* d = ray_sym(ray_vec_get_sym_id(x, 0));
         ray_t* s = ray_sym(ray_vec_get_sym_id(x, 1));
         ray_t* r = (q_io_is_fsym(d) && q_io_is_fsym(s))

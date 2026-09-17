@@ -19,6 +19,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include "qlang/q_count.h"
 #include "qlang/parse/q_parse.h"
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"
@@ -247,7 +248,7 @@ static ray_t *q_list(ray_t **xs, int n) {
  * BORROWED list e.  `nul` fills an empty slot (NULL: keep the C NULL, which
  * only the top-level statement list is allowed to carry). */
 static ray_t *cons_head(ray_t *head, ray_t *e, ray_t *(*nul)(void)) {
-    int64_t n = ray_len(e);
+    int64_t n = q_count(e);
     ray_t **es = (ray_t **)ray_data(e);
     ray_t *w = ray_list_new(n + 1);
     w = ray_list_append(w, head);
@@ -726,7 +727,7 @@ enum { QSQL_V_SELECT, QSQL_V_EXEC, QSQL_V_UPDATE, QSQL_V_DELETE };
  * already use, and the reason `value parse` sees a datum here, not a name.
  * Consumes e. */
 static ray_t *seq_of(ray_t *e) {
-    int64_t n = ray_len(e);
+    int64_t n = q_count(e);
     if (n == 1) {
         ray_t **slots = (ray_t **)ray_data(e);
         ray_t *only = slots[0];
@@ -750,10 +751,10 @@ int q_parse_is_seq_head(const ray_t *h) {
  * eval path needs the C-NULL empty-statement slots (no-op, no output), but a
  * tree handed out as a VALUE must be kdb-shaped: `parse ";"` is (;;();()). */
 void q_ast_fill_empty_stmts(ray_t *ast) {
-    if (!ast || ast->type != RAY_LIST || ray_len(ast) < 2) return;
+    if (!ast || ast->type != RAY_LIST || q_count(ast) < 2) return;
     ray_t **e = (ray_t **)ray_data(ast);
     if (!q_parse_is_seq_head(e[0])) return;
-    for (int64_t i = 1; i < ray_len(ast); i++)
+    for (int64_t i = 1; i < q_count(ast); i++)
         if (!e[i]) e[i] = ray_list_new(1);   /* len-0 general list: () */
 }
 
@@ -818,7 +819,7 @@ static int sym_is_nameref(ray_t *v) {
 /* The (:;name;expr) node.  Rejects `::`, `+:` (a marked verb head) and a QUOTED
  * lhs, so ``(`a:1)`` is not a binding. */
 static int binding_node(ray_t *x, ray_t **name, ray_t **val) {
-    if (!x || x->type != RAY_LIST || ray_len(x) != 3) return 0;
+    if (!x || x->type != RAY_LIST || q_count(x) != 3) return 0;
     ray_t **e = (ray_t **)ray_data(x);
     if (!sym_name_is(e[0], ":") || !sym_is_nameref(e[1])) return 0;
     if (name) *name = e[1];
@@ -834,7 +835,7 @@ static int binding_node(ray_t *x, ray_t **name, ray_t **val) {
  * refs at the point it can afford to longjmp. */
 static int names_have_reserved(ray_t *phrases) {
     if (!phrases || phrases->type != RAY_LIST) return 0;
-    int64_t n = ray_len(phrases);
+    int64_t n = q_count(phrases);
     ray_t **ph = (ray_t **)ray_data(phrases);
     for (int64_t i = 0; i < n; i++) {
         ray_t *name = NULL;
@@ -852,7 +853,7 @@ static int names_have_reserved(ray_t *phrases) {
 /* pairwise duplicate WITHIN one W64 sym-id vector */
 static int symvec_ids_dup(ray_t *a) {
     if (!a || a->type != RAY_SYM) return 0;
-    int64_t n = ray_len(a);
+    int64_t n = q_count(a);
     const int64_t *s = (const int64_t *)ray_data(a);
     for (int64_t i = 1; i < n; i++)
         for (int64_t j = 0; j < i; j++)
@@ -869,7 +870,7 @@ static int qsql_cross_names_dup(ray_t *A, ray_t *B) {
     ray_t *ka = A && A->type == RAY_DICT ? ray_dict_keys(A) : NULL;
     ray_t *kb = B && B->type == RAY_DICT ? ray_dict_keys(B) : NULL;
     if (!ka || ka->type != RAY_SYM || !kb || kb->type != RAY_SYM) return 0;
-    int64_t na = ray_len(ka), nb = ray_len(kb);
+    int64_t na = q_count(ka), nb = q_count(kb);
     const int64_t *sa = (const int64_t *)ray_data(ka);
     const int64_t *sb = (const int64_t *)ray_data(kb);
     for (int64_t i = 0; i < na; i++)
@@ -895,7 +896,7 @@ static ray_t *table_lit_dict(ray_t *defs) {
     ray_t *lv = q_registry_list_value();
     if (!lv) q_die("table literal: registry not initialized");
     if (names_have_reserved(defs)) { ray_release(defs); die_err(QE_ASSIGN); }
-    int64_t n = ray_len(defs);
+    int64_t n = q_count(defs);
     ray_t **ds = (ray_t **)ray_data(defs);
     int64_t id_x = ray_sym_intern_runtime("x", 1);
     ray_t *keys = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
@@ -1013,13 +1014,13 @@ static P parse_base(Parser *p) {
          * results in projection", releases/ChangesIn4.1.md; the 8-item cap in
          * basics/application.md is the function-rank cap), so `(1;;3) 7` fills
          * while a list holding an explicit `::` value stays data and indexes. */
-        if (ray_len(e) > 1) {
+        if (q_count(e) > 1) {
             ray_t **slots = (ray_t **)ray_data(e);
-            for (int64_t i = 0; i < ray_len(e); i++) {
+            for (int64_t i = 0; i < q_count(e); i++) {
                 if (!slots[i]) slots[i] = hole();
             }
         }
-        if (ray_len(e) == 1) {
+        if (q_count(e) == 1) {
             ray_t **slots = (ray_t **)ray_data(e);
             ray_t *only = slots[0];
             /* A NULL slot is the EMPTY paren `()` — the empty general list
@@ -1128,7 +1129,7 @@ static P parse_base(Parser *p) {
                     }
                     if (tnum && !ptypes) {
                         ptypes = ray_vec_new(RAY_I64, 4);
-                        for (int64_t z = 1; z < ray_len(params); z++) {
+                        for (int64_t z = 1; z < q_count(params); z++) {
                             int64_t zero = 0;
                             ptypes = ray_vec_append(ptypes, &zero);
                         }
@@ -1148,7 +1149,7 @@ static P parse_base(Parser *p) {
              * variable's name, so a spare argument lands where no body can read it
              * and `x` stays GLOBAL — default names come with OMITTING the signature
              * (function-notation.md "Signature").  Owner ruling 2026-08-12. */
-            if (!ray_len(params)) {
+            if (!q_count(params)) {
                 int64_t nul = ray_sym_intern_runtime("", 0);
                 params = ray_vec_append(params, &nul);
             }
@@ -1173,7 +1174,7 @@ static P parse_base(Parser *p) {
                 params = ray_vec_append(params, &id);
             }
         }
-        int64_t bn = ray_len(e);
+        int64_t bn = q_count(e);
         ray_t **bs = (ray_t **)ray_data(e);
         /* empty statements (`{2*x;}`) become `::` name-refs: the carrier
          * retains every body expr, so a C NULL here would be fatal */
@@ -1357,13 +1358,13 @@ static P parse_query(Parser *p) {
 
     /* select-phrase list: stops at by / from */
     *a = parse_phrase_list(p, Q_SELECT);
-    if (ray_len(*a) > QSQL_MAXCOLS) die_err(QE_LIMIT);
+    if (q_count(*a) > QSQL_MAXCOLS) die_err(QE_LIMIT);
 
     /* ref/delete.md:63: a delete phrase list is "a list of column names" —
      * anything else once slipped through qsql_norm_delete_a as a silent skip,
      * leaving an EMPTY name list, which deletes every row */
     if (verb == QSQL_V_DELETE) {
-        int64_t dn = ray_len(*a);
+        int64_t dn = q_count(*a);
         ray_t **dp = (ray_t **)ray_data(*a);
         for (int64_t i = 0; i < dn; i++)
             if (!sym_is_nameref(dp[i])) q_die("qsql: delete takes column names");
@@ -1376,8 +1377,8 @@ static P parse_query(Parser *p) {
         if (dist) q_die("qsql: distinct with by (b is one slot)");
         adv(p);
         *b = parse_phrase_list(p, Q_BY);
-        if (ray_len(*b) == 0) q_die("qsql: empty by phrase");
-        if (ray_len(*b) > QSQL_MAXCOLS) die_err(QE_LIMIT);
+        if (q_count(*b) == 0) q_die("qsql: empty by phrase");
+        if (q_count(*b) > QSQL_MAXCOLS) die_err(QE_LIMIT);
     }
 
     /* mandatory from + the from-expression */
@@ -1391,7 +1392,7 @@ static P parse_query(Parser *p) {
     if (qtok_sym_is(cur(p), "where")) {
         adv(p);
         *c = parse_phrase_list(p, Q_WHERE);
-        if (ray_len(*c) == 0) q_die("qsql: empty where phrase");
+        if (q_count(*c) == 0) q_die("qsql: empty where phrase");
     }
 
     /* terminator: only a statement boundary may follow a complete query */
@@ -1500,7 +1501,7 @@ static P parse_term(Parser *p, QCtx ctx) {
             /* bracket-apply on a bare verb (`+[2;]`) embeds the dyadic row —
              * an underapplied call becomes a projection downstream (2c). */
             if (t.role == R_VERB) t.v = q_embed(t.v, Q_DYADIC);
-            int64_t en = ray_len(e);
+            int64_t en = q_count(e);
             ray_t **es = (ray_t **)ray_data(e);
             ray_t *w = ray_list_new(en + 1);
             w = ray_list_append(w, t.v);
@@ -1726,9 +1727,9 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
      * its head is one of the six immutable iterator singletons — identity,
      * so a call tree like (enlist;{x}) is never mistaken for one.  Infix
      * (`x f' y`) and bracket forms never carry R_VERB list heads here. */
-    if (t.role == R_VERB && t.v && t.v->type == RAY_LIST && ray_len(t.v) == 2) {
+    if (t.role == R_VERB && t.v && t.v->type == RAY_LIST && q_count(t.v) == 2) {
         ray_t *root = ((ray_t **)ray_data(t.v))[1];
-        while (root && root->type == RAY_LIST && ray_len(root) == 2 &&
+        while (root && root->type == RAY_LIST && q_count(root) == 2 &&
                q_registry_iter_of(((ray_t **)ray_data(root))[0]) >= 0)
             root = ((ray_t **)ray_data(root))[1];
         if (q_registry_iter_of(((ray_t **)ray_data(t.v))[0]) >= 0 && root &&
@@ -1837,7 +1838,7 @@ static ray_t *qsql_derive_alias(ray_t *expr) {
         return qsql_colsym(id);
     }
     if (expr->type == RAY_LIST) {
-        int64_t n = ray_len(expr);
+        int64_t n = q_count(expr);
         ray_t **e = (ray_t **)ray_data(expr);
         for (int64_t i = n - 1; i >= 0; i--) {
             ray_t *a = qsql_derive_alias(e[i]);
@@ -1972,7 +1973,7 @@ static ray_t *qsql_convert_expr(ray_t *x) {
         return qsql_colsym(x->i64);                /* else column symbol */
     }
     if (x->type == RAY_LIST) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t **e = (ray_t **)ray_data(x);
         /* An ENLISTED symvec constant (the parser's ,`a`b wrap) passes through
          * whole: kdb keeps it enlisted (funsql.md:69 `c1 in `b`c` =
@@ -2020,7 +2021,7 @@ static ray_t *qsql_alias_x(ray_t **aliases, int na) {
  * an alias phrase keys on its written name; a bare phrase derives its output
  * name via qsql_derive_alias, exactly as qsql_colspec does over the clone. */
 static ray_t *qsql_norm_dict(ray_t *phrases) {
-    int64_t n = ray_len(phrases);
+    int64_t n = q_count(phrases);
     ray_t **ph = (ray_t **)ray_data(phrases);
     ray_t *aliases[QSQL_MAXCOLS], *vals[QSQL_MAXCOLS];
     int na = 0;
@@ -2056,7 +2057,7 @@ static ray_t *qsql_norm_dict(ray_t *phrases) {
  * the slot yields the functional a-value — a col sym as `,`c1`, a computed
  * expr as its enlisted tree); named / multiple -> a name!expr dict. */
 static ray_t *qsql_norm_exec_a(ray_t *phrases) {
-    int64_t n = ray_len(phrases);
+    int64_t n = q_count(phrases);
     ray_t **ph = (ray_t **)ray_data(phrases);
     if (n == 0) return ray_list_new(0);
     ray_t *name = NULL, *val = NULL;
@@ -2077,7 +2078,7 @@ static ray_t *qsql_norm_exec_a(ray_t *phrases) {
  * By-symbol (or a name!expr dict for a computed By) via qsql_exec_by. */
 static ray_t *qsql_norm_by(ray_t *phrases, int verb) {
     if (verb != QSQL_V_EXEC) return qsql_norm_dict(phrases);
-    int64_t n = ray_len(phrases);
+    int64_t n = q_count(phrases);
     ray_t **ph = (ray_t **)ray_data(phrases);
     /* `by 0b` is already a functional b-value: pass it through so exec takes the
      * select (table) shape — ref/exec.md:96 */
@@ -2107,7 +2108,7 @@ static ray_t *qsql_norm_by(ray_t *phrases, int verb) {
 /* where-phrase `c`: enlist the already-parsed constraint exprs (each converted),
  * matching qsql_where's enlist(constraint-list). */
 static ray_t *qsql_norm_where(ray_t *phrases) {
-    int64_t n = ray_len(phrases);
+    int64_t n = q_count(phrases);
     ray_t **ph = (ray_t **)ray_data(phrases);
     ray_t *clist = ray_list_new(n > 0 ? n : 1);
     for (int64_t i = 0; i < n; i++) {
@@ -2122,7 +2123,7 @@ static ray_t *qsql_norm_where(ray_t *phrases) {
  * `,,`b`), so one eval of the slot yields the functional symvec.  A bare 1-elem
  * symvec would instead eval to the ATOM (parsetrees.md:26 eval enlist`x -> `x). */
 static ray_t *qsql_norm_delete_a(ray_t *phrases) {
-    int64_t n = ray_len(phrases);
+    int64_t n = q_count(phrases);
     ray_t **ph = (ray_t **)ray_data(phrases);
     ray_t *a = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
     for (int64_t i = 0; i < n; i++) {
@@ -2150,7 +2151,7 @@ static ray_t *qsql_normalize_phrases(ray_t *phrase_list, QCtx origin, int verb) 
     case QSQL_V_EXEC:   return qsql_norm_exec_a(phrase_list);
     case QSQL_V_DELETE: return qsql_norm_delete_a(phrase_list);
     default:                                         /* SELECT / UPDATE */
-        if (ray_len(phrase_list) == 0) return ray_list_new(0);   /* select () */
+        if (q_count(phrase_list) == 0) return ray_list_new(0);   /* select () */
         return qsql_norm_dict(phrase_list);
     }
 }
@@ -2374,11 +2375,11 @@ ray_t *q_parse(const char *src) {
  * sequence (char head) asks its last statement. */
 int q_parse_is_assign(const ray_t *cast) {
     ray_t *ast = (ray_t *)cast;   /* read-only walk; ray_data lacks a const view */
-    if (!ast || ast->type != RAY_LIST || ray_len(ast) < 1) return 0;
+    if (!ast || ast->type != RAY_LIST || q_count(ast) < 1) return 0;
     ray_t **e = (ray_t **)ray_data(ast);
     ray_t *h = e[0];
     if (q_parse_is_seq_head(h)) {
-        int64_t n = ray_len(ast);
+        int64_t n = q_count(ast);
         return n >= 2 ? q_parse_is_assign(e[n - 1]) : 0;
     }
     if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return 0;
@@ -2390,11 +2391,11 @@ int q_parse_is_assign(const ray_t *cast) {
                    (l == 2 && nm[0] == ':' && nm[1] == ':');
     int is_modasg = (l >= 2 && nm[l - 1] == ':' && nm[0] != ':');
     ray_release(s);
-    if (!(is_colon || is_modasg) || ray_len(ast) != 3) return 0;
+    if (!(is_colon || is_modasg) || q_count(ast) != 3) return 0;
     ray_t *t = e[1];
     if (t && t->type == -RAY_SYM && !(t->attrs & Q_ATTR_QUOTED)) return 1;
     /* indexed assignment `name[i;…]:v` is silent too — kdb console */
-    if (t && t->type == RAY_LIST && ray_len(t) >= 2) {
+    if (t && t->type == RAY_LIST && q_count(t) >= 2) {
         ray_t *th = ((ray_t **)ray_data(t))[0];
         return th && th->type == -RAY_SYM && !(th->attrs & Q_ATTR_QUOTED);
     }

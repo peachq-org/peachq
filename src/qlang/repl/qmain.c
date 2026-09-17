@@ -4,6 +4,7 @@
  * console behaviour in-process. */
 #define _POSIX_C_SOURCE 200809L
 
+#include "qlang/q_count.h"
 #include "qlang/repl/q_repl.h"
 #include "qlang/q_ctx.h"   /* q_ctx_run_file/q_ctx_run_src — the script and -eval doors */
 #include "qlang/q_runtime.h"

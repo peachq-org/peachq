@@ -2,6 +2,7 @@
  * it.  RE2 is linked in on every platform (ARCHITECTURE.md, 2026-08-10), so the
  * shim behind q_re2_abi.h is CALLED, never loaded: no availability state, and a
  * NULL program means the pattern was bad. */
+#include "qlang/q_count.h"
 #include "qlang/io/q_re2.h"
 #include "qlang/io/q_re2_abi.h"
 #include "qlang/io/q_re2_pin.h"

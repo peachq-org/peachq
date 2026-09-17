@@ -13,6 +13,7 @@
  * — pure moves except within, rewritten onto the comparison primitives.
  * bin/binr were written here 2026-07-25; they had no q-layer body before. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"  /* the type-axis home: the shape predicates and the int-lane reads */
@@ -46,7 +47,7 @@ static ray_t* bound_cmp(ray_t* x, ray_t* y, int64_t k, const char* op) {
  * conforms to x, so the row is family `none` and this receives whole args. */
 ray_t* q_within_wrap(ray_t* x, ray_t* y) {
     if (!x || !y || ray_is_atom(y)) return q_err(QE_TYPE);
-    if (ray_len(y) != 2) return q_err(QE_LENGTH);
+    if (q_count(y) != 2) return q_err(QE_LENGTH);
     ray_t* ge = bound_cmp(x, y, 0, ">=");
     if (RAY_IS_ERR(ge)) return ge;
     ray_t* le = bound_cmp(x, y, 1, "<=");
@@ -65,7 +66,7 @@ ray_t* q_within_wrap(ray_t* x, ray_t* y) {
  * via ray_at_fn so typed vectors (STR lists-of-strings included) and boxed
  * lists share one home.  Borrows both. */
 static int seq_has_item(ray_t* y, ray_t* v) {
-    int64_t n = ray_len(y);
+    int64_t n = q_count(y);
     for (int64_t i = 0; i < n; i++) {
         ray_t* ia = ray_i64(i);
         ray_t* ye = ray_at_fn(y, ia);                /* owned item */
@@ -96,7 +97,7 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
     if (q_type_is_table(y)) {
         ray_t* i = q_search_find(y, x);
         if (!i || RAY_IS_ERR(i)) return i ? i : q_err(QE_TYPE);
-        ray_t* n = ray_i64(ray_table_nrows(y));
+        ray_t* n = ray_i64(q_count(y));
         ray_t* f = q_registry_lookup_name("<", 1, Q_DYADIC);  /* borrowed */
         ray_t* av[2] = { i, n };
         ray_t* r = f ? q_eval_apply_value(f, av, 2) : NULL;
@@ -105,7 +106,7 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
         return r ? r : q_err(QE_TYPE);
     }
     if (y->type == RAY_LIST) {
-        int64_t ny = ray_len(y);
+        int64_t ny = q_count(y);
         ray_t** e = (ray_t**)ray_data(y);
         int rank1_seek = ny > 0 && e[0] && !ray_is_atom(e[0]);
         if (rank1_seek) {
@@ -117,7 +118,7 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
             if (x->type != RAY_LIST || e[0]->type == RAY_LIST || e[0]->type == RAY_TABLE)
                 return ray_bool(seq_has_item(y, x) != 0);
         } else if (ray_is_atom(x)) return ray_bool(seq_has_item(y, x) != 0);
-        int64_t nx = ray_len(x);                     /* left-atomic over x */
+        int64_t nx = q_count(x);                     /* left-atomic over x */
         ray_t* outl = ray_list_new(nx > 0 ? nx : 1);
         if (RAY_IS_ERR(outl)) return outl;
         for (int64_t i = 0; i < nx; i++) {
@@ -145,14 +146,14 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
     if (q_type_is_num_tag(x->type) && q_type_is_num_tag(y->type)) {
         int xf = q_type_is_float_tag(x->type), yf = q_type_is_float_tag(y->type);
         if (xf != yf) {
-            if (!ray_is_atom(y) && ray_len(y) != 1)
+            if (!ray_is_atom(y) && q_count(y) != 1)
                 return q_err(QE_TYPE);
             int yn; double yv = q_velem_f(y, 0, &yn);
             if (ray_is_atom(x)) {
                 int nu; double v = q_velem_f(x, 0, &nu);
                 return ray_bool(!nu && !yn && v == yv);
             }
-            int64_t n = ray_len(x);
+            int64_t n = q_count(x);
             ray_t* out = ray_vec_new(RAY_BOOL, n > 0 ? n : 1);
             if (RAY_IS_ERR(out)) return out;
             out->len = n;
@@ -166,18 +167,18 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
     }
     /* a typed domain of two or more items is Find's (ref/find.md:102 "Find is implicit in ... in"), so its type
      * law rules here too; the atom and the 1-item y above keep in.md's "wider input type mix" */
-    if (ray_is_vec(y) && y->type != RAY_STR && ray_len(y) != 1 && !q_search_admits(y, x)) return q_err(QE_TYPE);
+    if (ray_is_vec(y) && y->type != RAY_STR && q_count(y) != 1 && !q_search_admits(y, x)) return q_err(QE_TYPE);
     /* Against a non-list y the comparison is left-atomic (ref/in.md) — one
      * boolean per item of x, and NONE is still boolean, where the base kernel
      * answers the untyped `()` that no downstream `where` survives.  A STR y
      * is excluded: it is a LIST of strings, seeking whole-x above. */
-    if (y->type != RAY_STR && !ray_is_atom(x) && ray_len(x) == 0)
+    if (y->type != RAY_STR && !ray_is_atom(x) && q_count(x) == 0)
         return q_type_empty(RAY_BOOL);
     ray_t* r = ray_in_fn(x, y);
     /* 1-char string x: base char membership returns a 1-vec; kdb wants an
      * ATOM (`"x" in "a"` -> 0b). */
     if (r && !RAY_IS_ERR(r) && x->type == -RAY_STR && ray_str_len(x) == 1 &&
-        r->type == RAY_BOOL && ray_len(r) == 1) {
+        r->type == RAY_BOOL && q_count(r) == 1) {
         int b = ((const bool*)ray_data(r))[0] != 0;
         ray_release(r);
         return ray_bool(b != 0);
@@ -218,7 +219,7 @@ static ray_t* miss_is_count(ray_t* i, int64_t cnt) {
     if (ray_is_atom(i) && i->type == -RAY_I64 && RAY_ATOM_IS_NULL(i)) { ray_release(i); return ray_i64(cnt); }
     if (i->type == RAY_I64) {
         int64_t* d = (int64_t*)ray_data(i);          /* fresh rc=1 from find */
-        for (int64_t j = 0, n = ray_len(i); j < n; j++) if (d[j] == NULL_I64) d[j] = cnt;
+        for (int64_t j = 0, n = q_count(i); j < n; j++) if (d[j] == NULL_I64) d[j] = cnt;
         i->attrs &= (uint8_t)~RAY_ATTR_HAS_NULLS;
     }
     return i;
@@ -230,7 +231,7 @@ static ray_t* miss_is_count(ray_t* i, int64_t cnt) {
  * column), so a simple leading column means the probe is a list of rows.  `flip`
  * then hands it to the positional column path unchanged. */
 static int probe_is_rowlist(ray_t* dom, ray_t* y) {
-    if (!y || y->type != RAY_LIST || ray_len(y) == 0) return 0;
+    if (!y || y->type != RAY_LIST || q_count(y) == 0) return 0;
     ray_t* y0 = ((ray_t**)ray_data(y))[0];
     if (!y0 || ray_is_atom(y0)) return 0;
     return !q_index_is_nested(ray_table_get_col_idx(dom, 0));
@@ -262,7 +263,7 @@ static int probe_cols(ray_t* x, ray_t* y, ray_t** pc, int64_t k, int64_t* m, int
     /* a POSITIONAL record carries one field per domain column, so a count that
      * disagrees is an arity fault, not a type one: `.Q.ft` (ref/dotq.md) pins
      * `s 2 3` — two elements against one key column — as 'length. */
-    if (!bad && ray_len(pv) != k) bad = pn ? 1 : 2;
+    if (!bad && q_count(pv) != k) bad = pn ? 1 : 2;
     int64_t got = 0;
     for (; got < k && !bad; got++) {
         int64_t at = got;
@@ -279,7 +280,7 @@ static int probe_cols(ray_t* x, ray_t* y, ray_t** pc, int64_t k, int64_t* m, int
     *m = 1;
     for (int64_t j = 0; j < k && !bad; j++) {
         if (ray_is_atom(pc[j])) continue;            /* an atom column broadcasts */
-        int64_t l = ray_len(pc[j]);
+        int64_t l = q_count(pc[j]);
         if (!*rec && l != *m) bad = 2;                /* rows of unequal width */
         else { *rec = 0; *m = l; }
     }
@@ -303,7 +304,7 @@ static ray_t* row_answer(ray_t* r, int rec) {
 /* `t ? row` — the smallest row index of table x matching the probe (find.md Searching tables); a miss is
  * `count x`. */
 static ray_t* find_rows(ray_t* x, ray_t* y) {
-    int64_t k = ray_table_ncols(x), n = ray_table_nrows(x);
+    int64_t k = ray_table_ncols(x), n = q_count(x);
     if (k <= 0 || !y) return q_err(QE_TYPE);
     /* a one-column table Finds as its column (owner 2026-09-16): an atom is its one-field record */
     if (k == 1 && ray_is_atom(y)) {
@@ -367,12 +368,12 @@ int q_search_admits(ray_t* x, ray_t* y) {
     if (!y) return 1;
     if (y->type == RAY_LIST) {
         ray_t** e = (ray_t**)ray_data(y);
-        for (int64_t i = 0, n = ray_len(y); i < n; i++) if (!q_search_admits(x, e[i])) return 0;
+        for (int64_t i = 0, n = q_count(y); i < n; i++) if (!q_search_admits(x, e[i])) return 0;
         return 1;
     }
     if (y->type == RAY_STR) return x->type == RAY_CHARV;       /* a list of strings: char-vector items */
     int8_t d = x->type, t = y->type == -RAY_STR ? RAY_CHARV : y->type < 0 ? (int8_t)-y->type : y->type;
-    if (t == d || t == RAY_ENUM || (ray_is_vec(y) && ray_len(y) == 0)) return 1;
+    if (t == d || t == RAY_ENUM || (ray_is_vec(y) && q_count(y) == 0)) return 1;
     int di = d == RAY_I16 || d == RAY_I32 || d == RAY_I64, ti = t == RAY_I16 || t == RAY_I32 || t == RAY_I64;
     return (di && ti) || (di && t == RAY_BYTE_ONLY) || (ti && d == RAY_BYTE_ONLY) ||
            (q_type_is_float_tag(d) && q_type_is_float_tag(t));
@@ -382,7 +383,7 @@ int q_search_admits(ray_t* x, ray_t* y) {
  * atom is a char list) — the axis find.md's "rank-sensitive" law compares on */
 static int find_depth(ray_t* v) {
     if (!v || (ray_is_atom(v) && !q_type_is_str_atom(v))) return 0;
-    if (ray_len(v) == 0) return 1;
+    if (q_count(v) == 0) return 1;
     ray_t* e0 = q_index_elem_at(v, 0);
     int d = 1 + find_depth(e0);
     if (e0) ray_release(e0);
@@ -413,7 +414,7 @@ ray_t* q_search_find(ray_t* x, ray_t* y) {
     }
     if (x && (ray_is_vec(x) || x->type == RAY_LIST)) {          /* find */
         if (ray_is_vec(x) && x->type != RAY_STR && !q_search_admits(x, y)) return q_err(QE_TYPE);
-        int64_t cnt = ray_len(x);
+        int64_t cnt = q_count(x);
         int xd = find_depth(x) - 1;                  /* the rank of x's items, read off the first (find.md) */
         if (x->type == RAY_LIST && y && y->type == RAY_LIST && cnt > 0 && find_depth(y) == xd)
             return ray_i64(q_search_find_item(x, y, cnt));   /* y IS one item's shape: whole, so x[x?x 0] round-trips */
@@ -425,7 +426,7 @@ ray_t* q_search_find(ray_t* x, ray_t* y) {
              * rank is matched whole (`u?(2 3;\`ab)` -> 3 3, never the whole of y).  The answer keeps y's shape, a
              * run of atoms collapsing to the index vector.  Empty x has no rank to read, so every item is one
              * miss (D2: a list probe on `()` is item-wise). */
-            int64_t ny = ray_len(y);
+            int64_t ny = q_count(y);
             ray_t** e = (ray_t**)ray_data(y);
             ray_t* out = ray_list_new(ny > 0 ? ny : 1);
             if (RAY_IS_ERR(out)) return out;
@@ -488,7 +489,7 @@ static int ord_cmp(ray_t* a, ray_t* b, int* err) {
         ray_release(r);
         return lt ? -1 : 1;
     }
-    int64_t na = ray_len(a), nb = ray_len(b), n = na < nb ? na : nb;
+    int64_t na = q_count(a), nb = q_count(b), n = na < nb ? na : nb;
     for (int64_t i = 0; i < n; i++) {
         ray_t* ea = q_index_elem_at(a, i);
         ray_t* eb = q_index_elem_at(b, i);
@@ -534,7 +535,7 @@ static int64_t bin_clamp(int64_t r, int64_t n, int right) {
  * equivalence classes come from the row Find over the leading columns (one pass for a run of probes); ORDER on the
  * last column stays a binary search over each class's positions, within which bin.md requires that column sorted. */
 static ray_t* bin_rows(ray_t* x, ray_t* y, int right) {
-    int64_t k = ray_table_ncols(x), n = ray_table_nrows(x);
+    int64_t k = ray_table_ncols(x), n = q_count(x);
     if (k <= 0 || !y) return q_err(QE_TYPE);
     ray_t** pc = (ray_t**)calloc((size_t)k * 2, sizeof *pc);
     if (!pc) return q_err(QE_TYPE);
@@ -556,9 +557,10 @@ static ray_t* bin_rows(ray_t* x, ray_t* y, int right) {
     out->len = m;
     for (int64_t i = 0; i < m && !err; i++) {
         ray_t* sel = cls ? ((ray_t**)ray_data(cls))[i] : NULL;                       /* borrowed */
-        int64_t cn = sel ? ray_len(sel) : n;
+        int64_t cn = sel ? q_count(sel) : n;
         const int64_t* sd = sel ? (const int64_t*)ray_data(sel) : NULL;
-        ray_t* pv = q_index_elem_at(pc[k - 1], ray_len(pc[k - 1]) == 1 ? 0 : i);
+        ray_t* pv = q_index_elem_at(pc[k - 1],
+                                    q_count(pc[k - 1]) == 1 ? 0 : i);
         if (!pv || RAY_IS_ERR(pv)) err = 1;
         int64_t r = err || cn == 0 ? -1 : bin_probe(last, sd, cn, pv, right, &err);
         int64_t* od = (int64_t*)ray_data(out);
@@ -597,13 +599,13 @@ static ray_t* bin_search(ray_t* x, ray_t* y, int right) {
         return keys_at(keys, i);
     }
     if (!ray_is_vec(x) && x->type != RAY_LIST) return q_err(QE_TYPE);
-    int64_t n = ray_len(x);
+    int64_t n = q_count(x);
     int err = 0;
     if (ray_is_atom(y) || q_index_is_nested(y) != q_index_is_nested(x)) {
         int64_t r = bin_clamp(bin_probe(x, NULL, n, y, right, &err), n, right);
         return err ? q_err(QE_TYPE) : ray_i64(r);
     }
-    int64_t ny = ray_len(y);
+    int64_t ny = q_count(y);
     ray_t* out = ray_vec_new(RAY_I64, ny > 0 ? ny : 1);
     if (RAY_IS_ERR(out)) return out;
     out->len = ny;

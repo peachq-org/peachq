@@ -37,26 +37,9 @@ ray_t* q_rtrim_fn(ray_t* x);
  * (kdb keeps `-33!` as the SHA-1 primitive; `.Q.sha1` is the utility twin). */
 ray_t* q_dotq_sha1_fn(ray_t* x);
 
-/* q `count x` (fn-value -> 1, else the base count).  Exported so `!`'s length
- * gate (bang_make_dict) measures key/value counts with q semantics.
- * q_builtins_count_long is the int64 specialization for callers wanting the number. */
+/* q `count x` as a VALUE (the verb's body): provider carriers answer through the
+ * provider, lazy values stay lazy.  The int64 accessor is q_count (q_count.h). */
 ray_t* q_count_fn(ray_t* x);
-int64_t q_builtins_count_long(ray_t* x);
-
-/* Hot-path count.  The ITERATORS ask for a count once per application, and
- * applications NEST, so at -O0 a cross-TU call per outer item is measurable:
- * routing the adverb arms through the boxed owner took integration/i078 from
- * 5.9s to 28s and timed the C runner out.  These three shapes answer exactly
- * as q_count_fn does; every other shape — dicts, function values, atoms,
- * pooled RAY_STR — falls through to it, so there is still ONE home. */
-static inline int64_t q_count_long(ray_t* x) {
-    if (x && !RAY_IS_ERR(x)) {
-        if (x->type == RAY_LIST || (ray_is_vec(x) && x->type != RAY_STR))
-            return ray_len(x);
-        if (x->type == RAY_TABLE) return ray_table_nrows(x);
-    }
-    return q_builtins_count_long(x);
-}
 
 /* Type letter of one value as `.Q.ty`/`meta` see it — the type-fact kernel
  * kept here; ops/q_dotq.c and ops/q_table.c consume it. */

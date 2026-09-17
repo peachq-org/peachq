@@ -6,6 +6,7 @@
  * `0:`'s through the cast home and nothing else is — `0:` TOKENIZES text
  * (upper case), `1:` REINTERPRETS bytes (lower case).  Deferred 'nyi: the
  * anymap write and the 4-item compressed write.  Inputs borrowed. */
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h"  /* the wrapper's own declaration */
 #include "qlang/base/q_err.h"
 #include "qlang/io/q_io.h"
@@ -94,7 +95,7 @@ static ray_t* fb_text_col(const uint8_t* base, int64_t nrec, int64_t reclen,
  * recipes.  Every `y` door lands here. */
 static ray_t* fb_decode(const char* ts, int64_t nt, ray_t* widths,
                         const uint8_t* base, int64_t nb, int big) {
-    if (nt == 0 || nt != ray_len(widths)) return q_err(QE_LENGTH);
+    if (nt == 0 || nt != q_count(widths)) return q_err(QE_LENGTH);
     fb_col_t* c = (fb_col_t*)malloc((size_t)nt * sizeof *c);
     if (!c) return q_err(QE_OOM);
     int64_t reclen = 0, nout = 0;
@@ -134,7 +135,7 @@ static ray_t* fb_payload(ray_t* y) {
         return b;
     }
     if (y->type == RAY_LIST) {
-        int64_t n = ray_len(y);
+        int64_t n = q_count(y);
         ray_t** e = (ray_t**)ray_data(y);
         if (n >= 2 && n <= 3 && e[0] && e[0]->type == -RAY_SYM) {
             ray_t* path;
@@ -169,7 +170,8 @@ static ray_t* fb_read(ray_t* x0, ray_t* x1, ray_t* y) {
     else return q_err(QE_TYPE);
     ray_t* pl = fb_payload(y);
     if (!pl || RAY_IS_ERR(pl)) return pl ? pl : q_err(QE_OOM);
-    ray_t* r = fb_decode(ts, nt, widths, (const uint8_t*)ray_data(pl), ray_len(pl), big);
+    ray_t* r = fb_decode(ts, nt, widths, (const uint8_t*)ray_data(pl),
+                         q_count(pl), big);
     ray_release(pl);
     return r;
 }
@@ -197,7 +199,7 @@ static ray_t* fb_save(ray_t* fsym, ray_t* y) {
             ray_release(path);
             return q_err(QE_NYI);
         }
-        bad = q_io_write_all(path, ray_data(v), (size_t)(ray_len(v) * esz));
+        bad = q_io_write_all(path, ray_data(v), (size_t)(q_count(v) * esz));
         ray_release(v);
     }
     ray_release(path);
@@ -210,7 +212,7 @@ ray_t* q_io_filebinary_wrap(ray_t* x, ray_t* y) {
     if (!x) return q_err(QE_TYPE);
     if (x->type == -RAY_SYM) return fb_save(x, y);
     if (x->type == RAY_LIST) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t** e = (ray_t**)ray_data(x);
         if (n == 2) return fb_read(e[0], e[1], y);
         /* (file;blockSize;algorithm;level) — ref/file-binary.md § Compression:
@@ -228,7 +230,8 @@ ray_t* q_io_filebinary_wrap(ray_t* x, ray_t* y) {
             if (!path) return q_err(QE_TYPE);
             ray_t* bad = ray_eval_get_restricted() ? q_err(QE_ACCESS)
                        : q_io_zip_write(path, (const uint8_t*)ray_data(y),
-                                        (size_t)ray_len(y), (int)lbs, (int)alg, (int)lvl);
+                                        (size_t) q_count(y), (int)lbs,
+                                        (int)alg, (int)lvl);
             ray_release(path);
             if (bad) return bad;
             ray_retain(e[0]);

@@ -14,6 +14,7 @@
   #include <winsock2.h>
   #include <ws2tcpip.h>      /* socklen_t */
 #endif
+#include "qlang/q_count.h"
 #include "qlang/ops/q_sys.h"
 #include "qlang/base/q_err.h"
 #include "qlang/eval/q_eval.h" /* q_eval / q_eval_dot_wrap — timing + .Q.ts */

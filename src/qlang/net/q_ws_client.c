@@ -8,6 +8,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L    /* clock_gettime / CLOCK_MONOTONIC */
 #endif
+#include "qlang/q_count.h"
 #include <rayforce.h>
 #include "qlang/base/q_err.h"
 #include "qlang/q_prim.h"

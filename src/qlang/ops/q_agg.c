@@ -5,6 +5,7 @@
  * internal surface lives in q_registry_internal.h.  See q_registry.h for
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
 #include "qlang/ops/q_index.h" /* q_index_at — first/last of an empty ride the miss law */
@@ -68,7 +69,7 @@ static void runscan_store_f(char* o, int esz, int64_t i, double v) {
 /* running max/min over a byte-uniform vector — charv (kdb `maxs "genie"` ->
  * "ggnnn") and u8 alike; bytes have no null, so no identity arm. */
 static ray_t* runscan_bytes(ray_t* x, q_rs_kind k) {
-    int64_t n = ray_len(x);
+    int64_t n = q_count(x);
     ray_t* out = ray_vec_new(x->type, n > 0 ? n : 1); out->len = n;
     const uint8_t* p = (const uint8_t*)ray_data(x);
     uint8_t* o = (uint8_t*)ray_data(out);
@@ -91,7 +92,7 @@ static ray_t* runscan(ray_t* x, q_rs_kind k) {
     if ((k == RS_MAXS || k == RS_MINS) && ray_is_vec(x) && ray_is_bytelike(x->type))
         return runscan_bytes(x, k);
     if (!q_vec_is_num(x)) return q_err(QE_TYPE);
-    int64_t n = ray_len(x);
+    int64_t n = q_count(x);
     if (k == RS_AVGS) {
         ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1); out->len = n;
         double* o = (double*)ray_data(out);
@@ -171,7 +172,7 @@ ray_t* q_ratios_wrap(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (ray_is_atom(x)) { ray_retain(x); return x; }
     if (!q_vec_is_num(x)) return q_err(QE_TYPE);
-    int64_t n = ray_len(x);
+    int64_t n = q_count(x);
     ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1); out->len = n;
     double* o = (double*)ray_data(out);
     for (int64_t i = 0; i < n; i++) {
@@ -201,7 +202,7 @@ ray_t* q_prd_wrap(ray_t* x) {
         return q_err(QE_TYPE);
     if (ray_is_atom(x)) return agg_atom_result(x);
     if (x->type == RAY_LIST) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t** e = (ray_t**)ray_data(x);
         if (n == 0) return ray_i64(1);                 /* empty product (derived) */
         ray_t* acc = e[0];
@@ -216,7 +217,7 @@ ray_t* q_prd_wrap(ray_t* x) {
     }
     if (!q_vec_is_num(x))
         return q_err(QE_TYPE);
-    int64_t n = ray_len(x);
+    int64_t n = q_count(x);
     if (q_vec_is_float(x)) {
         double acc = 1;
         for (int64_t i = 0; i < n; i++) {
@@ -244,8 +245,8 @@ ray_t* q_wavg_wrap(ray_t* x, ray_t* y) {
     int xatom = ray_is_atom(x);
     if (!q_vec_is_num(y) && !ray_is_atom(y)) return q_err(QE_TYPE);
     if (!xatom && !q_vec_is_num(x)) return q_err(QE_TYPE);
-    int64_t n = ray_is_atom(y) ? (xatom ? 1 : ray_len(x)) : ray_len(y);
-    if (!xatom && !ray_is_atom(y) && ray_len(x) != ray_len(y))
+    int64_t n = ray_is_atom(y) ? q_count(x) : q_count(y);
+    if (!xatom && !ray_is_atom(y) && q_count(x) != q_count(y))
         return q_err(QE_LENGTH);
     double sp = 0, sw = 0;
     for (int64_t i = 0; i < n; i++) {
@@ -275,7 +276,7 @@ static ray_t* mwin(ray_t* nx, ray_t* x, q_mw_kind k) {
         return q_err(QE_TYPE);
     }
     if (k == MW_MIN && N <= 0) { ray_retain(x); return x; }
-    int64_t n = ray_len(x);
+    int64_t n = q_count(x);
     int isf = q_vec_is_float(x);
     /* msum/mmax/mmin keep the input width (domain_dyadic.qcmd grids: e -> e);
      * mcount -> j, mdev -> f (ref/count.md, ref/dev.md transcripts). */
@@ -345,7 +346,7 @@ ray_t* q_ema_wrap(ray_t* a, ray_t* x) {
         if (x && ray_is_atom(x)) { ray_retain(x); return x; }
         return q_err(QE_TYPE);
     }
-    int64_t n = ray_len(x);
+    int64_t n = q_count(x);
     ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1); out->len = n;
     double* o = (double*)ray_data(out);
     double e = 0; int started = 0;
@@ -366,7 +367,7 @@ ray_t* q_ema_wrap(ray_t* a, ray_t* x) {
  * with by construction. */
 static ray_t* end_item(ray_t* x, int64_t i, ray_t* (*base)(ray_t*)) {
     if (!x || RAY_IS_ERR(x) || ray_is_lazy(x) ||
-        !(x->type == RAY_LIST || ray_is_vec(x)) || ray_len(x) != 0)
+        !(x->type == RAY_LIST || ray_is_vec(x)) || q_count(x) != 0)
         return base(x);
     ray_t* ia = ray_i64(i);
     ray_t* r  = q_index_at(x, (ray_t* const[]){ ia }, 1);
@@ -381,7 +382,7 @@ ray_t* q_last_wrap(ray_t* x)  { return end_item(x, -1, ray_last_fn); }
  * is a timestamp; Load Fixed pins `sum("DT";8 9)0:enlist"…"`).  Non-lists
  * keep the base vector aggregate. */
 ray_t* q_sum_wrap(ray_t* x) {
-    if (x && x->type == RAY_LIST && ray_len(x) > 0) {
+    if (x && x->type == RAY_LIST && q_count(x) > 0) {
         /* fold q `+` over the items via call_fn2 (the ATOMIC dispatch —
          * ray_add_fn alone is the atom kernel; vectors broadcast in eval). */
         ray_t* plus = q_registry_lookup_name("+", 1, Q_DYADIC);   /* borrowed */
@@ -389,7 +390,7 @@ ray_t* q_sum_wrap(ray_t* x) {
         ray_t** e = (ray_t**)ray_data(x);
         ray_t* acc = e[0];
         ray_retain(acc);
-        for (int64_t i = 1; i < ray_len(x); i++) {
+        for (int64_t i = 1; i < q_count(x); i++) {
             ray_t* nx = call_fn2(plus, acc, e[i]);
             ray_release(acc);
             if (!nx || RAY_IS_ERR(nx)) return nx ? nx : q_err(QE_OOM);
@@ -405,8 +406,8 @@ ray_t* q_sum_wrap(ray_t* x) {
  * them and stays the base kernel's: that divisor is rayfall's own tested
  * contract (test/rfl/null/agg.rfl) and the one group.c's SQL AVG shares. */
 ray_t* q_avg_wrap(ray_t* x) {
-    if (is_list(x) && ray_len(x) > 0) {
-        int64_t n = ray_len(x);
+    if (is_list(x) && q_count(x) > 0) {
+        int64_t n = q_count(x);
         ray_t** e = (ray_t**)ray_data(x);
         double s = 0;
         for (int64_t i = 0; i < n; i++) {

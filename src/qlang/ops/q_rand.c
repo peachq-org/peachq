@@ -5,6 +5,7 @@
  * Split from ops/q_list.c (corridor pass, 2026-07-22) — pure function moves;
  * the shared internal surface lives in q_registry_internal.h. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home */
@@ -211,7 +212,7 @@ static ray_t* deal_indices(int64_t n, int64_t total) {
 
 /* Deal/permute n indices then gather them from the list y (collapsed). */
 static ray_t* deal_pick(int64_t n, ray_t* y) {
-    ray_t* idx = deal_indices(n, ray_len(y));
+    ray_t* idx = deal_indices(n, q_count(y));
     if (!idx || RAY_IS_ERR(idx)) return idx;
     ray_t* out = ray_at_fn(y, idx);
     ray_release(idx);
@@ -242,7 +243,8 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
             if (m < 0) return q_err(QE_TYPE);
             return deal_indices(m, m);
         }
-        if (y && (ray_is_vec(y) || y->type == RAY_LIST)) return deal_pick(ray_len(y), y);
+        if (y && (ray_is_vec(y) || y->type == RAY_LIST)) return deal_pick(q_count(y),
+                                                                          y);
         return q_err(QE_NYI);
     }
     int deal = nx < 0;
@@ -253,7 +255,7 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
          * (ray_rand_fn), not the env name — the bootstrap shadow-rebinds root
          * `rand` to `.q.rand`. */
         ray_t* cnt = ray_i64(n);
-        ray_t* len = ray_i64(ray_len(y));
+        ray_t* len = ray_i64(q_count(y));
         ray_t* idx = ray_rand_fn(cnt, len);
         ray_release(cnt);
         ray_release(len);

@@ -4,6 +4,7 @@
  * ones inflate a block on first touch (the fault handler), the rest decode.
  * Single-threaded q layer. */
 #define _GNU_SOURCE            /* MAP_ANONYMOUS / MAP_FIXED */
+#include "qlang/q_count.h"
 #include "qlang/io/q_splay.h"
 #include "qlang/io/q_provider.h" /* `:pq: is never a splay directory */
 #include "qlang/io/q_io.h"           /* q_io_file_path */
@@ -524,7 +525,7 @@ static ray_t* splay_open(int64_t sym, ray_t* dir, splay_ent** out) {
     if (!dotd || RAY_IS_ERR(dotd)) { splay_free_partial(&e); return dotd ? dotd : q_err(QE_IO); }
     if (dotd->type != RAY_SYM) { ray_release(dotd); splay_free_partial(&e); return q_err(QE_CORRUPT); }
     e.keys = dotd;
-    e.ncols = ray_len(dotd);
+    e.ncols = q_count(dotd);
     e.cols = (splay_col*)calloc((size_t)(e.ncols > 0 ? e.ncols : 1), sizeof(splay_col));
     if (!e.cols) { splay_free_partial(&e); return q_err(QE_OOM); }
     for (int64_t i = 0; i < e.ncols; i++) {
@@ -680,7 +681,7 @@ static int64_t splay_col_find(splay_ent* e, int64_t name) {
 /* the named columns (cols NULL = every .d column) read whole into a table, the row-count agreement checked, the
  * directory sym marked in aux; NULL when a name is not on disk (the caller's unresolved form) */
 static ray_t* splay_table(splay_ent* e, ray_t* cols) {
-    int64_t nc = cols ? ray_len(cols) : e->ncols;
+    int64_t nc = cols ? q_count(cols) : e->ncols;
     ray_t* tbl = ray_table_new(nc > 0 ? nc : 1);
     if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_OOM);
     int64_t rows = -1;
@@ -689,7 +690,7 @@ static ray_t* splay_table(splay_ent* e, ray_t* cols) {
         if (i < 0) { ray_release(tbl); return NULL; }
         ray_t* col = splay_col_read(e, i);
         if (RAY_IS_ERR(col)) { ray_release(tbl); return col; }
-        int64_t n = ray_is_vec(col) || col->type == RAY_LIST || col->type == RAY_ENUM ? ray_len(col) : -1;
+        int64_t n = ray_is_vec(col) || col->type == RAY_LIST || col->type == RAY_ENUM ? q_count(col) : -1;
         if (rows < 0) rows = n;
         if (n < 0 || n != rows) {
             ray_release(col); ray_release(tbl);
@@ -723,7 +724,7 @@ ray_t* q_splay_flip(ray_t* cols, int64_t dirsym) {
         ray_t* t = splay_table(e, cols);
         if (t) return t;
     }
-    int64_t nc = ray_len(cols);                         /* unresolved: `()` per name, queried later */
+    int64_t nc = q_count(cols);                         /* unresolved: `()` per name, queried later */
     ray_t* tbl = ray_table_new(nc > 0 ? nc : 1);
     for (int64_t i = 0; i < nc && tbl && !RAY_IS_ERR(tbl); i++) {
         ray_t* empty = ray_list_new(0);

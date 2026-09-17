@@ -6,6 +6,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L    /* clock_gettime / CLOCK_MONOTONIC */
 #endif
+#include "qlang/q_count.h"
 #include <rayforce.h>
 #include "qlang/base/q_err.h"
 #include "qlang/q_prim.h"
@@ -686,7 +687,7 @@ ray_t* q_http_client_read_slice(ray_t* url, int64_t off, int64_t want) {
     if (st == 416) { ray_release(b); return ray_vec_from_raw(RAY_BYTE_ONLY, NULL, 0); }
     b = http_status_body(b, st);
     if (RAY_IS_ERR(b) || st == 206) return b;              /* 206: the body IS the slice */
-    int64_t at = off, n = ray_len(b);                      /* 200: Range ignored — slice here */
+    int64_t at = off, n = q_count(b);                      /* 200: Range ignored — slice here */
     int64_t take = q_io_clamp(n, &at, want);
     ray_t* out = ray_vec_from_raw(RAY_BYTE_ONLY,
                                   take ? (const uint8_t*)ray_data(b) + at : NULL, take);

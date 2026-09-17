@@ -2,6 +2,7 @@
  * it IS the self-reference "previous value"), bit 2 = in-recalc ('loop at
  * recalc, not creation).  The env entry is the authority; the name roster
  * self-heals when a view is replaced or expunged. */
+#include "qlang/q_count.h"
 #include "qlang/eval/q_view.h"
 #include "qlang/q_prim.h"
 #include "qlang/eval/q_eval.h"
@@ -114,9 +115,9 @@ static void deps_scan(ray_t* n, ray_t** deps, int* oom) {
         *deps = nv;
         return;
     }
-    if (n->type == RAY_SYM && ray_len(n) == 1) return;
+    if (n->type == RAY_SYM && q_count(n) == 1) return;
     if (q_eval_fn_value(n) || n->type != RAY_LIST) return;
-    int64_t k = ray_len(n);
+    int64_t k = q_count(n);
     if (k == 1) return;
     ray_t** e = (ray_t**)ray_data(n);
     for (int64_t i = 0; i < k; i++) deps_scan(e[i], deps, oom);
@@ -177,7 +178,7 @@ static void mark_dependents(int64_t sym) {
             if (!c || (c->aux[1] & VIEW_PENDING)) continue;
             ray_t* d = q_eval_apply_view_slots(c)[1];
             const void* dd = ray_data(d);
-            for (int64_t j = 0, m = ray_len(d); j < m; j++) {
+            for (int64_t j = 0, m = q_count(d); j < m; j++) {
                 ray_t* dep = view_of(ray_read_sym(dd, j, RAY_SYM, d->attrs));
                 if (dep && (dep->aux[1] & VIEW_PENDING)) {
                     c->aux[1] |= VIEW_PENDING;
@@ -310,7 +311,7 @@ int q_view_intercept(ray_t* ast, const char* src, ray_t** out) {
     *out = NULL;
     if (!ast || ast->type != RAY_LIST) return 0;
     if (q_eval_apply_frame_depth() > q_dbg_prompt_frames()) return 0;
-    int64_t n = ray_len(ast);
+    int64_t n = q_count(ast);
     ray_t** e = (ray_t**)ray_data(ast);
     if (n < 3 || !e[0]) return 0;
     const view_syms_t* S = vsyms();
@@ -319,7 +320,7 @@ int q_view_intercept(ray_t* ast, const char* src, ray_t** out) {
     if (e[0]->type == -RAY_SYM && e[0]->i64 == S->gcolon && n == 3) {
         asn = ast;
     } else if (q_parse_is_seq_head(e[0]) && e[1] && e[1]->type == RAY_LIST &&
-               ray_len(e[1]) == 3) {
+               q_count(e[1]) == 3) {
         ray_t** a1 = (ray_t**)ray_data(e[1]);
         if (a1[0] && a1[0]->type == -RAY_SYM && a1[0]->i64 == S->gcolon) {
             asn = e[1];
@@ -412,7 +413,7 @@ ray_t* q_view_names(int64_t ns_sym, int pending) {
     for (int i = 0; i < m && out && !RAY_IS_ERR(out); i++)
         out = ray_vec_append(out, &ids[i]);
     ray_sys_free(ids);
-    if (out && !RAY_IS_ERR(out) && !pending && ray_len(out) > 0)
+    if (out && !RAY_IS_ERR(out) && !pending && q_count(out) > 0)
         out->attrs |= RAY_ATTR_SORTED;         /* `\b` prints `s#...` (syscmds.md) */
     return out;
 }
@@ -432,11 +433,11 @@ ray_t* q_view_zb(void) {
         if (!c) continue;
         ray_t* d = q_eval_apply_view_slots(c)[1];
         const void* dd = ray_data(d);
-        for (int64_t j = 0, m = ray_len(d); j < m; j++) {
+        for (int64_t j = 0, m = q_count(d); j < m; j++) {
             int64_t dep = ray_read_sym(dd, j, RAY_SYM, d->attrs);
             int64_t at = -1;
             const void* kd = ray_data(keys);
-            for (int64_t k = 0, kn = ray_len(keys); k < kn; k++)
+            for (int64_t k = 0, kn = q_count(keys); k < kn; k++)
                 if (ray_read_sym(kd, k, RAY_SYM, keys->attrs) == dep) {
                     at = k;
                     break;

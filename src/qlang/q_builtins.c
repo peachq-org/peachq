@@ -2,6 +2,7 @@
  * is a bootstrap-only kernel catalogue: capture_base and the registry snapshot
  * it here, then q never consults it. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/q_builtins.h"
 #include "qlang/base/q_err.h"
 #include "qlang/eval/q_eval.h" /* q_eval_value_wrap / the carrier predicates */
@@ -16,6 +17,7 @@
 #include "qlang/q_console.h"  /* q_console_show — show's display sink */
 #include "qlang/base/q_type.h"     /* q_type_of — the `type` verb's type-number home */
 #include "qlang/io/q_provider.h"     /* provider carriers: 98h, count via provider */
+#include "ops/ops.h"                 /* ray_is_lazy / ray_lazy_materialize */
 #include "lang/env.h"       /* ray_fn_unary; ray_env_get = bootstrap catalogue reads */
 #include "lang/eval.h"      /* RAY_FN_NONE */
 #include "table/sym.h"      /* ray_sym_vec_cell */
@@ -80,7 +82,7 @@ static ray_t* id_dict(ray_t* x) {
     ray_t* v = ray_dict_vals(x);
     if (!k || k->type != RAY_SYM)
         return q_err(QE_TYPE);
-    int64_t n = ray_len(k);
+    int64_t n = q_count(k);
     ray_t* nk = ray_sym_vec_new(RAY_SYM_W64, n);
     int64_t stack[64];
     int64_t* used = (n <= 64) ? stack : (int64_t*)malloc((size_t)n * sizeof(int64_t));
@@ -164,7 +166,7 @@ int8_t q_builtins_type_num(ray_t* x) { return x ? type_of(x) : 0; }
  * char-vector strings). */
 static int uniform_list(ray_t* x, int8_t* elt) {
     if (!x || x->type != RAY_LIST) return 0;
-    int64_t n = ray_len(x);
+    int64_t n = q_count(x);
     if (n == 0) return 0;
     ray_t** e = (ray_t**)ray_data(x);
     int8_t t0 = 0;
@@ -196,41 +198,30 @@ char q_ty_char(ray_t* x) {
 }
 
 
-/* q `count` of any function value is 1 (kdb: functions are atoms) — a
- * carrier's raw len is its slot count, which must never leak. */
+/* q `count` as a value: carriers answer through the provider, lazy values stay lazy. */
 ray_t* q_count_fn(ray_t* x) {
-    if (x && q_eval_apply_is_fn(x)) return ray_i64(1);
-    /* a mapping's count is its DOMAIN's count — one rule for a plain dict and a
-     * keyed table, whose domain is a table (borrowed ref: do not release). */
-    if (x && x->type == RAY_DICT) {
-        if (q_provider_carrier_is(x)) return q_provider_carrier_count(x);
-        return q_count_fn(ray_dict_keys(x));
-    }
-    return g_base_count ? g_base_count(x)
-                        : q_err(QE_TYPE);
+    if (x && q_provider_carrier_is(x)) return q_provider_carrier_count(x);
+    if (ray_is_lazy(x)) return g_base_count(x);              /* stays in the chain */
+    int64_t n = q_count(x);
+    return n < 0 ? q_err(QE_TYPE) : ray_i64(n);
 }
 
-/* C-long specialization of q_count_fn: the count as an int64 (-1 on error),
- * for callers that want the number rather than a q value.  Consumes the
- * intermediate count value. */
-int64_t q_builtins_count_long(ray_t* x) {
-    /* Allocation-free lane for the shapes the ITERATORS ask about: they call
-     * this once per application, and applications nest, so building a count
-     * value here costs a malloc per outer item (integration/i078 went 5.9s ->
-     * 15.4s when the adverb arms started routing through the boxed path).
-     * Same answers as q_count_fn below, which still owns every other shape. */
-    if (x && !RAY_IS_ERR(x) && !q_eval_apply_is_fn(x)) {
-        if (x->type == RAY_DICT && !q_provider_carrier_is(x))
-            return q_builtins_count_long(ray_dict_keys(x));
-        if (x->type == RAY_TABLE) return ray_table_nrows(x);
-        if (x->type == RAY_LIST || (ray_is_vec(x) && x->type != RAY_STR))
-            return ray_len(x);
+/* q_count's tail: the shapes whose count is not a field read. */
+int64_t q_builtins_count_boxed(ray_t* x) {
+    if (q_provider_carrier_is(x)) {
+        ray_t* c = q_provider_carrier_count(x);
+        int64_t n = (c && c->type == -RAY_I64) ? c->i64 : -1;
+        ray_release(c);
+        return n;
     }
-    ray_t* c = q_count_fn(x);
-    if (!c || RAY_IS_ERR(c)) { ray_release(c); return -1; }
-    int64_t n = c->i64;
-    ray_release(c);
-    return n;
+    if (ray_is_lazy(x)) {
+        ray_retain(x);                                           /* materialize consumes */
+        ray_t* v = ray_lazy_materialize(x);
+        int64_t n = q_count(v);
+        ray_release(v);
+        return n;
+    }
+    return ray_is_atom(x) ? 1 : -1;
 }
 
 /* Capture a base unary's fn pointer AND attrs — a wrapper must be bound with

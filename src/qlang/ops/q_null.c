@@ -1,6 +1,7 @@
 /* ops/q_null.c — the `null` verb body.  Split from base/q_type.c (2026-08-02)
  * so base/ holds only the type-axis PREDICATES other code asks: a verb wrapper
  * needs q_list_collapse, and base/ must not reach the registry. */
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h"
 #include "qlang/base/q_type.h"  /* q_type_is_null_sym — the null-symbol divergence */
 #include "lang/internal.h"      /* is_collection, atomic_map_unary, ray_nil_fn */

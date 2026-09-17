@@ -2,6 +2,7 @@
  * the type-number / null axes, and the tag<->name vocabulary. Relocated out of
  * the frozen base header (lane extensions) and out of q_builtins/q_dollar/
  * q_math/q_table (the type + null knowledge) so each has ONE obvious home. */
+#include "qlang/q_count.h"
 #include "qlang/base/q_type.h"
 #include "qlang/base/q_err.h"          /* q_err / QE_TYPE — the throwing gates */
 #include "lang/internal.h"        /* as_i64, is_numeric/is_temporal, is_collection,
@@ -376,7 +377,7 @@ int q_type_is_null_sym(ray_t* x) {
  * the ATOM lane (RAY_ATOM_IS_NULL) knew it. */
 int q_type_vec_is_null(ray_t* x, int64_t i) {
     if (x && x->type == RAY_SYM) return sym_str_is_null(ray_sym_vec_cell(x, i));
-    if (x && x->type == RAY_CHARV && i >= 0 && i < ray_len(x))
+    if (x && x->type == RAY_CHARV && i >= 0 && i < q_count(x))
         return ((const uint8_t*)ray_data(x))[i] == 0x20;
     return ray_vec_is_null(x, i);
 }

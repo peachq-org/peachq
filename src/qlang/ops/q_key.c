@@ -1,4 +1,5 @@
 /* q_key.c — the `key` / `keys` verb bodies (contract: q_key.h). */
+#include "qlang/q_count.h"
 #include "qlang/ops/q_key.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_env.h"              /* q_env_resolve / _ns_roster / _marker_sym */

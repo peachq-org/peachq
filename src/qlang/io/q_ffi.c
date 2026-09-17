@@ -32,6 +32,7 @@
  * (single-evaluator law); a foreign-thread invocation returns zeros without
  * touching q.  Closures and their cifs are permanent (KX parity). */
 #define _GNU_SOURCE /* RTLD_DEFAULT */
+#include "qlang/q_count.h"
 #include "qlang/io/q_ffi.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_env.h"
@@ -119,7 +120,7 @@ static void* qffi_dlsym_name(ray_t* name, int* bad_shape) {
         if (!s || ray_str_len(s) >= sizeof(fn)) { *bad_shape = 1; return NULL; }
         memcpy(fn, ray_str_ptr(s), ray_str_len(s));
         fn[ray_str_len(s)] = '\0';
-    } else if (name->type == RAY_SYM && ray_len(name) == 2) {
+    } else if (name->type == RAY_SYM && q_count(name) == 2) {
         for (int i = 0; i < 2; i++) {
             ray_t* s = ray_sym_vec_cell(name, i);
             char*  dst = i ? fn : lib;
@@ -203,7 +204,7 @@ static void qffi_sym_writeback(qffi_symarg* sa) {
 }
 
 static int qffi_is_callback_tuple(ray_t* a) {
-    if (a->type != RAY_LIST || ray_len(a) < 2 || ray_len(a) > 3) return 0;
+    if (a->type != RAY_LIST || q_count(a) < 2 || q_count(a) > 3) return 0;
     ray_t* head = ((ray_t**)ray_data(a))[0];
     return head->type == RAY_QFN || head->type == RAY_LAMBDA ||
            head->type == RAY_UNARY || head->type == RAY_BINARY || head->type == RAY_VARY;
@@ -308,7 +309,7 @@ static ray_t* qffi_marshal_arg(qffi_ctx* c, int i, ray_t* a, char letter, ffi_ty
         }
         case RAY_NULL: s->p = NULL; return NULL;
         case RAY_CHARV: {
-            int64_t  n = ray_len(a);
+            int64_t  n = q_count(a);
             uint8_t* d = ray_data(a);
             if (n > 0 && d[n - 1] == 0) { s->p = d; return NULL; } /* explicit "\000": in place */
             char* t = qffi_strdup_n((const char*)d, (size_t)n);    /* auto-terminate divergence */
@@ -318,7 +319,7 @@ static ray_t* qffi_marshal_arg(qffi_ctx* c, int i, ray_t* a, char letter, ffi_ty
             return NULL;
         }
         case RAY_SYM: {
-            int64_t      n  = ray_len(a);
+            int64_t      n  = q_count(a);
             qffi_symarg* sa = &c->syms[c->nsyms];
             sa->vec = a;
             sa->n   = n;
@@ -493,10 +494,10 @@ static void qffi_closure_entry(ffi_cif* cif, void* ret, void** argv, void* ud) {
 
 static ray_t* qffi_make_closure(qffi_ctx* c, ray_t* tuple, void** code_out) {
     ray_t**     e  = (ray_t**)ray_data(tuple);
-    int64_t     tn = ray_len(tuple);
+    int64_t     tn = q_count(tuple);
     const char* lp;
     int64_t     ln;
-    if (e[1]->type == RAY_CHARV)       { lp = ray_data(e[1]); ln = ray_len(e[1]); }
+    if (e[1]->type == RAY_CHARV)       { lp = ray_data(e[1]); ln = q_count(e[1]); }
     else if (e[1]->type == -RAY_CHARV) { lp = (const char*)&e[1]->u8; ln = 1; }
     else return q_err(QE_TYPE);
     char rl = ' '; /* KX default: a 2-tuple callback returns void */
@@ -567,7 +568,7 @@ static ray_t* qffi_args_norm(ray_t* args, int64_t nargs,
                              ray_t** single, ray_t*** items, int64_t* n) {
     if (args->type == RAY_LIST) {
         *items = (ray_t**)ray_data(args);
-        *n     = ray_len(args);
+        *n     = q_count(args);
         if (*n > 0 && (*items)[*n - 1]->type == RAY_NULL) (*n)--;
         if (nargs >= 0) {
             while (*n > nargs && (*items)[*n - 1]->type == RAY_NULL) (*n)--;
@@ -588,7 +589,7 @@ static ray_t* qffi_bind_fn(ray_t** args, int64_t n) {
     ray_t*      types = args[1];
     const char* lp;
     int64_t     ln;
-    if (types->type == RAY_CHARV)       { lp = ray_data(types); ln = ray_len(types); }
+    if (types->type == RAY_CHARV)       { lp = ray_data(types); ln = q_count(types); }
     else if (types->type == -RAY_CHARV) { lp = (const char*)&types->u8; ln = 1; }
     else return q_err(QE_TYPE);
     if (args[2]->type != -RAY_CHARV) return q_err(QE_TYPE);
@@ -663,7 +664,7 @@ static ray_t* qffi_call_fn(ray_t** args, int64_t n) {
 static ray_t* qffi_parse_rtf(ray_t* rtf, char* rl, ray_t** name) {
     *rl = 'i';
     if (rtf->type == -RAY_SYM || rtf->type == RAY_SYM) { *name = rtf; return NULL; }
-    if (rtf->type == RAY_LIST && ray_len(rtf) == 2) {
+    if (rtf->type == RAY_LIST && q_count(rtf) == 2) {
         ray_t** e = (ray_t**)ray_data(rtf);
         if (e[0]->type != -RAY_CHARV) return q_err(QE_TYPE);
         *rl   = (char)e[0]->u8;

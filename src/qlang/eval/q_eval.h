@@ -64,8 +64,8 @@ ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n);
  * (or interned sym) to args (borrowed); owned result; an unbound name
  * answers 'name-of-it.  THE one home for a C-side "call the q function
  * called X": resolve, apply, release live here and nowhere else. */
-ray_t* q_eval_call_name(const char* name, size_t n, ray_t** args, int64_t argc);
-ray_t* q_eval_call_sym(int64_t sym, ray_t** args, int64_t argc);
+ray_t* q_eval_apply_call_name(const char* name, size_t n, ray_t** args, int64_t argc);
+ray_t* q_eval_apply_call_sym(int64_t sym, ray_t** args, int64_t argc);
 
 /* `@` / `.` manifest-row entrypoints (q_ops.c): 2 args Apply/Index; 3 args
  * Trap on a callable head, Amend ternary on a data head; 4 args Amend

@@ -3,6 +3,7 @@
 #ifndef RAY_OS_WINDOWS
   #define _GNU_SOURCE            /* openat / O_NOFOLLOW / O_DIRECTORY */
 #endif
+#include "qlang/q_count.h"
 #include <rayforce.h>
 #include "qlang/net/q_http.h"
 #include "qlang/q_prim.h"
@@ -11,7 +12,7 @@
 #include "qlang/html_assets_gen.h" /* q_html_assets[] — codegen'd from src/qlang/html/ */
 #include "qlang/q_console.h"   /* q_console_str/_reset — drain handler show output */
 #include "qlang/q_env.h"       /* q_env_get — `.h.HOME` / `.h.ty`, the `.z.*` handlers */
-#include "qlang/eval/q_eval.h" /* q_eval_call_name — handler firing */
+#include "qlang/eval/q_eval.h" /* q_eval_apply_call_name — handler firing */
 #include "mem/sys.h"
 #include "picohttpparser.h"
 #include <stdlib.h>
@@ -225,7 +226,7 @@ static bool http_str_atom_safe(ray_t* v, char* out, size_t outsz) {
  * integer atom for status; payload must be a RAY_STR atom.  Structural only. */
 bool q_http_zac_parse(const ray_t* r, int64_t* status_out,
                       const char** pay_out, size_t* paylen_out) {
-    if (!r || RAY_IS_ERR(r) || r->type != RAY_LIST || ray_len(r) != 2)
+    if (!r || RAY_IS_ERR(r) || r->type != RAY_LIST || q_count(r) != 2)
         return false;
     ray_t** it = (ray_t**)ray_data((ray_t*)r);
     ray_t*  s  = it[0];
@@ -647,7 +648,7 @@ static int zh_dispatch_call(ray_sock_t fd, const char* method, size_t mlen,
     ray_t* arg = zh_build_arg(method, mlen, text_p, text_len, hdrs, nh);
     if (!arg) { q_http_send_simple(fd, 500, "Internal Server Error"); return 0; }
 
-    ray_t* r = q_eval_call_name(which, strlen(which), &arg, 1);
+    ray_t* r = q_eval_apply_call_name(which, strlen(which), &arg, 1);
     ray_release(arg);
     /* drain handler show/0N! to the server console (zts_tick pattern) */
     { const char* con = q_console_str();
@@ -779,7 +780,7 @@ static int zac_gate(ray_sock_t fd, const char* target, size_t tlen,
     ray_t* arg = zh_build_arg(NULL, 0, target, tlen, hdrs, nh);
     if (!arg) { q_http_send_simple(fd, 500, "Internal Server Error"); return ZAC_DONE; }
 
-    ray_t* r = q_eval_call_name(".z.ac", 5, &arg, 1);
+    ray_t* r = q_eval_apply_call_name(".z.ac", 5, &arg, 1);
     ray_release(arg);
     { const char* con = q_console_str();     /* drain handler show/0N! */
       if (con && *con) { fputs(con, stdout); fflush(stdout); }

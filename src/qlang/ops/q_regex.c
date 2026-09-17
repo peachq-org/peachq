@@ -15,6 +15,7 @@
  * module).  Nesting deeper than one level, non-text elements and tables all fail
  * as `'type` in the leaf, without a guard: rejecting is reversible, accepting is
  * the one-way door. */
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* q_rlike_wrap's decl — the manifest wrap */
 #include "qlang/base/q_err.h"
 #include "qlang/eval/q_eval.h"     /* q_eval_apply_truthy — THE truthiness home */

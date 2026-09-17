@@ -12,6 +12,7 @@
  * RAY_FN_RESTRICTED note: nothing here touches the filesystem directly — the
  * byte core owns both the access and the restricted-mode gate. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* q_str_split_lines, q_list_collapse */
 #include "qlang/base/q_err.h"
 #include "qlang/io/q_io.h"  /* the byte core: paths, the slice read, the write */
@@ -31,7 +32,7 @@ static ray_t* ft_save_text(ray_t* fsym, ray_t* y) {
         ray_release(path);
         return q_err(QE_TYPE);
     }
-    int64_t n = ray_len(y);
+    int64_t n = q_count(y);
     size_t total = 0;
     for (int64_t i = 0; i < n; i++) {
         ray_t* ia = ray_i64(i);
@@ -151,7 +152,7 @@ static ray_t* ft_prepare(char delim, ray_t* y) {
     ray_t** litems = NULL;
     int is_table = y && y->type == RAY_TABLE;
     if (is_table) nc = ray_table_ncols(y);
-    else if (y && y->type == RAY_LIST) { nc = ray_len(y); litems = (ray_t**)ray_data(y); }
+    else if (y && y->type == RAY_LIST) { nc = q_count(y); litems = (ray_t**)ray_data(y); }
     else return q_err(QE_TYPE);
     (void)namev;
     if (nc == 0) return ray_list_new(1);
@@ -162,7 +163,7 @@ static ray_t* ft_prepare(char delim, ray_t* y) {
         int64_t l;
         if (col && col->type == -RAY_STR) l = (int64_t)ray_str_len(col);  /* char column */
         else if (col && (ray_is_vec(col) || col->type == RAY_LIST)) {
-            l = ray_len(col);
+            l = q_count(col);
             if (col->type == RAY_LIST) {                  /* must be all strings */
                 ray_t** it = (ray_t**)ray_data(col);
                 for (int64_t i = 0; i < l; i++)
@@ -265,7 +266,7 @@ static int8_t ft_tag(char c, int* is_str, int* is_skip) {
 static ray_t* ft_lines_of(ray_t* path, int64_t off, int64_t want) {
     ray_t* b = q_io_read_slice(path, off, want, NULL);
     if (!b || RAY_IS_ERR(b)) return b;
-    int64_t n = ray_len(b);
+    int64_t n = q_count(b);
     ray_t* rows = q_str_split_lines(n ? (const char*)ray_data(b) : "", (size_t)n);
     ray_release(b);
     return rows;
@@ -295,7 +296,7 @@ static ray_t* ft_rows(ray_t* y, int* single) {
         return rows;
     }
     if (y->type == RAY_LIST || y->type == RAY_STR) {
-        int64_t n = ray_len(y);
+        int64_t n = q_count(y);
         ray_t** e = y->type == RAY_LIST ? (ray_t**)ray_data(y) : NULL;
         /* (filesymbol; offset[; length]) chunk form — the read verbs' triple,
          * clamped rather than 'domain (q_io.h). */
@@ -332,7 +333,7 @@ static ray_t* ft_rows(ray_t* y, int* single) {
 /* flag=1 (embedded line returns): merge physical rows whose quotes are
  * unbalanced with the following row, restoring the '\n'.  Owns+returns. */
 static ray_t* ft_merge_quoted(ray_t* rows) {
-    int64_t n = ray_len(rows);
+    int64_t n = q_count(rows);
     ray_t* out = ray_list_new(n > 0 ? n : 1);
     if (RAY_IS_ERR(out)) { ray_release(rows); return out; }
     ray_t** e = (ray_t**)ray_data(rows);
@@ -435,7 +436,7 @@ static ray_t* ft_load_csv(ray_t* types, ray_t* delimspec, ray_t* flag, ray_t* y)
         delim = ray_str_ptr(delimspec)[0];
     else if (delimspec &&
              (delimspec->type == RAY_LIST || delimspec->type == RAY_STR) &&
-             ray_len(delimspec) == 1) {
+             q_count(delimspec) == 1) {
         /* enlisted delimiter -> first row is column names.  `enlist ","` is
          * an engine STR VECTOR (10h), a boxed 1-list also accepted. */
         ray_t* ia = ray_i64(0);
@@ -480,7 +481,7 @@ static ray_t* ft_load_csv(ray_t* types, ray_t* delimspec, ray_t* flag, ray_t* y)
         if (!rows || RAY_IS_ERR(rows)) { free(tags); free(fstr); free(fskip); return rows; }
     }
     ray_t** rp = (ray_t**)ray_data(rows);
-    int64_t nrows = ray_len(rows);
+    int64_t nrows = q_count(rows);
     ray_t* result = NULL;
     if (single) {
         /* one delimited string -> list of parsed atoms */
@@ -489,7 +490,7 @@ static ray_t* ft_load_csv(ray_t* types, ray_t* delimspec, ray_t* flag, ray_t* y)
         fields = ft_fields(fields, ray_str_ptr(rp[0]), ray_str_len(rp[0]), delim);
         if (RAY_IS_ERR(fields)) { result = fields; goto done; }
         ray_t** fp = (ray_t**)ray_data(fields);
-        int64_t nf = ray_len(fields);
+        int64_t nf = q_count(fields);
         ray_t* out = ray_list_new((int64_t)nt);
         if (RAY_IS_ERR(out)) { ray_release(fields); result = out; goto done; }
         ray_t* empty = ray_str("", 0);
@@ -539,7 +540,7 @@ static ray_t* ft_load_csv(ray_t* types, ray_t* delimspec, ray_t* flag, ray_t* y)
                 goto done;
             }
             ray_t** fp = (ray_t**)ray_data(fields);
-            int64_t nf = ray_len(fields);
+            int64_t nf = q_count(fields);
             int64_t c = 0;
             for (size_t j = 0; j < nt; j++) {
                 if (fskip[j]) continue;
@@ -577,7 +578,7 @@ static ray_t* ft_load_csv(ray_t* types, ray_t* delimspec, ray_t* flag, ray_t* y)
             nmf = ft_fields(nmf, ray_str_ptr(rp[0]), ray_str_len(rp[0]), delim);
         if (RAY_IS_ERR(nmf)) { ray_release(cols); result = nmf; goto done; }
         ray_t** np = (ray_t**)ray_data(nmf);
-        int64_t nn = ray_len(nmf);
+        int64_t nn = q_count(nmf);
         ray_t* tbl = ray_table_new(nout > 0 ? nout : 1);
         int64_t c2 = 0;
         ray_t** cp = (ray_t**)ray_data(cols);
@@ -602,7 +603,7 @@ done:
 static ray_t* ft_load_fixed(ray_t* types, ray_t* widths, ray_t* y) {
     const char* ts = ray_str_ptr(types);
     size_t nt = ray_str_len(types);
-    if (nt == 0 || (int64_t)nt != ray_len(widths))
+    if (nt == 0 || (int64_t)nt != q_count(widths))
         return q_err(QE_LENGTH);
     /* widths must be positive (codex P1: a negative width made the slice
      * length negative and reached memcpy as a huge size_t). */
@@ -624,7 +625,7 @@ static ray_t* ft_load_fixed(ray_t* types, ray_t* widths, ray_t* y) {
     ray_t* rows = ft_rows(y, &single);
     if (!rows || RAY_IS_ERR(rows)) { free(tags); free(fstr); free(fskip); return rows; }
     ray_t** rp = (ray_t**)ray_data(rows);
-    int64_t nrows = ray_len(rows);
+    int64_t nrows = q_count(rows);
     int64_t nout = 0;
     for (size_t j = 0; j < nt; j++) if (!fskip[j]) nout++;
     ray_t* result = NULL;
@@ -789,7 +790,7 @@ static ray_t* ft_norm_types(ray_t* x) {
 static ray_t* ft_norm_x(ray_t* x) {
     if (x && x->type == -RAY_CHARV) { char c = (char)x->u8; return ray_str(&c, 1); }
     if (x && x->type == RAY_CHARV) {
-        if (ray_len(x) == 1) {
+        if (q_count(x) == 1) {
             ray_t* s = q_str_of_charv(x);
             if (!s || RAY_IS_ERR(s)) return s;
             ray_t* l = ray_list_new(1);
@@ -801,7 +802,7 @@ static ray_t* ft_norm_x(ray_t* x) {
         return q_str_of_charv(x);
     }
     if (x && x->type == RAY_LIST) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t** e = (ray_t**)ray_data(x);
         ray_t* out = ray_list_new(n > 0 ? n : 1);
         if (!out || RAY_IS_ERR(out)) return out;
@@ -836,12 +837,12 @@ static ray_t* io_filetext_impl(ray_t* x, ray_t* y) {
             return ft_kv(s, n, y);
         return q_err(QE_TYPE);
     }
-    if (x->type == RAY_LIST && (ray_len(x) == 2 || ray_len(x) == 3)) {
+    if (x->type == RAY_LIST && (q_count(x) == 2 || q_count(x) == 3)) {
         ray_t** e = (ray_t**)ray_data(x);
         if (e[0] && e[0]->type == -RAY_STR) {
-            if (ray_len(x) == 2 && q_type_is_int_vec(e[1]))
+            if (q_count(x) == 2 && q_type_is_int_vec(e[1]))
                 return ft_load_fixed(e[0], e[1], y);
-            return ft_load_csv(e[0], e[1], ray_len(x) == 3 ? e[2] : NULL, y);
+            return ft_load_csv(e[0], e[1], q_count(x) == 3 ? e[2] : NULL, y);
         }
     }
     return q_err(QE_TYPE);
