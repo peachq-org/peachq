@@ -1262,8 +1262,8 @@ ray_t* ray_except_fn(ray_t* vec1, ray_t* vec2) {
         return result;
     }
 
-    /* Boxed list fallback */
-    int8_t orig_type = ray_is_vec(vec1) ? vec1->type : -1;
+    /* Boxed list fallback: a typed vec1 gathers its survivors by index so the result keeps its type */
+    ray_t* orig1 = ray_is_vec(vec1) ? vec1 : NULL;
     ray_t *_bx1 = NULL, *_bx2 = NULL;
     vec1 = unbox_vec_arg(vec1, &_bx1);
     if (RAY_IS_ERR(vec1)) return vec1;
@@ -1273,16 +1273,14 @@ ray_t* ray_except_fn(ray_t* vec1, ray_t* vec2) {
     int64_t len1 = ray_len(vec1);
     ray_t** e1 = (ray_t**)ray_data(vec1);
 
-    ray_t* result = ray_alloc(len1 * sizeof(ray_t*));
-    if (!result) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("oom", NULL); }
-    result->type = RAY_LIST;
-    ray_t** out = (ray_t**)ray_data(result);
+    int64_t idx_stack[256];
+    int64_t* idx = (len1 <= 256) ? idx_stack : (int64_t*)ray_sys_alloc((size_t)len1 * sizeof(int64_t));
+    if (!idx) { if (_bx1) ray_release(_bx1); if (_bx2) ray_release(_bx2); return ray_error("oom", NULL); }
     int64_t count = 0;
 
     if (ray_is_atom(vec2)) {
-        for (int64_t i = 0; i < len1; i++) {
-            if (!atom_eq(e1[i], vec2)) { ray_retain(e1[i]); out[count++] = e1[i]; }
-        }
+        for (int64_t i = 0; i < len1; i++)
+            if (!atom_eq(e1[i], vec2)) idx[count++] = i;
     } else {
         int64_t len2 = ray_len(vec2);
         ray_t** e2 = (ray_t**)ray_data(vec2);
@@ -1291,13 +1289,23 @@ ray_t* ray_except_fn(ray_t* vec1, ray_t* vec2) {
             for (int64_t j = 0; j < len2; j++) {
                 if (atom_eq(e1[i], e2[j])) { found = 1; break; }
             }
-            if (!found) { ray_retain(e1[i]); out[count++] = e1[i]; }
+            if (!found) idx[count++] = i;
         }
     }
-    result->len = count;
+    ray_t* result;
+    if (orig1) result = gather_by_idx(orig1, idx, count);
+    else {
+        result = ray_alloc(count * sizeof(ray_t*));
+        if (result) {
+            result->type = RAY_LIST;
+            result->len = count;
+            ray_t** out = (ray_t**)ray_data(result);
+            for (int64_t k = 0; k < count; k++) { ray_retain(e1[idx[k]]); out[k] = e1[idx[k]]; }
+        } else result = ray_error("oom", NULL);
+    }
+    if (idx != idx_stack) ray_sys_free(idx);
     if (_bx1) ray_release(_bx1);
     if (_bx2) ray_release(_bx2);
-    if (orig_type >= 0 && count == 0) { ray_release(result); return ray_vec_new(orig_type, 0); }
     return result;
 }
 
