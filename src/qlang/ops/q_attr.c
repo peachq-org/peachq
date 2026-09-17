@@ -242,7 +242,7 @@ static ray_t* attr_build(ray_t** vp, char letter) {
     bool ok = letter == 'u' ? (ray_attr_verify_distinct(v) && attr_no_dup_nulls(v))
             : letter == 'p' ? ray_attr_verify_contiguous(v) : true;
     if (!ok) return q_err(QE_DOMAIN);
-    ray_t* e = ray_index_attach_hash(vp);
+    ray_t* e = letter == 'u' ? ray_index_attach_hash_unique(vp) : ray_index_attach_hash(vp);
     if (RAY_IS_ERR(e)) return e;
     if (letter != 'g') ray_index_payload((*vp)->index)->markers |= mark;   /* the attach's own block: no clone */
     return NULL;

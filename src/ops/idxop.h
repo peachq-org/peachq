@@ -134,14 +134,18 @@ typedef struct {
     /* Kind-specific payload.  All ray_t* fields are owning refs. */
     union {
         struct {                /* RAY_IDX_HASH */
-            /* Chained open-addressing.  table[mask+1] holds the head rid+1
-             * for each bucket (0 = empty bucket).  chain[parent->len] holds
+            /* Chained open-addressing.  table[cap] holds the head rid+1 for
+             * each bucket (0 = empty); cap is a power of two, so the mask is
+             * table->len - 1 (ray_index_hash_mask).  chain[parent->len] holds
              * the next rid+1 in the same bucket's chain (0 = end of chain).
              * Lookup: hash key, read table[hash & mask] for head, walk chain
-             * until 0 comparing parent->data[rid] for equality. */
+             * until 0 comparing parent->data[rid] for equality.  first[k] is
+             * the row where distinct key k first appeared, in row order: the
+             * key set a chained hash otherwise lacks, kept in step by build
+             * and extend (a probe miss appends). */
             ray_t*   table;     /* RAY_I64 vec, capacity entries */
             ray_t*   chain;     /* RAY_I64 vec, parent->len entries */
-            uint64_t mask;      /* capacity - 1 (capacity is power of two) */
+            ray_t*   first;     /* RAY_I64 vec, one entry per distinct key; NULL on a UNIQUE build (til n) */
             int64_t  n_keys;    /* number of non-null rows indexed */
         } hash;
         struct {                /* RAY_IDX_SORT */
@@ -218,6 +222,11 @@ static inline ray_index_t* ray_index_payload(ray_t* idx) {
     return (ray_index_t*)idx->data;
 }
 
+/* The hash arm's bucket mask: the table is exactly its power-of-two capacity long. */
+static inline uint64_t ray_index_hash_mask(const ray_index_t* ix) {
+    return (uint64_t)ix->u.hash.table->len - 1;
+}
+
 /* ── Routing observability: per-site consult/hit counters ──
  * Diagnostic, unsynchronized (same caveat as ray_expr_bail_counts). */
 typedef enum {
@@ -238,6 +247,9 @@ void ray_idx_stats_init(void);   /* atexit dump when RAY_IDX_STATS set */
  * On failure, *vp is unchanged and a RAY_ERROR is returned. */
 ray_t* ray_index_attach_zone (ray_t** vp);
 ray_t* ray_index_attach_hash (ray_t** vp);
+/* The hash for a vector its caller has VERIFIED distinct (`u#`): no first list — every row is its own key, which
+ * the UNIQUE marker says — so the build never probes and an append never pushes. */
+ray_t* ray_index_attach_hash_unique(ray_t** vp);
 ray_t* ray_index_attach_sort (ray_t** vp);
 ray_t* ray_index_attach_bloom(ray_t** vp);
 /* Build per-chunk min/max + null bit at chunk_size = 1 << chunk_log2.
@@ -419,6 +431,16 @@ int64_t ray_index_find_row(ray_t* col, int64_t key);
 bool   ray_index_atom_key(const ray_t* col, const ray_t* atom, int64_t* key);
 ray_t* ray_index_eq_rowsel(ray_t* col, int64_t key);
 int    ray_index_has_key(ray_t* col, int64_t key);
+
+/* The key-set fronts for distinct / group (set-attribute.md:128-130).  keys_rows: an owned ref to an I64 vector of
+ * the first row of every distinct key, in first-occurrence order — READ-ONLY, a HASH hands out its own first list
+ * (a UNIQUE marker answers til n; CODES sorts its heads).  group_rows: an OWNED ascending I64 vector of every row
+ * of the key whose FIRST occurrence is first_row — a row keys_rows handed out, the precondition: the chain walk
+ * stops there (a PARTED run is a til-range, a UNIQUE row alone).  NULL declines — no fresh HASH/CODES block, a
+ * null-bearing or empty column, or an allocation that failed — and the caller keeps the scan, which reports its
+ * own memory error. */
+ray_t* ray_index_keys_rows(ray_t* col);
+ray_t* ray_index_group_rows(ray_t* col, int64_t first_row);
 
 /* ===== Sort-index range probe =====
  *
