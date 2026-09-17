@@ -84,8 +84,9 @@ static ray_t* car_put(ray_t* c, int64_t i, ray_t* child) {
 /* lambda carrier: [params symvec, body list, src string, defining `\d` context,
  * declared types i64vec (NULL = undecorated), n name charv, f file sym, l line
  * i64, locals symvec (q_eval_lambda_locals, params excluded)] — 5..7 are the
- * ref/value.md provenance slots, NULL until the first global assignment stamps
- * them (q_eval_apply_lambda_name).
+ * ref/value.md provenance slots, NULL until stamped: f/l by the parser
+ * (q_eval_apply_lambda_origin), n by the first global assignment
+ * (q_eval_apply_lambda_name).
  * The context is captured HERE, at parse time, because a lambda's unqualified
  * globals belong to the namespace it was written in, not the one it is called
  * from (ref/value.md: the globals list of `.test.f` reads `` `test`d`e ``).
@@ -121,51 +122,51 @@ static void lam_drop(ray_t* x) {
     if (RAY_IS_ERR(x)) ray_error_free(x); else ray_release(x);
 }
 
-/* all-or-nothing: a failed allocation stamps NOTHING, so LAM_NAME stays the
- * one "already stamped" witness and a later set may retry */
-static void lam_stamp(ray_t* v, const char* name, int64_t nn,
-                      int64_t file_sym, int64_t line) {
+static void lam_stamp(ray_t* v, const char* name, int64_t nn) {
     ray_t** s = car_slots(v);
     if (s[LAM_NAME]) return;                    /* the FIRST assignment wins */
     ray_t* nm = ray_charv(name, nn);
-    ray_t* f = file_sym ? ray_sym(file_sym) : NULL;
-    ray_t* l = file_sym ? ray_i64(line) : NULL;
-    int bad = !nm || RAY_IS_ERR(nm) ||
-              (file_sym && (!f || RAY_IS_ERR(f) || !l || RAY_IS_ERR(l)));
-    if (bad) { lam_drop(nm); lam_drop(f); lam_drop(l); return; }
+    if (!nm || RAY_IS_ERR(nm)) { lam_drop(nm); return; }
     s[LAM_NAME] = nm;
-    s[LAM_FILE] = f;
-    s[LAM_LINE] = l;
 }
 
 /* inner lambdas take the ENCLOSING function's name + "@", one more per
  * nesting level (basics/debug.md, ref/value.md `n`) */
-static void lam_stamp_inner(ray_t* node, const char* name, int64_t nn,
-                            int64_t file_sym, int64_t line) {
+static void lam_stamp_inner(ray_t* node, const char* name, int64_t nn) {
     if (!node) return;
     if (q_eval_apply_carrier_kind(node) == Q_EVAL_CAR_LAMBDA) {
         char* nm = (char*)ray_alloc_raw((size_t)nn + 1);
         if (!nm) return;
         memcpy(nm, name, (size_t)nn);
         nm[nn] = '@';
-        lam_stamp(node, nm, nn + 1, file_sym, line);
-        lam_stamp_inner(car_slots(node)[1], nm, nn + 1, file_sym, line);
+        lam_stamp(node, nm, nn + 1);
+        lam_stamp_inner(car_slots(node)[1], nm, nn + 1);
         ray_free_raw(nm);
         return;
     }
     if (node->type != RAY_LIST) return;
     ray_t** e = (ray_t**)ray_data(node);
     for (int64_t i = 0, k = q_count(node); i < k; i++)
-        lam_stamp_inner(e[i], name, nn, file_sym, line);
+        lam_stamp_inner(e[i], name, nn);
 }
 
-void q_eval_apply_lambda_name(ray_t* v, const char* name, int64_t nn,
-                              int64_t file_sym, int64_t line) {
+void q_eval_apply_lambda_name(ray_t* v, const char* name, int64_t nn) {
     if (q_eval_apply_carrier_kind(v) != Q_EVAL_CAR_LAMBDA ||
         car_slots(v)[LAM_NAME] || nn <= 0)
         return;
-    lam_stamp(v, name, nn, file_sym, line);
-    lam_stamp_inner(car_slots(v)[1], name, nn, file_sym, line);
+    lam_stamp(v, name, nn);
+    lam_stamp_inner(car_slots(v)[1], name, nn);
+}
+
+void q_eval_apply_lambda_origin(ray_t* v, int64_t file_sym, int64_t line) {
+    if (q_eval_apply_carrier_kind(v) != Q_EVAL_CAR_LAMBDA || !file_sym) return;
+    ray_t** s = car_slots(v);
+    if (s[LAM_FILE]) return;
+    ray_t* f = ray_sym(file_sym);
+    ray_t* l = ray_i64(line);
+    if (!f || RAY_IS_ERR(f) || !l || RAY_IS_ERR(l)) { lam_drop(f); lam_drop(l); return; }
+    s[LAM_FILE] = f;
+    s[LAM_LINE] = l;
 }
 
 int q_eval_apply_lambda_prov(ray_t* v, ray_t** name, int64_t* file_sym,
