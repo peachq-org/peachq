@@ -1276,7 +1276,16 @@ static int64_t rank_of(ray_t* fv) {
     }
     if (kind == Q_EVAL_CAR_COMP) return rank_of(car_slots(fv)[1]);
     if (kind == Q_EVAL_CAR_ITER) return 1;  /* exactly one operand */
-    return -1;                              /* vary / deriv: no fixed rank */
+    if (kind == Q_EVAL_CAR_DERIV) {
+        /* ref/maps.md:11-16: Each keeps its operand's rank, `\:` `/:` are binary, `':` is Each Parallel on a unary */
+        int adv = (int)car_slots(fv)[2]->i64;
+        ray_t* op = car_slots(fv)[0];
+        if (adv == 0) return op ? rank_of(op) : -1;
+        if (adv == 4 || adv == 5) return 2;
+        if (adv == 3 && op && rank_of(op) == 1) return 1;
+        return -1;
+    }
+    return -1;                              /* vary: no fixed rank */
 }
 
 int64_t q_eval_apply_rank(ray_t* fv) { return fv ? rank_of(fv) : -1; }
@@ -1487,10 +1496,10 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
     int kind = q_eval_apply_carrier_kind(fv);
     if (kind == Q_EVAL_CAR_ITER) return iter_call(fv, args, n);
     /* ref/apply.md Composition: `u v w@` — a unary on an `@`/`.` projection (or a composition) COMPOSES rather
-     * than applying to the fn value.  A derived function has no fixed rank and its one-argument form IS its unary
-     * (`f over g@` composes, #42); a fixed rank >= 2 projects instead ("if projected as a unary by Apply") */
+     * than applying to the fn value.  A variadic derived value's one-argument form IS its unary (`f over g@`
+     * composes, #42); a fixed rank >= 2 projects instead ("if projected as a unary by Apply") */
     int64_t rank = rank_of(fv);
-    if (n == 1 && (rank == 1 || kind == Q_EVAL_CAR_DERIV) && comp_tail(args[0]))
+    if (n == 1 && (rank == 1 || (rank < 0 && kind == Q_EVAL_CAR_DERIV)) && comp_tail(args[0]))
         return comp_new(fv, args[0]);
     if (kind == Q_EVAL_CAR_PROJ) return proj_call(fv, args, n);
     if (kind == Q_EVAL_CAR_DERIV) {
@@ -1652,7 +1661,7 @@ ray_t* q_eval_apply_train(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
     ray_t* g = args[n - 1];
     if (fv && !RAY_IS_ERR(fv) && q_eval_apply_is_fn(fv) && g && q_eval_apply_is_fn(g)) {
         int64_t rank = rank_of(fv);
-        if (n == 1 && (rank == 1 || q_eval_apply_carrier_kind(fv) == Q_EVAL_CAR_DERIV))
+        if (n == 1 && (rank == 1 || (rank < 0 && q_eval_apply_carrier_kind(fv) == Q_EVAL_CAR_DERIV)))
             return comp_new(fv, g);
         if (n == 2 && args[0] && (rank == 2 || rank < 0))
             return proj_compose(fv, row, args[0], g);
