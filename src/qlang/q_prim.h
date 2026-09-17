@@ -23,6 +23,10 @@
  * (net/, apply) reach it without the poisoned q_registry_internal.h. */
 ray_t* q_list_collapse(ray_t* l);
 
+/* Its inverse: a typed vector re-shaped into a boxed RAY_LIST of its atoms (each read through the element-read
+ * home), so a walker can dispatch on the items.  Borrows `v`; OWNED list, or an owned error.  DEFINED in ops/q_list.c. */
+ray_t* q_list_uncollapse(ray_t* v);
+
 /* THE per-column table walk (colfn owns any lazy-materialize).  DEFINED in
  * ops/q_table.c; declared here (like q_list_collapse) so env-using callers
  * (apply, dollar) reach it without the poisoned q_registry_internal.h. */
