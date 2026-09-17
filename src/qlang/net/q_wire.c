@@ -994,16 +994,14 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         if (!z) { ray_release(src); return q_err(QE_WSFULL); }
         memcpy(z, sp, n); z[n] = 0;
         ray_release(src);
-        /* restored on EVERY exit: a leaked context would corrupt every later
-         * decode in this process. */
-        int64_t saved = q_env_ctx();
-        q_env_ctx_set(ns);
+        /* the lambda's namespace is its SCOPE; restored on EVERY exit, so a decode never moves the session */
+        int64_t saved = q_env_scope(ns);
         ray_t* ast = q_parse(z);
         ray_free_raw(z);
         ray_t* lam;
         if (!ast || RAY_IS_ERR(ast)) lam = ast ? ast : q_err(QE_PARSE);
         else { lam = q_eval(ast); ray_release(ast); }
-        q_env_ctx_set(saved);
+        q_env_scope(saved);
         return lam;
     }
     case 101:                                         /* (::) / unary primitive */

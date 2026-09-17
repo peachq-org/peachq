@@ -97,12 +97,17 @@ int64_t q_env_marker_sym(void);
  * (basics/syscmds.md §`\d`).  OWNED sym vector. */
 ray_t* q_env_ns_roster(void);
 
-/* `\d` current context (0 = root).  A RELATIVE name resolves in the context
- * first and falls back to the root; an assignment lands IN the context, which
- * is what CREATES it — `\d .s` alone does not (syscmds.md §`\d`: "a new
- * namespace is created when an object is defined in it"). */
+/* The SESSION context is what `\d` shows and sets (0 = root): a RELATIVE name resolves in the context first and
+ * falls back to the root; an assignment lands IN the context, which is what CREATES it (syscmds.md §`\d`).  A
+ * running lambda resolves in the context it was DEFINED in — its SCOPE (owner 2026-09-17) — so a `\d` it or its
+ * caller executes never moves its own globals; fresh text (a load's lines, `value` of a string) follows the session.
+ * q_env_scope sets the scope (a ns sym, 0 = root, _SESSION = follow the session) and returns the previous, which
+ * the same C frame restores on every exit, aborts included (the frame-floor idiom). */
 void    q_env_ctx_set(int64_t ns_sym);
 int64_t q_env_ctx(void);
+#define Q_ENV_SCOPE_SESSION (-1)
+int64_t q_env_scope(int64_t scope);
+int64_t q_env_scope_ctx(void);   /* the context a relative name resolves against now (0 = root) */
 
 /* Local frames: one flat frame per call, no parent chain (q has no closures —
  * function-notation.md).  A BARRIER frame hides everything below it; frames

@@ -22,9 +22,10 @@ void q_dbg_frame_pop(void);
 int  q_dbg_statement_begin(const char* src, size_t n, int console);
 void q_dbg_statement_end(int tok);
 
-/* Inside @[;;]/.[;;]/.Q.trp protection: error-trap mode 0, never suspend. */
-void q_dbg_trap_enter(void);
-void q_dbg_trap_exit(void);
+/* Inside @[;;]/.[;;]/.Q.trp protection: error-trap mode 0, never suspend.  enter hands back the session `\d`;
+ * exit restores it when r is a caught error (a `:x` return is not one) — owner ruling 2026-09-17. */
+int64_t q_dbg_trap_enter(void);
+void    q_dbg_trap_exit(int64_t ctx, ray_t* r);
 
 /* Error seams: filter an owned result; may snapshot, suspend, and return a
  * `:r` replacement.  lambda_filter runs at the body-statement boundary with
