@@ -405,10 +405,12 @@ static Tokens scan(const char *src) {
         char c = src[p];
         uint8_t cl = CLASS[(uint8_t)c];
 
-        /* kdb sign rule: '-' adjacent to a digit is a SIGN when preceded by
-         * whitespace or start-of-input (`neg -1` applies neg to -1; `x -1`
-         * indexes x at -1); it is the verb only when glued to a noun (a-1). */
-        int neg_sign = (c == '-' && (CLASS[(uint8_t)src[p+1]] & CL_DIGIT) &&
+        /* kdb sign rule: '-' adjacent to a digit, or to a leading-dot magnitude (`-.5`, qtips/deriv.q:38), is a SIGN
+         * when preceded by whitespace or start-of-input (`neg -1` applies neg to -1; `x -1` indexes x at -1); it is
+         * the verb only when glued to a noun (a-1). */
+        int neg_sign = (c == '-' &&
+                        ((CLASS[(uint8_t)src[p+1]] & CL_DIGIT) ||
+                         (src[p+1] == '.' && (CLASS[(uint8_t)src[p+2]] & CL_DIGIT))) &&
                         !q_tok_byte_lit_starts(src, p + 1) &&   /* -0x0a: '-' stays the verb (bytes are unsigned) */
                         (!noun_pos || p == 0 || (CLASS[(uint8_t)src[p-1]] & CL_WS)));
 
@@ -1642,7 +1644,7 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
 
     /* SPACED `x ::` is APPLICATION — `::` a noun operand, the generic-null
      * VALUE (owner ruling 2026-07-23: `(::)~value ::` is 1b); only GLUED
-     * `x::…` keeps global-assign.  Demote the verb to a noun and fall into
+     * `x::y` keeps global-assign.  Demote the verb to a noun and fall into
      * the ordinary juxtaposition build below. */
     if (t.role == R_NOUN && u.role == R_VERB && u.v &&
         u.v->type == -RAY_SYM && ut->kind == T_VERB && ut->len == 2 &&
@@ -1672,8 +1674,14 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
         P e = parse_e(p, ctx);
         /* postfix form (`1+`, `-15!`): the missing rhs is a projection HOLE,
          * the same Q_ATTR_HOLE marker bracket elisions carry — an explicit
-         * `::` operand stays plain and evaluates to the generic-null VALUE */
+         * `::` operand stays plain and evaluates to the generic-null VALUE.
+         * A glued `f::` with nothing to assign is the identity closing a train
+         * (funq/ml.q `sum abs::`): the `f@` node, so the walker composes onto it. */
         ray_t *rhs = e.v ? e.v : hole();
+        if (!e.v && sym_name_is(u.v, "::")) {
+            ray_release(u.v);
+            u.v = q_verb('@');
+        }
         if (!verb_marked(u.v))
             u.v = q_embed(u.v, Q_DYADIC);      /* infix head: the dyadic row */
         ray_t *xs[3] = { u.v, t.v, rhs };
