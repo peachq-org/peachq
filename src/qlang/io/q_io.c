@@ -30,7 +30,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>         /* read — `read0 0` takes its line straight off fd 0 */
+#include <unistd.h>         /* read, isatty — `read0 0` is a raw read of fd 0 */
 #include <fcntl.h>          /* open — the kxzip block reader's descriptor */
 #include <errno.h>
 #ifdef RAY_OS_WINDOWS
@@ -789,24 +789,30 @@ static ray_t* read1_wrap_impl(ray_t* x) {
     return q_err(QE_TYPE);
 }
 
-/* ONE line off fd 0, delimiter removed (ref/read0.md § System or process
- * handle).  Read a byte at a time on purpose: the REPL reads the SAME fd, so
- * consuming past the newline would eat the statement after this one.  EOF
- * before any byte yields the empty line. */
-static ray_t* io_stdin_line(void) {
-    char*  buf = NULL;
-    size_t n = 0, cap = 0;
-    char   c;
-    while (read(0, &c, 1) == 1 && c != '\n') {
-        if (n + 1 > cap) {
-            size_t nc = cap ? cap * 2 : 128;
-            char* nb = (char*)realloc(buf, nc);
+/* A raw read of fd 0 (ref/read0.md § System or process handle is a terminal
+ * transcript; peachq-org/peachq#51 is a pipe).  A tty gives ONE line, delimiter
+ * removed — read a byte at a time on purpose: the REPL reads the SAME fd, so
+ * consuming past the newline would eat the statement after this one.  A pipe
+ * gives the whole stream to EOF as one char vector, bytes untouched (newlines
+ * and any CR kept).  EOF before any byte yields the empty vector. */
+static ray_t* io_stdin_read(void) {
+    char*   buf = NULL;
+    size_t  n = 0, cap = 0;
+    int     tty = isatty(0);
+    char    rbuf[4096];
+    ssize_t got;
+    while ((got = read(0, rbuf, tty ? 1 : sizeof rbuf)) > 0) {
+        if (tty && rbuf[0] == '\n') break;
+        if (n + (size_t)got > cap) {
+            while (n + (size_t)got > cap) cap = cap ? cap * 2 : 128;
+            char* nb = (char*)realloc(buf, cap);
             if (!nb) { free(buf); return q_err(QE_OOM); }
-            buf = nb; cap = nc;
+            buf = nb;
         }
-        buf[n++] = c;
+        memcpy(buf + n, rbuf, (size_t)got);
+        n += (size_t)got;
     }
-    if (n && buf[n - 1] == '\r') n--;             /* a CRLF source loses both */
+    if (tty && n && buf[n - 1] == '\r') n--;      /* a CRLF source loses both */
     ray_t* r = ray_charv(buf ? buf : "", (int64_t)n);
     free(buf);
     return r;
@@ -816,7 +822,7 @@ static ray_t* io_stdin_line(void) {
  * splits into lines (LF/CRLF delimiters removed), `(f;o)` gives the chars to
  * EOF minus ONE trailing line break (the doc pins `read0(`:foo;6)` -> "world"
  * on a file ending \n), and `(f;o;n)`/`(fifo;n)` give exactly what was read.
- * Handle 0 is the CONSOLE: one line of text from stdin.  Offsets accept 0
+ * Handle 0 is stdin: a line on a tty, the whole stream on a pipe.  Offsets accept 0
  * (superset of the doc). */
 static ray_t* read0_wrap_impl(ray_t* x);
 ray_t* q_read0_wrap(ray_t* x) {
@@ -826,7 +832,7 @@ ray_t* q_read0_wrap(ray_t* x) {
     return q_str_charv_out(r);              /* lines cross as char vectors */
 }
 static ray_t* read0_wrap_impl(ray_t* x) {
-    if (x && q_type_is_int_atom(x) && q_type_iatom_val(x) == 0) return io_stdin_line();
+    if (x && q_type_is_int_atom(x) && q_type_iatom_val(x) == 0) return io_stdin_read();
     ray_t* b = read1_wrap_impl(x);
     if (!b || RAY_IS_ERR(b)) return b;
     int64_t n = q_count(b);
