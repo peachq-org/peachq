@@ -5,6 +5,7 @@
  * record.  The `hopen`/`hclose` verb bodies sit at the tail, on top of the
  * transport open / kind dispatch / close they delegate to. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/io/q_handles.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_registry_internal.h" /* q_str_text_bytes, q_type_strict_i64 */
@@ -243,7 +244,7 @@ static ray_t* raw_write(int64_t qh, ray_t* y) {
     int fd = (int)(qh < 0 ? -qh : qh);
     int nl = qh < 0;
     const char* yp; int64_t yn;
-    if (y && y->type == RAY_BYTE_ONLY) { yp = (const char*)ray_data(y); yn = ray_len(y); }
+    if (y && y->type == RAY_BYTE_ONLY) { yp = (const char*)ray_data(y); yn = q_count(y); }
     else if (!(y && q_str_text_bytes(y, &yp, &yn))) yp = NULL;
     if (yp) {
         if (yn > 0 && write_all(fd, yp, yn) < 0) return q_err(QE_IO);
@@ -251,7 +252,7 @@ static ray_t* raw_write(int64_t qh, ray_t* y) {
         return NULL;
     }
     if (y && (y->type == RAY_LIST || y->type == RAY_STR)) {
-        int64_t m = ray_len(y);
+        int64_t m = q_count(y);
         for (int64_t i = 0; i < m; i++) {
             ray_t* ia = make_i64(i);
             ray_t* it = ray_at_fn(y, ia);
@@ -296,7 +297,7 @@ static ray_t* console_write_h(int64_t qh, ray_t* y) {
         if (q_console_write(yp, (size_t)yn) || (nl && q_console_write("\n", 1)))
             return q_err(QE_WSFULL);
     } else if (y && (y->type == RAY_LIST || y->type == RAY_STR)) {
-        int64_t m = ray_len(y);
+        int64_t m = q_count(y);
         for (int64_t i = 0; i < m; i++) {
             ray_t* ia = make_i64(i);
             ray_t* it = ray_at_fn(y, ia);
@@ -349,7 +350,8 @@ ray_t* q_handles_apply(ray_t* h, ray_t* y) {
             if (raw) return echo(h, raw_write(qh, y));
             ray_t* oa = q_handles_open_args(afd);           /* borrowed charv path */
             if (!oa) return q_err(QE_TYPE);
-            ray_t* p = ray_str((const char*)ray_data(oa), (size_t)ray_len(oa));
+            ray_t* p = ray_str((const char*)ray_data(oa),
+                               (size_t) q_count(oa));
             if (!p) return q_err(QE_OOM);
             ray_t* bad = q_wirefile_append_path(p, y);
             ray_release(p);
@@ -600,7 +602,7 @@ static ray_t* hopen_wrap_impl(ray_t* x) {
     ray_t* timeout   = NULL;
     ray_t* pair_conn = NULL;   /* owned when a pair was a typed int VECTOR */
     ray_t* pair_to   = NULL;
-    if (x && x->type == RAY_LIST && ray_len(x) >= 3) {
+    if (x && x->type == RAY_LIST && q_count(x) >= 3) {
         /* (conn; timeout; config) — the provider open triad ONLY; a socket
          * hopen stays kdb's 2-list, so a non-provider 3-list keeps its 'type.
          * The triad is FROZEN: a longer provider tuple is 'rank, never a
@@ -608,14 +610,14 @@ static ray_t* hopen_wrap_impl(ray_t* x) {
         ray_t** e = (ray_t**)ray_data(x);
         const char* ds; size_t dn;
         if (hopen_conn_text(e[0], &ds, &dn) && q_provider_spec_is(ds, dn)) {
-            if (ray_len(x) > 3) return q_err(QE_RANK);
+            if (q_count(x) > 3) return q_err(QE_RANK);
             return q_provider_hopen(ds, dn, e[1], e[2]);
         }
     }
-    if (x && x->type == RAY_LIST && ray_len(x) == 2) {   /* (conn; timeout-ms) */
+    if (x && x->type == RAY_LIST && q_count(x) == 2) {   /* (conn; timeout-ms) */
         ray_t** e = (ray_t**)ray_data(x);
         conn = e[0]; timeout = e[1];                     /* borrowed */
-    } else if (q_type_is_int_vec(x) && ray_len(x) == 2) {
+    } else if (q_type_is_int_vec(x) && q_count(x) == 2) {
         /* an all-int (port; timeout-ms) pair collapses to a homogeneous int
          * VECTOR (not a general list) — recover the two atoms.  (A symbol/string
          * conn keeps the pair a RAY_LIST, handled above.) */

@@ -115,7 +115,6 @@ ray_t* q_duckdb_codec_map_declared(int slot, ray_t* col, duck_logical_type lt, d
 bool   q_duckdb_codec_declared_stage_map(duck_logical_type lt, qd_colmap_t* out);
 bool   q_duckdb_codec_untyped(ray_t* col);
 bool   q_duckdb_codec_map_bits(ray_t* col, int depth, qd_colmap_t* cm);
-int64_t q_duckdb_codec_rec_rows(ray_t* col);
 
 /* The companions a column can grow, `<c>_q_<name>` (ADR 1/2/4/21): the two booleans flag a group's rare state, the
  * two longs carry what the slot cannot — a temporal's raw count, a 128-bit word's high half — and tzoff carries a

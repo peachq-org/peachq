@@ -1,4 +1,5 @@
 /* q_tls — see q_tls.h.  Observables: kb/ssl.md, internal.md:350, dotz.md:215. */
+#include "qlang/q_count.h"
 #include "qlang/net/q_tls.h"
 #include "qlang/base/q_err.h"
 #include "core/timer.h"      /* ray_time_now_ms — send/handshake deadlines */

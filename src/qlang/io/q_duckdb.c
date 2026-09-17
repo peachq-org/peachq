@@ -10,6 +10,7 @@
  * 0h lists of charv (string-C3: physical RAY_STR never reaches q-space);
  * floats follow the live-infinity model (ONLY NaN is null). */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/io/q_duckdb.h"
 #include "qlang/io/q_duckdb_api.h"
 #include "qlang/io/q_duckdb_internal.h"
@@ -22,7 +23,7 @@
 #include "qlang/q_prim.h"     /* q_str_text_bytes (write-path text cells) + q_table_meta_assemble */
 #include "lang/env.h"         /* ray_fn_unary / ray_fn_vary */
 #include "lang/eval.h"        /* RAY_FN_NONE, ray_at_fn */
-#include "qlang/eval/q_eval.h"  /* q_eval_call_sym — the .duckdb.onsql hook */
+#include "qlang/eval/q_eval.h"  /* q_eval_apply_call_sym — the .duckdb.onsql hook */
 #include "table/sym.h"        /* ray_sym_vec_cell */
 #include <rayforce.h>
 #include <math.h>
@@ -432,7 +433,7 @@ static void sqllog_fire(int32_t conn, const char* sql, int64_t t, int64_t dur, b
     int  slot = conn == NULL_I32 ? -1 : (int)(conn & ((1 << QD_SLOT_BITS) - 1));
     memcpy(keep[0], g_err_last, sizeof g_err_last);
     if (slot >= 0) memcpy(keep[1], g_cons[slot].err, sizeof g_err_last);
-    ray_t* r = q_eval_call_sym(hook, &rec, 1);
+    ray_t* r = q_eval_apply_call_sym(hook, &rec, 1);
     if (r && RAY_IS_ERR(r)) { q_err_drop(); ray_error_free(r); }
     else if (r) ray_release(r);
     memcpy(g_err_last, keep[0], sizeof g_err_last);
@@ -593,7 +594,7 @@ static ray_t* qd_main_open(duck_config cfg) {
     if (!e) {
         ray_t* row = q_duckdb_codec_result_to_table(slot, &res, NULL, 0, NULL);
         QAPI.destroy_result(&res);
-        if (row && !RAY_IS_ERR(row) && ray_table_nrows(row) == 1) {
+        if (row && !RAY_IS_ERR(row) && q_count(row) == 1) {
             size_t ln = 0;
             const char* d = q_duckdb_schema_text_cell(ray_table_get_col_idx(row, 0), 0, &ln);
             snprintf(g_main.catalog, sizeof g_main.catalog, "%.*s", (int)(d ? ln : 0), d ? d : "");
@@ -653,7 +654,7 @@ static void qd_cfg_put(qd_buf* b, const char* t, bool quote) {
 static ray_t* qd_config_apply(ray_t* cfg, qd_buf* attach) {
     ray_t* keys = ray_dict_keys(cfg);   /* borrowed */
     ray_t* vals = ray_dict_vals(cfg);   /* borrowed */
-    int64_t np = ray_dict_len(cfg);
+    int64_t np = q_count(cfg);
     if (keys->type != RAY_SYM && np) return q_duckdb_fail(-1, "open", "a config key is not a symbol");
     duck_config oc = NULL;
     for (int64_t i = 0; i < np; i++) {
@@ -866,7 +867,7 @@ static ray_t* qd_unlink_wrap(ray_t** args, int64_t n) {
     if (e) return e;
     ray_t* hit = q_duckdb_codec_result_to_table(g_main.slot, &res, NULL, 0, NULL);
     QAPI.destroy_result(&res);
-    bool is_view = hit && !RAY_IS_ERR(hit) && ray_table_nrows(hit) == 1;
+    bool is_view = hit && !RAY_IS_ERR(hit) && q_count(hit) == 1;
     q_duckdb_drop(hit);
     if (is_view) {
         q_duckdb_puts(&b, "DROP VIEW ");
@@ -897,7 +898,7 @@ static ray_t* qd_hdel_wrap(ray_t** args, int64_t n) {
     if (e) return e;
     ray_t* hit = q_duckdb_codec_result_to_table(slot, &res, NULL, 0, NULL);
     QAPI.destroy_result(&res);
-    bool is_view = hit && !RAY_IS_ERR(hit) && ray_table_nrows(hit) > 0;
+    bool is_view = hit && !RAY_IS_ERR(hit) && q_count(hit) > 0;
     q_duckdb_drop(hit);
     q_duckdb_puts(&b, is_view ? "DROP VIEW " : "DROP TABLE ");
     q_duckdb_schema_put_name(&b, &name);
@@ -925,7 +926,7 @@ static ray_t* qd_tables_fn(ray_t* x) {
     ray_t* rows = q_duckdb_codec_result_to_table(slot, &res, NULL, 0, NULL);
     QAPI.destroy_result(&res);
     if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_WSFULL);
-    int64_t n = ray_table_nrows(rows);
+    int64_t n = q_count(rows);
     ray_t* col = ray_table_get_col_idx(rows, 0);
     ray_t* out = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
     for (int64_t i = 0; i < n && out && !RAY_IS_ERR(out); i++) {
@@ -975,7 +976,7 @@ static ray_t* qd_meta_wrap(ray_t** args, int64_t n) {
         cat = q_duckdb_codec_result_to_table(slot, &res, NULL, 0, NULL);
         QAPI.destroy_result(&res);
     }
-    if (!cat || RAY_IS_ERR(cat) || ray_table_nrows(cat) == 0) {
+    if (!cat || RAY_IS_ERR(cat) || q_count(cat) == 0) {
         q_duckdb_schema_desc_free(desc, ndesc);
         if (cat && !RAY_IS_ERR(cat)) {
             ray_release(cat);
@@ -986,14 +987,14 @@ static ray_t* qd_meta_wrap(ray_t** args, int64_t n) {
         return cat;
     }
 
-    int64_t nrows = ray_table_nrows(cat);
+    int64_t nrows = q_count(cat);
     ray_t* names  = ray_table_get_col_idx(cat, 0);  /* borrowed text col */
     ray_t* dtypes = ray_table_get_col_idx(cat, 1);
 
     ray_t* cvec = ray_sym_vec_new(RAY_SYM_W64, nrows);
     ray_t* fvec = ray_sym_vec_new(RAY_SYM_W64, nrows);
     ray_t* avec = ray_sym_vec_new(RAY_SYM_W64, nrows);
-    char*  tbuf = malloc((size_t)nrows);
+    char*  tbuf = malloc(nrows > 0 ? (size_t)nrows : 1);
     bool   oom  = !tbuf;
     int64_t blank = ray_sym_intern_runtime("", 0);
     for (int64_t i = 0; i < nrows; i++) {
@@ -1035,7 +1036,7 @@ static ray_t* qd_envelope_split(int slot, ray_t* x, ray_t** data, qd_desc_t** de
     *ndecl = 0;
     *bare  = !x || x->type != RAY_LIST;
     if (*bare) return NULL;
-    if (x->len != 2) return q_duckdb_fail(slot, "envelope", "expected (data;schema)");
+    if (q_count(x) != 2) return q_duckdb_fail(slot, "envelope", "expected (data;schema)");
     *data = ((ray_t**)ray_data(x))[0];
     return q_duckdb_schema_desc_parse(slot, ((ray_t**)ray_data(x))[1], decl, ndecl);
 }

@@ -14,6 +14,7 @@
  * the q evaluator owns, retiring this seam. */
 #define _POSIX_C_SOURCE 200809L
 
+#include "qlang/q_count.h"
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_eval_internal.h"
 #include "qlang/eval/q_view.h"
@@ -83,7 +84,7 @@ static int nameref(ray_t* x) {
 
 /* the enlisted-constant unwrap's tree shape: a 1-element sym vector */
 static int sym_const(ray_t* x) {
-    return x && x->type == RAY_SYM && ray_len(x) == 1;
+    return x && x->type == RAY_SYM && q_count(x) == 1;
 }
 
 /* Hole detection: ONLY a parse-marked slot (Q_ATTR_HOLE — bracket elision
@@ -304,7 +305,7 @@ static void unpark(int local, int64_t sym, ray_t* v) {
  * an op-assign values as the NEW a[i] (ref/assign.md: `1+a[2]+:5` is 8). */
 static ray_t* indexed_assign(ray_t* target, ray_t* opv, ray_t* rhs) {
     ray_t** te = (ray_t**)ray_data(target);
-    int64_t k = ray_len(target) - 1;
+    int64_t k = q_count(target) - 1;
     if (k < 1 || k > EVAL_MAX_ARGS || !nameref(te[0]))
         return q_err(QE_NYI);
     if (q_registry_is_reserved(te[0]->i64)) return q_err(QE_ASSIGN);
@@ -355,7 +356,7 @@ static ray_t* indexed_assign(ray_t* target, ray_t* opv, ray_t* rhs) {
  * else is the global.  Returns the assigned value. */
 static ray_t* assign_eval(ray_t* target, ray_t* rhs) {
     if (!nameref(target)) {
-        if (target && target->type == RAY_LIST && ray_len(target) >= 2)
+        if (target && target->type == RAY_LIST && q_count(target) >= 2)
             return indexed_assign(target, NULL, rhs);
         return q_err(QE_NYI);
     }
@@ -391,7 +392,7 @@ typedef struct {
 int q_eval_symvec_has(ray_t* v, int64_t id) {
     if (!v || v->type != RAY_SYM) return 0;
     const void* d = ray_data(v);
-    for (int64_t i = 0, n = ray_len(v); i < n; i++)
+    for (int64_t i = 0, n = q_count(v); i < n; i++)
         if (ray_read_sym(d, i, RAY_SYM, v->attrs) == id) return 1;
     return 0;
 }
@@ -431,7 +432,7 @@ static void lam_scan(ray_t* n, lam_scan_t* s) {
         s->con = c;
         return;
     }
-    int64_t k = ray_len(n);
+    int64_t k = q_count(n);
     ray_t** e = (ray_t**)ray_data(n);
     if (k == 0) return;
     const eval_syms_t* S = syms();
@@ -467,7 +468,7 @@ ray_t* q_eval_lambda_locals(ray_t* params, ray_t* body) {
     if (!s.loc) return NULL;
     lam_scan(body, &s);
     ray_t* out = s.oom ? NULL : ray_sym_vec_new(RAY_SYM_W64, 4);
-    for (int64_t i = 0, n = out ? ray_len(s.loc) : 0; i < n && out; i++) {
+    for (int64_t i = 0, n = out ? q_count(s.loc) : 0; i < n && out; i++) {
         int64_t id = ray_read_sym(ray_data(s.loc), i, RAY_SYM, s.loc->attrs);
         if (!q_eval_symvec_has(params, id)) out = ray_vec_append(out, &id);
     }
@@ -539,17 +540,18 @@ static ray_t* lambda_structure(ray_t* v) {
     lam_scan(body, &s);
 
     /* a referenced name is global unless it is a parameter or a body local */
-    for (int64_t i = 0, n = s.ref ? ray_len(s.ref) : 0; i < n && !s.oom; i++) {
+    for (int64_t i = 0, n = s.ref ? q_count(s.ref) : 0; i < n && !s.oom; i++) {
         int64_t id = ray_read_sym(ray_data(s.ref), i, RAY_SYM, s.ref->attrs);
         if (q_eval_symvec_has(params, id) || q_eval_symvec_has(locals, id)) continue;
         sym_add(&s.glb, id, &s.oom);
     }
-    ray_t* nsg = ray_sym_vec_new(RAY_SYM_W64, 1 + (s.glb ? ray_len(s.glb) : 0));
+    ray_t* nsg = ray_sym_vec_new(RAY_SYM_W64,
+                                 1 + (s.glb ? q_count(s.glb) : 0));
     if (!nsg) s.oom = 1;
     else {
         int64_t id = ns_bare(ctx);
         nsg = ray_vec_append(nsg, &id);
-        for (int64_t i = 0, n = s.glb ? ray_len(s.glb) : 0; i < n && nsg; i++) {
+        for (int64_t i = 0, n = s.glb ? q_count(s.glb) : 0; i < n && nsg; i++) {
             int64_t g = ray_read_sym(ray_data(s.glb), i, RAY_SYM, s.glb->attrs);
             if (q_eval_symvec_has(locals, g)) continue;     /* `w::9` on a body local writes the local */
             nsg = ray_vec_append(nsg, &g);
@@ -566,7 +568,7 @@ static ray_t* lambda_structure(ray_t* v) {
     if (locals) ray_retain(locals);
     out = list_put(out, locals ? locals : ray_sym_vec_new(RAY_SYM_W64, 1));
     out = list_put(out, nsg);   nsg = NULL;
-    for (int64_t i = 0, n = s.con ? ray_len(s.con) : 0; i < n && out; i++) {
+    for (int64_t i = 0, n = s.con ? q_count(s.con) : 0; i < n && out; i++) {
         ray_t* c = ((ray_t**)ray_data(s.con))[i];
         ray_retain(c);
         out = list_put(out, c);
@@ -689,8 +691,8 @@ ray_t* q_eval_value_wrap(ray_t* x) {
         ray_retain(v);
         return v;
     }
-    if (x->type == RAY_LIST && ray_len(x) >= 1) {
-        int64_t argc = ray_len(x) - 1;
+    if (x->type == RAY_LIST && q_count(x) >= 1) {
+        int64_t argc = q_count(x) - 1;
         if (argc > EVAL_MAX_ARGS) return q_err(QE_RANK);
         ray_t** e = (ray_t**)ray_data(x);
         ray_t* h = e[0];
@@ -817,7 +819,7 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
     ray_t* opv = modassign_op(h, &row);
     if (!opv) return NULL;                           /* not an op: -> 'name path */
     if (!nameref(target)) {
-        if (target && target->type == RAY_LIST && ray_len(target) >= 2)
+        if (target && target->type == RAY_LIST && q_count(target) >= 2)
             return indexed_assign(target, opv, rhs);
         return q_err(QE_NYI);
     }
@@ -983,14 +985,14 @@ ray_t* q_eval(ray_t* node) {
         if (ret && !RAY_IS_ERR(ret)) ret->attrs |= Q_ATTR_QUOTED;
         goto out;
     }
-    if (node->type != RAY_LIST || ray_len(node) == 0) {
+    if (node->type != RAY_LIST || q_count(node) == 0) {
         ray_retain(node);
         ret = node;
         goto out;
     }
 
     {
-        int64_t n = ray_len(node);
+        int64_t n = q_count(node);
         ray_t** e = (ray_t**)ray_data(node);
         ray_t* h = e[0];
 

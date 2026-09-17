@@ -6,6 +6,7 @@
  * asc/desc/rank/xrank/xasc/xdesc are q.q derivations over these (QR_QSRC), not
  * C.  See q_registry.h for the registry contract. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
 #include "qlang/q_builtins.h"  /* q_builtins_type_num — the q type-id key */
@@ -112,7 +113,7 @@ static int ord_cmp_fn(ray_t* a, ray_t* b, int8_t qt) {
 /* Lexicographic over items, shorter-prefix-first.  Same-datatype byte vectors —
  * the string case — settle in one memcmp rather than n element reads. */
 static int ord_cmp_items(ray_t* a, ray_t* b) {
-    int64_t la = ray_len(a), lb = ray_len(b), n = la < lb ? la : lb;
+    int64_t la = q_count(a), lb = q_count(b), n = la < lb ? la : lb;
     if (ray_is_bytelike(a->type)) {
         int c = n ? memcmp(ray_data(a), ray_data(b), (size_t)n) : 0;
         if (c) return c < 0 ? -1 : 1;
@@ -186,7 +187,7 @@ static int ord_cmp_at(ray_t* v, int64_t i, int64_t j) {
 /* THE comparison grade: a stable bottom-up merge sort of `til count x` under
  * ord_cmp.  Ties take the left run, so equals keep input order for idesc too. */
 static ray_t* ord_grade(ray_t* x, int desc) {
-    int64_t n = ray_len(x);
+    int64_t n = q_count(x);
     ray_t* g = ray_vec_new(RAY_I64, n);
     if (!g || RAY_IS_ERR(g)) return g ? g : q_err(QE_OOM);
     g->len = n;
@@ -225,7 +226,7 @@ static ray_t* ord_grade(ray_t* x, int desc) {
  * is how a missing ordering law became a wrong answer.  Order it by the law and
  * give the kernel the DENSE rank, which carries the order AND the ties. */
 static ray_t* ord_dense_rank(ray_t* col) {
-    int64_t n = ray_len(col);
+    int64_t n = q_count(col);
     ray_t* g = ord_grade(col, 0);
     if (!g || RAY_IS_ERR(g)) return g ? g : q_err(QE_OOM);
     ray_t* r = ray_vec_new(RAY_I64, n);
@@ -256,7 +257,7 @@ static ray_t* ord_dense_rank(ray_t* col) {
  * argument), lifting the kernel's 16-key cap. */
 static ray_t* grade_table(ray_t* t, int desc) {
     int64_t nc = ray_table_ncols(t);
-    int64_t nr = ray_table_nrows(t);
+    int64_t nr = q_count(t);
     if (nc <= 0) return q_err(QE_TYPE);
     if (nr == 0) {
         ray_t* g = ray_vec_new(RAY_I64, 0);

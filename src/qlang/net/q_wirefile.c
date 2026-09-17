@@ -1,5 +1,6 @@
 /* q_wirefile — kdb+ on-disk reader (see q_wirefile.h). */
 #define _POSIX_C_SOURCE 200809L   /* lstat */
+#include "qlang/q_count.h"
 #include "qlang/net/q_wirefile.h"
 #include "qlang/io/q_io.h"      /* the byte core: paths, the slice read, the write */
 #include "qlang/net/q_wire.h"
@@ -7,7 +8,6 @@
 #include "qlang/base/q_type.h"  /* q_type_is_int_vec — the `.z.zd` triple */
 #include "qlang/q_env.h"        /* q_env_get — `.z.zd` lives as a plain global */
 #include "qlang/q_prim.h"       /* q_str_text_bytes — nested CHAR rows; q_attr_stamp_trusted — the disk `s` */
-#include "qlang/q_builtins.h"   /* q_count_long — nested column length */
 #include "qlang/ops/q_index.h"  /* q_index_elem_at — nested row reads */
 #include "qlang/io/q_splay.h"   /* q_splay_invalidate(_under) — writes drop stale map entries */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_concrete, q_eval_apply_value */
@@ -249,7 +249,7 @@ static ray_t* wf_read_nested(int8_t elem, ray_t* path, const uint8_t* off, int64
     ray_t* comp = wf_companion(path);
     if (RAY_IS_ERR(comp)) { ray_release(out); return comp; }
     const uint8_t* data = (const uint8_t*)ray_data(comp);
-    int64_t size = ray_len(comp), prev = 0;
+    int64_t size = q_count(comp), prev = 0;
     for (int64_t i = 0; i < count; i++) {
         int64_t end = wf_i64(off + i * 8);
         if (end < prev || end > size || (end - prev) % w) {
@@ -407,7 +407,7 @@ static ray_t* wf_read_image(const uint8_t* buf, size_t len, int unzipped, ray_t*
  * on disk it does not name is not part of the table.  Every column then goes
  * through the flat reader, so compression, enums and nesting come along free. */
 static ray_t* wf_read_splay(const char* dir, size_t n, ray_t* dotd) {
-    int64_t ncols = ray_len(dotd), rows = -1;
+    int64_t ncols = q_count(dotd), rows = -1;
     ray_t* tbl = ray_table_new(ncols);
     if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_OOM);
     ray_t* bad = NULL;
@@ -423,10 +423,10 @@ static ray_t* wf_read_splay(const char* dir, size_t n, ray_t* dotd) {
         ray_t* col = wf_is_file(cp) ? wf_read_path(cp, 1) : q_err(QE_CORRUPT);
         ray_release(cp);
         if (RAY_IS_ERR(col)) { bad = col; break; }
-        if (rows < 0) rows = ray_len(col);
+        if (rows < 0) rows = q_count(col);
         /* No artifact settles what kdb does with ragged columns; failing beats
          * truncating to the shortest and returning a plausible short table. */
-        if (ray_len(col) != rows) { ray_release(col); bad = q_err(QE_CORRUPT); break; }
+        if (q_count(col) != rows) { ray_release(col); bad = q_err(QE_CORRUPT); break; }
         tbl = ray_table_add_col(tbl, id, col);
         ray_release(col);
         if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_OOM);
@@ -467,7 +467,8 @@ static ray_t* wf_read_path(ray_t* path, int follow) {
     int zipped = 0;
     ray_t* all = q_io_read_slice(path, 0, -1, &zipped);
     if (!all || RAY_IS_ERR(all)) return all ? all : q_err(QE_IO);
-    ray_t* r = wf_read_image((const uint8_t*)ray_data(all), (size_t)ray_len(all),
+    ray_t* r = wf_read_image((const uint8_t*)ray_data(all),
+                             (size_t) q_count(all),
                              zipped, follow ? path : NULL);
     ray_release(all);
     return r;
@@ -627,7 +628,7 @@ ray_t* q_wirefile_probe(ray_t* pathstr, q_wf_colhdr* out) {
  * (0=none 1=s 2=u 3=p 4=g).  Only `s#` survives a rewrite — the other three
  * carry a side structure this writer does not build. */
 static ray_t* wf_write_b(ray_t* x, uint8_t disk) {
-    int64_t n = ray_len(x);
+    int64_t n = q_count(x);
     size_t esz = ray_type_sizes[disk];
     if (n < 0 || (uint64_t)n > (SIZE_MAX - WF_B_OFF) / esz) return q_err(QE_LIMIT);
     size_t total = WF_B_OFF + (size_t)n * esz;
@@ -715,7 +716,7 @@ static ray_t* wf_write_image(ray_t* x) {
  * explicit triple names one.  1 when set and 3 int cells, else 0. */
 static int wf_zd(int* lbs, int* alg, int* lvl) {
     ray_t* zd = q_env_get(ray_sym_intern_runtime(".z.zd", 5));   /* borrowed */
-    if (!zd || !q_type_is_int_vec(zd) || ray_len(zd) != 3) return 0;
+    if (!zd || !q_type_is_int_vec(zd) || q_count(zd) != 3) return 0;
     *lbs = (int)q_type_ivec_get(zd, 0);
     *alg = (int)q_type_ivec_get(zd, 1);
     *lvl = (int)q_type_ivec_get(zd, 2);
@@ -769,7 +770,7 @@ static ray_t* wf_write_flat_path(ray_t* path, ray_t* y, int lbs, int alg, int lv
     y = q_eval_apply_concrete(y);              /* storage boundary: no lazy on disk */
     char yl = q_attr_letter(y);
     int64_t yn = ray_is_vec(y) || y->type == RAY_ENUM || y->type == RAY_LIST
-               ? ray_len(y) : -1;
+               ? q_count(y) : -1;
     ray_t* img = wf_write_image(y);
     ray_release(y);
     if (RAY_IS_ERR(img)) return img;
@@ -818,7 +819,7 @@ static ray_t* wf_append_bytes(ray_t* path, const void* p, size_t n, long coff, c
 
 static ray_t* wf_append_inplace(ray_t* path, ray_t* v, int64_t count) {
     size_t esz = ray_type_sizes[(uint8_t)v->type];
-    int64_t n = ray_len(v);
+    int64_t n = q_count(v);
     if (count > INT64_MAX - n) return q_err(QE_LIMIT);
     int64_t nc = count + n;
     return wf_append_bytes(path, ray_data(v), esz * (size_t)n, 8, &nc, 8);
@@ -830,7 +831,7 @@ static ray_t* wf_append_inplace(ray_t* path, ray_t* v, int64_t count) {
  * else (an atom, a dict, a table) is one item, as `,` onto a list treats it. */
 static ray_t* wf_append_a_list(ray_t* path, ray_t* y, int32_t count) {
     int items = y->type == RAY_LIST || ray_is_vec(y) || y->type == RAY_ENUM;
-    int64_t n = items ? ray_len(y) : 1;
+    int64_t n = items ? q_count(y) : 1;
     if (n > INT32_MAX - count) return q_err(QE_LIMIT);
     q_wire_wbuf_t b = {0};
     for (int64_t i = 0; i < n; i++) {
@@ -854,7 +855,7 @@ static ray_t* wf_append_a_list(ray_t* path, ray_t* y, int32_t count) {
 /* Shape-A sym file: NUL-terminated names at EOF, ONE buffer/ONE write (no torn
  * half-symbol), header count untouched — advisory, the reader scans to EOF. */
 static ray_t* wf_append_syms(ray_t* path, ray_t* y) {
-    int64_t n = y->type == -RAY_SYM ? 1 : ray_len(y);
+    int64_t n = y->type == -RAY_SYM ? 1 : q_count(y);
     size_t total = 0;
     for (int64_t i = 0; i < n; i++) {
         int64_t id = y->type == -RAY_SYM ? y->i64 : ray_vec_get_sym_id(y, i);
@@ -996,8 +997,8 @@ ray_t* q_wirefile_domain_extend(ray_t* dompathstr, ray_t* symv, ray_t** position
     ray_t* dom = wf_is_file(dompathstr) ? wf_read_path(dompathstr, 0) : NULL;
     if (dom && RAY_IS_ERR(dom)) return dom;
     if (dom && dom->type != RAY_SYM) { ray_release(dom); return q_err(QE_TYPE); }
-    int64_t nold = dom ? ray_len(dom) : 0;
-    int64_t n = ray_len(symv);
+    int64_t nold = dom ? q_count(dom) : 0;
+    int64_t n = q_count(symv);
     /* open-addressed id->position map over the runtime sym ids both sides carry */
     int64_t hcap = 16;
     while (hcap < (nold + n) * 2) hcap <<= 1;
@@ -1039,33 +1040,34 @@ ray_t* q_wirefile_domain_extend(ray_t* dompathstr, ray_t* symv, ray_t** position
         return q_err(QE_OOM);
     }
     ray_t* bad = NULL;
-    if (nold == 0 && ray_len(fresh) >= 0 && !wf_is_file(dompathstr)) {
+    if (nold == 0 && q_count(fresh) >= 0 && !wf_is_file(dompathstr)) {
         ray_t* img = wf_write_image(fresh);              /* fresh: true count */
         bad = RAY_IS_ERR(img) ? img
             : q_io_write_all(dompathstr, ray_str_ptr(img), ray_str_len(img));
         if (!RAY_IS_ERR(img) && img != bad) ray_release(img);
-    } else if (ray_len(fresh) > 0) {
+    } else if (q_count(fresh) > 0) {
         ray_t* old = q_io_read_slice(dompathstr, 0, -1, NULL);
         if (!old || RAY_IS_ERR(old)) bad = old ? old : q_err(QE_IO);
         else {
             size_t add = 0;
-            for (int64_t i = 0; i < ray_len(fresh); i++) {
+            for (int64_t i = 0; i < q_count(fresh); i++) {
                 ray_t* nm = ray_sym_str(ray_vec_get_sym_id(fresh, i));
                 add += (nm ? ray_str_len(nm) : 0) + 1;
             }
-            uint8_t* buf = (uint8_t*)malloc((size_t)ray_len(old) + add);
+            uint8_t* buf = (uint8_t*)malloc((size_t) q_count(old) + add);
             if (!buf) bad = q_err(QE_OOM);
             else {
-                memcpy(buf, ray_data(old), (size_t)ray_len(old));
-                uint8_t* w = buf + ray_len(old);
-                for (int64_t i = 0; i < ray_len(fresh); i++) {
+                memcpy(buf, ray_data(old), (size_t) q_count(old));
+                uint8_t* w = buf + q_count(old);
+                for (int64_t i = 0; i < q_count(fresh); i++) {
                     ray_t* nm = ray_sym_str(ray_vec_get_sym_id(fresh, i));
                     size_t l = nm ? ray_str_len(nm) : 0;
                     memcpy(w, nm ? ray_str_ptr(nm) : "", l);
                     w += l;
                     *w++ = 0;
                 }
-                bad = q_io_write_all(dompathstr, buf, (size_t)ray_len(old) + add);
+                bad = q_io_write_all(dompathstr, buf,
+                                     (size_t) q_count(old) + add);
                 free(buf);
             }
             ray_release(old);
@@ -1084,7 +1086,7 @@ ray_t* q_wirefile_domain_extend(ray_t* dompathstr, ray_t* symv, ray_t** position
  * template byte-for-byte — fd20 page, name at +16, descriptor at 4080
  * (fd 00 14 attr, count i64), i64 positions from 4096. */
 static ray_t* wf_write_enum_img(ray_t* pos, const char* dn, size_t dnl) {
-    int64_t n = ray_len(pos);
+    int64_t n = q_count(pos);
     if (!wf_leaf_name(dn, dnl) || dnl > 255)   /* the probe's q_wf_colhdr.domain
                                                 * cap — never write a name the
                                                 * reader must refuse (codex r3) */
@@ -1112,7 +1114,7 @@ static int wf_row_bytes(ray_t* e, int8_t elem, const char** p, int64_t* nbytes) 
     if (elem == RAY_CHARV) return q_str_text_bytes(e, p, nbytes) ? 1 : 0;
     if (e->type != elem) return 0;
     *p = (const char*)ray_data(e);
-    *nbytes = ray_len(e) * (int64_t)ray_type_sizes[(uint8_t)elem];
+    *nbytes = q_count(e) * (int64_t)ray_type_sizes[(uint8_t)elem];
     return 1;
 }
 
@@ -1120,7 +1122,7 @@ static int wf_row_bytes(ray_t* e, int8_t elem, const char** p, int64_t* nbytes) 
  * `<col>#` = the raw element bytes (headerless) — the read format, reversed. */
 static ray_t* wf_write_nested(ray_t* path, ray_t* col, int8_t elem,
                               int lbs, int alg, int lvl) {
-    int64_t n = q_count_long(col);
+    int64_t n = q_count(col);
     ray_t* offs = ray_vec_new(RAY_I64, n > 0 ? n : 1);
     size_t total = 0;
     ray_t* bad = NULL;
@@ -1180,7 +1182,7 @@ static int8_t wf_col_nested_tag(ray_t* col) {
     if (!col) return 0;
     if (col->type == RAY_STR) return (int8_t)RAY_CHARV;
     if (col->type != RAY_LIST) return 0;
-    int64_t n = ray_len(col);
+    int64_t n = q_count(col);
     ray_t** e = (ray_t**)ray_data(col);
     int8_t t0 = (int8_t)RAY_CHARV;               /* empty column: char, as before */
     for (int64_t i = 0; i < n; i++) {
@@ -1234,7 +1236,7 @@ static ray_t* wf_write_splay_dir(ray_t* dirstr, ray_t* domsym, ray_t* y,
                             ray_str_ptr(nm), ray_str_len(nm));
         if (!cp) { bad = q_err(QE_OOM); break; }
         char cl = q_attr_letter(col);                /* before decay strips it */
-        int64_t cn = ray_is_vec(col) || col->type == RAY_ENUM ? ray_len(col) : -1;
+        int64_t cn = ray_is_vec(col) || col->type == RAY_ENUM ? q_count(col) : -1;
         wf_sidecar_drop(cp);
         ray_t* dec = NULL;                           /* a SYMLIST-domain 20h column
                                                       * writes as its resolved syms

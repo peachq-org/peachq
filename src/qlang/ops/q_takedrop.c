@@ -2,8 +2,8 @@
  * section of ref/take.md / ref/drop.md / ref/cut.md ("count x gives the number
  * of dimensions"); every arm GENERATES INDICES and lets q_index gather. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
-#include "qlang/q_builtins.h"          /* q_count_long — the one count home */
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"
 #include "lang/eval.h"     /* ray_take_fn — see take_kernel */
@@ -14,7 +14,7 @@
 #include <stdlib.h>
 
 static int64_t len_of(ray_t* x) {          /* -1 = atom or uncountable */
-    return (x && !ray_is_atom(x)) ? q_count_long(x) : -1;
+    return (x && !ray_is_atom(x)) ? q_count(x) : -1;
 }
 
 /* y[start .. start+w) through the index home; `recycle` wraps modulo total
@@ -126,7 +126,7 @@ static ray_t* reshape_law(ray_t* y, const int64_t* d, int64_t r) {
 }
 
 static ray_t* reshape(ray_t* shape, ray_t* y) {
-    int64_t r = ray_len(shape);
+    int64_t r = q_count(shape);
     int64_t sbuf[8];
     int64_t* d = (r <= 8) ? sbuf : malloc((size_t)r * sizeof(int64_t));
     if (!d) return q_err(QE_WSFULL);
@@ -144,7 +144,7 @@ static ray_t* reshape(ray_t* shape, ray_t* y) {
 static ray_t* cut_at(ray_t* pos, ray_t* y) {
     if (!y || (!ray_is_vec(y) && y->type != RAY_LIST && !q_type_is_table(y)))
         return q_err(QE_TYPE);
-    int64_t len = len_of(y), np = ray_len(pos);
+    int64_t len = len_of(y), np = q_count(pos);
     if (len < 0) return q_err(QE_TYPE);
     ray_t* out = ray_list_new(np > 0 ? np : 1);
     if (RAY_IS_ERR(out)) return out;
@@ -180,7 +180,7 @@ ray_t* q_take_wrap(ray_t* x, ray_t* y) {
     /* the parse tree of `update `g#c from t` carries the ENLISTED sym ((#;,`g;`c)),
      * and kx still applies the attribute when the target is a plain vector — the
      * functional-qsql attr idiom.  Containers keep their take-columns meaning. */
-    if (x && x->type == RAY_SYM && ray_len(x) == 1 && y &&
+    if (x && x->type == RAY_SYM && q_count(x) == 1 && y &&
         (ray_is_vec(y) || y->type == RAY_ENUM)) {
         ray_t* nm = ray_sym_str(ray_vec_get_sym_id(x, 0));       /* borrowed */
         size_t nl = nm ? ray_str_len(nm) : (size_t)-1;
@@ -199,18 +199,18 @@ ray_t* q_take_wrap(ray_t* x, ray_t* y) {
         if (!RAY_IS_ERR(e)) ray_release(e);
         return r;
     }
-    if (q_type_is_int_vec(x) && ray_len(x) >= 2) return reshape(x, y);
+    if (q_type_is_int_vec(x) && q_count(x) >= 2) return reshape(x, y);
     ray_t* es = q_funsql_entries_take(x, y);  /* dict keys / table cols / keyed */
     if (es) return es;
     int64_t n;
-    if (q_type_is_int_vec(x) && ray_len(x) == 1)
+    if (q_type_is_int_vec(x) && q_count(x) == 1)
         n = q_type_ivec_get(x, 0);            /* V3.4: a rank-1 shape is n#y */
     else if (!q_type_strict_i64(x, &n))
         return take_unify(take_kernel(y, x));
     /* take from an empty GENERAL list fills with its prototype — the empty
      * list itself: `flip (5#.Q.res)!(5#())` must be a 0-row table
      * (ref/dotq.md:1311); the typed twin `3#0#0` -> `0 0 0` already fills. */
-    if (y && y->type == RAY_LIST && ray_len(y) == 0 && n != 0 && n != NULL_I64) {
+    if (y && y->type == RAY_LIST && q_count(y) == 0 && n != 0 && n != NULL_I64) {
         int64_t k = n < 0 ? -n : n;
         ray_t* out = ray_list_new(k);
         if (RAY_IS_ERR(out)) return out;
@@ -248,7 +248,7 @@ ray_t* q_drop_wrap(ray_t* x, ray_t* y) {
     int64_t i;
     if (x && (ray_is_vec(x) || x->type == RAY_LIST) &&
         q_type_strict_i64(y, &i)) {           /* x _ i — delete the item at i */
-        int64_t len = ray_len(x);
+        int64_t len = q_count(x);
         if (i < 0 || i >= len) { ray_retain(x); return x; }   /* Drop is tolerant */
         ray_t* idx = ray_vec_new(RAY_I64, len > 1 ? len - 1 : 1);
         if (RAY_IS_ERR(idx)) return idx;

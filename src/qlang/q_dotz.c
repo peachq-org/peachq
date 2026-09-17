@@ -5,9 +5,10 @@
 #if defined(__linux__) && !defined(_GNU_SOURCE)
   #define _GNU_SOURCE             /* sched_getaffinity / CPU_COUNT — .z.c */
 #endif
+#include "qlang/q_count.h"
 #include "qlang/q_dotz.h"
 #include "qlang/q_env.h"       /* q_env_get — the settable handlers are globals */
-#include "qlang/eval/q_eval.h" /* q_eval_call_sym — handler firing */
+#include "qlang/eval/q_eval.h" /* q_eval_apply_call_sym — handler firing */
 #include "qlang/eval/q_view.h" /* q_view_zb — `.z.b` dependency dict */
 #include "qlang/eval/q_dbg.h"  /* q_dbg_zex/_zey — `.z.ex`/`.z.ey` (basics/debug.md) */
 #include "qlang/net/q_tls.h"   /* q_tls_dotz_e — `.z.e` TLS connection status */
@@ -369,7 +370,7 @@ static ray_t* zts_tick(ray_t* tick) {
     int64_t zts = ray_sym_intern_runtime(".z.ts", 5);
     if (!q_env_get(zts)) return NULL;             /* .z.ts unset → no-op */
     ray_t* ts = ray_timestamp(q_dotz_now_ns(1));       /* .z.P local timestamp arg */
-    ray_t* r  = q_eval_call_sym(zts, &ts, 1);
+    ray_t* r  = q_eval_apply_call_sym(zts, &ts, 1);
     ray_release(ts);
     /* Drain any show/0N! console output the handler produced to the SERVER
      * stdout — the timer fires outside run_one_line / remote-eval / an IPC hook,
@@ -389,7 +390,7 @@ void q_dotz_exit_fire(int code) {
     int64_t zexit = ray_sym_intern_runtime(".z.exit", 7);
     if (!q_env_get(zexit)) return;
     ray_t* arg = ray_i64(code);
-    ray_t* r = q_eval_call_sym(zexit, &arg, 1);
+    ray_t* r = q_eval_apply_call_sym(zexit, &arg, 1);
     ray_release(arg);
     if (r) ray_release(r);
     { const char* con = q_console_str();
