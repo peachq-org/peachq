@@ -109,7 +109,7 @@ ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
         ray_retain(types);
         s[4] = types;
     }
-    int64_t ctx = q_env_ctx();
+    int64_t ctx = q_env_scope_ctx();
     if (ctx) c = car_put(c, 3, ray_sym(ctx));
     if (RAY_IS_ERR(c)) return c;
     return car_put(c, LAM_LOCALS, q_eval_lambda_locals(params, b));
@@ -1136,10 +1136,9 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
     }
     g_frame_depth++;
     q_dbg_frame_push(lam);
-    /* the body runs in the namespace the lambda was DEFINED in, so a callee
-     * resolves its own globals, not its caller's (see q_eval_apply_lambda_new) */
-    int64_t caller_ctx = q_env_ctx(), lam_ctx = c[3] ? c[3]->i64 : 0;
-    q_env_ctx_set(lam_ctx);
+    /* the body resolves in the namespace the lambda was DEFINED in (q_eval_apply_lambda_new); the session `\d`
+     * is untouched, so an explicit `\d` in the body is a session directive that outlives the call */
+    int64_t caller_scope = q_env_scope(c[3] ? c[3]->i64 : 0);
     ray_t* r = RAY_NULL_OBJ;
     int64_t nb = ray_len(body);
     ray_t** bs = (ray_t**)ray_data(body);
@@ -1159,9 +1158,7 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
         r = q_err_take();
         if (!r) { ray_retain(RAY_NULL_OBJ); r = RAY_NULL_OBJ; }
     }
-    /* an explicit `\d` in the body is a SESSION directive and outlives the call
-     * — only the implicit definition-context is unwound (namespace/switch.qcmd) */
-    if (q_env_ctx() == lam_ctx) q_env_ctx_set(caller_ctx);
+    q_env_scope(caller_scope);
     q_dbg_frame_pop();
     g_frame_depth--;
     q_env_frame_pop();
@@ -1815,9 +1812,9 @@ static int amend_head(ray_t* d) {
 ray_t* q_eval_at_wrap(ray_t** args, int64_t n) {
     if (n == 2) return q_eval_apply_concrete(q_eval_apply_value(args[0], &args[1], 1));
     if (n == 3 && !amend_head(args[0])) {
-        q_dbg_trap_enter();             /* error-trap mode 0 inside the trap */
+        int64_t ctx = q_dbg_trap_enter();   /* error-trap mode 0 inside the trap */
         ray_t* r = q_eval_apply_concrete(q_eval_apply_value(args[0], &args[1], 1));
-        q_dbg_trap_exit();
+        q_dbg_trap_exit(ctx, r);
         return trap_catch(r, args[2]);
     }
     if (n == 3 || n == 4) return amend_value(args, n, 0);
@@ -1829,9 +1826,9 @@ ray_t* q_eval_at_wrap(ray_t** args, int64_t n) {
  * data head Amend (i is the path list). */
 ray_t* q_eval_dot_wrap(ray_t** args, int64_t n) {
     if (n == 3 && !amend_head(args[0])) {
-        q_dbg_trap_enter();
+        int64_t ctx = q_dbg_trap_enter();
         ray_t* r = q_eval_dot_wrap(args, 2);
-        q_dbg_trap_exit();
+        q_dbg_trap_exit(ctx, r);
         return trap_catch(r, args[2]);
     }
     if (n == 3 || n == 4) return amend_value(args, n, 1);

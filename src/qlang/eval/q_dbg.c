@@ -114,8 +114,11 @@ void q_dbg_statement_end(int tok) {
     g_held[d] = NULL;
 }
 
-void q_dbg_trap_enter(void) { g_trap_depth++; }
-void q_dbg_trap_exit(void)  { g_trap_depth--; }
+int64_t q_dbg_trap_enter(void) { g_trap_depth++; return q_env_ctx(); }
+void q_dbg_trap_exit(int64_t ctx, ray_t* r) {
+    g_trap_depth--;
+    if (r && RAY_IS_ERR(r) && !q_err_is(r, QE_RETURN)) q_env_ctx_set(ctx);
+}
 
 void q_dbg_set_reader(q_dbg_read_fn fn) { g_reader = fn; }
 
@@ -450,9 +453,9 @@ static ray_t* dbg_bt_object(void) {
 
 ray_t* q_dbg_trp_fn(ray_t** args, int64_t n) {
     if (n != 3) return q_err(QE_RANK);
-    q_dbg_trap_enter();
+    int64_t ctx = q_dbg_trap_enter();
     ray_t* r = q_eval_apply_concrete(q_eval_apply_value(args[0], &args[1], 1));
-    q_dbg_trap_exit();
+    q_dbg_trap_exit(ctx, r);
     if (!r || !RAY_IS_ERR(r) || q_err_is(r, QE_RETURN))
         return r ? r : q_err(QE_TYPE);
     ray_t* msg = q_err_take();
