@@ -61,7 +61,7 @@ ray_t* q_key_name(int64_t sym) {
 
     /* ref/key.md: "interpreted relative to the current context if not fully
      * qualified" — the existence test does NOT walk out to the root. */
-    int64_t look = qualified ? sym : q_env_qualify(q_env_ctx(), sym);
+    int64_t look = qualified ? sym : q_env_qualify(q_env_scope_ctx(), sym);
     ray_t* v = q_env_resolve(look);
     if (!v) return ray_list_new(1);              /* unbound -> () */
     if (RAY_IS_ERR(v)) return v;
