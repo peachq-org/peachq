@@ -3,6 +3,7 @@
  * ssr (manifest wraps) + the shared line-splitter q_str_split_lines.
  * Evicted from q_builtins.c + ops/q_io.c so the registration hub registers
  * and the string domain lives once. */
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* wrap decls + the string-C3 boundary decls */
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"         /* q_type_empty — like's empty answer is still boolean */
@@ -33,13 +34,13 @@ ray_t* q_str_of_charv(ray_t* x) {
     if (!x || RAY_IS_ERR(x)) return x;               /* errors pass through (no-op rc) */
     if (x->type == -RAY_CHARV) { char c = (char)x->u8; return ray_str(&c, 1); }
     if (x->type != RAY_CHARV) return q_err(QE_TYPE);
-    return ray_str((const char*)ray_data(x), (size_t)ray_len(x));
+    return ray_str((const char*)ray_data(x), (size_t) q_count(x));
 }
 
 bool q_str_text_bytes(ray_t* x, const char** p, int64_t* n) {
     if (!x || RAY_IS_ERR(x)) return false;
     if (x->type == -RAY_STR)  { *p = ray_str_ptr(x); *n = (int64_t)ray_str_len(x); return true; }
-    if (x->type == RAY_CHARV) { *p = (const char*)ray_data(x); *n = ray_len(x); return true; }
+    if (x->type == RAY_CHARV) { *p = (const char*)ray_data(x); *n = q_count(x); return true; }
     if (x->type == -RAY_CHARV){ *p = (const char*)&x->u8; *n = 1; return true; }
     return false;
 }
@@ -51,7 +52,7 @@ ray_t* q_str_in(ray_t* x) {
     if (!x || RAY_IS_ERR(x)) { if (x) ray_retain(x); return x; }
     if (x->type == RAY_CHARV || x->type == -RAY_CHARV) return q_str_of_charv(x);
     if (x->type == RAY_LIST) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t** e = (ray_t**)ray_data(x);
         bool any = false;
         for (int64_t i = 0; i < n && !any; i++)
@@ -84,7 +85,7 @@ static bool charv_out_needed(ray_t* r) {
     if (r->type == -RAY_STR || r->type == RAY_STR) return true;
     if (r->type == RAY_LIST) {
         ray_t** e = (ray_t**)ray_data(r);
-        for (int64_t i = 0; i < ray_len(r); i++)
+        for (int64_t i = 0; i < q_count(r); i++)
             if (charv_out_needed(e[i])) return true;
     }
     if (r->type == RAY_DICT) {
@@ -103,7 +104,7 @@ ray_t* q_str_charv_out(ray_t* r) {
         return v;
     }
     if (r->type == RAY_STR) {                    /* extracted column -> 0h list */
-        int64_t n = ray_len(r);
+        int64_t n = q_count(r);
         ray_t* out = ray_list_new(n);
         if (!out || RAY_IS_ERR(out)) { ray_release(r); return out ? out : q_err(QE_OOM); }
         for (int64_t i = 0; i < n; i++) {
@@ -119,7 +120,7 @@ ray_t* q_str_charv_out(ray_t* r) {
         return out;
     }
     if (r->type == RAY_LIST && charv_out_needed(r)) {
-        int64_t n = ray_len(r);
+        int64_t n = q_count(r);
         ray_t** e = (ray_t**)ray_data(r);
         if (r->rc == 1) {                        /* sole owner: rewrite in place */
             for (int64_t i = 0; i < n; i++) {
@@ -201,7 +202,7 @@ ray_t* q_string_fn(ray_t* x) {
     if (x->type == -RAY_BOOL) { char c = x->b8 ? '1' : '0'; return ray_charv(&c, 1); }
     if (!ray_is_vec(x)) return q_str_charv_out(ray_fmt(x, 0));   /* remaining atoms */
     /* vector: per-element string */
-    int64_t n = ray_len(x);
+    int64_t n = q_count(x);
     ray_t* out = ray_list_new(n > 0 ? n : 1);
     if (RAY_IS_ERR(out)) return out;
     for (int64_t i = 0; i < n; i++) {
@@ -230,7 +231,7 @@ static ray_t* str_case_leaf(ray_t* x, int64_t up) {
     if (x->type == -RAY_CHARV)                       /* char atom stays an atom */
         return ray_char((uint8_t)(up ? toupper(x->u8) : tolower(x->u8)));
     if (x->type == RAY_CHARV) {                      /* char vector, in place-of-copy */
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* r = ray_charv((const char*)ray_data(x), n);
         if (RAY_IS_ERR(r)) return r;
         str_case_bytes((const char*)ray_data(r), (size_t)n, (char*)ray_data(r), up);
@@ -261,7 +262,7 @@ static ray_t* str_case_leaf(ray_t* x, int64_t up) {
         return ray_sym(id);
     }
     if (x->type == RAY_SYM) {   /* symbol vector */
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* out = ray_sym_vec_new(RAY_SYM_W64, n);
         if (RAY_IS_ERR(out)) return out;
         for (int64_t i = 0; i < n; i++) {
@@ -280,7 +281,7 @@ static ray_t* str_case_leaf(ray_t* x, int64_t up) {
         return out;
     }
     if (x->type == RAY_STR) {   /* string vector -> per-element case shift */
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* out = ray_list_new(n > 0 ? n : 1);
         if (RAY_IS_ERR(out)) return out;
         for (int64_t i = 0; i < n; i++) {
@@ -329,13 +330,13 @@ static ray_t* str_trim_leaf(ray_t* x, int64_t mode) {
     }
     if (x->type == RAY_CHARV) {                  /* char vector -> trimmed charv */
         const char* p = (const char*)ray_data(x);
-        size_t n = (size_t)ray_len(x), a = 0, b = n;
+        size_t n = (size_t) q_count(x), a = 0, b = n;
         if (mode != 2) while (a < b && str_is_nullch(p[a])) a++;
         if (mode != 1) while (b > a && str_is_nullch(p[b - 1])) b--;
         return ray_charv(p + a, (int64_t)(b - a));
     }
     if (x->type == RAY_STR) {   /* string vector -> trim each element */
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* out = ray_list_new(n > 0 ? n : 1);
         if (RAY_IS_ERR(out)) return out;
         for (int64_t i = 0; i < n; i++) {
@@ -351,7 +352,7 @@ static ray_t* str_trim_leaf(ray_t* x, int64_t mode) {
         return out;
     }
     if (ray_is_vec(x)) {        /* simple non-string vector -> strip NULL ends */
-        int64_t n = ray_len(x), a = 0, b = n;
+        int64_t n = q_count(x), a = 0, b = n;
         if (mode != 2) while (a < b && q_type_vec_is_null(x, a)) a++;
         if (mode != 1) while (b > a && q_type_vec_is_null(x, b - 1)) b--;
         if (a == 0 && b == n) { ray_retain(x); return x; }
@@ -369,7 +370,7 @@ static ray_t* str_trim_leaf(ray_t* x, int64_t mode) {
      * or table recurses to string leaves; typed vectors keep the null-strip
      * arm above, so (0N;1;2) does NOT strip — only `0N 1 2` does. */
     if (x->type == RAY_LIST) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* out = ray_list_new(n > 0 ? n : 1);
         if (RAY_IS_ERR(out)) return out;
         ray_t** e = (ray_t**)ray_data(x);
@@ -530,7 +531,7 @@ ray_t* q_str_subject_map(ray_t* x, ray_t* (*one)(ray_t* e, void* ctx), void* ctx
         return ray_dict_new(k, v);
     }
     if (!q_str_subject_many(x)) return one(x, ctx);
-    int64_t n = ray_len(x);
+    int64_t n = q_count(x);
     if (n == 0) return empty_tag ? q_type_empty(empty_tag) : ray_list_new(0);
     ray_t* out = ray_list_new(n);
     if (RAY_IS_ERR(out)) return out;
@@ -671,7 +672,7 @@ ray_t* q_str_split_lines(const char* y, size_t yl) {
         }
     }
     /* drop a single trailing empty produced by a terminal '\n' */
-    int64_t n = ray_len(out);
+    int64_t n = q_count(out);
     if (n >= 1) {
         ray_t** e = (ray_t**)ray_data(out);
         if (e[n - 1]->type == -RAY_STR && ray_str_len(e[n - 1]) == 0) {

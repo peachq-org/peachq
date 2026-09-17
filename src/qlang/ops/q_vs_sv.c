@@ -2,6 +2,7 @@
  * like q_bang.c / q_dollar.c.  Partition and join are lane-uniform over chars and bytes with the result lane taken
  * from x ("type inferred from left hand side"); base-x encode/decode take integer-kinded y — byte and boolean
  * included — and the matrix forms are the per-item / per-column composition of the atom forms. */
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* wrap decls + q_prim.h (q_str_text_bytes, q_str_split_lines, q_str_charv_out) */
 #include "qlang/base/q_err.h"
 #include "table/sym.h"     /* ray_sym_str, ray_sym_vec_cell, ray_sym_intern_runtime */
@@ -24,7 +25,7 @@ static ray_t* lane_new(int8_t lane, const char* p, int64_t n) {
 static bool lane_bytes(ray_t* v, const char** p, int64_t* n) {
     if (!lane_of(v)) return false;
     if (v->type == -RAY_BYTE_ONLY) { *p = (const char*)&v->u8; *n = 1; return true; }
-    if (v->type == RAY_BYTE_ONLY)  { *p = (const char*)ray_data(v); *n = ray_len(v); return true; }
+    if (v->type == RAY_BYTE_ONLY)  { *p = (const char*)ray_data(v); *n = q_count(v); return true; }
     return q_str_text_bytes(v, p, n);
 }
 
@@ -147,7 +148,7 @@ static int64_t width_of(int64_t base, int64_t v) {
 
 /* an atom base needs v's digit count; a vector base is one digit per radix */
 static int64_t leaf_width(ray_t* x, int64_t v) {
-    return ray_is_atom(x) ? width_of(q_type_iatom_val(x), v) : ray_len(x);
+    return ray_is_atom(x) ? width_of(q_type_iatom_val(x), v) : q_count(x);
 }
 
 /* the width base x needs for y (ints, byte/bool, or any nesting of them); -1 when y is not integer-kinded */
@@ -155,7 +156,7 @@ static int64_t max_width(ray_t* x, ray_t* y) {
     int64_t v, w = 0;
     if (ikind_atom(y, &v)) return leaf_width(x, v);
     if (!y || (!ikind_vec(y) && y->type != RAY_LIST)) return -1;
-    for (int64_t j = 0; j < ray_len(y); j++) {
+    for (int64_t j = 0; j < q_count(y); j++) {
         int64_t wj = y->type == RAY_LIST ? max_width(x, ((ray_t**)ray_data(y))[j]) : leaf_width(x, ikind_get(y, j));
         if (wj < 0) return -1;
         if (wj > w) w = wj;
@@ -166,7 +167,7 @@ static int64_t max_width(ray_t* x, ray_t* y) {
 /* digits of v, MSB first: w digits of an atom base, or one digit per item of a vector base (mixed radix; a
  * non-positive radix takes the whole remainder, so `0 24 60 60` leaves the days unbounded) */
 static ray_t* digits_of(ray_t* x, int64_t v, int64_t w) {
-    int64_t n = ray_is_atom(x) ? w : ray_len(x);
+    int64_t n = ray_is_atom(x) ? w : q_count(x);
     ray_t* out = ray_vec_new(RAY_I64, n > 0 ? n : 1);
     if (RAY_IS_ERR(out)) return out;
     out->len = n;
@@ -186,7 +187,7 @@ static ray_t* base_encode(ray_t* x, ray_t* y, int64_t w) {
     int64_t v;
     if (ikind_atom(y, &v)) return digits_of(x, v, w);
     bool gen = y->type == RAY_LIST;
-    int64_t m = ray_len(y);
+    int64_t m = q_count(y);
     ray_t** e = gen ? (ray_t**)ray_data(y) : NULL;
     ray_t* cols = ray_list_new(m > 0 ? m : 1);
     if (RAY_IS_ERR(cols)) return cols;
@@ -250,7 +251,7 @@ ray_t* q_vs_wrap(ray_t* x, ray_t* y) {
  * ` sv host-lines form) */
 static ray_t* str_join(ray_t* y, const char* sep, int64_t sl, int host, int8_t lane) {
     if (!y || y->type != RAY_LIST) return q_err(QE_TYPE);
-    int64_t n = ray_len(y);
+    int64_t n = q_count(y);
     ray_t** ev = (ray_t**)ray_data(y);
     const char* ep; int64_t el;
     int64_t total = host ? n : (n > 0 ? (n - 1) * sl : 0);
@@ -275,7 +276,7 @@ static ray_t* str_join(ray_t* y, const char* sep, int64_t sl, int host, int8_t l
 /* ` sv `syms — join symbols: leading ':' (file handle) joins with '/', else
  * with '.'  -> single -RAY_SYM atom. */
 static ray_t* sym_join(ray_t* y) {
-    int64_t n = ray_len(y);
+    int64_t n = q_count(y);
     if (n == 0) return ray_sym(ray_sym_intern_runtime("", 0));
     ray_t* first = ray_sym_vec_cell(y, 0);
     const char* fp = first ? ray_str_ptr(first) : "";
@@ -303,7 +304,7 @@ static ray_t* sym_join(ray_t* y) {
 /* big-endian byte decode: interpret a U8 vector as a signed integer of the
  * matching width (2->short, 4->int, 8->long). */
 static ray_t* byte_decode(ray_t* y) {
-    int64_t n = ray_len(y);
+    int64_t n = q_count(y);
     const uint8_t* p = (const uint8_t*)ray_data(y);
     uint64_t v = 0;
     for (int64_t i = 0; i < n; i++) v = (v << 8) | p[i];
@@ -316,7 +317,7 @@ static ray_t* byte_decode(ray_t* y) {
 
 /* bits -> integer (8->byte, 16->short, 32->int, 64->long; 128->guid deferred) */
 static ray_t* bit_compose(ray_t* y) {
-    int64_t n = ray_len(y);
+    int64_t n = q_count(y);
     const uint8_t* p = (const uint8_t*)ray_data(y);
     if (n == 128) return q_err(QE_NYI);
     if (n != 8 && n != 16 && n != 32 && n != 64)
@@ -333,7 +334,7 @@ static ray_t* bit_compose(ray_t* y) {
  * vector, else column col of y's rows */
 static int64_t horner(ray_t* x, ray_t* y, int64_t col) {
     uint64_t acc = 0;                                 /* wraps by design: `2 sv 64#1` is -1 */
-    for (int64_t i = 0, n = ray_len(y); i < n; i++) {
+    for (int64_t i = 0, n = q_count(y); i < n; i++) {
         int64_t b = ray_is_atom(x) ? q_type_iatom_val(x) : q_type_ivec_get(x, i);
         int64_t d = col < 0 ? ikind_get(y, i) : ikind_get(((ray_t**)ray_data(y))[i], col);
         acc = acc * (uint64_t)b + (uint64_t)d;
@@ -344,16 +345,16 @@ static int64_t horner(ray_t* x, ray_t* y, int64_t col) {
 /* x sv y (ref/sv.md): a digit vector answers one number; a list of conforming items answers per column — the
  * inverse of the matrix encode, and Horner being atomic, a list of matrices answers a matrix (aoc/2021/day20.q) */
 static ray_t* base_decode(ray_t* x, ray_t* y) {
-    int64_t n = ray_len(y);
-    if (!ray_is_atom(x) && ray_len(x) != n) return q_err(QE_LENGTH);
+    int64_t n = q_count(y);
+    if (!ray_is_atom(x) && q_count(x) != n) return q_err(QE_LENGTH);
     if (y->type != RAY_LIST && !ikind_vec(y)) return q_err(QE_TYPE);
     if (y->type != RAY_LIST || n == 0) return ray_i64(horner(x, y, -1));   /* no digits: the fold's identity */
     ray_t** e = (ray_t**)ray_data(y);
-    int64_t m = n > 0 ? ray_len(e[0]) : 0;
+    int64_t m = n > 0 ? q_count(e[0]) : 0;
     bool nested = n > 0 && e[0]->type == RAY_LIST;
     for (int64_t i = 0; i < n; i++) {
         if (nested ? e[i]->type != RAY_LIST : !ikind_vec(e[i])) return q_err(QE_TYPE);
-        if (ray_len(e[i]) != m) return q_err(QE_LENGTH);
+        if (q_count(e[i]) != m) return q_err(QE_LENGTH);
     }
     ray_t* out = nested ? ray_list_new(m > 0 ? m : 1) : ray_vec_new(RAY_I64, m > 0 ? m : 1);
     if (RAY_IS_ERR(out)) return out;

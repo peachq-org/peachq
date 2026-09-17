@@ -7,6 +7,7 @@
  * lists, symbols or dicts.  Shape is the wrapper's job (lib/str.q), which is
  * also where the symbol coercion lives, so the discoverable q surface and the
  * dispatch have one home. */
+#include "qlang/q_count.h"
 #include "qlang/ops/q_strns.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_env.h" /* q_env_bind — the .str.i.* bindings */

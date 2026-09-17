@@ -1,6 +1,7 @@
 /* qdoc — see qdoc.h. */
 #define _POSIX_C_SOURCE 200809L
 
+#include "qlang/q_count.h"
 #include "qlang/repl/qdoc.h"
 #include "qlang/q_ctx.h"    /* q_ctx_run_line — THE statement seam this runner drives */
 #include "qlang/q_console.h"

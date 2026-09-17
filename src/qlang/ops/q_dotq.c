@@ -2,6 +2,7 @@
  * (via the .Q.c.* C seam) and .Q.ops (the whole verb surface as a read-only
  * table: the C manifest unioned with the q-source stdlib).
  * Evicted from q_builtins.c; the type-letter kernel (q_ty_char) stays there. */
+#include "qlang/q_count.h"
 #include "qlang/q_builtins.h"   /* q_ty_char + this file's decls */
 #include "qlang/base/q_err.h"
 #include "qlang/q_ops.h"        /* q_ops_table — the .Q.ops source */
@@ -122,7 +123,7 @@ ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs) {
     ray_t* ns   = q_registry_qsrc_ns();            /* owned, marker-free */
     ray_t* nsk  = ns ? ray_dict_keys(ns) : NULL;   /* borrowed */
     ray_t* nsv  = ns ? ray_dict_vals(ns) : NULL;   /* borrowed */
-    int64_t nsn = nsk ? ray_len(nsk) : 0;
+    int64_t nsn = nsk ? q_count(nsk) : 0;
     int64_t cap = n + nsn > 0 ? n + nsn : 1;
     ray_t* c[DOTQ_OPS_NCOLS];
     for (int i = 0; i < DOTQ_OPS_NCOLS; i++)
