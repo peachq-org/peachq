@@ -32,19 +32,69 @@ static int is_bool_atom(ray_t* v, int truth) {
     return v && q_type_is_bool(v) && (v->b8 != 0) == truth;
 }
 
-static ray_t* til_count(ray_t* t) {
-    ray_t* n = ray_i64(q_count_long(t));
-    ray_t* r = ray_til_fn(n);
-    ray_release(n);
-    return r ? r : q_err(QE_TYPE);
-}
-
 /* one gather home for everything: x@idx via value-apply (law 7) */
 static ray_t* gather(ray_t* x, ray_t* idx) {
     return q_eval_apply_value(x, &idx, 1);
 }
 
-/* From-resolve (law 24 + column-dict superset): sym -> env; keyed -> 0!; dict -> flip.
+/* an ATOM phrase result conforms to the row count: n#atom (law 8) */
+static ray_t* conform_col(ray_t* v, int64_t n) {
+    if (!v || RAY_IS_ERR(v) || !ray_is_atom(v)) return v;
+    ray_t* na = ray_i64(n);
+    ray_t* c = q_take_wrap(na, v);
+    ray_release(na);
+    ray_release(v);
+    return c;
+}
+
+/* The source axis over BOTH From shapes — a table's columns, or a dict source's entries (owner ruling 2026-09-16:
+ * `select`/`exec` over a dict is flip -> select -> flip back, and works for every dict).  Rows are the widest
+ * non-atom entry's (an all-atom dict is one row); an ATOM entry is a constant column, answering as it is under the
+ * full row set and conforming to a narrowed one — which is what lets a non-conformable dict ride the one ladder. */
+static int64_t src_ncols(ray_t* t) { return q_type_is_dict(t) ? ray_dict_len(t) : ray_table_ncols(t); }
+
+static ray_t* src_col(ray_t* t, int64_t c) {                 /* owned */
+    if (q_type_is_dict(t)) return q_index_elem_at(ray_dict_vals(t), c);
+    ray_t* col = ray_table_get_col_idx(t, c);
+    if (col) ray_retain(col);
+    return col;
+}
+
+static int64_t src_name(ray_t* t, int64_t c) {               /* -1: the entry has no name */
+    if (!q_type_is_dict(t)) return ray_table_col_name(t, c);
+    ray_t* k = ray_dict_keys(t);
+    return k->type == RAY_SYM ? ray_read_sym(ray_data(k), c, RAY_SYM, k->attrs) : -1;
+}
+
+static int64_t src_count(ray_t* t) {
+    if (!q_type_is_dict(t)) return q_count_long(t);
+    int64_t n = -1, nc = ray_dict_len(t);
+    for (int64_t c = 0; c < nc; c++) {
+        ray_t* v = src_col(t, c);
+        int64_t k = (v && !RAY_IS_ERR(v) && !ray_is_atom(v)) ? q_count_long(v) : -1;
+        if (k > n) n = k;
+        if (v) ray_release(v);
+    }
+    return n >= 0 ? n : (nc > 0 ? 1 : 0);
+}
+
+/* one entry at the rows (consumes v): a column gathers, a constant conforms — an atom idx is the row itself */
+static ray_t* entry_at(ray_t* v, ray_t* idx) {
+    if (!v || RAY_IS_ERR(v)) return v;
+    if (ray_is_atom(v)) return ray_is_atom(idx) ? v : conform_col(v, q_count_long(idx));
+    ray_t* r = gather(v, idx);
+    ray_release(v);
+    return r;
+}
+
+static ray_t* til_count(ray_t* t) {
+    ray_t* n = ray_i64(src_count(t));
+    ray_t* r = ray_til_fn(n);
+    ray_release(n);
+    return r ? r : q_err(QE_TYPE);
+}
+
+/* From-resolve (law 24): sym -> env; keyed -> 0!; dict -> itself (a dict source, owner 2026-09-16).
  * A `:...` RESOURCE resolves in the order user-docs/handles.md § Format inference sets:
  * explicit provider, then a recognised tabular suffix, then q's own object load (which is
  * what makes `:dir/` a splay and `:t` a serialized table) — an unrecognised one fails
@@ -80,7 +130,7 @@ static ray_t* ques_from_n(ray_t* t, int64_t* nkey, int hops) {
         if (nkey) *nkey = ray_table_ncols(ray_dict_keys(t));
         return q_bang_enkey(0, t);
     }
-    if (q_type_is_dict(t)) return q_flip_wrap(t);
+    if (q_type_is_dict(t)) { ray_retain(t); return t; }
     if (q_splay_table_unresolved(t)) return q_err(QE_IO);   /* `flip cols!`:missing/` fails when queried */
     if (q_type_is_table(t)) { ray_retain(t); return t; }
     return q_err(QE_TYPE);
@@ -109,11 +159,30 @@ static int idx_is_identity(ray_t* idx, int64_t n) {
 
 static ray_t* col_self(void* ctx, ray_t* col) { (void)ctx; ray_retain(col); return col; }
 
+/* a dict source at rows: every entry at idx, keys kept (`flip (flip d) idx` for the dicts that flip) */
+static ray_t* dict_rows(ray_t* d, ray_t* idx) {
+    int64_t nc = ray_dict_len(d);
+    ray_t* vals = ray_list_new(nc > 0 ? nc : 1);
+    for (int64_t c = 0; c < nc && !RAY_IS_ERR(vals); c++) {
+        ray_t* g = entry_at(src_col(d, c), idx);
+        if (!g || RAY_IS_ERR(g)) { ray_release(vals); return g ? g : q_err(QE_TYPE); }
+        vals = ray_list_append(vals, g);
+        ray_release(g);
+    }
+    if (RAY_IS_ERR(vals)) return vals;
+    ray_t* c = q_list_collapse(vals);
+    ray_release(vals);
+    if (!c || RAY_IS_ERR(c)) return c ? c : q_err(QE_TYPE);
+    ray_t* r = q_bang(ray_dict_keys(d), c);
+    ray_release(c);
+    return r;
+}
+
 /* rows of the from-value at idx: an identity idx takes the value itself without a copy — a mapped table as a
  * fresh block over the same columns, so the result is derived and plain (ref/dotq.md `.Q.qp select from B` -> 0) */
 static ray_t* from_rows(ray_t* t, ray_t* idx) {
-    ray_t* use = idx_is_identity(idx, q_count_long(t)) ? NULL : idx;
-    if (use) return gather(t, use);
+    ray_t* use = idx_is_identity(idx, src_count(t)) ? NULL : idx;
+    if (use) return q_type_is_dict(t) ? dict_rows(t, use) : gather(t, use);
     if (q_splay_table_path(t)) return q_table_map_cols(col_self, NULL, t);
     ray_retain(t);
     return t;
@@ -124,17 +193,18 @@ static ray_t* from_rows(ray_t* t, ray_t* idx) {
 static ray_t* phrase_eval(ray_t* tree, ray_t* t, ray_t* idx) {
     if (q_env_frame_push(0) != RAY_OK) return q_err(QE_STACK);
     ray_t* err = NULL;
-    int ident = idx_is_identity(idx, q_count_long(t));
+    int ident = idx_is_identity(idx, src_count(t));
     {
         /* the narrowing law: an identity idx binds the column ITSELF — the
          * per-element gather here was the projection cliff that priced
          * `select c1 from m` by the table's WIDTH (PLAN.md 2026-08-04) */
-        int64_t nc = ray_table_ncols(t);
+        int64_t nc = src_ncols(t);
         for (int64_t c = 0; c < nc && !err; c++) {
-            ray_t* col = ray_table_get_col_idx(t, c);
-            ray_t* g = ident ? (ray_retain(col), col) : gather(col, idx);
+            ray_t* col = src_col(t, c);
+            ray_t* g = ident ? col : entry_at(col, idx);
             if (!g || RAY_IS_ERR(g)) { err = g ? g : q_err(QE_TYPE); break; }
-            q_env_local_set(ray_table_col_name(t, c), g);    /* retains */
+            int64_t nm = src_name(t, c);
+            if (nm >= 0) q_env_local_set(nm, g);            /* retains */
             ray_release(g);
         }
     }
@@ -285,7 +355,7 @@ static ray_t* idx_restrict(ray_t* idx, int ident, ray_t* rows) {
  * applies the verb runs on that value — so nothing evaluates twice.  NULL = not this shape, or idx is not an
  * ascending subsequence: the phrase evaluates as before.  Mapped splays are the owner's deferral. */
 static ray_t* where_attr(ray_t* tree, ray_t* t, ray_t* idx) {
-    if (!tree || tree->type != RAY_LIST || ray_len(tree) != 3 || q_splay_table_path(t)) return NULL;
+    if (!tree || tree->type != RAY_LIST || ray_len(tree) != 3 || q_splay_table_path(t) || q_type_is_dict(t)) return NULL;
     ray_t** e = (ray_t**)ray_data(tree);
     if (!e[0] || !e[1] || !e[2]) return NULL;
     where_attr_op op;
@@ -297,7 +367,7 @@ static ray_t* where_attr(ray_t* tree, ray_t* t, ray_t* idx) {
     ray_t* cn = swapped ? e[2] : e[1];
     ray_t* col = cn->type == -RAY_SYM ? ray_table_get_col(t, cn->i64) : NULL;       /* borrowed */
     if (!col || !(ray_index_has(col) || ray_attr_is_sorted(col))) return NULL;
-    int64_t n = q_count_long(t);
+    int64_t n = src_count(t);
     int ident = idx_is_identity(idx, n);
     if (!ident && !idx_is_ascending(idx)) return NULL;
     ray_t* x = swapped ? e[1] : e[2];
@@ -332,16 +402,6 @@ static ray_t* where_fold(ray_t* c, ray_t* t, ray_t* idx0) {
         idx = nidx;
     }
     return idx;
-}
-
-/* an ATOM phrase result conforms to the row count: n#atom (law 8) */
-static ray_t* conform_col(ray_t* v, int64_t n) {
-    if (!v || RAY_IS_ERR(v) || !ray_is_atom(v)) return v;
-    ray_t* na = ray_i64(n);
-    ray_t* c = q_take_wrap(na, v);
-    ray_release(na);
-    ray_release(v);
-    return c;
 }
 
 /* every phrase of rng -> owned LIST of columns; atoms conform unless exec */
@@ -410,11 +470,13 @@ static ray_t* cols_table(ray_t* names, ray_t* rng, ray_t* t, ray_t* idx, int con
     if (names_collide(names)) return q_err(QE_DUP);
     ray_t* vals = sel_cols(rng, t, idx, conform);
     if (RAY_IS_ERR(vals)) return vals;
-    vals = agg_conform(vals);
-    if (RAY_IS_ERR(vals)) return vals;
+    int dict = q_type_is_dict(t);            /* a dict source's Select is names!values: the flip back */
+    if (dict) { ray_t* c = q_list_collapse(vals); ray_release(vals); vals = c; }
+    else vals = agg_conform(vals);
+    if (!vals || RAY_IS_ERR(vals)) return vals ? vals : q_err(QE_TYPE);
     ray_t* d = q_bang(names, vals);
     ray_release(vals);
-    if (!d || RAY_IS_ERR(d)) return d ? d : q_err(QE_TYPE);
+    if (!d || RAY_IS_ERR(d) || dict) return d ? d : q_err(QE_TYPE);
     ray_t* r = q_flip_wrap(d);
     ray_release(d);
     return r;
@@ -429,8 +491,10 @@ static ray_t* exec_shape(ray_t* a, ray_t* t, ray_t* idx) {
     if (is_empty_gen(a)) {
         ray_t* rows = from_rows(t, idx);
         if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_TYPE);
-        int64_t n = q_count_long(rows);
-        ray_t* r = q_index_elem_at(rows, n > 0 ? n - 1 : 0);
+        int64_t n = src_count(rows), j = n > 0 ? n - 1 : 0;
+        ray_t* last = ray_i64(j);
+        ray_t* r = q_type_is_dict(rows) ? dict_rows(rows, last) : q_index_elem_at(rows, j);
+        ray_release(last);
         ray_release(rows);
         return r;
     }
@@ -786,6 +850,10 @@ static ray_t* ques_select(ray_t** args, int64_t n) {
     int64_t nk = 0;                              /* keyed source: re-key the result */
     ray_t* t = ques_from(args[0], &nk);
     if (!t || RAY_IS_ERR(t)) return t ? t : q_err(QE_TYPE);
+    if (q_type_is_dict(t) && !(is_bool_atom(args[2], 0) || is_empty_gen(args[2]))) {   /* by / distinct: no witness */
+        ray_release(t);
+        return q_err(QE_NYI);
+    }
     ray_t* idx0 = til_count(t);
     ray_t* idx = RAY_IS_ERR(idx0) ? idx0 : where_fold(args[1], t, idx0);
     if (idx != idx0 && !RAY_IS_ERR(idx0)) ray_release(idx0);
@@ -1123,36 +1191,15 @@ static ray_t* update_table(ray_t* a, ray_t* b, ray_t* t, ray_t* idx) {
     return out;
 }
 
-/* update on a plain dict: entries bind as the namespace; result is the
+/* update on a plain dict: the dict source binding (phrase_eval); result is the
  * dict-join right-override d,a-evaluated (ref/update.md; by -> 'type 4.1) */
 static ray_t* update_dict(ray_t* a, ray_t* b, ray_t* c, ray_t* d) {
     if (!(is_bool_atom(b, 0) || is_empty_gen(b))) return q_err(QE_TYPE);
     if (!is_empty_gen(c)) return q_err(QE_NYI);
-    if (q_env_frame_push(0) != RAY_OK) return q_err(QE_STACK);
-    ray_t* dk = ray_dict_keys(d);
-    ray_t* dv = ray_dict_vals(d);
-    int64_t n = q_count_long(dk);
-    for (int64_t j = 0; j < n; j++) {
-        ray_t* k = q_index_elem_at(dk, j);
-        ray_t* v = q_index_elem_at(dv, j);
-        if (k && !RAY_IS_ERR(k) && k->type == -RAY_SYM && v && !RAY_IS_ERR(v))
-            q_env_local_set(k->i64, v);
-        if (k && !RAY_IS_ERR(k)) ray_release(k);
-        if (v && !RAY_IS_ERR(v)) ray_release(v);
-    }
-    ray_t* rng = ray_dict_vals(a);
-    int64_t nc = q_count_long(rng);
-    ray_t* vals = ray_list_new(nc > 0 ? nc : 1);
-    for (int64_t j = 0; j < nc && !RAY_IS_ERR(vals); j++) {
-        ray_t* tree = q_index_elem_at(rng, j);
-        ray_t* v = (tree && !RAY_IS_ERR(tree))
-                       ? q_eval_apply_concrete(q_eval(tree)) : tree;
-        if (tree && v != tree) ray_release(tree);
-        if (!v || RAY_IS_ERR(v)) { ray_release(vals); vals = v ? v : q_err(QE_TYPE); break; }
-        vals = ray_list_append(vals, v);
-        ray_release(v);
-    }
-    q_env_frame_pop();
+    ray_t* idx = til_count(d);
+    if (RAY_IS_ERR(idx)) return idx;
+    ray_t* vals = sel_cols(ray_dict_vals(a), d, idx, 0);
+    ray_release(idx);
     if (RAY_IS_ERR(vals)) return vals;
     ray_t* nd = q_bang(ray_dict_keys(a), vals);
     ray_release(vals);
