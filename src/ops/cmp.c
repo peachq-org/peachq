@@ -119,7 +119,7 @@ static ray_t* gt_impl(ray_t* a, ray_t* b, int tol) {
      * math on temporals applies to the underlying numerics, basics/math.md;
      * pinned by datatypes/minute 12:00=12*60 -> 1b) — as_i64/as_f64 read the
      * temporal payload, so the generic compare below handles it. */
-    if (!(is_numeric(a) || is_temporal(a) || RAY_IS_TEMPORALF(-a->type)) || !(is_numeric(b) || is_temporal(b) || RAY_IS_TEMPORALF(-b->type)))
+    if (!is_numeric_or_temporal(a) || !is_numeric_or_temporal(b))
         return ray_error("type", "cannot compare %s and %s",
                          ray_type_name(a->type), ray_type_name(b->type));
     int na = RAY_ATOM_IS_NULL(a), nb = RAY_ATOM_IS_NULL(b);
@@ -147,7 +147,7 @@ static ray_t* lt_impl(ray_t* a, ray_t* b, int tol) {
      * math on temporals applies to the underlying numerics, basics/math.md;
      * pinned by datatypes/minute 12:00=12*60 -> 1b) — as_i64/as_f64 read the
      * temporal payload, so the generic compare below handles it. */
-    if (!(is_numeric(a) || is_temporal(a) || RAY_IS_TEMPORALF(-a->type)) || !(is_numeric(b) || is_temporal(b) || RAY_IS_TEMPORALF(-b->type)))
+    if (!is_numeric_or_temporal(a) || !is_numeric_or_temporal(b))
         return ray_error("type", "cannot compare %s and %s",
                          ray_type_name(a->type), ray_type_name(b->type));
     int na = RAY_ATOM_IS_NULL(a), nb = RAY_ATOM_IS_NULL(b);
@@ -176,7 +176,7 @@ ray_t* ray_gte_fn(ray_t* a, ray_t* b) {
      * math on temporals applies to the underlying numerics, basics/math.md;
      * pinned by datatypes/minute 12:00=12*60 -> 1b) — as_i64/as_f64 read the
      * temporal payload, so the generic compare below handles it. */
-    if (!(is_numeric(a) || is_temporal(a) || RAY_IS_TEMPORALF(-a->type)) || !(is_numeric(b) || is_temporal(b) || RAY_IS_TEMPORALF(-b->type)))
+    if (!is_numeric_or_temporal(a) || !is_numeric_or_temporal(b))
         return ray_error("type", "cannot compare %s and %s",
                          ray_type_name(a->type), ray_type_name(b->type));
     int na = RAY_ATOM_IS_NULL(a), nb = RAY_ATOM_IS_NULL(b);
@@ -204,7 +204,7 @@ ray_t* ray_lte_fn(ray_t* a, ray_t* b) {
      * math on temporals applies to the underlying numerics, basics/math.md;
      * pinned by datatypes/minute 12:00=12*60 -> 1b) — as_i64/as_f64 read the
      * temporal payload, so the generic compare below handles it. */
-    if (!(is_numeric(a) || is_temporal(a) || RAY_IS_TEMPORALF(-a->type)) || !(is_numeric(b) || is_temporal(b) || RAY_IS_TEMPORALF(-b->type)))
+    if (!is_numeric_or_temporal(a) || !is_numeric_or_temporal(b))
         return ray_error("type", "cannot compare %s and %s",
                          ray_type_name(a->type), ray_type_name(b->type));
     int na = RAY_ATOM_IS_NULL(a), nb = RAY_ATOM_IS_NULL(b);
@@ -250,7 +250,7 @@ ray_t* ray_eq_fn(ray_t* a, ray_t* b) {
     if (is_temporal(a) && is_temporal(b))
         return make_bool(temporal_as_ns(a) == temporal_as_ns(b) ? 1 : 0);
     /* temporal ~ numeric payload compare (see ray_gt_fn note). */
-    if (!(is_numeric(a) || is_temporal(a) || RAY_IS_TEMPORALF(-a->type)) || !(is_numeric(b) || is_temporal(b) || RAY_IS_TEMPORALF(-b->type))) return ray_error("type", "=: incomparable operand types, got %s and %s", ray_type_name(a->type), ray_type_name(b->type));
+    if (!is_numeric_or_temporal(a) || !is_numeric_or_temporal(b)) return ray_error("type", "=: incomparable operand types, got %s and %s", ray_type_name(a->type), ray_type_name(b->type));
     /* An f64-backed temporal (datetime) forces the FLOAT lane: as_i64 on it
      * would return the raw bit pattern (codex r2 P2). */
     if (is_float_op(a, b) || RAY_IS_TEMPORALF(-a->type) || RAY_IS_TEMPORALF(-b->type))
@@ -275,7 +275,7 @@ ray_t* ray_neq_fn(ray_t* a, ray_t* b) {
     if (is_temporal(a) && is_temporal(b))
         return make_bool(temporal_as_ns(a) != temporal_as_ns(b) ? 1 : 0);
     /* temporal ~ numeric payload compare (see ray_gt_fn note). */
-    if (!(is_numeric(a) || is_temporal(a) || RAY_IS_TEMPORALF(-a->type)) || !(is_numeric(b) || is_temporal(b) || RAY_IS_TEMPORALF(-b->type))) return ray_error("type", "<>: incomparable operand types, got %s and %s", ray_type_name(a->type), ray_type_name(b->type));
+    if (!is_numeric_or_temporal(a) || !is_numeric_or_temporal(b)) return ray_error("type", "<>: incomparable operand types, got %s and %s", ray_type_name(a->type), ray_type_name(b->type));
     /* f64-backed temporal: float lane (see ray_eq_fn). */
     if (is_float_op(a, b) || RAY_IS_TEMPORALF(-a->type) || RAY_IS_TEMPORALF(-b->type))
         return make_bool(ray_cmp_tol_eq(as_f64(a), as_f64(b)) ? 0 : 1);
