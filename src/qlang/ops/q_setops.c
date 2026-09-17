@@ -12,7 +12,40 @@
 #include "qlang/ops/q_table.h"
 #include "lang/eval.h"       /* ray_except_fn, ray_sect_fn */
 #include "lang/internal.h"   /* ray_group_fn */
+#include "ops/idxop.h"       /* the key-set fronts: distinct/group read the attribute index */
+#include "table/sym.h"       /* ray_read_sym */
 #include <stdlib.h>
+#include <string.h>
+
+/* The gather is the scan's own key construction (builtins.c ray_group_fn): a fresh typed vector, a W64 sym
+ * vector adopting x's domain — so no attribute rides out on the result. */
+ray_t* q_attr_index_keys(ray_t* x, ray_t** rows) {
+    ray_t* r = ray_index_keys_rows(x);
+    if (!r) return NULL;
+    int64_t k = q_count(r);
+    const int64_t* ri = (const int64_t*)ray_data(r);
+    ray_t* keys;
+    if (x->type == RAY_SYM) {
+        keys = ray_sym_vec_new(RAY_SYM_W64, k);
+        for (int64_t j = 0; j < k && !RAY_IS_ERR(keys); j++) {
+            int64_t id = ray_read_sym(ray_data(x), ri[j], RAY_SYM, x->attrs);
+            keys = ray_vec_append(keys, &id);
+        }
+        if (!RAY_IS_ERR(keys)) ray_sym_vec_adopt_domain(keys, x);
+    } else {
+        size_t esz = ray_elem_size(x->type);
+        keys = ray_vec_new(x->type, k);
+        if (!RAY_IS_ERR(keys)) {
+            keys->len = k;
+            uint8_t* dst = (uint8_t*)ray_data(keys);
+            const uint8_t* src = (const uint8_t*)ray_data(x);
+            for (int64_t j = 0; j < k; j++) memcpy(dst + (size_t)j * esz, src + (size_t)ri[j] * esz, esz);
+        }
+    }
+    if (!keys || RAY_IS_ERR(keys)) { ray_release(r); return keys ? keys : q_err(QE_OOM); }
+    if (rows) *rows = r; else ray_release(r);
+    return keys;
+}
 
 /* Indices of x-rows [not] present in y (whole-row membership). */
 static ray_t* table_member_idx(ray_t* x, ray_t* y, int keep_present) {
@@ -78,13 +111,21 @@ ray_t* q_except_wrap(ray_t* x, ray_t* y) {
  * pass, where the scan below is O(n*distinct).  A LIST is not safe there —
  * group equates `1` with `1f`, `0n` with `0N`; `~` does not.  rayfall's own
  * ray_distinct_fn is no use either: it SORTS.  String operands are a deferred
- * cell (string model); atoms are kdb 'type. */
+ * cell (string model); atoms are kdb 'type.
+ * An ATTRIBUTED vector reads its index (set-attribute.md:128): `u#` is a copy
+ * without the marker (distinct.md:15 — the result carries no attribute), `g#`/`p#`
+ * gather the key set; a null-bearing column keeps the scan, which owns nulls. */
 ray_t* q_distinct_wrap(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (x->type == RAY_TABLE) return table_distinct(x);   /* row dedup */
     if (x->type == -RAY_STR)
         return q_err(QE_NYI);
     if (ray_is_vec(x)) {
+        if (ray_index_has(x) && q_attr_letter(x) == 'u' && !(x->attrs & RAY_ATTR_HAS_NULLS) &&
+            ray_index_payload(x->index)->built_for_len == q_count(x))
+            return ray_attr_drop_fn(x);
+        ray_t* ik = q_attr_index_keys(x, NULL);
+        if (ik) return ik;
         ray_t* g = ray_group_fn(x);
         if (!g || RAY_IS_ERR(g)) return g ? g : q_err(QE_TYPE);
         ray_t* k = ray_dict_keys(g);

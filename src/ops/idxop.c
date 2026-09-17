@@ -335,7 +335,9 @@ void ray_index_release_payload(ray_index_t* ix) {
             ray_release(ix->u.hash.table);
         if (ix->u.hash.chain && !RAY_IS_ERR(ix->u.hash.chain))
             ray_release(ix->u.hash.chain);
-        ix->u.hash.table = ix->u.hash.chain = NULL;
+        if (ix->u.hash.first && !RAY_IS_ERR(ix->u.hash.first))
+            ray_release(ix->u.hash.first);
+        ix->u.hash.table = ix->u.hash.chain = ix->u.hash.first = NULL;
         break;
     case RAY_IDX_SORT:
         if (ix->u.sort.perm && !RAY_IS_ERR(ix->u.sort.perm))
@@ -388,6 +390,8 @@ void ray_index_retain_payload(ray_index_t* ix) {
             ray_retain(ix->u.hash.table);
         if (ix->u.hash.chain && !RAY_IS_ERR(ix->u.hash.chain))
             ray_retain(ix->u.hash.chain);
+        if (ix->u.hash.first && !RAY_IS_ERR(ix->u.hash.first))
+            ray_retain(ix->u.hash.first);
         break;
     case RAY_IDX_SORT:
         if (ix->u.sort.perm && !RAY_IS_ERR(ix->u.sort.perm))
@@ -908,7 +912,9 @@ static int idx_child_slots(ray_index_t* ix, ray_t** slots[3]) {
     int n = 0;
     switch (ix->kind) {
     case RAY_IDX_HASH:
-        slots[n++] = &ix->u.hash.table; slots[n++] = &ix->u.hash.chain; break;
+        slots[n++] = &ix->u.hash.table; slots[n++] = &ix->u.hash.chain;
+        if (ix->u.hash.first) slots[n++] = &ix->u.hash.first;
+        break;
     case RAY_IDX_SORT:
         slots[n++] = &ix->u.sort.perm; break;
     case RAY_IDX_BLOOM:
@@ -989,7 +995,8 @@ ray_t* ray_index_inline_map(uint8_t* region) {
     int nch = idx_child_slots(ix, slots);
     for (int i = 0; i < nch; i++) {
         int64_t o = (int64_t)(intptr_t)(*slots[i]);
-        *slots[i] = o ? (ray_t*)(region + o) : NULL;
+        /* a region written before the hash kept its first list carries the old mask there: never a block offset */
+        *slots[i] = o && o == IDX_ALIGN32(o) ? (ray_t*)(region + o) : NULL;
     }
     ix->markers |= RAY_MARK_MMAP;
     idx->mmod = 1;
@@ -1010,8 +1017,9 @@ ray_t* ray_index_inline_map(uint8_t* region) {
 
 /* The table + chain over rows [0, upto) of v, sized for `sized_for` rows, written into ix's hash arm: the attach
  * builds over everything; an extension past HASH_LOAD_MAX_PCT rebuilds over what it has indexed so far, then
- * continues.  NULL on success, else an owned error with ix untouched. */
-static ray_t* hash_build(ray_t* v, int64_t upto, int64_t sized_for, ray_index_t* ix) {
+ * continues.  `keyset` also probes each row for its first list; a UNIQUE build skips that — its verify already
+ * proved every row a key, and the fronts read the marker as til n.  NULL on success, else an owned error. */
+static ray_t* hash_build(ray_t* v, int64_t upto, int64_t sized_for, ray_index_t* ix, bool keyset) {
     /* Capacity: at least 8, at most 2*n.  Power of two for cheap masking. */
     uint64_t cap = next_pow2((uint64_t)(sized_for < 4 ? 8 : 2 * sized_for));
     if (cap < 8) cap = 8;
@@ -1019,48 +1027,67 @@ static ray_t* hash_build(ray_t* v, int64_t upto, int64_t sized_for, ray_index_t*
     if (!table || RAY_IS_ERR(table)) return table ? table : ray_error("oom", NULL);
     ray_t* chain = i64_zeroed(upto);
     if (!chain || RAY_IS_ERR(chain)) { ray_release(table); return chain ? chain : ray_error("oom", NULL); }
+    /* Transient scratch for the first rows (freed before return): a key count is unknown until the pass ends. */
+    int64_t* fb = keyset ? (int64_t*)ray_alloc_raw((size_t)(upto > 0 ? upto : 1) * sizeof(int64_t)) : NULL;
+    if (keyset && !fb) { ray_release(table); ray_release(chain); return ray_error("oom", NULL); }
     int64_t* tbl = (int64_t*)ray_data(table);
     int64_t* chn = (int64_t*)ray_data(chain);
     const uint8_t* base = (const uint8_t*)ray_data(v);
-    int64_t n_keys = 0;
+    int64_t n_keys = 0, nfirst = 0;
     uint64_t mask = cap - 1;
     for (int64_t i = 0; i < upto; i++) {
         if (ray_vec_is_null(v, i)) continue;
-        uint64_t slot = mix64(numeric_key_word(base, v->type, i)) & mask;
+        uint64_t kw = numeric_key_word(base, v->type, i);
+        uint64_t slot = mix64(kw) & mask;
+        if (keyset) {
+            int64_t r = tbl[slot] - 1;
+            while (r >= 0 && numeric_key_word(base, v->type, r) != kw) r = chn[r] - 1;
+            if (r < 0) fb[nfirst++] = i;
+        }
         chn[i] = tbl[slot];     /* link previous head into chain */
         tbl[slot] = i + 1;      /* this row becomes new head */
         n_keys++;
     }
+    ray_t* first = keyset ? i64_zeroed(nfirst) : NULL;
+    if (keyset && (!first || RAY_IS_ERR(first))) {
+        ray_free_raw(fb); ray_release(table); ray_release(chain);
+        return first ? first : ray_error("oom", NULL);
+    }
+    if (nfirst) memcpy(ray_data(first), fb, (size_t)nfirst * sizeof(int64_t));
+    if (fb) ray_free_raw(fb);
     ix->u.hash.table  = table;
     ix->u.hash.chain  = chain;
-    ix->u.hash.mask   = mask;
+    ix->u.hash.first  = first;
     ix->u.hash.n_keys = n_keys;
     return NULL;
 }
 
-ray_t* ray_index_attach_hash(ray_t** vp) {
+static ray_t* attach_hash(ray_t** vp, bool keyset) {
     ray_t* v = prepare_attach(vp, "hash");
     if (RAY_IS_ERR(v)) return v;
 
     int64_t n = v->len;
     ray_t* idx = ray_index_alloc(RAY_IDX_HASH, v->type, n);
     if (!idx || RAY_IS_ERR(idx)) return idx ? idx : ray_error("oom", NULL);
-    ray_t* e = hash_build(v, n, n, ray_index_payload(idx));
+    ray_t* e = hash_build(v, n, n, ray_index_payload(idx), keyset);
     if (e) { ray_release(idx); return e; }
     return attach_finalize(v, idx);
 }
+ray_t* ray_index_attach_hash(ray_t** vp)        { return attach_hash(vp, true);  }
+ray_t* ray_index_attach_hash_unique(ray_t** vp) { return attach_hash(vp, false); }
 
 /* Chains stay short up to this load; the rebuild sizes for the whole vector, so a run of appends amortises to O(1). */
 #define HASH_LOAD_MAX_PCT 70
 
-/* Rows [from, len) of v go into the hash, probed first under the UNIQUE marker.  1 extended, 0 a duplicate, -1 OOM. */
+/* Rows [from, len) of v go into the hash, each probed first: a miss joins the first list, a hit under the UNIQUE
+ * marker is the duplicate.  1 extended, 0 a duplicate, -1 OOM. */
 static int hash_extend(ray_index_t* ix, ray_t* v, int64_t from) {
     if (!own_child(&ix->u.hash.table)) return -1;
     const uint8_t* base = (const uint8_t*)ray_data(v);
     for (int64_t i = from; i < v->len; i++) {
-        if ((uint64_t)(ix->u.hash.n_keys + 1) * 100 > (ix->u.hash.mask + 1) * HASH_LOAD_MAX_PCT) {
+        if ((uint64_t)(ix->u.hash.n_keys + 1) * 100 > (ray_index_hash_mask(ix) + 1) * HASH_LOAD_MAX_PCT) {
             ray_index_t nb = *ix;
-            ray_t* e = hash_build(v, i, v->len, &nb);
+            ray_t* e = hash_build(v, i, v->len, &nb, ix->u.hash.first != NULL);
             if (e) { ray_error_free(e); return -1; }
             ray_index_release_payload(ix);
             ix->u.hash = nb.u.hash;
@@ -1070,10 +1097,11 @@ static int hash_extend(ray_index_t* ix, ray_t* v, int64_t from) {
         int64_t* tbl = (int64_t*)ray_data(ix->u.hash.table);
         int64_t* chn = (int64_t*)ray_data(ix->u.hash.chain);
         uint64_t kw = numeric_key_word(base, v->type, i);
-        uint64_t slot = mix64(kw) & ix->u.hash.mask;
-        if (ix->markers & RAY_MARK_UNIQUE)
-            for (int64_t r = tbl[slot] - 1; r >= 0; r = chn[r] - 1)
-                if (numeric_key_word(base, v->type, r) == kw) return 0;
+        uint64_t slot = mix64(kw) & ray_index_hash_mask(ix);
+        int64_t r = tbl[slot] - 1;
+        while (r >= 0 && numeric_key_word(base, v->type, r) != kw) r = chn[r] - 1;
+        if (r >= 0 && (ix->markers & RAY_MARK_UNIQUE)) return 0;
+        if (r < 0 && ix->u.hash.first && !i64_push(&ix->u.hash.first, i)) return -1;
         chn[i] = tbl[slot];
         tbl[slot] = i + 1;
         ix->u.hash.n_keys++;
@@ -1176,7 +1204,7 @@ static ray_index_t* hash_probe_setup(ray_t* col, int64_t key,
     if (!ix->u.hash.table || !ix->u.hash.chain) return NULL;
 
     *kw = probe_key_word(col->type, key);
-    uint64_t slot = mix64(*kw) & ix->u.hash.mask;
+    uint64_t slot = mix64(*kw) & ray_index_hash_mask(ix);
     const int64_t* tbl = (const int64_t*)ray_data(ix->u.hash.table);
     *start_rid = tbl[slot] - 1;
     return ix;
@@ -1485,7 +1513,7 @@ ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec) {
     const int64_t* tbl  = (const int64_t*)ray_data(ix->u.hash.table);
     const int64_t* chn  = (const int64_t*)ray_data(ix->u.hash.chain);
     const uint8_t* base = (const uint8_t*)ray_data(col);
-    uint64_t mask = ix->u.hash.mask;
+    uint64_t mask = ray_index_hash_mask(ix);
     int8_t t  = col->type;
 
     /* Shared match buffer: starts at 16, grows by doubling, capped at n. */
@@ -2359,7 +2387,7 @@ ray_t* ray_index_info(ray_t* v) {
         if (RAY_IS_ERR(r)) goto fail;
         break;
     case RAY_IDX_HASH:
-        r = dict_append_sym_i64(&keys, &vals, "capacity", (int64_t)(ix->u.hash.mask + 1));
+        r = dict_append_sym_i64(&keys, &vals, "capacity", (int64_t)(ray_index_hash_mask(ix) + 1));
         if (RAY_IS_ERR(r)) goto fail;
         r = dict_append_sym_i64(&keys, &vals, "n_keys",   ix->u.hash.n_keys);
         if (RAY_IS_ERR(r)) goto fail;
@@ -2728,4 +2756,109 @@ int ray_index_has_key(ray_t* col, int64_t key) {
     for (; rid >= 0; rid = chn[rid] - 1)
         if (numeric_key_word(base, col->type, rid) == kw) return 1;
     return 0;
+}
+
+/* The block behind col when a key-set read may trust it: fresh HASH or CODES, no nulls, at least one row. */
+static ray_index_t* keyset_block(ray_t* col) {
+    if (!col || RAY_IS_ERR(col) || col->len == 0) return NULL;
+    if (!idx_fresh_nonull(col, RAY_IDX_HASH) && !idx_fresh_nonull(col, RAY_IDX_CODES)) return NULL;
+    return ray_index_payload(col->index);
+}
+
+/* i64_zeroed for the fronts: NULL on any failure (an error value freed), so the caller declines to the scan. */
+static ray_t* i64_or_null(int64_t n) {
+    ray_t* v = i64_zeroed(n);
+    if (v && RAY_IS_ERR(v)) { ray_error_free(v); v = NULL; }
+    return v;
+}
+
+static ray_t* i64_til(int64_t n) {
+    ray_t* v = i64_or_null(n);
+    if (!v) return NULL;
+    int64_t* d = (int64_t*)ray_data(v);
+    for (int64_t i = 0; i < n; i++) d[i] = i;
+    return v;
+}
+
+/* Every present id's head row, ascending — a page walk (O(pages * PAGE)) then a sort of the k heads. */
+static ray_t* codes_keys_rows(const ray_index_t* ix) {
+    const int64_t* d = (const int64_t*)ray_data(ix->u.codes.dir);
+    const int64_t* sl = (const int64_t*)ray_data(ix->u.codes.slots);
+    int per = ix->u.codes.layout;
+    int64_t k = 0;
+    for (int64_t p = 0; p < ix->u.codes.dir->len; p++)
+        if (d[p]) for (int64_t j = 0; j < RAY_CODES_PAGE; j++) k += sl[d[p] - 1 + j * per] != 0;
+    ray_t* out = i64_or_null(k);
+    if (!out) return NULL;
+    int64_t* o = (int64_t*)ray_data(out);
+    for (int64_t p = 0, w = 0; p < ix->u.codes.dir->len; p++)
+        if (d[p]) for (int64_t j = 0; j < RAY_CODES_PAGE; j++) {
+            int64_t head = sl[d[p] - 1 + j * per];
+            if (head) o[w++] = head - 1;
+        }
+    qsort(o, (size_t)k, sizeof(int64_t), hash_match_cmp_i64);
+    return out;
+}
+
+ray_t* ray_index_keys_rows(ray_t* col) {
+    ray_index_t* ix = keyset_block(col);
+    if (!ix) return NULL;
+    if (ix->markers & RAY_MARK_UNIQUE) return i64_til(col->len);
+    if (ix->kind == RAY_IDX_CODES) return codes_keys_rows(ix);
+    if (!ix->u.hash.first) return NULL;
+    ray_retain(ix->u.hash.first);
+    return ix->u.hash.first;
+}
+
+/* Row r of an integer-lane column equals the word iff its raw bytes do (the word is those bytes extended), so the
+ * chain walk compares in place and only the float family goes through numeric_key_word's canonical form. */
+static bool hash_row_eq(const uint8_t* base, int8_t t, int es, int64_t r, uint64_t kw) {
+    if (float_family(t)) return numeric_key_word(base, t, r) == kw;
+    return hash_key_bits(es, hash_col_read_i64(base, t, r)) == kw;
+}
+
+/* The bucket chain descends and every row of the key is >= first_row (the walk stops there); one pass collects the
+ * matches — a short chain on the stack, a long one in a doubling scratch — and the vector is written from the back. */
+#define HASH_GROUP_STACK 64
+static ray_t* hash_group_rows(ray_t* col, const ray_index_t* ix, int64_t first_row) {
+    const uint8_t* base = (const uint8_t*)ray_data(col);
+    const int64_t* tbl = (const int64_t*)ray_data(ix->u.hash.table);
+    const int64_t* chn = (const int64_t*)ray_data(ix->u.hash.chain);
+    int8_t t = col->type;
+    int es = numeric_elem_size(t);
+    uint64_t kw = numeric_key_word(base, t, first_row);
+    int64_t m = 0, cap = HASH_GROUP_STACK, sbuf[HASH_GROUP_STACK], *buf = sbuf;
+    for (int64_t r = tbl[mix64(kw) & ray_index_hash_mask(ix)] - 1; r >= first_row; r = chn[r] - 1) {
+        if (!hash_row_eq(base, t, es, r, kw)) continue;
+        if (m == cap) {
+            int64_t* nb = (int64_t*)ray_alloc_raw((size_t)cap * 2 * sizeof(int64_t));
+            if (!nb) { if (buf != sbuf) ray_free_raw(buf); return NULL; }
+            memcpy(nb, buf, (size_t)m * sizeof(int64_t));
+            if (buf != sbuf) ray_free_raw(buf);
+            buf = nb; cap *= 2;
+        }
+        buf[m++] = r;
+    }
+    ray_t* out = i64_or_null(m);
+    if (out) {
+        int64_t* o = (int64_t*)ray_data(out);
+        for (int64_t j = 0; j < m; j++) o[m - 1 - j] = buf[j];
+    }
+    if (buf != sbuf) ray_free_raw(buf);
+    return out;
+}
+
+ray_t* ray_index_group_rows(ray_t* col, int64_t first_row) {
+    ray_index_t* ix = keyset_block(col);
+    if (!ix || first_row < 0 || first_row >= col->len) return NULL;
+    if (ix->markers & RAY_MARK_UNIQUE) {
+        ray_t* out = i64_or_null(1);
+        if (out) ((int64_t*)ray_data(out))[0] = first_row;
+        return out;
+    }
+    if (ix->kind == RAY_IDX_HASH) return hash_group_rows(col, ix, first_row);
+    int64_t id = ray_read_sym(ray_data(col), first_row, RAY_SYM, col->attrs);
+    ray_t* out = i64_or_null(codes_copy_rows(ix, id, NULL));
+    if (out) codes_copy_rows(ix, id, (int64_t*)ray_data(out));
+    return out;
 }

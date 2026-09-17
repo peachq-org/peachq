@@ -25,6 +25,7 @@
 #include "qlang/io/q_provider.h" /* the flip pair; carrier cols from the snapshot, meta via hooks */
 #include "qlang/io/q_io.h"      /* q_io_is_fsym / q_io_resource_table — cols and meta of a decoded resource */
 #include "lang/internal.h"      /* ray_group_fn */
+#include "ops/idxop.h"          /* ray_index_group_rows — group's per-key rows off the attribute index */
 #include "ops/agg_engine.h"     /* agg_group_keys — the one dense group core */
 #include "table/sym.h"          /* ray_sym_intern_runtime, ray_sym_vec_cell, RAY_SYM_W64 */
 #include <string.h>
@@ -941,8 +942,33 @@ static ray_t* group_table(ray_t* t) {
     return ray_dict_new(kt, vals);
 }
 
+/* `group` off the attribute index (set-attribute.md:130): the key set gathered as the scan would build it, each
+ * value the key's ascending rows straight from the block — the scan's bytes with no hashing.  NULL = no lane,
+ * including a front that declines a key mid-way (the scan then answers, and its own error if memory is out). */
+static ray_t* group_idx(ray_t* x) {
+    ray_t* rows = NULL;
+    ray_t* keys = q_attr_index_keys(x, &rows);
+    if (!keys || RAY_IS_ERR(keys)) return keys;
+    int64_t k = q_count(rows);
+    const int64_t* ri = (const int64_t*)ray_data(rows);
+    ray_t* vals = ray_list_new(k);
+    for (int64_t j = 0; j < k && vals && !RAY_IS_ERR(vals); j++) {
+        ray_t* iv = ray_index_group_rows(x, ri[j]);
+        if (!iv) { ray_release(vals); vals = NULL; break; }
+        vals = ray_list_append(vals, iv);
+        ray_release(iv);
+    }
+    ray_release(rows);
+    if (!vals || RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
+    return ray_dict_new(keys, vals);
+}
+
 ray_t* q_group_wrap(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
+    if (ray_is_vec(x) && ray_index_has(x)) {
+        ray_t* g = group_idx(x);
+        if (g) return g;
+    }
     if (q_type_is_table(x)) return group_table(x);
     if (q_type_is_dict(x)) {
         ray_t* g = q_group_wrap(ray_dict_vals(x));        /* group the range */
