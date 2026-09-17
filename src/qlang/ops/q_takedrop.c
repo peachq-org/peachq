@@ -205,7 +205,7 @@ ray_t* q_take_wrap(ray_t* x, ray_t* y) {
     int64_t n;
     if (q_type_is_int_vec(x) && q_count(x) == 1)
         n = q_type_ivec_get(x, 0);            /* V3.4: a rank-1 shape is n#y */
-    else if (!q_type_strict_i64(x, &n))
+    else if (!q_type_count_i64(x, &n))
         return take_unify(take_kernel(y, x));
     /* take from an empty GENERAL list fills with its prototype — the empty
      * list itself: `flip (5#.Q.res)!(5#())` must be a 0-row table
@@ -262,8 +262,7 @@ ray_t* q_drop_wrap(ray_t* x, ray_t* y) {
     }
     if (q_type_is_int_vec(x)) return cut_at(x, y);
     int64_t k;
-    ray_t* e = q_type_i64_or_err(x, &k, "_: n");
-    if (e) return e;
+    if (!q_type_count_i64(x, &k)) return q_err(QE_TYPE);
     int64_t cnt = len_of(y);
     if (cnt < 0) return q_err(QE_TYPE);
     /* drop IS a take of what is left; the clamp is REQUIRED — drop is tolerant
