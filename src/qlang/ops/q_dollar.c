@@ -114,6 +114,7 @@ static int is_empty_list(ray_t* x) {
 }
 
 static ray_t* cast_u8(ray_t* x);
+static ray_t* cast_tod(int8_t tag, ray_t* x);
 
 /* tag -> base `as` spelling, then delegate; 'nyi when the tag has no spelling
  * (LIST/GUID/F32 targets). */
@@ -524,8 +525,12 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
         return cast_int(tag, x);
     case RAY_TIMESTAMP: return cast_timestamp(x);
     case RAY_SYM:  return cast_sym(x);
-    case RAY_F64: case RAY_MONTH: case RAY_DATE: case RAY_DATETIME:
-    case RAY_TIMESPAN: case RAY_MINUTE: case RAY_SECOND: case RAY_TIME:
+    case RAY_TIMESPAN: case RAY_MINUTE: case RAY_SECOND: {
+        int8_t st = (int8_t)-q_type_elem_tag(x);
+        if (st == RAY_TIMESTAMP || st == RAY_DATETIME) return cast_tod(tag, x);
+        return cast_delegate(tag, x);
+    }
+    case RAY_F64: case RAY_MONTH: case RAY_DATE: case RAY_DATETIME: case RAY_TIME:
         return cast_delegate(tag, x);
     }
     /* the `break` arms above + any out-of-band tag (the band is sparse: 3 is
@@ -653,9 +658,10 @@ ray_t* q_dollar_mmu(ray_t* x, ray_t* y) {
  * `year`mm`dd`hh`uu`ss`week names a field of a temporal value; `month` is NOT
  * here — it is a TYPE designator (q_cast_designator resolves it to RAY_MONTH,
  * so `month$ts` already yields the month datatype).  Return TYPES differ:
- * year/mm/dd/hh/uu/ss -> int, week -> date. */
+ * year/mm/dd/hh/uu/ss -> int, week -> date; the time of day (no symbol — cast_tod's
+ * own component) -> long ns. */
 typedef enum {
-    QCOMP_YEAR, QCOMP_MM, QCOMP_DD, QCOMP_HH, QCOMP_UU, QCOMP_SS, QCOMP_WEEK
+    QCOMP_YEAR, QCOMP_MM, QCOMP_DD, QCOMP_HH, QCOMP_UU, QCOMP_SS, QCOMP_WEEK, QCOMP_TOD
 } q_comp_e;
 
 static int component_of_sym(ray_t* t) {
@@ -712,15 +718,20 @@ static void temporal_parts(int8_t t, int64_t raw, double rawf,
     }
 }
 
-/* days/tod -> the extracted scalar; *rtag is the RESULT tag (RAY_I32/RAY_DATE).
+static int8_t component_tag(q_comp_e c) {
+    return c == QCOMP_WEEK ? RAY_DATE : c == QCOMP_TOD ? RAY_I64 : RAY_I32;
+}
+
+/* days/tod -> the extracted scalar; *rtag is the RESULT tag (component_tag).
  * Calendar fields (year/mm/dd) reuse the frozen base decomposition — the same
  * ray_temporal_extract the dot accessor uses — via a throwaway RAY_DATE mirror,
  * so the Hinnant civil_from_days lives in ONE place.  Clock fields stay a
  * SIGNED inline division: timespan is an unbounded signed duration and the base
  * HOUR/MINUTE/SECOND wrap+cap it at 24h (0D25:00:00 -> 25, never 1). */
 static int64_t component_value(q_comp_e c, int64_t days, int64_t tod, int8_t* rtag) {
-    if (c == QCOMP_WEEK) { *rtag = RAY_DATE; return q_calendar_week_start(days); }
-    *rtag = RAY_I32;
+    *rtag = component_tag(c);
+    if (c == QCOMP_WEEK) return q_calendar_week_start(days);
+    if (c == QCOMP_TOD) return tod;
     switch (c) {
     case QCOMP_YEAR: case QCOMP_MM: case QCOMP_DD: {
         int field = c == QCOMP_YEAR ? RAY_EXTRACT_YEAR
@@ -778,16 +789,16 @@ static ray_t* component_leaf(ray_t* x, int64_t comp) {
      * make floor()/(int64_t) UB — treat it as null, like the sentinel. */
     int datetimef = RAY_IS_TEMPORALF(at);
     if (x->type < 0) {
-        int8_t rtag = (c == QCOMP_WEEK) ? RAY_DATE : RAY_I32;
+        int8_t rtag = component_tag(c);
         if (RAY_ATOM_IS_NULL(x) || (datetimef && !isfinite(x->f64)))
             return ray_typed_null((int8_t)-rtag);
         int64_t days, tod;
         double rawf = datetimef ? x->f64 : 0.0;
         temporal_parts(at, temporal_raw_atom(at, x), rawf, &days, &tod);
         int64_t v = component_value(c, days, tod, &rtag);
-        return rtag == RAY_DATE ? ray_date(v) : ray_i32((int32_t)v);
+        return rtag == RAY_DATE ? ray_date(v) : rtag == RAY_I64 ? ray_i64(v) : ray_i32((int32_t)v);
     }
-    int8_t rtag = (c == QCOMP_WEEK) ? RAY_DATE : RAY_I32;
+    int8_t rtag = component_tag(c);
     int64_t n = ray_len(x);
     ray_t* out = ray_vec_new(rtag, n > 0 ? n : 1);
     if (RAY_IS_ERR(out)) return out;
@@ -802,9 +813,23 @@ static ray_t* component_leaf(ray_t* x, int64_t comp) {
         double rawf = datetimef ? fbase[i] : 0.0;
         temporal_parts(at, temporal_raw_vec(at, base, i), rawf, &days, &tod);
         int8_t rt; int64_t v = component_value(c, days, tod, &rt);
-        ((int32_t*)ray_data(out))[i] = (int32_t)v;   /* date + int both i32-stored */
+        if (rt == RAY_I64) ((int64_t*)ray_data(out))[i] = v;
+        else ((int32_t*)ray_data(out))[i] = (int32_t)v;   /* date + int both i32-stored */
     }
     return out;
+}
+
+/* timespan/minute/second of a timestamp or datetime is its time of day (ref/cast.md:168 "[) notions";
+ * kdb-common rand.q:4): the ns of day as a timespan, then the target's own duration narrowing */
+static ray_t* cast_tod(int8_t tag, ray_t* x) {
+    ray_t* ns = component_leaf(x, QCOMP_TOD);
+    if (!ns || RAY_IS_ERR(ns)) return ns ? ns : q_err(QE_TYPE);
+    ray_t* span = cast_delegate(RAY_TIMESPAN, ns);
+    ray_release(ns);
+    if (tag == RAY_TIMESPAN || !span || RAY_IS_ERR(span)) return span ? span : q_err(QE_TYPE);
+    ray_t* r = cast_delegate(tag, span);
+    ray_release(span);
+    return r;
 }
 
 /* `sym$temporal` component extraction; NULL if `sym` names no component. */
