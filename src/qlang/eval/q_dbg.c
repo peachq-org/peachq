@@ -8,6 +8,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/parse/q_parse.h"
 #include "qlang/q_ctx.h"
+#include "qlang/q_comment.h"   /* q_comment_origin — a load line's file + line */
 #include "qlang/q_console.h"
 #include "qlang/q_env.h"
 #include "qlang/ops/q_sys.h"
@@ -27,7 +28,11 @@ static _Thread_local int32_t g_live_env[DBG_LIVE_MAX];  /* their q_env frames */
 static _Thread_local int    g_live_depth;
 static _Thread_local int    g_cursor;              /* navigated frame, 0 = [0] */
 
-static char g_stmts[DBG_NEST_MAX][DBG_STMT_MAX];
+/* file/line: the loading script's, for a load line; 0 for console input (a q))
+ * line typed into a suspended load included), so its lambdas and frame stay bare */
+typedef struct { char text[DBG_STMT_MAX]; int64_t file, line; } dbg_stmt_t;
+
+static dbg_stmt_t g_stmts[DBG_NEST_MAX];
 static int  g_console_stmt;
 static int  g_trap_depth;
 static int  g_dbg_depth;
@@ -89,19 +94,27 @@ void q_dbg_snapshot_clear(void) {
 }
 
 int q_dbg_statement_begin(const char* src, size_t n, int console) {
-    if (console < 0) console = g_console_stmt ? 2 : 0;   /* load line: inherit */
+    int load_line = console < 0;
+    if (load_line) console = g_console_stmt ? 2 : 0;   /* load line: inherit */
     int d = g_depth++;
     if (d > 0 && d < DBG_NEST_MAX) {
         g_held[d] = q_err_take();
         g_outer[d] = (int8_t)g_snap_lvl;
     } else if (!d) q_err_drop();   /* a stale payload would caption this error */
     if (!g_dbg_depth) q_dbg_snapshot_clear();
-    if (n >= sizeof g_stmt) n = sizeof g_stmt - 1;
-    if (src && n) memcpy(g_stmt, src, n); else n = 0;
-    g_stmt[n] = '\0';
+    if (n >= sizeof g_stmt.text) n = sizeof g_stmt.text - 1;
+    if (src && n) memcpy(g_stmt.text, src, n); else n = 0;
+    g_stmt.text[n] = '\0';
+    g_stmt.file = load_line ? q_comment_origin(&g_stmt.line) : 0;
     int prev = g_console_stmt;
     g_console_stmt = console;
     return prev;
+}
+
+int64_t q_dbg_statement_origin(int64_t* line) {
+    if (g_depth <= 0 || !g_stmt.file) return 0;   /* between statements the slot is stale */
+    *line = g_stmt.line;
+    return g_stmt.file;
 }
 
 void q_dbg_statement_end(int tok) {
@@ -126,7 +139,8 @@ void q_dbg_set_reader(q_dbg_read_fn fn) { g_reader = fn; }
 void q_dbg_reset(void) {
     q_dbg_snapshot_clear();
     g_live_depth = g_cursor = 0;
-    g_stmt[0] = '\0';
+    g_stmt.text[0] = '\0';
+    g_stmt.file = 0;
     g_console_stmt = g_trap_depth = g_dbg_depth = g_prompt_frames = g_depth = 0;
     g_reader = NULL;
 }
@@ -169,9 +183,10 @@ static int lam_global_name(ray_t* lam, char* buf, size_t cap) {
 /* one `  [i]  file:line: name:src` line (basics/debug.md — file:line only "if
  * such information is available"); lam NULL = the statement frame (from stmt) */
 static size_t frame_line(char* dst, size_t cap, int idx, int mark, ray_t* lam,
-                         const char* stmt) {
-    const char* src = stmt;
-    size_t sn;
+                         const dbg_stmt_t* stmt) {
+    const char* src = stmt->text;
+    size_t sn = strlen(src);
+    int64_t fs = stmt->file, ln = stmt->line;
     char name[128], floc[300];
     name[0] = floc[0] = '\0';
     if (lam) {
@@ -179,15 +194,12 @@ static size_t frame_line(char* dst, size_t cap, int idx, int mark, ray_t* lam,
         src = s ? ray_str_ptr(s) : "{}";
         sn = s ? ray_str_len(s) : 2;
         if (lam_global_name(lam, name, sizeof name - 1)) strcat(name, ":");
-        int64_t fs = 0, ln = -1;
         q_eval_apply_lambda_prov(lam, NULL, &fs, &ln);
-        ray_t* fp = fs ? ray_sym_str(fs) : NULL;         /* borrowed */
-        if (fp)
-            snprintf(floc, sizeof floc, "%.*s:%lld: ", (int)ray_str_len(fp),
-                     ray_str_ptr(fp), (long long)ln);
-    } else {
-        sn = strlen(src);
     }
+    ray_t* fp = fs ? ray_sym_str(fs) : NULL;             /* borrowed */
+    if (fp)
+        snprintf(floc, sizeof floc, "%.*s:%lld: ", (int)ray_str_len(fp),
+                 ray_str_ptr(fp), (long long)ln);
     int n = snprintf(dst, cap, "%s[%d]  %s%s%.*s\n", mark ? ">>" : "  ", idx,
                      floc, name, (int)sn, src);
     return (n > 0 && (size_t)n < cap) ? (size_t)n : (cap ? cap - 1 : 0);
@@ -230,7 +242,7 @@ void q_dbg_print_trace(FILE* out, ray_t* err) {
     dbg_err_line(out, err);
     char line[DBG_STMT_MAX + 160];
     int depth = (g_snap.err == err) ? g_snap.depth : 0;
-    const char* stmt = (g_snap.err == err) ? snap_stmt : g_stmt;
+    const dbg_stmt_t* stmt = (g_snap.err == err) ? &snap_stmt : &g_stmt;
     for (int i = depth; i >= 0; i--) {
         frame_line(line, sizeof line, i, 0, i ? g_snap.lam[i - 1] : NULL, stmt);
         fputs(line, out);
@@ -248,7 +260,7 @@ static void dbg_show_console(void) {
 static void dbg_show_frame(int idx) {
     char line[DBG_STMT_MAX + 160];
     frame_line(line, sizeof line, idx, 0, idx > 0 ? live_lam(idx) : NULL,
-               g_stmt);
+               &g_stmt);
     fputs(line, stderr);
 }
 
@@ -443,11 +455,11 @@ static ray_t* dbg_bt_object(void) {
     char line[DBG_STMT_MAX + 160];
     for (int i = g_snap.depth; i >= 1; i--) {   /* lambdas: [depth+1] .. [2] */
         size_t n = frame_line(line, sizeof line, i + 1, 0, g_snap.lam[i - 1],
-                              snap_stmt);
+                              &snap_stmt);
         bt_append(&l, line, n ? n - 1 : 0);     /* strip \n */
     }
     bt_append(&l, "  [1]  (.Q.trp)", 15);
-    size_t n = frame_line(line, sizeof line, 0, 0, NULL, snap_stmt);
+    size_t n = frame_line(line, sizeof line, 0, 0, NULL, &snap_stmt);
     bt_append(&l, line, n ? n - 1 : 0);
     return l;
 }
@@ -503,7 +515,7 @@ ray_t* q_dbg_bt_fn(ray_t** args, int64_t n) {
     (void)args; (void)n;                       /* .Q.bt[] — arg ignored */
     char line[DBG_STMT_MAX + 160];
     /* suspended: [0] is the statement the LIVE frames belong to, not this line */
-    const char* stmt = g_dbg_depth > 0 ? snap_stmt : g_stmt;
+    const dbg_stmt_t* stmt = g_dbg_depth > 0 ? &snap_stmt : &g_stmt;
     for (int i = g_live_depth; i >= 0; i--) {
         int mark = g_dbg_depth > 0 && i == g_cursor;   /* >> = the current frame */
         size_t ln = frame_line(line, sizeof line, i, mark,

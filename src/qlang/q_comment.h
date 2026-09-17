@@ -42,9 +42,13 @@ void q_comment_fresh_line(int64_t line);
 /* The statement's own binding claims the armed header (the global-set home
  * calls this) — which is how a NON-lambda, a `\d`-qualified name and a stale
  * rebind are all one case.  The SAME seam is kdb's "first global assignment"
- * (ref/value.md `n`), so a lambda val is stamped with n/f/l here — captured
- * once, from the file+line this module already holds. */
+ * (ref/value.md `n`), so a lambda val is named here. */
 void q_comment_on_global_set(int64_t sym, ray_t* val);
+
+/* The script being loaded and the line its current statement starts on — the
+ * origin ref/value.md's `f`/`l` and debug.md's `file:line:` frames report.
+ * 0 (line untouched) when no script is loading. */
+int64_t q_comment_origin(int64_t* line);
 
 /* End of statement: hand any claimed record to its hook (unbound = no-op).
  * MUST be called between statements, never mid-eval, and before the console
