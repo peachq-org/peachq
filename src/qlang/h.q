@@ -19,7 +19,8 @@
 .h.sc:"$-.+!*'(),abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789";
 
 .h.htc:{[x;y] "<",(string x),">",y,"</",(string x),">"};
-.h.hta:{[x;y] "<",(string x)," ",(" " sv {[k;v] (string k),"=\"",v,"\""}'[key y;value y]),">"};
+/ an attribute value is a string or a symbol (owner 2026-09-17); any other value is its `string`
+.h.hta:{[x;y] "<",(string x)," ",(" " sv {[k;v] (string k),"=\"",$[10h=type v;v;string v],"\""}'[key y;value y]),">"};
 .h.htac:{[x;y;z] .h.hta[x;y],z,"</",(string x),">"};
 .h.hr:{count[x]#"-"};
 .h.nbr:{.h.htc[`nobr;x]};

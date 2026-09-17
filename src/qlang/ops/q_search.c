@@ -305,6 +305,14 @@ static ray_t* row_answer(ray_t* r, int rec) {
 static ray_t* find_rows(ray_t* x, ray_t* y) {
     int64_t k = ray_table_ncols(x), n = ray_table_nrows(x);
     if (k <= 0 || !y) return q_err(QE_TYPE);
+    /* a one-column table Finds as its column (owner 2026-09-16): an atom is its one-field record */
+    if (k == 1 && ray_is_atom(y)) {
+        ray_t* rec = ray_enlist_fn(&y, 1);
+        if (!rec || RAY_IS_ERR(rec)) return rec ? rec : q_err(QE_OOM);
+        ray_t* r = find_rows(x, rec);
+        ray_release(rec);
+        return r;
+    }
     ray_t** pc = (ray_t**)calloc((size_t)k * 2, sizeof *pc);
     if (!pc) return q_err(QE_TYPE);
     ray_t** dc = pc + k;
