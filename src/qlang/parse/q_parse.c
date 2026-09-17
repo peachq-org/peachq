@@ -649,9 +649,10 @@ static void free_tokens(Tokens ts) {
 /* ===== parser ================================================================ */
 
 typedef enum { R_NONE, R_NOUN, R_VERB } Role;
-/* train: the rightmost verb has its right operand elided (`count@`, `-9!`) — a value that applies LATER, so what
- * stands to its left COMPOSES onto it (ref/apply.md "u v w@", ref/compose.md "(0|+)").  Set only by the postfix
- * build in parse_e_from_body and carried left through infix and juxtaposition; parens, brackets and lambdas end it. */
+/* train: the rightmost operand is WRITTEN as a verb — a postfix elision (`count@`, `-9!`), a lone glyph (`0|+`) or
+ * an iterator-suffixed expression (`neg\`) — a value that applies LATER, so what stands to its left COMPOSES onto it
+ * (ref/apply.md "u v w@", ref/compose.md "(0|+)").  Set only in parse_e_from_body and carried left through infix and
+ * juxtaposition; a keyword, a lambda, a name, parens and brackets end it (composition is syntactic, 2026-09-17). */
 typedef struct { Role role; ray_t *v; int train; } P;
 static const P EMPTY = { R_NONE, NULL, 0 };
 
@@ -1644,8 +1645,13 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
     if (u.role == R_NONE) {
         /* a LONE glyph is the bare-verb VALUE: the dyadic row, a suffixed-colon marker (`#:`) selecting the monad, bare
          * `:`/`::` staying syntax syms (q_embed's guard).  Every expression end — `(+)`, slots, statements, lambda
-         * bodies, an assignment rhs — arrives here, so this is the ONE site beside the bracket head and adverb root. */
-        if (t.role == R_VERB && sym_is_glyph(t.v)) return (P){ R_NOUN, q_embed(t.v, Q_DYADIC), 0 };
+         * bodies, an assignment rhs — arrives here, so this is the ONE site beside the bracket head and adverb root.
+         * Written as a verb, the value is a train tail (`0|+`, `-2_(1_)\`); a keyword or lambda there is a noun. */
+        if (t.role == R_VERB && sym_is_glyph(t.v)) {
+            ray_t *v = q_embed(t.v, Q_DYADIC);
+            return (P){ R_NOUN, v, v->type != -RAY_SYM };
+        }
+        if (t.role == R_VERB && t.v && t.v->type == RAY_LIST) t.train = 1;
         return t;
     }
 
@@ -1996,6 +2002,7 @@ static ray_t *qsql_convert_expr(ray_t *x) {
             return x;
         }
         ray_t *node = ray_list_new(n > 0 ? n : 1);
+        if (n == 1 && e[0] == q_registry_list_value()) return node;   /* `()` is the empty list, a constant */
         if (n >= 1 && e[0] == q_registry_list_value()) {
             /* paren literal -> (enlist; e1; …): the monadic enlist VALUE head so
              * the exec fn-head branch enlists the per-column results. */
