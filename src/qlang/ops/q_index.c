@@ -191,6 +191,9 @@ static ray_t* run_positions(ray_t* x, ray_t* sel, ray_t* pos) {
     int64_t n0 = q_count(keys), m = q_count(sel), added = 0;
     int whole = pos->type != RAY_I64 || q_count(pos) != m;
     ray_t* first = whole ? NULL : q_search_find(sel, sel);
+    if (first && !RAY_IS_ERR(first) && first->type == RAY_I64 && q_count(first) == m)
+        for (int64_t j = 0; j < m && !whole; j++)       /* an item that misses ITSELF: a mixed-rank run (find.md:88) */
+            whole = ((const int64_t*)ray_data(first))[j] >= m;
     if (whole || !first || RAY_IS_ERR(first) || first->type != RAY_I64 || q_count(first) != m) {
         ray_release(pos);
         if (first && !RAY_IS_ERR(first)) { ray_release(first); first = NULL; }

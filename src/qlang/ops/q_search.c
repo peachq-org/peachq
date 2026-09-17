@@ -62,9 +62,9 @@ ray_t* q_within_wrap(ray_t* x, ray_t* y) {
 
 /* ===== q `x in y` — membership ============================================= */
 
-/* Whole-item scan: does any ITEM of container y match v (kdb `~`)?  Indexes
- * via ray_at_fn so typed vectors (STR lists-of-strings included) and boxed
- * lists share one home.  Borrows both. */
+/* Whole-item scan over a STR list-of-strings: does any ITEM of y match v (kdb
+ * `~`)?  Indexes via ray_at_fn, the one read of that physical lane.  Borrows
+ * both. */
 static int seq_has_item(ray_t* y, ray_t* v) {
     int64_t n = q_count(y);
     for (int64_t i = 0; i < n; i++) {
@@ -80,21 +80,27 @@ static int seq_has_item(ray_t* y, ray_t* v) {
 }
 
 /* q `x in y` — membership (ref/in.md).  Where y is a TYPED vector the test is
- * left-atomic (delegates to base ray_in_fn); where y is a generic LIST there
- * is NO iteration through x — x is tested WHOLE against the ITEMS of y, and
- * the search is rank-sensitive via y's FIRST item (find.md: a rank-n haystack
- * looks for rank n-1 objects): first item non-atom -> whole-x match (a rank-0
- * x is 0b: `3 in (1 2;3)` -> 0b); first item atom (or empty y — undocumented
- * edge, conservative) -> left-atomic over x against y's items.  Mixed numeric
- * families (float x vs int y) are allowed only against an ATOM or 1-item y
- * (elementwise equality); longer/empty mixed vectors are 'type.  A 1-char
- * string x against string y unwraps the base char row to an ATOM bool. */
+ * left-atomic (delegates to base ray_in_fn).  Where y is a general LIST or a
+ * TABLE, "in uses Find" (in.md:63) is the whole law: the flag is
+ * `(y?x) < count y`, so the rank Find reads off y's first item, the whole-x
+ * match, the row search and the empty-y miss all come from the one home.  A
+ * dict's membership is its RANGE's (`x in value y`, owner ruling 2026-09-17;
+ * `y?x` would answer a KEY, which a null key could not distinguish from a
+ * miss).  Mixed numeric families (float x vs int y) are allowed only against
+ * an ATOM or 1-item y (elementwise equality); longer/empty mixed vectors are
+ * 'type.  A 1-char string x against string y unwraps the base char row to an
+ * ATOM bool. */
 ray_t* q_in_wrap(ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);
-    /* a TABLE domain is membership over ROWS, which is exactly "did the row
-     * search find it": find answers a miss with `count y`, so the flag is
-     * `(y?x) < count y` and the record-vs-run shape comes back with it. */
-    if (q_type_is_table(y)) {
+    if (q_type_is_plain_dict(y)) {
+        int vo = 0;
+        ray_t* vv = q_table_dict_vals(y, &vo);
+        if (!vv) return q_err(QE_TYPE);
+        ray_t* r = q_in_wrap(x, vv);
+        if (vo) ray_release(vv);
+        return r;
+    }
+    if (q_type_is_table(y) || y->type == RAY_LIST) {
         ray_t* i = q_search_find(y, x);
         if (!i || RAY_IS_ERR(i)) return i ? i : q_err(QE_TYPE);
         ray_t* n = ray_i64(q_count(y));
@@ -104,38 +110,6 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
         ray_release(i);
         ray_release(n);
         return r ? r : q_err(QE_TYPE);
-    }
-    if (y->type == RAY_LIST) {
-        int64_t ny = q_count(y);
-        ray_t** e = (ray_t**)ray_data(y);
-        int rank1_seek = ny > 0 && e[0] && !ray_is_atom(e[0]);
-        if (rank1_seek) {
-            if (ray_is_atom(x)) return ray_bool(false);
-            /* whole-x seek when x IS one item shape: a simple vector, or a
-             * boxed list while y's items are boxed too ((1 2;3 4) in (...;9)).
-             * Per-item only when x is boxed OVER y's simple-vector items —
-             * e.g. list-of-strings in list-of-strings. */
-            if (x->type != RAY_LIST || e[0]->type == RAY_LIST || e[0]->type == RAY_TABLE)
-                return ray_bool(seq_has_item(y, x) != 0);
-        } else if (ray_is_atom(x)) return ray_bool(seq_has_item(y, x) != 0);
-        int64_t nx = q_count(x);                     /* left-atomic over x */
-        ray_t* outl = ray_list_new(nx > 0 ? nx : 1);
-        if (RAY_IS_ERR(outl)) return outl;
-        for (int64_t i = 0; i < nx; i++) {
-            ray_t* ia = ray_i64(i);
-            ray_t* xe = ray_at_fn(x, ia);            /* owned */
-            ray_release(ia);
-            if (!xe || RAY_IS_ERR(xe)) { ray_release(outl); return xe; }
-            ray_t* r = q_in_wrap(xe, y);
-            ray_release(xe);
-            if (!r || RAY_IS_ERR(r)) { ray_release(outl); return r; }
-            outl = ray_list_append(outl, r);         /* retains */
-            ray_release(r);
-            if (RAY_IS_ERR(outl)) return outl;
-        }
-        ray_t* c = q_list_collapse(outl);
-        ray_release(outl);
-        return c;
     }
     /* STR-vector y (peachq list-of-strings): whole-item membership -> atom */
     if (y->type == RAY_STR && x->type == -RAY_STR)
@@ -416,23 +390,25 @@ ray_t* q_search_find(ray_t* x, ray_t* y) {
         if (ray_is_vec(x) && x->type != RAY_STR && !q_search_admits(x, y)) return q_err(QE_TYPE);
         int64_t cnt = q_count(x);
         int xd = find_depth(x) - 1;                  /* the rank of x's items, read off the first (find.md) */
+        if (xd > 0 && y && find_depth(y) == 0)       /* an atom is never a rank-xd object (find.md:88): a miss */
+            return ray_i64(cnt);
         if (x->type == RAY_LIST && y && y->type == RAY_LIST && cnt > 0 && find_depth(y) == xd)
             return ray_i64(q_search_find_item(x, y, cnt));   /* y IS one item's shape: whole, so x[x?x 0] round-trips */
         if (y && y->type == RAY_LIST) {
             /* Find is right-atomic to the rank of x's items ("x?y looks for objects of rank n-1", find.md): an
-             * item deeper than that rank is a run of them, found item by item — an atom item over a simple x
+             * item deeper than that rank is a run of them, found item by item — an atom item over a SIMPLE x
              * HITS, as the older editions print `w?(10 5 -1;-8;3 17)` -> (0 3 4;1;2 7) (docs-v1 search.md:132,
-             * q1.txt:1046; the current page's miss is the divergence list/find.qcmd records) — and one at that
-             * rank is matched whole (`u?(2 3;\`ab)` -> 3 3, never the whole of y).  The answer keeps y's shape, a
-             * run of atoms collapsing to the index vector.  Empty x has no rank to read, so every item is one
-             * miss (D2: a list probe on `()` is item-wise). */
+             * q1.txt:1046; the current page's miss is the divergence list/find.qcmd records), over a deeper x it
+             * is the rank law's miss — and one at that rank is matched whole (`u?(2 3;\`ab)` -> 3 3, never the
+             * whole of y).  The answer keeps y's shape, a run of atoms collapsing to the index vector.  Empty x
+             * has no rank to read, so every item is one miss (D2: a list probe on `()` is item-wise). */
             int64_t ny = q_count(y);
             ray_t** e = (ray_t**)ray_data(y);
             ray_t* out = ray_list_new(ny > 0 ? ny : 1);
             if (RAY_IS_ERR(out)) return out;
             for (int64_t j = 0; j < ny; j++) {
                 ray_t* rr;
-                if (!e[j] || cnt == 0)
+                if (!e[j] || cnt == 0 || (xd > 0 && find_depth(e[j]) == 0))
                     rr = ray_i64(cnt);
                 else if (xd > 0 && find_depth(e[j]) <= xd)
                     rr = ray_i64(q_search_find_item(x, e[j], cnt));

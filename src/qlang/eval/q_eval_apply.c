@@ -1842,9 +1842,10 @@ ray_t* q_eval_at_wrap(ray_t** args, int64_t n) {
     return q_err(QE_RANK);
 }
 
-/* `.` — 2 args: a callable spread-applies over the rhs list, a noun
- * depth-indexes (m . 1 2 is m[1;2]); 3 args non-amendable head Trap; 3-4 args
- * data head Amend (i is the path list). */
+/* `.` — 2 args: a callable spread-applies over the rhs list — anything
+ * positionally indexable, so a table's ROWS spread and a dict is 'type (owner
+ * ruling 2026-09-17) — and a noun depth-indexes (m . 1 2 is m[1;2]); 3 args
+ * non-amendable head Trap; 3-4 args data head Amend (i is the path list). */
 ray_t* q_eval_dot_wrap(ray_t** args, int64_t n) {
     if (n == 3 && !amend_head(args[0])) {
         int64_t ctx = q_dbg_trap_enter();
@@ -1855,7 +1856,7 @@ ray_t* q_eval_dot_wrap(ray_t** args, int64_t n) {
     if (n == 3 || n == 4) return amend_value(args, n, 1);
     if (n != 2) return q_err(QE_RANK);
     ray_t* a = args[1];
-    if (!a || (!ray_is_vec(a) && a->type != RAY_LIST))
+    if (!a || (!ray_is_vec(a) && a->type != RAY_LIST && a->type != RAY_TABLE))
         return q_err(QE_TYPE);
     int64_t k = q_count(a);
     if (k < 1 || k > 8) return q_err(QE_RANK);
