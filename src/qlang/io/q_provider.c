@@ -898,14 +898,13 @@ ray_t* q_provider_load(const char* s, size_t n, ray_t* tables) {
     if (err) { ray_release(ent.connid); return err; }
     int64_t m = names->type == -RAY_SYM ? 1 : ray_len(names);
     ray_t* out = ray_sym_vec_new(RAY_SYM_W64, m > 0 ? m : 1);
-    int64_t ctx = q_env_ctx();
-    q_env_ctx_set(0);
+    int64_t scope = q_env_scope(0);            /* bound at the root, whatever the session or a calling lambda says */
     for (int64_t i = 0; i < m && !err; i++) {
         int64_t id = names->type == -RAY_SYM ? names->i64 : ray_vec_get_sym_id(names, i);
         err = load_bind(&ent, id);
         if (!err) out = ray_vec_append(out, &id);
     }
-    q_env_ctx_set(ctx);
+    q_env_scope(scope);
     ray_release(ent.connid);
     ray_release(names);
     if (err) { ray_release(out); return err; }
