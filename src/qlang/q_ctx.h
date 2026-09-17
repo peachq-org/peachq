@@ -47,6 +47,12 @@ int q_ctx_run_src(const char* s, FILE* out, FILE* err, ray_t** esig);
  * file would. */
 int q_ctx_run_named_src(const char* name, const char* s, FILE* out, FILE* err, ray_t** esig);
 
+/* q_ctx_run_src as a CONSOLE-initiated load — the tty's startup texts (`\l file`,
+ * the `-eval` texts): silent and multiline as any script, but its statements
+ * suspend into the debugger the way a typed `\l`'s do, so `:`/`\` resume or
+ * abort the load.  An abort is reported here; the return is q_ctx_run_src's. */
+int q_ctx_run_console_src(const char* s, FILE* out, FILE* err);
+
 /* Install the two callbacks the IPC layer evaluates a request through: source
  * text (the seam above, but answering with a value instead of printing — hence
  * a shared pipeline, not a shared function) and the kdb `(func;args)`
