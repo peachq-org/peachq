@@ -32,11 +32,13 @@
  * values.  A node whose one sym is the NULL sym is never a key list. */
 #define Q_ATTR_KEYLIST 0x40
 
-/* Q_ATTR_TRAIN: flag on a RAY_LIST call node whose rightmost operand is a train tail — a postfix-elided verb
- * (`count@`, `-9!`, `x each`) or a node so flagged — so `1~count@` composes `~[1;]` onto `count@` where the same
- * tree built by hand, or by a bracket elision (`count y[0;]`), applies.  Only the parser knows the syntax, so only
- * the parser sets it; the walker reads it at the application arm.  0x02 is unclaimed on a general list (heap.h's
- * legend gives it to -RAY_I64 atoms); the wire codec does not carry it, so a serialised tree applies. */
+/* Q_ATTR_TRAIN: flag on a RAY_LIST call node whose rightmost operand is a train tail — WRITTEN as a verb: a
+ * postfix elision (`count@`, `-9!`, `x each`), a lone glyph (`0|+`), an iterator-suffixed expression (`neg\`) or a
+ * node so flagged — so `1~count@` composes `~[1;]` onto `count@` where the same tree built by hand, or by a bracket
+ * elision (`count y[0;]`), applies; a keyword or lambda there (`3#{x}`) is a noun.  Only the parser knows the syntax,
+ * so only the parser sets it; the walker reads it at the application arm, THE one composition home.  0x02 is
+ * unclaimed on a general list (heap.h's legend gives it to -RAY_I64 atoms); the wire codec does not carry it, so a
+ * serialised tree applies. */
 #define Q_ATTR_TRAIN 0x02
 
 #define MAX_VEC  4096

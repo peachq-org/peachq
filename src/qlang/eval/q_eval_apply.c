@@ -1290,27 +1290,6 @@ static int64_t rank_of(ray_t* fv) {
 
 int64_t q_eval_apply_rank(ray_t* fv) { return fv ? rank_of(fv) : -1; }
 
-/* a value that composes when a unary is juxtaposed onto it: an `@`/`.`
- * projection (`count@`, `(%).`) or an existing composition (`u v w@`) */
-static int comp_tail(ray_t* x) {
-    int k = q_eval_apply_carrier_kind(x);
-    if (k == Q_EVAL_CAR_COMP) return 1;
-    if (k != Q_EVAL_CAR_PROJ) return 0;
-    const q_op_t* row = row_unbox(car_slots(x)[1]);
-    return row && row->name[1] == '\0' &&
-           (row->name[0] == '@' || row->name[0] == '.');
-}
-
-/* the row whose glyph decides implicit composition: a bare operator's own, a derived value's ROOT operand's */
-static const q_op_t* comp_glyph_row(ray_t* fv, const q_op_t* row) {
-    while (fv && q_eval_apply_carrier_kind(fv) == Q_EVAL_CAR_DERIV) {
-        row = row_unbox(car_slots(fv)[1]);
-        fv = car_slots(fv)[0];
-    }
-    return row && !row->adverb_hof && row->name[1] == '\0' &&
-                   !strchr("@.,!~?:", row->name[0]) ? row : NULL;
-}
-
 /* `a v g` composes the projection `v[a;]` onto g (`0|+`, `1~count@`): the one "project then compose" home */
 static ray_t* proj_compose(ray_t* fv, const q_op_t* row, ray_t* a, ray_t* g) {
     ray_t* h[2] = { a, NULL };
@@ -1505,35 +1484,7 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
 
     int kind = q_eval_apply_carrier_kind(fv);
     if (kind == Q_EVAL_CAR_ITER) return iter_call(fv, args, n);
-    /* ref/apply.md Composition: `u v w@` — a unary on an `@`/`.` projection (or a composition) COMPOSES rather
-     * than applying to the fn value.  A variadic derived value's one-argument form IS its unary (`f over g@`
-     * composes, #42); a fixed rank >= 2 projects instead ("if projected as a unary by Apply") */
-    int64_t rank = rank_of(fv);
-    if (n == 1 && (rank == 1 || (rank < 0 && kind == Q_EVAL_CAR_DERIV)) && comp_tail(args[0]))
-        return comp_new(fv, args[0]);
     if (kind == Q_EVAL_CAR_PROJ) return proj_call(fv, args, n);
-    /* ref/apply.md Composition, the glyph form: `(0|+)` is the projection
-     * `0|` ON `+`, not max of a function value.  Only single-glyph rows, and
-     * not the ones that legitimately CONSUME a function (`@` `.` apply, `,`
-     * `!` build structure from it, `~` `?` compare/search it, `:` returns it).
-     * A DERIVED head composes the same way from ITS value (`2#'reverse` is
-     * `#'[2;]` on reverse), which is why this sits above the adverb dispatch. */
-    if (n == 2 && args[0] && args[1] && q_eval_apply_is_fn(args[1]) &&
-        !q_eval_apply_is_fn(args[0]) && comp_glyph_row(fv, row)) {
-        /* a bare glyph operand arrives as the MONADIC sibling (name
-         * resolution prefers it) but q spells a bare glyph dyadic — `(0|+)`
-         * is `0|` on Add, rank 2.  The glyph and its keyword monad share one
-         * value, so `(0|neg)` reads dyadic too: unpinned by any doc row */
-        const q_op_t* grow = q_registry_row_of(args[1], Q_MONADIC);
-        ray_t* g = args[1];
-        if (grow && grow->name[1] == '\0' && rank_of(g) == 1) {
-            const q_op_t* drow = NULL;
-            ray_t* sib = q_registry_lookup_row(
-                ray_sym_intern_runtime(grow->name, 1), Q_DYADIC, &drow);
-            if (sib && q_eval_apply_is_fnval(sib)) g = sib;
-        }
-        return proj_compose(fv, row, args[0], g);
-    }
     if (kind == Q_EVAL_CAR_DERIV) {
         ray_t** c = car_slots(fv);
         return q_adverb_apply((int)c[2]->i64, c[0], row_unbox(c[1]),
@@ -1546,7 +1497,7 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
         return noun_index(fv, args, n);
     }
 
-    int64_t holes = 0;
+    int64_t rank = rank_of(fv), holes = 0;
     for (int64_t i = 0; i < n; i++)
         if (!args[i]) holes++;
     if (holes > 0) {
@@ -1572,8 +1523,7 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
             const q_op_t* frow = NULL;
             if (q_eval_apply_is_fnval(args[0]))
                 frow = q_registry_operand_row(args[0]);
-            /* `f over x` IS `(f/) x` (ref/accumulators.md "Keywords scan and over"): derive, then apply through
-             * this entry so the derived value meets the one composition gate */
+            /* `f over x` IS `(f/) x` (ref/accumulators.md "Keywords scan and over"): derive, then apply */
             ray_t* d = q_eval_apply_deriv_new(adv, args[0], frow);
             if (RAY_IS_ERR(d)) return d;
             ray_t* r = q_eval_apply(d, NULL, args + 1, 1);
@@ -1665,9 +1615,9 @@ ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
 }
 
 /* A TRAIN node (Q_ATTR_TRAIN, parser-marked): the last argument is the tail the syntax defers, so a unary head
- * composes onto it (`first asc@`, `u v w@`) and a noun-headed infix composes its projection (`1~count@`,
- * `(1b;)@-9!`) — the same laws as the value gates in apply_inner, minus their guesses about what the value IS.
- * A head that is not a function, or a fixed rank other than 1, applies as it always did. */
+ * composes onto it (`first asc@`, `u v w@`) and a noun-headed infix composes its projection (`1~count@`, `0|+`,
+ * `(1b;)@-9!`).  THE one composition home: the evaluator carries no value test (composition is syntactic).
+ * A variadic derived head's one-argument form IS its unary (`f over g@`, #42); a fixed rank >= 2 projects instead. */
 ray_t* q_eval_apply_train(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     ray_t* g = args[n - 1];
     if (fv && !RAY_IS_ERR(fv) && q_eval_apply_is_fn(fv) && g && q_eval_apply_is_fn(g)) {

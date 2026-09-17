@@ -10,6 +10,7 @@
 #include "lang/internal.h" /* ray_enlist_fn — reshape's atom arm */
 #include "qlang/ops/q_index.h"
 #include "qlang/eval/q_funsql.h" /* the entries-axis selection home */
+#include "qlang/eval/q_eval.h"   /* q_eval_apply_is_fn */
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -191,7 +192,7 @@ ray_t* q_take_wrap(ray_t* x, ray_t* y) {
             return r;
         }
     }
-    if (RAY_IS_NULL(y)) {   /* :: is an atom take fills from, but names no element lane */
+    if (RAY_IS_NULL(y) || q_eval_apply_is_fn(y)) {   /* an atom with no element lane: `::` or a function (`3#{x}`) */
         ray_t* e = ray_list_new(1);
         if (RAY_IS_ERR(e)) return e;
         e = ray_list_append(e, y);
