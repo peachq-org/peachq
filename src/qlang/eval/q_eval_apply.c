@@ -1301,6 +1301,16 @@ static int comp_tail(ray_t* x) {
            (row->name[0] == '@' || row->name[0] == '.');
 }
 
+/* the row whose glyph decides implicit composition: a bare operator's own, a derived value's ROOT operand's */
+static const q_op_t* comp_glyph_row(ray_t* fv, const q_op_t* row) {
+    while (fv && q_eval_apply_carrier_kind(fv) == Q_EVAL_CAR_DERIV) {
+        row = row_unbox(car_slots(fv)[1]);
+        fv = car_slots(fv)[0];
+    }
+    return row && !row->adverb_hof && row->name[1] == '\0' &&
+                   !strchr("@.,!~?:", row->name[0]) ? row : NULL;
+}
+
 /* `a v g` composes the projection `v[a;]` onto g (`0|+`, `1~count@`): the one "project then compose" home */
 static ray_t* proj_compose(ray_t* fv, const q_op_t* row, ray_t* a, ray_t* g) {
     ray_t* h[2] = { a, NULL };
@@ -1502,6 +1512,28 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
     if (n == 1 && (rank == 1 || (rank < 0 && kind == Q_EVAL_CAR_DERIV)) && comp_tail(args[0]))
         return comp_new(fv, args[0]);
     if (kind == Q_EVAL_CAR_PROJ) return proj_call(fv, args, n);
+    /* ref/apply.md Composition, the glyph form: `(0|+)` is the projection
+     * `0|` ON `+`, not max of a function value.  Only single-glyph rows, and
+     * not the ones that legitimately CONSUME a function (`@` `.` apply, `,`
+     * `!` build structure from it, `~` `?` compare/search it, `:` returns it).
+     * A DERIVED head composes the same way from ITS value (`2#'reverse` is
+     * `#'[2;]` on reverse), which is why this sits above the adverb dispatch. */
+    if (n == 2 && args[0] && args[1] && q_eval_apply_is_fn(args[1]) &&
+        !q_eval_apply_is_fn(args[0]) && comp_glyph_row(fv, row)) {
+        /* a bare glyph operand arrives as the MONADIC sibling (name
+         * resolution prefers it) but q spells a bare glyph dyadic — `(0|+)`
+         * is `0|` on Add, rank 2.  The glyph and its keyword monad share one
+         * value, so `(0|neg)` reads dyadic too: unpinned by any doc row */
+        const q_op_t* grow = q_registry_row_of(args[1], Q_MONADIC);
+        ray_t* g = args[1];
+        if (grow && grow->name[1] == '\0' && rank_of(g) == 1) {
+            const q_op_t* drow = NULL;
+            ray_t* sib = q_registry_lookup_row(
+                ray_sym_intern_runtime(grow->name, 1), Q_DYADIC, &drow);
+            if (sib && q_eval_apply_is_fnval(sib)) g = sib;
+        }
+        return proj_compose(fv, row, args[0], g);
+    }
     if (kind == Q_EVAL_CAR_DERIV) {
         ray_t** c = car_slots(fv);
         return q_adverb_apply((int)c[2]->i64, c[0], row_unbox(c[1]),
@@ -1522,27 +1554,6 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
         return q_eval_apply_proj_new(fv, row, args, n, rank);
     }
     if (fv == q_registry_compose_value()) return compose_apply(args, n);
-    /* ref/apply.md Composition, the glyph form: `(0|+)` is the projection
-     * `0|` ON `+`, not max of a function value.  Only single-glyph rows, and
-     * not the ones that legitimately CONSUME a function (`@` `.` apply, `,`
-     * `!` build structure from it, `~` `?` compare/search it, `:` returns it). */
-    if (row && !row->adverb_hof && n == 2 && row->name[1] == '\0' &&
-        !strchr("@.,!~?:", row->name[0]) && q_eval_apply_is_fn(args[1]) &&
-        !q_eval_apply_is_fn(args[0])) {
-        /* a bare glyph operand arrives as the MONADIC sibling (name
-         * resolution prefers it) but q spells a bare glyph dyadic — `(0|+)`
-         * is `0|` on Add, rank 2.  The glyph and its keyword monad share one
-         * value, so `(0|neg)` reads dyadic too: unpinned by any doc row */
-        const q_op_t* grow = q_registry_row_of(args[1], Q_MONADIC);
-        ray_t* g = args[1];
-        if (grow && grow->name[1] == '\0' && rank_of(g) == 1) {
-            const q_op_t* drow = NULL;
-            ray_t* sib = q_registry_lookup_row(
-                ray_sym_intern_runtime(grow->name, 1), Q_DYADIC, &drow);
-            if (sib && q_eval_apply_is_fnval(sib)) g = sib;
-        }
-        return proj_compose(fv, row, args[0], g);
-    }
     if (rank >= 0 && n < rank) return q_eval_apply_proj_new(fv, row, args, n, rank);
     if (rank >= 0 && n > rank) return q_err(QE_RANK);
     /* a manifest FNV overload matrix applied below its minimum rank PROJECTS
