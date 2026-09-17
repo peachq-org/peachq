@@ -1029,6 +1029,15 @@ static ray_t* gather_at(ray_t* x, ray_t* idx) {
     return q_typed_empty_like(g, x);
 }
 
+/* a null index VACATES a slot; a dict has no entry to put there, so the
+ * domain stays and only the range shifts (`next d` keeps its keys) */
+static int idx_vacates(ray_t* idx) {
+    int64_t n = ray_is_vec(idx) ? q_count(idx) : 0;
+    for (int64_t i = 0; i < n; i++)
+        if (q_type_vec_is_null(idx, i)) return 1;
+    return 0;
+}
+
 static ray_t* index_lift(ray_t* fv, ray_t** args, int64_t n) {
     ray_t* x = (n == 2) ? args[1] : args[0];
     ray_t* dom = (x->type == RAY_DICT) ? ray_dict_keys(x) : NULL;
@@ -1045,7 +1054,9 @@ static ray_t* index_lift(ray_t* fv, ray_t** args, int64_t n) {
     ray_t* idx = q_eval_apply_concrete(call_kernel(fv, iargs, n));
     ray_release(til);
     if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_TYPE);
-    ray_t* r = gather_at(dom ? dom : x, idx);
+    ray_t* r;
+    if (dom && idx_vacates(idx)) { ray_retain(dom); r = dom; }
+    else r = gather_at(dom ? dom : x, idx);
     if (dom && r && !RAY_IS_ERR(r)) {
         ray_t* nv = gather_at(ray_dict_vals(x), idx);
         /* rebuild through the `!` home, so a lifted slice is representationally
@@ -1340,7 +1351,7 @@ static ray_t* compose_apply(ray_t** args, int64_t n) {
 /* ===== enumerations (exception catalogue): decay-by-default ==============
  * A 20h arg at a verb boundary either reaches an ENUM-AWARE arm untouched
  * ($ cast, key, value, type, enlist, attr; amend forms go to the amend home),
- * rides the structural PRESERVE set (take/drop/sublist/reverse/first/last/
+ * rides the structural PRESERVE set (take/drop/sublist/xprev/reverse/first/last/
  * concat — strip to positions, apply, re-stamp the domain; indexing preserves
  * via noun_index above), or DECAYS to its resolved symlist so kernels never
  * meet tag 20 (2026-08-22 enum plan; ref/enumerate.md is the resolution law). */
@@ -1450,7 +1461,7 @@ static ray_t* enum_route(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) 
         if (n == 1 && q_enum_is(args[0]) && !strcmp(t, "count"))
             return enum_strip_apply(fv, row, args, n, 0, 0);
         if (n == 2 && q_enum_is(args[1]) &&
-            (!strcmp(t, "take") || !strcmp(t, "drop") || !strcmp(t, "sublist"))) {
+            (!strcmp(t, "take") || !strcmp(t, "drop") || !strcmp(t, "sublist") || !strcmp(t, "xprev"))) {
             if (!strcmp(t, "take") && args[0] && args[0]->type == -RAY_SYM)
                 return NULL;    /* `p#e — take's set-attribute arm is enum-aware */
             return enum_strip_apply(fv, row, args, n, 1, 1);

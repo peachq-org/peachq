@@ -15,10 +15,9 @@
 #include "lang/eval.h"     /* ray_take_fn, ray_xbar_fn */
 #include "lang/internal.h" /* ray_iasc_fn/ray_idesc_fn, RAY_IS_TEMPORAL64, ray_error */
 #include "qlang/ops/q_index.h" /* q_index_elem_at — the element read; q_index_at — the gather */
-#include "table/sym.h"     /* ray_sym_intern_runtime, RAY_SYM_W64 */
+#include "table/sym.h"     /* ray_sym_intern_runtime, RAY_SYM_W64, the adaptive sym width */
 #include <stdint.h>        /* uintptr_t */
 #include <string.h>
-#include <stdlib.h>        /* malloc/free */
 
 /* ---- collapse: homogeneous atom list -> typed vector (q_registry_internal.h) ---- */
 
@@ -278,9 +277,10 @@ ray_t* q_where_wrap(ray_t* x) {
 
 /* q `n xprev x` — n-item shift, null-filling the vacated end (ref/next.md:
  * +n is prev-by-n, -n is next); `next`/`prev` are its q.q unit shifts, so
- * every arm here is theirs too.  Strings shift CHARS with ' ' fill
- * (`1 xprev "abcde"` -> " abcd"); a generic LIST fills each vacated slot
- * with `0#first` of the ORIGINAL (`prev (1 2;"abc";`ibm)` -> (`long$();1 2;"abc")). */
+ * every arm here is theirs too.  Any typed vector shifts as cells and fills
+ * with ITS null (`1 xprev "abcde"` -> " abcd"); a generic LIST fills each
+ * vacated slot with `0#first` of the ORIGINAL (`prev (1 2;"abc";`ibm)` ->
+ * (`long$();1 2;"abc")).  An atom is not a list: 'type. */
 ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
     int64_t k;   /* strict cast owns the type axis; 0N rejected here */
     if (!q_type_strict_i64(nx, &k) || RAY_ATOM_IS_NULL(nx))
@@ -313,41 +313,26 @@ ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
         ray_release(fill);
         return out;
     }
-    if (x && (x->type == -RAY_STR || x->type == RAY_CHARV)) {
-        const char* s; int64_t len;
-        (void)q_str_text_bytes(x, &s, &len);
-        if (x->type == -RAY_STR) { s = ray_str_ptr(x); len = (int64_t)ray_str_len(x); }
-        char stackb[256];
-        char* b = (len <= (int64_t)sizeof stackb) ? stackb : malloc((size_t)(len > 0 ? len : 1));
-        if (!b) return q_err(QE_OOM);
-        for (int64_t i = 0; i < len; i++) {
-            int64_t j = i - k;
-            b[i] = (j >= 0 && j < len) ? s[j] : ' ';   /* char null is the blank */
-        }
-        ray_t* r = (x->type == RAY_CHARV) ? ray_charv(b, len) : ray_str(b, (size_t)len);
-        if (b != stackb) free(b);
-        return r;
-    }
-    if (!x || !ray_is_vec(x))
-        return q_err(QE_NYI);
+    if (!x || !ray_is_vec(x) || x->type == RAY_STR)
+        return q_err(QE_TYPE);
     int8_t t = x->type;
-    if (!(t == RAY_I16 || t == RAY_I32 || t == RAY_I64 || t == RAY_F32 || t == RAY_F64 || t == RAY_BOOL ||
-          ray_is_bytelike(t) || RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t) || RAY_IS_TEMPORALF(t)))
-        return q_err(QE_NYI);
     int64_t len = q_count(x);
-    size_t esz = ray_type_sizes[(uint8_t)t];
-    ray_t* out = ray_vec_new(t, len > 0 ? len : 1);
+    size_t esz = ray_sym_elem_size(t, x->attrs);        /* a sym vector's width is adaptive */
+    ray_t* out = t == RAY_SYM ? ray_sym_vec_new(x->attrs & RAY_SYM_W_MASK, len > 0 ? len : 1)
+                              : ray_vec_new(t, len > 0 ? len : 1);
     if (RAY_IS_ERR(out)) return out;
+    if (t == RAY_SYM) ray_sym_vec_adopt_domain(out, x);
     out->len = len;
     char* o = (char*)ray_data(out);
-    const char* in = (const char*)ray_data(x);
+    const char* in = len > 0 ? ray_vec_get(x, 0) : NULL;   /* strides a narrow-sym SLICE by its width; ray_data does not */
     int64_t sh = k >= 0 ? k : -k;
     if (sh > len) sh = len;
     int64_t keep = len - sh;
     int64_t vac = k >= 0 ? 0 : keep;                 /* prev-by-n vacates the head, next-by-n the tail */
     if (keep > 0) memcpy(o + (size_t)(k >= 0 ? sh : 0) * esz, in + (size_t)(k >= 0 ? 0 : sh) * esz, (size_t)keep * esz);
-    memset(o + (size_t)vac * esz, 0, (size_t)sh * esz);   /* the bool/byte null; sentinel types overwrite below */
-    for (int64_t i = vac; i < vac + sh; i++) ray_vec_set_null(out, i, true);
+    /* zero IS the null for sym id 0, guid, bool and byte; the char null is the blank */
+    memset(o + (size_t)vac * esz, t == RAY_CHARV ? ' ' : 0, (size_t)sh * esz);
+    for (int64_t i = vac; i < vac + sh; i++) ray_vec_set_null(out, i, true);   /* the sentinel types */
     return out;
 }
 
