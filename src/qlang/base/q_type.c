@@ -18,10 +18,6 @@ int64_t q_type_as_i64(ray_t* x) {
     return as_i64(x);
 }
 
-int q_type_is_numeric_or_temporal(ray_t* x) {
-    return is_numeric(x) || is_temporal(x) || RAY_IS_TEMPORALF(-x->type);
-}
-
 int q_type_is_bool(ray_t* x) {
     return x->type == -RAY_BOOL;
 }

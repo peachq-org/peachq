@@ -319,63 +319,34 @@ ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
     return make_typed_int(rt, wrap_sub64(as_i64(a), as_i64(b)));
 }
 
+/* ref/multiply.md:94-111, the temporal rows and columns (t temporal, n numeric; `*` commutes, so
+ * one arm serves both orders).  An int-family or real scale keeps the temporal (n*j -> n, e*p -> p);
+ * a float answers f, except that d*f and every z pair answer z.  Temporal x temporal is 'type. */
+static ray_t* mul_temporal(ray_t* t, ray_t* n) {
+    int f = n->type == -RAY_F64;
+    int8_t rt = t->type == -RAY_DATETIME || (f && t->type == -RAY_DATE) ? -RAY_DATETIME
+              : f ? -RAY_F64 : t->type;
+    if (RAY_ATOM_IS_NULL(t) || RAY_ATOM_IS_NULL(n)) return ray_typed_null(rt);
+    if (rt == -RAY_DATETIME) return ray_datetime(as_f64(t) * as_f64(n));
+    if (rt == -RAY_F64)      return make_f64(as_f64(t) * as_f64(n));
+    if (n->type == -RAY_F32) {   /* a real scales the count in its own lane, then narrows (as_i64's range guard) */
+        double v = as_f64(t) * as_f64(n);
+        return v >= -9223372036854775808.0 && v < 9223372036854775808.0 ? make_typed_int(rt, (int64_t)v)
+                                                                         : ray_typed_null(rt);
+    }
+    return make_typed_int(rt, wrap_mul64(t->i64, as_i64(n)));
+}
+
 ray_t* ray_mul_fn(ray_t* a, ray_t* b) {
     if ((a && RAY_IS_PARTED(a->type)) || (b && RAY_IS_PARTED(b->type)))
         return atomic_map_binary_op(ray_mul_fn, OP_MUL, a, b);
 
-    /* int * TIME → TIME, TIME * int → TIME */
-    if (is_numeric(a) && b->type == -RAY_TIME) {
-        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIME);
-        return ray_time(wrap_mul64(as_i64(a), b->i64));
-    }
-    if (a->type == -RAY_TIME && is_numeric(b)) {
-        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIME);
-        return ray_time(wrap_mul64(a->i64, as_i64(b)));
-    }
-    /* int * MONTH → MONTH, MONTH * int → MONTH (basics/math.md:156
-     * 2017.12m*0 1 2 → 2000.01 2017.12 2035.11m — payload multiply). */
-    if (is_numeric(a) && b->type == -RAY_MONTH) {
-        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_MONTH);
-        return ray_month(wrap_mul64(as_i64(a), b->i64));
-    }
-    if (a->type == -RAY_MONTH && is_numeric(b)) {
-        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_MONTH);
-        return ray_month(wrap_mul64(a->i64, as_i64(b)));
-    }
-    /* int * duration → duration, both orders (ref/multiply.md temporal
-     * rows/cols × int family; math.md month precedent). */
-    if (is_numeric(a) && b->type == -RAY_MINUTE) {
-        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_MINUTE);
-        return ray_minute(wrap_mul64(as_i64(a), b->i64));
-    }
-    if (a->type == -RAY_MINUTE && is_numeric(b)) {
-        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_MINUTE);
-        return ray_minute(wrap_mul64(a->i64, as_i64(b)));
-    }
-    if (is_numeric(a) && b->type == -RAY_SECOND) {
-        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_SECOND);
-        return ray_second(wrap_mul64(as_i64(a), b->i64));
-    }
-    if (a->type == -RAY_SECOND && is_numeric(b)) {
-        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_SECOND);
-        return ray_second(wrap_mul64(a->i64, as_i64(b)));
-    }
-    if (is_numeric(a) && b->type == -RAY_TIMESPAN) {
-        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESPAN);
-        return ray_timespan(wrap_mul64(as_i64(a), b->i64));
-    }
-    if (a->type == -RAY_TIMESPAN && is_numeric(b)) {
-        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESPAN);
-        return ray_timespan(wrap_mul64(a->i64, as_i64(b)));
-    }
-    /* TIME * TIME → error */
-    if (a->type == -RAY_TIME && b->type == -RAY_TIME)
-        return ray_error("type", "multiply: cannot multiply %s by %s",
-                         ray_type_name(a->type), ray_type_name(b->type));
-
-    if (!is_numeric(a) || !is_numeric(b))
+    if (!is_numeric(a) || !is_numeric(b)) {
+        if (is_numeric(a) && is_numeric_or_temporal(b)) return mul_temporal(b, a);
+        if (is_numeric_or_temporal(a) && is_numeric(b)) return mul_temporal(a, b);
         return ray_error("type", "cannot multiply %s and %s",
                          ray_type_name(a->type), ray_type_name(b->type));
+    }
     /* Null propagation */
     if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return null_for_promoted(a, b);
     if (is_float_op(a, b))
@@ -385,17 +356,12 @@ ray_t* ray_mul_fn(ray_t* a, ray_t* b) {
     return make_typed_int(rt, wrap_mul64(as_i64(a), as_i64(b)));
 }
 
+/* ref/divide.md:13 and :91-111: the ratio of the UNDERLYING values as a float, for every numeric or
+ * temporal pair — mixed units divide their raw counts (a minute is its minute count, a timespan its ns). */
 ray_t* ray_div_fn(ray_t* a, ray_t* b) {
     if ((a && RAY_IS_PARTED(a->type)) || (b && RAY_IS_PARTED(b->type)))
         return atomic_map_binary_op(ray_div_fn, OP_DIV, a, b);
-    /* MONTH ÷ numeric → f64 payload divide — doc-pinned (basics/math.md:158
-     * 2017.12m%2 → 107.5).  TIME ÷ int is ALSO doc-pinned (math.md:160
-     * 00:10%2 → 5f) but the base rfl suite pins (/ TIME x) → 'type
-     * (test/rfl/arith/branch_cov.rfl:263) — enabling it is a base-behavior
-     * decision deferred to its own change; DATE/TIMESTAMP stay rejected
-     * (unpinned — do not invent). */
-    if (!(is_numeric(a) || a->type == -RAY_MONTH || a->type == -RAY_MINUTE ||
-          a->type == -RAY_SECOND || a->type == -RAY_TIMESPAN) || !is_numeric(b))
+    if (!is_numeric_or_temporal(a) || !is_numeric_or_temporal(b))
         return ray_error("type", "cannot divide %s by %s",
                          ray_type_name(a->type), ray_type_name(b->type));
     if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))
