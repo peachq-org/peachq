@@ -20,17 +20,14 @@
 
 static _Thread_local int g_depth;
 
-/* index admission: ANY int-backed atom indexes (bools/bytes/temporals
- * included; floats, chars and syms do not — ref/apply.md errors) */
+/* index admission: a bool, or any atom of the int-index lane (q_type_int_index_width — bytes, chars and
+ * temporals included; floats and syms are not, ref/apply.md errors) */
 static int idx_i64(ray_t* v, int64_t* out) {
     if (!v || !ray_is_atom(v)) return 0;
     if (v->type == -RAY_BOOL) { *out = v->b8 ? 1 : 0; return 1; }
-    if (v->type == -RAY_CHARV) return 0;
-    if (v->type == -RAY_I64 || v->type == -RAY_I32 || v->type == -RAY_I16 ||
-        ray_is_bytelike(-v->type)) { *out = as_i64(v); return 1; }
-    if (RAY_IS_TEMPORAL32(-v->type)) { *out = (int64_t)v->i32; return 1; }
-    if (RAY_IS_TEMPORAL64(-v->type)) { *out = v->i64; return 1; }
-    return 0;
+    if (!q_type_int_index_width((int8_t)-v->type)) return 0;
+    *out = as_i64(v);
+    return 1;
 }
 
 static int is_coll(ray_t* v) {
@@ -945,11 +942,18 @@ static ray_t* amend_entire(ray_t* x, ray_t* f, ray_t* y) {
 }
 
 /* leaf store at ONE index i0: read S, apply, store (a dict key miss reads the typed null and the store INSERTS —
- * ref/amend.md).  p >= 0 is a dict key's position the run's Find already settled; -1 looks it up here. */
+ * ref/amend.md).  p >= 0 is a dict key's position the run's Find already settled; -1 looks it up here.
+ * An ABSENT key under an operator is undefined, exactly `a+:5` on an unbound name (ref/assign.md:135; owner ruling
+ * 2026-09-17): S is the operator's identity, never the miss null, so `()!()` accumulates under `+` (i100).  The
+ * step dictionary (`s#) is excluded — it defines every key. */
 static ray_t* leaf1(ray_t* x, ray_t* i0, int64_t p, ray_t* f, ray_t* y) {
     ray_t* nv;
     if (f) {
-        ray_t* s = p >= 0 ? dict_read(x, ray_i64(p), i0) : index_level(x, i0, 0);
+        ray_t* keys = p >= 0 ? ray_dict_slots(x)[0] : NULL;
+        const q_op_t* row = keys && p >= q_count(keys) && !(keys->attrs & RAY_ATTR_SORTED) && y
+                          ? q_registry_row_of(f, Q_DYADIC) : NULL;
+        ray_t* s = row ? q_ops_identity(row->name, QI_VALUE) : NULL;
+        if (!s) s = p >= 0 ? dict_read(x, ray_i64(p), i0) : index_level(x, i0, 0);
         if (!s || RAY_IS_ERR(s)) return s ? s : q_err(QE_TYPE);
         nv = leaf_apply(f, s, y);
         ray_release(s);

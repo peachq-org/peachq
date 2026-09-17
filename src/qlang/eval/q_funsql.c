@@ -1013,7 +1013,8 @@ static ray_t* entries_select(ray_t* dom, ray_t* rng, ray_t* x, int drop) {
 }
 
 /* a table IS `flip` of its column dict, so column take/drop is the entries law
- * with the flip on either side */
+ * with the flip on either side.  A column Take cannot miss: the take signals (owner ruling 2026-09-17; the
+ * class is not known, 'type chosen) where Drop, as everywhere, ignores an absent name. */
 static ray_t* cols_select(ray_t* x, ray_t* t, int drop) {
     ray_t* fd = q_table_to_dict(t);                          /* owned */
     if (!fd || RAY_IS_ERR(fd)) return fd ? fd : q_err(QE_TYPE);
@@ -1022,6 +1023,7 @@ static ray_t* cols_select(ray_t* x, ray_t* t, int drop) {
                     : q_err(QE_TYPE);
     ray_release(fd);
     if (!nd || RAY_IS_ERR(nd)) return nd ? nd : q_err(QE_TYPE);
+    if (!drop && q_count(ray_dict_keys(nd)) != q_count(x)) { ray_release(nd); return q_err(QE_TYPE); }
     ray_t* r = q_flip_wrap(nd);
     ray_release(nd);
     return r;
@@ -1033,9 +1035,15 @@ static ray_t* entries_verb(ray_t* x, ray_t* y, int drop) {
     if (!x || !y) return NULL;
     /* a dict's entries are named by ANY key type (ref/take.md:8; kdb-common log.q:271 takes with a char
      * vector); only an int is a count, the law Drop's dict arm already reads */
-    if (q_type_is_plain_dict(y))
-        return q_type_strict_i64(x, &n) || q_type_is_int_vec(x)
-                   ? NULL : entries_select(ray_dict_keys(y), ray_dict_vals(y), x, drop);
+    if (q_type_is_plain_dict(y)) {
+        if (q_type_strict_i64(x, &n) || q_type_is_int_vec(x)) return NULL;
+        if (drop || ray_is_atom(x)) return entries_select(ray_dict_keys(y), ray_dict_vals(y), x, drop);
+        ray_t* v = q_index_at(y, &x, 1);         /* `x#d` IS `x!d x` (owner ruling 2026-09-17) */
+        if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_TYPE);
+        ray_t* r = q_bang(x, v);
+        ray_release(v);
+        return r ? r : q_err(QE_TYPE);
+    }
     if (ray_is_atom(x)) return NULL;
     if (q_type_is_keyed(y))                                  /* ([]k:…)#kt */
         return entries_select(ray_dict_slots(y)[0], ray_dict_slots(y)[1], x, drop);
