@@ -9,6 +9,7 @@
  *     pluggable ray_term_set_highlighter() hook. */
 #define _POSIX_C_SOURCE 200809L
 
+#include "qlang/q_count.h"
 #include "qlang/repl/q_repl.h"
 #include "qlang/q_ctx.h"        /* the statement + console-teardown seams */
 #include "qlang/base/q_err.h"   /* q_err_text — full error text for console display */
@@ -265,11 +266,11 @@ static void repl_update_hint(ray_term_t* t, const char* s, size_t n) {
     if (RAY_IS_ERR(ast)) { ray_release(ast); return; }
     ray_t* r = q_eval(ast);
     ray_release(ast);
-    if (!RAY_IS_ERR(r) && r && r->type == RAY_CHARV && ray_len(r) > 0) {
+    if (!RAY_IS_ERR(r) && r && r->type == RAY_CHARV && q_count(r) > 0) {
         char hint[256];
         int  cmd = snprintf(hint, sizeof hint, "\\?%.*s", (int)n, s);
         snprintf(hint + cmd, sizeof hint - (size_t)cmd, " / %.*s",
-                 (int)ray_len(r), (const char*)ray_data(r));
+                 (int) q_count(r), (const char*)ray_data(r));
         ray_term_set_hint(t, hint, cmd);
     }
     ray_release(r);

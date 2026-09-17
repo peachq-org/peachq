@@ -2,6 +2,7 @@
  * i64 positions are the stored truth (domain-NAME sym id at aux 8-15, the link_target
  * pattern); resolution is LAZY through the env as a GLOBAL read (ref/enumerate.md:
  * after `` d[0]:`o `` the enum shows the new symbols while "i"$e is unchanged). */
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h"
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"
@@ -76,7 +77,7 @@ ray_t* q_enum_stamp(ray_t* v, int64_t dom) {
                                                         * collapse home builds the
                                                         * 20h vector directly */
         if (v->rc > 1 || (v->attrs & RAY_ATTR_SLICE)) {
-            ray_t* c = ray_vec_from_raw(RAY_I64, ray_data(v), ray_len(v));
+            ray_t* c = ray_vec_from_raw(RAY_I64, ray_data(v), q_count(v));
             ray_release(v);
             v = c;
             if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_OOM);
@@ -88,7 +89,7 @@ ray_t* q_enum_stamp(ray_t* v, int64_t dom) {
     }
     if (v->type == RAY_LIST) {                     /* nested index result */
         ray_t** e = (ray_t**)ray_data(v);
-        for (int64_t i = 0; i < ray_len(v); i++) {
+        for (int64_t i = 0; i < q_count(v); i++) {
             ray_t* r = q_enum_stamp(e[i], dom);    /* consumes the slot's ref */
             if (!r || RAY_IS_ERR(r)) { e[i] = NULL; ray_release(v); return r; }
             e[i] = r;
@@ -101,7 +102,7 @@ ray_t* q_enum_stamp(ray_t* v, int64_t dom) {
 /* Owned plain-i64 copy of the positions (the strip half of strip->op->stamp). */
 ray_t* q_enum_positions(ray_t* e) {
     if (e->type == -RAY_ENUM) return ray_i64(e->i64);
-    ray_t* v = ray_vec_from_raw(RAY_I64, ray_data(e), ray_len(e));
+    ray_t* v = ray_vec_from_raw(RAY_I64, ray_data(e), q_count(e));
     if (v && !RAY_IS_ERR(v) && (e->attrs & RAY_ATTR_HAS_NULLS))
         v->attrs |= RAY_ATTR_HAS_NULLS;
     return v;
@@ -187,7 +188,7 @@ ray_t* q_enum_decay(ray_t* e) {
 }
 
 static int64_t enum_find(ray_t* d, int64_t sym_id) {
-    int64_t dn = ray_len(d);
+    int64_t dn = q_count(d);
     for (int64_t k = 0; k < dn; k++)
         if (ray_vec_get_sym_id(d, k) == sym_id) return k;
     return -1;
@@ -215,12 +216,12 @@ ray_t* q_enum_coerce(int64_t dom, ray_t* y) {
         return q_err(QE_TYPE);                     /* wrong LANE into a symlist */
     ray_t* f = q_search_find(d, y);                /* hashed, whatever the type */
     if (!f || RAY_IS_ERR(f)) return f ? f : q_err(QE_TYPE);
-    int64_t dn = ray_len(d);
+    int64_t dn = q_count(d);
     int miss = 0;
     if (f->type == -RAY_I64) miss = f->i64 < 0 || f->i64 >= dn;
     else if (f->type == RAY_I64) {
         const int64_t* p = (const int64_t*)ray_data(f);
-        for (int64_t i = 0; i < ray_len(f) && !miss; i++)
+        for (int64_t i = 0; i < q_count(f) && !miss; i++)
             miss = p[i] < 0 || p[i] >= dn;
     } else miss = 1;
     if (miss) { ray_release(f); return q_err(QE_CAST); }
@@ -233,7 +234,7 @@ static int64_t enum_row_find(ray_t* kt, ray_t* row) {
     int64_t nk = ray_table_ncols(kt);
     int64_t ids[8];
     if (nk > 8) return -2;
-    if (!row || ray_len(row) != nk) return -2;
+    if (!row || q_count(row) != nk) return -2;
     for (int64_t j = 0; j < nk; j++) {
         if (row->type == RAY_SYM) ids[j] = ray_vec_get_sym_id(row, j);
         else if (row->type == RAY_LIST) {
@@ -244,7 +245,7 @@ static int64_t enum_row_find(ray_t* kt, ray_t* row) {
     }
     for (int64_t j = 0; j < nk; j++)
         if (ray_table_get_col_idx(kt, j)->type != RAY_SYM) return -2;
-    int64_t n = ray_table_nrows(kt);
+    int64_t n = q_count(kt);
     for (int64_t e = 0; e < n; e++) {
         int hit = 1;
         for (int64_t j = 0; j < nk && hit; j++)
@@ -264,14 +265,14 @@ static int64_t enum_row_find(ray_t* kt, ray_t* row) {
  * spelling. */
 static ray_t* enum_dollar_compound(int64_t dom, ray_t* kt, ray_t* y) {
     ray_t* out = NULL;
-    if (y->type == RAY_LIST && ray_len(y) == 0) {        /* schema `t$() */
+    if (y->type == RAY_LIST && q_count(y) == 0) {        /* schema `t$() */
         out = ray_vec_new(RAY_I64, 1);
     } else {
         int64_t one = enum_row_find(kt, y);
         if (one >= 0) return q_enum_stamp(ray_i64(one), dom);
         if (one == -1) return q_err(QE_CAST);
         if (y->type != RAY_LIST) return q_err(QE_TYPE);
-        int64_t n = ray_len(y);
+        int64_t n = q_count(y);
         out = ray_vec_new(RAY_I64, n);
         if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
         out->len = n;
@@ -301,7 +302,7 @@ ray_t* q_enum_dollar(ray_t* x, ray_t* y) {
         ray_release(s);
         return err;
     }
-    if (y->type == RAY_LIST && ray_len(y) == 0)
+    if (y->type == RAY_LIST && q_count(y) == 0)
         return q_enum_stamp(ray_vec_new(RAY_I64, 1), x->i64);
     ray_t* p = q_enum_coerce(x->i64, y);
     if (!p || RAY_IS_ERR(p)) return p ? p : q_err(QE_TYPE);
@@ -331,14 +332,14 @@ ray_t* q_enum_extend_try(ray_t* x, ray_t* y) {
 
 static ray_t* enum_extend(ray_t* x, ray_t* y) {
     ray_t* d = enum_domain_syms(x->i64);
-    ray_t* nd = ray_sym_vec_new(RAY_SYM_W64, d ? ray_len(d) : ray_len(y));
+    ray_t* nd = ray_sym_vec_new(RAY_SYM_W64, d ? q_count(d) : q_count(y));
     if (!nd || RAY_IS_ERR(nd)) return nd ? nd : q_err(QE_OOM);
-    for (int64_t i = 0; d && i < ray_len(d); i++) {
+    for (int64_t i = 0; d && i < q_count(d); i++) {
         int64_t id = ray_vec_get_sym_id(d, i);
         nd = ray_vec_append(nd, &id);
         if (!nd || RAY_IS_ERR(nd)) return nd ? nd : q_err(QE_OOM);
     }
-    int64_t grew = 0, yn = y->type == -RAY_SYM ? 1 : ray_len(y);
+    int64_t grew = 0, yn = q_count(y);
     for (int64_t i = 0; i < yn; i++) {
         int64_t id = y->type == -RAY_SYM ? y->i64 : ray_vec_get_sym_id(y, i);
         if (enum_find(nd, id) >= 0) continue;
@@ -389,7 +390,7 @@ ray_t* q_enum_cmp(ray_t* e, ray_t* y, int op) {
     ray_t* d = enum_domain_syms(q_enum_domain(e));
     if (!d) return NULL;
     int eatom = e->type == -RAY_ENUM;
-    int64_t n = eatom ? 1 : ray_len(e);
+    int64_t n = q_count(e);
     int64_t one = eatom ? e->i64 : 0;
     const int64_t* p = eatom ? &one : (const int64_t*)ray_data(e);
     /* a stored position outside the live domain simply matches nothing (R4:
@@ -397,7 +398,7 @@ ray_t* q_enum_cmp(ray_t* e, ray_t* y, int op) {
      * a miss; enum_pos_of_id answers -1 for an absent constant, a value no
      * stored position takes) */
     int yatom = y->type == -RAY_SYM;
-    int64_t yn = yatom ? 1 : ray_len(y);
+    int64_t yn = q_count(y);
     if (op <= 1) {                                    /* atomic =/<>: pairwise or broadcast */
         if (!yatom && yn != n) return NULL;
         ray_t* out = ray_vec_new(RAY_BOOL, n > 0 ? n : 1);
@@ -528,7 +529,7 @@ ray_t* q_enum_take(ray_t* y, ray_t* n) {
         for (int64_t c = 0; c < ray_table_ncols(y) && !ref; c++)
             ref = q_enum_is(ray_table_get_col_idx(y, c));
     if (!ref) return NULL;
-    int64_t cnt = y->type == RAY_TABLE ? ray_table_nrows(y) : ray_len(y);
+    int64_t cnt = q_count(y);
     if (cnt <= 0)   /* an empty source cannot cycle: the kernel's FILL law,
                      * per column so reference columns strip/restamp (codex r3) */
         return y->type == RAY_TABLE ? q_table_map_cols(enum_take_fill, n, y)

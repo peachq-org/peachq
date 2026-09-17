@@ -1,4 +1,5 @@
 /* q_gz — RFC 1952 gzip framing over miniz raw deflate/inflate (see q_gz.h). */
+#include "qlang/q_count.h"
 #include "qlang/net/q_gz.h"
 #include "miniz.h"
 #include <stdlib.h>

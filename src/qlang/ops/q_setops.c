@@ -5,6 +5,7 @@
  * dict/keyed operands the base kernels would mangle stay 'nyi — an error
  * beats a wrong answer. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h"
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"
@@ -15,7 +16,7 @@
 
 /* Indices of x-rows [not] present in y (whole-row membership). */
 static ray_t* table_member_idx(ray_t* x, ray_t* y, int keep_present) {
-    int64_t nrx = ray_table_nrows(x), nry = ray_table_nrows(y);
+    int64_t nrx = q_count(x), nry = q_count(y);
     int64_t ncx = ray_table_ncols(x);
     if (ncx != ray_table_ncols(y)) return q_err(QE_MISMATCH);
     ray_t* idx = ray_vec_new(RAY_I64, nrx > 0 ? nrx : 1);
@@ -37,7 +38,7 @@ static ray_t* table_member_idx(ray_t* x, ray_t* y, int keep_present) {
  * (ray_table_distinct_fn) sorts, so it is NOT reused — the same reason the q
  * vector distinct is a wrapper. */
 static ray_t* table_distinct(ray_t* t) {
-    int64_t nr = ray_table_nrows(t);
+    int64_t nr = q_count(t);
     int64_t* gid = malloc(sizeof(int64_t) * (size_t)(nr > 0 ? nr : 1));
     int64_t* rep = malloc(sizeof(int64_t) * (size_t)(nr > 0 ? nr : 1));
     if (!gid || !rep) { free(gid); free(rep); return q_err(QE_WSFULL); }
@@ -60,7 +61,8 @@ ray_t* q_except_wrap(ray_t* x, ray_t* y) {
     if (x && x->type == RAY_TABLE && y && y->type == RAY_TABLE) {
         ray_t* idx = table_member_idx(x, y, 0);
         if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
-        ray_t* r = qj_table_gather_idx(x, (int64_t*)ray_data(idx), ray_len(idx));
+        ray_t* r = qj_table_gather_idx(x, (int64_t*)ray_data(idx),
+                                       q_count(idx));
         ray_release(idx);
         return r;
     }
@@ -92,13 +94,13 @@ ray_t* q_distinct_wrap(ray_t* x) {
     }
     if (x->type != RAY_LIST)
         return q_err(QE_TYPE);
-    int64_t n = ray_len(x);
+    int64_t n = q_count(x);
     ray_t* out = ray_list_new(n > 0 ? n : 1);
     for (int64_t i = 0; i < n; i++) {
         ray_t* e = q_join_item(x, i);
         if (!e || RAY_IS_ERR(e)) { ray_release(out); return e; }
         int dup = 0;
-        int64_t m = ray_len(out);
+        int64_t m = q_count(out);
         ray_t** oe = (ray_t**)ray_data(out);
         for (int64_t j = 0; j < m && !dup; j++) dup = q_match_rec(oe[j], e);
         if (!dup) {
@@ -138,7 +140,8 @@ ray_t* q_inter_wrap(ray_t* x, ray_t* y) {
     if (x->type == RAY_TABLE && y->type == RAY_TABLE) {   /* rows of x in y */
         ray_t* idx = table_member_idx(x, y, 1);
         if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
-        ray_t* r = qj_table_gather_idx(x, (int64_t*)ray_data(idx), ray_len(idx));
+        ray_t* r = qj_table_gather_idx(x, (int64_t*)ray_data(idx),
+                                       q_count(idx));
         ray_release(idx);
         return r;
     }
@@ -157,8 +160,8 @@ ray_t* q_inter_wrap(ray_t* x, ray_t* y) {
     /* generic-list operands: whole-ITEM membership scan (base ray_sect_fn
      * flattens/mangles boxed items) — kdb keeps x items (dups kept) in y. */
     if (x->type == RAY_LIST || y->type == RAY_LIST) {
-        int64_t nx = ray_len(x);
-        int64_t ny = (ray_is_vec(y) || y->type == RAY_LIST) ? ray_len(y) : -1;
+        int64_t nx = q_count(x);
+        int64_t ny = (ray_is_vec(y) || y->type == RAY_LIST) ? q_count(y) : -1;
         if (ny < 0) return ray_sect_fn(x, y);
         ray_t* out = ray_list_new(nx > 0 ? nx : 1);
         if (RAY_IS_ERR(out)) return out;
@@ -202,7 +205,7 @@ ray_t* q_cross_wrap(ray_t* x, ray_t* y) {
         for (int64_t c = 0; c < ray_table_ncols(y); c++)
             if (ray_table_get_col(x, ray_table_col_name(y, c)))
                 return q_err(QE_TYPE);
-        int64_t nxr = ray_table_nrows(x), nyr = ray_table_nrows(y);
+        int64_t nxr = q_count(x), nyr = q_count(y);
         int64_t n = nxr * nyr;
         int64_t* xi = (int64_t*)malloc((size_t)(n > 0 ? n : 1) * sizeof(int64_t));
         int64_t* yi = (int64_t*)malloc((size_t)(n > 0 ? n : 1) * sizeof(int64_t));
