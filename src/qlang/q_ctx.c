@@ -225,8 +225,8 @@ static int ctx_run_script(const char* src, size_t len, int64_t file_sym,
     /* OWNER RULING 2026-08-06: a load SAVES the caller's `\d` context and
      * RESTORES it when the file runs to completion; a load that ABORTS leaves
      * the context where the error left it (deliberate — that is what makes the
-     * failing namespace inspectable).  Every door rides this seam, so `\l`,
-     * `system "l …"` and `-f` all obey it from here. */
+     * failing namespace inspectable; a trap that catches the abort restores it,
+     * 2026-09-17).  Every door rides this seam: `\l`, `system "l …"`, `-f`. */
     int64_t saved_ctx = q_env_ctx();
 
     /* A load runs at TOP LEVEL (owner ruling 2026-08-11): suspend the caller's

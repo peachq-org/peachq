@@ -40,10 +40,14 @@ static ray_t* env_root;        /* `.` — user root variables */
 static ray_t* env_ns;          /* ``  — top-level namespaces (nested dicts) */
 static ray_t* env_boot;        /* bootstrap builtins: q_env_bind plain names,
                                 * kept out of the user-visible `key `.` roster */
-/* `\d` context: the ns sym as given (`.jab`) plus its SEGMENT (`jab`), which is
- * what env_ns is keyed by.  Deriving the segment once per `\d` keeps relative
+/* A context is the ns sym as given (`.jab`) plus its SEGMENT (`jab`), which is
+ * what env_ns is keyed by.  Deriving the segment once per switch keeps relative
  * resolution to one extra dict probe and NO sym-table round trip (#359). */
-static int64_t g_ctx, g_ctx_seg;
+static int64_t g_ctx, g_ctx_seg;        /* the session `\d` */
+static int64_t g_scope, g_scope_seg;    /* a running lambda's defining context */
+static int     g_scoped;
+#define ENV_CTX (g_scoped ? g_scope : g_ctx)
+#define ENV_SEG (g_scoped ? g_scope_seg : g_ctx_seg)
 
 static int64_t env_marker(void) { return ray_sym_intern_runtime("", 0); }
 
@@ -87,6 +91,17 @@ static ray_t* name_str(int64_t sym, const char** p, size_t* n) {
     return s;                                  /* caller releases */
 }
 
+/* one level below root only (`\d` enforces it — q4m3 §12.7): 0 for the root */
+static int64_t ctx_seg_of(int64_t ns_sym) {
+    if (!ns_sym) return 0;
+    const char* p; size_t n;
+    ray_t* s = name_str(ns_sym, &p, &n);
+    if (!s) return 0;
+    int64_t seg = (n > 1 && p[0] == '.' && !memchr(p + 1, '.', n - 1)) ? ray_sym_intern_runtime(p + 1, n - 1) : 0;
+    ray_release(s);
+    return seg;
+}
+
 /* `.a.b` -> [a,b] from start=1; `..a` -> [a] from start=2 (root-qualified);
  * plain from start=0.  Returns the count, -1 on overflow. */
 static int env_segs(const char* p, size_t n, size_t start, int64_t* segs, int max) {
@@ -109,9 +124,9 @@ static size_t env_start(const char* p, size_t n) {
  * first step, so a write lands in — and thereby creates — the namespace.
  * Returns the new segment count and re-points *home; k unchanged at root. */
 static int ctx_reroot(int64_t* segs, int k, ray_t*** home) {
-    if (!g_ctx_seg || k <= 0 || k >= ENV_SEG_MAX) return k;
+    if (!ENV_SEG || k <= 0 || k >= ENV_SEG_MAX) return k;
     memmove(segs + 1, segs, (size_t)k * sizeof *segs);
-    segs[0] = g_ctx_seg;
+    segs[0] = ENV_SEG;
     *home = &env_ns;
     return k + 1;
 }
@@ -257,7 +272,7 @@ int q_env_take(int64_t sym, ray_t* cur) {
     if (!s) return 0;
     int relative = n > 0 && p[0] != '.';
     ray_release(s);
-    if ((g_ctx_seg && relative) || q_env_get(sym) != cur) return 0;
+    if ((ENV_SEG && relative) || q_env_get(sym) != cur) return 0;
     return q_env_bind(sym, RAY_NULL_OBJ) == RAY_OK;
 }
 
@@ -609,8 +624,8 @@ ray_t* q_env_resolve(int64_t sym) {
         base = ray_dict_probe_sym_borrowed(start == 1 ? env_ns : env_root, head);
     } else {
         base = frames_lookup(head);
-        if (!base && g_ctx_seg) {                   /* `\d .ns` shadows the root */
-            ray_t* nsd = ray_dict_probe_sym_borrowed(env_ns, g_ctx_seg);
+        if (!base && ENV_SEG) {                     /* `\d .ns` shadows the root */
+            ray_t* nsd = ray_dict_probe_sym_borrowed(env_ns, ENV_SEG);
             if (nsd) base = ray_dict_probe_sym_borrowed(nsd, head);
         }
         if (!base) base = ray_dict_probe_sym_borrowed(env_root, head);
@@ -655,7 +670,7 @@ int64_t q_env_fullname(int64_t sym, int64_t* ns) {
     int64_t full = sym;
     if (s) {
         if (n > 0 && p[0] != '.') {
-            int64_t q = q_env_qualify(g_ctx, sym);
+            int64_t q = q_env_qualify(ENV_CTX, sym);
             if (q >= 0) full = q;
         }
         ray_release(s);
@@ -756,18 +771,21 @@ ray_t* q_env_ns_roster(void) {
 void q_env_ctx_set(int64_t ns_sym) {
     if (ns_sym == g_ctx) return;
     g_ctx = ns_sym;
-    g_ctx_seg = 0;
-    if (!ns_sym) return;
-    const char* p; size_t n;
-    ray_t* s = name_str(ns_sym, &p, &n);
-    if (!s) return;
-    /* one level below root only (`\d` enforces it — q4m3 §12.7) */
-    if (n > 1 && p[0] == '.' && !memchr(p + 1, '.', n - 1))
-        g_ctx_seg = ray_sym_intern_runtime(p + 1, n - 1);
-    ray_release(s);
+    g_ctx_seg = ctx_seg_of(ns_sym);
 }
 
 int64_t q_env_ctx(void) { return g_ctx; }
+
+int64_t q_env_scope(int64_t scope) {
+    int64_t prev = g_scoped ? g_scope : Q_ENV_SCOPE_SESSION;
+    if (scope == prev) return prev;         /* a same-namespace call derives no segment */
+    g_scoped = scope != Q_ENV_SCOPE_SESSION;
+    g_scope = g_scoped ? scope : 0;
+    g_scope_seg = ctx_seg_of(g_scope);
+    return prev;
+}
+
+int64_t q_env_scope_ctx(void) { return ENV_CTX; }
 
 ray_err_t q_env_init(void) {
     if (env_root) return RAY_OK;
@@ -788,7 +806,7 @@ void q_env_destroy(void) {
     if (env_root) { ray_release(env_root); env_root = NULL; }
     if (env_ns)   { ray_release(env_ns);   env_ns   = NULL; }
     if (env_boot) { ray_release(env_boot); env_boot = NULL; }
-    g_ctx = g_ctx_seg = 0;
+    g_ctx = g_ctx_seg = g_scope = g_scope_seg = g_scoped = 0;
 }
 
 /* q `nam set y` (ref/get.md) — assign a global through a symbol handle.  It is

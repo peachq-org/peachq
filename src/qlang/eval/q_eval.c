@@ -608,9 +608,11 @@ static ray_t* lambda_structure(ray_t* v) {
  * q_eval). */
 ray_t* q_eval_statement(const char* src, int* parsed) {
     if (parsed) *parsed = 1;
+    int64_t scope = q_env_scope(Q_ENV_SCOPE_SESSION);   /* fresh text resolves at the session `\d`, as a load's frames do */
     ray_t* ast = q_parse(src);
     if (!ast || RAY_IS_ERR(ast)) {
         if (parsed) *parsed = 0;         /* the statement never ran — see q_eval.h */
+        q_env_scope(scope);
         return ast ? ast : q_err(QE_PARSE);
     }
     ray_t* r;
@@ -620,6 +622,7 @@ ray_t* q_eval_statement(const char* src, int* parsed) {
         r = q_eval(ast);
     }
     ray_release(ast);
+    q_env_scope(scope);
     if (silent && r && !RAY_IS_ERR(r)) {
         ray_release(r);
         ray_retain(RAY_NULL_OBJ);
