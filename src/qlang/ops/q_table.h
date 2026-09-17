@@ -20,6 +20,11 @@ int q_table_row_eq(ray_t* ta, int64_t ra, ray_t* tb, int64_t rb, int64_t ncmp);
  * boxed row-compare otherwise — `group`, `xgroup` and row dedup share it. */
 int64_t q_table_row_groups(ray_t* t, int64_t ncmp, int64_t* gid, int64_t* rep);
 
+/* The distinct keys of an attributed vector read off its index (set-attribute.md:128-130): typed as v, in
+ * first-occurrence order, exactly the scan's bytes; *rows (owned) is each key's first row, for `group`.  NULL
+ * when v carries no key set the fronts will vouch for — the caller keeps the scan.  Borrows v. */
+ray_t* q_attr_index_keys(ray_t* v, ray_t** rows);
+
 /* Collapse per-column boxed accumulators into a table, taking column names
  * from `names` at offset c0.  CONSUMES every accs[c] — an entry that IS an
  * error propagates as the result — so a caller never unwinds by hand. */
