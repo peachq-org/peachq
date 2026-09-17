@@ -1029,13 +1029,18 @@ static ray_t* cols_select(ray_t* x, ray_t* t, int drop) {
 
 /* NULL = not an entries selection, the wrapper's fall-through signal. */
 static ray_t* entries_verb(ray_t* x, ray_t* y, int drop) {
-    if (!x || !y || ray_is_atom(x)) return NULL;
+    int64_t n;
+    if (!x || !y) return NULL;
+    /* a dict's entries are named by ANY key type (ref/take.md:8; kdb-common log.q:271 takes with a char
+     * vector); only an int is a count, the law Drop's dict arm already reads */
+    if (q_type_is_plain_dict(y))
+        return q_type_strict_i64(x, &n) || q_type_is_int_vec(x)
+                   ? NULL : entries_select(ray_dict_keys(y), ray_dict_vals(y), x, drop);
+    if (ray_is_atom(x)) return NULL;
     if (q_type_is_keyed(y))                                  /* ([]k:…)#kt */
         return entries_select(ray_dict_slots(y)[0], ray_dict_slots(y)[1], x, drop);
-    if (x->type != RAY_SYM) return NULL;
-    if (y->type == RAY_TABLE) return cols_select(x, y, drop);
-    if (y->type == RAY_DICT) return entries_select(ray_dict_keys(y), ray_dict_vals(y), x, drop);
-    return NULL;
+    if (x->type != RAY_SYM || y->type != RAY_TABLE) return NULL;
+    return cols_select(x, y, drop);
 }
 
 /* drop named entries: the doc's sub-dictionary extraction `(key d) except keys`
