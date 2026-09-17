@@ -1177,12 +1177,12 @@ static ray_t* amend_r(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k,
 ray_t* q_index_amend(ray_t* x, ray_t* const* ix, int64_t k, ray_t* f, ray_t* y) {
     if (!x || RAY_IS_ERR(x)) return q_err(QE_TYPE);
     if (x->type == -RAY_SYM) return q_err(QE_DOMAIN);
+    if (f && y && q_registry_row_of(f, Q_DYADIC) == q_ops_find(":", 1)) f = NULL;   /* Assign IS plain replace (ref/amend.md) */
     /* enum target: index-assign enforces the domain — an in-domain sym coerces
      * to its position, out-of-domain is 'cast (owner training `` el[0]:`oo ``);
-     * only plain `:` replacement is defined on 20h this phase. */
+     * only plain replacement is defined on 20h this phase. */
     if (x->type == RAY_ENUM) {
-        if (f && q_registry_row_of(f, Q_DYADIC) != q_ops_find(":", 1))
-            return q_err(QE_TYPE);           /* NULL f IS plain replace */
+        if (f) return q_err(QE_TYPE);
         ray_t* ny = q_enum_coerce(q_enum_domain(x), y);
         if (!ny || RAY_IS_ERR(ny)) return ny ? ny : q_err(QE_TYPE);
         ray_t* p = q_enum_positions(x);
