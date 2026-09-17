@@ -105,6 +105,11 @@ static inline int is_temporal(ray_t* x) {
     return RAY_IS_TEMPORAL32(-x->type) || RAY_IS_TEMPORAL64(-x->type);
 }
 
+/* Every atom as_f64 has a lane for: the numerics and all temporals, the f64-backed datetime included. */
+static inline int is_numeric_or_temporal(ray_t* x) {
+    return is_numeric(x) || is_temporal(x) || RAY_IS_TEMPORALF(-x->type);
+}
+
 /* First-of-month day count since 2000.01.01 for a MONTH payload
  * (= (year-2000)*12 + month-1).  Hinnant days_from_civil (public domain),
  * rebased to the 2000 epoch, specialised to day==1.  Exact calendar
@@ -243,13 +248,21 @@ static inline ray_t* make_typed_float(int8_t atom_type, double val) {
     return ray_f32(__builtin_isnan(val) ? NULL_F32 : (float)val);
 }
 
-/* Create a result atom of the given type from an int64_t value */
+/* Create a result atom of the given type from an int64_t value (the int-backed temporals included) */
 static inline ray_t* make_typed_int(int8_t atom_type, int64_t val) {
     switch (atom_type) {
     case -RAY_I16: return make_i16((int16_t)val);
     case -RAY_I32: return make_i32((int32_t)val);
     case -RAY_BYTE_ONLY: return make_u8((uint8_t)val);
     case -RAY_CHARV:     return ray_char((uint8_t)val);
+    case -RAY_BOOL:      return make_bool(val != 0);
+    case -RAY_DATE:      return ray_date(val);
+    case -RAY_MONTH:     return ray_month(val);
+    case -RAY_TIME:      return ray_time(val);
+    case -RAY_MINUTE:    return ray_minute(val);
+    case -RAY_SECOND:    return ray_second(val);
+    case -RAY_TIMESTAMP: return ray_timestamp(val);
+    case -RAY_TIMESPAN:  return ray_timespan(val);
     default:       return make_i64(val);
     }
 }
