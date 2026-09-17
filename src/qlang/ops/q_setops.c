@@ -10,6 +10,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"
 #include "qlang/ops/q_table.h"
+#include "qlang/ops/q_index.h" /* q_index_at — the gather behind inter's atom-y arm */
 #include "lang/eval.h"       /* ray_except_fn, ray_sect_fn */
 #include "lang/internal.h"   /* ray_group_fn */
 #include "ops/idxop.h"       /* the key-set fronts: distinct/group read the attribute index */
@@ -175,7 +176,8 @@ ray_t* q_union_wrap(ray_t* x, ray_t* y) {
  * (ref/inter.md).  rayfall `sect` (ray_sect_fn) IS this for lists, but on
  * DICT operands it returns a wrong-shaped dict where kdb returns the common
  * VALUES as a list — so dict/table operands are guarded 'nyi (error, never a
- * wrong answer); everything else delegates to ray_sect_fn. */
+ * wrong answer); an atom y composes `x where x in y`; everything else
+ * delegates to ray_sect_fn. */
 ray_t* q_inter_wrap(ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);
     if (x->type == RAY_TABLE && y->type == RAY_TABLE) {   /* rows of x in y */
@@ -198,6 +200,18 @@ ray_t* q_inter_wrap(ray_t* x, ray_t* y) {
     if (x->type == RAY_DICT || x->type == RAY_TABLE ||
         y->type == RAY_DICT || y->type == RAY_TABLE)
         return q_err(QE_NYI);
+    /* atom y (#58): the doc's own definition, `x where x in y` — `in` is left-atomic over an atom y
+     * (ref/in.md) where ray_sect_fn refuses one; x-duplicates, x-order and x's type all ride the index. */
+    if ((ray_is_vec(x) || x->type == RAY_LIST) && ray_is_atom(y)) {
+        ray_t* m = q_in_wrap(x, y);
+        if (!m || RAY_IS_ERR(m)) return m ? m : q_err(QE_TYPE);
+        ray_t* w = q_where_wrap(m);
+        ray_release(m);
+        if (!w || RAY_IS_ERR(w)) return w ? w : q_err(QE_TYPE);
+        ray_t* r = q_typed_empty_like(q_index_at(x, &w, 1), x);
+        ray_release(w);
+        return r ? r : q_err(QE_TYPE);
+    }
     /* generic-list operands: whole-ITEM membership scan (base ray_sect_fn
      * flattens/mangles boxed items) — kdb keeps x items (dups kept) in y. */
     if (x->type == RAY_LIST || y->type == RAY_LIST) {

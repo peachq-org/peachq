@@ -218,9 +218,10 @@ int8_t q_type_elem_tag(ray_t* x) {
  * any int-backed index indexes)?  Returns the element width in bytes so
  * consumers key on WIDTH, never enumerate tags: 8/4/2 read signed, 1 reads
  * unsigned (U8); 0 = not an int index.  SYM is i64-backed but EXCLUDED —
- * a sym index means column access, never a row.  BOOL is excluded pending
- * a doc citation for boolean indexing.  A CHAR is a byte here (owner ruling
- * 2026-09-17: `(til 256)"ab"`) though never a count (q_type_strict_i64).
+ * a sym index means column access, never a row.  BOOL is excluded here; the
+ * index home and q_type_count_i64 admit it themselves.  A CHAR is a byte here
+ * (owner ruling 2026-09-17: `(til 256)"ab"`) though never a count
+ * (q_type_strict_i64).
  * Atom callers pass -atom->type; every accepted ATOM is one as_i64 reads. */
 int q_type_int_index_width(int8_t t) {
     switch (t) {
@@ -250,6 +251,14 @@ int q_type_strict_i64(ray_t* x, int64_t* out) {
     case 1: *out = (int64_t)x->u8;  return 1;
     default: return 0;
     }
+}
+
+/* The Take/Drop count slot: the strict set plus a bool atom read as 0/1 (#54 `(":"~first x)_x`,
+ * q2b.q:123 `(c1=3)_reverse …`, kdbslack req.q:282 `("."=first x)#"*"`; owner ruling 2026-09-17: an
+ * int/bool count against a table is always first-n).  Every other count slot keeps the strict lane. */
+int q_type_count_i64(ray_t* x, int64_t* out) {
+    if (x && x->type == -RAY_BOOL) { *out = x->b8 ? 1 : 0; return 1; }
+    return q_type_strict_i64(x, out);
 }
 
 /* Float twin: F64/F32/DATETIME (f64-slot payloads) + the q_type_strict_i64 set. */
