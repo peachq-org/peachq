@@ -18,7 +18,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"  /* the type-axis home: the shape predicates and the int-lane reads */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_value — within composes on `>=`/`<=`/`&` */
-#include "qlang/ops/q_index.h"  /* q_index_elem_at — THE element-read home */
+#include "qlang/ops/q_index.h"  /* q_index_elem_at, q_index_rank — THE element-read home and its rank axis */
 #include "lang/eval.h"     /* ray_in_fn, ray_find_fn */
 #include "lang/internal.h" /* atom_eq */
 #include "mem/heap.h"      /* RAY_ATTR_HAS_NULLS — ? find miss remap */
@@ -353,17 +353,6 @@ int q_search_admits(ray_t* x, ray_t* y) {
            (q_type_is_float_tag(d) && q_type_is_float_tag(t));
 }
 
-/* rank read down the first items: an atom 0, a list one more than its first item (an empty list 1; a string
- * atom is a char list) — the axis find.md's "rank-sensitive" law compares on */
-static int find_depth(ray_t* v) {
-    if (!v || (ray_is_atom(v) && !q_type_is_str_atom(v))) return 0;
-    if (q_count(v) == 0) return 1;
-    ray_t* e0 = q_index_elem_at(v, 0);
-    int d = 1 + find_depth(e0);
-    if (e0) ray_release(e0);
-    return d;
-}
-
 ray_t* q_search_find(ray_t* x, ray_t* y) {
     if (q_type_is_table(x)) return find_rows(x, y);
     /* kt?row — a keyed table IS keytable!valuetable, so the dict's reverse
@@ -389,11 +378,19 @@ ray_t* q_search_find(ray_t* x, ray_t* y) {
     if (x && (ray_is_vec(x) || x->type == RAY_LIST)) {          /* find */
         if (ray_is_vec(x) && x->type != RAY_STR && !q_search_admits(x, y)) return q_err(QE_TYPE);
         int64_t cnt = q_count(x);
-        int xd = find_depth(x) - 1;                  /* the rank of x's items, read off the first (find.md) */
-        if (xd > 0 && y && find_depth(y) == 0)       /* an atom is never a rank-xd object (find.md:88): a miss */
-            return ray_i64(cnt);
-        if (x->type == RAY_LIST && y && y->type == RAY_LIST && cnt > 0 && find_depth(y) == xd)
+        int xd = q_index_rank(x) - 1;                /* the rank of x's items, read off the first (find.md) */
+        int yd = q_index_rank(y);
+        if (x->type == RAY_LIST && y && y->type == RAY_LIST && cnt > 0 && yd == xd)
             return ray_i64(q_search_find_item(x, y, cnt));   /* y IS one item's shape: whole, so x[x?x 0] round-trips */
+        if (x->type == RAY_LIST && y && cnt > 0 && yd == xd - 1) {
+            /* a y one rank below x's items is sought enlisted (find.md:88, in.md:110; kdb transcript 2026-09-17) —
+             * the step `,:` took to append it (join.md:192), so `"a.q" in l` finds what `l,:enlist "a.q"` nested */
+            ray_t* ey = ray_enlist_fn(&y, 1);
+            if (!ey || RAY_IS_ERR(ey)) return ey ? ey : q_err(QE_OOM);
+            int64_t i = q_search_find_item(x, ey, cnt);
+            ray_release(ey);
+            return ray_i64(i);
+        }
         if (y && y->type == RAY_LIST) {
             /* Find is right-atomic to the rank of x's items ("x?y looks for objects of rank n-1", find.md): an
              * item deeper than that rank is a run of them, found item by item — an atom item over a SIMPLE x
@@ -408,9 +405,10 @@ ray_t* q_search_find(ray_t* x, ray_t* y) {
             if (RAY_IS_ERR(out)) return out;
             for (int64_t j = 0; j < ny; j++) {
                 ray_t* rr;
-                if (!e[j] || cnt == 0 || (xd > 0 && find_depth(e[j]) == 0))
+                int ed = q_index_rank(e[j]);
+                if (!e[j] || cnt == 0 || (xd > 0 && ed == 0))
                     rr = ray_i64(cnt);
-                else if (xd > 0 && find_depth(e[j]) <= xd)
+                else if (xd > 0 && ed <= xd)
                     rr = ray_i64(q_search_find_item(x, e[j], cnt));
                 else
                     rr = q_search_find(x, e[j]);
