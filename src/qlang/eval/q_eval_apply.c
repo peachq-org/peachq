@@ -1188,7 +1188,7 @@ static ray_t* proj_call(ray_t* proj, ray_t** args, int64_t n) {
 }
 
 /* ===== noun-head application ============================================
- * APPLICATION concerns only (handles, sym heads, elided lists, the string
+ * APPLICATION concerns only (identity, handles, sym heads, elided lists, the string
  * boundary) — all DATA indexing is ops/q_index.c, the one index/amend home;
  * results cross into q-space through q_str_charv_out. */
 
@@ -1210,6 +1210,10 @@ static ray_t* sym_head_apply(ray_t* head, ray_t** args, int64_t n) {
 
 static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
     if (n < 1) return q_err(QE_RANK);
+    if (RAY_IS_NULL(v) && n == 1 && args[0]) {   /* Identity: (::) x, ::[x], (::)@x (ref/identity.md) */
+        ray_retain(args[0]);
+        return args[0];
+    }
     /* handle-as-verb (`h x`): console/file/fifo/socket dispatch lives wholly
      * in q_handles_apply (the sole handle authority) */
     if ((v->type == -RAY_I64 || v->type == -RAY_I32) && n == 1 && args[0])
@@ -1311,13 +1315,13 @@ static ray_t* iter_call(ray_t* it, ray_t** args, int64_t n) {
 
 /* `'` in BRACKET form with VALUES (ref/compose.md): one value derives Each
  * (`'[count]` is `count'`), two or more COMPOSE — right to left, each outer
- * value unary, the derived rank the innermost value's. */
+ * value any unary applicable value (a handle: `'[-1;f]`, kdb-common require.q:288)
+ * applied through comp_call's seam, the derived rank the innermost value's. */
 static ray_t* apply_valence_sibling(ray_t* head, int64_t n, const q_op_t** row);
 
 static ray_t* compose_apply(ray_t** args, int64_t n) {
     if (n < 1) return q_err(QE_RANK);
-    for (int64_t i = 0; i < n; i++)
-        if (!q_eval_apply_is_fn(args[i])) return q_err(QE_TYPE);
+    if (!q_eval_apply_is_fn(args[n - 1])) return q_err(QE_TYPE);
     if (n == 1)
         return q_eval_apply_deriv_new(0, args[0],
                                       q_eval_apply_is_fnval(args[0])
@@ -1487,12 +1491,6 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
     }
     if (kind == Q_EVAL_CAR_COMP) return comp_call(fv, args, n);
     if (!kind && !q_eval_apply_is_fnval(fv)) {
-        /* the generic null is Identity: `(::) x` / `::[x]` returns x
-         * (ref/identity.md) — 101h is a unary primitive, not a noun */
-        if (RAY_IS_NULL(fv) && n == 1 && args[0]) {
-            ray_retain(args[0]);
-            return args[0];
-        }
         /* bare ENGINE lambda (rayfall-defined .rfl/serde values): base call */
         if (fv->type == RAY_LAMBDA) return call_lambda(fv, args, n);
         return noun_index(fv, args, n);
@@ -1509,9 +1507,9 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
     /* ref/apply.md Composition, the glyph form: `(0|+)` is the projection
      * `0|` ON `+`, not max of a function value.  Only single-glyph rows, and
      * not the ones that legitimately CONSUME a function (`@` `.` apply, `,`
-     * `!` build structure from it, `~` `?` compare/search it). */
+     * `!` build structure from it, `~` `?` compare/search it, `:` returns it). */
     if (row && !row->adverb_hof && n == 2 && row->name[1] == '\0' &&
-        !strchr("@.,!~?", row->name[0]) && q_eval_apply_is_fn(args[1]) &&
+        !strchr("@.,!~?:", row->name[0]) && q_eval_apply_is_fn(args[1]) &&
         !q_eval_apply_is_fn(args[0])) {
         /* a bare glyph operand arrives as the MONADIC sibling (name
          * resolution prefers it) but q spells a bare glyph dyadic — `(0|+)`
@@ -1805,12 +1803,18 @@ static ray_t* amend_value(ray_t** args, int64_t n, int dot) {
     return r ? r : q_err(QE_TYPE);
 }
 
+/* ref/apply.md Amend: d is a list or dictionary, or a handle to one; any other head (an atom, a function, a
+ * process handle) is Trap's f, applied — `@[1b;`x;0b]` answers the catch (owner ruling 2026-09-16). */
+static int amend_head(ray_t* d) {
+    return !ray_is_atom(d) || d->type == -RAY_SYM;
+}
+
 /* `@` — the overload matrix (ref/apply.md + ref/amend.md): 2 args Apply At /
- * Index At; 3 args on a callable head Trap At; 3-4 args on a data head
+ * Index At; 3 args on a non-amendable head Trap At; 3-4 args on a data head
  * Amend At (machinery: ops/q_index.c; a sym-atom d name-lifts). */
 ray_t* q_eval_at_wrap(ray_t** args, int64_t n) {
     if (n == 2) return q_eval_apply_concrete(q_eval_apply_value(args[0], &args[1], 1));
-    if (n == 3 && q_eval_apply_is_fn(args[0])) {
+    if (n == 3 && !amend_head(args[0])) {
         q_dbg_trap_enter();             /* error-trap mode 0 inside the trap */
         ray_t* r = q_eval_apply_concrete(q_eval_apply_value(args[0], &args[1], 1));
         q_dbg_trap_exit();
@@ -1821,10 +1825,10 @@ ray_t* q_eval_at_wrap(ray_t** args, int64_t n) {
 }
 
 /* `.` — 2 args: a callable spread-applies over the rhs list, a noun
- * depth-indexes (m . 1 2 is m[1;2]); 3 args callable Trap; 3-4 args data
- * head Amend (i is the path list). */
+ * depth-indexes (m . 1 2 is m[1;2]); 3 args non-amendable head Trap; 3-4 args
+ * data head Amend (i is the path list). */
 ray_t* q_eval_dot_wrap(ray_t** args, int64_t n) {
-    if (n == 3 && q_eval_apply_is_fn(args[0])) {
+    if (n == 3 && !amend_head(args[0])) {
         q_dbg_trap_enter();
         ray_t* r = q_eval_dot_wrap(args, 2);
         q_dbg_trap_exit();
