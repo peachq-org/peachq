@@ -1643,7 +1643,7 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
     }
 
     /* SPACED `x ::` is APPLICATION — `::` a noun operand, the generic-null
-     * VALUE (owner ruling 2026-07-23: `(::)~value ::` is 1b); only GLUED
+     * VALUE (owner ruling 2026-07-23; `value ::` is 0, ref/value.md:96); only GLUED
      * `x::y` keeps global-assign.  Demote the verb to a noun and fall into
      * the ordinary juxtaposition build below. */
     if (t.role == R_NOUN && u.role == R_VERB && u.v &&
