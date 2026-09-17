@@ -159,8 +159,10 @@ static size_t prompt_prefix_len(const char* line) {
  *
  * Matching contract (see error_row_matches):
  *   - DEFAULT is STRICT: the error TEXT the seam rendered (payload or class)
- *     must equal the word after the quote.  This is the project thesis ("error
- *     text match kdb"); a row expecting 'type no longer passes on 'name.
+ *     must equal the rest of the line after the quote — a signalled message
+ *     is words (`'dup names for cols/groups b`, `'too cold`).  This is the
+ *     project thesis ("error text match kdb"); a row expecting 'type no
+ *     longer passes on 'name.
  *   - `'error` is the sanctioned ANY-ERROR wildcard: kdb has no class named
  *     `error`, so a row whose first line is exactly `'error` matches ANY error.
  *     Use it for honest "this errors, class not doc-determinable" claims.
@@ -176,10 +178,11 @@ static int expect_is_error(const char* expect, char* cls, size_t csz) {
     if (*p != '\'') return 0;
     p++;
     size_t i = 0;
-    while (p[i] && p[i] != '\n' && p[i] != ' ' && i + 1 < csz) {
+    while (p[i] && p[i] != '\n' && i + 1 < csz) {
         cls[i] = p[i];
         i++;
     }
+    while (i > 0 && (cls[i - 1] == ' ' || cls[i - 1] == '\t')) i--;
     cls[i] = '\0';
     return 1;
 }

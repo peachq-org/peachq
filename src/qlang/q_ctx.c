@@ -119,6 +119,13 @@ static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
     ray_t* r = q_eval_statement(s, &parsed);
     if (!parsed) {                             /* 'dup dies at parse (qsql.md:168) */
         int code = r->aux[0] ? (int)r->aux[0] : (int)QE_PARSE + 1;
+        if (in_load) {                         /* the load's trap sees the text too */
+            q_err_sig_t t;
+            code = ctx_load_abort(r, out, err, &t);
+            q_dbg_statement_end(dbg_prev);
+            ctx_load_esig(esig, &t);
+            return code;
+        }
         ctx_show_err(out, err, r);
         q_dbg_statement_end(dbg_prev);
         return code;
