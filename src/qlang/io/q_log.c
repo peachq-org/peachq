@@ -7,6 +7,7 @@
  * so a failure before EOF refills and one at EOF is 'badtail: a chunk that is
  * garbage mid-file costs the window growing to LOG_MAX before it is named. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/io/q_log.h"
 #include "qlang/io/q_io.h"        /* q_io_file_path, q_io_pread */
 #include "qlang/io/q_handles.h"   /* q_handles_console_eval — the handle-0 door */
@@ -132,7 +133,7 @@ ray_t* q_log_replay(ray_t* y) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     int64_t n = -1;
     ray_t* f = y;
-    if (y && y->type == RAY_LIST && ray_len(y) == 2) {
+    if (y && y->type == RAY_LIST && q_count(y) == 2) {
         ray_t* a = q_index_elem_at(y, 0);
         if (!a || RAY_IS_ERR(a)) return a ? a : q_err(QE_OOM);
         int ok = q_type_is_int_atom(a);

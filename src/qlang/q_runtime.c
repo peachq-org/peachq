@@ -8,6 +8,7 @@
  * ray_env_destroy releases the builtin values the registry snapshotted.  Every
  * q consumer MUST tear down through q_runtime_destroy, never ray_runtime_destroy
  * directly, or the registry's retained verb snapshots would outlive the env. */
+#include "qlang/q_count.h"
 #include "qlang/q_runtime.h"
 #include "qlang/q_builtins.h"
 #include "qlang/q_registry.h"

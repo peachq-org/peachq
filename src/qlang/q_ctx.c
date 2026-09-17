@@ -4,6 +4,7 @@
  * made a verb depend on the front end. */
 #define _POSIX_C_SOURCE 200809L
 
+#include "qlang/q_count.h"
 #include "qlang/q_ctx.h"
 #include "qlang/base/q_err.h"     /* q_err / q_err_drop — the statement-entry backstop */
 #include "qlang/q_comment.h"          /* doc headers: the run above a definition */
@@ -333,7 +334,8 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig) {
     }
     char abs[PATH_MAX];
     const char* fpath = q_io_abs_path(path, abs, sizeof abs) ? abs : path;   /* ref/value.md `f`: the FULL path */
-    int rc = ctx_run_script((const char*)ray_data(bytes), (size_t)ray_len(bytes),
+    int rc = ctx_run_script((const char*)ray_data(bytes),
+                            (size_t) q_count(bytes),
                             ray_sym_intern_runtime(fpath, strlen(fpath)), out, err, esig);
     ray_release(bytes);
     return rc;
@@ -404,10 +406,10 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
  * whole dispatch. */
 static ray_t* remote_apply_body(ray_t* list) {
     if (!list || (list->type != RAY_LIST && !ray_is_vec(list)) ||
-        ray_len(list) < 1)
+        q_count(list) < 1)
         return q_err(QE_TYPE);
     int64_t saved_ctx = q_env_ctx();   /* same request law as remote_eval_str: an applied lambda may `system"d …"` */
-    int64_t n = ray_len(list);
+    int64_t n = q_count(list);
     ray_t* head = q_index_elem_at(list, 0);            /* owned */
     if (!head || RAY_IS_ERR(head)) return head ? head : q_err(QE_TYPE);
     if (head->type == -RAY_STR || head->type == RAY_CHARV) {   /* "+" / "{x*2}" */

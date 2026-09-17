@@ -11,6 +11,7 @@
  * Row equality is boxed q-match compare: O(n^2) at test scale by design
  * (single-home principle; SIMD paths belong to the engine). */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h"
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"       /* q_type_is_keyed / q_type_is_dense_group_col */
@@ -86,7 +87,7 @@ static int64_t sym_ids(ray_t* x, int64_t* out, int64_t cap) {
     if (!x) return -1;
     if (x->type == -RAY_SYM) { if (cap < 1) return -1; out[0] = x->i64; return 1; }
     if (x->type == RAY_SYM) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         if (n > cap) return -1;
         for (int64_t i = 0; i < n; i++) {
             /* borrowed domain atom — never released (table/sym.h) */
@@ -96,7 +97,7 @@ static int64_t sym_ids(ray_t* x, int64_t* out, int64_t cap) {
         return n;
     }
     if (x->type == RAY_LIST) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         if (n > cap) return -1;
         ray_t** e = (ray_t**)ray_data(x);
         for (int64_t i = 0; i < n; i++) {
@@ -150,7 +151,7 @@ static ray_t* table_reorder(ray_t* t, const int64_t* names, int64_t n) {
  * table's row has a typed vector value, not a boxed list). */
 ray_t* q_table_row_at(ray_t* t, int64_t row) {
     int64_t nc = ray_table_ncols(t);
-    int64_t nr = ray_table_nrows(t);
+    int64_t nr = q_count(t);
     int hit = row >= 0 && row < nr;
     ray_t* names = ray_vec_new(RAY_SYM, nc > 0 ? nc : 1);
     if (!names || RAY_IS_ERR(names)) return names ? names : q_err(QE_OOM);
@@ -167,16 +168,16 @@ ray_t* q_table_row_at(ray_t* t, int64_t row) {
                  ? ray_str(ray_str_ptr(col) + row, 1)
                  : ray_str(" ", 1);                          /* the char null is the blank */
         } else if (col && col->type == RAY_LIST) {
-            if (hit && row < ray_len(col)) {
+            if (hit && row < q_count(col)) {
                 cell = ((ray_t**)ray_data(col))[row];
                 ray_retain(cell);
             } else {
                 /* miss: the null of the first item's type (doc law); a string
                  * item nulls to the empty string, non-atom items to :: */
                 ray_t** e = (ray_t**)ray_data(col);
-                if (ray_len(col) > 0 && e[0] && e[0]->type == -RAY_STR)
+                if (q_count(col) > 0 && e[0] && e[0]->type == -RAY_STR)
                     cell = ray_str("", 0);
-                else if (ray_len(col) > 0 && e[0] && e[0]->type < 0)
+                else if (q_count(col) > 0 && e[0] && e[0]->type < 0)
                     cell = ray_typed_null(e[0]->type);
                 else { ray_retain(RAY_NULL_OBJ); cell = RAY_NULL_OBJ; }
             }
@@ -209,8 +210,8 @@ ray_t* q_table_at(ray_t* t, ray_t* idx) {
     }
     int w = ray_is_vec(idx) ? q_type_int_index_width(idx->type) : 0;
     if (!w) return NULL;
-    int64_t n = ray_len(idx);
-    int64_t nr = ray_table_nrows(t);
+    int64_t n = q_count(idx);
+    int64_t nr = q_count(t);
     int64_t* ids = (int64_t*)malloc((size_t)(n > 0 ? n : 1) * sizeof(int64_t));
     if (!ids) return q_err(QE_WSFULL);
     for (int64_t i = 0; i < n; i++) {
@@ -275,7 +276,7 @@ ray_t* q_table_cols_from_accs(ray_t* names, int64_t c0, ray_t** accs, int64_t nc
  * (agg_group_keys) when every compared column qualifies, boxed row-compare
  * otherwise — THE grouping home for `group`, `xgroup` and row dedup alike. */
 int64_t q_table_row_groups(ray_t* t, int64_t ncmp, int64_t* gid, int64_t* rep) {
-    int64_t nr = ray_table_nrows(t);
+    int64_t nr = q_count(t);
     int64_t ng = 0;
     int dense = ncmp >= 1 && ncmp <= 16 && nr > 0;
     /* an ENUM key column groups by its POSITIONS (owner amendment 2026-08-22:
@@ -348,7 +349,7 @@ static ray_t* null_cell_like(ray_t* col) {
     if (ray_is_atom(col)) return ray_typed_null(t);
     /* A NESTED column's null cell is its OUT-OF-RANGE read — `("ab";"c")[5]`
      * is `""`, so a filled string cell still counts 0 and casts to a null. */
-    ray_t* past = ray_i64(ray_len(col));
+    ray_t* past = ray_i64(q_count(col));
     ray_t* cell = q_index_at(col, &past, 1);
     ray_release(past);
     return cell;
@@ -361,8 +362,10 @@ static ray_t* null_cell_like(ray_t* col) {
  *     to the target -> 'mismatch (silent drop is never OK).  Target columns
  *     absent from the payload: null-filled under Q_ROWS_JOIN, else
  *     'mismatch (insert).
- *   - LIST, insert law, count == ncols: columns-form — item i is column i,
- *     atoms broadcast to the longest item (ref/insert.md is column-major).
+ *   - LIST, insert law: a first-item ATOM makes y ONE record (owner ruling
+ *     2026-09-16: `(1i;`x`y)` is a row, TorQ checkmonitor.q:45); otherwise
+ *     count == ncols with EVERY item a list of one count is the columns-form
+ *     (ref/insert.md:63 `(`s`t;40 50)`); there is no atom broadcast.
  *   - LIST/vector, Join law: row-major under the ref/join.md:192 rank rule —
  *     a first-element ATOM makes y rank 1, one below the table's 2, so y is
  *     implicitly enlisted as a single record; otherwise every item is a
@@ -389,7 +392,7 @@ ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law) {
                 return q_err(QE_MISMATCH);
             }
         }
-        int64_t nr = ray_table_nrows(src);
+        int64_t nr = q_count(src);
         ray_t* out = ray_table_new(nc);
         for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
             int64_t nm = ray_table_col_name(flat, c);
@@ -422,7 +425,7 @@ ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law) {
         if (!dk || dk->type != RAY_SYM)
             return q_err(QE_TYPE);
         if (!partial) {
-            int64_t dn = ray_len(dk);
+            int64_t dn = q_count(dk);
             for (int64_t i = 0; i < dn; i++) {
                 /* borrowed domain atom — never released (table/sym.h) */
                 ray_t* s = ray_sym_vec_cell(dk, i);
@@ -462,40 +465,36 @@ ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law) {
     if (y->type != RAY_LIST && !ray_is_vec(y))
         return q_err(QE_TYPE);
 
-    int64_t ny = ray_len(y);
+    int64_t ny = q_count(y);
     int single = 0;
-    if (law == Q_ROWS_JOIN && ny > 0) {
+    if (ny > 0) {
         ray_t* f0 = q_join_item(y, 0);
         if (!f0 || RAY_IS_ERR(f0)) return f0 ? f0 : q_err(QE_OOM);
         single = ray_is_atom(f0);
         ray_release(f0);
     }
 
-    if (law == Q_ROWS_INSERT && ny == nc) {               /* columns-form */
+    if (law == Q_ROWS_INSERT && !single && ny == nc) {     /* columns-form: every item a list, one count */
         int64_t L = -1;
         for (int64_t c = 0; c < nc; c++) {
             ray_t* it = q_join_item(y, c);
             if (!it || RAY_IS_ERR(it)) return it ? it : q_err(QE_OOM);
-            if (!ray_is_atom(it)) {
-                int64_t l = ray_len(it);
-                if (L < 0) L = l;
-                else if (l != L) { ray_release(it); return q_err(QE_LENGTH); }
-            }
+            int64_t l = (it->type == RAY_LIST || ray_is_vec(it)) ? q_count(it) : -1;
             ray_release(it);
+            if (l < 0) { L = -1; break; }
+            if (L < 0) L = l;
+            else if (l != L) return q_err(QE_LENGTH);
         }
-        if (L < 0) L = 1;
-        ray_t* out = ray_table_new(nc);
-        for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
-            ray_t* it = q_join_item(y, c);
-            if (!it || RAY_IS_ERR(it)) { ray_release(out); return it ? it : q_err(QE_OOM); }
-            ray_t* col;
-            if (ray_is_atom(it)) { col = q_table_bcast_col(it, L); ray_release(it); }
-            else col = it;
-            if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : q_err(QE_OOM); }
-            out = ray_table_add_col(out, ray_table_col_name(flat, c), col);
-            ray_release(col);
+        if (L >= 0) {
+            ray_t* out = ray_table_new(nc);
+            for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
+                ray_t* col = q_join_item(y, c);
+                if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : q_err(QE_OOM); }
+                out = ray_table_add_col(out, ray_table_col_name(flat, c), col);
+                ray_release(col);
+            }
+            return out;
         }
-        return out;
     }
 
     /* records-form (single: y itself is the one implicitly-enlisted record) */
@@ -516,7 +515,7 @@ ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law) {
         for (int64_t r = 0; r < nrec && !err; r++) {
             ray_t* rec = single ? (ray_retain(y), y) : q_join_item(y, r);
             if (!rec || RAY_IS_ERR(rec) ||
-                !(ray_is_vec(rec) || rec->type == RAY_LIST) || ray_len(rec) != nc) {
+                !(ray_is_vec(rec) || rec->type == RAY_LIST) || q_count(rec) != nc) {
                 if (rec && RAY_IS_ERR(rec)) err = rec;
                 else { if (rec) ray_release(rec); err = q_err(QE_LENGTH); }
                 break;
@@ -549,12 +548,12 @@ ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law) {
  * would surface there as rc 2.  Per column, the amend home's q_index_grow*
  * (one home with `v,:x`); every cell is checked before the first write. */
 static ray_t* table_append_inplace(ray_t* flat, ray_t* rows) {
-    int64_t nc = ray_table_ncols(flat), nr = ray_table_nrows(rows), nx = ray_table_nrows(flat);
+    int64_t nc = ray_table_ncols(flat), nr = q_count(rows), nx = q_count(flat);
     if (flat->rc != 1 || (flat->attrs & RAY_ATTR_ARENA) || nr <= 0) return NULL;
     for (int64_t c = 0; c < nc; c++) {
         ray_t* oc = ray_table_get_col_idx(flat, c);
         ray_t* pc = ray_table_get_col_idx(rows, c);
-        if (!oc || !pc || oc->rc != 1 || ray_len(pc) != nr || !q_index_growable(oc, pc)) return NULL;
+        if (!oc || !pc || oc->rc != 1 || q_count(pc) != nr || !q_index_growable(oc, pc)) return NULL;
     }
     ray_t** col = (ray_t**)malloc((size_t)nc * (sizeof(ray_t*) + 1));
     if (!col) return NULL;
@@ -597,7 +596,7 @@ static ray_t* table_append_inplace(ray_t* flat, ray_t* rows) {
  * an EMPTY target that remake IS the appended table. */
 ray_t* q_table_rows_typed(ray_t* flat, ray_t* rows) {
     int64_t nc = ray_table_ncols(flat);
-    int checked = ray_table_nrows(rows) > 0;
+    int checked = q_count(rows) > 0;
     ray_t* typed = ray_table_new(nc > 0 ? nc : 1);
     for (int64_t c = 0; c < nc && !RAY_IS_ERR(typed); c++) {
         ray_t* oc = ray_table_get_col_idx(flat, c);
@@ -622,7 +621,7 @@ ray_t* q_table_rows_typed(ray_t* flat, ray_t* rows) {
 ray_t* q_table_append(ray_t* flat, ray_t* rows, int exclusive) {
     int64_t nc = ray_table_ncols(flat);
     ray_t* typed = q_table_rows_typed(flat, rows);
-    if (ray_table_nrows(flat) == 0 || RAY_IS_ERR(typed)) return typed;
+    if (q_count(flat) == 0 || RAY_IS_ERR(typed)) return typed;
     rows = typed;                                                          /* owned from here */
     ray_t* out = NULL;
     if (!exclusive || !(out = table_append_inplace(flat, rows))) {
@@ -636,7 +635,9 @@ ray_t* q_table_append(ray_t* flat, ray_t* rows, int exclusive) {
                 if (joined && !RAY_IS_ERR(joined))
                     joined = q_enum_stamp(joined, q_enum_domain(oc));
             } else if (oc && ray_is_vec(oc)) {
-                joined = q_attr_append_keep(q_attr_letter(oc), ray_len(oc), q_attr_index_clone(oc), ray_concat_fn(oc, pc));
+                joined = q_attr_append_keep(q_attr_letter(oc), q_count(oc),
+                                            q_attr_index_clone(oc),
+                                            ray_concat_fn(oc, pc));
             } else {
                 joined = ray_concat_fn(oc, pc);
             }
@@ -718,8 +719,8 @@ ray_t* q_flip_wrap(ray_t* x) {
             if (!t) t = q_provider_flip(k, v->i64);       /* `:pq:…/ -> the bound pointer */
             if (t) return t;
         }
-        int64_t nc = ray_len(k);
-        if (!(v->type == RAY_LIST || ray_is_vec(v)) || ray_len(v) != nc)
+        int64_t nc = q_count(k);
+        if (!(v->type == RAY_LIST || ray_is_vec(v)) || q_count(v) != nc)
             return q_err(QE_LENGTH);
         /* pass 1: L = shared vector length (atoms broadcast) */
         int64_t L = -1;
@@ -727,9 +728,7 @@ ray_t* q_flip_wrap(ray_t* x) {
             ray_t* col = q_join_item(v, c);
             if (!col || RAY_IS_ERR(col)) return col ? col : q_err(QE_OOM);
             if (!ray_is_atom(col)) {
-                /* len-as-a-list: a 98h column measures its rows (raw len is the slot pair);
-                 * NOT q_count_long, whose base fallback errors on a 20h enum column */
-                int64_t l = col->type == RAY_TABLE ? ray_table_nrows(col) : ray_len(col);
+                int64_t l = q_count(col);
                 if (L < 0) L = l;
                 else if (l != L) { ray_release(col); return q_err(QE_LENGTH); }
             }
@@ -756,14 +755,14 @@ ray_t* q_flip_wrap(ray_t* x) {
         return out;
     }
     if (x->type == RAY_LIST) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         if (n == 0) { ray_retain(x); return x; }
         ray_t** e = (ray_t**)ray_data(x);
         int64_t L = -1;
         for (int64_t i = 0; i < n; i++) {
             ray_t* it = e[i];
             if (it && (ray_is_vec(it) || it->type == RAY_LIST)) {
-                int64_t l = ray_len(it);
+                int64_t l = q_count(it);
                 if (L < 0) L = l;
                 else if (l != L) return q_err(QE_LENGTH);
             }
@@ -842,7 +841,7 @@ ray_t* q_xgroup_wrap(ray_t* x, ray_t* y) {
     ray_release(flat);
     if (!reord || RAY_IS_ERR(reord)) return reord;
     int64_t nc = ray_table_ncols(reord);
-    int64_t nr = ray_table_nrows(reord);
+    int64_t nr = q_count(reord);
     int64_t* gid = malloc(sizeof(int64_t) * (size_t)(nr > 0 ? nr : 1));
     int64_t* rep = malloc(sizeof(int64_t) * (size_t)(nr > 0 ? nr : 1));
     if (!gid || !rep) { free(gid); free(rep); ray_release(reord); return q_err(QE_WSFULL); }
@@ -912,7 +911,7 @@ ray_t* q_xgroup_wrap(ray_t* x, ray_t* y) {
  * is int64/sym/str-readable, boxed row-compare fallback otherwise. */
 static ray_t* group_table(ray_t* t) {
     int64_t nc = ray_table_ncols(t);
-    int64_t nr = ray_table_nrows(t);
+    int64_t nr = q_count(t);
     int64_t* gid = malloc(sizeof(int64_t) * (size_t)(nr > 0 ? nr : 1));
     int64_t* rep = malloc(sizeof(int64_t) * (size_t)(nr > 0 ? nr : 1));
     if (!gid || !rep) { free(gid); free(rep); return q_err(QE_WSFULL); }
@@ -950,7 +949,7 @@ ray_t* q_group_wrap(ray_t* x) {
         if (!g || RAY_IS_ERR(g)) return g ? g : q_err(QE_TYPE);
         ray_t* keys = ray_dict_keys(x);
         ray_t* gv = ray_dict_vals(g);
-        int64_t ng = ray_len(gv);
+        int64_t ng = q_count(gv);
         ray_t* nv = ray_list_new(ng > 0 ? ng : 1);
         for (int64_t j = 0; j < ng && !RAY_IS_ERR(nv); j++) {
             ray_t* iv = q_index_elem_at(gv, j);
@@ -979,7 +978,7 @@ ray_t* q_ungroup_wrap(ray_t* x) {
     ray_t* flat = q_table_flatten(t);
     if (!flat || RAY_IS_ERR(flat)) return flat;
     int64_t nc = ray_table_ncols(flat);
-    int64_t nr = ray_table_nrows(flat);
+    int64_t nr = q_count(flat);
     if (nc > 64) { ray_release(flat); return q_err(QE_LIMIT); }
     ray_t* acc[64];
     for (int64_t c = 0; c < nc; c++) {
@@ -999,8 +998,7 @@ ray_t* q_ungroup_wrap(ray_t* x) {
             if (col && col->type == RAY_LIST) {
                 ray_t* cell = q_join_item(col, r);
                 if (!cell || RAY_IS_ERR(cell)) { err = cell ? cell : q_err(QE_OOM); break; }
-                int64_t l = cell->type == -RAY_STR ? (int64_t)ray_str_len(cell)
-                          : (ray_is_vec(cell) || cell->type == RAY_LIST) ? ray_len(cell) : 1;
+                int64_t l = (ray_is_vec(cell) || cell->type == RAY_LIST || cell->type == -RAY_STR) ? q_count(cell) : 1;
                 ray_release(cell);
                 if (cnt < 0) cnt = l;
                 else if (l != cnt) err = q_err(QE_LENGTH);
@@ -1101,7 +1099,7 @@ ray_t* q_cols_fn(ray_t* x) {
  * q_ty_char's whole-scan uniformity test (its ty_basic pins), the fallback
  * here for everything that is not a list with a vector first item. */
 static char meta_ty_char(ray_t* x) {
-    ray_t* e0 = x && x->type == RAY_LIST && ray_len(x)
+    ray_t* e0 = x && x->type == RAY_LIST && q_count(x)
               ? ((ray_t**)ray_data(x))[0] : NULL;
     int8_t t = !e0 ? 0
              : e0->type == -RAY_STR ? (int8_t)RAY_STR

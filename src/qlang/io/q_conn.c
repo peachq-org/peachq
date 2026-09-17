@@ -5,6 +5,7 @@
  * Rows sort by fd.  n/m (unsent msgs/bytes) are 0 for sockets — TRUTHFUL:
  * there is no async output queue yet (Stage 2) — and the long null on rows
  * where the concept does not apply. */
+#include "qlang/q_count.h"
 #include "qlang/io/q_conn.h"
 #include "qlang/io/q_handles.h"
 #include "qlang/io/q_provider.h"
@@ -219,7 +220,7 @@ ray_t* q_conn_zH(void) {
 ray_t* q_conn_zW(void) {
     ray_t* k = q_conn_zH();
     if (!k || RAY_IS_ERR(k)) return k;
-    int64_t n = ray_len(k), zero = 0;
+    int64_t n = q_count(k), zero = 0;
     ray_t* v = ray_vec_new(RAY_I64, n ? n : 1);
     for (int64_t i = 0; i < n && v && !RAY_IS_ERR(v); i++)
         v = ray_vec_append(v, &zero);
@@ -269,7 +270,7 @@ static ray_t* b38_dict(const conn_row* r) {
 }
 
 static ray_t* b38_table(const conn_row* rows, int64_t n, ray_t* y) {
-    int64_t k = ray_len(y);
+    int64_t k = q_count(y);
     int64_t cap = k ? k : 1;
     ray_t* c[5];
     c[0] = ray_vec_new(RAY_CHARV, cap);

@@ -5,6 +5,7 @@
  * candidate built from it would resolve against the cwd instead of the binary.
  * macOS still hands back the launch spelling, hence the realpath. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/io/q_exedir.h"
 #include <stdint.h>
 #include <stdio.h>

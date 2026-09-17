@@ -1,8 +1,8 @@
 /* q_fmt — the q-style value formatter (q_fmt.h); non-q shapes -> ray_fmt. */
+#include "qlang/q_count.h"
 #include "qlang/q_fmt.h"
 #include "qlang/q_fmt_internal.h" /* q_fmt_cell — shared with the pipe renderer */
 #include "qlang/q_console.h"  /* q_console_pipe_* — the modern display config */
-#include "qlang/q_builtins.h" /* q_builtins_count_long — THE count owner */
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
 #include "qlang/base/q_calendar.h" /* q_calendar_days_from_civil — date display domain */
 #include "qlang/base/q_err.h" /* QE_WSFULL — the allocating krepr's one failure */
@@ -261,13 +261,13 @@ static void fmt_elem_inline(ray_t* e, char* out, size_t cap) {
 /* Uniformly-singleton nested column collapses (`1| 10`); mixed keeps `,50`. */
 static int col_uniform_singleton(ray_t* col) {
     if (!col || col->type != RAY_LIST) return 0;
-    int64_t n = ray_len(col);
+    int64_t n = q_count(col);
     if (n == 0) return 0;
     ray_t** e = (ray_t**)ray_data(col);
     for (int64_t i = 0; i < n; i++) {
         ray_t* c = e[i];
         if (!c || c->type == -RAY_STR || ray_is_atom(c)) return 0;
-        if (!(ray_is_vec(c) || c->type == RAY_LIST) || ray_len(c) != 1) return 0;
+        if (!(ray_is_vec(c) || c->type == RAY_LIST) || q_count(c) != 1) return 0;
     }
     return 1;
 }
@@ -288,7 +288,7 @@ void q_fmt_cell(ray_t* col, int64_t row, int blank_null, char* out, size_t outsz
         return;
     }
     if (col && col->type == RAY_CHARV) {    /* char column: bare char cell */
-        if (row >= 0 && row < ray_len(col) && outsz > 1) {
+        if (row >= 0 && row < q_count(col) && outsz > 1) {
             out[0] = ((const char*)ray_data(col))[row];
             out[1] = '\0';
         }
@@ -298,7 +298,7 @@ void q_fmt_cell(ray_t* col, int64_t row, int blank_null, char* out, size_t outsz
                                              * value-list domain -> resolved
                                              * value; reference/unbound -> the
                                              * raw position */
-        if (row < 0 || row >= ray_len(col)) return;
+        if (row < 0 || row >= q_count(col)) return;
         int64_t p = ((const int64_t*)ray_data(col))[row];
         if (p == NULL_I64) return;          /* null position: gap, like a null cell */
         ray_t* e1 = q_enum_stamp(ray_i64(p), q_enum_domain(col));
@@ -384,7 +384,7 @@ static int64_t size_rows(int64_t nr) {
 
 static void q_fmt_table(ray_t* tbl) {
     int64_t nc = ray_table_ncols(tbl);
-    int64_t nr = ray_table_nrows(tbl);
+    int64_t nr = q_count(tbl);
     if (nc <= 0) { qe_puts("+`!()"); return; }   /* empty schema */
     if (nc > QF_MAXCOL) nc = QF_MAXCOL;
     int  widths[QF_MAXCOL];
@@ -405,8 +405,8 @@ static void q_fmt_table(ray_t* tbl) {
 }
 
 static void fmt_keyed(ray_t* kt, ray_t* vt) {
-    int64_t knc = ray_table_ncols(kt), knr = ray_table_nrows(kt);
-    int64_t vnc = ray_table_ncols(vt), vnr = ray_table_nrows(vt);
+    int64_t knc = ray_table_ncols(kt), knr = q_count(kt);
+    int64_t vnc = ray_table_ncols(vt), vnr = q_count(vt);
     int64_t nr  = knr < vnr ? knr : vnr;
     if (knc > QF_MAXCOL) knc = QF_MAXCOL;
     if (vnc > QF_MAXCOL) vnc = QF_MAXCOL;
@@ -666,7 +666,7 @@ static int elem_tok(ray_t* a, char* out, size_t n) {
 static int col_uniform_type(ray_t* col) {
     if (!col || col->type < 0) return 0;
     if (col->type != RAY_LIST) return 1;
-    int64_t n = ray_len(col);
+    int64_t n = q_count(col);
     if (n == 0) return 0;
     ray_t** e = (ray_t**)ray_data(col);
     for (int64_t i = 0; i < n; i++)
@@ -706,7 +706,7 @@ static void qe_join(const char* tok, int first) {
 #define Q_ATTR_QUOTED 0x20
 static int list_is_parse_tree(ray_t* v, int depth) {
     if (!v || v->type != RAY_LIST || depth > 64) return 0;
-    int64_t n = ray_len(v);
+    int64_t n = q_count(v);
     if (n < 1) return 0;
     ray_t* h = ((ray_t**)ray_data(v))[0];
     if (!h) return 0;
@@ -796,7 +796,7 @@ static int row_all_sym(ray_t* v) {
     if (!v) return 0;
     if (v->type == RAY_SYM) return 1;
     if (v->type != RAY_LIST) return 0;
-    int64_t n = ray_len(v);
+    int64_t n = q_count(v);
     if (n == 0) return 0;
     ray_t** e = (ray_t**)ray_data(v);
     for (int64_t i = 0; i < n; i++)
@@ -827,11 +827,12 @@ static void matrix_cell(ray_t* rv, int64_t c, int bare, int blank_null,
     } else if (a->type == -RAY_CHARV) {
         fmt_qtext((const char*)&a->u8, 1, out, outsz);
     } else if (a->type == RAY_CHARV) {
-        if (ray_len(a) == 1 && outsz > 1) {
+        if (q_count(a) == 1 && outsz > 1) {
             out[0] = ',';
             fmt_qtext((const char*)ray_data(a), 1, out + 1, outsz - 1);
         } else
-            fmt_qtext((const char*)ray_data(a), (size_t)ray_len(a), out, outsz);
+            fmt_qtext((const char*)ray_data(a), (size_t) q_count(a), out,
+                      outsz);
     } else
         fmt_elem_inline(a, out, outsz);
 }
@@ -846,7 +847,7 @@ static int matrix_row_ok(ray_t* r) {
     if (r->type > 0 && ray_is_vec(r) && matrix_alignable(r->type)) return 1;
     if (r->type != RAY_LIST) return 0;
     ray_t** it = (ray_t**)ray_data(r);
-    int64_t n = ray_len(r);
+    int64_t n = q_count(r);
     int row_nested = -1;
     for (int64_t i = 0; i < n; i++) {
         ray_t* c = it[i];
@@ -884,7 +885,7 @@ static void matrix_row_str(ray_t* row, int64_t nc, const int* w,
 static int is_matrix(ray_t** e, int64_t n) {
     if (n < 1) return 0;
     if (!matrix_row_ok(e[0])) return 0;
-    int64_t w = ray_len(e[0]);
+    int64_t w = q_count(e[0]);
     if (w == 0) return 0;
     /* One row is an enlist (`,1 2 3`) UNLESS it is also one column: a 1x1 drops
      * its commas for the same reason `(1 2;3 4)` does — it is a matrix
@@ -896,7 +897,7 @@ static int is_matrix(ray_t** e, int64_t n) {
         return 0;
     int all_charv = e[0]->type == RAY_CHARV;
     for (int64_t i = 1; i < n; i++) {
-        if (!matrix_row_ok(e[i]) || ray_len(e[i]) != w) return 0;
+        if (!matrix_row_ok(e[i]) || q_count(e[i]) != w) return 0;
         if (e[i]->type != RAY_CHARV) all_charv = 0;
     }
     /* all-charv is the STRING-LIST idiom, not a char matrix: `("Gfg";"is")`
@@ -925,7 +926,7 @@ static int* matrix_widths(ray_t** e, int64_t nr, int64_t nc, int blank_null,
 /* A general list is not a column, so its null cells keep their token (no doc in
  * the corpus blanks one) — blank_null 0 throughout. */
 static void fmt_matrix(ray_t** e, int64_t nr) {
-    int64_t nc = ray_len(e[0]);
+    int64_t nc = q_count(e[0]);
     /* no fixed column cap; clip-armed sizing scans showable rows only */
     int  stackw[64];
     int* widths = matrix_widths(e, size_rows(nr), nc, 0, stackw, 64);
@@ -1058,12 +1059,12 @@ static int64_t qp_take(ray_t* t, qp_col* cs, int64_t at, int64_t max) {
 static int64_t qp_gather(ray_t* val, qp_col* cs, int64_t max, int64_t* nrows, int64_t* nkey) {
     *nkey = 0;
     if (val->type == RAY_TABLE) {
-        *nrows = ray_table_nrows(val);
+        *nrows = q_count(val);
         return qp_take(val, cs, 0, max);
     }
     ray_t* kk = ray_dict_keys(val);                  /* borrowed */
     ray_t* vv = ray_dict_vals(val);                  /* borrowed */
-    int64_t kn = ray_table_nrows(kk), vn = ray_table_nrows(vv);
+    int64_t kn = q_count(kk), vn = q_count(vv);
     *nrows = kn < vn ? kn : vn;
     int64_t nk = qp_take(kk, cs, 0, max);
     *nkey = nk;
@@ -1382,7 +1383,7 @@ static int carrier_fmt(ray_t* v, char* buf, size_t bufsz) {
     if (!kind || bufsz == 0) return 0;
     if (kind == Q_EVAL_CAR_VIEW) {         /* `. `d shows the bare text: b+a */
         ray_t* t = q_view_text(v);
-        snprintf(buf, bufsz, "%.*s", t ? (int)ray_len(t) : 0,
+        snprintf(buf, bufsz, "%.*s", t ? (int) q_count(t) : 0,
                  t ? (const char*)ray_data(t) : "");
         if (t) ray_release(t);
         return 1;
@@ -1509,7 +1510,7 @@ static void q_fmt_body(ray_t* val) {
         return;
     }
     if (val->type == RAY_CHARV) {
-        int64_t n = ray_len(val);
+        int64_t n = q_count(val);
         const char* p = (const char*)ray_data(val);
         if (n == 1) qe_putc(',');                /* len-1 vector: ,"a" */
         qe_putc('"');
@@ -1523,7 +1524,7 @@ static void q_fmt_body(ray_t* val) {
     }
 
     /* empty typed vector: `` `type$() `` (byte keeps its bare-0x arm) */
-    if (val->type > 0 && ray_is_vec(val) && ray_len(val) == 0) {
+    if (val->type > 0 && ray_is_vec(val) && q_count(val) == 0) {
         const char* qn = empty_vec_qname(val->type);
         if (qn) { qe_printf("`%s$()", qn); return; }
     }
@@ -1540,7 +1541,7 @@ static void q_fmt_body(ray_t* val) {
 
     /* string vector: one quoted line per item; `,` on singleton and len-1 */
     if (val->type == RAY_STR && ray_is_vec(val)) {
-        int64_t n = ray_len(val);
+        int64_t n = q_count(val);
         if (n == 0) { qe_puts("()"); return; }   /* kdb: empty list */
         for (int64_t i = 0; i < n; i++) {
             if (qe_done()) break;                /* height cap hit — early exit */
@@ -1581,7 +1582,7 @@ static void q_fmt_body(ray_t* val) {
     }
 
     if (val->type == RAY_BOOL) {            /* 1001b */
-        int64_t n = ray_len(val);
+        int64_t n = q_count(val);
         const uint8_t* d = (const uint8_t*)ray_data(val);
         if (n == 1) qe_putc(',');                          /* enlist: ,0b */
         for (int64_t i = 0; i < n && !qe_line_done(); i++)
@@ -1591,7 +1592,7 @@ static void q_fmt_body(ray_t* val) {
     }
     /* byte vector: 0x + hex pairs (ref/sv.md); empty is bare `0x` */
     if (val->type == RAY_BYTE_ONLY) {
-        int64_t n = ray_len(val);
+        int64_t n = q_count(val);
         const uint8_t* d = (const uint8_t*)ray_data(val);
         static const char hx[] = "0123456789abcdef";
         if (n == 1) qe_putc(',');
@@ -1604,7 +1605,7 @@ static void q_fmt_body(ray_t* val) {
         return;
     }
     if (val->type == RAY_GUID) {
-        int64_t n = ray_len(val);
+        int64_t n = q_count(val);
         const uint8_t* d = (const uint8_t*)ray_data(val);
         if (n == 1) qe_putc(',');
         for (int64_t i = 0; i < n && !qe_line_done(); i++) {
@@ -1619,7 +1620,7 @@ static void q_fmt_body(ray_t* val) {
     if (val->type == RAY_I16 || val->type == RAY_I32 || val->type == RAY_I64) {
         int width  = (val->type == RAY_I16) ? 2 : (val->type == RAY_I32) ? 4 : 8;
         char vsuf  = (val->type == RAY_I16) ? 'h' : (val->type == RAY_I32) ? 'i' : 0;
-        int64_t n = ray_len(val);
+        int64_t n = q_count(val);
         if (n == 1) qe_putc(',');                          /* enlist: ,42h */
         for (int64_t i = 0; i < n && !qe_line_done(); i++) {
             char e[64];
@@ -1638,7 +1639,7 @@ static void q_fmt_body(ray_t* val) {
     {
         const q_ttok_t* tr = ttok_find(val->type);
         if (tr) {
-            int64_t n = ray_len(val);
+            int64_t n = q_count(val);
             if (n == 1) qe_putc(',');                      /* enlist: ,2000.01.01 */
             for (int64_t i = 0; i < n && !qe_line_done(); i++) {
                 char e[64];
@@ -1652,7 +1653,7 @@ static void q_fmt_body(ray_t* val) {
 
     if (val->type == RAY_F32 || val->type == RAY_F64) {
         int is64 = (val->type == RAY_F64);
-        int64_t n = ray_len(val);
+        int64_t n = q_count(val);
         if (n == 1) qe_putc(',');                          /* enlist: ,1f */
         int all_whole = (n > 0);   /* f64 gets ONE trailing `f` iff every element RENDERS digit-only */
         for (int64_t i = 0; i < n && !qe_line_done(); i++) {
@@ -1675,7 +1676,7 @@ static void q_fmt_body(ray_t* val) {
 
     /* sym vector: `a`b`c — every element backticked (data must round-trip) */
     if (val->type == RAY_SYM) {
-        int64_t n = ray_len(val);
+        int64_t n = q_count(val);
         if (n == 1) qe_putc(',');                          /* enlist: ,`a */
         for (int64_t i = 0; i < n && !qe_line_done(); i++) {
             ray_t* s = ray_sym_vec_cell(val, i);   /* borrowed -RAY_STR */
@@ -1728,9 +1729,8 @@ static void q_fmt_body(ray_t* val) {
             qe_puts(kb);
             return;
         }
-        /* entries, not slots: a TABLE domain (the iterators re-key onto one)
-         * counts its rows, which ray_len does not report */
-        int64_t n = k ? q_builtins_count_long(k) : 0;
+        /* entries, not slots: a TABLE domain (the iterators re-key onto one) counts its rows */
+        int64_t n = k ? q_count(k) : 0;
         if (n < 0) n = 0;
         size_t maxk = 0;
         int64_t n_size = size_rows(n);   /* clip-armed: size showable rows only */
@@ -1738,16 +1738,16 @@ static void q_fmt_body(ray_t* val) {
         int  dstackw[64];
         int* dw = NULL;
         int64_t dnc = 0;
-        if (v && v->type == RAY_LIST && ray_len(v) == n &&
+        if (v && v->type == RAY_LIST && q_count(v) == n &&
             is_matrix((ray_t**)ray_data(v), n)) {
-            dnc = ray_len(((ray_t**)ray_data(v))[0]);
+            dnc = q_count(((ray_t **)ray_data(v))[0]);
             dw  = matrix_widths((ray_t**)ray_data(v), n_size, dnc, 1, dstackw, 64);
-        } else if (v && v->type == RAY_LIST && ray_len(v) == n && n > 0) {
+        } else if (v && v->type == RAY_LIST && q_count(v) == n && n > 0) {
             /* UNIFORM zero-length rows are zero padded columns — blank, where
              * the ragged dict keeps `()` (ref/dotq.md:1322 vs :1655) */
             ray_t** ve = (ray_t**)ray_data(v);
             int64_t i = 0;
-            while (i < n && ve[i] && ve[i]->type == RAY_LIST && ray_len(ve[i]) == 0) i++;
+            while (i < n && ve[i] && ve[i]->type == RAY_LIST && q_count(ve[i]) == 0) i++;
             if (i == n) { dnc = 0; dw = dstackw; }
         }
         for (int pass = 0; pass < 2; pass++) {
@@ -1792,7 +1792,7 @@ static void q_fmt_body(ray_t* val) {
      * .md pins nested items inline `(110b;0b)`).  One item = `,x`;
      * rectangular = aligned matrix (ref/mmu.md). */
     if (val->type == RAY_LIST) {
-        int64_t n = ray_len(val);
+        int64_t n = q_count(val);
         ray_t** e = (ray_t**)ray_data(val);
         /* a bare constructor (parse "()") is the empty-list application */
         if (n == 1 && e[0] == q_registry_list_value()) { qe_puts("()"); return; }
@@ -1851,11 +1851,12 @@ static void krepr_into(ray_t* val, char* buf, size_t bufsz, int* tr) {
         return;
     }
     if (val->type == RAY_CHARV) {                  /* charv: "abc" / ,"a" */
-        if (ray_len(val) == 1 && bufsz > 1) {
+        if (q_count(val) == 1 && bufsz > 1) {
             buf[0] = ',';
             *tr |= fmt_qtext((const char*)ray_data(val), 1, buf + 1, bufsz - 1);
         } else
-            *tr |= fmt_qtext((const char*)ray_data(val), (size_t)ray_len(val), buf, bufsz);
+            *tr |= fmt_qtext((const char*)ray_data(val),
+                             (size_t) q_count(val), buf, bufsz);
         return;
     }
     if (q_enum_is(val)) {                          /* `d$values / `d!positions (R5) */
@@ -1913,7 +1914,7 @@ static void krepr_into(ray_t* val, char* buf, size_t bufsz, int* tr) {
         }
     }
     if (val->type == RAY_LIST) {
-        int64_t n = ray_len(val);
+        int64_t n = q_count(val);
         ray_t** e = (ray_t**)ray_data(val);
         if (n == 0 || (n == 1 && e[0] == q_registry_list_value())) {
             if ((size_t)snprintf(buf, bufsz, "()") >= bufsz) *tr = 1;
@@ -1935,7 +1936,7 @@ static void krepr_into(ray_t* val, char* buf, size_t bufsz, int* tr) {
     }
     /* string vector inline: `("hello,world";,"1")` (ref/file-text.md:348) */
     if (val->type == RAY_STR && ray_is_vec(val)) {
-        int64_t n = ray_len(val);
+        int64_t n = q_count(val);
         if (n == 0) { if ((size_t)snprintf(buf, bufsz, "()") >= bufsz) *tr = 1; return; }
         size_t pos = 0;
         if (pos + 1 < bufsz) buf[pos++] = (n == 1) ? ',' : '('; else *tr = 1;

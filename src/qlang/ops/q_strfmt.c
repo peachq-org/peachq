@@ -6,6 +6,7 @@
  * literal digits, and the argument vector gets one entry per OCCURRENCE — which
  * is why one q value can travel the numeric lane at `%1$d` and the string lane
  * at `%1$r`.  fmt does no argument stepping of its own by the time it runs. */
+#include "qlang/q_count.h"
 #include "qlang/ops/q_strfmt.h"
 #include "qlang/io/q_strfmt_abi.h"
 #include "qlang/base/q_err.h"
@@ -173,7 +174,7 @@ static int64_t sf_push(sfscan* s, char conv, int64_t qi, int* rewrite) {
         if (!t || RAY_IS_ERR(t)) { ray_release(t); s->bad = SF_ERR_OOM; return 0; }
         s->own[k]     = t;
         s->av[k].v.s.p = (const char*)ray_data(t);
-        s->av[k].v.s.n = t->len;
+        s->av[k].v.s.n = q_count(t);
         break;
     }
     }
@@ -366,7 +367,7 @@ static void sf_scan_format(sfscan* s, const char* f, int64_t n) {
 static ray_t* sf_run(ray_t* x, int gfmt) {
     if (!x) return q_err(QE_TYPE);
     if (RAY_IS_ERR(x)) { ray_retain(x); return x; }
-    if (x->type != RAY_LIST || x->len < 1) return q_err(QE_TYPE);
+    if (x->type != RAY_LIST || q_count(x) < 1) return q_err(QE_TYPE);
     const char* fp;
     int64_t     fn;
     ray_t*      f = ray_list_get(x, 0);
@@ -375,7 +376,7 @@ static ray_t* sf_run(ray_t* x, int gfmt) {
     sfscan s;
     memset(&s, 0, sizeof s);
     s.msg  = x;
-    s.argn = x->len - 1;
+    s.argn = q_count(x) - 1;
     if (gfmt) sf_scan_format(&s, fp, fn);
     else sf_scan_printf(&s, fp, fn);
 

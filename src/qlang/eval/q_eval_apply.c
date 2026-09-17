@@ -11,6 +11,7 @@
  * retains, release local. */
 #define _POSIX_C_SOURCE 200809L
 
+#include "qlang/q_count.h"
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_dbg.h"  /* frame list + the error seams (basics/debug.md) */
 #include "qlang/q_prim.h"
@@ -21,7 +22,7 @@
 #include "qlang/base/q_err.h"
 #include <ctype.h>            /* isalpha — the char-atom language arm */
 #include "qlang/q_ops.h"
-#include "qlang/q_builtins.h"  /* q_count_long — q `count` for C callers, hot lane */
+#include "qlang/q_builtins.h"  /* q_builtins_type_num */
 #include "qlang/q_registry.h"
 #include "qlang/base/q_type.h"     /* q_type_is_keyed — the type axis home */
 #include "qlang/parse/q_parse_internal.h"
@@ -154,7 +155,7 @@ static void lam_stamp_inner(ray_t* node, const char* name, int64_t nn,
     }
     if (node->type != RAY_LIST) return;
     ray_t** e = (ray_t**)ray_data(node);
-    for (int64_t i = 0, k = ray_len(node); i < k; i++)
+    for (int64_t i = 0, k = q_count(node); i < k; i++)
         lam_stamp_inner(e[i], name, nn, file_sym, line);
 }
 
@@ -413,7 +414,7 @@ static ray_t* unary_elem(ray_unary_fn fn, ray_t* e) {
 }
 
 static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
-    int64_t len = ray_len(arg);
+    int64_t len = q_count(arg);
     int is_boxed = (arg->type == RAY_LIST);
 
     if (len == 0) {
@@ -543,13 +544,13 @@ static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r
     if (!lc && !rc) return fn(l, r);
     uint16_t dop = dag_op_of(fn);
     if (dop && dag_pair_ok(l, r, lc, rc) &&
-        !(lc && rc && ray_len(l) != ray_len(r)))
+        !(lc && rc && q_count(l) != q_count(r)))
         return atomic_map_binary_op(fn, dop, l, r);
     /* a length mismatch still probes the first pair, so an out-of-domain pair answers 'type before 'length
      * (`"abac" xexp `a`b`a`); an empty side has no pair to probe and is 'length outright */
-    int mismatch = lc && rc && ray_len(l) != ray_len(r);
-    int64_t len = lc ? ray_len(l) : ray_len(r);
-    if (mismatch && (!ray_len(l) || !ray_len(r))) return q_err(QE_LENGTH);
+    int mismatch = lc && rc && q_count(l) != q_count(r);
+    int64_t len = lc ? q_count(l) : q_count(r);
+    if (mismatch && (!q_count(l) || !q_count(r))) return q_err(QE_LENGTH);
 
     if (len == 0) {
         /* the same carried-type law as map_unary: a generic () on either side is () (`2+()`, `\`ab+()`) */
@@ -680,15 +681,15 @@ static ray_t* atomic1(ray_unary_fn f, ray_t* x) {
  * uk borrowed; owned I64 or an owned error. */
 static ray_t* zip_pos(ray_t* keys, ray_t* uk) {
     ray_t* p = q_search_find(keys, uk);
-    int64_t n = ray_len(uk);
-    if (!p || RAY_IS_ERR(p) || (p->type == RAY_I64 && ray_len(p) == n)) return p ? p : q_err(QE_TYPE);
+    int64_t n = q_count(uk);
+    if (!p || RAY_IS_ERR(p) || (p->type == RAY_I64 && q_count(p) == n)) return p ? p : q_err(QE_TYPE);
     ray_release(p);
     if (keys->type != RAY_LIST) return q_err(QE_TYPE);
     p = ray_vec_new(RAY_I64, n);
     if (!p || RAY_IS_ERR(p)) return p ? p : q_err(QE_OOM);
     p->len = n;
     int64_t* d = (int64_t*)ray_data(p);
-    int64_t m = ray_len(keys);
+    int64_t m = q_count(keys);
     for (int64_t j = 0; j < n; j++) {
         ray_t* k = q_index_elem_at(uk, j);
         if (!k || RAY_IS_ERR(k)) { ray_release(p); return k ? k : q_err(QE_TYPE); }
@@ -701,10 +702,10 @@ static ray_t* zip_pos(ray_t* keys, ray_t* uk) {
 ray_t* q_eval_apply_dict_zip(const q_op_t* row, ray_t* x, ray_t* y, q_eval_zip_fn f, void* ctx) {
     ray_t* uk = ray_union_fn(ray_dict_keys(x), ray_dict_keys(y));
     if (!uk || RAY_IS_ERR(uk)) return uk ? uk : q_err(QE_TYPE);
-    int64_t n = ray_len(uk);
+    int64_t n = q_count(uk);
     ray_t* vx = ray_dict_vals(x);
     ray_t* vy = ray_dict_vals(y);
-    int64_t nx = q_count_long(ray_dict_keys(x)), ny = q_count_long(ray_dict_keys(y));
+    int64_t nx = q_count(ray_dict_keys(x)), ny = q_count(ray_dict_keys(y));
     ray_t* px = n > 0 ? zip_pos(ray_dict_keys(x), uk) : NULL;
     ray_t* py = n > 0 && !RAY_IS_ERR(px) ? zip_pos(ray_dict_keys(y), uk) : NULL;
     if (RAY_IS_ERR(px) || RAY_IS_ERR(py)) {
@@ -828,7 +829,7 @@ static ray_t* agg_nested(ray_t* fv, const q_op_t* row, ray_t* x) {
     const q_op_t* drow = NULL;
     ray_t* dv = q_eval_apply_manifest_value(q_ops_nested_dyad(row), Q_DYADIC, &drow);
     if (!dv) return q_err(QE_TYPE);
-    int64_t n = ray_len(x);
+    int64_t n = q_count(x);
     ray_t* r = q_index_elem_at(x, 0);
     for (int64_t i = 1; i < n && r && !RAY_IS_ERR(r); i++) {
         ray_t* e = q_index_elem_at(x, i);
@@ -871,11 +872,11 @@ static ray_t* agg2(ray_t* fv, const q_op_t* row, ray_t* x, ray_t* y) {
     ray_t* fy = q_index_any_nested_item(vy) ? flip_of(vy) : NULL;
     if (fy && RAY_IS_ERR(fy)) { ray_release(fx); return fy; }
     if (!fx && !fy) { ray_t* a[2] = { vx, vy }; return q_eval_apply(fv, row, a, 2); }
-    if (fx && fy && ray_len(fx) != ray_len(fy)) {
+    if (fx && fy && q_count(fx) != q_count(fy)) {
         ray_release(fx); ray_release(fy);
         return q_err(QE_LENGTH);
     }
-    int64_t n = ray_len(fx ? fx : fy);
+    int64_t n = q_count(fx ? fx : fy);
     ray_t* out = ray_list_new(n > 0 ? n : 1);
     for (int64_t i = 0; i < n; i++) {
         ray_t* xi = fx ? q_index_elem_at(fx, i) : vx;
@@ -1031,7 +1032,7 @@ static ray_t* gather_at(ray_t* x, ray_t* idx) {
 static ray_t* index_lift(ray_t* fv, ray_t** args, int64_t n) {
     ray_t* x = (n == 2) ? args[1] : args[0];
     ray_t* dom = (x->type == RAY_DICT) ? ray_dict_keys(x) : NULL;
-    int64_t n_ent = q_count_long(dom ? dom : x);   /* q count, one home */
+    int64_t n_ent = q_count(dom ? dom : x);   /* q count, one home */
     if (n_ent < 0) return q_err(QE_TYPE);
     ray_t* nrv = ray_i64(n_ent);
     ray_t* til = ray_til_fn(nrv);
@@ -1107,9 +1108,9 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
     /* declared-type check on ENTRY, the one check site (owner ruling
      * 2026-08-12): exact against q `type`, no widening; a projection binds
      * unchecked and fails HERE when finally applied */
-    if (ray_len(lam) > 4 && c[4]) {
+    if (ray_block_len(lam) > 4 && c[4]) {
         const int64_t* tn = (const int64_t*)ray_data(c[4]);
-        int64_t nt = ray_len(c[4]);
+        int64_t nt = q_count(c[4]);
         for (int64_t i = 0; i < n && i < nt; i++)
             if (tn[i] && q_builtins_type_num(args[i]) != (int8_t)tn[i])
                 return q_err(QE_TYPE);
@@ -1127,7 +1128,7 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
     /* every parse-time local starts as () (function-notation.md:155); the builder excluded the params, so none is
      * re-seeded.  All-or-nothing: a half-seeded frame would let a local fall through to the global */
     ray_t* locals = c[LAM_LOCALS];
-    for (int64_t i = 0, nl = locals ? ray_len(locals) : 0; i < nl; i++) {
+    for (int64_t i = 0, nl = locals ? q_count(locals) : 0; i < nl; i++) {
         ray_t* e = ray_list_new(0);
         ray_err_t se = e ? q_env_local_set(ray_read_sym(ray_data(locals), i, RAY_SYM, locals->attrs), e)
                          : RAY_ERR_OOM;                                              /* retains */
@@ -1140,7 +1141,7 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
      * is untouched, so an explicit `\d` in the body is a session directive that outlives the call */
     int64_t caller_scope = q_env_scope(c[3] ? c[3]->i64 : 0);
     ray_t* r = RAY_NULL_OBJ;
-    int64_t nb = ray_len(body);
+    int64_t nb = q_count(body);
     ray_t** bs = (ray_t**)ray_data(body);
     for (int64_t i = 0; i < nb; i++) {
         ray_t* nr = q_eval(bs[i]);
@@ -1171,7 +1172,7 @@ static ray_t* proj_call(ray_t* proj, ray_t** args, int64_t n) {
     ray_t** c = car_slots(proj);
     ray_t* fv = c[0];
     const q_op_t* row = row_unbox(c[1]);
-    int64_t rank = ray_len(proj) - 2;
+    int64_t rank = ray_block_len(proj) - 2;
     ray_t* merged[APPLY_MAX_ARGS];
     int64_t ai = 0, holes = 0;
     if (rank > APPLY_MAX_ARGS) return q_err(QE_RANK);
@@ -1253,11 +1254,11 @@ static int64_t rank_of(ray_t* fv) {
     if (fv->type == RAY_BINARY) return 2;
     int kind = q_eval_apply_carrier_kind(fv);
     if (kind == Q_EVAL_CAR_LAMBDA)
-        return car_slots(fv)[0] ? ray_len(car_slots(fv)[0]) : 0;
+        return car_slots(fv)[0] ? q_count(car_slots(fv)[0]) : 0;
     /* a projection's rank is the slots it still wants; a composition's is its
      * inner value's (`mmu[;b]` is unary, so `':` reads it as Each Parallel) */
     if (kind == Q_EVAL_CAR_PROJ) {
-        int64_t slots = ray_len(fv) - 2, holes = 0;
+        int64_t slots = ray_block_len(fv) - 2, holes = 0;
         for (int64_t i = 0; i < slots; i++)
             if (!car_slots(fv)[2 + i]) holes++;
         return holes;
@@ -1692,7 +1693,7 @@ ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n) {
     return noun_index(head, args, n);
 }
 
-ray_t* q_eval_call_sym(int64_t sym, ray_t** args, int64_t argc) {
+ray_t* q_eval_apply_call_sym(int64_t sym, ray_t** args, int64_t argc) {
     ray_t* f = q_env_resolve(sym);
     if (!f || RAY_IS_ERR(f)) {
         if (f) ray_error_free(f);
@@ -1704,8 +1705,8 @@ ray_t* q_eval_call_sym(int64_t sym, ray_t** args, int64_t argc) {
     return r;
 }
 
-ray_t* q_eval_call_name(const char* name, size_t n, ray_t** args, int64_t argc) {
-    return q_eval_call_sym(ray_sym_intern_runtime(name, n), args, argc);
+ray_t* q_eval_apply_call_name(const char* name, size_t n, ray_t** args, int64_t argc) {
+    return q_eval_apply_call_sym(ray_sym_intern_runtime(name, n), args, argc);
 }
 
 /* Trap (ref/apply.md): on error, a callable/null catch applies to the error
@@ -1752,7 +1753,7 @@ static ray_t* name_lift(const q_op_t* row, ray_t** args, int64_t n, int dot) {
         /* Amend Entire on a file (ref/amend.md; kb/performance-tips.md:151-152):
          * dot form, empty path — `,` appends, `:` sets.  Every other file amend
          * shape stays 'nyi (the file wave's remaining edge). */
-        if (dot && n == 4 && args[1] && args[1]->type == RAY_LIST && ray_len(args[1]) == 0) {
+        if (dot && n == 4 && args[1] && args[1]->type == RAY_LIST && q_count(args[1]) == 0) {
             const q_op_t* rep = q_registry_row_of(args[2], Q_DYADIC);
             if (rep && rep == q_ops_find(",", 1)) return q_wirefile_append(args[0], args[3]);
             if (rep && rep == q_ops_find(":", 1)) return q_io_set(args[0], args[3]);
@@ -1836,7 +1837,7 @@ ray_t* q_eval_dot_wrap(ray_t** args, int64_t n) {
     ray_t* a = args[1];
     if (!a || (!ray_is_vec(a) && a->type != RAY_LIST))
         return q_err(QE_TYPE);
-    int64_t k = ray_len(a);
+    int64_t k = q_count(a);
     if (k < 1 || k > 8) return q_err(QE_RANK);
     ray_t* av[8];
     for (int64_t i = 0; i < k; i++) {
@@ -1913,7 +1914,7 @@ ray_t* q_eval_apply_comp_inner(ray_t* v) {
 }
 
 int64_t q_eval_apply_proj_nslots(ray_t* v) {
-    return q_eval_apply_carrier_kind(v) == Q_EVAL_CAR_PROJ ? ray_len(v) - 2
+    return q_eval_apply_carrier_kind(v) == Q_EVAL_CAR_PROJ ? ray_block_len(v) - 2
                                                            : 0;
 }
 

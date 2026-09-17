@@ -19,6 +19,7 @@
  * Output goes straight to the tty fd: the console buffer (q_console.c) drains
  * between statements, and a game loop lives inside one. */
 #define _GNU_SOURCE
+#include "qlang/q_count.h"
 #include "qlang/io/q_termbox.h"
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"
@@ -673,7 +674,7 @@ static int arg_cp(ray_t* x, uint32_t* cp) {
 /* a style for cell x of a row: atom (whole), int vector (per cell), else 'type via 0 */
 static int style_at(ray_t* s, int64_t x, int64_t* out) {
     if (arg_i64(s, out)) return 1;
-    if (q_type_is_int_vec(s)) { *out = x < ray_len(s) ? q_type_ivec_get(s, x) : 0; return 1; }
+    if (q_type_is_int_vec(s)) { *out = x < q_count(s) ? q_type_ivec_get(s, x) : 0; return 1; }
     return 0;
 }
 
@@ -776,7 +777,7 @@ static int is_style(ray_t* s) { int64_t v; return arg_i64(s, &v) || q_type_is_in
 static int64_t cells_ch_len(ray_t* ch, const char** p, int64_t* plen) {
     if (q_type_is_char_atom(ch) || q_type_is_int_atom(ch)) return -1;
     if (ch->type == RAY_CHARV && q_str_text_bytes(ch, p, plen)) return *plen;
-    if (q_type_is_int_vec(ch) || ch->type == RAY_LIST) return ray_len(ch);
+    if (q_type_is_int_vec(ch) || ch->type == RAY_LIST) return q_count(ch);
     return -2;
 }
 
@@ -803,9 +804,9 @@ static ray_t* tbi_set_cells_fn(ray_t** args, int64_t n) {
     const char* p = NULL; int64_t plen = 0;
     int64_t chn = cells_ch_len(ch, &p, &plen);
     if (chn == -2) return q_err(QE_TYPE);
-    int64_t cnt = q_type_is_int_vec(xs) ? ray_len(xs) : q_type_is_int_vec(ys) ? ray_len(ys) : chn >= 0 ? chn : 1;   /* atoms conform */
-    if ((q_type_is_int_vec(xs) && ray_len(xs) != cnt) || (q_type_is_int_vec(ys) && ray_len(ys) != cnt) || (chn >= 0 && chn != cnt) ||
-        (q_type_is_int_vec(fg) && ray_len(fg) != cnt) || (q_type_is_int_vec(bg) && ray_len(bg) != cnt)) return q_err(QE_LENGTH);
+    int64_t cnt = q_type_is_int_vec(xs) ? q_count(xs) : q_type_is_int_vec(ys) ? q_count(ys) : chn >= 0 ? chn : 1;   /* atoms conform */
+    if ((q_type_is_int_vec(xs) && q_count(xs) != cnt) || (q_type_is_int_vec(ys) && q_count(ys) != cnt) || (chn >= 0 && chn != cnt) ||
+        (q_type_is_int_vec(fg) && q_count(fg) != cnt) || (q_type_is_int_vec(bg) && q_count(bg) != cnt)) return q_err(QE_LENGTH);
     for (int64_t i = 0; p && i < plen; i++) if ((unsigned char)p[i] >= 128) return q_err(QE_TYPE);
     for (int64_t i = 0; i < cnt; i++) {
         int64_t x = 0, y = 0, f = 0, b = 0;
@@ -848,7 +849,7 @@ static ray_t* tbi_print_fn(ray_t** args, int64_t n) {
 
 /* row y's share of a style: an atom is the whole, a vector/list is per row (owned answer; NULL = the atom itself) */
 static ray_t* row_style(ray_t* s, int64_t y) {
-    if (!s || y >= ray_len(s) || !(s->type == RAY_LIST || q_type_is_int_vec(s))) return NULL;
+    if (!s || y >= q_count(s) || !(s->type == RAY_LIST || q_type_is_int_vec(s))) return NULL;
     return s->type == RAY_LIST ? q_index_elem_at(s, y) : ray_i64(q_type_ivec_get(s, y));
 }
 
@@ -867,7 +868,7 @@ static ray_t* tbi_show_fn(ray_t** args, int64_t n) {
     int ok = 1;
     if (q_str_text_bytes(rows, &p, &len)) put_text(0, 0, p, len, fg, bg, INT64_MAX);
     else if (rows->type != RAY_LIST) ok = 0;
-    for (int64_t y = 0; ok && rows->type == RAY_LIST && y < ray_len(rows) && y < tb.h; y++) {
+    for (int64_t y = 0; ok && rows->type == RAY_LIST && y < q_count(rows) && y < tb.h; y++) {
         ray_t* row = q_index_elem_at(rows, y);
         ray_t* rf = row_style(fg, y);
         ray_t* rb = row_style(bg, y);

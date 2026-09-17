@@ -36,6 +36,7 @@
  * lexer reclassify the name as an infix verb in noun position (the retired
  * q_is_kw_verb memcmp, now manifest-driven). */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* wrapper decls for the QR_FN* recipes (brings q_ops.h) */
 #include "qlang/eval/q_eval.h"              /* q_eval_at_wrap / q_eval_dot_wrap — the `@` `.` rows */
 #include "qlang/eval/q_view.h"              /* q_view_wrap — the `view` row */

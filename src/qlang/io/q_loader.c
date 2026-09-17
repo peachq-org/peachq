@@ -1,7 +1,8 @@
 /* io/q_loader.c — the target seam both readers reach (contract in q_loader.h). */
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* q_insert_wrap / q_upsert_wrap — the by-name row-append */
 #include "qlang/base/q_err.h"
-#include "qlang/eval/q_eval.h"        /* q_eval_apply_value/_is_fn/_rank — the lambda; q_eval_call_sym — .q.xcol */
+#include "qlang/eval/q_eval.h"        /* q_eval_apply_value/_is_fn/_rank — the lambda; q_eval_apply_call_sym — .q.xcol */
 #include "qlang/io/q_loader.h"
 #include "qlang/q_env.h"              /* q_env_get — the global the symbol target names */
 #include "qlang/q_prim.h"             /* q_list_collapse */
@@ -166,7 +167,7 @@ ray_t* q_loader_rename(ray_t* spec, int64_t* names, int64_t n) {
     }
     if (RAY_IS_ERR(t)) return t;
     ray_t* args[2] = { spec, t };
-    ray_t* r = q_eval_call_sym(xcol, args, 2);
+    ray_t* r = q_eval_apply_call_sym(xcol, args, 2);
     ray_release(t);
     if (!r) return q_err(QE_OOM);
     if (RAY_IS_ERR(r)) return r;

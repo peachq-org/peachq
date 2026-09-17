@@ -29,6 +29,7 @@
  * may drop a row (see the note in ledger()). */
 #define _POSIX_C_SOURCE 200809L
 
+#include "qlang/q_count.h"
 #include "qlang/repl/qdoc.h"
 #include "qlang/q_runtime.h"
 #include "core/timer.h"      /* ray_time_now_ms — the --verbose progress line */

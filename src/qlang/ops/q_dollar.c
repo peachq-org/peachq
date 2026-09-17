@@ -4,6 +4,7 @@
  * q_dollar_enum / q_dollar_mmu are the per-operation homes, exposed with types
  * for reuse.  The per-target q_cast_* matrix lives here too; the int-atom
  * admission helpers and tag<->name vocabulary moved to q_type.c (q_type.h). */
+#include "qlang/q_count.h"
 #include "qlang/ops/q_dollar.h"
 #include "qlang/base/q_type.h"  /* int/float admission + q_type_rayname vocabulary */
 #include "qlang/base/q_err.h"
@@ -53,7 +54,7 @@ int8_t q_cast_designator(ray_t* t, int* is_tok, int* is_identity) {
     }
     if ((t->type == -RAY_STR && ray_str_len(t) == 1) ||
         t->type == -RAY_CHARV ||
-        (t->type == RAY_CHARV && ray_len(t) == 1)) {
+        (t->type == RAY_CHARV && q_count(t) == 1)) {
         char c = t->type == -RAY_CHARV ? (char)t->u8
                : t->type == RAY_CHARV  ? ((const char*)ray_data(t))[0]
                                        : ray_str_ptr(t)[0];
@@ -110,7 +111,7 @@ int8_t q_cast_designator(ray_t* t, int* is_tok, int* is_identity) {
  * A general list carries no element to infer from, so the target tag names the
  * empty result's domain. */
 static int is_empty_list(ray_t* x) {
-    return x && x->type == RAY_LIST && ray_len(x) == 0;
+    return x && x->type == RAY_LIST && q_count(x) == 0;
 }
 
 static ray_t* cast_u8(ray_t* x);
@@ -171,14 +172,14 @@ static ray_t* cast_str(ray_t* x) {
         ray_retain(x); return x;
     }
     if (x && x->type == RAY_BYTE_ONLY)                                  /* byte vec */
-        return ray_str((const char*)ray_data(x), (size_t)ray_len(x));
+        return ray_str((const char*)ray_data(x), (size_t) q_count(x));
     if (x && x->type == -RAY_BYTE_ONLY) return ray_char(x->u8);  /* byte atom -> char atom */
     if (q_type_is_int_atom(x)) {
         return ray_char((uint8_t)q_type_iatom_val(x));   /* `char$65 -> "A" (atom) */
     }
     if (q_type_is_int_vec(x)) {
-        int64_t n = ray_len(x);
-        char* buf = (char*)malloc(n ? (size_t)n : 1);
+        int64_t n = q_count(x);
+        char* buf = (char*)malloc(n > 0 ? (size_t)n : 1);
         if (!buf) return q_err(QE_WSFULL);
         for (int64_t i = 0; i < n; i++)
             buf[i] = (char)q_type_ivec_get(x, i);
@@ -197,9 +198,9 @@ static ray_t* cast_str(ray_t* x) {
         return r;
     }
     if (x && x->type == RAY_LIST) {          /* boxed list of int/byte -> string */
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t** e = (ray_t**)ray_data(x);
-        char* buf = (char*)malloc(n ? (size_t)n : 1);
+        char* buf = (char*)malloc(n > 0 ? (size_t)n : 1);
         if (!buf) return q_err(QE_WSFULL);
         for (int64_t i = 0; i < n; i++) {
             ray_t* ei = e[i];
@@ -239,7 +240,7 @@ static ray_t* q_cast_real(ray_t* x) {
         return r;
     }
     if (f->type == RAY_F64) {                               /* vector */
-        int64_t n = ray_len(f);
+        int64_t n = q_count(f);
         ray_t* out = ray_vec_new(RAY_F32, n);
         if (RAY_IS_ERR(out)) { ray_release(f); return out; }
         out->len = n;
@@ -273,7 +274,7 @@ static ray_t* cast_int(int8_t tag, ray_t* x) {
         return ray_i16((int16_t)r);
     }
     if (x && (x->type == RAY_F64 || x->type == RAY_F32)) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* out = ray_vec_new(tag, n);
         if (RAY_IS_ERR(out)) return out;
         out->len = n;
@@ -307,7 +308,7 @@ static ray_t* cast_int(int8_t tag, ray_t* x) {
     }
     if (x && (x->type == RAY_I64 || x->type == RAY_I32) &&
         ray_elem_size(x->type) > ray_elem_size(tag)) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* out = ray_vec_new(tag, n);
         if (RAY_IS_ERR(out)) return out;
         out->len = n;
@@ -351,13 +352,13 @@ static ray_t* cast_u8(ray_t* x) {
     }
     if (x && x->type == -RAY_CHARV) return ray_u8(x->u8);
     if (x && x->type == RAY_CHARV)
-        return ray_vec_from_raw(RAY_BYTE_ONLY, ray_data(x), ray_len(x));
+        return ray_vec_from_raw(RAY_BYTE_ONLY, ray_data(x), q_count(x));
     if (x && (x->type == -RAY_F64 || x->type == -RAY_F32)) {
         if (RAY_ATOM_IS_NULL(x)) return ray_u8(0);
         return ray_u8((uint8_t)(int64_t)rint(x->f64));  /* F32 stores f64 */
     }
     if (x && (x->type == RAY_F64 || x->type == RAY_F32)) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* out = ray_vec_new(RAY_BYTE_ONLY, n);
         if (RAY_IS_ERR(out)) return out;
         out->len = n;
@@ -371,7 +372,7 @@ static ray_t* cast_u8(ray_t* x) {
     }
     if (q_type_is_int_atom(x)) return ray_u8(cast_u8_scalar(q_type_iatom_val(x)));
     if (q_type_is_int_vec(x)) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* out = ray_vec_new(RAY_BYTE_ONLY, n > 0 ? n : 1);
         if (RAY_IS_ERR(out)) return out;
         out->len = n;
@@ -393,7 +394,7 @@ static ray_t* cast_timestamp(ray_t* x) {
         return ray_timestamp(q_calendar_ts_compose((int64_t)x->i32, 0));
     }
     if (x && x->type == RAY_DATE) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* out = ray_vec_new(RAY_TIMESTAMP, n > 0 ? n : 1);
         if (RAY_IS_ERR(out)) return out;
         out->len = n;
@@ -419,7 +420,7 @@ static ray_t* cast_timestamp(ray_t* x) {
         return ray_timestamp((int64_t)x->i32 * 1000000LL);
     }
     if (x && x->type == RAY_TIME) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* out = ray_vec_new(RAY_TIMESTAMP, n > 0 ? n : 1);
         if (RAY_IS_ERR(out)) return out;
         out->len = n;
@@ -497,7 +498,7 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
     /* general (boxed) list: cast each element, then collapse — typed vectors
      * are leaves the switch below hits WHOLE (vectorized kernels). */
     if (x && x->type == RAY_LIST) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* out = ray_list_new(n);
         if (RAY_IS_ERR(out)) return out;
         ray_t** e = (ray_t**)ray_data(x);
@@ -546,7 +547,7 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
 static ray_t* tok_leaf(int8_t tag, ray_t* x) {
     if (is_empty_list(x)) return q_type_empty(tag);
     if (x->type == RAY_LIST) {           /* boxed list: tok each element */
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* out = ray_list_new(n);
         if (RAY_IS_ERR(out)) return out;
         ray_t** e = (ray_t**)ray_data(x);
@@ -562,7 +563,7 @@ static ray_t* tok_leaf(int8_t tag, ray_t* x) {
         return c;
     }
     if (x->type == RAY_STR) {            /* physical string column: tok each */
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* out = ray_list_new(n > 0 ? n : 1);
         if (RAY_IS_ERR(out)) return out;
         for (int64_t i = 0; i < n; i++) {
@@ -593,7 +594,7 @@ ray_t* q_dollar_tok(int8_t tag, ray_t* x) {
  * form (charv vs -RAY_STR). */
 static ray_t* pad_leaf(int64_t w, ray_t* x) {
     if (x->type == RAY_LIST) {           /* boxed list -> pad each element */
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* out = ray_list_new(n > 0 ? n : 1);
         if (RAY_IS_ERR(out)) return out;
         ray_t** e = (ray_t**)ray_data(x);
@@ -607,7 +608,7 @@ static ray_t* pad_leaf(int64_t w, ray_t* x) {
         return out;
     }
     if (x->type == RAY_STR) {            /* physical string column -> pad each */
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* out = ray_list_new(n > 0 ? n : 1);
         if (RAY_IS_ERR(out)) return out;
         for (int64_t i = 0; i < n; i++) {
@@ -764,7 +765,7 @@ static ray_t* component_leaf(ray_t* x, int64_t comp) {
     q_comp_e c = (q_comp_e)comp;
     if (!x) return q_err(QE_TYPE);
     if (x->type == RAY_LIST) {           /* boxed list -> component each element */
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* out = ray_list_new(n > 0 ? n : 1);
         if (RAY_IS_ERR(out)) return out;
         ray_t** e = (ray_t**)ray_data(x);
@@ -799,7 +800,7 @@ static ray_t* component_leaf(ray_t* x, int64_t comp) {
         return rtag == RAY_DATE ? ray_date(v) : rtag == RAY_I64 ? ray_i64(v) : ray_i32((int32_t)v);
     }
     int8_t rtag = component_tag(c);
-    int64_t n = ray_len(x);
+    int64_t n = q_count(x);
     ray_t* out = ray_vec_new(rtag, n > 0 ? n : 1);
     if (RAY_IS_ERR(out)) return out;
     out->len = n;
@@ -870,13 +871,13 @@ ray_t* q_dollar(ray_t* t, ray_t* x) {
     if (q_mmu_class(t, &k) != QMMU_BAD && q_mmu_class(x, &k) != QMMU_BAD)
         return q_dollar_mmu(t, x);   /* ragged included: mmu owns its 'length */
     int multi = t && ((t->type == -RAY_STR && ray_str_len(t) > 1) ||
-                      (t->type == RAY_CHARV && ray_len(t) > 1) ||
+                      (t->type == RAY_CHARV && q_count(t) > 1) ||
                       t->type == RAY_SYM || t->type == RAY_I16 ||
                       t->type == RAY_LIST);
     if (multi) {
-        int64_t n = (t->type == -RAY_STR) ? (int64_t)ray_str_len(t) : ray_len(t);
+        int64_t n = q_count(t);
         int x_is_list = x && (ray_is_vec(x) || x->type == RAY_LIST);
-        if (x_is_list && ray_len(x) != n)
+        if (x_is_list && q_count(x) != n)
             return q_err(QE_LENGTH);
         ray_t* out = ray_list_new(n);
         if (RAY_IS_ERR(out)) return out;

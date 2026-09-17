@@ -1,6 +1,7 @@
 /* q_wire — kdb IPC wire-format codec.  Format contract + clean-room
  * provenance: see q_wire.h.  No frozen-base file is touched: this is a
  * q-layer TU; `-8!`/`-9!` dispatch lives in q_registry.c's `!` wrapper. */
+#include "qlang/q_count.h"
 #include "qlang/net/q_wire.h"
 #include "qlang/q_prim.h"
 #include "qlang/base/q_err.h"      /* q_err / q_err_text — full error text on the wire */
@@ -204,7 +205,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
                 rc = (w_u8(b, (uint8_t)(106 + q_eval_apply_deriv_adv(x))) ||
                       q_wire_write_obj(b, body)) ? -1 : 0;
             } else {
-                int64_t n = ray_len(body);
+                int64_t n = q_count(body);
                 rc = (w_u8(b, kind == Q_EVAL_CAR_PROJ ? 104 : 105) ||
                       w_i32(b, (int32_t)n)) ? -1 : 0;
                 for (int64_t i = 0; i < n && !rc; i++)
@@ -267,9 +268,9 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
             /* ext 202: string COLUMN keeps its type (col.c requires it) */
             if (w_u8(b, Q_WIRE_EXT_STRVEC) ||
                 w_u8(b, x->attrs & RAY_ATTR_HAS_NULLS) ||
-                w_count(b, x->len)) goto out;
+                w_count(b, q_count(x))) goto out;
             rc = 0;
-            for (int64_t i = 0; i < x->len && rc == 0; i++) {
+            for (int64_t i = 0; i < q_count(x) && rc == 0; i++) {
                 size_t n = 0;
                 const char* s = ray_str_vec_get(x, i, &n);
                 if (n > INT32_MAX) {
@@ -369,10 +370,10 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
             goto out;
         }
         if (w_u8(b, 98) || w_u8(b, q_attr_byte(x)) || w_u8(b, 99)) goto out;
-        if (w_u8(b, (uint8_t)RAY_SYM) || w_u8(b, 0) || w_count(b, schema->len)) goto out;
+        if (w_u8(b, (uint8_t)RAY_SYM) || w_u8(b, 0) || w_count(b, q_count(schema))) goto out;
         const int64_t* ids = (const int64_t*)ray_data(schema);
         rc = 0;
-        for (int64_t i = 0; i < schema->len && rc == 0; i++)
+        for (int64_t i = 0; i < q_count(schema) && rc == 0; i++)
             rc = w_sym_id(b, ids[i]);
         int64_t dir = q_splay_table_path(x);          /* a mapped splay travels as its flip's dict value */
         if (rc == 0 && dir) {
@@ -397,14 +398,14 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
          * but GUID nulls — all-zero payload — are only knowable from the
          * flag); wire mode spends the same byte on kdb's attribute. */
         uint8_t vattrs = b->serde ? (uint8_t)(x->attrs & RAY_ATTR_HAS_NULLS) : q_attr_byte(x);
-        if (w_u8(b, (uint8_t)t) || w_u8(b, vattrs) || w_count(b, x->len)) goto out;
+        if (w_u8(b, (uint8_t)t) || w_u8(b, vattrs) || w_count(b, q_count(x))) goto out;
         uint8_t esz = ray_type_sizes[(uint8_t)t];
         const uint8_t* d = (const uint8_t*)ray_data(x);
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-        rc = w_raw(b, d, (size_t)x->len * esz);
+        rc = w_raw(b, d, (size_t) q_count(x) * esz);
 #else
         rc = 0;
-        for (int64_t i = 0; i < x->len && rc == 0; i++) {
+        for (int64_t i = 0; i < q_count(x) && rc == 0; i++) {
             const uint8_t* e = d + (size_t)i * esz;
             switch (esz) {
             case 1: rc = w_u8(b, e[0]); break;
@@ -419,9 +420,9 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     }
     case RAY_STR: {
         /* string column -> kdb list of char vectors (q_wire.h) */
-        if (w_u8(b, 0) || w_u8(b, q_attr_byte(x)) || w_count(b, x->len)) goto out;
+        if (w_u8(b, 0) || w_u8(b, q_attr_byte(x)) || w_count(b, q_count(x))) goto out;
         rc = 0;
-        for (int64_t i = 0; i < x->len && rc == 0; i++) {
+        for (int64_t i = 0; i < q_count(x) && rc == 0; i++) {
             size_t n = 0;
             const char* s = ray_str_vec_get(x, i, &n);
             rc = w_charvec(b, s ? s : "", (int64_t)n, 0);
@@ -429,9 +430,9 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         goto out;
     }
     case RAY_SYM: {
-        if (w_u8(b, (uint8_t)RAY_SYM) || w_u8(b, q_attr_byte(x)) || w_count(b, x->len)) goto out;
+        if (w_u8(b, (uint8_t)RAY_SYM) || w_u8(b, q_attr_byte(x)) || w_count(b, q_count(x))) goto out;
         rc = 0;
-        for (int64_t i = 0; i < x->len && rc == 0; i++) {
+        for (int64_t i = 0; i < q_count(x) && rc == 0; i++) {
             ray_t* s = ray_sym_vec_cell(x, i);        /* borrowed; NULL = empty */
             rc = (s && !RAY_IS_ERR(s)) ? w_cstr(b, ray_str_ptr(s), ray_str_len(s))
                                        : w_u8(b, 0);
@@ -455,16 +456,17 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
             if (cx && !RAY_IS_ERR(cx)) ray_release(cx);
         }
         uint8_t attrs = b->serde ? (uint8_t)(x->attrs & ~RAY_ATTR_SLICE) : q_attr_byte(x);
-        if (w_u8(b, 0) || w_u8(b, attrs) || w_count(b, x->len)) goto out;
+        if (w_u8(b, 0) || w_u8(b, attrs) || w_count(b, q_count(x))) goto out;
         ray_t** e = (ray_t**)ray_data(x);
         rc = 0;
-        for (int64_t i = 0; i < x->len && rc == 0; i++)
+        for (int64_t i = 0; i < q_count(x) && rc == 0; i++)
             rc = q_wire_write_obj(b, e[i]);
         goto out;
     }
     case RAY_CHARV:         /* char vector: raw kdb tag 10 (len-1 stays a VECTOR
                              * on the wire — the 1-char-string conflation is gone) */
-        rc = w_charvec(b, (const char*)ray_data(x), x->len, q_attr_byte(x));
+        rc = w_charvec(b, (const char*)ray_data(x), q_count(x),
+                       q_attr_byte(x));
         goto out;
     }
     /* value band exhausted above; an out-of-band tag (INDEX 97, or the sparse
@@ -905,10 +907,10 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         if (!k || RAY_IS_ERR(k)) return k ? k : q_err(QE_DOMAIN);
         ray_t* v = rd_obj(c);
         if (!v || RAY_IS_ERR(v)) { ray_release(k); return v ? v : q_err(QE_DOMAIN); }
-        int64_t kl = k->type == RAY_TABLE ? ray_table_nrows(k)
-                   : (ray_is_vec(k) || k->type == RAY_LIST) ? ray_len(k) : -1;
-        int64_t vl = v->type == RAY_TABLE ? ray_table_nrows(v)
-                   : (ray_is_vec(v) || v->type == RAY_LIST) ? ray_len(v) : -1;
+        int64_t kl = k->type == RAY_TABLE ? q_count(k)
+                   : (ray_is_vec(k) || k->type == RAY_LIST) ? q_count(k) : -1;
+        int64_t vl = v->type == RAY_TABLE ? q_count(v)
+                   : (ray_is_vec(v) || v->type == RAY_LIST) ? q_count(v) : -1;
         if (kl < 0 || vl < 0 || kl != vl) {
             /* `cols!`:dir/` is the ONE unconformed dict `!` makes (ref/flip-splayed.md) */
             if (k->type == RAY_SYM && q_io_is_fsym(v)) return ray_dict_new(k, v);   /* consumes both */
@@ -941,12 +943,12 @@ static ray_t* rd_obj_inner(rcur_t* c) {
             ray_release(keys); ray_release(cols);
             return t ? t : q_err(QE_DOMAIN);
         }
-        if (cols->type != RAY_LIST || cols->len != keys->len) {
+        if (cols->type != RAY_LIST || q_count(cols) != q_count(keys)) {
             ray_release(keys); ray_release(cols);
             return q_err(QE_DOMAIN);
         }
-        ray_t* tbl = ray_table_new(keys->len);
-        for (int64_t i = 0; i < keys->len && tbl && !RAY_IS_ERR(tbl); i++)
+        ray_t* tbl = ray_table_new(q_count(keys));
+        for (int64_t i = 0; i < q_count(keys) && tbl && !RAY_IS_ERR(tbl); i++)
             tbl = ray_table_add_col(tbl, ray_vec_get_sym_id(keys, i),
                                     ray_list_get(cols, i));   /* col NOT consumed */
         ray_release(keys);
@@ -1126,7 +1128,7 @@ ray_t* q_wire_compress(ray_t* frame) {
     if (!frame || frame->type != RAY_BYTE_ONLY)
         return q_err(QE_TYPE);
     const uint8_t* y = (const uint8_t*)ray_data(frame);
-    size_t t = (size_t)frame->len;
+    size_t t = (size_t) q_count(frame);
     /* basics/ipc.md gates compression on the serialized DATA exceeding 2000 bytes; the
      * 8-byte message header is not data, so q ships a 2008-byte frame whole.  javakdb
      * c.java gates on the whole frame (`wBuffPos>2000`) — a deliberate divergence. */
@@ -1242,7 +1244,7 @@ ray_t* q_wire_deserialize(ray_t* bytes) {
     if (!bytes || bytes->type != RAY_BYTE_ONLY)
         return q_err(QE_TYPE);
     const uint8_t* p = (const uint8_t*)ray_data(bytes);
-    int64_t n = bytes->len;
+    int64_t n = q_count(bytes);
     if (n < 9)
         return q_err(QE_DOMAIN);
     int frame_be;
@@ -1263,7 +1265,7 @@ ray_t* q_wire_deserialize(ray_t* bytes) {
         ub = q_wire_uncompress_payload(body, blen, frame_be);
         if (!ub || RAY_IS_ERR(ub)) return ub ? ub : q_err(QE_WSFULL);
         body = (const uint8_t*)ray_data(ub);
-        blen = (size_t)ub->len;
+        blen = (size_t) q_count(ub);
     }
     rcur_t c = {0};
     c.p = body;

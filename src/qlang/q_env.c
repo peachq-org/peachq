@@ -6,6 +6,7 @@
  * table kernels their dict arms happen to touch. */
 #define _POSIX_C_SOURCE 200809L
 #define Q_OPS_ENV_GRANDFATHER /* the .ipc.on.* six-slot callback seam: ray_env_set on hook syms only */
+#include "qlang/q_count.h"
 #include "qlang/q_env.h"
 #include "qlang/q_registry_internal.h"
 #include "qlang/base/q_err.h"
@@ -78,7 +79,7 @@ static int env_is_marked(ray_t* v) {
     if (!v || RAY_IS_ERR(v) || v->type != RAY_DICT) return 0;
     ray_t* k = ray_dict_keys(v);
     ray_t* vl = ray_dict_vals(v);
-    return k && k->type == RAY_SYM && k->len >= 1 &&
+    return k && k->type == RAY_SYM && q_count(k) >= 1 &&
            vl && vl->type == RAY_LIST &&
            ray_read_sym(ray_data(k), 0, RAY_SYM, k->attrs) == env_marker();
 }
@@ -289,7 +290,7 @@ static ray_err_t env_root_splat(ray_t* d) {
     if (!d || d->type != RAY_DICT) return RAY_ERR_TYPE;
     ray_t*  dk = ray_dict_keys(d);                  /* borrowed */
     ray_t*  dv = ray_dict_vals(d);                  /* borrowed */
-    int64_t n = ray_dict_len(d), marker = env_marker();
+    int64_t n = q_count(d), marker = env_marker();
     ray_err_t e = RAY_OK;
     for (int64_t i = 0; i < n && e == RAY_OK; i++) {
         ray_t* k = q_join_item(dk, i);              /* owned */
@@ -733,7 +734,7 @@ int q_env_name_cmp(const void* a, const void* b) {
 static ray_t* env_dict_names(ray_t* d, q_env_ns_kind_t kind, int members) {
     ray_t* dk = ray_dict_keys(d);
     ray_t* dv = ray_dict_vals(d);
-    int64_t n = ray_dict_len(d);
+    int64_t n = q_count(d);
     if (!dk || dk->type != RAY_SYM || !dv || dv->type != RAY_LIST) return NULL;
     int64_t* sel = (int64_t*)ray_sys_alloc(sizeof(int64_t) * (size_t)(n > 0 ? n : 1));
     if (!sel) return NULL;

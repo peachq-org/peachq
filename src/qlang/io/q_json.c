@@ -14,6 +14,7 @@
  * q_fmt_float's, so `\P` governs JSON (syscmds.md:546).
  * Pure q-layer: no frozen-base edits. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/io/q_json.h"
 #include "qlang/q_prim.h"
 #include "qlang/base/q_err.h"
@@ -227,7 +228,7 @@ static void j_dict(jbuf* b, ray_t* x) {
         ray_release(flat);
         return;
     }
-    int64_t n = ray_len(keys);
+    int64_t n = q_count(keys);
     jbuf_putc(b, '{');
     for (int64_t i = 0; i < n; i++) {
         if (i) jbuf_putc(b, ',');
@@ -253,7 +254,7 @@ static void j_dict(jbuf* b, ray_t* x) {
 
 /* table -> JSON array of row objects. */
 static void j_table(jbuf* b, ray_t* x) {
-    int64_t nr = ray_table_nrows(x);
+    int64_t nr = q_count(x);
     int64_t nc = ray_table_ncols(x);
     jbuf_putc(b, '[');
     for (int64_t r = 0; r < nr; r++) {
@@ -278,7 +279,7 @@ static void j_table(jbuf* b, ray_t* x) {
 
 /* Emit a homogeneous typed vector as a JSON array. */
 static void j_vec(jbuf* b, ray_t* x) {
-    int64_t n = ray_len(x);
+    int64_t n = q_count(x);
     jbuf_putc(b, '[');
     switch (x->type) {
         case RAY_BOOL: {
@@ -350,12 +351,12 @@ static void j_emit(jbuf* b, ray_t* x) {
     if (!x) { j_nyi(b, 0); return; }
     if (x->type < 0) { j_atom(b, x); return; }
     if (x->type == RAY_CHARV) {                      /* char vector -> ONE string */
-        jbuf_str(b, (const char*)ray_data(x), (size_t)ray_len(x));
+        jbuf_str(b, (const char*)ray_data(x), (size_t) q_count(x));
         return;
     }
     switch (x->type) {
         case RAY_LIST: {
-            int64_t n = ray_len(x);
+            int64_t n = q_count(x);
             ray_t** e = (ray_t**)ray_data(x);
             jbuf_putc(b, '[');
             for (int64_t i = 0; i < n; i++) { if (i) jbuf_putc(b, ','); j_emit(b, e[i]); }
@@ -651,8 +652,8 @@ static ray_t* jr_path_set(jr_st* st, ray_t* v) {
         return jr_path_step(v, st->path);
     }
     if (v->type != RAY_SYM && v->type != RAY_I64 && v->type != RAY_LIST) return q_err(QE_TYPE);
-    int64_t n = ray_len(v);
-    if (!n) return NULL;
+    int64_t n = q_count(v);
+    if (n <= 0) return NULL;
     if (!(st->path = (jr_step*)malloc((size_t)n * sizeof *st->path))) return q_err(QE_WSFULL);
     st->npath = n;
     for (int64_t i = 0; i < n; i++) {
@@ -714,11 +715,11 @@ static ray_t* jr_bytes(ray_t* src, char** out, int64_t* outn) {
         ray_release(path);
         if (!held) return q_err(QE_OOM);
         if (RAY_IS_ERR(held)) return held;
-        n = ray_len(held);
+        n = q_count(held);
         p = n ? (const char*)ray_data(held) : "";
     } else if (!q_str_text_bytes(src, &p, &n)) {
         if (src->type != RAY_LIST) return q_err(QE_TYPE);
-        int64_t cnt = ray_len(src);
+        int64_t cnt = q_count(src);
         ray_t** e = (ray_t**)ray_data(src);
         for (int64_t i = 0; i < cnt; i++) {
             const char* ep;
@@ -820,7 +821,7 @@ static ray_t* jr_rejects_tbl(jr_st* st) {
     if (RAY_IS_ERR(tbl)) return tbl;
     for (int c = 0; c < 4; c++) {
         ray_t* col;
-        if (!st->rj[c] || !ray_len(st->rj[c]))
+        if (!st->rj[c] || !q_count(st->rj[c]))
             col = ct[c] == '*' ? ray_list_new(1) : q_type_empty(q_type_of_char(ct[c]));
         else
             col = q_list_collapse(st->rj[c]);
@@ -1060,7 +1061,7 @@ static ray_t* jr_types(jr_st* st, ray_t* ty) {
     if (ty->type != RAY_DICT) return q_err(QE_TYPE);
     ray_t* ks = ray_dict_keys(ty);
     ray_t* vs = ray_dict_vals(ty);
-    int64_t n = ks ? ray_len(ks) : 0;
+    int64_t n = ks ? q_count(ks) : 0;
     for (int64_t i = 0; i < n; i++) {
         ray_t* ia = ray_i64(i);
         ray_t* k = ray_at_fn(ks, ia);
@@ -1194,9 +1195,9 @@ static ray_t* jr_null_cell(const jr_st* st, char c) {
 /* A column of JSON strings, collapsed (RAY_STR) or not (a list of char vectors). */
 static int jr_col_is_text(ray_t* col) {
     if (col->type == RAY_STR) return 1;
-    if (col->type != RAY_LIST || !ray_len(col)) return 0;
+    if (col->type != RAY_LIST || !q_count(col)) return 0;
     ray_t** e = (ray_t**)ray_data(col);
-    for (int64_t i = 0; i < ray_len(col); i++)
+    for (int64_t i = 0; i < q_count(col); i++)
         if (!e[i] || e[i]->type != RAY_CHARV) return 0;
     return 1;
 }
@@ -1209,7 +1210,7 @@ static int jr_col_is_text(ray_t* col) {
  * is every char jr_type_canon admits, and its default arm refuses anything else. */
 static ray_t* jr_retype(const jr_st* st, char c, ray_t* col) {
     if (!jr_col_is_text(col)) return q_dollar_cast(q_type_of_char(c), col);
-    int64_t n = ray_len(col);
+    int64_t n = q_count(col);
     ray_t* out = ray_list_new(n > 0 ? n : 1);
     if (RAY_IS_ERR(out)) return out;
     for (int64_t i = 0; i < n; i++) {
@@ -1222,7 +1223,7 @@ static ray_t* jr_retype(const jr_st* st, char c, ray_t* col) {
         } else {
             ray_t* e = ((ray_t**)ray_data(col))[i];
             p = (const char*)ray_data(e);
-            pl = (size_t)ray_len(e);
+            pl = (size_t) q_count(e);
         }
         ray_t* a = q_csv_cell_atom(&st->fmt, c, p ? p : "", pl);
         if (!a || RAY_IS_ERR(a)) {
@@ -1410,7 +1411,7 @@ static ray_t* jr_assemble(const jr_st* st, ray_t** acc, yyjson_val*** vcol, int6
             } else
                 col = nbuilt ? jr_nested(st, vcol[j], nbuilt) : ray_list_new(1);
         } else
-            col = ray_len(acc[j]) ? q_list_collapse(acc[j])
+            col = q_count(acc[j]) ? q_list_collapse(acc[j])
                                   : (bc == '*' ? ray_list_new(1) : q_type_empty(q_type_of_char(bc)));
         if (col && !RAY_IS_ERR(col) && st->want[j] && st->want[j] != '*') {
             ray_t* c2 = jr_retype(st, st->want[j], col);
@@ -1557,7 +1558,7 @@ static ray_t* jr_opts(jr_st* st, ray_t* opts) {
     if (opts->type != RAY_DICT) return q_err(QE_TYPE);
     ray_t* ks = ray_dict_keys(opts);
     ray_t* vs = ray_dict_vals(opts);
-    int64_t n = ks ? ray_len(ks) : 0;
+    int64_t n = ks ? q_count(ks) : 0;
     for (int64_t i = 0; i < n; i++) {
         ray_t* ia = ray_i64(i);
         ray_t* k = ray_at_fn(ks, ia);
@@ -1638,7 +1639,7 @@ static ray_t* jr_emit(jr_st* st, ray_t* tbl) {
         ed = jr_rejects_tbl(st);
         if (!ed || RAY_IS_ERR(ed)) return ed ? ed : q_err(QE_OOM);
     }
-    ray_t* bad = q_loader_sink_emit(&st->sink, tbl, ed, 0, ray_table_nrows(tbl));
+    ray_t* bad = q_loader_sink_emit(&st->sink, tbl, ed, 0, q_count(tbl));
     if (ed) ray_release(ed);
     return bad;
 }
@@ -1678,7 +1679,7 @@ static ray_t* jr_read(ray_t* src, ray_t* target, ray_t* types, ray_t* opts, q_js
     if (!bad && !info_only) bad = jr_reconcile(&st);
     ray_t* r = bad ? bad : (info_only ? jr_info(&st) : jr_build(&st));
     if (r && !RAY_IS_ERR(r) && st.sink.kind) {
-        int64_t rows = ray_table_nrows(r);
+        int64_t rows = q_count(r);
         ray_t* s = jr_emit(&st, r);
         ray_release(r);
         r = s ? s : jr_summary(&st, rows);

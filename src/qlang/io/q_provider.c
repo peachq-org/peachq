@@ -9,6 +9,7 @@
  * resolved at CALL time from the live q env; a hook's error propagates
  * unmodified. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/io/q_provider.h"
 #include "qlang/io/q_handles.h"
 #include "qlang/base/q_err.h"
@@ -17,7 +18,7 @@
 #include "qlang/q_prim.h"          /* q_str_text_bytes, q_meta_fn */
 #include "qlang/q_builtins.h"      /* q_count_fn — the count fallback */
 #include "qlang/q_registry.h"      /* q_registry_provenance — op value -> its spelling */
-#include "qlang/eval/q_eval.h"     /* q_eval_apply_value / q_eval_call_sym — THE apply seam and its by-name front */
+#include "qlang/eval/q_eval.h"     /* q_eval_apply_value / q_eval_apply_call_sym — THE apply seam and its by-name front */
 #include "lang/eval.h"             /* ray_eval_get_restricted */
 #include "lang/env.h"              /* ray_fn_vary — the .pq.i.load native */
 #include "table/sym.h"             /* ray_sym_intern_runtime, ray_sym_str */
@@ -201,7 +202,7 @@ static ray_t* hook_fn(int64_t provider, const char* hook) {
 static ray_t* hook_call(int64_t provider, const char* hook, ray_t** args, int64_t n) {
     int64_t s = hook_sym(provider, hook);
     if (s < 0) return q_err(QE_NAME);
-    return q_eval_call_sym(s, args, n);
+    return q_eval_apply_call_sym(s, args, n);
 }
 
 
@@ -502,7 +503,7 @@ static const char* head_hook_name(ray_t* h, char* buf, size_t bufn) {
 
 /* `h (HEAD; args...)` — .provider.<name>[connid; args...] */
 static ray_t* prov_hook_list(prov_ent* e, ray_t* y) {
-    int64_t m = ray_len(y);
+    int64_t m = q_count(y);
     if (m < 1 || m > PROV_MAX_ARGS) return q_err(QE_RANK);
     ray_t* owned[PROV_MAX_ARGS] = { NULL };
     ray_t* args[PROV_MAX_ARGS];
@@ -858,7 +859,7 @@ ray_t* q_provider_hdel(ray_t* x) {
  * lands in the context, and a load defines tables in the root (the `\l dir` law). */
 static ray_t* load_names_ok(ray_t* names) {
     if (!names || RAY_IS_ERR(names)) return names ? names : q_err(QE_TYPE);
-    if (names->type == RAY_SYM || (names->type == RAY_LIST && ray_len(names) == 0)) return NULL;
+    if (names->type == RAY_SYM || (names->type == RAY_LIST && q_count(names) == 0)) return NULL;
     if (names->type != -RAY_SYM) { ray_release(names); return q_err(QE_TYPE); }
     return NULL;
 }
@@ -876,7 +877,7 @@ static ray_t* load_bind(prov_ent* e, int64_t name) {
 ray_t* q_provider_load(const char* s, size_t n, ray_t* tables) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     if (!tables || !(RAY_IS_NULL(tables) || tables->type == -RAY_SYM || tables->type == RAY_SYM ||
-                     (tables->type == RAY_LIST && ray_len(tables) == 0)))
+                     (tables->type == RAY_LIST && q_count(tables) == 0)))
         return q_err(QE_TYPE);
     spec_t sp;
     ray_t* pe = spec_parse(s, n, &sp);
@@ -896,7 +897,7 @@ ray_t* q_provider_load(const char* s, size_t n, ray_t* tables) {
     if (one) ray_release(one);
     err = load_names_ok(names);
     if (err) { ray_release(ent.connid); return err; }
-    int64_t m = names->type == -RAY_SYM ? 1 : ray_len(names);
+    int64_t m = q_count(names);
     ray_t* out = ray_sym_vec_new(RAY_SYM_W64, m > 0 ? m : 1);
     int64_t scope = q_env_scope(0);            /* bound at the root, whatever the session or a calling lambda says */
     for (int64_t i = 0; i < m && !err; i++) {

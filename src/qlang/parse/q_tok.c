@@ -1,6 +1,7 @@
 /* q_tok.c — THE single string->value scanner home (contract: q_tok.h).
  * Section 1: the literal-magnitude scanner the code parser calls.
  * Section 2: the `$` Tok whole-string scanners.  Both sit on q_calendar.c. */
+#include "qlang/q_count.h"
 #include "qlang/parse/q_tok.h"
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"      /* q_type_char — THE tag<->type-letter map */

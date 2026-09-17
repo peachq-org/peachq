@@ -5,6 +5,7 @@
  * internal surface lives in q_registry_internal.h.  See q_registry.h for
  * the registry contract. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home */
@@ -192,13 +193,13 @@ ray_t* q_xlog_wrap(ray_t* x, ray_t* y) {
  * whose axis drops from the result; a matrix is a rectangular list of f64 vecs.
  * Shape validated up front: ragged / count-y != count-first-x -> length. */
 int q_mmu_class(ray_t* v, int64_t* first) {  /* 0=vector, 1=matrix, else QMMU_* */
-    if (v && v->type == RAY_F64) { *first = ray_len(v); return 0; }   /* count x */
-    if (v && v->type == RAY_LIST && ray_len(v) > 0) {
+    if (v && v->type == RAY_F64) { *first = q_count(v); return 0; }   /* count x */
+    if (v && v->type == RAY_LIST && q_count(v) > 0) {
         ray_t** e = (ray_t**)ray_data(v);
         int64_t w = -1;
-        for (int64_t i = 0; i < ray_len(v); i++) {
+        for (int64_t i = 0; i < q_count(v); i++) {
             if (!e[i] || e[i]->type != RAY_F64) return QMMU_BAD;
-            int64_t l = ray_len(e[i]);
+            int64_t l = q_count(e[i]);
             if (w < 0) w = l; else if (l != w) return QMMU_RAGGED;
         }
         *first = w;                                                   /* count first x */
@@ -212,13 +213,13 @@ ray_t* q_mmu_wrap(ray_t* x, ray_t* y) {
     int xc = q_mmu_class(x, &kx), yc = q_mmu_class(y, &ky);
     if (xc == QMMU_BAD || yc == QMMU_BAD) return q_err(QE_TYPE);
     if (xc == QMMU_RAGGED || yc == QMMU_RAGGED) return q_err(QE_LENGTH);
-    if (kx != ray_len(y)) return q_err(QE_LENGTH);          /* count y must match */
+    if (kx != q_count(y)) return q_err(QE_LENGTH);          /* count y must match */
 
     ray_t* ycols = yc ? q_flip_wrap(y) : NULL;          /* owned: cols of y as f64 vecs */
     if (yc && (!ycols || RAY_IS_ERR(ycols))) return ycols ? ycols : q_err(QE_OOM);
     ray_t** rowv = xc ? (ray_t**)ray_data(x) : NULL;
     ray_t** colv = yc ? (ray_t**)ray_data(ycols) : NULL;
-    int64_t R = xc ? ray_len(x) : 1;                    /* result rows (dropped if x is a vec) */
+    int64_t R = xc ? q_count(x) : 1;                    /* result rows (dropped if x is a vec) */
     int64_t C = yc ? ky : 1;                            /* result cols (dropped if y is a vec) */
 
     /* scalar: vector . vector -> float atom (or propagated kernel error) */
@@ -293,7 +294,7 @@ ray_t* q_inv_wrap(ray_t* x) {
     int xc = q_mmu_class(x, &w);
     if (xc == QMMU_BAD || xc == 0) return q_err(QE_TYPE);
     if (xc == QMMU_RAGGED) return q_err(QE_LENGTH);
-    int64_t n = ray_len(x);
+    int64_t n = q_count(x);
     if (w != n) return q_err(QE_LENGTH);
 
     double* a = mat_flat(x, n, n);
@@ -351,7 +352,7 @@ ray_t* q_lsq_wrap(ray_t* x, ray_t* y) {
     if (xc == QMMU_BAD || yc == QMMU_BAD || xc == 0 || yc == 0) return q_err(QE_TYPE);
     if (xc == QMMU_RAGGED || yc == QMMU_RAGGED) return q_err(QE_LENGTH);
     if (px != py) return q_err(QE_LENGTH);
-    int64_t m = ray_len(x), n = ray_len(y);
+    int64_t m = q_count(x), n = q_count(y);
 
     ray_t* yt = q_flip_wrap(y);
     if (!yt || RAY_IS_ERR(yt)) return yt ? yt : q_err(QE_OOM);
@@ -566,8 +567,8 @@ static int match_rec(ray_t* a, ray_t* b) {
          * domains: the resolved values decide (the decay law's answer). */
         if (q_enum_domain(a) == q_enum_domain(b)) {
             if (a->type == -RAY_ENUM) return a->i64 == b->i64;
-            int64_t la = ray_len(a);
-            return la == ray_len(b) &&
+            int64_t la = q_count(a);
+            return la == q_count(b) &&
                    memcmp(ray_data(a), ray_data(b), (size_t)la * 8) == 0;
         }
         ray_t* ra = q_enum_val_image(a);
@@ -601,8 +602,8 @@ static int match_rec(ray_t* a, ray_t* b) {
         return q_match_rec(ea[0], eb[0]) && q_match_rec(ea[1], eb[1]);
     }
     if (a->type == RAY_LIST || ray_is_vec(a)) {
-        int64_t la = ray_len(a);
-        if (la != ray_len(b)) return 0;
+        int64_t la = q_count(a);
+        if (la != q_count(b)) return 0;
         /* same-type numeric vectors: payload memcmp (nulls are in-payload
          * sentinels; attrs deliberately not compared).  SYM vecs vary in
          * index width -> per-element below. */

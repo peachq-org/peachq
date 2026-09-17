@@ -8,6 +8,7 @@
  * and for each significant operation it exposes a specialized function with types where possible e.g. ``q_bang_dispatch(int64_t id, ray_t* y)``, ``q_bang_enkey(int64_t nkey, ray_t* y)``.
  * These more specific names are for reuse in the code base. Having the specific types also helps. 
  */
+#include "qlang/q_count.h"
 #include "qlang/ops/q_bang.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_registry_internal.h"  /* q_hsym_wrap, q_attr_wrap, q_type_strict_i64,
@@ -81,7 +82,7 @@ static ray_t* h_hcount(ray_t* y) {
 /* -34!(f;args) — .Q.ts, functional `\ts` (ref/dotq.md#ts-time-and-space).
  * The one operand packs Apply's two: unpack and delegate to the q_sys home. */
 static ray_t* h_timespace(ray_t* y) {
-    if (!y || y->type != RAY_LIST || ray_len(y) != 2)
+    if (!y || y->type != RAY_LIST || q_count(y) != 2)
         return q_err(QE_TYPE);
     return q_sys_ts_apply(ray_list_get(y, 0), ray_list_get(y, 1));
 }
@@ -110,7 +111,7 @@ static ray_t* bang_fmt_one(int places, double y) {
  * returns a string (atom) or list of strings (vector), formatted with IEEE754
  * rounding, ignoring \P. */
 static ray_t* h_format(ray_t* arg) {
-    if (!arg || arg->type != RAY_LIST || ray_len(arg) != 2)
+    if (!arg || arg->type != RAY_LIST || q_count(arg) != 2)
         return q_err(QE_TYPE);
     ray_t* px = ray_list_get(arg, 0);    /* borrowed */
     ray_t* y  = ray_list_get(arg, 1);    /* borrowed */
@@ -126,7 +127,7 @@ static ray_t* h_format(ray_t* arg) {
         return bang_fmt_one(places, y->f64);
     }
     if (y->type == RAY_F64) {                  /* float vector -> list of strings */
-        int64_t len = ray_len(y);
+        int64_t len = q_count(y);
         const double* d = (const double*)ray_data(y);
         ray_t* out = ray_list_new(len);
         for (int64_t i = 0; i < len; i++) {
@@ -189,7 +190,7 @@ static ray_t* dict_pair(ray_t* x, ray_t* y) {
     /* a dict is not a list (ref/dict.md:22, owner 2026-09-13): 'type, whatever its count says */
     if (q_type_is_dict(x) || q_type_is_dict(y))
         return q_err(QE_TYPE);
-    if (q_builtins_count_long(x) != q_builtins_count_long(y))
+    if (q_count(x) != q_count(y))
         return q_err(QE_LENGTH);
     /* nor is an atom (owner 2026-09-13): the 1-count match is no licence to enlist it */
     if (x->type < 0 || y->type < 0)
@@ -203,7 +204,7 @@ static ray_t* dict_pair(ray_t* x, ray_t* y) {
     /* An EMPTY dict is built directly: rayfall's dict rejects the empty general
      * list (`()!()`) and drops a typed empty's domain, but `` type value
      * (`long$())!`symbol$() `` must stay 11h. */
-    if (q_builtins_count_long(y) == 0) {
+    if (q_count(y) == 0) {
         ray_retain(x);
         ray_retain(y);
         return ray_dict_new(x, y);               /* consumes both retains */
@@ -227,9 +228,9 @@ static ray_t* dict_pair(ray_t* x, ray_t* y) {
  * the plain count law and signals what ``a!(1;2)` does), and with it the table
  * and dict key sides.  A typed empty (`long$()) value side is untouched too. */
 static ray_t* bang_make_dict(ray_t* x, ray_t* y) {
-    int64_t nk = q_builtins_count_long(x);
+    int64_t nk = q_count(x);
     int keylist = ray_is_vec(x) || x->type == RAY_LIST;
-    if (!keylist || nk <= 0 || y->type != RAY_LIST || ray_len(y) != 0)
+    if (!keylist || nk <= 0 || y->type != RAY_LIST || q_count(y) != 0)
         return dict_pair(x, y);
     ray_t* n = ray_i64(nk);
     ray_t* filled = q_take_wrap(n, y);
@@ -247,7 +248,7 @@ static ray_t* bang_make_dict(ray_t* x, ray_t* y) {
 static ray_t* bang_show(ray_t* y) {
     ray_t* s = q_fmt_krepr_charv(y);          /* `0N!` and `-3!` are ONE text — so, one call */
     if (RAY_IS_ERR(s)) return s;
-    int rc = q_console_write((const char*)ray_data(s), (size_t)ray_len(s));
+    int rc = q_console_write((const char*)ray_data(s), (size_t) q_count(s));
     rc |= q_console_write("\n", 1);
     ray_release(s);
     if (rc) return q_err(QE_WSFULL);
@@ -298,7 +299,7 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
                 return ray_ipc_handle_of_fd(q_type_iatom_val(y)) < 0 ? q_err(QE_DOMAIN)
                                                                      : q_tls_info();
             int cfg = y->type == RAY_NULL || y->type == RAY_UNARY ||
-                      (y->type == RAY_LIST && ray_len(y) == 0);
+                      (y->type == RAY_LIST && q_count(y) == 0);
             return cfg ? q_tls_info() : q_err(QE_TYPE);
         }
 

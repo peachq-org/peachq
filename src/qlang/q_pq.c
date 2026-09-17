@@ -6,6 +6,7 @@
  * store's file column reads `lib/str.q`, and every file's header is captured
  * (a flat concatenation kept only the first).  Nothing here runs at
  * q_runtime_create — the pre-gate env stays kdb-clean. */
+#include "qlang/q_count.h"
 #include "qlang/q_pq.h"
 #include "qlang/base/q_err.h"  /* q_err — an aborted bundle load's re-signal */
 #include "qlang/q_ctx.h"       /* q_ctx_run_src / _named_src — THE script seam */

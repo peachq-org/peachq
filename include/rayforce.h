@@ -321,6 +321,9 @@ void ray_error_free(ray_t* err);
  * below the q boundary, per string-model spec §A/§3. */
 #define ray_is_vec(v)     (((v)->type >= RAY_BOOL && (v)->type <= RAY_TIME) || (v)->type == RAY_STR)
 #define ray_len(v)        ((v)->len)
+/* The block's slot count under a name that announces a raw read — a dict or
+ * table block has 2, a STR atom's is not a length. */
+#define ray_block_len(v)  ((v)->len)
 
 /* Element type sizes indexed by type tag — covers all uint8_t values.
  * Only types 1-14 (vectors) have non-zero entries. */

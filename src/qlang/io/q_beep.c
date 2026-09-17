@@ -10,6 +10,7 @@
  * The tone plays on a detached thread that touches NOTHING of the engine —
  * no ray_t, no env, no console — only its copy of hz/ms and the audio handle. */
 #define _GNU_SOURCE
+#include "qlang/q_count.h"
 #include "qlang/io/q_beep.h"
 #include "qlang/io/q_termbox.h"    /* q_termbox_emit — the bell rides the session's stream */
 #include "qlang/base/q_err.h"

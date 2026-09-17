@@ -3,6 +3,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L    /* clock_gettime / CLOCK_MONOTONIC */
 #endif
+#include "qlang/q_count.h"
 #include <rayforce.h>
 #include "qlang/net/q_ws.h"
 #include "qlang/q_prim.h"
@@ -10,7 +11,7 @@
 #include "qlang/q_env.h"       /* q_env_get — the `.z.ws`/`.z.wo`/`.z.wc` handlers */
 #include "qlang/q_builtins.h"  /* q_dotq_sha1_fn / q_dotq_btoa_fn — accept key */
 #include "qlang/q_console.h"   /* q_console_str/_reset — drain handler output */
-#include "qlang/eval/q_eval.h" /* q_eval_call_name — handler firing */
+#include "qlang/eval/q_eval.h" /* q_eval_apply_call_name — handler firing */
 #include "mem/sys.h"
 #include "picohttpparser.h"
 #include <string.h>
@@ -190,7 +191,7 @@ static void ws_console_drain(void) {
 }
 
 static void ws_hook_fire(const char* name, ray_t* arg) {
-    ray_t* r = q_eval_call_name(name, strlen(name), &arg, 1);
+    ray_t* r = q_eval_apply_call_name(name, strlen(name), &arg, 1);
     ws_console_drain();
     if (r) {
         if (RAY_IS_ERR(r)) {              /* D2: log, keep the connection */
@@ -417,7 +418,7 @@ int q_ws_send(q_ws_conn_t* c, ray_sock_t fd, ray_t* msg) {
                                Q_WS_DATA_SECS, mask); }
     if (msg->type == RAY_BYTE_ONLY)
         return ws_frame_send(fd, Q_WS_OP_BIN, ray_data(msg),
-                             (size_t)msg->len, Q_WS_DATA_SECS, mask);
+                             (size_t) q_count(msg), Q_WS_DATA_SECS, mask);
     return -2;
 }
 

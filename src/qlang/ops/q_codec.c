@@ -1,6 +1,7 @@
 /* ops/q_codec.c — the byte-codec verb bodies: md5 (-15!), .Q base64
  * (btoa/atob), SHA-1, and the .Q.c.gz seam wrapper.  Evicted from
  * q_builtins.c; the shared text-bytes probe lives here with its users. */
+#include "qlang/q_count.h"
 #include "qlang/q_builtins.h"   /* the codec decls (q_md5_fn, q_dotq_*) */
 #include "qlang/base/q_err.h"
 #include "qlang/q_prim.h"      /* q_str_text_bytes */
@@ -88,7 +89,7 @@ static int codec_bytes_of(ray_t* x, const uint8_t** p, size_t* n) {
     const char* tp; int64_t tn;
     if (!x) return 0;
     if (q_str_text_bytes(x, &tp, &tn)) { *p = (const uint8_t*)tp; *n = (size_t)tn; return 1; }
-    if (x->type == RAY_BYTE_ONLY)  { *p = (const uint8_t*)ray_data(x); *n = (size_t)ray_len(x); return 1; }
+    if (x->type == RAY_BYTE_ONLY)  { *p = (const uint8_t*)ray_data(x); *n = (size_t) q_count(x); return 1; }
     return 0;
 }
 
@@ -264,7 +265,7 @@ ray_t* q_dotq_gz_fn(ray_t** args, int64_t argc) {
     ray_t* x = args[0];
     if (!x) return q_err(QE_TYPE);
     if (RAY_IS_NULL(x)) return ray_bool(1);              /* .Q.gz[::] — capability */
-    if (x->type == RAY_LIST && ray_len(x) == 2) {        /* deflate */
+    if (x->type == RAY_LIST && q_count(x) == 2) {        /* deflate */
         ray_t* cl  = ray_list_get(x, 0);                 /* borrowed */
         ray_t* cbv = ray_list_get(x, 1);                 /* borrowed */
         if (!cl || cl->type != -RAY_I64) return q_err(QE_TYPE);
