@@ -921,8 +921,11 @@ static ray_t *table_lit_dict(ray_t *defs) {
         die_err(QE_DUP);
     }
     /* a 1-elem keys node is byte-identical to the enlisted-sym-ATOM constant
-     * (,`a) that q_eval unwraps — mark it as the genuine 1-name key LIST */
+     * (,`a) that q_eval unwraps — mark it as the genuine 1-name key LIST; a
+     * longer one is a sym-vector CONSTANT, enclosed as every symvec in a tree
+     * is (,`a`b — parsetrees.md:26; bare, it would be the tree a[b]) */
     if (n == 1 && keys && !RAY_IS_ERR(keys)) keys->attrs |= Q_ATTR_KEYLIST;
+    else if (n > 1) keys = noun_tree_value(keys);
     ray_release(defs);
     return table_lit_bang(keys, vals);
 }
