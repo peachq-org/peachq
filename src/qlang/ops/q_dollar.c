@@ -10,6 +10,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/parse/q_tok.h"   /* q_tok — THE Tok entry */
 #include "qlang/base/q_calendar.h" /* q_calendar_ts_compose — date->timestamp cast */
+#include "qlang/ops/q_index.h"  /* q_index_any_nested_item — the "c"$ pack/distribute boundary */
 #include "ops/temporal.h"  /* ray_temporal_extract — base calendar decomposition */
 #include "lang/cal.h"     /* THE datetime and timestamp splits */
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
@@ -163,9 +164,9 @@ static ray_t* cast_bool(ray_t* x) {
 
 /* char cast (`10h$`/`` `char$``/`"c"$`): reinterpret an integer/byte value as
  * chars, producing a native string (peachq has no char-atom type distinct from
- * a 1-char string).  The boxed-list arm packs into ONE string, so "c"$ must
- * beat q_dollar_cast's RAY_LIST distribution (which would build a list of
- * 1-char strings — q_list_collapse refuses to pack them). */
+ * a 1-char string).  The boxed-list arm packs a list of ATOMS into ONE string,
+ * so "c"$ must beat q_dollar_cast's RAY_LIST distribution (which would build a
+ * list of 1-char strings — q_list_collapse refuses to pack them). */
 static ray_t* cast_str(ray_t* x) {
     if (x && x->type == -RAY_STR) { ray_retain(x); return x; }   /* identity */
     if (x && (x->type == RAY_CHARV || x->type == -RAY_CHARV)) {  /* charv identity */
@@ -197,7 +198,7 @@ static ray_t* cast_str(ray_t* x) {
         ray_release(b);
         return r;
     }
-    if (x && x->type == RAY_LIST) {          /* boxed list of int/byte -> string */
+    if (x && x->type == RAY_LIST) {          /* boxed list of int/byte ATOMS -> string */
         int64_t n = q_count(x);
         ray_t** e = (ray_t**)ray_data(x);
         char* buf = (char*)malloc(n > 0 ? (size_t)n : 1);
@@ -479,10 +480,12 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
         ray_release(v);
         return r;
     }
-    /* Precedes the switch by ORDER, not preference: "c"$ packs a boxed list
-     * into ONE string, so it must beat the per-tag arms AND the RAY_LIST
-     * distribution below. */
-    if (tag == RAY_CHARV)
+    /* Precedes the switch by ORDER, not preference: "c"$ packs a boxed list of
+     * ATOMS into ONE string (kdb's atomic cast collapses the char atoms the
+     * same way), so it must beat the per-tag arms AND the RAY_LIST
+     * distribution below — which a list holding a collection falls to, like
+     * every other target (owner ruling 2026-09-17). */
+    if (tag == RAY_CHARV && !q_index_any_nested_item(x))
         return q_str_charv_out(cast_str(x));
     /* numeric cast of char text = code points (`int$"ABC" -> 65 66 67i;
      * `float$"AC" -> 65 67f, ref/log.md:101) — via the byte cast, then cast. */
@@ -514,7 +517,7 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
         return c;
     }
     switch ((ray_type_e)tag) {
-    case RAY_CHARV: break;                   /* hoisted above: packs boxed lists */
+    case RAY_CHARV: break;                   /* hoisted above: the atom pack; nested lists distributed */
     case RAY_LIST: break;                    /* tag 0 is not a cast designator */
     case RAY_GUID: break;                    /* guid target: no base arm — deferred */
     case RAY_ENUM: break;                    /* never a designator (q_cast_designator) */
