@@ -44,6 +44,7 @@
 #include "qlang/ops/q_bang.h"               /* q_bang — the `!` row */
 #include "qlang/ops/q_dollar.h"             /* q_dollar — the `$` row */
 #include "qlang/ops/q_index.h"              /* q_index_assign_wrap — the `:` row */
+#include "qlang/q_env.h"                    /* q_env_marker_dict — the identity element of `.` */
 #include <assert.h>
 #include <string.h>
 
@@ -522,7 +523,7 @@ static const q_op_t Q_OPS[] = {
  * from the value or from each other. ==== */
 typedef struct {
     const char* name;   /* verb spelling, keyed by name so each row can cite its doc */
-    int8_t      val;    /* the element: 0/1 long, -1 = the generic empty () */
+    int8_t      val;    /* the element: 0/1 long, -1 = the generic empty (), -2 = the empty directory */
     int8_t      seeds;  /* accumulators.md unary-seed: `(I f/x)~(f/)x` — two-sided identities only */
     int8_t      fills;  /* dict key-union: identity applied on the missing side */
 } identity_t;
@@ -535,6 +536,9 @@ static const identity_t IDENTITY[] = {
     { ",", -1, 1, 0 },   /* seeds LIVE, not inert: `,` has no mono_scan, so `(,\)2 3 4` reaches the generic
                           * fold and its first item is ,2 ONLY because () seeds the first evaluation
                           * (accumulators.md:262).  fills UNSET: dict `,` is upsert, never element-wise */
+    { ".", -2, 0, 0 },   /* element: the empty directory (enlist `)!enlist (::) — `err.:(::)` on an unbound name
+                          * seeds the dictionary `err[`k]:{…}` extends (TorQ permissions.q:14, :136 spells it by
+                          * hand; owner ruling 2026-09-17).  Never seeds a fold, never fills a key-union */
 };
 
 static const identity_t* identity_row(const char* spelling) {
@@ -546,6 +550,7 @@ static const identity_t* identity_row(const char* spelling) {
 
 static ray_t* identity_value(const identity_t* r) {
     if (!r) return NULL;
+    if (r->val == -2) return q_env_marker_dict();
     return r->val < 0 ? ray_list_new(0) : ray_i64(r->val);
 }
 

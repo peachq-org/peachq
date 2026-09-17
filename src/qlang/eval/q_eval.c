@@ -23,7 +23,7 @@
 #include "qlang/q_ops.h"
 #include "qlang/q_registry.h"
 #include "qlang/q_registry_internal.h"   /* q_type_strict_i64 — the do-count judgment */
-#include "qlang/q_prim.h"                /* q_join_amend — the `,:` home */
+#include "qlang/q_prim.h"                /* q_join_amend — the `,:` home; q_list_uncollapse — the sym-vector tree */
 #include "qlang/q_dotz.h"
 #include "qlang/q_env.h"
 #include "qlang/ops/q_index.h"
@@ -639,8 +639,9 @@ ray_t* q_eval_statement(const char* src, int* parsed) {
  * `:path sym READS THAT FILE (ref/get.md — kdb's get IS value), any other
  * sym atom names a variable, a dict yields its values, and a list applies
  * its first item (string/sym heads evaluated first, ref/value.md) to the
- * rest AS LITERALS — nested trees stay data.  value of a TYPED vector
- * (incl. the enlisted constant ,`x) is doc-silent: 'nyi, never a guess. */
+ * rest AS LITERALS — nested trees stay data.  A sym vector of two or more is
+ * that list; value of any OTHER typed vector (incl. the enlisted constant
+ * ,`x) is doc-silent: 'nyi, never a guess. */
 ray_t* q_eval_value_wrap(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (RAY_IS_NULL(x)) return ray_i64(0);   /* (::) IS unary primitive 0 —
@@ -690,6 +691,12 @@ ray_t* q_eval_value_wrap(ray_t* x) {
         ray_t* v = ray_dict_vals(x);
         ray_retain(v);
         return v;
+    }
+    if (x->type == RAY_SYM && q_count(x) > 1) {   /* what `(`f;`)` collapses to (TorQ torq.q:678 `value (`init;`)`) */
+        ray_t* l = q_list_uncollapse(x);
+        ray_t* r = RAY_IS_ERR(l) ? l : q_eval_value_wrap(l);
+        if (!RAY_IS_ERR(l)) ray_release(l);
+        return r;
     }
     if (x->type == RAY_LIST && q_count(x) >= 1) {
         int64_t argc = q_count(x) - 1;
@@ -983,6 +990,14 @@ ray_t* q_eval(ray_t* node) {
         /* the unwrap is the enlist's inverse, so it must restore the DATA mark
          * too: without it a verb-glyph sym (`. `+) prints as a bare name-ref */
         if (ret && !RAY_IS_ERR(ret)) ret->attrs |= Q_ATTR_QUOTED;
+        goto out;
+    }
+    /* a longer sym vector is the tree (`f;`x…) kdb's `parse "f x"` prints — only the ENLISTED symbol list is a
+     * constant (parsetrees.md:100) — so a qSQL constraint's symbol head is a name (TorQ trackservers.q:350) */
+    if (node->type == RAY_SYM && q_count(node) > 1) {
+        ray_t* l = q_list_uncollapse(node);
+        ret = RAY_IS_ERR(l) ? l : q_eval(l);
+        if (!RAY_IS_ERR(l)) ray_release(l);
         goto out;
     }
     if (node->type != RAY_LIST || q_count(node) == 0) {

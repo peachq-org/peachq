@@ -93,6 +93,10 @@ int q_env_ident_ok(const char* p, size_t len);
  * for every other namespace (ref/key.md `key `.` beside `key `.q`). */
 int64_t q_env_marker_sym(void);
 
+/* The EMPTY directory `(enlist `)!enlist (::)` — what `.a.b:1` creates for `.a`, and the identity element of `.`
+ * (`err.:(::)` on an unbound name seeds it, TorQ permissions.q:14).  OWNED (rc=1), NULL on allocation failure. */
+ray_t* q_env_marker_dict(void);
+
 /* `key ``: the root's namespaces in creation order, `.z` excluded
  * (basics/syscmds.md §`\d`).  OWNED sym vector. */
 ray_t* q_env_ns_roster(void);

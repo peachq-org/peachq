@@ -55,7 +55,7 @@ static int64_t env_marker(void) { return ray_sym_intern_runtime("", 0); }
 /* q_env_marker_sym — see q_env.h. */
 int64_t q_env_marker_sym(void) { return env_marker(); }
 
-static ray_t* env_marker_dict(void) {
+ray_t* q_env_marker_dict(void) {
     ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, 1);
     ray_t* vals = ray_list_new(1);
     if (!keys || RAY_IS_ERR(keys) || !vals || RAY_IS_ERR(vals)) {
@@ -189,7 +189,7 @@ static ray_t* env_amend(ray_t* d, const int64_t* segs, int nseg, int i, ray_t* v
         ray_t* child = ray_dict_probe_sym_borrowed(d, segs[i]);
         ray_t* sub = NULL;
         if (child && child->type == RAY_DICT) { ray_retain(child); sub = child; }
-        else if (!child && ray_dict_find_sym(d, segs[i]) < 0) sub = env_marker_dict();
+        else if (!child && ray_dict_find_sym(d, segs[i]) < 0) sub = q_env_marker_dict();
         if (!sub) {
             ray_release(d);
             ray_release(k);
@@ -790,9 +790,9 @@ int64_t q_env_scope_ctx(void) { return ENV_CTX; }
 
 ray_err_t q_env_init(void) {
     if (env_root) return RAY_OK;
-    env_root = env_marker_dict();
-    env_ns   = env_marker_dict();
-    env_boot = env_marker_dict();
+    env_root = q_env_marker_dict();
+    env_ns   = q_env_marker_dict();
+    env_boot = q_env_marker_dict();
     if (!env_root || !env_ns || !env_boot) {
         q_env_destroy();
         return RAY_ERR_OOM;
