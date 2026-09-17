@@ -219,15 +219,15 @@ int8_t q_type_elem_tag(ray_t* x) {
  * consumers key on WIDTH, never enumerate tags: 8/4/2 read signed, 1 reads
  * unsigned (U8); 0 = not an int index.  SYM is i64-backed but EXCLUDED —
  * a sym index means column access, never a row.  BOOL is excluded pending
- * a doc citation for boolean indexing.  Atom callers pass -atom->type;
- * every accepted ATOM stores its payload in .i64 (vec/atom.c), so as_i64's
- * fallback reads it correctly. */
+ * a doc citation for boolean indexing.  A CHAR is a byte here (owner ruling
+ * 2026-09-17: `(til 256)"ab"`) though never a count (q_type_strict_i64).
+ * Atom callers pass -atom->type; every accepted ATOM is one as_i64 reads. */
 int q_type_int_index_width(int8_t t) {
     switch (t) {
     case RAY_I64: return 8;
     case RAY_I32: return 4;
     case RAY_I16: return 2;
-    case RAY_BYTE_ONLY: return 1;
+    RAY_BYTE_CASES: return 1;
     default:
         if (RAY_IS_TEMPORAL64(t)) return 8;   /* timestamp, timespan */
         if (RAY_IS_TEMPORAL32(t)) return 4;   /* month date minute second time */
@@ -237,11 +237,12 @@ int q_type_int_index_width(int8_t t) {
 
 /* Strict cast: cast-or-fail, TYPE-strict (an integral-valued float refuses);
  * typed nulls pass through as sentinel payloads — value checks stay at the
- * call site.  Accepted set = the q_type_int_index_width law: I64/I32/I16/U8 +
- * int-backed temporal ATOMS; never sym/bool/float/structures.
+ * call site.  Accepted set: I64/I32/I16/U8 + int-backed temporal ATOMS;
+ * never sym/bool/float/structures, nor a char — the index lane's one
+ * admission (q_type_int_index_width) a count refuses.
  * Returns 1 + *out, or 0 on refusal. */
 int q_type_strict_i64(ray_t* x, int64_t* out) {
-    if (!x || x->type >= 0) return 0;
+    if (!x || x->type >= 0 || x->type == -RAY_CHARV) return 0;
     switch (q_type_int_index_width((int8_t)-x->type)) {
     case 8: *out = x->i64;          return 1;
     case 4: *out = (int64_t)x->i32; return 1;

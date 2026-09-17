@@ -72,8 +72,9 @@ static ray_t* str_split(const char* y, int64_t yl, const char* sep, int64_t sl, 
     return out;
 }
 
-/* ` vs `sym — split a symbol: leading ':' (file handle) splits at the LAST
- * '/' into (dir; file); otherwise split on every '.'.  -> RAY_SYM vector. */
+/* ` vs `sym — split a symbol: a file handle (leading ':') into (dir; file) at
+ * the LAST '/', `:. the dir when there is none (owner ruling 2026-09-17);
+ * otherwise on every '.'.  -> RAY_SYM vector. */
 static ray_t* sym_split(ray_t* y) {
     ray_t* s = ray_sym_str(y->i64);
     if (!s) return q_err(QE_TYPE);
@@ -83,15 +84,11 @@ static ray_t* sym_split(ray_t* y) {
     if (n > 0 && p[0] == ':') {                    /* file handle: last '/' */
         size_t cut = n;
         for (size_t i = n; i-- > 0; ) if (p[i] == '/') { cut = i; break; }
-        if (cut == n) {                            /* no '/', single element */
-            int64_t id = ray_sym_intern_runtime(p, n);
-            out = ray_vec_append(out, &id);
-        } else {
-            int64_t a = ray_sym_intern_runtime(p, cut);
-            int64_t b = ray_sym_intern_runtime(p + cut + 1, n - cut - 1);
-            out = ray_vec_append(out, &a);
-            out = ray_vec_append(out, &b);
-        }
+        int64_t a = cut == n ? ray_sym_intern_runtime(":.", 2) : ray_sym_intern_runtime(p, cut);
+        int64_t b = cut == n ? ray_sym_intern_runtime(p + 1, n - 1)
+                             : ray_sym_intern_runtime(p + cut + 1, n - cut - 1);
+        out = ray_vec_append(out, &a);
+        out = ray_vec_append(out, &b);
     } else {                                        /* split all '.' */
         size_t seg = 0;
         for (size_t i = 0; i <= n; i++) {
