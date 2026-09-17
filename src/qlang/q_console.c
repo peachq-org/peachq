@@ -1,5 +1,6 @@
 /* q_console — console sink buffer + the modern pipe-table mode.  See
  * q_console.h for the contract; the value->string core stays in q_fmt.c. */
+#include "qlang/q_count.h"
 #include "qlang/q_console.h"
 #include "qlang/q_fmt.h"               /* q_fmt_console_alloc — show's render */
 #include "core/ipc.h"                  /* ray_ipc_current_handle — handler write-through */

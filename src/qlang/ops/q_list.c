@@ -7,6 +7,7 @@
  * both cases.  The shared internal surface lives in q_registry_internal.h.
  * See q_registry.h for the registry contract. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"  /* q_type_empty (the one typed-empty ctor), q_type_common — `^`'s result-type law */
@@ -22,11 +23,11 @@
 /* ---- collapse: homogeneous atom list -> typed vector (q_registry_internal.h) ---- */
 
 static ray_t* atom_run_collapse(ray_t* l) {
-    if (!l || RAY_IS_ERR(l) || l->type != RAY_LIST || ray_len(l) == 0) {
+    if (!l || RAY_IS_ERR(l) || l->type != RAY_LIST || q_count(l) == 0) {
         if (l) ray_retain(l);
         return l;
     }
-    int64_t n = ray_len(l);
+    int64_t n = q_count(l);
     ray_t** e = (ray_t**)ray_data(l);
     int8_t t = e[0] ? e[0]->type : 0;
     if (t >= 0 || t == -RAY_STR) { ray_retain(l); return l; }   /* not a scalar-atom run */
@@ -103,7 +104,7 @@ static ray_t* dict_rows_table(ray_t* const* rows, int64_t n) {
         if (!r) k0 = k;
         else if (!q_match_rec(k0, k)) return NULL;   /* same names, same order */
     }
-    int64_t nc = ray_len(k0);
+    int64_t nc = q_count(k0);
     /* a run of dicts with NO keys is no table: with no column to take a length from it would answer for zero
      * rows however many there are, and silently take every column beside it down with it */
     if (nc < 1) return NULL;
@@ -137,10 +138,10 @@ static ray_t* dict_rows_table(ray_t* const* rows, int64_t n) {
 }
 
 ray_t* q_list_collapse(ray_t* l) {
-    if (l && !RAY_IS_ERR(l) && l->type == RAY_LIST && ray_len(l) > 0) {
+    if (l && !RAY_IS_ERR(l) && l->type == RAY_LIST && q_count(l) > 0) {
         ray_t** e = (ray_t**)ray_data(l);
         if (e[0] && e[0]->type == RAY_DICT) {   /* a run of like rows IS a table */
-            ray_t* tb = dict_rows_table(e, ray_len(l));
+            ray_t* tb = dict_rows_table(e, q_count(l));
             if (tb) return tb;
         }
     }
@@ -158,7 +159,7 @@ ray_t* q_list_collapse(ray_t* l) {
  * `proto`; passes errors and non-empty results through untouched. */
 ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto) {
     if (!collapsed || RAY_IS_ERR(collapsed)) return collapsed;
-    if (collapsed->type != RAY_LIST || ray_len(collapsed) != 0) return collapsed;
+    if (collapsed->type != RAY_LIST || q_count(collapsed) != 0) return collapsed;
     ray_t* cp = (proto && proto->type == RAY_LIST) ? q_list_collapse(proto) : NULL;
     ray_t* p  = cp ? cp : proto;
     ray_t* tv = (p && ray_is_vec(p) && p->type != RAY_LIST) ? q_type_empty(p->type) : NULL;
@@ -200,7 +201,7 @@ ray_t* q_enlist_wrap(ray_t** args, int64_t n) {
                    ? ray_dict_keys(args[0]) : NULL;
     /* an EMPTY dict spells no row: no zero-column table could hold the one this makes, so it enlists as the
      * one-item list it is, leaving 'type to keys that are genuinely no table's names */
-    if (k && ray_len(k) > 0) {
+    if (k && q_count(k) > 0) {
         ray_t* t = dict_rows_table(args, 1);         /* non-sym keys are no table */
         return t ? t : q_err(QE_TYPE);
     }
@@ -242,9 +243,9 @@ ray_t* q_where_wrap(ray_t* x) {
         return keys;
     }
     /* an index is long whatever the input, and an empty has no 1s (owner ruling 2026-09-09; ref/where.md is silent) */
-    if (x && x->type == RAY_LIST && !ray_len(x)) return q_type_empty(RAY_I64);
+    if (x && x->type == RAY_LIST && !q_count(x)) return q_type_empty(RAY_I64);
     if (x && (x->type == RAY_I64 || x->type == RAY_I32 || x->type == RAY_I16)) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         int64_t total = 0;
         for (int64_t i = 0; i < n; i++) {
             int64_t c = (x->type == RAY_I64) ? ((const int64_t*)ray_data(x))[i]
@@ -286,7 +287,7 @@ ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
         return q_err(QE_TYPE);
     if (x && x->type == RAY_LIST) {
         /* fill = 0#first (a take that cannot empty degrades to ()) */
-        int64_t len = ray_len(x);
+        int64_t len = q_count(x);
         if (len == 0) { ray_retain(x); return x; }
         int64_t sh = k >= 0 ? k : -k;
         if (sh > len) sh = len;
@@ -333,7 +334,7 @@ ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
     if (!(t == RAY_I16 || t == RAY_I32 || t == RAY_I64 || t == RAY_F32 || t == RAY_F64 || t == RAY_BOOL ||
           ray_is_bytelike(t) || RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t) || RAY_IS_TEMPORALF(t)))
         return q_err(QE_NYI);
-    int64_t len = ray_len(x);
+    int64_t len = q_count(x);
     size_t esz = ray_type_sizes[(uint8_t)t];
     ray_t* out = ray_vec_new(t, len > 0 ? len : 1);
     if (RAY_IS_ERR(out)) return out;
@@ -358,7 +359,7 @@ ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
 ray_t* q_fills_wrap(ray_t* x) {
     if (x && ray_is_atom(x)) { ray_retain(x); return x; }
     if (x && x->type == RAY_SYM) {
-        int64_t n = ray_len(x);
+        int64_t n = q_count(x);
         ray_t* outl = ray_list_new(n > 0 ? n : 1);
         if (RAY_IS_ERR(outl)) return outl;
         int64_t carry = 0;
@@ -382,7 +383,7 @@ ray_t* q_fills_wrap(ray_t* x) {
     if (!x || !q_vec_is_num(x))
         return q_err(QE_NYI);
     int isf = q_vec_is_float(x);
-    int64_t n = ray_len(x);
+    int64_t n = q_count(x);
     ray_t* out = ray_vec_new(isf ? RAY_F64 : RAY_I64, n > 0 ? n : 1);
     if (RAY_IS_ERR(out)) return out;
     out->len = n;
@@ -438,8 +439,8 @@ ray_t* q_fill_wrap(ray_t* x, ray_t* y) {
         /* length follows y when it is a vector; a scalar y broadcasts to the
          * length of a vector x (`` `a`b`c^` `` -> 3 items), matching the
          * typed branch below. */
-        int64_t len = yatom ? (xatom ? 1 : ray_len(x)) : ray_len(y);
-        if (!xatom && !yatom && ray_len(x) != len)
+        int64_t len = yatom ? (xatom ? 1 : q_count(x)) : q_count(y);
+        if (!xatom && !yatom && q_count(x) != len)
             return q_err(QE_LENGTH);
         ray_t* outl = ray_list_new(len > 0 ? len : 1);
         if (RAY_IS_ERR(outl)) return outl;
@@ -473,14 +474,14 @@ ray_t* q_fill_wrap(ray_t* x, ray_t* y) {
     int8_t rt = q_type_common(xt, yt);
     if (!rt && xt == RAY_GUID && yt == RAY_GUID) rt = RAY_GUID;   /* the one cell ref/fill.md adds */
     if (!rt) return q_err(QE_TYPE);
-    int64_t len = yatom ? (xatom ? 1 : ray_len(x)) : ray_len(y);
-    if (!xatom && !yatom && ray_len(x) != ray_len(y))
+    int64_t len = yatom ? (xatom ? 1 : q_count(x)) : q_count(y);
+    if (!xatom && !yatom && q_count(x) != q_count(y))
         return q_err(QE_LENGTH);
     ray_t* xc = fill_conform(rt, x);
     if (!xc || RAY_IS_ERR(xc)) return xc;
     ray_t* yc = fill_conform(rt, y);
     if (!yc || RAY_IS_ERR(yc)) { ray_release(xc); return yc; }
-    if (ray_len(xc) < (xatom ? 1 : len) || ray_len(yc) < (yatom ? 1 : len)) {
+    if (q_count(xc) < (xatom ? 1 : len) || q_count(yc) < (yatom ? 1 : len)) {
         ray_release(xc); ray_release(yc);        /* a cast may not keep the count */
         return q_err(QE_LENGTH);
     }

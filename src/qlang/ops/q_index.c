@@ -1,10 +1,10 @@
 /* q_index — the one-code-path index/amend family (contract in q_index.h). */
+#include "qlang/q_count.h"
 #include "qlang/ops/q_index.h"
 #include "qlang/ops/q_bang.h"   /* q_bang — the `!` verb, which rebuilds a selection */
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — the int/long miss cast to its domain */
 #include "qlang/ops/q_table.h"  /* the keyed write's shape law and row-append home */
 #include "qlang/eval/q_eval.h"
-#include "qlang/q_builtins.h"   /* q_builtins_count_long — THE count owner */
 #include "qlang/base/q_err.h"
 #include "qlang/q_registry_internal.h"
 #include "qlang/base/q_type.h"       /* the type/shape axes: keyed, nested, iter */
@@ -71,7 +71,7 @@ ray_t* q_index_elem_at(ray_t* v, int64_t i) {
  * q_index_elem_at, so they live at the element-read home rather than dragging
  * it into base/. */
 int q_index_is_nested(ray_t* v) {
-    if (!v || ray_is_atom(v) || ray_len(v) == 0) return 0;
+    if (!v || ray_is_atom(v) || q_count(v) == 0) return 0;
     ray_t* e0 = q_index_elem_at(v, 0);
     int r = e0 && !RAY_IS_ERR(e0) && (!ray_is_atom(e0) || q_type_is_str_atom(e0));
     if (e0) ray_release(e0);
@@ -85,7 +85,7 @@ int q_index_rank(ray_t* v) {
     if (q_type_is_str_atom(v)) return 1;
     if (ray_is_atom(v)) return 0;
     ray_t* c = v->type == RAY_DICT ? ray_dict_vals(v) : v;
-    ray_t* e = c && c->type == RAY_LIST && ray_len(c) == 0 ? NULL : q_index_elem_at(c, 0);
+    ray_t* e = c && c->type == RAY_LIST && q_count(c) == 0 ? NULL : q_index_elem_at(c, 0);
     int r = 1 + q_index_rank(e);
     if (e) ray_release(e);
     return r;
@@ -93,7 +93,7 @@ int q_index_rank(ray_t* v) {
 
 int q_index_any_nested_item(ray_t* v) {
     if (!v || v->type != RAY_LIST) return 0;
-    int64_t n = ray_len(v);
+    int64_t n = q_count(v);
     for (int64_t i = 0; i < n; i++) {
         ray_t* e = q_index_elem_at(v, i);
         int c = e && !RAY_IS_ERR(e) && !ray_is_atom(e) && e->type != RAY_STR;
@@ -119,7 +119,7 @@ static ray_t* boxed1(ray_t* v) {
 static ray_t* miss_null(ray_t* c) {
     if (ray_is_vec(c)) return ray_typed_null((int8_t)-c->type);
     if (c && c->type == RAY_LIST) {
-        if (ray_len(c) == 0) return ray_list_new(0);
+        if (q_count(c) == 0) return ray_list_new(0);
         ray_t* e0 = ((ray_t**)ray_data(c))[0];
         if (e0 && !RAY_IS_ERR(e0) && !RAY_IS_NULL(e0)) {
             if (ray_is_atom(e0)) return ray_typed_null(e0->type);
@@ -173,9 +173,9 @@ static ray_t* key_pos(ray_t* x, ray_t* key) {
     ray_t* pos = q_search_find(keys, p);
     ray_release(p);
     if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_TYPE);
-    int64_t n = q_builtins_count_long(keys), r = n;
+    int64_t n = q_count(keys), r = n;
     if (q_type_is_int_atom(pos)) r = q_type_iatom_val(pos);
-    else if (pos->type == RAY_I64 && ray_len(pos) == 1) r = ((const int64_t*)ray_data(pos))[0];
+    else if (pos->type == RAY_I64 && q_count(pos) == 1) r = ((const int64_t*)ray_data(pos))[0];
     ray_release(pos);
     return ray_i64(r >= 0 && r < n ? r : n);
 }
@@ -188,10 +188,10 @@ static ray_t* key_pos(ray_t* x, ray_t* key) {
  * meets it the same way), key_pos against a typed one.  pos (Find's answer) consumed. */
 static ray_t* run_positions(ray_t* x, ray_t* sel, ray_t* pos) {
     ray_t* keys = ray_dict_slots(x)[0];
-    int64_t n0 = q_builtins_count_long(keys), m = q_builtins_count_long(sel), added = 0;
-    int whole = pos->type != RAY_I64 || ray_len(pos) != m;
+    int64_t n0 = q_count(keys), m = q_count(sel), added = 0;
+    int whole = pos->type != RAY_I64 || q_count(pos) != m;
     ray_t* first = whole ? NULL : q_search_find(sel, sel);
-    if (whole || !first || RAY_IS_ERR(first) || first->type != RAY_I64 || ray_len(first) != m) {
+    if (whole || !first || RAY_IS_ERR(first) || first->type != RAY_I64 || q_count(first) != m) {
         ray_release(pos);
         if (first && !RAY_IS_ERR(first)) { ray_release(first); first = NULL; }
         if (!whole || sel->type != RAY_LIST) return first ? first : q_err(QE_TYPE);
@@ -225,9 +225,9 @@ static ray_t* run_positions(ray_t* x, ray_t* sel, ray_t* pos) {
  * for "the items of i that are outside the domain", so a nested probe steps at its atoms.  pos consumed, probe
  * borrowed; a probe bin cannot order keeps the miss it already has. */
 static ray_t* step_fill(ray_t* keys, ray_t* pos, ray_t* probe) {
-    int64_t n = ray_len(keys);
+    int64_t n = q_count(keys);
     if (pos->type == RAY_LIST) {
-        for (int64_t j = 0, m = ray_len(pos); j < m; j++) {
+        for (int64_t j = 0, m = q_count(pos); j < m; j++) {
             ray_t* pj = q_index_elem_at(probe, j);
             ray_t* nj = pj && !RAY_IS_ERR(pj) ? step_fill(keys, q_index_elem_at(pos, j), pj) : NULL;
             if (pj) ray_release(pj);
@@ -241,13 +241,13 @@ static ray_t* step_fill(ray_t* keys, ray_t* pos, ray_t* probe) {
     }
     int atom = pos->type == -RAY_I64;
     if (!atom && pos->type != RAY_I64) return pos;
-    int64_t m = atom ? 1 : ray_len(pos), miss = 0;
+    int64_t m = atom ? 1 : q_count(pos), miss = 0;
     int64_t* d = atom ? &pos->i64 : (int64_t*)ray_data(pos);
     for (int64_t j = 0; j < m && !miss; j++) miss = d[j] >= n;
     if (!miss) return pos;
     ray_t* b = q_bin_wrap(keys, probe);
     if (b && !RAY_IS_ERR(b) && atom && b->type == -RAY_I64) { ray_release(pos); return b; }
-    if (b && !RAY_IS_ERR(b) && !atom && b->type == RAY_I64 && ray_len(b) == m) {
+    if (b && !RAY_IS_ERR(b) && !atom && b->type == RAY_I64 && q_count(b) == m) {
         const int64_t* bd = (const int64_t*)ray_data(b);
         for (int64_t j = 0; j < m; j++) if (d[j] >= n) d[j] = bd[j];
     }
@@ -275,13 +275,13 @@ static ray_t* index_level(ray_t* x, ray_t* i, int write) {
         if (!write) return dict_read(x, pos, i);
         int64_t p = pos->i64;
         ray_release(pos);
-        return p < q_builtins_count_long(ray_dict_slots(x)[0]) ? q_index_elem_at(ray_dict_slots(x)[1], p) : q_err(QE_INDEX);
+        return p < q_count(ray_dict_slots(x)[0]) ? q_index_elem_at(ray_dict_slots(x)[1], p) : q_err(QE_INDEX);
     }
     if (x->type == RAY_TABLE) return table_level(x, i, write);
     if (!is_coll(x)) return q_err(QE_TYPE);
     int64_t ix;
     if (!idx_i64(i, &ix)) return q_err(QE_TYPE);
-    if (ix < 0 || ix >= ray_len(x)) return write ? q_err(QE_INDEX) : miss_null(x);
+    if (ix < 0 || ix >= q_count(x)) return write ? q_err(QE_INDEX) : miss_null(x);
     return q_index_elem_at(x, ix);
 }
 
@@ -369,7 +369,7 @@ static ray_t* table_level(ray_t* t, ray_t* i, int write) {
     }
     int64_t ix;
     if (!idx_i64(i, &ix)) return q_err(QE_TYPE);
-    if (write && (ix < 0 || ix >= ray_table_nrows(t))) return q_err(QE_INDEX);
+    if (write && (ix < 0 || ix >= q_count(t))) return q_err(QE_INDEX);
     return q_index_elem_at(t, ix);           /* the item of a table is its row */
 }
 
@@ -404,7 +404,7 @@ static ray_t* store_level(ray_t* x, ray_t* i, ray_t* v) {
     if (x->type == RAY_TABLE) return table_store(x, i, v);
     int64_t ix;
     if (!idx_i64(i, &ix)) return q_err(QE_TYPE);
-    if (ix < 0 || ix >= ray_len(x)) return q_err(QE_INDEX);
+    if (ix < 0 || ix >= q_count(x)) return q_err(QE_INDEX);
     return vec_store(x, ix, v);
 }
 
@@ -440,7 +440,7 @@ static ray_t* index_map(ray_t* x, ray_t* i, ray_t* const* rest, int64_t k) {
      * (OOB / null index -> the lane's null, the total-index law) keeps the
      * boxed walk: the kernel gathers blind and owns no miss law. */
     if (i && k == 0 && x && ray_is_vec(x) && i->type == RAY_I64) {
-        int64_t xn = ray_len(x), n = ray_len(i), j = 0;
+        int64_t xn = q_count(x), n = q_count(i), j = 0;
         const int64_t* ix = (const int64_t*)ray_data(i);
         while (j < n && ix[j] >= 0 && ix[j] < xn) j++;
         if (j == n && n > 0) {
@@ -450,7 +450,7 @@ static ray_t* index_map(ray_t* x, ray_t* i, ray_t* const* rest, int64_t k) {
         }
     }
     ray_t* src = i ? i : x;
-    int64_t n = ray_len(src);
+    int64_t n = q_count(src);
     ray_t* out = ray_list_new(n > 0 ? n : 1);
     for (int64_t j = 0; j < n; j++) {
         ray_t* ej = q_index_elem_at(src, j);
@@ -557,7 +557,7 @@ static ray_t* scatter_store(ray_t* x, ray_t* sel, ray_t* y) {
     } else {
         if (y->type != x->type || (y->attrs & RAY_ATTR_SLICE)) return NULL;
     }
-    int64_t n = ray_len(sel), xn = ray_len(x);
+    int64_t n = q_count(sel), xn = q_count(x);
     if (n == 0) return x;                       /* conformability held by amend_seq */
     if (sel == x || y == x) return NULL;        /* self-referential: keep the loop's snapshot */
     const int64_t* ix = (const int64_t*)ray_data(sel);
@@ -592,7 +592,7 @@ static ray_t* scatter_store(ray_t* x, ray_t* sel, ray_t* y) {
  * hold — elem_fits per item, a same-type vector whole. */
 static int run_fits(ray_t* x, ray_t* vy) {
     if (x->type == RAY_LIST || vy->type == x->type) return 1;
-    for (int64_t j = 0, m = q_builtins_count_long(vy); j < m; j++) {
+    for (int64_t j = 0, m = q_count(vy); j < m; j++) {
         ray_t* e = q_index_elem_at(vy, j);
         int ok = e && !RAY_IS_ERR(e) && elem_fits(x, e);
         if (e) ray_release(e);
@@ -687,7 +687,7 @@ static ray_t* store_run(ray_t** nv, ray_t* pos, ray_t* vy) {
     if (r && RAY_IS_ERR(r)) return r;
     if (r) { *nv = r; return NULL; }
     const int64_t* d = (const int64_t*)ray_data(pos);
-    for (int64_t j = 0, m = ray_len(pos); j < m; j++) {
+    for (int64_t j = 0, m = q_count(pos); j < m; j++) {
         ray_t* e = q_index_elem_at(vy, j);
         if (!e || RAY_IS_ERR(e)) return e ? e : q_err(QE_OOM);
         r = vec_store(*nv, d[j], e);
@@ -707,7 +707,7 @@ static ray_t* store_run(ray_t** nv, ray_t* pos, ray_t* vy) {
  * earlier stores standing, as #688's in-place amend does.  ky/vy borrowed; pos consumed. */
 static ray_t* dict_put(ray_t* x, ray_t* ky, ray_t* vy, ray_t* pos, int strict) {
     ray_t** slots = ray_dict_slots(x);
-    int64_t n0 = q_builtins_count_long(slots[0]), m = ray_len(pos), added = 0;
+    int64_t n0 = q_count(slots[0]), m = q_count(pos), added = 0;
     const int64_t* d = (const int64_t*)ray_data(pos);
     for (int64_t j = 0; j < m; j++) if (d[j] >= n0 + added) added = d[j] + 1 - n0;
     if (m == 0) { ray_release(pos); return x; }
@@ -722,7 +722,7 @@ static ray_t* dict_put(ray_t* x, ray_t* ky, ray_t* vy, ray_t* pos, int strict) {
     else { ray_retain(nk); ray_retain(nv); }
     ray_t* err = NULL;
     if (!strict && !run_fits(nv, vy)) {
-        ray_t* b = items(nv, NULL, ray_len(nv));
+        ray_t* b = items(nv, NULL, q_count(nv));
         if (RAY_IS_ERR(b)) err = b;
         else { ray_release(nv); nv = b; }
     }
@@ -746,7 +746,7 @@ static ray_t* dict_put(ray_t* x, ray_t* ky, ray_t* vy, ray_t* pos, int strict) {
  * payload's own repeats are rows, as they are for a plain table.  pos consumed. */
 static ray_t* insert_positions(ray_t* pos, int64_t n0) {
     int64_t* d = (int64_t*)ray_data(pos);
-    for (int64_t j = 0, m = ray_len(pos); j < m; j++) {
+    for (int64_t j = 0, m = q_count(pos); j < m; j++) {
         if (d[j] < n0) { ray_release(pos); return q_err(QE_INSERT); }
         d[j] = n0 + j;
     }
@@ -796,17 +796,17 @@ ray_t* q_index_keyed_put(ray_t* x, ray_t* y, ray_t* hit, int mode, int exclusive
     if (!q_type_is_keyed(x) || !q_type_is_keyed(y)) return q_err(QE_TYPE);
     ray_t** xs = ray_dict_slots(x);
     ray_t** ys = ray_dict_slots(y);
-    int64_t n0 = ray_table_nrows(xs[0]), m = ray_table_nrows(ys[0]);
+    int64_t n0 = q_count(xs[0]), m = q_count(ys[0]);
     int64_t nkc = ray_table_ncols(xs[0]), nvc = ray_table_ncols(xs[1]);
     if (ray_table_ncols(ys[0]) != nkc || ray_table_ncols(ys[1]) != nvc) return q_err(QE_TYPE);
-    if (hit && (hit->type != RAY_BOOL || ray_len(hit) != nvc)) return q_err(QE_TYPE);
+    if (hit && (hit->type != RAY_BOOL || q_count(hit) != nvc)) return q_err(QE_TYPE);
     if (m == 0) { ray_retain(x); return x; }
     ray_t* tk = q_table_rows_typed(xs[0], ys[0]);   /* the gate over both parts, before any write */
     if (RAY_IS_ERR(tk)) return tk;
     ray_t* tv = q_table_rows_typed(xs[1], ys[1]);
     if (RAY_IS_ERR(tv)) { ray_release(tk); return tv; }
     ray_t* pos = dict_pos(x, tk);
-    if (pos && !RAY_IS_ERR(pos) && (pos->type != RAY_I64 || ray_len(pos) != m)) { ray_release(pos); pos = q_err(QE_TYPE); }
+    if (pos && !RAY_IS_ERR(pos) && (pos->type != RAY_I64 || q_count(pos) != m)) { ray_release(pos); pos = q_err(QE_TYPE); }
     if (pos && !RAY_IS_ERR(pos)) pos = mode == Q_KEYED_INSERT ? insert_positions(pos, n0) : run_positions(x, tk, pos);
     ray_t* err = !pos ? q_err(QE_OOM) : RAY_IS_ERR(pos) ? pos : NULL;
     const int64_t* d = err ? NULL : (const int64_t*)ray_data(pos);
@@ -866,7 +866,7 @@ static ray_t* row_cols(ray_t* v, ray_t* row) {
         ray_release(cell);
         named++;
     }
-    if (named != ray_len(ray_dict_keys(row))) { ray_release(hit); return q_err(QE_INDEX); }
+    if (named != q_count(ray_dict_keys(row))) { ray_release(hit); return q_err(QE_INDEX); }
     return hit;
 }
 
@@ -924,7 +924,7 @@ ray_t* q_index_dict_join(ray_t* x, ray_t* y, int strict) {
     ray_t* ky = ray_dict_slots(y)[0];
     ray_t* vy = ray_dict_slots(y)[1];
     if (!is_coll(slots[0]) || !is_coll(slots[1]) || !is_coll(ky) || !q_type_is_iter(vy)) return q_err(QE_TYPE);
-    int64_t m = ray_len(ky);
+    int64_t m = q_count(ky);
     if (m == 0) return x;
     ray_t* pos = dict_pos(x, ky);
     if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_TYPE);
@@ -1002,7 +1002,7 @@ static ray_t** slot_of(ray_t* x, ray_t* i0) {
             ray_release(pos);
         }
     } else if (x->type != RAY_LIST || !idx_i64(i0, &p)) return NULL;
-    if (p < 0 || p >= ray_len(l)) return NULL;
+    if (p < 0 || p >= q_count(l)) return NULL;
     ray_t** slot = (ray_t**)ray_data(l) + p;
     return *slot && !RAY_IS_ERR(*slot) ? slot : NULL;
 }
@@ -1029,7 +1029,7 @@ static ray_t** keyed_slot_of(ray_t* x, ray_t* key, ray_t* c, ray_t** pa) {
         ray_t* nl = ray_cow(*vl);
         if (nl && RAY_IS_ERR(nl)) ray_error_free(nl); else if (nl) *vl = nl;
     }
-    ray_t** slot = p < ray_table_nrows(v) ? slot_of(v, c) : NULL;
+    ray_t** slot = p < q_count(v) ? slot_of(v, c) : NULL;
     if (slot) *pa = ray_i64(p);
     return slot;
 }
@@ -1091,13 +1091,13 @@ static ray_t* amend_seq(ray_t* x, ray_t* sel, ray_t* const* rest, int64_t k,
                         ray_t* f, ray_t* y, int whole, const int64_t* dst) {
     ray_t* keys = (!sel && x->type == RAY_DICT) ? ray_dict_slots(x)[0] : NULL;
     if (keys) ray_retain(keys);                      /* outlives dict rebuilds */
-    int64_t n = q_builtins_count_long(sel ? sel : keys ? keys : x);
+    int64_t n = q_count(sel ? sel : keys ? keys : x);
     /* THE length law, once per level (ref/amend.md errors; conformable.md: an
      * atom conforms to everything, lists only at equal counts — so it must
      * fire for n==0 too, which a per-iteration check never reaches).  Pairing
      * reads the ITERATION domain, so a table of replacement ROWS pairs like
      * any list.  Before the guard: the caller's on-error release stays right. */
-    if (y && q_type_is_iter(y) && q_builtins_count_long(y) != n) {
+    if (y && q_type_is_iter(y) && q_count(y) != n) {
         if (keys) ray_release(keys);
         return q_err(QE_LENGTH);
     }
@@ -1148,7 +1148,7 @@ static ray_t* amend_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k,
             pos = run_positions(x, i0, pos);
             if (RAY_IS_ERR(pos)) return pos;
             ray_t** slots = ray_dict_slots(x);
-            if (!f && y && is_coll(y) && ray_len(y) == ray_len(pos) && is_coll(slots[0]) && is_coll(slots[1]))
+            if (!f && y && is_coll(y) && q_count(y) == q_count(pos) && is_coll(slots[0]) && is_coll(slots[1]))
                 return dict_put(x, i0, y, pos, 1);   /* `d[ks]:vs` IS `d,:ks!vs` */
             ray_t* r = amend_seq(x, i0, rest, k, f, y, 1, (const int64_t*)ray_data(pos));
             ray_release(pos);
@@ -1205,7 +1205,7 @@ ray_t* q_index_amend_at(ray_t* x, ray_t* i, ray_t* f, ray_t* y) {
 
 ray_t* q_index_amend_dot(ray_t* x, ray_t* i, ray_t* f, ray_t* y) {
     if (!is_coll(i)) return q_err(QE_TYPE);          /* i must be a list for `.` */
-    int64_t k = ray_len(i);
+    int64_t k = q_count(i);
     if (k > IDX_MAX_DEPTH) return q_err(QE_STACK);
     ray_t* buf[16];
     ray_t** ix = k <= 16 ? buf : malloc((size_t)k * sizeof *ix);
@@ -1245,7 +1245,7 @@ int q_index_growable(ray_t* x, ray_t* y) {
         return 0;
     if (x->type == RAY_SYM) {
         if (ray_sym_vec_domain(x) != ray_sym_vec_domain(y)) return 0;
-        for (int64_t i = 0, n = ray_len(y); i < n; i++)
+        for (int64_t i = 0, n = q_count(y); i < n; i++)
             if (ray_sym_dict_width(ray_read_sym(ray_data(y), i, RAY_SYM, y->attrs) + 1) > (x->attrs & RAY_SYM_W_MASK))
                 return 0;
     }
@@ -1256,14 +1256,14 @@ int q_index_growable(ray_t* x, ray_t* y) {
  * retention law extends it onto the grown vector or lets it go.  Failure anywhere leaves x bare. */
 ray_t* q_index_grow(ray_t** px, ray_t* y) {
     ray_t* x = *px;
-    int64_t nx = ray_len(x);
+    int64_t nx = q_count(x);
     char lx = q_attr_letter(x);
     ray_t* held = ray_index_has(x) ? x->index : NULL;
     if (held) { ray_retain(held); ray_index_drop(&x); }
     uint8_t esz = ray_sym_elem_size(y->type, y->attrs), xesz = ray_sym_elem_size(x->type, x->attrs);
     int nulls = 0;
     x->attrs &= (uint8_t)~RAY_ATTR_SORTED;               /* append keeps attrs; the law re-derives s */
-    for (int64_t i = 0, n = ray_len(y); i < n; i++) {
+    for (int64_t i = 0, n = q_count(y); i < n; i++) {
         const void* elem = (const char*)ray_data(y) + i * esz;
         int64_t id = 0;
         if (esz != xesz) {
@@ -1284,7 +1284,7 @@ ray_t* q_index_grow(ray_t** px, ray_t* y) {
 void q_index_ungrow(ray_t* x, int64_t nx, uint8_t was) {
     if (x->type == RAY_LIST) {
         ray_t** slots = (ray_t**)ray_data(x);
-        while (ray_len(x) > nx) ray_release(slots[--x->len]);
+        while (q_count(x) > nx) ray_release(slots[--x->len]);
         return;
     }
     if (ray_index_has(x)) ray_index_drop(&x);
