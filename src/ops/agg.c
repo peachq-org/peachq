@@ -110,24 +110,6 @@ static int64_t agg_read_i64(ray_t* v, int64_t i) {
     }
 }
 
-static ray_t* agg_atom_i64_for_type(int8_t t, int64_t v) {
-    switch (t) {
-    case RAY_BOOL: return ray_bool(v != 0);
-    case RAY_BYTE_ONLY: return ray_u8((uint8_t)v);
-    case RAY_CHARV: return ray_char((uint8_t)v);
-    case RAY_I16: return ray_i16((int16_t)v);
-    case RAY_I32: return ray_i32((int32_t)v);
-    case RAY_DATE: return ray_date(v);
-    case RAY_MONTH: return ray_month(v);
-    case RAY_TIME: return ray_time(v);
-    case RAY_MINUTE: return ray_minute(v);
-    case RAY_SECOND: return ray_second(v);
-    case RAY_TIMESTAMP: return ray_timestamp(v);
-    case RAY_TIMESPAN: return ray_timespan(v);
-    default: return ray_i64(v);
-    }
-}
-
 static ray_t* agg_parted_sum(ray_t* x) {
     int8_t base = (int8_t)RAY_PARTED_BASETYPE(x->type);
     if (!agg_parted_numeric_base(base) || base == RAY_DATE || base == RAY_MONTH)
@@ -222,7 +204,7 @@ static ray_t* agg_parted_minmax(ray_t* x, int want_max) {
             return ray_typed_null(-base);
     }
     if (base == RAY_F64) return make_f64(best_f);
-    return agg_atom_i64_for_type(base, best_i);
+    return make_typed_int((int8_t)-base, best_i);
 }
 
 /* Flat F32 min/max: e keeps its width (ref/min.md, ref/max.md); starting at

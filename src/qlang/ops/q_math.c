@@ -10,8 +10,8 @@
 #include "qlang/base/q_err.h"
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home */
 #include "lang/eval.h"     /* ray_eq_fn/ray_neq_fn, ray_neg_fn */
-#include "lang/internal.h" /* atomic_map_unary, as_f64, is_numeric, is_temporal, make_f64 */
-#include "qlang/base/q_type.h"  /* q_type_as_i64 / q_type_is_numeric_or_temporal / q_type_is_bool / q_type_is_char_atom */
+#include "lang/internal.h" /* atomic_map_unary, as_f64, is_numeric_or_temporal, make_f64 */
+#include "qlang/base/q_type.h"  /* q_type_as_i64 / q_type_is_bool / q_type_is_char_atom */
 #include "qlang/eval/q_eval.h" /* carrier read-out: `~` decomposes function values */
 #include <math.h>          /* sin/cos/tan/asin/acos/atan, exp/log, floor/floorf, ceil/ceilf */
 #include <string.h>        /* memcmp, memcpy */
@@ -73,7 +73,7 @@ Q_LIBM_UNARY(q_atan_wrap, atan, "atan")
 static ray_t* signum_atom(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (RAY_ATOM_IS_NULL(x)) return ray_i32(-1);
-    if (q_type_is_numeric_or_temporal(x)) {
+    if (is_numeric_or_temporal(x)) {
         double v = as_f64(x);
         return ray_i32(v < 0 ? -1 : (v > 0 ? 1 : 0));
     }
