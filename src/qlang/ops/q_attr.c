@@ -9,6 +9,7 @@
  * `s` needs no index and is the one letter a caller may vouch for.
  * Design: docs/attributes-status.md. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"  /* q_type_* guards */
@@ -155,7 +156,7 @@ static ray_t* attr_remap_err(ray_t* err, char letter) {
  * null is fine.  Only scans when the column actually carries nulls. */
 static bool attr_no_dup_nulls(ray_t* v) {
     if (!(v->attrs & RAY_ATTR_HAS_NULLS)) return true;
-    int64_t nulls = 0, n = ray_len(v);
+    int64_t nulls = 0, n = q_count(v);
     for (int64_t i = 0; i < n; i++)
         if (ray_vec_is_null(v, i) && ++nulls > 1) return false;
     return true;
@@ -176,7 +177,7 @@ ray_t* q_attr_index_clone(ray_t* x) {
 /* A kdb u# holds at most ONE null (attr_no_dup_nulls); the hash skips nulls, so a null among the new rows is judged
  * here: the letter survives iff the whole vector still holds at most one. */
 static bool u_nulls_ok(ray_t* r, int64_t nx) {
-    for (int64_t i = nx, n = ray_len(r); i < n; i++)
+    for (int64_t i = nx, n = q_count(r); i < n; i++)
         if (ray_vec_is_null(r, i)) return attr_no_dup_nulls(r);
     return true;
 }
@@ -188,7 +189,7 @@ static bool u_nulls_ok(ray_t* r, int64_t nx) {
  * letter is stale by then, its length the result's).  r CONSUMED (rc==1 fresh); slices/arena refused. */
 ray_t* q_attr_append_keep(char lx, int64_t nx, ray_t* idx, ray_t* r) {
     bool vec = r && !RAY_IS_ERR(r) && ray_is_vec(r) && !q_attr_letter(r) && !(r->attrs & (RAY_ATTR_SLICE | RAY_ATTR_ARENA))
-            && nx <= ray_len(r);
+            && nx <= q_count(r);
     if (lx == 'u' || lx == 'g') {
         if (idx && vec && (lx == 'g' || u_nulls_ok(r, nx)) && ray_index_extend(idx, r, nx) == 1) {
             ray_t* e = ray_index_attach_built(&r, idx);
@@ -200,7 +201,7 @@ ray_t* q_attr_append_keep(char lx, int64_t nx, ray_t* idx, ray_t* r) {
     }
     if (idx) ray_release(idx);
     if (lx != 's' || !vec) return r;
-    if (!non_descending(r, nx > 0 ? nx - 1 : 0, ray_len(r) - (nx > 0 ? nx - 1 : 0))) return r;
+    if (!non_descending(r, nx > 0 ? nx - 1 : 0, q_count(r) - (nx > 0 ? nx - 1 : 0))) return r;
     r = ray_cow(r);                 /* rc==1 here (fresh append result): in place */
     if (r && !RAY_IS_ERR(r)) r->attrs |= RAY_ATTR_SORTED;
     return r;
@@ -211,7 +212,7 @@ ray_t* q_attr_append_keep(char lx, int64_t nx, ray_t* idx, ray_t* r) {
  * (ray_vec_set drops it — the table's amend cell).  r is the writer's, already written. */
 void q_attr_store_keep(ray_t* r, const int64_t* pos, int64_t m) {
     if (!r || !ray_is_vec(r) || !(r->attrs & RAY_ATTR_SORTED)) return;
-    int64_t n = ray_len(r);
+    int64_t n = q_count(r);
     for (int64_t j = 0; j < m; j++) {
         int64_t from = pos[j] > 0 ? pos[j] - 1 : 0;
         if (!non_descending(r, from, n - from < 3 ? n - from : 3)) { r->attrs &= (uint8_t)~RAY_ATTR_SORTED; return; }
@@ -273,7 +274,7 @@ static ray_t* attr_set_table_s(ray_t* y) {
         ray_t* col = ray_table_get_col_idx(y, c);           /* borrowed */
         if (!col) { ray_release(out); return q_err(QE_TYPE); }
         if (c == 0) {
-            if (!non_descending(col, 0, ray_len(col))) { ray_release(out); return ray_error("s-fail", NULL); }
+            if (!non_descending(col, 0, q_count(col))) { ray_release(out); return ray_error("s-fail", NULL); }
             ray_retain(col);
             ray_t* pc = ray_cow(col);                        /* copy-on-shared (:29) */
             if (!pc || RAY_IS_ERR(pc)) { ray_release(out); return pc ? pc : q_err(QE_OOM); }
@@ -298,7 +299,7 @@ static ray_t* attr_set_keyed_s(ray_t* y) {
     ray_t* kt = ray_dict_keys(y);                            /* borrowed key TABLE */
     if (!kt || kt->type != RAY_TABLE || ray_table_ncols(kt) < 1) return q_err(QE_TYPE);
     ray_t* c0 = ray_table_get_col_idx(kt, 0);
-    if (!c0 || !non_descending(c0, 0, ray_len(c0))) return ray_error("s-fail", NULL);
+    if (!c0 || !non_descending(c0, 0, q_count(c0))) return ray_error("s-fail", NULL);
     kt->attrs |= RAY_ATTR_SORTED;
     ray_t* vals = ray_dict_vals(y);
     ray_retain(kt); ray_retain(vals);
@@ -312,7 +313,7 @@ static ray_t* attr_set_keyed_s(ray_t* y) {
 static ray_t* attr_set_dict_s(ray_t* y) {
     ray_t* k = ray_dict_keys(y);                             /* borrowed */
     if (!k || !ray_is_vec(k)) return q_err(QE_TYPE);
-    if (!non_descending(k, 0, ray_len(k))) return ray_error("s-fail", NULL);
+    if (!non_descending(k, 0, q_count(k))) return ray_error("s-fail", NULL);
     ray_retain(k);
     ray_t* nk = ray_cow(k);
     if (!nk || RAY_IS_ERR(nk)) return nk ? nk : q_err(QE_OOM);

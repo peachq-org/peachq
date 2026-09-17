@@ -17,6 +17,7 @@
  * summary's `rejected` unconditionally.  Duplicate header names dedupe DuckDB-style (a, b, a_1), never an
  * abort and never a silent merge.  An option key is NEVER silently ignored: unknown or not-yet-implemented
  * -> 'option. */
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* q_insert_wrap (the by-name row-append), q_list_collapse via q_prim */
 #include "qlang/base/q_calendar.h" /* the ONE civil-calendar home: date validity + day/ts composition */
 #include "qlang/base/q_err.h"
@@ -841,9 +842,9 @@ static ray_t* csv_rejects_tbl(csv_st* st, int64_t from) {
     if (RAY_IS_ERR(tbl)) return tbl;
     for (int c = 0; c < 4; c++) {
         ray_t* col;
-        if (!st->rj[c] || ray_len(st->rj[c]) <= from) col = csv_typed_empty(ct[c]);
+        if (!st->rj[c] || q_count(st->rj[c]) <= from) col = csv_typed_empty(ct[c]);
         else {
-            int64_t n = ray_len(st->rj[c]);
+            int64_t n = q_count(st->rj[c]);
             ray_t** it = (ray_t**)ray_data(st->rj[c]);
             ray_t* l = ray_list_new(n - from);
             for (int64_t i = from; i < n && !RAY_IS_ERR(l); i++) l = ray_list_append(l, it[i]);
@@ -973,7 +974,7 @@ static ray_t* csv_types_apply(csv_st* st) {
     /* dict: column sym -> type char */
     ray_t* ks = ray_dict_keys(ty);
     ray_t* vs = ray_dict_vals(ty);
-    int64_t n = ks ? ray_len(ks) : 0;
+    int64_t n = ks ? q_count(ks) : 0;
     for (int64_t i = 0; i < n; i++) {
         ray_t* ia = ray_i64(i);
         ray_t* k = ray_at_fn(ks, ia);
@@ -1043,20 +1044,21 @@ static int64_t csv_dialect_cols(const csv_st* st, const char* p, size_t n, int d
 #define CSV_DIALECT_ROWS 128
 static void csv_delim_sniff(csv_st* st) {
     static const char cand[] = { ',', ';', '\t', '|' };
-    int64_t m = ray_len(st->sniff);
+    int64_t m = q_count(st->sniff);
     if (m > CSV_DIALECT_ROWS) m = CSV_DIALECT_ROWS;
     ray_t** rows = (ray_t**)ray_data(st->sniff);
     int tol = st->ignore_err || st->store_rej || st->null_pad;
     int64_t best_cols = 0;
     int onecol = 1;
     for (int64_t i = 0; i < m && onecol; i++)      /* NUL-laden rows are binary, not one-column text */
-        if (memchr(ray_data(rows[i]), 0, (size_t)ray_len(rows[i]))) onecol = 0;
+        if (memchr(ray_data(rows[i]), 0, (size_t) q_count(rows[i]))) onecol = 0;
     for (size_t c = 0; c < sizeof cand; c++) {
         if ((st->cmt && cand[c] == st->cmt) || (!st->quote_off && cand[c] == st->quote)) continue;
         int64_t k[CSV_DIALECT_ROWS], ones = 0, cols = 0;
         int malformed = 0, ragged = 0;
         for (int64_t i = 0; i < m; i++) {
-            k[i] = csv_dialect_cols(st, (const char*)ray_data(rows[i]), (size_t)ray_len(rows[i]),
+            k[i] = csv_dialect_cols(st, (const char*)ray_data(rows[i]),
+                                    (size_t) q_count(rows[i]),
                                     (unsigned char)cand[c]);
             malformed |= k[i] < 0;
             ones += k[i] == 1;
@@ -1087,7 +1089,7 @@ static void csv_delim_sniff(csv_st* st) {
 }
 
 static ray_t* csv_freeze(csv_st* st) {
-    int64_t m = st->sniff ? ray_len(st->sniff) : 0;
+    int64_t m = st->sniff ? q_count(st->sniff) : 0;
     if (m == 0) return q_err(QE_CSV);
     ray_t** rows = (ray_t**)ray_data(st->sniff);
     if (!st->delim_explicit) csv_delim_sniff(st);
@@ -1100,7 +1102,8 @@ static ray_t* csv_freeze(csv_st* st) {
     int64_t nc = 0;
     st->rej_class = NULL;
     st->salv_class = NULL;
-    ray_t* bad = csv_row_split(st, (const char*)ray_data(rows[0]), (size_t)ray_len(rows[0]), &nc);
+    ray_t* bad = csv_row_split(st, (const char*)ray_data(rows[0]),
+                               (size_t) q_count(rows[0]), &nc);
     if (bad) return bad;                           /* row 0 must parse: no schema, no tolerance */
     const char* hdr_salv = st->salv_class;         /* a salvaged HEADER is audited too (row 0 as
                                                     * data records itself through the replay) */
@@ -1130,7 +1133,8 @@ static ray_t* csv_freeze(csv_st* st) {
         return q_err(QE_WSFULL);
     ray_t** hf = (ray_t**)ray_data(st->f_hdr);
     for (int64_t i = 1; i < m; i++) {              /* sniff the sure data rows; row 0 is judged below */
-        bad = csv_row_detect(st, (const char*)ray_data(rows[i]), (size_t)ray_len(rows[i]));
+        bad = csv_row_detect(st, (const char*)ray_data(rows[i]),
+                             (size_t) q_count(rows[i]));
         if (bad) return bad;
     }
     int header = st->header;
@@ -1142,7 +1146,8 @@ static ray_t* csv_freeze(csv_st* st) {
          * DuckDB's rule) — demotions the data alone would never produce */
         int all_str = 1, demote = 0;
         for (int64_t j = 0; j < nc; j++) {
-            ct_t d0 = q_csv_detect(&st->fmt, (const char*)ray_data(hf[j]), (size_t)ray_len(hf[j]));
+            ct_t d0 = q_csv_detect(&st->fmt, (const char*)ray_data(hf[j]),
+                                   (size_t) q_count(hf[j]));
             if (d0 != CT_STR && d0 != CT_UNKNOWN) all_str = 0;
             else if (d0 == CT_STR && st->f_ct[j] != CT_STR && (st->f_ct[j] != CT_UNKNOWN || m > 1))
                 demote = 1;
@@ -1150,16 +1155,18 @@ static ray_t* csv_freeze(csv_st* st) {
         header = all_str || demote;
     }
     if (!header) {                                 /* row 0 is data after all: fold it into the sniff */
-        bad = csv_row_detect(st, (const char*)ray_data(rows[0]), (size_t)ray_len(rows[0]));
+        bad = csv_row_detect(st, (const char*)ray_data(rows[0]),
+                             (size_t) q_count(rows[0]));
         if (bad) return bad;
     } else if (hdr_salv) {
         bad = csv_reject_note(st, st->sniff_lines[0], 0, hdr_salv,
-                              (const char*)ray_data(rows[0]), (size_t)ray_len(rows[0]));
+                              (const char*)ray_data(rows[0]),
+                              (size_t) q_count(rows[0]));
         if (bad) return bad;
     }
     for (int64_t j = 0; j < nc; j++) {
         const char* hp = (const char*)ray_data(hf[j]);
-        int64_t hl = header ? ray_len(hf[j]) : 0;
+        int64_t hl = header ? q_count(hf[j]) : 0;
         while (hl && (hp[0] == ' ' || hp[0] == '\t')) { hp++; hl--; }   /* names trim, like DuckDB */
         while (hl && (hp[hl - 1] == ' ' || hp[hl - 1] == '\t')) hl--;
         if (hl > 0) st->names[j] = ray_sym_intern_runtime(hp, (size_t)hl);
@@ -1262,7 +1269,8 @@ static ray_t* csv_freeze(csv_st* st) {
         int64_t live_line = st->line_cur;          /* the replay borrows the counter */
         for (int64_t i = first; i < m; i++) {
             st->line_cur = st->sniff_lines[i];
-            bad = csv_parse_row(st, (const char*)ray_data(rows[i]), (size_t)ray_len(rows[i]));
+            bad = csv_parse_row(st, (const char*)ray_data(rows[i]),
+                                (size_t) q_count(rows[i]));
             if (bad) return bad;
         }
         st->line_cur = live_line;
@@ -1306,7 +1314,7 @@ static ray_t* csv_line(csv_st* st, const char* p, size_t n) {
         st->sniff = NULL;
         return e;
     }
-    int64_t m = ray_len(st->sniff);
+    int64_t m = q_count(st->sniff);
     int64_t* nl = (int64_t*)realloc(st->sniff_lines, (size_t)m * sizeof(int64_t));
     if (!nl) return q_err(QE_WSFULL);
     st->sniff_lines = nl;
@@ -1448,7 +1456,7 @@ static ray_t* csv_flush_tbl(csv_st* st) {
     ray_t* tbl = ray_table_new(st->nkept);
     if (RAY_IS_ERR(tbl)) return tbl;
     for (int64_t k = 0; k < st->nkept; k++) {
-        ray_t* col = ray_len(st->acc[k]) ? q_list_collapse(st->acc[k]) : csv_typed_empty(st->kchars[k]);
+        ray_t* col = q_count(st->acc[k]) ? q_list_collapse(st->acc[k]) : csv_typed_empty(st->kchars[k]);
         if (!col || RAY_IS_ERR(col)) {
             ray_release(tbl);
             return col ? col : q_err(QE_OOM);
@@ -1499,7 +1507,7 @@ static int csv_sym_is(int64_t sym, const char* name) {
 static int csv_char_opt(ray_t* v, int* out) {
     if (v->type == -RAY_CHARV) *out = (unsigned char)v->u8;
     else if (v->type == RAY_CHARV) {
-        int64_t l = ray_len(v);
+        int64_t l = q_count(v);
         if (l > 1) return -1;
         *out = l ? (unsigned char)*(const char*)ray_data(v) : -2;
     } else return 0;
@@ -1511,7 +1519,7 @@ static ray_t* csv_opts(csv_st* st, ray_t* opts) {
     if (opts->type != RAY_DICT) return q_err(QE_TYPE);
     ray_t* ks = ray_dict_keys(opts);
     ray_t* vs = ray_dict_vals(opts);
-    int64_t n = ks ? ray_len(ks) : 0;
+    int64_t n = ks ? q_count(ks) : 0;
     int q_ch = -1, e_ch = -1, c_ch = -1;           /* dialect chars collect first, commit after the loop
                                                     * — dict key order must not decide the cross-checks */
     for (int64_t i = 0; i < n; i++) {
@@ -1663,7 +1671,7 @@ static ray_t* csv_run_whole(csv_st* st, ray_t* path) {
     ray_t* b = q_io_resource_read(path, 0, -1);
     if (!b) return q_err(QE_OOM);
     if (RAY_IS_ERR(b)) return b;
-    int64_t n = ray_len(b);
+    int64_t n = q_count(b);
     ray_t* bad = csv_run_mem(st, n ? (const char*)ray_data(b) : "", n);
     ray_release(b);
     return bad;
@@ -1685,7 +1693,7 @@ static ray_t* csv_run_res(csv_st* st, ray_t* file) {
         ray_t* b = q_io_resource_read(path, off, want);
         if (!b) { bad = q_err(QE_OOM); break; }
         if (RAY_IS_ERR(b)) { bad = b; break; }
-        int64_t got = ray_len(b);
+        int64_t got = q_count(b);
         bad = csv_pump(st, (const char*)ray_data(b), got, off == 0);
         ray_release(b);
         off += got;
@@ -1713,7 +1721,7 @@ static ray_t* csv_run_mem(csv_st* st, const char* p, int64_t n) {
 /* the list-of-lines shape is JOIN-with-newline-then-parse, never one element per record: a quoted
  * field spanning two elements rejoins before the carry ever sees it */
 static ray_t* csv_run_lines(csv_st* st, ray_t* x) {
-    int64_t n = ray_len(x), total = n ? n - 1 : 0;
+    int64_t n = q_count(x), total = n ? n - 1 : 0;
     ray_t** e = (ray_t**)ray_data(x);
     const char* ep;
     int64_t el;

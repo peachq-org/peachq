@@ -5,13 +5,13 @@
  * adverb nodes and the apply module's derived-value/keyword-HOF arms both land
  * here); derived evaluations call back out through q_eval_apply.  Same
  * refcount contract: args borrowed, result owned. */
+#include "qlang/q_count.h"
 #include "qlang/eval/q_eval.h"
 #include "qlang/q_prim.h"
 #include "qlang/eval/q_eval_internal.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_ops.h"       /* q_ops_find + manifest columns + the identity-table accessors */
 #include "qlang/q_registry.h"  /* q_registry_row_of */
-#include "qlang/q_builtins.h"  /* q_count_long — q `count` for C callers, hot lane */
 #include "qlang/base/q_type.h"
 #include "qlang/ops/q_index.h" /* q_index_elem_at — the one element accessor */
 #include "qlang/ops/q_dollar.h"
@@ -170,7 +170,7 @@ static ray_t* acc_reduce(ray_t* fv, const q_op_t* frow, ray_t* seed,
             iv[p] = dv;
         }
         if (!q_type_is_iter(iv[p])) continue;
-        int64_t c = q_count_long(iv[p]);
+        int64_t c = q_count(iv[p]);
         if (len < 0 || c > len) len = c;
     }
     ray_t* r;
@@ -221,7 +221,7 @@ static ray_t* acc_reduce(ray_t* fv, const q_op_t* frow, ray_t* seed,
  * vector maps one index, a list of lists two (`7 m\c`, :252). */
 static int64_t acc_rank(ray_t* fv) {
     if (fv->type == RAY_LIST) {
-        ray_t* it = ray_len(fv) ? ((ray_t**)ray_data(fv))[0] : NULL;
+        ray_t* it = q_count(fv) ? ((ray_t**)ray_data(fv))[0] : NULL;
         return (q_type_is_iter(it) && it->type != RAY_TABLE) ? 2 : 1;
     }
     if (fv->type == RAY_DICT || fv->type == RAY_TABLE || ray_is_vec(fv))
@@ -263,7 +263,7 @@ static ray_t* acc_unary(ray_t* fv, const q_op_t* frow, ray_t* x, int keep) {
     }
     ray_t* mv = (x->type == RAY_LIST) ? NULL : acc_mono(frow, keep, &mrow);
     ray_t* r;
-    if (q_type_is_iter(x) && q_count_long(x) == 0) {
+    if (q_type_is_iter(x) && q_count(x) == 0) {
         r = acc_empty(fv, frow, NULL, keep, mv != NULL);
         if (!r) r = q_eval_apply(mv, mrow, &x, 1);
     } else if (mv)
@@ -295,7 +295,7 @@ static ray_t* acc_apply(ray_t* fv, const q_op_t* frow, ray_t** args,
      * the VALUE's own type, unevaluated (:436) — this outranks the rank test,
      * which would otherwise read a simple vector as a Converge machine */
     if (n == 1 && !q_eval_apply_is_fn(fv) && q_type_is_iter(args[0]) &&
-        args[0]->type != RAY_TABLE && ray_len(args[0]) == 0)
+        args[0]->type != RAY_TABLE && q_count(args[0]) == 0)
         return q_typed_empty_like(ray_list_new(0), fv);
     int64_t rank = acc_rank(fv);
     if (rank < 0 && n <= 2 && q_eval_apply_fnv_matrix_row(frow)) rank = 2;   /* `(!/)x` reduces */
@@ -360,8 +360,8 @@ static ray_t* map_zip(ray_t* fv, const q_op_t* frow, ray_t** args, int64_t n,
         /* the scan must run to the end so every av[p] is populated for the
          * release below — so record the FIRST verdict only (an owned error
          * overwritten is an owned error leaked) */
-        if (len < 0) len = q_count_long(av[p]);
-        else if (len != q_count_long(av[p]) && !r) r = q_err(QE_LENGTH);
+        if (len < 0) len = q_count(av[p]);
+        else if (len != q_count(av[p]) && !r) r = q_err(QE_LENGTH);
     }
     int whole = r != NULL;                 /* a whole answer or an error: nothing to re-key */
     if (!r && len < 0) r = q_eval_apply(fv, frow, av, n);
@@ -402,7 +402,7 @@ static ray_t* case_apply(ray_t* sel, ray_t** args, int64_t n) {
         ray_retain(args[p]);
         av[p] = q_eval_apply_concrete(args[p]);   /* a picked-from DAG has no items */
     }
-    int64_t len = ray_len(sel);
+    int64_t len = q_count(sel);
     ray_t* l = ray_list_new(len);
     for (int64_t i = 0; i < len && !RAY_IS_ERR(l); i++) {
         ray_t* si = q_index_elem_at(sel, i);
@@ -443,7 +443,8 @@ static ray_t* prior_each(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
         }
         if (!prev && ray_is_vec(x)) prev = ray_typed_null((int8_t)-x->type);
         /* `first 0#x` for a table is its all-null row — the out-of-range read */
-        if (!prev && x->type == RAY_TABLE) prev = q_index_elem_at(x, q_count_long(x));
+        if (!prev && x->type == RAY_TABLE) prev = q_index_elem_at(x,
+                                                                  q_count(x));
         if (!prev) { prev = RAY_NULL_OBJ; ray_retain(prev); }
     }
     ray_t* r;
@@ -451,7 +452,7 @@ static ray_t* prior_each(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
         ray_t* av[2] = { x, prev };
         r = q_eval_apply(fv, frow, av, 2);
     } else {
-        int64_t len = q_count_long(x);
+        int64_t len = q_count(x);
         ray_t* l = ray_list_new(len);
         for (int64_t i = 0; i < len; i++) {
             ray_t* cur = q_index_elem_at(x, i);

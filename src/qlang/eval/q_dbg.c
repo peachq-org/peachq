@@ -2,6 +2,7 @@
  * read-eval loop runs where the error was produced, so the failing lambda's
  * q_env locals are live and `:r` feeds the walker in place.  Caret columns
  * need parser token offsets the trees don't carry yet — lines print bare. */
+#include "qlang/q_count.h"
 #include "qlang/eval/q_dbg.h"
 #include "qlang/eval/q_eval.h"
 #include "qlang/base/q_err.h"
@@ -142,7 +143,7 @@ static int lam_global_name(ray_t* lam, char* buf, size_t cap) {
         return 0;
     }
     int found = 0;
-    int64_t cnt = ray_len(names);
+    int64_t cnt = q_count(names);
     for (int64_t i = 0; i < cnt && !found; i++) {
         ray_t* m = q_index_elem_at(names, i);
         if (!m || RAY_IS_ERR(m)) { if (m) ray_release(m); continue; }
@@ -480,12 +481,12 @@ ray_t* q_dbg_sbt_fn(ray_t* x) {
     if (!x || (x->type != RAY_LIST && !ray_is_vec(x))) return q_err(QE_TYPE);
     char buf[8192];
     size_t used = 0;
-    int64_t cnt = ray_len(x);
+    int64_t cnt = q_count(x);
     for (int64_t i = 0; i < cnt; i++) {
         ray_t* s = q_index_elem_at(x, i);
         if (!s || RAY_IS_ERR(s)) { if (s) ray_release(s); continue; }
         if (s->type == RAY_CHARV) {
-            size_t sn = (size_t)ray_len(s);
+            size_t sn = (size_t) q_count(s);
             const char* sp = (const char*)ray_data(s);
             if (used + sn + 1 < sizeof buf) {
                 memcpy(buf + used, sp, sn);

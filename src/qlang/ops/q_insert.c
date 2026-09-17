@@ -4,6 +4,7 @@
  * SPELLING of Join — only the storage-provider path and the name/create/
  * rebind arms live here; the VALUE work is q_join_table_upsert. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h"
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"
@@ -16,12 +17,6 @@
 #include "qlang/net/q_wirefile.h"
 #include "qlang/io/q_splay.h"    /* a mapped global refuses by-name rows */
 
-/* Row count of a plain OR keyed table (keyed via its key table — never trust
- * ray_len on a string-atom column). */
-static int64_t any_nrows(ray_t* t) {
-    if (q_type_is_keyed(t)) return ray_table_nrows(ray_dict_keys(t));
-    return ray_table_nrows(t);
-}
 
 /* 0-based long index vector [start, start+n). */
 static ray_t* idx_range(int64_t start, int64_t n) {
@@ -41,7 +36,7 @@ static ray_t* insert_keyed(int64_t sym, ray_t* g, ray_t* y) {
     ray_t* rows = q_table_rows_normalize(flat, y, Q_ROWS_INSERT);
     ray_release(flat);
     if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_OOM);
-    int64_t before = any_nrows(g), added = ray_table_nrows(rows);
+    int64_t before = q_count(g), added = q_count(rows);
     ray_t* ky = q_bang_enkey(ray_table_ncols(ray_dict_keys(g)), rows);
     ray_release(rows);
     if (!ky || RAY_IS_ERR(ky)) return ky;
@@ -72,7 +67,7 @@ static ray_t* carrier_insert(ray_t* car, ray_t* y) {
     ray_t* r = q_provider_write(ray_dict_vals(car), y, 1);
     if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_TYPE);
     ray_release(r);
-    return idx_range(b0, ray_table_nrows(y));
+    return idx_range(b0, q_count(y));
 }
 
 /* q `x insert y` / insert[x;y] — x MUST name a global (kdb insert is always
@@ -85,7 +80,7 @@ ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
     if (!g) {                                             /* create */
         if (y && (y->type == RAY_TABLE || q_type_is_keyed(y))) {
             q_env_set(x->i64, y);                         /* retains */
-            return idx_range(0, any_nrows(y));
+            return idx_range(0, q_count(y));
         }
         return q_err(QE_TYPE);
     }
@@ -101,9 +96,9 @@ ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
     int stole = q_env_take(x->i64, g);
     ray_t* rows = q_table_rows_normalize(g, y, Q_ROWS_INSERT);
     ray_t* nt = rows && !RAY_IS_ERR(rows) ? NULL : rows ? rows : q_err(QE_OOM);
-    int64_t before = ray_table_nrows(g), added = 0;
+    int64_t before = q_count(g), added = 0;
     if (!nt) {
-        added = ray_table_nrows(rows);
+        added = q_count(rows);
         nt = q_table_append(g, rows, stole);
         ray_release(rows);
     }

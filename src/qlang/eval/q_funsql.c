@@ -5,10 +5,10 @@
  * on take/drop; by rides the group core; update is dict update over Amend At;
  * delete is drop / complement select.  Order: From-Where-Sort-Limit-By-Select. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/q_count.h"
 #include "qlang/eval/q_funsql.h"
 #include "qlang/eval/q_eval.h"
 #include "qlang/base/q_err.h"
-#include "qlang/q_builtins.h"          /* q_count_long */
 #include "qlang/q_prim.h"              /* q_cols_fn */
 #include "qlang/q_registry_internal.h" /* q_take_wrap, q_where_wrap, q_flip_wrap, ... */
 #include "qlang/ops/q_bang.h"
@@ -25,7 +25,7 @@
 
 
 static int is_empty_gen(ray_t* v) {
-    return v && ((v->type == RAY_LIST && ray_len(v) == 0) || RAY_IS_NULL(v));
+    return v && ((v->type == RAY_LIST && q_count(v) == 0) || RAY_IS_NULL(v));
 }
 
 static int is_bool_atom(ray_t* v, int truth) {
@@ -51,7 +51,7 @@ static ray_t* conform_col(ray_t* v, int64_t n) {
  * `select`/`exec` over a dict is flip -> select -> flip back, and works for every dict).  Rows are the widest
  * non-atom entry's (an all-atom dict is one row); an ATOM entry is a constant column, answering as it is under the
  * full row set and conforming to a narrowed one — which is what lets a non-conformable dict ride the one ladder. */
-static int64_t src_ncols(ray_t* t) { return q_type_is_dict(t) ? ray_dict_len(t) : ray_table_ncols(t); }
+static int64_t src_ncols(ray_t* t) { return q_type_is_dict(t) ? q_count(t) : ray_table_ncols(t); }
 
 static ray_t* src_col(ray_t* t, int64_t c) {                 /* owned */
     if (q_type_is_dict(t)) return q_index_elem_at(ray_dict_vals(t), c);
@@ -67,11 +67,11 @@ static int64_t src_name(ray_t* t, int64_t c) {               /* -1: the entry ha
 }
 
 static int64_t src_count(ray_t* t) {
-    if (!q_type_is_dict(t)) return q_count_long(t);
-    int64_t n = -1, nc = ray_dict_len(t);
+    if (!q_type_is_dict(t)) return q_count(t);
+    int64_t n = -1, nc = q_count(t);
     for (int64_t c = 0; c < nc; c++) {
         ray_t* v = src_col(t, c);
-        int64_t k = (v && !RAY_IS_ERR(v) && !ray_is_atom(v)) ? q_count_long(v) : -1;
+        int64_t k = (v && !RAY_IS_ERR(v) && !ray_is_atom(v)) ? q_count(v) : -1;
         if (k > n) n = k;
         if (v) ray_release(v);
     }
@@ -81,7 +81,7 @@ static int64_t src_count(ray_t* t) {
 /* one entry at the rows (consumes v): a column gathers, a constant conforms — an atom idx is the row itself */
 static ray_t* entry_at(ray_t* v, ray_t* idx) {
     if (!v || RAY_IS_ERR(v)) return v;
-    if (ray_is_atom(v)) return ray_is_atom(idx) ? v : conform_col(v, q_count_long(idx));
+    if (ray_is_atom(v)) return ray_is_atom(idx) ? v : conform_col(v, q_count(idx));
     ray_t* r = gather(v, idx);
     ray_release(v);
     return r;
@@ -150,7 +150,7 @@ static ray_t* from_col_owned(ray_t* t, int64_t nm) {
  * common — but `?[t;i;p]` hands USER i straight in, so identity is verified,
  * never inferred from the length alone */
 static int idx_is_identity(ray_t* idx, int64_t n) {
-    if (!idx || idx->type != RAY_I64 || ray_len(idx) != n) return 0;
+    if (!idx || idx->type != RAY_I64 || q_count(idx) != n) return 0;
     const int64_t* p = (const int64_t*)ray_data(idx);
     for (int64_t j = 0; j < n; j++)
         if (p[j] != j) return 0;
@@ -161,7 +161,7 @@ static ray_t* col_self(void* ctx, ray_t* col) { (void)ctx; ray_retain(col); retu
 
 /* a dict source at rows: every entry at idx, keys kept (`flip (flip d) idx` for the dicts that flip) */
 static ray_t* dict_rows(ray_t* d, ray_t* idx) {
-    int64_t nc = ray_dict_len(d);
+    int64_t nc = q_count(d);
     ray_t* vals = ray_list_new(nc > 0 ? nc : 1);
     for (int64_t c = 0; c < nc && !RAY_IS_ERR(vals); c++) {
         ray_t* g = entry_at(src_col(d, c), idx);
@@ -224,7 +224,7 @@ static ray_t* where_refine(ray_t* idx, ray_t* r) {
 }
 
 static int idx_is_ascending(ray_t* idx) {
-    int64_t n = ray_len(idx);
+    int64_t n = q_count(idx);
     const int64_t* p = (const int64_t*)ray_data(idx);
     for (int64_t j = 1; j < n; j++)
         if (p[j] < p[j - 1]) return 0;
@@ -260,7 +260,7 @@ static int cmp_i64_pair(const void* a, const void* b) {
 /* rows of a sorted column with a value in `set`: one span per needle, the spans ordered and merged (distinct values
  * give disjoint spans, equal needles the same span); the `in` primitive's m <= n/32 guard, the scan past it */
 static ray_t* rows_sorted_in(ray_t* col, ray_t* set) {
-    int64_t m = ray_len(set), n = ray_len(col);
+    int64_t m = q_count(set), n = q_count(col);
     if (set->type != col->type || (set->attrs & RAY_ATTR_HAS_NULLS) || m > n / 32) return NULL;
     int64_t* sp = (int64_t*)malloc(sizeof(int64_t) * 2 * (size_t)(m > 0 ? m : 1));
     if (!sp) return NULL;
@@ -306,7 +306,7 @@ static ray_t* attr_rows(ray_t* col, ray_t* v, where_attr_op op) {
         return r;
     }
     if (op == WA_WITHIN) {
-        if (!ray_is_vec(v) || ray_len(v) != 2 || !ray_attr_is_sorted(col)) return NULL;
+        if (!ray_is_vec(v) || q_count(v) != 2 || !ray_attr_is_sorted(col)) return NULL;
         ray_t* a = q_index_elem_at(v, 0);
         ray_t* b = q_index_elem_at(v, 1);
         ray_idx_consults[IDX_SITE_FILTER_RANGE]++;
@@ -334,7 +334,7 @@ static ray_t* attr_rows(ray_t* col, ray_t* v, where_attr_op op) {
  * (both ascending, idx's duplicates kept).  Consumes rows. */
 static ray_t* idx_restrict(ray_t* idx, int ident, ray_t* rows) {
     if (ident) return rows;
-    int64_t ni = ray_len(idx), nr = ray_len(rows), k = 0;
+    int64_t ni = q_count(idx), nr = q_count(rows), k = 0;
     const int64_t* d = (const int64_t*)ray_data(idx);
     const int64_t* r = (const int64_t*)ray_data(rows);
     ray_t* out = rows_new(ni < nr ? ni : nr);
@@ -355,7 +355,7 @@ static ray_t* idx_restrict(ray_t* idx, int ident, ray_t* rows) {
  * applies the verb runs on that value — so nothing evaluates twice.  NULL = not this shape, or idx is not an
  * ascending subsequence: the phrase evaluates as before.  Mapped splays are the owner's deferral. */
 static ray_t* where_attr(ray_t* tree, ray_t* t, ray_t* idx) {
-    if (!tree || tree->type != RAY_LIST || ray_len(tree) != 3 || q_splay_table_path(t) || q_type_is_dict(t)) return NULL;
+    if (!tree || tree->type != RAY_LIST || q_count(tree) != 3 || q_splay_table_path(t) || q_type_is_dict(t)) return NULL;
     ray_t** e = (ray_t**)ray_data(tree);
     if (!e[0] || !e[1] || !e[2]) return NULL;
     where_attr_op op;
@@ -387,11 +387,11 @@ static ray_t* where_attr(ray_t* tree, ray_t* t, ray_t* idx) {
  * previous ones kept; idx:=idx[where result]. */
 static ray_t* where_fold(ray_t* c, ray_t* t, ray_t* idx0) {
     ray_retain(idx0);
-    if (!c || is_empty_gen(c) || (ray_is_vec(c) && ray_len(c) == 0))
+    if (!c || is_empty_gen(c) || (ray_is_vec(c) && q_count(c) == 0))
         return idx0;
     if (c->type != RAY_LIST) { ray_release(idx0); return q_err(QE_TYPE); }
     ray_t* idx = idx0;
-    int64_t n = ray_len(c);
+    int64_t n = q_count(c);
     for (int64_t j = 0; j < n; j++) {
         ray_t* tree = q_index_elem_at(c, j);
         ray_t* nidx = (tree && !RAY_IS_ERR(tree)) ? where_attr(tree, t, idx) : tree;
@@ -406,8 +406,8 @@ static ray_t* where_fold(ray_t* c, ray_t* t, ray_t* idx0) {
 
 /* every phrase of rng -> owned LIST of columns; atoms conform unless exec */
 static ray_t* sel_cols(ray_t* rng, ray_t* t, ray_t* idx, int conform) {
-    int64_t nc = q_count_long(rng);
-    int64_t n = q_count_long(idx);
+    int64_t nc = q_count(rng);
+    int64_t n = q_count(idx);
     ray_t* vals = ray_list_new(nc > 0 ? nc : 1);
     for (int64_t j = 0; j < nc && !RAY_IS_ERR(vals); j++) {
         ray_t* tree = q_index_elem_at(rng, j);
@@ -433,7 +433,7 @@ static ray_t* sel_cols(ray_t* rng, ray_t* t, ray_t* idx, int conform) {
  * so `!`/`flip` must not learn this rule. */
 static int names_collide(ray_t* names) {
     if (!names || names->type != RAY_SYM) return 0;
-    int64_t n = ray_len(names);
+    int64_t n = q_count(names);
     const int64_t* s = (const int64_t*)ray_data(names);
     for (int64_t i = 1; i < n; i++)
         for (int64_t j = 0; j < i; j++)
@@ -446,7 +446,7 @@ static int names_collide(ray_t* names) {
  * qSQL's law, not `flip`'s: an all-atom column dict is 'rank everywhere else,
  * so a Select states the exception itself.  Consumes vals. */
 static ray_t* agg_conform(ray_t* vals) {
-    int64_t n = vals->type == RAY_LIST ? ray_len(vals) : 0;
+    int64_t n = vals->type == RAY_LIST ? q_count(vals) : 0;
     if (n == 0) return vals;
     ray_t** e = (ray_t**)ray_data(vals);
     for (int64_t i = 0; i < n; i++)
@@ -516,7 +516,7 @@ static ray_t* exec_shape(ray_t* a, ray_t* t, ray_t* idx) {
  * the first n rows BEFORE the Select phrase runs (divergent for aggregates). */
 static ray_t* limit_apply(ray_t* nspec, ray_t* r) {
     if (!r || RAY_IS_ERR(r)) return r;
-    int64_t cnt = q_count_long(r);
+    int64_t cnt = q_count(r);
     if (q_type_is_int_atom(nspec) && !RAY_ATOM_IS_NULL(nspec)) {
         int64_t n = q_type_iatom_val(nspec);
         if (n > cnt) n = cnt;
@@ -527,7 +527,7 @@ static ray_t* limit_apply(ray_t* nspec, ray_t* r) {
         ray_release(r);
         return out;
     }
-    if (q_type_is_int_vec(nspec) && ray_len(nspec) == 2) {
+    if (q_type_is_int_vec(nspec) && q_count(nspec) == 2) {
         ray_t* ia = q_index_elem_at(nspec, 0);
         ray_t* ja = q_index_elem_at(nspec, 1);
         int64_t i = q_type_iatom_val(ia), j = q_type_iatom_val(ja);
@@ -539,7 +539,7 @@ static ray_t* limit_apply(ray_t* nspec, ray_t* r) {
         ray_release(na);
         ray_release(r);
         if (!d || RAY_IS_ERR(d)) return d ? d : q_err(QE_TYPE);
-        int64_t left = q_count_long(d);
+        int64_t left = q_count(d);
         if (j > left) j = left;
         na = ray_i64(j);
         ray_t* out = q_take_wrap(na, d);
@@ -587,7 +587,7 @@ static ray_t* by_specs(ray_t* b, ray_t** trees_out) {
 /* per group: the ORIGINAL row numbers, idx@positions (law 14) — the groups
  * taken in `ord` order, so every by-consumer is handed law 15 already done */
 static ray_t* by_orig_idx(ray_t* idx, ray_t* gv, ray_t* ord) {
-    int64_t ng = ray_len(gv);
+    int64_t ng = q_count(gv);
     ray_t* out = ray_list_new(ng > 0 ? ng : 1);
     for (int64_t j = 0; j < ng && !RAY_IS_ERR(out); j++) {
         ray_t* pos = q_index_elem_at(gv, q_type_ivec_get(ord, j));
@@ -613,7 +613,7 @@ static ray_t* by_empty_probe(ray_t* tree, ray_t* t) {
 /* one a-phrase per group over its original rows; collapse (aggregates ->
  * vector, uniforms -> nested column) */
 static ray_t* by_col(ray_t* tree, ray_t* t, ray_t* gidxs) {
-    int64_t ng = ray_len(gidxs);
+    int64_t ng = q_count(gidxs);
     ray_t** gi = (ray_t**)ray_data(gidxs);
     ray_t* out = ray_list_new(ng > 0 ? ng : 1);
     for (int64_t j = 0; j < ng && !RAY_IS_ERR(out); j++) {
@@ -640,7 +640,7 @@ static ray_t* by_col(ray_t* tree, ray_t* t, ray_t* gidxs) {
 
 /* every a-phrase through by_col -> owned LIST of value columns */
 static ray_t* by_cols(ray_t* rng, ray_t* t, ray_t* gidxs) {
-    int64_t nc = q_count_long(rng);
+    int64_t nc = q_count(rng);
     ray_t* vals = ray_list_new(nc > 0 ? nc : 1);
     for (int64_t j = 0; j < nc && !RAY_IS_ERR(vals); j++) {
         ray_t* tree = q_index_elem_at(rng, j);
@@ -655,13 +655,13 @@ static ray_t* by_cols(ray_t* rng, ray_t* t, ray_t* gidxs) {
 
 /* per group LAST original row (select.md: a By with no Select phrase) */
 static ray_t* by_last_idx(ray_t* gidxs) {
-    int64_t ng = ray_len(gidxs);
+    int64_t ng = q_count(gidxs);
     ray_t** gi = (ray_t**)ray_data(gidxs);
     ray_t* out = ray_vec_new(RAY_I64, ng > 0 ? ng : 1);
     if (RAY_IS_ERR(out)) return out;
     out->len = 0;
     for (int64_t j = 0; j < ng; j++) {
-        int64_t n = q_count_long(gi[j]);
+        int64_t n = q_count(gi[j]);
         ray_t* e = n > 0 ? q_index_elem_at(gi[j], n - 1) : NULL;
         int64_t v = (e && !RAY_IS_ERR(e)) ? q_type_iatom_val(e) : 0;
         if (e && !RAY_IS_ERR(e)) ray_release(e);
@@ -792,7 +792,7 @@ static ray_t* by_exec_vec(ray_t* a, ray_t* t, ray_t* idx) {
         ray_t* vals = sel_cols(ray_dict_vals(a), t, idx, 0);
         if (RAY_IS_ERR(vals)) r = vals;
         else {
-            int64_t nc = ray_len(vals);          /* enlist each -> 1-row table */
+            int64_t nc = q_count(vals);          /* enlist each -> 1-row table */
             ray_t* cols1 = ray_list_new(nc > 0 ? nc : 1);
             for (int64_t j = 0; j < nc && !RAY_IS_ERR(cols1); j++) {
                 ray_t* v = q_index_elem_at(vals, j);
@@ -827,7 +827,7 @@ static ray_t* by_exec_vec(ray_t* a, ray_t* t, ray_t* idx) {
  * APPLIED through the one apply path (iasc/idesc/`<:`/`>:`/any unary grader),
  * never recognized from a catalogue. */
 static ray_t* sort_idx(ray_t* spec, ray_t* t, ray_t* idx) {
-    ray_t** e = (spec && spec->type == RAY_LIST && ray_len(spec) == 2)
+    ray_t** e = (spec && spec->type == RAY_LIST && q_count(spec) == 2)
                     ? (ray_t**)ray_data(spec) : NULL;
     if (!e || !e[0] || !e[1] || e[1]->type != -RAY_SYM) {
         ray_release(idx);
@@ -922,9 +922,9 @@ static ray_t* vec_cond(ray_t* b, ray_t* x, ray_t* y) {
         ray_retain(pick);
         return pick;
     }
-    int64_t n = ray_len(b);
-    if ((q_type_is_iter(x) && q_count_long(x) != n) ||
-        (q_type_is_iter(y) && q_count_long(y) != n))
+    int64_t n = q_count(b);
+    if ((q_type_is_iter(x) && q_count(x) != n) ||
+        (q_type_is_iter(y) && q_count(y) != n))
         return q_err(QE_LENGTH);
     const bool* bp = (const bool*)ray_data(b);
     ray_t* l = ray_list_new(n > 0 ? n : 1);
@@ -966,7 +966,7 @@ static int64_t search_pos_at(ray_t* pos, int64_t j) {
  * domain order (drop).  Find answers a miss with the count, so "found" is just
  * "in range".  Consumes nothing; owned i64 vector. */
 static ray_t* entries_index(ray_t* pos, int64_t n, int drop) {
-    int64_t m = ray_is_atom(pos) ? 1 : ray_len(pos);
+    int64_t m = ray_is_atom(pos) ? 1 : q_count(pos);
     ray_t* out = ray_vec_new(RAY_I64, (drop ? n : m) > 0 ? (drop ? n : m) : 1);
     if (RAY_IS_ERR(out)) return out;
     int64_t* o = (int64_t*)ray_data(out);
@@ -1000,7 +1000,7 @@ static ray_t* entries_gather(ray_t* x, ray_t* idx) {
 static ray_t* entries_select(ray_t* dom, ray_t* rng, ray_t* x, int drop) {
     ray_t* pos = q_search_find(dom, x);
     if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_TYPE);
-    ray_t* idx = entries_index(pos, q_count_long(dom), drop);
+    ray_t* idx = entries_index(pos, q_count(dom), drop);
     ray_release(pos);
     if (RAY_IS_ERR(idx)) return idx;
     ray_t* nk = entries_gather(dom, idx);
@@ -1103,15 +1103,15 @@ static ray_t* upd_col_start(ray_t* t, int64_t nm, ray_t* v, int full) {
      * — `update `dom$col from `t`, the training doc's FK creation path */
     if (cur && !(full && (q_type_elem_tag(v) || q_enum_is(v)))) return cur;
     if (cur) ray_release(cur);
-    return null_col_like(v, q_count_long(t));
+    return null_col_like(v, q_count(t));
 }
 
 /* the updated columns as names!cols; grouped when b names groups */
 static ray_t* upd_cols(ray_t* a, ray_t* t, ray_t* idx, ray_t* gidxs) {
     ray_t* keys = ray_dict_keys(a);
     ray_t* rng = ray_dict_vals(a);
-    int64_t nc = q_count_long(rng);
-    int full = q_count_long(idx) == q_count_long(t);
+    int64_t nc = q_count(rng);
+    int full = q_count(idx) == q_count(t);
     ray_t* cols = ray_list_new(nc > 0 ? nc : 1);
     for (int64_t j = 0; j < nc && !RAY_IS_ERR(cols); j++) {
         ray_t* nm = q_index_elem_at(keys, j);
@@ -1124,7 +1124,7 @@ static ray_t* upd_cols(ray_t* a, ray_t* t, ray_t* idx, ray_t* gidxs) {
             ray_t* v = phrase_eval(tree, t, idx);
             if (!v || RAY_IS_ERR(v)) err = v ? v : q_err(QE_TYPE);
             else if (full && (ray_is_vec(v) || v->type == RAY_ENUM || v->type == RAY_LIST) &&
-                     ray_len(v) == q_count_long(t)) {
+                     q_count(v) == q_count(t)) {
                 cur = v;                 /* a FULL update ADOPTS the phrase column —
                                           * `update `g#c from t` keeps the attribute
                                           * (set-attribute.md apply form 3) */
@@ -1136,7 +1136,7 @@ static ray_t* upd_cols(ray_t* a, ray_t* t, ray_t* idx, ray_t* gidxs) {
                 ray_release(v);
             }
         } else {                                         /* grouped (law 20) */
-            int64_t ng = ray_len(gidxs);
+            int64_t ng = q_count(gidxs);
             ray_t** gi = (ray_t**)ray_data(gidxs);
             for (int64_t k = 0; k < ng && !err; k++) {
                 ray_t* v = phrase_eval(tree, t, gi[k]);
@@ -1221,7 +1221,7 @@ static int is_symvec(ray_t* a) { return a && a->type == RAY_SYM; }
  * is not a dict to rewrite: each name is unbound from the K-tree, so an emptied
  * namespace survives (kdb keeps it in `key ``). */
 static ray_t* expunge_ns(int64_t ns, ray_t* names) {
-    int64_t n = ray_len(names);
+    int64_t n = q_count(names);
     for (int64_t i = 0; i < n; i++) {
         int64_t member = ray_read_sym(ray_data(names), i, RAY_SYM, names->attrs);
         int64_t full = q_env_qualify(ns, member);
@@ -1245,7 +1245,7 @@ static ray_t* bang_qsql(ray_t** args) {
     }
     if (tslot && tslot->type == -RAY_SYM) {
         name = tslot->i64;
-        if (is_symvec(a) && ray_len(a) > 0 && is_empty_gen(c) &&
+        if (is_symvec(a) && q_count(a) > 0 && is_empty_gen(c) &&
             q_env_ns_exists(name)) {
             ray_t* e = expunge_ns(name, a);
             if (e) return e;
@@ -1294,7 +1294,7 @@ static ray_t* bang_qsql(ray_t** args) {
             ray_release(src);
             return q_err(QE_TYPE);
         }
-        if (is_symvec(a) && ray_len(a) > 0 && is_empty_gen(c)) {
+        if (is_symvec(a) && q_count(a) > 0 && is_empty_gen(c)) {
             r = entries_verb(a, t, 1);              /* law 18: cols ≡ a _ t */
             /* a table stripped of EVERY column has no domain (an emptied dict does) */
             if (r && !RAY_IS_ERR(r) && ray_table_ncols(r) == 0) {
@@ -1310,7 +1310,7 @@ static ray_t* bang_qsql(ray_t** args) {
             else if (q_type_is_dict(a)) {           /* UPDATE */
                 r = update_table(a, b, t, idx);
                 ray_release(idx);
-            } else if (is_empty_gen(a) || (is_symvec(a) && ray_len(a) == 0)) {
+            } else if (is_empty_gen(a) || (is_symvec(a) && q_count(a) == 0)) {
                 /* law 19: delete rows ≡ the complement select */
                 ray_t* full = til_count(t);
                 ray_t* keep = RAY_IS_ERR(full) ? full : q_except_wrap(full, idx);
