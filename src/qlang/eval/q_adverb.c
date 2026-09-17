@@ -423,8 +423,7 @@ static ray_t* case_apply(ray_t* sel, ray_t** args, int64_t n) {
 
 /* Each Prior: fv between each item and the one before it.  Applied as a
  * binary the left argument IS the seed; applied as a unary the seed is the
- * value's identity element when q knows one, else `first 0#x` (ref/maps.md
- * Each Prior). */
+ * value's identity element when q knows one, else `first 0#x` (ref/maps.md:274). */
 static ray_t* prior_each(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
     ray_t* dv = iter_dict_vals(x);               /* prior is uniform: re-keys */
     if (dv) return dict_rekey(x, prior_each(fv, frow, seed, dv));
@@ -441,10 +440,14 @@ static ray_t* prior_each(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
             ray_release(prev);
             prev = c;
         }
-        if (!prev && ray_is_vec(x)) prev = ray_typed_null((int8_t)-x->type);
-        /* `first 0#x` for a table is its all-null row — the out-of-range read */
-        if (!prev && x->type == RAY_TABLE) prev = q_index_elem_at(x,
-                                                                  q_count(x));
+        /* no identity: `first 0#x` IS the out-of-range read x[count x] (ref/apply.md Index) — the typed null, a
+         * table's null row, and for a general list the null shaped like its first item, which is what makes
+         * basics/comparison.md:220's mixed-atom `(>=) prior` answer 11111b where `()` would not */
+        if (!prev && q_type_is_iter(x)) {
+            ray_t* n = ray_i64(q_count(x));
+            prev = q_index_at(x, &n, 1);
+            ray_release(n);
+        }
         if (!prev) { prev = RAY_NULL_OBJ; ray_retain(prev); }
     }
     ray_t* r;
