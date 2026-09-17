@@ -469,7 +469,7 @@ static int l_is_regular_readable(const char* p) {
  * then `$QHOME/name.q` — a fixtures/QHOME-style search root (the doctest runner
  * points QHOME at test/qscript).  An absolute path never gets QHOME prepended.
  * The resolved REGULAR readable file is executed line-at-a-time via the public
- * q_ctx_run_file (multiline-aware; silent — kdb loads silently).  A
+ * q_ctx_run_file (multiline-aware; a bare top-level value echoes, #53).  A
  * still-MISSING path signals the path as given (kdb: `\l nope.q` -> 'nope.q);
  * an existing DIRECTORY mounts through io/q_mount.c (splayed table / db root;
  * `\l .` reloads data only).  Getter form (no arg) stays 'nyi.

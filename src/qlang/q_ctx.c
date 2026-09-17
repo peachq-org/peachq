@@ -74,10 +74,10 @@ static void ctx_show_err(FILE* out, FILE* err, ray_t* e) {
  * Parse + evaluate + print a single input line.  Used verbatim by both the
  * piped and the interactive loops so their observable behaviour is identical
  * (same parse/eval/materialize/format pipeline, same error text). */
-/* print_result: when non-zero (REPL) a non-null, non-assignment result is
- * q-formatted to `out` (console auto-display).  When zero (script load) the
- * result is discarded — kdb scripts are silent except explicit side-effects
- * (show / 0N! / console writes), which still flush below. */
+/* print_result: when non-zero a non-null, non-assignment result is q-formatted
+ * to `out` (console auto-display).  A script LOAD prints too — kdb displays every
+ * unterminated top-level statement of a file (ml/jupyterq/index.md: a `;` is
+ * the off-switch; #53) — so zero is only for argv/bootstrap text. */
 
 /* A load line that ABORTS re-signals to whoever asked for the load: display
  * once at this line, then DETACH the error's identity (else display's drop and
@@ -190,8 +190,7 @@ static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
         return 0;
     }
     /* q console silence: the generic null prints nothing, which is already what
-     * an assignment statement answers (q_eval_statement); a script load
-     * (print_result == 0) prints no result at all. */
+     * an assignment statement (q_eval_statement) or `x;` answers. */
     if (print_result && !RAY_IS_NULL(r)) {
         size_t n;
         char*  txt = q_fmt_console_alloc(r, &n);   /* obey \c on auto-echo display */
@@ -218,7 +217,7 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
 /* The script runner reads BYTES — `\l file` arrives through the q_io byte core
  * and the embedded stdlib bundle (`\l pq`) is already a string, so one
  * multiline law serves both with no second file-reading stack. */
-static int ctx_run_script(const char* src, size_t len, int64_t file_sym,
+static int ctx_run_script(const char* src, size_t len, int64_t file_sym, int print_result,
                           FILE* out, FILE* err, ray_t** esig) {
     if (!src) { src = ""; len = 0; }     /* an empty read owns no buffer; `src + len` must stay defined */
 
@@ -272,7 +271,7 @@ static int ctx_run_script(const char* src, size_t len, int64_t file_sym,
      * console the eval error may first SUSPEND into the debugger — ctx_line's
      * load seam — and a `:r` resume continues the load instead of aborting. */
     int lrc = 0;
-    #define FLUSH() do { if (alen) { lrc = ctx_line(acc, alen, out, err, 0, 1, esig); alen = 0; } } while (0)
+    #define FLUSH() do { if (alen) { lrc = ctx_line(acc, alen, out, err, print_result, 1, esig); alen = 0; } } while (0)
 
     while (p < pend) {
         const char* line = p;
@@ -343,19 +342,20 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig) {
     const char* fpath = q_io_abs_path(path, abs, sizeof abs) ? abs : path;   /* ref/value.md `f`: the FULL path */
     int rc = ctx_run_script((const char*)ray_data(bytes),
                             (size_t) q_count(bytes),
-                            ray_sym_intern_runtime(fpath, strlen(fpath)), out, err, esig);
+                            ray_sym_intern_runtime(fpath, strlen(fpath)), 1, out, err, esig);
     ray_release(bytes);
     return rc;
 }
 
 int q_ctx_run_src(const char* s, FILE* out, FILE* err, ray_t** esig) {
     /* No path to attribute: the core bundles are ONE concatenated string, so
-     * their docs record the empty file. */
-    return ctx_run_script(s, strlen(s), 0, out, err, esig);
+     * their docs record the empty file.  Silent: this is the bootstrap and the
+     * launcher's argv text (`-eval`, ratified silent 2026-08-30), not a `\l`. */
+    return ctx_run_script(s, strlen(s), 0, 0, out, err, esig);
 }
 
 int q_ctx_run_named_src(const char* name, const char* s, FILE* out, FILE* err, ray_t** esig) {
-    return ctx_run_script(s, strlen(s), ray_sym_intern_runtime(name, strlen(name)), out, err, esig);
+    return ctx_run_script(s, strlen(s), ray_sym_intern_runtime(name, strlen(name)), 1, out, err, esig);
 }
 
 /* ===== The remote doors (see q_ctx.h) =====
