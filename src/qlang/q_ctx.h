@@ -36,8 +36,9 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err, int print_resu
 int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig);
 
 /* An in-memory STRING of q source under the SAME script semantics/returns as
- * q_ctx_run_file — the embedded stdlib bundle (`\l pq`) rides this: one
- * loader, one multiline law. */
+ * q_ctx_run_file — the bootstrap and the launcher's argv text ride this: one
+ * loader, one multiline law — except that a bare top-level value is NOT
+ * echoed (a load echoes, #53; `-eval` was ratified silent 2026-08-30). */
 int q_ctx_run_src(const char* s, FILE* out, FILE* err, ray_t** esig);
 
 /* q_ctx_run_src for an embedded file that KEEPS its name: `\l pq` runs each
