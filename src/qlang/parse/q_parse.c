@@ -27,6 +27,7 @@
 #include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
 #include "qlang/q_ops.h"      /* q_lex_is_kw_infix — static lexical manifest */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_is_fn, q_eval_apply_carrier_kind */
+#include "qlang/eval/q_dbg.h"  /* q_dbg_statement_origin — the lambda's file + line */
 #include "table/sym.h"       /* ray_sym_vec_cell — qSQL dict-key/col names */
 #include "core/numparse.h"   /* ray_parse_i64, ray_parse_f64 */
 #include <assert.h>
@@ -1182,6 +1183,13 @@ static P parse_base(Parser *p) {
         for (int64_t i = 0; i < bn; i++)
             if (!bs[i]) bs[i] = q_null();
         ray_t *fn = q_eval_apply_lambda_new(params, bs, bn, src, ptypes);
+        /* ref/value.md `f`/`l`: the lambda's origin is where it is PARSED — the loading script's
+         * file, and the line its `{` sits on (a multi-line statement's inner lambda has its own) */
+        int64_t line = 0, file = q_dbg_statement_origin(&line);
+        if (file) {
+            for (int i = 0; i < lb_start; i++) line += p->src[i] == '\n';
+            q_eval_apply_lambda_origin(fn, file, line);
+        }
         ray_release(src);
         ray_release(params);
         if (ptypes) ray_release(ptypes);

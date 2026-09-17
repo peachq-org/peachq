@@ -21,6 +21,9 @@ void q_dbg_frame_pop(void);
  * (inherits suspendability from the statement that asked for the load). */
 int  q_dbg_statement_begin(const char* src, size_t n, int console);
 void q_dbg_statement_end(int tok);
+/* the current statement's file + line when it is a loaded script's (the origin its lambdas and
+ * its frame-[0] line report); 0 for console input, line untouched */
+int64_t q_dbg_statement_origin(int64_t* line);
 
 /* Inside @[;;]/.[;;]/.Q.trp protection: error-trap mode 0, never suspend.  enter hands back the session `\d`;
  * exit restores it when r is a caught error (a `:x` return is not one) — owner ruling 2026-09-17. */

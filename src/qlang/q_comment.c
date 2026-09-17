@@ -16,8 +16,9 @@ static int32_t g_pending_depth;      /* the frame depth the statement itself bin
 static ray_t*  g_claimed;            /* hook records awaiting the fire point (owned) */
 static int64_t g_file;
 static int64_t g_stmt_line;          /* THE one line capture: the statement being
-                                      * evaluated names both the doc-store row
-                                      * and the lambda's `l` */
+                                      * evaluated names the doc-store row, the
+                                      * `l` of every lambda parsed in it and its
+                                      * own debugger frame */
 static int     g_seen_code;
 static int     g_file_run;           /* the run being read is the file's leading one */
 static int     g_file_run_done;
@@ -142,18 +143,22 @@ static void comment_stamp_lambda(int64_t sym, ray_t* val) {
     if (!s) return;
     const char* p = ray_str_ptr(s);
     int64_t n = ray_str_len(s);
-    int64_t line = g_file ? g_stmt_line : -1;
     if (n <= 0) return;
     if (p[0] == '.') {
-        q_eval_apply_lambda_name(val, p, n, g_file, line);
+        q_eval_apply_lambda_name(val, p, n);
         return;
     }
     char* buf = (char*)ray_alloc_raw((size_t)n + 2);
     if (!buf) return;
     buf[0] = buf[1] = '.';
     memcpy(buf + 2, p, (size_t)n);
-    q_eval_apply_lambda_name(val, buf, n + 2, g_file, line);
+    q_eval_apply_lambda_name(val, buf, n + 2);
     ray_free_raw(buf);
+}
+
+int64_t q_comment_origin(int64_t* line) {
+    if (g_file) *line = g_stmt_line;
+    return g_file;
 }
 
 void q_comment_on_global_set(int64_t sym, ray_t* val) {
