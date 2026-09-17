@@ -242,6 +242,11 @@ int main(int argc, char** argv) {
      * is a terminal), so it runs INSIDE the REPL once the debugger's reader is
      * armed, with the `-eval` texts after it. */
     const char* script = q_dotz_script_path();
+    /* `QINIT` names a file loaded after init, before any script (basics/by-topic.md): a startup load like the script —
+     * batch ahead of `-eval-before` on a non-tty, the console's first `\l` on a tty.  Empty is unset; there is no
+     * `$QHOME/q.q` default (#60). */
+    const char* qinit = getenv("QINIT");
+    if (qinit && !*qinit) qinit = NULL;
 
     /* `\c` console-size DISPLAY clipping is ARMED BY DEFAULT (q_sys_cfg_init)
      * so a fresh interactive tty REPL and a piped `printf … | ./q` (no script,
@@ -255,7 +260,7 @@ int main(int argc, char** argv) {
      * kdb has no off-switch, so the ceiling IS the batch idiom.  A tty that
      * drops to the REPL after the script, or an explicit `\c` in the script,
      * resets/re-arms the size. */
-    if ((script != NULL || n_before + n_after > 0) && !stdin_tty)
+    if ((script != NULL || qinit != NULL || n_before + n_after > 0) && !stdin_tty)
         q_console_clip_set(2000, 2000);
 
     /* `-eval-before` / `-eval` texts are scripts whose source came from argv: the script seam, the script abort
@@ -266,20 +271,24 @@ int main(int argc, char** argv) {
     /* a file-backed main loads its tables first, like `q dir/` — which implies `\l pq`, the loader's home */
     if (duckdb_main && *duckdb_main)
         script_rc = q_ctx_run_src("\\l pq\n.duckdb.load[.duckdb.main[];::]", stdout, stderr, NULL);
+    if (qinit && !stdin_tty && script_rc == 0)
+        script_rc = q_ctx_run_file(qinit, stdout, stderr, NULL);
     for (int i = 0; i < n_before && script_rc == 0; i++)
         script_rc = q_ctx_run_src(eval_before[i], stdout, stderr, NULL);
     free(eval_before);
 
     const char** startup = NULL;
-    char         load[PATH_MAX + 4];
+    const char*  files[] = { qinit, script };   /* the tty console's first `\l`s, QINIT ahead of the script */
+    char         load[2][PATH_MAX + 4];
     if (stdin_tty) {
-        startup = calloc((size_t)n_after + 2, sizeof *startup);
+        startup = calloc((size_t)n_after + 3, sizeof *startup);
         if (!startup) { fprintf(stderr, "q: out of memory\n"); return 1; }
         int k = 0;
-        if (script) {   /* absolute, as q_ctx_run_file records it: `\l` must not re-resolve against QHOME */
+        for (int i = 0; i < 2; i++) {   /* absolute, as q_ctx_run_file records it: `\l` must not re-resolve against QHOME */
             char abs[PATH_MAX];
-            snprintf(load, sizeof load, "\\l %s", q_io_abs_path(script, abs, sizeof abs) ? abs : script);
-            startup[k++] = load;
+            if (!files[i]) continue;
+            snprintf(load[i], sizeof load[i], "\\l %s", q_io_abs_path(files[i], abs, sizeof abs) ? abs : files[i]);
+            startup[k++] = load[i];
         }
         for (int i = 0; i < n_after; i++) startup[k++] = eval_after[i];
         q_repl_prime(startup);
@@ -292,9 +301,9 @@ int main(int argc, char** argv) {
     free(eval_after);
 
     if (script_rc != 0) {
-        /* A non-tty startup script (or a `-eval-before` text) could not be
-         * opened or ABORTED at an error (parse or eval — the script seam's
-         * law): skip the REPL/server loop and exit non-zero (kdb fails a bad
+        /* A batch startup stage (the `-duckdb` main load, QINIT, a non-tty
+         * script or an `-eval` text) could not be opened or ABORTED at an error
+         * (parse or eval — the script seam's law): skip the REPL/server loop and exit non-zero (kdb fails a bad
          * `q file.q` on a non-tty stdin; it must not silently succeed).  The
          * open error / the statement's trace already printed. */
     } else if (q_sys_listen_port() > 0 && poll) {

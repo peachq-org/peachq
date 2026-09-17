@@ -20,6 +20,16 @@ erroring statement suspends into the `q))` debugger with the session up — `:` 
 statement, `\` abandons it and returns to `q)`. When stdin is not a terminal (`q file.q </dev/null`, a pipe, a
 supervisor) the load aborts at the error and the process exits non-zero; that batch contract is unchanged.
 
+**`QINIT` names a file to load first.** When the environment variable is set, peachq loads that file (as given:
+absolute, or relative to the directory you start in) after its own bootstrap and any `-duckdb` main database, before
+the startup script and the prompt, and on a non-terminal stdin before every `-eval-before` text too — so anything it
+defines is visible to all of them. (On a terminal the `-eval-before` texts stay batch and run before the console
+takes over, so there they precede it.) It is an ordinary `\l`: definitions land in the root namespace, top-level values echo, and a failing one follows the
+startup-script rule above (a terminal suspends into `q))`, a non-terminal exits non-zero and the script never runs);
+a path that does not exist is the same `cannot open script` error a missing startup script gives. Unset or empty,
+nothing happens — peachq ships its own `q.q` as part of the bootstrap, so there is no `$QHOME/q.q` default to fall
+back to. `.z.v` reports the value.
+
 ## Every option
 
 The **status** column is the point of this table: **same** = behaves as the kx documentation describes, **DIFFERS** =
