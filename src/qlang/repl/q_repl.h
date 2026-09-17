@@ -23,6 +23,15 @@ typedef struct ray_poll ray_poll_t;   /* fwd — full API in core/poll.h */
  * Requires an initialised rayforce runtime. */
 void q_repl_run(FILE* in, FILE* out, FILE* err, int echo);
 
+/* Queue the tty console's FIRST statements (NULL-terminated q source texts,
+ * borrowed: `q file.q` as `\l <path>`, then the `-eval` texts).  Whichever tty
+ * loop runs first drains it as console-initiated scripts, reader armed and
+ * before its prompt, so a failing statement suspends into `q))` as a typed
+ * `\l`'s does (kx: a failing `q file.q` at a terminal suspends; only a non-tty
+ * stdin exits); with no editor to be had it runs the plain script way, an abort
+ * exiting as on a non-tty.  The piped loop ignores it. */
+void q_repl_prime(const char* const* startup);
+
 /* Poll-driven REPL: register stdin on `poll` (alongside any IPC listener
  * already on it) and run ONE event loop, so the console and IPC clients are
  * serviced concurrently — mirrors rayforce's own run_interactive (repl.c).

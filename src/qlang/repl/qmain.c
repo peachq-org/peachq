@@ -6,7 +6,7 @@
 
 #include "qlang/q_count.h"
 #include "qlang/repl/q_repl.h"
-#include "qlang/q_ctx.h"   /* q_ctx_run_file/q_ctx_run_src — the script and -eval doors */
+#include "qlang/q_ctx.h"   /* q_ctx_run_file/q_ctx_run_src — the non-tty script and -eval doors */
 #include "qlang/q_runtime.h"
 #include "qlang/q_dotz.h"
 #include "qlang/ops/q_sys.h"     /* q_sys_listen — single-homed listen+readback */
@@ -14,10 +14,12 @@
 #include "qlang/net/q_tls.h"  /* q_tls_server_mode_set — the `-E` TLS server mode */
 #include "qlang/parse/q_tok.h" /* q_tok_date_order_set — the `-z` date order */
 #include "qlang/io/q_duckdb.h" /* q_duckdb_main_path_set — the `-duckdb` main database file */
+#include "qlang/io/q_io.h"     /* q_io_abs_path — the tty startup `\l` names the script's full path */
 #include "core/poll.h"
 #include "core/runtime.h"
 #include <rayforce.h>
 #include <errno.h>
+#include <limits.h>      /* PATH_MAX — the startup `\l` line */
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -232,10 +234,13 @@ int main(int argc, char** argv) {
         q_console_clip_set(25, NULL_I64);
     }
 
-    /* Startup script (`q file.q`): run it before the REPL / server loop.
-     * kdb semantics — the script executes first; then a tty drops to the
-     * REPL, a `-p` server serves IPC, and a non-tty non-server run exits 0
-     * (the test/daemon shape) rather than blocking on an empty REPL. */
+    /* Startup script (`q file.q`).  Non-tty: run it before the server loop /
+     * exit — a `-p` server serves IPC, a non-server run exits 0 (the
+     * test/daemon shape) rather than blocking on an empty REPL, and an abort
+     * exits non-zero.  Tty: it is the console's first `\l` (owner ruling
+     * 2026-09-17, #57 — kx suspends a failing `q file.q` into `q))` when stdin
+     * is a terminal), so it runs INSIDE the REPL once the debugger's reader is
+     * armed, with the `-eval` texts after it. */
     const char* script = q_dotz_script_path();
 
     /* `\c` console-size DISPLAY clipping is ARMED BY DEFAULT (q_sys_cfg_init)
@@ -253,26 +258,45 @@ int main(int argc, char** argv) {
     if ((script != NULL || n_before + n_after > 0) && !stdin_tty)
         q_console_clip_set(2000, 2000);
 
-    /* `-eval-before` / `-eval` texts are scripts whose source came from argv: same statement seam (q_ctx_run_src),
-     * same abort law, results NOT echoed.  An abort anywhere skips everything after it, REPL/server loop included. */
+    /* `-eval-before` / `-eval` texts are scripts whose source came from argv: the script seam, the script abort
+     * law, results NOT echoed.  An abort skips everything after it — on a non-tty the REPL/server loop included.
+     * On a tty the `-eval` texts follow the script into the REPL (console-initiated, so they suspend as it does);
+     * `-eval-before` precedes the script by definition, so it stays the batch idiom on both. */
     int script_rc = 0;
     /* a file-backed main loads its tables first, like `q dir/` — which implies `\l pq`, the loader's home */
     if (duckdb_main && *duckdb_main)
         script_rc = q_ctx_run_src("\\l pq\n.duckdb.load[.duckdb.main[];::]", stdout, stderr, NULL);
     for (int i = 0; i < n_before && script_rc == 0; i++)
         script_rc = q_ctx_run_src(eval_before[i], stdout, stderr, NULL);
-    if (script && script_rc == 0)
-        script_rc = q_ctx_run_file(script, stdout, stderr, NULL);
-    for (int i = 0; i < n_after && script_rc == 0; i++)
-        script_rc = q_ctx_run_src(eval_after[i], stdout, stderr, NULL);
     free(eval_before);
+
+    const char** startup = NULL;
+    char         load[PATH_MAX + 4];
+    if (stdin_tty) {
+        startup = calloc((size_t)n_after + 2, sizeof *startup);
+        if (!startup) { fprintf(stderr, "q: out of memory\n"); return 1; }
+        int k = 0;
+        if (script) {   /* absolute, as q_ctx_run_file records it: `\l` must not re-resolve against QHOME */
+            char abs[PATH_MAX];
+            snprintf(load, sizeof load, "\\l %s", q_io_abs_path(script, abs, sizeof abs) ? abs : script);
+            startup[k++] = load;
+        }
+        for (int i = 0; i < n_after; i++) startup[k++] = eval_after[i];
+        q_repl_prime(startup);
+    } else {
+        if (script && script_rc == 0)
+            script_rc = q_ctx_run_file(script, stdout, stderr, NULL);
+        for (int i = 0; i < n_after && script_rc == 0; i++)
+            script_rc = q_ctx_run_src(eval_after[i], stdout, stderr, NULL);
+    }
     free(eval_after);
 
     if (script_rc != 0) {
-        /* Startup script could not be opened, or ABORTED at an error (parse or
-         * eval — the script seam's law): skip the REPL/server loop and exit
-         * non-zero (kdb fails a bad `q file.q`; it must not silently succeed).
-         * The open error / the statement's trace already printed. */
+        /* A non-tty startup script (or a `-eval-before` text) could not be
+         * opened or ABORTED at an error (parse or eval — the script seam's
+         * law): skip the REPL/server loop and exit non-zero (kdb fails a bad
+         * `q file.q` on a non-tty stdin; it must not silently succeed).  The
+         * open error / the statement's trace already printed. */
     } else if (q_sys_listen_port() > 0 && poll) {
         /* A listener is LIVE — from startup `-p` OR a runtime/script `\p N` —
          * so serve, don't exit at a non-tty script end.  Keyed off the
@@ -335,6 +359,7 @@ int main(int argc, char** argv) {
      * exit status (dotz.md) on EVERY session exit — `\\`/`exit x` never reach
      * here (q_sys_exit already terminated).  q_sys_exit does not return; the OS
      * reclaims the poll/runtime (same as the `exit x` path, kdb-true). */
+    free(startup);
     q_sys_exit(script_rc);
     return script_rc;   /* unreachable */
 }
