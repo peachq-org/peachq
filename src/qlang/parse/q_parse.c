@@ -57,16 +57,15 @@ static _Noreturn void die_err(q_err_e cls) {
     longjmp(q_err_jmp, 1);
 }
 
-/* kdb signals a refused k-unary glyph AS the class (`$42` -> '$, `+d` -> '+
- * — basics/parsetrees.md, its own "//$ unary form disabled in q" note), the
- * same offending-text-itself shape q_err_name carries for undefined names. */
-static char   g_die_name[2];
-static size_t g_die_name_n = 0;   /* nonzero: the handler answers q_err_name */
+/* a classed error whose TEXT is p[0..n) — the handler answers q_err_signal:
+ * a refused k-unary glyph AS the class (`$42` -> '$, `+d` -> '+, the
+ * offending-text-itself shape of undefined names, basics/parsetrees.md) and
+ * kx 4.0's `dup names for cols/groups b` (qsql.md:168) */
+static ray_t *g_die_payload = NULL;   /* owned charv across the longjmp */
 
-static _Noreturn void die_name(const char *p, size_t n) {
-    if (n > sizeof g_die_name) n = sizeof g_die_name;
-    memcpy(g_die_name, p, n);
-    g_die_name_n = n;
+static _Noreturn void die_signal(q_err_e cls, const char *p, size_t n) {
+    g_die_class = cls;
+    g_die_payload = ray_charv(p, (int64_t)n);
     longjmp(q_err_jmp, 1);
 }
 
@@ -861,22 +860,20 @@ static int symvec_ids_dup(ray_t *a) {
     return 0;
 }
 
-/* a select-COLUMN name colliding with a by-GROUP name — the cols/groups CROSS
- * collision, which is what covers both of qsql.md:168's parse-error examples
- * (`select b by b from t`, `select a,a by a from t`).  A collision WITHIN one
- * list is NOT checked here: kdb auto-aliases it, peachq rejects it at EVAL
- * (the stricter owner ruling — see q_funsql.c names_collide). */
-static int qsql_cross_names_dup(ray_t *A, ray_t *B) {
+/* the first select-COLUMN name (phrase order) also a by-GROUP name, or -1 —
+ * the cols/groups CROSS collision of qsql.md:168's two parse-error examples
+ * (`select b by b from t` -> b, `select a,a by a from t` -> a) */
+static int64_t qsql_cross_names_dup(ray_t *A, ray_t *B) {
     ray_t *ka = A && A->type == RAY_DICT ? ray_dict_keys(A) : NULL;
     ray_t *kb = B && B->type == RAY_DICT ? ray_dict_keys(B) : NULL;
-    if (!ka || ka->type != RAY_SYM || !kb || kb->type != RAY_SYM) return 0;
+    if (!ka || ka->type != RAY_SYM || !kb || kb->type != RAY_SYM) return -1;
     int64_t na = q_count(ka), nb = q_count(kb);
     const int64_t *sa = (const int64_t *)ray_data(ka);
     const int64_t *sb = (const int64_t *)ray_data(kb);
     for (int64_t i = 0; i < na; i++)
         for (int64_t j = 0; j < nb; j++)
-            if (sa[i] == sb[j]) return 1;
-    return 0;
+            if (sa[i] == sb[j]) return sa[i];
+    return -1;
 }
 
 /* the registry value for spelling s at valence v (q_embed's policy); q_parse
@@ -1430,11 +1427,17 @@ static P parse_query(Parser *p) {
     /* qsql.md:168: a cols-vs-groups collision "throws a 'dup names for
      * cols/groups error during parse" — AT PARSE, so a script carrying the
      * bug fails to LOAD and the operator is alerted before the code runs.
-     * A within-phrase collision is NOT this law's (kdb auto-aliases it;
-     * peachq rejects it at eval — the q_funsql.c ruling). */
-    if (verb == QSQL_V_SELECT && qsql_cross_names_dup(A, B)) {
+     * A within-phrase collision is NOT this law's (a derived name auto-aliases,
+     * a written duplicate dies at eval — q_funsql.c names_collide). */
+    int64_t dup = verb == QSQL_V_SELECT ? qsql_cross_names_dup(A, B) : -1;
+    if (dup >= 0) {
         ray_release(A); ray_release(B); ray_release(C);
-        die_err(QE_DUP);
+        char msg[256];
+        ray_t *nm = ray_sym_str(dup);
+        int n = snprintf(msg, sizeof msg, "dup names for cols/groups %.*s",
+                         nm ? (int)ray_str_len(nm) : 0, nm ? ray_str_ptr(nm) : "");
+        ray_release(nm);
+        die_signal(QE_DUP, msg, n < (int)sizeof msg ? (size_t)n : sizeof msg - 1);
     }
 
     /* a/b/c are consumed; the from-expr and the limit/order slots move out
@@ -1616,7 +1619,7 @@ static P parse_e_body(Parser *p, QCtx ctx) {
             /* kdb-published class: THE GLYPH ITSELF (`$42` -> '$, `+d` -> '+
              * — basics/parsetrees.md "//$ unary form disabled in q") */
             if (nk == T_NOUN || nk == T_LPAREN || nk == T_LBRACE || nk == T_VERB)
-                die_name(&p->src[ht->start], 1);
+                die_signal(QE_NAME, &p->src[ht->start], 1);
         }
     }
     P t = parse_term(p, ctx);
@@ -1706,7 +1709,7 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
                     ray_release(s);
                     ray_release(t.v);
                     if (e.v) ray_release(e.v);
-                    die_name(&g, 1);
+                    die_signal(QE_NAME, &g, 1);
                 }
                 ray_t *m = q_verb_name("::", 2);
                 ray_release(t.v);
@@ -1817,35 +1820,42 @@ static inline int qsql_is_fn_value(const ray_t *v) {
     return 0;
 }
 
-/* Rightmost column symbol in an expression — the default output-column name
- * (`sum a` -> `a`, `a` -> `a`).  Returns a fresh owned `sym, or NULL. */
-static ray_t *qsql_derive_alias(ray_t *expr) {
-    if (!expr) return NULL;
+/* the glyphs whose LEFT operand is a parameter and RIGHT the data: an unnamed
+ * phrase under one names by the data, so `update `g#sym`, `update `dom$col`
+ * and `update 0^size` land on the column itself (kb/performance-tips.md:283,
+ * learn/brief-introduction.md:381, core/kdb/taq/taq.q:65) */
+static int qsql_glyph_names_right(const q_op_t *row) {
+    return row->name[1] == 0 && strchr("#_^$@.", row->name[0]) != NULL;
+}
+
+/* The derived output name of an unnamed phrase as a sym id, or -1 (-> x).
+ * The head's manifest row picks the naming ARGUMENT: a glyph its first
+ * (qsql.md:234 "leftmost term"), a keyword or any other fn value its last
+ * (xbar.md:33 `10 xbar time.minute` -> minute; tpcd.q:12 `q wsum x` read
+ * back as x).  The virtual `i` never names a result (qsql.md:234). */
+static int64_t qsql_derive_alias(ray_t *expr) {
+    if (!expr) return -1;
     if (expr->type == -RAY_SYM && (expr->attrs & Q_ATTR_QUOTED)) {
-        /* a dotted reference keys its column by the LAST segment: `10 xbar
-         * time.minute` -> `minute` (ref/xbar.md:33, kb/programming-idioms.md:265) */
         int64_t id = expr->i64;
         ray_t *s = ray_sym_str(id);
-        if (s) {
-            const char *p = ray_str_ptr(s);
-            size_t n = ray_str_len(s), cut = 0;
-            for (size_t i = 0; i < n; i++)
-                if (p[i] == '.') cut = i + 1;
-            if (cut > 0 && cut < n)
-                id = ray_sym_intern_runtime(p + cut, (int64_t)(n - cut));
-            ray_release(s);
-        }
-        return qsql_colsym(id);
+        if (!s) return id;
+        const char *p = ray_str_ptr(s);
+        size_t n = ray_str_len(s), cut = 0;
+        for (size_t i = 0; i < n; i++)
+            if (p[i] == '.') cut = i + 1;
+        if (cut > 0 && cut < n) { p += cut; n -= cut; }
+        id = (n == 1 && p[0] == 'i') ? -1 : ray_sym_intern_runtime(p, (int64_t)n);
+        ray_release(s);
+        return id;
     }
-    if (expr->type == RAY_LIST) {
+    if (expr->type == RAY_LIST && q_count(expr) >= 2) {
         int64_t n = q_count(expr);
         ray_t **e = (ray_t **)ray_data(expr);
-        for (int64_t i = n - 1; i >= 0; i--) {
-            ray_t *a = qsql_derive_alias(e[i]);
-            if (a) return a;
-        }
+        const q_op_t *row = q_registry_operand_row(e[0]);
+        int first = row && row->lex == QLEX_GLYPH && !qsql_glyph_names_right(row);
+        return qsql_derive_alias(e[first ? 1 : n - 1]);
     }
-    return NULL;
+    return -1;
 }
 
 /* Build a q name!expr dict from a column list (consumes the alias/val refs). */
@@ -2009,17 +2019,17 @@ static ray_t *qsql_convert_expr(ray_t *x) {
     return x;
 }
 
-/* an unnameable phrase is named x, deduped x1,x2,… against the names already
- * assigned (qsql.md:234 "else as `x`") — NEVER silently dropped */
-static ray_t *qsql_alias_x(ray_t **aliases, int na) {
+/* a derived name in use suffixes 1,2,… (qsql.md:234 `c1 c11`) — never dropped */
+static ray_t *qsql_alias_dedup(int64_t id, ray_t **aliases, int na) {
     int64_t used[QSQL_MAXCOLS];
     for (int j = 0; j < na; j++) used[j] = aliases[j]->i64;
-    return qsql_colsym(q_name_dedup(ray_sym_intern_runtime("x", 1), used, na, 0));
+    if (id < 0) id = ray_sym_intern_runtime("x", 1);
+    return qsql_colsym(q_name_dedup(id, used, na, 0));
 }
 
 /* Fold a phrase list into a q name!expr DICT (select/update `a`, by-key `b`):
  * an alias phrase keys on its written name; a bare phrase derives its output
- * name via qsql_derive_alias, exactly as qsql_colspec does over the clone. */
+ * name via qsql_derive_alias over the clone. */
 static ray_t *qsql_norm_dict(ray_t *phrases) {
     int64_t n = q_count(phrases);
     ray_t **ph = (ray_t **)ray_data(phrases);
@@ -2031,20 +2041,8 @@ static ray_t *qsql_norm_dict(ray_t *phrases) {
             aliases[na] = qsql_colsym(name->i64);
             vals[na]    = qsql_convert_expr(val);
         } else {
-            ray_t *v  = qsql_convert_expr(ph[i]);
-            ray_t *al = qsql_derive_alias(v);
-            if (!al) al = qsql_alias_x(aliases, na);
-            /* kdb: a bare `select i` (the VIRTUAL row-index column) outputs
-             * under the name `x`, not `i` (qsql.md — i is not a real column,
-             * so the default rightmost-name alias does not apply). */
-            if (v && v->type == -RAY_SYM && al->type == -RAY_SYM) {
-                ray_t *als = ray_sym_str(al->i64);
-                if (als && ray_str_len(als) == 1 && ray_str_ptr(als)[0] == 'i') {
-                    ray_release(al);
-                    al = qsql_colsym(ray_sym_intern_runtime("x", 1));
-                }
-            }
-            aliases[na] = al;
+            ray_t *v    = qsql_convert_expr(ph[i]);
+            aliases[na] = qsql_alias_dedup(qsql_derive_alias(v), aliases, na);
             vals[na]    = v;
         }
         na++;
@@ -2095,10 +2093,10 @@ static ray_t *qsql_norm_by(ray_t *phrases, int verb) {
             bv[nb] = qsql_convert_expr(val);
             bnamed[nb] = 1;
         } else {
-            ray_t *v  = qsql_convert_expr(ph[i]);
-            ray_t *al = qsql_derive_alias(v);
-            if (!al) al = qsql_alias_x(bk, nb);
-            bk[nb] = al; bv[nb] = v; bnamed[nb] = 0;
+            ray_t *v = qsql_convert_expr(ph[i]);
+            bk[nb] = qsql_alias_dedup(qsql_derive_alias(v), bk, nb);
+            bv[nb] = v;
+            bnamed[nb] = 0;
         }
         nb++;
     }
@@ -2215,9 +2213,10 @@ ray_t *q_qsql_normalize_probe(const char *src, int ctx, int verb) {
         free_tokens(g_toks);
         g_toks.t = NULL; g_toks.n = 0;
         q_err_e cls = g_die_class; g_die_class = QE_PARSE;
-        if (g_die_name_n) {
-            size_t nn = g_die_name_n; g_die_name_n = 0;
-            return q_err_name(g_die_name, nn);
+        if (g_die_payload) {
+            ray_t *e = q_err_signal(cls, g_die_payload);
+            ray_release(g_die_payload); g_die_payload = NULL;
+            return e;
         }
         return q_err(cls);
     }
@@ -2342,9 +2341,10 @@ ray_t *q_parse(const char *src) {
         g_toks.t = NULL;
         g_toks.n = 0;
         q_err_e cls = g_die_class; g_die_class = QE_PARSE;
-        if (g_die_name_n) {
-            size_t nn = g_die_name_n; g_die_name_n = 0;
-            return q_err_name(g_die_name, nn);
+        if (g_die_payload) {
+            ray_t *e = q_err_signal(cls, g_die_payload);
+            ray_release(g_die_payload); g_die_payload = NULL;
+            return e;
         }
         return q_err(cls);
     }
