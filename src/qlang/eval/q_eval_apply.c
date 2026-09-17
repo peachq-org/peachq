@@ -1867,6 +1867,7 @@ ray_t* q_eval_dot_wrap(ray_t** args, int64_t n) {
     if (n == 3 || n == 4) return amend_value(args, n, 1);
     if (n != 2) return q_err(QE_RANK);
     ray_t* a = args[1];
+    if (a && RAY_IS_NULL(a)) return q_eval_at_wrap(args, 2);   /* `x . (::)` is `x[::]` — the null index selects all */
     if (!a || (!ray_is_vec(a) && a->type != RAY_LIST && a->type != RAY_TABLE))
         return q_err(QE_TYPE);
     int64_t k = q_count(a);

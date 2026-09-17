@@ -147,6 +147,18 @@ ray_t* q_list_collapse(ray_t* l) {
     return atom_run_collapse(l);
 }
 
+ray_t* q_list_uncollapse(ray_t* v) {
+    int64_t n = q_count(v);
+    ray_t* l = ray_list_new(n);
+    for (int64_t i = 0; i < n && !RAY_IS_ERR(l); i++) {
+        ray_t* a = q_index_elem_at(v, i);
+        if (!a || RAY_IS_ERR(a)) { ray_release(l); return a ? a : q_err(QE_TYPE); }
+        l = ray_list_append(l, a);
+        ray_release(a);
+    }
+    return l;
+}
+
 /* ---- wrappers (bespoke q semantics over a rayfall primitive) ---- */
 
 /* q_list_collapse leaves a ZERO-length boxed list untyped (no element to infer
