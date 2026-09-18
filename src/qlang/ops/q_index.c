@@ -766,10 +766,18 @@ static ray_t* insert_positions(ray_t* pos, int64_t n0) {
     return pos;
 }
 
+/* the rows mj (ctx) names of one payload column — a general column boxed (items): a dict cell must reach the
+ * row-append as a dict, not as the table a collapsed run would make of it (D43) */
+static ray_t* miss_col(void* ctx, ray_t* col) {
+    ray_t* mj = ctx;
+    if (col->type != RAY_LIST) return q_index_at(col, &mj, 1);
+    return items(col, (const int64_t*)ray_data(mj), q_count(mj));
+}
+
 /* one slot table grown by the payload rows mj names through THE row-append home — in the slack when the slot is
  * ours at rc 1, else by the copy.  *pt replaced on success; NULL on success, else the error with *pt untouched. */
 static ray_t* keyed_grow(ray_t** pt, ray_t* p, ray_t* mj) {
-    ray_t* pm = q_index_at(p, &mj, 1);
+    ray_t* pm = q_table_map_cols(miss_col, mj, p);
     if (!pm || RAY_IS_ERR(pm)) return pm ? pm : q_err(QE_OOM);
     ray_t* g = q_table_append(*pt, pm, (*pt)->rc == 1);
     ray_release(pm);
