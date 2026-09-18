@@ -247,17 +247,28 @@ int q_table_row_eq(ray_t* ta, int64_t ra, ray_t* tb, int64_t rb, int64_t ncmp) {
     return 1;
 }
 
-/* Collapse per-column boxed accumulators into a table taking column names from
- * `names` at offset c0.  CONSUMES every accs[c] — an entry that IS an error
- * propagates as the result — so a caller never unwinds them by hand.  Owned. */
-ray_t* q_table_cols_from_accs(ray_t* names, int64_t c0, ray_t** accs, int64_t nc) {
+/* The row-append's column from a run of record cells: an atom run types the column (`meta u` after the first
+ * insert into `()`), but a run of DICTS stays the general list it is — the list->table collapse belongs to
+ * enlist/flip/literal construction, never to insert/upsert (owner ruling 2026-09-18; TorQ stpmeta.q:38 upserts a
+ * differently-keyed dict per row into `schema:()`).  q_list_collapse's contract: borrows, owned result. */
+static ray_t* rows_col(ray_t* cells) {
+    ray_t** e = (ray_t**)ray_data(cells);
+    if (q_count(cells) > 0 && e[0] && e[0]->type == RAY_DICT) { ray_retain(cells); return cells; }
+    return q_list_collapse(cells);
+}
+
+/* Per-column boxed accumulators into a table taking column names from `names`
+ * at offset c0, each run through `collapse` (q_list_collapse, or the row-append's
+ * rows_col).  CONSUMES every accs[c] — an entry that IS an error propagates as
+ * the result — so a caller never unwinds them by hand.  Owned. */
+ray_t* q_table_cols_from_accs(ray_t* names, int64_t c0, ray_t** accs, int64_t nc, ray_t* (*collapse)(ray_t*)) {
     ray_t* out = ray_table_new(nc > 0 ? nc : 1);
     for (int64_t c = 0; c < nc; c++) {
         ray_t* a = accs[c];
         ray_t* cc;
         if (!a) cc = q_err(QE_OOM);
         else if (RAY_IS_ERR(a)) cc = a;
-        else { cc = q_list_collapse(a); ray_release(a); }
+        else { cc = collapse(a); ray_release(a); }
         if (RAY_IS_ERR(out)) {
             if (cc && cc != out) ray_release(cc);
         } else if (!cc || RAY_IS_ERR(cc)) {
@@ -326,7 +337,7 @@ int64_t q_table_row_groups(ray_t* t, int64_t ncmp, int64_t* gid, int64_t* rep) {
     return ng;
 }
 
-/* n copies of atom `a` as a collapsed column (broadcast helper). */
+/* n copies of `a` as a column (broadcast helper). */
 ray_t* q_table_bcast_col(ray_t* a, int64_t n) {
     ray_t* l = ray_list_new(n > 0 ? n : 1);
     if (RAY_IS_ERR(l)) return l;
@@ -334,7 +345,7 @@ ray_t* q_table_bcast_col(ray_t* a, int64_t n) {
         l = ray_list_append(l, a);
         if (RAY_IS_ERR(l)) return l;
     }
-    ray_t* c = q_list_collapse(l);
+    ray_t* c = rows_col(l);
     ray_release(l);
     return c;
 }
@@ -365,8 +376,8 @@ static ray_t* null_cell_like(ray_t* col) {
  *     'mismatch (insert).
  *   - LIST, insert law: a first-item ATOM makes y ONE record (owner ruling
  *     2026-09-16: `(1i;`x`y)` is a row, TorQ checkmonitor.q:45); otherwise
- *     count == ncols with EVERY item a list of one count is the columns-form
- *     (ref/insert.md:63 `(`s`t;40 50)`); there is no atom broadcast.
+ *     count == ncols with the list items of one count is the columns-form
+ *     (ref/insert.md:63 `(`s`t;40 50)`), an atom item broadcast to that count.
  *   - LIST/vector, Join law: row-major under the ref/join.md:192 rank rule —
  *     a first-element ATOM makes y rank 1, one below the table's 2, so y is
  *     implicitly enlisted as a single record; otherwise every item is a
@@ -475,25 +486,36 @@ ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law) {
         ray_release(f0);
     }
 
-    if (law == Q_ROWS_INSERT && !single && ny == nc) {     /* columns-form: every item a list, one count */
+    /* columns-form; an atom item broadcasts because TorQ's updtab stamps a .u.upd atom row as a 1-vector time
+     * followed by atoms and stplog.q:73 inserts it (owner ruling 2026-09-18) */
+    if (law == Q_ROWS_INSERT && !single && ny == nc) {
         int64_t L = -1;
         for (int64_t c = 0; c < nc; c++) {
             ray_t* it = q_join_item(y, c);
             if (!it || RAY_IS_ERR(it)) return it ? it : q_err(QE_OOM);
+            int atom = ray_is_atom(it);
             int64_t l = (it->type == RAY_LIST || ray_is_vec(it)) ? q_count(it) : -1;
             ray_release(it);
+            if (atom) continue;
             if (l < 0) { L = -1; break; }
             if (L < 0) L = l;
             else if (l != L) return q_err(QE_LENGTH);
         }
         if (L >= 0) {
+            ray_t* n = ray_i64(L);
             ray_t* out = ray_table_new(nc);
             for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
                 ray_t* col = q_join_item(y, c);
-                if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : q_err(QE_OOM); }
+                if (col && !RAY_IS_ERR(col) && ray_is_atom(col)) {
+                    ray_t* b = q_take_wrap(n, col);
+                    ray_release(col);
+                    col = b;
+                }
+                if (!col || RAY_IS_ERR(col)) { ray_release(out); ray_release(n); return col ? col : q_err(QE_OOM); }
                 out = ray_table_add_col(out, ray_table_col_name(flat, c), col);
                 ray_release(col);
             }
+            ray_release(n);
             return out;
         }
     }
@@ -536,7 +558,7 @@ ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law) {
             free(accs);
             return err;
         }
-        ray_t* out = q_table_cols_from_accs(flat, 0, accs, nc);
+        ray_t* out = q_table_cols_from_accs(flat, 0, accs, nc, rows_col);
         free(accs);
         return out;
     }
@@ -1059,7 +1081,7 @@ ray_t* q_ungroup_wrap(ray_t* x) {
         ray_release(flat);
         return err;
     }
-    ray_t* out = q_table_cols_from_accs(flat, 0, acc, nc);
+    ray_t* out = q_table_cols_from_accs(flat, 0, acc, nc, q_list_collapse);
     ray_release(flat);
     return out;
 }
