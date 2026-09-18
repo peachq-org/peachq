@@ -68,6 +68,13 @@ int q_handles_reserve_fd(void);
  * `h` is the applied int/long atom (borrowed); a write echoes it, retained. */
 ray_t* q_handles_apply(ray_t* h, ray_t* y);
 
+/* `-25!(handles;msg)` async broadcast: `handles` an int/long vector (or atom)
+ * of positive live socket handles, `msg` serialized ONCE and written to each.
+ * A bad handle or an unwireable msg is 'type before anything is sent; a socket
+ * failure mid-list is 'io.  Restricted mode 'access.  Args borrowed; `::` on
+ * success. */
+ray_t* q_handles_broadcast(ray_t* handles, ray_t* msg);
+
 /* `0 x` — the console door (.z.ps if defined, else `value`): every message-to-
  * self, and every chunk `-11!` replays, goes through it.  y borrowed, result owned. */
 ray_t* q_handles_console_eval(ray_t* y);

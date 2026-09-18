@@ -20,6 +20,7 @@
 #include "qlang/net/q_wire.h"       /* q_wire_serialize/_deserialize/_compress, Q_WIRE_ASYNC */
 #include "qlang/io/q_io.h"          /* the byte core: hcount's path+size, `-21!` stats */
 #include "qlang/io/q_conn.h"        /* q_conn_bang38 — `-38!` socket table */
+#include "qlang/io/q_handles.h"     /* q_handles_broadcast — `-25!` async broadcast */
 #include "qlang/io/q_log.h"         /* q_log_replay — `-11!` streaming execute */
 #include "qlang/eval/q_eval.h"  /* q_eval — `-6!` (internal.md: eval) */
 #include "qlang/q_fmt.h"        /* q_fmt_krepr — `-3!`, .Q.s1 */
@@ -290,6 +291,9 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -21: return q_io_zip_stats(y);
         case -35: return q_dotq_gz_fn(&y, 1);
         case -38: return q_conn_bang38(y);
+        case -25:  /* async broadcast (internal.md): a 2-list (handles;msg) */
+            if (y->type != RAY_LIST || q_count(y) != 2) return q_err(QE_TYPE);
+            return q_handles_broadcast(ray_list_get(y, 0), ray_list_get(y, 1));
         /* doc: `-26!handle` or `-26!()`; `(-26!)[]` arrives as `::`.  A handle
          * names a connection, and the settings ARE process-wide (they come
          * from the environment), so both forms answer the same dict — the
@@ -316,7 +320,6 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
                     * (eval-rebuild cutover); needs the RAY_FN_RESTRICTED gate
                     * inside the fresh apply module so a nested value-apply of
                     * a restricted VARY cannot bypass it (codex r1/r2 P1).      */
-        case -25:  /* async broadcast: IPC handles + loop                      */
         case -30:  /* deferred response: IPC + .z.w/.z.W                       */
         case -36:  /* load master key: OpenSSL/DARE                            */
         case -37:  /* .Q.prf0: code profiler                                    */

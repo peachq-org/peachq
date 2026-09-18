@@ -550,6 +550,18 @@ static ray_t* frame_apply_zip(ray_t* frame, bool zip_ok)
     return z;
 }
 
+/* Write one already-built frame under the connection's zip policy (zip acts
+ * on the finished frame, so a frame serialized once can be written to many
+ * peers).  Borrows `frame`; 0 on success, -1 on socket failure. */
+static int64_t conn_write_frame(ray_sock_t fd, ray_t* frame, bool zip_ok)
+{
+    ray_retain(frame);
+    frame = frame_apply_zip(frame, zip_ok);
+    int64_t rc = ray_sock_send(fd, ray_data(frame), (size_t)frame->len);
+    ray_release(frame);
+    return rc < 0 ? -1 : 0;
+}
+
 /* Serialize + send one kdb frame.  0 on success, -1 on serialization or
  * socket failure.  q_wire_serialize emits the COMPLETE frame (8-byte LE
  * header with msgtype + payload); values with no kdb wire form ('nyi:
@@ -561,10 +573,9 @@ static int64_t conn_write_msg(ray_sock_t fd, ray_t* msg, uint8_t msgtype,
     ray_t* frame = q_wire_serialize(msg, msgtype);
     if (!frame) return -1;
     if (RAY_IS_ERR(frame)) { ray_error_free(frame); return -1; }
-    frame = frame_apply_zip(frame, zip_ok);
-    int64_t rc = ray_sock_send(fd, ray_data(frame), (size_t)frame->len);
+    int64_t rc = conn_write_frame(fd, frame, zip_ok);
     ray_release(frame);
-    return rc < 0 ? -1 : 0;
+    return rc;
 }
 
 /* Send a SYNC response.  A result q_wire cannot express must never leave
@@ -2158,6 +2169,50 @@ ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg)
                                      conn_zip_ok((ray_ipc_conn_data_t*)sel->data)) < 0)
              ? RAY_ERR_IO : RAY_OK;
     if (owned) ray_release(msg);
+    return rc;
+}
+
+/* `-25!(handles;msg)` (basics/internal.md): one async frame, written to
+ * every handle.  Every handle is checked and the frame built BEFORE the
+ * first write, which is what makes "no messages will have been sent" on
+ * failure true.  A WS handle needs its own framing (q_ws.c), so it is
+ * refused rather than half-served.  RAY_ERR_TYPE for a bad handle, the
+ * serializer's own code for a value with no wire form, RAY_ERR_IO for a
+ * socket failure mid-list. */
+ray_err_t ray_ipc_send_async_many(const int64_t* handles, int64_t n, ray_t* msg)
+{
+    for (int64_t i = 0; i < n; i++) {
+        ray_selector_t* sel = conn_resolve(NULL, handles[i]);
+        if (!sel || ((ray_ipc_conn_data_t*)sel->data)->phase == RAY_IPC_PHASE_WS)
+            return RAY_ERR_TYPE;
+    }
+    bool owned = false;
+    if (ray_is_lazy(msg)) {
+        ray_retain(msg);
+        msg = ray_lazy_materialize(msg); /* consumes the retain */
+        if (RAY_IS_ERR(msg)) {
+            ray_err_t code = ray_err_from_obj(msg);
+            ray_error_free(msg);
+            return code;
+        }
+        owned = true;
+    }
+    ray_t* frame = q_wire_serialize(msg, RAY_IPC_MSG_ASYNC);
+    if (owned) ray_release(msg);
+    if (!frame) return RAY_ERR_OOM;
+    if (RAY_IS_ERR(frame)) {
+        ray_err_t code = ray_err_from_obj(frame);
+        ray_error_free(frame);
+        return code;
+    }
+    ray_err_t rc = RAY_OK;
+    for (int64_t i = 0; i < n && rc == RAY_OK; i++) {
+        ray_selector_t* sel = conn_resolve(NULL, handles[i]);
+        if (!sel || conn_write_frame((ray_sock_t)sel->fd, frame,
+                                     conn_zip_ok((ray_ipc_conn_data_t*)sel->data)) < 0)
+            rc = RAY_ERR_IO;
+    }
+    ray_release(frame);
     return rc;
 }
 

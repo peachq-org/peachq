@@ -380,6 +380,29 @@ ray_t* q_handles_apply(ray_t* h, ray_t* y) {
     return r;
 }
 
+/* `-25!(handles;msg)` — the same fd -> selector-id translation as the socket
+ * arm above, for every handle up front, so a bad handle anywhere in the list
+ * is refused before the kernel writes (a file/fifo/provider fd is not a peer).
+ * The doc asks for a vector; an atom is accepted as its 1-vector. */
+ray_t* q_handles_broadcast(ray_t* handles, ray_t* msg) {
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    int atom = handles->type == -RAY_I64 || handles->type == -RAY_I32;
+    if (!atom && handles->type != RAY_I64 && handles->type != RAY_I32) return q_err(QE_TYPE);
+    int64_t  n   = atom ? 1 : q_count(handles);
+    int64_t* ids = n ? (int64_t*)malloc((size_t)n * sizeof(int64_t)) : NULL;
+    if (n && !ids) return q_err(QE_OOM);
+    for (int64_t i = 0; i < n; i++) {
+        int64_t fd = atom ? q_type_iatom_val(handles) : q_type_ivec_get(handles, i);
+        int     hk = q_handles_kind(fd);
+        ids[i] = (hk < 0 || hk == Q_HANDLE_SOCKET) ? ray_ipc_handle_of_fd(fd) : -1;
+        if (ids[i] < 0) { free(ids); return q_err(QE_TYPE); }
+    }
+    ray_err_t rc = ray_ipc_send_async_many(ids, n, msg);
+    free(ids);
+    if (rc == RAY_OK) return RAY_NULL_OBJ;
+    return q_err(rc == RAY_ERR_IO ? QE_IO : rc == RAY_ERR_OOM ? QE_OOM : QE_TYPE);
+}
+
 static int is_text_atom(ray_t* v) {
     return v && (v->type == -RAY_STR || v->type == RAY_CHARV ||
                  v->type == -RAY_CHARV);
