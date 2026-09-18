@@ -8,7 +8,7 @@
 #include "qlang/q_registry_internal.h"
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"
-#include "qlang/q_env.h"
+#include "qlang/q_env.h"        /* the handle lane: a name resolves at the session `\d` */
 #include "qlang/ops/q_table.h"
 #include "qlang/ops/q_bang.h"  /* q_bang_enkey — the keying primitive */
 #include "qlang/ops/q_index.h" /* q_index_keyed_put — THE keyed write, insert's no-hit mode */
@@ -41,15 +41,15 @@ static ray_t* insert_keyed(int64_t sym, ray_t* g, ray_t* y) {
     ray_release(rows);
     if (!ky || RAY_IS_ERR(ky)) return ky;
     ray_retain(g);                                        /* ours across the park */
-    int stole = q_env_take(sym, g);
+    int stole = q_env_handle_take(sym, g);
     ray_t* nt = q_index_keyed_put(g, ky, NULL, Q_KEYED_INSERT, stole);
     ray_release(ky);
     if (!nt || RAY_IS_ERR(nt)) {
-        if (stole) q_env_bind(sym, g);                    /* restore the binding */
+        if (stole) q_env_handle_bind(sym, g);                    /* restore the binding */
         ray_release(g);
         return nt ? nt : q_err(QE_OOM);
     }
-    ray_err_t e = q_env_settle(sym, stole, nt);           /* retains */
+    ray_err_t e = q_env_handle_settle(sym, stole, nt);           /* retains */
     ray_release(g);
     ray_release(nt);
     return e == RAY_OK ? idx_range(before, added) : q_env_err(e);
@@ -76,10 +76,10 @@ static ray_t* carrier_insert(ray_t* car, ray_t* y) {
 ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
     if (!x || x->type != -RAY_SYM)
         return q_err(QE_TYPE);
-    ray_t* g = q_env_get(x->i64);                         /* borrowed */
+    ray_t* g = q_env_handle_get(x->i64);                         /* borrowed */
     if (!g) {                                             /* create */
         if (y && (y->type == RAY_TABLE || q_type_is_keyed(y))) {
-            q_env_set(x->i64, y);                         /* retains */
+            q_env_handle_set(x->i64, y);                         /* retains */
             return idx_range(0, q_count(y));
         }
         return q_err(QE_TYPE);
@@ -93,7 +93,7 @@ ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
      * column would copy: park it (q_env.h q_env_take) behind our own ref, which
      * keeps g alive for the restore. */
     ray_retain(g);
-    int stole = q_env_take(x->i64, g);
+    int stole = q_env_handle_take(x->i64, g);
     ray_t* rows = q_table_rows_normalize(g, y, Q_ROWS_INSERT);
     ray_t* nt = rows && !RAY_IS_ERR(rows) ? NULL : rows ? rows : q_err(QE_OOM);
     int64_t before = q_count(g), added = 0;
@@ -103,12 +103,12 @@ ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
         ray_release(rows);
     }
     if (!nt || RAY_IS_ERR(nt)) {
-        if (stole) q_env_bind(x->i64, g);                 /* restore the binding */
+        if (stole) q_env_handle_bind(x->i64, g);                 /* restore the binding */
         ray_release(g);
         return nt ? nt : q_err(QE_OOM);
     }
     ray_release(g);
-    ray_err_t e = q_env_settle(x->i64, stole, nt);        /* retains */
+    ray_err_t e = q_env_handle_settle(x->i64, stole, nt);        /* retains */
     ray_release(nt);
     return e == RAY_OK ? idx_range(before, added) : q_env_err(e);
 }
@@ -123,7 +123,7 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
     if (pr) return pr;
     if (q_io_is_fsym(x)) return q_wirefile_append(x, y);  /* file target: the one
                                                            * flat-append kernel */
-    ray_t* car = x && x->type == -RAY_SYM ? q_env_get(x->i64) : x;   /* a carrier, named or as the value */
+    ray_t* car = x && x->type == -RAY_SYM ? q_env_handle_get(x->i64) : x;   /* a carrier, named or as the value */
     if (q_provider_carrier_is(car)) {
         pr = q_provider_write(ray_dict_vals(car), y, 1);
         if (!pr || RAY_IS_ERR(pr)) return pr ? pr : q_err(QE_TYPE);
@@ -134,9 +134,9 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
     int64_t sym;
     ray_t* t = q_table_operand(x, &sym);
     if (!t) {
-        if (x && x->type == -RAY_SYM && !q_env_get(x->i64) &&
+        if (x && x->type == -RAY_SYM && !q_env_handle_get(x->i64) &&
             y && (y->type == RAY_TABLE || q_type_is_keyed(y))) {
-            q_env_set(x->i64, y);                         /* create, like insert */
+            q_env_handle_set(x->i64, y);                         /* create, like insert */
             ray_retain(x);
             return x;
         }
@@ -147,14 +147,14 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
     /* the binding this upsert REPLACES double-counts the table, so every
      * column would copy: park it (q_env.h q_env_take) behind our own ref */
     ray_retain(t);
-    int stole = q_env_take(sym, t);
+    int stole = q_env_handle_take(sym, t);
     ray_t* nt = q_join_table_upsert(t, y, stole);
     if (!nt || RAY_IS_ERR(nt)) {
-        if (stole) q_env_bind(sym, t);                    /* restore the binding */
+        if (stole) q_env_handle_bind(sym, t);                    /* restore the binding */
         ray_release(t);
         return nt ? nt : q_err(QE_OOM);
     }
-    ray_err_t e = q_env_settle(sym, stole, nt);           /* retains */
+    ray_err_t e = q_env_handle_settle(sym, stole, nt);           /* retains */
     ray_release(t);
     ray_release(nt);
     if (e != RAY_OK) return q_env_err(e);
