@@ -283,25 +283,47 @@ ray_err_t q_env_settle(int64_t sym, int stole, ray_t* val) {
     return e;
 }
 
+/* The scope switch as a saved triple: a handle op restores it byte-for-byte, because a `.z.vs` hook fired
+ * mid-call runs a lambda whose exit resets the switch through q_env_scope. */
+typedef struct { int64_t scope, seg; int scoped; } env_scope_t;
+
+static env_scope_t env_scope_as(int64_t ctx, int scoped) {
+    env_scope_t prev = { g_scope, g_scope_seg, g_scoped };
+    g_scope = ctx;
+    g_scope_seg = ctx_seg_of(ctx);
+    g_scoped = scoped;
+    return prev;
+}
+
+static void env_scope_restore(env_scope_t prev) {
+    g_scope = prev.scope;
+    g_scope_seg = prev.seg;
+    g_scoped = prev.scoped;
+}
+
 /* `` `. `` names the root itself, so assigning a dict RESTORES its members as
  * globals (ref/get.md `set`) — the ` -> :: marker is representation, skipped.
- * Members go back through q_env_set, so each gets the same name policy. */
+ * Members go back through q_env_set, so each gets the same name policy, AT THE
+ * ROOT whatever `\d` or a lambda scope says (`` `. `` is absolute); a member
+ * already bound to that very value is the amend's untouched node, not a write. */
 static ray_err_t env_root_splat(ray_t* d) {
     if (!d || d->type != RAY_DICT) return RAY_ERR_TYPE;
     ray_t*  dk = ray_dict_keys(d);                  /* borrowed */
     ray_t*  dv = ray_dict_vals(d);                  /* borrowed */
     int64_t n = q_count(d), marker = env_marker();
     ray_err_t e = RAY_OK;
+    env_scope_t sc = env_scope_as(0, 1);
     for (int64_t i = 0; i < n && e == RAY_OK; i++) {
         ray_t* k = q_join_item(dk, i);              /* owned */
         ray_t* v = q_join_item(dv, i);              /* owned */
         if (!k || RAY_IS_ERR(k) || k->type != -RAY_SYM || !v || RAY_IS_ERR(v))
             e = RAY_ERR_TYPE;
-        else if (k->i64 != marker)
+        else if (k->i64 != marker && q_env_get(k->i64) != v)
             e = q_env_set(k->i64, v);
         if (k && !RAY_IS_ERR(k)) ray_release(k);
         if (v && !RAY_IS_ERR(v)) ray_release(v);
     }
+    env_scope_restore(sc);
     return e;
 }
 
@@ -405,6 +427,71 @@ ray_err_t q_env_unbind(int64_t sym) {
         if (old) e = q_provider_unlink(q_env_fullname(sym, NULL), old);
     }
     if (old) ray_release(old);
+    return e;
+}
+
+/* ---- the handle lane (q_env.h) ---- */
+
+/* the node a relative name's write LANDS on under `\d .ns` — ctx_reroot's read twin, so read-name == write-name
+ * by construction; a dotted name and the root context read as q_env_get */
+static ray_t* env_addr_get(int64_t sym) {
+    const char* p; size_t n;
+    ray_t* s = name_str(sym, &p, &n);
+    if (!s) return NULL;
+    ray_t* v;
+    if (!ENV_SEG || n == 0 || p[0] == '.') v = q_env_get(sym);
+    else {
+        int64_t segs[ENV_SEG_MAX];
+        int k = env_segs(p, n, 0, segs, ENV_SEG_MAX);
+        v = k > 0 ? ray_dict_probe_sym_borrowed(env_ns, ENV_SEG) : NULL;
+        for (int i = 0; v && i < k; i++) v = ray_dict_probe_sym_borrowed(v, segs[i]);
+    }
+    ray_release(s);
+    return v;
+}
+
+ray_t* q_env_handle_get(int64_t sym) {
+    env_scope_t sc = env_scope_as(0, 0);
+    ray_t* v = env_addr_get(sym);
+    env_scope_restore(sc);
+    return v;
+}
+
+ray_t* q_env_handle_resolve(int64_t sym) {
+    env_scope_t sc = env_scope_as(0, 0);
+    int32_t floor = q_env_frame_floor(-1);      /* a handle names a global: no local shadows it */
+    ray_t* v = q_env_resolve(q_env_fullname(sym, NULL));
+    q_env_frame_floor(floor);
+    env_scope_restore(sc);
+    return v;
+}
+
+ray_err_t q_env_handle_set(int64_t sym, ray_t* val) {
+    env_scope_t sc = env_scope_as(0, 0);
+    ray_err_t e = q_env_set(sym, val);
+    env_scope_restore(sc);
+    return e;
+}
+
+int q_env_handle_take(int64_t sym, ray_t* cur) {
+    if (!cur) return 0;
+    env_scope_t sc = env_scope_as(0, 0);
+    int r = env_addr_get(sym) == cur && q_env_bind(sym, RAY_NULL_OBJ) == RAY_OK;
+    env_scope_restore(sc);
+    return r;
+}
+
+ray_err_t q_env_handle_settle(int64_t sym, int stole, ray_t* val) {
+    env_scope_t sc = env_scope_as(0, 0);
+    ray_err_t e = q_env_settle(sym, stole, val);
+    env_scope_restore(sc);
+    return e;
+}
+
+ray_err_t q_env_handle_bind(int64_t sym, ray_t* val) {
+    env_scope_t sc = env_scope_as(0, 0);
+    ray_err_t e = q_env_bind(sym, val);
+    env_scope_restore(sc);
     return e;
 }
 
@@ -625,11 +712,10 @@ ray_t* q_env_resolve(int64_t sym) {
         base = ray_dict_probe_sym_borrowed(start == 1 ? env_ns : env_root, head);
     } else {
         base = frames_lookup(head);
-        if (!base && ENV_SEG) {                     /* `\d .ns` shadows the root */
-            ray_t* nsd = ray_dict_probe_sym_borrowed(env_ns, ENV_SEG);
-            if (nsd) base = ray_dict_probe_sym_borrowed(nsd, head);
+        if (!base) {                                /* a global is BOUND to its context: no root search */
+            ray_t* home = ENV_SEG ? ray_dict_probe_sym_borrowed(env_ns, ENV_SEG) : env_root;
+            if (home) base = ray_dict_probe_sym_borrowed(home, head);
         }
-        if (!base) base = ray_dict_probe_sym_borrowed(env_root, head);
         if (!base) base = ray_dict_probe_sym_borrowed(env_boot, head);
     }
     ray_t* r = NULL;
@@ -825,7 +911,7 @@ ray_t* q_setg_wrap(ray_t* x, ray_t* y) {
             return q_err(QE_TYPE);
         }
         ray_release(s);
-        ray_err_t err = q_env_set(x->i64, y);
+        ray_err_t err = q_env_handle_set(x->i64, y);
         if (err != RAY_OK) return q_env_err(err);
         ray_retain(x);
         return x;
