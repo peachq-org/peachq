@@ -958,18 +958,17 @@ static ray_t* rd_obj_inner(rcur_t* c) {
     case 100: {                                       /* lambda: context + source */
         const char* ctx; size_t ctxn;
         if (r_cstr(c, &ctx, &ctxn)) return trunc_err("lambda context");
-        /* Owner ruling 2026-07-31: the sender's `\d` context is HONOURED, so an
-         * unqualified global in the body resolves against the RECEIVER's copy of
-         * that namespace.  Dotless on the wire, empty = root; a namespace we do
-         * not have is 'name — never auto-created, never a root fallback. */
+        /* The sender's `\d` context is the lambda's SCOPE (dotless on the wire, empty = root).  It need not
+         * exist here — a scope is a name, as after a local `\d .new` — so an unqualified global in the body
+         * resolves or fails at EVALUATION against the receiver's copy, never at decode (owner 2026-09-18).
+         * What `\d` could never set (a dotted or non-identifier context) is a malformed frame. */
         int64_t ns = 0;
         if (ctxn) {
             char nb[64];
-            if (ctxn + 1 >= sizeof nb) return q_err(QE_NAME);
+            if (ctxn + 1 >= sizeof nb || !q_env_ident_ok(ctx, ctxn)) return q_err(QE_NAME);
             nb[0] = '.';
             memcpy(nb + 1, ctx, ctxn);
             ns = ray_sym_intern_runtime(nb, ctxn + 1);
-            if (!q_env_ns_exists(ns)) return q_err(QE_NAME);
         }
         ray_t* src = rd_obj(c);
         if (!src || RAY_IS_ERR(src)) return src ? src : q_err(QE_DOMAIN);
