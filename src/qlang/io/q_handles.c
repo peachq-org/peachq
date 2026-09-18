@@ -403,6 +403,32 @@ ray_t* q_handles_broadcast(ray_t* handles, ray_t* msg) {
     return q_err(rc == RAY_ERR_IO ? QE_IO : rc == RAY_ERR_OOM ? QE_OOM : QE_TYPE);
 }
 
+ray_t* q_handles_deferred(ray_t* y) {
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (RAY_IS_NULL(y))
+        return ray_ipc_defer_response() == RAY_OK ? RAY_NULL_OBJ : q_err(QE_DOMAIN);
+    if (y->type != RAY_LIST || q_count(y) != 3) return q_err(QE_TYPE);
+    ray_t* h = ray_list_get(y, 0);
+    ray_t* b = ray_list_get(y, 1);
+    ray_t* m = ray_list_get(y, 2);
+    if (!q_type_is_int_atom(h) || !q_type_is_bool(b)) return q_err(QE_TYPE);
+    int64_t fd = q_type_iatom_val(h);
+    int     hk = q_handles_kind(fd);
+    int64_t id = (fd > 0 && (hk < 0 || hk == Q_HANDLE_SOCKET)) ? ray_ipc_handle_of_fd(fd) : -1;
+    if (id < 0) return q_err(QE_DOMAIN);
+    ray_t* err = NULL;
+    if (q_type_as_i64(b)) {
+        const char* tp; int64_t tn;
+        if (!q_str_subject_bytes(m, &tp, &tn)) return q_err(QE_TYPE);
+        err = q_err_from_text(tp, (size_t)tn);
+        m = err;
+    }
+    ray_err_t rc = ray_ipc_send_deferred(id, m);
+    if (err) ray_error_free(err);
+    if (rc == RAY_OK) return RAY_NULL_OBJ;
+    return q_err(rc == RAY_ERR_DOMAIN ? QE_DOMAIN : rc == RAY_ERR_OOM ? QE_OOM : QE_TYPE);
+}
+
 static int is_text_atom(ray_t* v) {
     return v && (v->type == -RAY_STR || v->type == RAY_CHARV ||
                  v->type == -RAY_CHARV);

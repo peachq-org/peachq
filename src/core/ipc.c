@@ -769,6 +769,16 @@ typedef struct {
     bool             sync_ready;
     bool             sync_badmsg;   /* deposited resp is a local 'badmsg — waiter closes after consuming */
     ray_t*           sync_resp;
+    /* `-30!` deferred response, keyed to the request FRAME: every SYNC
+     * dispatch on this conn takes the next sync_seq, and cur_sync_seq is the
+     * innermost frame's (0 while an async frame, or nothing, is executing —
+     * a nested wait can dispatch an async frame on the same conn).  defer_seq
+     * names the frame whose reply is owed by handle; defer_replied once that
+     * reply went out, so the frame's own return is not sent on top of it. */
+    int64_t          sync_seq;
+    int64_t          cur_sync_seq;
+    int64_t          defer_seq;
+    bool             defer_replied;
     /* TLS mode (phase RAY_IPC_PHASE_TLS): when the negotiation must be done by,
      * whether the first-byte sniff has already returned a verdict, and the
      * opaque q_tls.c handshake cookie (NULL until the first ClientHello byte). */
@@ -1285,19 +1295,27 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
     int64_t prev_handle = ipc_ctx_handle();
     ray_poll_t* prev_poll = ipc_ctx_poll();
     ipc_ctx_set(id, poll);
+    int64_t prev_seq = cd->cur_sync_seq;
+    int64_t seq      = msgtype == RAY_IPC_MSG_SYNC ? ++cd->sync_seq : 0;
+    cd->cur_sync_seq = seq;
 
     ray_t* result = NULL;
     int rc = ipc_dispatch(msgtype, pdata, (size_t)plen, swap, &result);
 
     ipc_ctx_set(prev_handle, prev_poll);
     ray_eval_set_restricted(prev_restricted);
+    /* the eval may have closed this very connection — revalidate before
+     * touching cd again */
+    ray_selector_t* cur = ray_poll_get(poll, id);
+    bool live = cur && cur->data == (void*)cd;
+    if (live) cd->cur_sync_seq = prev_seq;
 
     if (rc != 0) {           /* malformed data structure — .z.bm (dotz.md) */
         hook_call_badmsg(poll, id, sel->fd, pdata, (size_t)plen);              /* (1) */
         if (msgtype == RAY_IPC_MSG_SYNC) {
             /* bare 'badmsg to the requester (3) — the hook may have closed
              * this handle, so revalidate before writing to its fd */
-            ray_selector_t* cur = ray_poll_get(poll, id);
+            cur = ray_poll_get(poll, id);
             if (cur && cur->data == (void*)cd) {
                 ray_t* e = ray_error("badmsg", NULL);
                 send_response((ray_sock_t)cur->fd, e, conn_zip_ok(cd));
@@ -1312,13 +1330,14 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
     if (payload) ray_poll_buf_free(payload);
     if (uz) ray_release(uz);
 
-    /* Send response for sync messages.  The eval may have closed this
-     * very connection (`.ipc.close` on its own handle) — revalidate the
-     * selector before writing to its fd. */
-    if (msgtype == RAY_IPC_MSG_SYNC) {
-        ray_selector_t* cur = ray_poll_get(poll, id);
-        if (cur && cur->data == (void*)cd)
+    /* Send response for sync messages — unless the callback deferred THIS
+     * frame's (`-30!(::)`): its reply is owed later by handle, or already went
+     * out inside the request. */
+    if (msgtype == RAY_IPC_MSG_SYNC && live) {
+        if (cd->defer_seq != seq)
             send_response((ray_sock_t)cur->fd, result, conn_zip_ok(cd));
+        else if (cd->defer_replied)
+            cd->defer_seq = 0;
     }
     if (RAY_IS_ERR(result)) ray_error_free(result);
     else if (result != RAY_NULL_OBJ) ray_release(result);
@@ -2214,6 +2233,57 @@ ray_err_t ray_ipc_send_async_many(const int64_t* handles, int64_t n, ray_t* msg)
     }
     ray_release(frame);
     return rc;
+}
+
+/* `-30!(::)` (basics/internal.md): the SYNC request executing on the current
+ * connection completes without a reply.  RAY_ERR_DOMAIN when the executing
+ * frame is not one (an async message, a timer, the console) — the probe TorQ
+ * gateway.q:466 relies on — or when an earlier request's reply is still owed
+ * on this connection (a pipelining peer; kdb clients block, so the doc's model
+ * is one outstanding sync per connection).  Deferring twice is a no-op. */
+ray_err_t ray_ipc_defer_response(void)
+{
+    int64_t h = ipc_ctx_handle();
+    ray_poll_t* poll = ipc_active_poll();
+    ray_selector_t* sel = (h >= 0 && poll) ? ray_poll_get(poll, h) : NULL;
+    if (!sel || sel->type != RAY_SEL_SOCKET || !sel->data) return RAY_ERR_DOMAIN;
+    ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
+    int64_t seq = cd->cur_sync_seq;
+    if (!seq) return RAY_ERR_DOMAIN;
+    if (cd->defer_seq == seq) return RAY_OK;
+    if (cd->defer_seq && !cd->defer_replied) return RAY_ERR_DOMAIN;
+    cd->defer_seq     = seq;
+    cd->defer_replied = false;
+    return RAY_OK;
+}
+
+/* `-30!(handle;0b;msg)` / `-30!(handle;1b;err)`: the RESP frame the deferred
+ * request is still owed, sent by handle.  `msg` may be an error object — it
+ * crosses the wire as -128h exactly as an erroring `.z.pg` return does.
+ * RAY_ERR_DOMAIN for a handle that is not a live kdb-IPC connection or is
+ * not expecting a response. */
+ray_err_t ray_ipc_send_deferred(int64_t handle, ray_t* msg)
+{
+    ray_selector_t* sel = conn_resolve(NULL, handle);
+    if (!sel) return RAY_ERR_DOMAIN;
+    ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
+    if (cd->phase == RAY_IPC_PHASE_WS || !cd->defer_seq || cd->defer_replied)
+        return RAY_ERR_DOMAIN;
+    bool owned = false;
+    if (ray_is_lazy(msg)) {
+        ray_retain(msg);
+        msg = ray_lazy_materialize(msg); /* consumes the retain */
+        if (RAY_IS_ERR(msg)) {
+            ray_err_t code = ray_err_from_obj(msg);
+            ray_error_free(msg);
+            return code;
+        }
+        owned = true;
+    }
+    send_response((ray_sock_t)sel->fd, msg, conn_zip_ok(cd));
+    if (owned) ray_release(msg);
+    cd->defer_replied = true;   /* the frame clears defer_seq at its end; a stale one yields to the next defer */
+    return RAY_OK;
 }
 
 /* Remote-REPL sync send.  The kdb wire has no output-capture flag — the
