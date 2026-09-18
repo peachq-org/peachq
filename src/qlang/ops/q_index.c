@@ -476,10 +476,22 @@ static ray_t* index_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
         if (!is_coll(x) && x->type != RAY_DICT && x->type != RAY_TABLE)
             return q_err(QE_TYPE);
         if (k == 0) { ray_retain(x); return x; }
-        if (x->type == RAY_DICT && !q_type_is_keyed(x))
-            return index_map(ray_dict_slots(x)[1], NULL, rest, k);
-        if (x->type == RAY_DICT || x->type == RAY_TABLE) return q_err(QE_NYI);
-        return index_map(x, NULL, rest, k);
+        if (q_type_is_plain_dict(x)) {               /* `d[;i] ~ (key d)!(value d)[;i]` */
+            ray_t* v = index_map(ray_dict_slots(x)[1], NULL, rest, k);
+            if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_TYPE);
+            ray_t* r = q_bang(ray_dict_slots(x)[0], v);
+            ray_release(v);
+            return r;
+        }
+        if (x->type == RAY_DICT) return q_err(QE_NYI);
+        if (x->type == RAY_TABLE && q_type_is_sym_atom(rest[0])) {   /* `t[;c;…]` is `t[c][;…]` */
+            ray_t* col = index_r(x, rest[0], rest + 1, 0);
+            if (!col || RAY_IS_ERR(col)) return col ? col : q_err(QE_TYPE);
+            ray_t* r = index_r(col, NULL, rest + 1, k - 1);
+            ray_release(col);
+            return r;
+        }
+        return index_map(x, NULL, rest, k);          /* a table's items are its rows */
     }
     /* Index AT a dictionary: `x[d] ~ (key d)!x[value d]` (ref/fby.md prints it as `dat group grp`).  Reads off the
      * INDEX, so it outranks x's own shape — except on a TABLE domain, where the dict IS a key row (kb/faq.md). */
