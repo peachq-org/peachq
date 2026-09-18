@@ -714,7 +714,7 @@ static int from_tref(ray_t* t, tref_t* tr, ray_t** err_out) {
     }
     if (form == 1) { *err_out = q_err(QE_DOMAIN); return 1; }
     if (t && t->type == -RAY_SYM) {            /* functional `?[`t;...]` names */
-        ray_t* v = q_env_resolve(t->i64);
+        ray_t* v = q_env_handle_resolve(t->i64);
         if (!v || RAY_IS_ERR(v)) { if (v) ray_error_free(v); return 0; }
         int is = q_provider_carrier_is(v);
         if (is) *err_out = carrier_tref(v, tr);
