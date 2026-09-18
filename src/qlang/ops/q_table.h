@@ -25,12 +25,13 @@ int64_t q_table_row_groups(ray_t* t, int64_t ncmp, int64_t* gid, int64_t* rep);
  * when v carries no key set the fronts will vouch for — the caller keeps the scan.  Borrows v. */
 ray_t* q_attr_index_keys(ray_t* v, ray_t** rows);
 
-/* Collapse per-column boxed accumulators into a table, taking column names
- * from `names` at offset c0.  CONSUMES every accs[c] — an entry that IS an
+/* Per-column boxed accumulators into a table, taking column names from
+ * `names` at offset c0, each run through `collapse` (borrows, owned result —
+ * q_list_collapse's contract).  CONSUMES every accs[c] — an entry that IS an
  * error propagates as the result — so a caller never unwinds by hand. */
-ray_t* q_table_cols_from_accs(ray_t* names, int64_t c0, ray_t** accs, int64_t nc);
+ray_t* q_table_cols_from_accs(ray_t* names, int64_t c0, ray_t** accs, int64_t nc, ray_t* (*collapse)(ray_t*));
 
-/* n copies of atom `a` as a collapsed column (broadcast). */
+/* n copies of `a` as a column (broadcast): an atom run collapses, a dict is one ITEM per copy, never a row. */
 ray_t* q_table_bcast_col(ray_t* a, int64_t n);
 
 /* Column index of name id in t, or -1. */
