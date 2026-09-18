@@ -840,8 +840,9 @@ static void matrix_cell(ray_t* rv, int64_t c, int bare, int blank_null,
 /* A boxed row aligns when its cells agree on ONE display class — all collections,
  * or all atoms.  `((1 2;3);4 5)` agrees on neither and prints whole
  * (math/atomic_nested), where `2 3 4#til 5` is all collections and grids
- * (ref/take.md:86).  The char atom joins either class: it is an atom that prints
- * string-shaped, so `(2;10;"a")` (joins/cross) and `("a";"dog ")` (ref/trim.md) align. */
+ * (ref/take.md:86).  A char atom or a string joins either class: both print
+ * string-shaped, so `(2;10;"a")` (joins/cross), `("a";"dog ")` (ref/trim.md) and
+ * `(`.z.pg;"1+1")` (owner 2026-09-18) align. */
 static int matrix_row_ok(ray_t* r) {
     if (!r || RAY_IS_ERR(r)) return 0;
     if (r->type > 0 && ray_is_vec(r) && matrix_alignable(r->type)) return 1;
@@ -852,7 +853,7 @@ static int matrix_row_ok(ray_t* r) {
     for (int64_t i = 0; i < n; i++) {
         ray_t* c = it[i];
         if (!c || RAY_IS_ERR(c)) return 0;
-        if (c->type == -RAY_CHARV || c->type == -RAY_STR) continue;
+        if (c->type == -RAY_CHARV || c->type == RAY_CHARV || c->type == -RAY_STR) continue;
         int nested = is_collection(c);
         if (!nested && (!ray_is_atom(c) || RAY_IS_NULL(c))) return 0;
         if (row_nested < 0) row_nested = nested;
@@ -881,20 +882,20 @@ static void matrix_row_str(ray_t* row, int64_t nc, const int* w,
     out[pos] = '\0';
 }
 
-/* e[0..n) is >=2 same-length alignable rows: a LEFT-aligned matrix (ref/mmu.md). */
+/* e[0..n) is >=1 same-length alignable rows: a LEFT-aligned matrix (ref/mmu.md).
+ * One row grids by SHAPE like any other (ref/value.md:63 `enlist a:til 5` -> 0 1 2 3 4)
+ * when its cells are data atoms or strings; a function or nested cell keeps the
+ * enlist k-repr `,(<:;`price)` / `,((>;`qty;200);(=;`p;,`p1))` (basics/funsql.md). */
 static int is_matrix(ray_t** e, int64_t n) {
     if (n < 1) return 0;
     if (!matrix_row_ok(e[0])) return 0;
     int64_t w = q_count(e[0]);
     if (w == 0) return 0;
-    /* One row is an enlist (`,1 2 3`) UNLESS it is also one column: a 1x1 drops
-     * its commas for the same reason `(1 2;3 4)` does — it is a matrix
-     * (ref/file-binary.md `show pi` -> 3.141593, while .Q.s1 keeps ",,"). */
-    if (n == 1 && w != 1) return 0;
-    /* the 1x1 comma-drop covers SCALAR cells only: `,,(in;`s)` keeps its commas */
-    if (n == 1 && e[0]->type == RAY_LIST &&
-        is_collection(((ray_t**)ray_data(e[0]))[0]))
-        return 0;
+    if (n == 1 && e[0]->type == RAY_LIST)
+        for (int64_t c = 0; c < w; c++) {
+            ray_t* x = ((ray_t**)ray_data(e[0]))[c];
+            if (x->type >= 0 && x->type != RAY_CHARV) return 0;
+        }
     int all_charv = e[0]->type == RAY_CHARV;
     for (int64_t i = 1; i < n; i++) {
         if (!matrix_row_ok(e[i]) || q_count(e[i]) != w) return 0;
@@ -1787,10 +1788,12 @@ static void q_fmt_body(ray_t* val) {
         return;
     }
 
-    /* General list, kdb-true: one item per line, each a single-line k-repr —
-     * parse trees and values alike (basics/parsetrees.md; implicit-iteration
-     * .md pins nested items inline `(110b;0b)`).  One item = `,x`;
-     * rectangular = aligned matrix (ref/mmu.md). */
+    /* General list, kdb-true: rectangular = aligned matrix, one row included
+     * (ref/mmu.md, ref/value.md:63); else one item per line, each a single-line
+     * k-repr — parse trees and values alike (basics/parsetrees.md; implicit-
+     * iteration.md pins nested items inline `(110b;0b)`) — where a lone item
+     * prints `,x` unless it is a string: the string-list idiom at one row
+     * (ref/system.md:46 `system "pwd"` -> "/home/guest/q"). */
     if (val->type == RAY_LIST) {
         int64_t n = q_count(val);
         ray_t** e = (ray_t**)ray_data(val);
@@ -1798,7 +1801,7 @@ static void q_fmt_body(ray_t* val) {
         if (n == 1 && e[0] == q_registry_list_value()) { qe_puts("()"); return; }
         if (n == 0) { qe_puts("()"); return; }
         if (is_matrix(e, n)) { fmt_matrix(e, n); return; }
-        if (n == 1) {                             /* enlist: ,x */
+        if (n == 1 && e[0] && e[0]->type != RAY_CHARV) {   /* enlist: ,x */
             char elem[2048]; elem[0] = '\0';
             q_fmt_krepr(e[0], elem, sizeof elem);
             qe_putc(',');
