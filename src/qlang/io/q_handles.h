@@ -75,6 +75,13 @@ ray_t* q_handles_apply(ray_t* h, ray_t* y);
  * success. */
 ray_t* q_handles_broadcast(ray_t* handles, ray_t* msg);
 
+/* `-30!y` deferred response: `y` the generic null defers the executing sync
+ * request's reply; a 3-list `(h;1b;text)` / `(h;0b;msg)` answers it by
+ * handle (`text` a string or symbol, raised by the client).  'domain when
+ * nothing is executing or `h` is not a live handle expecting a response;
+ * any other shape 'type.  Restricted mode 'access.  y borrowed; `::`. */
+ray_t* q_handles_deferred(ray_t* y);
+
 /* `0 x` — the console door (.z.ps if defined, else `value`): every message-to-
  * self, and every chunk `-11!` replays, goes through it.  y borrowed, result owned. */
 ray_t* q_handles_console_eval(ray_t* y);
