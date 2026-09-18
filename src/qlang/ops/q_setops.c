@@ -11,6 +11,7 @@
 #include "qlang/base/q_type.h"
 #include "qlang/ops/q_table.h"
 #include "qlang/ops/q_index.h" /* q_index_at — the gather behind inter's atom-y arm */
+#include "qlang/eval/q_eval.h"  /* q_eval_apply_value — except composes `not` over `in` */
 #include "lang/eval.h"       /* ray_except_fn, ray_sect_fn */
 #include "lang/internal.h"   /* ray_group_fn */
 #include "ops/idxop.h"       /* the key-set fronts: distinct/group read the attribute index */
@@ -82,23 +83,35 @@ static ray_t* table_distinct(ray_t* t) {
     return out;
 }
 
-/* q `x except y` — table pair: rows of x not in y (x order and duplicates
- * kept, then per kdb the RESULT is over distinct rows of x — ref/except.md
- * operates on items; for tables kdb dedups via distinct semantics of the
- * underlying find, so keep it simple: rows of x not in y, x-dups kept).
- * Non-table operands delegate to base ray_except_fn (pre-wave behaviour). */
+/* q `x except y` — items (rows) of x not in y, x order and duplicates kept (ref/except.md).  A table pair
+ * scans whole rows; a general-list y composes `in`; everything else delegates to base ray_except_fn. */
 ray_t* q_except_wrap(ray_t* x, ray_t* y) {
     /* keyed tables / dicts are deferred cells — the base list kernel would
      * mangle the dict structure (mirror of the inter guard). */
-    if ((x && x->type == RAY_DICT) || (y && y->type == RAY_DICT))
+    if (q_type_is_dict(x) || q_type_is_dict(y))
         return q_err(QE_NYI);
-    if (x && x->type == RAY_TABLE && y && y->type == RAY_TABLE) {
+    if (q_type_is_table(x) && q_type_is_table(y)) {
         ray_t* idx = table_member_idx(x, y, 0);
         if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
         ray_t* r = qj_table_gather_idx(x, (int64_t*)ray_data(idx),
                                        q_count(idx));
         ray_release(idx);
         return r;
+    }
+    /* `x where not x in y` (except.md:30): the base boxed scan is atom_eq per item, not `in`'s rank law */
+    if (x && y && y->type == RAY_LIST && (ray_is_vec(x) || x->type == RAY_LIST)) {
+        ray_t* m = q_in_wrap(x, y);
+        if (!m || RAY_IS_ERR(m)) return m ? m : q_err(QE_TYPE);
+        ray_t* f = q_registry_lookup_name("not", 3, Q_MONADIC);  /* borrowed */
+        ray_t* nm = f ? q_eval_apply_value(f, &m, 1) : NULL;
+        ray_release(m);
+        if (!nm || RAY_IS_ERR(nm)) return nm ? nm : q_err(QE_TYPE);
+        ray_t* w = q_where_wrap(nm);
+        ray_release(nm);
+        if (!w || RAY_IS_ERR(w)) return w ? w : q_err(QE_TYPE);
+        ray_t* r = q_typed_empty_like(q_index_at(x, &w, 1), x);
+        ray_release(w);
+        return r ? r : q_err(QE_TYPE);
     }
     /* a typed x is Find's domain (ref/find.md:102 "Find is implicit in ... except"), so its type law rules here */
     if (x && ray_is_vec(x) && x->type != RAY_STR && !q_search_admits(x, y)) return q_err(QE_TYPE);
@@ -238,7 +251,7 @@ ray_t* q_inter_wrap(ray_t* x, ray_t* y) {
         }
         ray_t* c = q_list_collapse(out);
         ray_release(out);
-        return c;
+        return ray_is_vec(x) ? q_typed_empty_like(c, x) : c;
     }
     return ray_sect_fn(x, y);
 }
