@@ -176,16 +176,17 @@ static ray_t* take_unify(ray_t* r) {
 /* q `x # y` — Take (ref/take.md); borrows both args */
 ray_t* q_take_wrap(ray_t* x, ray_t* y) {
     if (x && x->type == -RAY_SYM && y &&
-        (ray_is_vec(y) || y->type == RAY_ENUM || y->type == RAY_TABLE || y->type == RAY_DICT))
+        (ray_is_vec(y) || y->type == RAY_ENUM || y->type == RAY_TABLE || y->type == RAY_DICT ||
+         (y->type == RAY_LIST && q_type_is_null_sym(x))))    /* D48: only the CLEAR form admits a general list */
         return q_attr_set_dispatch(x, y);              /* `s#v — set attribute */
     /* the parse tree of `update `g#c from t` carries the ENLISTED sym ((#;,`g;`c)),
      * and kx still applies the attribute when the target is a plain vector — the
      * functional-qsql attr idiom.  Containers keep their take-columns meaning. */
     if (x && x->type == RAY_SYM && q_count(x) == 1 && y &&
-        (ray_is_vec(y) || y->type == RAY_ENUM)) {
+        (ray_is_vec(y) || y->type == RAY_ENUM || y->type == RAY_LIST)) {
         ray_t* nm = ray_sym_str(ray_vec_get_sym_id(x, 0));       /* borrowed */
         size_t nl = nm ? ray_str_len(nm) : (size_t)-1;
-        if (nl == 0 || (nl == 1 && strchr("supg", ray_str_ptr(nm)[0]))) {
+        if (nl == 0 || (nl == 1 && y->type != RAY_LIST && strchr("supg", ray_str_ptr(nm)[0]))) {
             ray_t* a = ray_sym(ray_vec_get_sym_id(x, 0));
             ray_t* r = q_attr_set_dispatch(a, y);
             ray_release(a);
