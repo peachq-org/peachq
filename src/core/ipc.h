@@ -159,6 +159,14 @@ ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg);
  * unwireable msg mean nothing was sent; RAY_ERR_IO is a socket failure, after
  * which earlier handles in the list may already hold the frame. */
 ray_err_t ray_ipc_send_async_many(const int64_t* handles, int64_t n, ray_t* msg);
+/* `-30!` deferred response (basics/internal.md).  ray_ipc_defer_response: the
+ * SYNC request executing on the current connection gets no reply from the
+ * dispatcher; RAY_ERR_DOMAIN when none is executing.  ray_ipc_send_deferred:
+ * send that owed reply by handle — `msg` may be an error object, which the
+ * client raises; RAY_ERR_DOMAIN when the handle is not a live connection or
+ * is not expecting a response. */
+ray_err_t ray_ipc_defer_response(void);
+ray_err_t ray_ipc_send_deferred(int64_t handle, ray_t* msg);
 
 /* Remote-REPL helper.  The kdb wire has no output-capture flag: the
  * server prints display output on ITS console (kdb behaviour), so
