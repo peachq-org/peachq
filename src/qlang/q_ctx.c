@@ -115,8 +115,25 @@ static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
      * this level its state back. */
     int dbg_prev = q_dbg_statement_begin(s, n, in_load ? -1 : print_result);
 
-    int    parsed;
-    ray_t* r = q_eval_statement(s, &parsed);
+    /* `.z.pi` (ref/dotz.md:703, syscmds.md:937, owner 2026-09-18): a console
+     * line is the handler's to evaluate and its result is the display.  Never a
+     * load line, and never a `\`-command — both doc transcripts show `\x .z.pi`
+     * printing nothing under a prefixing handler, so the console keeps its
+     * commands (the text intake's byte-0 read).  The text is the line without
+     * its newline (what kdb passes is unrecorded: flip it here).  Gated on the
+     * binding only: a handler that never calls `value` swallows every
+     * expression, as on kdb. */
+    int     parsed = 1;
+    ray_t*  r;
+    int64_t zpi    = ray_sym_intern_runtime(".z.pi", 5);
+    ray_t*  zfn    = print_result && !in_load && s[0] != '\\' ? q_env_get(zpi) : NULL;
+    int     hooked = zfn && q_eval_apply_is_fn(zfn);
+    if (hooked) {
+        ray_t* txt = ray_charv(s, (int64_t)n);
+        r = q_eval_apply_call_sym(zpi, &txt, 1);
+        ray_release(txt);
+    } else
+        r = q_eval_statement(s, &parsed);
     if (!parsed) {                             /* 'dup dies at parse (qsql.md:168) */
         int code = r->aux[0] ? (int)r->aux[0] : (int)QE_PARSE + 1;
         if (in_load) {                         /* the load's trap sees the text too */
@@ -190,8 +207,12 @@ static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
         return 0;
     }
     /* q console silence: the generic null prints nothing, which is already what
-     * an assignment statement (q_eval_statement) or `x;` answers. */
-    if (print_result && !RAY_IS_NULL(r)) {
+     * an assignment statement (q_eval_statement) or `x;` answers.  A handler's
+     * TEXT is written as-is: the default handler is `.Q.s value x`. */
+    const char* hp; int64_t hn;
+    if (hooked && !RAY_IS_NULL(r) && q_str_text_bytes(r, &hp, &hn)) {
+        fwrite(hp, 1, (size_t)hn, out);
+    } else if (print_result && !RAY_IS_NULL(r)) {
         size_t n;
         char*  txt = q_fmt_console_alloc(r, &n);   /* obey \c on auto-echo display */
         if (txt) {

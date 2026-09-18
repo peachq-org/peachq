@@ -17,7 +17,8 @@ typedef struct ray_poll ray_poll_t;   /* fwd — full API in core/poll.h */
  * A `q)` prompt is written before every read.  When `echo` is non-zero the
  * input line is written after the prompt (so a piped / captured session
  * reproduces what a terminal would show); pass 0 for an interactive tty where
- * the terminal already echoes.  Evaluation errors go to `err`, never `out`, so
+ * the terminal already echoes.  Under `-q` (cmdline.md: "no startup banner
+ * text or session prompts") the piped flavour writes neither prompt nor echo.  Evaluation errors go to `err`, never `out`, so
  * a captured transcript shows no output line for an unsupported input.
  *
  * Requires an initialised rayforce runtime. */

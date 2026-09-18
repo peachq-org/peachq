@@ -20,6 +20,7 @@
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
 #include "qlang/ops/q_sys.h"      /* q_sys_prompt / q_sys_listen_port — the front end's two asks */
+#include "qlang/q_dotz.h"         /* q_dotz_quiet — `-q` silences the piped transcript's prompt and echo */
 #include "app/term.h"       /* ray_term_* line editor + highlighter hook */
 #include "core/poll.h"      /* ray_poll_* — concurrent REPL + IPC event loop */
 #include "lang/eval.h"      /* ray_eval_is_interrupted */
@@ -538,6 +539,7 @@ static ray_t* poll_tty_data(ray_poll_t* poll, ray_selector_t* sel, void* data) {
 
 static void pipe_prompt(q_poll_repl_t* c) {
     char prompt[80];
+    if (q_dotz_quiet()) return;
     q_sys_prompt(prompt, sizeof prompt);
     fputs(prompt, c->out);
     fflush(c->out);
@@ -575,7 +577,7 @@ static void poll_stdin_eof(ray_poll_t* poll, ray_selector_t* sel, q_poll_repl_t*
         c->acc_len = 0;
         pipe_line(c, c->acc, n);
     }
-    fputc('\n', c->out);   /* fgets loop prints '\n' after the EOF prompt */
+    if (!q_dotz_quiet()) fputc('\n', c->out);   /* fgets loop prints '\n' after the EOF prompt */
     fflush(c->out);
     poll_serve_or_exit(poll, sel->id);
 }
@@ -763,7 +765,7 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err, int stdin_tty) {
         q_dbg_set_reader(repl_tty_dbg_read);   /* `\e 1` debugger over this editor */
         reg.data_fn = poll_tty_data;
     } else {
-        c->echo = 1;   /* piped transcript: echo input after the prompt */
+        c->echo = !q_dotz_quiet();   /* piped transcript: echo input after the prompt; `-q` shows neither */
         reg.read_fn = poll_pipe_read;
         /* piped console: arm the `\e 1` debugger's nested line reader */
         q_dbg_set_reader(repl_poll_dbg_read);
@@ -820,22 +822,25 @@ void q_repl_run(FILE* in, FILE* out, FILE* err, int echo) {
      * identical so the qcmd transcript tests stay stable.  The prompt is
      * context-derived: `q)` at root, `q.foo)` after `\d .foo`. */
     char line[4096];
+    int  quiet = q_dotz_quiet();
 
     if (in == stdin)
         q_dbg_set_reader(repl_fgets_dbg_read);
 
     for (;;) {
         char prompt[80];
-        q_sys_prompt(prompt, sizeof prompt);
-        fputs(prompt, out);
+        if (!quiet) {
+            q_sys_prompt(prompt, sizeof prompt);
+            fputs(prompt, out);
+        }
         fflush(out);
 
-        if (!fgets(line, sizeof line, in)) { fputc('\n', out); break; }
+        if (!fgets(line, sizeof line, in)) { if (!quiet) fputc('\n', out); break; }
 
         size_t n = strlen(line);
         while (n && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = '\0';
 
-        if (echo) { fputs(line, out); fputc('\n', out); }
+        if (echo && !quiet) { fputs(line, out); fputc('\n', out); }
 
         if (n == 0) continue;
         q_ctx_run_line(line, n, out, err, 1);
