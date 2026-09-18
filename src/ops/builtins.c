@@ -2450,8 +2450,9 @@ ray_t* ray_group_fn(ray_t* x) {
         return ray_error("type", "group: argument must be a vector or list, got %s", ray_type_name(x->type));
     int64_t n = x->len;
     if (n == 0) {
-        ray_t* keys = ray_list_new(0);
+        ray_t* keys = ray_is_vec(x) ? ray_vec_new(x->type, 0) : ray_list_new(0);
         if (RAY_IS_ERR(keys)) return keys;
+        if (x->type == RAY_SYM) ray_sym_vec_adopt_domain(keys, x);
         ray_t* vals = ray_list_new(0);
         if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
         return ray_dict_new(keys, vals);
