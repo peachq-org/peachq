@@ -584,14 +584,15 @@ static ray_t* by_specs(ray_t* b, ray_t** trees_out) {
     return sv;
 }
 
-/* per group: the ORIGINAL row numbers, idx@positions (law 14) — the groups
- * taken in `ord` order, so every by-consumer is handed law 15 already done */
+/* per group: the ORIGINAL row numbers, idx@positions (law 14) — or the positions themselves under a NULL idx,
+ * when they already are original rows — the groups taken in `ord` order, so every by-consumer is handed law 15
+ * already done */
 static ray_t* by_orig_idx(ray_t* idx, ray_t* gv, ray_t* ord) {
     int64_t ng = q_count(gv);
     ray_t* out = ray_list_new(ng > 0 ? ng : 1);
     for (int64_t j = 0; j < ng && !RAY_IS_ERR(out); j++) {
         ray_t* pos = q_index_elem_at(gv, q_type_ivec_get(ord, j));
-        ray_t* gi = (pos && !RAY_IS_ERR(pos)) ? gather(idx, pos) : pos;
+        ray_t* gi = (pos && !RAY_IS_ERR(pos) && idx) ? gather(idx, pos) : pos;
         if (pos && gi != pos) ray_release(pos);
         if (!gi || RAY_IS_ERR(gi)) { ray_release(out); return gi ? gi : q_err(QE_TYPE); }
         out = ray_list_append(out, gi);
@@ -672,6 +673,75 @@ static ray_t* by_last_idx(ray_t* gidxs) {
     return out;
 }
 
+/* a where-refined idx is a strict subsequence of til n; a user idx that repeats a row would have to be kept twice,
+ * so the lane declines it rather than learn that */
+static int idx_is_strict(ray_t* idx, int64_t n) {
+    int64_t ni = q_count(idx);
+    const int64_t* p = (const int64_t*)ray_data(idx);
+    if (ni == 0 || p[0] < 0 || p[ni - 1] >= n) return 0;
+    for (int64_t j = 1; j < ni; j++)
+        if (p[j] <= p[j - 1]) return 0;
+    return 1;
+}
+
+static uint8_t* rows_bitmap(ray_t* rows, int64_t n) {
+    uint8_t* bm = calloc((size_t)(n / 8 + 1), 1);
+    const int64_t* p = (const int64_t*)ray_data(rows);
+    for (int64_t j = 0; bm && j < q_count(rows); j++) bm[p[j] >> 3] |= (uint8_t)(1u << (p[j] & 7));
+    return bm;
+}
+
+/* A single-column By is `group` on the column filtered by idx, never a re-hash of a gathered copy: each key's rows
+ * come off the index (#733's fronts) and are kept where idx's bit is set — one pass over the column's rows, where a
+ * merge per key was k passes over idx.  Owned keys!ORIGINAL rows, shaped as `group` answers a one-column table, or
+ * NULL for the scan path: not this shape, the fronts declined, or no memory for the bitmap (the scan says so). */
+static ray_t* by_group_idx(ray_t* names, ray_t* trees, ray_t* t, ray_t* idx) {
+    int64_t n = src_count(t);
+    if (names->type != RAY_SYM || q_count(names) != 1 || q_count(trees) != 1 || q_type_is_dict(t)
+        || q_splay_table_path(t))
+        return NULL;
+    ray_t* tree = q_index_elem_at(trees, 0);
+    int name = tree && !RAY_IS_ERR(tree) && tree->type == -RAY_SYM && tree->i64 != ray_sym_intern_runtime("i", 1);
+    ray_t* col = name ? ray_table_get_col(t, tree->i64) : NULL;       /* virtual `i` shadows a column, as the phrase */
+    if (tree) ray_release(tree);
+    int ident = col && ray_is_vec(col) && idx_is_identity(idx, n);
+    if (!col || !ray_is_vec(col) || (!ident && !idx_is_strict(idx, n))) return NULL;
+    uint8_t* bm = ident ? NULL : rows_bitmap(idx, n);
+    ray_t* first = (ident || bm) ? ray_index_keys_rows(col) : NULL;
+    if (!first) { free(bm); return NULL; }
+    int64_t k = q_count(first), m = 0;
+    const int64_t* fr = (const int64_t*)ray_data(first);
+    ray_t* keep = rows_new(k);
+    ray_t* vals = RAY_IS_ERR(keep) ? NULL : ray_list_new(k > 0 ? k : 1);
+    for (int64_t j = 0; j < k && vals && !RAY_IS_ERR(vals); j++) {
+        ray_t* iv = ray_index_group_rows(col, fr[j]);
+        if (!iv) { ray_release(vals); vals = NULL; break; }
+        if (bm) {
+            int64_t* d = (int64_t*)ray_data(iv), c = 0, len = q_count(iv);
+            for (int64_t i = 0; i < len; i++)
+                if (bm[d[i] >> 3] & (1u << (d[i] & 7))) d[c++] = d[i];
+            iv->len = c;
+        }
+        if (q_count(iv) == 0) { ray_release(iv); continue; }
+        ((int64_t*)ray_data(keep))[m++] = ((const int64_t*)ray_data(iv))[0];   /* -0.0 and 0.0 share a key */
+        vals = ray_list_append(vals, iv);
+        ray_release(iv);
+    }
+    free(bm);
+    ray_release(first);
+    if (!vals || RAY_IS_ERR(vals)) { if (!RAY_IS_ERR(keep)) ray_release(keep); return vals ? vals : keep; }
+    keep->len = m;
+    ray_t* kc = gather(col, keep);
+    ray_release(keep);
+    if (!kc || RAY_IS_ERR(kc)) { ray_release(vals); return kc ? kc : q_err(QE_TYPE); }
+    ray_t* cols = ray_list_append(ray_list_new(1), kc);
+    ray_release(kc);
+    ray_t* kt = RAY_IS_ERR(cols) ? cols : named_table(names, cols);
+    if (!RAY_IS_ERR(cols)) ray_release(cols);
+    if (!kt || RAY_IS_ERR(kt)) { ray_release(vals); return kt ? kt : q_err(QE_TYPE); }
+    return ray_dict_new(kt, vals);
+}
+
 /* grouped state shared by every by-consumer (laws 2+14): the by-table's
  * distinct rows as the owned key TABLE, and the original rows per group as
  * *gidxs_out.  Both come back ASCENDING BY KEY — law 15 is a By law, so it
@@ -680,14 +750,18 @@ static ray_t* by_last_idx(ray_t* gidxs) {
 static ray_t* by_group(ray_t* names, ray_t* trees, ray_t* t, ray_t* idx,
                        ray_t** gidxs_out) {
     *gidxs_out = NULL;
-    ray_t* bt = cols_table(names, trees, t, idx, 1);
-    if (!bt || RAY_IS_ERR(bt)) return bt ? bt : q_err(QE_TYPE);
-    ray_t* g = q_group_wrap(bt);
-    ray_release(bt);
+    ray_t* g = by_group_idx(names, trees, t, idx);
+    int rows_are_original = g != NULL;
+    if (!rows_are_original) {
+        ray_t* bt = cols_table(names, trees, t, idx, 1);
+        if (!bt || RAY_IS_ERR(bt)) return bt ? bt : q_err(QE_TYPE);
+        g = q_group_wrap(bt);
+        ray_release(bt);
+    }
     if (!g || RAY_IS_ERR(g)) return g ? g : q_err(QE_TYPE);
     ray_t* ord = q_iasc_wrap(ray_dict_keys(g));
     if (!ord || RAY_IS_ERR(ord)) { ray_release(g); return ord ? ord : q_err(QE_TYPE); }
-    ray_t* gidxs = by_orig_idx(idx, ray_dict_vals(g), ord);
+    ray_t* gidxs = by_orig_idx(rows_are_original ? NULL : idx, ray_dict_vals(g), ord);
     ray_t* kt = RAY_IS_ERR(gidxs) ? gidxs : gather(ray_dict_keys(g), ord);
     ray_release(ord);
     ray_release(g);
