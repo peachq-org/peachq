@@ -108,18 +108,19 @@ static ray_t* boxed1(ray_t* v) {
 }
 
 /* miss result for one absent/OOB element of c: the null SHAPED like the first
- * element (ref/apply.md Index; dict misses ride this via find).  An atom item
- * yields its typed atom null, a LIST-valued item the EMPTY of its own type —
- * the miss of ("aa";"bb") is "" and not " ".  With no item to read a shape
- * from, the empty general list answers the empty of its OWN type, which is
- * what makes `first ()` ~ `() 0` ~ `()`. */
+ * element (ref/apply.md Index; dict misses ride this via find).  A typed atom
+ * item yields its typed null, a LIST-valued item the EMPTY of its own type —
+ * the miss of ("aa";"bb") is "" and not " " — and an item with no typed null
+ * (a function, say) answers ::.  With no item to read a shape from, the empty
+ * general list answers the empty of its OWN type, which is what makes
+ * `first ()` ~ `() 0` ~ `()`. */
 static ray_t* miss_null(ray_t* c) {
     if (ray_is_vec(c)) return ray_typed_null((int8_t)-c->type);
     if (c && c->type == RAY_LIST) {
         if (q_count(c) == 0) return ray_list_new(0);
         ray_t* e0 = ((ray_t**)ray_data(c))[0];
         if (e0 && !RAY_IS_ERR(e0) && !RAY_IS_NULL(e0)) {
-            if (ray_is_atom(e0)) return ray_typed_null(e0->type);
+            if (e0->type < 0) return ray_typed_null(e0->type);
             if (ray_is_vec(e0)) return q_type_empty(e0->type);
             if (e0->type == RAY_LIST) return ray_list_new(0);
         }
