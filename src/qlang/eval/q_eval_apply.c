@@ -1450,10 +1450,12 @@ static ray_t* enum_route(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) 
         if (!strcmp(t, "as") || !strcmp(t, "key") || !strcmp(t, "value") ||
             !strcmp(t, "type") || !strcmp(t, "enlist") || !strcmp(t, "attr") ||
             !strcmp(t, "at") || !strcmp(t, "apply") || !strcmp(t, "show") ||
-            !strcmp(t, "dict") || !strcmp(t, "set-g"))
+            !strcmp(t, "dict") || !strcmp(t, "set-g") ||
+            !strcmp(t, "except") || !strcmp(t, "sect"))
             return NULL;      /* enum-aware arms (show/-3! render 20h itself;
                                * enlist of a 20h VECTOR boxes like any list;
-                               * set writes the reference SHAPE, wf_ref_image) */
+                               * set writes the reference SHAPE, wf_ref_image;
+                               * except/inter gather through q_index_at) */
         if (n == 1 && q_enum_is(args[0]) &&
             (!strcmp(t, "reverse") || !strcmp(t, "first") || !strcmp(t, "last")))
             return enum_strip_apply(fv, row, args, n, 0, 1);

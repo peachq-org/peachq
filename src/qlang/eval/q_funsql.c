@@ -17,7 +17,7 @@
 #include "qlang/io/q_io.h"             /* q_io_is_fsym / q_io_resource_table — resource From-resolve */
 #include "qlang/io/q_provider.h"         /* provider carriers: qsql push / materialize */
 #include "qlang/q_env.h"
-#include "lang/internal.h"             /* ray_til_fn, ray_typed_null, ray_except_fn, ray_sorted_span */
+#include "lang/internal.h"             /* ray_til_fn, ray_typed_null, ray_sorted_span */
 #include "ops/idxop.h"                 /* the kind-neutral index fronts + routing counters */
 #include "ops/rowsel.h"                /* ray_rowsel_to_indices */
 #include "table/dict.h"                /* ray_dict_slots — keyed-table halves */
@@ -1128,7 +1128,7 @@ static ray_t* entries_verb(ray_t* x, ray_t* y, int drop) {
 /* drop named entries: the doc's sub-dictionary extraction `(key d) except keys`
  * re-indexed as d[remaining] (ref/drop.md) */
 static ray_t* dict_drop_keys(ray_t* keys, ray_t* d) {
-    ray_t* rem = ray_except_fn(ray_dict_keys(d), keys);
+    ray_t* rem = q_except_wrap(ray_dict_keys(d), keys);
     if (!rem || RAY_IS_ERR(rem)) return rem ? rem : q_err(QE_TYPE);
     ray_t* nv = q_index_at(d, &rem, 1);
     if (!nv || RAY_IS_ERR(nv)) { ray_release(rem); return nv ? nv : q_err(QE_TYPE); }
