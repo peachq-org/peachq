@@ -119,7 +119,7 @@ static ray_t* ques_from_n(ray_t* t, int64_t* nkey, int hops) {
     }
     if (t->type == -RAY_SYM) {
         if (hops >= QUES_FROM_HOPS) return q_err(QE_TYPE);
-        ray_t* v = q_env_resolve(t->i64);
+        ray_t* v = q_env_handle_resolve(t->i64);
         if (!v) return q_err(QE_NAME);
         if (RAY_IS_ERR(v)) return v;
         ray_t* r = ques_from_n(v, nkey, hops + 1);
@@ -1301,15 +1301,19 @@ static int is_symvec(ray_t* a) { return a && a->type == RAY_SYM; }
 
 /* `delete a from `.` / `![`.ns;();0b;`a`b]` — EXPUNGE (q4m3 §12.5).  A namespace
  * is not a dict to rewrite: each name is unbound from the K-tree, so an emptied
- * namespace survives (kdb keeps it in `key ``). */
+ * namespace survives (kdb keeps it in `key ``).  The names are the namespace's
+ * own members, absolute — `` `. `` reaches the root under any `\d` or lambda scope. */
 static ray_t* expunge_ns(int64_t ns, ray_t* names) {
     int64_t n = q_count(names);
-    for (int64_t i = 0; i < n; i++) {
+    int64_t scope = q_env_scope(0);
+    ray_t* e = NULL;
+    for (int64_t i = 0; i < n && !e; i++) {
         int64_t member = ray_read_sym(ray_data(names), i, RAY_SYM, names->attrs);
         int64_t full = q_env_qualify(ns, member);
-        if (full < 0 || q_env_unbind(full) != RAY_OK) return q_err(QE_ASSIGN);
+        if (full < 0 || q_env_unbind(full) != RAY_OK) e = q_err(QE_ASSIGN);
     }
-    return NULL;
+    q_env_scope(scope);
+    return e;
 }
 
 static ray_t* bang_qsql(ray_t** args) {
@@ -1334,7 +1338,7 @@ static ray_t* bang_qsql(ray_t** args) {
             ray_retain(tslot);
             return tslot;
         }
-        src = q_env_resolve(name);
+        src = q_env_handle_resolve(name);
         if (!src) return q_err(QE_NAME);
         if (RAY_IS_ERR(src)) return src;
     } else if (tslot) {
@@ -1415,7 +1419,7 @@ static ray_t* bang_qsql(ray_t** args) {
     ray_release(src);
     if (name >= 0 && r && !RAY_IS_ERR(r)) {
         /* name form (law 21): amend in place, hand back the name */
-        ray_err_t e = q_env_set(name, r);
+        ray_err_t e = q_env_handle_set(name, r);
         if (e != RAY_OK) { ray_release(r); return q_env_err(e); }
         ray_release(r);
         ray_retain(tslot);

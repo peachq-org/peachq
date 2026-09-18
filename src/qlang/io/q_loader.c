@@ -125,7 +125,7 @@ ray_t* q_loader_sink_open(q_loader_sink* s, ray_t* target) {
     if (target->type != -RAY_SYM) return q_err(QE_TYPE);
     s->kind = 1;
     s->target = target;
-    ray_t* g = q_env_get(target->i64);              /* the same resolution insert itself uses */
+    ray_t* g = q_env_handle_get(target->i64);       /* the same resolution insert itself uses */
     return (g && (g->type == RAY_TABLE || q_type_is_keyed(g))) ? loader_schema(s, g) : NULL;
 }
 

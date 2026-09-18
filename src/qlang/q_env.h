@@ -59,6 +59,20 @@ int q_env_take(int64_t sym, ray_t* cur);
  * `stole` is what q_env_take answered; the set's error is returned. */
 ray_err_t q_env_settle(int64_t sym, int stole, ray_t* val);
 
+/* THE HANDLE LANE.  A handle (`` `t ``, `` `.ns.t ``) is a K-tree ADDRESS (glossary.md §Handle; ref/insert.md:78
+ * "global variables only"): a relative name is the SESSION `\d` context's member — the directory `system "d"`
+ * shows when the verb RUNS, never the running lambda's scope (owner ruling 2026-09-18) — and a dotted name is
+ * absolute, `` `. `` the root.  The root is never a fallback for a handle (ref/key.md:119), so the node a handle
+ * reads is the node a write through it lands on.  Every handle-taking verb rides these: the lambda scope is
+ * suspended for the call (the suspension fresh text already gets) and restored on every exit.  Contracts as their
+ * bare-name twins: _get borrowed or NULL, _resolve owned (the full walk), _take/_settle/_bind the park protocol. */
+ray_t*    q_env_handle_get(int64_t sym);
+ray_t*    q_env_handle_resolve(int64_t sym);
+ray_err_t q_env_handle_set(int64_t sym, ray_t* val);
+int       q_env_handle_take(int64_t sym, ray_t* cur);
+ray_err_t q_env_handle_settle(int64_t sym, int stole, ray_t* val);
+ray_err_t q_env_handle_bind(int64_t sym, ray_t* val);
+
 int    q_env_ns_exists(int64_t path_sym);
 /* The stored namespace dict itself (marker included), retained for the
  * caller.  OWNED; NULL if the name is not bound to a dict. */
@@ -101,10 +115,12 @@ ray_t* q_env_marker_dict(void);
  * (basics/syscmds.md §`\d`).  OWNED sym vector. */
 ray_t* q_env_ns_roster(void);
 
-/* The SESSION context is what `\d` shows and sets (0 = root): a RELATIVE name resolves in the context first and
- * falls back to the root; an assignment lands IN the context, which is what CREATES it (syscmds.md §`\d`).  A
- * running lambda resolves in the context it was DEFINED in — its SCOPE (owner 2026-09-17) — so a `\d` it or its
- * caller executes never moves its own globals; fresh text (a load's lines, `value` of a string) follows the session.
+/* The SESSION context is what `\d` shows and sets (0 = root): a RELATIVE name IS the context's member — under
+ * `\d .foo`, `a` is `.foo.a`, and if that is unbound the reference fails; it never searches the root (q4m3 §12.7,
+ * owner 2026-09-18).  Only the `.q` keywords (the registry) and the bound builtins (the boot shed) are visible from
+ * every context.  An assignment lands IN the context, which is what CREATES it (syscmds.md §`\d`).  A running
+ * lambda resolves in the context it was DEFINED in — its SCOPE (owner 2026-09-17) — so a `\d` it or its caller
+ * executes never moves its own globals; fresh text (a load's lines, `value` of a string) follows the session.
  * q_env_scope sets the scope (a ns sym, 0 = root, _SESSION = follow the session) and returns the previous, which
  * the same C frame restores on every exit, aborts included (the frame-floor idiom). */
 void    q_env_ctx_set(int64_t ns_sym);

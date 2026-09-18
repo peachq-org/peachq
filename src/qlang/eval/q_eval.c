@@ -664,10 +664,13 @@ ray_t* q_eval_value_wrap(ray_t* x) {
         if (f) return f;
         /* "the name of a GLOBAL variable" (ref/get.md:22): the caller's locals are behind the floor, as for a
          * script load (ctx_run_script) — a lambda's own `t` never shadows the table `t` a name or a string asks for
-         * (function-notation.md:153 "strictly local: invisible to other functions applied during evaluation") */
+         * (function-notation.md:153 "strictly local: invisible to other functions applied during evaluation") —
+         * and a handle resolves at the session `\d`, as the string form below does (q_env.h, the handle lane) */
         int floor = q_eval_apply_frame_floor(-1);
         int32_t ffloor = q_env_frame_floor(-1);
+        int64_t scope = q_env_scope(Q_ENV_SCOPE_SESSION);
         ray_t* v = name_value(x, NULL);
+        q_env_scope(scope);
         q_env_frame_floor(ffloor);
         q_eval_apply_frame_floor(floor);
         return v;

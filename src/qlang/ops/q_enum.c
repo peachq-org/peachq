@@ -116,7 +116,7 @@ ray_t* q_enum_positions(ray_t* e) {
  * keyed-table global, of ANY vector type (ref/fkeys.md's example is int-keyed). */
 q_edom_t q_enum_domain_kind(int64_t dom, ray_t** vals) {
     if (vals) *vals = NULL;
-    ray_t* d = q_env_get(dom);
+    ray_t* d = q_env_handle_get(dom);
     if (!d || RAY_IS_ERR(d)) return Q_EDOM_UNBOUND;
     if (d->type == RAY_SYM) { if (vals) *vals = d; return Q_EDOM_SYMLIST; }
     if (q_type_is_keyed(d)) {
@@ -148,7 +148,7 @@ static ray_t* enum_domain_syms(int64_t dom) {
  * NULL otherwise. */
 static ray_t* enum_domain_keytbl(int64_t dom) {
     if (q_enum_domain_kind(dom, NULL) != Q_EDOM_KEYEDN) return NULL;
-    return ray_dict_keys(q_env_get(dom));
+    return ray_dict_keys(q_env_handle_get(dom));
 }
 
 /* TOTAL resolution (R4): the index home's total gather, exactly `d idx` — a
@@ -325,7 +325,7 @@ ray_t* q_enum_extend_try(ray_t* x, ray_t* y) {
     if (isfile) return q_err(QE_NYI);
     /* a bound non-symlist global (a table domain included) is not extendable —
      * writing the union would CLOBBER it (ref/enum-extend.md's d is a list) */
-    ray_t* g = q_env_get(x->i64);
+    ray_t* g = q_env_handle_get(x->i64);
     if (g && !RAY_IS_ERR(g) && g->type != RAY_SYM) return q_err(QE_TYPE);
     return enum_extend(x, y);
 }
@@ -348,7 +348,7 @@ static ray_t* enum_extend(ray_t* x, ray_t* y) {
         grew++;
     }
     if (grew || !d) {
-        ray_err_t e = q_env_set(x->i64, nd);          /* retains */
+        ray_err_t e = q_env_handle_set(x->i64, nd);   /* retains */
         if (e != RAY_OK) { ray_release(nd); return q_env_err(e); }
     }
     ray_release(nd);
@@ -479,7 +479,7 @@ ray_t* q_enum_col_ingest(ray_t* oc, ray_t* pc) {
 ray_t* q_enum_deref(ray_t* v, int64_t fld) {
     if (!v || RAY_IS_ERR(v) || !q_enum_is(v)) return NULL;
     int64_t tgt = q_enum_domain(v);
-    ray_t* t = q_env_get(tgt);
+    ray_t* t = q_env_handle_get(tgt);
     if (!t || RAY_IS_ERR(t)) return NULL;
     ray_t* col = NULL;                                   /* owned */
     if (q_type_is_keyed(t)) {

@@ -658,7 +658,7 @@ ray_t* q_table_operand(ray_t* y, int64_t* sym_out) {
     *sym_out = -1;
     if (!y) return NULL;
     if (y->type == -RAY_SYM) {
-        ray_t* g = q_env_get(y->i64);
+        ray_t* g = q_env_handle_get(y->i64);
         if (g && (g->type == RAY_TABLE || q_type_is_keyed(g))) { *sym_out = y->i64; return g; }
         return NULL;
     }
@@ -819,7 +819,7 @@ ray_t* q_xkey_wrap(ray_t* x, ray_t* y) {
         if (!keyed || RAY_IS_ERR(keyed)) return keyed;
     }
     if (sym >= 0) {
-        q_env_set(sym, keyed);                            /* retains */
+        q_env_handle_set(sym, keyed);                     /* retains */
         ray_release(keyed);
         ray_retain(y);
         return y;
@@ -1084,7 +1084,7 @@ static ray_t* table_colnames(ray_t* x) {
  * global plain/keyed/mapped-splay table resolves to it (borrowed); else x. */
 static ray_t* table_bi_deref(ray_t* x) {
     if (x && x->type == -RAY_SYM) {
-        ray_t* g = q_env_get(x->i64);                   /* borrowed */
+        ray_t* g = q_env_handle_get(x->i64);            /* borrowed */
         if (g && (g->type == RAY_TABLE || q_type_is_keyed(g) || q_provider_carrier_is(g)))
             return g;
     }
@@ -1214,7 +1214,7 @@ ray_t* q_fkeys_wrap(ray_t* x) {
         int64_t f = -1;
         q_enum_meta_f(ray_table_get_col_idx(flat, c), &f);
         int64_t nm = ray_table_col_name(flat, c);
-        ray_t* d = f >= 0 ? q_env_get(f) : NULL;         /* borrowed */
+        ray_t* d = f >= 0 ? q_env_handle_get(f) : NULL;  /* borrowed */
         if (!d || RAY_IS_ERR(d) || !q_type_is_keyed(d)) continue;
         ks = ray_vec_append(ks, &nm);
         if (ks && !RAY_IS_ERR(ks)) vs = ray_vec_append(vs, &f);

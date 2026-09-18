@@ -1743,12 +1743,12 @@ static ray_t* name_lift(const q_op_t* row, ray_t** args, int64_t n, int dot) {
         return q_err(QE_NYI);
     }
     int64_t id = args[0]->i64;
-    ray_t* cur = q_env_get(id);                      /* borrowed flat global */
+    ray_t* cur = q_env_handle_get(id);               /* borrowed, at the session `\d` */
     int stole = 0;
     if (q_splay_table_path(cur)) return q_err(QE_SPLAY);   /* a mapped global takes no write (kb/splayed-tables.md:350) */
     if (cur && !RAY_IS_ERR(cur)) {
         ray_retain(cur);                             /* the consumable ref */
-        stole = q_env_take(id, cur);                 /* env drops its ref */
+        stole = q_env_handle_take(id, cur);          /* env drops its ref */
     } else if (q_env_ns_exists(id)) {
         cur = q_env_ns_view(id);       /* owned namespace dict: amend, rebind */
         if (!cur) return q_err(QE_DOMAIN);
@@ -1759,11 +1759,11 @@ static ray_t* name_lift(const q_op_t* row, ray_t** args, int64_t n, int dot) {
     ray_t* r = dot ? q_index_amend_dot(cur, args[1], args[2], y)
                    : q_index_amend_at(cur, args[1], args[2], y);
     if (!r || RAY_IS_ERR(r)) {
-        if (stole) q_env_bind(id, cur);              /* restore the binding */
+        if (stole) q_env_handle_bind(id, cur);       /* restore the binding */
         ray_release(cur);
         return r ? r : q_err(QE_TYPE);
     }
-    ray_err_t e = q_env_set(id, r);                  /* retains */
+    ray_err_t e = q_env_handle_set(id, r);           /* retains */
     ray_release(r);
     if (e != RAY_OK) return q_env_err(e);
     ray_retain(args[0]);

@@ -170,7 +170,7 @@ ray_t* q_bang_enkey(int64_t nkey, ray_t* y) {
         r = ray_dict_new(kt, vt);
     }
     if (sym < 0) return r;
-    ray_err_t e = q_env_set(sym, r);                      /* retains */
+    ray_err_t e = q_env_handle_set(sym, r);               /* retains */
     ray_release(r);
     if (e != RAY_OK) return q_env_err(e);
     ray_retain(y);
