@@ -1,18 +1,15 @@
-/* ops/q_setops.c — q `distinct` `union` `inter` `except` `cross`.  Each is a
- * wrapper rather than a rayfall rename because kdb's law differs at the
- * dedup: first-occurrence order, x-duplicates kept, whole-ITEM (not
- * flattened) membership.  Table arms compose the family's row primitives;
- * dict/keyed operands the base kernels would mangle stay 'nyi — an error
- * beats a wrong answer. */
+/* ops/q_setops.c — q `distinct` `union` `inter` `except` `cross`.  `except`/`inter` are `x where [not] x in y`
+ * (ref/except.md:30, ref/inter.md:18) and `union` is `distinct x,y`, so the set ops own no membership law: the type,
+ * rank, null and index laws all arrive from Find.  Table arms compose the family's row primitives; dict/keyed
+ * operands stay 'nyi — an error beats a wrong answer. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h"
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"
 #include "qlang/ops/q_table.h"
-#include "qlang/ops/q_index.h" /* q_index_at — the gather behind inter's atom-y arm */
-#include "qlang/eval/q_eval.h"  /* q_eval_apply_value — except composes `not` over `in` */
-#include "lang/eval.h"       /* ray_except_fn, ray_sect_fn */
+#include "qlang/ops/q_index.h" /* q_index_at — the gather */
+#include "qlang/eval/q_eval.h"  /* q_eval_apply_value — `not` through the registry */
 #include "lang/internal.h"   /* ray_group_fn */
 #include "ops/idxop.h"       /* the key-set fronts: distinct/group read the attribute index */
 #include "table/sym.h"       /* ray_read_sym */
@@ -83,39 +80,41 @@ static ray_t* table_distinct(ray_t* t) {
     return out;
 }
 
-/* q `x except y` — items (rows) of x not in y, x order and duplicates kept (ref/except.md).  A table pair
- * scans whole rows; a general-list y composes `in`; everything else delegates to base ray_except_fn. */
-ray_t* q_except_wrap(ray_t* x, ray_t* y) {
-    /* keyed tables / dicts are deferred cells — the base list kernel would
-     * mangle the dict structure (mirror of the inter guard). */
-    if (q_type_is_dict(x) || q_type_is_dict(y))
-        return q_err(QE_NYI);
-    if (q_type_is_table(x) && q_type_is_table(y)) {
-        ray_t* idx = table_member_idx(x, y, 0);
-        if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
-        ray_t* r = qj_table_gather_idx(x, (int64_t*)ray_data(idx),
-                                       q_count(idx));
-        ray_release(idx);
-        return r;
-    }
-    /* `x where not x in y` (except.md:30): the base boxed scan is atom_eq per item, not `in`'s rank law */
-    if (x && y && y->type == RAY_LIST && (ray_is_vec(x) || x->type == RAY_LIST)) {
-        ray_t* m = q_in_wrap(x, y);
-        if (!m || RAY_IS_ERR(m)) return m ? m : q_err(QE_TYPE);
-        ray_t* f = q_registry_lookup_name("not", 3, Q_MONADIC);  /* borrowed */
+/* `x where [not] x in y` for every non-table shape (ref/except.md:30, ref/inter.md:18).  `in` and `not` go through
+ * the registry door so an enum operand meets the same arm the q expression does.  Borrowed in, owned out. */
+static ray_t* setop_compose(ray_t* x, ray_t* y, int negate) {
+    ray_t* av[2] = { x, y };
+    ray_t* f = q_registry_lookup_name("in", 2, Q_DYADIC);  /* borrowed */
+    ray_t* m = f ? q_eval_apply_value(f, av, 2) : NULL;
+    if (!m || RAY_IS_ERR(m)) return m ? m : q_err(QE_TYPE);
+    if (negate) {
+        f = q_registry_lookup_name("not", 3, Q_MONADIC);
         ray_t* nm = f ? q_eval_apply_value(f, &m, 1) : NULL;
         ray_release(m);
         if (!nm || RAY_IS_ERR(nm)) return nm ? nm : q_err(QE_TYPE);
-        ray_t* w = q_where_wrap(nm);
-        ray_release(nm);
-        if (!w || RAY_IS_ERR(w)) return w ? w : q_err(QE_TYPE);
-        ray_t* r = q_typed_empty_like(q_index_at(x, &w, 1), x);
-        ray_release(w);
-        return r ? r : q_err(QE_TYPE);
+        m = nm;
     }
-    /* a typed x is Find's domain (ref/find.md:102 "Find is implicit in ... except"), so its type law rules here */
-    if (x && ray_is_vec(x) && x->type != RAY_STR && !q_search_admits(x, y)) return q_err(QE_TYPE);
-    return ray_except_fn(x, y);
+    ray_t* w = q_where_wrap(m);
+    ray_release(m);
+    if (!w || RAY_IS_ERR(w)) return w ? w : q_err(QE_TYPE);
+    ray_t* r = q_typed_empty_like(q_index_at(x, &w, 1), x);
+    ray_release(w);
+    return r ? r : q_err(QE_TYPE);
+}
+
+/* q `x except y` (ref/except.md); a lone dict/table is a deferred cell — a wrapper builds no container. */
+ray_t* q_except_wrap(ray_t* x, ray_t* y) {
+    if (!x || !y) return q_err(QE_TYPE);
+    if (q_type_is_table(x) && q_type_is_table(y)) {
+        ray_t* idx = table_member_idx(x, y, 0);
+        if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
+        ray_t* r = qj_table_gather_idx(x, (int64_t*)ray_data(idx), q_count(idx));
+        ray_release(idx);
+        return r;
+    }
+    if (q_type_is_dict(x) || q_type_is_dict(y) || q_type_is_table(x) || q_type_is_table(y))
+        return q_err(QE_NYI);
+    return setop_compose(x, y, 1);
 }
 
 /* q `distinct x` / monadic `?` — unique items in FIRST-OCCURRENCE order
@@ -185,75 +184,21 @@ ray_t* q_union_wrap(ray_t* x, ray_t* y) {
     return r;
 }
 
-/* q `x inter y` — items of x that are in y, x-duplicates and order kept
- * (ref/inter.md).  rayfall `sect` (ray_sect_fn) IS this for lists, but on
- * DICT operands it returns a wrong-shaped dict where kdb returns the common
- * VALUES as a list — so dict/table operands are guarded 'nyi (error, never a
- * wrong answer); an atom y composes `x where x in y`; everything else
- * delegates to ray_sect_fn. */
+/* q `x inter y` (ref/inter.md); two dicts answer their common VALUES as a list, so the dict arm recurses on them. */
 ray_t* q_inter_wrap(ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);
-    if (x->type == RAY_TABLE && y->type == RAY_TABLE) {   /* rows of x in y */
+    if (q_type_is_table(x) && q_type_is_table(y)) {
         ray_t* idx = table_member_idx(x, y, 1);
         if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
-        ray_t* r = qj_table_gather_idx(x, (int64_t*)ray_data(idx),
-                                       q_count(idx));
+        ray_t* r = qj_table_gather_idx(x, (int64_t*)ray_data(idx), q_count(idx));
         ray_release(idx);
         return r;
     }
-    /* dict arm (ref/inter.md): the common VALUE items of two dicts, as a
-     * list — recurse on the value lists (boxed whole-item membership). */
-    if (x->type == RAY_DICT && y->type == RAY_DICT &&
-        !q_type_is_keyed(x) && !q_type_is_keyed(y)) {
-        ray_t* vx = ray_dict_vals(x);                      /* borrowed */
-        ray_t* vy = ray_dict_vals(y);                      /* borrowed */
-        if (!vx || !vy) return q_err(QE_TYPE);
-        return q_inter_wrap(vx, vy);
-    }
-    if (x->type == RAY_DICT || x->type == RAY_TABLE ||
-        y->type == RAY_DICT || y->type == RAY_TABLE)
+    if (q_type_is_plain_dict(x) && q_type_is_plain_dict(y))
+        return q_inter_wrap(ray_dict_vals(x), ray_dict_vals(y));
+    if (q_type_is_dict(x) || q_type_is_dict(y) || q_type_is_table(x) || q_type_is_table(y))
         return q_err(QE_NYI);
-    /* atom y (#58): the doc's own definition, `x where x in y` — `in` is left-atomic over an atom y
-     * (ref/in.md) where ray_sect_fn refuses one; x-duplicates, x-order and x's type all ride the index. */
-    if ((ray_is_vec(x) || x->type == RAY_LIST) && ray_is_atom(y)) {
-        ray_t* m = q_in_wrap(x, y);
-        if (!m || RAY_IS_ERR(m)) return m ? m : q_err(QE_TYPE);
-        ray_t* w = q_where_wrap(m);
-        ray_release(m);
-        if (!w || RAY_IS_ERR(w)) return w ? w : q_err(QE_TYPE);
-        ray_t* r = q_typed_empty_like(q_index_at(x, &w, 1), x);
-        ray_release(w);
-        return r ? r : q_err(QE_TYPE);
-    }
-    /* generic-list operands: whole-ITEM membership scan (base ray_sect_fn
-     * flattens/mangles boxed items) — kdb keeps x items (dups kept) in y. */
-    if (x->type == RAY_LIST || y->type == RAY_LIST) {
-        int64_t nx = q_count(x);
-        int64_t ny = (ray_is_vec(y) || y->type == RAY_LIST) ? q_count(y) : -1;
-        if (ny < 0) return ray_sect_fn(x, y);
-        ray_t* out = ray_list_new(nx > 0 ? nx : 1);
-        if (RAY_IS_ERR(out)) return out;
-        for (int64_t i = 0; i < nx; i++) {
-            ray_t* xi = q_join_item(x, i);
-            if (!xi || RAY_IS_ERR(xi)) { ray_release(out); return xi ? xi : q_err(QE_TYPE); }
-            int found = 0;
-            for (int64_t j = 0; j < ny && !found; j++) {
-                ray_t* yj = q_join_item(y, j);
-                if (!yj || RAY_IS_ERR(yj)) { ray_release(xi); ray_release(out); return yj ? yj : q_err(QE_TYPE); }
-                found = q_match_rec(xi, yj);
-                ray_release(yj);
-            }
-            if (found) {
-                out = ray_list_append(out, xi);
-                if (RAY_IS_ERR(out)) { ray_release(xi); return out; }
-            }
-            ray_release(xi);
-        }
-        ray_t* c = q_list_collapse(out);
-        ray_release(out);
-        return ray_is_vec(x) ? q_typed_empty_like(c, x) : c;
-    }
-    return ray_sect_fn(x, y);
+    return setop_compose(x, y, 0);
 }
 
 /* q `x cross y` — Cartesian product, `{raze x,/:\:y}` (ref/cross.md): for
