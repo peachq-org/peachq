@@ -5,7 +5,7 @@
 #define QLANG_Q_CONN_H
 #include <rayforce.h>
 
-ray_t* q_conn_table(void);        /* .pq.conns[] — the 13-column superset */
+ray_t* q_conn_table(void);        /* .pq.conns[] — the 15-column superset */
 ray_t* q_conn_bang38(ray_t* y);   /* -38!x — socket-only; atom->dict, list->table */
 ray_t* q_conn_zW(void);           /* .z.W — socket handles!unsent bytes (I!J) */
 ray_t* q_conn_zH(void);           /* .z.H — active socket handles (I, sorted) */
