@@ -37,7 +37,7 @@
 #define RAY_FN_ATOMIC        0x04  /* auto-map all args over vectors */
 #define RAY_FN_AGGR          0x08  /* aggregation function */
 #define RAY_FN_SPECIAL_FORM  0x10  /* receives unevaluated args */
-#define RAY_FN_RESTRICTED    0x20  /* forbidden during -U restricted IPC evals */
+#define RAY_FN_RESTRICTED    0x20  /* forbidden during -u restricted IPC evals */
 #define RAY_FN_LAZY_AWARE    0x80  /* fn extends or starts lazy chains;
                                       dispatcher must NOT materialise its
                                       args. Without this flag, dispatcher

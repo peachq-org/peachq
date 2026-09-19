@@ -57,7 +57,7 @@
  *              not a parse tree; they diverge for nested lists.  See
  *              ARCHITECTURE.md "eval vs value").
  *   auth/eval  matches kdb: an authenticated connection gets full eval;
- *              restriction only via the -U secret + restricted flag,
+ *              restriction only via the -u restricted flag,
  *              which still wraps every inbound eval and is re-imposed on
  *              journal replay.
  *   journal    unchanged 16-byte ray_ipc_header_t envelope (serde v5) —
@@ -89,6 +89,7 @@
 #include "qlang/net/q_ws.h"
 #include "qlang/eval/q_eval.h"   /* q_eval_apply_value — q hook firing */
 #include "qlang/q_dotz.h"        /* q_dotz_now_ns — connection open-time stamp */
+#include "qlang/q_builtins.h"    /* q_md5_fn / q_dotq_sha1_fn — the password file's hashed secrets */
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -259,6 +260,17 @@ static bool ct_eq(const void* a, const void* b, size_t len) {
     return diff == 0;
 }
 
+/* The kdb creds line split: no colon = no user, the whole line is the password. */
+static void cred_split(const uint8_t* buf, size_t len, const char** user, size_t* ulen,
+                       const char** pw, size_t* plen) {
+    const char* creds = (const char*)buf;
+    const char* colon = len ? memchr(creds, ':', len) : NULL;
+    *user = creds;
+    *ulen = colon ? (size_t)(colon - creds) : 0;
+    *pw   = colon ? colon + 1 : creds;
+    *plen = colon ? (size_t)(len - (size_t)(*pw - creds)) : len;
+}
+
 /* Validate a creds line against the -u/-U secret.  creds is the RAW
  * "user:password" byte range from the kdb handshake (NO trailing NUL, NO
  * capability byte — the handshake reader strips both).  secret MUST point
@@ -267,10 +279,8 @@ static bool ct_eq(const void* a, const void* b, size_t len) {
  * no secret-length-dependent copies. */
 static bool validate_creds(const uint8_t* buf, size_t cred_len,
                            const char* secret) {
-    const char* creds = (const char*)buf;
-    const char* colon = cred_len ? memchr(creds, ':', cred_len) : NULL;
-    const char* pw = colon ? colon + 1 : creds;
-    size_t pw_len = colon ? (size_t)(cred_len - (size_t)(pw - creds)) : cred_len;
+    const char* user; size_t ulen; const char* pw; size_t pw_len;
+    cred_split(buf, cred_len, &user, &ulen, &pw, &pw_len);
     if (pw_len > 255) pw_len = 255;
 
     /* Zero-pad pw into a 256-byte buffer, then compare all 256 bytes
@@ -279,6 +289,103 @@ static bool validate_creds(const uint8_t* buf, size_t cred_len,
     uint8_t pw_buf[256] = {0};
     memcpy(pw_buf, pw, pw_len);
     return ct_eq(pw_buf, secret, 256);
+}
+
+/* ===== -u/-U password file (basics/cmdline.md) =====
+ * Spans into the file's bytes, loaded once at startup and kept for the process. */
+typedef struct { const char* user; size_t ulen; const char* secret; size_t slen; } auth_user_t;
+static auth_user_t* g_auth_users  = NULL;
+static size_t       g_auth_nusers = 0;
+static bool         g_auth_file   = false;
+
+int ray_ipc_auth_file_load(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return -1;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return -1; }
+    long sz = ftell(f);
+    if (sz < 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return -1; }
+    char* buf = (char*)ray_sys_alloc((size_t)sz + 1);
+    if (!buf) { fclose(f); errno = ENOMEM; return -1; }
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    if (got != (size_t)sz) { ray_sys_free(buf); errno = EIO; return -1; }
+
+    size_t lines = 1;
+    for (size_t i = 0; i < got; i++) lines += (buf[i] == '\n');
+    auth_user_t* users = (auth_user_t*)ray_sys_alloc(lines * sizeof *users);
+    if (!users) { ray_sys_free(buf); errno = ENOMEM; return -1; }
+
+    size_t n = 0;
+    for (size_t i = 0; i < got; ) {
+        size_t end = i;
+        while (end < got && buf[end] != '\n') end++;
+        size_t stop = end;
+        if (stop > i && buf[stop - 1] == '\r') stop--;
+        if (stop > i) {
+            const char* colon = memchr(buf + i, ':', stop - i);
+            users[n].user   = buf + i;
+            users[n].ulen   = colon ? (size_t)(colon - (buf + i)) : stop - i;
+            users[n].secret = colon ? colon + 1 : buf + stop;
+            users[n].slen   = colon ? (size_t)((buf + stop) - (colon + 1)) : 0;
+            n++;
+        }
+        i = end + 1;
+    }
+    g_auth_users  = users;
+    g_auth_nusers = n;
+    g_auth_file   = true;
+    return 0;
+}
+
+/* Does the stored hex secret (32 = md5, 40 = sha1; case-insensitive) equal `digest(pw)`? */
+static bool auth_hex_matches(const char* stored, size_t hex_len, const char* pw, size_t pw_len,
+                             ray_t* (*digest)(ray_t*)) {
+    ray_t* s = ray_charv(pw, (int64_t)pw_len);
+    if (!s || RAY_IS_ERR(s)) { if (s) ray_error_free(s); return false; }
+    ray_t* d = digest(s);
+    ray_release(s);
+    if (!d || RAY_IS_ERR(d)) { if (d) ray_error_free(d); return false; }
+    const uint8_t* bytes = (const uint8_t*)ray_data(d);
+    char hex[40], low[40];
+    for (size_t i = 0; i < hex_len / 2; i++) {
+        hex[2 * i]     = "0123456789abcdef"[bytes[i] >> 4];
+        hex[2 * i + 1] = "0123456789abcdef"[bytes[i] & 15];
+    }
+    ray_release(d);
+    for (size_t i = 0; i < hex_len; i++)
+        low[i] = (stored[i] >= 'A' && stored[i] <= 'Z') ? (char)(stored[i] + 32) : stored[i];
+    return ct_eq(hex, low, hex_len);
+}
+
+static bool auth_is_hex(const char* s, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
+    }
+    return true;
+}
+
+/* The stored secret's SHAPE picks the one form it is checked as, so a hash offered verbatim as the
+ * password never matches its own file line (a leaked file must not be a credential). */
+static bool auth_secret_matches(const char* stored, size_t slen, const char* pw, size_t pw_len) {
+    if (slen == 32 && auth_is_hex(stored, 32)) return auth_hex_matches(stored, 32, pw, pw_len, q_md5_fn);
+    if (slen == 40 && auth_is_hex(stored, 40)) return auth_hex_matches(stored, 40, pw, pw_len, q_dotq_sha1_fn);
+    uint8_t a[256] = {0}, b[256] = {0};
+    memcpy(a, pw, pw_len > 255 ? 255 : pw_len);
+    memcpy(b, stored, slen > 255 ? 255 : slen);
+    return ct_eq(a, b, 256) & (slen <= 255) & (pw_len <= 255);
+}
+
+/* An unlisted user (including the no-colon line) is rejected. */
+static bool validate_creds_file(const uint8_t* buf, size_t cred_len) {
+    const char* user; size_t ulen; const char* pw; size_t plen;
+    cred_split(buf, cred_len, &user, &ulen, &pw, &plen);
+    for (size_t i = 0; i < g_auth_nusers; i++) {
+        const auth_user_t* u = &g_auth_users[i];
+        if (u->ulen == ulen && memcmp(u->user, user, ulen) == 0)
+            return auth_secret_matches(u->secret, u->slen, pw, plen);
+    }
+    return false;
 }
 
 /* ===== Connection hooks (.ipc.on.*) =====
@@ -469,9 +576,9 @@ static void hook_call_badmsg(ray_poll_t* poll, int64_t handle, int64_t fd,
  *  -  1 → hook ran and returned truthy; caller continues the handshake.
  *  -  0 → hook ran and returned falsy (or errored); caller rejects.
  *  - -1 → no hook installed; caller uses the existing pass-through.
- * With a -u/-U secret the constant-time compare always runs FIRST, so
+ * With a -u/-U password file the constant-time compare always runs FIRST, so
  * this hook can only narrow access there — never widen it.  Without a
- * secret (kdb default: accept) the hook alone decides — the kdb
+ * file (kdb default: accept) the hook alone decides — the kdb
  * handshake always carries creds, mirroring kdb's -u + .z.pw layering.
  * `cred_buf/cred_len` is the raw "user:pass" range (no NUL, no cap). */
 static int hook_call_auth(ray_poll_t* poll, int64_t handle,
@@ -479,13 +586,8 @@ static int hook_call_auth(ray_poll_t* poll, int64_t handle,
     ray_t* fn = hook_lookup(IPC_HOOK_AUTH);
     if (!fn) return -1;
 
-    const char* creds = (const char*)cred_buf;
-    const char* colon = cred_len ? memchr(creds, ':', cred_len) : NULL;
-    const char* upart = creds;
-    size_t      ulen  = colon ? (size_t)(colon - creds) : 0;
-    const char* ppart = colon ? colon + 1 : creds;
-    size_t      plen  = colon ? (size_t)(cred_len - (size_t)(ppart - creds))
-                              : cred_len;
+    const char* upart; size_t ulen; const char* ppart; size_t plen;
+    cred_split(cred_buf, cred_len, &upart, &ulen, &ppart, &plen);
 
     /* Dialect seam: `.z.pw` receives "the user ID (as a symbol) and password
      * (as a string)" (ref/dotz.md) — asymmetric, and the user is the same
@@ -681,7 +783,7 @@ static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
          * The envelope stays the 16-byte serde header; the payload is the
          * kdb object bytes verbatim (the v5 serde reader speaks the wire
          * grammar).  RESTRICTED is captured so replay re-imposes it —
-         * without this a -U client's writes silently elevate to full
+         * without this a -u client's writes silently elevate to full
          * privilege on crash-recovery.  A failed journal write ABORTS the
          * eval ("the message has not been logged so we cannot accept
          * it") — silently evaluating un-logged mutations defeats -l/-L. */
@@ -750,7 +852,7 @@ typedef struct {
     uint16_t         hs_len;
     int64_t          listener_id;  /* id of the listener selector; -1 = outbound */
     bool             auth_required;  /* server has -u/-U */
-    bool             restricted;     /* server has -U */
+    bool             restricted;     /* server has -u */
     /* HTTP mode (phase RAY_IPC_PHASE_HTTP): request-header accumulator, byte
      * at a time like the handshake (the rx pump fires read_fn only on a FULL
      * buffer, so delimiter-terminated input cannot bulk-read). */
@@ -938,7 +1040,7 @@ static ray_t* ipc_accept(ray_poll_t* poll, ray_selector_t* sel)
     if (tls) cd->tls_deadline = ray_time_now_ms() + RAY_IPC_TLS_HS_MS;
     cd->listener_id = sel->id;
     cd->open_ns = q_dotz_now_ns(0);
-    cd->auth_required = (poll->auth_secret[0] != '\0');
+    cd->auth_required = (poll->auth_secret[0] != '\0') || g_auth_file;
     cd->restricted    = poll->restricted;
     cd->loopback      = ray_sock_is_loopback(new_fd);   /* emit-zip gate */
     cd->user_sym      = -1;
@@ -998,7 +1100,7 @@ static bool kdb_handshake_complete(ray_poll_t* poll, int64_t handle,
 
     bool ok = true;
     if (auth_required)
-        ok = validate_creds(hs, clen, secret);
+        ok = g_auth_file ? validate_creds_file(hs, clen) : validate_creds(hs, clen, secret);
     if (ok) {
         int hook_ok = hook_call_auth(poll, handle, hs, clen);
         if (hook_ok == 0) ok = false;
@@ -1070,8 +1172,11 @@ static ray_t* ipc_read_http(ray_poll_t* poll, ray_selector_t* sel)
         int64_t     hprev = ipc_ctx_handle();
         ray_poll_t* hpp   = ipc_ctx_poll();
         ipc_ctx_set(sel->id, poll);
+        bool prev_restricted = ray_eval_get_restricted();
+        ray_eval_set_restricted(cd->restricted);
         int up = q_http_respond((ray_sock_t)sel->fd, cd->http_buf, cd->http_len,
                                 cd->auth_required);
+        ray_eval_set_restricted(prev_restricted);
         ipc_ctx_set(hprev, hpp);
         /* 1 = 101 sent (kb/websockets.md): switch this connection to the WS
          * frame pump.  Alloc failure after the 101 just closes (plan D13). */
@@ -1467,7 +1572,7 @@ static void conn_on_handshake(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
         return;
     }
 
-    bool auth_req = (srv->auth_secret[0] != '\0');
+    bool auth_req = (srv->auth_secret[0] != '\0') || g_auth_file;
     /* Legacy C-fixture server (ray_ipc_conn_t): this struct tracks neither
      * peer capability nor loopback (ipc.h is unchanged), so it cannot compute
      * the emit-compression policy — by design it never compresses (see the
@@ -1988,7 +2093,7 @@ int64_t ray_ipc_connect(const char* host, uint16_t port,
     cd->phase       = RAY_IPC_PHASE_HEADER;
     cd->listener_id = -1;               /* outbound — no lifecycle hooks */
     cd->open_ns     = q_dotz_now_ns(0);
-    cd->restricted  = poll->restricted; /* -U narrows pushed evals too */
+    cd->restricted  = poll->restricted; /* -u narrows pushed evals too */
     cd->peer_zip    = (common >= 1);    /* negotiated compression eligibility */
     cd->loopback    = ray_sock_is_loopback(fd);   /* emit-zip gate */
     cd->user_sym    = -1;
