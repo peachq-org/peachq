@@ -22,6 +22,8 @@
 #include "lang/eval.h"             /* ray_eval_get_restricted */
 #include "lang/env.h"              /* ray_fn_vary — the .pq.i.load native */
 #include "table/sym.h"             /* ray_sym_intern_runtime, ray_sym_str */
+#include "core/ipc.h"              /* ray_ipc_conn_stamp — is the IPC token's socket still THAT connection */
+#include "qlang/q_dotz.h"          /* q_dotz_now_ns — the clock connection stamps are on */
 #include <rayforce.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,7 +40,9 @@ typedef struct {
     int64_t provider;   /* sym id */
     int64_t alias;      /* sym id (never the empty name for a registered row) */
     int64_t handle;     /* sym id of the registered spelling `:pq:ds:alias` — what hopen answers */
-    ray_t*  connid;     /* owned: the TOKEN .provider.i.open returned */
+    ray_t*  connid;     /* owned: the TOKEN .provider.i.open returned; NULL after a failed re-dial */
+    ray_t*  open3;      /* owned: the hopen tuple, kept for the re-dial; NULL = never re-dials */
+    int64_t stamp;      /* the IPC connection i.open itself made, by its open stamp; 0 = an opaque token */
     int     internal;   /* the provider's own row (DuckDB's main): neither hopen nor hclose may touch it */
 } prov_ent;
 
@@ -56,6 +60,7 @@ void q_provider_destroy(void) {
     for (int64_t i = 0; i < g_n; i++) {
         close((int)g_ents[i].fd);      /* teardown: no hooks, just the fd + refs */
         if (g_ents[i].connid) ray_release(g_ents[i].connid);
+        if (g_ents[i].open3)  ray_release(g_ents[i].open3);
     }
     free(g_ents);
     g_ents = NULL; g_cap = 0; g_n = 0;
@@ -207,7 +212,7 @@ static ray_t* hook_call(int64_t provider, const char* hook, ray_t** args, int64_
 
 
 /* every open form normalizes here: the FROZEN triad (rest; timeout|0N; config|::) — owned 3-list, the hook's
- * three trailing args; it dies with the call (hopen is where secrets die) */
+ * three trailing args; a registered alias keeps it for the re-dial, a temporary connection drops it */
 static ray_t* open3_make(seg_t rest, ray_t* timeout, ray_t* config) {
     ray_t* r = ray_list_new(3);
     if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_OOM);
@@ -222,17 +227,29 @@ static ray_t* open3_make(seg_t rest, ray_t* timeout, ray_t* config) {
     return r;
 }
 
+static int64_t token_fd(ray_t* c) {
+    return q_type_is_int_atom(c) ? q_type_iatom_val(c) : -1;
+}
+
 /* .provider.i.open[alias; rest; timeout; config] — the alias FIRST (the connection's identity, never an option),
- * then the triad's three SEPARATE args (arity frozen at 4) */
-static ray_t* conn_open(int64_t provider, int64_t alias, ray_t* open3, ray_t** connid_out) {
+ * then the triad's three SEPARATE args (arity frozen at 4).  *stamp_out: the open stamp of the IPC connection the
+ * hook made when its token IS that connection (an int naming a socket opened during the call — qpc's), else 0:
+ * an int a provider hands out for its own reasons is never mistaken for a socket it happens to equal. */
+static ray_t* conn_open(int64_t provider, int64_t alias, ray_t* open3, ray_t** connid_out, int64_t* stamp_out) {
     *connid_out = NULL;
+    if (stamp_out) *stamp_out = 0;
     ray_t** o3 = (ray_t**)ray_data(open3);
     ray_t* a = ray_sym(alias);
     ray_t* args[4] = { a, o3[0], o3[1], o3[2] };
+    int64_t t0 = q_dotz_now_ns(0);
     ray_t* c = hook_call(provider, "i.open", args, 4);
     ray_release(a);
     if (!c || RAY_IS_ERR(c)) return c ? c : q_err(QE_TYPE);
     *connid_out = c;
+    if (stamp_out && token_fd(c) >= 0) {
+        int64_t st = ray_ipc_conn_stamp(token_fd(c), false);
+        if (st >= t0) *stamp_out = st;
+    }
     return NULL;
 }
 
@@ -242,6 +259,47 @@ static void conn_close(int64_t provider, ray_t* connid) {
     ray_t* r = q_eval_apply_value(f, &connid, 1);
     ray_release(f);
     if (r) ray_release(r);
+}
+
+/* a watched token is dead once its fd no longer carries the connection it was opened as; with drain,
+ * a pending EOF is read first (and `.z.pc` runs inside — the caller re-finds its entry) */
+static int ent_dead(const prov_ent* e, int drain) {
+    if (!e->connid) return 1;
+    int64_t want = e->stamp;
+    return want && ray_ipc_conn_stamp(token_fd(e->connid), drain != 0) != want;
+}
+
+/* i.close only on a token that still names its connection — a dead IPC fd may already be someone else's */
+static void ent_drop_token(prov_ent* e) {
+    if (!e->connid) return;
+    if (!ent_dead(e, 0)) conn_close(e->provider, e->connid);
+    ray_release(e->connid);
+    e->connid = NULL;
+}
+
+/* THE reconnect (owner ruling 2026-09-18): a `:pq:` alias whose connection died re-dials ONCE per use,
+ * on the tuple hopen was given (so on its timeout); a failed dial errors THIS use and leaves the alias
+ * as it was — nothing is queued, remembered or retried.  Both the drain (`.z.pc`) and the dial (i.open)
+ * run q that may close this alias or open others, moving g_ents: *ep is re-found after each. */
+static ray_t* ent_live(prov_ent** ep) {
+    prov_ent* e = *ep;
+    if (!e->open3) return NULL;
+    int64_t pid = e->provider, aid = e->alias;
+    int dead = ent_dead(e, 1);
+    if (!(e = *ep = find_alias(pid, aid))) return q_err(QE_CONN);
+    if (!dead) return NULL;
+    ent_drop_token(e);
+    ray_t* c = NULL;
+    int64_t stamp = 0;
+    ray_t* err = conn_open(pid, aid, e->open3, &c, &stamp);
+    if (!(e = *ep = find_alias(pid, aid))) {
+        if (c) { conn_close(pid, c); ray_release(c); }
+        return err ? err : q_err(QE_CONN);
+    }
+    if (err) return err;
+    e->connid = c;
+    e->stamp  = stamp;
+    return NULL;
 }
 
 static prov_ent* ent_push(void) {
@@ -275,25 +333,36 @@ ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config) 
     if (live) {
         /* re-point the live alias: close old token, open new, swap — the
          * url-moved-don't-lose-tables affordance; carriers never notice */
-        conn_close(pid, live->connid);
-        ray_release(live->connid); live->connid = NULL;
+        ent_drop_token(live);
         ray_t* c = NULL;
-        ray_t* e = conn_open(pid, aid, o3, &c);
-        ray_release(o3);
+        int64_t stamp = 0;
+        ray_t* e = conn_open(pid, aid, o3, &c, &stamp);
+        if (!(live = find_alias(pid, aid))) {  /* i.open ran q that closed the alias */
+            ray_release(o3);
+            if (c) { conn_close(pid, c); ray_release(c); }
+            return e ? e : q_err(QE_CONN);
+        }
         if (e) {                               /* open failed: the alias dies */
+            ray_release(o3);
             int64_t fd = live->fd;
             close((int)fd);
             q_handles_deregister(fd);
+            if (live->open3) ray_release(live->open3);
             *live = g_ents[--g_n];
             return e;
         }
+        ent_drop_token(live);                  /* q under i.open may have re-pointed it first */
+        if (live->open3) ray_release(live->open3);
+        live->open3  = o3;
         live->connid = c;
+        live->stamp  = stamp;
         return ray_sym(live->handle);
     }
     int fd = q_handles_reserve_fd();
     if (fd < 0) { ray_release(o3); return q_err(QE_IO); }
-    /* only ":pq:ds:alias" is registered — the config (credentials, urls)
-     * dies here (hopen is where secrets die) — and that spelling IS the handle */
+    /* only ":pq:ds:alias" is registered — the config (credentials, urls) is
+     * kept in this host's private entry for the re-dial and nowhere q can
+     * read it — and that spelling IS the handle */
     size_t redlen = (size_t)(sp.alias.p + sp.alias.n - s);
     if (!q_handles_register(fd, Q_HANDLE_PROVIDER, 1, s, redlen)) {
         close(fd);
@@ -301,9 +370,10 @@ ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config) 
         return q_err(QE_OOM);
     }
     ray_t* c = NULL;
-    ray_t* e = conn_open(pid, aid, o3, &c);
-    ray_release(o3);
+    int64_t stamp = 0;
+    ray_t* e = conn_open(pid, aid, o3, &c, &stamp);
     if (e) {
+        ray_release(o3);
         q_handles_deregister(fd);
         close(fd);
         return e;
@@ -312,6 +382,7 @@ ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config) 
     if (!ne) {
         conn_close(pid, c);
         ray_release(c);
+        ray_release(o3);
         q_handles_deregister(fd);
         close(fd);
         return q_err(QE_OOM);
@@ -321,6 +392,8 @@ ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config) 
     ne->alias    = aid;
     ne->handle   = ray_sym_intern_runtime(s, redlen);
     ne->connid   = c;
+    ne->open3    = o3;
+    ne->stamp    = stamp;
     return ray_sym(ne->handle);
 }
 
@@ -343,12 +416,13 @@ int64_t q_provider_register_internal(const char* ds, const char* alias, ray_t* t
     return ne->handle;
 }
 
-int q_provider_info(int64_t fd, int64_t* provider, int64_t* alias, int64_t* handle) {
+int q_provider_info(int64_t fd, int64_t* provider, int64_t* alias, int64_t* handle, int* open) {
     prov_ent* e = find_fd(fd);
     if (!e) return 0;
     *provider = e->provider;
     *alias    = e->alias;
     *handle   = e->handle;
+    *open     = !ent_dead(e, 0);
     return 1;
 }
 
@@ -386,14 +460,16 @@ ray_t* q_provider_token(ray_t* handle, const char* provider) {
     return e->connid;
 }
 
-/* the provider's own row outlives every user close */
+/* the provider's own row outlives every user close; the row leaves the table BEFORE i.close runs — its
+ * hclose fires `.z.pc`, whose q may hclose this very alias again or open others */
 static ray_t* ent_close(prov_ent* e) {
     if (e->internal) return q_err(QE_DOMAIN);
-    conn_close(e->provider, e->connid);
-    ray_release(e->connid);
-    close((int)e->fd);
-    q_handles_deregister(e->fd);
+    prov_ent ent = *e;
     *e = g_ents[--g_n];
+    ent_drop_token(&ent);
+    if (ent.open3) ray_release(ent.open3);
+    close((int)ent.fd);
+    q_handles_deregister(ent.fd);
     return RAY_NULL_OBJ;
 }
 
@@ -427,12 +503,12 @@ static ray_t* cref_open(const spec_t* sp, cref_t* c) {
     if (sp->alias.n) {                         /* REFERENCE */
         ray_t* err = ref_find(sp, &c->e);
         if (err) return err;
-        return c->e ? NULL : q_err(QE_CONN);
+        return c->e ? ent_live(&c->e) : q_err(QE_CONN);
     }
     ray_t* o3 = open3_make(sp->cfg, NULL, NULL);   /* SPEC: temp connection */
     if (RAY_IS_ERR(o3)) return o3;
     ray_t* conn = NULL;
-    ray_t* err = conn_open(pid, empty_sym(), o3, &conn);
+    ray_t* err = conn_open(pid, empty_sym(), o3, &conn, NULL);
     ray_release(o3);
     if (err) return err;
     c->tmp = (prov_ent){ .fd = -1, .provider = pid, .alias = empty_sym(), .handle = empty_sym(), .connid = conn };
@@ -558,7 +634,8 @@ static ray_t* prov_dispatch(prov_ent* e, ray_t* y, int sync) {
 ray_t* q_provider_apply(int64_t qh, ray_t* y) {
     prov_ent* e = find_fd(qh < 0 ? -qh : qh);
     if (!e) return q_err(QE_TYPE);
-    return prov_dispatch(e, y, qh > 0);
+    ray_t* err = ent_live(&e);
+    return err ? err : prov_dispatch(e, y, qh > 0);
 }
 
 ray_t* q_provider_sym_apply(ray_t* head, ray_t** args, int64_t n) {
@@ -806,7 +883,7 @@ static ray_err_t link_hook(const char* hook, int64_t qname, ray_t* car) {
     if (e || !link) {
         ray_t* qn = ray_sym(qname);
         ray_t* tn = ray_sym(ray_sym_intern_runtime(sp.tbl.p, sp.tbl.n));
-        ray_t* args[3] = { e ? e->connid : RAY_NULL_OBJ, qn, tn };
+        ray_t* args[3] = { e && e->connid ? e->connid : RAY_NULL_OBJ, qn, tn };
         g_in_link = 1;
         ray_t* r = q_eval_apply_value(f, args, link ? 3 : 2);
         g_in_link = 0;
@@ -886,6 +963,7 @@ ray_t* q_provider_load(const char* s, size_t n, ray_t* tables) {
     ray_t* err = ref_find(&sp, &e);            /* LIVE alias only: a load never opens a transient connection */
     if (err) return err;
     if (!e) return q_err(QE_CONN);
+    if ((err = ent_live(&e))) return err;
     ray_t* f = hook_fn(e->provider, "i.load");
     if (!f) return q_err(QE_NYI);
     ray_t* one = sp.is_table ? ray_sym(ray_sym_intern_runtime(sp.tbl.p, sp.tbl.n)) : NULL;

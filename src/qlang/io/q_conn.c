@@ -31,6 +31,7 @@ typedef struct {
     int64_t       provider_sym, alias_sym;
     int64_t       handle_sym; /* provider rows: the alias sym hopen answered; -1 = the handle is the fd */
     int64_t       open_ns;    /* NULL_I64 = unknown */
+    uint8_t       open;       /* 0 only on a provider row whose connection died and has not been re-dialled */
 } conn_row;
 
 static int row_cmp(const void* a, const void* b) {
@@ -65,6 +66,7 @@ static conn_row* conn_rows(int64_t* n_out) {
         r->peer_addr = 0;
         r->provider_sym = esym; r->alias_sym = esym; r->handle_sym = -1;
         r->open_ns = infos[i].open_ns ? infos[i].open_ns : NULL_I64;
+        r->open = 1;
         if (r->out) {                     /* hopen registered the descriptor */
             int64_t us = q_handles_user_sym(r->fd);
             if (us >= 0) r->user_sym = us;
@@ -89,8 +91,12 @@ static conn_row* conn_rows(int64_t* n_out) {
         r->addr = hi.open_args;
         r->provider_sym = esym; r->alias_sym = esym; r->handle_sym = -1;
         r->open_ns = hi.open_time_ns;
-        if (hi.kind == Q_HANDLE_PROVIDER)
-            (void)q_provider_info(hi.fd, &r->provider_sym, &r->alias_sym, &r->handle_sym);
+        r->open = 1;
+        if (hi.kind == Q_HANDLE_PROVIDER) {
+            int open = 1;
+            (void)q_provider_info(hi.fd, &r->provider_sym, &r->alias_sym, &r->handle_sym, &open);
+            r->open = open != 0;
+        }
     }
     qsort(rows, (size_t)n, sizeof *rows, row_cmp);
     *n_out = n;
@@ -140,9 +146,9 @@ ray_t* q_conn_table(void) {
     conn_row* rows = conn_rows(&n);
     if (!rows) return q_err(QE_WSFULL);
     int64_t cap = n ? n : 1;
-    static const char* const names[14] = { "h", "handle", "kind", "p", "f", "z", "n",
-        "m", "out", "user", "addr", "provider", "alias", "opened" };
-    ray_t* c[14];
+    static const char* const names[15] = { "h", "handle", "kind", "p", "f", "z", "n",
+        "m", "out", "user", "addr", "provider", "alias", "opened", "state" };
+    ray_t* c[15];
     c[0]  = ray_vec_new(RAY_I32, cap);
     c[1]  = ray_list_new(cap);
     c[2]  = ray_sym_vec_new(RAY_SYM_W64, cap);
@@ -157,9 +163,12 @@ ray_t* q_conn_table(void) {
     c[11] = ray_sym_vec_new(RAY_SYM_W64, cap);
     c[12] = ray_sym_vec_new(RAY_SYM_W64, cap);
     c[13] = ray_vec_new(RAY_TIMESTAMP, cap);
+    c[14] = ray_sym_vec_new(RAY_SYM_W64, cap);
+    int64_t s_open = ray_sym_intern_runtime("open", 4), s_closed = ray_sym_intern_runtime("closed", 6);
     for (int64_t i = 0; i < n; i++) {
         conn_row* r = &rows[i];
         int64_t ks   = kind_sym(r->kind);
+        int64_t stt  = r->open ? s_open : s_closed;
         int64_t nm   = r->kind == Q_HANDLE_SOCKET ? 0 : NULL_I64;
         uint8_t zf   = 0;
         int32_t fd   = (int32_t)r->fd;
@@ -197,9 +206,10 @@ ray_t* q_conn_table(void) {
         c[11] = ray_vec_append(c[11], &r->provider_sym);
         c[12] = ray_vec_append(c[12], &r->alias_sym);
         c[13] = ray_vec_append(c[13], &r->open_ns);
+        c[14] = ray_vec_append(c[14], &stt);
     }
     free(rows);
-    return cols_table(c, names, 14);
+    return cols_table(c, names, 15);
 }
 
 ray_t* q_conn_zH(void) {
