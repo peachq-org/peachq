@@ -16,6 +16,7 @@
 #include "qlang/io/q_duckdb.h" /* q_duckdb_main_path_set — the `-duckdb` main database file */
 #include "qlang/io/q_io.h"     /* q_io_abs_path — the tty startup `\l` names the script's full path */
 #include "core/poll.h"
+#include "core/ipc.h"          /* ray_ipc_auth_file_load — the `-u`/`-U` password file */
 #include "core/runtime.h"
 #include <rayforce.h>
 #include <errno.h>
@@ -46,7 +47,7 @@ int main(int argc, char** argv) {
     bool        classic = false;
     int         etrap_mode = -1;
     int         date_order = -1;
-    const char* auth_pw = NULL;
+    const char* auth_file = NULL;
     bool        auth_restricted = false;
     int         tls_mode = 0;
     bool        want_help = false;
@@ -115,12 +116,18 @@ int main(int argc, char** argv) {
             }
             q_duckdb_main_path_set(duckdb_main = argv[++i]);
         } else if (strcmp(argv[i], "-u") == 0 && i + 1 < argc) {
-            auth_pw = argv[++i];
-            auth_restricted = false;
-        } else if (strcmp(argv[i], "-U") == 0 && i + 1 < argc) {
-            auth_pw = argv[++i];
+            /* basics/cmdline.md: `-u 1` restricts; `-u file` is `-u 1 -U file`. */
+            const char* spec = argv[++i];
             auth_restricted = true;
+            if (strcmp(spec, "1") != 0) auth_file = spec;
+        } else if (strcmp(argv[i], "-U") == 0 && i + 1 < argc) {
+            auth_file = argv[++i];
         }
+    }
+
+    if (auth_file && ray_ipc_auth_file_load(auth_file) != 0) {
+        fprintf(stderr, "q: cannot read password file '%s': %s\n", auth_file, strerror(errno));
+        return 2;
     }
 
     q_tls_server_mode_set(tls_mode);   /* before any listener can accept */
@@ -134,14 +141,7 @@ int main(int argc, char** argv) {
     ray_poll_t* poll = ray_poll_create();
     if (poll) ray_runtime_set_poll(poll);
 
-    if (poll && auth_pw) {
-        size_t pw_len = strlen(auth_pw);
-        if (pw_len >= sizeof(poll->auth_secret))
-            pw_len = sizeof(poll->auth_secret) - 1;
-        memcpy(poll->auth_secret, auth_pw, pw_len);
-        poll->auth_secret[pw_len] = '\0';
-        poll->restricted = auth_restricted;
-    }
+    if (poll) poll->restricted = auth_restricted;
 
     if (have_port) {
         /* `0W` (port_auto) binds port 0 → the OS chooses a free port.  The

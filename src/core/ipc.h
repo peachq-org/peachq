@@ -51,7 +51,7 @@ size_t ray_ipc_decompress(const uint8_t* src, size_t clen,
 
 #define RAY_IPC_FLAG_COMPRESSED 0x01
 /* Set by the journal hook in core/ipc.c eval_payload when the inbound
- * IPC message arrived on a `-U` restricted connection.  Used ONLY for
+ * IPC message arrived on a `-u` restricted connection.  Used ONLY for
  * persisted log frames; the live IPC path ignores it (the connection's
  * restricted state is the source of truth there).  Replay reads the
  * bit to re-impose the original sender's restrictions, otherwise a
@@ -86,6 +86,9 @@ int64_t ray_ipc_current_fd(void);
 /* Register IPC listener on poll. Returns selector id or -1. */
 int64_t ray_ipc_listen(ray_poll_t* poll, uint16_t port);
 
+/* The kdb `-u`/`-U` password file (user:password per line; plain or md5/sha1 hex).  Process-wide.  0, or -1 + errno. */
+int ray_ipc_auth_file_load(const char* path);
+
 /* ===== Legacy server API (wraps poll internally for tests) ===== */
 
 typedef struct ray_ipc_conn {
@@ -112,7 +115,7 @@ typedef struct ray_ipc_server {
     uint32_t          n_conns;
     bool              running;
     char              auth_secret[256]; /* password from -u/-U */
-    bool              restricted;       /* -U mode */
+    bool              restricted;       /* -u mode */
 } ray_ipc_server_t;
 
 ray_err_t ray_ipc_server_init(ray_ipc_server_t* srv, uint16_t port);
