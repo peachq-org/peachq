@@ -1458,17 +1458,18 @@ static void ipc_on_close(ray_poll_t* poll, ray_selector_t* sel)
      * before the listener's own close path (which would otherwise also
      * route through here) runs the hook with a stale fd.  Guard on:
      *   - sel->data: the listener itself has no conn data.
-     *   - listener_id ≥ 0: lifecycle hooks pair with inbound on.open
-     *     only — outbound conns (ray_ipc_connect) never fired on.open,
-     *     so they must not fire on.close either.
-     *   - phase ≥ HEADER: the connection actually completed handshake
-     *     (otherwise no matching on.open was fired, so on.close must
-     *     also stay silent to keep the pair balanced for the user). */
+     *   - phase ≥ HEADER: the connection completed its handshake — an
+     *     outbound conn is born there, so `.z.pc` fires for EVERY closing
+     *     connection, opened or accepted (ref/dotz.md:583; the inbound-only
+     *     pairing with on.open was retired 2026-09-18, D46). */
     if (sel->data) {
         ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
-        if (cd->listener_id >= 0 &&
-            (cd->phase == RAY_IPC_PHASE_HEADER ||
-             cd->phase == RAY_IPC_PHASE_PAYLOAD)) {
+        if (cd->phase == RAY_IPC_PHASE_HEADER ||
+            cd->phase == RAY_IPC_PHASE_PAYLOAD) {
+            /* closed BEFORE the hook runs: gone from `.z.W`, `.z.w` is 0i
+             * and `.z.u`/`.z.a` are local (the read_fn filter every
+             * collector and conn_resolve share) */
+            sel->rx.read_fn = NULL;
             hook_call_lifecycle(poll, IPC_HOOK_CLOSE, sel->id, sel->fd);
         }
         if (cd->http_buf) {     /* HTTP-mode request accumulator */
@@ -2023,6 +2024,20 @@ static int conn_pump(ray_poll_t* poll, int64_t id)
     }
 }
 
+int64_t ray_ipc_conn_stamp(int64_t fd, bool drain)
+{
+    int64_t id = ray_ipc_handle_of_fd(fd);
+    ray_poll_t* poll;
+    ray_selector_t* sel = id < 0 ? NULL : conn_resolve(&poll, id);
+    if (!sel) return -1;
+    ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
+    /* a pending EOF is the peer already gone: reading it closes the conn
+     * (and fires `.z.pc`) before the caller trusts the handle */
+    if (drain && !cd->sync_waiting && conn_pump(poll, id) < 0) return -1;
+    sel = ray_poll_get(poll, id);
+    return sel && sel->data == (void*)cd ? cd->open_ns : -1;
+}
+
 int64_t ray_ipc_connect(const char* host, uint16_t port,
                          const char* user, const char* password,
                          int timeout_ms)
@@ -2091,7 +2106,7 @@ int64_t ray_ipc_connect(const char* host, uint16_t port,
     if (!cd) { ray_sock_close(fd); return -1; }
     memset(cd, 0, sizeof(*cd));
     cd->phase       = RAY_IPC_PHASE_HEADER;
-    cd->listener_id = -1;               /* outbound — no lifecycle hooks */
+    cd->listener_id = -1;               /* outbound: no `.z.po`; `.z.pc` still fires */
     cd->open_ns     = q_dotz_now_ns(0);
     cd->restricted  = poll->restricted; /* -u narrows pushed evals too */
     cd->peer_zip    = (common >= 1);    /* negotiated compression eligibility */

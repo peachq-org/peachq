@@ -209,6 +209,13 @@ typedef struct {
  * cap).  out==NULL/cap==0 is a count query. */
 int64_t   ray_ipc_conn_list(ray_ipc_conn_info_t* out, int64_t cap);
 
+/* The open stamp (open_ns) of the live connection on socket fd `fd`, or -1:
+ * a handle number outlives its socket, so (fd, stamp) is what identifies ONE
+ * connection.  `drain` reads whatever the socket already holds first — a
+ * peer that has gone is then reported gone (its `.z.pc` fires here), not on
+ * the next write. */
+int64_t   ray_ipc_conn_stamp(int64_t fd, bool drain);
+
 /* Identity of ONE connection by rayfall handle (selector id — what
  * ray_ipc_current_handle returns), for the connection-context .z.u/.z.a.
  * Resolves during the handshake too, so `.z.u` is right inside `.z.pw`.

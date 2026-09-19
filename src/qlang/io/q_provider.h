@@ -7,8 +7,10 @@
  * calls .ds.i.open[alias;rest;timeout;config] / .ds.i.close[token] and keeps
  * the ONE registry alias <-> (ds; TOKEN; the legacy reserved fd);
  * every other hook is token-keyed, reached by NAME-GENERIC dispatch off a
- * plain q namespace, and secrets die at hopen (only ":pq:ds:alias" is ever
- * stored).  A bound table is the splay POINTER — the flip of
+ * plain q namespace, and only ":pq:ds:alias" is ever q-visible (the open
+ * tuple stays in the host's private entry, for the ONE re-dial a use of a
+ * dead IPC token makes — owner ruling 2026-09-18).  A bound table is the
+ * splay POINTER — the flip of
  * `cols!`:pq:ds:alias:t/`, carried as that dict with the aux mark
  * (base/q_type.h) — and its columns are ADVISORY: every query and write goes
  * back through the provider. */
@@ -88,8 +90,10 @@ ray_t* q_provider_sym_apply(ray_t* head, ray_t** args, int64_t n);
 ray_t* q_provider_close(int64_t qh);
 ray_t* q_provider_close_sym(ray_t* x);
 
-/* provider/alias/handle sym ids of a registered provider fd; 0 = no such fd */
-int    q_provider_info(int64_t fd, int64_t* provider, int64_t* alias, int64_t* handle);
+/* provider/alias/handle sym ids of a registered provider fd, and whether its
+ * connection is up (an IPC token that died reads 0 until the next use
+ * re-dials it); 0 = no such fd */
+int    q_provider_info(int64_t fd, int64_t* provider, int64_t* alias, int64_t* handle, int* open);
 
 int    q_provider_carrier_is(ray_t* x);      /* a bound table = the MARKED dict; never a shape test */
 
