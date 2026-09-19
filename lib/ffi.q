@@ -1,48 +1,46 @@
-/ Call C from q: .ffi.bind[`name;"argtypes";"rettype"] turns a symbol in any shared library into a q function.
-/ Call it with one list of arguments ending in :: - f (2f;10f;::).  Name the library for one not already loaded:
-/ `libm.so.6`pow.  .ffi.callFunction[("f";`sqrt)] (16f;::) is the one-shot form.  Type letters are q's own
-/ (i j f C ...), uppercase for pointers, "k" a callback.  \?ffi has examples; user-docs/ffi.md the detail.
-/ @implNote The KX ffikdb surface verbatim over a vendored libffi (src/qlang/io/q_ffi.c), so published
-/ ffikdb examples run unchanged.  Loaded by the `\l pq` gate.  Full doc: user-docs/ffi.md.
-/ Lambdas, not natives, so the surface is DISCOVERABLE: a bound function prints the word `arglist`, which is the answer
-/ to the question that sends people here.
-/ Provenance: adapted from KX ffikdb (Apache-2.0, per the ksql precedent; license at docs/licenses/kx-ffi-LICENSE).
-/ ANY-ORDER LAW: definitions only.
+/ Call C from q: .ffi.bind turns a symbol in any shared library into a q function, .ffi.callFunction is the
+/ one-shot form.  The surface and type letters are KX ffikdb's, so its published examples run unchanged.
+/ Adapted from KX ffikdb (Apache-2.0; licence at docs/licenses/kx-ffi-LICENSE).
+/ .
+/ @eg
+/ pow:.ffi.bind[`libm.so.6`pow;"ff";"f"]
+/ pow (2f;10f;::)
 
-/ resolve a C function ONCE and hand back a callable.
-/ The returned function is UNARY: it takes ONE list of arguments, and the trailing (::) is what stops q collapsing
-/ same-type arguments into a vector - (2f;10f) is ALREADY a float vector, so pow (2f;10f) is 'rank while
-/ pow (2f;10f;::) is 1024f.  KX's convention, not ours.
-/ @param funcname (symbol|symbol list) `fn resolvable in this process, or `lib`fn to dlopen a library
-/ @param argtypes (string|char) one letter per argument, "" for none; uppercase is a pointer, "k" a callback
-/ @param returntype (char) one letter, " " for void - a char ATOM, so enlist "f" is 'type
+/ Resolve a C function once and answer a q function that calls it.  The result is unary: it takes ONE list of
+/ arguments ending in (::) - the trailing :: stops q collapsing same-type arguments into a vector.
+/ @param funcname `fn resolvable in this process, or `lib`fn to load a library
+/ @param argtypes one type letter per argument (i j f C ... uppercase for a pointer, "k" a callback), "" for none
+/ @param returntype one type letter as a char atom, " " for void
 / @throws os funcname did not resolve
+/ @eg .ffi.bind[`libm.so.6`sqrt;"f";"f"] (16f;::)
 .ffi.bind:{[funcname;argtypes;returntype]
     {[binding;arglist] .ffi.i.call[binding;arglist]} .ffi.i.bind[funcname;argtypes;returntype]}
 
-/ call a C function, resolving it EVERY time - the one-shot twin of bind, with argument types inferred from the values.
-/ @param returnfunc (symbol|symbol list|list) `fn, `lib`fn, or (returnletter;fn) - the letter defaults to "i"
-/ @param arglist (any) the arguments, ending in (::)
+/ Call a C function, resolving it every time, with argument types inferred from the values.
+/ @param returnfunc `fn, `lib`fn, or (returnletter;fn) - the letter defaults to "i"
+/ @param arglist the arguments, ending in (::)
+/ @eg .ffi.callFunction[("f";`libm.so.6`sqrt)] (16f;::)
 .ffi.callFunction:{[returnfunc;arglist] .ffi.i.callfn[returnfunc;arglist]}
 
-/ read a C global variable.
-/ @param returnvar (symbol|symbol list|list) the spelling callFunction takes, naming a variable
+/ Read a C global variable.
+/ @param returnvar `var, `lib`var, or (typeletter;var)
 .ffi.cvar:{[returnvar] .ffi.i.cvar returnvar}
 
-/ set errno, and answer what it was BEFORE the set.  Anything but an int atom reads without setting.
-/ @param errnum (int) the new errno; omit to read without setting
-/ @return (int) the PREVIOUS errno
+/ Set errno and answer its previous value; anything but an int atom reads without setting.
+/ @return the previous errno
+/ @eg .ffi.setErrno[]
 .ffi.setErrno:{[errnum] .ffi.i.errno errnum}
 
-/ this platform's shared-library extension, as a SYMBOL.
-/ @return (symbol) `so, `dll or `dylib - a symbol, so ` sv `qr,.ffi.extension[] is `qr.so
+/ This platform's shared-library extension.
+/ @return `so, `dll or `dylib
+/ @eg ` sv `libmylib,.ffi.extension[]
 .ffi.extension:{[] ("wlm"!`dll`so`dylib) first string .z.o}
 
-/ the width of a pointer on this platform, in bytes.
-/ @return (int) 8i, or 4i on a 32-bit host
-.ffi.ptrsize:{$[.z.o like "?32"; 4i; 8i]}
+/ The width of a pointer on this platform, in bytes.
+/ @return 8i, or 4i on a 32-bit host
+.ffi.ptrsize:{[] $[.z.o like "?32"; 4i; 8i]}
 
-/ this platform's OS letter, as a CHAR - KX's `{[] first string .z.o}` verbatim, and what published examples branch on
-/ with "l"=.ffi.os[].  ` sv `qr,.ffi.os[] is therefore 'type where the extension spelling works; use `$"qr",.ffi.os[].
-/ @return (char) "l", "w" or "m"
+/ This platform's OS letter, as ffikdb examples branch on it.
+/ @return "l", "w" or "m"
+/ @eg "l"=.ffi.os[]
 .ffi.os:{[] first string .z.o}
