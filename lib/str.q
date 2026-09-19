@@ -1,126 +1,105 @@
-/ Python-shaped string helpers: .str.strip lstrip rstrip, startswith endswith, removeprefix removesuffix,
-/ isalpha isdigit isalnum isspace isupper islower, and .str.printf / .str.format - Python's spellings and
-/ Python's semantics.  Every function takes one string or a list of strings, and a symbol reads as a string.
-/ @implNote THE public .str surface, so a user reuses the names they already know.
-/ Python's exact SPELLINGS (isalpha, startswith, removeprefix - not the snake_case of qlib/q-coding-standards.md,
-/ an owner-ratified departure for familiarity) and Python's exact SEMANTICS, with q idiom only where Python has no
-/ opinion: a symbol reads wherever a string does, and everything works over a LIST of strings as readily as over one.
-/ Python's empty-string rule beats q's - every predicate answers 0b for "", where q's own `all ""` is 1b.
-/ Absent on purpose - q has them and a second spelling is worse than none: lower/upper, vs/sv (split/join), ss/ssr.
-/ strip/lstrip/rstrip are C natives (src/qlang/ops/q_strns.c) - character scanning in q is slow.  Lambdas, not
-/ natives, are the surface, so it stays DISCOVERABLE and the coercion and dispatch below keep ONE home.
-/ ANY-ORDER LAW: definitions only at top level.
+/ Python's string helpers with Python's spellings and semantics: strip lstrip rstrip, startswith endswith,
+/ removeprefix removesuffix, isalpha isdigit isalnum isspace isupper islower, printf and format.
+/ Every function takes one string or a list of strings; a symbol reads as its string.  The is* predicates answer
+/ 0b for "" as Python does.  lower, upper, vs, sv, ss and ssr are q's own and have no twin here.
+/ .
+/ @eg .str.strip "  a b  "
+/ @eg .str.isdigit ("123";"12a";`45)
+/ @eg .str.format ("{} costs {:.2f}";"tea";1.5)
 
-/ THE one coercion AND type gate.  A symbol reads as its string, a char atom as the one-char string, a symbol vector
-/ as the list its callers' 0h arm recurses over.  Anything else is 'type - a long vector would silently answer 0b.
+/ @ignore
 .str.i.text:{[s] $[type[s] in -11 11h; string s; -10h=type s; enlist s; type[s] in 0 10h; s; '`type]};
 
-/ every character of a NON-EMPTY string in `alphabet` - Python's rule, where q's `all ""` would answer 1b.
+/ @ignore
 .str.i.all_in:{[s;alphabet] $[0=count s; 0b; all s in alphabet]};
 
-/ Python's cased-character rule: at least one letter, and every letter in `alphabet`.  Digits and punctuation are
-/ uncased, so they neither qualify nor disqualify - "ABC1" is upper, "123" is not.
+/ @ignore
 .str.i.cased_in:{[s;alphabet] .str.i.all_in[s where s in .Q.a,.Q.A; alphabet]};
 
-/ leading and trailing " \t\n\r" removed.  NOT q's `trim`, whose domain is the char null instead.
-/ @param s (any) a string, a symbol, or a list of either
-.str.strip:{[s]
-    s:.str.i.text s;
-    $[0h=type s; .z.s each s; .str.i.strip s]};
+/ Leading and trailing whitespace (" \t\n\r") removed; q's trim strips only spaces.
+.str.strip:{[text]
+    text:.str.i.text text;
+    $[0h=type text; .z.s each text; .str.i.strip text]};
 
-/ leading " \t\n\r" removed.
-/ @param s (any) a string, a symbol, or a list of either
-.str.lstrip:{[s]
-    s:.str.i.text s;
-    $[0h=type s; .z.s each s; .str.i.lstrip s]};
+/ Leading whitespace removed.
+.str.lstrip:{[text]
+    text:.str.i.text text;
+    $[0h=type text; .z.s each text; .str.i.lstrip text]};
 
-/ trailing " \t\n\r" removed.
-/ @param s (any) a string, a symbol, or a list of either
-.str.rstrip:{[s]
-    s:.str.i.text s;
-    $[0h=type s; .z.s each s; .str.i.rstrip s]};
+/ Trailing whitespace removed.
+.str.rstrip:{[text]
+    text:.str.i.text text;
+    $[0h=type text; .z.s each text; .str.i.rstrip text]};
 
-/ does s begin with prefix?  An empty prefix always does, and a prefix longer than s never does - which is why this
-/ is `sublist` and not `#`, whose take WRAPS: 3#"ab" is "aba", so "ab" would wrongly start with "aba".
-/ @param s (any) a string, a symbol, or a list of either
-/ @param prefix (any) a string or symbol
-.str.startswith:{[s;prefix]
-    s:.str.i.text s;
+/ Does text begin with prefix?  An empty prefix always does.
+/ @eg .str.startswith[("apple";"banana");"a"]
+.str.startswith:{[text;prefix]
+    text:.str.i.text text;
     prefix:.str.i.text prefix;
-    $[0h=type s; .z.s[;prefix] each s; prefix~(count prefix) sublist s]};
+    $[0h=type text; .z.s[;prefix] each text; prefix~(count prefix) sublist text]};
 
-/ does s end with suffix?  Empty and over-long suffixes as above.
-/ @param s (any) a string, a symbol, or a list of either
-/ @param suffix (any) a string or symbol
-.str.endswith:{[s;suffix]
-    s:.str.i.text s;
+/ Does text end with suffix?
+.str.endswith:{[text;suffix]
+    text:.str.i.text text;
     suffix:.str.i.text suffix;
-    $[0h=type s; .z.s[;suffix] each s; suffix~(neg count suffix) sublist s]};
+    $[0h=type text; .z.s[;suffix] each text; suffix~(neg count suffix) sublist text]};
 
-/ s without a leading prefix, or s unchanged when it does not start with one.  Only ONE copy is removed.
-/ @param s (any) a string, a symbol, or a list of either
-/ @param prefix (any) a string or symbol
-.str.removeprefix:{[s;prefix]
-    s:.str.i.text s;
+/ text without one leading prefix, unchanged when it does not start with it.
+/ @eg .str.removeprefix["v1.2";"v"]
+.str.removeprefix:{[text;prefix]
+    text:.str.i.text text;
     prefix:.str.i.text prefix;
-    $[0h=type s; .z.s[;prefix] each s; .str.startswith[s;prefix]; (count prefix)_ s; s]};
+    $[0h=type text; .z.s[;prefix] each text; .str.startswith[text;prefix]; (count prefix)_ text; text]};
 
-/ s without a trailing suffix, or s unchanged when it does not end with one.  Only ONE copy is removed.
-/ @param s (any) a string, a symbol, or a list of either
-/ @param suffix (any) a string or symbol
-.str.removesuffix:{[s;suffix]
-    s:.str.i.text s;
+/ text without one trailing suffix, unchanged when it does not end with it.
+.str.removesuffix:{[text;suffix]
+    text:.str.i.text text;
     suffix:.str.i.text suffix;
-    $[0h=type s; .z.s[;suffix] each s; .str.endswith[s;suffix]; (neg count suffix)_ s; s]};
+    $[0h=type text; .z.s[;suffix] each text; .str.endswith[text;suffix]; (neg count suffix)_ text; text]};
 
-/ THE message gate: a plain string only gets its doubled delimiter unescaped, its conversions NEVER read.
+/ @ignore
 .str.i.msg:{[msg;engine;unescape]
     $[10h=type msg; unescape msg;
       (0h=type msg) and 10h=type first msg; engine msg;
       '`type]};
 
-/ C-style formatting.  Grammar and semantics are DuckDB's, so `%'d` groups with an APOSTROPHE and a comma is
-/ spelled `%,d`; the q supersets are `%r`, a permissive `%s`, and typed nulls rendering their q display.
-/ @param msg (any) a format string, or a general list of one plus its arguments
+/ C-style formatting (DuckDB's printf grammar): %d %s %.2f %'d groups thousands, %,d spells the comma; %r renders
+/ any q value; a plain string only has %% unescaped.
+/ @param msg a format string, or a list of one plus its arguments
+/ @eg .str.printf ("%s: %'d rows in %.1fs";"trade";1234567;0.25)
 .str.printf:{[msg] .str.i.msg[msg; .str.i.printf; ssr[;"%%";"%"]]};
 
-/ Python-style formatting, same message shape and same DuckDB engine: {} {0} {:>8.2f} {:,}.
-/ @param msg (any) a format string, or a general list of one plus its arguments
+/ Python-style formatting (DuckDB's format grammar): {} {0} {:>8.2f} {:,}; a plain string only has {{ }} unescaped.
+/ @param msg a format string, or a list of one plus its arguments
+/ @eg .str.format ("{:>6}|{:,}";"ab";1234567)
 .str.format:{[msg] .str.i.msg[msg; .str.i.format; {ssr[ssr[x;"{{";"{"];"}}";"}"]}]};
 
-/ is every character a letter, and is there at least one?
-/ @param s (any) a string, a symbol, or a list of either
-.str.isalpha:{[s]
-    s:.str.i.text s;
-    $[0h=type s; .z.s each s; .str.i.all_in[s;.Q.a,.Q.A]]};
+/ Is every character a letter, and is there at least one?
+.str.isalpha:{[text]
+    text:.str.i.text text;
+    $[0h=type text; .z.s each text; .str.i.all_in[text;.Q.a,.Q.A]]};
 
-/ is every character a digit, and is there at least one?
-/ @param s (any) a string, a symbol, or a list of either
-.str.isdigit:{[s]
-    s:.str.i.text s;
-    $[0h=type s; .z.s each s; .str.i.all_in[s;.Q.n]]};
+/ Is every character a digit, and is there at least one?
+.str.isdigit:{[text]
+    text:.str.i.text text;
+    $[0h=type text; .z.s each text; .str.i.all_in[text;.Q.n]]};
 
-/ is every character a letter or a digit, and is there at least one?  NOT .Q.an, which is the IDENTIFIER alphabet
-/ and admits "_" - .str.isalnum "a_b" is 0b.
-/ @param s (any) a string, a symbol, or a list of either
-.str.isalnum:{[s]
-    s:.str.i.text s;
-    $[0h=type s; .z.s each s; .str.i.all_in[s;.Q.a,.Q.A,.Q.n]]};
+/ Is every character a letter or a digit, and is there at least one?  "_" is neither.
+.str.isalnum:{[text]
+    text:.str.i.text text;
+    $[0h=type text; .z.s each text; .str.i.all_in[text;.Q.a,.Q.A,.Q.n]]};
 
-/ is every character one of " \t\n\r", and is there at least one?
-/ @param s (any) a string, a symbol, or a list of either
-.str.isspace:{[s]
-    s:.str.i.text s;
-    $[0h=type s; .z.s each s; .str.i.all_in[s;" \t\n\r"]]};
+/ Is every character whitespace, and is there at least one?
+.str.isspace:{[text]
+    text:.str.i.text text;
+    $[0h=type text; .z.s each text; .str.i.all_in[text;" \t\n\r"]]};
 
-/ is every CASED character upper case, and is there at least one?  Uncased characters are ignored, so "ABC1" is 1b.
-/ @param s (any) a string, a symbol, or a list of either
-.str.isupper:{[s]
-    s:.str.i.text s;
-    $[0h=type s; .z.s each s; .str.i.cased_in[s;.Q.A]]};
+/ Is every cased character upper case, and is there at least one?  "ABC1" is 1b.
+.str.isupper:{[text]
+    text:.str.i.text text;
+    $[0h=type text; .z.s each text; .str.i.cased_in[text;.Q.A]]};
 
-/ is every CASED character lower case, and is there at least one?  Uncased characters are ignored, so "abc1" is 1b.
-/ @param s (any) a string, a symbol, or a list of either
-.str.islower:{[s]
-    s:.str.i.text s;
-    $[0h=type s; .z.s each s; .str.i.cased_in[s;.Q.a]]};
+/ Is every cased character lower case, and is there at least one?  "abc1" is 1b.
+.str.islower:{[text]
+    text:.str.i.text text;
+    $[0h=type text; .z.s each text; .str.i.cased_in[text;.Q.a]]};
