@@ -1,3 +1,4 @@
+/ @ignore
 / help-db.q - the BUILTIN help database: one .help.i.r registration per builtin
 / name, generated from lib/help-builtins.tsv, then the page entries and help.q's
 / own public names by hand.  Split out of src/qlang/help.q so the always-on
