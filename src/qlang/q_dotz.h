@@ -61,6 +61,10 @@ const char* q_dotz_script_path(void);
  * this to suppress the interactive startup banner.  Valid after q_dotz_init. */
 bool q_dotz_quiet(void);
 
+/* Whether the launcher was given `flag` as a FLAG (not as another flag's value) — the one arity-aware argv
+ * probe, usable before q_dotz_init: qmain's `-conn` mode switch. */
+bool q_dotz_has_flag(int argc, char** argv, const char* flag);
+
 /* Wall clock in ns since the rayforce epoch (2000.01.01), UTC (local=0) or
  * local (local=1).  THE portable CLOCK_REALTIME home — Windows has no
  * clock_gettime, so every wall-clock reader in the q layer comes through here. */

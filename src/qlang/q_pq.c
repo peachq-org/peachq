@@ -14,6 +14,7 @@
 #include "qlang/io/q_conn.h"   /* q_conn_pq_register — the .pq.i.conns native */
 #include "qlang/io/q_provider.h" /* q_provider_pq_register — the .pq.i.load native */
 #include "qlang/q_console.h"   /* q_console_pq_register — the .pq.i.termsize native */
+#include "qlang/q_fmt.h"       /* q_fmt_pq_register — the .pq.i.facts native */
 #include "qlang/io/q_csv.h"    /* q_csv_register — the .csv.i.* natives */
 #include "qlang/io/q_json.h"  /* q_json_register — the .j.i.* natives */
 #include "qlang/io/q_ffi.h"    /* q_ffi_register — the .ffi.i.* natives */
@@ -72,6 +73,7 @@ ray_t* q_pq_load(void) {
     q_conn_pq_register();
     q_provider_pq_register();
     q_console_pq_register();
+    q_fmt_pq_register();
     q_ffi_register();
     q_termbox_register();
     q_beep_register();
