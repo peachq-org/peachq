@@ -1,7 +1,7 @@
 # The command line
 
 This page is the one home for how you launch peachq: every option the `q` binary takes, how each compares with kx q,
-and the two peachq-only flags for running q text at startup. The system commands you type once you are inside a
+the peachq-only flags for running q text at startup, and the `-conn` mode that runs it on another process. The system commands you type once you are inside a
 session have their own page: [System commands](syscmds.md).
 
 The general shape is kx's:
@@ -66,8 +66,11 @@ column names the system command that reads or sets the same thing at runtime, wh
 | `-eval "src"` | run q text **after** the startup script | **PEACHQ ONLY** | none |
 | `-eval-before "src"` | run q text **before** the startup script | **PEACHQ ONLY** | none |
 | `-duckdb path` | the main DuckDB database is this file, not memory; its tables load at startup (implies `\l pq`) | **PEACHQ ONLY** | none |
+| `-conn target` | run the file, `-eval` texts and stdin on a RUNNING q at any `hopen` target — a mode of its own, see below | **PEACHQ ONLY** | none |
+| `-save file` | with `-conn`: `set` the last result to this file, its ending choosing the format | **PEACHQ ONLY** | none |
+| `-ls` | with `-conn`: list the server's variables, tables first | **PEACHQ ONLY** | none |
 
-`-q`, `-L`, `-m`, `-eval`, `-eval-before` and `-duckdb` have no system-command equivalent.
+`-q`, `-L`, `-m`, `-eval`, `-eval-before`, `-duckdb`, `-conn`, `-save` and `-ls` have no system-command equivalent.
 
 ## `-duckdb`
 
@@ -116,6 +119,64 @@ non-terminal stdin exits 0, and a live listener serves. `-eval` does not imply "
 `exit 0` if that is what you want.
 
 Both flags are consumed by the launcher, so neither the flag nor its text appears in `.z.x`.
+
+## `-conn`: run q text on a running process
+
+```bash
+q [file.q] -conn target [-eval "src"]... [-save file] [-ls]
+```
+
+`-conn` sends q text to a q or peachq process that is already listening, the way an IDE does, and shows the answer
+here — no PTY, no persistent client, no escaping of your own beyond the shell's. It is **a mode, not a flag**: the only
+things it takes are the positional `file.q`, `-eval` (repeatable), piped stdin, `-save` and `-ls`. Every other `q`
+flag is an error — `q: -p is not valid with -conn`, exit 2 — because nothing runs locally: the local process boots,
+loads its standard library, connects, and everything you hand it is evaluated on the server.
+
+```bash
+q -conn :localhost:5000 -eval 'select from trade where sym=`AAPL'
+q setup.q -conn :localhost:5000                   # the file's text is one call, then each -eval, then stdin
+echo "count trade" | q -conn :localhost:5000
+q -conn :localhost:5000 -save out.parquet -eval 'trade'
+q -conn :localhost:5000 -ls
+```
+
+- **Target.** Anything `hopen` takes, passed through as written: all digits is a port (`-conn 5000`), anything
+  else the symbol — `:localhost:5000`, `::5000`, `:host:port:user:pass`, `:unix://…`, `:tcps://…`, even a `:pq:`
+  resource — with or without the leading backtick. Nothing is checked or added here: a target that opens but is
+  not a q process fails at the first call, with that call's error. The connection uses a 5-second timeout; a
+  refusal is `q: cannot connect to <target>: <hopen's error>`, exit 2.
+- **Ordering** is the local process's: the file's whole text as ONE call, then each `-eval` text as one call, then
+  piped stdin one call per line (blank lines run nothing). Multi-line text — a file, or an `-eval` with newlines —
+  runs as a script on the server: statement by statement, the last statement's value comes back.
+- **Display.** The value of each call is shown as the console would show it: a table as the pipe table, clipped to
+  `\c` rows with the `... (showing first n of N rows)` line and the per-column summary (`px=1-3. sym=all distinct.`)
+  under it; anything else in the usual form. On a terminal the console is the terminal's size; when stdout is a
+  pipe or a file the rows stay 25 but the WIDTH is unbounded, so every column reaches the reader. stdout carries only
+  values; notices and errors go to stderr. A server that answers by deferred reply (a TorQ gateway) hands back the
+  value itself rather than the wrapper's reply; it is shown, recorded and saved like any value.
+- **What is not captured.** Only the value of the last expression comes back. Anything the server itself prints —
+  `show`, `0N!`, `-1` — lands on the server's console, not here.
+- **`-save file`** evaluates as usual and `set`s the LAST call's value to the file, the ending choosing the format:
+  `.csv`, `.json`, `.parquet`, anything else kdb binary. Earlier calls run silently, as a script's non-final
+  statements do. A result over the 10 MB display gate (below) is refused rather than saved as display text.
+- **`-ls`** lists every variable on the server, whole, regardless of the console size: one block per namespace
+  (root `.` first, the rest sorted), each variable as `name type count columns` (and `view` where it is one), tables
+  first within the block; the language's own namespaces (`.Q .q .h .j .help .pq`) are left out.
+- **Exit codes.** 0 on success; 1 on a remote `'error`, which stops at the first erroring call as a failing script
+  would, the error class on stderr (`'type`); 2 on bad arguments or no connection.
+- **The wire.** Each call is the qStudio evaluation wrapper, sent byte-identical (some sites recognise its prefix),
+  so any q server that accepts qStudio accepts this. The wrapper carries qStudio's 10 MB size gate: a larger result
+  arrives as its console text only, with a notice on stderr, and is not saved.
+
+### Query history: `~/.qhist.d/`
+
+Every call is recorded under `~/.qhist.d/<host>_<port>/` (`HOME`, or `USERPROFILE` on Windows; credentials never
+reach a path): `index.tsv` keeps the last 200 calls — timestamp, `ok`/`fail`/`oversize`, the error text, serialised
+bytes, rows, and the query flattened to one line of at most 200 characters — and the last 10 results are kept as
+`<yyyymmdd_hhmmss_mmm>.bin`, the `-8!` bytes of the VALUE, at most 100 MB in all, the oldest evicted first. When the
+display hid part of a table — rows beyond the console's height, columns beyond its width — it ends with
+`Full result saved locally to kdb binary: <path>` on stderr, so `-9!read1 `:<path>` gives the whole result back; a
+table shown whole is the full result and gets no notice, though its `.bin` is written and indexed all the same. `PEACHQ_QHIST=/some/dir` relocates the root; `PEACHQ_QHIST=` (set and empty) turns the history off.
 
 # Notes for dev
 

@@ -235,33 +235,23 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
     return ctx_line(s, n, out, err, print_result, 0, NULL);
 }
 
-/* The script runner reads BYTES — `\l file` arrives through the q_io byte core
- * and the embedded stdlib bundle (`\l pq`) is already a string, so one
- * multiline law serves both with no second file-reading stack. */
-static int ctx_run_script(const char* src, size_t len, int64_t file_sym, int print_result,
-                          FILE* out, FILE* err, ray_t** esig) {
+/* THE multiline law as ONE walker every text door rides — the script runner
+ * (prints) and the value door (answers).  Yields each logical line, NUL-
+ * terminated, to `fn`; the first non-zero return stops the walk and is the
+ * walker's own.  It reads BYTES — `\l file` arrives through the q_io byte core
+ * and the embedded stdlib bundle (`\l pq`) is already a string, so one law
+ * serves both with no second file-reading stack. */
+typedef int (*ctx_stmt_fn)(const char* s, size_t n, void* u);
+
+static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, ctx_stmt_fn fn, void* u) {
     if (!src) { src = ""; len = 0; }     /* an empty read owns no buffer; `src + len` must stay defined */
 
     /* ONE logical line, joined.  Bounded by the SOURCE: a physical line adds
      * its own trimmed bytes plus at most the '\n' its own newline already paid
      * for.  Heap, not static — a loaded script may `\l` another while this one
-     * still holds the line that invoked it.  Allocated before any global state
-     * is touched, so the failure exit has nothing to restore. */
+     * still holds the line that invoked it. */
     char* acc = (char*)ray_sys_alloc(len + 2);
-    if (!acc) return 2 + (int)QE_OOM;
-
-    /* OWNER RULING 2026-08-06: a load SAVES the caller's `\d` context and
-     * RESTORES it when the file runs to completion; a load that ABORTS leaves
-     * the context where the error left it (deliberate — that is what makes the
-     * failing namespace inspectable; a trap that catches the abort restores it,
-     * 2026-09-17).  Every door rides this seam: `\l`, `system "l …"`, `-f`. */
-    int64_t saved_ctx = q_env_ctx();
-
-    /* A load runs at TOP LEVEL (owner ruling 2026-08-11): suspend the caller's
-     * frames (env read floor + apply write floor), restored on EVERY exit,
-     * aborts included — unlike `\d`, lost locals are never inspectable state. */
-    int     saved_floor  = q_eval_apply_frame_floor(-1);
-    int32_t saved_ffloor = q_env_frame_floor(-1);
+    if (!acc) return 1 + (int)QE_OOM;
 
     /* kdb script semantics (learn/startingkdb/language.md):
      *  - an INDENTED line CONTINUES the previous logical line;
@@ -292,7 +282,7 @@ static int ctx_run_script(const char* src, size_t len, int64_t file_sym, int pri
      * console the eval error may first SUSPEND into the debugger — ctx_line's
      * load seam — and a `:r` resume continues the load instead of aborting. */
     int lrc = 0;
-    #define FLUSH() do { if (alen) { lrc = ctx_line(acc, alen, out, err, print_result, 1, esig); alen = 0; } } while (0)
+    #define FLUSH() do { if (alen) { lrc = fn(acc, alen, u); alen = 0; } } while (0)
 
     while (p < pend) {
         const char* line = p;
@@ -340,13 +330,60 @@ static int ctx_run_script(const char* src, size_t len, int64_t file_sym, int pri
     if (!lrc) FLUSH();                             /* eval any pending logical line (incl. before a lone \) */
     #undef FLUSH
     q_comment_script_end(dsaved);
+    ray_sys_free(acc);
+    return lrc;
+}
+
+typedef struct { FILE* out; FILE* err; int print_result; ray_t** esig; } ctx_load_t;
+
+static int ctx_load_stmt(const char* s, size_t n, void* u) {
+    ctx_load_t* ld = (ctx_load_t*)u;
+    return ctx_line(s, n, ld->out, ld->err, ld->print_result, 1, ld->esig);
+}
+
+static int ctx_run_script(const char* src, size_t len, int64_t file_sym, int print_result,
+                          FILE* out, FILE* err, ray_t** esig) {
+    /* OWNER RULING 2026-08-06: a load SAVES the caller's `\d` context and
+     * RESTORES it when the file runs to completion; a load that ABORTS leaves
+     * the context where the error left it (deliberate — that is what makes the
+     * failing namespace inspectable; a trap that catches the abort restores it,
+     * 2026-09-17).  Every door rides this seam: `\l`, `system "l …"`, `-f`. */
+    int64_t saved_ctx = q_env_ctx();
+
+    /* A load runs at TOP LEVEL (owner ruling 2026-08-11): suspend the caller's
+     * frames (env read floor + apply write floor), restored on EVERY exit,
+     * aborts included — unlike `\d`, lost locals are never inspectable state. */
+    int     saved_floor  = q_eval_apply_frame_floor(-1);
+    int32_t saved_ffloor = q_env_frame_floor(-1);
+
+    ctx_load_t ld  = { out, err, print_result, esig };
+    int        lrc = ctx_walk_script(src, len, file_sym, ctx_load_stmt, &ld);
 
     q_env_frame_floor(saved_ffloor);
     q_eval_apply_frame_floor(saved_floor);
     if (!lrc) q_env_ctx_set(saved_ctx);            /* completed: caller's `\d` back */
     if (lrc && esig && *esig) q_dbg_mark_reported(*esig);
-    ray_sys_free(acc);
     return lrc ? 1 + lrc : 0;
+}
+
+/* The value door's line: keep the latest answer, stop at the first error. */
+static int ctx_eval_stmt(const char* s, size_t n, void* u) {
+    ray_t** last = (ray_t**)u;
+    ray_t*  r    = q_eval_statement(s, NULL);
+    if (ray_is_lazy(r)) r = ray_lazy_materialize(r);
+    q_comment_stmt_end();                      /* a definition's header leaves with its statement, as in a load */
+    if (*last) ray_release(*last);
+    *last = r;
+    return RAY_IS_ERR(r) ? 1 : 0;
+}
+
+ray_t* q_ctx_eval_src(const char* s, size_t n) {
+    ray_t* last = NULL;
+    int    rc   = ctx_walk_script(s, n, 0, ctx_eval_stmt, &last);
+    if (last) return last;
+    if (rc) return q_err(QE_OOM);          /* the one non-statement stop: the walker's own buffer */
+    ray_retain(RAY_NULL_OBJ);              /* no statement ran: what an assignment answers */
+    return RAY_NULL_OBJ;
 }
 
 int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig) {
@@ -407,22 +444,16 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
     /* OWNER RULING 2026-08-10: a request obeys ctx_run_script's law — restore the `\d`
      * context on success (no client parks a shared server), leave it where an abort left it. */
     int64_t saved_ctx = q_env_ctx();
-    char* tmp = (char*)ray_sys_alloc(len + 1);
-    if (!tmp) return q_err(QE_OOM);
-    memcpy(tmp, src, len);
-    tmp[len] = '\0';
     /* remote statements suspend only under `\e 1`; the seam always gives a
      * remote .Q.trp its `[0]` frame */
-    int dbg_prev = q_dbg_statement_begin(tmp, len, remote_console());
-    /* Remote source text is a STATEMENT like any other, so the assignment law
-     * and the view intercept both come from the one home — basics/ipc.md's
-     * `h"fn:{2+x}"` displays nothing because `value` answers nothing, not
-     * because the wire silences it.  A parse error needs no arm of its own here
-     * (it propagates as the -128h answer); only the `\e 2` dump is this door's. */
-    ray_t* r = q_eval_statement(tmp, NULL);
-    ray_sys_free(tmp);
-    if (ray_is_lazy(r))
-        r = ray_lazy_materialize(r);
+    int dbg_prev = q_dbg_statement_begin(src, len, remote_console());
+    /* Remote source text is a SCRIPT like any other text (owner ruling
+     * 2026-09-20): the assignment law and the view intercept come from the one
+     * home — basics/ipc.md's `h"fn:{2+x}"` displays nothing because `value`
+     * answers nothing, not because the wire silences it.  A parse error needs
+     * no arm of its own here (it propagates as the -128h answer); only the
+     * `\e 2` dump is this door's. */
+    ray_t* r = q_ctx_eval_src(src, len);
     { const char* con = q_console_str();
       if (con && *con) fputs(con, stdout);
       q_console_reset(); }

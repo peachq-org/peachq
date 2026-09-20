@@ -14,7 +14,9 @@
 #include "qlang/net/q_tls.h"  /* q_tls_server_mode_set — the `-E` TLS server mode */
 #include "qlang/parse/q_tok.h" /* q_tok_date_order_set — the `-z` date order */
 #include "qlang/io/q_duckdb.h" /* q_duckdb_main_path_set — the `-duckdb` main database file */
-#include "qlang/io/q_io.h"     /* q_io_abs_path — the tty startup `\l` names the script's full path */
+#include "qlang/io/q_io.h"     /* q_io_abs_path — the tty startup `\l` names the script's full path; q_io_read_slice — the -conn file */
+#include "qlang/q_env.h"       /* q_env_set — the -conn texts bound as q values */
+#include "qlang/base/q_err.h"  /* q_err_drop — an unreadable -conn file */
 #include "core/poll.h"
 #include "core/ipc.h"          /* ray_ipc_auth_file_load — the `-u`/`-U` password file */
 #include "core/runtime.h"
@@ -40,7 +42,130 @@ static int parse_port_spec(const char* s, uint16_t* out) {
     return 1;
 }
 
+/* ---- `-conn`: the remote runner (owner ruling 2026-09-20) -------------------------------------------------------
+ * A MODE with no flag in common with the local launcher: C parses argv, boots the runtime, loads the standard
+ * library and composes CALLS to .pq.i.conn_* through the script seam; every display, history, error shape and exit
+ * is q's (lib/pq.q).  The texts (the file, each -eval, each stdin line) are bound as q values rather than spliced
+ * into source, so no escaping happens here.  Exit codes: 2 bad arguments or no connection, 1 a remote error (the
+ * q side `exit`s, as a failing script would), 0 otherwise. */
+static void conn_bind(const char* name, const char* s, size_t n) {
+    ray_t* v = ray_charv(s, (int64_t)n);
+    q_env_set(ray_sym_intern_runtime(name, strlen(name)), v);
+    ray_release(v);
+}
+
+/* One text as one .pq.i.conn_call: two statements, so the console drains the display before the notice. */
+static int conn_call(const char* src, size_t n, const char* save, int last) {
+    conn_bind(".pq.i.conn_src", src, n);
+    conn_bind(".pq.i.conn_file", save ? save : "", save ? strlen(save) : 0);
+    const char* call = last ? ".pq.i.conn_p:.pq.i.conn_call[.pq.i.conn_h;.pq.i.conn_src;.pq.i.conn_file;1b]\n"
+                              ".pq.i.conn_notice .pq.i.conn_p"
+                            : ".pq.i.conn_p:.pq.i.conn_call[.pq.i.conn_h;.pq.i.conn_src;.pq.i.conn_file;0b]\n"
+                              ".pq.i.conn_notice .pq.i.conn_p";
+    return q_ctx_run_src(call, stdout, stderr, NULL) ? 1 : 0;
+}
+
+/* The gathered texts: the file's bytes (owned), then argv pointers, then stdin lines (owned copies). */
+typedef struct { const char** p; size_t* len; size_t n, cap, nstd; ray_t* file; } conn_texts;
+
+static void conn_texts_free(conn_texts* t) {
+    for (size_t i = t->n - t->nstd; i < t->n; i++) free((char*)t->p[i]);
+    free(t->p);
+    free(t->len);
+    if (t->file) ray_release(t->file);
+}
+
+static int conn_main(int argc, char** argv) {
+    const char* target = NULL;
+    const char* script = NULL;
+    const char* save   = NULL;
+    bool        ls     = false;
+    int         n_eval = 0;
+    for (int i = 1; i < argc; i++) {
+        const char* a = argv[i];
+        int value = strcmp(a, "-conn") == 0 || strcmp(a, "-eval") == 0 || strcmp(a, "-save") == 0;
+        if (value && i + 1 >= argc) { fprintf(stderr, "q: %s requires an argument\n", a); return 2; }
+        if      (strcmp(a, "-conn") == 0) target = argv[++i];    /* the mode switch: never a value here */
+        else if (strcmp(a, "-eval") == 0) { n_eval++; i++; }
+        else if (strcmp(a, "-save") == 0) save = argv[++i];
+        else if (strcmp(a, "-ls") == 0)   ls = true;
+        else if (a[0] == '-') { fprintf(stderr, "q: %s is not valid with -conn\n", a); return 2; }
+        else if (!script && strlen(a) > 2 && strcmp(a + strlen(a) - 2, ".q") == 0) script = a;
+        else { fprintf(stderr, "q: unexpected argument '%s' with -conn\n", a); return 2; }
+    }
+    if (target[0] == '`') target++;               /* the rest is hopen's, exactly as written (owner ruling) */
+    int stdin_tty = isatty(STDIN_FILENO);
+    if (!script && !n_eval && !ls && stdin_tty) { fprintf(stderr, "q: -conn needs a file, -eval, -ls or piped stdin\n"); return 2; }
+
+    /* The texts in the local process's order — the file's whole text, each -eval, then each stdin line — gathered
+     * first because `-save` takes the LAST one's value.  A blank stdin line runs nothing, as at the console. */
+    conn_texts t = { calloc((size_t)argc + 1, sizeof *t.p), calloc((size_t)argc + 1, sizeof *t.len),
+                     0, (size_t)argc + 1, 0, NULL };
+    ray_runtime_t* rt = NULL;
+    int            rc = 0;
+    if (!t.p || !t.len) { fprintf(stderr, "q: out of memory\n"); rc = 1; goto done; }
+    if (script) {
+        ray_t* pathv = ray_str(script, strlen(script));
+        t.file = pathv ? q_io_read_slice(pathv, 0, -1, NULL) : NULL;
+        if (pathv) ray_release(pathv);
+        if (!t.file || RAY_IS_ERR(t.file)) {
+            if (t.file) { q_err_drop(); ray_error_free(t.file); t.file = NULL; }
+            fprintf(stderr, "q: cannot open script '%s'\n", script);
+            rc = 2;
+            goto done;
+        }
+        t.p[t.n] = (const char*)ray_data(t.file);
+        t.len[t.n++] = (size_t)q_count(t.file);
+    }
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-eval") == 0) { t.p[t.n] = argv[++i]; t.len[t.n++] = strlen(argv[i]); }
+        else if (strcmp(argv[i], "-conn") == 0 || strcmp(argv[i], "-save") == 0) i++;
+    }
+    char line[4096];                          /* the piped console's line buffer, q_repl.c */
+    while (!stdin_tty && fgets(line, sizeof line, stdin)) {
+        size_t len = strlen(line);
+        while (len && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
+        if (strspn(line, " \t") == len) continue;
+        if (t.n == t.cap) {
+            const char** np = realloc(t.p, 2 * t.cap * sizeof *t.p);
+            size_t*      nl = realloc(t.len, 2 * t.cap * sizeof *t.len);
+            if (np) t.p = np;
+            if (nl) t.len = nl;
+            if (!np || !nl) { fprintf(stderr, "q: out of memory\n"); rc = 1; goto done; }
+            t.cap *= 2;
+        }
+        t.p[t.n] = strdup(line);
+        t.len[t.n++] = len;
+        t.nstd++;
+    }
+    if (save && !t.n) { fprintf(stderr, "q: -save needs a query to save\n"); rc = 2; goto done; }
+
+    rt = q_runtime_create(argc, argv);
+    if (!rt) { fprintf(stderr, "runtime init failed\n"); rc = 1; goto done; }
+    q_sys_own_process(true);
+    ray_poll_t* poll = ray_poll_create();
+    if (poll) ray_runtime_set_poll(poll);
+    q_console_pipe_enable();                  /* the local console's display, as `q` itself shows a table */
+    q_console_clip_set(25, isatty(STDOUT_FILENO) ? NULL_I64 : 2000);   /* a pipe gets every column */
+    const char* qh = getenv("PEACHQ_QHIST");  /* set-but-empty is the off switch q cannot see through getenv */
+    if (q_ctx_run_src("\\l pq", stdout, stderr, NULL) ||
+        (qh && !*qh && q_ctx_run_src(".pq.i.QHIST:\"\"", stdout, stderr, NULL))) { rc = 1; goto done; }
+    conn_bind(".pq.i.conn_target", target, strlen(target));
+    if (q_ctx_run_src(".pq.i.conn_h:.pq.i.conn_open .pq.i.conn_target", stdout, stderr, NULL)) { rc = 2; goto done; }
+
+    for (size_t i = 0; i < t.n && !rc; i++)
+        rc = conn_call(t.p[i], t.len[i], save, i + 1 == t.n);
+    if (!rc && ls) rc = q_ctx_run_src(".pq.i.conn_ls .pq.i.conn_h", stdout, stderr, NULL) ? 1 : 0;
+    q_ctx_run_src("hclose .pq.i.conn_h", stdout, stderr, NULL);
+done:
+    conn_texts_free(&t);
+    if (rt) q_sys_exit(rc);                   /* the exit home once a runtime exists: .z.exit fires, as `q` itself */
+    return rc;
+}
+
 int main(int argc, char** argv) {
+    if (q_dotz_has_flag(argc, argv, "-conn")) return conn_main(argc, argv);
+
     uint16_t    port = 0;
     bool        have_port = false;
     bool        port_auto = false;
