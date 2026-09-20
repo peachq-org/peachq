@@ -256,11 +256,12 @@
 .help.cmdline:([]
   option:("-b";"-c r c";"-C r c";"-e 0|1|2";"-E 0|1|2";"-g 0|1";"-l";"-L";"-m path";"-o N";"-p N";"-P N";"-q";
           "-r :h:p";"-s N";"-S N";"-t N";"-T N";"-u file";"-U file";"-w N";"-W N";"-z 0|1";
-          "-classic";"-eval \"src\"";"-eval-before \"src\"";"-h | --help";"--port N";"-duckdb path");
+          "-classic";"-eval \"src\"";"-eval-before \"src\"";"-h | --help";"--port N";"-duckdb path";
+          "-conn target";"-save file";"-ls");
   syscmd:`$("\\_";"\\c";"\\C";"\\e";"\\E";"\\g";"";"";"";"\\o";"\\p";"\\P";"";"\\r";"\\s";"\\S";"\\t";"\\T";"\\u";
-            "";"";"\\W";"\\z";"\\classic";"";"";"\\?cmdline";"\\p";"");
-  supported:01011000001010000011001111111b;
-  new:      00000000000000000000000111111b;
+            "";"";"\\W";"\\z";"\\classic";"";"";"\\?cmdline";"\\p";"";"";"";"");
+  supported:01011000001010000011001111111111b;
+  new:      00000000000000000000000111111111b;
   what:("block client write-access";"console size: rows and columns";"HTTP display size";
         "error-trap mode for client evals";"TLS server mode: 0 plain, 1 plain and TLS, 2 TLS only";"garbage-collection mode";
         "log updates to a file";"as -l, synchronous";"memory domain";"offset from UTC in hours";
@@ -271,7 +272,10 @@
         "kx-classic mode: legacy table display, kdb-clean environment";
         "run q text after the startup script";"run q text before the startup script";
         "print this table and exit";"the long spelling of -p";
-        "the main DuckDB database is this file, not memory: \\?duckdb"))
+        "the main DuckDB database is this file, not memory: \\?duckdb";
+        "run the file, -eval texts and stdin on a RUNNING q at any hopen target; no other flag applies";
+        "with -conn: set the last result to this file, its ending choosing csv, json, parquet or kdb binary";
+        "with -conn: list every variable on the server by namespace, tables first, whole"))
 
 / .help.cmdline as page lines: `q -flag`, then the marker (- not supported,
 / * peachq only) and the \ command, then the meaning - padded as a table.
@@ -284,7 +288,21 @@
 / `q -h`: the command-line page from this file alone - the builtin help db is
 / never loaded for it, so it answers at boot speed.
 .help.usage:{[]
-  -1 "\n" sv (enlist "usage: q [file.q] [-option [parameters] ...]"),("  ",/:.help.i.pages[`cmdline;`blurb]),(enlist ""),"  ",/:.help.i.clip .help.i.cmdlines[];}
+  -1 "\n" sv (enlist "usage: q [file.q] [-option [parameters] ...]"),("  ",/:.help.i.pages[`cmdline;`blurb]),(enlist ""),
+    ("  ",/:.help.i.clip .help.i.cmdlines[]),(enlist ""),"  ",/:.help.i.CONNLINES;}
+
+/ the -conn section of `q -h`: the remote runner by example, and the one thing it cannot show.
+.help.i.CONNLINES:
+  ("q [file.q] -conn target [-eval \"src\"]... [-save file] [-ls]  runs on a live q; nothing runs here";
+   "  target is anything hopen takes, as written: 5000, :localhost:5000, :host:port:user:pass, :unix://...";
+   "  q -conn :localhost:5000 -eval 'select from trade where sym=`AAPL'";
+   "  q setup.q -conn :localhost:5000                 the file's text is one call, then each -eval, then stdin";
+   "  echo \"count trade\" | q -conn :localhost:5000";
+   "  q -conn :localhost:5000 -save out.parquet -eval 'trade'";
+   "  q -conn :localhost:5000 -ls";
+   "  the last expression's value comes back; the server's own show/0N!/-1 output stays on its console";
+   "  every result is kept under ~/.qhist.d/host_port/ (PEACHQ_QHIST= turns it off); exit 1 on a remote error";
+   "  a piped stdout gets every column; a table the console clipped names its saved .bin on stderr");
 
 / the one-line summary for a name - the first line of its lead description,
 / else of the header of the file documenting it as a NAMESPACE (so a bare

@@ -111,6 +111,8 @@ static int flag_kind(const char* s) {
     if (strcmp(s, "-p") == 0 || strcmp(s, "--port") == 0 ||
         strcmp(s, "-u") == 0 || strcmp(s, "-U") == 0) return Q_FLAG_VALUE;
     if (strcmp(s, "-eval") == 0 || strcmp(s, "-eval-before") == 0 || strcmp(s, "-duckdb") == 0) return Q_FLAG_VALUE;
+    if (strcmp(s, "-conn") == 0 || strcmp(s, "-save") == 0) return Q_FLAG_VALUE;   /* the -conn mode's own */
+    if (strcmp(s, "-ls") == 0) return Q_FLAG_BOOL;
     return Q_FLAG_NONE;
 }
 
@@ -430,6 +432,14 @@ void q_dotz_init(int argc, char** argv) {
 }
 
 bool q_dotz_quiet(void) { return g_quiet; }
+
+bool q_dotz_has_flag(int argc, char** argv, const char* flag) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], flag) == 0) return true;
+        if (flag_kind(argv[i]) == Q_FLAG_VALUE) i++;
+    }
+    return false;
+}
 
 const char* q_dotz_script_path(void) {
     return g_script_idx < 0 ? NULL : g_argv[g_script_idx];

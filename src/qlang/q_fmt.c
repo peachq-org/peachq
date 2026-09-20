@@ -15,6 +15,8 @@
 #include "qlang/io/q_provider.h" /* a provider carrier displays as provider truth */
 #include "lang/format.h"   /* ray_fmt */
 #include "lang/eval.h"     /* ray_at_fn — dict/table element access */
+#include "lang/env.h"      /* ray_fn_unary — the .pq.i.facts native */
+#include "qlang/q_env.h"   /* q_env_bind — the .pq.i.facts native */
 #include "lang/internal.h" /* is_collection — THE boxed-list-or-typed-vector predicate */
 #include "ops/hash.h"    /* ray_hash_bytes — pipe digest distinct keys */
 #include "core/types.h"  /* ray_elem_size — pipe digest */
@@ -1244,6 +1246,36 @@ static int qp_digest(qp_col* cs, int64_t nc, int64_t nr, int32_t cols,
         break;
     }
     return lines[1][0] ? 2 : 1;
+}
+
+/* `.pq.i.facts[t]` — the digest's facts as q strings, one per column, uncapped
+ * and unwrapped: `.pq.summary` joins them, so a summary can never drift from
+ * what the console digest says. */
+static ray_t* qp_facts_fn(ray_t* t) {
+    if (!fmt_pipe_is_table(t)) return q_err(QE_TYPE);
+    int64_t max = t->type == RAY_TABLE ? ray_table_ncols(t)
+                : ray_table_ncols(ray_dict_keys(t)) + ray_table_ncols(ray_dict_vals(t));   /* every column, no display cap */
+    qp_col* cs = calloc((size_t)(max > 0 ? max : 1), sizeof *cs);
+    if (!cs) return q_err(QE_WSFULL);
+    int64_t nr = 0, nk = 0;
+    int64_t nc  = qp_gather(t, cs, max, &nr, &nk);
+    ray_t*  out = ray_list_new(nc > 0 ? nc : 1);
+    char    tok[QP_CELL * 6];
+    for (int64_t c = 0; c < nc; c++) {
+        qp_fact(&cs[c], nr, tok, sizeof tok);
+        ray_t* s = ray_charv(tok, (int64_t)strlen(tok));
+        out = ray_list_append(out, s);
+        ray_release(s);
+    }
+    free(cs);
+    return out;
+}
+
+void q_fmt_pq_register(void) {
+    static const char nm[] = ".pq.i.facts";
+    ray_t* obj = ray_fn_unary(nm, RAY_FN_NONE, qp_facts_fn);
+    q_env_bind(ray_sym_intern(nm, strlen(nm)), obj);
+    ray_release(obj);
 }
 
 /* ---- render -------------------------------------------------------------- */

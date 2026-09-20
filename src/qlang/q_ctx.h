@@ -47,6 +47,15 @@ int q_ctx_run_src(const char* s, FILE* out, FILE* err, ray_t** esig);
  * file would. */
 int q_ctx_run_named_src(const char* name, const char* s, FILE* out, FILE* err, ray_t** esig);
 
+/* Text under the SAME multiline law, ANSWERING instead of printing: the value
+ * of the last statement (owned; an assignment's is `::`, as is an empty text),
+ * or the first erroring statement's error, the statements after it never run.
+ * `value` of a string and the IPC source-text door are this door (owner ruling
+ * 2026-09-20: kdb's `value` is script-aware).  Nothing is echoed and no console
+ * drain happens here — the caller's statement seam owns both, as it owns the
+ * `\d` and frame-floor policy. */
+ray_t* q_ctx_eval_src(const char* s, size_t n);
+
 /* q_ctx_run_src as a CONSOLE-initiated load — the tty's startup texts (`\l file`,
  * the `-eval` texts): silent and multiline as any script, but its statements
  * suspend into the debugger the way a typed `\l`'s do, so `:`/`\` resume or
