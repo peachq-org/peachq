@@ -15,6 +15,8 @@
 / .termbox.shutdown[]
 / e`name
 
+.pq.load_natives`termbox;
+
 / Take the terminal: raw input, the alternate screen, cursor hidden.
 / @throws os stdin/stdout is not a terminal
 / @throws domain a session is already open

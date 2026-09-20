@@ -69,11 +69,13 @@ static void comment_drop_pending(void) {
 
 void q_comment_boot(int on) { g_boot = on; }
 
+/* The outer run and header ride the saved state because a statement is evaluated only when the NEXT one
+ * arrives: a `\l` runs while the comment run of the definition after it is already in hand. */
 q_comment_script_t q_comment_script_begin(int64_t file_sym) {
-    q_comment_script_t saved = { g_file, g_stmt_line, g_seen_code,
-                                 g_file_run_done };
+    q_comment_script_t saved = { g_file, g_stmt_line, g_seen_code, g_file_run_done, g_pending_depth,
+                                 g_alen ? ray_charv(g_acc, (int64_t)g_alen) : NULL, g_pending };
     g_alen = 0;
-    comment_drop_pending();
+    g_pending = NULL;
     g_file = file_sym;
     g_stmt_line = 0;
     g_seen_code = 0;
@@ -94,6 +96,13 @@ void q_comment_script_end(q_comment_script_t saved) {
     g_seen_code = saved.seen_code;
     g_file_run = 0;
     g_file_run_done = saved.file_run_done;
+    g_pending = saved.pending;
+    g_pending_depth = saved.pending_depth;
+    if (saved.run) {
+        g_alen = (size_t)q_count(saved.run);
+        memcpy(g_acc, ray_data(saved.run), g_alen);
+        ray_release(saved.run);
+    }
 }
 
 void q_comment_line(const char* p, size_t n) {
