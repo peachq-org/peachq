@@ -39,6 +39,9 @@ char* q_fmt_console_alloc(ray_t* val, size_t* len);
 void q_fmt_set_prec(int p);
 int  q_fmt_prec(void);
 
+/* Bind `.pq.i.facts` — the pipe digest's per-column facts as strings — for `\l pq`. */
+void q_fmt_pq_register(void);
+
 /* THE q float->text leaf (`\P`-honouring; NaN -> 0n/0Ne; wholes within the \P
  * horizon print integral, past it exponent-form).  f32=1 renders DISPLAY reals
  * (`e` suffix, 0Ne null); q_string_fn passes f32=0 — string "results contain
