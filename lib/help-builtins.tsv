@@ -420,6 +420,13 @@ while	i:0;while[i<3;i+:1];i	repeat expressions while a condition holds
 .h.xmp	.h.xmp ("a";"b")	render lines inside an HTML xmp element
 .h.xs	.h.xs "a<b"	escape text for XML
 .h.xt	.h.xt[`json;enlist"{}"]	parse text of a given type into a value
+.pq.version	.pq.version	the peachq version string
+.pq.conns	.pq.conns[]	list every open connection, one row each
+.pq.termsize	.pq.termsize[]	report the live terminal size as rows and columns
+.pq.cancolor	.pq.cancolor[]	tell whether stdout should carry ANSI colour
+.pq.dr	.pq.dr `neg	print a verb's domain and range grid, one row per type
+.pq.load	.pq.load[]	load the standard library file by file, as \l pq does
+.pq.load_natives	.pq.load_natives`regexp	bind the C functions a standard-library file calls, by file name
 .j.j	.j.j `a`b!1 2	render a value as JSON text
 .j.k	.j.k "[1,2,3]"	parse JSON text into a value
 .j.jd	.j.jd (1b;0w)	render JSON, choosing how to write infinities

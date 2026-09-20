@@ -6,6 +6,8 @@
 / pow:.ffi.bind[`libm.so.6`pow;"ff";"f"]
 / pow (2f;10f;::)
 
+.pq.load_natives`ffi;
+
 / Resolve a C function once and answer a q function that calls it.  The result is unary: it takes ONE list of
 / arguments ending in (::) - the trailing :: stops q collapsing same-type arguments into a vector.
 / @param funcname `fn resolvable in this process, or `lib`fn to load a library

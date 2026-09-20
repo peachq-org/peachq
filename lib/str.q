@@ -7,6 +7,8 @@
 / @eg .str.isdigit ("123";"12a";`45)
 / @eg .str.format ("{} costs {:.2f}";"tea";1.5)
 
+.pq.load_natives`str;
+
 / @ignore
 .str.i.text:{[s] $[type[s] in -11 11h; string s; -10h=type s; enlist s; type[s] in 0 10h; s; '`type]};
 

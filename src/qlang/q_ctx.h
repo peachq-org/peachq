@@ -35,6 +35,10 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err, int print_resu
  * line — `\l` raises it so the abort propagates out of nested loads. */
 int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig);
 
+/* The error a load ANSWERS with, from a run's return and esig: the eval abort's
+ * owned re-signal, a parse abort's class, NULL for a full run — what `\l` raises. */
+ray_t* q_ctx_run_abort(int rc, ray_t* esig);
+
 /* An in-memory STRING of q source under the SAME script semantics/returns as
  * q_ctx_run_file — the bootstrap and the launcher's argv text ride this: one
  * loader, one multiline law — except that a bare top-level value is NOT

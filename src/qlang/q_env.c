@@ -17,6 +17,7 @@
 #include "qlang/eval/q_view.h"    /* view hooks: set/unbind invalidation, dot-'nyi */
 #include "qlang/io/q_io.h"        /* q_io_set — `set`'s file half */
 #include "qlang/io/q_provider.h"  /* the link seam: q_provider_carrier_is, _link/_unlink — the HOST, never a provider */
+#include "qlang/q_pq.h"           /* q_pq_autoload — the first `.pq` reference loads lib/pq.q */
 #include "qlang/q_prim.h"         /* q_enum_deref — FK/link dotted-walk gather */
 #include "lang/internal.h"        /* ray_error */
 #include "table/sym.h"         /* ray_sym_intern_runtime, ray_sym_str, ray_read_sym */
@@ -49,6 +50,17 @@ static int64_t g_scope, g_scope_seg;    /* a running lambda's defining context *
 static int     g_scoped;
 #define ENV_CTX (g_scoped ? g_scope : g_ctx)
 #define ENV_SEG (g_scoped ? g_scope_seg : g_ctx_seg)
+static int64_t g_pq_seg;                /* `pq`: the one namespace that loads itself */
+
+/* `.pq` autoloads on its first reference, read or write (owner 2026-09-20) — THE
+ * hook, at the seam every name crosses: a dotted `.pq…` name, or a relative one
+ * under `\d .pq`.  q_pq_autoload holds the once guard (re-entrant references from
+ * pq.q itself answer NULL), so a loaded `.pq` costs one prefix compare. */
+static ray_t* env_pq_hook(const char* p, size_t n) {
+    int hit = p[0] == '.' ? n >= 3 && p[1] == 'p' && p[2] == 'q' && (n == 3 || p[3] == '.')
+                          : ENV_SEG == g_pq_seg;
+    return hit ? q_pq_autoload() : NULL;
+}
 
 static int64_t env_marker(void) { return ray_sym_intern_runtime("", 0); }
 
@@ -139,6 +151,8 @@ ray_t* q_env_get(int64_t sym) {
     ray_t* v = NULL;
     if (n == 1 && p[0] == '.') v = env_root;
     else if (n > 0) {
+        ray_t* e = env_pq_hook(p, n);
+        if (e) ray_release(e);               /* the load displayed it; a borrowed probe answers absence */
         size_t start = env_start(p, n);
         ray_t* home = (p[0] == '.' && start == 1) ? env_ns : env_root;
         int64_t segs[ENV_SEG_MAX];
@@ -347,6 +361,8 @@ ray_err_t q_env_set(int64_t sym, ray_t* val) {
         if (!s) return RAY_ERR_DOMAIN;
         int hook = q_dotz_ipc_hook_index(p, n);
         int root = n == 1 && p[0] == '.';
+        ray_t* le = n > 0 ? env_pq_hook(p, n) : NULL;
+        if (le) ray_release(le);             /* the load displayed it; the write itself still lands */
         ray_release(s);
         if (hook >= 0)   e = ray_env_set(ray_sym_ipc_hook(hook), val);
         else if (root)   e = env_root_splat(val);
@@ -702,6 +718,8 @@ ray_t* q_env_resolve(int64_t sym) {
         return env_root;
     }
     if (n == 0 || (n == 1 && p[0] == '.')) { ray_release(s); return NULL; }
+    ray_t* le = env_pq_hook(p, n);
+    if (le) { ray_release(s); return le; }   /* the reference answers the load's abort */
     size_t start = env_start(p, n);
     size_t hend = start;
     while (hend < n && p[hend] != '.') hend++;
@@ -879,6 +897,7 @@ ray_err_t q_env_init(void) {
     env_root = q_env_marker_dict();
     env_ns   = q_env_marker_dict();
     env_boot = q_env_marker_dict();
+    g_pq_seg = ray_sym_intern_runtime("pq", 2);
     if (!env_root || !env_ns || !env_boot) {
         q_env_destroy();
         return RAY_ERR_OOM;

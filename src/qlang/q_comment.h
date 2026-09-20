@@ -23,10 +23,13 @@
 /* On over q_runtime_create's core list: nothing is armed, queued or fired. */
 void q_comment_boot(int on);
 
-/* One script's capture state; a nested load saves and restores it. */
+/* One script's capture state; a nested load saves and restores it, the run
+ * being read and the armed header included. */
 typedef struct {
     int64_t file, stmt_line;
-    int seen_code, file_run_done;
+    int seen_code, file_run_done, pending_depth;
+    ray_t* run;         /* owned: the outer run, or NULL */
+    ray_t* pending;     /* owned: the outer armed header, or NULL */
 } q_comment_script_t;
 q_comment_script_t q_comment_script_begin(int64_t file_sym);
 void           q_comment_script_end(q_comment_script_t saved);

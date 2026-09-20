@@ -1,7 +1,11 @@
-/ The session itself: version, open connections, terminal size and colour support.  Loaded by \l pq.
+/ The session itself: version, open connections, terminal size and colour support, and the standard-library load
+/ sequence.  Nothing here is loaded at start-up: the first reference to any .pq name loads this file, whose first
+/ line - .pq.load_natives`pq, the one .pq member that exists before it runs - binds the C functions it calls.
 / .
 / @eg .pq.version
 / @eg select handle, alias from .pq.conns[]
+
+.pq.load_natives`pq;
 
 / The peachq version string.
 .pq.version:.z.v`version;
@@ -279,3 +283,12 @@
   while[(drop<count bins) and (sum (drop _ sizes))>100*1024*1024; drop+:1];
   hdel each paths til drop;
   };
+
+/ Load the standard library: \l pq runs this.  Every file loads as \l pq/<file>.q - a real file when a pq/ directory
+/ (the working directory's, then QHOME's) has it, else the copy built into peachq - so the list here IS the library.
+/ @return (symbol list) the file names, in load order
+/ @eg .pq.load[]
+.pq.load:{[]
+  files:`csv`duckdb`ffi`j`massive`parquet`pq`qpc`regexp`str`termbox`fs`path`pkg`qunit;
+  {system "l pq/",string[x],".q"} each files;
+  files};
