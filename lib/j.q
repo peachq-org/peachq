@@ -9,6 +9,8 @@
 / select from `:t.json where a>1
 / .j.read["[{\"a\":1},{\"a\":2}]";::;::;()!()]
 
+.pq.load_natives`j;
+
 / @ignore
 .j.i.frag:{[source;opts]
   if[not -11h=type source; :(source;opts)];

@@ -22,6 +22,8 @@
 / h "SELECT year(Date) AS yr, max(Price) FROM dow GROUP BY yr ORDER BY yr DESC LIMIT 3"
 / hclose h
 
+.pq.load_natives`duckdb;
+
 / @ignore
 .duckdb.call:{[c;q;sync] .duckdb.lastsql::q; .duckdb.i.exec[c;q]}
 / @ignore

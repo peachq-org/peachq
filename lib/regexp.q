@@ -5,6 +5,8 @@
 / @eg .regexp.extract["order 123 of 456";"[0-9]+"]
 / @eg .regexp.replace_all[("a-b";"c-d");"-";"_"]
 
+.pq.load_natives`regexp;
+
 / Does the pattern match anywhere in the subject?
 / @eg .regexp.matches["Hello";"(?i)^h"]
 .regexp.matches:{[subject;pattern] .regexp.i.test[subject;pattern;0b]}

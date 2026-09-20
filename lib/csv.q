@@ -9,6 +9,8 @@
 / select from `:trades.csv where px>2
 / t:.csv.read[`:trades.csv;::;(enlist `sym)!enlist "s";()!()]
 
+.pq.load_natives`csv;
+
 / Load delimited text as a table.  A symbol is a resource to open, text is the content itself.
 / Types resolve as: explicit types > an existing target table's schema > the sniff, and are fixed after the sniff
 / sample: a later cell that fails its type signals 'csv.  Sniffed text is a string column; ask for symbols with types.

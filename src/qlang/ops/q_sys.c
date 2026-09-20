@@ -24,7 +24,7 @@
 #include "qlang/io/q_io.h"    /* q_io_mkdir_parents — `\1`/`\2` create the path they name */
 #include "qlang/io/q_mount.h" /* q_mount_dir — the `\l <dir>` forms */
 #include "qlang/io/q_provider.h" /* q_provider_spec_is / _load — the `\l `:pq:…` form */
-#include "qlang/q_pq.h"       /* q_pq_load — the `\l pq` embedded-stdlib gate */
+#include "qlang/q_pq.h"       /* q_pq_load / _load_file — `\l pq` and `\l pq/<file>.q` */
 #include "qlang/q_env.h"      /* q_env_ctx_set/_ctx + q_env_ns_names — `\d` and the `\v`/`\f`/`\a` rosters */
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk (`\t`), q_dotz_exit_fire (`\\`), q_dotz_expungeable (`\x`) */
 #include "qlang/eval/q_view.h" /* q_view_names — `\b` / `\B` */
@@ -512,23 +512,17 @@ static ray_t* h_l(const char* arg, size_t alen) {
                 && l_is_regular_readable(cand)) { memcpy(found, cand, strlen(cand) + 1); ok = 1; }
         }
     }
-    if (ok) {   /* disk hit — load (silent); an ABORTED load signals: eval aborts
-                 * re-signal their text (already displayed), parse aborts their class */
+    /* peachq: the standard library.  `\l pq/<file>.q` is the file a pq/ directory
+     * (the cwd's or $QHOME's — the chain above) has, else the embedded member, so a
+     * pq/ directory is the library on disk, never a mount; `\l pq` runs its load
+     * sequence (`.pq.load[]`, lib/pq.q) unless a disk file `pq`/`pq.q` wins above. */
+    if (alen > 3 && memcmp(lit, "pq/", 3) == 0) return q_pq_load_file(lit, alen, ok ? found : NULL);
+    if (ok) {   /* disk hit — load (silent); an ABORTED load signals */
         ray_t* esig = NULL;
         int rc = q_ctx_run_file(found, stdout, stderr, &esig);
-        if (esig) return esig;
-        return rc >= 2 ? q_err((q_err_e)(rc - 2)) : NULL;
+        return q_ctx_run_abort(rc, esig);
     }
-    /* peachq: `\l pq` — the PeachQ stdlib gate. A dev-override disk file (the
-     * a/b/c/d chain above) wins; else a cwd directory literally named `pq`
-     * keeps dir semantics (mounts, below); ELSE the embedded stdlib.
-     * Every OTHER argument keeps its existing behaviour unchanged (the branch is
-     * scoped to the exact literal `pq`). */
-    if (alen == 2 && arg[0] == 'p' && arg[1] == 'q') {
-        struct stat st;
-        if (!(stat("pq", &st) == 0 && S_ISDIR(st.st_mode)))     /* not a `pq` dir → embedded */
-            return q_pq_load();
-    }
+    if (alen == 2 && memcmp(lit, "pq", 2) == 0) return q_pq_load();
     struct stat st;
     if (stat(lit, &st) == 0 && S_ISDIR(st.st_mode))       /* `\l .` = data-only reload */
         return q_mount_dir(lit, !(alen == 1 && lit[0] == '.'));
