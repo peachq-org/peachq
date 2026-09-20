@@ -1,17 +1,29 @@
-/* q_pq — the `\l pq` standard-library gate.  Nothing here runs at
- * q_runtime_create; q_pq_load() fires ONLY from the `\l pq` syscmd gate
- * (q_sys.c) and evals the embedded lib/ bundle (lib_gen.h).  The ONE
- * exception is the help-db seam below: bound at boot, loaded at first help
- * access — by neither of the two events this file otherwise serves. */
+/* q_pq — the standard library's C floor: the `.pq` autoload, the
+ * `.pq.load_natives` root, and the bundle member door behind `\l pq/<file>.q`.
+ * Nothing here runs at q_runtime_create except the help-db binding. */
 #ifndef PEACHQ_Q_PQ_H
 #define PEACHQ_Q_PQ_H
 
 #include <rayforce.h>
 
-/* Eval the embedded lib/ bundle through the script seam.  Idempotent:
- * re-loads re-eval (setters are silent, assignments overwrite).  Returns NULL
- * on a full load, else the abort's owned re-signal (the script seam's law). */
+/* The FIRST reference to a `.pq` name (q_env's hook) runs `\l pq/pq.q` once —
+ * through the one resolver, so a pq/ directory's copy wins over the bundle
+ * member.  NULL on a full load or when it already ran (a failed load displayed
+ * its error and is not retried); else the abort's owned re-signal (the script
+ * seam's law). */
+ray_t* q_pq_autoload(void);
+
+/* `\l pq` — run `.pq.load[]`, the load sequence lib/pq.q states in q; the
+ * reference itself autoloads `.pq`.  Returns as q_pq_autoload. */
 ray_t* q_pq_load(void);
+
+/* `\l pq/<file>.q` (`lit` as given, a `.q` suffix optional): `path` is the file
+ * a pq/ directory had, else the embedded lib/<file>.q or qlib/src/<file>.q
+ * member runs as its own named script; a name in neither is 'path as given.
+ * pq.q's first load IS the autoload: `.pq.load_natives` is bound just before
+ * it runs, the only `.pq` member its first line can see.  Returns as
+ * q_pq_autoload. */
+ray_t* q_pq_load_file(const char* lit, size_t alen, const char* path);
 
 /* Bind `.help.i.loaddb` — the on-demand door onto the embedded lib/help-db.q
  * bundle (the generated builtin one-liners).  Called at runtime create so a bare
@@ -20,7 +32,7 @@ ray_t* q_pq_load(void);
  * runtime. */
 void q_pq_helpdb_register(void);
 
-/* Forget the once-per-runtime help-db flag (a fresh runtime reloads it). */
+/* Forget the once-per-runtime flags (a fresh runtime reloads both). */
 void q_pq_reset(void);
 
 #endif /* PEACHQ_Q_PQ_H */
