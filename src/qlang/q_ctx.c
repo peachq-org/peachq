@@ -405,6 +405,11 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig) {
     return rc;
 }
 
+ray_t* q_ctx_run_abort(int rc, ray_t* esig) {
+    if (esig) return esig;
+    return rc >= 2 ? q_err((q_err_e)(rc - 2)) : NULL;
+}
+
 int q_ctx_run_src(const char* s, FILE* out, FILE* err, ray_t** esig) {
     /* No path to attribute: the core bundles are ONE concatenated string, so
      * their docs record the empty file.  Silent: this is the bootstrap and the
