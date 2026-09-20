@@ -9,9 +9,11 @@
 #include "qlang/eval/q_funsql.h"
 #include "qlang/eval/q_eval.h"
 #include "qlang/base/q_err.h"
+#include "qlang/base/q_type.h"         /* q_type_widens — the one int/long pair */
 #include "qlang/q_prim.h"              /* q_cols_fn */
 #include "qlang/q_registry_internal.h" /* q_take_wrap, q_where_wrap, q_flip_wrap, ... */
 #include "qlang/ops/q_bang.h"
+#include "qlang/ops/q_dollar.h"        /* q_dollar_cast — the Where-form update keeps the column type */
 #include "qlang/ops/q_index.h"
 #include "qlang/io/q_splay.h"          /* mapped splays: from materializes, writes 'splay */
 #include "qlang/io/q_io.h"             /* q_io_is_fsym / q_io_resource_table — resource From-resolve */
@@ -1161,8 +1163,14 @@ static ray_t* null_col_like(ray_t* v, int64_t n) {
  * amended at rows through Amend At — an atom broadcasts, a uniform result
  * scatters pairwise to the ORIGINAL positions. */
 static ray_t* upd_amend(ray_t* cur, ray_t* rows, ray_t* v) {
-    /* cur owned; consumed on success, released here on error */
-    ray_t* r = q_index_amend_at(cur, rows, NULL, v);
+    /* cur owned; consumed on success, released here on error.  The live column keeps its type: new values
+     * cross the int/long pair the way an insert's payload does (owner ruling 2026-09-20, TorQ
+     * trackservers.q:110 `update hits:1+hits ... where` on an int column; overrides ref/update.md:77). */
+    ray_t* cv = (cur && !RAY_IS_ERR(cur) && ray_is_vec(cur) && q_type_widens(cur->type, q_type_elem_tag(v)))
+                    ? q_dollar_cast(cur->type, v) : NULL;
+    if (cv && RAY_IS_ERR(cv)) { ray_release(cur); return cv; }
+    ray_t* r = q_index_amend_at(cur, rows, NULL, cv ? cv : v);
+    if (cv) ray_release(cv);
     if (!r || RAY_IS_ERR(r)) {
         ray_release(cur);
         return r ? r : q_err(QE_TYPE);
