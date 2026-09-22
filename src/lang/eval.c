@@ -1158,9 +1158,10 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
             int8_t atype = -col_src->type;
             if (atype == RAY_GUID) {
                 atom_wrap = ray_vec_new(RAY_GUID, 1);
-                if (!RAY_IS_ERR(atom_wrap) && col_src->obj)
-                    memcpy(ray_data(atom_wrap), ray_data(col_src->obj), 16);
-                if (!RAY_IS_ERR(atom_wrap)) atom_wrap->len = 1;
+                if (!RAY_IS_ERR(atom_wrap)) {
+                    memcpy(ray_data(atom_wrap), ray_guid_bytes(col_src), 16);
+                    atom_wrap->len = 1;
+                }
             } else if (atype == RAY_TIMESTAMP || atype == RAY_I64 || atype == RAY_SYM) {
                 atom_wrap = ray_vec_new(atype, 1);
                 if (!RAY_IS_ERR(atom_wrap)) { ((int64_t*)ray_data(atom_wrap))[0] = col_src->i64; atom_wrap->len = 1; }
@@ -1284,14 +1285,14 @@ ray_t* ray_table_fn(ray_t* names, ray_t* cols) {
                 size_t slen = ray_str_len(row_elems[j]);
                 col_vec = ray_str_vec_append(col_vec, sptr, slen);
             } else if (col_type == RAY_GUID) {
-                if (row_elems[j]->type != -RAY_GUID || !row_elems[j]->obj) {
+                if (row_elems[j]->type != -RAY_GUID) {
                     int8_t et = row_elems[j]->type;
                     ray_release(col_vec); ray_release(tbl);
                     if (_bxn) ray_release(_bxn);
                     if (_bxc) ray_release(_bxc);
                     return ray_error("type", "table: guid column element must be a guid, got %s", ray_type_name(et));
                 }
-                col_vec = ray_vec_append(col_vec, ray_data(row_elems[j]->obj));
+                col_vec = ray_vec_append(col_vec, ray_guid_bytes(row_elems[j]));
             } else {
                 /* Validate each element matches the column type (allow I64→F64 promotion) */
                 int type_ok = (row_elems[j]->type == -col_type);

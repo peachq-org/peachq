@@ -291,12 +291,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         switch ((ray_type_e)-t) {
         case RAY_ENUM: break;   /* unreachable: decayed to syms at entry */
         case RAY_BOOL: rc = (w_u8(b, (uint8_t)-RAY_BOOL) || w_u8(b, x->b8 ? 1 : 0)) ? -1 : 0; goto out;
-        case RAY_GUID: {
-            static const uint8_t zero[16] = {0};
-            const uint8_t* g = x->obj ? (const uint8_t*)((char*)x->obj + sizeof(ray_t)) : zero;
-            rc = (w_u8(b, (uint8_t)-RAY_GUID) || w_raw(b, g, 16)) ? -1 : 0;
-            goto out;
-        }
+        case RAY_GUID: rc = (w_u8(b, (uint8_t)-RAY_GUID) || w_raw(b, ray_guid_bytes(x), 16)) ? -1 : 0; goto out;
         case RAY_BYTE_ONLY: rc = (w_u8(b, (uint8_t)-RAY_BYTE_ONLY)  || w_u8(b, x->u8))   ? -1 : 0; goto out;
         case RAY_I16: rc = (w_u8(b, (uint8_t)-RAY_I16) || w_i16(b, x->i16)) ? -1 : 0; goto out;
         case RAY_I32: rc = (w_u8(b, (uint8_t)-RAY_I32) || w_i32(b, x->i32)) ? -1 : 0; goto out;

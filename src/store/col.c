@@ -102,13 +102,13 @@ static size_t col_str_pool_payload_len(const ray_t* vec);
  * Column file format:
  *   Bytes 0-15:  aux — RESERVED for postponed on-disk index persistence
  *                (min/max zone map); written ZERO today, NOT the version.
- *   Bytes 16-31: mmod=0, order=<format major version>, type, attrs, rc, len
+ *   Bytes 16-31: mmod=0, attrs, type, order=<format major version>, rc, len
  *   Bytes 32+:   raw element data
  *
  * On-disk format IS the in-memory format (zero deserialization on load):
  * file-offset 0 maps directly as the in-memory `ray_t`, payload at offset
  * 32.  The first 32 bytes ARE the allocator's object header; there is NO
- * separate envelope.  Of the header bytes, only mmod(16) and order(17) are
+ * separate envelope.  Of the header bytes, only mmod(16) and order(19) are
  * on-disk-free (written and recomputed on load).  The format MAJOR version
  * is a single byte carried in `order` (col.h); there is NO magic.  The
  * loaders validate the version, then reset the runtime `order` to its
