@@ -250,7 +250,7 @@ ray_t* q_hclose_wrap(ray_t* x);
 
 /* q `hsym x` / `attr x` verb implementations — exported so the q_bang.c
  * internal-fn aliases (`-1!` -> hsym, `-2!` -> attr) route to the SAME single
- * home the registry verb uses (Direction B, bang-ops-internal-status.md). */
+ * home the registry verb uses (Direction B). */
 ray_t* q_hsym_wrap(ray_t* x);
 ray_t* q_attr_wrap(ray_t* x);
 

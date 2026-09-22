@@ -1,6 +1,6 @@
 / h.q - peachq's `.h` namespace, authored from the PUBLISHED qdocs (ref/doth.md, CC BY 4.0).
 / ALWAYS-ON: baked in by tools/gen-bootstrap.sh -> h_gen.h, loaded at q_runtime_create after
-/ q.q+dotq.q. One definition per line (no LITERAL newline in one). Absent: .h.ht (doth-status.md).
+/ q.q+dotq.q. One definition per line (no LITERAL newline in one). Absent: .h.ht.
 / NAMING RULE: `.h.` carries ONLY names ref/doth.md documents; everything peachq invented is `.h.i.`.
 
 .h.br:"<br>";

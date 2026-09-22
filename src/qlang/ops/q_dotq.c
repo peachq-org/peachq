@@ -87,7 +87,6 @@ ray_t* q_dotq_s_fn(ray_t* x) {
  * no manifest row of its own carries the neutral 1b/0b, NOT an audit, and a NULL
  * family — `none is an operative lift-law value (exception-catalogue membership),
  * so family is inapplicable here, not unclassified.
- * Per-verb help strings live in docs/q-ops-help.tsv (archival, not the binary).
  * The x argument (`.Q.ops[]` passes `::`) is ignored. */
 static const char* dotq_lexclass_name(q_lex_class c) {
     switch (c) {
