@@ -46,7 +46,7 @@
 /* ===== RAY_QFN carriers ================================================== */
 
 /* kind lives in aux[0] — the i64 union slot IS len for the slot count */
-static ray_t* car_new(int kind, int64_t nslots) {
+static ray_t* car_new(q_car_kind_t kind, int64_t nslots) {
     ray_t* c = ray_alloc((size_t)nslots * sizeof(ray_t*));
     if (!c) return q_err(QE_OOM);
     c->type = RAY_QFN;
@@ -57,8 +57,8 @@ static ray_t* car_new(int kind, int64_t nslots) {
     return c;
 }
 
-int q_eval_apply_carrier_kind(const ray_t* v) {
-    return (v && v->type == RAY_QFN) ? (int)v->aux[0] : 0;
+q_car_kind_t q_eval_apply_carrier_kind(const ray_t* v) {
+    return (v && v->type == RAY_QFN) ? (q_car_kind_t)v->aux[0] : Q_EVAL_CAR_NONE;
 }
 
 static ray_t** car_slots(ray_t* c) { return (ray_t**)ray_data(c); }
@@ -1290,21 +1290,21 @@ static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
 static int64_t rank_of(ray_t* fv) {
     if (fv->type == RAY_UNARY) return 1;
     if (fv->type == RAY_BINARY) return 2;
-    int kind = q_eval_apply_carrier_kind(fv);
-    if (kind == Q_EVAL_CAR_LAMBDA)
+    switch (q_eval_apply_carrier_kind(fv)) {
+    case Q_EVAL_CAR_LAMBDA:
         return car_slots(fv)[0] ? q_count(car_slots(fv)[0]) : 0;
     /* a projection's rank is the slots it still wants; a composition's is its
      * inner value's (`mmu[;b]` is unary, so `':` reads it as Each Parallel) */
-    if (kind == Q_EVAL_CAR_PROJ) {
+    case Q_EVAL_CAR_PROJ: {
         int64_t slots = ray_block_len(fv) - 2, holes = 0;
         for (int64_t i = 0; i < slots; i++)
             if (!car_slots(fv)[2 + i]) holes++;
         return holes;
     }
-    if (kind == Q_EVAL_CAR_COMP) return rank_of(car_slots(fv)[1]);
-    if (kind == Q_EVAL_CAR_ITER) return 1;  /* exactly one operand */
-    if (kind == Q_EVAL_CAR_KFN) return car_slots(fv)[KFN_RANK]->i64;   /* `2:` declared it */
-    if (kind == Q_EVAL_CAR_DERIV) {
+    case Q_EVAL_CAR_COMP: return rank_of(car_slots(fv)[1]);
+    case Q_EVAL_CAR_ITER: return 1;  /* exactly one operand */
+    case Q_EVAL_CAR_KFN: return car_slots(fv)[KFN_RANK]->i64;   /* `2:` declared it */
+    case Q_EVAL_CAR_DERIV: {
         /* ref/maps.md:11-16: Each keeps its operand's rank, `\:` `/:` are binary, `':` is Each Parallel on a unary */
         int adv = (int)car_slots(fv)[2]->i64;
         ray_t* op = car_slots(fv)[0];
@@ -1313,7 +1313,9 @@ static int64_t rank_of(ray_t* fv) {
         if (adv == 3 && op && rank_of(op) == 1) return 1;
         return -1;
     }
-    return -1;                              /* vary: no fixed rank */
+    case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_VIEW: break;
+    }
+    return -1;                              /* vary/view: no fixed rank */
 }
 
 int64_t q_eval_apply_rank(ray_t* fv) { return fv ? rank_of(fv) : -1; }
@@ -1512,19 +1514,25 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
     if (ray_eval_is_interrupted()) return q_err(QE_STOP);
     if (n < 0 || n > APPLY_MAX_ARGS) return q_err(QE_RANK);
 
-    int kind = q_eval_apply_carrier_kind(fv);
-    if (kind == Q_EVAL_CAR_ITER) return iter_call(fv, args, n);
-    if (kind == Q_EVAL_CAR_PROJ) return proj_call(fv, args, n);
-    if (kind == Q_EVAL_CAR_DERIV) {
+    q_car_kind_t kind = q_eval_apply_carrier_kind(fv);
+    switch (kind) {
+    case Q_EVAL_CAR_ITER: return iter_call(fv, args, n);
+    case Q_EVAL_CAR_PROJ: return proj_call(fv, args, n);
+    case Q_EVAL_CAR_DERIV: {
         ray_t** c = car_slots(fv);
         return q_adverb_apply((int)c[2]->i64, c[0], row_unbox(c[1]),
                                    args, n);
     }
-    if (kind == Q_EVAL_CAR_COMP) return comp_call(fv, args, n);
-    if (!kind && !q_eval_apply_is_fnval(fv)) {
-        /* bare ENGINE lambda (rayfall-defined .rfl/serde values): base call */
-        if (fv->type == RAY_LAMBDA) return call_lambda(fv, args, n);
-        return noun_index(fv, args, n);
+    case Q_EVAL_CAR_COMP: return comp_call(fv, args, n);
+    case Q_EVAL_CAR_NONE:
+        if (!q_eval_apply_is_fnval(fv)) {
+            /* bare ENGINE lambda (rayfall-defined .rfl/serde values): base call */
+            if (fv->type == RAY_LAMBDA) return call_lambda(fv, args, n);
+            return noun_index(fv, args, n);
+        }
+        break;
+    /* the rank/hole laws below run first for these */
+    case Q_EVAL_CAR_LAMBDA: case Q_EVAL_CAR_KFN: case Q_EVAL_CAR_VIEW: break;
     }
 
     int64_t rank = rank_of(fv), holes = 0;
@@ -1544,8 +1552,12 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
         return q_eval_apply_proj_new(fv, vrow, args, n, 2);
     }
 
-    if (kind == Q_EVAL_CAR_LAMBDA) return lambda_call(fv, args, n);
-    if (kind == Q_EVAL_CAR_KFN) return q_kapi_invoke(fv, args, n);
+    switch (kind) {
+    case Q_EVAL_CAR_LAMBDA: return lambda_call(fv, args, n);
+    case Q_EVAL_CAR_KFN: return q_kapi_invoke(fv, args, n);
+    case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_PROJ: case Q_EVAL_CAR_DERIV:
+    case Q_EVAL_CAR_COMP: case Q_EVAL_CAR_ITER: case Q_EVAL_CAR_VIEW: break;
+    }
 
     /* keyword-HOF rows route to the native adverb arms (finding 3) */
     if (row && row->adverb_hof && row->lex == QLEX_KW_INFIX && n == 2) {
@@ -1664,9 +1676,9 @@ ray_t* q_eval_apply_train(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
 /* ===== the public value-apply seam ======================================= */
 
 int q_eval_apply_is_fn(ray_t* v) {
-    int kind = q_eval_apply_carrier_kind(v);
+    q_car_kind_t kind = q_eval_apply_carrier_kind(v);
     return q_eval_apply_is_fnval(v) || v->type == RAY_LAMBDA ||
-           (kind != 0 && kind != Q_EVAL_CAR_VIEW);
+           (kind != Q_EVAL_CAR_NONE && kind != Q_EVAL_CAR_VIEW);
 }
 
 /* Ambivalent-operator promotion for value-apply: a bare operator resolves to
@@ -1908,14 +1920,14 @@ int q_eval_apply_deriv_adv(ray_t* v) {
 }
 
 const char* q_eval_apply_car_head_name(ray_t* v) {
-    int kind = q_eval_apply_carrier_kind(v);
+    q_car_kind_t kind = q_eval_apply_carrier_kind(v);
     if (kind != Q_EVAL_CAR_DERIV && kind != Q_EVAL_CAR_PROJ) return NULL;
     const q_op_t* row = row_unbox(car_slots(v)[1]);
     return row ? row->name : NULL;
 }
 
 ray_t* q_eval_apply_car_head(ray_t* v) {
-    int kind = q_eval_apply_carrier_kind(v);
+    q_car_kind_t kind = q_eval_apply_carrier_kind(v);
     if (kind == Q_EVAL_CAR_DERIV || kind == Q_EVAL_CAR_PROJ ||
         kind == Q_EVAL_CAR_COMP)
         return car_slots(v)[0];

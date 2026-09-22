@@ -134,7 +134,7 @@ static int8_t type_of(ray_t* x) {
         int adv = c[2] ? (int)c[2]->i64 : 0;
         return (int8_t)(106 + (adv >= 0 && adv < 6 ? adv : 0));
     }
-    default: break;
+    case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_COMP: case Q_EVAL_CAR_VIEW: break;
     }
     if (x->type == RAY_LAMBDA) return 100;
     if (x->type == RAY_UNARY) return 101;

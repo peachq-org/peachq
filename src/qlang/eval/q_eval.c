@@ -533,9 +533,11 @@ ray_t* q_eval_carrier_value(ray_t* v) {
             out = list_put_borrowed(out, q_eval_apply_proj_arg(v, i));
         return out;
     }
-    default:
-        return NULL;
+    /* KFN answered above; a bare iterator stays deferred */
+    case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_LAMBDA: case Q_EVAL_CAR_ITER:
+    case Q_EVAL_CAR_VIEW: case Q_EVAL_CAR_KFN: break;
     }
+    return NULL;
 }
 
 static ray_t* lambda_structure(ray_t* v) {
