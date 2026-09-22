@@ -39,7 +39,7 @@ static bool qd_cell_is_0n(ray_t* cell) {
 /* ADR 15: a 0h column no cell of which votes a type is the emptied column at any depth, and only a declaration can
  * say what it was — ONE predicate for both doors.  A column of 0n ALONE is not it: that is the loaders' text null,
  * VARCHAR by the vote below, so a () cell is required. */
-bool q_duckdb_codec_untyped(ray_t* col) {
+static bool qd_untyped(ray_t* col) {
     if (!col || col->type != RAY_LIST) return false;
     bool hole = q_count(col) == 0;
     for (int64_t i = 0; i < q_count(col); i++) {
@@ -193,7 +193,7 @@ static bool qd_map_write(int slot, ray_t* v, int depth, qd_colmap_t* out, const 
     }
     /* an emptied string, nested-list and list-of-strings column are the SAME value: the BLOB this lands on is a
      * placeholder for whatever declares it, never an answer of its own */
-    if (depth == 0 && q_duckdb_codec_untyped(v)) {
+    if (depth == 0 && qd_untyped(v)) {
         out->leaf  = qd_map_read(QDUCK_TYPE_BLOB);
         out->depth = 0;
         out->undet = true;
@@ -258,25 +258,34 @@ static bool qd_map_write(int slot, ray_t* v, int depth, qd_colmap_t* out, const 
 
 static bool qd_map_read_logical(duck_logical_type lt, qd_colmap_t* out, duck_type* miss, const char** why);
 
+/* THE record-children ladder: how many fields a record logical type has, and field i's type (owned) with its name
+ * (owned; NULL for a MAP's two halves, which are typed but not named) */
+int q_duckdb_codec_rec_nfields(duck_logical_type lt, duck_type id) {
+    return id == QDUCK_TYPE_MAP ? 2 : id == QDUCK_TYPE_UNION ? (int)QAPI.union_type_member_count(lt)
+                                                            : (int)QAPI.struct_type_child_count(lt);
+}
+
+duck_logical_type q_duckdb_codec_rec_child(duck_logical_type lt, duck_type id, int i, char** name) {
+    if (name) *name = id == QDUCK_TYPE_MAP ? NULL : id == QDUCK_TYPE_UNION ? QAPI.union_type_member_name(lt, (duck_idx_t)i)
+                                                                          : QAPI.struct_type_child_name(lt, (duck_idx_t)i);
+    return id == QDUCK_TYPE_MAP   ? (i ? QAPI.map_type_value_type(lt) : QAPI.map_type_key_type(lt))
+         : id == QDUCK_TYPE_UNION ? QAPI.union_type_member_type(lt, (duck_idx_t)i)
+                                  : QAPI.struct_type_child_type(lt, (duck_idx_t)i);
+}
+
 /* A record logical type's fields: a STRUCT's children, a UNION's members, a MAP's key and value.  A MAP's
  * VARCHAR key reads as a q SYMBOL, because a dict key is a name.  A field MAY be named like a companion: the
  * mirror is parallel to the value (ADR 16), so no name inside a record is reserved. */
 static bool qd_rec_read_type(duck_logical_type lt, duck_type id, qd_colmap_t* out, duck_type* miss,
                              const char** why) {
-    int n = id == QDUCK_TYPE_MAP     ? 2
-          : id == QDUCK_TYPE_UNION   ? (int)QAPI.union_type_member_count(lt)
-                                     : (int)QAPI.struct_type_child_count(lt);
+    int n = q_duckdb_codec_rec_nfields(lt, id);
     if (n <= 0) return false;
     qd_rec_t* r = qd_rec_alloc(n);
     if (!r) return false;
     bool ok = true;
     for (int i = 0; ok && i < n; i++) {
-        duck_logical_type ct = id == QDUCK_TYPE_MAP ? (i ? QAPI.map_type_value_type(lt) : QAPI.map_type_key_type(lt))
-                             : id == QDUCK_TYPE_UNION ? QAPI.union_type_member_type(lt, (duck_idx_t)i)
-                                                      : QAPI.struct_type_child_type(lt, (duck_idx_t)i);
-        char* nm = id == QDUCK_TYPE_MAP ? NULL
-                 : id == QDUCK_TYPE_UNION ? QAPI.union_type_member_name(lt, (duck_idx_t)i)
-                                          : QAPI.struct_type_child_name(lt, (duck_idx_t)i);
+        char* nm;
+        duck_logical_type ct = q_duckdb_codec_rec_child(lt, id, i, &nm);
         const char* fn = nm ? nm : i ? "value" : "key";
         r->f[i].name = q_duckdb_text(fn, strlen(fn));
         if (!r->f[i].name)
@@ -418,9 +427,9 @@ bool q_duckdb_codec_map_bits(ray_t* col, int depth, qd_colmap_t* cm) {
     bool bools = cm->depth == depth + 1 && cm->leaf->ray_type == RAY_BOOL;
     bool empty = cm->depth == 0 && cm->leaf->dk_type == QDUCK_TYPE_BLOB && q_count(col) == 0;
     if (cm->rec || !(bools || empty)) return false;
-    for (size_t i = 0; i < QD_NTYPES; i++)
-        if (QD_TYPES[i].dk_type == QDUCK_TYPE_BIT) { cm->leaf = &QD_TYPES[i]; cm->depth = depth; return true; }
-    return false;
+    cm->leaf  = qd_map_read(QDUCK_TYPE_BIT);
+    cm->depth = depth;
+    return cm->leaf != NULL;
 }
 
 /* placeholder elem + set_null (sentinel + HAS_NULLS attr) */
@@ -441,6 +450,7 @@ static ray_t* qd_append_null(ray_t* vec) {
  * it, every row's high half in <c>_q_hi.  Those two families fold their null-patterned value into the same
  * column, so every type has exactly ONE companion kind, and a column grows it only when a row needs it. */
 static const char* const QD_CO_NAMES[] = { "none", "isnull", "notnull", "raw", "hi", "tzoff" };
+#define QD_CO_INFIX "_q_"
 
 const char* q_duckdb_codec_co_name(int kind) { return QD_CO_NAMES[kind]; }
 
@@ -448,19 +458,16 @@ const char* q_duckdb_codec_co_name(int kind) { return QD_CO_NAMES[kind]; }
  * declares and the cast leg consumes */
 void q_duckdb_codec_companion_col(qd_buf* b, const char* parent, size_t n, int kind) {
     q_duckdb_putn(b, parent, n);
-    q_duckdb_puts(b, "_q_");
+    q_duckdb_puts(b, QD_CO_INFIX);
     q_duckdb_puts(b, QD_CO_NAMES[kind]);
 }
 
 /* the kind a column name's suffix spells (QD_CO_NONE = not a companion); *sl the suffix length */
 static int qd_companion_kind(const char* s, size_t n, size_t* sl) {
     for (int k = QD_CO_ISNULL; k <= QD_CO_TZOFF; k++) {
-        qd_buf sfx = {0};
-        q_duckdb_codec_companion_col(&sfx, "", 0, k);
-        bool hit = !sfx.oom && n >= sfx.len && memcmp(s + n - sfx.len, sfx.p, sfx.len) == 0;
-        *sl = sfx.len;
-        q_duckdb_buf_free(&sfx);
-        if (hit) return k;
+        size_t kl = strlen(QD_CO_NAMES[k]);
+        *sl = 3 + kl;
+        if (n >= *sl && memcmp(s + n - *sl, QD_CO_INFIX, 3) == 0 && memcmp(s + n - kl, QD_CO_NAMES[k], kl) == 0) return k;
     }
     return QD_CO_NONE;
 }
@@ -473,7 +480,7 @@ bool q_duckdb_codec_companion_name(const char* s, size_t n) {
 /* The bridge's reserved namespace is the _q_ infix: a BARE table carries none, because a companion travels only
  * inside the pair (data;schema) and a q-born column of that spelling is a user's, colliding (ADR 11). */
 static bool qd_reserved_col(const char* s, size_t n) {
-    for (size_t i = 0; i + 3 <= n; i++) if (memcmp(s + i, "_q_", 3) == 0) return true;
+    for (size_t i = 0; i + 3 <= n; i++) if (memcmp(s + i, QD_CO_INFIX, 3) == 0) return true;
     return false;
 }
 
@@ -548,26 +555,21 @@ static ray_t* qd_rec_shell(const qd_colmap_t* cm, int kind) {
     return t ? t : q_err(QE_WSFULL);
 }
 
-/* one leaf flag onto the accumulator — a boolean vector at a leaf level, a list of atoms above it */
-static ray_t* qd_mirror_bit_append(ray_t* m, bool flag) {
-    if (!m || RAY_IS_ERR(m)) return m;
-    if (m->type == RAY_BOOL) { uint8_t f = flag; return ray_vec_append(m, &f); }
-    ray_t* a = ray_bool(flag);
-    if (!a || RAY_IS_ERR(a)) { ray_release(m); return a ? a : q_err(QE_WSFULL); }
-    ray_t* out = ray_list_append(m, a);   /* retains */
-    ray_release(a);
-    if (out && RAY_IS_ERR(out)) ray_release(m);
-    return out;
-}
-
-/* one whole row-mirror onto the accumulator; the caller's ref is consumed either way */
+/* one owned cell onto the accumulator; the caller's ref is consumed either way (THE append the mirrors derive from) */
 static ray_t* qd_mirror_append(ray_t* m, ray_t* cell) {
-    if (!cell || RAY_IS_ERR(cell)) { if (m && !RAY_IS_ERR(m)) ray_release(m); return cell ? cell : q_err(QE_WSFULL); }
+    if (!cell || RAY_IS_ERR(cell)) { q_duckdb_drop(m); return cell ? cell : q_err(QE_WSFULL); }
     if (!m || RAY_IS_ERR(m)) { ray_release(cell); return m; }
     ray_t* out = ray_list_append(m, cell);   /* retains */
     ray_release(cell);
     if (out && RAY_IS_ERR(out)) ray_release(m);
     return out;
+}
+
+/* one leaf flag onto the accumulator — a boolean vector at a leaf level, a list of atoms above it */
+static ray_t* qd_mirror_bit_append(ray_t* m, bool flag) {
+    if (!m || RAY_IS_ERR(m)) return m;
+    if (m->type == RAY_BOOL) { uint8_t f = flag; return ray_vec_append(m, &f); }
+    return qd_mirror_append(m, ray_bool(flag));
 }
 
 /* the i-th sub-mirror, borrowed; a boolean vector holds leaves, not sub-mirrors */
@@ -637,12 +639,7 @@ static bool qd_mirror_any(ray_t* m) {
 static ray_t* qd_tz_append(ray_t* m, int32_t off, bool isnull) {
     if (!m || RAY_IS_ERR(m)) return m;
     if (m->type == RAY_I32) return isnull ? qd_append_null(m) : ray_vec_append(m, &off);
-    ray_t* a = ray_i32(isnull ? NULL_I32 : off);
-    if (!a || RAY_IS_ERR(a)) { ray_release(m); return a ? a : q_err(QE_WSFULL); }
-    ray_t* out = ray_list_append(m, a);   /* retains */
-    ray_release(a);
-    if (out && RAY_IS_ERR(out)) ray_release(m);
-    return out;
+    return qd_mirror_append(m, ray_i32(isnull ? NULL_I32 : off));
 }
 
 /* The companions one read builds beside a value — the shape mirror, the leaf carrier's own, and a zoned leaf's
@@ -688,20 +685,11 @@ static ray_t* qd_long_row(ray_t* mask, ray_t* col, int64_t v, bool hi) {
 
 /* The TEXT twin of qd_long_row (ADR 11/19): a raw companion of DuckDB's own spelling, "" the absent marker the
  * write-back reads as "the slot holds it".  Born on the first row that needs it, over a column already holding it. */
-static ray_t* qd_text_cell(ray_t* mask, const char* s) {
-    ray_t* cell = ray_charv(s, (int64_t)strlen(s));
-    if (!cell || RAY_IS_ERR(cell)) { ray_release(mask); return cell ? cell : q_err(QE_WSFULL); }
-    ray_t* out = ray_list_append(mask, cell);   /* retains; leaves the accumulator standing when it fails */
-    ray_release(cell);
-    if (RAY_IS_ERR(out)) ray_release(mask);
-    return out;
-}
-
 static ray_t* qd_text_row(ray_t* mask, ray_t* col, const char* s) {
     int64_t row = q_count(col) - 1;
     if (!mask) mask = ray_list_new(row + 1);
-    while (mask && !RAY_IS_ERR(mask) && q_count(mask) < row) mask = qd_text_cell(mask, "");
-    return !mask || RAY_IS_ERR(mask) ? mask : qd_text_cell(mask, s);
+    while (mask && !RAY_IS_ERR(mask) && q_count(mask) < row) mask = qd_mirror_append(mask, ray_charv("", 0));
+    return !mask || RAY_IS_ERR(mask) ? mask : qd_mirror_append(mask, ray_charv(s, (int64_t)strlen(s)));
 }
 
 /* A months-bearing INTERVAL as text DuckDB parses back to the same three fields; its own rendering would need its
@@ -752,7 +740,7 @@ static char* qd_varint_text(const char* p, int64_t len) {
 
 static ray_t* qd_read_fail(int slot, ray_t* col, const qd_tmap_t* tm, const char* why) {
     ray_release(col);
-    return q_duckdb_fail(slot, tm->logical, why);
+    return q_duckdb_fail(slot, "%s: %s", tm->logical, why);
 }
 
 /* A µs count as the micros-only INTERVAL it is: months and days stay 0, so nothing we write can leak into a unit
@@ -839,7 +827,7 @@ static int qd_val_co_kind(const qd_colmap_t* cm) {
 
 /* ADR 21: a zoned temporal is a PAIR — the slot holds one integer and c_q_tzoff the other, ALWAYS, because an
  * offset of zero is a fact about the value and not an absence. */
-bool q_duckdb_codec_zoned(const qd_colmap_t* cm) {
+static bool qd_zoned(const qd_colmap_t* cm) {
     return !cm->rec && (cm->leaf->dk_type == QDUCK_TYPE_TIME_TZ || cm->leaf->dk_type == QDUCK_TYPE_TIMESTAMP_TZ);
 }
 
@@ -849,9 +837,9 @@ bool q_duckdb_codec_zoned(const qd_colmap_t* cm) {
 int q_duckdb_codec_companions_of(const qd_colmap_t* cm, const char* out[QD_CO_MAX]) {
     int n = 0;
     int k = qd_co_kind(cm), v = qd_val_co_kind(cm);
-    if (k != QD_CO_NONE || !q_duckdb_codec_zoned(cm)) out[n++] = QD_CO_NAMES[k];
+    if (k != QD_CO_NONE || !qd_zoned(cm)) out[n++] = QD_CO_NAMES[k];
     if (v != QD_CO_NONE && v != k) out[n++] = QD_CO_NAMES[v];
-    if (q_duckdb_codec_zoned(cm)) out[n++] = QD_CO_NAMES[QD_CO_TZOFF];
+    if (qd_zoned(cm)) out[n++] = QD_CO_NAMES[QD_CO_TZOFF];
     return n;
 }
 
@@ -1258,7 +1246,7 @@ static void qd_racc_free(qd_racc_t* a) {
 
 static ray_t* qd_born(ray_t** slot, ray_t* v) {
     if (v && !RAY_IS_ERR(v)) { *slot = v; return NULL; }
-    if (v) ray_release(v);
+    ray_release(v);
     return q_err(QE_WSFULL);
 }
 
@@ -1280,7 +1268,7 @@ static void qd_field_cos(const qd_colmap_t* fm, qd_cos_t* cos) {
         }
         return;
     }
-    cos->co[QD_CO_TZOFF].want = q_duckdb_codec_zoned(fm);
+    cos->co[QD_CO_TZOFF].want = qd_zoned(fm);
     int v = qd_val_co_kind(fm);
     if (v != QD_CO_NONE) cos->co[v].want = true;
 }
@@ -1347,7 +1335,7 @@ static ray_t* qd_read_rec(int slot, qd_racc_t* acc, const qd_colmap_t* cm, duck_
         int16_t sel = -1;
         if (ok) {
             sel = uni ? (int16_t)tag[rw] : 0;
-            if (sel >= r->n) { e = q_duckdb_fail(slot, cm->leaf->logical, "tag outside the union's members"); break; }
+            if (sel >= r->n) { e = q_duckdb_fail(slot, "%s: tag outside the union's members", cm->leaf->logical); break; }
             for (int i = uni ? sel : 0, hi = uni ? sel + 1 : r->n; !e && i < hi; i++) {
                 duck_idx_t off = map ? (duck_idx_t)ent[rw].offset : rw;
                 duck_idx_t len = map ? (duck_idx_t)ent[rw].length : 1;
@@ -1397,9 +1385,9 @@ static ray_t* qd_rec_cell(qd_racc_t* acc, const qd_rec_t* r, int from, int cnt, 
                     : co == QD_CO_NONE       ? NULL
                                              : qd_co_absent(co, r->f[k].map.leaf);
         if (!v || RAY_IS_ERR(v) || !keys || RAY_IS_ERR(keys) || !vals || RAY_IS_ERR(vals)) {
-            if (v && !RAY_IS_ERR(v)) ray_release(v);
-            if (keys && !RAY_IS_ERR(keys)) ray_release(keys);
-            if (vals && !RAY_IS_ERR(vals)) ray_release(vals);
+            q_duckdb_drop(v);
+            q_duckdb_drop(keys);
+            q_duckdb_drop(vals);
             return q_err(QE_WSFULL);
         }
         keys = ray_vec_append(keys, &id);
@@ -1409,8 +1397,8 @@ static ray_t* qd_rec_cell(qd_racc_t* acc, const qd_rec_t* r, int from, int cnt, 
     ray_t* cv = q_list_collapse(vals);
     ray_release(vals);
     if (!keys || RAY_IS_ERR(keys) || !cv || RAY_IS_ERR(cv)) {
-        if (keys && !RAY_IS_ERR(keys)) ray_release(keys);
-        if (cv && !RAY_IS_ERR(cv)) ray_release(cv);
+        q_duckdb_drop(keys);
+        q_duckdb_drop(cv);
         return q_err(QE_WSFULL);
     }
     return ray_dict_new(keys, cv);   /* consumes both */
@@ -1420,8 +1408,8 @@ static ray_t* qd_empty_dict(void) {
     ray_t* k = ray_list_new(1);
     ray_t* v = ray_list_new(1);
     if (!k || RAY_IS_ERR(k) || !v || RAY_IS_ERR(v)) {
-        if (k && !RAY_IS_ERR(k)) ray_release(k);
-        if (v && !RAY_IS_ERR(v)) ray_release(v);
+        q_duckdb_drop(k);
+        q_duckdb_drop(v);
         return q_err(QE_WSFULL);
     }
     return ray_dict_new(k, v);
@@ -1482,8 +1470,9 @@ static ray_t* qd_rec_build(int slot, qd_racc_t* acc, const qd_colmap_t* cm, bool
     for (int k = 0; out && k < QD_NCOS; k++) {
         bool always = k == QD_CO_ISNULL || k == QD_CO_TZOFF;
         if (map && !always && acc->fcos[0].co[k].want && acc->fcos[0].co[k].need)
-            return q_duckdb_fail(slot, cm->leaf->logical, k == QD_CO_NOTNULL ? "a key on the q null pattern has no companion"
-                                                                             : "a MAP's keys grow a companion its mirror cannot carry");
+            return q_duckdb_fail(slot, "%s: %s", cm->leaf->logical,
+                                 k == QD_CO_NOTNULL ? "a key on the q null pattern has no companion"
+                                                    : "a MAP's keys grow a companion its mirror cannot carry");
         for (int i = map ? 1 : 0; i < r->n; i++) {
             if (!acc->fcos[i].co[k].want || !(always || acc->fcos[i].co[k].need)) continue;
             if (!out->co[k].want) tmof[k] = r->f[i].map.leaf;
@@ -1533,9 +1522,8 @@ static ray_t* qd_read_rec_cell(int slot, ray_t* col, const qd_colmap_t* cm, duck
 
 /* Descriptor refinement: a row refines the physical map IFF its logical exists
  * AND agrees on both carrier and LIST depth; anything else DEGRADES. */
-void q_duckdb_codec_refine(const char* cname, const qd_desc_t* desc, int64_t ndesc,
-                           qd_colmap_t* cm) {
-    const qd_desc_t* d = q_duckdb_schema_desc_find(cname, strlen(cname), desc, ndesc);
+void q_duckdb_codec_refine(const char* cname, size_t n, const qd_desc_t* desc, int64_t ndesc, qd_colmap_t* cm) {
+    const qd_desc_t* d = q_duckdb_schema_desc_find(cname, n, desc, ndesc);
     qd_colmap_t ref;
     /* a record's fields are its refinement and only the dtype carries them, so no logical row may flatten it */
     if (cm->rec || !d || !q_duckdb_codec_parse_logical(d->logical, &ref) || ref.depth != cm->depth ||
@@ -1551,7 +1539,7 @@ ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_
     int64_t ncols = (int64_t)QAPI.column_count(res);
     bool query = QAPI.result_return_type(*res) == QDuckReturnQuery;
     if (schema) *schema = NULL;
-    if (ncols == 0) { ray_retain(RAY_NULL_OBJ); return RAY_NULL_OBJ; }
+    if (ncols == 0) return RAY_NULL_OBJ;
 
     /* one block a column — its map, the column being read, its companion set, a record's accumulator — and, asked,
      * the schema rows beside it; ONE exit below releases whatever any path left in them */
@@ -1577,7 +1565,7 @@ ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_
         if (!ok && why) q_duckdb_err_stash(slot, "column %s: %s", nm, why);
         else if (!ok) q_duckdb_err_stash(slot, "column %s: %s has no mapping", nm, q_duckdb_type_name(miss));
         else {
-            q_duckdb_codec_refine(nm, desc, ndesc, &cms[c]);
+            q_duckdb_codec_refine(nm, strlen(nm), desc, ndesc, &cms[c]);
             /* the type alone answers here; whether the column also turns out to be EMPTY is not known until the
              * chunks are in, and the logical type is gone by then — so the row is spelled now and re-judged later */
             if (rows) err = q_duckdb_schema_desc_of(nm, lt, &cms[c], desc, ndesc, false, &rows[c], &want[c]);
@@ -1669,7 +1657,6 @@ ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_
     if (ddl) {
         ray_release(tbl);
         tbl = RAY_NULL_OBJ;
-        ray_retain(tbl);
     }
     /* the same question a SECOND time, now that the rows are in (ADR 15): a column that turned out to be untyped —
      * no rows, or every cell empty or NULL — keeps its type only through a row, so it earns one here even where its
@@ -1679,7 +1666,7 @@ ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_
         int64_t nkeep = 0;
         if (!keep) err = q_err(QE_WSFULL);
         for (int64_t c = 0; keep && c < ncols; c++) {
-            if (!want[c] && !taken[c] && q_duckdb_codec_untyped(cols[c]))
+            if (!want[c] && !taken[c] && qd_untyped(cols[c]))
                 want[c] = q_duckdb_schema_needs(&cms[c], rows[c].dtype, true) != 0;
             if (want[c] && !taken[c]) keep[nkeep++] = rows[c];
         }
@@ -1692,7 +1679,7 @@ ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_
     if (err && schema && *schema) { ray_release(*schema); *schema = NULL; }
     for (int64_t c = 0; c < ncols; c++) {   /* add_col retained its own refs; a read that stopped short left NULLs */
         q_duckdb_codec_map_free(&cms[c]);
-        if (cols[c]) ray_release(cols[c]);
+        ray_release(cols[c]);
         qd_cos_drop(&cos[c]);
     }
     q_duckdb_schema_desc_free(rows, rows ? ncols : 0);
@@ -1758,7 +1745,7 @@ static ray_t* qd_put_text(int slot, duck_vector dv, duck_idx_t r, ray_t* col, in
     int64_t     n;
     int         k = qd_text_at(col, i, &p, &n);
     if (k == QD_TX_NULL) { qd_set_invalid(dv, r); return NULL; }
-    if (k == QD_TX_NONE) return q_duckdb_fail(slot, tm->logical, "cell is not text");
+    if (k == QD_TX_NONE) return q_duckdb_fail(slot, "%s: cell is not text", tm->logical);
     if (qd_utf8_valid((const unsigned char*)p, (size_t)n)) {
         QAPI.vector_assign_string_element_len(dv, r, p, (duck_idx_t)n);
         return NULL;
@@ -1766,10 +1753,8 @@ static ray_t* qd_put_text(int slot, duck_vector dv, duck_idx_t r, ray_t* col, in
     int64_t bad = 1;
     for (int64_t j = i + 1; j < q_count(col); j++)
         if (qd_text_at(col, j, &p, &n) == QD_TX_TEXT && !qd_utf8_valid((const unsigned char*)p, (size_t)n)) bad++;
-    char why[96];
-    snprintf(why, sizeof why, "text is not valid UTF-8 in %lld cell%s, the first at %lld", (long long)bad,
-             bad == 1 ? "" : "s", (long long)i);
-    return q_duckdb_fail(slot, tm->logical, why);
+    return q_duckdb_fail(slot, "%s: text is not valid UTF-8 in %lld cell%s, the first at %lld", tm->logical, (long long)bad,
+                         bad == 1 ? "" : "s", (long long)i);
 }
 
 /* THE write cell codec: n elements of col from `base` into dv rows from `dst`.  A sentinel
@@ -1811,7 +1796,7 @@ static ray_t* qd_write_leaf(int slot, duck_vector dv, ray_t* col, const qd_tmap_
                 if (qd_date_inf(v)) { ((int32_t*)data)[r] = v; break; }
                 int64_t d = month_payload_as_days(v) + QD_EPOCH_DAYS;
                 if (d > INT32_MAX || d < -(int64_t)INT32_MAX)
-                    return q_duckdb_fail(slot, tm->logical, "outside the DATE range");
+                    return q_duckdb_fail(slot, "%s: outside the DATE range", tm->logical);
                 ((int32_t*)data)[r] = (int32_t)d;
                 break;
             }
@@ -1844,7 +1829,7 @@ static ray_t* qd_write_leaf(int slot, duck_vector dv, ray_t* col, const qd_tmap_
             case RAY_DATETIME: { /* float days -> the TIMESTAMP's µs at q's millisecond grain; ±0w is ±infinity */
                 double v = *(double*)ray_vec_get(col, src);
                 if (v != v) {                                   /* 0Nz -> NULL; no TIMESTAMP spells it as a value */
-                    if (kp) return q_duckdb_fail(slot, tm->logical, "no TIMESTAMP holds the datetime null");
+                    if (kp) return q_duckdb_fail(slot, "%s: no TIMESTAMP holds the datetime null", tm->logical);
                     qd_set_invalid(dv, r);
                     break;
                 }
@@ -1852,10 +1837,10 @@ static ray_t* qd_write_leaf(int slot, duck_vector dv, ray_t* col, const qd_tmap_
                 if (v < 0 && isinf(v))  { ((int64_t*)data)[r] = -INT64_MAX; break; }
                 double ms = v * 86400000.0;
                 if (!(ms >= -9.0e15 && ms <= 9.0e15))
-                    return q_duckdb_fail(slot, tm->logical, "outside the TIMESTAMP range");
+                    return q_duckdb_fail(slot, "%s: outside the TIMESTAMP range", tm->logical);
                 int64_t n = llround(ms);
                 if ((double)n / 86400000.0 != v)   /* the count the reader rebuilds from must give the value back */
-                    return q_duckdb_fail(slot, tm->logical, "below the millisecond");
+                    return q_duckdb_fail(slot, "%s: below the millisecond", tm->logical);
                 ((int64_t*)data)[r] = (n + QD_EPOCH_MS) * 1000;
                 break;
             }
@@ -1871,7 +1856,7 @@ static ray_t* qd_write_leaf(int slot, duck_vector dv, ray_t* col, const qd_tmap_
                 if (qd_cell_is_0n(cell)) { qd_set_invalid(dv, r); break; }
                 if (tm->dk_type == QDUCK_TYPE_BIT) {
                     if (!cell || (cell->type != RAY_BOOL && q_count(cell)))
-                        return q_duckdb_fail(slot, tm->logical, "cell is not a boolean vector");
+                        return q_duckdb_fail(slot, "%s: cell is not a boolean vector", tm->logical);
                     /* DuckDB has no zero-bit BIT, so an empty cell has exactly one meaning: the NULL a read fills
                      * with one.  Flag it here — the isnull companion never reaches the leaf. */
                     if (!q_count(cell)) { qd_set_invalid(dv, r); break; }
@@ -1880,7 +1865,7 @@ static ray_t* qd_write_leaf(int slot, duck_vector dv, ray_t* col, const qd_tmap_
                     break;
                 }
                 if (!cell || cell->type != RAY_BYTE_ONLY)
-                    return q_duckdb_fail(slot, tm->logical, "cell is not a byte vector");
+                    return q_duckdb_fail(slot, "%s: cell is not a byte vector", tm->logical);
                 const char* bp = q_count(cell) ? (const char*)ray_vec_get(cell, 0) : "";
                 QAPI.vector_assign_string_element_len(dv, r, bp,
                                                       (duck_idx_t) q_count(cell));
@@ -1891,7 +1876,7 @@ static ray_t* qd_write_leaf(int slot, duck_vector dv, ray_t* col, const qd_tmap_
                 if (v == NULL_I32) { qd_set_invalid(dv, r); break; }
                 if (qd_date_inf(v)) { ((int32_t*)data)[r] = v; break; }
                 if (v >= INT32_MAX - QD_EPOCH_DAYS)   /* the count ON the sentinel would read back as infinity */
-                    return q_duckdb_fail(slot, tm->logical, "above the q epoch shift");
+                    return q_duckdb_fail(slot, "%s: above the q epoch shift", tm->logical);
                 ((int32_t*)data)[r] = v + QD_EPOCH_DAYS;
                 break;
             }
@@ -1906,7 +1891,7 @@ static ray_t* qd_write_leaf(int slot, duck_vector dv, ray_t* col, const qd_tmap_
                 if (v == NULL_I64) { qd_set_invalid(dv, r); break; }
                 if (qd_ts_inf(v)) { ((int64_t*)data)[r] = v; break; }
                 if (v >= INT64_MAX - QD_EPOCH_NS)
-                    return q_duckdb_fail(slot, tm->logical, "above the q epoch shift");
+                    return q_duckdb_fail(slot, "%s: above the q epoch shift", tm->logical);
                 ((int64_t*)data)[r] = v + QD_EPOCH_NS;
                 break;
             }
@@ -2019,18 +2004,12 @@ static ray_t* qd_write_col(int slot, duck_vector dv, ray_t* col, const qd_colmap
 /* Append a q table through the appender in vector-size chunks (cms[] pre-validated; masks[] and keeps[] = the
  * consumed companions, the shape mirror and a nested column's element companion, NULL where a column has neither;
  * catalog NULL = the default, "temp" = staging). */
-static ray_t* append_table_rows(int slot, const qd_name_t* nm, bool temp, ray_t* tbl,
+static ray_t* append_table_rows(int slot, const char* catalog, const char* schema, const char* table, ray_t* tbl,
                                 const qd_colmap_t* cms, ray_t* const* masks, ray_t* const* keeps) {
     int64_t ncols = ray_table_ncols(tbl);
     int64_t nrows = q_count(tbl);
-    /* the appender takes the parts the name grammar found, never the text: catalog, the schema the name
-     * resolved in, then the table */
-    const char* catalog = temp ? "temp" : nm->n == 3 ? nm->part[0] : NULL;
-    const char* schema  = temp || !*nm->schema ? "main" : nm->schema;
-
     duck_appender app = NULL;
-    if (QAPI.appender_create_ext(q_duckdb_con(slot), catalog, schema, nm->part[nm->n - 1], &app)
-            != QDuckSuccess) {
+    if (QAPI.appender_create_ext(q_duckdb_con(slot), *catalog ? catalog : NULL, schema, table, &app) != QDuckSuccess) {
         q_duckdb_err_stash(slot, "%s", QD_TEXT(QAPI.appender_error(app)));
         QAPI.appender_destroy(&app);
         return q_err(QE_DUCKDB);
@@ -2081,11 +2060,13 @@ static ray_t* append_table_rows(int slot, const qd_name_t* nm, bool temp, ray_t*
  * statement in any dialect, so nothing can mistake it for one and the timeline has no hole where the write was. */
 ray_t* q_duckdb_codec_append_table(int slot, const qd_name_t* nm, bool temp, ray_t* tbl,
                                    const qd_colmap_t* cms, ray_t* const* masks, ray_t* const* keeps) {
-    int64_t t0  = q_dotz_now_ns(0);
-    ray_t*  err = append_table_rows(slot, nm, temp, tbl, cms, masks, keeps);
-    char    what[1024];
+    int64_t t0 = q_dotz_now_ns(0);
+    /* the appender takes the parts the name grammar found, never the text: catalog ("" = the default), the schema
+     * the name resolved in, then the table */
     const char* catalog = temp ? "temp" : nm->n == 3 ? nm->part[0] : "";
     const char* schema  = temp || !*nm->schema ? "main" : nm->schema;
+    ray_t* err = append_table_rows(slot, catalog, schema, nm->part[nm->n - 1], tbl, cms, masks, keeps);
+    char   what[1024];
     snprintf(what, sizeof what, "/ appender %s%s%s.%s (%lld rows)", catalog, *catalog ? "." : "", schema,
              nm->part[nm->n - 1], (long long) q_count(tbl));
     q_duckdb_stmt_note(slot, what, t0, !err, q_count(tbl),
@@ -2100,16 +2081,15 @@ ray_t* q_duckdb_codec_check_table(int slot, ray_t* tbl, qd_colmap_t* cms) {
     for (int64_t c = 0; c < ncols; c++) cms[c] = (qd_colmap_t){ NULL, NULL, 0, false };
     for (int64_t c = 0; c < ncols; c++) {
         ray_t* col = ray_table_get_col_idx(tbl, c);   /* borrowed */
-        ray_t* nm  = ray_sym_str(ray_table_col_name(tbl, c));
+        size_t nl;
+        const char* np  = q_duckdb_col_name(tbl, c, &nl);
         const char* why = "the q column has no SQL meaning";
-        if (nm && col && qd_map_write(slot, col, 0, &cms[c], &why)) {
+        if (col && qd_map_write(slot, col, 0, &cms[c], &why)) {
             /* a flat enum column was decayed at the door, so one still here is under a LIST */
             if (cms[c].leaf->ray_type != RAY_ENUM) continue;
-            return q_duckdb_fail(slot, "enum", "a nested enum column has no mapping");
+            return q_duckdb_fail(slot, "enum: a nested enum column has no mapping");
         }
-        char what[300];
-        snprintf(what, sizeof what, "column %.*s", (int)(nm ? ray_str_len(nm) : 1), nm ? ray_str_ptr(nm) : "?");
-        return q_duckdb_fail(slot, what, why);
+        return q_duckdb_fail_col(slot, np, nl, "%s", why);
     }
     return NULL;
 }
@@ -2120,10 +2100,7 @@ static duck_logical_type qd_lt_under(duck_logical_type lt, int kind, int i) {
     duck_type id = QAPI.get_type_id(lt);
     if (kind < 0) return id == QDUCK_TYPE_LIST ? QAPI.list_type_child_type(lt)
                        : id == QDUCK_TYPE_ARRAY ? QAPI.array_type_child_type(lt) : NULL;
-    if (id != (duck_type)kind) return NULL;
-    return id == QDUCK_TYPE_MAP    ? (i ? QAPI.map_type_value_type(lt) : QAPI.map_type_key_type(lt))
-         : id == QDUCK_TYPE_UNION  ? QAPI.union_type_member_type(lt, (duck_idx_t)i)
-                                   : QAPI.struct_type_child_type(lt, (duck_idx_t)i);
+    return id == (duck_type)kind ? q_duckdb_codec_rec_child(lt, id, i, NULL) : NULL;
 }
 
 /* the first field whose q type only a sidecar row could bring back (no bare read answers it) and whose declared
@@ -2177,12 +2154,10 @@ ray_t* q_duckdb_codec_check_fields(int slot, ray_t* tbl, int64_t c, duck_logical
     const char* type;
     bool        legless = false;
     if (!cm->rec || !qd_field_refined(cm, lt, path, sizeof path, &type, &legless)) return NULL;
-    ray_t* nm = ray_sym_str(ray_table_col_name(tbl, c));   /* borrowed */
-    char what[300], why[640];
-    snprintf(what, sizeof what, "column %.*s", (int)(nm ? ray_str_len(nm) : 1), nm ? ray_str_ptr(nm) : "?");
-    snprintf(why, sizeof why, "field %s is %s %s - %s", path, strchr("aeiou", *type) ? "an" : "a", type,
-             legless ? QD_NO_CAST_LEG : "no q refinement inside a record");
-    return q_duckdb_fail(slot, what, why);
+    size_t nl;
+    const char* np = q_duckdb_col_name(tbl, c, &nl);
+    return q_duckdb_fail_col(slot, np, nl, "field %s is %s %s - %s", path, strchr("aeiou", *type) ? "an" : "a", type,
+                             legless ? QD_NO_CAST_LEG : "no q refinement inside a record");
 }
 
 /* THE enum site, at the write door's entry (2026-09-14): decayed before the schema check, the sidecar, the appender
@@ -2204,9 +2179,9 @@ ray_t* q_duckdb_codec_decay_enums(int slot, ray_t* tbl, qd_enum_t* en) {
         if (!en[c].dom) { out = ray_table_add_col(out, ray_table_col_name(tbl, c), col); continue; }   /* retains */
         ray_t* val = q_enum_resolve(col);
         if (!val || RAY_IS_ERR(val) || val->type != RAY_SYM) {
-            if (val) ray_release(val);
+            ray_release(val);
             ray_release(out);
-            return q_duckdb_fail(slot, "enum", "the domain resolves to no symbol list");
+            return q_duckdb_fail(slot, "enum: the domain resolves to no symbol list");
         }
         out = ray_table_add_col(out, ray_table_col_name(tbl, c), val);       /* retains */
         ray_release(val);
@@ -2214,10 +2189,8 @@ ray_t* q_duckdb_codec_decay_enums(int slot, ray_t* tbl, qd_enum_t* en) {
     return out ? out : q_err(QE_WSFULL);
 }
 
-static ray_t* qd_reject(int slot, ray_t* nm, const char* why) {
-    char what[300];
-    snprintf(what, sizeof what, "companion %.*s", (int)ray_str_len(nm), ray_str_ptr(nm));
-    return q_duckdb_fail(slot, what, why);
+static ray_t* qd_reject(int slot, const char* nm, size_t n, const char* why) {
+    return q_duckdb_fail(slot, "companion %.*s: %s", (int)n, nm, why);
 }
 
 /* A companion is admissible on a parent iff some manifest row of the parent's carrier can emit it: a j column may
@@ -2232,7 +2205,7 @@ static bool qd_co_admissible(const qd_colmap_t* pcm, int kind) {
     }
     for (size_t i = 0; kind == QD_CO_TZOFF && i < QD_NTYPES; i++)   /* ADR 21: it rides beside, so nesting is no bar */
         if (QD_TYPES[i].ray_type == pcm->leaf->ray_type &&
-            q_duckdb_codec_zoned(&(const qd_colmap_t){ &QD_TYPES[i], NULL, 0, false })) return true;
+            qd_zoned(&(const qd_colmap_t){ &QD_TYPES[i], NULL, 0, false })) return true;
     if (kind == QD_CO_TZOFF) return false;
     if (kind == QD_CO_ISNULL) return qd_cm_nullless(pcm);
     /* Depth is no bar to any of them: an element companion is the appender's to consume and the appender reaches
@@ -2400,20 +2373,18 @@ static ray_t* qd_store_companions(int slot, duck_result* res, int64_t ncols, con
             if (p != d && strlen(pn) == n - sl && memcmp(pn, nm, n - sl) == 0) c = p;
         }
         if (c < 0) continue;   /* an orphan is a column of its own; the write door refuses it by name */
-        char what[300];
-        snprintf(what, sizeof what, "companion %s", nm);
         const qd_colmap_t* pcm = &cms[c];
         bool text = kind == QD_CO_RAW && q_duckdb_codec_raw_is_text(pcm->leaf->ray_type);
         int  lf   = kind < QD_CO_RAW ? RAY_BOOL : kind == QD_CO_TZOFF ? RAY_I32 : text ? RAY_STR : RAY_I64;
-        if (pcm->rec || cms[d].rec) return q_duckdb_fail(slot, what, QD_NO_CAST_LEG);
-        if (!qd_co_admissible(pcm, kind)) return q_duckdb_fail(slot, what, "no column of the parent's type grows it");
+        if (pcm->rec || cms[d].rec) return q_duckdb_fail(slot, "companion %s: %s", nm, QD_NO_CAST_LEG);
+        if (!qd_co_admissible(pcm, kind)) return q_duckdb_fail(slot, "companion %s: %s", nm, "no column of the parent's type grows it");
         if (cms[d].leaf->ray_type != lf || cms[d].depth != pcm->depth)
-            return q_duckdb_fail(slot, what, kind < QD_CO_RAW ? "not a boolean column" : kind == QD_CO_TZOFF
+            return q_duckdb_fail(slot, "companion %s: %s", nm, kind < QD_CO_RAW ? "not a boolean column" : kind == QD_CO_TZOFF
                                  ? "is no int column mirroring its parent" : text ? "not a text column" : "not a long column");
         for (int i = 0; i < QD_NCOS; i++)
-            if (cos[d].co[i].acc) return q_duckdb_fail(slot, what, "a store companion holds NULL");
+            if (cos[d].co[i].acc) return q_duckdb_fail(slot, "companion %s: %s", nm, "a store companion holds NULL");
         bool fits = kind < QD_CO_RAW ? qd_mirror_fits_col(pcm, cols[c], cols[d]) : qd_leaf_fits(pcm, cols[c], cols[d], lf);
-        if (!fits) return q_duckdb_fail(slot, what, kind == QD_CO_TZOFF ? "is no int column mirroring its parent"
+        if (!fits) return q_duckdb_fail(slot, "companion %s: %s", nm, kind == QD_CO_TZOFF ? "is no int column mirroring its parent"
                                                                         : "does not mirror the shape of its parent");
         ray_t** acc = &cos[c].co[kind].acc;
         ray_t*  v   = kind < QD_CO_RAW ? qd_mask_or(*acc, cols[d]) : (ray_retain(cols[d]), cols[d]);
@@ -2450,21 +2421,18 @@ static ray_t* qd_strip(int slot, ray_t* tbl, ray_t** masks, ray_t** offs, ray_t*
                        bool bare, int64_t* parent, int64_t* at, int64_t* nest) {
     int64_t ncols = ray_table_ncols(tbl), nkeep = 0;
     for (int64_t c = 0; c < ncols; c++) {
-        ray_t* nm = ray_sym_str(ray_table_col_name(tbl, c));   /* borrowed */
-        size_t n  = nm ? ray_str_len(nm) : 0, sl = 0;
-        if (bare && nm && qd_reserved_col(ray_str_ptr(nm), n)) {
-            char what[300];
-            snprintf(what, sizeof what, "column %.*s", (int)n, ray_str_ptr(nm));
-            return q_duckdb_fail(slot, what, "_q_ is reserved; a companion rides the pair (data;schema)");
-        }
-        int kind = nm ? qd_companion_kind(ray_str_ptr(nm), n, &sl) : QD_CO_NONE;
+        size_t n, sl = 0;
+        const char* np = q_duckdb_col_name(tbl, c, &n);
+        if (bare && qd_reserved_col(np, n))
+            return q_duckdb_fail_col(slot, np, n, "_q_ is reserved; a companion rides the pair (data;schema)");
+        int kind = qd_companion_kind(np, n, &sl);
         parent[c] = -1;
         nest[c]   = 0;
         if (kind == QD_CO_NONE) { nkeep++; continue; }
-        int64_t pid = ray_sym_intern_runtime(ray_str_ptr(nm), n - sl);
+        int64_t pid = ray_sym_intern_runtime(np, n - sl);
         for (int64_t p = 0; p < ncols; p++) if (ray_table_col_name(tbl, p) == pid) parent[c] = p;
         ray_t* col = ray_table_get_col_idx(tbl, c);
-        if (parent[c] < 0) return qd_reject(slot, nm, "no parent column");
+        if (parent[c] < 0) return qd_reject(slot, np, n, "no parent column");
         /* the parent's map first: which CARRIER a raw companion wears is the parent's business (ADR 19 — a raw over
          * a timespan is DuckDB's own text, every other raw a long), so its own type check has to wait for it */
         ray_t* pcol = ray_table_get_col_idx(tbl, parent[c]);
@@ -2500,15 +2468,15 @@ static ray_t* qd_strip(int slot, ray_t* tbl, ray_t** masks, ray_t** offs, ray_t*
         }
         nest[c] = nest[c] && kind != QD_CO_ISNULL;   /* the mirror keeps its own slot; only the VALUE moves over */
         q_duckdb_codec_map_free(&pcm);
-        if (legless) return qd_reject(slot, nm, QD_NO_CAST_LEG);
+        if (legless) return qd_reject(slot, np, n, QD_NO_CAST_LEG);
         if (!shaped && (!col || col->type != (kind < QD_CO_RAW ? RAY_BOOL : text ? RAY_LIST : RAY_I64)))
-            return qd_reject(slot, nm, kind < QD_CO_RAW ? "not a boolean column"
-                                     : text ? "not a text column" : "not a long column");
-        if (!rows)   return qd_reject(slot, nm, "row count differs from its parent");
-        if (!mapped) return qd_reject(slot, nm, "parent has no mapping");
-        if (!fits)   return qd_reject(slot, nm, "no column of the parent's type grows it");
-        if (!shapes) return qd_reject(slot, nm, kind == QD_CO_TZOFF ? "is no int column mirroring its parent"
-                                                                    : "does not mirror the shape of its parent");
+            return qd_reject(slot, np, n, kind < QD_CO_RAW ? "not a boolean column"
+                                        : text ? "not a text column" : "not a long column");
+        if (!rows)   return qd_reject(slot, np, n, "row count differs from its parent");
+        if (!mapped) return qd_reject(slot, np, n, "parent has no mapping");
+        if (!fits)   return qd_reject(slot, np, n, "no column of the parent's type grows it");
+        if (!shapes) return qd_reject(slot, np, n, kind == QD_CO_TZOFF ? "is no int column mirroring its parent"
+                                                                       : "does not mirror the shape of its parent");
     }
     ray_t* out = ray_table_new(nkeep);
     for (int64_t c = 0, k = 0; c < ncols && out && !RAY_IS_ERR(out); c++) {
@@ -2525,12 +2493,12 @@ static ray_t* qd_strip(int slot, ray_t* tbl, ray_t** masks, ray_t** offs, ray_t*
     if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_WSFULL);
     for (int64_t c = 0; c < ncols; c++) {
         if (parent[c] < 0) continue;
-        ray_t* nm = ray_sym_str(ray_table_col_name(tbl, c));   /* non-NULL: only a NAMED companion got a parent above */
-        size_t  sl   = 0;
-        int     kind = qd_companion_kind(ray_str_ptr(nm), ray_str_len(nm), &sl);
+        size_t  n, sl = 0;
+        const char* np = q_duckdb_col_name(tbl, c, &n);
+        int     kind = qd_companion_kind(np, n, &sl);
         ray_t** slot_of = kind == QD_CO_TZOFF ? offs : nest[c] ? keeps : masks;
-        if (parent[parent[c]] >= 0)   { ray_release(out); return qd_reject(slot, nm, "parent is itself a companion"); }
-        if (slot_of[at[parent[c]]])   { ray_release(out); return qd_reject(slot, nm, "parent already has a companion"); }
+        if (parent[parent[c]] >= 0)   { ray_release(out); return qd_reject(slot, np, n, "parent is itself a companion"); }
+        if (slot_of[at[parent[c]]])   { ray_release(out); return qd_reject(slot, np, n, "parent already has a companion"); }
         slot_of[at[parent[c]]] = ray_table_get_col_idx(tbl, c);
     }
     return out;
@@ -2628,9 +2596,10 @@ ray_t* q_duckdb_codec_stage_image(ray_t* tbl, const qd_colmap_t* cms, ray_t* con
             int    kind = k == 2 ? QD_CO_TZOFF : k ? vk : q_duckdb_codec_mask_kind(&cms[c], masks[c]);
             ray_t* co   = k == 2 ? offs[c] : k ? keeps[c] : masks[c];
             if (!co || (k < 2 && kind < QD_CO_RAW)) continue;
-            ray_t* pn = ray_sym_str(ray_table_col_name(tbl, c));   /* borrowed */
+            size_t pl;
+            const char* pn = q_duckdb_col_name(tbl, c, &pl);
             qd_buf cn = {0};
-            q_duckdb_codec_companion_col(&cn, pn ? ray_str_ptr(pn) : "?", pn ? ray_str_len(pn) : 1, kind);
+            q_duckdb_codec_companion_col(&cn, pn, pl, kind);
             if (cn.oom) { q_duckdb_buf_free(&cn); ray_release(out); return q_err(QE_WSFULL); }
             scms[n].leaf  = q_duckdb_codec_canon_leaf(k == 2 ? RAY_I32
                                 : kind == QD_CO_RAW && q_duckdb_codec_raw_is_text(cms[c].leaf->ray_type) ? RAY_STR
@@ -2667,15 +2636,8 @@ static ray_t* qd_dict_syms(ray_t* cell) {
     return k && k->type == RAY_SYM ? k : NULL;
 }
 
-static ray_t* qd_rec_fail(int slot, const char* why) { return q_duckdb_fail(slot, "record", why); }
+static ray_t* qd_rec_fail(int slot, const char* why) { return q_duckdb_fail(slot, "record: %s", why); }
 
-
-static ray_t* qd_dict_row(ray_t* col, int64_t i) {
-    if (col->type == RAY_TABLE) return q_table_row_at(col, i);
-    ray_t* c = ray_list_get(col, i);
-    ray_retain(c);
-    return c;
-}
 
 /* Every record row under `lev` LIST levels of v, gathered into one column — the shape qd_rec_map reads fields
  * off.  An empty cell contributes no row and so casts no vote, exactly as an empty cell does at depth 0. */
@@ -2685,7 +2647,7 @@ static ray_t* qd_rec_flatten(ray_t* v, int lev, ray_t* acc) {
         if (!cell || qd_cell_is_0n(cell)) continue;
         if (lev > 1) { acc = qd_rec_flatten(cell, lev - 1, acc); continue; }
         for (int64_t r = 0, n = q_count(cell); r < n; r++)
-            acc = qd_mirror_append(acc, qd_dict_row(cell, r));   /* consumes the row either way */
+            acc = qd_mirror_append(acc, qd_row_at(cell, r));   /* consumes the row either way */
     }
     return acc;
 }
@@ -2825,7 +2787,7 @@ static ray_t* qd_rec_explode(int slot, ray_t* col, bool uni, bool fielded, ray_t
     }
     for (int k = 0; k < nw; k++) q_duckdb_drop(sl[k].box);
     free(sl);
-    if (!e) { if (tag) *tag = tv; else if (tv) ray_release(tv); return tbl; }
+    if (!e) { if (tag) *tag = tv; else ray_release(tv); return tbl; }
     q_duckdb_drop(tv);
     if (tbl != e) q_duckdb_drop(tbl);
     return e;
@@ -2849,7 +2811,7 @@ static ray_t* qd_rec_open(int slot, ray_t* col, bool uni, bool fielded, qd_colma
         if (q_duckdb_codec_is_rec(cm[c].leaf) && !cm[c].rec)
             e = qd_rec_fail(slot, "a nested record's cells do not agree on their fields");
     if (!e) { *store = st; *cms = cm; return NULL; }
-    for (int64_t c = 0; cm && c < nf; c++) q_duckdb_codec_map_free(&cm[c]);
+    if (cm) q_duckdb_codec_maps_free(cm, nf);
     if (st != e) ray_release(st);
     free(cm);
     if (tag && *tag) { ray_release(*tag); *tag = NULL; }
@@ -2857,10 +2819,10 @@ static ray_t* qd_rec_open(int slot, ray_t* col, bool uni, bool fielded, qd_colma
 }
 
 static void qd_rec_close(int nf, qd_colmap_t* cms, ray_t* store, ray_t* tag) {
-    for (int c = 0; c < nf; c++) q_duckdb_codec_map_free(&cms[c]);
+    q_duckdb_codec_maps_free(cms, nf);
     free(cms);
-    if (store) ray_release(store);
-    if (tag) ray_release(tag);
+    ray_release(store);
+    ray_release(tag);
 }
 
 /* the record fields of an exploded store table, their maps moved in; the caller owns the result (NULL on OOM,
@@ -2869,8 +2831,9 @@ static qd_rec_t* qd_rec_of_store(ray_t* store, qd_colmap_t* cms) {
     int nf = (int)ray_table_ncols(store);
     qd_rec_t* r = qd_rec_alloc(nf);
     for (int i = 0; r && i < nf; i++) {
-        ray_t* nm = ray_sym_str(ray_table_col_name(store, i));   /* borrowed */
-        r->f[i].name = q_duckdb_text(nm ? ray_str_ptr(nm) : "", nm ? ray_str_len(nm) : 0);
+        size_t nl;
+        const char* np = q_duckdb_col_name(store, i, &nl);
+        r->f[i].name = q_duckdb_text(np, nl);
         r->f[i].map  = cms[i];
         cms[i] = (qd_colmap_t){ NULL, NULL, 0, false };
         if (!r->f[i].name) { qd_colmap_t t = { NULL, r, 0, false }; q_duckdb_codec_map_free(&t); return NULL; }
@@ -2906,11 +2869,11 @@ static ray_t* qd_map_flatten(int slot, ray_t* col, int64_t base, int64_t n,
     ray_t* lv = ray_vec_new(RAY_I64, n ? n : 1);
     ray_t* e  = kb && vb && lv && !RAY_IS_ERR(kb) && !RAY_IS_ERR(vb) && !RAY_IS_ERR(lv) ? NULL : q_err(QE_WSFULL);
     for (int64_t rw = base; !e && rw < base + n; rw++) {
-        ray_t*  cell = qd_dict_row(col, rw);                                          /* owned */
+        ray_t*  cell = qd_row_at(col, rw);                                          /* owned */
         ray_t*  kk   = cell && cell->type == RAY_DICT ? ray_dict_keys(cell) : NULL;   /* borrowed */
         ray_t*  vv   = cell && cell->type == RAY_DICT ? ray_dict_vals(cell) : NULL;
         int64_t kn   = kk ? q_count(kk) : -1;
-        if (kn < 0) { if (cell) ray_release(cell); e = qd_rec_fail(slot, "a cell is not a dict"); break; }
+        if (kn < 0) { ray_release(cell); e = qd_rec_fail(slot, "a cell is not a dict"); break; }
         for (int64_t j = 0; !e && j < kn; j++) {
             ray_t* k = qd_cell_at(kk, j);
             ray_t* v = vv ? qd_cell_at(vv, j) : NULL;
@@ -2919,27 +2882,27 @@ static ray_t* qd_map_flatten(int slot, ray_t* col, int64_t base, int64_t n,
             for (int64_t p = 0; !e && p < j; p++) {
                 ray_t* prev = qd_cell_at(kk, p);
                 if (prev && !RAY_IS_ERR(prev) && q_match_rec(prev, k)) e = qd_rec_fail(slot, "Map keys must be unique.");
-                if (prev && !RAY_IS_ERR(prev)) ray_release(prev);
+                q_duckdb_drop(prev);
             }
             if (!e) {
                 kb = ray_list_append(kb, k);
                 vb = ray_list_append(vb, v);
                 if (!kb || RAY_IS_ERR(kb) || !vb || RAY_IS_ERR(vb)) e = q_err(QE_WSFULL);
             }
-            if (k && !RAY_IS_ERR(k)) ray_release(k);
-            if (v && !RAY_IS_ERR(v)) ray_release(v);
+            q_duckdb_drop(k);
+            q_duckdb_drop(v);
         }
         if (!e) { lv = ray_vec_append(lv, &kn); if (!lv || RAY_IS_ERR(lv)) e = q_err(QE_WSFULL); }
         ray_release(cell);
     }
     ray_t* kc = e ? NULL : qd_rec_collapse(kb);
     ray_t* vc = e ? NULL : qd_rec_collapse(vb);
-    if (kb && !RAY_IS_ERR(kb)) ray_release(kb);
-    if (vb && !RAY_IS_ERR(vb)) ray_release(vb);
+    q_duckdb_drop(kb);
+    q_duckdb_drop(vb);
     if (e || !kc || RAY_IS_ERR(kc) || !vc || RAY_IS_ERR(vc)) {
-        if (kc && !RAY_IS_ERR(kc)) ray_release(kc);
-        if (vc && !RAY_IS_ERR(vc)) ray_release(vc);
-        if (lv && !RAY_IS_ERR(lv)) ray_release(lv);
+        q_duckdb_drop(kc);
+        q_duckdb_drop(vc);
+        q_duckdb_drop(lv);
         return e ? e : q_err(QE_WSFULL);
     }
     *keys = kc;
@@ -2967,7 +2930,7 @@ static ray_t* qd_map_co(ray_t* mir, ray_t* lens, int64_t base, int64_t n, ray_t*
     ray_t* acc = ray_list_new(1);
     bool box = mir->type == RAY_LIST || mir->type == RAY_TABLE;
     for (int64_t i = 0; box && acc && !RAY_IS_ERR(acc) && i < n; i++) {
-        ray_t* mc = qd_dict_row(mir, base + i);
+        ray_t* mc = qd_row_at(mir, base + i);
         if (RAY_IS_ERR(mc)) { ray_release(acc); return mc; }
         ray_t*  mv = mc && mc->type == RAY_DICT ? ray_dict_vals(mc) : NULL;   /* borrowed */
         int64_t l  = *(int64_t*)ray_vec_get(lens, i);
@@ -3043,7 +3006,7 @@ static ray_t* qd_rec_field_co(ray_t* co, const qd_colmap_t* fcm, const char* nam
     for (int64_t i = 0; acc && !RAY_IS_ERR(acc) && i < rows; i++) {
         /* like-keyed companion rows collapse to a TABLE the way the value does, so the row is fetched, not borrowed */
         bool   box = co->type == RAY_LIST || co->type == RAY_TABLE;
-        ray_t* mc  = box && !(kind == QD_CO_ISNULL && qd_mirror_bit(co, i)) ? qd_dict_row(co, i) : NULL;
+        ray_t* mc  = box && !(kind == QD_CO_ISNULL && qd_mirror_bit(co, i)) ? qd_row_at(co, i) : NULL;
         if (RAY_IS_ERR(mc)) { ray_release(acc); return mc; }
         ray_t* v  = NULL;
         if (mc && mc->type == RAY_DICT) {
@@ -3081,7 +3044,7 @@ static ray_t* qd_write_rec(int slot, duck_vector dv, ray_t* col, const qd_colmap
     if (!pos) e = q_err(QE_WSFULL);
     for (int i = 0; !e && i < nd; i++) {
         int c = 0;
-        while (c < nf && strcmp(ray_str_ptr(ray_sym_str(ray_table_col_name(store, c))), cm->rec->f[i].name)) c++;
+        while (c < nf && strcmp(q_duckdb_col_name(store, c, NULL), cm->rec->f[i].name)) c++;
         pos[i] = c < nf ? c : -1;
         if (c < nf) fld[c] = i;
     }
@@ -3130,10 +3093,10 @@ static ray_t* qd_map_from_data(int slot, ray_t* col, duck_type kind, qd_colmap_t
     if (cm->rec && cm->leaf->dk_type == kind) return NULL;
     qd_colmap_t out = { qd_map_read(kind), NULL, cm->depth, false };
     if (!out.leaf) return qd_rec_fail(slot, "the declared record type has no mapping");
-    if (kind == QDUCK_TYPE_STRUCT) {
+    if (kind == QDUCK_TYPE_STRUCT || kind == QDUCK_TYPE_UNION) {
         qd_colmap_t* cms;
         ray_t*       store = NULL;
-        ray_t*       e = qd_rec_open(slot, col, false, false, &cms, NULL, &store);
+        ray_t*       e = qd_rec_open(slot, col, kind == QDUCK_TYPE_UNION, false, &cms, NULL, &store);
         if (e) return e;
         qd_rec_t* r = qd_rec_of_store(store, cms);
         qd_rec_close((int)ray_table_ncols(store), cms, store, NULL);
@@ -3155,15 +3118,6 @@ static ray_t* qd_map_from_data(int slot, ray_t* col, duck_type kind, qd_colmap_t
             q_duckdb_codec_map_free(&out);
             return qd_rec_fail(slot, "a MAP's keys and values have no mapping");
         }
-    } else if (kind == QDUCK_TYPE_UNION) {
-        qd_colmap_t* cms;
-        ray_t*       store = NULL;
-        ray_t*       e = qd_rec_open(slot, col, true, false, &cms, NULL, &store);
-        if (e) return e;
-        qd_rec_t* r = qd_rec_of_store(store, cms);
-        qd_rec_close((int)ray_table_ncols(store), cms, store, NULL);
-        if (!r) return q_err(QE_WSFULL);
-        out.rec = r;
     } else return qd_rec_fail(slot, "a record declares STRUCT, MAP or UNION");
     q_duckdb_codec_map_free(cm);
     *cm = out;
@@ -3223,7 +3177,7 @@ static ray_t* qd_decl_merge(int slot, ray_t* col, qd_colmap_t* dec) {
     if (!seen) e = q_err(QE_WSFULL);
     for (int i = 0; !e && i < r->n; i++) {
         int c = 0;
-        while (c < nf && strcmp(ray_str_ptr(ray_sym_str(ray_table_col_name(store, c))), r->f[i].name)) c++;
+        while (c < nf && strcmp(q_duckdb_col_name(store, c, NULL), r->f[i].name)) c++;
         if (c == nf) continue;   /* declared, never shown: the declaration's own spelling is all there is */
         seen[c] = true;
         /* the law is RECURSIVE: a nested record keeps the declaration's fields and takes the data's spelling of
