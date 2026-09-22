@@ -518,6 +518,13 @@ static int match_carrier(ray_t* a, ray_t* b) {
                q_match_rec(q_eval_apply_comp_inner(a), q_eval_apply_comp_inner(b));
     case Q_EVAL_CAR_ITER:
         return q_eval_apply_iter_id(a) == q_eval_apply_iter_id(b);
+    case Q_EVAL_CAR_KFN: {
+        void *fa = NULL, *fb = NULL;
+        int64_t ra = 0, rb = 0;
+        q_eval_apply_kfn_parts(a, &fa, &ra, NULL, NULL);
+        q_eval_apply_kfn_parts(b, &fb, &rb, NULL, NULL);
+        return fa == fb && ra == rb;
+    }
     default:
         return 0;
     }
