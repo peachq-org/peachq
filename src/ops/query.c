@@ -1076,11 +1076,10 @@ ray_op_t* compile_expr_dag(ray_graph_t* g, ray_t* expr) {
          * Deliberately NOT applying the in-query column-shadow rule here: by
          * design an inline `(quote col)` call node STAYS the literal symbol,
          * whereas the tick atom `'col` resolves to the column (the AST-shape
-         * boundary pinned by test/rfl/query/literal_col_ref.rfl — Part 2
-         * unwraps a literal -RAY_SYM atom, not a (quote …) call node).  So a
-         * quoted symbol always folds to a const atom; vector / atom data folds
-         * to a const node; non-foldable quoted data (e.g. a quoted list)
-         * returns NULL. */
+         * boundary: Part 2 unwraps a literal -RAY_SYM atom, not a (quote …)
+         * call node).  So a quoted symbol always folds to a const atom; vector /
+         * atom data folds to a const node; non-foldable quoted data (e.g. a quoted
+         * list) returns NULL. */
         if (fname_len == 5 && memcmp(fname, "quote", 5) == 0) {
             if (n != 2) return NULL;
             ray_t* q = elems[1];
