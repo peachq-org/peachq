@@ -57,21 +57,11 @@
  *              not a parse tree; they diverge for nested lists.  See
  *              ARCHITECTURE.md "eval vs value").
  *   auth/eval  matches kdb: an authenticated connection gets full eval;
- *              restriction only via the -u restricted flag,
- *              which still wraps every inbound eval and is re-imposed on
- *              journal replay.
- *   journal    unchanged 16-byte ray_ipc_header_t envelope (serde v5) —
- *              only the SOCKET wire moved to kdb frames.  A sync frame is
- *              journaled ONLY when it will be evaluated by the default
- *              string path: hook-handled frames are not journaled (replay
- *              cannot reproduce hook dispatch, and replaying a hook's
- *              list payload through eval would violate the value-vs-eval
- *              ruling).
+ *              restriction only via the -u restricted flag, which still
+ *              wraps every inbound eval.
  *
  * The native 16-byte-prefix protocol (version handshake, prefix header,
- * verbose flag, wire compression) is REMOVED.  ray_ipc_compress /
- * ray_ipc_decompress remain: journals may hold Phase-B-era compressed
- * frames within wire version 5. */
+ * verbose flag, wire compression) is REMOVED. */
 
 #ifndef RAY_OS_WINDOWS
   #define _GNU_SOURCE
@@ -80,7 +70,6 @@
 #include "core/ipc.h"
 #include "mem/sys.h"
 #include "ops/ops.h"
-#include "store/journal.h"
 #include "qlang/base/q_err.h"  /* q_err_from_text (-128h decode) + q_err_drop backstop */
 #include "qlang/net/q_wire.h"
 #include "qlang/net/q_http.h"
@@ -121,10 +110,8 @@
 /* ===== Compression (delta + RLE) =====
  *
  * NOT the kdb wire codec (that is q_wire compress/uncompress, Phase F).
- * WIRE-DEAD since Phase C: kdb frames never use this scheme.  KEPT because
- * the journal may contain Phase-B-era compressed frames inside wire
- * version 5 — journal.c's decompress_if_needed still calls
- * ray_ipc_decompress. */
+ * WIRE-DEAD since Phase C: kdb frames never use this scheme.  The pair is
+ * exported API and stays for out-of-tree readers of Phase-B-era frames. */
 
 size_t ray_ipc_compress(const uint8_t* src, size_t len,
                         uint8_t* dst, size_t dst_cap)
@@ -747,10 +734,7 @@ static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
     ray_t* result = NULL;
 
     if (hook) {
-        /* Hook-handled frames are NOT journaled: replay cannot reproduce
-         * hook dispatch, and replaying a hook's list payload through eval
-         * would violate the value-vs-eval ruling (Phase C decision).
-         * Dialect seam (string-C3): wire text decodes to a char vector; a
+        /* Dialect seam (string-C3): wire text decodes to a char vector; a
          * pure-rayfall process (no q runtime hook installed) still expects
          * the legacy string atom. */
         if (msg->type == RAY_CHARV && !ray_eval_remote_str_installed()) {
@@ -771,51 +755,20 @@ static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
     } else if (msg->type == -RAY_STR || msg->type == RAY_CHARV ||
                msg->type == -RAY_CHARV) {
         /* q source text: a char vector/atom on the wire (kdb tag 10/-10), or
-         * a legacy string atom.  SAME acceptance set as journal.c eval_one —
-         * keep the two predicates identical (string-C3 1b). */
+         * a legacy string atom (string-C3 1b). */
         const char* sp = msg->type == -RAY_STR  ? ray_str_ptr(msg)
                        : msg->type == RAY_CHARV ? (const char*)ray_data(msg)
                                                 : (const char*)&msg->u8;
         size_t      sn = msg->type == -RAY_STR  ? ray_str_len(msg)
                        : msg->type == RAY_CHARV ? (size_t)msg->len : 1;
-        /* Journal hook: log the mutation channel BEFORE evaluation, so a
-         * crash mid-handler still leaves the message on disk for replay.
-         * The envelope stays the 16-byte serde header; the payload is the
-         * kdb object bytes verbatim (the v5 serde reader speaks the wire
-         * grammar).  RESTRICTED is captured so replay re-imposes it —
-         * without this a -u client's writes silently elevate to full
-         * privilege on crash-recovery.  A failed journal write ABORTS the
-         * eval ("the message has not been logged so we cannot accept
-         * it") — silently evaluating un-logged mutations defeats -l/-L. */
-        if (ray_journal_is_open() && msgtype == RAY_IPC_MSG_SYNC) {
-            ray_ipc_header_t log_hdr = {
-                .prefix  = RAY_SERDE_PREFIX,
-                .version = RAY_SERDE_WIRE_VERSION,
-                .flags   = ray_eval_get_restricted() ? RAY_IPC_FLAG_RESTRICTED : 0,
-                .endian  = 0,
-                .msgtype = msgtype,
-                .size    = (int64_t)plen,
-            };
-            if (ray_journal_write_bytes(&log_hdr, payload, (int64_t)plen) != RAY_OK) {
-                fprintf(stderr, "log: ERROR  journal write failed - refusing to evaluate\n");
-                ray_release(msg);
-                *out_result = ray_error("io", "journal write failed; mutation refused");
-                return 0;
-            }
-        }
         result = ray_eval_remote_str(sp, sn);
         ray_release(msg);
     } else if (msg->type == RAY_LIST) {
         /* kdb (func; args…) value-apply request (ADR-0004): a SINGLE
          * application of func to the already-evaluated args via the q value
          * hook — NEVER ray_eval (a value object is not a parse tree; human
-         * ruling 2026-07-06).  NOT journaled: the journal contract only logs
-         * IPC STRING payloads (journal.c eval_one replays a non-string frame
-         * through ray_eval, which would mis-evaluate a value object as an
-         * AST).  A durable mutation must therefore be sent on the string
-         * channel (which IS journaled) — value-apply journaling is a tracked
-         * deferral (PLAN.md), not a silent gap.  Ownership: borrowed msg to
-         * the hook, owned result back, one ray_release(msg). */
+         * ruling 2026-07-06).  Ownership: borrowed msg to the hook, owned
+         * result back, one ray_release(msg). */
         result = ray_eval_remote_apply(msg);
         ray_release(msg);
     } else {

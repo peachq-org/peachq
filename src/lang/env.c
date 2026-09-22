@@ -98,7 +98,7 @@ static struct {
     /* Per-slot flag: 1 iff this binding was last written by user code
      * (ray_env_set / ray_env_set_local-promoted-to-global), 0 if the
      * latest writer was builtin registration (ray_env_bind / _flat).
-     * Powers ray_env_list_user, which the journal snapshot uses to
+     * Powers ray_env_list_user, which snapshot callers use to
      * pick which globals to dump to <base>.qdb.  A user `(set + 42)`
      * over a builtin flips the slot to user=1 so the override is
      * preserved across snapshot/restore. */
@@ -621,7 +621,7 @@ ray_err_t ray_env_set(int64_t sym_id, ray_t* val) {
     if (ray_sym_is_reserved(sym_id) && !ray_sym_is_ipc_hook(sym_id))
         return RAY_ERR_RESERVED;
     /* Same machinery as ray_env_bind, but routes through the user-flagged
-     * binder so the journal snapshot can pick this slot.  Without this
+     * binder so a snapshot can pick this slot.  Without this
      * flip, env_bind_global would also be reached via ray_env_bind below
      * and the slot would carry user=0 — leaving it out of <base>.qdb. */
     if (ray_sym_is_dotted(sym_id))

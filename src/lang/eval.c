@@ -37,7 +37,6 @@
 #include "core/profile.h"
 #include "mem/heap.h"
 #include "mem/sys.h"
-/* store/serde.h, store/splay.h, store/part.h moved to system.c */
 /* ray_lang_print, ray_cast_fn, etc. moved to ops/builtins.c */
 /* ray_error() is declared in <rayforce.h> (included via eval.h) */
 
@@ -1377,8 +1376,8 @@ ray_t* ray_value_fn(ray_t* x) {
 
 
 /* ray_lang_print, fmt_interpolate, ray_println_fn, ray_show_fn, ray_format_fn,
- * ray_resolve_fn, ray_timeit_fn, ray_exit_fn, resolve_type_name,
- * ray_read_csv_fn, ray_write_csv_fn, cast_match, ray_cast_fn, ray_type_fn,
+ * ray_resolve_fn, ray_timeit_fn, ray_exit_fn,
+ * cast_match, ray_cast_fn, ray_type_fn,
  * ray_read_file_fn, ray_load_file_fn, ray_write_file_fn
  * moved to ops/builtins.c */
 
@@ -2588,8 +2587,8 @@ static void register_vary(const char* name, uint8_t attrs, ray_vary_fn fn) {
  * registration (see ray_set_load_rayfall_ns / q_runtime_create).  q owns
  * dotted namespaces for user code, and real q has no .sys/.os/.ipc — so
  * they must not be squatted before release (backward-compat is one-way).
- * The DATA namespaces (.db/.csv/.graph/.attr/.col) are intentionally NOT
- * gated — they return q-usable data; their exposure is a separate ruling. */
+ * The DATA namespaces (.attr/.col) are intentionally NOT gated — they
+ * return q-usable data; their exposure is a separate ruling. */
 static bool g_load_rayfall_ns = true;
 
 void ray_set_load_rayfall_ns(bool on) { g_load_rayfall_ns = on; }
@@ -2733,10 +2732,6 @@ static void ray_register_builtins(void) {
     register_vary("println",    RAY_FN_NONE, ray_println_fn);
     register_vary("show",       RAY_FN_NONE, ray_show_fn);
     register_vary("format",     RAY_FN_NONE, ray_format_fn);
-    register_vary("read-csv",   RAY_FN_RESTRICTED, ray_read_csv_fn);
-    register_vary("write-csv",  RAY_FN_RESTRICTED, ray_write_csv_fn);
-    register_vary(".csv.read",         RAY_FN_RESTRICTED, ray_read_csv_fn);
-    register_vary(".csv.write",        RAY_FN_RESTRICTED, ray_write_csv_fn);
     register_binary("as",       RAY_FN_NONE, ray_cast_fn);
     register_unary("type",      RAY_FN_NONE, ray_type_fn);
     register_unary("read",      RAY_FN_RESTRICTED, ray_read_file_fn);
@@ -2775,17 +2770,6 @@ static void ray_register_builtins(void) {
     /* Serialization */
     register_unary("ser",        RAY_FN_NONE, ray_ser_fn);
     register_unary("de",         RAY_FN_NONE, ray_de_fn);
-
-    /* Splayed / partitioned table I/O */
-    /* Database storage — splayed and parted table I/O.  Kept under a
-     * dedicated `.db.*` namespace so format-specific siblings stay
-     * grouped (set/get per format) and there's room to grow
-     * without polluting the top-level builtin namespace. */
-    register_vary(".db.splayed.set",   RAY_FN_RESTRICTED, ray_set_splayed_fn);
-    register_vary(".db.splayed.get",   RAY_FN_NONE,       ray_get_splayed_fn);
-    register_vary(".db.parted.get",    RAY_FN_NONE,       ray_get_parted_fn);
-    register_vary(".db.parted.tables", RAY_FN_NONE,       ray_get_parted_tables_fn);
-    register_vary(".db.parted.fill",   RAY_FN_RESTRICTED, ray_fill_parted_fn);
 
     /* GUID generation */
     register_unary("guid",       RAY_FN_NONE, ray_guid_fn);
@@ -2830,14 +2814,6 @@ static void ray_register_builtins(void) {
      * the category. */
     register_vary (".sys.gc",   RAY_FN_NONE,        ray_gc_fn);
     register_unary(".sys.exec", RAY_FN_RESTRICTED,  ray_system_fn);
-    /* Registry-dispatched system commands.  `.sys.cmd "name args"` is
-     * the colon-command entry point; the per-command direct builtins below
-     * skip the string parse for callers that already have a typed arg
-     * in hand.  All share the table in lang/syscmd.c. */
-    register_unary(".sys.cmd",    RAY_FN_RESTRICTED, ray_syscmd_string_dispatch_fn);
-    register_vary (".sys.timeit", RAY_FN_NONE,       ray_sys_timeit_fn);
-    register_unary(".sys.listen", RAY_FN_RESTRICTED, ray_sys_listen_fn);
-    register_vary (".sys.env",    RAY_FN_NONE,       ray_sys_env_fn);
     register_vary (".sys.args",   RAY_FN_NONE,       ray_sys_args_fn);
 
     /* OS env / process interaction under `.os.*` */
@@ -2859,19 +2835,6 @@ static void ray_register_builtins(void) {
      * Variadic for the `(.ipc.handle)` / `(.ipc.handle 0)` convention. */
     register_vary(  ".ipc.handle", RAY_FN_NONE,       ray_ipc_handle_fn);
 
-    /* Transaction-log journaling under `.log.*` — the -l/-L feature.
-     * The CLI flags -l <base> / -L <base> call ray_journal_open() at
-     * startup; these builtins expose the same machinery to Rayfall code
-     * for manual control (open from a script, snapshot on demand, etc). */
-    register_vary(".log.open",     RAY_FN_RESTRICTED, ray_log_open_fn);
-    register_unary(".log.write",   RAY_FN_NONE,       ray_log_write_fn);
-    register_unary(".log.replay",  RAY_FN_RESTRICTED, ray_log_replay_fn);
-    register_unary(".log.validate",RAY_FN_NONE,       ray_log_validate_fn);
-    register_vary(".log.roll",     RAY_FN_RESTRICTED, ray_log_roll_fn);
-    register_vary(".log.snapshot", RAY_FN_RESTRICTED, ray_log_snapshot_fn);
-    register_vary(".log.sync",     RAY_FN_NONE,       ray_log_sync_fn);
-    register_vary(".log.close",    RAY_FN_RESTRICTED, ray_log_close_fn);
-    register_vary(".log.purge",    RAY_FN_RESTRICTED, ray_log_purge_fn);
     }  /* end g_load_rayfall_ns plumbing block */
 
     /* quote — special form (unevaluated argument) */
@@ -2956,31 +2919,6 @@ static void ray_register_builtins(void) {
     register_unary (".col.link?",  RAY_FN_NONE, ray_col_link_p_fn);
     register_unary (".col.target", RAY_FN_NONE, ray_col_target_fn);
 
-    /* Graph algorithms (see src/ops/graph_builtin.c, src/ops/traverse.c).
-     * Build a CSR handle from an edge table, then dispatch any of the 18
-     * algorithms in src/ops/traverse.c.  All wrappers are vary-arity so
-     * the underlying algorithm's optional parameters surface uniformly.
-     * Lifecycle handles auto-free on rc→0 (see RAY_ATTR_GRAPH branch in
-     * src/mem/heap.c). */
-    register_vary (".graph.build",         RAY_FN_NONE, ray_graph_build_fn);
-    register_unary(".graph.free",          RAY_FN_NONE, ray_graph_free_fn);
-    register_unary(".graph.info",          RAY_FN_NONE, ray_graph_info_fn);
-    register_vary (".graph.pagerank",      RAY_FN_NONE, ray_graph_pagerank_fn);
-    register_vary (".graph.connected",     RAY_FN_NONE, ray_graph_connected_fn);
-    register_vary (".graph.dijkstra",      RAY_FN_NONE, ray_graph_dijkstra_fn);
-    register_vary (".graph.louvain",       RAY_FN_NONE, ray_graph_louvain_fn);
-    register_vary (".graph.degree",        RAY_FN_NONE, ray_graph_degree_fn);
-    register_vary (".graph.topsort",       RAY_FN_NONE, ray_graph_topsort_fn);
-    register_vary (".graph.dfs",           RAY_FN_NONE, ray_graph_dfs_fn);
-    register_vary (".graph.cluster",       RAY_FN_NONE, ray_graph_cluster_fn);
-    register_vary (".graph.betweenness",   RAY_FN_NONE, ray_graph_betweenness_fn);
-    register_vary (".graph.closeness",     RAY_FN_NONE, ray_graph_closeness_fn);
-    register_vary (".graph.mst",           RAY_FN_NONE, ray_graph_mst_fn);
-    register_vary (".graph.random-walk",   RAY_FN_NONE, ray_graph_random_walk_fn);
-    register_vary (".graph.k-shortest",    RAY_FN_NONE, ray_graph_k_shortest_fn);
-    register_vary (".graph.shortest-path", RAY_FN_NONE, ray_graph_shortest_path_fn);
-    register_vary (".graph.expand",        RAY_FN_NONE, ray_graph_expand_fn);
-    register_vary (".graph.var-expand",    RAY_FN_NONE, ray_graph_var_expand_fn);
     /* NOT lazy-aware: ray_strlen_fn has no lazy branch and there is no
      * OP_STRLEN chain opcode — the flag made eval pass raw lazy handles
      * that fell through to the eager paths and errored.  Without the

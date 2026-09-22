@@ -616,18 +616,10 @@ ray_t* ray_print_fn(ray_t** args, int64_t n);
 ray_t* ray_meta_fn(ray_t* x);
 ray_t* ray_gc_fn(ray_t** args, int64_t n);
 ray_t* ray_system_fn(ray_t* x);
-/* `.sys.cmd "name args"` — registry-dispatched system commands with
- * shell fallback (see lang/syscmd.h). */
-ray_t* ray_syscmd_string_dispatch_fn(ray_t* x);
-/* Direct typed entry points sharing the syscmd registry. timeit and
- * env are variadic so they accept the zero-arg toggle/list shape. */
-ray_t* ray_sys_listen_fn(ray_t* x);
-ray_t* ray_sys_timeit_fn(ray_t** args, int64_t n);
-ray_t* ray_sys_env_fn(ray_t** args, int64_t n);
 ray_t* ray_getenv_fn(ray_t* x);
 /* Filesystem metadata under .fs.* (issue #36).  Lean two: size +
  * directory-list.  Existence/is-file/is-dir reachable via try on
- * either of these, or via the shell fallback in .sys.cmd. */
+ * either of these. */
 ray_t* ray_fs_size_fn(ray_t* x);
 ray_t* ray_fs_list_fn(ray_t* x);
 ray_t* ray_setenv_fn(ray_t* name, ray_t* val);
@@ -652,25 +644,7 @@ ray_t* ray_hclose_fn(ray_t* x);
 ray_t* ray_hsend_fn(ray_t* handle, ray_t* msg);
 ray_t* ray_hpost_fn(ray_t* handle, ray_t* msg);
 ray_t* ray_ipc_handle_fn(ray_t** args, int64_t n);
-ray_t* ray_set_splayed_fn(ray_t** args, int64_t n);
-ray_t* ray_get_splayed_fn(ray_t** args, int64_t n);
-ray_t* ray_get_parted_fn(ray_t** args, int64_t n);
-ray_t* ray_get_parted_tables_fn(ray_t** args, int64_t n);
-ray_t* ray_fill_parted_fn(ray_t** args, int64_t n);
 ray_t* ray_guid_fn(ray_t* n_arg);
-
-/* Transaction-log journaling (.log.*) — the -l/-L feature.
- * Implementations live in src/ops/journal.c; the on-disk machinery
- * is src/store/journal.c. */
-ray_t* ray_log_open_fn(ray_t** args, int64_t n);
-ray_t* ray_log_write_fn(ray_t* expr);
-ray_t* ray_log_replay_fn(ray_t* path);
-ray_t* ray_log_validate_fn(ray_t* path);
-ray_t* ray_log_roll_fn(ray_t** args, int64_t n);
-ray_t* ray_log_snapshot_fn(ray_t** args, int64_t n);
-ray_t* ray_log_sync_fn(ray_t** args, int64_t n);
-ray_t* ray_log_close_fn(ray_t** args, int64_t n);
-ray_t* ray_log_purge_fn(ray_t** args, int64_t n);
 
 /* Group (formerly static in eval.c, now extern for query.c) */
 ray_t* ray_group_fn(ray_t* x);
@@ -682,8 +656,6 @@ ray_t* ray_format_fn(ray_t** args, int64_t n);
 ray_t* ray_resolve_fn(ray_t** args, int64_t n);
 ray_t* ray_timeit_fn(ray_t** args, int64_t n);
 ray_t* ray_exit_fn(ray_t* arg);
-ray_t* ray_read_csv_fn(ray_t** args, int64_t n);
-ray_t* ray_write_csv_fn(ray_t** args, int64_t n);
 ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val);
 ray_t* ray_type_fn(ray_t* val);
 ray_t* ray_read_file_fn(ray_t* path_obj);
@@ -712,31 +684,6 @@ ray_t* ray_anti_join_fn(ray_t** args, int64_t n);
 ray_t* ray_window_join_fn(ray_t** args, int64_t n);
 ray_t* ray_window_join1_fn(ray_t** args, int64_t n);
 ray_t* ray_asof_join_fn(ray_t** args, int64_t n);
-
-/* Graph builtins (.graph.* family).  Implemented in src/ops/graph_builtin.c —
- * thin wrappers around the lazy-DAG graph algorithms in src/ops/traverse.c.
- * The graph itself is an opaque ray_rel_t* wrapped in a -RAY_I64 atom with
- * RAY_ATTR_GRAPH; ownership semantics mirror the HNSW handle (see
- * src/ops/embedding.c). */
-ray_t* ray_graph_build_fn(ray_t** args, int64_t n);
-ray_t* ray_graph_free_fn(ray_t* h);
-ray_t* ray_graph_info_fn(ray_t* h);
-ray_t* ray_graph_pagerank_fn(ray_t** args, int64_t n);
-ray_t* ray_graph_connected_fn(ray_t** args, int64_t n);
-ray_t* ray_graph_dijkstra_fn(ray_t** args, int64_t n);
-ray_t* ray_graph_louvain_fn(ray_t** args, int64_t n);
-ray_t* ray_graph_degree_fn(ray_t** args, int64_t n);
-ray_t* ray_graph_topsort_fn(ray_t** args, int64_t n);
-ray_t* ray_graph_dfs_fn(ray_t** args, int64_t n);
-ray_t* ray_graph_cluster_fn(ray_t** args, int64_t n);
-ray_t* ray_graph_betweenness_fn(ray_t** args, int64_t n);
-ray_t* ray_graph_closeness_fn(ray_t** args, int64_t n);
-ray_t* ray_graph_mst_fn(ray_t** args, int64_t n);
-ray_t* ray_graph_random_walk_fn(ray_t** args, int64_t n);
-ray_t* ray_graph_k_shortest_fn(ray_t** args, int64_t n);
-ray_t* ray_graph_shortest_path_fn(ray_t** args, int64_t n);
-ray_t* ray_graph_expand_fn(ray_t** args, int64_t n);
-ray_t* ray_graph_var_expand_fn(ray_t** args, int64_t n);
 
 /* Convenience wrapper: atomic_map_binary with no DAG opcode */
 static inline ray_t* atomic_map_binary(ray_binary_fn fn, ray_t* left, ray_t* right) {

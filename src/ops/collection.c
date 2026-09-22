@@ -1754,7 +1754,7 @@ ray_t* ray_take_fn(ray_t* vec, ray_t* n_obj) {
 ray_t* ray_at_fn(ray_t* vec, ray_t* idx) {
     if (ray_is_lazy(vec)) vec = ray_lazy_materialize(vec);
     /* Table column access by symbol key — return the typed vector directly.
-     * A column loaded from a splayed/parted table (.db.parted.get) is still in
+     * A column loaded from a splayed/parted table is still in
      * segmented (RAY_IS_PARTED) form; the query path flattens it lazily, but a
      * direct `(at table 'col)` must materialize it so downstream `(at col i)` /
      * count / formatting see a dense vector instead of failing with `type`. */

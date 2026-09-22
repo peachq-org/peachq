@@ -120,7 +120,7 @@ bool ray_env_has_name(const char* name, int64_t len);
 int32_t ray_env_list(int64_t* sym_ids, ray_t** vals, int32_t max_entries);
 
 /* Iterate ONLY user-defined bindings (slots last written via ray_env_set,
- * not ray_env_bind).  Powers the journal snapshot — the .qdb file would
+ * not ray_env_bind).  Powers env snapshots — a snapshot file would
  * otherwise carry every builtin, which is wasteful and breaks on reload
  * because builtin function objects hold absolute pointers from the prior
  * process.  A user `(set + 42)` over a builtin flips the slot to user-

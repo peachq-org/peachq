@@ -29,8 +29,6 @@
 #include "mem/heap.h"
 #include "mem/sys.h"
 #include "store/serde.h"
-#include "store/splay.h"
-#include "store/part.h"
 #include "core/ipc.h"
 #include "core/poll.h"
 #include "core/rand.h"  /* ray_rand_u64 — the guid bits */
@@ -69,65 +67,6 @@ ray_t* ray_de_fn(ray_t* val) {
     return ray_de(val);
 }
 
-/* True when `name` (n bytes) is partition-shaped: nonempty, digits and
- * dots only — the same loose classification collect_part_dirs
- * (store/part.c) applies to partition directory names. */
-static bool sym_partition_shaped(const char* name, size_t n) {
-    if (n == 0) return false;
-    for (size_t i = 0; i < n; i++)
-        if (name[i] != '.' && (name[i] < '0' || name[i] > '9')) return false;
-    return true;
-}
-
-/* Symfile resolution (sym-domain spec, "Surface"): for a partition dir
- * (/db/2024.01.01/t/) the table root is the PARTED ROOT — derived from
- * the path shape — and the domain is root/.sym; for a standalone splayed
- * dir the root is the dir itself (dir/.sym).  The symfile is a dotfile so
- * it can never collide with a user column (e.g. a "sym" ticker column).
- * Writes default to the convention unconditionally; reads prefer an
- * existing dir/.sym, then an existing partition root/.sym, else NULL (the
- * load layer raises the
- * loud "sym" error only if SYM columns actually exist). */
-static const char* splay_resolve_sym(const char* dir, char* buf, size_t bufsz,
-                                     bool for_write) {
-    size_t dlen = strlen(dir);
-    while (dlen > 1 && dir[dlen - 1] == '/') dlen--; /* strip trailing '/' */
-
-    /* dir/.sym */
-    int n = snprintf(buf, bufsz, "%.*s/.sym", (int)dlen, dir);
-    if (n < 0 || (size_t)n >= bufsz) return NULL;
-    if (!for_write && access(buf, F_OK) == 0) return buf;
-
-    /* partition-shaped parent → parted root's root/sym */
-    const char* slash = NULL;
-    for (size_t i = dlen; i > 0; i--)
-        if (dir[i - 1] == '/') { slash = dir + i - 1; break; }
-    if (slash && slash > dir) {
-        size_t parent_end = (size_t)(slash - dir);
-        const char* pslash = NULL;
-        for (size_t i = parent_end; i > 0; i--)
-            if (dir[i - 1] == '/') { pslash = dir + i - 1; break; }
-        const char* pname = pslash ? pslash + 1 : dir;
-        size_t pname_len = (size_t)(dir + parent_end - pname);
-        if (sym_partition_shaped(pname, pname_len) && pslash) {
-            size_t root_len = (size_t)(pslash - dir);
-            if (root_len == 0) root_len = 1; /* "/" root */
-            int rn = snprintf(buf, bufsz, "%.*s/.sym", (int)root_len, dir);
-            if (rn < 0 || (size_t)rn >= bufsz) return NULL;
-            if (for_write || access(buf, F_OK) == 0) return buf;
-            return NULL;
-        }
-    }
-
-    if (for_write) {
-        /* Not partition-shaped: the dir itself is the table root. */
-        n = snprintf(buf, bufsz, "%.*s/.sym", (int)dlen, dir);
-        if (n < 0 || (size_t)n >= bufsz) return NULL;
-        return buf;
-    }
-    return NULL; /* read: no symfile resolvable */
-}
-
 /* Helper: extract null-terminated path from a STR atom into a stack buffer.
  * Returns pointer to buf on success, NULL on failure. */
 static const char* str_to_cpath(ray_t* s, char* buf, size_t bufsz) {
@@ -140,113 +79,6 @@ static const char* str_to_cpath(ray_t* s, char* buf, size_t bufsz) {
     return buf;
 }
 
-/* (.db.splayed.set "dir" table) or (.db.splayed.set "dir" table "sym_path") */
-ray_t* ray_set_splayed_fn(ray_t** args, int64_t n) {
-    if (n < 2 || n > 3)
-        return ray_error("domain", ".db.splayed.set expects 2 or 3 arguments, got %lld", (long long)n);
-
-    char dir[1024];
-    if (!str_to_cpath(args[0], dir, sizeof(dir)))
-        return ray_error("type", ".db.splayed.set expects a string dir path, got %s", ray_type_name(args[0]->type));
-
-    ray_t* tbl = args[1];
-    if (!tbl || tbl->type != RAY_TABLE)
-        return ray_error("type", ".db.splayed.set expects a table, got %s", ray_type_name(tbl->type));
-
-    char sym[1024];
-    const char* sym_path = NULL;
-    if (n == 3 && args[2] && args[2]->type == -RAY_STR)
-        sym_path = str_to_cpath(args[2], sym, sizeof(sym));
-    else
-        sym_path = splay_resolve_sym(dir, sym, sizeof(sym), true);
-
-    ray_err_t err = ray_splay_save(tbl, dir, sym_path);
-    if (err != RAY_OK) return ray_error(ray_err_code_str(err), NULL);
-
-    /* Build + persist accelerator indexes (STR dictionaries, numeric chunk-zone
-     * min/max) inline at each column file's tail so mmap loads get the fast
-     * paths — same pass .csv.splayed runs. */
-    ray_splay_build_indexes(dir, tbl);
-
-    ray_retain(tbl);
-    return tbl;
-}
-
-/* (.db.splayed.get "dir") or (.db.splayed.get "dir" "sym_path") */
-ray_t* ray_get_splayed_fn(ray_t** args, int64_t n) {
-    if (n < 1 || n > 2)
-        return ray_error("domain", ".db.splayed.get expects 1 or 2 arguments, got %lld", (long long)n);
-
-    char dir[1024];
-    if (!str_to_cpath(args[0], dir, sizeof(dir)))
-        return ray_error("type", ".db.splayed.get expects a string dir path, got %s", ray_type_name(args[0]->type));
-
-    char sym[1024];
-    const char* sym_path = NULL;
-    if (n == 2 && args[1] && args[1]->type == -RAY_STR)
-        sym_path = str_to_cpath(args[1], sym, sizeof(sym));
-    else
-        sym_path = splay_resolve_sym(dir, sym, sizeof(sym), false);
-
-    /* sym_path == NULL: no symfile resolvable (no explicit arg, no
-     * dir/sym, no partition root/sym).  The load layer raises the loud
-     * "sym" error if the table actually has SYM columns; symbol-free
-     * tables load fine without one. */
-    return ray_read_splayed(dir, sym_path);
-}
-
-/* (.db.parted.get "db_root" `table_name) -- load partitioned table */
-ray_t* ray_get_parted_fn(ray_t** args, int64_t n) {
-    if (n != 2)
-        return ray_error("domain", ".db.parted.get expects 2 arguments, got %lld", (long long)n);
-
-    char root[1024];
-    if (!str_to_cpath(args[0], root, sizeof(root)))
-        return ray_error("type", ".db.parted.get expects a string db root path, got %s", ray_type_name(args[0]->type));
-
-    /* Table name as symbol atom */
-    if (!args[1] || args[1]->type != -RAY_SYM)
-        return ray_error("type", ".db.parted.get expects a sym table name, got %s", ray_type_name(args[1]->type));
-    ray_t* name_atom = ray_sym_str(args[1]->i64);
-    if (!name_atom) return ray_error("name", NULL);
-
-    char name[256];
-    size_t nlen = ray_str_len(name_atom);
-    if (nlen == 0 || nlen >= sizeof(name))
-        return ray_error("domain", ".db.parted.get table name length out of range, got %lld", (long long)nlen);
-    memcpy(name, ray_str_ptr(name_atom), nlen);
-    name[nlen] = '\0';
-
-    return ray_read_parted(root, name);
-}
-
-/* (.db.parted.tables "db_root") → sym vector of table names available under
- * the root, suitable for passing to .db.parted.get. */
-ray_t* ray_get_parted_tables_fn(ray_t** args, int64_t n) {
-    if (n != 1)
-        return ray_error("domain", ".db.parted.tables expects 1 argument, got %lld", (long long)n);
-
-    char root[1024];
-    if (!str_to_cpath(args[0], root, sizeof(root)))
-        return ray_error("type", ".db.parted.tables expects a string db root path, got %s", ray_type_name(args[0]->type));
-
-    return ray_parted_tables(root);
-}
-
-/* (.db.parted.fill "db_root") → sym vector of partition names that were
- * filled.  Writes an empty copy of every table into the partitions that lack
- * it (schema from the most recent partition with it). */
-ray_t* ray_fill_parted_fn(ray_t** args, int64_t n) {
-    if (n != 1)
-        return ray_error("domain", ".db.parted.fill expects 1 argument, got %lld", (long long)n);
-
-    char root[1024];
-    if (!str_to_cpath(args[0], root, sizeof(root)))
-        return ray_error("type", ".db.parted.fill expects a string db root path, got %s", ray_type_name(args[0]->type));
-
-    return ray_parted_fill(root);
-}
-
 /* stat/dirent used by the .fs.* filesystem metadata builtins below. */
 #include <sys/stat.h>
 #include <dirent.h>
@@ -256,12 +88,10 @@ ray_t* ray_fill_parted_fn(ray_t** args, int64_t n) {
  *
  * Issue #36 asked for size + existence + listing primitives.  We
  * keep just two — `.fs.size` and `.fs.list` — because every other
- * predicate (exists, is-file, is-dir) is reachable either via
- * try-on-error against these or via the existing shell fallback
- * (`(.sys.cmd "test -e p")` etc.).  Both errors are flagged "io"
- * so a user wrapping the call in `try` can distinguish missing /
- * wrong-kind from a domain mistake without introspecting the
- * message.
+ * predicate (exists, is-file, is-dir) is reachable via try-on-error
+ * against these.  Both errors are flagged "io" so a user wrapping the
+ * call in `try` can distinguish missing / wrong-kind from a domain
+ * mistake without introspecting the message.
  * ══════════════════════════════════════════ */
 
 /* (.fs.size "path") → i64 file size in bytes.  Errors with "io"
@@ -315,7 +145,7 @@ ray_t* ray_fs_list_fn(ray_t* x) {
     /* Collect names into a sys-allocator string array; capacity grows
      * geometrically so big directories don't quadratic-realloc.  Uses
      * ray_sys_alloc/realloc/strdup/free (NOT libc) per project policy —
-     * mirrors the collect_part_dirs idiom in src/store/part.c. */
+     * mirrors the partition-directory scan idiom. */
     char** names = NULL;
     int64_t count = 0;
     int64_t cap = 0;

@@ -35,7 +35,6 @@
 #include "table/domain.h"
 #include "lang/eval.h"
 #include "store/hnsw.h"
-#include "store/csr.h"
 #include "ops/idxop.h"
 #include <string.h>
 #include <stdlib.h>     /* getenv */
@@ -718,16 +717,6 @@ static void ray_release_owned_refs(ray_t* v) {
             v->attrs &= (uint8_t)~RAY_ATTR_HNSW;
             return;
         }
-        /* I64 atom tagged as a graph handle owns a ray_rel_t (CSR) — free
-         * it on rc→0 so users don't leak when rebinding or going out of
-         * scope without an explicit (.graph.free h). */
-        if (v->type == -RAY_I64 && (v->attrs & RAY_ATTR_GRAPH)) {
-            ray_rel_t* rel = (ray_rel_t*)(uintptr_t)v->i64;
-            if (rel) ray_rel_free(rel);
-            v->i64 = 0;
-            v->attrs &= (uint8_t)~RAY_ATTR_GRAPH;
-            return;
-        }
         if (ray_atom_owns_obj(v) && v->obj && !RAY_IS_ERR(v->obj))
             ray_release(v->obj);
         return;
@@ -848,17 +837,6 @@ bool ray_retain_owned_refs(ray_t* v) {
             }
             return true;
         }
-        /* Graph handle (ray_rel_t*).  No deep-clone API exists for CSR
-         * (could be GBs), and the user's mental model is "the handle is
-         * the graph" — like a file descriptor.  On block-copy we detach
-         * the COPY (the source keeps ownership) so a later free of the
-         * duplicate doesn't touch the source's CSR.  This matches the
-         * lazy-graph (RAY_LAZY) policy above. */
-        if (v->type == -RAY_I64 && (v->attrs & RAY_ATTR_GRAPH)) {
-            v->i64 = 0;
-            v->attrs &= (uint8_t)~RAY_ATTR_GRAPH;
-            return true;
-        }
         if (ray_atom_owns_obj(v) && v->obj && !RAY_IS_ERR(v->obj))
             ray_retain(v->obj);
         return true;
@@ -955,13 +933,6 @@ static void ray_detach_owned_refs(ray_t* v) {
         if (v->type == -RAY_I64 && (v->attrs & RAY_ATTR_HNSW)) {
             v->i64 = 0;
             v->attrs &= (uint8_t)~RAY_ATTR_HNSW;
-            return;
-        }
-        /* Graph handle: same semantics as HNSW — ownership has moved,
-         * clear the bit so rc→0 doesn't ray_rel_free a foreign pointer. */
-        if (v->type == -RAY_I64 && (v->attrs & RAY_ATTR_GRAPH)) {
-            v->i64 = 0;
-            v->attrs &= (uint8_t)~RAY_ATTR_GRAPH;
             return;
         }
         if (ray_atom_owns_obj(v)) v->obj = NULL;

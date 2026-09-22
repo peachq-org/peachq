@@ -28,7 +28,7 @@
  * numparse — unified (ptr, len) → value parsers
  *
  * Used by both the language tokenizer (src/lang/parse.c) and the CSV
- * reader (src/io/csv.c).  All parsers share the same shape:
+ * readers.  All parsers share the same shape:
  *
  *     size_t consumed = ray_parse_X(src, len, &out);
  *

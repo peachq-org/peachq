@@ -44,8 +44,6 @@ extern "C" {
 /* ===== Forward Declarations (internal types) ===== */
 
 typedef struct ray_pool      ray_pool_t;
-typedef struct ray_csr       ray_csr_t;
-typedef struct ray_rel       ray_rel_t;
 typedef struct ray_hnsw      ray_hnsw_t;
 
 /* ===== Lazy DAG Handle Accessors ===== */
@@ -708,44 +706,6 @@ ray_op_t* ray_tail(ray_graph_t* g, ray_op_t* input, int64_t n);
 uint16_t ray_graph_add_table(ray_graph_t* g, ray_t* table);
 ray_op_t* ray_scan_table(ray_graph_t* g, uint16_t table_id, const char* col_name);
 
-/* Graph traversal */
-ray_op_t* ray_expand(ray_graph_t* g, ray_op_t* src_nodes,
-                    ray_rel_t* rel, uint8_t direction);
-ray_op_t* ray_var_expand(ray_graph_t* g, ray_op_t* start_nodes,
-                        ray_rel_t* rel, uint8_t direction,
-                        uint8_t min_depth, uint8_t max_depth,
-                        bool track_path);
-ray_op_t* ray_shortest_path(ray_graph_t* g, ray_op_t* src, ray_op_t* dst,
-                           ray_rel_t* rel, uint8_t max_depth);
-ray_op_t* ray_wco_join(ray_graph_t* g,
-                      ray_rel_t** rels, uint8_t n_rels,
-                      uint8_t n_vars);
-
-/* Graph algorithms */
-ray_op_t* ray_pagerank(ray_graph_t* g, ray_rel_t* rel,
-                      uint16_t max_iter, double damping);
-ray_op_t* ray_connected_comp(ray_graph_t* g, ray_rel_t* rel);
-ray_op_t* ray_dijkstra(ray_graph_t* g, ray_op_t* src, ray_op_t* dst,
-                      ray_rel_t* rel, const char* weight_col,
-                      uint8_t max_depth);
-ray_op_t* ray_louvain(ray_graph_t* g, ray_rel_t* rel,
-                     uint16_t max_iter);
-ray_op_t* ray_degree_cent(ray_graph_t* g, ray_rel_t* rel);
-ray_op_t* ray_topsort(ray_graph_t* g, ray_rel_t* rel);
-ray_op_t* ray_dfs(ray_graph_t* g, ray_op_t* src, ray_rel_t* rel, uint8_t max_depth);
-ray_op_t* ray_astar(ray_graph_t* g, ray_op_t* src, ray_op_t* dst,
-                  ray_rel_t* rel, const char* weight_col,
-                  const char* lat_col, const char* lon_col,
-                  ray_t* node_props, uint8_t max_depth);
-ray_op_t* ray_k_shortest(ray_graph_t* g, ray_op_t* src, ray_op_t* dst,
-                       ray_rel_t* rel, const char* weight_col, uint16_t k);
-ray_op_t* ray_cluster_coeff(ray_graph_t* g, ray_rel_t* rel);
-ray_op_t* ray_random_walk(ray_graph_t* g, ray_op_t* src, ray_rel_t* rel,
-                        uint16_t walk_length);
-ray_op_t* ray_betweenness(ray_graph_t* g, ray_rel_t* rel, uint16_t sample_size);
-ray_op_t* ray_closeness(ray_graph_t* g, ray_rel_t* rel, uint16_t sample_size);
-ray_op_t* ray_mst(ray_graph_t* g, ray_rel_t* rel, const char* weight_col);
-
 /* Rerank ops: consume a filtered source table and return top-K nearest rows
  * (source columns + _dist appended).  Used by `select ... nearest ... take`. */
 ray_op_t* ray_ann_rerank(ray_graph_t* g, ray_op_t* src,
@@ -754,22 +714,6 @@ ray_op_t* ray_ann_rerank(ray_graph_t* g, ray_op_t* src,
 ray_op_t* ray_knn_rerank(ray_graph_t* g, ray_op_t* src,
                          int64_t col_sym, const float* query_vec,
                          int32_t dim, int64_t k, ray_hnsw_metric_t metric);
-
-/* CSR / Relationship API */
-ray_rel_t* ray_rel_build(ray_t* from_table, const char* fk_col,
-                         int64_t n_target_nodes, bool sort_targets);
-ray_rel_t* ray_rel_from_edges(ray_t* edge_table,
-                             const char* src_col, const char* dst_col,
-                             int64_t n_src_nodes, int64_t n_dst_nodes,
-                             bool sort_targets);
-ray_err_t  ray_rel_save(ray_rel_t* rel, const char* dir);
-ray_rel_t* ray_rel_load(const char* dir);
-ray_rel_t* ray_rel_mmap(const char* dir);
-void      ray_rel_set_props(ray_rel_t* rel, ray_t* props);
-void      ray_rel_free(ray_rel_t* rel);
-const int64_t* ray_rel_neighbors(ray_rel_t* rel, int64_t node,
-                                uint8_t direction, int64_t* out_count);
-int64_t   ray_rel_n_nodes(ray_rel_t* rel, uint8_t direction);
 
 /* ===== Optimizer API ===== */
 
