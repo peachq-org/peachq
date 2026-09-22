@@ -554,12 +554,7 @@ static int match_rec(ray_t* a, ray_t* b) {
     if (a->type == -RAY_STR)
         return ray_str_len(a) == ray_str_len(b) &&
                memcmp(ray_str_ptr(a), ray_str_ptr(b), ray_str_len(a)) == 0;
-    if (a->type == -RAY_GUID) {
-        /* payload lives in a 16-byte U8 buffer behind the obj pointer —
-         * an 8-byte union memcmp would compare POINTERS (codex P2). */
-        return a->obj && b->obj &&
-               memcmp(ray_data(a->obj), ray_data(b->obj), 16) == 0;
-    }
+    if (a->type == -RAY_GUID) return memcmp(ray_guid_bytes(a), ray_guid_bytes(b), 16) == 0;
     if (a->type == RAY_ENUM || a->type == -RAY_ENUM) {
         /* 20h sits outside the ray_is_vec band, so the container walk lands
          * here (the apply-level `~` decays before the kernel; children of a
