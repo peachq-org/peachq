@@ -885,7 +885,7 @@ static int32_t term_highlight_into(char* dst, int32_t dst_cap,
         default:
             /* Check for word at word boundary.  Also accepts a leading `.`
              * followed by alphanum so reserved-namespace builtins like
-             * `.sys.gc` / `.csv.read` are scanned as one token instead
+             * `.sys.gc` / `.fs.size` are scanned as one token instead
              * of three pieces (`.`, `sys`, `.`, `gc`).  Internal `.`
              * extends the word only when followed by another alphanum,
              * keeping `foo.` or `1.5)` from being mis-joined. */

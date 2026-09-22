@@ -240,7 +240,7 @@ ray_err_t ray_obj_save(ray_t* obj, const char* path) {
 
     /* Durability: fflush + fsync BEFORE fclose so a buffered write
      * hitting ENOSPC inside fclose doesn't slip through silently.
-     * Callers (esp. ray_journal_snapshot) write to a .tmp then rename
+     * Callers write to a .tmp then rename
      * — without this fsync the .tmp may be empty/partial on disk
      * when the rename atomically swaps it in. */
     if (fflush(f) != 0) {

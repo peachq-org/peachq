@@ -212,7 +212,7 @@ void ray_lang_print(FILE* fp, ray_t* val);
 typedef ray_t* (*ray_apply_hook_t)(ray_t* head, ray_t** args, int64_t n);
 void ray_eval_set_apply_hook(ray_apply_hook_t hook);
 
-/* peachq: remote-source string evaluation (IPC request payloads, journal
+/* peachq: remote-source string evaluation (IPC request payloads,
  * replay).  A language layer may install a hook that owns the parse+eval
  * of remote SOURCE STRINGS (peachq installs q_parse -> q_lower -> ray_eval
  * at q boot); without a hook the engine's own ray_eval_str runs (rayfall —
@@ -371,8 +371,6 @@ ray_t* ray_window_join1_fn(ray_t** args, int64_t n);
 
 /* I/O */
 ray_t* ray_println_fn(ray_t** args, int64_t n);
-ray_t* ray_read_csv_fn(ray_t** args, int64_t n);
-ray_t* ray_write_csv_fn(ray_t** args, int64_t n);
 ray_t* ray_read_file_fn(ray_t* path_obj);
 ray_t* ray_write_file_fn(ray_t* path_obj, ray_t* content);
 

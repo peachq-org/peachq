@@ -121,7 +121,7 @@ static size_t col_str_pool_payload_len(const ray_t* vec);
 
 /* The format-version constant and the stamp/check helpers
  * (ray_col_stamp_format / ray_col_check_format) live in col.h so the CSV
- * streaming splayed-column writer (src/io/csv.c) shares the exact same
+ * streaming splayed-column writer shared the exact same
  * on-disk identity. */
 
 /* Allowlist of attr bits the save path legitimately persists (col_save_impl
@@ -605,7 +605,7 @@ static void try_load_link_sidecar(ray_t* vec, const char* path) {
 
 /* Append an inline index region to an EXISTING column file (no data rewrite):
  * pad the payload to 32, write the region, then stamp the aux[0..3] marker.
- * Used by the streaming .csv.splayed builder, which writes raw columns first.
+ * Used by the streaming splayed builder, which writes raw columns first.
  * `col_len`/`col_type` describe the on-disk column (payload = 32 + len*esz). */
 ray_err_t ray_col_append_index(const char* path, const void* ix_v,
                                int64_t col_len, int8_t col_type) {
@@ -1542,7 +1542,7 @@ static ray_t* col_mmap_impl(const char* path, struct ray_sym_domain_s* dom,
     }
 
     /* Reattach link sidecar if present.  Without this, linked columns
-     * round-tripped through splay-mmap (splay.c:184) lose HAS_LINK
+     * round-tripped through splay-mmap lose HAS_LINK
      * even though ray_col_load restores it. */
     try_load_link_sidecar(vec, path);
 

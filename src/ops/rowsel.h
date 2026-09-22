@@ -58,7 +58,7 @@
  * The accessors below are the only valid way to read its contents.
  *
  * Note: this is unrelated to the existing RAY_SEL type tag used by
- * src/ops/join.c and src/ops/traverse.c as a generic key-bit set.
+ * src/ops/join.c as a generic key-bit set.
  * Those continue to use ray_sel_* unchanged.
  */
 

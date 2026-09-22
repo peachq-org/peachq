@@ -36,9 +36,7 @@
 #include "exec.h"
 #include "core/pool.h"
 #include "core/profile.h"
-#include "store/csr.h"
 #include "store/hnsw.h"
-#include "lftj.h"
 #include "mem/heap.h"
 #include "table/sym.h"
 #include "table/table.h"
@@ -1168,30 +1166,6 @@ void pivot_ingest_free(pivot_ingest_t* out);
 
 /* ── window.c ── */
 ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl);
-
-/* ── graph_exec.c ── */
-ray_t* exec_expand(ray_graph_t* g, ray_op_t* op, ray_t* src_vec);
-ray_t* exec_var_expand(ray_graph_t* g, ray_op_t* op, ray_t* start_vec);
-ray_t* exec_shortest_path(ray_graph_t* g, ray_op_t* op,
-                          ray_t* src_val, ray_t* dst_val);
-ray_t* exec_pagerank(ray_graph_t* g, ray_op_t* op);
-ray_t* exec_connected_comp(ray_graph_t* g, ray_op_t* op);
-ray_t* exec_dijkstra(ray_graph_t* g, ray_op_t* op,
-                     ray_t* src_val, ray_t* dst_val);
-ray_t* exec_wco_join(ray_graph_t* g, ray_op_t* op);
-ray_t* exec_louvain(ray_graph_t* g, ray_op_t* op);
-ray_t* exec_degree_cent(ray_graph_t* g, ray_op_t* op);
-ray_t* exec_topsort(ray_graph_t* g, ray_op_t* op);
-ray_t* exec_cluster_coeff(ray_graph_t* g, ray_op_t* op);
-ray_t* exec_betweenness(ray_graph_t* g, ray_op_t* op);
-ray_t* exec_closeness(ray_graph_t* g, ray_op_t* op);
-ray_t* exec_mst(ray_graph_t* g, ray_op_t* op);
-ray_t* exec_random_walk(ray_graph_t* g, ray_op_t* op, ray_t* src_val);
-ray_t* exec_dfs(ray_graph_t* g, ray_op_t* op, ray_t* src_val);
-ray_t* exec_astar(ray_graph_t* g, ray_op_t* op,
-                  ray_t* src_val, ray_t* dst_val);
-ray_t* exec_k_shortest(ray_graph_t* g, ray_op_t* op,
-                       ray_t* src_val, ray_t* dst_val);
 
 /* ── pivot_exec.c ── */
 ray_t* exec_if(ray_graph_t* g, ray_op_t* op);

@@ -38,7 +38,6 @@
 #include "ops/rowsel.h"
 #include "ops/fused_group.h"
 #include "ops/fused_topk.h"
-#include "ops/hll.h"
 #include "ops/temporal.h"
 #include "core/profile.h"
 #include "table/sym.h"
