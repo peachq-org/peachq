@@ -33,7 +33,6 @@
 #include "lang/cal.h"
 #include "core/pool.h"
 #include "core/types.h"
-#include "io/csv.h"
 #include "ops/ops.h"
 
 static inline double clear_neg_zero(double v) {
@@ -42,8 +41,6 @@ static inline double clear_neg_zero(double v) {
     return v;
 }
 #include "ops/hash.h"
-#include "store/part.h"
-#include "store/splay.h"
 #include "table/sym.h"
 #include "core/profile.h"
 #include "mem/sys.h"
@@ -485,116 +482,6 @@ ray_t* ray_exit_fn(ray_t* arg) {
     return NULL; /* unreachable */
 }
 
-/* (read-csv path) — read CSV file, return RAY_TABLE */
-/* Helper: resolve a type name symbol to a ray type code */
-static int8_t resolve_type_name(int64_t sym_id) {
-    ray_t* s = ray_sym_str(sym_id);
-    if (!s) return -1;
-    const char* name = ray_str_ptr(s);
-    size_t len = ray_str_len(s);
-    int8_t result = -1;
-    if (len == 3 && memcmp(name, "I64", 3) == 0) result = RAY_I64;
-    else if (len == 3 && memcmp(name, "I32", 3) == 0) result = RAY_I32;
-    else if (len == 3 && memcmp(name, "I16", 3) == 0) result = RAY_I16;
-    /* INT — schema-only marker; csv.c resolves it to the narrowest int width
-     * (I16/I32/I64) from the column's parsed min/max/has_null. */
-    else if (len == 3 && memcmp(name, "INT", 3) == 0) result = RAY_CSV_AUTO_TAG;
-    else if (len == 3 && memcmp(name, "F64", 3) == 0) result = RAY_F64;
-    else if (len == 2 && memcmp(name, "B8", 2) == 0) result = RAY_BOOL;
-    else if (len == 2 && memcmp(name, "U8", 2) == 0) result = RAY_BYTE_ONLY;
-    else if (len == 6 && memcmp(name, "SYMBOL", 6) == 0) result = RAY_SYM;
-    else if (len == 3 && memcmp(name, "STR", 3) == 0) result = RAY_STR;
-    else if (len == 3 && memcmp(name, "F32", 3) == 0) result = RAY_F32;
-    else if (len == 4 && memcmp(name, "DATE", 4) == 0) result = RAY_DATE;
-    else if (len == 5 && memcmp(name, "MONTH", 5) == 0) result = RAY_MONTH;
-    else if (len == 8 && memcmp(name, "DATETIME", 8) == 0) result = RAY_DATETIME;
-    else if (len == 4 && memcmp(name, "TIME", 4) == 0) result = RAY_TIME;
-    else if (len == 9 && memcmp(name, "TIMESTAMP", 9) == 0) result = RAY_TIMESTAMP;
-    else if (len == 6 && memcmp(name, "MINUTE", 6) == 0) result = RAY_MINUTE;
-    else if (len == 6 && memcmp(name, "SECOND", 6) == 0) result = RAY_SECOND;
-    else if (len == 8 && memcmp(name, "TIMESPAN", 8) == 0) result = RAY_TIMESPAN;
-    else if (len == 4 && memcmp(name, "GUID", 4) == 0) result = RAY_GUID;
-    ray_release(s);
-    return result;
-}
-
-ray_t* ray_read_csv_fn(ray_t** args, int64_t n) {
-    if (n < 1 || n > 3) return ray_error("arity", "read-csv: expects 1 to 3 arguments, got %lld", (long long)n);
-
-    /* (read-csv [types] "path"), (read-csv [names] [types] "path"), or (read-csv "path") */
-    ray_t* path_obj = NULL;
-    ray_t* schema = NULL;
-    ray_t* names = NULL;
-    if (n >= 3 && ray_is_vec(args[0]) && args[0]->type == RAY_SYM &&
-        ray_is_vec(args[1]) && args[1]->type == RAY_SYM) {
-        names = args[0];
-        schema = args[1];
-        path_obj = args[2];
-    } else if (n >= 2 && ray_is_vec(args[0]) && args[0]->type == RAY_SYM) {
-        schema = args[0];
-        path_obj = args[1];
-    } else {
-        path_obj = args[0];
-    }
-
-    const char* path = NULL;
-    if (path_obj->type == -RAY_STR)
-        path = ray_str_ptr(path_obj);
-    else
-        return ray_error("type", "read-csv: path must be str, got %s", ray_type_name(path_obj->type));
-    if (!path) return ray_error("domain", "read-csv: empty path");
-
-    if (schema) {
-        int64_t ncols = schema->len;
-        int8_t col_types[256];
-        if (ncols > 256) return ray_error("limit", NULL);
-        void* sym_data = ray_data(schema);
-        for (int64_t i = 0; i < ncols; i++) {
-            int64_t sid = ray_read_sym(sym_data, i, schema->type, schema->attrs);
-            col_types[i] = resolve_type_name(sid);
-            if (col_types[i] < 0) return ray_error("type", "read-csv: unknown column type name in schema");
-        }
-        int64_t col_names[256];
-        if (names) {
-            if (names->len != ncols) return ray_error("length", "read-csv: names and types must match, got %lld names and %lld types", (long long)names->len, (long long)ncols);
-            void* name_data = ray_data(names);
-            for (int64_t i = 0; i < ncols; i++)
-                col_names[i] = ray_read_sym(name_data, i, names->type, names->attrs);
-        }
-        ray_t* tbl = names
-            ? ray_read_csv_named_opts(path, 0, false, col_types, (int32_t)ncols,
-                                      col_names, (int32_t)ncols)
-            : ray_read_csv_opts(path, 0, true, col_types, (int32_t)ncols);
-        if (!tbl) return ray_error("io", NULL);
-        if (RAY_IS_ERR(tbl)) return tbl;
-        return tbl;
-    }
-
-    ray_t* tbl = ray_read_csv(path);
-    if (!tbl) return ray_error("io", NULL);
-    if (RAY_IS_ERR(tbl)) return tbl;
-    return tbl;
-}
-
-/* (write-csv table path) — write table to CSV file */
-ray_t* ray_write_csv_fn(ray_t** args, int64_t n) {
-    if (n < 2) return ray_error("arity", "write-csv: expects 2 arguments, got %lld", (long long)n);
-    ray_t* tbl = args[0];
-    ray_t* path_obj = args[1];
-    if (tbl->type != RAY_TABLE) return ray_error("type", "write-csv: first argument must be table, got %s", ray_type_name(tbl->type));
-    const char* path = NULL;
-    if (path_obj->type == -RAY_STR)
-        path = ray_str_ptr(path_obj);
-    else
-        return ray_error("type", "write-csv: path must be str, got %s", ray_type_name(path_obj->type));
-    if (!path) return ray_error("domain", "write-csv: empty path");
-    ray_err_t err = ray_write_csv(tbl, path);
-    if (err != RAY_OK) return ray_error(ray_err_code_str(err), NULL);
-    return make_i64(0);
-}
-
-/* (as 'TypeName value) — type cast */
-/* Case-insensitive type name match helper */
 static int cast_match(const char* tname, size_t tlen, const char* target) {
     size_t tgt_len = strlen(target);
     if (tlen != tgt_len) return 0;
