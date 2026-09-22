@@ -175,10 +175,7 @@ static ray_t* take_unify(ray_t* r) {
 
 /* q `x # y` — Take (ref/take.md); borrows both args */
 ray_t* q_take_wrap(ray_t* x, ray_t* y) {
-    if (x && x->type == -RAY_SYM && y &&
-        (ray_is_vec(y) || y->type == RAY_ENUM || y->type == RAY_TABLE || y->type == RAY_DICT ||
-         (y->type == RAY_LIST && q_type_is_null_sym(x))))    /* D48: only the CLEAR form admits a general list */
-        return q_attr_set_dispatch(x, y);              /* `s#v — set attribute */
+    if (q_attr_set_admits(x, y)) return q_attr_set_dispatch(x, y);   /* `s#v — set attribute */
     /* the parse tree of `update `g#c from t` carries the ENLISTED sym ((#;,`g;`c)),
      * and kx still applies the attribute when the target is a plain vector — the
      * functional-qsql attr idiom.  Containers keep their take-columns meaning. */
