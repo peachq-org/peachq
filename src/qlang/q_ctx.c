@@ -334,15 +334,42 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, ctx_st
     return lrc;
 }
 
-typedef struct { FILE* out; FILE* err; int print_result; ray_t** esig; } ctx_load_t;
+typedef struct { FILE* out; FILE* err; int print_result; char lang; ray_t** esig; } ctx_load_t;
 
+/* A custom language handler lives in a SINGLE-LETTER namespace and is passed the statement text
+ * (wp/query-interface.md:41), so a script whose extension is one such letter runs every statement
+ * through `.X.e` — embedPy's `.t` suites are scored that way.  Prefixing is the whole routing: the
+ * text seam already strips every leading `<letter>)` and keeps the RIGHTMOST, so a `p)` line inside
+ * a `.t` file still reaches `.p.e`.  `q` and `k` keep their own doors. */
 static int ctx_load_stmt(const char* s, size_t n, void* u) {
     ctx_load_t* ld = (ctx_load_t*)u;
-    return ctx_line(s, n, ld->out, ld->err, ld->print_result, 1, ld->esig);
+    if (!ld->lang) return ctx_line(s, n, ld->out, ld->err, ld->print_result, 1, ld->esig);
+    char* t = (char*)ray_sys_alloc(n + 3);
+    if (!t) return 1 + (int)QE_OOM;
+    t[0] = ld->lang;
+    t[1] = ')';
+    memcpy(t + 2, s, n);
+    t[n + 2] = '\0';
+    int rc = ctx_line(t, n + 2, ld->out, ld->err, ld->print_result, 1, ld->esig);
+    ray_sys_free(t);
+    return rc;
+}
+
+static char ctx_script_lang(const char* path) {
+    const char* dot = path ? strrchr(path, '.') : NULL;
+    if (!dot || strlen(dot) != 2) return 0;
+    char c = dot[1];
+    int alpha = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');   /* `.H.e` is the documented one */
+    if (!alpha || c == 'q' || c == 'k') return 0;
+    /* Gated on the HANDLER, not the spelling (owner ruling 2026-09-22): `.h` and `.j` are peachq's own
+     * namespaces, so a file named for one must keep loading as q until someone defines its `.X.e`. */
+    char    name[5] = { '.', c, '.', 'e', '\0' };
+    ray_t*  fn      = q_env_get(ray_sym_intern_runtime(name, 4));
+    return fn && q_eval_apply_is_fn(fn) ? c : 0;
 }
 
 static int ctx_run_script(const char* src, size_t len, int64_t file_sym, int print_result,
-                          FILE* out, FILE* err, ray_t** esig) {
+                          char lang, FILE* out, FILE* err, ray_t** esig) {
     /* OWNER RULING 2026-08-06: a load SAVES the caller's `\d` context and
      * RESTORES it when the file runs to completion; a load that ABORTS leaves
      * the context where the error left it (deliberate — that is what makes the
@@ -356,7 +383,7 @@ static int ctx_run_script(const char* src, size_t len, int64_t file_sym, int pri
     int     saved_floor  = q_eval_apply_frame_floor(-1);
     int32_t saved_ffloor = q_env_frame_floor(-1);
 
-    ctx_load_t ld  = { out, err, print_result, esig };
+    ctx_load_t ld  = { out, err, print_result, lang, esig };
     int        lrc = ctx_walk_script(src, len, file_sym, ctx_load_stmt, &ld);
 
     q_env_frame_floor(saved_ffloor);
@@ -400,7 +427,8 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig) {
     const char* fpath = q_io_abs_path(path, abs, sizeof abs) ? abs : path;   /* ref/value.md `f`: the FULL path */
     int rc = ctx_run_script((const char*)ray_data(bytes),
                             (size_t) q_count(bytes),
-                            ray_sym_intern_runtime(fpath, strlen(fpath)), 1, out, err, esig);
+                            ray_sym_intern_runtime(fpath, strlen(fpath)), 1,
+                            ctx_script_lang(path), out, err, esig);
     ray_release(bytes);
     return rc;
 }
@@ -414,16 +442,16 @@ int q_ctx_run_src(const char* s, FILE* out, FILE* err, ray_t** esig) {
     /* No path to attribute: the core bundles are ONE concatenated string, so
      * their docs record the empty file.  Silent: this is the bootstrap and the
      * launcher's argv text (`-eval`, ratified silent 2026-08-30), not a `\l`. */
-    return ctx_run_script(s, strlen(s), 0, 0, out, err, esig);
+    return ctx_run_script(s, strlen(s), 0, 0, 0, out, err, esig);
 }
 
 int q_ctx_run_named_src(const char* name, const char* s, FILE* out, FILE* err, ray_t** esig) {
-    return ctx_run_script(s, strlen(s), ray_sym_intern_runtime(name, strlen(name)), 1, out, err, esig);
+    return ctx_run_script(s, strlen(s), ray_sym_intern_runtime(name, strlen(name)), 1, 0, out, err, esig);
 }
 
 int q_ctx_run_console_src(const char* s, FILE* out, FILE* err) {
     int tok = q_dbg_statement_begin(s, strlen(s), 1);   /* the statement the load's lines inherit console-ness from */
-    int rc  = ctx_run_script(s, strlen(s), 0, 0, out, err, NULL);   /* argv text: silent, as q_ctx_run_src */
+    int rc  = ctx_run_script(s, strlen(s), 0, 0, 0, out, err, NULL);   /* argv text: silent, as q_ctx_run_src */
     q_dbg_statement_end(tok);
     return rc;
 }
