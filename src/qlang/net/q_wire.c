@@ -196,9 +196,9 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
                   w_charvec(b, ray_str_ptr(src), (int64_t)ray_str_len(src), 0)) ? -1 : 0;
             goto out;
         }
-        int kind = b->serde ? 0 : q_eval_apply_carrier_kind(x);
-        if (kind == Q_EVAL_CAR_PROJ || kind == Q_EVAL_CAR_COMP ||
-            kind == Q_EVAL_CAR_DERIV) {
+        q_car_kind_t kind = b->serde ? Q_EVAL_CAR_NONE : q_eval_apply_carrier_kind(x);
+        switch (kind) {
+        case Q_EVAL_CAR_PROJ: case Q_EVAL_CAR_COMP: case Q_EVAL_CAR_DERIV: {
             ray_t* body = q_eval_carrier_value(x);    /* owned */
             if (!body) { rc = wbuf_fail(b, q_err(QE_WSFULL)); goto out; }
             if (kind == Q_EVAL_CAR_DERIV) {
@@ -213,6 +213,10 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
             }
             ray_release(body);
             goto out;
+        }
+        /* serde mode, and the kinds with no wire encoding, fall to 'nyi */
+        case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_LAMBDA: case Q_EVAL_CAR_ITER:
+        case Q_EVAL_CAR_VIEW: case Q_EVAL_CAR_KFN: break;
         }
         rc = wbuf_fail(b, q_err(QE_NYI));
         goto out;

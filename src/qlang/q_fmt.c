@@ -1409,16 +1409,19 @@ void q_fmt_console(ray_t* val, char* buf, size_t bufsz) {
  * the bound-argument echo, holes empty — {x+y}[1;], +[;2] (kdb shape,
  * owner ruling 2026-07-23).  Returns 1 iff v was rendered as a carrier. */
 static int carrier_fmt(ray_t* v, char* buf, size_t bufsz) {
-    int kind = q_eval_apply_carrier_kind(v);
-    if (!kind || bufsz == 0) return 0;
-    if (kind == Q_EVAL_CAR_VIEW) {         /* `. `d shows the bare text: b+a */
+    q_car_kind_t kind = q_eval_apply_carrier_kind(v);
+    if (kind == Q_EVAL_CAR_NONE || bufsz == 0) return 0;
+    const char* nm = q_eval_apply_car_head_name(v);
+    ray_t* head = q_eval_apply_car_head(v);
+    switch (kind) {
+    case Q_EVAL_CAR_VIEW: {                /* `. `d shows the bare text: b+a */
         ray_t* t = q_view_text(v);
         snprintf(buf, bufsz, "%.*s", t ? (int) q_count(t) : 0,
                  t ? (const char*)ray_data(t) : "");
         if (t) ray_release(t);
         return 1;
     }
-    if (kind == Q_EVAL_CAR_LAMBDA) {
+    case Q_EVAL_CAR_LAMBDA: {
         ray_t* src = q_eval_apply_lambda_src(v);
         if (src)
             snprintf(buf, bufsz, "%.*s", (int)ray_str_len(src),
@@ -1427,7 +1430,7 @@ static int carrier_fmt(ray_t* v, char* buf, size_t bufsz) {
             snprintf(buf, bufsz, "{..}");
         return 1;
     }
-    if (kind == Q_EVAL_CAR_KFN) {          /* the `2:` call that made it, read back off the slots */
+    case Q_EVAL_CAR_KFN: {                 /* the `2:` call that made it, read back off the slots */
         int64_t rank = 0, lib = 0, sym = 0;
         q_eval_apply_kfn_parts(v, NULL, &rank, &lib, &sym);
         ray_t* ls = ray_sym_str(lib);
@@ -1437,15 +1440,13 @@ static int carrier_fmt(ray_t* v, char* buf, size_t bufsz) {
                  fs ? (int)ray_str_len(fs) : 0, fs ? ray_str_ptr(fs) : "", (long long)rank);
         return 1;
     }
-    if (kind == Q_EVAL_CAR_ITER) {
+    case Q_EVAL_CAR_ITER: {
         int adv = q_eval_apply_iter_id(v);
         snprintf(buf, bufsz, "%s",
                  (adv >= 0 && adv < 6) ? ADVERB_NAMES[adv] : "");
         return 1;
     }
-    const char* nm = q_eval_apply_car_head_name(v);
-    ray_t* head = q_eval_apply_car_head(v);
-    if (kind == Q_EVAL_CAR_DERIV) {
+    case Q_EVAL_CAR_DERIV: {
         int adv = q_eval_apply_deriv_adv(v);
         char fb[128] = "";
         if (nm) snprintf(fb, sizeof fb, "%s", nm);
@@ -1454,13 +1455,15 @@ static int carrier_fmt(ray_t* v, char* buf, size_t bufsz) {
                  (adv >= 0 && adv < 6) ? ADVERB_NAMES[adv] : "");
         return 1;
     }
-    if (kind == Q_EVAL_CAR_COMP) {
+    case Q_EVAL_CAR_COMP: {
         ray_t* g = q_eval_apply_comp_inner(v);
         char ub[128] = "", gb[128] = "";
         if (head) q_fmt(head, ub, sizeof ub);
         if (g) q_fmt(g, gb, sizeof gb);
         snprintf(buf, bufsz, "%s %s", ub, gb);
         return 1;
+    }
+    case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_PROJ: break;
     }
     char fb[256] = "";
     if (nm) snprintf(fb, sizeof fb, "%s", nm);

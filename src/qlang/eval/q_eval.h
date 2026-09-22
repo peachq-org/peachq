@@ -105,10 +105,10 @@ int q_eval_apply_is_fn(ray_t* v);
 
 /* RAY_QFN carriers (lambda/projection/derived verb/composition): child
  * slots in ray_data, kind in aux[0]; serde/wire refuse them via totality
- * fallbacks. */
-enum { Q_EVAL_CAR_LAMBDA = 1, Q_EVAL_CAR_PROJ = 2, Q_EVAL_CAR_DERIV = 3,
-       Q_EVAL_CAR_COMP = 4, Q_EVAL_CAR_ITER = 5, Q_EVAL_CAR_VIEW = 6,
-       Q_EVAL_CAR_KFN = 7 };
+ * fallbacks.  NAMED so -Wswitch fails the build on a switch missing an arm. */
+typedef enum { Q_EVAL_CAR_NONE = 0, Q_EVAL_CAR_LAMBDA = 1, Q_EVAL_CAR_PROJ = 2,
+               Q_EVAL_CAR_DERIV = 3, Q_EVAL_CAR_COMP = 4, Q_EVAL_CAR_ITER = 5,
+               Q_EVAL_CAR_VIEW = 6, Q_EVAL_CAR_KFN = 7 } q_car_kind_t;
 /* `2:`-loaded C function (112h): [fn pointer boxed i64, rank i64, lib sym, symbol sym].  It is a
  * CARRIER and not a RAY_VARY builtin precisely so it has a DECLARED rank — a variadic would be
  * rankless, and `f[1;]` could not project nor `f each` iterate. */
@@ -125,7 +125,7 @@ ray_t* q_eval_apply_deriv_new(int adv, ray_t* fv, const struct q_op* frow);
  * back out (-1 when v is not an iterator). */
 ray_t* q_eval_apply_iter_new(int adv);
 int    q_eval_apply_iter_id(ray_t* v);
-int    q_eval_apply_carrier_kind(const ray_t* v);   /* 0 = not a carrier */
+q_car_kind_t q_eval_apply_carrier_kind(const ray_t* v);   /* Q_EVAL_CAR_NONE = not a carrier */
 /* the value's arity as dispatch sees it; -1 when it has no fixed rank */
 int64_t q_eval_apply_rank(ray_t* v);
 int    q_eval_apply_frame_depth(void);              /* lambda frames live (above the floor) */
