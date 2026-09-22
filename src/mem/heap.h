@@ -127,6 +127,14 @@ ray_t*    ray_cow(ray_t* v);
  * ray_alloc_copy of such a block is an ordinary heap copy (mmod 0). */
 void ray_free_set_mapped_fn(void (*fn)(ray_t* v));
 
+/* ===== RAY_QFN finalizer =====
+ * A carrier slot may stand for a resource base cannot name (a `2:` foreign
+ * object's destructor, which lives inside the loaded `.so`).  ray_free runs
+ * the installed hook on every RAY_QFN before its slots are released, so the
+ * owning layer gets its ONE last-reference choke point.  Same contract as the
+ * mapped hook: install at runtime create, clear after the env is gone. */
+void ray_free_set_qfn_fin_fn(void (*fn)(ray_t* v));
+
 /* ===== Memory Statistics ===== */
 
 typedef struct {

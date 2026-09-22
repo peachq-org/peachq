@@ -12,6 +12,7 @@
 #include "qlang/eval/q_eval.h"       /* the KFN carrier + q_eval_apply_value */
 #include "qlang/q_ctx.h"             /* q_ctx_eval_src — what k(0,…) evaluates through */
 #include "core/poll.h"
+#include "mem/heap.h"                /* ray_free_set_qfn_fin_fn — the foreign-destructor choke point */
 #include "core/runtime.h"
 #include "ops/ops.h"                 /* RAY_EXTRACT_* */
 #include "ops/temporal.h"            /* ray_temporal_extract — dj's civil fields */
@@ -73,6 +74,17 @@ typedef struct k0 {
 #define K_SHIM 0x6b
 static int k_is_shim(K x) { return x && x->m == (signed char)K_SHIM; }
 
+/* The `u` byte of a shim is ours too (kdb writes it on nothing we hand out).  A -128h error object
+ * owns the malloc'd message `x->s` points at, so the string dies with the object instead of leaking
+ * a symbol per distinct error text into the intern table. */
+#define K_UOWN 1
+
+/* 112h — an extension's FOREIGN object: `knk(2,destructor,payload)` with `xt` overwritten (py.c:7;
+ * pykx and pcre2 use the same convention).  Its two slots are RAW pointers, never K objects, so no
+ * walk here may treat them as such.  It is the CANONICAL object: the q-side carrier boxes this k0
+ * and owns one reference, and r0 running the destructor at the last one is kdb's own law. */
+static int k_is_foreign(K x) { return k_is_shim(x) && x->t == 112 && x->n >= 2; }
+
 /* PUBLISHED OWNERSHIP CONTRACT — interfaces/capiref.md `Tags:` lines, which this file obeys and the
  * one table that records them.  `own` CONSUMES its arguments' references; everything else BORROWS.
  * `ee` returns 0 on error (the caller propagates 0 or calls ee).  capiref.md:103 is the law over all
@@ -107,6 +119,8 @@ S sn(const S s, I n);
 S ss(const S s);
 K krr(const S s);
 K orr(const S s);
+K ee(K x);
+K dl(V* f, J n);
 K ka(I t);
 K kb(I x);
 K kg(I x);
@@ -242,6 +256,31 @@ static K shim_atom(I t) {
     return x;
 }
 
+/* THE one -128h builder.  A ray error is a packed class plus a per-VM message, neither of which
+ * outlives the call, so the object carries its OWN NUL-terminated copy (capiref.md `ee`: the reader
+ * is `x->s`) and frees it in r0. */
+static K shim_err(const char* m, size_t n) {
+    K x = shim_atom(-128);
+    if (!x) return (K)0;
+    char* p = (char*)malloc(n + 1);
+    if (!p) return x;                 /* capiref.md `ee`: `x->s` may be NULL, and readers check */
+    memcpy(p, m, n);
+    p[n] = '\0';
+    x->s = p;
+    x->u = K_UOWN;
+    return x;
+}
+
+/* capiref.md `ee`: capture AND RESET the pending error into the usual -128h object.  A non-NULL x is
+ * its own answer and the error status is untouched — only the NULL path clears it.  capiref.md:113
+ * notes such an object may only be returned at the top level of a C function called from q; that is
+ * the extension's discipline to keep, not ours to enforce. */
+K ee(K x) {
+    if (x || !g_kerr_set) return x;
+    g_kerr_set = 0;
+    return shim_err(g_kerr, strlen(g_kerr));
+}
+
 K r1(K x) {
     if (!x) return x;
     if (k_is_shim(x)) { x->r++; return x; }
@@ -256,6 +295,9 @@ V r0(K x) {
     if (x->t == 0)  { for (J i = 0; i < x->n; i++) r0(kK(x)[i]); }
     if (x->t == 99) { r0(kK(x)[0]); r0(kK(x)[1]); }
     if (x->t == 98) r0(x->k);
+    if (x->t == -128 && x->u == K_UOWN) free(x->s);
+    /* THE exactly-once destructor call: the last reference to a foreign is where kdb runs it too. */
+    if (k_is_foreign(x) && kK(x)[0]) ((V(*)(K))(void*)kK(x)[0])(x);
     free(x);
 }
 
@@ -525,9 +567,7 @@ static K k_of_ray(ray_t* v) {
     if (RAY_IS_ERR(v)) {
         int64_t n = 0;
         const char* m = q_err_text(v, &n);
-        K x = shim_atom(-128);
-        if (x) x->s = sn((S)(m ? m : "error"), (I)(m ? n : 5));
-        return x;
+        return m ? shim_err(m, (size_t)n) : shim_err("error", 5);
     }
 
     if (t == RAY_TABLE) {
@@ -552,6 +592,14 @@ static K k_of_ray(ray_t* v) {
             kK(x)[i] = e;
         }
         return x;
+    }
+
+    /* A foreign hands back the SAME k0 every crossing — the extension's own object, not a view of
+     * it — so `kK(x)[1]` is the pointer it stored and identity survives the round trip. */
+    if (t == RAY_QFN) {
+        void* obj = NULL;
+        if (!q_eval_apply_foreign_parts(v, &obj)) return krr((S) "nyi");   /* lambdas, `2:` fns */
+        return r1((K)obj);
     }
 
     /* physical STR is q-invisible: a char vector is what crosses (string-C3) */
@@ -600,6 +648,12 @@ static ray_t* k_to_ray(K x) {
     if (!k_is_shim(x)) { ray_t* v = RAY_OF(x); ray_retain(v); return v; }
 
     I t = x->t;
+    if (t == 112) {
+        if (!k_is_foreign(x)) return q_err(QE_TYPE);   /* 112h with no (destructor;payload) pair */
+        ray_t* c = q_eval_apply_foreign_new(r1(x));
+        if (RAY_IS_ERR(c)) r0(x);
+        return c;
+    }
     if (t == 101) return RAY_NULL_OBJ;
     if (t == -128) return q_err_from_text(x->s ? x->s : "", x->s ? strlen(x->s) : 0);
     if (t == -11) return ray_sym(sym_id(x->s));
@@ -675,6 +729,9 @@ static int seam_ok(K x, int depth) {
     if (!x) return 0;
     if (depth > 16) return 1;   /* a depth CAP on the walk, never a verdict: deep nesting is legal */
     I t = x->t;
+    /* a carrier overlay (what `dl` hands back) reads its ray tag, which is no kdb tag at all */
+    if (!k_is_shim(x) && RAY_OF(x)->type == RAY_QFN) return RAY_OF(x)->rc > 0;
+    if (t == 112) return k_is_foreign(x);
     if (t != -128 && t != 101 && t != 98 && t != 99 && !(t < 0 ? k_tag_ok(-t) : k_tag_ok(t)))
         return 0;
     if (k_is_shim(x)) {
@@ -802,8 +859,7 @@ K k(I handle, const S s, ...) {    /* own: takes ownership of references to its 
     if (RAY_IS_ERR(res)) {
         int64_t n = 0;
         const char* m = q_err_text(res, &n);
-        out = shim_atom(-128);
-        if (out) out->s = sn((S)(m ? m : "error"), (I)(m ? n : 5));
+        out = m ? shim_err(m, (size_t)n) : shim_err("error", 5);
         ray_error_free(res);
         goto done;
     }
@@ -827,6 +883,19 @@ typedef K (*F7)(K, K, K, K, K, K, K);
 typedef K (*F8)(K, K, K, K, K, K, K, K);
 
 #define KAPI_MAX_RANK 8
+
+/* capiref.md `dl`: a C function of rank n, wrapped as a q function.  The SAME Q_EVAL_CAR_KFN carrier
+ * `2:` builds — from a pointer the extension already holds, so there is no library and no dlsym name
+ * to record and both provenance slots stay the EMPTY symbol (owner ruling 2026-09-22).  The result
+ * is a carrier OVERLAY: an extension that reads `xt` on it sees ray's own tag, not 112h — harmless,
+ * because the one thing to do with a `dl` result is hand it back to q. */
+K dl(V* f, J n) {
+    if (!f || n < 1 || n > KAPI_MAX_RANK) return krr((S) "rank");
+    int64_t none = ray_sym_intern_runtime("", 0);
+    ray_t* c = q_eval_apply_kfn_new(f, n, none, none);
+    if (!c || RAY_IS_ERR(c)) { if (c) ray_error_free(c); return krr((S) "wsfull"); }
+    return K_OF(c);
+}
 
 ray_t* q_kapi_invoke(ray_t* carrier, ray_t** args, int64_t n) {
     void*   fn   = NULL;
@@ -1037,7 +1106,22 @@ ray_t* q_dl_wrap(ray_t* x, ray_t* y) {
 }
 #endif /* !_WIN32 */
 
+/* The heap's RAY_QFN choke point (heap.c `ray_free_set_qfn_fin_fn`, the `ray_free_set_mapped_fn`
+ * precedent): base cannot know a carrier kind, so the death of a foreign carrier comes back HERE to
+ * drop the reference it holds on the extension's own k0 — which is where the destructor runs. */
+static void kapi_qfn_fin(ray_t* v) {
+    void* obj = NULL;
+    if (q_eval_apply_foreign_parts(v, &obj) && obj) r0((K)obj);
+}
+
+void q_kapi_init(void) { ray_free_set_qfn_fin_fn(kapi_qfn_fin); }
+
 void q_kapi_reset(void) {
+    /* Ordering law: every foreign object must be DEAD before this runs, because its destructor is a
+     * function pointer inside the loaded `.so` — q_runtime_destroy calls us after q_env_destroy.  The
+     * `.so` itself never unmaps (dlopen RTLD_NODELETE, q_ffi.c's policy), so a foreign that outlived
+     * a runtime would still find its code; the hook it needs is what goes away here. */
+    ray_free_set_qfn_fin_fn(NULL);
     ray_poll_t* p = (ray_poll_t*)ray_runtime_get_poll();
     for (int i = 0; i < g_nsd; i++)
         if (p) ray_poll_deregister(p, g_sd[i].id);

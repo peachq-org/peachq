@@ -218,6 +218,23 @@ int q_eval_apply_kfn_parts(ray_t* v, void** fn, int64_t* rank, int64_t* lib_sym,
     return 1;
 }
 
+/* foreign carrier: [opaque pointer boxed i64] — an extension's 112h object.  The pointer is BOXED
+ * because the heap's RAY_QFN release walk reads every slot as a ray_t*. */
+ray_t* q_eval_apply_foreign_new(void* obj) {
+    ray_t* c = car_new(Q_EVAL_CAR_FOREIGN, 1);
+    if (RAY_IS_ERR(c)) return c;
+    return car_put(c, 0, ray_i64((int64_t)(uintptr_t)obj));
+}
+
+int q_eval_apply_foreign_parts(ray_t* v, void** obj) {
+    if (q_eval_apply_carrier_kind(v) != Q_EVAL_CAR_FOREIGN) return 0;
+    /* the finalizer reaches a carrier car_put is UNWINDING, whose slot is still C-NULL */
+    ray_t* slot = car_slots(v)[0];
+    if (!slot) return 0;
+    if (obj) *obj = (void*)(uintptr_t)slot->i64;
+    return 1;
+}
+
 /* iterator carrier: [adv atom] — the operand-less iterator value (103h) */
 ray_t* q_eval_apply_iter_new(int adv) {
     ray_t* c = car_new(Q_EVAL_CAR_ITER, 1);
@@ -1313,9 +1330,9 @@ static int64_t rank_of(ray_t* fv) {
         if (adv == 3 && op && rank_of(op) == 1) return 1;
         return -1;
     }
-    case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_VIEW: break;
+    case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_VIEW: case Q_EVAL_CAR_FOREIGN: break;
     }
-    return -1;                              /* vary/view: no fixed rank */
+    return -1;                              /* vary/view/foreign: no fixed rank */
 }
 
 int64_t q_eval_apply_rank(ray_t* fv) { return fv ? rank_of(fv) : -1; }
@@ -1516,6 +1533,7 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
 
     q_car_kind_t kind = q_eval_apply_carrier_kind(fv);
     switch (kind) {
+    case Q_EVAL_CAR_FOREIGN: return q_err(QE_TYPE);   /* 112h, but opaque: never callable */
     case Q_EVAL_CAR_ITER: return iter_call(fv, args, n);
     case Q_EVAL_CAR_PROJ: return proj_call(fv, args, n);
     case Q_EVAL_CAR_DERIV: {
@@ -1556,7 +1574,8 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
     case Q_EVAL_CAR_LAMBDA: return lambda_call(fv, args, n);
     case Q_EVAL_CAR_KFN: return q_kapi_invoke(fv, args, n);
     case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_PROJ: case Q_EVAL_CAR_DERIV:
-    case Q_EVAL_CAR_COMP: case Q_EVAL_CAR_ITER: case Q_EVAL_CAR_VIEW: break;
+    case Q_EVAL_CAR_COMP: case Q_EVAL_CAR_ITER: case Q_EVAL_CAR_VIEW:
+    case Q_EVAL_CAR_FOREIGN: break;   /* foreign answered 'type at the head */
     }
 
     /* keyword-HOF rows route to the native adverb arms (finding 3) */
@@ -1678,7 +1697,8 @@ ray_t* q_eval_apply_train(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
 int q_eval_apply_is_fn(ray_t* v) {
     q_car_kind_t kind = q_eval_apply_carrier_kind(v);
     return q_eval_apply_is_fnval(v) || v->type == RAY_LAMBDA ||
-           (kind != Q_EVAL_CAR_NONE && kind != Q_EVAL_CAR_VIEW);
+           (kind != Q_EVAL_CAR_NONE && kind != Q_EVAL_CAR_VIEW &&
+            kind != Q_EVAL_CAR_FOREIGN);
 }
 
 /* Ambivalent-operator promotion for value-apply: a bare operator resolves to
