@@ -34,6 +34,7 @@
 #include "qlang/ops/q_bang.h"
 #include "qlang/ops/q_dollar.h"
 #include "qlang/ops/q_index.h"
+#include "qlang/ops/q_vecop.h"  /* the typed elementwise path the two maps probe first */
 #include "qlang/q_env.h"
 #include "lang/eval.h"
 #include "lang/internal.h"   /* call_lambda — bare engine-lambda application */
@@ -458,6 +459,8 @@ static ray_t* unary_elem(ray_unary_fn fn, ray_t* e) {
 }
 
 static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
+    ray_t* fast = q_vecop_unary(fn, arg);
+    if (fast) return fast;
     int64_t len = q_count(arg);
     int is_boxed = (arg->type == RAY_LIST);
 
@@ -586,6 +589,8 @@ static int dag_pair_ok(ray_t* l, ray_t* r, int lc, int rc) {
 static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r) {
     int lc = is_coll(l), rc = is_coll(r);
     if (!lc && !rc) return fn(l, r);
+    ray_t* fast = q_vecop_binary(fn, l, r);
+    if (fast) return fast;
     uint16_t dop = dag_op_of(fn);
     if (dop && dag_pair_ok(l, r, lc, rc) &&
         !(lc && rc && q_count(l) != q_count(r)))
