@@ -12,20 +12,16 @@
 #include "qlang/q_count.h"
 #include "qlang/repl/q_repl.h"
 #include "qlang/q_ctx.h"        /* the statement + console-teardown seams */
-#include "qlang/base/q_err.h"   /* q_err_text — full error text for console display */
 #include "qlang/parse/q_parse.h"
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
 #include "qlang/eval/q_dbg.h"    /* debug-loop line readers (basics/debug.md) */
-#include "qlang/eval/q_view.h"   /* q_view_intercept — `x::e` at the line seam */
-#include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
 #include "qlang/ops/q_sys.h"      /* q_sys_prompt / q_sys_listen_port — the front end's two asks */
 #include "qlang/q_dotz.h"         /* q_dotz_quiet — `-q` silences the piped transcript's prompt and echo */
 #include "app/term.h"       /* ray_term_* line editor + highlighter hook */
 #include "core/poll.h"      /* ray_poll_* — concurrent REPL + IPC event loop */
-#include "lang/eval.h"      /* ray_eval_is_interrupted */
+#include "lang/eval.h"      /* ray_eval_clear_interrupt */
 #include "lang/env.h"       /* ray_env_has_name — live env-derived name highlight */
-#include "ops/ops.h"        /* ray_is_lazy, ray_lazy_materialize */
 #include <rayforce.h>
 #include <ctype.h>          /* isalpha/isalnum — the hint's name-token scan */
 #include <stdlib.h>         /* getenv */
@@ -231,8 +227,7 @@ static const char* i_hist_path(char* buf, size_t cap) {
 static ray_term_t* g_live_term;
 static char g_live_hist_path[4108];
 
-/* Interactive TTY loop — mirrors the proven fallback branch of rayforce's
- * run_interactive (src/app/repl.c) but drives the q pipeline. */
+/* Interactive TTY loop over the q pipeline. */
 /* q REPL is line-at-a-time, exactly like kdb's `q)` console: every Return
  * submits.  This replaces rayforce's bracket-continuation counter, whose
  * `;`-as-line-comment rule (correct for rayfall/lisp) mis-flagged q's `;`
@@ -402,8 +397,7 @@ static void repl_interactive(FILE* out, FILE* err) {
 
 /* ===== Poll-driven REPL (concurrent console + IPC) =====
  *
- * Mirrors rayforce's own run_interactive (src/app/repl.c ~919): stdin is
- * registered as a selector on the SAME poll that carries the IPC listener,
+ * stdin is registered as a selector on the SAME poll that carries the IPC listener,
  * so one single-threaded ray_poll_run services keystrokes AND client
  * sockets — a client round-trips while the console sits at its prompt.
  *
