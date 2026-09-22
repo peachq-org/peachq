@@ -1,0 +1,19 @@
+/* The kdb C-API names `./q` exports so a `2:`-loaded extension resolves against us.
+ *
+ * `nm -D ./q` exports ZERO `T` symbols without this list, so nothing an extension links
+ * against resolves.  NEVER `-rdynamic` in its place: that exports every peachq internal
+ * into the plugin's namespace, and lets a `.so` we dlopen interpose on our own symbols.
+ *
+ * This is exactly the PR 1 surface served by src/qlang/io/q_kapi.c.  A name added here
+ * must have a definition there, or the link fails. */
+{
+  ka; kb; kg; kh; ki; kj; ke; kf; kc; ks; kd; kz; kt; ktj; ktn; kp; kpn; knk; ku;
+  ja; js; jk; jv;
+  xD; xT; ktd; knt;
+  ss; sn; krr; orr;
+  r1; r0;
+  ymd; dj;
+  setm; m9; gc; ver;
+  sd1; sd0; sd0x;
+  k;
+};

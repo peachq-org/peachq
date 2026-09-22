@@ -62,9 +62,10 @@ ray_t* q_hof_nyi_wrap(ray_t* f, ray_t* x);
 /* ---- defined in ops/q_null.c ---- */
 ray_t* q_null_wrap(ray_t* x);
 
-/* ---- defined in io/q_io_filetext.c, io/q_io_filebinary.c ---- */
+/* ---- defined in io/q_io_filetext.c, io/q_io_filebinary.c, io/q_kapi.c ---- */
 ray_t* q_io_filetext_wrap(ray_t* x, ray_t* y);
 ray_t* q_io_filebinary_wrap(ray_t* x, ray_t* y);
+ray_t* q_dl_wrap(ray_t* x, ray_t* y);                         /* `2:` Dynamic Load */
 
 /* ---- defined in ops/q_sys.c ---- */
 ray_t* q_setenv_wrap(ray_t* x, ray_t* y);

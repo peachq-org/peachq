@@ -506,6 +506,14 @@ static ray_t* list_put_borrowed(ray_t* out, ray_t* v) {
  * composed values", a derived function as the bare "argument of the iterator".
  * NULL = not one of those kinds (a bare iterator stays deferred). */
 ray_t* q_eval_carrier_value(ray_t* v) {
+    /* a `2:`-loaded function reads out as the call that made it (PR 1 of the `2:` programme) */
+    if (q_eval_apply_carrier_kind(v) == Q_EVAL_CAR_KFN) {
+        int64_t rank = 0, lib = 0, sym = 0;
+        q_eval_apply_kfn_parts(v, NULL, &rank, &lib, &sym);
+        ray_t* out = list_put(list_put(list_put(ray_list_new(3), ray_sym(lib)), ray_sym(sym)),
+                              ray_i64(rank));
+        return out;
+    }
     ray_t* h = q_eval_apply_car_head(v);
     if (!h) return NULL;
     switch (q_eval_apply_carrier_kind(v)) {
