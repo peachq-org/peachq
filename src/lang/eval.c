@@ -24,20 +24,17 @@
 #include "lang/eval.h"
 #include "core/runtime.h"
 #include "lang/internal.h"
-#include "app/repl.h"
 #include "lang/env.h"
 #include "lang/nfo.h"
 #include "lang/parse.h"
 #include "core/types.h"
 #include "ops/ops.h"
 #include "ops/temporal.h"
-#include "ops/datalog.h"
 #include "ops/idxop.h"
 #include "ops/linkop.h"
 #include "table/sym.h"
 #include "vec/vec.h"            /* ray_check_null_invariant (DEBUG null-model gate) */
 #include "core/profile.h"
-#include "table/sym.h"
 #include "mem/heap.h"
 #include "mem/sys.h"
 /* store/serde.h, store/splay.h, store/part.h moved to system.c */
@@ -2585,7 +2582,7 @@ static void register_vary(const char* name, uint8_t attrs, ray_vary_fn fn) {
 }
 
 /* When false, ray_register_builtins skips the rayfall system-plumbing
- * namespaces (.sys/.os/.ipc/.fs/.repl/.log/.time).  Defaults ON so the
+ * namespaces (.sys/.os/.ipc/.fs/.log/.time).  Defaults ON so the
  * rayforce persona is unchanged; the q runtime flips it OFF for its own
  * registration (see ray_set_load_rayfall_ns / q_runtime_create).  q owns
  * dotted namespaces for user code, and real q has no .sys/.os/.ipc — so
@@ -2823,7 +2820,7 @@ static void ray_register_builtins(void) {
     register_vary("print",       RAY_FN_NONE, ray_print_fn);
     register_unary("meta",       RAY_FN_NONE, ray_meta_fn);
 
-    /* Rayfall system-plumbing namespaces (.sys/.os/.fs/.ipc/.repl/.log) —
+    /* Rayfall system-plumbing namespaces (.sys/.os/.fs/.ipc/.log) —
      * gated OFF under the q runtime by g_load_rayfall_ns.  Body kept at the
      * original indent to minimise the frozen-base diff. */
     if (g_load_rayfall_ns) {
@@ -2860,13 +2857,6 @@ static void ray_register_builtins(void) {
     /* Current connection handle inside any `.ipc.on.*` hook, -1 otherwise.
      * Variadic for the `(.ipc.handle)` / `(.ipc.handle 0)` convention. */
     register_vary(  ".ipc.handle", RAY_FN_NONE,       ray_ipc_handle_fn);
-
-    /* Remote-REPL session control under `.repl.*`.  Once .repl.connect
-     * succeeds, the local REPL line-loop reroutes each subsequent input
-     * through ray_ipc_send_verbose() until .repl.disconnect.  See
-     * src/app/repl_remote.c for the state model. */
-    register_unary(".repl.connect",    RAY_FN_RESTRICTED, ray_repl_connect_fn);
-    register_vary( ".repl.disconnect", RAY_FN_RESTRICTED, ray_repl_disconnect_fn);
 
     /* Transaction-log journaling under `.log.*` — the -l/-L feature.
      * The CLI flags -l <base> / -L <base> call ray_journal_open() at
@@ -2931,26 +2921,6 @@ static void ray_register_builtins(void) {
     register_unary("sym-name",   RAY_FN_NONE, ray_sym_name_fn);
     register_binary("unify",     RAY_FN_NONE, ray_unify_fn);
     register_binary("xrank",     RAY_FN_NONE, ray_xrank_fn);
-
-    /* EAV triple storage */
-    register_vary("datoms",        RAY_FN_NONE, ray_datoms_fn);
-    register_vary("assert-fact",   RAY_FN_NONE, ray_assert_fact_fn);
-    register_vary("retract-fact",  RAY_FN_NONE, ray_retract_fact_fn);
-    register_vary("scan-eav",      RAY_FN_NONE, ray_scan_eav_fn);
-    register_vary("pull",          RAY_FN_NONE, ray_pull_fn);
-
-    /* Datalog */
-    register_vary("rule",         RAY_FN_SPECIAL_FORM, ray_rule_fn);
-    register_vary("query",        RAY_FN_SPECIAL_FORM, ray_query_fn);
-
-    /* Programmatic Datalog API */
-    register_vary("dl-program",    RAY_FN_NONE, ray_dl_program_fn);
-    register_vary("dl-add-edb",    RAY_FN_NONE, ray_dl_add_edb_fn);
-    register_unary("dl-stratify",  RAY_FN_NONE, ray_dl_stratify_fn);
-    register_unary("dl-eval",      RAY_FN_NONE, ray_dl_eval_fn);
-    register_binary("dl-query",    RAY_FN_NONE, ray_dl_query_fn);
-    register_binary("dl-provenance", RAY_FN_NONE, ray_dl_provenance_fn);
-    register_unary("dl-free",      RAY_FN_NONE, ray_dl_free_fn);
 
     /* Vector similarity / embeddings / HNSW */
     register_binary("cos-dist",    RAY_FN_NONE, ray_cos_dist_fn);
@@ -3030,8 +3000,6 @@ ray_err_t ray_lang_init(void) {
 
 void ray_lang_destroy(void) {
     if (__VM && __VM->raise_val) { ray_release(__VM->raise_val); __VM->raise_val = NULL; }
-    /* Reset global Datalog rule storage */
-    ray_dl_reset_rules();
     ray_env_destroy();
     ray_compile_reset();
 }
