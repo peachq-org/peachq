@@ -4,6 +4,7 @@
 #include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h"
 #include "qlang/base/q_type.h"  /* q_type_is_null_sym — the null-symbol divergence */
+#include "qlang/ops/q_vecop.h"  /* the typed scan, for the `^:` arrival that skips the apply maps */
 #include "lang/internal.h"      /* is_collection, atomic_map_unary, ray_nil_fn */
 
 /* Base `ray_nil_fn` reads sym id 0 as the EMPTY symbol (a value); q reads the
@@ -19,6 +20,8 @@ static ray_t* nil_fn(ray_t* x) {
  * that folds to a bool vector (`null (1;`a;2.5;"x")` -> 0000b), while a nested
  * list yields bool VECTORS that q_list_collapse leaves intact. */
 ray_t* q_null_wrap(ray_t* x) {
+    ray_t* fast = q_vecop_unary(q_null_wrap, x);
+    if (fast) return fast;
     ray_t* r = is_collection(x) ? atomic_map_unary(nil_fn, x) : nil_fn(x);
     if (!r || RAY_IS_ERR(r) || r->type != RAY_LIST) return r;
     ray_t* c = q_list_collapse(r);   /* owned: retains-or-builds */
