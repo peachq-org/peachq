@@ -122,12 +122,7 @@ static uint64_t hs_hash_row(ray_t* src, int64_t i, int8_t t, void* data) {
                 case -RAY_TIMESTAMP:
                 case -RAY_TIMESPAN:  return ray_hash_i64(e->i64);
                 case -RAY_DATETIME:  return ray_hash_f64(e->f64);
-                case -RAY_GUID: {
-                    const uint8_t* g = e->obj
-                        ? (const uint8_t*)ray_data(e->obj)
-                        : (const uint8_t*)ray_data((ray_t*)e);
-                    return ray_hash_bytes(g, 16);
-                }
+                case -RAY_GUID:      return ray_hash_bytes(ray_guid_bytes((ray_t*)e), 16);
                 case -RAY_STR:
                     return ray_hash_bytes(ray_str_ptr(e), ray_str_len(e));
                 default:
@@ -741,11 +736,8 @@ int atom_eq(ray_t* a, ray_t* b) {
         return a->i32 == b->i32;
     case -RAY_TIMESTAMP: case -RAY_TIMESPAN:
         return a->i64 == b->i64;
-    case -RAY_GUID: {
-        const uint8_t* ga = a->obj ? (const uint8_t*)ray_data(a->obj) : (const uint8_t*)ray_data((ray_t*)a);
-        const uint8_t* gb = b->obj ? (const uint8_t*)ray_data(b->obj) : (const uint8_t*)ray_data((ray_t*)b);
-        return memcmp(ga, gb, 16) == 0;
-    }
+    case -RAY_GUID:
+        return memcmp(ray_guid_bytes((ray_t*)a), ray_guid_bytes((ray_t*)b), 16) == 0;
     case -RAY_STR:
         return ray_str_len(a) == ray_str_len(b) &&
                memcmp(ray_str_ptr(a), ray_str_ptr(b), ray_str_len(a)) == 0;
@@ -1968,7 +1960,7 @@ static int64_t find_scan(ray_t* vec, ray_t* val, int64_t start) {
         case RAY_F64: RAY_TEMPORALF_CASES:  { double v = val->f64;  FIND_SCAN(((const double*)a)[i] == v); }
         case RAY_F32:                       { double v = val->f64;  FIND_SCAN((double)((const float*)a)[i] == v); }
         case RAY_GUID: {
-            const uint8_t* g = (const uint8_t*)ray_data(val->obj ? val->obj : val);
+            const uint8_t* g = ray_guid_bytes(val);
             FIND_SCAN(memcmp((const uint8_t*)a + i * 16, g, 16) == 0);
         }
         case RAY_SYM: {

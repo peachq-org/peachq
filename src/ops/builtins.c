@@ -1835,8 +1835,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             for (int64_t i = 0; i < n2; i++) {
                 ray_t* cast = ray_cast_fn(type_sym, items[i]);
                 if (RAY_IS_ERR(cast)) { ray_release(vec); return cast; }
-                if (cast->obj) memcpy(data + i * 16, ray_data(cast->obj), 16);
-                else memcpy(data + i * 16, ray_data(cast), 16);
+                memcpy(data + i * 16, ray_guid_bytes(cast), 16);
                 ray_release(cast);
             }
             ray_t* result = cast_vec_copy_nulls(vec, val);
@@ -2133,8 +2132,7 @@ ray_t* ray_enlist_fn(ray_t** args, int64_t n) {
         case RAY_GUID: {
             uint8_t* d = (uint8_t*)ray_data(vec);
             for (int64_t i = 0; i < n; i++) {
-                const uint8_t* gd = args[i]->obj ? (const uint8_t*)ray_data(args[i]->obj) : (const uint8_t*)ray_data(args[i]);
-                memcpy(d + i * 16, gd, 16);
+                memcpy(d + i * 16, ray_guid_bytes(args[i]), 16);
             }
             break;
         }
@@ -2338,12 +2336,7 @@ static uint64_t atom_hash(ray_t* a) {
         case -RAY_DATE:
         case -RAY_TIME:      return ray_hash_i64((int64_t)a->i32);
         case -RAY_TIMESTAMP: return ray_hash_i64(a->i64);
-        case -RAY_GUID: {
-            const uint8_t* g = a->obj
-                ? (const uint8_t*)ray_data(a->obj)
-                : (const uint8_t*)ray_data((ray_t*)a);
-            return ray_hash_bytes(g, 16);
-        }
+        case -RAY_GUID:      return ray_hash_bytes(ray_guid_bytes((ray_t*)a), 16);
         case -RAY_STR:
             return ray_hash_bytes(ray_str_ptr(a), ray_str_len(a));
         case RAY_LIST: {
@@ -3045,10 +3038,8 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
             ((bool*)ray_data(result))[0] = a->b8; break;
         RAY_BYTE_CASES:
             ((uint8_t*)ray_data(result))[0] = a->u8; break;
-        case RAY_GUID: {
-            const uint8_t* gd = a->obj ? (const uint8_t*)ray_data(a->obj) : (const uint8_t*)ray_data((ray_t*)a);
-            memcpy(ray_data(result), gd, 16); break;
-        }
+        case RAY_GUID:
+            memcpy(ray_data(result), ray_guid_bytes((ray_t*)a), 16); break;
         default: ray_free(result); return ray_error("type", "concat: unsupported element type %s", ray_type_name(b->type));
         }
         /* Null-model invariant 16.4: propagate null-ness of the leading atom
@@ -3098,10 +3089,8 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
             ((bool*)ray_data(result))[na] = b->b8; break;
         RAY_BYTE_CASES:
             ((uint8_t*)ray_data(result))[na] = b->u8; break;
-        case RAY_GUID: {
-            const uint8_t* gd = b->obj ? (const uint8_t*)ray_data(b->obj) : (const uint8_t*)ray_data((ray_t*)b);
-            memcpy((uint8_t*)ray_data(result) + na * 16, gd, 16); break;
-        }
+        case RAY_GUID:
+            memcpy((uint8_t*)ray_data(result) + na * 16, ray_guid_bytes((ray_t*)b), 16); break;
         default: ray_free(result); return ray_error("type", "concat: unsupported element type %s", ray_type_name(a->type));
         }
         result->len = na + 1;
@@ -3146,13 +3135,10 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
             ((uint8_t*)ray_data(result))[0] = a->u8;
             ((uint8_t*)ray_data(result))[1] = b->u8;
             break;
-        case RAY_GUID: {
-            const uint8_t* ga = a->obj ? (const uint8_t*)ray_data(a->obj) : (const uint8_t*)ray_data((ray_t*)a);
-            const uint8_t* gb = b->obj ? (const uint8_t*)ray_data(b->obj) : (const uint8_t*)ray_data((ray_t*)b);
-            memcpy(ray_data(result), ga, 16);
-            memcpy((uint8_t*)ray_data(result) + 16, gb, 16);
+        case RAY_GUID:
+            memcpy(ray_data(result), ray_guid_bytes((ray_t*)a), 16);
+            memcpy((uint8_t*)ray_data(result) + 16, ray_guid_bytes((ray_t*)b), 16);
             break;
-        }
         default: ray_free(result); return ray_error("type", "concat: unsupported element type %s", ray_type_name(vtype));
         }
         /* Null-model invariant 16.4: a typed-null atom (e.g. the I64 literal

@@ -108,7 +108,7 @@ static ray_t* gt_impl(ray_t* a, ray_t* b, int tol) {
     if (a->type == -RAY_SYM && b->type == -RAY_SYM)
         return make_bool(sym_atom_cmp(a, b) > 0 ? 1 : 0);
     if (a->type == -RAY_GUID && b->type == -RAY_GUID)
-        return make_bool(memcmp(ray_data(a->obj), ray_data(b->obj), 16) > 0 ? 1 : 0);
+        return make_bool(memcmp(ray_guid_bytes(a), ray_guid_bytes(b), 16) > 0 ? 1 : 0);
     /* Temporal comparison (same or cross-temporal via nanosecond conversion) */
     if (is_temporal(a) && is_temporal(b)) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))
@@ -137,7 +137,7 @@ static ray_t* lt_impl(ray_t* a, ray_t* b, int tol) {
     if (a->type == -RAY_SYM && b->type == -RAY_SYM)
         return make_bool(sym_atom_cmp(a, b) < 0 ? 1 : 0);
     if (a->type == -RAY_GUID && b->type == -RAY_GUID)
-        return make_bool(memcmp(ray_data(a->obj), ray_data(b->obj), 16) < 0 ? 1 : 0);
+        return make_bool(memcmp(ray_guid_bytes(a), ray_guid_bytes(b), 16) < 0 ? 1 : 0);
     if (is_temporal(a) && is_temporal(b)) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))
             return make_bool(RAY_ATOM_IS_NULL(a) && !RAY_ATOM_IS_NULL(b) ? 1 : 0);
@@ -165,7 +165,7 @@ ray_t* ray_gte_fn(ray_t* a, ray_t* b) {
     if (a->type == -RAY_SYM && b->type == -RAY_SYM)
         return make_bool(sym_atom_cmp(a, b) >= 0 ? 1 : 0);
     if (a->type == -RAY_GUID && b->type == -RAY_GUID)
-        return make_bool(memcmp(ray_data(a->obj), ray_data(b->obj), 16) >= 0 ? 1 : 0);
+        return make_bool(memcmp(ray_guid_bytes(a), ray_guid_bytes(b), 16) >= 0 ? 1 : 0);
     if (is_temporal(a) && is_temporal(b)) {
         if (RAY_ATOM_IS_NULL(a) && RAY_ATOM_IS_NULL(b)) return make_bool(1);
         if (RAY_ATOM_IS_NULL(a)) return make_bool(0);
@@ -193,7 +193,7 @@ ray_t* ray_lte_fn(ray_t* a, ray_t* b) {
     if (a->type == -RAY_SYM && b->type == -RAY_SYM)
         return make_bool(sym_atom_cmp(a, b) <= 0 ? 1 : 0);
     if (a->type == -RAY_GUID && b->type == -RAY_GUID)
-        return make_bool(memcmp(ray_data(a->obj), ray_data(b->obj), 16) <= 0 ? 1 : 0);
+        return make_bool(memcmp(ray_guid_bytes(a), ray_guid_bytes(b), 16) <= 0 ? 1 : 0);
     if (is_temporal(a) && is_temporal(b)) {
         if (RAY_ATOM_IS_NULL(a) && RAY_ATOM_IS_NULL(b)) return make_bool(1);
         if (RAY_ATOM_IS_NULL(a)) return make_bool(1);
@@ -245,7 +245,7 @@ ray_t* ray_eq_fn(ray_t* a, ray_t* b) {
     if (a->type == -RAY_SYM && b->type == -RAY_SYM)
         return make_bool(a->i64 == b->i64 ? 1 : 0);
     if (a->type == -RAY_GUID && b->type == -RAY_GUID)
-        return make_bool(memcmp(ray_data(a->obj), ray_data(b->obj), 16) == 0 ? 1 : 0);
+        return make_bool(memcmp(ray_guid_bytes(a), ray_guid_bytes(b), 16) == 0 ? 1 : 0);
     /* Temporal comparison (same or cross-temporal via nanosecond conversion) */
     if (is_temporal(a) && is_temporal(b))
         return make_bool(temporal_as_ns(a) == temporal_as_ns(b) ? 1 : 0);
@@ -270,7 +270,7 @@ ray_t* ray_neq_fn(ray_t* a, ray_t* b) {
     if (a->type == -RAY_SYM && b->type == -RAY_SYM)
         return make_bool(a->i64 != b->i64 ? 1 : 0);
     if (a->type == -RAY_GUID && b->type == -RAY_GUID)
-        return make_bool(memcmp(ray_data(a->obj), ray_data(b->obj), 16) != 0 ? 1 : 0);
+        return make_bool(memcmp(ray_guid_bytes(a), ray_guid_bytes(b), 16) != 0 ? 1 : 0);
     /* Temporal comparison (same or cross-temporal via nanosecond conversion) */
     if (is_temporal(a) && is_temporal(b))
         return make_bool(temporal_as_ns(a) != temporal_as_ns(b) ? 1 : 0);

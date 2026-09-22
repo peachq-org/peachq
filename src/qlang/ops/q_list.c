@@ -64,10 +64,7 @@ static ray_t* atom_run_collapse(ray_t* l) {
         case RAY_F64:
         case RAY_DATETIME:
                        vec = ray_vec_append(vec, &e[i]->f64); appended = true; break;
-        case RAY_GUID: {                                      /* 16-byte payload, not i64 */
-            const void* g = e[i]->obj ? ray_data(e[i]->obj) : ray_data(e[i]);
-            vec = ray_vec_append(vec, g); appended = true;
-        } break;
+        case RAY_GUID: vec = ray_vec_append(vec, ray_guid_bytes(e[i])); appended = true; break;
         RAY_BYTE_CASES: /* explicit u8 read — byte + char atoms store the payload
                          * in u8; no LE-aliasing through the shared i64 append */
                        vec = ray_vec_append(vec, &e[i]->u8); appended = true; break;

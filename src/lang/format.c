@@ -618,10 +618,8 @@ static void fmt_dict_key(fmt_buf_t* b, ray_t* keys, int64_t i, int mode) {
         k_atom_storage.f64  = (double)((float*)ray_data(keys))[i];
         k_atom = &k_atom_storage;
     } else if (keys->type == RAY_GUID) {
-        /* GUID atoms keep their 16-byte payload in a heap-allocated
-         * child block; the stack-local view trick from the other
-         * branches doesn't carry the bytes (fmt_obj would deref a
-         * bogus inline data[] pointer).  Build a real atom. */
+        /* The stack-local header the other branches use has no data[] to
+         * hold the 16 inline bytes — build a real atom. */
         k_atom = ray_guid(((const uint8_t*)ray_data(keys)) + i * 16);
         k_owned = (k_atom && !RAY_IS_ERR(k_atom));
     } else if (keys->type == RAY_LIST) {
@@ -1125,7 +1123,7 @@ static void fmt_obj(fmt_buf_t* b, ray_t* obj, int mode) {
         case RAY_TIMESTAMP: fmt_timestamp(b, obj->i64); break;
         case RAY_SYM:  fmt_sym(b, obj->i64); break;
         case RAY_STR:  fmt_str_atom(b, obj, mode > 0); break;
-        case RAY_GUID: fmt_guid(b, obj->obj ? (const uint8_t*)ray_data(obj->obj) : (const uint8_t*)ray_data(obj)); break;
+        case RAY_GUID: fmt_guid(b, ray_guid_bytes(obj)); break;
         default:       fmt_puts(b, "?"); break;
         }
     } else if (ray_is_vec(obj)) {

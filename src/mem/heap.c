@@ -671,7 +671,6 @@ static bool ray_atom_str_is_sso(const ray_t* s) {
 }
 
 static bool ray_atom_owns_obj(const ray_t* v) {
-    if (v->type == -RAY_GUID) return v->obj != NULL;
     if (v->type == -RAY_STR) return !ray_atom_str_is_sso(v);
     return false;
 }
@@ -1317,7 +1316,7 @@ ray_t* ray_alloc_copy(ray_t* v) {
          * then bumps slice_parent's rc, keeping the view valid. */
         data_size = 0;
     } else if (ray_is_atom(v)) {
-        data_size = 0;
+        data_size = v->type == -RAY_GUID ? 16 : 0;
     } else if (v->type == RAY_TABLE || v->type == RAY_DICT) {
         data_size = 2 * sizeof(ray_t*);
     } else if (RAY_IS_PARTED(v->type) || v->type == RAY_MAPCOMMON) {

@@ -159,12 +159,7 @@ static int ord_cmp(ray_t* a, ray_t* b) {
             return 0;
         }
         case RAY_STR: { int c = ray_str_cmp(a, b); return c < 0 ? -1 : c > 0; }
-        case RAY_GUID:
-            if (a->obj && b->obj) {
-                int c = memcmp(ray_data(a->obj), ray_data(b->obj), 16);
-                return c < 0 ? -1 : c > 0;
-            }
-            return 0;
+        case RAY_GUID: { int c = memcmp(ray_guid_bytes(a), ray_guid_bytes(b), 16); return c < 0 ? -1 : c > 0; }
         default: break;
         }
     } else if (a->type == RAY_LIST || ray_is_vec(a)) {

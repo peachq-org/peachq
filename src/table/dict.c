@@ -277,8 +277,7 @@ int64_t ray_dict_find_idx(ray_t* d, ray_t* key_atom) {
         }
         case RAY_GUID: {
             const uint8_t* a = (const uint8_t*)base;
-            const uint8_t* kp = key_atom->obj ? (const uint8_t*)ray_data(key_atom->obj) : NULL;
-            if (!kp) return -1;
+            const uint8_t* kp = ray_guid_bytes(key_atom);
             for (int64_t i = 0; i < n; i++) {
                 if (keys_have_nulls && ray_vec_is_null(keys, i)) continue;
                 if (memcmp(a + i * 16, kp, 16) == 0) return i;
@@ -573,9 +572,7 @@ ray_t* ray_dict_upsert(ray_t* d, ray_t* key_atom, ray_t* val) {
     } else if (keys->type == RAY_STR && key_atom->type == -RAY_STR) {
         new_keys = ray_str_vec_append(keys, ray_str_ptr(key_atom), ray_str_len(key_atom));
     } else if (keys->type == RAY_GUID && key_atom->type == -RAY_GUID) {
-        const void* src = key_atom->obj ? ray_data(key_atom->obj) : NULL;
-        if (!src) { ray_release(d); return ray_error("type", "dict upsert: guid key has no payload"); }
-        new_keys = ray_vec_append(keys, src);
+        new_keys = ray_vec_append(keys, ray_guid_bytes(key_atom));
     } else if (keys->type == RAY_F32 && key_atom->type == -RAY_F32) {
         /* F32 atoms keep their value in the f64 union slot; the keys vec
          * stores narrower 4-byte floats, so narrow before append (the

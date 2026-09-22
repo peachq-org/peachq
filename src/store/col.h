@@ -30,10 +30,10 @@
 struct ray_sym_domain_s;
 
 /* On-disk column format generation, carried in the 32-byte header's `order`
- * byte (offset 17).  The on-disk header IS the in-memory ray_t allocator
+ * byte (offset 19).  The on-disk header IS the in-memory ray_t allocator
  * layout (payload at offset 32); there is NO separate envelope.
  *
- * Placement rationale: of the header bytes, only mmod(16) and order(17) are
+ * Placement rationale: of the header bytes, only mmod(16) and order(19) are
  * on-disk-free (written 0 and recomputed on load).  aux(0-15) is RESERVED
  * for postponed on-disk index persistence (min/max zone map) and must not
  * be squatted; rc(20-23) carries the SYM saved dictionary count;
@@ -77,7 +77,7 @@ static inline void ray_col_stamp_format(ray_t* header) {
 }
 
 /* Validate the format generation in a mapped/built column header's `order`
- * byte (offset 17).  Returns RAY_OK iff it matches the reader's generation,
+ * byte (offset 19).  Returns RAY_OK iff it matches the reader's generation,
  * else RAY_ERR_VERSION.  Strict equality: with the current generation at 0,
  * legacy/pre-stamp files (order==0) load and any other generation is refused. */
 static inline ray_err_t ray_col_check_format(const ray_t* header) {

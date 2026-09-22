@@ -241,12 +241,9 @@ ray_t* ray_datetime(double val) {
 
 ray_t* ray_typed_null(int8_t type) {
     if (type >= 0) return ray_error("type", "typed_null: expects a negative atom type tag, got %s", ray_type_name(type));
-    /* GUID null is the canonical all-zero 16-byte value: allocate the
-     * U8 payload buffer up front (same shape as ray_guid) so consumers
-     * can deref obj without a NULL check.  Other types use the payload
-     * union — the sentinel write below is the source of truth; the
-     * aux[0] bit is retained for atom types without a sentinel
-     * (BOOL/U8/F32). */
+    /* GUID null is the canonical all-zero 16-byte value.  Other types use the
+     * payload union — the sentinel write below is the source of truth; the
+     * aux[0] bit is retained for atom types without a sentinel (BOOL/U8/F32). */
     if (type == -RAY_GUID) {
         static const uint8_t NULL_GUID_BYTES[16] = {0};
         ray_t* v = ray_guid(NULL_GUID_BYTES);
@@ -281,23 +278,13 @@ ray_t* ray_typed_null(int8_t type) {
 }
 
 /* --------------------------------------------------------------------------
- * GUID atom: 16 bytes stored in a U8 vector, pointer in obj field
+ * GUID atom: the 16 bytes sit inline at data[] (the 64-byte minimum block)
  * -------------------------------------------------------------------------- */
 
 ray_t* ray_guid(const uint8_t* bytes) {
-    /* Allocate U8 vector of length 16 */
-    ray_t* vec = ray_alloc(16);
-    if (!vec || RAY_IS_ERR(vec)) return vec;
-    vec->type = RAY_BYTE_ONLY;
-    vec->len = 16;
-    memcpy(ray_data(vec), bytes, 16);
-
-    ray_t* v = ray_alloc(0);
-    if (RAY_IS_ERR(v)) {
-        ray_free(vec);
-        return v;
-    }
+    ray_t* v = ray_alloc(16);
+    if (!v || RAY_IS_ERR(v)) return v;
     v->type = -RAY_GUID;
-    v->obj = vec;
+    memcpy(ray_guid_bytes(v), bytes, 16);
     return v;
 }

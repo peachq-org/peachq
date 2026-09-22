@@ -635,12 +635,9 @@ static int atom_tok(ray_t* a, int suffixed, char* out, size_t n) {
         /* digit-only tokens take `f` (`5f`); `3e+11` self-identifies */
         if (suffixed && fmt_tok_is_bare_int(out)) tok_append(out, n, 'f');
         return 1;
-    case -RAY_GUID: {
-        const uint8_t* b16 = a->obj ? (const uint8_t*)ray_data(a->obj)
-                                    : (const uint8_t*)ray_data(a);
-        guid_tok(b16, out, n);
+    case -RAY_GUID:
+        guid_tok(ray_guid_bytes(a), out, n);
         return 1;
-    }
     case -RAY_SYM: {
         ray_t* s = ray_sym_str(a->i64);   /* borrowed — never released (sym.h:105) */
         if (s) snprintf(out, n, "%.*s", (int)ray_str_len(s), ray_str_ptr(s));

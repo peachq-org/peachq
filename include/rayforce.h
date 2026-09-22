@@ -245,9 +245,9 @@ typedef union ray_t {
         };
         /* Bytes 16-31: metadata + value */
         uint8_t  mmod;       /* 0=heap, 1=file-mmap */
-        uint8_t  order;      /* block order (block size = 2^order) */
-        int8_t   type;       /* negative=atom, positive=vector, 0=LIST */
         uint8_t  attrs;      /* attribute flags */
+        int8_t   type;       /* negative=atom, positive=vector, 0=LIST */
+        uint8_t  order;      /* block order (block size = 2^order) */
         uint32_t rc;         /* reference count (0=free) */
         union {
             uint8_t  b8;     /* BOOL atom */
@@ -257,7 +257,7 @@ typedef union ray_t {
             uint32_t u32;
             int64_t  i64;    /* I64/SYMBOL/DATE/TIME/TIMESTAMP atom */
             double   f64;    /* F64 atom */
-            union ray_t* obj; /* pointer to child (long strings, GUID) */
+            union ray_t* obj; /* pointer to child (long strings) */
             struct { uint8_t slen; char sdata[7]; }; /* SSO string (<=7 bytes) */
             int64_t  len;    /* vector element count */
         };
@@ -342,6 +342,7 @@ static inline void* ray_data_fn(ray_t* v) {
 }
 #define ray_slice_data(v) ray_data_fn(v)  /* alias — ray_data is always slice-safe */
 #define ray_data(v)       ray_data_fn(v)
+static inline uint8_t* ray_guid_bytes(ray_t* v) { return v->data; }
 
 /* ===== Symbol domain access (RAY_SYM vectors) ===== */
 
@@ -576,13 +577,8 @@ static inline bool ray_atom_is_null_fn(const union ray_t* x) {
              * kdb-true (`null " "` -> 1b; string-model spec Design 7). */
             return x->u8 == 0x20;
         case RAY_GUID: {
-            /* GUID null = 16 all-zero bytes in obj's U8 buffer.
-             * obj is always populated by ray_guid / ray_typed_null —
-             * a NULL obj indicates corruption; treat as null
-             * defensively. */
-            if (!x->obj) return true;
-            const uint8_t* b = (const uint8_t*)((char*)x->obj + sizeof(union ray_t));
-            for (int i = 0; i < 16; i++) if (b[i]) return false;
+            const uint8_t* g = ray_guid_bytes((ray_t*)x);
+            for (int i = 0; i < 16; i++) if (g[i]) return false;
             return true;
         }
         default:            return (x->aux[0] & 1) != 0;
