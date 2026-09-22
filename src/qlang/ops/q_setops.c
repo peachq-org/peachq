@@ -16,36 +16,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* The gather is the scan's own key construction (builtins.c ray_group_fn): a fresh typed vector, a W64 sym
- * vector adopting x's domain — so no attribute rides out on the result. */
-ray_t* q_attr_index_keys(ray_t* x, ray_t** rows) {
-    ray_t* r = ray_index_keys_rows(x);
-    if (!r) return NULL;
-    int64_t k = q_count(r);
-    const int64_t* ri = (const int64_t*)ray_data(r);
-    ray_t* keys;
-    if (x->type == RAY_SYM) {
-        keys = ray_sym_vec_new(RAY_SYM_W64, k);
-        for (int64_t j = 0; j < k && !RAY_IS_ERR(keys); j++) {
-            int64_t id = ray_read_sym(ray_data(x), ri[j], RAY_SYM, x->attrs);
-            keys = ray_vec_append(keys, &id);
-        }
-        if (!RAY_IS_ERR(keys)) ray_sym_vec_adopt_domain(keys, x);
-    } else {
-        size_t esz = ray_elem_size(x->type);
-        keys = ray_vec_new(x->type, k);
-        if (!RAY_IS_ERR(keys)) {
-            keys->len = k;
-            uint8_t* dst = (uint8_t*)ray_data(keys);
-            const uint8_t* src = (const uint8_t*)ray_data(x);
-            for (int64_t j = 0; j < k; j++) memcpy(dst + (size_t)j * esz, src + (size_t)ri[j] * esz, esz);
-        }
-    }
-    if (!keys || RAY_IS_ERR(keys)) { ray_release(r); return keys ? keys : q_err(QE_OOM); }
-    if (rows) *rows = r; else ray_release(r);
-    return keys;
-}
-
 /* Indices of x-rows [not] present in y (whole-row membership). */
 static ray_t* table_member_idx(ray_t* x, ray_t* y, int keep_present) {
     int64_t nrx = q_count(x), nry = q_count(y);
