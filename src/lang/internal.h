@@ -494,7 +494,7 @@ static inline int store_typed_elem(ray_t* vec, int64_t i, ray_t* elem) {
             ray_write_sym(ray_data(vec), i, v, vec->type, vec->attrs);
             return 0;
         }
-        case RAY_GUID:      if (elem->obj) memcpy(((uint8_t*)ray_data(vec)) + i * 16, ray_data(elem->obj), 16); return 0;
+        case RAY_GUID:      memcpy(((uint8_t*)ray_data(vec)) + i * 16, ray_guid_bytes(elem), 16); return 0;
         default: return -1;
     }
 }
