@@ -34,8 +34,13 @@ ray_t* q_dl_wrap(ray_t* x, ray_t* y);
  * capiref.md:103's law that a dynamically-linked module never takes ownership of its parameters). */
 ray_t* q_kapi_invoke(ray_t* carrier, ray_t** args, int64_t n);
 
-/* Per-runtime teardown: deregister every `sd1` fd and drop the symbol mirror (its ids die with the
- * runtime's intern table).  dlopen handles are NOT closed — RTLD_NODELETE, as q_ffi.c does. */
+/* Install the heap's RAY_QFN finalizer, which is how a 112h foreign object's destructor — a function
+ * pointer inside the loaded `.so` — gets run on the last q reference. */
+void q_kapi_init(void);
+
+/* Per-runtime teardown: clear that finalizer, deregister every `sd1` fd and drop the symbol mirror
+ * (its ids die with the runtime's intern table).  Runs AFTER the env, so every foreign is already
+ * dead.  dlopen handles are NOT closed — RTLD_NODELETE, as q_ffi.c does. */
 void q_kapi_reset(void);
 
 #endif /* Q_KAPI_H */
