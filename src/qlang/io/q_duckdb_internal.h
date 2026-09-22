@@ -32,24 +32,34 @@ duck_connection q_duckdb_con(int slot);
 void   q_duckdb_err_stash(int slot, const char* fmt, ...);
 size_t q_duckdb_err_mark(void);
 void   q_duckdb_err_rewind(int slot, size_t mark);
-ray_t* q_duckdb_fail(int slot, const char* what, const char* why);
-ray_t* q_duckdb_run(int slot, const char* sql, duck_result* out);
-ray_t* q_duckdb_run2(int slot, const char* sql, duck_result* out, int stash);
-ray_t* q_duckdb_exec_stmt(int slot, const char* sql);
+ray_t* q_duckdb_fail(int slot, const char* fmt, ...);
+ray_t* q_duckdb_fail_col(int slot, const char* name, size_t n, const char* fmt, ...);
+const char* q_duckdb_col_name(ray_t* tbl, int64_t c, size_t* len);
 const char* q_duckdb_err_text(int slot);
 
 /* One row of `.duckdb.sqllog`: t0 = q_dotz_now_ns(0) read before the work, rows = NULL_I64 where the count is not
- * the bridge's to know, err = NULL when it succeeded.  Every SQL statement is noted inside q_duckdb_run2; the
+ * the bridge's to know, err = NULL when it succeeded.  Every SQL statement is noted inside q_duckdb_run; the
  * appender, which is not SQL at all, notes a `/ appender ...` line of its own so the timeline has no hole. */
 void q_duckdb_stmt_note(int slot, const char* sql, int64_t t0, bool ok, int64_t rows, const char* err);
 
 /* growable SQL text; `oom` latches and every put behind it is a no-op */
 typedef struct { char* p; size_t len, cap; int oom; } qd_buf;
+
+/* the statement seam.  run: NULL and *out filled (the caller destroys it), or an owned error with the result already
+ * destroyed; stash=0 is a probe whose failure stays off err[].  exec: run, the result dropped.  query: the result as
+ * an OWNED table, `::` for a column-less statement, an owned error otherwise — never NULL.  The _buf forms consume
+ * the built buffer either way; one that lost its text answers 'wsfull. */
+ray_t* q_duckdb_run(int slot, const char* sql, duck_result* out, int stash);
+ray_t* q_duckdb_exec(int slot, const char* sql);
+ray_t* q_duckdb_exec_buf(int slot, qd_buf* b);
+ray_t* q_duckdb_query(int slot, const char* sql, int stash);
+ray_t* q_duckdb_query_buf(int slot, qd_buf* b, int stash);
+
 void q_duckdb_puts(qd_buf* b, const char* s);
 void q_duckdb_putn(qd_buf* b, const char* s, size_t n);
 void q_duckdb_put_ident(qd_buf* b, const char* s, size_t n);
 void q_duckdb_put_strlit(qd_buf* b, const char* s, size_t n);
-void q_duckdb_buf_free(qd_buf* b);
+int  q_duckdb_buf_free(qd_buf* b);   /* the latched oom, so `b->oom |= q_duckdb_buf_free(&sub)` hands it up */
 char* q_duckdb_text(const char* s, size_t n);
 void* q_duckdb_cols(int64_t n, size_t per);
 
@@ -108,12 +118,15 @@ bool   q_duckdb_codec_parse_logical(const char* s, qd_colmap_t* out);
 const qd_tmap_t* q_duckdb_codec_canon_leaf(int8_t ray_type);
 bool   q_duckdb_codec_raw_is_text(int8_t ray_type);
 bool   q_duckdb_codec_is_rec(const qd_tmap_t* tm);
+/* a record type's field count, and field i: its type OWNED (destroy_logical_type), its name OWNED (duck_free; a
+ * MAP's halves have none, so *name is NULL there) */
+int    q_duckdb_codec_rec_nfields(duck_logical_type lt, duck_type id);
+duck_logical_type q_duckdb_codec_rec_child(duck_logical_type lt, duck_type id, int i, char** name);
 void   q_duckdb_codec_map_free(qd_colmap_t* cm);
 void   q_duckdb_codec_maps_free(qd_colmap_t* cms, int64_t n);
 void   q_duckdb_codec_spell_map(const qd_colmap_t* cm, qd_buf* b);
 ray_t* q_duckdb_codec_map_declared(int slot, ray_t* col, duck_logical_type lt, duck_type kind, qd_colmap_t* cm);
 bool   q_duckdb_codec_declared_stage_map(duck_logical_type lt, qd_colmap_t* out);
-bool   q_duckdb_codec_untyped(ray_t* col);
 bool   q_duckdb_codec_map_bits(ray_t* col, int depth, qd_colmap_t* cm);
 
 /* The companions a column can grow, `<c>_q_<name>` (ADR 1/2/4/21): the two booleans flag a group's rare state, the
@@ -126,12 +139,11 @@ void   q_duckdb_codec_companion_col(qd_buf* b, const char* parent, size_t n, int
 int    q_duckdb_codec_mask_kind(const qd_colmap_t* cm, ray_t* mask);
 int    q_duckdb_codec_keep_kind(const qd_colmap_t* cm, ray_t* keep);
 bool   q_duckdb_codec_companion_name(const char* s, size_t n);
-bool   q_duckdb_codec_zoned(const qd_colmap_t* cm);
 bool   q_duckdb_codec_tz_all_zero(ray_t* off);
 int    q_duckdb_codec_companions_of(const qd_colmap_t* cm, const char* out[QD_CO_MAX]);
 ray_t* q_duckdb_codec_stage_image(ray_t* tbl, const qd_colmap_t* cms, ray_t* const* masks, ray_t* const* offs,
                                   ray_t* const* keeps, qd_colmap_t* scms, ray_t** smasks, ray_t** skeeps);
-void   q_duckdb_codec_refine(const char* cname, const qd_desc_t* desc, int64_t ndesc, qd_colmap_t* cm);
+void   q_duckdb_codec_refine(const char* cname, size_t n, const qd_desc_t* desc, int64_t ndesc, qd_colmap_t* cm);
 ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_t* desc, int64_t ndesc, ray_t** schema);
 ray_t* q_duckdb_codec_check_table(int slot, ray_t* tbl, qd_colmap_t* cms);
 ray_t* q_duckdb_codec_check_fields(int slot, ray_t* tbl, int64_t c, duck_logical_type lt, const qd_colmap_t* cm);
@@ -151,9 +163,9 @@ ray_t* q_duckdb_codec_strip_companions(int slot, ray_t* tbl, ray_t** masks, ray_
 bool        q_duckdb_schema_name_parse(const char* s, size_t n, qd_name_t* out);
 void        q_duckdb_schema_name_resolve(int slot, qd_name_t* nm);
 void        q_duckdb_schema_put_name(qd_buf* b, const qd_name_t* nm);
-void        q_duckdb_schema_put_catalog_where(qd_buf* b, const qd_name_t* nm);
+ray_t*      q_duckdb_schema_catalog_cols(int slot, const qd_name_t* nm);
 bool        q_duckdb_schema_reserved_name(const qd_name_t* nm);
-const char* q_duckdb_schema_text_cell(ray_t* col, int64_t i, size_t* len);
+const char* q_duckdb_schema_text_cell(ray_t* tbl, int64_t col, int64_t row, size_t* len);
 const qd_desc_t* q_duckdb_schema_desc_find(const char* name, size_t len, const qd_desc_t* desc, int64_t ndesc);
 ray_t*      q_duckdb_schema_check_names(int slot, ray_t* tbl);
 int64_t     q_duckdb_schema_fetch_desc(int slot, const qd_name_t* nm, qd_desc_t** out);
@@ -166,7 +178,6 @@ bool        q_duckdb_schema_catalog_col(const char* dt, size_t n, qd_colmap_t* o
 void        q_duckdb_schema_create_ddl(qd_buf* b, const qd_name_t* nm, ray_t* tbl, const qd_colmap_t* cms, bool temp);
 ray_t*      q_duckdb_schema_check(int slot, const qd_name_t* nm, ray_t* tbl, const qd_colmap_t* cms,
                                   const char* const* dtypes, bool* missing);
-void        q_duckdb_schema_spell_type(duck_logical_type lt, qd_buf* b);
 int         q_duckdb_schema_needs(const qd_colmap_t* cm, const char* dtype, bool empty);
 ray_t*      q_duckdb_schema_desc_of(const char* cname, duck_logical_type lt, const qd_colmap_t* cm,
                                     const qd_desc_t* desc, int64_t ndesc, bool empty, qd_desc_t* out, bool* wanted);
