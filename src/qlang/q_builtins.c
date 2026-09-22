@@ -128,7 +128,10 @@ static int8_t type_of(ray_t* x) {
     case Q_EVAL_CAR_LAMBDA: return 100;
     case Q_EVAL_CAR_PROJ:   return 104;
     case Q_EVAL_CAR_ITER:   return 103;
-    case Q_EVAL_CAR_KFN:    return 112;   /* basics/datatypes.md:365 — ``type(`f 2:`f,1)`` is 112h */
+    /* ONE type over two internal shapes: kdb spells a `2:`-loaded function and an extension's
+     * foreign wrapper alike (basics/datatypes.md:365 — ``type(`f 2:`f,1)`` is 112h). */
+    case Q_EVAL_CAR_KFN:
+    case Q_EVAL_CAR_FOREIGN: return 112;
     case Q_EVAL_CAR_DERIV: {
         ray_t** c = (ray_t**)ray_data(x);
         int adv = c[2] ? (int)c[2]->i64 : 0;
