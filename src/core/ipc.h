@@ -33,8 +33,8 @@
  *
  * WIRE-DEAD since Phase C: the kdb wire never compresses in either
  * direction (compression is deferred — Phase F; a compressed inbound
- * frame is refused).  These functions remain because the journal may
- * hold Phase-B-era compressed frames within wire version 5. */
+ * frame is refused).  Exported API, kept for out-of-tree readers of
+ * Phase-B-era frames. */
 
 #define RAY_IPC_COMPRESS_THRESHOLD 2000
 
@@ -50,19 +50,12 @@ size_t ray_ipc_decompress(const uint8_t* src, size_t clen,
 #define RAY_IPC_MSG_RESP   2
 
 #define RAY_IPC_FLAG_COMPRESSED 0x01
-/* Set by the journal hook in core/ipc.c eval_payload when the inbound
- * IPC message arrived on a `-u` restricted connection.  Used ONLY for
- * persisted log frames; the live IPC path ignores it (the connection's
- * restricted state is the source of truth there).  Replay reads the
- * bit to re-impose the original sender's restrictions, otherwise a
- * crash + restart silently elevates restricted commands to full
- * privilege. */
 #define RAY_IPC_FLAG_RESTRICTED 0x02
-/* NB: both flags above are JOURNAL-ENVELOPE flags only (the 16-byte
- * ray_ipc_header_t persists as the journal frame envelope).  The kdb
- * socket wire (Phase C) has no flags byte — its 8-byte header carries
- * endian/msgtype/compressed only.  The old RAY_IPC_FLAG_VERBOSE wire
- * flag is gone with the native protocol. */
+/* NB: both flags name bits of ray_ipc_header_t's flags byte, which no
+ * live path writes or reads — the kdb socket wire (Phase C) has no
+ * flags byte at all (its 8-byte header carries endian/msgtype/
+ * compressed only), and the write-ahead journal that persisted the
+ * 16-byte header as its frame envelope is gone. */
 #define RAY_IPC_MAX_CONNS 256
 
 /* ===== Connection hooks (.ipc.on.*) ===== */

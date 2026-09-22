@@ -52,7 +52,6 @@
  *
  *   Bits 0x01-0x03  RAY_SYM vectors:  sym index width (RAY_SYM_W8/W16/W32/W64)
  *   Bits 0x01-0x10  function objects (RAY_UNARY/BINARY/VARY): RAY_FN_* flags
- *   Bit  0x02       -RAY_I64 atoms:  RAY_ATTR_GRAPH (ray_rel_t* CSR handle in .i64)
  *   Bit  0x04       -RAY_I64 atoms:  RAY_ATTR_HNSW (HNSW handle in .i64)
  *   Bit  0x08       vectors:         RAY_ATTR_HAS_INDEX (index ray_t* in aux[0..7])
  *   Bit  0x10       vectors:         RAY_ATTR_SLICE
@@ -79,13 +78,6 @@
 #endif
 #define RAY_ATTR_HAS_NULLS    0x40
 #define RAY_ATTR_ARENA        0x80
-
-/* I64 atom carries an owning ray_rel_t* (CSR graph) in its .i64 slot.
- * Checked by .graph.* builtins before dereferencing.  User may call
- * (.graph.free h) explicitly; the heap finalizer also frees the underlying
- * ray_rel_t when the atom's rc drops to zero so rebindings/scope-exit
- * never leak the graph. */
-#define RAY_ATTR_GRAPH        0x02
 
 /* I64 atom carries an owning ray_hnsw_t* in its .i64 slot.
  * Checked by HNSW builtins before dereferencing.  User must (hnsw-free h). */
@@ -423,7 +415,7 @@ static inline void ray_scratch_arena_init(ray_scratch_arena_t* a) {
 }
 
 /* Retain all child/owned refs inside a compound block (STR/LIST/TABLE/etc.).
- * Used by ray_block_copy and ray_alloc_copy after shallow-copying a block.
+ * Used by ray_alloc_copy after shallow-copying a block.
  *
  * Returns true on success, false if a deep-clone of a uniquely-owned
  * resource (e.g. an HNSW index) failed.  On failure, any owned state that
