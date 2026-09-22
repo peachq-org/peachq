@@ -107,7 +107,14 @@ int q_eval_apply_is_fn(ray_t* v);
  * slots in ray_data, kind in aux[0]; serde/wire refuse them via totality
  * fallbacks. */
 enum { Q_EVAL_CAR_LAMBDA = 1, Q_EVAL_CAR_PROJ = 2, Q_EVAL_CAR_DERIV = 3,
-       Q_EVAL_CAR_COMP = 4, Q_EVAL_CAR_ITER = 5, Q_EVAL_CAR_VIEW = 6 };
+       Q_EVAL_CAR_COMP = 4, Q_EVAL_CAR_ITER = 5, Q_EVAL_CAR_VIEW = 6,
+       Q_EVAL_CAR_KFN = 7 };
+/* `2:`-loaded C function (112h): [fn pointer boxed i64, rank i64, lib sym, symbol sym].  It is a
+ * CARRIER and not a RAY_VARY builtin precisely so it has a DECLARED rank — a variadic would be
+ * rankless, and `f[1;]` could not project nor `f each` iterate. */
+ray_t* q_eval_apply_kfn_new(void* fn, int64_t rank, int64_t lib_sym, int64_t sym);
+/* Read the four slots back (any out-param may be NULL); 0 unless v is a KFN carrier. */
+int    q_eval_apply_kfn_parts(ray_t* v, void** fn, int64_t* rank, int64_t* lib_sym, int64_t* sym);
 /* types: i64 vector of declared kdb type nums parallel to params (0 = untyped
  * slot), or NULL for an undecorated lambda; checked exactly on entry ('type) */
 ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,

@@ -28,6 +28,7 @@
 #include "qlang/parse/q_parse_internal.h"
 #include "qlang/io/q_handles.h"
 #include "qlang/io/q_io.h"     /* q_io_set — Amend Entire `:` on a file target */
+#include "qlang/io/q_kapi.h"   /* q_kapi_invoke — the 112h (`2:`-loaded) arm */
 #include "qlang/io/q_splay.h"  /* q_splay_fault_pending; a mapped global refuses by-name amends */
 #include "qlang/net/q_wirefile.h"  /* q_wirefile_append — Amend Entire `,` */
 #include "qlang/ops/q_bang.h"
@@ -190,6 +191,31 @@ ray_t* q_eval_apply_deriv_new(int adv, ray_t* fv, const q_op_t* frow) {
         if (RAY_IS_ERR(c)) return c;
     }
     return car_put(c, 2, ray_i64(adv));
+}
+
+/* kfn carrier: [fn ptr boxed i64, rank i64, lib sym, symbol sym] — a `2:`-loaded C function */
+enum { KFN_PTR = 0, KFN_RANK = 1, KFN_LIB = 2, KFN_SYM = 3, KFN_SLOTS = 4 };
+
+ray_t* q_eval_apply_kfn_new(void* fn, int64_t rank, int64_t lib_sym, int64_t sym) {
+    ray_t* c = car_new(Q_EVAL_CAR_KFN, KFN_SLOTS);
+    if (RAY_IS_ERR(c)) return c;
+    c = car_put(c, KFN_PTR, ray_i64((int64_t)(uintptr_t)fn));
+    if (RAY_IS_ERR(c)) return c;
+    c = car_put(c, KFN_RANK, ray_i64(rank));
+    if (RAY_IS_ERR(c)) return c;
+    c = car_put(c, KFN_LIB, ray_sym(lib_sym));
+    if (RAY_IS_ERR(c)) return c;
+    return car_put(c, KFN_SYM, ray_sym(sym));
+}
+
+int q_eval_apply_kfn_parts(ray_t* v, void** fn, int64_t* rank, int64_t* lib_sym, int64_t* sym) {
+    if (q_eval_apply_carrier_kind(v) != Q_EVAL_CAR_KFN) return 0;
+    ray_t** s = car_slots(v);
+    if (fn)      *fn      = (void*)(uintptr_t)s[KFN_PTR]->i64;
+    if (rank)    *rank    = s[KFN_RANK]->i64;
+    if (lib_sym) *lib_sym = s[KFN_LIB]->i64;
+    if (sym)     *sym     = s[KFN_SYM]->i64;
+    return 1;
 }
 
 /* iterator carrier: [adv atom] — the operand-less iterator value (103h) */
@@ -1277,6 +1303,7 @@ static int64_t rank_of(ray_t* fv) {
     }
     if (kind == Q_EVAL_CAR_COMP) return rank_of(car_slots(fv)[1]);
     if (kind == Q_EVAL_CAR_ITER) return 1;  /* exactly one operand */
+    if (kind == Q_EVAL_CAR_KFN) return car_slots(fv)[KFN_RANK]->i64;   /* `2:` declared it */
     if (kind == Q_EVAL_CAR_DERIV) {
         /* ref/maps.md:11-16: Each keeps its operand's rank, `\:` `/:` are binary, `':` is Each Parallel on a unary */
         int adv = (int)car_slots(fv)[2]->i64;
@@ -1518,6 +1545,7 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
     }
 
     if (kind == Q_EVAL_CAR_LAMBDA) return lambda_call(fv, args, n);
+    if (kind == Q_EVAL_CAR_KFN) return q_kapi_invoke(fv, args, n);
 
     /* keyword-HOF rows route to the native adverb arms (finding 3) */
     if (row && row->adverb_hof && row->lex == QLEX_KW_INFIX && n == 2) {

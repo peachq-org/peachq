@@ -72,6 +72,7 @@
  *   hopen   — opens an IPC connection (ref/hopen.md).
  *   hclose  — closes an IPC connection (ref/hopen.md).
  *   0:      — File Text: Save Text writes / Load CSV reads a file (ref/file-text.md).
+ *   2:      — Dynamic Load: dlopens a shared object and runs its initialisers (ref/dynamic-load.md).
  *   read0   — reads a file's lines (ref/read0.md).
  *   hdel    — deletes a file or (empty) folder (ref/hdel.md).
  *   setenv  — sets a process environment variable (ref/getenv.md).
@@ -486,12 +487,14 @@ static const q_op_t Q_OPS[] = {
      * `h"query"` is handle-as-verb application, not a manifest row. */
     { "hopen",  QLEX_KW_PREFIX, QR_FN1("hopen", q_hopen_wrap),   QR_NONE, NULL, 1, 1, "none", NULL, QKOP(44) },
     { "hclose", QLEX_KW_PREFIX, QR_FN1("hclose", q_hclose_wrap), QR_NONE, NULL, 1, 1, "none", NULL },
-    /* ---- File Text / File Binary ---- both are tokenized by the scanner's
-     * digit-colon arm and dispatch on the LEFT operand's shape, so both are
-     * family "none" exception-catalogue members. `2:` (Dynamic Load) has no
-     * row and stays a name-ref ('name). */
+    /* ---- File Text / File Binary / Dynamic Load ---- all three are tokenized
+     * by the scanner's digit-colon arm; `0:`/`1:` dispatch on the LEFT operand's
+     * shape and `2:` reads a whole `(`sym;rank)` pair, so all three are family
+     * "none" exception-catalogue members. `2:` is DYADIC only (ref/dynamic-load.md
+     * gives no monadic form) and its result is a 112h carrier, not a kernel call. */
     { "0:",     QLEX_GLYPH,     QR_FN1("read0", q_read0_wrap), QR_FN2("file-text", q_io_filetext_wrap), NULL, 1, 1, "none", NULL, QKOP(20) },
     { "1:",     QLEX_GLYPH,     QR_FN1("read1", q_read1_wrap), QR_FN2("file-binary", q_io_filebinary_wrap), NULL, 1, 1, "none", NULL, QKOP(21) },
+    { "2:",     QLEX_GLYPH,     QR_NONE,                       QR_FN2("dynamic-load", q_dl_wrap), NULL, 1, 1, "none", NULL, QKOP(22) },
     { "hsym",   QLEX_KW_PREFIX, QR_FN1("hsym", q_hsym_wrap),   QR_NONE,           NULL, 1, 0, "atomic", NULL },
     { "read0",  QLEX_KW_PREFIX, QR_FN1("read0", q_read0_wrap), QR_NONE,           NULL, 1, 1, "none", NULL, QKOP(20) },
     { "read1",  QLEX_KW_PREFIX, QR_FN1("read1", q_read1_wrap), QR_NONE,           NULL, 1, 1, "none", NULL, QKOP(21) },
