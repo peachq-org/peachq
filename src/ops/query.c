@@ -10036,9 +10036,7 @@ static ray_t* append_atom_to_col(ray_t* col_vec, ray_t* atom) {
     }
     case RAY_GUID: {
         if (at != -RAY_GUID) return ray_error("type", "insert: guid column requires a guid value, got %s", ray_type_name(at));
-        static const uint8_t zero_guid[16] = {0};
-        const void* src = atom->obj ? ray_data(atom->obj) : zero_guid;
-        return ray_vec_append(col_vec, src);
+        return ray_vec_append(col_vec, ray_guid_bytes(atom));
     }
     case RAY_SYM: {
         if (at != -RAY_SYM) return ray_error("type", "insert: sym column requires a sym value, got %s", ray_type_name(at));
@@ -10459,13 +10457,11 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                             if (RAY_IS_ERR(bcast)) { ray_release(expr_vec); ray_release(new_col); ray_release(result); ray_release(mask_vec); ray_release(tbl); return bcast; }
                         }
                     } else {
-                        /* elem is wide enough for every fixed-width type incl.
-                         * GUID (16 B), whose payload lives in ->obj — copying
-                         * ray_elem_size(ct) bytes from ->i64 would over-read an
-                         * 8-byte buffer and write the wrong source for GUID. */
+                        /* elem is wide enough for every fixed-width type incl. GUID (16 B) —
+                         * ray_elem_size(ct) bytes from ->i64 would over-read the 8-byte union. */
                         uint8_t elem[16] = {0};
                         if (ct == RAY_GUID) {
-                            if (expr_vec->obj) memcpy(elem, ray_data(expr_vec->obj), 16);
+                            memcpy(elem, ray_guid_bytes(expr_vec), 16);
                         } else if (ct == RAY_F64 && expr_vec->type == -RAY_I64) {
                             double promoted = (double)expr_vec->i64;
                             memcpy(elem, &promoted, sizeof promoted);
@@ -10707,12 +10703,11 @@ ray_t* ray_update(ray_t** args, int64_t n) {
                         if (RAY_IS_ERR(bcast)) { ray_release(expr_vec); ray_release(result); ray_release(tbl); return bcast; }
                     }
                 } else {
-                    /* Wide enough for every fixed-width type incl. GUID (16 B,
-                     * payload in ->obj); ray_elem_size(ct) bytes from ->i64
-                     * would over-read an 8-byte buffer for GUID. */
+                    /* Wide enough for every fixed-width type incl. GUID (16 B);
+                     * ray_elem_size(ct) bytes from ->i64 would over-read the 8-byte union. */
                     uint8_t elem[16] = {0};
                     if (ct == RAY_GUID) {
-                        if (expr_vec->obj) memcpy(elem, ray_data(expr_vec->obj), 16);
+                        memcpy(elem, ray_guid_bytes(expr_vec), 16);
                     } else if (ct == RAY_F64 && expr_vec->type == -RAY_I64) {
                         double promoted = (double)expr_vec->i64;
                         memcpy(elem, &promoted, sizeof promoted);
@@ -10845,11 +10840,11 @@ no_where_add_col:
                     if (RAY_IS_ERR(bcast)) { ray_release(expr_vec); ray_release(result); ray_release(tbl); return bcast; }
                 }
             } else {
-                /* elem holds any fixed-width payload incl. GUID's 16 B (in
-                 * ->obj); copying from ->i64 would be wrong/over-read for GUID. */
+                /* elem holds any fixed-width payload incl. GUID's 16 B;
+                 * copying from ->i64 would over-read the 8-byte union for GUID. */
                 uint8_t elem[16] = {0};
                 if (ct == RAY_GUID) {
-                    if (expr_vec->obj) memcpy(elem, ray_data(expr_vec->obj), 16);
+                    memcpy(elem, ray_guid_bytes(expr_vec), 16);
                 } else {
                     memcpy(elem, &expr_vec->i64, ray_elem_size(ct));
                 }
@@ -11004,12 +10999,7 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
                     int64_t s = val->i64;
                     tbl = ray_vec_append(tbl, &s);
                 } else if (tt == RAY_GUID) {
-                    /* GUID atom's 16-byte payload lives in val->obj; typed-null
-                     * atoms have obj==NULL — write zeros and let the post-call
-                     * RAY_ATOM_IS_NULL check mark the slot. */
-                    static const uint8_t zero_guid[16] = {0};
-                    const void* src = val->obj ? ray_data(val->obj) : zero_guid;
-                    tbl = ray_vec_append(tbl, src);
+                    tbl = ray_vec_append(tbl, ray_guid_bytes(val));
                 } else {
                     tbl = ray_vec_append(tbl, &val->u8);
                 }
@@ -11073,9 +11063,7 @@ ray_t* ray_insert(ray_t** args, int64_t n) {
                             tbl = ray_vec_insert_at(tbl, i, &s);
                             result = tbl;
                         } else if (tt == RAY_GUID) {
-                            static const uint8_t zero_guid[16] = {0};
-                            const void* src = val->obj ? ray_data(val->obj) : zero_guid;
-                            tbl = ray_vec_insert_at(tbl, i, src);
+                            tbl = ray_vec_insert_at(tbl, i, ray_guid_bytes(val));
                             result = tbl;
                         } else {
                             tbl = ray_vec_insert_at(tbl, i, &val->u8);
