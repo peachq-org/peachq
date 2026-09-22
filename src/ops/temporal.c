@@ -98,7 +98,7 @@ static int64_t rte_extract_one(int64_t us, int field) {
 /* Convert a raw slot value from the respective temporal type into
  * microseconds-since-2000 — the internal unit used by rte_extract_one's
  * Hinnant math.  DATE is stored as int32 days, TIME as int32 ms,
- * TIMESTAMP as int64 *nanoseconds* (matching io/csv.c's parse and the
+ * TIMESTAMP as int64 *nanoseconds* (matching the
  * rest of the runtime).  The previous version of this helper treated
  * TIMESTAMP as µs, which made (yyyy ts) decode to absurd years (26204
  * on 2024-03-15) — a 1000× unit mismatch. */

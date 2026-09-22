@@ -68,7 +68,7 @@ typedef enum {
     /* Per-column string dictionary: an int32 code per row + the distinct
      * string values (code -> string).  Lets group-by / distinct run on the
      * cheap integer-code path instead of hashing 16-byte ray_str_t descriptors
-     * and chasing the string pool.  Built at column ingest / splayed save and
+     * and chasing the string pool.  Built at column ingest and
      * persisted inline like the chunk-zone index; the only accelerator index
      * permitted on RAY_STR (it stores codes alongside the descriptors, leaving
      * the column's own representation untouched). */
@@ -258,13 +258,13 @@ ray_t* ray_index_attach_bloom(ray_t** vp);
 ray_t* ray_index_attach_chunk_zone(ray_t** vp, uint8_t chunk_log2);
 
 /* Build a chunk-zone index WITHOUT attaching it — returns a standalone
- * RAY_INDEX object (caller releases).  Used by the splayed-store builder to
+ * RAY_INDEX object (caller releases).  Used by a column-store builder to
  * compute an index for persistence without COWing a shared column. */
 ray_t* ray_index_chunk_zone_compute(ray_t* v, uint8_t chunk_log2);
 
 /* Build a RAY_IDX_DICT (codes + distinct values) for STR vector `v` WITHOUT
  * attaching it — standalone RAY_INDEX object (caller releases / attaches).
- * Returns RAY_ERR_NYI for non-STR.  Used at splayed save to persist the dict
+ * Returns RAY_ERR_NYI for non-STR.  Used at column save to persist the dict
  * and by ray_index_attach_dict for the runtime path. */
 ray_t* ray_index_dict_compute(ray_t* v);
 ray_t* ray_index_attach_dict(ray_t** vp);
