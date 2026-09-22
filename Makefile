@@ -5,7 +5,7 @@
 
 CC      ?= cc
 
-RAY_ENTRY_SRC = src/app/main.c src/qlang/repl/qmain.c src/qlang/repl/qdoctest_main.c
+RAY_ENTRY_SRC = src/qlang/repl/qmain.c src/qlang/repl/qdoctest_main.c
 RAY_LIB_SRC   = $(filter-out $(RAY_ENTRY_SRC), $(wildcard src/*/*.c src/qlang/eval/*.c src/qlang/ops/*.c src/qlang/net/*.c src/qlang/io/*.c \
                                             src/qlang/parse/*.c src/qlang/base/*.c src/qlang/repl/*.c))
 
@@ -128,10 +128,10 @@ BUILD_DATE := $(shell date -u +%Y-%m-%d)
 WARNS   = -Wall -Wextra -Wno-unused-parameter
 DEFS    = -DRAY_VERSION_MAJOR=$(VERSION_MAJOR) -DRAY_VERSION_MINOR=$(VERSION_MINOR) \
           -DRAY_VERSION_PATCH=$(VERSION_PATCH) -DRAYFORCE_VERSION=\"$(RAY_VERSION)\"
-# Changes daily, so scoped to the four objects that read it — otherwise every
+# Changes daily, so scoped to the three objects that read it — otherwise every
 # cached object misses at midnight.
 DATE_DEF   = -DRAYFORCE_BUILD_DATE=\"$(BUILD_DATE)\"
-DATE_STEMS = $(addprefix $(BUILD_DIR)/,src/app/repl src/ops/system src/qlang/q_dotz src/qlang/repl/qmain)
+DATE_STEMS = $(addprefix $(BUILD_DIR)/,src/ops/system src/qlang/q_dotz src/qlang/repl/qmain)
 $(addsuffix .o,$(DATE_STEMS)) $(addsuffix .win.o,$(DATE_STEMS)): DEFS += $(DATE_DEF)
 INCLUDES = $(RAY_INCLUDES)
 DEPFLAGS = -MMD -MP

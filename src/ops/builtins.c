@@ -2326,7 +2326,7 @@ static inline uint64_t hash_i64(int64_t v) {
  * only fallback collapses every nested-list row to the same hash, so
  * the existing path is degenerate for composite multi-key composites.
  * Uses the canonical wyhash helpers from ops/hash.h, same as the
- * pivot / datalog / join hashers. */
+ * pivot / join hashers. */
 static uint64_t atom_hash(ray_t* a) {
     /* List-element position: elements may be a bare C NULL (ray_list_set stores
      * NULL unretained; ray_list_get is out-of-range), mirroring atom_eq's
