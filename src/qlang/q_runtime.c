@@ -17,6 +17,7 @@
 #include "qlang/ops/q_sys.h"      /* q_sys_seed_init / q_sys_ctx_reset */
 #include "qlang/io/q_handles.h"  /* q_handles_init/destroy — the handle registry lifecycle */
 #include "qlang/io/q_provider.h"   /* q_provider_init/destroy — the provider registry lifecycle */
+#include "qlang/io/q_kapi.h"     /* q_kapi_reset — sd1 fds + the sym mirror die with the runtime */
 #include "qlang/io/q_splay.h"    /* q_splay_init/destroy — the splay registry lifecycle */
 #include "qlang/io/q_duckdb.h"   /* q_duckdb_reset — close handles at teardown */
 #include "qlang/io/q_re2.h"      /* q_re2_reset — drop compiled patterns at teardown */
@@ -104,6 +105,7 @@ void q_runtime_destroy(ray_runtime_t* rt) {
     q_re2_reset();             /* no compiled pattern outlives its runtime */
     ray_eval_set_remote_str_fn(NULL);  /* remote strings fall back to rayfall */
     ray_eval_set_remote_apply_fn(NULL);/* (func;args) value-apply -> 'nyi w/o q runtime */
+    q_kapi_reset();            /* deregister `2:` sd1 fds before the poll and the sym table go */
     q_dbg_reset();             /* drop snapshot-retained lambdas before the env */
     q_handles_destroy();       /* drop handle records (open_args refs) before the env */
     q_provider_destroy();        /* drop provider records (connid refs) before the env */
