@@ -161,6 +161,17 @@ else
   LIBS = -lm $(RE2_LIB) $(FMT_LIB) $(CXXLIB)
 endif
 
+# `2:` (kdb C API): a loaded extension resolves ktn/kj/r0/… out of OUR executable, and `nm -D ./q`
+# exports nothing without this.  A dynamic-LIST, never -rdynamic: -rdynamic would export every
+# peachq internal into the plugin's namespace and let a .so we dlopen interpose on our own symbols.
+# Linux only — macOS needs -Wl,-exported_symbols_list with a different file format, unverified on
+# this host, and a Windows extension needs an import library (both out of PR 1; `2:` answers 'nyi).
+ifeq ($(UNAME_S),Linux)
+  KAPI_EXPORTS = -Wl,--dynamic-list=tools/kapi.syms
+else
+  KAPI_EXPORTS =
+endif
+
 CFLAGS  ?= $(RELEASE_CFLAGS)
 LDFLAGS ?=
 
@@ -267,8 +278,8 @@ $(FMT_LIB): $(FMT_OBJ)
 
 FMT_DEPS = $(FMT_OBJ:.o=.d) $(WIN_FMT_OBJ:.o=.d)
 
-$(Q_TARGET): $(LIB_OBJ) $(Q_MAIN_OBJ) $(RE2_LIB) $(FMT_LIB)
-	$(CC) $(CFLAGS) -o $@ $(LIB_OBJ) $(Q_MAIN_OBJ) $(LIBS) $(LDFLAGS)
+$(Q_TARGET): $(LIB_OBJ) $(Q_MAIN_OBJ) $(RE2_LIB) $(FMT_LIB) tools/kapi.syms
+	$(CC) $(CFLAGS) -o $@ $(LIB_OBJ) $(Q_MAIN_OBJ) $(LIBS) $(LDFLAGS) $(KAPI_EXPORTS)
 
 # --- Windows cross-build (mingw-w64): make win --------------------------------
 # RAY_OS_WINDOWS on the command line because some files test it before the
