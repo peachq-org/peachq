@@ -136,18 +136,18 @@ ray_t* q_attr_stamp_byte(ray_t* v, uint8_t byte) {
  * Consumes err, returns a fresh error; passes oom/unexpected codes through. */
 static ray_t* attr_remap_err(ray_t* err, char letter) {
     const char* code = ray_err_code(err);
-    const char* sig = NULL;
+    q_err_e sig = QE__COUNT;
     if (code) {
         if (strcmp(code, "domain") == 0)
-            sig = (letter == 's') ? "s-fail"
-                : (letter == 'u' || letter == 'p') ? "u-fail"
-                : "type";
+            sig = (letter == 's') ? QE_SFAIL
+                : (letter == 'u' || letter == 'p') ? QE_UFAIL
+                : QE_TYPE;
         else if (strcmp(code, "nyi") == 0 || strcmp(code, "type") == 0)
-            sig = "type";
+            sig = QE_TYPE;
     }
-    if (!sig) return err;                            /* oom / unexpected */
+    if (sig == QE__COUNT) return err;                /* oom / unexpected */
     ray_error_free(err);
-    return ray_error(sig, NULL);
+    return q_err(sig);
 }
 
 /* kdb `u#`: a null is a value, so a column with TWO OR MORE nulls is not unique
@@ -275,7 +275,7 @@ static ray_t* attr_set_table_s(ray_t* y) {
         ray_t* col = ray_table_get_col_idx(y, c);           /* borrowed */
         if (!col) { ray_release(out); return q_err(QE_TYPE); }
         if (c == 0) {
-            if (!non_descending(col, 0, q_count(col))) { ray_release(out); return ray_error("s-fail", NULL); }
+            if (!non_descending(col, 0, q_count(col))) { ray_release(out); return q_err(QE_SFAIL); }
             ray_retain(col);
             ray_t* pc = ray_cow(col);                        /* copy-on-shared (:29) */
             if (!pc || RAY_IS_ERR(pc)) { ray_release(out); return pc ? pc : q_err(QE_OOM); }
@@ -300,7 +300,7 @@ static ray_t* attr_set_keyed_s(ray_t* y) {
     ray_t* kt = ray_dict_keys(y);                            /* borrowed key TABLE */
     if (!kt || kt->type != RAY_TABLE || ray_table_ncols(kt) < 1) return q_err(QE_TYPE);
     ray_t* c0 = ray_table_get_col_idx(kt, 0);
-    if (!c0 || !non_descending(c0, 0, q_count(c0))) return ray_error("s-fail", NULL);
+    if (!c0 || !non_descending(c0, 0, q_count(c0))) return q_err(QE_SFAIL);
     kt->attrs |= RAY_ATTR_SORTED;
     ray_t* vals = ray_dict_vals(y);
     ray_retain(kt); ray_retain(vals);
@@ -314,7 +314,7 @@ static ray_t* attr_set_keyed_s(ray_t* y) {
 static ray_t* attr_set_dict_s(ray_t* y) {
     ray_t* k = ray_dict_keys(y);                             /* borrowed */
     if (!k || !ray_is_vec(k)) return q_err(QE_TYPE);
-    if (!non_descending(k, 0, q_count(k))) return ray_error("s-fail", NULL);
+    if (!non_descending(k, 0, q_count(k))) return q_err(QE_SFAIL);
     ray_retain(k);
     ray_t* nk = ray_cow(k);
     if (!nk || RAY_IS_ERR(nk)) return nk ? nk : q_err(QE_OOM);
@@ -368,6 +368,14 @@ static ray_t* attr_set_enum(char letter, ray_t* y) {
     if (!w || RAY_IS_ERR(w)) return w ? w : q_err(QE_OOM);
     (void)q_enum_attr_set(w, 0);
     return w;
+}
+
+/* `x # y` is the set-attribute form when x is a symbol atom and y is a vector, enum, table, dict, or — for the
+ * CLEAR form only (D48) — a general list.  Containers otherwise keep take's column meaning. */
+bool q_attr_set_admits(ray_t* x, ray_t* y) {
+    return x && x->type == -RAY_SYM && y &&
+        (ray_is_vec(y) || y->type == RAY_ENUM || y->type == RAY_TABLE || y->type == RAY_DICT ||
+         (y->type == RAY_LIST && q_type_is_null_sym(x)));
 }
 
 /* q `sym # vec` — set / clear a column attribute.  sym is a symbol ATOM: the
