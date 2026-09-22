@@ -533,9 +533,9 @@ ray_t* q_eval_carrier_value(ray_t* v) {
             out = list_put_borrowed(out, q_eval_apply_proj_arg(v, i));
         return out;
     }
-    /* KFN answered above; a bare iterator stays deferred */
+    /* KFN answered above; a bare iterator stays deferred; a foreign is opaque */
     case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_LAMBDA: case Q_EVAL_CAR_ITER:
-    case Q_EVAL_CAR_VIEW: case Q_EVAL_CAR_KFN: break;
+    case Q_EVAL_CAR_VIEW: case Q_EVAL_CAR_KFN: case Q_EVAL_CAR_FOREIGN: break;
     }
     return NULL;
 }

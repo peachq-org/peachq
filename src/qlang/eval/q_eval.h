@@ -108,13 +108,19 @@ int q_eval_apply_is_fn(ray_t* v);
  * fallbacks.  NAMED so -Wswitch fails the build on a switch missing an arm. */
 typedef enum { Q_EVAL_CAR_NONE = 0, Q_EVAL_CAR_LAMBDA = 1, Q_EVAL_CAR_PROJ = 2,
                Q_EVAL_CAR_DERIV = 3, Q_EVAL_CAR_COMP = 4, Q_EVAL_CAR_ITER = 5,
-               Q_EVAL_CAR_VIEW = 6, Q_EVAL_CAR_KFN = 7 } q_car_kind_t;
+               Q_EVAL_CAR_VIEW = 6, Q_EVAL_CAR_KFN = 7,
+               Q_EVAL_CAR_FOREIGN = 8 } q_car_kind_t;
 /* `2:`-loaded C function (112h): [fn pointer boxed i64, rank i64, lib sym, symbol sym].  It is a
  * CARRIER and not a RAY_VARY builtin precisely so it has a DECLARED rank — a variadic would be
  * rankless, and `f[1;]` could not project nor `f each` iterate. */
 ray_t* q_eval_apply_kfn_new(void* fn, int64_t rank, int64_t lib_sym, int64_t sym);
 /* Read the four slots back (any out-param may be NULL); 0 unless v is a KFN carrier. */
 int    q_eval_apply_kfn_parts(ray_t* v, void** fn, int64_t* rank, int64_t* lib_sym, int64_t* sym);
+/* An extension's 112h FOREIGN object: [opaque pointer boxed i64].  It answers 112h to `type` like a
+ * `2:`-loaded function — ONE type over two internal shapes — but is NOT applicable ('type), and the
+ * pointer's own destructor runs on the last reference through the heap's RAY_QFN finalizer hook. */
+ray_t* q_eval_apply_foreign_new(void* obj);
+int    q_eval_apply_foreign_parts(ray_t* v, void** obj);
 /* types: i64 vector of declared kdb type nums parallel to params (0 = untyped
  * slot), or NULL for an undecorated lambda; checked exactly on entry ('type) */
 ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,

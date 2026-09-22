@@ -59,6 +59,12 @@ static int match_carrier(ray_t* a, ray_t* b) {
         q_eval_apply_kfn_parts(b, &fb, &rb, NULL, NULL);
         return fa == fb && ra == rb;
     }
+    case Q_EVAL_CAR_FOREIGN: {   /* the extension's own k0 IS the identity */
+        void *oa = NULL, *ob = NULL;
+        q_eval_apply_foreign_parts(a, &oa);
+        q_eval_apply_foreign_parts(b, &ob);
+        return oa && oa == ob;
+    }
     case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_VIEW: break;
     }
     return 0;

@@ -663,6 +663,9 @@ static void heap_flush_foreign(ray_heap_t* h, bool return_to_owner) {
  * Owned-reference helpers
  * -------------------------------------------------------------------------- */
 
+static void (*g_qfn_fin)(ray_t*) = NULL;
+void ray_free_set_qfn_fin_fn(void (*fn)(ray_t* v)) { g_qfn_fin = fn; }
+
 static bool ray_atom_str_is_sso(const ray_t* s) {
     if (s->slen >= 1 && s->slen <= 7) return true;
     if (s->slen == 0 && s->obj == NULL) return true;
@@ -692,6 +695,7 @@ static void ray_release_owned_refs(ray_t* v) {
         }
         if (v->type == RAY_QFN) {
             /* q-eval carrier: len child slots, C-NULL = projection hole */
+            if (g_qfn_fin) g_qfn_fin(v);   /* the owning layer's last-reference choke point */
             ray_t** slots = (ray_t**)ray_data(v);
             for (int64_t i = 0; i < v->len; i++) {
                 if (slots[i] && !RAY_IS_ERR(slots[i]))
