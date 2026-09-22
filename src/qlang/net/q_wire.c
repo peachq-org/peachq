@@ -216,7 +216,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         }
         /* serde mode, and the kinds with no wire encoding, fall to 'nyi */
         case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_LAMBDA: case Q_EVAL_CAR_ITER:
-        case Q_EVAL_CAR_VIEW: case Q_EVAL_CAR_KFN: break;
+        case Q_EVAL_CAR_VIEW: case Q_EVAL_CAR_KFN: case Q_EVAL_CAR_FOREIGN: break;
         }
         rc = wbuf_fail(b, q_err(QE_NYI));
         goto out;

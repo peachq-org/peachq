@@ -17,7 +17,7 @@
 #include "qlang/ops/q_sys.h"      /* q_sys_seed_init / q_sys_ctx_reset */
 #include "qlang/io/q_handles.h"  /* q_handles_init/destroy — the handle registry lifecycle */
 #include "qlang/io/q_provider.h"   /* q_provider_init/destroy — the provider registry lifecycle */
-#include "qlang/io/q_kapi.h"     /* q_kapi_reset — sd1 fds + the sym mirror die with the runtime */
+#include "qlang/io/q_kapi.h"     /* q_kapi_init/reset — the foreign finalizer, sd1 fds, the sym mirror */
 #include "qlang/io/q_splay.h"    /* q_splay_init/destroy — the splay registry lifecycle */
 #include "qlang/io/q_duckdb.h"   /* q_duckdb_reset — close handles at teardown */
 #include "qlang/io/q_re2.h"      /* q_re2_reset — drop compiled patterns at teardown */
@@ -73,6 +73,7 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
         q_handles_init();      /* fd-keyed handle registry (file/fifo/socket open-time) */
         q_provider_init();       /* virtual-table provider registry (int<->alias<->conn) */
         q_splay_init();        /* the splayed-table registry (headers + the map ledger) */
+        q_kapi_init();         /* the RAY_QFN finalizer, so a `2:` foreign can run its destructor */
         q_ctx_install_remote_hooks();  /* paired with the teardown in q_runtime_destroy */
         q_builtins_register();
         /* `.z.*` is an eval-time resolver, NOT a namespace: compute the
@@ -105,7 +106,6 @@ void q_runtime_destroy(ray_runtime_t* rt) {
     q_re2_reset();             /* no compiled pattern outlives its runtime */
     ray_eval_set_remote_str_fn(NULL);  /* remote strings fall back to rayfall */
     ray_eval_set_remote_apply_fn(NULL);/* (func;args) value-apply -> 'nyi w/o q runtime */
-    q_kapi_reset();            /* deregister `2:` sd1 fds before the poll and the sym table go */
     q_dbg_reset();             /* drop snapshot-retained lambdas before the env */
     q_handles_destroy();       /* drop handle records (open_args refs) before the env */
     q_provider_destroy();        /* drop provider records (connid refs) before the env */
@@ -114,6 +114,9 @@ void q_runtime_destroy(ray_runtime_t* rt) {
     q_eval_syms_reset();       /* cached sym ids die with this runtime's sym table */
     q_view_reset();            /* view roster + cached sym ids likewise */
     q_env_destroy();           /* release q's K-tree before the heap dies */
+    q_kapi_reset();            /* AFTER the env: every `2:` foreign must run its destructor — code
+                                * inside the loaded `.so` — while the finalizer hook is still live.
+                                * The poll is still up too, so the sd1 fds deregister cleanly. */
     q_splay_destroy();         /* munmap column regions AFTER every holder released */
     q_sys_ctx_reset();         /* drop the `\d` context with its runtime */
     q_console_pipe_disable();          /* reset the `\classic` display global — the

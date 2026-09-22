@@ -1430,11 +1430,20 @@ static int carrier_fmt(ray_t* v, char* buf, size_t bufsz) {
             snprintf(buf, bufsz, "{..}");
         return 1;
     }
+    case Q_EVAL_CAR_FOREIGN:               /* an opaque pointer: nothing to show but what it is */
+        snprintf(buf, bufsz, "foreign");
+        return 1;
     case Q_EVAL_CAR_KFN: {                 /* the `2:` call that made it, read back off the slots */
         int64_t rank = 0, lib = 0, sym = 0;
         q_eval_apply_kfn_parts(v, NULL, &rank, &lib, &sym);
         ray_t* ls = ray_sym_str(lib);
         ray_t* fs = ray_sym_str(sym);
+        /* `dl` mints the same carrier from a pointer the extension already held: no library, no
+         * dlsym name, and no `2:` call that would reproduce it (owner ruling 2026-09-22). */
+        if (!ls || ray_str_len(ls) == 0) {
+            snprintf(buf, bufsz, "dl(%lld)", (long long)rank);
+            return 1;
+        }
         snprintf(buf, bufsz, "`%.*s 2:(`%.*s;%lld)",
                  ls ? (int)ray_str_len(ls) : 0, ls ? ray_str_ptr(ls) : "",
                  fs ? (int)ray_str_len(fs) : 0, fs ? ray_str_ptr(fs) : "", (long long)rank);
