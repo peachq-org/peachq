@@ -145,8 +145,8 @@ static inline bool iocp_is_listener(const ray_selector_t* s) {
  * Nothing in the engine starts Winsock (sock.c calls socket()/WSAPoll()/recv()
  * with no WSAStartup; the only other init, q_dotz.c's win_wsa_ensure, fires
  * only on the `.z.h`/`.z.a` getters).  Without this every socket op fails
- * WSANOTINITIALISED.  ray_poll_create is the single correct home: both
- * launchers (src/app/main.c, src/qlang/qmain.c) call it before any socket
+ * WSANOTINITIALISED.  ray_poll_create is the single correct home:
+ * the launcher (src/qlang/repl/qmain.c) calls it before any socket
  * work.  Same one-time-guarded, never-WSACleanup pattern as q_dotz.c (winsock
  * is a process-lifetime resource; WSAStartup itself is refcounted/idempotent,
  * so a benign flag race just calls it twice).  Kept file-local rather than
