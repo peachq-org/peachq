@@ -10,6 +10,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/eval/q_dbg.h"        /* q_dbg_statement_origin — the loading script's own directory */
 #include "qlang/eval/q_eval.h"       /* the KFN carrier + q_eval_apply_value */
+#include "qlang/q_builtins.h"        /* q_builtins_type_num — THE q type answer a function crosses as */
 #include "qlang/q_ctx.h"             /* q_ctx_eval_src — what k(0,…) evaluates through */
 #include "core/poll.h"
 #include "mem/heap.h"                /* ray_free_set_qfn_fin_fn — the foreign-destructor choke point */
@@ -74,10 +75,15 @@ typedef struct k0 {
 #define K_SHIM 0x6b
 static int k_is_shim(K x) { return x && x->m == (signed char)K_SHIM; }
 
-/* The `u` byte of a shim is ours too (kdb writes it on nothing we hand out).  A -128h error object
- * owns the malloc'd message `x->s` points at, so the string dies with the object instead of leaking
- * a symbol per distinct error text into the intern table. */
-#define K_UOWN 1
+/* 100h–111h — a q FUNCTION VALUE on its way through an extension.  The `u` byte of a shim is ours
+ * (kdb writes it on nothing we hand out).  kdb hands a function over opaque: py.c
+ * only r1s it, capsules it, and hands it back to `k(0;".";f;args)` (py.c:34), so the one slot holds
+ * the ray value RAW (never a K, like a foreign's slots) and `u` says which shape this is, because a
+ * 101h shim is also how `::` crosses. */
+#define K_UFN 2
+static int k_is_qfn(K x) {
+    return k_is_shim(x) && x->t >= 100 && x->t <= 111 && x->n == 1 && x->u == K_UFN;
+}
 
 /* 112h — an extension's FOREIGN object: `knk(2,destructor,payload)` with `xt` overwritten (py.c:7;
  * pykx and pcre2 use the same convention).  Its two slots are RAW pointers, never K objects, so no
@@ -256,18 +262,12 @@ static K shim_atom(I t) {
     return x;
 }
 
-/* THE one -128h builder.  A ray error is a packed class plus a per-VM message, neither of which
- * outlives the call, so the object carries its OWN NUL-terminated copy (capiref.md `ee`: the reader
- * is `x->s`) and frees it in r0. */
+/* THE one -128h builder.  kdb's error text is a SYMBOL, so `x->s` OUTLIVES the object it came on —
+ * py.c:26 reads the message after r0'ing it — and the intern mirror is what makes a char* that
+ * persistent.  `x->s` may still be NULL (capiref.md `ee`), and readers check. */
 static K shim_err(const char* m, size_t n) {
     K x = shim_atom(-128);
-    if (!x) return (K)0;
-    char* p = (char*)malloc(n + 1);
-    if (!p) return x;                 /* capiref.md `ee`: `x->s` may be NULL, and readers check */
-    memcpy(p, m, n);
-    p[n] = '\0';
-    x->s = p;
-    x->u = K_UOWN;
+    if (x) x->s = sn((S)m, (I)n);
     return x;
 }
 
@@ -295,7 +295,7 @@ V r0(K x) {
     if (x->t == 0)  { for (J i = 0; i < x->n; i++) r0(kK(x)[i]); }
     if (x->t == 99) { r0(kK(x)[0]); r0(kK(x)[1]); }
     if (x->t == 98) r0(x->k);
-    if (x->t == -128 && x->u == K_UOWN) free(x->s);
+    if (k_is_qfn(x)) ray_release((ray_t*)kK(x)[0]);
     /* THE exactly-once destructor call: the last reference to a foreign is where kdb runs it too. */
     if (k_is_foreign(x) && kK(x)[0]) ((V(*)(K))(void*)kK(x)[0])(x);
     free(x);
@@ -596,10 +596,18 @@ static K k_of_ray(ray_t* v) {
 
     /* A foreign hands back the SAME k0 every crossing — the extension's own object, not a view of
      * it — so `kK(x)[1]` is the pointer it stored and identity survives the round trip. */
-    if (t == RAY_QFN) {
+    if (t == RAY_QFN || t == RAY_LAMBDA || t == RAY_UNARY || t == RAY_BINARY || t == RAY_VARY) {
         void* obj = NULL;
-        if (!q_eval_apply_foreign_parts(v, &obj)) return krr((S) "nyi");   /* lambdas, `2:` fns */
-        return r1((K)obj);
+        if (t == RAY_QFN && q_eval_apply_foreign_parts(v, &obj)) return r1((K)obj);
+        I qt = q_builtins_type_num(v);   /* lambda 100h, projection 104h, derived 106h+, … */
+        if (qt < 100 || qt > 111) return krr((S) "nyi");
+        K x = shim_vec(0, 1);
+        if (!x) return (K)0;
+        x->t = (signed char)qt;
+        x->u = K_UFN;
+        ray_retain(v);
+        kK(x)[0] = (K)v;
+        return x;
     }
 
     /* physical STR is q-invisible: a char vector is what crosses (string-C3) */
@@ -648,6 +656,7 @@ static ray_t* k_to_ray(K x) {
     if (!k_is_shim(x)) { ray_t* v = RAY_OF(x); ray_retain(v); return v; }
 
     I t = x->t;
+    if (k_is_qfn(x)) { ray_t* v = (ray_t*)kK(x)[0]; ray_retain(v); return v; }
     if (t == 112) {
         if (!k_is_foreign(x)) return q_err(QE_TYPE);   /* 112h with no (destructor;payload) pair */
         ray_t* c = q_eval_apply_foreign_new(r1(x));
@@ -731,7 +740,8 @@ static int seam_ok(K x, int depth) {
     I t = x->t;
     /* a carrier overlay (what `dl` hands back) reads its ray tag, which is no kdb tag at all */
     if (!k_is_shim(x) && RAY_OF(x)->type == RAY_QFN) return RAY_OF(x)->rc > 0;
-    if (t == 112) return k_is_foreign(x);
+    if (t == 112) return k_is_foreign(x) || k_is_qfn(x);
+    if (k_is_qfn(x)) return ((ray_t*)kK(x)[0])->rc > 0;
     if (t != -128 && t != 101 && t != 98 && t != 99 && !(t < 0 ? k_tag_ok(-t) : k_tag_ok(t)))
         return 0;
     if (k_is_shim(x)) {
