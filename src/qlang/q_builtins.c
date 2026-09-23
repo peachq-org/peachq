@@ -24,7 +24,6 @@
 #include <rayforce.h>
 #include <assert.h>
 #include <ctype.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -340,21 +339,13 @@ void q_builtins_register(void) {
      * builtin values and must be torn down via q_runtime_destroy before the
      * runtime.  Fail fast: a missing audited builtin is a bug. */
     assert(q_registry_init() == RAY_OK);
-    /* Monadic table verbs (feat/q-table-verbs) are REGISTRY wrappers with no
-     * base env builtin behind them — but a bare keyword used as a HOF operand
-     * (`flip each x`, `keys each ts`) resolves through the ENV (the q `value`
-     * precedent), so bind the registry's own immutable value under the same
-     * name.  Application heads still embed the registry copy; both paths call
-     * ONE wrapper. */
-    {
-        static const char* tv_monads[] = { "flip", "keys", "ungroup" };
-        for (size_t i = 0; i < sizeof tv_monads / sizeof *tv_monads; i++) {
-            const char* nm = tv_monads[i];
-            ray_t* v = q_registry_lookup_name(nm, strlen(nm), Q_MONADIC); /* borrowed */
-            if (!v) fprintf(stderr, "q_builtins: registry miss for %s\n", nm);
-            assert(v != NULL);
-            q_env_bind(ray_sym_intern(nm, strlen(nm)), v);               /* retains */
-        }
+    /* `.q` holds q's named functions (ref/key.md): every keyword's immutable registry value; q.q adds the rest */
+    int nops = 0;
+    const q_op_t* ops = q_ops_table(&nops);
+    for (int i = 0; i < nops; i++) {
+        ray_t* v = ops[i].lex != QLEX_KW ? NULL : q_registry_row_value(&ops[i], Q_MONADIC);
+        if (!v && ops[i].lex == QLEX_KW) v = q_registry_row_value(&ops[i], Q_DYADIC);
+        if (v) q_env_bind(q_env_qualify(ray_sym_intern(".q", 2), ray_sym_intern(ops[i].name, strlen(ops[i].name))), v);
     }
     /* .Q.c.* — the raw C primitives behind the .Q namespace (internal/unstable).
      * dotq.q delegates each public `.Q.<name>` to these (rule 6, loaded next) →
