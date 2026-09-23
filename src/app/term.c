@@ -375,11 +375,14 @@ ray_term_t* ray_term_create_io(const ray_term_io_t* io) {
 }
 
 /* The OS-console door: default transport + raw mode + history file. */
-ray_term_t* ray_term_create(void) {
+ray_term_t* ray_term_create(void) { return ray_term_create_console(1); }
+
+ray_term_t* ray_term_create_console(int hist_file) {
     ray_term_t* term = ray_term_create_io(NULL);
     if (!term) return NULL;
     term->io.get_size = term_os_get_size;
     term->owns_console = 1;
+    term->hist_file = hist_file;
 
 #if defined(RAY_OS_WINDOWS)
     term->h_stdin  = GetStdHandle(STD_INPUT_HANDLE);
@@ -406,14 +409,14 @@ ray_term_t* ray_term_create(void) {
 #endif
 
     term_refresh_size(term);
-    ray_hist_load(&term->hist, NULL);
+    if (hist_file) ray_hist_load(&term->hist, NULL);
     return term;
 }
 
 void ray_term_destroy(ray_term_t* term) {
     if (!term) return;
     if (g_active_term == term) g_active_term = NULL;
-    if (term->owns_console) ray_hist_save(&term->hist, NULL);
+    if (term->owns_console && term->hist_file) ray_hist_save(&term->hist, NULL);
     ray_hist_destroy(&term->hist);
     if (term->owns_console) {
 #if defined(RAY_OS_WINDOWS)
