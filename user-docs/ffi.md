@@ -4,6 +4,9 @@ peachq calls C through the `.ffi` namespace. It is the KX ffikdb surface, spelli
 `.ffi.bind`, `.ffi.callFunction`, `.ffi.cvar`, `.ffi.setErrno`, `.ffi.extension`, `.ffi.ptrsize` and `.ffi.os` all mean
 what they mean there, so published ffikdb examples run unchanged.
 
+A library written against kdb's `k.h` (embedPy, qVis, your own kx extension) loads with `2:` instead — see
+[C extensions](c-extensions.md).
+
 ## Loading
 
 `.ffi` is part of the standard library, behind the one gate:
