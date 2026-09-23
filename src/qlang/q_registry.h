@@ -95,9 +95,12 @@ const struct q_op* q_registry_row_of(const ray_t* value, q_valence_t valence);
  * the container lift the per-item apply needs (`sum each t`). */
 const struct q_op* q_registry_operand_row(const ray_t* value);
 
-/* True iff sym_id is a word no source position may bind — a manifest row (any valence, values or not) or a
- * syntax word.  O(1), for the lexical assign gates.  False before q_registry_init. */
+/* True iff sym_id is a manifest row (any valence, values or not) or a syntax word.  O(1), for the lexical assign
+ * gates — what they make of it is theirs.  False before q_registry_init. */
 int q_registry_is_reserved(int64_t sym_id);
+
+/* True iff sym_id is one of the `.Q.res` syntax words — the `SYNTAX_WORDS[]` roster, reached by q_ops_syntax_word. */
+int q_registry_is_syntax_word(int64_t sym_id);
 
 /* End of bootstrap: record every `.q` name defined so far as builtin and engage q_registry_locked.  Before it,
  * q.q is still defining its own `.q` entries. */
