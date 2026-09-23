@@ -103,8 +103,8 @@ int q_registry_is_reserved(int64_t sym_id);
  * q.q is still defining its own `.q` entries. */
 void q_registry_seal(void);
 
-/* True iff a BARE global binding of sym_id, a `.q.<sym_id>` write, or replacing `.q` itself must signal 'assign: a
- * reserved word or a builtin `.q` name, once sealed. */
+/* True iff sym_id is `.q`, a reserved word or a builtin `.q` name, once sealed.  Callers apply it: q_env_set to a
+ * root or `.q.<sym_id>` target, q_eval to a bare global `name:` spelling. */
 int q_registry_locked(int64_t sym_id);
 
 /* The infix rule: s[0..n) is infix iff its `.q` entry has rank >= 2.  A keyword's entry is the immutable
