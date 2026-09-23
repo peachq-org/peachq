@@ -776,7 +776,7 @@ ray_t* ray_hsend_fn(ray_t* handle, ray_t* msg) {
 
 /* (.ipc.post handle msg) → null on local send, error on failure.
  * Async fire-and-forget counterpart to (.ipc.send ...): the server runs
- * the message through `.ipc.on.async` (or default eval) and sends NO
+ * the message through `.z.ps` (or default eval) and sends NO
  * response, so only a LOCAL send failure is observable here. */
 ray_t* ray_hpost_fn(ray_t* handle, ray_t* msg) {
     if (!ray_is_atom(handle) || (handle->type != -RAY_I64 && handle->type != -RAY_I32))
@@ -789,7 +789,7 @@ ray_t* ray_hpost_fn(ray_t* handle, ray_t* msg) {
     return RAY_NULL_OBJ;
 }
 
-/* (.ipc.handle) → i64 current connection handle inside any `.ipc.on.*`
+/* (.ipc.handle) → i64 current connection handle inside any `.z.p*`
  * hook, or -1 outside any hook.  Registered variadic so both
  * `(.ipc.handle)` (no args) and `(.ipc.handle 0)` (one arg, ignored)
  * work — matches the convention of `.sys.gc` / `.sys.info`. */

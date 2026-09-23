@@ -10,13 +10,14 @@
 #include "qlang/base/q_err.h"
 #include "qlang/q_registry_internal.h" /* q_str_text_bytes, q_type_strict_i64 */
 #include "qlang/q_console.h" /* q_console_write — the 1/-1 console handles */
-#include "qlang/q_dotz.h"   /* q_dotz_now_ns — the portable wall clock; q_dotz_resolve — `.z.ps` */
+#include "qlang/q_dotz.h"   /* q_dotz_now_ns — the portable wall clock */
 #include "qlang/io/q_io.h"   /* q_io_mkdir_parents — hopen creates missing directories */
 #include "qlang/io/q_provider.h" /* the `:pq:` virtual-table provider arms */
 #include "qlang/net/q_wirefile.h"    /* q_wirefile_append_path — typed handle append */
 #include "qlang/net/q_ws.h"          /* q_ws_client_open — `:ws:// sym handles */
 #include "qlang/net/q_http_client.h" /* q_http_client_raw + the scheme spelling — `:http:// sym handles */
 #include "qlang/eval/q_eval.h"       /* q_eval_value_wrap / q_eval_apply_value — handle 0 IS `.z.ps`/value */
+#include "qlang/q_env.h"            /* q_env_resolve — `.z.ps` is an ordinary global */
 #include "lang/eval.h"       /* ray_eval_get_restricted, ray_at_fn */
 #include "lang/internal.h"   /* make_i32/make_i64, ray_hopen_fn/ray_hsend_fn/ray_hpost_fn/ray_hclose_fn */
 #include "core/runtime.h"    /* __VM->ipc_handle — the handle context handle 0 swaps */
@@ -278,7 +279,7 @@ static ray_t* raw_write(int64_t qh, ray_t* y) {
  * mode DENIES it — `0".z.u"` IS the identity escape -b/-U exists to close. */
 ray_t* q_handles_console_eval(ray_t* y) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
-    ray_t* zps = q_dotz_resolve(ray_sym_intern(".z.ps", 5));   /* owned; NULL = the `value` default */
+    ray_t* zps = q_env_resolve(ray_sym_intern_runtime(".z.ps", 5));   /* owned; NULL = the `value` default */
     int64_t saved = __VM ? __VM->ipc_handle : -1;
     if (__VM) __VM->ipc_handle = -1;                 /* -1 IS "no connection" — the console */
     ray_t* r = zps ? q_eval_apply_value(zps, &y, 1) : q_eval_value_wrap(y);

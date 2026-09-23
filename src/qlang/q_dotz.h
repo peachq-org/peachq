@@ -25,23 +25,14 @@ void q_dotz_init(int argc, char** argv);
  * time, well after q_dotz_init). */
 ray_t* q_dotz_resolve(int64_t sym_id);
 
-/* kdb `.z.p*` connection-handler alias -> the `.ipc.on.*` hook INDEX
- * (0=open 1=close 2=sync 3=async 4=auth 5=badmsg — `.z.bm` — matching
- * env.c's ray_sym_ipc_hook),
- * or -1 if `name` is not a handler alias.  Shared by the read path
- * (q_dotz_resolve) and the write path (q_env_set) so the two spellings
- * (`.z.pg` and `.ipc.on.sync`) resolve to ONE env slot. */
-int q_dotz_ipc_hook_index(const char* name, size_t len);
-
 /* THE list of `.z` names `\x` may expunge (owner ruling 2026-09-12 over basics/syscmds.md \x + ref/dotz.md). */
 bool q_dotz_expungeable(const char* name, size_t len);
 
-/* The settable `.z.*` handlers (`.z.ts`/`.z.exit`/`.z.ph`/`.z.pp`/`.z.pm`/
- * `.z.ac`/`.z.ws`/`.z.wo`/`.z.wc`) are ORDINARY globals: every write form
- * reaches them through q_env_set, and each fire site resolves the current
- * binding by name (q_env_get) so a re-assign takes effect immediately.  Who
- * FIRES each: `.z.ts` the poll timer and `.z.exit` q_sys_exit — both below —
- * `.z.p*`/`.z.ac` q_http.c, `.z.w*` q_ws.c. */
+/* The settable `.z.*` handlers (`.z.ts`/`.z.exit`/`.z.ph`/`.z.pp`/`.z.pm`/`.z.ac`/`.z.ws`/`.z.wo`/`.z.wc` and the
+ * connection six `.z.po`/`.z.pc`/`.z.pg`/`.z.ps`/`.z.pw`/`.z.bm`) are ORDINARY globals: every write form reaches
+ * them through q_env_set, and each fire site resolves the current binding by name (q_env_get) so a re-assign takes
+ * effect immediately.  Who FIRES each: `.z.ts` the poll timer and `.z.exit` q_sys_exit — both below — the `.z.p`
+ * HTTP trio and `.z.ac` q_http.c, `.z.w*` q_ws.c, the connection six src/core/ipc.c. */
 void   q_dotz_exit_fire(int code);
 
 /* True for a `.z.*` name whose SETTING is 'nyi, so both write paths (`:`

@@ -58,10 +58,10 @@ size_t ray_ipc_decompress(const uint8_t* src, size_t clen,
  * 16-byte header as its frame envelope is gone. */
 #define RAY_IPC_MAX_CONNS 256
 
-/* ===== Connection hooks (.ipc.on.*) ===== */
+/* ===== Connection hooks (.z.p*) ===== */
 
 /* Current connection handle, readable from Rayfall via the `.ipc.handle`
- * builtin while a `.ipc.on.*` hook is on the stack.  Set/restored by the
+ * builtin while a `.z.p*` hook is on the stack.  Set/restored by the
  * server around every hook invocation; defaults to -1 outside any hook.
  * Thread-local — IPC dispatch is single-threaded today, but the storage
  * class keeps the value scoped to the dispatch thread should that ever
