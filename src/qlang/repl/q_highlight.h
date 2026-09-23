@@ -1,8 +1,6 @@
-/* q_highlight — the q console's syntax highlighter, installed as the line editor's ray_highlight_fn.
- *
- * LEXICAL: the rendering is a function of the line and the back-lit pair only, never of the running session.
- * Builtin names colour from a build-time table of the documented builtins (lib/help-builtins.tsv minus the
- * unimplemented rows of lib/help-builtins-gaps.tsv); `.q.x` colours as `x`; `.z.*` colours by shape. */
+/* q_highlight — the q console's syntax highlighter, installed as the line editor's ray_highlight_fn.  A byte's role
+ * is lexical, a function of the line and the back-lit pair only; a role's colour is the C default unless a `.pq.hl`
+ * dictionary overrides it, and nothing is coloured while q_console_color says colour is off. */
 #ifndef Q_HIGHLIGHT_H
 #define Q_HIGHLIGHT_H
 
