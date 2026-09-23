@@ -9,7 +9,7 @@
 #include "qlang/q_ctx.h"   /* q_ctx_run_file/q_ctx_run_src — the non-tty script and -eval doors */
 #include "qlang/q_runtime.h"
 #include "qlang/q_dotz.h"
-#include "qlang/ops/q_sys.h"     /* q_sys_listen — single-homed listen+readback */
+#include "qlang/ops/q_sys.h"     /* q_sys_listen_spec_parse / q_sys_listen — the `-p` spec, shared with `\p` */
 #include "qlang/q_console.h"  /* q_console_pipe_enable — the modern pipe-table display; q_console_color */
 #include "qlang/net/q_tls.h"  /* q_tls_server_mode_set — the `-E` TLS server mode */
 #include "qlang/parse/q_tok.h" /* q_tok_date_order_set — the `-z` date order */
@@ -29,18 +29,7 @@
 #include <string.h>
 #include <unistd.h>
 
-/* `-p` port spec: 1 → *out in 1..65535; 2 → the `0W` auto token; 0 → invalid.  strtol with a full-consume + range
- * check — atoi silently coerced `0N`/`abc`/`99999` to 0 and fell through to a plain REPL with no listener. */
-static int parse_port_spec(const char* s, uint16_t* out) {
-    if (strcmp(s, "0W") == 0 || strcmp(s, "0w") == 0) return 2;
-    errno = 0;
-    char* end = NULL;
-    long  v = strtol(s, &end, 10);
-    if (errno != 0 || end == s || *end != '\0') return 0;
-    if (v < 1 || v > 65535) return 0;
-    *out = (uint16_t)v;
-    return 1;
-}
+#define LISTEN_SPEC_FORMS "[rp,][host:](port|0W|lo/hi|servicename), port 1..65535"
 
 /* ---- `-conn`: the remote runner (owner ruling 2026-09-20) -------------------------------------------------------
  * A MODE with no flag in common with the local launcher: C parses argv, boots the runtime, loads the standard
@@ -166,9 +155,7 @@ done:
 int main(int argc, char** argv) {
     if (q_dotz_has_flag(argc, argv, "-conn")) return conn_main(argc, argv);
 
-    uint16_t    port = 0;
-    bool        have_port = false;
-    bool        port_auto = false;
+    const char* port_spec = NULL;
     bool        classic = false;
     int         etrap_mode = -1;
     int         date_order = -1;
@@ -188,17 +175,10 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--port") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "q: %s requires a port argument (1..65535 or 0W)\n", argv[i]);
+                fprintf(stderr, "q: %s requires a port argument (%s)\n", argv[i], LISTEN_SPEC_FORMS);
                 return 2;
             }
-            const char* spec = argv[++i];
-            int k = parse_port_spec(spec, &port);
-            if (k == 0) {
-                fprintf(stderr, "q: invalid port '%s' (expected 1..65535 or 0W)\n", spec);
-                return 2;
-            }
-            have_port = true;
-            port_auto = (k == 2);
+            port_spec = argv[++i];
         } else if (strcmp(argv[i], "-E") == 0) {
             /* Strict like `-p`: a mistyped mode must not silently downgrade to plaintext. */
             const char* spec = (i + 1 < argc) ? argv[++i] : "";
@@ -268,31 +248,20 @@ int main(int argc, char** argv) {
 
     if (poll) poll->restricted = auth_restricted;
 
-    if (have_port) {
-        /* `0W` (port_auto) binds port 0 → the OS chooses a free port.  The
-         * bind + getsockname readback + `\p` getter-state (g_listen_port) are
-         * single-homed in q_sys_listen, shared with the runtime `\p N`/`\p 0W`
-         * path — so `system "p"` reports the real port after an arg-bind too.
-         * NO port is announced (full kdb fidelity); a supervisor/test reads it
-         * back with the `\p`/`system "p"` getter. */
-        uint16_t bound = poll ? q_sys_listen(port_auto ? 0 : port) : 0;
-        int      listen_errno = errno;
-        if (bound) {
-            /* Bound OK — the real listener port now lives in the authoritative
-             * `\p` getter state (q_sys_listen_port), which the post-script
-             * server-mode decision reads; the local `port` is no longer
-             * consulted past this point. */
-        } else {
-            /* Strict: an unusable port (invalid, EADDRINUSE, EACCES, or
-             * any bind/listen failure) must NOT fall through into a
-             * silent ray_poll_run with nothing registered (a hang) or a
-             * plain REPL — exit non-zero so a supervisor flags it. */
-            if (port_auto)
-                fprintf(stderr, "q: failed to bind a free port: %s\n",
-                        strerror(listen_errno));
-            else
-                fprintf(stderr, "q: failed to listen on port %u: %s\n",
-                        port, strerror(listen_errno));
+    if (port_spec) {
+        /* Parsed only now: a servicename lookup needs Winsock, which the event poll starts.  No port is announced; a
+         * supervisor/test reads it back with the `\p` getter.  A bad spec or a failed bind exits non-zero rather
+         * than falling through to a listener-less server loop or a plain REPL. */
+        q_sys_listen_spec_t spec;
+        q_err_e             err;
+        bool                failed = true;
+        if (!q_sys_listen_spec_parse(port_spec, strlen(port_spec), &spec, &err) || (!spec.any && spec.lo == 0))
+            fprintf(stderr, "q: invalid port '%s' (expected %s)\n", port_spec, LISTEN_SPEC_FORMS);
+        else if (!poll || !q_sys_listen(&spec))
+            fprintf(stderr, "q: failed to listen on '%s': %s\n", port_spec, strerror(errno));
+        else
+            failed = false;
+        if (failed) {
             if (poll) {
                 ray_runtime_set_poll(NULL);
                 ray_poll_destroy(poll);
