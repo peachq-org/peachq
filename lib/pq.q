@@ -2,6 +2,8 @@
 / sequence.  Nothing here is loaded at start-up: the first reference to any .pq name loads this file, whose first
 / line - .pq.load_natives`pq, the one .pq member that exists before it runs - binds the C functions it calls.
 / .
+/ The console's syntax colours are .pq.hl.
+/ .
 / @eg .pq.version
 / @eg select handle, alias from .pq.conns[]
 
@@ -19,18 +21,22 @@
 / The live terminal size, with the 25/80 fallback and [10,2000] clamp that \c 0N uses.
 / @return (rows;cols)
 / @eg .pq.termsize[]
-.pq.termsize:{2#.pq.i.termsize[]}
+.pq.termsize:{[] .pq.i.termsize[]}
 
 / Whether stdout should carry ANSI colour: PEACHQ_COLORS=0/1 overrides everything, then NO_COLOR (off), FORCE_COLOR
 / (on), else a tty whose TERM is not dumb.
 / @return boolean
 / @eg .pq.cancolor[]
-.pq.cancolor:{
-  e:getenv`PEACHQ_COLORS;
-  $[e~enlist"1";1b;e~enlist"0";0b;
-    count getenv`NO_COLOR;0b;
-    count getenv`FORCE_COLOR;1b;
-    (0<last .pq.i.termsize[])and not "dumb"~getenv`TERM]}
+.pq.cancolor:{[] .pq.i.cancolor[]}
+
+/ The console's syntax colours, role to colour, read by the highlighter at each redraw.  Roles: kw keywords, str
+/ strings, esc string escapes, cmt comments, sym symbols, num numbers, tmp temporals and typed nulls, op verbs and
+/ adverbs, sys system names, cmd \ commands, match the bracket or quote pair at the cursor.  A colour is an int 0-255
+/ (a 256-colour foreground) or a string of digits and ; used as the SGR parameters.  A role left out, or given
+/ anything else, keeps its default; with colour off (.pq.cancolor) nothing is coloured.  Amend in place
+/ (.pq.hl[`kw]:141) or set it in QINIT; loading this file again resets it.
+/ The defaults mirror the C table in src/qlang/repl/q_highlight.c - change both together.
+.pq.hl:`kw`str`esc`cmt`sym`num`tmp`op`sys`cmd`match!(33;34;168;244;37;166;136;98;127;160;"7");
 
 / @ignore
 .pq.drsamples:{[k] c:"bgxhijefcspmdznuvt"; v:@[.'[$;;`$]c,'1;c?"gs";:;(0Ng;`abc)]; $[k;{3#x}each v;v]}
