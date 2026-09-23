@@ -231,11 +231,11 @@ static ray_err_t env_store(ray_t** home, const int64_t* segs, int nseg, ray_t* v
     return RAY_OK;
 }
 
-/* A reserved word has no BARE rebinding spelling, whatever the `\d` context; a dotted name is the user's own except
- * `.q` and its builtin entries (owner ruling 2026-09-23).  Every write and unbind — set, park, settle — lands here. */
-static int env_locked(int64_t sym, const char* p, size_t n, ray_t** home, const int64_t* segs, int k) {
-    if (p[0] != '.') return !memchr(p, '.', n) && q_registry_locked(sym);
-    return home == &env_ns && segs[0] == g_q_seg && q_registry_locked(k == 1 ? sym : segs[1]);
+/* Judged by the TARGET after `\d` re-rooting — a root reserved word, `.q` itself or a `.q` builtin entry; a colon
+ * assignment's bare SPELLING is refused upstream in q_eval (owner ruling 2026-09-23). */
+static int env_locked(int64_t sym, ray_t** home, const int64_t* segs, int k) {
+    if (home != &env_ns) return k == 1 && q_registry_locked(segs[0]);
+    return segs[0] == g_q_seg && q_registry_locked(k == 1 ? sym : segs[1]);
 }
 
 /* the dict a name's segments are keyed under — a relative name re-rooted by `\d`, a new plain name into the shed */
@@ -259,7 +259,7 @@ static ray_err_t env_put(int64_t sym, ray_t* val, int boot_new, ray_t** disp) {
         size_t start = env_start(p, n);
         int k = env_segs(p, n, start, segs, ENV_SEG_MAX);
         ray_t** home = k > 0 ? env_home(p, start, segs, &k, boot_new) : NULL;
-        if (home && !env_locked(sym, p, n, home, segs, k)) e = env_store(home, segs, k, val, disp);
+        if (home && !env_locked(sym, home, segs, k)) e = env_store(home, segs, k, val, disp);
     }
     ray_release(s);
     return e;
@@ -344,8 +344,8 @@ static ray_err_t env_root_splat(ray_t* d) {
 }
 
 /* THE one write home: every q form that binds a name (`:` `::`, indexed and
- * modified assign, `@`/`.` name-amend, `set`) lands here, so the whole name
- * policy is stated once — the `` `. `` root splat, and otherwise an ordinary
+ * modified assign, `@`/`.` name-amend, `set`) lands here, so the whole TARGET
+ * policy is stated once (a colon's spelling lock is q_eval's) — the `` `. `` root splat, and otherwise an ordinary
  * tree amend, settable `.z.*` handlers included: they are plain globals their
  * C fire sites read by name (src/core/ipc.c reads the connection six,
  * q_wirefile the `.z.zd` zip triple).  Both branches converge on `e` so that
@@ -392,7 +392,7 @@ ray_err_t q_env_unbind(int64_t sym) {
         size_t start = env_start(p, n);
         int k = env_segs(p, n, start, segs, ENV_SEG_MAX);
         ray_t** home = k > 0 ? env_home(p, start, segs, &k, 0) : NULL;
-        if (home && env_locked(sym, p, n, home, segs, k)) e = RAY_ERR_DOMAIN;
+        if (home && env_locked(sym, home, segs, k)) e = RAY_ERR_DOMAIN;
         else if (home) {
             ray_t* holder = *home;
             for (int i = 0; holder && i < k - 1; i++)

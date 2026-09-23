@@ -286,6 +286,12 @@ static int write_is_local(int64_t sym) {
     return !sym_dotted(sym) && q_eval_apply_frame_depth() > 0 && q_env_local_get(sym) != NULL;
 }
 
+/* A colon assignment is judged by its SPELLING (owner ruling 2026-09-23): a reserved word never, and a bare global
+ * spelling of a `.q` builtin in no `\d` context — q_env_set only sees the re-rooted target. */
+int q_eval_assign_locked(int64_t sym) {
+    return q_registry_is_reserved(sym) || (!write_is_local(sym) && q_registry_locked(sym));
+}
+
 /* undo a park (q_env_take / q_env_local_take) on a failed write: the value
  * read goes back into the slot the write would have rebound */
 static void unpark(int local, int64_t sym, ray_t* v) {
@@ -303,7 +309,7 @@ static ray_t* indexed_assign(ray_t* target, ray_t* opv, ray_t* rhs) {
     int64_t k = q_count(target) - 1;
     if (k < 1 || k > EVAL_MAX_ARGS || !nameref(te[0]))
         return q_err(QE_NYI);
-    if (q_registry_is_reserved(te[0]->i64)) return q_err(QE_ASSIGN);
+    if (q_eval_assign_locked(te[0]->i64)) return q_err(QE_ASSIGN);
     ray_t* rv = q_eval(rhs);
     if (RAY_IS_ERR(rv)) return rv;
     rv = q_eval_apply_concrete(rv);
@@ -355,7 +361,7 @@ static ray_t* assign_eval(ray_t* target, ray_t* rhs) {
             return indexed_assign(target, NULL, rhs);
         return q_err(QE_NYI);
     }
-    if (q_registry_is_reserved(target->i64)) return q_err(QE_ASSIGN);
+    if (q_eval_assign_locked(target->i64)) return q_err(QE_ASSIGN);
     ray_t* v = q_eval_apply_concrete(q_eval(rhs));    /* boundary seam: assignment */
     if (RAY_IS_ERR(v)) return v;
     Q_ASSERT_CONCRETE(v);                  /* env-set tripwire */
@@ -833,6 +839,7 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
             return indexed_assign(target, opv, rhs);
         return q_err(QE_NYI);
     }
+    if (q_eval_assign_locked(target->i64)) return q_err(QE_ASSIGN);
     ray_t* rv = q_eval(rhs);
     if (RAY_IS_ERR(rv)) return rv;
     const q_op_t* trow = NULL;

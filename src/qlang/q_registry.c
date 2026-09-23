@@ -124,8 +124,8 @@ static sym_slot_t* sym_slot(int64_t sym_id, int insert) {
     }
 }
 
-/* a name with no manifest row holds a valueless slot: a syntax word is reserved everywhere, a q.q-defined `.q`
- * name only against a bare global or `.q` write (q_registry_locked) — a local or a dotted member may reuse it */
+/* a name with no manifest row holds a valueless slot: a syntax word is reserved in every spelling, a q.q-defined
+ * `.q` name only as a global (q_registry_locked) — a local or another context's member may reuse it */
 static const q_op_t SYNTAX_WORD, DOTQ_BUILTIN;
 static void reserve_name(int64_t sym_id, const q_op_t* mark) {
     sym_slot_t* s = sym_slot(sym_id, 1);

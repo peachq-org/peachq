@@ -34,6 +34,8 @@ ray_t** q_eval_apply_view_slots(ray_t* v);   /* NULL unless a view carrier */
 int q_eval_symvec_has(ray_t* v, int64_t id);
 int q_eval_fn_value(ray_t* x);
 int q_eval_ctl_sym(int64_t id);
+/* a colon assignment's SPELLING lock — q_env_set judges only the re-rooted target */
+int q_eval_assign_locked(int64_t sym);
 /* the parse-time locals of a lambda body, params excluded — OWNED symvec (ref/value.md `## Lambda`); built ONCE
  * per lambda value by q_eval_apply_lambda_new, read back BORROWED (NULL unless a lambda carrier) */
 ray_t* q_eval_lambda_locals(ray_t* params, ray_t* body);
