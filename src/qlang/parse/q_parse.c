@@ -24,8 +24,8 @@
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"
 #include "qlang/parse/q_tok.h"    /* q_tok_temporal, q_tok_el — literal magnitudes */
-#include "qlang/q_registry.h" /* q_registry_lookup_name, Q_DYADIC */
-#include "qlang/q_ops.h"      /* q_lex_is_kw_infix — static lexical manifest */
+#include "qlang/q_registry.h" /* q_registry_lookup_name, q_registry_is_infix, Q_DYADIC */
+#include "qlang/q_ops.h"      /* q_ops_find — the static lexical manifest */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_is_fn, q_eval_apply_carrier_kind */
 #include "qlang/eval/q_dbg.h"  /* q_dbg_statement_origin — the lambda's file + line */
 #include "table/sym.h"       /* ray_sym_vec_cell — qSQL dict-key/col names */
@@ -88,15 +88,6 @@ ray_t *q_verb(char c) {
  * a name-ref sym, ATTR_QUOTED clear; the parser embeds its registry value. */
 ray_t *q_verb_name(const char *s, int len) {
     return ray_sym(ray_sym_intern_runtime(s, (size_t)len));
-}
-
-/* Infix keyword verbs (q keyword functions usable between two nouns).  Derived
- * from the SINGLE-SOURCE op manifest (q_ops.c QLEX_KW_INFIX rows) — no longer a
- * hardcoded memcmp, and no runtime-registry dependency (the manifest is a
- * static table, and the scanner runs before eval).  The set is 49 spellings
- * wide, so what the scanner decides here it decides for all of them. */
-static int q_is_kw_verb(const char *s, int len) {
-    return q_lex_is_kw_infix(s, len);
 }
 
 /* An iterator IS a value (103h, basics/datatypes.md), so the scanner hands
@@ -460,7 +451,7 @@ static Tokens scan(const char *src) {
              * standalone or BINDING `div` stays a name-ref noun — else the
              * reserved-name gate never sees a name to refuse, and the `:` is
              * silently discarded (`w[1] div:3` computing `2 div 3`). */
-            if (noun_pos && !lone_colon_next(src, p) && q_is_kw_verb(src + start, len)) {
+            if (noun_pos && !lone_colon_next(src, p) && q_registry_is_infix(src + start, (size_t)len)) {
                 EMIT(T_VERB, q_verb_name(src + start, len));
                 noun_pos = 0;
             } else {
