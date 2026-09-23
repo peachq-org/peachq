@@ -48,6 +48,7 @@ static int     g_scoped;
 #define ENV_CTX (g_scoped ? g_scope : g_ctx)
 #define ENV_SEG (g_scoped ? g_scope_seg : g_ctx_seg)
 static int64_t g_pq_seg;                /* `pq`: the one namespace that loads itself */
+static int64_t g_q_seg;                 /* `q`: the namespace whose builtin entries are locked */
 
 /* `.pq` autoloads on its first reference, read or write (owner 2026-09-20) — THE
  * hook, at the seam every name crosses: a dotted `.pq…` name, or a relative one
@@ -230,6 +231,24 @@ static ray_err_t env_store(ray_t** home, const int64_t* segs, int nseg, ray_t* v
     return RAY_OK;
 }
 
+/* A reserved word has no BARE rebinding spelling, whatever the `\d` context; a dotted name is the user's own except
+ * `.q` and its builtin entries (owner ruling 2026-09-23).  Every write and unbind — set, park, settle — lands here. */
+static int env_locked(int64_t sym, const char* p, size_t n, ray_t** home, const int64_t* segs, int k) {
+    if (p[0] != '.') return !memchr(p, '.', n) && q_registry_locked(sym);
+    return home == &env_ns && segs[0] == g_q_seg && q_registry_locked(k == 1 ? sym : segs[1]);
+}
+
+/* the dict a name's segments are keyed under — a relative name re-rooted by `\d`, a new plain name into the shed */
+static ray_t** env_home(const char* p, size_t start, int64_t* segs, int* k, int boot_new) {
+    if (p[0] == '.') return start == 1 ? &env_ns : &env_root;
+    ray_t** home = &env_root;
+    *k = ctx_reroot(segs, *k, &home);
+    if (home == &env_root && ray_dict_find_sym(env_root, segs[0]) < 0 &&
+        (ray_dict_find_sym(env_boot, segs[0]) >= 0 || boot_new))
+        home = &env_boot;
+    return home;
+}
+
 static ray_err_t env_put(int64_t sym, ray_t* val, int boot_new, ray_t** disp) {
     const char* p; size_t n;
     ray_t* s = name_str(sym, &p, &n);
@@ -239,17 +258,8 @@ static ray_err_t env_put(int64_t sym, ray_t* val, int boot_new, ray_t** disp) {
     if (n > 0 && !(n == 1 && p[0] == '.')) {
         size_t start = env_start(p, n);
         int k = env_segs(p, n, start, segs, ENV_SEG_MAX);
-        if (k <= 0) e = RAY_ERR_DOMAIN;
-        else if (p[0] == '.') {
-            e = env_store(start == 1 ? &env_ns : &env_root, segs, k, val, disp);
-        } else {
-            ray_t** home = &env_root;
-            int nk = ctx_reroot(segs, k, &home);
-            if (nk == k && ray_dict_find_sym(env_root, segs[0]) < 0 &&
-                (ray_dict_find_sym(env_boot, segs[0]) >= 0 || boot_new))
-                home = &env_boot;
-            e = env_store(home, segs, nk, val, disp);
-        }
+        ray_t** home = k > 0 ? env_home(p, start, segs, &k, boot_new) : NULL;
+        if (home && !env_locked(sym, p, n, home, segs, k)) e = env_store(home, segs, k, val, disp);
     }
     ray_release(s);
     return e;
@@ -380,16 +390,10 @@ ray_err_t q_env_unbind(int64_t sym) {
     int64_t segs[ENV_SEG_MAX];
     if (n > 0 && !(n == 1 && p[0] == '.')) {
         size_t start = env_start(p, n);
-        ray_t** home = (p[0] == '.' && start == 1) ? &env_ns : &env_root;
         int k = env_segs(p, n, start, segs, ENV_SEG_MAX);
-        if (k > 0 && p[0] != '.') {
-            int nk = ctx_reroot(segs, k, &home);
-            if (nk == k && ray_dict_find_sym(*home, segs[0]) < 0 &&
-                ray_dict_find_sym(env_boot, segs[0]) >= 0)
-                home = &env_boot;
-            k = nk;
-        }
-        if (k > 0) {
+        ray_t** home = k > 0 ? env_home(p, start, segs, &k, 0) : NULL;
+        if (home && env_locked(sym, p, n, home, segs, k)) e = RAY_ERR_DOMAIN;
+        else if (home) {
             ray_t* holder = *home;
             for (int i = 0; holder && i < k - 1; i++)
                 holder = ray_dict_probe_sym_borrowed(holder, segs[i]);
@@ -492,6 +496,12 @@ ray_err_t q_env_handle_bind(int64_t sym, ray_t* val) {
 }
 
 int q_env_ns_exists(int64_t path_sym) { return env_is_marked(q_env_get(path_sym)); }
+
+ray_t* q_env_ns_probe(int64_t ns_sym, const char* member, size_t n) {
+    int64_t id = ray_sym_find(member, n);
+    ray_t* d = id < 0 ? NULL : q_env_get(ns_sym);
+    return d && d->type == RAY_DICT ? ray_dict_probe_sym_borrowed(d, id) : NULL;
+}
 
 ray_t* q_env_ns_view(int64_t path_sym) {
     ray_t* v = q_env_get(path_sym);
@@ -873,6 +883,7 @@ ray_err_t q_env_init(void) {
     env_ns   = q_env_marker_dict();
     env_boot = q_env_marker_dict();
     g_pq_seg = ray_sym_intern_runtime("pq", 2);
+    g_q_seg  = ray_sym_intern_runtime("q", 1);
     if (!env_root || !env_ns || !env_boot) {
         q_env_destroy();
         return RAY_ERR_OOM;

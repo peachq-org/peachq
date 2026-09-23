@@ -2,8 +2,8 @@
  *
  * One source, two consumers (spec 2026-07-03-q-op-registry-complete-design.md,
  * "Bootstrap — split lexical metadata from runtime values"):
- *   1. the LEXER (src/qlang/q_parse.c) — static classification, zero runtime
- *      dependency (the scanner runs before eval), via q_lex_is_kw_infix();
+ *   1. the LEXER (src/qlang/q_parse.c) — a keyword's infix-ness, static, via
+ *      q_lex_is_kw_infix() (a non-keyword asks `.q` at run time: q_registry_is_infix);
  *   2. the REGISTRY builder (src/qlang/q_registry.c) — builds the runtime
  *      (name, valence) -> ray_t function value + q-surface provenance, by
  *      iterating q_ops_table().
@@ -26,15 +26,11 @@
 #include "rayforce.h"   /* ray_t (the q_ops_identity* accessors) */
 #include <stdint.h>
 
-/* Lexical class — how the scanner treats the token.  Only KW_INFIX is
- * reclassified from a name-ref noun into an infix verb (in noun position);
- * KW_PREFIX keywords stay name-ref nouns (resolved at eval), glyphs are the
- * CL_VERB chars, adverbs the CL_ADVERB chars.  Held so the manifest is the
- * one place the lexer's keyword-verb set is defined. */
+/* Lexical class — how the scanner treats the token: glyphs are the CL_VERB chars, adverbs the CL_ADVERB chars.
+ * Whether a keyword is INFIX is not a class: it is the row's valence (q_lex_is_kw_infix). */
 typedef enum {
     QLEX_GLYPH = 1,     /* +, -, =, #, <=, ... (single/multi-char verb glyph) */
-    QLEX_KW_INFIX,      /* alnum keyword usable infix between nouns (div)      */
-    QLEX_KW_PREFIX,     /* alnum keyword monad/prefix (til, count, neg, ...)   */
+    QLEX_KW,            /* alnum keyword (div, til, count, ...)               */
     QLEX_ADVERB         /* / \ ' /: \: ':                                       */
 } q_lex_class;
 
@@ -189,10 +185,12 @@ const q_op_t* q_ops_alias_target(const q_op_t* row);
  * derives from the manifest and needs no roster.  NULL for the other laws. */
 const q_op_t* q_ops_nested_dyad(const q_op_t* row);
 
-/* True iff s[0..len) is a keyword usable as an INFIX verb (i.e. a QLEX_KW_INFIX
- * row).  Replaces the hardcoded memcmp("div") in the scanner.  Static-only: no
- * runtime registry dependency. */
+/* True iff s[0..len) is a keyword row with a dyadic recipe — the builtin half of the infix rule
+ * (q_registry_is_infix).  Static-only: no runtime registry dependency. */
 int q_lex_is_kw_infix(const char* s, int len);
+
+/* The reserved words that are SYNTAX, not functions (control words, qSQL words) — `.Q.res`; NULL past the end. */
+const char* q_ops_syntax_word(int i);
 
 /* True iff s[0..len) is a RESERVED q verb name (any manifest row).  q reserves
  * its primitives — `div:5` raises 'assign (ADR 0003 Decision 1).  Static-only. */

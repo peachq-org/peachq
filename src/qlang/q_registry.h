@@ -95,10 +95,21 @@ const struct q_op* q_registry_row_of(const ray_t* value, q_valence_t valence);
  * the container lift the per-item apply needs (`sum each t`). */
 const struct q_op* q_registry_operand_row(const ray_t* value);
 
-/* True iff sym_id names a manifest row (any valence, values or not) — the
- * sym-id twin of q_ops_is_reserved, O(1), for eval's assign gates.  False
- * before q_registry_init. */
+/* True iff sym_id is a word no source position may bind — a manifest row (any valence, values or not) or a
+ * syntax word.  O(1), for the lexical assign gates.  False before q_registry_init. */
 int q_registry_is_reserved(int64_t sym_id);
+
+/* End of bootstrap: record every `.q` name defined so far as builtin and engage q_registry_locked.  Before it,
+ * q.q is still defining its own `.q` entries. */
+void q_registry_seal(void);
+
+/* True iff a BARE global binding of sym_id, a `.q.<sym_id>` write, or replacing `.q` itself must signal 'assign: a
+ * reserved word or a builtin `.q` name, once sealed. */
+int q_registry_locked(int64_t sym_id);
+
+/* The infix rule: s[0..n) is infix iff its `.q` entry has rank >= 2.  A keyword's entry is the immutable
+ * registry value, so the manifest answers for it; any other name is a pure probe of `.q` that interns nothing. */
+int q_registry_is_infix(const char* s, size_t n);
 
 /* Borrowed value for a MANIFEST ROW at one valence — the row-pointer twin of
  * q_registry_lookup; NULL when the row has no value at that valence (or the

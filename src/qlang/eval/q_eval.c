@@ -138,19 +138,13 @@ static ray_t* resolve(int64_t id, const q_op_t** row_out) {
     if (v) return v;
     /* bare identifier -> `.q.<name>` (kdb: keywords ARE .q entries) */
     ray_t* nm = ray_sym_str(id);
-    if (nm) {
-        const char* p = ray_str_ptr(nm);
-        size_t n = ray_str_len(nm);
-        char full[64];
-        if (n > 0 && n + 3 < sizeof full && !memchr(p, '.', n)) {
-            memcpy(full, ".q.", 3);
-            memcpy(full + 3, p, n);
-            ray_release(nm);
-            return q_env_resolve(ray_sym_intern_runtime(full, n + 3));
-        }
-        ray_release(nm);
-    }
-    return NULL;
+    if (!nm) return NULL;
+    const char* p = ray_str_ptr(nm);
+    size_t n = ray_str_len(nm);
+    v = n > 0 && !memchr(p, '.', n) ? q_env_ns_probe(ray_sym_intern_runtime(".q", 2), p, n) : NULL;
+    ray_release(nm);
+    if (v) ray_retain(v);
+    return v;
 }
 
 /* Dot notation whose last segment names a cast target IS that cast:
