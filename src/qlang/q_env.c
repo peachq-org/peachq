@@ -629,18 +629,25 @@ int q_env_local_take(int64_t sym, ray_t* cur) {
     return 0;
 }
 
-static ray_t* frames_lookup(int64_t sym) {
+/* `skip_scopes` stops ABOVE the first lambda scope (a barrier frame): no local ever carries a dotted spelling
+ * (q_eval.c write_is_local refuses one), so a dotted name is global by construction and a parameter must not
+ * shadow it — `{[a;i;b] i.gl[a;1]}` means the global `i.gl`.  qSQL column scopes are barrier-FREE and stay
+ * visible, so `sym.name` foreign-key notation still reads a column. */
+static ray_t* frames_lookup_at(int64_t sym, int skip_scopes) {
     if (g_fview == Q_ENV_FRAME_VIEW_NONE) return NULL;
     int32_t top = g_fdepth - 1;
     if (g_fview >= 0 && g_fview < top) top = g_fview;
     for (int32_t d = top; d >= g_ffloor; d--) {
         frame_t* f = &g_frames[d];
+        if (skip_scopes && f->barrier) break;
         for (int32_t i = 0; i < f->n; i++)
             if (f->keys[i] == sym) return f->vals[i];
         if (f->barrier) break;
     }
     return NULL;
 }
+
+static ray_t* frames_lookup(int64_t sym) { return frames_lookup_at(sym, 0); }
 
 /* ---- resolution ---- */
 
@@ -714,7 +721,7 @@ ray_t* q_env_resolve(int64_t sym) {
     if (p[0] == '.') {
         base = ray_dict_probe_sym_borrowed(start == 1 ? env_ns : env_root, head);
     } else {
-        base = frames_lookup(head);
+        base = frames_lookup_at(head, hend < n);
         if (!base) {                                /* a global is BOUND to its context: no root search */
             ray_t* home = ENV_SEG ? ray_dict_probe_sym_borrowed(env_ns, ENV_SEG) : env_root;
             if (home) base = ray_dict_probe_sym_borrowed(home, head);
