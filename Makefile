@@ -46,7 +46,7 @@ RAY_INCLUDES = -Iinclude -I$(GEN_DIR) -Isrc \
 RAY_GEN_HDRS = $(GEN_DIR)/qlang/dotq_gen.h $(GEN_DIR)/qlang/h_gen.h \
                $(GEN_DIR)/qlang/j_gen.h $(GEN_DIR)/qlang/help_gen.h \
                $(GEN_DIR)/qlang/helpdb_gen.h $(GEN_DIR)/qlang/lib_gen.h \
-               $(GEN_DIR)/qlang/html_assets_gen.h
+               $(GEN_DIR)/qlang/html_assets_gen.h $(GEN_DIR)/qlang/hl_names_gen.h
 
 # The generated set by NAME, for callers that need them without a link target
 # (Makefile.wasm assumes they exist). Naming the group, not one file, is what
@@ -100,6 +100,10 @@ $(GEN_DIR)/qlang/html_assets_gen.h: tools/gen-assets.sh $(HTML_ASSET_DEPS)
 	@mkdir -p $(dir $@)
 	@tools/gen-assets.sh $@ src/qlang/html
 
+$(GEN_DIR)/qlang/hl_names_gen.h: lib/help-builtins.tsv lib/help-builtins-gaps.tsv tools/gen-hl-names.sh
+	@mkdir -p $(dir $@)
+	tools/gen-hl-names.sh $@ lib/help-builtins.tsv lib/help-builtins-gaps.tsv
+
 # Both suffixes: a .win.o inherits none of the .o target's prerequisites, which is
 # how the mingw build broke while the native one was already fixed.
 $(BUILD_DIR)/src/qlang/q_runtime.o $(BUILD_DIR)/src/qlang/q_runtime.win.o: \
@@ -108,6 +112,8 @@ $(BUILD_DIR)/src/qlang/q_runtime.o $(BUILD_DIR)/src/qlang/q_runtime.win.o: \
 $(BUILD_DIR)/src/qlang/q_pq.o   $(BUILD_DIR)/src/qlang/q_pq.win.o:   $(GEN_DIR)/qlang/lib_gen.h \
     $(GEN_DIR)/qlang/helpdb_gen.h
 $(BUILD_DIR)/src/qlang/net/q_http.o $(BUILD_DIR)/src/qlang/net/q_http.win.o: $(GEN_DIR)/qlang/html_assets_gen.h
+$(BUILD_DIR)/src/qlang/repl/q_highlight.o $(BUILD_DIR)/src/qlang/repl/q_highlight.win.o: \
+    $(GEN_DIR)/qlang/hl_names_gen.h
 
 STD      = c17
 Q_TARGET = q

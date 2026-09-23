@@ -1,6 +1,6 @@
 /* q_tok — THE single string->value scanner home (temporal + guid).  Both
  * text entrances share it: the code parser's literal magnitudes
- * (q_tok_temporal, called from q_parse.c's scan_one_num) and `$` Tok's
+ * (q_tok_temporal, called from q_parse.c's scan_num_literal) and `$` Tok's
  * whole-string parses (q_dollar_tok).  The two grammars stay DISTINCT — Tok
  * accepts separator/packed forms the literal syntax refuses — but the code
  * lives in one file over one calendar (q_calendar.c) so a format never grows
@@ -33,6 +33,10 @@ typedef struct { q_tok_el_kind kind; int64_t i; double f; int forces_float; } q_
  * scan), -1 on a malformed shape with *err set to the parse-error text (the
  * caller dies — invalid civil dates/clocks never fall back to floats). */
 int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err);
+
+/* One magnitude (a Special, a temporal or a number) and then its admitted type letter; pure, returns as above. */
+int q_tok_magnitude(const char* src, int* p, q_tok_el* out, const char** err);
+int q_tok_type_letter(const char* src, int* p, char* letter, const q_tok_el* last, const char** err);
 
 /* Scan ONE whole literal (atom or space-separated vector strand) at src[*p]:
  * numeric, boolean, byte-hex, guid-null and every temporal type, including the
