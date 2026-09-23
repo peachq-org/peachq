@@ -2886,19 +2886,6 @@ static void ray_register_builtins(void) {
     register_binary("unify",     RAY_FN_NONE, ray_unify_fn);
     register_binary("xrank",     RAY_FN_NONE, ray_xrank_fn);
 
-    /* Vector similarity / embeddings / HNSW */
-    register_binary("cos-dist",    RAY_FN_NONE, ray_cos_dist_fn);
-    register_binary("inner-prod",  RAY_FN_NONE, ray_inner_prod_fn);
-    register_binary("l2-dist",     RAY_FN_NONE, ray_l2_dist_fn);
-    register_unary ("norm",        RAY_FN_NONE, ray_norm_fn);
-    register_vary  ("knn",         RAY_FN_NONE, ray_knn_fn);
-    register_vary  ("hnsw-build",  RAY_FN_NONE, ray_hnsw_build_fn);
-    register_vary  ("ann",         RAY_FN_NONE, ray_ann_fn);
-    register_unary ("hnsw-free",   RAY_FN_NONE, ray_hnsw_free_fn);
-    register_binary("hnsw-save",   RAY_FN_RESTRICTED, ray_hnsw_save_fn);
-    register_unary ("hnsw-load",   RAY_FN_RESTRICTED, ray_hnsw_load_fn);
-    register_unary ("hnsw-info",   RAY_FN_NONE, ray_hnsw_info_fn);
-
     /* Per-vector accelerator indices (see src/ops/idxop.h) */
     register_unary (".idx.zone",   RAY_FN_NONE, ray_idx_zone_fn);
     register_unary (".idx.hash",   RAY_FN_NONE, ray_idx_hash_fn);
