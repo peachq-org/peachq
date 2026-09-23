@@ -19,6 +19,8 @@
 #include "qlang/q_console.h"
 #include "qlang/ops/q_sys.h"      /* q_sys_prompt / q_sys_listen_port — the front end's two asks */
 #include "qlang/q_dotz.h"         /* q_dotz_quiet — `-q` silences the piped transcript's prompt and echo */
+#include "qlang/q_fmt.h"          /* a history record's time prints as the console prints a timestamp */
+#include "store/fileio.h"         /* ray_file_rename — a history rewrite replaces the file whole */
 #include "app/term.h"       /* ray_term_* line editor + highlighter hook */
 #include "core/poll.h"      /* ray_poll_* — concurrent REPL + IPC event loop */
 #include "lang/eval.h"      /* ray_eval_clear_interrupt */
@@ -27,6 +29,8 @@
 #include <stdlib.h>         /* getenv */
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>       /* S_ISREG — only a regular file is read as history */
 #include <unistd.h>         /* read, STDIN_FILENO — poll-driven stdin
                              * (mingw-w64 provides both; the CRT read() on fd 0
                              * covers pipes/files, and the tty flavour reads
@@ -45,10 +49,166 @@ static const char* i_hist_path(char* buf, size_t cap) {
 }
 
 /* The live non-poll interactive terminal (repl_interactive), so q_sys_exit can
- * restore it + save history from inside an eval (q_ctx_console_close).  The
- * poll flavour's terminal lives in g_q_poll_repl and is closed there. */
+ * restore it from inside an eval (q_ctx_console_close).  The poll flavour's
+ * terminal lives in g_q_poll_repl and is closed there. */
 static ray_term_t* g_live_term;
-static char g_live_hist_path[4108];
+
+#ifndef O_BINARY
+  #define O_BINARY 0
+#endif
+
+/* ~/.qhist is TSV, one record per submitted tty line, appended as the line finishes: a header, then
+ * `time\tstatus\tms\tquery` with the query last and NSL888 ending the record, so a query may carry tabs and,
+ * later, newlines.  Best-effort: any failure to read or write it turns history off for the session. */
+#define QHIST_HEADER   "time\tstatus\tms\tquery\n"
+#define QHIST_END      "NSL888\n"
+#define QHIST_READ_MAX ((int64_t)16 << 20)
+
+static char g_qhist_path[4108];
+static int  g_qhist_on;
+
+static int qhist_write(const char* path, int flags, const char* b, size_t n) {
+    int fd = open(path, O_BINARY | O_WRONLY | O_CREAT | flags, 0600);
+    if (fd < 0) return -1;
+    int rc = write(fd, b, n) == (ssize_t)n ? 0 : -1;
+    return close(fd) || rc ? -1 : 0;
+}
+
+/* A rewrite goes to <path>.tmp and is renamed over, so a crash mid-way never costs the history. */
+static int qhist_replace(const char* b, size_t n) {
+    char tmp[sizeof g_qhist_path + 8];
+    snprintf(tmp, sizeof tmp, "%s.tmp", g_qhist_path);
+    return qhist_write(tmp, O_TRUNC, b, n) || ray_file_rename(tmp, g_qhist_path) != RAY_OK ? -1 : 0;
+}
+
+static void qhist_line(const char* s, size_t n, const char* status, int64_t ms) {
+    struct stat st;
+    if (!g_qhist_on) return;
+    int     fresh = stat(g_qhist_path, &st) != 0;
+    int64_t now   = q_dotz_now_ns(1);
+    ray_t*  ts    = ray_timestamp(now - now % 1000000);
+    char    tbuf[48];
+    q_fmt(ts, tbuf, sizeof tbuf);
+    ray_release(ts);
+    tbuf[23] = '\0';   /* 2026.09.23D16:05:12.345 — milliseconds */
+    size_t cap = sizeof QHIST_HEADER + strlen(tbuf) + strlen(status) + n + 40;
+    char*  buf = (char*)malloc(cap);
+    if (!buf) return;
+    int k = snprintf(buf, cap, "%s%s\t", fresh ? QHIST_HEADER : "", tbuf);
+    for (const char* c = status; *c; c++)
+        buf[k++] = (unsigned char)*c < ' ' ? ' ' : *c;   /* the error's own tabs and newlines would split the record */
+    k += snprintf(buf + k, cap - (size_t)k, "\t%lld\t", (long long)ms);
+    memcpy(buf + k, s, n);
+    memcpy(buf + k + n, QHIST_END, sizeof QHIST_END - 1);
+    if (qhist_write(g_qhist_path, O_APPEND, buf, (size_t)k + n + sizeof QHIST_END - 1)) g_qhist_on = 0;
+    free(buf);
+}
+
+/* The next whole record from *p: a line ending NSL888 (header lines between records skipped), its query after the
+ * first three tabs.  0 at the end, where a tail with no end (a write cut short) is not a record. */
+static int qhist_next(const char** p, const char* e, const char** rec, const char** q, size_t* qn) {
+    const size_t en = sizeof QHIST_END - 2;
+    for (*rec = *p; *p < e;) {
+        const char* nl = (const char*)memchr(*p, '\n', (size_t)(e - *p));
+        if (!nl) return 0;
+        *p = nl + 1;
+        if ((size_t)(*p - *rec) == sizeof QHIST_HEADER - 1 && memcmp(*rec, QHIST_HEADER, sizeof QHIST_HEADER - 1) == 0) {
+            *rec = *p;
+            continue;
+        }
+        if ((size_t)(nl - *rec) < en || memcmp(nl - en, QHIST_END, en) != 0) continue;
+        const char* t = *rec;
+        for (int i = 0; i < 3 && t; i++)
+            if ((t = (const char*)memchr(t, '\t', (size_t)(nl - en - t)))) t++;
+        if (!t) { *rec = *p; continue; }
+        *q  = t;
+        *qn = (size_t)(nl - en - t);
+        return 1;
+    }
+    return 0;
+}
+
+/* The format before the TSV was NUL-separated entries: keep it once as <path>.bak, rewrite it in place with the
+ * time, status and ms unknown.  Answers the new text (owned) or NULL. */
+static char* qhist_migrate(const char* b, size_t n, size_t* on) {
+    char bak[sizeof g_qhist_path + 8];
+    snprintf(bak, sizeof bak, "%s.bak", g_qhist_path);
+    if (qhist_write(bak, O_EXCL, b, n) && errno != EEXIST) return NULL;
+    size_t entries = 1;
+    for (size_t i = 0; i < n; i++) entries += b[i] == '\0';
+    size_t cap = sizeof QHIST_HEADER + n + entries * 16;
+    char*  out = (char*)malloc(cap);
+    if (!out) return NULL;
+    size_t k = (size_t)snprintf(out, cap, QHIST_HEADER);
+    for (const char* p = b; p < b + n;) {
+        const char* z = (const char*)memchr(p, '\0', (size_t)(b + n - p));
+        if (!z) z = b + n;
+        if (z > p) k += (size_t)snprintf(out + k, cap - k, "0Np\t?\t0N\t%.*s" QHIST_END, (int)(z - p), p);
+        p = z + 1;
+    }
+    *on = k;
+    return out;
+}
+
+/* The last QHIST_READ_MAX bytes of a regular file, from the first whole line.  Anything else at the path (a FIFO,
+ * a device, a directory) or an error turns history off. */
+static char* qhist_read(size_t* n) {
+    struct stat st;
+    if (stat(g_qhist_path, &st) != 0) return errno == ENOENT ? (*n = 0, (char*)calloc(1, 1)) : NULL;
+    if (!S_ISREG(st.st_mode)) return NULL;
+    int fd = open(g_qhist_path, O_BINARY | O_RDONLY);
+    if (fd < 0) return NULL;
+    int64_t off = st.st_size > QHIST_READ_MAX ? (int64_t)st.st_size - QHIST_READ_MAX : 0;
+    size_t  want = (size_t)((int64_t)st.st_size - off);
+    char*   b = (char*)malloc(want + 1);
+    ssize_t r = b && lseek(fd, (off_t)off, SEEK_SET) == (off_t)off ? read(fd, b, want) : -1;
+    close(fd);
+    if (r != (ssize_t)want) { free(b); return NULL; }
+    char* nl = off ? (char*)memchr(b, '\n', want) : NULL;
+    size_t skip = nl ? (size_t)(nl + 1 - b) : 0;
+    memmove(b, b + skip, want - skip);
+    *n = want - skip;
+    return b;
+}
+
+/* Recall gets the newest HIST_MAX_ENTRIES records; the file is cut back to those once it holds twice as many. */
+static void qhist_open(ray_hist_t* h) {
+    char pbuf[4096];
+    snprintf(g_qhist_path, sizeof g_qhist_path, "%s", i_hist_path(pbuf, sizeof pbuf));
+    size_t n;
+    char*  b = qhist_read(&n);
+    g_qhist_on = b != NULL;
+    if (b && memchr(b, '\0', n)) {
+        size_t mn;
+        char*  m = qhist_migrate(b, n, &mn);
+        free(b);
+        if (!m || qhist_replace(m, mn)) { free(m); g_qhist_on = 0; return; }
+        b = m;
+        n = mn;
+    }
+    const char *p = b, *rec, *q, *keep = NULL;
+    size_t      qn;
+    int64_t     total = 0, i = 0;
+    while (b && qhist_next(&p, b + n, &rec, &q, &qn)) total++;
+    for (p = b; b && qhist_next(&p, b + n, &rec, &q, &qn);)
+        if (i++ >= total - HIST_MAX_ENTRIES) {
+            if (!keep) keep = rec;
+            ray_hist_add(h, q, (int32_t)qn);
+        }
+    if (total > 2 * HIST_MAX_ENTRIES) {
+        size_t kn  = (size_t)(p - keep);
+        char*  out = (char*)malloc(sizeof QHIST_HEADER + kn);
+        if (out) {
+            memcpy(out, QHIST_HEADER, sizeof QHIST_HEADER - 1);
+            memcpy(out + sizeof QHIST_HEADER - 1, keep, kn);
+            if (qhist_replace(out, sizeof QHIST_HEADER - 1 + kn)) g_qhist_on = 0;
+            free(out);
+        }
+    }
+    free(b);
+    q_ctx_set_line_done(qhist_line);
+}
+
 
 /* kdb's `q)` console is line-at-a-time: every Return submits, whatever is left open. */
 static int32_t no_continuation(const char* mbuf, int32_t mbuf_len,
@@ -140,18 +300,15 @@ static void batch_startup(FILE* out, FILE* err) {
 }
 
 static void repl_interactive(FILE* out, FILE* err) {
-    ray_term_t* t = ray_term_create();
+    ray_term_t* t = ray_term_create_console(0);
     if (!t) {
         fprintf(err, "q: terminal init failed\n");
         batch_startup(out, err);
         return;
     }
 
-    char hist_buf[4096];
-    const char* hist_path = i_hist_path(hist_buf, sizeof hist_buf);
-    snprintf(g_live_hist_path, sizeof g_live_hist_path, "%s", hist_path);
     g_live_term = t;
-    ray_hist_load(&t->hist, hist_path);
+    qhist_open(&t->hist);
     ray_term_set_highlighter(t, q_highlight);
     ray_term_set_prompt(t, "q)", 2);   /* exact kdb-style prompt, no glyph */
     ray_term_set_continuation_fn(t, no_continuation);  /* kdb: line-at-a-time */
@@ -207,7 +364,6 @@ static void repl_interactive(FILE* out, FILE* err) {
     }
 
     q_dbg_set_reader(NULL);
-    ray_hist_save(&t->hist, hist_path);
     ray_term_destroy(t);
     g_live_term = NULL;
 }
@@ -234,7 +390,6 @@ typedef struct {
     FILE*       out;
     FILE*       err;
     int         eof_done;        /* stdin EOF handled once (EPOLLIN and/or EPOLLHUP) */
-    char        hist_path[4108];
     /* piped mode */
     int         echo;
     size_t      acc_len;         /* bytes accumulated toward the next line */
@@ -243,23 +398,21 @@ typedef struct {
 
 static q_poll_repl_t g_q_poll_repl;
 
-/* Restore the terminal + save history exactly once (idempotent). */
+/* Restore the terminal exactly once (idempotent). */
 static void poll_close_term(q_poll_repl_t* c) {
     if (!c->term)
         return;
-    ray_hist_save(&c->term->hist, c->hist_path);
     ray_term_destroy(c->term);
     c->term = NULL;
 }
 
 /* The console teardown registered into q_ctx by the entry points below:
- * whichever REPL flavour holds a live terminal, restore it and save history
+ * whichever REPL flavour holds a live terminal, restore it
  * BEFORE `.z.exit` runs (its 0N! output must land on a cooked terminal).
  * Idempotent; no-op when piped. */
 static void repl_console_close(void) {
     poll_close_term(&g_q_poll_repl);
     if (g_live_term) {
-        ray_hist_save(&g_live_term->hist, g_live_hist_path);
         ray_term_destroy(g_live_term);
         g_live_term = NULL;
     }
@@ -556,17 +709,14 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err, int stdin_tty) {
     reg.error_fn = poll_stdin_hup;   /* HUP → same EOF path (else a client hangs) */
 
     if (stdin_tty) {
-        ray_term_t* t = ray_term_create();
+        ray_term_t* t = ray_term_create_console(0);
         if (!t) {
             fprintf(err, "q: terminal init failed\n");
             return -1;
         }
         /* Same setup as repl_interactive: q history, q highlighter, kdb
          * `q)` prompt, line-at-a-time (no continuation), SIGINT plumbing. */
-        char hist_buf[4096];
-        const char* hp = i_hist_path(hist_buf, sizeof hist_buf);
-        snprintf(c->hist_path, sizeof c->hist_path, "%s", hp);
-        ray_hist_load(&t->hist, c->hist_path);
+        qhist_open(&t->hist);
         ray_term_set_highlighter(t, q_highlight);
         ray_term_set_prompt(t, "q)", 2);
         ray_term_set_continuation_fn(t, no_continuation);
