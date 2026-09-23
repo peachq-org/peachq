@@ -65,22 +65,17 @@
 #define TERM_BUF_SIZE 4096
 #define HIST_DEFAULT_CAP 256
 
-/* Pluggable syntax-highlighter hook.  Same signature as term.c's built-in
- * highlighter: render `buf`/`buf_len` into `dst` (never writing past
- * `dst_cap`), optionally back-lighting the matched bracket pair at
- * match_pos1 / match_pos2 (-1 when none), and return the number of bytes
- * written.  Lets callers (e.g. the q REPL) inject a language-correct
- * tokenizer while the default (NULL) keeps rayforce's built-in behaviour. */
+/* Pluggable syntax-highlighter hook: render `buf`/`buf_len` into `dst` (never writing past `dst_cap`),
+ * back-lighting the pair at match_pos1 / match_pos2 (-1 when none; see ray_term_match_pair), and return the
+ * number of bytes written.  NULL renders the buffer uncoloured. */
 typedef int32_t (*ray_highlight_fn)(char* dst, int32_t dst_cap,
                                     const char* buf, int32_t buf_len,
                                     int32_t match_pos1, int32_t match_pos2);
 
 /* Optional pluggable multi-line continuation policy.  Given the accumulated
  * multiline buffer and the current line, return the count of still-open
- * brackets (>0 keeps reading a continuation line, 0 submits).  NULL → the
- * built-in counter, whose `;`-as-line-comment rule is correct for rayfall but
- * WRONG for q (where `;` is a separator, so `(1 2 3;4 5)` false-continued).
- * The q REPL installs its own (kdb is line-at-a-time → no continuation). */
+ * brackets (>0 keeps reading a continuation line, 0 submits).  NULL → every
+ * Return submits. */
 typedef int32_t (*ray_continuation_fn)(const char* mbuf, int32_t mbuf_len,
                                        const char* buf, int32_t buf_len);
 
@@ -178,9 +173,9 @@ typedef struct ray_term {
     int32_t     esc_state;     /* 0=normal, 1=ESC, 2=ESC[, 3=ESCO, 5=CSI params */
     char        esc_buf[9];    /* CSI parameters, sans ESC[ and the final; full = stop storing */
     int32_t     esc_buf_len;
-    /* Optional pluggable syntax highlighter; NULL → use the built-in one. */
+    /* Optional pluggable syntax highlighter; NULL → uncoloured. */
     ray_highlight_fn highlight_fn;
-    /* Optional pluggable continuation policy; NULL → built-in counter. */
+    /* Optional pluggable continuation policy; NULL → every Return submits. */
     ray_continuation_fn continuation_fn;
     /* The console transport (see ray_term_io_t); zeroed = OS defaults. */
     ray_term_io_t io;
@@ -208,8 +203,7 @@ void   ray_term_redraw(ray_term_t* term);
 void   ray_term_prompt(ray_term_t* term);
 
 /* Install a pluggable syntax highlighter (see ray_highlight_fn).  Pass NULL
- * to restore the built-in highlighter.  Callers own the function; it must
- * outlive the term. */
+ * to render uncoloured.  Callers own the function; it must outlive the term. */
 void   ray_term_set_highlighter(ray_term_t* term, ray_highlight_fn fn);
 
 /* Arm (or with NULL/"" clear) the empty-prompt hint; accept_len = leading
@@ -217,7 +211,7 @@ void   ray_term_set_highlighter(ray_term_t* term, ray_highlight_fn fn);
 void   ray_term_set_hint(ray_term_t* term, const char* text, int32_t accept_len);
 
 /* Install a pluggable multi-line continuation policy (see ray_continuation_fn).
- * Pass NULL to restore the built-in bracket counter. */
+ * Pass NULL to submit on every Return. */
 void   ray_term_set_continuation_fn(ray_term_t* term, ray_continuation_fn fn);
 
 /* Set (or clear, when prefix == NULL or empty) the prompt prefix.
@@ -254,6 +248,11 @@ int32_t ray_hist_search(ray_hist_t* hist, const char* needle, int32_t needle_len
 int32_t ray_term_find_matching_paren(const char* buf, int32_t buf_len,
                                     int32_t cursor_pos);
 
+/* The pair the editor back-lights for a cursor at byte `cursor`: the bracket at or just before the cursor and its
+ * match, else the quote there and its partner, else the innermost pair enclosing the cursor (a string's quotes, or
+ * brackets).  -1/-1 when none.  String-aware: a bracket inside "..." never pairs. */
+void    ray_term_match_pair(const char* buf, int32_t buf_len, int32_t cursor, int32_t* a, int32_t* b);
+
 /* Collect completion candidates from all sources (env, keywords, columns,
  * history words).  Stores results in term->comp_items / comp_count.
  * prefix/prefix_len is the word being completed. */
@@ -261,7 +260,7 @@ void ray_term_collect_completions(ray_term_t* term, const char* prefix,
                                  int32_t prefix_len);
 
 
-/* Multi-line input: count unmatched opening brackets in multiline_buf + buf */
+/* Multi-line input: the installed continuation policy's answer, 0 (submit) when none */
 int32_t ray_term_count_unmatched(ray_term_t* term);
 void    ray_term_continuation_prompt(ray_term_t* term);
 
