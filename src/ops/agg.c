@@ -24,6 +24,7 @@
 #include "lang/internal.h"
 #include "ops/ops.h"
 #include "ops/idxop.h"   /* RAY_IDX_CHUNK_ZONE fast path for min/max */
+#include "ops/hash.h"    /* ray_hash_bytes — wide (STR) group-key hashing */
 #include "mem/heap.h"
 
 #include <stdlib.h>  /* qsort (introselect fallback) */
@@ -829,4 +830,80 @@ ray_t* ray_pearson_corr_fn(ray_t* x, ray_t* y) {
     double dy  = dn * syy - sy * sy;
     if (dx <= 0.0 || dy <= 0.0) return make_f64(NAN);
     return make_f64(num / sqrt(dx * dy));
+}
+
+/* Per-key hash/eq that also handles WIDE (variable-length STR) keys: int/SYM
+ * keys hash/compare their int64 cell; STR keys hash/compare their bytes.  The
+ * per-key type branch is invariant across rows (predicted), so the all-int/SYM
+ * path is unaffected. */
+static inline uint64_t agg_key_hash_at(ray_t* col, const void* data, int64_t r) {
+    if (col->type == RAY_STR) {
+        size_t len = 0;
+        const char* s = ray_str_vec_get(col, r, &len);
+        return ray_hash_bytes(s ? s : "", s ? len : 0);
+    }
+    return (uint64_t)agg_read_key_i64(col, data, r);
+}
+static inline int agg_key_eq_at(ray_t* col, const void* data, int64_t a, int64_t b) {
+    if (col->type == RAY_STR) {
+        size_t la = 0, lb = 0;
+        const char* sa = ray_str_vec_get(col, a, &la);
+        const char* sb = ray_str_vec_get(col, b, &lb);
+        return la == lb && (la == 0 || memcmp(sa, sb, la) == 0);
+    }
+    return agg_read_key_i64(col, data, a) == agg_read_key_i64(col, data, b);
+}
+
+int agg_group_keys(ray_t** key_cols, uint8_t n_keys, int64_t nrows, agg_groups_t* out) {
+    const void* data[16];
+    for (uint8_t k = 0; k < n_keys; k++) data[k] = ray_data(key_cols[k]);
+
+    /* hash table capacity: next pow2 >= 2*nrows, min 16 */
+    int64_t cap = 16;
+    while (cap < nrows * 2) cap <<= 1;
+    uint64_t mask = (uint64_t)cap - 1;
+
+    int32_t* ht_gid = ray_alloc_raw((size_t)cap * sizeof(int32_t));
+    out->gids      = ray_alloc_raw((size_t)(nrows > 0 ? nrows : 1) * sizeof(uint32_t));
+    out->first_row = ray_alloc_raw((size_t)(nrows > 0 ? nrows : 1) * sizeof(int64_t));
+    if (!ht_gid || !out->gids || !out->first_row) {
+        ray_free_raw(ht_gid); ray_free_raw(out->gids); ray_free_raw(out->first_row);
+        out->gids = NULL; out->first_row = NULL; return -1;
+    }
+    for (int64_t i = 0; i < cap; i++) ht_gid[i] = -1;
+
+    int64_t ngroups = 0;
+    for (int64_t r = 0; r < nrows; r++) {
+        uint64_t h = 1469598103934665603ULL;
+        for (uint8_t k = 0; k < n_keys; k++) {
+            h ^= agg_key_hash_at(key_cols[k], data[k], r); h *= 1099511628211ULL;
+        }
+        uint64_t slot = h & mask;
+        for (;;) {
+            int32_t gptr = ht_gid[slot];
+            if (gptr < 0) {                          /* empty slot → new group */
+                ht_gid[slot] = (int32_t)ngroups;
+                out->first_row[ngroups] = r;
+                out->gids[r] = (uint32_t)ngroups;
+                ngroups++;
+                break;
+            }
+            int64_t fr = out->first_row[gptr];
+            int eq = 1;
+            for (uint8_t k = 0; k < n_keys; k++) {
+                if (!agg_key_eq_at(key_cols[k], data[k], r, fr)) { eq = 0; break; }
+            }
+            if (eq) { out->gids[r] = (uint32_t)gptr; break; }
+            slot = (slot + 1) & mask;                /* linear probe */
+        }
+    }
+    out->ngroups = ngroups;
+    ray_free_raw(ht_gid);
+    return 0;
+}
+
+void agg_groups_free(agg_groups_t* out) {
+    if (!out) return;
+    ray_free_raw(out->gids);      out->gids = NULL;
+    ray_free_raw(out->first_row); out->first_row = NULL;
 }
