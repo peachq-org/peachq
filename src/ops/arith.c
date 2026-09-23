@@ -23,6 +23,7 @@
 
 #include "lang/internal.h"
 #include "ops/ops.h"
+#include "core/pool.h"   /* ray_pool_dispatch — xbar's parallel morsel loop */
 
 /* Arithmetic builtins (atom-only).
  * Vector dispatch goes through the DAG executor. */
@@ -589,4 +590,183 @@ ray_t* ray_pow_fn(ray_t* x, ray_t* y) {
         return ray_error("type", "pow: expects numeric base and exponent, got %s and %s",
                          ray_type_name(x->type), ray_type_name(y->type));
     return make_f64(pow(as_f64(x), as_f64(y)));
+}
+
+/* (xbar col bucket) — time/value bucketing: floor(col/bucket)*bucket */
+/* Parallel inner loops for ray_xbar_fn fast path.  Dispatch one task per
+ * morsel range so 5M-row temporal columns scale across the worker pool
+ * (Q43's xbar was ~6ms serial, ~0.5ms with 28 workers). */
+typedef struct {
+    int8_t out_type;
+    const void* in;
+    void* out;
+    int64_t b;
+    int pow2;
+} xbar_par_ctx_t;
+
+static void xbar_par_fn(void* vctx, uint32_t worker_id,
+                        int64_t start, int64_t end) {
+    (void)worker_id;
+    xbar_par_ctx_t* c = (xbar_par_ctx_t*)vctx;
+    int64_t b = c->b;
+    if (c->out_type == RAY_I64 || RAY_IS_TEMPORAL64(c->out_type)) {
+        const int64_t* in = (const int64_t*)c->in;
+        int64_t* o = (int64_t*)c->out;
+        if (c->pow2) {
+            int64_t mask = ~(b - 1);
+            for (int64_t i = start; i < end; i++) o[i] = in[i] & mask;
+        } else {
+            for (int64_t i = start; i < end; i++) {
+                int64_t a = in[i];
+                int64_t q = a / b;
+                if ((a ^ b) < 0 && q * b != a) q--;
+                o[i] = q * b;
+            }
+        }
+    } else if (c->out_type == RAY_I32 || RAY_IS_TEMPORAL32(c->out_type)) {
+        const int32_t* in = (const int32_t*)c->in;
+        int32_t* o = (int32_t*)c->out;
+        int32_t b32 = (int32_t)b;
+        if (c->pow2) {
+            int32_t mask = (int32_t)~((uint32_t)b32 - 1);
+            for (int64_t i = start; i < end; i++) o[i] = in[i] & mask;
+        } else {
+            for (int64_t i = start; i < end; i++) {
+                int32_t a = in[i];
+                int64_t q = (int64_t)a / b32;
+                if ((a ^ b32) < 0 && q * b32 != a) q--;
+                o[i] = (int32_t)(q * b32);
+            }
+        }
+    } else { /* RAY_I16 */
+        const int16_t* in = (const int16_t*)c->in;
+        int16_t* o = (int16_t*)c->out;
+        int16_t b16 = (int16_t)b;
+        for (int64_t i = start; i < end; i++) {
+            int16_t a = in[i];
+            int16_t q = a / b16;
+            if ((a ^ b16) < 0 && q * b16 != a) q--;
+            o[i] = q * b16;
+        }
+    }
+}
+
+ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket) {
+    /* Vectorised fast path for `(xbar VEC scalar_int)` on integer or
+     * temporal columns.  The generic atomic_map_binary path was
+     * allocating one ray_t* atom per row and calling ray_xbar_fn
+     * recursively — at 5M rows this dominates (≥100 ms).  A direct
+     * tight loop computes floor-div + multiply per element with no
+     * allocations.  When the bucket is a power of two we lower the
+     * divide further to mask + arithmetic.  Parallelised across the
+     * worker pool for large columns.
+     *
+     * Short-circuited only when both bucket and col are well-typed;
+     * everything else falls through to the recursive
+     * atomic_map_binary path. */
+    if (col && ray_is_vec(col) && bucket && ray_is_atom(bucket) &&
+        (bucket->type == -RAY_I64 || bucket->type == -RAY_I32 ||
+         bucket->type == -RAY_I16) &&
+        (col->type == RAY_I64 || col->type == RAY_I32 ||
+         col->type == RAY_I16 || col->type == RAY_TIMESTAMP ||
+         RAY_IS_TEMPORAL32(col->type)) &&
+        !RAY_ATOM_IS_NULL(bucket)) {
+        int64_t b = bucket->i64;
+        if (b == 0) return ray_error("domain", "xbar: bucket size must be non-zero");
+        int64_t n = col->len;
+        ray_t* out = ray_vec_new(col->type, n);
+        if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+        out->len = n;
+
+        int8_t out_type = col->type;
+        int pow2 = 0;
+        if (out_type == RAY_I64 || RAY_IS_TEMPORAL64(out_type)) {
+            pow2 = (b > 0 && (b & (b - 1)) == 0);
+        } else if (out_type == RAY_I32 || RAY_IS_TEMPORAL32(out_type)) {
+            int32_t b32 = (int32_t)b;
+            pow2 = (b32 > 0 && ((uint32_t)b32 & ((uint32_t)b32 - 1)) == 0);
+        }
+
+        ray_pool_t* pool = ray_pool_get();
+        if (pool && n >= 200000 && ray_pool_total_workers(pool) >= 2) {
+            xbar_par_ctx_t ctx = {
+                .out_type = out_type,
+                .in       = ray_data(col),
+                .out      = ray_data(out),
+                .b        = b,
+                .pow2     = pow2,
+            };
+            ray_pool_dispatch(pool, xbar_par_fn, &ctx, n);
+        } else {
+            xbar_par_ctx_t ctx = {
+                .out_type = out_type,
+                .in       = ray_data(col),
+                .out      = ray_data(out),
+                .b        = b,
+                .pow2     = pow2,
+            };
+            xbar_par_fn(&ctx, 0, 0, n);
+        }
+
+        /* Propagate nulls if present.  Walk per-element via
+         * ray_vec_is_null (sentinel-based). */
+        if (col->attrs & RAY_ATTR_HAS_NULLS) {
+            for (int64_t i = 0; i < n; i++)
+                if (ray_vec_is_null(col, i))
+                    ray_vec_set_null(out, i, true);
+        }
+        return out;
+    }
+
+    /* Recursive unwrap for nested collections (list of vectors) */
+    if (is_collection(col) || is_collection(bucket))
+        return atomic_map_binary(ray_xbar_fn, col, bucket);
+    /* Both are integer types (i64, i32, i16) → integer xbar */
+    if (is_numeric(col) && is_numeric(bucket) && !is_float_op(col, bucket)) {
+        int64_t a = as_i64(col), b = as_i64(bucket);
+        if (b == 0 || RAY_ATOM_IS_NULL(col) || RAY_ATOM_IS_NULL(bucket))
+            return ray_error("domain", "xbar: bucket size must be non-zero and operands non-null");
+        int64_t q = a / b;
+        if ((a ^ b) < 0 && q * b != a) q--;
+        int64_t result = q * b;
+        /* Result type follows the wider of the two operands */
+        if (col->type == -RAY_I32 && bucket->type == -RAY_I32) return make_i32((int32_t)result);
+        if (col->type == -RAY_I16 && bucket->type == -RAY_I16) return make_i16((int16_t)result);
+        return make_i64(result);
+    }
+    /* Float path: either operand is f64 */
+    if (is_numeric(col) && is_numeric(bucket)) {
+        if (RAY_ATOM_IS_NULL(col) || RAY_ATOM_IS_NULL(bucket))
+            return ray_error("domain", "xbar: operands must be non-null");
+        double c = as_f64(col), b = as_f64(bucket);
+        if (b == 0.0) return ray_error("domain", "xbar: bucket size must be non-zero");
+        double fq = floor(c / b);
+        return make_f64(fq * b);
+    }
+    /* Temporal xbar: col is temporal, bucket is integer or temporal (not float) */
+    if (is_temporal(col) && (is_temporal(bucket) ||
+        (is_numeric(bucket) && bucket->type != -RAY_F64))) {
+        int64_t a = col->i64, b;
+        if (is_temporal(bucket)) {
+            b = bucket->i64;
+            /* Cross-temporal conversion: TIME(ms) bucket on TIMESTAMP(ns) col */
+            if (col->type == -RAY_TIMESTAMP && bucket->type == -RAY_TIME)
+                b *= 1000000LL;
+        } else {
+            b = as_i64(bucket);
+        }
+        if (b == 0 || RAY_ATOM_IS_NULL(bucket)) return ray_error("domain", "xbar: bucket size must be non-zero and non-null");
+        int64_t q = a / b;
+        if ((a ^ b) < 0 && q * b != a) q--;
+        int64_t result = q * b;
+        if (col->type == -RAY_TIME) return ray_time(result);
+        if (col->type == -RAY_DATE) return ray_date(result);
+        if (col->type == -RAY_MONTH) return ray_month(result);
+        if (col->type == -RAY_MINUTE) return ray_minute(result);
+        if (col->type == -RAY_SECOND) return ray_second(result);
+        if (col->type == -RAY_TIMESPAN) return ray_timespan(result);
+        return ray_timestamp(result);
+    }
+    return ray_error("type", "xbar: unsupported operand types, got %s and %s",
+                     ray_type_name(col->type), ray_type_name(bucket->type));
 }

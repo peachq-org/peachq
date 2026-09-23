@@ -26,7 +26,7 @@
 #include "qlang/io/q_io.h"      /* q_io_is_fsym / q_io_resource_table — cols and meta of a decoded resource */
 #include "lang/internal.h"      /* ray_group_fn */
 #include "ops/idxop.h"          /* ray_index_group_rows — group's per-key rows off the attribute index */
-#include "ops/agg_engine.h"     /* agg_group_keys — the one dense group core */
+#include "ops/ops.h"            /* agg_group_keys — the one dense group core */
 #include "table/sym.h"          /* ray_sym_intern_runtime, ray_sym_vec_cell, RAY_SYM_W64 */
 #include <string.h>
 #include <stdlib.h>
