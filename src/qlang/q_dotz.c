@@ -16,7 +16,7 @@
 #include "qlang/q_console.h"   /* q_console_str/_reset — drain .z.ts/.z.exit show/0N! output */
 #include "qlang/io/q_conn.h"   /* q_conn_zW/_zH — `.z.W`/`.z.H` collector views */
 #include "lang/cal.h"          /* ymd_to_date — build-date -> q date for .z.k */
-#include "lang/env.h"          /* ray_sym_ipc_hook / ray_env_get / ray_fn_unary */
+#include "lang/env.h"          /* ray_env_get / ray_fn_unary */
 #include "lang/eval.h"         /* RAY_FN_NONE — .z.ts timer thunk attrs */
 #include "core/ipc.h"          /* ray_ipc_current_handle / ray_ipc_fd_of_handle — .z.w */
 #include "core/platform.h"     /* ray_thread_count — .z.c off Linux */
@@ -68,22 +68,6 @@ static int    g_argc       = 0;
 static char** g_argv       = NULL;
 static int    g_script_idx = -1;   /* argv index of the `*.q` script, or -1 */
 static bool   g_quiet      = false; /* `-q` on the command line (kdb .z.q) */
-
-int q_dotz_ipc_hook_index(const char* name, size_t len) {
-    if (len == 5 && memcmp(name, ".z.bm", 5) == 0)
-        return 5;             /* .z.bm -> .ipc.on.badmsg (dotz.md msg validator) */
-    if (len != 5 || name[0] != '.' || name[1] != 'z' || name[2] != '.' ||
-        name[3] != 'p')
-        return -1;
-    switch (name[4]) {
-        case 'o': return 0;   /* .z.po -> .ipc.on.open  */
-        case 'c': return 1;   /* .z.pc -> .ipc.on.close */
-        case 'g': return 2;   /* .z.pg -> .ipc.on.sync  */
-        case 's': return 3;   /* .z.ps -> .ipc.on.async */
-        case 'w': return 4;   /* .z.pw -> .ipc.on.auth  */
-        default:  return -1;
-    }
-}
 
 bool q_dotz_expungeable(const char* name, size_t len) {
     static const char* const tails[] = { "pg", "ps", "po", "pc", "pw", "bm", "pi", "pq", "pd", "ph",
@@ -502,19 +486,6 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
          * unset (no snapshot) declines -> 'name, matching an unset callback */
         if (p[4] == 'x') out = q_dbg_zex();
         else if (p[4] == 'y') out = q_dbg_zey();
-    }
-
-    /* kdb `.z.p*` handler-alias READ-BACK: resolve to the SAME `.ipc.on.*` env
-     * slot the write path (q_env_set) installs into — so `.z.pg` reflects a
-     * `.ipc.on.sync:{…}` assignment and vice-versa.  An UNSET alias declines
-     * (NULL -> eval raises 'name, matching an unset name); kdb's default-handler
-     * exposure is deferred (see the plan's accepted decisions). */
-    if (!out) {
-        int hk = q_dotz_ipc_hook_index(p, n);
-        if (hk >= 0) {
-            ray_t* fn = ray_env_get(ray_sym_ipc_hook(hk));   /* borrowed */
-            if (fn) { ray_retain(fn); out = fn; }
-        }
     }
 
     ray_release(name);
