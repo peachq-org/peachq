@@ -200,6 +200,10 @@ ray_t* q_string_fn(ray_t* x) {
     }
     /* Not ray_fmt: rayfall would write "true"/"false", a rayfall literal q has no reader for. */
     if (x->type == -RAY_BOOL) { char c = x->b8 ? '1' : '0'; return ray_charv(&c, 1); }
+    if (q_type_is_fn(x)) {                                       /* ref/string.md: `string {x*x}` is "{x*x}" */
+        ray_t* src = q_eval_apply_lambda_src(x);
+        return src ? q_str_charv_of_str(src) : q_fmt_krepr_charv(x);
+    }
     if (!ray_is_vec(x)) return q_str_charv_out(ray_fmt(x, 0));   /* remaining atoms */
     /* vector: per-element string */
     int64_t n = q_count(x);
