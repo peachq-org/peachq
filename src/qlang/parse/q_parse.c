@@ -1138,6 +1138,11 @@ static P parse_base(Parser *p) {
                 q_die("expected ']' after lambda signature");
             }
             adv(p);
+            if (q_count(params) > 8) {                  /* basics/errors.md: "Too many parameters (8 max)" */
+                ray_release(params);
+                if (ptypes) ray_release(ptypes);
+                die_err(QE_PARAMS);
+            }
             /* `{[] ...}` is RANK 1 with an UNNAMEABLE slot: the null symbol is no
              * variable's name, so a spare argument lands where no body can read it
              * and `x` stays GLOBAL — default names come with OMITTING the signature
