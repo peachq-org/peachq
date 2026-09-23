@@ -31,7 +31,8 @@
 #include "qlang/parse/q_parse.h"    /* q_parse — `\t expr` / `\ts expr` timing */
 #include "qlang/parse/q_tok.h" /* q_tok_date_order_set/_order — `\z` */
 #include "qlang/net/q_tls.h"  /* q_tls_server_mode — `\E` */
-#include "core/ipc.h"         /* ray_ipc_listen — `\p N` binds a listener */
+#include "core/ipc.h"         /* ray_ipc_listen_at — `\p` binds a listener */
+#include "core/sock.h"        /* ray_sock_resolve4 / _service_port — the listen spec host and servicename */
 #include "core/poll.h"        /* ray_poll_get / deregister — `\p 0W`/`\p 0`; poll->timers */
 #include "core/runtime.h"     /* ray_runtime_get_poll — the runtime event poll */
 #include "core/numparse.h"    /* ray_parse_i64 — the shared engine int parser (reuse) */
@@ -349,9 +350,7 @@ static ray_t* h_bB(int pending, const char* arg, size_t alen) {
  *     `10 10`, `0N`) — i.e. LONGS — so those getters return i64. */
 
 /* Read the actual bound port back off a listener fd (getsockname) — the `0W`
- * auto-bind path needs the OS-chosen port to report it.  The SINGLE home of the
- * readback (qmain.c's startup `-p` now calls q_sys_listen below rather than
- * duplicating this); 0 on failure. */
+ * auto-bind path needs the OS-chosen port to report it; 0 on failure. */
 static uint16_t p_bound_port(int64_t fd) {
     struct sockaddr_in sa;
     socklen_t          len = sizeof(sa);
@@ -361,12 +360,69 @@ static uint16_t p_bound_port(int64_t fd) {
     return ntohs(sa.sin_port);
 }
 
-/* Single-home the listen+readback+state-swap shared by `\p N`/`\p 0W` and the
- * startup `-p` path (see q_sys.h).  port==0 → OS-chosen ephemeral.  Silent. */
-uint16_t q_sys_listen(uint16_t port) {
+/* One port or servicename end of a listen spec.  A negative number is the multithreaded input mode, deferred. */
+static bool listen_port_tok(const char* s, size_t n, uint16_t* out, q_err_e* err) {
+    int64_t v;
+    if (parse_i64(s, n, &v)) {
+        if (v < 0 || v > 65535) { *err = QE_DOMAIN; return false; }
+        *out = (uint16_t)v;
+        return true;
+    }
+    char name[64];
+    if (n == 0 || n >= sizeof name) { *err = QE_PARSE; return false; }
+    memcpy(name, s, n); name[n] = '\0';
+    if (!(*out = ray_sock_service_port(name))) { *err = QE_PARSE; return false; }
+    return true;
+}
+
+bool q_sys_listen_spec_parse(const char* s, size_t n, q_sys_listen_spec_t* out, q_err_e* err) {
+    memset(out, 0, sizeof *out);
+    if (n >= 3 && memcmp(s, "rp,", 3) == 0) { out->reuseport = true; s += 3; n -= 3; }
+    const char* colon = NULL;
+    for (size_t i = 0; i < n; i++) if (s[i] == ':') colon = s + i;
+    if (colon) {
+        size_t hn = (size_t)(colon - s);
+        if (hn >= sizeof out->host) { *err = QE_DOMAIN; return false; }
+        memcpy(out->host, s, hn);
+        n -= hn + 1; s = colon + 1;
+    }
+    if (n == 2 && s[0] == '0' && (s[1] == 'W' || s[1] == 'w')) { out->any = true; return true; }
+    const char* slash = memchr(s, '/', n);
+    if (!slash) {
+        if (!listen_port_tok(s, n, &out->lo, err)) return false;
+        out->hi = out->lo;
+        return true;
+    }
+    if (!listen_port_tok(s, (size_t)(slash - s), &out->lo, err)) return false;
+    if (!listen_port_tok(slash + 1, n - (size_t)(slash - s) - 1, &out->hi, err)) return false;
+    if (out->lo == 0 || out->lo > out->hi) { *err = QE_DOMAIN; return false; }
+    return true;
+}
+
+/* lo..hi in random order (basics/listening-port.md), first bind wins; the shuffle is lazy, so a free first draw
+ * costs one bind. */
+static int64_t listen_range(ray_poll_t* poll, uint32_t ip, const q_sys_listen_spec_t* spec) {
+    uint32_t n = (uint32_t)spec->hi - spec->lo + 1;
+    if (n == 1) return ray_ipc_listen_at(poll, ip, spec->lo, spec->reuseport);
+    uint16_t* ports = malloc(n * sizeof *ports);
+    if (!ports) return -1;
+    for (uint32_t i = 0; i < n; i++) ports[i] = (uint16_t)(spec->lo + i);
+    int64_t sel = -1;
+    for (uint32_t i = 0; i < n && sel < 0; i++) {
+        uint32_t j = i + (uint32_t)ray_rand_below(n - i);
+        uint16_t t = ports[j]; ports[j] = ports[i]; ports[i] = t;
+        sel = ray_ipc_listen_at(poll, ip, t, spec->reuseport);
+    }
+    free(ports);
+    return sel;
+}
+
+uint16_t q_sys_listen(const q_sys_listen_spec_t* spec) {
     ray_poll_t* poll = (ray_poll_t*)ray_runtime_get_poll();
     if (!poll) return 0;                                  /* no event poll (e.g. qdoctest) */
-    int64_t sel = ray_ipc_listen(poll, port);            /* port==0 → OS picks a free port */
+    uint32_t ip;
+    if (ray_sock_resolve4(spec->host, &ip) != 0) return 0;
+    int64_t sel = spec->any ? ray_ipc_listen_at(poll, ip, 0, spec->reuseport) : listen_range(poll, ip, spec);
     if (sel < 0) return 0;                               /* bind/listen failed — old listener intact */
     ray_selector_t* ls = ray_poll_get(poll, sel);
     uint16_t bound = ls ? p_bound_port(ls->fd) : 0;
@@ -389,25 +445,6 @@ uint16_t q_sys_listen(uint16_t port) {
  * it for the post-script server-mode decision instead of a stale local port. */
 uint16_t q_sys_listen_port(void) { return (uint16_t)g_listen_port; }
 
-/* `\p` — listening port (basics/syscmds.md, listening-port.md).  Merges this
- * feature's getter/close/rebind with #127's `0W` ephemeral bind:
- *   getter `\p`        -> current listening port, `0i` when none (kdb default).
- *   `\p 0`             -> stop listening: deregister the live listener selector
- *                        (fires ipc_on_close -> closes the fd), reset to 0.
- *   `\p N` (1..65535)  -> bind a kdb-protocol IPC listener on the runtime event
- *                        poll; the unified REPL loop (q_repl.c) serves it and
- *                        reads this state at stdin EOF, so a client that `\p`s a
- *                        port becomes a server and a `\p 0` stops being one.
- *   `\p 0W`            -> bind any OS-chosen free port, read it back via
- *                        getsockname and record it (mirrors startup `-p 0W`,
- *                        qmain.c — both call q_sys_listen) — what lets
- *                        tools/qscript run each server on an ephemeral port,
- *                        immune to a busy 5000 / concurrent runners.
- * `\p N`/`0W` rebind drops the previous listener only AFTER the new bind
- * succeeds (a failed bind leaves the old one intact; codex diff P2 — enforced
- * inside q_sys_listen).  The getter reports the ACTUAL bound port (incl. the
- * `0W`-chosen one).  NO port is ANNOUNCED on any path — full kdb fidelity; a
- * supervisor/test reads the port back with the `\p`/`system "p"` getter. */
 /* `\E` — DISPLAY the TLS server mode as an int (syscmds.md documents no setter
  * form; the mode is fixed by the `-E` command line).  A setter stays the silent
  * no-op every other display-only `\`-command uses. */
@@ -416,25 +453,23 @@ static ray_t* h_E(const char* arg, size_t alen) {
     return alen == 0 ? ray_i32(q_tls_server_mode()) : NULL;
 }
 
+/* `\p` — listening port (basics/syscmds.md, listening-port.md): the getter reports the bound port (`0i` when none);
+ * a setter takes the spec `-p` takes (q_sys_listen_spec_parse).  `\p 0` stops listening; any other spec rebinds, and
+ * the previous listener is dropped only AFTER the new bind succeeds.  NO port is ANNOUNCED on any path — a
+ * supervisor/test reads it back with the getter. */
 static ray_t* h_p(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_listen_port);        /* getter -> `0i` default */
-    /* `0W`/`0w` auto token (same shape as h_S's `0N` probe) — bind port 0. */
-    bool port_auto = (alen == 2 && arg[0] == '0' && (arg[1] == 'W' || arg[1] == 'w'));
-    int64_t v = 0;
-    if (!port_auto) {
-        if (!parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
-        if (v < 0 || v > 65535) return q_err(QE_DOMAIN);
-    }
-    if (!port_auto && v == 0) {                          /* `\p 0` — stop listening */
+    q_sys_listen_spec_t spec;
+    q_err_e             err;
+    if (!q_sys_listen_spec_parse(arg, alen, &spec, &err)) return q_err(err);
+    if (!spec.any && spec.lo == 0) {                     /* `\p 0` — stop listening */
         ray_poll_t* poll = (ray_poll_t*)ray_runtime_get_poll();
         if (poll && g_listen_sel >= 0) ray_poll_deregister(poll, g_listen_sel);
         g_listen_sel  = -1;
         g_listen_port = 0;
         return NULL;                                     /* silent */
     }
-    /* Bind/readback/state-swap single-homed in q_sys_listen (shared with startup
-     * `-p`).  0 → no poll (qdoctest) / bind-listen / readback failure → `'io`. */
-    if (!q_sys_listen(port_auto ? 0 : (uint16_t)v)) return q_err(QE_IO);
+    if (!q_sys_listen(&spec)) return q_err(QE_IO);
     return NULL;                                          /* setter: silent */
 }
 

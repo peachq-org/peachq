@@ -1454,9 +1454,14 @@ static void ipc_on_close(ray_poll_t* poll, ray_selector_t* sel)
 
 int64_t ray_ipc_listen(ray_poll_t* poll, uint16_t port)
 {
+    return ray_ipc_listen_at(poll, htonl(INADDR_ANY), port, false);
+}
+
+int64_t ray_ipc_listen_at(ray_poll_t* poll, uint32_t ip, uint16_t port, bool reuseport)
+{
     if (!poll) return -1;
 
-    ray_sock_t fd = ray_sock_listen(port);
+    ray_sock_t fd = ray_sock_listen_at(ip, port, reuseport);
     if (fd == RAY_INVALID_SOCK) return -1;
     ray_sock_set_nonblocking(fd);
 
