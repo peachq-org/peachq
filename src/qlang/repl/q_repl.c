@@ -12,6 +12,7 @@
 #include "qlang/q_count.h"
 #include "qlang/repl/q_repl.h"
 #include "qlang/q_ctx.h"        /* the statement + console-teardown seams */
+#include "qlang/repl/q_highlight.h"
 #include "qlang/parse/q_parse.h"
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
 #include "qlang/eval/q_dbg.h"    /* debug-loop line readers (basics/debug.md) */
@@ -21,7 +22,6 @@
 #include "app/term.h"       /* ray_term_* line editor + highlighter hook */
 #include "core/poll.h"      /* ray_poll_* — concurrent REPL + IPC event loop */
 #include "lang/eval.h"      /* ray_eval_clear_interrupt */
-#include "lang/env.h"       /* ray_env_has_name — live env-derived name highlight */
 #include <rayforce.h>
 #include <ctype.h>          /* isalpha/isalnum — the hint's name-token scan */
 #include <stdlib.h>         /* getenv */
@@ -31,183 +31,6 @@
                              * (mingw-w64 provides both; the CRT read() on fd 0
                              * covers pipes/files, and the tty flavour reads
                              * through ray_term_getc, never this fd) */
-
-/* ===== q syntax highlighter (matches ray_highlight_fn) =====
- *
- * Colours q — not rayfall — syntax: backtick symbols, `/` end-of-line
- * comments (q's comment char; `;` is a q separator, NOT a comment), "..."
- * strings, numeric literals and q verbs/keywords.  Every write is bounded
- * so it can never run past dst_cap. */
-
-#define QHL_KEYWORD  "\033[1;32m"        /* green  — verbs/keywords          */
-#define QHL_STRING   "\033[1;33m"        /* yellow — "..." string literals   */
-#define QHL_COMMENT  "\033[1;38;5;8m"    /* gray   — / comment to EOL        */
-#define QHL_SYMBOL   "\033[1;38;5;118m"  /* salad  — `sym backtick symbols   */
-#define QHL_NUMBER   "\033[1;38;5;208m"  /* orange — numeric literals        */
-#define QHL_OP       "\033[1;38;5;39m"   /* blue   — operators/adverbs       */
-#define QHL_RESET    "\033[0m"
-
-/* Verbs and builtins are NOT hardcoded: a word highlights green iff it is a
- * real bound name in the live eval env (ray_env_has_name), exactly as
- * rayforce's own term_highlight_into does.  This tracks reality with zero
- * maintenance — as q verbs get bound they light up automatically, and unbound
- * words stay uncoloured (an honest "won't resolve" signal).
- *
- * The one thing the env can't supply is q's pure SQL *statement* keywords,
- * which are syntax rather than functions.  Those are the only hardcoded set. */
-static const char* const Q_SQL_WORDS[] = {
-    "select", "exec", "update", "delete", "from", "by",
-};
-
-static int is_word(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-           (c >= '0' && c <= '9') || c == '_';
-}
-
-static int is_digit(char c) { return c >= '0' && c <= '9'; }
-
-static int is_op(char c) {
-    return strchr(":+-*%!&|<>=~,^#_$?@.", c) != NULL && c != '\0';
-}
-
-static int is_keyword(const char* w, int32_t len) {
-    /* qSQL statement keywords (pure syntax, not env functions) ... */
-    for (size_t i = 0; i < sizeof(Q_SQL_WORDS) / sizeof(Q_SQL_WORDS[0]); i++) {
-        if ((int32_t)strlen(Q_SQL_WORDS[i]) == len &&
-            memcmp(Q_SQL_WORDS[i], w, (size_t)len) == 0)
-            return 1;
-    }
-    /* ... everything else: green iff it is a real bound name in the eval env. */
-    return ray_env_has_name(w, (int64_t)len);
-}
-
-static int32_t repl_highlight(char* dst, int32_t dst_cap, const char* buf, int32_t buf_len,
-                    int32_t match_pos1, int32_t match_pos2) {
-    (void)match_pos1;
-    (void)match_pos2;
-    int32_t n = 0;
-
-#define QHL_PUT(s, slen) do {                                         \
-        int32_t sl_ = (int32_t)(slen);                                \
-        if (n + sl_ < dst_cap) { memcpy(dst + n, (s), (size_t)sl_); n += sl_; } \
-    } while (0)
-#define QHL_LIT(s) QHL_PUT((s), (int32_t)strlen(s))
-
-    for (int32_t i = 0; i < buf_len; ) {
-        char c = buf[i];
-
-        /* `/` comment — q treats `/` as a comment to end of line when it
-         * starts a line or is preceded by whitespace; otherwise it is an
-         * operator/adverb (divide, over). */
-        if (c == '/' && (i == 0 || buf[i - 1] == ' ' || buf[i - 1] == '\t')) {
-            int32_t j = i;
-            while (j < buf_len && buf[j] != '\n')
-                j++;
-            QHL_LIT(QHL_COMMENT);
-            QHL_PUT(buf + i, j - i);
-            QHL_LIT(QHL_RESET);
-            i = j;
-            continue;
-        }
-
-        /* Backtick symbol: `sym or ` on its own. */
-        if (c == '`') {
-            int32_t j = i + 1;
-            if (j < buf_len && buf[j] == ':') /* `:handle */
-                j++;
-            while (j < buf_len && (is_word(buf[j]) || buf[j] == '.' || buf[j] == ':'))
-                j++;
-            QHL_LIT(QHL_SYMBOL);
-            QHL_PUT(buf + i, j - i);
-            QHL_LIT(QHL_RESET);
-            i = j;
-            continue;
-        }
-
-        /* "..." string literal (with backslash escapes). */
-        if (c == '"') {
-            int32_t j = i + 1;
-            while (j < buf_len) {
-                if (buf[j] == '\\' && j + 1 < buf_len) {
-                    j += 2;
-                    continue;
-                }
-                if (buf[j] == '"') {
-                    j++;
-                    break;
-                }
-                j++;
-            }
-            QHL_LIT(QHL_STRING);
-            QHL_PUT(buf + i, j - i);
-            QHL_LIT(QHL_RESET);
-            i = j;
-            continue;
-        }
-
-        /* Numeric literal: a digit, or a leading `.` before a digit.  The
-         * scan pulls in the usual q numeric tails (dot, exponent, and the
-         * type-suffix letters h/i/j/e/f/p/n/z/u/v/t/b) so 2019.01m, 1.5e3
-         * and 42j read as one token. */
-        int num_start = is_digit(c) ||
-                        (c == '.' && i + 1 < buf_len && is_digit(buf[i + 1]));
-        int prev_word = (i > 0 && is_word(buf[i - 1]));
-        if (num_start && !prev_word) {
-            int32_t j = i + 1;
-            while (j < buf_len) {
-                char d = buf[j];
-                if (is_digit(d) || d == '.' || strchr("hijefpnzuvtb", d))
-                    j++;
-                else if ((d == 'e' || d == 'E') && j + 1 < buf_len &&
-                         (buf[j + 1] == '+' || buf[j + 1] == '-'))
-                    j += 2;
-                else
-                    break;
-            }
-            QHL_LIT(QHL_NUMBER);
-            QHL_PUT(buf + i, j - i);
-            QHL_LIT(QHL_RESET);
-            i = j;
-            continue;
-        }
-
-        /* Word: keyword/verb (green) or plain identifier. */
-        if (is_word(c) && !is_digit(c)) {
-            int32_t j = i + 1;
-            while (j < buf_len && is_word(buf[j]))
-                j++;
-            int32_t wlen = j - i;
-            if (is_keyword(buf + i, wlen)) {
-                QHL_LIT(QHL_KEYWORD);
-                QHL_PUT(buf + i, wlen);
-                QHL_LIT(QHL_RESET);
-            } else {
-                QHL_PUT(buf + i, wlen);
-            }
-            i = j;
-            continue;
-        }
-
-        /* Standalone operator / adverb char. */
-        if (is_op(c)) {
-            QHL_LIT(QHL_OP);
-            QHL_PUT(&c, 1);
-            QHL_LIT(QHL_RESET);
-            i++;
-            continue;
-        }
-
-        /* Anything else: pass through verbatim. */
-        QHL_PUT(&c, 1);
-        i++;
-    }
-
-#undef QHL_PUT
-#undef QHL_LIT
-    return n;
-}
-
-
 
 /* Locate the q history file: $HOME/.qhist, or a bare ".qhist" in the CWD
  * when $HOME is unset.  Returns a pointer into the caller-supplied buffer. */
@@ -227,13 +50,7 @@ static const char* i_hist_path(char* buf, size_t cap) {
 static ray_term_t* g_live_term;
 static char g_live_hist_path[4108];
 
-/* Interactive TTY loop over the q pipeline. */
-/* q REPL is line-at-a-time, exactly like kdb's `q)` console: every Return
- * submits.  This replaces rayforce's bracket-continuation counter, whose
- * `;`-as-line-comment rule (correct for rayfall/lisp) mis-flagged q's `;`
- * separator inside parens as an open expression — e.g. `(1 2 3;4 5)` dropped
- * into a `…` continuation prompt instead of evaluating.  Returning 0 means
- * "never incomplete". */
+/* kdb's `q)` console is line-at-a-time: every Return submits, whatever is left open. */
 static int32_t no_continuation(const char* mbuf, int32_t mbuf_len,
                                  const char* buf, int32_t buf_len) {
     (void)mbuf; (void)mbuf_len; (void)buf; (void)buf_len;
@@ -335,7 +152,7 @@ static void repl_interactive(FILE* out, FILE* err) {
     snprintf(g_live_hist_path, sizeof g_live_hist_path, "%s", hist_path);
     g_live_term = t;
     ray_hist_load(&t->hist, hist_path);
-    ray_term_set_highlighter(t, repl_highlight);
+    ray_term_set_highlighter(t, q_highlight);
     ray_term_set_prompt(t, "q)", 2);   /* exact kdb-style prompt, no glyph */
     ray_term_set_continuation_fn(t, no_continuation);  /* kdb: line-at-a-time */
 
@@ -750,7 +567,7 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err, int stdin_tty) {
         const char* hp = i_hist_path(hist_buf, sizeof hist_buf);
         snprintf(c->hist_path, sizeof c->hist_path, "%s", hp);
         ray_hist_load(&t->hist, c->hist_path);
-        ray_term_set_highlighter(t, repl_highlight);
+        ray_term_set_highlighter(t, q_highlight);
         ray_term_set_prompt(t, "q)", 2);
         ray_term_set_continuation_fn(t, no_continuation);
         ray_term_install_signals(t);
