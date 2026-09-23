@@ -6,7 +6,7 @@
  * (typed-value) dict is NOT traversable, so `.foo:`p`q!7 8` makes `.foo.q`
  * a 'name — dotted access is value traversal, never name splitting.
  * Rayfall's env (src/lang/env.c) is a bootstrap-only kernel catalogue; q's
- * ONLY live seam into it is the six `.ipc.on.*` hook syms. */
+ * name surface never writes to it. */
 #ifndef PEACHQ_Q_ENV_H
 #define PEACHQ_Q_ENV_H
 
@@ -26,9 +26,8 @@ ray_t* q_env_resolve(int64_t sym);
 
 /* THE write home every q assignment form reaches — `:`/`::`, indexed and
  * modified assign, `@`/`.` name-amend, `set` — so the name policy is stated
- * once: `` `. `` restores root variables from a dict, `.z.p*`/`.z.bm` alias the
- * `.ipc.on.*` hook slots, and every other name (`.z.zd` included) is a
- * path-copy amend of the nested dicts.  Missing ancestors conjure marked dicts
+ * once: `` `. `` restores root variables from a dict, and every other name
+ * (the `.z.*` handlers included) is a path-copy amend of the nested dicts.  Missing ancestors conjure marked dicts
  * (`.fee.fi.fo:42` creates `.fee`, `.fee.fi`); `.ns:d` is an ordinary rebind of
  * the one name — no subtree side effects. */
 ray_err_t q_env_set(int64_t sym, ray_t* val);

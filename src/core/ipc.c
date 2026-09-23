@@ -28,7 +28,7 @@
  *   handshake  client sends "user:password" + capability-byte + \0
  *              (older clients omit the capability byte); the server
  *              validates (constant-time -u/-U secret compare first, then
- *              the `.ipc.on.auth` hook may narrow) and replies with ONE
+ *              the `.z.pw` hook may narrow) and replies with ONE
  *              byte min(cap, 3) — or closes the connection on rejection.
  *   header     8 bytes: [endian(01=LE) msgtype(0/1/2) compressed(0/1)
  *              total-len:int32] — total-len INCLUDES the header; both
@@ -44,8 +44,8 @@
  *   payload    ONE q_wire object (src/qlang/q_wire.c, kb/serialization.md
  *              grammar).  Whole-payload consumption is enforced; trailing
  *              bytes are protocol corruption and close the connection.
- *   dispatch   STRING-FIRST (human ruling 2026-07-06): `.ipc.on.sync` /
- *              `.ipc.on.async` hooks take precedence (they receive the
+ *   dispatch   STRING-FIRST (human ruling 2026-07-06): `.z.pg` /
+ *              `.z.ps` hooks take precedence (they receive the
  *              decoded object); otherwise a string payload evaluates via
  *              ray_eval_remote_str (the q pipeline when the q runtime is
  *              up, rayfall in the bare engine binary); a general-list
@@ -77,6 +77,7 @@
 #include "core/timer.h"        /* ray_time_now_ms — TLS negotiation deadlines */
 #include "qlang/net/q_ws.h"
 #include "qlang/eval/q_eval.h"   /* q_eval_apply_value — q hook firing */
+#include "qlang/q_env.h"         /* q_env_get — the `.z.p*` hooks are ordinary globals */
 #include "qlang/q_dotz.h"        /* q_dotz_now_ns — connection open-time stamp */
 #include "qlang/q_builtins.h"    /* q_md5_fn / q_dotq_sha1_fn — the password file's hashed secrets */
 #include <string.h>
@@ -375,11 +376,11 @@ static bool validate_creds_file(const uint8_t* buf, size_t cred_len) {
     return false;
 }
 
-/* ===== Connection hooks (.ipc.on.*) =====
+/* ===== Connection hooks (.z.p*) =====
  *
  * Six user-settable lambdas that intercept the connection lifecycle.
- * Lookup is by interned sym id; we cache the ids in `hook_syms[]` so the
- * fast path is a single ray_env_get + RAY_LAMBDA-type check per dispatch.
+ * They are ORDINARY q globals (ref/dotz.md): the environment stores them
+ * under their kdb names and this file resolves one when it fires.
  *
  * `__VM->ipc_handle` is the per-thread value `.ipc.handle` reads back
  * to Rayfall.  Each dispatch saves/restores it around the invocation,
@@ -389,13 +390,10 @@ static bool validate_creds_file(const uint8_t* buf, size_t cred_len) {
  * stack" — exposed verbatim through the builtin.
  *
  * Errors:
- *   - on.open / on.close / on.async / on.badmsg: logged to stderr, swallowed.
- *   - on.sync: error becomes the response (same as a raw `eval` error).
- *   - on.auth: error treated as reject (handshake refused). */
+ *   - .z.po / .z.pc / .z.ps / .z.bm: logged to stderr, swallowed.
+ *   - .z.pg: error becomes the response (same as a raw `eval` error).
+ *   - .z.pw: error treated as reject (handshake refused). */
 
-/* Hook indices must match the order in `src/lang/env.c`
- * (g_ipc_hook_syms[]) — the `ray_sym_ipc_hook(idx)` getter assumes this
- * mapping.  Keep them in lockstep. */
 enum {
     IPC_HOOK_OPEN   = 0,
     IPC_HOOK_CLOSE  = 1,
@@ -404,6 +402,11 @@ enum {
     IPC_HOOK_AUTH   = 4,
     IPC_HOOK_BADMSG = 5,   /* .z.bm msg validator (ref/dotz.md) */
     IPC_HOOK_COUNT  = 6,
+};
+
+/* IPC_HOOK_* order is contract; every name is 5 bytes (hook_lookup's literal). */
+static const char* const IPC_HOOK_NAMES[IPC_HOOK_COUNT] = {
+    ".z.po", ".z.pc", ".z.pg", ".z.ps", ".z.pw", ".z.bm",
 };
 
 /* The IPC dispatch context — which connection's hook/eval is on this
@@ -454,16 +457,12 @@ static bool hook_is_q(const ray_t* fn) {
 }
 
 /* Fetch the hook if one is installed and is in fact applicable.
- * Non-function bindings (cleared via `set .ipc.on.X 0` or never bound)
- * yield NULL — caller falls back to default behaviour.  Returns a
- * borrowed ref; do not release.  Sym IDs come from env.c's central
- * cache, so a runtime destroy/recreate cycle invalidates them in one
- * place and the lookup here always sees IDs from the current sym
- * table. */
+ * Non-function bindings (`.z.po:22` is legal in kdb) yield NULL — caller
+ * falls back to default behaviour.  Returns a borrowed ref; do not
+ * release. */
 static ray_t* hook_lookup(int idx) {
-    int64_t sym = ray_sym_ipc_hook(idx);
-    if (sym < 0) return NULL;
-    ray_t* fn = ray_env_get(sym);
+    if (idx < 0 || idx >= IPC_HOOK_COUNT) return NULL;
+    ray_t* fn = q_env_get(ray_sym_intern_runtime(IPC_HOOK_NAMES[idx], 5));
     if (!fn || (fn->type != RAY_LAMBDA && !hook_is_q(fn))) return NULL;
     return fn;
 }
@@ -472,10 +471,13 @@ static ray_t* hook_lookup(int idx) {
  * lambdas through the base call path (ipc.c is peachq-owned — the one
  * core-file consumer of the q apply seam). */
 static ray_t* hook_fire(ray_t* fn, ray_t** args, int64_t n) {
-    if (hook_is_q(fn)) return q_eval_apply_value(fn, args, n);
-    if (n == 1) return call_fn1(fn, args[0]);
-    if (n == 2) return call_fn2(fn, args[0], args[1]);
-    return call_lambda(fn, args, n);
+    ray_retain(fn);                     /* a body that rebinds `.z` or its own name frees what we hold */
+    ray_t* r = hook_is_q(fn) ? q_eval_apply_value(fn, args, n)
+             : n == 1        ? call_fn1(fn, args[0])
+             : n == 2        ? call_fn2(fn, args[0], args[1])
+             :                 call_lambda(fn, args, n);
+    ray_release(fn);
+    return r;
 }
 
 /* The handle a hook receives: a q hook (.z.po/.z.pc/.z.bm) gets the socket fd
@@ -501,11 +503,9 @@ static void hook_call_lifecycle(ray_poll_t* poll, int idx, int64_t handle, int64
     ipc_ctx_set(handle, poll ? poll : prev_poll);
     ray_t* r = hook_fire(fn, &arg, 1);
     ipc_ctx_set(prev, prev_poll);
-    if (r && RAY_IS_ERR(r)) {
-        const char* name = (idx == IPC_HOOK_OPEN) ? ".ipc.on.open" : ".ipc.on.close";
+    if (r && RAY_IS_ERR(r))
         fprintf(stderr, "ipc: %s hook raised an error (handle=%lld)\n",
-                name, (long long)handle);
-    }
+                IPC_HOOK_NAMES[idx], (long long)handle);
     ray_release(arg);
     if (r) {
         if (RAY_IS_ERR(r)) ray_error_free(r);
@@ -550,7 +550,7 @@ static void hook_call_badmsg(ray_poll_t* poll, int64_t handle, int64_t fd,
     ray_t* r = hook_fire(fn, &arg, 1);
     ipc_ctx_set(prev, prev_poll);
     if (r && RAY_IS_ERR(r))
-        fprintf(stderr, "ipc: .ipc.on.badmsg hook raised an error (handle=%lld)\n",
+        fprintf(stderr, "ipc: .z.bm hook raised an error (handle=%lld)\n",
                 (long long)handle);
     ray_release(arg);
     if (r) {
@@ -612,7 +612,7 @@ static int hook_call_auth(ray_poll_t* poll, int64_t handle,
 
     int ok;
     if (!r || RAY_IS_ERR(r)) {
-        fprintf(stderr, "ipc: .ipc.on.auth hook raised an error - rejecting\n");
+        fprintf(stderr, "ipc: .z.pw hook raised an error - rejecting\n");
         ok = 0;
     } else {
         ok = is_truthy(r) ? 1 : 0;
@@ -748,7 +748,7 @@ static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
          * a response) — log + drop so the operator sees the hook
          * misbehaving. */
         if (result && RAY_IS_ERR(result) && msgtype == RAY_IPC_MSG_ASYNC) {
-            fprintf(stderr, "ipc: .ipc.on.async hook raised an error\n");
+            fprintf(stderr, "ipc: .z.ps hook raised an error\n");
             ray_error_free(result);
             result = NULL;
         }
@@ -1139,7 +1139,7 @@ static ray_t* ipc_read_http(ray_poll_t* poll, ray_selector_t* sel)
             cd->phase = RAY_IPC_PHASE_WS;
             sel->rx.read_fn = ipc_read_ws;
             ray_poll_rx_request(poll, sel, q_ws_want((q_ws_conn_t*)cd->ws));
-            /* fire `.z.wo` AFTER arming the read (the .ipc.on.open pattern);
+            /* fire `.z.wo` AFTER arming the read (the .z.po pattern);
              * handle ctx exposed so `.z.w` resolves inside the hook.  The hook
              * may close this very conn — sel is not touched after. */
             int64_t prev = ipc_ctx_handle();
@@ -1229,7 +1229,7 @@ static ray_t* ipc_read_handshake(ray_poll_t* poll, ray_selector_t* sel)
     sel->rx.read_fn = ipc_read_header;
     ray_poll_rx_request(poll, sel, KDB_HDR_LEN);
     /* Connection is now fully ready for inbound messages.  Fire
-     * `.ipc.on.open` AFTER we've requested the next read, so a hook that
+     * `.z.po` AFTER we've requested the next read, so a hook that
      * calls back into the server can't race the read pump. */
     hook_call_lifecycle(poll, IPC_HOOK_OPEN, sel->id, sel->fd);
     return NULL;
@@ -1406,7 +1406,7 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
 static void ipc_on_close(ray_poll_t* poll, ray_selector_t* sel)
 {
     (void)poll;
-    /* Fire `.ipc.on.close` BEFORE tearing the per-conn state down so a
+    /* Fire `.z.pc` BEFORE tearing the per-conn state down so a
      * hook reading `.ipc.handle` still sees this connection's id, and
      * before the listener's own close path (which would otherwise also
      * route through here) runs the hook with a stale fd.  Guard on:
@@ -1480,7 +1480,7 @@ int64_t ray_ipc_listen(ray_poll_t* poll, uint16_t port)
 
 static void conn_close(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
 {
-    /* `.ipc.on.close` fires only for conns that were actually opened —
+    /* `.z.pc` fires only for conns that were actually opened —
      * a slot whose phase never advanced past HANDSHAKE was never
      * announced via on.open and so shouldn't be announced via on.close.
      * Keeps the pair balanced for the user. */

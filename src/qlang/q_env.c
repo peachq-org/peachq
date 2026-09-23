@@ -1,11 +1,10 @@
 /* q_env — q's K-tree as NESTED DICTS.  See q_env.h for the model.
  *
  * The two NAME-FACING verbs live here rather than in ops/: `key` and `set`
- * read and write the tree itself (root roster, context members, the one
- * .ipc.on.* seam), so their bodies belong beside the tree, not beside the
- * table kernels their dict arms happen to touch. */
+ * read and write the tree itself (root roster, context members), so their
+ * bodies belong beside the tree, not beside the table kernels their dict arms
+ * happen to touch. */
 #define _POSIX_C_SOURCE 200809L
-#define Q_OPS_ENV_GRANDFATHER /* the .ipc.on.* six-slot callback seam: ray_env_set on hook syms only */
 #include "qlang/q_count.h"
 #include "qlang/q_env.h"
 #include "qlang/q_registry_internal.h"
@@ -13,7 +12,6 @@
 #include "qlang/base/q_type.h"     /* q_type_is_table / _is_keyed — the \v|\a split */
 #include "qlang/q_builtins.h"      /* q_type_is_fn — the \f split (needs the apply module) */
 #include "qlang/q_comment.h"          /* the armed doc header's one consumption point */
-#include "qlang/q_dotz.h"         /* the .z.pX / .z.bm hook alias — one table for set AND unbind */
 #include "qlang/eval/q_view.h"    /* view hooks: set/unbind invalidation, dot-'nyi */
 #include "qlang/io/q_io.h"        /* q_io_set — `set`'s file half */
 #include "qlang/io/q_provider.h"  /* the link seam: q_provider_carrier_is, _link/_unlink — the HOST, never a provider */
@@ -24,7 +22,6 @@
 #include "table/dict.h"        /* ray_dict_* probes/upsert */
 #include "ops/linkop.h"        /* ray_link_has / ray_link_deref */
 #include "ops/temporal.h"      /* ray_temporal_accessor — the dotted accessor roster */
-#include "lang/env.h"          /* the SIX .ipc.on.* hook syms — the one rayfall-env seam */
 #include "mem/sys.h"
 #include <stdlib.h>            /* qsort — the member listings are sorted */
 #include <string.h>
@@ -170,25 +167,19 @@ ray_t* q_env_get(int64_t sym) {
 
 /* ---- assignment: path-copy amend down the dict chain ---- */
 
-/* The provider carrier the last leaf amend or remove displaced, retained: the link seam's unlink reads it
+/* The provider carrier a leaf amend or remove displaces, retained: the link seam's unlink reads it back out
  * (q_env_set / q_env_unbind).  One probe + one mark test per write is the whole cost to an ordinary assignment. */
-static ray_t* g_carrier_displaced;
-
-static void env_carrier_displace(ray_t* holder, int64_t seg) {
+static ray_t* env_carrier_of(ray_t* holder, int64_t seg) {
     ray_t* prev = ray_dict_probe_sym_borrowed(holder, seg);
-    if (prev && q_provider_carrier_is(prev)) { ray_retain(prev); g_carrier_displaced = prev; }
-}
-
-static ray_t* env_carrier_take(void) {
-    ray_t* d = g_carrier_displaced;
-    g_carrier_displaced = NULL;
-    return d;
+    if (!prev || !q_provider_carrier_is(prev)) return NULL;
+    ray_retain(prev);
+    return prev;
 }
 
 /* Consumes d; owned result, NULL on failure.  Missing ancestors conjure
  * marked dicts (`.fee.fi.fo:42` creates `.fee`, `.fee.fi`); an existing
  * non-dict (or unreachable collapsed slot) intermediate refuses. */
-static ray_t* env_amend(ray_t* d, const int64_t* segs, int nseg, int i, ray_t* val) {
+static ray_t* env_amend(ray_t* d, const int64_t* segs, int nseg, int i, ray_t* val, ray_t** disp) {
     ray_t* k = ray_sym(segs[i]);
     if (!k || RAY_IS_ERR(k)) {
         ray_release(d);
@@ -197,7 +188,7 @@ static ray_t* env_amend(ray_t* d, const int64_t* segs, int nseg, int i, ray_t* v
     }
     ray_t* r;
     if (i == nseg - 1) {
-        env_carrier_displace(d, segs[i]);
+        if (disp) *disp = env_carrier_of(d, segs[i]);
         r = ray_dict_upsert(d, k, val);
     } else {
         ray_t* child = ray_dict_probe_sym_borrowed(d, segs[i]);
@@ -209,7 +200,7 @@ static ray_t* env_amend(ray_t* d, const int64_t* segs, int nseg, int i, ray_t* v
             ray_release(k);
             return NULL;
         }
-        ray_t* nd = env_amend(sub, segs, nseg, i + 1, val);
+        ray_t* nd = env_amend(sub, segs, nseg, i + 1, val, disp);
         if (!nd) {
             ray_release(d);
             ray_release(k);
@@ -225,17 +216,17 @@ static ray_t* env_amend(ray_t* d, const int64_t* segs, int nseg, int i, ray_t* v
 
 /* The home is retained across the amend so a mid-path failure never loses
  * the tree (upsert consumes and path-copies via ray_cow at rc>1). */
-static ray_err_t env_store(ray_t** home, const int64_t* segs, int nseg, ray_t* val) {
+static ray_err_t env_store(ray_t** home, const int64_t* segs, int nseg, ray_t* val, ray_t** disp) {
     if (!*home) return RAY_ERR_DOMAIN;
     ray_retain(*home);
-    ray_t* nd = env_amend(*home, segs, nseg, 0, val);
+    ray_t* nd = env_amend(*home, segs, nseg, 0, val, disp);
     if (!nd) return RAY_ERR_DOMAIN;
     ray_release(*home);
     *home = nd;
     return RAY_OK;
 }
 
-static ray_err_t env_put(int64_t sym, ray_t* val, int boot_new) {
+static ray_err_t env_put(int64_t sym, ray_t* val, int boot_new, ray_t** disp) {
     const char* p; size_t n;
     ray_t* s = name_str(sym, &p, &n);
     if (!s) return RAY_ERR_DOMAIN;
@@ -246,14 +237,14 @@ static ray_err_t env_put(int64_t sym, ray_t* val, int boot_new) {
         int k = env_segs(p, n, start, segs, ENV_SEG_MAX);
         if (k <= 0) e = RAY_ERR_DOMAIN;
         else if (p[0] == '.') {
-            e = env_store(start == 1 ? &env_ns : &env_root, segs, k, val);
+            e = env_store(start == 1 ? &env_ns : &env_root, segs, k, val, disp);
         } else {
             ray_t** home = &env_root;
             int nk = ctx_reroot(segs, k, &home);
             if (nk == k && ray_dict_find_sym(env_root, segs[0]) < 0 &&
                 (ray_dict_find_sym(env_boot, segs[0]) >= 0 || boot_new))
                 home = &env_boot;
-            e = env_store(home, segs, nk, val);
+            e = env_store(home, segs, nk, val, disp);
         }
     }
     ray_release(s);
@@ -262,10 +253,7 @@ static ray_err_t env_put(int64_t sym, ray_t* val, int boot_new) {
 
 /* a bind is a park or a bootstrap write, invisible to the link seam as it is to views */
 ray_err_t q_env_bind(int64_t sym, ray_t* val) {
-    ray_err_t e = env_put(sym, val, 1);
-    ray_t* d = env_carrier_take();
-    if (d) ray_release(d);
-    return e;
+    return env_put(sym, val, 1, NULL);
 }
 
 /* the link seam: the carrier a write displaced, then the one it bound, under the name the write LANDED on */
@@ -343,38 +331,30 @@ static ray_err_t env_root_splat(ray_t* d) {
 
 /* THE one write home: every q form that binds a name (`:` `::`, indexed and
  * modified assign, `@`/`.` name-amend, `set`) lands here, so the whole name
- * policy is stated once — the `` `. `` root splat, the `.z.p*` alias onto the
- * six `.ipc.on.*` hook syms over RAYFALL's env (the one deliberate seam:
- * src/core/ipc.c reads them from g_env at dispatch).  Everything else is an
- * ordinary tree amend, settable `.z.*` handlers and `.z.zd` included — plain
- * globals their C fire sites read by name (q_wirefile reads the zip triple).
- * The branches converge on `e` so that EVERY successful bind — hook aliases
- * the tree amend never sees included — is a definition a doc header can name. */
+ * policy is stated once — the `` `. `` root splat, and otherwise an ordinary
+ * tree amend, settable `.z.*` handlers included: they are plain globals their
+ * C fire sites read by name (src/core/ipc.c reads the connection six,
+ * q_wirefile the `.z.zd` zip triple).  Both branches converge on `e` so that
+ * EVERY successful bind is a definition an armed doc header can name. */
 ray_err_t q_env_set(int64_t sym, ray_t* val) {
     if (!val) return q_env_unbind(sym);
+    const char* p; size_t n;
+    ray_t* s = name_str(sym, &p, &n);
+    if (!s) return RAY_ERR_DOMAIN;
+    int root = n == 1 && p[0] == '.';
+    ray_t* le = n > 0 ? env_pq_hook(p, n) : NULL;
+    if (le) ray_release(le);                 /* the load displayed it; the write itself still lands */
+    ray_release(s);
     ray_err_t e;
-    if (ray_sym_is_ipc_hook(sym)) {
-        e = ray_env_set(sym, val);
-    } else {
-        const char* p; size_t n;
-        ray_t* s = name_str(sym, &p, &n);
-        if (!s) return RAY_ERR_DOMAIN;
-        int hook = q_dotz_ipc_hook_index(p, n);
-        int root = n == 1 && p[0] == '.';
-        ray_t* le = n > 0 ? env_pq_hook(p, n) : NULL;
-        if (le) ray_release(le);             /* the load displayed it; the write itself still lands */
-        ray_release(s);
-        if (hook >= 0)   e = ray_env_set(ray_sym_ipc_hook(hook), val);
-        else if (root)   e = env_root_splat(val);
-        else {
-            e = env_put(sym, val, 0);
-            ray_t* old = env_carrier_take();
-            if (e == RAY_OK) {
-                q_view_on_global_set(sym);   /* invalidation + .z.vs */
-                if (old || q_provider_carrier_is(val)) e = env_link(sym, old, val);
-            }
-            if (old) ray_release(old);
+    if (root) e = env_root_splat(val);
+    else {
+        ray_t* old = NULL;
+        e = env_put(sym, val, 0, &old);
+        if (e == RAY_OK) {
+            q_view_on_global_set(sym);       /* invalidation + .z.vs */
+            if (old || q_provider_carrier_is(val)) e = env_link(sym, old, val);
         }
+        if (old) ray_release(old);
     }
     if (e == RAY_OK) q_comment_on_global_set(sym, val);
     return e;
@@ -388,16 +368,13 @@ ray_t* q_env_err(ray_err_t e) {
 }
 
 ray_err_t q_env_unbind(int64_t sym) {
-    if (ray_sym_is_ipc_hook(sym)) return ray_env_set(sym, NULL);
     const char* p; size_t n;
     ray_t* s = name_str(sym, &p, &n);
     if (!s) return RAY_ERR_TYPE;
     ray_err_t e = RAY_OK;
+    ray_t* old = NULL;
     int64_t segs[ENV_SEG_MAX];
-    int hook = q_dotz_ipc_hook_index(p, n);
-    if (hook >= 0) {
-        e = ray_env_set(ray_sym_ipc_hook(hook), NULL);
-    } else if (n > 0 && !(n == 1 && p[0] == '.')) {
+    if (n > 0 && !(n == 1 && p[0] == '.')) {
         size_t start = env_start(p, n);
         ray_t** home = (p[0] == '.' && start == 1) ? &env_ns : &env_root;
         int k = env_segs(p, n, start, segs, ENV_SEG_MAX);
@@ -418,7 +395,7 @@ ray_err_t q_env_unbind(int64_t sym) {
                     if (key) ray_release(key);
                     e = RAY_ERR_OOM;
                 } else {
-                    env_carrier_displace(holder, segs[k - 1]);
+                    old = env_carrier_of(holder, segs[k - 1]);
                     ray_retain(holder);
                     ray_t* nd = ray_dict_remove(holder, key);
                     ray_release(key);
@@ -429,7 +406,7 @@ ray_err_t q_env_unbind(int64_t sym) {
                         ray_release(*home);
                         *home = nd;
                     } else {
-                        e = env_store(home, segs, k - 1, nd);
+                        e = env_store(home, segs, k - 1, nd, NULL);
                         ray_release(nd);
                     }
                 }
@@ -437,7 +414,6 @@ ray_err_t q_env_unbind(int64_t sym) {
         }
     }
     ray_release(s);
-    ray_t* old = env_carrier_take();
     if (e == RAY_OK) {
         q_view_on_global_unbind(sym);   /* dependents go pending */
         if (old) e = q_provider_unlink(q_env_fullname(sym, NULL), old);
@@ -446,7 +422,7 @@ ray_err_t q_env_unbind(int64_t sym) {
     return e;
 }
 
-/* ---- the handle lane (q_env.h) ---- */
+/* ---- the handle lane (q_env.h): the ordinary env operations forced to ROOT scope, because a handle names a global ---- */
 
 /* the node a relative name's write LANDS on under `\d .ns` — ctx_reroot's read twin, so read-name == write-name
  * by construction; a dotted name and the root context read as q_env_get */
@@ -704,11 +680,6 @@ static ray_t* walk_segs(ray_t* v, int fresh, const char* p, size_t n, size_t pos
 ray_t* q_env_resolve(int64_t sym) {
     ray_t* v = frames_lookup(sym);
     if (v) { ray_retain(v); return v; }
-    if (ray_sym_is_ipc_hook(sym)) {            /* the six-slot callback table */
-        v = ray_env_get(sym);
-        if (v) ray_retain(v);
-        return v;
-    }
     const char* p; size_t n;
     ray_t* s = name_str(sym, &p, &n);
     if (!s) return NULL;
