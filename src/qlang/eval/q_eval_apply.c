@@ -1553,7 +1553,12 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
         return q_adverb_apply((int)c[2]->i64, c[0], row_unbox(c[1]),
                                    args, n);
     }
-    case Q_EVAL_CAR_COMP: return comp_call(fv, args, n);
+    case Q_EVAL_CAR_COMP: {
+        /* an elision projects the composition ITSELF; pushed down into the inner value it raised 'type */
+        for (int64_t i = 0; i < n; i++)
+            if (!args[i]) return q_eval_apply_proj_new(fv, NULL, args, n, rank_of(fv));
+        return comp_call(fv, args, n);
+    }
     case Q_EVAL_CAR_NONE:
         if (!q_eval_apply_is_fnval(fv)) {
             /* bare ENGINE lambda (rayfall-defined .rfl/serde values): base call */
