@@ -1,0 +1,36 @@
+# help-builtins-gaps - where lib/help-builtins.tsv and the live core namespaces are ALLOWED to disagree: name<TAB>kind<TAB>reason.
+# kind internal: bound in .q .Q .h .j (or a Q_OPS verb) but deliberately undocumented - never gets a help row.
+# kind unimplemented: documented in the TSV but not bound yet; reason is one word - out-of-scope (the 2026-08-03
+#   storage ADR rules partitioned/splayed WRITE out) or not-built.  The REPL highlighter leaves these uncoloured.
+# Read by tools/gen-hl-names.sh (the highlighter's name table) and test/q/namespace/builtins_documented.qcmd.
+.Q.c	internal	-
+.Q.ops	internal	-
+.h.i	internal	-
+.Q.bv	unimplemented	not-built
+.Q.Cf	unimplemented	out-of-scope
+.Q.chk	unimplemented	out-of-scope
+.Q.dpft	unimplemented	out-of-scope
+.Q.dpfts	unimplemented	out-of-scope
+.Q.dpt	unimplemented	out-of-scope
+.Q.dpts	unimplemented	out-of-scope
+.Q.dsftg	unimplemented	out-of-scope
+.Q.ens	unimplemented	not-built
+.Q.fc	unimplemented	not-built
+.Q.fk	unimplemented	not-built
+.Q.hdpf	unimplemented	out-of-scope
+.Q.l	unimplemented	not-built
+.Q.ld	unimplemented	not-built
+.Q.li	unimplemented	not-built
+.Q.lo	unimplemented	not-built
+.Q.P	unimplemented	not-built
+.Q.p1	unimplemented	not-built
+.Q.prf0	unimplemented	not-built
+.Q.ps	unimplemented	not-built
+.Q.st	unimplemented	not-built
+.Q.trpd	unimplemented	not-built
+.Q.u	unimplemented	not-built
+.Q.U	unimplemented	not-built
+.Q.view	unimplemented	not-built
+.Q.vt	unimplemented	not-built
+.Q.Xf	unimplemented	out-of-scope
+.h.ht	unimplemented	not-built

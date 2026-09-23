@@ -694,24 +694,14 @@ static int32_t find_next_utf8(const char* buf, int32_t pos, int32_t len) {
 
 /* ===== ANSI color constants ===== */
 
-#define CLR_GREEN      "\033[1;32m"
-#define CLR_YELLOW     "\033[1;33m"
 #define CLR_GRAY       "\033[1;38;5;8m"
-#define CLR_LIGHT_BLUE "\033[1;38;5;39m"
-#define CLR_SALAD      "\033[1;38;5;118m"
 #define CLR_RESET      "\033[0m"
-#define CLR_BACK_CYAN  "\033[46m"
 
-/* ===== Syntax highlighting helpers ===== */
+/* ===== Word characters (completion) ===== */
 
 static int is_alphanum(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
            (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '?' || c == '!';
-}
-
-static int is_op_char(char c) {
-    return c == '+' || c == '-' || c == '*' || c == '/' || c == '%' ||
-           c == '<' || c == '>' || c == '=' || c == '!' || c == '&' || c == '|';
 }
 
 /* ===== Bracket matching ===== */
@@ -751,6 +741,16 @@ static int in_string_at(const char* buf, int32_t pos) {
     return in_str;
 }
 
+/* map[i] = 1 for an opening quote and every byte inside its string, 0 elsewhere. */
+static void string_map(const char* buf, int32_t buf_len, uint8_t* map) {
+    int s = 0;
+    for (int32_t i = 0; i < buf_len; i++) {
+        if (buf[i] == '"' && !is_escaped(buf, i))
+            s = !s;
+        map[i] = (uint8_t)s;
+    }
+}
+
 int32_t ray_term_find_matching_paren(const char* buf, int32_t buf_len,
                                     int32_t cursor_pos) {
     if (cursor_pos < 0 || cursor_pos >= buf_len)
@@ -781,15 +781,9 @@ int32_t ray_term_find_matching_paren(const char* buf, int32_t buf_len,
             }
         }
     } else {
-        /* Scan backward: build string-state bitmap in one forward pass,
-         * then use it for the backward scan.  O(n) total. */
         uint8_t str_map[TERM_BUF_SIZE];
-        int s = 0;
-        for (int32_t i = 0; i < buf_len; i++) {
-            if (buf[i] == '"' && !is_escaped(buf, i))
-                s = !s;
-            str_map[i] = (uint8_t)s;
-        }
+        if (buf_len > TERM_BUF_SIZE) return -1;
+        string_map(buf, buf_len, str_map);
         for (int32_t i = cursor_pos; i >= 0; i--) {
             if (str_map[i]) continue;
             if (buf[i] == c) depth++;
@@ -803,147 +797,46 @@ int32_t ray_term_find_matching_paren(const char* buf, int32_t buf_len,
     return -1;
 }
 
-/* Write highlighted buffer content into dst. Returns bytes written. */
-static int32_t term_highlight_into(char* dst, int32_t dst_cap,
-                                   const char* buf, int32_t buf_len,
-                                   int32_t match_pos1, int32_t match_pos2) {
-    int32_t n = 0;
+/* Content bytes hold no unescaped quote, so the partner is simply the nearest one in the right direction. */
+static int32_t quote_partner(const char* buf, int32_t buf_len, const uint8_t* str_map, int32_t q) {
+    int32_t step = str_map[q] ? 1 : -1;
+    for (int32_t i = q + step; i >= 0 && i < buf_len; i += step)
+        if (buf[i] == '"' && !is_escaped(buf, i)) return i;
+    return -1;
+}
 
-#define HL_APPEND(s, slen) do { \
-    if (n + (slen) < dst_cap) { memcpy(dst + n, (s), (size_t)(slen)); n += (slen); } \
-} while (0)
-#define HL_LIT(s) HL_APPEND((s), (int32_t)strlen(s))
-
-    for (int32_t i = 0; i < buf_len; i++) {
-        char c = buf[i];
-        int colored = 0;
-
-        switch (c) {
-        case '(': case ')': case '[': case ']': case '{': case '}':
-            if (i == match_pos1 || i == match_pos2) {
-                HL_LIT(CLR_BACK_CYAN);
-            } else {
-                HL_LIT(CLR_GRAY);
-            }
-            HL_APPEND(&c, 1);
-            HL_LIT(CLR_RESET);
-            colored = 1;
-            break;
-
-        case ':':
-            /* Dict key colon */
-            HL_LIT(CLR_GRAY);
-            HL_APPEND(&c, 1);
-            HL_LIT(CLR_RESET);
-            colored = 1;
-            break;
-
-        case '"': {
-            /* String literal */
-            int32_t j = i + 1;
-            while (j < buf_len) {
-                if (buf[j] == '"' && !is_escaped(buf, j)) {
-                    j++;
-                    break;
-                }
-                j++;
-            }
-            HL_LIT(CLR_YELLOW);
-            HL_APPEND(buf + i, j - i);
-            HL_LIT(CLR_RESET);
-            i = j - 1;
-            colored = 1;
-            break;
-        }
-
-        case '\'': {
-            /* Quoted symbol: 'name */
-            int32_t j = i + 1;
-            while (j < buf_len && is_alphanum(buf[j])) j++;
-            if (j > i + 1) {
-                HL_LIT(CLR_SALAD);
-                HL_APPEND(buf + i, j - i);
-                HL_LIT(CLR_RESET);
-                i = j - 1;
-                colored = 1;
-            }
-            break;
-        }
-
-        case ';': {
-            /* Comment to end of line */
-            int32_t j = i;
-            while (j < buf_len && buf[j] != '\n') j++;
-            HL_LIT(CLR_GRAY);
-            HL_APPEND(buf + i, j - i);
-            HL_LIT(CLR_RESET);
-            i = j - 1;
-            colored = 1;
-            break;
-        }
-
-        default:
-            /* Check for word at word boundary.  Also accepts a leading `.`
-             * followed by alphanum so reserved-namespace builtins like
-             * `.sys.gc` / `.fs.size` are scanned as one token instead
-             * of three pieces (`.`, `sys`, `.`, `gc`).  Internal `.`
-             * extends the word only when followed by another alphanum,
-             * keeping `foo.` or `1.5)` from being mis-joined. */
-            {
-                int prev_ok = (i == 0 ||
-                               (!is_alphanum(buf[i - 1]) && buf[i - 1] != '.'));
-                int start_ok = is_alphanum(c) ||
-                               (c == '.' && i + 1 < buf_len && is_alphanum(buf[i + 1]));
-                if (prev_ok && start_ok) {
-                    int32_t j = i + 1;
-                    while (j < buf_len) {
-                        if (is_alphanum(buf[j])) { j++; continue; }
-                        if (buf[j] == '.' && j + 1 < buf_len &&
-                            is_alphanum(buf[j + 1])) { j++; continue; }
-                        break;
-                    }
-                    int32_t wlen = j - i;
-
-                    /* Exact-match env check — prefix lookup with max=1
-                     * returns only the first alphabetical match, which
-                     * would misclassify e.g. `de` when `del`/`desc` sort
-                     * earlier and hit the same prefix. */
-                    if (ray_env_has_name(buf + i, wlen)) {
-                        HL_LIT(CLR_GREEN);
-                        HL_APPEND(buf + i, wlen);
-                        HL_LIT(CLR_RESET);
-                    } else {
-                        /* Not a builtin — emit plain */
-                        HL_APPEND(buf + i, wlen);
-                    }
-                    i = j - 1;
-                    colored = 1;
-                    break;
-                }
-            }
-            if (is_op_char(c)) {
-                /* Check operator is standing alone (not part of a word) */
-                int prev_alnum = (i > 0 && is_alphanum(buf[i - 1]));
-                int next_alnum = (i + 1 < buf_len && is_alphanum(buf[i + 1]));
-                if (!prev_alnum && !next_alnum) {
-                    HL_LIT(CLR_LIGHT_BLUE);
-                    HL_APPEND(&c, 1);
-                    HL_LIT(CLR_RESET);
-                    colored = 1;
-                }
-            }
-            break;
-        }
-
-        if (!colored) {
-            HL_APPEND(&c, 1);
+void ray_term_match_pair(const char* buf, int32_t buf_len, int32_t cursor, int32_t* a, int32_t* b) {
+    *a = *b = -1;
+    if (buf_len <= 0 || buf_len > TERM_BUF_SIZE || cursor < 0 || cursor > buf_len) return;
+    for (int32_t k = cursor; k >= 0 && k >= cursor - 1; k--) {
+        int32_t m = ray_term_find_matching_paren(buf, buf_len, k);
+        if (m >= 0) { *a = k; *b = m; return; }
+    }
+    uint8_t str_map[TERM_BUF_SIZE];
+    string_map(buf, buf_len, str_map);
+    for (int32_t k = cursor; k >= 0 && k >= cursor - 1; k--) {
+        if (k < buf_len && buf[k] == '"' && !is_escaped(buf, k)) {
+            int32_t m = quote_partner(buf, buf_len, str_map, k);
+            if (m >= 0) { *a = k; *b = m; return; }
         }
     }
-
-#undef HL_LIT
-#undef HL_APPEND
-
-    return n;
+    if (cursor > 0 && str_map[cursor - 1]) {
+        int32_t open = cursor - 1;
+        while (buf[open] != '"' || is_escaped(buf, open)) open--;
+        int32_t m = quote_partner(buf, buf_len, str_map, open);
+        if (m >= 0) { *a = open; *b = m; }
+        return;
+    }
+    int depth = 0;
+    for (int32_t i = cursor - 1; i >= 0; i--) {
+        if (str_map[i]) continue;
+        if (is_close_bracket(buf[i])) depth++;
+        else if (is_open_bracket(buf[i]) && depth-- == 0) {
+            int32_t m = ray_term_find_matching_paren(buf, buf_len, i);
+            if (m >= 0) { *a = i; *b = m; }
+            return;
+        }
+    }
 }
 
 /* ===== Ghost text (inline completion) ===== */
@@ -1239,47 +1132,8 @@ static void comp_cycle_insert(ray_term_t* term, int32_t idx) {
 /* ===== Multi-line input ===== */
 
 int32_t ray_term_count_unmatched(ray_term_t* term) {
-    /* openq: a pluggable continuation policy fully replaces the built-in
-     * counter (whose `;`-as-comment rule is rayfall-correct, q-wrong). */
-    if (term->continuation_fn)
-        return term->continuation_fn(term->multiline_buf, term->multiline_len,
-                                     term->buf, term->buf_len);
-    int32_t depth = 0;
-    int32_t in_string = 0;
-
-    /* Scan multiline_buf first */
-    for (int32_t i = 0; i < term->multiline_len; i++) {
-        char c = term->multiline_buf[i];
-        if (in_string) {
-            if (c == '\\' && i + 1 < term->multiline_len) { i++; continue; }
-            if (c == '"') in_string = 0;
-            continue;
-        }
-        if (c == '"') { in_string = 1; continue; }
-        if (c == ';') {
-            while (i < term->multiline_len && term->multiline_buf[i] != '\n') i++;
-            continue;
-        }
-        if (c == '(' || c == '[' || c == '{') depth++;
-        else if (c == ')' || c == ']' || c == '}') { if (depth > 0) depth--; }
-    }
-
-    /* Then scan current buf — no newlines possible here (single line),
-       but skip from ';' to end of buf for consistency. */
-    for (int32_t i = 0; i < term->buf_len; i++) {
-        char c = term->buf[i];
-        if (in_string) {
-            if (c == '\\' && i + 1 < term->buf_len) { i++; continue; }
-            if (c == '"') in_string = 0;
-            continue;
-        }
-        if (c == '"') { in_string = 1; continue; }
-        if (c == ';') break; /* rest of current line is a comment */
-        if (c == '(' || c == '[' || c == '{') depth++;
-        else if (c == ')' || c == ']' || c == '}') { if (depth > 0) depth--; }
-    }
-
-    return depth;
+    if (!term->continuation_fn) return 0;
+    return term->continuation_fn(term->multiline_buf, term->multiline_len, term->buf, term->buf_len);
 }
 
 /* ===== Prompt ===== */
@@ -1381,15 +1235,14 @@ void ray_term_set_hint(ray_term_t* term, const char* text, int32_t accept_len) {
     term->hint_accept = accept_len > (int32_t)n ? (int32_t)n : accept_len;
 }
 
-/* Dispatch to the caller-supplied highlighter when one is installed,
- * otherwise fall back to the built-in.  Both share term_highlight_into's
- * signature so the default path stays byte-identical. */
 static int32_t term_highlight(const ray_term_t* term, char* dst, int32_t dst_cap,
                               const char* buf, int32_t buf_len,
                               int32_t match_pos1, int32_t match_pos2) {
     if (term->highlight_fn)
         return term->highlight_fn(dst, dst_cap, buf, buf_len, match_pos1, match_pos2);
-    return term_highlight_into(dst, dst_cap, buf, buf_len, match_pos1, match_pos2);
+    if (buf_len >= dst_cap) return 0;
+    memcpy(dst, buf, (size_t)buf_len);
+    return buf_len;
 }
 
 /* ===== Redraw ===== */
@@ -1444,18 +1297,8 @@ void ray_term_redraw(ray_term_t* term) {
             hlen += PROMPT_LEN;
         }
         if (term->buf_len > 0) {
-            /* Find bracket match at cursor */
-            int32_t match_pos1 = -1, match_pos2 = -1;
-            int32_t cursor = term->buf_pos;
-            /* Check char at cursor, or char before cursor */
-            if (cursor < term->buf_len) {
-                int32_t m = ray_term_find_matching_paren(term->buf, term->buf_len, cursor);
-                if (m >= 0) { match_pos1 = cursor; match_pos2 = m; }
-            }
-            if (match_pos1 < 0 && cursor > 0) {
-                int32_t m = ray_term_find_matching_paren(term->buf, term->buf_len, cursor - 1);
-                if (m >= 0) { match_pos1 = cursor - 1; match_pos2 = m; }
-            }
+            int32_t match_pos1, match_pos2;
+            ray_term_match_pair(term->buf, term->buf_len, term->buf_pos, &match_pos1, &match_pos2);
             hlen += term_highlight(term, hlbuf + hlen,
                                    (int32_t)sizeof(hlbuf) - hlen,
                                    term->buf, term->buf_len,

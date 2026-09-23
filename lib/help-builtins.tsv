@@ -96,6 +96,7 @@ key	key `:.	list the files in a directory
 keys	keys ([a:1 2]b:3 4)	name a table's primary-key columns
 xkey	`a xkey ([]a:1 2;b:3 4)	make the named columns a table's primary key
 like	"quick" like "qu*"	match text against a glob pattern
+rlike	`AAPL`MSFT`IBM rlike "^[AM]"	test whether text contains a match for a regular expression
 lj	([]a:1 2)lj([a:1 2]b:`x`y)	left join: add y's columns to x, matching on y's key
 ljf	([]a:1 2)ljf([a:1 2]b:`x`y)	left join that keeps x's values where y is null
 load	load `:trade	read a binary file or splayed table into a global
@@ -143,6 +144,7 @@ save	save `:trade.csv	write a global to a file, format chosen by the suffix
 rsave	rsave `trade	write a table splayed to a directory of that name
 select	select a from ([]a:1 2)	read rows and columns from a table
 from	select a from trade	name the table a select, exec, update or delete reads
+by	select count i by b from ([]b:1 1 2)	group the rows a select or exec reads by the named columns
 show	show 1 2 3	format a value and write it to the console
 signum	signum -3 0 2	report the sign as -1, 0 or 1
 sin	sin 0 1	take the sine of an angle in radians
