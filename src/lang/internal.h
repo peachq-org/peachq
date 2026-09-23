@@ -101,9 +101,7 @@ static inline int atom_is_oob_null(const ray_t* x) {
 }
 
 /* Check if an atom is a temporal type */
-static inline int is_temporal(ray_t* x) {
-    return RAY_IS_TEMPORAL32(-x->type) || RAY_IS_TEMPORAL64(-x->type);
-}
+static inline int is_temporal(ray_t* x) { return RAY_IS_TEMPORAL(-x->type); }
 
 /* Every atom as_f64 has a lane for: the numerics and all temporals, the f64-backed datetime included. */
 static inline int is_numeric_or_temporal(ray_t* x) {
@@ -164,7 +162,7 @@ static inline int64_t as_i64(ray_t* x) {
     if (x->type == -RAY_F32)
         return (x->f64 >= -9223372036854775808.0 && x->f64 < 9223372036854775808.0)
                    ? (int64_t)x->f64 : NULL_I64;
-    if (x->type == -RAY_I32)  return (int64_t)x->i32;
+    if (x->type == -RAY_I32 || RAY_IS_TEMPORAL32(-x->type)) return (int64_t)x->i32;
     if (x->type == -RAY_I16)  return (int64_t)x->i16;
     if (ray_is_bytelike(-x->type))   return (int64_t)x->u8;
     return x->i64; /* fallback */

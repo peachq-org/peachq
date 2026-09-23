@@ -131,6 +131,8 @@ typedef enum {
 #define RAY_IS_TEMPORAL32(t) ((t) == RAY_DATE || (t) == RAY_TIME || (t) == RAY_MONTH || \
                               (t) == RAY_MINUTE || (t) == RAY_SECOND)
 #define RAY_IS_TEMPORAL64(t) ((t) == RAY_TIMESTAMP || (t) == RAY_TIMESPAN)
+/* the two int-payload families together — the tag-shaped twin of is_temporal */
+#define RAY_IS_TEMPORAL(t)   (RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t))
 /* f64-backed temporal ("a float wearing a costume"): enrolls beside the
  * FLOAT-family case-lists, never the int-temporal macros above (int payload
  * readers would misread the f64 union slot). */

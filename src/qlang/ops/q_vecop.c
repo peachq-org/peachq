@@ -1,12 +1,14 @@
 /* q_vecop.c — the typed elementwise loops behind q_vecop.h.
  *
- * Three lanes carry every pair this file admits: BYTE (two 1-byte tags, which
- * have no null and no tolerance), INT (int64, nulls as NULL_I64) and DBL
- * (double, nulls as NaN).  Each operand is brought to its lane's width once —
- * an already-wide vector in place, a narrow one through a widening pass, an
- * atom as a zero-stride broadcast — and then ONE loop decides the whole
- * vector.  Which lane a pair lands on is not a preference: it reproduces the
- * kernels' own split, so the answer is the kernels' answer.
+ * Three lanes carry every pair this file admits: BYTE (the 1-byte tags, whose
+ * only null is the char blank, and no tolerance), INT (int64, nulls as NULL_I64)
+ * and DBL (double, nulls as NaN).  A same-type temporal rides INT on its own
+ * PAYLOAD — a common unit would buy nothing and overflow i64 past year 2292.
+ * Each operand is brought to its lane's width once — an already-wide vector in
+ * place, a narrow one through a widening pass, an atom as a zero-stride
+ * broadcast — and then ONE loop decides the whole vector.  Which lane a pair
+ * lands on is not a preference: it reproduces the kernels' own split, so the
+ * answer is the kernels' answer.
  *   ordering (< <= > >=)  ops/cmp.c int_cmp_lane: INT only when both operands
  *                         are int-lane tags, else the double tail with the
  *                         tolerance band; bool is NOT an int-lane tag there.
@@ -46,10 +48,15 @@ static vop_t op_of(ray_t* (*f)(ray_t*, ray_t*)) {
     return VO_NONE;
 }
 
-/* the two lane memberships ops/cmp.c turns on and the type axis does not name:
- * the 1-byte payloads, and int_cmp_lane's own set (which excludes bool) */
-static int byte_tag(int8_t t) { return t == RAY_BOOL || t == RAY_BYTE_ONLY; }
-static int int_tag(int8_t t) { return t == RAY_I64 || t == RAY_I32 || t == RAY_I16 || t == RAY_BYTE_ONLY; }
+/* the lane memberships ops/cmp.c turns on and the type axis does not name: the
+ * 1-byte payloads, and int_cmp_lane's own set (which excludes bool) */
+static int byte_tag(int8_t t) { return t == RAY_BOOL || ray_is_bytelike(t); }
+static int int_tag(int8_t t) {
+    return t == RAY_I64 || t == RAY_I32 || t == RAY_I16 || ray_is_bytelike(t) || RAY_IS_TEMPORAL(t);
+}
+/* Every tag the lanes read; the datetime stays out, its tolerance band being
+ * one q_type_is_float_tag does not name. */
+static int lane_tag(int8_t t) { return q_type_is_num_tag(t) || t == RAY_CHARV || RAY_IS_TEMPORAL(t); }
 static int answers_bool(vop_t op) { return op >= VO_LT && op <= VO_NE; }
 
 /* ===== operand widening ==================================================
@@ -68,7 +75,7 @@ static void widen_f(double* o, const void* s, int8_t t, int64_t n) {
             for (int64_t i = 0; i < n; i++) o[i] = p[i] ? 1.0 : 0.0;
             break;
         }
-        case RAY_BYTE_ONLY: {
+        RAY_BYTE_CASES: {
             const uint8_t* p = s;
             for (int64_t i = 0; i < n; i++) o[i] = (double)p[i];
             break;
@@ -103,7 +110,7 @@ static void widen_j(int64_t* o, const void* s, int8_t t, int64_t n) {
             for (int64_t i = 0; i < n; i++) o[i] = p[i] ? 1 : 0;
             break;
         }
-        case RAY_BYTE_ONLY: {
+        RAY_BYTE_CASES: {
             const uint8_t* p = s;
             for (int64_t i = 0; i < n; i++) o[i] = (int64_t)p[i];
             break;
@@ -144,7 +151,7 @@ static int band_make(band_t* o, ray_t* v, int8_t tag, int vec, lane_t ln, int64_
     }
     o->step = 1;
     const void* src = ray_data(v);
-    if (ln == LN_BYTE || (ln == LN_INT && tag == RAY_I64) || (ln == LN_DBL && tag == RAY_F64)) {
+    if (ln == LN_BYTE || (ln == LN_INT && (tag == RAY_I64 || RAY_IS_TEMPORAL64(tag))) || (ln == LN_DBL && tag == RAY_F64)) {
         o->p = src;
         return 1;
     }
@@ -161,37 +168,41 @@ static int band_make(band_t* o, ray_t* v, int8_t tag, int vec, lane_t ln, int64_
  * One byte per element: a comparison's own answer, or for & | ^ the mask
  * "take the LEFT operand here". */
 
-#define DEC_D(BOTH, ONLYX, ONLYY, EXPR)                                            \
+#define DEC_LOOP(T, ISNULL, BOTH, ONLYX, ONLYY, EXPR)                              \
     do {                                                                           \
-        const double *px = xb.p, *py = yb.p;                                       \
+        const T *px = xb.p, *py = yb.p;                                            \
         for (int64_t i = 0; i < n; i++, px += xb.step, py += yb.step) {            \
-            double x = *px, y = *py;                                               \
-            int nx = (x != x), ny = (y != y);                                      \
+            T x = *px, y = *py;                                                    \
+            int nx = (ISNULL(x)), ny = (ISNULL(y));                                \
             m[i] = (uint8_t)((nx && ny) ? (BOTH) : nx ? (ONLYX) : ny ? (ONLYY) : (EXPR)); \
         }                                                                          \
     } while (0)
 
-#define DEC_J(BOTH, ONLYX, ONLYY, EXPR)                                            \
-    do {                                                                           \
-        const int64_t *px = xb.p, *py = yb.p;                                      \
-        for (int64_t i = 0; i < n; i++, px += xb.step, py += yb.step) {            \
-            int64_t x = *px, y = *py;                                              \
-            int nx = (x == NULL_I64), ny = (y == NULL_I64);                        \
-            m[i] = (uint8_t)((nx && ny) ? (BOTH) : nx ? (ONLYX) : ny ? (ONLYY) : (EXPR)); \
-        }                                                                          \
-    } while (0)
+#define NUL_D(v) ((v) != (v))
+#define NUL_J(v) ((v) == NULL_I64)
+#define NUL_B(v) ((int)(v) == bnul)
+#define DEC_D(B, X, Y, E) DEC_LOOP(double, NUL_D, B, X, Y, E)
+#define DEC_J(B, X, Y, E) DEC_LOOP(int64_t, NUL_J, B, X, Y, E)
+#define DEC_B(B, X, Y, E) DEC_LOOP(uint8_t, NUL_B, B, X, Y, E)
 
-#define DEC_B(EXPR)                                                                \
-    do {                                                                           \
-        const uint8_t *px = xb.p, *py = yb.p;                                      \
-        for (int64_t i = 0; i < n; i++, px += xb.step, py += yb.step) {            \
-            unsigned x = *px, y = *py;                                             \
-            m[i] = (uint8_t)(EXPR);                                                \
-        }                                                                          \
-    } while (0)
+/* The int and byte lanes decide by the same exact ordering, so one roster of
+ * (both-null, x-null, y-null, value) answers serves both — the ^ default is
+ * "take x exactly where y is null". */
+#define DEC_EXACT(DEC)                                                             \
+    switch (op) {                                                                  \
+        case VO_LT: case VO_MIN: DEC(0, 1, 0, x < y); break;                       \
+        case VO_LE: DEC(1, 1, 0, x <= y); break;                                   \
+        case VO_GT: case VO_MAX: DEC(0, 0, 1, x > y); break;                       \
+        case VO_GE: DEC(1, 0, 1, x >= y); break;                                   \
+        case VO_EQ: DEC(1, 0, 0, x == y); break;                                   \
+        case VO_NE: DEC(0, 1, 1, x != y); break;                                   \
+        default: DEC(1, 0, 1, 0); break;                                           \
+    }
 
-/* `tol` is ops/cmp.c's tol_pair for this pair, and 0 for the & | picks. */
-static void decide(uint8_t* m, vop_t op, lane_t ln, band_t xb, band_t yb, int tol, int64_t n) {
+/* `tol` is ops/cmp.c's tol_pair for this pair, and 0 for the & | picks.  `bnul`
+ * is the byte lane's null: 0x20 for a char (kdb-true `null " "`), and a value no
+ * byte can hold for the bool/byte tags, which have none. */
+static void decide(uint8_t* m, vop_t op, lane_t ln, band_t xb, band_t yb, int tol, int bnul, int64_t n) {
     if (ln == LN_DBL) {
         switch (op) {
             case VO_LT: case VO_MIN: DEC_D(0, 1, 0, x < y && !(tol && ray_cmp_tol_eq(x, y))); break;
@@ -200,28 +211,12 @@ static void decide(uint8_t* m, vop_t op, lane_t ln, band_t xb, band_t yb, int to
             case VO_GE: DEC_D(1, 0, 1, x >= y || (tol && ray_cmp_tol_eq(x, y))); break;
             case VO_EQ: DEC_D(1, 0, 0, ray_cmp_tol_eq(x, y)); break;
             case VO_NE: DEC_D(0, 1, 1, !ray_cmp_tol_eq(x, y)); break;
-            default: DEC_D(1, 0, 1, 0); break;      /* ^ takes x exactly where y is null */
+            default: DEC_D(1, 0, 1, 0); break;
         }
     } else if (ln == LN_INT) {
-        switch (op) {
-            case VO_LT: case VO_MIN: DEC_J(0, 1, 0, x < y); break;
-            case VO_LE: DEC_J(1, 1, 0, x <= y); break;
-            case VO_GT: case VO_MAX: DEC_J(0, 0, 1, x > y); break;
-            case VO_GE: DEC_J(1, 0, 1, x >= y); break;
-            case VO_EQ: DEC_J(1, 0, 0, x == y); break;
-            case VO_NE: DEC_J(0, 1, 1, x != y); break;
-            default: DEC_J(1, 0, 1, 0); break;
-        }
+        DEC_EXACT(DEC_J);
     } else {
-        switch (op) {
-            case VO_LT: case VO_MIN: DEC_B(x < y); break;
-            case VO_LE: DEC_B(x <= y); break;
-            case VO_GT: case VO_MAX: DEC_B(x > y); break;
-            case VO_GE: DEC_B(x >= y); break;
-            case VO_EQ: DEC_B(x == y); break;
-            case VO_NE: DEC_B(x != y); break;
-            default: memset(m, 0, (size_t)n); break;  /* a byte is never null: ^ always takes y */
-        }
+        DEC_EXACT(DEC_B);
     }
 }
 
@@ -247,11 +242,12 @@ static void pick_into(ray_t* out, int8_t rt, lane_t ln, band_t xb, band_t yb, co
         return;
     }
     const int64_t *px = xb.p, *py = yb.p;
+    int w = ray_type_sizes[rt];          /* a temporal narrows by its payload width, not its tag */
     for (int64_t i = 0; i < n; i++, px += xb.step, py += yb.step) {
         int64_t v = m[i] ? *px : *py;
         int isnull = (v == NULL_I64);
-        if (rt == RAY_I16) ((int16_t*)o)[i] = isnull ? NULL_I16 : (int16_t)v;
-        else if (rt == RAY_I32) ((int32_t*)o)[i] = isnull ? NULL_I32 : (int32_t)v;
+        if (w == 2) ((int16_t*)o)[i] = isnull ? NULL_I16 : (int16_t)v;
+        else if (w == 4) ((int32_t*)o)[i] = isnull ? NULL_I32 : (int32_t)v;
         else ((int64_t*)o)[i] = v;
         if (isnull) ray_vec_set_null(out, i, true);
     }
@@ -268,7 +264,13 @@ ray_t* q_vecop_binary(ray_t* (*f)(ray_t*, ray_t*), ray_t* x, ray_t* y) {
     if ((!xv && !ray_is_atom(x)) || (!yv && !ray_is_atom(y))) return NULL;
     int8_t xt = xv ? x->type : (int8_t)-x->type;
     int8_t yt = yv ? y->type : (int8_t)-y->type;
-    if (!q_type_is_num_tag(xt) || !q_type_is_num_tag(yt)) return NULL;
+    if (!lane_tag(xt) || !lane_tag(yt)) return NULL;
+    /* Across a type difference the lanes take the plain numerics only.  A
+     * cross-type temporal pair is the narrowing matrix (basics/comparison.md:76-95),
+     * which neither this file nor the kernel implements yet (D0903a/D726b); a char
+     * beside a byte or bool puts ONE in-band null (the blank) on a lane whose
+     * other side has none. */
+    if (xt != yt && !(q_type_is_num_tag(xt) && q_type_is_num_tag(yt))) return NULL;
     if (xv && yv && x->len != y->len) return NULL;     /* 'length stays the caller's to raise */
     int64_t n = xv ? x->len : y->len;
     if (n <= 0) return NULL;                           /* so does the empty's carried type */
@@ -282,7 +284,7 @@ ray_t* q_vecop_binary(ray_t* (*f)(ray_t*, ray_t*), ray_t* x, ray_t* y) {
         else ln = (int_tag(xt) && int_tag(yt)) ? LN_INT : LN_DBL;
     } else {
         rt = q_type_common(xt, yt);
-        if (!rt || !q_type_is_num_tag(rt)) return NULL;
+        if (!lane_tag(rt)) return NULL;
         ln = byte_tag(rt) ? LN_BYTE : q_type_is_float_tag(rt) ? LN_DBL : LN_INT;
     }
 
@@ -301,7 +303,7 @@ ray_t* q_vecop_binary(ray_t* (*f)(ray_t*, ray_t*), ray_t* x, ray_t* y) {
     }
     if (out && !RAY_IS_ERR(out)) {
         int tol = (op == VO_MIN || op == VO_MAX) ? 0 : (q_type_is_float_tag(xt) || q_type_is_float_tag(yt));
-        decide(m, op, ln, xb, yb, tol, n);
+        decide(m, op, ln, xb, yb, tol, xt == RAY_CHARV ? 0x20 : 0x100, n);
         if (!answers_bool(op)) {
             pick_into(out, rt, ln, xb, yb, m, n);
             free(m);
