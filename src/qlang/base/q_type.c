@@ -12,11 +12,7 @@
 #include <string.h>               /* memchr/memset — matrix bake-out (init only) */
 #include <math.h>                 /* isinf — the infinity lane */
 
-int64_t q_type_as_i64(ray_t* x) {
-    if (RAY_IS_TEMPORAL32(-x->type)) return (int64_t)x->i32;
-    if (RAY_IS_TEMPORAL64(-x->type)) return x->i64;
-    return as_i64(x);
-}
+int64_t q_type_as_i64(ray_t* x) { return as_i64(x); }
 
 int q_type_is_bool(ray_t* x) {
     return x->type == -RAY_BOOL;
