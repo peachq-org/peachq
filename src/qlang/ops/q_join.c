@@ -566,8 +566,8 @@ static ray_t* qj_uj_unkeyed(ray_t* x, ray_t* y) {
 }
 
 /* keyed merge: x updated by y (mode 0 wholesale / 1 fill), unmatched y rows
- * appended.  THE single home for keyed uj / ujf / `,` / `^`. */
-ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode) {
+ * appended.  THE single home for keyed uj / ujf. */
+static ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode) {
     ray_t* xk = ray_dict_keys(x);                          /* borrowed */
     ray_t* yk = ray_dict_keys(y);                          /* borrowed */
     if (!qj_same_schema(xk, yk))
@@ -655,7 +655,7 @@ ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode) {
  * stores only y's OWN columns (ref/join.md:274; list/join.qcmd pins them
  * KEPT) — `merge` below, under `,` and `,:` alike (ref/join.md:140: keyed Join
  * is strict on the data columns too); the keyed JOIN home qj_ktbl_merge serves
- * uj/ujf/^ alone. */
+ * uj/ujf alone. */
 static ray_t* table_upsert(ray_t* x, ray_t* y, int exclusive, int merge) {
     int keyed = q_type_is_keyed(x);
     int64_t nkey = keyed ? ray_table_ncols(ray_dict_keys(x)) : 0;

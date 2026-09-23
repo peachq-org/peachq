@@ -321,9 +321,12 @@ static ray_t* acc_apply(ray_t* fv, const q_op_t* frow, ray_t** args,
 
 typedef struct { ray_t* fv; const q_op_t* frow; } map_zip_t;
 
-static ray_t* map_zip_apply(void* c, ray_t* x, ray_t* y) {
+static ray_t* map_zip(ray_t* fv, const q_op_t* frow, ray_t** args, int64_t n, uint64_t mask);
+
+/* two dicts of differing keys under a dyad: the pair law aligns them, then Each runs over each aligned group */
+static ray_t* map_zip_pair(void* c, ray_t* x, ray_t* y) {
     ray_t* av[2] = { x, y };
-    return q_eval_apply_concrete(q_eval_apply(((map_zip_t*)c)->fv, ((map_zip_t*)c)->frow, av, 2));
+    return map_zip(((map_zip_t*)c)->fv, ((map_zip_t*)c)->frow, av, 2, 3);
 }
 
 /* Each, Each Left and Each Right are ONE law (ref/maps.md: `x f\:y` is
@@ -349,7 +352,7 @@ static ray_t* map_zip(ray_t* fv, const q_op_t* frow, ray_t** args, int64_t n,
         if (dv) {
             if (!dk) { dk = av[p]; ray_retain(dk); }
             else if (!r && !q_match_rec(ray_dict_keys(dk), ray_dict_keys(av[p])))
-                r = n == 2 ? q_eval_apply_dict_zip(frow, dk, av[p], map_zip_apply, &(map_zip_t){ fv, frow })
+                r = n == 2 ? q_eval_apply_dict_pair(frow, dk, av[p], map_zip_pair, &(map_zip_t){ fv, frow })
                            : q_err(QE_LENGTH);
             ray_retain(dv);
             ray_release(av[p]);

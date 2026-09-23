@@ -45,7 +45,7 @@ ray_t* q_match_wrap(ray_t* a, ray_t* b);
 /* `?` Find — x?y: the first index in x of y, or of each item of y; a miss is `count x`; a dict answers keys.
  * Borrows both; owned result or owned error.  q_search_find_item: the first index of x (a boxed list) whose
  * ITEM whole-matches v, else cnt.  Both DEFINED in ops/q_search.c; declared here (like q_list_collapse) so the
- * apply module's dict-dict zip reaches them without the poisoned q_registry_internal.h. */
+ * eval family (funsql's domain Find) reaches them without the poisoned q_registry_internal.h. */
 ray_t* q_search_find(ray_t* x, ray_t* y);
 int64_t q_search_find_item(ray_t* x, ray_t* v, int64_t cnt);
 

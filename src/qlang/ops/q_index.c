@@ -940,6 +940,27 @@ static ray_t* dict_put1(ray_t* x, ray_t* key, int64_t p, ray_t* v) {
     return r;
 }
 
+ray_t* q_index_dict_align(ray_t* x, ray_t* ykeys) {
+    int64_t n0 = q_count(ray_dict_slots(x)[0]), m = q_count(ykeys), added = 0, miss = 0;
+    ray_t* pos = m ? dict_pos(x, ykeys) : ray_vec_new(RAY_I64, 1);
+    if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_OOM);
+    if (!m) pos->len = 0;
+    int run = pos->type == RAY_I64 && q_count(pos) == m;
+    for (int64_t j = 0; run && j < m; j++) miss |= ((const int64_t*)ray_data(pos))[j] >= n0;
+    if (miss || !run) pos = run_positions(x, ykeys, pos);        /* a hit-only run needs no repeat settling */
+    if (RAY_IS_ERR(pos)) return pos;
+    const int64_t* d = (const int64_t*)ray_data(pos);
+    for (int64_t j = 0; j < m; j++) if (d[j] >= n0 + added) added = d[j] + 1 - n0;
+    ray_t* out = ray_vec_new(RAY_I64, n0 + added > 0 ? n0 + added : 1);
+    if (!out || RAY_IS_ERR(out)) { ray_release(pos); return out ? out : q_err(QE_OOM); }
+    out->len = n0 + added;
+    int64_t* o = (int64_t*)ray_data(out);
+    for (int64_t r = 0; r < n0 + added; r++) o[r] = m;
+    for (int64_t j = m - 1; j >= 0; j--) o[d[j]] = j;              /* reversed, so the first occurrence wins */
+    ray_release(pos);
+    return out;
+}
+
 ray_t* q_index_dict_join(ray_t* x, ray_t* y, int strict) {
     ray_t** slots = ray_dict_slots(x);
     ray_t* ky = ray_dict_slots(y)[0];

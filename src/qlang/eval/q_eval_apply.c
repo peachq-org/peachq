@@ -42,6 +42,7 @@
 #include "table/sym.h"
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ===== RAY_QFN carriers ================================================== */
@@ -449,7 +450,7 @@ static ray_t* probe_atom(ray_t* coll) {
 
 static ray_t* atomic1(ray_unary_fn f, ray_t* x);
 /* the manifest row travels down the L2 lift (as it does with an adverb
- * operand, #443): its spelling keys the key-union fill (q_ops_identity, QI_FILL) */
+ * operand, #443): its spelling keys the dict pair's fill (q_ops_identity, QI_FILL) */
 static ray_t* atomic2(ray_binary_fn f, const q_op_t* row, ray_t* x, ray_t* y);
 
 static ray_t* unary_elem(ray_unary_fn fn, ray_t* e) {
@@ -720,79 +721,86 @@ static ray_t* atomic1(ray_unary_fn f, ray_t* x) {
     return f(x);
 }
 
-/* dyadic dict-dict: key-union distribution.  Common keys combine; a key on one
- * side only combines with the verb's identity element on the missing side when
- * the identity FILLS (`d1-d2` is 0-y there, ref/subtract.md), else it passes
- * through untouched (`d1%d2`, ref/divide.md; every identity-less verb). */
-/* where every union key sits on one side: ONE Find over that side's domain (a miss is its count), so the zip is
- * positional after two probes instead of a scan per key per side.  A general domain whose items mix ranks is
- * outside Find's rank law (find.md; PLAN.md register 2026-09-15), so there each key is matched whole instead.
- * uk borrowed; owned I64 or an owned error. */
-static ray_t* zip_pos(ray_t* keys, ray_t* uk) {
-    ray_t* p = q_search_find(keys, uk);
-    int64_t n = q_count(uk);
-    if (!p || RAY_IS_ERR(p) || (p->type == RAY_I64 && q_count(p) == n)) return p ? p : q_err(QE_TYPE);
-    ray_release(p);
-    if (keys->type != RAY_LIST) return q_err(QE_TYPE);
-    p = ray_vec_new(RAY_I64, n);
-    if (!p || RAY_IS_ERR(p)) return p ? p : q_err(QE_OOM);
-    p->len = n;
-    int64_t* d = (int64_t*)ray_data(p);
-    int64_t m = q_count(keys);
-    for (int64_t j = 0; j < n; j++) {
-        ray_t* k = q_index_elem_at(uk, j);
-        if (!k || RAY_IS_ERR(k)) { ray_release(p); return k ? k : q_err(QE_TYPE); }
-        d[j] = q_search_find_item(keys, k, m);
-        ray_release(k);
-    }
-    return p;
+/* `flip x` and `x,y` through the manifest value — the two primitives the container laws are spelled with */
+static ray_t* apply_named(const char* name, ray_t** a, int64_t n) {
+    const q_op_t* row = NULL;
+    ray_t* fv = q_eval_apply_manifest_value(q_ops_find(name, (int)strlen(name)), n == 1 ? Q_MONADIC : Q_DYADIC, &row);
+    return fv ? q_eval_apply(fv, row, a, n) : q_err(QE_TYPE);
 }
 
-ray_t* q_eval_apply_dict_zip(const q_op_t* row, ray_t* x, ray_t* y, q_eval_zip_fn f, void* ctx) {
-    ray_t* uk = ray_union_fn(ray_dict_keys(x), ray_dict_keys(y));
-    if (!uk || RAY_IS_ERR(uk)) return uk ? uk : q_err(QE_TYPE);
-    int64_t n = q_count(uk);
-    ray_t* vx = ray_dict_vals(x);
-    ray_t* vy = ray_dict_vals(y);
-    int64_t nx = q_count(ray_dict_keys(x)), ny = q_count(ray_dict_keys(y));
-    ray_t* px = n > 0 ? zip_pos(ray_dict_keys(x), uk) : NULL;
-    ray_t* py = n > 0 && !RAY_IS_ERR(px) ? zip_pos(ray_dict_keys(y), uk) : NULL;
-    if (RAY_IS_ERR(px) || RAY_IS_ERR(py)) {
-        ray_release(uk);
-        if (RAY_IS_ERR(px)) return px;
-        ray_release(px);
-        return py;
-    }
-    const int64_t* ix = px ? (const int64_t*)ray_data(px) : NULL;
-    const int64_t* iy = py ? (const int64_t*)ray_data(py) : NULL;
+static ray_t* flip_of(ray_t* x) { return apply_named("flip", &x, 1); }      /* ragged input 'length here */
+
+/* x,y consuming both (an error on either side is the answer) */
+static ray_t* join_owned(ray_t* x, ray_t* y) {
+    ray_t* a[2] = { x, y };
+    ray_t* r = !x || RAY_IS_ERR(x) ? x : !y || RAY_IS_ERR(y) ? y : apply_named(",", a, 2);
+    if (x && r != x) ray_release(x);
+    if (y && r != y) ray_release(y);
+    return r ? r : q_err(QE_TYPE);
+}
+
+/* v at positions p[0..n) — one gather through the index home (a table value gathers rows); owned */
+static ray_t* gather(ray_t* v, const int64_t* p, int64_t n) {
+    ray_t* ix = ray_vec_new(RAY_I64, n > 0 ? n : 1);
+    if (!ix || RAY_IS_ERR(ix)) return ix ? ix : q_err(QE_OOM);
+    ix->len = n;
+    memcpy(ray_data(ix), p, (size_t)n * sizeof(int64_t));
+    ray_t* r = q_index_at(v, &ix, 1);
+    ray_release(ix);
+    return r;
+}
+
+/* THE dict-pair law (owner ruling 2026-09-23): the keys align through the index home's one Find
+ * (q_index_dict_align) and the verb runs ONCE per aligned group — the shared keys' two gathers, an x-only group
+ * against the row's fill identity where it has one (`d1-d2` is 0-y, ref/subtract.md) else kept, a y-only group
+ * likewise else appended (ref/divide.md) — then the x half goes back to x's key order by one gather.  `f` sees
+ * collections, so a keyed pair's gathered ROWS meet the table law inside it: a keyed table is a dict here. */
+ray_t* q_eval_apply_dict_pair(const q_op_t* row, ray_t* x, ray_t* y, q_eval_zip_fn f, void* ctx) {
+    ray_t* xk = ray_dict_keys(x); ray_t* xv = ray_dict_vals(x);
+    ray_t* yk = ray_dict_keys(y); ray_t* yv = ray_dict_vals(y);
+    ray_t* al = q_index_dict_align(x, yk);
+    if (!al || RAY_IS_ERR(al)) return al ? al : q_err(QE_TYPE);
+    int64_t nx = q_count(xk), ny = q_count(yk), n = q_count(al), nh = 0, same = n == nx && ny == nx;
+    const int64_t* iy = (const int64_t*)ray_data(al);
+    for (int64_t r = 0; r < nx; r++) { nh += iy[r] < ny; same = same && iy[r] == r; }
+    int64_t* s = (int64_t*)malloc((size_t)(3 * nx + 1) * sizeof(int64_t));
+    if (!s) { ray_release(al); return q_err(QE_WSFULL); }
+    int64_t *hx = s, *hy = s + nh, *xo = s + 2 * nh, *perm = s + nx + nh;
+    for (int64_t r = 0, a = 0, b = 0; r < nx; r++)
+        if (iy[r] < ny) { hx[a] = r; hy[a] = iy[r]; perm[r] = a++; }
+        else            { xo[b] = r; perm[r] = nh + b++; }
     ray_t* id = row ? q_ops_identity(row->name, QI_FILL) : NULL;
-    ray_t* out = ray_list_new(n > 0 ? n : 1);
-    ray_t* bad = NULL;
-    for (int64_t j = 0; j < n; j++) {
-        ray_t* ex = ix[j] < nx ? q_index_elem_at(vx, ix[j]) : NULL;
-        ray_t* ey = iy[j] < ny ? q_index_elem_at(vy, iy[j]) : NULL;
-        ray_t* r;
-        if (ex && RAY_IS_ERR(ex))      { r = ex; ex = NULL; }
-        else if (ey && RAY_IS_ERR(ey)) { r = ey; ey = NULL; }
-        else if (ex && ey)             r = f(ctx, ex, ey);
-        else if (id)                   r = ex ? f(ctx, ex, id) : f(ctx, id, ey);
-        else                           { r = ex ? ex : ey; ray_retain(r); }
-        if (ex) ray_release(ex);
-        if (ey) ray_release(ey);
-        if (!r || RAY_IS_ERR(r)) { bad = r ? r : q_err(QE_TYPE); break; }
-        out = ray_list_append(out, r);
-        ray_release(r);
-        if (RAY_IS_ERR(out)) { bad = out; out = NULL; break; }
+    ray_t* part = NULL;
+    if (same) part = f(ctx, xv, yv);                                  /* one key order: no gather at all */
+    else if (nh > 0) {
+        ray_t* gx = gather(xv, hx, nh);
+        ray_t* gy = RAY_IS_ERR(gx) ? NULL : gather(yv, hy, nh);
+        part = RAY_IS_ERR(gx) ? gx : RAY_IS_ERR(gy) ? gy : f(ctx, gx, gy);
+        if (part != gx) ray_release(gx);
+        if (gy && part != gy) ray_release(gy);
     }
-    if (px) ray_release(px);
-    if (py) ray_release(py);
+    if (!same && nh < nx && (!part || !RAY_IS_ERR(part))) {
+        ray_t* gx = gather(xv, xo, nx - nh);
+        ray_t* g = id && !RAY_IS_ERR(gx) ? f(ctx, gx, id) : gx;
+        if (g != gx) ray_release(gx);
+        part = part ? join_owned(part, g) : g;
+        if (nh > 0 && !RAY_IS_ERR(part)) { ray_t* o = gather(part, perm, nx); ray_release(part); part = o; }
+    }
+    if (n > nx && (!part || !RAY_IS_ERR(part))) {
+        ray_t* gy = gather(yv, iy + nx, n - nx);
+        ray_t* g = id && !RAY_IS_ERR(gy) ? f(ctx, id, gy) : gy;
+        if (g != gy) ray_release(gy);
+        part = part ? join_owned(part, g) : g;
+    }
+    ray_t* keys = xk;
+    ray_retain(xk);
+    if (n > nx && part && !RAY_IS_ERR(part)) keys = join_owned(xk, gather(yk, iy + nx, n - nx));
+    free(s);
+    ray_release(al);
     if (id) ray_release(id);
-    if (bad) {
-        if (out) ray_release(out);
-        ray_release(uk);
-        return bad;
-    }
-    return ray_dict_new(uk, q_eval_apply_collapse(out));
+    if (!part || RAY_IS_ERR(part)) { ray_release(keys); return part ? part : q_err(QE_TYPE); }
+    if (RAY_IS_ERR(keys)) { ray_release(part); return keys; }
+    return ray_dict_new(keys, part);
 }
 
 typedef struct { ray_binary_fn f; const q_op_t* row; ray_t* other; int other_left; } a2ctx;
@@ -809,14 +817,22 @@ static ray_t* atomic2_zip(void* vctx, ray_t* x, ray_t* y) {
     return r;
 }
 
+/* two tables pair column by column: the dict-pair law over their column dicts, flipped back (`t+t`, owner ruling
+ * 2026-09-23); each side's dict is owned here and released once the pair has answered */
+static ray_t* table_pair(const q_op_t* row, ray_t* x, ray_t* y, q_eval_zip_fn f, void* ctx) {
+    ray_t* cx = flip_of(x);
+    ray_t* cy = RAY_IS_ERR(cx) ? NULL : flip_of(y);
+    ray_t* r = RAY_IS_ERR(cx) ? cx : RAY_IS_ERR(cy) ? cy : q_eval_apply_dict_pair(row, cx, cy, f, ctx);
+    if (r != cx) ray_release(cx);
+    if (cy && r != cy) ray_release(cy);
+    return r;
+}
+
 static ray_t* atomic2(ray_binary_fn f, const q_op_t* row, ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);
     int xd = x->type == RAY_DICT, yd = y->type == RAY_DICT;
-    if (xd && yd) {
-        if (q_type_is_keyed(x) && q_type_is_keyed(y)) return f(x, y);   /* the zip has no row Find: the wrapper's pair */
-        a2ctx c = { f, row, NULL, 0 };
-        return q_eval_apply_dict_zip(row, x, y, atomic2_zip, &c);
-    }
+    a2ctx c = { f, row, NULL, 0 };
+    if (xd && yd) return q_eval_apply_dict_pair(row, x, y, atomic2_zip, &c);
     if (xd || yd) {
         ray_t* d = xd ? x : y;
         ray_t* o = xd ? y : x;
@@ -828,11 +844,17 @@ static ray_t* atomic2(ray_binary_fn f, const q_op_t* row, ray_t* x, ray_t* y) {
         ray_retain(k);
         return ray_dict_new(k, nv);
     }
-    if (x->type == RAY_TABLE || y->type == RAY_TABLE) {
-        int xt = x->type == RAY_TABLE;
+    int xt = x->type == RAY_TABLE, yt = y->type == RAY_TABLE;
+    if (xt && yt) {
+        ray_t* d = table_pair(row, x, y, atomic2_zip, &c);
+        ray_t* t = RAY_IS_ERR(d) ? d : flip_of(d);
+        if (t != d) ray_release(d);
+        return t;
+    }
+    if (xt || yt) {
         ray_t* t = xt ? x : y;
         ray_t* o = xt ? y : x;
-        if (o->type == RAY_TABLE || is_coll(o)) return q_err(QE_NYI);
+        if (is_coll(o)) return q_err(QE_TYPE);            /* in a pair a table is no list of rows (owner 2026-09-23) */
         a2ctx ctx = { f, row, o, !xt };
         return q_table_map_cols(atomic2_col, &ctx, t);
     }
@@ -847,14 +869,6 @@ ray_t* q_eval_apply_manifest_value(const q_op_t* r, q_valence_t v,
     ray_t* val = q_registry_row_value(r, v);
     if (out) *out = val ? r : NULL;
     return val;
-}
-
-/* `flip x` through the manifest value — the transpose the rank-2 laws lean on */
-static ray_t* flip_of(ray_t* x) {
-    const q_op_t* frow = NULL;
-    ray_t* fl = q_eval_apply_manifest_value(q_ops_find("flip", 4), Q_MONADIC, &frow);
-    if (!fl) return q_err(QE_TYPE);
-    return q_eval_apply(fl, frow, &x, 1);       /* ragged input 'length here */
 }
 
 /* `f each flip x` — literally: the 4.1t traverse-columns law (ref/dev.md,
@@ -900,27 +914,49 @@ static ray_t* agg_nested(ray_t* fv, const q_op_t* row, ray_t* x) {
     return m;
 }
 
-/* a dyadic aggregate lifts over a dict (by its VALUES) or a nested list, and
- * never over a table — basics/math.md's "Exceptions to the above" lists
- * `wavg (tables)` / `wsum (tables)` while ref/{sum,avg}.md say each "applies
- * to dictionaries"; a keyed table is a dict wearing a table's law. */
-static int agg2_lifts(ray_t* v) {
-    return (v->type == RAY_DICT && !q_type_is_keyed(v)) ||
-           q_index_any_nested_item(v);
+/* a reduction over a table is one per column, colname!result (ref/sum.md; `wavg[2;] t`, owner ruling 2026-09-23):
+ * `other`, when held, rides whole into every column on the side it came from */
+static ray_t* reduce_cols(ray_t* fv, const q_op_t* row, ray_t* t, ray_t* other, int other_left) {
+    int64_t nc = ray_table_ncols(t);
+    ray_t* ks = ray_sym_vec_new(RAY_SYM_W64, nc > 0 ? nc : 1);
+    ray_t* vs = ray_list_new(nc > 0 ? nc : 1);
+    for (int64_t c = 0; c < nc; c++) {
+        ray_t* col = ray_table_get_col_idx(t, c);      /* borrowed */
+        ray_t* a[2] = { other_left ? other : col, other_left ? col : other };
+        ray_t* r = q_eval_apply_concrete(q_eval_apply(fv, row, other ? a : &col, other ? 2 : 1));
+        if (RAY_IS_ERR(r)) { ray_release(ks); ray_release(vs); return r; }
+        int64_t nm = ray_table_col_name(t, c);
+        ks = ray_vec_append(ks, &nm);
+        vs = ray_list_append(vs, r);
+        ray_release(r);
+    }
+    return ray_dict_new(ks, q_eval_apply_collapse(vs));
+}
+
+typedef struct { ray_t* fv; const q_op_t* row; } fnctx;
+
+/* the pair callback of a NON-atomic verb: the verb each over the aligned groups */
+static ray_t* each_pair(void* c, ray_t* x, ray_t* y) {
+    ray_t* a[2] = { x, y };
+    return q_adverb_apply(0 /* `'` each */, ((fnctx*)c)->fv, ((fnctx*)c)->row, a, 2);
 }
 
 /* THE dyadic rank-2 arm, spelled by ref/avg.md's own annotation on
  * `(1 2;3 4) wavg (500 400;300 200)`: "this is (1 3 wavg 500 300; 2 4 wavg
  * 400 200)" — the two args' COLUMNS zipped, a flat arg riding whole into
- * every column (`1 2 wavg d`, same page). */
+ * every column (`1 2 wavg d`, same page).  A dict reduces by its value (the
+ * keys drop; a keyed table's value is a table), a table by its columns. */
 static ray_t* agg2(ray_t* fv, const q_op_t* row, ray_t* x, ray_t* y) {
-    ray_t* vx = agg2_lifts(x) && x->type == RAY_DICT ? ray_dict_vals(x) : x;
-    ray_t* vy = agg2_lifts(y) && y->type == RAY_DICT ? ray_dict_vals(y) : y;
-    ray_t* fx = q_index_any_nested_item(vx) ? flip_of(vx) : NULL;
+    if (x->type == RAY_DICT) return agg2(fv, row, ray_dict_vals(x), y);
+    if (y->type == RAY_DICT) return agg2(fv, row, x, ray_dict_vals(y));
+    if (x->type == RAY_TABLE && y->type == RAY_TABLE) return table_pair(row, x, y, each_pair, &(fnctx){ fv, row });
+    if (y->type == RAY_TABLE) return reduce_cols(fv, row, y, x, 1);
+    if (x->type == RAY_TABLE) return reduce_cols(fv, row, x, y, 0);
+    ray_t* fx = q_index_any_nested_item(x) ? flip_of(x) : NULL;
     if (fx && RAY_IS_ERR(fx)) return fx;
-    ray_t* fy = q_index_any_nested_item(vy) ? flip_of(vy) : NULL;
+    ray_t* fy = q_index_any_nested_item(y) ? flip_of(y) : NULL;
     if (fy && RAY_IS_ERR(fy)) { ray_release(fx); return fy; }
-    if (!fx && !fy) { ray_t* a[2] = { vx, vy }; return q_eval_apply(fv, row, a, 2); }
+    if (!fx && !fy) { ray_t* a[2] = { x, y }; return q_eval_apply(fv, row, a, 2); }
     if (fx && fy && q_count(fx) != q_count(fy)) {
         ray_release(fx); ray_release(fy);
         return q_err(QE_LENGTH);
@@ -928,8 +964,8 @@ static ray_t* agg2(ray_t* fv, const q_op_t* row, ray_t* x, ray_t* y) {
     int64_t n = q_count(fx ? fx : fy);
     ray_t* out = ray_list_new(n > 0 ? n : 1);
     for (int64_t i = 0; i < n; i++) {
-        ray_t* xi = fx ? q_index_elem_at(fx, i) : vx;
-        ray_t* yi = fy ? q_index_elem_at(fy, i) : vy;
+        ray_t* xi = fx ? q_index_elem_at(fx, i) : x;
+        ray_t* yi = fy ? q_index_elem_at(fy, i) : y;
         ray_t* a[2] = { xi, yi };
         ray_t* r = q_eval_apply(fv, row, a, 2);
         if (fx) ray_release(xi);
@@ -952,21 +988,7 @@ static ray_t* agg1(ray_t* fv, const q_op_t* row, ray_t* x) {
         ray_t* v = ray_dict_vals(x);
         return q_eval_apply(fv, row, &v, 1);
     }
-    if (x && x->type == RAY_TABLE) {
-        int64_t nc = ray_table_ncols(x);
-        ray_t* ks = ray_sym_vec_new(RAY_SYM_W64, nc > 0 ? nc : 1);
-        ray_t* vs = ray_list_new(nc > 0 ? nc : 1);
-        for (int64_t c = 0; c < nc; c++) {
-            ray_t* col = ray_table_get_col_idx(x, c);      /* borrowed */
-            ray_t* r = q_eval_apply_concrete(q_eval_apply(fv, row, &col, 1));
-            if (RAY_IS_ERR(r)) { ray_release(ks); ray_release(vs); return r; }
-            int64_t nm = ray_table_col_name(x, c);
-            ks = ray_vec_append(ks, &nm);
-            vs = ray_list_append(vs, r);
-            ray_release(r);
-        }
-        return ray_dict_new(ks, q_eval_apply_collapse(vs));
-    }
+    if (x && x->type == RAY_TABLE) return reduce_cols(fv, row, x, NULL, 0);
     if (row && row->nested && q_index_any_nested_item(x)) return agg_nested(fv, row, x);
     return q_err(QE_TYPE);
 }
@@ -1642,8 +1664,8 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
             if (n == 1 && (is_container(args[0]) ||
                            (row->nested && q_index_any_nested_item(args[0]))))
                 return agg1(fv, row, args[0]);
-            if (n == 2 && row->nested &&
-                (agg2_lifts(args[0]) || agg2_lifts(args[1])))
+            if (n == 2 && (is_container(args[0]) || is_container(args[1]) ||
+                           (row->nested && (q_index_any_nested_item(args[0]) || q_index_any_nested_item(args[1])))))
                 return agg2(fv, row, args[0], args[1]);
         } else if (strcmp(fam, "map") == 0) {
             if (n == 1 && (is_container(args[0]) ||

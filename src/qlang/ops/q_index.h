@@ -59,6 +59,12 @@ ray_t* q_index_amend(ray_t* x, ray_t* const* ix, int64_t k, ray_t* f, ray_t* y);
  * caller's only ref, its slots included; a shared level copies once), the caller's on error; y borrowed. */
 ray_t* q_index_dict_join(ray_t* x, ray_t* y, int strict);
 
+/* The key alignment of a dict PAIR — the read half of the dict write above (one Find of ykeys over x's domain,
+ * run_positions' repeat law), for the lifts that combine two dicts: an owned I64 vector with one slot per result
+ * key — x's keys, then y's new keys in y's order, a repeated key by its FIRST occurrence — holding the y position
+ * aligned to that slot, or `count ykeys` where none is (an x-only key).  A table domain matches rows.  Borrows both. */
+ray_t* q_index_dict_align(ray_t* x, ray_t* ykeys);
+
 /* THE keyed-table write — the dict write with table slots (ref/upsert.md §Keyed table; ref/join.md:140,274;
  * ref/insert.md:56).  y is a keyed table of x's schema (the door normalised it: q_table_rows_normalize then
  * `nkey!rows`).  `(key x)?key y` once — run_positions' law: a repeated key appends once, its last occurrence wins —
