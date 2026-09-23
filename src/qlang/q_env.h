@@ -18,6 +18,8 @@ void      q_env_destroy(void);
 /* Borrowed ref or NULL: the pure dict chain (`.a.b.c` = successive general-
  * dict probes; a namespace name yields its stored dict; `.` the root). */
 ray_t* q_env_get(int64_t sym);
+/* q_env_get without the `.pq` autoload, for probing optional configuration (`.pq.hl`); NULL before q_env_init. */
+ray_t* q_env_peek(int64_t sym);
 
 /* Full resolution — locals (frame stack, barrier-aware), then the dict walk
  * plus the non-dict segment steps: table/link deref and the temporal

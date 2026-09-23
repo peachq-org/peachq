@@ -165,7 +165,7 @@
 
 / the effective console (rows;cols): `\c`, its auto (`0N`) axes filled from
 / the live terminal (.help.i.termsize, a C native bound at boot).
-.help.i.csize:{[] (2#.help.i.termsize[])^system"c"}
+.help.i.csize:{[] .help.i.termsize[]^system"c"}
 
 / lines clipped to the console width with the console's own `..` mark, so no
 / printed help line ever wraps.

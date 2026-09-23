@@ -141,14 +141,15 @@ static int ctx_reroot(int64_t* segs, int k, ray_t*** home) {
     return k + 1;
 }
 
-ray_t* q_env_get(int64_t sym) {
+static ray_t* env_get(int64_t sym, int load) {
+    if (!env_ns) return NULL;
     const char* p; size_t n;
     ray_t* s = name_str(sym, &p, &n);
     if (!s) return NULL;
     ray_t* v = NULL;
     if (n == 1 && p[0] == '.') v = env_root;
     else if (n > 0) {
-        ray_t* e = env_pq_hook(p, n);
+        ray_t* e = load ? env_pq_hook(p, n) : NULL;
         if (e) ray_release(e);               /* the load displayed it; a borrowed probe answers absence */
         size_t start = env_start(p, n);
         ray_t* home = (p[0] == '.' && start == 1) ? env_ns : env_root;
@@ -164,6 +165,9 @@ ray_t* q_env_get(int64_t sym) {
     ray_release(s);
     return v;
 }
+
+ray_t* q_env_get(int64_t sym)  { return env_get(sym, 1); }
+ray_t* q_env_peek(int64_t sym) { return env_get(sym, 0); }
 
 /* ---- assignment: path-copy amend down the dict chain ---- */
 
