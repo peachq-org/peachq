@@ -302,7 +302,7 @@ static ray_t* b38_table(const conn_row* rows, int64_t n, ray_t* y) {
         } else {
             fd = q_type_ivec_get(y, i);
         }
-        const conn_row* r;
+        const conn_row* r = NULL;
         ray_t* e = b38_row(rows, n, fd, &r);
         if (e) {                               /* the semantic error wins */
             ray_t* bad = cols_bad(c, 5);

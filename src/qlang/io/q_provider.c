@@ -785,7 +785,7 @@ static int from_tref(ray_t* t, tref_t* tr, ray_t** err_out) {
     }
     int form = q_provider_coord_sym_form(t);
     if (form == 2) {
-        sym_text(t, &p, &n);
+        if (!sym_text(t, &p, &n)) { *err_out = q_err(QE_TYPE); return 1; }
         *err_out = tref_open(p, n, tr);
         return 1;
     }

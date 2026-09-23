@@ -829,7 +829,7 @@ static ray_t* qd_open_wrap(ray_t** args, int64_t n) {
 }
 
 static ray_t* qd_close_fn(ray_t* x) {
-    int slot;
+    int slot = -1;
     ray_t* e = qd_door(&x, 1, 1, &slot);
     if (e) return e;
     if (g_main.open && slot == g_main.slot) return q_err(QE_DOMAIN);
