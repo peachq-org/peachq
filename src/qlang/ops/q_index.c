@@ -693,10 +693,10 @@ static ray_t* grow_misses(ray_t** nk, ray_t** nv, ray_t* ky, ray_t* vy, const in
 }
 
 /* Every value at its settled position — a hit, or a miss's slot once grown (its first occurrence rewrites itself,
- * a repeat overwrites it: last wins): one typed scatter when the shapes allow, else the item store; in place at rc 1
- * either way.  NULL on success. */
+ * a repeat overwrites it: last wins): a table slot's items are rows, so the amend's table level stores them; else one
+ * typed scatter when the shapes allow, else the item store; in place at rc 1 either way.  NULL on success. */
 static ray_t* store_run(ray_t** nv, ray_t* pos, ray_t* vy) {
-    ray_t* r = scatter_store(*nv, pos, vy);
+    ray_t* r = (*nv)->type == RAY_TABLE ? q_index_amend(*nv, &pos, 1, NULL, vy) : scatter_store(*nv, pos, vy);
     if (r && RAY_IS_ERR(r)) return r;
     if (r) { *nv = r; return NULL; }
     const int64_t* d = (const int64_t*)ray_data(pos);
