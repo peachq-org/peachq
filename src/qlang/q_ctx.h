@@ -23,6 +23,10 @@
  * q_err_e + 1 — the statement never ran. */
 int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err, int print_result);
 
+/* Called as each q_ctx_run_line line finishes, a q)) line inside the one it suspended included: its text, "ok" or
+ * the error shown ('type), and its ms; "exit" for the line that ends the process.  The tty keeps its history here. */
+void q_ctx_set_line_done(void (*fn)(const char* s, size_t n, const char* status, int64_t ms));
+
 /* A file of q source under kdb script semantics: an INDENTED line continues the
  * previous logical one, blank/comment lines do not flush, `/`..`\` blocks skip,
  * and a trimmed singleton `\` exits the script.  Returns 1 if the file's bytes

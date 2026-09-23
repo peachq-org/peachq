@@ -25,6 +25,7 @@
 #include "mem/sys.h"              /* ray_sys_alloc — remote-eval scratch */
 #include "ops/ops.h"              /* ray_is_lazy, ray_lazy_materialize */
 #include "app/term.h"             /* ray_term_interrupted */
+#include "core/timer.h"           /* ray_time_now_ms — a finished line's ms */
 #include <rayforce.h>
 #include <limits.h>               /* PATH_MAX — the load's resolved file symbol */
 #include <stdlib.h>
@@ -38,7 +39,25 @@ static void (*g_tty_restore)(void);
 void q_ctx_set_console_close(void (*fn)(void)) { g_console_close = fn; }
 void q_ctx_set_tty_restore(void (*fn)(void))   { g_tty_restore = fn; }
 static void ctx_tty_restore(void) { if (g_tty_restore) g_tty_restore(); }
+/* The console line running now (innermost: a q)) line inside the q) line it suspended), for the line-done hook. */
+typedef struct { const char* s; size_t n; int64_t t0; } ctx_line_t;
+static ctx_line_t g_line;
+static void (*g_line_done)(const char* s, size_t n, const char* status, int64_t ms);
+
+void q_ctx_set_line_done(void (*fn)(const char*, size_t, const char*, int64_t)) { g_line_done = fn; }
+
+static void ctx_line_done(ray_t* e, const char* status) {
+    char        st[128];
+    int64_t     n = 0;
+    const char* t = e ? q_err_text(e, &n) : NULL;
+    if (t) snprintf(st, sizeof st, "'%.*s", (int)n, t);
+    else   snprintf(st, sizeof st, "%s", status);
+    if (g_line_done && g_line.s) g_line_done(g_line.s, g_line.n, st, ray_time_now_ms() - g_line.t0);
+    g_line.s = NULL;
+}
+
 void q_ctx_console_close(void) {
+    if (g_line.s) ctx_line_done(NULL, "exit");
     ctx_tty_restore();
     if (g_console_close) g_console_close();
 }
@@ -144,6 +163,7 @@ static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
             ctx_load_esig(esig, &t);
             return code;
         }
+        ctx_line_done(r, NULL);
         ctx_show_err(out, err, r);
         q_dbg_statement_end(dbg_prev);
         return code;
@@ -173,7 +193,9 @@ static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
         ray_term_clear_interrupt();
         if (RAY_IS_ERR(r)) ray_error_free(r); else ray_release(r);
         q_err_drop();              /* the discarded error's text never re-renders */
-        ctx_show_err(out, err, q_err(QE_STOP));
+        ray_t* stop = q_err(QE_STOP);
+        if (!in_load) ctx_line_done(stop, NULL);
+        ctx_show_err(out, err, stop);
         ctx_statement_end();
         q_dbg_statement_end(dbg_prev);
         if (in_load) {             /* a Ctrl-C aborts the load — never suspends */
@@ -202,6 +224,7 @@ static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
             ctx_load_esig(esig, &t);
             return code;
         }
+        ctx_line_done(r, NULL);
         ctx_show_err(out, err, r);
         ctx_statement_end();
         q_dbg_statement_end(dbg_prev);
@@ -221,11 +244,14 @@ static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
             fputc('\n', out);
             free(txt);
         } else {
-            ctx_show_err(out, err, q_err(QE_WSFULL));   /* a display we cannot build is an error */
+            ray_t* e = q_err(QE_WSFULL);   /* a display we cannot build is an error */
+            if (!in_load) ctx_line_done(e, NULL);
+            ctx_show_err(out, err, e);
         }
     }
     ray_release(r);
     fflush(out);
+    if (!in_load && g_line.s) ctx_line_done(NULL, "ok");
     ctx_statement_end();
     q_dbg_statement_end(dbg_prev);
     return 0;
@@ -233,7 +259,11 @@ static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
 
 int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
                    int print_result) {
-    return ctx_line(s, n, out, err, print_result, 0, NULL);
+    ctx_line_t prev = g_line;
+    g_line = (ctx_line_t){ s, n, ray_time_now_ms() };
+    int rc = ctx_line(s, n, out, err, print_result, 0, NULL);
+    g_line = prev;
+    return rc;
 }
 
 /* THE multiline law as ONE walker every text door rides — the script runner

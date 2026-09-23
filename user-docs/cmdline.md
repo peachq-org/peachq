@@ -170,6 +170,8 @@ q -conn :localhost:5000 -ls
 
 ### Query history: `~/.qhist.d/`
 
+This is the `-conn` result store; the console's own line history, `~/.qhist`, is described in [the REPL](repl.md).
+
 Every call is recorded under `~/.qhist.d/<host>_<port>/` (`HOME`, or `USERPROFILE` on Windows; credentials never
 reach a path): `index.tsv` keeps the last 200 calls — timestamp, `ok`/`fail`/`oversize`, the error text, serialised
 bytes, rows, and the query flattened to one line of at most 200 characters — and the last 10 results are kept as

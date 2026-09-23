@@ -183,6 +183,8 @@ typedef struct ray_term {
      * modes, history file): destroy and the fatal-signal path restore and
      * save.  0 for ray_term_create_io terms. */
     int32_t owns_console;
+    /* 1 when the console also loads and saves ~/.rayforce_history (ray_term_create); q keeps its own. */
+    int32_t hist_file;
 } ray_term_t;
 
 /* The OS-console door: raw tty mode + history file + ioctl size polling.
@@ -191,6 +193,7 @@ typedef struct ray_term {
  * file; feed input by writing term->input[0] + ray_term_feed, push size
  * with ray_term_set_size). */
 ray_term_t* ray_term_create(void);
+ray_term_t* ray_term_create_console(int hist_file);   /* ray_term_create, with or without ~/.rayforce_history */
 ray_term_t* ray_term_create_io(const ray_term_io_t* io);
 void       ray_term_destroy(ray_term_t* term);
 int64_t    ray_term_getc(ray_term_t* term);
@@ -278,7 +281,7 @@ void ray_term_request_interrupt(void);
 void ray_term_eval_begin(ray_term_t* term);
 void ray_term_eval_end(ray_term_t* term);
 
-#define HIST_MAX_ENTRIES 1000
+#define HIST_MAX_ENTRIES 5000
 #define HIST_DEFAULT_PATH ".rayforce_history"
 
 #endif /* RAY_TERM_H */
