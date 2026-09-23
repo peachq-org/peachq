@@ -37,6 +37,12 @@
 #endif
 
 ray_sock_t ray_sock_listen(uint16_t port);
+/* ip is IPv4 in network order (ray_sock_resolve4).  reuseport sets SO_REUSEPORT; Windows has none and binds exclusively. */
+ray_sock_t ray_sock_listen_at(uint32_t ip, uint16_t port, bool reuseport);
+/* host's first IPv4 address, network order; NULL or "" is every interface.  0, or -1 + errno. */
+int        ray_sock_resolve4(const char* host, uint32_t* ip);
+/* The tcp port a /etc/services name stands for; 0 when unknown. */
+uint16_t   ray_sock_service_port(const char* name);
 ray_sock_t ray_sock_accept(ray_sock_t srv);
 /* Connect to host:port.  timeout_ms > 0 bounds the connect: the socket
  * connects non-blocking and waits at most timeout_ms for completion (a
