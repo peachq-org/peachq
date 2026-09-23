@@ -374,21 +374,6 @@ ray_t* ray_println_fn(ray_t** args, int64_t n);
 ray_t* ray_read_file_fn(ray_t* path_obj);
 ray_t* ray_write_file_fn(ray_t* path_obj, ray_t* content);
 
-/* Vector similarity / embeddings / HNSW.
- * cos-dist and l2-dist return distance (lower = closer); inner-prod is
- * the raw mathematical dot product. */
-ray_t* ray_cos_dist_fn(ray_t* a, ray_t* b);
-ray_t* ray_inner_prod_fn(ray_t* a, ray_t* b);
-ray_t* ray_l2_dist_fn(ray_t* a, ray_t* b);
-ray_t* ray_norm_fn(ray_t* x);
-ray_t* ray_knn_fn(ray_t** args, int64_t n);
-ray_t* ray_hnsw_build_fn(ray_t** args, int64_t n);
-ray_t* ray_ann_fn(ray_t** args, int64_t n);
-ray_t* ray_hnsw_free_fn(ray_t* h);
-ray_t* ray_hnsw_save_fn(ray_t* h, ray_t* path);
-ray_t* ray_hnsw_load_fn(ray_t* path);
-ray_t* ray_hnsw_info_fn(ray_t* h);
-
 /* Cast and type */
 ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val);
 ray_t* ray_type_fn(ray_t* val);

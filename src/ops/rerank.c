@@ -57,7 +57,7 @@ static bool rr_is_numeric(ray_t* v) {
         || v->type == RAY_I32 || v->type == RAY_I64;
 }
 
-/* Distance metrics — mirror row_score in src/ops/embedding.c. */
+/* Distance metrics — lower is closer, so inner product enters negated. */
 typedef enum { RR_COS_DIST, RR_IP_NEG, RR_L2_DIST } rr_metric_t;
 
 static rr_metric_t rr_metric_from_hnsw(int32_t m) {
@@ -270,8 +270,7 @@ static int64_t* accepted_rowids(ray_graph_t* g, int64_t nrows, int64_t* count) {
     return dense;
 }
 
-/* Max-heap top-K by distance (lower=closer).  Mirrors the heap in
- * src/ops/embedding.c:ray_knn_fn. */
+/* Max-heap top-K by distance (lower=closer). */
 typedef struct { double d; int64_t id; } rr_ent_t;
 
 static void rr_heap_insert(rr_ent_t* heap, int64_t k, int64_t* size,
