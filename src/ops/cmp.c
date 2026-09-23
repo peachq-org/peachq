@@ -91,14 +91,22 @@ int sym_atom_cmp(ray_t* a, ray_t* b) {
 /* Atoms as_i64 reads EXACTLY.  A double cannot separate longs past 2^53
  * (9007199254740993 > 9007199254740992 read as equal), and min2/max2 turn that
  * into a wrong VALUE, not just a wrong flag — so an all-integer pair compares
- * on the integer lane, as ray_eq_fn already does.  Bools and the i32-backed
- * temporals stay on the f64 tail: exact there, and as_i64's fallback is not. */
+ * on the integer lane, as ray_eq_fn already does.  A temporal joins it on its
+ * own PAYLOAD: same-type temporals order by it, and a temporal~numeric mix
+ * compares it with the number (basics/math.md).  Bools stay on the f64 tail. */
 static inline int int_cmp_lane(ray_t* x) {
     return x->type == -RAY_I64 || x->type == -RAY_I32 || x->type == -RAY_I16 ||
-           ray_is_bytelike(-x->type);
+           ray_is_bytelike(-x->type) || is_temporal(x);
 }
 #define INT_CMP_LANE(a, b, op) \
     if (int_cmp_lane(a) && int_cmp_lane(b)) return make_bool(as_i64(a) op as_i64(b) ? 1 : 0)
+
+/* Temporals of DIFFERENT type only: the published law is a narrowing matrix
+ * (basics/comparison.md:76-95), this widens — a registered gap (D0903a/D726b).
+ * Same-type pairs never reach here: they are the payload compare above, which
+ * a common unit would overflow past year 2292 (86400e9 ns/day exceeds i64). */
+#define CROSS_TEMPORAL(a, b) \
+    (a->type != b->type && is_temporal(a) && is_temporal(b))
 
 /* Comparison.  `tol` — ordering is defined off the tolerance (`a>b` is `a>b and not a=b`),
  * so inside the band < and > are both 0b, <= and >= both 1b; cmp_pick passes 0 (Lesser/
@@ -109,16 +117,8 @@ static ray_t* gt_impl(ray_t* a, ray_t* b, int tol) {
         return make_bool(sym_atom_cmp(a, b) > 0 ? 1 : 0);
     if (a->type == -RAY_GUID && b->type == -RAY_GUID)
         return make_bool(memcmp(ray_guid_bytes(a), ray_guid_bytes(b), 16) > 0 ? 1 : 0);
-    /* Temporal comparison (same or cross-temporal via nanosecond conversion) */
-    if (is_temporal(a) && is_temporal(b)) {
-        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))
-            return make_bool(RAY_ATOM_IS_NULL(b) && !RAY_ATOM_IS_NULL(a) ? 1 : 0);
+    if (CROSS_TEMPORAL(a, b) && !RAY_ATOM_IS_NULL(a) && !RAY_ATOM_IS_NULL(b))
         return make_bool(temporal_as_ns(a) > temporal_as_ns(b) ? 1 : 0);
-    }
-    /* temporal ~ numeric mixes compare the PAYLOAD with the number (kdb:
-     * math on temporals applies to the underlying numerics, basics/math.md;
-     * pinned by datatypes/minute 12:00=12*60 -> 1b) — as_i64/as_f64 read the
-     * temporal payload, so the generic compare below handles it. */
     if (!is_numeric_or_temporal(a) || !is_numeric_or_temporal(b))
         return ray_error("type", "cannot compare %s and %s",
                          ray_type_name(a->type), ray_type_name(b->type));
@@ -138,15 +138,8 @@ static ray_t* lt_impl(ray_t* a, ray_t* b, int tol) {
         return make_bool(sym_atom_cmp(a, b) < 0 ? 1 : 0);
     if (a->type == -RAY_GUID && b->type == -RAY_GUID)
         return make_bool(memcmp(ray_guid_bytes(a), ray_guid_bytes(b), 16) < 0 ? 1 : 0);
-    if (is_temporal(a) && is_temporal(b)) {
-        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))
-            return make_bool(RAY_ATOM_IS_NULL(a) && !RAY_ATOM_IS_NULL(b) ? 1 : 0);
+    if (CROSS_TEMPORAL(a, b) && !RAY_ATOM_IS_NULL(a) && !RAY_ATOM_IS_NULL(b))
         return make_bool(temporal_as_ns(a) < temporal_as_ns(b) ? 1 : 0);
-    }
-    /* temporal ~ numeric mixes compare the PAYLOAD with the number (kdb:
-     * math on temporals applies to the underlying numerics, basics/math.md;
-     * pinned by datatypes/minute 12:00=12*60 -> 1b) — as_i64/as_f64 read the
-     * temporal payload, so the generic compare below handles it. */
     if (!is_numeric_or_temporal(a) || !is_numeric_or_temporal(b))
         return ray_error("type", "cannot compare %s and %s",
                          ray_type_name(a->type), ray_type_name(b->type));
@@ -166,16 +159,8 @@ ray_t* ray_gte_fn(ray_t* a, ray_t* b) {
         return make_bool(sym_atom_cmp(a, b) >= 0 ? 1 : 0);
     if (a->type == -RAY_GUID && b->type == -RAY_GUID)
         return make_bool(memcmp(ray_guid_bytes(a), ray_guid_bytes(b), 16) >= 0 ? 1 : 0);
-    if (is_temporal(a) && is_temporal(b)) {
-        if (RAY_ATOM_IS_NULL(a) && RAY_ATOM_IS_NULL(b)) return make_bool(1);
-        if (RAY_ATOM_IS_NULL(a)) return make_bool(0);
-        if (RAY_ATOM_IS_NULL(b)) return make_bool(1);
+    if (CROSS_TEMPORAL(a, b) && !RAY_ATOM_IS_NULL(a) && !RAY_ATOM_IS_NULL(b))
         return make_bool(temporal_as_ns(a) >= temporal_as_ns(b) ? 1 : 0);
-    }
-    /* temporal ~ numeric mixes compare the PAYLOAD with the number (kdb:
-     * math on temporals applies to the underlying numerics, basics/math.md;
-     * pinned by datatypes/minute 12:00=12*60 -> 1b) — as_i64/as_f64 read the
-     * temporal payload, so the generic compare below handles it. */
     if (!is_numeric_or_temporal(a) || !is_numeric_or_temporal(b))
         return ray_error("type", "cannot compare %s and %s",
                          ray_type_name(a->type), ray_type_name(b->type));
@@ -194,16 +179,8 @@ ray_t* ray_lte_fn(ray_t* a, ray_t* b) {
         return make_bool(sym_atom_cmp(a, b) <= 0 ? 1 : 0);
     if (a->type == -RAY_GUID && b->type == -RAY_GUID)
         return make_bool(memcmp(ray_guid_bytes(a), ray_guid_bytes(b), 16) <= 0 ? 1 : 0);
-    if (is_temporal(a) && is_temporal(b)) {
-        if (RAY_ATOM_IS_NULL(a) && RAY_ATOM_IS_NULL(b)) return make_bool(1);
-        if (RAY_ATOM_IS_NULL(a)) return make_bool(1);
-        if (RAY_ATOM_IS_NULL(b)) return make_bool(0);
+    if (CROSS_TEMPORAL(a, b) && !RAY_ATOM_IS_NULL(a) && !RAY_ATOM_IS_NULL(b))
         return make_bool(temporal_as_ns(a) <= temporal_as_ns(b) ? 1 : 0);
-    }
-    /* temporal ~ numeric mixes compare the PAYLOAD with the number (kdb:
-     * math on temporals applies to the underlying numerics, basics/math.md;
-     * pinned by datatypes/minute 12:00=12*60 -> 1b) — as_i64/as_f64 read the
-     * temporal payload, so the generic compare below handles it. */
     if (!is_numeric_or_temporal(a) || !is_numeric_or_temporal(b))
         return ray_error("type", "cannot compare %s and %s",
                          ray_type_name(a->type), ray_type_name(b->type));
@@ -246,10 +223,8 @@ ray_t* ray_eq_fn(ray_t* a, ray_t* b) {
         return make_bool(a->i64 == b->i64 ? 1 : 0);
     if (a->type == -RAY_GUID && b->type == -RAY_GUID)
         return make_bool(memcmp(ray_guid_bytes(a), ray_guid_bytes(b), 16) == 0 ? 1 : 0);
-    /* Temporal comparison (same or cross-temporal via nanosecond conversion) */
-    if (is_temporal(a) && is_temporal(b))
+    if (CROSS_TEMPORAL(a, b))
         return make_bool(temporal_as_ns(a) == temporal_as_ns(b) ? 1 : 0);
-    /* temporal ~ numeric payload compare (see ray_gt_fn note). */
     if (!is_numeric_or_temporal(a) || !is_numeric_or_temporal(b)) return ray_error("type", "=: incomparable operand types, got %s and %s", ray_type_name(a->type), ray_type_name(b->type));
     /* An f64-backed temporal (datetime) forces the FLOAT lane: as_i64 on it
      * would return the raw bit pattern (codex r2 P2). */
@@ -271,10 +246,8 @@ ray_t* ray_neq_fn(ray_t* a, ray_t* b) {
         return make_bool(a->i64 != b->i64 ? 1 : 0);
     if (a->type == -RAY_GUID && b->type == -RAY_GUID)
         return make_bool(memcmp(ray_guid_bytes(a), ray_guid_bytes(b), 16) != 0 ? 1 : 0);
-    /* Temporal comparison (same or cross-temporal via nanosecond conversion) */
-    if (is_temporal(a) && is_temporal(b))
+    if (CROSS_TEMPORAL(a, b))
         return make_bool(temporal_as_ns(a) != temporal_as_ns(b) ? 1 : 0);
-    /* temporal ~ numeric payload compare (see ray_gt_fn note). */
     if (!is_numeric_or_temporal(a) || !is_numeric_or_temporal(b)) return ray_error("type", "<>: incomparable operand types, got %s and %s", ray_type_name(a->type), ray_type_name(b->type));
     /* f64-backed temporal: float lane (see ray_eq_fn). */
     if (is_float_op(a, b) || RAY_IS_TEMPORALF(-a->type) || RAY_IS_TEMPORALF(-b->type))

@@ -8,11 +8,10 @@
 #include <rayforce.h>
 #include <stdint.h>
 
-/* Integer lane read, temporal-complete: the int-backed temporals read
- * explicitly here (TEMPORAL32 from the i32 payload, TEMPORAL64 from i64); every
- * other atom delegates to the base as_i64. DATETIME is f64-backed
- * (rayforce.h:129) — read it via as_f64, never here. Nulls are the caller's to
- * test (RAY_ATOM_IS_NULL) before the read. */
+/* The q-facing spelling of the base as_i64, which owns every integer lane the
+ * int-backed temporals included; it exists so a qlang caller reads an atom's
+ * payload without pulling in lang/internal.h. DATETIME is f64-backed — read it
+ * via as_f64, never here. Nulls are the caller's to test before the read. */
 int64_t q_type_as_i64(ray_t* x);
 
 /* Bool atom — the lane predicate, so bool's b->i promotion is a named lane
