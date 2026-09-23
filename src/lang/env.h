@@ -59,7 +59,7 @@ ray_err_t ray_env_bind(int64_t sym_id, ray_t* val);
  * global env hash without traversing dotted-segment dict upserts.
  * Used to register every fully-qualified builtin name (`.sys.gc`,
  * `.os.getenv`, …) alongside the root namespace dict, so prefix
- * lookup (REPL completion + highlighter) enumerates them all. */
+ * lookup (REPL completion) enumerates them all. */
 ray_err_t ray_env_bind_flat(int64_t sym_id, ray_t* val);
 
 /* True if a symbol's interned name starts with `.` — i.e. it belongs to
@@ -85,13 +85,6 @@ ray_t*    ray_env_resolve(int64_t sym_id);
 int64_t ray_env_lookup_prefix(const char* prefix, int64_t len,
                               const char** results, int64_t max_results);
 
-/* True iff `name[0..len)` is an exact-match global env binding or
- * keyword.  Does NOT intern the probed string (unlike ray_env_get which
- * would need a sym_id).  Used by the REPL highlighter to decide whether
- * to paint the current word green — the prefix-lookup API returns only
- * the first-matching entry, which would misclassify `de` as non-builtin
- * when an alphabetically-earlier `desc`/`del` hits the same prefix. */
-bool ray_env_has_name(const char* name, int64_t len);
 
 /* Iterate global environment entries.
  * Fills sym_ids[] and vals[] with up to max_entries items.
