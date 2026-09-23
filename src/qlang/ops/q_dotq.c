@@ -88,12 +88,14 @@ ray_t* q_dotq_s_fn(ray_t* x) {
  * family — `none is an operative lift-law value (exception-catalogue membership),
  * so family is inapplicable here, not unclassified.
  * The x argument (`.Q.ops[]` passes `::`) is ignored. */
-static const char* dotq_lexclass_name(q_lex_class c) {
+static const char* dotq_lexclass_name(q_lex_class c, int64_t nm) {
+    ray_t* s = c == QLEX_KW ? ray_sym_str(nm) : NULL;
+    int infix = s && q_registry_is_infix(ray_str_ptr(s), ray_str_len(s));
+    if (s) ray_release(s);
     switch (c) {
-    case QLEX_GLYPH:     return "glyph";
-    case QLEX_KW_INFIX:  return "kw_infix";
-    case QLEX_KW_PREFIX: return "kw_prefix";
-    case QLEX_ADVERB:    return "adverb";
+    case QLEX_GLYPH:  return "glyph";
+    case QLEX_KW:     return infix ? "kw_infix" : "kw_prefix";
+    case QLEX_ADVERB: return "adverb";
     }
     return "unknown";
 }
@@ -139,9 +141,9 @@ ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs) {
         /* a row is q-implemented only when NO slot carries a C recipe */
         int has_c = (ops[i].mon.kind  != QK_NONE && ops[i].mon.kind  != QK_QSRC) ||
                     (ops[i].dyad.kind != QK_NONE && ops[i].dyad.kind != QK_QSRC);
-        int64_t qi = has_c ? -1 : ray_dict_find_sym(ns, nm);
-        if (qi >= 0) {
-            taken[qi] = 1;
+        int64_t qi = ray_dict_find_sym(ns, nm);
+        if (qi >= 0) taken[qi] = 1;
+        if (qi >= 0 && !has_c) {
             int64_t r = q_eval_apply_rank(ray_list_get(nsv, qi));
             bm = r == 1;
             bd = r == 2;
@@ -149,15 +151,15 @@ ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs) {
         /* an alias row declares no metadata — describe the verb it names */
         const q_op_t* md = q_ops_alias_target(&ops[i]);
         if (!md) md = &ops[i];
-        dotq_ops_row(c, &ok, nm, dotq_lexclass_name(ops[i].lex), bm, bd,
+        dotq_ops_row(c, &ok, nm, dotq_lexclass_name(ops[i].lex, nm), bm, bd,
                      md->deterministic != 0, md->sideeffect != 0,
-                     md->family, qi >= 0 ? "q" : "c");
+                     md->family, qi >= 0 && !has_c ? "q" : "c");
     }
     for (int64_t j = 0; j < nsn && ok; j++) {
         if (taken[j]) continue;
         int64_t nm = ray_read_sym(ray_data(nsk), j, RAY_SYM, nsk->attrs);
         int64_t r = q_eval_apply_rank(ray_list_get(nsv, j));
-        dotq_ops_row(c, &ok, nm, "kw_prefix", r == 1, r == 2, 1, 0, "", "q");
+        dotq_ops_row(c, &ok, nm, dotq_lexclass_name(QLEX_KW, nm), r == 1, r == 2, 1, 0, "", "q");
     }
     free(taken);
     if (ns) ray_release(ns);

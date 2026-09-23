@@ -1591,7 +1591,7 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
     }
 
     /* keyword-HOF rows route to the native adverb arms (finding 3) */
-    if (row && row->adverb_hof && row->lex == QLEX_KW_INFIX && n == 2) {
+    if (row && row->adverb_hof && row->lex == QLEX_KW && n == 2) {
         int adv = q_adverb_hof_id(row->adverb_hof);
         if (adv >= 0) {
             const q_op_t* frow = NULL;
