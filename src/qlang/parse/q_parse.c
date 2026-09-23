@@ -44,7 +44,7 @@
 
 /* ===== parse-error escape =====================================================
  * kparser die()s (exit) on malformed input.  A REPL must not exit, so a
- * malformed parse longjmps back to q_parse, which returns a ray_error. */
+ * malformed parse longjmps back to parse_text, which returns a ray_error. */
 static jmp_buf q_err_jmp;
 static q_err_e g_die_class = QE_PARSE;   /* die_err overrides for one longjmp */
 
@@ -1224,9 +1224,9 @@ static P parse_base(Parser *p) {
 /* ===== the parser's die-path leak guard ======================================
  * parse_query allocates raw phrase lists (a/b/c) and the from-expression (t)
  * BEFORE it can q_die (empty by/where, missing from, trailing junk, or a nested
- * parse_e failure deeper in the clause).  q_die longjmps to q_parse's handler,
+ * parse_e failure deeper in the clause).  q_die longjmps to parse_text's handler,
  * skipping parse_query's tail, so those refs would leak under ASan.  Register
- * each live slot ADDRESS on this stack; the q_parse / probe error handlers walk
+ * each live slot ADDRESS on this stack; the parse_text / probe error handlers walk
  * it and release *slot for every in-flight ref.  LIFO: nested parse_phrase_list
  * / parse_query calls push and pop within their own frame, so the stack stays
  * balanced.  On the success path parse_query pops its own registrations (the
@@ -1538,7 +1538,7 @@ static P parse_term(Parser *p, QCtx ctx) {
 
 /* The two charged wrappers: every recursion cycle in the descent crosses
  * parse_E, parse_e or parse_e_from, so charging these three bounds them all.
- * die_err longjmps to q_parse's one setjmp, which abandons the whole Parser —
+ * die_err longjmps to parse_text's setjmp, which abandons the whole Parser —
  * an unwound-past decrement is unreachable, so no cleanup handler is needed. */
 static P parse_e(Parser *p, QCtx ctx) {
     if (++p->depth > Q_PARSE_MAX_DEPTH) die_err(QE_LIMIT);
@@ -2303,6 +2303,8 @@ ray_t *q_parse_lang_tree(char letter, const char *p, int64_t n) {
 
 /* ===== public entry ========================================================== */
 
+static ray_t *parse_text(const char *src);
+
 ray_t *q_parse(const char *src) {
     /* Value embedding requires a live registry (codex #1): fail fast rather
      * than silently emit a mixed sym/value tree.  Every q entry point
@@ -2339,6 +2341,10 @@ ray_t *q_parse(const char *src) {
                                rn == 1 ? ray_char((uint8_t)r[0]) : ray_charv(r, rn));
         }
     }
+    return parse_text(src);
+}
+
+static ray_t *parse_text(const char *src) {
     init_class();
     g_toks.t = NULL;
     g_toks.n = 0;

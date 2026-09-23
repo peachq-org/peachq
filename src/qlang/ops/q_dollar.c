@@ -314,7 +314,7 @@ static ray_t* cast_int(int8_t tag, ray_t* x) {
         if (RAY_IS_ERR(out)) return out;
         out->len = n;
         int is64 = (x->type == RAY_I64);
-        int64_t src_inf;
+        int64_t src_inf = 0;
         ray_type_inf(x->type, 1, &src_inf);
         for (int64_t i = 0; i < n; i++) {
             int64_t v = is64 ? ((const int64_t*)ray_data(x))[i]
