@@ -21,17 +21,28 @@
  *                         kernel would not have picked; 0 and 1 order the same
  *                         way on all three, which is why that is safe.
  * ops/cmp.c's cmp_pick compares with tolerance OFF, so & and | never tolerate.
+ *
+ * + - * div mod ride INT on the plain integer tags only.  Their result tag is
+ * not the operands' — ops/arith.c promotes (`5h+3h` is an int) — so the lane
+ * computes in i64 and CONSTRUCTS the promoted tag, reading the promotion off
+ * lang/internal.h's arith_int_type rather than carrying a table of its own.
+ * Overflow is left alone: two's-complement wrap in unsigned space, whose
+ * landing on a sentinel (`0W+1` is 0N) is incidental and stays so.
  */
 #include "qlang/q_count.h"
 #include "qlang/ops/q_vecop.h"
 #include "qlang/q_registry_internal.h" /* the compare/min2/max2/fill/null wrapper roster */
 #include "qlang/base/q_type.h"         /* q_type_common + the numeric/float tag memberships */
 #include "lang/eval.h"                 /* ray_lt_fn/ray_gt_fn/..., ray_cmp_tol_eq */
-#include "lang/internal.h"             /* as_f64 / as_i64 — the atom lane reads */
+#include "lang/internal.h"             /* as_f64 / as_i64 / arith_int_type — the atom lane reads */
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
-typedef enum { VO_NONE = 0, VO_LT, VO_LE, VO_GT, VO_GE, VO_EQ, VO_NE, VO_MIN, VO_MAX, VO_FILL } vop_t;
+typedef enum {
+    VO_NONE = 0, VO_LT, VO_LE, VO_GT, VO_GE, VO_EQ, VO_NE, VO_MIN, VO_MAX, VO_FILL,
+    VO_ADD, VO_SUB, VO_MUL, VO_IDIV, VO_MOD
+} vop_t;
 typedef enum { LN_BYTE = 1, LN_INT, LN_DBL } lane_t;
 
 static vop_t op_of(ray_t* (*f)(ray_t*, ray_t*)) {
@@ -45,8 +56,15 @@ static vop_t op_of(ray_t* (*f)(ray_t*, ray_t*)) {
     if (p == (uintptr_t)q_min2_wrap) return VO_MIN;
     if (p == (uintptr_t)q_max2_wrap) return VO_MAX;
     if (p == (uintptr_t)q_fill_wrap) return VO_FILL;
+    if (p == (uintptr_t)ray_add_fn) return VO_ADD;
+    if (p == (uintptr_t)ray_sub_fn) return VO_SUB;
+    if (p == (uintptr_t)ray_mul_fn) return VO_MUL;
+    if (p == (uintptr_t)ray_idiv_fn) return VO_IDIV;
+    if (p == (uintptr_t)ray_mod_fn) return VO_MOD;
     return VO_NONE;
 }
+
+static int is_arith(vop_t op) { return op >= VO_ADD; }
 
 /* the lane memberships ops/cmp.c turns on and the type axis does not name: the
  * 1-byte payloads, and int_cmp_lane's own set (which excludes bool) */
@@ -253,6 +271,115 @@ static void pick_into(ray_t* out, int8_t rt, lane_t ln, band_t xb, band_t yb, co
     }
 }
 
+/* ===== the arithmetic lane ===============================================
+ * The tags + - * div mod read: plain integers only.  A char is out (its 0x20
+ * null is in-band, and the byte lane's own reading of it is not arithmetic's),
+ * a float and a temporal are out (each has a payload law of its own).
+ * ray_is_byte_only keeps a byte ATOM, which widens like any other operand. */
+static int arith_tag(int8_t t) {
+    return t == RAY_BOOL || t == RAY_I16 || t == RAY_I32 || t == RAY_I64 || ray_is_byte_only(t);
+}
+
+/* The tag map_binary would have built for this pair: the kernel's own atom
+ * answer, raised to the widest int operand by its "integer width follows the
+ * wider vector operand" rule (bool is not one of those widths).  Where the two
+ * disagree the lane DECLINES — `(1 2 3) mod 2h` is short one element-0 at a
+ * time and long the next, a per-element reading no typed vector can carry, so
+ * it stays where it is decided.  0 = not this lane's. */
+static int8_t arith_rt(vop_t op, int8_t xt, int8_t yt) {
+    int8_t w = 0;
+    if (xt != RAY_BOOL && xt > w) w = xt;
+    if (yt != RAY_BOOL && yt > w) w = yt;
+    int8_t rt = op == VO_IDIV ? RAY_I64 : op == VO_MOD ? yt : arith_int_type(xt, yt);
+    if (rt != RAY_I16 && rt != RAY_I32 && rt != RAY_I64) return 0;
+    return rt >= w ? rt : 0;
+}
+
+/* ray_idiv_fn's own arithmetic: the quotient is taken in DOUBLE, so `0W div 1`
+ * is 0N and a magnitude past 2^53 answers the rounded ratio.  The range test is
+ * a CONTAINMENT rather than the kernel's two rejects, which leaves the cast
+ * undefined at exactly 2^63; the containment answers the null there, matching
+ * what the kernel's cast yields on the targets we build for.  Defined where the
+ * kernel is not, and observably the same — not a claim that C guarantees it. */
+static inline int64_t idiv64(int64_t a, int64_t b) {
+    double bv = (double)b;
+    if (bv == 0.0) return NULL_I64;
+    double q = floor((double)a / bv);
+    return (q > -9223372036854775808.0 && q < 9223372036854775808.0) ? (int64_t)q : NULL_I64;
+}
+
+/* ray_mod_fn's floor modulo.  INT64_MIN IS the null and is filtered before the
+ * loop calls this, so the one trapping quotient (INT64_MIN / -1) cannot arise;
+ * the products go through unsigned space, where the kernel's own `bv * q`
+ * overflows (`0W mod -2` trips UBSan there).  Both answer -1 — this is the
+ * same arithmetic with the overflow spelled legally. */
+static inline int64_t imod64(int64_t a, int64_t b) {
+    if (b == 0) return NULL_I64;
+    int64_t q = a / b;
+    if ((a ^ b) < 0 && (int64_t)((uint64_t)q * (uint64_t)b) != a) q--;
+    return (int64_t)((uint64_t)a - (uint64_t)q * (uint64_t)b);
+}
+
+/* One loop per (verb, result width).  The width is loop-invariant, so hoisting
+ * it out is what leaves a plain typed loop behind.  A lane null narrows to the
+ * result's own sentinel; a WRAPPED value that lands on that sentinel is a null
+ * too, which is how `0Wi+1i` is 0Ni — so the test is on the narrowed value. */
+#define ARI_W(T, NUL, EXPR)                                                        \
+    do {                                                                           \
+        T* d = o;                                                                  \
+        for (int64_t i = 0; i < n; i++, px += xb.step, py += yb.step) {            \
+            int64_t a = *px, b = *py;                                              \
+            int64_t v = (a == NULL_I64 || b == NULL_I64) ? NULL_I64 : (EXPR);      \
+            T r = v == NULL_I64 ? (NUL) : (T)v;                                    \
+            d[i] = r;                                                              \
+            if (r == (NUL)) nul = i;                                               \
+        }                                                                          \
+    } while (0)
+
+#define ARI_OP(EXPR)                                                               \
+    do {                                                                           \
+        if (w == 8) ARI_W(int64_t, NULL_I64, EXPR);                                \
+        else if (w == 4) ARI_W(int32_t, NULL_I32, EXPR);                           \
+        else ARI_W(int16_t, NULL_I16, EXPR);                                       \
+    } while (0)
+
+static void arith_into(ray_t* out, int8_t rt, vop_t op, band_t xb, band_t yb, int64_t n) {
+    void* o = ray_data(out);
+    int w = ray_type_sizes[rt];
+    int64_t nul = -1;
+    const int64_t *px = xb.p, *py = yb.p;
+    switch (op) {
+        case VO_ADD: ARI_OP((int64_t)((uint64_t)a + (uint64_t)b)); break;
+        case VO_SUB: ARI_OP((int64_t)((uint64_t)a - (uint64_t)b)); break;
+        case VO_MUL: ARI_OP((int64_t)((uint64_t)a * (uint64_t)b)); break;
+        case VO_IDIV: ARI_OP(idiv64(a, b)); break;
+        default: ARI_OP(imod64(a, b)); break;
+    }
+    if (nul >= 0) ray_vec_set_null(out, nul, true);   /* the sentinel is written; this is the attr */
+}
+
+/* A byte VECTOR operand is 'type on this road today (`(0x01 0x02)+0x03`), the
+ * element store having no byte arm; declining one leaves that error where it
+ * is rather than answering it here. */
+static ray_t* arith_binary(vop_t op, ray_t* x, ray_t* y, int8_t xt, int8_t yt, int xv, int yv, int64_t n) {
+    if (!arith_tag(xt) || !arith_tag(yt)) return NULL;
+    if ((xv && ray_is_byte_only(xt)) || (yv && ray_is_byte_only(yt))) return NULL;
+    int8_t rt = arith_rt(op, xt, yt);
+    if (!rt) return NULL;
+
+    band_t xb, yb;
+    if (!band_make(&xb, x, xt, xv, LN_INT, n)) return NULL;
+    if (!band_make(&yb, y, yt, yv, LN_INT, n)) { free(xb.own); return NULL; }
+    ray_t* out = ray_vec_new(rt, n);
+    if (out && !RAY_IS_ERR(out)) {
+        out->len = n;
+        arith_into(out, rt, op, xb, yb, n);
+    }
+    free(xb.own);
+    free(yb.own);
+    return out;
+}
+
 /* ===== the binary seam =================================================== */
 
 ray_t* q_vecop_binary(ray_t* (*f)(ray_t*, ray_t*), ray_t* x, ray_t* y) {
@@ -264,6 +391,10 @@ ray_t* q_vecop_binary(ray_t* (*f)(ray_t*, ray_t*), ray_t* x, ray_t* y) {
     if ((!xv && !ray_is_atom(x)) || (!yv && !ray_is_atom(y))) return NULL;
     int8_t xt = xv ? x->type : (int8_t)-x->type;
     int8_t yt = yv ? y->type : (int8_t)-y->type;
+    if (xv && yv && x->len != y->len) return NULL;     /* 'length stays the caller's to raise */
+    int64_t n = xv ? x->len : y->len;
+    if (n <= 0) return NULL;                           /* so does the empty's carried type */
+    if (is_arith(op)) return arith_binary(op, x, y, xt, yt, xv, yv, n);
     if (!lane_tag(xt) || !lane_tag(yt)) return NULL;
     /* Across a type difference the lanes take the plain numerics only.  A
      * cross-type temporal pair is the narrowing matrix (basics/comparison.md:76-95),
@@ -271,9 +402,6 @@ ray_t* q_vecop_binary(ray_t* (*f)(ray_t*, ray_t*), ray_t* x, ray_t* y) {
      * beside a byte or bool puts ONE in-band null (the blank) on a lane whose
      * other side has none. */
     if (xt != yt && !(q_type_is_num_tag(xt) && q_type_is_num_tag(yt))) return NULL;
-    if (xv && yv && x->len != y->len) return NULL;     /* 'length stays the caller's to raise */
-    int64_t n = xv ? x->len : y->len;
-    if (n <= 0) return NULL;                           /* so does the empty's carried type */
 
     int8_t rt;
     lane_t ln;
