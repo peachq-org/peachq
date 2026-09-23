@@ -1234,14 +1234,21 @@ static ray_t* proj_call(ray_t* proj, ray_t** args, int64_t n) {
     const q_op_t* row = row_unbox(c[1]);
     int64_t rank = ray_block_len(proj) - 2;
     ray_t* merged[APPLY_MAX_ARGS];
-    int64_t ai = 0, holes = 0;
+    int64_t ai = 0, holes = 0, fn_rank = 0;
     if (rank > APPLY_MAX_ARGS) return q_err(QE_RANK);
     for (int64_t i = 0; i < rank; i++) {
+        if (!c[2 + i]) fn_rank++;
         merged[i] = (!c[2 + i] && ai < n) ? args[ai++] : c[2 + i];
         if (!merged[i]) holes++;
     }
     if (ai < n) return q_err(QE_RANK);
-    if (holes > 0) return q_eval_apply_proj_new(fv, row, merged, rank, rank);
+    if (holes > 0) {
+        /* a part-filled paren literal projects OVER the list, never into the hidden ctor's slots, so
+         * `get` reads back as (list;arg…) and a marker list stays recognisable by identity */
+        if (n > 0 && fv == q_registry_list_value())
+            return q_eval_apply_proj_new(proj, NULL, args, n, fn_rank);
+        return q_eval_apply_proj_new(fv, row, merged, rank, rank);
+    }
     return q_eval_apply(fv, row, merged, rank);
 }
 
