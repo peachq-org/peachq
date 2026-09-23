@@ -286,10 +286,13 @@ static int write_is_local(int64_t sym) {
     return !sym_dotted(sym) && q_eval_apply_frame_depth() > 0 && q_env_local_get(sym) != NULL;
 }
 
-/* A colon assignment is judged by its SPELLING (owner ruling 2026-09-23): a reserved word never, and a bare global
- * spelling of a `.q` builtin in no `\d` context — q_env_set only sees the re-rooted target. */
+/* A colon assignment is judged by its SPELLING, a `set` by its target (owner rulings 2026-09-23) — q_env_set sees
+ * only the re-rooted name.  A syntax word is the one spelling a non-root `\d` may take as a context MEMBER: it
+ * carries no value, so nothing is overwritten; a lambda local of that spelling stays refused. */
 int q_eval_assign_locked(int64_t sym) {
-    return q_registry_is_reserved(sym) || (!write_is_local(sym) && q_registry_locked(sym));
+    int global = !write_is_local(sym);
+    if (global && q_env_scope_ctx() && q_registry_is_syntax_word(sym)) return 0;
+    return q_registry_is_reserved(sym) || (global && q_registry_locked(sym));
 }
 
 /* undo a park (q_env_take / q_env_local_take) on a failed write: the value
