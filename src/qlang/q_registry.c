@@ -588,6 +588,11 @@ int q_registry_is_reserved(int64_t sym_id) {
     return s && s->row != &DOTQ_BUILTIN;
 }
 
+int q_registry_is_syntax_word(int64_t sym_id) {
+    sym_slot_t* s = sym_slot(sym_id, 0);
+    return s && s->row == &SYNTAX_WORD;
+}
+
 void q_registry_seal(void) {
     ray_t* ns = q_registry_qsrc_ns();
     ray_t* k = ns ? ray_dict_keys(ns) : NULL;
