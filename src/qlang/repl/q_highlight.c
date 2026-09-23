@@ -1,26 +1,32 @@
 /* q_highlight — see q_highlight.h.  Token shapes follow q_parse.c's scanner; literals go through q_tok itself. */
+#include "qlang/q_count.h"
 #include "qlang/repl/q_highlight.h"
 #include "qlang/parse/q_tok.h"             /* q_tok_magnitude / q_tok_type_letter / q_tok_byte_lit_starts */
 #include "qlang/parse/q_parse_internal.h"  /* VERB_CHARS */
-#include "qlang/base/q_type.h"             /* q_type_of_char */
-#include "qlang/hl_names_gen.h"            /* Q_HL_NAMES */
+#include "qlang/base/q_type.h"             /* q_type_of_char; q_type_is_int_atom — a .pq.hl colour number */
+#include "qlang/q_console.h"               /* q_console_color — the colour on/off law */
+#include "qlang/q_env.h"                   /* q_env_peek — .pq.hl without the .pq autoload */
+#include "qlang/q_prim.h"                  /* q_str_text_bytes — a .pq.hl SGR string */
+#include "qlang/ops/q_index.h"             /* q_index_at — a .pq.hl role's value */
+#include "qlang/hl_names_gen.h"            /* Q_HL_NAMES — help-builtins.tsv minus the help-builtins-gaps.tsv rows */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* 256-colour, mid-luminance: every role must read on a dark and on a light background. */
-#define HL_KEYWORD  "\033[38;5;33m"
-#define HL_STRING   "\033[38;5;34m"
-#define HL_ESCAPE   "\033[38;5;168m"
-#define HL_COMMENT  "\033[38;5;244m"
-#define HL_SYMBOL   "\033[38;5;37m"
-#define HL_NUMBER   "\033[38;5;166m"
-#define HL_TEMPORAL "\033[38;5;136m"
-#define HL_OP       "\033[38;5;98m"
-#define HL_SYSTEM   "\033[38;5;127m"
-#define HL_COMMAND  "\033[38;5;160m"
-#define HL_MATCH    "\033[7m"
+enum { HL_NONE = -1, HL_KEYWORD, HL_STRING, HL_ESCAPE, HL_COMMENT, HL_SYMBOL, HL_NUMBER, HL_TEMPORAL, HL_OP, HL_SYSTEM,
+       HL_COMMAND, HL_MATCH, HL_ROLES };
+
+/* The default palette and the role names `.pq.hl` keys it by.  256-colour, mid-luminance: every role must read on a
+ * dark and on a light background.  Mirrored by `.pq.hl` in lib/pq.q — change both together. */
+static const struct { const char* name; const char* sgr; } ROLES[HL_ROLES] = {
+    { "kw", "38;5;33" },   { "str", "38;5;34" },  { "esc", "38;5;168" }, { "cmt", "38;5;244" }, { "sym", "38;5;37" },
+    { "num", "38;5;166" }, { "tmp", "38;5;136" }, { "op", "38;5;98" },   { "sys", "38;5;127" }, { "cmd", "38;5;160" },
+    { "match", "7" },
+};
+
 #define HL_RESET    "\033[0m"
 #define HL_RESET_N  ((int32_t)sizeof HL_RESET - 1)
+#define HL_SGR_MAX  48
 
 typedef struct {
     char*       dst;
@@ -31,6 +37,8 @@ typedef struct {
     int32_t     m1, m2;
     const char* buf;
     int32_t     len;
+    int         plain;
+    char        pal[HL_ROLES][HL_SGR_MAX];
 } hl_t;
 
 typedef struct { const char* s; size_t n; } hl_key;
@@ -57,18 +65,19 @@ static void reset(hl_t* h) {
     h->n += HL_RESET_N;
 }
 
-static void span(hl_t* h, const char* colour, int32_t from, int32_t to) {
+static void span(hl_t* h, int role, int32_t from, int32_t to) {
+    if (h->plain) { text(h, h->buf + from, to - from); return; }
     int open = 0;
     for (int32_t i = from; i < to && !h->full; ) {
         if (i == h->m1 || i == h->m2) {
             if (open) { reset(h); open = 0; }
-            if (code(h, HL_MATCH)) { text(h, h->buf + i, 1); reset(h); }
+            if (code(h, h->pal[HL_MATCH])) { text(h, h->buf + i, 1); reset(h); }
             i++;
             continue;
         }
         int32_t j = i + 1;
         while (j < to && j != h->m1 && j != h->m2) j++;
-        if (colour && !open && !(open = code(h, colour))) break;
+        if (role != HL_NONE && !open && !(open = code(h, h->pal[role]))) break;
         text(h, h->buf + i, j - i);
         i = j;
     }
@@ -92,17 +101,17 @@ static int documented(const char* s, int32_t n) {
     return bsearch(&k, Q_HL_NAMES, sizeof Q_HL_NAMES / sizeof *Q_HL_NAMES, sizeof *Q_HL_NAMES, key_cmp) != NULL;
 }
 
-static const char* name_colour(const char* s, int32_t n) {
-    if (n > 3 && memcmp(s, ".q.", 3) == 0) return documented(s + 3, n - 3) ? HL_KEYWORD : NULL;
+static int name_role(const char* s, int32_t n) {
+    if (n > 3 && memcmp(s, ".q.", 3) == 0) return documented(s + 3, n - 3) ? HL_KEYWORD : HL_NONE;
     if (n > 3 && memcmp(s, ".z.", 3) == 0) return HL_SYSTEM;
-    if (!documented(s, n)) return NULL;
+    if (!documented(s, n)) return HL_NONE;
     return s[0] == '.' ? HL_SYSTEM : HL_KEYWORD;
 }
 
-static int32_t rest_of_line(hl_t* h, const char* colour, int32_t i) {
+static int32_t rest_of_line(hl_t* h, int role, int32_t i) {
     int32_t j = i;
     while (j < h->len && h->buf[j] != '\n') j++;
-    span(h, colour, i, j);
+    span(h, role, i, j);
     return j;
 }
 
@@ -155,11 +164,11 @@ static int32_t lex_name(hl_t* h, int32_t i) {
     while (j < h->len && is_word(b[j])) j++;
     while (j + 1 < h->len && b[j] == '.' && is_word(b[j + 1]))
         for (j++; j < h->len && is_word(b[j]); j++) {}
-    span(h, name_colour(b + i, j - i), i, j);
+    span(h, name_role(b + i, j - i), i, j);
     return j;
 }
 
-static const char* literal_colour(const q_tok_el* el, char letter) {
+static int literal_role(const q_tok_el* el, char letter) {
     int8_t t = q_type_of_char(letter);
     if (el->kind == Q_TOK_EL_NULL || el->kind == Q_TOK_EL_PINF || el->kind == Q_TOK_EL_NINF) return HL_TEMPORAL;
     if (t) return RAY_IS_TEMPORAL32(t) || RAY_IS_TEMPORAL64(t) || RAY_IS_TEMPORALF(t) ? HL_TEMPORAL : HL_NUMBER;
@@ -194,7 +203,7 @@ static int32_t lex_number(hl_t* h, int32_t i) {
         span(h, HL_NUMBER, i, j);
         return j;
     }
-    span(h, literal_colour(&el, letter), i, i + p);
+    span(h, literal_role(&el, letter), i, i + p);
     return i + p;
 }
 
@@ -218,15 +227,44 @@ static int32_t lex_one(hl_t* h, int32_t i) {
     else if (is_digit(c) || num)                                        j = lex_number(h, i);
     else {
         noun = c == ')' || c == ']' || c == '}' || ((c == ' ' || c == '\t') && h->noun);
-        span(h, c && (strchr(VERB_CHARS, c) || strchr("'/\\", c)) ? HL_OP : NULL, i, j);
+        span(h, c && (strchr(VERB_CHARS, c) || strchr("'/\\", c)) ? HL_OP : HL_NONE, i, j);
     }
     h->noun = noun;
     return j;
 }
 
+/* Only digits and `;` pass, so no user byte can be a terminal control or throw off the editor's width accounting. */
+static int user_sgr(char* esc, ray_t* v) {
+    const char* p;
+    int64_t     n;
+    if (q_type_is_int_atom(v)) {
+        int64_t c = q_type_iatom_val(v);
+        return c >= 0 && c <= 255 && snprintf(esc, HL_SGR_MAX, "\033[38;5;%dm", (int)c) > 0;
+    }
+    if (!q_str_text_bytes(v, &p, &n) || n == 0 || n > HL_SGR_MAX - 4) return 0;
+    for (int64_t i = 0; i < n; i++)
+        if (!is_digit(p[i]) && p[i] != ';') return 0;
+    return snprintf(esc, HL_SGR_MAX, "\033[%.*sm", (int)n, p) > 0;
+}
+
+/* Never signals: a malformed `.pq.hl`, or a bad value for one role, keeps the default, since every redraw runs this. */
+static void palette(hl_t* h) {
+    ray_t* hl = q_env_peek(ray_sym_intern(".pq.hl", 6));
+    int    ok = hl && hl->type == RAY_DICT;   /* never index anything else: a function would run on every keystroke */
+    for (int r = 0; r < HL_ROLES; r++) {
+        ray_t* key = ok ? ray_sym(ray_sym_intern(ROLES[r].name, strlen(ROLES[r].name))) : NULL;
+        ray_t* v   = key ? q_index_at(hl, &key, 1) : NULL;
+        if (!v || !user_sgr(h->pal[r], v)) snprintf(h->pal[r], HL_SGR_MAX, "\033[%sm", ROLES[r].sgr);
+        if (v) ray_release(v);
+        if (key) ray_release(key);
+    }
+}
+
 int32_t q_highlight(char* dst, int32_t dst_cap, const char* buf, int32_t buf_len, int32_t match_pos1,
                     int32_t match_pos2) {
-    hl_t h = { dst, dst_cap, 0, 0, 0, match_pos1, match_pos2, buf, buf_len };
+    hl_t h = { .dst = dst, .cap = dst_cap, .m1 = match_pos1, .m2 = match_pos2, .buf = buf, .len = buf_len,
+               .plain = !q_console_color(true) };
+    if (!h.plain) palette(&h);
     for (int32_t i = 0; i < buf_len && !h.full; ) i = lex_one(&h, i);
     return h.n;
 }
