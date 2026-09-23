@@ -24,6 +24,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"
 #include "qlang/q_ctx.h"          /* q_ctx_set_tty_restore — the statement-seam restore */
+#include "qlang/q_console.h"      /* q_console_color — the colour on/off law */
 #include "qlang/q_env.h"
 #include "qlang/q_prim.h"         /* q_str_text_bytes */
 #include "qlang/io/q_io.h"        /* q_io_path_operand — the headless door's two paths */
@@ -184,16 +185,13 @@ static void probe_size(int* w, int* h) {
 #endif
 }
 
-/* .pq.cancolor's law (lib/pq.q): PEACHQ_COLORS / NO_COLOR / FORCE_COLOR outrank TERM */
+/* Whether to colour is the console's law; only how richly is ours to tell. */
 static int detect_cap(void) {
-    const char* pc = getenv("PEACHQ_COLORS");
     const char* ct = getenv("COLORTERM");
     const char* t  = getenv("TERM");
-    int forced = (pc && !strcmp(pc, "1")) || getenv("FORCE_COLOR");
-    if ((pc && !strcmp(pc, "0")) || getenv("NO_COLOR")) return TB_MODE_MONO;
+    if (!q_console_color(true)) return TB_MODE_MONO;
     if (ct && (!strcmp(ct, "truecolor") || !strcmp(ct, "24bit"))) return TB_MODE_TRUE;
     if (t && strstr(t, "256color")) return TB_MODE_256;
-    if (t && !strcmp(t, "dumb") && !forced) return TB_MODE_MONO;
     return TB_MODE_16;
 }
 

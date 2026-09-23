@@ -5,7 +5,7 @@
 #include "qlang/q_fmt.h"               /* q_fmt_console_alloc — show's render */
 #include "core/ipc.h"                  /* ray_ipc_current_handle — handler write-through */
 #include "core/platform.h"             /* RAY_OS_WINDOWS — the `\c 0N` terminal query */
-#include "qlang/q_env.h"               /* q_env_bind — the .pq.i.termsize native */
+#include "qlang/q_env.h"               /* q_env_bind — the .pq.i.termsize/.pq.i.cancolor natives */
 #include "lang/env.h"                  /* ray_fn_unary */
 #include <stdio.h>
 #include <stdlib.h>
@@ -139,33 +139,49 @@ void q_console_clip_setting(int64_t* rows, int64_t* cols) {
     if (cols) *cols = g_con_cols_auto ? NULL_I64 : g_con_cols;
 }
 
-/* `.pq.i.termsize[]` — the LIVE terminal (rows;cols;tty), same query + 25/80
- * fallback + [10,2000] coercion as the `\c 0N` auto axes, plus whether stdout
- * IS a terminal (0/1); the q side (help preview, .pq.cancolor) cannot reach
- * ioctl/isatty any other way. */
+bool q_console_color(bool tty) {
+    const char* pc = getenv("PEACHQ_COLORS");
+    const char* nc = getenv("NO_COLOR");
+    const char* fc = getenv("FORCE_COLOR");
+    const char* t  = getenv("TERM");
+    if (pc && (!strcmp(pc, "1") || !strcmp(pc, "0"))) return pc[0] == '1';
+    if (nc && *nc) return false;
+    if (fc && *fc) return true;
+    return tty && !(t && !strcmp(t, "dumb"));
+}
+
+/* `.pq.i.termsize[]` — the LIVE terminal (rows;cols), same query + 25/80 fallback + [10,2000] coercion as the `\c 0N`
+ * auto axes; the q side (help preview, .pq.termsize) cannot reach ioctl any other way. */
 static ray_t* termsize_fn(ray_t* x) {
     (void)x;
     int32_t r, c;
     clip_term_size(&r, &c);
-#if defined(RAY_OS_WINDOWS)
-    int64_t tty = GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_CHAR;
-#else
-    int64_t tty = isatty(STDOUT_FILENO) == 1;
-#endif
-    ray_t* v = ray_vec_new(RAY_I64, 3);
+    ray_t* v = ray_vec_new(RAY_I64, 2);
     if (RAY_IS_ERR(v)) return v;
     int64_t rr = r, cc = c;
     v = ray_vec_append(v, &rr);
     if (RAY_IS_ERR(v)) return v;
-    v = ray_vec_append(v, &cc);
-    if (RAY_IS_ERR(v)) return v;
-    return ray_vec_append(v, &tty);
+    return ray_vec_append(v, &cc);
 }
 
-static void termsize_bind(const char* nm) {
-    ray_t* obj = ray_fn_unary(nm, RAY_FN_NONE, termsize_fn);
+/* `.pq.i.cancolor[]` — the colour law for stdout, which q cannot ask isatty about. */
+static ray_t* cancolor_fn(ray_t* x) {
+    (void)x;
+#if defined(RAY_OS_WINDOWS)
+    bool tty = GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_CHAR;
+#else
+    bool tty = isatty(STDOUT_FILENO) == 1;
+#endif
+    return ray_bool(q_console_color(tty));
+}
+
+static void console_bind(const char* nm, ray_unary_fn fn) {
+    ray_t* obj = ray_fn_unary(nm, RAY_FN_NONE, fn);
     q_env_bind(ray_sym_intern(nm, strlen(nm)), obj);
     ray_release(obj);
 }
-void q_console_pq_register(void)   { termsize_bind(".pq.i.termsize"); }
-void q_console_help_register(void) { termsize_bind(".help.i.termsize"); }
+void q_console_pq_register(void) {
+    console_bind(".pq.i.termsize", termsize_fn);
+    console_bind(".pq.i.cancolor", cancolor_fn);
+}
+void q_console_help_register(void) { console_bind(".help.i.termsize", termsize_fn); }

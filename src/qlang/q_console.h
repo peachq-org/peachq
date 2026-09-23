@@ -43,12 +43,12 @@ bool q_console_clip(int32_t* rows, int32_t* cols);
 void q_console_clip_set(int64_t rows, int64_t cols);
 void q_console_clip_setting(int64_t* rows, int64_t* cols);
 
-/* Bind the `.pq.i.termsize` native (live terminal rows/cols) — called from
- * the `\l pq` gate, beside the other .pq.i.* registrars. */
+/* THE colour on/off law every colour emitter consults: PEACHQ_COLORS=1/0 outright, then a non-empty NO_COLOR (off)
+ * or FORCE_COLOR (on), else colour iff the emitter's output is a terminal (`tty`) whose TERM is not dumb. */
+bool q_console_color(bool tty);
+
+/* lib/pq.q's natives `.pq.i.termsize` and `.pq.i.cancolor`; and termsize again as `.help.i.termsize`, bound at boot. */
 void q_console_pq_register(void);
-/* The same native as `.help.i.termsize`, bound at BOOT beside `.help.i.loaddb`:
- * help clips to the live terminal before `\l pq`, and `.help` is already a
- * peachq name in the pre-gate env. */
 void q_console_help_register(void);
 
 #endif /* Q_CONSOLE_H */

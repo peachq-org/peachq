@@ -10,7 +10,7 @@
 #include "qlang/q_runtime.h"
 #include "qlang/q_dotz.h"
 #include "qlang/ops/q_sys.h"     /* q_sys_listen — single-homed listen+readback */
-#include "qlang/q_console.h"  /* q_console_pipe_enable — the modern pipe-table display */
+#include "qlang/q_console.h"  /* q_console_pipe_enable — the modern pipe-table display; q_console_color */
 #include "qlang/net/q_tls.h"  /* q_tls_server_mode_set — the `-E` TLS server mode */
 #include "qlang/parse/q_tok.h" /* q_tok_date_order_set — the `-z` date order */
 #include "qlang/io/q_duckdb.h" /* q_duckdb_main_path_set — the `-duckdb` main database file */
@@ -334,11 +334,9 @@ int main(int argc, char** argv) {
         /* `\?` works in classic too (help is on the always-on bootstrap now), but
          * classic is the kdb-clean env and the qscript runner forces it for
          * byte-identical output — so the doors are advertised only in modern.
-         * The commands are peach (256-color 215) unless NO_COLOR / PEACHQ_COLORS=0
-         * — the same off switches .pq.cancolor honours. */
+         * The commands are peach (256-color 215) when the colour law allows. */
         if (!classic) {
-            const char* pc = getenv("PEACHQ_COLORS");
-            bool color = !(getenv("NO_COLOR") || (pc && strcmp(pc, "0") == 0));
+            bool color = q_console_color(isatty(STDOUT_FILENO));
             const char* peach = color ? "\033[38;5;215m" : "";
             const char* grey  = color ? "\033[90m" : "";
             const char* off   = color ? "\033[0m" : "";
