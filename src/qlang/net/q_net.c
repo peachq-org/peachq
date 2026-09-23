@@ -3,11 +3,12 @@
  * input parses without DNS, unresolvable -> -1i; .Q.host maps an int address
  * to a hostname sym via the OS resolver (order/choice is OS-governed). */
 #ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200809L   /* getaddrinfo/getnameinfo under -std=c17 */
+#define _POSIX_C_SOURCE 200809L   /* getnameinfo under -std=c17 */
 #endif
 #include "qlang/q_count.h"
 #include "qlang/net/q_net.h"
 #include "qlang/base/q_err.h"
+#include "core/sock.h"          /* ray_sock_resolve4 — the .Q.addr lookup */
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -19,7 +20,6 @@
 #else
   #include <netdb.h>
   #include <netinet/in.h>
-  #include <arpa/inet.h>
   #include <sys/socket.h>
 #endif
 
@@ -46,19 +46,9 @@ ray_t* q_net_addr(ray_t* y) {
     memcpy(name, ray_str_ptr(s), n);
     name[n] = '\0';
     wsa_ensure();
-    struct in_addr in;
-    if (inet_pton(AF_INET, name, &in) == 1)   /* dotted quad: no DNS lookup */
-        return ray_i32((int32_t)ntohl(in.s_addr));
-    struct addrinfo hints;
-    struct addrinfo* res = NULL;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET;
-    if (getaddrinfo(name, NULL, &hints, &res) != 0 || !res)
-        return ray_i32(-1);                    /* unresolvable -> -1i */
-    struct sockaddr_in* sin = (struct sockaddr_in*)(void*)res->ai_addr;
-    int32_t addr = (int32_t)ntohl(sin->sin_addr.s_addr);
-    freeaddrinfo(res);
-    return ray_i32(addr);
+    uint32_t ip;
+    if (ray_sock_resolve4(name, &ip) != 0) return ray_i32(-1);   /* unresolvable -> -1i */
+    return ray_i32((int32_t)ntohl(ip));
 }
 
 ray_t* q_net_host(ray_t* y) {

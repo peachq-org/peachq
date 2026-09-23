@@ -80,18 +80,63 @@ static int sock_map_err(int e) { return e; }
 static int sock_errno(void) { return errno; }
 #endif
 
+int ray_sock_resolve4(const char* host, uint32_t* ip)
+{
+    if (!host || !*host) { *ip = htonl(INADDR_ANY); return 0; }
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags    = AI_PASSIVE;
+    if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) { errno = EADDRNOTAVAIL; return -1; }
+    *ip = ((struct sockaddr_in*)res->ai_addr)->sin_addr.s_addr;
+    freeaddrinfo(res);
+    return 0;
+}
+
+uint16_t ray_sock_service_port(const char* name)
+{
+    struct servent* se = getservbyname(name, "tcp");
+    return se ? ntohs((uint16_t)se->s_port) : 0;
+}
+
 ray_sock_t ray_sock_listen(uint16_t port)
+{
+    return ray_sock_listen_at(htonl(INADDR_ANY), port, false);
+}
+
+ray_sock_t ray_sock_listen_at(uint32_t ip, uint16_t port, bool reuseport)
 {
     ray_sock_t fd = (ray_sock_t)socket(AF_INET, SOCK_STREAM, 0);
     if (fd == RAY_INVALID_SOCK) { (void)sock_errno(); return RAY_INVALID_SOCK; }
+    /* A `system` child that inherits the listener keeps the port after `\p 0` and swallows its connections. */
+#ifdef RAY_OS_WINDOWS
+    SetHandleInformation((HANDLE)fd, HANDLE_FLAG_INHERIT, 0);
+#else
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+#endif
 
     int yes = 1;
+#ifdef RAY_OS_WINDOWS
+    /* Windows SO_REUSEADDR lets another process bind the same port and take its connections; own the port instead. */
+    setsockopt(fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*)&yes, sizeof(yes));
+#else
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes));
+#endif
+#ifdef SO_REUSEPORT
+    if (reuseport && setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, (const char*)&yes, sizeof(yes)) < 0) {
+        (void)sock_errno();
+        ray_sock_close(fd);
+        return RAY_INVALID_SOCK;
+    }
+#else
+    (void)reuseport;
+#endif
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_addr.s_addr = ip;
     addr.sin_port        = htons(port);
 
     if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {

@@ -14,6 +14,7 @@
 
 #include <rayforce.h>
 #include <stddef.h>
+#include "qlang/base/q_err.h"   /* q_err_e — the listen-spec parse failure */
 
 /* Re-initialize the rng to kdb's constant startup seed (-314159i,
  * basics/syscmds.md \S) and record it as the last-initialized seed.  Called by
@@ -48,17 +49,15 @@ void q_sys_err_trap_set(int mode);
  * that could not delete the in-flight (popped) timer. */
 bool q_sys_timer_active(void);
 
-/* Bind a kdb-protocol IPC listener on the runtime event poll and record it as
- * the live `\p` listener — the SINGLE HOME for both `\p N`/`\p 0W` (q_sys.c
- * h_p) and startup `-p`/`-p 0W` (qmain.c).  `port == 0` → OS-chosen ephemeral
- * (the `0W` path).  On success: reads the ACTUAL bound port back via
- * getsockname, drops any previous listener (kdb listens on ONE port), sets the
- * authoritative `\p` getter state (`g_listen_port`, so `system "p"` reports the
- * real port after EITHER path), then returns the bound port (>0).  On any
- * failure (no poll, bind/listen, or readback) returns 0 and leaves the previous
- * listener intact — never advertises port 0.  Silent
- * (prints nothing — full kdb port fidelity). */
-uint16_t q_sys_listen(uint16_t port);
+/* The `-p`/`\p` spec `[rp,][host:](port|0W|lo/hi|servicename)`: empty host = every interface, `any` = `0W`, lo == hi == 0
+ * = `\p 0`.  Call it after the event poll exists (a servicename needs Winsock).  false + *err: QE_PARSE bad syntax or
+ * unknown servicename, QE_DOMAIN out of range, lo > hi, or negative (multithreaded mode, unsupported). */
+typedef struct { char host[256]; uint16_t lo, hi; bool reuseport, any; } q_sys_listen_spec_t;
+bool q_sys_listen_spec_parse(const char* s, size_t n, q_sys_listen_spec_t* out, q_err_e* err);
+
+/* Bind spec as THE `\p` listener (kdb listens on ONE port, so the previous one is dropped): the bound port, or 0 with
+ * the previous listener intact.  Shared by `\p` and the startup `-p`.  Silent. */
+uint16_t q_sys_listen(const q_sys_listen_spec_t* spec);
 
 /* The AUTHORITATIVE live listening port (`\p` getter state): the bound port
  * (>0) while a listener is up, 0 after `\p 0` / when never bound.  qmain's

@@ -78,6 +78,8 @@ int64_t ray_ipc_current_fd(void);
 
 /* Register IPC listener on poll. Returns selector id or -1. */
 int64_t ray_ipc_listen(ray_poll_t* poll, uint16_t port);
+/* The same on one IPv4 address (network order, ray_sock_resolve4), SO_REUSEPORT on request. */
+int64_t ray_ipc_listen_at(ray_poll_t* poll, uint32_t ip, uint16_t port, bool reuseport);
 
 /* The kdb `-u`/`-U` password file (user:password per line; plain or md5/sha1 hex).  Process-wide.  0, or -1 + errno. */
 int ray_ipc_auth_file_load(const char* path);
