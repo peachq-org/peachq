@@ -1072,6 +1072,22 @@ int64_t q_join_gen_len(ray_t* x) {
     return x && x->type != RAY_DICT ? q_count(x) : -1;
 }
 
+/* A table demoted to what basics/glossary.md:769 calls it — the general list of its row dicts.  Rows come from
+ * q_table_row_at, never base `at`, which is enum-blind and drops an enum column's domain. */
+static ray_t* qj_table_as_rows(ray_t* x) {
+    int64_t n = q_count(x);
+    ray_t* out = ray_list_new(n > 0 ? n : 1);
+    if (RAY_IS_ERR(out)) return out;
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* row = q_table_row_at(x, i);
+        if (!row || RAY_IS_ERR(row)) { ray_release(out); return row ? row : q_err(QE_OOM); }
+        out = ray_list_append(out, row);
+        ray_release(row);
+        if (RAY_IS_ERR(out)) return out;
+    }
+    return out;
+}
+
 /* q `x,y` join — table , record-dict appends the record (ref/join.md +
  * ref/upsert.md: a simple table's Join of a matching record is the same
  * append upsert performs).  Joins wave: non-conforming table,table is
@@ -1082,8 +1098,8 @@ int64_t q_join_gen_len(ray_t* x) {
  * falls back to a GENERIC boxed list (kdb `,` never type-errors on a list
  * join — ref/join.md `1 2,"a"`).  Every other operand pair delegates to base
  * concat (register_binary("concat") == ray_concat_fn) byte-identically.
- * `exclusive` is q_join_amend's word (below) that x may grow in place. */
-static ray_t* join_core(ray_t* x, ray_t* y, int exclusive) {
+ * `exclusive` is q_join_amend's word (below) that x may grow in place, `append` its word that this is `,:`. */
+static ray_t* join_core(ray_t* x, ray_t* y, int exclusive, int append) {
     /* `()` is Join's IDENTITY (the seed the `,` accumulator starts from,
      * ref/accumulators.md:264) for EVERY container, not just the ones base
      * concat happens to accept: a table is a list of records and a dict a list
@@ -1097,8 +1113,24 @@ static ray_t* join_core(ray_t* x, ray_t* y, int exclusive) {
     }
     if (q_type_is_keyed(x) && q_type_is_keyed(y))
         return table_upsert(x, y, exclusive, 1);      /* strict, y's OWN columns update (ref/join.md:140,274) */
+    if (q_type_is_table(x) && y && !append && !q_type_is_table(y) && !q_type_is_dict(y)) {
+        /* Plain `,` on a payload the row law will not read falls back to basics/glossary.md:769's other reading of
+         * x, the list of its row dicts (owner ruling 2026-09-23); a bare ATOM is never a row even where the
+         * 1-column upsert would take it.  `,:` is Append, which DOES read records off a list (ref/join.md:280). */
+        if (!ray_is_atom(y)) {
+            ray_t* r = q_join_table_upsert(x, y, exclusive);
+            if (!q_err_is(r, QE_TYPE) && !q_err_is(r, QE_LENGTH) && !q_err_is(r, QE_MISMATCH)) return r;
+            q_err_drop();                                 /* the rejection is ours to discard, payload and block */
+            ray_error_free(r);
+        }
+        ray_t* rows = qj_table_as_rows(x);
+        if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_OOM);
+        ray_t* out = join_core(rows, y, 0, 0);
+        ray_release(rows);
+        return out;
+    }
     if ((q_type_is_table(x) || q_type_is_keyed(x)) && y)
-        return q_join_table_upsert(x, y, exclusive);  /* every other payload: THE law */
+        return q_join_table_upsert(x, y, exclusive);
     /* A bare dict joins ONLY with a dict (ref/join.md: `10,d` -> 'type; base
      * concat would wrongly DISTRIBUTE the scalar over the dict's values). */
     if (q_type_is_plain_dict(x) != q_type_is_plain_dict(y)) return q_err(QE_TYPE);
@@ -1126,7 +1158,7 @@ static ray_t* join_core(ray_t* x, ray_t* y, int exclusive) {
      * arguments are vectors or atoms of the same type; otherwise a mixed
      * list").  Only 'type boxes — an enum-domain 'cast stays an error.  `,:`
      * Append is type-strict instead: q_join_amend (below) refuses before it
-     * gets here, the only home that can tell `,:` from `,`. */
+     * gets here. */
     int64_t nx = q_join_gen_len(x), ny = q_join_gen_len(y);
     const char* cls = r ? q_err_class(r) : NULL;  /* base errors carry no q_err stamp */
     if (nx < 0 || ny < 0 || !cls || strcmp(cls, "type") ||
@@ -1158,7 +1190,7 @@ ray_t* q_join_wrap(ray_t* x, ray_t* y) {
         ray_t* t = q_count(x) == 0 ? y : q_count(y) == 0 ? x : NULL;
         if (t) { ray_retain(t); return t; }
     }
-    return join_core(x, y, 0);
+    return join_core(x, y, 0, 0);
 }
 
 /* The vector half of q_join_grow: a vector at rc 1 takes a same-type atom or vector in the slack its buddy block
@@ -1248,7 +1280,7 @@ ray_t* q_join_amend(ray_t** px, ray_t* y, int exclusive) {
     ray_t* r = exclusive ? join_vec_grow(px, py) : NULL;
     if (!r && exclusive) r = join_list_grow(px, py);
     if (!r) {
-        r = join_core(*px, py, exclusive);
+        r = join_core(*px, py, exclusive, 1);
         if (exclusive && r && !RAY_IS_ERR(r)) ray_release(*px);
     }
     if (py != y) ray_release(py);
