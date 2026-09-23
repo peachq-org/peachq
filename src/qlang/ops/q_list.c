@@ -420,10 +420,6 @@ static ray_t* fill_conform(int8_t rt, ray_t* v) {
  * `fills` forward-fill and the fill-scan forms are elsewhere. */
 ray_t* q_fill_wrap(ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);
-    /* keyed^keyed is the uj merge with fill semantics (ref/coalesce.md:
-     * y records update x's, but y NULLS don't overwrite). */
-    if (q_type_is_keyed(x) && q_type_is_keyed(y))
-        return qj_ktbl_merge(x, y, 1);
     int xatom = ray_is_atom(x), yatom = ray_is_atom(y);
 
     /* ---- symbol fill ---- */
