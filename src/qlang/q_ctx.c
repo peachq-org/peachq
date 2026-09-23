@@ -15,7 +15,8 @@
 #include "qlang/q_env.h"          /* q_env_ctx / _set — the load's `\d` save+restore */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
-#include "qlang/q_prim.h"         /* q_str_text_bytes — the remote value-apply head */
+#include "qlang/q_prim.h"         /* q_str_text_bytes — the remote value-apply head; q_ssr_wrap — a known file's CRLF */
+#include "qlang/q_builtins.h"     /* q_dotq_sha1_fn — a known file's digest */
 #include "qlang/ops/q_sys.h"      /* q_sys_gc_mode / q_sys_err_trap_mode — the statement-seam policy */
 #include "qlang/ops/q_index.h"    /* q_index_elem_at — the element-read home */
 #include "qlang/io/q_io.h"        /* q_io_read_slice — THE byte core a load reads through */
@@ -413,6 +414,35 @@ ray_t* q_ctx_eval_src(const char* s, size_t n) {
     return RAY_NULL_OBJ;
 }
 
+/* Third-party files q cannot run but whose loss costs nothing, known by the SHA-1 of their text read with CRLF as LF
+ * (both checkouts are one row); a load runs `q` in their place.  Never by name: every other byte runs as it is. */
+static const struct { int64_t len; const char* sha1; const char* q; } g_known_files[] = {
+    /* TorQ code/common/json.k (4aa4b90e…): KX's old k encoder, parked under `.jOLD` (unreferenced) on a modern .z.K */
+    { 725, "\x4a\xa4\xb9\x0e\xef\x7b\x7c\x9b\x7c\xd0\x57\x2e\x6c\xf8\xee\xee\xd7\x41\x1f\x19", "" },
+    /* Old TorQ code/common/json.k (1bace6a8…): an older KX k encoder loaded into `.j`; later TorQ kept native .j */
+    { 514, "\x1b\xac\xe6\xa8\x4a\x61\x1d\xbf\xcf\xbe\x0e\x67\x5c\x4b\x2c\xcb\x5b\xb7\x6a\xcb", "" },
+    /* KX e/json.k (32327ed1…): "json support for kdb+3.2 or before (superceded by .j namespace)", e/README.txt */
+    { 831, "\x32\x32\x7e\xd1\x10\x4b\x65\xe0\xcd\xc1\x26\xdd\xa1\xbc\xcd\xb9\xc1\x71\xd0\x44", "" },
+};
+
+static const char* ctx_known_file(const char* p, int64_t n) {
+    size_t k = 0, nk = sizeof g_known_files / sizeof *g_known_files;
+    while (k < nk && !(g_known_files[k].len <= n && n <= 2 * g_known_files[k].len)) k++;   /* CRLF at most doubles */
+    if (k == nk) return NULL;
+    ray_t* a[3] = { ray_charv(p, n), ray_charv("\r\n", 2), ray_charv("\n", 1) };
+    ray_t* lf   = q_ssr_wrap(a, 3);
+    for (int i = 0; i < 3; i++) ray_release(a[i]);
+    int64_t len = RAY_IS_ERR(lf) ? -1 : q_count(lf);
+    ray_t*  dg  = RAY_IS_ERR(lf) ? lf : q_dotq_sha1_fn(lf);
+    if (dg != lf) ray_release(lf);
+    if (!dg || RAY_IS_ERR(dg)) { if (dg) { q_err_drop(); ray_error_free(dg); } return NULL; }
+    const char* hit = NULL;
+    for (; k < nk && !hit; k++)
+        if (g_known_files[k].len == len && !memcmp(ray_data(dg), g_known_files[k].sha1, 20)) hit = g_known_files[k].q;
+    ray_release(dg);
+    return hit;
+}
+
 int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig) {
     size_t plen  = strlen(path);
     ray_t* pathv = ray_str(path, plen);
@@ -425,8 +455,9 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig) {
     }
     char abs[PATH_MAX];
     const char* fpath = q_io_abs_path(path, abs, sizeof abs) ? abs : path;   /* ref/value.md `f`: the FULL path */
-    int rc = ctx_run_script((const char*)ray_data(bytes),
-                            (size_t) q_count(bytes),
+    const char* src = (const char*)ray_data(bytes);
+    const char* sub = ctx_known_file(src, q_count(bytes));
+    int rc = ctx_run_script(sub ? sub : src, sub ? strlen(sub) : (size_t) q_count(bytes),
                             ray_sym_intern_runtime(fpath, strlen(fpath)), 1,
                             ctx_script_lang(path), out, err, esig);
     ray_release(bytes);
