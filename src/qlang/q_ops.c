@@ -117,9 +117,10 @@
  *   ?      -> index   (deal/roll on a table = random-index gather; the dict
  *                      entries-axis collision for find/deal is spec §9.1,
  *                      owner call — ref/deal.md, ref/find.md)
- *   ~      -> aggregate (match reduces two structures to ONE bool atom,
- *                      structure discarded — but it does not follow the L3
- *                      `agg value d` law (keys compared too); near-border)
+ *   ~      -> none   (match reads two WHOLE values to one bool atom — keys
+ *                      compared too, so no lift may open a container for it;
+ *                      it left `aggregate` when that lift became uniform,
+ *                      owner ruling 2026-09-23)
  *   ratios -> map     (ref/ratios.md LABELS it "an aggregate function" but its
  *                      own examples are length-preserving `update ret:ratios
  *                      price by sym` — the label is a doc misprint; classified
@@ -213,8 +214,8 @@ static const q_op_t Q_OPS[] = {
     { "&",     QLEX_GLYPH,     QR_FN1("where", q_where_wrap),  QR_FN2A("and", q_min2_wrap), NULL, 1, 0, "atomic", "min", .mono_scan = "mins", QKOP(5) },
     { ",",     QLEX_GLYPH,     QR_ENV("enlist"),               QR_FN2("concat", q_join_wrap), NULL, 1, 0, "structural", "raze", QKOP(12) },
     /* `~` monadic not is ATOMIC on its own recipe, since `family` speaks for
-     * the DYAD; Match reduces to one bool atom (near-border, see AUDIT). */
-    { "~",     QLEX_GLYPH,     QR_FN1A("not", q_not_wrap),     QR_FN2("match", q_match_wrap), NULL, 1, 0, "aggregate", NULL, QKOP(15) },
+     * the DYAD; Match takes both values whole (see AUDIT). */
+    { "~",     QLEX_GLYPH,     QR_FN1A("not", q_not_wrap),     QR_FN2("match", q_match_wrap), NULL, 1, 0, "none", NULL, QKOP(15) },
     /* `^` fill: "Fill is an atomic function" (ref/fill.md). */
     { "^",     QLEX_GLYPH,     QR_FN1("nil?", q_null_wrap),    QR_FN2("fill", q_fill_wrap), NULL, 1, 0, "atomic", NULL, QKOP(7) },
     /* ---- type-dispatch glyphs ---- */
