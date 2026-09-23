@@ -32,7 +32,7 @@
 #include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
-#include "qlang/q_env.h"   /* q_env_get — q-bound builtins are snapshot sources too */
+#include "qlang/q_env.h"   /* q_env_get — q-bound builtins are snapshot sources too; q_env_ns_probe */
 #include "lang/env.h"      /* ray_env_get (bootstrap catalogue); ray_fn_unary/binary/vary */
 #include "lang/eval.h"     /* RAY_FN_ATOMIC/SPECIAL_FORM/Q_LOWER — attrs stamped on built values */
 #include "lang/internal.h" /* ray_sym_str — name display */
@@ -70,6 +70,8 @@ typedef struct {
 static entry_t g_entries[2 * REG_ROW_CAP];
 static int     g_count    = 0;
 static bool    g_inited   = false;
+static bool    g_sealed   = false;   /* reserved names locked (q_registry_seal) */
+static int64_t g_dotq;
 static bool    g_building = false;   /* debug re-entry guard (see header note) */
 
 /* ---- O(1) resolution indexes -------------------------------------------
@@ -78,10 +80,10 @@ static bool    g_building = false;   /* debug re-entry guard (see header note) *
  * the runtime's sym table.  Open-addressed, power of two, load <= 1/2 at
  * the row/entry caps. */
 
-#define SYM_SLOTS (2 * REG_ROW_CAP)     /* keys: one per manifest row */
+#define SYM_SLOTS (2 * REG_ROW_CAP)     /* keys: the manifest rows plus the reserve_name words */
 typedef struct {
     int64_t       sym_id;
-    const q_op_t* row;      /* non-NULL == occupied (every name IS a row) */
+    const q_op_t* row;      /* non-NULL == occupied: a manifest row or a reserve_name marker */
     int16_t       ent[3];   /* [valence] -> g_entries idx, -1 = no value  */
 } sym_slot_t;
 static sym_slot_t g_sym_idx[SYM_SLOTS];
@@ -120,6 +122,14 @@ static sym_slot_t* sym_slot(int64_t sym_id, int insert) {
         }
         if (s->sym_id == sym_id) return s;
     }
+}
+
+/* a name with no manifest row holds a valueless slot: a syntax word is reserved everywhere, a q.q-defined `.q`
+ * name only against a bare global or `.q` write (q_registry_locked) — a local or a dotted member may reuse it */
+static const q_op_t SYNTAX_WORD, DOTQ_BUILTIN;
+static void reserve_name(int64_t sym_id, const q_op_t* mark) {
+    sym_slot_t* s = sym_slot(sym_id, 1);
+    if (!s->row) s->row = mark;
 }
 
 static val_slot_t* val_slot(const ray_t* value, q_valence_t valence, int insert) {
@@ -242,23 +252,6 @@ static int name_char_ok(char c) {
            (c >= '0' && c <= '9') || c == '_';
 }
 
-static int name_is_keyword_reserved(int64_t sym_id) {
-    ray_t* s = ray_sym_str(sym_id);
-    if (!s) return 0;
-    const char* p = ray_str_ptr(s);
-    size_t n = ray_str_len(s);
-    int nop = 0;
-    const q_op_t* ops = q_ops_table(&nop);
-    int hit = 0;
-    for (int i = 0; i < nop && !hit; i++) {
-        if (ops[i].lex == QLEX_GLYPH || ops[i].lex == QLEX_ADVERB) continue;
-        size_t m = strlen(ops[i].name);
-        hit = (m == n && memcmp(ops[i].name, p, n) == 0);
-    }
-    ray_release(s);
-    return hit;
-}
-
 static int name_prev_contains(const int64_t* previous, int64_t n_previous,
                                 int64_t sym_id) {
     for (int64_t i = 0; i < n_previous; i++)
@@ -312,7 +305,7 @@ int64_t q_registry_name_sanitize(int64_t sym_id) {
 int64_t q_name_dedup(int64_t sym_id, const int64_t* previous, int64_t n_previous,
                      int check_reserved) {
     int64_t base = sym_id;
-    if (check_reserved && name_is_keyword_reserved(base))
+    if (check_reserved && q_registry_is_reserved(base))
         base = name_append_suffix(base, 1);
     if (!name_prev_contains(previous, n_previous, base)) return base;
     for (int64_t i = 1; i < INT64_MAX; i++) {
@@ -323,20 +316,12 @@ int64_t q_name_dedup(int64_t sym_id, const int64_t* previous, int64_t n_previous
 }
 
 ray_t* q_registry_name_reserved_words(void) {
-    int nop = 0;
-    const q_op_t* ops = q_ops_table(&nop);
-    int n = 0;
-    for (int i = 0; i < nop; i++)
-        if (ops[i].lex != QLEX_GLYPH && ops[i].lex != QLEX_ADVERB) n++;
-    ray_t* out = ray_sym_vec_new(RAY_SYM_W64, n);
-    if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
-    for (int i = 0; i < nop; i++) {
-        if (ops[i].lex == QLEX_GLYPH || ops[i].lex == QLEX_ADVERB) continue;
-        int64_t id = ray_sym_intern_runtime(ops[i].name, strlen(ops[i].name));
+    ray_t* out = ray_sym_vec_new(RAY_SYM_W64, 16);
+    for (int i = 0; out && !RAY_IS_ERR(out) && q_ops_syntax_word(i); i++) {
+        int64_t id = ray_sym_intern_runtime(q_ops_syntax_word(i), strlen(q_ops_syntax_word(i)));
         out = ray_vec_append(out, &id);
-        if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
     }
-    return out;
+    return out ? out : q_err(QE_OOM);
 }
 
 /* ---- value builders keyed by manifest build-kind ---- */
@@ -474,6 +459,9 @@ ray_err_t q_registry_init(void) {
             g_building = false; q_registry_destroy(); return RAY_ERR_DOMAIN;
         }
     }
+    for (int i = 0; q_ops_syntax_word(i); i++)
+        reserve_name(ray_sym_intern(q_ops_syntax_word(i), strlen(q_ops_syntax_word(i))), &SYNTAX_WORD);
+    g_dotq = ray_sym_intern(".q", 2);
     /* the paren-literal ctor IS the `enlist` verb's value (ADR: one value, not
      * a spelling-less twin), so the wire codec can read code 41 off its row */
     g_list_ctor = q_registry_row_value(q_ops_find("enlist", 6), Q_MONADIC);
@@ -596,7 +584,27 @@ ray_t* q_registry_lookup_row(int64_t sym_id, q_valence_t valence,
 }
 
 int q_registry_is_reserved(int64_t sym_id) {
-    return sym_slot(sym_id, 0) != NULL;
+    sym_slot_t* s = sym_slot(sym_id, 0);
+    return s && s->row != &DOTQ_BUILTIN;
+}
+
+void q_registry_seal(void) {
+    ray_t* ns = q_registry_qsrc_ns();
+    ray_t* k = ns ? ray_dict_keys(ns) : NULL;
+    for (int64_t i = 0; k && i < q_count(k); i++)
+        reserve_name(ray_read_sym(ray_data(k), i, RAY_SYM, k->attrs), &DOTQ_BUILTIN);
+    if (ns) ray_release(ns);
+    g_sealed = true;
+}
+
+int q_registry_locked(int64_t sym_id) {
+    return g_sealed && (sym_id == g_dotq || sym_slot(sym_id, 0));
+}
+
+int q_registry_is_infix(const char* s, size_t n) {
+    if (q_ops_find(s, (int)n)) return q_lex_is_kw_infix(s, (int)n);
+    ray_t* v = q_env_ns_probe(g_dotq, s, n);
+    return v && q_eval_apply_rank(v) >= 2;
 }
 
 ray_t* q_registry_row_value(const q_op_t* row, q_valence_t valence) {
@@ -705,5 +713,6 @@ void q_registry_destroy(void) {
         if (g_iters[a]) { ray_release(g_iters[a]); g_iters[a] = NULL; }
     g_count  = 0;
     g_inited = false;
+    g_sealed = false;
     idx_reset();   /* cached sym ids die with the runtime's sym table */
 }
