@@ -26,10 +26,41 @@
 
 #include <rayforce.h>
 #include "store/hnsw.h"  /* ray_hnsw_metric_t, ray_hnsw_t */
+#include "table/sym.h"   /* ray_read_sym — agg_read_key_i64's SYM lane */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Dense group assignment over 1..16 key columns, first-occurrence order. */
+typedef struct {
+    uint32_t* gids;       /* len = nrows */
+    int64_t*  first_row;  /* len = ngroups; row index where each group first appeared */
+    int64_t   ngroups;
+} agg_groups_t;
+
+/* Multi-key grouping (1..16 keys). Reads each key as an int64 (intern id for
+ * SYM) and hashes the tuple. Assigns gids incrementally on first sight → gid
+ * order == first-occurrence order; first_row[gid] records the row where the
+ * group first appeared. Returns 0 on success (caller releases out via
+ * agg_groups_free()), -1 on allocation failure. */
+int agg_group_keys(ray_t** key_cols, uint8_t n_keys, int64_t nrows, agg_groups_t* out);
+
+/* Release the buffers an agg_groups_t holds (buddy-backed, NOT libc malloc — so
+ * callers must use this, not free()).  Idempotent; NULLs the pointers. */
+void agg_groups_free(agg_groups_t* out);
+
+/* Read element `row` of an integer/temporal/SYM column widened to int64. */
+static inline int64_t agg_read_key_i64(ray_t* col, const void* data, int64_t row) {
+    switch (col->type) {
+        case RAY_I64: RAY_TEMPORAL64_CASES: return ((const int64_t*)data)[row];
+        case RAY_I32: RAY_TEMPORAL32_CASES: return ((const int32_t*)data)[row];
+        case RAY_I16: return ((const int16_t*)data)[row];
+        RAY_BYTE_CASES: case RAY_BOOL: return ((const uint8_t*)data)[row];
+        case RAY_SYM: return (int64_t)ray_read_sym(data, row, col->type, col->attrs);
+        default: return 0;  /* gate guarantees only the above reach here */
+    }
+}
 
 /* ===== Internal Type Constants ===== */
 

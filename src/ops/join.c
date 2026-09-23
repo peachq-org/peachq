@@ -25,6 +25,7 @@
 #include "ops/hash.h"
 #include "ops/idxop.h"
 #include "lang/internal.h"  /* sym_id_runtime, sym_domain_rep (sym-domain Phase 2) */
+#include "ops/ops.h"         /* ray_graph_new / ray_join / ray_asof_join / ray_execute */
 
 /* Test knob: force the legacy build-on-right behavior so the differential
  * harness can compare swap vs no-swap in one binary. */
@@ -2291,4 +2292,141 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
     if (rt_time_hdr) scratch_free(rt_time_hdr);
     if (eq_xl_hdr) scratch_free(eq_xl_hdr);
     return out;
+}
+
+/* Shared implementation for left-join (join_type=1) and inner-join (join_type=0).
+ * (left-join t1 t2 [key ...]) / (inner-join t1 t2 [key ...]) */
+static ray_t* join_impl(ray_t** args, int64_t n, uint8_t join_type) {
+    if (n < 3) return ray_error("arity", "join: expects left table, right table and keys, got %lld args", (long long)n);
+
+    ray_t* left_tbl  = args[0];
+    ray_t* right_tbl = args[1];
+    ray_t* keys      = args[2];
+
+    /* Detect alternative calling convention: (join [keys] t1 t2) */
+    if (left_tbl->type != RAY_TABLE && args[1]->type == RAY_TABLE && args[2]->type == RAY_TABLE) {
+        keys      = args[0];
+        left_tbl  = args[1];
+        right_tbl = args[2];
+    }
+
+    if (left_tbl->type != RAY_TABLE || right_tbl->type != RAY_TABLE)
+        return ray_error("type", "join: both operands must be tables, got %s and %s",
+                         ray_type_name(left_tbl->type), ray_type_name(right_tbl->type));
+    ray_t* _bxk = NULL;
+    keys = unbox_vec_arg(keys, &_bxk);
+    if (RAY_IS_ERR(keys)) return keys;
+    if (!is_list(keys))
+        { if (_bxk) ray_release(_bxk); return ray_error("type", "join: keys must be a symbol list, got %s", ray_type_name(keys->type)); }
+
+    int64_t nk = ray_len(keys);
+    if (nk == 0 || nk > 16) { if (_bxk) ray_release(_bxk); return ray_error("domain", "join: requires 1..16 keys, got %lld", (long long)nk); }
+    ray_t** key_elems = (ray_t**)ray_data(keys);
+
+    ray_graph_t* g = ray_graph_new(left_tbl);
+    if (!g) { if (_bxk) ray_release(_bxk); return ray_error("oom", NULL); }
+
+    ray_op_t* left_node  = ray_const_table(g, left_tbl);
+    ray_op_t* right_node = ray_const_table(g, right_tbl);
+
+    ray_op_t* lk[16], *rk[16];
+    for (int64_t i = 0; i < nk; i++) {
+        if (key_elems[i]->type != -RAY_SYM) {
+            int8_t ke_t = key_elems[i]->type;            /* capture BEFORE free */
+            ray_graph_free(g); if (_bxk) ray_release(_bxk);
+            return ray_error("type", "join: key must be a symbol name, got %s", ray_type_name(ke_t));
+        }
+        ray_t* name_str = ray_sym_str(key_elems[i]->i64);
+        if (!name_str) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", "join: unknown key symbol"); }
+        lk[i] = ray_scan(g, ray_str_ptr(name_str));
+        rk[i] = ray_scan(g, ray_str_ptr(name_str));
+        if (!lk[i] || !rk[i]) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", "join: key column not found"); }
+    }
+
+    if (_bxk) ray_release(_bxk);
+
+    ray_op_t* jn = ray_join(g, left_node, lk, right_node, rk,
+                           (uint8_t)nk, join_type);
+    if (!jn) { ray_graph_free(g); return ray_error("oom", NULL); }
+
+    jn = ray_optimize(g, jn);
+    ray_t* result = ray_execute(g, jn);
+    ray_graph_free(g);
+    return result;
+}
+
+ray_t* ray_left_join_fn(ray_t** args, int64_t n)  { return join_impl(args, n, 1); }
+ray_t* ray_inner_join_fn(ray_t** args, int64_t n) { return join_impl(args, n, 0); }
+
+/* (asof-join [key1 key2 ... timeKey] leftTable rightTable)
+ * Last key is the time/asof column, rest are equality keys.  The equality
+ * keys are OPTIONAL: a lone time key (asof-join [timeKey] L R) performs an
+ * un-partitioned asof over all rows. */
+ray_t* ray_asof_join_fn(ray_t** args, int64_t n) {
+    if (n < 3) return ray_error("arity", "asof-join: expects keys, left table and right table, got %lld args", (long long)n);
+    ray_t* keys_vec   = args[0];
+    ray_t* left_tbl   = args[1];
+    ray_t* right_tbl  = args[2];
+
+    if (left_tbl->type != RAY_TABLE || right_tbl->type != RAY_TABLE)
+        return ray_error("type", "asof-join: both operands must be tables, got %s and %s",
+                         ray_type_name(left_tbl->type), ray_type_name(right_tbl->type));
+
+    /* Keys vector must be a SYM vector with at least 1 element: the time key;
+     * any preceding keys are equality (partition) keys. */
+    ray_t* _bxk = NULL;
+    keys_vec = unbox_vec_arg(keys_vec, &_bxk);
+    if (!is_list(keys_vec) || ray_len(keys_vec) < 1) {
+        if (_bxk) ray_release(_bxk);
+        return ray_error("domain", "asof-join: keys must be a non-empty symbol list");
+    }
+    ray_t** kelems = (ray_t**)ray_data(keys_vec);
+    int64_t nkeys = ray_len(keys_vec);
+
+    /* Last key is the time column */
+    ray_t* time_sym = kelems[nkeys - 1];
+    if (time_sym->type != -RAY_SYM) {
+        int8_t ts_t = time_sym->type;            /* capture BEFORE free */
+        if (_bxk) ray_release(_bxk);
+        return ray_error("type", "asof-join: time key must be a symbol, got %s", ray_type_name(ts_t));
+    }
+
+    /* Remaining keys are equality keys */
+    uint8_t n_eq = (uint8_t)(nkeys - 1);
+    ray_t** eq_syms = kelems; /* first n_eq elements */
+
+    ray_graph_t* g = ray_graph_new(left_tbl);
+    if (!g) { if (_bxk) ray_release(_bxk); return ray_error("oom", NULL); }
+
+    ray_op_t* left_node  = ray_const_table(g, left_tbl);
+    ray_op_t* right_node = ray_const_table(g, right_tbl);
+
+    ray_t* tname = ray_sym_str(time_sym->i64);
+    if (!tname) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", "asof-join: unknown time key symbol"); }
+    ray_op_t* time_op = ray_scan(g, ray_str_ptr(tname));
+    if (!time_op) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", "asof-join: time key column not found"); }
+
+    ray_op_t* eq_ops[16];
+    for (uint8_t i = 0; i < n_eq; i++) {
+        if (eq_syms[i]->type != -RAY_SYM) {
+            int8_t es_t = eq_syms[i]->type;            /* capture BEFORE free */
+            ray_graph_free(g); if (_bxk) ray_release(_bxk);
+            return ray_error("type", "asof-join: equality key must be a symbol, got %s", ray_type_name(es_t));
+        }
+        ray_t* nm = ray_sym_str(eq_syms[i]->i64);
+        if (!nm) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", "asof-join: unknown equality key symbol"); }
+        eq_ops[i] = ray_scan(g, ray_str_ptr(nm));
+        if (!eq_ops[i]) { ray_graph_free(g); if (_bxk) ray_release(_bxk); return ray_error("domain", "asof-join: equality key column not found"); }
+    }
+
+    if (_bxk) ray_release(_bxk);
+
+    ray_op_t* jn = ray_asof_join(g, left_node, right_node,
+                                time_op, eq_ops, n_eq, 1);
+    if (!jn) { ray_graph_free(g); return ray_error("oom", NULL); }
+
+    jn = ray_optimize(g, jn);
+    ray_t* result = ray_execute(g, jn);
+    ray_graph_free(g);
+    return result;
 }
