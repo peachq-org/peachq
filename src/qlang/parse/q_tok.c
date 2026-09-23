@@ -316,7 +316,7 @@ static int lit_special(const char *s, int p, q_tok_el *out) {
 
 /* Scan one magnitude at src[*p]: 1 on success, 0 on no match, -1 with *err on a
  * malformed temporal shape (an invalid civil date never falls back to a float). */
-static int lit_magnitude(const char *src, int *p, q_tok_el *out, const char **err) {
+int q_tok_magnitude(const char *src, int *p, q_tok_el *out, const char **err) {
     out->forces_float = 0;
     int used = lit_special(src, *p, out);
     if (used) { *p += used; return 1; }
@@ -480,8 +480,7 @@ static ray_t *lit_temporal(const lit_ctx *c, const q_tok_el *buf, int m) {
  * date vector) but only p/u/v/t let one CARRY the letter — so `3d` / `3m` / `3z` keep parsing as `3` juxtaposed with
  * the name (no parse-display churn) while `0p` / `1t` / `13:30 20:00t` are literals.  `g` (guid) is null-only —
  * guid has no infinity and no other literal (basics/datatypes.md §Guid). */
-static int lit_type_letter(const char *src, int *p, char *letter,
-                           const q_tok_el *last, const char **err) {
+int q_tok_type_letter(const char *src, int *p, char *letter, const q_tok_el *last, const char **err) {
     char c = src[*p];
     if (!c || !last) return 1;
     int ok = strchr("bhijef", c) != NULL || (c == 'g' && last->kind == Q_TOK_EL_NULL);
@@ -549,9 +548,9 @@ ray_t* q_tok_literal(const char *src, int *p, const char **err) {
     }
     q_tok_el buf[MAX_VEC]; int m = 0;
     char letter = 0;
-    if (lit_magnitude(src, p, &buf[m++], err) != 1)
+    if (q_tok_magnitude(src, p, &buf[m++], err) != 1)
         LIT_ERR(*err ? *err : "bad number");
-    if (!lit_type_letter(src, p, &letter, &buf[m - 1], err)) return NULL;
+    if (!q_tok_type_letter(src, p, &letter, &buf[m - 1], err)) return NULL;
     int closed = letter && !lit_el_special(&buf[m - 1]);
     for (;;) {
         int sp = *p;
@@ -559,7 +558,7 @@ ray_t* q_tok_literal(const char *src, int *p, const char **err) {
         if (sp == *p) break;                     /* no space => run ended */
         if (q_tok_byte_lit_starts(src, sp)) break;   /* byte literal: own noun */
         q_tok_el e; int q = sp;
-        int got = lit_magnitude(src, &q, &e, err);
+        int got = q_tok_magnitude(src, &q, &e, err);
         if (got < 0) return NULL;
         if (!got) break;                         /* not another magnitude */
         /* A letter on a MAGNITUDE closes the literal: q prints one trailing suffix for the whole vector
@@ -568,7 +567,7 @@ ray_t* q_tok_literal(const char *src, int *p, const char **err) {
         if (closed) LIT_ERR("type suffix must end the literal");
         if (m >= MAX_VEC) LIT_ERR("numeric literal too long");
         *p = q; buf[m++] = e;
-        if (!lit_type_letter(src, p, &letter, &buf[m - 1], err)) return NULL;
+        if (!q_tok_type_letter(src, p, &letter, &buf[m - 1], err)) return NULL;
         closed = letter && !lit_el_special(&buf[m - 1]);
     }
 

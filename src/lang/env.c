@@ -705,23 +705,6 @@ static int cmp_str_ptr(const void* a, const void* b) {
     return strcmp(*(const char**)a, *(const char**)b);
 }
 
-bool ray_env_has_name(const char* name, int64_t len) {
-    if (!name || len <= 0) return false;
-    for (int32_t i = 0; i < g_env.count; i++) {
-        ray_t* s = ray_sym_str(g_env.keys[i]);
-        if (!s) continue;
-        const char* n = ray_str_ptr(s);
-        if (!n) continue;
-        if ((int64_t)strlen(n) == len && memcmp(n, name, (size_t)len) == 0)
-            return true;
-    }
-    for (const char** kw = s_keywords; *kw; kw++) {
-        if ((int64_t)strlen(*kw) == len && memcmp(*kw, name, (size_t)len) == 0)
-            return true;
-    }
-    return false;
-}
-
 int64_t ray_env_lookup_prefix(const char* prefix, int64_t len,
                               const char** results, int64_t max_results) {
     int64_t count = 0;
