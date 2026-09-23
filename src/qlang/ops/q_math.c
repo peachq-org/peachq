@@ -187,10 +187,10 @@ ray_t* q_xlog_wrap(ray_t* x, ray_t* y) {
 }
 
 /* q `x mmu y` — matrix multiply / dot product (ref/mmu.md).  f64-only (`real`/int
- * -> type; the doc says "float").  Each entry is ray_inner_prod_fn over a row of x
- * and a column of q_flip_wrap y (reusing both kernels).  A vector is an f64 vec
- * whose axis drops from the result; a matrix is a rectangular list of f64 vecs.
- * Shape validated up front: ragged / count-y != count-first-x -> length. */
+ * -> type; the doc says "float").  Each entry is mmu_dot over a row of x and a
+ * column of q_flip_wrap y.  A vector is an f64 vec whose axis drops from the
+ * result; a matrix is a rectangular list of f64 vecs.  Shape validated up front:
+ * ragged / count-y != count-first-x / empty inner axis -> length. */
 int q_mmu_class(ray_t* v, int64_t* first) {  /* 0=vector, 1=matrix, else QMMU_* */
     if (v && v->type == RAY_F64) { *first = q_count(v); return 0; }   /* count x */
     if (v && v->type == RAY_LIST && q_count(v) > 0) {
@@ -207,22 +207,36 @@ int q_mmu_class(ray_t* v, int64_t* first) {  /* 0=vector, 1=matrix, else QMMU_* 
     return QMMU_BAD;
 }
 
+/* The inner product mmu is built from — every operand reaching it has already been
+ * proved a RAY_F64 vector of length n by q_mmu_class, so the read is direct.  NaN
+ * folds to the one float null, as the make_f64 this replaced did; ±Inf survives. */
+static double mmu_dot(const double* a, const double* b, int64_t n) {
+    double acc = 0.0;
+    for (int64_t i = 0; i < n; i++) acc += a[i] * b[i];
+    return __builtin_isnan(acc) ? NULL_F64 : acc;
+}
+
 ray_t* q_mmu_wrap(ray_t* x, ray_t* y) {
     int64_t kx, ky;                                     /* count-first (matrix) / count (vec) */
     int xc = q_mmu_class(x, &kx), yc = q_mmu_class(y, &ky);
     if (xc == QMMU_BAD || yc == QMMU_BAD) return q_err(QE_TYPE);
     if (xc == QMMU_RAGGED || yc == QMMU_RAGGED) return q_err(QE_LENGTH);
     if (kx != q_count(y)) return q_err(QE_LENGTH);          /* count y must match */
+    if (kx <= 0) return q_err(QE_LENGTH);                   /* no product over an empty axis */
 
     ray_t* ycols = yc ? q_flip_wrap(y) : NULL;          /* owned: cols of y as f64 vecs */
     if (yc && (!ycols || RAY_IS_ERR(ycols))) return ycols ? ycols : q_err(QE_OOM);
+    if (yc && ky > 0) {                                 /* the flip is what mmu_dot reads */
+        int64_t w;
+        if (q_mmu_class(ycols, &w) != 1 || w != kx || q_count(ycols) != ky) { ray_release(ycols); return q_err(QE_TYPE); }
+    }
     ray_t** rowv = xc ? (ray_t**)ray_data(x) : NULL;
     ray_t** colv = yc ? (ray_t**)ray_data(ycols) : NULL;
     int64_t R = xc ? q_count(x) : 1;                    /* result rows (dropped if x is a vec) */
     int64_t C = yc ? ky : 1;                            /* result cols (dropped if y is a vec) */
 
-    /* scalar: vector . vector -> float atom (or propagated kernel error) */
-    if (!xc && !yc) return ray_inner_prod_fn(x, y);
+    /* scalar: vector . vector -> float atom */
+    if (!xc && !yc) return make_f64(mmu_dot(ray_data(x), ray_data(y), kx));
 
     /* matrix . matrix -> list of R f64 vecs, each length C */
     if (xc && yc) {
@@ -233,11 +247,8 @@ ray_t* q_mmu_wrap(ray_t* x, ray_t* y) {
             if (!row || RAY_IS_ERR(row)) { ray_release(out); ray_release(ycols); return row ? row : q_err(QE_OOM); }
             row->len = C;
             double* od = (double*)ray_data(row);
-            for (int64_t j = 0; j < C; j++) {
-                ray_t* d = ray_inner_prod_fn(rowv[i], colv[j]);
-                if (!d || RAY_IS_ERR(d)) { ray_release(row); ray_release(out); ray_release(ycols); return d ? d : q_err(QE_OOM); }
-                od[j] = as_f64(d); ray_release(d);
-            }
+            for (int64_t j = 0; j < C; j++)
+                od[j] = mmu_dot(ray_data(rowv[i]), ray_data(colv[j]), kx);
             out = ray_list_append(out, row); ray_release(row);   /* append RETAINS */
             if (RAY_IS_ERR(out)) { ray_release(ycols); return out; }
         }
@@ -251,11 +262,8 @@ ray_t* q_mmu_wrap(ray_t* x, ray_t* y) {
     if (!out || RAY_IS_ERR(out)) { if (ycols) ray_release(ycols); return out ? out : q_err(QE_OOM); }
     out->len = n;
     double* od = (double*)ray_data(out);
-    for (int64_t k = 0; k < n; k++) {
-        ray_t* d = ray_inner_prod_fn(xc ? rowv[k] : x, yc ? colv[k] : y);
-        if (!d || RAY_IS_ERR(d)) { ray_release(out); if (ycols) ray_release(ycols); return d ? d : q_err(QE_OOM); }
-        od[k] = as_f64(d); ray_release(d);
-    }
+    for (int64_t k = 0; k < n; k++)
+        od[k] = mmu_dot(ray_data(xc ? rowv[k] : x), ray_data(yc ? colv[k] : y), kx);
     if (ycols) ray_release(ycols);
     return out;
 }
