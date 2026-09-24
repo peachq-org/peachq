@@ -362,7 +362,6 @@ static int64_t lit_narrow_special(q_tok_el_kind k, int width) {
 }
 
 static int64_t lit_int(const q_tok_el *e, int width) {
-    if (e->kind == Q_TOK_EL_FLOAT) return (int64_t)e->f;
     if (e->kind == Q_TOK_EL_NULL || e->kind == Q_TOK_EL_PINF || e->kind == Q_TOK_EL_NINF)
         return lit_narrow_special(e->kind, width);
     return e->i;
@@ -411,7 +410,7 @@ static const lit_ctx LIT_CTX[] = {
     { Q_TOK_EL_DT,       RAY_DATETIME,  1, 0, 1, 86400000000000LL, NULL          },
 };
 
-/* 0N / 0W / -0W: TYPELESS, so a Special takes its type from its own letter. */
+/* 0N / 0W / -0W: TYPELESS, so a Special takes the literal's type. */
 static int lit_el_special(const q_tok_el *e) {
     return e->kind == Q_TOK_EL_NULL || e->kind == Q_TOK_EL_PINF ||
            e->kind == Q_TOK_EL_NINF;
@@ -480,18 +479,13 @@ static ray_t *lit_temporal(const lit_ctx *c, const q_tok_el *buf, int m) {
  * date vector) but only p/u/v/t let one CARRY the letter — so `3d` / `3m` / `3z` keep parsing as `3` juxtaposed with
  * the name (no parse-display churn) while `0p` / `1t` / `13:30 20:00t` are literals.  `g` (guid) is null-only —
  * guid has no infinity and no other literal (basics/datatypes.md §Guid). */
-int q_tok_type_letter(const char *src, int *p, char *letter, const q_tok_el *last, const char **err) {
+void q_tok_type_letter(const char *src, int *p, char *letter, const q_tok_el *last) {
     char c = src[*p];
-    if (!c || !last) return 1;
-    int ok = strchr("bhijef", c) != NULL || (c == 'g' && last->kind == Q_TOK_EL_NULL);
+    int ok = c && (strchr("bhijef", c) || (c == 'g' && last->kind == Q_TOK_EL_NULL));
     for (size_t k = 0; !ok && k < sizeof LIT_CTX / sizeof *LIT_CTX; k++)
         ok = c == q_type_char(LIT_CTX[k].type) &&
              (last->kind == Q_TOK_EL_INT ? LIT_CTX[k].int_ok : lit_el_ok(last, &LIT_CTX[k], 1));
-    if (!ok) return 1;
-    if (*letter && *letter != c) { *err = "inconsistent numeric type suffix"; return 0; }
-    *letter = c;
-    (*p)++;
-    return 1;
+    if (ok) *letter = src[(*p)++];
 }
 
 /* ---- byte literals (q type 4, char x): glued `0x` consumes the maximal hex-digit run.  Doc pins (CLEAN ROOM,
@@ -550,8 +544,7 @@ ray_t* q_tok_literal(const char *src, int *p, const char **err) {
     char letter = 0;
     if (q_tok_magnitude(src, p, &buf[m++], err) != 1)
         LIT_ERR(*err ? *err : "bad number");
-    if (!q_tok_type_letter(src, p, &letter, &buf[m - 1], err)) return NULL;
-    int closed = letter && !lit_el_special(&buf[m - 1]);
+    q_tok_type_letter(src, p, &letter, &buf[m - 1]);
     for (;;) {
         int sp = *p;
         while (lit_ws(src[sp])) sp++;
@@ -561,14 +554,12 @@ ray_t* q_tok_literal(const char *src, int *p, const char **err) {
         int got = q_tok_magnitude(src, &q, &e, err);
         if (got < 0) return NULL;
         if (!got) break;                         /* not another magnitude */
-        /* A letter on a MAGNITUDE closes the literal: q prints one trailing suffix for the whole vector
-         * (basics/datatypes.md:254-259), so `1h 2h` is not a q spelling (owner ruling 2026-07-30) — `1 2h` is.  A
-         * letter on a SPECIAL is that element's own type (0N/0W carry none), so `0Nu 0Wu 09:30` stays a literal. */
-        if (closed) LIT_ERR("type suffix must end the literal");
+        /* q prints one trailing suffix for the whole vector (basics/datatypes.md:254-259): `1 2h`, never `1h 2h`
+         * (owner ruling 2026-07-30), and a special is no exception — `0N 0W 09:30u` (owner ruling 2026-09-23). */
+        if (letter) LIT_ERR("type suffix must end the literal");
         if (m >= MAX_VEC) LIT_ERR("numeric literal too long");
         *p = q; buf[m++] = e;
-        if (!q_tok_type_letter(src, p, &letter, &buf[m - 1], err)) return NULL;
-        closed = letter && !lit_el_special(&buf[m - 1]);
+        q_tok_type_letter(src, p, &letter, &buf[m - 1]);
     }
 
     /* Booleans: a 0/1 run ending in 'b' (spaces flattened). */
@@ -613,9 +604,9 @@ ray_t* q_tok_literal(const char *src, int *p, const char **err) {
         return lit_temporal(c, buf, m);
     }
 
-    /* Float context: explicit e/f letter, or any fractional/lowercase-special. */
+    /* The letter decides; only a letter-free literal is floated by a fraction or a lowercase special. */
     int is_float = (letter == 'e' || letter == 'f');
-    for (int i = 0; i < m && !is_float; i++)
+    for (int i = 0; i < m && !letter; i++)
         if (buf[i].forces_float) is_float = 1;
     if (is_float) {
         int f32 = (letter == 'e');
@@ -634,6 +625,8 @@ ray_t* q_tok_literal(const char *src, int *p, const char **err) {
     }
 
     /* Integer context: h=i16, i=i32, j/none=i64.  Without HAS_NULLS a reduction cannot tell 0Ni/0Nh from data. */
+    for (int i = 0; i < m; i++)
+        if (buf[i].forces_float && !lit_el_special(&buf[i])) LIT_ERR("bad number");
     int width = (letter == 'h') ? 2 : (letter == 'i') ? 4 : 8;
     if (m == 1) {
         int64_t v = lit_int(&buf[0], width);

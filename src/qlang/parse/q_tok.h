@@ -34,9 +34,9 @@ typedef struct { q_tok_el_kind kind; int64_t i; double f; int forces_float; } q_
  * caller dies — invalid civil dates/clocks never fall back to floats). */
 int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err);
 
-/* One magnitude (a Special, a temporal or a number) and then its admitted type letter; pure, returns as above. */
+/* One magnitude (a Special, a temporal or a number), returning as above; then its admitted type letter, if any. */
 int q_tok_magnitude(const char* src, int* p, q_tok_el* out, const char** err);
-int q_tok_type_letter(const char* src, int* p, char* letter, const q_tok_el* last, const char** err);
+void q_tok_type_letter(const char* src, int* p, char* letter, const q_tok_el* last);
 
 /* Scan ONE whole literal (atom or space-separated vector strand) at src[*p]:
  * numeric, boolean, byte-hex, guid-null and every temporal type, including the
