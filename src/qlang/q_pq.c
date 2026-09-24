@@ -78,7 +78,8 @@ void q_pq_reset(void) { g_helpdb_state = g_pq_state = LOAD_COLD; }
  * calls.  `pq` is the session set lib/pq.q needs (connections, the provider
  * load, the terminal); `str` is both string engines; `termbox` includes the
  * beep.  Re-binding is idempotent, so a reload costs nothing but the bind. */
-static void pq_set_pq(void)      { q_conn_pq_register(); q_provider_pq_register(); q_console_pq_register(); q_fmt_pq_register(); }
+static void pq_set_pq(void)      { q_conn_pq_register(); q_provider_pq_register(); q_console_pq_register(); q_fmt_pq_register();
+                                   q_ctx_pq_register(); }
 static void pq_set_str(void)     { q_strfmt_register(); q_strns_register(); }
 static void pq_set_termbox(void) { q_termbox_register(); q_beep_register(); }
 static const struct { const char* name; void (*bind)(void); } PQ_SETS[] = {

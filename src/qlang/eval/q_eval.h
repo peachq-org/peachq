@@ -138,6 +138,12 @@ int    q_eval_apply_frame_depth(void);              /* lambda frames live (above
 /* set the frame floor (< 0: floor at the current depth); returns the previous.
  * A script load suspends the caller's frames for WRITES — ctx_run_script */
 int    q_eval_apply_frame_floor(int floor);
+/* Fresh text runs at TOP LEVEL: the caller's frames suspended — the env read floor and the apply write floor together
+ * — and resumed on every exit by the same C frame.  A load's lines, `value` of a string or of a name (ref/get.md:22:
+ * a lambda's own `t` never shadows the global asked for) and a transcript's line all ride this pair. */
+typedef struct { int floor; int32_t ffloor; } q_eval_frames_t;
+q_eval_frames_t q_eval_frames_suspend(void);
+void            q_eval_frames_resume(q_eval_frames_t f);
 /* BORROWED params/body/ctx (ctx NULL = root); 0 unless v is a lambda carrier */
 int    q_eval_apply_lambda_parts(ray_t* v, ray_t** params, ray_t** body,
                                  ray_t** ctx);

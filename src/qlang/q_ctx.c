@@ -12,21 +12,25 @@
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_dbg.h"     /* statement stash + `\e` trace display */
 #include "qlang/eval/q_view.h"    /* q_view_intercept — `x::e` at the line seam */
-#include "qlang/q_env.h"          /* q_env_ctx / _set — the load's `\d` save+restore */
+#include "qlang/q_env.h"          /* q_env_ctx / _set — the load's `\d` save+restore; q_env_peek — `.<ext>.e` */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"
-#include "qlang/q_prim.h"         /* q_str_text_bytes — the remote value-apply head; q_ssr_wrap — a known file's CRLF */
+#include "qlang/q_prim.h"         /* q_str_text_bytes — the remote value-apply head; q_ssr_wrap — a known file's CRLF;
+                                   * q_str_split_lines / q_str_charv_out — a whole-text file as read0's lines */
 #include "qlang/q_builtins.h"     /* q_dotq_sha1_fn — a known file's digest */
-#include "qlang/ops/q_sys.h"      /* q_sys_gc_mode / q_sys_err_trap_mode — the statement-seam policy */
+#include "qlang/q_dotz.h"         /* q_dotz_quiet — `-q` silences a transcript's prompt and echo, as the piped console's */
+#include "qlang/ops/q_sys.h"      /* q_sys_gc_mode / q_sys_err_trap_mode — the statement-seam policy; q_sys_prompt */
 #include "qlang/ops/q_index.h"    /* q_index_elem_at — the element-read home */
 #include "qlang/io/q_io.h"        /* q_io_read_slice — THE byte core a load reads through */
-#include "lang/eval.h"            /* ray_eval_is_interrupted, ray_eval_set_remote_*_fn */
+#include "lang/env.h"             /* ray_fn_unary — the .pq.i.console native */
+#include "lang/eval.h"            /* ray_eval_is_interrupted, ray_eval_set_remote_*_fn, RAY_FN_NONE */
 #include "mem/heap.h"             /* ray_heap_gc — the `\g 1` statement-end collect */
 #include "mem/sys.h"              /* ray_sys_alloc — remote-eval scratch */
 #include "ops/ops.h"              /* ray_is_lazy, ray_lazy_materialize */
 #include "app/term.h"             /* ray_term_interrupted */
 #include "core/timer.h"           /* ray_time_now_ms — a finished line's ms */
 #include <rayforce.h>
+#include <ctype.h>                /* isalnum — a file's extension */
 #include <limits.h>               /* PATH_MAX — the load's resolved file symbol */
 #include <stdlib.h>
 #include <string.h>
@@ -122,9 +126,11 @@ static void ctx_load_esig(ray_t** esig, q_err_sig_t* t) {
 /* in_load: this is a script-runner line — an eval error (or interrupt, or a
  * failing `\`-command such as a nested `\l`) ABORTS the load: non-zero return
  * plus the re-signal in *esig.  Non-load callers keep the historic contract
- * (eval errors report and return 0). */
+ * (eval errors report and return 0).  console: q_dbg_statement_begin's — 0
+ * never suspends (a transcript's line), else a console statement or a load
+ * line's inheritance. */
 static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
-                    int print_result, int in_load, ray_t** esig) {
+                    int print_result, int in_load, int console, ray_t** esig) {
     if (n == 0)
         return 0;
 
@@ -133,7 +139,7 @@ static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
      * the per-statement save/restore — the error-payload backstop (q_err.c
      * head) rides it.  Every exit path ends it, so a NESTED statement gives
      * this level its state back. */
-    int dbg_prev = q_dbg_statement_begin(s, n, in_load ? -1 : print_result);
+    int dbg_prev = q_dbg_statement_begin(s, n, console);
 
     /* `.z.pi` (ref/dotz.md:703, syscmds.md:937, owner 2026-09-18): a console
      * line is the handler's to evaluate and its result is the display.  Never a
@@ -261,7 +267,7 @@ int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
                    int print_result) {
     ctx_line_t prev = g_line;
     g_line = (ctx_line_t){ s, n, ray_time_now_ms() };
-    int rc = ctx_line(s, n, out, err, print_result, 0, NULL);
+    int rc = ctx_line(s, n, out, err, print_result, 0, print_result, NULL);
     g_line = prev;
     return rc;
 }
@@ -374,14 +380,14 @@ typedef struct { FILE* out; FILE* err; int print_result; char lang; ray_t** esig
  * a `.t` file still reaches `.p.e`.  `q` and `k` keep their own doors. */
 static int ctx_load_stmt(const char* s, size_t n, void* u) {
     ctx_load_t* ld = (ctx_load_t*)u;
-    if (!ld->lang) return ctx_line(s, n, ld->out, ld->err, ld->print_result, 1, ld->esig);
+    if (!ld->lang) return ctx_line(s, n, ld->out, ld->err, ld->print_result, 1, -1, ld->esig);
     char* t = (char*)ray_sys_alloc(n + 3);
     if (!t) return 1 + (int)QE_OOM;
     t[0] = ld->lang;
     t[1] = ')';
     memcpy(t + 2, s, n);
     t[n + 2] = '\0';
-    int rc = ctx_line(t, n + 2, ld->out, ld->err, ld->print_result, 1, ld->esig);
+    int rc = ctx_line(t, n + 2, ld->out, ld->err, ld->print_result, 1, -1, ld->esig);
     ray_sys_free(t);
     return rc;
 }
@@ -399,27 +405,32 @@ static char ctx_script_lang(const char* path) {
     return fn && q_eval_apply_is_fn(fn) ? c : 0;
 }
 
+/* THE load boundary, every door's (`\l`, `system "l …"`, `-f`, a whole-text file).  OWNER RULING 2026-08-06: a
+ * load SAVES the caller's `\d` context and RESTORES it when the file runs to completion; a load that ABORTS leaves
+ * the context where the error left it (deliberate — that is what makes the failing namespace inspectable; a trap
+ * that catches the abort restores it, 2026-09-17).  And a load runs at TOP LEVEL (owner ruling 2026-08-11): the
+ * caller's frames suspended, resumed on EVERY exit, aborts included — unlike `\d`, lost locals are never
+ * inspectable state. */
+typedef struct { int64_t ctx; q_eval_frames_t frames; } ctx_load_scope_t;
+
+static ctx_load_scope_t ctx_load_enter(void) {
+    ctx_load_scope_t s;
+    s.ctx    = q_env_ctx();
+    s.frames = q_eval_frames_suspend();
+    return s;
+}
+
+static void ctx_load_leave(ctx_load_scope_t s, int completed) {
+    q_eval_frames_resume(s.frames);
+    if (completed) q_env_ctx_set(s.ctx);
+}
+
 static int ctx_run_script(const char* src, size_t len, int64_t file_sym, int print_result,
                           char lang, FILE* out, FILE* err, ray_t** esig) {
-    /* OWNER RULING 2026-08-06: a load SAVES the caller's `\d` context and
-     * RESTORES it when the file runs to completion; a load that ABORTS leaves
-     * the context where the error left it (deliberate — that is what makes the
-     * failing namespace inspectable; a trap that catches the abort restores it,
-     * 2026-09-17).  Every door rides this seam: `\l`, `system "l …"`, `-f`. */
-    int64_t saved_ctx = q_env_ctx();
-
-    /* A load runs at TOP LEVEL (owner ruling 2026-08-11): suspend the caller's
-     * frames (env read floor + apply write floor), restored on EVERY exit,
-     * aborts included — unlike `\d`, lost locals are never inspectable state. */
-    int     saved_floor  = q_eval_apply_frame_floor(-1);
-    int32_t saved_ffloor = q_env_frame_floor(-1);
-
-    ctx_load_t ld  = { out, err, print_result, lang, esig };
-    int        lrc = ctx_walk_script(src, len, file_sym, ctx_load_stmt, &ld);
-
-    q_env_frame_floor(saved_ffloor);
-    q_eval_apply_frame_floor(saved_floor);
-    if (!lrc) q_env_ctx_set(saved_ctx);            /* completed: caller's `\d` back */
+    ctx_load_scope_t scope = ctx_load_enter();
+    ctx_load_t       ld    = { out, err, print_result, lang, esig };
+    int              lrc   = ctx_walk_script(src, len, file_sym, ctx_load_stmt, &ld);
+    ctx_load_leave(scope, !lrc);
     if (lrc && esig && *esig) q_dbg_mark_reported(*esig);
     return lrc ? 1 + lrc : 0;
 }
@@ -473,6 +484,110 @@ static const char* ctx_known_file(const char* p, int64_t n) {
     return hit;
 }
 
+/* ===== Whole-text files: `.<ext>.e` and the .qcmd default =====
+ *
+ * A file whose extension is MORE than one letter is handed WHOLE, as read0's
+ * lines, to `.<ext>.e` when that is a function, else to peachq's built-in
+ * default for the extension — `qcmd`: `.pq.i.qcmd` (lib/pq.q), a console
+ * transcript replayed — else it loads as q (owner ruling 2026-09-24).  Whole,
+ * because the statement walker cannot read a transcript: an indented display
+ * line continues the statement before it, a bare `/` output line opens a
+ * comment block and a lone `\` ends the file.  kdb's single-letter handlers
+ * (ctx_script_lang) keep their statement-by-statement routing. */
+
+static FILE* g_console_out;   /* the load in progress's streams: what `.pq.i.console` prints to; NULL = stdout/stderr */
+static FILE* g_console_err;
+
+/* `.pq.i.console` — see q_ctx.h: prompt and input echo (none under `-q`, as
+ * the piped console), then the line as the console runs it — `.z.pi`,
+ * display, an error printed and the run continuing.  Never suspends (a
+ * transcript's expected answer is often an error), never a history record
+ * (nobody typed it), and at top level: a transcript's `a:1` is the session's. */
+static ray_t* pq_console_fn(ray_t* x) {
+    const char* p; int64_t n;
+    if (!q_str_text_bytes(x, &p, &n)) return q_err(QE_TYPE);
+    FILE* out = g_console_out ? g_console_out : stdout;
+    FILE* err = g_console_err ? g_console_err : stderr;
+    if (!q_dotz_quiet()) {
+        char prompt[80];
+        int  pl = q_sys_prompt(prompt, sizeof prompt);
+        fwrite(prompt, 1, (size_t)pl, out);
+        fwrite(p, 1, (size_t)n, out);
+        fputc('\n', out);
+    }
+    if (n) {
+        char* s = (char*)ray_sys_alloc((size_t)n + 1);   /* q_parse reads a C string */
+        if (!s) return q_err(QE_OOM);
+        memcpy(s, p, (size_t)n);
+        s[n] = '\0';
+        ctx_line_t      prev   = g_line;
+        q_eval_frames_t frames = q_eval_frames_suspend();
+        int             base   = q_dbg_frame_base(-1);
+        g_line.s = NULL;
+        ctx_line(s, (size_t)n, out, err, 1, 0, 0, NULL);
+        q_dbg_frame_base(base);
+        g_line = prev;
+        q_eval_frames_resume(frames);
+        ray_sys_free(s);
+    }
+    fflush(out);
+    ray_retain(RAY_NULL_OBJ);
+    return RAY_NULL_OBJ;
+}
+
+void q_ctx_pq_register(void) {
+    ray_t* fn = ray_fn_unary(".pq.i.console", RAY_FN_NONE, pq_console_fn);
+    q_env_bind(ray_sym_intern(".pq.i.console", 13), fn);
+    ray_release(fn);
+}
+
+static const char* ctx_ext(const char* path) {   /* an alphanumeric extension longer than a letter, else NULL */
+    const char* dot = strrchr(path, '.');
+    if (!dot || strlen(dot) < 3) return NULL;
+    for (const char* c = dot + 1; *c; c++)
+        if (!isalnum((unsigned char)*c)) return NULL;
+    return dot + 1;
+}
+
+/* 1 with *handler = `.<ext>.e` when that is a function (borrowed), 1 with NULL for a built-in default, 0: q. */
+static int ctx_whole_file(const char* path, ray_t** handler) {
+    const char* ext = ctx_ext(path);
+    char        name[64];
+    *handler = NULL;
+    if (!ext || snprintf(name, sizeof name, ".%s.e", ext) >= (int)sizeof name) return 0;
+    ray_t* fn = q_env_peek(ray_sym_intern_runtime(name, strlen(name)));   /* peek: `f.pq` must not autoload .pq */
+    if (fn && q_eval_apply_is_fn(fn)) { *handler = fn; return 1; }
+    /* internal only, not user-facing: no user-docs, help or --help mention until the owner decides to expose it */
+    return strcmp(ext, "qcmd") == 0;
+}
+
+/* The whole-text load, under the load boundary's law.  The handler's error is the load's answer (esig), displayed
+ * here only when nobody asked for it. */
+static int ctx_run_whole(ray_t* handler, ray_t* lines, FILE* out, FILE* err, ray_t** esig) {
+    { const char* con = q_console_str();   /* the caller's pending display lands first, as a script's first line drains it */
+      if (con && *con) fputs(con, out);
+      q_console_reset(); }
+    ctx_load_scope_t scope    = ctx_load_enter();
+    FILE*            prev_out = g_console_out;
+    FILE*            prev_err = g_console_err;
+    g_console_out = out;
+    g_console_err = err;
+    ray_t* r  = handler ? q_eval_apply_value(handler, &lines, 1)
+                        : q_eval_apply_call_name(".pq.i.qcmd", 10, &lines, 1);   /* the `.pq` autoload resolves it */
+    int    ok = !r || !RAY_IS_ERR(r);
+    g_console_out = prev_out;
+    g_console_err = prev_err;
+    ctx_load_leave(scope, ok);
+    if (ok) {
+        if (r) ray_release(r);
+        return 0;
+    }
+    int code = r->aux[0] ? (int)r->aux[0] : (int)QE_VALUE + 1;
+    if (esig) *esig = r;
+    else ctx_show_err(out, err, r);
+    return 1 + code;
+}
+
 int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig) {
     size_t plen  = strlen(path);
     ray_t* pathv = ray_str(path, plen);
@@ -487,7 +602,14 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig) {
     const char* fpath = q_io_abs_path(path, abs, sizeof abs) ? abs : path;   /* ref/value.md `f`: the FULL path */
     const char* src = (const char*)ray_data(bytes);
     const char* sub = ctx_known_file(src, q_count(bytes));
-    int rc = ctx_run_script(sub ? sub : src, sub ? strlen(sub) : (size_t) q_count(bytes),
+    ray_t*      handler;
+    int rc;
+    if (!sub && ctx_whole_file(path, &handler)) {
+        ray_t* lines = q_str_charv_out(q_str_split_lines(src, (size_t)q_count(bytes)));
+        if (RAY_IS_ERR(lines)) { ray_error_free(lines); rc = 1 + (int)QE_OOM; }
+        else { rc = ctx_run_whole(handler, lines, out, err, esig); ray_release(lines); }
+    } else
+        rc = ctx_run_script(sub ? sub : src, sub ? strlen(sub) : (size_t) q_count(bytes),
                             ray_sym_intern_runtime(fpath, strlen(fpath)), 1,
                             ctx_script_lang(path), out, err, esig);
     ray_release(bytes);

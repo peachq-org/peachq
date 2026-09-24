@@ -89,6 +89,23 @@
 / Namespaces `-ls` hides: the language's own and the standard library's.
 .pq.i.LS_HIDDEN:`.Q`.q`.h`.j`.help`.pq;
 
+/ @ignore
+.pq.i.qcmd_prompt:{[line]
+  if[line like "q)*"; :2];
+  if[not line like "q.*"; :0];
+  close:line?")";
+  name:line 2_til close;
+  named:(0<count name) and (first[name] in .Q.a,.Q.A) and all name in .Q.an;
+  $[named and close<count line; close+1; 0]};
+
+/ @ignore
+/ Internal only, not user-facing: do not document in user-docs, help or --help until the owner decides to expose it.
+.pq.i.qcmd:{[lines]
+  lines:$[10h=type lines; "\n" vs lines; lines];
+  at:.pq.i.qcmd_prompt each lines;
+  keep:where at>0;
+  .pq.i.console each at[keep] _' lines keep};
+
 / The text as a q string literal's body (qStudio's KdbHelper.escape, in its order): backslash, tab, CR, LF, quote.
 .pq.i.remote_escape:{[text]
   text:"",text;
