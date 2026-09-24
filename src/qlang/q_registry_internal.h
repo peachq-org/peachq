@@ -180,7 +180,7 @@ ray_t* q_hdel_wrap(ray_t* x);                                 /* used by: builti
 
 /* ---- defined in ops/q_str.c ---- */
 ray_t* q_ssr_wrap(ray_t** args, int64_t n);                   /* used by: builtins, registry */
-ray_t* q_str_split_lines(const char* y, size_t yl);           /* used by: io, vs_sv */
+/* q_str_split_lines: declared in q_prim.h (the load path reads a file as lines too) */
 
 /* ---- defined in ops/q_vs_sv.c ---- */
 ray_t* q_vs_wrap(ray_t* x, ray_t* y);
