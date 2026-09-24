@@ -34,6 +34,7 @@
 #define _GNU_SOURCE /* RTLD_DEFAULT */
 #include "qlang/q_count.h"
 #include "qlang/io/q_ffi.h"
+#include "qlang/io/q_dl.h"      /* q_dl_open / q_dl_sym — a named library, never unmapped */
 #include "qlang/base/q_err.h"
 #include "qlang/q_env.h"
 #include "lang/env.h"    /* ray_fn_unary / ray_fn_vary */
@@ -132,23 +133,19 @@ static void* qffi_dlsym_name(ray_t* name, int* bad_shape) {
         *bad_shape = 1;
         return NULL;
     }
-#if defined(_WIN32)
     if (lib[0]) {
-        HMODULE h = LoadLibraryA(lib);
-        return h ? (void*)GetProcAddress(h, fn) : NULL;
+        void* h = q_dl_open(lib);
+        return h ? q_dl_sym(h, fn) : NULL;
     }
+#if defined(_WIN32)
     static const char* wellknown[] = { NULL, "msvcrt.dll", "kernel32.dll" };
     for (size_t i = 0; i < sizeof wellknown / sizeof *wellknown; i++) {
-        HMODULE h = wellknown[i] ? LoadLibraryA(wellknown[i]) : GetModuleHandleA(NULL);
-        void*   p = h ? (void*)GetProcAddress(h, fn) : NULL;
+        void* h = wellknown[i] ? q_dl_open(wellknown[i]) : (void*)GetModuleHandleA(NULL);
+        void* p = h ? q_dl_sym(h, fn) : NULL;
         if (p) return p;
     }
     return NULL;
 #else
-    if (lib[0]) {
-        void* h = dlopen(lib, RTLD_NOW | RTLD_NODELETE);
-        return h ? dlsym(h, fn) : NULL;
-    }
     return dlsym(RTLD_DEFAULT, fn);
 #endif
 }
