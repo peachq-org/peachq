@@ -43,6 +43,10 @@ int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig);
  * owned re-signal, a parse abort's class, NULL for a full run — what `\l` raises. */
 ray_t* q_ctx_run_abort(int rc, ray_t* esig);
 
+/* The launcher's file as ONE batch statement: `name` reaches q_sys_load (the loader `\l` uses) as the argv token,
+ * spaces kept, never re-parsed as `\l` text.  Returns 0 on a load, 1 after displaying its error once. */
+int q_ctx_run_load(const char* name, FILE* out, FILE* err);
+
 /* An in-memory STRING of q source under the SAME script semantics/returns as
  * q_ctx_run_file — the bootstrap and the launcher's argv text ride this: one
  * loader, one multiline law — except that a bare top-level value is NOT
