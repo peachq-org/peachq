@@ -424,7 +424,7 @@ static const lit_ctx *lit_ctx_of_kind(q_tok_el_kind k) {
 
 /* An element belongs to context c iff it is c's own shape, a Special, or a plain int (a raw payload count).  A
  * float-forcing element (a fraction, or a lowercase `0w`) may only be c's own shape or the null — `0nd` is the K-ism
- * spelling of `0Nd`, `0wd` is not a literal.  A SUFFIXED literal DECLARES its type and converts a magnitude of the
+ * spelling of `0Nd`, `0wd` is not a literal (float-backed `0wz` is).  A SUFFIXED literal DECLARES its type and converts a magnitude of the
  * same quantity — a calendar point or an amount of time, never one relabelled as the other (`"t"$2000.01.02` is
  * 00:00:00.001): a POINT takes only a finer point, since dropping precision moves the instant (`2000.01.01T06:00:00d`,
  * owner ruling 2026-09-04), while an AMOUNT takes any other amount, coarser included, because kdb is inconsistent
@@ -432,7 +432,8 @@ static const lit_ctx *lit_ctx_of_kind(q_tok_el_kind k) {
  * payload, so it is a destination only.  An UNSUFFIXED strand only INFERS its type and keeps the single
  * date->timestamp promotion — `13:30 13:30:01` stays 'parse, never quietly `13:30 13:30`. */
 static int lit_el_ok(const q_tok_el *e, const lit_ctx *c, int suffixed) {
-    if (e->forces_float && e->kind != Q_TOK_EL_NULL && e->kind != c->kind) return 0;
+    if (e->forces_float && e->kind != Q_TOK_EL_NULL && e->kind != c->kind &&
+        !(lit_el_special(e) && c->kind == Q_TOK_EL_DT)) return 0;
     if (e->kind == c->kind || e->kind == Q_TOK_EL_INT || lit_el_special(e)) return 1;
     if (!suffixed) return c->kind == Q_TOK_EL_TS && e->kind == Q_TOK_EL_DATE;
     const lit_ctx *s = lit_ctx_of_kind(e->kind);
