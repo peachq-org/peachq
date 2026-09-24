@@ -88,6 +88,10 @@ bool q_str_subject_many(ray_t* x);
 ray_t* q_str_subject_map(ray_t* x, ray_t* (*one)(ray_t* e, void* ctx), void* ctx,
                          int8_t empty_tag);
 
+/* read0's lines from bytes: split on '\n', a trailing '\r' stripped from each, a single trailing empty line
+ * dropped; -RAY_STR atoms (q_str_charv_out gives the q form). */
+ray_t* q_str_split_lines(const char* y, size_t yl);
+
 /* Boundary-out walk: CONSUMES r, returns owned.  -RAY_STR atom -> charv;
  * RAY_STR vector -> 0h list of charv; LIST/DICT values converted (in place
  * only at rc==1); TABLE (incl. keyed-table value side) passes untouched. */

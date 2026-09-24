@@ -26,6 +26,7 @@
 static _Thread_local ray_t* g_live[DBG_LIVE_MAX];  /* borrowed lambda values */
 static _Thread_local int32_t g_live_env[DBG_LIVE_MAX];  /* their q_env frames */
 static _Thread_local int    g_live_depth;
+static _Thread_local int    g_frame_base;          /* the first live frame a snapshot reports */
 static _Thread_local int    g_cursor;              /* navigated frame, 0 = [0] */
 
 /* file/line: the loading script's, for a load line; 0 for console input (a q))
@@ -86,6 +87,12 @@ ray_t* q_dbg_self(void) {
 
 void q_dbg_frame_pop(void) { g_live_depth--; }
 
+int q_dbg_frame_base(int base) {
+    int prev = g_frame_base;
+    g_frame_base = base < 0 ? g_live_depth : base;
+    return prev;
+}
+
 void q_dbg_snapshot_clear(void) {
     for (int i = 0; i < g_snap.depth; i++) ray_release(g_snap.lam[i]);
     if (g_snap.ex) ray_release(g_snap.ex);
@@ -138,7 +145,7 @@ void q_dbg_set_reader(q_dbg_read_fn fn) { g_reader = fn; }
 
 void q_dbg_reset(void) {
     q_dbg_snapshot_clear();
-    g_live_depth = g_cursor = 0;
+    g_live_depth = g_frame_base = g_cursor = 0;
     g_stmt.text[0] = '\0';
     g_stmt.file = 0;
     g_console_stmt = g_trap_depth = g_dbg_depth = g_prompt_frames = g_depth = 0;
@@ -209,9 +216,11 @@ static void snap_take(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
     g_snap_lvl = LVL(g_depth - 1);   /* this level's own slot; an inherited one stands */
     q_dbg_snapshot_clear();
     g_snap.err = r;
-    g_snap.depth = g_live_depth < DBG_SNAP_MAX ? g_live_depth : DBG_SNAP_MAX;
+    int stored = g_live_depth < DBG_LIVE_MAX ? g_live_depth : DBG_LIVE_MAX;
+    int base   = g_frame_base < stored ? g_frame_base : stored;
+    g_snap.depth = stored - base < DBG_SNAP_MAX ? stored - base : DBG_SNAP_MAX;
     for (int i = 0; i < g_snap.depth; i++) {
-        g_snap.lam[i] = g_live[i];
+        g_snap.lam[i] = g_live[base + i];
         ray_retain(g_snap.lam[i]);
     }
     if (fv) {

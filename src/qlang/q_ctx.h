@@ -39,6 +39,11 @@ void q_ctx_set_line_done(void (*fn)(const char* s, size_t n, const char* status,
  * line — `\l` raises it so the abort propagates out of nested loads. */
 int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig);
 
+/* lib/pq.q's native `.pq.i.console x` — the console line for a transcript's input x: the live prompt and x echoed
+ * (neither under `-q`, as the piped console), then x run as the console runs a line, on the streams of the load in
+ * progress (else stdout/stderr).  `.pq.i.qcmd` (lib/pq.q) applies it per prompt line.  Bound by `.pq.load_natives`pq`. */
+void q_ctx_pq_register(void);
+
 /* The error a load ANSWERS with, from a run's return and esig: the eval abort's
  * owned re-signal, a parse abort's class, NULL for a full run — what `\l` raises. */
 ray_t* q_ctx_run_abort(int rc, ray_t* esig);

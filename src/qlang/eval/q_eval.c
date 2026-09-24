@@ -647,6 +647,18 @@ ray_t* q_eval_statement(const char* src, int* parsed) {
     return r;
 }
 
+q_eval_frames_t q_eval_frames_suspend(void) {
+    q_eval_frames_t f;
+    f.floor  = q_eval_apply_frame_floor(-1);
+    f.ffloor = q_env_frame_floor(-1);
+    return f;
+}
+
+void q_eval_frames_resume(q_eval_frames_t f) {
+    q_env_frame_floor(f.ffloor);
+    q_eval_apply_frame_floor(f.floor);
+}
+
 /* `value`/`get` (ref/value.md; get is the synonym).  q `eval` needs no body
  * here — it is .q.eval:(-6!), the q_bang.c arm over q_eval.  value applies
  * ONCE, non-recursively: a string parses+evaluates in the current context, a
@@ -680,23 +692,19 @@ ray_t* q_eval_value_wrap(ray_t* x) {
          * script load (ctx_run_script) — a lambda's own `t` never shadows the table `t` a name or a string asks for
          * (function-notation.md:153 "strictly local: invisible to other functions applied during evaluation") —
          * and a handle resolves at the session `\d`, as the string form below does (q_env.h, the handle lane) */
-        int floor = q_eval_apply_frame_floor(-1);
-        int32_t ffloor = q_env_frame_floor(-1);
+        q_eval_frames_t frames = q_eval_frames_suspend();
         int64_t scope = q_env_scope(Q_ENV_SCOPE_SESSION);
         ray_t* v = name_value(x, NULL);
         q_env_scope(scope);
-        q_env_frame_floor(ffloor);
-        q_eval_apply_frame_floor(floor);
+        q_eval_frames_resume(frames);
         return v;
     }
     if (x->type == RAY_CHARV || x->type == -RAY_CHARV || x->type == -RAY_STR) {
         const char* p; int64_t n;
         if (!q_str_text_bytes(x, &p, &n)) return q_err(QE_TYPE);
-        int floor = q_eval_apply_frame_floor(-1);
-        int32_t ffloor = q_env_frame_floor(-1);
+        q_eval_frames_t frames = q_eval_frames_suspend();
         ray_t* r = q_ctx_eval_src(p, (size_t)n);   /* text is a script: the last statement's value (2026-09-20) */
-        q_env_frame_floor(ffloor);
-        q_eval_apply_frame_floor(floor);
+        q_eval_frames_resume(frames);
         return r;
     }
     if (x->type == RAY_DICT) {
