@@ -272,7 +272,7 @@ static qdoc_result_t run_path(const char* path,
                               int verbose, FILE* out, qd_emit_t* em) {
     qdoc_result_t r = {0};
 
-    /* Fixture resolution for `\l name` (h_l's QHOME search): point QHOME at the
+    /* Fixture resolution for `\l name` (q_sys_load's QHOME search): point QHOME at the
      * committed fixtures root test/qscript so corpus rows like `\l sp.q` resolve
      * to test/qscript/sp.q.  Absolute (from cwd == repo root at entry, before any
      * in-file `\cd`); set once.  We OVERRIDE any inherited QHOME so a developer's
