@@ -22,7 +22,6 @@
  */
 
 #include "core/morsel.h"
-#include "core/platform.h"
 #include "mem/heap.h"
 #include "table/sym.h"
 #include "ops/idxop.h"
@@ -32,8 +31,7 @@
  * ray_morsel_init
  *
  * Initialize a morsel iterator over the given vector. Sets up offset,
- * length, and element size. Issues a sequential madvise hint for mmap'd
- * vectors to optimize readahead.
+ * length, and element size.
  * -------------------------------------------------------------------------- */
 
 void ray_morsel_init(ray_morsel_t* m, ray_t* vec) {
@@ -44,11 +42,6 @@ void ray_morsel_init(ray_morsel_t* m, ray_t* vec) {
     m->morsel_len = 0;
     m->morsel_ptr = NULL;
     m->null_bits = NULL;
-
-    /* One-time hint for mmap'd vectors */
-    if (vec->mmod == 1) {
-        ray_vm_advise_seq(ray_data(vec), (size_t)m->len * m->elem_size);
-    }
 }
 
 /* --------------------------------------------------------------------------
