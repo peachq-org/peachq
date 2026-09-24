@@ -29,6 +29,11 @@ int64_t ray_ipc_listen(ray_poll_t* poll, uint16_t port) {
     return -1;
 }
 
+int64_t ray_ipc_listen_at(ray_poll_t* poll, uint32_t ip, uint16_t port, bool reuseport) {
+    (void)poll; (void)ip; (void)port; (void)reuseport;
+    return -1;
+}
+
 int64_t ray_ipc_connect(const char* host, uint16_t port, const char* user,
                         const char* password, int timeout_ms) {
     (void)host; (void)port; (void)user; (void)password; (void)timeout_ms;
@@ -45,6 +50,18 @@ ray_t* ray_ipc_send(int64_t handle, ray_t* msg) {
 ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg) {
     (void)handle; (void)msg;
     return RAY_ERR_IO;
+}
+
+ray_err_t ray_ipc_send_async_many(const int64_t* handles, int64_t n, ray_t* msg) {
+    (void)handles; (void)msg;
+    return n > 0 ? RAY_ERR_TYPE : RAY_OK;
+}
+
+ray_err_t ray_ipc_defer_response(void) { return RAY_ERR_DOMAIN; }
+
+ray_err_t ray_ipc_send_deferred(int64_t handle, ray_t* msg) {
+    (void)handle; (void)msg;
+    return RAY_ERR_DOMAIN;
 }
 
 /* Poll/handle plumbing referenced by q_sys.c and q_wrap_io.c but backed by the
@@ -109,6 +126,11 @@ size_t ray_ipc_decompress(const uint8_t* src, size_t clen, uint8_t* dst,
 int64_t ray_ipc_conn_list(ray_ipc_conn_info_t* out, int64_t cap) {
     (void)out; (void)cap;
     return 0;
+}
+
+int64_t ray_ipc_conn_stamp(int64_t fd, bool drain) {
+    (void)fd; (void)drain;
+    return -1;
 }
 
 bool ray_ipc_conn_identity(int64_t handle, ray_ipc_conn_ident_t* out) {
