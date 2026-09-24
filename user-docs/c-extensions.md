@@ -134,6 +134,9 @@ The rules are kdb's, from its [C API reference](https://code.kx.com/q/interfaces
 - **[embedPy](https://github.com/KxSystems/embedPy)** — Python inside q, on Linux. Its own test suite passes in
   full (268 tests) with a small patch to `p.q`: two `k)` one-liners rewritten in q, since peachq does not run k.
   Its published examples give the documented values too.
+- **[kxkdb](https://github.com/q-archive/kxkdb)** — KX's Rust interface. Its `api_examples` library loads, and its
+  `tests/test.q` passes 142 of 147; the five left are q-language gaps (`.z.p+1e9`, a four-field time literal such as
+  `2015.03.16T12:00:00:00`, and `2+"rust"`, which is `'type` in kx q and bytes in peachq), not C API ones.
 - **[qVis](https://github.com/mkeenan-kdb/qVis)** — an SDL3 pixel canvas, on Linux. It loads and draws — window,
   pixels, shapes, bulk pixel upload, keyboard and mouse polling, driven through `sd1` — and its `qOS` desktop's
   smoke test passes. Its inspector's drill-down still stops on a known table-append bug.
@@ -144,7 +147,7 @@ The rules are kdb's, from its [C API reference](https://code.kx.com/q/interfaces
 |---|---|
 | `'foo.so …` listing paths | Not found at any of them — or found but it needs a function peachq does not provide. Run `nm -u foo.so`. |
 | `'myfunc` | The library loaded but does not export `myfunc`. `nm -D foo.so` shows what it does export. |
-| `'nyi` from inside a call | A value that cannot cross yet (an enumeration), `k()` with a non-zero handle, or `sd1` on Windows. |
+| `'nyi` from inside a call | `k()` with a non-zero handle, or `sd1` on Windows. |
 | `'kapi bad-return: lib:fn` | (debug builds) Your function returned a malformed object — bad type, negative count, or one already freed. |
 | `'rank` at `2:` | Rank must be 1 to 8. |
 
@@ -154,17 +157,24 @@ The rules are kdb's, from its [C API reference](https://code.kx.com/q/interfaces
   only "when I'm the sole owner" will take its copy branch instead. Correct, slightly slower.
 - **Never write an argument's header.** Setting `x->t`, `x->a` or `x->u` on something q lent you changes a live q
   value. (kdb forbids this too; peachq just doesn't forgive it.) `x->a`'s bits are not kdb's attribute values.
-- **Enumerations (`20h`–`76h`) do not cross** — `'nyi`. Pass `value` of the column.
+- **Enumerations cross as `20h`**, with their positions as `kJ(x)`, and come back as the same enumeration.
+  An enumeration you *build* (`ktn(20,n)`) is scratch you can fill and read, but it has no domain, so returning
+  it to q is `'type`.
+- **Growing an argument** (`jv(&x,y)` on an `x` q lent you, then `return r1(x)`) returns the grown list and leaves
+  q's own value unchanged. In kx q the join is visible to every holder unless it reallocates.
+- **`b9` never compresses.** Its mode is the reader's capability; compression is for a message sent to another
+  machine, so `b9(3,x)` gives the same bytes as `-8!x`, as in kx q.
 - **`k()` works with handle `0` only** (the running q). A remote handle is `'nyi`.
 - **Libraries are never unloaded** once loaded; reloading a rebuilt `.so` needs a new session.
 
 ### What is provided
 
-Constructors `ka kb kg kh ki kj ke kf kc ks kd kz kt ktj ktn kp kpn knk ku ktd knt xD xT`; list building
-`ja js jk jv`; `ss sn krr orr ee dl r1 r0 ymd dj setm m9 gc ver sd1 sd0 sd0x k`.
+Constructors `ka kb kg kh ki kj ke kf kc ks kd kz kt ktj ktn kp kpn knk vaknk ku ktd knt xD xT`; list building
+`ja js jk jv`; `vk vi`; serialising `b9 d9 okx`; calling q `k vak dot`; and `ss sn krr orr ee dl r1 r0 ymd dj setm m9
+gc ver sd1 sd0 sd0x`. `vi` reads a general list, which is how peachq holds kdb's nested vectors (`77h`–`97h`).
 
-Not provided: `b9 d9` (serialise), `dot`, `m4`, `okx`, `vi vk vak vaknk`, and the IPC client calls
-(`khp khpu khpun khpunc kclose sslInfo`), which belong to kx's `c.o` rather than to an extension.
+Not provided: `m4` and `sslInfo`, which kx gives standalone programs only, and the IPC client calls
+(`khp khpu khpun khpunc kclose`), which belong to kx's `c.o` rather than to an extension.
 
 ---
 
