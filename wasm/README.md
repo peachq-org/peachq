@@ -1,93 +1,89 @@
 # peachq WebAssembly build
 
-A browser-runnable q REPL: the peachq engine (parser + q datatypes over the
-rayforce array core) compiled to WebAssembly with emscripten, driven by a small
-self-contained web page. Mirrors upstream rayforce's `wasm.rayforcedb.com` demo,
-retargeted to this `src/`-based tree.
+The peachq engine compiled to WebAssembly with emscripten, run in a **Web Worker** and driven by pages through a
+small client library. The build output, `build/wasm/www/`, is a directory any static server can serve.
 
 ## What's here
 
-| File          | Purpose                                                            |
-| ------------- | ------------------------------------------------------------------ |
-| `q_wasm.c`    | The browser C ABI. Drives peachq's real pipeline (`q_parse` → `q_eval` → materialize → `q_fmt`). |
-| `ipc_stub.c`  | Inert stubs for the handful of `ray_ipc_*` symbols retained TUs reference — a browser tab has no sockets. |
-| `smoke.js`    | The headless check: evaluates q in the built module and asserts the answers, regex most of all. |
-| `index.html`  | Self-contained REPL page. Loads `peachq.js`, `ccall`s the ABI.   |
-| `server.py`   | Stdlib preview server (correct `application/wasm` MIME).           |
-| `peachq.js` / `peachq.wasm` | Build artifacts (generated; git-ignored).       |
+| File                 | Purpose |
+| -------------------- | ------- |
+| `peachq-client.js`   | **The page API.** Starts the Worker, evaluates lines, layers files, restarts. Pages use only this. |
+| `worker.js`          | The Worker: hosts the engine, answers the client, supplies HTTP by synchronous XHR. |
+| `engine.js`          | Boots the module, owns its C ABI, mounts file manifests lazily. Shared by the Worker and the node smoke. |
+| `index.html`         | The minimal reference page, built on the client API. |
+| `q_wasm.c`           | The C ABI: `q_wasm_init`, `q_wasm_eval` (one line through `q_ctx_run_line`, answered on stdout/stderr), `q_wasm_qdoc` (a `.qcmd` through the qdoc runner). |
+| `q_wasm_http.c`      | The wasm side of the HTTP exchange seam: calls the host's `Module.peachqFetch`, rebuilds the raw response. |
+| `q_wasm_shell.c`     | The `system` mini-shell over the in-memory FS: `pwd ls cat echo mkdir rm head tail`. |
+| `q_wasm_buf.h`       | The growable buffer both host adapters build their answers in. |
+| `ipc_stub.c`         | Inert stubs for the `ray_ipc_*` symbols retained TUs reference — a tab has no sockets. |
+| `gen-files.sh`       | Stages `examples/q/` (minus `termbox/`) as `files/` and writes `files.json`. |
+| `smoke.qcmd`         | The wasm ledger: plain-q rows (basics, regex, the mini-shell, the examples) in the wasm REPL's display. |
+| `smoke.js`           | The headless node check: runs `smoke.qcmd` inside the module, then the rows q text cannot express (HTTP against a fixture server, byte checks, the Range header). |
+| `browser-smoke.cjs`  | The headless Chromium check through the Worker: lazy loading, XHR, responsiveness, restart. |
+| `server.py`          | Stdlib preview server with the `Range`/206 support lazy files need. |
 
-The build wiring lives in `../Makefile.wasm` (a **separate** file — the root
-`Makefile` is a frozen-base file, so it is deliberately left untouched).
+The build wiring lives in `../Makefile.wasm`.
 
-## Exported ABI
+## The client API
 
-Three stable C entry points (see `q_wasm.c`), plus `malloc`/`free`:
-
-```c
-int   q_wasm_init(void);          /* create the q runtime once (idempotent) */
-char* q_wasm_eval(const char* q);  /* eval one q line -> malloc'd formatted result */
-void  q_wasm_free(char* p);        /* free a q_wasm_eval result */
+```html
+<script src="wasm/peachq-client.js"></script>
+<script>
+  const q = await PeachQ.start({ base: 'wasm/', onStatus: (s) => console.log(s) });
+  const { out, err } = await q.eval('til 5');         // stdout text, and stderr ('' unless an error was shown)
+  await q.addFiles('my/files.json', 'my/files/');     // a manifest (or its URL) + where its files are served
+  await q.restart();                                  // a fresh engine — also the way to stop a runaway query
+</script>
 ```
 
-`q_wasm_eval` never returns NULL: errors come back as `"parse error"` or
-`"error: <code>"` strings so the JS side always has something to print.
+- `start({ base, files, onStatus })` — `base` is the directory holding `worker.js` (default `./`); `files: false`
+  skips mounting the build's own `files.json`; `onStatus` receives `loading` / `ready` / `busy` / `failed`.
+- `eval(line)` — one line of q, as typed at `q)`. Resolves `{ out, err }`; rejects only if the engine died.
+- `addFiles(manifest, baseUrl)` — `manifest` is `[{ path, size?, sha256? }]` or the URL of one. Each file is
+  mounted under the start directory (`/home/q`) and fetched from `baseUrl + path` (plus `?v=<sha256>`) when q
+  first reads it; a later manifest replaces an earlier file. Layers survive `restart()`.
+- `restart()` / `terminate()` — end the Worker; pending calls reject.
 
-## Build
+A session that hits a fatal engine error (an emscripten abort, e.g. a lazy file its server refused) goes to
+`failed`; `restart()` brings it back.
 
-Prerequisites: [emscripten](https://emscripten.org). Install + activate:
+## What works in a tab
+
+- **Files**: the in-memory FS — `\l`, `read0`, `0:`, `set`/`get`, `\cd`. The session starts in `/home/q`, where the
+  examples are: `\ls`, then `\l trades.q`.
+- **HTTP**: `.Q.hg`, `.Q.hp`, `read0`/`read1` of `http(s)://` (ranged reads send `Range:`), and the raw handle
+  `` (`:http://host) "GET / HTTP/1.1\r\n\r\n" `` all go through the browser. CORS decides what is reachable; the
+  browser follows redirects, decodes gzip and drops the headers a page may not set.
+- **`system` / `\cmd`**: the mini-shell above (`ls [path…]`, `head`/`tail [-n N | -N] file`, `mkdir [-p]`,
+  `rm [-rf]`); no pipes, quoting, globs or redirection. Anything else answers `'os`, as a failing shell would.
+- Not here: IPC handles, DuckDB, the terminal games (`examples/q/termbox/`), Ctrl-C (use `restart()`).
+
+## Build and check
+
+Prerequisites: [emscripten](https://emscripten.org) (`. ~/emsdk/emsdk_env.sh` adds `emcc` and a modern node).
 
 ```sh
-git clone https://github.com/emscripten-core/emsdk.git ~/emsdk
-cd ~/emsdk && ./emsdk install latest && ./emsdk activate latest
-. ~/emsdk/emsdk_env.sh          # adds emcc + a modern bundled node to PATH
+make -f Makefile.wasm wasm                 # -> build/wasm/www/
+make -f Makefile.wasm wasm-smoke           # node: build, then the headless check
+make -f Makefile.wasm wasm-browser-smoke PLAYWRIGHT=/path/to/node_modules   # Chromium; skips without Playwright
+python3 wasm/server.py                     # then open http://localhost:8000
 ```
 
-Then, from the repo root:
+`smoke.qcmd` runs inside the wasm module through the same qdoc runner as `./qdoctest` (`q_wasm_qdoc`), so its
+rows are ordinary `.qcmd` rows. It is a wasm-only ledger — `/home/q`, the lazily mounted examples and the pipe
+display — and deliberately lives outside `test/q`, where the native gate would find it. A `\l` row's echo is not
+captured by the runner, so each example load is followed by rows that pin what it built.
 
-```sh
-make -f Makefile.wasm wasm        # -> wasm/peachq.js + wasm/peachq.wasm
-make -f Makefile.wasm wasm-smoke  # build, then run the headless check
-```
+`smoke.js` runs under the emsdk node (`$EMSDK_NODE`; override with `NODE=`). The browser check needs Playwright
+and its Chromium from the environment — this repo installs no packages.
 
-## Run
+## Notes
 
-```sh
-python3 wasm/server.py          # then open http://localhost:8000
-```
-
-Type a q expression and press Enter — e.g. `2+3` → `5`, `til 5` → `0 1 2 3 4`,
-`sum 1 2 3 4` → `10`.
-
-### Headless check
-
-```sh
-make -f Makefile.wasm wasm-smoke
-```
-
-`smoke.js` loads the module, initialises the runtime, evaluates real q and
-asserts each answer; its `CASES` list is what the check covers. It runs under
-the emsdk-bundled node (`$EMSDK_NODE` — the emscripten glue needs v18+);
-override with `make -f Makefile.wasm wasm-smoke NODE=/path/to/node`.
-
-## Notes / constraints
-
-- **Native build unaffected.** This target compiles the same `RAY_LIB_SRC`
-  library sources with `emcc` instead of `clang`, into objects of its own under
-  `build/wasm/`; it touches no source file and nothing frozen.
-- **No libffi.** Its config headers are generated per NATIVE target, and a
-  browser tab has nothing to dlopen: the vendored sources are filtered out and
-  `q_ffi.c` compiles as the `'nyi` stub it already is without `RAY_FFI`.
-- **Two languages.** RE2 is compiled in here as it is on every other platform,
-  and it is C++: since clang rejects `-std=c17` on C++ input, the C and the C++
-  compile separately (the root `Makefile`'s own object and archive rules, at
-  this target's own `BUILD_DIR`) and the link is `em++`, which brings libc++ in.
-- **No networking.** `src/core/ipc.c` (TCP server/client, `select`/`fd_set`) is
-  excluded from the WASM source set — it has no meaning in a browser and does
-  not compile under emscripten's sysroot. `ipc_stub.c` satisfies the linker.
-- **Single-threaded.** WASM is single-threaded by construction; the build forces
-  `RAYFORCE_CORES=0` so the pool never tries to spawn workers.
-- **Fast-math.** The demo uses `-msimd128` + the vectorization-enabling
-  fast-math flags, but **not** `-ffinite-math-only` (which upstream's target had):
-  this build compiles the same engine, and that engine encodes F64/F32 nulls as
-  NaN (`x != x` checks). Assuming no-NaN would mis-evaluate float nulls (`0Nf`)
-  in the browser, so it is dropped to match the native build's correctness.
+- **Native build unaffected.** The two `src/` seams (`q_http_client.c`'s exchange, `q_sys.c`'s shell capture) are
+  `#if defined(__EMSCRIPTEN__)` branches that call into this directory.
+- **No libffi, no ipc.c.** The FFI config headers are per native target and a tab has nothing to dlopen;
+  `src/core/ipc.c` does not compile under the wasm sysroot — `ipc_stub.c` satisfies the linker.
+- **Two languages.** RE2 and fmt are C++: C and C++ compile separately and the link is `em++`.
+- **Single-threaded**, with an 8 MB stack (a native thread's size; emscripten's 64 KB default overflows in the
+  sort and display paths).
+- **No `-ffinite-math-only`**: the engine encodes float nulls as NaN.

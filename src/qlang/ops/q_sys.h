@@ -78,6 +78,12 @@ ray_t* q_sys_run(const char* line, size_t n);
  * displayed.  The two doors differ only in how the name arrives — argv token or the text after `\l`. */
 ray_t* q_sys_load(const char* name, size_t n);
 
+#if defined(__EMSCRIPTEN__)
+/* A browser tab has no /bin/sh: the wasm host (wasm/q_wasm_shell.c) runs the shell
+ * miss over the in-memory FS.  Returns malloc'd stdout (caller frees), NULL = 'os. */
+char* q_sys_host_shell(const char* cmd, size_t* len);
+#endif
+
 /* Capability: may `\`-commands exit(3) the PROCESS (via q_sys_exit)?  OFF by
  * default and reset per runtime (q_sys_cfg_init); only qmain.c enables it.
  * NOT gated: the shell miss — one capture path for `\cmd` and `system "cmd"`
