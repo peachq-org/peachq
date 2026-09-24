@@ -28,8 +28,6 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <errno.h>
 #ifdef RAY_OS_WINDOWS
 #include <windows.h>
 #else
@@ -235,9 +233,8 @@ void ray_error_clear(void) {
 
 /* ===== Lifecycle ===== */
 
-static ray_runtime_t* runtime_create_impl(const char* sym_path,
-                                           ray_err_t* out_sym_err) {
-    if (out_sym_err) *out_sym_err = RAY_OK;
+ray_runtime_t* ray_runtime_create(int argc, char** argv) {
+    (void)argc; (void)argv;
 
     /* Init subsystems */
     ray_heap_init();
@@ -276,68 +273,12 @@ static ray_runtime_t* runtime_create_impl(const char* sym_path,
         rt->mem_budget = (int64_t)(4ULL << 30);
 #endif
 
-    /* __RUNTIME must be visible before ray_sym_load so mem_budget checks
-     * and ray_error() both operate against the live runtime. */
     __RUNTIME = rt;
 
-    /* Load persisted symbol table BEFORE ray_lang_init interns builtins.
-     * Ordering: __VM + mem_budget are live so file I/O errors surface via
-     * ray_error() and allocations are budget-bounded.  Still before
-     * ray_lang_init so persisted user symbol IDs keep their slots and
-     * builtins append afterwards. */
-    if (sym_path) {
-        /* Pre-flight size check: reject files that would blow past the
-         * memory budget before ever touching ray_col_load.
-         *
-         * errno handling: ENOENT is the normal first-run case and stays
-         * RAY_OK; any *other* stat failure (EACCES, ENOTDIR, EIO, …) is
-         * a real problem and must be surfaced as RAY_ERR_IO, otherwise
-         * the caller would silently continue with an empty sym table
-         * and later hit the "divergence" class of bugs this entrypoint
-         * was added to avoid. */
-        struct stat st;
-        if (stat(sym_path, &st) == 0) {
-            /* Allow the sym file itself plus some working headroom (2x).
-             * A well-formed sym file is a list of interned strings; the
-             * in-memory footprint is bounded by file size within a small
-             * constant factor. */
-            if (st.st_size > 0 &&
-                (int64_t)st.st_size > rt->mem_budget / 2) {
-                if (out_sym_err) *out_sym_err = RAY_ERR_OOM;
-                /* Continue startup with empty sym table; caller decides
-                 * whether to treat this as fatal. */
-            } else {
-                ray_err_t sym_err = ray_sym_load(sym_path);
-                if (out_sym_err) *out_sym_err = sym_err;
-                /* RAY_ERR_CORRUPT and I/O errors are non-fatal here:
-                 * caller inspects out_sym_err to decide recovery. */
-            }
-        } else if (errno != ENOENT) {
-            if (out_sym_err) *out_sym_err = RAY_ERR_IO;
-        }
-        /* ENOENT: leave out_sym_err = RAY_OK — absent sym file is the
-         * normal first-run case. */
-    }
-
-    /* Init language (env + builtins) — must be after __VM is set and
-     * after sym_load so persisted user IDs keep their slots. */
+    /* Init language (env + builtins) — must be after __VM is set. */
     ray_lang_init();
 
     return rt;
-}
-
-ray_runtime_t* ray_runtime_create(int argc, char** argv) {
-    (void)argc; (void)argv;
-    return runtime_create_impl(NULL, NULL);
-}
-
-ray_runtime_t* ray_runtime_create_with_sym(const char* sym_path) {
-    return runtime_create_impl(sym_path, NULL);
-}
-
-ray_runtime_t* ray_runtime_create_with_sym_err(const char* sym_path,
-                                               ray_err_t* out_sym_err) {
-    return runtime_create_impl(sym_path, out_sym_err);
 }
 
 /* ===== Main event loop accessors =====
