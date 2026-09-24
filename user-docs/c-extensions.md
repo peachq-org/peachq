@@ -9,7 +9,7 @@ kx's [Using C functions](https://code.kx.com/q/interfaces/using-c-functions/) de
 | Platform | Status |
 |---|---|
 | Linux x86-64 | Supported |
-| Windows x64 | In progress |
+| Windows x64 | Supported, except `sd1` |
 | macOS | Not yet |
 
 If you want to call a plain C library (libm, libc, your own `.so` that knows nothing about `k.h`), you want
@@ -38,10 +38,10 @@ q)value add
 2
 ```
 
-Leave the suffix off and `.so` is added. The library is looked for, in order:
+Leave the suffix off and `.so` is added (`.dll` on Windows). The library is looked for, in order:
 
 1. at the path as given (relative to the current directory);
-2. under `$QHOME/l64/` — kdb's own fallback;
+2. under `$QHOME/l64/` (`$QHOME/w64/` on Windows) — kdb's own fallback;
 3. beside the script that is doing the loading — so a project that ships `foo.q` and `foo.so` side by side works
    wherever it is run from.
 
@@ -56,8 +56,8 @@ A library that loads but has no such function signals the function's name: `'nos
 
 ## Moving an extension from kx q
 
-1. **Put the `.so` where it was.** In `$QHOME/l64/`, or beside the `.q` file that loads it. Your `2:` lines do not
-   change.
+1. **Put the library where it was.** In `$QHOME/l64/` (`w64/` for a `.dll`), or beside the `.q` file that loads
+   it. Your `2:` lines do not change.
 2. **Check it only uses functions peachq provides.** Most of `k.h` is here (see [the list](#what-is-provided));
    a library that needs a missing one fails to load. Check before you start:
 
@@ -103,6 +103,10 @@ Build it with no q library to link — the `k.h` functions are resolved from the
 gcc -shared -fPIC -DKXVER=3 add.c -o add.so
 ```
 
+On Windows, build the DLL as kx documents: link against an import library that names `q.exe` — kx's `q.lib`, or
+with MinGW a `libq.a` made by `dlltool` from a `.def` (`LIBRARY q.exe`, then `EXPORTS` and the names you use).
+peachq's `q.exe` exports the same names under the same module name. The MinGW route is what peachq's own tests run.
+
 ```q
 q)add:`:./add 2:(`add;2)
 q)add[2;3.5]
@@ -123,16 +127,16 @@ The rules are kdb's, from its [C API reference](https://code.kx.com/q/interfaces
 - **Signal an error with `krr("text")`.** q sees `'text`.
 - **`k(0, "expr", args…, (K)0)`** evaluates in the running q and takes ownership of `args`.
 - **`sd1(fd, callback)`** puts your file descriptor on q's event loop; q calls `callback` on the main thread
-  when it is readable. This is how a GUI or a background thread wakes q up.
+  when it is readable. This is how a GUI or a background thread wakes q up. Linux only for now.
 
 ## Projects known to work
 
-- **[embedPy](https://github.com/KxSystems/embedPy)** — Python inside q. Its own test suite runs on peachq
-  unchanged apart from a small patch to `p.q` (two `k)` one-liners rewritten in q, since peachq does not run k).
-  It passes on a release build, bar one row that depends on `xexp`'s last-bit precision.
-- **[qVis](https://github.com/mkeenan-kdb/qVis)** — an SDL3 pixel canvas. It loads and draws — window, pixels,
-  shapes, bulk pixel upload, keyboard and mouse polling, driven through `sd1`. Its `qOS` demo names a parameter
-  `by`, which peachq refuses (see [reserved words](compatibility.md)); rename it and it loads.
+- **[embedPy](https://github.com/KxSystems/embedPy)** — Python inside q, on Linux. Its own test suite passes in
+  full (268 tests) with a small patch to `p.q`: two `k)` one-liners rewritten in q, since peachq does not run k.
+  Its published examples give the documented values too.
+- **[qVis](https://github.com/mkeenan-kdb/qVis)** — an SDL3 pixel canvas, on Linux. It loads and draws — window,
+  pixels, shapes, bulk pixel upload, keyboard and mouse polling, driven through `sd1` — and its `qOS` desktop's
+  smoke test passes. Its inspector's drill-down still stops on a known table-append bug.
 
 ## Troubleshooting
 
@@ -140,7 +144,7 @@ The rules are kdb's, from its [C API reference](https://code.kx.com/q/interfaces
 |---|---|
 | `'foo.so …` listing paths | Not found at any of them — or found but it needs a function peachq does not provide. Run `nm -u foo.so`. |
 | `'myfunc` | The library loaded but does not export `myfunc`. `nm -D foo.so` shows what it does export. |
-| `'nyi` from inside a call | A value that cannot cross yet (an enumeration), or `k()` with a non-zero handle. |
+| `'nyi` from inside a call | A value that cannot cross yet (an enumeration), `k()` with a non-zero handle, or `sd1` on Windows. |
 | `'kapi bad-return: lib:fn` | (debug builds) Your function returned a malformed object — bad type, negative count, or one already freed. |
 | `'rank` at `2:` | Rank must be 1 to 8. |
 
@@ -184,7 +188,7 @@ embedPy uses for a `PyObject*`) are both `112h` in q; a foreign's destructor run
 
 **Linking.** `q` exports exactly the `k.h` names above and nothing else, so an extension resolves against them and
 cannot collide with peachq's internals. `dlopen` uses `RTLD_NOW`, so a missing name fails at load, not at the first
-call. The Windows port exports the same list from `q.exe`, the module kx's `q.lib` import library names.
+call. On Windows `q.exe` exports the same list, and a DLL binds to it by module name, just as it binds to kx's `q.exe`.
 
 **Debug builds check what you return.** Tag in range, count non-negative, refcount sane, not already freed —
 otherwise `'kapi bad-return` names the library and function at the call that did it, instead of a crash several
