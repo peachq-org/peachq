@@ -73,6 +73,11 @@ uint16_t q_sys_listen_port(void);
  * where q_parse routes a leading-`\` line. */
 ray_t* q_sys_run(const char* line, size_t n);
 
+/* THE loader behind `\l name` and the launcher's file: `name` (n bytes, spaces kept) is a script, a directory, a
+ * `:pq:` coordinate or `pq`.  NULL or a value on success; an OWNED error otherwise, an aborted script's already
+ * displayed.  The two doors differ only in how the name arrives — argv token or the text after `\l`. */
+ray_t* q_sys_load(const char* name, size_t n);
+
 /* Capability: may `\`-commands exit(3) the PROCESS (via q_sys_exit)?  OFF by
  * default and reset per runtime (q_sys_cfg_init); only qmain.c enables it.
  * NOT gated: the shell miss — one capture path for `\cmd` and `system "cmd"`

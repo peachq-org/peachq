@@ -1,7 +1,7 @@
 /* q — the launcher: arg parse, runtime/poll/listener bring-up, `-eval-before` texts, the startup script, `-eval`
- * texts, then REPL / server / exit.  Flags are documented in user-docs/cmdline.md; q_dotz.c's flag_kind() is the
- * canonical consumed-flag list.  The interactive loop lives in q_repl.c so the qcmd tests can drive the identical
- * console behaviour in-process. */
+ * texts, then REPL / server / exit.  Flags are documented in user-docs/cmdline.md; q_dotz.c's option table
+ * (q_dotz_opt) is what q consumes from argv.  The interactive loop lives in q_repl.c so the qcmd tests can drive the
+ * identical console behaviour in-process. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/q_count.h"
@@ -12,9 +12,8 @@
 #include "qlang/ops/q_sys.h"     /* q_sys_listen_spec_parse / q_sys_listen — the `-p` spec, shared with `\p` */
 #include "qlang/q_console.h"  /* q_console_pipe_enable — the modern pipe-table display; q_console_color */
 #include "qlang/net/q_tls.h"  /* q_tls_server_mode_set — the `-E` TLS server mode */
-#include "qlang/parse/q_tok.h" /* q_tok_date_order_set — the `-z` date order */
 #include "qlang/io/q_duckdb.h" /* q_duckdb_main_path_set — the `-duckdb` main database file */
-#include "qlang/io/q_io.h"     /* q_io_abs_path — the tty startup `\l` names the script's full path; q_io_read_slice — the -conn file */
+#include "qlang/io/q_io.h"     /* q_io_abs_path — QINIT's startup `\l`; q_io_read_slice — the -conn file */
 #include "qlang/q_env.h"       /* q_env_set — the -conn texts bound as q values */
 #include "qlang/base/q_err.h"  /* q_err_drop — an unreadable -conn file */
 #include "core/poll.h"
@@ -152,13 +151,33 @@ done:
     return rc;
 }
 
+/* The option at argv[i], applied through its `\` command; false once reported, when that command refuses it. */
+static bool option_apply(char** argv, int i) {
+    const q_dotz_opt_t* o = q_dotz_opt(argv[i]);
+    size_t n = 2 + strlen(o->cmd);
+    for (int k = 1; k <= o->nparam; k++) n += 1 + strlen(argv[i + k]);
+    char* line = malloc(n);
+    if (!line) { fprintf(stderr, "q: out of memory\n"); return false; }
+    int at = snprintf(line, n, "\\%s", o->cmd);
+    for (int k = 1; k <= o->nparam; k++) at += snprintf(line + at, n - (size_t)at, " %s", argv[i + k]);
+    ray_t* r = q_sys_run(line, (size_t)at);
+    free(line);
+    if (r && RAY_IS_ERR(r)) {
+        q_err_drop();
+        ray_error_free(r);
+        fprintf(stderr, "q: invalid %s value '%s'\n", argv[i], argv[i + 1]);
+        return false;
+    }
+    if (r) ray_release(r);
+    return true;
+}
+
 int main(int argc, char** argv) {
     if (q_dotz_has_flag(argc, argv, "-conn")) return conn_main(argc, argv);
 
+    const char* script = q_dotz_file_arg(argc, argv);
     const char* port_spec = NULL;
     bool        classic = false;
-    int         etrap_mode = -1;
-    int         date_order = -1;
     const char* auth_file = NULL;
     bool        auth_restricted = false;
     int         tls_mode = 0;
@@ -169,65 +188,42 @@ int main(int argc, char** argv) {
      * startup script / after it), never by argv position.  argc bounds the counts. */
     const char** eval_before = calloc((size_t)argc, sizeof *eval_before);
     const char** eval_after  = calloc((size_t)argc, sizeof *eval_after);
-    int          n_before = 0, n_after = 0;
-    if (!eval_before || !eval_after) { fprintf(stderr, "q: out of memory\n"); return 1; }
+    int*         applied     = calloc((size_t)argc, sizeof *applied);
+    int          n_before = 0, n_after = 0, n_applied = 0;
+    if (!eval_before || !eval_after || !applied) { fprintf(stderr, "q: out of memory\n"); return 1; }
 
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--port") == 0) {
-            if (i + 1 >= argc) {
-                fprintf(stderr, "q: %s requires a port argument (%s)\n", argv[i], LISTEN_SPEC_FORMS);
-                return 2;
-            }
-            port_spec = argv[++i];
-        } else if (strcmp(argv[i], "-E") == 0) {
-            /* Strict like `-p`: a mistyped mode must not silently downgrade to plaintext. */
-            const char* spec = (i + 1 < argc) ? argv[++i] : "";
-            if (strlen(spec) != 1 || spec[0] < '0' || spec[0] > '2') {
-                fprintf(stderr, "q: invalid -E mode '%s' (expected 0, 1 or 2)\n", spec);
-                return 2;
-            }
-            tls_mode = spec[0] - '0';
-        } else if (strcmp(argv[i], "-e") == 0) {
-            /* Applied AFTER q_runtime_create — cfg init resets the mode to 0. */
-            const char* spec = (i + 1 < argc) ? argv[++i] : "";
-            if (strlen(spec) != 1 || spec[0] < '0' || spec[0] > '2') {
-                fprintf(stderr, "q: invalid -e mode '%s' (expected 0, 1 or 2)\n", spec);
-                return 2;
-            }
-            etrap_mode = spec[0] - '0';
-        } else if (strcmp(argv[i], "-z") == 0) {
-            /* Applied AFTER q_runtime_create — cfg init resets the order to 0. */
-            const char* spec = (i + 1 < argc) ? argv[++i] : "";
-            if (strlen(spec) != 1 || spec[0] < '0' || spec[0] > '1') {
-                fprintf(stderr, "q: invalid -z mode '%s' (expected 0 or 1)\n", spec);
-                return 2;
-            }
-            date_order = spec[0] - '0';
-        } else if (strcmp(argv[i], "-classic") == 0) {
-            classic = true;
-        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            want_help = true;
-        } else if (strcmp(argv[i], "-eval") == 0 || strcmp(argv[i], "-eval-before") == 0) {
-            if (i + 1 >= argc) {
-                fprintf(stderr, "q: %s requires a q source argument\n", argv[i]);
-                return 2;
-            }
-            if (strcmp(argv[i], "-eval") == 0) eval_after[n_after++] = argv[++i];
-            else                               eval_before[n_before++] = argv[++i];
-        } else if (strcmp(argv[i], "-duckdb") == 0) {
-            if (i + 1 >= argc) {
-                fprintf(stderr, "q: -duckdb requires a database file argument\n");
-                return 2;
-            }
-            q_duckdb_main_path_set(duckdb_main = argv[++i]);
-        } else if (strcmp(argv[i], "-u") == 0 && i + 1 < argc) {
-            /* basics/cmdline.md: `-u 1` restricts; `-u file` is `-u 1 -U file`. */
-            const char* spec = argv[++i];
-            auth_restricted = true;
-            if (strcmp(spec, "1") != 0) auth_file = spec;
-        } else if (strcmp(argv[i], "-U") == 0 && i + 1 < argc) {
-            auth_file = argv[++i];
+    for (int i = script ? 2 : 1; i < argc; i++) {
+        const char*         a = argv[i];
+        const q_dotz_opt_t* o = q_dotz_opt(a);
+        if (!o) {
+            want_help |= strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0;
+            continue;
         }
+        if (i + o->nparam >= argc) {
+            fprintf(stderr, "q: %s needs %d parameter%s\n", a, o->nparam, o->nparam == 1 ? "" : "s");
+            return 2;
+        }
+        const char* v = o->nparam ? argv[i + 1] : NULL;
+        if (o->values && (strlen(v) != 1 || !strchr(o->values, v[0]))) {
+            fprintf(stderr, "q: invalid %s value '%s' (expected ", a, v);
+            for (const char* c = o->values; *c; c++) fprintf(stderr, "%s%c", c == o->values ? "" : "|", *c);
+            fprintf(stderr, ")\n");
+            return 2;
+        }
+        if (o->cmd) applied[n_applied++] = i;
+        else if (strcmp(a, "-p") == 0 || strcmp(a, "--port") == 0) port_spec = v;
+        else if (strcmp(a, "-E") == 0) tls_mode = v[0] - '0';
+        else if (strcmp(a, "-classic") == 0) classic = true;
+        else if (strcmp(a, "-eval") == 0) eval_after[n_after++] = v;
+        else if (strcmp(a, "-eval-before") == 0) eval_before[n_before++] = v;
+        else if (strcmp(a, "-duckdb") == 0) q_duckdb_main_path_set(duckdb_main = v);
+        else if (strcmp(a, "-U") == 0) auth_file = v;
+        else if (strcmp(a, "-u") == 0) {
+            /* basics/cmdline.md: `-u 1` restricts; `-u file` is `-u 1 -U file`. */
+            auth_restricted = true;
+            if (strcmp(v, "1") != 0) auth_file = v;
+        }
+        i += o->nparam;
     }
 
     if (auth_file && ray_ipc_auth_file_load(auth_file) != 0) {
@@ -248,43 +244,74 @@ int main(int argc, char** argv) {
 
     if (poll) poll->restricted = auth_restricted;
 
-    if (port_spec) {
+    int stdin_tty = isatty(STDIN_FILENO);
+    /* `QINIT` names a file loaded after init, before any script (basics/by-topic.md): a startup load like the script —
+     * batch ahead of `-eval-before` on a non-tty, the console's first `\l` on a tty.  Empty is unset; there is no
+     * `$QHOME/q.q` default (#60). */
+    const char* qinit = getenv("QINIT");
+    if (qinit && !*qinit) qinit = NULL;
+
+    /* Modern mode (the default): switch the console to the pipe-table display
+     * and auto-fit the console width (`\c 25 0N` — 0N re-resolves to the live
+     * terminal at each render, so a resize follows).  The stdlib is NOT
+     * auto-loaded (owner 2026-08-14, startup cost): `\l pq` is explicit.
+     * `-classic` skips both (kdb-clean env, legacy display, kdb `\c 25 80`).
+     * The non-tty script batch widen below still overrides. */
+    if (!classic) {
+        q_console_pipe_enable();
+        q_console_clip_set(25, NULL_I64);
+    }
+
+    /* `\c` console-size DISPLAY clipping is ARMED BY DEFAULT (q_sys_cfg_init)
+     * so a fresh interactive tty REPL and a piped `printf … | ./q` (no script,
+     * no -eval) truncate at
+     * the 25 80 default (kdb-true).  The ONE carve-out: a non-tty SCRIPT
+     * LOAD (`./q file.q </dev/null`, the qscript/daemon shape — `-eval` texts
+     * are script source from argv, so they count) is a BATCH
+     * context, NOT a display — widen the clip to the documented 2000 ceiling
+     * (basics/syscmds.md `\c`: values coerce to [10,2000]) so the script's
+     * `show`/`.z.f` (an absolute path, often > 80 chars) renders full-width.
+     * kdb has no off-switch, so the ceiling IS the batch idiom.  A tty that
+     * drops to the REPL after the script, an explicit `-c`, or an explicit `\c`
+     * in the script, resets/re-arms the size. */
+    if ((script != NULL || qinit != NULL || n_before + n_after > 0) && !stdin_tty)
+        q_console_clip_set(2000, 2000);
+
+    /* After the display defaults above, so an explicit `-c` wins over them. */
+    bool failed = false;
+    for (int i = 0; i < n_applied && !failed; i++) failed = !option_apply(argv, applied[i]);
+    free(applied);
+
+    if (port_spec && !failed) {
         /* Parsed only now: a servicename lookup needs Winsock, which the event poll starts.  No port is announced; a
          * supervisor/test reads it back with the `\p` getter.  A bad spec or a failed bind exits non-zero rather
          * than falling through to a listener-less server loop or a plain REPL. */
         q_sys_listen_spec_t spec;
         q_err_e             err;
-        bool                failed = true;
+        failed = true;
         if (!q_sys_listen_spec_parse(port_spec, strlen(port_spec), &spec, &err) || (!spec.any && spec.lo == 0))
             fprintf(stderr, "q: invalid port '%s' (expected %s)\n", port_spec, LISTEN_SPEC_FORMS);
         else if (!poll || !q_sys_listen(&spec))
             fprintf(stderr, "q: failed to listen on '%s': %s\n", port_spec, strerror(errno));
         else
             failed = false;
-        if (failed) {
-            if (poll) {
-                ray_runtime_set_poll(NULL);
-                ray_poll_destroy(poll);
-            }
-            q_runtime_destroy(rt);
-            return 2;
+    }
+    if (failed) {
+        if (poll) {
+            ray_runtime_set_poll(NULL);
+            ray_poll_destroy(poll);
         }
+        q_runtime_destroy(rt);
+        return 2;
     }
 
     /* `-h` / `--help` is the launcher's only when no script is named: `q app.q -h` is the app's flag, in .z.x.  The
      * table is .help.cmdline, rendered by the same q as `\?cmdline`, so the C side carries no copy of it. */
-    if (want_help && !q_dotz_script_path()) {
+    if (want_help && !script) {
         q_console_clip_set(2000, 2000);
         q_ctx_run_src(".help.usage[]", stdout, stderr, NULL);
         q_sys_exit(0);
     }
-
-    if (etrap_mode >= 0)
-        q_sys_err_trap_set(etrap_mode);
-    if (date_order >= 0)
-        q_tok_date_order_set(date_order);
-
-    int stdin_tty = isatty(STDIN_FILENO);
 
     /* Startup banner (kdb-style version + build date, via the same macros as
      * .z.v`version / .z.k).  GUARDRAIL: print ONLY on an interactive tty REPL and NOT
@@ -315,46 +342,13 @@ int main(int argc, char** argv) {
         fflush(stdout);
     }
 
-    /* Modern mode (the default): switch the console to the pipe-table display
-     * and auto-fit the console width (`\c 25 0N` — 0N re-resolves to the live
-     * terminal at each render, so a resize follows).  The stdlib is NOT
-     * auto-loaded (owner 2026-08-14, startup cost): `\l pq` is explicit.
-     * `-classic` skips both (kdb-clean env, legacy display, kdb `\c 25 80`).
-     * The non-tty script batch widen below still overrides. */
-    if (!classic) {
-        q_console_pipe_enable();
-        q_console_clip_set(25, NULL_I64);
-    }
-
-    /* Startup script (`q file.q`).  Non-tty: run it before the server loop /
+    /* The file (`q file`) is a `\l`.  Non-tty: run it before the server loop /
      * exit — a `-p` server serves IPC, a non-server run exits 0 (the
      * test/daemon shape) rather than blocking on an empty REPL, and an abort
      * exits non-zero.  Tty: it is the console's first `\l` (owner ruling
      * 2026-09-17, #57 — kx suspends a failing `q file.q` into `q))` when stdin
      * is a terminal), so it runs INSIDE the REPL once the debugger's reader is
      * armed, with the `-eval` texts after it. */
-    const char* script = q_dotz_script_path();
-    /* `QINIT` names a file loaded after init, before any script (basics/by-topic.md): a startup load like the script —
-     * batch ahead of `-eval-before` on a non-tty, the console's first `\l` on a tty.  Empty is unset; there is no
-     * `$QHOME/q.q` default (#60). */
-    const char* qinit = getenv("QINIT");
-    if (qinit && !*qinit) qinit = NULL;
-
-    /* `\c` console-size DISPLAY clipping is ARMED BY DEFAULT (q_sys_cfg_init)
-     * so a fresh interactive tty REPL and a piped `printf … | ./q` (no script,
-     * no -eval) truncate at
-     * the 25 80 default (kdb-true).  The ONE carve-out: a non-tty SCRIPT
-     * LOAD (`./q file.q </dev/null`, the qscript/daemon shape — `-eval` texts
-     * are script source from argv, so they count) is a BATCH
-     * context, NOT a display — widen the clip to the documented 2000 ceiling
-     * (basics/syscmds.md `\c`: values coerce to [10,2000]) so the script's
-     * `show`/`.z.f` (an absolute path, often > 80 chars) renders full-width.
-     * kdb has no off-switch, so the ceiling IS the batch idiom.  A tty that
-     * drops to the REPL after the script, or an explicit `\c` in the script,
-     * resets/re-arms the size. */
-    if ((script != NULL || qinit != NULL || n_before + n_after > 0) && !stdin_tty)
-        q_console_clip_set(2000, 2000);
-
     /* `-eval-before` / `-eval` texts are scripts whose source came from argv: the script seam, the script abort
      * law, results NOT echoed.  An abort skips everything after it — on a non-tty the REPL/server loop included.
      * On a tty the `-eval` texts follow the script into the REPL (console-initiated, so they suspend as it does);
@@ -372,21 +366,23 @@ int main(int argc, char** argv) {
     const char** startup = NULL;
     const char*  files[] = { qinit, script };   /* the tty console's first `\l`s, QINIT ahead of the script */
     char         load[2][PATH_MAX + 4];
+    char         abs[PATH_MAX];
+    /* QINIT absolute (relative to the start directory, never QHOME); the file as given, so `\l` resolves it */
+    if (qinit)
+        snprintf(load[0], sizeof load[0], "\\l %s", q_io_abs_path(qinit, abs, sizeof abs) ? abs : qinit);
+    if (script)
+        snprintf(load[1], sizeof load[1], "\\l %s", script);
     if (stdin_tty) {
         startup = calloc((size_t)n_after + 3, sizeof *startup);
         if (!startup) { fprintf(stderr, "q: out of memory\n"); return 1; }
         int k = 0;
-        for (int i = 0; i < 2; i++) {   /* absolute, as q_ctx_run_file records it: `\l` must not re-resolve against QHOME */
-            char abs[PATH_MAX];
-            if (!files[i]) continue;
-            snprintf(load[i], sizeof load[i], "\\l %s", q_io_abs_path(files[i], abs, sizeof abs) ? abs : files[i]);
-            startup[k++] = load[i];
-        }
+        for (int i = 0; i < 2; i++)
+            if (files[i]) startup[k++] = load[i];
         for (int i = 0; i < n_after; i++) startup[k++] = eval_after[i];
         q_repl_prime(startup);
     } else {
         if (script && script_rc == 0)
-            script_rc = q_ctx_run_file(script, stdout, stderr, NULL);
+            script_rc = q_ctx_run_load(script, stdout, stderr);
         for (int i = 0; i < n_after && script_rc == 0; i++)
             script_rc = q_ctx_run_src(eval_after[i], stdout, stderr, NULL);
     }

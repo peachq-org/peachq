@@ -4,7 +4,7 @@
  * enumerate.  Each `.z.<name>` is a name the EVALUATOR fills with a computed
  * value when a tree references it — the same way q fills `.z.p`.  This module
  * caches argv once at boot and MINTS the process-constant values on demand
- * (`.z.f` script file, `.z.x` args after the script, `.z.X` full raw argv) via
+ * (`.z.f` the file, `.z.x` the arguments q does not consume, `.z.X` full raw argv) via
  * q_dotz_resolve, which the evaluator's name ladder calls only on an
  * env-resolution MISS, before `'name`.
  *
@@ -14,7 +14,7 @@
 
 #include <rayforce.h>
 
-/* Cache argv and locate the `*.q` script once.  Cheap and idempotent — it
+/* Cache argv and whether argv[1] is the file.  Cheap and idempotent — it
  * stores only pointers/indices (no `ray_t*`, so nothing to free on re-init);
  * value construction is deferred to q_dotz_resolve. */
 void q_dotz_init(int argc, char** argv);
@@ -44,9 +44,21 @@ void   q_dotz_exit_fire(int code);
  * `\t N` handler as the repeating timer's callback. */
 ray_t* q_dotz_timer_thunk(void);
 
-/* The positional `*.q` startup script from argv, or NULL if none — qmain uses
- * this to decide whether to run a script.  Points into argv (process-lifetime). */
-const char* q_dotz_script_path(void);
+/* One command-line option: its spelling, its parameter count, the `\` command the launcher applies it through (NULL:
+ * none), and its one-character values where cmdline.md enumerates them (NULL: any). */
+typedef struct {
+    const char* name;
+    int         nparam;
+    const char* cmd;
+    const char* values;
+} q_dotz_opt_t;
+
+/* The option `token` spells, or NULL — THE table of what q consumes from argv: the launcher applies each one, and
+ * `.z.x`, `.z.q` and q_dotz_has_flag skip each with its parameters. */
+const q_dotz_opt_t* q_dotz_opt(const char* token);
+
+/* argv[1] when it is not an option, else NULL: `q [file] [-option [parameters] …]` (basics/cmdline.md). */
+const char* q_dotz_file_arg(int argc, char** argv);
 
 /* Whether `-q` (quiet mode, kdb .z.q) was on the command line — qmain reads
  * this to suppress the interactive startup banner.  Valid after q_dotz_init. */

@@ -517,6 +517,19 @@ int q_ctx_run_console_src(const char* s, FILE* out, FILE* err) {
     return rc;
 }
 
+int q_ctx_run_load(const char* name, FILE* out, FILE* err) {
+    size_t n   = strlen(name);
+    int    tok = q_dbg_statement_begin(name, n, 0);
+    ray_t* r   = q_sys_load(name, n);
+    int    rc  = r && RAY_IS_ERR(r);
+    if (rc) ctx_show_err(out, err, r);
+    else if (r) ray_release(r);
+    fflush(out);
+    ctx_statement_end();
+    q_dbg_statement_end(tok);
+    return rc;
+}
+
 /* ===== The remote doors (see q_ctx.h) =====
  *
  * q_ctx_run_line's pipeline, disposing of the result over the wire instead of

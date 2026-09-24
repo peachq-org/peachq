@@ -59,15 +59,15 @@ static void win_wsa_ensure(void) {
 #endif
 
 /* argv is process-lifetime (owned by main), so we cache only the pointers and
- * the script's position and MINT each `.z.*` value on demand.  These values
+ * MINT each `.z.*` value on demand.  These values
  * are immutable argv snapshots, cheap to build, and read rarely — caching them
  * as owned `ray_t*` would add lifecycle (init/destroy/retain) without benefit.
  * Adding a computed `.z.*` name = one switch case in q_dotz_resolve + a small
  * producer; init/destroy are untouched. */
-static int    g_argc       = 0;
-static char** g_argv       = NULL;
-static int    g_script_idx = -1;   /* argv index of the `*.q` script, or -1 */
-static bool   g_quiet      = false; /* `-q` on the command line (kdb .z.q) */
+static int    g_argc  = 0;
+static char** g_argv  = NULL;
+static bool   g_file  = false;   /* argv[1] is the file */
+static bool   g_quiet = false;   /* `-q` on the command line (kdb .z.q) */
 
 bool q_dotz_expungeable(const char* name, size_t len) {
     static const char* const tails[] = { "pg", "ps", "po", "pc", "pw", "bm", "pi", "pq", "pd", "ph",
@@ -78,33 +78,35 @@ bool q_dotz_expungeable(const char* name, size_t len) {
     return false;
 }
 
-static bool ends_with_dot_q(const char* s) {
-    size_t n = strlen(s);
-    return n >= 2 && s[n - 2] == '.' && s[n - 1] == 'q';
+/* basics/cmdline.md's options, then peachq's own launcher flags: what q consumes from argv. */
+static const q_dotz_opt_t Q_OPTS[] = {
+    { "-b", 0, NULL, NULL }, { "-c", 2, "c", NULL }, { "-C", 2, "C", NULL }, { "-e", 1, "e", "012" },
+    { "-E", 1, NULL, "012" }, { "-g", 1, "g", "01" }, { "-l", 0, NULL, NULL }, { "-L", 0, NULL, NULL },
+    { "-m", 1, NULL, NULL }, { "-o", 1, "o", NULL }, { "-p", 1, NULL, NULL }, { "-P", 1, "P", NULL },
+    { "-q", 0, NULL, NULL }, { "-r", 1, NULL, NULL }, { "-s", 1, "s", NULL }, { "-S", 1, "S", NULL },
+    { "-t", 1, "t", NULL }, { "-T", 1, NULL, NULL }, { "-u", 1, NULL, NULL }, { "-U", 1, NULL, NULL },
+    { "-w", 1, NULL, NULL }, { "-W", 1, "W", NULL }, { "-z", 1, "z", "01" },
+    { "--port", 1, NULL, NULL }, { "-classic", 0, NULL, NULL }, { "-eval", 1, NULL, NULL },
+    { "-eval-before", 1, NULL, NULL }, { "-duckdb", 1, NULL, NULL }, { "-conn", 1, NULL, NULL },
+    { "-save", 1, NULL, NULL }, { "-ls", 0, NULL, NULL },
+};
+
+const q_dotz_opt_t* q_dotz_opt(const char* token) {
+    for (size_t i = 0; i < sizeof Q_OPTS / sizeof *Q_OPTS; i++)
+        if (strcmp(Q_OPTS[i].name, token) == 0) return &Q_OPTS[i];
+    return NULL;
 }
 
-/* Launcher-flag classification — THE single home for which argv tokens the q launcher consumes (flags documented
- * in user-docs/cmdline.md).  It drives the `.z.x` view (which OMITS them; `.z.X` stays raw), the `*.q` script
- * locator (a value-flag's following token is a value, not the script) and the `-q`/`.z.q` quiet-mode probe.
- * KEEP IN SYNC with qmain.c's arg-parse switch (which acts on them and reads `.z.q` back via q_dotz_quiet()) —
- * this classifier is the canonical list. */
-enum { Q_FLAG_NONE = 0, Q_FLAG_BOOL = 1, Q_FLAG_VALUE = 2 };
-static int flag_kind(const char* s) {
-    if (strcmp(s, "-q") == 0 || strcmp(s, "-classic") == 0) return Q_FLAG_BOOL;
-    if (strcmp(s, "-e") == 0 || strcmp(s, "-E") == 0 || strcmp(s, "-z") == 0) return Q_FLAG_VALUE;
-    if (strcmp(s, "-p") == 0 || strcmp(s, "--port") == 0 ||
-        strcmp(s, "-u") == 0 || strcmp(s, "-U") == 0) return Q_FLAG_VALUE;
-    if (strcmp(s, "-eval") == 0 || strcmp(s, "-eval-before") == 0 || strcmp(s, "-duckdb") == 0) return Q_FLAG_VALUE;
-    if (strcmp(s, "-conn") == 0 || strcmp(s, "-save") == 0) return Q_FLAG_VALUE;   /* the -conn mode's own */
-    if (strcmp(s, "-ls") == 0) return Q_FLAG_BOOL;
-    return Q_FLAG_NONE;
+const char* q_dotz_file_arg(int argc, char** argv) {
+    return argc > 1 && argv[1][0] != '-' ? argv[1] : NULL;
 }
 
-/* argv[lo..hi) as a q list of strings (empty list, not null, when lo==hi). */
-static ray_t* strings_list(int lo, int hi) {
-    int    n   = hi - lo;
-    ray_t* out = ray_list_new(n > 0 ? n : 1);
+/* argv[lo..hi) as a q list of strings, skipping every option and its parameters when `args` is set. */
+static ray_t* strings_list(int lo, int hi, bool args) {
+    ray_t* out = ray_list_new(hi > lo ? hi - lo : 1);
     for (int i = lo; i < hi; i++) {
+        const q_dotz_opt_t* o = args ? q_dotz_opt(g_argv[i]) : NULL;
+        if (o) { i += o->nparam; continue; }
         ray_t* s = ray_charv(g_argv[i], (int64_t)strlen(g_argv[i]));
         out = ray_list_append(out, s);   /* append RETAINS */
         ray_release(s);
@@ -114,27 +116,12 @@ static ray_t* strings_list(int lo, int hi) {
 
 /* `.z.*` producers — each mints a FRESH owned ref (rc>=1), matching the
  * name-hook contract (the resolver returns an owned value or NULL). */
-static ray_t* z_f(void) {   /* script file symbol; null sym when no script */
-    const char* s = g_script_idx < 0 ? "" : g_argv[g_script_idx];
+static ray_t* z_f(void) {   /* the file as given; null sym when none */
+    const char* s = g_file ? g_argv[1] : "";
     return ray_sym(ray_sym_intern(s, strlen(s)));
 }
-static ray_t* z_x(void) {   /* args AFTER the script, MINUS launcher-consumed flags */
-    int    lo  = g_script_idx < 0 ? g_argc : g_script_idx + 1;
-    int    cap = g_argc - lo;
-    ray_t* out = ray_list_new(cap > 0 ? cap : 1);   /* over-cap ok — length grows on append */
-    for (int i = lo; i < g_argc; i++) {
-        int k = flag_kind(g_argv[i]);
-        if (k == Q_FLAG_VALUE) { i++; continue; }   /* drop flag AND its value token */
-        if (k == Q_FLAG_BOOL)  { continue; }        /* drop the bare flag (e.g. -q) */
-        ray_t* s = ray_charv(g_argv[i], (int64_t)strlen(g_argv[i]));
-        out = ray_list_append(out, s);   /* append RETAINS */
-        ray_release(s);
-    }
-    return out;
-}
-static ray_t* z_X(void) {   /* full raw argv, including the binary (UNFILTERED) */
-    return strings_list(0, g_argc);
-}
+static ray_t* z_x(void) { return strings_list(g_file ? 2 : 1, g_argc, true); }
+static ray_t* z_X(void) { return strings_list(0, g_argc, false); }
 
 /* ---- system / host / process producers (kdb .z.o/.z.i/.z.h/.z.u/.z.a) -------
  * Read-only, minted fresh per reference like the other computed producers.  POSIX-first
@@ -389,44 +376,21 @@ ray_t* q_dotz_timer_thunk(void) {
 }
 
 void q_dotz_init(int argc, char** argv) {
-    g_argc = argc;
-    g_argv = argv;
-
-    /* Locate the positional `*.q` script: the first token ending in ".q" that
-     * is not the value of a value-consuming flag.  (`.z.x` = every token AFTER
-     * it; kdb also drops its own recognized options — position-based is
-     * kdb-true for the non-flag args the increment-1 tests pass.) */
-    g_script_idx = -1;
-    for (int i = 1; i < argc; i++) {
-        int k = flag_kind(argv[i]);
-        if (k == Q_FLAG_VALUE) { i++; continue; }   /* stateful: skip flag AND its value — a VALUE spelled like a
-                                                     * flag (`-eval "-p"`) must not swallow the token after it */
-        if (k == Q_FLAG_BOOL) continue;
-        if (ends_with_dot_q(argv[i])) { g_script_idx = i; break; }
-    }
-
-    /* Quiet mode (`-q`, kdb .z.q): scan argv, skipping value-flag values so a
-     * `-p -q` (where `-q` is a port value, not the flag) doesn't false-trigger. */
-    g_quiet = false;
-    for (int i = 1; i < argc; i++) {
-        int k = flag_kind(argv[i]);
-        if (k == Q_FLAG_VALUE) { i++; continue; }
-        if (k == Q_FLAG_BOOL && strcmp(argv[i], "-q") == 0) g_quiet = true;
-    }
+    g_argc  = argc;
+    g_argv  = argv;
+    g_file  = q_dotz_file_arg(argc, argv) != NULL;
+    g_quiet = q_dotz_has_flag(argc, argv, "-q");
 }
 
 bool q_dotz_quiet(void) { return g_quiet; }
 
 bool q_dotz_has_flag(int argc, char** argv, const char* flag) {
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], flag) == 0) return true;
-        if (flag_kind(argv[i]) == Q_FLAG_VALUE) i++;
+    for (int i = q_dotz_file_arg(argc, argv) ? 2 : 1; i < argc; i++) {
+        const q_dotz_opt_t* o = q_dotz_opt(argv[i]);
+        if (o && strcmp(o->name, flag) == 0) return true;
+        if (o) i += o->nparam;
     }
     return false;
-}
-
-const char* q_dotz_script_path(void) {
-    return g_script_idx < 0 ? NULL : g_argv[g_script_idx];
 }
 
 ray_t* q_dotz_resolve(int64_t sym_id) {
@@ -495,6 +459,6 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
 void q_dotz_destroy(void) {
     g_argc       = 0;
     g_argv       = NULL;
-    g_script_idx = -1;
+    g_file       = false;
     g_quiet      = false;
 }
