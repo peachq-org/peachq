@@ -141,15 +141,6 @@ void   ray_runtime_set_sys_args(void* dict);
 void*  ray_runtime_get_sys_args(void);
 ray_t* ray_build_sys_args(int argc, char** argv);
 
-/* Persistent-consumer lifecycle: load the sym table from `sym_path` (if
- * present) before builtins register, so user-interned IDs keep the same
- * slots across process restarts.  The _err variant surfaces the load
- * result via `out_sym_err` (RAY_OK / RAY_ERR_CORRUPT / I/O errors) so
- * callers can decide recovery policy; the plain variant discards it. */
-ray_runtime_t* ray_runtime_create_with_sym(const char* sym_path);
-ray_runtime_t* ray_runtime_create_with_sym_err(const char* sym_path,
-                                               ray_err_t* out_sym_err);
-
 /* Error API — allocates ray_t with type=RAY_ERROR, sets __VM->err.msg */
 ray_t* ray_error(const char* code, const char* fmt, ...);
 /* Read error code from a RAY_ERROR object (returns pointer to sdata) */

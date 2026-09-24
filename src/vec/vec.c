@@ -200,9 +200,8 @@ ray_t* ray_sym_vec_new(uint8_t sym_width, int64_t capacity) {
     v->attrs = sym_width;  /* lower 2 bits encode width */
     memset(v->aux, 0, 16);
     /* Every SYM vec carries a non-NULL resolution domain.  This is the
-     * single chokepoint all runtime SYM vec construction funnels through;
-     * loaded columns are patched in src/store/col.c.  The singleton is
-     * immortal — no retain needed. */
+     * single chokepoint all SYM vec construction funnels through.  The
+     * singleton is immortal — no retain needed. */
     v->sym_domain = ray_sym_runtime_domain();
 
     return v;
@@ -472,9 +471,8 @@ ray_t* ray_vec_concat(ray_t* a, ray_t* b) {
     uint8_t out_attrs = (a_esz >= b_esz) ? (a->attrs & RAY_SYM_W_MASK) : (b->attrs & RAY_SYM_W_MASK);
     uint8_t esz = (a_esz >= b_esz) ? a_esz : b_esz;
 
-    /* SYM cross-domain concat (post-flip reachable: a loaded FILE-domain
-     * column concatenated with a runtime one): positions in different
-     * dictionaries must not be raw-mixed.  Materialize as RUNTIME-domain
+    /* SYM cross-domain concat: positions in different dictionaries must not
+     * be raw-mixed.  Unreachable while the runtime domain is the only one.  Materialize as RUNTIME-domain
      * W64 ids, translating each side through its domain's runtime-id LUT
      * (NULL LUT = runtime side, ids pass through) — invariant 5: the
      * translation rides this pass, which touches every row anyway. */
