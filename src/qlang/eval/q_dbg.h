@@ -12,6 +12,10 @@
 
 void q_dbg_frame_push(ray_t* lam);   /* borrowed; lambda application entry */
 void q_dbg_frame_pop(void);
+/* The live frames a statement REPORTS: an error's snapshot (the trace, .Q.sbt) starts at this base, 0 = every frame.
+ * -1 sets it at the live depth now — a transcript's line reports its own frames, never its runner's — and returns
+ * the previous, which the same C frame restores.  The suspend loop navigates the true stack regardless. */
+int  q_dbg_frame_base(int base);
 
 /* Statement seam: the ONE per-statement save/restore — frame-[0] text, console
  * flag, pending payload, snapshot.  A NESTED statement (`\l` inside one, a q))
