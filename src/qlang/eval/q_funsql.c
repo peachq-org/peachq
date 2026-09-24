@@ -386,9 +386,9 @@ static ray_t* where_attr(ray_t* tree, ray_t* t, ray_t* idx) {
 }
 
 /* Law 6: SUCCESSIVE refinement — each constraint sees only the rows the
- * previous ones kept; idx:=idx[where result]. */
+ * previous ones kept; idx:=idx[where result].  Consumes idx0. */
 static ray_t* where_fold(ray_t* c, ray_t* t, ray_t* idx0) {
-    ray_retain(idx0);
+    if (RAY_IS_ERR(idx0)) return idx0;
     if (!c || is_empty_gen(c) || (ray_is_vec(c) && q_count(c) == 0))
         return idx0;
     if (c->type != RAY_LIST) { ray_release(idx0); return q_err(QE_TYPE); }
@@ -930,9 +930,7 @@ static ray_t* ques_select(ray_t** args, int64_t n) {
         ray_release(t);
         return q_err(QE_NYI);
     }
-    ray_t* idx0 = til_count(t);
-    ray_t* idx = RAY_IS_ERR(idx0) ? idx0 : where_fold(args[1], t, idx0);
-    if (idx != idx0 && !RAY_IS_ERR(idx0)) ray_release(idx0);
+    ray_t* idx = where_fold(args[1], t, til_count(t));
     if (n == 6 && !RAY_IS_ERR(idx)) idx = sort_idx(args[5], t, idx);
     if (n >= 5 && !RAY_IS_ERR(idx)) idx = limit_apply(args[4], idx);
     if (RAY_IS_ERR(idx)) { ray_release(t); return idx; }
@@ -1397,9 +1395,7 @@ static ray_t* bang_qsql(ray_t** args) {
             }
             nk = 0;                                 /* dropping may hit keys */
         } else {
-            ray_t* idx0 = til_count(t);
-            ray_t* idx = RAY_IS_ERR(idx0) ? idx0 : where_fold(c, t, idx0);
-            if (idx != idx0 && !RAY_IS_ERR(idx0)) ray_release(idx0);
+            ray_t* idx = where_fold(c, t, til_count(t));
             if (RAY_IS_ERR(idx)) r = idx;
             else if (q_type_is_dict(a)) {           /* UPDATE */
                 r = update_table(a, b, t, idx);
