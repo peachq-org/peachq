@@ -7,13 +7,21 @@ session have their own page: [System commands](syscmds.md).
 The general shape is kx's:
 
 ```bash
-q [file.q] [-option [parameters] ...]
+q [file] [-option [parameters] ...]
 ```
 
-The first token ending in `.q` is the startup script; everything after it that q does not consume for itself is
-yours to read back as `.z.x` (`.z.X` keeps the raw command line). The flags that work exactly as kx documents them
-today are `-e -E -p -q -z`; `-c` is applied but not yet removed from `.z.x`, and `-u`/`-U` are applied but with
-their meanings swapped against kdb (a known defect). Everything else is in the table below.
+**The file is the first argument**, when it does not start with `-`, and nothing else ever is: `q -P 3 t.q` loads
+nothing and hands `t.q` to your code. It is loaded exactly as `\l file` would load it — a script, `\l trade` finding
+`trade.q`, a directory — and `.z.f` is the name as you typed it (`` `trade ``).
+
+**Every option takes the parameter count kx documents** (`-c r c` takes two, `-q` none, `-e 0|1|2` one) and is
+consumed with them; everything else is yours to read back as `.z.x`, with or without a file (`q -abc 123` gives
+`("-abc";"123")`; `.z.X` keeps the raw command line). An option whose `\` command exists is **applied through that
+command** at startup, before the file loads — `-P 9` is `\P 9` — so it behaves exactly as the command does.
+
+**A missing or invalid option value stops q before it starts**, on stderr with exit code 2:
+`q: -c needs 2 parameters`, `q: invalid -e value '7' (expected 0|1|2)`, `q: invalid -P value 'x'`. The options whose
+syntax lists their values (`-e -E -g -z`) accept only those; the others accept whatever their `\` command accepts.
 
 **A failing startup script** follows kx: when stdin is a terminal the script is the console's first `\l`, so the
 erroring statement suspends into the `q))` debugger with the session up — `:` resumes the load at the next
@@ -26,51 +34,55 @@ the startup script and the prompt, and on a non-terminal stdin before every `-ev
 defines is visible to all of them. (On a terminal the `-eval-before` texts stay batch and run before the console
 takes over, so there they precede it.) It is an ordinary `\l`: definitions land in the root namespace, top-level values echo, and a failing one follows the
 startup-script rule above (a terminal suspends into `q))`, a non-terminal exits non-zero and the script never runs);
-a path that does not exist is the same `cannot open script` error a missing startup script gives. Unset or empty,
+a path that does not exist is a `cannot open script` error. Unset or empty,
 nothing happens — peachq ships its own `q.q` as part of the bootstrap, so there is no `$QHOME/q.q` default to fall
 back to. `.z.v` reports the value.
 
 ## Every option
 
-The **status** column is the point of this table: **same** = behaves as the kx documentation describes, **DIFFERS** =
-recognized surface but not (or not fully) what kx does, **PEACHQ ONLY** = does not exist in kx q. The **also as**
-column names the system command that reads or sets the same thing at runtime, where one exists — and where a
-`\`-command merely shares the letter, it says so instead.
+The **status** column is the point of this table: **applied** = q consumes the option and acts on it (through the
+`\` command in the last column, or in the launcher where there is none), **consumed only** = q consumes it with its
+parameters, so it never reaches `.z.x`, but it has no effect yet, **peachq only** = does not exist in kx q. The
+**applied as** column names the system command the option is applied through, which also reads it back at runtime —
+and where a `\`-command merely shares the letter, it says so instead.
 
-| Flag | What it does | Status | Also as |
+| Flag | What it does | Status | Applied as |
 |---|---|---|---|
-| `-b` | block client write-access | **DIFFERS** — not yet wired, and left in `.z.x` | the reader is `\_`, not `\b` (`\b` is views) |
-| `-c r c` | console size (rows, columns) | **same**, but left in `.z.x` | `\c`, `system "c"` |
-| `-C r c` | HTTP display size | **DIFFERS** — not yet wired, and left in `.z.x` | `\C` |
-| `-e 0\|1\|2` | error-trap mode for client evals | **same** | `\e` |
-| `-E 0\|1\|2` | TLS server mode | **same** | `\E` (view only) |
-| `-g 0\|1` | garbage-collection mode | **DIFFERS** — not yet wired, and left in `.z.x` | `\g` |
-| `-l` | log updates to a file | **DIFFERS** — not yet wired | none — `\l` **loads a file**, same letter only |
-| `-L` | as `-l`, synchronous | **DIFFERS** — not yet wired | none |
-| `-m path` | memory domain | **DIFFERS** — not yet wired | none |
-| `-o N` | offset from UTC (hours) | **DIFFERS** — not yet wired, and left in `.z.x` | `\o` |
-| `-p N` | listen on port N; `0W` binds an OS-chosen free port; peachq also accepts the spelling `--port N` | **same** for a plain port or `0W` | `\p` |
-| `-P N` | float display precision | **DIFFERS** — not yet wired, and left in `.z.x` | `\P` |
-| `-q` | quiet mode: no startup banner; `.z.q` reads it back | **same** | none |
-| `-r :h:p` | replicate from a primary | **DIFFERS** — not yet wired | `\r` |
-| `-s N` | secondary threads | **DIFFERS** — not yet wired, and left in `.z.x` | `\s` |
-| `-S N` | random seed | **DIFFERS** — not yet wired, and left in `.z.x` | `\S` |
-| `-t N` | timer period (ms) | **DIFFERS** — not yet wired, and left in `.z.x` | `\t` — which is also `\t expr` expression timing |
-| `-T N` | client query timeout (s) | **DIFFERS** — not yet wired, and left in `.z.x` | `\T` |
-| `-u file` | password file, and restrict client evals | **DIFFERS** — swapped with `-U` (known defect, see below) | `\u` **reloads** the file at runtime |
-| `-U file` | password file | **DIFFERS** — swapped with `-u` | none |
-| `-w N` | workspace memory **limit** (MB) | **DIFFERS** — not yet wired, and left in `.z.x` | none — `\w` reports memory **usage**, same letter only |
-| `-W N` | start-of-week offset | **DIFFERS** — not yet wired, and left in `.z.x` | `\W` |
-| `-z 0\|1` | date parse order (`"D"$`): 0 = mdy, 1 = dmy | **same** | `\z` |
-| `-classic` | legacy kx table display, kdb-clean environment | **PEACHQ ONLY** | `\classic` |
-| `-eval "src"` | run q text **after** the startup script | **PEACHQ ONLY** | none |
-| `-eval-before "src"` | run q text **before** the startup script | **PEACHQ ONLY** | none |
-| `-duckdb path` | the main DuckDB database is this file, not memory; its tables load at startup (implies `\l pq`) | **PEACHQ ONLY** | none |
-| `-conn target` | run the file, `-eval` texts and stdin on a RUNNING q at any `hopen` target — a mode of its own, see below | **PEACHQ ONLY** | none |
-| `-save file` | with `-conn`: `set` the last result to this file, its ending choosing the format | **PEACHQ ONLY** | none |
-| `-ls` | with `-conn`: list the server's variables, tables first | **PEACHQ ONLY** | none |
+| `-b` | block client write-access | **consumed only** | none — the reader is `\_`, which is not implemented |
+| `-c r c` | console size (rows, columns) | **applied** | `\c r c` |
+| `-C r c` | HTTP display size | **applied** | `\C r c` |
+| `-e 0\|1\|2` | error-trap mode for client evals | **applied** | `\e` |
+| `-E 0\|1\|2` | TLS server mode | **applied** (launcher, before any listener) | none — `\E` only reads it |
+| `-g 0\|1` | garbage-collection mode | **applied** | `\g` |
+| `-l` | log updates to a file | **consumed only** | none — `\l` **loads a file**, same letter only |
+| `-L` | as `-l`, synchronous | **consumed only** | none |
+| `-m path` | memory domain | **consumed only** | none |
+| `-o N` | offset from UTC (hours) | **applied** | `\o` |
+| `-p N` | listen on port N; `0W` binds an OS-chosen free port | **applied** (launcher) | none — `\p` changes it at runtime |
+| `-P N` | float display precision | **applied** | `\P` |
+| `-q` | quiet mode: no startup banner; `.z.q` reads it back | **applied** (launcher) | none |
+| `-r :h:p` | replicate from a primary | **consumed only** | none |
+| `-s N` | secondary threads | **applied** | `\s` |
+| `-S N` | random seed | **applied** | `\S` |
+| `-t N` | timer period (ms) | **applied** | `\t` |
+| `-T N` | client query timeout (s) | **consumed only** | none — `\T` is not implemented |
+| `-u 1` or `-u file` | restrict client evals; with a file, also the password file | **applied** (launcher; see the `-u`/`-U` note) | `\u` **reloads** the file at runtime |
+| `-U file` | password file | **applied** (launcher) | none |
+| `-w N` | workspace memory **limit** (MB) | **consumed only** | none — `\w` reports memory **usage**, same letter only |
+| `-W N` | start-of-week offset | **applied** | `\W` |
+| `-z 0\|1` | date parse order (`"D"$`): 0 = mdy, 1 = dmy | **applied** | `\z` |
+| `--port N` | the long spelling of `-p` | **peachq only** | none |
+| `-classic` | legacy kx table display, kdb-clean environment | **peachq only** | `\classic` |
+| `-eval "src"` | run q text **after** the startup script | **peachq only** | none |
+| `-eval-before "src"` | run q text **before** the startup script | **peachq only** | none |
+| `-duckdb path` | the main DuckDB database is this file, not memory; its tables load at startup (implies `\l pq`) | **peachq only** | none |
+| `-conn target` | run the file, `-eval` texts and stdin on a RUNNING q at any `hopen` target — a mode of its own, see below | **peachq only** | none |
+| `-save file` | with `-conn`: `set` the last result to this file, its ending choosing the format | **peachq only** | none |
+| `-ls` | with `-conn`: list the server's variables, tables first | **peachq only** | none |
 
-`-q`, `-L`, `-m`, `-eval`, `-eval-before`, `-duckdb`, `-conn`, `-save` and `-ls` have no system-command equivalent.
+`-h` / `--help` prints this table and exits when no file is named; after a file it is the file's own argument, in
+`.z.x`. Options are applied in the order they appear, after the display defaults (so `-c` wins over them) and before
+`-eval-before`, the file and `-eval`.
 
 ## `-duckdb`
 
@@ -98,7 +110,7 @@ A cross-platform way to run q text at startup without piping stdin — piping is
 ```bash
 q -eval "show 2+2"                 # prints 4
 q startup.q -eval "show count t"   # startup.q loads first, then the text runs
-q -eval-before "opts:`fast" s.q    # opts is bound before s.q loads
+q s.q -eval-before "opts:`fast"    # opts is bound before s.q loads
 ```
 
 The text is **a script whose source came from argv**, not a console line, so script rules apply:
@@ -188,13 +200,12 @@ This section is temporary bookkeeping and is expected to disappear as the entrie
   where the kx system-commands page shows `0b`. The cmdline/options qscript suite pins `1b`, following the
   system-commands page as the shape authority its header cites. Nothing to fix in the engine until the corpus is
   reconciled; recorded so the next reader does not "correct" the golden to the other page.
-- **The command-line options are TWO independent gaps, not one** — stripping from `.z.x` AND propagation to the
-  setting. `-c` is the proof: `system "c"` answers the value (applied) while `any .z.x like "-c"` is `1b` (not
-  stripped); `-e` is the mirror image (stripped AND applied, only its getter's type is off); `-o -P -S -t -W -g -s
-  -C` are neither. Pinned since 2026-08-17 by the cmdline/options qscript suite — a PAIR of rows for every option
-  with a getter, each red row naming its own gap. Two getters (`\_ \T`) and the bare `\u` reload answer `'nyi`
-  (the `\z` getter, listed here before 2026-08-30, now works), and `\e \g \W \s` answer `i` where the un-printed
-  doc reading says long.
+- **`-b -T -w -l -L -r -m` are consumed but not applied** — none has a working `\` command to apply it through
+  (`\_` and `\T` answer `'nyi`), so the cmdline/options rows for `system "_"` and `system "T"` stay red. `\e \g \W`
+  answer int by owner ruling (2026-09-24).
+- **`\l` text with a space in the name** — the file loads through the loader `\l` uses, handed the argv token whole,
+  so `q 'my file.q'` works; how `\l my file.q` itself should be spelled is unpinned (defects.tsv Dqzvnk, a ruling).
+  On a terminal the file is still primed as a `\l` line, so a spaced name there waits on the same ruling.
 - **`-u` and `-U` are swapped against kdb (2026-08-14, #487)** — kdb's `-u file` is "password file AND restricted"
   while `-U file` is the password file alone; peachq has it exactly the other way round. Unpinned: a pin needs a
   multi-process qscript case (a remote `read0`/`system` under each flag).
