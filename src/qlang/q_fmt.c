@@ -5,6 +5,7 @@
 #include "qlang/q_console.h"  /* q_console_pipe_* — the modern display config */
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
 #include "qlang/base/q_calendar.h" /* q_calendar_days_from_civil — date display domain */
+#include "qlang/base/q_type.h" /* q_type_char — a sentinel run's one type letter */
 #include "qlang/base/q_err.h" /* QE_WSFULL — the allocating krepr's one failure */
 #include "qlang/q_registry_internal.h" /* q_type_qname — the guarded type-name home */
 #include "qlang/parse/q_parse_internal.h" /* ADVERB_NAMES — the one adverb-spelling table */
@@ -542,39 +543,39 @@ static void guid_tok(const uint8_t* b16, char* out, size_t n) {
     out[pos < n ? pos : n - 1] = '\0';
 }
 
-/* Datetime (f64 — Q_TTOK width 0): NaN->0Nz, ±inf->0Wz/-0Wz (live 0Wz,
- * 2026-07-28); out-of-range -> 0000.00.00T00:00:00.000; ms (tok.md:227). */
-static void datetime_tok(double v, char* out, size_t n) {
-    if (v != v) { snprintf(out, n, "0Nz"); return; }
-    if (isinf(v)) { snprintf(out, n, v < 0 ? "-0Wz" : "0Wz"); return; }
+/* Datetime (f64 — Q_TTOK width 0): float-backed, so its infinity is the lowercase
+ * `0w` (basics/datatypes.md:30); out-of-range -> 0000.00.00T00:00:00.000; ms (tok.md:227). */
+static int datetime_tok(double v, char* out, size_t n) {
+    if (v != v) { snprintf(out, n, "0N"); return 1; }
+    if (isinf(v)) { snprintf(out, n, v < 0 ? "-0w" : "0w"); return 1; }
     if (v < (double)q_calendar_days_from_civil(1, 1, 1) ||
         v >= (double)(q_calendar_days_from_civil(9999, 12, 31) + 1)) {
         snprintf(out, n, "0000.00.00T00:00:00.000");
-        return;
+        return 0;
     }
     tok_via_atom(ray_datetime(v), out, n);
+    return 0;
 }
 
-/* THE temporal token table: sentinel suffix (0=bare), once-per-value trailing
- * char (month's `m`, basics/syntax.md:164), width (0 = f64), ctor-or-payload. */
+/* THE temporal token table: whether the type letter trails every value (month's `m`,
+ * basics/syntax.md:164), width (0 = f64), ctor-or-payload. */
 typedef struct {
     int8_t  type;                               /* RAY_* vector type (atom: -type) */
-    char    sfx;                                /* sentinel suffix letter */
-    char    vsfx;                               /* trailing char, once per value */
+    uint8_t lettered;                           /* the letter trails every value */
     int     width;                              /* element bytes; 0 = f64 */
     ray_t* (*ctor)(int64_t);                    /* payload via temp atom … */
     void   (*payload)(int64_t, char*, size_t);  /* … unless overridden here */
 } q_ttok_t;
 
 static const q_ttok_t Q_TTOK[] = {
-    { RAY_DATE,      'd', 0,   4, NULL,          date_payload },
-    { RAY_MONTH,      0,  'm', 4, NULL,          month_payload },
-    { RAY_TIME,      't', 0,   4, ray_time,      NULL },
-    { RAY_MINUTE,    'u', 0,   4, ray_minute,    NULL },
-    { RAY_SECOND,    'v', 0,   4, ray_second,    NULL },
-    { RAY_TIMESPAN,  'n', 0,   8, ray_timespan,  NULL },
-    { RAY_TIMESTAMP, 'p', 0,   8, ray_timestamp, NULL },
-    { RAY_DATETIME,   0,  0,   0, NULL,          NULL },
+    { RAY_DATE,      0,   4, NULL,          date_payload },
+    { RAY_MONTH,     1,   4, NULL,          month_payload },
+    { RAY_TIME,      0,   4, ray_time,      NULL },
+    { RAY_MINUTE,    0,   4, ray_minute,    NULL },
+    { RAY_SECOND,    0,   4, ray_second,    NULL },
+    { RAY_TIMESPAN,  0,   8, ray_timespan,  NULL },
+    { RAY_TIMESTAMP, 0,   8, ray_timestamp, NULL },
+    { RAY_DATETIME,  0,   0, NULL,          NULL },
 };
 
 static const q_ttok_t* ttok_find(int8_t t) {
@@ -583,19 +584,18 @@ static const q_ttok_t* ttok_find(int8_t t) {
     return NULL;
 }
 
-static void ttok_elem(const q_ttok_t* r, ray_t* v, int64_t i,
-                        char* out, size_t n) {
-    if (r->width == 0) {
-        datetime_tok(i < 0 ? v->f64 : ((const double*)ray_data(v))[i], out, n);
-        return;
-    }
+/* One element's token; a sentinel is BARE and answers 1, since it names no type and the caller owes the letter. */
+static int ttok_elem(const q_ttok_t* r, ray_t* v, int64_t i, char* out, size_t n) {
+    if (r->width == 0)
+        return datetime_tok(i < 0 ? v->f64 : ((const double*)ray_data(v))[i], out, n);
     int64_t x = (i < 0)
         ? (r->width == 4 ? (int64_t)v->i32 : v->i64)
         : (r->width == 4 ? (int64_t)((const int32_t*)ray_data(v))[i]
                          : ((const int64_t*)ray_data(v))[i]);
-    if (sentinel_tok(x, r->width, r->sfx, out, n)) return;
-    if (r->payload) { r->payload(x, out, n); return; }
-    tok_via_atom(r->ctor(x), out, n);
+    if (sentinel_tok(x, r->width, 0, out, n)) return 1;
+    if (r->payload) r->payload(x, out, n);
+    else tok_via_atom(r->ctor(x), out, n);
+    return 0;
 }
 
 static void tok_append(char* out, size_t n, char c) {
@@ -611,8 +611,8 @@ static int atom_tok(ray_t* a, int suffixed, char* out, size_t n) {
     if (!a || RAY_IS_ERR(a) || a->type >= 0) return 0;
     const q_ttok_t* tr = ttok_find((int8_t)-a->type);
     if (tr) {
-        ttok_elem(tr, a, -1, out, n);
-        if (suffixed && tr->vsfx) tok_append(out, n, tr->vsfx);
+        int sentinel = ttok_elem(tr, a, -1, out, n);
+        if (tr->lettered ? suffixed : sentinel) tok_append(out, n, q_type_char(tr->type));
         return 1;
     }
     switch (a->type) {
@@ -1685,20 +1685,20 @@ static void q_fmt_body(ray_t* val) {
         if (vsuf) qe_putc(vsuf);
         return;
     }
-    /* temporal vector: bare tokens space-joined; only month has a trailing
-     * type char (`m`) — the other temporals' full tokens self-identify,
-     * sentinels included (`2000.01.01 0Nd`) */
+    /* temporal vector: the literal grammar read back — sentinels bare, ONE trailing letter when no element names
+     * the type (`0N 0W 09:30`, `0N 0Wu`); month always carries its `m` */
     {
         const q_ttok_t* tr = ttok_find(val->type);
         if (tr) {
             int64_t n = q_count(val);
+            int all_sentinel = 1;
             if (n == 1) qe_putc(',');                      /* enlist: ,2000.01.01 */
             for (int64_t i = 0; i < n && !qe_line_done(); i++) {
                 char e[64];
-                ttok_elem(tr, val, i, e, sizeof e);
+                all_sentinel &= ttok_elem(tr, val, i, e, sizeof e);
                 qe_join(e, i == 0);
             }
-            if (tr->vsfx) qe_putc(tr->vsfx);
+            if (tr->lettered || all_sentinel) qe_putc(q_type_char(val->type));
             return;
         }
     }
