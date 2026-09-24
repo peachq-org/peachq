@@ -2,7 +2,7 @@
  *
  * An extension built against kdb's published `k.h` compiles `kI(x)`, `x->n` and friends as macros over
  * kdb's `struct k0` INSIDE ITS OWN object code, so whatever we hand it must BE those bytes.  It is:
- * `struct k0{m,a,t,u,r,{n,G0[]}}` is `ray_t{mmod,attrs,type,order,rc,{len,data[]}}` shifted 16 bytes,
+ * `struct k0{m,a,t,u,r,{n,G0[]}}` is `ray_t{order|mmod,attrs,type,kattr,rc,{len,data[]}}` shifted 16 bytes,
  * and rayfall's type tags ARE kdb's numbers, so `K = (K)((char*)v + 16)` is the whole marshal for flat
  * typed vectors and most atoms — no copy, in either direction.  `test/test_types.c types/header_layout`
  * pins the offsets that make it true.
@@ -14,11 +14,12 @@
  * RAY_STR, and slices (`kG(x)` must be inline, so a slice materialises).
  *
  * ZERO-COPY IS DANGEROUS BY DESIGN, and we say so rather than defend against it.  The overlay hands the
- * extension the LIVE ray header: writing `x->t` retypes a live q value, writing `x->a`/`x->u` scuffs the
- * attribute/block-order bytes.  Reads are safe.  Two reads diverge and both are benign: `x->r` is ray's
- * rc, which is 1 where kx would say 0 for a sole owner (so an extension's in-place-mutation check takes
- * the conservative copy branch), and `x->a` is ray's attrs, whose bit values are not kdb's `s`/`u`/`p`/`g`
- * (a kdb attribute never changes what `kG(x)` points at, so the read is advisory either way). */
+ * extension the LIVE ray header: writing `x->t` retypes a live q value, writing `x->a` scuffs ray's
+ * attribute bits.  `x->u` is its own byte (`kattr`): the q attribute is stamped there for the call and
+ * read back from the RETURNED value only, so an extension that writes it labels its result and never
+ * touches the allocator.  Two reads diverge and both are benign: `x->r` is ray's rc, which is 1 where kx
+ * would say 0 for a sole owner (so an extension's in-place-mutation check takes the conservative copy
+ * branch), and `x->a` is ray's attrs, whose bit values are not kdb's (read `x->u` for those). */
 #ifndef Q_KAPI_H
 #define Q_KAPI_H
 
