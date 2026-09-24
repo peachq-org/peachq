@@ -217,6 +217,9 @@ static int heap_preallocate(int fd, off_t offset, off_t len) {
  * -------------------------------------------------------------------------- */
 _Static_assert(sizeof(ray_pool_hdr_t) <= 16,
                "ray_pool_hdr_t must fit in aux (16 bytes)");
+_Static_assert(RAY_HEAP_MAX_ORDER < 64, "a block order must fit ray_t.order's 6 bits");
+_Static_assert(offsetof(ray_t, attrs) == 17 && offsetof(ray_t, kattr) == 19,
+               "order|mmod must fill byte 16 alone: byte 19 is kdb's x->u");
 
 /* --------------------------------------------------------------------------
  * Thread-local state
@@ -1300,6 +1303,7 @@ ray_t* ray_alloc_copy(ray_t* v) {
     memcpy(copy, v, 32 + data_size);
     copy->mmod  = new_mmod;
     copy->order = new_order;
+    copy->kattr = 0;
     if (RAY_UNLIKELY(ray_rc_sync))
         ray_atomic_store(&copy->rc, 1);
     else
@@ -1357,6 +1361,7 @@ ray_t* ray_scratch_realloc(ray_t* v, size_t new_data_size) {
         memcpy(new_v, v, 32 + copy_data);
         new_v->mmod = new_mmod;
         new_v->order = new_order;
+        new_v->kattr = 0;
         if (RAY_UNLIKELY(ray_rc_sync))
             ray_atomic_store(&new_v->rc, 1);
         else
