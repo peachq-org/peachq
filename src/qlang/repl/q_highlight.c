@@ -198,11 +198,12 @@ static int32_t lex_number(hl_t* h, int32_t i) {
     const char* err    = NULL;
     char        letter = 0;
     int         p      = 0;
-    if (q_tok_magnitude(z, &p, &el, &err) != 1 || p == 0 || !q_tok_type_letter(z, &p, &letter, &el, &err)) {
+    if (q_tok_magnitude(z, &p, &el, &err) != 1 || p == 0) {
         for (j = d; j < h->len && (is_word(b[j]) || b[j] == '.'); j++) {}
         span(h, HL_NUMBER, i, j);
         return j;
     }
+    q_tok_type_letter(z, &p, &letter, &el);
     span(h, literal_role(&el, letter), i, i + p);
     return i + p;
 }
