@@ -13,7 +13,7 @@ kx's [Using C functions](https://code.kx.com/q/interfaces/using-c-functions/) de
 | macOS | Not yet |
 
 If you want to call a plain C library (libm, libc, your own `.so` that knows nothing about `k.h`), you want
-[Foreign functions](ffi.md) instead.
+[Foreign functions](lib/ffi.md) instead.
 
 ## Loading a function
 

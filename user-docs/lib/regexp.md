@@ -49,6 +49,8 @@ way).
 
 ## Function reference
 
+Every function and parameter: [.regexp API](https://peachq.org/docs/api/regexp.q.html).
+
 Every function takes a fixed number of arguments, and the names below are literally the
 parameter names, so typing a function's name prints its signature.
 

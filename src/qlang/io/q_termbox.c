@@ -23,6 +23,7 @@
 #include "qlang/io/q_termbox.h"
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"
+#include "qlang/base/q_utf8.h"
 #include "qlang/q_ctx.h"          /* q_ctx_set_tty_restore — the statement-seam restore */
 #include "qlang/q_console.h"      /* q_console_color — the colour on/off law */
 #include "qlang/q_env.h"
@@ -389,17 +390,9 @@ static void sgr_emit(int64_t fg, int64_t bg) {
     out_str("m");
 }
 
-static int utf8_enc(uint32_t cp, char* b) {
-    if (cp < 0x80)         { b[0] = (char)cp; return 1; }
-    if (cp < 0x800)        { b[0] = (char)(0xC0 | cp >> 6); b[1] = (char)(0x80 | (cp & 63)); return 2; }
-    if (cp < 0x10000)      { b[0] = (char)(0xE0 | cp >> 12); b[1] = (char)(0x80 | (cp >> 6 & 63)); b[2] = (char)(0x80 | (cp & 63)); return 3; }
-    b[0] = (char)(0xF0 | cp >> 18); b[1] = (char)(0x80 | (cp >> 12 & 63)); b[2] = (char)(0x80 | (cp >> 6 & 63)); b[3] = (char)(0x80 | (cp & 63));
-    return 4;
-}
-
 static void utf8_put(uint32_t cp) {
     char b[4];
-    out_bytes(b, (size_t)utf8_enc(cp, b));
+    out_bytes(b, (size_t)q_utf8_enc(cp, b));
 }
 
 /* bytes -> codepoint; *len = bytes consumed (0 = incomplete, needs more) */
@@ -427,7 +420,7 @@ static void cursor_to(int x, int y) {
 /* the columns a codepoint occupies once emitted (0/1/2), from THE width owner */
 static int cp_cols(uint32_t cp) {
     char b[4];
-    return ray_term_visual_width(b, utf8_enc(cp, b));
+    return ray_term_visual_width(b, q_utf8_enc(cp, b));
 }
 
 static ray_t* tb_present(void) {
@@ -602,7 +595,7 @@ static const char* const EV_NAMES[9] = { "kind", "name", "ch", "mod", "x", "y", 
 /* the three derived lanes of an event: its kind, its name (a printable names itself into kbuf), its ch */
 static void event_lanes(const tb_ev* e, const char** type, const char** key, char* kbuf, ray_t** ch) {
     *type = !e ? "none" : e->is_mouse ? "mouse" : e->w != NULL_I64 ? "resize" : "key";
-    *key = !e ? *type : e->key && *e->key ? e->key : e->key ? *type : (kbuf[utf8_enc(e->cp, kbuf)] = 0, kbuf);
+    *key = !e ? *type : e->key && *e->key ? e->key : e->key ? *type : (kbuf[q_utf8_enc(e->cp, kbuf)] = 0, kbuf);
     *ch = !e || e->cp == 0 ? ray_char(' ') : e->cp < 128 ? ray_char((uint8_t)e->cp) : ray_i64(e->cp);
 }
 
