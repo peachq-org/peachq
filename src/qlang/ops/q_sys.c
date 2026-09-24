@@ -976,6 +976,12 @@ static ray_t* sys_shell_capture(const char* rem, size_t rlen) {
     memcpy(cmd, rem, rlen);
     cmd[rlen] = '\0';
 
+#if defined(__EMSCRIPTEN__)
+    size_t len = 0;
+    char*  out = q_sys_host_shell(cmd, &len);
+    if (blk) ray_free(blk);
+    if (!out) return q_err(QE_OS);
+#else
     FILE* p = popen(cmd, "r");
     if (blk) ray_free(blk);
     if (!p) return q_err(QE_OS);
@@ -1007,6 +1013,7 @@ static ray_t* sys_shell_capture(const char* rem, size_t rlen) {
         free(out);
         return q_err(QE_OS);                    /* nonzero / signalled */
     }
+#endif
 
     /* Split on '\n', dropping a trailing '\r' per line (LF + associated CR
      * removed).  A trailing newline does NOT yield an empty final row. */

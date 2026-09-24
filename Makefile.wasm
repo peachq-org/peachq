@@ -1,4 +1,5 @@
-# WebAssembly build (browser q REPL) -> wasm/peachq.js + .wasm.
+# WebAssembly build (browser q REPL) -> build/wasm/www/, a directory a static server can serve:
+# peachq.js/.wasm, the Worker + client + reference page, and files/ + files.json (examples/q).
 # Activate emscripten first: . ~/emsdk/emsdk_env.sh && make -f Makefile.wasm wasm
 
 CC  = emcc
@@ -20,12 +21,13 @@ include Makefile
 # libffi goes with it — its config headers are generated per NATIVE target, and
 # without RAY_FFI q_ffi.c is already the 'nyi stub.
 LIB_SRC  = $(filter-out src/core/ipc.c, $(RAY_LIB_SRC))
-GLUE_SRC = wasm/q_wasm.c wasm/ipc_stub.c
+GLUE_SRC = wasm/q_wasm.c wasm/q_wasm_http.c wasm/q_wasm_shell.c wasm/ipc_stub.c
 SRC      = $(LIB_SRC) $(GLUE_SRC) $(filter-out third_party/libffi/%,$(RAY_VENDOR_SRC))
 QFFI_DEF =
 
 TARGET = peachq
-OUTDIR = wasm
+OUTDIR = $(BUILD_DIR)/www
+WEB_SRC = wasm/index.html wasm/engine.js wasm/worker.js wasm/peachq-client.js
 
 INCLUDES = $(RAY_INCLUDES)
 RAY_VERSION ?= $(shell cat VERSION 2>/dev/null || echo 0.0)
@@ -54,18 +56,26 @@ FMT_CXXFLAGS = -std=c++17 -O3 -msimd128 -fvisibility=hidden \
 
 WASM_OBJ = $(addprefix $(BUILD_DIR)/,$(SRC:.c=.o))
 
-# malloc/free are exported because ccall's string marshalling needs them;
-# MODULARIZE emits a createPeachQ factory that loads in Node and the browser.
+# wasm/engine.js is the one caller of the ABI, and marshals a line through malloc (ccall's
+# stack copy would cap its length); q_wasm_http.c's EM_JS uses the UTF8/HEAP helpers.
+# MODULARIZE emits a createPeachQ factory that loads in a Worker and in Node.
+#   STACK_SIZE              — a native thread's 8 MB, not emscripten's 64 KB: the engine keeps
+#                             sort/format scratch on the stack, and a `\l` nests deeper still.
 #   --no-entry              — the glue has no main(); runtime inits lazily.
 EMFLAGS = \
-  -s "EXPORTED_FUNCTIONS=['_q_wasm_init','_q_wasm_eval','_q_wasm_free','_malloc','_free']" \
-  -s "EXPORTED_RUNTIME_METHODS=['ccall','cwrap','UTF8ToString','FS']" \
+  -s "EXPORTED_FUNCTIONS=['_q_wasm_init','_q_wasm_eval','_q_wasm_qdoc','_malloc','_free']" \
+  -s "EXPORTED_RUNTIME_METHODS=['ccall','UTF8ToString','HEAPU8','HEAPU32','FS']" \
   -s ALLOW_MEMORY_GROWTH=1 \
+  -s STACK_SIZE=8MB \
   -s MODULARIZE=1 \
   -s EXPORT_NAME=createPeachQ \
   --no-entry
 
+# The page, Worker and client are copied, and examples/q (bar the terminal games) is
+# re-staged with its manifest, on every run: both are cheap, and a stale copy is not.
 wasm: $(OUTDIR)/$(TARGET).js
+	cp $(WEB_SRC) $(OUTDIR)/
+	sh wasm/gen-files.sh examples/q $(OUTDIR)
 
 $(OUTDIR)/$(TARGET).js: $(WASM_OBJ) $(RE2_LIB) $(FMT_LIB)
 	@mkdir -p $(OUTDIR)
@@ -75,12 +85,17 @@ $(OUTDIR)/$(TARGET).js: $(WASM_OBJ) $(RE2_LIB) $(FMT_LIB)
 # exports its own node as EMSDK_NODE.
 NODE ?= $(if $(EMSDK_NODE),$(EMSDK_NODE),node)
 
-wasm-smoke: $(OUTDIR)/$(TARGET).js
-	$(NODE) $(OUTDIR)/smoke.js
+wasm-smoke: wasm
+	$(NODE) wasm/smoke.js $(OUTDIR)
+
+# Headless Chromium through the Worker; Playwright comes from the environment (PLAYWRIGHT=
+# a node_modules dir, or NODE_PATH), and its absence is a skip — this repo installs no packages.
+wasm-browser-smoke: wasm
+	$(NODE) wasm/browser-smoke.cjs $(OUTDIR) $(PLAYWRIGHT)
 
 clean::
-	-rm -f $(OUTDIR)/$(TARGET).js $(OUTDIR)/$(TARGET).wasm $(OUTDIR)/$(TARGET).data
+	-rm -rf $(OUTDIR)
 
-.PHONY: wasm wasm-smoke clean
+.PHONY: wasm wasm-smoke wasm-browser-smoke clean
 
 -include $(WASM_OBJ:.o=.d)
