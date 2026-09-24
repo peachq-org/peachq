@@ -960,6 +960,13 @@ int q_tok_month(const char* p, size_t len, int64_t* months) {
     return 1;
 }
 
+/* Tok-only (qYaml's kx run): the loaders' cell grammar keeps a bare D as text (csvKdbTest near-miss). */
+static int tok_ts_bare_d(const char* p, size_t len, int64_t* ns) {
+    int64_t y, mo, d;
+    if (len && p[len - 1] == 'D' && q_tok_date(p, len - 1, &y, &mo, &d)) len--;
+    return q_tok_ts(p, len, ns);
+}
+
 /* ===== 3. the Tok entry — contract in q_tok.h, stated once ===== */
 ray_t* q_tok(int8_t tag, const char* p, size_t len) {
     while (len && *p == ' ') { p++; len--; }
@@ -1014,16 +1021,16 @@ ray_t* q_tok(int8_t tag, const char* p, size_t len) {
     }
     case RAY_TIMESTAMP: {
         int64_t ns;
-        if (!q_tok_ts(p, len, &ns))
+        if (!tok_ts_bare_d(p, len, &ns))
             return ray_typed_null(-RAY_TIMESTAMP);
         return ray_timestamp(ns);
     }
     case RAY_DATETIME: {
         /* tok.md:222-227 pins "PZ"$\: over ONE input: Z shares P's accepted
-         * shapes at ms display precision — reuse q_tok_ts (the single P
+         * shapes at ms display precision — reuse tok_ts_bare_d (the single P
          * parser) and convert ns -> fractional days. */
         int64_t ns;
-        if (!q_tok_ts(p, len, &ns))
+        if (!tok_ts_bare_d(p, len, &ns))
             return ray_typed_null(-RAY_DATETIME);
         return ray_datetime((double)ns / 86400000000000.0);
     }
@@ -1061,7 +1068,9 @@ ray_t* q_tok(int8_t tag, const char* p, size_t len) {
     case RAY_MINUTE: {
         /* FLOOR to the containing minute (ref/tok.md:61 "U"$"12:13:14" ->
          * 12:13; cast.md:168-170 truncation rule); past the i32 payload
-         * domain -> null (the tok.md out-of-domain contract). */
+         * domain -> null (the tok.md out-of-domain contract).  A bare 1-2 digit hour is qYaml's zone offset. */
+        tok_clock c;
+        if (len && len <= 2 && tok_clock_scan(p, len, 0, &c) == len && c.hd == (int)len) return ray_minute(c.secs / 60);
         int64_t secs, frac;
         if (!q_tok_clock(p, len, &secs, &frac) || secs / 60 > INT32_MAX)
             return ray_typed_null(-RAY_MINUTE);
