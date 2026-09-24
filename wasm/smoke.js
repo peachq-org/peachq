@@ -1,8 +1,9 @@
 /* The headless check of the wasm build under node: real q through wasm/engine.js, the same
- * engine code the Worker runs.  The plain-q rows are wasm/smoke.qcmd, run inside the module
- * by the native qdoc runner; the rows here need JS.  HTTP goes through a node Module.peachqFetch (a child
- * process doing fetch) to a fixture server that is a second child, since the hook blocks
- * this process; the build's files.json is mounted as lazy files read from disk.
+ * engine code the Worker runs.  The rows are wasm/node/NN-name.qcmd, replayed in order in ONE
+ * session by the native qdoc runner inside the module, with ORIGIN bound to the fixture server.
+ * HTTP goes through a node Module.peachqFetch (a child process doing fetch) to that server, a
+ * second child, since the hook blocks this process; the build's files.json is mounted as lazy
+ * files read from disk.
  *
  *   node wasm/smoke.js build/wasm/www
  *
@@ -83,27 +84,6 @@ function startServer() {
     });
 }
 
-/* What a .qcmd row cannot say: the fixture server's port, bytes compared as bytes,
- * and whether the Range header really went out. */
-function cases(P) {
-    const H = `http://127.0.0.1:${P}`;
-    return [
-        [`count read1 \`:${H}/b.bin`, '128'],
-        [`(read1 \`:${H}/b.bin)~"x"$128+til 128`, '1b'],
-        [`-8#read1 \`:${H}/b.bin`, '0x' + BIN.subarray(-8).toString('hex')],
-        [`read1 (\`:${H}/b.bin;2;3)`, '0x828384'],
-        [`.Q.hg "${H}/lastrange"`, '"bytes=2-4"'],
-        [`.Q.hg "${H}/t.txt"`, `"${TEXT}"`],
-        [`.Q.hp["${H}/echo";"text/plain";"ping"]`, '"ping"'],
-        [`.Q.hg "${H}/gz"`, '"zipped text"'],
-        [`.Q.hg "${H}/redirect"`, `"${TEXT}"`],
-        [`12#(\`:${H}) "GET /t.txt HTTP/1.1\\r\\nHost: x\\r\\n\\r\\n"`, '"HTTP/1.1 200"'],
-        [`-4#(\`:${H}) "POST /echo HTTP/1.1\\r\\nHost: x\\r\\nContent-Length: 4\\r\\n\\r\\npong"`, '"pong"'],
-        [`read1 \`:${H}/missing`, { err: "'io" }],
-        ['.Q.hg "http://127.0.0.1:1/"', { err: "'conn" }],
-    ];
-}
-
 async function main() {
     if (parseInt(process.versions.node, 10) < 18) {
         console.error(`node ${process.versions.node} cannot parse the emscripten glue — use $EMSDK_NODE`);
@@ -117,28 +97,22 @@ async function main() {
         const q = await boot({ factory: require(path.join(www, 'peachq.js')), fetch: nodeFetch });
         q.addFiles(JSON.parse(fs.readFileSync(path.join(www, 'files.json'), 'utf8')), path.join(www, 'files') + path.sep);
 
-        const ledger = fs.readFileSync(path.join(__dirname, 'smoke.qcmd'), 'utf8');
-        const rows = ledger.split('\n').filter((l) => l.startsWith('q)')).length;
-        const qd = q.qdoc(ledger);
-        total += rows;
-        failed += qd.failed < 0 ? rows : qd.failed;
-        console.log(`${qd.failed === 0 ? 'ok' : 'FAIL'}  wasm/smoke.qcmd  ${rows - Math.max(qd.failed, 0)}/${rows} rows`);
-        if (qd.failed) console.error(qd.report);   /* the runner's FAIL rows, among what the \l rows echoed */
-
-        for (const [src, want] of cases(port)) {
-            total++;
-            const { out, err } = q.eval(src);
-            const ok = typeof want === 'object' ? err.startsWith(want.err) : out === want && err === '';
-            if (ok) console.log(`ok    ${src}`);
-            else {
-                failed++;
-                console.error(`FAIL  ${src}\n  want ${JSON.stringify(want)}\n  out  ${JSON.stringify(out)}\n  err  ${JSON.stringify(err)}`);
-            }
+        q.eval(`ORIGIN:"http://127.0.0.1:${port}"`);
+        const dir = path.join(__dirname, 'node');
+        for (const name of fs.readdirSync(dir).filter((f) => f.endsWith('.qcmd')).sort()) {
+            const text = fs.readFileSync(path.join(dir, name), 'utf8');
+            const rows = text.split('\n').filter((l) => /^q[\w.]*\)/.test(l)).length;
+            const qd = q.qdoc(text);
+            const bad = qd.failed < 0 ? rows : qd.failed;
+            total += rows;
+            failed += bad;
+            console.log(`${bad ? 'FAIL' : 'ok  '}  wasm/node/${name}  ${rows - bad}/${rows} rows`);
+            if (bad) console.error(qd.report);   /* the runner's FAIL rows, among what the \l rows echoed */
         }
     } finally {
         child.kill();
     }
-    console.log(`${total - failed}/${total} passed`);
+    console.log(`${total - failed}/${total} rows passed`);
     process.exit(failed ? 1 : 0);
 }
 

@@ -219,4 +219,10 @@ typedef struct {
     bool       (*value_is_null)(duck_result* res, duck_idx_t col, duck_idx_t row);
 } duck_api_t;
 
+#if defined(__EMSCRIPTEN__)
+/* A browser tab cannot dlopen: wasm/q_wasm_duckdb.c fills the table from DuckDB's own wasm build, which the host
+ * loads on this first call.  1 bound; 0 when the host offers no DuckDB or could not load it. */
+int q_wasm_duck_bind(duck_api_t* api);
+#endif
+
 #endif /* Q_DUCKDB_API_H */

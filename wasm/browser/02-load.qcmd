@@ -1,0 +1,4 @@
+/ \l from the start directory fetches that one file, lazily (the harness then checks it was the only one).
+q)\l trades.q
+q)count trades
+10000

@@ -1,0 +1,3 @@
+/ The examples are listed from the build's manifest before any is fetched (the harness then checks no /files/ request).
+q)all ("adverbs.q";"csv.q";"prices.csv";"trades.q") in system "ls"
+1b

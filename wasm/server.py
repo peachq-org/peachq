@@ -5,6 +5,10 @@ Serves .wasm as application/wasm and answers single `Range: bytes=a-b` requests 
 the Worker mounts files with emscripten's createLazyFile, which HEADs a file for its length
 and then reads it in Range chunks. Stdlib http.server does neither Range nor 206.
 
+/duckdb/ is served from build/duckdb-wasm/, where `make -f Makefile.wasm duckdb-wasm` puts DuckDB's
+browser build: the Worker at /worker.js looks for it at ../duckdb/<version>/, as /wasm/latest/worker.js
+finds /wasm/duckdb/<version>/ on the site.
+
     python3 wasm/server.py                  # http://localhost:8000, serving build/wasm/www
     python3 wasm/server.py 9000 some/dir    # port 0 picks a free port
 """
@@ -13,9 +17,10 @@ import os
 import re
 import sys
 
+BUILD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build")
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
-DIR = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else
-                      os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "wasm", "www"))
+DIR = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else os.path.join(BUILD, "wasm", "www"))
+DUCKDB = os.path.abspath(os.path.join(BUILD, "duckdb-wasm"))
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -23,6 +28,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def __init__(self, *a, **k):
         super().__init__(*a, directory=DIR, **k)
+
+    def translate_path(self, path):
+        if path.startswith("/duckdb/"):
+            return os.path.join(DUCKDB, os.path.relpath(super().translate_path(path[7:]), DIR))
+        return super().translate_path(path)
 
     def end_headers(self):
         self.send_header("Accept-Ranges", "bytes")

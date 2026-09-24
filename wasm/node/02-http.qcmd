@@ -1,0 +1,31 @@
+/ q's HTTP through the host's Module.peachqFetch; ORIGIN is smoke.js's fixture server: /b.bin is the 128 bytes
+/ 0x80..0xff, /t.txt "hello peachq", /echo answers its body, /gz is gzip-encoded, /redirect goes to /t.txt, and
+/ /lastrange answers the Range header of the last ranged read.
+q)count read1 hsym `$ORIGIN,"/b.bin"
+128
+q)(read1 hsym `$ORIGIN,"/b.bin")~"x"$128+til 128
+1b
+q)-8#read1 hsym `$ORIGIN,"/b.bin"
+0xf8f9fafbfcfdfeff
+q)read1 (hsym `$ORIGIN,"/b.bin";2;3)
+0x828384
+q)/ the slice went out as a Range header
+q).Q.hg ORIGIN,"/lastrange"
+"bytes=2-4"
+q).Q.hg ORIGIN,"/t.txt"
+"hello peachq"
+q).Q.hp[ORIGIN,"/echo";"text/plain";"ping"]
+"ping"
+q).Q.hg ORIGIN,"/gz"
+"zipped text"
+q).Q.hg ORIGIN,"/redirect"
+"hello peachq"
+q)/ the raw handle: the request text goes out verbatim, the whole response comes back
+q)12#(hsym `$ORIGIN) "GET /t.txt HTTP/1.1\r\nHost: x\r\n\r\n"
+"HTTP/1.1 200"
+q)-4#(hsym `$ORIGIN) "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\npong"
+"pong"
+q)read1 hsym `$ORIGIN,"/missing"
+'io
+q).Q.hg "http://127.0.0.1:1/"
+'conn

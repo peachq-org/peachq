@@ -21,15 +21,20 @@ include Makefile
 # libffi goes with it — its config headers are generated per NATIVE target, and
 # without RAY_FFI q_ffi.c is already the 'nyi stub.
 LIB_SRC  = $(filter-out src/core/ipc.c, $(RAY_LIB_SRC))
-GLUE_SRC = wasm/q_wasm.c wasm/q_wasm_http.c wasm/q_wasm_shell.c wasm/ipc_stub.c
+GLUE_SRC = wasm/q_wasm.c wasm/q_wasm_http.c wasm/q_wasm_duckdb.c wasm/q_wasm_shell.c wasm/ipc_stub.c
 SRC      = $(LIB_SRC) $(GLUE_SRC) $(filter-out third_party/libffi/%,$(RAY_VENDOR_SRC))
 QFFI_DEF =
 
 TARGET = peachq
 OUTDIR = $(BUILD_DIR)/www
-WEB_SRC = wasm/index.html wasm/engine.js wasm/worker.js wasm/peachq-client.js
+WEB_SRC = wasm/index.html wasm/engine.js wasm/worker.js wasm/peachq-client.js wasm/duck-loader.js
 
 INCLUDES = $(RAY_INCLUDES)
+
+# The DuckDB browser build this one loads (wasm/duckdb-wasm.pin): compiled into the shim, so a pin move rebuilds it.
+DUCKDB_WASM := $(shell awk '$$1 == "pin" { print $$2 }' wasm/duckdb-wasm.pin)
+$(BUILD_DIR)/wasm/q_wasm_duckdb.o: DEFS += -DQ_WASM_DUCKDB_PIN=\"$(DUCKDB_WASM)\"
+$(BUILD_DIR)/wasm/q_wasm_duckdb.o: wasm/duckdb-wasm.pin
 RAY_VERSION ?= $(shell cat VERSION 2>/dev/null || echo 0.0)
 V_MAJ := $(word 1,$(subst ., ,$(RAY_VERSION)))
 V_MIN := $(word 2,$(subst ., ,$(RAY_VERSION)))
@@ -90,12 +95,21 @@ wasm-smoke: wasm
 
 # Headless Chromium through the Worker; Playwright comes from the environment (PLAYWRIGHT=
 # a node_modules dir, or NODE_PATH), and its absence is a skip — this repo installs no packages.
-wasm-browser-smoke: wasm
+wasm-browser-smoke: wasm duckdb-wasm
 	$(NODE) wasm/browser-smoke.cjs $(OUTDIR) $(PLAYWRIGHT)
+
+# DuckDB's browser build, fetched once and checked against the pin, where wasm/server.py serves it at /duckdb/.
+duckdb-wasm:
+	tools/duckdb-wasm-publish.sh fetch $(DUCKDB_WASM)
+
+# test/q/duckdb replayed in the browser, by hand before a release (never in make q-test): red off the recorded
+# divergences (wasm/README.md).
+wasm-duckdb-suites: wasm duckdb-wasm
+	$(NODE) wasm/duckdb-suites.cjs $(OUTDIR) $(PLAYWRIGHT)
 
 clean::
 	-rm -rf $(OUTDIR)
 
-.PHONY: wasm wasm-smoke wasm-browser-smoke clean
+.PHONY: wasm wasm-smoke wasm-browser-smoke duckdb-wasm wasm-duckdb-suites clean
 
 -include $(WASM_OBJ:.o=.d)
