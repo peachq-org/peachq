@@ -257,11 +257,11 @@ static ray_t* rows_col(ray_t* cells) {
     return q_list_collapse(cells);
 }
 
-/* Per-column boxed accumulators into a table taking column names from `names`
- * at offset c0, each run through `collapse` (q_list_collapse, or the row-append's
- * rows_col).  CONSUMES every accs[c] — an entry that IS an error propagates as
- * the result — so a caller never unwinds them by hand.  Owned. */
-ray_t* q_table_cols_from_accs(ray_t* names, int64_t c0, ray_t** accs, int64_t nc, ray_t* (*collapse)(ray_t*)) {
+/* Per-column boxed accumulators into a table named by the sym ids `names`, each run
+ * through `collapse` (q_list_collapse, or the row-append's rows_col).  CONSUMES
+ * every accs[c] — an entry that IS an error propagates as the result — so a
+ * caller never unwinds them by hand.  Owned. */
+ray_t* q_table_cols_from_accs(const int64_t* names, ray_t** accs, int64_t nc, ray_t* (*collapse)(ray_t*)) {
     ray_t* out = ray_table_new(nc > 0 ? nc : 1);
     for (int64_t c = 0; c < nc; c++) {
         ray_t* a = accs[c];
@@ -275,7 +275,7 @@ ray_t* q_table_cols_from_accs(ray_t* names, int64_t c0, ray_t** accs, int64_t nc
             ray_release(out);
             out = cc ? cc : q_err(QE_OOM);
         } else {
-            out = ray_table_add_col(out, ray_table_col_name(names, c0 + c), cc);
+            out = ray_table_add_col(out, names[c], cc);
             ray_release(cc);
         }
     }
@@ -558,7 +558,7 @@ ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law) {
             free(accs);
             return err;
         }
-        ray_t* out = q_table_cols_from_accs(flat, 0, accs, nc, rows_col);
+        ray_t* out = q_table_cols_from_accs((const int64_t*)ray_data(ray_table_schema(flat)), accs, nc, rows_col);
         free(accs);
         return out;
     }
@@ -1081,7 +1081,7 @@ ray_t* q_ungroup_wrap(ray_t* x) {
         ray_release(flat);
         return err;
     }
-    ray_t* out = q_table_cols_from_accs(flat, 0, acc, nc, q_list_collapse);
+    ray_t* out = q_table_cols_from_accs((const int64_t*)ray_data(ray_table_schema(flat)), acc, nc, q_list_collapse);
     ray_release(flat);
     return out;
 }

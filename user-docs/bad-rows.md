@@ -1,7 +1,7 @@
 # Bad rows
 
-Your load failed. This page says why, and what to do about it. It covers both readers — [`.csv.read`](csv.md) and
-[`.j.read`](json.md) — because they answer the same way.
+Your load failed. This page says why, and what to do about it. It covers both readers — [`.csv.read`](lib/csv.md) and
+[`.j.read`](lib/j.md) — because they answer the same way.
 
 The default posture is strict: **a bad row aborts the load**. Tolerance is opt-in, one option at a time, and the
 levers carry DuckDB's own names and defaults.
@@ -181,4 +181,4 @@ q).csv.read[`:trades.csv;{[tblData;errData;misc] if[count errData; show errData]
 ```
 
 `errData` is a table with the same four columns, and is the empty table — schema intact — on a clean batch. See
-[Reading CSV](csv.md#a-lambda-called-once-per-batch).
+[Reading CSV](lib/csv.md#a-lambda-called-once-per-batch).
