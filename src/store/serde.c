@@ -21,27 +21,13 @@
  *   SOFTWARE.
  */
 
-#ifndef RAY_OS_WINDOWS
-#  define _GNU_SOURCE   /* fileno() for fsync-after-fwrite below */
-#endif
-
-
-#ifndef RAY_OS_WINDOWS
-#  define _GNU_SOURCE   /* fileno() for fsync-after-fwrite below */
-#endif
-
 #include "serde.h"
 #include "core/types.h"
 #include "mem/heap.h"
 #include "vec/vec.h"
-
-#ifndef RAY_OS_WINDOWS
-#  include <unistd.h>
-#endif
 #include "lang/format.h"
 #include "qlang/net/q_wire.h"   /* THE codec (serde mode) — kb/serialization grammar + ext band */
 #include <string.h>
-#include <stdio.h>
 
 /* --------------------------------------------------------------------------
  * serde v5 (RAY_SERDE_WIRE_VERSION 5): the payload format IS kdb's
@@ -201,91 +187,4 @@ ray_t* ray_de(ray_t* bytes) {
 
     int64_t len = hdr->size;
     return ray_de_raw(buf + sizeof(ray_ipc_header_t), &len);
-}
-
-/* --------------------------------------------------------------------------
- * File I/O: save/load any object in binary format
- * -------------------------------------------------------------------------- */
-
-ray_err_t ray_obj_save(ray_t* obj, const char* path) {
-    bool owned = false;
-    if (ray_is_lazy(obj)) {
-        ray_retain(obj);
-        obj = ray_lazy_materialize(obj); /* consumes the retain */
-        if (RAY_IS_ERR(obj)) {
-            ray_err_t code = ray_err_from_obj(obj);
-            ray_error_free(obj);
-            return code;
-        }
-        owned = true;
-    }
-
-    ray_t* bytes = ray_ser(obj);
-    if (!bytes || RAY_IS_ERR(bytes)) {
-        if (bytes && RAY_IS_ERR(bytes)) ray_error_free(bytes);
-        if (owned) ray_release(obj);
-        return RAY_ERR_DOMAIN;
-    }
-
-    FILE* f = fopen(path, "wb");
-    if (!f) { ray_release(bytes); if (owned) ray_release(obj); return RAY_ERR_IO; }
-
-    size_t total = (size_t)bytes->len;
-    size_t n = fwrite(ray_data(bytes), 1, total, f);
-    if (n != total) {
-        fclose(f); ray_release(bytes);
-        if (owned) ray_release(obj);
-        return RAY_ERR_IO;
-    }
-
-    /* Durability: fflush + fsync BEFORE fclose so a buffered write
-     * hitting ENOSPC inside fclose doesn't slip through silently.
-     * Callers write to a .tmp then rename
-     * — without this fsync the .tmp may be empty/partial on disk
-     * when the rename atomically swaps it in. */
-    if (fflush(f) != 0) {
-        fclose(f); ray_release(bytes);
-        if (owned) ray_release(obj);
-        return RAY_ERR_IO;
-    }
-#ifndef RAY_OS_WINDOWS
-    if (fsync(fileno(f)) != 0) {
-        fclose(f); ray_release(bytes);
-        if (owned) ray_release(obj);
-        return RAY_ERR_IO;
-    }
-#endif
-    /* fclose itself can fail (final flush of any platform-level
-     * buffer).  Check it. */
-    int close_rc = fclose(f);
-    ray_release(bytes);
-    if (owned) ray_release(obj);
-    return close_rc == 0 ? RAY_OK : RAY_ERR_IO;
-}
-
-ray_t* ray_obj_load(const char* path) {
-    FILE* f = fopen(path, "rb");
-    if (!f) return ray_error("io", NULL);
-
-    /* Check fseek/ftell return values — silent failures here let a
-     * truncated read through as "valid empty file" or worse. */
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return ray_error("io", "fseek end"); }
-    long sz = ftell(f);
-    if (sz < 0) { fclose(f); return ray_error("io", "ftell"); }
-    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return ray_error("io", "fseek set"); }
-
-    if (sz == 0) { fclose(f); return ray_error("io", "empty file"); }
-
-    ray_t* buf = ray_vec_new(RAY_BYTE_ONLY, sz);
-    if (!buf || RAY_IS_ERR(buf)) { fclose(f); return buf; }
-    buf->len = sz;
-
-    size_t n = fread(ray_data(buf), 1, (size_t)sz, f);
-    fclose(f);
-
-    if ((long)n != sz) { ray_release(buf); return ray_error("io", "short read"); }
-
-    ray_t* result = ray_de(buf);
-    ray_release(buf);
-    return result;
 }

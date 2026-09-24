@@ -34,8 +34,6 @@
 #if defined(RAY_OS_LINUX) || defined(RAY_OS_MACOS)
 
 #include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
 #include <unistd.h>
 #include <pthread.h>
 #include "mem/sys.h"
@@ -51,40 +49,6 @@ void* ray_vm_alloc(size_t size) {
 
 void ray_vm_free(void* ptr, size_t size) {
     if (ptr) munmap(ptr, size);
-}
-
-void* ray_vm_map_file(const char* path, size_t* out_size) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return NULL;
-
-    struct stat st;
-    if (fstat(fd, &st) != 0) {
-        close(fd);
-        return NULL;
-    }
-
-    if (st.st_size <= 0) {
-        close(fd);
-        if (out_size) *out_size = 0;
-        return NULL;
-    }
-
-    size_t len = (size_t)st.st_size;
-    void* p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
-    close(fd);
-
-    if (p == MAP_FAILED) return NULL;
-
-    if (out_size) *out_size = len;
-    return p;
-}
-
-void ray_vm_unmap_file(void* ptr, size_t size) {
-    if (ptr) munmap(ptr, size);
-}
-
-void ray_vm_advise_seq(void* ptr, size_t size) {
-    if (ptr) madvise(ptr, size, MADV_SEQUENTIAL);
 }
 
 void ray_vm_release(void* ptr, size_t size) {
@@ -282,48 +246,6 @@ void ray_vm_free(void* ptr, size_t size) {
     if (ptr) VirtualFree(ptr, 0, MEM_RELEASE);
 }
 
-void* ray_vm_map_file(const char* path, size_t* out_size) {
-    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
-                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) return NULL;
-
-    LARGE_INTEGER file_size;
-    if (!GetFileSizeEx(hFile, &file_size)) {
-        CloseHandle(hFile);
-        return NULL;
-    }
-
-    HANDLE hMap = CreateFileMappingA(hFile, NULL, PAGE_WRITECOPY, 0, 0, NULL);
-    if (!hMap) {
-        CloseHandle(hFile);
-        return NULL;
-    }
-
-    void* p = MapViewOfFile(hMap, FILE_MAP_COPY, 0, 0, 0);
-
-    /* We can close both handles; the mapping keeps the file open internally. */
-    CloseHandle(hMap);
-    CloseHandle(hFile);
-
-    if (!p) return NULL;
-
-    if (out_size) *out_size = (size_t)file_size.QuadPart;
-    return p;
-}
-
-void ray_vm_unmap_file(void* ptr, size_t size) {
-    (void)size;
-    if (ptr) UnmapViewOfFile(ptr);
-}
-
-void ray_vm_advise_seq(void* ptr, size_t size) {
-    /* PrefetchVirtualMemory is Win8.1+. Best-effort; ignore failure. */
-    WIN32_MEMORY_RANGE_ENTRY entry;
-    entry.VirtualAddress = ptr;
-    entry.NumberOfBytes  = size;
-    PrefetchVirtualMemory(GetCurrentProcess(), 1, &entry, 0);
-}
-
 void ray_vm_release(void* ptr, size_t size) {
     if (!ptr) return;
     /* DiscardVirtualMemory (Win8.1+) or fallback to decommit+recommit */
@@ -425,8 +347,6 @@ void ray_sem_signal(ray_sem_t* s) {
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
 #include <unistd.h>
 #include "mem/sys.h"
 
@@ -451,32 +371,7 @@ void ray_vm_free(void* ptr, size_t size) {
     if (munmap(ptr, size) != 0) ray_free_raw(ptr);
 }
 
-void* ray_vm_map_file(const char* path, size_t* out_size) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return NULL;
-
-    struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
-        close(fd);
-        if (out_size) *out_size = 0;
-        return NULL;
-    }
-
-    size_t len = (size_t)st.st_size;
-    void* p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
-    close(fd);
-
-    if (p == MAP_FAILED) return NULL;
-    if (out_size) *out_size = len;
-    return p;
-}
-
-void ray_vm_unmap_file(void* ptr, size_t size) {
-    if (ptr) munmap(ptr, size);
-}
-
-/* madvise hints are advisory and have no analog on WASM — no-ops. */
-void ray_vm_advise_seq(void* ptr, size_t size)      { (void)ptr; (void)size; }
+/* madvise hints are advisory and have no analog on WASM — no-op. */
 void ray_vm_release(void* ptr, size_t size)         { (void)ptr; (void)size; }
 
 void ray_vm_release_block(void* blk, size_t bsize, bool hugepage) {

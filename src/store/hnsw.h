@@ -75,7 +75,7 @@ typedef struct ray_hnsw {
     int8_t*          node_level;      /* max layer for each node (n_nodes entries) */
     ray_hnsw_layer_t  layers[HNSW_MAX_LAYERS];
     const float*     vectors;         /* pointer to embedding data (not owned) */
-    bool             owns_data;       /* true if loaded from disk (owns neighbor arrays etc.) */
+    bool             owns_data;       /* true if this index owns its vectors buffer */
 } ray_hnsw_t;
 
 /* --- Build / Free / Clone --- */
@@ -124,10 +124,5 @@ int64_t ray_hnsw_search_filter(const ray_hnsw_t* idx,
 
 /* --- Accessors --- */
 int32_t ray_hnsw_dim(const ray_hnsw_t* idx);
-
-/* --- Persistence --- */
-ray_err_t ray_hnsw_save(const ray_hnsw_t* idx, const char* dir);
-ray_hnsw_t* ray_hnsw_load(const char* dir);
-ray_hnsw_t* ray_hnsw_mmap(const char* dir);
 
 #endif /* RAY_HNSW_H */

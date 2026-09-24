@@ -200,8 +200,8 @@ typedef enum {
 /* ===== Core Type: ray_t (32-byte block/object header) ===== */
 
 /* Symbol-resolution domain (src/table/domain.h): every RAY_SYM vector
- * carries a non-NULL pointer to one — either the immortal runtime
- * singleton (global intern table) or a refcounted mmapped symfile. */
+ * carries a non-NULL pointer to the immortal runtime singleton (global
+ * intern table). */
 struct ray_sym_domain_s;
 
 typedef union ray_t {
@@ -212,8 +212,7 @@ typedef union ray_t {
          * slot carries no bitmap bits.  `aux` is the raw-byte view used by
          * atoms (aux[0]&1 typed-null bit), envs (builtin name @ aux[2..15]),
          * functions (DAG opcode @ aux[0..1]), str-pools (dead-bytes @
-         * aux[0..3]), tables/dicts/lists (zero-init), and the on-disk col
-         * header. */
+         * aux[0..3]), and tables/dicts/lists (zero-init). */
         union {
             uint8_t  aux[16];
             struct { union ray_t* slice_parent;  int64_t slice_offset; };
@@ -232,8 +231,7 @@ typedef union ray_t {
              *   - slices use both 0-7 and 8-15, but slice headers do not
              *     store a domain — ray_sym_vec_domain follows
              *     slice_parent, mirroring ray_data_fn's slice walk.
-             * The pointer is runtime-only state: serde strips aux, and
-             * col_save zeroes the SYM header aux slot on disk. */
+             * The pointer is runtime-only state: serde strips aux. */
             struct { uint8_t _aux_sym_lo[8];     struct ray_sym_domain_s* sym_domain; };
             /* RAY_ATTR_HAS_INDEX (vectors): ray_t* of type RAY_INDEX
              * carrying the accelerator payload and the saved aux
@@ -246,7 +244,7 @@ typedef union ray_t {
             struct { uint8_t link_lo[8];         int64_t link_target; };
         };
         /* Bytes 16-31: metadata + value */
-        uint8_t  mmod;       /* 0=heap, 1=file-mmap */
+        uint8_t  mmod;       /* 0=heap, 3=externally mapped (q splay reader) */
         uint8_t  attrs;      /* attribute flags */
         int8_t   type;       /* negative=atom, positive=vector, 0=LIST */
         uint8_t  order;      /* block order (block size = 2^order) */
@@ -371,10 +369,8 @@ static inline struct ray_sym_domain_s* ray_sym_vec_domain(ray_t* v) {
 ray_t*  ray_sym_domain_str(struct ray_sym_domain_s* dom, int64_t pos);
 int64_t ray_sym_domain_find(struct ray_sym_domain_s* dom, const char* str, size_t len);
 
-/* Entry count, and the position → runtime-intern-id LUT (NULL for the
- * runtime domain — ids pass through; for FILE domains the FIRST request
- * interns the vocabulary sequentially: obtain the LUT BEFORE handing
- * cell ids to ray_pool_dispatch workers).  Docs: src/table/domain.h. */
+/* Entry count, and the position → runtime-intern-id LUT (always NULL:
+ * runtime-domain ids pass through).  Docs: src/table/domain.h. */
 int64_t ray_sym_domain_count(struct ray_sym_domain_s* dom);
 const int64_t* ray_sym_domain_runtime_lut(struct ray_sym_domain_s* dom);
 
@@ -659,16 +655,6 @@ uint32_t ray_sym_count(void);
 void ray_sym_strings_borrow(ray_t*** out_strings, uint32_t* out_count);
 bool     ray_sym_ensure_cap(uint32_t needed);
 
-/* Runtime dictionary snapshot — NOT table symfiles.  ray_sym_save writes
- * the whole process-global intern table to `path` (tmp + fsync + atomic
- * rename, replacing whatever was there; single-writer contract);
- * ray_sym_load restores it, requiring every entry to land at the id equal
- * to its file position so ids from the saved session stay valid (see
- * ray_runtime_create_with_sym).  Stored tables do not use these: their
- * symbols live in per-table symfiles managed by the storage layer. */
-ray_err_t ray_sym_save(const char* path);
-ray_err_t ray_sym_load(const char* path);
-
 /* ===== Environment API =====
  *
  * Thread-safety: the environment is shared global state.  Concurrent calls
@@ -720,14 +706,14 @@ ray_t*  ray_dict_remove(ray_t* d, ray_t* key_atom);             /* COW; consumes
 
 /* ===== Runtime + Rayfall Eval API =====
  *
- * Embedders build a runtime, optionally restoring a persisted symbol
- * table, then evaluate Rayfall source strings against the global env.
+ * Embedders build a runtime, then evaluate Rayfall source strings against
+ * the global env.
  *
  * Tables and other ray_t* values can be exposed to Rayfall by interning
  * a symbol name and binding via ray_env_set, then queried with
  * ray_eval_str:
  *
- *   ray_runtime_t* rt = ray_runtime_create_with_sym(".sym");
+ *   ray_runtime_t* rt = ray_runtime_create(0, NULL);
  *   int64_t name_id = ray_sym_intern("t", 1);
  *   ray_env_set(name_id, my_table);            // rayforce retains
  *   ray_t* result = ray_eval_str("select count from t");
@@ -744,18 +730,6 @@ typedef struct ray_runtime_s ray_runtime_t;
 /* Create a runtime with an empty symbol table. argc/argv are forwarded
  * so embedders can hand off CLI flags; pass 0/NULL when not applicable. */
 ray_runtime_t* ray_runtime_create(int argc, char** argv);
-
-/* Create a runtime and pre-load the persisted symbol table at sym_path.
- * Missing file or NULL is fine (symbols start empty). I/O or corrupt-
- * file conditions are non-fatal: the runtime starts up and the caller
- * can detect the issue via ray_runtime_create_with_sym_err if needed. */
-ray_runtime_t* ray_runtime_create_with_sym(const char* sym_path);
-
-/* As ray_runtime_create_with_sym, but writes the sym-load status to
- * *out_sym_err. RAY_OK on success or absent file; non-zero on I/O,
- * corrupt-file, or OOM during sym load.  Pass NULL to ignore. */
-ray_runtime_t* ray_runtime_create_with_sym_err(const char* sym_path,
-                                                ray_err_t*  out_sym_err);
 
 /* Tear down the runtime: lang state, env, VMs, heap.  Always pair with
  * exactly one ray_runtime_create* call. */

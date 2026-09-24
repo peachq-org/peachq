@@ -68,8 +68,7 @@ typedef enum {
     /* Per-column string dictionary: an int32 code per row + the distinct
      * string values (code -> string).  Lets group-by / distinct run on the
      * cheap integer-code path instead of hashing 16-byte ray_str_t descriptors
-     * and chasing the string pool.  Built at column ingest and
-     * persisted inline like the chunk-zone index; the only accelerator index
+     * and chasing the string pool.  The only accelerator index
      * permitted on RAY_STR (it stores codes alongside the descriptors, leaving
      * the column's own representation untouched). */
     RAY_IDX_DICT       = 7,
@@ -97,12 +96,6 @@ typedef enum {
  * that have no dedicated attrs bit).  sorted lives in attrs (RAY_ATTR_SORTED),
  * not here. */
 #define RAY_MARK_UNIQUE  0x01
-/* Set when this index and its child vecs are passengers in the parent column's
- * file mapping (restored in-place from the on-disk inline index region).  The
- * parent's single munmap frees them; ray_release_owned_refs must NOT free a
- * passenger index by pointer.  Clear = heap-resident index (freed normally),
- * including a runtime-built index attached to an mmap'd column. */
-#define RAY_MARK_MMAP    0x02
 /* Neutral bit reservation for the kdb `` `p# `` (parted) attribute, STAMPED and
  * READ BACK BY THE q LAYER — not by rayfall-native `.attr.*`.  The q parted path
  * (q_registry.c) attaches a find-hash and stamps this marker via
@@ -153,7 +146,7 @@ typedef struct {
         } sort;
         struct {                /* RAY_IDX_ZONE */
             /* A column is integer XOR float, so the int and float extrema share
-             * storage (keeps ray_index_t a 32-byte multiple for mmap layout). */
+             * storage. */
             union { int64_t min_i; double min_f; }; /* min (int: date/time too) */
             union { int64_t max_i; double max_f; }; /* max */
             int64_t n_nulls;    /* number of null rows (0 if no nulls) */
@@ -185,8 +178,7 @@ typedef struct {
             int64_t n_parts;
         } part;
         struct {                /* RAY_IDX_DICT */
-            /* Both children are RAY_I32 (numeric — the inline persistence stores
-             * them verbatim, no nested str_pool).  The distinct STRING values
+            /* Both children are RAY_I32 (numeric, no nested str_pool).  The distinct STRING values
              * are NOT duplicated: first_occ[c] is the parent-column row index of
              * code c's first occurrence, so code -> string resolves through the
              * parent column itself (ray_str_vec_get(col, first_occ[c])). */
@@ -209,13 +201,6 @@ typedef struct {
         } codes;
     } u;
 } ray_index_t;
-
-/* On-disk index persistence stores the RAY_INDEX object and its child vecs as
- * contiguous 32-byte-aligned ray_t blocks mmap'd in place (no serialization).
- * For the trailing child blocks to stay 32-aligned, the index payload must be a
- * 32-byte multiple — enforce it so the layout invariant can't silently break. */
-_Static_assert(sizeof(ray_index_t) % 32 == 0,
-               "ray_index_t must be a 32-byte multiple for in-place mmap layout");
 
 /* Inline accessor — returns ray_index_t* for a RAY_INDEX block. */
 static inline ray_index_t* ray_index_payload(ray_t* idx) {
@@ -258,14 +243,12 @@ ray_t* ray_index_attach_bloom(ray_t** vp);
 ray_t* ray_index_attach_chunk_zone(ray_t** vp, uint8_t chunk_log2);
 
 /* Build a chunk-zone index WITHOUT attaching it — returns a standalone
- * RAY_INDEX object (caller releases).  Used by a column-store builder to
- * compute an index for persistence without COWing a shared column. */
+ * RAY_INDEX object (caller releases), so a shared column is not COWed. */
 ray_t* ray_index_chunk_zone_compute(ray_t* v, uint8_t chunk_log2);
 
 /* Build a RAY_IDX_DICT (codes + distinct values) for STR vector `v` WITHOUT
  * attaching it — standalone RAY_INDEX object (caller releases / attaches).
- * Returns RAY_ERR_NYI for non-STR.  Used at column save to persist the dict
- * and by ray_index_attach_dict for the runtime path. */
+ * Returns RAY_ERR_NYI for non-STR.  ray_index_attach_dict attaches it. */
 ray_t* ray_index_dict_compute(ray_t* v);
 ray_t* ray_index_attach_dict(ray_t** vp);
 
@@ -289,15 +272,6 @@ ray_t* ray_index_attach_codes(ray_t** vp, ray_codes_layout_t layout);
  * runtime-domain column the id passes through.  ray_index_atom_key's -RAY_SYM
  * arm is this, so a consumer keys a symbol like any other atom. */
 int64_t ray_index_sym_key(ray_t* col, int64_t runtime_id);
-
-/* ── Inline on-disk index region (kdb+-style, zero-copy mmap) ──
- * ray_index_inline_size: bytes the region occupies (32-aligned ray_t blocks).
- * ray_index_inline_write: serialize `ix` into dst (child ptrs → region offsets).
- * ray_index_inline_map: patch an mmap'd region's child offsets → absolute ptrs
- *   in place and return the RAY_INDEX object (flagged RAY_MARK_MMAP). */
-int64_t ray_index_inline_size(const ray_index_t* ix);
-void    ray_index_inline_write(uint8_t* dst, const ray_index_t* ix);
-ray_t*  ray_index_inline_map(uint8_t* region);
 
 /* Drop any attached index from *vp.  No-op if none.  Restores the
  * pre-attach aux state byte-for-byte.  Returns *vp. */
