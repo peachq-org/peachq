@@ -6,15 +6,17 @@ defaults and behaviour follow DuckDB's `read_csv`; the types you get back are q'
 It is an **incremental** reader: the source is pulled through a fixed read buffer, so a huge file costs no more
 memory than a small one when you send the rows somewhere as they arrive.
 
-Read [Loading a file](loading.md) first — the source law, the sample, the type freeze, `types` and what a cell means
+Read [Loading a file](../loading.md) first — the source law, the sample, the type freeze, `types` and what a cell means
 are shared with the JSON reader and are not repeated here. This page is CSV's own half: delimiters, quoting
 dialects, headers, `skip`, and where the rows go.
 
 Standard q reads CSV with `0:`, which needs you to state every column type up front and gives no control over
 quoting, comments or bad rows. `0:` still works exactly as it always did — use it when you already know the schema
-and the file is clean, and `.csv.read` when you do not. See [Compatibility with kx q](compatibility.md).
+and the file is clean, and `.csv.read` when you do not. See [Compatibility with kx q](../compatibility.md).
 
 ## The two functions
+
+Every function and parameter: [.csv API](https://peachq.org/docs/api/csv.q.html).
 
 The `.csv` namespace is part of the standard library:
 
@@ -53,7 +55,7 @@ Note `sym`: sniffed text is always a string column, never a symbol. Ask with `ty
 ## Text sources
 
 A symbol names a resource; text is content. Both go in the first argument, and
-[Loading a file](loading.md#1-pick-a-source) states the law. What is CSV's own is what happens to a **list** of char
+[Loading a file](../loading.md#1-pick-a-source) states the law. What is CSV's own is what happens to a **list** of char
 vectors, which is defined as **join with `"\n"`, then parse** — not one element per record:
 
 ```q
@@ -108,7 +110,7 @@ types   | `sym`px`qty`dt!"*fjd"
 ```
 
 - `rows` — rows landed **by this call**, not the target's total
-- `rejected` — rows that left a reject record (see [Bad rows](bad-rows.md))
+- `rejected` — rows that left a reject record (see [Bad rows](../bad-rows.md))
 - `chunks` — how many read batches the file took
 - `ignored` — CSV columns dropped because the existing target table has no such column
 - `types` — the per-column type chars actually used, `*` meaning "left as a string"
@@ -152,7 +154,7 @@ ignored | `symbol$()
 types   | `ticker`px!"sf"
 ```
 
-[Loading a file](loading.md#5-you-rename-with-xcol) has the rest: what `xcol` takes, and why `types` still keys on
+[Loading a file](../loading.md#5-you-rename-with-xcol) has the rest: what `xcol` takes, and why `types` still keys on
 the file's own names.
 
 ### A lambda, called once per batch
@@ -181,7 +183,7 @@ A lambda of any other rank is refused with `'rank`. A target that is neither `::
 ## Stating types
 
 The third argument overrides the sniff. The type chars and the rules that govern them are on
-[Loading a file](loading.md#4-you-override-with-types); the two shapes they come in are CSV's business here.
+[Loading a file](../loading.md#4-you-override-with-types); the two shapes they come in are CSV's business here.
 
 A **dict** names the columns it cares about and leaves the rest to the sniff:
 
@@ -251,13 +253,13 @@ short-dict idiom `` ``delim!(::;";") `` works.
 
 `nullstr` and `all_varchar` are recognised names that are **not implemented** — passing either signals `'option`,
 like an unknown key. There is no `encoding` option; the reader is byte-transparent, and
-[Loading a file](loading.md#encoding) says what that means.
+[Loading a file](../loading.md#encoding) says what that means.
 
 Degenerate combinations are refused up front rather than producing nonsense: the quote character cannot be the
 delimiter, a newline cannot be the delimiter, the comment character cannot collide with an explicit delimiter, and a
 multi-character `comment` is `'domain`.
 
-The last five options are the tolerance levers, and [Bad rows](bad-rows.md) is their page.
+The last five options are the tolerance levers, and [Bad rows](../bad-rows.md) is their page.
 
 ### Formats for dates and timestamps
 
@@ -280,7 +282,7 @@ q).csv.read[`:tz.csv;::;::;(enlist `timestampformat)!enlist "%Y-%m-%dT%H:%M:%S%z
 ```
 
 Without that option a tz-suffixed cell stays text, bytes intact, and zone **names** are not readable at all —
-[Loading a file](loading.md#timezone-suffixes-stay-text) covers the posture and the workaround.
+[Loading a file](../loading.md#timezone-suffixes-stay-text) covers the posture and the workaround.
 
 ## The delimiter is sniffed; the dialect is not
 
@@ -401,7 +403,7 @@ q).csv.read[`:e.csv;::;::;()!()]
 ## When a load fails
 
 The error classes, the frozen-type miss and its two fixes, and the tolerance levers are on
-[Bad rows](bad-rows.md) — one page, shared with the JSON reader.
+[Bad rows](../bad-rows.md) — one page, shared with the JSON reader.
 
 ## Undefined in this release
 
