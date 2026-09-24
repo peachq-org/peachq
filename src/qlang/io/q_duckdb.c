@@ -4,7 +4,8 @@
  *
  * DuckDB is reached ONLY via dlopen + a dlsym'd fn table (q_duckdb_api.h),
  * lazily on first use: PEACHQ_DUCKDB_LIB set = EXCLUSIVE, else $QHOME ->
- * exe dir -> system default; version gated >= 1.4; every failure is the bare
+ * exe dir -> system default; version gated >= 1.4 (the browser build fills the
+ * same table from wasm/q_wasm_duckdb.c); every failure is the bare
  * 'duckdb class.  Reads drain the chunk API, writes feed the appender whole
  * chunks — both directions columnar.  String columns cross the boundary as
  * 0h lists of charv (string-C3: physical RAY_STR never reaches q-space);
@@ -34,7 +35,7 @@
 #include <sys/stat.h>
 
 #if defined(__EMSCRIPTEN__)
-/* no dynamic loading in the wasm build — loader is a constant failure */
+/* no dynamic loading in the wasm build: wasm/q_wasm_duckdb.c binds the table (q_wasm_duck_bind) */
 #elif defined(_WIN32)
 #include <windows.h>
 #else
@@ -226,8 +227,7 @@ static void qd_dlclose(void* dl) {
 static void qd_load(void) {
     if (g_qd.state == 1) return;
 #if defined(__EMSCRIPTEN__)
-    g_qd.state = 2;
-    return;
+    g_qd.state = q_wasm_duck_bind(&qd_api) ? 1 : 2;
 #else
     void* dl = NULL;
     const char* envp = getenv("PEACHQ_DUCKDB_LIB");

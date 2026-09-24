@@ -1,0 +1,7 @@
+/ q's HTTP rides the Worker's synchronous XHR; ORIGIN is the harness's server.  A slice is a Range request.
+q)0<count .Q.hg ORIGIN,"/files.json"
+1b
+q)read1 (hsym `$ORIGIN,"/files/prices.csv";0;4)
+0x64617465
+q).Q.hg "http://localhost:1/"
+'conn

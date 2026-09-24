@@ -1,16 +1,20 @@
 /* The browser check of the wasm build: headless Chromium opens the reference page
  * (index.html, served by server.py) and drives the engine through peachq-client.js and the
- * Worker.  It pins what node cannot see: files are listed before any is fetched and fetched
- * only when read, HTTP rides the Worker's synchronous XHR, and the page stays responsive
- * while q computes.
+ * Worker.  The q is wasm/browser/NN-name.qcmd, replayed in order in ONE session by the native
+ * qdoc runner inside the Worker, with ORIGIN bound to this server.  This file keeps what q text
+ * cannot say: the network log between ledgers (files listed before any is fetched and fetched
+ * only when read; DuckDB's browser build loaded on its first use, from the pinned local copy
+ * (make -f Makefile.wasm duckdb-wasm); every request off localhost refused), and the page and
+ * client — the input box, responsiveness while q computes, addFiles, restart.
  *
  *   node wasm/browser-smoke.cjs build/wasm/www [/path/to/node_modules]
  *
  * Playwright is resolved from that node_modules, else the usual way (NODE_PATH included);
  * without it this check SKIPS (exit 0). */
 'use strict';
+const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { serve } = require('./serve.cjs');
 
 let chromium;
 try {
@@ -21,22 +25,10 @@ try {
 }
 
 const www = path.resolve(process.argv[2] || path.join(__dirname, '..', 'build', 'wasm', 'www'));
-const EXAMPLES = ['adverbs.q', 'csv.q', 'prices.csv', 'trades.q'];
-
-function startServer() {
-    const child = spawn('python3', [path.join(__dirname, 'server.py'), '0', www], { stdio: ['ignore', 'pipe', 'ignore'] });
-    return new Promise((resolve, reject) => {
-        child.stdout.once('data', (d) => {
-            const m = /localhost:(\d+)/.exec(String(d));
-            if (m) resolve({ child, port: +m[1] }); else reject(new Error('server said: ' + d));
-        });
-        child.once('exit', () => reject(new Error('server.py died')));
-    });
-}
+const LEDGERS = path.join(__dirname, 'browser');
 
 async function main() {
-    const { child, port } = await startServer();
-    const origin = `http://localhost:${port}`;
+    const { child, origin } = await serve(www, 'browser-smoke');
     const browser = await chromium.launch();
     let failed = 0, total = 0;
     const check = (name, ok, detail = '') => {
@@ -44,40 +36,48 @@ async function main() {
         if (ok) console.log(`ok    ${name}`);
         else { failed++; console.error(`FAIL  ${name}${detail ? '\n  ' + detail : ''}`); }
     };
+    let rows = 0, rowsFailed = 0;
     try {
         const context = await browser.newContext();
-        const fetched = [];
+        const fetched = [], offsite = [];
         context.on('request', (r) => fetched.push(new URL(r.url()).pathname));
+        await context.route(/.*/, (r) => {
+            if (new URL(r.request().url()).hostname === 'localhost') return r.continue();
+            offsite.push(r.request().url());
+            return r.abort();
+        });
         const page = await context.newPage();
         const run = (src) => page.evaluate((s) => q.eval(s), src);
         const fileFetches = () => fetched.filter((p) => p.startsWith('/files/'));
+        const duckFetches = () => fetched.filter((p) => p.startsWith('/duckdb/'));
+        const ledger = async (name) => {
+            const text = fs.readFileSync(path.join(LEDGERS, name), 'utf8');
+            const n = text.split('\n').filter((l) => /^q[\w.]*\)/.test(l)).length;
+            const r = await page.evaluate((t) => q.call({ op: 'qdoc', text: t }), text);
+            const bad = r.failed < 0 ? n : r.failed;
+            rows += n;
+            rowsFailed += bad;
+            console.log(`${bad ? 'FAIL' : 'ok  '}  wasm/browser/${name}  ${n - bad}/${n} rows`);
+            if (bad) console.error(r.report);
+        };
 
         await page.goto(origin + '/index.html');
         await page.waitForFunction(() => document.getElementById('status').textContent === 'ready', null, { timeout: 60000 });
         check('the page boots the engine in a Worker', await page.evaluate(() => typeof createPeachQ === 'undefined'));
+        await run(`ORIGIN:"${origin}"`);
 
-        const ls = await run('\\ls');
-        check('\\ls lists the examples', EXAMPLES.every((f) => ls.out.includes(`"${f}"`)), JSON.stringify(ls));
+        await ledger('01-files.qcmd');
         check('... before any file is fetched', fileFetches().length === 0, fileFetches().join(' '));
-
-        const load = await run('\\l trades.q');
-        check('\\l trades.q from the start directory', /vwap/.test(load.out) && load.err === '', JSON.stringify(load).slice(0, 300));
-        check('... fetched that file and no other', fileFetches().every((p) => p === '/files/trades.q') && fileFetches().length > 0,
+        await ledger('02-load.qcmd');
+        check('\\l fetched that file and no other', fileFetches().every((p) => p === '/files/trades.q') && fileFetches().length > 0,
               fileFetches().join(' '));
-        const n = await run('count trades');
-        check('count trades', n.out === '10000', JSON.stringify(n));
 
         await page.fill('#inp', 'sum 1 2 3');
         await page.press('#inp', 'Enter');
         await page.waitForFunction(() => [...document.querySelectorAll('#out .res')].some((d) => d.textContent === '6'));
         check('the page input evaluates a line', true);
 
-        const hg = await run(`0<count .Q.hg "${origin}/files.json"`);
-        check('.Q.hg through the Worker XHR', hg.out === '1b', JSON.stringify(hg));
-        const slice = await run(`read1 (\`:${origin}/files/prices.csv;0;4)`);
-        check('read1 slice is a Range request, bytes exact', slice.out === '0x64617465', JSON.stringify(slice));
-        const refused = await run('.Q.hg "http://localhost:1/"');
-        check('an unreachable host answers \'conn', refused.err.startsWith("'conn"), JSON.stringify(refused));
+        await ledger('03-http.qcmd');
 
         const busy = page.evaluate(() => q.eval('\\t do[3000000;a:1]'));
         await page.waitForFunction(() => document.getElementById('status').textContent === 'busy');
@@ -87,6 +87,13 @@ async function main() {
         const ms = +(await busy).out;
         check('the page answers while q computes', answered === 'busy' && lag < 200 && ms > 4 * lag,
               `page answered in ${lag} ms, q ran ${ms} ms`);
+
+        check('no DuckDB request before its first use', duckFetches().length === 0, duckFetches().join(' '));
+        await ledger('04-duckdb.qcmd');
+        check('... and DuckDB loaded in the Worker', duckFetches().length > 0);
+        const jsonExt = /\/duckdb\/[^/]+\/extensions\/v[\d.]+\/wasm_eh\/json\.duckdb_extension\.wasm$/;
+        check('the json extension autoloaded, from the pinned directory', fetched.some((p) => jsonExt.test(p)));
+        check('nothing was fetched from off localhost', offsite.length === 0, offsite.join(' '));
 
         await page.evaluate(() => q.addFiles([{ path: 'more/adverbs.q' }], 'files/'));
         const more = await run('\\ls more');
@@ -106,8 +113,8 @@ async function main() {
         await browser.close();
         child.kill();
     }
-    console.log(`${total - failed}/${total} passed`);
-    process.exit(failed ? 1 : 0);
+    console.log(`${rows - rowsFailed}/${rows} ledger rows, ${total - failed}/${total} checks passed`);
+    process.exit(failed || rowsFailed ? 1 : 0);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
