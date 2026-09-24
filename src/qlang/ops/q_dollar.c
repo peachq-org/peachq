@@ -172,9 +172,10 @@ static ray_t* cast_str(ray_t* x) {
     if (x && (x->type == RAY_CHARV || x->type == -RAY_CHARV)) {  /* charv identity */
         ray_retain(x); return x;
     }
-    if (x && x->type == RAY_BYTE_ONLY)                                  /* byte vec */
+    /* a boolean is one byte (cast.md: the bit pattern is unchanged) */
+    if (x && (x->type == RAY_BYTE_ONLY || x->type == RAY_BOOL))
         return ray_str((const char*)ray_data(x), (size_t) q_count(x));
-    if (x && x->type == -RAY_BYTE_ONLY) return ray_char(x->u8);  /* byte atom -> char atom */
+    if (x && (x->type == -RAY_BYTE_ONLY || x->type == -RAY_BOOL)) return ray_char(x->u8);
     if (q_type_is_int_atom(x)) {
         return ray_char((uint8_t)q_type_iatom_val(x));   /* `char$65 -> "A" (atom) */
     }
@@ -209,7 +210,7 @@ static ray_t* cast_str(ray_t* x) {
             if      (ei && ei->type == -RAY_I64) v = ei->i64;
             else if (ei && ei->type == -RAY_I32) v = ei->i32;
             else if (ei && ei->type == -RAY_I16) v = ei->i16;
-            else if (ei && ei->type == -RAY_BYTE_ONLY)  v = ei->u8;
+            else if (ei && (ei->type == -RAY_BYTE_ONLY || ei->type == -RAY_BOOL)) v = ei->u8;
             else if (ei && ei->type == -RAY_STR && ray_str_len(ei) == 1)
                 v = (unsigned char)ray_str_ptr(ei)[0];
             else if (ei && ei->type == -RAY_CHARV) v = ei->u8;
@@ -372,6 +373,10 @@ static ray_t* cast_u8(ray_t* x) {
         return out;
     }
     if (q_type_is_int_atom(x)) return ray_u8(cast_u8_scalar(q_type_iatom_val(x)));
+    int64_t tv;
+    /* the low byte, as base's temporal VECTOR arm gives the atom's own vector */
+    if (x && x->type < 0 && RAY_IS_TEMPORAL(-x->type) && q_type_strict_i64(x, &tv))
+        return ray_u8((uint8_t)tv);
     if (q_type_is_int_vec(x)) {
         int64_t n = q_count(x);
         ray_t* out = ray_vec_new(RAY_BYTE_ONLY, n > 0 ? n : 1);
