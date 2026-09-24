@@ -747,11 +747,7 @@ static void ray_release_owned_refs(ray_t* v) {
      * so we must NOT also try to release those off the parent — they
      * aren't there anymore.  Skip the STR_pool branch. */
     if (v->attrs & RAY_ATTR_HAS_INDEX) {
-        /* A mmap-resident index (mmod==1) is a PASSENGER in this column's file
-         * mapping — the column's single munmap frees it.  Releasing it here
-         * would ray_free it and munmap a sub-region of the mapping.  Only a
-         * heap-built index (mmod==0) is released by pointer. */
-        if (v->index && !RAY_IS_ERR(v->index) && v->index->mmod != 1)
+        if (v->index && !RAY_IS_ERR(v->index))
             ray_release(v->index);
         return;
     }
@@ -860,9 +856,7 @@ bool ray_retain_owned_refs(ray_t* v) {
     }
 
     if (v->attrs & RAY_ATTR_HAS_INDEX) {
-        /* Mirror ray_release_owned_refs: a mmap-resident passenger index
-         * (mmod==1) is owned by the column's mapping, not refcounted here. */
-        if (v->index && !RAY_IS_ERR(v->index) && v->index->mmod != 1)
+        if (v->index && !RAY_IS_ERR(v->index))
             ray_retain(v->index);
         return true;
     }
@@ -1133,50 +1127,13 @@ void ray_free(ray_t* v) {
 
     ray_heap_t* h = ray_tl_heap;
 
-    /* File-mapped: munmap */
-    if (v->mmod == 1) {
-        if (v->type == RAY_TABLE || v->type == RAY_DICT || v->type == RAY_LIST) return;
-        if (v->type > 0 && v->type < RAY_TYPE_COUNT) {
-            uint8_t esz = ray_sym_elem_size(v->type, v->attrs);
-            size_t data_size = 32 + (size_t)v->len * esz;
-            if (v->type == RAY_STR) {
-                size_t pool_len = 0;
-                if (v->str_pool && !RAY_IS_ERR(v->str_pool) && v->str_pool->len > 0)
-                    pool_len = (size_t)v->str_pool->len;
-                data_size += 32 + pool_len;
-            }
-            /* Inline index region: a mmap-resident (passenger) index extends the
-             * mapping past the payload by its 32-aligned inline region.  Derive
-             * that size from the index itself (ray_index_inline_size) rather than
-             * stashing it in aux — str_pool occupies _idx_pad on STR columns, and
-             * the payload size above already accounts for descriptors + pool.
-             * Heap-resident indexes (RAY_MARK_MMAP clear) keep the payload-only
-             * formula. */
-            if ((v->attrs & RAY_ATTR_HAS_INDEX) && v->index && !RAY_IS_ERR(v->index)) {
-                ray_index_t* ix = ray_index_payload(v->index);
-                if (ix->markers & RAY_MARK_MMAP) {
-                    int64_t region_off = ((int64_t)data_size + 31) & ~(int64_t)31;
-                    data_size = (size_t)(region_off + ray_index_inline_size(ix));
-                }
-            }
-            size_t mapped_size = (data_size + 4095) & ~(size_t)4095;
-            ray_vm_unmap_file(v, mapped_size);
-        } else {
-            ray_vm_unmap_file(v, 4096);
-        }
-        if (h) RAY_STAT(h->stats.free_count++);
-        return;
-    }
-
     /* Externally-mapped (mmod==3): the installing layer's munmap choke point */
     if (v->mmod == 3) {
         if (g_mapped_free) g_mapped_free(v);
         if (h) RAY_STAT(h->stats.free_count++);
         return;
     }
-
-    /* Legacy mmod==2 guard */
-    if (v->mmod == 2) return;
+    assert(v->mmod == 0);
 
     if (!h) return;
 

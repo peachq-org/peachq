@@ -107,8 +107,4 @@ ray_t*  ray_ser(ray_t* obj);
 /* Top-level: deserialize from U8 vector (validates IPC header) */
 ray_t*  ray_de(ray_t* bytes);
 
-/* File I/O: save/load any object in binary format */
-ray_err_t ray_obj_save(ray_t* obj, const char* path);
-ray_t*    ray_obj_load(const char* path);
-
 #endif /* RAY_SERDE_H */
