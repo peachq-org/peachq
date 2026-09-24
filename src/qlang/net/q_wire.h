@@ -103,6 +103,8 @@ ray_t* q_wire_serialize_len(ray_t* x);
  * decode to exactly one object consuming the whole frame.  `bytes` must
  * be a RAY_U8 vector.  Returns an owned value or a RAY_ERROR. */
 ray_t* q_wire_deserialize(ray_t* bytes);
+/* As above; *sent_err says an error result is the message's own -128h payload, not a decode failure. */
+ray_t* q_wire_deserialize_ex(ray_t* bytes, int* sent_err);
 
 /* ---- Phase F compression codec (javakdb c.java scheme) ----
  * Compress a complete frame: returns the compressed frame when its serialized
