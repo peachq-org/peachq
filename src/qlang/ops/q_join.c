@@ -64,6 +64,7 @@ static ray_t* qj_col_gather(ray_t* col, const int64_t* idx, int64_t n) {
         ray_release(p);
         return q_enum_stamp(g, q_enum_domain(col));
     }
+    if (col && col->type == RAY_TABLE) return qj_table_gather_idx(col, idx, n);
     if (col && col->type == -RAY_STR) {
         const char* sp = ray_str_ptr(col);
         int64_t sl = (int64_t)ray_str_len(col);
@@ -1049,6 +1050,7 @@ ray_t* q_wj1_wrap(ray_t** args, int64_t n) { return qj_wj_core(args, n, 1); }
  * One boxed item of any sequence: strings iterate CHARS (1-char -RAY_STR
  * cells, string-model shim), atoms behave as 1-item lists.  Owned result. */
 ray_t* q_join_item(ray_t* x, int64_t i) {
+    if (x && x->type == RAY_TABLE) return q_table_row_at(x, i);   /* base at reads a nested table column's slots */
     if (x && x->type == RAY_ENUM) {              /* base at is enum-blind: the
                                                   * item is the -20h atom */
         if (i < 0 || i >= q_count(x)) return q_enum_null_atom(q_enum_domain(x));
