@@ -1,0 +1,10 @@
+# DuckDB's browser build, loaded by the wasm REPL on its first DuckDB call: published per version by
+# tools/duckdb-wasm-publish.sh, fetched for local runs by `make -f Makefile.wasm duckdb-wasm`, sha256-checked by both.
+# `pin <version>` is what a build loads; `<version> <path> <sha256> <url>` is one file.  1.33.1-dev57.0 is DuckDB
+# v1.5.4; its extensions sit at extensions/v<duckdb>/wasm_eh/, the layout custom_extension_repository expects.
+pin 1.33.1-dev57.0
+1.33.1-dev57.0 duckdb-browser-blocking.cjs b83b0d06e67a3c1ef1013ec1d46055a516ffa27ecd60e05d67049ac1cbfa9fd1 https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev57.0/dist/duckdb-browser-blocking.cjs
+1.33.1-dev57.0 duckdb-eh.wasm 3abdec74989dcc54d2f2ea5621f611f3c45db1e7dff2f408476014d82beb2029 https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev57.0/dist/duckdb-eh.wasm
+1.33.1-dev57.0 extensions/v1.5.4/wasm_eh/parquet.duckdb_extension.wasm 4845705bbd69fc9ad52878d96a505c73cae4a6c509822079cc2413e5eb437f95 https://extensions.duckdb.org/v1.5.4/wasm_eh/parquet.duckdb_extension.wasm
+1.33.1-dev57.0 extensions/v1.5.4/wasm_eh/json.duckdb_extension.wasm 993b19f7929cc305b2529c548f2842e8e7a5b112d1c88f31c84798b51901ca16 https://extensions.duckdb.org/v1.5.4/wasm_eh/json.duckdb_extension.wasm
+1.33.1-dev57.0 extensions/v1.5.4/wasm_eh/httpfs.duckdb_extension.wasm 576721756dd01b86cdfdcf1303ecdcc9776929fd21c3e3b86fdd43a2259aec5b https://extensions.duckdb.org/v1.5.4/wasm_eh/httpfs.duckdb_extension.wasm
