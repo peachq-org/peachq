@@ -521,6 +521,29 @@ static int redirect_resolve(const q_http_url_t* cur, const char* loc, size_t n,
     return q_http_client_url_parse(buf, (size_t)w, out);
 }
 
+/* THE one network exchange: request head + body out, the whole raw response back
+ * (q_http_client_read_response's contract).  http_do and the raw client both ride it. */
+static char* http_exchange(const q_http_url_t* u, const char* req, size_t req_len,
+                           const char* body, size_t body_len, int64_t deadline,
+                           int no_body, size_t* len, const char** err)
+{
+#if defined(__EMSCRIPTEN__)
+    (void)deadline;
+    return q_http_client_host_exchange(u, req, req_len, body, body_len, no_body, len, err);
+#else
+    ray_sock_t fd = q_http_client_connect(u->host, u->port, Q_HTTP_CONNECT_MS, err);
+    if (fd == RAY_INVALID_SOCK) return NULL;
+    char* resp = NULL;
+    if (u->scheme == 1 && q_tls_client_start(fd, u->host, err) != 0) goto done;
+    if (q_http_client_send_all(fd, req, req_len, deadline) != 0) { *err = "conn"; goto done; }
+    if (body_len && q_http_client_send_all(fd, body, body_len, deadline) != 0) { *err = "conn"; goto done; }
+    resp = q_http_client_read_response(fd, len, deadline, err, no_body);
+done:
+    ray_sock_close(fd);
+    return resp;
+#endif
+}
+
 /* Shared GET/HEAD/POST driver — THE one place a 3xx is followed (`.Q.hg`, `.Q.hp`
  * and the read0/read1 slice all ride it; q_http_client_raw does not).  Returns the
  * body (charv, or bytes when the caller asked) or a bare-class ray_error. */
@@ -580,19 +603,10 @@ static ray_t* http_do(ray_t* urlv, const http_req_t* r)
         if (rl < 0 || (size_t)rl >= sizeof req) return q_err(QE_LIMIT);
 
         const char* err = "conn";
-        ray_sock_t fd = q_http_client_connect(u.host, u.port, Q_HTTP_CONNECT_MS, &err);
-        if (fd == RAY_INVALID_SOCK) return ray_error(err, NULL);
-
         ray_t* result = NULL;
-        char* resp = NULL;
-        if (u.scheme == 1 && q_tls_client_start(fd, u.host, &err) != 0) goto done;
-        if (q_http_client_send_all(fd, req, (size_t)rl, deadline) != 0) { err = "conn"; goto done; }
-        if (mime && body_len &&
-            q_http_client_send_all(fd, body, body_len, deadline) != 0) { err = "conn"; goto done; }
-
         size_t rlen = 0;
-        resp = q_http_client_read_response(fd, &rlen, deadline, &err, r->head);
-        if (!resp) goto done;
+        char* resp = http_exchange(&u, req, (size_t)rl, body, mime ? body_len : 0, deadline, r->head, &rlen, &err);
+        if (!resp) return ray_error(err, NULL);
         int st; const char* rbody; size_t rbl; int gz = 0; q_http_span_t loc;
         int ex = q_http_client_extract(resp, rlen, &st, &rbody, &rbl, &gz, r->head, r->clen, &loc);
         if (ex == 0 && r->status) *r->status = st;
@@ -607,7 +621,7 @@ static ray_t* http_do(ray_t* urlv, const http_req_t* r)
                 if (!nu.userinfo[0] && host_ieq(nu.host, u.host))
                     memcpy(nu.userinfo, u.userinfo, sizeof nu.userinfo);
                 u = nu;
-                free(resp); ray_sock_close(fd);
+                free(resp);
                 continue;
             }
         }
@@ -622,9 +636,7 @@ static ray_t* http_do(ray_t* urlv, const http_req_t* r)
         else if (ex == 0) result = http_body(r, rbody, rbl);
         else if (ex == -2) err = "wsfull";
         else err = "conn";
-done:
         free(resp);
-        ray_sock_close(fd);
         if (result) return result;
         return ray_error(err, NULL);
     }
@@ -723,17 +735,10 @@ ray_t* q_http_client_raw(ray_t* hsym, ray_t* request) {
     if (q_http_client_url_parse(s, sn, &u) != 0) return q_err(QE_DOMAIN);
 
     const char* err = "conn";
-    ray_sock_t fd = q_http_client_connect(u.host, u.port, Q_HTTP_CONNECT_MS, &err);
-    if (fd == RAY_INVALID_SOCK) return ray_error(err, NULL);
-
-    int64_t deadline = now_ms() + Q_HTTP_TOTAL_MS;
-    ray_t* result = NULL;
-    if (u.scheme == 1 && q_tls_client_start(fd, u.host, &err) != 0) goto done;
-    if (q_http_client_send_all(fd, reqp, (size_t)reqn,
-                               deadline) != 0) { err = "conn"; goto done; }
     size_t rlen = 0;
-    char* resp = q_http_client_read_response(fd, &rlen, deadline, &err, 0);
-    if (!resp) goto done;
+    char* resp = http_exchange(&u, reqp, (size_t)reqn, NULL, 0, now_ms() + Q_HTTP_TOTAL_MS, 0, &rlen, &err);
+    if (!resp) return ray_error(err, NULL);
+    ray_t* result = NULL;
     int st; const char* body; size_t body_len;
     /* raw client returns the response verbatim — no transparent gzip inflate (NULL) */
     int ex = q_http_client_extract(resp, rlen, &st, &body, &body_len, NULL, 0, NULL, NULL);
@@ -744,8 +749,6 @@ ray_t* q_http_client_raw(ray_t* hsym, ray_t* request) {
     } else if (ex == -2) err = "wsfull";
     else err = "conn";
     free(resp);
-done:
-    ray_sock_close(fd);
     if (result) return result;
     return ray_error(err, NULL);
 }

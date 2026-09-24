@@ -74,6 +74,15 @@ int q_http_client_send_all(ray_sock_t fd, const void* buf, size_t len,
 char* q_http_client_read_response(ray_sock_t fd, size_t* len,
                                   int64_t deadline_ms, const char** err, int no_body);
 
+#if defined(__EMSCRIPTEN__)
+/* A browser tab has no sockets: wasm/q_wasm_http.c answers the request (head `req` +
+ * `body`, to `u`) with the whole raw response in a malloc'd buffer (caller frees), or
+ * NULL with *err set to a bare class word ('conn when the host could not reach it). */
+char* q_http_client_host_exchange(const q_http_url_t* u, const char* req, size_t req_len,
+                                  const char* body, size_t body_len, int no_body,
+                                  size_t* len, const char** err);
+#endif
+
 /* `.Q.c.hg` — GET; x is a string or symbol URL atom, returns the body string. */
 ray_t* q_dotq_hg_fn(ray_t* x);
 /* `.Q.c.hp` — POST [url; mimeType; body], returns the body string (vary/3). */

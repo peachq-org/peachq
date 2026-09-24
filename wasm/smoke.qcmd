@@ -1,0 +1,90 @@
+/ The wasm build's own ledger, run inside the module by wasm/smoke.js through the qdoc runner, in the wasm REPL's display mode.
+q)2+3
+5
+q)sum 1 2 3 4
+10
+q)\l pq
+q)"abc" rlike "b"
+1b
+q)"abc" rlike "z"
+0b
+q)"abc" rlike "^a.c$"
+1b
+q)`AAPL`MSFT`IBM rlike "^[AM]"
+110b
+q).regexp.matches["abc";"b"]
+1b
+q).regexp.full_match["abc";"ab"]
+0b
+q).regexp.extract["order-1234";"[0-9]+"]
+"1234"
+q).regexp.replace_all["a1b2";"[0-9]";"#"]
+"a#b#"
+q).regexp.escape["a.b"]
+"a\\.b"
+q).regexp.version
+"v1.5.5"
+q)\pwd
+"/home/q"
+q)any (enlist "x")~/:system "ls"
+0b
+q)`:x set 1
+`:x
+q)any (enlist "x")~/:system "ls"
+1b
+q)system "echo hi there"
+"hi there"
+q)count system "mkdir -p d/e"
+0
+q)system "ls d"
+,"e"
+q)`:t.txt 0: ("l1";"l2";"l3")
+`:t.txt
+q)system "cat t.txt"
+"l1"
+"l2"
+"l3"
+q)system "head -n 2 t.txt"
+"l1"
+"l2"
+q)system "tail -1 t.txt"
+"l3"
+q)count system "rm -r d t.txt x"
+0
+q)any ("d";"t.txt";"x") in system "ls"
+0b
+q)@[system;"frob";{x}]
+"os"
+q)system "ls nosuch"
+'os
+q)all ("adverbs.q";"csv.q";"prices.csv";"trades.q") in system "ls"
+1b
+q)\l trades.q
+q)count trades
+10000
+q)select trades:count i, volume:sum size, vwap:size wavg price by sym from trades
+| sym    | trades | volume  | vwap     |
+| symbol | long   | long    | float    |
+|========|--------|---------|----------|
+| AAPL   | 2018   | 5021700 | 125.1743 |
+| AMZN   | 1998   | 5126400 | 124.4528 |
+| GOOG   | 1933   | 4871500 | 124.8937 |
+| IBM    | 1974   | 5074600 | 125.4509 |
+| MSFT   | 2077   | 5306300 | 125.351  |
+q)\l csv.q
+q)count prices
+45
+q)select last close, move:(last close)%first close by sym from prices
+| sym    | close  | move      |
+| symbol | float  | float     |
+|========|--------|-----------|
+| AAPL   | 231.89 | 1.015369  |
+| IBM    | 256    | 0.9828387 |
+| MSFT   | 485.39 | 0.9557743 |
+q)count read0 `:returns.csv
+43
+q)\l adverbs.q
+q)fib
+0 1 1 2 3 5 8 13 21 34 55 89
+q)hyp[3;4]
+5f
