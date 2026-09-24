@@ -1,4 +1,5 @@
 /* q_dl — see q_dl.h. */
+#include "qlang/q_count.h"
 #include "qlang/io/q_dl.h"
 #include <stdio.h>
 

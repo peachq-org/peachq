@@ -189,7 +189,7 @@ const q_op_t* q_ops_nested_dyad(const q_op_t* row);
  * (q_registry_is_infix).  Static-only: no runtime registry dependency. */
 int q_lex_is_kw_infix(const char* s, int len);
 
-/* The reserved words that are SYNTAX, not functions (control words, qSQL words) — `.Q.res`; NULL past the end. */
+/* The reserved words that are SYNTAX, not functions (control words, qSQL verbs) — `.Q.res`; NULL past the end. */
 const char* q_ops_syntax_word(int i);
 
 /* True iff s[0..len) is a RESERVED q verb name (any manifest row).  q reserves
