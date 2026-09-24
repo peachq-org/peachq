@@ -12,11 +12,13 @@
 #include "qlang/eval/q_eval.h"       /* the KFN carrier + q_eval_apply_value */
 #include "qlang/q_builtins.h"        /* q_builtins_type_num — THE q type answer a function crosses as */
 #include "qlang/q_ctx.h"             /* q_ctx_eval_src — what k(0,…) evaluates through */
+#include "qlang/q_prim.h"            /* q_attr_byte / q_attr_stamp_byte — the attribute BYTE both ways */
 #include "qlang/io/q_dl.h"           /* q_dl_open / q_dl_sym — the extension, never unmapped */
 #include "qlang/io/q_io.h"           /* q_io_abs_path — a Windows candidate's lexical absolute path */
 #include "core/poll.h"
 #include "mem/heap.h"                /* ray_free_set_qfn_fin_fn — the foreign-destructor choke point */
 #include "core/runtime.h"
+#include "ops/idxop.h"               /* ray_attr_drop_fn — a relabelled result sheds its old attribute */
 #include "ops/ops.h"                 /* RAY_EXTRACT_* */
 #include "ops/temporal.h"            /* ray_temporal_extract — dj's civil fields */
 #include "table/sym.h"               /* ray_sym_vec_cell, ray_read_sym */
@@ -71,13 +73,19 @@ typedef struct k0 {
 #define K_OF(v)   ((K)((char*)(v) + 16))
 #define RAY_OF(x) ((ray_t*)((char*)(x) - 16))
 
-/* A shim-owned k0 (a copy, not an overlay) says so in the `m` byte: ray mmod is 0 or 3, and kx
- * code never reads `m`.  Everything else is an overlay, so r1/r0 know which kind they hold. */
-#define K_SHIM 0x6b
-static int k_is_shim(K x) { return x && x->m == (signed char)K_SHIM; }
+/* A shim-owned k0 (a copy, not an overlay) says so in the `m` byte: its mmod bits hold 2, which no ray
+ * header does (mmod is 0 or 3), and kx code never reads `m`.  Built through the header itself, so the
+ * value follows the compiler's bitfield layout.  Everything else is an overlay: r1/r0 know which. */
+static signed char k_shim_m(void) {
+    ray_t h;
+    memset(&h, 0, sizeof h);
+    h.mmod = 2;
+    return ((signed char*)&h)[16];
+}
+static int k_is_shim(K x) { return x && x->m == k_shim_m(); }
 
-/* 100h–111h — a q FUNCTION VALUE on its way through an extension.  The `u` byte of a shim is ours
- * (kdb writes it on nothing we hand out).  kdb hands a function over opaque: py.c
+/* 100h–111h — a q FUNCTION VALUE on its way through an extension.  The `u` byte of a function shim is
+ * ours (a function has no attribute).  kdb hands a function over opaque: py.c
  * only r1s it, capsules it, and hands it back to `k(0;".";f;args)` (py.c:34), so the one slot holds
  * the ray value RAW (never a K, like a foreign's slots) and `u` says which shape this is, because a
  * 101h shim is also how `::` crosses. */
@@ -244,7 +252,7 @@ static size_t shim_cap(J n, uint8_t esz) {
 
 static K shim_alloc(size_t extra) {
     K x = (K)calloc(1, K_HDR + extra);
-    if (x) x->m = (signed char)K_SHIM;
+    if (x) x->m = k_shim_m();
     return x;
 }
 
@@ -404,6 +412,7 @@ static K shim_grow(K x, uint8_t esz, J extra) {
         x->r--;                        /* this caller's reference moves to the copy */
         return c;
     }
+    x->u = 0;                          /* an append voids the attribute label, as an overlay's COW copy does */
     if (nc == oc) return x;
     return (K)realloc(x, K_HDR + nc);
 }
@@ -549,6 +558,16 @@ static K k_spine(ray_t* keys, ray_t* vals, I tag) {
     return (tag == 98 && d) ? xT(d) : d;
 }
 
+/* Every handoff restamps `u` with the q attribute (kb/serialization.md:39: 0 none, 1 s, 2 u, 3 p, 4 g), so
+ * the byte a value keeps after a call is never read stale.  It is not cleared: an outer extension may still
+ * hold the overlay a nested `k()` call handed on. */
+static K k_view(ray_t* v) {
+    K x = K_OF(v);
+    C b = (C)q_attr_byte(v);
+    if (x->u != b) x->u = b;
+    return x;
+}
+
 /* a ray table keeps its column names as an i64 vector of sym ids; kdb wants an 11h symbol vector */
 static K k_of_schema(ray_t* tbl) {
     int64_t n = ray_table_ncols(tbl);
@@ -621,13 +640,14 @@ static K k_of_ray(ray_t* v) {
         if (RAY_IS_TEMPORAL32(tag)) { K x = shim_atom(t); if (x) x->i = (I)v->i64; return x; }
         if (!k_atom_overlays(tag)) return krr((S) "nyi");   /* enums, and anything unenrolled */
         ray_retain(v);
-        return K_OF(v);
+        return k_view(v);
     }
 
     if (t == RAY_SYM) {                                /* symbol vector: ids -> stable char* */
         int64_t n = q_count(v);
         K x = shim_vec(11, n);
         if (!x) return (K)0;
+        x->u = (C)q_attr_byte(v);
         for (int64_t i = 0; i < n; i++) {
             int64_t id = ray_read_sym(ray_data(v), i, RAY_SYM, v->attrs);
             kS(x)[i] = sym_cstr(id);
@@ -639,10 +659,10 @@ static K k_of_ray(ray_t* v) {
         if (v->attrs & RAY_ATTR_SLICE) {               /* kG(x) must be inline: materialise */
             ray_t* c = ray_vec_from_raw(t, ray_data(v), q_count(v));
             if (!c || RAY_IS_ERR(c)) { if (c) ray_error_free(c); return (K)0; }
-            return K_OF(c);
+            return k_view(c);
         }
         ray_retain(v);
-        return K_OF(v);
+        return k_view(v);
     }
 
     return krr((S) "nyi");                             /* lambdas, verbs, physical STR columns */
@@ -654,7 +674,13 @@ static K k_of_ray(ray_t* v) {
  * every shim shape is rebuilt. */
 static ray_t* k_to_ray(K x) {
     if (!x) return q_err(QE_TYPE);
-    if (!k_is_shim(x)) { ray_t* v = RAY_OF(x); ray_retain(v); return v; }
+    if (!k_is_shim(x)) {
+        /* a changed `u` REPLACES the attribute (0 clears it), trusted as the IPC decoder trusts a byte */
+        ray_t* v = RAY_OF(x);
+        uint8_t b = (uint8_t)x->u;
+        if (b > 4 || b == q_attr_byte(v)) { ray_retain(v); return v; }
+        return q_attr_stamp_byte(ray_cow(ray_attr_drop_fn(v)), b);
+    }
 
     I t = x->t;
     if (k_is_qfn(x)) { ray_t* v = (ray_t*)kK(x)[0]; ray_retain(v); return v; }
@@ -723,7 +749,7 @@ static ray_t* k_to_ray(K x) {
             v = ray_vec_append(v, &id);
             if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_OOM);
         }
-        return v;
+        return q_attr_stamp_byte(v, (uint8_t)x->u);
     }
 
     return q_err(QE_TYPE);
@@ -945,7 +971,8 @@ ray_t* q_kapi_invoke(ray_t* carrier, ray_t** args, int64_t n) {
         default: break;
     }
 
-    for (int64_t i = 0; i < n; i++) r0(a[i]);   /* the module BORROWED them (capiref.md:103) */
+    /* the module BORROWED them (capiref.md:103); a label it set on one it did not return is dropped */
+    for (int64_t i = 0; i < n; i++) r0(a[i]);
 
     if (!r) {                                   /* NULL + a pending krr is the error; NULL alone is `::` */
         if (g_kerr_set) { g_kerr_set = 0; return q_err_from_text(g_kerr, strlen(g_kerr)); }

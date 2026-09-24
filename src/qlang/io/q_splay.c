@@ -606,6 +606,7 @@ static ray_t* splay_hdr_over(const splay_region* r, splay_col* c) {
     ray_t* v = (ray_t*)(vm->base + vm->guard - 16);     /* data[] lands on byte 16 */
     v->mmod  = 3;                                       /* rc-driven release */
     v->order = 0;
+    v->kattr = 0;                                       /* byte 19 overlays the kdb file header */
     v->type  = c->h.tag;
     v->attrs = (uint8_t)((c->h.disk_attr == 1 ? RAY_ATTR_SORTED : 0) |
                          (splay_nullable(c->h.tag) ? RAY_ATTR_HAS_NULLS : 0));
