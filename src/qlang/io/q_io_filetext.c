@@ -17,9 +17,10 @@
 #include "qlang/base/q_err.h"
 #include "qlang/io/q_io.h"  /* the byte core: paths, the slice read, the write */
 #include "qlang/ops/q_dollar.h" /* q_cast_designator, q_dollar_tok — Tok column parses */
+#include "qlang/parse/q_tok.h"  /* q_tok — header names take the cells' blank trim */
 #include "qlang/q_builtins.h" /* q_string_fn — Prepare Text cell text; q_io_filetext_csv_quote decl */
 #include "lang/eval.h"      /* ray_at_fn */
-#include "table/sym.h"      /* ray_sym_intern_runtime, ray_sym_str */
+#include "table/sym.h"      /* ray_sym_str */
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
@@ -584,10 +585,13 @@ static ray_t* ft_load_csv(ray_t* types, ray_t* delimspec, ray_t* flag, ray_t* y)
         ray_t** cp = (ray_t**)ray_data(cols);
         for (size_t j = 0; j < nt && !RAY_IS_ERR(tbl); j++) {
             if (fskip[j]) continue;
-            int64_t nm = (int64_t)j < nn
-                ? ray_sym_intern_runtime(ray_str_ptr(np[j]), ray_str_len(np[j]))
-                : ray_sym_intern_runtime("", 0);
-            tbl = ray_table_add_col(tbl, nm, cp[c2]);
+            /* a name trims as its cells do: through Tok's blank trim */
+            ray_t* nm = (int64_t)j < nn
+                ? q_tok(RAY_SYM, ray_str_ptr(np[j]), ray_str_len(np[j]))
+                : q_tok(RAY_SYM, "", 0);
+            if (!nm || RAY_IS_ERR(nm)) { ray_release(tbl); tbl = nm ? nm : q_err(QE_OOM); break; }
+            tbl = ray_table_add_col(tbl, nm->i64, cp[c2]);
+            ray_release(nm);
             c2++;
         }
         ray_release(nmf);
