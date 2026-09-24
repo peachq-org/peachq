@@ -9,65 +9,98 @@
 #include "core/numparse.h"     /* ray_parse_f64/i64 — float twin + numeric Tok */
 #include "lang/internal.h"      /* ray_typed_null, ray_guid, ray_error — q_tok() values */
 #include "qlang/parse/q_parse_internal.h"  /* MAX_VEC — one literal cap for both scanners */
-#include <limits.h>
 #include <math.h>
 #include <string.h>
 
 static int tok_digit(char c) { return c >= '0' && c <= '9'; }
 
-static int tok_dig_run(const char *s, int p) {
-    int n = 0;
-    while (tok_digit(s[p + n])) n++;
-    return n;
+/* The digit run at s[i], bounded by n; a NUL-terminated caller passes SIZE_MAX. */
+static size_t tok_dig_run_n(const char *s, size_t n, size_t i) {
+    size_t k = 0;
+    while (i + k < n && tok_digit(s[i + k])) k++;
+    return k;
 }
+
+static int tok_dig_run(const char *s, int p) { return (int)tok_dig_run_n(s, SIZE_MAX, (size_t)p); }
+
+static int tok_all_digits(const char *p, size_t len) { return len && tok_dig_run_n(p, len, 0) == len; }
 
 static int tok_name_byte(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
 }
 
-/* The clock after a date-or-day separator — ONE grammar for the p (`dateD…`), z (`dateT…`) and n (`intD…`)
- * literals, which differ only in what precedes the separator and in payload resolution:
- *     [HH[:MM[:SS]]][.f{1,9}]
- * Every field defaults to zero, the bare separator included; the fraction is always the sub-second part, wherever it
- * appears (`0D08:30.5` is 08:30:00.5); MM and SS cap at 59; HH is uncapped and normalises into the payload (`D99` is
- * four days and three hours), so no arm caps the hour.  The hour is 1 or 2 digits bare but EXACTLY 2 when a colon
- * follows — `D8:30` dies.  Nothing derives that: it is a tokenizer disambiguation rule, implemented as observed
- * (owner transcript 2026-09-10); do not "fix" it.  Returns 1 with *e past the clock, 0 with *err on a malformed
- * clock (3+ hour digits, a colon not followed by two digits, a field out of range, a dot after clock digits that
- * brings no fraction digit, 10+ of them).  The byte after the clock is caller policy: a timestamp hands it to the
- * literal builder (a type letter), a timespan yields to a name byte (`1D45x` stays a juxtaposition), and a dot
- * after a BARE separator is not a clock byte at all (`0D.x` is a dotted name; the p/z arms die on it). */
-typedef struct { int64_t ns; int fields; int fd; } tok_clock;
+/* THE clock grammar: code literals and every `$` Tok clock read it here, and each caller adds only its policy.
+ *     H…H[:MM[:SS[:f…]]][.f…]
+ * The hour is any digit run (overflow-checked); MM and SS are exactly two digits, < 60, and a field is taken only when
+ * its colon is followed by exactly two digits, so the scan stops AT a colon it cannot use and the caller reads that
+ * byte.  The fourth field is the sub-second fraction, exactly like `.f` (kb/faq.md:611 `09:04:59:000`).  A `.f` after
+ * it is taken only when the fourth field is all zeros (kxkdb's `D00:00:00:00.000000000`); the fraction is then the
+ * dot's.  A dot is consumed after a field, or before a digit.  `fd` counts the fraction's digits uncapped (the digit cap
+ * is caller policy) and `frac` is its first nine right-padded to ns.  `ok` = every field in range, no hour overflow, and a
+ * well-formed fourth field.  Returns the index past the clock. */
+typedef struct { int64_t secs, frac; int hd, fields, sub, dot, fd, ok; } tok_clock;
 
-static int tok_clock_tail(const char *src, int *e, tok_clock *c, const char **err) {
-    int q = *e;
+static int64_t tok_frac_ns(const char *s, size_t i, size_t fd) {
+    int64_t f = 0;
+    for (size_t k = 0; k < 9; k++) f = f * 10 + (k < fd ? s[i + k] - '0' : 0);
+    return f;
+}
+
+static size_t tok_clock_scan(const char *s, size_t n, size_t i, tok_clock *c) {
     int64_t f[3] = {0, 0, 0};
-    *c = (tok_clock){0, 0, 0};
-    int hd = tok_dig_run(src, q);
-    if (hd > 2) { *err = "bad clock"; return 0; }
-    if (hd) {
-        for (int k = 0; k < hd; k++) f[0] = f[0] * 10 + (src[q + k] - '0');
-        q += hd;
-        c->fields = 1;
-        while (c->fields < 3 && src[q] == ':') {
-            if (hd != 2 || tok_dig_run(src, q + 1) != 2) { *err = "bad clock"; return 0; }
-            f[c->fields] = (src[q + 1] - '0') * 10 + (src[q + 2] - '0');
-            if (f[c->fields] >= 60) { *err = "bad clock"; return 0; }
-            q += 3;
-            c->fields++;
-        }
+    *c = (tok_clock){.ok = 1};
+    for (; i < n && tok_digit(s[i]); i++, c->hd++)
+        if (__builtin_mul_overflow(f[0], 10, &f[0]) || __builtin_add_overflow(f[0], s[i] - '0', &f[0])) c->ok = 0;
+    c->fields = c->hd > 0;
+    while (c->fields && c->fields < 3 && i < n && s[i] == ':' && tok_dig_run_n(s, n, i + 1) == 2) {
+        f[c->fields] = (s[i + 1] - '0') * 10 + (s[i + 2] - '0');
+        if (f[c->fields++] >= 60) c->ok = 0;
+        i += 3;
     }
-    int64_t frac = 0;
-    if (src[q] == '.' && !tok_digit(src[q + 1]) && c->fields) { *err = "bad clock"; return 0; }
-    if (src[q] == '.' && tok_digit(src[q + 1])) {
-        c->fd = tok_dig_run(src, q + 1);
-        if (c->fd > 9) { *err = "bad clock"; return 0; }
-        for (int k = 0; k < c->fd; k++) frac = frac * 10 + (src[q + 1 + k] - '0');
-        for (int k = c->fd; k < 9; k++) frac *= 10;
-        q += 1 + c->fd;
+    size_t r;
+    if (c->fields == 3 && i < n && s[i] == ':' && (r = tok_dig_run_n(s, n, i + 1))) {
+        c->sub = c->fd = (int)r;
+        c->frac = tok_frac_ns(s, i + 1, r);
+        i += 1 + r;
     }
-    c->ns = (f[0] * 3600 + f[1] * 60 + f[2]) * 1000000000LL + frac;
-    *e = q;
+    if (i < n && s[i] == '.' && (c->fields || tok_dig_run_n(s, n, i + 1))) {
+        r = tok_dig_run_n(s, n, i + 1);
+        if (c->sub && (c->frac || c->sub > 9)) c->ok = 0;
+        c->dot = 1;
+        c->fd = (int)r;
+        c->frac = tok_frac_ns(s, i + 1, r);
+        i += 1 + r;
+    }
+    if (__builtin_mul_overflow(f[0], 3600, &c->secs) || __builtin_add_overflow(c->secs, f[1] * 60 + f[2], &c->secs))
+        c->ok = 0;
+    return i;
+}
+
+static int64_t tok_clock_ns(const tok_clock *c) { return c->secs * 1000000000LL + c->frac; }
+
+/* 1..9 fraction digits when there is a fraction at all. */
+static int tok_clock_frac9(const tok_clock *c) { return !(c->dot && !c->fd) && c->fd <= 9; }
+
+/* The clock after a date-or-day separator — ONE policy for the p (`dateD…`), z (`dateT…`) and n (`intD…`) literals,
+ * which differ only in what precedes the separator and in payload resolution:
+ *     [HH[:MM[:SS[:f]]]][.f{1,9}]
+ * Every field defaults to zero, the bare separator included; the fraction is always the sub-second part, wherever it
+ * appears (`0D08:30.5` is 08:30:00.5); HH is uncapped and normalises into the payload (`D99` is four days and three
+ * hours), so no arm caps the hour.  The hour is 1 or 2 digits bare but EXACTLY 2 when a colon follows — `D8:30` dies.
+ * Nothing derives that: it is a tokenizer disambiguation rule, implemented as observed (owner transcript 2026-09-10);
+ * do not "fix" it.  Returns 1 with *e past the clock, 0 with *err on a malformed clock (3+ hour digits, a colon not
+ * followed by two digits, a field out of range, a dot after clock digits that brings no fraction digit, 10+ of them).
+ * The byte after the clock is caller policy: a timestamp hands it to the literal builder (a type letter), a timespan
+ * yields to a name byte (`1D45x` stays a juxtaposition), and a dot after a BARE separator is not a clock byte at all
+ * (`0D.x` is a dotted name; the p/z arms die on it). */
+static int tok_clock_tail(const char *src, int *e, tok_clock *c, const char **err) {
+    size_t q = tok_clock_scan(src, SIZE_MAX, (size_t)*e, c);
+    if (!c->ok || c->hd > 2 || (c->fields > 1 && c->hd != 2) || (c->fields && c->fields < 3 && !c->dot && src[q] == ':') ||
+        !tok_clock_frac9(c)) {
+        *err = "bad clock";
+        return 0;
+    }
+    *e = (int)q;
     return 1;
 }
 
@@ -99,7 +132,7 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
                 tok_clock c;
                 if (!tok_clock_tail(src, &end, &c, err) || src[end] == '.') { *err = "bad clock"; return -1; }
                 out->kind = Q_TOK_EL_TS;
-                out->i = q_calendar_ts_compose(q_calendar_days_from_civil(y, mo, d), c.ns);
+                out->i = q_calendar_ts_compose(q_calendar_days_from_civil(y, mo, d), tok_clock_ns(&c));
                 if (neg) out->i = -out->i;
                 *p = end;
                 return 1;
@@ -115,7 +148,7 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
                 if (!tok_clock_tail(src, &end, &c, err) || src[end] == '.' || c.fd > 3 || (c.fd && c.fields < 3))
                     { *err = "bad datetime"; return -1; }
                 out->kind = Q_TOK_EL_DT;
-                out->f = (double)q_calendar_days_from_civil(y, mo, d) + (double)(c.ns / 1000000) / 86400000.0;
+                out->f = (double)q_calendar_days_from_civil(y, mo, d) + (double)(tok_clock_ns(&c) / 1000000) / 86400000.0;
                 if (neg) out->f = -out->f;   /* glued sign negates the payload (kdb date-literal rule; derived for T) */
                 *p = end;
                 return 1;
@@ -165,94 +198,30 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
         }
     }
 
-    /* Time literal magnitude: HH:MM:SS.f with 1..3 fractional digits padded to ms (`.1`->100, `.11`->110), checked
-     * before the float peek for the same reason as date.  The 1..3-digit gate is THE disambiguation from the
-     * adjacent clock shapes (basics/syntax.md): 4..9 digits is the timespan below, no `.f` is second/minute.
-     * Payload = i32 ms of day (the base RAY_TIME payload); a glued sign negates it; mm/ss >= 60 die rather than
-     * fall to the float strand. */
+    /* The bare clocks (basics/syntax.md:89-90), checked before the float peek for the same reason as date: a
+     * two-digit hour and at least HH:MM, typed by what follows the minutes.  HH:MM is the minute and HH:MM:SS the
+     * second; a sub-second part (`.f` or the fourth field) of 1..3 digits is the time, padded to ms (`.1`->100), and
+     * of 4..9 the bare-clock timespan (the pinned spelling is the 9-digit 12:00:00.000000000, datatypes.md:134).  Any
+     * other shape is no match; a field >= 60 dies rather than fall to the float strand; a glued sign negates. */
     {
         int q = *p;
         int neg = (src[q] == '-');
         if (neg) q++;
-        /* The clock-digit / ':' / '.' checks short-circuit BEFORE reading the
-         * fractional run, so tok_dig_run(q+9) is only reached once src[q+8]=='.' is
-         * confirmed in-bounds (else a short input overruns the buffer). */
-        if (tok_dig_run(src, q) == 2 && src[q + 2] == ':' &&
-            tok_dig_run(src, q + 3) == 2 && src[q + 5] == ':' &&
-            tok_dig_run(src, q + 6) == 2 && src[q + 8] == '.') {
-            int fd = tok_dig_run(src, q + 9);         /* fractional-digit run length */
-            if (fd >= 1 && fd <= 3) {
-                int64_t h  = (src[q]     - '0') * 10 + (src[q + 1] - '0');
-                int64_t mi = (src[q + 3] - '0') * 10 + (src[q + 4] - '0');
-                int64_t s  = (src[q + 6] - '0') * 10 + (src[q + 7] - '0');
-                int64_t ms = 0;                   /* fractional -> milliseconds */
-                for (int k = 0; k < fd; k++) ms = ms * 10 + (src[q + 9 + k] - '0');
-                for (int k = fd; k < 3; k++) ms *= 10; /* right-pad to 3 digits */
-                if (mi >= 60 || s >= 60) { *err = "bad time"; return -1; }
-                out->kind = Q_TOK_EL_TIME;
-                out->i = h * 3600000 + mi * 60000 + s * 1000 + ms;
-                if (neg) out->i = -out->i;
-                *p = q + 9 + fd;
-                return 1;
-            }
-            if (fd >= 4 && fd <= 9) {
-                /* Timespan clock form: 4..9 fractional digits right-padded to ns (the pinned spelling is the 9-digit
-                 * 12:00:00.000000000, datatypes.md:134; 4..8 derived — mirrors the timestamp arm's 1..9 pad). */
-                int64_t h  = (src[q]     - '0') * 10 + (src[q + 1] - '0');
-                int64_t mi = (src[q + 3] - '0') * 10 + (src[q + 4] - '0');
-                int64_t s  = (src[q + 6] - '0') * 10 + (src[q + 7] - '0');
-                int64_t ns = 0;
-                for (int k = 0; k < fd; k++) ns = ns * 10 + (src[q + 9 + k] - '0');
-                for (int k = fd; k < 9; k++) ns *= 10;
-                if (mi >= 60 || s >= 60) { *err = "bad timespan"; return -1; }
-                out->kind = Q_TOK_EL_TIMESPAN;
-                out->i = (h * 3600 + mi * 60 + s) * 1000000000LL + ns;
-                if (neg) out->i = -out->i;
-                *p = q + 9 + fd;
-                return 1;
-            }
-        }
-    }
-
-    /* Second literal magnitude: HH:MM:SS, terminator neither '.' nor ':' nor a digit (basics/syntax.md:90).  The
-     * three clock shapes are mutually exclusive by terminator, so ordering here is not load-bearing. */
-    {
-        int q = *p;
-        int neg = (src[q] == '-');
-        if (neg) q++;
-        if (tok_dig_run(src, q) == 2 && src[q + 2] == ':' &&
-            tok_dig_run(src, q + 3) == 2 && src[q + 5] == ':' &&
-            tok_dig_run(src, q + 6) == 2 &&
-            src[q + 8] != '.' && src[q + 8] != ':' &&
-            !(tok_digit(src[q + 8]))) {
-            int64_t h  = (src[q]     - '0') * 10 + (src[q + 1] - '0');
-            int64_t mi = (src[q + 3] - '0') * 10 + (src[q + 4] - '0');
-            int64_t s  = (src[q + 6] - '0') * 10 + (src[q + 7] - '0');
-            if (mi >= 60 || s >= 60) { *err = "bad second"; return -1; }
-            out->kind = Q_TOK_EL_SECOND;
-            out->i = h * 3600 + mi * 60 + s;
-            if (neg) out->i = -out->i;
-            *p = q + 8;
-            return 1;
-        }
-    }
-
-    /* Minute literal magnitude: HH:MM, terminator neither ':' nor '.' nor a digit (basics/syntax.md:89). */
-    {
-        int q = *p;
-        int neg = (src[q] == '-');
-        if (neg) q++;
-        if (tok_dig_run(src, q) == 2 && src[q + 2] == ':' &&
-            tok_dig_run(src, q + 3) == 2 &&
-            src[q + 5] != ':' && src[q + 5] != '.' &&
-            !(tok_digit(src[q + 5]))) {
-            int64_t h  = (src[q]     - '0') * 10 + (src[q + 1] - '0');
-            int64_t mm = (src[q + 3] - '0') * 10 + (src[q + 4] - '0');
-            if (mm >= 60) { *err = "bad minute"; return -1; }
-            out->kind = Q_TOK_EL_MINUTE;
-            out->i = h * 60 + mm;
-            if (neg) out->i = -out->i;
-            *p = q + 5;
+        tok_clock c;
+        size_t e = tok_clock_scan(src, SIZE_MAX, (size_t)q, &c);
+        int whole = c.hd == 2 && !c.dot && !c.fd && src[e] != ':';
+        int hms = c.hd == 2 && c.fields == 3;
+        q_tok_el_kind k = Q_TOK_EL_INT;
+        int64_t v = 0;
+        if (whole && c.fields == 2) { k = Q_TOK_EL_MINUTE; v = c.secs / 60; }
+        else if (whole && c.fields == 3) { k = Q_TOK_EL_SECOND; v = c.secs; }
+        else if (hms && c.fd >= 1 && c.fd <= 3) { k = Q_TOK_EL_TIME; v = c.secs * 1000 + c.frac / 1000000; }
+        else if (hms && c.fd >= 4 && c.fd <= 9) { k = Q_TOK_EL_TIMESPAN; v = tok_clock_ns(&c); }
+        if (k != Q_TOK_EL_INT) {
+            if (!c.ok) { *err = "bad clock"; return -1; }
+            out->kind = k;
+            out->i = neg ? -v : v;
+            *p = (int)e;
             return 1;
         }
     }
@@ -277,7 +246,7 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
                 int64_t days = 0;
                 for (int k = 0; k < dd; k++) days = days * 10 + (src[q + k] - '0');
                 out->kind = Q_TOK_EL_TIMESPAN;
-                out->i = days * 86400000000000LL + c.ns;
+                out->i = days * 86400000000000LL + tok_clock_ns(&c);
                 if (neg) out->i = -out->i;
                 *p = e;
                 return 1;
@@ -823,67 +792,30 @@ static int tok_ip_guid(const char* p, size_t len, uint8_t out[16]) {
  *   - PACKED digits HHMMSSmmm (doc-pinned): "T"$"123456789" -> 12:34:56.789,
  *     "T"$"123456123987654" -> 12:34:56.123 (>=6 digits: HH MM SS then up to 3
  *     fractional; extra fractional digits ignored).
- *   - COLON H…H:MM:SS[.f…] (derived — the natural literal spelling): the `.`
- *     fractional is optional; only its first 3 digits (millis) are used.  The
- *     hour field is UNCAPPED (derived: time is a duration and q's own display
- *     writes 596:31:23.647 for 0Wt) — past the i32 ms domain is out-of-domain.
+ *   - COLON: the shared clock grammar (derived — the natural literal
+ *     spelling), with this Tok's policy: seconds are required, and the
+ *     fraction may be a bare dot or any number of digits, of which only the
+ *     first 3 (millis) are used.  The hour field is UNCAPPED
+ *     (derived: time is a duration and q's own display writes 596:31:23.647 for
+ *     0Wt) — past the i32 ms domain is out-of-domain.
  * mm/ss must be < 60, else out-of-domain.  Returns 1 and fills *ms on success,
  * 0 on any shape/range mismatch (caller -> typed null 0Nt). */
-static int tok_all_digits(const char* p, size_t len) {
-    if (len == 0) return 0;
-    for (size_t i = 0; i < len; i++)
-        if (p[i] < '0' || p[i] > '9') return 0;
-    return 1;
-}
 int q_tok_time(const char* p, size_t len, int32_t* ms) {
-    int64_t h, mi, s, frac = 0;
-    int has_colon = 0;
-    for (size_t i = 0; i < len; i++) if (p[i] == ':') { has_colon = 1; break; }
-    /* colon form: H[H]:MM:SS[.f…] */
-    if (has_colon) {
-        size_t i = 0;
-        int64_t hv = 0;
-        while (i < len && p[i] >= '0' && p[i] <= '9') {
-            if (__builtin_mul_overflow(hv, (int64_t)10, &hv) ||
-                __builtin_add_overflow(hv, (int64_t)(p[i] - '0'), &hv)) return 0;
-            i++;
-        }
-        if (i == 0 || i >= len || p[i] != ':') return 0;
-        i++;
-        if (i + 2 > len || !tok_all_digits(p + i, 2) || i + 2 >= len || p[i + 2] != ':')
-            return 0;
-        mi = (p[i] - '0') * 10 + (p[i + 1] - '0');
-        i += 3;
-        if (i + 2 > len || !tok_all_digits(p + i, 2)) return 0;
-        s = (p[i] - '0') * 10 + (p[i + 1] - '0');
-        i += 2;
-        if (i < len) {                        /* optional .fractional */
-            if (p[i] != '.') return 0;
-            i++;
-            int64_t scale = 100;
-            size_t seen = 0;
-            while (i < len && p[i] >= '0' && p[i] <= '9') {
-                if (seen < 3) { frac += (p[i] - '0') * scale; scale /= 10; seen++; }
-                i++;
-            }
-            if (i != len) return 0;           /* trailing junk */
-        }
-        h = hv;
-        if (mi >= 60 || s >= 60) return 0;
+    if (memchr(p, ':', len)) {
+        tok_clock c;
         int64_t total;
-        if (__builtin_mul_overflow(h, (int64_t)3600000, &total) ||
-            __builtin_add_overflow(total, mi * 60000 + s * 1000 + frac, &total) ||
-            total > INT32_MAX) return 0;
+        if (tok_clock_scan(p, len, 0, &c) != len || !c.ok || c.fields != 3 ||
+            __builtin_mul_overflow(c.secs, (int64_t)1000, &total) ||
+            __builtin_add_overflow(total, c.frac / 1000000, &total) || total > INT32_MAX) return 0;
         *ms = (int32_t)total;
         return 1;
     }
     /* packed HHMMSSmmm: >=6 digits, first 6 = HHMMSS, next up to 3 = millis */
     if (len >= 6 && tok_all_digits(p, len)) {
-        h  = (p[0] - '0') * 10 + (p[1] - '0');
-        mi = (p[2] - '0') * 10 + (p[3] - '0');
-        s  = (p[4] - '0') * 10 + (p[5] - '0');
-        int64_t scale = 100;
-        for (size_t i = 6; i < len && i < 9; i++) { frac += (p[i] - '0') * scale; scale /= 10; }
+        int64_t h  = (p[0] - '0') * 10 + (p[1] - '0');
+        int64_t mi = (p[2] - '0') * 10 + (p[3] - '0');
+        int64_t s  = (p[4] - '0') * 10 + (p[5] - '0');
+        int64_t frac = tok_frac_ns(p, 6, len < 9 ? len - 6 : 3) / 1000000;
         if (mi >= 60 || s >= 60) return 0;
         *ms = (int32_t)(h * 3600000 + mi * 60000 + s * 1000 + frac);
         return 1;
@@ -896,56 +828,33 @@ int q_tok_time(const char* p, size_t len, int32_t* ms) {
  *   - PACKED digits HHMMSS + up to 9 fractional digits right-padded
  *     (doc-pinned for "N": tok.md:200 "N"$"123456123987654" ->
  *     0D12:34:56.123987654); >=4 digits HHMM accepted with SS=0 (derived).
- *   - COLON H…H:MM[:SS[.f{1..9}]] (derived — the literal spellings; the hour
- *     field is UNCAPPED, derived from q's own duration display writing
- *     35791394:07 for 0Wu, whose ns exceeds i64 — hence the split return:
- *     each caller composes in ITS unit and applies its payload domain).
+ *   - COLON: the shared clock grammar (derived — the literal spellings) from
+ *     H…H:MM up, with 1..9 fraction digits only after the seconds; the hour field is
+ *     UNCAPPED, derived from q's own duration display writing 35791394:07 for
+ *     0Wu, whose ns exceeds i64 — hence the split return: each caller composes
+ *     in ITS unit and applies its payload domain.
  * mm/ss must be < 60.  Returns 1 and fills secs + frac_ns, else 0 (-> null). */
 int q_tok_clock(const char* p, size_t len, int64_t* secs, int64_t* frac_ns) {
-    int64_t h = 0, mi = 0, s = 0, frac = 0;
-    int has_colon = 0;
-    for (size_t i = 0; i < len; i++) if (p[i] == ':') { has_colon = 1; break; }
-    if (has_colon) {
-        size_t i = 0;
-        while (i < len && p[i] >= '0' && p[i] <= '9') {
-            if (__builtin_mul_overflow(h, (int64_t)10, &h) ||
-                __builtin_add_overflow(h, (int64_t)(p[i] - '0'), &h)) return 0;
-            i++;
-        }
-        if (i == 0 || i >= len || p[i] != ':') return 0;
-        i++;
-        if (i + 2 > len || !tok_all_digits(p + i, 2)) return 0;
-        mi = (p[i] - '0') * 10 + (p[i + 1] - '0');
-        i += 2;
-        if (i < len) {                        /* optional :SS[.f…] */
-            if (p[i] != ':') return 0;
-            i++;
-            if (i + 2 > len || !tok_all_digits(p + i, 2)) return 0;
-            s = (p[i] - '0') * 10 + (p[i + 1] - '0');
-            i += 2;
-            if (i < len) {
-                if (p[i] != '.' || i + 1 == len) return 0;
-                i++;
-                size_t fd = len - i;
-                if (fd > 9 || !tok_all_digits(p + i, fd)) return 0;
-                for (size_t k = 0; k < fd; k++) frac = frac * 10 + (p[i + k] - '0');
-                for (size_t k = fd; k < 9; k++) frac *= 10;
-            }
-        }
-    } else if (len >= 4 && tok_all_digits(p, len)) {
-        h  = (p[0] - '0') * 10 + (p[1] - '0');
-        mi = (p[2] - '0') * 10 + (p[3] - '0');
-        if (len >= 6) {
-            s = (p[4] - '0') * 10 + (p[5] - '0');
-            size_t fd = len - 6;
-            if (fd > 9) return 0;
-            for (size_t k = 0; k < fd; k++) frac = frac * 10 + (p[6 + k] - '0');
-            for (size_t k = fd; k < 9; k++) frac *= 10;
-        } else if (len != 4) return 0;
-    } else return 0;
+    if (memchr(p, ':', len)) {
+        tok_clock c;
+        if (tok_clock_scan(p, len, 0, &c) != len || !c.ok || c.fields < 2 || (c.dot && c.fields < 3) ||
+            !tok_clock_frac9(&c)) return 0;
+        *secs = c.secs;
+        *frac_ns = c.frac;
+        return 1;
+    }
+    if (len < 4 || !tok_all_digits(p, len) || len == 5) return 0;
+    int64_t h  = (p[0] - '0') * 10 + (p[1] - '0');
+    int64_t mi = (p[2] - '0') * 10 + (p[3] - '0');
+    int64_t s = 0, frac = 0;
+    if (len >= 6) {
+        s = (p[4] - '0') * 10 + (p[5] - '0');
+        size_t fd = len - 6;
+        if (fd > 9) return 0;
+        frac = tok_frac_ns(p, 6, fd);
+    }
     if (mi >= 60 || s >= 60) return 0;
-    if (__builtin_mul_overflow(h, (int64_t)3600, secs) ||
-        __builtin_add_overflow(*secs, mi * 60 + s, secs)) return 0;
+    *secs = h * 3600 + mi * 60 + s;
     *frac_ns = frac;
     return 1;
 }
@@ -976,28 +885,14 @@ int q_tok_timespan_ns(const char* p, size_t len, int64_t* ns) {
     return q_tok_clock_ns(p, len, ns);
 }
 
-/* tod scan for "P"$: HH:MM:SS[.f{1..9}] -> ns of day (colon form only; the
+/* tod scan for "P"$ -> ns of day: the shared clock grammar with a two-digit
+ * hour, the seconds required and 1..9 fraction digits (colon form only; the
  * packed date form is split off by the caller).  Returns 1/0. */
 static int tok_tod_ns(const char* p, size_t len, int64_t* ns) {
-    if (len < 8 || !tok_all_digits(p, 2) || p[2] != ':' ||
-        !tok_all_digits(p + 3, 2) || p[5] != ':' || !tok_all_digits(p + 6, 2))
+    tok_clock c;
+    if (tok_clock_scan(p, len, 0, &c) != len || !c.ok || c.hd != 2 || c.fields != 3 || !tok_clock_frac9(&c))
         return 0;
-    int64_t h  = (p[0]-'0')*10 + (p[1]-'0');
-    int64_t mi = (p[3]-'0')*10 + (p[4]-'0');
-    int64_t s  = (p[6]-'0')*10 + (p[7]-'0');
-    if (mi >= 60 || s >= 60) return 0;
-    int64_t frac = 0;
-    if (len > 8) {
-        if (p[8] != '.' || len == 9) return 0;
-        size_t fd = len - 9;
-        if (fd > 9) return 0;
-        for (size_t k = 0; k < fd; k++) {
-            if (p[9 + k] < '0' || p[9 + k] > '9') return 0;
-            frac = frac * 10 + (p[9 + k] - '0');
-        }
-        for (size_t k = fd; k < 9; k++) frac *= 10;
-    }
-    *ns = (h * 3600 + mi * 60 + s) * 1000000000LL + frac;
+    *ns = tok_clock_ns(&c);
     return 1;
 }
 
@@ -1023,11 +918,7 @@ int q_tok_ts(const char* p, size_t len, int64_t* out) {
         secs -= 946684800LL;                  /* unix epoch -> 2000.01.01 */
         int64_t ns;
         if (__builtin_mul_overflow(secs, 1000000000LL, &ns)) return 0;
-        int64_t frac = 0;
-        size_t fd = (dot == len) ? 0 : len - dot - 1;
-        for (size_t k = 0; k < fd; k++) frac = frac * 10 + (p[dot + 1 + k] - '0');
-        for (size_t k = fd; k < 9; k++) frac *= 10;
-        if (__builtin_add_overflow(ns, frac, &ns)) return 0;
+        if (__builtin_add_overflow(ns, tok_frac_ns(p, dot + 1, dot == len ? 0 : len - dot - 1), &ns)) return 0;
         *out = ns;
         return 1;
     }
