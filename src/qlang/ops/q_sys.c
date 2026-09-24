@@ -498,7 +498,7 @@ static int l_is_regular_readable(const char* p) {
     return stat(p, &st) == 0 && S_ISREG(st.st_mode) && access(p, R_OK) == 0;
 }
 
-/* `\l name` — load a q script (basics/syscmds.md).  Resolution chain (first hit
+/* The loader `\l name` and the launcher's file share (basics/syscmds.md).  Resolution chain (first hit
  * wins): (a) the literal path relative to cwd; (b) the literal + ".q" (kdb loads
  * `\l script` as `script.q`); (c)/(d) for a RELATIVE name only, `$QHOME/name`
  * then `$QHOME/name.q` — a fixtures/QHOME-style search root (the doctest runner
@@ -511,7 +511,7 @@ static int l_is_regular_readable(const char* p) {
  * `system "l …"` single-homes through here.  A `:pq:` coordinate (the sym
  * spelling tolerated, as `\l :file` is) is a LOAD from a provider: the alias's
  * catalog, or the one table the table form names (io/q_provider.c). */
-static ray_t* h_l(const char* arg, size_t alen) {
+ray_t* q_sys_load(const char* arg, size_t alen) {
     if (alen == 0) return q_err(QE_NYI);        /* `\l` (bare) — reload cwd, deferred */
     const char* co = arg + (alen && arg[0] == '`');
     size_t con = alen - (size_t)(co - arg);
@@ -1128,7 +1128,7 @@ ray_t* q_sys_run(const char* line, size_t n) {
             case 'W': return h_W(arg, alen);                     /* week offset         */
             case 'e': return h_e(arg, alen);                     /* error-trap mode     */
             case 'w': return h_w(alen);                          /* workspace stats     */
-            case 'l': return h_l(arg, alen);                     /* load q script       */
+            case 'l': return q_sys_load(arg, alen);              /* load q script       */
             case 'p': return h_p(arg, alen);                     /* listening port      */
             case 't': return h_t(arg, alen, rest, restlen, rep); /* timer / \t exp      */
             case 'b': return h_bB(0, arg, alen);                 /* views               */
