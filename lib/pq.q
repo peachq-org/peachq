@@ -295,6 +295,6 @@
 / @return (symbol list) the file names, in load order
 / @eg .pq.load[]
 .pq.load:{[]
-  files:`csv`duckdb`ffi`j`massive`md`parquet`pq`qpc`regexp`str`termbox`fs`path`pkg`qunit;
+  files:`csv`duckdb`ffi`j`massive`md`parquet`pq`qpc`regexp`str`termbox`fs`path`pkg`qunit`yml;
   {system "l pq/",string[x],".q"} each files;
   files};
