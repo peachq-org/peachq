@@ -3,11 +3,13 @@
 `.j.read` loads a JSON document as a table. Its option names, defaults and behaviour follow DuckDB's `read_json`;
 the types you get back are q's.
 
-Everything on [Loading a file](loading.md) applies here — the source law, the sample, the freeze, `types`, and what
+Everything on [Loading a file](../loading.md) applies here — the source law, the sample, the freeze, `types`, and what
 a cell means. This page is JSON's own half: how records are framed, what each root shape becomes, what happens to
 nesting, and how to reach inside an envelope.
 
 ## Four functions, two of them always there
+
+Every function and parameter: [.j API](https://peachq.org/docs/api/j.q.html).
 
 ```q
 q).j.k "{\"a\":1}"          / deserialize a string  — always available
@@ -57,7 +59,7 @@ q).j.read[.j.j ([]a:1 2;d:2024.01.15 2024.01.16);::;::;()!()]
 ```
 
 Symbol, char, guid and byte are the exceptions: JSON writes them indistinguishably from strings, so guid and byte
-come back by the [written-form grammar](loading.md#the-grammar-is-the-form-q-writes) and a symbol or char column
+come back by the [written-form grammar](../loading.md#the-grammar-is-the-form-q-writes) and a symbol or char column
 comes back as text unless `types` says otherwise.
 
 ## Framing: how records are delimited
@@ -134,7 +136,7 @@ q)select from `:array.jsonl
 
 The ending is matched exactly, case-sensitively, and on the path alone. `TRADES.JSON` and `trades.json.gz` name no
 format; a URL's query and fragment are not part of it, so a signed link still reads as JSON. An ending that names no
-format is never guessed at — [Handles and resources](handles.md) has the full order.
+format is never guessed at — [Handles and resources](../handles.md) has the full order.
 
 ## Root shapes: what the document becomes
 
@@ -201,7 +203,7 @@ A **boolean does not promote into the numbers**. JSON states its types, so `true
 than a text ambiguity, and the column keeps the values as written.
 
 The union is over the **sample**, so the schema still freezes: a key first seen beyond `sample_size` is not a column
-and signals `'type`. A key repeated *within one record* is `'dup`. See [Bad rows](bad-rows.md) for both, and for the
+and signals `'type`. A key repeated *within one record* is `'dup`. See [Bad rows](../bad-rows.md) for both, and for the
 lever that drops such a record instead of signalling.
 
 ## Nesting
@@ -325,7 +327,7 @@ The fourth argument is a dict. **An option is never silently ignored**: an unkno
 | `null_padding` | boolean | `0b` | accepted for `.csv.read` parity; changes nothing, since the key union already null-fills |
 
 The format subset is the one [`.csv.read` validates](csv.md#formats-for-dates-and-timestamps), and `xcol` is the
-rename described on [Loading a file](loading.md#5-you-rename-with-xcol) — it applies before the target is consulted,
+rename described on [Loading a file](../loading.md#5-you-rename-with-xcol) — it applies before the target is consulted,
 so a document keyed `sym`,`price` loads straight into a table of `ticker`,`px`:
 
 ```q
@@ -345,4 +347,4 @@ columns, and q needs no such setting — a q cell holds a table, so a nested val
 ## When a load fails
 
 The error classes, the frozen-type miss and its two fixes, and the tolerance levers are on
-[Bad rows](bad-rows.md) — one page, shared with the CSV reader.
+[Bad rows](../bad-rows.md) — one page, shared with the CSV reader.
