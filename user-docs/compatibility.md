@@ -16,7 +16,7 @@ Ordered by how likely each is to stop a real migration.
 | **Splayed and partitioned writing** | Reading kx on-disk format is in scope; writing it is not. | below |
 | **Pattern matching (kdb+ 4.1)** | The 4.1 assignment and parameter forms signal `'parse`. | [typed-parameters.md](typed-parameters.md) |
 | **Reserved words in name positions** | Refused wherever a name is bound, not only at `name:`. | below |
-| **Load CSV (`0:`)** | Unchanged, and still needs the full type string and a clean file. | [csv.md](csv.md) |
+| **Load CSV (`0:`)** | Unchanged, and still needs the full type string and a clean file. | [csv.md](lib/csv.md) |
 | **`set` to a `.csv`/`.json`/`.txt`/`.xml`/`.xls`/`.parquet` path** | Writes that format, not the q binary form; `t` must be a table. | below |
 | **System commands and launch flags** | Some are unwired or no-ops; both pages mark every item against kx. | [cmdline.md](cmdline.md), [syscmds.md](syscmds.md) |
 
@@ -32,7 +32,7 @@ are unavailable. Flat `set`, `` `:dir/ set `` and `.z.zd` all work. For large lo
 `` `:f.parquet set t `` writes parquet, and so on for every `.h.tx` key, where kx writes the q binary form under any
 name. The read side already worked that way (`` select from `:f.csv ``); the write side now matches it. A value that
 is not a table signals `'type` under those endings; a path with no recognised ending is the binary form as in kx.
-See [Handles and resources](handles.md) § Format inference and [parquet.md](parquet.md).
+See [Handles and resources](handles.md) § Format inference and [parquet.md](lib/parquet.md).
 
 **`get` reads the format the suffix names.** `` get `:f.csv `` (and `value`) answers the table `` select from `:f.csv ``
 reads, for every ending `select from` speaks (`.csv .tsv .json .jsonl .ndjson .parquet`), where kx signals `'type`
@@ -72,17 +72,17 @@ and its domain file binds under its own name at `get`.
 
 | What | One line | More |
 |---|---|---|
-| **Reading CSV** — `.csv.read`, `.csv.info` | Type inference, quoting dialects, streaming targets, a reject channel. | [csv.md](csv.md) |
-| **Reading JSON** — `.j.read`, `.j.info` | A reader beside kdb's `.j.k` converter: written forms, a table, a schema. | [json.md](json.md) |
+| **Reading CSV** — `.csv.read`, `.csv.info` | Type inference, quoting dialects, streaming targets, a reject channel. | [csv.md](lib/csv.md) |
+| **Reading JSON** — `.j.read`, `.j.info` | A reader beside kdb's `.j.k` converter: written forms, a table, a schema. | [json.md](lib/j.md) |
 | **The shared loader laws** | What a cell means, the freeze, the error classes, the tolerance levers. | [loading.md](loading.md), [bad-rows.md](bad-rows.md) |
 | **Resources at a URL** | A `` `: `` symbol can name a resource anywhere; `read0`, `read1` and qSQL resolve it. | [handles.md](handles.md) |
-| **Regular expressions** — `.regexp`, `rlike` | RE2-backed matching, extraction, replacement and splitting. | [regexp.md](regexp.md) |
+| **Regular expressions** — `.regexp`, `rlike` | RE2-backed matching, extraction, replacement and splitting. | [regexp.md](lib/regexp.md) |
 | **Typed parameters** | Declared types, optional arguments, defaults and varargs, read statically. | [typed-parameters.md](typed-parameters.md) |
-| **Foreign functions** — `.ffi` | Call into a shared library from q. | [ffi.md](ffi.md) |
+| **Foreign functions** — `.ffi` | Call into a shared library from q. | [ffi.md](lib/ffi.md) |
 | **Startup evaluation** — `-eval`, `-eval-before` | Run q text from argv after / before the startup script; no stdin piping. | [cmdline.md](cmdline.md) |
 | **String helpers** — `.str` | `printf`/`format`, strip, prefix and suffix tests, character-class predicates. | at the REPL |
 | **DuckDB-backed storage** — `.duckdb` | Query it from q, and reach Parquet and S3 through it. | at the REPL |
-| **Parquet** — `.parquet.read`, `.parquet.write` | Read and write parquet through DuckDB; q types survive the round trip. | [parquet.md](parquet.md) |
+| **Parquet** — `.parquet.read`, `.parquet.write` | Read and write parquet through DuckDB; q types survive the round trip. | [parquet.md](lib/parquet.md) |
 
 Everything above arrives with `\l pq`, except URL resources, `rlike` and the startup flags, which are always there. The two rows with
 no page of their own are documented by their own doc comments — type `.str.printf` or `.duckdb.exec` at the prompt.

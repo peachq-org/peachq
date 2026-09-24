@@ -10,8 +10,8 @@ q)\l pq
 
 | Reader | Reads | Guide |
 |---|---|---|
-| `.csv.read`, `.csv.info` | delimited text | [Reading CSV](csv.md) |
-| `.j.read`, `.j.info` | JSON | [Reading JSON](json.md) |
+| `.csv.read`, `.csv.info` | delimited text | [Reading CSV](lib/csv.md) |
+| `.j.read`, `.j.info` | JSON | [Reading JSON](lib/j.md) |
 
 ## Loading the standard library
 
@@ -166,7 +166,7 @@ q).j.read["{\"c\":\"2011-01-01\"}";::;::;()!()]
 
 Everything in this section holds for both. The one thing JSON adds is that quoting is type information a CSV file
 cannot carry, and it is respected: a quoted number or boolean — `"1"`, `"true"` — stays text, because the document
-said it was a string. [Reading JSON](json.md) has the detail.
+said it was a string. [Reading JSON](lib/j.md) has the detail.
 
 ### The grammar is the form q writes
 
@@ -239,7 +239,7 @@ q).csv.read[`:tz.csv;::;::;()!()]
 ```
 
 The one door onto an offset is `%z` in `timestampformat`. Ask for it and the offset is **applied**: the stored
-timestamp is UTC. Both readers take that option; [Reading CSV](csv.md) works the example.
+timestamp is UTC. Both readers take that option; [Reading CSV](lib/csv.md) works the example.
 
 Under an explicit `"p"` with no format, a **zero**-offset tail — `Z`, `z`, `+00:00` — parses, because the digits
 already are the UTC instant and nothing shifts, and so does minute resolution (`2025-10-06T10:57`). A **non-zero**
@@ -284,7 +284,7 @@ almost certainly not what you want.
 
 ## Where to go next
 
-- [Reading CSV](csv.md) — delimiters, quoting dialects, headers, `skip`, streaming targets.
-- [Reading JSON](json.md) — framing, root shapes, nesting, `path`.
-- [Reading parquet](parquet.md) — a different reader: DuckDB's, through the `.duckdb` bridge, with DuckDB's types.
+- [Reading CSV](lib/csv.md) — delimiters, quoting dialects, headers, `skip`, streaming targets.
+- [Reading JSON](lib/j.md) — framing, root shapes, nesting, `path`.
+- [Reading parquet](lib/parquet.md) — a different reader: DuckDB's, through the `.duckdb` bridge, with DuckDB's types.
 - [Bad rows](bad-rows.md) — the error classes, the frozen-type miss, and the tolerance levers.

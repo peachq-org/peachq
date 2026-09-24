@@ -5,7 +5,7 @@ peachq calls C through the `.ffi` namespace. It is the KX ffikdb surface, spelli
 what they mean there, so published ffikdb examples run unchanged.
 
 A library written against kdb's `k.h` (embedPy, qVis, your own kx extension) loads with `2:` instead — see
-[C extensions](c-extensions.md).
+[C extensions](../c-extensions.md).
 
 ## Loading
 
@@ -18,6 +18,8 @@ q)\l pq
 Before the gate the namespace does not exist, so a pre-gate environment stays kdb-clean.
 
 ## `bind` and `callFunction`
+
+Every function and parameter: [.ffi API](https://peachq.org/docs/api/ffi.q.html).
 
 Both call C. The difference is *when* the work happens.
 

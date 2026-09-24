@@ -23,6 +23,8 @@ it could not find.
 
 ## `.parquet.read[file;opts;query]`
 
+Every function and parameter: [.parquet API](https://peachq.org/docs/api/parquet.q.html).
+
 **file** is a file symbol. The leading colon is dropped and the rest is handed to DuckDB's `read_parquet`
 verbatim, so everything `read_parquet` accepts as a path works: a glob (`` `$":part/*/*.parquet" `` — `*` is not a
 bare-symbol character), a hive-partitioned tree, an `http://` or `https://` URL, or a symbol LIST, which becomes
@@ -163,7 +165,7 @@ comes back as DuckDB reads it. There is no q-side cast table: the restore is the
 ### `set`, `save` and the download door
 
 `` `:f.parquet set t `` is `.parquet.write[`:f.parquet;t;()]` — the suffix names the format, as it does for every
-`.h.tx` key ([handles.md](handles.md) § Format inference). `` save `t.parquet `` and the web server's
+`.h.tx` key ([handles.md](../handles.md) § Format inference). `` save `t.parquet `` and the web server's
 `/name.parquet?expr` door both go through `.h.tx[`parquet]`, which answers the file's BYTES (`.parquet.i.bytes`:
 a write to a temp file, `read1`, `hdel`); `save` writes them with `1:`, the door sends them verbatim. Before `\l pq`
 the entry signals `'.parquet.i.bytes`, the name it could not find, and `` `:f.parquet set t `` signals
@@ -174,7 +176,7 @@ materialised (kx signals `'type` there).
 
 `` `:s3://bucket/x.parquet set t `` and `.parquet.write[`$":s3://bucket/x.parquet";t;()]` `COPY` through httpfs;
 `select from `:s3://bucket/x.parquet` and `.parquet.read` hand the URL to `read_parquet` the same way (`gcs://`,
-`hf://` and the rest of [handles.md § Remote schemes](handles.md#remote-schemes-duckdb-is-the-transport) alike). A
+`hf://` and the rest of [handles.md § Remote schemes](../handles.md#remote-schemes-duckdb-is-the-transport) alike). A
 public bucket needs nothing; otherwise credentials are DuckDB secrets on `.duckdb.main[]`, through the shim:
 
 ```q

@@ -56,7 +56,7 @@ endpoint-, or member-like unless another rule, such as a recognised tabular file
 This gives PeachQ two clear routes into qSQL:
 
 1. An explicit table resource, normally signalled by a trailing `/`, such as a splay or virtual provider table.
-2. A file-like resource whose format is known to decode to a table, such as `.csv`, `.tsv`, `.json`, or `.parquet` (see [parquet.md](parquet.md)).
+2. A file-like resource whose format is known to decode to a table, such as `.csv`, `.tsv`, `.json`, or `.parquet` (see [parquet.md](lib/parquet.md)).
 
 Existing q supports operations such as:
 
@@ -167,7 +167,7 @@ select from `:s3://bucket/x.parquet        / parquet is DuckDB's format: read_pa
 
 csv, tsv, json, jsonl, `read0`, `read1` and `get` see the bytes DuckDB's `read_blob('url')` returns — peachq's
 decoders are THE parser of what a cell means, and a second type inference (DuckDB's CSV reader) would disagree with
-them. Parquet is the one format DuckDB owns, so it is read in place with pushdown ([parquet.md](parquet.md)).
+them. Parquet is the one format DuckDB owns, so it is read in place with pushdown ([parquet.md](lib/parquet.md)).
 
 `read_blob` fetches the **whole object**: a ranged `read1 (`:s3://…;offset;length)` slices that in memory, so it costs
 the object, not the range. On any URL the query string and `#fragment` are not part of the format claim, so
@@ -284,7 +284,7 @@ can select the CSV/TSV or JSON decoder from the file ending.
 The ending is a **declaration**, not a hint, so it can carry more than the decoder's name. `.jsonl` and `.ndjson` say the
 file is JSON Lines and it is read that way; `.json` says only JSON, and the reader decides whether the file is one
 document or a stream. Nothing is inferred from the bytes: a `.jsonl` holding a single JSON array is an error rather than a
-quiet re-reading. [Reading JSON](json.md) covers framing.
+quiet re-reading. [Reading JSON](lib/j.md) covers framing.
 
 The same rule is intended to apply after transport resolution:
 
@@ -309,7 +309,7 @@ independent of table-format inference.
 
 The same ending selects the WRITER. `` `:f.EXT set t `` writes the format `.h.tx` names for `EXT` — every `.h.tx`
 key: `csv`, `txt`, `xml`, `xls` and `json` through peachq's own writers (the lines `save` would write, so
-`` select from `:f.csv `` reads them back), `parquet` through `.parquet.write` (see [parquet.md](parquet.md)). `t`
+`` select from `:f.csv `` reads them back), `parquet` through `.parquet.write` (see [parquet.md](lib/parquet.md)). `t`
 must be a table (`'type` otherwise); no recognised ending is the binary form as in kx, and a dotfile such as
 `` `:.json `` is not a format claim. This is a documented divergence from kx, where the same `set` writes the q
 binary form under any name. To a remote scheme (`s3://`, `gcs://`, `hf://`) the same endings write the same bytes,
