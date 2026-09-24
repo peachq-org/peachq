@@ -8,7 +8,7 @@
 #include "qlang/io/q_kapi.h"
 #include "qlang/base/q_calendar.h"   /* q_calendar_days_from_civil — the one civil-calendar home */
 #include "qlang/base/q_err.h"
-#include "qlang/eval/q_dbg.h"        /* q_dbg_statement_origin — the loading script's own directory */
+#include "qlang/eval/q_dbg.h"        /* q_dbg_statement_origin, q_dbg_trap_enter/exit */
 #include "qlang/eval/q_eval.h"       /* the KFN carrier + q_eval_apply_value */
 #include "qlang/q_builtins.h"        /* q_builtins_type_num — THE q type answer a function crosses as */
 #include "qlang/q_ctx.h"             /* q_ctx_eval_src — what k(0,…) evaluates through */
@@ -980,6 +980,15 @@ static ray_t* k_eval(const char* s, K* argv, int argc) {
     return out;
 }
 
+/* A callback's error belongs to the extension that made it (capiref.md:398), so the console must not suspend
+ * under the C frame: the same never-suspend region as @[;;] (Dgqrpb). */
+static ray_t* k_trapped(const char* s, ray_t* fn, K* argv, int argc) {
+    int64_t ctx = q_dbg_trap_enter();
+    ray_t* r = fn ? k_apply(fn, argv, argc) : k_eval(s, argv, argc);
+    q_dbg_trap_exit(ctx, r);
+    return r;
+}
+
 /* a q error as the -128h object; consumes e */
 static K k_err_of(ray_t* e) {
     K out = k_of_ray(e);
@@ -1014,7 +1023,7 @@ K vak(I handle, const S s, va_list ap) {    /* own: takes ownership of reference
     }
     /* capiref.md:400 — handle==0 "is valid only for a plugin, and executes against the kdb+ process
      * in which it is loaded".  A real handle is the IPC client, which is not served. */
-    K out = handle != 0 ? krr((S) "nyi") : k_take(k_eval(s ? s : "", argv, argc), 0);
+    K out = handle != 0 ? krr((S) "nyi") : k_take(k_trapped(s ? s : "", NULL, argv, argc), 0);
     for (int i = 0; i < argc; i++) r0(argv[i]);
     return out;
 }
@@ -1031,7 +1040,7 @@ K k(I handle, const S s, ...) {
 K dot(K x, K y) {
     K argv[2] = { x, y };
     ray_t* apply = q_registry_lookup_name(".", 1, Q_DYADIC);   /* borrowed */
-    return apply ? k_take(k_apply(apply, argv, 2), 1) : krr((S) "nyi");
+    return apply ? k_take(k_trapped(NULL, apply, argv, 2), 1) : krr((S) "nyi");
 }
 
 /* own: q's own collapse — like atoms to a vector, conforming dictionaries to a table (capiref.md vk) */
