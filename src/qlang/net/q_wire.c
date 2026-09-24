@@ -1238,7 +1238,10 @@ corrupt:
     return q_err(QE_DOMAIN);
 }
 
-ray_t* q_wire_deserialize(ray_t* bytes) {
+ray_t* q_wire_deserialize(ray_t* bytes) { return q_wire_deserialize_ex(bytes, NULL); }
+
+ray_t* q_wire_deserialize_ex(ray_t* bytes, int* sent_err) {
+    if (sent_err) *sent_err = 0;
     if (!bytes || bytes->type != RAY_BYTE_ONLY)
         return q_err(QE_TYPE);
     const uint8_t* p = (const uint8_t*)ray_data(bytes);
@@ -1279,6 +1282,7 @@ ray_t* q_wire_deserialize(ray_t* bytes) {
         if (RAY_IS_ERR(r)) ray_error_free(r); else ray_release(r);
         r = q_err(QE_DOMAIN);
     }
+    if (sent_err && r && RAY_IS_ERR(r) && c.top_err_ok && c.rem == 0) *sent_err = 1;
     if (ub) ray_release(ub);
     return r;
 }
