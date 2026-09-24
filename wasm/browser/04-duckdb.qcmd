@@ -1,0 +1,31 @@
+/ DuckDB's browser build loads on its first use, into the running session (the harness checks no /duckdb/ request
+/ before this file, some after, and the json extension from the pinned directory).
+q)g:42
+q)h:.duckdb.main[]
+q)g
+42
+q)/ the query that autoloads json: an i64 return read before its call would break here
+q).duckdb.exec[h;"SELECT typeof('{}'::JSON) AS t"]
+| t      |
+|        |
+|--------|
+| "JSON" |
+q)t:([] l:1 0N 3; f:1.5 0n 2.25; s:`a`b`c; c:("short";"";"a string well over twelve bytes long"); li:(1 2;`long$();3 4 5))
+q).duckdb.set[h;`t;t]; t~.duckdb.get[h;`t]
+1b
+q)/ 3000 struct/map rows cross the 2048-row chunk both ways
+q)st:.duckdb.exec[h;"SELECT {'a': i, 'b': 'n' || repeat('x', (i % 40)::INT)} AS st, MAP {'k': i} AS m FROM range(3000) t(i)"]
+q).duckdb.set[h;`st;st]; (count st; st~.duckdb.get[h;`st])
+3000
+1b
+q)/ a DuckDB write lands in q's filesystem
+q).duckdb.exec[h;"COPY (SELECT 1 AS x) TO 'w.parquet'"]
+| Count |
+| long  |
+|-------|
+| 1     |
+q)4#read1 `:w.parquet
+0x50415231
+q)/ a same-origin parquet URL through lib/parquet.q
+q)count select from hsym `$ORIGIN,"/test/data/parquet/gold_vs_bitcoin.parquet"
+517
