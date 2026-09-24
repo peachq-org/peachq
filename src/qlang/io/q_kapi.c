@@ -12,6 +12,8 @@
 #include "qlang/eval/q_eval.h"       /* the KFN carrier + q_eval_apply_value */
 #include "qlang/q_builtins.h"        /* q_builtins_type_num — THE q type answer a function crosses as */
 #include "qlang/q_ctx.h"             /* q_ctx_eval_src — what k(0,…) evaluates through */
+#include "qlang/io/q_dl.h"           /* q_dl_open / q_dl_sym — the extension, never unmapped */
+#include "qlang/io/q_io.h"           /* q_io_abs_path — a Windows candidate's lexical absolute path */
 #include "core/poll.h"
 #include "mem/heap.h"                /* ray_free_set_qfn_fin_fn — the foreign-destructor choke point */
 #include "core/runtime.h"
@@ -29,7 +31,6 @@
 #include <string.h>
 
 #if !defined(_WIN32)
-#include <dlfcn.h>
 #include <fcntl.h>
 #include <unistd.h>
 #endif
@@ -773,6 +774,14 @@ typedef struct { I fd; int64_t id; } sd_reg_t;
 static sd_reg_t g_sd[32];
 static int      g_nsd;
 
+#if defined(_WIN32)
+/* Out of scope on Windows (owner ruling 2026-09-24): `d` there is a SOCKET, and handing one to the iocp
+ * poll from an extension is unproven. */
+K sd1(I d, K (*f)(I)) {
+    (void)d; (void)f;
+    return krr((S) "nyi");
+}
+#else
 static ray_t* sd_readable(ray_poll_t* poll, ray_selector_t* sel) {
     (void)poll;
     K (*f)(I) = (K(*)(I))(uintptr_t)sel->data;
@@ -788,12 +797,10 @@ K sd1(I d, K (*f)(I)) {
     ray_poll_t* p = (ray_poll_t*)ray_runtime_get_poll();
     if (!p || g_nsd >= (int)(sizeof g_sd / sizeof g_sd[0])) { sd0x(fd, 1); return krr((S) "io"); }
 
-#if !defined(_WIN32)
     if (d < 0) {
         int fl = fcntl(fd, F_GETFL, 0);
         if (fl >= 0) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
     }
-#endif
     ray_poll_reg_t reg = { 0 };
     reg.fd = fd;
     reg.type = RAY_SEL_SOCKET;
@@ -807,6 +814,7 @@ K sd1(I d, K (*f)(I)) {
     g_nsd++;
     return ki(fd);           /* capiref.md: on success an integer K holding d */
 }
+#endif
 
 V sd0x(I d, I f) {
     ray_poll_t* p = (ray_poll_t*)ray_runtime_get_poll();
@@ -961,15 +969,6 @@ ray_t* q_kapi_invoke(ray_t* carrier, ray_t** args, int64_t n) {
     return out;
 }
 
-#if defined(_WIN32)
-/* Windows is out of scope for PR 1: an extension there resolves against an IMPORT LIBRARY, which
- * the mingw link does not produce, so `2:` answers honestly rather than half-working. */
-ray_t* q_dl_wrap(ray_t* x, ray_t* y) {
-    (void)x; (void)y;
-    return q_err(QE_NYI);
-}
-#else
-
 /* borrowed text of a symbol atom / char vector / char atom argument */
 static int arg_text(ray_t* v, char* buf, size_t cap) {
     const char* p = NULL;
@@ -996,7 +995,33 @@ static int arg_text(ray_t* v, char* buf, size_t cap) {
     return 1;
 }
 
+#if defined(_WIN32)
+#define KAPI_DLEXT ".dll"
+#define KAPI_OSDIR "w64"
+#elif defined(__APPLE__)
 #define KAPI_DLEXT ".so"   /* a kdb extension is `.so` on macOS too */
+#define KAPI_OSDIR "m64"
+#else
+#define KAPI_DLEXT ".so"
+#define KAPI_OSDIR "l64"
+#endif
+
+/* A path that names a root or a drive takes no `$QHOME` or script-directory fallback. */
+static int dl_rooted(const char* p) {
+#if defined(_WIN32)
+    if (p[0] == '\\' || (p[0] && p[1] == ':')) return 1;
+#endif
+    return p[0] == '/';
+}
+
+static const char* dl_lastsep(const char* p) {
+    const char* s = strrchr(p, '/');
+#if defined(_WIN32)
+    const char* b = strrchr(p, '\\');
+    if (b && (!s || b > s)) s = b;
+#endif
+    return s;
+}
 
 /* The candidate paths, in kdb's order (ref/dynamic-load.md) plus one: as given, then under
  * `$QHOME/os`, then beside the script that is loading — a deliberate SUPERSET, because portable code
@@ -1005,35 +1030,35 @@ typedef struct { char p[4][1200]; int n; } dl_paths;
 
 /* Every candidate is made ABSOLUTE, which is both what kdb does ("From 4.1t it resolves to an
  * absolute path only, without resolving sym-links" — ref/dynamic-load.md) and what makes a bare
- * `` `fixture `` work at all: dlopen reads a name with no slash as a library-SEARCH request and
- * never looks in the current directory.  dl_brief puts the cwd prefix back for the error text. */
+ * `` `fixture `` work at all: dlopen (and LoadLibrary) reads a bare name as a library-SEARCH request,
+ * which does not start in the current directory.  dl_brief puts the cwd prefix back for the error text. */
 static void dl_add(dl_paths* c, const char* fmt, const char* a, const char* b) {
     if (c->n >= 4) return;
-    char rel[600], cwd[512];
+    char rel[600];
     snprintf(rel, sizeof rel, fmt, a, b);
+#if defined(_WIN32)
+    if (!q_io_abs_path(rel, c->p[c->n], sizeof c->p[0])) snprintf(c->p[c->n], sizeof c->p[0], "%s", rel);
+#else
+    char cwd[512];
     if (rel[0] == '/' || !getcwd(cwd, sizeof cwd)) snprintf(c->p[c->n], sizeof c->p[0], "%s", rel);
     else snprintf(c->p[c->n], sizeof c->p[0], "%s/%s", cwd, rel);
+#endif
     c->n++;
 }
 
 static void dl_candidates(const char* lib, dl_paths* c) {
     const char* p = lib[0] == ':' ? lib + 1 : lib;
-    const char* base = strrchr(p, '/');
+    const char* base = dl_lastsep(p);
     base = base ? base + 1 : p;
     const char* ext = strchr(base, '.') ? "" : KAPI_DLEXT;
 
     c->n = 0;
     dl_add(c, "%s%s", p, ext);
-    if (p[0] != '/') {
+    if (!dl_rooted(p)) {
         const char* qhome = getenv("QHOME");
         if (qhome) {
-#if defined(__APPLE__)
-            const char* os = "m64";
-#else
-            const char* os = "l64";
-#endif
             char dir[576];
-            snprintf(dir, sizeof dir, "%s/%s/%s", qhome, os, p);
+            snprintf(dir, sizeof dir, "%s/%s/%s", qhome, KAPI_OSDIR, p);
             dl_add(c, "%s%s", dir, ext);
         }
         int64_t ln = 0;
@@ -1041,9 +1066,9 @@ static void dl_candidates(const char* lib, dl_paths* c) {
         if (fs && ray_str_len(fs) < 400) {
             char script[512];
             snprintf(script, sizeof script, "%.*s", (int)ray_str_len(fs), ray_str_ptr(fs));
-            char* slash = strrchr(script, '/');
+            const char* slash = dl_lastsep(script);
             if (slash) {
-                slash[1] = '\0';
+                script[slash - script + 1] = '\0';
                 char dir[576];
                 snprintf(dir, sizeof dir, "%s%s", script, p);
                 dl_add(c, "%s%s", dir, ext);
@@ -1057,7 +1082,11 @@ static void dl_candidates(const char* lib, dl_paths* c) {
  * absolute build path into the text (and so into any transcript that records it). */
 static const char* dl_brief(const char* p) {
     static char cwd[512];
-    if (p[0] != '/' || !getcwd(cwd, sizeof cwd)) return p;
+#if defined(_WIN32)
+    if (!q_io_abs_path(".", cwd, sizeof cwd)) return p;   /* spelled as dl_add spells a candidate */
+#else
+    if (!getcwd(cwd, sizeof cwd)) return p;
+#endif
     size_t n = strlen(cwd);
     return (n > 1 && strncmp(p, cwd, n) == 0 && p[n] == '/') ? p + n + 1 : p;
 }
@@ -1069,7 +1098,7 @@ static int   g_ndlh;
 static void* dl_open(const char* path) {
     for (int i = 0; i < g_ndlh; i++)
         if (strcmp(g_dlh[i].path, path) == 0) return g_dlh[i].h;
-    void* h = dlopen(path, RTLD_NOW | RTLD_NODELETE);   /* q_ffi.c's policy */
+    void* h = q_dl_open(path);
     if (!h) return NULL;
     if (g_ndlh < (int)(sizeof g_dlh / sizeof g_dlh[0])) {
         snprintf(g_dlh[g_ndlh].path, sizeof g_dlh[g_ndlh].path, "%s", path);
@@ -1108,13 +1137,12 @@ ray_t* q_dl_wrap(ray_t* x, ray_t* y) {
             off += snprintf(msg + off, sizeof msg - (size_t)off, i ? " %s" : "%s", dl_brief(c.p[i]));
         return q_err_from_text(msg, strlen(msg));
     }
-    void* fn = dlsym(h, fname);
+    void* fn = q_dl_sym(h, fname);
     if (!fn) return q_err_name(fname, strlen(fname));
 
     return q_eval_apply_kfn_new(fn, rank, ray_sym_intern_runtime(lib, strlen(lib)),
                                 ray_sym_intern_runtime(fname, strlen(fname)));
 }
-#endif /* !_WIN32 */
 
 /* The heap's RAY_QFN choke point (heap.c `ray_free_set_qfn_fin_fn`, the `ray_free_set_mapped_fn`
  * precedent): base cannot know a carrier kind, so the death of a foreign carrier comes back HERE to
@@ -1129,7 +1157,7 @@ void q_kapi_init(void) { ray_free_set_qfn_fin_fn(kapi_qfn_fin); }
 void q_kapi_reset(void) {
     /* Ordering law: every foreign object must be DEAD before this runs, because its destructor is a
      * function pointer inside the loaded `.so` — q_runtime_destroy calls us after q_env_destroy.  The
-     * `.so` itself never unmaps (dlopen RTLD_NODELETE, q_ffi.c's policy), so a foreign that outlived
+     * `.so` itself never unmaps (q_dl_open), so a foreign that outlived
      * a runtime would still find its code; the hook it needs is what goes away here. */
     ray_free_set_qfn_fin_fn(NULL);
     ray_poll_t* p = (ray_poll_t*)ray_runtime_get_poll();

@@ -170,8 +170,8 @@ endif
 # `2:` (kdb C API): a loaded extension resolves ktn/kj/r0/… out of OUR executable, and `nm -D ./q`
 # exports nothing without this.  A dynamic-LIST, never -rdynamic: -rdynamic would export every
 # peachq internal into the plugin's namespace and let a .so we dlopen interpose on our own symbols.
-# Linux only — macOS needs -Wl,-exported_symbols_list with a different file format, unverified on
-# this host, and a Windows extension needs an import library (both out of PR 1; `2:` answers 'nyi).
+# Linux only here — macOS needs -Wl,-exported_symbols_list with a different file format, unverified on
+# this host; Windows exports through WIN_KAPI_DEF below.
 ifeq ($(UNAME_S),Linux)
   KAPI_EXPORTS = -Wl,--dynamic-list=tools/kapi.syms
 else
@@ -387,14 +387,25 @@ $(WIN_FMT_LIB): $(WIN_FMT_OBJ)
 # g++ drives the link (RE2 is C++) with $(WIN_OPT), not $(WIN_CFLAGS), whose
 # -std=c17 a C++ driver rejects.  The C++ runtime links STATICALLY — libstdc++,
 # libgcc, and the libwinpthread they pull in — so q.exe still ships as one file.
-q.exe: $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_RE2_LIB) $(WIN_FMT_LIB)
+# `2:` on Windows binds by MODULE NAME, as kdb's q.lib does: q.exe exports exactly tools/kapi.syms (the
+# Linux dynamic-list, never --export-all-symbols), and the link emits libq.a, an import library naming
+# q.exe, which an extension links against so its k.h imports resolve into the running q.exe.
+WIN_KAPI_DEF    = $(BUILD_DIR)/kapi.win.def
+WIN_KAPI_IMPLIB = $(BUILD_DIR)/libq.a
+
+$(WIN_KAPI_DEF): tools/kapi.syms
+	@mkdir -p $(dir $@)
+	{ echo 'NAME q.exe'; echo 'EXPORTS'; sed -n '/{/,/}/p' $< | tr -d '{};' | tr -s ' \t' '\n' | grep .; } > $@
+
+q.exe: $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_RE2_LIB) $(WIN_FMT_LIB) $(WIN_KAPI_DEF)
 	$(WIN_CXX) $(WIN_OPT) -Wl,--stack,8388608 -static-libstdc++ -static-libgcc \
-	  -o $@ $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_LIBS) -Wl,-Bstatic -lwinpthread
+	  -o $@ $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_LIBS) -Wl,-Bstatic -lwinpthread \
+	  $(WIN_KAPI_DEF) -Wl,--out-implib,$(WIN_KAPI_IMPLIB)
 
 # Recursive so the -j lands on the object rules even when the outer make is
 # serial (win-smoke and the bare `make win` both go through here).
 win:
-	+@$(MAKE) --no-print-directory -j$(RAY_WIN_JOBS) q.exe
+	+@$(MAKE) --no-print-directory -j$(RAY_WIN_JOBS) q.exe $(WIN_KAPI_FIXTURE)
 
 clean::
 	-rm -rf $(BUILD_DIR)
