@@ -164,12 +164,10 @@ static bool attr_no_dup_nulls(ray_t* v) {
 }
 
 /* A copying writer's block for the law: a clone, so the source keeps its own while the result's is extended.
- * NULL when no extension could keep the letter (not u/g, or a mapped block). */
+ * NULL when no extension could keep the letter (not u/g). */
 ray_t* q_attr_index_clone(ray_t* x) {
     char l = q_attr_letter(x);
-    if ((l != 'u' && l != 'g') || !ray_index_has(x) || x->index->mmod == 1 ||
-        (ray_index_payload(x->index)->markers & RAY_MARK_MMAP))
-        return NULL;
+    if ((l != 'u' && l != 'g') || !ray_index_has(x)) return NULL;
     ray_t* c = ray_index_clone(x->index);
     if (c && RAY_IS_ERR(c)) { ray_error_free(c); return NULL; }
     return c;

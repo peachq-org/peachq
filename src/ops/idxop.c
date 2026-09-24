@@ -895,114 +895,6 @@ ray_t* ray_index_attach_dict(ray_t** vp) {
     return attach_finalize(v, idx);
 }
 
-/* ── Inline on-disk index region (zero-copy mmap, kdb+-style) ───────────────
- * An attached index is persisted at the (32-aligned) tail of its column file as
- * a run of contiguous 32-byte-aligned ray_t blocks:
- *   [RAY_INDEX block: 32B hdr + ray_index_t payload][child vec block]…
- * The ray_index_t's child-pointer fields hold REGION-RELATIVE byte offsets on
- * disk; ray_index_inline_map patches them to absolute pointers in place after
- * mmap (one COW'd header page) and flags the index RAY_MARK_MMAP so the parent
- * column frees the whole region with one munmap and never frees children by
- * pointer.  All blocks are 32-aligned so each is a directly-usable ray_t. */
-#define IDX_ALIGN32(n) (((n) + 31) & ~(int64_t)31)
-
-/* Addresses of this kind's child ray_t* fields (so write/map read+patch them
- * uniformly).  Returns count 0..3. */
-static int idx_child_slots(ray_index_t* ix, ray_t** slots[3]) {
-    int n = 0;
-    switch (ix->kind) {
-    case RAY_IDX_HASH:
-        slots[n++] = &ix->u.hash.table; slots[n++] = &ix->u.hash.chain;
-        if (ix->u.hash.first) slots[n++] = &ix->u.hash.first;
-        break;
-    case RAY_IDX_SORT:
-        slots[n++] = &ix->u.sort.perm; break;
-    case RAY_IDX_BLOOM:
-        slots[n++] = &ix->u.bloom.bits; break;
-    case RAY_IDX_CHUNK_ZONE:
-        slots[n++] = &ix->u.chunk_zone.mins;
-        slots[n++] = &ix->u.chunk_zone.maxs;
-        slots[n++] = &ix->u.chunk_zone.null_bits; break;
-    case RAY_IDX_PART:
-        slots[n++] = &ix->u.part.keys; slots[n++] = &ix->u.part.starts;
-        slots[n++] = &ix->u.part.lens; break;
-    case RAY_IDX_DICT:
-        slots[n++] = &ix->u.dict.codes; slots[n++] = &ix->u.dict.first_occ; break;
-    case RAY_IDX_CODES:
-        slots[n++] = &ix->u.codes.dir; slots[n++] = &ix->u.codes.slots;
-        if (ix->u.codes.next) slots[n++] = &ix->u.codes.next;
-        break;
-    default: break;  /* RAY_IDX_ZONE: scalars only, no child vecs */
-    }
-    return n;
-}
-
-static int64_t idx_blk_bytes(const ray_t* v) {
-    return IDX_ALIGN32(32 + (int64_t)v->len * ray_elem_size(v->type));
-}
-
-/* Total byte size of the inline region for `ix` (32-aligned blocks). */
-int64_t ray_index_inline_size(const ray_index_t* ix) {
-    int64_t total = IDX_ALIGN32(32 + (int64_t)sizeof(ray_index_t));  /* RAY_INDEX block */
-    ray_t** slots[3];
-    int nch = idx_child_slots((ray_index_t*)ix, slots);
-    for (int i = 0; i < nch; i++) {
-        ray_t* c = *slots[i];
-        if (c && !RAY_IS_ERR(c)) total += idx_blk_bytes(c);
-    }
-    return total;
-}
-
-/* Serialize `ix` into `dst` (>= ray_index_inline_size bytes, pre-zeroed by the
- * caller for clean 32-pad).  Child pointers become region-relative offsets. */
-void ray_index_inline_write(uint8_t* dst, const ray_index_t* ix) {
-    ray_t blkhdr;
-    memset(&blkhdr, 0, 32);
-    blkhdr.type = RAY_INDEX; blkhdr.len = (int64_t)sizeof(ray_index_t);
-    blkhdr.mmod = 1; blkhdr.rc = 1;
-    memcpy(dst, &blkhdr, 32);
-
-    ray_index_t* on = (ray_index_t*)(dst + 32);
-    memcpy(on, ix, sizeof(ray_index_t));   /* scalars + child ptrs (overwritten below) */
-    on->markers |= RAY_MARK_MMAP;           /* on-disk indexes are always mmap-resident */
-
-    ray_t** src_slots[3];
-    ray_t** on_slots[3];
-    int nch = idx_child_slots((ray_index_t*)ix, src_slots);
-    idx_child_slots(on, on_slots);
-    int64_t off = IDX_ALIGN32(32 + (int64_t)sizeof(ray_index_t));
-    for (int i = 0; i < nch; i++) {
-        ray_t* c = *src_slots[i];
-        if (!c || RAY_IS_ERR(c)) { *on_slots[i] = NULL; continue; }
-        ray_t chdr;
-        memcpy(&chdr, c, 32);
-        chdr.mmod = 1; chdr.rc = 1;
-        memcpy(dst + off, &chdr, 32);
-        size_t dbytes = (size_t)c->len * ray_elem_size(c->type);
-        if (dbytes) memcpy(dst + off + 32, ray_data(c), dbytes);
-        *on_slots[i] = (ray_t*)(intptr_t)off;   /* region-relative offset */
-        off += idx_blk_bytes(c);
-    }
-}
-
-/* Map an mmap'd inline region in place: patch child offsets to absolute
- * pointers and return the RAY_INDEX object (already RAY_MARK_MMAP).  `region`
- * points at the start of the index region within the column's file mapping. */
-ray_t* ray_index_inline_map(uint8_t* region) {
-    ray_t* idx = (ray_t*)region;
-    ray_index_t* ix = ray_index_payload(idx);
-    ray_t** slots[3];
-    int nch = idx_child_slots(ix, slots);
-    for (int i = 0; i < nch; i++) {
-        int64_t o = (int64_t)(intptr_t)(*slots[i]);
-        /* a region written before the hash kept its first list carries the old mask there: never a block offset */
-        *slots[i] = o && o == IDX_ALIGN32(o) ? (ray_t*)(region + o) : NULL;
-    }
-    ix->markers |= RAY_MARK_MMAP;
-    idx->mmod = 1;
-    return idx;
-}
-
 /* --------------------------------------------------------------------------
  * Hash index — chained open addressing
  *
@@ -1375,7 +1267,7 @@ ray_t* ray_index_empty_rowsel(int64_t n) {
 /* The rows equal to `key`, the column's word (ray_index_atom_key's output; an integer VALUE on the int lanes). */
 static ray_t* hash_eq_rowsel(ray_t* col, int64_t key) {
     /* Sanity precheck — idx_fresh validates parted/nulls/kind/staleness;
-     * hash_probe_setup below also validates key-range, elem-size, and
+     * hash_probe_setup also validates key-range, elem-size, and
      * payload pointers, so these checks are complementary. */
     if (!idx_fresh(col, RAY_IDX_HASH)) return NULL;
     int64_t rid = -1;
@@ -1748,8 +1640,8 @@ ray_t* ray_index_range_rowsel(ray_t* col, uint16_t cmp_op,
  *   identity     for I64/TIMESTAMP (8-byte storage)
  * which is exactly (uint64_t)(int64_t)key after the appropriate truncation.
  *
- * We derive kbits the same way hash_probe_setup does for the HASH index
- * (see hash_probe_setup, ~line 773), then run the same double-hash probe.
+ * We derive kbits the same way hash_probe_setup does for the HASH index,
+ * then run the same double-hash probe.
  * -------------------------------------------------------------------------- */
 
 bool ray_index_bloom_absent(ray_t* col, int64_t key) {
@@ -2241,10 +2133,10 @@ static int codes_extend(ray_index_t* ix, ray_t* v, int64_t from) {
 }
 
 int ray_index_extend(ray_t* idx, ray_t* vec, int64_t old_len) {
-    if (!idx || RAY_IS_ERR(idx) || idx->type != RAY_INDEX || idx->mmod == 1 || !vec || RAY_IS_ERR(vec) || !ray_is_vec(vec))
+    if (!idx || RAY_IS_ERR(idx) || idx->type != RAY_INDEX || !vec || RAY_IS_ERR(vec) || !ray_is_vec(vec))
         return -1;
     ray_index_t* ix = ray_index_payload(idx);
-    if ((ix->markers & RAY_MARK_MMAP) || ix->parent_type != vec->type || ix->built_for_len != old_len || old_len > vec->len)
+    if (ix->parent_type != vec->type || ix->built_for_len != old_len || old_len > vec->len)
         return -1;
     int r = -1;
     if (ix->kind == RAY_IDX_HASH) r = hash_extend(ix, vec, old_len);

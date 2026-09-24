@@ -140,13 +140,10 @@ ray_t* ray_link_deref(ray_t* v, int64_t sym_id) {
 
     /* Reject parted targets at deref time, mirroring the attach-time guard
      * in ray_link_attach.  The attach-time check catches the obvious case
-     * (user calls (.col.link 'parted_dim ...)), but two paths bypass it:
-     *   1. Lazy rebind — attach saw a non-parted table; the sym was later
-     *      rebound to a parted one (env lookup is at deref time).
-     *   2. .link sidecar reload — try_load_link_sidecar (col.c) writes
-     *      link_target straight from the on-disk sym name without any
-     *      env-state check.
-     * Without a deref-time guard, both produce a silent wrong-answer bug
+     * (user calls (.col.link 'parted_dim ...)), but a lazy rebind bypasses
+     * it: attach saw a non-parted table; the sym was later rebound to a
+     * parted one (env lookup is at deref time).
+     * Without a deref-time guard, that produces a silent wrong-answer bug
      * (target_col[linkcol[i]] indexes into RAY_PARTED data, which is a
      * list of segment pointers — straight-byte indexing is meaningless). */
     int64_t tcols = ray_table_ncols(target_tab);
@@ -279,7 +276,7 @@ ray_t* ray_link_deref(ray_t* v, int64_t sym_id) {
  * Rayfall builtin entry points
  * -------------------------------------------------------------------------- */
 
-ray_t* ray_col_link_fn(ray_t* target_sym, ray_t* int_vec) {
+ray_t* ray_link_fn(ray_t* target_sym, ray_t* int_vec) {
     if (!target_sym || target_sym->type != -RAY_SYM)
         return ray_error("type", "(.col.link target v): target must be a sym");
     if (!int_vec || RAY_IS_ERR(int_vec))
@@ -293,7 +290,7 @@ ray_t* ray_col_link_fn(ray_t* target_sym, ray_t* int_vec) {
     return w;
 }
 
-ray_t* ray_col_unlink_fn(ray_t* v) {
+ray_t* ray_unlink_fn(ray_t* v) {
     if (!v || RAY_IS_ERR(v)) return v;
     ray_t* w = v;
     ray_retain(w);
@@ -302,11 +299,11 @@ ray_t* ray_col_unlink_fn(ray_t* v) {
     return w;
 }
 
-ray_t* ray_col_link_p_fn(ray_t* v) {
+ray_t* ray_link_p_fn(ray_t* v) {
     return ray_bool(ray_link_has(v) ? 1 : 0);
 }
 
-ray_t* ray_col_target_fn(ray_t* v) {
+ray_t* ray_link_target_fn(ray_t* v) {
     if (!ray_link_has(v)) return RAY_NULL_OBJ;
     /* Slice-aware: ray_link_target_id reads from slice_parent for slices,
      * because v->link_target on a slice aliases slice_offset and would

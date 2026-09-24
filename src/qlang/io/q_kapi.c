@@ -71,7 +71,7 @@ typedef struct k0 {
 #define K_OF(v)   ((K)((char*)(v) + 16))
 #define RAY_OF(x) ((ray_t*)((char*)(x) - 16))
 
-/* A shim-owned k0 (a copy, not an overlay) says so in the `m` byte: ray mmod is 0, 1 or 3, and kx
+/* A shim-owned k0 (a copy, not an overlay) says so in the `m` byte: ray mmod is 0 or 3, and kx
  * code never reads `m`.  Everything else is an overlay, so r1/r0 know which kind they hold. */
 #define K_SHIM 0x6b
 static int k_is_shim(K x) { return x && x->m == (signed char)K_SHIM; }

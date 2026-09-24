@@ -269,7 +269,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
             goto out;
         }
         if (t == RAY_STR) {
-            /* ext 202: string COLUMN keeps its type (col.c requires it) */
+            /* ext 202: string COLUMN keeps its type */
             if (w_u8(b, Q_WIRE_EXT_STRVEC) ||
                 w_u8(b, x->attrs & RAY_ATTR_HAS_NULLS) ||
                 w_count(b, q_count(x))) goto out;

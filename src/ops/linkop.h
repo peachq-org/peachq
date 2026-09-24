@@ -42,8 +42,7 @@
  * link follows automatically.
  *
  * HAS_LINK is a property of the column, not a transient accelerator —
- * unlike HAS_INDEX it is preserved across in-place mutation and
- * persisted to disk via a `.link` sidecar file.
+ * unlike HAS_INDEX it is preserved across in-place mutation.
  */
 
 #include <rayforce.h>
@@ -97,9 +96,9 @@ ray_t* ray_link_deref(ray_t* v, int64_t sym_id);
 
 /* ===== Rayfall builtin entry points ===== */
 
-ray_t* ray_col_link_fn   (ray_t* target_sym, ray_t* int_vec);  /* (.col.link 'target v) */
-ray_t* ray_col_unlink_fn (ray_t* v);                            /* (.col.unlink v) */
-ray_t* ray_col_link_p_fn (ray_t* v);                            /* (.col.link? v) */
-ray_t* ray_col_target_fn (ray_t* v);                            /* (.col.target v) */
+ray_t* ray_link_fn        (ray_t* target_sym, ray_t* int_vec);  /* (.col.link 'target v) */
+ray_t* ray_unlink_fn      (ray_t* v);                            /* (.col.unlink v) */
+ray_t* ray_link_p_fn      (ray_t* v);                            /* (.col.link? v) */
+ray_t* ray_link_target_fn (ray_t* v);                            /* (.col.target v) */
 
 #endif /* RAY_LINKOP_H */

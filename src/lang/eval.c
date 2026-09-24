@@ -2901,10 +2901,10 @@ static void ray_register_builtins(void) {
     register_unary (".attr.drop",  RAY_FN_NONE, ray_attr_drop_fn);
 
     /* Linked columns (see src/ops/linkop.h) */
-    register_binary(".col.link",   RAY_FN_NONE, ray_col_link_fn);
-    register_unary (".col.unlink", RAY_FN_NONE, ray_col_unlink_fn);
-    register_unary (".col.link?",  RAY_FN_NONE, ray_col_link_p_fn);
-    register_unary (".col.target", RAY_FN_NONE, ray_col_target_fn);
+    register_binary(".col.link",   RAY_FN_NONE, ray_link_fn);
+    register_unary (".col.unlink", RAY_FN_NONE, ray_unlink_fn);
+    register_unary (".col.link?",  RAY_FN_NONE, ray_link_p_fn);
+    register_unary (".col.target", RAY_FN_NONE, ray_link_target_fn);
 
     /* NOT lazy-aware: ray_strlen_fn has no lazy branch and there is no
      * OP_STRLEN chain opcode — the flag made eval pass raw lazy handles
