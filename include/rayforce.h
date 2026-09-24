@@ -243,11 +243,13 @@ typedef union ray_t {
              * link_lo[8] aliases bytes 0-7.  See ops/linkop.h. */
             struct { uint8_t link_lo[8];         int64_t link_target; };
         };
-        /* Bytes 16-31: metadata + value */
-        uint8_t  mmod;       /* 0=heap, 3=externally mapped (q splay reader) */
+        /* Bytes 16-31: metadata + value.  Byte 16 packs order and mmod so byte 19,
+         * which kdb's C API reads and writes as `x->u`, is no allocator state. */
+        uint8_t  order : 6;  /* block order (block size = 2^order), <= RAY_HEAP_MAX_ORDER */
+        uint8_t  mmod  : 2;  /* 0=heap, 3=externally mapped (q splay reader) */
         uint8_t  attrs;      /* attribute flags */
         int8_t   type;       /* negative=atom, positive=vector, 0=LIST */
-        uint8_t  order;      /* block order (block size = 2^order) */
+        uint8_t  kattr;      /* kdb C API attribute byte: q_kapi.c's alone, 0 elsewhere */
         uint32_t rc;         /* reference count (0=free) */
         union {
             uint8_t  b8;     /* BOOL atom */
