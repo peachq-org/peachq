@@ -12,12 +12,15 @@
 #include "qlang/eval/q_eval.h"       /* the KFN carrier + q_eval_apply_value */
 #include "qlang/q_builtins.h"        /* q_builtins_type_num — THE q type answer a function crosses as */
 #include "qlang/q_ctx.h"             /* q_ctx_eval_src — what k(0,…) evaluates through */
-#include "qlang/q_prim.h"            /* q_attr_byte / q_attr_stamp_byte — the attribute BYTE both ways */
+#include "qlang/q_registry.h"        /* the `.` verb dot applies */
+#include "qlang/q_prim.h"            /* the attribute BYTE both ways, the enum domain, vk's collapse */
 #include "qlang/io/q_dl.h"           /* q_dl_open / q_dl_sym — the extension, never unmapped */
 #include "qlang/io/q_io.h"           /* q_io_abs_path — a Windows candidate's lexical absolute path */
+#include "qlang/net/q_wire.h"        /* b9/d9/okx are the -8!/-9! codec */
 #include "core/poll.h"
 #include "mem/heap.h"                /* ray_free_set_qfn_fin_fn — the foreign-destructor choke point */
 #include "core/runtime.h"
+#include "core/types.h"              /* ray_elem_size — the overlay widths */
 #include "ops/idxop.h"               /* ray_attr_drop_fn — a relabelled result sheds its old attribute */
 #include "ops/ops.h"                 /* RAY_EXTRACT_* */
 #include "ops/temporal.h"            /* ray_temporal_extract — dj's civil fields */
@@ -49,6 +52,7 @@ typedef unsigned char G;
 typedef short H;
 typedef int   I;
 typedef long long J;
+typedef unsigned long long UJ;
 typedef float  E;
 typedef double F;
 typedef void   V;
@@ -106,19 +110,20 @@ static int k_is_foreign(K x) { return k_is_shim(x) && x->t == 112 && x->n >= 2; 
  * of it: a dynamically-linked module never takes ownership of its parameters — the same rule as the
  * apply module's args-borrowed/result-owned (CLAUDE.md rule 5), which is why q_kapi_invoke borrows.
  *
- *   own       k  jk  ktd  xD  xT   (also vk — not served in PR 1)
- *   ee        knt  ktd  xT          (also b9 d9 dot — not served in PR 1)
+ *   own       k  vak  knk  vaknk  jk  ktd  xD  xT  vk
+ *   ee        knt  ktd  xT  b9  d9  dot
  *   borrow    everything else, knt's `x` explicitly (capiref.md: "does not take ownership of x")
  *   returns   every function that hands back a K hands back a reference the CALLER owns */
 
-/* Payload width per tag; 3 is kdb's hole, 0 and 11 hold pointers.  Tags are rayfall's too. */
-static const uint8_t k_esz[20] = {
-    [0] = sizeof(K), [1] = 1,  [2] = 16, [3] = 0,  [4] = 1,  [5] = 2,  [6] = 4,
-    [7] = 8,  [8] = 4,  [9] = 8,  [10] = 1, [11] = sizeof(S), [12] = 8, [13] = 4,
-    [14] = 4, [15] = 8, [16] = 8, [17] = 4, [18] = 4, [19] = 4,
-};
+/* Payload width per tag.  The tags are rayfall's, so an overlay's width IS ray's (an enum's i64 positions
+ * are kdb's J, its domain riding the ray header BELOW the k0); only kdb's two C pointer lanes differ. */
+static size_t k_esz(I t) { return t == 0 ? sizeof(K) : t == 11 ? sizeof(S) : ray_elem_size(t); }
 
 static int k_tag_ok(I t) { return t >= 0 && t <= 19 && t != 3; }
+/* An extension may build a 20h (kxkdb's simple_to_compound fills one with positions), but only a q value's
+ * overlay carries a domain: a shim one is scratch the extension reads, and 'type if it is handed back. */
+static int k_tag_vec(I t) { return k_tag_ok(t) || t == RAY_ENUM; }
+static int k_growable(K x) { return k_tag_ok(x->t) || (x->t == RAY_ENUM && k_is_shim(x)); }
 /* the tags whose bytes a ray_t already IS: everything but the mixed list and the symbol vector */
 static int k_tag_overlays(I t) { return k_tag_ok(t) && t != 0 && t != 11; }
 /* Atoms: as above, minus the two representation mismatches.  A real ATOM is widened into ray's f64
@@ -129,7 +134,8 @@ static int k_atom_overlays(I t) { return k_tag_overlays(t) && t != 8 && !RAY_IS_
 
 /* The exported ABI.  These deliberately have NO peachq header — the consumer is an extension
  * compiled against kdb's own k.h, which declares them itself.  Prototyped here only so the file
- * builds under -Wmissing-prototypes, and as the written record of how much of k.h is served. */
+ * builds under -Wmissing-prototypes, and as the written record of how much of k.h is served.  Not served:
+ * the khp* / kclose IPC client, and m4 / sslInfo, which capiref.md gives standalone applications only. */
 S sn(const S s, I n);
 S ss(const S s);
 K krr(const S s);
@@ -175,6 +181,14 @@ K sd1(I d, K (*f)(I));
 V sd0x(I d, I f);
 V sd0(I d);
 K k(I handle, const S s, ...);
+K vak(I handle, const S s, va_list ap);
+K vaknk(I n, va_list ap);
+K dot(K x, K y);
+K vk(K x);
+K vi(K x, UJ j);
+K b9(I mode, K x);
+K d9(K x);
+I okx(K x);
 
 /* ===== the pending error slot ============================================================== */
 
@@ -244,7 +258,7 @@ static int64_t sym_id(const S s) {
 
 /* Capacity in bytes for n elements, rounded to a power of two so ja/js/jk amortise: the growth test
  * is a pure function of n, which is what lets struct k0 stay byte-compatible (no capacity field). */
-static size_t shim_cap(J n, uint8_t esz) {
+static size_t shim_cap(J n, size_t esz) {
     size_t need = (size_t)n * (size_t)esz, c = 64;
     while (c < need) c <<= 1;
     return c;
@@ -257,8 +271,8 @@ static K shim_alloc(size_t extra) {
 }
 
 static K shim_vec(I t, J n) {
-    if (!k_tag_ok(t) || n < 0 || (uint64_t)n > SIZE_MAX / 16) return (K)0;
-    K x = shim_alloc(shim_cap(n, k_esz[t]));
+    if (!k_tag_vec(t) || n < 0 || (uint64_t)n > SIZE_MAX / 16) return (K)0;
+    K x = shim_alloc(shim_cap(n, k_esz(t)));
     if (!x) return (K)0;
     x->t = (signed char)t;
     x->n = n;
@@ -281,13 +295,16 @@ static K shim_err(const char* m, size_t n) {
 }
 
 /* capiref.md `ee`: capture AND RESET the pending error into the usual -128h object.  A non-NULL x is
- * its own answer and the error status is untouched — only the NULL path clears it.  capiref.md:113
- * notes such an object may only be returned at the top level of a C function called from q; that is
- * the extension's discipline to keep, not ours to enforce. */
+ * its own answer and the error status is untouched — only the NULL path clears it.  A NULL x is ALWAYS
+ * answered with a -128h object, whose `x->s` is NULL when nothing was pending: capiref.md's own
+ * `ee(dot(a,b))` reads `xt` unchecked, and kxkdb's is_error tells that NULL-s case from a real error.
+ * capiref.md:113 notes such an object may only be returned at the top level of a C function called
+ * from q; that is the extension's discipline to keep, not ours to enforce. */
 K ee(K x) {
-    if (x || !g_kerr_set) return x;
+    if (x) return x;
+    K e = g_kerr_set ? shim_err(g_kerr, strlen(g_kerr)) : shim_atom(-128);
     g_kerr_set = 0;
-    return shim_err(g_kerr, strlen(g_kerr));
+    return e;
 }
 
 K r1(K x) {
@@ -351,7 +368,7 @@ K ktn(I type, J n) {
     ray_t* v = ray_vec_new((int8_t)type, n);
     if (!v || RAY_IS_ERR(v)) { if (v) ray_error_free(v); return (K)0; }
     v->len = n;
-    if (n > 0) memset(ray_data(v), 0, (size_t)n * k_esz[type]);
+    if (n > 0) memset(ray_data(v), 0, (size_t)n * k_esz(type));
     return K_OF(v);
 }
 
@@ -364,13 +381,18 @@ K kpn(const S s, J n) {
 
 K kp(const S s) { return kpn(s, s ? (J)strlen(s) : 0); }
 
-K knk(I n, ...) {      /* own: takes ownership of references to its arguments */
+K vaknk(I n, va_list ap) {      /* own: takes ownership of references to its arguments */
     K x = shim_vec(0, n);
     if (!x) return (K)0;
-    va_list a;
-    va_start(a, n);
-    for (I i = 0; i < n; i++) kK(x)[i] = va_arg(a, K);
-    va_end(a);
+    for (I i = 0; i < n; i++) kK(x)[i] = va_arg(ap, K);
+    return x;
+}
+
+K knk(I n, ...) {
+    va_list ap;
+    va_start(ap, n);
+    K x = vaknk(n, ap);
+    va_end(ap);
     return x;
 }
 
@@ -398,9 +420,61 @@ I dj(I date) {
 
 /* ---- append helpers ---- */
 
+/* The extension call in flight BORROWS its arguments (capiref.md:103), yet kxkdb's concat_list2 grows one
+ * with jv and returns it.  kdb grows in place; we cannot, because the caller still holds the value, so the
+ * append is lent a reference to consume and its copy is owned by this frame until the call returns.  A
+ * count above what the frame holds means the extension took a reference of its own (`z=r1(x);jv(&z,y)`),
+ * and then the append consumes that one as usual. */
+#define KAPI_MAX_RANK 8
+
+typedef struct { K k; int64_t base; } kapi_held;
+
+typedef struct kapi_frame {
+    K* arg;
+    int64_t narg;
+    int64_t base[KAPI_MAX_RANK];
+    kapi_held* own;
+    size_t nown, cap;
+    struct kapi_frame* up;
+} kapi_frame;
+static kapi_frame* g_frame;
+
+#define GROW_PLAIN   (-1)
+#define GROW_LENT    (-2)
+#define GROW_NOROOM  (-3)
+
+static int64_t k_refs(K x) { return k_is_shim(x) ? x->r : (int64_t)RAY_OF(x)->rc; }
+
+static int grow_begin(K x) {
+    if (!g_frame) return GROW_PLAIN;
+    for (size_t j = 0; j < g_frame->nown; j++)
+        if (g_frame->own[j].k == x) return k_refs(x) > g_frame->own[j].base ? GROW_PLAIN : (int)j;
+    for (int64_t i = 0; i < g_frame->narg; i++) {
+        if (g_frame->arg[i] != x) continue;
+        if (k_refs(x) > g_frame->base[i]) return GROW_PLAIN;
+        if (g_frame->nown == g_frame->cap) {    /* the slot the copy lands in, before the copy exists */
+            size_t nc = g_frame->cap ? g_frame->cap * 2 : 4;
+            kapi_held* no = (kapi_held*)realloc(g_frame->own, nc * sizeof *no);
+            if (!no) return GROW_NOROOM;
+            g_frame->own = no;
+            g_frame->cap = nc;
+        }
+        r1(x);
+        return GROW_LENT;
+    }
+    return GROW_PLAIN;
+}
+
+static void grow_end(int slot, K old, K now) {
+    if (slot == GROW_PLAIN) return;
+    if (slot >= 0) { g_frame->own[slot] = (kapi_held){ now, k_refs(now) }; return; }
+    if (now == old) { r0(old); return; }          /* the append failed and consumed nothing */
+    g_frame->own[g_frame->nown++] = (kapi_held){ now, k_refs(now) };
+}
+
 /* COW, for the same reason ray_vec_append COWs on the overlay path: another reference means the
  * storage is SHARED, and reallocating it would leave that holder pointing at freed memory. */
-static K shim_grow(K x, uint8_t esz, J extra) {
+static K shim_grow(K x, size_t esz, J extra) {
     size_t oc = shim_cap(x->n, esz), nc = shim_cap(x->n + extra, esz);
     if (x->r > 0) {
         K c = shim_alloc(nc);
@@ -419,9 +493,9 @@ static K shim_grow(K x, uint8_t esz, J extra) {
 
 /* ja/js/jk/jv all answer "a pointer to the (potentially reallocated) K object" (capiref.md, and
  * k.h's own `extern K … ja(K*,V*),js(K*,S) …`), so every one of them returns *x. */
-K ja(K* x, V* y) {
-    if (!x || !*x || !k_tag_ok((*x)->t)) return x ? *x : (K)0;
-    uint8_t esz = k_esz[(*x)->t];
+static K append_ja(K* x, V* y) {
+    if (!x || !*x || !k_growable(*x)) return x ? *x : (K)0;
+    size_t esz = k_esz((*x)->t);
     if (k_is_shim(*x)) {
         K g = shim_grow(*x, esz, 1);
         if (!g) return *x;
@@ -436,7 +510,7 @@ K ja(K* x, V* y) {
     return *x;
 }
 
-K js(K* x, S y) {
+static K append_js(K* x, S y) {
     if (!x || !*x || (*x)->t != 11 || !k_is_shim(*x)) return x ? *x : (K)0;
     K g = shim_grow(*x, sizeof(S), 1);
     if (!g) return *x;
@@ -446,7 +520,7 @@ K js(K* x, S y) {
     return *x;
 }
 
-K jk(K* x, K y) {      /* own: takes ownership of a reference to y */
+static K append_jk(K* x, K y) {      /* own: takes ownership of a reference to y */
     if (!x || !*x || (*x)->t != 0 || !k_is_shim(*x)) { r0(y); return x ? *x : (K)0; }
     K g = shim_grow(*x, sizeof(K), 1);
     if (!g) { r0(y); return *x; }
@@ -456,10 +530,10 @@ K jk(K* x, K y) {      /* own: takes ownership of a reference to y */
     return *x;
 }
 
-K jv(K* x, K y) {
-    if (!x || !*x || !y || (*x)->t != y->t || !k_tag_ok(y->t)) return x ? *x : (K)0;
+static K append_jv(K* x, K y) {
+    if (!x || !*x || !y || (*x)->t != y->t || !k_growable(*x)) return x ? *x : (K)0;
     if (k_is_shim(*x)) {
-        uint8_t esz = k_esz[y->t];
+        size_t esz = k_esz(y->t);
         J yn = y->n, at = (*x)->n;
         int self = (*x == y);     /* `jv(&a,a)`: the growth below may move the source too */
         K g = shim_grow(*x, esz, yn);
@@ -479,6 +553,22 @@ K jv(K* x, K y) {
     *x = K_OF(v);
     return *x;
 }
+
+/* Every append funnels through here, so a borrowed argument is never consumed in the extension's place.
+ * DROP is what a refused append still owes: jk owns y. */
+#define K_APPEND(name, Y, DROP)                                              \
+    K name(K* x, Y y) {                                                      \
+        K old = x ? *x : (K)0;                                               \
+        int slot = old ? grow_begin(old) : GROW_PLAIN;                       \
+        if (slot == GROW_NOROOM) { DROP; return old; }                       \
+        K now = append_##name(x, y);                                         \
+        grow_end(slot, old, now);                                            \
+        return now;                                                          \
+    }
+K_APPEND(ja, V*, (void)y)
+K_APPEND(js, S, (void)y)
+K_APPEND(jk, K, r0(y))
+K_APPEND(jv, K, (void)y)
 
 /* ---- dictionaries and tables ---- */
 
@@ -510,7 +600,7 @@ static K kd_vals(K x) { return x->t == 98 ? kK(x->k)[1] : kK(x)[1]; }
 static K cols_join(K a, K b, I t) {
     K z = shim_vec(t, a->n + b->n);
     if (!z) return (K)0;
-    uint8_t esz = k_esz[t];
+    size_t esz = k_esz(t);
     memcpy(kG(z), kG(a), (size_t)a->n * esz);
     memcpy(kG(z) + (size_t)a->n * esz, kG(b), (size_t)b->n * esz);
     if (t == 0) for (J i = 0; i < z->n; i++) r1(kK(z)[i]);
@@ -638,7 +728,7 @@ static K k_of_ray(ray_t* v) {
         if (tag == RAY_SYM) return ks(sym_cstr(v->i64));
         if (tag == RAY_F32) { K x = shim_atom(-8); if (x) x->e = (E)v->f64; return x; }
         if (RAY_IS_TEMPORAL32(tag)) { K x = shim_atom(t); if (x) x->i = (I)v->i64; return x; }
-        if (!k_atom_overlays(tag)) return krr((S) "nyi");   /* enums, and anything unenrolled */
+        if (!k_atom_overlays(tag) && tag != RAY_ENUM) return krr((S) "nyi");
         ray_retain(v);
         return k_view(v);
     }
@@ -655,9 +745,10 @@ static K k_of_ray(ray_t* v) {
         return x;
     }
 
-    if (k_tag_overlays(t)) {
+    if (k_tag_overlays(t) || t == RAY_ENUM) {
         if (v->attrs & RAY_ATTR_SLICE) {               /* kG(x) must be inline: materialise */
-            ray_t* c = ray_vec_from_raw(t, ray_data(v), q_count(v));
+            ray_t* c = ray_vec_from_raw(t == RAY_ENUM ? RAY_I64 : t, ray_data(v), q_count(v));
+            if (t == RAY_ENUM) c = q_enum_stamp(c, q_enum_domain(v));
             if (!c || RAY_IS_ERR(c)) { if (c) ray_error_free(c); return (K)0; }
             return k_view(c);
         }
@@ -769,7 +860,7 @@ static int seam_ok(K x, int depth) {
     if (!k_is_shim(x) && RAY_OF(x)->type == RAY_QFN) return RAY_OF(x)->rc > 0;
     if (t == 112) return k_is_foreign(x) || k_is_qfn(x);
     if (k_is_qfn(x)) return ((ray_t*)kK(x)[0])->rc > 0;
-    if (t != -128 && t != 101 && t != 98 && t != 99 && !(t < 0 ? k_tag_ok(-t) : k_tag_ok(t)))
+    if (t != -128 && t != 101 && t != 98 && t != 99 && !k_tag_vec(t < 0 ? -t : t))
         return 0;
     if (k_is_shim(x)) {
         if (x->r < 0) return 0;
@@ -785,7 +876,7 @@ static int seam_ok(K x, int depth) {
     if (t >= 0) {                                             /* n must fit the block we allocated */
         if (v->len < 0) return 0;
         size_t cap = ((size_t)1 << v->order);
-        if (v->mmod == 0 && (size_t)v->len * k_esz[t] + 32 > cap) return 0;
+        if (v->mmod == 0 && (size_t)v->len * k_esz(t) + 32 > cap) return 0;
     }
     return 1;
 }
@@ -861,58 +952,148 @@ V sd0(I d) { sd0x(d, 1); }
 
 /* ===== k() — the extension calling back into q ============================================= */
 
-K k(I handle, const S s, ...) {    /* own: takes ownership of references to its arguments */
-    K argv[8];
+/* THE one door back into q for k(), vak() and dot(): apply fn (borrowed) to the BORROWED args. */
+static ray_t* k_apply(ray_t* fn, K* argv, int argc) {
+    ray_t* ra[KAPI_MAX_RANK];
+    int built = 0;
+    for (; built < argc; built++) {
+        ra[built] = k_to_ray(argv[built]);
+        if (!ra[built] || RAY_IS_ERR(ra[built])) break;
+    }
+    ray_t* out;
+    if (built < argc) {
+        if (ra[built]) ray_error_free(ra[built]);
+        out = q_err(QE_TYPE);
+    } else {
+        out = q_eval_apply_value(fn, ra, argc);
+    }
+    for (int i = 0; i < built; i++) ray_release(ra[i]);
+    return out;
+}
+
+/* k()'s contract: evaluate the source text, then apply the result to any args */
+static ray_t* k_eval(const char* s, K* argv, int argc) {
+    ray_t* res = q_ctx_eval_src(s, strlen(s));
+    if (argc == 0 || !res || RAY_IS_ERR(res)) return res;
+    ray_t* out = k_apply(res, argv, argc);
+    ray_release(res);
+    return out;
+}
+
+/* a q error as the -128h object; consumes e */
+static K k_err_of(ray_t* e) {
+    K out = k_of_ray(e);
+    ray_error_free(e);
+    return out;
+}
+
+/* the `ee` convention: a q error becomes the pending krr and the answer is 0; consumes e */
+static K k_pend(ray_t* e) {
+    K x = k_err_of(e);
+    krr(x && x->s ? x->s : (S) "error");
+    r0(x);
+    return (K)0;
+}
+
+/* an owned q result handed over as a K; consumes v */
+static K k_take(ray_t* v, int ee_) {
+    if (!v) return (K)0;
+    if (RAY_IS_ERR(v)) return ee_ ? k_pend(v) : k_err_of(v);
+    K out = k_of_ray(v);
+    ray_release(v);
+    return out;
+}
+
+K vak(I handle, const S s, va_list ap) {    /* own: takes ownership of references to its arguments */
+    K argv[KAPI_MAX_RANK];
     int argc = 0;
-    va_list ap;
-    va_start(ap, s);
     for (;;) {
         K a = va_arg(ap, K);
         if (!a) break;
-        if (argc < 8) argv[argc++] = a;
+        if (argc < KAPI_MAX_RANK) argv[argc++] = a;
     }
-    va_end(ap);
-
-    K out = (K)0;
     /* capiref.md:400 — handle==0 "is valid only for a plugin, and executes against the kdb+ process
-     * in which it is loaded".  A real handle is PR 2's IPC client. */
-    if (handle != 0) { krr((S) "nyi"); goto done; }
-
-    ray_t* res = q_ctx_eval_src(s ? s : "", s ? strlen(s) : 0);
-    if (argc > 0 && res && !RAY_IS_ERR(res)) {
-        ray_t* ra[8];
-        int built = 0;
-        for (; built < argc; built++) {
-            ra[built] = k_to_ray(argv[built]);
-            if (!ra[built] || RAY_IS_ERR(ra[built])) break;
-        }
-        if (built < argc) {
-            if (ra[built]) ray_error_free(ra[built]);
-            for (int i = 0; i < built; i++) ray_release(ra[i]);
-            ray_release(res);
-            krr((S) "type");
-            goto done;
-        }
-        ray_t* fn = res;
-        res = q_eval_apply_value(fn, ra, argc);
-        for (int i = 0; i < argc; i++) ray_release(ra[i]);
-        ray_release(fn);
-    }
-
-    if (!res) goto done;
-    if (RAY_IS_ERR(res)) {
-        int64_t n = 0;
-        const char* m = q_err_text(res, &n);
-        out = m ? shim_err(m, (size_t)n) : shim_err("error", 5);
-        ray_error_free(res);
-        goto done;
-    }
-    out = k_of_ray(res);
-    ray_release(res);
-
-done:
+     * in which it is loaded".  A real handle is the IPC client, which is not served. */
+    K out = handle != 0 ? krr((S) "nyi") : k_take(k_eval(s ? s : "", argv, argc), 0);
     for (int i = 0; i < argc; i++) r0(argv[i]);
     return out;
+}
+
+K k(I handle, const S s, ...) {
+    va_list ap;
+    va_start(ap, s);
+    K out = vak(handle, s, ap);
+    va_end(ap);
+    return out;
+}
+
+/* `.[x;y]`, borrowing both: capiref.md tags dot `ee` and never `own` */
+K dot(K x, K y) {
+    K argv[2] = { x, y };
+    ray_t* apply = q_registry_lookup_name(".", 1, Q_DYADIC);   /* borrowed */
+    return apply ? k_take(k_apply(apply, argv, 2), 1) : krr((S) "nyi");
+}
+
+/* own: q's own collapse — like atoms to a vector, conforming dictionaries to a table (capiref.md vk) */
+K vk(K x) {
+    if (!x || x->t != 0) return x;
+    ray_t* l = k_to_ray(x);
+    r0(x);
+    if (!l || RAY_IS_ERR(l)) return k_take(l, 0);
+    ray_t* c = q_list_collapse(l);
+    ray_release(l);
+    return k_take(c, 0);
+}
+
+/* capiref.md `vi` serves the 77..97 mapped nested vectors, which peachq holds as 0h lists of vectors, so
+ * a 0h list is what it reads — through q's own indexing, which is what gives an out-of-range j the null
+ * of the first item's type. */
+K vi(K x, UJ j) {
+    if (!x || x->t != 0) return krr((S) "type");
+    ray_t* l = k_to_ray(x);
+    if (!l || RAY_IS_ERR(l)) return k_take(l, 0);
+    ray_t* ix = ray_i64((int64_t)j);
+    ray_t* e = q_eval_apply_value(l, &ix, 1);
+    ray_release(ix);
+    ray_release(l);
+    return k_take(e, 0);
+}
+
+/* ===== b9 / d9 / okx — the -8!/-9! wire codec ============================================== */
+
+/* ee.  Every mode unenumerates — the wire never carries an enum (kb/serialization.md:361) — and allows
+ * timestamps.  None compresses, though capiref.md's table says 3 does: kxkdb's published suite has
+ * b9(3,x) ~ -8!x for a 6026-byte frame that q_wire_compress takes to 90 (Dclgcn, the doc-vs-witness split). */
+K b9(I mode, K x) {
+    if (mode < -1 || mode > 6 || mode == 4) return krr((S) "type");
+    ray_t* v = k_to_ray(x);
+    if (!v || RAY_IS_ERR(v)) return k_take(v ? v : q_err(QE_TYPE), 1);
+    ray_t* f = q_wire_serialize(v, Q_WIRE_ASYNC);
+    ray_release(v);
+    return k_take(f, 1);
+}
+
+static ray_t* k_frame_decode(K x, int* sent_err) {
+    if (!x || x->t != 4) return q_err(QE_TYPE);
+    ray_t* b = k_to_ray(x);
+    if (!b || RAY_IS_ERR(b)) return b;
+    ray_t* v = q_wire_deserialize_ex(b, sent_err);
+    ray_release(b);
+    return v;
+}
+
+K d9(K x) { return k_take(k_frame_decode(x, NULL), 1); }   /* ee; x is not modified */
+
+/* "Decompressed data only" (capiref.md okx): a compressed frame is not a message this vouches for.  A
+ * message whose payload is an error is valid, though it decodes to an error value. */
+I okx(K x) {
+    if (!x || x->t != 4 || x->n < 8 || kG(x)[2] != 0) return 0;
+    int sent_err = 0;
+    ray_t* v = k_frame_decode(x, &sent_err);
+    if (!v) return 0;
+    int ok = !RAY_IS_ERR(v) || sent_err;
+    if (RAY_IS_ERR(v)) ray_error_free(v); else ray_release(v);
+    return ok;
 }
 
 /* ===== `2:` — the loader =================================================================== */
@@ -925,8 +1106,6 @@ typedef K (*F5)(K, K, K, K, K);
 typedef K (*F6)(K, K, K, K, K, K);
 typedef K (*F7)(K, K, K, K, K, K, K);
 typedef K (*F8)(K, K, K, K, K, K, K, K);
-
-#define KAPI_MAX_RANK 8
 
 /* capiref.md `dl`: a C function of rank n, wrapped as a q function.  The SAME Q_EVAL_CAR_KFN carrier
  * `2:` builds — from a pointer the extension already holds, so there is no library and no dlsym name
@@ -959,6 +1138,9 @@ ray_t* q_kapi_invoke(ray_t* carrier, ray_t** args, int64_t n) {
 
     g_kerr_set = 0;
     K r = (K)0;
+    kapi_frame fr = { .arg = a, .narg = n, .up = g_frame };
+    for (int64_t i = 0; i < n; i++) fr.base[i] = k_refs(a[i]);
+    g_frame = &fr;
     switch (rank) {
         case 1: r = ((F1)fn)(a[0]); break;
         case 2: r = ((F2)fn)(a[0], a[1]); break;
@@ -970,29 +1152,33 @@ ray_t* q_kapi_invoke(ray_t* carrier, ray_t** args, int64_t n) {
         case 8: r = ((F8)fn)(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]); break;
         default: break;
     }
+    g_frame = fr.up;
 
     /* the module BORROWED them (capiref.md:103); a label it set on one it did not return is dropped */
     for (int64_t i = 0; i < n; i++) r0(a[i]);
 
+    ray_t* out;
     if (!r) {                                   /* NULL + a pending krr is the error; NULL alone is `::` */
-        if (g_kerr_set) { g_kerr_set = 0; return q_err_from_text(g_kerr, strlen(g_kerr)); }
-        return RAY_NULL_OBJ;
-    }
-    if (!SEAM_OK(r)) {
+        out = g_kerr_set ? q_err_from_text(g_kerr, strlen(g_kerr)) : RAY_NULL_OBJ;
+    } else if (!SEAM_OK(r)) {
         ray_t* ls = ray_sym_str(lib);
         ray_t* ss_ = ray_sym_str(sym);
         char msg[256];
         snprintf(msg, sizeof msg, "kapi bad-return: %.*s:%.*s",
                  ls ? (int)ray_str_len(ls) : 0, ls ? ray_str_ptr(ls) : "",
                  ss_ ? (int)ray_str_len(ss_) : 0, ss_ ? ray_str_ptr(ss_) : "");
+        /* r and the frame's copies deliberately NOT freed: we just judged r malformed, and freeing it
+         * is the corruption this check exists to stay out of */
         g_kerr_set = 0;
-        return q_err_from_text(msg, strlen(msg));   /* r deliberately NOT freed: we just judged it
-                                                     * malformed, and freeing it is the corruption
-                                                     * this check exists to stay out of */
+        free(fr.own);
+        return q_err_from_text(msg, strlen(msg));
+    } else {
+        out = k_to_ray(r);
+        r0(r);
     }
     g_kerr_set = 0;
-    ray_t* out = k_to_ray(r);
-    r0(r);
+    for (size_t i = 0; i < fr.nown; i++) r0(fr.own[i].k);
+    free(fr.own);
     return out;
 }
 

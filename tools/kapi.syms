@@ -7,7 +7,7 @@
  * This is exactly the surface served by src/qlang/io/q_kapi.c.  A name added here
  * must have a definition there, or the link fails. */
 {
-  ka; kb; kg; kh; ki; kj; ke; kf; kc; ks; kd; kz; kt; ktj; ktn; kp; kpn; knk; ku;
+  ka; kb; kg; kh; ki; kj; ke; kf; kc; ks; kd; kz; kt; ktj; ktn; kp; kpn; knk; vaknk; ku;
   ja; js; jk; jv;
   xD; xT; ktd; knt;
   ss; sn; krr; orr; ee;
@@ -16,5 +16,7 @@
   ymd; dj;
   setm; m9; gc; ver;
   sd1; sd0; sd0x;
-  k;
+  k; vak; dot;
+  vk; vi;
+  b9; d9; okx;
 };
