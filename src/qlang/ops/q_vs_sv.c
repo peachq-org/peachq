@@ -54,6 +54,15 @@ static int64_t ikind_get(ray_t* v, int64_t i) {
     return q_type_is_int_vec(v) ? q_type_ivec_get(v, i) : ((const uint8_t*)ray_data(v))[i];
 }
 
+/* sv's decode also takes float digits and radices (ref/sv.md: "numeric atoms or lists") */
+static bool fkind(ray_t* v) { return v && q_type_is_float_tag(v->type); }
+
+static bool nkind_vec(ray_t* v) { return ikind_vec(v) || (fkind(v) && v->type > 0); }
+
+static double nkind_get(ray_t* v, int64_t i) {
+    return fkind(v) ? ray_vec_get_f64(v, i) : (double)ikind_get(v, i);
+}
+
 /* split y on the byte string sep -> list of lane pieces (keeps empties; an empty sep is one piece) */
 static ray_t* str_split(const char* y, int64_t yl, const char* sep, int64_t sl, int8_t lane) {
     ray_t* out = ray_list_new(4);
@@ -119,19 +128,20 @@ static ray_t* byte_encode(ray_t* y) {
     return ray_vec_from_raw(RAY_BYTE_ONLY, b, w);
 }
 
-/* big-endian bit decompose of an integer scalar (0b vs y) -> BOOL vector */
+/* big-endian bit decompose of an integer or guid scalar (0b vs y) -> BOOL vector */
 static ray_t* bit_decompose(ray_t* y) {
-    int w = 0; uint64_t bits = 0;
+    int w = 0; uint64_t bits = 0; const uint8_t* g = NULL;
     switch (y->type) {
     case -RAY_BOOL: w = 1;  bits = y->b8 ? 1 : 0; break;
     RAY_BYTE_ATOM_CASES: w = 8;  bits = (uint8_t)y->u8; break;
     case -RAY_I16:  w = 16; bits = (uint16_t)y->i16; break;
     case -RAY_I32:  w = 32; bits = (uint32_t)y->i32; break;
     case -RAY_I64:  w = 64; bits = (uint64_t)y->i64; break;
+    case -RAY_GUID: w = 128; g = ray_guid_bytes(y); break;
     default: return q_err(QE_TYPE);
     }
-    uint8_t stackb[64];
-    for (int i = 0; i < w; i++) stackb[i] = (uint8_t)((bits >> (w - 1 - i)) & 1);
+    uint8_t stackb[128];
+    for (int i = 0; i < w; i++) stackb[i] = (uint8_t)((g ? (uint64_t)g[i / 8] >> (7 - i % 8) : bits >> (w - 1 - i)) & 1);
     return ray_vec_from_raw(RAY_BOOL, stackb, w);
 }
 
@@ -299,10 +309,11 @@ static ray_t* sym_join(ray_t* y) {
 }
 
 /* big-endian byte decode: interpret a U8 vector as a signed integer of the
- * matching width (2->short, 4->int, 8->long). */
+ * matching width (2->short, 4->int, 8->long, 16->guid). */
 static ray_t* byte_decode(ray_t* y) {
     int64_t n = q_count(y);
     const uint8_t* p = (const uint8_t*)ray_data(y);
+    if (n == 16) return ray_guid(p);
     uint64_t v = 0;
     for (int64_t i = 0; i < n; i++) v = (v << 8) | p[i];
     if (n == 2) return ray_i16((int16_t)(uint16_t)v);
@@ -312,11 +323,15 @@ static ray_t* byte_decode(ray_t* y) {
     return q_err(QE_NYI);
 }
 
-/* bits -> integer (8->byte, 16->short, 32->int, 64->long; 128->guid deferred) */
+/* bits -> integer (8->byte, 16->short, 32->int, 64->long, 128->guid) */
 static ray_t* bit_compose(ray_t* y) {
     int64_t n = q_count(y);
     const uint8_t* p = (const uint8_t*)ray_data(y);
-    if (n == 128) return q_err(QE_NYI);
+    if (n == 128) {
+        uint8_t g[16] = {0};
+        for (int i = 0; i < 128; i++) g[i / 8] |= (uint8_t)((p[i] & 1) << (7 - i % 8));
+        return ray_guid(g);
+    }
     if (n != 8 && n != 16 && n != 32 && n != 64)
         return q_err(QE_NYI);
     uint64_t v = 0;
@@ -339,24 +354,47 @@ static int64_t horner(ray_t* x, ray_t* y, int64_t col) {
     return (int64_t)acc;
 }
 
+static double horner_f(ray_t* x, ray_t* y, int64_t col) {
+    double acc = 0, b = 0;
+    for (int64_t i = 0, n = q_count(y); i < n; i++) {
+        if (ray_is_atom(x)) q_type_strict_f64(x, &b); else b = nkind_get(x, i);
+        double d = col < 0 ? nkind_get(y, i) : nkind_get(((ray_t**)ray_data(y))[i], col);
+        acc = i ? acc * b + d : d;                    /* the first radix is unused (ref/sv.md); 0*0w is NaN */
+    }
+    return acc;
+}
+
+/* a null digit nulls the decode: Horner is `*` and `+`, both null-propagating (owner ruling 2026-09-24) */
+static bool null_digit(ray_t* y, int64_t col) {
+    for (int64_t i = 0, n = q_count(y); i < n; i++)
+        if (col < 0 ? ray_vec_is_null(y, i) : ray_vec_is_null(((ray_t**)ray_data(y))[i], col)) return true;
+    return false;
+}
+
 /* x sv y (ref/sv.md): a digit vector answers one number; a list of conforming items answers per column — the
  * inverse of the matrix encode, and Horner being atomic, a list of matrices answers a matrix (aoc/2021/day20.q) */
 static ray_t* base_decode(ray_t* x, ray_t* y) {
     int64_t n = q_count(y);
     if (!ray_is_atom(x) && q_count(x) != n) return q_err(QE_LENGTH);
-    if (y->type != RAY_LIST && !ikind_vec(y)) return q_err(QE_TYPE);
-    if (y->type != RAY_LIST || n == 0) return ray_i64(horner(x, y, -1));   /* no digits: the fold's identity */
+    if (y->type != RAY_LIST && !nkind_vec(y)) return q_err(QE_TYPE);
+    bool flt = fkind(x) || fkind(y);
+    if (y->type != RAY_LIST && null_digit(y, -1)) return ray_typed_null(flt ? -RAY_F64 : -RAY_I64);
+    if (y->type != RAY_LIST || n == 0)               /* no digits: the fold's identity */
+        return flt ? ray_f64(horner_f(x, y, -1)) : ray_i64(horner(x, y, -1));
     ray_t** e = (ray_t**)ray_data(y);
     int64_t m = n > 0 ? q_count(e[0]) : 0;
     bool nested = n > 0 && e[0]->type == RAY_LIST;
     for (int64_t i = 0; i < n; i++) {
-        if (nested ? e[i]->type != RAY_LIST : !ikind_vec(e[i])) return q_err(QE_TYPE);
+        if (nested ? e[i]->type != RAY_LIST : !nkind_vec(e[i])) return q_err(QE_TYPE);
         if (q_count(e[i]) != m) return q_err(QE_LENGTH);
+        flt = flt || fkind(e[i]);
     }
-    ray_t* out = nested ? ray_list_new(m > 0 ? m : 1) : ray_vec_new(RAY_I64, m > 0 ? m : 1);
+    ray_t* out = nested ? ray_list_new(m > 0 ? m : 1) : ray_vec_new(flt ? RAY_F64 : RAY_I64, m > 0 ? m : 1);
     if (RAY_IS_ERR(out)) return out;
     if (!nested) out->len = m;
     for (int64_t c = 0; c < m; c++) {
+        if (!nested && null_digit(y, c)) { ray_vec_set_null(out, c, true); continue; }
+        if (!nested && flt) { ((double*)ray_data(out))[c] = horner_f(x, y, c); continue; }
         if (!nested) { ((int64_t*)ray_data(out))[c] = horner(x, y, c); continue; }
         ray_t* col = ray_list_new(n);                 /* column c: every item's row c */
         for (int64_t i = 0; i < n && !RAY_IS_ERR(col); i++) col = ray_list_append(col, ((ray_t**)ray_data(e[i]))[c]);
@@ -377,6 +415,6 @@ ray_t* q_sv_wrap(ray_t* x, ray_t* y) {
     if (q_type_is_null_sym(x)) return y->type == RAY_SYM ? sym_join(y) : str_join(y, "\n", 1, 1, RAY_CHARV);
     if (x->type == -RAY_BYTE_ONLY) return y->type == RAY_BYTE_ONLY ? byte_decode(y) : q_err(QE_TYPE);
     if (x->type == -RAY_BOOL) return y->type == RAY_BOOL ? bit_compose(y) : q_err(QE_TYPE);
-    if (q_type_is_int_atom(x) || q_type_is_int_vec(x)) return base_decode(x, y);
+    if (q_type_is_int_atom(x) || q_type_is_int_vec(x) || fkind(x)) return base_decode(x, y);
     return q_err(QE_TYPE);
 }
