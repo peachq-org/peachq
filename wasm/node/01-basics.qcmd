@@ -1,4 +1,5 @@
-/ The wasm build's own ledger, run inside the module by wasm/smoke.js through the qdoc runner, in the wasm REPL's display mode.
+/ The wasm build's plain-q ledger, run inside the module by wasm/smoke.js through the qdoc runner, in the wasm REPL's
+/ display mode.
 q)2+3
 5
 q)sum 1 2 3 4
@@ -88,3 +89,6 @@ q)fib
 0 1 1 2 3 5 8 13 21 34 55 89
 q)hyp[3;4]
 5f
+q)/ the node smoke offers no DuckDB host (Module.peachqDuckLoad), so the bridge answers as with no library
+q).duckdb.main[]
+'duckdb
