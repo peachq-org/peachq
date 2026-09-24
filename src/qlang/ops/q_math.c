@@ -10,9 +10,9 @@
 #include "qlang/base/q_err.h"
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home */
 #include "lang/eval.h"     /* ray_eq_fn/ray_neq_fn, ray_neg_fn */
-#include "lang/internal.h" /* atomic_map_unary, as_f64, is_numeric_or_temporal, make_f64 */
+#include "lang/internal.h" /* atomic_map_unary, as_f64, is_numeric_or_temporal, make_f64, ray_pow_fn */
 #include "qlang/base/q_type.h"  /* q_type_as_i64 / q_type_is_bool / q_type_is_char_atom */
-#include <math.h>          /* sin/cos/tan/asin/acos/atan, exp/log, floor/floorf, ceil/ceilf */
+#include <math.h>          /* sin/cos/tan/asin/acos/atan, exp/log, isfinite, floor/floorf, ceil/ceilf */
 #include <string.h>        /* memcpy */
 #include <stdlib.h>        /* malloc, free */
 
@@ -140,18 +140,20 @@ ray_t* q_neg_wrap(ray_t* x) {
     return ray_neg_fn(x);
 }
 
-/* q `x xexp y` — x to the power y as a FLOAT (ref/exp.md).  The doc pins the COMPUTATION, not just the value: "The
- * calculation is performed as exp y * log x", so `2 xexp 3` is 7.9999999999999982, NOT C pow's exact 8.  x null or
- * negative -> log NaN -> 0n; y null -> 0n.  x=0 is the one point the identity misreads: exp(0 * -inf) is NaN where the
- * page's "x non-negative -> x to the y" wants 0^0 = 1.  The published domain is `b x h i j e f` on both axes: char is
- * refused although it shares the byte lane, and a null is refused by its TYPE before it is honoured as a null (0Ng). */
+/* q `x xexp y` — C pow(), the kdb 4.0 2020.07.15 law (embedPy tests/curvefit.t), not ref/exp.md's older exp y * log x:
+ * `2 xexp 3` is exactly 8f and `-1 xexp 2` is 1f.  A negative base with a fractional or infinite exponent is 0n,
+ * which pow alone misses at pow(-2, inf) = inf and pow(-inf, .5) = inf.  The published domain is `b x h i j e f` on
+ * both axes: char is refused although it shares the byte lane, and a null is refused by its TYPE before it is honoured
+ * as a null (0Ng). */
 ray_t* q_xexp_wrap(ray_t* x, ray_t* y) {
     if (!x || !y || !is_numeric(x) || !is_numeric(y) || q_type_is_char_atom(x) || q_type_is_char_atom(y))
         return q_err(QE_TYPE);
     if (RAY_ATOM_IS_NULL(x) || RAY_ATOM_IS_NULL(y))
         return ray_typed_null(-RAY_F64);
     double xf = as_f64(x), yf = as_f64(y);
-    return make_f64(xf == 0 && yf == 0 ? 1.0 : exp(yf * log(xf)));
+    if (xf < 0 && (!isfinite(yf) || yf != floor(yf)))
+        return ray_typed_null(-RAY_F64);
+    return ray_pow_fn(x, y);
 }
 
 /* q `x xlog y` — base-x logarithm of y as a FLOAT: log(yf)/log(xf) with both
