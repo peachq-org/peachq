@@ -1,7 +1,7 @@
 / Draw on the terminal as a grid of cells: .termbox.init[] takes the screen, .termbox.show rows paints a list of
 / strings from the top-left corner, .termbox.present[] flushes the changes, .termbox.peek_event 100 waits up to
 / 100 ms for a key or mouse event, .termbox.shutdown[] hands the terminal back.  The names and meanings follow
-/ termbox2 (snake_case), so its documentation and examples carry over.  examples/q/life.q is the worked example.
+/ termbox2 (snake_case), so its documentation and examples carry over.  examples/q/termbox/life.q is the worked example.
 / .
 / One session at a time.  The terminal is restored on shutdown, on any error, on Ctrl-C and on exit, so restore is
 / never the program's job; Ctrl-C is the interrupt, never a key.  Text written by show or -1 inside a loop reaches
