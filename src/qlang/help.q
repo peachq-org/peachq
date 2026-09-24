@@ -260,7 +260,7 @@
           "-conn target";"-save file";"-ls");
   syscmd:`$("\\_";"\\c";"\\C";"\\e";"\\E";"\\g";"";"";"";"\\o";"\\p";"\\P";"";"\\r";"\\s";"\\S";"\\t";"\\T";"\\u";
             "";"";"\\W";"\\z";"\\classic";"";"";"\\?cmdline";"\\p";"";"";"";"");
-  supported:01011000001010000011001111111111b;
+  supported:01111100011110111011011111111111b;
   new:      00000000000000000000000111111111b;
   what:("block client write-access";"console size: rows and columns";"HTTP display size";
         "error-trap mode for client evals";"TLS server mode: 0 plain, 1 plain and TLS, 2 TLS only";"garbage-collection mode";
@@ -288,7 +288,7 @@
 / `q -h`: the command-line page from this file alone - the builtin help db is
 / never loaded for it, so it answers at boot speed.
 .help.usage:{[]
-  -1 "\n" sv (enlist "usage: q [file.q] [-option [parameters] ...]"),("  ",/:.help.i.pages[`cmdline;`blurb]),(enlist ""),
+  -1 "\n" sv (enlist "usage: q [file] [-option [parameters] ...]"),("  ",/:.help.i.pages[`cmdline;`blurb]),(enlist ""),
     ("  ",/:.help.i.clip .help.i.cmdlines[]),(enlist ""),"  ",/:.help.i.CONNLINES;}
 
 / the -conn section of `q -h`: the remote runner by example, and the one thing it cannot show.
@@ -415,7 +415,7 @@
   ();();();();();
   ("an iterator modifies a verb: each item, each pair, each left, each right";"/ folds to one value, \\ keeps every step");
   ("a \\ line is a command, not an expression; system \"c 25 200\" is its q form");
-  ("the first token ending in .q is the startup script; what follows it and q does not consume is the script's .z.x";
+  ("the file is the first argument, loaded as \\l loads it; every other token q does not consume is .z.x";
    "after / : the \\ command that reads or sets the same thing, * a peachq-only flag, - not implemented yet");
   ("n is the type number and c the .Q.t character; a vector is n, an atom -n";"sz is bytes per item; sql is the nearest ANSI SQL type";
    "0w and -0w are real infinities; the integer 0W and -0W are the type's bounds, not infinities";
