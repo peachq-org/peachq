@@ -23,6 +23,7 @@
 #include "core/types.h"  /* ray_elem_size — pipe digest */
 
 #include "table/sym.h"     /* ray_sym_vec_cell — resolve a sym-vector cell */
+#include "core/platform.h" /* RAY_TLS — per-thread render scratch */
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -66,11 +67,11 @@ typedef struct {
 } qe_tgt;
 
 #define QE_MAX 128
-static qe_tgt g_qe[QE_MAX];
-static int    g_qe_n;          /* stack depth; deeper-than-QE_MAX renders empty */
-static qe_tgt g_qe_void;       /* overflow sink (buf NULL — all writes no-op) */
+static RAY_TLS qe_tgt g_qe[QE_MAX];   /* render scratch is per thread: a peach worker renders too */
+static RAY_TLS int    g_qe_n;          /* stack depth; deeper-than-QE_MAX renders empty */
+static RAY_TLS qe_tgt g_qe_void;       /* overflow sink (buf NULL — all writes no-op) */
 
-static struct {
+static RAY_TLS struct {
     int32_t rows, cols;   /* live `\c` size (already clamped to [10,2000]) */
     int32_t nlines;       /* completed (flushed) display lines */
     int     stop;         /* height cap decided — swallow everything else */
@@ -79,7 +80,7 @@ static struct {
     size_t  llog;         /* LOGICAL chars on the line, incl. swallowed overflow */
     size_t  ltrail;       /* trailing-space run at the logical end (qe_trim) */
 } g_clip;
-static int g_clip_active;
+static RAY_TLS int g_clip_active;
 
 static qe_tgt* qe_top(void) {
     return (g_qe_n > 0 && g_qe_n <= QE_MAX) ? &g_qe[g_qe_n - 1] : &g_qe_void;

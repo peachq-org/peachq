@@ -262,13 +262,6 @@ void q_dbg_print_trace(FILE* out, ray_t* err) {
     }
 }
 
-static void dbg_show_console(void) {
-    const char* con = q_console_str();
-    if (con && *con) fputs(con, stdout);
-    q_console_reset();
-    fflush(stdout);
-}
-
 /* one backtrace-shaped line for frame `idx` (0 = the statement frame) */
 static void dbg_show_frame(int idx) {
     char line[DBG_STMT_MAX + 160];
@@ -309,14 +302,15 @@ static int32_t cursor_view(void) {
 static ray_t* dbg_value_at(const char* src, int keep_err) {
     int tok = q_dbg_statement_begin(src, strlen(src), 1);
     int32_t prev = q_env_frame_view(cursor_view());
+    FILE*   door = q_console_door(stdout);
     ray_t* r = q_parse(src);
     if (!RAY_IS_ERR(r)) {
         ray_t* ast = r;
         r = q_eval_apply_concrete(q_eval(ast));
         ray_release(ast);
     }
+    q_console_door(door);
     q_env_frame_view(prev);
-    dbg_show_console();
     int resignal = RAY_IS_ERR(r) && keep_err;
     if (RAY_IS_ERR(r) && !keep_err) {
         if (!q_dbg_reported(r)) {
@@ -348,7 +342,7 @@ static ray_t* dbg_suspend(ray_t* err) {
     int outer_frames = g_prompt_frames;
     g_prompt_frames = q_eval_apply_frame_depth();
     g_cursor = g_live_depth;
-    dbg_show_console();
+    q_console_flush();
     dbg_banner(err, g_cursor);
     ray_t* out = NULL;
     char line[DBG_LINE_MAX];
@@ -533,7 +527,7 @@ ray_t* q_dbg_bt_fn(ray_t** args, int64_t n) {
         int mark = g_dbg_depth > 0 && i == g_cursor;   /* >> = the current frame */
         size_t ln = frame_line(line, sizeof line, i, mark,
                                i ? live_lam(i) : NULL, stmt);
-        q_console_write(line, ln);
+        q_console_write(line, ln, false);
     }
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;

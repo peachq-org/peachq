@@ -48,11 +48,10 @@ ray_t* q_parse_builtin_fn(ray_t* x) {
 }
 
 
-/* (show x) — print x's q console display as a SIDE EFFECT (buffered in the q
- * console sink; the host drains it), then return generic null.  Overrides
- * rayfall's `show`, which uses the rayfall formatter (`[1 2 3]`) rather than
- * q_fmt.  qdoc/repl print nothing for the null result, so the row shows only
- * the buffered display. */
+/* (show x) — print x's q console display as a SIDE EFFECT (written through the
+ * q console sink), then return generic null.  Overrides rayfall's `show`, which
+ * uses the rayfall formatter (`[1 2 3]`) rather than q_fmt.  qdoc/repl print
+ * nothing for the null result, so the row shows only the display. */
 static ray_t* show_fn(ray_t* x) {
     if (q_console_show(x)) return q_err(QE_WSFULL);
     ray_retain(RAY_NULL_OBJ);

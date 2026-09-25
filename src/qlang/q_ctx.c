@@ -14,8 +14,8 @@
 #include "qlang/eval/q_view.h"    /* q_view_intercept — `x::e` at the line seam */
 #include "qlang/q_env.h"          /* q_env_ctx / _set — the load's `\d` save+restore; q_env_peek — `.<ext>.e` */
 #include "qlang/q_fmt.h"
-#include "qlang/q_console.h"
-#include "qlang/q_prim.h"         /* q_str_text_bytes — the remote value-apply head; q_ssr_wrap — a known file's CRLF;
+#include "qlang/q_console.h"      /* q_console_door — the running door names the console's stream */
+#include "qlang/q_prim.h"        /* q_str_text_bytes — the remote value-apply head; q_ssr_wrap — a known file's CRLF;
                                    * q_str_split_lines / q_str_charv_out — a whole-text file as read0's lines */
 #include "qlang/q_builtins.h"     /* q_dotq_sha1_fn — a known file's digest */
 #include "qlang/q_dotz.h"         /* q_dotz_quiet — `-q` silences a transcript's prompt and echo, as the piped console's */
@@ -130,8 +130,8 @@ static void ctx_load_esig(ray_t** esig, q_err_sig_t* t) {
  * (eval errors report and return 0).  console: q_dbg_statement_begin's — 0
  * never suspends (a transcript's line), else a console statement or a load
  * line's inheritance. */
-static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
-                    int print_result, int in_load, int console, ray_t** esig) {
+static int ctx_line_run(const char* s, size_t n, FILE* out, FILE* err,
+                        int print_result, int in_load, int console, ray_t** esig) {
     if (n == 0)
         return 0;
 
@@ -179,14 +179,8 @@ static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
         r = ray_lazy_materialize(r);
 
     /* THE doc-capture fire point: a header claimed during this statement's eval
-     * reaches its `.help` hook here — after the eval (never mid-eval) and BEFORE the
-     * drain below, so anything the q hook shows leaves with this statement. */
+     * reaches its `.help` hook here — after the eval, never mid-eval. */
     q_comment_stmt_end();
-
-    /* flush any show/0N! side-effect display captured during eval */
-    { const char* con = q_console_str();
-      if (con && *con) fputs(con, out);
-      q_console_reset(); }
 
     /* Mirror repl.c's post-eval contract: a Ctrl-C that landed during eval
      * means "stop" even when a non-polling C kernel absorbed it and the
@@ -262,6 +256,14 @@ static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
     ctx_statement_end();
     q_dbg_statement_end(dbg_prev);
     return 0;
+}
+
+static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
+                    int print_result, int in_load, int console, ray_t** esig) {
+    FILE* door = q_console_door(out);
+    int   rc   = ctx_line_run(s, n, out, err, print_result, in_load, console, esig);
+    q_console_door(door);
+    return rc;
 }
 
 int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
@@ -566,10 +568,8 @@ static int ctx_whole_file(const char* path, ray_t** handler) {
 /* The whole-text load, under the load boundary's law.  The handler's error is the load's answer (esig), displayed
  * here only when nobody asked for it. */
 static int ctx_run_whole(ray_t* handler, ray_t* lines, FILE* out, FILE* err, ray_t** esig) {
-    { const char* con = q_console_str();   /* the caller's pending display lands first, as a script's first line drains it */
-      if (con && *con) fputs(con, out);
-      q_console_reset(); }
     ctx_load_scope_t scope    = ctx_load_enter();
+    FILE*            door     = q_console_door(out);
     FILE*            prev_out = g_console_out;
     FILE*            prev_err = g_console_err;
     g_console_out = out;
@@ -579,6 +579,7 @@ static int ctx_run_whole(ray_t* handler, ray_t* lines, FILE* out, FILE* err, ray
     int    ok = !r || !RAY_IS_ERR(r);
     g_console_out = prev_out;
     g_console_err = prev_err;
+    q_console_door(door);
     ctx_load_leave(scope, ok);
     if (ok) {
         if (r) ray_release(r);
@@ -658,8 +659,7 @@ int q_ctx_run_load(const char* name, FILE* out, FILE* err) {
  *
  * q_ctx_run_line's pipeline, disposing of the result over the wire instead of
  * to `out`; errors propagate as owned values the IPC layer serializes as -128h.
- * Console output drains to the SERVER's stdout, then resets so it cannot bleed
- * into the next request. */
+ * Console output is written to the SERVER's stdout as it is issued. */
 
 /* `\e` error-trap-CLIENTS mode (syscmds.md#e-error-trap-clients) applied to a
  * request: 1 = the statement is console-marked, so an error suspends on the
@@ -684,10 +684,9 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
      * answers nothing, not because the wire silences it.  A parse error needs
      * no arm of its own here (it propagates as the -128h answer); only the
      * `\e 2` dump is this door's. */
-    ray_t* r = q_ctx_eval_src(src, len);
-    { const char* con = q_console_str();
-      if (con && *con) fputs(con, stdout);
-      q_console_reset(); }
+    FILE*  door = q_console_door(stdout);
+    ray_t* r    = q_ctx_eval_src(src, len);
+    q_console_door(door);
     ctx_statement_end();
     remote_err_dump(r);                  /* `\e 2`: trace before the seam closes */
     q_dbg_statement_end(dbg_prev);

@@ -9,9 +9,9 @@
 #include "qlang/io/q_handles.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_registry_internal.h" /* q_str_text_bytes, q_type_strict_i64 */
-#include "qlang/q_console.h" /* q_console_write — the 1/-1 console handles */
+#include "qlang/q_console.h" /* q_console_write/_err — the 1 -1 2 -2 console handles */
 #include "qlang/q_dotz.h"   /* q_dotz_now_ns — the portable wall clock */
-#include "qlang/io/q_io.h"   /* q_io_mkdir_parents — hopen creates missing directories */
+#include "qlang/io/q_io.h"   /* q_io_mkdir_parents — hopen creates missing directories; q_io_write_fd */
 #include "qlang/io/q_provider.h" /* the `:pq:` virtual-table provider arms */
 #include "qlang/net/q_wirefile.h"    /* q_wirefile_append_path — typed handle append */
 #include "qlang/net/q_ws.h"          /* q_ws_client_open — `:ws:// sym handles */
@@ -28,8 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>           /* open — file/fifo transport handles */
-#include <unistd.h>          /* read/write/close — raw handle IO */
-#include <errno.h>           /* EINTR — short-write retry loop */
+#include <unistd.h>          /* close — raw handle IO */
 #ifdef RAY_OS_WINDOWS
 #include <io.h>              /* _dup/_close — msvcrt has no fcntl/F_DUPFD */
 #endif
@@ -225,18 +224,6 @@ ray_t* q_handles_open(const char* path, size_t plen, int is_fifo) {
 
 /* ---- apply: `h x` ------------------------------------------------------- */
 
-/* write() the WHOLE buffer, retrying short writes and EINTR — a FIFO or large
- * payload can consume fewer bytes than asked without erroring.  0 ok, -1 error. */
-static int write_all(int fd, const char* p, int64_t n) {
-    int64_t off = 0;
-    while (off < n) {
-        ssize_t w = write(fd, p + off, (size_t)(n - off));
-        if (w < 0) { if (errno == EINTR) continue; return -1; }
-        off += w;
-    }
-    return 0;
-}
-
 /* Raw file write.  A POSITIVE handle writes the payload bytes verbatim — NO
  * newline framing (the primitive the streaming PR lacked); a NEGATIVE handle
  * appends '\n' after the string / after each list item (basics/handles.md:
@@ -248,8 +235,8 @@ static ray_t* raw_write(int64_t qh, ray_t* y) {
     if (y && y->type == RAY_BYTE_ONLY) { yp = (const char*)ray_data(y); yn = q_count(y); }
     else if (!(y && q_str_text_bytes(y, &yp, &yn))) yp = NULL;
     if (yp) {
-        if (yn > 0 && write_all(fd, yp, yn) < 0) return q_err(QE_IO);
-        if (nl && write_all(fd, "\n", 1) < 0) return q_err(QE_IO);
+        if (yn > 0 && q_io_write_fd(fd, yp, (size_t)yn) < 0) return q_err(QE_IO);
+        if (nl && q_io_write_fd(fd, "\n", 1) < 0) return q_err(QE_IO);
         return NULL;
     }
     if (y && (y->type == RAY_LIST || y->type == RAY_STR)) {
@@ -261,9 +248,9 @@ static ray_t* raw_write(int64_t qh, ray_t* y) {
             if (!it || RAY_IS_ERR(it)) return it ? it : q_err(QE_OOM);
             const char* ip; int64_t in_;
             if (!q_str_text_bytes(it, &ip, &in_)) { ray_release(it); return q_err(QE_TYPE); }
-            if (in_ > 0 && write_all(fd, ip, in_) < 0) { ray_release(it); return q_err(QE_IO); }
+            if (in_ > 0 && q_io_write_fd(fd, ip, (size_t)in_) < 0) { ray_release(it); return q_err(QE_IO); }
             ray_release(it);
-            if (nl && write_all(fd, "\n", 1) < 0) return q_err(QE_IO);
+            if (nl && q_io_write_fd(fd, "\n", 1) < 0) return q_err(QE_IO);
         }
         return NULL;
     }
@@ -288,15 +275,19 @@ ray_t* q_handles_console_eval(ray_t* y) {
     return r;
 }
 
-/* Console handles (kdb basics/handles.md): 1/-1 stdout, routed to the q console
- * sink; a NEGATIVE handle appends '\n' after each string.  2/-2 are NOT here —
- * stderr is fd 2, which raw_write already speaks.  NULL on success, else the error. */
+/* Console handles (kdb basics/handles.md): 1/-1 stdout, 2/-2 stderr, all through
+ * the one console sink; a NEGATIVE handle appends '\n' after each string, in the
+ * same write.  NULL on success, else the error. */
 static ray_t* console_write_h(int64_t qh, ray_t* y) {
-    int nl = qh < 0;
+    int  nl  = qh < 0;
+    int  fd2 = qh == 2 || qh == -2;
+    int  (*emit)(const char*, size_t, bool) = fd2 ? q_console_write_err : q_console_write;
+    q_err_e fail = fd2 ? QE_IO : QE_WSFULL;
     const char* yp; int64_t yn;
-    if (y && q_str_text_bytes(y, &yp, &yn)) {
-        if (q_console_write(yp, (size_t)yn) || (nl && q_console_write("\n", 1)))
-            return q_err(QE_WSFULL);
+    if (fd2 && y && y->type == RAY_BYTE_ONLY) {
+        if (emit((const char*)ray_data(y), (size_t)q_count(y), nl)) return q_err(fail);
+    } else if (y && q_str_text_bytes(y, &yp, &yn)) {
+        if (emit(yp, (size_t)yn, nl)) return q_err(fail);
     } else if (y && (y->type == RAY_LIST || y->type == RAY_STR)) {
         int64_t m = q_count(y);
         for (int64_t i = 0; i < m; i++) {
@@ -309,9 +300,9 @@ static ray_t* console_write_h(int64_t qh, ray_t* y) {
                 ray_release(it);
                 return q_err(QE_TYPE);
             }
-            int rc = q_console_write(ip, (size_t)in_) || (nl && q_console_write("\n", 1));
+            int rc = emit(ip, (size_t)in_, nl);
             ray_release(it);
-            if (rc) return q_err(QE_WSFULL);
+            if (rc) return q_err(fail);
         }
     } else
         return q_err(QE_TYPE);
@@ -334,8 +325,7 @@ static ray_t* echo(ray_t* h, ray_t* bad) {
 
 ray_t* q_handles_apply(ray_t* h, ray_t* y) {
     int64_t qh = (h->type == -RAY_I64) ? h->i64 : (int64_t)h->i32;
-    if (qh == 1 || qh == -1) return echo(h, console_write_h(qh, y));
-    if (qh == 2 || qh == -2) return echo(h, raw_write(qh, y));   /* stderr IS fd 2, `\2`-redirectable */
+    if (qh == 1 || qh == -1 || qh == 2 || qh == -2) return echo(h, console_write_h(qh, y));
     if (qh == 0) return q_handles_console_eval(y);
     int64_t afd = (qh == INT64_MIN) ? 0 : (qh < 0 ? -qh : qh);   /* neg h = same fd */
     if (afd >= 3) {

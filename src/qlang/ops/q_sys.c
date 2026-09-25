@@ -22,7 +22,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/eval/q_eval.h" /* q_eval / q_eval_dot_wrap — timing + .Q.ts */
 #include "qlang/q_fmt.h"      /* q_fmt_set_prec/q_fmt_prec (`\P`) */
-#include "qlang/q_console.h"  /* q_console_str/reset (timed-expr side effects); q_console_pipe_* (`\classic`) */
+#include "qlang/q_console.h"  /* q_console_flush (the exit path); q_console_pipe_* (`\classic`) */
 #include "qlang/q_ctx.h"           /* the engine context: `\l` source seam, console teardown */
 #include "qlang/io/q_io.h"    /* q_io_mkdir_parents — `\1`/`\2` create the path they name */
 #include "qlang/io/q_mount.h" /* q_mount_dir — the `\l <dir>` forms */
@@ -192,7 +192,7 @@ void q_sys_exit(int code) {
     g_exit_code = code;
     q_ctx_console_close();
     q_dotz_exit_fire(code);
-    q_console_flush();   /* the host never gets its drain turn — issue #23 */
+    q_console_flush();   /* issue #23: nothing the statement wrote is left in a stream buffer */
     exit(code);
 }
 
@@ -325,7 +325,7 @@ static ray_t* h_x(const char* arg, size_t alen) {
 
 /* `\1 file` / `\2 file` — basics/syscmds.md: files and intermediate directories
  * created if necessary, output APPENDED to an existing one.  FD level (dup2),
- * not a re-pointed FILE*, so every writer follows at once — the console drain,
+ * not a re-pointed FILE*, so every writer follows at once — the console sink,
  * the q handle 2, a child inheriting the descriptor — and `\1 /dev/stdin`
  * restores the default the way the doc says.  Getter form: still 'nyi. */
 static ray_t* h_redirect(int fd, const char* arg, size_t alen) {
