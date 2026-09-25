@@ -307,11 +307,14 @@
   hdel each paths til drop;
   };
 
-/ Load the standard library: \l pq runs this.  Every file loads as \l pq/<file>.q - a real file when a pq/ directory
-/ (the working directory's, then QHOME's) has it, else the copy built into peachq - so the list here IS the library.
-/ @return (symbol list) the file names, in load order
-/ @eg .pq.load[]
-.pq.load:{[]
-  files:`csv`duckdb`ffi`j`massive`md`parquet`pq`qpc`regexp`str`termbox`fs`path`pkg`qunit`yml;
-  {system "l pq/",string[x],".q"} each files;
-  files};
+/ Every standard-library file, in the order \l pq reloads them.
+.pq.i.files:`csv`duckdb`ffi`j`massive`md`parquet`pq`qpc`regexp`str`termbox`fs`path`pkg`qunit`yml;
+
+/ Run each file as \l pq/<file>.q: a pq/ directory's (the working directory's, then QHOME's), else the built-in copy.
+.pq.i.run:{[files] {system "l pq/",string[x],".q"} each files; files};
+
+/ Load standard-library files not already loaded; \l pq/<file>.q and \l pq always reload.
+/ @param files (symbol|symbol list) the files to load; [] for every library file
+/ @return (symbol list) the files this call loaded
+/ @eg .pq.load`regexp
+.pq.load:{[files] .pq.i.run $[files~(::);.pq.i.files;(),files] except .pq.i.loaded[]};
