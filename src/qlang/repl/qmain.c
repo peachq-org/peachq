@@ -278,7 +278,9 @@ int main(int argc, char** argv) {
 
     /* After the display defaults above, so an explicit `-c` wins over them. */
     bool failed = false;
+    q_sys_launching(true);
     for (int i = 0; i < n_applied && !failed; i++) failed = !option_apply(argv, applied[i]);
+    q_sys_launching(false);
     free(applied);
 
     if (port_spec && !failed) {

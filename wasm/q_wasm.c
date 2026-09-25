@@ -3,7 +3,6 @@
  * with stdout/stderr as its streams: the host reads the answer from the module's
  * print/printErr exactly as a terminal reads ./q.  wasm/engine.js is the one caller,
  * and wasm/smoke.js runs its .qcmd ledger through q_wasm_qcmd. */
-#define _POSIX_C_SOURCE 200809L   /* setenv */
 #include "qlang/q_runtime.h"
 #include "qlang/q_ctx.h"
 #include "qlang/q_console.h"      /* pipe-table display + the console clip */
@@ -20,13 +19,12 @@
 
 static ray_runtime_t* g_rt = NULL;
 
-/* Idempotent.  0 ok, 1 failure.  The pool gets zero workers: a wasm module is
- * single-threaded (platform.c answers ray_thread_create with 'nyi). */
+/* Idempotent.  0 ok, 1 failure.  The pool has no workers, as q without -s: a
+ * wasm module is single-threaded (platform.c answers ray_thread_create with 'nyi). */
 EMSCRIPTEN_KEEPALIVE
 int q_wasm_init(void) {
     if (g_rt)
         return 0;
-    setenv("RAYFORCE_CORES", "0", 1);
     g_rt = q_runtime_create(0, NULL);
     if (!g_rt)
         return 1;

@@ -38,6 +38,8 @@
 #include "core/sock.h"        /* ray_sock_resolve4 / _service_port — the listen spec host and servicename */
 #include "core/poll.h"        /* ray_poll_get / deregister — `\p 0W`/`\p 0`; poll->timers */
 #include "core/runtime.h"     /* ray_runtime_get_poll — the runtime event poll */
+#include "core/platform.h"    /* ray_thread_count — `\s 0W` */
+#include "core/pool.h"        /* ray_pool_get / _init / _destroy — `\s` is the pool */
 #include "core/numparse.h"    /* ray_parse_i64 — the shared engine int parser (reuse) */
 #include "core/rand.h"        /* ray_rand_seed — `\S` re-seeds THE stream */
 #include "core/timer.h"       /* ray_timers_create/add/del — `\t N` timer heap */
@@ -131,16 +133,16 @@ void q_sys_seed_init(void) {
  * BEHAVIOURAL SIDE-EFFECTS ARE MOSTLY DEFERRED (rule 9): `\c` NOW clips the q
  * console DISPLAY (width + height, applied by q_fmt.c's console emitter — see
  * q_fmt_console), but peachq does not yet wrap `\C` HTTP output, run real gc
- * for `\g`, apply `\o`/`\W` to temporal display, trap errors for `\e`, or
- * re-tune worker threads for `\s`.  Those commands store + report the kdb-true
- * value only; the effect itself is a tracked PLAN.md gap.  Faking a
- * side-effect would be worse than an honest store-and-report. */
+ * for `\g`, apply `\o`/`\W` to temporal display, or trap errors for `\e`.
+ * Those commands store + report the kdb-true value only; the effect itself is
+ * a tracked PLAN.md gap.  Faking a side-effect would be worse than an honest
+ * store-and-report. */
 static int32_t g_http_rows, g_http_cols;  /* \C HTTP size     (default 36 2000) */
 static int32_t g_gc_mode;                 /* \g gc mode       (default 0)       */
 static int64_t g_utc_offset;              /* \o UTC offset    (default 0N)      */
 static int32_t g_week_offset;             /* \W week offset   (default 2)       */
 static int32_t g_err_trap;                /* \e error trap    (default 0)       */
-static int32_t g_sec_threads;             /* \s secondary thr (default 0)       */
+static int     g_launching;               /* the launcher is applying argv options */
 static int     g_own_process;             /* this runtime may exit the process   */
 static int     g_exiting;                 /* .z.exit reentry guard */
 
@@ -167,7 +169,6 @@ void q_sys_cfg_init(void) {
     g_week_offset = 2;           /* Monday (0 = Saturday) */
     q_tok_date_order_set(0);     /* `\z` — mm/dd/yyyy (state single-homed in q_tok.c) */
     g_err_trap  = 0;             /* trapping off */
-    g_sec_threads = 0;           /* no secondary threads configured */
     g_timer_ms  = 0;             /* `\t` off per runtime */
     g_timer_id  = -1;
     g_listen_port = 0;           /* `\p` — no listening port by default */
@@ -176,6 +177,8 @@ void q_sys_cfg_init(void) {
 }
 
 void q_sys_own_process(bool on) { g_own_process = on ? 1 : 0; }
+
+void q_sys_launching(bool on) { g_launching = on ? 1 : 0; }
 
 /* See q_sys.h.  `.z.exit` runs AFTER the console is restored (its 0N! output
  * must land on a cooked terminal) and cannot cancel or rewrite the exit: a
@@ -909,13 +912,27 @@ static ray_t* h_e(const char* arg, size_t alen) {
     return NULL;
 }
 
-/* `\s` — secondary threads.  `\s`→configured count (`0i`).  Runtime re-tuning
- * (and `\s 0N` = show max) is DEFERRED; `\s 0N` returns a parse error for now. */
+/* `\s` — secondary threads ARE the worker pool (owner ruling 2026-09-25): the launcher applies `-s N` as `\s N` while
+ * g_launching is set, which sizes the pool, and its worker count is the ceiling `\s 0N` shows (`0W` = all cores but
+ * one).  Later `\s N` lets N of those workers run at once — never a destroy + re-init, since a worker's heap dies
+ * with its thread while values it allocated live on — and refuses a count past the ceiling, or 0 while workers exist:
+ * switching between single- and multi-threaded is not designed yet.  Negative N (processes, .z.pd) is 'nyi. */
 static ray_t* h_s(const char* arg, size_t alen) {
-    if (alen == 0) return ray_i32(g_sec_threads);
+    ray_pool_t* pool = ray_pool_get();
+    if (!pool) return q_err(QE_OOM);
+    if (alen == 0) return ray_i32((int32_t)pool->n_active);
+    if (alen == 2 && arg[0] == '0' && arg[1] == 'N') return ray_i32((int32_t)pool->n_workers);
     int64_t v;
-    if (!parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
-    g_sec_threads = (int32_t)v;
+    if (alen == 2 && arg[0] == '0' && arg[1] == 'W') v = (int64_t)ray_thread_count() - 1;
+    else if (!parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
+    if (v < 0) return q_err(QE_NYI);
+    if (g_launching) {
+        if (v > UINT32_MAX) return q_err(QE_THREADS);
+        ray_pool_destroy();
+        return ray_pool_init((uint32_t)v) == RAY_OK ? NULL : q_err(QE_THREADS);
+    }
+    if (v > pool->n_workers || (v == 0 && pool->n_workers > 0)) return q_err(QE_THREADS);
+    pool->n_active = (uint32_t)v;
     return NULL;
 }
 

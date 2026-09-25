@@ -21,6 +21,7 @@ typedef enum {
     QE_OOM, QE_IO, QE_NAME, QE_INDEX, QE_RESERVE, QE_INIT,
     QE_RANGE, QE_SCHEMA, QE_CORRUPT, QE_CANCEL, QE_VERSION, QE_DUCKDB,
     QE_REGEX, QE_OPTION, QE_CSV, QE_PRINTF, QE_FORMAT, QE_BADFUNC,
+    QE_THREADS,             /* `\s N` past the -s ceiling, or a switch between single- and multi-threaded */
     QE_SIGNAL, QE_RETURN,   /* always payload-carrying; sdata never displayed */
     QE__COUNT
 } q_err_e;
