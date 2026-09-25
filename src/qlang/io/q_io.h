@@ -81,6 +81,10 @@ ray_t* q_io_write_all(ray_t* pathstr, const void* bytes, size_t n);
  * faults in the memcpy and the syscall never meets an unmapped page.  0, or -1 on a short write. */
 int q_io_fwrite(FILE* fp, const void* bytes, size_t n);
 
+/* THE descriptor write: all n bytes, retrying short writes and EINTR (a fifo or a large payload takes fewer bytes
+ * than asked without erroring).  0, or -1 on an error. */
+int q_io_write_fd(int fd, const void* bytes, size_t n);
+
 /* A kxzip container held whole in memory: NULL = none (buf IS the plaintext),
  * else owned plaintext bytes, or 'corrupt/'nyi.  q_io_zip_stats is `-21!x` —
  * an owned five-key dict, EMPTY when the file carries no container. */
