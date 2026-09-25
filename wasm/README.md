@@ -11,7 +11,7 @@ small client library. The build output, `build/wasm/www/`, is a directory any st
 | `worker.js`          | The Worker: hosts the engine, answers the client, supplies HTTP by synchronous XHR. |
 | `engine.js`          | Boots the module, owns its C ABI, mounts file manifests lazily. Shared by the Worker and the node smoke. |
 | `index.html`         | The minimal reference page, built on the client API. |
-| `q_wasm.c`           | The C ABI: `q_wasm_init`, `q_wasm_eval` (one line through `q_ctx_run_line`, answered on stdout/stderr), `q_wasm_qdoc` (a `.qcmd` through the qdoc runner). |
+| `q_wasm.c`           | The C ABI: `q_wasm_init`, `q_wasm_eval` (one line through `q_ctx_run_line`, answered on stdout/stderr), `q_wasm_qcmd` (a `.qcmd` replayed through the transcript door, scored by the host). |
 | `q_wasm_http.c`      | The wasm side of the HTTP exchange seam: calls the host's `Module.peachqFetch`, rebuilds the raw response. |
 | `q_wasm_duckdb.c`    | The DuckDB C-API table (`duck_api_t`) bound across to DuckDB's own wasm module, which the host loads on first use. |
 | `duck-loader.js`     | Loads DuckDB's published browser build synchronously in the Worker; main is its WebDB, over q's filesystem. |
@@ -101,11 +101,12 @@ make -f Makefile.wasm duckdb-wasm          # DuckDB's browser build, checked aga
 python3 wasm/server.py                     # then open http://localhost:8000
 ```
 
-Both smokes replay their `.qcmd` folder inside the wasm module through the same qdoc runner as `./qdoctest`
-(`q_wasm_qdoc`), in file order, in one session, after binding `ORIGIN` to their server's `http://host:port` — so a
+Both smokes replay their `.qcmd` folder inside the wasm module through the transcript door the native gate
+uses (`q_wasm_qcmd`, scored in `engine.js` by the row rule of `tools/qcmd/run.sh`), in file order, in one
+session, after binding `ORIGIN` to their server's `http://host:port` — so a
 row spells a URL `ORIGIN,"/files.json"`. They are wasm-only ledgers — `/home/q`, the lazily mounted examples, the
 pipe display, a live server — and deliberately live outside `test/q`, where the native gate would find them. A `\l`
-row's echo is not captured by the runner, so each load is followed by rows that pin what it built.
+row shows what the load printed, not the statements it ran, so each load is followed by rows that pin what it built.
 
 `smoke.js` runs under the emsdk node (`$EMSDK_NODE`; override with `NODE=`). The browser check needs Playwright
 and its Chromium from the environment — this repo installs no packages.
