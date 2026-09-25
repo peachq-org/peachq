@@ -416,7 +416,7 @@
 .help.i.r[`.pq.termsize;".pq.termsize[]                      /                         report the live terminal size as rows and columns"]
 .help.i.r[`.pq.cancolor;".pq.cancolor[]                      /                         tell whether stdout should carry ANSI colour"]
 .help.i.r[`.pq.dr;".pq.dr `neg                         / ::                      print a verb's domain and range grid, one row per type"]
-.help.i.r[`.pq.load;".pq.load[]                          /                         load the standard library file by file, as \\l pq does"]
+.help.i.r[`.pq.load;".pq.load`regexp                     /                         load the standard-library files not already loaded ([] = every file)"]
 .help.i.r[`.pq.load_natives;".pq.load_natives`regexp             /                         bind the C functions a standard-library file calls, by file name"]
 .help.i.r[`.j.j;".j.j `a`b!1 2                       / \"{\\\"a\\\":1,\\\"b\\\":2}\"     render a value as JSON text"]
 .help.i.r[`.j.k;".j.k \"[1,2,3]\"                      / 1 2 3f                  parse JSON text into a value"]
