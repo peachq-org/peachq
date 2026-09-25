@@ -688,13 +688,17 @@ static void send_response(ray_sock_t fd, ray_t* result, bool zip_ok)
 
 /* Decode one inbound payload (exactly one object, whole-buffer).
  * *is_wire_err is set when the payload is a well-formed top-level -128h
- * error — the REMOTE's error object, a valid response value.  Any other
- * decode failure, or trailing bytes, returns NULL: protocol corruption,
- * the caller closes the connection. */
+ * error — the REMOTE's error object, a valid response value.  *value_err
+ * is set when the decode failed on the value itself ('badfunc — D0731b):
+ * the frame length already delimits the message, so the error is returned
+ * and the stream stays in sync.  Any other decode failure, or trailing
+ * bytes, returns NULL: a malformed structure, the caller closes the
+ * connection (dotz.md `.z.bm`). */
 static ray_t* ipc_decode_payload(const uint8_t* p, size_t plen, int swap,
-                                 int* is_wire_err)
+                                 int* is_wire_err, int* value_err)
 {
     if (is_wire_err) *is_wire_err = 0;
+    if (value_err) *value_err = 0;
     if (plen == 0) return NULL;
     if (p[0] == 0x80) {                     /* wire error -128h: 0x80 + text cstr */
         const uint8_t* nul = memchr(p + 1, 0, plen - 1);
@@ -703,10 +707,12 @@ static ray_t* ipc_decode_payload(const uint8_t* p, size_t plen, int swap,
         return q_err_from_text((const char*)(p + 1), (size_t)(nul - (p + 1)));
     }
     size_t consumed = 0;
-    ray_t* v = q_wire_read_obj(p, plen, &consumed, swap);
+    int verr = 0;
+    ray_t* v = q_wire_read_obj_ex(p, plen, &consumed, swap, 0, &verr);
     if (!v) return NULL;
-    if (RAY_IS_ERR(v)) { ray_error_free(v); return NULL; }
+    if (RAY_IS_ERR(v) && !(verr && consumed == plen)) { ray_error_free(v); return NULL; }
     if (consumed != plen) { ray_release(v); return NULL; }
+    if (value_err) *value_err = verr;
     return v;
 }
 
@@ -725,8 +731,13 @@ static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
     q_err_drop();   /* request-entry error-payload backstop (q_repl's twin) —
                        a prior request's uncaught 'name text must not caption
                        this request's unrelated error */
-    ray_t* msg = ipc_decode_payload(payload, plen, swap, NULL);
+    int value_err;
+    ray_t* msg = ipc_decode_payload(payload, plen, swap, NULL, &value_err);
     if (!msg) return -1;
+    if (value_err) {                        /* answered like an evaluation error; async drops it */
+        *out_result = msg;
+        return 0;
+    }
 
     int hook_idx = (msgtype == RAY_IPC_MSG_SYNC) ? IPC_HOOK_SYNC
                                                  : IPC_HOOK_ASYNC;
@@ -1303,13 +1314,14 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
 
     /* Response frame: deposit it for the sync send waiting on this
      * conn instead of evaluating it.  A response nobody waits for has
-     * no defined meaning — log and drop.  Protocol corruption (decode
-     * failure / trailing bytes) closes the connection so the waiter
-     * observes a clean 'io error instead of a bogus value. */
+     * no defined meaning — log and drop.  A malformed structure (or
+     * trailing bytes) closes the connection so the waiter observes a clean
+     * 'badmsg instead of a bogus value; a value-level decode error such as
+     * 'badfunc is itself the response. */
     if (msgtype == RAY_IPC_MSG_RESP) {
         int is_wire_err = 0;
         ray_t* obj = ipc_decode_payload(pdata, (size_t)plen, swap,
-                                        &is_wire_err);
+                                        &is_wire_err, NULL);
         if (!obj) {              /* malformed data structure — .z.bm (dotz.md) */
             hook_call_badmsg(poll, id, sel->fd, pdata, (size_t)plen);          /* (1) */
             if (payload) ray_poll_buf_free(payload);

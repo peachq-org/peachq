@@ -91,7 +91,7 @@ static int tok_clock_frac9(const tok_clock *c) { return !(c->dot && !c->fd) && c
  * do not "fix" it.  Returns 1 with *e past the clock, 0 with *err on a malformed clock (3+ hour digits, a colon not
  * followed by two digits, a field out of range, a dot after clock digits that brings no fraction digit, 10+ of them).
  * The byte after the clock is caller policy: a timestamp hands it to the literal builder (a type letter), a timespan
- * yields to a name byte (`1D45x` stays a juxtaposition), and a dot after a BARE separator is not a clock byte at all
+ * yields to a name byte (`1D45x` stays a juxtaposition) unless it is a type letter it takes, and a dot after a BARE separator is not a clock byte at all
  * (`0D.x` is a dotted name; the p/z arms die on it). */
 static int tok_clock_tail(const char *src, int *e, tok_clock *c, const char **err) {
     size_t q = tok_clock_scan(src, SIZE_MAX, (size_t)*e, c);
@@ -103,6 +103,8 @@ static int tok_clock_tail(const char *src, int *e, tok_clock *c, const char **er
     *e = (int)q;
     return 1;
 }
+
+static int lit_temporal_letter(char c, const q_tok_el *last);
 
 /* ===== 1. literal magnitudes (the code parser's temporal arm) ===== */
 int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
@@ -229,7 +231,8 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
     /* Timespan D-form: digits 'D' clock (interfaces usage 0D00:05 / 0D00:00:10; `0D0` is the one-digit spelling,
      * learn/brief-introduction.md:38 `n?0D0`; the bare `1D` day count is derived).  The clock is the shared tail; what
      * is arm policy is the byte after it: a name byte means this was a name after all — `1D45x`, `1D4x`, `1D123` and
-     * `0Dabc` stay `int` + name juxtapositions (the no-churn rule) — and a bare `0D` also yields to '.' or ':' (`0D.x`
+     * `0Dabc` stay `int` + name juxtapositions (the no-churn rule) — unless it is a lone type letter the timespan
+     * takes (`0D12:00n`, `0D01:30:00t`: the bare clock's #594 rules), and a bare `0D` also yields to '.' or ':' (`0D.x`
      * is a dotted name).  Hour overflow normalises through the ns count (`123D45` -> 124D21:…).  The date arm ran
      * first, so `2000.01.01D…` never reaches here. */
     {
@@ -242,7 +245,9 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
             tok_clock c;
             if (!tok_clock_tail(src, &e, &c, err)) return -1;
             int bare = !c.fields && !c.fd;
-            if (!tok_name_byte(src[e]) && !(bare && (src[e] == '.' || src[e] == ':'))) {
+            q_tok_el ts = { .kind = Q_TOK_EL_TIMESPAN };
+            int letter = lit_temporal_letter(src[e], &ts) && !tok_name_byte(src[e + 1]);
+            if ((letter || !tok_name_byte(src[e])) && !(bare && (src[e] == '.' || src[e] == ':'))) {
                 int64_t days = 0;
                 for (int k = 0; k < dd; k++) days = days * 10 + (src[q + k] - '0');
                 out->kind = Q_TOK_EL_TIMESPAN;
@@ -444,18 +449,22 @@ static ray_t *lit_temporal(const lit_ctx *c, const q_tok_el *buf, int m) {
     return lit_mark_nulls(ray_vec_from_raw(c->type, t, m), buf, m);
 }
 
-/* Read an optional trailing type letter at src[*p].  b/h/i/j/e/f are always available.  A TEMPORAL letter asks a
- * narrower question than lit_el_ok — a plain int is a raw payload in EVERY temporal context (`2000.01.01 5` is a
- * date vector) but only p/u/v/t let one CARRY the letter — so `3d` / `3m` / `3z` keep parsing as `3` juxtaposed with
- * the name (no parse-display churn) while `0p` / `1t` / `13:30 20:00t` are literals.  `g` (guid) is null-only —
+/* A TEMPORAL letter asks a narrower question than lit_el_ok — a plain int is a raw payload in EVERY temporal context
+ * (`2000.01.01 5` is a date vector) but only p/u/v/t let one CARRY the letter — so `3d` / `3m` / `3z` keep parsing as
+ * `3` juxtaposed with the name (no parse-display churn) while `0p` / `1t` / `13:30 20:00t` are literals. */
+static int lit_temporal_letter(char c, const q_tok_el *last) {
+    for (size_t k = 0; c && k < sizeof LIT_CTX / sizeof *LIT_CTX; k++)
+        if (c == q_type_char(LIT_CTX[k].type))
+            return last->kind == Q_TOK_EL_INT ? LIT_CTX[k].int_ok : lit_el_ok(last, &LIT_CTX[k], 1);
+    return 0;
+}
+
+/* Read an optional trailing type letter at src[*p].  b/h/i/j/e/f are always available.  `g` (guid) is null-only —
  * guid has no infinity and no other literal (basics/datatypes.md §Guid). */
 void q_tok_type_letter(const char *src, int *p, char *letter, const q_tok_el *last) {
     char c = src[*p];
-    int ok = c && (strchr("bhijef", c) || (c == 'g' && last->kind == Q_TOK_EL_NULL));
-    for (size_t k = 0; !ok && k < sizeof LIT_CTX / sizeof *LIT_CTX; k++)
-        ok = c == q_type_char(LIT_CTX[k].type) &&
-             (last->kind == Q_TOK_EL_INT ? LIT_CTX[k].int_ok : lit_el_ok(last, &LIT_CTX[k], 1));
-    if (ok) *letter = src[(*p)++];
+    if (c && (strchr("bhijef", c) || (c == 'g' && last->kind == Q_TOK_EL_NULL) || lit_temporal_letter(c, last)))
+        *letter = src[(*p)++];
 }
 
 /* ---- byte literals (q type 4, char x): glued `0x` consumes the maximal hex-digit run.  Doc pins (CLEAN ROOM,

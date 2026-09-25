@@ -212,7 +212,7 @@ static ray_t* wf_read_a(const uint8_t* buf, size_t len) {
     if (buf[2] == RAY_SYM)
         return wf_disk_attr(wf_syms_to_eof(buf + WF_A_OFF, len - WF_A_OFF), buf[3]);
     size_t consumed = 0;
-    ray_t* v = q_wire_read_obj_ex(buf + 2, len - 2, &consumed, 0, Q_WIRE_READ_DISK);
+    ray_t* v = q_wire_read_obj_ex(buf + 2, len - 2, &consumed, 0, Q_WIRE_READ_DISK, NULL);
     if (v && !RAY_IS_ERR(v) && consumed != len - 2) { ray_release(v); return q_err(QE_CORRUPT); }
     return v;
 }

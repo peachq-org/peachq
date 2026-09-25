@@ -104,7 +104,7 @@ int64_t ray_ser_raw(uint8_t* buf, ray_t* obj) {
 ray_t* ray_de_raw(uint8_t* buf, int64_t* len) {
     if (!len || *len < 1) return NULL;
     size_t consumed = 0;
-    ray_t* r = q_wire_read_obj_ex(buf, (size_t)*len, &consumed, 0, 1);
+    ray_t* r = q_wire_read_obj_ex(buf, (size_t)*len, &consumed, 0, 1, NULL);
     *len -= (int64_t)consumed;
     return r;
 }
