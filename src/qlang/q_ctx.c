@@ -104,12 +104,13 @@ static void ctx_show_err(FILE* out, FILE* err, ray_t* e) {
  * the off-switch; #53) — so zero is only for argv/bootstrap text. */
 
 /* A load line that ABORTS re-signals to whoever asked for the load: display
- * once at this line, then DETACH the error's identity (else display's drop and
+ * once at this line — unless a trap will catch it, whose handler owns it (owner
+ * 2026-09-25) — then DETACH the error's identity (else display's drop and
  * q_dbg_statement_end's payload restore would destroy the text); the caller
  * re-signals only after the statement seam has closed. */
 static int ctx_load_abort(ray_t* e, FILE* out, FILE* err, q_err_sig_t* t) {
     ctx_tty_restore();
-    if (!q_dbg_reported(e)) {
+    if (!q_dbg_reported(e) && !q_dbg_trapped()) {
         fflush(out);
         q_dbg_print_trace(err, e);
     }
@@ -431,7 +432,7 @@ static int ctx_run_script(const char* src, size_t len, int64_t file_sym, int pri
     ctx_load_t       ld    = { out, err, print_result, lang, esig };
     int              lrc   = ctx_walk_script(src, len, file_sym, ctx_load_stmt, &ld);
     ctx_load_leave(scope, !lrc);
-    if (lrc && esig && *esig) q_dbg_mark_reported(*esig);
+    if (lrc && esig && *esig && !q_dbg_trapped()) q_dbg_mark_reported(*esig);
     return lrc ? 1 + lrc : 0;
 }
 
@@ -514,6 +515,7 @@ static ray_t* pq_console_fn(ray_t* x) {
         fwrite(prompt, 1, (size_t)pl, out);
         fwrite(p, 1, (size_t)n, out);
         fputc('\n', out);
+        fflush(out);   /* a terminal shows the echo before anything the line writes to stderr */
     }
     if (n) {
         char* s = (char*)ray_sys_alloc((size_t)n + 1);   /* q_parse reads a C string */
