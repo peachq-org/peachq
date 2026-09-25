@@ -94,6 +94,10 @@ char* q_sys_host_shell(const char* cmd, size_t* len);
  * alike (owner ruling 2026-09-04), a computation returning data. */
 void   q_sys_own_process(bool on);
 
+/* While on, `\s N` sizes the worker pool and so sets its ceiling — the launcher's `-s N`; only qmain.c sets it, around
+ * applying argv options.  Off, `\s N` stays within that ceiling. */
+void   q_sys_launching(bool on);
+
 /* The ONE process-exit home — `\\`, the `exit` verb, and remote `\\` all land
  * here.  Fires the user's `.z.exit` handler (unary, arg = exit code;
  * ref/dotz.md#zexit-action-on-exit), restores the console, then exit(code).
