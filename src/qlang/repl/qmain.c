@@ -41,7 +41,7 @@ static void conn_bind(const char* name, const char* s, size_t n) {
     ray_release(v);
 }
 
-/* One text as one .pq.i.conn_call: two statements, so the console drains the display before the notice. */
+/* One text as one .pq.i.conn_call: two statements, the display and then the notice. */
 static int conn_call(const char* src, size_t n, const char* save, int last) {
     conn_bind(".pq.i.conn_src", src, n);
     conn_bind(".pq.i.conn_file", save ? save : "", save ? strlen(save) : 0);

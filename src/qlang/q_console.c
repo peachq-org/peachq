@@ -1,12 +1,14 @@
-/* q_console — console sink buffer + the modern pipe-table mode.  See
+/* q_console — the console sink + the modern pipe-table mode.  See
  * q_console.h for the contract; the value->string core stays in q_fmt.c. */
 #include "qlang/q_count.h"
 #include "qlang/q_console.h"
 #include "qlang/q_fmt.h"               /* q_fmt_console_alloc — show's render */
-#include "core/ipc.h"                  /* ray_ipc_current_handle — handler write-through */
-#include "core/platform.h"             /* RAY_OS_WINDOWS — the `\c 0N` terminal query */
+#include "qlang/io/q_io.h"             /* q_io_fwrite / q_io_write_fd — the byte writers */
+#include "core/ipc.h"                  /* ray_ipc_current_handle — a handler writes the server console */
+#include "core/platform.h"             /* RAY_OS_WINDOWS — the `\c 0N` terminal query; RAY_TLS */
 #include "qlang/q_env.h"               /* q_env_bind — the .pq.i.termsize/.pq.i.cancolor natives */
 #include "lang/env.h"                  /* ray_fn_unary */
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,58 +19,67 @@
 #include <unistd.h>
 #endif
 
-/* ---- the console sink buffer --------------------------------------------- */
+/* ---- the console sink: write-through, one lock, whole writes ------------- */
 
-static char*  g_console;
-static size_t g_console_len, g_console_cap;
+static _Atomic(int)  g_con_lock;
+static RAY_TLS FILE* g_door;   /* per thread: a worker writes the process stdout */
 
-void q_console_reset(void) { g_console_len = 0; if (g_console) g_console[0] = '\0'; }
+static void con_lock(void) {
+    while (atomic_exchange_explicit(&g_con_lock, 1, memory_order_acquire)) {
+#if defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#endif
+    }
+}
+static void con_unlock(void) { atomic_store_explicit(&g_con_lock, 0, memory_order_release); }
 
-const char* q_console_str(void) { return g_console ? g_console : ""; }
-
-/* The host drains this buffer BETWEEN statements, so text a statement emits
- * before it exits the process would die with it (peachq issue #23). */
-void q_console_flush(void) {
-    if (!g_console_len) return;
-    fwrite(g_console, 1, g_console_len, stdout);
-    fflush(stdout);
-    q_console_reset();
+FILE* q_console_door(FILE* out) {
+    FILE* prev = g_door;
+    g_door = out;
+    return prev;
 }
 
-static int console_append(const char* s, size_t n) {
-    if (g_console_len + n + 1 > g_console_cap) {
-        size_t nc = g_console_cap ? g_console_cap * 2 : 256;
-        while (nc < g_console_len + n + 1) nc *= 2;
-        char* nb = realloc(g_console, nc);
-        if (!nb) return -1;                    /* say so: a dropped append is lost display */
-        g_console = nb; g_console_cap = nc;
-    }
-    memcpy(g_console + g_console_len, s, n);
-    g_console_len += n;
-    g_console[g_console_len] = '\0';
+/* An IPC handler writes the SERVER console whichever door is open (kdb). */
+static FILE* con_out(void) {
+    return ray_ipc_current_handle() >= 0 || !g_door ? stdout : g_door;
+}
+
+void q_console_flush(void) {
+    con_lock();
+    fflush(con_out());
+    fflush(stdout);
+    con_unlock();
+}
+
+/* A stdout stream error is not the statement's to escalate: a closed pipe drops the display, as it always has. */
+int q_console_write(const char* s, size_t n, bool nl) {
+    FILE* f = con_out();
+    con_lock();
+    if (!q_io_fwrite(f, s, n) && nl) fputc('\n', f);
+    fflush(f);
+    con_unlock();
     return 0;
 }
 
-/* g_console buffer for the host to drain; in an IPC handler (no host drain) straight to stdout, kdb's server-console behaviour. */
-static int console_emit(const char* s, size_t n) {
-    if (ray_ipc_current_handle() >= 0) {
-        size_t w = fwrite(s, 1, n, stdout);
-        fflush(stdout);                        /* a stream error is not OURS to escalate */
-        return w == n ? 0 : -1;
-    }
-    return console_append(s, n);
+/* Raw fd 2, so `\2` redirects it; stdout is flushed first so the two streams keep issue order. */
+int q_console_write_err(const char* s, size_t n, bool nl) {
+    FILE* f = con_out();
+    con_lock();
+    fflush(f);
+    if (f != stdout) fflush(stdout);
+    int bad = q_io_write_fd(2, s, n) || (nl && q_io_write_fd(2, "\n", 1));
+    con_unlock();
+    return bad ? -1 : 0;
 }
 
 int q_console_show(ray_t* val) {
     size_t n;
     char*  txt = q_fmt_console_alloc(val, &n);   /* `show` obeys the `\c` display clip */
     if (!txt) return -1;
-    int rc = console_emit(txt, n);
+    int rc = q_console_write(txt, n, true);
     free(txt);
-    return console_emit("\n", 1) || rc;
+    return rc;
 }
-
-int q_console_write(const char* s, size_t n) { return console_emit(s, n); }
 
 
 /* ---- pipe-mode STATE (the renderer lives in q_fmt.c — a formatting mode) ---- */
