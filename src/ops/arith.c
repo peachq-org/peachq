@@ -150,11 +150,11 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
     /* DATE + TIME → TIMESTAMP */
     if (a->type == -RAY_DATE && b->type == -RAY_TIME) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESTAMP);
-        return ray_timestamp(a->i64 * 86400000000000LL + b->i64 * 1000000LL);
+        return ray_timestamp(wrap_add64(wrap_mul64(a->i64, 86400000000000LL), b->i64 * 1000000LL));
     }
     if (a->type == -RAY_TIME && b->type == -RAY_DATE) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESTAMP);
-        return ray_timestamp(b->i64 * 86400000000000LL + a->i64 * 1000000LL);
+        return ray_timestamp(wrap_add64(wrap_mul64(b->i64, 86400000000000LL), a->i64 * 1000000LL));
     }
     /* TIME + TIME → TIME */
     if (a->type == -RAY_TIME && b->type == -RAY_TIME) {
@@ -164,11 +164,11 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
     /* TIME + TIMESTAMP → TIMESTAMP (add ms as ns) */
     if (a->type == -RAY_TIME && b->type == -RAY_TIMESTAMP) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESTAMP);
-        return ray_timestamp(b->i64 + a->i64 * 1000000LL);
+        return ray_timestamp(wrap_add64(b->i64, a->i64 * 1000000LL));
     }
     if (a->type == -RAY_TIMESTAMP && b->type == -RAY_TIME) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESTAMP);
-        return ray_timestamp(a->i64 + b->i64 * 1000000LL);
+        return ray_timestamp(wrap_add64(a->i64, b->i64 * 1000000LL));
     }
     /* duration + duration -> the finer unit (ref/add.md temporal block).
      * TIME+TIME kept its dedicated arm above; every pair involving u/v/n
@@ -249,7 +249,7 @@ ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
     /* DATE - TIME → TIMESTAMP */
     if (a->type == -RAY_DATE && b->type == -RAY_TIME) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESTAMP);
-        return ray_timestamp(a->i64 * 86400000000000LL - b->i64 * 1000000LL);
+        return ray_timestamp(wrap_sub64(wrap_mul64(a->i64, 86400000000000LL), b->i64 * 1000000LL));
     }
     /* TIME - int → TIME */
     if (a->type == -RAY_TIME && is_numeric(b)) {
@@ -279,7 +279,7 @@ ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
     /* TIMESTAMP - TIME → TIMESTAMP */
     if (a->type == -RAY_TIMESTAMP && b->type == -RAY_TIME) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESTAMP);
-        return ray_timestamp(a->i64 - b->i64 * 1000000LL);
+        return ray_timestamp(wrap_sub64(a->i64, b->i64 * 1000000LL));
     }
     /* TIMESTAMP - TIMESTAMP → TIMESPAN (kdb p-p->n, ref/subtract.md row p
      * col p; same ns payload as the old i64 result, only the tag changed —
@@ -408,7 +408,7 @@ ray_t* ray_mod_fn(ray_t* a, ray_t* b) {
         int64_t av = a->i64;
         int64_t q = av / bv;
         if ((av ^ bv) < 0 && q * bv != av) q--;
-        int64_t result = av - bv * q;
+        int64_t result = wrap_sub64(av, wrap_mul64(bv, q));
         if (a->type == -RAY_TIME)      return ray_time(result);
         if (a->type == -RAY_DATE)      return ray_date(result);
         if (a->type == -RAY_MONTH)     return ray_month(result);
@@ -468,7 +468,7 @@ ray_t* ray_mod_fn(ray_t* a, ray_t* b) {
 
     int64_t q = av / bv;
     if ((av ^ bv) < 0 && q * bv != av) q--;  /* floor division */
-    int64_t result = av - bv * q;
+    int64_t result = wrap_sub64(av, wrap_mul64(bv, q));
     /* Result type follows RIGHT operand */
     if (b->type == -RAY_I32) return make_i32((int32_t)result);
     if (b->type == -RAY_I16) return make_i16((int16_t)result);
