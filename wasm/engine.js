@@ -21,8 +21,8 @@
         let out = [], err = [], seq = [];
         const M = await factory({
             locateFile,
-            print: (s) => { out.push(s); seq.push([0, s]); },
-            printErr: (s) => { err.push(s); seq.push([1, s]); },
+            print: (s) => { out.push(s); seq.push(s); },
+            printErr: (s) => { err.push(s); seq.push(s); },
             peachqFetch: fetch,
             peachqDuckLoad: duckLoad,
         });
@@ -51,11 +51,8 @@
             },
 
             /* A .qcmd transcript replayed in this session (`q f.qcmd`) and scored by the row rule of
-             * tools/qcmd/run.sh: rows pair by index on the echoed prompt line; a non-error row compares
-             * its stdout block, an error row its error line, `'error` and a bare `'` matching any error.
-             * The host sees stdout and stderr in order, so a row's error is the one in its own block
-             * whose [0] frame names the row.  Answers the failing-row count (-1 when no row ran) and a
-             * report of the failures. */
+             * tools/qcmd/run.sh, stdout and stderr read as one stream.  Answers the failing-row count
+             * (-1 when no row ran) and a report of the failures. */
             qcmd(text) {
                 const path = '/tmp/ledger.qcmd';
                 M.FS.writeFile(path, String(text));
@@ -66,18 +63,9 @@
                     if (PROMPT.test(l)) want.push({ line: l, block: [] });
                     else if (want.length && !/^\/[ \t]/.test(l)) want[want.length - 1].block.push(l);
                 }
-                for (const [fd, s] of seq) {
-                    if (!fd && PROMPT.test(s)) got.push({ line: s, block: [], err: '', cur: '' });
-                    else if (!got.length) continue;
-                    else if (!fd) got[got.length - 1].block.push(s);
-                    else {
-                        const g = got[got.length - 1];
-                        if (s.startsWith("'")) g.cur = s;
-                        else if (s.startsWith('  [0]  ')) {
-                            if (!g.err && s.slice(7) === g.line.replace(PROMPT, '')) g.err = g.cur;
-                            g.cur = '';
-                        }
-                    }
+                for (const s of seq) {
+                    if (PROMPT.test(s)) got.push({ line: s, block: [] });
+                    else if (got.length) got[got.length - 1].block.push(s);
                 }
                 const trim = (b) => b.join('\n').replace(/\r/g, '').replace(/^[ \t\n]+|[ \t\n]+$/g, '');
                 const report = [];
@@ -88,9 +76,10 @@
                     else if (g.line !== w.line) { ok = false; act = 'prompt: ' + g.line; }
                     else if (exp.startsWith("'")) {
                         const cls = exp.split('\n')[0].replace(/[ \t]+$/, '').slice(1);
-                        act = g.err || trim(g.block);
-                        ok = !!g.err && (cls === '' || cls === 'error' || g.err === "'" + cls);
-                    } else { act = g.err ? trim(g.block) + '\n' + g.err : trim(g.block); ok = !g.err && act === exp; }
+                        const e = (g.block.find((l) => l.startsWith("'")) || '').replace(/\r$/, '');
+                        act = e || trim(g.block);
+                        ok = !!e && (cls === '' || cls === 'error' || e === "'" + cls);
+                    } else { act = trim(g.block); ok = act === exp; }
                     if (!ok) report.push(`  ${w.line}\n    want: ${exp}\n    got:  ${act}`);
                 });
                 return { failed: want.length ? report.length : -1, report: report.join('\n') };
