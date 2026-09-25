@@ -50,10 +50,8 @@ ray_t* q_dotq_qp_fn(ray_t* x) {
  * `.Q.s x` is byte-identical to what `show x` prints, INCLUDING the
  * line-terminating trailing newline, and OBEYS the `\c` console width/height
  * ("Obeys console width and height set by \c", ref/dotq.md) and `\P`
- * precision.  We do NOT reuse q_console_show here: that appends into the
- * global console sink the REPL/qdoc host drains after each eval, so routing
- * through it would inject `.Q.s`'s text into the host's output — `.Q.s` must
- * be side-effect-free and RETURN the string.
+ * precision.  We do NOT reuse q_console_show here: that PRINTS to the console,
+ * and `.Q.s` must be side-effect-free and RETURN the string.
  * The buffer grows to fit: q_fmt_console_alloc is the console seam's one growth home. */
 ray_t* q_dotq_s_fn(ray_t* x) {
     size_t len;

@@ -117,6 +117,19 @@ int q_io_fwrite(FILE* fp, const void* bytes, size_t n) {
     return 0;
 }
 
+int q_io_write_fd(int fd, const void* bytes, size_t n) {
+    const char* p = (const char*)bytes;
+    while (n) {
+        size_t  c = n < INT_MAX ? n : INT_MAX;
+        ssize_t w = write(fd, p, c);
+        if (w < 0) { if (errno == EINTR) continue; return -1; }
+        if (w == 0) return -1;
+        p += w;
+        n -= (size_t)w;
+    }
+    return 0;
+}
+
 ray_t* q_io_write_all(ray_t* pathstr, const void* bytes, size_t n) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     const char* p = ray_str_ptr(pathstr);

@@ -16,8 +16,7 @@
  * with rgb24 in bits 10-33, attributes from bit 40 — ONE packing for every
  * output mode; the mode only decides how the emitter degrades it.
  *
- * Output goes straight to the tty fd: the console buffer (q_console.c) drains
- * between statements, and a game loop lives inside one. */
+ * Output goes straight to the tty fd, never through the console sink (q_console.c). */
 #define _GNU_SOURCE
 #include "qlang/q_count.h"
 #include "qlang/io/q_termbox.h"
