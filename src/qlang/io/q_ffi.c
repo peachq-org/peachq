@@ -34,7 +34,7 @@
 #define _GNU_SOURCE /* RTLD_DEFAULT */
 #include "qlang/q_count.h"
 #include "qlang/io/q_ffi.h"
-#include "qlang/io/q_dl.h"      /* q_dl_open / q_dl_sym — a named library, never unmapped */
+#include "qlang/io/q_dl.h"      /* q_dl_open / q_dl_sym — a named library, never unmapped; q_dl_unavailable */
 #include "qlang/base/q_err.h"
 #include "qlang/q_env.h"
 #include "lang/env.h"    /* ray_fn_unary / ray_fn_vary */
@@ -148,6 +148,11 @@ static void* qffi_dlsym_name(ray_t* name, int* bad_shape) {
 #else
     return dlsym(RTLD_DEFAULT, fn);
 #endif
+}
+
+static ray_t* qffi_unresolved(void) {
+    const char* why = q_dl_unavailable();
+    return why ? q_err_from_text(why, strlen(why)) : q_err(QE_OS);
 }
 
 /* ---- argument marshalling ---------------------------------------------- */
@@ -597,7 +602,7 @@ static ray_t* qffi_bind_fn(ray_t** args, int64_t n) {
     int   bad = 0;
     void* fn  = qffi_dlsym_name(args[0], &bad);
     if (bad) return q_err(QE_TYPE);
-    if (!fn) return q_err(QE_OS);
+    if (!fn) return qffi_unresolved();
 
     qffi_bind_t* b = calloc(1, sizeof *b);
     if (!b) return q_err(QE_WSFULL);
@@ -681,7 +686,7 @@ static ray_t* qffi_callfn_fn(ray_t** args, int64_t n) {
     int   bad = 0;
     void* fn  = qffi_dlsym_name(name, &bad);
     if (bad) return q_err(QE_TYPE);
-    if (!fn) return q_err(QE_OS);
+    if (!fn) return qffi_unresolved();
 
     ray_t*  single;
     ray_t** items;
@@ -707,7 +712,7 @@ static ray_t* qffi_cvar_fn(ray_t* x) {
     int   bad  = 0;
     void* addr = qffi_dlsym_name(name, &bad);
     if (bad) return q_err(QE_TYPE);
-    if (!addr) return q_err(QE_OS);
+    if (!addr) return qffi_unresolved();
     return qffi_wrap_ret(rl, addr);
 }
 

@@ -10,4 +10,7 @@ void* q_dl_open(const char* path);
 /* NULL when the library does not export `name` */
 void* q_dl_sym(void* lib, const char* name);
 
+/* NULL where shared libraries load; a -static build (no dlopen) answers the q error naming the download that can */
+const char* q_dl_unavailable(void);
+
 #endif /* QLANG_IO_Q_DL_H */

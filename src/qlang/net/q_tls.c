@@ -2,6 +2,7 @@
 #include "qlang/q_count.h"
 #include "qlang/net/q_tls.h"
 #include "qlang/base/q_err.h"
+#include "qlang/io/q_dl.h"   /* q_dl_unavailable — a static build cannot dlopen OpenSSL */
 #include "core/timer.h"      /* ray_time_now_ms — send/handshake deadlines */
 #include "table/sym.h"
 #include <string.h>
@@ -335,7 +336,11 @@ static int set_peer_name(void* ssl, const char* host) {
 }
 
 int q_tls_client_start(ray_sock_t fd, const char* host, const char** err) {
-    if (tls_load() != 1) { if (err) *err = "nyi"; return -1; }
+    if (tls_load() != 1) {
+        const char* why = q_dl_unavailable();
+        if (err) *err = why ? why : "nyi";
+        return -1;
+    }
     if (err) *err = "conn";
 
     const void* meth = A.TLS_client_method ? A.TLS_client_method()
