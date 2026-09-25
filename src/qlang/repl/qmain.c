@@ -1,7 +1,6 @@
 /* q — the launcher: arg parse, runtime/poll/listener bring-up, `-eval-before` texts, the startup script, `-eval`
  * texts, then REPL / server / exit.  Flags are documented in user-docs/cmdline.md; q_dotz.c's option table
- * (q_dotz_opt) is what q consumes from argv.  The interactive loop lives in q_repl.c so the qcmd tests can drive the
- * identical console behaviour in-process. */
+ * (q_dotz_opt) is what q consumes from argv.  The interactive loop lives in q_repl.c. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/q_count.h"
@@ -317,8 +316,7 @@ int main(int argc, char** argv) {
      * .z.v`version / .z.k).  GUARDRAIL: print ONLY on an interactive tty REPL and NOT
      * under `-q` (.z.q).  Piped/redirected stdin (the qcmd/qscript runners,
      * `printf … | ./q`, `</dev/null` daemons) is NOT a tty, so it never leaks
-     * into an equality golden; the qdoctest runner is a separate binary that
-     * never reaches this path. */
+     * into an equality golden. */
     if (stdin_tty && !q_dotz_quiet()) {
 #ifdef RAYFORCE_BUILD_DATE
         const char* build = RAYFORCE_BUILD_DATE;

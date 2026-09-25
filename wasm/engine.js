@@ -5,6 +5,7 @@
     'use strict';
 
     const HOME = '/home/q';
+    const PROMPT = /^q(\.[A-Za-z][A-Za-z0-9_]*)?\)/;
 
     function checkPath(path) {
         if (typeof path !== 'string' || /[\\\x00-\x1f]/.test(path) ||
@@ -17,11 +18,11 @@
      * locateFile: where peachq.wasm lives.  duckLoad: the Module.peachqDuckLoad hook (q_wasm_duckdb.c),
      * absent where DuckDB is not offered. */
     async function boot({ factory, fetch, locateFile, duckLoad }) {
-        let out = [], err = [];
+        let out = [], err = [], seq = [];
         const M = await factory({
             locateFile,
-            print: (s) => out.push(s),
-            printErr: (s) => err.push(s),
+            print: (s) => { out.push(s); seq.push([0, s]); },
+            printErr: (s) => { err.push(s); seq.push([1, s]); },
             peachqFetch: fetch,
             peachqDuckLoad: duckLoad,
         });
@@ -40,7 +41,7 @@
                 const p = M._malloc(bytes.length + 1);
                 M.HEAPU8.set(bytes, p);
                 M.HEAPU8[p + bytes.length] = 0;
-                out = []; err = [];
+                out = []; err = []; seq = [];
                 try {
                     M._q_wasm_eval(p);
                 } finally {
@@ -49,14 +50,50 @@
                 return { out: out.join('\n'), err: err.join('\n') };
             },
 
-            /* A .qcmd transcript run in this session by the native qdoc runner: the failing-row
-             * count (-1 when no row ran) and the runner's report of the failures. */
-            qdoc(text) {
+            /* A .qcmd transcript replayed in this session (`q f.qcmd`) and scored by the row rule of
+             * tools/qcmd/run.sh: rows pair by index on the echoed prompt line; a non-error row compares
+             * its stdout block, an error row its error line, `'error` and a bare `'` matching any error.
+             * The host sees stdout and stderr in order, so a row's error is the one in its own block
+             * whose [0] frame names the row.  Answers the failing-row count (-1 when no row ran) and a
+             * report of the failures. */
+            qcmd(text) {
                 const path = '/tmp/ledger.qcmd';
                 M.FS.writeFile(path, String(text));
-                out = []; err = [];
-                const failed = M.ccall('q_wasm_qdoc', 'number', ['string'], [path]);
-                return { failed, report: out.join('\n') };
+                out = []; err = []; seq = [];
+                M.ccall('q_wasm_qcmd', 'number', ['string'], [path]);
+                const want = [], got = [];
+                for (const l of String(text).replace(/\r/g, '').split('\n')) {
+                    if (PROMPT.test(l)) want.push({ line: l, block: [] });
+                    else if (want.length && !/^\/[ \t]/.test(l)) want[want.length - 1].block.push(l);
+                }
+                for (const [fd, s] of seq) {
+                    if (!fd && PROMPT.test(s)) got.push({ line: s, block: [], err: '', cur: '' });
+                    else if (!got.length) continue;
+                    else if (!fd) got[got.length - 1].block.push(s);
+                    else {
+                        const g = got[got.length - 1];
+                        if (s.startsWith("'")) g.cur = s;
+                        else if (s.startsWith('  [0]  ')) {
+                            if (!g.err && s.slice(7) === g.line.replace(PROMPT, '')) g.err = g.cur;
+                            g.cur = '';
+                        }
+                    }
+                }
+                const trim = (b) => b.join('\n').replace(/\r/g, '').replace(/^[ \t\n]+|[ \t\n]+$/g, '');
+                const report = [];
+                want.forEach((w, i) => {
+                    const g = got[i], exp = trim(w.block);
+                    let ok, act;
+                    if (!g) { ok = false; act = '(no replay row)'; }
+                    else if (g.line !== w.line) { ok = false; act = 'prompt: ' + g.line; }
+                    else if (exp.startsWith("'")) {
+                        const cls = exp.split('\n')[0].replace(/[ \t]+$/, '').slice(1);
+                        act = g.err || trim(g.block);
+                        ok = !!g.err && (cls === '' || cls === 'error' || g.err === "'" + cls);
+                    } else { act = g.err ? trim(g.block) + '\n' + g.err : trim(g.block); ok = !g.err && act === exp; }
+                    if (!ok) report.push(`  ${w.line}\n    want: ${exp}\n    got:  ${act}`);
+                });
+                return { failed: want.length ? report.length : -1, report: report.join('\n') };
             },
 
             /* Mount [{path, size?, sha256?}] under dir (default HOME) as lazy files read from
