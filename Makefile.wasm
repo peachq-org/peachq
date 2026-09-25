@@ -100,7 +100,7 @@ wasm-browser-smoke: wasm duckdb-wasm
 
 # DuckDB's browser build, fetched once and checked against the pin, where wasm/server.py serves it at /duckdb/.
 duckdb-wasm:
-	tools/duckdb-wasm-publish.sh fetch $(DUCKDB_WASM)
+	tools/duckdb-wasm-fetch.sh $(DUCKDB_WASM)
 
 # test/q/duckdb replayed in the browser, by hand before a release (never in make q-test): red off the recorded
 # divergences (wasm/README.md).
