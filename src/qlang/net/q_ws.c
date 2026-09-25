@@ -10,7 +10,7 @@
 #include "qlang/net/q_http.h"      /* q_http_send_all — bounded sends */
 #include "qlang/q_env.h"       /* q_env_get — the `.z.ws`/`.z.wo`/`.z.wc` handlers */
 #include "qlang/q_builtins.h"  /* q_dotq_sha1_fn / q_dotq_btoa_fn — accept key */
-#include "qlang/q_console.h"   /* q_console_str/_reset — drain handler output */
+#include "qlang/q_console.h"   /* q_console_door — handler output is the server console's */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_call_name — handler firing */
 #include "mem/sys.h"
 #include "picohttpparser.h"
@@ -183,16 +183,10 @@ static void ws_close_send(ray_sock_t fd, int code, int mask) {
 
 /* ---- `.z.ws`/`.z.wo`/`.z.wc` dispatch ---- */
 
-/* Drain handler show/0N! output — nothing else drains here (zts_tick). */
-static void ws_console_drain(void) {
-    const char* con = q_console_str();
-    if (con && *con) { fputs(con, stdout); fflush(stdout); }
-    q_console_reset();
-}
-
 static void ws_hook_fire(const char* name, ray_t* arg) {
-    ray_t* r = q_eval_apply_call_name(name, strlen(name), &arg, 1);
-    ws_console_drain();
+    FILE*  door = q_console_door(stdout);
+    ray_t* r    = q_eval_apply_call_name(name, strlen(name), &arg, 1);
+    q_console_door(door);
     if (r) {
         if (RAY_IS_ERR(r)) {              /* D2: log, keep the connection */
             fprintf(stderr, "ws: %s handler raised an error\n", name);

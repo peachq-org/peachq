@@ -249,8 +249,7 @@ static ray_t* bang_make_dict(ray_t* x, ray_t* y) {
 static ray_t* bang_show(ray_t* y) {
     ray_t* s = q_fmt_krepr_charv(y);          /* `0N!` and `-3!` are ONE text — so, one call */
     if (RAY_IS_ERR(s)) return s;
-    int rc = q_console_write((const char*)ray_data(s), (size_t) q_count(s));
-    rc |= q_console_write("\n", 1);
+    int rc = q_console_write((const char*)ray_data(s), (size_t) q_count(s), true);
     ray_release(s);
     if (rc) return q_err(QE_WSFULL);
     ray_retain(y);
