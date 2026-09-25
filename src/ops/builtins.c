@@ -1562,9 +1562,8 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (val->type == -RAY_I64) return ray_timespan(val->i64);
         if (val->type == -RAY_F64 || val->type == -RAY_F32)
             return ray_timespan((int64_t)val->f64);
-        if (val->type == -RAY_MINUTE) return ray_timespan((int64_t)val->i32 * 60000000000LL);
-        if (val->type == -RAY_SECOND) return ray_timespan((int64_t)val->i32 * 1000000000LL);
-        if (val->type == -RAY_TIME)   return ray_timespan((int64_t)val->i32 * 1000000LL);
+        if (val->type == -RAY_MINUTE || val->type == -RAY_SECOND || val->type == -RAY_TIME)
+            return ray_timespan(temporal_as_ns(val));
         /* Vector cast: same-tag = identity; a TEMPORAL source needs the
          * per-element unit conversion (cast_vec_temporal_elems — the atom
          * arm's semantics); int-family stays on the generic fast path. */
@@ -1590,14 +1589,11 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
         if (val->type == -RAY_F64 || val->type == -RAY_F32)
             return ray_timestamp((int64_t)val->f64);
         if (val->type == -RAY_TIME) return ray_timestamp((int64_t)val->i32);
-        if (val->type == -RAY_DATE) {
-            int64_t days = val->i32;
-            return ray_timestamp(days * 24LL * 60 * 60 * 1000000000LL);
-        }
+        if (val->type == -RAY_DATE) return ray_timestamp(temporal_as_ns(val));
         if (val->type == -RAY_MONTH) {
             /* First-of-month midnight. */
             if (RAY_ATOM_IS_NULL(val)) return ray_typed_null(-RAY_TIMESTAMP);
-            return ray_timestamp(month_payload_as_days((int64_t)val->i32) * 86400000000000LL);
+            return ray_timestamp(temporal_as_ns(val));
         }
         if (val->type == -RAY_DATETIME) {
             /* The datetime's integer form, saturating at +-0Wp (datatypes.md:146:
