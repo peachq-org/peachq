@@ -49,7 +49,9 @@ typedef struct {
 /* Thread pool */
 struct ray_pool {
     ray_thread_t*       threads;       /* worker thread handles [n_workers] */
-    uint32_t           n_workers;     /* number of background threads (nproc - 1) */
+    uint32_t           n_workers;     /* number of background threads */
+    _Atomic(uint32_t)  n_active;      /* workers admitted at once, <= n_workers (q `\s`) */
+    _Atomic(uint32_t)  n_running;     /* workers admitted now */
     _Atomic(uint32_t)  shutdown;
 
     /* SPMC task ring (single producer = main, multi consumer = workers + main).
@@ -87,8 +89,8 @@ struct ray_pool {
  * in pool.c. */
 #define RAY_POOL_MAX_TASKS  (1u << 16)
 
-/* Initialize pool with n_workers background threads.
- * Pass 0 to auto-detect (nproc - 1). */
+/* Initialize pool with n_workers background threads; 0 = the main thread alone.  Each worker needs its own heap, so
+ * RAY_ERR_LIMIT past the heap registry. */
 ray_err_t ray_pool_create(ray_pool_t* pool, uint32_t n_workers);
 
 /* Shutdown and free all resources */

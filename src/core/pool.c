@@ -88,6 +88,13 @@ static void worker_loop(void* arg) {
         if (atomic_load_explicit(&pool->shutdown, memory_order_acquire))
             break;
 
+        /* A surplus wake-up must not raise concurrency past `\s`: leftover tokens outlive a short dispatch. */
+        if (atomic_fetch_add_explicit(&pool->n_running, 1, memory_order_acq_rel)
+                >= atomic_load_explicit(&pool->n_active, memory_order_relaxed)) {
+            atomic_fetch_sub_explicit(&pool->n_running, 1, memory_order_acq_rel);
+            continue;
+        }
+
         /* Claim and execute tasks until the window is drained */
         uint64_t idx;
         while (pool_claim(pool, &idx)) {
@@ -105,6 +112,7 @@ static void worker_loop(void* arg) {
             atomic_fetch_sub_explicit(&pool->pending, 1,
                                       memory_order_acq_rel);
         }
+        atomic_fetch_sub_explicit(&pool->n_running, 1, memory_order_acq_rel);
 
         /* No ray_heap_gc() here — removing worker GC between dispatch rounds
          * ensures main can safely modify worker heaps in ray_parallel_end().
@@ -130,24 +138,9 @@ ray_err_t ray_pool_create(ray_pool_t* pool, uint32_t n_workers) {
     atomic_init(&pool->task_limit, 0);
     atomic_init(&pool->pending, 0);
     atomic_init(&pool->cancelled, 0);
-
-    if (n_workers == 0) {
-        /* Auto-size to ncpu-1. The RAYFORCE_CORES env var overrides this
-         * default worker count — the test harness sets it (see the Makefile
-         * `test` target) so neither the in-process runtime nor the server
-         * children it spawns via .sys.exec each create ncpu-1 threads on a
-         * many-core box. An explicit -c (which passes n_workers > 0 through
-         * ray_pool_init) bypasses this entirely, and a non-test run with the
-         * var unset keeps the historical ncpu-1 default. */
-        const char* env = getenv("RAYFORCE_CORES");
-        if (env && *env) {
-            long v = strtol(env, NULL, 10);
-            n_workers = (v > 0) ? (uint32_t)v : 0;
-        } else {
-            uint32_t ncpu = ray_thread_count();
-            n_workers = (ncpu > 1) ? ncpu - 1 : 0;
-        }
-    }
+    atomic_init(&pool->n_running, 0);
+    atomic_init(&pool->n_active, n_workers);
+    if (n_workers >= RAY_HEAP_REGISTRY_SIZE) return RAY_ERR_LIMIT;
 
     pool->n_workers = n_workers;
     atomic_store_explicit(&pool->shutdown, 0, memory_order_relaxed);
@@ -317,7 +310,8 @@ void ray_pool_dispatch(ray_pool_t* pool, ray_pool_fn fn, void* ctx,
     ray_rc_sync = true;
 
     /* Wake worker threads */
-    for (uint32_t i = 0; i < pool->n_workers; i++) {
+    uint32_t n_wake = atomic_load_explicit(&pool->n_active, memory_order_relaxed);
+    for (uint32_t i = 0; i < n_wake; i++) {
         ray_sem_signal(&pool->work_ready);
     }
 
@@ -408,7 +402,8 @@ void ray_pool_dispatch_n(ray_pool_t* pool, ray_pool_fn fn, void* ctx,
     ray_rc_sync = true;
 
     /* Wake worker threads */
-    for (uint32_t i = 0; i < pool->n_workers; i++) {
+    uint32_t n_wake = atomic_load_explicit(&pool->n_active, memory_order_relaxed);
+    for (uint32_t i = 0; i < n_wake; i++) {
         ray_sem_signal(&pool->work_ready);
     }
 
