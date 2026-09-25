@@ -155,10 +155,12 @@ ray_t* q_wire_fixed_vec(int8_t t, const uint8_t* p, int64_t count, int swap);
  * emitted little-endian. */
 int    q_wire_write_obj_ex(q_wire_wbuf_t* b, ray_t* x, int serde);
 /* `mode` bits: Q_WIRE_READ_SERDE = the serde grammar above; Q_WIRE_READ_DISK = an image off disk, whose
- * u/g/p bytes are dropped (a live decode rebuilds them — a disk lane never builds an index on load). */
+ * u/g/p bytes are dropped (a live decode rebuilds them — a disk lane never builds an index on load).
+ * *value_err (may be NULL) says an error result is the decoded value's own ('badfunc, an unknown
+ * primitive's 'nyi, a projection that fails to apply), not a malformed structure. */
 #define Q_WIRE_READ_SERDE 1
 #define Q_WIRE_READ_DISK  2
 ray_t* q_wire_read_obj_ex(const uint8_t* buf, size_t len, size_t* consumed,
-                          int swap, int mode);
+                          int swap, int mode, int* value_err);
 
 #endif /* Q_WIRE_H */
