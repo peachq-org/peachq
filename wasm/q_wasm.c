@@ -2,13 +2,12 @@
  * A line runs through q_ctx_run_line, the statement seam every native door shares,
  * with stdout/stderr as its streams: the host reads the answer from the module's
  * print/printErr exactly as a terminal reads ./q.  wasm/engine.js is the one caller,
- * and wasm/smoke.js runs its .qcmd ledger through q_wasm_qdoc. */
+ * and wasm/smoke.js runs its .qcmd ledger through q_wasm_qcmd. */
 #define _POSIX_C_SOURCE 200809L   /* setenv */
 #include "qlang/q_runtime.h"
 #include "qlang/q_ctx.h"
 #include "qlang/q_console.h"      /* pipe-table display + the console clip */
 #include "qlang/q_pq.h"           /* q_pq_load — the embedded stdlib bundle */
-#include "qlang/repl/qdoc.h"      /* q_qdoc_run_file_emit — the ledger runs through the real runner */
 #include <rayforce.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,13 +48,18 @@ void q_wasm_eval(const char* src) {
     fflush(stderr);
 }
 
-/* A .qcmd file run in this session by the native qdoc runner, failing rows reported
- * on stdout.  Answers the failing-row count; -1 when no row ran. */
+/* A .qcmd transcript replayed in this session through the console's transcript door —
+ * what `q f.qcmd` runs — answered on stdout/stderr like q_wasm_eval; the host scores
+ * the rows (wasm/engine.js).  0 on a full run, 1 when the load aborted. */
 EMSCRIPTEN_KEEPALIVE
-int q_wasm_qdoc(const char* path) {
+int q_wasm_qcmd(const char* path) {
     if (!path || q_wasm_init() != 0)
-        return -1;
-    qdoc_result_t r = q_qdoc_run_file_emit(path, 1, stdout, NULL);
+        return 1;
+    ray_t* esig = NULL;
+    int    rc   = q_ctx_run_file(path, stdout, stderr, &esig);
+    if (esig)
+        ray_release(esig);
     fflush(stdout);
-    return r.examples ? r.examples - r.passed : -1;
+    fflush(stderr);
+    return rc != 0;
 }

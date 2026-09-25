@@ -1,6 +1,6 @@
 /* The headless check of the wasm build under node: real q through wasm/engine.js, the same
  * engine code the Worker runs.  The rows are wasm/node/NN-name.qcmd, replayed in order in ONE
- * session by the native qdoc runner inside the module, with ORIGIN bound to the fixture server.
+ * session through the transcript door inside the module, with ORIGIN bound to the fixture server.
  * HTTP goes through a node Module.peachqFetch (a child process doing fetch) to that server, a
  * second child, since the hook blocks this process; the build's files.json is mounted as lazy
  * files read from disk.
@@ -102,7 +102,7 @@ async function main() {
         for (const name of fs.readdirSync(dir).filter((f) => f.endsWith('.qcmd')).sort()) {
             const text = fs.readFileSync(path.join(dir, name), 'utf8');
             const rows = text.split('\n').filter((l) => /^q[\w.]*\)/.test(l)).length;
-            const qd = q.qdoc(text);
+            const qd = q.qcmd(text);
             const bad = qd.failed < 0 ? rows : qd.failed;
             total += rows;
             failed += bad;

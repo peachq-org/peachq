@@ -68,7 +68,7 @@ WASM_OBJ = $(addprefix $(BUILD_DIR)/,$(SRC:.c=.o))
 #                             sort/format scratch on the stack, and a `\l` nests deeper still.
 #   --no-entry              — the glue has no main(); runtime inits lazily.
 EMFLAGS = \
-  -s "EXPORTED_FUNCTIONS=['_q_wasm_init','_q_wasm_eval','_q_wasm_qdoc','_malloc','_free']" \
+  -s "EXPORTED_FUNCTIONS=['_q_wasm_init','_q_wasm_eval','_q_wasm_qcmd','_malloc','_free']" \
   -s "EXPORTED_RUNTIME_METHODS=['ccall','UTF8ToString','HEAPU8','HEAPU32','FS']" \
   -s ALLOW_MEMORY_GROWTH=1 \
   -s STACK_SIZE=8MB \

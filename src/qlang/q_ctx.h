@@ -88,7 +88,7 @@ void q_ctx_install_remote_hooks(void);
 /* Console teardown before exit.  The context knows only that SOMETHING may need
  * restoring before `.z.exit` runs (its 0N! output must land on a cooked
  * terminal); the front end that owns a terminal registers the how.  Unset —
- * qdoctest, wasm, a bare pipe — q_ctx_console_close is a no-op. */
+ * wasm, a bare pipe — q_ctx_console_close is a no-op. */
 void q_ctx_set_console_close(void (*fn)(void));
 void q_ctx_console_close(void);
 

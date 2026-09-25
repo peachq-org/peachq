@@ -1,5 +1,5 @@
 /* The DuckDB ledgers (test/q/duckdb/*.qcmd) replayed in the browser: each suite runs in a fresh Worker through the
- * native qdoc runner (q_wasm_qdoc), with the parquet fixtures mounted where the suites read them.  A by-hand check
+ * transcript door (q_wasm_qcmd), with the parquet fixtures mounted where the suites read them.  A by-hand check
  * of the browser's DuckDB before a release, never part of make q-test: it fails when a suite's failing-row count is
  * not the recorded divergence's (wasm/README.md), and prints every failing row either way.
  *
@@ -45,7 +45,7 @@ async function main() {
             await page.evaluate(([m, base]) => q.addFiles(m, base), [manifest, origin + '/']);
             await page.evaluate(() => q.eval('\\classic 1'));
             const t0 = Date.now();
-            const r = await page.evaluate((x) => q.call({ op: 'qdoc', text: x }), text)
+            const r = await page.evaluate((x) => q.call({ op: 'qcmd', text: x }), text)
                 .catch((e) => ({ failed: -1, report: String(e) }));
             const ok = r.failed < 0 ? 0 : rows - r.failed;
             const expected = r.failed === (DIVERGES[s] || 0);
