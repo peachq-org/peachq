@@ -22,6 +22,7 @@
 #define DBG_EY_MAX   8
 #define DBG_NEST_MAX 8
 #define DBG_KEEP_ERR 4   /* _end token bit: this statement leaves with its own payload */
+#define DBG_TRAP_SHIFT 3 /* _end token bits from here: the trap depth the level beneath had */
 
 static _Thread_local ray_t* g_live[DBG_LIVE_MAX];  /* borrowed lambda values */
 static _Thread_local int32_t g_live_env[DBG_LIVE_MAX];  /* their q_env frames */
@@ -113,7 +114,8 @@ int q_dbg_statement_begin(const char* src, size_t n, int console) {
     if (src && n) memcpy(g_stmt.text, src, n); else n = 0;
     g_stmt.text[n] = '\0';
     g_stmt.file = load_line ? q_comment_origin(&g_stmt.line) : 0;
-    int prev = g_console_stmt;
+    int prev = g_console_stmt | g_trap_depth << DBG_TRAP_SHIFT;
+    if (!load_line) g_trap_depth = 0;   /* a load line is its asker's; any other statement owns its errors */
     g_console_stmt = console;
     return prev;
 }
@@ -126,6 +128,7 @@ int64_t q_dbg_statement_origin(int64_t* line) {
 
 void q_dbg_statement_end(int tok) {
     g_console_stmt = tok & 3;
+    g_trap_depth = tok >> DBG_TRAP_SHIFT;
     int d = --g_depth;
     if (d <= 0 || d >= DBG_NEST_MAX) return;
     if (g_snap_lvl == d) q_dbg_snapshot_clear();   /* whatever this level took */
@@ -136,6 +139,7 @@ void q_dbg_statement_end(int tok) {
 }
 
 int64_t q_dbg_trap_enter(void) { g_trap_depth++; return q_env_ctx(); }
+int     q_dbg_trapped(void) { return g_trap_depth > 0; }
 void q_dbg_trap_exit(int64_t ctx, ray_t* r) {
     g_trap_depth--;
     if (r && RAY_IS_ERR(r) && !q_err_is(r, QE_RETURN)) q_env_ctx_set(ctx);
