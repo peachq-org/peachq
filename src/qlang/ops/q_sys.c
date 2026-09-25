@@ -487,6 +487,7 @@ static ray_t* h_cd(const char* arg, size_t alen) {
     char path[PATH_MAX];
     memcpy(path, arg, alen); path[alen] = '\0';
     if (chdir(path) != 0) return q_err(QE_OS);
+    q_pq_path_changed();
     return NULL;                                          /* setter: silent */
 }
 
@@ -496,6 +497,30 @@ static ray_t* h_cd(const char* arg, size_t alen) {
 static int l_is_regular_readable(const char* p) {
     struct stat st;
     return stat(p, &st) == 0 && S_ISREG(st.st_mode) && access(p, R_OK) == 0;
+}
+
+int q_sys_load_find(const char* lit, size_t alen, char* found) {
+    char cand[PATH_MAX], scratch[PATH_MAX];
+    char* dst = found ? found : scratch;
+    int  ok = 0;
+
+    /* (a) literal path, relative to cwd (kdb: `\l name` as given). */
+    if (l_is_regular_readable(lit)) { memcpy(dst, lit, alen + 1); ok = 1; }
+    /* (b) literal + ".q" (kdb loads `\l script` as `script.q`). */
+    if (!ok && snprintf(cand, sizeof cand, "%s.q", lit) < (int)sizeof cand
+        && l_is_regular_readable(cand)) { memcpy(dst, cand, strlen(cand) + 1); ok = 1; }
+    /* (c)/(d) fixtures/QHOME search — RELATIVE names only (an absolute path is
+     * literal in kdb; never prepend a root to it — keeps `\l /tmp/db*` a no-op). */
+    if (!ok && lit[0] != '/') {
+        const char* qh = getenv("QHOME");
+        if (qh && *qh) {
+            if (snprintf(cand, sizeof cand, "%s/%s", qh, lit) < (int)sizeof cand
+                && l_is_regular_readable(cand)) { memcpy(dst, cand, strlen(cand) + 1); ok = 1; }
+            if (!ok && snprintf(cand, sizeof cand, "%s/%s.q", qh, lit) < (int)sizeof cand
+                && l_is_regular_readable(cand)) { memcpy(dst, cand, strlen(cand) + 1); ok = 1; }
+        }
+    }
+    return ok;
 }
 
 /* The loader `\l name` and the launcher's file share (basics/syscmds.md).  Resolution chain (first hit
@@ -527,30 +552,12 @@ ray_t* q_sys_load(const char* arg, size_t alen) {
     char lit[PATH_MAX];
     memcpy(lit, arg, alen); lit[alen] = '\0';
 
-    char cand[PATH_MAX];
     char found[PATH_MAX];                                 /* stable copy of the resolved path */
-    int  ok = 0;
-
-    /* (a) literal path, relative to cwd (kdb: `\l name` as given). */
-    if (l_is_regular_readable(lit)) { memcpy(found, lit, alen + 1); ok = 1; }
-    /* (b) literal + ".q" (kdb loads `\l script` as `script.q`). */
-    if (!ok && snprintf(cand, sizeof cand, "%s.q", lit) < (int)sizeof cand
-        && l_is_regular_readable(cand)) { memcpy(found, cand, strlen(cand) + 1); ok = 1; }
-    /* (c)/(d) fixtures/QHOME search — RELATIVE names only (an absolute path is
-     * literal in kdb; never prepend a root to it — keeps `\l /tmp/db*` a no-op). */
-    if (!ok && lit[0] != '/') {
-        const char* qh = getenv("QHOME");
-        if (qh && *qh) {
-            if (snprintf(cand, sizeof cand, "%s/%s", qh, lit) < (int)sizeof cand
-                && l_is_regular_readable(cand)) { memcpy(found, cand, strlen(cand) + 1); ok = 1; }
-            if (!ok && snprintf(cand, sizeof cand, "%s/%s.q", qh, lit) < (int)sizeof cand
-                && l_is_regular_readable(cand)) { memcpy(found, cand, strlen(cand) + 1); ok = 1; }
-        }
-    }
+    int  ok = q_sys_load_find(lit, alen, found);
     /* peachq: the standard library.  `\l pq/<file>.q` is the file a pq/ directory
-     * (the cwd's or $QHOME's — the chain above) has, else the embedded member, so a
-     * pq/ directory is the library on disk, never a mount; `\l pq` runs its load
-     * sequence (`.pq.load[]`, lib/pq.q) unless a disk file `pq`/`pq.q` wins above. */
+     * (the cwd's or $QHOME's) has, else the embedded member, so a pq/ directory is
+     * the library on disk, never a mount; `\l pq` reloads every library file
+     * (lib/pq.q's list) unless a disk file `pq`/`pq.q` wins above. */
     if (alen > 3 && memcmp(lit, "pq/", 3) == 0) return q_pq_load_file(lit, alen, ok ? found : NULL);
     if (ok) {   /* disk hit — load (silent); an ABORTED load signals */
         ray_t* esig = NULL;
@@ -1221,5 +1228,6 @@ static ray_t* setenv_impl(ray_t* x, ray_t* y) {
     ray_release(name);
     if (r && RAY_IS_ERR(r)) return r;
     if (r) ray_release(r);                              /* discard echoed value */
+    q_pq_path_changed();                                /* QHOME may have moved */
     return RAY_NULL_OBJ;                                /* kdb: setenv -> :: */
 }

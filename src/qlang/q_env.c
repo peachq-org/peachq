@@ -15,7 +15,7 @@
 #include "qlang/eval/q_view.h"    /* view hooks: set/unbind invalidation, dot-'nyi */
 #include "qlang/io/q_io.h"        /* q_io_set — `set`'s file half */
 #include "qlang/io/q_provider.h"  /* the link seam: q_provider_carrier_is, _link/_unlink — the HOST, never a provider */
-#include "qlang/q_pq.h"           /* q_pq_autoload — the first `.pq` reference loads lib/pq.q */
+#include "qlang/q_pq.h"           /* q_pq_autoload / _autoload_ns — a first `.pq` or missed library reference loads its file */
 #include "qlang/q_prim.h"         /* q_enum_deref — FK/link dotted-walk gather */
 #include "lang/internal.h"        /* ray_error */
 #include "table/sym.h"         /* ray_sym_intern_runtime, ray_sym_str, ray_read_sym */
@@ -58,6 +58,15 @@ static ray_t* env_pq_hook(const char* p, size_t n) {
     int hit = p[0] == '.' ? n >= 3 && p[1] == 'p' && p[2] == 'q' && (n == 3 || p[3] == '.')
                           : ENV_SEG == g_pq_seg;
     return hit ? q_pq_autoload() : NULL;
+}
+
+/* Every other library namespace autoloads on a MISSED read of a dotted name (owner 2026-09-25): a found name never
+ * gets here, so a user's definition wins and core `.j` still gains lib/j.q. */
+static ray_t* env_lib_hook(const char* p, size_t n) {
+    if (n < 2 || p[0] != '.' || p[1] == '.') return NULL;
+    size_t k = 1;
+    while (k < n && p[k] != '.') k++;
+    return q_pq_autoload_ns(p + 1, k - 1);
 }
 
 static int64_t env_marker(void) { return ray_sym_intern_runtime("", 0); }
@@ -162,6 +171,8 @@ static ray_t* env_get(int64_t sym, int load) {
             for (int i = 1; v && i < k; i++)
                 v = ray_dict_probe_sym_borrowed(v, segs[i]);
         }
+        ray_t* le = !v && load ? env_lib_hook(p, n) : NULL;
+        if (le) { ray_release(le); v = env_get(sym, 0); }
     }
     ray_release(s);
     return v;
@@ -698,7 +709,7 @@ static ray_t* walk_segs(ray_t* v, int fresh, const char* p, size_t n, size_t pos
     return v;
 }
 
-ray_t* q_env_resolve(int64_t sym) {
+static ray_t* env_resolve(int64_t sym, int lib) {
     ray_t* v = frames_lookup(sym);
     if (v) { ray_retain(v); return v; }
     const char* p; size_t n;
@@ -733,9 +744,13 @@ ray_t* q_env_resolve(int64_t sym) {
         if (hend >= n) { ray_retain(base); r = base; }
         else r = walk_segs(base, 0, p, n, hend + 1);
     }
+    ray_t* miss = r || !lib ? NULL : env_lib_hook(p, n);
     ray_release(s);
-    return r;
+    if (miss && !RAY_IS_ERR(miss)) { ray_release(miss); return env_resolve(sym, 0); }
+    return r ? r : miss;
 }
+
+ray_t* q_env_resolve(int64_t sym) { return env_resolve(sym, 1); }
 
 /* ---- introspection: rosters and member listings ---- */
 

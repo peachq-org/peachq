@@ -2,11 +2,8 @@
 
 The option names, defaults and behaviour follow DuckDB's `read_csv` and `read_json`; the types you get back are q's.
 
-peachq ships two readers, both part of the standard library:
-
-```q
-q)\l pq
-```
+peachq ships two readers, both part of the standard library. Nothing needs loading first: the first call to
+`.csv.read` or `.j.read` loads its file.
 
 | Reader | Reads | Guide |
 |---|---|---|
@@ -16,23 +13,31 @@ q)\l pq
 ## Loading the standard library
 
 The standard library is a set of q files — `csv.q`, `duckdb.q`, `regexp.q`, `str.q`, `termbox.q`, `qunit.q` and the
-rest — built into the peachq binary and, in a distribution, shipped as real files in a `pq/` directory. Four spellings
-drive it:
+rest — built into the peachq binary and, in a distribution, shipped as real files in a `pq/` directory. Usually you
+load nothing: using a name loads its file. Five spellings drive it by hand:
 
 | | |
 |---|---|
-| `\l pq` | load the whole library, in the order `.pq.load[]` states |
-| `\l pq/regexp.q` | load one file; it carries its own C functions, so nothing else is needed first |
-| `.pq.load[]` | the load sequence itself: the file list, in q, inspectable — `\l pq` runs exactly this |
+| `\l pq` | reload the whole library |
+| `\l pq/regexp.q` | reload one file; it carries its own C functions, so nothing else is needed first |
+| `` .pq.load`regexp`str `` | load the files not already loaded, and return the ones it loaded |
+| `.pq.load[]` | load every library file not already loaded |
 | `` .pq.load_natives`regexp `` | bind the C functions a library file calls; every native-backed file opens with its own line |
 
-**Nothing of `.pq` is loaded at start-up.** The first reference to any `.pq` name — reading `.pq.version`, assigning
-`.pq.mine:1`, from the console, a script or a connection — loads `pq.q`, and only `pq.q`, then the reference
-proceeds. Until then `.pq` is absent from `` key ` ``; the rest of the library never loads on its own.
+**Nothing is loaded at start-up; a file loads the first time you use one of its names.** Reading `.regexp.extract`
+when it does not exist yet — from the console, a script or a connection — loads `pq/regexp.q` (first `.pq` itself),
+then the reference proceeds; so does opening a `` `:pq:duckdb: `` connection. It happens once per file: after that a
+missing `.regexp` name is the usual `'name` error. Only reading a missing name triggers it: assigning
+`.regexp.mine:1` does not, and a name you defined yourself is found, so it loads nothing. But when some other missing
+`.regexp` name loads the file, the file redefines its own names over yours — keep your code out of library
+namespaces. `.pq` is the one exception: assigning `.pq.mine:1` also loads `pq.q`. A
+namespace the core already has, like `.j`, still gets its library half on the first missing name. Until a file loads,
+its namespace is absent from `` key ` ``.
 
 **Disk wins over the built-in copy.** `\l pq/<file>.q` looks for `pq/<file>.q` in the working directory, then under
 `$QHOME`, and only then uses the copy built into the binary. So a `pq/` directory beside your scripts — or the one a
-distribution ships in `QHOME` — is the library, and editing a file there changes what `\l pq` loads. A file loaded by
+distribution ships in `QHOME` — is the library, and editing a file there changes what `\l pq` and first use load. A
+`pq/<name>.q` of your own there loads on first use of `.<name>` too. A file loaded by
 its own path (`\l /opt/peachq/pq/regexp.q`) behaves identically to the built-in member: the file binds its natives
 with its first line, so the two are the same bytes doing the same thing. A name in neither place is the usual path
 error, `'pq/nope.q`; an unknown set for `.pq.load_natives` is `'name`.

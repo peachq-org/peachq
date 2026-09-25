@@ -13,9 +13,16 @@
  * seam's law). */
 ray_t* q_pq_autoload(void);
 
-/* `\l pq` — run `.pq.load[]`, the load sequence lib/pq.q states in q; the
+/* `\l pq` — reload every library file (`.pq.i.files`, lib/pq.q's list); the
  * reference itself autoloads `.pq`.  Returns as q_pq_autoload. */
 ray_t* q_pq_load(void);
+
+/* A missing `.<stem>…` read: when `<stem>.q` is a library file (a pq/ directory's,
+ * else the bundle member's) the load record has not seen, load `.pq` then run
+ * `\l pq/<stem>.q`.
+ * NULL when nothing ran; else RAY_NULL_OBJ on a load, or the abort's owned
+ * re-signal.  `.pq` itself is q_pq_autoload's. */
+ray_t* q_pq_autoload_ns(const char* stem, size_t n);
 
 /* `\l pq/<file>.q` (`lit` as given, a `.q` suffix optional): `path` is the file
  * a pq/ directory had, else the embedded lib/<file>.q or qlib/src/<file>.q
@@ -32,7 +39,10 @@ ray_t* q_pq_load_file(const char* lit, size_t alen, const char* path);
  * runtime. */
 void q_pq_helpdb_register(void);
 
-/* Forget the once-per-runtime flags (a fresh runtime reloads both). */
+/* Forget the once-per-runtime flags and the load record (a fresh runtime reloads everything). */
 void q_pq_reset(void);
+
+/* The cwd or $QHOME moved: a namespace remembered as having no library file is looked for again. */
+void q_pq_path_changed(void);
 
 #endif /* PEACHQ_Q_PQ_H */
