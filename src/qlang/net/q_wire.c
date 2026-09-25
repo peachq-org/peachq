@@ -547,6 +547,7 @@ typedef struct {
     int    depth0;      /* g_wire_depth at cursor creation (top-level marker) */
     int    serde;       /* serde mode: ext band on, list collapse off */
     int    disk;        /* an image off disk: u/g/p bytes dropped, `s` kept */
+    ray_t* verr;        /* the first error that is a value's own, not the structure's (D0731b) */
 } rcur_t;
 
 static int r_need(rcur_t* c, size_t n) { return c->rem >= n; }
@@ -601,6 +602,24 @@ static ray_t* trunc_err(const char* what) {
 }
 
 static ray_t* rd_obj(rcur_t* c);
+
+/* A value that cannot be built still leaves its bytes well-formed: note the first such error and stand (::) in its
+ * place, so the rest of the payload is still read and a malformed structure behind it still fails as one. */
+static ray_t* rd_value_err(rcur_t* c, ray_t* e) {
+    if (e && !RAY_IS_ERR(e)) return e;
+    if (!e) e = q_err(QE_DOMAIN);
+    if (c->verr) ray_error_free(e);
+    else c->verr = e;
+    return RAY_NULL_OBJ;
+}
+
+/* the decode's answer: a structural failure wins over a value error, which wins over the placeholder-bearing value */
+static ray_t* rd_finish(rcur_t* c, ray_t* r) {
+    if (!c->verr) return r;
+    if (r && RAY_IS_ERR(r)) { ray_error_free(c->verr); return r; }
+    if (r) ray_release(r);
+    return c->verr;
+}
 
 ray_t* q_wire_fixed_vec(int8_t t, const uint8_t* p, int64_t count, int swap) {
     uint8_t esz = ray_type_sizes[(uint8_t)t];
@@ -984,11 +1003,9 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         }
         size_t n = ray_str_len(src);
         const char* sp = ray_str_ptr(src);
-        /* only lambda literals may be re-evaluated: the {…} body itself is
-         * unevaluated at definition time, so this cannot run arbitrary code. */
         if (n < 2 || sp[0] != '{') {
             ray_release(src);
-            return q_err(QE_DOMAIN);
+            return rd_value_err(c, q_err(QE_BADFUNC));
         }
         char* z = (char*)ray_alloc_raw(n + 1);
         if (!z) { ray_release(src); return q_err(QE_WSFULL); }
@@ -999,10 +1016,12 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         ray_t* ast = q_parse(z);
         ray_free_raw(z);
         ray_t* lam;
-        if (!ast || RAY_IS_ERR(ast)) lam = ast ? ast : q_err(QE_PARSE);
-        else { lam = q_eval(ast); ray_release(ast); }
+        /* only a lambda LITERAL is evaluated — its body runs at application, never here; `{x}[…]` would */
+        if (ast && RAY_IS_ERR(ast)) { q_err_drop(); ray_error_free(ast); lam = q_err(QE_BADFUNC); }
+        else if (ast && q_eval_apply_carrier_kind(ast) == Q_EVAL_CAR_LAMBDA) { lam = q_eval(ast); ray_release(ast); }
+        else { if (ast) ray_release(ast); lam = q_err(QE_BADFUNC); }
         q_env_scope(saved);
-        return lam;
+        return rd_value_err(c, lam);
     }
     case 101:                                         /* (::) / unary primitive */
     case 102: {                                       /* binary primitive */
@@ -1011,14 +1030,14 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         if (t == 101 && which == 0) return RAY_NULL_OBJ;
         ray_t* v = q_registry_kdb_op_value((int)which,
                                            t == 101 ? Q_MONADIC : Q_DYADIC);
-        if (!v) return q_err(QE_NYI);
+        if (!v) return rd_value_err(c, q_err(QE_NYI));
         ray_retain(v);
         return v;
     }
     case 103: {                                       /* iterator, by adverb id */
         if (!r_need(c, 1)) return trunc_err("iterator code");
         ray_t* v = q_registry_iter_value((int)r_u8(c));
-        if (!v) return q_err(QE_NYI);
+        if (!v) return rd_value_err(c, q_err(QE_NYI));
         ray_retain(v);
         return v;
     }
@@ -1059,7 +1078,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
             ray_free_raw(a);
         }
         ray_release(l);
-        return r ? r : q_err(QE_DOMAIN);
+        return rd_value_err(c, r);
     }
     case 106: case 107: case 108: case 109: case 110: case 111: {
         /* applying the iterator recovers the manifest row that the family
@@ -1069,7 +1088,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         ray_t* it = q_registry_iter_value(t - 106);   /* borrowed */
         ray_t* r = it ? q_eval_apply_value(it, &f, 1) : q_err(QE_NYI);
         ray_release(f);
-        return r ? r : q_err(QE_DOMAIN);
+        return rd_value_err(c, r);
     }
     default:
         return q_err(QE_DOMAIN);
@@ -1086,7 +1105,7 @@ static ray_t* rd_obj(rcur_t* c) {
 }
 
 ray_t* q_wire_read_obj_ex(const uint8_t* buf, size_t len, size_t* consumed,
-                          int swap, int mode) {
+                          int swap, int mode, int* value_err) {
     /* public contract: `swap` = frame is big-endian (see q_wire.h) */
     rcur_t c = {0};
     c.p = buf;
@@ -1098,11 +1117,12 @@ ray_t* q_wire_read_obj_ex(const uint8_t* buf, size_t len, size_t* consumed,
     c.disk = (mode & Q_WIRE_READ_DISK) != 0;
     ray_t* r = rd_obj(&c);
     if (consumed) *consumed = len - c.rem;
-    return r;
+    if (value_err) *value_err = c.verr && !(r && RAY_IS_ERR(r));
+    return rd_finish(&c, r);
 }
 
 ray_t* q_wire_read_obj(const uint8_t* buf, size_t len, size_t* consumed, int swap) {
-    return q_wire_read_obj_ex(buf, len, consumed, swap, 0);
+    return q_wire_read_obj_ex(buf, len, consumed, swap, 0, NULL);
 }
 
 int q_wire_write_obj_ex(q_wire_wbuf_t* b, ray_t* x, int serde) {
@@ -1284,5 +1304,5 @@ ray_t* q_wire_deserialize_ex(ray_t* bytes, int* sent_err) {
     }
     if (sent_err && r && RAY_IS_ERR(r) && c.top_err_ok && c.rem == 0) *sent_err = 1;
     if (ub) ray_release(ub);
-    return r;
+    return rd_finish(&c, r);
 }

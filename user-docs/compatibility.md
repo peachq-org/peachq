@@ -5,6 +5,7 @@ This page is the index for someone moving code from kx q — what will not work 
 not there before. One or two lines each, then a link to the page that covers it.
 
 Everything here is deliberate. A behaviour that is simply broken is a bug, not a divergence, and is not listed.
+The errors peachq signals that kx q does not have are listed in [Errors](errors.md).
 
 ## Not supported, or different
 
