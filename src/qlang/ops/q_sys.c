@@ -419,7 +419,7 @@ static int64_t listen_range(ray_poll_t* poll, uint32_t ip, const q_sys_listen_sp
 
 uint16_t q_sys_listen(const q_sys_listen_spec_t* spec) {
     ray_poll_t* poll = (ray_poll_t*)ray_runtime_get_poll();
-    if (!poll) return 0;                                  /* no event poll (e.g. qdoctest) */
+    if (!poll) return 0;                                  /* no event poll (an embedder) */
     uint32_t ip;
     if (ray_sock_resolve4(spec->host, &ip) != 0) return 0;
     int64_t sel = spec->any ? ray_ipc_listen_at(poll, ip, 0, spec->reuseport) : listen_range(poll, ip, spec);
@@ -666,8 +666,8 @@ ray_t* q_sys_ts_apply(ray_t* f, ray_t* args) {
  *   `\t`         getter → current interval as a long (`0` when off, kdb-true).
  *   `\t 0`       stop the repeating timer (silent); works with no poll loop.
  *   `\t N` (N>0) fire `.z.ts` every N ms via a forwarding thunk on the poll
- *                timer heap (silent).  Needs an event poll; under ./qdoctest
- *                there is none → 'io (honest, like `\p`), never a hang.
+ *                timer heap (silent).  Needs an event poll; an embedder
+ *                without one gets 'io (honest, like `\p`), never a hang.
  *   `\t exp`     a LONE-integer argument is the timer above; ANY other argument
  *                (`\t log til 100000`, the multi-token `\t 2 + 2`) is a timed
  *                expression → run it once, return the elapsed whole ms.
@@ -716,7 +716,7 @@ static ray_t* h_t(const char* arg, size_t alen, const char* rest, size_t restlen
         g_timer_ms = 0;
         return NULL;
     }
-    if (!poll) return q_err(QE_IO);             /* no event poll (qdoctest) */
+    if (!poll) return q_err(QE_IO);             /* no event poll (an embedder) */
     if (!poll->timers) {
         poll->timers = ray_timers_create(16);
         if (!poll->timers) return q_err(QE_OOM);

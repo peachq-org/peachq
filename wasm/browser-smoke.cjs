@@ -1,7 +1,7 @@
 /* The browser check of the wasm build: headless Chromium opens the reference page
  * (index.html, served by server.py) and drives the engine through peachq-client.js and the
  * Worker.  The q is wasm/browser/NN-name.qcmd, replayed in order in ONE session by the native
- * qdoc runner inside the Worker, with ORIGIN bound to this server.  This file keeps what q text
+ * transcript door inside the Worker, with ORIGIN bound to this server.  This file keeps what q text
  * cannot say: the network log between ledgers (files listed before any is fetched and fetched
  * only when read; DuckDB's browser build loaded on its first use, from the pinned local copy
  * (make -f Makefile.wasm duckdb-wasm); every request off localhost refused), and the page and
@@ -53,7 +53,7 @@ async function main() {
         const ledger = async (name) => {
             const text = fs.readFileSync(path.join(LEDGERS, name), 'utf8');
             const n = text.split('\n').filter((l) => /^q[\w.]*\)/.test(l)).length;
-            const r = await page.evaluate((t) => q.call({ op: 'qdoc', text: t }), text);
+            const r = await page.evaluate((t) => q.call({ op: 'qcmd', text: t }), text);
             const bad = r.failed < 0 ? n : r.failed;
             rows += n;
             rowsFailed += bad;

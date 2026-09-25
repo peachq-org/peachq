@@ -1,9 +1,9 @@
 /* q_console — the host-facing console SINK + its routing config (q_console.c).
  * Base doctrine (src/lang/format.h): pure string core, print veneers, config
  * beside the sink.  q_fmt.c is the pure formatter; this layer buffers the
- * side-effect text `show`/`0N!`/the 1/-1 handles emit — qdoc compares only a
- * row's rendered output and the REPL prints per line, so the host drains the
- * buffer before/instead of the result and resets it once per example / line. */
+ * side-effect text `show`/`0N!`/the 1/-1 handles emit — the REPL prints per
+ * line, so the host drains the buffer before/instead of the result and resets
+ * it once per line. */
 #ifndef Q_CONSOLE_H
 #define Q_CONSOLE_H
 
@@ -20,8 +20,8 @@ int  q_console_write(const char* s, size_t n);  /* raw bytes (kdb 1/-1 handles);
 /* Modern pipe-table display: a deliberate kdb divergence, the `./q`/wasm
  * DEFAULT (`-classic` at launch / `\classic 1` at runtime opt out; spec:
  * docs/superpowers/specs/2026-07-16-nonlegacy-display-design.md).  The global
- * itself starts OFF — each front end arms it — so qdoctest and embedders stay
- * kdb-true.  Gated at ONE branch in q_fmt_console — the console seam — never
+ * itself starts OFF — each front end arms it — so embedders stay kdb-true.
+ * Gated at ONE branch in q_fmt_console — the console seam — never
  * q_fmt_body, so round-trip surfaces (`string`, `-3!`, CSV, cells) keep the
  * legacy text.  q_runtime_destroy resets (no cross-runtime leak). */
 void q_console_pipe_enable(void);

@@ -75,7 +75,7 @@ self.onmessage = async (e) => {
         if (op === 'start') result = await start(e.data);
         else if (!engine) throw new Error('engine not started');
         else if (op === 'eval') result = engine.eval(e.data.src);
-        else if (op === 'qdoc') result = engine.qdoc(e.data.text);
+        else if (op === 'qcmd') result = engine.qcmd(e.data.text);
         else if (op === 'addFiles') result = engine.addFiles(e.data.manifest, e.data.baseUrl);
         else throw new Error('unknown op ' + op);
         self.postMessage({ id, result });

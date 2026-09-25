@@ -1,4 +1,4 @@
-/ The wasm build's plain-q ledger, run inside the module by wasm/smoke.js through the qdoc runner, in the wasm REPL's
+/ The wasm build's plain-q ledger, run inside the module by wasm/smoke.js through the transcript door, in the wasm REPL's
 / display mode.
 q)2+3
 5

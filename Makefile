@@ -5,7 +5,7 @@
 
 CC      ?= cc
 
-RAY_ENTRY_SRC = src/qlang/repl/qmain.c src/qlang/repl/qdoctest_main.c
+RAY_ENTRY_SRC = src/qlang/repl/qmain.c
 RAY_LIB_SRC   = $(filter-out $(RAY_ENTRY_SRC), $(wildcard src/*/*.c src/qlang/eval/*.c src/qlang/ops/*.c src/qlang/net/*.c src/qlang/io/*.c \
                                             src/qlang/parse/*.c src/qlang/base/*.c src/qlang/repl/*.c))
 
