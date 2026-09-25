@@ -1891,32 +1891,14 @@ static ray_t *qsql_build_dict(ray_t **aliases, ray_t **vals, int n) {
     return ray_dict_new(keys, valv);   /* consumes keys, valv */
 }
 
-/* Build the exec By-phrase VALUE from a parsed by-column list.  kdb encodes an
- * exec By as a bare symbol (single group column) or symbol vector (multiple)
- * when the columns are unnamed bare column references — routed to the grouped-
- * exec branch of q_funsql_select_impl (currently deferred).  A named/computed
- * By (`by k:expr`) degrades to a name!expr DICT, the same shape Select uses, so
- * ql_qsql_exec skips it and it lowers via the Select path (keyed-table result).
- * Consumes the bk/bv refs.  Returns an OWNED value. */
+/* The exec By-phrase VALUE.  One bare column is the quoted symbol (parsetrees.md); anything else, several bare
+ * columns included, is the name!expr dict Select uses, so `exec … by a,b` keys by a table (SO 49112236) where a
+ * functional sym VECTOR b would answer funsql.md:348's one empty-symbol group.  Consumes bk/bv; OWNED result. */
 static ray_t *qsql_exec_by(ray_t **bk, ray_t **bv, const int *bnamed, int nb) {
-    int all_bare = 1;
-    for (int i = 0; i < nb; i++)
-        if (bnamed[i] || !(bv[i] && bv[i]->type == -RAY_SYM &&
-                           (bv[i]->attrs & Q_ATTR_QUOTED))) { all_bare = 0; break; }
-    if (all_bare) {
-        ray_t *b;
-        if (nb == 1) {
-            /* the tree QUOTES the group-by symbol constant (parsetrees.md):
-             * one eval of `,`n` yields the functional b-value `n */
-            b = symvec_add(ray_sym_vec_new(RAY_SYM_W64, 1), bv[0]->i64);
-        } else {
-            /* a by-symbol VECTOR constant is enlisted like every symvec in a
-             * tree (parsetrees.md): ,`a`b evals once to the functional b */
-            b = ray_sym_vec_new(RAY_SYM_W64, nb);
-            for (int i = 0; i < nb; i++) b = symvec_add(b, bv[i]->i64);
-            b = qsql_enlist(b);
-        }
-        for (int i = 0; i < nb; i++) { ray_release(bk[i]); ray_release(bv[i]); }
+    if (nb == 1 && !bnamed[0] && bv[0] && bv[0]->type == -RAY_SYM && (bv[0]->attrs & Q_ATTR_QUOTED)) {
+        ray_t *b = symvec_add(ray_sym_vec_new(RAY_SYM_W64, 1), bv[0]->i64);
+        ray_release(bk[0]);
+        ray_release(bv[0]);
         return b;
     }
     return qsql_build_dict(bk, bv, nb);              /* consumes bk/bv */
@@ -2086,8 +2068,8 @@ static ray_t *qsql_norm_exec_a(ray_t *phrases) {
     return qsql_norm_dict(phrases);                  /* named / multiple -> dict */
 }
 
-/* by-phrase `b`: select/update use the name!expr dict; exec uses the bare/vector
- * By-symbol (or a name!expr dict for a computed By) via qsql_exec_by. */
+/* by-phrase `b`: select/update use the name!expr dict; exec uses the bare By-symbol for one bare column, else the
+ * same dict, via qsql_exec_by. */
 static ray_t *qsql_norm_by(ray_t *phrases, int verb) {
     if (verb != QSQL_V_EXEC) return qsql_norm_dict(phrases);
     int64_t n = q_count(phrases);

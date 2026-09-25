@@ -342,15 +342,30 @@ void q_fmt_cell(ray_t* col, int64_t row, int blank_null, char* out, size_t outsz
     ray_release(c);
 }
 
+/* One side of a table-sided dict: a table is its columns, any other list is ONE headerless column. */
+static int64_t side_ncols(ray_t* x) { return x->type == RAY_TABLE ? ray_table_ncols(x) : 1; }
+static ray_t* side_col(ray_t* x, int64_t c) { return x->type == RAY_TABLE ? ray_table_get_col_idx(x, c) : x; }
+
+static void side_name(ray_t* x, int64_t c, char* out, size_t n) {
+    ray_t* s = x->type == RAY_TABLE ? ray_sym_str(ray_table_col_name(x, c)) : NULL;
+    snprintf(out, n, "%.*s", s ? (int)ray_str_len(s) : 0, s ? ray_str_ptr(s) : "");
+    if (s) ray_release(s);
+}
+
+/* A dict with a table on either side displays as a table (ref/exec.md:80, :88). */
+static int dict_is_tabular(ray_t* val) {
+    if (!val || val->type != RAY_DICT) return 0;
+    ray_t* k = ray_dict_keys(val);
+    ray_t* v = ray_dict_vals(val);
+    return (q_type_is_table(k) || q_type_is_table(v)) && q_type_is_iter(k) && q_type_is_iter(v);
+}
+
 static void table_widths(ray_t* tbl, int64_t nc, int64_t nr,
                            int* widths, char hdr[][64]) {
     for (int64_t c = 0; c < nc; c++) {
-        ray_t* s = ray_sym_str(ray_table_col_name(tbl, c));
-        snprintf(hdr[c], 64, "%.*s", s ? (int)ray_str_len(s) : 0,
-                 s ? ray_str_ptr(s) : "");
-        if (s) ray_release(s);
+        side_name(tbl, c, hdr[c], 64);
         int w = (int)strlen(hdr[c]);
-        ray_t* col = ray_table_get_col_idx(tbl, c);
+        ray_t* col = side_col(tbl, c);
         for (int64_t r = 0; r < nr; r++) {
             char cb[64]; q_fmt_cell(col, r, 1, cb, sizeof cb);
             int l = (int)strlen(cb); if (l > w) w = l;
@@ -369,7 +384,7 @@ static void table_grid(int64_t nc, const int* widths, char hdr[][64]) {
 static void grid_cells(ray_t* t, int64_t nc, const int* w, int64_t r) {
     for (int64_t c = 0; c < nc; c++) {
         if (c) qe_putc(' ');
-        char cb[64]; q_fmt_cell(ray_table_get_col_idx(t, c), r, 1, cb, sizeof cb);
+        char cb[64]; q_fmt_cell(side_col(t, c), r, 1, cb, sizeof cb);
         qe_pad(cb, w[c]);
     }
 }
@@ -408,8 +423,8 @@ static void q_fmt_table(ray_t* tbl) {
 }
 
 static void fmt_keyed(ray_t* kt, ray_t* vt) {
-    int64_t knc = ray_table_ncols(kt), knr = q_count(kt);
-    int64_t vnc = ray_table_ncols(vt), vnr = q_count(vt);
+    int64_t knc = side_ncols(kt), knr = q_count(kt);
+    int64_t vnc = side_ncols(vt), vnr = q_count(vt);
     int64_t nr  = knr < vnr ? knr : vnr;
     if (knc > QF_MAXCOL) knc = QF_MAXCOL;
     if (vnc > QF_MAXCOL) vnc = QF_MAXCOL;
@@ -992,14 +1007,7 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
 #define QP_MIN_ROWS 10     /* digest fires only past this many TABLE rows */
 
 static bool fmt_pipe_is_table(ray_t* val) {
-    if (!val) return false;
-    if (val->type == RAY_TABLE) return true;
-    if (val->type == RAY_DICT) {                     /* keyed table = table!table */
-        ray_t* kk = ray_dict_keys(val);              /* borrowed */
-        ray_t* vv = ray_dict_vals(val);              /* borrowed */
-        return kk && vv && kk->type == RAY_TABLE && vv->type == RAY_TABLE;
-    }
-    return false;
+    return q_type_is_table(val) || dict_is_tabular(val);
 }
 
 /* ---- output: one line at a time, under the `\c` cols width rule ---------- */
@@ -1041,13 +1049,10 @@ static const char* qp_typename(ray_t* col) {
 }
 
 static int64_t qp_take(ray_t* t, qp_col* cs, int64_t at, int64_t max) {
-    int64_t nc = ray_table_ncols(t);
+    int64_t nc = side_ncols(t);
     for (int64_t c = 0; c < nc && at < max; c++, at++) {
-        ray_t* s = ray_sym_str(ray_table_col_name(t, c));
-        snprintf(cs[at].name, QP_CELL, "%.*s", s ? (int)ray_str_len(s) : 0,
-                 s ? ray_str_ptr(s) : "");
-        if (s) ray_release(s);
-        cs[at].col  = ray_table_get_col_idx(t, c);   /* borrowed */
+        side_name(t, c, cs[at].name, QP_CELL);
+        cs[at].col  = side_col(t, c);                /* borrowed */
         cs[at].type = qp_typename(cs[at].col);
     }
     return at;
@@ -1251,7 +1256,7 @@ static int qp_digest(qp_col* cs, int64_t nc, int64_t nr, int32_t cols,
 static ray_t* qp_facts_fn(ray_t* t) {
     if (!fmt_pipe_is_table(t)) return q_err(QE_TYPE);
     int64_t max = t->type == RAY_TABLE ? ray_table_ncols(t)
-                : ray_table_ncols(ray_dict_keys(t)) + ray_table_ncols(ray_dict_vals(t));   /* every column, no display cap */
+                : side_ncols(ray_dict_keys(t)) + side_ncols(ray_dict_vals(t));   /* every column, no display cap */
     qp_col* cs = calloc((size_t)(max > 0 ? max : 1), sizeof *cs);
     if (!cs) return q_err(QE_WSFULL);
     int64_t nr = 0, nk = 0;
@@ -1763,13 +1768,9 @@ static void q_fmt_body(ray_t* val) {
         else if (mt) ray_release(mt);
     }
 
-    if (val->type == RAY_DICT) {            /* keyed table = table!table */
-        ray_t* kk = ray_dict_keys(val);
-        ray_t* vv = ray_dict_vals(val);
-        if (kk && vv && kk->type == RAY_TABLE && vv->type == RAY_TABLE) {
-            fmt_keyed(kk, vv);
-            return;
-        }
+    if (dict_is_tabular(val)) {
+        fmt_keyed(ray_dict_keys(val), ray_dict_vals(val));
+        return;
     }
 
     if (val->type == RAY_DICT) {            /* dict: `key| value` rows */
