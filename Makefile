@@ -182,6 +182,11 @@ endif
 CFLAGS  ?= $(RELEASE_CFLAGS)
 LDFLAGS ?=
 
+# A -static link cannot dlopen, so every library load fails there: q_dl.c names the download that can.
+ifneq ($(filter -static,$(LDFLAGS)),)
+$(BUILD_DIR)/src/qlang/io/q_dl.o: DEFS += -DRAY_STATIC_LINK=1
+endif
+
 LIB_SRC = $(RAY_LIB_SRC) $(RAY_VENDOR_SRC)
 LIB_OBJ    = $(addprefix $(BUILD_DIR)/,$(LIB_SRC:.c=.o)) $(LIBFFI_NATIVE_OBJ)
 Q_MAIN_OBJ = $(BUILD_DIR)/src/qlang/repl/qmain.o

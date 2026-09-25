@@ -606,7 +606,7 @@ static ray_t* http_do(ray_t* urlv, const http_req_t* r)
         ray_t* result = NULL;
         size_t rlen = 0;
         char* resp = http_exchange(&u, req, (size_t)rl, body, mime ? body_len : 0, deadline, r->head, &rlen, &err);
-        if (!resp) return ray_error(err, NULL);
+        if (!resp) return q_err_from_text(err, strlen(err));
         int st; const char* rbody; size_t rbl; int gz = 0; q_http_span_t loc;
         int ex = q_http_client_extract(resp, rlen, &st, &rbody, &rbl, &gz, r->head, r->clen, &loc);
         if (ex == 0 && r->status) *r->status = st;
@@ -737,7 +737,7 @@ ray_t* q_http_client_raw(ray_t* hsym, ray_t* request) {
     const char* err = "conn";
     size_t rlen = 0;
     char* resp = http_exchange(&u, reqp, (size_t)reqn, NULL, 0, now_ms() + Q_HTTP_TOTAL_MS, 0, &rlen, &err);
-    if (!resp) return ray_error(err, NULL);
+    if (!resp) return q_err_from_text(err, strlen(err));
     ray_t* result = NULL;
     int st; const char* body; size_t body_len;
     /* raw client returns the response verbatim — no transparent gzip inflate (NULL) */

@@ -14,7 +14,7 @@
 #include "qlang/q_ctx.h"             /* q_ctx_eval_src — what k(0,…) evaluates through */
 #include "qlang/q_registry.h"        /* the `.` verb dot applies */
 #include "qlang/q_prim.h"            /* the attribute BYTE both ways, the enum domain, vk's collapse */
-#include "qlang/io/q_dl.h"           /* q_dl_open / q_dl_sym — the extension, never unmapped */
+#include "qlang/io/q_dl.h"           /* q_dl_open / q_dl_sym — the extension, never unmapped; q_dl_unavailable */
 #include "qlang/io/q_io.h"           /* q_io_abs_path — a Windows candidate's lexical absolute path */
 #include "qlang/net/q_wire.h"        /* b9/d9/okx are the -8!/-9! codec */
 #include "core/poll.h"
@@ -1265,6 +1265,8 @@ static void dl_add(dl_paths* c, const char* fmt, const char* a, const char* b) {
     if (rel[0] == '/' || !getcwd(cwd, sizeof cwd)) snprintf(c->p[c->n], sizeof c->p[0], "%s", rel);
     else snprintf(c->p[c->n], sizeof c->p[0], "%s/%s", cwd, rel);
 #endif
+    for (int i = 0; i < c->n; i++)
+        if (strcmp(c->p[i], c->p[c->n]) == 0) return;   /* a script beside the cwd names the cwd's path again */
     c->n++;
 }
 
@@ -1353,6 +1355,8 @@ ray_t* q_dl_wrap(ray_t* x, ray_t* y) {
     void* h = NULL;
     for (int i = 0; i < c.n && !h; i++) h = dl_open(c.p[i]);
     if (!h) {
+        const char* why = q_dl_unavailable();
+        if (why) return q_err_from_text(why, strlen(why));
         char msg[640];
         int off = 0;
         for (int i = 0; i < c.n && off >= 0 && off < (int)sizeof msg; i++)
