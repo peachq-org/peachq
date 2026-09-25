@@ -9,9 +9,9 @@
 #include "core/sock.h"
 
 /* Client handshake on a connected fd, then attach.  `host` drives SNI and peer
- * name verification.  0 ok; -1 with *err set to a bare error class: `nyi` when
- * this box has no usable OpenSSL (the degradation ladder — https stays as
- * unimplemented as it was before the tier), `conn` for a real TLS failure. */
+ * name verification.  0 ok; -1 with *err set to the error text: `nyi` when this
+ * box has no usable OpenSSL (the degradation ladder), `conn` for a real TLS
+ * failure, q_dl_unavailable's line in a static build that can load none. */
 int q_tls_client_start(ray_sock_t fd, const char* host, const char** err);
 
 /* `-E` TLS server mode: 0 plain, 1 plain and TLS, 2 TLS only (cmdline.md). */
