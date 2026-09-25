@@ -28,3 +28,12 @@ void* q_dl_sym(void* lib, const char* name) {
     return dlsym(lib, name);
 #endif
 }
+
+#if defined(RAY_STATIC_LINK)
+const char* q_dl_unavailable(void) {
+    return "static-dlopen: this build cannot load shared libraries - use a -glibc download: "
+           "https://peachq.org/docs/basics/errors#static-dlopen";
+}
+#else
+const char* q_dl_unavailable(void) { return NULL; }
+#endif
