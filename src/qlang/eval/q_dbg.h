@@ -33,6 +33,8 @@ int64_t q_dbg_statement_origin(int64_t* line);
  * exit restores it when r is a caught error (a `:x` return is not one) — owner ruling 2026-09-17. */
 int64_t q_dbg_trap_enter(void);
 void    q_dbg_trap_exit(int64_t ctx, ray_t* r);
+/* 1 when a trap encloses the running statement (a load line inherits its asker's): its error has a handler. */
+int     q_dbg_trapped(void);
 
 /* Error seams: filter an owned result; may snapshot, suspend, and return a
  * `:r` replacement.  lambda_filter runs at the body-statement boundary with
