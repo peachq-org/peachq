@@ -68,7 +68,7 @@ uint16_t q_sys_listen_port(void);
 
 /* Execute a `\`-command line: OWNED value (NULL = silent) or OWNED error.
  * ONE setting for every door (owner ruling 2026-09-04: `\X` IS `system "X"`) —
- * an unknown token shells via popen and returns stdout as a list of char
+ * an unknown token shells out and returns stdout as a list of char
  * vectors ('os on nonzero exit).  The intended caller is q_system_fn, which is
  * where q_parse routes a leading-`\` line. */
 ray_t* q_sys_run(const char* line, size_t n);

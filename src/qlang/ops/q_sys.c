@@ -6,6 +6,9 @@
  * (q_sys_exit), gated by the g_own_process capability rather than by the
  * caller, and the unknown-token shell miss.  \d owns the current-context state
  * here; \S owns its seed state here. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE          /* memfd_create */
+#endif
 #define _POSIX_C_SOURCE 200809L
 /* winsock2.h must precede EVERY windows.h (core/profile.h pulls one in) or
  * mingw silently falls back to the winsock v1 declarations. */
@@ -46,7 +49,7 @@
 #include "mem/heap.h"         /* ray_mem_stats / ray_mem_stats_t — `\w` reuse */
 #include <stdlib.h>           /* malloc, free, exit — `\\` */
 #include <string.h>           /* strlen, memcpy, memcmp */
-#include <stdio.h>            /* popen / pclose — `system "…"` stdout capture */
+#include <stdio.h>            /* snprintf; popen / pclose — the Windows `system "…"` capture */
 #include <unistd.h>          /* chdir / getcwd / access — `\cd`, `\l`; dup2 — `\1`/`\2` */
 #include <fcntl.h>           /* open — the `\1`/`\2` redirect target */
 #include <limits.h>          /* PATH_MAX */
@@ -61,7 +64,15 @@
 #include "qlang/q_registry.h" /* q_str_text_bytes / q_str_charv_out — charv text accessors */
 #include "qlang/q_registry_internal.h" /* q_exit_wrap + the q_type_* atom helpers */
 #ifndef RAY_OS_WINDOWS
-#include <sys/wait.h>        /* WIFEXITED / WEXITSTATUS — shell-capture status */
+#include <sys/wait.h>        /* waitpid / WIFEXITED / WEXITSTATUS — shell-capture status */
+#ifndef __EMSCRIPTEN__
+#include <spawn.h>           /* posix_spawn — the shell-capture child */
+#include <errno.h>
+#ifdef __linux__
+#include <sys/mman.h>        /* memfd_create */
+#endif
+extern char** environ;
+#endif
 #endif                       /* mingw has no <sys/wait.h>; _pclose gives the code directly */
 
 /* `\p 0W` reads the OS-chosen port back off the listener fd (getsockname),
@@ -964,13 +975,103 @@ static ray_t* h_help(const char* p, size_t n) {
     return NULL;
 }
 
+#if !defined(__EMSCRIPTEN__)
+typedef struct { char* p; size_t n; } sh_buf_t;
+#endif
+
+#if defined(RAY_OS_WINDOWS)
+static ray_t* sh_run(const char* cmd, sh_buf_t* b) {
+    FILE* p = popen(cmd, "r");
+    if (!p) return q_err(QE_OS);
+    size_t cap = 0;
+    char   rbuf[4096];
+    size_t got;
+    while ((got = fread(rbuf, 1, sizeof rbuf, p)) > 0) {
+        if (b->n + got > cap) {
+            size_t nc = cap ? cap : 4096;
+            while (b->n + got > nc) nc *= 2;
+            char* nb = (char*)realloc(b->p, nc);
+            if (!nb) { pclose(p); return q_err(QE_OOM); }
+            b->p = nb;
+            cap  = nc;
+        }
+        memcpy(b->p + b->n, rbuf, got);
+        b->n += got;
+    }
+    /* _pclose returns the command's exit code directly (-1 on spawn failure), not a wait(2) status. */
+    return pclose(p) == 0 ? NULL : q_err(QE_OS);
+}
+#elif !defined(__EMSCRIPTEN__)
+static int sh_capture_fd(void) {
+    int fd = -1;
+#ifdef __linux__
+    fd = memfd_create("q-system", MFD_CLOEXEC);
+#endif
+    if (fd < 0) {
+        const char* d = getenv("TMPDIR");
+        char path[PATH_MAX];
+        if (snprintf(path, sizeof path, "%s/q-system-XXXXXX", d && *d ? d : "/tmp") >= (int)sizeof path) return -1;
+        if ((fd = mkstemp(path)) < 0) return -1;
+        if (unlink(path) != 0) { close(fd); return -1; }
+    }
+    int h = fcntl(fd, F_DUPFD_CLOEXEC, 10);
+    close(fd);
+    return h;
+}
+
+/* kdb appends its capture redirect (`cmd > tmpout`, ref/system.md), so it is the LAST redirect and wins over one
+ * inside cmd.  Ours is `>&9`, fd 9 the capture file as fd 1 is, read up to its size once the shell has exited:
+ * nothing waits for the file's other holders, such as a background job. */
+static ray_t* sh_run(const char* cmd, sh_buf_t* b) {
+    int fd = sh_capture_fd();
+    if (fd < 0) return q_err(QE_OS);
+
+    static const char tail[] = " >&9 9>&-";
+    size_t cl  = strlen(cmd);
+    char*  w   = (char*)malloc(cl + sizeof tail);
+    pid_t  pid = -1;
+    int    rc  = ENOMEM;
+    posix_spawn_file_actions_t fa;
+    if (w && (rc = posix_spawn_file_actions_init(&fa)) == 0) {
+        memcpy(w, cmd, cl);
+        memcpy(w + cl, tail, sizeof tail);
+        char  sh[] = "sh", c[] = "-c";
+        char* argv[] = {sh, c, w, NULL};
+        if ((rc = posix_spawn_file_actions_adddup2(&fa, fd, 1)) == 0
+            && (rc = posix_spawn_file_actions_adddup2(&fa, fd, 9)) == 0)
+            rc = posix_spawn(&pid, "/bin/sh", &fa, NULL, argv, environ);
+        posix_spawn_file_actions_destroy(&fa);
+    }
+    free(w);
+    if (rc != 0) { close(fd); return q_err(rc == ENOMEM ? QE_OOM : QE_OS); }
+
+    int   status = 0;
+    pid_t r;
+    while ((r = waitpid(pid, &status, 0)) < 0 && errno == EINTR) {}
+    /* No status (another reaper took the child, e.g. SIGCHLD ignored): an unproven success is 'os. */
+    if (r != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) { close(fd); return q_err(QE_OS); }
+
+    struct stat st;
+    if (fstat(fd, &st) != 0) { close(fd); return q_err(QE_OS); }
+    size_t size = (size_t)st.st_size;
+    if (size && !(b->p = (char*)malloc(size))) { close(fd); return q_err(QE_OOM); }
+    while (b->n < size) {
+        ssize_t k = pread(fd, b->p + b->n, size - b->n, (off_t)b->n);
+        if (k < 0 && errno == EINTR) continue;
+        if (k < 0) { close(fd); return q_err(QE_OS); }
+        if (k == 0) break;
+        b->n += (size_t)k;
+    }
+    close(fd);
+    return NULL;
+}
+#endif
+
 /* Shell escape for the q `system "…"` STRING form.  Runs the command in the
- * current PROCESS cwd (popen -> /bin/sh -c) and captures its STDOUT as a q
- * LIST of character vectors, one per line, with the line feed and any
- * associated carriage return removed (ref/system.md).  A nonzero shell exit
- * throws 'os (ref/system.md `@[system;"ls egg";…]` -> "error - os"); stderr is
- * NOT captured (popen "r" reads stdout only).  Ownership-heavy: every failure
- * path releases the partial list, the current row, and both scratch buffers. */
+ * current PROCESS cwd and captures its STDOUT as a q LIST of character vectors,
+ * one per line, with the line feed and any associated carriage return removed
+ * (ref/system.md).  A nonzero shell exit throws 'os (ref/system.md
+ * `@[system;"ls egg";…]` -> "error - os"); stderr is NOT captured. */
 static ray_t* sys_shell_capture(const char* rem, size_t rlen) {
     char   stackbuf[1024];
     char*  cmd = stackbuf;
@@ -989,37 +1090,12 @@ static ray_t* sys_shell_capture(const char* rem, size_t rlen) {
     if (blk) ray_free(blk);
     if (!out) return q_err(QE_OS);
 #else
-    FILE* p = popen(cmd, "r");
+    sh_buf_t sb  = {0};
+    ray_t*   err = sh_run(cmd, &sb);
     if (blk) ray_free(blk);
-    if (!p) return q_err(QE_OS);
-
-    /* Slurp all stdout into a growable buffer. */
-    size_t cap = 4096, len = 0;
-    char*  out = (char*)malloc(cap);
-    if (!out) { pclose(p); return q_err(QE_OOM); }
-    size_t got;
-    char   rbuf[4096];
-    while ((got = fread(rbuf, 1, sizeof rbuf, p)) > 0) {
-        if (len + got > cap) {
-            while (len + got > cap) cap *= 2;
-            char* nb = (char*)realloc(out, cap);
-            if (!nb) { free(out); pclose(p); return q_err(QE_OOM); }
-            out = nb;
-        }
-        memcpy(out + len, rbuf, got);
-        len += got;
-    }
-    int status = pclose(p);
-#ifdef RAY_OS_WINDOWS
-    /* _pclose returns the command's exit code directly (-1 on spawn failure),
-     * NOT a wait(2)-encoded status — no WIFEXITED/WEXITSTATUS on Windows. */
-    if (status != 0) {
-#else
-    if (status == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-#endif
-        free(out);
-        return q_err(QE_OS);                    /* nonzero / signalled */
-    }
+    if (err) { free(sb.p); return err; }
+    char*  out = sb.p;
+    size_t len = sb.n;
 #endif
 
     /* Split on '\n', dropping a trailing '\r' per line (LF + associated CR
@@ -1044,9 +1120,9 @@ static ray_t* sys_shell_capture(const char* rem, size_t rlen) {
 }
 
 /* The q-owned `system "…"` verb: prepend `\` and PASS THROUGH q_sys_run —
- * `system "X"` ≡ `\X` for every command, one path, and since 2026-09-04 the
+ * `system "X"` ≡ `\X` for every command, one path, and the
  * `\X` LINE arrives here too (q_parse builds this application).  An unknown
- * token shells via popen, stdout -> list of char vectors.  `system` is a
+ * token shells out, stdout -> list of char vectors.  `system` is a
  * restricted primitive under IPC reval (kdb blocks it) -> 'access. */
 ray_t* q_system_fn(ray_t* x) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
