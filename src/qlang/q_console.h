@@ -1,21 +1,25 @@
-/* q_console — the host-facing console SINK + its routing config (q_console.c).
+/* q_console — the console SINK + its routing config (q_console.c).
  * Base doctrine (src/lang/format.h): pure string core, print veneers, config
- * beside the sink.  q_fmt.c is the pure formatter; this layer buffers the
- * side-effect text `show`/`0N!`/the 1/-1 handles emit — the REPL prints per
- * line, so the host drains the buffer before/instead of the result and resets
- * it once per line. */
+ * beside the sink.  q_fmt.c is the pure formatter; this layer writes the
+ * side-effect text `show`/`0N!`/the 1 -1 2 -2 handles emit THROUGH to its
+ * destination as it is issued: each call is one whole logical write (payload
+ * plus its newline) under one lock; one thread's writes keep issue order across
+ * stdout and fd 2, and writers outside the sink stay ordered because every sink
+ * write flushes.  A door's stream must not itself write to the console. */
 #ifndef Q_CONSOLE_H
 #define Q_CONSOLE_H
 
 #include <rayforce.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 
-int         q_console_show(ray_t* val);   /* the whole display + '\n'; -1 = could not build it, or the sink refused */
-const char* q_console_str(void);          /* buffered text ("" if empty) */
-void        q_console_reset(void);        /* clear the buffer */
-void        q_console_flush(void);        /* write + clear: the exit-path drain */
-int  q_console_write(const char* s, size_t n);  /* raw bytes (kdb 1/-1 handles); -1 = sink refused */
+int   q_console_show(ray_t* val);     /* the whole display + '\n'; -1 = could not build it */
+int   q_console_write(const char* s, size_t n, bool nl);      /* the door's stdout; always 0 (errors not escalated) */
+int   q_console_write_err(const char* s, size_t n, bool nl);  /* fd 2 (handles 2/-2); -1 = the write failed */
+void  q_console_flush(void);          /* the exit path's fflush (issue #23) */
+/* The running door names its thread's stdout stream (NULL = stdout) and restores the previous one when it returns. */
+FILE* q_console_door(FILE* out);
 
 /* Modern pipe-table display: a deliberate kdb divergence, the `./q`/wasm
  * DEFAULT (`-classic` at launch / `\classic 1` at runtime opt out; spec:

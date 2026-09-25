@@ -10,7 +10,7 @@
 #include "qlang/net/q_gz.h"        /* q_gz_deflate — `form?` response gzip (#6) */
 #include "qlang/net/q_ws.h"        /* q_ws_handshake — the Upgrade hand-off */
 #include "qlang/html_assets_gen.h" /* q_html_assets[] — codegen'd from src/qlang/html/ */
-#include "qlang/q_console.h"   /* q_console_str/_reset — drain handler show output */
+#include "qlang/q_console.h"   /* q_console_door — handler output is the server console's */
 #include "qlang/q_env.h"       /* q_env_get — `.h.HOME` / `.h.ty`, the `.z.*` handlers */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_call_name — handler firing */
 #include "mem/sys.h"
@@ -648,12 +648,10 @@ static int zh_dispatch_call(ray_sock_t fd, const char* method, size_t mlen,
     ray_t* arg = zh_build_arg(method, mlen, text_p, text_len, hdrs, nh);
     if (!arg) { q_http_send_simple(fd, 500, "Internal Server Error"); return 0; }
 
-    ray_t* r = q_eval_apply_call_name(which, strlen(which), &arg, 1);
+    FILE*  door = q_console_door(stdout);        /* handler show/0N! is the SERVER console's */
+    ray_t* r    = q_eval_apply_call_name(which, strlen(which), &arg, 1);
+    q_console_door(door);
     ray_release(arg);
-    /* drain handler show/0N! to the server console (zts_tick pattern) */
-    { const char* con = q_console_str();
-      if (con && *con) { fputs(con, stdout); fflush(stdout); }
-      q_console_reset(); }
 
     { const char* rp; int64_t rn;
       if (r && !RAY_IS_ERR(r) && q_str_text_bytes(r, &rp, &rn)) {
@@ -780,11 +778,10 @@ static int zac_gate(ray_sock_t fd, const char* target, size_t tlen,
     ray_t* arg = zh_build_arg(NULL, 0, target, tlen, hdrs, nh);
     if (!arg) { q_http_send_simple(fd, 500, "Internal Server Error"); return ZAC_DONE; }
 
-    ray_t* r = q_eval_apply_call_name(".z.ac", 5, &arg, 1);
+    FILE*  door = q_console_door(stdout);
+    ray_t* r    = q_eval_apply_call_name(".z.ac", 5, &arg, 1);
+    q_console_door(door);
     ray_release(arg);
-    { const char* con = q_console_str();     /* drain handler show/0N! */
-      if (con && *con) { fputs(con, stdout); fflush(stdout); }
-      q_console_reset(); }
 
     int result = ZAC_DONE;
     int64_t st; const char* pay; size_t paylen;

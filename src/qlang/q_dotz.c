@@ -13,7 +13,7 @@
 #include "qlang/eval/q_dbg.h"  /* q_dbg_zex/_zey — `.z.ex`/`.z.ey` (basics/debug.md) */
 #include "qlang/net/q_tls.h"   /* q_tls_dotz_e — `.z.e` TLS connection status */
 #include "qlang/ops/q_sys.h"       /* q_sys_timer_active — stopped-timer no-op guard */
-#include "qlang/q_console.h"   /* q_console_str/_reset — drain .z.ts/.z.exit show/0N! output */
+#include "qlang/q_console.h"   /* q_console_door — .z.ts/.z.exit output is the server console's */
 #include "qlang/io/q_conn.h"   /* q_conn_zW/_zH — `.z.W`/`.z.H` collector views */
 #include "lang/cal.h"          /* ymd_to_date — build-date -> q date for .z.k */
 #include "lang/env.h"          /* ray_env_get / ray_fn_unary */
@@ -343,32 +343,24 @@ static ray_t* zts_tick(ray_t* tick) {
     int64_t zts = ray_sym_intern_runtime(".z.ts", 5);
     if (!q_env_get(zts)) return NULL;             /* .z.ts unset → no-op */
     ray_t* ts = ray_timestamp(q_dotz_now_ns(1));       /* .z.P local timestamp arg */
-    ray_t* r  = q_eval_apply_call_sym(zts, &ts, 1);
+    FILE*  door = q_console_door(stdout);          /* the timer's output is the SERVER console's */
+    ray_t* r    = q_eval_apply_call_sym(zts, &ts, 1);
+    q_console_door(door);
     ray_release(ts);
-    /* Drain any show/0N! console output the handler produced to the SERVER
-     * stdout — the timer fires outside run_one_line / remote-eval / an IPC hook,
-     * so nothing else drains q_console_str here; without this the output is
-     * delayed until the next eval or (in an idle timer server) accumulates
-     * unbounded.  fflush so an otherwise-idle server surfaces it promptly. */
-    { const char* con = q_console_str();
-      if (con && *con) { fputs(con, stdout); fflush(stdout); }
-      q_console_reset(); }
     return r;                                      /* fire_expired frees/prints it */
 }
 
 /* Call `.z.exit` (if set) with the exit code (ref/dotz.md: unary, arg = the
- * exit parameter; default = do nothing), then drain its show/0N! console
- * output to stdout — this runs moments before exit(), nothing else drains. */
+ * exit parameter; default = do nothing); its show/0N! goes to stdout. */
 void q_dotz_exit_fire(int code) {
     int64_t zexit = ray_sym_intern_runtime(".z.exit", 7);
     if (!q_env_get(zexit)) return;
-    ray_t* arg = ray_i64(code);
-    ray_t* r = q_eval_apply_call_sym(zexit, &arg, 1);
+    ray_t* arg  = ray_i64(code);
+    FILE*  door = q_console_door(stdout);
+    ray_t* r    = q_eval_apply_call_sym(zexit, &arg, 1);
+    q_console_door(door);
     ray_release(arg);
     if (r) ray_release(r);
-    { const char* con = q_console_str();
-      if (con && *con) { fputs(con, stdout); fflush(stdout); }
-      q_console_reset(); }
 }
 
 ray_t* q_dotz_timer_thunk(void) {
