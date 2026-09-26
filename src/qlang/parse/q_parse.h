@@ -45,4 +45,8 @@ void q_ast_fill_empty_stmts(ray_t* ast);
  * symbol.  THE one test; q_eval's head dispatch and the parser both ask it. */
 int q_parse_is_seq_head(const ray_t* h);
 
+/* `-4!x`: src[0..n) (NUL-terminated at n) cut at the scanner's token boundaries into a list of char vectors;
+ * the blanks and comments between them are tokens too, so the pieces raze back to the input. */
+ray_t* q_parse_tokens(const char* src, int64_t n);
+
 #endif /* Q_PARSE_H */
