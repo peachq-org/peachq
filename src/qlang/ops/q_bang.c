@@ -23,6 +23,7 @@
 #include "qlang/io/q_handles.h"     /* q_handles_broadcast/deferred — `-25!` broadcast, `-30!` deferred reply */
 #include "qlang/io/q_log.h"         /* q_log_replay — `-11!` streaming execute */
 #include "qlang/eval/q_eval.h"  /* q_eval — `-6!` (internal.md: eval) */
+#include "qlang/eval/q_dbg.h"   /* q_dbg_trp_dot — `-105!` */
 #include "qlang/q_fmt.h"        /* q_fmt_krepr — `-3!`, .Q.s1 */
 #include "qlang/q_console.h"    /* q_console_write — 0N! */
 #include "qlang/ops/q_sys.h"        /* q_sys_ts_apply — `-34!` (.Q.ts) */
@@ -291,6 +292,7 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -21: return q_io_zip_stats(y);
         case -35: return q_dotq_gz_fn(&y, 1);
         case -38: return q_conn_bang38(y);
+        case -105: return q_dbg_trp_dot(y);
         case -25:  /* async broadcast (internal.md): a 2-list (handles;msg) */
             if (y->type != RAY_LIST || q_count(y) != 2) return q_err(QE_TYPE);
             return q_handles_broadcast(ray_list_get(y, 0), ray_list_get(y, 1));
