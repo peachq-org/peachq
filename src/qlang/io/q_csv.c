@@ -59,7 +59,7 @@ typedef struct q_csv_card {
     uint32_t non_null;
 } card_t;
 
-typedef struct { const char* p; size_t n; char* dyn; } csv_fld;
+typedef struct { const char* p; size_t n; char* dyn; int quoted; } csv_fld;
 
 static ray_t* csv_typed_empty(char c);
 
@@ -395,8 +395,8 @@ static int csv_f64_special(const char* f, size_t n, double* v) {
 
 ct_t q_csv_detect(const q_csv_fmt_t* fmt, const char* f, size_t n) {
     if (csv_null_tok(f, n)) return CT_UNKNOWN;
-    /* typed cells tolerate surrounding blanks (" 567" is a written long — kdb's
-     * casts and DuckDB both read it); blanks-only is text, NEVER a null */
+    /* typed cells tolerate surrounding blanks (" 567" is a written long); a blanks-only cell reaching here
+     * was QUOTED (csv_fld_text empties an unquoted one) or a JSON string, so its blanks are content: text */
     while (n && f[0] == ' ') { f++; n--; }
     while (n && f[n - 1] == ' ') n--;
     if (n == 0) return CT_STR;
@@ -583,7 +583,7 @@ ray_t* q_csv_cell_atom(const q_csv_fmt_t* fmt, char c, const char* f, size_t n) 
     if (c == 'c') return n == 1 ? ray_char((uint8_t)f[0]) : q_err(QE_CSV);
     while (n && f[0] == ' ') { f++; n--; }         /* the same blank tolerance the sniffer applies */
     while (n && f[n - 1] == ' ') n--;
-    if (n == 0) return q_err(QE_CSV);              /* blanks-only under a typed column is the miss law */
+    if (n == 0) return q_err(QE_CSV);              /* quoted blanks are content, which no number or instant reads */
     switch (c) {
         case 'b': {
             int v = csv_bool_tok(f, n);
@@ -711,10 +711,11 @@ static int csv_region_scan(const csv_st* st, int delim, const char** pp, const c
  * here, the tail unread.  *ate says a delimiter was consumed, so a trailing one yields the empty final
  * field. */
 static ray_t* csv_field(csv_st* st, const char** pp, const char* end,
-                        const char** out, size_t* outn, char** dyn, int* ate) {
+                        const char** out, size_t* outn, char** dyn, int* quoted, int* ate) {
     const char* p = *pp;
     int delim = st->no_delim ? -1 : (unsigned char)st->delim;
     *ate = 0;
+    *quoted = 0;
     if (!st->quote_off && p < end && *p == st->quote) {
         const char* q0 = p;
         const char *s, *e, *cls;
@@ -725,6 +726,7 @@ static ray_t* csv_field(csv_st* st, const char** pp, const char* end,
             p = q0;
             goto literal;
         }
+        *quoted = 1;
         if (esc_seen) {
             size_t raw = (size_t)(e - s);
             char* d = (char*)malloc(raw ? raw : 1);
@@ -770,6 +772,20 @@ static void csv_fields_free(csv_st* st) {
     st->nfields = 0;
 }
 
+/* a field's cell text: an unquoted field sheds its surrounding blanks (padding, so blanks-only is the empty
+ * cell); a quoted one is byte-exact */
+static void csv_fld_text(const csv_st* st, const csv_fld* f, const char** p, size_t* n) {
+    const char* s = f->p;
+    size_t l = f->n;
+    char tab = st->no_delim || st->delim != '\t' ? '\t' : ' ';
+    if (!f->quoted) {
+        while (l && (s[0] == ' ' || s[0] == tab)) { s++; l--; }
+        while (l && (s[l - 1] == ' ' || s[l - 1] == tab)) l--;
+    }
+    *p = s;
+    *n = l;
+}
+
 /* split one row into st->fields — the ONE field walk every phase (header, detect,
  * parse) consumes, so count is known before anything is committed */
 static ray_t* csv_row_split(csv_st* st, const char* p, size_t n, int64_t* cnt) {
@@ -787,7 +803,7 @@ static ray_t* csv_row_split(csv_st* st, const char* p, size_t n, int64_t* cnt) {
         csv_fld* f = &st->fields[st->nfields];
         f->dyn = NULL;
         int ate = 0;
-        ray_t* bad = csv_field(st, &p, end, &f->p, &f->n, &f->dyn, &ate);
+        ray_t* bad = csv_field(st, &p, end, &f->p, &f->n, &f->dyn, &f->quoted, &ate);
         if (bad) { csv_fields_free(st); return bad; }
         st->nfields++;
         if (!ate) break;
@@ -882,8 +898,11 @@ static ray_t* csv_parse_row(csv_st* st, const char* p, size_t n) {
         for (int64_t j = 0; j < st->ncols && !bad; j++) {
             int64_t k = st->kidx[j];
             if (k < 0) continue;
-            ray_t* a = j < cnt ? q_csv_cell_atom(&st->fmt, st->kchars[k], st->fields[j].p, st->fields[j].n)
-                               : q_csv_cell_atom(&st->fmt, st->kchars[k], "", 0);   /* the pad: the empty-field null */
+            const char* fp = "";
+            size_t fn = 0;
+            if (j < cnt && st->kchars[k] == 'c') fp = st->fields[j].p, fn = st->fields[j].n;   /* byte-literal */
+            else if (j < cnt) csv_fld_text(st, &st->fields[j], &fp, &fn);   /* else the pad: the empty-field null */
+            ray_t* a = q_csv_cell_atom(&st->fmt, st->kchars[k], fp, fn);
             if (!a) bad = q_err(QE_OOM);
             else if (RAY_IS_ERR(a)) {
                 st->rej_class = CSV_RJ_CAST;
@@ -943,8 +962,11 @@ static ray_t* csv_row_detect(csv_st* st, const char* p, size_t n) {
         return tol ? NULL : q_err(QE_CSV);
     }
     for (int64_t j = 0; j < (cnt < st->ncols ? cnt : st->ncols); j++) {
-        st->f_ct[j] = q_csv_promote(st->f_ct[j], q_csv_detect(&st->fmt, st->fields[j].p, st->fields[j].n));
-        csv_card_note(&st->f_card[j], st->fields[j].p, st->fields[j].n);
+        const char* fp;
+        size_t fn;
+        csv_fld_text(st, &st->fields[j], &fp, &fn);
+        st->f_ct[j] = q_csv_promote(st->f_ct[j], q_csv_detect(&st->fmt, fp, fn));
+        csv_card_note(&st->f_card[j], fp, fn);
     }
     csv_fields_free(st);
     return NULL;
@@ -1108,7 +1130,10 @@ static ray_t* csv_freeze(csv_st* st) {
     const char* hdr_salv = st->salv_class;         /* a salvaged HEADER is audited too (row 0 as
                                                     * data records itself through the replay) */
     for (int64_t j = 0; j < nc; j++) {
-        ray_t* c = ray_charv(st->fields[j].p, (int64_t)st->fields[j].n);
+        const char* fp;
+        size_t fn;
+        csv_fld_text(st, &st->fields[j], &fp, &fn);
+        ray_t* c = ray_charv(fp, (int64_t)fn);
         if (!RAY_IS_ERR(c)) {
             st->f_hdr = ray_list_append(st->f_hdr, c);
             ray_release(c);
