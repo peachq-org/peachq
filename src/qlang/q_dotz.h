@@ -28,6 +28,11 @@ ray_t* q_dotz_resolve(int64_t sym_id);
 /* THE list of `.z` names `\x` may expunge (owner ruling 2026-09-12 over basics/syscmds.md \x + ref/dotz.md). */
 bool q_dotz_expungeable(const char* name, size_t len);
 
+/* The connection and message handlers a fresh process starts with (`.z.ph` is h.q's): captured once the core
+ * bootstrap has run, and put back by a forked worker, which must not answer with the parent's own handlers. */
+void q_dotz_doors_snapshot(void);
+void q_dotz_doors_restore(void);
+
 /* The settable `.z.*` handlers (`.z.ts`/`.z.exit`/`.z.ph`/`.z.pp`/`.z.pm`/`.z.ac`/`.z.ws`/`.z.wo`/`.z.wc` and the
  * connection six `.z.po`/`.z.pc`/`.z.pg`/`.z.ps`/`.z.pw`/`.z.bm`) are ORDINARY globals: every write form reaches
  * them through q_env_set, and each fire site resolves the current binding by name (q_env_get) so a re-assign takes
@@ -73,7 +78,7 @@ bool q_dotz_has_flag(int argc, char** argv, const char* flag);
  * clock_gettime, so every wall-clock reader in the q layer comes through here. */
 int64_t q_dotz_now_ns(int local);
 
-/* Clear the cached argv pointers (no owned values to release). */
+/* Clear the cached argv pointers and release the startup handler snapshot. */
 void q_dotz_destroy(void);
 
 #endif /* Q_DOTZ_H */
