@@ -98,13 +98,16 @@ void   q_sys_own_process(bool on);
  * applying argv options.  Off, `\s N` stays within that ceiling. */
 void   q_sys_launching(bool on);
 
-/* The ONE process-exit home — `\\`, the `exit` verb, and remote `\\` all land
- * here.  Fires the user's `.z.exit` handler (unary, arg = exit code;
- * ref/dotz.md#zexit-action-on-exit), restores the console, then exit(code).
- * The handler cannot cancel or rewrite the exit (reentry exits with the
- * ORIGINAL code).  Capability off → returns silently WITHOUT firing `.z.exit`
- * (a doctest per-file runtime teardown is not a process exit). */
+/* The ONE process-exit home — `\\`, the `exit` verb, and remote `\\` all land here.  Fires the user's `.z.exit`
+ * handler (unary, arg = exit code; ref/dotz.md#zexit-action-on-exit), restores the console, ends and reaps every owned
+ * worker (no `.z.pc`: the close is this side's), then exit(code).  The handler cannot cancel or rewrite the exit
+ * (reentry exits with the ORIGINAL code).  Capability off → returns silently WITHOUT firing `.z.exit` (a doctest
+ * per-file runtime teardown is not a process exit). */
 void   q_sys_exit(int code);
+
+/* The child of a fork: `\s 0` (the pool's threads did not survive the fork), `\t 0`, `\p 0`, and from now on
+ * q_sys_exit leaves by _exit — no `.z.exit`, no atexit, nothing of the parent's torn down. */
+void   q_sys_forked(void);
 
 /* `.Q.ts[f;args]` / `-34!(f;args)` — Apply `.[f;args]` under the SAME time+space
  * measurement `\ts` uses; returns the 2-list ((ms;bytes); result) or the

@@ -51,12 +51,23 @@ static int64_t   g_cap  = 0;
 static int64_t   g_n    = 0;
 static int64_t   g_empty_sym = -1;
 
+static int64_t token_fd(ray_t* c);
+
+/* a q hook on the socket under an alias names the ALIAS int (owner ruling 2026-09-26): the socket is plumbing */
+static int64_t hook_fd(int64_t fd, int64_t stamp) {
+    for (int64_t i = 0; stamp && i < g_n; i++)
+        if (g_ents[i].stamp == stamp && token_fd(g_ents[i].connid) == fd) return g_ents[i].fd;
+    return fd;
+}
+
 void q_provider_init(void) {
     g_ents = NULL; g_cap = 0; g_n = 0;
     g_empty_sym = -1;
+    ray_ipc_set_hook_fd_fn(hook_fd);
 }
 
 void q_provider_destroy(void) {
+    ray_ipc_set_hook_fd_fn(NULL);
     for (int64_t i = 0; i < g_n; i++) {
         close((int)g_ents[i].fd);      /* teardown: no hooks, just the fd + refs */
         if (g_ents[i].connid) ray_release(g_ents[i].connid);
@@ -64,6 +75,14 @@ void q_provider_destroy(void) {
     }
     free(g_ents);
     g_ents = NULL; g_cap = 0; g_n = 0;
+}
+
+void q_provider_forget(void) {
+    for (int64_t i = 0; i < g_n; i++) {
+        if (g_ents[i].connid) ray_release(g_ents[i].connid);
+        if (g_ents[i].open3)  ray_release(g_ents[i].open3);
+    }
+    g_n = 0;
 }
 
 static int64_t empty_sym(void) {
@@ -320,10 +339,8 @@ ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config) 
     if (pe) return pe;
     if (sp.is_table) return q_err(QE_DOMAIN);  /* a table is never a connection */
     if (!sp.alias.n) return q_err(QE_DOMAIN);  /* a sym handle needs a name: the aliasless form only one-shots */
-    /* R4 — the HOST validates the open tuple, so providers never see junk */
+    /* R4 — the HOST validates the timeout; the third element is the provider's to read or refuse */
     if (timeout && !q_type_is_int_atom(timeout)) return q_err(QE_TYPE);
-    if (config && !RAY_IS_NULL(config) && config->type != RAY_DICT)
-        return q_err(QE_TYPE);
     int64_t pid = ray_sym_intern_runtime(sp.ds.p, sp.ds.n);
     int64_t aid = ray_sym_intern_runtime(sp.alias.p, sp.alias.n);
     ray_t* o3 = open3_make(sp.cfg, timeout, config);
@@ -416,13 +433,14 @@ int64_t q_provider_register_internal(const char* ds, const char* alias, ray_t* t
     return ne->handle;
 }
 
-int q_provider_info(int64_t fd, int64_t* provider, int64_t* alias, int64_t* handle, int* open) {
+int q_provider_info(int64_t fd, int64_t* provider, int64_t* alias, int64_t* handle, int* open, int64_t* link) {
     prov_ent* e = find_fd(fd);
     if (!e) return 0;
     *provider = e->provider;
     *alias    = e->alias;
     *handle   = e->handle;
     *open     = !ent_dead(e, 0);
+    *link     = *open && e->stamp ? token_fd(e->connid) : -1;
     return 1;
 }
 
@@ -460,8 +478,8 @@ ray_t* q_provider_token(ray_t* handle, const char* provider) {
     return e->connid;
 }
 
-/* the provider's own row outlives every user close; the row leaves the table BEFORE i.close runs — its
- * hclose fires `.z.pc`, whose q may hclose this very alias again or open others */
+/* the provider's own row outlives every user close; the row leaves the table BEFORE i.close runs — that
+ * is provider q, which may hclose this very alias again or open others */
 static ray_t* ent_close(prov_ent* e) {
     if (e->internal) return q_err(QE_DOMAIN);
     prov_ent ent = *e;
@@ -609,15 +627,29 @@ static ray_t* prov_hook_list(prov_ent* e, ray_t* y) {
     return r;
 }
 
+/* .X.call[connid; msg; sync] */
+static ray_t* prov_call(prov_ent* e, ray_t* msg, int sync) {
+    ray_t* flag = ray_bool(sync != 0);
+    ray_t* args[3] = { e->connid, msg, flag };
+    ray_t* r = hook_call(e->provider, "call", args, 3);
+    ray_release(flag);
+    return r;
+}
+
+/* .X.i.peer:1b declares another q: its list messages are the peer's own, so no local name can turn one into a hook */
+static int prov_is_peer(int64_t provider) {
+    ray_t* v = hook_fn(provider, "i.peer");
+    int peer = v && v->type == -RAY_BOOL && v->b8;
+    if (v) ray_release(v);
+    return peer;
+}
+
 static ray_t* prov_dispatch(prov_ent* e, ray_t* y, int sync) {
     const char* tp; int64_t tn;
-    if (y && q_str_text_bytes(y, &tp, &tn)) {  /* text -> .X.call */
+    if (y && q_str_text_bytes(y, &tp, &tn)) {
         ray_t* txt = ray_charv(tp, tn);
-        ray_t* flag = ray_bool(sync != 0);
-        ray_t* args[3] = { e->connid, txt, flag };
-        ray_t* r = hook_call(e->provider, "call", args, 3);
+        ray_t* r = prov_call(e, txt, sync);
         ray_release(txt);
-        ray_release(flag);
         return r;
     }
     if (y && y->type == -RAY_SYM) {            /* `get (h;`t)` reaches here */
@@ -626,6 +658,8 @@ static ray_t* prov_dispatch(prov_ent* e, ray_t* y, int sync) {
         if (e->alias == empty_sym()) return q_err(QE_NYI);  /* bind needs an alias */
         return prov_bind(e, y);
     }
+    if (y && y->type >= 0 && prov_is_peer(e->provider))
+        return prov_call(e, y, sync);
     if (y && (y->type == RAY_LIST || y->type == RAY_SYM))
         return prov_hook_list(e, y);
     return q_err(QE_TYPE);

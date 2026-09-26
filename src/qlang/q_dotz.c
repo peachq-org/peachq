@@ -69,13 +69,41 @@ static char** g_argv  = NULL;
 static bool   g_file  = false;   /* argv[1] is the file */
 static bool   g_quiet = false;   /* `-q` on the command line (kdb .z.q) */
 
+/* door: a connection or message handler, which a forked worker resets to its startup value */
+static const struct { const char* name; bool door; } HOOKS[] = {
+    { ".z.pg", true },  { ".z.ps", true },  { ".z.po", true },  { ".z.pc", true },  { ".z.pw", true },
+    { ".z.bm", true },  { ".z.pq", true },  { ".z.ph", true },  { ".z.pp", true },  { ".z.pm", true },
+    { ".z.ac", true },  { ".z.wo", true },  { ".z.wc", true },  { ".z.ws", true },  { ".z.pi", false },
+    { ".z.pd", false }, { ".z.ts", false }, { ".z.exit", false }, { ".z.vs", false }, { ".z.zd", false },
+};
+#define N_HOOKS (sizeof HOOKS / sizeof *HOOKS)
+static ray_t* g_door_boot[N_HOOKS];
+
 bool q_dotz_expungeable(const char* name, size_t len) {
-    static const char* const tails[] = { "pg", "ps", "po", "pc", "pw", "bm", "pi", "pq", "pd", "ph",
-                                         "pp", "pm", "ac", "wo", "wc", "ws", "ts", "exit", "vs", "zd" };
-    if (len < 5 || memcmp(name, ".z.", 3) != 0) return false;
-    for (size_t i = 0; i < sizeof tails / sizeof *tails; i++)
-        if (strlen(tails[i]) == len - 3 && memcmp(tails[i], name + 3, len - 3) == 0) return true;
+    for (size_t i = 0; i < N_HOOKS; i++)
+        if (strlen(HOOKS[i].name) == len && memcmp(HOOKS[i].name, name, len) == 0) return true;
     return false;
+}
+
+static int64_t hook_sym(size_t i) {
+    return ray_sym_intern_runtime(HOOKS[i].name, strlen(HOOKS[i].name));
+}
+
+void q_dotz_doors_snapshot(void) {
+    for (size_t i = 0; i < N_HOOKS; i++) {
+        if (!HOOKS[i].door) continue;
+        if (g_door_boot[i]) ray_release(g_door_boot[i]);
+        g_door_boot[i] = q_env_get(hook_sym(i));
+        if (g_door_boot[i]) ray_retain(g_door_boot[i]);
+    }
+}
+
+void q_dotz_doors_restore(void) {
+    for (size_t i = 0; i < N_HOOKS; i++) {
+        if (!HOOKS[i].door) continue;
+        if (g_door_boot[i]) (void)q_env_bind(hook_sym(i), g_door_boot[i]);
+        else (void)q_env_unbind(hook_sym(i));
+    }
 }
 
 /* basics/cmdline.md's options, then peachq's own launcher flags: what q consumes from argv. */
@@ -449,6 +477,8 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
 }
 
 void q_dotz_destroy(void) {
+    for (size_t i = 0; i < N_HOOKS; i++)
+        if (g_door_boot[i]) { ray_release(g_door_boot[i]); g_door_boot[i] = NULL; }
     g_argc       = 0;
     g_argv       = NULL;
     g_file       = false;

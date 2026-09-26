@@ -33,6 +33,11 @@ static void con_lock(void) {
 }
 static void con_unlock(void) { atomic_store_explicit(&g_con_lock, 0, memory_order_release); }
 
+void q_console_forked(void) {
+    atomic_store_explicit(&g_con_lock, 0, memory_order_relaxed);
+    g_door = NULL;
+}
+
 FILE* q_console_door(FILE* out) {
     FILE* prev = g_door;
     g_door = out;

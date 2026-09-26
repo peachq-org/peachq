@@ -166,6 +166,52 @@ ray_sock_t ray_sock_accept(ray_sock_t srv)
     return fd;
 }
 
+#ifdef RAY_OS_WINDOWS
+static bool sock_same_addr(const struct sockaddr_in* a, const struct sockaddr_in* b)
+{
+    return a->sin_addr.s_addr == b->sin_addr.s_addr && a->sin_port == b->sin_port;
+}
+#endif
+
+int ray_sock_pair(ray_sock_t sv[2])
+{
+#ifdef RAY_OS_WINDOWS
+    /* Winsock has no socketpair: a loopback listener lives only until it accepts, and a stranger that got in first
+     * fails the pair rather than taking its end. */
+    ray_sock_t l = ray_sock_listen_at(htonl(INADDR_LOOPBACK), 0, false);
+    if (l == RAY_INVALID_SOCK) return -1;
+    struct sockaddr_in at, mine, peer;
+    int n = sizeof at, nm = sizeof mine, np = sizeof peer;
+    ray_sock_t c = RAY_INVALID_SOCK, s = RAY_INVALID_SOCK;
+    if (getsockname(l, (struct sockaddr*)&at, &n) == 0 &&
+        (c = (ray_sock_t)socket(AF_INET, SOCK_STREAM, 0)) != RAY_INVALID_SOCK &&
+        connect(c, (struct sockaddr*)&at, sizeof at) == 0)
+        s = ray_sock_accept(l);
+    ray_sock_close(l);
+    if (s == RAY_INVALID_SOCK || getsockname(c, (struct sockaddr*)&mine, &nm) != 0 ||
+        getpeername(s, (struct sockaddr*)&peer, &np) != 0 || !sock_same_addr(&mine, &peer)) {
+        (void)sock_errno();
+        ray_sock_close(c);
+        ray_sock_close(s);
+        return -1;
+    }
+    int yes = 1;
+    setsockopt(c, IPPROTO_TCP, TCP_NODELAY, (const char*)&yes, sizeof(yes));
+    SetHandleInformation((HANDLE)c, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0);
+    sv[0] = s;
+    sv[1] = c;
+#else
+    int fd[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fd) != 0) return -1;
+    fcntl(fd[0], F_SETFD, FD_CLOEXEC);
+    fcntl(fd[1], F_SETFD, FD_CLOEXEC);
+    sv[0] = fd[0];
+    sv[1] = fd[1];
+#endif
+    return 0;
+}
+
 /* Connect an already-created socket `fd` to one resolved address.  With
  * timeout_ms > 0 the connect is driven non-blocking + poll (a blocking
  * connect() ignores SO_*TIMEO) and the same budget is then applied as the

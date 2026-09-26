@@ -44,6 +44,8 @@ int        ray_sock_resolve4(const char* host, uint32_t* ip);
 /* The tcp port a /etc/services name stands for; 0 when unknown. */
 uint16_t   ray_sock_service_port(const char* name);
 ray_sock_t ray_sock_accept(ray_sock_t srv);
+/* Two connected stream sockets, neither inherited by a child process; 0, or -1 + errno. */
+int        ray_sock_pair(ray_sock_t sv[2]);
 /* Connect to host:port.  timeout_ms > 0 bounds the connect: the socket
  * connects non-blocking and waits at most timeout_ms for completion (a
  * blocking connect() ignores SO_*TIMEO and would otherwise hang for the

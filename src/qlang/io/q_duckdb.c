@@ -786,7 +786,7 @@ static ray_t* qd_open_wrap(ray_t** args, int64_t n) {
     if (!q_str_text_bytes(args[1], &tp, &tn)) return q_duckdb_fail(-1, "open: path is not text");
     if (tn >= 512) return q_duckdb_fail(-1, "open: path is longer than 511 bytes");
     ray_t* cfg = args[3] && !RAY_IS_NULL(args[3]) ? args[3] : NULL;
-    if (cfg && cfg->type != RAY_DICT) return q_duckdb_fail(-1, "open: config is not a dict");
+    if (cfg && cfg->type != RAY_DICT) return q_err(QE_TYPE);
     char path[512];
     if (tn == 0 || (tn == 8 && memcmp(tp, "default:", 8) == 0)) path[0] = '\0';
     else snprintf(path, sizeof path, "%.*s", (int)tn, tp);

@@ -20,6 +20,8 @@ int   q_console_write_err(const char* s, size_t n, bool nl);  /* fd 2 (handles 2
 void  q_console_flush(void);          /* the exit path's fflush (issue #23) */
 /* The running door names its thread's stdout stream (NULL = stdout) and restores the previous one when it returns. */
 FILE* q_console_door(FILE* out);
+/* The child of a fork writes the process stdout, and no thread of the parent can still hold the lock. */
+void  q_console_forked(void);
 
 /* Modern pipe-table display: a deliberate kdb divergence, the `./q`/wasm
  * DEFAULT (`-classic` at launch / `\classic 1` at runtime opt out; spec:

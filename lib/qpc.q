@@ -1,23 +1,25 @@
 / Another q process as a data source: h:hopen `:pq:qpc:alias:host:port connects and answers the alias symbol
-/ `:pq:qpc:alias; h "1+1" is a sync call, h (`async;"x::1") an async send, `:pq:qpc:alias:table/ is that process's
-/ table for get, set, upsert and qsql (the query is pushed to the peer), hclose h closes it.  \?handles has examples.
+/ `:pq:qpc:alias; h "1+1" is a sync call and h (`f;x) a sync message, exactly as on a kdb handle; the async send is neg
+/ of the alias int (the h of its .pq.conns[] row).  `:pq:qpc:alias:table/ is that process's table for get, set,
+/ upsert and qsql (the query is pushed to the peer), hclose h closes it.  \?handles has examples.
 / Every .qpc member is a hook the handle machinery calls; none is a user door.
 / .
 / @eg
-/ h:hopen `:pq:qpc:peer:localhost:5000
-/ h "1+1"
-/ h (`async;"x::1")
+/ p:hopen `:pq:qpc:peer:localhost:5000
+/ p "1+1"
+/ p (+;1;1)
+/ neg[first exec h from .pq.conns[] where handle~\:p] "x::1"
 / select from `:pq:qpc:peer:trade/ where px>2
-/ hclose h
+/ hclose p
 
 / @ignore
-.qpc.i.open:{[alias;cfg;tmo;opt] $[null tmo; hopen `$":",cfg; hopen (`$":",cfg;tmo)]}
+.qpc.i.peer:1b
+/ @ignore
+.qpc.i.open:{[alias;cfg;tmo;opt] if[not(opt~(::))or 99h=type opt;'`type]; $[null tmo; hopen `$":",cfg; hopen (`$":",cfg;tmo)]}
 / @ignore
 .qpc.i.close:{[c] hclose c}
 / @ignore
 .qpc.call:{[c;q;sync] $[sync;c q;neg[c] q]}
-/ @ignore
-.qpc.async:{[c;msg] .qpc.call[c;msg;0b]}
 / @ignore
 .qpc.bind:{[c;t] c "cols ",string t}
 / @ignore

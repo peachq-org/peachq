@@ -31,6 +31,18 @@ int q_handles_register(int64_t fd, q_handle_kind kind, int initiated_out,
 
 void q_handles_deregister(int64_t fd);
 
+/* A forked child drops every record and owned worker it inherited, closing nothing. */
+void q_handles_forget(void);
+
+/* An OWNED link: the process `pid` is this handle's worker.  When the IPC connection on `fd` closes — hclose, or the
+ * worker died — the worker is signalled (TERM, then KILL after a bounded grace) and reaped, so none is left a zombie.
+ * 0 on OOM. */
+int     q_handles_own(int64_t fd, int64_t pid);
+int64_t q_handles_owned_pid(int64_t fd);   /* -1 = not owned */
+void    q_handles_owned_closed(int64_t fd);  /* the link on fd is closed: end and reap its worker, if it has one */
+void    q_handles_reap(int64_t pid);          /* TERM, a bounded grace, KILL, and reap one child process */
+void    q_handles_end_owned(void);           /* every owned worker at once, under one grace; its link is left open */
+
 /* Registered kind of `fd`, or -1 when not a q-registered handle. */
 int q_handles_kind(int64_t fd);
 
@@ -86,9 +98,16 @@ ray_t* q_handles_deferred(ray_t* y);
  * self, and every chunk `-11!` replays, goes through it.  y borrowed, result owned. */
 ray_t* q_handles_console_eval(ray_t* y);
 
-/* `` `:… `` sym-handle apply — the protocol arm (caller has checked the
- * leading ':'): ws/wss and http/https clients, else one-shot sync IPC on a
- * string argument; a file handle has no apply.  Args borrowed, result owned. */
+/* What a sym denotes, decided HERE once: a global NAME (no leading ':'), a
+ * PROCESS handle (a `:pq:` connection, ws/wss, http/https, IPC `:host:port` /
+ * `::port`) — applicable, so ternary @/. is Trap — or a PATH (file, dir, fifo,
+ * a `:pq:…:t/` table coordinate) — data, so ternary @/. is Amend. */
+typedef enum { Q_SYM_NAME = 0, Q_SYM_PATH = 1, Q_SYM_PROCESS = 2 } q_sym_kind;
+q_sym_kind q_handles_sym_kind(ray_t* sym);
+
+/* `` `:… `` sym-handle apply — the protocol arm (caller has checked
+ * q_handles_sym_kind): ws/wss and http/https clients, else one-shot sync IPC
+ * on a string argument; a file handle has no apply.  Args borrowed, result owned. */
 ray_t* q_handles_sym_apply(ray_t* head, ray_t** args, int64_t n);
 
 /* file/fifo -> close fd + deregister; else deregister + IPC close (dead
