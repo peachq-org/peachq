@@ -457,7 +457,7 @@ static void bt_append(ray_t** l, const char* line, size_t n) {
     }
 }
 
-static ray_t* dbg_bt_object(void) {
+static ray_t* dbg_bt_object(const char* door) {
     ray_t* l = ray_list_new(g_snap.depth + 2);
     char line[DBG_STMT_MAX + 160];
     for (int i = g_snap.depth; i >= 1; i--) {   /* lambdas: [depth+1] .. [2] */
@@ -465,16 +465,16 @@ static ray_t* dbg_bt_object(void) {
                               &snap_stmt);
         bt_append(&l, line, n ? n - 1 : 0);     /* strip \n */
     }
-    bt_append(&l, "  [1]  (.Q.trp)", 15);
+    bt_append(&l, door, strlen(door));
     size_t n = frame_line(line, sizeof line, 0, 0, NULL, &snap_stmt);
     bt_append(&l, line, n ? n - 1 : 0);
     return l;
 }
 
-ray_t* q_dbg_trp_fn(ray_t** args, int64_t n) {
-    if (n != 3) return q_err(QE_RANK);
+/* .Q.trp applies f to x; .Q.trpd (= -105!) is its dot form, spreading x as the argument list */
+static ray_t* dbg_trap(ray_t** args, int dot) {
     int64_t ctx = q_dbg_trap_enter();
-    ray_t* r = q_eval_apply_concrete(q_eval_apply_value(args[0], &args[1], 1));
+    ray_t* r = dot ? q_eval_dot_wrap(args, 2) : q_eval_apply_concrete(q_eval_apply_value(args[0], &args[1], 1));
     q_dbg_trap_exit(ctx, r);
     if (!r || !RAY_IS_ERR(r) || q_err_is(r, QE_RETURN))
         return r ? r : q_err(QE_TYPE);
@@ -486,7 +486,7 @@ ray_t* q_dbg_trp_fn(ray_t** args, int64_t n) {
     }
     ray_error_free(r);
     if (!msg || RAY_IS_ERR(msg)) return msg ? msg : q_err(QE_OOM);
-    ray_t* bt = dbg_bt_object();
+    ray_t* bt = dbg_bt_object(dot ? "  [1]  (.Q.trpd)" : "  [1]  (.Q.trp)");
     q_dbg_snapshot_clear();
     if (!bt || RAY_IS_ERR(bt)) { ray_release(msg); return bt ? bt : q_err(QE_OOM); }
     ray_t* av[2] = { msg, bt };
@@ -494,6 +494,20 @@ ray_t* q_dbg_trp_fn(ray_t** args, int64_t n) {
     ray_release(msg);
     ray_release(bt);
     return c;
+}
+
+ray_t* q_dbg_trp_fn(ray_t** args, int64_t n) {
+    return n == 3 ? dbg_trap(args, 0) : q_err(QE_RANK);
+}
+
+ray_t* q_dbg_trpd_fn(ray_t** args, int64_t n) {
+    return n == 3 ? dbg_trap(args, 1) : q_err(QE_RANK);
+}
+
+ray_t* q_dbg_trp_dot(ray_t* y) {
+    if (!y || y->type != RAY_LIST || q_count(y) != 3) return q_err(QE_TYPE);
+    ray_t* av[3] = { ray_list_get(y, 0), ray_list_get(y, 1), ray_list_get(y, 2) };
+    return q_dbg_trpd_fn(av, 3);
 }
 
 ray_t* q_dbg_sbt_fn(ray_t* x) {
