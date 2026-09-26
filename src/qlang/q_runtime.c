@@ -97,6 +97,7 @@ ray_runtime_t* q_runtime_create(int argc, char** argv) {
         if (q_registry_bind_qsrc() != RAY_OK)
             fprintf(stderr, "q bootstrap: qsrc registry bind failed\n");
         q_registry_seal();
+        q_dotz_doors_snapshot();
     }
     return rt;
 }
