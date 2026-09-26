@@ -532,7 +532,7 @@
   ("resource handles: a :pq: symbol names a resource by ALIAS, and a table resource stands in as a table · page";
    "a resource specification: :pq: then the provider, an alias you choose, then what the provider needs";
    "hopen answers the alias symbol `:pq:qpc:bob - it names that connection for as long as it is open";
-   "the handle applies as in kx: a string is a sync call over the wire; h (`async;msg) is the async send";
+   "the handle applies as in kx: a string is a sync call over the wire; a list is a (func;args) message, as on a kdb handle";
    "the alias is a handle too: a script names the peer, and no int can go stale in a variable";
    "a trailing / marks a table resource: this one is a table on the peer, read through the alias";
    "qsql on a remote table: the where, by and aggregate are pushed to the peer as one functional select";

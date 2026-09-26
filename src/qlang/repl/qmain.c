@@ -13,6 +13,7 @@
 #include "qlang/net/q_tls.h"  /* q_tls_server_mode_set — the `-E` TLS server mode */
 #include "qlang/io/q_duckdb.h" /* q_duckdb_main_path_set — the `-duckdb` main database file */
 #include "qlang/io/q_io.h"     /* q_io_abs_path — QINIT's startup `\l`; q_io_read_slice — the -conn file */
+#include "qlang/io/q_worker.h" /* q_worker_link — a procq worker's link to the process that launched it */
 #include "qlang/q_env.h"       /* q_env_set — the -conn texts bound as q values */
 #include "qlang/base/q_err.h"  /* q_err_drop — an unreadable -conn file */
 #include "core/poll.h"
@@ -172,6 +173,7 @@ static bool option_apply(char** argv, int i) {
 }
 
 int main(int argc, char** argv) {
+    int link = q_worker_link();
     if (q_dotz_has_flag(argc, argv, "-conn")) return conn_main(argc, argv);
 
     const char* script = q_dotz_file_arg(argc, argv);
@@ -243,7 +245,8 @@ int main(int argc, char** argv) {
 
     if (poll) poll->restricted = auth_restricted;
 
-    int stdin_tty = isatty(STDIN_FILENO);
+    /* a worker is never a console, even where its NUL stdin reads as a character device (Windows) */
+    int stdin_tty = link < 0 && isatty(STDIN_FILENO);
     /* `QINIT` names a file loaded after init, before any script (basics/by-topic.md): a startup load like the script —
      * batch ahead of `-eval-before` on a non-tty, the console's first `\l` on a tty.  Empty is unset; there is no
      * `$QHOME/q.q` default (#60). */
@@ -388,7 +391,12 @@ int main(int argc, char** argv) {
     }
     free(eval_after);
 
-    if (script_rc != 0) {
+    if (link >= 0) {
+        /* A procq worker: its startup ran as any q's (a script error does not stop it, kx's rule), then it serves
+         * its link — and any listener its script opened — until the link closes, and prints nothing of its own. */
+        if (poll && ray_ipc_serve_link(link) >= 0) ray_poll_run(poll);
+        script_rc = 0;
+    } else if (script_rc != 0) {
         /* A batch startup stage (the `-duckdb` main load, QINIT, a non-tty
          * script or an `-eval` text) could not be opened or ABORTED at an error
          * (parse or eval — the script seam's law): skip the REPL/server loop and exit non-zero (kdb fails a bad
