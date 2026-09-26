@@ -492,7 +492,7 @@ ray_t* q_wire_serialize(ray_t* x, uint8_t msgtype) {
         return e;
     }
     ray_release(x);
-    if (b.len > INT32_MAX) {
+    if (b.len > Q_WIRE_MSG_MAX) {
         q_wire_wbuf_free(&b);
         return q_err(QE_LIMIT);
     }
@@ -520,7 +520,7 @@ ray_t* q_wire_serialize_len(ray_t* x) {
     }
     size_t len = b.len;
     q_wire_wbuf_free(&b);
-    return len > INT32_MAX ? q_err(QE_LIMIT) : ray_i64((int64_t)len);
+    return len > Q_WIRE_MSG_MAX ? q_err(QE_LIMIT) : ray_i64((int64_t)len);
 }
 
 /* ==========================================================================
@@ -1140,8 +1140,6 @@ int q_wire_write_obj_ex(q_wire_wbuf_t* b, ray_t* x, int serde) {
  * include the 8-byte header and follow the frame's endianness: read either
  * way, written to match the input frame's byte-0), token stream @12. */
 
-#define Q_WIRE_ZIP_MAX (256u * 1024u * 1024u)   /* mirrors ipc.c KDB_MAX_MSG */
-
 ray_t* q_wire_compress(ray_t* frame) {
     if (!frame || frame->type != RAY_BYTE_ONLY)
         return q_err(QE_TYPE);
@@ -1213,7 +1211,7 @@ ray_t* q_wire_uncompress_payload(const uint8_t* pl, size_t plen, int frame_be) {
     uint32_t usz = frame_be
         ? ((uint32_t)pl[0] << 24 | (uint32_t)pl[1] << 16 | (uint32_t)pl[2] << 8 | pl[3])
         : ((uint32_t)pl[3] << 24 | (uint32_t)pl[2] << 16 | (uint32_t)pl[1] << 8 | pl[0]);
-    if (usz < 9 || usz > Q_WIRE_ZIP_MAX)
+    if (usz < 9 || usz > Q_WIRE_MSG_MAX)
         return q_err(QE_DOMAIN);
     if ((uint64_t)usz - 8 > (uint64_t)(plen - 4) * 86)      /* bomb guard */
         return q_err(QE_DOMAIN);

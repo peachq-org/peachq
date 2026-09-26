@@ -139,6 +139,27 @@ int64_t   ray_ipc_connect(const char* host, uint16_t port,
                            const char* user, const char* password,
                            int timeout_ms);
 void      ray_ipc_close(int64_t handle);
+/* The same close, initiated by this side's q `hclose`: `.z.pc` does not fire. */
+void      ray_ipc_close_local(int64_t handle);
+
+/* Maps a connection (socket fd, open stamp) to the int its q hooks receive;
+ * installed by the q runtime (NULL = the fd itself). */
+typedef int64_t (*ray_ipc_hook_fd_fn)(int64_t fd, int64_t stamp);
+void      ray_ipc_set_hook_fd_fn(ray_ipc_hook_fd_fn fn);
+
+/* Told the socket fd of every IPC connection this process closes, after the socket is closed; installed by the q
+ * runtime (NULL = nobody). */
+typedef void (*ray_ipc_closed_fn)(int64_t fd);
+void      ray_ipc_set_closed_fn(ray_ipc_closed_fn fn);
+
+/* The kdb handshake as the CLIENT on a socket already connected (blocking, under the socket's own timeouts), then an
+ * OUTBOUND connection in the active poll.  Consumes fd whatever happens; the handle, or ray_ipc_connect's -1 / -3. */
+int64_t   ray_ipc_adopt_client(ray_sock_t fd, const char* user, const char* password);
+
+/* Serve a connected socket as an INBOUND connection with no listener (a worker's link to the process that made it):
+ * it starts at the kdb handshake, asks no credentials, and when it closes the active poll's run loop returns 0.
+ * Returns the handle, or -1 (fd left open). */
+int64_t   ray_ipc_serve_link(ray_sock_t fd);
 
 /* Register an already-open, handshake-complete outbound WebSocket socket as a
  * poll WS handle (phase RAY_IPC_PHASE_WS, ipc_read_ws pump, cd->ws = ws_conn;

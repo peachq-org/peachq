@@ -32,6 +32,7 @@ typedef struct {
     int64_t       handle_sym; /* provider rows: the alias sym hopen answered; -1 = the handle is the fd */
     int64_t       open_ns;    /* NULL_I64 = unknown */
     uint8_t       open;       /* 0 only on a provider row whose connection died and has not been re-dialled */
+    int64_t       pid;        /* provider rows: the worker its link kills on close; -1 = none (a socket row never) */
 } conn_row;
 
 static int row_cmp(const void* a, const void* b) {
@@ -59,7 +60,7 @@ static conn_row* conn_rows(int64_t* n_out) {
         r->fd   = infos[i].fd;
         r->kind = Q_HANDLE_SOCKET;
         r->p    = infos[i].ws ? 'w' : 'q';
-        r->f    = 't';                    /* TCP is the only transport family */
+        r->f    = infos[i].is_unix ? 'u' : 't';
         r->out  = !infos[i].inbound;
         r->user_sym = esym;
         r->addr = NULL;
@@ -67,6 +68,7 @@ static conn_row* conn_rows(int64_t* n_out) {
         r->provider_sym = esym; r->alias_sym = esym; r->handle_sym = -1;
         r->open_ns = infos[i].open_ns ? infos[i].open_ns : NULL_I64;
         r->open = 1;
+        r->pid  = -1;
         if (r->out) {                     /* hopen registered the descriptor */
             int64_t us = q_handles_user_sym(r->fd);
             if (us >= 0) r->user_sym = us;
@@ -92,10 +94,13 @@ static conn_row* conn_rows(int64_t* n_out) {
         r->provider_sym = esym; r->alias_sym = esym; r->handle_sym = -1;
         r->open_ns = hi.open_time_ns;
         r->open = 1;
+        r->pid  = -1;
         if (hi.kind == Q_HANDLE_PROVIDER) {
             int open = 1;
-            (void)q_provider_info(hi.fd, &r->provider_sym, &r->alias_sym, &r->handle_sym, &open);
+            int64_t link = -1;
+            (void)q_provider_info(hi.fd, &r->provider_sym, &r->alias_sym, &r->handle_sym, &open, &link);
             r->open = open != 0;
+            if (link >= 0) r->pid = q_handles_owned_pid(link);
         }
     }
     qsort(rows, (size_t)n, sizeof *rows, row_cmp);
@@ -146,9 +151,9 @@ ray_t* q_conn_table(void) {
     conn_row* rows = conn_rows(&n);
     if (!rows) return q_err(QE_WSFULL);
     int64_t cap = n ? n : 1;
-    static const char* const names[15] = { "h", "handle", "kind", "p", "f", "z", "n",
-        "m", "out", "user", "addr", "provider", "alias", "opened", "state" };
-    ray_t* c[15];
+    static const char* const names[17] = { "h", "handle", "kind", "p", "f", "z", "n",
+        "m", "out", "user", "addr", "provider", "alias", "opened", "state", "pid", "owned" };
+    ray_t* c[17];
     c[0]  = ray_vec_new(RAY_I32, cap);
     c[1]  = ray_list_new(cap);
     c[2]  = ray_sym_vec_new(RAY_SYM_W64, cap);
@@ -164,6 +169,8 @@ ray_t* q_conn_table(void) {
     c[12] = ray_sym_vec_new(RAY_SYM_W64, cap);
     c[13] = ray_vec_new(RAY_TIMESTAMP, cap);
     c[14] = ray_sym_vec_new(RAY_SYM_W64, cap);
+    c[15] = ray_vec_new(RAY_I32, cap);
+    c[16] = ray_vec_new(RAY_BOOL, cap);
     int64_t s_open = ray_sym_intern_runtime("open", 4), s_closed = ray_sym_intern_runtime("closed", 6);
     for (int64_t i = 0; i < n; i++) {
         conn_row* r = &rows[i];
@@ -207,9 +214,13 @@ ray_t* q_conn_table(void) {
         c[12] = ray_vec_append(c[12], &r->alias_sym);
         c[13] = ray_vec_append(c[13], &r->open_ns);
         c[14] = ray_vec_append(c[14], &stt);
+        int32_t pid = r->pid < 0 ? NULL_I32 : (int32_t)r->pid;
+        uint8_t owned = r->pid >= 0;
+        c[15] = ray_vec_append(c[15], &pid);
+        c[16] = ray_vec_append(c[16], &owned);
     }
     free(rows);
-    return cols_table(c, names, 15);
+    return cols_table(c, names, 17);
 }
 
 ray_t* q_conn_zH(void) {
