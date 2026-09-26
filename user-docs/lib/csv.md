@@ -400,6 +400,23 @@ q).csv.read[`:e.csv;::;::;()!()]
 | 2    | "" | "y" |
 ```
 
+**Padding is not data.** An unquoted cell sheds its surrounding spaces (and tabs, unless tab is the delimiter), so
+an unquoted blanks-only cell is an empty field — the column's null — and an aligned, pipe-separated file types its
+columns as if it were unpadded. A quoted data cell is byte-exact: `"  "` is two spaces. A declared `c` column is
+byte-literal too, so a single unquoted space there is the space character. Header names trim either way.
+`csv 0:` quotes only cells holding the delimiter, as kdb does, so blank-edged text does not survive a csv round
+trip: quote it yourself when the blanks matter.
+
+```q
+q)`:p.csv 0: ("a | b   | c";"1 | x   | ";"  | yy  |\"  \"");
+q).csv.read[`:p.csv;::;::;()!()]
+| a    | b    | c    |
+| long |      |      |
+|------|------|------|
+| 1    | ,"x" | ""   |
+|      | "yy" | "  " |
+```
+
 ## When a load fails
 
 The error classes, the frozen-type miss and its two fixes, and the tolerance levers are on
