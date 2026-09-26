@@ -12,6 +12,7 @@
 .Q.w:.Q.c.w;
 .Q.gc:.Q.c.gc;
 .Q.trp:.Q.c.trp;
+.Q.trpd:.Q.c.trpd;
 .Q.sbt:.Q.c.sbt;
 .Q.bt:.Q.c.bt;
 .Q.en:.Q.c.en;
