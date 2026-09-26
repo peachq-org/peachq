@@ -16,6 +16,7 @@ ray_t* q_string_fn(ray_t* x);
  * value (so a user `parse:{…}` rebind cannot break `-5!`; kdb keeps `-N!` as the
  * primitive underneath the keyword). */
 ray_t* q_parse_builtin_fn(ray_t* x);
+ray_t* q_tokens_fn(ray_t* x);   /* `-4!` */
 ray_t* q_md5_fn(ray_t* x);
 ray_t* q_dotq_btoa_fn(ray_t* x);
 ray_t* q_dotq_atob_fn(ray_t* x);

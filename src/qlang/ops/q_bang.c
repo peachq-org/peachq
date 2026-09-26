@@ -13,7 +13,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/q_registry_internal.h"  /* q_hsym_wrap, q_attr_wrap, q_type_strict_i64,
                                          * q_type_is_int_atom, q_type_iatom_val, q_table_flatten */
-#include "qlang/q_builtins.h"   /* q_parse_builtin_fn, q_md5_fn, q_dotq_btoa_fn, q_dotq_sha1_fn */
+#include "qlang/q_builtins.h"   /* q_parse_builtin_fn, q_tokens_fn, q_md5_fn, q_dotq_btoa_fn, q_dotq_sha1_fn */
 #include "qlang/q_env.h"        /* q_env_set — the one global-set home (`N!`name`) */
 #include "qlang/ops/q_table.h"  /* q_table_operand — a table by value or by name */
 #include "qlang/io/q_json.h"       /* q_json_serialize (.j.j), q_json_deserialize (.j.k) */
@@ -268,6 +268,7 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -1:  return q_hsym_wrap(y);
         case -2:  return q_attr_wrap(y);
         case -3:  return q_fmt_krepr_charv(y);
+        case -4:  return q_tokens_fn(y);
         case -5:  return q_parse_builtin_fn(y);
         case -6:  return q_eval(y);              /* internal.md: -6! is eval */
         case -7:  return h_hcount(y);
@@ -311,7 +312,6 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
          * Kept as EXPLICIT cases so the -N! id map stays documented in code.
          * (No per-verb string — bare 'nyi, per the no-embedded-error-strings
          * ruling; the comment carries the id's doc name / blocking reason.) */
-        case -4:   /* tokens: scanner token list                                */
         case -10:  /* type enum: enumerations                                   */
         case -19:  /* set / compress file (AMBIGUOUS doc — see PR Deferrals)    */
         case -20:  /* .Q.gc: garbage collect                                    */

@@ -27,25 +27,32 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* (parse str) — parse q SOURCE into a ray_t AST (overrides rayfall's lisp
- * parse).  q_parse needs a NUL-terminated C string; a RAY_STR atom's bytes are
- * not guaranteed terminated, so copy through a bounded scratch buffer. */
-/* Exported (q_builtins.h) so the `-5!` internal-fn alias single-homes here. */
-ray_t* q_parse_builtin_fn(ray_t* x) {
+/* q_parse needs a NUL-terminated C string; a RAY_STR atom's bytes are not guaranteed terminated. */
+static ray_t* on_text(ray_t* x, ray_t* (*f)(const char*, int64_t)) {
     const char* sp; int64_t sn;
     if (!q_str_text_bytes(x, &sp, &sn)) return q_err(QE_TYPE);
-    size_t sl = (size_t)sn;
     if (!sp) return q_err(QE_DOMAIN);
-    char* src = malloc(sl + 1);
+    char* src = malloc((size_t)sn + 1);
     if (!src) return q_err(QE_WSFULL);
-    memcpy(src, sp, sl);
-    src[sl] = '\0';
-    ray_t* ast = q_parse(src);
+    memcpy(src, sp, (size_t)sn);
+    src[sn] = '\0';
+    ray_t* r = f(src, sn);
     free(src);
+    return r;
+}
+
+static ray_t* parse_src(const char* src, int64_t n) {
+    (void)n;
+    ray_t* ast = q_parse(src);
     /* handed out as DATA: empty statements become () (kdb parse ";") */
     if (ast && !RAY_IS_ERR(ast)) q_ast_fill_empty_stmts(ast);
     return ast ? ast : q_err(QE_PARSE);
 }
+
+/* (parse str) — overrides rayfall's lisp parse.  Exported (q_builtins.h) so the `-5!` alias single-homes here. */
+ray_t* q_parse_builtin_fn(ray_t* x) { return on_text(x, parse_src); }
+
+ray_t* q_tokens_fn(ray_t* x) { return on_text(x, q_parse_tokens); }
 
 
 /* (show x) — print x's q console display as a SIDE EFFECT (written through the
