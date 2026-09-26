@@ -60,8 +60,11 @@ void q_dbg_snapshot_clear(void);     /* a trap consumed the error */
 
 /* .Q surface bodies (bound as .Q.c.* in q_builtins.c; aliased in dotq.q). */
 ray_t* q_dbg_trp_fn(ray_t** args, int64_t n);   /* .Q.trp[f;x;g] */
+ray_t* q_dbg_trpd_fn(ray_t** args, int64_t n);  /* .Q.trpd[f;x;g] */
 ray_t* q_dbg_sbt_fn(ray_t* x);                  /* .Q.sbt bt-object -> string */
 ray_t* q_dbg_bt_fn(ray_t** args, int64_t n);    /* .Q.bt[] -> console dump */
+
+ray_t* q_dbg_trp_dot(ray_t* y);                 /* -105!(f;args;g): .Q.trpd on a 3-list, for q_bang */
 
 ray_t* q_dbg_zex(void);              /* owned failed-primitive value or NULL */
 ray_t* q_dbg_zey(void);              /* owned arg list or NULL */
