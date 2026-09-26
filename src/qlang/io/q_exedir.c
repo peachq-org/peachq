@@ -20,9 +20,8 @@
 #include <unistd.h>
 #endif
 
-int q_exedir(char* dst, size_t cap) {
+int q_exepath(char* dst, size_t cap) {
     dst[0] = '\0';
-    if (cap < 2) return 0;
     char exe[1024];
 #if defined(_WIN32)
     DWORD n = GetModuleFileNameA(NULL, exe, (DWORD)sizeof exe);
@@ -42,6 +41,17 @@ int q_exedir(char* dst, size_t cap) {
     if (n <= 0) return 0;
     exe[n] = '\0';
 #endif
+    size_t len = strlen(exe);
+    if (len + 1 > cap) return 0;
+    memcpy(dst, exe, len + 1);
+    return 1;
+}
+
+int q_exedir(char* dst, size_t cap) {
+    dst[0] = '\0';
+    if (cap < 2) return 0;
+    char exe[1024];
+    if (!q_exepath(exe, sizeof exe)) return 0;
     char* sep = strrchr(exe, '/');
 #if defined(_WIN32)
     char* bsep = strrchr(exe, '\\');

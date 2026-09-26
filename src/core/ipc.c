@@ -33,7 +33,7 @@
  *   header     8 bytes: [endian(01=LE) msgtype(0/1/2) compressed(0/1)
  *              total-len:int32] — total-len INCLUDES the header; both
  *              endiannesses are read, little-endian is emitted.  The
- *              256MB frame guard is enforced here.  Compressed inbound
+ *              2 GB frame limit (Q_WIRE_MSG_MAX) is enforced here.  Compressed inbound
  *              frames (byte 2 == 1) decompress via
  *              q_wire_uncompress_payload before routing — Phase F.  EMIT
  *              mirrors it: a frame is compressed on send (q_wire_compress)
@@ -213,9 +213,9 @@ size_t ray_ipc_decompress(const uint8_t* src, size_t clen,
 #define RAY_IPC_TLS_HS_MS    5000   /* a negotiation that stalls this long is reaped */
 
 #define KDB_HDR_LEN 8
-#define KDB_MAX_MSG (256u * 1024u * 1024u)   /* 256MB frame guard */
 #define KDB_HS_MAX  512                      /* creds line hard cap */
 #define KDB_CAPABILITY 3                     /* what we speak (V3.0 level) */
+#define IPC_LINK (-2)                        /* listener_id of a link ray_ipc_serve_link adopted */
 
 /* Parse an 8-byte kdb header.  0 ok / -1 bad (caller closes).  *swap is
  * set when the frame is big-endian; *zip when the frame is compressed
@@ -233,7 +233,7 @@ static int kdb_hdr_parse(const uint8_t in[KDB_HDR_LEN], uint8_t* msgtype,
     uint32_t n = *swap
         ? ((uint32_t)in[4] << 24) | ((uint32_t)in[5] << 16) | ((uint32_t)in[6] << 8) | in[7]
         : ((uint32_t)in[7] << 24) | ((uint32_t)in[6] << 16) | ((uint32_t)in[5] << 8) | in[4];
-    if (n < KDB_HDR_LEN + 1 || n > KDB_MAX_MSG) return -1;
+    if (n < KDB_HDR_LEN + 1 || n > Q_WIRE_MSG_MAX) return -1;
     *payload_len = n - KDB_HDR_LEN;
     return 0;
 }
@@ -480,11 +480,33 @@ static ray_t* hook_fire(ray_t* fn, ray_t** args, int64_t n) {
     return r;
 }
 
+/* A hook whose error is logged and swallowed: its signal text must not caption the error of the call it interrupted. */
+static ray_t* hook_fire_swallowed(ray_t* fn, ray_t** args, int64_t n) {
+    ray_t* pending = q_err_take();
+    ray_t* r = hook_fire(fn, args, n);
+    q_err_put(pending);
+    return r;
+}
+
+static ray_ipc_hook_fd_fn g_hook_fd_fn = NULL;
+
+void ray_ipc_set_hook_fd_fn(ray_ipc_hook_fd_fn fn) { g_hook_fd_fn = fn; }
+
+static ray_ipc_closed_fn g_closed_fn = NULL;
+
+void ray_ipc_set_closed_fn(ray_ipc_closed_fn fn) { g_closed_fn = fn; }
+
 /* The handle a hook receives: a q hook (.z.po/.z.pc/.z.bm) gets the socket fd
- * as an int — what `.z.w` answers and `.z.H` lists — while an engine lambda keeps
- * the selector id `.ipc.post` / `.ipc.send` / `.ipc.close` expect. */
-static ray_t* hook_handle_arg(ray_t* fn, int64_t handle, int64_t fd) {
-    return hook_is_q(fn) ? make_i32((int32_t)fd) : make_i64(handle);
+ * as an int — what `.z.w` answers and `.z.H` lists, unless the q layer answers
+ * for that connection (fd, stamp) — while an engine lambda keeps the selector
+ * id `.ipc.post` / `.ipc.send` / `.ipc.close` expect. */
+static int64_t hook_handle(ray_t* fn, int64_t handle, int64_t fd, int64_t stamp) {
+    if (!hook_is_q(fn)) return handle;
+    return (int32_t)(g_hook_fd_fn ? g_hook_fd_fn(fd, stamp) : fd);
+}
+
+static ray_t* hook_handle_arg(ray_t* fn, int64_t h) {
+    return hook_is_q(fn) ? make_i32((int32_t)h) : make_i64(h);
 }
 
 /* Call a single-arg hook for lifecycle events (on.open / on.close).
@@ -493,19 +515,20 @@ static ray_t* hook_handle_arg(ray_t* fn, int64_t handle, int64_t fd) {
  * in, exposed thread-locally so the hook body can use the handle with
  * `.ipc.post` / `.ipc.send` / `.ipc.close`; the legacy server path
  * passes NULL (its conn-index handles are not selector ids). */
-static void hook_call_lifecycle(ray_poll_t* poll, int idx, int64_t handle, int64_t fd) {
+static void hook_call_lifecycle(ray_poll_t* poll, int idx, int64_t handle, int64_t fd, int64_t stamp) {
     ray_t* fn = hook_lookup(idx);
     if (!fn) return;
-    ray_t* arg = hook_handle_arg(fn, handle, fd);
+    int64_t h = hook_handle(fn, handle, fd, stamp);
+    ray_t* arg = hook_handle_arg(fn, h);
     if (!arg || RAY_IS_ERR(arg)) { if (arg) ray_release(arg); return; }
     int64_t prev = ipc_ctx_handle();
     ray_poll_t* prev_poll = ipc_ctx_poll();
     ipc_ctx_set(handle, poll ? poll : prev_poll);
-    ray_t* r = hook_fire(fn, &arg, 1);
+    ray_t* r = hook_fire_swallowed(fn, &arg, 1);
     ipc_ctx_set(prev, prev_poll);
     if (r && RAY_IS_ERR(r))
         fprintf(stderr, "ipc: %s hook raised an error (handle=%lld)\n",
-                IPC_HOOK_NAMES[idx], (long long)handle);
+                IPC_HOOK_NAMES[idx], (long long)h);
     ray_release(arg);
     if (r) {
         if (RAY_IS_ERR(r)) ray_error_free(r);
@@ -518,7 +541,7 @@ static void hook_call_lifecycle(ray_poll_t* poll, int idx, int64_t handle, int64
  * follows.  msgBytes = the (already-decompressed) payload bytes as a byte
  * vector, built only when a handler is installed.  Errors are logged and
  * swallowed like the lifecycle hooks. */
-static void hook_call_badmsg(ray_poll_t* poll, int64_t handle, int64_t fd,
+static void hook_call_badmsg(ray_poll_t* poll, int64_t handle, int64_t fd, int64_t stamp,
                              const uint8_t* bytes, size_t len)
 {
     ray_t* fn = hook_lookup(IPC_HOOK_BADMSG);
@@ -527,7 +550,8 @@ static void hook_call_badmsg(ray_poll_t* poll, int64_t handle, int64_t fd,
     if (!mb || RAY_IS_ERR(mb)) { if (mb) ray_error_free(mb); return; }
     memcpy(ray_data(mb), bytes, len);
     mb->len = (int64_t)len;
-    ray_t* h = hook_handle_arg(fn, handle, fd);
+    int64_t hv = hook_handle(fn, handle, fd, stamp);
+    ray_t* h = hook_handle_arg(fn, hv);
     if (!h || RAY_IS_ERR(h)) {
         if (h) ray_error_free(h);
         ray_release(mb);
@@ -547,11 +571,11 @@ static void hook_call_badmsg(ray_poll_t* poll, int64_t handle, int64_t fd,
     int64_t prev = ipc_ctx_handle();
     ray_poll_t* prev_poll = ipc_ctx_poll();
     ipc_ctx_set(handle, poll ? poll : prev_poll);
-    ray_t* r = hook_fire(fn, &arg, 1);
+    ray_t* r = hook_fire_swallowed(fn, &arg, 1);
     ipc_ctx_set(prev, prev_poll);
     if (r && RAY_IS_ERR(r))
         fprintf(stderr, "ipc: .z.bm hook raised an error (handle=%lld)\n",
-                (long long)handle);
+                (long long)hv);
     ray_release(arg);
     if (r) {
         if (RAY_IS_ERR(r)) ray_error_free(r);
@@ -605,7 +629,7 @@ static int hook_call_auth(ray_poll_t* poll, int64_t handle,
     ray_poll_t* prev_poll = ipc_ctx_poll();
     ipc_ctx_set(handle, poll ? poll : prev_poll);
     ray_t* up[2] = { u, p };
-    ray_t* r = hook_fire(fn, up, 2);
+    ray_t* r = hook_fire_swallowed(fn, up, 2);
     ipc_ctx_set(prev, prev_poll);
     ray_release(u);
     ray_release(p);
@@ -753,7 +777,7 @@ static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
             ray_release(msg);
             msg = s;
         }
-        result = hook_fire(hook, &msg, 1);
+        result = msgtype == RAY_IPC_MSG_ASYNC ? hook_fire_swallowed(hook, &msg, 1) : hook_fire(hook, &msg, 1);
         ray_release(msg);
         /* Async errors have nowhere to go on the wire (async never sends
          * a response) — log + drop so the operator sees the hook
@@ -814,7 +838,7 @@ typedef struct {
     uint32_t         plen;         /* current frame's payload length */
     uint8_t          hs[KDB_HS_MAX];  /* handshake creds accumulator */
     uint16_t         hs_len;
-    int64_t          listener_id;  /* id of the listener selector; -1 = outbound */
+    int64_t          listener_id;  /* id of the listener selector; -1 = outbound, IPC_LINK = an adopted inbound link */
     bool             auth_required;  /* server has -u/-U */
     bool             restricted;     /* server has -u */
     /* HTTP mode (phase RAY_IPC_PHASE_HTTP): request-header accumulator, byte
@@ -854,6 +878,7 @@ typedef struct {
     /* GMT open time (q_dotz_now_ns(0)), stamped at accept/connect/ws-register
      * — the `opened` column of the q connection collector. */
     int64_t          open_ns;
+    bool             local_close;   /* ray_ipc_close_local: no `.z.pc` */
     /* Per-connection identity (.z.u/.z.a/.pq.conns): the handshake userid —
      * the hs[] prefix, marked at creds parse BEFORE the auth hook fires (so
      * `.z.u` is right inside `.z.pw`) but interned LAZILY on first ask, never
@@ -1242,7 +1267,7 @@ static ray_t* ipc_read_handshake(ray_poll_t* poll, ray_selector_t* sel)
     /* Connection is now fully ready for inbound messages.  Fire
      * `.z.po` AFTER we've requested the next read, so a hook that
      * calls back into the server can't race the read pump. */
-    hook_call_lifecycle(poll, IPC_HOOK_OPEN, sel->id, sel->fd);
+    hook_call_lifecycle(poll, IPC_HOOK_OPEN, sel->id, sel->fd, cd->open_ns);
     return NULL;
 }
 
@@ -1323,7 +1348,7 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
         ray_t* obj = ipc_decode_payload(pdata, (size_t)plen, swap,
                                         &is_wire_err, NULL);
         if (!obj) {              /* malformed data structure — .z.bm (dotz.md) */
-            hook_call_badmsg(poll, id, sel->fd, pdata, (size_t)plen);          /* (1) */
+            hook_call_badmsg(poll, id, sel->fd, cd->open_ns, pdata, (size_t)plen);  /* (1) */
             if (payload) ray_poll_buf_free(payload);
             if (uz) ray_release(uz);
             /* the hook may itself have closed this handle — revalidate
@@ -1381,7 +1406,7 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
     if (live) cd->cur_sync_seq = prev_seq;
 
     if (rc != 0) {           /* malformed data structure — .z.bm (dotz.md) */
-        hook_call_badmsg(poll, id, sel->fd, pdata, (size_t)plen);              /* (1) */
+        hook_call_badmsg(poll, id, sel->fd, cd->open_ns, pdata, (size_t)plen);      /* (1) */
         if (msgtype == RAY_IPC_MSG_SYNC) {
             /* bare 'badmsg to the requester (3) — the hook may have closed
              * this handle, so revalidate before writing to its fd */
@@ -1418,24 +1443,26 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
 static void ipc_on_close(ray_poll_t* poll, ray_selector_t* sel)
 {
     (void)poll;
+    bool conn = sel->data != NULL;
     /* Fire `.z.pc` BEFORE tearing the per-conn state down so a
      * hook reading `.ipc.handle` still sees this connection's id, and
      * before the listener's own close path (which would otherwise also
      * route through here) runs the hook with a stale fd.  Guard on:
      *   - sel->data: the listener itself has no conn data.
      *   - phase ≥ HEADER: the connection completed its handshake — an
-     *     outbound conn is born there, so `.z.pc` fires for EVERY closing
-     *     connection, opened or accepted (ref/dotz.md:583; the inbound-only
-     *     pairing with on.open was retired 2026-09-18, D46). */
+     *     outbound conn is born there, so `.z.pc` fires whether this side
+     *     opened or accepted it (ref/dotz.md:583; the inbound-only pairing
+     *     with on.open was retired 2026-09-18, D46).
+     *   - !local_close: this side's own q `hclose` fires none (ref/dotz.md:611). */
     if (sel->data) {
         ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
-        if (cd->phase == RAY_IPC_PHASE_HEADER ||
-            cd->phase == RAY_IPC_PHASE_PAYLOAD) {
+        if (!cd->local_close && (cd->phase == RAY_IPC_PHASE_HEADER ||
+                                 cd->phase == RAY_IPC_PHASE_PAYLOAD)) {
             /* closed BEFORE the hook runs: gone from `.z.W`, `.z.w` is 0i
              * and `.z.u`/`.z.a` are local (the read_fn filter every
              * collector and conn_resolve share) */
             sel->rx.read_fn = NULL;
-            hook_call_lifecycle(poll, IPC_HOOK_CLOSE, sel->id, sel->fd);
+            hook_call_lifecycle(poll, IPC_HOOK_CLOSE, sel->id, sel->fd, cd->open_ns);
         }
         if (cd->http_buf) {     /* HTTP-mode request accumulator */
             ray_sys_free(cd->http_buf);
@@ -1462,6 +1489,14 @@ static void ipc_on_close(ray_poll_t* poll, ray_selector_t* sel)
         sel->data = NULL;
     }
     ray_sock_close((ray_sock_t)sel->fd);
+    if (conn && g_closed_fn) g_closed_fn(sel->fd);
+}
+
+/* the link a worker serves is its whole life: once it closes, the poll loop ends */
+static void ipc_on_link_close(ray_poll_t* poll, ray_selector_t* sel)
+{
+    ipc_on_close(poll, sel);
+    ray_poll_exit(poll, 0);
 }
 
 int64_t ray_ipc_listen(ray_poll_t* poll, uint16_t port)
@@ -1503,7 +1538,7 @@ static void conn_close(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
      * Keeps the pair balanced for the user. */
     if (c->phase == RAY_IPC_PHASE_HEADER ||
         c->phase == RAY_IPC_PHASE_PAYLOAD) {
-        hook_call_lifecycle(NULL, IPC_HOOK_CLOSE, (int64_t)(c - srv->conns), (int64_t)c->fd);
+        hook_call_lifecycle(NULL, IPC_HOOK_CLOSE, (int64_t)(c - srv->conns), (int64_t)c->fd, 0);
     }
 
 #if defined(__linux__)
@@ -1561,7 +1596,7 @@ static void conn_on_handshake(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
     c->rx_len  = 0;
     c->rx_need = KDB_HDR_LEN;
     c->phase   = RAY_IPC_PHASE_HEADER;
-    hook_call_lifecycle(NULL, IPC_HOOK_OPEN, (int64_t)(c - srv->conns), (int64_t)c->fd);
+    hook_call_lifecycle(NULL, IPC_HOOK_OPEN, (int64_t)(c - srv->conns), (int64_t)c->fd, 0);
 }
 
 static void conn_on_header(ray_ipc_server_t* srv, ray_ipc_conn_t* c)
@@ -1923,7 +1958,7 @@ int64_t ray_ipc_conn_list(ray_ipc_conn_info_t* out, int64_t cap)
         ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
         if (out && n < cap) {
             out[n].fd        = sel->fd;
-            out[n].inbound   = cd->listener_id >= 0;
+            out[n].inbound   = cd->listener_id != -1;
             out[n].ws        = sel->rx.read_fn == ipc_read_ws;
             out[n].open_ns   = cd->open_ns;
             out[n].user_sym  = conn_user_sym(cd);
@@ -1949,7 +1984,7 @@ bool ray_ipc_conn_identity(int64_t handle, ray_ipc_conn_ident_t* out)
     out->user_sym  = conn_user_sym(cd);
     out->peer_addr = cd->peer_addr;
     out->is_unix   = cd->peer_unix != 0;
-    out->inbound   = cd->listener_id >= 0;
+    out->inbound   = cd->listener_id != -1;
     return true;
 }
 
@@ -2015,14 +2050,20 @@ int64_t ray_ipc_connect(const char* host, uint16_t port,
     /* The connection lives in the active poll's selector table — its
      * selector id IS the handle.  No poll, no handle namespace: refuse
      * up front rather than hand out an integer nothing can resolve. */
-    ray_poll_t* poll = ipc_active_poll();
-    if (!poll) return -1;
+    if (!ipc_active_poll()) return -1;
 
     /* Default the connect/handshake budget to 5s when the caller gives
      * no explicit timeout, matching the long-standing handshake timeout. */
     int connect_to = timeout_ms > 0 ? timeout_ms : 5000;
     ray_sock_t fd = ray_sock_connect(host, port, connect_to);
     if (fd == RAY_INVALID_SOCK) return (errno == ETIMEDOUT) ? -5 : -1;
+    return ray_ipc_adopt_client(fd, user, password);
+}
+
+int64_t ray_ipc_adopt_client(ray_sock_t fd, const char* user, const char* password)
+{
+    ray_poll_t* poll = ipc_active_poll();
+    if (!poll) { ray_sock_close(fd); return -1; }
 
     /* kdb handshake: "user:password" + capability byte + NUL.  The colon
      * is ALWAYS present (the no-credential handshake is ":\3\0") so the
@@ -2148,16 +2189,54 @@ int64_t ray_ws_client_register(ray_sock_t fd, void* ws_conn)
     return id;
 }
 
-void ray_ipc_close(int64_t handle)
+int64_t ray_ipc_serve_link(ray_sock_t fd)
+{
+    ray_poll_t* poll = ipc_active_poll();
+    if (!poll) return -1;
+
+    ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)ray_sys_alloc(
+                                    sizeof(ray_ipc_conn_data_t));
+    if (!cd) return -1;
+    memset(cd, 0, sizeof(*cd));
+    cd->phase       = RAY_IPC_PHASE_HANDSHAKE;
+    cd->listener_id = IPC_LINK;
+    cd->open_ns     = q_dotz_now_ns(0);
+    cd->loopback    = true;
+    cd->restricted  = poll->restricted;
+    cd->user_sym    = -1;
+    conn_stamp_peer(cd, fd);
+
+    ray_sock_set_nonblocking(fd);
+
+    ray_poll_reg_t reg = {0};
+    reg.fd       = (int64_t)fd;
+    reg.type     = RAY_SEL_SOCKET;
+    reg.recv_fn  = ipc_recv_fn;
+    reg.read_fn  = ipc_read_handshake;
+    reg.close_fn = ipc_on_link_close;
+    reg.data     = cd;
+
+    int64_t id = ray_poll_register(poll, &reg);
+    if (id < 0) { ray_sys_free(cd); return -1; }
+    ray_selector_t* ns = ray_poll_get(poll, id);
+    if (ns) ray_poll_rx_request(poll, ns, 1);
+    return id;
+}
+
+static void ipc_close(int64_t handle, bool local)
 {
     ray_poll_t* poll;
     ray_selector_t* sel = conn_resolve(&poll, handle);
     if (!sel) return;
     /* Deregister fires ipc_on_close: socket closed, conn data freed,
-     * and the on.close hook for inbound connections — so a server can
-     * kick a client through the same handle its hooks were given. */
+     * and `.z.pc` unless the close is local — so a server can kick a
+     * client through the same handle its hooks were given. */
+    ((ray_ipc_conn_data_t*)sel->data)->local_close = local;
     ray_poll_deregister(poll, sel->id);
 }
+
+void ray_ipc_close(int64_t handle)       { ipc_close(handle, false); }
+void ray_ipc_close_local(int64_t handle) { ipc_close(handle, true); }
 
 /* Sync round-trip on any connection handle.  Writes a SYNC frame, then
  * pumps this connection's rx machinery until the matching RESP frame is

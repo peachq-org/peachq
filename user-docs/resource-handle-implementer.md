@@ -33,8 +33,8 @@ best-effort.
 |---|---|---|
 | `.X.i.open[alias;rest;timeout;config]` | `hopen`, the one-shot apply (alias `` ` ``), a temporary connection for an aliasless coordinate. `rest` is the coordinate text after the alias, verbatim; `timeout` 0N when absent; `config` `::` or the dict of the 3-list form. Answers the token. | required |
 | `.X.i.close[token]` | `hclose`, the end of a one-shot, a re-pointed alias | optional (no-op) |
-| `.X.call[token;text;sync]` | the handle applied to a string (`h "…"`) | required for that door |
-| `.X.async[token;msg]` | `h (`async;msg)` | required for that door (`'.X.async` otherwise) |
+| `.X.call[token;msg;sync]` | the handle applied to a string (`h "…"`), or on a q peer to any list; `sync` is `0b` for `neg` of the alias int | required for that door |
+| `.X.i.peer` | `1b` declares the provider a q peer: every list message goes to `.X.call` unchanged, never a hook | optional (`0b`) |
 | `.X.bind[token;name]` | a table coordinate is bound (`get`, `h`name`): answers the column names (a symbol list) | required |
 | `.X.get[token;name]` | a bound table is materialised (`select`, `count`/`meta` fallback) | required |
 | `.X.set[token;name;data]` / `.X.upsert[token;name;data]` | `` `:pq:X:alias:t/ set x `` / `upsert x`; `insert`/`upsert` on a global bound to your table (through `upsert`) | required for that door |
@@ -45,8 +45,9 @@ best-effort.
 | `.X.i.load[token;tables]` | `` \l `:pq:X:alias `` (`tables` = `::`), `` \l `:pq:X:alias:t/ `` (`` enlist `t ``), `.pq.i.load[h;tables]` (as given: `()`, `::` or a symbol list): answer the NAMES to bind — a symbol list, `()` for none. The host makes each pointer through `bind` and binds it at the root, later-wins, and answers the names | optional (`'nyi`) |
 | `.X.i.hdel[token;name]` | `` hdel `:pq:X:alias:t/ ``: drop the OBJECT; the q name, if any, stays bound | optional (`'nyi`) |
 
-Any other name reaches you through the list door, `h (`name; args…)` → `.X.name[token; args…]`, except `i`, `open`
-and `close`, which the host keeps to itself.
+Unless you are a q peer, any other name reaches you through the list door, `h (`name; args…)` →
+`.X.name[token; args…]`, except `i`, `open` and `close`, which the host keeps to itself. A q peer has no list door:
+`h (list)` must mean what it means on a kdb handle, whatever hooks happen to be defined.
 
 **The link hooks** are best-effort: the global is already bound when they run, so an error is dropped (the same shape
 as `.z.vs`), a hook that itself binds a carrier does not re-enter, and an aliasless (self-contained) carrier never
@@ -67,7 +68,7 @@ loader, `hdel`) — a user never spells one, and the list door never reaches one
 | `hopen `:pq:X:al:cfg` | registers alias → token, answers the alias symbol | `.X.i.open[alias;rest;timeout;config]` | yes |
 | `hclose h` | drops the registration | `.X.i.close[token]` | no (no-op) |
 | `h "text"` | text call | `.X.call[token;text;sync]` | yes |
-| `h (`async;msg)` | the async send | `.X.async[token;msg]` | no (`'.X.async`) |
+| `h (`name;args…)` | a hook call; on a q peer, the message sent unchanged | `.X.name[token;args…]` / `.X.call[token;msg;1b]` | no (`'.X.name`) |
 | `h`t`, `get `:pq:X:al:t/` | builds the pointer from the column names | `.X.bind[token;name]` | yes |
 | `select … from t`, `value t` | materialises | `.X.get[token;name]` | yes |
 | `?[t;…]` and every qSQL over a pointer | pushes the resolved functional tree | `.X.qsql[token;cols;tree]` | no (materialise) |
