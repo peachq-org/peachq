@@ -368,17 +368,16 @@ static Tokens scan(const char *src) {
     int p = 0;
     int noun_pos = 0;
 
-/* NOTE: g_toks.t is updated IMMEDIATELY after the realloc — the token payload
- * KK is evaluated as part of the following statement and may q_die (e.g. the
- * deferred `0we` float-infinity literal); the longjmp handler must see the
- * live buffer, not a stale/NULL pointer (leak, or free of a moved block).
- * g_toks.n stays at the OLD count until the slot is actually stored. */
+/* KK runs FIRST: a literal payload advances p (so .len is only right after it) and may q_die (the deferred `0we`
+ * float-infinity literal) before the slot exists.  g_toks.t follows every realloc so the longjmp handler frees the
+ * live buffer; g_toks.n stays at the OLD count until the slot is stored. */
 #define EMIT(TK, KK) do { \
+        ray_t *kk_ = (KK); \
         if (n >= cap) { cap = cap ? cap * 2 : 32; toks = realloc(toks, (size_t)cap * sizeof(Token)); \
-                        if (!toks) q_die("out of memory"); /* g_toks still tracks the old block */ \
+                        if (!toks) { if (kk_) ray_release(kk_); q_die("out of memory"); } \
                         g_toks.t = toks; } \
-        toks[n++] = (Token){ .kind = (TK), .start = start, .len = p - start, .k = (KK) }; \
-        g_toks.t = toks; g_toks.n = n; \
+        toks[n++] = (Token){ .kind = (TK), .start = start, .len = p - start, .k = kk_ }; \
+        g_toks.n = n; \
     } while (0)
 
     for (;;) {
@@ -2331,6 +2330,19 @@ ray_t *q_parse(const char *src) {
     return parse_text(src);
 }
 
+static ray_t *die_answer(void) {
+    free_tokens(g_toks);
+    g_toks.t = NULL;
+    g_toks.n = 0;
+    q_err_e cls = g_die_class; g_die_class = QE_PARSE;
+    if (g_die_payload) {
+        ray_t *e = q_err_signal(cls, g_die_payload);
+        ray_release(g_die_payload); g_die_payload = NULL;
+        return e;
+    }
+    return q_err(cls);
+}
+
 static ray_t *parse_text(const char *src) {
     init_class();
     g_toks.t = NULL;
@@ -2339,16 +2351,7 @@ static ray_t *parse_text(const char *src) {
         /* q_die() longjmped here; free whatever the scanner had emitted, plus
          * every ref the abandoned frames registered on the pending guard. */
         qsql_pend_unwind();
-        free_tokens(g_toks);
-        g_toks.t = NULL;
-        g_toks.n = 0;
-        q_err_e cls = g_die_class; g_die_class = QE_PARSE;
-        if (g_die_payload) {
-            ray_t *e = q_err_signal(cls, g_die_payload);
-            ray_release(g_die_payload); g_die_payload = NULL;
-            return e;
-        }
-        return q_err(cls);
+        return die_answer();
     }
 
     Tokens ts = scan(src);
@@ -2370,6 +2373,47 @@ static ray_t *parse_text(const char *src) {
      * ray_eval() self-evaluates it, rather than every caller having to treat a
      * bare C NULL specially. */
     return prog ? prog : RAY_NULL_OBJ;
+}
+
+static ray_t *tokens_push(ray_t *l, const char *s, int a, int b) {
+    ray_t *t = ray_charv(s + a, b - a);
+    l = ray_list_append(l, t);
+    ray_release(t);
+    return l;
+}
+
+/* A gap between scanned tokens holds only blanks and comments; a comment takes the blank run before it. */
+static ray_t *tokens_gap(ray_t *l, const char *s, int a, int b) {
+    while (a < b) {
+        int e = a;
+        while (e < b && (CLASS[(uint8_t)s[e]] & CL_WS)) e++;
+        if (e < b) while (e < b && s[e] != '\n') e++;
+        l = tokens_push(l, s, a, e);
+        a = e;
+    }
+    return l;
+}
+
+ray_t *q_parse_tokens(const char *src, int64_t n) {
+    if (n > INT_MAX - 1) return q_err(QE_DOMAIN);
+    if (!q_registry_ready()) return q_err(QE_INIT);
+    init_class();
+    g_toks.t = NULL;
+    g_toks.n = 0;
+    if (setjmp(q_err_jmp)) return die_answer();
+    Tokens ts = scan(src);
+    ray_t *l = ray_list_new(ts.n > 1 ? ts.n * 2 : 1);
+    int at = 0;
+    for (int i = 0; i < ts.n - 1; i++) {
+        l = tokens_gap(l, src, at, ts.t[i].start);
+        l = tokens_push(l, src, ts.t[i].start, ts.t[i].start + ts.t[i].len);
+        at = ts.t[i].start + ts.t[i].len;
+    }
+    l = tokens_gap(l, src, at, (int)n);
+    free_tokens(ts);
+    g_toks.t = NULL;
+    g_toks.n = 0;
+    return l;
 }
 
 /* q_parse_is_assign — see q_parse.h.  Head is the name-ref `:`/`::` (or the
