@@ -39,7 +39,7 @@ int q_provider_ns_is(const char* s, size_t n);
  * open form (bare sym, 2-list, 3-list, one-shot sym-apply) normalizes to the
  * FROZEN tuple .ds.i.open[alias; rest; timeout; config] — alias ` for the
  * one-shot, timeout 0N when absent, opts :: when absent (both borrowed here,
- * may be NULL); any future open-time need rides the opts dict. */
+ * may be NULL); a non-dict opts is the provider's to read or refuse. */
 ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config);
 
 /* A provider's OWN connection as a registered row (DuckDB's `:pq:ds:main`):
@@ -90,10 +90,14 @@ ray_t* q_provider_sym_apply(ray_t* head, ray_t** args, int64_t n);
 ray_t* q_provider_close(int64_t qh);
 ray_t* q_provider_close_sym(ray_t* x);
 
-/* provider/alias/handle sym ids of a registered provider fd, and whether its
+/* provider/alias/handle sym ids of a registered provider fd, whether its
  * connection is up (an IPC token that died reads 0 until the next use
- * re-dials it); 0 = no such fd */
-int    q_provider_info(int64_t fd, int64_t* provider, int64_t* alias, int64_t* handle, int* open);
+ * re-dials it), and the socket fd of that IPC token (-1 = an opaque token);
+ * 0 = no such fd */
+int    q_provider_info(int64_t fd, int64_t* provider, int64_t* alias, int64_t* handle, int* open, int64_t* link);
+
+/* A forked child drops every alias it inherited without calling a hook or closing a descriptor. */
+void   q_provider_forget(void);
 
 int    q_provider_carrier_is(ray_t* x);      /* a bound table = the MARKED dict; never a shape test */
 

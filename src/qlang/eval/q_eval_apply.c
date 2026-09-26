@@ -1279,12 +1279,11 @@ static ray_t* proj_call(ray_t* proj, ray_t** args, int64_t n) {
  * boundary) — all DATA indexing is ops/q_index.c, the one index/amend home;
  * results cross into q-space through q_str_charv_out. */
 
-/* Symbol-handle application: a `` `:… `` communication handle delegates
- * wholly to q_handles_sym_apply (the sole handle authority); otherwise
- * q4m3 §12 symbol-as-global indexing. */
+/* Symbol-handle application: a `` `:… `` handle delegates wholly to
+ * q_handles_sym_apply (the sole handle authority); otherwise q4m3 §12
+ * symbol-as-global indexing. */
 static ray_t* sym_head_apply(ray_t* head, ray_t** args, int64_t n) {
-    ray_t* s = ray_sym_str(head->i64);               /* borrowed */
-    if (s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == ':')
+    if (q_handles_sym_kind(head) != Q_SYM_NAME)
         return q_handles_sym_apply(head, args, n);
     ray_t* v = q_env_resolve(head->i64);             /* owned or NULL */
     if (!v) return q_err(QE_TYPE);
@@ -1829,10 +1828,9 @@ static ray_t* trap_catch(ray_t* r, ray_t* e) {
 static ray_t* name_lift(const q_op_t* row, ray_t** args, int64_t n, int dot) {
     if (!row || !row->name_lift || !args[0] || args[0]->type != -RAY_SYM)
         return NULL;
-    ray_t* s = ray_sym_str(args[0]->i64);
-    int isfile = s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == ':';
-    if (s) ray_release(s);
-    if (isfile) {
+    q_sym_kind kind = q_handles_sym_kind(args[0]);
+    if (kind == Q_SYM_PROCESS) return q_err(QE_TYPE);   /* a process holds no data to amend */
+    if (kind == Q_SYM_PATH) {
         /* Amend Entire on a file (ref/amend.md; kb/performance-tips.md:151-152):
          * dot form, empty path — `,` appends, `:` sets.  Every other file amend
          * shape stays 'nyi (the file wave's remaining edge). */
@@ -1887,7 +1885,8 @@ static ray_t* amend_value(ray_t** args, int64_t n, int dot) {
 /* ref/apply.md Amend: d is a list or dictionary, or a handle to one; any other head (an atom, a function, a
  * process handle) is Trap's f, applied — `@[1b;`x;0b]` answers the catch (owner ruling 2026-09-16). */
 static int amend_head(ray_t* d) {
-    return !ray_is_atom(d) || d->type == -RAY_SYM;
+    if (d->type == -RAY_SYM) return q_handles_sym_kind(d) != Q_SYM_PROCESS;
+    return !ray_is_atom(d);
 }
 
 /* `@` — the overload matrix (ref/apply.md + ref/amend.md): 2 args Apply At /

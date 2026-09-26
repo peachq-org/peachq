@@ -25,6 +25,7 @@
 #include "qlang/q_console.h"  /* q_console_flush (the exit path); q_console_pipe_* (`\classic`) */
 #include "qlang/q_ctx.h"           /* the engine context: `\l` source seam, console teardown */
 #include "qlang/io/q_io.h"    /* q_io_mkdir_parents — `\1`/`\2` create the path they name */
+#include "qlang/io/q_handles.h" /* q_handles_end_owned — the exit home ends every owned worker */
 #include "qlang/io/q_mount.h" /* q_mount_dir — the `\l <dir>` forms */
 #include "qlang/io/q_provider.h" /* q_provider_spec_is / _load — the `\l `:pq:…` form */
 #include "qlang/q_pq.h"       /* q_pq_load / _load_file — `\l pq` and `\l pq/<file>.q` */
@@ -185,15 +186,30 @@ void q_sys_launching(bool on) { g_launching = on ? 1 : 0; }
  * reentrant q_sys_exit from inside the handler skips it and exits with the
  * ORIGINAL code (dotz.md: "The handler cannot cancel the exit"). */
 static int g_exit_code;
+static int g_forked;
 void q_sys_exit(int code) {
     if (!g_own_process) return;
-    if (g_exiting) exit(g_exit_code);
+    if (g_forked) { q_handles_end_owned(); q_console_flush(); _exit(code); }
+    if (g_exiting) { q_handles_end_owned(); exit(g_exit_code); }
     g_exiting  = 1;
     g_exit_code = code;
     q_ctx_console_close();
     q_dotz_exit_fire(code);
+    q_handles_end_owned();
     q_console_flush();   /* issue #23: nothing the statement wrote is left in a stream buffer */
     exit(code);
+}
+
+/* The pool's threads, the timer heap and the listener all belonged to the parent's poll and threads: the child forgets
+ * them without touching them.  `.z.ts` keeps its value. */
+void q_sys_forked(void) {
+    g_forked = 1;
+    ray_pool_t* pool = ray_pool_get();
+    if (pool) { pool->n_active = 0; pool->n_workers = 0; }
+    g_timer_ms = 0;
+    g_timer_id = -1;
+    g_listen_port = 0;
+    g_listen_sel  = -1;
 }
 
 /* q `exit x` — terminate with exit code x (ref/exit.md; blocked during reval

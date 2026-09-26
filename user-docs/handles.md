@@ -450,11 +450,43 @@ hclose h                                      / the one close door
   Opening the same alias again re-points it in place and answers the same symbol.
 - `hclose h` is the only close door; a provider's own open/close are hooks the host calls, with no public spelling.
 - `.pq.conns[]` lists every open connection: `handle` is what `hclose` takes (the alias symbol for a provider row,
-  the int for a socket or file), `h` the fd, with `provider`, `alias` and `opened` beside them.
-- **Async is a hook call**: `h (`async; msg)` reaches the provider's `.X.async` — the q IPC provider defines it as
-  the async send; an in-process engine like DuckDB does not (`'.duckdb.async`). `neg` on the symbol stays q's `neg`.
+  the int for a socket or file), `h` the fd, with `provider`, `alias` and `opened` beside them. `owned` is `1b` on a
+  worker's alias row and `pid` is its process id; they are `0b` and null everywhere else, the socket beneath the alias
+  included, so `count select from .pq.conns[] where owned` counts workers. `hclose` of an owned handle kills and reaps
+  the worker, and so does this process's exit (`exit`, `\\` or the end of its script), without firing `.z.pc`.
+- **A q peer's handle is a kdb handle**: on a qpc, forkq or procq alias, `h (`f;x;y)` is sent to the other process
+  unchanged, exactly as on an int handle, whatever names exist here. The async send is `neg` of the alias int —
+  `` neg[first exec h from .pq.conns[] where handle~\:p] "x:1" `` for an alias `p`. Don't name that variable `h`:
+  inside the query the `h` column shadows a global `h`, so the lookup answers `0Ni`. `neg` on the symbol stays q's
+  `neg`. On any other provider a list is a hook call: `h (`name; args…)` reaches `.X.name` (`'.duckdb.async` for
+  `h (`async;…)` on DuckDB).
 - The int fd shown as `h` in `.pq.conns[]` is the legacy form, for code that expects `hopen` to answer an int: it is
   accepted wherever the symbol is, and goes once nothing uses it.
+
+**A forked worker.** `` h:hopen `:pq:forkq:w1 `` forks this process: the worker starts with every global this process
+has at that moment, and `h "expr"`, `h (`f;x)` and the async `neg` of its alias int talk to it over the kdb protocol
+like any q server. It is a snapshot, not a mirror — later changes on either side are not seen by the other — and it only computes: `\t`, `\p` and
+`\s` are 0, the `.z.p*`/`.z.w*` handlers are the ones a fresh q starts with (so `.z.ph` is the built-in web
+handler), the connections this process had are not open in it, and it exits without running `.z.exit`. A worker may
+open its own port (`` h "system \"p 0W\"" ``): it then serves IPC and HTTP from the snapshot as of the fork, and a
+worker forked again after a death does not re-open it. `hclose h` kills it; if it dies, the next use of `h` forks a
+new worker from this process as it is then (`opened` changes). `` hopen (`:pq:forkq:w1;ms) `` bounds the fork's handshake; a null, zero or
+negative timeout means the default, 5000 ms. A process that cannot be copied safely refuses with `'nofork` (not the main
+thread, a parallel region running, a swap-backed heap, Windows); `'fork` is the OS refusing. Two forks draw the same
+random numbers.
+
+**A launched worker.** `` h:hopen (`:pq:procq:w1;5000;("init.q";"-s";"2")) `` starts a new
+peachq — this same executable — with exactly that argv: no shell, no splitting, nothing of peachq's added, so `.z.x`
+and `.z.f` read as they would for `q init.q -s 2`. It is an ordinary q process: its script runs (a script error stops
+the script, not the process, as in kx), its own `.z.p*` handlers apply, and a `\p` its script sets keeps serving. Its
+stdin is the null device; its stdout and stderr are this process's. `h` talks to it exactly as to a forked worker, and it
+lives exactly as long as `h`: `hclose h` kills it, and it dies with this process. If it dies, the next use of `h`
+launches it again from the same argv — its recipe is its argv, so anything pushed into it since is gone. The timeout
+(ms; null, zero or negative = the default 10000) bounds the launch; a worker that exits or never answers within it is
+`'proc`. A successful `hopen` means the process started and answered, not that its script succeeded: a script error
+stops the script and leaves the worker serving, so check what the script should have defined before relying on it.
+The third element is the argv, a list of strings with one string per argument (`` enlist "init.q" `` is one argument);
+`""` and `::` mean no arguments, and anything else is `'type`. On Windows `hclose` ends the worker outright: there is no TERM to ask it first.
 
 **The DuckDB link and `s)`.** The process has ONE DuckDB database — the main instance, whose own handle is
 `` `:pq:duckdb:main `` (listed by `.pq.conns[]`, answered by `.duckdb.main[]`; `hopen`/`hclose` refuse the alias, and

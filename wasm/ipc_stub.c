@@ -79,6 +79,10 @@ int64_t ray_ws_client_register(ray_sock_t fd, void* ws_conn) {
     (void)fd; (void)ws_conn; return -1;
 }
 
+void ray_ipc_close_local(int64_t handle) { (void)handle; }
+void ray_ipc_set_hook_fd_fn(ray_ipc_hook_fd_fn fn) { (void)fn; }
+void ray_ipc_set_closed_fn(ray_ipc_closed_fn fn) { (void)fn; }
+
 /* Real RLE+delta decompressor, preserved verbatim from src/core/ipc.c so
  * compressed journal replay/validate works under WASM. Pure; no networking. */
 size_t ray_ipc_decompress(const uint8_t* src, size_t clen, uint8_t* dst,

@@ -76,6 +76,6 @@ ray_t* q_dbg_self(void);
 typedef int (*q_dbg_read_fn)(const char* prompt, char* buf, size_t cap);
 void q_dbg_set_reader(q_dbg_read_fn fn);
 
-void q_dbg_reset(void);              /* runtime teardown: drop retained refs */
+void q_dbg_reset(void);              /* runtime teardown, or a forked child starting at top level: drop retained refs */
 
 #endif

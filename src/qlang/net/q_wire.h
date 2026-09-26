@@ -106,6 +106,9 @@ ray_t* q_wire_deserialize(ray_t* bytes);
 /* As above; *sent_err says an error result is the message's own -128h payload, not a decode failure. */
 ray_t* q_wire_deserialize_ex(ray_t* bytes, int* sent_err);
 
+/* The largest frame, header included, at the capability we speak: the 32-bit length (basics/ipc.md:360-369). */
+#define Q_WIRE_MSG_MAX ((uint32_t)INT32_MAX)
+
 /* ---- Phase F compression codec (javakdb c.java scheme) ----
  * Compress a complete frame: returns the compressed frame when its serialized
  * data (the frame less its 8-byte header) exceeds 2000 bytes AND compresses to

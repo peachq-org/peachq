@@ -31,6 +31,12 @@
 #include <unistd.h>          /* close — raw handle IO */
 #ifdef RAY_OS_WINDOWS
 #include <io.h>              /* _dup/_close — msvcrt has no fcntl/F_DUPFD */
+#include <windows.h>         /* OpenProcess/TerminateProcess — an owned worker dies with its link */
+#else
+#include <signal.h>          /* kill — an owned worker dies with its link */
+#include <sys/wait.h>        /* waitpid */
+#include <time.h>            /* nanosleep */
+#include <errno.h>           /* EINTR */
 #endif
 
 typedef struct {
@@ -46,9 +52,22 @@ static q_handle_rec* g_recs = NULL;
 static int64_t       g_cap  = 0;
 static int64_t       g_n    = 0;
 
-void q_handles_init(void) { g_recs = NULL; g_cap = 0; g_n = 0; }
+/* on Windows `pin` holds the process open, so its pid is not reused before the reap */
+typedef struct { int64_t fd, pid; void* pin; } q_owned;
+static q_owned* g_owned = NULL;
+static int64_t  g_owned_cap = 0, g_owned_n = 0;
+
+void q_handles_init(void) {
+    g_recs = NULL; g_cap = 0; g_n = 0;
+    g_owned = NULL; g_owned_cap = 0; g_owned_n = 0;
+    ray_ipc_set_closed_fn(q_handles_owned_closed);
+}
 
 void q_handles_destroy(void) {
+    q_handles_end_owned();
+    ray_ipc_set_closed_fn(NULL);
+    free(g_owned);
+    g_owned = NULL; g_owned_cap = 0; g_owned_n = 0;
     for (int64_t i = 0; i < g_n; i++) {
         /* file/fifo fds were opened directly by this registry — no other owner
          * closes them (sockets are the IPC layer's).  Close on teardown so
@@ -59,6 +78,83 @@ void q_handles_destroy(void) {
     }
     free(g_recs);
     g_recs = NULL; g_cap = 0; g_n = 0;
+}
+
+void q_handles_forget(void) {
+    for (int64_t i = 0; i < g_n; i++)
+        if (g_recs[i].open_args) ray_release(g_recs[i].open_args);
+    g_n = 0;
+    g_owned_n = 0;
+}
+
+int q_handles_own(int64_t fd, int64_t pid) {
+    if (g_owned_n == g_owned_cap) {
+        int64_t nc = g_owned_cap ? g_owned_cap * 2 : 8;
+        q_owned* no = (q_owned*)realloc(g_owned, (size_t)nc * sizeof *no);
+        if (!no) return 0;
+        g_owned = no; g_owned_cap = nc;
+    }
+    void* pin = NULL;
+#ifdef RAY_OS_WINDOWS
+    pin = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+#endif
+    g_owned[g_owned_n++] = (q_owned){ fd, pid, pin };
+    return 1;
+}
+
+int64_t q_handles_owned_pid(int64_t fd) {
+    for (int64_t i = 0; i < g_owned_n; i++) if (g_owned[i].fd == fd) return g_owned[i].pid;
+    return -1;
+}
+
+/* TERM hurries a busy worker, KILL ends a stuck one; one grace covers them all.  The wait retries an interrupted call
+ * and a worker is done (pid 0) once reaped or no child of ours.  Windows has no TERM: every worker is terminated
+ * outright, then each is waited for and its pin let go. */
+static void reap(q_owned* w, int64_t n) {
+#ifndef RAY_OS_WINDOWS
+    pid_t r;
+    int64_t live = n;
+    for (int64_t i = 0; i < n; i++) kill((pid_t)w[i].pid, SIGTERM);
+    for (int ms = 0; live && ms < 1000; ms++) {
+        for (int64_t i = 0; i < n; i++) {
+            if (!w[i].pid) continue;
+            while ((r = waitpid((pid_t)w[i].pid, NULL, WNOHANG)) < 0 && errno == EINTR) {}
+            if (r != 0) { w[i].pid = 0; live--; }
+        }
+        if (live) nanosleep(&(struct timespec){ 0, 1000000 }, NULL);
+    }
+    for (int64_t i = 0; i < n; i++) {
+        if (!w[i].pid) continue;
+        kill((pid_t)w[i].pid, SIGKILL);
+        while (waitpid((pid_t)w[i].pid, NULL, 0) < 0 && errno == EINTR) {}
+    }
+#else
+    for (int64_t i = 0; i < n; i++) {
+        HANDLE p = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)w[i].pid);
+        if (p) { TerminateProcess(p, 1); CloseHandle(p); }
+    }
+    for (int64_t i = 0; i < n; i++) {
+        HANDLE p = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)w[i].pid);
+        if (p) { WaitForSingleObject(p, INFINITE); CloseHandle(p); }
+        if (w[i].pin) CloseHandle((HANDLE)w[i].pin);
+    }
+#endif
+}
+
+void q_handles_reap(int64_t pid) { reap(&(q_owned){ -1, pid, NULL }, 1); }
+
+void q_handles_end_owned(void) {
+    reap(g_owned, g_owned_n);
+    g_owned_n = 0;
+}
+
+void q_handles_owned_closed(int64_t fd) {
+    int64_t i = 0;
+    while (i < g_owned_n && g_owned[i].fd != fd) i++;
+    if (i == g_owned_n) return;
+    q_owned o = g_owned[i];
+    g_owned[i] = g_owned[--g_owned_n];
+    reap(&o, 1);
 }
 
 static int64_t find_slot(int64_t fd) {
@@ -425,6 +521,13 @@ static int is_text_atom(ray_t* v) {
                  v->type == -RAY_CHARV);
 }
 
+enum { SCHEME_NONE, SCHEME_WS, SCHEME_HTTP };
+static int sym_scheme(const char* sp, size_t sl) {
+    if ((sl >= 6 && memcmp(sp, ":ws://", 6) == 0) || (sl >= 7 && memcmp(sp, ":wss://", 7) == 0))
+        return SCHEME_WS;
+    return sl && sp[0] == ':' && q_http_client_scheme_is(sp + 1, sl - 1) ? SCHEME_HTTP : SCHEME_NONE;
+}
+
 /* The `:`-prefixed SYM arm of the same abstraction: protocol dispatch on the
  * descriptor text — ws/wss and http/https clients, else one-shot sync IPC
  * (ref/hopen.md): connect -> send -> close.  A file-path SYM applies only
@@ -435,13 +538,13 @@ ray_t* q_handles_sym_apply(ray_t* head, ray_t** args, int64_t n) {
     size_t sl = ray_str_len(s);
     if (q_provider_spec_is(sp, sl))
         return q_provider_sym_apply(head, args, n);
-    if ((sl >= 6 && memcmp(sp, ":ws://", 6) == 0) ||
-        (sl >= 7 && memcmp(sp, ":wss://", 7) == 0)) {
+    int scheme = sym_scheme(sp, sl);
+    if (scheme == SCHEME_WS) {
         if (n == 1 && is_text_atom(args[0]))
             return q_ws_client_open(head, args[0]);
         return q_err(QE_TYPE);
     }
-    if (sl && sp[0] == ':' && q_http_client_scheme_is(sp + 1, sl - 1)) {
+    if (scheme == SCHEME_HTTP) {
         if (n == 1 && is_text_atom(args[0]))
             return q_http_client_raw(head, args[0]);
         return q_err(QE_TYPE);
@@ -474,10 +577,8 @@ ray_t* q_handles_close(int64_t qh) {
     q_handles_deregister(qh);                 /* drop any socket record (no-op if absent) */
     int64_t id = ray_ipc_handle_of_fd(qh);
     if (id < 0) return RAY_NULL_OBJ;          /* not a live handle — no-op */
-    ray_t* raw = make_i64(id);
-    ray_t* r = ray_hclose_fn(raw);
-    ray_release(raw);
-    return r;
+    ray_ipc_close_local(id);
+    return RAY_NULL_OBJ;
 }
 
 /* ---- read1 on a fifo handle --------------------------------------------- */
@@ -613,13 +714,25 @@ static int hopen_transport(const char* s, size_t n, const char** path, size_t* p
     return HT_FILE;
 }
 
+q_sym_kind q_handles_sym_kind(ray_t* sym) {
+    ray_t* s = ray_sym_str(sym->i64);               /* borrowed */
+    const char* sp = s ? ray_str_ptr(s) : NULL;
+    size_t sl = s ? ray_str_len(s) : 0;
+    if (!sl || sp[0] != ':') return Q_SYM_NAME;
+    if (q_provider_spec_is(sp, sl))
+        return q_provider_coord_sym_form(sym) == 2 ? Q_SYM_PATH : Q_SYM_PROCESS;
+    if (sym_scheme(sp, sl) != SCHEME_NONE) return Q_SYM_PROCESS;
+    const char* path; size_t plen;
+    return hopen_transport(sp, sl, &path, &plen) == HT_IPC ? Q_SYM_PROCESS : Q_SYM_PATH;
+}
+
 /* q `hopen y` — connect: an int handle (a `:pq:` conn: its alias sym).  Restricted connections must not
  * open outbound sockets (the `.ipc.open` primitive is RAY_FN_RESTRICTED; calling
  * ray_hopen_fn directly bypasses the eval-layer check, so re-assert it here). */
-static ray_t* hopen_wrap_impl(ray_t* x);
+static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given);
 ray_t* q_hopen_wrap(ray_t* x) {
     ray_t* xs = q_str_in(x);            /* charv args -> legacy STR forms */
-    ray_t* r = hopen_wrap_impl(xs);
+    ray_t* r = hopen_wrap_impl(xs, x);
     ray_release(xs);
     return r;
 }
@@ -636,7 +749,7 @@ static int hopen_conn_text(ray_t* c, const char** ds, size_t* dn) {
     return 0;
 }
 
-static ray_t* hopen_wrap_impl(ray_t* x) {
+static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* conn      = x;
     ray_t* timeout   = NULL;
@@ -651,7 +764,8 @@ static ray_t* hopen_wrap_impl(ray_t* x) {
         const char* ds; size_t dn;
         if (hopen_conn_text(e[0], &ds, &dn) && q_provider_spec_is(ds, dn)) {
             if (q_count(x) > 3) return q_err(QE_RANK);
-            return q_provider_hopen(ds, dn, e[1], e[2]);
+            /* the third element is the provider's: it gets the caller's value, not the legacy STR form */
+            return q_provider_hopen(ds, dn, e[1], ((ray_t**)ray_data(given))[2]);
         }
     }
     if (x && x->type == RAY_LIST && q_count(x) == 2) {   /* (conn; timeout-ms) */
