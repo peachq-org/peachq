@@ -380,6 +380,7 @@ void q_builtins_register(void) {
     bind_vary (".Q.c.hp", q_dotq_hp_fn);     /* HTTP POST [url;mime;body] (ref/dotq.md) */
     bind_vary (".Q.c.gz", q_dotq_gz_fn);     /* GZip ::/inflate/deflate (ref/dotq.md) */
     bind_vary (".Q.c.trp", q_dbg_trp_fn);    /* trap-at + backtrace (ref/dotq.md) */
+    bind_vary (".Q.c.trpd", q_dbg_trpd_fn);  /* trap + backtrace, any rank (ref/dotq.md) */
     bind_unary(".Q.c.sbt", q_dbg_sbt_fn);    /* string backtrace (ref/dotq.md) */
     bind_vary (".Q.c.bt",  q_dbg_bt_fn);     /* dump backtrace (ref/dotq.md) */
     bind_value(".Q.c.res", q_registry_name_reserved_words());
