@@ -1355,13 +1355,13 @@ static ray_t* qd_unsafe_exec_text_wrap(ray_t** args, int64_t n) {
 
 static void qd_bind_unary(const char* name, ray_unary_fn fn) {
     ray_t* obj = ray_fn_unary(name, RAY_FN_NONE, fn);
-    q_env_bind(ray_sym_intern(name, strlen(name)), obj);
+    q_env_bind_native(name, obj, 1);
     ray_release(obj);
 }
 
-static void qd_bind_vary(const char* name, ray_vary_fn fn) {
+static void qd_bind_vary(const char* name, int rank, ray_vary_fn fn) {
     ray_t* obj = ray_fn_vary(name, RAY_FN_NONE, fn);
-    q_env_bind(ray_sym_intern(name, strlen(name)), obj);
+    q_env_bind_native(name, obj, rank);
     ray_release(obj);
 }
 
@@ -1442,24 +1442,24 @@ static ray_t* qd_types_fn(ray_t** args, int64_t n) {
  * Registration fires from the `\l pq` gate, so the pre-gate env is kdb-clean. */
 void q_duckdb_register(void) {
     /* NO dlopen here — the library is resolved lazily on first use. */
-    qd_bind_vary (".duckdb.i.open",   qd_open_wrap);
+    qd_bind_vary (".duckdb.i.open",   4, qd_open_wrap);
     qd_bind_unary(".duckdb.i.close",  qd_close_fn);
-    qd_bind_vary (".duckdb.i.main",   qd_main_fn);
-    qd_bind_vary (".duckdb.i.link",   qd_link_wrap);
-    qd_bind_vary (".duckdb.i.unlink", qd_unlink_wrap);
-    qd_bind_vary (".duckdb.i.hdel",   qd_hdel_wrap);
+    qd_bind_vary (".duckdb.i.main",   1, qd_main_fn);
+    qd_bind_vary (".duckdb.i.link",   3, qd_link_wrap);
+    qd_bind_vary (".duckdb.i.unlink", 2, qd_unlink_wrap);
+    qd_bind_vary (".duckdb.i.hdel",   2, qd_hdel_wrap);
     qd_bind_unary(".duckdb.i.tables", qd_tables_fn);
     qd_bind_unary(".duckdb.i.err",    qd_err_fn);
-    qd_bind_vary (".duckdb.i.exec",   qd_sql_wrap);
-    qd_bind_vary (".duckdb.i.execx",  qd_sqlx_wrap);
+    qd_bind_vary (".duckdb.i.exec",   2, qd_sql_wrap);
+    qd_bind_vary (".duckdb.i.execx",  2, qd_sqlx_wrap);
     qd_bind_unary(".duckdb.i.qname",  qd_qname_fn);
-    qd_bind_vary (".duckdb.i.get",    qd_get_wrap);
-    qd_bind_vary (".duckdb.i.getx",   qd_getx_wrap);
-    qd_bind_vary (".duckdb.i.set",    qd_set_wrap);
-    qd_bind_vary (".duckdb.i.append", qd_append_wrap);
-    qd_bind_vary (".duckdb.i.meta",   qd_meta_wrap);
-    qd_bind_vary (".duckdb.i.types",  qd_types_fn);
+    qd_bind_vary (".duckdb.i.get",    2, qd_get_wrap);
+    qd_bind_vary (".duckdb.i.getx",   2, qd_getx_wrap);
+    qd_bind_vary (".duckdb.i.set",    3, qd_set_wrap);
+    qd_bind_vary (".duckdb.i.append", 3, qd_append_wrap);
+    qd_bind_vary (".duckdb.i.meta",   2, qd_meta_wrap);
+    qd_bind_vary (".duckdb.i.types",  1, qd_types_fn);
     /* the two DIAGNOSTICS, bound under .duckdb directly: neither has q-side logic, and a shim in front of a
      * diagnostic is one more thing to keep honest.  `unsafe` marks the one that bypasses the type contract. */
-    qd_bind_vary (".duckdb.i.unsafeExecText", qd_unsafe_exec_text_wrap);
+    qd_bind_vary (".duckdb.i.unsafeExecText", 2, qd_unsafe_exec_text_wrap);
 }

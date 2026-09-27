@@ -247,19 +247,19 @@ static void capture_base(const char* name, ray_unary_fn* out, uint8_t* attrs) {
 
 static void bind_unary(const char* name, ray_unary_fn fn) {
     ray_t* obj = ray_fn_unary(name, RAY_FN_NONE, fn);
-    q_env_bind(ray_sym_intern(name, strlen(name)), obj);
+    q_env_bind_native(name, obj, 1);
     ray_release(obj);
 }
 
-static void bind_vary(const char* name, ray_vary_fn fn) {
+static void bind_vary(const char* name, int rank, ray_vary_fn fn) {
     ray_t* obj = ray_fn_vary(name, RAY_FN_NONE, fn);
-    q_env_bind(ray_sym_intern(name, strlen(name)), obj);
+    q_env_bind_native(name, obj, rank);
     ray_release(obj);
 }
 
 static void bind_binary(const char* name, ray_binary_fn fn) {
     ray_t* obj = ray_fn_binary(name, RAY_FN_NONE, fn);
-    q_env_bind(ray_sym_intern(name, strlen(name)), obj);
+    q_env_bind_native(name, obj, 2);
     ray_release(obj);
 }
 
@@ -285,17 +285,17 @@ void q_builtins_register(void) {
     bind_unary("trim",   q_trim_fn);
     bind_unary("ltrim",  q_ltrim_fn);
     bind_unary("rtrim",  q_rtrim_fn);
-    bind_vary ("ssr",    q_ssr_wrap);
+    bind_vary ("ssr",    3, q_ssr_wrap);
     /* bracket-form joins (feat/q-joins-rebuild): triadic/quaternary prefix
      * keywords resolve through the env (the ssr precedent); implementations
      * in q_registry.c over the engine join machinery. */
-    bind_vary ("ej",     q_ej_wrap);
-    bind_vary ("aj",     q_aj_wrap);
-    bind_vary ("aj0",    q_aj0_wrap);
-    bind_vary ("ajf",    q_ajf_wrap);
-    bind_vary ("ajf0",   q_ajf0_wrap);
-    bind_vary ("wj",     q_wj_wrap);
-    bind_vary ("wj1",    q_wj1_wrap);
+    bind_vary ("ej",     3, q_ej_wrap);
+    bind_vary ("aj",     3, q_aj_wrap);
+    bind_vary ("aj0",    3, q_aj0_wrap);
+    bind_vary ("ajf",    3, q_ajf_wrap);
+    bind_vary ("ajf0",   3, q_ajf0_wrap);
+    bind_vary ("wj",     4, q_wj_wrap);
+    bind_vary ("wj1",    4, q_wj1_wrap);
     bind_unary("show",   show_fn);
     /* `system "…"` — q-owned string form; single-homes with the `\`-slash
      * dispatcher (q_sys.c). QK_ENV row in q_ops.c snapshots this binding. */
@@ -339,7 +339,7 @@ void q_builtins_register(void) {
     bind_unary("value", q_eval_value_wrap);
     /* `enlist` — q dict arm (1-row table); the `,` monadic QK_ENV snapshot
      * inherits it (bound before q_registry_init, q_eval_value_wrap precedent). */
-    bind_vary ("enlist", q_enlist_wrap);
+    bind_vary ("enlist", 0, q_enlist_wrap);
     /* Build q's verb table over the now-populated g_env (ray_lang_init has run).
      * The registry is the authoritative, immutable verb source; it snapshots
      * builtin values and must be torn down via q_runtime_destroy before the
@@ -372,17 +372,17 @@ void q_builtins_register(void) {
     };
     for (size_t i = 0; i < sizeof dotq_c_unary / sizeof *dotq_c_unary; i++)
         bind_unary(dotq_c_unary[i].name, dotq_c_unary[i].fn);
-    bind_vary (".Q.c.ops", q_dotq_ops_fn);   /* niladic .Q.ops[] + unary .Q.ops x */
-    bind_vary (".Q.c.w",   q_dotq_w_fn);     /* memory stats dict (ref/dotq.md) */
-    bind_vary (".Q.c.gc",  q_dotq_gc_fn);    /* garbage collect (ref/dotq.md) */
+    bind_vary (".Q.c.ops", 1, q_dotq_ops_fn);   /* niladic .Q.ops[] + unary .Q.ops x */
+    bind_vary (".Q.c.w",   1, q_dotq_w_fn);     /* memory stats dict (ref/dotq.md) */
+    bind_vary (".Q.c.gc",  1, q_dotq_gc_fn);    /* garbage collect (ref/dotq.md) */
     bind_binary(".Q.c.en", q_dotq_en_fn);    /* enumerate-varchar-cols shim (ref/dotq.md) */
-    bind_vary (".Q.c.zblocks", q_dotq_zblocks_fn); /* inflated-blocks witness (internal) */
-    bind_vary (".Q.c.hp", q_dotq_hp_fn);     /* HTTP POST [url;mime;body] (ref/dotq.md) */
-    bind_vary (".Q.c.gz", q_dotq_gz_fn);     /* GZip ::/inflate/deflate (ref/dotq.md) */
-    bind_vary (".Q.c.trp", q_dbg_trp_fn);    /* trap-at + backtrace (ref/dotq.md) */
-    bind_vary (".Q.c.trpd", q_dbg_trpd_fn);  /* trap + backtrace, any rank (ref/dotq.md) */
+    bind_vary (".Q.c.zblocks", 1, q_dotq_zblocks_fn); /* inflated-blocks witness (internal) */
+    bind_vary (".Q.c.hp", 3, q_dotq_hp_fn);     /* HTTP POST [url;mime;body] (ref/dotq.md) */
+    bind_vary (".Q.c.gz", 1, q_dotq_gz_fn);     /* GZip ::/inflate/deflate (ref/dotq.md) */
+    bind_vary (".Q.c.trp", 3, q_dbg_trp_fn);    /* trap-at + backtrace (ref/dotq.md) */
+    bind_vary (".Q.c.trpd", 3, q_dbg_trpd_fn);  /* trap + backtrace, any rank (ref/dotq.md) */
     bind_unary(".Q.c.sbt", q_dbg_sbt_fn);    /* string backtrace (ref/dotq.md) */
-    bind_vary (".Q.c.bt",  q_dbg_bt_fn);     /* dump backtrace (ref/dotq.md) */
+    bind_vary (".Q.c.bt",  1, q_dbg_bt_fn);     /* dump backtrace (ref/dotq.md) */
     bind_value(".Q.c.res", q_registry_name_reserved_words());
     /* `.Q.c.rd` — the hardened docroot read h.q's default `.z.ph` serves through.
      * It sits in THIS tier, not under `.h`, because binding an `.h.*` name here

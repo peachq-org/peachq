@@ -8,7 +8,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_utf8.h"   /* q_utf8_enc — a decoded entity's bytes */
 #include "qlang/ops/q_table.h"   /* q_table_cols_from_accs — the block table's assembly */
-#include "qlang/q_env.h"         /* q_env_bind — the .md.i.* bindings */
+#include "qlang/q_env.h"         /* q_env_bind_native — the .md.i.* bindings */
 #include "lang/env.h"            /* ray_fn_unary */
 #include "lang/eval.h"           /* RAY_FN_NONE */
 #include "md4c.h"
@@ -316,7 +316,7 @@ static ray_t* md_html_fn(ray_t* x) {
 
 static void md_bind(const char* nm, ray_unary_fn fn) {
     ray_t* f = ray_fn_unary(nm, RAY_FN_NONE, fn);
-    q_env_bind(ray_sym_intern(nm, strlen(nm)), f);
+    q_env_bind_native(nm, f, 1);
     ray_release(f);
 }
 

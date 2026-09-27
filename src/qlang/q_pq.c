@@ -32,7 +32,7 @@
 #include "qlang/ops/q_strns.h" /* q_strns_register — the .str.i.* strip natives */
 #include "qlang/lib_gen.h"     /* PEACHQ_LIB_FILES — the codegen'd lib/ + qlib/src bundle, one entry per file */
 #include "qlang/helpdb_gen.h"  /* PEACHQ_HELPDB_BOOTSTRAP — the codegen'd lib/help-db.q */
-#include "qlang/q_env.h"       /* q_env_bind / q_env_ident_ok — the native bindings, a namespace name */
+#include "qlang/q_env.h"       /* q_env_bind_native / q_env_ident_ok — the native bindings, a namespace name */
 #include "lang/env.h"          /* ray_fn_unary — the native values */
 #include "lang/eval.h"         /* RAY_FN_NONE — no dispatch attrs on those values */
 #include <stdio.h>
@@ -47,7 +47,7 @@ static ray_t* pq_run(const char* src) {
 
 static void pq_bind(const char* nm, ray_unary_fn fn) {
     ray_t* obj = ray_fn_unary(nm, RAY_FN_NONE, fn);
-    q_env_bind(ray_sym_intern(nm, strlen(nm)), obj);
+    q_env_bind_native(nm, obj, 1);
     ray_release(obj);
 }
 
