@@ -13,7 +13,7 @@
 #include "qlang/net/q_tls.h"  /* q_tls_server_mode_set — the `-E` TLS server mode */
 #include "qlang/io/q_duckdb.h" /* q_duckdb_main_path_set — the `-duckdb` main database file */
 #include "qlang/io/q_io.h"     /* q_io_abs_path — QINIT's startup `\l`; q_io_read_slice — the -conn file */
-#include "qlang/io/q_worker.h" /* q_worker_link — a procq worker's link to the process that launched it */
+#include "qlang/io/q_worker.h" /* q_worker_link — a :pq:qspawn: worker's link to the process that launched it */
 #include "qlang/q_env.h"       /* q_env_set — the -conn texts bound as q values */
 #include "qlang/base/q_err.h"  /* q_err_drop — an unreadable -conn file */
 #include "core/poll.h"
@@ -392,7 +392,7 @@ int main(int argc, char** argv) {
     free(eval_after);
 
     if (link >= 0) {
-        /* A procq worker: its startup ran as any q's (a script error does not stop it, kx's rule), then it serves
+        /* A :pq:qspawn: worker: its startup ran as any q's (a script error does not stop it, kx's rule), then it serves
          * its link — and any listener its script opened — until the link closes, and prints nothing of its own. */
         if (poll && ray_ipc_serve_link(link) >= 0) ray_poll_run(poll);
         script_rc = 0;

@@ -27,7 +27,7 @@
 #include "qlang/io/q_io.h"    /* q_io_mkdir_parents — `\1`/`\2` create the path they name */
 #include "qlang/io/q_handles.h" /* q_handles_end_owned — the exit home ends every owned worker */
 #include "qlang/io/q_mount.h" /* q_mount_dir — the `\l <dir>` forms */
-#include "qlang/io/q_provider.h" /* q_provider_spec_is / _load — the `\l `:pq:…` form */
+#include "qlang/io/q_provider.h" /* q_provider_load — the `\l `:pq:duckdb:al` form */
 #include "qlang/q_pq.h"       /* q_pq_load / _load_file — `\l pq` and `\l pq/<file>.q` */
 #include "qlang/q_env.h"      /* q_env_ctx_set/_ctx + q_env_ns_names — `\d` and the `\v`/`\f`/`\a` rosters */
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk (`\t`), q_dotz_exit_fire (`\\`), q_dotz_expungeable (`\x`) */
@@ -570,7 +570,7 @@ ray_t* q_sys_load(const char* arg, size_t alen) {
     if (alen == 0) return q_err(QE_NYI);        /* `\l` (bare) — reload cwd, deferred */
     const char* co = arg + (alen && arg[0] == '`');
     size_t con = alen - (size_t)(co - arg);
-    if (q_provider_spec_is(co, con)) {
+    if (q_handles_pq(co, con, NULL)) {
         ray_t* r = q_provider_load(co, con, RAY_NULL_OBJ);
         if (r && !RAY_IS_ERR(r)) { ray_release(r); r = NULL; }
         return r;

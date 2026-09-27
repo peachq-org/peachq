@@ -22,8 +22,8 @@ typedef enum {
     QE_RANGE, QE_SCHEMA, QE_CORRUPT, QE_CANCEL, QE_VERSION, QE_DUCKDB,
     QE_REGEX, QE_OPTION, QE_CSV, QE_PRINTF, QE_FORMAT, QE_BADFUNC,
     QE_THREADS,             /* `\s N` past the -s ceiling, or a switch between single- and multi-threaded */
-    QE_NOFORK, QE_FORK,     /* forkq: this process cannot be copied safely / the OS refused the fork */
-    QE_PROC,                /* procq: the worker could not be launched or exited before it answered */
+    QE_NOFORK, QE_FORK,     /* :pq:qfork:: this process cannot be copied safely / the OS refused the fork */
+    QE_PROC,                /* :pq:qspawn:: the worker could not be launched or exited before it answered */
     QE_SIGNAL, QE_RETURN,   /* always payload-carrying; sdata never displayed */
     QE__COUNT
 } q_err_e;

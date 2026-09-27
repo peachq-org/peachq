@@ -81,6 +81,11 @@ ltime	ltime 2000.01.01D12:00:00	convert a UTC timestamp to local time
 hcount	hcount `:trade.csv	report a file's size in bytes
 hdel	hdel `:trade.csv	delete a file, or an empty directory
 hopen	hopen `::5000	open a connection to a process, file or fifo
+hopen	hopen (`:pq:q:srv;`::5000)	an alias for another q process: arg is anything hopen takes
+hopen	hopen (`:pq:qfork:w1;::)	fork this q as the worker w1: arg is :: or a timeout in ms
+hopen	hopen (`:pq:qspawn:w2;enlist"a.q")	launch a fresh peachq as w2: arg is its argv
+hopen	hopen (`:pq:duckdb:db;":memory:")	a DuckDB database: arg is a path or ":memory:"
+hopen	hopen(`:pq:qfork:w;(1#`timeout)!1#5)	a dict arg names options: timeout alike on every kind; other keys 'domain
 hclose	hclose h	close a connection handle
 hsym	hsym `trade.csv	turn a symbol into a file or process handle symbol
 ij	ij[([]a:1 2);([a:1 2]b:`x`y)]	inner join: keep x's rows whose key matches y, adding y's columns
