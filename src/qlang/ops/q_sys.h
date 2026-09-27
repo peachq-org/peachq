@@ -105,6 +105,9 @@ void   q_sys_launching(bool on);
  * per-file runtime teardown is not a process exit). */
 void   q_sys_exit(int code);
 
+/* `\1`/`\2` (fd 1/2) with no runtime needed, so a worker runs it before anything else: 0, or -1 when it will not open */
+int    q_sys_redirect(int fd, const char* path, size_t n);
+
 /* The child of a fork: `\s 0` (the pool's threads did not survive the fork), `\t 0`, `\p 0`, and from now on
  * q_sys_exit leaves by _exit — no `.z.exit`, no atexit, nothing of the parent's torn down. */
 void   q_sys_forked(void);

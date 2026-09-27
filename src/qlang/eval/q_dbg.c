@@ -260,6 +260,7 @@ void q_dbg_print_trace(FILE* out, ray_t* err) {
         frame_line(line, sizeof line, i, 0, i ? g_snap.lam[i - 1] : NULL, stmt);
         fputs(line, out);
     }
+    fflush(out);   /* Windows buffers stderr to a file: a worker killed later would lose its trace */
 }
 
 /* one backtrace-shaped line for frame `idx` (0 = the statement frame) */

@@ -423,14 +423,15 @@ from reading as kx file paths, so anything else under `:pq:` is `'domain`, never
 `hopen (`:pq:<kind>:alias;arg)`, so the raw form is the same call
 (a bare `` hopen `:pq:qfork:w1 `` is arg `::`). An opener is rank 2 and stays rank 2: its arg is the kind's obvious
 form, or a **dict of named options**, the one extension point. A key means the same for every kind that takes it —
-today `timeout`, the ms to obtain a live handle — and a key a kind does not take is `'domain`, never ignored:
+`timeout` is the ms to obtain a live handle, `stdout`/`stderr` a worker's log files — and a key a kind does not take
+is `'domain`, never ignored:
 
 | opener | dict keys |
 |---|---|
 | `.pq.hopen_q` | `conn` (any kx form) and `timeout` — a timeout in both is `'domain` |
-| `.pq.hopen_qfork` | `timeout` |
-| `.pq.hopen_qspawn` | `argv` and `timeout` |
-| `.pq.hopen_duckdb` | `path` beside DuckDB's own ATTACH and SET options; `timeout` is `'domain` |
+| `.pq.hopen_qfork` | `timeout`, `stdout` and `stderr` |
+| `.pq.hopen_qspawn` | `argv`, `timeout`, `stdout` and `stderr` |
+| `.pq.hopen_duckdb` | `path` beside DuckDB's own ATTACH and SET options; `timeout`, `stdout` and `stderr` are `'domain` |
 
 The arg is kept, privately, with the alias: a reconnect or a relaunch replays it through the same door.
 
@@ -481,7 +482,7 @@ OS refusing. Two forks draw the same random numbers.
 with exactly that argv: no shell, no splitting, nothing of peachq's added, so `.z.x` and `.z.f` read as they would for
 `q init.q -s 2`. It is an ordinary q process: its script runs (a script error stops the script, not the process, as in
 kx), its own `.z.p*` handlers apply, and a `\p` its script sets keeps serving. Its stdin is the null device; its stdout
-and stderr are this process's. `h` talks to it exactly as to a forked worker, and it lives exactly as long as `h`:
+and stderr are this process's unless the `stdout`/`stderr` options below name files. `h` talks to it exactly as to a forked worker, and it lives exactly as long as `h`:
 `hclose h` kills it, and it dies with this process. If it dies, the next use of `h` launches it again from the same
 argv — its recipe is its argv, so anything pushed into it since is gone. The argv is one string per argument
 (`` enlist "init.q" `` is one argument); `""` and `::` mean no arguments, and anything else is `'type`. The dict form
@@ -490,6 +491,19 @@ worker that exits or never answers within it is `'proc`. A successful open means
 not that its script succeeded: a script error stops the script and leaves the worker serving, so check what the script
 should have defined before relying on it. On Windows `hclose` ends the worker outright: there is no TERM to ask it
 first.
+
+**A worker's logs.** The `stdout` and `stderr` keys, on `.pq.hopen_qfork` and `.pq.hopen_qspawn` only, send the worker's
+output to files: each is a file symbol, and it behaves exactly as `\1`/`\2` run by the worker itself — appended, its
+parent directories created — except that the worker does it first, before its startup script or any option can print.
+So a launched worker's startup output, errors included, lands in the file, which a `\1` sent after `hopen` is too late
+for. Both keys may name the same file. A relative path is made absolute when the handle opens, so a worker restored
+after this process `\cd`s writes to the same file; a restore appends to it. Any other value is `'type`, and a file the
+worker cannot open fails the open (`'fork`, `'proc`).
+
+```q
+.pq.hopen_qspawn[`w2;`argv`stdout`stderr!(("init.q";"-s";"2");`:logs/w2.log;`:logs/w2.log)]
+.pq.hopen_qfork[`w1;`stdout`stderr!(`:w1.out;`:w1.err)]
+```
 
 **The DuckDB link and `s)`.** The process has ONE DuckDB database — the main instance, whose own handle is
 `` `:pq:duckdb:main `` (listed by `.pq.conns[]`, answered by `.duckdb.main[]`; `hopen`/`hclose` refuse the alias, and

@@ -22,6 +22,8 @@ ray_t* q_io_path_operand(ray_t* x);
 /* the absolute '/'-separated spelling of an EXISTING path into abs[cap]: canonical on POSIX (realpath — symlinks
  * resolved), lexical on Windows (_fullpath resolves no junction); 0 when it will not resolve or fit */
 int q_io_abs_path(const char* path, char* abs, size_t cap);
+/* as q_io_abs_path, for n bytes of a path that need not exist (lexical: joined to the cwd); 0 when it will not fit */
+int q_io_abs_spelling(const char* path, size_t n, char* abs, size_t cap);
 
 /* How big the file IS, or -1 when the path will not stat: a kxzip container
  * answers with its ORIGINAL file's length (ref/hcount.md), one that will not

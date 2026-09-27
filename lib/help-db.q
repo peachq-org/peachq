@@ -80,7 +80,7 @@
 .help.i.r[`ltime;"ltime 2000.01.01D12:00:00           /                         convert a UTC timestamp to local time"]
 .help.i.r[`hcount;"hcount `:trade.csv                  /                         report a file's size in bytes"]
 .help.i.r[`hdel;"hdel `:trade.csv                    /                         delete a file, or an empty directory"]
-.help.i.r[`hopen;"hopen `::5000                       /                         open a connection to a process, file or fifo\nhopen (`:pq:q:srv;`::5000)          /                         an alias for another q process: arg is anything hopen takes\nhopen (`:pq:qfork:w1;::)            /                         fork this q as the worker w1: arg is :: or a timeout in ms\nhopen (`:pq:qspawn:w2;enlist\"a.q\")  /                         launch a fresh peachq as w2: arg is its argv\nhopen (`:pq:duckdb:db;\":memory:\")   /                         a DuckDB database: arg is a path or \":memory:\"\nhopen(`:pq:qfork:w;(1#`timeout)!1#5) /                         a dict arg names options: timeout alike on every kind; other keys 'domain"]
+.help.i.r[`hopen;"hopen `::5000                       /                         open a connection to a process, file or fifo\nhopen (`:pq:q:srv;`::5000)          /                         an alias for another q process: arg is anything hopen takes\nhopen (`:pq:qfork:w1;::)            /                         fork this q as the worker w1: arg is :: or a timeout in ms\nhopen (`:pq:qspawn:w2;enlist\"a.q\")  /                         launch a fresh peachq as w2: arg is its argv\nhopen (`:pq:duckdb:db;\":memory:\")   /                         a DuckDB database: arg is a path or \":memory:\"\nhopen(`:pq:qfork:w;(1#`timeout)!1#5) /                         a dict arg names options: timeout alike on every kind; other keys 'domain\nhopen(`:pq:qfork:w;(1#`stdout)!1#`:o) /                         a worker's stdout (or stderr) to a file: \\1 run by the worker before anything else"]
 .help.i.r[`hclose;"hclose h                            /                         close a connection handle"]
 .help.i.r[`hsym;"hsym `trade.csv                     / `:trade.csv             turn a symbol into a file or process handle symbol"]
 .help.i.r[`ij;"ij[([]a:1 2);([a:1 2]b:`x`y)]       / +`a`b!(1 2;`x`y)        inner join: keep x's rows whose key matches y, adding y's columns"]
@@ -532,7 +532,7 @@
    "qsql on a remote table: the where, by and aggregate are pushed to the peer as one functional select";
    "fork this q as the worker w1 - :: or a timeout in ms; it dies with its handle";
    "launch a fresh peachq with exactly that argv as the worker w2";
-   "every opener is hopen (`:pq:<kind>:alias;arg); a dict arg names options - a key a kind does not take is 'domain";
+   "every opener is hopen (`:pq:<kind>:alias;arg); a dict arg names options - a key a kind does not take is 'domain; stdout/stderr file symbols log a worker";
    "a DuckDB database under the alias mkt: the arg a path or \":memory:\"";
    "a file whose format is known decodes to a table: .csv .tsv .json - a URL is a transport, not a format";
    "so an http(s) csv reads the same way: the exchange MIC codes, straight off the web";
