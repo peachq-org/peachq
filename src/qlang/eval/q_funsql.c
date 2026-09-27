@@ -109,7 +109,7 @@ static ray_t* til_count(ray_t* t) {
 #define QUES_FROM_HOPS 8
 static ray_t* ques_from_n(ray_t* t, int64_t* nkey, int hops) {
     if (!t) return q_err(QE_TYPE);
-    ray_t* pm = q_provider_from_table(t);   /* carrier / `:pq: hsym: provider truth */
+    ray_t* pm = q_provider_from_table(t);   /* carrier / table coordinate: provider truth */
     if (pm) return pm;
     if (q_io_is_fsym(t)) {
         ray_t* v = q_io_resource_table(t);

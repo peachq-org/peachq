@@ -12,7 +12,7 @@
 #include "qlang/ops/q_table.h"
 #include "qlang/ops/q_bang.h"  /* q_bang_enkey — the keying primitive */
 #include "qlang/ops/q_index.h" /* q_index_keyed_put — THE keyed write, insert's no-hit mode */
-#include "qlang/io/q_provider.h" /* upsert: `:pq: targets route to .X.upsert */
+#include "qlang/io/q_provider.h" /* upsert: a table coordinate routes to .X.upsert */
 #include "qlang/io/q_io.h"       /* q_io_is_fsym — upsert's file-target classifier */
 #include "qlang/net/q_wirefile.h"
 #include "qlang/io/q_splay.h"    /* a mapped global refuses by-name rows */

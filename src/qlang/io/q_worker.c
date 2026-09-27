@@ -19,9 +19,7 @@
 #include "core/pool.h"
 #include "core/runtime.h"
 #include "mem/heap.h"
-#include "lang/env.h"
 #include "lang/eval.h"
-#include "table/sym.h"
 #include <rayforce.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -194,7 +192,7 @@ static ray_t* argv_make(ray_t* x, const char* exe, char*** out) {
 #endif
 
 #ifdef Q_WORKER_FORK
-static ray_t* forkq_fork_fn(ray_t* tmo) {
+ray_t* q_worker_fork(ray_t* tmo) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     int64_t ms = timeout_ms(tmo, 5000);
     if (ms < 0) return q_err(QE_TYPE);
@@ -289,7 +287,7 @@ static int launch(int64_t* pid, void** proc, const char* exe, ray_sock_t link, c
 
 static void launched_release(void* proc) { (void)proc; }
 #elif defined(RAY_OS_WINDOWS)
-static ray_t* forkq_fork_fn(ray_t* tmo) { (void)tmo; return q_err(QE_NOFORK); }
+ray_t* q_worker_fork(ray_t* tmo) { (void)tmo; return q_err(QE_NOFORK); }
 
 int q_worker_link(void) {
     const char* v = getenv(Q_WORKER_FD_ENV);
@@ -464,7 +462,7 @@ static void launched_release(void* proc) {
 #endif
 
 #ifdef Q_WORKER_SPAWN
-static ray_t* procq_spawn_fn(ray_t* args, ray_t* tmo) {
+ray_t* q_worker_spawn(ray_t* args, ray_t* tmo) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     int64_t ms = timeout_ms(tmo, 10000);
     if (ms < 0) return q_err(QE_TYPE);
@@ -486,21 +484,7 @@ static ray_t* procq_spawn_fn(ray_t* args, ray_t* tmo) {
     return r;
 }
 #else
-static ray_t* forkq_fork_fn(ray_t* tmo) { (void)tmo; return q_err(QE_NOFORK); }
+ray_t* q_worker_fork(ray_t* tmo) { (void)tmo; return q_err(QE_NOFORK); }
 int q_worker_link(void) { return -1; }
-static ray_t* procq_spawn_fn(ray_t* args, ray_t* tmo) { (void)args; (void)tmo; return q_err(QE_NYI); }
+ray_t* q_worker_spawn(ray_t* args, ray_t* tmo) { (void)args; (void)tmo; return q_err(QE_NYI); }
 #endif
-
-void q_worker_forkq_register(void) {
-    static const char nm[] = ".forkq.i.fork";
-    ray_t* obj = ray_fn_unary(nm, RAY_FN_NONE, forkq_fork_fn);
-    q_env_bind(ray_sym_intern(nm, strlen(nm)), obj);
-    ray_release(obj);
-}
-
-void q_worker_procq_register(void) {
-    static const char nm[] = ".procq.i.spawn";
-    ray_t* obj = ray_fn_binary(nm, RAY_FN_NONE, procq_spawn_fn);
-    q_env_bind(ray_sym_intern(nm, strlen(nm)), obj);
-    ray_release(obj);
-}

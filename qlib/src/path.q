@@ -5,7 +5,7 @@
 / nothing from the peachq C surface.  Names, and the stem/suffix rule, are pathlib's.
 / Three families live in `: symbols and only the FIRST is path-shaped: paths, IPC handles (`:host:port,
 / `:tcps://...) and provider handles (`:pq:...).  The last two are 'domain, because lexical rules corrupt them
-/ silently - .path.parent would strip the trailing slash that makes `:pq:ds:al:cfg:t/ a TABLE handle rather than
+/ silently - .path.parent would strip the trailing slash that makes `:pq:duckdb:al:t/ a TABLE handle rather than
 / a connection.  host:port is deliberately NOT detected and must never be: `:localhost:5000 is indistinguishable
 / from a folder named "localhost:5000", and a Windows drive puts a colon at position 1, so any host:port
 / heuristic would break every `:c:/temp/x.csv.  ANY-ORDER LAW: definitions only at top level.

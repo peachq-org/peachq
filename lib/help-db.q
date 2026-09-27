@@ -80,7 +80,7 @@
 .help.i.r[`ltime;"ltime 2000.01.01D12:00:00           /                         convert a UTC timestamp to local time"]
 .help.i.r[`hcount;"hcount `:trade.csv                  /                         report a file's size in bytes"]
 .help.i.r[`hdel;"hdel `:trade.csv                    /                         delete a file, or an empty directory"]
-.help.i.r[`hopen;"hopen `::5000                       /                         open a connection to a process, file or fifo"]
+.help.i.r[`hopen;"hopen `::5000                       /                         open a connection to a process, file or fifo\nhopen (`:pq:q:srv;`::5000)          /                         an alias for another q process: arg is anything hopen takes\nhopen (`:pq:qfork:w1;::)            /                         fork this q as the worker w1: arg is :: or a timeout in ms\nhopen (`:pq:qspawn:w2;enlist\"a.q\")  /                         launch a fresh peachq as w2: arg is its argv\nhopen (`:pq:duckdb:db;\":memory:\")   /                         a DuckDB database: arg is a path or \":memory:\"\nhopen(`:pq:qfork:w;(1#`timeout)!1#5) /                         a dict arg names options: timeout alike on every kind; other keys 'domain"]
 .help.i.r[`hclose;"hclose h                            /                         close a connection handle"]
 .help.i.r[`hsym;"hsym `trade.csv                     / `:trade.csv             turn a symbol into a file or process handle symbol"]
 .help.i.r[`ij;"ij[([]a:1 2);([a:1 2]b:`x`y)]       / +`a`b!(1 2;`x`y)        inner join: keep x's rows whose key matches y, adding y's columns"]
@@ -230,7 +230,7 @@
 .help.i.r[`.Q.bt;".Q.bt[]                             /                         dump the backtrace of the current execution to stdout"]
 .help.i.r[`.Q.sbt;".Q.sbt .Q.bt[]                      /                         render a backtrace object as display text"]
 .help.i.r[`.Q.trp;".Q.trp[{x+1};`a;{y}]                /                         trap a unary and hand the handler a backtrace"]
-.help.i.r[`.Q.trpd;".Q.trpd[+;(1;2);{y}]                /                         trap a function of any rank with a backtrace"]
+.help.i.r[`.Q.trpd;".Q.trpd[+;(1;2);{y}]                / 3                       trap a function of any rank with a backtrace"]
 .help.i.r[`.Q.btoa;".Q.btoa \"hello\"                     /                         encode text as base-64"]
 .help.i.r[`.Q.atob;".Q.atob \"aGVsbG8=\"                  / 0x68656c6c6f            decode base-64 text back to bytes"]
 .help.i.r[`.Q.sha1;".Q.sha1 \"hello\"                     /                         hash text with SHA-1"]
@@ -438,7 +438,7 @@
 .help.i.r[`$">=";"3>=2                                / 1b                      test whether x is at least y"]
 .help.i.r[`$"&";"2&3                                 / 2                       take the lesser of two values - logical AND on booleans"]
 .help.i.r[`$"|";"2|3                                 / 3                       take the greater of two values - logical OR on booleans"]
-.help.i.r[`$"^";"0^1 0N 3                            / 1 0 3                   fill the nulls in y with x\n([]a:1 0N)^([]a:0N 2)               /                         coalesce two tables, taking non-null values from y"]
+.help.i.r[`$"^";"0^1 0N 3                            / 1 0 3                   fill the nulls in y with x\n([]a:1 0N)^([]a:0N 2)               / +(,`a)!,1 2             coalesce two tables, taking non-null values from y"]
 .help.i.r[`$",";"1 2,3 4                             / 1 2 3 4                 join values into one list\n([]a:1 2),([]a:3 4)                 / +(,`a)!,1 2 3 4         append the rows of two matching tables"]
 .help.i.r[`$"~";"1 2~1 2                             / 1b                      test whether two values match exactly, type included"]
 .help.i.r[`$"#";"3#til 10                            / 0 1 2                   take the first x items, recycling the list if needed\n-2#til 10                           / 8 9                     take the last items, when x is negative\n2 3#til 6                           / (0 1 2;3 4 5)           reshape a list into x rows of y\n`a`c#`a`b`c!1 2 3                   / `a`c!1 3                keep only the named entries of a dictionary"]
@@ -493,7 +493,7 @@
    "callFunction resolves, calls and forgets: types inferred from the values, the return letter given";
    "no arguments is the sentinel alone; uppercase letters are pointers, \"k\" a callback: \\?.ffi lists the surface")]];
 .help.i.r[`duckdb;"\n" sv .help.i.exline'[
-  ("\\?duckdb";"\\l pq";"h:hopen `:pq:duckdb:mkt:demo.duckdb";"n:1000";
+  ("\\?duckdb";"\\l pq";"h:.pq.hopen_duckdb[`mkt;\"demo.duckdb\"]";"n:1000";
    "`:pq:duckdb:mkt:trade/ set ([] sym:n?`AAPL`MSFT; px:n?100f; sz:n?1000)";
    "h \"SELECT sym, count(*) n FROM trade GROUP BY sym\"";"select vwap:sz wavg px by sym from `:pq:duckdb:mkt:trade/";
    "t:get `:pq:duckdb:mkt:trade/";"-3!t";"count t";"meta t";
@@ -503,8 +503,8 @@
   ("";"";"";"";"`trade";"";"";"";"\"+`sym`px`sz!`:pq:duckdb:mkt:trade/\"";"1000";"";"";"";"`:pq:duckdb:main";
    "";"";"5";"`:pq:duckdb:mkt:trade/";"";"");
   ("DuckDB as a q data source: a database is a handle, its tables are q tables, qsql pushes down · page";
-   "the .duckdb namespace and the :pq:duckdb: provider arrive with the standard library";
-   "open (or create) a database file under the alias mkt: hopen answers `:pq:duckdb:mkt, the alias as a handle";
+   "the .duckdb namespace and the :pq:duckdb: kind arrive with the standard library";
+   "open (or create) a database file under the alias mkt: the opener answers `:pq:duckdb:mkt, the alias as a handle";
    "";
    "set writes a q table as a DuckDB table: symbols, floats and longs map to their SQL types";
    "the handle takes SQL text, and the answer comes back as a q table";
@@ -520,22 +520,20 @@
    "s) after a CREATE or ALTER binds the NEW names of main's catalog (a CTAS prints its Count); a DROP unbinds nothing";
    "tick is a q name: .duckdb.load[h;tables] is the verb form of \\l, .duckdb.hdel[h;t] of hdel";
    "hdel on a table coordinate drops the table (or view) itself; a q name bound to it stays and errors on use";
-   "every open connection: handle is the alias sym (an int for a socket), with provider and alias";"hclose takes the sym")]];
+   "every open connection: handle is the int, spec the alias sym, with provider and alias";"hclose takes the sym")]];
 .help.i.r[`handles;"\n" sv .help.i.exline'[
-  ("\\?handles";"`:pq:duckdb:mkt:/data/market.duckdb";"h:hopen `:pq:qpc:bob:localhost:6000";"h \"tables[]\"";
-   "`:pq:qpc:bob \"1+1\"";"dow:get `:pq:qpc:bob:dowt/";"select from dow where Date=1915.04.01";
-   "select from `:trades.csv";"select from `:https://www.timestored.com/data/sample/iso10383_mic.csv";
-   "select from `:https://www.timestored.com/data/sample/types.json";
-   "t:get `:pq:duckdb:mkt:trade/";"s)SELECT count(*) n FROM t";"\\l `:pq:duckdb:mkt";"hdel `:pq:duckdb:mkt:trade/";
-   ".pq.conns[]";"hclose h");
-  ("";"";"";"";"2";"";"";"";"";"";"";"";"";"`:pq:duckdb:mkt:trade/";"";"");
-  ("resource handles: a :pq: symbol names a resource by ALIAS, and a table resource stands in as a table · page";
-   "a resource specification: :pq: then the provider, an alias you choose, then what the provider needs";
-   "hopen answers the alias symbol `:pq:qpc:bob - it names that connection for as long as it is open";
-   "the handle applies as in kx: a string is a sync call over the wire; a list is a (func;args) message, as on a kdb handle";
+  ("\\?handles";"h:.pq.hopen_q[`bob;`:localhost:6000]";"h \"tables[]\"";"`:pq:q:bob \"1+1\"";"dow:get `:pq:q:bob:dowt/";"select from dow where Date=1915.04.01";"w:.pq.hopen_qfork[`w1;::]";"p:.pq.hopen_qspawn[`w2;(\"init.q\";\"-s\";\"2\")]";"hopen (`:pq:qspawn:w3;`argv`timeout!(();20000))";"d:.pq.hopen_duckdb[`mkt;\"/data/market.duckdb\"]";"select from `:trades.csv";"select from `:https://www.timestored.com/data/sample/iso10383_mic.csv";"select from `:https://www.timestored.com/data/sample/types.json";"t:get `:pq:duckdb:mkt:trade/";"s)SELECT count(*) n FROM t";"\\l `:pq:duckdb:mkt";"hdel `:pq:duckdb:mkt:trade/";".pq.conns[]";"hclose h");
+  ("";"";"";"2";"";"";"";"";"";"";"";"";"";"";"";"";"`:pq:duckdb:mkt:trade/";"";"");
+  ("resource handles: :pq: then the KIND then an alias you choose names the handle · page";
+   "another q process under the alias bob: the arg is anything hopen takes; h is `:pq:q:bob";
+   "the handle applies as in kx: a string is a sync call; a list is a (func;args) message, as on a kdb handle";
    "the alias is a handle too: a script names the peer, and no int can go stale in a variable";
-   "a trailing / marks a table resource: this one is a table on the peer, read through the alias";
+   "a trailing :<table>/ is a table coordinate: this one is a table on the peer, read through the alias";
    "qsql on a remote table: the where, by and aggregate are pushed to the peer as one functional select";
+   "fork this q as the worker w1 - :: or a timeout in ms; it dies with its handle";
+   "launch a fresh peachq with exactly that argv as the worker w2";
+   "every opener is hopen (`:pq:<kind>:alias;arg); a dict arg names options - a key a kind does not take is 'domain";
+   "a DuckDB database under the alias mkt: the arg a path or \":memory:\"";
    "a file whose format is known decodes to a table: .csv .tsv .json - a URL is a transport, not a format";
    "so an http(s) csv reads the same way: the exchange MIC codes, straight off the web";
    "and json too - nested arrays stay nested lists; \\?loaders has the readers behind this";
@@ -543,7 +541,7 @@
    "...so s) runs SQL over the q name, live: \\?duckdb has the instance";
    "a provider's tables LOAD like a database directory: \\l on the alias binds every table as a pointer at the root";
    "hdel on a table coordinate drops the object on the provider (a peer's table too); the q name, if any, stays bound";
-   "every open connection: handle, kind, provider, alias, when it opened";
+   "every open connection: handle is the int, spec the alias, with kind, provider, alias, when it opened";
    "close by the handle; the alias goes with the connection")]];
 .help.i.r[`loaders;"\n" sv .help.i.exline'[
   ("\\?loaders";"\\l pq";"`:demo.csv 0: (\"sym,px,sz\";\"AAPL,101.5,100\";\"MSFT,99.25,250\")";"select from `:demo.csv";
