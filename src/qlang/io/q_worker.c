@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <limits.h>
 #if !defined(__EMSCRIPTEN__)
 #define Q_WORKER_SPAWN 1
 #include "core/sock.h"
@@ -46,6 +47,37 @@
 #ifdef RAY_OS_WINDOWS
 #include <winsock2.h>
 #include <windows.h>
+#endif
+
+#ifdef Q_WORKER_SPAWN
+static const char* const log_env[2] = { "PEACHQ_WORKER_STDOUT", "PEACHQ_WORKER_STDERR" };
+
+static void env_unset(const char* name) {
+#ifdef RAY_OS_WINDOWS
+    _putenv_s(name, "");
+#else
+    unsetenv(name);
+#endif
+}
+
+/* `\1`/`\2` for each path given: 0, or -1 when one will not open */
+static int logs_apply(const char* const log[2]) {
+    for (int i = 0; i < 2; i++)
+        if (log[i] && q_sys_redirect(i + 1, log[i], strlen(log[i])) != 0) return -1;
+    return 0;
+}
+
+/* a launched worker's log paths, taken out of its environment and applied */
+static int logs_from_env(void) {
+    char buf[2][PATH_MAX];
+    const char* log[2] = { NULL, NULL };
+    for (int i = 0; i < 2; i++) {
+        const char* v = getenv(log_env[i]);
+        if (v && *v && strlen(v) < sizeof buf[i]) log[i] = strcpy(buf[i], v);
+        env_unset(log_env[i]);
+    }
+    return logs_apply(log);
+}
 #endif
 
 #ifdef Q_WORKER_FORK
@@ -111,8 +143,8 @@ static int die_with_parent(pid_t parent) {
 }
 
 /* a child that cannot be isolated never answers the handshake, so the parent's open fails with 'fork */
-static _Noreturn void child(int link, pid_t parent) {
-    if (setpgid(0, 0) != 0 || die_with_parent(parent) != 0) _exit(1);
+static _Noreturn void child(int link, pid_t parent, const char* const log[2]) {
+    if (logs_apply(log) != 0 || setpgid(0, 0) != 0 || die_with_parent(parent) != 0) _exit(1);
     signal(SIGTERM, SIG_DFL);
     signal(SIGQUIT, SIG_DFL);
     signal(SIGPIPE, SIG_IGN);
@@ -192,7 +224,7 @@ static ray_t* argv_make(ray_t* x, const char* exe, char*** out) {
 #endif
 
 #ifdef Q_WORKER_FORK
-ray_t* q_worker_fork(ray_t* tmo) {
+ray_t* q_worker_fork(ray_t* tmo, const char* const log[2]) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     int64_t ms = timeout_ms(tmo, 5000);
     if (ms < 0) return q_err(QE_TYPE);
@@ -207,7 +239,7 @@ ray_t* q_worker_fork(ray_t* tmo) {
     pid_t parent = getpid();
     pid_t pid = fork();
     if (pid < 0) { close(sv[0]); close(sv[1]); return q_err(QE_FORK); }
-    if (pid == 0) { close(sv[0]); child(sv[1], parent); }
+    if (pid == 0) { close(sv[0]); child(sv[1], parent, log); }
     close(sv[1]);
     return link_adopt(sv[0], pid, ms, QE_FORK);
 }
@@ -218,36 +250,52 @@ int q_worker_link(void) {
     char* end;
     long fd = strtol(v, &end, 10);
     pid_t parent = (pid_t)strtol(*end == ':' ? end + 1 : "0", NULL, 10);
-    unsetenv(Q_WORKER_FD_ENV);
+    env_unset(Q_WORKER_FD_ENV);
     struct stat st;
     if (*end != ':' || fd < 3 || fd > INT32_MAX || fstat((int)fd, &st) != 0 || !S_ISSOCK(st.st_mode)) return -1;
     if (die_with_parent(parent) != 0) _exit(1);
     fcntl((int)fd, F_SETFD, FD_CLOEXEC);
     close_inherited((int)fd);
     signal(SIGPIPE, SIG_IGN);
+    if (logs_from_env() != 0) _exit(1);
     return (int)fd;
 }
 
-/* this process's environment with the link named in it: the child reads it and unsets it before any q runs */
-static char** env_make(char* link) {
+static int env_named(const char* var, const char* name) {
+    size_t m = strlen(name);
+    return strncmp(var, name, m) == 0 && var[m] == '=';
+}
+
+/* this process's environment with the link and log paths named in it (add[], NULL = none): the child reads them and
+ * unsets them before any q runs */
+static char** env_make(char* const add[3]) {
     extern char** environ;
     size_t n = 0;
     while (environ[n]) n++;
-    char** e = (char**)calloc(n + 2, sizeof *e);
+    char** e = (char**)calloc(n + 4, sizeof *e);
     if (!e) return NULL;
-    size_t k = 0, m = strlen(Q_WORKER_FD_ENV);
+    size_t k = 0;
     for (size_t i = 0; i < n; i++)
-        if (strncmp(environ[i], Q_WORKER_FD_ENV, m) != 0 || environ[i][m] != '=') e[k++] = environ[i];
-    e[k] = link;
+        if (!env_named(environ[i], Q_WORKER_FD_ENV) && !env_named(environ[i], log_env[0]) &&
+            !env_named(environ[i], log_env[1]))
+            e[k++] = environ[i];
+    for (int j = 0; j < 3; j++)
+        if (add[j]) e[k++] = add[j];
     return e;
 }
 
 /* stdin /dev/null, the link at Q_WORKER_FD, its own process group, every signal at its default and none blocked */
-static int spawn(pid_t* pid, const char* exe, int link, char** argv) {
+static int spawn(pid_t* pid, const char* exe, int link, char** argv, const char* const log[2]) {
     char var[64];
     snprintf(var, sizeof var, "%s=%d:%ld", Q_WORKER_FD_ENV, Q_WORKER_FD, (long)getpid());
-    char** envp = env_make(var);
-    if (!envp) return ENOMEM;
+    char* add[3] = { var, NULL, NULL };
+    for (int i = 0; i < 2; i++) {
+        size_t n = log[i] ? strlen(log_env[i]) + strlen(log[i]) + 2 : 0;
+        if (n && (add[i + 1] = (char*)malloc(n))) snprintf(add[i + 1], n, "%s=%s", log_env[i], log[i]);
+        else if (n) { free(add[1]); return ENOMEM; }
+    }
+    char** envp = env_make(add);
+    if (!envp) { free(add[1]); free(add[2]); return ENOMEM; }
     sigset_t none, dfl;
     sigemptyset(&none);
     sigfillset(&dfl);
@@ -270,16 +318,19 @@ static int spawn(pid_t* pid, const char* exe, int link, char** argv) {
         posix_spawn_file_actions_destroy(&fa);
     }
     free(envp);
+    free(add[1]);
+    free(add[2]);
     return rc;
 }
 
 /* 0 once argv runs with `link` as its worker link, else an errno; *proc is what launched_release lets go of */
-static int launch(int64_t* pid, void** proc, const char* exe, ray_sock_t link, char** argv) {
+static int launch(int64_t* pid, void** proc, const char* exe, ray_sock_t link, char** argv,
+                  const char* const log[2]) {
     *proc = NULL;
     int hi = link == Q_WORKER_FD ? fcntl(link, F_DUPFD_CLOEXEC, Q_WORKER_FD + 1) : link;
     if (hi < 0) return EBADF;
     pid_t p = -1;
-    int rc = spawn(&p, exe, hi, argv);
+    int rc = spawn(&p, exe, hi, argv, log);
     if (hi != link) close(hi);
     *pid = p;
     return rc;
@@ -287,15 +338,16 @@ static int launch(int64_t* pid, void** proc, const char* exe, ray_sock_t link, c
 
 static void launched_release(void* proc) { (void)proc; }
 #elif defined(RAY_OS_WINDOWS)
-ray_t* q_worker_fork(ray_t* tmo) { (void)tmo; return q_err(QE_NOFORK); }
+ray_t* q_worker_fork(ray_t* tmo, const char* const log[2]) { (void)tmo; (void)log; return q_err(QE_NOFORK); }
 
+/* the variable names an inherited pipe carrying the WSAPROTOCOL_INFOW the parent duplicated the link into */
 int q_worker_link(void) {
     const char* v = getenv(Q_WORKER_FD_ENV);
     if (!v) return -1;
     char* end;
     unsigned long long h = strtoull(v, &end, 10);
     int named = *end == 0 && h != 0;
-    _putenv_s(Q_WORKER_FD_ENV, "");
+    env_unset(Q_WORKER_FD_ENV);
     if (!named) return -1;
     WSAPROTOCOL_INFOW info;
     char* at = (char*)&info;
@@ -306,7 +358,7 @@ int q_worker_link(void) {
     if (left || WSAStartup(MAKEWORD(2, 2), &wsa) != 0) _exit(1);
     SOCKET s = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &info, 0,
                           WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
-    if (s == INVALID_SOCKET) _exit(1);
+    if (s == INVALID_SOCKET || logs_from_env() != 0) _exit(1);
     return (int)s;
 }
 
@@ -382,7 +434,8 @@ static HANDLE inheritable(HANDLE h) {
 /* Created suspended, in the job and its own process group, inheriting only NUL as stdin, this process's stdout and
  * stderr, and the read end of a pipe named in Q_WORKER_FD_ENV; the link is duplicated for its pid and the
  * WSAPROTOCOL_INFOW written down that pipe before it runs. */
-static int launch(int64_t* pid, void** proc, const char* exe, ray_sock_t link, char** argv) {
+static int launch(int64_t* pid, void** proc, const char* exe, ray_sock_t link, char** argv,
+                  const char* const log[2]) {
     (void)exe;
     *proc = NULL;
     static wchar_t self[32768];
@@ -419,12 +472,17 @@ static int launch(int64_t* pid, void** proc, const char* exe, ray_sock_t link, c
         si.lpAttributeList = al;
         char var[32];
         snprintf(var, sizeof var, "%llu", (unsigned long long)(uintptr_t)rd);
+        SetEnvironmentVariableA(log_env[0], NULL);
+        SetEnvironmentVariableA(log_env[1], NULL);
         if (UpdateProcThreadAttribute(al, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, list, nl * sizeof *list, NULL, NULL) &&
-            SetEnvironmentVariableA(Q_WORKER_FD_ENV, var)) {
+            SetEnvironmentVariableA(Q_WORKER_FD_ENV, var) && (!log[0] || SetEnvironmentVariableA(log_env[0], log[0])) &&
+            (!log[1] || SetEnvironmentVariableA(log_env[1], log[1]))) {
             BOOL made = CreateProcessW(self, cmd.p, NULL, NULL, TRUE,
                                        CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP | EXTENDED_STARTUPINFO_PRESENT,
                                        NULL, NULL, &si.StartupInfo, &pi);
             SetEnvironmentVariableA(Q_WORKER_FD_ENV, NULL);
+            SetEnvironmentVariableA(log_env[0], NULL);
+            SetEnvironmentVariableA(log_env[1], NULL);
             WSAPROTOCOL_INFOW info;
             DWORD put = 0;
             if (made && AssignProcessToJobObject(job, pi.hProcess) &&
@@ -462,7 +520,7 @@ static void launched_release(void* proc) {
 #endif
 
 #ifdef Q_WORKER_SPAWN
-ray_t* q_worker_spawn(ray_t* args, ray_t* tmo) {
+ray_t* q_worker_spawn(ray_t* args, ray_t* tmo, const char* const log[2]) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     int64_t ms = timeout_ms(tmo, 10000);
     if (ms < 0) return q_err(QE_TYPE);
@@ -475,7 +533,7 @@ ray_t* q_worker_spawn(ray_t* args, ray_t* tmo) {
     if (ray_sock_pair(sv) != 0) { argv_free(argv); return q_err(QE_PROC); }
     int64_t pid = -1;
     void* proc = NULL;
-    int rc = launch(&pid, &proc, exe, sv[1], argv);
+    int rc = launch(&pid, &proc, exe, sv[1], argv, log);
     argv_free(argv);
     ray_sock_close(sv[1]);
     if (rc != 0) { ray_sock_close(sv[0]); return q_err(rc == ENOMEM ? QE_OOM : QE_PROC); }
@@ -484,7 +542,10 @@ ray_t* q_worker_spawn(ray_t* args, ray_t* tmo) {
     return r;
 }
 #else
-ray_t* q_worker_fork(ray_t* tmo) { (void)tmo; return q_err(QE_NOFORK); }
+ray_t* q_worker_fork(ray_t* tmo, const char* const log[2]) { (void)tmo; (void)log; return q_err(QE_NOFORK); }
 int q_worker_link(void) { return -1; }
-ray_t* q_worker_spawn(ray_t* args, ray_t* tmo) { (void)args; (void)tmo; return q_err(QE_NYI); }
+ray_t* q_worker_spawn(ray_t* args, ray_t* tmo, const char* const log[2]) {
+    (void)args; (void)tmo; (void)log;
+    return q_err(QE_NYI);
+}
 #endif

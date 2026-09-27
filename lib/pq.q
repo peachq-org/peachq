@@ -26,11 +26,13 @@
 .pq.hopen_q:{[alias;arg] hopen (`$":pq:q:",string alias;arg)};
 
 / Fork this process as the worker `:pq:qfork:alias, the same call as hopen (`:pq:qfork:alias;arg).
-/ @param arg (any) :: for the defaults, a timeout in ms, or a dict of `timeout
+/ @param arg (any) :: for the defaults, a timeout in ms, or a dict of `timeout`stdout`stderr: `stdout`stderr!(`:w1.out;`:w1.err)
+/ sends the worker's output to those files, as \1/\2 run by the worker before anything else
 .pq.hopen_qfork:{[alias;arg] hopen (`$":pq:qfork:",string alias;arg)};
 
 / Launch a fresh peachq as the worker `:pq:qspawn:alias, the same call as hopen (`:pq:qspawn:alias;arg).
-/ @param arg (any) its argv, one string per argument ("" or :: for none), or a dict of `argv and `timeout
+/ @param arg (any) its argv, one string per argument ("" or :: for none), or a dict of `argv`timeout`stdout`stderr:
+/ `argv`stdout`stderr!(("init.q";"-s";"2");`:logs/w2.log;`:logs/w2.log) logs its startup script's output too
 .pq.hopen_qspawn:{[alias;arg] hopen (`$":pq:qspawn:",string alias;arg)};
 
 / Attach a DuckDB database as `:pq:duckdb:alias, the same call as hopen (`:pq:duckdb:alias;arg).
