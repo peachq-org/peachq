@@ -408,7 +408,7 @@ static ray_t* strfmt_format_fn(ray_t* x) { return sf_run(x, 1); }
 
 static void strfmt_bind_fn(const char* name, ray_unary_fn fn) {
     ray_t* obj = ray_fn_unary(name, RAY_FN_NONE, fn);
-    q_env_bind(ray_sym_intern(name, strlen(name)), obj);
+    q_env_bind_native(name, obj, 1);
     ray_release(obj);
 }
 
