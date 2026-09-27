@@ -281,6 +281,44 @@ ray_err_t q_env_bind(int64_t sym, ray_t* val) {
     return env_put(sym, val, 1, NULL);
 }
 
+typedef struct { int64_t name; ray_t* fn; int rank; } env_native_t;
+static env_native_t* g_natives;
+static int           g_nnat, g_natcap;
+
+ray_err_t q_env_bind_native(const char* name, ray_t* fn, int rank) {
+    int64_t sym = ray_sym_intern_runtime(name, strlen(name));
+    int i = 0;
+    while (i < g_nnat && g_natives[i].name != sym) i++;
+    if (i < g_nnat && g_natives[i].fn->type == fn->type && g_natives[i].fn->i64 == fn->i64 && g_natives[i].rank == rank)
+        return q_env_bind(sym, g_natives[i].fn);
+    if (i == g_natcap) {
+        int nc = g_natcap ? 2 * g_natcap : 64;
+        env_native_t* nn = (env_native_t*)ray_sys_alloc(sizeof *nn * (size_t)nc);
+        if (!nn) return RAY_ERR_OOM;
+        if (g_natives) { memcpy(nn, g_natives, sizeof *nn * (size_t)g_nnat); ray_sys_free(g_natives); }
+        g_natives = nn;
+        g_natcap = nc;
+    }
+    ray_retain(fn);
+    if (i < g_nnat) ray_release(g_natives[i].fn);
+    else g_nnat++;
+    g_natives[i] = (env_native_t){ sym, fn, rank };
+    return q_env_bind(sym, fn);
+}
+
+int64_t q_env_native_name(ray_t* fn, int* rank) {
+    for (int i = 0; i < g_nnat; i++)
+        if (g_natives[i].fn == fn) { *rank = g_natives[i].rank; return g_natives[i].name; }
+    return 0;
+}
+
+ray_t* q_env_native_get(const char* name, size_t n, int rank) {
+    int64_t sym = ray_sym_find(name, n);
+    for (int i = 0; sym >= 0 && i < g_nnat; i++)
+        if (g_natives[i].name == sym && (rank < 0 || g_natives[i].rank == rank)) return g_natives[i].fn;
+    return NULL;
+}
+
 /* the link seam: the carrier a write displaced, then the one it bound, under the name the write LANDED on */
 static ray_err_t env_link(int64_t sym, ray_t* old, ray_t* val) {
     int64_t full = q_env_fullname(sym, NULL);
@@ -920,7 +958,11 @@ void q_env_destroy(void) {
     if (env_root) { ray_release(env_root); env_root = NULL; }
     if (env_ns)   { ray_release(env_ns);   env_ns   = NULL; }
     if (env_boot) { ray_release(env_boot); env_boot = NULL; }
-    g_ctx = g_ctx_seg = g_scope = g_scope_seg = g_scoped = 0;
+    for (int i = 0; i < g_nnat; i++) ray_release(g_natives[i].fn);
+    if (g_natives) ray_sys_free(g_natives);
+    g_natives = NULL;
+    g_nnat = g_natcap = 0;
+    g_ctx = g_ctx_seg =g_scope = g_scope_seg = g_scoped = 0;
 }
 
 /* q `nam set y` (ref/get.md) — assign a global through a symbol handle.  It is

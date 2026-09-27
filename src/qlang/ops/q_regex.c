@@ -21,7 +21,7 @@
 #include "qlang/eval/q_eval.h"     /* q_eval_apply_truthy — THE truthiness home */
 #include "qlang/io/q_re2.h"
 #include "qlang/ops/q_regex.h"
-#include "qlang/q_env.h"           /* q_env_bind — the .regexp bindings */
+#include "qlang/q_env.h"           /* q_env_bind / _bind_native — the .regexp bindings */
 #include "qlang/q_prim.h"          /* q_str_subject_bytes/_many/_map */
 #include "lang/env.h"              /* ray_fn_vary */
 #include "lang/eval.h"             /* RAY_FN_NONE */
@@ -299,26 +299,25 @@ static ray_t* regex_escape_fn(ray_t** args, int64_t n) {
     return q_str_subject_map(args[0], regex_escape_one, NULL, 0);
 }
 
-static void regex_bind(const char* name, ray_t* obj) {
-    q_env_bind(ray_sym_intern(name, strlen(name)), obj);
+static void regex_bind_fn(const char* name, int rank, ray_vary_fn fn) {
+    ray_t* obj = ray_fn_vary(name, RAY_FN_NONE, fn);
+    q_env_bind_native(name, obj, rank);
     ray_release(obj);
 }
 
-static void regex_bind_fn(const char* name, ray_vary_fn fn) {
-    regex_bind(name, ray_fn_vary(name, RAY_FN_NONE, fn));
-}
-
 void q_regex_register(void) {
-    regex_bind_fn(".regexp.i.test",        regex_test_fn);
-    regex_bind_fn(".regexp.i.extract",     regex_extract_fn);
-    regex_bind_fn(".regexp.i.groups",      regex_groups_fn);
-    regex_bind_fn(".regexp.i.groups_all",  regex_groups_all_fn);
-    regex_bind_fn(".regexp.i.extract_all", regex_extract_all_fn);
-    regex_bind_fn(".regexp.i.split",       regex_split_fn);
-    regex_bind_fn(".regexp.i.replace",     regex_replace_fn);
-    regex_bind_fn(".regexp.i.escape",      regex_escape_fn);
+    regex_bind_fn(".regexp.i.test",        3, regex_test_fn);
+    regex_bind_fn(".regexp.i.extract",     2, regex_extract_fn);
+    regex_bind_fn(".regexp.i.groups",      2, regex_groups_fn);
+    regex_bind_fn(".regexp.i.groups_all",  2, regex_groups_all_fn);
+    regex_bind_fn(".regexp.i.extract_all", 2, regex_extract_all_fn);
+    regex_bind_fn(".regexp.i.split",       2, regex_split_fn);
+    regex_bind_fn(".regexp.i.replace",     4, regex_replace_fn);
+    regex_bind_fn(".regexp.i.escape",      1, regex_escape_fn);
     /* the pin as DATA, not a call: RE2 has no version string, so what we can
      * report is the DuckDB release the vendored tree came from */
     const char* pin = q_re2_pin();
-    regex_bind(".regexp.version", ray_charv(pin, (int64_t)strlen(pin)));
+    ray_t* v = ray_charv(pin, (int64_t)strlen(pin));
+    q_env_bind(ray_sym_intern(".regexp.version", 15), v);
+    ray_release(v);
 }

@@ -1318,6 +1318,28 @@ static const char* dl_brief(const char* p) {
 typedef struct { char path[512]; void* h; } dlh_t;
 static dlh_t g_dlh[32];
 static int   g_ndlh;
+/* Every function a `2:` resolved, by the lib and symbol text it was asked for with — what the wire names.  A decode
+ * reuses the pointer rather than calling dlsym again (a GNU IFUNC resolver runs on every dlsym); two pointers under
+ * one spelling (a relative lib loaded from two directories) leave it NULL, so neither is guessed. */
+typedef struct { int64_t lib, sym; void* fn; } dl_fn_t;
+static dl_fn_t* g_dlfn;
+static int      g_ndlfn, g_dlfncap;
+
+static void dl_note(int64_t lib, int64_t sym, void* fn) {
+    for (int i = 0; i < g_ndlfn; i++)
+        if (g_dlfn[i].lib == lib && g_dlfn[i].sym == sym) {
+            if (g_dlfn[i].fn != fn) g_dlfn[i].fn = NULL;
+            return;
+        }
+    if (g_ndlfn == g_dlfncap) {
+        int nc = g_dlfncap ? 2 * g_dlfncap : 16;
+        dl_fn_t* nt = (dl_fn_t*)realloc(g_dlfn, (size_t)nc * sizeof *nt);
+        if (!nt) return;
+        g_dlfn = nt;
+        g_dlfncap = nc;
+    }
+    g_dlfn[g_ndlfn++] = (dl_fn_t){ lib, sym, fn };
+}
 
 static void* dl_open(const char* path) {
     for (int i = 0; i < g_ndlh; i++)
@@ -1366,8 +1388,23 @@ ray_t* q_dl_wrap(ray_t* x, ray_t* y) {
     void* fn = q_dl_sym(h, fname);
     if (!fn) return q_err_name(fname, strlen(fname));
 
-    return q_eval_apply_kfn_new(fn, rank, ray_sym_intern_runtime(lib, strlen(lib)),
-                                ray_sym_intern_runtime(fname, strlen(fname)));
+    int64_t lsym = ray_sym_intern_runtime(lib, strlen(lib));
+    int64_t fsym = ray_sym_intern_runtime(fname, strlen(fname));
+    dl_note(lsym, fsym, fn);
+    return q_eval_apply_kfn_new(fn, rank, lsym, fsym);
+}
+
+ray_t* q_dl_loaded(const char* lib, size_t ln, const char* fn, size_t fnn, int64_t rank) {
+    int64_t lsym = ray_sym_find(lib, ln), fsym = ray_sym_find(fn, fnn);
+    if (rank < 1 || rank > KAPI_MAX_RANK || lsym < 0 || fsym < 0) return NULL;
+    for (int i = 0; i < g_ndlfn; i++) {
+        if (g_dlfn[i].lib != lsym || g_dlfn[i].sym != fsym) continue;
+        if (!g_dlfn[i].fn) return NULL;
+        ray_t* c = q_eval_apply_kfn_new(g_dlfn[i].fn, rank, g_dlfn[i].lib, g_dlfn[i].sym);
+        if (c && RAY_IS_ERR(c)) { ray_error_free(c); return NULL; }
+        return c;
+    }
+    return NULL;
 }
 
 /* The heap's RAY_QFN choke point (heap.c `ray_free_set_qfn_fin_fn`, the `ray_free_set_mapped_fn`
@@ -1394,5 +1431,8 @@ void q_kapi_reset(void) {
     free(g_symmirror);
     g_symmirror = NULL;
     g_symcap = 0;
+    free(g_dlfn);
+    g_dlfn = NULL;
+    g_ndlfn = g_dlfncap = 0;
     g_kerr_set = 0;
 }

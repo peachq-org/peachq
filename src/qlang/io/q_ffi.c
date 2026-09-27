@@ -734,13 +734,13 @@ static ray_t* qffi_errno_fn(ray_t* x)                 { (void)x; return q_err(QE
 
 static void qffi_bind_native_u(const char* name, ray_unary_fn fn) {
     ray_t* obj = ray_fn_unary(name, RAY_FN_NONE, fn);
-    q_env_bind(ray_sym_intern(name, strlen(name)), obj);
+    q_env_bind_native(name, obj, 1);
     ray_release(obj);
 }
 
-static void qffi_bind_native_v(const char* name, ray_vary_fn fn) {
+static void qffi_bind_native_v(const char* name, int rank, ray_vary_fn fn) {
     ray_t* obj = ray_fn_vary(name, RAY_FN_NONE, fn);
-    q_env_bind(ray_sym_intern(name, strlen(name)), obj);
+    q_env_bind_native(name, obj, rank);
     ray_release(obj);
 }
 
@@ -748,9 +748,9 @@ void q_ffi_register(void) {
 #ifdef RAY_FFI
     qffi_main_thread = qffi_thread_id();
 #endif
-    qffi_bind_native_v(".ffi.i.bind",   qffi_bind_fn);
-    qffi_bind_native_v(".ffi.i.call",   qffi_call_fn);
-    qffi_bind_native_v(".ffi.i.callfn", qffi_callfn_fn);
+    qffi_bind_native_v(".ffi.i.bind",   3, qffi_bind_fn);
+    qffi_bind_native_v(".ffi.i.call",   2, qffi_call_fn);
+    qffi_bind_native_v(".ffi.i.callfn", 2, qffi_callfn_fn);
     qffi_bind_native_u(".ffi.i.cvar",   qffi_cvar_fn);
     qffi_bind_native_u(".ffi.i.errno",  qffi_errno_fn);
 }

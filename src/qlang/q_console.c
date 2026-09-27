@@ -6,7 +6,7 @@
 #include "qlang/io/q_io.h"             /* q_io_fwrite / q_io_write_fd — the byte writers */
 #include "core/ipc.h"                  /* ray_ipc_current_handle — a handler writes the server console */
 #include "core/platform.h"             /* RAY_OS_WINDOWS — the `\c 0N` terminal query; RAY_TLS */
-#include "qlang/q_env.h"               /* q_env_bind — the .pq.i.termsize/.pq.i.cancolor natives */
+#include "qlang/q_env.h"               /* q_env_bind_native — the .pq.i.termsize/.pq.i.cancolor natives */
 #include "lang/env.h"                  /* ray_fn_unary */
 #include <stdatomic.h>
 #include <stdio.h>
@@ -193,7 +193,7 @@ static ray_t* cancolor_fn(ray_t* x) {
 
 static void console_bind(const char* nm, ray_unary_fn fn) {
     ray_t* obj = ray_fn_unary(nm, RAY_FN_NONE, fn);
-    q_env_bind(ray_sym_intern(nm, strlen(nm)), obj);
+    q_env_bind_native(nm, obj, 1);
     ray_release(obj);
 }
 void q_console_pq_register(void) {

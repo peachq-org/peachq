@@ -42,6 +42,16 @@ ray_t* q_env_err(ray_err_t e);
  * (bootstrap writers stay out of the `key `.` roster). */
 ray_err_t q_env_bind(int64_t sym, ray_t* val);
 
+/* q_env_bind a C native (fn borrowed) under its full q name, and record it as one of this process's OWN natives at
+ * the q rank it is called with (0: none fixed, so it never crosses the wire).  The record holds the value itself, so
+ * rebinding the global never moves it; binding the same C function under the same name again binds the value
+ * recorded first, so a reload keeps identity. */
+ray_err_t q_env_bind_native(const char* name, ray_t* fn, int rank);
+/* The full name (sym) and rank a native was recorded under, or 0 for any value that is not one. */
+int64_t   q_env_native_name(ray_t* fn, int* rank);
+/* The native recorded under name[0..n) at rank (any rank when negative), borrowed, or NULL. */
+ray_t*    q_env_native_get(const char* name, size_t n, int rank);
+
 /* Remove a binding (dict minus one key); no-op when absent.  An emptied
  * namespace survives as its marker dict (kdb keeps it in `key `). */
 ray_err_t q_env_unbind(int64_t sym);

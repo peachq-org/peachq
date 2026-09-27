@@ -842,6 +842,6 @@ static ray_t* pq_load_fn(ray_t** args, int64_t n) {
 void q_provider_pq_register(void) {
     static const char nm[] = ".pq.i.load";
     ray_t* obj = ray_fn_vary(nm, RAY_FN_NONE, pq_load_fn);
-    q_env_bind(ray_sym_intern(nm, strlen(nm)), obj);
+    q_env_bind_native(nm, obj, 2);
     ray_release(obj);
 }

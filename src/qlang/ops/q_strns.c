@@ -10,7 +10,7 @@
 #include "qlang/q_count.h"
 #include "qlang/ops/q_strns.h"
 #include "qlang/base/q_err.h"
-#include "qlang/q_env.h" /* q_env_bind — the .str.i.* bindings */
+#include "qlang/q_env.h" /* q_env_bind_native — the .str.i.* bindings */
 #include "qlang/q_prim.h" /* q_str_text_bytes — THE text-bytes accessor */
 #include "lang/env.h"    /* ray_fn_unary */
 #include "lang/eval.h"   /* RAY_FN_NONE */
@@ -41,7 +41,7 @@ static ray_t* strns_rstrip_fn(ray_t* x) { return strns_strip(x, STRNS_TRAIL); }
 
 static void strns_bind_fn(const char* name, ray_unary_fn fn) {
     ray_t* obj = ray_fn_unary(name, RAY_FN_NONE, fn);
-    q_env_bind(ray_sym_intern(name, strlen(name)), obj);
+    q_env_bind_native(name, obj, 1);
     ray_release(obj);
 }
 

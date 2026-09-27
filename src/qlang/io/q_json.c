@@ -25,7 +25,7 @@
 #include "qlang/ops/q_dollar.h"  /* q_dollar_cast — the one conversion home */
 #include "qlang/io/q_io.h"       /* q_io_file_path + the resource-read seam */
 #include "qlang/io/q_loader.h"   /* the shared target seam: oracle + sink + the xcol rename */
-#include "qlang/q_env.h"         /* q_env_bind — the .j.i.* bindings */
+#include "qlang/q_env.h"         /* q_env_bind_native — the .j.i.* bindings */
 #include "lang/env.h"            /* ray_fn_vary */
 #include "table/sym.h"        /* ray_sym_vec_cell */
 #include <rayforce.h>
@@ -1724,13 +1724,13 @@ static ray_t* j_info_fn(ray_t** args, int64_t n) {
 
 ray_t* q_json_read_table(ray_t* src, q_json_frame_t frame) { return jr_read(src, NULL, NULL, NULL, frame, 0); }
 
-static void jr_bind_fn(const char* name, ray_vary_fn fn) {
+static void jr_bind_fn(const char* name, int rank, ray_vary_fn fn) {
     ray_t* f = ray_fn_vary(name, RAY_FN_NONE, fn);
-    q_env_bind(ray_sym_intern(name, strlen(name)), f);
+    q_env_bind_native(name, f, rank);
     ray_release(f);
 }
 
 void q_json_register(void) {
-    jr_bind_fn(".j.i.read", j_read_fn);
-    jr_bind_fn(".j.i.info", j_info_fn);
+    jr_bind_fn(".j.i.read", 4, j_read_fn);
+    jr_bind_fn(".j.i.info", 2, j_info_fn);
 }

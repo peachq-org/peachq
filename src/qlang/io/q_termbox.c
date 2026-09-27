@@ -981,32 +981,32 @@ static ray_t* tbi_cells_fn(ray_t* x) {
 
 static void bind_u(const char* name, ray_unary_fn fn) {
     ray_t* obj = ray_fn_unary(name, RAY_FN_NONE, fn);
-    q_env_bind(ray_sym_intern(name, strlen(name)), obj);
+    q_env_bind_native(name, obj, 1);
     ray_release(obj);
 }
 
-static void bind_v(const char* name, ray_vary_fn fn) {
+static void bind_v(const char* name, int rank, ray_vary_fn fn) {
     ray_t* obj = ray_fn_vary(name, RAY_FN_NONE, fn);
-    q_env_bind(ray_sym_intern(name, strlen(name)), obj);
+    q_env_bind_native(name, obj, rank);
     ray_release(obj);
 }
 
 void q_termbox_register(void) {
     q_ctx_set_tty_restore(session_close);
-    bind_v(".termbox.i.init",            tbi_init_fn);
+    bind_v(".termbox.i.init",            1, tbi_init_fn);
     bind_u(".termbox.i.shutdown",        tbi_shutdown_fn);
     bind_u(".termbox.i.size",            tbi_size_fn);
     bind_u(".termbox.i.clear",           tbi_clear_fn);
     bind_u(".termbox.i.present",         tbi_present_fn);
     bind_u(".termbox.i.invalidate",      tbi_invalidate_fn);
-    bind_v(".termbox.i.set_cursor",      tbi_set_cursor_fn);
-    bind_v(".termbox.i.set_cell",        tbi_set_cell_fn);
-    bind_v(".termbox.i.set_cells",       tbi_set_cells_fn);
+    bind_v(".termbox.i.set_cursor",      2, tbi_set_cursor_fn);
+    bind_v(".termbox.i.set_cell",        5, tbi_set_cell_fn);
+    bind_v(".termbox.i.set_cells",       5, tbi_set_cells_fn);
     bind_u(".termbox.i.events",          tbi_events_fn);
     bind_u(".termbox.i.clock",           tbi_clock_fn);
-    bind_v(".termbox.i.wrap",            tbi_wrap_fn);
-    bind_v(".termbox.i.print",           tbi_print_fn);
-    bind_v(".termbox.i.show",            tbi_show_fn);
+    bind_v(".termbox.i.wrap",            2, tbi_wrap_fn);
+    bind_v(".termbox.i.print",           5, tbi_print_fn);
+    bind_v(".termbox.i.show",            1, tbi_show_fn);
     bind_u(".termbox.i.peek_event",      tbi_peek_event_fn);
     bind_u(".termbox.i.set_input_mode",  tbi_set_input_mode_fn);
     bind_u(".termbox.i.set_output_mode", tbi_set_output_mode_fn);
