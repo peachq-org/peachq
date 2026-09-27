@@ -29,6 +29,7 @@
 #include "ops/ops.h"              /* ray_is_lazy, ray_lazy_materialize */
 #include "app/term.h"             /* ray_term_interrupted */
 #include "core/timer.h"           /* ray_time_now_ms — a finished line's ms */
+#include "core/runtime.h"         /* __VM->ipc_handle — a transcript line runs in the console's handle context */
 #include <rayforce.h>
 #include <ctype.h>                /* isalnum — a file's extension */
 #include <limits.h>               /* PATH_MAX — the load's resolved file symbol */
@@ -527,8 +528,11 @@ static ray_t* pq_console_fn(ray_t* x) {
         ctx_line_t      prev   = g_line;
         q_eval_frames_t frames = q_eval_frames_suspend();
         int             base   = q_dbg_frame_base(-1);
+        int64_t         conn   = __VM ? __VM->ipc_handle : -1;
+        if (__VM) __VM->ipc_handle = -1;           /* the console's handle context: .z.w 0i, as `0 x` sets it */
         g_line.s = NULL;
         ctx_line(s, (size_t)n, out, err, 1, 0, 0, NULL);
+        if (__VM) __VM->ipc_handle = conn;
         q_dbg_frame_base(base);
         g_line = prev;
         q_eval_frames_resume(frames);
