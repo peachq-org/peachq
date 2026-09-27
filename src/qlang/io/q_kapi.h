@@ -30,6 +30,11 @@
  * projects, iterates and `value`s like any other. */
 ray_t* q_dl_wrap(ray_t* x, ray_t* y);
 
+/* `lib 2:(`fn;rank)` for a function an earlier `2:` in this process resolved under the same lib and symbol text —
+ * never a load or a symbol lookup, so no library code runs.  Owned KFN carrier, or NULL when no `2:` resolved it or
+ * that spelling resolved to two different functions. */
+ray_t* q_dl_loaded(const char* lib, size_t ln, const char* fn, size_t fnn, int64_t rank);
+
 /* Apply a KFN carrier: marshal n args in, call the C function, marshal the result back.  THE apply
  * module's arm for 112h; args are BORROWED, the result is owned (CLAUDE.md rule 5 — which is also
  * capiref.md:103's law that a dynamically-linked module never takes ownership of its parameters). */
