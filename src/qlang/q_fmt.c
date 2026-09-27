@@ -17,7 +17,7 @@
 #include "lang/format.h"   /* ray_fmt */
 #include "lang/eval.h"     /* ray_at_fn — dict/table element access */
 #include "lang/env.h"      /* ray_fn_unary — the .pq.i.facts native */
-#include "qlang/q_env.h"   /* q_env_bind — the .pq.i.facts native */
+#include "qlang/q_env.h"   /* q_env_bind_native — the .pq.i.facts native */
 #include "lang/internal.h" /* is_collection — THE boxed-list-or-typed-vector predicate */
 #include "ops/hash.h"    /* ray_hash_bytes — pipe digest distinct keys */
 #include "core/types.h"  /* ray_elem_size — pipe digest */
@@ -1277,7 +1277,7 @@ static ray_t* qp_facts_fn(ray_t* t) {
 void q_fmt_pq_register(void) {
     static const char nm[] = ".pq.i.facts";
     ray_t* obj = ray_fn_unary(nm, RAY_FN_NONE, qp_facts_fn);
-    q_env_bind(ray_sym_intern(nm, strlen(nm)), obj);
+    q_env_bind_native(nm, obj, 1);
     ray_release(obj);
 }
 

@@ -52,6 +52,9 @@
  *   - Lambdas serialize their SOURCE text (the .q.lambda carrier's `src`);
  *     decoding re-evaluates it (q_parse → q_eval), so it
  *     requires a warm q registry (runtime-only, like the `value` wrapper).
+ *   - A library native (a C binding under a namespace path) or a `2:`
+ *     function travels as its closed `2:` call, a root 100h lambda the
+ *     decoder hands back as the process's own value when it holds it (D501a).
  *   - Engine values with no kdb tag (builtin fn values, projections,
  *     RAY_INDEX, graph/HNSW handles, lazies) refuse the wire with 'nyi.
  *     Type-tag range 200..250 is RESERVED for journal-only extension

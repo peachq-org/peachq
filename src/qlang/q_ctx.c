@@ -541,7 +541,7 @@ static ray_t* pq_console_fn(ray_t* x) {
 
 void q_ctx_pq_register(void) {
     ray_t* fn = ray_fn_unary(".pq.i.console", RAY_FN_NONE, pq_console_fn);
-    q_env_bind(ray_sym_intern(".pq.i.console", 13), fn);
+    q_env_bind_native(".pq.i.console", fn, 1);
     ray_release(fn);
 }
 
