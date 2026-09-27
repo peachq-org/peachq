@@ -13,7 +13,7 @@
 #include "qlang/q_registry_internal.h" /* q_str_split_lines, q_type_strict_i64 */
 #include "qlang/base/q_err.h"
 #include "qlang/io/q_handles.h" /* q_handles_read1 — the fifo-handle read form */
-#include "qlang/io/q_provider.h"  /* q_io_set: `:pq: targets route to .X.set; hdel: to .X.i.hdel */
+#include "qlang/io/q_provider.h"  /* q_io_set: a table coordinate routes to .X.set; hdel: to .X.hdel */
 #include "qlang/io/q_csv.h"     /* the CSV/TSV decoder behind a recognised tabular suffix */
 #include "qlang/io/q_json.h"    /* the JSON decoder, and the framing a suffix declares to it */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_call_name — the .parquet doors and the .duckdb transport are bound by `\l pq`, not linked */
@@ -926,7 +926,7 @@ int q_io_is_fsym(ray_t* v) {
 }
 
 ray_t* q_io_set(ray_t* x, ray_t* y) {
-    ray_t* pr = q_provider_write(x, y, 0);   /* `:pq: 4-seg coordinate -> .X.set */
+    ray_t* pr = q_provider_write(x, y, 0);   /* a table coordinate -> .X.set */
     if (pr) return pr;
     if (x && x->type == RAY_LIST) {
         int64_t n = q_count(x);
@@ -978,7 +978,7 @@ static int io_remove_any(const char* p) {
  * a folder is removed only when empty (the doc's "folders only if empty").  A
  * missing path or non-empty folder surfaces 'io (the read0 ENOENT precedent).
  * WRITES the filesystem, so restricted mode refuses (the file-verb precedent).
- * A `:pq:` table coordinate drops that OBJECT through its provider. */
+ * A table coordinate (`:pq:duckdb:db:t/) drops that OBJECT through its provider. */
 ray_t* q_hdel_wrap(ray_t* x) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     if (!x || x->type != -RAY_SYM) return q_err(QE_TYPE);  /* a DELETE takes only the

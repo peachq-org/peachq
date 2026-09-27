@@ -714,7 +714,7 @@ static ray_t* table_colnames(ray_t* x);
  *   POINTER dict  -> the same pair unmarked (a provider table is that flip too — q_provider.h)
  *   dict          -> table (sym keys; vector vals share one length L, atoms
  *                    broadcast to L; mismatched vector length -> 'length);
- *                    `cols!`:dir/` -> the mapped table, `cols!`:pq:…/` the bound provider pointer
+ *                    `cols!`:dir/` -> the mapped table, `cols!`:pq:duckdb:db:t/` the bound provider pointer
  *   list of lists -> transposed list (atom items broadcast)
  * Keyed tables, atoms, and an ALL-ATOM dict or list are 'rank: "to define a
  * 1-row table, enlist at least one of the column values" (basics/syntax.md:236)
@@ -739,7 +739,7 @@ ray_t* q_flip_wrap(ray_t* x) {
             return q_err(QE_TYPE);
         if (v->type == -RAY_SYM) {                        /* ONE hsym-valued arm, dispatching on the spelling */
             ray_t* t = q_splay_flip(k, v->i64);           /* `:dir/  -> the mapped table */
-            if (!t) t = q_provider_flip(k, v->i64);       /* `:pq:…/ -> the bound pointer */
+            if (!t) t = q_provider_flip(k, v->i64);       /* `:pq:duckdb:db:t/ -> the bound pointer */
             if (t) return t;
         }
         int64_t nc = q_count(k);
@@ -1117,7 +1117,7 @@ static ray_t* table_bi_deref(ray_t* x) {
  * is what makes a carrier (a `cols!coordinate` dict) need no arm of its own here. */
 ray_t* q_cols_fn(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
-    ray_t* car = q_provider_get_carrier(x);   /* `:pq: coordinate, splay symmetry */
+    ray_t* car = q_provider_get_carrier(x);   /* a table coordinate, splay symmetry */
     if (car) {
         if (RAY_IS_ERR(car)) return car;
         ray_t* k = q_cols_fn(car);
@@ -1160,7 +1160,7 @@ static char meta_ty_char(ray_t* x) {
  * mapped column carries its disk letter as a trusted stamp).  The result is a RAY_DICT from a 1-col key table to a
  * 3-col value table — "a keyed table is just a dictionary from one table to another". */
 ray_t* q_meta_fn(ray_t* x) {
-    ray_t* car = x ? q_provider_get_carrier(x) : NULL;   /* `:pq: coordinate */
+    ray_t* car = x ? q_provider_get_carrier(x) : NULL;   /* a table coordinate */
     if (car) {
         if (RAY_IS_ERR(car)) return car;
         ray_t* r = q_provider_carrier_meta(car);
