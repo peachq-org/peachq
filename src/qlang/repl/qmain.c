@@ -185,14 +185,6 @@ int main(int argc, char** argv) {
     bool        want_help = false;
     const char* duckdb_main = getenv("PEACHQ_DUCKDB_MAIN");
 
-    /* `-eval-before` / `-eval` texts, each list in argv order; order between the lists is by FLAG (before the
-     * startup script / after it), never by argv position.  argc bounds the counts. */
-    const char** eval_before = calloc((size_t)argc, sizeof *eval_before);
-    const char** eval_after  = calloc((size_t)argc, sizeof *eval_after);
-    int*         applied     = calloc((size_t)argc, sizeof *applied);
-    int          n_before = 0, n_after = 0, n_applied = 0;
-    if (!eval_before || !eval_after || !applied) { fprintf(stderr, "q: out of memory\n"); return 1; }
-
     for (int i = script ? 2 : 1; i < argc; i++) {
         const char*         a = argv[i];
         const q_dotz_opt_t* o = q_dotz_opt(a);
@@ -211,12 +203,9 @@ int main(int argc, char** argv) {
             fprintf(stderr, ")\n");
             return 2;
         }
-        if (o->cmd) applied[n_applied++] = i;
-        else if (strcmp(a, "-p") == 0 || strcmp(a, "--port") == 0) port_spec = v;
+        if (strcmp(a, "-p") == 0 || strcmp(a, "--port") == 0) port_spec = v;
         else if (strcmp(a, "-E") == 0) tls_mode = v[0] - '0';
         else if (strcmp(a, "-classic") == 0) classic = true;
-        else if (strcmp(a, "-eval") == 0) eval_after[n_after++] = v;
-        else if (strcmp(a, "-eval-before") == 0) eval_before[n_before++] = v;
         else if (strcmp(a, "-duckdb") == 0) q_duckdb_main_path_set(duckdb_main = v);
         else if (strcmp(a, "-U") == 0) auth_file = v;
         else if (strcmp(a, "-u") == 0) {
@@ -230,6 +219,24 @@ int main(int argc, char** argv) {
     if (auth_file && ray_ipc_auth_file_load(auth_file) != 0) {
         fprintf(stderr, "q: cannot read password file '%s': %s\n", auth_file, strerror(errno));
         return 2;
+    }
+
+    /* Allocated after the argument checks above so their error returns need no cleanup.  `-eval-before` / `-eval`
+     * texts, each list in argv order; order between the lists is by FLAG (before the startup script / after it),
+     * never by argv position.  argc bounds the counts; `startup` adds the tty console's two `\l`s and its NULL. */
+    const char** eval_before = calloc((size_t)argc, sizeof *eval_before);
+    const char** eval_after  = calloc((size_t)argc, sizeof *eval_after);
+    int*         applied     = calloc((size_t)argc, sizeof *applied);
+    const char** startup     = calloc((size_t)argc + 3, sizeof *startup);
+    int          n_before = 0, n_after = 0, n_applied = 0;
+    if (!eval_before || !eval_after || !applied || !startup) { fprintf(stderr, "q: out of memory\n"); return 1; }
+    for (int i = script ? 2 : 1; i < argc; i++) {
+        const q_dotz_opt_t* o = q_dotz_opt(argv[i]);
+        if (!o) continue;
+        if (o->cmd) applied[n_applied++] = i;
+        else if (strcmp(argv[i], "-eval") == 0) eval_after[n_after++] = argv[i + 1];
+        else if (strcmp(argv[i], "-eval-before") == 0) eval_before[n_before++] = argv[i + 1];
+        i += o->nparam;
     }
 
     q_tls_server_mode_set(tls_mode);   /* before any listener can accept */
@@ -306,6 +313,9 @@ int main(int argc, char** argv) {
             ray_poll_destroy(poll);
         }
         q_runtime_destroy(rt);
+        free(eval_before);
+        free(eval_after);
+        free(startup);
         return 2;
     }
 
@@ -366,7 +376,6 @@ int main(int argc, char** argv) {
         script_rc = q_ctx_run_src(eval_before[i], stdout, stderr, NULL);
     free(eval_before);
 
-    const char** startup = NULL;
     const char*  files[] = { qinit, script };   /* the tty console's first `\l`s, QINIT ahead of the script */
     char         load[2][PATH_MAX + 4];
     char         abs[PATH_MAX];
@@ -376,8 +385,6 @@ int main(int argc, char** argv) {
     if (script)
         snprintf(load[1], sizeof load[1], "\\l %s", script);
     if (stdin_tty) {
-        startup = calloc((size_t)n_after + 3, sizeof *startup);
-        if (!startup) { fprintf(stderr, "q: out of memory\n"); return 1; }
         int k = 0;
         for (int i = 0; i < 2; i++)
             if (files[i]) startup[k++] = load[i];
