@@ -153,8 +153,8 @@ q -conn :localhost:5000 -ls
 ```
 
 - **Target.** Anything `hopen` takes, passed through as written: all digits is a port (`-conn 5000`), anything
-  else the symbol — `:localhost:5000`, `::5000`, `:host:port:user:pass`, `:unix://…`, `:tcps://…`, even a `:pq:`
-  resource — with or without the leading backtick. Nothing is checked or added here: a target that opens but is
+  else the symbol — `:localhost:5000`, `::5000`, `:host:port:user:pass`, `:unix://…`, `:tcps://…` — with or
+  without the leading backtick. Nothing is checked or added here: a target that opens but is
   not a q process fails at the first call, with that call's error. The connection uses a 5-second timeout; a
   refusal is `q: cannot connect to <target>: <hopen's error>`, exit 2.
 - **Ordering** is the local process's: the file's whole text as ONE call, then each `-eval` text as one call, then

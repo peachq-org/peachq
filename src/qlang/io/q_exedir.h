@@ -1,7 +1,7 @@
 /* q_exedir — where THIS executable lives: the anchor for anything that ships
  * beside `q`.  Today that is the optional dlopen'd modules (io/q_re2.c,
  * io/q_duckdb.c), which both need the same answer on all three hosts, and
- * procq (io/q_worker.c), which launches this binary again. */
+ * :pq:qspawn: (io/q_worker.c), which launches this binary again. */
 #ifndef QLANG_IO_Q_EXEDIR_H
 #define QLANG_IO_Q_EXEDIR_H
 

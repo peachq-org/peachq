@@ -1,16 +1,16 @@
 / Query and write DuckDB databases from q: a database is a handle, its tables are q tables.
-/ hopen `:pq:duckdb:alias:/path/db opens or creates a database and answers the alias symbol `:pq:duckdb:alias, the
+/ .pq.hopen_duckdb[`alias;"/path/db"] opens or creates a database and answers the alias symbol `:pq:duckdb:alias, the
 / handle every .duckdb verb takes.  h "SELECT ..." runs SQL and answers a table; hclose h closes it.
 / `:pq:duckdb:alias:table/ names a table for get, set, upsert and qsql, with select/where/by pushed down to DuckDB.
 / .
 / One DuckDB database lives in the process, `:pq:duckdb:main (.duckdb.main[]; q -duckdb path puts it in a file):
 / every alias is a catalog attached to it, and a q global bound to a DuckDB table is a same-named view in it, so
 / s)SELECT ... runs SQL over q names, live.  DuckDB's httpfs carries s3:// gcs:// hf:// URLs for read0, read1,
-/ select from and set, with credentials as DuckDB secrets.  h (`getx;`t) reads a table with its schema as the pair
-/ (data;schema), which set and upsert accept back.  \?duckdb has more examples.
+/ select from and set, with credentials as DuckDB secrets.  .duckdb.getx[h;`t] reads a table with its schema as the
+/ pair (data;schema), which set and upsert accept back.  \?duckdb has more examples.
 / .
 / @eg
-/ h:hopen `:pq:duckdb:demo:default:
+/ h:.pq.hopen_duckdb[`demo;":memory:"]
 / `:pq:duckdb:demo:trade/ set ([] sym:`a`b; px:1.5 2.5)
 / `:pq:duckdb:demo:trade/ upsert ([] sym:enlist `c; px:enlist 3.5)
 / select from `:pq:duckdb:demo:trade/ where px>2
@@ -28,24 +28,24 @@
 .duckdb.call:{[c;q;sync] .duckdb.lastsql::q; .duckdb.i.exec[c;q]}
 / @ignore
 .duckdb.bind:{[c;t] (key .duckdb.i.meta[c;t])`c}
-/ @ignore
+/ A table of the handle's catalog as a q table.
 .duckdb.get:{[c;t] .duckdb.i.get[c;t]}
-/ @ignore
+/ Create or replace a table of the handle's catalog from a q table, or from the pair .duckdb.getx answers.
 .duckdb.set:{[c;t;d] .duckdb.i.set[c;t;d]; t}
 / @ignore
 .duckdb.append:{[c;t;d] .duckdb.i.append[c;t;d]; t}
 / @ignore
 .duckdb.upsert:.duckdb.append
-/ @ignore
+/ The meta of a table of the handle's catalog, read from DuckDB without fetching a row.
 .duckdb.meta:{[c;t] .duckdb.i.meta[c;t]}
 
 / Run SQL on a handle and answer the result as a table; a statement without a result answers ::.
 / @eg .duckdb.exec[.duckdb.main[];"SELECT 1 AS one, 'a' AS s"]
 .duckdb.exec:{[handle;sql] .duckdb.i.exec[handle;sql]}
 
-/ @ignore
+/ A table with its DuckDB schema, as the pair (data;schema) that set and upsert accept back.
 .duckdb.getx:{[c;t] .duckdb.i.getx[c;t]}
-/ @ignore
+/ SQL's answer with its DuckDB schema, as the pair (data;schema).
 .duckdb.execx:{[c;sql] .duckdb.i.execx[c;sql]}
 
 / The reason behind the last 'duckdb signal, first line the cause, cleared by the next call.
@@ -147,7 +147,7 @@
   insert[`.duckdb.sqllog; enlist row];
   if[m<count .duckdb.sqllog; .duckdb.sqllog::(neg m div 2)#.duckdb.sqllog]}
 
-/ @ignore
+/ The row count of a table of the handle's catalog, counted by DuckDB.
 .duckdb.count:{[c;t] first .duckdb.i.exec[c; "SELECT COUNT(*) AS n FROM ",.duckdb.i.qname t]`n}
 
 / @ignore

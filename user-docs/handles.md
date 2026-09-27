@@ -12,7 +12,7 @@ For example:
 `:data/trades.csv
 `:localhost:5000
 `:https://www.timestored.com/data/sample/dowjones.csv
-`:pq:duckdb:prod:/data/market.db
+`:pq:duckdb:prod:trade/
 ```
 
 A resource specification says **what resource is being referred to**. The operation applied to it determines what PeachQ asks that resource to do.
@@ -32,30 +32,30 @@ These capabilities overlap. They are not intended to form a rigid hierarchy of m
 | q IPC endpoint | ```:localhost:5000``` | open, synchronous call, asynchronous send |
 | HTTP resource | ```:http://host/x``` | retrieve remote content; planned table resolution |
 | WebSocket endpoint | ```:ws://host/x``` | connect, then persistent framed messaging |
-| PeachQ provider | ```:pq:duckdb:prod:/data/db``` | provider-defined connection and table capabilities |
+| Alias | ```:pq:q:srv```, ```:pq:duckdb:prod:trade/``` | a named connection of one kind, and its tables |
 
 An **opened handle** is different from a resource specification. For example, `hopen` on an IPC resource returns an integer handle. The `:...`
-value identifies the resource; the returned integer represents an opened connection to it. `hopen` on a `:pq:` provider resource returns the
-**alias symbol** instead (see PeachQ providers below): the handle says what it is, and it is the same value the coordinate forms use.
+value identifies the resource; the returned integer represents an opened connection to it. `hopen` on an alias returns the
+**alias symbol** instead (see Aliases below): the handle says what it is, and it is the same value the coordinate forms use.
 
 ## Resources as tables
 
 PeachQ extends the existing q idea that some resources can be used directly as tables.
 
-A trailing `/` is an important part of that model. In existing q, a splayed table is addressed by a directory-style resource ending in `/`. PeachQ
-should preserve that signal and use it consistently:
+A trailing `/` is an important part of that model. In existing q, a splayed table is addressed by a directory-style resource ending in `/`. An
+alias names its tables the same way, `:<table>/` after the alias:
 
 ```q
 `:data/trade/
 `:pq:duckdb:prod:trade/
 ```
 
-A trailing `/` means that the resource is explicitly table- or collection-like. A resource without the trailing slash remains file-, object-,
+Both mean the resource is explicitly table- or collection-like. A resource without either remains file-, object-,
 endpoint-, or member-like unless another rule, such as a recognised tabular file format, gives it table semantics.
 
 This gives PeachQ two clear routes into qSQL:
 
-1. An explicit table resource, normally signalled by a trailing `/`, such as a splay or virtual provider table.
+1. An explicit table resource, signalled by a trailing `/`: a splay, or an alias's table (`:<table>/` after the alias).
 2. A file-like resource whose format is known to decode to a table, such as `.csv`, `.tsv`, `.json`, or `.parquet` (see [parquet.md](lib/parquet.md)).
 
 Existing q supports operations such as:
@@ -265,7 +265,7 @@ For table selection, PeachQ should prefer explicit interpretation over inference
 
 The initial rule is:
 
-1. An explicit scheme or PeachQ provider wins.
+1. An explicit scheme or `:pq:` alias wins.
 2. Otherwise, a recognised file ending selects the format.
 3. Otherwise, PeachQ does not invent a tabular interpretation.
 
@@ -405,88 +405,91 @@ explicit decoding API.
 
 Future transports and containers should compose rather than require combined implementations such as "HTTP CSV" or "ZIP CSV".
 
-## PeachQ providers
+## Aliases: `:pq:<kind>:<alias>`
 
-Some resources are not naturally modelled as transport + decoder. They already provide operations over structured data.
+Some resources are not naturally modelled as transport + decoder: another q process, a worker, a database. PeachQ
+names each by `:pq:`, the kind, and an alias you choose:
 
-PeachQ reserves the explicit prefix:
+| kind | connection (the alias handle) | table coordinate | opener | its `arg` |
+|---|---|---|---|---|
+| another q process | `` `:pq:q:srv `` | `` `:pq:q:srv:trade/ `` | `.pq.hopen_q[alias;arg]` | anything kx `hopen` takes: a port, `` `::5000 ``, `` `:host:port ``, `` `:host:port:user:pass ``, a string, `` `:unix://5000 ``, `` `:tcps://… ``, the `(conn;timeout)` pair |
+| a fork of this q | `` `:pq:qfork:w1 `` | — | `.pq.hopen_qfork[alias;arg]` | `::` (the defaults) or a timeout in ms |
+| a fresh peachq | `` `:pq:qspawn:w2 `` | — | `.pq.hopen_qspawn[alias;arg]` | its argv, a list of strings (`""` or `::` for none) |
+| DuckDB | `` `:pq:duckdb:db `` | `` `:pq:duckdb:db:trade/ `` | `.pq.hopen_duckdb[alias;arg]` | a path, or `":memory:"` |
 
-```text
-:pq:<provider>:<alias>:<resource>
-```
+The segment after `:pq:` is the kind, the alias follows, and `:<table>/` after the alias is a table coordinate; both
+names are `[a-zA-Z][a-zA-Z0-9_]*`, and the spelling is case-sensitive. The reserved `pq` segment is what keeps these
+from reading as kx file paths, so anything else under `:pq:` is `'domain`, never a file. Every opener is one line,
+`hopen (`:pq:<kind>:alias;arg)`, so the raw form is the same call
+(a bare `` hopen `:pq:qfork:w1 `` is arg `::`). An opener is rank 2 and stays rank 2: its arg is the kind's obvious
+form, or a **dict of named options**, the one extension point. A key means the same for every kind that takes it —
+today `timeout`, the ms to obtain a live handle — and a key a kind does not take is `'domain`, never ignored:
 
-For example:
+| opener | dict keys |
+|---|---|
+| `.pq.hopen_q` | `conn` (any kx form) and `timeout` — a timeout in both is `'domain` |
+| `.pq.hopen_qfork` | `timeout` |
+| `.pq.hopen_qspawn` | `argv` and `timeout` |
+| `.pq.hopen_duckdb` | `path` beside DuckDB's own ATTACH and SET options; `timeout` is `'domain` |
+
+The arg is kept, privately, with the alias: a reconnect or a relaunch replays it through the same door.
 
 ```q
-`:pq:duckdb:prod:/data/market.db
+h:.pq.hopen_q[`srv;(`:localhost:5000;1000)]   / answers the alias symbol `:pq:q:srv
+h "2+2"                                         / the handle applies like any q handle: text is a call
+h (`f;20;5)                                     / on a q alias, a list is a (func;args) message as on a kdb handle
+select from `:pq:q:srv:trade/ where px>2          / a table on the peer, the query pushed there
+hclose h                                        / the one close door
 ```
 
-`:pq:` was chosen as a clean namespace for PeachQ resource providers and, in particular, to make named aliases unambiguous.
+- `hopen` **answers the alias symbol** `` `:pq:<kind>:<alias> `` — not an int. The alias is **required**: a handle needs
+  a name, so `` hopen `:pq:duckdb: `` is `'domain`, and a table coordinate is never a connection (`'domain`).
+- The symbol IS the live connection: `` `:pq:q:srv "1+1" `` and `h "1+1"` are the same call, and the public verbs of a
+  kind take it (`.duckdb.exec[h;sql]`). After `hclose h` the same symbol answers `'conn`, and so does any alias that
+  was never opened: a reference never opens anything. Opening the same alias again re-points it in place and answers
+  the same symbol.
+- `hclose h` is the only close door.
+- `.pq.conns[]` lists every open connection, one row each, its columns named in words (`-38!`, `.z.W` and `.z.H` keep
+  kdb's letters): `handle` is always the int — what `.z.pc` gets and `neg` works on — and `spec` the alias symbol
+  (null for a plain handle), with `kind`, `protocol`, `family`, `compressed`, `queued_msgs`, `queued_bytes`,
+  `outbound`, `user`, `address`, `provider` (`q`, `qfork`, `qspawn`, `duckdb`), `alias`, `opened`, `state`, `pid` and
+  `owned` beside them. `owned` is `1b` on a worker's alias row and `pid` is its process id; they are `0b` and null
+  everywhere else, the socket beneath the alias included, so `count select from .pq.conns[] where owned` counts
+  workers. `hclose` of an owned handle kills and reaps the worker, and so does this process's exit (`exit`, `\\` or the
+  end of its script), without firing `.z.pc`.
+- **A q peer's handle is a kdb handle**: on a `:pq:q:`, `:pq:qfork:` or `:pq:qspawn:` alias every message is sent to the
+  other process unchanged, exactly as on an int handle, whatever names exist here. The async send is `neg` of the
+  alias int: `` neg[first exec handle from .pq.conns[] where spec=p] "x:1" `` for an alias `p`. `neg` on the symbol
+  stays q's `neg`. On DuckDB text is SQL and a list is `'type`.
+- The int in the `handle` column is accepted wherever the symbol is, for code that expects `hopen` to answer an int.
+- If a q peer dies, its alias keeps its number and its row (`state` reads `closed`); the next use makes ONE dial
+  attempt through the same open with the same arg, on that arg's own timeout, and a failure errors that use.
 
-A provider connection can expose tables which participate directly in qSQL. Table resources should retain the trailing `/` convention:
+**A forked worker.** `` h:.pq.hopen_qfork[`w1;::] `` forks this process: the worker starts with every global this
+process has at that moment, and `h "expr"`, `h (`f;x)` and the async `neg` of its alias int talk to it over the kdb
+protocol like any q server. It is a snapshot, not a mirror — later changes on either side are not seen by the other —
+and it only computes: `\t`, `\p` and `\s` are 0, the `.z.p*`/`.z.w*` handlers are the ones a fresh q starts with (so
+`.z.ph` is the built-in web handler), the connections this process had are not open in it, and it exits without
+running `.z.exit`. A worker may open its own port (`` h "system \"p 0W\"" ``): it then serves IPC and HTTP from the
+snapshot as of the fork, and a worker forked again after a death does not re-open it. `hclose h` kills it; if it dies,
+the next use of `h` forks a new worker from this process as it is then (`opened` changes). The arg is `::` or the
+fork's handshake timeout in ms (null, zero or negative = the default, 5000). A process that cannot be copied safely
+refuses with `'nofork` (not the main thread, a parallel region running, a swap-backed heap, Windows); `'fork` is the
+OS refusing. Two forks draw the same random numbers.
 
-```q
-`:pq:duckdb:prod:trade/
-```
-
-A DuckDB-backed table can therefore resolve through the DuckDB provider rather than being downloaded and decoded as a file.
-
-This also gives PeachQ an explicit escape hatch where inference from a normal path would be inappropriate.
-
-### Opening, using and closing a provider connection
-
-```q
-h:hopen `:pq:duckdb:prod:/data/market.db     / answers the alias symbol `:pq:duckdb:prod
-h "SELECT count(*) FROM trade"                / the handle applies like any q handle: text is a call
-h (`get;`trade)                               / a list names a provider hook
-hclose h                                      / the one close door
-```
-
-- `hopen` **answers the alias symbol** `` `:pq:<provider>:<alias> `` — not an int. The alias is **required**: a
-  handle needs a name, so `` hopen `:pq:duckdb::/data/market.db `` is `'domain`. The aliasless form is the one-shot
-  apply, `` `:pq:duckdb::/data/market.db "SELECT 1" `` (open, run, close, nothing registered).
-- The symbol IS the live connection: `` `:pq:duckdb:prod "SELECT 1" `` and `h "SELECT 1"` are the same call, and
-  the public verbs of a provider take it (`.duckdb.exec[h;sql]`). After `hclose h` the same symbol answers `'conn`.
-  Opening the same alias again re-points it in place and answers the same symbol.
-- `hclose h` is the only close door; a provider's own open/close are hooks the host calls, with no public spelling.
-- `.pq.conns[]` lists every open connection: `handle` is what `hclose` takes (the alias symbol for a provider row,
-  the int for a socket or file), `h` the fd, with `provider`, `alias` and `opened` beside them. `owned` is `1b` on a
-  worker's alias row and `pid` is its process id; they are `0b` and null everywhere else, the socket beneath the alias
-  included, so `count select from .pq.conns[] where owned` counts workers. `hclose` of an owned handle kills and reaps
-  the worker, and so does this process's exit (`exit`, `\\` or the end of its script), without firing `.z.pc`.
-- **A q peer's handle is a kdb handle**: on a qpc, forkq or procq alias, `h (`f;x;y)` is sent to the other process
-  unchanged, exactly as on an int handle, whatever names exist here. The async send is `neg` of the alias int —
-  `` neg[first exec h from .pq.conns[] where handle~\:p] "x:1" `` for an alias `p`. Don't name that variable `h`:
-  inside the query the `h` column shadows a global `h`, so the lookup answers `0Ni`. `neg` on the symbol stays q's
-  `neg`. On any other provider a list is a hook call: `h (`name; args…)` reaches `.X.name` (`'.duckdb.async` for
-  `h (`async;…)` on DuckDB).
-- The int fd shown as `h` in `.pq.conns[]` is the legacy form, for code that expects `hopen` to answer an int: it is
-  accepted wherever the symbol is, and goes once nothing uses it.
-
-**A forked worker.** `` h:hopen `:pq:forkq:w1 `` forks this process: the worker starts with every global this process
-has at that moment, and `h "expr"`, `h (`f;x)` and the async `neg` of its alias int talk to it over the kdb protocol
-like any q server. It is a snapshot, not a mirror — later changes on either side are not seen by the other — and it only computes: `\t`, `\p` and
-`\s` are 0, the `.z.p*`/`.z.w*` handlers are the ones a fresh q starts with (so `.z.ph` is the built-in web
-handler), the connections this process had are not open in it, and it exits without running `.z.exit`. A worker may
-open its own port (`` h "system \"p 0W\"" ``): it then serves IPC and HTTP from the snapshot as of the fork, and a
-worker forked again after a death does not re-open it. `hclose h` kills it; if it dies, the next use of `h` forks a
-new worker from this process as it is then (`opened` changes). `` hopen (`:pq:forkq:w1;ms) `` bounds the fork's handshake; a null, zero or
-negative timeout means the default, 5000 ms. A process that cannot be copied safely refuses with `'nofork` (not the main
-thread, a parallel region running, a swap-backed heap, Windows); `'fork` is the OS refusing. Two forks draw the same
-random numbers.
-
-**A launched worker.** `` h:hopen (`:pq:procq:w1;5000;("init.q";"-s";"2")) `` starts a new
-peachq — this same executable — with exactly that argv: no shell, no splitting, nothing of peachq's added, so `.z.x`
-and `.z.f` read as they would for `q init.q -s 2`. It is an ordinary q process: its script runs (a script error stops
-the script, not the process, as in kx), its own `.z.p*` handlers apply, and a `\p` its script sets keeps serving. Its
-stdin is the null device; its stdout and stderr are this process's. `h` talks to it exactly as to a forked worker, and it
-lives exactly as long as `h`: `hclose h` kills it, and it dies with this process. If it dies, the next use of `h`
-launches it again from the same argv — its recipe is its argv, so anything pushed into it since is gone. The timeout
-(ms; null, zero or negative = the default 10000) bounds the launch; a worker that exits or never answers within it is
-`'proc`. A successful `hopen` means the process started and answered, not that its script succeeded: a script error
-stops the script and leaves the worker serving, so check what the script should have defined before relying on it.
-The third element is the argv, a list of strings with one string per argument (`` enlist "init.q" `` is one argument);
-`""` and `::` mean no arguments, and anything else is `'type`. On Windows `hclose` ends the worker outright: there is no TERM to ask it first.
+**A launched worker.** `` h:.pq.hopen_qspawn[`w1;("init.q";"-s";"2")] `` starts a new peachq — this same executable —
+with exactly that argv: no shell, no splitting, nothing of peachq's added, so `.z.x` and `.z.f` read as they would for
+`q init.q -s 2`. It is an ordinary q process: its script runs (a script error stops the script, not the process, as in
+kx), its own `.z.p*` handlers apply, and a `\p` its script sets keeps serving. Its stdin is the null device; its stdout
+and stderr are this process's. `h` talks to it exactly as to a forked worker, and it lives exactly as long as `h`:
+`hclose h` kills it, and it dies with this process. If it dies, the next use of `h` launches it again from the same
+argv — its recipe is its argv, so anything pushed into it since is gone. The argv is one string per argument
+(`` enlist "init.q" `` is one argument); `""` and `::` mean no arguments, and anything else is `'type`. The dict form
+`` `argv`timeout!(("init.q";"-s";"2");20000) `` bounds the launch (ms; null, zero or negative = the default 10000); a
+worker that exits or never answers within it is `'proc`. A successful open means the process started and answered,
+not that its script succeeded: a script error stops the script and leaves the worker serving, so check what the script
+should have defined before relying on it. On Windows `hclose` ends the worker outright: there is no TERM to ask it
+first.
 
 **The DuckDB link and `s)`.** The process has ONE DuckDB database — the main instance, whose own handle is
 `` `:pq:duckdb:main `` (listed by `.pq.conns[]`, answered by `.duckdb.main[]`; `hopen`/`hclose` refuse the alias, and
@@ -496,7 +499,7 @@ moment of assignment (a view, never a copy: `` `myt insert x `` writes through t
 it); re-pointing the global re-points the view, any other value drops it, `` `.ns.t `` links under its full name.
 `s)SELECT count(*) FROM myt` is that view; `s)SELECT * FROM al.dt` reaches the alias's catalog qualified, and a bare
 `dt` is NOT visible (a bare name in `s)` is a q name). After `hclose` of the alias the view errors on use, as the
-pointer's own `get` does. `\?duckdb` and `docs/duckdb-api.md` have the rest; the q IPC provider defines no link.
+pointer's own `get` does. `\?duckdb` and `docs/duckdb-api.md` have the rest; a q peer defines no link.
 
 **Loading and dropping — the sync law.** Anything done THROUGH q is in sync by construction: assigning, re-pointing
 or unbinding a pointer, `insert`/`upsert` on one, `hdel` of a coordinate — one global-set seam, one provider hook per
@@ -513,8 +516,8 @@ nothing is ever unbound behind your back.
   included); an existing global keeps its value — `\l` is the later-wins door, this one is add-only. Row writes need
   nothing (a pointer reads live). `s)DROP TABLE x` leaves q's `x` bound: it errors on use with DuckDB's own text.
 - **`hdel` on a coordinate drops the OBJECT**: `` hdel `:pq:duckdb:al:dt/ `` is `DROP TABLE` (or `DROP VIEW`, by what
-  the name is); `` hdel `:pq:qpc:al:t/ `` deletes the table on the peer. A q name bound to it stays bound and errors
-  on use. The connection form is `'domain`, a dead alias `'conn`, a provider without the hook `'nyi`. Deleting the q
+  the name is); `` hdel `:pq:q:al:t/ `` deletes the table on the peer. A q name bound to it stays bound and errors
+  on use. The connection form is `'domain`, a dead alias `'conn`. Deleting the q
   name (`delete dt from `.`) never drops the object — the splay precedent: deleting `` t:get `:db/t/ `` never removes
   the directory.
 
@@ -528,17 +531,9 @@ The extended resource model is intended to explain and extend those behaviours, 
 - Existing q IPC resource and opened-handle behaviour remains compatible.
 - Existing splayed-table qSQL behaviour remains valid, including the trailing `/` table-resource convention.
 - New table-resource behaviour extends the same idea to additional sources.
-- Explicit PeachQ providers use the `:pq:` namespace so they do not need to overload unrelated existing handle forms.
+- Aliases live under the reserved `:pq:` prefix (`:pq:q:`, `:pq:qfork:`, `:pq:qspawn:`, `:pq:duckdb:`), so they do not overload unrelated existing handle forms.
 
 This gives existing q code the familiar compact syntax while allowing new code to treat external data sources consistently.
-
-## For implementers: provider and qSQL contract
-
-Writing a `:pq:` provider — the `.X` namespace, every hook the host calls (`.X.i.open`/`.X.i.close`, `call`/`async`,
-`bind`/`get`/`set`/`upsert`/`count`/`meta`/`qsql`, the link hooks `.X.i.link`/`.X.i.unlink`), which are required and
-which optional, and what the host guarantees — is its own page: `user-docs/resource-handle-implementer.md`.
-
-
 
 # Dev Work
 Your order is good. I’d tighten it to this:
@@ -572,7 +567,7 @@ Your order is good. I’d tighten it to this:
 10. Resolution order: explicit provider/scheme > explicit format API > recognized final suffix > error.
 11. Do not initially infer from HTTP Content-Type or magic bytes.
 12. Preserve trailing / as the explicit table/collection signal for splays and provider-backed tables.
-13. Keep provider resolution separate from file-format resolution: :pq:duckdb:.../ is a provider; .csv is a decoder.
+13. Keep provider resolution separate from file-format resolution: :pq:duckdb:db:t/ is a provider; .csv is a decoder.
 14. .qsql pushdown is optional; materialize-then-host-qSQL is a valid implementation.
 15. Avoid combined implementations like httpcsv, zipcsv, or s3parquet; those indicate abstraction leakage. The one documented exception: a `.parquet` URL is handed to DuckDB, whose httpfs does the range reads a footer needs (parquet.md).
 

@@ -17,7 +17,7 @@ typedef enum {
     Q_HANDLE_FILE   = 0,
     Q_HANDLE_FIFO   = 1,
     Q_HANDLE_SOCKET = 2,
-    Q_HANDLE_PROVIDER = 3,   /* io/q_provider.h — a virtual-table provider connection */
+    Q_HANDLE_PROVIDER = 3,   /* io/q_provider.h — a `:pq:` alias's connection */
 } q_handle_kind;
 
 void q_handles_init(void);
@@ -99,11 +99,23 @@ ray_t* q_handles_deferred(ray_t* y);
 ray_t* q_handles_console_eval(ray_t* y);
 
 /* What a sym denotes, decided HERE once: a global NAME (no leading ':'), a
- * PROCESS handle (a `:pq:` connection, ws/wss, http/https, IPC `:host:port` /
+ * PROCESS handle (a `:pq:` alias `:pq:q:srv`, ws/wss, http/https, IPC `:host:port` /
  * `::port`) — applicable, so ternary @/. is Trap — or a PATH (file, dir, fifo,
- * a `:pq:…:t/` table coordinate) — data, so ternary @/. is Amend. */
+ * a `:pq:duckdb:db:t/` table coordinate) — data, so ternary @/. is Amend. */
 typedef enum { Q_SYM_NAME = 0, Q_SYM_PATH = 1, Q_SYM_PROCESS = 2 } q_sym_kind;
 q_sym_kind q_handles_sym_kind(ray_t* sym);
+
+/* `:pq:<kind>:<alias>` is a connection, `:pq:<kind>:<alias>:<table>/` a table coordinate.  BAD = the reserved `:pq:`
+ * namespace holding anything else (never a file). */
+typedef enum { Q_PQ_NONE = 0, Q_PQ_Q, Q_PQ_QFORK, Q_PQ_QSPAWN, Q_PQ_DUCKDB, Q_PQ_BAD } q_pq_kind;
+typedef struct { const char* alias; size_t alias_n; const char* table; size_t table_n; int ok; } q_pq_parts;
+
+/* The kind `s` names, NONE outside `:pq:`.  parts (may be NULL) gets the alias and table spans (table NULL = the
+ * connection) and ok 0 unless the text is exactly one of the two forms with both names valid — 'domain where used. */
+q_pq_kind    q_handles_pq(const char* s, size_t n, q_pq_parts* parts);
+q_pq_kind    q_handles_pq_of(ray_t* x, const char** s, size_t* n);   /* a sym/string, or the head of a list of them */
+const char* q_handles_pq_kind_name(q_pq_kind k);
+int         q_handles_name_ok(const char* p, size_t n);   /* [a-zA-Z][a-zA-Z0-9_]* */
 
 /* `` `:… `` sym-handle apply — the protocol arm (caller has checked
  * q_handles_sym_kind): ws/wss and http/https clients, else one-shot sync IPC

@@ -6,7 +6,7 @@
 #define _GNU_SOURCE            /* MAP_ANONYMOUS / MAP_FIXED */
 #include "qlang/q_count.h"
 #include "qlang/io/q_splay.h"
-#include "qlang/io/q_provider.h" /* `:pq: is never a splay directory */
+#include "qlang/io/q_handles.h" /* a `:pq:` coordinate is never a splay directory */
 #include "qlang/io/q_io.h"           /* q_io_file_path */
 #include "qlang/net/q_wirefile.h"
 #include "qlang/base/q_err.h"
@@ -466,7 +466,7 @@ static int splay_dir_sym_is(int64_t sym) {
     if (!s) return 0;
     size_t n = ray_str_len(s);
     const char* p = ray_str_ptr(s);
-    return n >= 2 && p[0] == ':' && p[n - 1] == '/' && !q_provider_spec_is(p, n);
+    return n >= 2 && p[0] == ':' && p[n - 1] == '/' && !q_handles_pq(p, n, NULL);
 }
 
 static ray_t* splay_open(int64_t sym, ray_t* dir, splay_ent** out);

@@ -1,8 +1,8 @@
 /* q_conn — see q_conn.h.  Sockets come ONLY from the IPC walk (the liveness
  * authority — a stale q_handles socket record can never resurrect a dead
  * connection); q_handles enriches outbound sockets (user, redacted addr) and
- * contributes the non-socket rows; q_provider adds provider/alias/handle detail.
- * Rows sort by fd.  n/m (unsent msgs/bytes) are 0 for sockets — TRUTHFUL:
+ * contributes the non-socket rows; q_provider adds the alias rows' provider/alias/spec.
+ * Rows sort by fd.  queued_msgs/_bytes (-38!'s n/m) are 0 for sockets — TRUTHFUL:
  * there is no async output queue yet (Stage 2) — and the long null on rows
  * where the concept does not apply. */
 #include "qlang/q_count.h"
@@ -29,7 +29,7 @@ typedef struct {
     ray_t*        addr;       /* BORROWED charv; NULL = none */
     int32_t       peer_addr;  /* inbound rows: peer IPv4 (host order); 0 = none */
     int64_t       provider_sym, alias_sym;
-    int64_t       handle_sym; /* provider rows: the alias sym hopen answered; -1 = the handle is the fd */
+    int64_t       handle_sym; /* alias rows: the alias sym hopen answered; -1 = a plain handle */
     int64_t       open_ns;    /* NULL_I64 = unknown */
     uint8_t       open;       /* 0 only on a provider row whose connection died and has not been re-dialled */
     int64_t       pid;        /* provider rows: the worker its link kills on close; -1 = none (a socket row never) */
@@ -151,14 +151,15 @@ ray_t* q_conn_table(void) {
     conn_row* rows = conn_rows(&n);
     if (!rows) return q_err(QE_WSFULL);
     int64_t cap = n ? n : 1;
-    static const char* const names[17] = { "h", "handle", "kind", "p", "f", "z", "n",
-        "m", "out", "user", "addr", "provider", "alias", "opened", "state", "pid", "owned" };
+    static const char* const names[17] = { "handle", "spec", "kind", "protocol", "family", "compressed",
+        "queued_msgs", "queued_bytes", "outbound", "user", "address", "provider", "alias", "opened", "state", "pid",
+        "owned" };
     ray_t* c[17];
     c[0]  = ray_vec_new(RAY_I32, cap);
-    c[1]  = ray_list_new(cap);
+    c[1]  = ray_sym_vec_new(RAY_SYM_W64, cap);
     c[2]  = ray_sym_vec_new(RAY_SYM_W64, cap);
-    c[3]  = ray_vec_new(RAY_CHARV, cap);
-    c[4]  = ray_vec_new(RAY_CHARV, cap);
+    c[3]  = ray_sym_vec_new(RAY_SYM_W64, cap);
+    c[4]  = ray_sym_vec_new(RAY_SYM_W64, cap);
     c[5]  = ray_vec_new(RAY_BOOL, cap);
     c[6]  = ray_vec_new(RAY_I64, cap);
     c[7]  = ray_vec_new(RAY_I64, cap);
@@ -172,22 +173,24 @@ ray_t* q_conn_table(void) {
     c[15] = ray_vec_new(RAY_I32, cap);
     c[16] = ray_vec_new(RAY_BOOL, cap);
     int64_t s_open = ray_sym_intern_runtime("open", 4), s_closed = ray_sym_intern_runtime("closed", 6);
+    int64_t esym = ray_sym_intern_runtime("", 0);
+    int64_t s_q = ray_sym_intern_runtime("q", 1), s_ws = ray_sym_intern_runtime("ws", 2);
+    int64_t s_tcp = ray_sym_intern_runtime("tcp", 3), s_unix = ray_sym_intern_runtime("unix", 4);
     for (int64_t i = 0; i < n; i++) {
         conn_row* r = &rows[i];
         int64_t ks   = kind_sym(r->kind);
         int64_t stt  = r->open ? s_open : s_closed;
         int64_t nm   = r->kind == Q_HANDLE_SOCKET ? 0 : NULL_I64;
+        int64_t spec = r->handle_sym >= 0 ? r->handle_sym : esym;
+        int64_t prot = r->p == 'w' ? s_ws : r->p == 'q' ? s_q : esym;
+        int64_t fam  = r->f == 'u' ? s_unix : r->f == 't' ? s_tcp : esym;
         uint8_t zf   = 0;
         int32_t fd   = (int32_t)r->fd;
         c[0]  = ray_vec_append(c[0], &fd);
-        if (c[1] && !RAY_IS_ERR(c[1])) {  /* what hclose takes: the alias sym for a provider, else the fd */
-            ray_t* hv = r->handle_sym >= 0 ? ray_sym(r->handle_sym) : ray_i32(fd);
-            c[1] = ray_list_append(c[1], hv);
-            ray_release(hv);
-        }
+        c[1]  = ray_vec_append(c[1], &spec);
         c[2]  = ray_vec_append(c[2], &ks);
-        c[3]  = ray_vec_append(c[3], &r->p);
-        c[4]  = ray_vec_append(c[4], &r->f);
+        c[3]  = ray_vec_append(c[3], &prot);
+        c[4]  = ray_vec_append(c[4], &fam);
         c[5]  = ray_vec_append(c[5], &zf);
         c[6]  = ray_vec_append(c[6], &nm);
         c[7]  = ray_vec_append(c[7], &nm);

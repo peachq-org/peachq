@@ -300,10 +300,10 @@ static char g_main_path[512];    /* the `-duckdb` path; "" = the env var, else i
 
 /* Every alias is an ATTACHed catalog NAMED BY THE ALIAS and shared by path: a second alias on the same file would
  * be DuckDB's "Unique file handle conflict", so it USEs the first's catalog and the DETACH waits for the last
- * connection (a DETACH from any connection kills the catalog for all).  Path "" is `:default:`, the shared
- * in-memory catalog "default"; a one-shot on a file attaches under a generated name and detaches on the way out. */
+ * connection (a DETACH from any connection kills the catalog for all).  Path "" is ":memory:", the shared
+ * in-memory catalog "default". */
 static struct {
-    char path[512];              /* as given, normalized only for `:default:` */
+    char path[512];              /* as given, normalized only for ":memory:" */
     char name[256];
     int  refs;
     bool used;
@@ -379,7 +379,7 @@ static int32_t qd_handle_of(int slot) {
  * neither can be mistaken for the other.  -1 = no live connection. */
 static int qd_resolve(ray_t* h) {
     int64_t v;
-    ray_t* tok = q_provider_token(h, "duckdb");
+    ray_t* tok = q_provider_token(h, Q_PQ_DUCKDB);
     if (tok) h = tok;
     if (h && h->type == -RAY_I32)      v = h->i32;
     else if (h && h->type == -RAY_I64) v = h->i64;
@@ -638,7 +638,7 @@ static ray_t* qd_main_open(duck_config cfg) {
     snprintf(g_main.catalog, sizeof g_main.catalog, "%.*s", (int)ln, d ? d : "");
     q_duckdb_drop(row);
     ray_t* tok = ray_i32(qd_handle_of(slot));
-    g_main.handle = q_provider_register_internal("duckdb", QD_MAIN_ALIAS, tok);
+    g_main.handle = q_provider_register_internal(Q_PQ_DUCKDB, QD_MAIN_ALIAS, tok);
     ray_release(tok);
     if (g_main.handle) return NULL;
     QAPI.disconnect(&g_cons[slot].con);
@@ -698,6 +698,8 @@ static ray_t* qd_config_apply(ray_t* cfg, qd_buf* attach) {
         char k[128], t[256];
         bool quote;
         snprintf(k, sizeof k, "%.*s", ks ? (int)ray_str_len(ks) : 0, ks ? ray_str_ptr(ks) : "");
+        if (strcmp(k, "path") == 0) continue;
+        if (strcmp(k, "timeout") == 0) { if (oc) QAPI.destroy_config(&oc); return q_err(QE_DOMAIN); }
         ray_t* iv = ray_i64(i);
         ray_t* v = ray_at_fn(vals, iv);
         ray_release(iv);
@@ -772,24 +774,41 @@ static void qd_close_slot(int slot) {
     qd_cat_release(g_cons[slot].cat);
 }
 
-/* .duckdb.i.open[alias; rest; timeout; config] — the host's open hook.  rest is the coordinate's config text: the
- * db path, "default:" (or empty) = the shared in-memory catalog; timeout means nothing to an in-process engine;
- * config is :: or the option dict (qd_config_apply).  The alias names the catalog the path is attached under; the
- * empty alias is a one-shot, served under a generated name unless the path is already attached.  Answers the TOKEN. */
+/* the dict arg's `path` (owned) into *out; 0 when there is none */
+static int qd_dict_path(ray_t* d, ray_t** out) {
+    ray_t* k = ray_sym(ray_sym_intern_runtime("path", 4));
+    *out = ray_dict_get(d, k);
+    ray_release(k);
+    return *out && !RAY_IS_ERR(*out);
+}
+
+/* .duckdb.i.open[alias; arg] — the host's open hook.  arg is the db path, or a dict of `path` beside DuckDB's own
+ * ATTACH/SET options (qd_config_apply; `timeout` means nothing to an in-process engine and is 'domain).  ":memory:"
+ * is the shared in-memory catalog.  The alias names the catalog the path is attached under.  Answers the TOKEN. */
 static ray_t* qd_open_wrap(ray_t** args, int64_t n) {
-    ray_t* e = qd_door(args, n, 4, NULL);
+    ray_t* e = qd_door(args, n, 2, NULL);
     if (e) return e;
     char alias[256];
     const char* tp; int64_t tn;
     if (!qd_sym_text(args[0], alias, sizeof alias)) return q_duckdb_fail(-1, "open: alias is not a symbol");
     if (strcmp(alias, QD_MAIN_ALIAS) == 0) return q_err(QE_DOMAIN);
-    if (!q_str_text_bytes(args[1], &tp, &tn)) return q_duckdb_fail(-1, "open: path is not text");
-    if (tn >= 512) return q_duckdb_fail(-1, "open: path is longer than 511 bytes");
-    ray_t* cfg = args[3] && !RAY_IS_NULL(args[3]) ? args[3] : NULL;
-    if (cfg && cfg->type != RAY_DICT) return q_err(QE_TYPE);
+    ray_t* cfg = args[1] && args[1]->type == RAY_DICT ? args[1] : NULL;
+    ray_t* pv = NULL;
+    if (cfg && !qd_dict_path(cfg, &pv)) {
+        if (pv && RAY_IS_ERR(pv)) ray_error_free(pv);
+        return q_err(QE_DOMAIN);
+    }
+    ray_t* pa = cfg ? pv : args[1];
+    int text = q_str_text_bytes(pa, &tp, &tn);
     char path[512];
-    if (tn == 0 || (tn == 8 && memcmp(tp, "default:", 8) == 0)) path[0] = '\0';
-    else snprintf(path, sizeof path, "%.*s", (int)tn, tp);
+    if (text && tn > 0 && tn < 512) {
+        if (tn == 8 && memcmp(tp, ":memory:", 8) == 0) path[0] = '\0';
+        else snprintf(path, sizeof path, "%.*s", (int)tn, tp);
+    }
+    if (pv) ray_release(pv);
+    if (!text) return q_err(QE_TYPE);
+    if (tn == 0) return q_err(QE_DOMAIN);
+    if (tn >= 512) return q_duckdb_fail(-1, "open: path is longer than 511 bytes");
 
     qd_buf opts = {0};
     e = cfg ? qd_config_apply(cfg, &opts) : qd_main_need();
@@ -802,14 +821,7 @@ static ray_t* qd_open_wrap(ray_t** args, int64_t n) {
         q_duckdb_buf_free(&opts);
         return q_duckdb_fail(-1, "open: ATTACH options on a catalog that is already attached");
     }
-    if (cat < 0) {
-        static unsigned oneshot;
-        char name[256];
-        if (!path[0]) snprintf(name, sizeof name, "default");
-        else if (alias[0]) snprintf(name, sizeof name, "%s", alias);
-        else snprintf(name, sizeof name, "_t%u", ++oneshot);
-        cat = qd_cat_attach(path, name, opts.len ? opts.p : "");
-    }
+    if (cat < 0) cat = qd_cat_attach(path, path[0] ? alias : "default", opts.len ? opts.p : "");
     q_duckdb_buf_free(&opts);
     if (cat < 0) return q_err(QE_DUCKDB);
 

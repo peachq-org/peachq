@@ -12,11 +12,30 @@
 / The peachq version string.
 .pq.version:.z.v`version;
 
-/ Every open connection, one row each.  The single-letter columns p f z n m are the -38! names so kdb code ports.
-/ @col handle what hclose takes: the alias symbol of a :pq: provider, else the fd int
-/ @col alias the :pq: alias, when the connection opened with one
+/ Every open connection, one row each; -38! keeps kdb's letters, these are the same facts in words.
+/ @col handle the int: what .z.pc gets and neg works on, for an alias too
+/ @col spec the alias symbol (`:pq:qfork:w1) hopen answered, null for a plain handle
+/ @col protocol `q or `ws on a socket; family `tcp or `unix
+/ @col pid the worker an owned alias kills on hclose; owned says it has one
 / @eg .pq.conns[]
+/ @eg exec handle from .pq.conns[] where spec=`:pq:qfork:w1
 .pq.conns:{[] .pq.i.conns[]}
+
+/ Open (or re-point) `:pq:q:alias on another q process, the same call as hopen (`:pq:q:alias;arg); answers that symbol.
+/ @param arg (any) what hopen takes (port, `::5000, `:host:port:user:pass, (conn;timeout) ...), or a `conn`timeout dict
+.pq.hopen_q:{[alias;arg] hopen (`$":pq:q:",string alias;arg)};
+
+/ Fork this process as the worker `:pq:qfork:alias, the same call as hopen (`:pq:qfork:alias;arg).
+/ @param arg (any) :: for the defaults, a timeout in ms, or a dict of `timeout
+.pq.hopen_qfork:{[alias;arg] hopen (`$":pq:qfork:",string alias;arg)};
+
+/ Launch a fresh peachq as the worker `:pq:qspawn:alias, the same call as hopen (`:pq:qspawn:alias;arg).
+/ @param arg (any) its argv, one string per argument ("" or :: for none), or a dict of `argv and `timeout
+.pq.hopen_qspawn:{[alias;arg] hopen (`$":pq:qspawn:",string alias;arg)};
+
+/ Attach a DuckDB database as `:pq:duckdb:alias, the same call as hopen (`:pq:duckdb:alias;arg).
+/ @param arg (any) the path or ":memory:", or a dict of `path beside DuckDB's own ATTACH and SET options
+.pq.hopen_duckdb:{[alias;arg] hopen (`$":pq:duckdb:",string alias;arg)};
 
 / The live terminal size, with the 25/80 fallback and [10,2000] clamp that \c 0N uses.
 / @return (rows;cols)
@@ -58,6 +77,13 @@
 .pq.i.rnode:{[cl;x] $[(type x) in 0 99h;.z.s[cl] each x;-11h=type x;$[x in cl;x;.pq.i.rval x];x]}
 / @ignore
 .pq.i.resolveTree:{[cl;tree] (enlist tree 0),.pq.i.rnode[cl,`i] each 1_tree}
+
+.pq.i.q.bind:{[c;t] c "cols ",string t};
+.pq.i.q.get:{[c;t] c string t};
+.pq.i.q.set:{[c;t;d] c (`set;t;d); t};
+.pq.i.q.upsert:{[c;t;d] c (`upsert;t;d); t};
+.pq.i.q.hdel:{[c;t] c (!;`.;();0b;enlist t); t};
+.pq.i.q.qsql:{[c;cl;tree] c (?),.pq.i.resolveTree[cl;tree]};
 
 / One line of facts about a table, one per column in column order: numeric columns as min-max, booleans as the
 / share true, everything else as a distinct count (`all distinct` when every row differs; a temporal column that
@@ -276,9 +302,9 @@
   path};
 
 / The :host:port a handle was opened to, from the connection table; the handle number when it is not there.
-.pq.i.qhist_target:{[handle]
-  addr:exec addr from .pq.conns[] where h=handle;
-  $[count addr; ":",first addr; ":",string handle]};
+.pq.i.qhist_target:{[h]
+  addr:exec address from .pq.conns[] where handle=h;
+  $[count addr; ":",first addr; ":",string h]};
 
 .pq.i.qhist_index:{[dir;line]
   file:hsym `$dir,"/index.tsv";
@@ -308,7 +334,7 @@
   };
 
 / Every standard-library file, in the order \l pq reloads them.
-.pq.i.files:`csv`duckdb`ffi`j`massive`md`parquet`pq`qpc`regexp`str`termbox`fs`path`pkg`qunit`yml;
+.pq.i.files:`csv`duckdb`ffi`j`massive`md`parquet`pq`regexp`str`termbox`fs`path`pkg`qunit`yml;
 
 / Run each file as \l pq/<file>.q: a pq/ directory's (the working directory's, then QHOME's), else the built-in copy.
 .pq.i.run:{[files] {system "l pq/",string[x],".q"} each files; files};
