@@ -955,7 +955,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         ray_t* cols = rd_obj(c);
         if (!cols || RAY_IS_ERR(cols)) { ray_release(keys); return cols ? cols : q_err(QE_DOMAIN); }
         if (cols->type == -RAY_SYM) {                 /* 98 over (99: cols; hsym): the flip law, off the spelling —
-                                                       * `:dir/ re-opens the mapping, `:pq:…/ rebinds the pointer */
+                                                       * `:dir/ re-opens the mapping, `:pq:duckdb:db:t/ rebinds the pointer */
             ray_t* t = q_splay_flip(keys, cols->i64);
             if (!t) t = q_provider_flip(keys, cols->i64);
             ray_release(keys); ray_release(cols);
