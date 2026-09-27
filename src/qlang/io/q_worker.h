@@ -10,21 +10,21 @@
 _Noreturn void q_worker_serve(int link);
 
 /* The `:pq:qfork:` open: fork, hand the child to q_worker_serve, and answer the parent's end as an int socket handle
- * once the kdb handshake is done (timeout ms; NULL, null, 0 or negative = 5000).  'nofork when this process cannot be
- * copied safely — a swap-backed heap pool, not the main thread, a parallel region running, no fork on the platform;
- * 'fork when the OS refuses or the child never answers; 'access under -u. */
-ray_t* q_worker_fork(ray_t* tmo);
+ * once the kdb handshake is done (timeout ms; NULL, null, 0 or negative = 5000).  log[0]/log[1] (NULL = none) are the
+ * child's stdout/stderr files, `\1`/`\2` as its first act.  'nofork when this process cannot be copied safely (a
+ * swap-backed heap pool, not the main thread, a parallel region, no fork); 'fork when the OS refuses or the child never
+ * answers; 'access under -u. */
+ray_t* q_worker_fork(ray_t* tmo, const char* const log[2]);
 
 /* The `:pq:qspawn:` open: launch this executable with exactly argv (a list of strings; no shell, no flag of ours), its
  * end of a socketpair at Q_WORKER_FD, and answer the parent's end once the kdb handshake is done (timeout ms; NULL,
  * null, 0 or negative = 10000).  'proc when it cannot be launched or ends before it answers; 'nyi under wasm;
- * 'access under -u. */
-ray_t* q_worker_spawn(ray_t* argv, ray_t* tmo);
+ * 'access under -u.  log as for q_worker_fork: the launched process applies it before its startup reads an option. */
+ray_t* q_worker_spawn(ray_t* argv, ray_t* tmo, const char* const log[2]);
 
-/* A launched worker learns its link from Q_WORKER_FD_ENV, which this unsets before any q can read it: the link's fd,
- * bound to die with its parent and every other inherited fd closed; -1 = not a worker.  POSIX names "fd:parent pid";
- * Windows names an inherited pipe carrying the WSAPROTOCOL_INFOW the parent duplicated the link into, and the parent's
- * job object is what ties the worker's life to it. */
+/* A launched worker learns its link, and its stdout/stderr files (applied before this returns), from the environment,
+ * unset before any q can read it: the link's fd, bound to die with its parent and every other inherited fd closed;
+ * -1 = not a worker. */
 #define Q_WORKER_FD_ENV "PEACHQ_WORKER_FD"
 #define Q_WORKER_FD 3
 int q_worker_link(void);
