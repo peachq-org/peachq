@@ -57,6 +57,27 @@ int q_io_abs_path(const char* path, char* abs, size_t cap) {
     return 1;
 }
 
+int q_io_abs_spelling(const char* path, size_t n, char* abs, size_t cap) {
+#ifdef RAY_OS_WINDOWS
+    char p[PATH_MAX];                   /* _fullpath is lexical: drive- and root-relative forms resolve, no file needed */
+    if (n >= sizeof p) return 0;
+    memcpy(p, path, n);
+    p[n] = '\0';
+    return q_io_abs_path(p, abs, cap);
+#else
+    size_t c = 0;
+    if (!n || path[0] != '/') {
+        if (!q_io_abs_path(".", abs, cap)) return 0;
+        c = strlen(abs);
+        if (c && abs[c - 1] != '/') abs[c++] = '/';
+    }
+    if (c + n + 1 > cap) return 0;
+    memcpy(abs + c, path, n);
+    abs[c + n] = '\0';
+    return 1;
+#endif
+}
+
 ray_t* q_io_file_path(ray_t* x) {
     const char* p;
     size_t n;
