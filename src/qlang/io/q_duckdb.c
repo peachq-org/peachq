@@ -699,7 +699,10 @@ static ray_t* qd_config_apply(ray_t* cfg, qd_buf* attach) {
         bool quote;
         snprintf(k, sizeof k, "%.*s", ks ? (int)ray_str_len(ks) : 0, ks ? ray_str_ptr(ks) : "");
         if (strcmp(k, "path") == 0) continue;
-        if (strcmp(k, "timeout") == 0) { if (oc) QAPI.destroy_config(&oc); return q_err(QE_DOMAIN); }
+        if (strcmp(k, "timeout") == 0 || strcmp(k, "stdout") == 0 || strcmp(k, "stderr") == 0) {
+            if (oc) QAPI.destroy_config(&oc);
+            return q_err(QE_DOMAIN);
+        }
         ray_t* iv = ray_i64(i);
         ray_t* v = ray_at_fn(vals, iv);
         ray_release(iv);
@@ -783,7 +786,8 @@ static int qd_dict_path(ray_t* d, ray_t** out) {
 }
 
 /* .duckdb.i.open[alias; arg] — the host's open hook.  arg is the db path, or a dict of `path` beside DuckDB's own
- * ATTACH/SET options (qd_config_apply; `timeout` means nothing to an in-process engine and is 'domain).  ":memory:"
+ * ATTACH/SET options (qd_config_apply; `timeout`, `stdout` and `stderr` mean nothing to an in-process engine and are
+ * 'domain).  ":memory:"
  * is the shared in-memory catalog.  The alias names the catalog the path is attached under.  Answers the TOKEN. */
 static ray_t* qd_open_wrap(ray_t** args, int64_t n) {
     ray_t* e = qd_door(args, n, 2, NULL);
