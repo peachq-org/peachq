@@ -29,7 +29,7 @@
 #include "qlang/ops/q_index.h"
 #include "qlang/ops/q_dollar.h"   /* q_dollar — the cast home `x.attr` rides */
 #include "qlang/net/q_wirefile.h"  /* q_wirefile_read — `get `:file */
-#include "qlang/io/q_provider.h"   /* q_provider_get_carrier — `get `:pq:...:t/ */
+#include "qlang/io/q_provider.h"   /* q_provider_get_carrier — `get `:pq:duckdb:db:t/ */
 #include "qlang/io/q_splay.h"      /* q_splay_get — `get `:dir/ maps; value/amend read the aux path */
 #include "qlang/io/q_io.h"         /* q_io_resource_table — `get `:f.csv reads the format the ending names */
 #include "qlang/q_ctx.h"           /* q_ctx_eval_src — multi-line text under the script law */
@@ -681,7 +681,7 @@ ray_t* q_eval_value_wrap(ray_t* x) {
     if (x->type == -RAY_SYM) {
         ray_t* m = q_splay_get(x);           /* NULL unless a `:dir/ table folder */
         if (m) return m;
-        ray_t* pc = q_provider_get_carrier(x);   /* `:pq:...:t/ -> the carrier;
+        ray_t* pc = q_provider_get_carrier(x);   /* `:pq:duckdb:db:t/ -> the carrier;
                                                   * connection form -> 'domain */
         if (pc) return pc;
         ray_t* rt = q_io_resource_table(x);  /* `:f.csv etc.: the ending `select from` speaks */
