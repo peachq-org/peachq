@@ -360,6 +360,6 @@ static ray_t* pq_conns_fn(ray_t* x) { (void)x; return q_conn_table(); }
 void q_conn_pq_register(void) {
     static const char nm[] = ".pq.i.conns";
     ray_t* obj = ray_fn_unary(nm, RAY_FN_NONE, pq_conns_fn);
-    q_env_bind(ray_sym_intern(nm, strlen(nm)), obj);
+    q_env_bind_native(nm, obj, 1);
     ray_release(obj);
 }

@@ -220,6 +220,6 @@ static ray_t* beep_fn(ray_t** args, int64_t n) {
 void q_beep_register(void) {
     static const char nm[] = ".termbox.i.beep";
     ray_t* obj = ray_fn_vary(nm, RAY_FN_NONE, beep_fn);
-    q_env_bind(ray_sym_intern(nm, strlen(nm)), obj);
+    q_env_bind_native(nm, obj, 2);
     ray_release(obj);
 }

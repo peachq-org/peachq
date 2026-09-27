@@ -26,7 +26,7 @@
 #include "qlang/io/q_loader.h"  /* the shared target seam: oracle + sink + the xcol rename */
 #include "qlang/io/q_io.h"      /* the resource-read seam: paths + the slice read */
 #include "qlang/parse/q_tok.h"  /* the Tok scanners — THE spelling owners the sniffer delegates to */
-#include "qlang/q_env.h"        /* q_env_bind — the .csv.i.* bindings */
+#include "qlang/q_env.h"        /* q_env_bind_native — the .csv.i.* bindings */
 #include "qlang/q_prim.h"       /* ct_t + the q_csv_* cell-parser seam defined here */
 #include "core/numparse.h"      /* ray_parse_i64/f64 */
 #include "lang/env.h"           /* ray_fn_vary */
@@ -1876,13 +1876,13 @@ ray_t* q_csv_read_table(ray_t* src, char delim) {
     return out;
 }
 
-static void csv_bind_fn(const char* name, ray_vary_fn fn) {
+static void csv_bind_fn(const char* name, int rank, ray_vary_fn fn) {
     ray_t* f = ray_fn_vary(name, RAY_FN_NONE, fn);
-    q_env_bind(ray_sym_intern(name, strlen(name)), f);
+    q_env_bind_native(name, f, rank);
     ray_release(f);
 }
 
 void q_csv_register(void) {
-    csv_bind_fn(".csv.i.read", csv_read_fn);
-    csv_bind_fn(".csv.i.info", csv_info_fn);
+    csv_bind_fn(".csv.i.read", 4, csv_read_fn);
+    csv_bind_fn(".csv.i.info", 2, csv_info_fn);
 }

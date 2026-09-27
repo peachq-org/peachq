@@ -11,12 +11,13 @@
 #include "qlang/io/q_splay.h"   /* a mapped splay travels as 98 over (99: cols; `:dir/) and re-opens */
 #include "qlang/io/q_provider.h" /* a provider pointer travels the same shape and rebinds */
 #include "qlang/io/q_io.h"      /* q_io_is_fsym — the one admitted unconformed dict */
+#include "qlang/io/q_kapi.h"    /* q_dl_loaded — a function a `2:` already resolved */
 #include "qlang/parse/q_parse.h"      /* q_parse — lambda decode (RUNTIME only) */
 #include "lang/eval.h"          /* ray_eval */
 #include "table/sym.h"          /* ray_sym_vec_cell */
 #include "mem/heap.h"           /* RAY_ATTR_HAS_NULLS */
 #include "store/serde.h"        /* fn-serde hook getters (serde mode ext 200) */
-#include "qlang/q_env.h"        /* q_env_resolve — wire fn names resolve in q, never rayfall */
+#include "qlang/q_env.h"        /* q_env_resolve + the native table — wire fn names resolve in q, never rayfall */
 #include "lang/env.h"           /* ray_fn_name */
 #include <stdint.h>
 #include <string.h>
@@ -136,6 +137,53 @@ static int w_lambda_ctx(q_wire_wbuf_t* b, ray_t* ctx) {
     return w_cstr(b, p, n);
 }
 
+/* A C function on the wire is its closed `2:` call as a root 100h lambda, `{[x;y] (`LIB 2:(`FN;2))[x;y]}` (D501a):
+ * any kdb peer decodes it, and it fails honestly there only when called.  LIB `pq` names this process's own library
+ * natives.
+ * w_dl_call and dl_call_scan own the template together; a byte changed in one must change in the other. */
+#define DL_PARAMS "xyzabcde"
+
+/* the leading run of p a name in the template may hold — a library name also takes a path's `:` and `/` */
+static size_t dl_name_len(const char* p, size_t n, int lib) {
+    size_t i = 0;
+    for (; i < n; i++) {
+        char c = p[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' ||
+              (lib && (c == ':' || c == '/'))))
+            break;
+    }
+    return i;
+}
+
+/* A library native is bound under a namespace path (`.ffi.i.bind`); a root name (`aj`, `show`, `parse`) is a q
+ * keyword, which is the language rather than our library, so it never travels as a `pq` function (owner 2026-09-26). */
+static int dl_library_native(const char* p, size_t n) { return n > 1 && p[0] == '.'; }
+
+static int w_dl_call(q_wire_wbuf_t* b, int64_t lib_sym, int64_t fn_sym, int64_t rank) {
+    ray_t* ls = ray_sym_str(lib_sym);                 /* borrowed, both */
+    ray_t* fs = fn_sym ? ray_sym_str(fn_sym) : NULL;
+    if (!ls || RAY_IS_ERR(ls) || !fs || RAY_IS_ERR(fs)) return wbuf_fail(b, q_err(QE_NYI));
+    const char* lib = ray_str_ptr(ls);
+    const char* fn  = ray_str_ptr(fs);
+    size_t ln = ray_str_len(ls), fnn = ray_str_len(fs);
+    if (rank < 1 || rank > (int64_t)strlen(DL_PARAMS) || !ln || !fnn ||
+        dl_name_len(lib, ln, 1) != ln || dl_name_len(fn, fnn, 0) != fnn)
+        return wbuf_fail(b, q_err(QE_NYI));
+    char ps[2 * sizeof DL_PARAMS];
+    int pn = 0;
+    for (int64_t i = 0; i < rank; i++) {
+        if (i) ps[pn++] = ';';
+        ps[pn++] = DL_PARAMS[i];
+    }
+    size_t cap = ln + fnn + 2 * (size_t)pn + 32;
+    char* s = (char*)ray_alloc_raw(cap);
+    if (!s) return wbuf_fail(b, q_err(QE_WSFULL));
+    int n = snprintf(s, cap, "{[%.*s] (`%.*s 2:(`%.*s;%d))[%.*s]}", pn, ps, (int)ln, lib, (int)fnn, fn, (int)rank, pn, ps);
+    int rc = (w_u8(b, 100) || w_u8(b, 0) || w_charvec(b, s, n, 0)) ? -1 : 0;
+    ray_free_raw(s);
+    return rc;
+}
+
 int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     if (b->err) return -1;
     /* serde mode: a C-NULL slot (v4 wrote marker 126, read back as the null
@@ -214,9 +262,15 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
             ray_release(body);
             goto out;
         }
+        case Q_EVAL_CAR_KFN: {
+            int64_t rank = 0, lib = 0, sym = 0;
+            q_eval_apply_kfn_parts(x, NULL, &rank, &lib, &sym);
+            rc = w_dl_call(b, lib, sym, rank);
+            goto out;
+        }
         /* serde mode, and the kinds with no wire encoding, fall to 'nyi */
         case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_LAMBDA: case Q_EVAL_CAR_ITER:
-        case Q_EVAL_CAR_VIEW: case Q_EVAL_CAR_KFN: case Q_EVAL_CAR_FOREIGN: break;
+        case Q_EVAL_CAR_VIEW: case Q_EVAL_CAR_FOREIGN: break;
         }
         rc = wbuf_fail(b, q_err(QE_NYI));
         goto out;
@@ -224,12 +278,17 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
 
     int8_t t = x->type;
 
-    /* fn values, wire mode: 101h/102h from the manifest row's kdb_op column.
-     * No row (aliased env snapshot, q_registry.h) or no code -> 'nyi. */
+    /* fn values, wire mode: 101h/102h from the manifest row's kdb_op column; a library native with no code travels
+     * as its `2:` call.  Anything else (a keyword native, Drlwud; an aliased env snapshot, q_registry.h) -> 'nyi. */
     if (!b->serde && (t == RAY_UNARY || t == RAY_BINARY || t == RAY_VARY)) {
         q_valence_t val = Q_DYADIC;
         int code = q_registry_kdb_op_of(x, &val);
+        int rank = 0;
+        int64_t nat = code < 0 ? q_env_native_name(x, &rank) : 0;
+        ray_t* ns = nat ? ray_sym_str(nat) : NULL;    /* borrowed */
+        if (!ns || RAY_IS_ERR(ns) || !dl_library_native(ray_str_ptr(ns), ray_str_len(ns))) nat = 0;
         rc = code >= 0 ? w_prim(b, val == Q_MONADIC ? 101 : 102, (uint8_t)code)
+           : nat       ? w_dl_call(b, ray_sym_intern_runtime("pq", 2), nat, rank)
                        : wbuf_fail(b, q_err(QE_NYI));
         goto out;
     }
@@ -237,14 +296,19 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     /* ---- serde-mode extension records (storage/journal; q_wire.h) ---- */
     if (b->serde) {
         if (t == RAY_UNARY || t == RAY_BINARY || t == RAY_VARY) {
-            /* ext 200: builtin fn by name — writer hook first, then aux name */
+            /* ext 200: builtin fn by name — writer hook first, then a native's full name, then aux name */
             char scratch[16];
             const char* name = NULL;
+            size_t nlen = 0;
+            int rank = 0;
+            int64_t nat = 0;
             ray_serde_fn_writer_t wh = ray_serde_fn_writer_hook();
             if (wh && wh(x, scratch)) name = scratch;
-            else name = ray_fn_name(x);
-            size_t nlen = name ? strlen(name) : 0;
-            if (nlen > 15) nlen = 15;
+            else if ((nat = q_env_native_name(x, &rank))) {
+                ray_t* s = ray_sym_str(nat);          /* borrowed */
+                if (s && !RAY_IS_ERR(s)) { name = ray_str_ptr(s); nlen = ray_str_len(s); }
+            } else name = ray_fn_name(x);
+            if (name && !nlen) nlen = strlen(name);
             rc = (w_u8(b, Q_WIRE_EXT_FN) || w_u8(b, (uint8_t)t) ||
                   w_cstr(b, name ? name : "", nlen)) ? -1 : 0;
             goto out;
@@ -696,16 +760,15 @@ static ray_t* rd_ext(rcur_t* c, uint8_t tag) {
         uint8_t valence = r_u8(c);
         if (valence != RAY_UNARY && valence != RAY_BINARY && valence != RAY_VARY)
             return q_err(QE_DOMAIN);
-        const char* s; size_t n;
-        if (r_cstr(c, &s, &n)) return trunc_err("builtin name");
-        char name[16];
-        if (n > sizeof name - 1) n = sizeof name - 1;
-        memcpy(name, s, n); name[n] = 0;
+        const char* name; size_t n;       /* r_cstr found the NUL, so name is a C string in place */
+        if (r_cstr(c, &name, &n)) return trunc_err("builtin name");
         ray_serde_fn_reader_t rh = ray_serde_fn_reader_hook();
         if (rh) {
             ray_t* hooked = rh(name);
             if (hooked) return hooked;    /* owned by contract */
         }
+        ray_t* nat = q_env_native_get(name, n, -1);   /* borrowed */
+        if (nat) { ray_retain(nat); return nat; }
         /* q's surface only: the registry cell at the WIRE VALENCE (a QK_ENV
          * snapshot IS the base value, so `+` round-trips pointer-identical),
          * then the q env.  A rayfall-only name — e.g. a peer-supplied
@@ -781,6 +844,53 @@ static ray_t* rd_ext(rcur_t* c, uint8_t tag) {
     default:
         return q_err(QE_DOMAIN);
     }
+}
+
+static int dl_lit(const char** p, const char* end, const char* lit) {
+    size_t k = strlen(lit);
+    if ((size_t)(end - *p) < k || memcmp(*p, lit, k) != 0) return 0;
+    *p += k;
+    return 1;
+}
+
+/* a parameter list naming the first *rank of DL_PARAMS in order; *rank 0 = learn it from this list */
+static int dl_params(const char** p, const char* end, int* rank) {
+    int i = 0;
+    for (;;) {
+        if (*p == end || i == (int)strlen(DL_PARAMS) || **p != DL_PARAMS[i]) return 0;
+        (*p)++; i++;
+        if (*p == end || **p != ';') break;
+        (*p)++;
+    }
+    if (*rank && i != *rank) return 0;
+    *rank = i;
+    return 1;
+}
+
+/* w_dl_call's template read back: the value it names when this process already holds it, else NULL — the text
+ * then stays an ordinary lambda.  A byte scanner, never q_parse: recognising must not evaluate what it read. */
+static ray_t* dl_call_value(const char* s, size_t n) {
+    const char* p = s;
+    const char* end = s + n;
+    int rank = 0;
+    if (!dl_lit(&p, end, "{[") || !dl_params(&p, end, &rank) || !dl_lit(&p, end, "] (`")) return NULL;
+    const char* lib = p;
+    size_t ln = dl_name_len(p, (size_t)(end - p), 1);
+    p += ln;
+    if (!ln || !dl_lit(&p, end, " 2:(`")) return NULL;
+    const char* fn = p;
+    size_t fnn = dl_name_len(p, (size_t)(end - p), 0);
+    p += fnn;
+    char num[4] = { ';', (char)('0' + rank), ')', 0 };
+    if (!fnn || !dl_lit(&p, end, num) || !dl_lit(&p, end, ")[") || !dl_params(&p, end, &rank) ||
+        !dl_lit(&p, end, "]}") || p != end)
+        return NULL;
+    if (ln == 2 && memcmp(lib, "pq", 2) == 0) {
+        ray_t* v = dl_library_native(fn, fnn) ? q_env_native_get(fn, fnn, rank) : NULL;   /* borrowed */
+        if (v) ray_retain(v);
+        return v;
+    }
+    return q_dl_loaded(lib, ln, fn, fnn, rank);
 }
 
 static ray_t* rd_obj_inner(rcur_t* c) {
@@ -1003,6 +1113,8 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         }
         size_t n = ray_str_len(src);
         const char* sp = ray_str_ptr(src);
+        ray_t* dl = ctxn ? NULL : dl_call_value(sp, n);
+        if (dl) { ray_release(src); return dl; }
         if (n < 2 || sp[0] != '{') {
             ray_release(src);
             return rd_value_err(c, q_err(QE_BADFUNC));
