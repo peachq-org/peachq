@@ -1,136 +1,61 @@
-/* q_provider — the virtual-table HOST (actionable-plans/
- * 2026-08-07-plugin-data-sources-tables.md; contract v3 = the 2026-09-15 ADR
- * § Handles).  Grammar: connection form `:pq:ds:alias:config` (hopen only)
- * vs table form `:pq:ds:alias[:config]:t/` (every table position — the
- * trailing slash IS the table marker).  hopen answers the ALIAS SYMBOL
- * `:pq:ds:alias`, and hopen/hclose are the only lifecycle doors: the host
- * calls .ds.i.open[alias;rest;timeout;config] / .ds.i.close[token] and keeps
- * the ONE registry alias <-> (ds; TOKEN; the legacy reserved fd);
- * every other hook is token-keyed, reached by NAME-GENERIC dispatch off a
- * plain q namespace, and only ":pq:ds:alias" is ever q-visible (the open
- * tuple stays in the host's private entry, for the ONE re-dial a use of a
- * dead IPC token makes — owner ruling 2026-09-18).  A bound table is the
- * splay POINTER — the flip of
- * `cols!`:pq:ds:alias:t/`, carried as that dict with the aux mark
- * (base/q_type.h) — and its columns are ADVISORY: every query and write goes
- * back through the provider. */
+/* q_provider — the `:pq:<kind>:<alias>` aliases (q_handles_pq names the kinds).  hopen answers the ALIAS SYMBOL and
+ * hopen/hclose are the only lifecycle doors over ONE registry alias <-> (kind; token; hopen arg; reserved fd).  The
+ * three q kinds are one thing, an int IPC socket from connect, fork or spawn: every message is the peer's own and
+ * close is hclose.  DuckDB's token is its own, reached through the fixed `.duckdb` hooks; a q peer's table hooks are
+ * `.pq.i.q.*`.  The arg stays private to the host for the ONE re-dial a use of a dead peer makes.  A bound table is
+ * the flip of `cols!`:pq:duckdb:db:t/`, the aux-marked dict (base/q_type.h); its columns are advisory. */
 #ifndef QLANG_Q_PROVIDER_H
 #define QLANG_Q_PROVIDER_H
 #include <rayforce.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "qlang/io/q_handles.h"
 
 void q_provider_init(void);
 void q_provider_destroy(void);
 
-/* Does the descriptor text spell the provider marker `:pq:...` (case-
- * insensitive on the marker)? */
-int q_provider_spec_is(const char* s, size_t n);
+/* hopen (`:pq:<kind>:alias; arg) — arg borrowed, NULL = `::`; answers the alias sym, re-pointing a live one in place */
+ray_t* q_provider_hopen(const char* s, size_t n, ray_t* arg);
 
-/* Is the descriptor inside the pq FILE namespace — path `pq` or `pq:...`
- * after the optional hsym colon, case-insensitive?  hopen never opens these
- * as files: they parse as a coordinate or error 'domain (the `./pq...`
- * relative spelling stays the escape for real files). */
-int q_provider_ns_is(const char* s, size_t n);
+/* A kind's OWN connection (`:pq:duckdb:main`): listed and resolved like any alias, but hopen/hclose of it are 'domain.
+ * Answers the handle sym id, 0 on failure; token is retained. */
+int64_t q_provider_register_internal(q_pq_kind kind, const char* alias, ray_t* token);
 
-/* hopen `:pq:ds:alias:config` (CONNECTION form only — a table form is
- * 'domain, and the alias is REQUIRED: a sym handle needs a name) — the alias
- * sym `:pq:ds:alias`, a live alias re-pointed in place (the same sym).  EVERY
- * open form (bare sym, 2-list, 3-list, one-shot sym-apply) normalizes to the
- * FROZEN tuple .ds.i.open[alias; rest; timeout; config] — alias ` for the
- * one-shot, timeout 0N when absent, opts :: when absent (both borrowed here,
- * may be NULL); a non-dict opts is the provider's to read or refuse. */
-ray_t* q_provider_hopen(const char* s, size_t n, ray_t* timeout, ray_t* config);
-
-/* A provider's OWN connection as a registered row (DuckDB's `:pq:ds:main`):
- * listed by .pq.conns[], resolved like any alias, but hopen of that alias and
- * hclose of the handle are 'domain.  Answers the handle sym id, 0 on failure;
- * token is retained. */
-int64_t q_provider_register_internal(const char* ds, const char* alias, ray_t* token);
-
-/* The link seam (q_env_set / q_env_unbind): a carrier bound to a global is
- * .X.i.link[token; qname; table], one displaced or unbound is
- * .X.i.unlink[token; qname] — both OPTIONAL hooks, best-effort (the global is
- * already bound; a hook's error is dropped).  qname = the global's full name.
- * RAY_ERR_NYI (text pending) when the provider defines one without the other. */
+/* The link seam (q_env_set / q_env_unbind): .X.i.link[token; qname; table] / .X.i.unlink[token; qname], best-effort */
 ray_err_t q_provider_link(int64_t qname, ray_t* car);
 ray_err_t q_provider_unlink(int64_t qname, ray_t* car);
 
-/* DuckDB->q is a LOAD (`\l` on a coordinate, .pq.i.load[h;tables]): the
- * connection form loads the catalog through .X.i.load[token; tables] (() none,
- * :: all, else the sym list), the table form that one table.  The alias must
- * be LIVE ('conn), the hook defined ('nyi); the host binds each name it
- * answers to its pointer at the ROOT, later-wins, and answers the names. */
+/* `\l` on a coordinate / .pq.i.load[h;tables]: .X.i.load names the tables, the host binds them at the root */
 ray_t* q_provider_load(const char* s, size_t n, ray_t* tables);
 void   q_provider_pq_register(void);
 
-/* `hdel `:pq:ds:al:t/` drops the OBJECT through .X.i.hdel[token; t]; a q name
- * bound to it stays bound.  NULL = not `:pq:; the connection form is 'domain,
- * a dead alias 'conn, a provider without the hook 'nyi; answers x. */
-ray_t* q_provider_hdel(ray_t* x);
-
-/* `h y` on the LEGACY int handle (qh < 0 = async call).  Text -> .X.call,
- * sym atom -> .X.bind + carrier, list/sym-vector -> the named hook. */
-ray_t* q_provider_apply(int64_t qh, ray_t* y);
-
-/* The token behind a handle of THIS provider — the alias sym or the legacy
- * int — BORROWED; NULL when it is neither (dead, another provider's, junk).
- * A token means something only to its own provider (qpc's is an IPC fd), so
- * a native never decodes another's. */
-ray_t* q_provider_token(ray_t* handle, const char* provider);
-
-/* `` `:pq:... `` sym apply: a LIVE alias resolves to its connection, else
- * transient one-shot (open -> dispatch -> close, alias never registered). */
+ray_t* q_provider_hdel(ray_t* x);                     /* NULL = not a `:pq:` sym */
+ray_t* q_provider_apply(int64_t qh, ray_t* y);        /* the legacy int handle; qh < 0 = async */
+ray_t* q_provider_token(ray_t* handle, q_pq_kind kind); /* BORROWED; NULL = not a live alias of that kind */
 ray_t* q_provider_sym_apply(ray_t* head, ray_t** args, int64_t n);
-
-/* hclose arms: .X.i.close[token] (no-op if undefined), then the record and
- * its reserved fd go away.  Owned :: like q_handles_close; a dead alias sym
- * is the same tolerated no-op as a dead int, a sym that is no connection
- * REFERENCE (config, a table, no alias) 'domain, one that is not `:pq:` 'type. */
 ray_t* q_provider_close(int64_t qh);
 ray_t* q_provider_close_sym(ray_t* x);
 
-/* provider/alias/handle sym ids of a registered provider fd, whether its
- * connection is up (an IPC token that died reads 0 until the next use
- * re-dials it), and the socket fd of that IPC token (-1 = an opaque token);
- * 0 = no such fd */
+/* kind/alias/handle sym ids of an alias fd, whether it is up, and a q peer's socket fd (-1 otherwise); 0 = no such */
 int    q_provider_info(int64_t fd, int64_t* provider, int64_t* alias, int64_t* handle, int* open, int64_t* link);
 
-/* A forked child drops every alias it inherited without calling a hook or closing a descriptor. */
-void   q_provider_forget(void);
+void   q_provider_forget(void);                       /* a forked child drops every alias, calling nothing */
 
-int    q_provider_carrier_is(ray_t* x);      /* a bound table = the MARKED dict; never a shape test */
+int    q_provider_carrier_is(ray_t* x);               /* a bound table = the MARKED dict; never a shape test */
+ray_t* q_provider_flip(ray_t* cols, int64_t sym);     /* `cols!`:pq:duckdb:db:t/` -> the pointer, NULL = not that */
+ray_t* q_provider_unflip(ray_t* car);                 /* the pointer -> that pair, plain */
+int    q_provider_coord_sym_form(ray_t* x);           /* 0 none, 1 connection, 2 table coordinate */
 
-/* The flip law both ways (q_splay_flip's twin), each a FRESH block, NULL = not that shape: flip flip x ~ x. */
-ray_t* q_provider_flip(ray_t* cols, int64_t sym);     /* `cols!`:pq:…:t/` -> the pointer */
-ray_t* q_provider_unflip(ray_t* car);                 /* the pointer     -> that pair, plain */
-
-int    q_provider_coord_sym_is(ray_t* x);   /* -RAY_SYM spelling :pq:... */
-int    q_provider_coord_sym_form(ray_t* x); /* 0 none, 1 connection, 2 table (/) */
-
-/* `get` of a table-form coordinate — the carrier (splay symmetry), cols via
- * the bind hook on the live or temporary connection.  NULL = not `:pq:. */
-ray_t* q_provider_get_carrier(ray_t* x);
-
-/* Provider truth for a bound carrier: .X.get materialization, .X.count /
- * .X.meta with the host fallback (materialize) when undefined. */
+ray_t* q_provider_get_carrier(ray_t* x);              /* `get` of a coordinate; NULL = not a `:pq:` sym */
 ray_t* q_provider_carrier_table(ray_t* car);
 ray_t* q_provider_carrier_count(ray_t* car);
 ray_t* q_provider_carrier_meta(ray_t* car);
 
-/* funsql seams.  from_table: carrier value or table-form hsym -> owned
- * materialized table (phase-1 residual law), NULL = not a provider.  qsql_push:
- * when the from-slot is a provider table and .X.qsql is defined, call
- * .X.qsql[connid; cols; tree] — cols the provider-truth column list (one
- * LIVE bind round-trip; embedded carrier keys are advisory and can be
- * stale), tree the functional args with slot 0 the BARE underlying name
- * (name-normalization law).  A `::` result means the hook DECLINED; that,
- * a missing hook, or unavailable cols -> NULL (the materialize fallback). */
+/* funsql seams: the materialized from-slot (NULL = not a provider), and .X.qsql[token; cols; tree] pushdown — NULL
+ * when there is no hook or it answers `::` (declined), so the caller materializes */
 ray_t* q_provider_from_table(ray_t* t);
 ray_t* q_provider_qsql_push(ray_t** args, int64_t n);
 
-/* hsym-target write door: `` `:pq:ds:alias:t/ set y `` -> .X.set (upsert=1
- * -> .X.upsert).  NULL = not a provider target (caller keeps its path). */
-ray_t* q_provider_write(ray_t* x, ray_t* y, int upsert);
+ray_t* q_provider_write(ray_t* x, ray_t* y, int upsert);   /* `:pq:duckdb:db:t/ set|upsert y`; NULL = not ours */
 
 #endif

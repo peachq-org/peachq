@@ -12,7 +12,7 @@
 #include "qlang/q_console.h" /* q_console_write/_err — the 1 -1 2 -2 console handles */
 #include "qlang/q_dotz.h"   /* q_dotz_now_ns — the portable wall clock */
 #include "qlang/io/q_io.h"   /* q_io_mkdir_parents — hopen creates missing directories; q_io_write_fd */
-#include "qlang/io/q_provider.h" /* the `:pq:` virtual-table provider arms */
+#include "qlang/io/q_provider.h" /* the `:pq:` aliases: `:pq:q:`, `:pq:qfork:`, `:pq:qspawn:`, `:pq:duckdb:` */
 #include "qlang/net/q_wirefile.h"    /* q_wirefile_append_path — typed handle append */
 #include "qlang/net/q_ws.h"          /* q_ws_client_open — `:ws:// sym handles */
 #include "qlang/net/q_http_client.h" /* q_http_client_raw + the scheme spelling — `:http:// sym handles */
@@ -528,6 +528,42 @@ static int sym_scheme(const char* sp, size_t sl) {
     return sl && sp[0] == ':' && q_http_client_scheme_is(sp + 1, sl - 1) ? SCHEME_HTTP : SCHEME_NONE;
 }
 
+static const char* const PQ_KINDS[] = { NULL, "q", "qfork", "qspawn", "duckdb" };
+
+const char* q_handles_pq_kind_name(q_pq_kind k) { return k > Q_PQ_NONE && k <= Q_PQ_DUCKDB ? PQ_KINDS[k] : NULL; }
+
+int q_handles_name_ok(const char* p, size_t n) {
+    if (!n || !((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z'))) return 0;
+    for (size_t i = 1; i < n; i++) {
+        char c = p[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')) return 0;
+    }
+    return 1;
+}
+
+q_pq_kind q_handles_pq(const char* s, size_t n, q_pq_parts* parts) {
+    if (n < 4 || memcmp(s, ":pq:", 4) != 0) return Q_PQ_NONE;
+    int tbl = s[n - 1] == '/';
+    size_t e = tbl ? n - 1 : n, i = 4;
+    const char* f[3] = { NULL, NULL, NULL };
+    size_t fn[3] = { 0, 0, 0 };
+    int nf = 0, extra = 0;
+    while (i <= e) {                           /* the `:`-separated segments after `:pq:` */
+        size_t j = i;
+        while (j < e && s[j] != ':') j++;
+        if (nf < 3) { f[nf] = s + i; fn[nf] = j - i; nf++; } else extra = 1;
+        i = j + 1;
+    }
+    q_pq_kind kind = Q_PQ_BAD;
+    for (int k = Q_PQ_Q; k <= Q_PQ_DUCKDB && nf; k++)
+        if (strlen(PQ_KINDS[k]) == fn[0] && memcmp(f[0], PQ_KINDS[k], fn[0]) == 0) kind = (q_pq_kind)k;
+    if (!parts) return kind;
+    *parts = (q_pq_parts){ f[1], fn[1], tbl ? (f[2] ? f[2] : s + e) : NULL, tbl ? fn[2] : 0, 0 };
+    parts->ok = kind != Q_PQ_BAD && !extra && nf == (tbl ? 3 : 2) && q_handles_name_ok(f[1], fn[1]) &&
+                (!tbl || q_handles_name_ok(f[2], fn[2]));
+    return kind;
+}
+
 /* The `:`-prefixed SYM arm of the same abstraction: protocol dispatch on the
  * descriptor text — ws/wss and http/https clients, else one-shot sync IPC
  * (ref/hopen.md): connect -> send -> close.  A file-path SYM applies only
@@ -536,7 +572,7 @@ ray_t* q_handles_sym_apply(ray_t* head, ray_t** args, int64_t n) {
     ray_t* s = ray_sym_str(head->i64);               /* borrowed */
     const char* sp = ray_str_ptr(s);
     size_t sl = ray_str_len(s);
-    if (q_provider_spec_is(sp, sl))
+    if (q_handles_pq(sp, sl, NULL))
         return q_provider_sym_apply(head, args, n);
     int scheme = sym_scheme(sp, sl);
     if (scheme == SCHEME_WS) {
@@ -609,9 +645,9 @@ ray_t* q_handles_read1(int64_t fd, ray_t* count) {
  * equivalent hsym SYMBOL (both with the kdb "::PORT"/":host:port" leading-colon
  * conventions — the leading-`:` scanner lexes `` `::5000 ``/`` `:host:port `` as
  * one colon-bearing symbol, so both surfaces reach hopen_norm_descriptor and
- * share ONE parser), or a 2-list (conn; timeout-ms).  A `:pq:` conn may also
- * be a 3-list (conn; timeout; config) — the provider open triad — and answers
- * the alias SYM, not an int (q_provider_hopen).  A `:path` / `:fifo://path`
+ * share ONE parser), or a 2-list (conn; timeout-ms).  A `:pq:` alias is
+ * `(`:pq:<kind>:alias; arg)` or the bare spec (arg `::`) and answers the alias SYM,
+ * not an int (q_provider_hopen).  A `:path` / `:fifo://path`
  * descriptor is NOT IPC — hopen_transport routes it to q_handles_open above.
  * DEFERRED (clean 'nyi, not a silent TCP attempt): the transport schemes
  * `unix://` / `tcps://` / `unixs://`, which need a transport layer peachq lacks,
@@ -719,14 +755,14 @@ q_sym_kind q_handles_sym_kind(ray_t* sym) {
     const char* sp = s ? ray_str_ptr(s) : NULL;
     size_t sl = s ? ray_str_len(s) : 0;
     if (!sl || sp[0] != ':') return Q_SYM_NAME;
-    if (q_provider_spec_is(sp, sl))
-        return q_provider_coord_sym_form(sym) == 2 ? Q_SYM_PATH : Q_SYM_PROCESS;
+    q_pq_parts parts;
+    if (q_handles_pq(sp, sl, &parts)) return parts.table ? Q_SYM_PATH : Q_SYM_PROCESS;
     if (sym_scheme(sp, sl) != SCHEME_NONE) return Q_SYM_PROCESS;
     const char* path; size_t plen;
     return hopen_transport(sp, sl, &path, &plen) == HT_IPC ? Q_SYM_PROCESS : Q_SYM_PATH;
 }
 
-/* q `hopen y` — connect: an int handle (a `:pq:` conn: its alias sym).  Restricted connections must not
+/* q `hopen y` — connect: an int handle (a `:pq:` alias: its sym).  Restricted connections must not
  * open outbound sockets (the `.ipc.open` primitive is RAY_FN_RESTRICTED; calling
  * ray_hopen_fn directly bypasses the eval-layer check, so re-assert it here). */
 static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given);
@@ -749,24 +785,36 @@ static int hopen_conn_text(ray_t* c, const char** ds, size_t* dn) {
     return 0;
 }
 
+/* the sym vector `(`:pq:q:srv;`::5000)` collapses to has its head by id, a general list as an item */
+q_pq_kind q_handles_pq_of(ray_t* x, const char** s, size_t* n) {
+    int64_t cn;
+    if (x && x->type == RAY_SYM && q_count(x) >= 1) {
+        ray_t* h = ray_sym_str(ray_vec_get_sym_id(x, 0));
+        if (!h) return Q_PQ_NONE;
+        *s = ray_str_ptr(h); *n = ray_str_len(h);
+        return q_handles_pq(*s, *n, NULL);
+    }
+    if (x && x->type == RAY_LIST && q_count(x) >= 1) x = ((ray_t**)ray_data(x))[0];
+    if (hopen_conn_text(x, s, n)) return q_handles_pq(*s, *n, NULL);
+    if (!q_str_text_bytes(x, s, &cn)) return Q_PQ_NONE;
+    *n = (size_t)cn;
+    return q_handles_pq(*s, *n, NULL);
+}
+
 static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* conn      = x;
     ray_t* timeout   = NULL;
     ray_t* pair_conn = NULL;   /* owned when a pair was a typed int VECTOR */
     ray_t* pair_to   = NULL;
-    if (x && x->type == RAY_LIST && q_count(x) >= 3) {
-        /* (conn; timeout; config) — the provider open triad ONLY; a socket
-         * hopen stays kdb's 2-list, so a non-provider 3-list keeps its 'type.
-         * The triad is FROZEN: a longer provider tuple is 'rank, never a
-         * silently dropped tail. */
-        ray_t** e = (ray_t**)ray_data(x);
-        const char* ds; size_t dn;
-        if (hopen_conn_text(e[0], &ds, &dn) && q_provider_spec_is(ds, dn)) {
-            if (q_count(x) > 3) return q_err(QE_RANK);
-            /* the third element is the provider's: it gets the caller's value, not the legacy STR form */
-            return q_provider_hopen(ds, dn, e[1], ((ray_t**)ray_data(given))[2]);
-        }
+    const char* ds; size_t dn;
+    if (x && (x->type == RAY_LIST || x->type == RAY_SYM) && q_handles_pq_of(x, &ds, &dn)) {   /* (spec; arg) */
+        if (q_count(x) != 2) return q_err(QE_RANK);
+        if (x->type == RAY_LIST) return q_provider_hopen(ds, dn, ((ray_t**)ray_data(given))[1]);
+        ray_t* arg = ray_sym(ray_vec_get_sym_id(x, 1));
+        ray_t* r = q_provider_hopen(ds, dn, arg);
+        ray_release(arg);
+        return r;
     }
     if (x && x->type == RAY_LIST && q_count(x) == 2) {   /* (conn; timeout-ms) */
         ray_t** e = (ray_t**)ray_data(x);
@@ -782,13 +830,9 @@ static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given) {
     /* File/FIFO transport (Phase 1): a `:path` / `:fifo://path` descriptor opens a
      * filesystem fd directly, never an IPC socket.  A bare int port / `::port` /
      * `:host:port` classifies IPC and falls through. */
-    const char* ds; size_t dn;
     if (hopen_conn_text(conn, &ds, &dn)) {
-        if (q_provider_spec_is(ds, dn)) {
-            if (pair_conn) ray_release(pair_conn);
-            if (pair_to)   ray_release(pair_to);
-            return q_provider_hopen(ds, dn, timeout, NULL);   /* config absent -> :: */
-        }
+        if (q_handles_pq(ds, dn, NULL))
+            return q_provider_hopen(ds, dn, NULL);
         const char* path; size_t plen;
         int ht = hopen_transport(ds, dn, &path, &plen);
         if (ht != HT_IPC) {
@@ -796,8 +840,8 @@ static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given) {
             if (pair_to)   ray_release(pair_to);
             if (ht == HT_FIFO_NYI)
                 return q_err(QE_NYI);
-            if (q_provider_ns_is(ds, dn))
-                return q_err(QE_DOMAIN);   /* the marker owns its file namespace */
+            if (plen >= 2 && path[0] == 'p' && path[1] == 'q' && (plen == 2 || path[2] == ':'))
+                return q_err(QE_DOMAIN);   /* `pq` is the alias namespace, never a file */
             return q_handles_open(path, plen, ht == HT_FIFO);
         }
     }
@@ -861,8 +905,8 @@ static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given) {
 }
 
 /* q `hclose h` — validate the handle, then delegate the file/fifo-vs-IPC
- * dispatch to this file's q_handles_close; a SYM is a provider alias handle
- * (what hopen `:pq:` answers).  Restricted connections are refused, matching
+ * dispatch to this file's q_handles_close; a SYM is a `:pq:` alias
+ * (what hopen `:pq:<kind>:alias` answers).  Restricted connections are refused, matching
  * hopen / the handle-apply path. */
 ray_t* q_hclose_wrap(ray_t* x) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
