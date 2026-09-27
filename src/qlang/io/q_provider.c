@@ -6,6 +6,8 @@
 #include "qlang/io/q_provider.h"
 #include "qlang/io/q_handles.h"
 #include "qlang/io/q_worker.h"     /* q_worker_fork / _spawn — the qfork and qspawn opens */
+#include "qlang/io/q_io.h"         /* q_io_file_path, q_io_abs_spelling — a worker's stdout/stderr files */
+#include "qlang/ops/q_index.h"     /* q_index_amend — storing those files absolute */
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"     /* q_type_is_int_atom; q_type_coord_mark — THE carrier mark */
 #include "qlang/q_env.h"
@@ -21,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>          /* PATH_MAX */
 #include <unistd.h>          /* close — releasing the reserved fd */
 
 #define PROV_NAME_MAX 256
@@ -141,6 +144,10 @@ static ray_t* hook_call(q_pq_kind kind, const char* hook, ray_t** args, int64_t 
     return q_eval_apply_call_sym(s, args, n);
 }
 
+static int key_is(ray_t* ks, const char* name) {
+    return ks && ray_str_len(ks) == strlen(name) && memcmp(ray_str_ptr(ks), name, strlen(name)) == 0;
+}
+
 /* A dict arg's keys, each one the kind takes: out[j] (owned) is the value of names[j].  'domain for any other key —
  * a key that does not apply is never ignored. */
 static ray_t* arg_opts(ray_t* d, const char* const* names, int nn, ray_t** out) {
@@ -151,8 +158,7 @@ static ray_t* arg_opts(ray_t* d, const char* const* names, int nn, ray_t** out) 
     for (int64_t i = 0; i < m; i++) {
         ray_t* ks = ray_sym_vec_cell(keys, i);
         int j = 0;
-        while (j < nn && !(ks && ray_str_len(ks) == strlen(names[j]) && memcmp(ray_str_ptr(ks), names[j], strlen(names[j])) == 0))
-            j++;
+        while (j < nn && !key_is(ks, names[j])) j++;
         if (j == nn) return q_err(QE_DOMAIN);
         ray_t* iv = ray_i64(i);
         if (out[j]) ray_release(out[j]);
@@ -194,27 +200,75 @@ static ray_t* open_q(ray_t* arg) {
     return r;
 }
 
-/* `:pq:qfork:`: `::` or a timeout in ms; `:pq:qspawn:`: the argv (`""`/`::` = none).  Each dict takes `timeout`, and
- * qspawn's names its argv `argv`. */
+/* A worker's `stdout`/`stderr` value is a file symbol: true with its path NUL-terminated in buf[cap], else *why */
+static bool log_path(ray_t* v, char* buf, size_t cap, q_err_e* why) {
+    ray_t* p = v->type == -RAY_SYM ? q_io_file_path(v) : NULL;
+    if (!p) { *why = QE_TYPE; return false; }
+    size_t n = ray_str_len(p);
+    bool ok = n < cap;
+    if (ok) { memcpy(buf, ray_str_ptr(p), n); buf[n] = '\0'; }
+    else *why = QE_LIMIT;
+    ray_release(p);
+    return ok;
+}
+
+/* `:pq:qfork:`: `::` or a timeout in ms; `:pq:qspawn:`: the argv (`""`/`::` = none).  Each dict takes `timeout`,
+ * `stdout` and `stderr`, and qspawn's names its argv `argv`. */
 static ray_t* open_worker(q_pq_kind kind, ray_t* arg) {
-    static const char* const names[] = { "timeout", "argv" };
-    ray_t* o[2] = { NULL, NULL };
+    static const char* const names[] = { "timeout", "stdout", "stderr", "argv" };
+    ray_t* o[4] = { NULL, NULL, NULL, NULL };
     ray_t* err = NULL;
     ray_t* tmo  = NULL;
     ray_t* argv = kind == Q_PQ_QSPAWN ? arg : NULL;
+    char buf[2][PATH_MAX];
+    const char* log[2] = { NULL, NULL };
     if (arg->type == RAY_DICT) {
-        err = arg_opts(arg, names, kind == Q_PQ_QSPAWN ? 2 : 1, o);
-        tmo = o[0]; argv = o[1];
+        err = arg_opts(arg, names, kind == Q_PQ_QSPAWN ? 4 : 3, o);
+        tmo = o[0]; argv = o[3];
+        q_err_e why;
+        for (int i = 0; i < 2 && !err; i++)
+            if (o[i + 1]) {
+                if (log_path(o[i + 1], buf[i], sizeof buf[i], &why)) log[i] = buf[i];
+                else err = q_err(why);
+            }
     } else if (kind == Q_PQ_QFORK && !RAY_IS_NULL(arg)) {
         if (!q_type_is_int_atom(arg)) err = q_err(QE_TYPE);
         tmo = arg;
     }
     ray_t* none = NULL;
     if (!err && kind == Q_PQ_QSPAWN && (!argv || RAY_IS_NULL(argv))) argv = none = ray_list_new(0);
-    ray_t* r = err ? err : kind == Q_PQ_QFORK ? q_worker_fork(tmo) : q_worker_spawn(argv, tmo);
+    ray_t* r = err ? err : kind == Q_PQ_QFORK ? q_worker_fork(tmo, log) : q_worker_spawn(argv, tmo, log);
     if (none) ray_release(none);
-    for (int i = 0; i < 2; i++) if (o[i]) ray_release(o[i]);
+    for (int i = 0; i < 4; i++) if (o[i]) ray_release(o[i]);
     return r;
+}
+
+/* A worker dict's `stdout`/`stderr` file symbols made absolute NOW, so a relaunch after this process `\cd`s writes the
+ * same files; any other value is left for open_worker to refuse.  Consumes d, answers the arg to store. */
+static ray_t* logs_absolute(ray_t* d) {
+    static const char* const names[] = { "stdout", "stderr" };
+    for (int i = 0; i < 2 && d->type == RAY_DICT; i++) {
+        ray_t* k = ray_sym(ray_sym_intern_runtime(names[i], strlen(names[i])));
+        ray_t* v = ray_dict_get(d, k);
+        ray_t* e = v && RAY_IS_ERR(v) ? v : NULL;
+        char p[PATH_MAX], abs[PATH_MAX + 1];
+        q_err_e why;
+        if (v && !e && log_path(v, p, sizeof p, &why)) {
+            if (!q_io_abs_spelling(p, strlen(p), abs + 1, sizeof abs - 1)) e = q_err(QE_LIMIT);
+            else {
+                abs[0] = ':';
+                ray_t* a = ray_sym(ray_sym_intern_runtime(abs, strlen(abs)));
+                ray_t* r = q_index_amend(d, &k, 1, NULL, a);
+                ray_release(a);
+                if (RAY_IS_ERR(r)) e = r;
+                else d = r;
+            }
+        }
+        if (v && !RAY_IS_ERR(v)) ray_release(v);
+        ray_release(k);
+        if (e) { ray_release(d); return e; }
+    }
+    return d;
 }
 
 /* The one open every hopen and re-dial runs.  A q kind's token must be a q IPC connection this call made — its open
@@ -355,6 +409,8 @@ ray_t* q_provider_hopen(const char* s, size_t n, ray_t* arg) {
     int64_t aid = ray_sym_intern_runtime(p.alias, p.alias_n);
     ray_t* a = arg ? arg : RAY_NULL_OBJ;
     ray_retain(a);
+    if (kind == Q_PQ_QFORK || kind == Q_PQ_QSPAWN) a = logs_absolute(a);
+    if (RAY_IS_ERR(a)) return a;
     prov_ent* live = find_alias(kind, aid);
     if (live && live->internal) { ray_release(a); return q_err(QE_DOMAIN); }
     if (live) return repoint(live, a);

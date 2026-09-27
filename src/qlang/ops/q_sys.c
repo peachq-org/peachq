@@ -343,20 +343,25 @@ static ray_t* h_x(const char* arg, size_t alen) {
  * created if necessary, output APPENDED to an existing one.  FD level (dup2),
  * not a re-pointed FILE*, so every writer follows at once — the console sink,
  * the q handle 2, a child inheriting the descriptor — and `\1 /dev/stdin`
- * restores the default the way the doc says.  Getter form: still 'nyi. */
-static ray_t* h_redirect(int fd, const char* arg, size_t alen) {
-    if (alen == 0) return q_err(QE_NYI);
-    if (alen >= PATH_MAX) return q_err(QE_OS);
+ * restores the default the way the doc says. */
+int q_sys_redirect(int fd, const char* arg, size_t alen) {
+    if (alen >= PATH_MAX) return -1;
     char path[PATH_MAX];
     memcpy(path, arg, alen); path[alen] = '\0';
     q_io_mkdir_parents(path, alen);
     int f = open(path, O_BINARY | O_WRONLY | O_CREAT | O_APPEND, 0666);
-    if (f < 0) return q_err(QE_OS);
+    if (f < 0) return -1;
     fflush(fd == 1 ? stdout : stderr);   /* buffered bytes belong to the OLD target */
-    if (f == fd) return NULL;            /* std fd was closed: open landed ON it, already done */
+    if (f == fd) return 0;               /* std fd was closed: open landed ON it, already done */
     int rc = dup2(f, fd);
     close(f);
-    return rc < 0 ? q_err(QE_OS) : NULL;
+    return rc < 0 ? -1 : 0;
+}
+
+/* getter form: still 'nyi */
+static ray_t* h_redirect(int fd, const char* arg, size_t alen) {
+    if (alen == 0) return q_err(QE_NYI);
+    return q_sys_redirect(fd, arg, alen) ? q_err(QE_OS) : NULL;
 }
 
 /* `\b` (views) / `\B` (pending views), basics/syscmds.md — q_view.c owns the
