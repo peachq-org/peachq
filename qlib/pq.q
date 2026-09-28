@@ -50,6 +50,14 @@
 / @eg .pq.cancolor[]
 .pq.cancolor:{[] .pq.i.cancolor[]}
 
+/ The modern display of x as a string: exactly what the console prints when it is not in \classic mode, whatever the
+/ session's mode, clipped by \c like .Q.s.  A table or keyed table is the pipe table; anything else is the text .Q.s
+/ returns, which is always the classic display.
+/ @param x (any) the value to render
+/ @return (string) the display, ending in a newline
+/ @eg .pq.render_modern ([]a:1 2;b:`x`y)
+.pq.render_modern:{[x] .pq.i.render_modern x};
+
 / The console's syntax colours, role to colour, read by the highlighter at each redraw.  Roles: kw keywords, str
 / strings, esc string escapes, cmt comments, sym symbols, num numbers, tmp temporals and typed nulls, op verbs and
 / adverbs, sys system names, cmd \ commands, match the bracket or quote pair at the cursor.  A colour is an int 0-255
@@ -205,12 +213,15 @@
 
 .pq.i.conn_ls:{[handle] -1 .pq.i.conn_ls_lines handle;};
 
+/ The text the console prints for x in the session's display mode.
+.pq.i.console_text:{[x] $[system "classic"; .Q.s x; .pq.render_modern x]};
+
 / The console display of a remote result: the value as the console shows it, and under the classic display a
 / table's summary line - the modern display digests a clipped table itself and shows a small one whole.
 / @param val (any) the unwrapped value
 .pq.i.remote_show:{[val]
   if[(::)~val; :(::)];
-  1 .Q.s val;
+  1 .pq.i.console_text val;
   if[.Q.qt[val] and system "classic"; -1 .pq.summary val];
   };
 
@@ -230,9 +241,9 @@
 .pq.i.remote_clipped:{[val]
   size:"c "," " sv {$[null x; "0N"; string x]} each system "c";
   system "c 2000 2000";
-  whole:@[.Q.s;val;{[size;err] system size; 'err}[size]];
+  whole:@[.pq.i.console_text;val;{[size;err] system size; 'err}[size]];
   system size;
-  not whole~.Q.s val};
+  not whole~.pq.i.console_text val};
 
 / Evaluate q text on a server and `set` the value to a file, its ending choosing the format (.csv .json .parquet, else
 / kdb binary).  A result over the 10 MB gate is refused - only its display text came back - with `'oversize`.

@@ -67,7 +67,7 @@
                     if (PROMPT.test(s)) got.push({ line: s, block: [] });
                     else if (got.length) got[got.length - 1].block.push(s);
                 }
-                const trim = (b) => b.join('\n').replace(/\r/g, '').replace(/^[ \t\n]+|[ \t\n]+$/g, '');
+                const trim = (b) => b.map((l) => l.replace(/[ \t\r]+$/, '')).join('\n').replace(/^[ \t\n]+|[ \t\n]+$/g, '');
                 const report = [];
                 want.forEach((w, i) => {
                     const g = got[i], exp = trim(w.block);
@@ -76,7 +76,7 @@
                     else if (g.line !== w.line) { ok = false; act = 'prompt: ' + g.line; }
                     else if (exp.startsWith("'")) {
                         const cls = exp.split('\n')[0].replace(/[ \t]+$/, '').slice(1);
-                        const e = (g.block.find((l) => l.startsWith("'")) || '').replace(/\r$/, '');
+                        const e = (g.block.find((l) => l.startsWith("'")) || '').replace(/[ \t\r]+$/, '');
                         act = e || trim(g.block);
                         ok = !!e && (cls === '' || cls === 'error' || e === "'" + cls);
                     } else { act = trim(g.block); ok = act === exp; }
