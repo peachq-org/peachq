@@ -271,18 +271,10 @@ static int csv_p_cell(const char* f, size_t n, int64_t* out) {
                                          (hh * 3600 + mm * 60) * 1000000000LL, out);
 }
 
-/* THE WRITER'S FORM IS THE WHOLE GRAMMAR (owner 2026-08-27).  q prints a byte as
- * `0x` + exactly two hex digits and `.j.j` writes that, so that is what a cell may
- * be.  LONGER stays text: `0xFF0000` is a byte VECTOR, which one cell cannot hold.
- * BARE hex stays text too — `0a` is far likelier an identifier, the same call CSV
- * already makes on `007` — so the `0x` prefix is what makes this unambiguous.
- * The loader and the cast diverge here and stay diverged: `"X"$"0x0a"` is 0x00,
- * because Tok reads BARE hex and the prefix makes it consume an invalid pair.
- * Tok is not widened (R9); the loader reads the form q WRITES. */
-static int csv_byte_cell(const char* f, size_t n, uint8_t* out) {
-    if (n != 4 || f[0] != '0' || (f[1] | 0x20) != 'x') return 0;
+static int csv_hex_pair(const char* f, size_t n, uint8_t* out) {
+    if (n != 2) return 0;
     unsigned v = 0;
-    for (size_t i = 2; i < 4; i++) {
+    for (size_t i = 0; i < 2; i++) {
         char c = f[i];
         int d = (c >= '0' && c <= '9') ? c - '0' : ((c | 0x20) >= 'a' && (c | 0x20) <= 'f') ? (c | 0x20) - 'a' + 10 : -1;
         if (d < 0) return 0;
@@ -290,6 +282,19 @@ static int csv_byte_cell(const char* f, size_t n, uint8_t* out) {
     }
     *out = (uint8_t)v;
     return 1;
+}
+
+/* THE WRITER'S FORM IS THE WHOLE GRAMMAR (owner 2026-08-27).  q prints a byte as
+ * `0x` + exactly two hex digits and `.j.j` writes that, so that is what a cell may
+ * be.  LONGER stays text: `0xFF0000` is a byte VECTOR, which one cell cannot hold.
+ * BARE hex SNIFFS as text — `0a` is far likelier an identifier, the same call CSV
+ * already makes on `007` — so the `0x` prefix is what makes this unambiguous; only a
+ * DECLARED x also reads bare hex, the form `string` writes.
+ * The loader and the cast diverge here and stay diverged: `"X"$"0x0a"` is 0x00,
+ * because Tok reads BARE hex and the prefix makes it consume an invalid pair.
+ * Tok is not widened (R9); the loader reads the form q WRITES. */
+static int csv_byte_cell(const char* f, size_t n, uint8_t* out) {
+    return n == 4 && f[0] == '0' && (f[1] | 0x20) == 'x' && csv_hex_pair(f + 2, 2, out);
 }
 
 /* the D-separated (or, under a frozen 'n', any Tok-accepted clock) timespan */
@@ -646,7 +651,7 @@ ray_t* q_csv_cell_atom(const q_csv_fmt_t* fmt, char c, const char* f, size_t n) 
         }
         case 'x': {
             uint8_t b;
-            if (!csv_byte_cell(f, n, &b)) return q_err(QE_CSV);
+            if (!csv_byte_cell(f, n, &b) && !csv_hex_pair(f, n, &b)) return q_err(QE_CSV);
             return ray_u8(b);
         }
         /* z is p's cell: the legacy datetime is SPELLED like a timestamp, and a DECLARED type beats
