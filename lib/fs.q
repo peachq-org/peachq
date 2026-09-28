@@ -1,13 +1,13 @@
 / The filesystem: .fs.exists, .fs.isfile, .fs.isdir, .fs.size answer for a path, a symbol or a list of them;
-/ .fs.remove deletes the files named and .fs.rmdir the empty directories named - never anything below them.
-/ .fs.walk lists a tree's files, .fs.gettempdir names the temporary directory and .fs.mkdtemp makes a new one in it.
-/ @implNote THE .fs surface: the read-safe view of the filesystem, plus deletion bounded to the objects NAMED - one hdel
-/ per element, so a vector argument deletes exactly its own elements and never a level below any of them.  Every
-/ path argument converts through .path.path, so .fs takes a string, a symbol or a path and inherits .path's refusal of
-/ `:pq: provider handles and scheme:// URLs.  Portable q - key, hcount and hdel are all standard kdb, so nothing here
-/ calls the peachq C surface; the names are Python's os/os.path/tempfile spellings.  NO DELETION HERE RECURSES: hdel
-/ refuses a populated directory itself, and that refusal is the whole guard - inherited, never re-worded; .fs.walk
-/ recurses, but only reads.  Definitions only.
+/ .fs.remove deletes the files named and .fs.rmdir the empty directories named - never anything below them;
+/ .fs.rmtree deletes a directory tree.  .fs.walk lists a tree's files, .fs.gettempdir names the temporary directory
+/ and .fs.mkdtemp makes a new one in it.
+/ @implNote Every path argument converts through .path.path, so .fs takes a string, a symbol or a path and inherits
+/ .path's refusal of `:pq: provider handles and scheme:// URLs.  The names are Python's os/shutil/tempfile spellings.
+/ .fs.remove and .fs.rmdir are one hdel per element, and hdel's refusal of a populated directory is their whole guard;
+/ .fs.rmtree is the ONE recursive delete, and native, because a q walk over `key` follows links.
+
+.pq.load_natives`fs;
 
 / THE SHAPE LAW, and the one place the three kinds are told apart: `key` answers a symbol ATOM for a file, a symbol
 / VECTOR for a directory and a GENERAL empty for a missing path.  So an EMPTY directory is `symbol$() - 11h, a
@@ -50,6 +50,11 @@
 / 'io and survives intact - the engine's refusal to recurse is the guard, and it is passed through untouched.
 / @param p (any) a path, a string or a symbol - or a list of them
 .fs.rmdir:{[p] .fs.i.map[{hdel .fs.i.accept[0 11h;x]};p]};
+
+/ delete a directory and everything in it, answering its path; a link inside it, or named, is removed and never
+/ followed.  A file, a root, the working directory or any directory above it is 'domain; a missing path is 'io.
+/ @param p (any) a path, a string or a symbol - or a list of them
+.fs.rmtree:{[p] .fs.i.map[.fs.i.rmtree;p]};
 
 / the files at any depth under a directory whose names match a `like` pattern, as strings relative to it, in `key`
 / order.  A file answers its own name when it matches; an empty directory or a missing path answers ().
