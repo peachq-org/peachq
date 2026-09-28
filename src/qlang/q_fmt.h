@@ -19,12 +19,13 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz);
  * its first cols-3 chars + `..` at columns cols-2,cols-1 (fixed-column,
  * type-blind); a display taller than rows-2 lines shows rows-3 lines + a bare
  * `..` row.  Applied IN-RENDER by q_fmt.c's emitter, so a huge value never
- * renders in full.  The DISPLAY seam — REPL auto-echo, `show`, `.Q.s` route
- * through here; unarmed (or for a parse tree — rule 2) it equals q_fmt. */
+ * renders in full.  The DISPLAY seam — REPL auto-echo and `show` route
+ * through here, and only here does the modern mode apply; classic and unarmed
+ * (or for a parse tree — rule 2) it equals q_fmt. */
 void q_fmt_console(ray_t* val, char* buf, size_t bufsz);
 
 /* q_fmt_console into a HEAP buffer grown to fit — the console seam's ONE growth home (REPL
- * auto-echo, `show`, `.Q.s`).  Nothing is dropped at the DESTINATION buffer, so the truncation a
+ * auto-echo, `show`).  Nothing is dropped at the DESTINATION buffer, so the truncation a
  * reader sees is `\c`, which shows itself as `..`.  (The renderers still stage each nested
  * ELEMENT through a fixed array of their own — a separate cap, PLAN.md.)  *len is the rendered
  * length.  CALLER MUST free().  NULL = it could not be produced (allocation failure, or past the
@@ -39,7 +40,11 @@ char* q_fmt_console_alloc(ray_t* val, size_t* len);
 void q_fmt_set_prec(int p);
 int  q_fmt_prec(void);
 
-/* Bind `.pq.i.facts` — the pipe digest's per-column facts as strings — for `\l pq`. */
+/* A display as a q string ending in the console's line terminator, under the `\c` clip: the classic console text
+ * (modern=0, `.Q.s`) or the modern display (modern=1), whatever the session's mode.  Owned, or 'wsfull. */
+ray_t* q_fmt_display_charv(ray_t* val, int modern);
+
+/* Bind `.pq.i.facts` (the pipe digest's per-column facts as strings) and `.pq.i.render_modern` for `\l pq`. */
 void q_fmt_pq_register(void);
 
 /* THE q float->text leaf (`\P`-honouring; NaN -> 0n/0Ne; wholes within the \P

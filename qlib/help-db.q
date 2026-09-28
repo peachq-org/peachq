@@ -415,6 +415,7 @@
 .help.i.r[`.pq.conns;".pq.conns[]                         /                         list every open connection, one row each"]
 .help.i.r[`.pq.termsize;".pq.termsize[]                      /                         report the live terminal size as rows and columns"]
 .help.i.r[`.pq.cancolor;".pq.cancolor[]                      /                         tell whether stdout should carry ANSI colour"]
+.help.i.r[`.pq.render_modern;".pq.render_modern ([]a:1 2)         /                         render a value as the modern console display, a string"]
 .help.i.r[`.pq.dr;".pq.dr `neg                         / ::                      print a verb's domain and range grid, one row per type"]
 .help.i.r[`.pq.load;".pq.load`regexp                     /                         load the standard-library files not already loaded ([] = every file)"]
 .help.i.r[`.pq.load_natives;".pq.load_natives`regexp             /                         bind the C functions a standard-library file calls, by file name"]
