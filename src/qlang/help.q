@@ -296,8 +296,8 @@
   ("q [file.q] -conn target [-eval \"src\"]... [-save file] [-ls]  runs on a live q; nothing runs here";
    "  target is anything hopen takes, as written: 5000, :localhost:5000, :host:port:user:pass, :unix://...";
    "  q -conn :localhost:5000 -eval 'select from trade where sym=`AAPL'";
-   "  q setup.q -conn :localhost:5000                 the file's text is one call, then each -eval, then stdin";
-   "  echo \"count trade\" | q -conn :localhost:5000";
+   "  q setup.q -conn :localhost:5000                 the file's text is one call, then each -eval";
+   "  echo \"count trade\" | q -conn :localhost:5000    stdin is read only with no file and no -eval";
    "  q -conn :localhost:5000 -save out.parquet -eval 'trade'";
    "  q -conn :localhost:5000 -ls";
    "  the last expression's value comes back; the server's own show/0N!/-1 output stays on its console";

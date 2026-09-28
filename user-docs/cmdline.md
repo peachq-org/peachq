@@ -146,8 +146,8 @@ loads its standard library, connects, and everything you hand it is evaluated on
 
 ```bash
 q -conn :localhost:5000 -eval 'select from trade where sym=`AAPL'
-q setup.q -conn :localhost:5000                   # the file's text is one call, then each -eval, then stdin
-echo "count trade" | q -conn :localhost:5000
+q setup.q -conn :localhost:5000                   # the file's text is one call, then each -eval
+echo "count trade" | q -conn :localhost:5000       # stdin is read only with no file and no -eval
 q -conn :localhost:5000 -save out.parquet -eval 'trade'
 q -conn :localhost:5000 -ls
 ```
@@ -157,9 +157,11 @@ q -conn :localhost:5000 -ls
   without the leading backtick. Nothing is checked or added here: a target that opens but is
   not a q process fails at the first call, with that call's error. The connection uses a 5-second timeout; a
   refusal is `q: cannot connect to <target>: <hopen's error>`, exit 2.
-- **Ordering** is the local process's: the file's whole text as ONE call, then each `-eval` text as one call, then
-  piped stdin one call per line (blank lines run nothing). Multi-line text — a file, or an `-eval` with newlines —
-  runs as a script on the server: statement by statement, the last statement's value comes back.
+- **Ordering** is the local process's: the file's whole text as ONE call, then each `-eval` text as one call.
+  Piped stdin is read, one call per line (blank lines run nothing), only when there is neither a file nor an
+  `-eval`: with either, stdin is left alone, so a run from cron or a pipeline never waits on it. Multi-line text —
+  a file, or an `-eval` with newlines — runs as a script on the server: statement by statement, the last
+  statement's value comes back.
 - **Display.** The value of each call is shown as the console would show it: a table as the pipe table, clipped to
   `\c` rows with the `... (showing first n of N rows)` line and the per-column summary (`px=1-3. sym=all distinct.`)
   under it; anything else in the usual form. On a terminal the console is the terminal's size; when stdout is a
