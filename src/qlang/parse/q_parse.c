@@ -434,10 +434,7 @@ static Tokens scan(const char *src) {
             EMIT(T_NOUN, scan_num_literal(src, &p));
             noun_pos = 1;
         }
-        /* q names cannot START with '_' (leading '_' is the drop/cut verb);
-         * interior '_' stays a name byte (a_b) via the CL_ALPHA continuation
-         * loops below, so only the token-start byte is excluded here. */
-        else if (((cl & CL_ALPHA) && c != '_') ||
+        else if (((cl & CL_ALPHA) && !q_parse_drop_lead(c)) ||
                  (c == '.' && (CLASS[(uint8_t)src[p+1]] & CL_ALPHA))) {
             while (CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) p++;
             while (src[p] == '.' && (CLASS[(uint8_t)src[p+1]] & (CL_ALPHA | CL_DIGIT))) {
@@ -531,7 +528,7 @@ static Tokens scan(const char *src) {
                      * `http://www.example.com), but only where more body
                      * follows — a trailing ':' is still the operator, and '-'
                      * is never a bare-symbol byte (`a-b stays subtraction). */
-                    for (;;) {
+                    if (!q_parse_drop_lead(src[p])) for (;;) {
                         while ((CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) ||
                                src[p] == '.')
                             p++;

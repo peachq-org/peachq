@@ -28,7 +28,7 @@
 .parquet.i.schema:{[c;t]
   k:.duckdb.i.lit lower string t;
   if[0=first (.duckdb.exec[c;"SELECT count(*) AS n FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = 'main' AND table_name = '_q_schema'"])`n; :()];
-  .duckdb.exec[c;"SELECT c.column_name AS col, c.data_type AS dtype, s.logical, s.iskey FROM main._q_schema s JOIN duckdb_columns() c ON c.database_name = ",$[t=`_q_staging;"'temp'";"current_database()"]," AND c.schema_name = 'main' AND c.table_name = ",(.duckdb.i.lit string t)," AND translate(c.column_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = s.col WHERE s.tbl = ",k," AND s.col <> '' ORDER BY c.column_index"]}
+  .duckdb.exec[c;"SELECT c.column_name AS col, c.data_type AS dtype, s.logical, s.iskey FROM main._q_schema s JOIN duckdb_columns() c ON c.database_name = ",$[t=.duckdb.i.staging;"'temp'";"current_database()"]," AND c.schema_name = 'main' AND c.table_name = ",(.duckdb.i.lit string t)," AND translate(c.column_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = s.col WHERE s.tbl = ",k," AND s.col <> '' ORDER BY c.column_index"]}
 / @ignore
 .parquet.i.coord:{[t]
   if[-11h<>type v:value flip t; :()];
@@ -54,19 +54,19 @@
   if[98h<>type table; '`type];
   if[count ct:.parquet.i.coord table;
     .parquet.i.copy[ct 0;"(SELECT * FROM ",(.duckdb.i.qname ct 1),")";file;.parquet.i.schema . ct;opts]; :file];
-  c:.duckdb.main[]; .duckdb.set[c;`_q_staging;$[-11h=type value flip table;select from table;table]];
-  .parquet.i.copy[c;.duckdb.i.qname `_q_staging;file;.parquet.i.schema[c;`_q_staging];opts];
-  .duckdb.hdel[c;`_q_staging]; file}
+  c:.duckdb.main[]; .duckdb.set[c;.duckdb.i.staging;$[-11h=type value flip table;select from table;table]];
+  .parquet.i.copy[c;.duckdb.i.qname .duckdb.i.staging;file;.parquet.i.schema[c;.duckdb.i.staging];opts];
+  .duckdb.hdel[c;.duckdb.i.staging]; file}
 
 / @ignore
 .parquet.i.restore:{[rel;kv;query]
   c:.duckdb.main[];
   ds:update col:`$col from .duckdb.exec[c;"SELECT column_name AS col, column_type AS dtype FROM (DESCRIBE SELECT * FROM ",rel,")"];
   env:ds lj `col xkey select col:`$col, logical:`$logical, iskey from .j.k kv;
-  .duckdb.set[c;`_q_staging;(flip (env`col)!(count env)#enlist ();env)];
-  .duckdb.exec[c;"INSERT INTO ",(.duckdb.i.qname `_q_staging)," SELECT * FROM ",rel];
-  r:$[.duckdb.i.none query;.duckdb.get[c;`_q_staging];.duckdb.i.push[c;.pq.i.resolveTree[env`col;(enlist `_q_staging),eval each 2_query]]];
-  .duckdb.hdel[c;`_q_staging]; r}
+  .duckdb.set[c;.duckdb.i.staging;(flip (env`col)!(count env)#enlist ();env)];
+  .duckdb.exec[c;"INSERT INTO ",(.duckdb.i.qname .duckdb.i.staging)," SELECT * FROM ",rel];
+  r:$[.duckdb.i.none query;.duckdb.get[c;.duckdb.i.staging];.duckdb.i.push[c;.pq.i.resolveTree[env`col;(enlist .duckdb.i.staging),eval each 2_query]]];
+  .duckdb.hdel[c;.duckdb.i.staging]; r}
 
 / Read a parquet file (or files) as a table, optionally through a select pushed down to DuckDB.
 / @param file `:x.parquet, a glob as `$":data/*.parquet", a URL, or a list of them

@@ -145,7 +145,7 @@ static int32_t lex_symbol(hl_t* h, int32_t i) {
     int32_t     j = i + 1;
     if (j < h->len && b[j] == ':') {
         while (++j < h->len && (is_word(b[j]) || b[j] == '.' || b[j] == ':' || b[j] == '/')) {}
-    } else {
+    } else if (j >= h->len || !q_parse_drop_lead(b[j])) {
         for (;;) {
             while (j < h->len && (is_word(b[j]) || b[j] == '.')) j++;
             int32_t sep = j;
