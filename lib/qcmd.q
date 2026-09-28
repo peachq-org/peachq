@@ -20,15 +20,16 @@
   root,"/","/" sv {[kept;part] $[part~".."; -1_kept; kept,enlist part]}/[();parts]};
 
 .qcmd.i.opts:{[opts]
-  opts:(`out`n!(::;10)),$[99h=type opts; opts; ()!()];
+  opts:(`out`n`setup!(::;10;::)),$[99h=type opts; opts; ()!()];
   if[not (type opts`n) in -5 -6 -7h; '`type];
+  if[not ((::)~opts`setup) or (type opts`setup) within 100 112h; '`type];
   if[1>opts`n; '`domain];
   opts};
 
 / Replay and score every transcript under a path.
 / @param path (any) a .qcmd file, or a directory whose *.qcmd files at every depth are scored (*.win.qcmd excluded)
 / @param opts (dict) `out the replay directory (by default a temporary one, deleted after scoring), `n the forks run
-/ at once (10)
+/ at once (10), `setup a function each worker runs on its directory's path, from inside it, before the replay
 / @return (table) file line prompt want got why, one row per transcript row, line its prompt's 1-based line in the
 / file; why is "" for a pass, else output, prompt, no error, error, worker died or missing row
 .qcmd.check:{[path;opts]
@@ -41,17 +42,17 @@
     absolute:.qcmd.i.abspath each src;
     keep:where not .str.startswith[absolute; out,"/"];
     ([] file:`$src keep; src:absolute keep; out:join[out] each rel keep; k:til count keep)};
-  batch:{[jobs]
+  batch:{[setup;jobs]
     / Answers (worker;pid).  The worker appends, so a stale replay goes first; it replays in a directory of its own.
     / No local may share a .pq.conns[] column name: `where spec=alias` would compare two columns.
-    start:{[job]
+    start:{[setup;job]
       target:.path.path job`out;
       @[hdel;target;::];
       worker:@[.pq.hopen_qfork[`$"qcmdrun",string job`k];`stdout`stderr!2#target;{[err] `}];
       if[null worker; :(worker;0Ni)];
       conn:exec handle:first handle, pid:first pid from .pq.conns[] where spec=worker;
-      replay:{[dir;file] system "cd ",dir; system "l ",file};
-      @[neg conn`handle;(replay;job`dir;job`src);::];
+      replay:{[dir;setup;file] system "cd ",dir; setup dir; system "l ",file};
+      @[neg conn`handle;(replay;job`dir;setup;job`src);::];
       (worker;conn`pid)};
     / A sync call on a dead qfork alias forks a fresh worker, so a changed .z.i is a death too.
     finish:{[started]
@@ -83,7 +84,7 @@
       res:@[res;lost;:;(count lost)#enlist (""; $[died; "worker died"; "missing row"])];
       ([] file:n#file; line:want 2; prompt:want 0; want:want 1; got:res[;0]; why:res[;1])};
     jobs[`dir]:{.fs.mkdtemp[]} each jobs`k;
-    started:start each jobs;
+    started:start[setup] each jobs;
     died:finish each started;
     {@[.fs.rmtree;x;::]} each jobs`dir;
     raze score'[jobs`file;jobs`src;jobs`out;died]};
@@ -91,7 +92,7 @@
   own:(::)~opts`out;
   out:.qcmd.i.abspath $[own; .fs.mkdtemp[]; opts`out];
   score_all:{[plan;batch;path;out;n] jobs:plan[path;out]; .qcmd.i.EMPTY,$[count jobs; raze batch each n cut jobs; ()]};
-  results:.[score_all;(plan;batch;path;out;opts`n);::];
+  results:.[score_all;(plan;batch opts`setup;path;out;opts`n);::];
   if[own; @[.fs.rmtree;out;::]];
   if[10h=type results; 'results];
   results};
@@ -117,3 +118,17 @@
   {[file;ok] -1 string[file],": ",string[sum ok],"/",string count ok}'[key files;ok value files];
   if[not (::)~opts`out; -1 "replays: ",.qcmd.i.abspath opts`out];
   $[(0=count results) or not all ok; 1; 0]};
+
+/ ---------------------------------------- the peachq test corpus ----------------------------------------
+
+/ A setup that links, into a worker's directory, each symlink now in the working directory (read once, here).
+.qcmd.i.linkset:{[]
+  quote:{[s] "'",ssr[s;"'";"'\\''"],"'"};
+  names:system "find . -maxdepth 1 -type l";
+  if[0=count names; :{[dir]}];
+  sources:" " sv quote each (system["cd"],"/"),/:2_'names;
+  {[quote;sources;dir] system "ln -s ",sources," ",quote dir}[quote;sources]};
+
+/ .qcmd.check over a corpus run from the gate's scratch directory, each worker seeing its links (tools/qscratch.sh).
+/ @param dir (any) as .qcmd.check's path
+.qcmd.corpus:{[dir] .qcmd.check[dir;(enlist `setup)!enlist .qcmd.i.linkset[]]};
