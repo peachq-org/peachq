@@ -44,25 +44,11 @@ ray_t* q_dotq_qp_fn(ray_t* x) {
     return q_splay_table_path(x) ? ray_bool(false) : ray_i64(0);
 }
 
-/* (.Q.s x) — x formatted to plain text as the console prints it (ref/dotq.md
- * `.Q.s`), returned as a q string.  SINGLE-HOMES to q_fmt_console_alloc — the
- * same DISPLAY seam `show` uses (q_console_show is it + '\n') — so
- * `.Q.s x` is byte-identical to what `show x` prints, INCLUDING the
- * line-terminating trailing newline, and OBEYS the `\c` console width/height
- * ("Obeys console width and height set by \c", ref/dotq.md) and `\P`
- * precision.  We do NOT reuse q_console_show here: that PRINTS to the console,
- * and `.Q.s` must be side-effect-free and RETURN the string.
- * The buffer grows to fit: q_fmt_console_alloc is the console seam's one growth home. */
+/* (.Q.s x) — x as the classic console prints it, `\c`-clipped and line-terminated (ref/dotq.md `.Q.s`), whatever the
+ * display mode: the returned string is data.  `::` and `()` print nothing, so their text is empty. */
 ray_t* q_dotq_s_fn(ray_t* x) {
-    size_t len;
-    char*  buf = q_fmt_console_alloc(x, &len);       /* `.Q.s` OBEYS `\c` */
-    if (!buf) return q_err(QE_WSFULL);
-    char* nb = realloc(buf, len + 2);
-    if (!nb) { free(buf); return q_err(QE_WSFULL); }
-    nb[len] = '\n';                                  /* console line terminator */
-    ray_t* r = ray_charv(nb, (int64_t)(len + 1));
-    free(nb);
-    return r;
+    if (RAY_IS_NULL(x) || (x && x->type == RAY_LIST && q_count(x) == 0)) return ray_charv("", 0);
+    return q_fmt_display_charv(x, 0);
 }
 
 /* ---- .Q.ops — the whole verb surface as a read-only introspection table ----
