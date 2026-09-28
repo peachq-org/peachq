@@ -401,8 +401,29 @@ static ray_t* repoint(prov_ent* live, ray_t* a) {
     return ray_sym(live->handle);
 }
 
+/* the positive handle sym of a `-alias` spelling (the async form); NULL for any other */
+static ray_t* async_pos(const char* s, size_t n) {
+    q_pq_parts p;
+    if (!q_handles_pq(s, n, &p) || !p.alias_n || p.alias[0] != '-') return NULL;
+    ray_t* a = ray_sym(ray_sym_intern_runtime(s, n));
+    ray_t* r = q_handles_pq_neg(a);
+    ray_release(a);
+    return r;
+}
+
 ray_t* q_provider_hopen(const char* s, size_t n, ray_t* arg) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    ray_t* pos = async_pos(s, n);
+    if (pos && RAY_IS_ERR(pos)) return pos;
+    if (pos) {                                 /* opens (or reuses) the alias, answers the form it was asked for */
+        const char* ps = NULL; size_t pn = 0;
+        sym_text(pos, &ps, &pn);
+        ray_release(pos);
+        ray_t* r = q_provider_hopen(ps, pn, arg);
+        if (!r || RAY_IS_ERR(r)) return r;
+        ray_release(r);
+        return ray_sym(ray_sym_intern_runtime(s, n));
+    }
     q_pq_parts p;
     q_pq_kind kind = q_handles_pq(s, n, &p);
     if (!kind || !p.ok || p.table) return q_err(QE_DOMAIN);   /* a table is never a connection */
@@ -585,13 +606,17 @@ static ray_t* alias_live(q_pq_kind kind, const q_pq_parts* p, prov_ent** out) {
 ray_t* q_provider_sym_apply(ray_t* head, ray_t** args, int64_t n) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     if (n != 1) return q_err(QE_RANK);
-    const char* s; size_t sl;
+    const char* s = NULL; size_t sl = 0;
+    ray_t* pos = sym_text(head, &s, &sl) ? async_pos(s, sl) : NULL;
+    if (pos && RAY_IS_ERR(pos)) return pos;
+    int sync = !pos;
+    if (pos) { sym_text(pos, &s, &sl); ray_release(pos); }   /* the text is the sym table's, not the atom's */
     q_pq_parts p;
-    q_pq_kind kind = sym_text(head, &s, &sl) ? q_handles_pq(s, sl, &p) : Q_PQ_NONE;
+    q_pq_kind kind = s ? q_handles_pq(s, sl, &p) : Q_PQ_NONE;
     if (!kind || !p.ok || p.table) return q_err(QE_DOMAIN);   /* a table is never a connection */
     prov_ent* e;
     ray_t* err = alias_live(kind, &p, &e);
-    return err ? err : prov_dispatch(e, args[0], 1);
+    return err ? err : prov_dispatch(e, args[0], sync);
 }
 
 
