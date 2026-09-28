@@ -169,41 +169,22 @@ int8_t q_builtins_type_num(ray_t* x) { return x ? type_of(x) : 0; }
 /* ---- table introspection (type-output feature) --------------------------- */
 /* The tag -> type-char map is q_type_char (q_type.c, the type-axis home). */
 
-/* True iff x is a uniform, matrix-mappable list of simple vectors of ONE
- * element type (kdb `.Q.ty` upper-case case, e.g. `3 2#3 4 5` or
- * `("abc";"de")`).  *elt receives that element tag (RAY_STR for a list of
- * char-vector strings). */
-static int uniform_list(ray_t* x, int8_t* elt) {
-    if (!x || x->type != RAY_LIST) return 0;
-    int64_t n = q_count(x);
-    if (n == 0) return 0;
-    ray_t** e = (ray_t**)ray_data(x);
-    int8_t t0 = 0;
-    for (int64_t i = 0; i < n; i++) {
-        ray_t* ei = e[i];
-        int8_t ti;
-        if (ei && ei->type == -RAY_STR)      ti = (int8_t)RAY_STR;   /* char vec */
-        else if (ei && ray_is_vec(ei))       ti = (int8_t)ei->type;  /* simple vec */
-        else return 0;                                               /* not uniform */
-        if (i == 0) t0 = ti; else if (ti != t0) return 0;
-    }
-    if (elt) *elt = t0;
-    return 1;
+static char ty_upper(int8_t tag) {
+    char lc = q_type_char(tag);
+    return lc ? (char)(lc - 'a' + 'A') : ' ';
 }
 
-/* type char of one value, as `.Q.ty`/`meta` see it.  Simple vector -> lower;
- * native string (-RAY_STR) -> 'c' (INTROSPECTION shim: peachq stores a char
- * vector as one string atom); uniform list of vectors -> UPPER; else blank. */
+/* type char of one value, as `.Q.ty` and `meta` both see it: a vector is lower case, an atom upper case, and a
+ * general list is its FIRST item's letter upper case when that item is a vector, else blank — never a uniformity
+ * scan (ref/meta.md: "only the first item in each column is examined"). -RAY_STR is a char VECTOR, not an atom. */
 char q_ty_char(ray_t* x) {
-    int8_t elt;
-    if (x && x->type == -RAY_STR) return 'c';                       /* char-vec shim */
-    if (x && (ray_is_vec(x) || x->type == RAY_ENUM))
-        return q_type_char((int8_t)x->type);        /* enum column: `s` (meta pin) */
-    if (uniform_list(x, &elt)) {
-        char lc = q_type_char(elt);
-        return (char)(lc ? (lc - 'a' + 'A') : ' ');
-    }
-    return ' ';
+    if (!x) return ' ';
+    if (x->type == -RAY_STR) return 'c';
+    if (ray_is_vec(x) || x->type == RAY_ENUM) return q_type_char((int8_t)x->type);
+    if (ray_is_atom(x)) return ty_upper(x->type);
+    ray_t* e0 = x->type == RAY_LIST && q_count(x) ? ((ray_t**)ray_data(x))[0] : NULL;
+    if (e0 && e0->type == -RAY_STR) return ty_upper(RAY_STR);
+    return e0 && ray_is_vec(e0) ? ty_upper(e0->type) : ' ';
 }
 
 
