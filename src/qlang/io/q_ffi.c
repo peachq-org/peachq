@@ -1,6 +1,6 @@
 /* q_ffi — the .ffi.i.* natives: the KX-ffikdb-compatible FFI core over the
  * vendored libffi (third_party/libffi; surface spec: the published ffikdb
- * reference, adopted Apache-2.0 per the ksql precedent — see lib/ffi.q).
+ * reference, adopted Apache-2.0 per the ksql precedent — see `.ffi`).
  * The KX law kept verbatim: type LETTERS feed the CIF; VALUES marshal from
  * the ACTUAL q args — atoms via scratch slots, vectors as in-place data
  * pointers (C-side mutation is visible, the KX pointer contract), sym

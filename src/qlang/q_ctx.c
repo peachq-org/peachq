@@ -492,7 +492,7 @@ static const char* ctx_known_file(const char* p, int64_t n) {
  *
  * A file whose extension is MORE than one letter is handed WHOLE, as read0's
  * lines, to `.<ext>.e` when that is a function, else to peachq's built-in
- * default for the extension — `qcmd`: `.pq.i.qcmd` (lib/pq.q), a console
+ * default for the extension — `qcmd`: `.pq.i.qcmd`, a console
  * transcript replayed — else it loads as q (owner ruling 2026-09-24).  Whole,
  * because the statement walker cannot read a transcript: an indented display
  * line continues the statement before it, a bare `/` output line opens a
@@ -565,7 +565,7 @@ static int ctx_whole_file(const char* path, ray_t** handler) {
     if (!ext || snprintf(name, sizeof name, ".%s.e", ext) >= (int)sizeof name) return 0;
     ray_t* fn = q_env_peek(ray_sym_intern_runtime(name, strlen(name)));   /* peek: `f.pq` must not autoload .pq */
     if (fn && q_eval_apply_is_fn(fn)) { *handler = fn; return 1; }
-    /* internal only, not user-facing: no user-docs, help or --help mention until the owner decides to expose it */
+    /* internal only, not user-facing: no docs, help or --help mention until the owner decides to expose it */
     return strcmp(ext, "qcmd") == 0;
 }
 

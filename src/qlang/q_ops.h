@@ -99,7 +99,7 @@ typedef struct {
  * sideeffect AUDIT and FAMILY AUDIT blocks); the `family` vocabulary is
  * atomic|map|aggregate|index|rowid|structural|irregular|none (defs:
  * actionable-plans/2026-07-15-uniform-structure-dispatch.md).  Per-verb help
- * strings live OUTSIDE the binary (lib/help-builtins.tsv). */
+ * strings live OUTSIDE the binary (help-builtins.tsv). */
 /* Rank-2 sub-law of an `aggregate` row — what the L3 lift does with a NESTED
  * argument (a dict's rank-2 values, or a plain nested list).  Zero-default is
  * "no rank-2 law": first/last reduce to an ITEM, not a column (ref/first.md). */

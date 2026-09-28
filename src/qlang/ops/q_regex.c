@@ -1,5 +1,5 @@
 /* q_regex — the RE2 verb surface: the `rlike` keyword and the `.regexp.i.*`
- * natives lib/regexp.q is written over.  Specification: user-docs/lib/regexp.md.
+ * natives `.regexp` is written over.
  *
  * Regex verbs join the STRING-BOUNDARY exception catalogue beside like/ss/ssr
  * rather than declaring a family: a string IS a char vector, so no lift law can

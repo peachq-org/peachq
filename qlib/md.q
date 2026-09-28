@@ -2,7 +2,7 @@
 / with tables, strikethrough and task lists.
 / .
 / @eg
-/ t:.md.parse hsym `$"user-docs/c-extensions.md"
+/ t:.md.parse ("| a | b |";"|---|---|";"| 1 | 2 |")
 / first exec val from t where kind=`table
 / .md.html "Hello *world*"
 

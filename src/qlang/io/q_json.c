@@ -1128,7 +1128,7 @@ static ray_t* jr_reconcile(jr_st* st) {
 /* ---- build ----------------------------------------------------------------- */
 
 /* the shared cell parser signals 'csv; inside this reader that fit failure is
- * 'type — the class lib/j.q declares — so the spelling is remapped, not the law */
+ * 'type — the class `.j` declares — so the spelling is remapped, not the law */
 static ray_t* jr_cellerr(ray_t* e) {
     int64_t n;
     const char* t = q_err_text(e, &n);
@@ -1569,7 +1569,7 @@ static ray_t* jr_opts(jr_st* st, ray_t* opts) {
         else if (k->type != -RAY_SYM) bad = q_err(QE_TYPE);
         else if (jr_opt_is(k->i64, "")) {
             /* the empty-sym key is padding, value unread — the same short-dict
-             * idiom lib/csv.q legalizes, without weakening the never-ignored law */
+             * idiom `.csv` legalizes, without weakening the never-ignored law */
         } else if (jr_opt_is(k->i64, "sample_size")) {
             int64_t x;
             if (!q_type_strict_i64(v, &x)) bad = q_err(QE_TYPE);

@@ -10,9 +10,9 @@
 / The bootstrap itself is NOT listened to: q_comment.c is inert over the core
 / list, so nothing in this file (or q.q/.h/.j) is captured and the store is
 / EMPTY after boot - this file's own public names are hand-written rows in
-/ lib/help-db.q, file-less and line-less like every other builtin.  That whole
+/ help-db.q, file-less and line-less like every other builtin.  That whole
 / file, page entries included, is deferred: FIRST HELP ACCESS is the one thing
-/ that loads it (owner 2026-09-03) - not boot, not `\l pq`.  Every READER
+/ that loads it (owner 2026-09-03) - not boot, not a library load.  Every READER
 / calls .help.i.loaddb (get/text/find/i.index/show/full); .help.oneline does
 / NOT, because it fires on every line typed and must never pull in a load as
 / a side effect of typing.  So the REPL hint for a builtin is dark until the
@@ -248,7 +248,7 @@
   ninf:(::;::;::;::;-0Wh;-0Wi;-0W;-0We;-0w;::;::;-0Wp;-0Wm;-0Wd;-0Wz;-0Wn;-0Wu;-0Wv;-0Wt),16#enlist(::);
   sql:("";"";"";"";"smallint";"int";"bigint";"real";"float";"";"varchar";"";"";"date";"timestamp";"";"";"";"time"),16#enlist"")
 
-/ the command line, one row per flag (user-docs/cmdline.md is its prose):
+/ the command line, one row per flag:
 / option is the flag with its parameter shape, syscmd the `\` command that
 / reads or sets the same thing (` when none), supported whether peachq honours
 / it, new whether kx q has no such flag.  A VALUE like .help.types, so
@@ -316,7 +316,7 @@
   $[count s;first s;""]}
 
 / the namespace a file documents: the one most of its definitions bind into,
-/ else its stem (`lib/str.q` is `.str`) - register_file's ns is only the `\d`
+/ else its stem (str.q is `.str`) - register_file's ns is only the `\d`
 / context, which every lib file leaves at `.`.
 .help.i.filens:{[f]
   d:exec ns from .help.funcs where file=f;
@@ -327,7 +327,7 @@
 .help.i.nssum:{[f;v] l:first "\n" vs v; s:(last "/" vs string f)," - "; $[s~(count s)#l;(count s)_l;l]}
 
 / every documented namespace: one row per file header the capture saw - the
-/ `\l pq` files and a user's own alike - with the header's one-liner.
+/ library's files and a user's own alike - with the header's one-liner.
 .help.namespaces:{[]
   t:select file,val from .help.filetags where null tag;
   select ns:.help.i.filens each file,file,summary:.help.i.nssum'[file;val] from t}
@@ -336,7 +336,7 @@
 .help.i.nsheader:{[p] fs:exec file from .help.namespaces[] where ns=p;
   raze {"\n" vs x} each exec val from .help.filetags where file in fs,null tag}
 
-/ register one builtin's one-liner - every row of lib/help-db.q, the page entries
+/ register one builtin's one-liner - every row of help-db.q, the page entries
 / included, calls it, so keep the call short.  It NEVER overwrites a
 / CAPTURED definition: the db loads at FIRST HELP ACCESS, by which time a user's own
 / docs can already be in the store, and theirs win.  A null `line` is what marks a
@@ -504,7 +504,7 @@
 / the index (bare `?`): the tutorial first, every row pasteable, `· page`
 / marking a directory.  Every listed page HAS an entry, so its row is that
 / entry's own line - one home per summary.  Then every documented NAMESPACE
-/ the session holds (.help.namespaces: the `\l pq` files and the user's own),
+/ the session holds (.help.namespaces: the library's files and the user's own),
 / or the `\l pq` line while none is loaded.  Layout is prose: order lives here.
 .help.i.index:{[]
   .help.i.loaddb[];
@@ -522,7 +522,7 @@
 
 / page ENTRY rows, rendered from the registry summary.  NEVER overwrites an
 / already-documented name - the defensive half of the no-collision rule.
-/ lib/help-db.q calls it AFTER its generated block, so a page whose body IS its
+/ help-db.q calls it AFTER its generated block, so a page whose body IS its
 / entry (`started`) already stands and keeps its generated line.
 .help.i.pr:{[name;page] if[not name in exec fullname from .help.funcs;
   .help.i.r[name;.help.i.line["\\?",string name;.help.i.pages[page;`summary]," · page"]]];}

@@ -2,7 +2,7 @@
  * NAMED positional arguments through two hooks: `.help.register_file[file;ns;
  * header]` and `.help.register_definition[fullname;ns;file;line;header]`.
  * peachq owns no doc store in C (owner ruling): `.help` is pure q in
- * lib/help.q and this file only feeds it.
+ * `.help` and this file only feeds it.
  *
  * The CONTRACT a driver owes: bracket each script, classify every physical
  * line, and end each statement — one comment run documents at most one name.

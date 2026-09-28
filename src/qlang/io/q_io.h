@@ -43,8 +43,7 @@ ray_t* q_io_file_triple(ray_t* fsym, ray_t* offv, ray_t* wantv, int clamp,
  * when asked, says whether one was. */
 ray_t* q_io_read_slice(ray_t* pathstr, int64_t off, int64_t want, int* zipped);
 
-/* THE range/EOF law, defined once for every transport (user-docs/handles.md
- * point 4): an offset past EOF reads nothing, a length past EOF is a short read,
+/* THE range/EOF law, defined once for every transport: an offset past EOF reads nothing, a length past EOF is a short read,
  * want < 0 is to EOF.  *off is clamped in place; the return is what to take. */
 int64_t q_io_clamp(int64_t size, int64_t* off, int64_t want);
 
@@ -79,7 +78,7 @@ ray_t* q_io_set(ray_t* x, ray_t* y);
 void q_io_mkdir_parents(const char* path, size_t n);
 ray_t* q_io_write_all(ray_t* pathstr, const void* bytes, size_t n);
 
-/* bind .fs.i.rmtree, the native lib/fs.q wraps as .fs.rmtree (`.pq.load_natives`fs) */
+/* bind .fs.i.rmtree, the native `.fs` wraps as .fs.rmtree (`.pq.load_natives`fs) */
 void q_io_fs_register(void);
 
 /* THE fwrite: n bytes through a bounded stack buffer, so a mapped-on-touch source (a compressed splay region)

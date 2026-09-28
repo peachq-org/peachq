@@ -1,11 +1,11 @@
 / @ignore
 / help-db.q - the BUILTIN help database: one .help.i.r registration per builtin
-/ name, generated from lib/help-builtins.tsv, then the page entries and help.q's
+/ name, generated from help-builtins.tsv, then the page entries and help.q's
 / own public names by hand.  Split out of src/qlang/help.q so the always-on
 / bootstrap carries the machinery and this file carries only data: FIRST HELP
 / ACCESS is the one thing that loads it (owner 2026-09-03): every reader door
-/ calls .help.i.loaddb, boot does not, and neither does `\l pq`.
-/ >>> GENERATED from lib/help-builtins.tsv by `python3 tools/gen-help-builtins.py`
+/ calls .help.i.loaddb and nothing else does.
+/ >>> GENERATED from help-builtins.tsv by `python3 tools/gen-help-builtins.py`
 / >>> edit the TSV, rerun (it splices this block in place), commit both.
 .help.i.r[`abs;"abs -5 3 -2                         / 5 3 2                   take the magnitude, dropping the sign"]
 .help.i.r[`aj;"aj[`sym`time;trade;quote]           /                         as-of join: take the last y row at or before each x time"]
@@ -478,7 +478,7 @@
 
 / the extension SHOWCASE pages: each body IS its entry, in the tutorial's
 / rhythm (call / result / meaning), the results run by hand on this build -
-/ they need `\l pq`, a library or a live peer, which the witness step cannot.
+/ they need a library or a live peer, which the witness step cannot.
 .help.i.r[`ffi;"\n" sv .help.i.exline'[
   ("\\?ffi";"\\l pq";"strlen:.ffi.bind[`strlen;\"C\";\"i\"]";"strlen (\"hello world\";::)";"strlen \"hello world\"";
    "f:.ffi.bind[`libm.so.6`pow;\"ff\";\"f\"]";"f (2f;10f;::)";".ffi.callFunction[(\"f\";`sqrt)] (16f;::)";".ffi.bind[`getpid;\"\";\"i\"] (::)");

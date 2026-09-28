@@ -13,7 +13,6 @@
 / and the whole response, status included, is in .massive.envelope.
 / .
 / @eg
-/ \l pq
 / .massive.setKey "your-api-key"
 / r:.massive.bars[`AAPL;2026.08.01;2026.09.04;()!()]
 / 1-min r[`c]%maxs r`c                                          / the max drawdown over the range

@@ -1,5 +1,5 @@
 /* q — the launcher: arg parse, runtime/poll/listener bring-up, `-eval-before` texts, the startup script, `-eval`
- * texts, then REPL / server / exit.  Flags are documented in user-docs/cmdline.md; q_dotz.c's option table
+ * texts, then REPL / server / exit.  q_dotz.c's option table
  * (q_dotz_opt) is what q consumes from argv.  The interactive loop lives in q_repl.c. */
 #define _POSIX_C_SOURCE 200809L
 
@@ -33,7 +33,7 @@
 /* ---- `-conn`: the remote runner (owner ruling 2026-09-20) -------------------------------------------------------
  * A MODE with no flag in common with the local launcher: C parses argv, boots the runtime, loads the standard
  * library and composes CALLS to .pq.i.conn_* through the script seam; every display, history, error shape and exit
- * is q's (lib/pq.q).  The texts (the file, each -eval, each stdin line) are bound as q values rather than spliced
+ * is q's (`.pq`).  The texts (the file, each -eval, each stdin line) are bound as q values rather than spliced
  * into source, so no escaping happens here.  Exit codes: 2 bad arguments or no connection, 1 a remote error (the
  * q side `exit`s, as a failing script would), 0 otherwise. */
 static void conn_bind(const char* name, const char* s, size_t n) {
