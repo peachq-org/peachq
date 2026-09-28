@@ -564,6 +564,27 @@ q_pq_kind q_handles_pq(const char* s, size_t n, q_pq_parts* parts) {
     return kind;
 }
 
+ray_t* q_handles_pq_neg(ray_t* x) {
+    ray_t* str = x && x->type == -RAY_SYM ? ray_sym_str(x->i64) : NULL;   /* borrowed */
+    if (!str) return NULL;
+    const char* s = ray_str_ptr(str);
+    size_t n = ray_str_len(str);
+    q_pq_parts p;
+    if (!q_handles_pq(s, n, &p) || !p.alias) return NULL;
+    size_t at = (size_t)(p.alias - s);
+    int neg = p.alias_n && p.alias[0] == '-';
+    size_t m = neg ? n - 1 : n + 1;
+    char* out = (char*)malloc(m);
+    if (!out) return q_err(QE_OOM);
+    memcpy(out, s, at);
+    if (neg) memcpy(out + at, s + at + 1, n - at - 1);
+    else { out[at] = '-'; memcpy(out + at + 1, s + at, n - at); }
+    q_handles_pq(neg ? out : s, neg ? m : n, &p);
+    ray_t* r = p.ok ? ray_sym(ray_sym_intern_runtime(out, m)) : NULL;
+    free(out);
+    return r;
+}
+
 /* The `:`-prefixed SYM arm of the same abstraction: protocol dispatch on the
  * descriptor text — ws/wss and http/https clients, else one-shot sync IPC
  * (ref/hopen.md): connect -> send -> close.  A file-path SYM applies only
