@@ -1,6 +1,6 @@
 /* q_md — Markdown as q values.  md4c (third_party/md4c) does all of the parsing and the HTML rendering; this file
  * only adapts its callbacks: .md.i.parse folds the block events into one row per block, .md.i.html collects
- * md4c-html's XHTML.  A markdown table's val is its cells as strings, rows of them header first, which lib/md.q
+ * md4c-html's XHTML.  A markdown table's val is its cells as strings, rows of them header first, which `.md`
  * hands to .csv.read. */
 #include "qlang/q_count.h"
 #include "qlang/io/q_md.h"

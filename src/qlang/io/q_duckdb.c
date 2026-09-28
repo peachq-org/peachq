@@ -410,7 +410,7 @@ static ray_t* qd_door(ray_t** args, int64_t n, int64_t want, int* slot) {
 
 /* Every SQL statement (q_duckdb_run) and the appender's non-SQL batch reaches the hook, so a refused write shows
  * the CAST statement that was actually attempted.  The LOG itself is q's: `.duckdb.sqllog` is an ordinary table and
- * `lib/duckdb.q` owns the insert and the cap, so the schema and the retention are readable and changeable there. */
+ * `.duckdb` owns the insert and the cap, so the schema and the retention are readable and changeable there. */
 
 enum { QD_L_TIME, QD_L_DUR, QD_L_OK, QD_L_CONN, QD_L_ROWS, QD_L_SQL, QD_L_ERR, QD_L_NCOL };
 
@@ -570,7 +570,7 @@ static ray_t* qd_name_arg(int slot, ray_t* x, qd_name_t* out) {
     return NULL;
 }
 
-/* .duckdb.i.qname `t — the name as SQL, so a q-side door spells it exactly as the C doors do (lib/duckdb.q). */
+/* .duckdb.i.qname `t — the name as SQL, so a q-side door spells it exactly as the C doors do. */
 static ray_t* qd_qname_fn(ray_t* x) {
     char t[256];
     qd_name_t name;
@@ -1438,12 +1438,12 @@ static ray_t* qd_types_fn(ray_t** args, int64_t n) {
     return bad ? bad : tbl;
 }
 
-/* The INTERNAL native surface (`.duckdb.i.*`) the lib/duckdb.q provider hooks
+/* The INTERNAL native surface (`.duckdb.i.*`) the `.duckdb` provider hooks
  * are written over — the connection, the typed round-trip and one raw exec.
  * The public bespoke API (connect/sql/select/connections/version) was
  * REPLACED 2026-08-07 by the `:pq:duckdb:` virtual-table surface, not wrapped;
  * `.duckdb.err[]`, the message channel behind the bare 'duckdb, is the reader kept.
- * Registration fires from the `\l pq` gate, so the pre-gate env is kdb-clean. */
+ * Registration fires from `.pq.load_natives`, so a session that never loads `.duckdb` is kdb-clean. */
 void q_duckdb_register(void) {
     /* NO dlopen here — the library is resolved lazily on first use. */
     qd_bind_vary (".duckdb.i.open",   4, qd_open_wrap);
