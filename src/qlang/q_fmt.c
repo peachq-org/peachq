@@ -250,7 +250,8 @@ static size_t char_esc(unsigned char ch, char out[8]);   /* fwd — fmt_dict_ele
 static int elem_tok(ray_t* a, char* out, size_t n);      /* fwd — THE cell law, defined below */
 static int col_uniform_type(ray_t* col);                 /* fwd — its precondition */
 
-/* Tables: padded columns under a dashed rule, keyed tables put key columns left of `|`; NO trailing spaces. */
+/* Tables: every cell, the last column's too, pads to its column width, so each line is as wide as its dashed rule;
+ * keyed tables put key columns left of `|`. */
 
 #define QF_MAXCOL 64
 
@@ -411,13 +412,11 @@ static void q_fmt_table(ray_t* tbl) {
     table_widths(tbl, nc, size_rows(nr), widths, hdr);
 
     table_grid(nc, widths, hdr);
-    qe_trim();
     qe_putc('\n');
     grid_rule(nc, widths);
     qe_putc('\n');
     for (int64_t r = 0; r < nr; r++) {
         grid_cells(tbl, nc, widths, r);
-        qe_trim();
         if (r + 1 < nr) qe_putc('\n');
         if (qe_done()) break;                    /* height cap hit — early exit */
     }
@@ -437,18 +436,15 @@ static void fmt_keyed(ray_t* kt, ray_t* vt) {
     table_grid(knc, kw, kh);
     qe_putc('|'); qe_putc(' ');
     table_grid(vnc, vw, vh);
-    qe_trim();
     qe_putc('\n');
     grid_rule(knc, kw);
     qe_putc('|'); qe_putc(' ');
     grid_rule(vnc, vw);
-    qe_trim();
     qe_putc('\n');
     for (int64_t r = 0; r < nr; r++) {
         grid_cells(kt, knc, kw, r);
         qe_putc('|'); qe_putc(' ');
         grid_cells(vt, vnc, vw, r);
-        qe_trim();
         if (r + 1 < nr) qe_putc('\n');
         if (qe_done()) break;                    /* height cap hit — early exit */
     }
@@ -991,10 +987,8 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     fmt_into(val, buf, bufsz, &trunc);
 }
 
-/* Public entry, CONSOLE: the `\c` clip when armed; unarmed — or a parse tree — equals q_fmt. */
 /* ---- pipe-table display: a FORMATTING MODE (state lives in q_console.c).
- * Moved from the console split: the renderer is value->text, its sole caller
- * is q_fmt_console below — both entries are file-static. ---- */
+ * The renderer is value->text; its one caller is fmt_modern_into below. ---- */
 /* ---- modern pipe-table mode ---------------------------------------------- */
 
 #define QP_MAXCOL   64
@@ -1274,11 +1268,17 @@ static ray_t* qp_facts_fn(ray_t* t) {
     return out;
 }
 
-void q_fmt_pq_register(void) {
-    static const char nm[] = ".pq.i.facts";
-    ray_t* obj = ray_fn_unary(nm, RAY_FN_NONE, qp_facts_fn);
+static ray_t* render_modern_fn(ray_t* x) { return q_fmt_display_charv(x, 1); }
+
+static void fmt_bind(const char* nm, ray_unary_fn fn) {
+    ray_t* obj = ray_fn_unary(nm, RAY_FN_NONE, fn);
     q_env_bind_native(nm, obj, 1);
     ray_release(obj);
+}
+
+void q_fmt_pq_register(void) {
+    fmt_bind(".pq.i.facts", qp_facts_fn);
+    fmt_bind(".pq.i.render_modern", render_modern_fn);
 }
 
 /* ---- render -------------------------------------------------------------- */
@@ -1370,20 +1370,10 @@ static void fmt_pipe_render(ray_t* val, char* buf, size_t bufsz, int* trunc) {
 }
 
 
-static void fmt_console_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
+/* The classic console text under the `\c` clip, whatever the display mode. */
+static void fmt_classic_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
     *trunc = 0;
     if (bufsz == 0 || !buf) return;
-    /* Modern mode (armed by qmain/wasm unless `-classic`/`\classic 1`):
-     * tables render as the pipe table.  Gated
-     * HERE — the console seam — and never in q_fmt_body, which the UNCLIPPED
-     * q_fmt (`string`, `-3!`, CSV, every cell) shares and must keep legacy. */
-    if (q_console_pipe_on() && fmt_pipe_is_table(val)) { fmt_pipe_render(val, buf, bufsz, trunc); return; }
-    if (q_console_pipe_on() && q_provider_carrier_is(val)) {   /* a pointer IS a table here; unreadable -> legacy */
-        ray_t* mt = q_provider_carrier_table(val);
-        if (mt && !RAY_IS_ERR(mt) && mt->type == RAY_TABLE) { fmt_pipe_render(mt, buf, bufsz, trunc); ray_release(mt); return; }
-        if (mt && RAY_IS_ERR(mt)) ray_error_free(mt);
-        else if (mt) ray_release(mt);
-    }
     int32_t rows = 0, cols = 0;
     int armed = q_console_clip(&rows, &cols) && !g_clip_active;
     if (armed && val && val->type == RAY_LIST && list_is_parse_tree(val, 0))
@@ -1404,6 +1394,27 @@ static void fmt_console_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
     g_clip_active = 0;
 }
 
+/* The modern display: tables as the pipe table, everything else as the classic console text. */
+static void fmt_modern_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
+    *trunc = 0;
+    if (bufsz == 0 || !buf) return;
+    if (fmt_pipe_is_table(val)) { fmt_pipe_render(val, buf, bufsz, trunc); return; }
+    if (q_provider_carrier_is(val)) {   /* a pointer IS a table here; unreadable -> legacy */
+        ray_t* mt = q_provider_carrier_table(val);
+        if (mt && !RAY_IS_ERR(mt) && mt->type == RAY_TABLE) { fmt_pipe_render(mt, buf, bufsz, trunc); ray_release(mt); return; }
+        if (mt && RAY_IS_ERR(mt)) ray_error_free(mt);
+        else if (mt) ray_release(mt);
+    }
+    fmt_classic_into(val, buf, bufsz, trunc);
+}
+
+/* Only what prints follows the mode: gated HERE, never in q_fmt_body, which `string`, `-3!`, CSV and every cell share. */
+static void fmt_console_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
+    if (q_console_pipe_on()) fmt_modern_into(val, buf, bufsz, trunc);
+    else fmt_classic_into(val, buf, bufsz, trunc);
+}
+
+/* Public entry, CONSOLE: the `\c` clip when armed; unarmed — or a parse tree — equals q_fmt. */
 void q_fmt_console(ray_t* val, char* buf, size_t bufsz) {
     int trunc;
     fmt_console_into(val, buf, bufsz, &trunc);
@@ -2063,6 +2074,18 @@ static char* fmt_grow(void (*render)(ray_t*, char*, size_t, int*), ray_t* val, s
 }
 
 char* q_fmt_console_alloc(ray_t* val, size_t* len) { return fmt_grow(fmt_console_into, val, len); }
+
+ray_t* q_fmt_display_charv(ray_t* val, int modern) {
+    size_t len;
+    char*  buf = fmt_grow(modern ? fmt_modern_into : fmt_classic_into, val, &len);
+    if (!buf) return q_err(QE_WSFULL);
+    char* nb = realloc(buf, len + 2);
+    if (!nb) { free(buf); return q_err(QE_WSFULL); }
+    nb[len] = '\n';
+    ray_t* r = ray_charv(nb, (int64_t)(len + 1));
+    free(nb);
+    return r;
+}
 
 ray_t* q_fmt_krepr_charv(ray_t* val) {
     size_t len;
