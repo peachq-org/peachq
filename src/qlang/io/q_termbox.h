@@ -1,8 +1,8 @@
 /* q_termbox — the .termbox.i.* natives: an xterm-only cell terminal (raw mode
  * nested inside the REPL's, front/back cell buffers, diff-present with
  * 16/256/truecolor, decoded key + SGR-mouse input with a timeout) and its
- * headless door (init on two file paths).  Registered at the `\l pq` gate;
- * lib/termbox.q wraps the public .termbox.* spellings on top. */
+ * headless door (init on two file paths).  Bound by `.pq.load_natives`;
+ * `.termbox` wraps the public .termbox.* spellings on top. */
 #ifndef QLANG_IO_Q_TERMBOX_H
 #define QLANG_IO_Q_TERMBOX_H
 

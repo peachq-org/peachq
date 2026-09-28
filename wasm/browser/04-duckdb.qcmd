@@ -26,6 +26,6 @@ q).duckdb.exec[h;"COPY (SELECT 1 AS x) TO 'w.parquet'"]
 | 1     |
 q)4#read1 `:w.parquet
 0x50415231
-q)/ a same-origin parquet URL through lib/parquet.q
+q)/ a same-origin parquet URL through .parquet
 q)count select from hsym `$ORIGIN,"/test/data/parquet/gold_vs_bitcoin.parquet"
 517

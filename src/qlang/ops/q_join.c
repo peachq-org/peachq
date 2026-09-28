@@ -1106,7 +1106,7 @@ static ray_t* join_core(ray_t* x, ray_t* y, int exclusive, int append) {
      * ref/accumulators.md:264) for EVERY container, not just the ones base
      * concat happens to accept: a table is a list of records and a dict a list
      * of entries, so joining zero of them leaves either unchanged.  Without it
-     * `c:(); c,:t` (qlib/src/qunit.q's runNsTests) and `c,:d` are 'type — the
+     * `c:(); c,:t` (`.qunit.runNsTests`) and `c,:d` are 'type — the
      * dict pair reaching the bare-dict guard below. */
     if (x && y) {
         ray_t* t = (x->type == RAY_LIST && q_count(x) == 0)   ? y
