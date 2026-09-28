@@ -181,6 +181,12 @@ ray_t* q_string_fn(ray_t* x) {
         return ray_charv((const char*)&x->u8, 1);
     /* NB a charv vector falls to the element-wise arm below: kdb `string
      * "cat"` -> (,"c";,"a";,"t") (ref/string.md:37-39). */
+    /* Bare hex, not the display's 0x; ahead of the null arm since 0x00 is a value. */
+    if (x->type == -RAY_BYTE_ONLY) {
+        static const char hex[] = "0123456789abcdef";
+        char h[2] = { hex[x->u8 >> 4], hex[x->u8 & 0x0F] };
+        return ray_charv(h, 2);
+    }
     /* A NULL atom strings as the EMPTY string, every type (owner ruling
      * 2026-08-22: nulls have no q-readable text form — ref/string.md pins no
      * null spelling, and base's 0Nl/0Nf are rayfall literals, not q's).  This
