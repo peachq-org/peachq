@@ -23,9 +23,8 @@
 #endif
 
 
-/* (.Q.ty x) — LOWER char for a simple vector / string, UPPER for a uniform
- * list of vectors, blank (" ") otherwise (ref/dotq.md).  A char ATOM, so
- * `.Q.ty each` packs to one char vector ("jc JC" in the doc's own example). */
+/* (.Q.ty x) — q_ty_char's letter as a char ATOM, so `.Q.ty each` packs to one char vector ("jc JC" in the doc's own
+ * example). */
 ray_t* q_dotq_ty_fn(ray_t* x) {
     return ray_char((uint8_t)q_ty_char(x));
 }
