@@ -85,11 +85,13 @@
   r:.duckdb.exec[.duckdb.main[];"SELECT content FROM read_blob(",(.duckdb.i.file url),")"];
   if[0=count r; '`io]; if[1<count r; '`domain]; first r`content}
 / @ignore
+.duckdb.i.staging:`$"_q_staging"
+/ @ignore
 .duckdb.i.write0:{[url;lines]
   if[not all 10h=type each lines; '`type];
-  c:.duckdb.main[]; .duckdb.set[c;`_q_staging;([] line:lines)];
-  .duckdb.exec[c;"COPY (SELECT line FROM ",(.duckdb.i.qname `_q_staging),") TO ",(.duckdb.i.file url)," (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '')"];
-  .duckdb.hdel[c;`_q_staging]; url}
+  c:.duckdb.main[]; .duckdb.set[c;.duckdb.i.staging;([] line:lines)];
+  .duckdb.exec[c;"COPY (SELECT line FROM ",(.duckdb.i.qname .duckdb.i.staging),") TO ",(.duckdb.i.file url)," (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '')"];
+  .duckdb.hdel[c;.duckdb.i.staging]; url}
 
 / Create or replace a DuckDB secret (the credentials httpfs uses for s3:// gcs:// hf://), or drop one.
 / opts ride verbatim as KEY value clauses of CREATE SECRET, so an unknown key is DuckDB's own refusal; the key
