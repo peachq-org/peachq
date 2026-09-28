@@ -1,10 +1,10 @@
-/* q_strns — the `.str.i.*` strip natives behind lib/str.q's Python-shaped
+/* q_strns — the `.str.i.*` strip natives behind `.str`'s Python-shaped
  * `.str` namespace.  In C because character scanning in q is slow and these
  * three are the hot ones; everything else in `.str` stays q.
  * The stripped set is Python's `str.strip()` default WHITESPACE, spelled
  * exactly " \t\n\r" — NOT q's `trim`, which strips the char null.
  * Each native is a LEAF: it answers for one piece of text and knows nothing of
- * lists, symbols or dicts.  Shape is the wrapper's job (lib/str.q), which is
+ * lists, symbols or dicts.  Shape is the wrapper's job (`.str`), which is
  * also where the symbol coercion lives, so the discoverable q surface and the
  * dispatch have one home. */
 #include "qlang/q_count.h"

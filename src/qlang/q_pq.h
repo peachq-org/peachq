@@ -13,7 +13,7 @@
  * seam's law). */
 ray_t* q_pq_autoload(void);
 
-/* `\l pq` — reload every library file (`.pq.i.files`, lib/pq.q's list); the
+/* `\l pq` — reload every library file (`.pq.i.files`); the
  * reference itself autoloads `.pq`.  Returns as q_pq_autoload. */
 ray_t* q_pq_load(void);
 
@@ -25,14 +25,13 @@ ray_t* q_pq_load(void);
 ray_t* q_pq_autoload_ns(const char* stem, size_t n);
 
 /* `\l pq/<file>.q` (`lit` as given, a `.q` suffix optional): `path` is the file
- * a pq/ directory had, else the embedded lib/<file>.q or qlib/src/<file>.q
- * member runs as its own named script; a name in neither is 'path as given.
+ * a pq/ directory had, else the embedded member runs as its own named script; a name in neither is 'path as given.
  * pq.q's first load IS the autoload: `.pq.load_natives` is bound just before
  * it runs, the only `.pq` member its first line can see.  Returns as
  * q_pq_autoload. */
 ray_t* q_pq_load_file(const char* lit, size_t alen, const char* path);
 
-/* Bind `.help.i.loaddb` — the on-demand door onto the embedded lib/help-db.q
+/* Bind `.help.i.loaddb` — the on-demand door onto the embedded help-db
  * bundle (the generated builtin one-liners).  Called at runtime create so a bare
  * prompt has it.  FIRST HELP ACCESS is the only trigger (owner 2026-09-03): every
  * reader door in help.q calls it, `\l pq` does NOT, and the load is once per

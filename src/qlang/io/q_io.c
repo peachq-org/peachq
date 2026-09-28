@@ -244,7 +244,7 @@ ray_t* q_io_read_slice(ray_t* pathstr, int64_t off, int64_t want, int* zipped) {
     return io_slice(plain, off, want);
 }
 
-/* ---- the resource-read seam (user-docs/handles.md point 1) --------------- */
+/* ---- the resource-read seam ---- */
 
 /* A scheme-less path IS the file transport, so the only question is whether one
  * the http client speaks is spelled out in front. */
@@ -276,7 +276,7 @@ static size_t io_claim_len(ray_t* pathstr) {
     return n;
 }
 
-/* read_blob fetches the whole object, so a ranged read slices in memory (user-docs/handles.md § Remote schemes) */
+/* read_blob fetches the whole object, so a ranged read slices in memory */
 static ray_t* io_remote_read(ray_t* pathstr, int64_t off, int64_t want) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* url = q_str_charv_of_str(pathstr);
@@ -305,10 +305,9 @@ static ray_t* io_parquet_table(ray_t* fsym) {
 }
 
 /* The READ side of the on-disk-format classification q_io_set owns for writes,
- * for the formats that decode to a table by their name (user-docs/handles.md
- * § Format inference: explicit provider or scheme, then explicit format API,
- * then the recognised final suffix, then error — never Content-Type, never
- * magic bytes).  NULL = no recognised tabular format, so the caller falls back
+ * for the formats that decode to a table by their name (format inference: explicit provider or
+ * scheme, then explicit format API, then the recognised final suffix, then error — never
+ * Content-Type, never magic bytes).  NULL = no recognised tabular format, so the caller falls back
  * to q's own object load; a REMOTE resource has no such fallback, so there an
  * unrecognised suffix fails here rather than as a filesystem miss. */
 ray_t* q_io_resource_table(ray_t* fsym) {

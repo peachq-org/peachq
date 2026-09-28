@@ -127,7 +127,7 @@
   $[named and close<count line; close+1; 0]};
 
 / @ignore
-/ Internal only, not user-facing: do not document in user-docs, help or --help until the owner decides to expose it.
+/ Internal only, not user-facing: do not document in docs, help or --help until the owner decides to expose it.
 .pq.i.qcmd:{[lines]
   lines:$[10h=type lines; "\n" vs lines; lines];
   at:.pq.i.qcmd_prompt each lines;
@@ -335,13 +335,13 @@
   hdel each paths til drop;
   };
 
-/ Every standard-library file, in the order \l pq reloads them.
+/ Every standard-library file, in load order.
 .pq.i.files:`csv`duckdb`ffi`j`massive`md`parquet`pq`regexp`str`termbox`fs`path`pkg`qunit`yml;
 
 / Run each file as \l pq/<file>.q: a pq/ directory's (the working directory's, then QHOME's), else the built-in copy.
 .pq.i.run:{[files] {system "l pq/",string[x],".q"} each files; files};
 
-/ Load standard-library files not already loaded; \l pq/<file>.q and \l pq always reload.
+/ Load standard-library files not already loaded; \l pq/<file>.q always reloads.
 / @param files (symbol|symbol list) the files to load; [] for every library file
 / @return (symbol list) the files this call loaded
 / @eg .pq.load`regexp

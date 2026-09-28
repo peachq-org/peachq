@@ -53,7 +53,7 @@ void q_console_clip_setting(int64_t* rows, int64_t* cols);
  * or FORCE_COLOR (on), else colour iff the emitter's output is a terminal (`tty`) whose TERM is not dumb. */
 bool q_console_color(bool tty);
 
-/* lib/pq.q's natives `.pq.i.termsize` and `.pq.i.cancolor`; and termsize again as `.help.i.termsize`, bound at boot. */
+/* `.pq`'s natives `.pq.i.termsize` and `.pq.i.cancolor`; and termsize again as `.help.i.termsize`, bound at boot. */
 void q_console_pq_register(void);
 void q_console_help_register(void);
 
