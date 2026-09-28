@@ -460,14 +460,16 @@ hclose h                                        / the one close door
   end of its script), without firing `.z.pc`.
 - **A q peer's handle is a kdb handle**: on a `:pq:q:`, `:pq:qfork:` or `:pq:qspawn:` alias every message is sent to the
   other process unchanged, exactly as on an int handle, whatever names exist here. The async send is `neg` of the
-  alias int: `` neg[first exec handle from .pq.conns[] where spec=p] "x:1" `` for an alias `p`. `neg` on the symbol
-  stays q's `neg`. On DuckDB text is SQL and a list is `'type`.
+  alias, as on an int: `neg h` is the alias with a leading `-` (`` `:pq:qfork:-w1 ``), so `neg[h] "x:1"` sends
+  async and `neg[h][]` flushes. `neg` toggles the `-` on any `:pq:` symbol whatever its kind; the provider refuses
+  what it cannot do (DuckDB signals `'domain`). `hopen` of the `-` form opens the alias and answers the `-` form. On
+  DuckDB text is SQL and a list is `'type`.
 - The int in the `handle` column is accepted wherever the symbol is, for code that expects `hopen` to answer an int.
 - If a q peer dies, its alias keeps its number and its row (`state` reads `closed`); the next use makes ONE dial
   attempt through the same open with the same arg, on that arg's own timeout, and a failure errors that use.
 
 **A forked worker.** `` h:.pq.hopen_qfork[`w1;::] `` forks this process: the worker starts with every global this
-process has at that moment, and `h "expr"`, `h (`f;x)` and the async `neg` of its alias int talk to it over the kdb
+process has at that moment, and `h "expr"`, `h (`f;x)` and the async `neg[h] "expr"` talk to it over the kdb
 protocol like any q server. It is a snapshot, not a mirror — later changes on either side are not seen by the other —
 and it only computes: `\t`, `\p` and `\s` are 0, the `.z.p*`/`.z.w*` handlers are the ones a fresh q starts with (so
 `.z.ph` is the built-in web handler), the connections this process had are not open in it, and it exits without

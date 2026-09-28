@@ -25,7 +25,7 @@
 .pq.load_natives`duckdb;
 
 / @ignore
-.duckdb.call:{[c;q;sync] .duckdb.lastsql::q; .duckdb.i.exec[c;q]}
+.duckdb.call:{[c;q;sync] if[not sync; '`domain]; .duckdb.lastsql::q; .duckdb.i.exec[c;q]}
 / @ignore
 .duckdb.bind:{[c;t] (key .duckdb.i.meta[c;t])`c}
 / A table of the handle's catalog as a q table.

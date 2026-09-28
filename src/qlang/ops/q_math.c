@@ -12,6 +12,7 @@
 #include "lang/eval.h"     /* ray_eq_fn/ray_neq_fn, ray_neg_fn */
 #include "lang/internal.h" /* atomic_map_unary, as_f64, is_numeric_or_temporal, make_f64, ray_pow_fn */
 #include "qlang/base/q_type.h"  /* q_type_as_i64 / q_type_is_bool / q_type_is_char_atom */
+#include "qlang/io/q_handles.h" /* q_handles_pq_neg — a `:pq:` handle's async form */
 #include <math.h>          /* sin/cos/tan/asin/acos/atan, exp/log, isfinite, floor/floorf, ceil/ceilf */
 #include <string.h>        /* memcpy */
 #include <stdlib.h>        /* malloc, free */
@@ -124,7 +125,7 @@ ray_t* q_ceiling_wrap(ray_t* x) {
  * to the base kernel (its INT_MIN->null width guards).  Registered ATOMIC, so a
  * vector arrives element-wise.  Two lanes: f64-backed (DATETIME, bool) vs
  * i64-backed (the int temporals); a temporal's only INT64_MIN is its null,
- * caught first. */
+ * caught first.  A `:pq:` handle sym negs to its async form (a peachq extension). */
 ray_t* q_neg_wrap(ray_t* x) {
     if (x && (is_temporal(x) || RAY_IS_TEMPORALF(-x->type) || q_type_is_bool(x))) {
         if (RAY_ATOM_IS_NULL(x)) { ray_retain(x); return x; }
@@ -136,6 +137,10 @@ ray_t* q_neg_wrap(ray_t* x) {
         ray_t* r = q_dollar_cast(out, p);
         ray_release(p);
         return r;
+    }
+    if (x && x->type == -RAY_SYM) {
+        ray_t* r = q_handles_pq_neg(x);
+        return r ? r : q_err(QE_TYPE);
     }
     return ray_neg_fn(x);
 }

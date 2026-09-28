@@ -116,6 +116,9 @@ q_pq_kind    q_handles_pq(const char* s, size_t n, q_pq_parts* parts);
 q_pq_kind    q_handles_pq_of(ray_t* x, const char** s, size_t* n);   /* a sym/string, or the head of a list of them */
 const char* q_handles_pq_kind_name(q_pq_kind k);
 int         q_handles_name_ok(const char* p, size_t n);   /* [a-zA-Z][a-zA-Z0-9_]* */
+/* `neg` of a `:pq:` sym: a leading `-` on the alias toggled (the async form) whatever the kind; NULL unless the
+ * positive spelling is well-formed.  Owned. */
+ray_t*      q_handles_pq_neg(ray_t* x);
 
 /* `` `:… `` sym-handle apply — the protocol arm (caller has checked
  * q_handles_sym_kind): ws/wss and http/https clients, else one-shot sync IPC
