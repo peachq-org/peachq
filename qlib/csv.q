@@ -1,6 +1,6 @@
 / Read delimited text (CSV, TSV) as a table, from a file, a URL or text in memory.
 / `select from `:trades.csv` is the shortest spelling; .csv.read adds a target table, explicit column types and
-/ options; .csv.info shows the schema it would sniff.  What a cell means is shared with .j.read (user-docs/loading.md).
+/ options; .csv.info shows the schema it would sniff.  What a cell means is shared with .j.read.
 / .
 / @eg
 / select from `:https://www.timestored.com/data/sample/dowjones.csv where Date>1960.01.01

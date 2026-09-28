@@ -156,7 +156,7 @@ ray_t* q_duckdb_codec_strip_companions(int slot, ray_t* tbl, ray_t** masks, ray_
 /* ---- q_duckdb_schema.c: the sidecar, the catalog spellings, the DDL, the envelope's schema ---- */
 
 #define QD_STAGE_TBL "_q_stage"       /* the temp table a declared type is staged in, then CAST out of */
-#define QD_STAGING_TBL "_q_staging"   /* the reserved temp table lib/parquet.q stages a q table in; set may name it */
+#define QD_STAGING_TBL "_q_staging"   /* the reserved temp table `.parquet` stages a q table in; set may name it */
 #define QD_NEED_LOGICAL 1
 #define QD_NEED_DTYPE   2
 

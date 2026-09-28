@@ -592,7 +592,7 @@ ray_t* q_sys_load(const char* arg, size_t alen) {
     /* peachq: the standard library.  `\l pq/<file>.q` is the file a pq/ directory
      * (the cwd's or $QHOME's) has, else the embedded member, so a pq/ directory is
      * the library on disk, never a mount; `\l pq` reloads every library file
-     * (lib/pq.q's list) unless a disk file `pq`/`pq.q` wins above. */
+     * (`.pq.i.files`) unless a disk file `pq`/`pq.q` wins above. */
     if (alen > 3 && memcmp(lit, "pq/", 3) == 0) return q_pq_load_file(lit, alen, ok ? found : NULL);
     if (ok) {   /* disk hit — load (silent); an ABORTED load signals */
         ray_t* esig = NULL;

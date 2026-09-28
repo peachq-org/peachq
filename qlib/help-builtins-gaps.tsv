@@ -1,4 +1,4 @@
-# help-builtins-gaps - where lib/help-builtins.tsv and the live core namespaces are ALLOWED to disagree: name<TAB>kind<TAB>reason.
+# help-builtins-gaps - where help-builtins.tsv and the live core namespaces are ALLOWED to disagree: name<TAB>kind<TAB>reason.
 # kind internal: bound in .q .Q .h .j (or a Q_OPS verb) but deliberately undocumented - never gets a help row.
 # kind unimplemented: documented in the TSV but not bound yet; reason is one word - out-of-scope (the 2026-08-03
 #   storage ADR rules partitioned/splayed WRITE out) or not-built.  The REPL highlighter leaves these uncoloured.

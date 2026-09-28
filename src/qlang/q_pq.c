@@ -1,13 +1,13 @@
 /* q_pq — the standard library's C floor, none of it run at q_runtime_create:
- * the `.pq` AUTOLOAD (the first reference to a `.pq` name, read or write, runs
- * lib/pq.q once — q_env's hook fires it), the library AUTOLOAD (a missing
+ * the `.pq` AUTOLOAD (the first reference to a `.pq` name, read or write, loads
+ * `.pq` once — q_env's hook fires it), the library AUTOLOAD (a missing
  * `.<file>…` read runs `\l pq/<file>.q` once), the per-file load record `.pq.load`
  * reads, the `.pq.load_natives` root every
- * native-backed lib/ file opens with (so a file loaded from disk carries its
+ * native-backed library file opens with (so a file loaded from disk carries its
  * natives as the bundle member does), and the bundle MEMBER door behind
- * `\l pq/<file>.q`.  The load SEQUENCE is q — `.pq.load` in lib/pq.q; `\l pq`
+ * `\l pq/<file>.q`.  The load SEQUENCE is q — `.pq.load`; `\l pq`
  * runs `.pq.i.run` over every file.  Every file runs as its own NAMED script through
- * the multiline seam, so the doc store's file column reads `lib/str.q` and each
+ * the multiline seam, so the doc store's file column names the file and each
  * header is captured.  The help-db seam is bound at boot, loaded at first help
  * access — by neither event. */
 #include "qlang/q_count.h"
@@ -31,8 +31,8 @@
 #include "qlang/ops/q_regex.h" /* q_regex_register — the .regexp.i.* natives */
 #include "qlang/ops/q_strfmt.h" /* q_strfmt_register — the .str.i.printf/.format natives */
 #include "qlang/ops/q_strns.h" /* q_strns_register — the .str.i.* strip natives */
-#include "qlang/lib_gen.h"     /* PEACHQ_LIB_FILES — the codegen'd lib/ + qlib/src bundle, one entry per file */
-#include "qlang/helpdb_gen.h"  /* PEACHQ_HELPDB_BOOTSTRAP — the codegen'd lib/help-db.q */
+#include "qlang/lib_gen.h"     /* PEACHQ_LIB_FILES — the codegen'd bundle, one entry per file */
+#include "qlang/helpdb_gen.h"  /* PEACHQ_HELPDB_BOOTSTRAP — the codegen'd builtin help data */
 #include "qlang/q_env.h"       /* q_env_bind_native / q_env_ident_ok — the native bindings, a namespace name */
 #include "lang/env.h"          /* ray_fn_unary — the native values */
 #include "lang/eval.h"         /* RAY_FN_NONE — no dispatch attrs on those values */
@@ -105,8 +105,8 @@ static ray_t* pq_loaded_fn(ray_t* x) {
     return g_loaded;
 }
 
-/* The native sets by lib/ file stem: `.pq.load_natives`csv` binds what lib/csv.q
- * calls.  `pq` is the session set lib/pq.q needs (connections, the provider
+/* The native sets by file stem: `.pq.load_natives`csv` binds what `.csv`
+ * calls.  `pq` is the session set `.pq` needs (connections, the provider
  * load, the terminal); `str` is both string engines; `termbox` includes the
  * beep.  Re-binding is idempotent, so a reload costs nothing but the bind. */
 static void pq_set_pq(void)      { q_conn_pq_register(); q_provider_pq_register(); q_console_pq_register(); q_fmt_pq_register();
@@ -120,7 +120,7 @@ static const struct { const char* name; void (*bind)(void); } PQ_SETS[] = {
     { "termbox", pq_set_termbox },
 };
 
-/* `.pq.load_natives`name` — the C root of a native-backed lib/ file, its FIRST
+/* `.pq.load_natives`name` — the C root of a native-backed library file, its FIRST
  * statement.  A symbol or string names the set; an unknown one is 'name, as an
  * undefined word is. */
 static ray_t* pq_load_natives_fn(ray_t* x) {
@@ -138,7 +138,7 @@ ray_t* q_pq_autoload(void) { return g_pq_state == LOAD_COLD ? pq_run("\\l pq/pq.
 
 ray_t* q_pq_load(void) { return pq_run(".pq.i.run .pq.i.files;"); }
 
-/* the bundle member whose basename is `<stem>.q` (lib/ and qlib/src/ share one namespace of stems) */
+/* the bundle member whose basename is `<stem>.q` */
 static const char* pq_member(const char* stem, size_t n, const char** src) {
     for (size_t i = 0; i < sizeof PEACHQ_LIB_FILES / sizeof *PEACHQ_LIB_FILES; i++) {
         const char* base = strrchr(PEACHQ_LIB_FILES[i].name, '/') + 1;

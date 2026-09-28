@@ -97,7 +97,7 @@ static ray_t* til_count(ray_t* t) {
 }
 
 /* From-resolve (law 24): sym -> env; keyed -> 0!; dict -> itself (a dict source, owner 2026-09-16).
- * A `:...` RESOURCE resolves in the order user-docs/handles.md § Format inference sets:
+ * A `:...` RESOURCE resolves in the format-inference order:
  * explicit provider, then a recognised tabular suffix, then q's own object load (which is
  * what makes `:dir/` a splay and `:t` a serialized table) — an unrecognised one fails
  * rather than being guessed, and a plain STRING is never a table source.

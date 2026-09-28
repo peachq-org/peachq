@@ -70,27 +70,21 @@ $(GEN_DIR)/qlang/j_gen.h: src/qlang/j.q tools/gen-bootstrap.sh
 
 # The .help machinery, always on and LAST of the ordered core list: the capture
 # hooks must be bound before the first file a user loads.  Its builtin DATA is a
-# separate bundle (lib/help-db.q), loaded on demand so bare boot never pays it.
+# separate bundle, loaded on demand so bare boot never pays it.
 $(GEN_DIR)/qlang/help_gen.h: src/qlang/help.q tools/gen-bootstrap.sh
 	@mkdir -p $(dir $@)
 	SYMBOL=PEACHQ_HELP_BOOTSTRAP tools/gen-bootstrap.sh $@ src/qlang/help.q
 
-$(GEN_DIR)/qlang/helpdb_gen.h: lib/help-db.q tools/gen-bootstrap.sh
+$(GEN_DIR)/qlang/helpdb_gen.h: qlib/help-db.q tools/gen-bootstrap.sh
 	@mkdir -p $(dir $@)
-	SYMBOL=PEACHQ_HELPDB_BOOTSTRAP tools/gen-bootstrap.sh $@ lib/help-db.q
+	SYMBOL=PEACHQ_HELPDB_BOOTSTRAP tools/gen-bootstrap.sh $@ $<
 
-# The standard library, both halves: lib/*.q TOP LEVEL ONLY — q that calls into
-# the peachq C surface — and qlib/src/*.q, the PORTABLE half that must also run
-# on kx q.  Sorted for determinism — the ANY-ORDER LAW makes the order
-# semantically moot.
-# The directories themselves are prerequisites (lib/. spelled with the dot —
-# bare `lib` is the librayforce.a target): deleting/renaming a file bumps the
-# dir mtime, which the file-only list cannot see (the html-assets rule's law).
-# help-db.q is EXCLUDED: it is the deferred builtin-help data, delivered by its
-# own embedded bundle behind .help.i.loaddb, which `\l pq` calls once.
-LIB_Q_SRCS := $(filter-out lib/help-db.q,$(sort $(wildcard lib/*.q))) \
-              $(sort $(wildcard qlib/src/*.q))
-$(GEN_DIR)/qlang/lib_gen.h: lib/. qlib/src $(LIB_Q_SRCS) tools/gen-bootstrap.sh
+# The standard library, top-level *.q only, sorted for determinism (the any-order
+# law makes the order moot); help-db.q is the separate bundle above.  The
+# directory is a prerequisite: deleting or renaming a file bumps its mtime,
+# which the file-only list cannot see.
+LIB_Q_SRCS := $(filter-out %/help-db.q,$(sort $(wildcard qlib/*.q)))
+$(GEN_DIR)/qlang/lib_gen.h: qlib $(LIB_Q_SRCS) tools/gen-bootstrap.sh
 	@mkdir -p $(dir $@)
 	SYMBOL=PEACHQ_LIB_FILES PER_FILE=1 tools/gen-bootstrap.sh $@ $(LIB_Q_SRCS)
 
@@ -101,9 +95,9 @@ $(GEN_DIR)/qlang/html_assets_gen.h: tools/gen-assets.sh $(HTML_ASSET_DEPS)
 	@mkdir -p $(dir $@)
 	@tools/gen-assets.sh $@ src/qlang/html
 
-$(GEN_DIR)/qlang/hl_names_gen.h: lib/help-builtins.tsv lib/help-builtins-gaps.tsv tools/gen-hl-names.sh
+$(GEN_DIR)/qlang/hl_names_gen.h: qlib/help-builtins.tsv qlib/help-builtins-gaps.tsv tools/gen-hl-names.sh
 	@mkdir -p $(dir $@)
-	tools/gen-hl-names.sh $@ lib/help-builtins.tsv lib/help-builtins-gaps.tsv
+	tools/gen-hl-names.sh $@ $(filter %.tsv,$^)
 
 # Both suffixes: a .win.o inherits none of the .o target's prerequisites, which is
 # how the mingw build broke while the native one was already fixed.

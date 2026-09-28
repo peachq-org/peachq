@@ -1,6 +1,6 @@
 / Read JSON as a table: .j.read loads a document or JSON Lines from a file, a URL or a string, .j.info shows the
 / schema it would use.  `select from `:data.json` is the shortest spelling.  .j.j and .j.k serialize and parse a
-/ value and need no \l pq.
+/ value and are core q, always loaded.
 / .
 / @eg
 / select from `:https://www.timestored.com/data/sample/price.json where symbol like "*BTC"

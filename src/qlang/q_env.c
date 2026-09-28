@@ -61,7 +61,7 @@ static ray_t* env_pq_hook(const char* p, size_t n) {
 }
 
 /* Every other library namespace autoloads on a MISSED read of a dotted name (owner 2026-09-25): a found name never
- * gets here, so a user's definition wins and core `.j` still gains lib/j.q. */
+ * gets here, so a user's definition wins and core `.j` still gains the library's `.j`. */
 static ray_t* env_lib_hook(const char* p, size_t n) {
     if (n < 2 || p[0] != '.' || p[1] == '.') return NULL;
     size_t k = 1;

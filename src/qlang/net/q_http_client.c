@@ -669,7 +669,7 @@ static ray_t* http_status_body(ray_t* b, int status) {
 }
 
 /* ---- the http transport under the resource-read seam (q_io_resource_read) ----
- * user-docs/handles.md points 1 + 3: read0/read1 reach HTTP through the SAME seam
+ * read0/read1 reach HTTP through the SAME seam
  * the file transport sits behind, and a ranged call really does send `Range:`.
  * One q-level read is one GET; a ranged one first asks HEAD for the length so the
  * clamp is q_io_clamp's law rather than a server's 416 discipline.  That HEAD is a

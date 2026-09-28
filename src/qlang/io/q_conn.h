@@ -9,6 +9,6 @@ ray_t* q_conn_table(void);        /* .pq.conns[] — the 17-column superset */
 ray_t* q_conn_bang38(ray_t* y);   /* -38!x — socket-only; atom->dict, list->table */
 ray_t* q_conn_zW(void);           /* .z.W — socket handles!unsent bytes (I!J) */
 ray_t* q_conn_zH(void);           /* .z.H — active socket handles (I, sorted) */
-void   q_conn_pq_register(void);  /* bind the .pq.i.conns native (\l pq gate) */
+void   q_conn_pq_register(void);  /* bind the .pq.i.conns native (.pq.load_natives) */
 
 #endif

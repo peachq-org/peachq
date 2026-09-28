@@ -1,4 +1,5 @@
 / qunit.q - unit testing for q similar to junit, cunit etc.
+/ portable: must run on kx q
 / Tests should be specified in their own file/namespace       <br/>
 / Actual test functions should then be named test* and contain assertions.       <br/>
 / <br/>
