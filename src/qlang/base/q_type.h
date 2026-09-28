@@ -40,7 +40,7 @@ const char* q_type_rayname(int8_t tag);
 
 /* THE single tag -> type-char map (ref/dotq.md `.Q.ty`, `meta`'s `t` column).
  * Absolute or negative tag; 0 for tags with no char.  Lowercase = the element
- * char; `.Q.ty` uppercases it for a uniform list of vectors. */
+ * char; `.Q.ty` uppercases it for an atom or a list led by a vector. */
 char q_type_char(int8_t tag);
 
 /* The reverse map: lowercase type char -> vector tag, 0 for no such char

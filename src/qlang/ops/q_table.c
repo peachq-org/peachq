@@ -1141,21 +1141,6 @@ ray_t* q_cols_fn(ray_t* x) {
     return table_colnames(t);
 }
 
-/* meta's COLUMN classifier — the kx FIRST-ITEM law (ref/meta.md warning:
- * "only the first item in each column is examined"), so meta is never a
- * splay-validity oracle (the splay writer scans every row); `.Q.ty` keeps
- * q_ty_char's whole-scan uniformity test (its ty_basic pins), the fallback
- * here for everything that is not a list with a vector first item. */
-static char meta_ty_char(ray_t* x) {
-    ray_t* e0 = x && x->type == RAY_LIST && q_count(x)
-              ? ((ray_t**)ray_data(x))[0] : NULL;
-    int8_t t = !e0 ? 0
-             : e0->type == -RAY_STR ? (int8_t)RAY_STR
-             : ray_is_vec(e0)       ? (int8_t)e0->type : 0;
-    char lc = t ? q_type_char(t) : 0;
-    return lc ? (char)(lc - 'a' + 'A') : q_ty_char(x);
-}
-
 /* (meta x) — table metadata keyed by column name: (c) -> (t; f; a) — t via q_ty_char, a via q_attr_letter (a
  * mapped column carries its disk letter as a trusted stamp).  The result is a RAY_DICT from a 1-col key table to a
  * 3-col value table — "a keyed table is just a dictionary from one table to another". */
@@ -1193,7 +1178,7 @@ ray_t* q_meta_fn(ray_t* x) {
         int64_t a = blank, f = blank;
         int64_t nm = ray_table_col_name(flat, c);
         ray_t* col = ray_table_get_col_idx(flat, c);      /* borrowed */
-        char tc = meta_ty_char(col);
+        char tc = q_ty_char(col);
         char fc = q_enum_meta_f(col, &f);   /* FK/link target + t override */
         if (fc) tc = fc;
         char ac = q_attr_letter(col);
