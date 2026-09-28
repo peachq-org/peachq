@@ -23,12 +23,12 @@
   opts:(`out`n!(::;10)),$[99h=type opts; opts; ()!()];
   if[not (type opts`n) in -5 -6 -7h; '`type];
   if[1>opts`n; '`domain];
-  opts[`out]:.qcmd.i.abspath $[(::)~opts`out; .fs.mkdtemp[]; opts`out];
   opts};
 
 / Replay and score every transcript under a path.
 / @param path (any) a .qcmd file, or a directory whose *.qcmd files at every depth are scored (*.win.qcmd excluded)
-/ @param opts (dict) `out the replay directory (a temporary one by default), `n the forks run at once (10)
+/ @param opts (dict) `out the replay directory (by default a temporary one, deleted after scoring), `n the forks run
+/ at once (10)
 / @return (table) file line prompt want got why, one row per transcript row, line its prompt's 1-based line in the
 / file; why is "" for a pass, else output, prompt, no error, error, worker died or missing row
 .qcmd.check:{[path;opts]
@@ -50,8 +50,8 @@
       worker:@[.pq.hopen_qfork[`$"qcmdrun",string job`k];`stdout`stderr!2#target;{[err] `}];
       if[null worker; :(worker;0Ni)];
       conn:exec handle:first handle, pid:first pid from .pq.conns[] where spec=worker;
-      replay:{[file] system "cd ",.fs.mkdtemp[]; system "l ",file};
-      @[neg conn`handle;(replay;job`src);::];
+      replay:{[dir;file] system "cd ",dir; system "l ",file};
+      @[neg conn`handle;(replay;job`dir;job`src);::];
       (worker;conn`pid)};
     / A sync call on a dead qfork alias forks a fresh worker, so a changed .z.i is a death too.
     finish:{[started]
@@ -82,13 +82,19 @@
       res:verdict'[want 0;want 1;got[0] til n;got[1] til n];
       res:@[res;lost;:;(count lost)#enlist (""; $[died; "worker died"; "missing row"])];
       ([] file:n#file; line:want 2; prompt:want 0; want:want 1; got:res[;0]; why:res[;1])};
+    jobs[`dir]:{.fs.mkdtemp[]} each jobs`k;
     started:start each jobs;
     died:finish each started;
+    {@[.fs.rmtree;x;::]} each jobs`dir;
     raze score'[jobs`file;jobs`src;jobs`out;died]};
   opts:.qcmd.i.opts opts;
-  jobs:plan[path;opts`out];
-  if[0=count jobs; :.qcmd.i.EMPTY];
-  .qcmd.i.EMPTY,raze batch each (opts`n) cut jobs};
+  own:(::)~opts`out;
+  out:.qcmd.i.abspath $[own; .fs.mkdtemp[]; opts`out];
+  score_all:{[plan;batch;path;out;n] jobs:plan[path;out]; .qcmd.i.EMPTY,$[count jobs; raze batch each n cut jobs; ()]};
+  results:.[score_all;(plan;batch;path;out;opts`n);::];
+  if[own; @[.fs.rmtree;out;::]];
+  if[10h=type results; 'results];
+  results};
 
 / Replay and score like .qcmd.check, print each failing row and a pass count per file, and answer the exit code:
 / 0 when every row passes, 1 when any fails or there were none.
@@ -109,5 +115,5 @@
   show_row each results where not ok;
   files:group results`file;
   {[file;ok] -1 string[file],": ",string[sum ok],"/",string count ok}'[key files;ok value files];
-  -1 "replays: ",opts`out;
+  if[not (::)~opts`out; -1 "replays: ",.qcmd.i.abspath opts`out];
   $[(0=count results) or not all ok; 1; 0]};

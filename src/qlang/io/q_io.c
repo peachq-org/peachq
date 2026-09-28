@@ -22,6 +22,7 @@
 #include "qlang/net/q_wirefile.h" /* the format writers behind q_io_set */
 #include "qlang/net/q_http_client.h" /* the http half of the resource-read seam */
 #include "lang/eval.h"      /* ray_eval_get_restricted */
+#include "lang/env.h"       /* ray_fn_unary — the .fs.i.rmtree native */
 #include "store/fileio.h"   /* ray_mkdir_p — the parent directories a write promises */
 #include "table/sym.h"      /* ray_sym_intern_runtime, ray_sym_vec_cell */
 #include <limits.h>         /* PATH_MAX — q_io_abs_path */
@@ -36,6 +37,8 @@
 #ifdef RAY_OS_WINDOWS
 #include <io.h>             /* _get_osfhandle — the positional block read */
 #include <windows.h>
+#else
+#include <dirent.h>         /* fdopendir — the tree delete's walk */
 #endif
 #ifndef O_BINARY
 #define O_BINARY 0          /* only Windows has a text mode to opt out of */
@@ -1013,4 +1016,230 @@ ray_t* q_hdel_wrap(ray_t* x) {
     if (rc != 0) return q_err(QE_IO);
     ray_retain(x);
     return x;
+}
+
+/* ---- the tree delete behind .fs.rmtree ---------------------------------- */
+
+#ifdef RAY_OS_WINDOWS
+#define RMTREE_SEP(c) ((c) == '/' || (c) == '\\')
+#else
+#define RMTREE_SEP(c) ((c) == '/')
+#endif
+
+/* 'domain before anything is touched: an empty path, a root, a drive root on any platform, a UNC share root on
+ * Windows, or a last component of . or .. (rm's own refusal).  n excludes any trailing separator. */
+static int rmtree_refused(const char* p, size_t n) {
+    if (n == 0 || (n == 1 && RMTREE_SEP(*p))) return 1;
+    if (n >= 2 && p[1] == ':' && (p[0] | 0x20) >= 'a' && (p[0] | 0x20) <= 'z') {
+        size_t i = 2;
+        while (i < n && (p[i] == '/' || p[i] == '\\')) i++;
+        if (i == n) return 1;
+    }
+#ifdef RAY_OS_WINDOWS
+    if (RMTREE_SEP(p[0]) && RMTREE_SEP(p[1])) {
+        int parts = 0;
+        for (size_t i = 2; i < n; i++) parts += !RMTREE_SEP(p[i]) && RMTREE_SEP(p[i - 1]);
+        if (parts <= 2) return 1;                   /* \\server\share, \\?\c: */
+    }
+#endif
+    size_t i = n;
+    while (i && !RMTREE_SEP(p[i - 1])) i--;
+    return (n - i == 1 && p[i] == '.') || (n - i == 2 && p[i] == '.' && p[i + 1] == '.');
+}
+
+#ifdef RAY_OS_WINDOWS
+enum { RMTREE_WPATH = 32768 };
+
+/* No FILE_SHARE_DELETE: while the handle is open nobody can rename the directory away and put a junction in its
+ * place, so the walk under it stays inside the tree.  FILE_FLAG_OPEN_REPARSE_POINT opens a link as itself. */
+static HANDLE rmtree_open(const wchar_t* p, DWORD share) {
+    return CreateFileW(p, FILE_READ_ATTRIBUTES, share, NULL, OPEN_EXISTING,
+                       FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+}
+
+/* the path of the open handle with every junction and link resolved, trailing separator dropped; 0 on failure */
+static size_t rmtree_final(HANDLE h, wchar_t* out) {
+    DWORD n = h == INVALID_HANDLE_VALUE ? 0 : GetFinalPathNameByHandleW(h, out, RMTREE_WPATH, FILE_NAME_NORMALIZED);
+    if (n == 0 || n >= RMTREE_WPATH) return 0;
+    while (n && out[n - 1] == L'\\') out[--n] = 0;
+    return n;
+}
+
+static int rmtree_holds_cwd(const wchar_t* dir, size_t n, wchar_t* cwd) {
+    HANDLE c = rmtree_open(L".", FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    size_t k = rmtree_final(c, cwd);
+    if (c != INVALID_HANDLE_VALUE) CloseHandle(c);
+    return !k || (k >= n && _wcsnicmp(dir, cwd, n) == 0 && (k == n || cwd[n] == L'\\'));
+}
+
+static int rmtree_entry(wchar_t* p, size_t n, DWORD attrs);
+
+static int rmtree_contents(wchar_t* p, size_t n) {
+    if (n + 3 > RMTREE_WPATH) return -1;
+    wcscpy(p + n, L"\\*");
+    WIN32_FIND_DATAW f;
+    HANDLE h = FindFirstFileW(p, &f);
+    p[n] = 0;
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    int rc = 0;
+    do {
+        size_t k = wcslen(f.cFileName);
+        if (wcscmp(f.cFileName, L".") == 0 || wcscmp(f.cFileName, L"..") == 0) continue;
+        if (n + k + 2 > RMTREE_WPATH) { rc = -1; break; }
+        p[n] = L'\\';
+        memcpy(p + n + 1, f.cFileName, (k + 1) * sizeof *p);
+        rc = rmtree_entry(p, n + 1 + k, f.dwFileAttributes);
+        p[n] = 0;
+    } while (rc == 0 && FindNextFileW(h, &f));
+    FindClose(h);
+    return rc;
+}
+
+/* the attributes of what the open handle names NOW, not what the listing saw */
+static DWORD rmtree_attrs(HANDLE h) {
+    BY_HANDLE_FILE_INFORMATION fi;
+    return h != INVALID_HANDLE_VALUE && GetFileInformationByHandle(h, &fi) ? fi.dwFileAttributes : INVALID_FILE_ATTRIBUTES;
+}
+
+static int rmtree_leaf(const wchar_t* p, DWORD attrs) {
+    if (attrs & FILE_ATTRIBUTE_READONLY) SetFileAttributesW(p, FILE_ATTRIBUTE_NORMAL);
+    return (attrs & FILE_ATTRIBUTE_DIRECTORY ? RemoveDirectoryW(p) : DeleteFileW(p)) ? 0 : -1;
+}
+
+/* the directory open as h is emptied with h held, then removed; a reparse point is a leaf, never entered */
+static int rmtree_dir(wchar_t* p, size_t n, HANDLE h, DWORD attrs) {
+    int rc = attrs & FILE_ATTRIBUTE_REPARSE_POINT ? 0 : rmtree_contents(p, n);
+    CloseHandle(h);
+    return rc ? rc : rmtree_leaf(p, attrs);
+}
+
+static int rmtree_entry(wchar_t* p, size_t n, DWORD attrs) {
+    if (!(attrs & FILE_ATTRIBUTE_DIRECTORY)) return rmtree_leaf(p, attrs);
+    HANDLE h = rmtree_open(p, FILE_SHARE_READ | FILE_SHARE_WRITE);
+    DWORD now = rmtree_attrs(h);
+    if (now == INVALID_FILE_ATTRIBUTES) {
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        return -1;
+    }
+    return rmtree_dir(p, n, h, now);
+}
+
+static ray_t* rmtree_path(const char* path) {
+    wchar_t* w = malloc(3 * RMTREE_WPATH * sizeof *w);
+    if (!w) return q_err(QE_OOM);
+    int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, w, RMTREE_WPATH);
+    HANDLE h = n ? rmtree_open(w, FILE_SHARE_READ | FILE_SHARE_WRITE) : INVALID_HANDLE_VALUE;
+    DWORD a = rmtree_attrs(h);
+    int link = a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT);
+    wchar_t* dir = w + RMTREE_WPATH;   /* the walk runs under the resolved path, so no junction above it can move it */
+    size_t k = 0;
+    ray_t* err = NULL;
+    if (a == INVALID_FILE_ATTRIBUTES) err = q_err(QE_IO);
+    else if (!(a & FILE_ATTRIBUTE_DIRECTORY) && !link) err = q_err(QE_DOMAIN);
+    else if (!link && (!(k = rmtree_final(h, dir)) || rmtree_holds_cwd(dir, k, w + 2 * RMTREE_WPATH)))
+        err = q_err(QE_DOMAIN);
+    if (err) {
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    } else if (link ? rmtree_dir(w, (size_t)n - 1, h, a) : rmtree_dir(dir, k, h, a)) {
+        err = q_err(QE_IO);
+    }
+    free(w);
+    return err;
+}
+#else
+#ifdef O_PATH
+#define RMTREE_ID_OPEN (O_PATH | O_DIRECTORY | O_CLOEXEC)   /* an ancestor we may search but not read */
+#else
+#define RMTREE_ID_OPEN (O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+#endif
+enum { RMTREE_DEPTH = 256 };
+
+/* The working directory and every directory above it, by identity, walked up by descriptor so a rename cannot hide
+ * one.  Every directory the walk opens is checked against it, which also stops a bind mount of one inside the tree. */
+typedef struct { int n; dev_t dev[RMTREE_DEPTH]; ino_t ino[RMTREE_DEPTH]; } rmtree_guard_t;
+
+static int rmtree_guard_init(rmtree_guard_t* g) {
+    g->n = 0;
+    int fd = open(".", RMTREE_ID_OPEN);
+    struct stat a;
+    while (fd >= 0 && g->n < RMTREE_DEPTH && fstat(fd, &a) == 0) {
+        if (g->n && a.st_dev == g->dev[g->n - 1] && a.st_ino == g->ino[g->n - 1]) { close(fd); return 1; }
+        g->dev[g->n] = a.st_dev;
+        g->ino[g->n++] = a.st_ino;
+        int up = openat(fd, "..", RMTREE_ID_OPEN);
+        close(fd);
+        fd = up;
+    }
+    if (fd >= 0) close(fd);
+    return 0;
+}
+
+static int rmtree_guarded(const rmtree_guard_t* g, int fd) {
+    struct stat st;
+    if (fstat(fd, &st) != 0) return 1;
+    for (int i = 0; i < g->n; i++) if (g->dev[i] == st.st_dev && g->ino[i] == st.st_ino) return 1;
+    return 0;
+}
+
+static int rmtree_at(int dir, const char* name, const rmtree_guard_t* g);
+
+/* empties the open directory fd, then closes it */
+static int rmtree_contents(int fd, const rmtree_guard_t* g) {
+    DIR* d = rmtree_guarded(g, fd) ? NULL : fdopendir(fd);
+    if (!d) { close(fd); return -1; }
+    int rc = 0;
+    for (struct dirent* e; rc == 0 && (errno = 0, e = readdir(d));)
+        if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0) rc = rmtree_at(dirfd(d), e->d_name, g);
+    if (rc == 0 && errno) rc = -1;
+    closedir(d);
+    return rc;
+}
+
+/* O_NOFOLLOW makes a link fail the open, so a link — to a directory or not — is unlinked as a leaf, never entered */
+static int rmtree_at(int dir, const char* name, const rmtree_guard_t* g) {
+    int fd = openat(dir, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return errno == ENOTDIR || errno == ELOOP ? unlinkat(dir, name, 0) : -1;
+    return rmtree_contents(fd, g) ? -1 : unlinkat(dir, name, AT_REMOVEDIR);
+}
+
+static ray_t* rmtree_path(const char* p) {
+    int fd = open(p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat st;
+    if (fd < 0) {
+        if (lstat(p, &st) != 0) return q_err(QE_IO);
+        if (S_ISLNK(st.st_mode)) return unlink(p) ? q_err(QE_IO) : NULL;
+        return q_err(S_ISDIR(st.st_mode) ? QE_IO : QE_DOMAIN);
+    }
+    rmtree_guard_t g;
+    if (!rmtree_guard_init(&g) || rmtree_guarded(&g, fd)) { close(fd); return q_err(QE_DOMAIN); }
+    return rmtree_contents(fd, &g) || rmdir(p) ? q_err(QE_IO) : NULL;
+}
+#endif
+
+/* `.fs.i.rmtree x` — delete the directory tree at the file symbol x and answer x; a link is removed, never followed */
+static ray_t* rmtree_fn(ray_t* x) {
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    ray_t* path = q_io_path_operand(x);
+    if (!path) return q_err(QE_TYPE);
+    const char* p = ray_str_ptr(path);
+    size_t n = ray_str_len(path);
+    while (n > 1 && RMTREE_SEP(p[n - 1])) n--;
+    ray_t* err;
+    if (rmtree_refused(p, n)) {
+        err = q_err(QE_DOMAIN);
+    } else {
+        ray_t* trimmed = ray_str(p, n);
+        err = rmtree_path(ray_str_ptr(trimmed));
+        ray_release(trimmed);
+    }
+    ray_release(path);
+    if (err) return err;
+    ray_retain(x);
+    return x;
+}
+
+void q_io_fs_register(void) {
+    ray_t* obj = ray_fn_unary(".fs.i.rmtree", RAY_FN_NONE, rmtree_fn);
+    q_env_bind_native(".fs.i.rmtree", obj, 1);
+    ray_release(obj);
 }
