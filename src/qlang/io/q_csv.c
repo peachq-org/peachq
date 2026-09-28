@@ -1,11 +1,11 @@
-/* io/q_csv.c — the incremental CSV core: `.csv.i.read` / `.csv.i.info`, the C floor under lib/csv.q.
+/* io/q_csv.c — the incremental CSV core: `.csv.i.read` / `.csv.i.info`, the C floor under `.csv`.
  *
  * The core is bytes-in -> complete typed rows out + remainder carry: a feed appends to the carry, rows end
  * at an unquoted '\n' (RFC-4180 — a quoted field keeps its newlines, and may straddle any number of feeds),
  * and the incomplete tail waits for the next feed.  Nothing here assumes it knows the file size or can seek,
  * so a decompressor could feed the same core; today's two drivers are chunked resource-seam reads and an
  * in-memory payload sliced at that same chunk size (THE SOURCE LAW, at csv_run).  The decoder names no
- * transport (user-docs/handles.md point 7): it asks the seam whether repeated ranged pulls are cheap.
+ * transport: it asks the seam whether repeated ranged pulls are cheap.
  *
  * Types FREEZE after the sniff sample (field parsers + the promote lattice + the sym-cardinality rule adapted
  * from src/io/csv.c): a later cell that fails its frozen type signals 'csv — never a silent null, never a
@@ -1768,7 +1768,7 @@ static ray_t* csv_run_lines(csv_st* st, ray_t* x) {
     return bad;
 }
 
-/* THE SOURCE LAW (lib/csv.q): a symbol is a PATH, text is CONTENT.  No sniffing - the caller's
+/* THE SOURCE LAW: a symbol is a PATH, text is CONTENT.  No sniffing - the caller's
  * type states which, so `:x.csv can never be read as one line of CSV nor "a,b" as a filename.  A symbol is a
  * RESOURCE, not a file: which transport serves it is the seam's business, never the decoder's. */
 static ray_t* csv_run(csv_st* st, ray_t* src) {

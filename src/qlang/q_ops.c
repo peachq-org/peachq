@@ -418,7 +418,7 @@ static const q_op_t Q_OPS[] = {
     { "ss",      QLEX_KW,        QR_NONE,                      QR_FN2("ss", q_ss_wrap), NULL, 1, 0, "none", NULL, QKOP(27) },
     { "ssr",     QLEX_KW,        QR_ENV("ssr"),                QR_NONE,           NULL, 1, 0, "none", NULL },
     /* a peachq extension, so no kdb primitive code: RE2 partial match
-     * (user-docs/lib/regexp.md).  `.regexp.*` is stdlib q and has no row. */
+     * `.regexp.*` is stdlib q and has no row. */
     { "rlike",   QLEX_KW,        QR_NONE,                      QR_FN2("rlike", q_rlike_wrap), NULL, 1, 0, "none", NULL },
     { "show",    QLEX_KW,        QR_ENV("show"),               QR_NONE,           NULL, 1, 1, "none", NULL },
     { "system",  QLEX_KW,        QR_ENV("system"),             QR_NONE,           NULL, 1, 1, "none", NULL },
