@@ -77,6 +77,7 @@ and its domain file binds under its own name at `get`.
 | **Reading JSON** — `.j.read`, `.j.info` | A reader beside kdb's `.j.k` converter: written forms, a table, a schema. | [json.md](lib/j.md) |
 | **The shared loader laws** | What a cell means, the freeze, the error classes, the tolerance levers. | [loading.md](loading.md), [bad-rows.md](bad-rows.md) |
 | **Resources at a URL** | A `` `: `` symbol can name a resource anywhere; `read0`, `read1` and qSQL resolve it. | [handles.md](handles.md) |
+| **`neg` of a `:pq:` handle symbol** | The async form, the alias with a leading `-`, where kx signals `'type`: `neg[h] msg` sends async. | [handles.md](handles.md) |
 | **Regular expressions** — `.regexp`, `rlike` | RE2-backed matching, extraction, replacement and splitting. | [regexp.md](lib/regexp.md) |
 | **Typed parameters** | Declared types, optional arguments, defaults and varargs, read statically. | [typed-parameters.md](typed-parameters.md) |
 | **Foreign functions** — `.ffi` | Call into a shared library from q. | [ffi.md](lib/ffi.md) |
