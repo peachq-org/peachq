@@ -362,14 +362,43 @@ static int dict_is_tabular(ray_t* val) {
     return (q_type_is_table(k) || q_type_is_table(v)) && q_type_is_iter(k) && q_type_is_iter(v);
 }
 
+/* A column of same-length simple vectors is a matrix: its per-position widths, else n == 0 and cells render alone. */
+typedef struct { int64_t n; int* w; int st[16]; } col_mx;
+
+static int is_matrix(ray_t** e, int64_t n);   /* fwd */
+static int* matrix_widths(ray_t** e, int64_t nr, int64_t nc, int blank_null, int* stackw, int64_t stackn);   /* fwd */
+static void matrix_row_str(ray_t* row, int64_t nc, const int* w, char* out, size_t outsz);   /* fwd */
+
+static void col_mx_init(col_mx* m, ray_t* col, int64_t nr) {
+    m->n = 0; m->w = NULL;
+    int64_t n = col && col->type == RAY_LIST ? q_count(col) : 0;
+    ray_t** e = n > 0 ? (ray_t**)ray_data(col) : NULL;
+    for (int64_t i = 0; i < n; i++)
+        if (!e[i] || e[i]->type <= 0 || e[i]->type == RAY_LIST) return;
+    if (!e || !is_matrix(e, n)) return;
+    m->w = matrix_widths(e, nr, q_count(e[0]), 1, m->st, 16);
+    if (m->w) m->n = q_count(e[0]);
+}
+
+static void col_mx_free(col_mx* m, int64_t nc) {
+    for (int64_t c = 0; c < nc; c++)
+        if (m[c].w != m[c].st) free(m[c].w);
+}
+
+static void col_cell(ray_t* col, const col_mx* m, int64_t r, char* out, size_t n) {
+    if (m->n) matrix_row_str(((ray_t**)ray_data(col))[r], m->n, m->w, out, n);
+    else q_fmt_cell(col, r, 1, out, n);
+}
+
 static void table_widths(ray_t* tbl, int64_t nc, int64_t nr,
-                           int* widths, char hdr[][64]) {
+                           int* widths, char hdr[][64], col_mx* mx) {
     for (int64_t c = 0; c < nc; c++) {
         side_name(tbl, c, hdr[c], 64);
         int w = (int)strlen(hdr[c]);
         ray_t* col = side_col(tbl, c);
+        col_mx_init(&mx[c], col, nr);
         for (int64_t r = 0; r < nr; r++) {
-            char cb[64]; q_fmt_cell(col, r, 1, cb, sizeof cb);
+            char cb[64]; col_cell(col, &mx[c], r, cb, sizeof cb);
             int l = (int)strlen(cb); if (l > w) w = l;
         }
         widths[c] = w;
@@ -383,10 +412,10 @@ static void table_grid(int64_t nc, const int* widths, char hdr[][64]) {
     }
 }
 
-static void grid_cells(ray_t* t, int64_t nc, const int* w, int64_t r) {
+static void grid_cells(ray_t* t, int64_t nc, const int* w, const col_mx* mx, int64_t r) {
     for (int64_t c = 0; c < nc; c++) {
         if (c) qe_putc(' ');
-        char cb[64]; q_fmt_cell(side_col(t, c), r, 1, cb, sizeof cb);
+        char cb[64]; col_cell(side_col(t, c), &mx[c], r, cb, sizeof cb);
         qe_pad(cb, w[c]);
     }
 }
@@ -409,17 +438,19 @@ static void q_fmt_table(ray_t* tbl) {
     if (nc > QF_MAXCOL) nc = QF_MAXCOL;
     int  widths[QF_MAXCOL];
     char hdr[QF_MAXCOL][64];
-    table_widths(tbl, nc, size_rows(nr), widths, hdr);
+    col_mx mx[QF_MAXCOL];
+    table_widths(tbl, nc, size_rows(nr), widths, hdr, mx);
 
     table_grid(nc, widths, hdr);
     qe_putc('\n');
     grid_rule(nc, widths);
     qe_putc('\n');
     for (int64_t r = 0; r < nr; r++) {
-        grid_cells(tbl, nc, widths, r);
+        grid_cells(tbl, nc, widths, mx, r);
         if (r + 1 < nr) qe_putc('\n');
         if (qe_done()) break;                    /* height cap hit — early exit */
     }
+    col_mx_free(mx, nc);
 }
 
 static void fmt_keyed(ray_t* kt, ray_t* vt) {
@@ -430,8 +461,9 @@ static void fmt_keyed(ray_t* kt, ray_t* vt) {
     if (vnc > QF_MAXCOL) vnc = QF_MAXCOL;
     int  kw[QF_MAXCOL], vw[QF_MAXCOL];
     char kh[QF_MAXCOL][64], vh[QF_MAXCOL][64];
-    table_widths(kt, knc, size_rows(nr), kw, kh);
-    table_widths(vt, vnc, size_rows(nr), vw, vh);
+    col_mx km[QF_MAXCOL], vm[QF_MAXCOL];
+    table_widths(kt, knc, size_rows(nr), kw, kh, km);
+    table_widths(vt, vnc, size_rows(nr), vw, vh, vm);
 
     table_grid(knc, kw, kh);
     qe_putc('|'); qe_putc(' ');
@@ -442,12 +474,14 @@ static void fmt_keyed(ray_t* kt, ray_t* vt) {
     grid_rule(vnc, vw);
     qe_putc('\n');
     for (int64_t r = 0; r < nr; r++) {
-        grid_cells(kt, knc, kw, r);
+        grid_cells(kt, knc, kw, km, r);
         qe_putc('|'); qe_putc(' ');
-        grid_cells(vt, vnc, vw, r);
+        grid_cells(vt, vnc, vw, vm, r);
         if (r + 1 < nr) qe_putc('\n');
         if (qe_done()) break;                    /* height cap hit — early exit */
     }
+    col_mx_free(km, knc);
+    col_mx_free(vm, vnc);
 }
 
 /* Integer-backed sentinels (kdb datatypes table): MIN->0N, MAX->0W, -MAX->-0W, + suffix (0=bare).
