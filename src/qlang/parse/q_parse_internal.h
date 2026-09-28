@@ -41,6 +41,9 @@
  * serialised tree applies. */
 #define Q_ATTR_TRAIN 0x02
 
+/* A leading '_' is the drop/cut verb: no name or symbol constant begins with it (basics/syntax.md:601). */
+static inline int q_parse_drop_lead(char c) { return c == '_'; }
+
 #define MAX_VEC  4096
 #define MAX_NAME 256
 
