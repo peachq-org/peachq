@@ -79,6 +79,9 @@ ray_t* q_io_set(ray_t* x, ray_t* y);
 void q_io_mkdir_parents(const char* path, size_t n);
 ray_t* q_io_write_all(ray_t* pathstr, const void* bytes, size_t n);
 
+/* bind .fs.i.rmtree, the native lib/fs.q wraps as .fs.rmtree (`.pq.load_natives`fs) */
+void q_io_fs_register(void);
+
 /* THE fwrite: n bytes through a bounded stack buffer, so a mapped-on-touch source (a compressed splay region)
  * faults in the memcpy and the syscall never meets an unmapped page.  0, or -1 on a short write. */
 int q_io_fwrite(FILE* fp, const void* bytes, size_t n);

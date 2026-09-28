@@ -22,6 +22,7 @@
 #include "qlang/q_console.h"   /* q_console_pq_register — the .pq.i.termsize native */
 #include "qlang/q_fmt.h"       /* q_fmt_pq_register — the .pq.i.facts native */
 #include "qlang/io/q_csv.h"    /* q_csv_register — the .csv.i.* natives */
+#include "qlang/io/q_io.h"     /* q_io_fs_register — the .fs.i.rmtree native */
 #include "qlang/io/q_json.h"  /* q_json_register — the .j.i.* natives */
 #include "qlang/io/q_md.h"    /* q_md_register — the .md.i.* natives */
 #include "qlang/io/q_ffi.h"    /* q_ffi_register — the .ffi.i.* natives */
@@ -114,8 +115,9 @@ static void pq_set_str(void)     { q_strfmt_register(); q_strns_register(); }
 static void pq_set_termbox(void) { q_termbox_register(); q_beep_register(); }
 static const struct { const char* name; void (*bind)(void); } PQ_SETS[] = {
     { "pq", pq_set_pq },            { "csv", q_csv_register },     { "duckdb", q_duckdb_register },
-    { "ffi", q_ffi_register },      { "j", q_json_register },      { "md", q_md_register },
-    { "regexp", q_regex_register }, { "str", pq_set_str },         { "termbox", pq_set_termbox },
+    { "ffi", q_ffi_register },      { "fs", q_io_fs_register },    { "j", q_json_register },
+    { "md", q_md_register },        { "regexp", q_regex_register }, { "str", pq_set_str },
+    { "termbox", pq_set_termbox },
 };
 
 /* `.pq.load_natives`name` — the C root of a native-backed lib/ file, its FIRST
