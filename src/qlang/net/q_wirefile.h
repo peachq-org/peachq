@@ -56,7 +56,7 @@ ray_t* q_wirefile_en(ray_t* dom, ray_t* t);
 
 /* One column file's HEADER, no payload read.  `tag` is the element tag (0 when
  * only a decode can tell: a kxzip container, a shape-A non-vector); `count` is
- * the header count (-1 unknown; a shape-A general list's int32); `mappable` marks a fixed-width uncompressed
+ * the row count (-1 unknown; a shape-A general list's int32; an unattributed column's from its length); `mappable` marks a fixed-width uncompressed
  * simple vector whose payload starts at byte 16. */
 typedef struct {
     int8_t  tag;
