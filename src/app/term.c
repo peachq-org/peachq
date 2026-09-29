@@ -1150,6 +1150,7 @@ int32_t ray_term_count_unmatched(ray_term_t* term) {
 #define CONT_PROMPT_VIS  2  /* visual: … + space */
 
 void ray_term_prompt(ray_term_t* term) {
+    term->last_cursor_row = 0;
     if (term->prompt_override_len > 0) {
         term_write(term, term->prompt_override, (size_t)term->prompt_override_len);
         term->prompt_len = term->prompt_override_vis;
@@ -1166,6 +1167,7 @@ void ray_term_continuation_prompt(ray_term_t* term) {
      * stays visually aligned with the active session indicator. */
     if (term->prompt_prefix_len > 0)
         term_write(term, term->prompt_prefix, (size_t)term->prompt_prefix_len);
+    term->last_cursor_row = 0;
     term_write(term, CONT_PROMPT_STR, CONT_PROMPT_LEN);
     term->prompt_len = term->prompt_prefix_vis + CONT_PROMPT_VIS;
 }
@@ -1259,14 +1261,8 @@ void ray_term_redraw(ray_term_t* term) {
     cursor_hide(term);
     term_refresh_size(term);
 
-    /* Move to start of first line */
     cursor_move_start(term);
-    if (term->last_total_rows > 1) {
-        for (int32_t i = 1; i < term->last_total_rows; i++) {
-            cursor_move_up(term, 1);
-            cursor_move_start(term);
-        }
-    }
+    cursor_move_up(term, term->last_cursor_row);
 
     /* Clear from cursor to end of screen */
     line_clear_below(term);
@@ -1302,6 +1298,9 @@ void ray_term_redraw(ray_term_t* term) {
         if (term->buf_len > 0) {
             int32_t match_pos1, match_pos2;
             ray_term_match_pair(term->buf, term->buf_len, term->buf_pos, &match_pos1, &match_pos2);
+            /* A reverse-video cell under the cursor turns a bar cursor into a block. */
+            if (match_pos1 == term->buf_pos) match_pos1 = -1;
+            if (match_pos2 == term->buf_pos) match_pos2 = -1;
             hlen += term_highlight(term, hlbuf + hlen,
                                    (int32_t)sizeof(hlbuf) - hlen,
                                    term->buf, term->buf_len,
@@ -1359,14 +1358,8 @@ void ray_term_redraw(ray_term_t* term) {
 static void ray_term_search_redraw(ray_term_t* term) {
     cursor_hide(term);
 
-    /* Move to start */
     cursor_move_start(term);
-    if (term->last_total_rows > 1) {
-        for (int32_t i = 1; i < term->last_total_rows; i++) {
-            cursor_move_up(term, 1);
-            cursor_move_start(term);
-        }
-    }
+    cursor_move_up(term, term->last_cursor_row);
     line_clear_below(term);
     term_flush(term);
 
@@ -1420,9 +1413,13 @@ static void ray_term_search_redraw(ray_term_t* term) {
 
     /* Position cursor right after the search query closing tick */
     int32_t cursor_col = SEARCH_PROMPT_LEN + term->search_len;
-    int32_t end_col = total_vis;
-    int32_t diff = end_col - cursor_col;
-    if (diff > 0) cursor_move_left(term, diff);
+    if (term->term_width > 0) {
+        int32_t row = cursor_col / term->term_width;
+        cursor_move_up(term, total_vis / term->term_width - row);
+        cursor_move_start(term);
+        cursor_move_right(term, cursor_col % term->term_width);
+        term->last_cursor_row = row;
+    }
 
     cursor_show(term);
     term_flush(term);
@@ -1749,6 +1746,7 @@ static ray_t* feed_normal(ray_term_t* term, int key) {
         {
             cursor_hide(term);
             cursor_move_start(term);
+            cursor_move_up(term, term->last_cursor_row);
             line_clear_below(term);
             char hlbuf[TERM_BUF_SIZE * 8];
             int32_t hlen = 0;
@@ -1877,6 +1875,7 @@ static ray_t* feed_normal(ray_term_t* term, int key) {
         term_write(term, "\033[H\033[2J", 7);
         term_flush(term);
         term->last_total_rows = 1;
+        term->last_cursor_row = 0;
         ray_term_redraw(term);
         return NULL;
     }

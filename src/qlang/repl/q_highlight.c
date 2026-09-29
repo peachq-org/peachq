@@ -21,7 +21,7 @@ enum { HL_NONE = -1, HL_KEYWORD, HL_STRING, HL_ESCAPE, HL_COMMENT, HL_SYMBOL, HL
 static const struct { const char* name; const char* sgr; } ROLES[HL_ROLES] = {
     { "kw", "38;5;33" },   { "str", "38;5;114" },  { "esc", "38;5;168" }, { "cmt", "38;5;244" }, { "sym", "38;5;37" },
     { "num", "38;5;166" }, { "tmp", "38;5;136" }, { "op", "38;5;141" },  { "sys", "38;5;127" }, { "cmd", "38;5;160" },
-    { "match", "7" },
+    { "match", "1;31" },
 };
 
 #define HL_RESET    "\033[0m"
