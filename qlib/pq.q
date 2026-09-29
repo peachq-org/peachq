@@ -65,7 +65,7 @@
 / anything else, keeps its default; with colour off (.pq.cancolor) nothing is coloured.  Amend in place
 / (.pq.hl[`kw]:141) or set it in QINIT; loading this file again resets it.
 / The defaults mirror the C table in src/qlang/repl/q_highlight.c - change both together.
-.pq.hl:`kw`str`esc`cmt`sym`num`tmp`op`sys`cmd`match!(33;114;168;244;37;166;136;141;127;160;"7");
+.pq.hl:`kw`str`esc`cmt`sym`num`tmp`op`sys`cmd`match!(33;114;168;244;37;166;136;141;127;160;"1;31");
 
 / @ignore
 .pq.drsamples:{[k] c:"bgxhijefcspmdznuvt"; v:@[.'[$;;`$]c,'1;c?"gs";:;(0Ng;`abc)]; $[k;{3#x}each v;v]}
