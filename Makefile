@@ -134,6 +134,9 @@ DEFS    = -DRAY_VERSION_MAJOR=$(VERSION_MAJOR) -DRAY_VERSION_MINOR=$(VERSION_MIN
 DATE_DEF   = -DRAYFORCE_BUILD_DATE=\"$(BUILD_DATE)\"
 DATE_STEMS = $(addprefix $(BUILD_DIR)/,src/ops/system src/qlang/q_dotz src/qlang/repl/qmain)
 $(addsuffix .o,$(DATE_STEMS)) $(addsuffix .win.o,$(DATE_STEMS)): DEFS += $(DATE_DEF)
+# The version reaches these only as a -D flag, so a VERSION bump alone never rebuilt them (v0.88's q.exe said 0.85).
+VERSION_STEMS = $(DATE_STEMS) $(BUILD_DIR)/src/core/types
+$(addsuffix .o,$(VERSION_STEMS)) $(addsuffix .win.o,$(VERSION_STEMS)): $(wildcard VERSION)
 INCLUDES = $(RAY_INCLUDES)
 DEPFLAGS = -MMD -MP
 
