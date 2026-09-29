@@ -36,7 +36,7 @@ Ask one question:
 q -conn 5000 -eval 'count trade'
 ```
 
-Pipe a batch — one call per line:
+Pipe a batch — one call per line. stdin is read only when there is no script file and no `-eval`:
 
 ```bash
 printf 'count trade\nf 21\n' | q -conn :localhost:5000
@@ -47,7 +47,8 @@ printf 'count trade\nf 21\n' | q -conn :localhost:5000
 42
 ```
 
-Run a script on the server, then a query after it — the file runs as one call, each `-eval` after it:
+Run a script on the server, then a query after it — the file runs as one call, each `-eval` after it. With a script
+file or `-eval`, stdin is not read, so this runs and exits even from cron or a pipeline:
 
 ```bash
 q setup.q -conn :localhost:5000 -eval 'select sum size by sym from trade'
@@ -102,7 +103,7 @@ works too — you get the value, not the wrapper.
 - Only the value of the last expression in each call comes back. `show`, `0N!` and `-1` print on the **server's**
   console, not yours.
 - `-conn` is a mode, not a flag: it takes a script file, `-eval`, piped stdin, `-save` and `-ls`, and nothing else.
-  Nothing runs locally.
+  Nothing runs locally. Piped stdin is read only when there is no file and no `-eval`.
 - Results over 10 MB come back as console text only, with a notice on stderr, and are not saved.
 - Every call is recorded under `~/.qhist.d/<host>_<port>/`; when the display clipped a table, the full result is kept
   as kdb binary and stderr tells you the path. `PEACHQ_QHIST=` (set and empty) turns this off.

@@ -86,7 +86,8 @@ static int conn_main(int argc, char** argv) {
     if (!script && !n_eval && !ls && stdin_tty) { fprintf(stderr, "q: -conn needs a file, -eval, -ls or piped stdin\n"); return 2; }
 
     /* The texts in the local process's order — the file's whole text, each -eval, then each stdin line — gathered
-     * first because `-save` takes the LAST one's value.  A blank stdin line runs nothing, as at the console. */
+     * first because `-save` takes the LAST one's value.  stdin is read only when there is neither a file nor an
+     * -eval, so neither waits on an idle pipe; a blank stdin line runs nothing, as at the console. */
     conn_texts t = { calloc((size_t)argc + 1, sizeof *t.p), calloc((size_t)argc + 1, sizeof *t.len),
                      0, (size_t)argc + 1, 0, NULL };
     ray_runtime_t* rt = NULL;
@@ -110,7 +111,7 @@ static int conn_main(int argc, char** argv) {
         else if (strcmp(argv[i], "-conn") == 0 || strcmp(argv[i], "-save") == 0) i++;
     }
     char line[4096];                          /* the piped console's line buffer, q_repl.c */
-    while (!stdin_tty && fgets(line, sizeof line, stdin)) {
+    while (!script && !n_eval && !stdin_tty && fgets(line, sizeof line, stdin)) {
         size_t len = strlen(line);
         while (len && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
         if (strspn(line, " \t") == len) continue;
