@@ -114,10 +114,11 @@ static ray_t* gen_bytes(int64_t n) {
     return out;
 }
 
-/* n?0 / n?0i — full-range longs/ints.  The engine's sentinel values
- * (0N=INT_MIN, -0W=INT_MIN+1, 0W=INT_MAX) are never generated (rejection
- * loop) — a roll must not fabricate nulls/infinities. */
-static ray_t* gen_longs(int64_t n) {
+/* n?0 / n?0i / n?0h — full range of a w-bit integer, as longs the caller narrows.
+ * The engine's sentinel values (0N=min, -0W=min+1, 0W=max) are never generated
+ * (rejection loop) — a roll must not fabricate nulls/infinities. */
+static ray_t* gen_full(int64_t n, int w) {
+    int64_t hi = w == 64 ? INT64_MAX : (INT64_C(1) << (w - 1)) - 1, lo = -hi - 1;
     ray_t* out = ray_vec_new(RAY_I64, n > 0 ? n : 1);
     if (RAY_IS_ERR(out)) return out;
     out->len = n;
@@ -125,23 +126,8 @@ static ray_t* gen_longs(int64_t n) {
     for (int64_t i = 0; i < n; i++) {
         int64_t v;
         do {
-            v = (int64_t)ray_rand_u64();
-        } while (v == INT64_MIN || v == INT64_MIN + 1 || v == INT64_MAX);
-        d[i] = v;
-    }
-    return out;
-}
-
-static ray_t* gen_ints(int64_t n) {
-    ray_t* out = ray_vec_new(RAY_I32, n > 0 ? n : 1);
-    if (RAY_IS_ERR(out)) return out;
-    out->len = n;
-    int32_t* d = (int32_t*)ray_data(out);
-    for (int64_t i = 0; i < n; i++) {
-        int32_t v;
-        do {
-            v = (int32_t)(uint32_t)ray_rand_u64();
-        } while (v == INT32_MIN || v == INT32_MIN + 1 || v == INT32_MAX);
+            v = (int64_t)(ray_rand_u64() << (64 - w)) >> (64 - w);
+        } while (v == lo || v == lo + 1 || v == hi);
         d[i] = v;
     }
     return out;
@@ -223,12 +209,12 @@ static ray_t* deal_pick(int64_t n, ray_t* y) {
 /* q `x?y` — roll / deal / pick / generate + the find dispatch (type-dispatch
  * on the operands).
  *   list ? y   -> find (q_search_find, ops/q_search.c — dict reverse lookup rides it)
- *   n ? int    -> roll: n randoms in [0,int)  (rayfall rand)
+ *   n ? int    -> roll: n randoms in til int, typed as int (short/int/long/byte)
  *   n ? list   -> pick: n random indices gathered from the list
  *   -n ? m / 0N ? m -> deal / permute (deal_indices)
- *   generate arms (`m sym, float, temporal, " ", 0b, 0x0, 0, 0i, 0Ng) ->
- *   gen_* above.  Deferred cells (error, never a wrong answer): short y,
- *   non-" " char pick (string model), deal of 0/0i. */
+ *   generate arms (`m sym, float, temporal, " ", 0b, 0x0, 0h, 0, 0i, 0Ng) ->
+ *   gen_* above.  Deferred cells (error, never a wrong answer):
+ *   non-" " char pick (string model), deal of 0h/0/0i/0x0. */
 ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
     ray_t* ee = q_enum_extend_try(x, y);   /* `x?y` Enum Extend: sym handle ? syms */
     if (ee) return ee;
@@ -276,10 +262,6 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
         switch ((ray_type_e)-y->type) {
         case RAY_LIST:                          /* dead arm: an atom tag is strictly negative */
             break;
-        case RAY_BOOL:
-            if (deal) return q_err(QE_TYPE);
-            if (y->b8) return q_err(QE_NYI);   /* roll defined for 0b only */
-            return gen_bits(n);               /* n?0b */
         case RAY_GUID: {                        /* n?0Ng / -n?0Ng — env guid.
              * Deal reuses the same generator: distinctness rests on the
              * 122-bit space (collisions negligible); kdb's process/time deal
@@ -291,25 +273,29 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
             ray_release(cnt);
             return g;
         }
-        case RAY_BYTE_ONLY:
-            if (deal) return q_err(QE_TYPE);
-            if (y->u8) return q_err(QE_NYI);   /* roll defined for 0x0 only */
-            return gen_bytes(n);              /* n?0x0 */
-        case RAY_I16:
-            return q_err(QE_NYI);    /* short roll/deal deferred */
-        case RAY_I32: case RAY_I64: {
-            if (!RAY_ATOM_IS_NULL(y) && q_type_iatom_val(y) == 0) {  /* n?0 / n?0i full-range */
-                if (deal) return q_err(QE_NYI);
-                return (y->type == -RAY_I64) ? gen_longs(n) : gen_ints(n);
+        case RAY_BOOL: case RAY_BYTE_ONLY: case RAY_I16: case RAY_I32: case RAY_I64: {
+            int8_t tag = (int8_t)-y->type;     /* til y, typed as y (n?1b is all 0b) */
+            if (deal && tag == RAY_BOOL) return q_err(QE_TYPE);
+            int64_t m = tag == RAY_BOOL ? y->b8 : tag == RAY_BYTE_ONLY ? y->u8 : q_type_iatom_val(y);
+            if (m == 0 && deal) return q_err(QE_NYI);
+            if (m == 0 && tag == RAY_BOOL) return gen_bits(n);      /* n?0b */
+            if (m == 0 && tag == RAY_BYTE_ONLY) return gen_bytes(n); /* n?0x0 */
+            if (m < 0) return q_err(QE_DOMAIN);  /* nulls are negative sentinels */
+            ray_t* v;
+            if (m == 0) {
+                v = gen_full(n, tag == RAY_I64 ? 64 : tag == RAY_I32 ? 32 : 16);
+            } else if (deal) {
+                v = deal_indices(n, m);         /* -n?m — deal, no replacement */
+            } else {
+                ray_t* cnt = ray_i64(n);        /* n?m — roll via the kernel */
+                ray_t* mx = ray_i64(m);
+                v = ray_rand_fn(cnt, mx);
+                ray_release(cnt);
+                ray_release(mx);
             }
-            if (deal) {                         /* -n?m — deal, no replacement */
-                int64_t m = q_type_iatom_val(y);
-                if (m <= 0) return q_err(QE_DOMAIN);
-                return deal_indices(n, m);
-            }
-            ray_t* cnt = ray_i64(n);            /* n?m — roll via the kernel */
-            ray_t* r = ray_rand_fn(cnt, y);
-            ray_release(cnt);
+            if (!v || RAY_IS_ERR(v) || tag == RAY_I64) return v;
+            ray_t* r = q_dollar_cast(tag, v);
+            ray_release(v);
             return r;
         }
         case RAY_F32: case RAY_F64:
