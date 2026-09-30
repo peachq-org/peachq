@@ -331,7 +331,7 @@ static ray_t* dbg_value_at(const char* src, int keep_err) {
  * `q)` — with name reads rooted at the navigated frame. */
 static void dbg_run_line(const char* line, size_t n) {
     int32_t prev = q_env_frame_view(cursor_view());
-    q_ctx_run_line(line, n, stdout, stderr, 1);
+    q_ctx_run_debug_line(line, n, stdout, stderr);
     q_env_frame_view(prev);
 }
 
