@@ -56,8 +56,8 @@ int q_vec_is_num(ray_t* x) {
                  x->type==RAY_BOOL||ray_is_bytelike(x->type)||x->type==RAY_F64||x->type==RAY_F32);
 }
 
-/* An additive or multiplicative fold over a char vector pairs a char with a char, which arithmetic refuses (the
- * msum/mavg/avgs/deltas grids answer `.` for C); a char ATOM folds nothing and keeps sum.md's c -> i. */
+/* The grids that answer `.` for a char vector (msum, avgs); sum/sums/prd read it as code points to i (their `c -> i`
+ * cells, owner ruling Dazlln 2026-09-30). */
 static int fold_refused(ray_t* x) { return x && x->type == RAY_CHARV; }
 
 typedef enum { RS_SUMS, RS_PRDS, RS_MAXS, RS_MINS, RS_AVGS } q_rs_kind;
@@ -87,15 +87,14 @@ static ray_t* runscan_bytes(ray_t* x, q_rs_kind k) {
 
 static ray_t* runscan(ray_t* x, q_rs_kind k) {
     if (!x) return q_err(QE_TYPE);
-    if (ray_is_atom(x)) {                 /* maxs/mins keep the atom; avgs -> float */
+    if (ray_is_atom(x)) {                 /* avgs -> float; the others keep the atom (sum.md:92, prd.md:50) */
         if (k == RS_AVGS) { int nu; double v = q_velem_f(x, 0, &nu);
                             return nu ? ray_typed_null(-RAY_F64) : ray_f64(v); }
-        if (k == RS_SUMS || k == RS_PRDS) return agg_atom_result(x);
         ray_retain(x); return x;
     }
     if ((k == RS_MAXS || k == RS_MINS) && ray_is_vec(x) && ray_is_bytelike(x->type))
         return runscan_bytes(x, k);
-    if (!q_vec_is_num(x) || fold_refused(x)) return q_err(QE_TYPE);
+    if (!q_vec_is_num(x) || (k == RS_AVGS && fold_refused(x))) return q_err(QE_TYPE);
     int64_t n = q_count(x);
     if (k == RS_AVGS) {
         ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1); out->len = n;
@@ -219,7 +218,7 @@ ray_t* q_prd_wrap(ray_t* x) {
         }
         return acc;
     }
-    if (!q_vec_is_num(x) || fold_refused(x))
+    if (!q_vec_is_num(x))
         return q_err(QE_TYPE);
     int64_t n = q_count(x);
     if (q_vec_is_float(x)) {
@@ -403,7 +402,6 @@ ray_t* q_sum_wrap(ray_t* x) {
         }
         return acc;
     }
-    if (fold_refused(x)) return q_err(QE_TYPE);
     return ray_sum_fn(x);
 }
 

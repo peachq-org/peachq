@@ -233,8 +233,8 @@ static inline ray_t* null_for_promoted(ray_t* a, ray_t* b) {
 }
 
 /* ref/sum.md:212 and prd.md:115: an aggregate's range is its dyad's — b h i sum to i,
- * j to j, e f and the durations keep their type; a char ATOM is i (its range cell).
- * Bytes stay j: `sum 0x0102` is deferred with the byte lane. */
+ * j to j, e f and the durations keep their type; a char vector sums its code points to i (owner ruling
+ * Dazlln).  Bytes stay j: `sum 0x0102` is deferred with the byte lane. */
 static inline int8_t agg_sum_type(int8_t t) {
     if (t == RAY_BOOL || t == RAY_I16 || t == RAY_I32 || t == RAY_CHARV) return RAY_I32;
     return ray_is_bytelike(t) ? RAY_I64 : t;
@@ -273,11 +273,11 @@ static inline ray_t* make_typed_int(int8_t atom_type, int64_t val) {
     }
 }
 
-/* sum/prd/sums/prds over an atom: the atom in the aggregate's range (`sum 1h` is 1i). */
+/* sum/prd/sums/prds over an atom: the atom itself (sum.md:21, prd.md:23; `sum 1h` is 1h).  The grids' b h c -> i
+ * cells describe VECTOR input (KX tools.q ddt1), not atoms. */
 static inline ray_t* agg_atom_result(ray_t* x) {
-    int8_t rt = (int8_t)-agg_sum_type((int8_t)-x->type);
-    if (rt == x->type) { ray_retain(x); return x; }
-    return RAY_ATOM_IS_NULL(x) ? ray_typed_null(rt) : make_typed_int(rt, as_i64(x));
+    ray_retain(x);
+    return x;
 }
 
 /* ══════════════════════════════════════════
