@@ -169,8 +169,7 @@ ray_t* q_str_charv_out(ray_t* r) {
  * formatter would instead render the whole vector as one bracketed string. */
 ray_t* q_string_fn(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
-    if (RAY_IS_NULL(x)) return ray_charv("::", 2);   /* its display form
-                                                      * (owner ruling 2026-07-23) */
+    if (Q_IS_GENERIC_NULL(x)) return ray_charv("::", 2);   /* its display form (owner ruling 2026-07-23) */
     if (x->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(x->i64);        /* borrowed */
         if (!s) return q_err(QE_TYPE);
