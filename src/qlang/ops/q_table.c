@@ -339,6 +339,8 @@ int64_t q_table_row_groups(ray_t* t, int64_t ncmp, int64_t* gid, int64_t* rep) {
 
 /* n copies of `a` as a column (broadcast helper). */
 ray_t* q_table_bcast_col(ray_t* a, int64_t n) {
+    if (n == 0 && a && a->type < 0 && a->type != -RAY_ENUM && a->type != -RAY_STR)
+        return q_type_empty((int8_t)-a->type);       /* no cell to collapse: 0#atom keeps the atom's type */
     ray_t* l = ray_list_new(n > 0 ? n : 1);
     if (RAY_IS_ERR(l)) return l;
     for (int64_t i = 0; i < n; i++) {
