@@ -206,13 +206,13 @@ void q_view_set_index(ray_t** idxv, int64_t k) {
 }
 
 /* `.z.vs` fires AFTER any default-namespace global set (ref/dotz.md; `a.b`
- * fires, `.a.b` does not); errors swallowed — the set already happened.  The
+ * fires, `.a.b` and a bare name under `\d .a` do not); errors swallowed — the set already happened.  The
  * index snapshot is consumed up front so a nested set never sees a stale one. */
 void q_view_on_global_set(int64_t sym) {
     ray_t* idx = g_setidx;
     g_setidx = NULL;
     const char* p; size_t n;
-    if (!name_bytes(sym, &p, &n) || n == 0 || p[0] == '.') {
+    if (!name_bytes(sym, &p, &n) || n == 0 || p[0] == '.' || q_env_scope_ctx()) {
         if (idx) ray_release(idx);
         return;
     }
@@ -264,7 +264,9 @@ static ray_t* view_define(int64_t name, ray_t* body, const char* txt,
     c->aux[1] = VIEW_PENDING;
     roster_add(name);                          /* before the set: never a live
                                                 * view the roster cannot see */
+    int64_t scope = q_env_scope(0);            /* a view under `\d .ns` is still a root view (learn/views.md:20) */
     ray_err_t e = q_env_set(name, c);
+    q_env_scope(scope);
     ray_release(c);
     if (e != RAY_OK) return q_env_err(e);
     ray_retain(RAY_NULL_OBJ);
