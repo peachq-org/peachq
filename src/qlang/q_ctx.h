@@ -22,6 +22,8 @@
  * RAN (eval errors included — they were reported); else the PARSE error's
  * q_err_e + 1 — the statement never ran. */
 int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err, int print_result);
+/* A `q))` prompt's line: q_ctx_run_line(..., 1) minus `.z.pi` (peachq#72); the caller selects the frame. */
+int q_ctx_run_debug_line(const char* s, size_t n, FILE* out, FILE* err);
 
 /* Called as each q_ctx_run_line line finishes, a q)) line inside the one it suspended included: its text, "ok" or
  * the error shown ('type), and its ms; "exit" for the line that ends the process.  The tty keeps its history here. */

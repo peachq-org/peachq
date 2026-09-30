@@ -133,7 +133,7 @@ static void ctx_load_esig(ray_t** esig, q_err_sig_t* t) {
  * never suspends (a transcript's line), else a console statement or a load
  * line's inheritance. */
 static int ctx_line_run(const char* s, size_t n, FILE* out, FILE* err,
-                        int print_result, int in_load, int console, ray_t** esig) {
+                        int print_result, int in_load, int console, int dbg_line, ray_t** esig) {
     if (n == 0)
         return 0;
 
@@ -151,11 +151,12 @@ static int ctx_line_run(const char* s, size_t n, FILE* out, FILE* err,
      * commands (the text intake's byte-0 read).  The text is the line without
      * its newline (what kdb passes is unrecorded: flip it here).  Gated on the
      * binding only: a handler that never calls `value` swallows every
-     * expression, as on kdb. */
+     * expression, as on kdb.  A `q))` line bypasses it: its names are the
+     * suspended frame's, which the handler's own frame would shadow (#72). */
     int     parsed = 1;
     ray_t*  r;
     int64_t zpi    = ray_sym_intern_runtime(".z.pi", 5);
-    ray_t*  zfn    = print_result && !in_load && s[0] != '\\' ? q_env_get(zpi) : NULL;
+    ray_t*  zfn    = print_result && !in_load && !dbg_line && s[0] != '\\' ? q_env_get(zpi) : NULL;
     int     hooked = zfn && q_eval_apply_is_fn(zfn);
     if (hooked) {
         ray_t* txt = ray_charv(s, (int64_t)n);
@@ -261,20 +262,27 @@ static int ctx_line_run(const char* s, size_t n, FILE* out, FILE* err,
 }
 
 static int ctx_line(const char* s, size_t n, FILE* out, FILE* err,
-                    int print_result, int in_load, int console, ray_t** esig) {
+                    int print_result, int in_load, int console, int dbg_line, ray_t** esig) {
     FILE* door = q_console_door(out);
-    int   rc   = ctx_line_run(s, n, out, err, print_result, in_load, console, esig);
+    int   rc   = ctx_line_run(s, n, out, err, print_result, in_load, console, dbg_line, esig);
     q_console_door(door);
     return rc;
 }
 
-int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err,
-                   int print_result) {
+static int ctx_console_line(const char* s, size_t n, FILE* out, FILE* err, int print_result, int dbg_line) {
     ctx_line_t prev = g_line;
     g_line = (ctx_line_t){ s, n, ray_time_now_ms() };
-    int rc = ctx_line(s, n, out, err, print_result, 0, print_result, NULL);
+    int rc = ctx_line(s, n, out, err, print_result, 0, print_result, dbg_line, NULL);
     g_line = prev;
     return rc;
+}
+
+int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err, int print_result) {
+    return ctx_console_line(s, n, out, err, print_result, 0);
+}
+
+int q_ctx_run_debug_line(const char* s, size_t n, FILE* out, FILE* err) {
+    return ctx_console_line(s, n, out, err, 1, 1);
 }
 
 /* THE multiline law as ONE walker every text door rides — the script runner
@@ -405,14 +413,14 @@ typedef struct { FILE* out; FILE* err; int print_result; char lang; ray_t** esig
  * a `.t` file still reaches `.p.e`.  `q` and `k` keep their own doors. */
 static int ctx_load_stmt(const char* s, size_t n, void* u) {
     ctx_load_t* ld = (ctx_load_t*)u;
-    if (!ld->lang) return ctx_line(s, n, ld->out, ld->err, ld->print_result, 1, -1, ld->esig);
+    if (!ld->lang) return ctx_line(s, n, ld->out, ld->err, ld->print_result, 1, -1, 0, ld->esig);
     char* t = (char*)ray_sys_alloc(n + 3);
     if (!t) return 1 + (int)QE_OOM;
     t[0] = ld->lang;
     t[1] = ')';
     memcpy(t + 2, s, n);
     t[n + 2] = '\0';
-    int rc = ctx_line(t, n + 2, ld->out, ld->err, ld->print_result, 1, -1, ld->esig);
+    int rc = ctx_line(t, n + 2, ld->out, ld->err, ld->print_result, 1, -1, 0, ld->esig);
     ray_sys_free(t);
     return rc;
 }
@@ -552,7 +560,7 @@ static ray_t* pq_console_fn(ray_t* x) {
         int64_t         conn   = __VM ? __VM->ipc_handle : -1;
         if (__VM) __VM->ipc_handle = -1;           /* the console's handle context: .z.w 0i, as `0 x` sets it */
         g_line.s = NULL;
-        ctx_line(s, (size_t)n, out, err, 1, 0, 0, NULL);
+        ctx_line(s, (size_t)n, out, err, 1, 0, 0, 0, NULL);
         if (__VM) __VM->ipc_handle = conn;
         q_dbg_frame_base(base);
         g_line = prev;
