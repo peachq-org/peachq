@@ -147,6 +147,16 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
                  * to the shared grammar (owner 2026-09-10), not an oversight.  Payload = f64 days since 2000.01.01. */
                 int end = q + 11;
                 tok_clock c;
+                if (tok_clock_tail(src, &end, &c, err) && src[end] == 'p') {
+                    /* the p letter makes a T-spelt stamp a timestamp at full precision (qstudio-private
+                     * KdbHelperTest.testP, kdb 3.x: 2023.02.10T15:36:36.576232p) */
+                    out->kind = Q_TOK_EL_TS;
+                    out->i = q_calendar_ts_compose(q_calendar_days_from_civil(y, mo, d), tok_clock_ns(&c));
+                    if (neg) out->i = -out->i;
+                    *p = end;
+                    return 1;
+                }
+                end = q + 11;
                 if (!tok_clock_tail(src, &end, &c, err) || src[end] == '.' || c.fd > 3 || (c.fd && c.fields < 3))
                     { *err = "bad datetime"; return -1; }
                 out->kind = Q_TOK_EL_DT;
@@ -459,11 +469,12 @@ static int lit_temporal_letter(char c, const q_tok_el *last) {
     return 0;
 }
 
-/* Read an optional trailing type letter at src[*p].  b/h/i/j/e/f are always available.  `g` (guid) is null-only —
- * guid has no infinity and no other literal (basics/datatypes.md §Guid). */
+/* Read an optional trailing type letter at src[*p].  b/h/i/j/e/f are always available.  `g` (guid) and `c` (char)
+ * are null-only — guid has no infinity and no other literal (basics/datatypes.md §Guid). */
 void q_tok_type_letter(const char *src, int *p, char *letter, const q_tok_el *last) {
     char c = src[*p];
-    if (c && (strchr("bhijef", c) || (c == 'g' && last->kind == Q_TOK_EL_NULL) || lit_temporal_letter(c, last)))
+    if (c && (strchr("bhijef", c) || ((c == 'g' || c == 'c') && last->kind == Q_TOK_EL_NULL) ||
+              lit_temporal_letter(c, last)))
         *letter = src[(*p)++];
 }
 
@@ -567,6 +578,15 @@ ray_t* q_tok_literal(const char *src, int *p, const char **err) {
             memset(ray_data(vec), 0, (size_t)m * 16);   /* all-null guids */
         }
         return vec;
+    }
+
+    /* `0Nc` is the char null, a blank — qstudio-private KdbTypeTest.testSpecialNulls (kdb 3.x) */
+    if (letter == 'c') {
+        char blanks[MAX_VEC];
+        for (int i = 0; i < m; i++)
+            if (buf[i].kind != Q_TOK_EL_NULL) LIT_ERR("bad number");
+        memset(blanks, ' ', (size_t)m);
+        return m == 1 ? ray_char(' ') : ray_charv(blanks, m);
     }
 
     /* A temporal letter NAMES its context (`13:30v` would otherwise reach the minute row first and drop the `v`);
