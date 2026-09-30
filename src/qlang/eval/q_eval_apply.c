@@ -1309,9 +1309,15 @@ static ray_t* sym_head_apply(ray_t* head, ray_t** args, int64_t n) {
     return r;
 }
 
+/* the container gate of noun application; an enum vector indexes like any vector (q_index_at's enum arm keeps 20h) */
+static int indexable(ray_t* v) {
+    return v->type == RAY_DICT || v->type == RAY_TABLE || v->type == RAY_ENUM || ray_is_vec(v) ||
+           v->type == RAY_LIST;
+}
+
 static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
     if (n < 1) return q_err(QE_RANK);
-    if (RAY_IS_NULL(v) && n == 1 && args[0]) {   /* Identity: (::) x, ::[x], (::)@x (ref/identity.md) */
+    if ((RAY_IS_NULL(v) || Q_IS_HOLE(v)) && n == 1 && args[0]) {   /* Identity: (::) x, ::[x], (::)@x (ref/identity.md) */
         ray_retain(args[0]);
         return args[0];
     }
@@ -1339,11 +1345,7 @@ static ray_t* noun_index(ray_t* v, ray_t** args, int64_t n) {
         ray_release(t);
         return r;
     }
-    /* an enum vector indexes like any vector (q_index_at's enum arm preserves
-     * 20h) — admit it past the container gate */
-    if (!(v->type == RAY_DICT || v->type == RAY_TABLE || v->type == RAY_ENUM ||
-          ray_is_vec(v) || v->type == RAY_LIST))
-        return q_err(QE_TYPE);
+    if (!indexable(v)) return q_err(QE_TYPE);
     if (n > APPLY_MAX_ARGS) return q_err(QE_RANK);
     ray_t* r = q_index_at(v, args, n);               /* the ONE index home */
     if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_TYPE);
@@ -1574,10 +1576,32 @@ static ray_t* enum_route(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) 
     return enum_decay_apply(fv, row, args, n);
 }
 
+/* kx's magic value: a hole ARGUMENT is an elision — a value of rank > 1, or an index into a container, projects on
+ * that slot (`mv+10` is `+[;10]`, `1 2[mv]` is 1 2); a unary receives it as data (`null mv`, `enlist mv`), and so do
+ * the identity and a symbol head, which resolves and re-enters here — owner 2026-09-30, lodash.q:74.
+ * Writes the elided copy to out and answers 1 when there was a hole to elide. */
+static int hole_args(ray_t* fv, ray_t** args, int64_t n, ray_t** out) {
+    int64_t holes = 0;
+    for (int64_t i = 0; i < n; i++)
+        if (Q_IS_HOLE(args[i])) holes++;
+    if (!holes) return 0;
+    if (q_eval_apply_is_fn(fv)) {
+        int64_t rank = rank_of(fv);
+        if ((rank < 0 ? n : rank) < 2) return 0;
+    } else if (!indexable(fv)) {
+        return 0;
+    }
+    for (int64_t i = 0; i < n; i++)
+        out[i] = Q_IS_HOLE(args[i]) ? NULL : args[i];
+    return 1;
+}
+
 static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     if (!fv || RAY_IS_ERR(fv)) return q_err(QE_TYPE);
     if (ray_eval_is_interrupted()) return q_err(QE_STOP);
     if (n < 0 || n > APPLY_MAX_ARGS) return q_err(QE_RANK);
+    ray_t* elided[APPLY_MAX_ARGS];
+    if (hole_args(fv, args, n, elided)) args = elided;
 
     q_car_kind_t kind = q_eval_apply_carrier_kind(fv);
     switch (kind) {

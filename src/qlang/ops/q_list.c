@@ -196,6 +196,14 @@ ray_t* q_raze_wrap(ray_t* x) {
         ray_release(l);
         return c;
     }
+    /* a list of atoms has no level to collapse (ref/raze.md:3) and is answered as it is — the base kernel has no
+     * vector form for the null tag, so `raze (::;::)` and a list of projection holes reached 'type there */
+    if (x && x->type == RAY_LIST) {
+        ray_t** e = (ray_t**)ray_data(x);
+        int64_t i = 0, n = q_count(x);
+        while (i < n && e[i] && !q_type_is_iter(e[i]) && e[i]->type != RAY_DICT && e[i]->type != -RAY_STR) i++;
+        if (i == n) return q_list_collapse(x);
+    }
     return ray_raze_fn(x);
 }
 
