@@ -900,7 +900,7 @@ static int matrix_row_ok(ray_t* r) {
         if (!c || RAY_IS_ERR(c)) return 0;
         if (c->type == -RAY_CHARV || c->type == RAY_CHARV || c->type == -RAY_STR) continue;
         int nested = is_collection(c);
-        if (!nested && (!ray_is_atom(c) || RAY_IS_NULL(c))) return 0;
+        if (!nested && (!ray_is_atom(c) || Q_IS_GENERIC_NULL(c))) return 0;
         if (row_nested < 0) row_nested = nested;
         else if (row_nested != nested) return 0;
     }
@@ -1540,7 +1540,7 @@ static int carrier_fmt(ray_t* v, char* buf, size_t bufsz) {
     for (int64_t i = 0; i < slots; i++) {
         if (i) PUT(";");
         ray_t* a = q_eval_apply_proj_arg(v, i);
-        if (a) {
+        if (a && !Q_IS_HOLE(a)) {
             char ab[128] = "";
             q_fmt(a, ab, sizeof ab);
             PUT("%s", ab);
@@ -1561,8 +1561,8 @@ static int fn_glyph_spelling(const char* s) {
 static void q_fmt_body(ray_t* val) {
     if (!val) return;
 
-    /* generic null prints `::` (top-level silence is the CALLER's rule) */
-    if (RAY_IS_NULL(val)) {
+    /* the generic null and the projection hole both print `::` (top-level silence is the CALLER's rule) */
+    if (Q_IS_GENERIC_NULL(val)) {
         qe_puts("::");
         return;
     }
