@@ -32,7 +32,7 @@
 #include "qlang/io/q_provider.h"   /* q_provider_get_carrier — `get `:pq:duckdb:db:t/ */
 #include "qlang/io/q_splay.h"      /* q_splay_get — `get `:dir/ maps; value/amend read the aux path */
 #include "qlang/io/q_io.h"         /* q_io_resource_table — `get `:f.csv reads the format the ending names */
-#include "qlang/q_ctx.h"           /* q_ctx_eval_src — multi-line text under the script law */
+#include "qlang/q_ctx.h"           /* q_ctx_eval_src — multi-line text under the value law */
 #include "lang/eval.h"
 #include "ops/ops.h"
 #include "table/sym.h"             /* ray_read_sym — sym vectors are width-adaptive */
@@ -703,7 +703,7 @@ ray_t* q_eval_value_wrap(ray_t* x) {
         const char* p; int64_t n;
         if (!q_str_text_bytes(x, &p, &n)) return q_err(QE_TYPE);
         q_eval_frames_t frames = q_eval_frames_suspend();
-        ray_t* r = q_ctx_eval_src(p, (size_t)n);   /* text is a script: the last statement's value (2026-09-20) */
+        ray_t* r = q_ctx_eval_src(p, (size_t)n);   /* multi-line text: the last statement's value (2026-09-30) */
         q_eval_frames_resume(frames);
         return r;
     }
