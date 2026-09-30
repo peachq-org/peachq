@@ -413,6 +413,13 @@ ray_t* q_attr_set_dispatch(ray_t* n, ray_t* vec) {
     case 's': break;
     default:  return q_err(QE_TYPE);        /* `z#vec etc. */
     }
+    if (vec && vec->type == RAY_SYM) {      /* the engine setter orders ids; kdb orders by string, as `<=` does */
+        if (!non_descending(vec, 0, q_count(vec))) return q_err(QE_SFAIL);
+        ray_t* w = ray_cow(ray_attr_drop_fn(vec));   /* the engine's numeric setter stamps a cow'd copy the same way */
+        if (!w || RAY_IS_ERR(w)) return w ? w : q_err(QE_OOM);
+        w->attrs |= RAY_ATTR_SORTED;
+        return w;
+    }
     ray_t* nm = ray_sym(ray_sym_intern_runtime("sorted", 6));   /* owned -RAY_SYM */
     /* kdb: a vector carries at most ONE attribute, and `` `x# `` REPLACES any
      * prior one (`` attr `s#`g#1 2 3 `` -> `` `s ``).  The rayfall-native setter
