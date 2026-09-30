@@ -342,6 +342,7 @@ typedef struct { Token *t; int n; } Tokens;
  * the normal free_tokens call) can still release it — otherwise a malformed
  * input leaks the token array.  Updated as the scanner emits. */
 static Tokens g_toks = { NULL, 0 };
+static int g_scan_open_str;   /* the last scan ran off the end inside a string literal */
 
 /* Whole literals (numeric / boolean / byte / guid / temporal) are scanned and
  * BUILT by q_tok.c — the single string->value home the `$` Tok scanners already
@@ -468,7 +469,7 @@ static Tokens scan(const char *src) {
                 if (src[p] == '\\' && src[p+1]) p += 2;   /* skip escaped char */
                 else p++;
             }
-            if (src[p] != '"') q_die("unterminated string");
+            if (src[p] != '"') { g_scan_open_str = 1; q_die("unterminated string"); }
             int len = p - s;
             p++;                     /* past closing quote */
             char* db = malloc((size_t)len + 1);
@@ -2288,6 +2289,21 @@ ray_t *q_parse_lang_tree(char letter, const char *p, int64_t n) {
 
 static ray_t *parse_text(const char *src);
 
+static const char *intake_lang(const char *src, size_t *n, char *lang) {
+    *lang = 0;
+    while (*n >= 2 && isalpha((unsigned char)src[0]) && src[1] == ')' && !(*n >= 3 && src[2] == ')')) {
+        *lang = src[0];
+        src += 2;
+        *n -= 2;
+    }
+    return src;
+}
+
+static const char *intake_sys(const char *src) {
+    while (*src == ' ' || *src == '\t') src++;
+    return *src == '\\' ? src : NULL;
+}
+
 ray_t *q_parse(const char *src) {
     /* Value embedding requires a live registry (codex #1): fail fast rather
      * than silently emit a mixed sym/value tree.  Every q entry point
@@ -2306,17 +2322,11 @@ ray_t *q_parse(const char *src) {
      * (ref/system.md). */
     {
         size_t n = strlen(src);
-        char lang = 0;
-        while (n >= 2 && isalpha((unsigned char)src[0]) && src[1] == ')' &&
-               !(n >= 3 && src[2] == ')')) {
-            lang = src[0];
-            src += 2;
-            n -= 2;
-        }
+        char lang;
+        src = intake_lang(src, &n, &lang);
         if (n && lang && lang != 'q') return q_parse_lang_tree(lang, src, (int64_t)n);
-        const char* b = src;
-        while (*b == ' ' || *b == '\t') b++;
-        if (*b == '\\') {
+        const char* b = intake_sys(src);
+        if (b) {
             const char* r = b + 1;
             int64_t rn = (int64_t)n - (r - src);
             /* the q string-literal shape: one char is an ATOM (string-C3) */
@@ -2411,6 +2421,53 @@ ray_t *q_parse_tokens(const char *src, int64_t n) {
     g_toks.t = NULL;
     g_toks.n = 0;
     return l;
+}
+
+static int open_depth(Tokens ts) {
+    int d = 0;
+    for (int i = 0; i < ts.n; i++) {
+        TKind k = ts.t[i].kind;
+        d += (k == T_LPAREN || k == T_LBRACE || k == T_LBRACK) - (k == T_RPAREN || k == T_RBRACE || k == T_RBRACK);
+    }
+    return d;
+}
+
+static void open_scan(q_parse_open_t *st, const char *src) {
+    init_class();
+    g_toks.t = NULL;
+    g_toks.n = 0;
+    g_scan_open_str = 0;
+    if (setjmp(q_err_jmp)) {
+        st->depth += open_depth(g_toks);
+        ray_error_free(die_answer());
+    } else {
+        Tokens ts = scan(src);
+        st->depth += open_depth(ts);
+        free_tokens(ts);
+        g_toks.t = NULL;
+        g_toks.n = 0;
+    }
+    st->in_string = g_scan_open_str;
+}
+
+void q_parse_open_feed(q_parse_open_t *st, const char *piece) {
+    if (st->opaque) return;
+    if (!st->fed) {
+        st->fed = 1;
+        size_t n = strlen(piece);
+        char   lang;
+        piece = intake_lang(piece, &n, &lang);
+        if ((n && lang && lang != 'q') || intake_sys(piece)) { st->opaque = 1; return; }
+    }
+    if (!q_registry_ready()) return;
+    if (!st->in_string) { open_scan(st, piece); return; }
+    size_t n = strlen(piece);               /* the piece starts inside the string: reopen it for the scanner */
+    char  *quoted = malloc(n + 2);
+    if (!quoted) return;
+    quoted[0] = '"';
+    memcpy(quoted + 1, piece, n + 1);
+    open_scan(st, quoted);
+    free(quoted);
 }
 
 /* q_parse_is_assign — see q_parse.h.  Head is the name-ref `:`/`::` (or the
