@@ -248,6 +248,9 @@ ray_t* q_vs_wrap(ray_t* x, ray_t* y) {
     /* --- base-x --- */
     if (q_type_is_int_atom(x) && q_type_iatom_val(x) < 2) return q_err(QE_DOMAIN);
     if (q_type_is_int_atom(x) || q_type_is_int_vec(x)) {
+        /* kdb (peachq#74): base 2 of a negative long is its low 63 bits at full width, the sign bit dropped */
+        if (ray_is_atom(x) && q_type_iatom_val(x) == 2 && y->type == -RAY_I64 && y->i64 < 0 && y->i64 != NULL_I64)
+            return digits_of(x, y->i64 & INT64_MAX, 63);
         int64_t w = max_width(x, y);
         return w < 0 ? q_err(QE_TYPE) : base_encode(x, y, w);
     }
