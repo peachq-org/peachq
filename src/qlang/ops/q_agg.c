@@ -56,6 +56,10 @@ int q_vec_is_num(ray_t* x) {
                  x->type==RAY_BOOL||ray_is_bytelike(x->type)||x->type==RAY_F64||x->type==RAY_F32);
 }
 
+/* An additive or multiplicative fold over a char vector pairs a char with a char, which arithmetic refuses (the
+ * msum/mavg/avgs/deltas grids answer `.` for C); a char ATOM folds nothing and keeps sum.md's c -> i. */
+static int fold_refused(ray_t* x) { return x && x->type == RAY_CHARV; }
+
 typedef enum { RS_SUMS, RS_PRDS, RS_MAXS, RS_MINS, RS_AVGS } q_rs_kind;
 
 /* Width-generic float store: the scans accumulate in double but the result
@@ -91,7 +95,7 @@ static ray_t* runscan(ray_t* x, q_rs_kind k) {
     }
     if ((k == RS_MAXS || k == RS_MINS) && ray_is_vec(x) && ray_is_bytelike(x->type))
         return runscan_bytes(x, k);
-    if (!q_vec_is_num(x)) return q_err(QE_TYPE);
+    if (!q_vec_is_num(x) || fold_refused(x)) return q_err(QE_TYPE);
     int64_t n = q_count(x);
     if (k == RS_AVGS) {
         ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1); out->len = n;
@@ -215,7 +219,7 @@ ray_t* q_prd_wrap(ray_t* x) {
         }
         return acc;
     }
-    if (!q_vec_is_num(x))
+    if (!q_vec_is_num(x) || fold_refused(x))
         return q_err(QE_TYPE);
     int64_t n = q_count(x);
     if (q_vec_is_float(x)) {
@@ -271,6 +275,7 @@ static ray_t* mwin(ray_t* nx, ray_t* x, q_mw_kind k) {
     int64_t N;
     ray_t* err = q_type_i64_or_err(nx, &N, "m-window: n");
     if (err) return err;
+    if (k == MW_SUM && (fold_refused(x) || q_type_is_char_atom(x))) return q_err(QE_TYPE);   /* sum.md's msum c column */
     if (!x || !q_vec_is_num(x)) {
         if (x && ray_is_atom(x)) { ray_retain(x); return x; }
         return q_err(QE_TYPE);
@@ -398,6 +403,7 @@ ray_t* q_sum_wrap(ray_t* x) {
         }
         return acc;
     }
+    if (fold_refused(x)) return q_err(QE_TYPE);
     return ray_sum_fn(x);
 }
 
