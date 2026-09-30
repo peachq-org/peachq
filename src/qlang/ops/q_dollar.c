@@ -285,7 +285,7 @@ static ray_t* cast_int(int8_t tag, ray_t* x) {
             double v = is64 ? ((const double*)ray_data(x))[i]
                             : (double)((const float*)ray_data(x))[i];
             int isnull = isnan(v);
-            int64_t iv;
+            int64_t iv = 0;
             if (isnull) iv = 0;
             else if (isinf(v)) ray_type_inf(tag, v > 0, &iv);
             else iv = (int64_t)rint(v);
@@ -304,7 +304,7 @@ static ray_t* cast_int(int8_t tag, ray_t* x) {
     if (x && (x->type == -RAY_I64 || x->type == -RAY_I32) &&
         ray_elem_size((int8_t)-x->type) > ray_elem_size(tag) && q_type_is_inf(x)) {
         int64_t v = x->type == -RAY_I64 ? x->i64 : (int64_t)x->i32;
-        int64_t inf;
+        int64_t inf = 0;
         ray_type_inf(tag, v > 0, &inf);
         return tag == RAY_I32 ? ray_i32((int32_t)inf) : ray_i16((int16_t)inf);
     }
@@ -443,13 +443,15 @@ static ray_t* cast_timestamp(ray_t* x) {
         }
         return out;
     }
-    /* float -> timestamp: base truncates the float to a raw ns count, but
-     * kdb's unit semantics here (rint-ns vs datetime-style fractional DAYS)
-     * is unpinned in the docs corpus — error beats a wrong answer, so the
-     * shape is a deferred cell (designator-audit decision, plan 2026-07-07). */
-    if (x && (x->type == -RAY_F64 || x->type == -RAY_F32 ||
-              x->type == RAY_F64  || x->type == RAY_F32))
-        return q_err(QE_NYI);
+    /* a float counts nanoseconds as the long it casts to, not datetime's days: qstudio-private's
+     * KdbHelperDataTableImageTest golden renders `timestamp$110.11 on 2000.01.01 */
+    if (x && (x->type == -RAY_F64 || x->type == -RAY_F32 || x->type == RAY_F64 || x->type == RAY_F32)) {
+        ray_t* ns = cast_int(RAY_I64, x);
+        if (!ns || RAY_IS_ERR(ns)) return ns;
+        ray_t* r = cast_delegate(RAY_TIMESTAMP, ns);
+        ray_release(ns);
+        return r;
+    }
     return cast_delegate(RAY_TIMESTAMP, x);
 }
 
