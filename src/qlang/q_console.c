@@ -78,6 +78,7 @@ int q_console_write_err(const char* s, size_t n, bool nl) {
 }
 
 int q_console_show(ray_t* val) {
+    if (q_fmt_shows_nothing(val)) return 0;
     size_t n;
     char*  txt = q_fmt_console_alloc(val, &n);   /* `show` obeys the `\c` display clip */
     if (!txt) return -1;
