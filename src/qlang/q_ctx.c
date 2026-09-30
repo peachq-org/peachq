@@ -7,7 +7,6 @@
 #include "qlang/q_count.h"
 #include "qlang/q_ctx.h"
 #include "qlang/base/q_err.h"     /* q_err / q_err_drop — the statement-entry backstop */
-#include "qlang/base/q_type.h"    /* Q_IS_GENERIC_NULL — the console's silent results */
 #include "qlang/q_comment.h"          /* doc headers: the run above a definition */
 #include "qlang/parse/q_parse.h"
 #include "qlang/eval/q_eval.h"
@@ -234,13 +233,12 @@ static int ctx_line_run(const char* s, size_t n, FILE* out, FILE* err,
         q_dbg_statement_end(dbg_prev);
         return 0;
     }
-    /* q console silence: the generic null prints nothing, which is already what
-     * an assignment statement (q_eval_statement) or `x;` answers.  A handler's
-     * TEXT is written as-is: the default handler is `.Q.s value x`. */
+    /* An assignment statement (q_eval_statement) or `x;` answers `::`, so it prints nothing.  A handler's TEXT is
+     * written as-is: the default handler is `.Q.s value x`. */
     const char* hp; int64_t hn;
-    if (hooked && !Q_IS_GENERIC_NULL(r) && q_str_text_bytes(r, &hp, &hn)) {
+    if (hooked && !q_fmt_shows_nothing(r) && q_str_text_bytes(r, &hp, &hn)) {
         fwrite(hp, 1, (size_t)hn, out);
-    } else if (print_result && !Q_IS_GENERIC_NULL(r)) {
+    } else if (print_result && !q_fmt_shows_nothing(r)) {
         size_t n;
         char*  txt = q_fmt_console_alloc(r, &n);   /* obey \c on auto-echo display */
         if (txt) {

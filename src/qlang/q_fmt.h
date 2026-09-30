@@ -32,6 +32,10 @@ void q_fmt_console(ray_t* val, char* buf, size_t bufsz);
  * growth cap): signal, never print a prefix. */
 char* q_fmt_console_alloc(ray_t* val, size_t* len);
 
+/* A top-level display of nothing: the identity, the projection hole and the empty general list `()` — the console,
+ * `show` and `.Q.s` print no text for them (peachq#73, #32).  Inside a container they render as items. */
+bool q_fmt_shows_nothing(ray_t* val);
+
 /* ---- `\P` display precision -----------------------------------------------
  * Significant digits shown when a float is converted to a string (kdb `\P`,
  * default 7, range [0,17]; 0 = maximum = 17).  q_sys.c's `\P` handler is the
