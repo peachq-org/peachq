@@ -2109,6 +2109,10 @@ static char* fmt_grow(void (*render)(ray_t*, char*, size_t, int*), ray_t* val, s
 
 char* q_fmt_console_alloc(ray_t* val, size_t* len) { return fmt_grow(fmt_console_into, val, len); }
 
+bool q_fmt_shows_nothing(ray_t* val) {
+    return Q_IS_GENERIC_NULL(val) || (val && val->type == RAY_LIST && q_count(val) == 0);
+}
+
 ray_t* q_fmt_display_charv(ray_t* val, int modern) {
     size_t len;
     char*  buf = fmt_grow(modern ? fmt_modern_into : fmt_classic_into, val, &len);
