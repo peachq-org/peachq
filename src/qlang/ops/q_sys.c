@@ -794,16 +794,14 @@ static ray_t* h_ts(size_t alen, const char* rest, size_t restlen, int64_t rep) {
     return pair_i64((int64_t)ms, bytes);               /* `(ms; bytes)` 2-long */
 }
 
-/* `\P` — display precision.  `\P`→`7i`; `\P n` sets n∈[0,17] (0 = max = 17),
- * silent.  The float formatter (q_fmt.c) is the sole reader. */
+/* `\P` — display precision.  `\P`→`7i`; `\P n` sets n∈[0,17] (0 = max = 17), above 17 is the max too
+ * (basics/precision.md sets `\P 18` to show every digit), silent.  The float formatter (q_fmt.c) is the sole reader. */
 static ray_t* h_P(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(q_fmt_prec());          /* getter */
     int64_t v;
     if (!parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
-    /* Range [0,17].  syscmds.md does not specify the out-of-range action, so
-     * we make it a silent no-op leaving precision unchanged — we neither
-     * corrupt state nor pin an unverified value (rule 9 / clean-room). */
-    if (v < 0 || v > 17) return NULL;
+    if (v < 0) return NULL;                                 /* unwitnessed: a silent no-op */
+    if (v > 17) v = 17;
     q_fmt_set_prec((int)v);
     return NULL;                                            /* setter: silent */
 }
