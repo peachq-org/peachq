@@ -112,6 +112,7 @@ ray_t* q_ceiling_wrap(ray_t* x) {
         ray_retain(x);
         return x;
     }
+    if (q_type_is_char_atom(x)) return ray_i32(x->u8);   /* ref/ceiling.md range c -> i */
     return q_err(QE_TYPE);
 }
 
@@ -138,6 +139,7 @@ ray_t* q_neg_wrap(ray_t* x) {
         ray_release(p);
         return r;
     }
+    if (q_type_is_char_atom(x)) return ray_i32(-(int32_t)x->u8);   /* ref/neg.md range c -> i */
     if (x && x->type == -RAY_SYM) {
         ray_t* r = q_handles_pq_neg(x);
         return r ? r : q_err(QE_TYPE);
