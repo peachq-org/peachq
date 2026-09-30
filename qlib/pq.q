@@ -68,14 +68,21 @@
 .pq.hl:`kw`str`esc`cmt`sym`num`tmp`op`sys`cmd`match!(33;114;168;244;37;166;136;141;127;160;"1;31");
 
 / @ignore
-.pq.drsamples:{[k] c:"bgxhijefcspmdznuvt"; v:@[.'[$;;`$]c,'1;c?"gs";:;(0Ng;`abc)]; $[k;{3#x}each v;v]}
+.pq.drsamples:{[k] c:"bgxhijefcspmdznuvt"; if[not k; :@[.'[$;;`$]c,'1;c?"gs";:;(0Ng;`abc)]];
+  g:"G"$("8c680a01-5a49-5aab-5a65-d4bfddb6a661";"5ae7962d-49f2-404d-5aec-f7c8abbae288";"5a580fb6-656b-5e69-d445-417ebfe71994");
+  (101b;g),("xhijef"$\:3 1 2),("bca";`b`ca`abc),(10_c)$\:2022.06.04D10:20:30.4 2023.01.02D03:04:05.006 2021.12.31D23:59:59.999}
 / @ignore
 .pq.drtype:{[x] c:"bgxhijefcspmdznuvt"; $[x~`err;".";$[0>type x;c;upper c]("h"$(1+til 19)except 3)?abs type x]}
 / @ignore
-.pq.drform:{[f;m] c:"bgxhijefcspmdznuvt"; v:.pq.drsamples m~`monadic; n:$[-11h=type f;string f;-10h=type f;enlist f;f]; g:$[not (type f)in -11 -10 10h;f;m~`dyadic;eval parse "{x ",n," y}";eval parse n]; $[m~`dyadic;-1 {x," | ",1_raze " ",'y}'[c;{[g;v;x]{[g;x;y].pq.drtype .[g;(x;y);{`err}]}[g;x]each v}[g;v]each v];-1 ("domain:";"range: "),'{raze " ",'x}each($[m~`monadic;upper c;c];.pq.drtype each{[g;x].[g;enlist x;{`err}]}[g]each v)];}
-/ Print a verb's domain and range grid in the layout the KX reference pages use, probed by casting a sample of every
-/ type: a lower-case letter is an atom result, upper-case a list, "." an error.  After KX's tools.q
-/ (qdocs/docs/docs/tools.q, CC BY 4.0).
+.pq.drform:{[f;m] c:"bgxhijefcspmdznuvt"; v:.pq.drsamples not m~`dyadic;
+  n:$[-11h=type f;string f;-10h=type f;enlist f;f];
+  g:$[not (type f)in -11 -10 10h;f;m~`dyadic;eval parse "{x ",n," y}";eval parse n];
+  if[m~`dyadic; -1 {x," | ",1_raze " ",'y}'[c;{[g;v;x]{[g;x;y].pq.drtype .[g;(x;y);{`err}]}[g;x]each v}[g;v]each v]; :(::)];
+  r:$[m~`monadic;::;lower].pq.drtype each{[g;x].[g;enlist x;{`err}]}[g]each v;
+  -1 ("domain:";"range: "),'{raze " ",'x}each($[m~`monadic;upper c;c];r);}
+/ Print a verb's domain and range grid in the layout the KX reference pages use, probed with a sample of every type
+/ (an atom each side of a dyad, a three-item vector for a monad): a lower-case letter is an atom result, upper-case
+/ a list, "." an error.  After KX's tools.q (qdocs/docs/docs/tools.q, CC BY 4.0).
 / @param verb a symbol or char naming a verb in .Q.ops[], or a function
 / @eg .pq.dr `neg
 / @eg .pq.dr "+"
