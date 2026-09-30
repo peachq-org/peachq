@@ -92,6 +92,17 @@ static ray_t* ft_cell_text(ray_t* atom) {
             return d;
         }
     }
+    if (atom->type == -RAY_MONTH && s->type == -RAY_STR && ray_str_len(s)) {
+        /* `string` drops the m (#898) but the csv contract writes it: bare 2026.08 would read back as a float. */
+        size_t n = ray_str_len(s);
+        char b[32];
+        if (n + 1 <= sizeof b) {
+            memcpy(b, ray_str_ptr(s), n);
+            b[n] = 'm';
+            ray_release(s);
+            return ray_str(b, n + 1);
+        }
+    }
     return s;
 }
 
