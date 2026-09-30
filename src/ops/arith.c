@@ -193,7 +193,7 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
         return ray_timespan(wrap_add64(a->i64, b->i64));
     }
 
-    if (!is_numeric(a) || !is_numeric(b))
+    if (!is_numeric(a) || !is_numeric(b) || arith_char_refused(a->type, b->type))
         return ray_error("type", "cannot add %s and %s",
                          ray_type_name(a->type), ray_type_name(b->type));
     /* Null propagation */
@@ -208,6 +208,12 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
 ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
     if ((a && RAY_IS_PARTED(a->type)) || (b && RAY_IS_PARTED(b->type)))
         return atomic_map_binary_op(ray_sub_fn, OP_SUB, a, b);
+    if (b->type == -RAY_CHARV) {   /* x-y is x+neg y, and ref/neg.md takes c to i */
+        ray_t* bi = make_i32((int32_t)b->u8);
+        ray_t* r = ray_sub_fn(a, bi);
+        ray_release(bi);
+        return r;
+    }
 
     /* DATETIME (f64-backed, excluded from is_temporal) — see ray_add_fn.
      * z - z -> f64 days difference (basics/precision.md:274 `0=a-b`);
@@ -301,12 +307,18 @@ ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESTAMP);
         return ray_timestamp(wrap_sub64(temporal_as_ns(a), temporal_as_ns(b)));
     }
+    /* int - absolute keeps the absolute (ref/subtract.md rows b..e, cols p m d z); a float row is D672a's */
+    if (is_numeric(a) && a->type != -RAY_F64) {
+        if (is_absolute_temporal(b)) return make_typed_int(b->type, wrap_sub64(as_i64(a), as_i64(b)));
+        if (b->type == -RAY_DATETIME)
+            return RAY_ATOM_IS_NULL(a) ? ray_typed_null(-RAY_DATETIME) : ray_datetime(as_f64(a) - b->f64);
+    }
     /* TIMESTAMP - DATE → error */
     if (a->type == -RAY_TIMESTAMP && b->type == -RAY_DATE)
         return ray_error("type", "subtract: cannot subtract %s from %s",
                          ray_type_name(b->type), ray_type_name(a->type));
 
-    if (!is_numeric(a) || !is_numeric(b))
+    if (!is_numeric(a) || !is_numeric(b) || arith_char_refused(a->type, b->type))
         return ray_error("type", "cannot subtract %s and %s",
                          ray_type_name(a->type), ray_type_name(b->type));
     /* Null propagation */
@@ -345,9 +357,9 @@ ray_t* ray_mul_fn(ray_t* a, ray_t* b) {
     if (!is_numeric(a) || !is_numeric(b)) {
         if (is_numeric(a) && is_numeric_or_temporal(b)) return mul_temporal(b, a);
         if (is_numeric_or_temporal(a) && is_numeric(b)) return mul_temporal(a, b);
-        return ray_error("type", "cannot multiply %s and %s",
-                         ray_type_name(a->type), ray_type_name(b->type));
     }
+    if (!is_numeric(a) || !is_numeric(b) || arith_char_refused(a->type, b->type))
+        return ray_error("type", "cannot multiply %s and %s", ray_type_name(a->type), ray_type_name(b->type));
     /* Null propagation */
     if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return null_for_promoted(a, b);
     if (is_float_op(a, b))
@@ -417,16 +429,15 @@ ray_t* ray_mod_fn(ray_t* a, ray_t* b) {
         if (a->type == -RAY_TIMESPAN)  return ray_timespan(result);
         return ray_timestamp(result);
     }
-    if (!is_numeric(a) || !is_numeric(b))
+    if (!is_numeric(a) || !is_numeric(b) || arith_char_refused(a->type == -RAY_F32 ? -RAY_F64 : a->type, b->type))
         return ray_error("type", "cannot mod %s by %s",
                          ray_type_name(a->type), ray_type_name(b->type));
 
     /* u8: unsigned byte modulo, no null sentinel — mod by 0 returns 0 */
-    if (b->type == -RAY_BYTE_ONLY || b->type == -RAY_CHARV) {
+    if (b->type == -RAY_BYTE_ONLY) {
         uint8_t bv = b->u8;
-        if (bv == 0) return b->type == -RAY_CHARV ? ray_char(0) : make_u8(0);
-        uint8_t rv = (uint8_t)((uint8_t)as_i64(a) % bv);
-        return b->type == -RAY_CHARV ? ray_char(rv) : make_u8(rv);
+        if (bv == 0) return make_u8(0);
+        return make_u8((uint8_t)((uint8_t)as_i64(a) % bv));
     }
     if (a->type == -RAY_BYTE_ONLY) {
         /* a is u8 but b is not u8 — treat as integer, result follows b's type */
@@ -473,7 +484,6 @@ ray_t* ray_mod_fn(ray_t* a, ray_t* b) {
     if (b->type == -RAY_I32) return make_i32((int32_t)result);
     if (b->type == -RAY_I16) return make_i16((int16_t)result);
     if (b->type == -RAY_BYTE_ONLY) return make_u8((uint8_t)result);
-    if (b->type == -RAY_CHARV) return ray_char((uint8_t)result);
     return make_i64(result);
 }
 
@@ -547,6 +557,7 @@ ray_t* ray_abs_fn(ray_t* x) {
         if (RAY_UNLIKELY(x->i16 == INT16_MIN)) return ray_typed_null(-RAY_I16);
         return make_i16(x->i16 < 0 ? -x->i16 : x->i16);
     }
+    if (x->type == -RAY_CHARV) return make_i32(x->u8);   /* ref/abs.md range c -> i */
     return ray_error("type", "abs: expects a numeric argument, got %s", ray_type_name(x->type));
 }
 

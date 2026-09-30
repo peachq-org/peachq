@@ -27,7 +27,7 @@
 / ref/sum.md "equivalent to {sum x*y}", float ONLY "when both x and y are
 / integer lists" - an atom operand is not a list, so it never promotes
 .q.wsum:{sum x*$[all (type x;type y)in 5 6 7h;"f"$y;y]}
-.q.cov:{avg[x*y]-avg[x]*avg y}
+.q.cov:{x:"f"$x; y:"f"$y; avg[x*y]-avg[x]*avg y}
 .q.scov:{cov[x;y]*count[x]%-1+count x}
 .q.mavg:{(x msum y)%x mcount y}
 / ref/fby.md prints the law: `(sum each dat group grp)grp`; x is the (aggr;d)

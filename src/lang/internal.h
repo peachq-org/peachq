@@ -209,6 +209,14 @@ static inline int8_t arith_int_type(int8_t a, int8_t b) {
     return RAY_I32;
 }
 
+/* Char is not a number in arithmetic: a char operand reads as its code point only beside a float (row and column
+ * `c` of ref/add.md, subtract.md, multiply.md, mod.md).  Atom tags, passed as the verb READS its operands — subtract
+ * reads a char y as neg does (an int), mod a real x as a float — and asked after the temporal arms, which take a
+ * char as an int offset. */
+static inline int arith_char_refused(int8_t at, int8_t bt) {
+    return (at == -RAY_CHARV || bt == -RAY_CHARV) && at != -RAY_F64 && bt != -RAY_F64;
+}
+
 static inline int8_t promote_int_type(ray_t* a, ray_t* b) {
     return (int8_t)-arith_int_type((int8_t)-a->type, (int8_t)-b->type);
 }
@@ -225,10 +233,10 @@ static inline ray_t* null_for_promoted(ray_t* a, ray_t* b) {
 }
 
 /* ref/sum.md:212 and prd.md:115: an aggregate's range is its dyad's — b h i sum to i,
- * j to j, e f and the durations keep their type.  Bytes stay j: `sum 0x0102` is
- * deferred with the byte lane. */
+ * j to j, e f and the durations keep their type; a char ATOM is i (its range cell).
+ * Bytes stay j: `sum 0x0102` is deferred with the byte lane. */
 static inline int8_t agg_sum_type(int8_t t) {
-    if (t == RAY_BOOL || t == RAY_I16 || t == RAY_I32) return RAY_I32;
+    if (t == RAY_BOOL || t == RAY_I16 || t == RAY_I32 || t == RAY_CHARV) return RAY_I32;
     return ray_is_bytelike(t) ? RAY_I64 : t;
 }
 
