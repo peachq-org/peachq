@@ -46,7 +46,7 @@ ray_t* q_dotq_qp_fn(ray_t* x) {
 /* (.Q.s x) — x as the classic console prints it, `\c`-clipped and line-terminated (ref/dotq.md `.Q.s`), whatever the
  * display mode: the returned string is data.  `::` and `()` print nothing, so their text is empty. */
 ray_t* q_dotq_s_fn(ray_t* x) {
-    if (RAY_IS_NULL(x) || (x && x->type == RAY_LIST && q_count(x) == 0)) return ray_charv("", 0);
+    if (Q_IS_GENERIC_NULL(x) || (x && x->type == RAY_LIST && q_count(x) == 0)) return ray_charv("", 0);
     return q_fmt_display_charv(x, 0);
 }
 

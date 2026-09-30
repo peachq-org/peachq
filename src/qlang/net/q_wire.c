@@ -5,6 +5,7 @@
 #include "qlang/net/q_wire.h"
 #include "qlang/q_prim.h"
 #include "qlang/base/q_err.h"      /* q_err / q_err_text — full error text on the wire */
+#include "qlang/base/q_type.h"     /* Q_HOLE_OBJ — the projection hole, 101h 0xff */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_lambda_src / q_eval — lambda serde;
                                  * q_eval_apply_concrete — the IPC boundary force */
 #include "qlang/q_registry.h"   /* q_list_collapse + the kdb_op identity pair */
@@ -217,9 +218,9 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         rc = (w_u8(b, 0x80) || w_cstr(b, text ? text : "", (size_t)tn)) ? -1 : 0;
         goto out;
     }
-    /* (::) generic null — kdb's unary primitive 0 (the identity) */
-    if (RAY_IS_NULL(x)) {
-        rc = w_prim(b, 101, 0);
+    /* (::) is kdb's unary primitive 0 (the identity); the projection hole is its 0xff (lodash.q:72) */
+    if (RAY_IS_NULL(x) || Q_IS_HOLE(x)) {
+        rc = w_prim(b, 101, Q_IS_HOLE(x) ? 0xff : 0);
         goto out;
     }
     /* RAY_QFN carriers — iterators are kdb 103h by adverb id (q_registry.h's
@@ -1140,6 +1141,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         if (!r_need(c, 1)) return trunc_err("primitive code");
         uint8_t which = r_u8(c);
         if (t == 101 && which == 0) return RAY_NULL_OBJ;
+        if (t == 101 && which == 0xff) return Q_HOLE_OBJ;
         ray_t* v = q_registry_kdb_op_value((int)which,
                                            t == 101 ? Q_MONADIC : Q_DYADIC);
         if (!v) return rd_value_err(c, q_err(QE_NYI));
@@ -1155,9 +1157,8 @@ static ray_t* rd_obj_inner(rcur_t* c) {
     }
     case 104:                                         /* projection */
     case 105: {                                       /* composition */
-        /* Applying rebuilds both, so neither carrier's constructor is reached
-         * from here: a (::) is the hole that makes a head PROJECT, and the
-         * compose value folds the parts right to left. */
+        /* A projection is CONSTRUCTED through the apply module's seam; a
+         * composition is the compose value folding its parts right to left. */
         if (!r_need(c, 4)) return trunc_err("carrier count");
         int32_t count = r_i32(c);
         if (count < (t == 104 ? 1 : 2) || (uint64_t)count > c->rem)
@@ -1175,18 +1176,14 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         ray_t* r;
         if (t == 105) r = q_eval_apply_value(q_registry_compose_value(), e, count);
         else {
-            /* args alias the list, so a decoded (::) becomes the C NULL apply
-             * reads as a hole without disowning it.  All-concrete args would
-             * CALL the head — remote code execution from a crafted frame — so
-             * the trailing hole the writer trims is restored first: with one
-             * hole present apply can only project, padding out to rank. */
+            /* args alias the list, so a decoded hole (0x65ff) becomes the C NULL
+             * the carrier reads as one without disowning it; a (::) is a real
+             * argument.  The head is never applied here. */
             ray_t** a = (ray_t**)ray_alloc_raw((size_t)count * sizeof *a);
             if (!a) { ray_release(l); return q_err(QE_WSFULL); }
-            int32_t n = count - 1, holes = 0;
             for (int32_t i = 1; i < count; i++)
-                if (!(a[i - 1] = RAY_IS_NULL(e[i]) ? NULL : e[i])) holes++;
-            if (!holes) a[n++] = NULL;
-            r = q_eval_apply_value(e[0], a, n);
+                a[i - 1] = Q_IS_HOLE(e[i]) ? NULL : e[i];
+            r = q_eval_apply_proj_value(e[0], a, count - 1);
             ray_free_raw(a);
         }
         ray_release(l);

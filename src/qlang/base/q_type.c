@@ -406,3 +406,5 @@ int64_t q_type_coord_sym(ray_t* x) {
     memcpy(&sym, x->aux + 8, sizeof sym);
     return sym;
 }
+
+ray_t q_hole_obj = { .type = RAY_NULL, .attrs = RAY_ATTR_ARENA, .rc = 0, .len = 0 };
