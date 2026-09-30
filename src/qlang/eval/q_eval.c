@@ -527,8 +527,8 @@ ray_t* q_eval_carrier_value(ray_t* v) {
         return list_put_borrowed(list_put_borrowed(ray_list_new(2), h),
                                  q_eval_apply_comp_inner(v));
     case Q_EVAL_CAR_PROJ: {
-        /* an ELIDED trailing slot is not a bound argument — `+[2]` fills the
-         * dyad's second slot with a hole but reads out as the 2-item (+;2) */
+        /* an UNWRITTEN trailing slot is rank padding, not a bound argument — `+[2]` reads out as the 2-item
+         * (+;2); a written hole (`{x+y}[1;]`) is the hole value and stays (D0922h) */
         int64_t n = q_eval_apply_proj_nslots(v);
         while (n > 0 && !q_eval_apply_proj_arg(v, n - 1)) n--;
         ray_t* out = list_put_borrowed(ray_list_new(n + 1), h);

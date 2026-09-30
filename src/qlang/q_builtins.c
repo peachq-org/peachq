@@ -128,7 +128,7 @@ static ray_unary_fn g_base_count = NULL;
  * a recorded string-model divergence (ARCHITECTURE.md).  Carrier classification
  * is the apply module's to answer, which is why this cannot sit in base/. */
 static int8_t type_of(ray_t* x) {
-    if (RAY_IS_NULL(x)) return 101;
+    if (Q_IS_GENERIC_NULL(x)) return 101;
     switch (q_eval_apply_carrier_kind(x)) {
     case Q_EVAL_CAR_LAMBDA: return 100;
     case Q_EVAL_CAR_PROJ:   return 104;

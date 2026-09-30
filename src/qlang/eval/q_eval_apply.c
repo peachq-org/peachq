@@ -249,9 +249,22 @@ int q_eval_apply_iter_id(ray_t* v) {
                ? (int)car_slots(v)[0]->i64 : -1;
 }
 
-/* projection carrier: [fv, fv-row box, slot0..slotR-1]; holes = C NULL */
+/* an open slot: a written hole or unwritten padding */
+static int slot_open(ray_t* s) { return !s || Q_IS_HOLE(s); }
+
+/* projection carrier: [fv, fv-row box, slot0..slotR-1].  args[0..n) are the WRITTEN slots — a C NULL there is
+ * an elision and is stored as the hole VALUE (kx's 101h 0xff, which `value` and the wire read back); the slots
+ * from n to the rank are unwritten padding (`+[2]` reads out as (+;2)) and stay C NULL.  A primitive's trailing
+ * holes are padding too — kdb writes `-15!` as (!;-15) (qPython fixture) — unless every slot is one (`+[;]`);
+ * a lambda keeps what was written (`{x+y}[1;]`, owner 2026-09-30) and a paren literal's written slots ARE its
+ * rank (`(value(1;))2` is the hole, q2b.q:6). */
 ray_t* q_eval_apply_proj_new(ray_t* fv, const q_op_t* row, ray_t** args,
                              int64_t n, int64_t rank) {
+    if (q_eval_apply_is_fnval(fv) && fv != q_registry_list_value()) {
+        int64_t k = n;
+        while (k > 0 && slot_open(args[k - 1])) k--;
+        if (k > 0) n = k;
+    }
     int64_t slots = rank > n ? rank : n;
     ray_t* c = car_new(Q_EVAL_CAR_PROJ, slots + 2);
     if (RAY_IS_ERR(c)) return c;
@@ -265,7 +278,7 @@ ray_t* q_eval_apply_proj_new(ray_t* fv, const q_op_t* row, ray_t** args,
     }
     for (int64_t i = 0; i < n; i++) {
         if (args[i]) ray_retain(args[i]);
-        s[2 + i] = args[i];
+        s[2 + i] = args[i] ? args[i] : Q_HOLE_OBJ;
     }
     return c;
 }
@@ -1256,12 +1269,14 @@ static ray_t* proj_call(ray_t* proj, ray_t** args, int64_t n) {
     const q_op_t* row = row_unbox(c[1]);
     int64_t rank = ray_block_len(proj) - 2;
     ray_t* merged[APPLY_MAX_ARGS];
-    int64_t ai = 0, holes = 0, fn_rank = 0;
+    int64_t ai = 0, holes = 0, fn_rank = 0, written = 0;
     if (rank > APPLY_MAX_ARGS) return q_err(QE_RANK);
     for (int64_t i = 0; i < rank; i++) {
-        if (!c[2 + i]) fn_rank++;
-        merged[i] = (!c[2 + i] && ai < n) ? args[ai++] : c[2 + i];
-        if (!merged[i]) holes++;
+        int open = slot_open(c[2 + i]), filled = open && ai < n;
+        if (open) fn_rank++;
+        merged[i] = filled ? args[ai++] : c[2 + i];
+        if (slot_open(merged[i])) holes++;
+        if (filled || c[2 + i]) written = i + 1;
     }
     if (ai < n) return q_err(QE_RANK);
     if (holes > 0) {
@@ -1269,7 +1284,7 @@ static ray_t* proj_call(ray_t* proj, ray_t** args, int64_t n) {
          * `get` reads back as (list;arg…) and a marker list stays recognisable by identity */
         if (n > 0 && fv == q_registry_list_value())
             return q_eval_apply_proj_new(proj, NULL, args, n, fn_rank);
-        return q_eval_apply_proj_new(fv, row, merged, rank, rank);
+        return q_eval_apply_proj_new(fv, row, merged, written, rank);
     }
     return q_eval_apply(fv, row, merged, rank);
 }
@@ -1348,7 +1363,7 @@ static int64_t rank_of(ray_t* fv) {
     case Q_EVAL_CAR_PROJ: {
         int64_t slots = ray_block_len(fv) - 2, holes = 0;
         for (int64_t i = 0; i < slots; i++)
-            if (!car_slots(fv)[2 + i]) holes++;
+            if (slot_open(car_slots(fv)[2 + i])) holes++;
         return holes;
     }
     case Q_EVAL_CAR_COMP: return rank_of(car_slots(fv)[1]);
@@ -1773,6 +1788,23 @@ ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n) {
         return q_eval_apply(head, row, args, n);
     }
     return noun_index(head, args, n);
+}
+
+/* A projection of head over args (C NULL = hole) CONSTRUCTED, never applied — the codec's seam: a decoder builds
+ * values and runs none (docs/ipc-architecture.md).  A hole-less arg list is kdb's rank padding (`{x+y}[3]`); on a
+ * head whose rank it meets, or a variadic, a hole is appended so the value is a projection whatever the head. */
+ray_t* q_eval_apply_proj_value(ray_t* head, ray_t** args, int64_t n) {
+    if (!head || RAY_IS_ERR(head) || !q_eval_apply_is_fn(head)) return q_err(QE_DOMAIN);
+    if (n < 0 || n >= APPLY_MAX_ARGS) return q_err(QE_RANK);
+    ray_t* a[APPLY_MAX_ARGS];
+    int64_t rank = rank_of(head), holes = 0;
+    for (int64_t i = 0; i < n; i++)
+        if (!(a[i] = args[i])) holes++;
+    if (!holes && !(rank > 0 && n < rank)) a[n++] = NULL;
+    if (rank < n) rank = n;
+    const q_op_t* row = q_eval_apply_is_fnval(head)
+                            ? q_registry_row_of(head, rank == 1 ? Q_MONADIC : Q_DYADIC) : NULL;
+    return q_eval_apply_proj_new(head, row, a, n, rank);
 }
 
 ray_t* q_eval_apply_call_sym(int64_t sym, ray_t** args, int64_t argc) {

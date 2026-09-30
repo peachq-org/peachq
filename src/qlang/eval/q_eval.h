@@ -59,6 +59,8 @@ ray_t* q_adverb_apply(int adv, ray_t* fv, const struct q_op* frow,
  * `@`/`.` dyadic and every C-side "call this q value" site.  Args BORROWED,
  * result OWNED. */
 ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n);
+/* the codec's seam: a projection of head over args (C NULL = hole) built directly, never applied */
+ray_t* q_eval_apply_proj_value(ray_t* head, ray_t** args, int64_t n);
 
 /* The by-name front on that seam — apply the q global named name[0..n)
  * (or interned sym) to args (borrowed); owned result; an unbound name
@@ -163,7 +165,7 @@ int  q_eval_apply_lambda_prov(ray_t* v, ray_t** name, int64_t* file_sym,
 /* Carrier read-out for display (q_fmt renders; slot layout stays opaque):
  * BORROWED parts, NULL when v is not that carrier kind — deriv/proj head
  * value + manifest spelling (NULL spelling = value head), composition's
- * inner g, and a projection's slot count + bound arg (NULL arg = hole). */
+ * inner g, and a projection's slot count + bound arg (Q_HOLE_OBJ = a written hole, NULL = unwritten padding). */
 int         q_eval_apply_deriv_adv(ray_t* v);       /* adv id, -1 not deriv */
 const char* q_eval_apply_car_head_name(ray_t* v);
 ray_t*      q_eval_apply_car_head(ray_t* v);
@@ -172,7 +174,7 @@ int64_t     q_eval_apply_proj_nslots(ray_t* v);
 ray_t*      q_eval_apply_proj_arg(ray_t* v, int64_t i);
 
 /* ref/value.md's carrier read-out, OWNED: a projection's (fn;arg…) with the
- * trailing elided slots dropped and interior holes as (::), a composition's
+ * unwritten trailing slots dropped and every written hole as the hole value (Q_HOLE_OBJ), a composition's
  * (u;g), a derived function's bare operand.  NULL for another kind AND for
  * allocation failure, so decide the kind first if you must tell them apart. */
 ray_t* q_eval_carrier_value(ray_t* v);

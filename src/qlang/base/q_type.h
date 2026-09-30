@@ -124,6 +124,14 @@ int q_type_is_iter(ray_t* v);
 int q_type_is_null_sym(ray_t* x);
 int q_type_vec_is_null(ray_t* x, int64_t i);
 
+/* kx's projection HOLE — an elided argument: 101h, payload 0xff on the wire (the identity `(::)` is 0x00), `::`
+ * in display.  A second ARENA singleton on the null tag, so retain/release are no-ops and only its address tells. */
+extern ray_t q_hole_obj;
+#define Q_HOLE_OBJ   (&q_hole_obj)
+#define Q_IS_HOLE(p) ((p) == Q_HOLE_OBJ)
+/* either null-tag singleton: 101h, `::` in a list, nothing at the console and "" from .Q.s (owner 2026-09-30) */
+#define Q_IS_GENERIC_NULL(p) (RAY_IS_NULL(p) || Q_IS_HOLE(p))
+
 /* Is this atom its type's ±infinity (0W / -0W / ±0w)?  RAY_ATOM_IS_NULL's twin
  * at the far end of the lane; 0 for the types the docs pin no infinity for. */
 int q_type_is_inf(ray_t* x);
