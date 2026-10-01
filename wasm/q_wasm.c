@@ -1,15 +1,12 @@
-/* q_wasm — the C ABI of peachq's WebAssembly build: create the runtime, run one line.
- * A line runs through q_ctx_run_line, the statement seam every native door shares,
- * with stdout/stderr as its streams: the host reads the answer from the module's
- * print/printErr exactly as a terminal reads ./q.  wasm/engine.js is the one caller,
- * and wasm/smoke.js runs its .qcmd ledger through q_wasm_qcmd. */
+/* q_wasm — the C ABI of peachq's WebAssembly build: create the runtime, run q text.
+ * The host reads each answer from the module's print/printErr (stdout/stderr).
+ * wasm/engine.js is the one caller, and wasm/smoke.js runs its .qcmd ledger through q_wasm_qcmd. */
 #include "qlang/q_runtime.h"
 #include "qlang/q_ctx.h"
 #include "qlang/q_console.h"      /* pipe-table display + the console clip */
 #include "qlang/q_pq.h"           /* q_pq_load — the embedded stdlib bundle */
 #include <rayforce.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -35,14 +32,13 @@ int q_wasm_init(void) {
     return 0;
 }
 
-/* One line of q, answered on stdout (the value, `show` output) and stderr (the
- * error display) — both flushed before return, so every byte has reached the host. */
+/* Text as `value`/an IPC request reads it, in the console's session (`\d` sticks), answered as the console
+ * displays it: the web never reaches the console's one-line door. */
 EMSCRIPTEN_KEEPALIVE
 void q_wasm_eval(const char* src) {
     if (!src || q_wasm_init() != 0)
         return;
-    q_ctx_run_line(src, strlen(src), stdout, stderr, 1);
-    fflush(stdout);
+    q_ctx_run_value_src(src, strlen(src), stdout, stderr);
     fflush(stderr);
 }
 

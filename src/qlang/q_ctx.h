@@ -76,6 +76,10 @@ int q_ctx_run_named_src(const char* name, const char* s, FILE* out, FILE* err, r
  * `\d` and frame-floor policy. */
 ray_t* q_ctx_eval_src(const char* s, size_t n);
 
+/* q_ctx_eval_src in the console's session, its answer displayed as the console displays a line's (`\c`, nothing for
+ * `::`, an error's trace) — the browser's one door.  Unlike an IPC request it keeps `\d`; it never suspends. */
+void q_ctx_run_value_src(const char* s, size_t n, FILE* out, FILE* err);
+
 /* q_ctx_run_src as a CONSOLE-initiated load — the tty's startup texts (`\l file`,
  * the `-eval` texts): silent and multiline as any script, but its statements
  * suspend into the debugger the way a typed `\l`'s do, so `:`/`\` resume or

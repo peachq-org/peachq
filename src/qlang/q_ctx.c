@@ -14,7 +14,7 @@
 #include "qlang/eval/q_view.h"    /* q_view_intercept — `x::e` at the line seam */
 #include "qlang/q_env.h"          /* q_env_ctx / _set — the load's `\d` save+restore; q_env_peek — `.<ext>.e` */
 #include "qlang/q_fmt.h"
-#include "qlang/q_console.h"      /* q_console_door — the running door names the console's stream */
+#include "qlang/q_console.h"      /* q_console_door — the running door names the console's stream; q_console_show */
 #include "qlang/q_prim.h"        /* q_str_text_bytes — the remote value-apply head; q_ssr_wrap — a known file's CRLF;
                                    * q_str_split_lines / q_str_charv_out — a whole-text file as read0's lines */
 #include "qlang/q_builtins.h"     /* q_dotq_sha1_fn — a known file's digest */
@@ -238,18 +238,10 @@ static int ctx_line_run(const char* s, size_t n, FILE* out, FILE* err,
     const char* hp; int64_t hn;
     if (hooked && !q_fmt_shows_nothing(r) && q_str_text_bytes(r, &hp, &hn)) {
         fwrite(hp, 1, (size_t)hn, out);
-    } else if (print_result && !q_fmt_shows_nothing(r)) {
-        size_t n;
-        char*  txt = q_fmt_console_alloc(r, &n);   /* obey \c on auto-echo display */
-        if (txt) {
-            fwrite(txt, 1, n, out);
-            fputc('\n', out);
-            free(txt);
-        } else {
-            ray_t* e = q_err(QE_WSFULL);   /* a display we cannot build is an error */
-            if (!in_load) ctx_line_done(e, NULL);
-            ctx_show_err(out, err, e);
-        }
+    } else if (print_result && q_console_show(r)) {
+        ray_t* e = q_err(QE_WSFULL);       /* a display we cannot build is an error */
+        if (!in_load) ctx_line_done(e, NULL);
+        ctx_show_err(out, err, e);
     }
     ray_release(r);
     fflush(out);
@@ -484,6 +476,22 @@ ray_t* q_ctx_eval_src(const char* s, size_t n) {
     if (rc) return q_err(QE_OOM);          /* the one non-statement stop: the walker's own buffer */
     ray_retain(RAY_NULL_OBJ);              /* no statement ran: what an assignment answers */
     return RAY_NULL_OBJ;
+}
+
+void q_ctx_run_value_src(const char* s, size_t n, FILE* out, FILE* err) {
+    int    dbg_prev = q_dbg_statement_begin(s, n, 0);
+    FILE*  door     = q_console_door(out);
+    ray_t* r        = q_ctx_eval_src(s, n);
+    if (RAY_IS_ERR(r))
+        ctx_show_err(out, err, r);
+    else {
+        if (q_console_show(r)) ctx_show_err(out, err, q_err(QE_WSFULL));
+        ray_release(r);
+    }
+    fflush(out);
+    q_console_door(door);
+    ctx_statement_end();
+    q_dbg_statement_end(dbg_prev);
 }
 
 /* Third-party files q cannot run but whose loss costs nothing, known by the SHA-1 of their text read with CRLF as LF
