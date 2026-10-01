@@ -668,6 +668,7 @@ void q_eval_frames_resume(q_eval_frames_t f) {
  * rest AS LITERALS — nested trees stay data.  A sym vector of two or more is
  * that list; value of any OTHER typed vector (incl. the enlisted constant
  * ,`x) is doc-silent: 'nyi, never a guess. */
+/* docs/text-entry-law.md (target state; peachq may differ): `value "…"` is the IPC column */
 ray_t* q_eval_value_wrap(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (RAY_IS_NULL(x)) return ray_i64(0);   /* (::) IS unary primitive 0 —

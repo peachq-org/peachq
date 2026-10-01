@@ -595,6 +595,7 @@ ray_t* q_sys_load(const char* arg, size_t alen) {
      * (`.pq.i.files`) unless a disk file `pq`/`pq.q` wins above. */
     if (alen > 3 && memcmp(lit, "pq/", 3) == 0) return q_pq_load_file(lit, alen, ok ? found : NULL);
     if (ok) {   /* disk hit — load (silent); an ABORTED load signals */
+        /* docs/text-entry-law.md (target state; peachq may differ): `\l` and `system "l"` are the via-file column */
         ray_t* esig = NULL;
         int rc = q_ctx_run_file(found, stdout, stderr, &esig);
         return q_ctx_run_abort(rc, esig);
