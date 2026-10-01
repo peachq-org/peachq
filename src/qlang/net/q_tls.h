@@ -42,5 +42,6 @@ int q_tls_server_sniff(ray_sock_t fd);
 
 ray_t* q_tls_info(void);              /* `(-26!)[]`      — basics/internal.md:350 */
 ray_t* q_tls_conn_info(ray_sock_t fd);/* `.z.e`/per-handle — ref/dotz.md:215      */
+void   q_tls_pq_register(void);       /* bind the .pq.i.tlsinfo native (.pq.load_natives) */
 
 #endif /* Q_TLS_H */
