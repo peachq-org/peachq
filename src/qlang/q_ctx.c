@@ -267,6 +267,7 @@ static int ctx_console_line(const char* s, size_t n, FILE* out, FILE* err, int p
     return rc;
 }
 
+/* docs/text-entry-law.md (target state; peachq may differ): a line typed at the REPL: IPC column, console session */
 int q_ctx_run_line(const char* s, size_t n, FILE* out, FILE* err, int print_result) {
     return ctx_console_line(s, n, out, err, print_result, 0);
 }
@@ -285,6 +286,7 @@ int q_ctx_run_debug_line(const char* s, size_t n, FILE* out, FILE* err) {
  * open `{ ( [` or string (owner ruling 2026-09-30 — value is not `\l`). */
 typedef int (*ctx_stmt_fn)(const char* s, size_t n, void* u);
 
+/* docs/text-entry-law.md (target state; peachq may differ): the via-file and IPC columns */
 static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int value_door, ctx_stmt_fn fn, void* u) {
     if (!src) { src = ""; len = 0; }     /* an empty read owns no buffer; `src + len` must stay defined */
 
@@ -469,6 +471,7 @@ static int ctx_eval_stmt(const char* s, size_t n, void* u) {
     return RAY_IS_ERR(r) ? 1 : 0;
 }
 
+/* docs/text-entry-law.md (target state; peachq may differ): the IPC column */
 ray_t* q_ctx_eval_src(const char* s, size_t n) {
     ray_t* last = NULL;
     int    rc   = ctx_walk_script(s, n, 0, 1, ctx_eval_stmt, &last);
@@ -710,6 +713,7 @@ static void remote_err_dump(ray_t* r) {
         q_dbg_print_trace(stderr, r);
 }
 
+/* docs/text-entry-law.md (target state; peachq may differ): IPC column; an IPC request's session */
 static ray_t* remote_eval_str(const char* src, size_t len) {
     /* OWNER RULING 2026-08-10: a request obeys ctx_run_script's law — restore the `\d`
      * context on success (no client parks a shared server), leave it where an abort left it. */
