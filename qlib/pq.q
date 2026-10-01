@@ -39,6 +39,31 @@
 / @param arg (any) the path or ":memory:", or a dict of `path beside DuckDB's own ATTACH and SET options
 .pq.hopen_duckdb:{[alias;arg] hopen (`$":pq:duckdb:",string alias;arg)};
 
+/ How each HTTPS client in this process checks a server's certificate, one row per transport: `peachq for .Q.hg, read0,
+/ select from an https URL and hopen of tcps:// or wss://, and `duckdb once DuckDB's httpfs extension is loaded.
+/ With no SSL_CA_CERT_FILE or SSL_CA_CERT_PATH set, peachq trusts the operating system's roots: Windows' root store, or
+/ OpenSSL's default bundle elsewhere.  SSL_VERIFY_SERVER=NO turns checking off.
+/ @col verify whether the server's certificate is checked
+/ @col ca_source `env when SSL_CA_CERT_FILE or SSL_CA_CERT_PATH names the roots, `os for Windows' root store, `default
+/ for the library's own default locations, `setting for DuckDB's ca_cert_file
+/ @col ca_file the trusted roots' bundle file, "" where none applies; ca_path the same for a directory of roots
+/ @col openssl_version the OpenSSL peachq loaded, "" when there is none
+/ @col overridden_by the environment variables (or DuckDB settings) that move this row off its default
+/ @col last_error why peachq's last TLS connection failed, "" after one that worked; the error it signalled is 'conn
+/ @eg .pq.tlsinfo[]
+/ @eg first exec last_error from .pq.tlsinfo[] where transport=`peachq
+.pq.tlsinfo:{[]
+  t:enlist(enlist[`transport]!enlist`peachq),.pq.i.tlsinfo[];
+  if[not`:pq:duckdb:main in exec spec from .pq.conns[];:t];
+  q:"SELECT name, value FROM duckdb_settings() WHERE name IN ('ca_cert_file','enable_curl_server_cert_verification')";
+  r:.duckdb.exec[.duckdb.main[];q];
+  s:(`$r`name)!r`value;
+  if[2>count s;:t];
+  f:s`ca_cert_file;
+  v:"true"~s`enable_curl_server_cert_verification;
+  t,enlist`transport`verify`ca_source`ca_file`ca_path`openssl_version`overridden_by`last_error!
+    (`duckdb;v;$[count f;`setting;`default];f;"";"";`ca_cert_file`enable_curl_server_cert_verification where(0<count f),not v;"")};
+
 / The live terminal size, with the 25/80 fallback and [10,2000] clamp that \c 0N uses.
 / @return (rows;cols)
 / @eg .pq.termsize[]

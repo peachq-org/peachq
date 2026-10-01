@@ -332,7 +332,7 @@ WIN_RE2_OBJ  = $(addprefix $(BUILD_DIR)/,$(RE2_SRC:.cc=.win.o)) \
 WIN_FMT_LIB  = $(BUILD_DIR)/libpqfmt.win.a
 WIN_FMT_OBJ  = $(BUILD_DIR)/third_party/fmt/format.win.o \
                $(BUILD_DIR)/src/qlang/io/q_strfmt_shim.win.o
-WIN_LIBS    = $(WIN_RE2_LIB) $(WIN_FMT_LIB) -lws2_32 -lm
+WIN_LIBS    = $(WIN_RE2_LIB) $(WIN_FMT_LIB) -lws2_32 -lcrypt32 -lm
 # iocp_win.c provides ray_poll_* on Windows; linking the iocp.c stub too is a
 # multiple-definition error.
 WIN_LIB_OBJ    = $(filter-out $(BUILD_DIR)/src/core/iocp.win.o, $(addprefix $(BUILD_DIR)/,$(LIB_SRC:.c=.win.o))) \
