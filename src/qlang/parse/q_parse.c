@@ -835,9 +835,10 @@ static int names_have_reserved(ray_t *phrases) {
 }
 
 /* ===== table literal -> kdb's dict-then-flip parse tree ====================
- * (owner ruling 2026-07-24).  Column-name rule: `c:e` -> c, a bare name-ref
- * keeps its name, anything else derives x (deduped x,x1,… by q_name_dedup —
- * cases.tsv row `([] til 10)`; ChangesIn4.1.md `([0;1;2])`). */
+ * (owner ruling 2026-07-24).  An unnamed column takes qSQL's derived name
+ * (qsql_derive_alias), so `([] f a)` is `a` exactly as `select f a` is. */
+
+static int64_t qsql_derive_alias(ray_t *expr);
 
 /* pairwise duplicate WITHIN one W64 sym-id vector */
 static int symvec_ids_dup(ray_t *a) {
@@ -894,11 +895,10 @@ static ray_t *table_lit_dict(ray_t *defs) {
         int64_t nm = -1;
         if (binding_node(d, &nmv, &ex)) {
             nm = nmv->i64;
-        } else if (sym_is_nameref(d)) {
-            nm = d->i64;
+        } else {
+            nm = qsql_derive_alias(d);
+            nm = q_name_dedup(nm < 0 ? id_x : nm, (int64_t *)ray_data(keys), i, 0);
         }
-        if (nm < 0)
-            nm = q_name_dedup(id_x, (int64_t *)ray_data(keys), i, 0);
         keys = ray_vec_append(keys, &nm);
         if (ex) { vals = ray_list_append(vals, ex); }
         else    { ray_t *nul = q_null(); vals = ray_list_append(vals, nul); ray_release(nul); }
@@ -1839,13 +1839,14 @@ static int qsql_glyph_names_right(const q_op_t *row) {
 }
 
 /* The derived output name of an unnamed phrase as a sym id, or -1 (-> x).
- * The head's manifest row picks the naming ARGUMENT: a glyph its first
+ * The head's manifest row picks the naming ARGUMENT: a glyph (or the raw
+ * paren list a table literal holds, select's `,`) its first
  * (qsql.md:234 "leftmost term"), a keyword or any other fn value its last
  * (xbar.md:33 `10 xbar time.minute` -> minute; tpcd.q:12 `q wsum x` read
  * back as x).  The virtual `i` never names a result (qsql.md:234). */
 static int64_t qsql_derive_alias(ray_t *expr) {
     if (!expr) return -1;
-    if (expr->type == -RAY_SYM && (expr->attrs & Q_ATTR_QUOTED)) {
+    if (expr->type == -RAY_SYM && !(expr->attrs & Q_ATTR_HOLE)) {
         int64_t id = expr->i64;
         ray_t *s = ray_sym_str(id);
         if (!s) return id;
@@ -1862,7 +1863,7 @@ static int64_t qsql_derive_alias(ray_t *expr) {
         int64_t n = q_count(expr);
         ray_t **e = (ray_t **)ray_data(expr);
         const q_op_t *row = q_registry_operand_row(e[0]);
-        int first = row && row->lex == QLEX_GLYPH && !qsql_glyph_names_right(row);
+        int first = e[0] == q_registry_list_value() || (row && row->lex == QLEX_GLYPH && !qsql_glyph_names_right(row));
         return qsql_derive_alias(e[first ? 1 : n - 1]);
     }
     return -1;
