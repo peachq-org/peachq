@@ -373,6 +373,7 @@ int main(int argc, char** argv) {
         script_rc = q_ctx_run_src("\\l pq\n.duckdb.load[.duckdb.main[];::]", stdout, stderr, NULL);
     if (qinit && !stdin_tty && script_rc == 0)
         script_rc = q_ctx_run_file(qinit, stdout, stderr, NULL);
+    /* docs/text-entry-law.md (target state; peachq may differ): `q f.q` is via file; `-eval` text is the IPC column */
     for (int i = 0; i < n_before && script_rc == 0; i++)
         script_rc = q_ctx_run_src(eval_before[i], stdout, stderr, NULL);
     free(eval_before);
