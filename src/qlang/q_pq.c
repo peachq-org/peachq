@@ -21,6 +21,7 @@
 #include "qlang/io/q_provider.h" /* q_provider_pq_register — the .pq.i.load native */
 #include "qlang/q_console.h"   /* q_console_pq_register — the .pq.i.termsize native */
 #include "qlang/q_fmt.h"       /* q_fmt_pq_register — the .pq.i.facts native */
+#include "qlang/net/q_tls.h"   /* q_tls_pq_register — the .pq.i.tlsinfo native */
 #include "qlang/io/q_csv.h"    /* q_csv_register — the .csv.i.* natives */
 #include "qlang/io/q_io.h"     /* q_io_fs_register — the .fs.i.rmtree native */
 #include "qlang/io/q_json.h"  /* q_json_register — the .j.i.* natives */
@@ -110,7 +111,7 @@ static ray_t* pq_loaded_fn(ray_t* x) {
  * load, the terminal); `str` is both string engines; `termbox` includes the
  * beep.  Re-binding is idempotent, so a reload costs nothing but the bind. */
 static void pq_set_pq(void)      { q_conn_pq_register(); q_provider_pq_register(); q_console_pq_register(); q_fmt_pq_register();
-                                   q_ctx_pq_register(); pq_bind(".pq.i.loaded", pq_loaded_fn); }
+                                   q_ctx_pq_register(); q_tls_pq_register(); pq_bind(".pq.i.loaded", pq_loaded_fn); }
 static void pq_set_str(void)     { q_strfmt_register(); q_strns_register(); }
 static void pq_set_termbox(void) { q_termbox_register(); q_beep_register(); }
 static const struct { const char* name; void (*bind)(void); } PQ_SETS[] = {
