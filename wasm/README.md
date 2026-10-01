@@ -11,7 +11,7 @@ small client library. The build output, `build/wasm/www/`, is a directory any st
 | `worker.js`          | The Worker: hosts the engine, answers the client, supplies HTTP by synchronous XHR. |
 | `engine.js`          | Boots the module, owns its C ABI, mounts file manifests lazily. Shared by the Worker and the node smoke. |
 | `index.html`         | The minimal reference page, built on the client API. |
-| `q_wasm.c`           | The C ABI: `q_wasm_init`, `q_wasm_eval` (one line through `q_ctx_run_line`, answered on stdout/stderr), `q_wasm_qcmd` (a `.qcmd` replayed through the transcript door, scored by the host). |
+| `q_wasm.c`           | The C ABI: `q_wasm_init`, `q_wasm_eval` (text through `q_ctx_eval_src`, the `value`/IPC text function, answered on stdout/stderr as the console displays it), `q_wasm_qcmd` (a `.qcmd` replayed through the transcript door, scored by the host). |
 | `q_wasm_http.c`      | The wasm side of the HTTP exchange seam: calls the host's `Module.peachqFetch`, rebuilds the raw response. |
 | `q_wasm_duckdb.c`    | The DuckDB C-API table (`duck_api_t`) bound across to DuckDB's own wasm module, which the host loads on first use. |
 | `duck-loader.js`     | Loads DuckDB's published browser build synchronously in the Worker; main is its WebDB, over q's filesystem. |
@@ -44,7 +44,13 @@ The build wiring lives in `../Makefile.wasm`.
 
 - `start({ base, files, onStatus })` — `base` is the directory holding `worker.js` (default `./`); `files: false`
   skips mounting the build's own `files.json`; `onStatus` receives `loading` / `ready` / `busy` / `failed`.
-- `eval(line)` — one line of q, as typed at `q)`. Resolves `{ out, err }`; rejects only if the engine died.
+- `eval(src)` — q text, read as `value` and an IPC request read it, in one console session. Resolves `{ out, err }`:
+  the answer as the console displays it (nothing for an assignment), and the error display. Rejects only if the
+  engine died. The web has only this door, never the console's one-line door.
+- **An editor's Run sends the WHOLE selection in ONE `eval` call** — never split it into lines: a multi-line lambda
+  is one statement only when its lines arrive together. The page draws its own `q)` echo; `eval` prints none.
+- **`\d` sticks for the session**, as at the console (an IPC request would undo it). An error shows on `err` and
+  the next `eval` runs normally: nothing suspends into `q))` in the browser.
 - `addFiles(manifest, baseUrl)` — `manifest` is `[{ path, size?, sha256? }]` or the URL of one. Each file is
   mounted under the start directory (`/home/q`) and fetched from `baseUrl + path` (plus `?v=<sha256>`) when q
   first reads it; a later manifest replaces an earlier file. Layers survive `restart()`.
