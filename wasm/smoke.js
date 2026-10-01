@@ -109,6 +109,34 @@ async function main() {
             console.log(`${bad ? 'FAIL' : 'ok  '}  wasm/node/${name}  ${rows - bad}/${rows} rows`);
             if (bad) console.error(qd.report);   /* the runner's FAIL rows, among what the \l rows echoed */
         }
+
+        /* eval is the page's door: the value/IPC text function in this console session, each answer displayed. */
+        const evalRows = [
+            ['g:{[x]\n  a:x+1;\n  a*2}', '', ''],
+            ['g 3', '8', ''],
+            ['\\d .asd', '', ''],
+            ['system "d"', '`.asd', ''],
+            ['\\d .', '', ''],
+            ['1+`x', '', /'type/],
+            ['.z.pi:{"console\\n"}', '', ''],
+            ['1+1', '2', ''],
+            ['\\x .z.pi', '', ''],
+            ['b:42', '', ''],
+            ['til 5', '0 1 2 3 4', ''],
+        ];
+        let evalBad = 0;
+        for (const [src, wantOut, wantErr] of evalRows) {
+            const { out, err } = q.eval(src);
+            const errOk = wantErr instanceof RegExp ? wantErr.test(err) : err === wantErr;
+            if (out !== wantOut || !errOk) {
+                evalBad++;
+                console.error(`  eval ${JSON.stringify(src)}\n    want: ${JSON.stringify(wantOut)} ${wantErr}\n` +
+                              `    got:  ${JSON.stringify(out)} ${JSON.stringify(err)}`);
+            }
+        }
+        total += evalRows.length;
+        failed += evalBad;
+        console.log(`${evalBad ? 'FAIL' : 'ok  '}  eval rows  ${evalRows.length - evalBad}/${evalRows.length} rows`);
     } finally {
         child.kill();
     }
