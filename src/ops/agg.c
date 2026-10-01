@@ -23,6 +23,7 @@
 
 #include "lang/internal.h"
 #include "ops/ops.h"
+#include "ops/internal.h"   /* exec_reduction — the eager vector aggregates */
 #include "ops/idxop.h"   /* RAY_IDX_CHUNK_ZONE fast path for min/max */
 #include "ops/hash.h"    /* ray_hash_bytes — wide (STR) group-key hashing */
 #include "mem/heap.h"
@@ -81,15 +82,6 @@ static void nth_element_dbl(double* a, int64_t lo, int64_t hi, int64_t k) {
 /* ══════════════════════════════════════════
  * Aggregation builtins
  * ══════════════════════════════════════════ */
-
-/* Build a one-op DAG over a single input vector and execute it. */
-#define AGG_VEC_VIA_DAG(x, ctor) do {                       \
-    ray_graph_t* g = ray_graph_new(NULL);                   \
-    if (!g) return ray_error("oom", NULL);                  \
-    ray_op_t* in = ray_graph_input_vec(g, x);              \
-    ray_op_t* op = ctor(g, in);                            \
-    return ray_lazy_wrap(g, op);                            \
-} while(0)
 
 static int agg_parted_numeric_base(int8_t t) {
     return t == RAY_BOOL || ray_is_bytelike(t) || t == RAY_I16 ||
@@ -296,8 +288,7 @@ ray_t* ray_sum_fn(ray_t* x) {
                 return ray_timestamp(sum);
             }
         }
-        /* I64/F64: parallel morsel-driven reduction via DAG executor */
-        AGG_VEC_VIA_DAG(x, ray_sum);
+        return exec_reduction(NULL, &(ray_op_t){ .opcode = OP_SUM }, x);
     }
     if (!is_list(x)) return ray_error("type", "sum expects a numeric vector, atom, or list, got %s", ray_type_name(x->type));
     int64_t len = ray_len(x);
@@ -357,7 +348,7 @@ ray_t* ray_avg_fn(ray_t* x) {
             if (cnt == 0) return ray_typed_null(-RAY_F64);
             return make_f64(s / (double)cnt);
         }
-        AGG_VEC_VIA_DAG(x, ray_avg);
+        return exec_reduction(NULL, &(ray_op_t){ .opcode = OP_AVG }, x);
     }
     if (!is_list(x)) return ray_error("type", "avg expects a numeric vector, atom, or list, got %s", ray_type_name(x->type));
     int64_t len = ray_len(x);
@@ -421,7 +412,7 @@ ray_t* ray_min_fn(ray_t* x) {
             }
         }
         if (x->type == RAY_F32) return agg_flat_f32_minmax(x, 0);
-        AGG_VEC_VIA_DAG(x, ray_min_op);
+        return exec_reduction(NULL, &(ray_op_t){ .opcode = OP_MIN }, x);
     }
     if (!is_list(x)) return ray_error("type", "min expects a vector, atom, or list, got %s", ray_type_name(x->type));
     int64_t len = ray_len(x);
@@ -485,7 +476,7 @@ ray_t* ray_max_fn(ray_t* x) {
             }
         }
         if (x->type == RAY_F32) return agg_flat_f32_minmax(x, 1);
-        AGG_VEC_VIA_DAG(x, ray_max_op);
+        return exec_reduction(NULL, &(ray_op_t){ .opcode = OP_MAX }, x);
     }
     if (!is_list(x)) return ray_error("type", "max expects a vector, atom, or list, got %s", ray_type_name(x->type));
     int64_t len = ray_len(x);

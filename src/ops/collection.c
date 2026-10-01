@@ -2375,7 +2375,7 @@ ray_t* ray_til_fn(ray_t* x) {
     return vec;
 }
 
-/* Shared eager kernel — called by the OP_REVERSE executor. */
+/* Shared eager kernel — called by the OP_REVERSE executor and ray_reverse_fn. */
 ray_t* reverse_vec_eager(ray_t* x) {
     int64_t len = x->len;
     if (len <= 1) { ray_retain(x); return x; }
@@ -2441,15 +2441,7 @@ ray_t* ray_reverse_fn(ray_t* x) {
 
     if (ray_is_atom(x)) { ray_retain(x); return x; }
 
-    /* Typed vector path: start a fresh lazy chain.  The DAG executor will
-     * call reverse_vec_eager() when the chain is materialised. */
-    if (ray_is_vec(x)) {
-        ray_graph_t* g = ray_graph_new(NULL);
-        if (!g) return ray_error("oom", NULL);
-        ray_op_t* in = ray_graph_input_vec(g, x);
-        ray_op_t* op = ray_reverse_op(g, in);
-        return ray_lazy_wrap(g, op);
-    }
+    if (ray_is_vec(x)) return reverse_vec_eager(x);
 
     /* Boxed list path — eager (DAG cannot yet express list reversal) */
     ray_t* _bx = NULL;
