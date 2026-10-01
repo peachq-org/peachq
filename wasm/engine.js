@@ -35,7 +35,7 @@
         return {
             home: HOME,
 
-            /* One line of q: what it printed to stdout and to stderr ('' when clean). */
+            /* q text, as `value` reads it, in this session: what it printed to stdout and stderr ('' when clean). */
             eval(src) {
                 const bytes = enc.encode(String(src));
                 const p = M._malloc(bytes.length + 1);
