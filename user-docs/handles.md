@@ -198,6 +198,34 @@ the reason). The `httpfs` extension autoloads on first use — a fresh box fetch
 a failed load is the same `'duckdb` with `.duckdb.err[]` saying why. In restricted mode (`-U`) every remote door is
 `'access` before DuckDB is asked.
 
+### HTTPS certificates
+
+peachq's own client (`https://` in `select from`, `read0`, `read1`, `.Q.hg`, `.Q.hp`, and `hopen` of `tcps://` or
+`wss://`) always checks the server's certificate, and needs no setup to do it: with nothing configured it trusts the
+operating system's root certificates — the Windows root store on Windows, OpenSSL's default bundle elsewhere. kdb's
+environment variables change that, read afresh on every connection:
+
+| Variable | Effect |
+|---|---|
+| `SSL_CA_CERT_FILE` | trust only the roots in this PEM bundle (replaces the operating system's) |
+| `SSL_CA_CERT_PATH` | trust only the roots in this directory |
+| `SSL_VERIFY_SERVER=NO` | do not check certificates at all |
+
+A `KX_` prefix (`KX_SSL_CA_CERT_FILE`) wins over the bare name. A certificate that fails the check is `'conn`;
+`.pq.tlsinfo[]` says why, and what each client in the process trusts:
+
+```q
+q)@[.Q.hg;`$":https://self-signed.badssl.com/";{x}]
+"conn"
+q)first exec last_error from .pq.tlsinfo[] where transport=`peachq
+"handshake failed: certificate verify failed: self-signed certificate"
+```
+
+`ca_source` is `` `os `` on Windows, `` `default `` elsewhere and `` `env `` when a variable names the roots;
+`overridden_by` lists the variables in force. Once DuckDB's `httpfs` is loaded a `duckdb` row reports its own
+`ca_cert_file` and `enable_curl_server_cert_verification` settings — DuckDB's remote schemes check certificates with
+their own client, which also needs no setup.
+
 ## `get`, `read0`, `read1`, and `select`
 
 These operations ask different questions of a resource.
