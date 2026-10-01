@@ -34,6 +34,7 @@ int q_wasm_init(void) {
 
 /* Text as `value`/an IPC request reads it, in the console's session (`\d` sticks), answered as the console
  * displays it: the web never reaches the console's one-line door. */
+/* docs/text-entry-law.md (target state; peachq may differ): the web REPL is the IPC column, console session */
 EMSCRIPTEN_KEEPALIVE
 void q_wasm_eval(const char* src) {
     if (!src || q_wasm_init() != 0)

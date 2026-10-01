@@ -157,6 +157,8 @@
   at:where text in special;
   $[count text; raze @[enlist each text;at;:;escaped special?text at]; text]};
 
+/ docs/text-entry-law.md (target state; peachq may differ): -conn -eval is IPC text; -conn f.q is via file, on the client
+
 / Evaluate q text on a server, the way qStudio does: the wrapper round the escaped text, one sync call.
 / @param handle (int) an open handle
 / @param text (string) the q text; multi-line text runs as a script and the last statement answers
