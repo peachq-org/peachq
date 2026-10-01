@@ -5,6 +5,9 @@
 #include "qlang/io/q_dl.h"   /* q_dl_unavailable — a static build cannot dlopen OpenSSL */
 #include "core/timer.h"      /* ray_time_now_ms — send/handshake deadlines */
 #include "table/sym.h"
+#include "qlang/q_env.h"     /* q_env_bind_native — the .pq.i.tlsinfo native */
+#include "lang/env.h"        /* ray_fn_unary */
+#include "lang/eval.h"       /* RAY_FN_NONE */
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -14,6 +17,7 @@
 #ifdef RAY_OS_WINDOWS
   #define WIN32_LEAN_AND_MEAN
   #include <windows.h>
+  #include <wincrypt.h>
   typedef HMODULE dso_t;
   #define DSO_OPEN(p)     LoadLibraryA(p)
   #define DSO_SYM(h, n)   ((void*)GetProcAddress((h), (n)))
@@ -96,6 +100,13 @@ typedef struct {
     const void* (*BIO_s_mem)(void);
     int         (*BIO_read)(void*, void*, int);
     int         (*BIO_free)(void*);
+    void*       (*SSL_CTX_get_cert_store)(const void*);
+    void*       (*d2i_X509)(void**, const unsigned char**, long);
+    int         (*X509_STORE_add_cert)(void*, void*);
+    const char* (*X509_verify_cert_error_string)(long);
+    unsigned long (*ERR_get_error)(void);
+    void        (*ERR_clear_error)(void);
+    void        (*ERR_error_string_n)(unsigned long, char*, size_t);
 } tls_api_t;
 
 static tls_api_t A;
@@ -174,10 +185,15 @@ static int tls_load(void) {
     SYM(A.ssl, SSL_get0_param);       SYM(cr, X509_VERIFY_PARAM_set1_host);
     SYM(cr,    X509_VERIFY_PARAM_set1_ip_asc);
     SYM(A.ssl, SSL_get_version);      SYM(A.ssl, SSL_get_current_cipher);
-    SYM(A.ssl, SSL_CIPHER_get_name);  SYM(A.ssl, OpenSSL_version);
-    SYM(A.ssl, SSLeay_version);
+    SYM(A.ssl, SSL_CIPHER_get_name);  SYM(cr,    OpenSSL_version);
+    SYM(cr,    SSLeay_version);
     SYM(cr,    X509_get_default_cert_dir);
     SYM(cr,    X509_get_default_cert_file);
+    SYM(A.ssl, SSL_CTX_get_cert_store);
+    SYM(cr,    d2i_X509);             SYM(cr,    X509_STORE_add_cert);
+    SYM(cr,    X509_verify_cert_error_string);
+    SYM(cr,    ERR_get_error);        SYM(cr,    ERR_clear_error);
+    SYM(cr,    ERR_error_string_n);
 
     if (!A.SSL_CTX_new || !A.SSL_CTX_free || !A.SSL_new || !A.SSL_free ||
         !A.SSL_set_fd || !A.SSL_connect || !A.SSL_read || !A.SSL_write ||
@@ -206,13 +222,19 @@ static const char* const CFG_DEFAULTS[CFG_N] = {
     NULL, NULL, NULL, NULL, NULL, "NO", "HOSTIP"
 };
 
+/* The environment variable that sets k, or NULL when k is at its default. */
+static const char* cfg_var(int k, char kx[64]) {
+    snprintf(kx, 64, "KX_%s", CFG_NAMES[k]);
+    const char* v = getenv(kx);
+    if (v && *v) return kx;
+    v = getenv(CFG_NAMES[k]);
+    return v && *v ? CFG_NAMES[k] : NULL;
+}
+
 static const char* cfg_get(int k) {
     char kx[64];
-    snprintf(kx, sizeof kx, "KX_%s", CFG_NAMES[k]);
-    const char* v = getenv(kx);
-    if (!v || !*v) v = getenv(CFG_NAMES[k]);
-    if (!v || !*v) v = CFG_DEFAULTS[k];
-    return v;
+    const char* var = cfg_var(k, kx);
+    return var ? getenv(var) : CFG_DEFAULTS[k];
 }
 
 static const char* tls_version_string(void) {
@@ -285,23 +307,81 @@ static void sess_close(void* p) {
     free(s);
 }
 
+#ifdef RAY_OS_WINDOWS
+/* OpenSSL's default paths name nothing on a stock Windows box: its roots live in CryptoAPI. */
+/* A root the store restricts away from server authentication must not come back
+ * unrestricted as bare DER.  An empty usage list means all uses only when the
+ * lookup says CRYPT_E_NOT_FOUND; otherwise it means none. */
+static int root_serves_tls(PCCERT_CONTEXT c) {
+    DWORD n = 0;
+    SetLastError(0);
+    if (!CertGetEnhancedKeyUsage(c, 0, NULL, &n)) return GetLastError() == (DWORD)CRYPT_E_NOT_FOUND;
+    PCERT_ENHKEY_USAGE u = (PCERT_ENHKEY_USAGE)malloc(n);
+    int ok = 0;
+    SetLastError(0);
+    if (u && CertGetEnhancedKeyUsage(c, 0, u, &n)) {
+        ok = u->cUsageIdentifier == 0 && GetLastError() == (DWORD)CRYPT_E_NOT_FOUND;
+        for (DWORD i = 0; i < u->cUsageIdentifier && !ok; i++)
+            ok = strcmp(u->rgpszUsageIdentifier[i], szOID_PKIX_KP_SERVER_AUTH) == 0;
+    }
+    free(u);
+    return ok;
+}
+
+static int trust_os_store(void* ctx) {
+    void* store = A.SSL_CTX_get_cert_store && A.d2i_X509 && A.X509_STORE_add_cert && A.X509_free
+                ? A.SSL_CTX_get_cert_store(ctx) : NULL;
+    HCERTSTORE os = store ? CertOpenSystemStoreA(0, "ROOT") : NULL;
+    if (!os) return -1;
+    int added = 0;
+    for (PCCERT_CONTEXT c = NULL; (c = CertEnumCertificatesInStore(os, c)) != NULL; ) {
+        if (!root_serves_tls(c)) continue;
+        const unsigned char* der = c->pbCertEncoded;
+        void* x = A.d2i_X509(NULL, &der, (long)c->cbCertEncoded);
+        if (!x) continue;
+        added += A.X509_STORE_add_cert(store, x) == 1;
+        A.X509_free(x);
+    }
+    CertCloseStore(os, 0);
+    return added ? 0 : -1;
+}
+#endif
+
 /* An explicit CA is honoured exactly as kdb does, failures included; the system
- * store is only a fallback on an UNSET variable, read from cert_dir() directly —
- * SSL_CTX_set_default_verify_paths resolves via $SSL_CERT_FILE, kdb's name for
- * the process's OWN cert (kb/ssl.md:89), which would become the CA store.  The
- * two defaults load separately: one call fails if either path is absent. */
+ * store is only a fallback on an UNSET variable. */
 static int ctx_trust(void* ctx) {
     const char* ca_file = cfg_get(CFG_CA_CERT_FILE);
     const char* ca_path = cfg_get(CFG_CA_CERT_PATH);
     if (ca_file || ca_path)
         return A.SSL_CTX_load_verify_locations(ctx, ca_file, ca_path) == 1 ? 0 : -1;
-
+#ifdef RAY_OS_WINDOWS
+    return trust_os_store(ctx);
+#else
+    /* Read from cert_dir() directly: SSL_CTX_set_default_verify_paths resolves via
+     * $SSL_CERT_FILE, kdb's name for the process's OWN cert (kb/ssl.md:89), which
+     * would become the CA store.  The two defaults load separately: one call fails
+     * if either path is absent. */
     const char* dir  = A.X509_get_default_cert_dir  ? A.X509_get_default_cert_dir()  : NULL;
     const char* file = A.X509_get_default_cert_file ? A.X509_get_default_cert_file() : NULL;
     int ok = 0;
     if (dir  && A.SSL_CTX_load_verify_locations(ctx, NULL, dir)  == 1) ok = 1;
     if (file && A.SSL_CTX_load_verify_locations(ctx, file, NULL) == 1) ok = 1;
     return ok ? 0 : -1;
+#endif
+}
+
+/* Why the last client handshake failed, "" after one that succeeded: the q error stays 'conn. */
+static char g_last_error[256];
+
+static void note_failure(void* ssl, const char* stage) {
+    long vr = ssl ? A.SSL_get_verify_result(ssl) : TLS_X509_V_OK;
+    unsigned long e = A.ERR_get_error ? A.ERR_get_error() : 0;
+    char detail[200] = "";
+    if (vr != TLS_X509_V_OK && A.X509_verify_cert_error_string)
+        snprintf(detail, sizeof detail, "certificate verify failed: %s", A.X509_verify_cert_error_string(vr));
+    else if (e && A.ERR_error_string_n)
+        A.ERR_error_string_n(e, detail, sizeof detail);
+    snprintf(g_last_error, sizeof g_last_error, "%s%s%s", stage, *detail ? ": " : "", detail);
 }
 
 static int sess_attach(ray_sock_t fd, void* ctx, void* ssl) {
@@ -337,17 +417,18 @@ static int set_peer_name(void* ssl, const char* host) {
 
 int q_tls_client_start(ray_sock_t fd, const char* host, const char** err) {
     if (tls_load() != 1) {
+        snprintf(g_last_error, sizeof g_last_error, "no usable OpenSSL library");
         const char* why = q_dl_unavailable();
         if (err) *err = why ? why : "nyi";
         return -1;
     }
     if (err) *err = "conn";
+    if (A.ERR_clear_error) A.ERR_clear_error();
 
     const void* meth = A.TLS_client_method ? A.TLS_client_method()
                                            : A.SSLv23_client_method();
-    if (!meth) return -1;
-    void* ctx = A.SSL_CTX_new(meth);
-    if (!ctx) return -1;
+    void* ctx = meth ? A.SSL_CTX_new(meth) : NULL;
+    if (!ctx) { note_failure(NULL, "cannot create an SSL context"); return -1; }
 
     /* kb/ssl.md:161-169: NO verifies nothing, YES is chain-only, HOSTIP adds
      * host/IP checking.  An unrecognised value takes the strictest reading. */
@@ -357,27 +438,26 @@ int q_tls_client_start(ray_sock_t fd, const char* host, const char** err) {
     const char* ciph     = cfg_get(CFG_CIPHER_LIST);
 
     if (ciph && A.SSL_CTX_set_cipher_list &&
-        A.SSL_CTX_set_cipher_list(ctx, ciph) != 1) goto fail_ctx;
+        A.SSL_CTX_set_cipher_list(ctx, ciph) != 1) { note_failure(NULL, "SSL_CIPHER_LIST rejected"); goto fail_ctx; }
     if (verify) {
-        if (ctx_trust(ctx) != 0) goto fail_ctx;
+        if (ctx_trust(ctx) != 0) { note_failure(NULL, "no trusted CA certificates could be loaded"); goto fail_ctx; }
         A.SSL_CTX_set_verify(ctx, TLS_VERIFY_PEER, NULL);
     } else {
         A.SSL_CTX_set_verify(ctx, TLS_VERIFY_NONE, NULL);
     }
 
     void* ssl = A.SSL_new(ctx);
-    if (!ssl) goto fail_ctx;
+    if (!ssl) { note_failure(NULL, "cannot create an SSL session"); goto fail_ctx; }
     if (host && *host) {
         if (A.SSL_ctrl && !host_is_ipv4(host))   /* SNI is names only (RFC 6066) */
             A.SSL_ctrl(ssl, TLS_CTRL_SET_HOSTNAME, TLS_NAMETYPE_HOST, (void*)(uintptr_t)host);
         /* Refuse rather than continue when the stack can bind no peer name. */
-        if (bindname && set_peer_name(ssl, host) != 0) goto fail_ssl;
+        if (bindname && set_peer_name(ssl, host) != 0) { note_failure(NULL, "cannot bind the peer name"); goto fail_ssl; }
     }
-    if (A.SSL_set_fd(ssl, (int)fd) != 1) goto fail_ssl;
-    if (A.SSL_connect(ssl) != 1) goto fail_ssl;
-    if (verify && A.SSL_get_verify_result(ssl) != TLS_X509_V_OK) goto fail_ssl;
-
-    if (sess_attach(fd, ctx, ssl) != 0) goto fail_ssl;
+    if (A.SSL_set_fd(ssl, (int)fd) != 1 || A.SSL_connect(ssl) != 1 ||
+        (verify && A.SSL_get_verify_result(ssl) != TLS_X509_V_OK)) { note_failure(ssl, "handshake failed"); goto fail_ssl; }
+    if (sess_attach(fd, ctx, ssl) != 0) { note_failure(NULL, "cannot attach the session"); goto fail_ssl; }
+    g_last_error[0] = 0;
     return 0;
 
 fail_ssl:
@@ -607,4 +687,52 @@ ray_t* q_tls_conn_info(ray_sock_t fd) {
         dict_put(&keys, &vals, "CERT", peer_cert_dict(s->ssl));
     }
     return ray_dict_new(keys, vals);
+}
+
+static ray_t* charv_of(const char* s) { return ray_charv(s ? s : "", s ? (int64_t)strlen(s) : 0); }
+
+/* `.pq.i.tlsinfo[]` — what the NEXT client handshake will trust, and why the last one failed. */
+static ray_t* tlsinfo_fn(ray_t* x) {
+    (void)x;
+    static const int OVERRIDES[] = { CFG_CA_CERT_FILE, CFG_CA_CERT_PATH, CFG_VERIFY_SERVER };
+    ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, 7);
+    ray_t* vals = ray_list_new(7);
+    ray_t* by   = ray_sym_vec_new(RAY_SYM_W64, 3);
+    if (!keys || RAY_IS_ERR(keys) || !vals || RAY_IS_ERR(vals) || !by || RAY_IS_ERR(by)) {
+        if (keys && !RAY_IS_ERR(keys)) ray_release(keys);
+        if (vals && !RAY_IS_ERR(vals)) ray_release(vals);
+        if (by && !RAY_IS_ERR(by)) ray_release(by);
+        return q_err(QE_LIMIT);
+    }
+    char kx[64];
+    for (size_t i = 0; i < sizeof OVERRIDES / sizeof *OVERRIDES; i++) {
+        const char* var = cfg_var(OVERRIDES[i], kx);
+        int64_t id = isym(var);
+        if (var) by = ray_vec_append(by, &id);
+    }
+    const char* ca_file = cfg_get(CFG_CA_CERT_FILE);
+    const char* ca_path = cfg_get(CFG_CA_CERT_PATH);
+    const char* source  = ca_file || ca_path ? "env" : "default";
+#ifdef RAY_OS_WINDOWS
+    if (!ca_file && !ca_path) source = "os";
+#else
+    if (!ca_file && !ca_path && tls_load() == 1) {
+        ca_file = A.X509_get_default_cert_file ? A.X509_get_default_cert_file() : NULL;
+        ca_path = A.X509_get_default_cert_dir  ? A.X509_get_default_cert_dir()  : NULL;
+    }
+#endif
+    dict_put(&keys, &vals, "verify",          ray_bool(strcmp(cfg_get(CFG_VERIFY_SERVER), "NO") != 0));
+    dict_put(&keys, &vals, "ca_source",       ray_sym(isym(source)));
+    dict_put(&keys, &vals, "ca_file",         charv_of(ca_file));
+    dict_put(&keys, &vals, "ca_path",         charv_of(ca_path));
+    dict_put(&keys, &vals, "openssl_version", charv_of(tls_version_string()));
+    dict_put(&keys, &vals, "overridden_by",   by);
+    dict_put(&keys, &vals, "last_error",      charv_of(g_last_error));
+    return ray_dict_new(keys, vals);
+}
+
+void q_tls_pq_register(void) {
+    ray_t* obj = ray_fn_unary(".pq.i.tlsinfo", RAY_FN_NONE, tlsinfo_fn);
+    q_env_bind_native(".pq.i.tlsinfo", obj, 1);
+    ray_release(obj);
 }
