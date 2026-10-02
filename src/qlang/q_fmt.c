@@ -172,15 +172,15 @@ static int qe_fits(size_t need) {
     return 0;
 }
 
-/* qe_done: height cap hit; qe_line_done: line over width — never before qe_trim. */
+/* qe_done: height cap hit; qe_line_done: line over width, or an unclipped sink full — never before qe_trim. */
 static int qe_done(void) {
     qe_tgt* t = qe_top();
     return t->clip && g_clip.stop;
 }
 static int qe_line_done(void) {
     qe_tgt* t = qe_top();
-    return t->clip &&
-           (g_clip.stop || g_clip.llog > (size_t)(g_clip.cols - 1));
+    if (!t->clip) return t->trunc;
+    return g_clip.stop || g_clip.llog > (size_t)(g_clip.cols - 1);
 }
 
 static void qe_pad(const char* s, int w) {
@@ -213,6 +213,11 @@ static void qe_pop(void) {
 static int64_t qe_clip_rows(void) {
     qe_tgt* t = qe_top();
     return t->clip ? (int64_t)g_clip.rows : 0;
+}
+
+static int64_t qe_clip_cols(void) {
+    qe_tgt* t = qe_top();
+    return t->clip ? (int64_t)g_clip.cols : 0;
 }
 
 /* Sym atom: verb/null name-refs bare, else backticked; a DATA sym (Q_ATTR_QUOTED) never bare. */
@@ -254,6 +259,8 @@ static int col_uniform_type(ray_t* col);                 /* fwd — its precondi
  * keyed tables put key columns left of `|`. */
 
 #define QF_MAXCOL 64
+#define QF_CELL   64
+#define QF_DICTV  1024
 
 /* THE inline-cell law (ref/trim.md, ref/dotq.md:1655): a dict row, a table
  * cell and a list-row cell are ELEMENTS, and an element renders single-line —
@@ -366,7 +373,8 @@ static int dict_is_tabular(ray_t* val) {
 typedef struct { int64_t n; int* w; int st[16]; } col_mx;
 
 static int is_matrix(ray_t** e, int64_t n);   /* fwd */
-static int* matrix_widths(ray_t** e, int64_t nr, int64_t nc, int blank_null, int* stackw, int64_t stackn);   /* fwd */
+static int* matrix_widths(ray_t** e, int64_t nr, int64_t nc, int blank_null, int64_t lim, int64_t* nw,
+                          int* stackw, int64_t stackn);   /* fwd */
 static void matrix_row_str(ray_t* row, int64_t nc, const int* w, char* out, size_t outsz);   /* fwd */
 
 static void col_mx_init(col_mx* m, ray_t* col, int64_t nr) {
@@ -376,8 +384,9 @@ static void col_mx_init(col_mx* m, ray_t* col, int64_t nr) {
     for (int64_t i = 0; i < n; i++)
         if (!e[i] || e[i]->type <= 0 || e[i]->type == RAY_LIST) return;
     if (!e || !is_matrix(e, n)) return;
-    m->w = matrix_widths(e, nr, q_count(e[0]), 1, m->st, 16);
-    if (m->w) m->n = q_count(e[0]);
+    int64_t nw;
+    m->w = matrix_widths(e, nr, q_count(e[0]), 1, QF_CELL - 1, &nw, m->st, 16);
+    if (m->w) m->n = nw;
 }
 
 static void col_mx_free(col_mx* m, int64_t nc) {
@@ -398,7 +407,7 @@ static void table_widths(ray_t* tbl, int64_t nc, int64_t nr,
         ray_t* col = side_col(tbl, c);
         col_mx_init(&mx[c], col, nr);
         for (int64_t r = 0; r < nr; r++) {
-            char cb[64]; col_cell(col, &mx[c], r, cb, sizeof cb);
+            char cb[QF_CELL]; col_cell(col, &mx[c], r, cb, sizeof cb);
             int l = (int)strlen(cb); if (l > w) w = l;
         }
         widths[c] = w;
@@ -415,7 +424,7 @@ static void table_grid(int64_t nc, const int* widths, char hdr[][64]) {
 static void grid_cells(ray_t* t, int64_t nc, const int* w, const col_mx* mx, int64_t r) {
     for (int64_t c = 0; c < nc; c++) {
         if (c) qe_putc(' ');
-        char cb[64]; col_cell(side_col(t, c), &mx[c], r, cb, sizeof cb);
+        char cb[QF_CELL]; col_cell(side_col(t, c), &mx[c], r, cb, sizeof cb);
         qe_pad(cb, w[c]);
     }
 }
@@ -915,7 +924,7 @@ static void matrix_row_str(ray_t* row, int64_t nc, const int* w,
     size_t pos = 0;
     int bare = row_all_sym(row);
     out[0] = '\0';
-    for (int64_t c = 0; c < nc; c++) {
+    for (int64_t c = 0; c < nc && pos + 1 < outsz; c++) {
         char cb[512]; matrix_cell(row, c, bare, 1, cb, sizeof cb);
         if (c && pos + 1 < outsz) out[pos++] = ' ';
         int l = (int)strlen(cb);
@@ -952,39 +961,53 @@ static int is_matrix(ray_t** e, int64_t n) {
     return !all_charv;
 }
 
-/* Column widths over nr rows; NULL on OOM.  Caller frees unless == stackw.
- * `blank_null` must match the render pass or the grid misaligns. */
-static int* matrix_widths(ray_t** e, int64_t nr, int64_t nc, int blank_null,
+/* Column widths over nr rows, left to right while a column starts before `lim` (0 = all); *nw = columns sized.
+ * NULL on OOM.  Caller frees unless == stackw.  `blank_null` must match the render pass or the grid misaligns. */
+static int* matrix_widths(ray_t** e, int64_t nr, int64_t nc, int blank_null, int64_t lim, int64_t* nw,
                           int* stackw, int64_t stackn) {
-    int* w = (nc <= stackn) ? stackw : malloc((size_t)(nc > 0 ? nc : 1) * sizeof(int));
-    if (!w) return NULL;
-    for (int64_t c = 0; c < nc; c++) w[c] = 0;
-    for (int64_t r = 0; r < nr; r++) {          /* rows outer: one row_all_sym each */
-        int bare = row_all_sym(e[r]);
-        for (int64_t c = 0; c < nc; c++) {
-            char cb[512]; matrix_cell(e[r], c, bare, blank_null, cb, sizeof cb);
+    int64_t cap = (lim && lim < nc) ? lim : nc;   /* column c starts at >= c */
+    int* w = (cap <= stackn) ? stackw : malloc((size_t)(cap > 0 ? cap : 1) * sizeof(int));
+    char bst[256];
+    char* bare = (nr <= 256) ? bst : malloc((size_t)nr);
+    if (!w || !bare) {
+        if (w != stackw) free(w);
+        if (bare != bst) free(bare);
+        return NULL;
+    }
+    for (int64_t r = 0; r < nr; r++) bare[r] = (char)row_all_sym(e[r]);
+    int64_t c = 0, start = 0;
+    for (; c < cap && (!lim || start < lim); c++) {
+        w[c] = 0;
+        for (int64_t r = 0; r < nr; r++) {
+            char cb[512]; matrix_cell(e[r], c, bare[r], blank_null, cb, sizeof cb);
             int l = (int)strlen(cb); if (l > w[c]) w[c] = l;
         }
+        start += w[c] + 1;
     }
+    *nw = c;
+    if (bare != bst) free(bare);
     return w;
 }
 
 /* A general list is not a column, so its null cells keep their token (no doc in
  * the corpus blanks one) — blank_null 0 throughout. */
 static void fmt_matrix(ray_t** e, int64_t nr) {
-    int64_t nc = q_count(e[0]);
-    /* no fixed column cap; clip-armed sizing scans showable rows only */
+    int64_t nc = q_count(e[0]), nw;
     int  stackw[64];
-    int* widths = matrix_widths(e, size_rows(nr), nc, 0, stackw, 64);
+    int* widths = matrix_widths(e, size_rows(nr), nc, 0, qe_clip_cols(), &nw, stackw, 64);
     if (!widths) return;
     for (int64_t r = 0; r < nr; r++) {
         if (qe_done()) break;                    /* height cap hit — early exit */
         if (r) qe_putc('\n');
         int bare = row_all_sym(e[r]);
-        for (int64_t c = 0; c < nc; c++) {
+        for (int64_t c = 0; c < nw; c++) {
             if (c) qe_putc(' ');
             char cb[512]; matrix_cell(e[r], c, bare, 0, cb, sizeof cb);
             qe_pad(cb, widths[c]);                    /* left-align */
+        }
+        for (int64_t c = nw; c < nc; c++) {          /* unsized columns start past the edge: only the `..` asks */
+            char cb[512]; matrix_cell(e[r], c, bare, 0, cb, sizeof cb);
+            if (cb[strspn(cb, " ")]) { qe_putc(' '); qe_puts(cb); break; }
         }
         qe_trim();                                    /* no trailing spaces */
     }
@@ -1840,7 +1863,7 @@ static void q_fmt_body(ray_t* val) {
         if (v && v->type == RAY_LIST && q_count(v) == n &&
             is_matrix((ray_t**)ray_data(v), n)) {
             dnc = q_count(((ray_t **)ray_data(v))[0]);
-            dw  = matrix_widths((ray_t**)ray_data(v), n_size, dnc, 1, dstackw, 64);
+            dw  = matrix_widths((ray_t**)ray_data(v), n_size, dnc, 1, QF_DICTV - 1, &dnc, dstackw, 64);
         } else if (v && v->type == RAY_LIST && q_count(v) == n && n > 0) {
             /* UNIFORM zero-length rows are zero padded columns — blank, where
              * the ragged dict keeps `()` (ref/dotq.md:1322 vs :1655) */
@@ -1863,7 +1886,7 @@ static void q_fmt_body(ray_t* val) {
                     if (kl > maxk) maxk = kl;
                     continue;
                 }
-                char vb[1024]; vb[0] = '\0';
+                char vb[QF_DICTV]; vb[0] = '\0';
                 if (dw) {
                     matrix_row_str(((ray_t**)ray_data(v))[i], dnc, dw, vb, sizeof vb);
                     size_t aneed = (i ? 1 : 0) + maxk + 2 + strlen(vb);
