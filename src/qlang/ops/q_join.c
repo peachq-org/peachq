@@ -9,7 +9,7 @@
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
 #include "qlang/ops/q_table.h" /* the shape law + append behind the row-append home */
-#include "qlang/ops/q_bang.h"  /* q_bang_enkey — keyed-result construction */
+#include "qlang/ops/q_bang.h"  /* q_bang_enkey — keyed-result construction; q_bang — a table reference read as a dict */
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — Append's int/long pair cast to the vector's type */
 #include "qlang/ops/q_index.h" /* q_index_grow* — a parked vector grows where it stands; q_index_rank — the `,:` rank rule */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_value — pj rides q's own `+` */
@@ -1263,9 +1263,23 @@ ray_t* q_join_grow(ray_t** px, ray_t* y) {
 ray_t* q_join_amend(ray_t** px, ray_t* y, int exclusive) {
     ray_t* x = *px;
     if (q_type_is_plain_dict(x) && q_type_is_plain_dict(y)) {   /* 1: Append's strict law */
+        ray_t* yk = ray_dict_keys(y);
+        ray_t* yv = ray_dict_vals(y);
+        ray_t* yd = y;
+        /* `cols!`sym` appends as every key mapped to the symbol; only this door reads it so (owner 2026-10-03) */
+        if (yk && yv && yk->type == RAY_SYM && yv->type == -RAY_SYM) {
+            ray_t* n = ray_i64(q_count(yk));
+            ray_t* filled = q_take_wrap(n, yv);
+            ray_release(n);
+            if (RAY_IS_ERR(filled)) return filled;
+            yd = q_bang(yk, filled);
+            ray_release(filled);
+            if (RAY_IS_ERR(yd)) return yd;
+        }
         if (!exclusive) ray_retain(x);
-        ray_t* r = q_index_dict_join(x, y, 1);
+        ray_t* r = q_index_dict_join(x, yd, 1);
         if (!exclusive && RAY_IS_ERR(r)) ray_release(x);
+        if (yd != y) ray_release(yd);
         return r;
     }
     int pair = x && y && ray_is_vec(x) && q_type_widens(x->type, y->type);
