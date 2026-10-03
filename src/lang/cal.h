@@ -94,14 +94,15 @@ static inline int ts_compose_checked(int64_t days, int64_t tod_ns, int64_t* out)
 }
 
 /* THE datetime split: an f64 day count -> (day, ns of day in [0,NS_PER_DAY)).
- * Round the ns product at the VALUE's magnitude — an f64 datetime resolves to
- * ~79ns at present-day scale, so that rounding is what recovers the instant
- * written (2022.03.14T12:30:00.000 is stored 26ns light) — then take every
- * narrower grain as the [) floor of it.  ref/cast.md:166 (narrowing truncates)
- * rules out rounding at ms; basics/precision.md:268 (a float 0.015ns below a ms
- * boundary still displays as that ms) rules out truncating the raw float.  The
- * day base is subtracted in __int128, so unlike a plain i64 ns the split keeps
- * the datetime's own 0001..9999 range (a timestamp reaches only 1707..2292).
+ * A datetime's grain is the ms (ref/tok.md:227), but an f64 day count holds an
+ * instant only to its own ulp (~79ns today): .069 is stored 39ns light.  So an
+ * instant within one ulp of a ms boundary snaps onto it, and every narrower
+ * grain is the [) floor of the result.  ref/cast.md:168 (narrowing truncates)
+ * rules out rounding at ms outright: a real sub-ms remainder (half a ms past)
+ * floors.  basics/precision.md:268 (a float 0.015ns below a ms boundary still
+ * displays as that ms) rules out truncating the raw float.  The day base is
+ * subtracted in __int128, so unlike a plain i64 ns the split keeps the
+ * datetime's own 0001..9999 range (a timestamp reaches only 1707..2292).
  * A non-finite value has no day and takes the ±0Wp instant. */
 #define DATETIME_DAY_MAX 9.0e15   /* past 2^53 a double no longer counts days one by one */
 
@@ -114,6 +115,9 @@ static inline void datetime_to_day_ns(double val, int64_t* day, int64_t* tod_ns)
     }
     int64_t d = (int64_t)floor(val);
     __int128 tod = (__int128)round(val * (double)NS_PER_DAY) - (__int128)d * NS_PER_DAY;
+    double ulp_ns = (nextafter(fabs(val), INFINITY) - fabs(val)) * (double)NS_PER_DAY;
+    __int128 ms = (tod < 0 ? tod - 500000 : tod + 500000) / 1000000 * 1000000;
+    if ((double)(tod > ms ? tod - ms : ms - tod) <= ulp_ns) tod = ms;
     if (tod < 0) { d -= 1; tod += NS_PER_DAY; }                 /* rounded back a day */
     else if (tod >= NS_PER_DAY) { d += 1; tod -= NS_PER_DAY; }  /* rounded on a day */
     *day = d;
