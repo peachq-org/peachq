@@ -10,6 +10,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/ops/q_table.h" /* the shape law + append behind the row-append home */
 #include "qlang/ops/q_bang.h"  /* q_bang_enkey — keyed-result construction */
+#include "qlang/ops/q_dollar.h" /* q_dollar_cast — Append's int/long pair cast to the vector's type */
 #include "qlang/ops/q_index.h" /* q_index_grow* — a parked vector grows where it stands; q_index_rank — the `,:` rank rule */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_value — pj rides q's own `+` */
 #include "lang/eval.h"     /* ray_left_join_fn, ray_window_join*_fn */
@@ -1271,10 +1272,12 @@ ray_t* q_join_amend(ray_t** px, ray_t* y, int exclusive) {
         if (!exclusive && RAY_IS_ERR(r)) ray_release(x);
         return r;
     }
-    if (x && y && ray_is_vec(x) && x->type != RAY_STR && y->type != x->type && y->type != -x->type &&
+    int pair = x && y && ray_is_vec(x) && q_type_widens(x->type, y->type);
+    if (x && y && ray_is_vec(x) && x->type != RAY_STR && y->type != x->type && y->type != -x->type && !pair &&
         !((y->type == RAY_LIST || ray_is_vec(y)) && q_count(y) == 0))
         return q_err(QE_TYPE);
-    ray_t* py = y;
+    ray_t* py = pair ? q_dollar_cast(x->type, y) : y;
+    if (pair && (!py || RAY_IS_ERR(py))) return py ? py : q_err(QE_OOM);
     if (x && y && (x->type == RAY_LIST || x->type == RAY_STR) && q_count(x) > 0 && q_index_rank(x) == q_index_rank(y) + 1) {
         py = ray_enlist_fn(&y, 1);
         if (!py || RAY_IS_ERR(py)) return py ? py : q_err(QE_OOM);
