@@ -15,5 +15,6 @@
 /* owned result, or NULL = not this file's lane (the caller's loop owns it) */
 ray_t* q_vecop_binary(ray_t* (*f)(ray_t*, ray_t*), ray_t* x, ray_t* y);
 ray_t* q_vecop_unary(ray_t* (*f)(ray_t*), ray_t* x);
+int q_vecop_is_compare(ray_t* (*f)(ray_t*, ray_t*));
 
 #endif /* QLANG_OPS_Q_VECOP_H */
