@@ -157,7 +157,8 @@ bool q_sys_timer_active(void) { return g_timer_ms > 0; }
  * (0 = not listening, kdb default); g_listen_sel is the poll selector id of the
  * live listener so `\p 0` can deregister it (deregister fires ipc_on_close ->
  * ray_sock_close on the listen fd).  -1 = none. */
-static int32_t g_listen_port;
+static int32_t  g_listen_port;
+static uint32_t g_listen_ip;     /* network order; 0 = every interface */
 static int64_t g_listen_sel = -1;
 
 void q_sys_cfg_init(void) {
@@ -473,12 +474,14 @@ uint16_t q_sys_listen(const q_sys_listen_spec_t* spec) {
     if (g_listen_sel >= 0) ray_poll_deregister(poll, g_listen_sel);
     g_listen_sel  = sel;
     g_listen_port = bound;                               /* authoritative — `system "p"` reports it */
+    g_listen_ip   = ip;
     return bound;
 }
 
 /* The authoritative live listening port (0 = none) — see q_sys.h.  qmain reads
  * it for the post-script server-mode decision instead of a stale local port. */
 uint16_t q_sys_listen_port(void) { return (uint16_t)g_listen_port; }
+uint32_t q_sys_listen_ip(void)   { return g_listen_ip; }
 
 /* `\E` — DISPLAY the TLS server mode as an int (syscmds.md documents no setter
  * form; the mode is fixed by the `-E` command line).  A setter stays the silent

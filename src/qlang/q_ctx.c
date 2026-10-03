@@ -15,17 +15,16 @@
 #include "qlang/q_env.h"          /* q_env_ctx / _set — the load's `\d` save+restore; q_env_peek — `.<ext>.e` */
 #include "qlang/q_fmt.h"
 #include "qlang/q_console.h"      /* q_console_door — the running door names the console's stream; q_console_show */
-#include "qlang/q_prim.h"        /* q_str_text_bytes — the remote value-apply head; q_ssr_wrap — a known file's CRLF;
+#include "qlang/q_prim.h"        /* q_str_text_bytes — a request's `[0]` line; q_ssr_wrap — a known file's CRLF;
                                    * q_str_split_lines / q_str_charv_out — a whole-text file as read0's lines */
 #include "qlang/q_builtins.h"     /* q_dotq_sha1_fn — a known file's digest */
 #include "qlang/q_dotz.h"         /* q_dotz_quiet — `-q` silences a transcript's prompt and echo, as the piped console's */
 #include "qlang/ops/q_sys.h"      /* q_sys_gc_mode / q_sys_err_trap_mode — the statement-seam policy; q_sys_prompt */
-#include "qlang/ops/q_index.h"    /* q_index_elem_at — the element-read home */
 #include "qlang/io/q_io.h"        /* q_io_read_slice — THE byte core a load reads through */
 #include "lang/env.h"             /* ray_fn_unary — the .pq.i.console native */
-#include "lang/eval.h"            /* ray_eval_is_interrupted, ray_eval_set_remote_*_fn, RAY_FN_NONE */
+#include "lang/eval.h"            /* ray_eval_is_interrupted, ray_eval_set_remote_value_fn, RAY_FN_NONE */
 #include "mem/heap.h"             /* ray_heap_gc — the `\g 1` statement-end collect */
-#include "mem/sys.h"              /* ray_sys_alloc — remote-eval scratch */
+#include "mem/sys.h"              /* ray_sys_alloc — a statement's C-string scratch */
 #include "ops/ops.h"              /* ray_is_lazy, ray_lazy_materialize */
 #include "app/term.h"             /* ray_term_interrupted */
 #include "core/timer.h"           /* ray_time_now_ms — a finished line's ms */
@@ -33,7 +32,6 @@
 #include <rayforce.h>
 #include <ctype.h>                /* isalnum — a file's extension */
 #include <limits.h>               /* PATH_MAX — the load's resolved file symbol */
-#include <stdlib.h>
 #include <string.h>
 
 /* The front end's terminal teardown, if one registered.  See q_ctx.h. */
@@ -67,8 +65,8 @@ void q_ctx_console_close(void) {
     if (g_console_close) g_console_close();
 }
 
-/* GC policy has ONE home: this statement seam, covering all three doors
- * (run_line, remote_eval_str, remote_apply).  `\g 0` (deferred, the kdb
+/* GC policy has ONE home: this statement seam, covering both doors
+ * (run_line, remote_value).  `\g 0` (deferred, the kdb
  * default — basics/syscmds.md#g-garbage-collection-mode) collects NOTHING
  * here, so the default path is byte-for-byte the pre-`\g` behaviour; `\g 1`
  * (immediate) collects after every statement.  ray_heap_gc self-gates its
@@ -697,11 +695,10 @@ int q_ctx_run_load(const char* name, FILE* out, FILE* err) {
     return rc;
 }
 
-/* ===== The remote doors (see q_ctx.h) =====
+/* ===== The remote door (see q_ctx.h) =====
  *
- * q_ctx_run_line's pipeline, disposing of the result over the wire instead of
- * to `out`; errors propagate as owned values the IPC layer serializes as -128h.
- * Console output is written to the SERVER's stdout as it is issued. */
+ * `value` of the message under the statement seam, answering over the wire instead of to `out`; errors propagate
+ * as owned values the IPC layer serializes as -128h.  Console output is written to the SERVER's stdout as issued. */
 
 /* `\e` error-trap-CLIENTS mode (syscmds.md#e-error-trap-clients) applied to a
  * request: 1 = the statement is console-marked, so an error suspends on the
@@ -713,22 +710,18 @@ static void remote_err_dump(ray_t* r) {
         q_dbg_print_trace(stderr, r);
 }
 
-/* docs/text-entry-law.md (target state; peachq may differ): IPC column; an IPC request's session */
-static ray_t* remote_eval_str(const char* src, size_t len) {
-    /* OWNER RULING 2026-08-10: a request obeys ctx_run_script's law — restore the `\d`
-     * context on success (no client parks a shared server), leave it where an abort left it. */
-    int64_t saved_ctx = q_env_ctx();
-    /* remote statements suspend only under `\e 1`; the seam always gives a
-     * remote .Q.trp its `[0]` frame */
-    int dbg_prev = q_dbg_statement_begin(src, len, remote_console());
-    /* Remote source text is `value` of that text (owner ruling 2026-09-30):
-     * the multiline law, the assignment law and the view intercept come from the one
-     * home — basics/ipc.md's `h"fn:{2+x}"` displays nothing because `value`
-     * answers nothing, not because the wire silences it.  A parse error needs
-     * no arm of its own here (it propagates as the -128h answer); only the
-     * `\e 2` dump is this door's. */
-    FILE*  door = q_console_door(stdout);
-    ray_t* r    = q_ctx_eval_src(src, len);
+/* docs/text-entry-law.md (target state; peachq may differ): IPC column; an IPC request's session.
+ * A request with no .z.pg/.z.ps answers as handle 0, ONE `value` of the message (owner 2026-10-03): basics/ipc.md's
+ * `h"fn:{2+x}"` answers nothing because `value` does.  Only source text has a `[0]` line to stash for `\e`. */
+static ray_t* remote_value(ray_t* msg) {
+    /* OWNER RULING 2026-08-10: restore `\d` on success (no client parks a shared server), not after an abort. */
+    int64_t     saved_ctx = q_env_ctx();
+    const char* src = NULL;
+    int64_t     len = 0;
+    (void)q_str_text_bytes(msg, &src, &len);   /* leaves them NULL/0 for a non-text message */
+    int    dbg_prev = q_dbg_statement_begin(src, (size_t)len, remote_console());
+    FILE*  door     = q_console_door(stdout);
+    ray_t* r        = q_eval_value_wrap(msg);
     q_console_door(door);
     ctx_statement_end();
     remote_err_dump(r);                  /* `\e 2`: trace before the seam closes */
@@ -737,78 +730,6 @@ static ray_t* remote_eval_str(const char* src, size_t len) {
     return r;                            /* an error propagates as the -128h answer */
 }
 
-/* The kdb value/apply wire shape — NOT a statement: ONE list-apply of the head to
- * already-evaluated tail args, never re-evaluating them (ADR-0004: value, not
- * eval), through the one public apply entry.  A sym/string head resolves/parses to
- * its value first.  `list` is BORROWED (the ipc layer releases it); the result is
- * OWNED.  Restricted mode needs no re-assert: ipc_dispatch sets it around the
- * whole dispatch. */
-static ray_t* remote_apply_body(ray_t* list) {
-    if (!list || (list->type != RAY_LIST && !ray_is_vec(list)) ||
-        q_count(list) < 1)
-        return q_err(QE_TYPE);
-    int64_t saved_ctx = q_env_ctx();   /* same request law as remote_eval_str: an applied lambda may `system"d …"` */
-    int64_t n = q_count(list);
-    ray_t* head = q_index_elem_at(list, 0);            /* owned */
-    if (!head || RAY_IS_ERR(head)) return head ? head : q_err(QE_TYPE);
-    if (head->type == -RAY_STR || head->type == RAY_CHARV) {   /* "+" / "{x*2}" */
-        const char* sp; int64_t sn;
-        if (q_str_text_bytes(head, &sp, &sn)) {
-            char* z = malloc((size_t)sn + 1);
-            if (!z) { ray_release(head); return q_err(QE_WSFULL); }
-            memcpy(z, sp, (size_t)sn);
-            z[sn] = '\0';
-            ray_t* ast = q_parse(z);
-            free(z);
-            ray_release(head);
-            if (RAY_IS_ERR(ast)) return ast;
-            head = q_eval(ast);
-            ray_release(ast);
-            if (RAY_IS_ERR(head)) return head;
-        }
-    } else if (head->type == -RAY_SYM) {   /* `sum -> its value, registry-first */
-        ray_t* v = q_eval_value_wrap(head);
-        if (RAY_IS_ERR(v)) { ray_release(head); return v; }
-        ray_release(head);
-        head = v;
-    }
-    ray_t* argv[8];
-    int64_t argc = n - 1;
-    if (argc > 8) { ray_release(head); return q_err(QE_RANK); }
-    for (int64_t i = 0; i < argc; i++) {
-        argv[i] = q_index_elem_at(list, i + 1);        /* owned */
-        if (!argv[i] || RAY_IS_ERR(argv[i])) {
-            ray_t* err = argv[i];
-            for (int64_t j = 0; j < i; j++) ray_release(argv[j]);
-            ray_release(head);
-            return err ? err : q_err(QE_TYPE);
-        }
-    }
-    ray_t* r;
-    if (argc == 0) {                                      /* (f) -> f[] = f@:: */
-        ray_t* nil = RAY_NULL_OBJ;
-        r = q_eval_apply_value(head, &nil, 1);
-    } else {
-        r = q_eval_apply_value(head, argv, argc);
-    }
-    if (r && ray_is_lazy(r)) r = ray_lazy_materialize(r);
-    for (int64_t j = 0; j < argc; j++) ray_release(argv[j]);
-    ray_release(head);
-    ctx_statement_end();
-    if (!RAY_IS_ERR(r)) q_env_ctx_set(saved_ctx);
-    return r;
-}
-
-/* The value-apply request under the same `\e` law; no source text for [0]. */
-static ray_t* remote_apply(ray_t* list) {
-    int dbg_prev = q_dbg_statement_begin(NULL, 0, remote_console());
-    ray_t* r = remote_apply_body(list);
-    remote_err_dump(r);
-    q_dbg_statement_end(dbg_prev);
-    return r;
-}
-
 void q_ctx_install_remote_hooks(void) {
-    ray_eval_set_remote_str_fn(remote_eval_str);
-    ray_eval_set_remote_apply_fn(remote_apply);
+    ray_eval_set_remote_value_fn(remote_value);
 }

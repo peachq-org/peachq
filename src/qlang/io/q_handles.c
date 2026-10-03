@@ -10,7 +10,8 @@
 #include "qlang/base/q_err.h"
 #include "qlang/q_registry_internal.h" /* q_str_text_bytes, q_type_strict_i64 */
 #include "qlang/q_console.h" /* q_console_write/_err — the 1 -1 2 -2 console handles */
-#include "qlang/q_dotz.h"   /* q_dotz_now_ns — the portable wall clock */
+#include "qlang/q_dotz.h"   /* q_dotz_now_ns — the portable wall clock; q_dotz_resolve — `.z.h`, hopen's own host */
+#include "qlang/ops/q_sys.h" /* q_sys_listen_port — hopen of the own listener is handle 0 */
 #include "qlang/io/q_io.h"   /* q_io_mkdir_parents — hopen creates missing directories; q_io_write_fd */
 #include "qlang/io/q_provider.h" /* the `:pq:` aliases: `:pq:q:`, `:pq:qfork:`, `:pq:qspawn:`, `:pq:duckdb:` */
 #include "qlang/net/q_wirefile.h"    /* q_wirefile_append_path — typed handle append */
@@ -23,6 +24,8 @@
 #include "core/runtime.h"    /* __VM->ipc_handle — the handle context handle 0 swaps */
 #include "table/sym.h"       /* ray_sym_intern_runtime, ray_sym_str */
 #include "core/ipc.h"        /* ray_ipc_handle_of_fd/fd_of_handle — q true-fd handle <-> selector id */
+#include "core/sock.h"       /* ray_sock_resolve4 — hopen of an interface-bound own listener */
+#include "core/numparse.h"   /* ray_parse_i64 — hopen's own-listener port */
 #include <rayforce.h>
 #include <stdio.h>           /* snprintf — hopen descriptor normalization */
 #include <stdlib.h>
@@ -823,6 +826,35 @@ q_pq_kind q_handles_pq_of(ray_t* x, const char** s, size_t* n) {
     return q_handles_pq(*s, *n, NULL);
 }
 
+/* "host:port[:…]" names this process's live listener: its port, and a host that is an empty host, a loopback name
+ * or `.z.h` — or, when the listener is bound to one interface, any host resolving to that address.  IPv6 `::1`
+ * has no spelling here: a leading `::` is already localhost. */
+static bool hopen_is_self(const char* s, size_t n) {
+    uint16_t lp = q_sys_listen_port();
+    const char* c = memchr(s, ':', n);
+    if (!lp || !c) return false;
+    size_t      hn = (size_t)(c - s), rn = n - hn - 1;
+    const char* pe = memchr(c + 1, ':', rn);
+    size_t      pn = pe ? (size_t)(pe - c - 1) : rn;
+    int64_t     port;
+    if (!pn || ray_parse_i64(c + 1, pn, &port) != pn || port != lp) return false;
+    uint32_t lip = q_sys_listen_ip(), hip;
+    if (lip) {
+        char   host[600];
+        size_t hl = hn ? hn : 9;
+        if (hl >= sizeof host) return false;
+        memcpy(host, hn ? s : "127.0.0.1", hl);
+        host[hl] = '\0';
+        return ray_sock_resolve4(host, &hip) == 0 && hip == lip;
+    }
+    if (hn == 0 || (hn == 9 && (!memcmp(s, "localhost", 9) || !memcmp(s, "127.0.0.1", 9)))) return true;
+    ray_t* zh = q_dotz_resolve(ray_sym_intern(".z.h", 4));   /* owned sym atom */
+    ray_t* hs = zh ? ray_sym_str(zh->i64) : NULL;             /* borrowed */
+    bool   me = hs && ray_str_len(hs) == hn && !memcmp(ray_str_ptr(hs), s, hn);
+    if (zh) ray_release(zh);
+    return me;
+}
+
 static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* conn      = x;
@@ -883,6 +915,14 @@ static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given) {
         if (pair_conn) ray_release(pair_conn);
         if (pair_to)   ray_release(pair_to);
         return terr;
+    }
+    /* Own listener: handle 0, no socket, no credential check — a single-threaded server cannot answer its own
+     * handshake, and the user means nothing locally (owner 2026-10-03). */
+    if (hopen_is_self(ray_str_ptr(cs), ray_str_len(cs))) {
+        ray_release(cs);
+        if (pair_conn) ray_release(pair_conn);
+        if (pair_to)   ray_release(pair_to);
+        return make_i32(0);
     }
     if (timeout) {
         tv = make_i64(tmo);

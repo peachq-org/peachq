@@ -106,8 +106,7 @@ void q_runtime_destroy(ray_runtime_t* rt) {
     q_pq_reset();              /* the help-db bundle reloads into the next runtime */
     q_duckdb_reset();          /* close DuckDB handles/dbs (suite isolation) */
     q_re2_reset();             /* no compiled pattern outlives its runtime */
-    ray_eval_set_remote_str_fn(NULL);  /* remote strings fall back to rayfall */
-    ray_eval_set_remote_apply_fn(NULL);/* (func;args) value-apply -> 'nyi w/o q runtime */
+    ray_eval_set_remote_value_fn(NULL);/* requests fall back to rayfall source strings */
     q_dbg_reset();             /* drop snapshot-retained lambdas before the env */
     q_handles_destroy();       /* drop handle records (open_args refs) before the env */
     q_provider_destroy();        /* drop provider records (connid refs) before the env */
