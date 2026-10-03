@@ -503,7 +503,7 @@ bool q_registry_ready(void) {
 /* Install the QK_QSRC cells from the loaded q.q definitions (contract in
  * q_registry.h).  Same entry shape as add_entry, but the value is a SNAPSHOT
  * of the `.q.<target>` env binding rather than a built one — immutable like
- * every other cell (`.q` is a reserved root only the bootstrap writes).
+ * every other cell (a `.q` builtin entry is a binding no write may change).
  * is_wrapper=1: the value is unique per cell, so pointer-identity provenance
  * is exact (q_registry_provenance).  Serde is UNTOUCHED by that flag: the
  * `q!…` fn-hook fires only for RAY_FN_Q_LOWER function values; carriers keep
@@ -603,7 +603,7 @@ void q_registry_seal(void) {
 }
 
 int q_registry_locked(int64_t sym_id) {
-    return g_sealed && (sym_id == g_dotq || sym_slot(sym_id, 0));
+    return g_sealed && sym_slot(sym_id, 0);
 }
 
 int q_registry_is_infix(const char* s, size_t n) {
