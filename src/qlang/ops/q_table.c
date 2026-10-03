@@ -716,7 +716,8 @@ static ray_t* table_colnames(ray_t* x);
  *   POINTER dict  -> the same pair unmarked (a provider table is that flip too — q_provider.h)
  *   dict          -> table (sym keys; vector vals share one length L, atoms
  *                    broadcast to L; mismatched vector length -> 'length);
- *                    `cols!`:dir/` -> the mapped table, `cols!`:pq:duckdb:db:t/` the bound provider pointer
+ *                    `cols!`:dir/` -> the mapped table, `cols!`:pq:duckdb:db:t/` the bound provider pointer,
+ *                    `cols!`name` the unresolved partitioned table
  *   list of lists -> transposed list (atom items broadcast)
  * Keyed tables, atoms, and an ALL-ATOM dict or list are 'rank: "to define a
  * 1-row table, enlist at least one of the column values" (basics/syntax.md:236)
@@ -739,8 +740,8 @@ ray_t* q_flip_wrap(ray_t* x) {
         ray_t* v = ray_dict_vals(x);                      /* borrowed */
         if (!k || k->type != RAY_SYM || !v)
             return q_err(QE_TYPE);
-        if (v->type == -RAY_SYM) {                        /* ONE hsym-valued arm, dispatching on the spelling */
-            ray_t* t = q_splay_flip(k, v->i64);           /* `:dir/  -> the mapped table */
+        if (v->type == -RAY_SYM) {                        /* ONE symbol-valued arm, dispatching on the spelling */
+            ray_t* t = q_splay_flip(k, v->i64);           /* `:dir/ or `name -> the table reference */
             if (!t) t = q_provider_flip(k, v->i64);       /* `:pq:duckdb:db:t/ -> the bound pointer */
             if (t) return t;
         }

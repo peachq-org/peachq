@@ -133,7 +133,13 @@ static ray_t* ques_from_n(ray_t* t, int64_t* nkey, int hops) {
         return q_bang_enkey(0, t);
     }
     if (q_type_is_dict(t)) { ray_retain(t); return t; }
-    if (q_splay_table_unresolved(t)) return q_err(QE_IO);   /* `flip cols!`:missing/` fails when queried */
+    if (q_splay_table_unresolved(t)) {   /* fails when queried: a missing dir 'io, an unknown name itself (`'s`) */
+        ray_t* s = ray_sym(q_splay_table_path(t));
+        ray_t* nm = ray_sym_str(s->i64);                  /* borrowed */
+        ray_t* e = q_io_is_fsym(s) ? q_err(QE_IO) : q_err_name(ray_str_ptr(nm), ray_str_len(nm));
+        ray_release(s);
+        return e;
+    }
     if (q_type_is_table(t)) { ray_retain(t); return t; }
     return q_err(QE_TYPE);
 }
