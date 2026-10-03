@@ -13,22 +13,12 @@
  * src/lang/eval.h (0x20) — kept local so the parser needs no eval header. */
 #define Q_ATTR_QUOTED 0x20
 
-/* Q_ATTR_HOLE: flag on the `::` sym of an ELIDED bracket-call slot (`f[a;;b]`)
- * — a projection hole, as distinct from an explicit `::` (a real generic-null
- * VALUE, e.g. the whole-value amend index `@[v;::;f]` or a trap fx).  The two
- * spell identically (`::`), so this flag is the only signal that lets the
- * `@`/`.` lowering tell an elision (project) from an explicit `::` (amend/trap
- * data).  0x40 is unused on a -RAY_SYM atom (it is RAY_FN_COMPILED/Q_LOWER on
- * fn/lambda values only), and the marked node never survives lowering. */
-#define Q_ATTR_HOLE   0x40
-
 /* Q_ATTR_KEYLIST: flag on a 1-elem RAY_SYM VECTOR node — the 1-col table-literal
  * KEY LIST (q_parse.c table_lit_dict).  That node is byte-identical to the
  * enlisted-sym-ATOM constant (,`a — parsetrees.md:26 unwraps it), so this is the
  * only signal that the node is a genuine 1-NAME LIST and `!` must see list!list.
- * Numerically the Q_ATTR_HOLE bit (that one lives on -RAY_SYM atoms) and
- * RAY_ATTR_HAS_NULLS — chosen because it has no display glyph and no serde
- * footprint; q_eval answers a fresh unmarked copy, so it never escapes into
+ * Numerically RAY_ATTR_HAS_NULLS — chosen because it has no display glyph and no
+ * serde footprint; q_eval answers a fresh unmarked copy, so it never escapes into
  * values.  A node whose one sym is the NULL sym is never a key list. */
 #define Q_ATTR_KEYLIST 0x40
 
@@ -51,7 +41,6 @@ static inline int q_parse_drop_lead(char c) { return c == '_'; }
 ray_t *q_verb(char c);
 ray_t *q_verb_name(const char *s, int len);
 ray_t *q_embed(ray_t *sym, q_valence_t val);
-ray_t *q_null(void);
 ray_t *q_symvec_append(ray_t *vec, const char *s, int len);
 extern const char VERB_CHARS[];
 extern const char *ADVERB_NAMES[];

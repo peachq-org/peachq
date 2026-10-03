@@ -293,14 +293,6 @@ void q_builtins_register(void) {
      * `cols`.  Bound BEFORE q_registry_init, like `string`/`show`. */
     bind_unary("meta",   q_meta_fn);
     bind_unary("cols",   q_cols_fn);
-    /* `::` — the generic-null VALUE.  Elided call args parse as unquoted `::`
-     * name-refs (`f[]` is (`f;::), cases.tsv:43); binding the value makes them
-     * evaluate to RAY_NULL_OBJ instead of a 'name error — which is exactly
-     * what lambda application detects as projection holes, and gives a typed
-     * `::` its kdb value.  The funsql special forms are unaffected (their `::`
-     * markers are never evaluated). */
-    ray_retain(RAY_NULL_OBJ);
-    bind_value("::", RAY_NULL_OBJ);
     /* Function-value introspection wrappers.  Bound BEFORE q_registry_init so
      * the registry's QK_ENV rows (`#` monadic = count) snapshot the WRAPPED
      * values — one home for the carrier special-cases. */

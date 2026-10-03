@@ -11,7 +11,7 @@
 #include "qlang/q_env.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_registry.h"
-#include "qlang/parse/q_parse_internal.h"   /* Q_ATTR_HOLE */
+#include "qlang/parse/q_parse.h"      /* q_parse_is_seq_head — `name::rhs;…` */
 #include "mem/heap.h"                 /* RAY_ATTR_SORTED */
 #include "mem/sys.h"                  /* ray_sys_alloc/free — the roster */
 #include "table/sym.h"
@@ -22,7 +22,7 @@
 #define VIEW_INRECALC 2u
 
 typedef struct {
-    int64_t gcolon, zvs;
+    int64_t zvs;
     int     ready;
 } view_syms_t;
 static view_syms_t g_syms;
@@ -34,8 +34,7 @@ static int      g_in_zvs;
 
 static const view_syms_t* vsyms(void) {
     if (!g_syms.ready) {
-        g_syms.gcolon = ray_sym_intern_runtime("::", 2);
-        g_syms.zvs    = ray_sym_intern_runtime(".z.vs", 5);
+        g_syms.zvs   = ray_sym_intern_runtime(".z.vs", 5);
         g_syms.ready  = 1;
     }
     return &g_syms;
@@ -103,7 +102,6 @@ static void roster_heal(void) {
 static void deps_scan(ray_t* n, ray_t** deps, int* oom) {
     if (!n || *oom) return;
     if (n->type == -RAY_SYM) {
-        if (n->attrs & Q_ATTR_HOLE) return;
         int64_t id = n->i64;
         if (q_eval_ctl_sym(id) || q_registry_is_reserved(id) || name_dotted(id))
             return;
@@ -318,15 +316,14 @@ int q_view_intercept(ray_t* ast, const char* src, ray_t** out) {
     int64_t n = q_count(ast);
     ray_t** e = (ray_t**)ray_data(ast);
     if (n < 3 || !e[0]) return 0;
-    const view_syms_t* S = vsyms();
     ray_t* asn = NULL;
     int seq = 0;
-    if (e[0]->type == -RAY_SYM && e[0]->i64 == S->gcolon && n == 3) {
+    if (RAY_IS_NULL(e[0]) && n == 3) {
         asn = ast;
     } else if (q_parse_is_seq_head(e[0]) && e[1] && e[1]->type == RAY_LIST &&
                q_count(e[1]) == 3) {
         ray_t** a1 = (ray_t**)ray_data(e[1]);
-        if (a1[0] && a1[0]->type == -RAY_SYM && a1[0]->i64 == S->gcolon) {
+        if (RAY_IS_NULL(a1[0])) {
             asn = e[1];
             seq = 1;
         }
@@ -334,7 +331,7 @@ int q_view_intercept(ray_t* ast, const char* src, ray_t** out) {
     if (!asn) return 0;
     ray_t** a = (ray_t**)ray_data(asn);
     ray_t* tgt = a[1];
-    if (!tgt || tgt->type != -RAY_SYM || (tgt->attrs & Q_ATTR_HOLE) || !a[2])
+    if (!tgt || tgt->type != -RAY_SYM || !a[2])
         return 0;
     if (q_eval_assign_locked(tgt->i64) || name_dotted(tgt->i64)) return 0;
     const char* txt;
