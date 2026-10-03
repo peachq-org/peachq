@@ -11,7 +11,6 @@
 #include "qlang/q_registry.h"   /* q_list_collapse + the kdb_op identity pair */
 #include "qlang/io/q_splay.h"   /* a mapped splay travels as 98 over (99: cols; `:dir/) and re-opens */
 #include "qlang/io/q_provider.h" /* a provider pointer travels the same shape and rebinds */
-#include "qlang/io/q_io.h"      /* q_io_is_fsym — the one admitted unconformed dict */
 #include "qlang/io/q_kapi.h"    /* q_dl_loaded — a function a `2:` already resolved */
 #include "qlang/parse/q_parse.h"      /* q_parse — lambda decode (RUNTIME only) */
 #include "lang/eval.h"          /* ray_eval */
@@ -1041,8 +1040,8 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         int64_t vl = v->type == RAY_TABLE ? q_count(v)
                    : (ray_is_vec(v) || v->type == RAY_LIST) ? q_count(v) : -1;
         if (kl < 0 || vl < 0 || kl != vl) {
-            /* `cols!`:dir/` is the ONE unconformed dict `!` makes (ref/flip-splayed.md) */
-            if (k->type == RAY_SYM && q_io_is_fsym(v)) return ray_dict_new(k, v);   /* consumes both */
+            /* `cols!`sym` is the ONE unconformed dict `!` makes (ref/flip-splayed.md) */
+            if (k->type == RAY_SYM && v->type == -RAY_SYM) return ray_dict_new(k, v);   /* consumes both */
             ray_release(k); ray_release(v);
             return q_err(QE_LENGTH);
         }
@@ -1065,8 +1064,9 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         }
         ray_t* cols = rd_obj(c);
         if (!cols || RAY_IS_ERR(cols)) { ray_release(keys); return cols ? cols : q_err(QE_DOMAIN); }
-        if (cols->type == -RAY_SYM) {                 /* 98 over (99: cols; hsym): the flip law, off the spelling —
-                                                       * `:dir/ re-opens the mapping, `:pq:duckdb:db:t/ rebinds the pointer */
+        if (cols->type == -RAY_SYM) {                 /* 98 over (99: cols; sym): the flip law, off the spelling —
+                                                       * `:dir/ re-opens the mapping, `name stays unresolved,
+                                                       * `:pq:duckdb:db:t/ rebinds the pointer */
             ray_t* t = q_splay_flip(keys, cols->i64);
             if (!t) t = q_provider_flip(keys, cols->i64);
             ray_release(keys); ray_release(cols);

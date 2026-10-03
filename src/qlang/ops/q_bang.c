@@ -182,9 +182,9 @@ ray_t* q_bang_enkey(int64_t nkey, ray_t* y) {
  * (rows).  ()!() is the empty dict; a keyed table is a table!table dict.  vals
  * pass through as-is (rayfall `dict` broadcasts/boxes). */
 static ray_t* dict_pair(ray_t* x, ray_t* y) {
-    /* `cols!`:dir/` — n symbols against ONE hsym atom, the flip of a mapped splayed table (ref/flip-splayed.md);
-     * the count gate does not apply */
-    if (x->type == RAY_SYM && q_io_is_fsym(y)) {
+    /* `cols!`:dir/` or `cols!`name` — n symbols against ONE symbol atom, the flip of a splayed or partitioned
+     * table (ref/flip-splayed.md, ref/dotq.md `+`sym`time`num!`tt`); the count gate does not apply */
+    if (x->type == RAY_SYM && y->type == -RAY_SYM) {
         ray_retain(x);
         ray_retain(y);
         return ray_dict_new(x, y);               /* consumes both retains */

@@ -469,6 +469,16 @@ static int splay_dir_sym_is(int64_t sym) {
     return n >= 2 && p[0] == ':' && p[n - 1] == '/' && !q_handles_pq(p, n, NULL);
 }
 
+/* a plain symbol names a partitioned table (ref/flip-splayed.md:21); the null symbol is id 0, the "no coordinate"
+ * sentinel, and names nothing */
+static int splay_name_sym_is(int64_t sym) {
+    if (sym == 0) return 0;
+    ray_t* a = ray_sym(sym);
+    int name = !q_io_is_fsym(a);
+    ray_release(a);
+    return name;
+}
+
 static ray_t* splay_open(int64_t sym, ray_t* dir, splay_ent** out);
 
 /* Entry behind handle-sym `sym`: found, or opened from its own path (a cold
@@ -716,14 +726,18 @@ ray_t* q_splay_get(ray_t* x) {
 }
 
 ray_t* q_splay_flip(ray_t* cols, int64_t dirsym) {
-    if (!cols || cols->type != RAY_SYM || !splay_dir_sym_is(dirsym)) return NULL;
-    ray_t* err = NULL;
-    splay_ent* e = splay_resolve_sym(dirsym, &err);
-    if (err) return err;
-    if (e) {
-        splay_bind_domain(e);
-        ray_t* t = splay_table(e, cols);
-        if (t) return t;
+    if (!cols || cols->type != RAY_SYM) return NULL;
+    if (splay_dir_sym_is(dirsym)) {
+        ray_t* err = NULL;
+        splay_ent* e = splay_resolve_sym(dirsym, &err);
+        if (err) return err;
+        if (e) {
+            splay_bind_domain(e);
+            ray_t* t = splay_table(e, cols);
+            if (t) return t;
+        }
+    } else if (!splay_name_sym_is(dirsym)) {
+        return NULL;
     }
     int64_t nc = q_count(cols);                         /* unresolved: `()` per name, queried later */
     ray_t* tbl = ray_table_new(nc > 0 ? nc : 1);

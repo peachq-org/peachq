@@ -22,12 +22,13 @@ void q_splay_invalidate_under(const char* path, size_t n);   /* flat write insid
  * flat reader); else the owned mapped table or a RAY_ERROR from load-time HEADER validation ('type/'corrupt/'nyi/'io). */
 ray_t* q_splay_get(ray_t* x);
 
-/* `flip cols!`:dir/` — the mapped table, or, when the directory does not resolve, the UNRESOLVED table (the dict
- * retagged: an empty general list per column, aux set) that displays `+(,`a)!`:./s/` and fails only when queried
- * (ref/flip-splayed.md).  NULL unless dirsym spells a splay directory (`:…/`, not a provider coordinate). */
+/* `flip cols!`:dir/` — the mapped table, or, when the directory does not resolve, the UNRESOLVED table (an empty
+ * general list per column, aux set) that displays `+(,`a)!`:./s/` and fails only when queried (ref/flip-splayed.md).
+ * `flip cols!`name` names a partitioned table, which no mount resolves yet: always the unresolved table.  NULL unless
+ * dirsym spells a splay directory (`:…/`, not a provider coordinate) or a non-null plain name. */
 ray_t* q_splay_flip(ray_t* cols, int64_t dirsym);
 
-/* The directory sym a mapped or unresolved table was flipped from (0 = a plain table), and the unresolved test. */
+/* The sym a mapped or unresolved table was flipped from (0 = a plain table), and the unresolved test. */
 int64_t q_splay_table_path(ray_t* t);
 int     q_splay_table_unresolved(ray_t* t);
 
