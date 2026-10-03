@@ -50,7 +50,7 @@ static _Thread_local int g_depth;
  * hand the next runtime stale ids and control forms would degrade to 'name. */
 typedef struct {
     int64_t adv[6];
-    int64_t semi, colon, gcolon, dollar, kif, kwhile, kdo;
+    int64_t semi, colon, dollar, kif, kwhile, kdo;
     int     ready;
 } eval_syms_t;
 static eval_syms_t g_syms;
@@ -62,7 +62,6 @@ static const eval_syms_t* syms(void) {
                                                    strlen(ADVERB_NAMES[i]));
         g_syms.semi   = ray_sym_intern_runtime(";", 1);
         g_syms.colon  = ray_sym_intern_runtime(":", 1);
-        g_syms.gcolon = ray_sym_intern_runtime("::", 2);
         g_syms.dollar = ray_sym_intern_runtime("$", 1);
         g_syms.kif    = ray_sym_intern_runtime("if", 2);
         g_syms.kwhile = ray_sym_intern_runtime("while", 5);
@@ -86,14 +85,6 @@ static int nameref(ray_t* x) {
 /* the enlisted-constant unwrap's tree shape: a 1-element sym vector */
 static int sym_const(ray_t* x) {
     return x && x->type == RAY_SYM && q_count(x) == 1;
-}
-
-/* Hole detection: ONLY a parse-marked slot (Q_ATTR_HOLE — bracket elision
- * `f[;2]` or the postfix forms' missing operand `1+`) projects.  A plain
- * `::` is uniformly DATA, the generic null, under every head — kdb passes
- * an explicit `::` argument to the callee (ref/dotq.md `.Q.en[::;t1]`). */
-static int is_hole(ray_t* x) {
-    return x && x->type == -RAY_SYM && (x->attrs & Q_ATTR_HOLE);
 }
 
 /* adverb id (0=' 1=/ 2=\ 3=': 4=/: 5=\:), else -1.  The parser emits the
@@ -190,7 +181,6 @@ static ray_t* dot_cast(int64_t id) {
 
 static ray_t* name_value(ray_t* sym, const q_op_t** row_out) {
     if (row_out) *row_out = NULL;
-    if (sym->i64 == syms()->gcolon) return RAY_NULL_OBJ;
     ray_t* v = resolve(sym->i64, row_out);
     if (!v) v = dot_cast(sym->i64);
     return v ? v : name_error(sym->i64);
@@ -235,13 +225,12 @@ static ray_t* operand_value(ray_t* F, const q_op_t** row_out) {
     return v;
 }
 
-/* args RIGHT-to-left into argv (owned; holes stay C-NULL).  On error the
- * already-evaluated tail (indices > i) is released.  A LONE elided slot is
- * `f[]` — kdb applies to the generic null, only `;`-elision projects. */
+/* args RIGHT-to-left into argv (owned).  On error the already-evaluated tail (indices > i) is released.  A
+ * `;`-elided slot stays C NULL — open — for the index home and the train seam; a lone hole is a value like any
+ * other, judged by the apply module's hole law. */
 static ray_t* eval_args_rtl(ray_t** e, int64_t argc, ray_t** argv) {
     for (int64_t i = argc - 1; i >= 0; i--) {
-        if (is_hole(e[i]) && argc == 1) { argv[i] = RAY_NULL_OBJ; continue; }
-        if (is_hole(e[i])) { argv[i] = NULL; continue; }
+        if (e[i] == Q_HOLE_OBJ && argc > 1) { argv[i] = NULL; continue; }
         argv[i] = q_eval(e[i]);
         if (RAY_IS_ERR(argv[i])) {
             ray_t* err = argv[i];
@@ -355,15 +344,19 @@ static ray_t* indexed_assign(ray_t* target, ray_t* opv, ray_t* rhs) {
     return ret;
 }
 
+/* what a tree can assign INTO: a name, or an index form `a[i;…]` headed by one — a sym atom in a tree is always a
+ * name (parsetrees.md:80), so an eval'd `(::;`d;5)` assigns exactly as the parsed `d::5` does */
+static int assign_target(ray_t* x) {
+    if (nameref(x)) return 1;
+    return x && x->type == RAY_LIST && q_count(x) >= 2 && nameref(((ray_t**)ray_data(x))[0]);
+}
+
 /* `:`/`::` assignment — both take THE locality law: a `:` target is in the frame by construction (a parse-time
  * local, seeded at entry), `::` on a param/local writes the local (function-notation.md "Name scope"), anything
  * else is the global.  Returns the assigned value. */
 static ray_t* assign_eval(ray_t* target, ray_t* rhs) {
-    if (!nameref(target)) {
-        if (target && target->type == RAY_LIST && q_count(target) >= 2)
-            return indexed_assign(target, NULL, rhs);
-        return q_err(QE_NYI);
-    }
+    if (!assign_target(target)) return q_err(QE_NYI);
+    if (!nameref(target)) return indexed_assign(target, NULL, rhs);
     if (q_eval_assign_locked(target->i64)) return q_err(QE_ASSIGN);
     ray_t* v = q_eval_apply_concrete(q_eval(rhs));    /* boundary seam: assignment */
     if (RAY_IS_ERR(v)) return v;
@@ -410,7 +403,7 @@ static void sym_add(ray_t** v, int64_t id, int* oom) {
 
 int q_eval_ctl_sym(int64_t id) {
     const eval_syms_t* S = syms();
-    return id == S->semi || id == S->colon || id == S->gcolon ||
+    return id == S->semi || id == S->colon ||
            id == S->kif || id == S->kwhile || id == S->kdo;
 }
 
@@ -425,12 +418,12 @@ static void lam_scan(ray_t* n, lam_scan_t* s) {
     if (nameref(n)) {
         /* a keyword head is a verb, not a free global: the registry owns the
          * name (assignment to it is 'assign), so it can never be a user's */
-        if (!q_eval_ctl_sym(n->i64) && !is_hole(n) && !q_registry_is_reserved(n->i64))
+        if (!q_eval_ctl_sym(n->i64) && !q_registry_is_reserved(n->i64))
             sym_add(&s->ref, n->i64, &s->oom);
         return;
     }
     if (n->type != RAY_LIST) {
-        if (!s->con) return;
+        if (!s->con || Q_IS_GENERIC_NULL(n)) return;
         ray_t* c = ray_list_append(s->con, n);
         if (!c) { s->oom = 1; return; }
         s->con = c;
@@ -440,10 +433,9 @@ static void lam_scan(ray_t* n, lam_scan_t* s) {
     ray_t** e = (ray_t**)ray_data(n);
     if (k == 0) return;
     const eval_syms_t* S = syms();
-    if (k == 3 && nameref(e[0]) &&
-        (e[0]->i64 == S->colon || e[0]->i64 == S->gcolon)) {
+    if (k == 3 && (RAY_IS_NULL(e[0]) || (nameref(e[0]) && e[0]->i64 == S->colon))) {
         if (nameref(e[1])) {
-            int global = e[0]->i64 == S->gcolon || sym_dotted(e[1]->i64);
+            int global = RAY_IS_NULL(e[0]) || sym_dotted(e[1]->i64);
             sym_add(global ? &s->glb : &s->loc, e[1]->i64, &s->oom);
         } else {
             lam_scan(e[1], s);
@@ -950,7 +942,7 @@ static ray_t* list_lit(ray_t** e, int64_t n) {
     ray_t* ret;
     int64_t holes = 0;
     for (int64_t i = n - 1; i >= 0; i--) {
-        if (is_hole(e[i])) { argv[i] = NULL; holes++; continue; }
+        if (e[i] == Q_HOLE_OBJ) { argv[i] = NULL; holes++; continue; }
         argv[i] = e[i] ? q_eval_apply_concrete(q_eval(e[i])) : RAY_NULL_OBJ;
         if (RAY_IS_ERR(argv[i])) {
             ret = argv[i];
@@ -1040,9 +1032,14 @@ ray_t* q_eval(ray_t* node) {
          * signal below (q_parse.h: q_parse_is_seq_head is the one test) */
         if (q_parse_is_seq_head(h)) { ret = seq_eval(e + 1, n - 1); goto out; }
 
+        /* global assign is the identity value heading (::;name;rhs) — `a::1` and `::[a;1]` are one tree */
+        if (RAY_IS_NULL(h) && n == 3 && assign_target(e[1])) {
+            ret = assign_eval(e[1], e[2]);
+            goto out;
+        }
         if (nameref(h)) {
             const eval_syms_t* S = syms();
-            if ((h->i64 == S->colon || h->i64 == S->gcolon) && n == 3) {
+            if (h->i64 == S->colon && n == 3) {
                 ret = assign_eval(e[1], e[2]);
                 goto out;
             }
