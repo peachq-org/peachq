@@ -127,8 +127,9 @@ The text is **a script whose source came from argv**, not a console line, so scr
 s.q, then A.
 
 After the texts run, the session does what it always does: an interactive terminal drops to the `q)` prompt, a
-non-terminal stdin exits 0, and a live listener serves. `-eval` does not imply "exit after" — end the text with
-`exit 0` if that is what you want.
+non-terminal stdin is read as console input to its end and then exits 0, and a live listener serves. `-eval` does
+not imply "exit after" — end the text with `exit 0` if that is what you want. So `echo 'a+1' | q s.q` evaluates
+`a+1` after s.q; `q s.q </dev/null` runs s.q and exits at once.
 
 Both flags are consumed by the launcher, so neither the flag nor its text appears in `.z.x`.
 
