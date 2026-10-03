@@ -248,15 +248,15 @@ static bool ct_eq(const void* a, const void* b, size_t len) {
     return diff == 0;
 }
 
-/* The kdb creds line split: no colon = no user, the whole line is the password. */
+/* The kdb creds line split: no colon = all user, empty password (the `:host:port:user` handle). */
 static void cred_split(const uint8_t* buf, size_t len, const char** user, size_t* ulen,
                        const char** pw, size_t* plen) {
     const char* creds = (const char*)buf;
     const char* colon = len ? memchr(creds, ':', len) : NULL;
     *user = creds;
-    *ulen = colon ? (size_t)(colon - creds) : 0;
-    *pw   = colon ? colon + 1 : creds;
-    *plen = colon ? (size_t)(len - (size_t)(*pw - creds)) : len;
+    *ulen = colon ? (size_t)(colon - creds) : len;
+    *pw   = colon ? colon + 1 : creds + len;
+    *plen = colon ? (size_t)(len - (size_t)(*pw - creds)) : 0;
 }
 
 /* Validate a creds line against the -u/-U secret.  creds is the RAW
@@ -364,7 +364,7 @@ static bool auth_secret_matches(const char* stored, size_t slen, const char* pw,
     return ct_eq(a, b, 256) & (slen <= 255) & (pw_len <= 255);
 }
 
-/* An unlisted user (including the no-colon line) is rejected. */
+/* An unlisted user is rejected. */
 static bool validate_creds_file(const uint8_t* buf, size_t cred_len) {
     const char* user; size_t ulen; const char* pw; size_t plen;
     cred_split(buf, cred_len, &user, &ulen, &pw, &plen);
@@ -1079,11 +1079,11 @@ static bool kdb_handshake_complete(ray_poll_t* poll, int64_t handle,
      * (creds are ASCII, so a control byte can only be the capability). */
     if (clen >= 1 && hs[clen - 1] <= 6) { cap = hs[clen - 1]; clen--; }
 
-    /* Mark the userid span before ANY hook fires — same colon split as
-     * hook_call_auth (no colon = no user).  cd==NULL: legacy fixture server. */
+    /* Mark the userid span before ANY hook fires.  cd==NULL: legacy fixture server. */
     if (cd) {
-        const uint8_t* colon = clen ? memchr(hs, ':', clen) : NULL;
-        cd->user_len = (uint16_t)(colon ? (size_t)(colon - hs) : 0);
+        const char* user; size_t ulen; const char* pw; size_t plen;
+        cred_split(hs, clen, &user, &ulen, &pw, &plen);
+        cd->user_len = (uint16_t)ulen;
         cd->user_ok  = 1;
     }
 
@@ -2065,12 +2065,11 @@ int64_t ray_ipc_adopt_client(ray_sock_t fd, const char* user, const char* passwo
     ray_poll_t* poll = ipc_active_poll();
     if (!poll) { ray_sock_close(fd); return -1; }
 
-    /* kdb handshake: "user:password" + capability byte + NUL.  The colon
-     * is ALWAYS present (the no-credential handshake is ":\3\0") so the
-     * server's auth hook sees an unambiguous user/pass split. */
+    /* kdb handshake: "user:password" + capability byte + NUL; a lone user goes
+     * colon-less, and no credential at all is ":\3\0". */
     char cred[300];
-    int n = snprintf(cred, sizeof(cred) - 2, "%s:%s",
-                     user ? user : "", password ? password : "");
+    int n = snprintf(cred, sizeof(cred) - 2, "%s%s%s", user ? user : "",
+                     password || !user ? ":" : "", password ? password : "");
     if (n < 0 || n >= (int)sizeof(cred) - 2) { ray_sock_close(fd); return -1; }
     cred[n++] = KDB_CAPABILITY;
     cred[n++] = 0x00;
