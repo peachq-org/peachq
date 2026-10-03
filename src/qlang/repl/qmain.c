@@ -356,11 +356,10 @@ int main(int argc, char** argv) {
         fflush(stdout);
     }
 
-    /* The file (`q file`) is a `\l`.  Non-tty: run it before the server loop /
-     * exit — a `-p` server serves IPC, a non-server run exits 0 (the
-     * test/daemon shape) rather than blocking on an empty REPL, and an abort
-     * exits non-zero.  Tty: it is the console's first `\l` (owner ruling
-     * 2026-09-17, #57 — kx suspends a failing `q file.q` into `q))` when stdin
+    /* The file (`q file`) is a `\l`.  Non-tty: run it before the event loop,
+     * which then reads stdin to EOF like any console (a `-p` server serves past
+     * it), and an abort exits non-zero.  Tty: it is the console's first `\l`
+     * (owner ruling 2026-09-17, #57 — kx suspends a failing `q file.q` into `q))` when stdin
      * is a terminal), so it runs INSIDE the REPL once the debugger's reader is
      * armed, with the `-eval` texts after it. */
     /* `-eval-before` / `-eval` texts are scripts whose source came from argv: the script seam, the script abort
@@ -413,7 +412,7 @@ int main(int argc, char** argv) {
          * open error / the statement's trace already printed. */
     } else if (q_sys_listen_port() > 0 && poll) {
         /* A listener is LIVE — from startup `-p` OR a runtime/script `\p N` —
-         * so serve, don't exit at a non-tty script end.  Keyed off the
+         * so serve past stdin EOF.  Keyed off the
          * authoritative `\p` getter state (q_sys_listen_port), not a stale
          * local `port` or a sticky listener flag: a startup-script `\p 0` that
          * closes the `-p` listener now correctly drops OUT of server mode
@@ -446,9 +445,6 @@ int main(int argc, char** argv) {
             if (q_sys_listen_port() > 0)
                 ray_poll_run(poll);   /* serve iff the listener is still LIVE */
         }
-    } else if (script && !stdin_tty) {
-        /* Ran a startup script with no server on a non-tty (`q file.q
-         * </dev/null`): exit 0 without entering the REPL. */
     } else {
         /* No listener: run the SAME poll event loop the server uses (Bundle 3
          * — unify on rayforce's run_interactive shape) so an idle client
@@ -468,7 +464,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    /* Natural end-of-session (stdin EOF / script end) is a process exit too:
+    /* Natural end-of-session (stdin EOF) is a process exit too:
      * route it through THE exit home, so `.z.exit` fires exactly once with the
      * exit status (dotz.md) on EVERY session exit — `\\`/`exit x` never reach
      * here (q_sys_exit already terminated).  q_sys_exit does not return; the OS
