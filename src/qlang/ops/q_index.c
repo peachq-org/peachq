@@ -19,6 +19,7 @@
 #define IDX_MAX_DEPTH 2048
 
 static _Thread_local int g_depth;
+static _Thread_local int g_store;   /* Assign: an op-amend's computed row, redistributed by table_store, stays strict */
 
 /* index admission: a bool, or any atom of the int-index lane (q_type_int_index_width — bytes, chars and
  * temporals included; floats and syms are not, ref/apply.md errors) */
@@ -318,6 +319,14 @@ static int elem_fits(ray_t* x, ray_t* v) {
     if (!ray_is_vec(x) || x->type == RAY_STR) return 0;
     return ray_is_atom(v) &&
            (RAY_ATOM_IS_NULL(v) || (int8_t)-v->type == x->type);
+}
+
+/* a store takes the int/long pair cast to the storage's type (owner ruling 2026-10-03); consumes v */
+static ray_t* pair_cast(ray_t* s, ray_t* v) {
+    if (!s || !v || RAY_IS_ERR(v) || !ray_is_vec(s) || !q_type_widens(s->type, v->type)) return v;
+    ray_t* c = q_dollar_cast(s->type, v);
+    ray_release(v);
+    return c;
 }
 
 /* store v as item ix of a list/typed vector.  x consumed on success, the
@@ -972,7 +981,12 @@ ray_t* q_index_dict_join(ray_t* x, ray_t* y, int strict) {
     if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_TYPE);
     pos = run_positions(x, ky, pos);
     if (RAY_IS_ERR(pos)) return pos;
-    return dict_put(x, ky, vy, pos, strict);
+    ray_retain(vy);
+    ray_t* cy = strict ? pair_cast(slots[1], vy) : vy;
+    if (RAY_IS_ERR(cy)) { ray_release(pos); return cy; }
+    ray_t* r = dict_put(x, ky, cy, pos, strict);
+    ray_release(cy);
+    return r;
 }
 
 /* Amend Entire: the selection is x itself.  x consumed on success. */
@@ -1001,6 +1015,7 @@ static ray_t* leaf1(ray_t* x, ray_t* i0, int64_t p, ray_t* f, ray_t* y) {
         ray_release(s);
     } else {
         nv = leaf_apply(NULL, NULL, y);
+        if (g_store) nv = pair_cast(q_type_is_plain_dict(x) ? ray_dict_slots(x)[1] : x, nv);
     }
     if (!nv || RAY_IS_ERR(nv)) return nv ? nv : q_err(QE_TYPE);
     ray_t* r = p >= 0 ? dict_put1(x, i0, p, nv) : store_level(x, i0, nv);
@@ -1152,7 +1167,11 @@ static ray_t* amend_seq(ray_t* x, ray_t* sel, ray_t* const* rest, int64_t k,
     }
     if (sel && k == 0 && y &&
         (!f || q_registry_row_of(f, Q_DYADIC) == q_ops_find(":", 1))) {
-        ray_t* r = scatter_store(x, sel, y);   /* registry `:` IS plain replace */
+        ray_retain(y);
+        ray_t* cy = g_store ? pair_cast(x, y) : y;
+        if (RAY_IS_ERR(cy)) { if (keys) ray_release(keys); return cy; }
+        ray_t* r = scatter_store(x, sel, cy);   /* registry `:` IS plain replace */
+        ray_release(cy);
         if (r) return r;
     }
     ray_retain(x);                                   /* the error-restore guard */
@@ -1197,8 +1216,9 @@ static ray_t* amend_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k,
             pos = run_positions(x, i0, pos);
             if (RAY_IS_ERR(pos)) return pos;
             ray_t** slots = ray_dict_slots(x);
-            if (!f && y && is_coll(y) && q_count(y) == q_count(pos) && is_coll(slots[0]) && is_coll(slots[1]))
-                return dict_put(x, i0, y, pos, 1);   /* `d[ks]:vs` IS `d,:ks!vs` */
+            if (!f && y && is_coll(y) && q_count(y) == q_count(pos) && is_coll(slots[0]) && is_coll(slots[1]) &&
+                run_fits(slots[1], y))
+                return dict_put(x, i0, y, pos, 1);   /* `d[ks]:vs` IS `d,:ks!vs`; else item by item, as leaf1 casts */
             ray_t* r = amend_seq(x, i0, rest, k, f, y, 1, (const int64_t*)ray_data(pos));
             ray_release(pos);
             return r;
@@ -1245,7 +1265,11 @@ ray_t* q_index_amend(ray_t* x, ray_t* const* ix, int64_t k, ray_t* f, ray_t* y) 
     }
     if (k <= 0 || (!is_coll(x) && x->type != RAY_DICT && x->type != RAY_TABLE))
         return amend_entire(x, f, y);
-    return level_collapse(amend_r(x, ix[0], ix + 1, k - 1, f, y));
+    int was = g_store;
+    g_store = !f && y;
+    ray_t* r = level_collapse(amend_r(x, ix[0], ix + 1, k - 1, f, y));
+    g_store = was;
+    return r;
 }
 
 ray_t* q_index_amend_at(ray_t* x, ray_t* i, ray_t* f, ray_t* y) {
