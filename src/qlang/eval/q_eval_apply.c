@@ -558,12 +558,14 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
     return q_eval_apply_collapse(out);
 }
 
+static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r);
+
 static ray_t* binary_elem(ray_binary_fn fn, const q_op_t* row, ray_t* a, ray_t* b) {
     if (RAY_IS_ERR(a)) return a;
     if (RAY_IS_ERR(b)) return b;
     if (is_coll(a) || is_coll(b) || is_container(a) || is_container(b))
         return atomic2(fn, row, a, b);
-    return fn(a, b);
+    return map_binary(fn, row, a, b);
 }
 
 /* eval.c's atomic_map_binary_op owns a DAG-executor fast path keyed on the
@@ -601,6 +603,16 @@ static int dag_pair_ok(ray_t* l, ray_t* r, int lc, int rc) {
 #undef DAG_ATOMT
 
 static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r) {
+    int8_t lt = (int8_t)-q_type_elem_tag(l), rt = (int8_t)-q_type_elem_tag(r);
+    int8_t to_l = q_type_cmp_as(lt, rt), to_r = to_l ? 0 : q_type_cmp_as(rt, lt);
+    if ((to_l || to_r) && q_vecop_is_compare(fn)) {
+        /* the date-bearing side is cast whole, never per element (basics/comparison.md:132) */
+        ray_t* c = to_l ? q_dollar_cast(to_l, l) : q_dollar_cast(to_r, r);
+        if (!c || RAY_IS_ERR(c)) return c ? c : q_err(QE_TYPE);
+        ray_t* res = to_l ? map_binary(fn, row, c, r) : map_binary(fn, row, l, c);
+        ray_release(c);
+        return res;
+    }
     int lc = is_coll(l), rc = is_coll(r);
     if (!lc && !rc) return fn(l, r);
     ray_t* fast = q_vecop_binary(fn, l, r);
