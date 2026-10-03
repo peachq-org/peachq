@@ -242,11 +242,25 @@ static ray_err_t env_store(ray_t** home, const int64_t* segs, int nseg, ray_t* v
     return RAY_OK;
 }
 
-/* Judged by the TARGET after `\d` re-rooting — a root reserved word, `.q` itself or a `.q` builtin entry; a colon
- * assignment's bare SPELLING is refused upstream in q_eval (owner ruling 2026-09-23). */
-static int env_locked(int64_t sym, ray_t** home, const int64_t* segs, int k) {
+/* a write of `.q` whole is judged by its effect: each builtin entry keeps its very object (NULL drops them all) */
+static int env_q_changes_builtin(ray_t* nq) {
+    ray_t* q = ray_dict_probe_sym_borrowed(env_ns, g_q_seg);
+    ray_t* qk = q ? ray_dict_keys(q) : NULL;
+    for (int64_t i = 0; qk && i < q_count(qk); i++) {
+        int64_t key = ray_read_sym(ray_data(qk), i, RAY_SYM, qk->attrs);
+        if (!q_registry_locked(key)) continue;
+        if (!nq || nq->type != RAY_DICT || ray_dict_probe_sym_borrowed(nq, key) != ray_dict_probe_sym_borrowed(q, key))
+            return 1;
+    }
+    return 0;
+}
+
+/* Judged by the TARGET after `\d` re-rooting — a root reserved word or a `.q` builtin entry, and `.q` itself by
+ * effect; a colon assignment's bare SPELLING is refused upstream in q_eval (owner ruling 2026-09-23). */
+static int env_locked(ray_t** home, const int64_t* segs, int k, ray_t* val) {
     if (home != &env_ns) return k == 1 && q_registry_locked(segs[0]);
-    return segs[0] == g_q_seg && q_registry_locked(k == 1 ? sym : segs[1]);
+    if (segs[0] != g_q_seg) return 0;
+    return k == 1 ? env_q_changes_builtin(val) : q_registry_locked(segs[1]);
 }
 
 /* the dict a name's segments are keyed under — a relative name re-rooted by `\d`, a new plain name into the shed */
@@ -270,7 +284,7 @@ static ray_err_t env_put(int64_t sym, ray_t* val, int boot_new, ray_t** disp) {
         size_t start = env_start(p, n);
         int k = env_segs(p, n, start, segs, ENV_SEG_MAX);
         ray_t** home = k > 0 ? env_home(p, start, segs, &k, boot_new) : NULL;
-        if (home && !env_locked(sym, home, segs, k)) e = env_store(home, segs, k, val, disp);
+        if (home && !env_locked(home, segs, k, val)) e = env_store(home, segs, k, val, disp);
     }
     ray_release(s);
     return e;
@@ -441,7 +455,7 @@ ray_err_t q_env_unbind(int64_t sym) {
         size_t start = env_start(p, n);
         int k = env_segs(p, n, start, segs, ENV_SEG_MAX);
         ray_t** home = k > 0 ? env_home(p, start, segs, &k, 0) : NULL;
-        if (home && env_locked(sym, home, segs, k)) e = RAY_ERR_DOMAIN;
+        if (home && env_locked(home, segs, k, NULL)) e = RAY_ERR_DOMAIN;
         else if (home) {
             ray_t* holder = *home;
             for (int i = 0; holder && i < k - 1; i++)
