@@ -13,7 +13,7 @@
 #include "qlang/io/q_provider.h" /* a provider pointer travels the same shape and rebinds */
 #include "qlang/io/q_kapi.h"    /* q_dl_loaded — a function a `2:` already resolved */
 #include "qlang/parse/q_parse.h"      /* q_parse — lambda decode (RUNTIME only) */
-#include "lang/eval.h"          /* ray_eval */
+#include "lang/eval.h"          /* ray_eval_remote_value_installed — the string-C3 dialect probe */
 #include "table/sym.h"          /* ray_sym_vec_cell */
 #include "mem/heap.h"           /* RAY_ATTR_HAS_NULLS */
 #include "store/serde.h"        /* fn-serde hook getters (serde mode ext 200) */
@@ -936,7 +936,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
             uint8_t ch = r_u8(c);
             /* legacy dialect (WIRE mode only — serde must preserve value
              * types): a pure-rayfall process keeps 1-char string atoms */
-            if (!c->serde && !ray_eval_remote_str_installed()) {
+            if (!c->serde && !ray_eval_remote_value_installed()) {
                 char cc = (char)ch;
                 return ray_str(&cc, 1);
             }
@@ -967,7 +967,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
          * no in-band null scan) — a true charv value (string-C3 1b) — EXCEPT
          * on the live WIRE into a pure-rayfall process (no q runtime), which
          * keeps its legacy string atoms; serde always preserves value types. */
-        if (t == RAY_CHARV && !c->serde && !ray_eval_remote_str_installed()) {
+        if (t == RAY_CHARV && !c->serde && !ray_eval_remote_value_installed()) {
             if (!r_need(c, 5)) return trunc_err("char vector header");
             (void)r_u8(c);
             int32_t count = r_i32(c);
