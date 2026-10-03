@@ -44,18 +44,10 @@
  *   payload    ONE q_wire object (src/qlang/q_wire.c, kb/serialization.md
  *              grammar).  Whole-payload consumption is enforced; trailing
  *              bytes are protocol corruption and close the connection.
- *   dispatch   STRING-FIRST (human ruling 2026-07-06): `.z.pg` /
- *              `.z.ps` hooks take precedence (they receive the
- *              decoded object); otherwise a string payload evaluates via
- *              ray_eval_remote_str (the q pipeline when the q runtime is
- *              up, rayfall in the bare engine binary); a general-list
- *              payload — the kdb `(func;args)` typed-apply form — is an
- *              explicit fast-follow answered with 'nyi.
- *              TODO(ipc-phase-c-followup): route (func;args) through
- *              value/apply — a SINGLE application of func to the already-
- *              evaluated args — NEVER through ray_eval (a value object is
- *              not a parse tree; they diverge for nested lists.  See
- *              ARCHITECTURE.md "eval vs value").
+ *   dispatch   `.z.pg` / `.z.ps` take precedence (they receive the
+ *              decoded object); otherwise ray_eval_remote_value answers as
+ *              handle 0 — `value` of the message, one application, never
+ *              ray_eval (rayfall source strings in the bare engine binary).
  *   auth/eval  matches kdb: an authenticated connection gets full eval;
  *              restriction only via the -u restricted flag, which still
  *              wraps every inbound eval.
@@ -605,7 +597,7 @@ static int hook_call_auth(ray_poll_t* poll, int64_t handle,
      * interned id `.z.u` answers with inside the hook, so a server's own
      * ``u~`bob`` holds.  The password stays a char vector (string-C3); a
      * pure-rayfall process keeps the legacy string atoms on both. */
-    int q_dialect = ray_eval_remote_str_installed();
+    int q_dialect = ray_eval_remote_value_installed();
     ray_t* u;
     if (q_dialect) {
         /* Interning HERE, past the no-hook exit, keeps conn_user_sym's rule
@@ -772,7 +764,7 @@ static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
         /* Dialect seam (string-C3): wire text decodes to a char vector; a
          * pure-rayfall process (no q runtime hook installed) still expects
          * the legacy string atom. */
-        if (msg->type == RAY_CHARV && !ray_eval_remote_str_installed()) {
+        if (msg->type == RAY_CHARV && !ray_eval_remote_value_installed()) {
             ray_t* s = ray_str((const char*)ray_data(msg), (size_t)msg->len);
             ray_release(msg);
             msg = s;
@@ -787,28 +779,9 @@ static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
             ray_error_free(result);
             result = NULL;
         }
-    } else if (msg->type == -RAY_STR || msg->type == RAY_CHARV ||
-               msg->type == -RAY_CHARV) {
-        /* q source text: a char vector/atom on the wire (kdb tag 10/-10), or
-         * a legacy string atom (string-C3 1b). */
-        const char* sp = msg->type == -RAY_STR  ? ray_str_ptr(msg)
-                       : msg->type == RAY_CHARV ? (const char*)ray_data(msg)
-                                                : (const char*)&msg->u8;
-        size_t      sn = msg->type == -RAY_STR  ? ray_str_len(msg)
-                       : msg->type == RAY_CHARV ? (size_t)msg->len : 1;
-        result = ray_eval_remote_str(sp, sn);
-        ray_release(msg);
-    } else if (msg->type == RAY_LIST) {
-        /* kdb (func; args…) value-apply request (ADR-0004): a SINGLE
-         * application of func to the already-evaluated args via the q value
-         * hook — NEVER ray_eval (a value object is not a parse tree; human
-         * ruling 2026-07-06).  Ownership: borrowed msg to the hook, owned
-         * result back, one ray_release(msg). */
-        result = ray_eval_remote_apply(msg);
-        ray_release(msg);
     } else {
+        result = ray_eval_remote_value(msg);   /* handle 0: `value` of the message, whatever its shape */
         ray_release(msg);
-        result = ray_error("nyi", "IPC request must be a q source string");
     }
 
     /* A lazy result is an internal deferred-DAG representation that cannot

@@ -86,10 +86,8 @@ void q_ctx_run_value_src(const char* s, size_t n, FILE* out, FILE* err);
  * abort the load.  An abort is reported here; the return is q_ctx_run_src's. */
 int q_ctx_run_console_src(const char* s, FILE* out, FILE* err);
 
-/* Install the two callbacks the IPC layer evaluates a request through: source
- * text (the seam above, but answering with a value instead of printing — hence
- * a shared pipeline, not a shared function) and the kdb `(func;args)`
- * value-apply, which is not source at all.  q_runtime owns the paired teardown. */
+/* Install the callback the IPC layer answers a request with no .z.pg/.z.ps through: `value` of the message, as
+ * handle 0 does, answering with a value instead of printing.  q_runtime owns the paired teardown. */
 void q_ctx_install_remote_hooks(void);
 
 /* Console teardown before exit.  The context knows only that SOMETHING may need

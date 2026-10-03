@@ -92,45 +92,31 @@ int  ray_eval_is_interrupted(void)    { return ray_interrupted(); }
 static ray_apply_hook_t g_apply_hook = NULL;
 void ray_eval_set_apply_hook(ray_apply_hook_t hook) { g_apply_hook = hook; }
 
-/* peachq remote-source string eval — see eval.h.  NULL = rayfall eval_str. */
-static ray_remote_str_fn_t g_remote_str_fn = NULL;
-void ray_eval_set_remote_str_fn(ray_remote_str_fn_t fn) { g_remote_str_fn = fn; }
-
-/* peachq remote (func;args) value-apply — see eval.h.  NULL = no q runtime
- * (pure rayfall), which has no value-apply IPC dialect, so a list request
- * safe-errors 'nyi rather than being coerced into an apply. */
-static ray_remote_apply_fn_t g_remote_apply_fn = NULL;
-void ray_eval_set_remote_apply_fn(ray_remote_apply_fn_t fn) { g_remote_apply_fn = fn; }
+/* peachq remote request `value` — see eval.h.  NULL = no q runtime. */
+static ray_remote_value_fn_t g_remote_value_fn = NULL;
+void ray_eval_set_remote_value_fn(ray_remote_value_fn_t fn) { g_remote_value_fn = fn; }
 
 /* peachq eval-time computed-name resolver (`.z.*`) — see eval.h.  Consulted at
  * every name-LOAD miss, before raising `'name`.  NULL = historic behaviour. */
 static ray_name_hook_t g_name_hook = NULL;
 void ray_eval_set_name_hook(ray_name_hook_t hook) { g_name_hook = hook; }
 
-/* string-C3 dialect probe: true iff the q runtime installed its remote-eval
- * hook — IPC hands hook text as char vectors then, legacy strings otherwise. */
-bool ray_eval_remote_str_installed(void) { return g_remote_str_fn != NULL; }
+/* string-C3 dialect probe: true iff the q runtime installed its remote hook —
+ * IPC hands hook text as char vectors then, legacy strings otherwise. */
+bool ray_eval_remote_value_installed(void) { return g_remote_value_fn != NULL; }
 
-ray_t* ray_eval_remote_str(const char* src, size_t len) {
-    if (!src || len == 0) return RAY_NULL_OBJ;
-    if (g_remote_str_fn) return g_remote_str_fn(src, len);
+ray_t* ray_eval_remote_value(ray_t* msg) {
+    if (g_remote_value_fn) return g_remote_value_fn(msg);
+    if (msg->type != -RAY_STR) return ray_error("nyi", "IPC request must be a q source string");
+    size_t len = ray_str_len(msg);
+    if (len == 0) return RAY_NULL_OBJ;
     char* tmp = (char*)ray_sys_alloc(len + 1);
     if (!tmp) return ray_error("oom", "remote eval: out of memory");
-    memcpy(tmp, src, len);
+    memcpy(tmp, ray_str_ptr(msg), len);
     tmp[len] = '\0';
     ray_t* r = ray_eval_str(tmp);
     ray_sys_free(tmp);
     return r;
-}
-
-ray_t* ray_eval_remote_apply(ray_t* list) {
-    if (g_remote_apply_fn) return g_remote_apply_fn(list);
-    /* No q runtime installed (pure rayfall): the engine binary has no
-     * value-apply IPC dialect, and a generic list is not a rayfall apply
-     * shape.  Safe-error rather than guess — never a wrong answer, never a
-     * crash (ADR-0004: a value object is not a parse tree, so we do NOT
-     * ray_eval it either). */
-    return ray_error("nyi", "IPC (func;args) value-apply requires the q runtime");
 }
 
 ray_t* ray_eval_get_nfo(void) { return __VM ? __VM->nfo : NULL; }

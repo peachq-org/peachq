@@ -212,30 +212,13 @@ void ray_lang_print(FILE* fp, ray_t* val);
 typedef ray_t* (*ray_apply_hook_t)(ray_t* head, ray_t** args, int64_t n);
 void ray_eval_set_apply_hook(ray_apply_hook_t hook);
 
-/* peachq: remote-source string evaluation (IPC request payloads,
- * replay).  A language layer may install a hook that owns the parse+eval
- * of remote SOURCE STRINGS (peachq installs q_parse -> q_lower -> ray_eval
- * at q boot); without a hook the engine's own ray_eval_str runs (rayfall —
- * the engine binary's IPC dialect).  The hook receives the bytes and
- * length (NOT NUL-terminated) and returns an OWNED value. */
-typedef ray_t* (*ray_remote_str_fn_t)(const char* src, size_t len);
-void   ray_eval_set_remote_str_fn(ray_remote_str_fn_t fn);
-bool   ray_eval_remote_str_installed(void);   /* q runtime present? (IPC text dialect) */
-ray_t* ray_eval_remote_str(const char* src, size_t len);
-
-/* peachq: remote-source (func;args) VALUE-APPLY evaluation (IPC request
- * payloads).  The kdb "value/apply" wire shape is a general list whose head is
- * the function (symbol / string source / value / lambda carrier) and whose tail
- * are ALREADY-EVALUATED data args.  A language layer installs a hook that does a
- * SINGLE application of the head to the args — NEVER a recursive ray_eval (a
- * value object is not a parse tree; ARCHITECTURE.md "eval vs value").  peachq
- * installs a thin wrapper over the single-home q `value` at boot.  Without a
- * hook (pure rayfall — the engine binary has no value-apply IPC dialect) the
- * request SAFE-ERRORS `'nyi` rather than guessing an apply.  The hook receives
- * the list BORROWED (the caller releases it) and returns an OWNED value. */
-typedef ray_t* (*ray_remote_apply_fn_t)(ray_t* list);
-void   ray_eval_set_remote_apply_fn(ray_remote_apply_fn_t fn);
-ray_t* ray_eval_remote_apply(ray_t* list);
+/* peachq: an IPC request with no .z.pg/.z.ps.  The q runtime installs a hook answering `value` of the message
+ * (BORROWED in, OWNED out); without one a source string runs through ray_eval_str (rayfall, the engine binary's
+ * IPC dialect) and any other message is 'nyi. */
+typedef ray_t* (*ray_remote_value_fn_t)(ray_t* msg);
+void   ray_eval_set_remote_value_fn(ray_remote_value_fn_t fn);
+bool   ray_eval_remote_value_installed(void);   /* q runtime present? (IPC text dialect) */
+ray_t* ray_eval_remote_value(ray_t* msg);
 
 /* peachq: eval-time computed-name resolver (the `.z.*` mechanism).  Called at
  * every name-LOAD site (tree-walk atom deref + VM op_resolve/op_resolve_w)

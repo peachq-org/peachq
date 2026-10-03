@@ -65,6 +65,7 @@ uint16_t q_sys_listen(const q_sys_listen_spec_t* spec);
  * so a startup-script `\p 0` that closes the `-p` listener no longer strands
  * the process in a listener-less server loop. */
 uint16_t q_sys_listen_port(void);
+uint32_t q_sys_listen_ip(void);     /* its bound IPv4 address (network order; 0 = every interface) */
 
 /* Execute a `\`-command line: OWNED value (NULL = silent) or OWNED error.
  * ONE setting for every door (owner ruling 2026-09-04: `\X` IS `system "X"`) —
