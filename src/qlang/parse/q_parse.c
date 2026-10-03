@@ -23,21 +23,18 @@
 #include "qlang/parse/q_parse.h"
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"
-#include "qlang/parse/q_tok.h"    /* q_tok_temporal, q_tok_el — literal magnitudes */
+#include "qlang/parse/q_tok.h"    /* q_tok_literal, q_tok_byte_lit_starts — the literal scanner */
 #include "qlang/q_registry.h" /* q_registry_lookup_name, q_registry_is_infix, Q_DYADIC */
 #include "qlang/q_ops.h"      /* q_ops_find — the static lexical manifest */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_is_fn, q_eval_apply_carrier_kind */
 #include "qlang/eval/q_dbg.h"  /* q_dbg_statement_origin — the lambda's file + line */
 #include "table/sym.h"       /* ray_sym_vec_cell — qSQL dict-key/col names */
-#include "core/numparse.h"   /* ray_parse_i64, ray_parse_f64 */
-#include <assert.h>
 #include <ctype.h>       /* isalpha — the `<letter>)` intake prefix */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <limits.h>
-#include <math.h>
 #include <setjmp.h>
 #include "qlang/parse/q_parse_internal.h"
 
@@ -123,8 +120,9 @@ ray_t *q_embed(ray_t *sym, q_valence_t val) {
     if (!s) return sym;
     const char *nm = ray_str_ptr(s);
     size_t nl = ray_str_len(s);
-    /* `:`/`::` heads are assignment/return SYNTAX (the walker dispatches on
-     * the colon sym); the `:` registry row serves operand position only */
+    /* `::` IS the identity value wherever it lands (a tree carries values, never a `::` symbol: the global-assign
+     * head, an empty call, a bare term); `:` stays the assignment/return SYNTAX sym the walker dispatches on */
+    if (nl == 2 && nm[0] == ':' && nm[1] == ':') { ray_release(s); ray_release(sym); return RAY_NULL_OBJ; }
     if (nm[0] == ':') { ray_release(s); return sym; }
     /* the marker IS the valence, so it wins over whatever the SITE asked for —
      * `(*:)`, `*:[x]` and `@[|:;x]` all reach here as operands, asking dyadic */
@@ -145,23 +143,9 @@ ray_t *q_embed(ray_t *sym, q_valence_t val) {
  * names, which must stay env-resolved name-refs. */
 static int sym_is_glyph(ray_t *sym);   /* defined after VERB_CHARS */
 
-/* generic null :: — the elided-argument hole */
-ray_t *q_null(void) {
-    return ray_sym(ray_sym_intern_runtime("::", 2));
-}
-
-/* An ELIDED bracket-call slot `f[a;;b]` — a projection hole.  Same `::`
- * spelling (so every existing hole check still matches), plus Q_ATTR_HOLE so
- * the @/. lowering can tell it from an explicit `::` value. */
-static ray_t *hole(void) {
-    ray_t *x = q_null();
-    if (x && !RAY_IS_ERR(x)) x->attrs |= Q_ATTR_HOLE;
-    return x;
-}
-
 /* True iff v is a NAME-REF sym (unquoted -RAY_SYM) whose spelling is exactly s
  * — the one home for the "read a sym back and compare it" walk the tree checks
- * repeat (`;` statement heads, `:` alias heads, the `::` value, the join `,`). */
+ * repeat (`;` statement heads, `:` alias heads, the `::` token, the join `,`). */
 static int sym_name_is(const ray_t *v, const char *s) {
     if (!v || v->type != -RAY_SYM || (v->attrs & Q_ATTR_QUOTED)) return 0;
     ray_t *str = ray_sym_str(v->i64);
@@ -215,22 +199,15 @@ ray_t *q_symvec_append(ray_t *vec, const char *s, int len) {
 
 /* Build a ray list from n owned children, releasing each after append
  * (append retains).  A C-NULL child (an empty operand, e.g. the value of
- * `()`, or a missing element) is normalised to q_null() so it never reaches
- * ray_eval as a bare C NULL — ray_eval asserts value-nulls are RAY_NULL_OBJ,
- * not C NULL.  The top-level program list is built separately in parse_E,
- * which DOES preserve C NULL (an empty statement / whole-line comment is a
- * no-op that must yield no output, not `::`). */
+ * `()`, or a missing element) is normalised to the generic null so it never
+ * reaches the walker as a bare C NULL.  The top-level program list is built
+ * separately in parse_E, which DOES preserve C NULL (an empty statement /
+ * whole-line comment is a no-op that must yield no output, not `::`). */
 static ray_t *q_list(ray_t **xs, int n) {
     ray_t *l = ray_list_new(n > 0 ? n : 1);
     for (int i = 0; i < n; i++) {
-        if (xs[i]) {
-            l = ray_list_append(l, xs[i]);
-            ray_release(xs[i]);
-        } else {
-            ray_t *nul = q_null();
-            l = ray_list_append(l, nul);
-            ray_release(nul);
-        }
+        l = ray_list_append(l, xs[i] ? xs[i] : RAY_NULL_OBJ);
+        if (xs[i]) ray_release(xs[i]);
     }
     return l;
 }
@@ -238,17 +215,13 @@ static ray_t *q_list(ray_t **xs, int n) {
 /* (head; e0; e1; …) — a fresh list of `head` followed by every element of the
  * BORROWED list e.  `nul` fills an empty slot (NULL: keep the C NULL, which
  * only the top-level statement list is allowed to carry). */
-static ray_t *cons_head(ray_t *head, ray_t *e, ray_t *(*nul)(void)) {
+static ray_t *cons_head(ray_t *head, ray_t *e, ray_t *nul) {
     int64_t n = q_count(e);
     ray_t **es = (ray_t **)ray_data(e);
     ray_t *w = ray_list_new(n + 1);
     w = ray_list_append(w, head);
-    for (int64_t i = 0; i < n; i++) {
-        if (es[i] || !nul) { w = ray_list_append(w, es[i]); continue; }
-        ray_t *x = nul();
-        w = ray_list_append(w, x);
-        ray_release(x);
-    }
+    for (int64_t i = 0; i < n; i++)
+        w = ray_list_append(w, es[i] ? es[i] : nul);
     return w;
 }
 
@@ -900,8 +873,7 @@ static ray_t *table_lit_dict(ray_t *defs) {
             nm = q_name_dedup(nm < 0 ? id_x : nm, (int64_t *)ray_data(keys), i, 0);
         }
         keys = ray_vec_append(keys, &nm);
-        if (ex) { vals = ray_list_append(vals, ex); }
-        else    { ray_t *nul = q_null(); vals = ray_list_append(vals, nul); ray_release(nul); }
+        vals = ray_list_append(vals, ex ? ex : RAY_NULL_OBJ);
     }
     /* a dup column name in the LITERAL dies at parse like a select's
      * (qsql/select_fixes.qcmd pins `([] a:1 2;a:3 4)` -> 'dup); the same
@@ -1007,7 +979,7 @@ static P parse_base(Parser *p) {
         if (q_count(e) > 1) {
             ray_t **slots = (ray_t **)ray_data(e);
             for (int64_t i = 0; i < q_count(e); i++) {
-                if (!slots[i]) slots[i] = hole();
+                if (!slots[i]) slots[i] = Q_HOLE_OBJ;
             }
         }
         if (q_count(e) == 1) {
@@ -1019,15 +991,6 @@ static P parse_base(Parser *p) {
              * zero-element list, yielding the empty list).  `(1)` is grouping
              * -> the lone element; only `()` reaches here with a NULL slot. */
             if (only) {
-                /* A parenthesized lone `(::)` is the generic-null VALUE
-                 * itself (kdb null-test idiom `x~(::)`), never the `::`
-                 * name-ref whose spelling downstream elision checks
-                 * (ql_is_hole) would turn into a projection hole.  Emit the
-                 * self-evaluating null singleton; q_fmt prints it `::`. */
-                if (sym_name_is(only, "::")) {
-                    ray_release(e);
-                    return (P){ R_NOUN, RAY_NULL_OBJ, 0 };
-                }
                 ray_retain(only);
                 ray_release(e);
                 return (P){ R_NOUN, only, 0 };
@@ -1171,10 +1134,10 @@ static P parse_base(Parser *p) {
         }
         int64_t bn = q_count(e);
         ray_t **bs = (ray_t **)ray_data(e);
-        /* empty statements (`{2*x;}`) become `::` name-refs: the carrier
+        /* empty statements (`{2*x;}`) become the generic null: the carrier
          * retains every body expr, so a C NULL here would be fatal */
         for (int64_t i = 0; i < bn; i++)
-            if (!bs[i]) bs[i] = q_null();
+            if (!bs[i]) bs[i] = RAY_NULL_OBJ;
         ray_t *fn = q_eval_apply_lambda_new(params, bs, bn, src, ptypes);
         /* ref/value.md `f`/`l`: the lambda's origin is where it is PARSED — the loading script's
          * file, and the line its `{` sits on (a multi-line statement's inner lambda has its own) */
@@ -1205,9 +1168,7 @@ static P parse_base(Parser *p) {
             expect(p, T_RBRACK, "expected ']' in compose '[...]'");
             ray_t *cv = q_registry_compose_value();
             if (!cv) q_die("compose: registry not initialized");
-            /* `'[;]` elides to project the COMPOSE value itself — the same
-             * projection hole a bracket call marks, not a `::` value */
-            ray_t *w = cons_head(cv, args, hole);
+            ray_t *w = cons_head(cv, args, Q_HOLE_OBJ);   /* `'[;]` projects the compose value itself */
             ray_release(args);
             return (P){ R_NOUN, w, 0 };
         }
@@ -1515,10 +1476,8 @@ static P parse_term(Parser *p, QCtx ctx) {
             w = ray_list_append(w, t.v);
             ray_release(t.v);
             for (int64_t i = 0; i < en; i++) {
-                if (es[i]) w = ray_list_append(w, es[i]);
-                /* an elided bracket slot is a projection hole (Q_ATTR_HOLE),
-                 * distinct from an explicit `::` value in the same position */
-                else       { ray_t *nul = hole(); w = ray_list_append(w, nul); ray_release(nul); }
+                /* an empty call `f[]` passes identity (ref/identity.md); an elided `;` slot is the projection hole */
+                w = ray_list_append(w, es[i] ? es[i] : en == 1 ? RAY_NULL_OBJ : Q_HOLE_OBJ);
             }
             ray_release(e);
             t.v = w; t.role = R_NOUN;
@@ -1571,7 +1530,7 @@ static P parse_e_body(Parser *p, QCtx ctx) {
             nk != T_SEMI && nk != T_RBRACK && nk != T_RPAREN && nk != T_RBRACE) {
             adv(p);
             P e = parse_e(p, ctx);
-            ray_t *rhs = (e.role != R_NONE && e.v) ? e.v : q_null();
+            ray_t *rhs = (e.role != R_NONE && e.v) ? e.v : RAY_NULL_OBJ;
             ray_t *xs[2] = { ray_char(':'), rhs };
             return (P){ R_NOUN, q_list(xs, 2), 0 };
         }
@@ -1589,7 +1548,7 @@ static P parse_e_body(Parser *p, QCtx ctx) {
             nk != T_RBRACK && nk != T_RBRACE && nk != T_EOF) {
             adv(p);
             P e = parse_e(p, ctx);
-            ray_t *rhs = (e.role != R_NONE && e.v) ? e.v : q_null();
+            ray_t *rhs = (e.role != R_NONE && e.v) ? e.v : RAY_NULL_OBJ;
             ray_t *xs[2] = { ray_char('\''), rhs };
             return (P){ R_NOUN, q_list(xs, 2), 0 };
         }
@@ -1644,13 +1603,13 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
     P u = parse_term(p, ctx);
 
     if (u.role == R_NONE) {
-        /* a LONE glyph is the bare-verb VALUE: the dyadic row, a suffixed-colon marker (`#:`) selecting the monad, bare
-         * `:`/`::` staying syntax syms (q_embed's guard).  Every expression end — `(+)`, slots, statements, lambda
+        /* a LONE glyph is the bare-verb VALUE: the dyadic row, a suffixed-colon marker (`#:`) selecting the monad, a
+         * bare `:` staying the syntax sym and `::` the identity value (q_embed's guard).  Every expression end — `(+)`, slots, statements, lambda
          * bodies, an assignment rhs — arrives here, so this is the ONE site beside the bracket head and adverb root.
          * Written as a verb, the value is a train tail (`0|+`, `-2_(1_)\`); a keyword or lambda there is a noun. */
         if (t.role == R_VERB && sym_is_glyph(t.v)) {
             ray_t *v = q_embed(t.v, Q_DYADIC);
-            return (P){ R_NOUN, v, v->type != -RAY_SYM };
+            return (P){ R_NOUN, v, v->type != -RAY_SYM && v != RAY_NULL_OBJ };
         }
         if (t.role == R_VERB && t.v && t.v->type == RAY_LIST) t.train = 1;
         return t;
@@ -1686,12 +1645,11 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
             q_die("assignment needs a name or an index form on the left");
         }
         P e = parse_e(p, ctx);
-        /* postfix form (`1+`, `-15!`): the missing rhs is a projection HOLE,
-         * the same Q_ATTR_HOLE marker bracket elisions carry — an explicit
-         * `::` operand stays plain and evaluates to the generic-null VALUE.
+        /* postfix form (`1+`, `-15!`): the missing rhs is the projection HOLE, as a bracket elision's is — an
+         * explicit `::` operand is the identity VALUE.
          * A glued `f::` with nothing to assign is the identity closing a train
          * (funq/ml.q `sum abs::`): the `f@` node, so the walker composes onto it. */
-        ray_t *rhs = e.v ? e.v : hole();
+        ray_t *rhs = e.v ? e.v : Q_HOLE_OBJ;
         if (!e.v && sym_name_is(u.v, "::")) {
             ray_release(u.v);
             u.v = q_verb('@');
@@ -1721,9 +1679,8 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
                     if (e.v) ray_release(e.v);
                     die_signal(QE_NAME, &g, 1);
                 }
-                ray_t *m = q_verb_name("::", 2);
                 ray_release(t.v);
-                t.v = m;
+                t.v = RAY_NULL_OBJ;
             }
             ray_release(s);
         }
@@ -1846,7 +1803,7 @@ static int qsql_glyph_names_right(const q_op_t *row) {
  * back as x).  The virtual `i` never names a result (qsql.md:234). */
 static int64_t qsql_derive_alias(ray_t *expr) {
     if (!expr) return -1;
-    if (expr->type == -RAY_SYM && !(expr->attrs & Q_ATTR_HOLE)) {
+    if (expr->type == -RAY_SYM) {
         int64_t id = expr->i64;
         ray_t *s = ray_sym_str(id);
         if (!s) return id;
@@ -1940,7 +1897,7 @@ static ray_t *qsql_convert_expr(ray_t *x);
 static ray_t *qsql_convert_head(ray_t *h) {
     if (h && h->type == RAY_LIST) return qsql_convert_expr(h);
     if (!h || h->type != -RAY_SYM ||
-        (h->attrs & (Q_ATTR_QUOTED | Q_ATTR_HOLE))) {
+        (h->attrs & Q_ATTR_QUOTED)) {
         if (h) ray_retain(h);
         return h;                                  /* fn value / literal: as-is */
     }
@@ -1961,13 +1918,10 @@ static ray_t *qsql_convert_head(ray_t *h) {
  *   - an application `(head; args…)` -> converted head + column-ised args.
  * Returns an OWNED tree; does NOT consume x. */
 static ray_t *qsql_convert_expr(ray_t *x) {
-    if (!x) return q_null();
+    if (!x) return RAY_NULL_OBJ;
     if (x->type == -RAY_SYM) {
         /* `sym constants arrive pre-wrapped (,`sym) from noun_tree_value and
-         * pass through the tail below; a sym ATOM here is always a name-ref.
-         * EXCEPT an elision hole, whose meaning rides Q_ATTR_HOLE, not its
-         * spelling: column-ising it turns `(+[;10]) c` into an application. */
-        if (x->attrs & Q_ATTR_HOLE) { ray_retain(x); return x; }
+         * pass through the tail below; a sym ATOM here is always a name-ref. */
         ray_t *ev = NULL;                          /* standalone name-ref */
         ray_t *s = ray_sym_str(x->i64);
         if (s) { ev = q_registry_lookup_name(ray_str_ptr(s), ray_str_len(s),
@@ -2234,10 +2188,10 @@ static ray_t *parse_E(Parser *p, QCtx ctx) {
      * frame is charged once per bracket level, so a 32KB local would exhaust
      * the stack long before Q_PARSE_MAX_DEPTH.  ray_list_append stores a C
      * NULL without retaining, so the list PRESERVES the C-NULL slots (unlike
-     * q_list, which normalises them to q_null()).  An empty statement — a
+     * q_list, which normalises them to the generic null).  An empty statement — a
      * whole-line comment, the `;;` between two expressions — is such a NULL;
      * seq_of and the evaluator read it as a no-op that yields no output, where
-     * q_null() would print `::`. */
+     * the generic null would print `::`. */
     if (++p->depth > Q_PARSE_MAX_DEPTH) die_err(QE_LIMIT);
     /* The FIRST expression is parsed before the list exists, so the die that
      * ends a run of nested brackets — every level of it dies here, in its own
@@ -2471,9 +2425,9 @@ void q_parse_open_feed(q_parse_open_t *st, const char *piece) {
     free(quoted);
 }
 
-/* q_parse_is_assign — see q_parse.h.  Head is the name-ref `:`/`::` (or the
- * modified-assign `<op>:`) with a name/indexed-name target; a `;` statement
- * sequence (char head) asks its last statement. */
+/* q_parse_is_assign — see q_parse.h.  Head is the identity value (`a::1`) or
+ * the name-ref `:` / modified-assign `<op>:`, with a name/indexed-name target;
+ * a `;` statement sequence (char head) asks its last statement. */
 int q_parse_is_assign(const ray_t *cast) {
     ray_t *ast = (ray_t *)cast;   /* read-only walk; ray_data lacks a const view */
     if (!ast || ast->type != RAY_LIST || q_count(ast) < 1) return 0;
@@ -2483,16 +2437,17 @@ int q_parse_is_assign(const ray_t *cast) {
         int64_t n = q_count(ast);
         return n >= 2 ? q_parse_is_assign(e[n - 1]) : 0;
     }
-    if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return 0;
-    ray_t *s = ray_sym_str(h->i64);
-    if (!s) return 0;
-    const char *nm = ray_str_ptr(s);
-    size_t l = ray_str_len(s);
-    int is_colon = (l == 1 && nm[0] == ':') ||
-                   (l == 2 && nm[0] == ':' && nm[1] == ':');
-    int is_modasg = (l >= 2 && nm[l - 1] == ':' && nm[0] != ':');
-    ray_release(s);
-    if (!(is_colon || is_modasg) || q_count(ast) != 3) return 0;
+    int asg = RAY_IS_NULL(h);
+    if (!asg) {
+        if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return 0;
+        ray_t *s = ray_sym_str(h->i64);
+        if (!s) return 0;
+        const char *nm = ray_str_ptr(s);
+        size_t l = ray_str_len(s);
+        asg = (l == 1 && nm[0] == ':') || (l >= 2 && nm[l - 1] == ':' && nm[0] != ':');
+        ray_release(s);
+    }
+    if (!asg || q_count(ast) != 3) return 0;
     ray_t *t = e[1];
     if (t && t->type == -RAY_SYM && !(t->attrs & Q_ATTR_QUOTED)) return 1;
     /* indexed assignment `name[i;…]:v` is silent too — kdb console */
