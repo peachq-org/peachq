@@ -677,16 +677,16 @@ ray_t* ray_sys_args_fn(ray_t** args, int64_t n) {
  * IPC builtins
  * ══════════════════════════════════════════ */
 
-/* (hopen "host:port[:user:password]" [timeout-ms]) → i64 handle.
+/* (hopen "host:port[:user[:password]]" [timeout-ms]) → i64 handle.
  * The optional second argument bounds the TCP connect and handshake in
  * milliseconds; omitted leaves the default budget. */
 ray_t* ray_hopen_fn(ray_t** args, int64_t n) {
     if (n < 1 || n > 2)
-        return ray_error("rank", ".ipc.open expects 1 or 2 arguments: \"host:port[:user:password]\" [timeout-ms]");
+        return ray_error("rank", ".ipc.open expects 1 or 2 arguments: \"host:port[:user[:password]]\" [timeout-ms]");
 
     ray_t* x = args[0];
     if (!ray_is_atom(x) || x->type != -RAY_STR)
-        return ray_error("type", ".ipc.open expects a string \"host:port[:user:password]\", got %s", ray_type_name(x->type));
+        return ray_error("type", ".ipc.open expects a string \"host:port[:user[:password]]\", got %s", ray_type_name(x->type));
 
     /* Optional connect timeout in milliseconds (0 = use default). */
     int timeout_ms = 0;
@@ -715,7 +715,7 @@ ray_t* ray_hopen_fn(ray_t** args, int64_t n) {
             start = &s[i + 1];
         }
     }
-    if (n_parts < 2) return ray_error("domain", ".ipc.open expects \"host:port[:user:password]\", missing port");
+    if (n_parts < 2) return ray_error("domain", ".ipc.open expects \"host:port[:user[:password]]\", missing port");
 
     char host[256];
     if (part_lens[0] >= sizeof(host)) return ray_error("domain", ".ipc.open host too long, got %lld bytes", (long long)part_lens[0]);
@@ -731,19 +731,17 @@ ray_t* ray_hopen_fn(ray_t** args, int64_t n) {
 
     char user[128] = "";
     char password[128] = "";
-    if (n_parts >= 4) {
-        if (part_lens[2] < sizeof(user)) {
-            memcpy(user, parts[2], part_lens[2]);
-            user[part_lens[2]] = '\0';
-        }
-        if (part_lens[3] < sizeof(password)) {
-            memcpy(password, parts[3], part_lens[3]);
-            password[part_lens[3]] = '\0';
-        }
+    if (n_parts >= 3 && part_lens[2] < sizeof(user)) {
+        memcpy(user, parts[2], part_lens[2]);
+        user[part_lens[2]] = '\0';
+    }
+    if (n_parts >= 4 && part_lens[3] < sizeof(password)) {
+        memcpy(password, parts[3], part_lens[3]);
+        password[part_lens[3]] = '\0';
     }
 
     const char* pw_ptr = (n_parts >= 4) ? password : NULL;
-    const char* us_ptr = (n_parts >= 4) ? user : NULL;
+    const char* us_ptr = (n_parts >= 3) ? user : NULL;
 
     int64_t h = ray_ipc_connect(host, (uint16_t)port, us_ptr, pw_ptr, timeout_ms);
     if (h == -2) return ray_error("access", "server requires authentication");
