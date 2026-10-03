@@ -1075,19 +1075,15 @@ int64_t q_join_gen_len(ray_t* x) {
     return x && x->type != RAY_DICT ? q_count(x) : -1;
 }
 
-/* A table demoted to what basics/glossary.md:769 calls it — the general list of its row dicts.  Rows come from
- * q_table_row_at, never base `at`, which is enum-blind and drops an enum column's domain. */
-static ray_t* qj_table_as_rows(ray_t* x) {
-    int64_t n = q_count(x);
-    ray_t* out = ray_list_new(n > 0 ? n : 1);
-    if (RAY_IS_ERR(out)) return out;
-    for (int64_t i = 0; i < n; i++) {
-        ray_t* row = q_table_row_at(x, i);
-        if (!row || RAY_IS_ERR(row)) { ray_release(out); return row ? row : q_err(QE_OOM); }
-        out = ray_list_append(out, row);
-        ray_release(row);
-        if (RAY_IS_ERR(out)) return out;
-    }
+static ray_t* join_core(ray_t* x, ray_t* y, int exclusive, int append);
+
+/* `x,y` with the plain table on the left (`table_left`) or right read as what basics/glossary.md:769 calls it, the
+ * list of its row dicts — q_list_uncollapse reads them off q_table_row_at, which keeps an enum column's domain. */
+static ray_t* join_as_rows(ray_t* x, ray_t* y, int table_left) {
+    ray_t* rows = q_list_uncollapse(table_left ? x : y);
+    if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_OOM);
+    ray_t* out = table_left ? join_core(rows, y, 0, 0) : join_core(x, rows, 0, 0);
+    ray_release(rows);
     return out;
 }
 
@@ -1099,8 +1095,10 @@ static ray_t* qj_table_as_rows(ray_t* x) {
  * `kt1,kt3`); dict,dict is the one dict write (q_index_dict_join, Join's
  * boxing law) on a copy; and a base-concat 'type on list-joinable operands
  * falls back to a GENERIC boxed list (kdb `,` never type-errors on a list
- * join — ref/join.md `1 2,"a"`).  Every other operand pair delegates to base
- * concat (register_binary("concat") == ray_concat_fn) byte-identically.
+ * join — ref/join.md `1 2,"a"`); a plain table beside a non-row payload or
+ * a non-dict list joins as its row dicts (join_as_rows).  Every other operand
+ * pair delegates to base concat (register_binary("concat") == ray_concat_fn)
+ * byte-identically.
  * `exclusive` is q_join_amend's word (below) that x may grow in place, `append` its word that this is `,:`. */
 static ray_t* join_core(ray_t* x, ray_t* y, int exclusive, int append) {
     /* `()` is Join's IDENTITY (the seed the `,` accumulator starts from,
@@ -1126,12 +1124,10 @@ static ray_t* join_core(ray_t* x, ray_t* y, int exclusive, int append) {
             q_err_drop();                                 /* the rejection is ours to discard, payload and block */
             ray_error_free(r);
         }
-        ray_t* rows = qj_table_as_rows(x);
-        if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_OOM);
-        ray_t* out = join_core(rows, y, 0, 0);
-        ray_release(rows);
-        return out;
+        return join_as_rows(x, y, 1);
     }
+    if (q_type_is_table(y) && x && !q_type_is_table(x) && !q_type_is_dict(x))
+        return join_as_rows(x, y, 0);                 /* the same reading on the right: `(1;2),([]a:1 2)` is 4 items */
     if ((q_type_is_table(x) || q_type_is_keyed(x)) && y)
         return q_join_table_upsert(x, y, exclusive);
     /* A bare dict joins ONLY with a dict (ref/join.md: `10,d` -> 'type; base
@@ -1160,8 +1156,8 @@ static ray_t* join_core(ray_t* x, ray_t* y, int exclusive, int append) {
     /* boxed-list fallback (ref/join.md:33 "The result is a vector if both
      * arguments are vectors or atoms of the same type; otherwise a mixed
      * list").  Only 'type boxes — an enum-domain 'cast stays an error.  `,:`
-     * Append is type-strict instead: q_join_amend (below) refuses before it
-     * gets here. */
+     * Append onto a typed vector is type-strict instead: q_join_amend (below)
+     * refuses before it gets here. */
     int64_t nx = q_join_gen_len(x), ny = q_join_gen_len(y);
     const char* cls = r ? q_err_class(r) : NULL;  /* base errors carry no q_err stamp */
     if (nx < 0 || ny < 0 || !cls || strcmp(cls, "type") ||
