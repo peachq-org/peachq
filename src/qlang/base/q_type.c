@@ -193,6 +193,12 @@ int8_t q_type_common(int8_t a, int8_t b) {
     return g_common[a][b];
 }
 
+int8_t q_type_cmp_as(int8_t a, int8_t b) {
+    int dated = a == RAY_TIMESTAMP || a == RAY_DATETIME;
+    int clock = b == RAY_MINUTE || b == RAY_SECOND || b == RAY_TIME || b == RAY_TIMESPAN;
+    return dated && clock ? b : 0;
+}
+
 /* The empty typed vector of tag (sym vectors need their width ctor). */
 ray_t* q_type_empty(int8_t tag) {
     return tag == RAY_SYM ? ray_sym_vec_new(RAY_SYM_W64, 0)

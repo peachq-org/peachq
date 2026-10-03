@@ -53,6 +53,9 @@ int8_t q_type_of_char(char c);
  * which every caller must reject.  O(1); q_type_init must have run. */
 int8_t q_type_common(int8_t a, int8_t b);
 
+/* The tag `a` is cast to before it compares with `b`, 0 = as it stands (basics/comparison.md:78-87,132). */
+int8_t q_type_cmp_as(int8_t a, int8_t b);
+
 /* Bakes the published matrix into its tag-indexed form.  Idempotent, depends on
  * nothing but compile-time constants; called from q_registry_init so it is done
  * before any verb can run. */

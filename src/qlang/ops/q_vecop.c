@@ -397,10 +397,10 @@ ray_t* q_vecop_binary(ray_t* (*f)(ray_t*, ray_t*), ray_t* x, ray_t* y) {
     if (is_arith(op)) return arith_binary(op, x, y, xt, yt, xv, yv, n);
     if (!lane_tag(xt) || !lane_tag(yt)) return NULL;
     /* Across a type difference the lanes take the plain numerics only.  A
-     * cross-type temporal pair is the narrowing matrix (basics/comparison.md:76-95),
-     * which neither this file nor the kernel implements yet (D0903a/D726b); a char
-     * beside a byte or bool puts ONE in-band null (the blank) on a lane whose
-     * other side has none. */
+     * cross-type temporal pair keeps the kernel's own reading (the pairs
+     * q_type_cmp_as narrows arrive here already one type); a char beside a
+     * byte or bool puts ONE in-band null (the blank) on a lane whose other side
+     * has none. */
     if (xt != yt && !(q_type_is_num_tag(xt) && q_type_is_num_tag(yt))) return NULL;
 
     int8_t rt;
@@ -441,6 +441,8 @@ ray_t* q_vecop_binary(ray_t* (*f)(ray_t*, ray_t*), ray_t* x, ray_t* y) {
     free(yb.own);
     return out;
 }
+
+int q_vecop_is_compare(ray_t* (*f)(ray_t*, ray_t*)) { return answers_bool(op_of(f)); }
 
 /* ===== the monadic seam: `null x` ======================================== */
 

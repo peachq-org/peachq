@@ -101,10 +101,10 @@ static inline int int_cmp_lane(ray_t* x) {
 #define INT_CMP_LANE(a, b, op) \
     if (int_cmp_lane(a) && int_cmp_lane(b)) return make_bool(as_i64(a) op as_i64(b) ? 1 : 0)
 
-/* Temporals of DIFFERENT type only: the published law is a narrowing matrix
- * (basics/comparison.md:76-95), this widens — a registered gap (D0903a/D726b).
- * Same-type pairs never reach here: they are the payload compare above, which
- * a common unit would overflow past year 2292 (86400e9 ns/day exceeds i64). */
+/* Temporals of DIFFERENT type, widened; q narrows a dated one meeting a time of
+ * day first (qlang q_type_cmp_as), save `in` (D726b).  Same-type pairs are the
+ * payload compare above, which a common unit would overflow past year 2292
+ * (86400e9 ns/day exceeds i64). */
 #define CROSS_TEMPORAL(a, b) \
     (a->type != b->type && is_temporal(a) && is_temporal(b))
 
