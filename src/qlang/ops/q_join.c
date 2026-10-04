@@ -1291,9 +1291,11 @@ static ray_t* raze_step(ray_t* join, ray_t* acc, ray_t* e) {
  * body answers both, and answers as the fold (),x[0],x[1],... (accumulators.md Unary application). */
 ray_t* q_raze_wrap(ray_t* x) {
     if (x->type == RAY_DICT) return q_raze_wrap(ray_dict_vals(x));
-    if (q_type_is_iter(x) && q_count(x) == 0) return ray_list_new(0);
-    /* a simple vector is its own fold; keeping its attribute is the one liberty, and `~` cannot see it */
-    if (q_type_is_iter(x) && x->type != RAY_LIST && x->type != RAY_TABLE) {
+    int simple = q_type_is_iter(x) && x->type != RAY_LIST && x->type != RAY_TABLE;
+    if (q_type_is_iter(x) && q_count(x) == 0 && (!simple || x->type == RAY_STR)) return ray_list_new(0);
+    /* a simple vector, empty included, is its own fold (owner 2026-10-04: `raze ""` is `""`); keeping its
+     * attribute is the one liberty, and `~` cannot see it */
+    if (simple) {
         if (q_enum_is(x)) return q_enum_decay(x);
         ray_retain(x);
         return x;
