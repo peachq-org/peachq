@@ -439,7 +439,6 @@ static const q_op_t Q_OPS[] = {
     { "max",     QLEX_KW,        QR_ENV("max"),                QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_FOLD, QKOP(28) },
     { "min",     QLEX_KW,        QR_ENV("min"),                QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_FOLD, QKOP(27) },
     /* rank == iasc iasc (ref/rank.md) — the grade family, rowid. */
-    /* `raze` adds the kdb atom arm (`raze 42` -> ,42) over base ray_raze_fn. */
     { "raze",    QLEX_KW,        QR_FN1("raze", q_raze_wrap),  QR_NONE,           NULL, 1, 0, "structural", NULL },
     /* `enlist` is its OWN unary primitive 41, NOT a keyword cover for `,:` (12)
      * — owner ruling 2026-07-30.  Its value IS the paren-literal ctor head, so
