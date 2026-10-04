@@ -177,21 +177,11 @@ ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto) {
     return tv;
 }
 
-/* q `enlist` — base ray_enlist_fn plus the kdb dict arm: enlist of a bare
- * dict is a 1-ROW TABLE (ref/enlist.md: `` enlist `a`b`c!(1;2 3; 4) ``
- * displays a table whose b cell is 2 3) — the one-row case of the shared
- * dict-rows builder.  Env-bound by q_builtins_register BEFORE registry init,
- * so the `,` monadic QK_ENV snapshot picks this wrapper up too. */
+/* A non-empty symbol-keyed dict enlists to a 1-row table (enlist.md:55), any other dict to a 1-item list.
+ * Env-bound before registry init, so the monadic `,` snapshot picks this wrapper up too. */
 ray_t* q_enlist_wrap(ray_t** args, int64_t n) {
-    ray_t* k = n == 1 && args[0] && args[0]->type == RAY_DICT && !q_type_is_keyed(args[0])
-                   ? ray_dict_keys(args[0]) : NULL;
-    /* an EMPTY dict spells no row: no zero-column table could hold the one this makes, so it enlists as the
-     * one-item list it is, leaving 'type to keys that are genuinely no table's names */
-    if (k && q_count(k) > 0) {
-        ray_t* t = dict_rows_table(args, 1);         /* non-sym keys are no table */
-        return t ? t : q_err(QE_TYPE);
-    }
-    return ray_enlist_fn(args, n);
+    ray_t* t = n == 1 && args[0] && args[0]->type == RAY_DICT ? dict_rows_table(args, 1) : NULL;
+    return t ? t : ray_enlist_fn(args, n);
 }
 
 /* q `til` — any non-negative integer atom (ref/til.md: bool/byte/short/int
