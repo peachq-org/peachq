@@ -140,9 +140,10 @@
 / A PAGE (see the pages block at the foot of this file) never fetches: its
 / member table IS the answer and the website is one static pointer line, so
 / the whole page tier is offline by construction.
-.help.i.ladder:{[s] n:`$s;
+/ An alias renders its page's entry unless a captured doc owns the alias name.
+.help.i.ladder:{[s] n:`$s; p:.help.i.canon s;
+  n:$[(not null p)and null .help.funcs[n;`line];p;n];
   loc:$[n in exec fullname from .help.funcs;.help.get n;""];
-  p:.help.i.canon s;
   $[null p;(loc;.help.webfetch s);("\n" sv (enlist $[count loc;loc;s]),.help.i.pagetext p;"")]}
 
 / `""`, `(::)` and the niladic `.help.show[]` all mean "show me the index".
@@ -414,7 +415,7 @@
  blurb:(
   ();();();();();
   ("an iterator modifies a verb: each item, each pair, each left, each right";"/ folds to one value, \\ keeps every step");
-  ("a \\ line is a command, not an expression; system \"c 25 200\" is its q form");
+  enlist"a \\ line is a command, not an expression; system \"c 25 200\" is its q form";
   ("the file is the first argument, loaded as \\l loads it; every other token q does not consume is .z.x";
    "after / : the \\ command that reads or sets the same thing, * a peachq-only flag, - not implemented yet");
   ("n is the type number and c the .Q.t character; a vector is n, an atom -n";"sz is bytes per item; sql is the nearest ANSI SQL type";
