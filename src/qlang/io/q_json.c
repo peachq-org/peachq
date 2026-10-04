@@ -480,7 +480,7 @@ static ray_t* j_node(yyjson_val* v, int written) {
 
 ray_t* q_json_deserialize(ray_t* x) {
     const char* sp; int64_t sn;
-    if (!q_str_text_bytes(x, &sp, &sn)) return q_err(QE_TYPE);
+    if (!q_str_text_or_bytes(x, &sp, &sn)) return q_err(QE_TYPE);
     size_t n = (size_t)sn;
     char* buf = malloc(n + 1);
     if (!buf) return q_err(QE_WSFULL);

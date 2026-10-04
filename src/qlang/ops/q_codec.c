@@ -4,7 +4,7 @@
 #include "qlang/q_count.h"
 #include "qlang/q_builtins.h"   /* the codec decls (q_md5_fn, q_dotq_*) */
 #include "qlang/base/q_err.h"
-#include "qlang/q_prim.h"      /* q_str_text_bytes */
+#include "qlang/q_prim.h"      /* q_str_text_or_bytes */
 #include "qlang/net/q_gz.h"         /* q_gz_deflate/inflate — .Q.c.gz seam */
 #include "lang/internal.h"      /* ray_error, ray_vec_from_raw */
 #include <string.h>
@@ -82,15 +82,12 @@ ray_t* q_md5_fn(ray_t* x) {
 static const char Q_B64_ALPHA[64] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-/* Borrow the raw bytes of a string atom (-RAY_STR; use ray_str_len — SSO union
- * aliasing makes ray_len garbage on a string atom) or a byte vector (RAY_BYTE_ONLY).
- * Returns 0 for any other type. */
+/* A byte atom is refused: the codecs take text or a byte vector. */
 static int codec_bytes_of(ray_t* x, const uint8_t** p, size_t* n) {
     const char* tp; int64_t tn;
-    if (!x) return 0;
-    if (q_str_text_bytes(x, &tp, &tn)) { *p = (const uint8_t*)tp; *n = (size_t)tn; return 1; }
-    if (x->type == RAY_BYTE_ONLY)  { *p = (const uint8_t*)ray_data(x); *n = (size_t) q_count(x); return 1; }
-    return 0;
+    if (!x || x->type == -RAY_BYTE_ONLY || !q_str_text_or_bytes(x, &tp, &tn)) return 0;
+    *p = (const uint8_t*)tp; *n = (size_t)tn;
+    return 1;
 }
 
 /* base64-encode n bytes of src into a fresh malloc'd buffer; *outlen set.
