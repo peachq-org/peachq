@@ -45,6 +45,12 @@ bool q_str_text_bytes(ray_t* x, const char** p, int64_t* n) {
     return false;
 }
 
+bool q_str_text_or_bytes(ray_t* x, const char** p, int64_t* n) {
+    if (x && x->type == -RAY_BYTE_ONLY) { *p = (const char*)&x->u8; *n = 1; return true; }
+    if (x && x->type == RAY_BYTE_ONLY)  { *p = (const char*)ray_data(x); *n = q_count(x); return true; }
+    return q_str_text_bytes(x, p, n);
+}
+
 /* Inverse adapter for the legacy string-verb bodies (vs/sv):
  * BORROWS x, returns OWNED legacy form — charv/char atom -> -RAY_STR atom;
  * LIST elements converted recursively; everything else retained as-is. */
