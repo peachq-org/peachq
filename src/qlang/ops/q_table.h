@@ -57,11 +57,14 @@ ray_t* q_table_rows_normalize(ray_t* flat, ray_t* y, int law);
 ray_t* q_table_rows_typed(ray_t* flat, ray_t* rows);
 
 /* Append normalized rows to a FLAT table: per-column base concat behind the
- * q-level guards (0-row untyped columns adopt the payload's types; a TYPED
- * column keeps kdb type-strictness).  `exclusive` is the caller's word that
- * it holds the only reference to `flat` (it parked the name's binding, the
- * q_env_take pattern): the columns may then grow in place, and the result is
- * `flat` itself, retained.  0 = today's copy, whatever the refcounts say. */
-ray_t* q_table_append(ray_t* flat, ray_t* rows, int exclusive);
+ * q-level guards (0-row untyped columns adopt the payload's types).  `strict`
+ * is the row law of insert, upsert, `,:` and keyed Join (q_table_rows_typed);
+ * 0 is plain `,` on an unkeyed table, where a column whose types differ is
+ * joined as lists (ref/join.md:33 — a mixed column).  `exclusive` is the
+ * caller's word that it holds the only reference to `flat` (it parked the
+ * name's binding, the q_env_take pattern): the columns may then grow in place,
+ * and the result is `flat` itself, retained.  0 = today's copy, whatever the
+ * refcounts say. */
+ray_t* q_table_append(ray_t* flat, ray_t* rows, int exclusive, int strict);
 
 #endif

@@ -99,7 +99,7 @@ ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
     int64_t before = q_count(g), added = 0;
     if (!nt) {
         added = q_count(rows);
-        nt = q_table_append(g, rows, stole);
+        nt = q_table_append(g, rows, stole, 1);
         ray_release(rows);
     }
     if (!nt || RAY_IS_ERR(nt)) {
