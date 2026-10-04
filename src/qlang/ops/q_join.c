@@ -633,7 +633,7 @@ static ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode) {
         /* THE row-append home, not base table-concat: an untyped general
          * column constrains nothing, so a typed payload must be accepted
          * (base's table concat demands column types be equal). */
-        out = q_table_append(part1, part2, 0);
+        out = q_table_append(part1, part2, 0, 1);
         ray_release(part1);
         ray_release(part2);
     }
@@ -648,7 +648,10 @@ static ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode) {
 /* ---- the row-append home: upsert IS a spelling of Join ---------------------
  * wp/permissions/index.md:387 defines upsert as .[;();,;]; ref/amend.md:66
  * gives .[d;();v;y] <=> v[d;y].  So the VALUE work of upsert / `,:` /
- * .[x;();,;y] / `x,y` on a table left is ONE operation: normalize the payload
+ * .[x;();,;y] / `x,y` on a table left is ONE operation — `strict` 0 for plain
+ * `,` on an unkeyed table alone, whose columns join as lists (ref/join.md:33);
+ * upsert keeps the type law (ref/upsert.md:28 outranks wp/permissions'
+ * .[;();,;]) like `,:` and keyed Join (:140,:156): normalize the payload
  * through the shape law, then compose — per-column append on a plain table,
  * THE keyed write (q_index_keyed_put: one row Find, the hits stored and the
  * misses grown per column) on a keyed one.  The keyed⊕keyed pair is the ONE
@@ -658,7 +661,7 @@ static ray_t* qj_ktbl_merge(ray_t* x, ray_t* y, int mode) {
  * KEPT) — `merge` below, under `,` and `,:` alike (ref/join.md:140: keyed Join
  * is strict on the data columns too); the keyed JOIN home qj_ktbl_merge serves
  * uj/ujf alone. */
-static ray_t* table_upsert(ray_t* x, ray_t* y, int exclusive, int merge) {
+static ray_t* table_upsert(ray_t* x, ray_t* y, int exclusive, int merge, int strict) {
     int keyed = q_type_is_keyed(x);
     int64_t nkey = keyed ? ray_table_ncols(ray_dict_keys(x)) : 0;
     ray_t* hit = NULL;
@@ -693,7 +696,7 @@ static ray_t* table_upsert(ray_t* x, ray_t* y, int exclusive, int merge) {
     ray_t* rows = q_table_rows_normalize(flat, y, Q_ROWS_JOIN);
     if (!keyed) {
         if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_OOM);
-        ray_t* nf = q_table_append(flat, rows, exclusive);
+        ray_t* nf = q_table_append(flat, rows, exclusive, strict);
         ray_release(rows);
         return nf;
     }
@@ -706,7 +709,7 @@ static ray_t* table_upsert(ray_t* x, ray_t* y, int exclusive, int merge) {
     return r;
 }
 
-ray_t* q_join_table_upsert(ray_t* x, ray_t* y, int exclusive) { return table_upsert(x, y, exclusive, 0); }
+ray_t* q_join_table_upsert(ray_t* x, ray_t* y, int exclusive) { return table_upsert(x, y, exclusive, 0, 1); }
 
 static ray_t* qj_uj_core(ray_t* x, ray_t* y, int mode) {
     if (!x || !y) return q_err(QE_TYPE);
@@ -1087,6 +1090,17 @@ static ray_t* join_as_rows(ray_t* x, ray_t* y, int table_left) {
     return out;
 }
 
+/* `d,t` is `(enlist d),t` (basics/glossary.md:769), so the dict is the first row; a dict naming any column t lacks,
+ * or lacking one t has, is 'mismatch (owner ruling 2026-10-04), never a null-filled row. */
+static ray_t* join_dict_row(ray_t* x, ray_t* y) {
+    ray_t* row = q_enlist_wrap(&x, 1);
+    if (!row || RAY_IS_ERR(row)) return row ? row : q_err(QE_OOM);
+    ray_t* out = q_type_is_table(row) && ray_table_ncols(row) == ray_table_ncols(y) ? join_core(row, y, 0, 0)
+                                                                                    : q_err(QE_MISMATCH);
+    ray_release(row);
+    return out;
+}
+
 /* q `x,y` join — table , record-dict appends the record (ref/join.md +
  * ref/upsert.md: a simple table's Join of a matching record is the same
  * append upsert performs).  Joins wave: non-conforming table,table is
@@ -1116,7 +1130,7 @@ static ray_t* join_core(ray_t* x, ray_t* y, int exclusive, int append) {
         }
     }
     if (q_type_is_keyed(x) && q_type_is_keyed(y))
-        return table_upsert(x, y, exclusive, 1);      /* strict, y's OWN columns update (ref/join.md:140,274) */
+        return table_upsert(x, y, exclusive, 1, 1);   /* strict, y's OWN columns update (ref/join.md:140,274) */
     if (q_type_is_table(x) && y && !append && !q_type_is_table(y) && !q_type_is_dict(y)) {
         /* Plain `,` on a payload the row law will not read falls back to basics/glossary.md:769's other reading of
          * x, the list of its row dicts (owner ruling 2026-09-23); a bare ATOM is never a row even where the
@@ -1132,7 +1146,9 @@ static ray_t* join_core(ray_t* x, ray_t* y, int exclusive, int append) {
     if (q_type_is_table(y) && x && !q_type_is_table(x) && !q_type_is_dict(x))
         return join_as_rows(x, y, 0);                 /* the same reading on the right: `(1;2),([]a:1 2)` is 4 items */
     if ((q_type_is_table(x) || q_type_is_keyed(x)) && y)
-        return q_join_table_upsert(x, y, exclusive);
+        return table_upsert(x, y, exclusive, 0, append);   /* plain `,` joins columns as lists: ref/join.md:33,107 */
+    if (q_type_is_plain_dict(x) && q_type_is_table(y))
+        return join_dict_row(x, y);
     /* A bare dict joins ONLY with a dict (ref/join.md: `10,d` -> 'type; base
      * concat would wrongly DISTRIBUTE the scalar over the dict's values). */
     if (q_type_is_plain_dict(x) != q_type_is_plain_dict(y)) return q_err(QE_TYPE);
