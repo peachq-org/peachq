@@ -262,9 +262,11 @@ static ray_t* acc_unary(ray_t* fv, const q_op_t* frow, ray_t* x, int keep) {
     ray_t* mv = acc_mono(frow, keep, &mrow);
     /* boxed lists take the native fold — the aggregate and running wrappers' boxed arms ride base call_fn plumbing
      * (finding 5).  `,`'s mono is the one structural row, and raze is the fold itself, so it takes them too */
-    if (mv && x->type == RAY_LIST && strcmp(mrow->family, "structural") != 0) mv = NULL;
+    int structural = mv && strcmp(mrow->family, "structural") == 0;
+    if (mv && x->type == RAY_LIST && !structural) mv = NULL;
     ray_t* r;
-    if (q_type_is_iter(x) && q_count(x) == 0) {
+    /* raze owns its empties: `(,/)""` is `""` (owner 2026-10-04), so `,`'s identity `()` must not answer first */
+    if (q_type_is_iter(x) && q_count(x) == 0 && !structural) {
         r = acc_empty(fv, frow, NULL, keep, mv != NULL);
         if (!r) r = q_eval_apply(mv, mrow, &x, 1);
     } else if (mv)
