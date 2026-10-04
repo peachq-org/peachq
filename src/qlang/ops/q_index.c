@@ -788,7 +788,7 @@ static ray_t* miss_col(void* ctx, ray_t* col) {
 static ray_t* keyed_grow(ray_t** pt, ray_t* p, ray_t* mj) {
     ray_t* pm = q_table_map_cols(miss_col, mj, p);
     if (!pm || RAY_IS_ERR(pm)) return pm ? pm : q_err(QE_OOM);
-    ray_t* g = q_table_append(*pt, pm, (*pt)->rc == 1);
+    ray_t* g = q_table_append(*pt, pm, (*pt)->rc == 1, 1);
     ray_release(pm);
     if (!g || RAY_IS_ERR(g)) return g ? g : q_err(QE_OOM);
     ray_release(*pt);
@@ -970,8 +970,25 @@ ray_t* q_index_dict_align(ray_t* x, ray_t* ykeys) {
     return out;
 }
 
+static ray_t* level_collapse(ray_t* x);
+
+/* A table value list is a list of records (basics/glossary.md:769): the join writes the rows, and the level collapse
+ * makes them a table again only if every value is still a like record. */
+static ray_t* dict_join_rows(ray_t* x, ray_t* y, int strict) {
+    ray_t* rows = q_list_uncollapse(ray_dict_slots(x)[1]);
+    if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_OOM);
+    ray_retain(ray_dict_slots(x)[0]);
+    ray_t* d = ray_dict_new(ray_dict_slots(x)[0], rows);
+    if (!d || RAY_IS_ERR(d)) return d ? d : q_err(QE_OOM);
+    ray_t* r = q_index_dict_join(d, y, strict);
+    if (RAY_IS_ERR(r)) { ray_release(d); return r; }
+    ray_release(x);
+    return level_collapse(r);
+}
+
 ray_t* q_index_dict_join(ray_t* x, ray_t* y, int strict) {
     ray_t** slots = ray_dict_slots(x);
+    if (q_type_is_table(slots[1])) return q_count(ray_dict_slots(y)[0]) ? dict_join_rows(x, y, strict) : x;
     ray_t* ky = ray_dict_slots(y)[0];
     ray_t* vy = ray_dict_slots(y)[1];
     if (!is_coll(slots[0]) || !is_coll(slots[1]) || !is_coll(ky) || !q_type_is_iter(vy)) return q_err(QE_TYPE);
