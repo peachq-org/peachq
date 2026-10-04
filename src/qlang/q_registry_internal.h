@@ -102,7 +102,6 @@ ray_t* q_xbar_wrap(ray_t* bucket, ray_t* col);
 /* ---- defined in ops/q_list.c ---- */
 ray_t* q_xprev_wrap(ray_t* nx, ray_t* x);
 ray_t* q_fills_wrap(ray_t* x);
-ray_t* q_raze_wrap(ray_t* x);
 ray_t* q_where_wrap(ray_t* x);
 
 /* ---- defined in ops/q_rand.c ---- */
@@ -190,6 +189,7 @@ ray_t* q_sv_wrap(ray_t* x, ray_t* y);
 ray_t* qj_table_gather_idx(ray_t* t, const int64_t* idx, int64_t n);/* used by: table, list */
 ray_t* q_join_table_upsert(ray_t* x, ray_t* y, int exclusive);/* THE value row-append home; used by: insert (upsert spelling).
                                                                  exclusive = the caller holds x's ONLY ref (a parked name) */
+ray_t* q_raze_wrap(ray_t* x);
 ray_t* q_join_wrap(ray_t* x, ray_t* y);                       /* also shared: index (splice, dict insert), setops (cross, union) */
 ray_t* q_join_gen_item(ray_t* x, int64_t i);                      /* used by: setops */
 int64_t q_join_gen_len(ray_t* x);                                 /* used by: setops */

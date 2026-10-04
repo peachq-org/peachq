@@ -1106,11 +1106,14 @@ static ray_t* join_core(ray_t* x, ray_t* y, int exclusive, int append) {
      * concat happens to accept: a table is a list of records and a dict a list
      * of entries, so joining zero of them leaves either unchanged.  Without it
      * `c:(); c,:t` (`.qunit.runNsTests`) and `c,:d` are 'type — the
-     * dict pair reaching the bare-dict guard below. */
+     * dict pair reaching the bare-dict guard below.  An empty vector keeps its type the same way: `(),""` is "". */
     if (x && y) {
         ray_t* t = (x->type == RAY_LIST && q_count(x) == 0)   ? y
                  : (y->type == RAY_LIST && q_count(y) == 0)   ? x : NULL;
-        if (q_type_is_table(t) || q_type_is_dict(t)) { ray_retain(t); return t; }
+        if (q_type_is_table(t) || q_type_is_dict(t) || (q_type_is_iter(t) && q_count(t) == 0)) {
+            ray_retain(t);
+            return t;
+        }
     }
     if (q_type_is_keyed(x) && q_type_is_keyed(y))
         return table_upsert(x, y, exclusive, 1);      /* strict, y's OWN columns update (ref/join.md:140,274) */
@@ -1251,6 +1254,51 @@ ray_t* q_join_grow(ray_t** px, ray_t* y) {
     r = q_join_wrap(*px, y);
     if (r && !RAY_IS_ERR(r)) ray_release(*px);
     return r;
+}
+
+/* One step acc,e of Join Over, consuming acc.  It grows in place, except that an enum takes the apply module's
+ * enum route through `,`.  A hole is an item here, never an elision (`raze 10#enlist mv`, function/projection). */
+static ray_t* raze_step(ray_t* join, ray_t* acc, ray_t* e) {
+    ray_t* r;
+    if ((q_enum_is(acc) || q_enum_is(e)) && !Q_IS_HOLE(e)) {
+        ray_t* av[2] = { acc, e };
+        r = q_eval_apply_value(join, av, 2);
+    } else {
+        r = q_join_grow(&acc, e);
+        if (r && !RAY_IS_ERR(r)) return r;
+    }
+    ray_release(acc);
+    return r ? r : q_err(QE_TYPE);
+}
+
+/* q `raze x` IS `,/` (ref/over.md:91): `,/` applied as a unary monomorphizes here for every shape, so this one
+ * body answers both, and answers as the fold (),x[0],x[1],... (accumulators.md Unary application). */
+ray_t* q_raze_wrap(ray_t* x) {
+    if (x->type == RAY_DICT) return q_raze_wrap(ray_dict_vals(x));
+    if (q_type_is_iter(x) && q_count(x) == 0) return ray_list_new(0);
+    /* a simple vector is its own fold; keeping its attribute is the one liberty, and `~` cannot see it */
+    if (q_type_is_iter(x) && x->type != RAY_LIST && x->type != RAY_TABLE) {
+        if (q_enum_is(x)) return q_enum_decay(x);
+        ray_retain(x);
+        return x;
+    }
+    /* one fixed-width type throughout: the fold is the plain concatenation, which the kernel presizes; an enum
+     * item instead takes the apply module's route below */
+    ray_t* fast = x->type == RAY_LIST && !q_enum_is(((ray_t**)ray_data(x))[0]) ? ray_raze_presized(x) : NULL;
+    if (fast) return fast;
+    ray_t* join = q_registry_lookup_name(",", 1, Q_DYADIC);
+    if (!join) return q_err(QE_TYPE);
+    ray_t* acc = ray_list_new(0);
+    if (RAY_IS_ERR(acc)) return acc;
+    if (!q_type_is_iter(x)) return raze_step(join, acc, x);
+    int64_t n = q_count(x);
+    for (int64_t i = 0; i < n && !RAY_IS_ERR(acc); i++) {
+        ray_t* e = q_index_elem_at(x, i);
+        if (!e || RAY_IS_ERR(e)) { ray_release(acc); return e ? e : q_err(QE_TYPE); }
+        acc = raze_step(join, acc, e);
+        ray_release(e);
+    }
+    return acc;
 }
 
 /* `x,:y` on a name — the Append law (ref/join.md `,:`: `s,:5f` is 'type where `s,5f` boxes; an EMPTY payload is
