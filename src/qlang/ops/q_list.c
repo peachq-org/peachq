@@ -1,5 +1,5 @@
 /* ops/q_list.c — the general list verbs: collapse (the homogeneous-atom-run ->
- * typed-vector home), raze/enlist, til/where, xprev/fills/fill.
+ * typed-vector home), enlist, til/where, xprev/fills/fill.
  *
  * Split from q_registry.c (2026-07-14), then narrowed (2026-07-27) when the
  * `#`/`_` glyph homes went to ops/q_takedrop.c, column attributes to
@@ -175,36 +175,6 @@ ray_t* q_typed_empty_like(ray_t* collapsed, ray_t* proto) {
     if (!tv || RAY_IS_ERR(tv)) { if (tv) ray_release(tv); return collapsed; }
     ray_release(collapsed);
     return tv;
-}
-
-/* q `raze x` — base ray_raze_fn plus the kdb dict and atom arms: a dict razes
- * its values, an atom comes back as a 1-item list (ref/raze.md `raze 42` ->
- * ,42).  Everything else delegates. */
-ray_t* q_raze_wrap(ray_t* x) {
-    /* a dict razes its VALUES (ref/raze.md).  `raze` IS `,/` by DEFINITION
-     * only: the fold recopies its accumulator and measures ~70x slower, so the
-     * identity is pinned as a property row, never spelled as the call path. */
-    if (x && x->type == RAY_DICT && !q_type_is_keyed(x))
-        return ray_raze_fn(ray_dict_vals(x));
-    /* strings are kdb char LISTS (rank 1) — never the atom arm */
-    if (x && ray_is_atom(x) && x->type != -RAY_STR) {
-        ray_t* l = ray_list_new(1);
-        if (RAY_IS_ERR(l)) return l;
-        l = ray_list_append(l, x);                   /* retains x */
-        if (RAY_IS_ERR(l)) return l;
-        ray_t* c = q_list_collapse(l);               /* owned */
-        ray_release(l);
-        return c;
-    }
-    /* a list of atoms has no level to collapse (ref/raze.md:3) and is answered as it is — the base kernel has no
-     * vector form for the null tag, so `raze (::;::)` and a list of projection holes reached 'type there */
-    if (x && x->type == RAY_LIST) {
-        ray_t** e = (ray_t**)ray_data(x);
-        int64_t i = 0, n = q_count(x);
-        while (i < n && e[i] && !q_type_is_iter(e[i]) && e[i]->type != RAY_DICT && e[i]->type != -RAY_STR) i++;
-        if (i == n) return q_list_collapse(x);
-    }
-    return ray_raze_fn(x);
 }
 
 /* q `enlist` — base ray_enlist_fn plus the kdb dict arm: enlist of a bare

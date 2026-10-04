@@ -673,6 +673,7 @@ ray_t* ray_dict_fn(ray_t* keys, ray_t* vals);
 ray_t* ray_nil_fn(ray_t* x);
 ray_t* ray_where_fn(ray_t* x);
 ray_t* ray_raze_fn(ray_t* x);
+ray_t* ray_raze_presized(ray_t* x);
 ray_t* ray_ungroup_fn(ray_t* x);
 ray_t* ray_within_fn(ray_t* vals, ray_t* range);
 

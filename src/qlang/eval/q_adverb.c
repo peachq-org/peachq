@@ -252,8 +252,6 @@ static ray_t* acc_unary(ray_t* fv, const q_op_t* frow, ray_t* x, int keep) {
     ray_retain(x);
     x = q_eval_apply_concrete(x);              /* materialize at the boundary */
     const q_op_t* mrow = NULL;
-    /* boxed lists take the native fold — the aggregate wrappers' boxed arms
-     * ride base call_fn plumbing (finding 5) */
     ray_t* dv = iter_dict_vals(x);
     if (dv) {                    /* the values are the domain; Scan re-keys */
         ray_t* dr = acc_unary(fv, frow, dv, keep);
@@ -261,7 +259,10 @@ static ray_t* acc_unary(ray_t* fv, const q_op_t* frow, ray_t* x, int keep) {
         ray_release(x);
         return dr;
     }
-    ray_t* mv = (x->type == RAY_LIST) ? NULL : acc_mono(frow, keep, &mrow);
+    ray_t* mv = acc_mono(frow, keep, &mrow);
+    /* boxed lists take the native fold — the aggregate and running wrappers' boxed arms ride base call_fn plumbing
+     * (finding 5).  `,`'s mono is the one structural row, and raze is the fold itself, so it takes them too */
+    if (mv && x->type == RAY_LIST && strcmp(mrow->family, "structural") != 0) mv = NULL;
     ray_t* r;
     if (q_type_is_iter(x) && q_count(x) == 0) {
         r = acc_empty(fv, frow, NULL, keep, mv != NULL);

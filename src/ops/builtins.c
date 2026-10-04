@@ -3154,6 +3154,35 @@ ray_t* ray_concat_fn(ray_t* a, ray_t* b) {
     return ray_error("type", "concat: cannot concatenate %s and %s", ray_type_name(a->type), ray_type_name(b->type));
 }
 
+/* Items all vectors of one fixed-width, null-free primitive type (no SYM/STR/GUID/LIST): one pre-sized output and
+ * a memcpy per item, O(total) instead of the pairwise concat loop's O(N²).  NULL when x is not that shape. */
+ray_t* ray_raze_presized(ray_t* x) {
+    if (x->type != RAY_LIST || x->len == 0) return NULL;
+    ray_t** items = (ray_t**)ray_data(x);
+    int64_t n = x->len;
+    if (!ray_is_vec(items[0])) return NULL;
+    int8_t t = items[0]->type;
+    if (t == RAY_LIST || t == RAY_STR || t == RAY_SYM || t == RAY_GUID) return NULL;
+    int64_t total = 0;
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* it = items[i];
+        if (!ray_is_vec(it) || it->type != t || (it->attrs & RAY_ATTR_HAS_NULLS)) return NULL;
+        total += it->len;
+    }
+    ray_t* out = ray_vec_new(t, total);
+    if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
+    out->len = total;
+    uint8_t esz = ray_elem_size(t);
+    char* dst = (char*)ray_data(out);
+    int64_t pos = 0;
+    for (int64_t i = 0; i < n; i++) {
+        int64_t k = items[i]->len;
+        if (k > 0) memcpy(dst + pos * esz, ray_data(items[i]), (size_t)k * esz);
+        pos += k;
+    }
+    return out;
+}
+
 /* (raze list-of-vecs) -> flattened vector */
 ray_t* ray_raze_fn(ray_t* x) {
     /* Scalar passthrough */
@@ -3165,40 +3194,8 @@ ray_t* ray_raze_fn(ray_t* x) {
     int64_t n = x->len;
     if (n == 0) return ray_list_new(0);
     ray_t** items = (ray_t**)ray_data(x);
-
-    /* Fast path: all items are vectors of the same primitive type
-     * (numeric/temporal, fixed-width, no SYM/STR/GUID/LIST/null).
-     * Pre-size one output vector and memcpy each item's data — O(total)
-     * instead of the pairwise concat loop's O(N²). */
-    if (ray_is_vec(items[0])) {
-        int8_t t = items[0]->type;
-        bool fast = (t != RAY_LIST && t != RAY_STR && t != RAY_SYM && t != RAY_GUID);
-        int64_t total = 0;
-        if (fast) {
-            for (int64_t i = 0; i < n; i++) {
-                ray_t* it = items[i];
-                if (!ray_is_vec(it) || it->type != t
-                    || (it->attrs & RAY_ATTR_HAS_NULLS)) {
-                    fast = false; break;
-                }
-                total += it->len;
-            }
-        }
-        if (fast) {
-            ray_t* out = ray_vec_new(t, total);
-            if (!out || RAY_IS_ERR(out)) return out ? out : ray_error("oom", NULL);
-            out->len = total;
-            uint8_t esz = ray_elem_size(t);
-            char* dst = (char*)ray_data(out);
-            int64_t pos = 0;
-            for (int64_t i = 0; i < n; i++) {
-                int64_t k = items[i]->len;
-                if (k > 0) memcpy(dst + pos * esz, ray_data(items[i]), (size_t)k * esz);
-                pos += k;
-            }
-            return out;
-        }
-    }
+    ray_t* fast = ray_raze_presized(x);
+    if (fast) return fast;
 
     /* Slow path: pairwise concat — used for mixed types, null-bearing
      * inputs, and non-fixed-width vectors (SYM/STR/GUID/LIST). */
