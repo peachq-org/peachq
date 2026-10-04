@@ -3,7 +3,7 @@
  * from x ("type inferred from left hand side"); base-x encode/decode take integer-kinded y — byte and boolean
  * included — and the matrix forms are the per-item / per-column composition of the atom forms. */
 #include "qlang/q_count.h"
-#include "qlang/q_registry_internal.h" /* wrap decls + q_prim.h (q_str_text_bytes, q_str_split_lines, q_str_charv_out) */
+#include "qlang/q_registry_internal.h" /* wrap decls + q_prim.h (q_str_text_or_bytes, q_str_split_lines, q_str_charv_out) */
 #include "qlang/base/q_err.h"
 #include "table/sym.h"     /* ray_sym_str, ray_sym_vec_cell, ray_sym_intern_runtime */
 #include <string.h>        /* memcmp, memcpy */
@@ -21,17 +21,9 @@ static ray_t* lane_new(int8_t lane, const char* p, int64_t n) {
     return lane == RAY_BYTE_ONLY ? ray_vec_from_raw(RAY_BYTE_ONLY, p, n) : ray_charv(p, n);
 }
 
-/* the bytes behind a lane value; a lane atom is one byte */
-static bool lane_bytes(ray_t* v, const char** p, int64_t* n) {
-    if (!lane_of(v)) return false;
-    if (v->type == -RAY_BYTE_ONLY) { *p = (const char*)&v->u8; *n = 1; return true; }
-    if (v->type == RAY_BYTE_ONLY)  { *p = (const char*)ray_data(v); *n = q_count(v); return true; }
-    return q_str_text_bytes(v, p, n);
-}
-
 /* a lane VECTOR (an internal -RAY_STR atom is a string) */
 static bool lane_vec_bytes(ray_t* v, const char** p, int64_t* n) {
-    return lane_bytes(v, p, n) && (v->type > 0 || v->type == -RAY_STR);
+    return q_str_text_or_bytes(v, p, n) && (v->type > 0 || v->type == -RAY_STR);
 }
 
 /* ---- integer-kinded y for base-x: the int lanes plus byte and boolean (tracked aoc programs ran `2 vs 0x05`,
@@ -232,14 +224,14 @@ ray_t* q_vs_wrap(ray_t* x, ray_t* y) {
     int8_t lane = lane_of(x);
     /* --- partition: x names the result lane; a text x splits a char atom as a 1-char string, a byte x leaves
      * atoms to the encode arm (vs_charv.qcmd pins `0x0 vs "f"` as 'type) --- */
-    if (lane && (lane == RAY_CHARV ? lane_bytes(y, &yp, &yl) : lane_vec_bytes(y, &yp, &yl))) {
-        lane_bytes(x, &xp, &xl);
+    if (lane && (lane == RAY_CHARV ? q_str_text_or_bytes(y, &yp, &yl) : lane_vec_bytes(y, &yp, &yl))) {
+        q_str_text_or_bytes(x, &xp, &xl);
         return str_split(yp, yl, xp, xl, lane);
     }
     /* --- line split / sym split (` vs) --- */
     if (q_type_is_null_sym(x)) {
         if (y->type == -RAY_SYM) return sym_split(y);
-        if (!lane_bytes(y, &yp, &yl)) return q_err(QE_TYPE);
+        if (!q_str_text_or_bytes(y, &yp, &yl)) return q_err(QE_TYPE);
         return q_str_charv_out(q_str_split_lines(yp, (size_t)yl));
     }
     /* --- byte encode (0x0 vs scalar) / bit decompose (0b vs scalar) --- */
@@ -414,7 +406,7 @@ ray_t* q_sv_wrap(ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);
     const char* xp; int64_t xl;
     int8_t lane = lane_of(x);
-    if (lane && y->type == RAY_LIST && lane_bytes(x, &xp, &xl)) return str_join(y, xp, xl, 0, lane);
+    if (lane && y->type == RAY_LIST && q_str_text_or_bytes(x, &xp, &xl)) return str_join(y, xp, xl, 0, lane);
     if (q_type_is_null_sym(x)) return y->type == RAY_SYM ? sym_join(y) : str_join(y, "\n", 1, 1, RAY_CHARV);
     if (x->type == -RAY_BYTE_ONLY) return y->type == RAY_BYTE_ONLY ? byte_decode(y) : q_err(QE_TYPE);
     if (x->type == -RAY_BOOL) return y->type == RAY_BOOL ? bit_compose(y) : q_err(QE_TYPE);
