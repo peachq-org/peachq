@@ -339,6 +339,16 @@ int64_t ray_vec_get_i64(ray_t* vec, int64_t idx) {
     return 0;
 }
 
+/* The write twin of ray_vec_get_i64: v narrows to the vector's own int lane width. */
+void ray_vec_set_i64(ray_t* vec, int64_t idx, int64_t v) {
+    if (!vec || idx < 0 || idx >= vec->len) return;
+    void* d = ray_data(vec);
+    if (vec->type == RAY_I64 || RAY_IS_TEMPORAL64(vec->type)) ((int64_t*)d)[idx] = v;
+    else if (vec->type == RAY_I32 || RAY_IS_TEMPORAL32(vec->type)) ((int32_t*)d)[idx] = (int32_t)v;
+    else if (vec->type == RAY_I16) ((int16_t*)d)[idx] = (int16_t)v;
+    else if (ray_is_bytelike(vec->type) || vec->type == RAY_BOOL) ((uint8_t*)d)[idx] = (uint8_t)v;
+}
+
 double ray_vec_get_f64(ray_t* vec, int64_t idx) {
     if (!vec || idx < 0 || idx >= vec->len) return 0.0;
     if (vec->type == RAY_F64) return ((const double*)ray_data(vec))[idx];
