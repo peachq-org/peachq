@@ -16,6 +16,7 @@
 #include "qlang/io/q_worker.h" /* q_worker_link — a :pq:qspawn: worker's link to the process that launched it */
 #include "qlang/q_env.h"       /* q_env_set — the -conn texts bound as q values */
 #include "qlang/base/q_err.h"  /* q_err_drop — an unreadable -conn file */
+#include "core/numparse.h"     /* ray_parse_i64 — LINES/COLUMNS */
 #include "core/poll.h"
 #include "core/ipc.h"          /* ray_ipc_auth_file_load — the `-u`/`-U` password file */
 #include "core/runtime.h"
@@ -152,6 +153,12 @@ done:
     return rc;
 }
 
+static bool env_int(const char* name, int64_t* out) {
+    const char* v = getenv(name);
+    size_t      n = v ? strlen(v) : 0;
+    return n && ray_parse_i64(v, n, out) == n;
+}
+
 /* The option at argv[i], applied through its `\` command; false once reported, when that command refuses it. */
 static bool option_apply(char** argv, int i) {
     const q_dotz_opt_t* o = q_dotz_opt(argv[i]);
@@ -265,27 +272,16 @@ int main(int argc, char** argv) {
      * and auto-fit the console width (`\c 25 0N` — 0N re-resolves to the live
      * terminal at each render, so a resize follows).  The stdlib is NOT
      * auto-loaded (owner 2026-08-14, startup cost): `\l pq` is explicit.
-     * `-classic` skips both (kdb-clean env, legacy display, kdb `\c 25 80`).
-     * The non-tty script batch widen below still overrides. */
+     * `-classic` skips both (kdb-clean env, legacy display, kdb `\c 25 80`). */
     if (!classic) {
         q_console_pipe_enable();
         q_console_clip_set(25, NULL_I64);
     }
 
-    /* `\c` console-size DISPLAY clipping is ARMED BY DEFAULT (q_sys_cfg_init)
-     * so a fresh interactive tty REPL and a piped `printf … | ./q` (no script,
-     * no -eval) truncate at
-     * the 25 80 default (kdb-true).  The ONE carve-out: a non-tty SCRIPT
-     * LOAD (`./q file.q </dev/null`, the qscript/daemon shape — `-eval` texts
-     * are script source from argv, so they count) is a BATCH
-     * context, NOT a display — widen the clip to the documented 2000 ceiling
-     * (basics/syscmds.md `\c`: values coerce to [10,2000]) so the script's
-     * `show`/`.z.f` (an absolute path, often > 80 chars) renders full-width.
-     * kdb has no off-switch, so the ceiling IS the batch idiom.  A tty that
-     * drops to the REPL after the script, an explicit `-c`, or an explicit `\c`
-     * in the script, resets/re-arms the size. */
-    if ((script != NULL || qinit != NULL || n_before + n_after > 0) && !stdin_tty)
-        q_console_clip_set(2000, 2000);
+    /* kdb's `\c` default is LINES and COLUMNS when both are set (basics/syscmds.md); the launcher, not the library, so an
+     * embedding host's environment never moves its clip.  An explicit `-c` or a script's `\c` still wins. */
+    int64_t env_rows, env_cols;
+    if (env_int("LINES", &env_rows) && env_int("COLUMNS", &env_cols)) q_console_clip_set(env_rows, env_cols);
 
     /* After the display defaults above, so an explicit `-c` wins over them. */
     bool failed = false;
