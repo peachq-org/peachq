@@ -78,6 +78,9 @@ bool q_dotz_has_flag(int argc, char** argv, const char* flag);
  * clock_gettime, so every wall-clock reader in the q layer comes through here. */
 int64_t q_dotz_now_ns(int local);
 
+/* Seconds east of UTC in force at a UTC instant (seconds since 2000.01.01): a set `\o`, else the OS zone's rule. */
+int64_t q_dotz_utc_offset_at(int64_t secs);
+
 /* Clear the cached argv pointers and release the startup handler snapshot. */
 void q_dotz_destroy(void);
 
