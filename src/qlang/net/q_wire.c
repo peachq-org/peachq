@@ -1311,9 +1311,8 @@ ray_t* q_wire_compress(ray_t* frame) {
 
 /* Decompress a compressed frame's PAYLOAD (bytes after the 8-byte header:
  * uint32 uncompressed total, then tokens).  Inbound bytes are attacker-
- * controlled: the claimed size is capped and ratio-guarded (a token triple
- * expands to at most 257 bytes), and every stream read / output write is
- * bounds-checked — corrupt frames return 'domain, never scribble. */
+ * controlled: the claimed size is capped, and every stream read / output write
+ * is bounds-checked — corrupt frames return 'domain, never scribble. */
 ray_t* q_wire_uncompress_payload(const uint8_t* pl, size_t plen, int frame_be) {
     if (plen < 6)
         return q_err(QE_DOMAIN);
@@ -1322,7 +1321,8 @@ ray_t* q_wire_uncompress_payload(const uint8_t* pl, size_t plen, int frame_be) {
         : ((uint32_t)pl[3] << 24 | (uint32_t)pl[2] << 16 | (uint32_t)pl[1] << 8 | pl[0]);
     if (usz < 9 || usz > Q_WIRE_MSG_MAX)
         return q_err(QE_DOMAIN);
-    if ((uint64_t)usz - 8 > (uint64_t)(plen - 4) * 86)      /* bomb guard */
+    /* bomb guard: a back-reference token is 2 stream bytes writing at most 257 (c.java u()) */
+    if ((uint64_t)usz - 8 > (uint64_t)((plen - 4) / 2) * 257)
         return q_err(QE_DOMAIN);
     /* dst mirrors c.java's whole-frame buffer: [0..8) is the never-written
      * header region, zeroed so a corrupt back-reference reads zeros in-bounds. */
