@@ -70,9 +70,8 @@
 / ---- Value / table-dict (ref/dotq.md) ----
 / .Q.v: filepath -> splayed table (unsupported in-memory); other symbol -> global named x; else -> x.
 .Q.v:{$[-11h=type x;value x;x]};
-/ .Q.V: table -> dictionary of its column values.  Spelled by name, not `flip x`: the flip of a mapped splayed
-/ table is `cols!`:dir/` (ref/flip-splayed.md), and every q.q verb that wants the columns rides this.
-.Q.V:{$[98h=type x;(cols x)!x cols x;flip x]};
+/ .Q.V: `flip x` keeps same-named columns' values apart; a mapped splay's flip is `cols!`:dir/` (ref/flip-splayed.md).
+.Q.V:{$[98h<>type x;flip x;0b~.Q.qp x;c!x c:cols x;flip x]};
 
 / ---- General-purpose utils (ref/dotq.md) ----
 .Q.dd:{` sv x,`$string y};
