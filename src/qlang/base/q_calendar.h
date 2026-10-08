@@ -27,11 +27,9 @@ int     q_calendar_date_valid(int64_t y, int64_t m, int64_t d);
 int     q_calendar_ts_compose_checked(int64_t days, int64_t tod_ns, int64_t* out);
 int64_t q_calendar_ts_compose(int64_t days, int64_t tod_ns);
 
-/* Monday-of-week for a day count since 2000.01.01 (ref/cast.md:138 ``week``):
- * the start of the week the date resides in; a Monday returns unchanged.
- * Calendar (year/mm/dd) and clock (hh/uu/ss) decode reuse the base
- * ray_temporal_extract / a signed inline division; `week` has no base field. */
-int64_t q_calendar_week_start(int64_t days);
+/* Start of the week a day count since 2000.01.01 resides in (ref/cast.md:138 ``week``), for a week starting on
+ * day `start` (0 = Saturday, the `\W` numbering, reduced mod 7); a start day returns unchanged. */
+int64_t q_calendar_week_start(int64_t days, int64_t start);
 
 /* The MONTH payload a day count since 2000.01.01 falls in — the inverse of base's month_payload_as_days
  * (lang/internal.h), exact over a DATE payload's range.  Answers 1 when that day IS the first of the month. */

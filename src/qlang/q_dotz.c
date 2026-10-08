@@ -12,7 +12,7 @@
 #include "qlang/eval/q_view.h" /* q_view_zb — `.z.b` dependency dict */
 #include "qlang/eval/q_dbg.h"  /* q_dbg_zex/_zey — `.z.ex`/`.z.ey` (basics/debug.md) */
 #include "qlang/net/q_tls.h"   /* q_tls_dotz_e — `.z.e` TLS connection status */
-#include "qlang/ops/q_sys.h"       /* q_sys_timer_active — stopped-timer no-op guard */
+#include "qlang/ops/q_sys.h"       /* q_sys_timer_active / q_sys_utc_offset_secs — timer guard, `\o` */
 #include "qlang/q_console.h"   /* q_console_door — .z.ts/.z.exit output is the server console's */
 #include "qlang/io/q_conn.h"   /* q_conn_zW/_zH — `.z.W`/`.z.H` collector views */
 #include "lang/cal.h"          /* ymd_to_date — build-date -> q date for .z.k */
@@ -328,9 +328,9 @@ static ray_t* z_v(void) {   /* `.z.v` — peachq's own version + environment, kd
 #define RAY_NS_PER_DAY      86400000000000LL
 
 /* Current time as nanoseconds since the rayforce epoch (2000.01.01), in UTC
- * (local=0) or local wall-clock (local=1).  Local offset is derived portably
- * (no tm_gmtoff): mktime of the UTC fields interprets them as local, so the
- * signed difference from the real instant IS the east-of-UTC offset. */
+ * (local=0) or local wall-clock (local=1).  Local offset is the set `\o`, else
+ * derived portably (no tm_gmtoff): mktime of the UTC fields interprets them as
+ * local, so the signed difference from the real instant IS the east-of-UTC offset. */
 int64_t q_dotz_now_ns(int local) {
     struct timespec ts;
 #ifdef RAY_OS_WINDOWS
@@ -347,16 +347,19 @@ int64_t q_dotz_now_ns(int local) {
 #else
     clock_gettime(CLOCK_REALTIME, &ts);
 #endif
-    int64_t unix_ns = (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    int64_t ns = ((int64_t)ts.tv_sec - RAY_EPOCH_UNIX_SECS) * 1000000000LL + ts.tv_nsec;
     if (local) {
-        time_t s = ts.tv_sec;
-        struct tm g;
-        gmtime_r(&s, &g);
-        g.tm_isdst = -1;
-        int64_t off = (int64_t)(s - mktime(&g));   /* seconds east of UTC (incl DST) */
-        unix_ns += off * 1000000000LL;
+        int64_t off;
+        if (!q_sys_utc_offset_secs(&off)) {
+            time_t s = ts.tv_sec;
+            struct tm g;
+            gmtime_r(&s, &g);
+            g.tm_isdst = -1;
+            off = (int64_t)(s - mktime(&g));   /* seconds east of UTC (incl DST) */
+        }
+        ns = (int64_t)((uint64_t)ns + (uint64_t)off * 1000000000ULL);   /* a wild `\o` wraps, never UB */
     }
-    return unix_ns - RAY_EPOCH_UNIX_SECS * 1000000000LL;
+    return ns;
 }
 
 

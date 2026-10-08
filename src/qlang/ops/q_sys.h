@@ -37,6 +37,10 @@ int         q_sys_prompt(char* buf, size_t cap);
  * q_ctx statement seam — the one place that acts on it. */
 int q_sys_gc_mode(void);
 
+/* The live `\W` start-of-week day (0 = Saturday) and `\o` offset in seconds east of UTC; false = `0N`, the OS offset. */
+int  q_sys_week_offset(void);
+bool q_sys_utc_offset_secs(int64_t* secs);
+
 /* The live `\e` error-trap mode (0 abort / 1 suspend / 2 collect+abort),
  * consumed by q_dbg's suspend gate and the q_ctx error display.  The setter
  * is the qmain tty-console default (kdb: console default is 1); every other
