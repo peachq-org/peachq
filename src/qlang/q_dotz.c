@@ -1,6 +1,6 @@
 /* q_dotz — see q_dotz.h.  The eval-time `.z.*` command-line resolver. */
 #ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200809L   /* clock_gettime / gmtime_r for the clock producers */
+#define _POSIX_C_SOURCE 200809L   /* clock_gettime / gmtime_r / localtime_r for the clock producers */
 #endif
 #if defined(__linux__) && !defined(_GNU_SOURCE)
   #define _GNU_SOURCE             /* sched_getaffinity / CPU_COUNT — .z.c */
@@ -24,7 +24,7 @@
 #include <stdio.h>             /* snprintf / sscanf for the version producers */
 #include <stdlib.h>            /* getenv — .z.v environment */
 #include <string.h>
-#include <time.h>             /* clock_gettime / gmtime_r / mktime — .z clock family */
+#include <time.h>             /* clock_gettime / gmtime_r / localtime_r — .z clock family, ltime/gtime offset */
 #include <unistd.h>          /* getpid / gethostname / getuid — .z.i/.z.h/.z.u */
 #ifndef RAY_OS_WINDOWS
   #include <pwd.h>             /* getpwuid — .z.u OS username */
@@ -327,10 +327,19 @@ static ray_t* z_v(void) {   /* `.z.v` — peachq's own version + environment, kd
 #define RAY_EPOCH_UNIX_SECS 946684800LL          /* 2000.01.01 00:00:00 UTC, unix secs */
 #define RAY_NS_PER_DAY      86400000000000LL
 
+/* No portable tm_gmtoff: the offset is the local fields' distance from the UTC fields of the same instant. */
+int64_t q_dotz_utc_offset_at(int64_t secs) {
+    int64_t off;
+    if (q_sys_utc_offset_secs(&off)) return off;
+    time_t    t = (time_t)(secs + RAY_EPOCH_UNIX_SECS);
+    struct tm l, g;
+    if (!localtime_r(&t, &l) || !gmtime_r(&t, &g)) return 0;
+    int64_t days = l.tm_year == g.tm_year ? l.tm_yday - g.tm_yday : l.tm_year > g.tm_year ? 1 : -1;
+    return ((days * 24 + l.tm_hour - g.tm_hour) * 60 + l.tm_min - g.tm_min) * 60 + l.tm_sec - g.tm_sec;
+}
+
 /* Current time as nanoseconds since the rayforce epoch (2000.01.01), in UTC
- * (local=0) or local wall-clock (local=1).  Local offset is the set `\o`, else
- * derived portably (no tm_gmtoff): mktime of the UTC fields interprets them as
- * local, so the signed difference from the real instant IS the east-of-UTC offset. */
+ * (local=0) or local wall-clock (local=1). */
 int64_t q_dotz_now_ns(int local) {
     struct timespec ts;
 #ifdef RAY_OS_WINDOWS
@@ -349,14 +358,7 @@ int64_t q_dotz_now_ns(int local) {
 #endif
     int64_t ns = ((int64_t)ts.tv_sec - RAY_EPOCH_UNIX_SECS) * 1000000000LL + ts.tv_nsec;
     if (local) {
-        int64_t off;
-        if (!q_sys_utc_offset_secs(&off)) {
-            time_t s = ts.tv_sec;
-            struct tm g;
-            gmtime_r(&s, &g);
-            g.tm_isdst = -1;
-            off = (int64_t)(s - mktime(&g));   /* seconds east of UTC (incl DST) */
-        }
+        int64_t off = q_dotz_utc_offset_at((int64_t)ts.tv_sec - RAY_EPOCH_UNIX_SECS);
         ns = (int64_t)((uint64_t)ns + (uint64_t)off * 1000000000ULL);   /* a wild `\o` wraps, never UB */
     }
     return ns;
