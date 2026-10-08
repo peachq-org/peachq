@@ -1292,22 +1292,22 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
     sel->rx.read_fn = ipc_read_header;
     ray_poll_rx_request(poll, sel, KDB_HDR_LEN);
 
-    /* Compressed frame (Phase F): decompress BEFORE any routing so the
-     * RESP-deposit and dispatch legs below both see plain payload bytes.
-     * A corrupt frame is protocol corruption — close, like any other. */
+    /* A corrupt compressed frame keeps its raw bytes: .z.bm reports what arrived. */
     uint8_t* pdata = payload->data;
     ray_t*   uz    = NULL;
+    bool     zbad  = false;
     if (zip) {
         uz = q_wire_uncompress_payload(payload->data, (size_t)plen, swap);
-        ray_poll_buf_free(payload);
-        payload = NULL;
         if (!uz || RAY_IS_ERR(uz)) {
             if (uz) ray_error_free(uz);
-            ray_poll_deregister(poll, id);
-            return NULL;
+            uz = NULL;
+            zbad = true;
+        } else {
+            ray_poll_buf_free(payload);
+            payload = NULL;
+            pdata = (uint8_t*)ray_data(uz);
+            plen  = (uint32_t)uz->len;
         }
-        pdata = (uint8_t*)ray_data(uz);
-        plen  = (uint32_t)uz->len;
     }
 
     /* Response frame: deposit it for the sync send waiting on this
@@ -1318,8 +1318,8 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
      * 'badfunc is itself the response. */
     if (msgtype == RAY_IPC_MSG_RESP) {
         int is_wire_err = 0;
-        ray_t* obj = ipc_decode_payload(pdata, (size_t)plen, swap,
-                                        &is_wire_err, NULL);
+        ray_t* obj = zbad ? NULL : ipc_decode_payload(pdata, (size_t)plen, swap,
+                                                      &is_wire_err, NULL);
         if (!obj) {              /* malformed data structure — .z.bm (dotz.md) */
             hook_call_badmsg(poll, id, sel->fd, cd->open_ns, pdata, (size_t)plen);  /* (1) */
             if (payload) ray_poll_buf_free(payload);
@@ -1368,7 +1368,7 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
     cd->cur_sync_seq = seq;
 
     ray_t* result = NULL;
-    int rc = ipc_dispatch(msgtype, pdata, (size_t)plen, swap, &result);
+    int rc = zbad ? -1 : ipc_dispatch(msgtype, pdata, (size_t)plen, swap, &result);
 
     ipc_ctx_set(prev_handle, prev_poll);
     ray_eval_set_restricted(prev_restricted);
