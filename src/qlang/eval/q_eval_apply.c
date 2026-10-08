@@ -1887,6 +1887,13 @@ static ray_t* trap_catch(ray_t* r, ray_t* e) {
     return c;
 }
 
+/* .[h;();v;y]: Amend Entire, v the dyadic glyph `verb`. */
+static int amend_entire_with(ray_t** args, int64_t n, int dot, const char* verb) {
+    if (!dot || n != 4 || !args[1] || args[1]->type != RAY_LIST || q_count(args[1]) != 0) return 0;
+    const q_op_t* rep = q_registry_row_of(args[2], Q_DYADIC);
+    return rep && rep == q_ops_find(verb, 1);
+}
+
 /* Name-form amend, gated by the manifest name_lift flag — NEVER by
  * sym-sniffing in verb bodies (sym atoms are legal data).  The env's ref is
  * STOLEN for the call so a sole global amends IN PLACE (ref/amend.md handle
@@ -1902,11 +1909,8 @@ static ray_t* name_lift(const q_op_t* row, ray_t** args, int64_t n, int dot) {
         /* Amend Entire on a file (ref/amend.md; kb/performance-tips.md:151-152):
          * dot form, empty path — `,` appends, `:` sets.  Every other file amend
          * shape stays 'nyi (the file wave's remaining edge). */
-        if (dot && n == 4 && args[1] && args[1]->type == RAY_LIST && q_count(args[1]) == 0) {
-            const q_op_t* rep = q_registry_row_of(args[2], Q_DYADIC);
-            if (rep && rep == q_ops_find(",", 1)) return q_wirefile_append(args[0], args[3]);
-            if (rep && rep == q_ops_find(":", 1)) return q_io_set(args[0], args[3]);
-        }
+        if (amend_entire_with(args, n, dot, ",")) return q_wirefile_append(args[0], args[3]);
+        if (amend_entire_with(args, n, dot, ":")) return q_io_set(args[0], args[3]);
         return q_err(QE_NYI);
     }
     int64_t id = args[0]->i64;
@@ -1919,6 +1923,11 @@ static ray_t* name_lift(const q_op_t* row, ray_t** args, int64_t n, int dot) {
     } else if (q_env_ns_exists(id)) {
         cur = q_env_ns_view(id);       /* owned namespace dict: amend, rebind */
         if (!cur) return q_err(QE_DOMAIN);
+    } else if (amend_entire_with(args, n, dot, ":")) {
+        ray_err_t e = q_env_handle_set(id, args[3]);   /* the one amend that creates */
+        if (e != RAY_OK) return q_env_err(e);
+        ray_retain(args[0]);
+        return args[0];
     } else {
         return q_err(QE_DOMAIN);                     /* not a handle */
     }
