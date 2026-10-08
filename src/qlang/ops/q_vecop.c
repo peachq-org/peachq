@@ -22,10 +22,10 @@
  *                         way on all three, which is why that is safe.
  * ops/cmp.c's cmp_pick compares with tolerance OFF, so & and | never tolerate.
  *
- * + - * div mod ride INT on the plain integer tags only.  Their result tag is
- * not the operands' — ops/arith.c promotes (`5h+3h` is an int) — so the lane
- * computes in i64 and CONSTRUCTS the promoted tag, reading the promotion off
- * lang/internal.h's arith_int_type rather than carrying a table of its own.
+ * + - * div mod ride INT on the integer tags (div and mod on every int-backed
+ * count).  Their result tag is not the operands' — ops/arith.c promotes (`5h+3h`
+ * is an int) — so the lane computes in i64 and CONSTRUCTS the promoted tag, read
+ * off lang/internal.h's arith_int_type / div_type / mod_type, never a table.
  * Overflow is left alone: two's-complement wrap in unsigned space, whose
  * landing on a sentinel (`0W+1` is 0N) is incidental and stays so.
  */
@@ -35,7 +35,6 @@
 #include "qlang/base/q_type.h"         /* q_type_common + the numeric/float tag memberships */
 #include "lang/eval.h"                 /* ray_lt_fn/ray_gt_fn/..., ray_cmp_tol_eq */
 #include "lang/internal.h"             /* as_f64 / as_i64 / arith_int_type — the atom lane reads */
-#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -161,7 +160,7 @@ static int band_make(band_t* o, ray_t* v, int8_t tag, int vec, lane_t ln, int64_
         o->step = 0;
         switch (ln) {
             case LN_BYTE: o->scalar.b = tag == RAY_BOOL ? (v->b8 ? 1 : 0) : v->u8; break;
-            case LN_INT: o->scalar.j = RAY_ATOM_IS_NULL(v) ? NULL_I64 : as_i64(v); break;
+            case LN_INT: o->scalar.j = atom_is_oob_null(v) ? NULL_I64 : as_i64(v); break;
             default: o->scalar.d = RAY_ATOM_IS_NULL(v) ? NULL_F64 : as_f64(v); break;
         }
         o->p = &o->scalar;
@@ -272,52 +271,35 @@ static void pick_into(ray_t* out, int8_t rt, lane_t ln, band_t xb, band_t yb, co
 }
 
 /* ===== the arithmetic lane ===============================================
- * The tags + - * div mod read: plain integers only.  A char is out (its 0x20
- * null is in-band, and the byte lane's own reading of it is not arithmetic's),
- * a float and a temporal are out (each has a payload law of its own).
- * ray_is_byte_only keeps a byte ATOM, which widens like any other operand. */
+ * The tags + - * read: plain integers only.  A char is out (its 0x20 null is
+ * in-band, and the byte lane's own reading of it is not arithmetic's), a float
+ * and a temporal are out (each has a payload law of its own).
+ * ray_is_byte_only keeps a byte ATOM, which widens like any other operand.
+ * div and mod read every int-backed count, a char's code point included. */
 static int arith_tag(int8_t t) {
     return t == RAY_BOOL || t == RAY_I16 || t == RAY_I32 || t == RAY_I64 || ray_is_byte_only(t);
+}
+static int counts_tag(vop_t op, int8_t t) {
+    return op == VO_IDIV || op == VO_MOD ? int_tag(t) || t == RAY_BOOL : arith_tag(t);
 }
 
 /* The tag map_binary would have built for this pair: the kernel's own atom
  * answer, raised to the widest int operand by its "integer width follows the
  * wider vector operand" rule (bool is not one of those widths).  Where the two
- * disagree the lane DECLINES — `(1 2 3) mod 2h` is short one element-0 at a
- * time and long the next, a per-element reading no typed vector can carry, so
- * it stays where it is decided.  0 = not this lane's. */
+ * disagree the lane DECLINES, so the per-element road decides it.  div and mod
+ * answer their published grid as it stands: the kernel's tag, never widened.
+ * 0 = not this lane's. */
 static int8_t arith_rt(vop_t op, int8_t xt, int8_t yt) {
+    if (op == VO_IDIV || op == VO_MOD) {
+        int8_t rt = op == VO_IDIV ? div_type(xt, yt) : mod_type(xt, yt);
+        return rt == RAY_I16 || rt == RAY_I32 || rt == RAY_I64 || RAY_IS_TEMPORAL(rt) ? rt : 0;
+    }
     int8_t w = 0;
     if (xt != RAY_BOOL && xt > w) w = xt;
     if (yt != RAY_BOOL && yt > w) w = yt;
-    int8_t rt = op == VO_IDIV ? RAY_I64 : op == VO_MOD ? yt : arith_int_type(xt, yt);
+    int8_t rt = arith_int_type(xt, yt);
     if (rt != RAY_I16 && rt != RAY_I32 && rt != RAY_I64) return 0;
     return rt >= w ? rt : 0;
-}
-
-/* ray_idiv_fn's own arithmetic: the quotient is taken in DOUBLE, so `0W div 1`
- * is 0N and a magnitude past 2^53 answers the rounded ratio.  The range test is
- * a CONTAINMENT rather than the kernel's two rejects, which leaves the cast
- * undefined at exactly 2^63; the containment answers the null there, matching
- * what the kernel's cast yields on the targets we build for.  Defined where the
- * kernel is not, and observably the same — not a claim that C guarantees it. */
-static inline int64_t idiv64(int64_t a, int64_t b) {
-    double bv = (double)b;
-    if (bv == 0.0) return NULL_I64;
-    double q = floor((double)a / bv);
-    return (q > -9223372036854775808.0 && q < 9223372036854775808.0) ? (int64_t)q : NULL_I64;
-}
-
-/* ray_mod_fn's floor modulo.  INT64_MIN IS the null and is filtered before the
- * loop calls this, so the one trapping quotient (INT64_MIN / -1) cannot arise;
- * the products go through unsigned space, where the kernel's own `bv * q`
- * overflows (`0W mod -2` trips UBSan there).  Both answer -1 — this is the
- * same arithmetic with the overflow spelled legally. */
-static inline int64_t imod64(int64_t a, int64_t b) {
-    if (b == 0) return NULL_I64;
-    int64_t q = a / b;
-    if ((a ^ b) < 0 && (int64_t)((uint64_t)q * (uint64_t)b) != a) q--;
-    return (int64_t)((uint64_t)a - (uint64_t)q * (uint64_t)b);
 }
 
 /* One loop per (verb, result width).  The width is loop-invariant, so hoisting
@@ -352,18 +334,18 @@ static void arith_into(ray_t* out, int8_t rt, vop_t op, band_t xb, band_t yb, in
         case VO_ADD: ARI_OP((int64_t)((uint64_t)a + (uint64_t)b)); break;
         case VO_SUB: ARI_OP((int64_t)((uint64_t)a - (uint64_t)b)); break;
         case VO_MUL: ARI_OP((int64_t)((uint64_t)a * (uint64_t)b)); break;
-        case VO_IDIV: ARI_OP(idiv64(a, b)); break;
-        default: ARI_OP(imod64(a, b)); break;
+        case VO_IDIV: ARI_OP(floor_div64(a, b)); break;
+        default: ARI_OP(floor_mod64(a, b)); break;
     }
     if (nul >= 0) ray_vec_set_null(out, nul, true);   /* the sentinel is written; this is the attr */
 }
 
-/* A byte VECTOR operand is 'type on this road today (`(0x01 0x02)+0x03`), the
- * element store having no byte arm; declining one leaves that error where it
- * is rather than answering it here. */
+/* A byte VECTOR operand of + - * is 'type on this road today (`(0x01 0x02)+0x03`),
+ * the element store having no byte arm; declining one leaves that error where it
+ * is.  div and mod never answer a byte. */
 static ray_t* arith_binary(vop_t op, ray_t* x, ray_t* y, int8_t xt, int8_t yt, int xv, int yv, int64_t n) {
-    if (!arith_tag(xt) || !arith_tag(yt)) return NULL;
-    if ((xv && ray_is_byte_only(xt)) || (yv && ray_is_byte_only(yt))) return NULL;
+    if (!counts_tag(op, xt) || !counts_tag(op, yt)) return NULL;
+    if (op != VO_IDIV && op != VO_MOD && ((xv && ray_is_byte_only(xt)) || (yv && ray_is_byte_only(yt)))) return NULL;
     int8_t rt = arith_rt(op, xt, yt);
     if (!rt) return NULL;
 

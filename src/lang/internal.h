@@ -85,12 +85,14 @@ static inline ray_t* make_bool(uint8_t v) {
  * Type checks and numeric extraction
  * ══════════════════════════════════════════ */
 
-/* Helpers to extract numeric value as double */
-static inline int is_numeric(ray_t* x) {
-    return x->type == -RAY_I64 || x->type == -RAY_F64 || x->type == -RAY_F32 ||
-           x->type == -RAY_I16 || x->type == -RAY_I32 ||
-           ray_is_bytelike(-x->type) || x->type == -RAY_BOOL;
+/* The numeric vector tags, char and byte included */
+static inline int numeric_tag(int8_t t) {
+    return t == RAY_I64 || t == RAY_F64 || t == RAY_F32 || t == RAY_I16 || t == RAY_I32 ||
+           ray_is_bytelike(t) || t == RAY_BOOL;
 }
+static inline int temporal_tag(int8_t t) { return RAY_IS_TEMPORAL(t) || RAY_IS_TEMPORALF(t); }
+
+static inline int is_numeric(ray_t* x) { return numeric_tag((int8_t)-x->type); }
 
 /* Null the atom's own lane keeps OUT OF BAND — one a vector's null test can see.
  * The byte lanes have none: `" "` answers `null` (kdb-true) but to equality it is
@@ -105,7 +107,7 @@ static inline int is_temporal(ray_t* x) { return RAY_IS_TEMPORAL(-x->type); }
 
 /* Every atom as_f64 has a lane for: the numerics and all temporals, the f64-backed datetime included. */
 static inline int is_numeric_or_temporal(ray_t* x) {
-    return is_numeric(x) || is_temporal(x) || RAY_IS_TEMPORALF(-x->type);
+    return is_numeric(x) || temporal_tag((int8_t)-x->type);
 }
 
 /* First-of-month day count since 2000.01.01 for a MONTH payload
@@ -187,6 +189,10 @@ static inline int is_float_op(ray_t* a, ray_t* b) {
     return a->type == -RAY_F64 || b->type == -RAY_F64 ||
            a->type == -RAY_F32 || b->type == -RAY_F32;
 }
+/* the datetime is float-backed too */
+static inline int float_lane(ray_t* a, ray_t* b) {
+    return is_float_op(a, b) || a->type == -RAY_DATETIME || b->type == -RAY_DATETIME;
+}
 
 /* ══════════════════════════════════════════
  * Null/type helpers
@@ -215,6 +221,44 @@ static inline int8_t arith_int_type(int8_t a, int8_t b) {
  * char as an int offset. */
 static inline int arith_char_refused(int8_t at, int8_t bt) {
     return (at == -RAY_CHARV || bt == -RAY_CHARV) && at != -RAY_F64 && bt != -RAY_F64;
+}
+
+/* x mod y over vector tags, 0 for 'type (ref/mod.md:60-85).  A temporal x answers its difference type (what x-x
+ * gives: date/month int, timestamp timespan, datetime float, a duration itself), or float under a float divisor (a
+ * date refuses one); a number modulo a temporal answers the temporal, except that a real or float x answers datetime
+ * beside a date or datetime and float otherwise.  Between numbers a real or float x, or a float y, answers float, a
+ * real y real, and the integers int unless a long is present. */
+static inline int8_t mod_type(int8_t x, int8_t y) {
+    int tx = temporal_tag(x), ty = temporal_tag(y), fx = x == RAY_F32 || x == RAY_F64;
+    if ((!tx && !numeric_tag(x)) || (!ty && !numeric_tag(y)) || (tx && ty)) return 0;
+    if (tx && y == RAY_F64) return x == RAY_DATE ? 0 : RAY_F64;
+    if (tx) return x == RAY_DATE || x == RAY_MONTH ? RAY_I32 : x == RAY_TIMESTAMP ? RAY_TIMESPAN
+                 : x == RAY_DATETIME ? RAY_F64 : x;
+    if (ty) return !fx ? y : y == RAY_DATE || y == RAY_DATETIME ? RAY_DATETIME : RAY_F64;
+    if (arith_char_refused((int8_t)(fx ? -RAY_F64 : -x), (int8_t)-y)) return 0;
+    if (fx || y == RAY_F64) return RAY_F64;
+    if (y == RAY_F32) return RAY_F32;
+    return x == RAY_I64 || y == RAY_I64 ? RAY_I64 : RAY_I32;
+}
+
+/* x div y over vector tags, 0 for 'type (ref/div.md "Domain and range"): x alone decides — a temporal keeps its
+ * type, a real or float answers float, a long long, and every narrower number (char included) int. */
+static inline int8_t div_type(int8_t x, int8_t y) {
+    if ((!temporal_tag(x) && !numeric_tag(x)) || (!temporal_tag(y) && !numeric_tag(y))) return 0;
+    if (temporal_tag(x)) return x;
+    if (x == RAY_F32 || x == RAY_F64) return RAY_F64;
+    return x == RAY_I64 ? RAY_I64 : RAY_I32;
+}
+
+/* Floor division and its remainder on int64 counts, the products in unsigned space (kdb wraps).  A zero divisor is
+ * the long null; INT64_MIN is every int64 lane's null, so callers filter it and INT64_MIN / -1 cannot arise. */
+static inline int64_t floor_div64(int64_t a, int64_t b) {
+    if (b == 0) return NULL_I64;
+    int64_t q = a / b;
+    return (a ^ b) < 0 && (int64_t)((uint64_t)q * (uint64_t)b) != a ? q - 1 : q;
+}
+static inline int64_t floor_mod64(int64_t a, int64_t b) {
+    return b == 0 ? NULL_I64 : (int64_t)((uint64_t)a - (uint64_t)floor_div64(a, b) * (uint64_t)b);
 }
 
 static inline int8_t promote_int_type(ray_t* a, ray_t* b) {
@@ -271,6 +315,14 @@ static inline ray_t* make_typed_int(int8_t atom_type, int64_t val) {
     case -RAY_TIMESPAN:  return ray_timespan(val);
     default:       return make_i64(val);
     }
+}
+
+/* A float-lane answer in its result type; an integral result outside int64 is the null (as_i64's range guard). */
+static inline ray_t* float_lane_atom(int8_t rt, double v) {
+    if (rt == -RAY_F64 || rt == -RAY_F32) return make_typed_float(rt, v);
+    if (rt == -RAY_DATETIME) return ray_datetime(v);
+    return v >= -9223372036854775808.0 && v < 9223372036854775808.0 ? make_typed_int(rt, (int64_t)v)
+                                                                     : ray_typed_null(rt);
 }
 
 /* sum/prd/sums/prds over an atom: the atom itself (sum.md:21, prd.md:23; `sum 1h` is 1h).  The grids' b h c -> i
