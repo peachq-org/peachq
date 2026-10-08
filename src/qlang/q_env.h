@@ -114,6 +114,8 @@ int q_env_name_cmp(const void* a, const void* b);
 /* A plain q identifier — ASCII letter, then letters/digits/underscore.  Name
  * SPELLING is env knowledge: `\d` context switching and directory mounts share it. */
 int q_env_ident_ok(const char* p, size_t len);
+/* A `\d` context path without its leading dot: `a` or `a.b.c`, each segment an identifier. */
+int q_env_ctx_ok(const char* p, size_t len);
 
 /* The symbol that marks a dictionary as a NAMESPACE.  env's representation, so
  * env owns it: `key` strips it from the root (ops/q_key.c) and kdb prints it

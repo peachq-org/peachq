@@ -28,6 +28,7 @@
 
 #define ENV_NAME_MAX 256
 #define ENV_SEG_MAX 64
+#define ENV_CTX_MAX 16
 #define ENV_FRAME_MAX 2048
 #define ENV_FRAME_INLINE 16
 
@@ -39,14 +40,15 @@ static ray_t* env_root;        /* `.` — user root variables */
 static ray_t* env_ns;          /* ``  — top-level namespaces (nested dicts) */
 static ray_t* env_boot;        /* bootstrap builtins: q_env_bind plain names,
                                 * kept out of the user-visible `key `.` roster */
-/* A context is the ns sym as given (`.jab`) plus its SEGMENT (`jab`), which is
- * what env_ns is keyed by.  Deriving the segment once per switch keeps relative
- * resolution to one extra dict probe and NO sym-table round trip (#359). */
-static int64_t g_ctx, g_ctx_seg;        /* the session `\d` */
-static int64_t g_scope, g_scope_seg;    /* a running lambda's defining context */
-static int     g_scoped;
+/* A context is the ns sym as given (`.a.b`) plus its segment PATH (`a`,`b`), walked down from env_ns.  Deriving the
+ * path once per switch keeps a k-level context to k dict probes and NO sym-table round trip (#359). */
+typedef struct { int n; int64_t seg[ENV_CTX_MAX]; } env_path_t;
+static int64_t    g_ctx, g_scope;       /* the session `\d`; a running lambda's defining context */
+static env_path_t g_ctx_path, g_scope_path;
+static int        g_scoped;
 #define ENV_CTX (g_scoped ? g_scope : g_ctx)
-#define ENV_SEG (g_scoped ? g_scope_seg : g_ctx_seg)
+#define ENV_PATH (g_scoped ? &g_scope_path : &g_ctx_path)
+#define ENV_DEPTH (ENV_PATH->n)
 static int64_t g_pq_seg;                /* `pq`: the one namespace that loads itself */
 static int64_t g_q_seg;                 /* `q`: the namespace whose builtin entries are locked */
 
@@ -56,7 +58,7 @@ static int64_t g_q_seg;                 /* `q`: the namespace whose builtin entr
  * pq.q itself answer NULL), so a loaded `.pq` costs one prefix compare. */
 static ray_t* env_pq_hook(const char* p, size_t n) {
     int hit = p[0] == '.' ? n >= 3 && p[1] == 'p' && p[2] == 'q' && (n == 3 || p[3] == '.')
-                          : ENV_SEG == g_pq_seg;
+                          : ENV_DEPTH && ENV_PATH->seg[0] == g_pq_seg;
     return hit ? q_pq_autoload() : NULL;
 }
 
@@ -111,17 +113,6 @@ static ray_t* name_str(int64_t sym, const char** p, size_t* n) {
     return s;                                  /* caller releases */
 }
 
-/* one level below root only (`\d` enforces it — q4m3 §12.7): 0 for the root */
-static int64_t ctx_seg_of(int64_t ns_sym) {
-    if (!ns_sym) return 0;
-    const char* p; size_t n;
-    ray_t* s = name_str(ns_sym, &p, &n);
-    if (!s) return 0;
-    int64_t seg = (n > 1 && p[0] == '.' && !memchr(p + 1, '.', n - 1)) ? ray_sym_intern_runtime(p + 1, n - 1) : 0;
-    ray_release(s);
-    return seg;
-}
-
 /* `.a.b` -> [a,b] from start=1; `..a` -> [a] from start=2 (root-qualified);
  * plain from start=0.  Returns the count, -1 on overflow. */
 static int env_segs(const char* p, size_t n, size_t start, int64_t* segs, int max) {
@@ -136,19 +127,40 @@ static int env_segs(const char* p, size_t n, size_t start, int64_t* segs, int ma
     return k;
 }
 
+static void ctx_path_of(int64_t ns_sym, env_path_t* path) {
+    path->n = 0;
+    if (!ns_sym) return;
+    const char* p; size_t n;
+    ray_t* s = name_str(ns_sym, &p, &n);
+    if (!s) return;
+    if (n > 1 && p[0] == '.' && q_env_ctx_ok(p + 1, n - 1))
+        path->n = env_segs(p, n, 1, path->seg, ENV_CTX_MAX);
+    if (path->n < 0) path->n = 0;
+    ray_release(s);
+}
+
+static ray_t* ctx_home(void) {
+    const env_path_t* c = ENV_PATH;
+    ray_t* v = env_ns;
+    for (int i = 0; v && i < c->n; i++) v = ray_dict_probe_sym_borrowed(v, c->seg[i]);
+    return v;
+}
+
 static size_t env_start(const char* p, size_t n) {
     return p[0] == '.' ? ((n > 1 && p[1] == '.') ? 2 : 1) : 0;
 }
 
-/* `\d .ns` re-roots a RELATIVE name: the context segment becomes the path's
- * first step, so a write lands in — and thereby creates — the namespace.
- * Returns the new segment count and re-points *home; k unchanged at root. */
+/* `\d .a.b` re-roots a RELATIVE name: the context path becomes its first steps, so a write lands in — and thereby
+ * creates — the namespace and its intermediates.  Returns the new segment count (-1 past ENV_SEG_MAX) and re-points
+ * *home; k unchanged at root. */
 static int ctx_reroot(int64_t* segs, int k, ray_t*** home) {
-    if (!ENV_SEG || k <= 0 || k >= ENV_SEG_MAX) return k;
-    memmove(segs + 1, segs, (size_t)k * sizeof *segs);
-    segs[0] = ENV_SEG;
+    const env_path_t* c = ENV_PATH;
+    if (!c->n || k <= 0) return k;
+    if (k + c->n > ENV_SEG_MAX) return -1;
+    memmove(segs + c->n, segs, (size_t)k * sizeof *segs);
+    memcpy(segs, c->seg, (size_t)c->n * sizeof *segs);
     *home = &env_ns;
-    return k + 1;
+    return k + c->n;
 }
 
 static ray_t* env_get(int64_t sym, int load) {
@@ -268,6 +280,7 @@ static ray_t** env_home(const char* p, size_t start, int64_t* segs, int* k, int 
     if (p[0] == '.') return start == 1 ? &env_ns : &env_root;
     ray_t** home = &env_root;
     *k = ctx_reroot(segs, *k, &home);
+    if (*k <= 0) return NULL;
     if (home == &env_root && ray_dict_find_sym(env_root, segs[0]) < 0 &&
         (ray_dict_find_sym(env_boot, segs[0]) >= 0 || boot_new))
         home = &env_boot;
@@ -352,7 +365,7 @@ int q_env_take(int64_t sym, ray_t* cur) {
     if (!s) return 0;
     int relative = n > 0 && p[0] != '.';
     ray_release(s);
-    if ((ENV_SEG && relative) || q_env_get(sym) != cur) return 0;
+    if ((ENV_DEPTH && relative) || q_env_get(sym) != cur) return 0;
     return q_env_bind(sym, RAY_NULL_OBJ) == RAY_OK;
 }
 
@@ -364,20 +377,28 @@ ray_err_t q_env_settle(int64_t sym, int stole, ray_t* val) {
 
 /* The scope switch as a saved triple: a handle op restores it byte-for-byte, because a `.z.vs` hook fired
  * mid-call runs a lambda whose exit resets the switch through q_env_scope. */
-typedef struct { int64_t scope, seg; int scoped; } env_scope_t;
+typedef struct { int64_t scope; env_path_t path; int scoped; } env_scope_t;
+
+static void path_copy(env_path_t* d, const env_path_t* s) {
+    d->n = s->n;
+    memcpy(d->seg, s->seg, (size_t)s->n * sizeof *s->seg);
+}
 
 static env_scope_t env_scope_as(int64_t ctx, int scoped) {
-    env_scope_t prev = { g_scope, g_scope_seg, g_scoped };
+    env_scope_t prev;
+    prev.scope = g_scope;
+    prev.scoped = g_scoped;
+    path_copy(&prev.path, &g_scope_path);
     g_scope = ctx;
-    g_scope_seg = ctx_seg_of(ctx);
+    ctx_path_of(ctx, &g_scope_path);
     g_scoped = scoped;
     return prev;
 }
 
-static void env_scope_restore(env_scope_t prev) {
-    g_scope = prev.scope;
-    g_scope_seg = prev.seg;
-    g_scoped = prev.scoped;
+static void env_scope_restore(const env_scope_t* prev) {
+    g_scope = prev->scope;
+    path_copy(&g_scope_path, &prev->path);
+    g_scoped = prev->scoped;
 }
 
 /* `` `. `` names the root itself, so assigning a dict RESTORES its members as
@@ -402,7 +423,7 @@ static ray_err_t env_root_splat(ray_t* d) {
         if (k && !RAY_IS_ERR(k)) ray_release(k);
         if (v && !RAY_IS_ERR(v)) ray_release(v);
     }
-    env_scope_restore(sc);
+    env_scope_restore(&sc);
     return e;
 }
 
@@ -502,11 +523,11 @@ static ray_t* env_addr_get(int64_t sym) {
     ray_t* s = name_str(sym, &p, &n);
     if (!s) return NULL;
     ray_t* v;
-    if (!ENV_SEG || n == 0 || p[0] == '.') v = q_env_get(sym);
+    if (!ENV_DEPTH || n == 0 || p[0] == '.') v = q_env_get(sym);
     else {
         int64_t segs[ENV_SEG_MAX];
         int k = env_segs(p, n, 0, segs, ENV_SEG_MAX);
-        v = k > 0 ? ray_dict_probe_sym_borrowed(env_ns, ENV_SEG) : NULL;
+        v = k > 0 ? ctx_home() : NULL;
         for (int i = 0; v && i < k; i++) v = ray_dict_probe_sym_borrowed(v, segs[i]);
     }
     ray_release(s);
@@ -516,7 +537,7 @@ static ray_t* env_addr_get(int64_t sym) {
 ray_t* q_env_handle_get(int64_t sym) {
     env_scope_t sc = env_scope_as(0, 0);
     ray_t* v = env_addr_get(sym);
-    env_scope_restore(sc);
+    env_scope_restore(&sc);
     return v;
 }
 
@@ -525,14 +546,14 @@ ray_t* q_env_handle_resolve(int64_t sym) {
     int32_t floor = q_env_frame_floor(-1);      /* a handle names a global: no local shadows it */
     ray_t* v = q_env_resolve(q_env_fullname(sym, NULL));
     q_env_frame_floor(floor);
-    env_scope_restore(sc);
+    env_scope_restore(&sc);
     return v;
 }
 
 ray_err_t q_env_handle_set(int64_t sym, ray_t* val) {
     env_scope_t sc = env_scope_as(0, 0);
     ray_err_t e = q_env_set(sym, val);
-    env_scope_restore(sc);
+    env_scope_restore(&sc);
     return e;
 }
 
@@ -540,21 +561,21 @@ int q_env_handle_take(int64_t sym, ray_t* cur) {
     if (!cur) return 0;
     env_scope_t sc = env_scope_as(0, 0);
     int r = env_addr_get(sym) == cur && q_env_bind(sym, RAY_NULL_OBJ) == RAY_OK;
-    env_scope_restore(sc);
+    env_scope_restore(&sc);
     return r;
 }
 
 ray_err_t q_env_handle_settle(int64_t sym, int stole, ray_t* val) {
     env_scope_t sc = env_scope_as(0, 0);
     ray_err_t e = q_env_settle(sym, stole, val);
-    env_scope_restore(sc);
+    env_scope_restore(&sc);
     return e;
 }
 
 ray_err_t q_env_handle_bind(int64_t sym, ray_t* val) {
     env_scope_t sc = env_scope_as(0, 0);
     ray_err_t e = q_env_bind(sym, val);
-    env_scope_restore(sc);
+    env_scope_restore(&sc);
     return e;
 }
 
@@ -786,7 +807,7 @@ static ray_t* env_resolve(int64_t sym, int lib) {
     } else {
         base = frames_lookup_at(head, hend < n);
         if (!base) {                                /* a global is BOUND to its context: no root search */
-            ray_t* home = ENV_SEG ? ray_dict_probe_sym_borrowed(env_ns, ENV_SEG) : env_root;
+            ray_t* home = ENV_DEPTH ? ctx_home() : env_root;
             if (home) base = ray_dict_probe_sym_borrowed(home, head);
         }
         if (!base) base = ray_dict_probe_sym_borrowed(env_boot, head);
@@ -875,6 +896,17 @@ int q_env_ident_ok(const char* p, size_t len) {
     return 1;
 }
 
+int q_env_ctx_ok(const char* p, size_t len) {
+    int depth = 0;
+    for (size_t i = 0; i <= len; ) {
+        size_t e = i;
+        while (e < len && p[e] != '.') e++;
+        if (++depth > ENV_CTX_MAX || !q_env_ident_ok(p + i, e - i)) return 0;
+        i = e + 1;
+    }
+    return 1;
+}
+
 int q_env_name_cmp(const void* a, const void* b) {
     const char* pa; size_t la;
     const char* pb; size_t lb;
@@ -935,17 +967,17 @@ ray_t* q_env_ns_roster(void) {
 void q_env_ctx_set(int64_t ns_sym) {
     if (ns_sym == g_ctx) return;
     g_ctx = ns_sym;
-    g_ctx_seg = ctx_seg_of(ns_sym);
+    ctx_path_of(ns_sym, &g_ctx_path);
 }
 
 int64_t q_env_ctx(void) { return g_ctx; }
 
 int64_t q_env_scope(int64_t scope) {
     int64_t prev = g_scoped ? g_scope : Q_ENV_SCOPE_SESSION;
-    if (scope == prev) return prev;         /* a same-namespace call derives no segment */
+    if (scope == prev) return prev;         /* a same-namespace call derives no path */
     g_scoped = scope != Q_ENV_SCOPE_SESSION;
     g_scope = g_scoped ? scope : 0;
-    g_scope_seg = ctx_seg_of(g_scope);
+    ctx_path_of(g_scope, &g_scope_path);
     return prev;
 }
 
@@ -976,7 +1008,8 @@ void q_env_destroy(void) {
     if (g_natives) ray_sys_free(g_natives);
     g_natives = NULL;
     g_nnat = g_natcap = 0;
-    g_ctx = g_ctx_seg =g_scope = g_scope_seg = g_scoped = 0;
+    g_ctx = g_scope = g_scoped = 0;
+    g_ctx_path.n = g_scope_path.n = 0;
 }
 
 /* q `nam set y` (ref/get.md) — assign a global through a symbol handle.  It is
