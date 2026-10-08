@@ -112,7 +112,7 @@ static const q_dotz_opt_t Q_OPTS[] = {
     { "-E", 1, NULL, "012" }, { "-g", 1, "g", "01" }, { "-l", 0, NULL, NULL }, { "-L", 0, NULL, NULL },
     { "-m", 1, NULL, NULL }, { "-o", 1, "o", NULL }, { "-p", 1, NULL, NULL }, { "-P", 1, "P", NULL },
     { "-q", 0, NULL, NULL }, { "-r", 1, NULL, NULL }, { "-s", 1, "s", NULL }, { "-S", 1, "S", NULL },
-    { "-t", 1, "t", NULL }, { "-T", 1, NULL, NULL }, { "-u", 1, NULL, NULL }, { "-U", 1, NULL, NULL },
+    { "-t", 1, "t", NULL }, { "-T", 1, "T", NULL }, { "-u", 1, NULL, NULL }, { "-U", 1, NULL, NULL },
     { "-w", 1, NULL, NULL }, { "-W", 1, "W", NULL }, { "-z", 1, "z", "01" },
     { "--port", 1, NULL, NULL }, { "-classic", 0, NULL, NULL }, { "-eval", 1, NULL, NULL },
     { "-eval-before", 1, NULL, NULL }, { "-duckdb", 1, NULL, NULL }, { "-conn", 1, NULL, NULL },
@@ -451,6 +451,7 @@ ray_t* q_dotz_resolve(int64_t sym_id) {
             case 'W': out = q_conn_zW(); break;
             case 'H': out = q_conn_zH(); break;
             case 'K': out = z_K(); break;
+            case 'l': out = ray_list_new(0); break;                              /* .z.l unlicensed: () */
             case 'k': out = z_k(); break;
             case 'v': out = z_v(); break;
             /* one-line producers inlined; q_dotz_now_ns(0)=UTC, (1)=local */

@@ -136,9 +136,10 @@ void q_sys_seed_init(void) {
  * `week$.  `\C` is store-and-report only: peachq does not yet wrap HTTP output. */
 static int32_t g_http_rows, g_http_cols;  /* \C HTTP size     (default 36 2000) */
 static int32_t g_gc_mode;                 /* \g gc mode       (default 0)       */
-static int64_t g_utc_offset;              /* \o UTC offset    (default 0N)      */
+static int32_t g_utc_offset;              /* \o UTC offset    (default 0N)      */
 static int32_t g_week_offset;             /* \W week offset   (default 2)       */
 static int32_t g_err_trap;                /* \e error trap    (default 0)       */
+static int32_t g_timeout_s;               /* \T client timeout, seconds (default 0) */
 static int     g_launching;               /* the launcher is applying argv options */
 static int     g_own_process;             /* this runtime may exit the process   */
 static int     g_exiting;                 /* .z.exit reentry guard */
@@ -163,10 +164,11 @@ void q_sys_cfg_init(void) {
     q_console_clip_set(25, 80);  /* `\c` clip ARMED at the 25 80 default (q_console.c) */
     g_http_rows = 36; g_http_cols = 2000;
     g_gc_mode   = 0;
-    g_utc_offset = NULL_I64;     /* 0N — "use the machine offset" */
+    g_utc_offset = NULL_I32;     /* 0N — "use the machine offset" */
     g_week_offset = 2;           /* Monday (0 = Saturday) */
     q_tok_date_order_set(0);     /* `\z` — mm/dd/yyyy (state single-homed in q_tok.c) */
     g_err_trap  = 0;             /* trapping off */
+    g_timeout_s = 0;             /* `\T` no timeout */
     g_timer_ms  = 0;             /* `\t` off per runtime */
     g_timer_id  = -1;
     g_listen_port = 0;           /* `\p` — no listening port by default */
@@ -254,13 +256,23 @@ static int parse_ints(const char* s, size_t len, int64_t* out, int max) {
     return parse_ints_n(s, len, out, max, 0);
 }
 
-/* Build a two-element typed vector for the pair-valued getters (`\c`/`\C`). */
+/* The `(ms; bytes)` 2-long the timing forms (`\ts`, `.Q.ts`) answer. */
 static ray_t* pair_i64(int64_t a, int64_t b) {
     ray_t* v = ray_vec_new(RAY_I64, 2);
     if (RAY_IS_ERR(v)) return v;
     v = ray_vec_append(v, &a);
     if (RAY_IS_ERR(v)) return v;
     return ray_vec_append(v, &b);
+}
+
+/* The `\c`/`\C` getters' int pair; an auto (`0N`) axis is the int null. */
+static ray_t* pair_i32(int64_t a, int64_t b) {
+    int32_t p[2] = { (int32_t)a, (int32_t)b };
+    ray_t* v = ray_vec_from_raw(RAY_I32, p, 2);
+    if (RAY_IS_ERR(v)) return v;
+    if (a == NULL_I64) ray_vec_set_null(v, 0, true);
+    if (b == NULL_I64) ray_vec_set_null(v, 1, true);
+    return v;
 }
 
 /* ---- per-command handlers ---------------------------------------------------
@@ -317,9 +329,9 @@ static ray_t* h_S(const char* arg, size_t alen) {
 
 /* ---- shared handlers for the still-unimplemented commands ------------------
  * After the dedicated handlers, h_getset serves the REMAINING commands whose SETTER / ACTION form
- * (arg present) prints NOTHING in kdb — \r replicate, \_ hide-q-code, \T timeout, \u user-pwd.  We accept the
+ * (arg present) prints NOTHING in kdb — \r replicate, \_ hide-q-code, \u user-pwd.  We accept the
  * arg-form as a silent no-op: the OUTPUT matches kdb's empty setter output, so
- * the frozen ledger rows that bank that silence (e.g. `\z 1`) stay green.  The
+ * the frozen ledger rows that bank that silence stay green.  The
  * side-effect is a tracked gap; the GETTER form (no arg, which kdb prints a
  * value for) can't yet report the value → honest 'nyi. */
 static ray_t* h_getset(size_t alen) {
@@ -698,7 +710,7 @@ ray_t* q_sys_ts_apply(ray_t* f, ray_t* args) {
 
 /* `\t` — timer OR expression timing (basics/syscmds.md), disambiguated by the
  * argument (owner ruling 2026-07-14):
- *   `\t`         getter → current interval as a long (`0` when off, kdb-true).
+ *   `\t`         getter → current interval as an int (`0i` when off, kdb-true).
  *   `\t 0`       stop the repeating timer (silent); works with no poll loop.
  *   `\t N` (N>0) fire `.z.ts` every N ms via a forwarding thunk on the poll
  *                timer heap (silent).  Needs an event poll; an embedder
@@ -714,7 +726,7 @@ ray_t* q_sys_ts_apply(ray_t* f, ray_t* args) {
  * `\t 0` from re-invoking `.z.ts`; a reentrant interval change may transiently
  * double-fire (documented edge). */
 static ray_t* h_t(const char* arg, size_t alen, const char* rest, size_t restlen, int64_t rep) {
-    if (alen == 0) return ray_i64(g_timer_ms);           /* getter → bare long */
+    if (alen == 0) return ray_i32((int32_t)g_timer_ms);  /* getter → int; capped at INT32_MAX below */
 
     /* Timer-vs-expression disambiguation.  A `:n` suffix is always expression
      * timing; without one, only a LONE integer (whole arg region, trailing
@@ -850,7 +862,7 @@ static ray_t* h_c(const char* rest, size_t restlen) {
     if (cnt == 0) {                                           /* getter */
         int64_t r, c;
         q_console_clip_setting(&r, &c);
-        return pair_i64(r, c);
+        return pair_i32(r, c);
     }
     if (cnt >= 2)                                             /* setter (coerces + arms) */
         q_console_clip_set(p[0], p[1]);
@@ -860,7 +872,7 @@ static ray_t* h_c(const char* rest, size_t restlen) {
 static ray_t* h_C(const char* rest, size_t restlen) {
     int64_t p[2];
     int cnt = parse_ints(rest, restlen, p, 2);
-    if (cnt == 0) return pair_i64(g_http_rows, g_http_cols);
+    if (cnt == 0) return pair_i32(g_http_rows, g_http_cols);
     if (cnt >= 2) {
         g_http_rows = (int32_t) clamp_cc(p[0]);
         g_http_cols = (int32_t) clamp_cc(p[1]);
@@ -887,27 +899,38 @@ int q_sys_err_trap_mode(void) { return (int)g_err_trap; }
 
 void q_sys_err_trap_set(int mode) { g_err_trap = (int32_t)mode; }
 
-/* `\o` — offset from UTC (hours; minutes if abs>23).  `\o`→`0N` (machine
+/* `\o` — offset from UTC (hours; minutes if abs>23).  `\o`→`0Ni` (machine
  * offset), else the set value; `\o 0N` restores the machine offset. */
 static ray_t* h_o(const char* arg, size_t alen) {
-    if (alen == 0) return ray_i64(g_utc_offset);     /* 0N default, or set value */
-    int64_t v = NULL_I64;
+    if (alen == 0) return ray_i32(g_utc_offset);     /* 0Ni default, or set value */
+    int64_t v = NULL_I32;
     if (!(alen == 2 && !memcmp(arg, "0N", 2)) && !parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
-    g_utc_offset = v;
+    if (v != NULL_I32 && (v <= INT32_MIN || v > INT32_MAX)) return q_err(QE_PARSE);
+    g_utc_offset = (int32_t)v;
     return NULL;
 }
 
 bool q_sys_utc_offset_secs(int64_t* secs) {
-    if (g_utc_offset == NULL_I64) return false;
+    if (g_utc_offset == NULL_I32) return false;
     uint64_t unit = g_utc_offset > 23 || g_utc_offset < -23 ? 60 : 3600;
     *secs = (int64_t)((uint64_t)g_utc_offset * unit);
     return true;
 }
 
+/* `\T` — client execution timeout in seconds (syscmds.md#t-timeout): stored and reported, not yet enforced. */
+static ray_t* h_T(const char* arg, size_t alen) {
+    if (alen == 0) return ray_i32(g_timeout_s);
+    int64_t v;
+    if (!parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
+    if (v < 0 || v > INT32_MAX) return q_err(QE_DOMAIN);
+    g_timeout_s = (int32_t)v;
+    return NULL;
+}
+
 /* syscmds.md#z-date-parsing — the "D"$ date order; state lives in q_tok.c, the
  * one date reader.  Out of range is a silent no-op, as for `\P`. */
 static ray_t* h_z(const char* arg, size_t alen) {
-    if (alen == 0) return ray_i64(q_tok_date_order());
+    if (alen == 0) return ray_i32(q_tok_date_order());
     int64_t v;
     if (!parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
     if (v < 0 || v > 1) return NULL;
@@ -1257,6 +1280,7 @@ ray_t* q_sys_run(const char* line, size_t n) {
             case 'C': return h_C(rest, restlen);                 /* HTTP display size   */
             case 'o': return h_o(arg, alen);                     /* offset from UTC     */
             case 'z': return h_z(arg, alen);                     /* "D"$ date order     */
+            case 'T': return h_T(arg, alen);                     /* client timeout      */
             case 'g': return h_g(arg, alen);                     /* gc mode             */
             case 's': return h_s(arg, alen);                     /* secondary threads   */
             case 'W': return h_W(arg, alen);                     /* week offset         */
@@ -1272,9 +1296,8 @@ ray_t* q_sys_run(const char* line, size_t n) {
             case '2': return h_redirect(2, arg, alen);           /* stderr redirect     */
             case 'x': return h_x(arg, alen);                     /* expunge a .z callback */
             /* Silent setter/action form (arg present) → NULL; getter → 'nyi:
-             * \r replicate, \T timeout, \u user-pwd, \_ hide-q-code. */
-            case 'r': case 'T':
-            case 'u': case '_':
+             * \r replicate, \u user-pwd, \_ hide-q-code. */
+            case 'r': case 'u': case '_':
                 return h_getset(alen);
             /* \\ quit — q_sys_exit is capability-gated (a real process exits firing
              * .z.exit; an embedder returns silently, kdb-true either way). */
