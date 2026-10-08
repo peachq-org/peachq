@@ -8,6 +8,7 @@
 #include "qlang/q_count.h"
 #include "qlang/eval/q_funsql.h"
 #include "qlang/eval/q_eval.h"
+#include "qlang/eval/q_eval_internal.h" /* q_eval_symvec_has */
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"         /* q_type_widens — the one int/long pair */
 #include "qlang/q_prim.h"              /* q_cols_fn */
@@ -1399,7 +1400,9 @@ static ray_t* bang_qsql(ray_t** args) {
                 ray_release(r);
                 r = q_err(QE_DOMAIN);
             }
-            nk = 0;                                 /* dropping may hit keys */
+            for (int64_t i = 0; i < nk; i++)
+                if (q_eval_symvec_has(a, ray_table_col_name(t, i))) nk = 0;
+            if (r && !RAY_IS_ERR(r) && ray_table_ncols(r) <= nk) nk = 0;
         } else {
             ray_t* idx = where_fold(c, t, til_count(t));
             if (RAY_IS_ERR(idx)) r = idx;
