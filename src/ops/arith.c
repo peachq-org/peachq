@@ -340,13 +340,8 @@ static ray_t* mul_temporal(ray_t* t, ray_t* n) {
     int8_t rt = t->type == -RAY_DATETIME || (f && t->type == -RAY_DATE) ? -RAY_DATETIME
               : f ? -RAY_F64 : t->type;
     if (RAY_ATOM_IS_NULL(t) || RAY_ATOM_IS_NULL(n)) return ray_typed_null(rt);
-    if (rt == -RAY_DATETIME) return ray_datetime(as_f64(t) * as_f64(n));
-    if (rt == -RAY_F64)      return make_f64(as_f64(t) * as_f64(n));
-    if (n->type == -RAY_F32) {   /* a real scales the count in its own lane, then narrows (as_i64's range guard) */
-        double v = as_f64(t) * as_f64(n);
-        return v >= -9223372036854775808.0 && v < 9223372036854775808.0 ? make_typed_int(rt, (int64_t)v)
-                                                                         : ray_typed_null(rt);
-    }
+    if (rt != t->type || n->type == -RAY_F32 || rt == -RAY_DATETIME)
+        return float_lane_atom(rt, as_f64(t) * as_f64(n));
     return make_typed_int(rt, wrap_mul64(t->i64, as_i64(n)));
 }
 
@@ -383,108 +378,33 @@ ray_t* ray_div_fn(ray_t* a, ray_t* b) {
     return make_f64(as_f64(a) / as_f64(b));
 }
 
+/* The counts divide exactly in the int lane, and in the float lane beside a real, float or datetime.  A char is its
+ * code point, so its blank is no null here; a null or a zero divisor answers the result type's null. */
 ray_t* ray_idiv_fn(ray_t* a, ray_t* b) {
-    if (!is_numeric(a) || !is_numeric(b))
-        return ray_error("type", "cannot div %s by %s",
-                         ray_type_name(a->type), ray_type_name(b->type));
-    if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))
-        return ray_typed_null(-RAY_I64);
-    double bv = as_f64(b);
-    if (bv == 0.0)
-        return ray_typed_null(-RAY_I64);
-    double q = floor(as_f64(a) / bv);
-    if (q < (double)INT64_MIN || q > (double)INT64_MAX)
-        return ray_typed_null(-RAY_I64);
-    return make_i64((int64_t)q);
+    int8_t rt = (int8_t)-div_type((int8_t)-a->type, (int8_t)-b->type);
+    if (!rt)
+        return ray_error("type", "cannot div %s by %s", ray_type_name(a->type), ray_type_name(b->type));
+    if (atom_is_oob_null(a) || atom_is_oob_null(b)) return ray_typed_null(rt);
+    if (float_lane(a, b))
+        return as_f64(b) == 0.0 ? ray_typed_null(rt) : float_lane_atom(rt, floor(as_f64(a) / as_f64(b)));
+    return as_i64(b) == 0 ? ray_typed_null(rt) : make_typed_int(rt, floor_div64(as_i64(a), as_i64(b)));
 }
 
 ray_t* ray_mod_fn(ray_t* a, ray_t* b) {
     if ((a && RAY_IS_PARTED(a->type)) || (b && RAY_IS_PARTED(b->type)))
         return atomic_map_binary_op(ray_mod_fn, OP_MOD, a, b);
-    /* Temporal % numeric → temporal (same type as left operand) */
-    if (is_temporal(a) && is_numeric(b)) {
-        if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))
-            return ray_typed_null(a->type);
-        int64_t bv;
-        if (b->type == -RAY_F64) {
-            double bvf = b->f64;
-            if (bvf == 0.0)
-                return ray_typed_null(a->type);
-            bv = (int64_t)bvf;
-        } else {
-            bv = as_i64(b);
-        }
-        if (bv == 0)
-            return ray_typed_null(a->type);
-
-        int64_t av = a->i64;
-        int64_t q = av / bv;
-        if ((av ^ bv) < 0 && q * bv != av) q--;
-        int64_t result = wrap_sub64(av, wrap_mul64(bv, q));
-        if (a->type == -RAY_TIME)      return ray_time(result);
-        if (a->type == -RAY_DATE)      return ray_date(result);
-        if (a->type == -RAY_MONTH)     return ray_month(result);
-        if (a->type == -RAY_MINUTE)    return ray_minute(result);
-        if (a->type == -RAY_SECOND)    return ray_second(result);
-        if (a->type == -RAY_TIMESPAN)  return ray_timespan(result);
-        return ray_timestamp(result);
-    }
-    if (!is_numeric(a) || !is_numeric(b) || arith_char_refused(a->type == -RAY_F32 ? -RAY_F64 : a->type, b->type))
-        return ray_error("type", "cannot mod %s by %s",
-                         ray_type_name(a->type), ray_type_name(b->type));
-
-    /* u8: unsigned byte modulo, no null sentinel — mod by 0 returns 0 */
-    if (b->type == -RAY_BYTE_ONLY) {
-        uint8_t bv = b->u8;
-        if (bv == 0) return make_u8(0);
-        return make_u8((uint8_t)((uint8_t)as_i64(a) % bv));
-    }
-    if (a->type == -RAY_BYTE_ONLY) {
-        /* a is u8 but b is not u8 — treat as integer, result follows b's type */
-    }
-
-    /* Null propagation and division by zero: null type follows RIGHT operand.
-     * ref/mod.md's grid is asymmetric, so mod cannot share promote_float_type:
-     * row `e` is f (a real LEFT operand yields float), while an int row with
-     * col `e` is e — which "follows RIGHT" already gives. */
-    if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) {
-        int8_t rt = (b->type == -RAY_F64 || a->type == -RAY_F64 ||
-                     a->type == -RAY_F32) ? -RAY_F64 : b->type;
-        return ray_typed_null(rt);
-    }
-
-    /* Float modulo: result = a - b * floor(a/b), type follows RIGHT or f64 */
-    if (is_float_op(a, b)) {
+    int8_t rt = (int8_t)-mod_type((int8_t)-a->type, (int8_t)-b->type);
+    if (!rt)
+        return ray_error("type", "cannot mod %s by %s", ray_type_name(a->type), ray_type_name(b->type));
+    if (atom_is_oob_null(a) || atom_is_oob_null(b)) return ray_typed_null(rt);
+    if (float_lane(a, b)) {
         double av = as_f64(a), bv = as_f64(b);
-        if (bv == 0.0) {
-            int8_t rt = (b->type == -RAY_F64 || a->type == -RAY_F64 ||
-                         a->type == -RAY_F32) ? -RAY_F64 : b->type;
-            return ray_typed_null(rt);
-        }
-        double result = av - bv * floor(av / bv);
-        /* Snap tiny residual to 0 */
-        if (fabs(result) < 1e-12 || fabs(result - fabs(bv)) < 1e-12) result = bv > 0 ? 0.0 : -0.0;
-        if (b->type == -RAY_F64 || a->type == -RAY_F64 || a->type == -RAY_F32)
-            return make_f64(result);
-        if (b->type == -RAY_F32) return make_typed_float(-RAY_F32, result);
-        if (b->type == -RAY_I32) return make_i32((int32_t)(int64_t)result);
-        if (b->type == -RAY_I16) return make_i16((int16_t)(int64_t)result);
-        return make_i64((int64_t)result);
+        if (bv == 0.0) return ray_typed_null(rt);
+        double r = av - bv * floor(av / bv);
+        if (fabs(r) < 1e-12 || fabs(r - fabs(bv)) < 1e-12) r = bv > 0 ? 0.0 : -0.0;
+        return float_lane_atom(rt, r);
     }
-
-    /* Integer modulo: result = a - b * floor(a/b), sign follows b (divisor) */
-    int64_t av = as_i64(a), bv = as_i64(b);
-    if (bv == 0)
-        return ray_typed_null(b->type);
-
-    int64_t q = av / bv;
-    if ((av ^ bv) < 0 && q * bv != av) q--;  /* floor division */
-    int64_t result = wrap_sub64(av, wrap_mul64(bv, q));
-    /* Result type follows RIGHT operand */
-    if (b->type == -RAY_I32) return make_i32((int32_t)result);
-    if (b->type == -RAY_I16) return make_i16((int16_t)result);
-    if (b->type == -RAY_BYTE_ONLY) return make_u8((uint8_t)result);
-    return make_i64(result);
+    return as_i64(b) == 0 ? ray_typed_null(rt) : make_typed_int(rt, floor_mod64(as_i64(a), as_i64(b)));
 }
 
 ray_t* ray_neg_fn(ray_t* x) {
