@@ -116,6 +116,10 @@ int q_search_admits(ray_t* x, ray_t* y);
 ray_t* q_bin_wrap(ray_t* x, ray_t* y);
 ray_t* q_binr_wrap(ray_t* x, ray_t* y);
 
+/* ---- defined in ops/q_time.c ---- */
+ray_t* q_ltime_wrap(ray_t* x);
+ray_t* q_gtime_wrap(ray_t* x);
+
 /* ---- defined in ops/q_math.c ---- */
 ray_t* q_sin_wrap(ray_t* x);
 ray_t* q_cos_wrap(ray_t* x);
