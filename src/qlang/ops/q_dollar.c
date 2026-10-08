@@ -1,5 +1,5 @@
 /* q_dollar — the single C home for the `$` verb (contract: q_dollar.h).
- * PURE value semantics: values -> values, no env/runtime state.  q_dollar is
+ * Value semantics: values -> values; the one runtime read is the live `\W` day for `week$.  q_dollar is
  * the generic registry row; q_dollar_pad / q_dollar_cast / q_dollar_tok /
  * q_dollar_enum / q_dollar_mmu are the per-operation homes, exposed with types
  * for reuse.  The per-target q_cast_* matrix lives here too; the int-atom
@@ -11,6 +11,7 @@
 #include "qlang/parse/q_tok.h"   /* q_tok — THE Tok entry */
 #include "qlang/base/q_calendar.h" /* q_calendar_ts_compose — date->timestamp cast */
 #include "qlang/ops/q_index.h"  /* q_index_any_nested_item — the "c"$ pack/distribute boundary */
+#include "qlang/ops/q_sys.h"    /* q_sys_week_offset — the live `\W` start day */
 #include "ops/temporal.h"  /* ray_temporal_extract — base calendar decomposition */
 #include "lang/cal.h"     /* THE datetime and timestamp splits */
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
@@ -741,7 +742,7 @@ static int8_t component_tag(q_comp_e c) {
  * HOUR/MINUTE/SECOND wrap+cap it at 24h (0D25:00:00 -> 25, never 1). */
 static int64_t component_value(q_comp_e c, int64_t days, int64_t tod, int8_t* rtag) {
     *rtag = component_tag(c);
-    if (c == QCOMP_WEEK) return q_calendar_week_start(days);
+    if (c == QCOMP_WEEK) return q_calendar_week_start(days, q_sys_week_offset());
     if (c == QCOMP_TOD) return tod;
     switch (c) {
     case QCOMP_YEAR: case QCOMP_MM: case QCOMP_DD: {
