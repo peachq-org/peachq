@@ -1090,11 +1090,11 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         /* The sender's `\d` context is the lambda's SCOPE (dotless on the wire, empty = root).  It need not
          * exist here — a scope is a name, as after a local `\d .new` — so an unqualified global in the body
          * resolves or fails at EVALUATION against the receiver's copy, never at decode (owner 2026-09-18).
-         * What `\d` could never set (a dotted or non-identifier context) is a malformed frame. */
+         * What `\d` could never set (a non-identifier segment) is a malformed frame. */
         int64_t ns = 0;
         if (ctxn) {
             char nb[64];
-            if (ctxn + 1 >= sizeof nb || !q_env_ident_ok(ctx, ctxn)) return q_err(QE_NAME);
+            if (ctxn + 1 >= sizeof nb || !q_env_ctx_ok(ctx, ctxn)) return q_err(QE_NAME);
             nb[0] = '.';
             memcpy(nb + 1, ctx, ctxn);
             ns = ray_sym_intern_runtime(nb, ctxn + 1);
