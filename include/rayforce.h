@@ -389,6 +389,7 @@ void ray_sym_vec_adopt_domain(ray_t* out, ray_t* in);
 int8_t   ray_obj_type(ray_t* v);
 uint8_t  ray_obj_attrs(ray_t* v);
 int64_t  ray_vec_get_i64(ray_t* vec, int64_t idx);
+void     ray_vec_set_i64(ray_t* vec, int64_t idx, int64_t v);
 double   ray_vec_get_f64(ray_t* vec, int64_t idx);
 int64_t  ray_vec_get_sym_id(ray_t* vec, int64_t idx);
 
