@@ -103,13 +103,13 @@ static ray_t* ctx_switch(const char* name, size_t len) {
         q_env_ctx_set(0);
         return NULL;
     }
-    /* One level below root only (kdb limitation, q4m3 §12.7): `.ident`. */
+    /* nested `.a.b` is a superset of kdb 4.x (q4m3 §12.7: one level only); the first definition creates it */
     if (len >= 2 && len < 64 && name[0] == '.' &&
-        q_env_ident_ok(name + 1, len - 1)) {
+        q_env_ctx_ok(name + 1, len - 1)) {
         q_env_ctx_set(ray_sym_intern_runtime(name, len));
         return NULL;
     }
-    return q_err_name(name, len);       /* `\d .jab.util` -> '.jab.util */
+    return q_err_name(name, len);
 }
 
 /* ---- `\S` random-seed state (moved from q_ns.c; \S is its only consumer) ----

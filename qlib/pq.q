@@ -163,7 +163,7 @@
   if[not line like "q.*"; :0];
   close:line?")";
   name:line 2_til close;
-  named:(0<count name) and (first[name] in .Q.a,.Q.A) and all name in .Q.an;
+  named:all{(0<count x) and (first[x] in .Q.a,.Q.A) and all x in .Q.an}each "." vs name;
   $[named and close<count line; close+1; 0]};
 
 / @ignore
