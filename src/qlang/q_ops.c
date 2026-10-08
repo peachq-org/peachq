@@ -498,6 +498,9 @@ static const q_op_t Q_OPS[] = {
      * wrappers rather than QR_ENV renames. */
     { "getenv", QLEX_KW,        QR_FN1("getenv", q_getenv_wrap), QR_NONE,         NULL, 1, 0, "none", NULL, QKOP(30) },
     { "setenv", QLEX_KW,        QR_NONE,                       QR_FN2("setenv", q_setenv_wrap), NULL, 1, 1, "none", NULL, QKOP(33) },
+    /* ---- local and UTC time ---- both on ref/gtime.md */
+    { "gtime",  QLEX_KW,        QR_FN1("gtime", q_gtime_wrap), QR_NONE,           NULL, 1, 0, "atomic", NULL },
+    { "ltime",  QLEX_KW,        QR_FN1("ltime", q_ltime_wrap), QR_NONE,           NULL, 1, 0, "atomic", NULL },
     /* ---- adverbs ---- `':` is variadic: Each Prior on a rank-2 value, Each
      * Parallel on a rank-1 one (ref/maps.md); the cell names the dyadic
      * reading. */
