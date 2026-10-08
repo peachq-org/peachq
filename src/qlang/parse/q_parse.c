@@ -2234,15 +2234,35 @@ static ray_t *intake_tree(const char *name, size_t nl, ray_t *arg) {
     return t;
 }
 
+static ray_t *parse_text(const char *src);
+
+/* k texts a client is witnessed sending, byte for byte bar trailing blanks, beside their q transliteration —
+ * qStudio's Server Properties (qstudio-private ServerSlashConfig.java:36, ServerReport.java:54-63,74).  Not a k
+ * evaluator: an entry needs a witness of the text (the real k mode is Dirscx). */
+static const struct { const char *k, *q; } k_known[] = {
+    { ".:'[\"\\\\\",/:\"cCegopPstTWz\"]",
+      "value each \"\\\\\",/:\"cCegopPstTWz\"" },
+    { "({$[min `PV`PD`D`pf in !: `.Q; ([] desc:! b; val:. b:(`Segments`Partitions`PartitionType)!(#.Q.D;#.Q.PD;.Q.pf)); "
+      "([] Data:,\"Not partitioned or segmented\")]}[];+:{,x}'.Q.w[];"
+      ".:'[$`.z.a`.z.h`.z.i`.z.k`.z.K`.z.l`.z.o`.z.u`.z.x,`$\"\\\\s\"])",
+      "({$[min `PV`PD`D`pf in key `.Q; ([] desc:key b; val:value b:(`Segments`Partitions`PartitionType)!"
+      "(count .Q.D;count .Q.PD;.Q.pf)); ([] Data:enlist \"Not partitioned or segmented\")]}[]; "
+      "flip {enlist x} each .Q.w[]; value each string `.z.a`.z.h`.z.i`.z.k`.z.K`.z.l`.z.o`.z.u`.z.x,`$\"\\\\s\")" },
+};
+
 ray_t *q_parse_lang_tree(char letter, const char *p, int64_t n) {
     char nm[5] = { '.', letter, '.', 'e', '\0' };
     if (letter == 'q') return intake_tree("value", 5, ray_charv(p, n));
+    if (letter == 'k') {
+        size_t m = (size_t)n;
+        while (m && (p[m - 1] == ' ' || p[m - 1] == '\t' || p[m - 1] == '\n' || p[m - 1] == '\r')) m--;
+        for (size_t i = 0; i < sizeof k_known / sizeof k_known[0]; i++)
+            if (strlen(k_known[i].k) == m && !memcmp(k_known[i].k, p, m)) return parse_text(k_known[i].q);
+    }
     return intake_tree(nm, 4, ray_charv(p, n));
 }
 
 /* ===== public entry ========================================================== */
-
-static ray_t *parse_text(const char *src);
 
 static const char *intake_lang(const char *src, size_t *n, char *lang) {
     *lang = 0;
