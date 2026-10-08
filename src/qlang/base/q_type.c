@@ -199,6 +199,18 @@ int8_t q_type_cmp_as(int8_t a, int8_t b) {
     return dated && clock ? b : 0;
 }
 
+int8_t q_type_diff(int8_t t) {
+    switch (t) {
+    case RAY_BOOL: case RAY_BYTE_ONLY: case RAY_I16: case RAY_I32:
+    case RAY_DATE: case RAY_MONTH: return RAY_I32;
+    case RAY_TIMESTAMP:            return RAY_TIMESPAN;
+    case RAY_DATETIME:             return RAY_F64;
+    case RAY_I64: case RAY_F32: case RAY_F64: case RAY_TIMESPAN:
+    case RAY_MINUTE: case RAY_SECOND: case RAY_TIME: return t;
+    default:                       return 0;
+    }
+}
+
 /* The empty typed vector of tag (sym vectors need their width ctor). */
 ray_t* q_type_empty(int8_t tag) {
     return tag == RAY_SYM ? ray_sym_vec_new(RAY_SYM_W64, 0)
