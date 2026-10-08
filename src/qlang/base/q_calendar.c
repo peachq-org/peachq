@@ -40,12 +40,12 @@ int64_t q_calendar_ts_compose(int64_t days, int64_t tod_ns) {
                                                             : INT64_MAX;
 }
 
-/* 2000.01.01 is a Saturday; shift the epoch so Monday==0, floor to the week.
+/* 2000.01.01 is a Saturday, so day 0 is start day 0.
  * `week` has no base ray_temporal_extract field, so the cast keeps this q-side
  * (calendar year/mm/dd and clock hh/uu/ss decode elsewhere). */
-int64_t q_calendar_week_start(int64_t days) {
-    int64_t dow = (((days + 5) % 7) + 7) % 7;   /* 0=Mon .. 6=Sun */
-    return days - dow;
+int64_t q_calendar_week_start(int64_t days, int64_t start) {
+    int64_t n = ((start % 7) + 7) % 7;
+    return days - ((((days - n) % 7) + 7) % 7);
 }
 
 /* Hinnant civil_from_days (public domain), rebased 2000 the same way month_payload_as_days rebases the

@@ -131,13 +131,9 @@ void q_sys_seed_init(void) {
  * (called by q_runtime_create), so a `\c 5 5` in one .qcmd file never leaks
  * into the next (the doctest runner builds a fresh runtime per file).
  *
- * BEHAVIOURAL SIDE-EFFECTS ARE MOSTLY DEFERRED (rule 9): `\c` NOW clips the q
- * console DISPLAY (width + height, applied by q_fmt.c's console emitter — see
- * q_fmt_console), but peachq does not yet wrap `\C` HTTP output, run real gc
- * for `\g`, apply `\o`/`\W` to temporal display, or trap errors for `\e`.
- * Those commands store + report the kdb-true value only; the effect itself is
- * a tracked PLAN.md gap.  Faking a side-effect would be worse than an honest
- * store-and-report. */
+ * Each effect is read at use through a getter: `\c` by q_fmt_console, `\g` by the
+ * q_ctx statement end, `\e` by the remote door, `\o` by the local clock, `\W` by
+ * `week$.  `\C` is store-and-report only: peachq does not yet wrap HTTP output. */
 static int32_t g_http_rows, g_http_cols;  /* \C HTTP size     (default 36 2000) */
 static int32_t g_gc_mode;                 /* \g gc mode       (default 0)       */
 static int64_t g_utc_offset;              /* \o UTC offset    (default 0N)      */
@@ -167,7 +163,7 @@ void q_sys_cfg_init(void) {
     q_console_clip_set(25, 80);  /* `\c` clip ARMED at the 25 80 default (q_console.c) */
     g_http_rows = 36; g_http_cols = 2000;
     g_gc_mode   = 0;
-    g_utc_offset = NULL_I64;     /* 0N — "use the machine offset" (deferred) */
+    g_utc_offset = NULL_I64;     /* 0N — "use the machine offset" */
     g_week_offset = 2;           /* Monday (0 = Saturday) */
     q_tok_date_order_set(0);     /* `\z` — mm/dd/yyyy (state single-homed in q_tok.c) */
     g_err_trap  = 0;             /* trapping off */
@@ -892,13 +888,20 @@ int q_sys_err_trap_mode(void) { return (int)g_err_trap; }
 void q_sys_err_trap_set(int mode) { g_err_trap = (int32_t)mode; }
 
 /* `\o` — offset from UTC (hours; minutes if abs>23).  `\o`→`0N` (machine
- * offset), else the set value.  Temporal-display wiring is DEFERRED. */
+ * offset), else the set value; `\o 0N` restores the machine offset. */
 static ray_t* h_o(const char* arg, size_t alen) {
     if (alen == 0) return ray_i64(g_utc_offset);     /* 0N default, or set value */
-    int64_t v;
-    if (!parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
+    int64_t v = NULL_I64;
+    if (!(alen == 2 && !memcmp(arg, "0N", 2)) && !parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
     g_utc_offset = v;
     return NULL;
+}
+
+bool q_sys_utc_offset_secs(int64_t* secs) {
+    if (g_utc_offset == NULL_I64) return false;
+    uint64_t unit = g_utc_offset > 23 || g_utc_offset < -23 ? 60 : 3600;
+    *secs = (int64_t)((uint64_t)g_utc_offset * unit);
+    return true;
 }
 
 /* syscmds.md#z-date-parsing — the "D"$ date order; state lives in q_tok.c, the
@@ -912,8 +915,7 @@ static ray_t* h_z(const char* arg, size_t alen) {
     return NULL;
 }
 
-/* `\W` — start-of-week offset (0 = Saturday, default 2 = Monday).  `\W`→`2i`.
- * Week-start wiring into temporal ops is DEFERRED. */
+/* `\W` — start-of-week offset (0 = Saturday, default 2 = Monday).  `\W`→`2i`. */
 static ray_t* h_W(const char* arg, size_t alen) {
     if (alen == 0) return ray_i32(g_week_offset);
     int64_t v;
@@ -921,6 +923,8 @@ static ray_t* h_W(const char* arg, size_t alen) {
     g_week_offset = (int32_t)v;
     return NULL;
 }
+
+int q_sys_week_offset(void) { return (int)g_week_offset; }
 
 /* `\e` — error trap CLIENTS (syscmds.md#e-error-trap-clients; owner ruling
  * 2026-08-14: "local calls always suspend, \e should only be client calls").
