@@ -254,17 +254,11 @@ static int slot_open(ray_t* s) { return !s || Q_IS_HOLE(s); }
 
 /* projection carrier: [fv, fv-row box, slot0..slotR-1].  args[0..n) are the WRITTEN slots — a C NULL there is
  * an elision and is stored as the hole VALUE (kx's 101h 0xff, which `value` and the wire read back); the slots
- * from n to the rank are unwritten padding (`+[2]` reads out as (+;2)) and stay C NULL.  A primitive's trailing
- * holes are padding too — kdb writes `-15!` as (!;-15) (qPython fixture) — unless every slot is one (`+[;]`);
- * a lambda keeps what was written (`{x+y}[1;]`, owner 2026-09-30) and a paren literal's written slots ARE its
- * rank (`(value(1;))2` is the hole, q2b.q:6). */
+ * from n to the rank are unwritten padding (`+[2]` reads out as (+;2)) and stay C NULL.  Whatever the head, a
+ * written hole is kept: kdb writes `+[1;]` as three items (Pulse's c.java witness) as it keeps `{x+y}[1;]`'s
+ * (owner 2026-09-30), and a paren literal's written slots ARE its rank (`(value(1;))2` is the hole, q2b.q:6). */
 ray_t* q_eval_apply_proj_new(ray_t* fv, const q_op_t* row, ray_t** args,
                              int64_t n, int64_t rank) {
-    if (q_eval_apply_is_fnval(fv) && fv != q_registry_list_value()) {
-        int64_t k = n;
-        while (k > 0 && slot_open(args[k - 1])) k--;
-        if (k > 0) n = k;
-    }
     int64_t slots = rank > n ? rank : n;
     ray_t* c = car_new(Q_EVAL_CAR_PROJ, slots + 2);
     if (RAY_IS_ERR(c)) return c;
@@ -1399,10 +1393,10 @@ static int64_t rank_of(ray_t* fv) {
 
 int64_t q_eval_apply_rank(ray_t* fv) { return fv ? rank_of(fv) : -1; }
 
-/* `a v g` composes the projection `v[a;]` onto g (`0|+`, `1~count@`): the one "project then compose" home */
+/* `a v g` composes the juxtaposed projection `v[a]` onto g (`0|+`, `1~count@`): the one "project then compose"
+ * home; a juxtaposition writes no slot */
 static ray_t* proj_compose(ray_t* fv, const q_op_t* row, ray_t* a, ray_t* g) {
-    ray_t* h[2] = { a, NULL };
-    ray_t* p = q_eval_apply_proj_new(fv, row, h, 2, 2);
+    ray_t* p = q_eval_apply_proj_new(fv, row, &a, 1, 2);
     if (RAY_IS_ERR(p)) return p;
     ray_t* c = comp_new(p, g);
     ray_release(p);
@@ -1659,17 +1653,12 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
         return q_eval_apply_proj_new(fv, vrow, args, n, 2);
     }
 
-    switch (kind) {
-    case Q_EVAL_CAR_LAMBDA: return lambda_call(fv, args, n);
-    case Q_EVAL_CAR_KFN: return q_kapi_invoke(fv, args, n);
-    case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_PROJ: case Q_EVAL_CAR_DERIV:
-    case Q_EVAL_CAR_COMP: case Q_EVAL_CAR_ITER: case Q_EVAL_CAR_VIEW:
-    case Q_EVAL_CAR_FOREIGN: break;   /* foreign answered 'type at the head */
-    }
-
-    /* keyword-HOF rows route to the native adverb arms (finding 3) */
-    if (row && row->adverb_hof && row->lex == QLEX_KW && n == 2) {
-        int adv = q_adverb_hof_id(row->adverb_hof);
+    /* keyword-HOF rows route to the native adverb arms (finding 3), the row's and not its q.q lambda value's,
+     * however the lambda was reached (infix, `.`, a variable) */
+    const q_op_t* hof = row;
+    if (!hof && n == 2 && kind == Q_EVAL_CAR_LAMBDA) hof = q_registry_row_of(fv, Q_DYADIC);
+    if (hof && hof->adverb_hof && hof->lex == QLEX_KW && n == 2) {
+        int adv = q_adverb_hof_id(hof->adverb_hof);
         if (adv >= 0) {
             /* a list under the keyword is a unary value indexed item by item, never Case, which is the glyph's
              * `int'[…]` alone (owner witness 2026-10-09: `0 0 0 each til 3` is `0 0 0`; qcheck qc.q:533) */
@@ -1685,6 +1674,14 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
             ray_release(d);
             return r;
         }
+    }
+
+    switch (kind) {
+    case Q_EVAL_CAR_LAMBDA: return lambda_call(fv, args, n);
+    case Q_EVAL_CAR_KFN: return q_kapi_invoke(fv, args, n);
+    case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_PROJ: case Q_EVAL_CAR_DERIV:
+    case Q_EVAL_CAR_COMP: case Q_EVAL_CAR_ITER: case Q_EVAL_CAR_VIEW:
+    case Q_EVAL_CAR_FOREIGN: break;   /* foreign answered 'type at the head */
     }
 
     /* enum args at a verb boundary: aware arm, preserve set, or decay */
@@ -1832,19 +1829,19 @@ ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n) {
 
 /* A projection of head over args (C NULL = hole) CONSTRUCTED, never applied — the codec's seam: a decoder builds
  * values and runs none (docs/ipc-architecture.md).  A hole-less arg list is kdb's rank padding (`{x+y}[3]`); on a
- * head whose rank it meets, or a variadic, a hole is appended so the value is a projection whatever the head. */
+ * head whose rank it meets, or a variadic, one slot of padding is added so the value is a projection whatever the
+ * head. */
 ray_t* q_eval_apply_proj_value(ray_t* head, ray_t** args, int64_t n) {
     if (!head || RAY_IS_ERR(head) || !q_eval_apply_is_fn(head)) return q_err(QE_DOMAIN);
     if (n < 0 || n >= APPLY_MAX_ARGS) return q_err(QE_RANK);
-    ray_t* a[APPLY_MAX_ARGS];
     int64_t rank = rank_of(head), holes = 0;
     for (int64_t i = 0; i < n; i++)
-        if (!(a[i] = args[i])) holes++;
-    if (!holes && !(rank > 0 && n < rank)) a[n++] = NULL;
+        if (!args[i]) holes++;
+    if (!holes && !(rank > 0 && n < rank)) rank = n + 1;
     if (rank < n) rank = n;
     const q_op_t* row = q_eval_apply_is_fnval(head)
                             ? q_registry_row_of(head, rank == 1 ? Q_MONADIC : Q_DYADIC) : NULL;
-    return q_eval_apply_proj_new(head, row, a, n, rank);
+    return q_eval_apply_proj_new(head, row, args, n, rank);
 }
 
 ray_t* q_eval_apply_call_sym(int64_t sym, ray_t** args, int64_t argc) {
