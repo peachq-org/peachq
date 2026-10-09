@@ -225,10 +225,12 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     /* RAY_QFN carriers — iterators are kdb 103h by adverb id (q_registry.h's
      * canonical 0=' .. 5=\: order IS c.java's IterationOperator table);
      * lambdas serialize BY SOURCE as kdb 100h (context + source text; decode
-     * re-evaluates through q_parse -> q_eval); projection 104h, composition
-     * 105h and derived function 106h+adv carry ref/value.md's read-out, framed
-     * as K.java's KArrayBase writes it — a BARE int32 count, no attrs byte —
-     * with an Adverb's lone operand needing no count at all.  Serde still
+     * re-evaluates through q_parse -> q_eval); projection 104h carries its
+     * head and every WRITTEN slot, a hole as 101h 0xff (`+[1;]` is three items
+     * as c.java reads it, `+[1]` two), composition 105h and derived function
+     * 106h+adv ref/value.md's read-out, framed as K.java's KArrayBase writes
+     * it — a BARE int32 count, no attrs byte — with an Adverb's lone operand
+     * needing no count at all.  Serde still
      * refuses every carrier: its records are a separately versioned format. */
     if (x->type == RAY_QFN) {
         int adv = q_eval_apply_iter_id(x);
@@ -246,7 +248,15 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         }
         q_car_kind_t kind = b->serde ? Q_EVAL_CAR_NONE : q_eval_apply_carrier_kind(x);
         switch (kind) {
-        case Q_EVAL_CAR_PROJ: case Q_EVAL_CAR_COMP: case Q_EVAL_CAR_DERIV: {
+        case Q_EVAL_CAR_PROJ: {
+            int64_t n = q_eval_apply_proj_nslots(x);
+            while (n > 0 && !q_eval_apply_proj_arg(x, n - 1)) n--;
+            rc = (w_u8(b, 104) || w_i32(b, (int32_t)(n + 1)) || q_wire_write_obj(b, q_eval_apply_car_head(x))) ? -1 : 0;
+            for (int64_t i = 0; i < n && !rc; i++)
+                rc = q_wire_write_obj(b, q_eval_apply_proj_arg(x, i));
+            goto out;
+        }
+        case Q_EVAL_CAR_COMP: case Q_EVAL_CAR_DERIV: {
             ray_t* body = q_eval_carrier_value(x);    /* owned */
             if (!body) { rc = wbuf_fail(b, q_err(QE_WSFULL)); goto out; }
             if (kind == Q_EVAL_CAR_DERIV) {
@@ -254,8 +264,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
                       q_wire_write_obj(b, body)) ? -1 : 0;
             } else {
                 int64_t n = q_count(body);
-                rc = (w_u8(b, kind == Q_EVAL_CAR_PROJ ? 104 : 105) ||
-                      w_i32(b, (int32_t)n)) ? -1 : 0;
+                rc = (w_u8(b, 105) || w_i32(b, (int32_t)n)) ? -1 : 0;
                 for (int64_t i = 0; i < n && !rc; i++)
                     rc = q_wire_write_obj(b, ray_list_get(body, i));
             }
