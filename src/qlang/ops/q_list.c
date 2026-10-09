@@ -317,9 +317,9 @@ ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
  * (ref/fill.md; `fills` is the `^\` fill-scan).  Leading nulls stay null.
  * Numeric vectors keep q_fill_wrap's I64/F64 result split; SYM vectors carry
  * the last non-null sym id (id 0 IS q's null sym, same test as q_fill_wrap).
- * Atoms pass through; other shapes are deferred cells. */
+ * Atoms and the empty general list pass through; other shapes are deferred cells. */
 ray_t* q_fills_wrap(ray_t* x) {
-    if (x && ray_is_atom(x)) { ray_retain(x); return x; }
+    if (x && (ray_is_atom(x) || (x->type == RAY_LIST && q_count(x) == 0))) { ray_retain(x); return x; }
     if (x && x->type == RAY_SYM) {
         int64_t n = q_count(x);
         ray_t* outl = ray_list_new(n > 0 ? n : 1);
