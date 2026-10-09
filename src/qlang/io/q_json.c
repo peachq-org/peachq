@@ -36,6 +36,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* a q string is bytes, so a lone high byte reads back as it was written */
+#define J_READ_FLAGS (YYJSON_READ_ALLOW_INF_AND_NAN | YYJSON_READ_ALLOW_INVALID_UNICODE)
+
 /* ======================================================================== *
  *  .j.j — serialize
  * ======================================================================== */
@@ -349,6 +352,7 @@ static void j_vec(jbuf* b, ray_t* x) {
 static void j_emit(jbuf* b, ray_t* x) {
     if (b->oom || b->nyi) return;
     if (!x) { j_nyi(b, 0); return; }
+    if (x->type == RAY_NULL) { jbuf_puts(b, "null"); return; }
     if (x->type < 0) { j_atom(b, x); return; }
     if (x->type == RAY_CHARV) {                      /* char vector -> ONE string */
         jbuf_str(b, (const char*)ray_data(x), (size_t) q_count(x));
@@ -486,7 +490,7 @@ ray_t* q_json_deserialize(ray_t* x) {
     if (!buf) return q_err(QE_WSFULL);
     if (n) memcpy(buf, sp, n);
     buf[n] = '\0';
-    yyjson_doc* doc = yyjson_read_opts(buf, n, YYJSON_READ_ALLOW_INF_AND_NAN, NULL, NULL);
+    yyjson_doc* doc = yyjson_read_opts(buf, n, J_READ_FLAGS, NULL, NULL);
     if (!doc) {
         ray_t* e = q_err(QE_PARSE);
         free(buf);
@@ -868,7 +872,7 @@ static ray_t* jr_frame_nd(jr_st* st, char* buf, int64_t n) {
         }
         if (at >= n) break;
         yyjson_doc* doc = yyjson_read_opts(buf + at, (size_t)(n - at),
-                                           YYJSON_READ_ALLOW_INF_AND_NAN | YYJSON_READ_STOP_WHEN_DONE,
+                                           J_READ_FLAGS | YYJSON_READ_STOP_WHEN_DONE,
                                            NULL, NULL);
         size_t used = doc ? yyjson_doc_get_read_size(doc) : 0;
         while (used && (unsigned char)buf[at + (int64_t)used - 1] <= ' ') used--;
@@ -903,7 +907,7 @@ static ray_t* jr_frame_nd(jr_st* st, char* buf, int64_t n) {
  * document, so auto reads it - which is why auto cannot be "does it start with [". */
 static ray_t* jr_frame(jr_st* st, char* buf, int64_t n) {
     if (st->format == Q_JSON_ND) return jr_frame_nd(st, buf, n);
-    yyjson_doc* doc = yyjson_read_opts(buf, (size_t)n, YYJSON_READ_ALLOW_INF_AND_NAN, NULL, NULL);
+    yyjson_doc* doc = yyjson_read_opts(buf, (size_t)n, J_READ_FLAGS, NULL, NULL);
     if (!doc) return st->format == Q_JSON_ARRAY ? q_err(QE_PARSE) : jr_frame_nd(st, buf, n);
     if (!jr_hold(st, doc)) { yyjson_doc_free(doc); return q_err(QE_WSFULL); }
     yyjson_val* root = yyjson_doc_get_root(doc);
