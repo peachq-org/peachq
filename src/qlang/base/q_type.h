@@ -127,6 +127,9 @@ int q_type_is_sym_atom(ray_t* x);
  * the INDEX law, reading a table as an axis pair, keeps its own is_coll. */
 int q_type_is_iter(ray_t* v);
 
+/* the generic empty list `()`: no items, so no item type to infer from */
+int q_type_is_empty_list(ray_t* x);
+
 /* q treats the null symbol ` AS null (base sym-0 is the empty symbol); the
  * element form is ray_vec_is_null with that same reading restored for RAY_SYM. */
 int q_type_is_null_sym(ray_t* x);
