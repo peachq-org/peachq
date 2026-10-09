@@ -368,6 +368,10 @@ int q_type_is_iter(ray_t* v) {
            (ray_is_vec(v) && v->type != RAY_STR);
 }
 
+int q_type_is_empty_list(ray_t* x) {
+    return x && x->type == RAY_LIST && q_count(x) == 0;
+}
+
 /* ---- null axis (owner-ruled: null is not math) --------------------------- */
 
 /* RAY_ATOM_IS_NULL's twin at the other end of the lane: the float lanes carry a

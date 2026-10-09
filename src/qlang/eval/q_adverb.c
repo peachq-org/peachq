@@ -123,12 +123,12 @@ static ray_t* acc_iterate(ray_t* fv, const q_op_t* frow, ray_t* t, int64_t n,
     return acc_finish(&a, err);
 }
 
-/* Empty right argument (:385), the value never evaluated.  With a seed Scan
- * and Over diverge: Over reduces to the left argument (:445) where Scan, being
- * uniform, returns `()` (:405).  Applied as a unary they agree and the answer
- * comes from the VALUE — its identity element, else (for a list value) an
- * empty of its own type, else `()`.  NULL means "let the registered aggregate
- * answer": `|`/`&` monomorphize but have no doc-published identity. */
+/* Empty right argument (:385), the value never evaluated.  Over reduces to the
+ * left argument (:445), else the value's identity element (:420).  Scan is
+ * uniform (:405) and never answers an identity: an empty list, the keyword's
+ * own empty when the scan monomorphizes (`(+\)x` agrees with `sums x`, owner
+ * ruling 2026-10-09).  Otherwise an empty of a list value's own type (:436),
+ * else `()`.  NULL means "let the registered keyword answer". */
 static ray_t* acc_empty(ray_t* fv, const q_op_t* frow, ray_t* seed, int keep,
                         int has_mono) {
     if (seed) {
@@ -136,7 +136,7 @@ static ray_t* acc_empty(ray_t* fv, const q_op_t* frow, ray_t* seed, int keep,
         ray_retain(seed);
         return seed;
     }
-    ray_t* id = frow ? q_ops_identity(frow->name, QI_VALUE) : NULL;
+    ray_t* id = frow && !keep ? q_ops_identity(frow->name, QI_VALUE) : NULL;
     if (id) return id;
     return has_mono ? NULL : q_typed_empty_like(ray_list_new(0), fv);
 }
@@ -260,10 +260,10 @@ static ray_t* acc_unary(ray_t* fv, const q_op_t* frow, ray_t* x, int keep) {
         return dr;
     }
     ray_t* mv = acc_mono(frow, keep, &mrow);
-    /* boxed lists take the native fold — the aggregate and running wrappers' boxed arms ride base call_fn plumbing
+    /* non-empty boxed lists take the native fold — the aggregate and running wrappers' boxed arms ride base call_fn plumbing
      * (finding 5).  `,`'s mono is the one structural row, and raze is the fold itself, so it takes them too */
     int structural = mv && strcmp(mrow->family, "structural") == 0;
-    if (mv && x->type == RAY_LIST && !structural) mv = NULL;
+    if (mv && x->type == RAY_LIST && q_count(x) && !structural) mv = NULL;
     ray_t* r;
     /* raze owns its empties: `(,/)""` is `""` (owner 2026-10-04), so `,`'s identity `()` must not answer first */
     if (q_type_is_iter(x) && q_count(x) == 0 && !structural) {

@@ -110,13 +110,6 @@ int8_t q_cast_designator(ray_t* t, int* is_tok, int* is_identity) {
     return 0;
 }
 
-/* Cast/Tok of the empty general list -> q_type_empty(tag) (`long$() / `$()).
- * A general list carries no element to infer from, so the target tag names the
- * empty result's domain. */
-static int is_empty_list(ray_t* x) {
-    return x && x->type == RAY_LIST && q_count(x) == 0;
-}
-
 static ray_t* cast_u8(ray_t* x);
 static ray_t* cast_tod(int8_t tag, ray_t* x);
 
@@ -485,7 +478,7 @@ static ray_t* cast_sym(ray_t* x) {
  * already agree.  The switch has NO `default:`, so -Wall (=> -Wswitch) +
  * -Werror refuse to build a target no arm states. */
 ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
-    if (is_empty_list(x)) return q_type_empty(tag);
+    if (q_type_is_empty_list(x)) return q_type_empty(tag);   /* () has no item to infer from: the tag names the domain */
     /* enum SOURCE: int-family targets read the POSITIONS ("i"$e is unchanged
      * by a domain edit — ref/enumerate.md); every other target sees the
      * resolved symlist (the decay law: `$e -> syms, "c"/string via sym). */
@@ -569,7 +562,7 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
  * Recursion stops at STRINGS, not atoms: boxed lists and physical string
  * columns distribute per element; a non-string leaf is a 'type error. */
 static ray_t* tok_leaf(int8_t tag, ray_t* x) {
-    if (is_empty_list(x)) return q_type_empty(tag);
+    if (q_type_is_empty_list(x)) return q_type_empty(tag);
     if (x->type == RAY_LIST) {           /* boxed list: tok each element */
         int64_t n = q_count(x);
         ray_t* out = ray_list_new(n);

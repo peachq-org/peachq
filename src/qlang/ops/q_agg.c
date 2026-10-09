@@ -56,10 +56,6 @@ int q_vec_is_num(ray_t* x) {
                  x->type==RAY_BOOL||ray_is_bytelike(x->type)||x->type==RAY_F64||x->type==RAY_F32);
 }
 
-/* The grids that answer `.` for a char vector (msum, avgs); sum/sums/prd read it as code points to i (their `c -> i`
- * cells, owner ruling Dazlln 2026-09-30). */
-static int fold_refused(ray_t* x) { return x && x->type == RAY_CHARV; }
-
 typedef enum { RS_SUMS, RS_PRDS, RS_MAXS, RS_MINS, RS_AVGS } q_rs_kind;
 
 /* Width-generic float store: the scans accumulate in double but the result
@@ -94,7 +90,8 @@ static ray_t* runscan(ray_t* x, q_rs_kind k) {
     }
     if ((k == RS_MAXS || k == RS_MINS) && ray_is_vec(x) && ray_is_bytelike(x->type))
         return runscan_bytes(x, k);
-    if (!q_vec_is_num(x) || (k == RS_AVGS && fold_refused(x))) return q_err(QE_TYPE);
+    /* a char is not a number in arithmetic: `sums "abc"` is 'type (sum.md:113, owner ruling 2026-10-09) */
+    if (!ray_is_vec(x) || !q_type_is_num_tag(x->type)) return q_err(QE_TYPE);
     int64_t n = q_count(x);
     if (k == RS_AVGS) {
         ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1); out->len = n;
@@ -174,7 +171,7 @@ ray_t* q_avgs_wrap(ray_t* x){ return runscan(x, RS_AVGS); }
 ray_t* q_ratios_wrap(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (ray_is_atom(x)) { ray_retain(x); return x; }
-    if (!q_vec_is_num(x)) return q_err(QE_TYPE);
+    if (!ray_is_vec(x) || !q_type_is_num_tag(x->type)) return q_err(QE_TYPE);
     int64_t n = q_count(x);
     ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1); out->len = n;
     double* o = (double*)ray_data(out);
