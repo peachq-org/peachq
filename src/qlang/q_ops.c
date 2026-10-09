@@ -149,6 +149,12 @@
  *                      documented form.  The wrapper takes whole args and
  *                      composes `(x>=y 0)&x<=y 1`, so the atomic lift on the
  *                      COMPARISONS supplies every shape)
+ *   in     -> none    (ref/in.md's rank table: left-atomic only where y is an
+ *                      atom or vector, a list y sought whole, a dict y its
+ *                      range — "Results for mixed-rank arguments are not
+ *                      intuitive", and no lift law expresses them.  The
+ *                      wrapper owns every arm and self-recurses; ruled
+ *                      2026-10-09)
  * String-model caveat: string/upper/lower/trim/ltrim/rtrim/like classify
  * `atomic` at STRING granularity — the elementwise unit is the whole string,
  * now a RAY_CHARV vector (string-C3; this audit predates C3 and is pure
@@ -245,8 +251,8 @@ static const q_op_t Q_OPS[] = {
     { "xexp",  QLEX_KW,        QR_NONE,                        QR_FN2A("xexp", q_xexp_wrap), NULL, 1, 0, "atomic", NULL, QKOP(32) },
     { "xlog",  QLEX_KW,        QR_NONE,                        QR_FN2A("xlog", q_xlog_wrap), NULL, 1, 0, "atomic", NULL },
     { "each",  QLEX_KW,        QR_NONE,                        QR_FN2("map", q_hof_nyi_wrap), "map", 1, 0, "none", NULL },
-    /* rowid: `in` needs item equality (a set-op predicate). */
-    { "in",    QLEX_KW,        QR_NONE,                        QR_FN2("in", q_in_wrap), NULL, 1, 0, "rowid", NULL, QKOP(23) },
+    /* none: `in` owns ref/in.md's rank table (FAMILY AUDIT border rulings). */
+    { "in",    QLEX_KW,        QR_NONE,                        QR_FN2("in", q_in_wrap), NULL, 1, 0, "none", NULL, QKOP(23) },
     /* Monadic cells stay QR_NONE: both are dyadic-only in q, so prefix `and x`
      * misses and eval falls through to rayfall's scalar special form. */
     { "and",   QLEX_KW,        QR_NONE,                        QR_FN2A("and", q_min2_wrap), NULL, 1, 0, "atomic", NULL, QKOP(5) },
