@@ -363,7 +363,7 @@ static ray_t* raw_write(int64_t qh, ray_t* y) {
  * written straight through __VM as q_err.c writes raise_val — the base is frozen
  * and owns no scoped setter.  DIVERGENCE (deliberate, kdb is silent): restricted
  * mode DENIES it — `0".z.u"` IS the identity escape -b/-U exists to close. */
-/* docs/text-entry-law.md (target state; peachq may differ): `0 "…"` is the IPC column */
+/* docs/text-entry-law.md: `0 "…"` is the IPC column */
 ray_t* q_handles_console_eval(ray_t* y) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* zps = q_env_resolve(ray_sym_intern_runtime(".z.ps", 5));   /* owned; NULL = the `value` default */
