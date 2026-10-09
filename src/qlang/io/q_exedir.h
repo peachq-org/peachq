@@ -13,6 +13,6 @@
 int q_exedir(char* dst, size_t cap);
 
 /* The running executable's own path, the same way; 1 = dst filled, 0 = unknown (dst is ""). */
-int q_exepath(char* dst, size_t cap);
+int q_exedir_path(char* dst, size_t cap);
 
 #endif /* QLANG_IO_Q_EXEDIR_H */

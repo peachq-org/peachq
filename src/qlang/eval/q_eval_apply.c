@@ -1671,6 +1671,10 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
     if (row && row->adverb_hof && row->lex == QLEX_KW && n == 2) {
         int adv = q_adverb_hof_id(row->adverb_hof);
         if (adv >= 0) {
+            /* a list under the keyword is a unary value indexed item by item, never Case, which is the glyph's
+             * `int'[…]` alone (owner witness 2026-10-09: `0 0 0 each til 3` is `0 0 0`; qcheck qc.q:533) */
+            if (adv == 0 && args[1] && q_type_is_iter(args[0]))
+                return q_adverb_each(args[0], NULL, args + 1, 1);
             const q_op_t* frow = NULL;
             if (q_eval_apply_is_fnval(args[0]))
                 frow = q_registry_operand_row(args[0]);

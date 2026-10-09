@@ -480,6 +480,10 @@ static ray_t* prior_each(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
     return r;
 }
 
+ray_t* q_adverb_each(ray_t* fv, const q_op_t* frow, ray_t** args, int64_t n) {
+    return map_zip(fv, frow, args, n, ~(uint64_t)0);
+}
+
 ray_t* q_adverb_apply(int adv, ray_t* fv, const q_op_t* frow,
                            ray_t** args, int64_t n) {
     if (!fv) return q_err(QE_TYPE);
@@ -497,7 +501,7 @@ ray_t* q_adverb_apply(int adv, ray_t* fv, const q_op_t* frow,
     if (adv == 1 || adv == 2) return acc_apply(fv, frow, args, n, adv == 2);
     if (adv == 0) {                                        /* `'` each */
         if (q_type_is_int_vec(fv)) return case_apply(fv, args, n);
-        return map_zip(fv, frow, args, n, ~(uint64_t)0);
+        return q_adverb_each(fv, frow, args, n);
     }
     if (adv == 3) {                                        /* `':` */
         /* a rank-1 value makes `':` Each Parallel, a rank-2 one Each Prior
