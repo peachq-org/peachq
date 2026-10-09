@@ -92,6 +92,7 @@ int8_t q_cast_designator(ray_t* t, int* is_tok, int* is_identity) {
         else if (l == 3 && !memcmp(nm, "int",     3)) r = RAY_I32;
         else if (l == 5 && !memcmp(nm, "short",   5)) r = RAY_I16;
         else if (l == 7 && !memcmp(nm, "boolean", 7)) r = RAY_BOOL;
+        else if (l == 4 && !memcmp(nm, "guid",    4)) r = RAY_GUID;
         else if (l == 4 && !memcmp(nm, "byte",    4)) r = RAY_BYTE_ONLY;
         else if (l == 4 && !memcmp(nm, "real",    4)) r = RAY_F32;
         else if (l == 6 && !memcmp(nm, "symbol",  6)) r = RAY_SYM;

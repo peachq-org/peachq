@@ -661,9 +661,9 @@ void q_eval_frames_resume(q_eval_frames_t f) {
  * here — it is .q.eval:(-6!), the q_bang.c arm over q_eval.  value applies
  * ONCE, non-recursively: a string parses+evaluates in the current context, a
  * `:path sym READS THAT FILE (ref/get.md — kdb's get IS value), any other
- * sym atom names a variable, a dict yields its values, and a list applies
- * its first item (string/sym heads evaluated first, ref/value.md) to the
- * rest AS LITERALS — nested trees stay data.  A sym vector of two or more is
+ * sym atom names a variable, a dict yields its values, () is itself (owner
+ * ruling 2026-10-09), and a list applies its first item (string/sym heads
+ * evaluated first, ref/value.md) to the rest AS LITERALS — nested trees stay data.  A sym vector of two or more is
  * that list; value of any OTHER typed vector (incl. the enlisted constant
  * ,`x) is doc-silent: 'nyi, never a guess. */
 /* docs/text-entry-law.md: `value "…"` is the IPC column */
@@ -717,6 +717,7 @@ ray_t* q_eval_value_wrap(ray_t* x) {
         if (!RAY_IS_ERR(l)) ray_release(l);
         return r;
     }
+    if (x->type == RAY_LIST && q_count(x) == 0) { ray_retain(x); return x; }
     if (x->type == RAY_LIST && q_count(x) >= 1) {
         int64_t argc = q_count(x) - 1;
         if (argc > EVAL_MAX_ARGS) return q_err(QE_RANK);

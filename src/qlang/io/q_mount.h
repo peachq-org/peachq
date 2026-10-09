@@ -11,4 +11,7 @@
  * the bound name sym for the splayed form (kx echoes it), NULL for a root mount, or an owned error. */
 ray_t* q_mount_dir(const char* path, int scripts);
 
+/* `\l f` of a serialized object binds it to the global named by f's last path element. */
+ray_t* q_mount_object(const char* path);
+
 #endif /* PEACHQ_Q_MOUNT_H */
