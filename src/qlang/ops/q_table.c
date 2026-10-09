@@ -14,7 +14,7 @@
 #include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h"
 #include "qlang/base/q_err.h"
-#include "qlang/base/q_type.h"       /* q_type_is_keyed / q_type_is_dense_group_col */
+#include "qlang/base/q_type.h"       /* q_type_is_keyed / q_type_is_dense_group_col / q_type_is_iter */
 #include "qlang/q_builtins.h"   /* q_ty_char — meta column letters */
 #include "qlang/q_env.h"
 #include "qlang/ops/q_table.h"
@@ -737,7 +737,7 @@ static ray_t* table_colnames(ray_t* x);
  *                    broadcast to L; mismatched vector length -> 'length);
  *                    `cols!`:dir/` -> the mapped table, `cols!`:pq:duckdb:db:t/` the bound provider pointer,
  *                    `cols!`name` the unresolved partitioned table
- *   list of lists -> transposed list (atom items broadcast)
+ *   list of lists -> transposed list (atom items broadcast; a table item is its list of rows)
  * Keyed tables, atoms, and an ALL-ATOM dict or list are 'rank: "to define a
  * 1-row table, enlist at least one of the column values" (basics/syntax.md:236)
  * — so `([]a:1)` is an error, and qSQL's one-row aggregate exception is stated
@@ -806,7 +806,7 @@ ray_t* q_flip_wrap(ray_t* x) {
         int64_t L = -1;
         for (int64_t i = 0; i < n; i++) {
             ray_t* it = e[i];
-            if (it && (ray_is_vec(it) || it->type == RAY_LIST)) {
+            if (q_type_is_iter(it)) {
                 int64_t l = q_count(it);
                 if (L < 0) L = l;
                 else if (l != L) return q_err(QE_LENGTH);
@@ -821,7 +821,7 @@ ray_t* q_flip_wrap(ray_t* x) {
             for (int64_t i = 0; i < n; i++) {
                 ray_t* it = e[i];
                 ray_t* cell;
-                if (it && (ray_is_vec(it) || it->type == RAY_LIST)) {
+                if (q_type_is_iter(it)) {
                     cell = q_join_item(it, r);
                 } else { cell = it; if (cell) ray_retain(cell); }
                 if (!cell || RAY_IS_ERR(cell)) { ray_release(rowl); ray_release(out); return cell ? cell : q_err(QE_OOM); }
