@@ -18,7 +18,7 @@
 #include "ops/idxop.h"     /* .attr.* engine calls: ray_attr_*, RAY_IDX_*, RAY_MARK_* */
 #include "mem/heap.h"      /* RAY_ATTR_HAS_NULLS / RAY_ATTR_SORTED, ray_cow */
 #include "table/sym.h"     /* ray_sym_intern_runtime, ray_read_sym */
-#include <string.h>        /* strcmp — the error remap */
+#include <string.h>        /* strcmp — the error remap; strchr — the letter set */
 
 /* Read a vector's attribute as kdb's SINGLE letter: 's'/'u'/'g'/'p', or 0 for
  * none.  Reads the block markers/kind DIRECTLY rather than delegating to the
@@ -368,12 +368,13 @@ static ray_t* attr_set_enum(char letter, ray_t* y) {
     return w;
 }
 
-/* `x # y` is the set-attribute form when x is a symbol atom and y is a vector, enum, table, dict, or — for the
- * CLEAR form only (D48) — a general list.  Containers otherwise keep take's column meaning. */
+/* `x # y` is the set-attribute form when x is a symbol atom and y is a vector, enum, table, dict, or a general
+ * list — any list for the CLEAR form (D48), only the empty one for a letter.  Containers otherwise keep take's
+ * column meaning. */
 bool q_attr_set_admits(ray_t* x, ray_t* y) {
     return x && x->type == -RAY_SYM && y &&
         (ray_is_vec(y) || y->type == RAY_ENUM || y->type == RAY_TABLE || y->type == RAY_DICT ||
-         (y->type == RAY_LIST && q_type_is_null_sym(x)));
+         (y->type == RAY_LIST && (q_type_is_null_sym(x) || q_count(y) == 0)));
 }
 
 /* q `sym # vec` — set / clear a column attribute.  sym is a symbol ATOM: the
@@ -401,6 +402,9 @@ ray_t* q_attr_set_dispatch(ray_t* n, ray_t* vec) {
     }
     if (vec && vec->type == RAY_ENUM)
         return letter == '?' ? q_err(QE_TYPE) : attr_set_enum(letter, vec);
+    /* the empty general list holds no item to contradict a letter, so it takes any; a carrier it lacks drops */
+    if (letter && strchr("supg", letter) && vec && vec->type == RAY_LIST && q_count(vec) == 0)
+        return q_attr_rebuild(ray_cow(ray_attr_drop_fn(vec)), letter);
     switch (letter) {
     case 0:   return ray_attr_drop_fn(vec);          /* `#vec -> drop all */
     case 'u': case 'p': case 'g': {
