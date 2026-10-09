@@ -30,7 +30,7 @@ int8_t q_cast_designator(ray_t* t, int* is_tok, int* is_identity);
  * element (collapsed); float sources pre-round via rint (kdb ties-even) for
  * integer targets; symbol target is identity on syms and Tok on strings; "c"$
  * packs an int list into one string; an empty general list becomes the typed
- * empty.  Typed vectors are cast WHOLE.  Returns owned; 'nyi for deferred. */
+ * empty.  Typed vectors are cast WHOLE.  Returns owned; 'type when x has no conversion to tag. */
 ray_t* q_dollar_cast(int8_t tag, ray_t* x);
 
 /* Parse string(s) to the tag type (kdb Tok, ref/tok.md).  Leading/trailing

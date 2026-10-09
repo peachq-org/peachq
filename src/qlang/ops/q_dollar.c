@@ -6,7 +6,7 @@
  * admission helpers and tag<->name vocabulary moved to q_type.c (q_type.h). */
 #include "qlang/q_count.h"
 #include "qlang/ops/q_dollar.h"
-#include "qlang/base/q_type.h"  /* int/float admission + q_type_rayname vocabulary */
+#include "qlang/base/q_type.h"  /* int/float admission + the tag/letter/name vocabulary */
 #include "qlang/base/q_err.h"
 #include "qlang/parse/q_tok.h"   /* q_tok — THE Tok entry */
 #include "qlang/base/q_calendar.h" /* q_calendar_ts_compose — date->timestamp cast */
@@ -22,37 +22,19 @@
 #include <string.h>
 #include <stdlib.h>
 
-/* Designator resolution is separate from conversion so C callers (future
- * bool-widening / promotion work) can invoke q_dollar_cast(tag, x) directly. */
-
+/* Number, letter and name all resolve through q_type's maps, so the #209 guarantee (a new datatype must
+ * name its designator) rides q_type_char's compile-guarded switch; ENUM and physical STR are never targets. */
 int8_t q_cast_designator(ray_t* t, int* is_tok, int* is_identity) {
     *is_tok = 0;
     if (is_identity) *is_identity = 0;
     if (!t) return 0;
-    if (t->type == -RAY_I16) {          /* kdb type number == rayfall tag */
+    if (t->type == -RAY_I16) {
         if (RAY_ATOM_IS_NULL(t)) return 0;
-        int16_t n = t->i16;
-        if (n <= 0) { *is_tok = 1; n = (int16_t)-n; }
-        /* Numeric designator == rayfall tag.  No `default:` — exhaustive over
-         * the value band (#209): a new datatype must name its designator here.
-         * An out-of-band n (98h table, sparse gap 3) falls to the trailing
-         * `return 0` = "not a designator", exactly as the old default did. */
-        switch ((ray_type_e)n) {
-        case RAY_BOOL: case RAY_BYTE_ONLY: case RAY_I16: case RAY_I32:
-        case RAY_I64:  case RAY_F32: case RAY_F64: case RAY_SYM: case RAY_CHARV:
-        case RAY_GUID:      /* cast.md:20 `2h "g" `guid` are one designator row;
-                             * `-2h$"uuid"` = guid Tok (q_dollar_tok parses it). The
-                             * `2h$` CAST is the identity on guids, else deferred. */
-        RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: RAY_TEMPORALF_CASES:
-            return (int8_t)n;
-        case RAY_LIST:      /* 0h is Identity (cast.md:40): returns y unchanged */
-            if (is_identity) *is_identity = 1;
-            return 0;
-        case RAY_ENUM:      /* 20h names no cast target — enums are made by `d$y */
-        case RAY_STR:       /* 21h: physical storage tag, never a q designator */
-            return 0;
-        }
-        return 0;   /* unreachable for in-band n; out-of-band handled here */
+        int n = t->i16;
+        if (n <= 0) { *is_tok = 1; n = -n; }
+        if (n == RAY_LIST && is_identity) *is_identity = 1;   /* 0h is Identity (cast.md:40) */
+        if (n >= RAY_TYPE_COUNT || n == RAY_ENUM || n == RAY_STR) return 0;
+        return q_type_char((int8_t)n) ? (int8_t)n : 0;
     }
     if ((t->type == -RAY_STR && ray_str_len(t) == 1) ||
         t->type == -RAY_CHARV ||
@@ -61,49 +43,15 @@ int8_t q_cast_designator(ray_t* t, int* is_tok, int* is_identity) {
                : t->type == RAY_CHARV  ? ((const char*)ray_data(t))[0]
                                        : ray_str_ptr(t)[0];
         if (c >= 'A' && c <= 'Z') { *is_tok = 1; c = (char)(c - 'A' + 'a'); }
-        switch (c) {
-        case 'b': return RAY_BOOL; case 'x': return RAY_BYTE_ONLY;
-        case 'h': return RAY_I16;  case 'i': return RAY_I32;
-        case 'j': return RAY_I64;  case 'e': return RAY_F32;
-        case 'f': return RAY_F64;  case 's': return RAY_SYM;
-        case 'd': return RAY_DATE; case 'g': return RAY_GUID;
-        case 't': return RAY_TIME; case 'p': return RAY_TIMESTAMP;
-        case 'm': return RAY_MONTH;
-        case 'u': return RAY_MINUTE;
-        case 'v': return RAY_SECOND;
-        case 'n': return RAY_TIMESPAN;
-        case 'z': return RAY_DATETIME;
-        case 'c': return RAY_CHARV; /* char cast: "c"$x reinterprets as chars */
-        case '*': if (is_identity) *is_identity = 1;  /* Identity (cast.md:40) */
-                  return 0;
-        default:  return 0;
-        }
+        if (c == '*' && is_identity) *is_identity = 1;
+        return q_type_of_char(c);
     }
     if (t->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(t->i64);
         if (!s) return 0;
-        const char* nm = ray_str_ptr(s);
         size_t l = ray_str_len(s);
-        int8_t r = 0;
-        if      (l == 0)                              { *is_tok = 1; r = RAY_SYM; }
-        else if (l == 4 && !memcmp(nm, "char",    4)) r = RAY_CHARV;
-        else if (l == 4 && !memcmp(nm, "long",    4)) r = RAY_I64;
-        else if (l == 5 && !memcmp(nm, "float",   5)) r = RAY_F64;
-        else if (l == 3 && !memcmp(nm, "int",     3)) r = RAY_I32;
-        else if (l == 5 && !memcmp(nm, "short",   5)) r = RAY_I16;
-        else if (l == 7 && !memcmp(nm, "boolean", 7)) r = RAY_BOOL;
-        else if (l == 4 && !memcmp(nm, "guid",    4)) r = RAY_GUID;
-        else if (l == 4 && !memcmp(nm, "byte",    4)) r = RAY_BYTE_ONLY;
-        else if (l == 4 && !memcmp(nm, "real",    4)) r = RAY_F32;
-        else if (l == 6 && !memcmp(nm, "symbol",  6)) r = RAY_SYM;
-        else if (l == 4 && !memcmp(nm, "date",    4)) r = RAY_DATE;
-        else if (l == 5 && !memcmp(nm, "month",   5)) r = RAY_MONTH;
-        else if (l == 6 && !memcmp(nm, "minute",  6)) r = RAY_MINUTE;
-        else if (l == 6 && !memcmp(nm, "second",  6)) r = RAY_SECOND;
-        else if (l == 8 && !memcmp(nm, "timespan",8)) r = RAY_TIMESPAN;
-        else if (l == 4 && !memcmp(nm, "time",    4)) r = RAY_TIME;
-        else if (l == 9 && !memcmp(nm, "timestamp", 9)) r = RAY_TIMESTAMP;
-        else if (l == 8 && !memcmp(nm, "datetime", 8)) r = RAY_DATETIME;
+        int8_t r = l ? q_type_of_qname(ray_str_ptr(s), l) : RAY_SYM;
+        if (!l) *is_tok = 1;
         ray_release(s);
         return r;
     }
@@ -113,11 +61,23 @@ int8_t q_cast_designator(ray_t* t, int* is_tok, int* is_identity) {
 static ray_t* cast_u8(ray_t* x);
 static ray_t* cast_tod(int8_t tag, ray_t* x);
 
-/* tag -> base `as` spelling, then delegate; 'nyi when the tag has no spelling
- * (LIST/GUID/F32 targets). */
+/* The one place the rayfall `as` vocabulary appears in the q layer; a tag base cannot cast to is 'type. */
+static const char* cast_rayname(int8_t tag) {
+    switch (tag) {
+    case RAY_BOOL: return "BOOL";   case RAY_BYTE_ONLY: return "U8";
+    case RAY_I16: return "I16";     case RAY_I32: return "I32";
+    case RAY_I64: return "I64";     case RAY_F64: return "F64";
+    case RAY_DATE: return "DATE";   case RAY_TIME: return "TIME";
+    case RAY_MONTH: return "MONTH"; case RAY_MINUTE: return "MINUTE";
+    case RAY_SECOND: return "SECOND";       case RAY_TIMESPAN: return "TIMESPAN";
+    case RAY_TIMESTAMP: return "TIMESTAMP"; case RAY_DATETIME: return "DATETIME";
+    default: return NULL;
+    }
+}
+
 static ray_t* cast_delegate(int8_t tag, ray_t* x) {
-    const char* nm = q_type_rayname(tag);
-    if (!nm) return q_err(QE_NYI);
+    const char* nm = cast_rayname(tag);
+    if (!nm) return q_err(QE_TYPE);
     ray_t* ts = ray_sym(ray_sym_intern(nm, strlen(nm)));
     if (!ts || RAY_IS_ERR(ts)) return ts;
     ray_t* r = ray_cast_fn(ts, x);
@@ -461,7 +421,7 @@ static ray_t* cast_temporal32(int8_t tag, ray_t* x) {
 /* Symbol target: `symbol$sym is identity; strings follow the Tok law
  * (ref/tok.md Symbols: `$"hello" -> `hello, blanks trimmed, `$"" -> `) —
  * the cast/tok distinction has no doc-visible difference for sym targets.
- * Every other source is deferred. */
+ * Every other source has no conversion: 'type. */
 static ray_t* cast_sym(ray_t* x) {
     if (x && (x->type == -RAY_SYM || x->type == RAY_SYM)) {
         ray_retain(x);
@@ -469,7 +429,7 @@ static ray_t* cast_sym(ray_t* x) {
     }
     const char* p; int64_t n;
     if (x && q_str_text_bytes(x, &p, &n)) return q_tok(RAY_SYM, p, (size_t)n);
-    return q_err(QE_NYI);
+    return q_err(QE_TYPE);
 }
 
 /* The ONE cast home (contract: q_dollar.h).  Dispatch is on the TARGET tag:
@@ -551,9 +511,7 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
     case RAY_F64: case RAY_DATETIME:
         return cast_delegate(tag, x);
     }
-    /* the `break` arms above + any out-of-band tag (the band is sparse: 3 is
-     * kdb's short-of-3).  cast_delegate has no spelling for them -> 'nyi,
-     * which is what each returned before — no bespoke error strings needed. */
+    /* the `break` arms above + any out-of-band tag: no base spelling, so cast_delegate refuses 'type */
     return cast_delegate(tag, x);
 }
 
