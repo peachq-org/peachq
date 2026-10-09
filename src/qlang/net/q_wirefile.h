@@ -74,6 +74,10 @@ typedef struct {
  * tag, 'corrupt inconsistent lengths, 'nyi recognized-but-deferred layouts. */
 ray_t* q_wirefile_probe(ray_t* pathstr, q_wf_colhdr* out);
 
+/* Does the file (or the kxzip container's plaintext) open with a kdb data header?  Never true of q
+ * source text: no UTF-8 byte is fd-ff. */
+int q_wirefile_is_data(const char* path);
+
 /* Read ONE column file (nesting/compression resolve away; an enum column
  * reads ENUM-NATIVE as a 20h vector naming its domain — resolution is lazy
  * through the env, 2026-08-22 plan). */
