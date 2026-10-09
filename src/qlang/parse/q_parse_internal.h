@@ -31,6 +31,11 @@
  * serialised tree applies. */
 #define Q_ATTR_TRAIN 0x02
 
+/* Q_ATTR_POSTFIX: flag on the call node of a postfix elision (`2+`, `-15!`, `count@`): its trailing hole was never
+ * WRITTEN, so the walker applies the head to the bound operand alone and the projection is `+[2]`'s (qPython's md5
+ * fixture is two items) — parse still shows kdb's (+;2;::).  0x04 is unclaimed on a general list. */
+#define Q_ATTR_POSTFIX 0x04
+
 /* A leading '_' is the drop/cut verb: no name or symbol constant begins with it (basics/syntax.md:601). */
 static inline int q_parse_drop_lead(char c) { return c == '_'; }
 
