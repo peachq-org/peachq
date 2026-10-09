@@ -280,12 +280,10 @@ int q_ctx_run_debug_line(const char* s, size_t n, FILE* out, FILE* err) {
  * walker's own.  It reads BYTES — `\l file` arrives through the q_io byte core
  * and the embedded stdlib bundle (`\l pq`) is already a string, so one law
  * serves both with no second file-reading stack.  `value_door` is `value` of
- * text and the IPC source text: those also continue while the scanner sees an
- * open `{ ( [` or string (owner ruling 2026-09-30 — value is not `\l`). */
-typedef int (*ctx_stmt_fn)(const char* s, size_t n, void* u);
-
-/* docs/text-entry-law.md (target state; peachq may differ): the via-file and IPC columns */
-static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int value_door, ctx_stmt_fn fn, void* u) {
+ * text and an IPC request: there EVERY line continues the one before,
+ * `;` alone separates statements (owner ruling 2026-10-08). */
+/* docs/text-entry-law.md: the via-file and IPC columns */
+static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int value_door, q_ctx_stmt_fn fn, void* u) {
     if (!src) { src = ""; len = 0; }     /* an empty read owns no buffer; `src + len` must stay defined */
 
     /* ONE logical line, joined.  Bounded by the SOURCE: a physical line adds
@@ -297,8 +295,8 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
 
     /* kdb script semantics (learn/startingkdb/language.md):
      *  - an INDENTED line CONTINUES the previous logical line (at the value
-     *    door, so does any line while a bracket or string is open — a line
-     *    inside a string is raw bytes: never classified, never trimmed);
+     *    door, so does EVERY line — a line inside a string is raw bytes there:
+     *    never classified, never trimmed);
      *  - blank lines, whitespace-only lines, and comment lines (trimmed first
      *    char '/') are IGNORED for continuation — they do NOT flush the
      *    accumulator (so `a:1 2` <blank> `/c` <blank> ` 3` ` + 4` => a:5 6 7);
@@ -365,7 +363,7 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
             if (trim[0] == '/') { q_comment_line(trim, tlen); continue; }  /* comment-only line: ignored, no flush */
         }
 
-        int is_cont = alen > 0 && (indented || q_parse_open_is(&open));
+        int is_cont = alen > 0 && (value_door || indented);
         if (is_cont) q_comment_break();                 /* a continuation cannot be documented */
         else {                                          /* eval the prior line, arm this one */
             FLUSH();
@@ -469,7 +467,11 @@ static int ctx_eval_stmt(const char* s, size_t n, void* u) {
     return RAY_IS_ERR(r) ? 1 : 0;
 }
 
-/* docs/text-entry-law.md (target state; peachq may differ): the IPC column */
+int q_ctx_file_statements(const char* s, size_t n, q_ctx_stmt_fn fn, void* u) {
+    return ctx_walk_script(s, n, 0, 0, fn, u);
+}
+
+/* docs/text-entry-law.md: the IPC column */
 ray_t* q_ctx_eval_src(const char* s, size_t n) {
     ray_t* last = NULL;
     int    rc   = ctx_walk_script(s, n, 0, 1, ctx_eval_stmt, &last);

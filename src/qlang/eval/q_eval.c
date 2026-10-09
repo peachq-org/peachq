@@ -660,7 +660,7 @@ void q_eval_frames_resume(q_eval_frames_t f) {
  * rest AS LITERALS — nested trees stay data.  A sym vector of two or more is
  * that list; value of any OTHER typed vector (incl. the enlisted constant
  * ,`x) is doc-silent: 'nyi, never a guess. */
-/* docs/text-entry-law.md (target state; peachq may differ): `value "…"` is the IPC column */
+/* docs/text-entry-law.md: `value "…"` is the IPC column */
 ray_t* q_eval_value_wrap(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (RAY_IS_NULL(x)) return ray_i64(0);   /* (::) IS unary primitive 0 —
@@ -696,7 +696,7 @@ ray_t* q_eval_value_wrap(ray_t* x) {
         const char* p; int64_t n;
         if (!q_str_text_bytes(x, &p, &n)) return q_err(QE_TYPE);
         q_eval_frames_t frames = q_eval_frames_suspend();
-        ray_t* r = q_ctx_eval_src(p, (size_t)n);   /* multi-line text: the last statement's value (2026-09-30) */
+        ray_t* r = q_ctx_eval_src(p, (size_t)n);
         q_eval_frames_resume(frames);
         return r;
     }

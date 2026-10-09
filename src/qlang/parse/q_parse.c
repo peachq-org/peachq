@@ -2398,27 +2398,15 @@ ray_t *q_parse_tokens(const char *src, int64_t n) {
     return l;
 }
 
-static int open_depth(Tokens ts) {
-    int d = 0;
-    for (int i = 0; i < ts.n; i++) {
-        TKind k = ts.t[i].kind;
-        d += (k == T_LPAREN || k == T_LBRACE || k == T_LBRACK) - (k == T_RPAREN || k == T_RBRACE || k == T_RBRACK);
-    }
-    return d;
-}
-
 static void open_scan(q_parse_open_t *st, const char *src) {
     init_class();
     g_toks.t = NULL;
     g_toks.n = 0;
     g_scan_open_str = 0;
     if (setjmp(q_err_jmp)) {
-        st->depth += open_depth(g_toks);
         ray_error_free(die_answer());
     } else {
-        Tokens ts = scan(src);
-        st->depth += open_depth(ts);
-        free_tokens(ts);
+        free_tokens(scan(src));
         g_toks.t = NULL;
         g_toks.n = 0;
     }

@@ -66,15 +66,17 @@ int q_ctx_run_src(const char* s, FILE* out, FILE* err, ray_t** esig);
  * file would. */
 int q_ctx_run_named_src(const char* name, const char* s, FILE* out, FILE* err, ray_t** esig);
 
-/* Text under the multiline law, ANSWERING instead of printing: the value
- * of the last statement (owned; an assignment's is `::`, as is an empty text),
- * or the first erroring statement's error, the statements after it never run.
- * `value` of a string and the IPC source-text door are this door, where a line
- * also continues while a bracket or string is open (owner ruling 2026-09-30:
- * value is not `\l`).  Nothing is echoed and no console
- * drain happens here — the caller's statement seam owns both, as it owns the
- * `\d` and frame-floor policy. */
+/* Text read by the IPC column of docs/text-entry-law.md, ANSWERING instead of printing: every line continues the
+ * one before, so only `;` separates statements.  The value of the last statement (owned; an assignment's is `::`, as
+ * is an empty text), or the first erroring statement's error, the statements after it never run.  `value` of a
+ * string, an IPC request and `k(h,"…")` are this door.  Nothing is echoed and no console drain happens here — the
+ * caller's statement seam owns both, as it owns the `\d` and frame-floor policy. */
 ray_t* q_ctx_eval_src(const char* s, size_t n);
+
+/* Text cut into the statements a load of it would run (the via-file column), each handed NUL-terminated to `fn`
+ * without running it; the first non-zero return stops the walk and is returned.  `-conn f.q` sends these. */
+typedef int (*q_ctx_stmt_fn)(const char* s, size_t n, void* u);
+int q_ctx_file_statements(const char* s, size_t n, q_ctx_stmt_fn fn, void* u);
 
 /* q_ctx_eval_src in the console's session, its answer displayed as the console displays a line's (`\c`, nothing for
  * `::`, an error's trace) — the browser's one door.  Unlike an IPC request it keeps `\d`; it never suspends. */
