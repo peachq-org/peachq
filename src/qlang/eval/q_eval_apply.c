@@ -1712,6 +1712,14 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
                 return atomic2((ray_binary_fn)(uintptr_t)fv->i64, row,
                                args[0], args[1]);
         } else if (strcmp(fam, "aggregate") == 0) {
+            /* the fold group answers `()` as it answers the typed empty: `max ()` is `max 0#0` (owner ruling
+             * 2026-10-09), as `sum ()` is 0 */
+            if (n == 1 && q_ops_nested_dyad(row) && q_type_is_empty_list(args[0])) {
+                ray_t* e = q_type_empty(RAY_I64);
+                ray_t* r = q_eval_apply(fv, row, &e, 1);
+                ray_release(e);
+                return r;
+            }
             if (n == 1 && (is_container(args[0]) ||
                            (row->nested && q_index_any_nested_item(args[0]))))
                 return agg1(fv, row, args[0]);
@@ -1719,6 +1727,8 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
                            (row->nested && (q_index_any_nested_item(args[0]) || q_index_any_nested_item(args[1])))))
                 return agg2(fv, row, args[0], args[1]);
         } else if (strcmp(fam, "map") == 0) {
+            /* a map is uniform (maps.md:390): `sums ()` is `()` */
+            if (n == 1 && q_type_is_empty_list(args[0])) return ray_list_new(0);
             if (n == 1 && (is_container(args[0]) ||
                            q_index_any_nested_item(args[0])))
                 return map1(fv, row, NULL, args[0]);
