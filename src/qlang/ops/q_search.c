@@ -19,6 +19,7 @@
 #include "qlang/base/q_type.h"  /* the type-axis home: the shape predicates and the int-lane reads */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_value — within composes on `>=`/`<=`/`&` */
 #include "qlang/ops/q_index.h"  /* q_index_elem_at, q_index_rank — THE element-read home and its rank axis */
+#include "qlang/ops/q_bang.h"   /* q_bang — a dict left of `in` rebuilt through the `!` home */
 #include "lang/eval.h"     /* ray_in_fn, ray_find_fn */
 #include "lang/internal.h" /* atom_eq */
 #include "mem/heap.h"      /* RAY_ATTR_HAS_NULLS — ? find miss remap */
@@ -86,7 +87,8 @@ static int seq_has_item(ray_t* y, ray_t* v) {
  * match, the row search and the empty-y miss all come from the one home.  A
  * dict's membership is its RANGE's (`x in value y`, owner ruling 2026-09-17;
  * `y?x` would answer a KEY, which a null key could not distinguish from a
- * miss).  Mixed numeric families (float x vs int y) are allowed only against
+ * miss).  A dict LEFT of an atom or vector y is left-atomic (in.md:22):
+ * `(key x)!(value x) in y`; of a list y it is one item sought whole (in.md:34).  Mixed numeric families (float x vs int y) are allowed only against
  * an ATOM or 1-item y (elementwise equality); longer/empty mixed vectors are
  * 'type.  A 1-char string x against string y unwraps the base char row to an
  * ATOM bool. */
@@ -98,6 +100,17 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
         if (!vv) return q_err(QE_TYPE);
         ray_t* r = q_in_wrap(x, vv);
         if (vo) ray_release(vv);
+        return r;
+    }
+    if (q_type_is_plain_dict(x) && (ray_is_atom(y) || ray_is_vec(y))) {
+        int vo = 0;
+        ray_t* vv = q_table_dict_vals(x, &vo);
+        if (!vv) return q_err(QE_TYPE);
+        ray_t* v = q_in_wrap(vv, y);
+        if (vo) ray_release(vv);
+        if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_TYPE);
+        ray_t* r = q_bang(ray_dict_keys(x), v);
+        ray_release(v);
         return r;
     }
     if (q_type_is_table(y) || y->type == RAY_LIST) {

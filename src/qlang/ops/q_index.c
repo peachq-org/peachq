@@ -926,11 +926,31 @@ static ray_t* run1(ray_t* v) {
     return ray_is_atom(v) ? ray_enlist_fn(&v, 1) : ray_list_append(ray_list_new(1), v);
 }
 
+/* A table value list is a list of records (basics/glossary.md:769): the same dict over its rows, which a write
+ * extends and the level collapse makes a table again only if every value is still a like record.  Owned. */
+static ray_t* dict_rows(ray_t* x) {
+    ray_t* rows = q_list_uncollapse(ray_dict_slots(x)[1]);
+    if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_OOM);
+    ray_retain(ray_dict_slots(x)[0]);
+    ray_t* d = ray_dict_new(ray_dict_slots(x)[0], rows);
+    return d ? d : q_err(QE_OOM);
+}
+
 /* one key at settled position p: the run of one — or the keyed table's row put, which finds its own row.  A table
- * domain over vector values is a dict (its keys grow by the row join); a table as the VALUE list is not written. */
+ * domain over vector values is a dict (its keys grow by the row join).  A table as the VALUE list takes the row
+ * among its rows (dict_rows) and the completed level collapses them, so a ragged one widens its columns (qcheck
+ * qc.q:145) and no mid-amend collapse types the next key's write. */
 static ray_t* dict_put1(ray_t* x, ray_t* key, int64_t p, ray_t* v) {
     ray_t** slots = ray_dict_slots(x);
     if (q_type_is_keyed(x)) return keyed_put1(x, key, v);
+    if (q_type_is_table(slots[1])) {
+        ray_t* d = dict_rows(x);
+        if (RAY_IS_ERR(d)) return d;
+        ray_t* r = dict_put1(d, key, p, v);
+        if (RAY_IS_ERR(r)) { ray_release(d); return r; }
+        ray_release(x);
+        return r;
+    }
     if (!(is_coll(slots[0]) || q_type_is_table(slots[0])) || !is_coll(slots[1])) return q_err(QE_TYPE);
     ray_t* ky = run1(key);
     ray_t* vy = run1(v);
@@ -972,14 +992,10 @@ ray_t* q_index_dict_align(ray_t* x, ray_t* ykeys) {
 
 static ray_t* level_collapse(ray_t* x);
 
-/* A table value list is a list of records (basics/glossary.md:769): the join writes the rows, and the level collapse
- * makes them a table again only if every value is still a like record. */
+/* the join writes the rows (dict_rows), then collapses its completed level */
 static ray_t* dict_join_rows(ray_t* x, ray_t* y, int strict) {
-    ray_t* rows = q_list_uncollapse(ray_dict_slots(x)[1]);
-    if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_OOM);
-    ray_retain(ray_dict_slots(x)[0]);
-    ray_t* d = ray_dict_new(ray_dict_slots(x)[0], rows);
-    if (!d || RAY_IS_ERR(d)) return d ? d : q_err(QE_OOM);
+    ray_t* d = dict_rows(x);
+    if (RAY_IS_ERR(d)) return d;
     ray_t* r = q_index_dict_join(d, y, strict);
     if (RAY_IS_ERR(r)) { ray_release(d); return r; }
     ray_release(x);

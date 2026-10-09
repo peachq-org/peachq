@@ -2,6 +2,7 @@
  * actionable-plans/2026-09-26-forkq-procq-handles.md; each owner forgets its own part without closing or calling a
  * hook (q_sys_forked, q_console_forked, q_handles_forget, q_provider_forget). */
 #define _GNU_SOURCE
+#include "qlang/q_count.h"
 #include "qlang/io/q_worker.h"
 #include "qlang/io/q_exedir.h"
 #include "qlang/io/q_handles.h"
@@ -203,7 +204,7 @@ static void argv_free(char** a) {
 
 /* argv is the worker's whole recipe: a list of strings passed to the new process as they are */
 static ray_t* argv_make(ray_t* x, const char* exe, char*** out) {
-    int64_t n = x->type < 0 ? -1 : ray_len(x);
+    int64_t n = x->type < 0 ? -1 : q_count(x);
     if (n < 0 || (n && x->type != RAY_LIST)) return q_err(QE_TYPE);
     char** a = (char**)calloc((size_t)n + 2, sizeof *a);
     if (!a) return q_err(QE_OOM);
@@ -212,7 +213,7 @@ static ray_t* argv_make(ray_t* x, const char* exe, char*** out) {
         ray_t* s = ((ray_t**)ray_data(x))[i];
         if (s->type != RAY_CHARV && s->type != -RAY_CHARV) { argv_free(a); return q_err(QE_TYPE); }
         const char* p = s->type == RAY_CHARV ? (const char*)ray_data(s) : (const char*)&s->u8;
-        size_t len = s->type == RAY_CHARV ? (size_t)ray_len(s) : 1;
+        size_t len = s->type == RAY_CHARV ? (size_t)q_count(s) : 1;
         if (memchr(p, 0, len)) { argv_free(a); return q_err(QE_DOMAIN); }
         if (!(a[i + 1] = (char*)malloc(len + 1))) { argv_free(a); return q_err(QE_OOM); }
         memcpy(a[i + 1], p, len);
@@ -525,7 +526,7 @@ ray_t* q_worker_spawn(ray_t* args, ray_t* tmo, const char* const log[2]) {
     int64_t ms = timeout_ms(tmo, 10000);
     if (ms < 0) return q_err(QE_TYPE);
     char exe[1024];
-    if (!q_exepath(exe, sizeof exe)) return q_err(QE_PROC);
+    if (!q_exedir_path(exe, sizeof exe)) return q_err(QE_PROC);
     char** argv = NULL;
     ray_t* e = argv_make(args, exe, &argv);
     if (e) return e;

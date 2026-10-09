@@ -61,4 +61,8 @@ int q_eval_apply_fnv_matrix_row(const struct q_op* r);
  * when the spelling is not a HOF's */
 int q_adverb_hof_id(const char* hof);
 
+/* Each with no Case reading — the keywords' form (`0 0 0 each til 3` indexes; Case is the glyph `int'[…]`):
+ * every item applied, an empty argument the generic `()` (ref/maps.md).  Args borrowed, result owned. */
+ray_t* q_adverb_each(ray_t* fv, const struct q_op* frow, ray_t** args, int64_t n);
+
 #endif /* Q_EVAL_INTERNAL_H */

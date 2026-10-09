@@ -20,7 +20,7 @@
 #include <unistd.h>
 #endif
 
-int q_exepath(char* dst, size_t cap) {
+int q_exedir_path(char* dst, size_t cap) {
     dst[0] = '\0';
     char exe[1024];
 #if defined(_WIN32)
@@ -51,7 +51,7 @@ int q_exedir(char* dst, size_t cap) {
     dst[0] = '\0';
     if (cap < 2) return 0;
     char exe[1024];
-    if (!q_exepath(exe, sizeof exe)) return 0;
+    if (!q_exedir_path(exe, sizeof exe)) return 0;
     char* sep = strrchr(exe, '/');
 #if defined(_WIN32)
     char* bsep = strrchr(exe, '\\');
