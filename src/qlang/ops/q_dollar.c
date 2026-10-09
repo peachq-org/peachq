@@ -42,7 +42,7 @@ int8_t q_cast_designator(ray_t* t, int* is_tok, int* is_identity) {
         case RAY_I64:  case RAY_F32: case RAY_F64: case RAY_SYM: case RAY_CHARV:
         case RAY_GUID:      /* cast.md:20 `2h "g" `guid` are one designator row;
                              * `-2h$"uuid"` = guid Tok (q_dollar_tok parses it). The
-                             * `2h$` CAST stays deferred at q_dollar_cast. */
+                             * `2h$` CAST is the identity on guids, else deferred. */
         RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: RAY_TEMPORALF_CASES:
             return (int8_t)n;
         case RAY_LIST:      /* 0h is Identity (cast.md:40): returns y unchanged */
@@ -259,22 +259,22 @@ static ray_t* q_cast_real(ray_t* x) {
     return f;
 }
 
+/* A float beyond the target's range, ±inf included, saturates to its ±0W (`long$0w` -> 0W; the infinity
+ * corresponding to numeric x is min 0#x, ref/cast.md; qcheck t/review.q:3 needs "j"$1e300 -> 0W). */
+static int64_t cast_float_lane(int8_t tag, double v) {
+    int64_t w = 0;
+    ray_type_inf(tag, v > 0, &w);
+    double r = rint(v);
+    return (v > 0 ? r >= (double)w : r <= (double)w) ? w : (int64_t)r;
+}
+
 static ray_t* cast_int(int8_t tag, ray_t* x) {
     if (x && (x->type == -RAY_F64 || x->type == -RAY_F32)) {
         if (RAY_ATOM_IS_NULL(x)) return ray_typed_null((int8_t)-tag);
-        /* ±inf saturates to the target's ±0W (`long$0w` -> 0W; the infinity
-         * corresponding to numeric x is min 0#x, ref/cast.md). */
-        if (isinf(x->f64)) {
-            int64_t w = 0;
-            ray_type_inf(tag, x->f64 > 0, &w);
-            if (tag == RAY_I64) return ray_i64(w);
-            if (tag == RAY_I32) return ray_i32((int32_t)w);
-            return ray_i16((int16_t)w);
-        }
-        double r = rint(x->f64);              /* F32 atoms store f64 payload */
-        if (tag == RAY_I64) return ray_i64((int64_t)r);
-        if (tag == RAY_I32) return ray_i32((int32_t)r);
-        return ray_i16((int16_t)r);
+        int64_t v = cast_float_lane(tag, x->f64);       /* F32 atoms store f64 payload */
+        if (tag == RAY_I64) return ray_i64(v);
+        if (tag == RAY_I32) return ray_i32((int32_t)v);
+        return ray_i16((int16_t)v);
     }
     if (x && (x->type == RAY_F64 || x->type == RAY_F32)) {
         int64_t n = q_count(x);
@@ -286,10 +286,7 @@ static ray_t* cast_int(int8_t tag, ray_t* x) {
             double v = is64 ? ((const double*)ray_data(x))[i]
                             : (double)((const float*)ray_data(x))[i];
             int isnull = isnan(v);
-            int64_t iv = 0;
-            if (isnull) iv = 0;
-            else if (isinf(v)) ray_type_inf(tag, v > 0, &iv);
-            else iv = (int64_t)rint(v);
+            int64_t iv = isnull ? 0 : cast_float_lane(tag, v);
             if      (tag == RAY_I64) ((int64_t*)ray_data(out))[i] = iv;
             else if (tag == RAY_I32) ((int32_t*)ray_data(out))[i] = (int32_t)iv;
             else                     ((int16_t*)ray_data(out))[i] = (int16_t)iv;
@@ -456,6 +453,17 @@ static ray_t* cast_timestamp(ray_t* x) {
     return cast_delegate(RAY_TIMESTAMP, x);
 }
 
+/* A long reaches a 32-bit temporal through the int lane, so its infinities saturate as `int$ does ("u"$0W -> 0Wu,
+ * qcheck t/types.q:14); finite values truncate there exactly as base's own arm does. */
+static ray_t* cast_temporal32(int8_t tag, ray_t* x) {
+    if (q_type_elem_tag(x) != -RAY_I64) return cast_delegate(tag, x);
+    ray_t* i = cast_int(RAY_I32, x);
+    if (!i || RAY_IS_ERR(i)) return i;
+    ray_t* r = cast_delegate(tag, i);
+    ray_release(i);
+    return r;
+}
+
 /* Symbol target: `symbol$sym is identity; strings follow the Tok law
  * (ref/tok.md Symbols: `$"hello" -> `hello, blanks trimmed, `$"" -> `) —
  * the cast/tok distinction has no doc-visible difference for sym targets.
@@ -527,7 +535,9 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
     switch ((ray_type_e)tag) {
     case RAY_CHARV: break;                   /* hoisted above: the atom pack; nested lists distributed */
     case RAY_LIST: break;                    /* tag 0 is not a cast designator */
-    case RAY_GUID: break;                    /* guid target: no base arm — deferred */
+    case RAY_GUID:                           /* identity on guids; no base arm for any other source */
+        if (q_type_elem_tag(x) == -RAY_GUID) { ray_retain(x); return x; }
+        break;
     case RAY_ENUM: break;                    /* never a designator (q_cast_designator) */
     case RAY_STR:  break;                    /* physical tag: never a cast target */
     case RAY_F32:  return q_cast_real(x);    /* real: narrow base F64 cast to F32 */
@@ -540,9 +550,11 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
     case RAY_TIMESPAN: case RAY_MINUTE: case RAY_SECOND: {
         int8_t st = (int8_t)-q_type_elem_tag(x);
         if (st == RAY_TIMESTAMP || st == RAY_DATETIME) return cast_tod(tag, x);
-        return cast_delegate(tag, x);
+        return tag == RAY_TIMESPAN ? cast_delegate(tag, x) : cast_temporal32(tag, x);
     }
-    case RAY_F64: case RAY_MONTH: case RAY_DATE: case RAY_DATETIME: case RAY_TIME:
+    case RAY_MONTH: case RAY_DATE: case RAY_TIME:
+        return cast_temporal32(tag, x);
+    case RAY_F64: case RAY_DATETIME:
         return cast_delegate(tag, x);
     }
     /* the `break` arms above + any out-of-band tag (the band is sparse: 3 is
