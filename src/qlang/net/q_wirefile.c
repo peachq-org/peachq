@@ -600,6 +600,19 @@ ray_t* q_wirefile_probe(ray_t* pathstr, q_wf_colhdr* out) {
     return wf_probe_classify(buf, got, fsz, 0, out);
 }
 
+/* Through the byte core, so a kxzip container is judged by the header it holds. */
+int q_wirefile_is_data(const char* path) {
+    ray_t* ps = ray_str(path, strlen(path));
+    if (!ps || RAY_IS_ERR(ps)) { if (ps) ray_error_free(ps); return 0; }
+    ray_t* head = q_io_read_slice(ps, 0, 2, NULL);
+    ray_release(ps);
+    if (!head) return 0;
+    if (RAY_IS_ERR(head)) { ray_error_free(head); return 0; }
+    int r = wf_sniff((const uint8_t*)ray_data(head), (size_t)q_count(head)) != WF_UNKNOWN;
+    ray_release(head);
+    return r;
+}
+
 /* ---- the writer --------------------------------------------------------- */
 
 #define WF_A_MAGIC 2   /* the `ff 01` before the -8! payload */

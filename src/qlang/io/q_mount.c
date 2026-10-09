@@ -146,6 +146,15 @@ static ray_t* mount_root(const char* abs, size_t n, int scripts) {
     return bad;
 }
 
+ray_t* q_mount_object(const char* path) {
+    size_t n = strlen(path);
+    const char* base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    size_t bn = strlen(base);
+    if (!q_env_ident_ok(base, bn)) return q_err_name(path, n);
+    return mount_bind_object(path, n, base, bn);
+}
+
 ray_t* q_mount_dir(const char* path, int scripts) {
     char abs[PATH_MAX];
     if (!q_io_abs_path(path, abs, sizeof abs) || !mount_is_dir(abs)) return q_err(QE_OS);
