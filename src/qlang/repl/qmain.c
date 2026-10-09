@@ -43,15 +43,35 @@ static void conn_bind(const char* name, const char* s, size_t n) {
     ray_release(v);
 }
 
-/* One text as one .pq.i.conn_call: two statements, the display and then the notice. */
-static int conn_call(const char* src, size_t n, const char* save, int last) {
+/* One text as one .pq.i.conn_call: two statements, the display and then the notice.  A quiet text displays nothing. */
+static int conn_call(const char* src, size_t n, const char* save, int last, int quiet) {
     conn_bind(".pq.i.conn_src", src, n);
     conn_bind(".pq.i.conn_file", save ? save : "", save ? strlen(save) : 0);
-    const char* call = last ? ".pq.i.conn_p:.pq.i.conn_call[.pq.i.conn_h;.pq.i.conn_src;.pq.i.conn_file;1b]\n"
-                              ".pq.i.conn_notice .pq.i.conn_p"
-                            : ".pq.i.conn_p:.pq.i.conn_call[.pq.i.conn_h;.pq.i.conn_src;.pq.i.conn_file;0b]\n"
-                              ".pq.i.conn_notice .pq.i.conn_p";
+    char call[160];
+    snprintf(call, sizeof call, ".pq.i.conn_p:.pq.i.conn_call[.pq.i.conn_h;.pq.i.conn_src;.pq.i.conn_file;%db;%db]\n"
+                                ".pq.i.conn_notice .pq.i.conn_p", last, quiet);
     return q_ctx_run_src(call, stdout, stderr, NULL) ? 1 : 0;
+}
+
+/* docs/text-entry-law.md: the file is cut by the via-file law here, one message per statement, as a `\l` would run
+ * it; a statement is held until the next arrives, so the file's last one can be the run's last text. */
+typedef struct { char* held; size_t n; const char* save; } conn_file_t;
+
+static int conn_file_stmt(const char* s, size_t n, void* u) {
+    conn_file_t* f = (conn_file_t*)u;
+    if (f->held && conn_call(f->held, f->n, f->save, 0, 1)) return 1;
+    free(f->held);
+    f->held = strdup(s);
+    f->n    = n;
+    return f->held ? 0 : 1;
+}
+
+static int conn_file(const char* src, size_t n, const char* save, int last) {
+    conn_file_t f  = { NULL, 0, save };
+    int         rc = q_ctx_file_statements(src, n, conn_file_stmt, &f) ? 1 : 0;
+    if (!rc && (f.held || last)) rc = conn_call(f.held ? f.held : "", f.n, save, last, 1);
+    free(f.held);
+    return rc;
 }
 
 /* The gathered texts: the file's bytes (owned), then argv pointers, then stdin lines (owned copies). */
@@ -86,7 +106,7 @@ static int conn_main(int argc, char** argv) {
     int stdin_tty = isatty(STDIN_FILENO);
     if (!script && !n_eval && !ls && stdin_tty) { fprintf(stderr, "q: -conn needs a file, -eval, -ls or piped stdin\n"); return 2; }
 
-    /* The texts in the local process's order — the file's whole text, each -eval, then each stdin line — gathered
+    /* The texts in the local process's order — the file, each -eval, then each stdin line — gathered
      * first because `-save` takes the LAST one's value.  stdin is read only when there is neither a file nor an
      * -eval, so neither waits on an idle pipe; a blank stdin line runs nothing, as at the console. */
     conn_texts t = { calloc((size_t)argc + 1, sizeof *t.p), calloc((size_t)argc + 1, sizeof *t.len),
@@ -144,7 +164,8 @@ static int conn_main(int argc, char** argv) {
     if (q_ctx_run_src(".pq.i.conn_h:.pq.i.conn_open .pq.i.conn_target", stdout, stderr, NULL)) { rc = 2; goto done; }
 
     for (size_t i = 0; i < t.n && !rc; i++)
-        rc = conn_call(t.p[i], t.len[i], save, i + 1 == t.n);
+        rc = script && i == 0 ? conn_file(t.p[i], t.len[i], save, t.n == 1)
+                              : conn_call(t.p[i], t.len[i], save, i + 1 == t.n, 0);
     if (!rc && ls) rc = q_ctx_run_src(".pq.i.conn_ls .pq.i.conn_h", stdout, stderr, NULL) ? 1 : 0;
     q_ctx_run_src("hclose .pq.i.conn_h", stdout, stderr, NULL);
 done:
