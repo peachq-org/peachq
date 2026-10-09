@@ -182,11 +182,11 @@
   at:where text in special;
   $[count text; raze @[enlist each text;at;:;escaped special?text at]; text]};
 
-/ docs/text-entry-law.md (target state; peachq may differ): -conn -eval is IPC text; -conn f.q is via file, on the client
+/ docs/text-entry-law.md: -conn -eval is IPC text; -conn f.q is via file, on the client
 
 / Evaluate q text on a server, the way qStudio does: the wrapper round the escaped text, one sync call.
 / @param handle (int) an open handle
-/ @param text (string) the q text; multi-line text runs as a script and the last statement answers
+/ @param text (string) the q text, read by the IPC column: one expression, `;` the only statement separator
 / @return the raw triple (sizeOk; $[sizeOk; ((runOk;`);value or (error;backtrace)); 0b]; consoleText)
 .pq.i.remote_call:{[handle;text] handle .pq.i.WRAPPER,"\"",.pq.i.remote_escape[text],"\""};
 
@@ -297,12 +297,13 @@
   @[hopen;(where_to;5000);{[target;err] -2 "q: cannot connect to ",target,": ",err; exit 2}[target]]};
 
 / One launcher call under -conn: a display, or with a file the last text's value saved and the earlier ones run
-/ silently, as a script's non-final statements.  A remote error is its class on stderr and exit 1, as a failing
-/ script; the caller announces the answered path once the display has left the console.
-.pq.i.conn_call:{[handle;text;file;final]
+/ silently, as a script's non-final statements; a quiet text (a statement of the -conn script) is never displayed.
+/ A remote error is its class on stderr and exit 1, as a failing script; the caller announces the answered path once
+/ the display has left the console.
+.pq.i.conn_call:{[handle;text;file;final;quiet]
   to_file:{[h;f;t] .pq.i.remote_save[h;f;t]; ""};
   silently:{[h;t] .pq.i.remote_query[h;t]; ""};
-  run:$[""~file; .pq.i.remote_run[handle]; final; to_file[handle;file]; silently[handle]];
+  run:$[final and count file; to_file[handle;file]; quiet or count file; silently[handle]; .pq.i.remote_run[handle]];
   @[run;text;{[err] -2 "'",err; exit 1}]};
 
 .pq.i.conn_notice:{[path] if[count path; -2 "Full result saved locally to kdb binary: ",path]};

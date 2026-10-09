@@ -971,7 +971,7 @@ static ray_t* k_apply(ray_t* fn, K* argv, int argc) {
     return out;
 }
 
-/* docs/text-entry-law.md (target state; peachq may differ): k(h,"…") is the IPC column */
+/* docs/text-entry-law.md: k(h,"…") is the IPC column */
 /* k()'s contract: evaluate the source text, then apply the result to any args */
 static ray_t* k_eval(const char* s, K* argv, int argc) {
     ray_t* res = q_ctx_eval_src(s, strlen(s));
