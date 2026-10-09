@@ -26,7 +26,8 @@
 #include "qlang/q_ctx.h"           /* the engine context: `\l` source seam, console teardown */
 #include "qlang/io/q_io.h"    /* q_io_mkdir_parents — `\1`/`\2` create the path they name */
 #include "qlang/io/q_handles.h" /* q_handles_end_owned — the exit home ends every owned worker */
-#include "qlang/io/q_mount.h" /* q_mount_dir — the `\l <dir>` forms */
+#include "qlang/io/q_mount.h" /* q_mount_dir / _object — the `\l <dir>` and serialized-object forms */
+#include "qlang/net/q_wirefile.h" /* q_wirefile_is_data — `\l` tells a data file from a script */
 #include "qlang/io/q_provider.h" /* q_provider_load — the `\l `:pq:duckdb:al` form */
 #include "qlang/q_pq.h"       /* q_pq_load / _load_file — `\l pq` and `\l pq/<file>.q` */
 #include "qlang/q_env.h"      /* q_env_ctx_set/_ctx + q_env_ns_names — `\d` and the `\v`/`\f`/`\a` rosters */
@@ -574,7 +575,8 @@ int q_sys_load_find(const char* lit, size_t alen, char* found) {
  * `\l script` as `script.q`); (c)/(d) for a RELATIVE name only, `$QHOME/name`
  * then `$QHOME/name.q` — a fixtures/QHOME-style search root (the doctest runner
  * points QHOME at test/qscript).  An absolute path never gets QHOME prepended.
- * The resolved REGULAR readable file is executed line-at-a-time via the public
+ * A resolved file with a kdb data header binds as a serialized object (q_mount_object); any
+ * other REGULAR readable file is executed line-at-a-time via the public
  * q_ctx_run_file (multiline-aware; a bare top-level value echoes, #53).  A
  * still-MISSING path signals the path as given (kdb: `\l nope.q` -> 'nope.q);
  * an existing DIRECTORY mounts through io/q_mount.c (splayed table / db root;
@@ -605,6 +607,7 @@ ray_t* q_sys_load(const char* arg, size_t alen) {
      * the library on disk, never a mount; `\l pq` reloads every library file
      * (`.pq.i.files`) unless a disk file `pq`/`pq.q` wins above. */
     if (alen > 3 && memcmp(lit, "pq/", 3) == 0) return q_pq_load_file(lit, alen, ok ? found : NULL);
+    if (ok && q_wirefile_is_data(found)) return q_mount_object(found);
     if (ok) {   /* disk hit — load (silent); an ABORTED load signals */
         /* docs/text-entry-law.md (target state; peachq may differ): `\l` and `system "l"` are the via-file column */
         ray_t* esig = NULL;
