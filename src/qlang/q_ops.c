@@ -250,7 +250,7 @@ static const q_op_t Q_OPS[] = {
     /* ref/exp.md, ref/log.md. */
     { "xexp",  QLEX_KW,        QR_NONE,                        QR_FN2A("xexp", q_xexp_wrap), NULL, 1, 0, "atomic", NULL, QKOP(32) },
     { "xlog",  QLEX_KW,        QR_NONE,                        QR_FN2A("xlog", q_xlog_wrap), NULL, 1, 0, "atomic", NULL },
-    { "each",  QLEX_KW,        QR_NONE,                        QR_FN2("map", q_hof_nyi_wrap), "map", 1, 0, "none", NULL },
+    { "each",  QLEX_KW,        QR_NONE,                        QR_QSRC("each"),   "map", 1, 0, "none", NULL },
     /* none: `in` owns ref/in.md's rank table (FAMILY AUDIT border rulings). */
     { "in",    QLEX_KW,        QR_NONE,                        QR_FN2("in", q_in_wrap), NULL, 1, 0, "none", NULL, QKOP(23) },
     /* Monadic cells stay QR_NONE: both are dyadic-only in q, so prefix `and x`
@@ -347,10 +347,10 @@ static const q_op_t Q_OPS[] = {
     { "mmu",   QLEX_KW,        QR_NONE,                        QR_FN2("mmu", q_mmu_wrap), NULL, 1, 0, "none", NULL },
     { "inv",   QLEX_KW,        QR_FN1("inv", q_inv_wrap),      QR_NONE,           NULL, 1, 0, "none", NULL },
     { "lsq",   QLEX_KW,        QR_NONE,                        QR_FN2("lsq", q_lsq_wrap), NULL, 1, 0, "none", NULL },
-    { "over",  QLEX_KW,        QR_NONE,                        QR_FN2("over", q_hof_nyi_wrap), "fold", 1, 0, "none", NULL },
-    { "scan",  QLEX_KW,        QR_NONE,                        QR_FN2("scan-kw", q_hof_nyi_wrap), "scan", 1, 0, "none", NULL },
-    { "prior", QLEX_KW,        QR_NONE,                        QR_FN2("prior", q_hof_nyi_wrap), "prior", 1, 0, "none", NULL },
-    { "peach", QLEX_KW,        QR_NONE,                        QR_FN2("peach", q_hof_nyi_wrap), "map", 1, 0, "none", NULL },
+    { "over",  QLEX_KW,        QR_NONE,                        QR_QSRC("over"),   "fold", 1, 0, "none", NULL },
+    { "scan",  QLEX_KW,        QR_NONE,                        QR_QSRC("scan"),   "scan", 1, 0, "none", NULL },
+    { "prior", QLEX_KW,        QR_NONE,                        QR_QSRC("prior"),  "prior", 1, 0, "none", NULL },
+    { "peach", QLEX_KW,        QR_NONE,                        QR_QSRC("peach"),  "map", 1, 0, "none", NULL },
     /* ---- keyword-prefix monads (pass-through/rename) ---- */
     /* QR_ALIAS twins: reserved keyword spellings of a glyph's k unary form,
      * SHARING its value — kdb prints `~:`/`@:` for them (basics/parsetrees.md

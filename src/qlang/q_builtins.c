@@ -249,12 +249,6 @@ static void bind_value(const char* name, ray_t* val) {
     ray_release(val);
 }
 
-/* keyword-HOF recipe stub (q_registry_internal.h note) */
-ray_t* q_hof_nyi_wrap(ray_t* f, ray_t* x) {
-    (void)f; (void)x;
-    return q_err(QE_NYI);
-}
-
 
 void q_builtins_register(void) {
     bind_unary("parse", q_parse_builtin_fn);

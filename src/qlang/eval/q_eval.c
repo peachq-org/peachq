@@ -520,9 +520,15 @@ ray_t* q_eval_carrier_value(ray_t* v) {
                                  q_eval_apply_comp_inner(v));
     case Q_EVAL_CAR_PROJ: {
         /* an UNWRITTEN trailing slot is rank padding, not a bound argument — `+[2]` reads out as the 2-item
-         * (+;2); a written hole (`{x+y}[1;]`) is the hole value and stays (D0922h) */
+         * (+;2); a written hole (`{x+y}[1;]`) is the hole value and stays (D0922h), but a primitive's trailing
+         * holes read out as padding too (`value +[2;]` is (+;2)) unless every slot is one */
         int64_t n = q_eval_apply_proj_nslots(v);
         while (n > 0 && !q_eval_apply_proj_arg(v, n - 1)) n--;
+        if (q_eval_apply_is_fnval(h) && h != q_registry_list_value()) {
+            int64_t k = n;
+            while (k > 0 && Q_IS_HOLE(q_eval_apply_proj_arg(v, k - 1))) k--;
+            if (k > 0) n = k;
+        }
         ray_t* out = list_put_borrowed(ray_list_new(n + 1), h);
         for (int64_t i = 0; i < n; i++)
             out = list_put_borrowed(out, q_eval_apply_proj_arg(v, i));
@@ -1119,10 +1125,11 @@ ray_t* q_eval(ray_t* node) {
                             : (argc == 2) ? Q_DYADIC : 0;
             if (val) row = q_registry_row_of(fv, val);
         }
+        int64_t nap = (node->attrs & Q_ATTR_POSTFIX) && !argv[argc - 1] ? argc - 1 : argc;
         /* a parser-marked TRAIN (`1~count@`): its rightmost operand is deferred, so the head composes onto it */
         ret = (node->attrs & Q_ATTR_TRAIN) && argv[argc - 1]
                   ? q_eval_apply_train(fv, row, argv, argc)
-                  : q_eval_apply(fv, row, argv, argc);
+                  : q_eval_apply(fv, row, argv, nap);
         release_args(argv, argc);
         ray_release(fv);
     }
