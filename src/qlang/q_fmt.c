@@ -287,7 +287,8 @@ static int col_uniform_singleton(ray_t* col) {
 
 /* THE cell renderer — table, keyed table, dict and aligned row.  `blank_null` =
  * a COLUMN, where a null shows as a gap (ref/lj.md, ref/log.md:50-52); a general
- * list keeps its token.  A cell sheds the suffix only where the CONTAINER names
+ * list keeps its token, and so does the generic null `::` in any cell (owner
+ * witness 2026-10-08).  A cell sheds the suffix only where the CONTAINER names
  * the type — `col_uniform_type`, the same gate the dict rows use. */
 void q_fmt_cell(ray_t* col, int64_t row, int blank_null, char* out, size_t outsz) {
     out[0] = '\0';
@@ -339,7 +340,7 @@ void q_fmt_cell(ray_t* col, int64_t row, int blank_null, char* out, size_t outsz
     ray_release(ia);
     if (!c || RAY_IS_ERR(c)) { if (c) ray_release(c); return; }
     if (blank_null && ray_is_atom(c) && c->type != -RAY_STR &&
-        c->type != -RAY_SYM && RAY_ATOM_IS_NULL(c)) {
+        c->type != -RAY_SYM && !Q_IS_GENERIC_NULL(c) && RAY_ATOM_IS_NULL(c)) {
         ray_release(c);
         return;
     }
