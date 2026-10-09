@@ -9,7 +9,7 @@
                                    * atomic_map_unary, ray_nil_fn */
 #include "table/sym.h"            /* ray_sym_str — the null-symbol divergence */
 #include "core/types.h"           /* RAY_TYPE_COUNT — the tag-indexed matrix bound */
-#include <string.h>               /* memchr/memset — matrix bake-out (init only) */
+#include <string.h>
 #include <math.h>                 /* isinf — the infinity lane */
 
 int64_t q_type_as_i64(ray_t* x) { return as_i64(x); }
@@ -67,23 +67,6 @@ const char* q_type_qname(int8_t t) {
     return NULL;   /* unreachable: value band is exhausted above */
 }
 
-/* tag -> rayfall `as` type-sym spelling (cast delegation targets only) */
-const char* q_type_rayname(int8_t tag) {
-    switch (tag) {
-    case RAY_BOOL: return "BOOL"; case RAY_BYTE_ONLY: return "U8";
-    case RAY_I16:  return "I16";  case RAY_I32: return "I32";
-    case RAY_I64:  return "I64";  case RAY_F64: return "F64";
-    case RAY_DATE: return "DATE"; case RAY_TIME: return "TIME";
-    case RAY_MONTH: return "MONTH";
-    case RAY_MINUTE: return "MINUTE";
-    case RAY_SECOND: return "SECOND";
-    case RAY_TIMESPAN: return "TIMESPAN";
-    case RAY_TIMESTAMP: return "TIMESTAMP";
-    case RAY_DATETIME: return "DATETIME";
-    default:       return NULL;
-    }
-}
-
 char q_type_char(int8_t tag) {
     int t = tag < 0 ? -tag : tag;                   /* int arith: |INT8_MIN|==128, no UB */
     if (t <= 0 || t >= RAY_TYPE_COUNT) return 0;    /* list 0, gap 3 & out-of-band: no char */
@@ -121,6 +104,16 @@ int8_t q_type_of_char(char c) {
     for (int t = 1; t < RAY_TYPE_COUNT; t++) {
         if (t == RAY_STR) continue;
         if (q_type_char((int8_t)t) == c) return (int8_t)t;
+    }
+    return 0;
+}
+
+int8_t q_type_of_qname(const char* nm, size_t len) {
+    /* ENUM shares `symbol` with SYM and must not win it; LIST/STR have no name */
+    for (int t = 1; t < RAY_TYPE_COUNT; t++) {
+        if (t == RAY_ENUM) continue;
+        const char* q = q_type_qname((int8_t)t);
+        if (q && strlen(q) == len && !memcmp(q, nm, len)) return (int8_t)t;
     }
     return 0;
 }
