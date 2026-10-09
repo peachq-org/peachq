@@ -22,6 +22,13 @@
 / the atom-listify is spelled 1#x (`,:()` amend unsupported; `(),x` boxes)
 .q.med:{x:$[0h>type x;1#x;x];avg x (iasc x)@floor .5*-1 0+count x}
 / infix keywords (lexer row stays; registry cell rebound from these post-load)
+/ the iterator keywords: ref/parse.md:72 shows each as k){x'y}, learn/views.md:264 peach as k){x':y}; over scan prior
+/ take the same shape undocumented.  q spells a derived function applied prefix bracketed (ref/iterators.md:94-100)
+.q.each:{x'[y]}
+.q.over:{x/[y]}
+.q.scan:{x\[y]}
+.q.prior:{x':[y]}
+.q.peach:{x':[y]}
 / `max 0,`/`max 1,` stand in for k's `0|`/`1|` (dyadic | lands in wave 3)
 .q.sublist:{$[2=count x;x[0]_((sum x)&count y)#y;0<=x;(x&count y)#y;(max 0,x+count y)_y]}
 / ref/sum.md "equivalent to {sum x*y}", float ONLY "when both x and y are

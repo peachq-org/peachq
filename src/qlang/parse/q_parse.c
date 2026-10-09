@@ -1657,7 +1657,11 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
         if (!verb_marked(u.v))
             u.v = q_embed(u.v, Q_DYADIC);      /* infix head: the dyadic row */
         ray_t *xs[3] = { u.v, t.v, rhs };
-        return train_node(q_list(xs, 3), !e.v, e.train);
+        P r = train_node(q_list(xs, 3), !e.v, e.train);
+        int8_t ut = u.v->type;
+        if (!e.v && r.v && !RAY_IS_ERR(r.v) && (ut == RAY_UNARY || ut == RAY_BINARY || ut == RAY_VARY))
+            r.v->attrs |= Q_ATTR_POSTFIX;
+        return r;
     }
 
     P e = parse_e_from(p, u, ctx);
