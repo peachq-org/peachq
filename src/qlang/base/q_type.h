@@ -34,10 +34,6 @@ int q_type_widens(int8_t a, int8_t b);
  * STR); total over the value band. */
 const char* q_type_qname(int8_t t);
 
-/* tag -> rayfall `as` type-sym spelling ("I64"/"DATE"/...) or NULL when the
- * tag has no cast-delegation spelling. */
-const char* q_type_rayname(int8_t tag);
-
 /* THE single tag -> type-char map (ref/dotq.md `.Q.ty`, `meta`'s `t` column).
  * Absolute or negative tag; 0 for tags with no char.  Lowercase = the element
  * char; `.Q.ty` uppercases it for an atom or a list led by a vector. */
@@ -46,6 +42,9 @@ char q_type_char(int8_t tag);
 /* The reverse map: lowercase type char -> vector tag, 0 for no such char
  * (typed-parameter signatures; the caller applies the case rule). */
 int8_t q_type_of_char(char c);
+
+/* The reverse of q_type_qname: kdb type name (len bytes, unterminated) -> vector tag, 0 for no such name. */
+int8_t q_type_of_qname(const char* nm, size_t len);
 
 /* THE q result-type law for a mixed-type pair — what TYPE the result carries
  * (`d&j` -> d), per the "Domain and range" matrix in ref/lesser.md.  Takes
