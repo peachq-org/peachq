@@ -174,6 +174,7 @@ bool q_duckdb_codec_raw_is_text(int8_t ray_type) { return ray_type == RAY_TIMESP
 
 static bool qd_rec_map(int slot, ray_t* v, int depth, qd_colmap_t* out);
 static ray_t* qd_rec_spine(int slot, ray_t* v, int lev);
+static const char QD_NO_SQL_MEANING[] = "the q column has no SQL meaning";
 
 /* q value -> column map (write direction).  A generic list is utf8 when EVERY
  * cell is text and bytes when every cell is a byte vector — those base cases
@@ -1915,15 +1916,14 @@ static ray_t* qd_write_leaf(int slot, duck_vector dv, ray_t* col, const qd_tmap_
  * the parameter mapping is the column mapping and has no table of its own.  A row the codec invalidated is a NULL
  * OF THAT COLUMN'S TYPE (owner 2026-10-14: one conversion everywhere), made through the one LIST the value API
  * casts into.  *out is owned, never NULL on success; anything but an atom of abs type 1..19 or a string is 'type. */
-ray_t* q_duckdb_codec_atom_value(int slot, ray_t* v, duck_value* out) {
+static ray_t* qd_atom_value(int slot, ray_t* v, duck_value* out) {
     *out = NULL;
     bool str = v->type == RAY_CHARV;
     const qd_tmap_t* tm = str                                 ? q_duckdb_codec_canon_leaf(RAY_STR)
                         : v->type < 0 && -v->type <= RAY_TIME ? q_duckdb_codec_canon_leaf((int8_t)-v->type)
                                                               : NULL;
     if (!tm) return q_err(QE_TYPE);
-    ray_t* col = str ? ray_list_new(1) : ray_enlist_fn(&v, 1);
-    if (str && col && !RAY_IS_ERR(col)) col = ray_list_append(col, v);
+    ray_t* col = ray_enlist_fn(&v, 1);
     if (!col || RAY_IS_ERR(col)) return col ? col : q_err(QE_WSFULL);
     duck_logical_type lt = QAPI.create_logical_type(tm->dk_type);
     duck_data_chunk   ch = QAPI.create_data_chunk(&lt, 1);
@@ -1963,6 +1963,50 @@ ray_t* q_duckdb_codec_atom_value(int slot, ray_t* v, duck_value* out) {
     }
     QAPI.destroy_data_chunk(&ch);
     QAPI.destroy_logical_type(&lt);
+    return e;
+}
+
+/* v as a value of the cell map (leaf, depth): depth 0 is the atom path; above it every element is one level down,
+ * wrapped as a LIST of the codec's child type — the cast the value API applies types each untyped NULL.  A 0n where
+ * a list is due is the NULL element the writer sets.  Every child dies here, on every path. */
+static ray_t* qd_list_value(int slot, ray_t* v, const qd_tmap_t* leaf, int depth, duck_value* out) {
+    *out = NULL;
+    if (depth == 0) return qd_atom_value(slot, v, out);
+    if (qd_cell_is_0n(v)) return (*out = QAPI.create_null_value()) ? NULL : q_err(QE_WSFULL);
+    int64_t     n    = q_count(v);
+    duck_value* kids = q_duckdb_cols(n, sizeof *kids);
+    if (!kids) return q_err(QE_WSFULL);
+    ray_t* e = NULL;
+    for (int64_t i = 0; !e && i < n; i++) {
+        ray_t* el = qd_cell_at(v, i);
+        e = !el ? q_err(QE_WSFULL) : RAY_IS_ERR(el) ? el : qd_list_value(slot, el, leaf, depth - 1, &kids[i]);
+        if (el && !RAY_IS_ERR(el)) ray_release(el);
+    }
+    const qd_colmap_t child = { leaf, NULL, depth - 1, false };
+    duck_logical_type ct = e ? NULL : qd_make_logical(&child);
+    if (!e && !(*out = ct ? QAPI.create_list_value(ct, kids, (duck_idx_t)n) : NULL)) e = q_err(QE_WSFULL);
+    if (ct) QAPI.destroy_logical_type(&ct);
+    for (int64_t i = 0; i < n; i++) if (kids[i]) QAPI.destroy_value(&kids[i]);
+    free(kids);
+    return e;
+}
+
+/* The bound value of a q value: what .duckdb.set writes for the one-row column ([] v:enlist v), the column map
+ * saying what the cell is (docs/duckdb-api.md § Parameters); what the codec refuses, this refuses in its words.
+ * A record (dict, table) or a BLOB (byte vector) is 'type until the pair carries STRUCT/MAP/BLOB. */
+ray_t* q_duckdb_codec_bind_value(int slot, ray_t* v, duck_value* out) {
+    *out = NULL;
+    ray_t* col = ray_enlist_fn(&v, 1);
+    if (!col || RAY_IS_ERR(col)) return col ? col : q_err(QE_WSFULL);
+    qd_colmap_t cm  = { NULL, NULL, 0, false };
+    const char* why = QD_NO_SQL_MEANING;
+    bool mapped = qd_map_write(slot, col, 0, &cm, &why);
+    ray_release(col);
+    ray_t* e = !mapped  ? q_duckdb_fail(slot, "%s", why)
+             : cm.undet ? q_duckdb_fail(slot, "an empty untyped list has no type to bind as")
+             : cm.rec || cm.leaf->dk_type == QDUCK_TYPE_BLOB ? q_err(QE_TYPE)
+                                                             : qd_list_value(slot, v, cm.leaf, cm.depth, out);
+    q_duckdb_codec_map_free(&cm);
     return e;
 }
 
@@ -2139,7 +2183,7 @@ ray_t* q_duckdb_codec_check_table(int slot, ray_t* tbl, qd_colmap_t* cms) {
         ray_t* col = ray_table_get_col_idx(tbl, c);   /* borrowed */
         size_t nl;
         const char* np  = q_duckdb_col_name(tbl, c, &nl);
-        const char* why = "the q column has no SQL meaning";
+        const char* why = QD_NO_SQL_MEANING;
         if (col && qd_map_write(slot, col, 0, &cms[c], &why)) {
             /* a flat enum column was decayed at the door, so one still here is under a LIST */
             if (cms[c].leaf->ray_type != RAY_ENUM) continue;
