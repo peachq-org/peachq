@@ -85,6 +85,13 @@ typedef struct duck_data_chunk_o* duck_data_chunk;
 typedef struct duck_vector_o*     duck_vector;
 typedef struct duck_appender_o*   duck_appender;
 typedef struct duck_logical_o*    duck_logical_type;
+typedef struct duck_prepared_o*   duck_prepared;
+typedef struct duck_value_o*      duck_value;
+
+/* the by-value temporal cells of the value API (duckdb_date / duckdb_timestamp / duckdb_timestamp_ns) */
+typedef struct { int32_t days; }   duck_date;
+typedef struct { int64_t micros; } duck_timestamp;
+typedef struct { int64_t nanos; }  duck_timestamp_ns;
 
 typedef struct { uint64_t lower; int64_t  upper; } duck_hugeint;   /* HUGEINT, and UUID storage */
 typedef struct { uint64_t lower; uint64_t upper; } duck_uhugeint;
@@ -217,6 +224,37 @@ typedef struct {
     duck_idx_t (*row_count)(duck_result* res);
     char*      (*value_varchar)(duck_result* res, duck_idx_t col, duck_idx_t row);
     bool       (*value_is_null)(duck_result* res, duck_idx_t col, duck_idx_t row);
+    /* Prepared statements — the pair door's rows, the loader's optional tail (a library without them loads, and
+     * only that door refuses).  A statement failing to prepare still owns its error text until destroyed;
+     * parameter_name's text is freed with duck_free; bind_value COPIES, so the caller destroys its own value;
+     * the C API refuses a bad index or name with no text at all. */
+    duck_state  (*prepare)(duck_connection con, const char* sql, duck_prepared* out);
+    void        (*destroy_prepare)(duck_prepared* ps);
+    const char* (*prepare_error)(duck_prepared ps);
+    duck_idx_t  (*nparams)(duck_prepared ps);
+    char*       (*parameter_name)(duck_prepared ps, duck_idx_t index);
+    duck_state  (*bind_parameter_index)(duck_prepared ps, duck_idx_t* index, const char* name);
+    duck_state  (*bind_value)(duck_prepared ps, duck_idx_t index, duck_value v);
+    duck_state  (*execute_prepared)(duck_prepared ps, duck_result* out);
+    void        (*destroy_value)(duck_value* v);
+    duck_value  (*create_bool)(bool v);
+    duck_value  (*create_uint8)(uint8_t v);
+    duck_value  (*create_int16)(int16_t v);
+    duck_value  (*create_int32)(int32_t v);
+    duck_value  (*create_int64)(int64_t v);
+    duck_value  (*create_float)(float v);
+    duck_value  (*create_double)(double v);
+    duck_value  (*create_varchar_length)(const char* s, duck_idx_t n);
+    duck_value  (*create_date)(duck_date v);
+    duck_value  (*create_interval)(duck_interval v);
+    duck_value  (*create_timestamp)(duck_timestamp v);
+    duck_value  (*create_timestamp_ns)(duck_timestamp_ns v);
+    duck_value  (*create_uuid)(duck_uhugeint v);
+    /* the typed NULL the value API has no constructor for: a LIST casts its children to its child type, so an
+     * untyped null put into a one-element LIST of type T and taken back out is NULL of type T */
+    duck_value  (*create_null_value)(void);
+    duck_value  (*create_list_value)(duck_logical_type t, duck_value* values, duck_idx_t n);
+    duck_value  (*get_list_child)(duck_value list, duck_idx_t index);
 } duck_api_t;
 
 #if defined(__EMSCRIPTEN__)
