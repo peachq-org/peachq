@@ -316,6 +316,7 @@ static void qd_load(void) {
 #define QD_TOKEN_MARK (1 << 30)  /* on every token, so no token can spell a provider fd (a small positive int) */
 #define QD_MAIN_ALIAS "main"
 #define QD_LINK_MARK  "peachq link"   /* the COMMENT a link view carries: what tells it from a user's view of that name */
+#define QD_NO_PREPARE "bridge: prepared statements are not available in this DuckDB build"   /* the browser shim fills none */
 
 /* ONE database per process (ADR 2026-09-15 § Main instance): in-memory, or the file `-duckdb`/PEACHQ_DUCKDB_MAIN
  * names.  Opened on first need, when it also takes its own connection — the visible handle `:pq:duckdb:main, on
@@ -1306,7 +1307,7 @@ static ray_t* qd_bind_one(int slot, duck_prepared ps, ray_t* vals, ray_t* keys, 
  * (prepare, execute).  The statement dies on every path. */
 static ray_t* qd_run_bound(int slot, const char* sql, ray_t* params, duck_result* out) {
     int64_t t0 = q_dotz_now_ns(0);
-    if (!QAPI.prepare) return q_duckdb_fail(slot, "bridge: prepared statements need libduckdb >= 1.4");
+    if (!QAPI.prepare) return q_duckdb_fail(slot, QD_NO_PREPARE);
     duck_prepared ps = NULL;
     ray_t* e = QAPI.prepare(g_cons[slot].con, sql, &ps) == QDuckSuccess ? NULL
              : q_duckdb_fail(slot, "%s", QD_TEXT(QAPI.prepare_error(ps)));
@@ -1383,7 +1384,7 @@ static ray_t* qd_prepnames_wrap(ray_t** args, int64_t n) {
     if (e) return e;
     const char* tp; int64_t tn;
     if (!q_str_text_bytes(args[1], &tp, &tn)) return q_err(QE_TYPE);
-    if (!QAPI.prepare) return q_duckdb_fail(slot, "bridge: prepared statements need libduckdb >= 1.4");
+    if (!QAPI.prepare) return q_duckdb_fail(slot, QD_NO_PREPARE);
     char* sql = q_duckdb_text(tp, (size_t)tn);
     if (!sql) return q_err(QE_WSFULL);
     duck_prepared ps = NULL;
