@@ -1910,6 +1910,62 @@ static ray_t* qd_write_leaf(int slot, duck_vector dv, ray_t* col, const qd_tmap_
     return NULL;
 }
 
+/* One atom (or a 10h string) as the duckdb_value the appender stores for a one-row column of its type: the cell
+ * codec above writes its canonical leaf into a one-row chunk, and the value is lifted out of that physical cell — so
+ * the parameter mapping is the column mapping and has no table of its own.  A row the codec invalidated is a NULL
+ * OF THAT COLUMN'S TYPE (owner 2026-10-14: one conversion everywhere), made through the one LIST the value API
+ * casts into.  *out is owned, never NULL on success; anything but an atom of abs type 1..19 or a string is 'type. */
+ray_t* q_duckdb_codec_atom_value(int slot, ray_t* v, duck_value* out) {
+    *out = NULL;
+    bool str = v->type == RAY_CHARV;
+    const qd_tmap_t* tm = str                                 ? q_duckdb_codec_canon_leaf(RAY_STR)
+                        : v->type < 0 && -v->type <= RAY_TIME ? q_duckdb_codec_canon_leaf((int8_t)-v->type)
+                                                              : NULL;
+    if (!tm) return q_err(QE_TYPE);
+    ray_t* col = str ? ray_list_new(1) : ray_enlist_fn(&v, 1);
+    if (str && col && !RAY_IS_ERR(col)) col = ray_list_append(col, v);
+    if (!col || RAY_IS_ERR(col)) return col ? col : q_err(QE_WSFULL);
+    duck_logical_type lt = QAPI.create_logical_type(tm->dk_type);
+    duck_data_chunk   ch = QAPI.create_data_chunk(&lt, 1);
+    duck_vector       dv = QAPI.data_chunk_get_vector(ch, 0);
+    ray_t* e = qd_write_leaf(slot, dv, col, tm, 0, 0, 1, NULL, NULL);
+    ray_release(col);
+    if (!e && !q_duckdb_validity_ok(QAPI.vector_get_validity(dv), 0)) {
+        duck_value nul = QAPI.create_null_value();
+        duck_value box = nul ? QAPI.create_list_value(lt, &nul, 1) : NULL;
+        *out = box ? QAPI.get_list_child(box, 0) : NULL;
+        if (box) QAPI.destroy_value(&box);
+        if (nul) QAPI.destroy_value(&nul);
+        if (!*out) e = q_err(QE_WSFULL);
+    } else if (!e) {
+        const void* d = QAPI.vector_get_data(dv);
+        switch (tm->dk_type) {
+            case QDUCK_TYPE_BOOLEAN:      *out = QAPI.create_bool(*(const uint8_t*)d != 0); break;
+            case QDUCK_TYPE_UTINYINT:     *out = QAPI.create_uint8(*(const uint8_t*)d); break;
+            case QDUCK_TYPE_SMALLINT:     *out = QAPI.create_int16(*(const int16_t*)d); break;
+            case QDUCK_TYPE_INTEGER:      *out = QAPI.create_int32(*(const int32_t*)d); break;
+            case QDUCK_TYPE_BIGINT:       *out = QAPI.create_int64(*(const int64_t*)d); break;
+            case QDUCK_TYPE_FLOAT:        *out = QAPI.create_float(*(const float*)d); break;
+            case QDUCK_TYPE_DOUBLE:       *out = QAPI.create_double(*(const double*)d); break;
+            case QDUCK_TYPE_VARCHAR:      *out = QAPI.create_varchar_length(q_duckdb_string_data(d), q_duckdb_string_len(d)); break;
+            case QDUCK_TYPE_DATE:         *out = QAPI.create_date((duck_date){ *(const int32_t*)d }); break;
+            case QDUCK_TYPE_INTERVAL:     *out = QAPI.create_interval(*(const duck_interval*)d); break;
+            case QDUCK_TYPE_TIMESTAMP:    *out = QAPI.create_timestamp((duck_timestamp){ *(const int64_t*)d }); break;
+            case QDUCK_TYPE_TIMESTAMP_NS: *out = QAPI.create_timestamp_ns((duck_timestamp_ns){ *(const int64_t*)d }); break;
+            case QDUCK_TYPE_UUID: {       /* the value API takes the RFC words; the vector keeps the sign-flipped hugeint */
+                const duck_hugeint* h = d;
+                *out = QAPI.create_uuid((duck_uhugeint){ h->lower, (uint64_t)h->upper ^ (1ULL << 63) });
+                break;
+            }
+            default: e = q_err(QE_TYPE);
+        }
+        if (!e && !*out) e = q_err(QE_WSFULL);
+    }
+    QAPI.destroy_data_chunk(&ch);
+    QAPI.destroy_logical_type(&lt);
+    return e;
+}
+
 /* One vector per LIST level, plus how much of it is already filled. */
 typedef struct { duck_vector vec; duck_idx_t used; } qd_level_t;
 

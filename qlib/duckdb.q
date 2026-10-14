@@ -39,14 +39,21 @@
 / The meta of a table of the handle's catalog, read from DuckDB without fetching a row.
 .duckdb.meta:{[c;t] .duckdb.i.meta[c;t]}
 
-/ Run SQL on a handle and answer the result as a table; a statement without a result answers ::.
+/ Run SQL on a handle and answer the result as a table; a statement without a result answers ::.  sql is a string, or the
+/ pair (string;dict) binding each $name by name or (string;list) binding $1, $2 ... by position; values are atoms or strings
+/ (a null is SQL NULL), DuckDB's refusal is 'duckdb with the reason in .duckdb.err[], anything else 'type.
 / @eg .duckdb.exec[.duckdb.main[];"SELECT 1 AS one, 'a' AS s"]
+/ @eg .duckdb.exec[.duckdb.main[];("SELECT $a + $b AS n";`a`b!1 2)]
 .duckdb.exec:{[handle;sql] .duckdb.i.exec[handle;sql]}
 
 / A table with its DuckDB schema, as the pair (data;schema) that set and upsert accept back.
 .duckdb.getx:{[c;t] .duckdb.i.getx[c;t]}
-/ SQL's answer with its DuckDB schema, as the pair (data;schema).
+/ SQL's answer with its DuckDB schema, as the pair (data;schema); sql as .duckdb.exec takes it, parameters included.
 .duckdb.execx:{[c;sql] .duckdb.i.execx[c;sql]}
+
+/ The $name parameters a statement (string) declares, distinct and in first-occurrence order; $1 and ? are named by number.
+/ @eg .duckdb.params "SELECT $x FROM t WHERE s='$y' AND n>$z"
+.duckdb.params:{[sql] .duckdb.i.params sql}
 
 / The reason behind the last 'duckdb signal, first line the cause, cleared by the next call.
 / err[] is any connection's, err[handle] that connection's.
@@ -178,14 +185,3 @@
 / .duckdb.exec[.duckdb.main[];"CREATE OR REPLACE TABLE u AS SELECT 1 AS a"]
 / .duckdb.hdel[.duckdb.main[];`u]
 .duckdb.hdel:{[handle;table] .duckdb.i.hdel[handle;table]}
-
-/ @ignore
-.s.e:{[x] r:.duckdb.main[] x; if[(.s.i.head x) in ("CREATE";"ALTER"); .s.i.sync[]]; r}
-/ @ignore
-.s.i.sync:{[] h:.duckdb.main[]; .pq.i.load[h;.duckdb.i.tables[h] except key `.]}
-/ @ignore
-.s.i.head:{[s]
-  s:((s in " \t\r\n")?0b)_s;
-  if["--"~2#s; :.s.i.head (1+s?"\n")_s];
-  if["/*"~2#s; k:first where (s="*")&next s="/"; :$[null k;"";.s.i.head (2+k)_s]];
-  upper ((s in .Q.a,.Q.A)?0b)#s}
