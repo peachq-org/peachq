@@ -566,7 +566,8 @@ static ray_t* prov_bind(prov_ent* e, ray_t* name) {
 }
 
 /* A q peer's alias is exactly a kdb handle: every message goes to the peer unchanged, async is its negative.  On
- * DuckDB text is SQL and a name binds a carrier; nothing else is a message. */
+ * DuckDB text is SQL — bare, or first in a pair with its parameters, which the provider's own door judges — and a
+ * name binds a carrier; nothing else is a message. */
 static ray_t* prov_dispatch(prov_ent* e, ray_t* y, int sync) {
     if (e->stamp) {
         int64_t fd = token_fd(e->connid);
@@ -576,8 +577,10 @@ static ray_t* prov_dispatch(prov_ent* e, ray_t* y, int sync) {
         return r;
     }
     const char* tp; int64_t tn;
-    if (y && q_str_text_bytes(y, &tp, &tn)) {
-        ray_t* txt = ray_charv(tp, tn);
+    bool pair = y && y->type == RAY_LIST && q_count(y) == 2 && q_str_text_bytes(ray_list_get(y, 0), &tp, &tn);
+    if (pair || (y && q_str_text_bytes(y, &tp, &tn))) {
+        ray_t* txt = pair ? y : ray_charv(tp, tn);
+        if (pair) ray_retain(txt);
         ray_t* flag = ray_bool(sync != 0);
         ray_t* args[3] = { e->connid, txt, flag };
         ray_t* r = hook_call(e->kind, "call", args, 3);

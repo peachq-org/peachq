@@ -382,7 +382,7 @@
   };
 
 / Every standard-library file, in load order.
-.pq.i.files:`csv`duckdb`ffi`j`massive`md`parquet`pq`regexp`str`termbox`fs`path`pkg`qunit`yml;
+.pq.i.files:`csv`duckdb`s`ffi`j`massive`md`parquet`pq`regexp`str`termbox`fs`path`pkg`qunit`yml;
 
 / Run each file as \l pq/<file>.q: a pq/ directory's (the working directory's, then QHOME's), else the built-in copy.
 .pq.i.run:{[files] {system "l pq/",string[x],".q"} each files; files};
