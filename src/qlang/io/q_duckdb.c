@@ -1293,7 +1293,7 @@ static ray_t* qd_bind_one(int slot, duck_prepared ps, ray_t* vals, ray_t* keys, 
     ray_t* v = q_index_elem_at(vals, i);
     if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_WSFULL);
     duck_value dv = NULL;
-    ray_t* e = q_duckdb_codec_atom_value(slot, v, &dv);
+    ray_t* e = q_duckdb_codec_bind_value(slot, v, &dv);
     ray_release(v);
     if (!e && QAPI.bind_value(ps, idx, dv) != QDuckSuccess)
         e = q_duckdb_fail(slot, "parameter %llu: DuckDB refused the value", (unsigned long long)idx);
