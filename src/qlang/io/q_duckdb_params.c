@@ -3,7 +3,8 @@
  * only — no libduckdb — so the parser can call it on a box without the library.  Skipped as the lexer skips them:
  * '…' strings ('' escapes; E'…' adds backslash escapes), "…" identifiers, -- line comments, nested block comments,
  * and $tag$…$tag$ / $$…$$ dollar quotes; a $ glued to an identifier (a$x) is part of it.  A name folds to lowercase
- * as DuckDB folds an identifier; `?` is the positional after the highest numbered so far. */
+ * as DuckDB folds an identifier, or keeps its spelling for the parser's capture; `?` is the positional after the
+ * highest numbered so far. */
 #include "qlang/io/q_duckdb.h"
 #include "qlang/base/q_err.h"
 #include "table/sym.h"
@@ -39,17 +40,17 @@ static size_t scan_comment(const char* s, size_t n, size_t i) {           /* i a
     return n;
 }
 
-static ray_t* scan_add(ray_t* v, const char* s, size_t n) {
+static ray_t* scan_add(ray_t* v, const char* s, size_t n, bool fold) {
     char* low = malloc(n + 1);
     if (!low) { ray_release(v); return q_err(QE_WSFULL); }
-    for (size_t k = 0; k < n; k++) low[k] = (char)tolower((unsigned char)s[k]);
+    for (size_t k = 0; k < n; k++) low[k] = fold ? (char)tolower((unsigned char)s[k]) : s[k];
     int64_t id = ray_sym_intern_runtime(low, n);
     free(low);
     for (int64_t k = 0; k < ray_len(v); k++) if (*(const int64_t*)ray_vec_get(v, k) == id) return v;
     return ray_vec_append(v, &id);
 }
 
-ray_t* q_duckdb_params(const char* s, size_t n) {
+static ray_t* params(const char* s, size_t n, bool fold) {
     ray_t* v = ray_sym_vec_new(RAY_SYM_W64, 1);
     long positional = 0;
     for (size_t i = 0; v && !RAY_IS_ERR(v) && i < n;) {
@@ -60,7 +61,7 @@ ray_t* q_duckdb_params(const char* s, size_t n) {
         if (c == '/' && i + 1 < n && s[i + 1] == '*') { i = scan_comment(s, n, i); continue; }
         if (c == '?') {
             char num[24];
-            v = scan_add(v, num, (size_t)snprintf(num, sizeof num, "%ld", ++positional));
+            v = scan_add(v, num, (size_t)snprintf(num, sizeof num, "%ld", ++positional), fold);
             i++;
             continue;
         }
@@ -75,8 +76,11 @@ ray_t* q_duckdb_params(const char* s, size_t n) {
             while (j < n && scan_ident_char(s[j])) j++;
             if (j < n && s[j] == '$') { i = scan_to(s, n, j + 1, s + i, j + 1 - i); continue; }
         } else { i = j; continue; }
-        v = scan_add(v, s + i + 1, j - i - 1);
+        v = scan_add(v, s + i + 1, j - i - 1, fold);
         i = j;
     }
     return v ? v : q_err(QE_WSFULL);
 }
+
+ray_t* q_duckdb_params(const char* s, size_t n)         { return params(s, n, true); }
+ray_t* q_duckdb_params_spelled(const char* s, size_t n) { return params(s, n, false); }

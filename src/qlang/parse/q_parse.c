@@ -26,6 +26,8 @@
 #include "qlang/parse/q_tok.h"    /* q_tok_literal, q_tok_byte_lit_starts — the literal scanner */
 #include "qlang/q_registry.h" /* q_registry_lookup_name, q_registry_is_infix, Q_DYADIC */
 #include "qlang/q_ops.h"      /* q_ops_find — the static lexical manifest */
+#include "qlang/q_env.h"      /* q_env_ident_ok — a captured marker must be a q name */
+#include "qlang/io/q_duckdb.h" /* q_duckdb_params — the markers of a capturing text literal */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_is_fn, q_eval_apply_carrier_kind */
 #include "qlang/eval/q_dbg.h"  /* q_dbg_statement_origin — the lambda's file + line */
 #include "table/sym.h"       /* ray_sym_vec_cell — qSQL dict-key/col names */
@@ -307,6 +309,7 @@ typedef struct {
     TKind  kind;
     int    start, len;
     ray_t *k;      /* owned by the token until the parser lifts it (sets NULL) */
+    int    capture;   /* a sql/SELECT text literal: parse_base lowers it through text_capture */
 } Token;
 
 typedef struct { Token *t; int n; } Tokens;
@@ -340,8 +343,9 @@ static int lone_colon_next(const char *src, int p) {
 /* The tagged text literal (docs/parser-architecture.md § Rules): at a token start, N >= 2 backticks + a tag + one
  * whitespace byte open it and the next run of exactly N backticks closes it; the value is the bytes between, verbatim,
  * always a char vector.  NULL when no tag follows the run: it is symbols, so p is untouched. */
-static ray_t *scan_text_literal(const char *src, int *pp) {
-    static const struct { const char *word; int kept; } TAGS[] = { { "sql", 0 }, { "raw", 0 }, { "SELECT", 1 } };
+static ray_t *scan_text_literal(const char *src, int *pp, int *capture) {
+    static const struct { const char *word; int kept, capture; } TAGS[] =
+        { { "sql", 0, 1 }, { "raw", 0, 0 }, { "SELECT", 1, 1 } };
     int p = *pp, n = 0, s = 0;
     while (src[p] == '`') { p++; n++; }
     if (n < 2) return NULL;
@@ -349,7 +353,9 @@ static ray_t *scan_text_literal(const char *src, int *pp) {
         int l = (int)strlen(TAGS[i].word);
         if (strncmp(src + p, TAGS[i].word, (size_t)l) != 0) continue;
         char after = src[p + l];
-        if (after == ' ' || after == '\t' || after == '\n') s = TAGS[i].kept ? p : p + l + 1;
+        if (after != ' ' && after != '\t' && after != '\n') continue;
+        s = TAGS[i].kept ? p : p + l + 1;
+        *capture = TAGS[i].capture;
     }
     if (!s) return NULL;
     int e = s;
@@ -399,6 +405,7 @@ static Tokens scan(const char *src) {
         char c = src[p];
         uint8_t cl = CLASS[(uint8_t)c];
         ray_t *lit;
+        int capture = 0;
 
         /* kdb sign rule: '-' adjacent to a digit, or to a leading-dot magnitude (`-.5`, qtips/deriv.q:38), is a SIGN
          * when preceded by whitespace or start-of-input (`neg -1` applies neg to -1; `x -1` indexes x at -1); it is
@@ -506,8 +513,9 @@ static Tokens scan(const char *src) {
             free(db);
             noun_pos = 1;
         }
-        else if (c == '`' && (lit = scan_text_literal(src, &p))) {
+        else if (c == '`' && (lit = scan_text_literal(src, &p, &capture))) {
             EMIT(T_NOUN, lit);
+            toks[n - 1].capture = capture;
             noun_pos = 1;
         }
         else if (c == '`') {
@@ -881,7 +889,7 @@ static ray_t *table_lit_head(const char *s, q_valence_t v) {
 }
 
 /* (!;a;b) — consumes a,b */
-static ray_t *table_lit_bang(ray_t *a, ray_t *b) {
+static ray_t *bang_tree(ray_t *a, ray_t *b) {
     ray_t *xs[3] = { table_lit_head("!", Q_DYADIC), a, b };
     return q_list(xs, 3);
 }
@@ -923,13 +931,73 @@ static ray_t *table_lit_dict(ray_t *defs) {
     if (n == 1 && keys && !RAY_IS_ERR(keys)) keys->attrs |= Q_ATTR_KEYLIST;
     else if (n > 1) keys = noun_tree_value(keys);
     ray_release(defs);
-    return table_lit_bang(keys, vals);
+    return bang_tree(keys, vals);
 }
 
 /* col defs -> (+:;(!;…)) — flip of the dictionary arm; consumes defs */
 static ray_t *table_lit_flip(ray_t *defs) {
     ray_t *xs[2] = { table_lit_head("+", Q_MONADIC), table_lit_dict(defs) };
     return q_list(xs, 2);
+}
+
+/* ===== the capturing text literal ============================================
+ * A sql/SELECT literal, or an s) line, whose text has NAMED markers lowers to the pair `(text; names!refs)` spelled
+ * as a hand would — `("…";(enlist `v)!enlist v)` for one name, `("…";`v`w!(v;w))` for more — so each name is an
+ * ordinary reference, resolved by q scoping at eval (docs/parser-architecture.md § Rules). */
+
+/* Consumes text and answers it unchanged when nothing captures; a captured x/y/z is an implicit lambda argument. */
+static ray_t *text_capture(ray_t *text, uint8_t *xyz_mask) {
+    const char *s = (const char *)ray_data(text);
+    int64_t n = q_count(text);
+    ray_t *all = q_duckdb_params_spelled(s, (size_t)n);
+    ray_t *folded = q_duckdb_params(s, (size_t)n);
+    if (RAY_IS_ERR(all) || RAY_IS_ERR(folded)) {
+        ray_release(all); ray_release(folded); ray_release(text);
+        die_err(QE_WSFULL);
+    }
+    int collide = q_count(folded) < q_count(all);
+    ray_release(folded);
+    if (collide) { ray_release(all); ray_release(text); q_die("two marker spellings fold to one name"); }
+    ray_t *names = ray_sym_vec_new(RAY_SYM_W64, 1);
+    for (int64_t k = 0; k < q_count(all); k++) {
+        ray_t *str = ray_sym_vec_cell(all, k);
+        const char *nm = ray_str_ptr(str);
+        size_t nl = ray_str_len(str);
+        if (isdigit((unsigned char)nm[0])) continue;
+        if (!q_env_ident_ok(nm, nl)) {
+            ray_release(all); ray_release(names); ray_release(text);
+            q_die("marker is not a q name");
+        }
+        if (xyz_mask && nl == 1 && nm[0] >= 'x' && nm[0] <= 'z') *xyz_mask |= 1 << (nm[0] - 'x');
+        names = ray_vec_append(names, ray_vec_get(all, k));
+    }
+    ray_release(all);
+    int64_t m = q_count(names);
+    if (!m) { ray_release(names); return text; }
+    ray_t *refs = ray_list_new(m);
+    for (int64_t k = 0; k < m; k++) {
+        ray_t *r = ray_sym(*(const int64_t *)ray_vec_get(names, k));
+        refs = ray_list_append(refs, r);
+        ray_release(r);
+    }
+    ray_t *keys, *hd;
+    if (m == 1) {
+        ray_t *kx[2] = { i_name("enlist", 6), names };
+        keys = q_list(kx, 2);
+        hd = i_name("enlist", 6);
+    } else {
+        keys = noun_tree_value(names);
+        hd = q_registry_list_value();
+        ray_retain(hd);
+    }
+    ray_t *vals = cons_head(hd, refs, NULL);
+    ray_release(hd);
+    ray_release(refs);
+    ray_t *px[2] = { text, bang_tree(keys, vals) };
+    ray_t *e = q_list(px, 2);
+    ray_t *pair = cons_head(q_registry_list_value(), e, NULL);
+    ray_release(e);
+    return pair;
 }
 
 static P parse_base(Parser *p) {
@@ -953,7 +1021,8 @@ static P parse_base(Parser *p) {
             else if (c == 'y') *p->xyz_mask |= 2;
             else if (c == 'z') *p->xyz_mask |= 4;
         }
-        ray_t *v = noun_tree_value(tk->k); tk->k = NULL;
+        ray_t *v = tk->k; tk->k = NULL;
+        v = tk->capture ? text_capture(v, p->xyz_mask) : noun_tree_value(v);
         adv(p);
         return (P){ R_NOUN, v, 0 };
     }
@@ -1001,7 +1070,7 @@ static P parse_base(Parser *p) {
             }
             ray_t *vcols = parse_E(p, Q_NONE);
             expect(p, T_RPAREN, "expected ')'");
-            return (P){ R_NOUN, table_lit_bang(table_lit_flip(kcols), table_lit_flip(vcols)), 0 };
+            return (P){ R_NOUN, bang_tree(table_lit_flip(kcols), table_lit_flip(vcols)), 0 };
         }
         ray_t *e = parse_E(p, Q_NONE);
         expect(p, T_RPAREN, "expected ')'");
@@ -2273,6 +2342,7 @@ static ray_t *intake_tree(const char *name, size_t nl, ray_t *arg) {
 }
 
 static ray_t *parse_text(const char *src);
+static ray_t *die_answer(void);
 
 /* k texts a client is witnessed sending, byte for byte bar trailing blanks, beside their q transliteration —
  * qStudio's Server Properties (qstudio-private ServerSlashConfig.java:36, ServerReport.java:54-63,74).  Not a k
@@ -2296,6 +2366,11 @@ ray_t *q_parse_lang_tree(char letter, const char *p, int64_t n) {
         while (m && (p[m - 1] == ' ' || p[m - 1] == '\t' || p[m - 1] == '\n' || p[m - 1] == '\r')) m--;
         for (size_t i = 0; i < sizeof k_known / sizeof k_known[0]; i++)
             if (strlen(k_known[i].k) == m && !memcmp(k_known[i].k, p, m)) return parse_text(k_known[i].q);
+    }
+    if (letter == 's') {
+        g_toks.t = NULL; g_toks.n = 0;
+        if (setjmp(q_err_jmp)) return die_answer();
+        return intake_tree(nm, 4, text_capture(ray_charv(p, n), NULL));
     }
     return intake_tree(nm, 4, ray_charv(p, n));
 }
