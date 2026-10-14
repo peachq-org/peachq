@@ -1086,9 +1086,9 @@ static void qd_lift(qd_buf* b, int d, const char* full, const char* const* cols,
         if (l > 1) snprintf(src, sizeof src, "qdx%d", l - 1);
         q_duckdb_puts(b, "list_transform(");
         q_duckdb_puts(b, l == 1 ? cols[0] : src);
-        q_duckdb_puts(b, ", (");
+        q_duckdb_puts(b, ", lambda ");
         q_duckdb_puts(b, lv); q_duckdb_puts(b, ", "); q_duckdb_puts(b, li);
-        q_duckdb_puts(b, ") -> ");
+        q_duckdb_puts(b, ": ");
     }
     f(b, e, ctx);
     for (int l = 0; l < d; l++) q_duckdb_puts(b, ")");
