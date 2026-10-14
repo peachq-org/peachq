@@ -23,12 +23,14 @@
 #include "qlang/q_dotz.h"     /* q_dotz_now_ns — the sqllog clock */
 #include "qlang/q_prim.h"     /* q_str_text_bytes (write-path text cells) + q_table_meta_assemble */
 #include "qlang/ops/q_bang.h" /* q_bang_enkey — 0! flattens a keyed table at the write door */
+#include "qlang/ops/q_index.h" /* q_index_elem_at — the one element read, a parameter value off its list */
 #include "lang/env.h"         /* ray_fn_unary / ray_fn_vary */
 #include "lang/eval.h"        /* RAY_FN_NONE, ray_at_fn */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_call_sym — the .duckdb.onsql hook */
 #include "table/sym.h"        /* ray_sym_vec_cell */
 #include <rayforce.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -173,8 +175,34 @@ static const char* const QD_SYMS[] = {
     "duckdb_row_count",
     "duckdb_value_varchar",
     "duckdb_value_is_null",
+    "duckdb_prepare",
+    "duckdb_destroy_prepare",
+    "duckdb_prepare_error",
+    "duckdb_nparams",
+    "duckdb_parameter_name",
+    "duckdb_bind_parameter_index",
+    "duckdb_bind_value",
+    "duckdb_execute_prepared",
+    "duckdb_destroy_value",
+    "duckdb_create_bool",
+    "duckdb_create_uint8",
+    "duckdb_create_int16",
+    "duckdb_create_int32",
+    "duckdb_create_int64",
+    "duckdb_create_float",
+    "duckdb_create_double",
+    "duckdb_create_varchar_length",
+    "duckdb_create_date",
+    "duckdb_create_interval",
+    "duckdb_create_timestamp",
+    "duckdb_create_timestamp_ns",
+    "duckdb_create_uuid",
+    "duckdb_create_null_value",
+    "duckdb_create_list_value",
+    "duckdb_get_list_child",
 };
 #define QD_NSYMS (sizeof QD_SYMS / sizeof *QD_SYMS)
+#define QD_SYM_PREPARED (offsetof(duck_api_t, prepare) / sizeof(void*))   /* from here on a missing symbol is tolerated */
 
 _Static_assert(sizeof(duck_api_t) == QD_NSYMS * sizeof(void*),
                "QD_SYMS[] must match duck_api_t, in order");
@@ -256,6 +284,10 @@ static void qd_load(void) {
     void** slots = (void**)&qd_api;
     for (size_t i = 0; i < QD_NSYMS; i++) {
         slots[i] = qd_dlsym(dl, QD_SYMS[i]);
+        if (!slots[i] && i >= QD_SYM_PREPARED) {      /* the tail is ONE capability: any gap and prepare is NULL */
+            memset(slots + QD_SYM_PREPARED, 0, (QD_NSYMS - QD_SYM_PREPARED) * sizeof *slots);
+            break;
+        }
         if (!slots[i]) {
             g_qd.state = 2;
             memset(&qd_api, 0, sizeof qd_api);
@@ -1235,20 +1267,103 @@ static ray_t* qd_get_wrap(ray_t** args, int64_t n) { return qd_get_any(args, n, 
 /* .duckdb.getx[h;`t] — the envelope: (data;schema), schema = the declared types the q carriers cannot spell. */
 static ray_t* qd_getx_wrap(ray_t** args, int64_t n) { return qd_get_any(args, n, true); }
 
-/* .duckdb.exec[h;"..."] / .duckdb.execx — run any statement (python-API parity): a result WITH columns converts
- * per the default read mapping (no sidecar; unsupported column types error as ever), execx pairing it with its
- * schema; a column-less result (DDL) answers `::` (execx: beside an empty schema). */
+/* key i of a dict as owned text; NULL on OOM */
+static char* qd_key_text(ray_t* keys, int64_t i) {
+    ray_t* ks = ray_sym_vec_cell(keys, i);
+    return q_duckdb_text(ks ? ray_str_ptr(ks) : "", ks ? ray_str_len(ks) : 0);
+}
+
+/* one parameter of the pair: item i of vals bound to the marker its key names (keys given) or to position i+1.  A key
+ * the statement does not name is ignored (owner 2026-10-14); two keys DuckDB folds onto one marker (`x` and `X`)
+ * are an error naming both — by[] holds the key that bound each marker, 1-based. */
+static ray_t* qd_bind_one(int slot, duck_prepared ps, ray_t* vals, ray_t* keys, int64_t i, int64_t* by) {
+    duck_idx_t idx = (duck_idx_t)i + 1;
+    if (keys) {
+        char* name = qd_key_text(keys, i);
+        if (!name) return q_err(QE_WSFULL);
+        bool marker = QAPI.bind_parameter_index(ps, &idx, name) == QDuckSuccess;
+        char* first = marker && by[idx - 1] ? qd_key_text(keys, by[idx - 1] - 1) : NULL;
+        ray_t* e = first ? q_duckdb_fail(slot, "parameters %s and %s bind the same marker", first, name) : NULL;
+        free(first);
+        free(name);
+        if (e || !marker) return e;
+        by[idx - 1] = i + 1;
+    }
+    ray_t* v = q_index_elem_at(vals, i);
+    if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_WSFULL);
+    duck_value dv = NULL;
+    ray_t* e = q_duckdb_codec_atom_value(slot, v, &dv);
+    ray_release(v);
+    if (!e && QAPI.bind_value(ps, idx, dv) != QDuckSuccess)
+        e = q_duckdb_fail(slot, "parameter %llu: DuckDB refused the value", (unsigned long long)idx);
+    if (dv) QAPI.destroy_value(&dv);
+    return e;
+}
+
+/* The pair's run — q_duckdb_run with parameters: prepare, bind (a symbol-keyed dict by name, any other list by
+ * position — exactly as many items as the statement has markers, the C API refusing an index silently, so the count
+ * is checked first in DuckDB's own words), execute into *out.  DuckDB's text is the refusal wherever it has one
+ * (prepare, execute).  The statement dies on every path. */
+static ray_t* qd_run_bound(int slot, const char* sql, ray_t* params, duck_result* out) {
+    int64_t t0 = q_dotz_now_ns(0);
+    if (!QAPI.prepare) return q_duckdb_fail(slot, "bridge: prepared statements need libduckdb >= 1.4");
+    duck_prepared ps = NULL;
+    ray_t* e = QAPI.prepare(g_cons[slot].con, sql, &ps) == QDuckSuccess ? NULL
+             : q_duckdb_fail(slot, "%s", QD_TEXT(QAPI.prepare_error(ps)));
+    ray_t*   keys = params->type == RAY_DICT ? ray_dict_keys(params) : NULL;
+    ray_t*   vals = keys ? ray_dict_vals(params) : params;
+    int64_t  n    = q_count(vals);
+    int64_t  np   = e ? 0 : (int64_t)QAPI.nparams(ps);
+    int64_t* by   = e ? NULL : q_duckdb_cols(np, sizeof *by);
+    if (!e && !by) e = q_err(QE_WSFULL);
+    if (!e && !keys && n != np)
+        e = q_duckdb_fail(slot, "Expected %lld parameters, but %lld were supplied", (long long)np, (long long)n);
+    for (int64_t i = 0; !e && i < n; i++) e = qd_bind_one(slot, ps, vals, keys, i, by);
+    free(by);
+    if (!e && QAPI.execute_prepared(ps, out) != QDuckSuccess) {
+        e = q_duckdb_fail(slot, "%s", QD_TEXT(QAPI.result_error(out)));
+        QAPI.destroy_result(out);
+    }
+    QAPI.destroy_prepare(&ps);
+    q_duckdb_stmt_note(slot, sql, t0, !e, NULL_I64, e ? q_duckdb_err_text(slot) : NULL);
+    return e;
+}
+
+/* The pair law (docs/duckdb-api.md § Parameters): a 2-item list whose first item is the SQL and whose second is a
+ * symbol-keyed dict (named) or any other list (positional); an EMPTY dict or list is the bare string (*params
+ * NULL), and every other list is 'type.  A non-list is the bare string, judged by the door. */
+static ray_t* qd_pair_split(ray_t* x, ray_t** sql, ray_t** params) {
+    *sql = x;
+    *params = NULL;
+    if (!x || x->type != RAY_LIST) return NULL;
+    ray_t* p = q_count(x) == 2 ? ray_list_get(x, 1) : NULL;
+    bool list = p && p->type >= RAY_LIST && p->type <= RAY_TIME;
+    bool dict = p && p->type == RAY_DICT && (ray_dict_keys(p)->type == RAY_SYM || !q_count(p));
+    if (!list && !dict) return q_err(QE_TYPE);
+    *sql = ray_list_get(x, 0);
+    if (q_count(p)) *params = p;
+    return NULL;
+}
+
+/* .duckdb.exec[h;"..."] / .duckdb.execx — run any statement (python-API parity), or the pair (sql;params) with its
+ * parameters bound: a result WITH columns converts per the default read mapping (no sidecar; unsupported column
+ * types error as ever), execx pairing it with its schema; a column-less result (DDL) answers `::` (execx: beside
+ * an empty schema). */
 static ray_t* qd_sql_any(ray_t** args, int64_t n, bool pair) {
     int slot;
     ray_t* e = qd_door(args, n, 2, &slot);
     if (e) return e;
+    ray_t* sql;
+    ray_t* params;
+    if ((e = qd_pair_split(args[1], &sql, &params))) return e;
     const char* tp; int64_t tn;
-    if (!args[1] || !q_str_text_bytes(args[1], &tp, &tn)) return q_duckdb_fail(slot, "sql: not a string");
+    if (!sql || !q_str_text_bytes(sql, &tp, &tn))
+        return sql == args[1] ? q_duckdb_fail(slot, "sql: not a string") : q_err(QE_TYPE);
     qd_buf b = {0};
     q_duckdb_putn(&b, tp, (size_t)tn);
     if (b.oom) { q_duckdb_buf_free(&b); return q_err(QE_WSFULL); }
     duck_result res;
-    e = q_duckdb_run(slot, b.p, &res, 1);
+    e = params ? qd_run_bound(slot, b.p, params, &res) : q_duckdb_run(slot, b.p, &res, 1);
     q_duckdb_buf_free(&b);
     if (e) return e;
     ray_t* schema = NULL;
@@ -1259,6 +1374,39 @@ static ray_t* qd_sql_any(ray_t** args, int64_t n, bool pair) {
 
 static ray_t* qd_sql_wrap(ray_t** args, int64_t n)  { return qd_sql_any(args, n, false); }
 static ray_t* qd_sqlx_wrap(ray_t** args, int64_t n) { return qd_sql_any(args, n, true); }
+
+/* .duckdb.i.prepnames[h;sql] — DuckDB's own parameter names of a statement, in index order: the oracle the scanner
+ * (.duckdb.i.params) is tested against, and nothing else's.  'duckdb with DuckDB's text when it will not prepare. */
+static ray_t* qd_prepnames_wrap(ray_t** args, int64_t n) {
+    int slot;
+    ray_t* e = qd_door(args, n, 2, &slot);
+    if (e) return e;
+    const char* tp; int64_t tn;
+    if (!q_str_text_bytes(args[1], &tp, &tn)) return q_err(QE_TYPE);
+    if (!QAPI.prepare) return q_duckdb_fail(slot, "bridge: prepared statements need libduckdb >= 1.4");
+    char* sql = q_duckdb_text(tp, (size_t)tn);
+    if (!sql) return q_err(QE_WSFULL);
+    duck_prepared ps = NULL;
+    bool ok = QAPI.prepare(g_cons[slot].con, sql, &ps) == QDuckSuccess;
+    free(sql);
+    int    np    = ok ? (int)QAPI.nparams(ps) : 0;
+    char** names = ok ? q_duckdb_cols(np, sizeof *names) : NULL;
+    bool   full  = names != NULL;
+    for (int i = 0; full && i < np; i++) full = (names[i] = QAPI.parameter_name(ps, (duck_idx_t)i + 1)) != NULL;
+    ray_t* r = !ok   ? q_duckdb_fail(slot, "%s", QD_TEXT(QAPI.prepare_error(ps)))
+             : !full ? q_err(QE_WSFULL)
+                     : qd_sym_list((const char* const*)names, np);
+    for (int i = 0; names && i < np; i++) if (names[i]) QAPI.duck_free(names[i]);
+    free(names);
+    QAPI.destroy_prepare(&ps);
+    return r;
+}
+
+/* .duckdb.i.params sql — the $names as the scanner reads them (q_duckdb_params.c): text alone, no library */
+static ray_t* qd_params_fn(ray_t* x) {
+    const char* tp; int64_t tn;
+    return q_str_text_bytes(x, &tp, &tn) ? q_duckdb_params(tp, (size_t)tn) : q_err(QE_TYPE);
+}
 
 /* the diagnostic's own answer: a q string, never a signal — the LAYER that refused is the first word */
 static ray_t* diag_text(const char* s) { return ray_charv(s, (int64_t)strlen(s)); }
@@ -1456,6 +1604,8 @@ void q_duckdb_register(void) {
     qd_bind_unary(".duckdb.i.err",    qd_err_fn);
     qd_bind_vary (".duckdb.i.exec",   2, qd_sql_wrap);
     qd_bind_vary (".duckdb.i.execx",  2, qd_sqlx_wrap);
+    qd_bind_vary (".duckdb.i.prepnames", 2, qd_prepnames_wrap);
+    qd_bind_unary(".duckdb.i.params", qd_params_fn);
     qd_bind_unary(".duckdb.i.qname",  qd_qname_fn);
     qd_bind_vary (".duckdb.i.get",    2, qd_get_wrap);
     qd_bind_vary (".duckdb.i.getx",   2, qd_getx_wrap);

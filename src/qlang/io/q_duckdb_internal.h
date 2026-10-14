@@ -145,6 +145,9 @@ ray_t* q_duckdb_codec_stage_image(ray_t* tbl, const qd_colmap_t* cms, ray_t* con
                                   ray_t* const* keeps, qd_colmap_t* scms, ray_t** smasks, ray_t** skeeps);
 void   q_duckdb_codec_refine(const char* cname, size_t n, const qd_desc_t* desc, int64_t ndesc, qd_colmap_t* cm);
 ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_t* desc, int64_t ndesc, ray_t** schema);
+/* an atom or string as the value the appender stores for a one-row column of its type, a q null as a NULL of that
+ * type: *out owned (destroy_value); 'type outside abs type 1..19 and 10h */
+ray_t* q_duckdb_codec_atom_value(int slot, ray_t* v, duck_value* out);
 ray_t* q_duckdb_codec_check_table(int slot, ray_t* tbl, qd_colmap_t* cms);
 ray_t* q_duckdb_codec_check_fields(int slot, ray_t* tbl, int64_t c, duck_logical_type lt, const qd_colmap_t* cm);
 ray_t* q_duckdb_codec_decay_enums(int slot, ray_t* tbl, qd_enum_t* en);
