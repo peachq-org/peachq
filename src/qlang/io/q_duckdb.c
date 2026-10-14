@@ -1409,6 +1409,12 @@ static ray_t* qd_params_fn(ray_t* x) {
     return q_str_text_bytes(x, &tp, &tn) ? q_duckdb_params(tp, (size_t)tn) : q_err(QE_TYPE);
 }
 
+/* .duckdb.i.spelled sql — the same markers as written (the parser's capture names), internal */
+static ray_t* qd_spelled_fn(ray_t* x) {
+    const char* tp; int64_t tn;
+    return q_str_text_bytes(x, &tp, &tn) ? q_duckdb_params_spelled(tp, (size_t)tn) : q_err(QE_TYPE);
+}
+
 /* the diagnostic's own answer: a q string, never a signal — the LAYER that refused is the first word */
 static ray_t* diag_text(const char* s) { return ray_charv(s, (int64_t)strlen(s)); }
 
@@ -1607,6 +1613,7 @@ void q_duckdb_register(void) {
     qd_bind_vary (".duckdb.i.execx",  2, qd_sqlx_wrap);
     qd_bind_vary (".duckdb.i.prepnames", 2, qd_prepnames_wrap);
     qd_bind_unary(".duckdb.i.params", qd_params_fn);
+    qd_bind_unary(".duckdb.i.spelled", qd_spelled_fn);
     qd_bind_unary(".duckdb.i.qname",  qd_qname_fn);
     qd_bind_vary (".duckdb.i.get",    2, qd_get_wrap);
     qd_bind_vary (".duckdb.i.getx",   2, qd_getx_wrap);

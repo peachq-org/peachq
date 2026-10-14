@@ -7,8 +7,10 @@
 #include <stddef.h>
 
 /* The `$name` parameters of a SQL statement — distinct, first-occurrence order, an 11h vector (empty for none) — as
- * DuckDB's lexer reads them: `$1` and `?` are named by number.  Pure text, no library (q_duckdb_params.c). */
+ * DuckDB's lexer reads them: `$1` and `?` are named by number.  Pure text, no library (q_duckdb_params.c).
+ * `_spelled` keeps each name as written (distinct by spelling) for the parser's capture; the bind folds. */
 ray_t* q_duckdb_params(const char* s, size_t n);
+ray_t* q_duckdb_params_spelled(const char* s, size_t n);
 
 /* Bind the `.duckdb.*` verbs into the q env (dotted env binds, the .Q.c.*
  * pattern).  Does NOT touch the DuckDB library — that is dlopen'd lazily on
