@@ -316,6 +316,7 @@ typedef struct { Token *t; int n; } Tokens;
  * input leaks the token array.  Updated as the scanner emits. */
 static Tokens g_toks = { NULL, 0 };
 static int g_scan_open_str;   /* the last scan ran off the end inside a string literal */
+static int g_scan_open_lit;   /* … or inside a text literal: its fence length */
 
 /* Whole literals (numeric / boolean / byte / guid / temporal) are scanned and
  * BUILT by q_tok.c — the single string->value home the `$` Tok scanners already
@@ -334,6 +335,34 @@ static ray_t *scan_num_literal(const char *src, int *p) {
 static int lone_colon_next(const char *src, int p) {
     while (src[p] == ' ' || src[p] == '\t') p++;
     return src[p] == ':' && src[p + 1] != ':';
+}
+
+/* The tagged text literal (docs/parser-architecture.md § Rules): at a token start, N >= 2 backticks + a tag + one
+ * whitespace byte open it and the next run of exactly N backticks closes it; the value is the bytes between, verbatim,
+ * always a char vector.  NULL when no tag follows the run: it is symbols, so p is untouched. */
+static ray_t *scan_text_literal(const char *src, int *pp) {
+    static const struct { const char *word; int kept; } TAGS[] = { { "sql", 0 }, { "raw", 0 }, { "SELECT", 1 } };
+    int p = *pp, n = 0, s = 0;
+    while (src[p] == '`') { p++; n++; }
+    if (n < 2) return NULL;
+    for (size_t i = 0; i < sizeof TAGS / sizeof *TAGS && !s; i++) {
+        int l = (int)strlen(TAGS[i].word);
+        if (strncmp(src + p, TAGS[i].word, (size_t)l) != 0) continue;
+        char after = src[p + l];
+        if (after == ' ' || after == '\t' || after == '\n') s = TAGS[i].kept ? p : p + l + 1;
+    }
+    if (!s) return NULL;
+    int e = s;
+    for (;;) {
+        if (!src[e]) { g_scan_open_lit = n; q_die("unterminated literal"); }
+        if (src[e] != '`') { e++; continue; }
+        int r = e;
+        while (src[r] == '`') r++;
+        if (r - e == n) break;
+        e = r;
+    }
+    *pp = e + n;
+    return ray_charv(src + s, (int64_t)(e - s));
 }
 
 static Tokens scan(const char *src) {
@@ -369,6 +398,7 @@ static Tokens scan(const char *src) {
         int start = p;
         char c = src[p];
         uint8_t cl = CLASS[(uint8_t)c];
+        ray_t *lit;
 
         /* kdb sign rule: '-' adjacent to a digit, or to a leading-dot magnitude (`-.5`, qtips/deriv.q:38), is a SIGN
          * when preceded by whitespace or start-of-input (`neg -1` applies neg to -1; `x -1` indexes x at -1); it is
@@ -474,6 +504,10 @@ static Tokens scan(const char *src) {
             if (dl == 1) EMIT(T_NOUN, ray_char((uint8_t)db[0]));
             else         EMIT(T_NOUN, ray_charv(db, (int64_t)dl));
             free(db);
+            noun_pos = 1;
+        }
+        else if (c == '`' && (lit = scan_text_literal(src, &p))) {
+            EMIT(T_NOUN, lit);
             noun_pos = 1;
         }
         else if (c == '`') {
@@ -2407,6 +2441,7 @@ static void open_scan(q_parse_open_t *st, const char *src) {
     g_toks.t = NULL;
     g_toks.n = 0;
     g_scan_open_str = 0;
+    g_scan_open_lit = 0;
     if (setjmp(q_err_jmp)) {
         ray_error_free(die_answer());
     } else {
@@ -2415,6 +2450,7 @@ static void open_scan(q_parse_open_t *st, const char *src) {
         g_toks.n = 0;
     }
     st->in_string = g_scan_open_str;
+    st->in_literal = g_scan_open_lit;
 }
 
 void q_parse_open_feed(q_parse_open_t *st, const char *piece) {
@@ -2427,12 +2463,14 @@ void q_parse_open_feed(q_parse_open_t *st, const char *piece) {
         if ((n && lang && lang != 'q') || intake_sys(piece)) { st->opaque = 1; return; }
     }
     if (!q_registry_ready()) return;
-    if (!st->in_string) { open_scan(st, piece); return; }
-    size_t n = strlen(piece);               /* the piece starts inside the string: reopen it for the scanner */
-    char  *quoted = malloc(n + 2);
+    if (!st->in_string && !st->in_literal) { open_scan(st, piece); return; }
+    size_t n = strlen(piece), fence = (size_t)st->in_literal;   /* the piece starts inside the literal: reopen it for the scanner */
+    char  *quoted = malloc(n + fence + 5);
     if (!quoted) return;
-    quoted[0] = '"';
-    memcpy(quoted + 1, piece, n + 1);
+    size_t k = 0;
+    if (fence) { memset(quoted, '`', fence); k = fence; memcpy(quoted + k, "raw ", 4); k += 4; }
+    else quoted[k++] = '"';
+    memcpy(quoted + k, piece, n + 1);
     open_scan(st, quoted);
     free(quoted);
 }
