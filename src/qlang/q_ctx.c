@@ -356,7 +356,7 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
             if (tlen == 1 && trim[0] == '\\') in_block = 0;   /* singleton \ closes; no flush */
             continue;
         }
-        if (!open.in_string) {
+        if (!open.in_string && !open.in_literal) {
             if (tlen == 0) { q_comment_break(); continue; }  /* blank/whitespace-only: ignored, no flush */
             if (tlen == 1 && trim[0] == '/') { in_block = 1; q_comment_break(); continue; }  /* open block; no flush */
             if (tlen == 1 && trim[0] == '\\') break; /* singleton \ exits (post-loop FLUSH runs)  */
@@ -379,7 +379,7 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
         alen += n;
         acc[alen] = '\0';                          /* q_ctx_run_line's q_parse reads it as a C string */
         if (value_door) q_parse_open_feed(&open, acc + piece);
-        if (open.in_string && raw > n) {
+        if ((open.in_string || open.in_literal) && raw > n) {
             memcpy(acc + alen, line + n, raw - n);
             alen += raw - n;
             acc[alen] = '\0';
