@@ -9,7 +9,6 @@
 #include "qlang/base/q_err.h"
 #include "qlang/q_prim.h"     /* q_str_text_bytes, q_enum_resolve, q_table_row_at + q_list_collapse (record cells) */
 #include "qlang/base/q_calendar.h"  /* q_calendar_month_from_days — the DATE a q month stores as */
-#include "qlang/q_dotz.h"           /* q_dotz_now_ns — the appender's sqllog clock */
 #include "lang/internal.h"          /* month_payload_as_days — THE forward half, base's own */
 #include "table/sym.h"        /* ray_sym_vec_cell */
 #include <rayforce.h>
@@ -59,19 +58,20 @@ static const qd_tmap_t* qd_map_read(duck_type t) {
 
 /* The q column tag a row SURFACES as (utf8/bytes are 0h lists at q-space). */
 static int8_t qd_surface_type(const qd_tmap_t* tm) {
-    return (tm->ray_type == RAY_STR || tm->ray_type == RAY_LIST)
+    return (tm->ray_type == RAY_STR || tm->ray_type == RAY_LIST || tm->ray_type == RAY_NULL)
                ? RAY_LIST : tm->ray_type;
 }
 int8_t q_duckdb_codec_surface_of(const qd_colmap_t* cm) {
     return cm->depth ? RAY_LIST : qd_surface_type(cm->leaf);
 }
 
-/* The three nested RECORDS (ADR 12): one carrier — a q DICT per cell — three spellings, and only the declared
- * type says which of them a dict was.  A field's NULL rides the parent's SHAPE MIRROR (ADR 16), never a key
- * inside the data dict, so a nested null needs no new spelling and no field name is reserved. */
+/* The nested RECORDS (ADR 12): a q DICT per cell for STRUCT, MAP and UNION — three spellings of one carrier, and
+ * only the declared type says which a dict was — and a plain LIST per cell for the positional TUPLE.  A field's
+ * NULL rides the parent's SHAPE MIRROR (ADR 16), never a key inside the data dict, so a nested null needs no new
+ * spelling and no field name is reserved. */
 bool q_duckdb_codec_is_rec(const qd_tmap_t* tm) {
     return tm && (tm->dk_type == QDUCK_TYPE_STRUCT || tm->dk_type == QDUCK_TYPE_MAP ||
-                  tm->dk_type == QDUCK_TYPE_UNION);
+                  tm->dk_type == QDUCK_TYPE_UNION  || tm->dk_type == QDUCK_TYPE_TUPLE);
 }
 
 void q_duckdb_codec_maps_free(qd_colmap_t* cms, int64_t n) {
@@ -97,7 +97,7 @@ static qd_rec_t* qd_rec_alloc(int n) {
 void q_duckdb_codec_spell_map(const qd_colmap_t* cm, qd_buf* b) {
     q_duckdb_puts(b, cm->leaf->sql);
     if (cm->rec) {
-        bool named = cm->leaf->dk_type != QDUCK_TYPE_MAP;   /* a MAP declares two types, not two names */
+        bool named = cm->leaf->dk_type != QDUCK_TYPE_MAP && cm->leaf->dk_type != QDUCK_TYPE_TUPLE;
         q_duckdb_puts(b, "(");
         for (int i = 0; i < cm->rec->n; i++) {
             if (i) q_duckdb_puts(b, ", ");
@@ -174,7 +174,7 @@ bool q_duckdb_codec_raw_is_text(int8_t ray_type) { return ray_type == RAY_TIMESP
 
 static bool qd_rec_map(int slot, ray_t* v, int depth, qd_colmap_t* out);
 static ray_t* qd_rec_spine(int slot, ray_t* v, int lev);
-static const char QD_NO_SQL_MEANING[] = "the q column has no SQL meaning";
+const char QD_NO_SQL_MEANING[] = "the q column has no SQL meaning";
 
 /* q value -> column map (write direction).  A generic list is utf8 when EVERY
  * cell is text and bytes when every cell is a byte vector — those base cases
@@ -200,12 +200,13 @@ static bool qd_map_write(int slot, ray_t* v, int depth, qd_colmap_t* out, const 
         out->undet = true;
         return out->leaf != NULL;
     }
-    bool all_bytes = true, all_text = true, all_dict = q_count(v) > 0, atom = false, hole = false;
+    bool all_bytes = true, all_text = true, all_dict = q_count(v) > 0, all_unit = all_dict, atom = false, hole = false;
     int64_t voted = 0;
-    for (int64_t i = 0; i < q_count(v) && (all_bytes || all_text || all_dict); i++) {
+    for (int64_t i = 0; i < q_count(v) && (all_bytes || all_text || all_dict || all_unit); i++) {
         ray_t* cell = ray_list_get(v, i);
         if (!cell) return false;
         if (cell->type != RAY_DICT) all_dict = false;
+        if (!Q_IS_GENERIC_NULL(cell)) all_unit = false;
         if (qd_cell_is_0n(cell)) continue;
         voted++;
         if (cell->type != RAY_BYTE_ONLY) all_bytes = false;
@@ -214,6 +215,11 @@ static bool qd_map_write(int slot, ray_t* v, int depth, qd_colmap_t* out, const 
         hole |= cell->type == RAY_LIST && q_count(cell) == 0;
     }
     if (all_dict) return qd_rec_map(slot, v, depth, out);
+    if (all_unit) {   /* a column of :: is DuckDB's untyped NULL, the value .j.k reads a JSON null as */
+        out->leaf  = qd_map_read(QDUCK_TYPE_SQLNULL);
+        out->depth = depth;
+        return out->leaf != NULL;
+    }
     /* a char ATOM is text to the vote but no string comes back for it, and a bare () beside strings would land as
      * VARCHAR[] of single characters: both are refused, never guessed (2026-09-14) */
     if (all_text && atom) { if (why) *why = "a char atom among strings"; return false; }
@@ -232,10 +238,17 @@ static bool qd_map_write(int slot, ray_t* v, int depth, qd_colmap_t* out, const 
     for (int64_t i = 0; i < q_count(v); i++) {
         ray_t* cell = ray_list_get(v, i);
         if (qd_cell_is_0n(cell)) continue;
-        if (!cell || cell->type < 0) return false;      /* atom-bearing: fail loud */
+        if (!cell || cell->type < 0 || Q_IS_GENERIC_NULL(cell)) return false;      /* atom-bearing: fail loud */
         if (cell->type == RAY_LIST && q_count(cell) == 0) continue;   /* () carries no type */
         qd_colmap_t cm;
-        if (!qd_map_write(slot, cell, depth + 1, &cm, why)) { q_duckdb_codec_map_free(&cm); return false; }
+        if (!qd_map_write(slot, cell, depth + 1, &cm, why)) {
+            q_duckdb_codec_map_free(&cm);
+            /* a list whose items share no one shape is a TUPLE's row, which only a declaration can type: the
+             * fields stay DEFERRED, and undeclared it is refused as the meaningless column it would be */
+            if (cell->type != RAY_LIST || (why && *why != QD_NO_SQL_MEANING)) return false;
+            cm = (qd_colmap_t){ qd_map_read(QDUCK_TYPE_TUPLE), NULL, depth, false };
+        }
+        if (cm.leaf && cm.leaf->dk_type == QDUCK_TYPE_TUPLE && !cm.rec) { *out = cm; return true; }
         /* a record UNDER a list declares the fields ALL its rows agree on, so the rows are gathered into the one
          * column qd_rec_map reads them off — depth 0's own law, one flattening away */
         if (q_duckdb_codec_is_rec(cm.leaf)) {
@@ -259,19 +272,127 @@ static bool qd_map_write(int slot, ray_t* v, int depth, qd_colmap_t* out, const 
 
 static bool qd_map_read_logical(duck_logical_type lt, qd_colmap_t* out, duck_type* miss, const char** why);
 
+/* ---- the logical-type ladder over the v2 value parameters: DECIMAL (width, scale), LIST (element), ARRAY
+ * (element, size), MAP (key, value), STRUCT/UNION (one named field each), ENUM (one entry each) ---- */
+
+duck_type q_duckdb_type_id(duck_logical_type lt) {
+    int32_t id = 0;
+    return lt && QAPI.logical_type_get_id(lt, &id, NULL) == QDuckSuccess ? (duck_type)id : 0;
+}
+
+duck_idx_t q_duckdb_type_nparams(duck_logical_type lt) {
+    duck_idx_t n = 0;
+    return lt && QAPI.logical_type_get_param_count(lt, &n, NULL) == QDuckSuccess ? n : 0;
+}
+
+/* parameter i as a TYPE (owned) with its name (owned copy, NULL where positional or on OOM) */
+duck_logical_type q_duckdb_type_param(duck_logical_type lt, duck_idx_t i, char** name) {
+    duck_str   pn = { NULL, 0 };
+    duck_value pv = NULL;
+    duck_logical_type t = NULL;
+    if (name) *name = NULL;
+    if (!lt || QAPI.logical_type_get_param(lt, i, &pn, &pv, NULL) != QDuckSuccess) return NULL;
+    if (QAPI.value_get_type(pv, &t, NULL) != QDuckSuccess) t = NULL;
+    if (name && pn.len) *name = q_duckdb_text(pn.ptr, pn.len);
+    QAPI.value_destroy(&pv);
+    return t;
+}
+
+/* parameter i as the integer it carries (a DECIMAL's width or scale, an ARRAY's size); -1 where it is none */
+int64_t q_duckdb_type_param_int(duck_logical_type lt, duck_idx_t i) {
+    duck_str   pn;
+    duck_value pv = NULL;
+    uint8_t    u  = 0;
+    int64_t    v  = -1;
+    if (!lt || QAPI.logical_type_get_param(lt, i, &pn, &pv, NULL) != QDuckSuccess) return -1;
+    if (QAPI.value_get_utinyint(pv, &u, NULL) == QDuckSuccess) v = u;
+    else if (QAPI.value_get_bigint(pv, &v, NULL) != QDuckSuccess) v = -1;
+    QAPI.value_destroy(&pv);
+    return v;
+}
+
+/* parameter i as the text it carries (an ENUM entry): owned; NULL where it is none or on OOM */
+char* q_duckdb_type_param_text(duck_logical_type lt, duck_idx_t i) {
+    duck_str   pn, sv = { NULL, 0 };
+    duck_value pv = NULL;
+    if (!lt || QAPI.logical_type_get_param(lt, i, &pn, &pv, NULL) != QDuckSuccess) return NULL;
+    char* out = QAPI.value_get_varchar(pv, &sv, NULL) == QDuckSuccess ? q_duckdb_text(sv.ptr ? sv.ptr : "", sv.len) : NULL;
+    QAPI.value_destroy(&pv);
+    return out;
+}
+
+/* the type's alias (JSON over VARCHAR), copied into buf; false where its name is the id's own */
+bool q_duckdb_type_alias(duck_logical_type lt, char* buf, size_t cap) {
+    duck_str nm = { NULL, 0 };
+    duck_type id = q_duckdb_type_id(lt);
+    if (!lt || id == QDUCK_TYPE_SQLNULL) return false;   /* named NULL, declared "NULL": the one name that is quoted */
+    if (QAPI.logical_type_get_name(lt, &nm, NULL) != QDuckSuccess) return false;
+    const char* canon = q_duckdb_type_name(id);
+    if (nm.len == strlen(canon) && memcmp(nm.ptr, canon, nm.len) == 0) return false;
+    snprintf(buf, cap, "%.*s", (int)nm.len, nm.ptr ? nm.ptr : "");
+    return true;
+}
+
+duck_logical_type q_duckdb_type_make(int slot, duck_type id) {
+    duck_logical_type t = NULL;
+    if (id == QDUCK_TYPE_SQLNULL) {   /* bind-time-only to the id constructor; its text spells it */
+        const duck_str nul = { "\"NULL\"", 6 };
+        return QAPI.connection_create_type_from_text(q_duckdb_con(slot), &nul, &t, NULL) == QDuckSuccess ? t : NULL;
+    }
+    return QAPI.connection_create_type_from_id(q_duckdb_con(slot), id, NULL, NULL, 0, &t, NULL) == QDuckSuccess ? t : NULL;
+}
+
+/* a parameterised type from its children: LIST(elem), MAP(key, value), STRUCT/UNION(name field, ...) */
+static duck_logical_type qd_type_compose(int slot, duck_type id, const char* const* names, duck_logical_type* kids,
+                                         int n) {
+    duck_value* vals = q_duckdb_cols(n, sizeof *vals + sizeof(duck_str));
+    duck_str*   nm   = vals ? (duck_str*)(vals + n) : NULL;
+    duck_logical_type t = NULL;
+    bool ok = vals != NULL;
+    for (int i = 0; ok && i < n; i++) {
+        ok = QAPI.value_create_type(q_duckdb_con(slot), kids[i], &vals[i], NULL) == QDuckSuccess;
+        if (names) nm[i] = (duck_str){ names[i], strlen(names[i]) };
+    }
+    if (ok && QAPI.connection_create_type_from_id(q_duckdb_con(slot), id, names ? nm : NULL, vals, (duck_idx_t)n, &t,
+                                                  NULL) != QDuckSuccess) t = NULL;
+    for (int i = 0; vals && i < n; i++) if (vals[i]) QAPI.value_destroy(&vals[i]);
+    free(vals);
+    return t;
+}
+
+/* a flat vector's view (its data, validity, count); a vector DuckDB will not flatten answers false */
+bool q_duckdb_vec_view(duck_vector v, duck_view* out) {
+    memset(out, 0, sizeof *out);
+    return v && QAPI.vector_flatten(v, NULL) == QDuckSuccess && QAPI.vector_get_view(v, out, NULL) == QDuckSuccess;
+}
+
+static duck_vector qd_child(duck_vector v, duck_idx_t i) {
+    duck_vector c = NULL;
+    return v && QAPI.vector_get_child(v, i, &c, NULL) == QDuckSuccess ? c : NULL;
+}
+
+/* the storage an ENUM keeps its dictionary index in, by the dictionary's size (header contract) */
+static duck_type qd_enum_width(duck_logical_type lt) {
+    duck_idx_t n = q_duckdb_type_nparams(lt);
+    return n <= 255 ? QDUCK_TYPE_UTINYINT : n <= 65535 ? QDUCK_TYPE_USMALLINT : QDUCK_TYPE_UINTEGER;
+}
+
+/* the storage a DECIMAL keeps its unscaled value in, by width (header contract) */
+static duck_type qd_decimal_phys(duck_logical_type lt) {
+    int64_t w = q_duckdb_type_param_int(lt, 0);
+    return w <= 4 ? QDUCK_TYPE_SMALLINT : w <= 9 ? QDUCK_TYPE_INTEGER : w <= 18 ? QDUCK_TYPE_BIGINT : QDUCK_TYPE_HUGEINT;
+}
+
 /* THE record-children ladder: how many fields a record logical type has, and field i's type (owned) with its name
  * (owned; NULL for a MAP's two halves, which are typed but not named) */
 int q_duckdb_codec_rec_nfields(duck_logical_type lt, duck_type id) {
-    return id == QDUCK_TYPE_MAP ? 2 : id == QDUCK_TYPE_UNION ? (int)QAPI.union_type_member_count(lt)
-                                                            : (int)QAPI.struct_type_child_count(lt);
+    return id == QDUCK_TYPE_MAP ? 2 : (int)q_duckdb_type_nparams(lt);
 }
 
 duck_logical_type q_duckdb_codec_rec_child(duck_logical_type lt, duck_type id, int i, char** name) {
-    if (name) *name = id == QDUCK_TYPE_MAP ? NULL : id == QDUCK_TYPE_UNION ? QAPI.union_type_member_name(lt, (duck_idx_t)i)
-                                                                          : QAPI.struct_type_child_name(lt, (duck_idx_t)i);
-    return id == QDUCK_TYPE_MAP   ? (i ? QAPI.map_type_value_type(lt) : QAPI.map_type_key_type(lt))
-         : id == QDUCK_TYPE_UNION ? QAPI.union_type_member_type(lt, (duck_idx_t)i)
-                                  : QAPI.struct_type_child_type(lt, (duck_idx_t)i);
+    duck_logical_type t = q_duckdb_type_param(lt, (duck_idx_t)i, name);
+    if (name && id != QDUCK_TYPE_MAP && t && !*name) *name = q_duckdb_text("", 0);   /* a TUPLE's field: named, emptily */
+    return t;
 }
 
 /* A record logical type's fields: a STRUCT's children, a UNION's members, a MAP's key and value.  A MAP's
@@ -295,8 +416,8 @@ static bool qd_rec_read_type(duck_logical_type lt, duck_type id, qd_colmap_t* ou
         if (ok && id == QDUCK_TYPE_MAP && i == 0 && !r->f[0].map.depth &&
             r->f[0].map.leaf->dk_type == QDUCK_TYPE_VARCHAR)
             r->f[0].map.leaf = qd_map_logical("symbol", 6);
-        if (nm) QAPI.duck_free(nm);
-        if (ct) QAPI.destroy_logical_type(&ct);
+        free(nm);
+        if (ct) QAPI.logical_type_destroy(&ct);
     }
     out->rec = r;
     if (ok) return true;
@@ -310,13 +431,13 @@ static bool qd_map_read_logical(duck_logical_type lt, qd_colmap_t* out, duck_typ
     duck_logical_type cur = lt, owned = NULL;
     int depth = 0;
     duck_type id;
-    while (cur && ((id = QAPI.get_type_id(cur)) == QDUCK_TYPE_LIST || id == QDUCK_TYPE_ARRAY) && depth < QD_MAX_DEPTH) {
-        duck_logical_type child = id == QDUCK_TYPE_LIST ? QAPI.list_type_child_type(cur) : QAPI.array_type_child_type(cur);
-        if (owned) QAPI.destroy_logical_type(&owned);
+    while (cur && ((id = q_duckdb_type_id(cur)) == QDUCK_TYPE_LIST || id == QDUCK_TYPE_ARRAY) && depth < QD_MAX_DEPTH) {
+        duck_logical_type child = q_duckdb_type_param(cur, 0, NULL);
+        if (owned) QAPI.logical_type_destroy(&owned);
         cur = owned = child;
         depth++;
     }
-    *miss = cur ? QAPI.get_type_id(cur) : 0;
+    *miss = q_duckdb_type_id(cur);
     const qd_tmap_t* leaf = cur ? qd_map_read(*miss) : NULL;
     out->leaf  = leaf;
     out->rec   = NULL;
@@ -325,35 +446,54 @@ static bool qd_map_read_logical(duck_logical_type lt, qd_colmap_t* out, duck_typ
     if (depth && *miss == QDUCK_TYPE_UTINYINT) { *why = "utinyint list: no q carrier distinct from BLOB"; leaf = NULL; }
     bool ok = leaf && !q_duckdb_codec_is_rec(leaf);
     if (leaf && !ok) ok = qd_rec_read_type(cur, *miss, out, miss, why);
-    if (owned) QAPI.destroy_logical_type(&owned);
+    if (owned) QAPI.logical_type_destroy(&owned);
     return ok;
 }
 
 /* the DuckDB type a staged column is written into: a record builds its fields, everything else its leaf row */
-static duck_logical_type qd_make_logical(const qd_colmap_t* cm) {
+static duck_logical_type qd_make_logical(int slot, const qd_colmap_t* cm) {
     duck_logical_type t;
-    if (!cm->rec) t = QAPI.create_logical_type(cm->leaf->dk_type);
+    if (!cm->rec) t = q_duckdb_type_make(slot, cm->leaf->dk_type);
     else {
         int n = cm->rec->n, i = 0;
         duck_logical_type* ct = q_duckdb_cols(n, sizeof *ct + sizeof(char*));   /* the field types, then their names */
         const char**       nm = ct ? (const char**)(ct + n) : NULL;
         for (; ct && i < n; i++) {
             nm[i] = cm->rec->f[i].name;
-            if (!(ct[i] = qd_make_logical(&cm->rec->f[i].map))) break;
+            if (!(ct[i] = qd_make_logical(slot, &cm->rec->f[i].map))) break;
         }
-        t = i < n                                      ? NULL
-          : cm->leaf->dk_type == QDUCK_TYPE_MAP        ? QAPI.create_map_type(ct[0], ct[1])
-          : cm->leaf->dk_type == QDUCK_TYPE_UNION      ? QAPI.create_union_type(ct, nm, (duck_idx_t)i)
-                                                       : QAPI.create_struct_type(ct, nm, (duck_idx_t)i);
-        for (int k = 0; k < i; k++) QAPI.destroy_logical_type(&ct[k]);
+        bool pos = cm->leaf->dk_type == QDUCK_TYPE_MAP || cm->leaf->dk_type == QDUCK_TYPE_TUPLE;
+        t = i < n ? NULL : qd_type_compose(slot, cm->leaf->dk_type, pos ? NULL : nm, ct, i);
+        for (int k = 0; k < i; k++) QAPI.logical_type_destroy(&ct[k]);
         free(ct);
     }
     for (int i = 0; i < cm->depth && t; i++) {
-        duck_logical_type nested = QAPI.create_list_type(t);   /* borrows the child */
-        QAPI.destroy_logical_type(&t);
+        duck_logical_type nested = qd_type_compose(slot, QDUCK_TYPE_LIST, NULL, &t, 1);
+        QAPI.logical_type_destroy(&t);
         t = nested;
     }
     return t;
+}
+
+/* the 16-byte cell of a VARCHAR/BLOB/BIT vector: inline to 12 bytes, else arena-owned bytes the cell points at */
+static ray_t* qd_put_bytes(duck_vector dv, duck_idx_t r, const char* p, size_t n) {
+    void* data = NULL;
+    if (QAPI.vector_get_data_mutable(dv, &data, NULL) != QDuckSuccess) return q_err(QE_DUCKDB);
+    duck_string_t* cell = (duck_string_t*)data + r;
+    cell->value.inlined.length = (uint32_t)n;
+    if (n <= QDUCK_STRING_INLINE_MAX) {
+        memset(cell->value.inlined.inlined, 0, QDUCK_STRING_INLINE_MAX);
+        memcpy(cell->value.inlined.inlined, p, n);
+        return NULL;
+    }
+    duck_arena arena = NULL;
+    uint8_t*   dst   = NULL;
+    if (QAPI.vector_get_arena(dv, &arena, NULL) != QDuckSuccess ||
+        QAPI.arena_allocate(arena, (duck_idx_t)n, &dst, NULL) != QDuckSuccess) return q_err(QE_WSFULL);
+    memcpy(dst, p, n);
+    memcpy(cell->value.pointer.prefix, p, 4);
+    cell->value.pointer.ptr = (char*)dst;
+    return NULL;
 }
 /* ---- UUID <-> hugeint (upper word's sign bit flipped for ordering;
  * bytes are RFC-4122 big-endian) ---- */
@@ -414,9 +554,9 @@ static ray_t* qd_bits_write(duck_vector dv, duck_idx_t r, ray_t* cell) {
         if (src[i]) buf[1 + j / 8] |= m;
         else        buf[1 + j / 8] &= (uint8_t)~m;
     }
-    QAPI.vector_assign_string_element_len(dv, r, (const char*)buf, (duck_idx_t)(nb + 1));
+    ray_t* e = qd_put_bytes(dv, r, (const char*)buf, (size_t)nb + 1);
     free(buf);
-    return NULL;
+    return e;
 }
 
 /* The envelope's `bitstring` row over the map a nested boolean column derives: the ONE remap a declaration makes,
@@ -514,7 +654,7 @@ static ray_t* qd_mask_row(ray_t* mask, int64_t row, bool flag) {
  * notnull, a long for hi and a counting raw, DuckDB's own text for a text raw, an int for tzoff.  A nested
  * column's containers are null-less and its elements are not, so the two companions ride as two columns.
  * UNDER A RECORD each FIELD grows its own, and the record ships one column per KIND any field grew — the write
- * back reaches the ones the APPENDER consumes, hi/raw/tzoff awaiting a cast leg that descends. ---- */
+ * back reaches the ones the CHUNK WRITER consumes, hi/raw/tzoff awaiting a cast leg that descends. ---- */
 
 /* the accumulator a companion of `kind` takes at this level: a list above the leaf, the kind's own vector at it */
 static ray_t* qd_co_new(const qd_colmap_t* cm, int kind, int64_t cap) {
@@ -705,16 +845,16 @@ static void qd_interval_text(const void* data, duck_idx_t r, char* buf, size_t c
  * big-endian magnitude bytes, every byte one's-complemented when the value is negative.  The caller owns the
  * returned text; NULL = malformed, too wide, or out of memory.
  * The conversion is repeated division by ten, O(bytes^2), and the header's 23-bit length admits 8 MiB of magnitude —
- * twenty million digits, which would wedge the reader for hours.  So a magnitude past QD_VARINT_MAX is REFUSED,
+ * twenty million digits, which would wedge the reader for hours.  So a magnitude past QD_BIGNUM_MAX is REFUSED,
  * loudly, at a width (9,800-odd digits) no arithmetic a store holds comes near.  §21's "unbounded" is the ruling
  * that no FIXED-WIDTH CARRIER suffices, not a promise to decode an 8 MiB integer inside a read. */
-#define QD_VARINT_MAX 4096
-static char* qd_varint_text(const char* p, int64_t len) {
+#define QD_BIGNUM_MAX 4096
+static char* qd_bignum_text(const char* p, int64_t len) {
     if (len < 3) return NULL;
     uint8_t inv = ((uint8_t)p[0] & 0x80) ? 0 : 0xFF;
     uint32_t n  = (uint32_t)((((uint8_t)p[0] ^ inv) & 0x7F) << 16) | (uint32_t)((uint8_t)p[1] ^ inv) << 8 |
                   (uint32_t)((uint8_t)p[2] ^ inv);
-    if ((int64_t)n + 3 != len || n > QD_VARINT_MAX) return NULL;
+    if ((int64_t)n + 3 != len || n > QD_BIGNUM_MAX) return NULL;
     uint8_t* m   = malloc(n ? n : 1);
     char*    out = malloc((size_t)n * 3 + 4);   /* 256^n < 10^(2.41n), so 3 digits a byte is room to spare */
     if (!m || !out) { free(m); free(out); return NULL; }
@@ -806,7 +946,8 @@ static int qd_leaf_co_kind(const qd_tmap_t* tm) {
     if (qd_nullless(tm)) return QD_CO_ISNULL;
     if (qd_wide_int(tm->dk_type)) return QD_CO_HI;
     if (tm->dk_type == QDUCK_TYPE_INTERVAL && q_duckdb_codec_raw_is_text(tm->ray_type)) return QD_CO_RAW;
-    if (tm->dk_type == QDUCK_TYPE_VARINT) return QD_CO_RAW;   /* ADR 21: every row, since the slot holds none of it */
+    if (tm->dk_type == QDUCK_TYPE_BIGNUM) return QD_CO_RAW;   /* ADR 21: every row, since the slot holds none of it */
+    if (tm->dk_type == QDUCK_TYPE_SQLNULL) return QD_CO_NONE;  /* every :: IS the null: nothing to flag or keep */
     if (tm->ray_type == RAY_DATE || tm->ray_type == RAY_TIME || tm->ray_type == RAY_TIMESTAMP) return QD_CO_RAW;
     bool off_pattern = tm->dk_type == QDUCK_TYPE_TINYINT || tm->dk_type == QDUCK_TYPE_USMALLINT ||
                        tm->dk_type == QDUCK_TYPE_UINTEGER || tm->dk_type == QDUCK_TYPE_TIME_NS;
@@ -873,11 +1014,13 @@ static duck_idx_t qd_enum_index(const void* data, duck_type width, duck_idx_t r)
 static ray_t* qd_read_cells_1(int slot, ray_t* col, const qd_tmap_t* tm, duck_vector dv, duck_idx_t from,
                               duck_idx_t n, qd_cos_t* cos, duck_logical_type enum_lt,
                               duck_type phys, char** scratch) {
-    void*     data     = QAPI.vector_get_data(dv);
-    uint64_t* validity = QAPI.vector_get_validity(dv);
+    duck_view w;
+    if (!q_duckdb_vec_view(dv, &w)) { ray_release(col); return q_err(QE_DUCKDB); }
+    const void*     data     = w.data;
+    const uint64_t* validity = w.validity;
     const bool nullless = qd_nullless(tm);
     const int  kind     = qd_co_kind(&(const qd_colmap_t){ tm, NULL, 0, false });
-    const duck_type ewidth = enum_lt ? QAPI.enum_internal_type(enum_lt) : 0;
+    const duck_type ewidth = enum_lt ? qd_enum_width(enum_lt) : 0;
     for (duck_idx_t r = from; r < from + n; r++) {
         bool ok = q_duckdb_validity_ok(validity, r), hit = false, need = false;
         int64_t cval = NULL_I64;
@@ -948,15 +1091,15 @@ static ray_t* qd_read_cells_1(int slot, ray_t* col, const qd_tmap_t* tm, duck_ve
                     break;
                 }
                 /* ADR 21: a BIGNUM has no q carrier at any width, so the slot is 0N and the DIGITS ride raw */
-                if (tm->dk_type == QDUCK_TYPE_VARINT) {
+                if (tm->dk_type == QDUCK_TYPE_BIGNUM) {
                     free(*scratch);           /* "" is raw's absent marker, so a NULL row must not inherit digits */
                     *scratch = NULL;
                     col = qd_append_null(col);
                     if (!ok) break;
                     const duck_string_t* sv = &((const duck_string_t*)data)[r];
-                    *scratch = qd_varint_text(q_duckdb_string_data(sv), (int64_t)q_duckdb_string_len(sv));
+                    *scratch = qd_bignum_text(q_duckdb_string_data(sv), (int64_t)q_duckdb_string_len(sv));
                     if (!*scratch)
-                        return qd_read_fail(slot, col, tm, "a VARINT cell no header describes, or wider than 4096 bytes");
+                        return qd_read_fail(slot, col, tm, "a BIGNUM cell no header describes, or wider than 4096 bytes");
                     need = true;
                     break;
                 }
@@ -1001,10 +1144,10 @@ static ray_t* qd_read_cells_1(int slot, ray_t* col, const qd_tmap_t* tm, duck_ve
                 int64_t id;
                 if (!ok) id = ray_sym_intern_runtime("", 0);
                 else if (enum_lt) {
-                    char* v = QAPI.enum_dictionary_value(enum_lt, qd_enum_index(data, ewidth, r));
+                    char* v = q_duckdb_type_param_text(enum_lt, qd_enum_index(data, ewidth, r));
                     if (!v) return qd_read_fail(slot, col, tm, "index outside the enum dictionary");
                     id = ray_sym_intern_runtime(v, strlen(v));
-                    QAPI.duck_free(v);
+                    free(v);
                 } else {
                     const duck_string_t* s = &((const duck_string_t*)data)[r];
                     id = ray_sym_intern_runtime(q_duckdb_string_data(s), q_duckdb_string_len(s));
@@ -1083,6 +1226,9 @@ static ray_t* qd_read_cells_1(int slot, ray_t* col, const qd_tmap_t* tm, duck_ve
                 col = ray_vec_append(col, &q);
                 break;
             }
+            case RAY_NULL:       /* the untyped NULL: every row is ::, valid or not */
+                col = ray_list_append(col, RAY_NULL_OBJ);
+                break;
             case RAY_GUID: {
                 if (!ok) { col = qd_append_null(col); break; }   /* NULL -> 0Ng */
                 uint8_t b[16];
@@ -1151,10 +1297,11 @@ static ray_t* qd_read_cells(int slot, ray_t* col, const qd_tmap_t* tm, duck_vect
 static ray_t* qd_read_leaf(int slot, ray_t* col, const qd_tmap_t* tm,
                            duck_vector dv, duck_idx_t from, duck_idx_t n, qd_cos_t* cos) {
     bool enumd = tm->dk_type == QDUCK_TYPE_ENUM, dec = tm->dk_type == QDUCK_TYPE_DECIMAL;
-    duck_logical_type lt = enumd || dec ? QAPI.vector_get_column_type(dv) : NULL;
-    duck_type phys = dec && lt ? QAPI.decimal_internal_type(lt) : tm->dk_type;
+    duck_logical_type lt = NULL;
+    if ((enumd || dec) && QAPI.vector_get_logical_type(dv, &lt, NULL) != QDuckSuccess) lt = NULL;
+    duck_type phys = dec && lt ? qd_decimal_phys(lt) : tm->dk_type;
     ray_t* r = qd_read_cells(slot, col, tm, dv, from, n, cos, enumd ? lt : NULL, phys);
-    if (lt) QAPI.destroy_logical_type(&lt);
+    if (lt) QAPI.logical_type_destroy(&lt);
     return r;
 }
 
@@ -1171,12 +1318,15 @@ static ray_t* qd_read_col(int slot, ray_t* col, const qd_colmap_t* cm,
         return cm->rec ? qd_read_rec_cell(slot, col, cm, dv, from, n, cos)
                        : qd_read_leaf(slot, col, cm->leaf, dv, from, n, cos);
     const qd_colmap_t child = { cm->leaf, cm->rec, cm->depth - 1, false };
-    duck_logical_type lt = QAPI.vector_get_column_type(dv);
-    duck_idx_t asz = lt && QAPI.get_type_id(lt) == QDUCK_TYPE_ARRAY ? QAPI.array_type_array_size(lt) : 0;
-    if (lt) QAPI.destroy_logical_type(&lt);
-    const duck_list_entry* ent = asz ? NULL : (const duck_list_entry*)QAPI.vector_get_data(dv);
-    uint64_t*   validity = QAPI.vector_get_validity(dv);
-    duck_vector cv       = asz ? QAPI.array_vector_get_child(dv) : QAPI.list_vector_get_child(dv);
+    duck_logical_type lt = NULL;
+    if (QAPI.vector_get_logical_type(dv, &lt, NULL) != QDuckSuccess) lt = NULL;
+    duck_idx_t asz = q_duckdb_type_id(lt) == QDUCK_TYPE_ARRAY ? (duck_idx_t)q_duckdb_type_param_int(lt, 1) : 0;
+    if (lt) QAPI.logical_type_destroy(&lt);
+    duck_view w;
+    if (!q_duckdb_vec_view(dv, &w)) { ray_release(col); return q_err(QE_DUCKDB); }
+    const duck_list_entry* ent      = asz ? NULL : (const duck_list_entry*)w.data;
+    const uint64_t*        validity = w.validity;
+    duck_vector            cv       = qd_child(dv, 0);
     if ((!asz && !ent) || !cv) { ray_release(col); return q_err(QE_DUCKDB); }
     for (duck_idx_t r = from; r < from + n; r++) {
         bool       ok  = q_duckdb_validity_ok(validity, r);
@@ -1313,24 +1463,27 @@ static ray_t* qd_read_rec(int slot, qd_racc_t* acc, const qd_colmap_t* cm, duck_
                           duck_idx_t from, duck_idx_t n) {
     const qd_rec_t* r = cm->rec;
     bool uni = cm->leaf->dk_type == QDUCK_TYPE_UNION, map = cm->leaf->dk_type == QDUCK_TYPE_MAP;
-    uint64_t* validity = QAPI.vector_get_validity(dv);
+    duck_view w, tw = { 0 };
+    if (!q_duckdb_vec_view(dv, &w)) return q_err(QE_DUCKDB);
+    const uint64_t* validity = w.validity;
     const duck_list_entry* ent = NULL;
     duck_vector* child = q_duckdb_cols(r->n, sizeof *child);
     duck_vector  tagv  = NULL;
     if (!child) return q_err(QE_WSFULL);
     if (map) {
-        duck_vector kv = QAPI.list_vector_get_child(dv);
-        ent = (const duck_list_entry*)QAPI.vector_get_data(dv);
-        child[0] = kv ? QAPI.struct_vector_get_child(kv, 0) : NULL;
-        child[1] = kv ? QAPI.struct_vector_get_child(kv, 1) : NULL;
+        duck_vector kv = qd_child(dv, 0);
+        ent = (const duck_list_entry*)w.data;
+        child[0] = qd_child(kv, 0);
+        child[1] = qd_child(kv, 1);
     } else {
-        tagv = uni ? QAPI.struct_vector_get_child(dv, 0) : NULL;
-        for (int i = 0; i < r->n; i++) child[i] = QAPI.struct_vector_get_child(dv, (duck_idx_t)(uni + i));
+        tagv = uni ? qd_child(dv, 0) : NULL;
+        for (int i = 0; i < r->n; i++) child[i] = qd_child(dv, (duck_idx_t)(uni + i));
     }
     ray_t* e = NULL;
     for (int i = 0; !e && i < r->n; i++) if (!child[i]) e = q_err(QE_DUCKDB);
     if (!e && ((map && !ent) || (uni && !tagv))) e = q_err(QE_DUCKDB);
-    const uint8_t* tag = uni && tagv ? (const uint8_t*)QAPI.vector_get_data(tagv) : NULL;
+    if (!e && tagv && !q_duckdb_vec_view(tagv, &tw)) e = q_err(QE_DUCKDB);
+    const uint8_t* tag = (const uint8_t*)tw.data;
     for (duck_idx_t rw = from; !e && rw < from + n; rw++) {
         bool ok = q_duckdb_validity_ok(validity, rw);
         int16_t sel = -1;
@@ -1375,28 +1528,29 @@ static ray_t* qd_cell_at(ray_t* col, int64_t i) {
  * companion of each field.  A field with nothing to say in that kind takes its ABSENT MARKER, because the mirror
  * is keyed exactly like the value (ADR 16) and a key the value carries may not go missing from beside it.
  * The value side takes q's one collapse law: the wire cannot encode an uncollapsed run at any depth. */
-static ray_t* qd_rec_cell(qd_racc_t* acc, const qd_rec_t* r, int from, int cnt, int64_t i, int co) {
-    ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, cnt);
+static ray_t* qd_rec_cell(qd_racc_t* acc, const qd_rec_t* r, bool tuple, int from, int cnt, int64_t i, int co) {
+    ray_t* keys = tuple ? NULL : ray_sym_vec_new(RAY_SYM_W64, cnt);   /* a TUPLE's fields are its positions */
     ray_t* vals = ray_list_new(cnt);
     for (int k = from; k < from + cnt; k++) {
         ray_t*  src = co == QD_CO_NONE ? acc->col[k] : acc->fcos[k].co[co].acc;
-        int64_t id  = ray_sym_intern_runtime(r->f[k].name, (int64_t)strlen(r->f[k].name));
+        int64_t id  = tuple ? 0 : ray_sym_intern_runtime(r->f[k].name, (int64_t)strlen(r->f[k].name));
         ray_t*  v   = id < 0                 ? NULL
                     : src                    ? qd_cell_at(src, i)
                     : co == QD_CO_NONE       ? NULL
                                              : qd_co_absent(co, r->f[k].map.leaf);
-        if (!v || RAY_IS_ERR(v) || !keys || RAY_IS_ERR(keys) || !vals || RAY_IS_ERR(vals)) {
+        if (!v || RAY_IS_ERR(v) || (!tuple && (!keys || RAY_IS_ERR(keys))) || !vals || RAY_IS_ERR(vals)) {
             q_duckdb_drop(v);
             q_duckdb_drop(keys);
             q_duckdb_drop(vals);
             return q_err(QE_WSFULL);
         }
-        keys = ray_vec_append(keys, &id);
+        if (!tuple) keys = ray_vec_append(keys, &id);
         vals = ray_list_append(vals, v);
         ray_release(v);
     }
     ray_t* cv = q_list_collapse(vals);
     ray_release(vals);
+    if (tuple) return cv ? cv : q_err(QE_WSFULL);
     if (!keys || RAY_IS_ERR(keys) || !cv || RAY_IS_ERR(cv)) {
         q_duckdb_drop(keys);
         q_duckdb_drop(cv);
@@ -1421,7 +1575,8 @@ static ray_t* qd_empty_dict(void) {
  * a STRUCT row is the fields' dict, a UNION row the ONE field its tag names, a MAP row the window its entry
  * count cuts out of the two flat halves, and a NULL cell read no fields at all — so the field columns count LIVE
  * rows, never the row index.  `tm` is the leaf a RAW companion's absent marker takes its carrier from. */
-static ray_t* qd_rec_pass(qd_racc_t* acc, const qd_rec_t* r, bool uni, bool map, int co, const qd_tmap_t* tm) {
+static ray_t* qd_rec_pass(qd_racc_t* acc, const qd_rec_t* r, duck_type kind, int co, const qd_tmap_t* tm) {
+    bool uni = kind == QDUCK_TYPE_UNION, map = kind == QDUCK_TYPE_MAP, tuple = kind == QDUCK_TYPE_TUPLE;
     int64_t  nrows = q_count(acc->sel), off = 0;
     int64_t* live  = q_duckdb_cols(r->n, sizeof *live);
     ray_t*   out   = live ? ray_list_new(nrows ? nrows : 1) : NULL;
@@ -1431,7 +1586,7 @@ static ray_t* qd_rec_pass(qd_racc_t* acc, const qd_rec_t* r, bool uni, bool map,
         int64_t len = map && sel >= 0 ? *(int64_t*)ray_vec_get(acc->ent, rw) : 0;
         int64_t at  = sel < 0 ? 0 : live[uni ? sel : 0];
         ray_t*  cell;
-        if (sel < 0) cell = co == QD_CO_NONE ? qd_empty_dict() : qd_co_absent(co, tm);
+        if (sel < 0) cell = co != QD_CO_NONE ? qd_co_absent(co, tm) : tuple ? ray_list_new(1) : qd_empty_dict();
         else if (map) {   /* a MAP's companion is keyed by its own DATA keys — only the values can be NULL */
             ray_t* k = ray_vec_slice(acc->col[0], off, len);
             ray_t* v = ray_vec_slice(co == QD_CO_NONE ? acc->col[1] : acc->fcos[1].co[co].acc, off, len);
@@ -1439,7 +1594,7 @@ static ray_t* qd_rec_pass(qd_racc_t* acc, const qd_rec_t* r, bool uni, bool map,
                 { q_duckdb_drop(k); q_duckdb_drop(v); cell = q_err(QE_WSFULL); }
             else cell = ray_dict_new(k, v);   /* consumes both */
         }
-        else cell = qd_rec_cell(acc, r, uni ? sel : 0, uni ? 1 : r->n, at, co);
+        else cell = qd_rec_cell(acc, r, tuple, uni ? sel : 0, uni ? 1 : r->n, at, co);
         if (sel >= 0) live[uni ? sel : 0]++;
         off += len;
         out = qd_mirror_append(out, cell);   /* consumes cell either way */
@@ -1453,7 +1608,7 @@ static ray_t* qd_rec_pass(qd_racc_t* acc, const qd_rec_t* r, bool uni, bool map,
  * (ADR 12/16), each a like-keyed dict per live row and the kind's own atom where the cell is NULL. */
 static ray_t* qd_rec_build(int slot, qd_racc_t* acc, const qd_colmap_t* cm, bool flat, qd_cos_t* out) {
     const qd_rec_t* r = cm->rec;
-    bool uni = cm->leaf->dk_type == QDUCK_TYPE_UNION, map = cm->leaf->dk_type == QDUCK_TYPE_MAP;
+    bool map = cm->leaf->dk_type == QDUCK_TYPE_MAP;
     if (out) memset(out, 0, sizeof *out);
     for (int i = 0; i < r->n; i++) {
         if (!acc->sub[i]) continue;
@@ -1481,10 +1636,10 @@ static ray_t* qd_rec_build(int slot, qd_racc_t* acc, const qd_colmap_t* cm, bool
             out->co[k].need = out->co[k].need || acc->fcos[i].co[k].need;
         }
     }
-    ray_t* col = qd_rec_pass(acc, r, uni, map, QD_CO_NONE, NULL);
+    ray_t* col = qd_rec_pass(acc, r, cm->leaf->dk_type, QD_CO_NONE, NULL);
     for (int k = 0; out && col && !RAY_IS_ERR(col) && k < QD_NCOS; k++) {
         if (!out->co[k].want) continue;
-        ray_t* c = qd_rec_pass(acc, r, uni, map, k, tmof[k]);
+        ray_t* c = qd_rec_pass(acc, r, cm->leaf->dk_type, k, tmof[k]);
         if (!c || RAY_IS_ERR(c)) { ray_release(col); col = c ? c : q_err(QE_WSFULL); break; }
         out->co[k].acc = flat ? c : qd_mirror_pack(c);
     }
@@ -1537,8 +1692,8 @@ void q_duckdb_codec_refine(const char* cname, size_t n, const qd_desc_t* desc, i
  * envelope's schema table is built beside the data, here where the logical types are in hand; NULL drops it. */
 ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_t* desc,
                                       int64_t ndesc, ray_t** schema) {
-    int64_t ncols = (int64_t)QAPI.column_count(res);
-    bool query = QAPI.result_return_type(*res) == QDuckReturnQuery;
+    int64_t ncols = (int64_t)res->ncols;
+    bool query = res->rtype == QDuckReturnQuery;
     if (schema) *schema = NULL;
     if (ncols == 0) return RAY_NULL_OBJ;
 
@@ -1554,12 +1709,12 @@ ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_
     bool*        want  = rows ? (bool*)(rows + ncols) : NULL;   /* one flag a column, decided twice (see below) */
     ray_t*       err   = NULL;
     for (int64_t c = 0; !err && c < ncols; c++) {
-        const char* nm = QAPI.column_name(res, (duck_idx_t)c);
+        const char* nm = res->names[c];
         for (int64_t d = 0; !err && d < c; d++)   /* a q table keys its columns by name, so a second one is unreachable */
-            if (strcmp(QAPI.column_name(res, (duck_idx_t)d), nm) == 0)
+            if (strcmp(res->names[d], nm) == 0)
                 { q_duckdb_err_stash(slot, "two result columns named %s", nm); err = q_err(QE_DUCKDB); }
         if (err) break;
-        duck_logical_type lt = QAPI.column_logical_type(res, (duck_idx_t)c);
+        duck_logical_type lt = q_duckdb_result_col_type(res, (duck_idx_t)c);   /* borrowed */
         duck_type miss = 0;
         const char* why = NULL;
         bool ok = lt && qd_map_read_logical(lt, &cms[c], &miss, &why);
@@ -1571,7 +1726,6 @@ ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_
              * chunks are in, and the logical type is gone by then — so the row is spelled now and re-judged later */
             if (rows) err = q_duckdb_schema_desc_of(nm, lt, &cms[c], desc, ndesc, false, &rows[c], &want[c]);
         }
-        if (lt) QAPI.destroy_logical_type(&lt);
         if (!ok && !err) err = q_err(QE_DUCKDB);
     }
 
@@ -1589,16 +1743,16 @@ ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_
         if (e) err = e;
     }
 
-    duck_data_chunk chunk;
-    while (!err && (chunk = QAPI.fetch_chunk(*res)) != NULL) {
-        duck_idx_t n = QAPI.data_chunk_get_size(chunk);
+    for (duck_idx_t k = 0; !err && k < res->nchunks; k++) {
+        duck_idx_t n = 0;
+        QAPI.data_chunk_get_size(res->chunks[k], &n, NULL);
         for (int64_t c = 0; c < ncols && !err; c++) {
-            duck_vector dv = QAPI.data_chunk_get_vector(chunk, (duck_idx_t)c);
+            duck_vector dv = NULL;
+            if (QAPI.data_chunk_get_vector(res->chunks[k], (duck_idx_t)c, &dv, NULL) != QDuckSuccess) { err = q_err(QE_DUCKDB); break; }
             if (accs[c]) { err = qd_read_rec(slot, accs[c], &cms[c], dv, 0, n); continue; }
             cols[c] = qd_read_col(slot, cols[c], &cms[c], dv, 0, n, &cos[c]);
             if (!cols[c] || RAY_IS_ERR(cols[c])) { err = cols[c] ? cols[c] : q_err(QE_WSFULL); cols[c] = NULL; }
         }
-        QAPI.destroy_data_chunk(&chunk);
     }
     for (int64_t c = 0; c < ncols; c++) {
         if (!accs[c]) continue;
@@ -1639,7 +1793,7 @@ ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_
     if (!err) err = qd_store_companions(slot, res, ncols, cms, cols, cos, taken);
     ray_t* tbl = err ? NULL : ray_table_new(ncols);
     for (int64_t c = 0; c < ncols; c++) {
-        const char* nm = QAPI.column_name(res, (duck_idx_t)c);
+        const char* nm = res->names[c];
         if (taken[c]) continue;
         if (tbl && !RAY_IS_ERR(tbl)) tbl = ray_table_add_col(tbl, ray_sym_intern_runtime(nm, strlen(nm)), cols[c]);
         for (int i = 0; i < QD_NCOS && tbl && !RAY_IS_ERR(tbl); i++) {
@@ -1687,9 +1841,16 @@ ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_
     free(cms);
     return err ? err : tbl;
 }
+/* one row NULL by its mask bit; a record's children are invalidated by the caller (qd_rec_invalidate), which is
+ * DuckDB's nested-NULL invariant kept by hand */
 static void qd_set_invalid(duck_vector dv, duck_idx_t r) {
-    QAPI.vector_ensure_validity_writable(dv);
-    QAPI.validity_set_row_invalid(QAPI.vector_get_validity(dv), r);
+    uint64_t* validity = NULL;
+    if (QAPI.vector_flat_get_validity_mutable(dv, &validity, NULL) == QDuckSuccess) validity[r >> 6] &= ~(1ULL << (r & 63));
+}
+
+static void* qd_data_mut(duck_vector dv) {
+    void* data = NULL;
+    return QAPI.vector_get_data_mutable(dv, &data, NULL) == QDuckSuccess ? data : NULL;
 }
 
 /* the boundary DuckDB itself draws (probed 2026-09-14): overlongs, surrogates and above U+10FFFF are invalid */
@@ -1747,10 +1908,7 @@ static ray_t* qd_put_text(int slot, duck_vector dv, duck_idx_t r, ray_t* col, in
     int         k = qd_text_at(col, i, &p, &n);
     if (k == QD_TX_NULL) { qd_set_invalid(dv, r); return NULL; }
     if (k == QD_TX_NONE) return q_duckdb_fail(slot, "%s: cell is not text", tm->logical);
-    if (qd_utf8_valid((const unsigned char*)p, (size_t)n)) {
-        QAPI.vector_assign_string_element_len(dv, r, p, (duck_idx_t)n);
-        return NULL;
-    }
+    if (qd_utf8_valid((const unsigned char*)p, (size_t)n)) return qd_put_bytes(dv, r, p, (size_t)n);
     int64_t bad = 1;
     for (int64_t j = i + 1; j < q_count(col); j++)
         if (qd_text_at(col, j, &p, &n) == QD_TX_TEXT && !qd_utf8_valid((const unsigned char*)p, (size_t)n)) bad++;
@@ -1764,7 +1922,8 @@ static ray_t* qd_put_text(int slot, duck_vector dv, duck_idx_t r, ray_t* col, in
  * the raw bits go through as the value they were. */
 static ray_t* qd_write_leaf(int slot, duck_vector dv, ray_t* col, const qd_tmap_t* tm,
                             int64_t base, duck_idx_t dst, int64_t n, ray_t* keep, ray_t* mir) {
-    void* data = QAPI.vector_get_data(dv);
+    void* data = qd_data_mut(dv);
+    if (!data && tm->ray_type != RAY_NULL) return q_err(QE_DUCKDB);
     for (int64_t i = 0; i < n; i++) {
         int64_t src = base + i;
         duck_idx_t r = dst + (duck_idx_t)i;
@@ -1773,6 +1932,9 @@ static ray_t* qd_write_leaf(int slot, duck_vector dv, ray_t* col, const qd_tmap_
         bool boolco = keep && (keep->type == RAY_BOOL || keep->type == -RAY_BOOL);
         bool kp     = keep && (!boolco || qd_mirror_bit(keep, src));
         switch (tm->ray_type) {
+            case RAY_NULL:
+                qd_set_invalid(dv, r);
+                break;
             case RAY_BOOL:
                 ((uint8_t*)data)[r] = *(uint8_t*)ray_vec_get(col, src) ? 1 : 0;
                 break;
@@ -1868,8 +2030,8 @@ static ray_t* qd_write_leaf(int slot, duck_vector dv, ray_t* col, const qd_tmap_
                 if (!cell || cell->type != RAY_BYTE_ONLY)
                     return q_duckdb_fail(slot, "%s: cell is not a byte vector", tm->logical);
                 const char* bp = q_count(cell) ? (const char*)ray_vec_get(cell, 0) : "";
-                QAPI.vector_assign_string_element_len(dv, r, bp,
-                                                      (duck_idx_t) q_count(cell));
+                ray_t* e = qd_put_bytes(dv, r, bp, (size_t)q_count(cell));
+                if (e) return e;
                 break;
             }
             case RAY_DATE: {     /* a temporal's companion is raw, consumed by the cast leg: 0N here is NULL */
@@ -1881,7 +2043,7 @@ static ray_t* qd_write_leaf(int slot, duck_vector dv, ray_t* col, const qd_tmap_
                 ((int32_t*)data)[r] = v + QD_EPOCH_DAYS;
                 break;
             }
-            case RAY_TIME: {     /* ms -> µs; a declared TIME is the cast leg's business, never the appender's */
+            case RAY_TIME: {     /* ms -> µs; a declared TIME is the cast leg's business, never the chunk writer's */
                 int32_t v = *(int32_t*)ray_vec_get(col, src);
                 if (v == NULL_I32) { qd_set_invalid(dv, r); break; }
                 qd_put_interval(data, r, (int64_t)v * 1000);
@@ -1911,11 +2073,11 @@ static ray_t* qd_write_leaf(int slot, duck_vector dv, ray_t* col, const qd_tmap_
     return NULL;
 }
 
-/* One atom (or a 10h string) as the duckdb_value the appender stores for a one-row column of its type: the cell
+/* One atom (or a 10h string) as the duckdb value the write path stores for a one-row column of its type: the cell
  * codec above writes its canonical leaf into a one-row chunk, and the value is lifted out of that physical cell — so
  * the parameter mapping is the column mapping and has no table of its own.  A row the codec invalidated is a NULL
- * OF THAT COLUMN'S TYPE (owner 2026-10-14: one conversion everywhere), made through the one LIST the value API
- * casts into.  *out is owned, never NULL on success; anything but an atom of abs type 1..19 or a string is 'type. */
+ * OF THAT COLUMN'S TYPE (owner 2026-10-14: one conversion everywhere).  *out is owned, never NULL on success;
+ * anything but an atom of abs type 1..19 or a string is 'type. */
 static ray_t* qd_atom_value(int slot, ray_t* v, duck_value* out) {
     *out = NULL;
     bool str = v->type == RAY_CHARV;
@@ -1925,54 +2087,64 @@ static ray_t* qd_atom_value(int slot, ray_t* v, duck_value* out) {
     if (!tm) return q_err(QE_TYPE);
     ray_t* col = ray_enlist_fn(&v, 1);
     if (!col || RAY_IS_ERR(col)) return col ? col : q_err(QE_WSFULL);
-    duck_logical_type lt = QAPI.create_logical_type(tm->dk_type);
-    duck_data_chunk   ch = QAPI.create_data_chunk(&lt, 1);
-    duck_vector       dv = QAPI.data_chunk_get_vector(ch, 0);
-    ray_t* e = qd_write_leaf(slot, dv, col, tm, 0, 0, 1, NULL, NULL);
+    duck_connection   con = q_duckdb_con(slot);
+    duck_logical_type lt  = q_duckdb_type_make(slot, tm->dk_type);
+    duck_data_chunk   ch  = NULL;
+    duck_vector       dv  = NULL;
+    uint64_t*         validity = NULL;
+    ray_t* e = lt && QAPI.data_chunk_create_with_connection(con, &lt, 1, &ch, NULL) == QDuckSuccess &&
+               QAPI.data_chunk_get_vector(ch, 0, &dv, NULL) == QDuckSuccess &&
+               QAPI.vector_set_size(dv, 1, NULL) == QDuckSuccess
+                   ? qd_write_leaf(slot, dv, col, tm, 0, 0, 1, NULL, NULL)
+                   : q_err(QE_DUCKDB);
     ray_release(col);
-    if (!e && !q_duckdb_validity_ok(QAPI.vector_get_validity(dv), 0)) {
-        duck_value nul = QAPI.create_null_value();
-        duck_value box = nul ? QAPI.create_list_value(lt, &nul, 1) : NULL;
-        *out = box ? QAPI.get_list_child(box, 0) : NULL;
-        if (box) QAPI.destroy_value(&box);
-        if (nul) QAPI.destroy_value(&nul);
-        if (!*out) e = q_err(QE_WSFULL);
+    if (!e && QAPI.vector_flat_get_validity_mutable(dv, &validity, NULL) != QDuckSuccess) e = q_err(QE_DUCKDB);
+    if (!e && !q_duckdb_validity_ok(validity, 0)) {
+        if (QAPI.value_create_null(lt, out, NULL) != QDuckSuccess) e = q_err(QE_WSFULL);
     } else if (!e) {
-        const void* d = QAPI.vector_get_data(dv);
+        const void* d = qd_data_mut(dv);
+        duck_state  st;
         switch (tm->dk_type) {
-            case QDUCK_TYPE_BOOLEAN:      *out = QAPI.create_bool(*(const uint8_t*)d != 0); break;
-            case QDUCK_TYPE_UTINYINT:     *out = QAPI.create_uint8(*(const uint8_t*)d); break;
-            case QDUCK_TYPE_SMALLINT:     *out = QAPI.create_int16(*(const int16_t*)d); break;
-            case QDUCK_TYPE_INTEGER:      *out = QAPI.create_int32(*(const int32_t*)d); break;
-            case QDUCK_TYPE_BIGINT:       *out = QAPI.create_int64(*(const int64_t*)d); break;
-            case QDUCK_TYPE_FLOAT:        *out = QAPI.create_float(*(const float*)d); break;
-            case QDUCK_TYPE_DOUBLE:       *out = QAPI.create_double(*(const double*)d); break;
-            case QDUCK_TYPE_VARCHAR:      *out = QAPI.create_varchar_length(q_duckdb_string_data(d), q_duckdb_string_len(d)); break;
-            case QDUCK_TYPE_DATE:         *out = QAPI.create_date((duck_date){ *(const int32_t*)d }); break;
-            case QDUCK_TYPE_INTERVAL:     *out = QAPI.create_interval(*(const duck_interval*)d); break;
-            case QDUCK_TYPE_TIMESTAMP:    *out = QAPI.create_timestamp((duck_timestamp){ *(const int64_t*)d }); break;
-            case QDUCK_TYPE_TIMESTAMP_NS: *out = QAPI.create_timestamp_ns((duck_timestamp_ns){ *(const int64_t*)d }); break;
-            case QDUCK_TYPE_UUID: {       /* the value API takes the RFC words; the vector keeps the sign-flipped hugeint */
-                const duck_hugeint* h = d;
-                *out = QAPI.create_uuid((duck_uhugeint){ h->lower, (uint64_t)h->upper ^ (1ULL << 63) });
+            case QDUCK_TYPE_BOOLEAN:      st = QAPI.value_create_bool(con, *(const uint8_t*)d != 0, out, NULL); break;
+            case QDUCK_TYPE_UTINYINT:     st = QAPI.value_create_utinyint(con, *(const uint8_t*)d, out, NULL); break;
+            case QDUCK_TYPE_SMALLINT:     st = QAPI.value_create_smallint(con, *(const int16_t*)d, out, NULL); break;
+            case QDUCK_TYPE_INTEGER:      st = QAPI.value_create_int(con, *(const int32_t*)d, out, NULL); break;
+            case QDUCK_TYPE_BIGINT:       st = QAPI.value_create_bigint(con, *(const int64_t*)d, out, NULL); break;
+            case QDUCK_TYPE_FLOAT:        st = QAPI.value_create_float(con, *(const float*)d, out, NULL); break;
+            case QDUCK_TYPE_DOUBLE:       st = QAPI.value_create_double(con, *(const double*)d, out, NULL); break;
+            case QDUCK_TYPE_VARCHAR: {
+                duck_str s = { q_duckdb_string_data(d), q_duckdb_string_len(d) };
+                st = QAPI.value_create_varchar(con, &s, out, NULL);
                 break;
             }
-            default: e = q_err(QE_TYPE);
+            case QDUCK_TYPE_DATE:         st = QAPI.value_create_date(con, *(const int32_t*)d, out, NULL); break;
+            case QDUCK_TYPE_INTERVAL:     st = QAPI.value_create_interval(con, (const duck_interval*)d, out, NULL); break;
+            case QDUCK_TYPE_TIMESTAMP:    st = QAPI.value_create_timestamp(con, *(const int64_t*)d, out, NULL); break;
+            case QDUCK_TYPE_TIMESTAMP_NS: st = QAPI.value_create_timestamp_ns(con, *(const int64_t*)d, out, NULL); break;
+            case QDUCK_TYPE_UUID:         st = QAPI.value_create_uuid(con, (const duck_hugeint*)d, out, NULL); break;   /* the storage form, as the vector holds it */
+            default:                      st = -1; e = q_err(QE_TYPE);
         }
-        if (!e && !*out) e = q_err(QE_WSFULL);
+        if (!e && st != QDuckSuccess) e = q_err(QE_WSFULL);
     }
-    QAPI.destroy_data_chunk(&ch);
-    QAPI.destroy_logical_type(&lt);
+    if (ch) QAPI.data_chunk_destroy(&ch);
+    if (lt) QAPI.logical_type_destroy(&lt);
     return e;
 }
 
 /* v as a value of the cell map (leaf, depth): depth 0 is the atom path; above it every element is one level down,
  * wrapped as a LIST of the codec's child type — the cast the value API applies types each untyped NULL.  A 0n where
- * a list is due is the NULL element the writer sets.  Every child dies here, on every path. */
+ * a list is due is the NULL element of that list type.  Every child dies here, on every path. */
 static ray_t* qd_list_value(int slot, ray_t* v, const qd_tmap_t* leaf, int depth, duck_value* out) {
     *out = NULL;
     if (depth == 0) return qd_atom_value(slot, v, out);
-    if (qd_cell_is_0n(v)) return (*out = QAPI.create_null_value()) ? NULL : q_err(QE_WSFULL);
+    const qd_colmap_t child = { leaf, NULL, depth - 1, false };
+    if (qd_cell_is_0n(v)) {
+        const qd_colmap_t self = { leaf, NULL, depth, false };
+        duck_logical_type lt = qd_make_logical(slot, &self);
+        bool ok = lt && QAPI.value_create_null(lt, out, NULL) == QDuckSuccess;
+        if (lt) QAPI.logical_type_destroy(&lt);
+        return ok ? NULL : q_err(QE_WSFULL);
+    }
     int64_t     n    = q_count(v);
     duck_value* kids = q_duckdb_cols(n, sizeof *kids);
     if (!kids) return q_err(QE_WSFULL);
@@ -1982,11 +2154,11 @@ static ray_t* qd_list_value(int slot, ray_t* v, const qd_tmap_t* leaf, int depth
         e = !el ? q_err(QE_WSFULL) : RAY_IS_ERR(el) ? el : qd_list_value(slot, el, leaf, depth - 1, &kids[i]);
         if (el && !RAY_IS_ERR(el)) ray_release(el);
     }
-    const qd_colmap_t child = { leaf, NULL, depth - 1, false };
-    duck_logical_type ct = e ? NULL : qd_make_logical(&child);
-    if (!e && !(*out = ct ? QAPI.create_list_value(ct, kids, (duck_idx_t)n) : NULL)) e = q_err(QE_WSFULL);
-    if (ct) QAPI.destroy_logical_type(&ct);
-    for (int64_t i = 0; i < n; i++) if (kids[i]) QAPI.destroy_value(&kids[i]);
+    duck_logical_type ct = e ? NULL : qd_make_logical(slot, &child);
+    if (!e && !(ct && QAPI.value_create_list(q_duckdb_con(slot), ct, kids, (duck_idx_t)n, out, NULL) == QDuckSuccess))
+        e = q_err(QE_WSFULL);
+    if (ct) QAPI.logical_type_destroy(&ct);
+    for (int64_t i = 0; i < n; i++) if (kids[i]) QAPI.value_destroy(&kids[i]);
     free(kids);
     return e;
 }
@@ -2035,7 +2207,7 @@ static ray_t* qd_write_data(int slot, duck_vector dv, ray_t* col, const qd_colma
 
 static ray_t* qd_write_nested(int slot, qd_level_t* lv, const qd_colmap_t* cm, int level,
                               ray_t* col, int64_t base, duck_idx_t dst, int64_t n, ray_t* mir, ray_t* keep) {
-    duck_list_entry* ent  = (duck_list_entry*)QAPI.vector_get_data(lv[level].vec);
+    duck_list_entry* ent  = qd_data_mut(lv[level].vec);
     const qd_colmap_t bot = { cm->leaf, cm->rec, 0, false };   /* what a level-1 cell holds: a leaf, or a record */
     if (!ent) return q_err(QE_DUCKDB);
     for (int64_t i = 0; i < n; i++) {
@@ -2080,13 +2252,12 @@ static ray_t* qd_write_data(int slot, duck_vector dv, ray_t* col, const qd_colma
     lv[cm->depth].vec  = dv;
     lv[cm->depth].used = 0;
     for (int l = cm->depth - 1; l >= 0; l--) {
-        duck_idx_t have = QAPI.list_vector_get_size(lv[l + 1].vec);
-        if (QAPI.list_vector_reserve(lv[l + 1].vec, have + (duck_idx_t)count[l]) != QDuckSuccess ||
-            QAPI.list_vector_set_size(lv[l + 1].vec, have + (duck_idx_t)count[l]) != QDuckSuccess)
+        duck_idx_t have = 0;
+        lv[l].vec = qd_child(lv[l + 1].vec, 0);
+        if (!lv[l].vec || QAPI.vector_get_size(lv[l].vec, &have, NULL) != QDuckSuccess ||
+            QAPI.vector_set_size(lv[l].vec, have + (duck_idx_t)count[l], NULL) != QDuckSuccess)
             return q_err(QE_DUCKDB);
-        lv[l].vec  = QAPI.list_vector_get_child(lv[l + 1].vec);
         lv[l].used = have;
-        if (!lv[l].vec) return q_err(QE_DUCKDB);
     }
     return qd_write_nested(slot, lv, cm, cm->depth, col, base, dst, n, mir, keep);
 }
@@ -2101,76 +2272,45 @@ static ray_t* qd_write_col(int slot, duck_vector dv, ray_t* col, const qd_colmap
     return qd_write_data(slot, dv, col, cm, base, dst, n, mirror ? keep : mask, mirror ? mask : NULL);
 }
 
-/* Append a q table through the appender in vector-size chunks (cms[] pre-validated; masks[] and keeps[] = the
- * consumed companions, the shape mirror and a nested column's element companion, NULL where a column has neither;
- * catalog NULL = the default, "temp" = staging). */
-static ray_t* append_table_rows(int slot, const char* catalog, const char* schema, const char* table, ray_t* tbl,
-                                const qd_colmap_t* cms, ray_t* const* masks, ray_t* const* keeps) {
+#define QD_CHUNK_ROWS 2048   /* STANDARD_VECTOR_SIZE: what a fresh chunk's vectors hold */
+
+/* The rows of a q table as ONE column data collection, filled chunk by chunk (cms[] pre-validated; masks[] and
+ * keeps[] = the consumed companions, the shape mirror and a nested column's element companion, NULL where a column
+ * has neither).  A fresh chunk per batch: the collection copies, and a chunk's string arena only grows. */
+ray_t* q_duckdb_codec_collect(int slot, ray_t* tbl, const qd_colmap_t* cms, ray_t* const* masks, ray_t* const* keeps,
+                              duck_collection* out) {
     int64_t ncols = ray_table_ncols(tbl);
     int64_t nrows = q_count(tbl);
-    duck_appender app = NULL;
-    if (QAPI.appender_create_ext(q_duckdb_con(slot), *catalog ? catalog : NULL, schema, table, &app) != QDuckSuccess) {
-        q_duckdb_err_stash(slot, "%s", QD_TEXT(QAPI.appender_error(app)));
-        QAPI.appender_destroy(&app);
-        return q_err(QE_DUCKDB);
-    }
-
+    duck_connection    con    = q_duckdb_con(slot);
     duck_logical_type* ltypes = q_duckdb_cols(ncols, sizeof *ltypes);
-    if (!ltypes) { QAPI.appender_destroy(&app); return q_err(QE_WSFULL); }
+    duck_append_state  state  = NULL;
+    *out = NULL;
+    if (!ltypes) return q_err(QE_WSFULL);
     ray_t* err = NULL;
     for (int64_t c = 0; c < ncols; c++)
-        if (!(ltypes[c] = qd_make_logical(&cms[c]))) err = q_err(QE_WSFULL);
-    duck_data_chunk chunk = err ? NULL : QAPI.create_data_chunk(ltypes, (duck_idx_t)ncols);
-    if (!err && !chunk) err = q_err(QE_DUCKDB);
-
-    int64_t vecsz = (int64_t)QAPI.vector_size();
-    if (vecsz <= 0) vecsz = 2048;
-    for (int64_t base = 0; base < nrows && !err; base += vecsz) {
-        int64_t n = nrows - base < vecsz ? nrows - base : vecsz;
-        QAPI.data_chunk_reset(chunk);
+        if (!(ltypes[c] = qd_make_logical(slot, &cms[c]))) err = q_err(QE_WSFULL);
+    if (!err && (QAPI.column_data_collection_create_with_connection(con, ltypes, (duck_idx_t)ncols, out, NULL) != QDuckSuccess ||
+                 QAPI.column_data_collection_append_state_create(*out, &state, NULL) != QDuckSuccess))
+        err = q_err(QE_DUCKDB);
+    for (int64_t base = 0; base < nrows && !err; base += QD_CHUNK_ROWS) {
+        int64_t n = nrows - base < QD_CHUNK_ROWS ? nrows - base : QD_CHUNK_ROWS;
+        duck_data_chunk chunk = NULL;
+        duck_err        e     = NULL;
+        if (QAPI.data_chunk_create_with_connection(con, ltypes, (duck_idx_t)ncols, &chunk, NULL) != QDuckSuccess) { err = q_err(QE_DUCKDB); break; }
         for (int64_t c = 0; c < ncols && !err; c++) {
             ray_t* col = ray_table_get_col_idx(tbl, c);   /* borrowed */
-            err = qd_write_col(slot, QAPI.data_chunk_get_vector(chunk, (duck_idx_t)c),
-                               col, &cms[c], base, 0, n, masks[c], keeps[c]);
+            duck_vector dv = NULL;
+            if (QAPI.data_chunk_get_vector(chunk, (duck_idx_t)c, &dv, NULL) != QDuckSuccess) { err = q_err(QE_DUCKDB); break; }
+            err = qd_write_col(slot, dv, col, &cms[c], base, 0, n, masks[c], keeps[c]);
+            if (!err && QAPI.vector_set_size(dv, (duck_idx_t)n, NULL) != QDuckSuccess) err = q_err(QE_DUCKDB);
         }
-        if (!err) {
-            QAPI.data_chunk_set_size(chunk, (duck_idx_t)n);
-            if (QAPI.append_data_chunk(app, chunk) != QDuckSuccess) {
-                q_duckdb_err_stash(slot, "%s", QD_TEXT(QAPI.appender_error(app)));
-                err = q_err(QE_DUCKDB);
-            }
-        }
+        if (!err && QAPI.column_data_collection_append(*out, state, chunk, &e) != QDuckSuccess) err = q_duckdb_fail_err(slot, &e);
+        QAPI.data_chunk_destroy(&chunk);
     }
-
-    if (chunk) QAPI.destroy_data_chunk(&chunk);
-    for (int64_t c = 0; c < ncols; c++) if (ltypes[c]) QAPI.destroy_logical_type(&ltypes[c]);
+    if (state) QAPI.column_data_collection_append_state_destroy(&state);
+    for (int64_t c = 0; c < ncols; c++) if (ltypes[c]) QAPI.logical_type_destroy(&ltypes[c]);
     free(ltypes);
-
-    /* explicit flush first: destroy frees the error text (codex round 3) */
-    if (!err && QAPI.appender_flush(app) != QDuckSuccess) {
-        q_duckdb_err_stash(slot, "%s", QD_TEXT(QAPI.appender_error(app)));
-        err = q_err(QE_DUCKDB);
-    }
-    if (QAPI.appender_destroy(&app) != QDuckSuccess && !err)
-        err = q_err(QE_DUCKDB);
-    return err;
-}
-
-/* The appender moves the data without issuing SQL, so it writes its own log line — a `/` comment, which is not a
- * statement in any dialect, so nothing can mistake it for one and the timeline has no hole where the write was. */
-ray_t* q_duckdb_codec_append_table(int slot, const qd_name_t* nm, bool temp, ray_t* tbl,
-                                   const qd_colmap_t* cms, ray_t* const* masks, ray_t* const* keeps) {
-    int64_t t0 = q_dotz_now_ns(0);
-    /* the appender takes the parts the name grammar found, never the text: catalog ("" = the default), the schema
-     * the name resolved in, then the table */
-    const char* catalog = temp ? "temp" : nm->n == 3 ? nm->part[0] : "";
-    const char* schema  = temp || !*nm->schema ? "main" : nm->schema;
-    ray_t* err = append_table_rows(slot, catalog, schema, nm->part[nm->n - 1], tbl, cms, masks, keeps);
-    char   what[1024];
-    snprintf(what, sizeof what, "/ appender %s%s%s.%s (%lld rows)", catalog, *catalog ? "." : "", schema,
-             nm->part[nm->n - 1], (long long) q_count(tbl));
-    q_duckdb_stmt_note(slot, what, t0, !err, q_count(tbl),
-                       err ? q_duckdb_err_text(slot) : NULL);
+    if (err && *out) QAPI.column_data_collection_destroy(out);
     return err;
 }
 
@@ -2197,9 +2337,8 @@ ray_t* q_duckdb_codec_check_table(int slot, ray_t* tbl, qd_colmap_t* cms) {
 /* the declaration one level down (owned): kind < 0 = a LIST/ARRAY's element, else record `kind`'s child i */
 static duck_logical_type qd_lt_under(duck_logical_type lt, int kind, int i) {
     if (!lt) return NULL;
-    duck_type id = QAPI.get_type_id(lt);
-    if (kind < 0) return id == QDUCK_TYPE_LIST ? QAPI.list_type_child_type(lt)
-                       : id == QDUCK_TYPE_ARRAY ? QAPI.array_type_child_type(lt) : NULL;
+    duck_type id = q_duckdb_type_id(lt);
+    if (kind < 0) return id == QDUCK_TYPE_LIST || id == QDUCK_TYPE_ARRAY ? q_duckdb_type_param(lt, 0, NULL) : NULL;
     return id == (duck_type)kind ? q_duckdb_codec_rec_child(lt, id, i, NULL) : NULL;
 }
 
@@ -2210,7 +2349,7 @@ static duck_logical_type qd_lt_under(duck_logical_type lt, int kind, int i) {
 /* ONE spelling for every field a record cannot write back: a hi/raw/tzoff companion (2026-09-13) or a remap (2026-09-15) */
 static const char QD_NO_CAST_LEG[] = "a record's fields rebuild through no cast leg yet";
 static duck_type qd_legless_id(duck_logical_type t) {
-    duck_type id = t ? QAPI.get_type_id(t) : 0;
+    duck_type id = q_duckdb_type_id(t);
     return id == QDUCK_TYPE_BIT || id == QDUCK_TYPE_TIME_NS ? id : 0;
 }
 static bool qd_field_refined(const qd_colmap_t* cm, duck_logical_type lt, char* path, size_t cap, const char** type,
@@ -2219,14 +2358,14 @@ static bool qd_field_refined(const qd_colmap_t* cm, duck_logical_type lt, char* 
     duck_type         leg = qd_legless_id(lt);   /* a BIT sits where the q side sees one LIST level, so every level is judged */
     for (int d = 0; d < cm->depth && (d == 0 ? lt : at); d++) {
         duck_logical_type next = qd_lt_under(d ? at : lt, -1, 0);
-        if (at) QAPI.destroy_logical_type(&at);
+        if (at) QAPI.logical_type_destroy(&at);
         at = next;
         if (!leg) leg = qd_legless_id(at);
     }
     duck_logical_type here = cm->depth ? at : lt;
     bool refined = false;
     if (!cm->rec) {
-        const qd_tmap_t* own = here ? qd_map_read(QAPI.get_type_id(here)) : NULL;
+        const qd_tmap_t* own = here ? qd_map_read(q_duckdb_type_id(here)) : NULL;
         *legless = leg != 0;
         refined  = *legless || (!cm->leaf->read_canon && !(own && own->ray_type == cm->leaf->ray_type));
         if (refined) *type = *legless ? q_duckdb_type_name(leg) : cm->leaf->logical;
@@ -2239,11 +2378,11 @@ static bool qd_field_refined(const qd_colmap_t* cm, duck_logical_type lt, char* 
             snprintf(path + n, cap - n, "%s%s", n ? "." : "", cm->rec->f[i].name);
             duck_logical_type ft = qd_lt_under(here, (int)cm->leaf->dk_type, i);
             refined = qd_field_refined(f, ft, path, cap, type, legless);
-            if (ft) QAPI.destroy_logical_type(&ft);
+            if (ft) QAPI.logical_type_destroy(&ft);
         }
         if (!refined) path[n] = '\0';
     }
-    if (at) QAPI.destroy_logical_type(&at);
+    if (at) QAPI.logical_type_destroy(&at);
     return refined;
 }
 
@@ -2260,7 +2399,7 @@ ray_t* q_duckdb_codec_check_fields(int slot, ray_t* tbl, int64_t c, duck_logical
                              legless ? QD_NO_CAST_LEG : "no q refinement inside a record");
 }
 
-/* THE enum site, at the write door's entry (2026-09-14): decayed before the schema check, the sidecar, the appender
+/* THE enum site, at the write door's entry (2026-09-14): decayed before the schema check, the sidecar, the chunk writer
  * or rekey can see a 20h column, an enum is STORED as its symbols (ADR 8) and cannot go stale when its domain changes */
 ray_t* q_duckdb_codec_decay_enums(int slot, ray_t* tbl, qd_enum_t* en) {
     int64_t ncols = ray_table_ncols(tbl);
@@ -2308,7 +2447,7 @@ static bool qd_co_admissible(const qd_colmap_t* pcm, int kind) {
             qd_zoned(&(const qd_colmap_t){ &QD_TYPES[i], NULL, 0, false })) return true;
     if (kind == QD_CO_TZOFF) return false;
     if (kind == QD_CO_ISNULL) return qd_cm_nullless(pcm);
-    /* Depth is no bar to any of them: an element companion is the appender's to consume and the appender reaches
+    /* Depth is no bar to any of them: an element companion is the chunk writer's to consume and it reaches
      * every depth, while hi and raw are rebuilt by a CAST LEG, which reaches every depth too now that the legs
      * lift elementwise (ADR 21).  What the companion has to be is its parent's SHAPE, and qd_mirror_fits_col is
      * what judges that. */
@@ -2318,6 +2457,7 @@ static bool qd_co_admissible(const qd_colmap_t* pcm, int kind) {
 }
 
 static int64_t qd_sym_id(ray_t* v, int64_t i);
+static bool qd_tuple_cell(ray_t* cell);
 
 /* one row of any column shape, OWNED: a table hands back its row dict, a list its cell, a vector its atom */
 static ray_t* qd_row_at(ray_t* v, int64_t i) {
@@ -2358,7 +2498,20 @@ static bool qd_mirror_fits(const qd_colmap_t* cm, ray_t* v, ray_t* m) {
         return true;
     }
     /* a flat leaf's row mirror is the atom handled above; only a record row goes deeper */
-    if (!q_duckdb_codec_is_rec(cm->leaf) || v->type != RAY_DICT || m->type != RAY_DICT) return false;
+    if (!q_duckdb_codec_is_rec(cm->leaf)) return false;
+    if (cm->leaf->dk_type == QDUCK_TYPE_TUPLE) {   /* positional: a flag per member, in the row's own order */
+        if (!qd_tuple_cell(v) || (m->type != RAY_LIST && m->type != RAY_BOOL) || q_count(m) != q_count(v)) return false;
+        for (int64_t j = 0; cm->rec && j < q_count(v) && j < cm->rec->n; j++) {
+            ray_t* vv = qd_row_at(v, j);
+            ray_t* mv = qd_row_at(m, j);
+            bool   ok = qd_mirror_fits(&cm->rec->f[j].map, vv, mv);
+            q_duckdb_drop(vv);
+            q_duckdb_drop(mv);
+            if (!ok) return false;
+        }
+        return true;
+    }
+    if (v->type != RAY_DICT || m->type != RAY_DICT) return false;
     ray_t* vk = ray_dict_keys(v);
     if (!q_match_rec(vk, ray_dict_keys(m))) return false;
     if (!cm->rec) return true;   /* the fields are not derivable (a MAP's keys vary): the keys ARE the check */
@@ -2463,13 +2616,13 @@ static ray_t* qd_mask_or(ray_t* a, ray_t* b) {
 static ray_t* qd_store_companions(int slot, duck_result* res, int64_t ncols, const qd_colmap_t* cms, ray_t** cols,
                                   qd_cos_t* cos, bool* taken) {
     for (int64_t d = 0; d < ncols; d++) {
-        const char* nm = QAPI.column_name(res, (duck_idx_t)d);
+        const char* nm = res->names[d];
         size_t n = strlen(nm), sl = 0;
         int kind = qd_companion_kind(nm, n, &sl);
         if (kind == QD_CO_NONE) continue;
         int64_t c = -1;
         for (int64_t p = 0; p < ncols && c < 0; p++) {
-            const char* pn = QAPI.column_name(res, (duck_idx_t)p);
+            const char* pn = res->names[p];
             if (p != d && strlen(pn) == n - sl && memcmp(pn, nm, n - sl) == 0) c = p;
         }
         if (c < 0) continue;   /* an orphan is a column of its own; the write door refuses it by name */
@@ -2540,7 +2693,7 @@ static ray_t* qd_strip(int slot, ray_t* tbl, ray_t** masks, ray_t** offs, ray_t*
         bool mapped = pcol && qd_map_write(slot, pcol, 0, &pcm, NULL), fits = mapped && qd_co_admissible(&pcm, kind);
         bool text = mapped && kind == QD_CO_RAW && q_duckdb_codec_raw_is_text(pcm.leaf->ray_type);
         /* ADR 12/16: a record's fields grow their own companions and the READ ships every one of them, but only
-         * what the APPENDER consumes travels back — hi, raw and a zone offset are rebuilt by a CAST LEG, and no
+         * what the CHUNK WRITER consumes travels back — hi, raw and a zone offset are rebuilt by a CAST LEG, and no
          * leg reaches inside a record yet */
         bool prec    = mapped && q_duckdb_codec_is_rec(pcm.leaf);   /* a UNION's and a MAP's fields are deferred */
         bool legless = prec && kind >= QD_CO_RAW;
@@ -2647,7 +2800,7 @@ static ray_t* qd_spread_atom(ray_t* a, int64_t n) {
     return out;
 }
 
-/* ADR 16: an ATOM answers for the whole of what it stands beside — but the appender writes a LIST cell for a LIST
+/* ADR 16: an ATOM answers for the whole of what it stands beside — but the chunk writer writes a LIST cell for a LIST
  * cell, so a companion STAGED at its parent's shape takes that atom spread over the cell it answered for.  A
  * companion already carrying the shape is handed straight back. */
 static ray_t* qd_co_spread(ray_t* co, ray_t* val, int depth) {
@@ -2799,7 +2952,65 @@ static ray_t* qd_rec_collapse(ray_t* box) {
 /* one field of the explode: its name, the column being built for it, and the fill an absent row takes */
 typedef struct { int64_t want; ray_t* box; ray_t* fill; } qd_slot_t;
 
-static ray_t* qd_rec_explode(int slot, ray_t* col, bool uni, bool fielded, ray_t** tag) {
+/* a TUPLE's cell: the list its row is, or the vector q collapsed that list to; a string is text, not a row */
+static bool qd_tuple_cell(ray_t* cell) {
+    return cell && cell->type >= RAY_LIST && cell->type <= RAY_TIME && cell->type != RAY_CHARV;
+}
+
+/* The TUPLE explode: field k of every row is position k of its cell, the width fixed by the first live cell and
+ * held by every other; an EMPTY cell is a NULL record, filled from the first live cell as a dict's absent field
+ * is.  The store's columns are named by position, which nothing reads back: a TUPLE's fields have no names. */
+static ray_t* qd_tuple_explode(int slot, ray_t* col, bool fielded, ray_t** tag) {
+    int64_t n = q_count(col), nw = 0;
+    ray_t*  tv = ray_vec_new(RAY_I16, n ? n : 1);
+    ray_t*  e  = tv && !RAY_IS_ERR(tv) ? NULL : q_err(QE_WSFULL);
+    ray_t*  first = NULL;
+    for (int64_t rw = 0; !e && rw < n; rw++) {
+        ray_t* cell = ray_list_get(col, rw);
+        if (!qd_tuple_cell(cell)) { e = qd_rec_fail(slot, "a cell is not a list"); break; }
+        int64_t kn = q_count(cell);
+        if (kn && !first) { first = cell; nw = kn; }
+        if (kn && kn != nw) e = qd_rec_fail(slot, "the cells do not agree on their fields");
+    }
+    if (!e && !first && !fielded) e = qd_rec_fail(slot, "an all-empty record column declares no fields");
+    ray_t** box = e ? NULL : q_duckdb_cols(nw, sizeof *box);
+    if (!e && !box) e = q_err(QE_WSFULL);
+    for (int64_t k = 0; !e && k < nw; k++)
+        if (!(box[k] = ray_list_new(n ? n : 1)) || RAY_IS_ERR(box[k])) e = q_err(QE_WSFULL);
+    for (int64_t rw = 0; !e && rw < n; rw++) {
+        ray_t*  cell = ray_list_get(col, rw);
+        int16_t live = q_count(cell) ? 0 : -1;
+        for (int64_t k = 0; !e && k < nw; k++) {
+            ray_t* v = qd_cell_at(live < 0 ? first : cell, k);
+            if (!v || RAY_IS_ERR(v)) { e = v ? v : q_err(QE_WSFULL); break; }
+            box[k] = ray_list_append(box[k], v);
+            ray_release(v);
+            if (!box[k] || RAY_IS_ERR(box[k])) e = box[k] ? box[k] : q_err(QE_WSFULL);
+        }
+        if (!e) { tv = ray_vec_append(tv, &live); if (!tv || RAY_IS_ERR(tv)) e = tv ? tv : q_err(QE_WSFULL); }
+    }
+    ray_t* tbl = e ? NULL : ray_table_new(nw ? nw : 1);
+    if (!e && !tbl) e = q_err(QE_WSFULL);
+    for (int64_t k = 0; !e && k < nw; k++) {
+        char   nm[24];
+        int    nl = snprintf(nm, sizeof nm, "%lld", (long long)k + 1);
+        ray_t* cv = qd_rec_collapse(box[k]);
+        if (!cv || RAY_IS_ERR(cv)) { e = cv ? cv : q_err(QE_WSFULL); break; }
+        tbl = ray_table_add_col(tbl, ray_sym_intern_runtime(nm, nl), cv);   /* retains */
+        ray_release(cv);
+        if (!tbl || RAY_IS_ERR(tbl)) e = tbl ? tbl : q_err(QE_WSFULL);
+    }
+    for (int64_t k = 0; box && k < nw; k++) q_duckdb_drop(box[k]);
+    free(box);
+    if (!e) { if (tag) *tag = tv; else ray_release(tv); return tbl; }
+    q_duckdb_drop(tv);
+    if (tbl != e) q_duckdb_drop(tbl);
+    return e;
+}
+
+static ray_t* qd_rec_explode(int slot, ray_t* col, duck_type kind, bool fielded, ray_t** tag) {
+    if (kind == QDUCK_TYPE_TUPLE) return qd_tuple_explode(slot, col, fielded, tag);
+    bool       uni = kind == QDUCK_TYPE_UNION;
     int64_t    n  = q_count(col);
     qd_slot_t* sl = NULL;
     int        nw = 0, cap = 0;
@@ -2896,11 +3107,11 @@ static ray_t* qd_rec_explode(int slot, ray_t* col, bool uni, bool fielded, ray_t
 /* everything a dict-celled column IS: the store columns (owned), their maps (owned, in ONE block *cms sized to
  * the exploded table — qd_rec_close) and, asked, the live field of each row.  ONE explode serves the map and the
  * write.  A field wears NO companion of its own (ADR 16): the mirror is parallel, so every key here is data. */
-static ray_t* qd_rec_open(int slot, ray_t* col, bool uni, bool fielded, qd_colmap_t** cms, ray_t** tag,
+static ray_t* qd_rec_open(int slot, ray_t* col, duck_type kind, bool fielded, qd_colmap_t** cms, ray_t** tag,
                           ray_t** store) {
     if (tag) *tag = NULL;
     *cms = NULL;
-    ray_t* st = qd_rec_explode(slot, col, uni, fielded, tag);
+    ray_t* st = qd_rec_explode(slot, col, kind, fielded, tag);
     if (RAY_IS_ERR(st)) return st;
     int64_t      nf = ray_table_ncols(st);
     qd_colmap_t* cm = q_duckdb_cols(nf, sizeof *cm);
@@ -2949,7 +3160,7 @@ static bool qd_rec_map(int slot, ray_t* v, int depth, qd_colmap_t* out) {
     qd_colmap_t* cms;
     ray_t*       store = NULL;
     size_t       mark  = q_duckdb_err_mark();
-    ray_t*       e = RAY_IS_ERR(v) ? v : qd_rec_open(slot, v, false, false, &cms, NULL, &store);
+    ray_t*       e = RAY_IS_ERR(v) ? v : qd_rec_open(slot, v, QDUCK_TYPE_STRUCT, false, &cms, NULL, &store);
     out->leaf  = qd_map_read(QDUCK_TYPE_STRUCT);
     out->rec   = NULL;
     out->depth = depth;
@@ -3051,14 +3262,14 @@ static ray_t* qd_write_map(int slot, duck_vector dv, ray_t* col, const qd_colmap
     ray_t *keys = NULL, *vals = NULL, *lens = NULL;
     ray_t* e = qd_map_flatten(slot, col, base, n, &keys, &vals, &lens);
     if (e) return e;
-    int64_t    tot  = q_count(keys);
-    duck_idx_t have = QAPI.list_vector_get_size(dv);   /* under a LIST every cell writes into one entry spine */
-    if (QAPI.list_vector_reserve(dv, have + (duck_idx_t)tot) != QDuckSuccess ||
-        QAPI.list_vector_set_size(dv, have + (duck_idx_t)tot) != QDuckSuccess)
+    int64_t     tot  = q_count(keys);
+    duck_idx_t  have = 0;
+    duck_vector kv   = qd_child(dv, 0);   /* under a LIST every cell writes into one entry spine */
+    if (!kv || QAPI.vector_get_size(kv, &have, NULL) != QDuckSuccess ||
+        QAPI.vector_set_size(kv, have + (duck_idx_t)tot, NULL) != QDuckSuccess)
         e = q_err(QE_DUCKDB);
-    duck_list_entry* ent = e ? NULL : (duck_list_entry*)QAPI.vector_get_data(dv);
-    duck_vector      kv  = e ? NULL : QAPI.list_vector_get_child(dv);
-    if (!e && (!ent || !kv)) e = q_err(QE_DUCKDB);
+    duck_list_entry* ent = e ? NULL : qd_data_mut(dv);
+    if (!e && !ent) e = q_err(QE_DUCKDB);
     for (int64_t i = 0, off = have; !e && i < n; i++) {
         int64_t    l = *(int64_t*)ray_vec_get(lens, i);
         duck_idx_t r = dst + (duck_idx_t)i;
@@ -3070,9 +3281,9 @@ static ray_t* qd_write_map(int slot, duck_vector dv, ray_t* col, const qd_colmap
     ray_t *vmir = NULL, *vkp = NULL;
     if (!e && qd_co_admissible(&cm->rec->f[1].map, QD_CO_ISNULL))  e = qd_map_co(mir,  lens, base, n, &vmir);
     if (!e && qd_co_admissible(&cm->rec->f[1].map, QD_CO_NOTNULL)) e = qd_map_co(keep, lens, base, n, &vkp);
-    if (!e) e = qd_write_col(slot, QAPI.struct_vector_get_child(kv, 0), keys, &cm->rec->f[0].map, 0, have, tot,
+    if (!e) e = qd_write_col(slot, qd_child(kv, 0), keys, &cm->rec->f[0].map, 0, have, tot,
                              NULL, NULL);
-    if (!e) e = qd_write_col(slot, QAPI.struct_vector_get_child(kv, 1), vals, &cm->rec->f[1].map, 0, have, tot,
+    if (!e) e = qd_write_col(slot, qd_child(kv, 1), vals, &cm->rec->f[1].map, 0, have, tot,
                              vmir ? vmir : vkp, vmir ? vkp : NULL);
     ray_release(keys);
     ray_release(vals);
@@ -3088,20 +3299,20 @@ static void qd_rec_invalidate(duck_vector dv, const qd_colmap_t* cm, duck_idx_t 
     qd_set_invalid(dv, r);
     if (!cm->rec || cm->depth || cm->leaf->dk_type == QDUCK_TYPE_MAP) return;
     bool uni = cm->leaf->dk_type == QDUCK_TYPE_UNION;
-    if (uni) qd_set_invalid(QAPI.struct_vector_get_child(dv, 0), r);
+    if (uni) qd_set_invalid(qd_child(dv, 0), r);
     for (int i = 0; i < cm->rec->n; i++)
-        qd_rec_invalidate(QAPI.struct_vector_get_child(dv, (duck_idx_t)(uni + i)), &cm->rec->f[i].map, r);
+        qd_rec_invalidate(qd_child(dv, (duck_idx_t)(uni + i)), &cm->rec->f[i].map, r);
 }
 
 /* One field's column of sub-companions, into *out, cut out of the record's own (ADR 12/16) in the kind the
  * caller holds.  A row whose isnull mirror is the atom 1b is NULL all the way down, so the field takes that atom
  * too; every other kind has nothing to say about such a row and takes its own absent marker.  A field whose
  * carrier does not grow the kind takes nothing — a sentinel carrier needs no isnull, its null being in band. */
-static ray_t* qd_rec_field_co(ray_t* co, const qd_colmap_t* fcm, const char* name, int64_t rows, int kind,
+static ray_t* qd_rec_field_co(ray_t* co, const qd_colmap_t* fcm, const char* name, int at, int64_t rows, int kind,
                               ray_t** out) {
     *out = NULL;
     if (!co || !qd_co_admissible(fcm, kind)) return NULL;
-    int64_t id  = ray_sym_intern_runtime(name, (int64_t)strlen(name));
+    int64_t id  = at < 0 ? ray_sym_intern_runtime(name, (int64_t)strlen(name)) : -1;   /* at >= 0: a TUPLE's position */
     ray_t*  acc = ray_list_new(rows ? rows : 1);
     for (int64_t i = 0; acc && !RAY_IS_ERR(acc) && i < rows; i++) {
         /* like-keyed companion rows collapse to a TABLE the way the value does, so the row is fetched, not borrowed */
@@ -3109,7 +3320,8 @@ static ray_t* qd_rec_field_co(ray_t* co, const qd_colmap_t* fcm, const char* nam
         ray_t* mc  = box && !(kind == QD_CO_ISNULL && qd_mirror_bit(co, i)) ? qd_row_at(co, i) : NULL;
         if (RAY_IS_ERR(mc)) { ray_release(acc); return mc; }
         ray_t* v  = NULL;
-        if (mc && mc->type == RAY_DICT) {
+        if (mc && at >= 0 && qd_tuple_cell(mc) && at < q_count(mc)) v = qd_cell_at(mc, at);
+        else if (mc && at < 0 && mc->type == RAY_DICT) {
             ray_t* k = ray_dict_keys(mc);   /* borrowed */
             for (int64_t j = 0; !v && k && j < q_count(k); j++)
                 if (qd_sym_id(k, j) == id) v = qd_cell_at(ray_dict_vals(mc), j);
@@ -3132,10 +3344,10 @@ static ray_t* qd_rec_field_co(ray_t* co, const qd_colmap_t* fcm, const char* nam
 static ray_t* qd_write_rec(int slot, duck_vector dv, ray_t* col, const qd_colmap_t* cm, int64_t base,
                            duck_idx_t dst, int64_t n, ray_t* mir, ray_t* keep) {
     if (cm->leaf->dk_type == QDUCK_TYPE_MAP) return qd_write_map(slot, dv, col, cm, base, dst, n, mir, keep);
-    bool         uni = cm->leaf->dk_type == QDUCK_TYPE_UNION;
+    bool         uni = cm->leaf->dk_type == QDUCK_TYPE_UNION, tuple = cm->leaf->dk_type == QDUCK_TYPE_TUPLE;
     qd_colmap_t* cms;
     ray_t*       store = NULL, *tag = NULL;
-    ray_t*       e = qd_rec_open(slot, col, uni, true, &cms, &tag, &store);
+    ray_t*       e = qd_rec_open(slot, col, cm->leaf->dk_type, true, &cms, &tag, &store);
     if (e) return e;
     int  nf  = (int)ray_table_ncols(store);
     int  nd  = cm->rec->n;
@@ -3143,20 +3355,20 @@ static ray_t* qd_write_rec(int slot, duck_vector dv, ray_t* col, const qd_colmap
     int* fld = pos ? pos + nd : NULL;
     if (!pos) e = q_err(QE_WSFULL);
     for (int i = 0; !e && i < nd; i++) {
-        int c = 0;
-        while (c < nf && strcmp(q_duckdb_col_name(store, c, NULL), cm->rec->f[i].name)) c++;
+        int c = tuple ? i : 0;   /* a TUPLE's field i is store column i, where the rows reached that far */
+        while (!tuple && c < nf && strcmp(q_duckdb_col_name(store, c, NULL), cm->rec->f[i].name)) c++;
         pos[i] = c < nf ? c : -1;
         if (c < nf) fld[c] = i;
     }
-    duck_vector tv = uni ? QAPI.struct_vector_get_child(dv, 0) : NULL;
-    uint8_t*    t  = tv ? (uint8_t*)QAPI.vector_get_data(tv) : NULL;
+    duck_vector tv = uni ? qd_child(dv, 0) : NULL;
+    uint8_t*    t  = tv ? qd_data_mut(tv) : NULL;
     if (!e && uni && !t) e = q_err(QE_DUCKDB);
     for (int64_t i = 0; !e && t && i < n; i++) {
         int16_t live = *(int16_t*)ray_vec_get(tag, base + i);
         t[dst + (duck_idx_t)i] = (uint8_t)(live < 0 ? 0 : fld[live]);
     }
     for (int i = 0; !e && i < nd; i++) {
-        duck_vector cv = QAPI.struct_vector_get_child(dv, (duck_idx_t)(uni + i));
+        duck_vector cv = qd_child(dv, (duck_idx_t)(uni + i));
         if (!cv) { e = q_err(QE_DUCKDB); break; }
         if (pos[i] < 0) {   /* declared, never shown: NULL in every row, and for a UNION a member with no tag */
             for (int64_t k = 0; k < n; k++) qd_rec_invalidate(cv, &cm->rec->f[i].map, dst + (duck_idx_t)k);
@@ -3166,10 +3378,8 @@ static ray_t* qd_write_rec(int slot, duck_vector dv, ray_t* col, const qd_colmap
          * qd_write_col reads for a nested column, one level in (ADR 16) */
         const qd_field_t* f = &cm->rec->f[i];
         ray_t *fm = NULL, *fk = NULL;
-        e = qd_rec_field_co(mir, &f->map, f->name, q_count(tag), QD_CO_ISNULL,
-                            &fm);
-        if (!e) e = qd_rec_field_co(keep, &f->map, f->name, q_count(tag),
-                                    QD_CO_NOTNULL, &fk);
+        e = qd_rec_field_co(mir, &f->map, f->name, tuple ? i : -1, q_count(tag), QD_CO_ISNULL, &fm);
+        if (!e) e = qd_rec_field_co(keep, &f->map, f->name, tuple ? i : -1, q_count(tag), QD_CO_NOTNULL, &fk);
         if (!e) e = qd_write_col(slot, cv, ray_table_get_col_idx(store, pos[i]), &f->map, base, dst, n,
                                  fm ? fm : fk, fm ? fk : NULL);
         ray_release(fm);
@@ -3193,10 +3403,10 @@ static ray_t* qd_map_from_data(int slot, ray_t* col, duck_type kind, qd_colmap_t
     if (cm->rec && cm->leaf->dk_type == kind) return NULL;
     qd_colmap_t out = { qd_map_read(kind), NULL, cm->depth, false };
     if (!out.leaf) return qd_rec_fail(slot, "the declared record type has no mapping");
-    if (kind == QDUCK_TYPE_STRUCT || kind == QDUCK_TYPE_UNION) {
+    if (kind == QDUCK_TYPE_STRUCT || kind == QDUCK_TYPE_UNION || kind == QDUCK_TYPE_TUPLE) {
         qd_colmap_t* cms;
         ray_t*       store = NULL;
-        ray_t*       e = qd_rec_open(slot, col, kind == QDUCK_TYPE_UNION, false, &cms, NULL, &store);
+        ray_t*       e = qd_rec_open(slot, col, kind, false, &cms, NULL, &store);
         if (e) return e;
         qd_rec_t* r = qd_rec_of_store(store, cms);
         qd_rec_close((int)ray_table_ncols(store), cms, store, NULL);
@@ -3218,7 +3428,7 @@ static ray_t* qd_map_from_data(int slot, ray_t* col, duck_type kind, qd_colmap_t
             q_duckdb_codec_map_free(&out);
             return qd_rec_fail(slot, "a MAP's keys and values have no mapping");
         }
-    } else return qd_rec_fail(slot, "a record declares STRUCT, MAP or UNION");
+    } else return qd_rec_fail(slot, "a record declares STRUCT, TUPLE, MAP or UNION");
     q_duckdb_codec_map_free(cm);
     *cm = out;
     return NULL;
@@ -3270,14 +3480,15 @@ static ray_t* qd_decl_merge(int slot, ray_t* col, qd_colmap_t* dec) {
     }
     qd_colmap_t* cms;
     ray_t*       store = NULL;
-    ray_t*       e = qd_rec_open(slot, col, dec->leaf->dk_type == QDUCK_TYPE_UNION, true, &cms, NULL, &store);
+    bool         tuple = dec->leaf->dk_type == QDUCK_TYPE_TUPLE;
+    ray_t*       e = qd_rec_open(slot, col, dec->leaf->dk_type, true, &cms, NULL, &store);
     if (e) return e;
     int   nf   = (int)ray_table_ncols(store);
     bool* seen = q_duckdb_cols(nf, sizeof *seen);
     if (!seen) e = q_err(QE_WSFULL);
     for (int i = 0; !e && i < r->n; i++) {
-        int c = 0;
-        while (c < nf && strcmp(q_duckdb_col_name(store, c, NULL), r->f[i].name)) c++;
+        int c = tuple ? (i < nf ? i : nf) : 0;
+        while (!tuple && c < nf && strcmp(q_duckdb_col_name(store, c, NULL), r->f[i].name)) c++;
         if (c == nf) continue;   /* declared, never shown: the declaration's own spelling is all there is */
         seen[c] = true;
         /* the law is RECURSIVE: a nested record keeps the declaration's fields and takes the data's spelling of
@@ -3306,17 +3517,25 @@ static ray_t* qd_decl_merge(int slot, ray_t* col, qd_colmap_t* dec) {
  * declared, or a declaration DuckDB does not read as a record of this column's shape, the dict spells itself and
  * `kind` says which of the three to spell it as. */
 ray_t* q_duckdb_codec_map_declared(int slot, ray_t* col, duck_logical_type lt, duck_type kind, qd_colmap_t* cm) {
-    if (!q_duckdb_codec_is_rec(cm->leaf)) return NULL;
+    bool rec = q_duckdb_codec_is_rec(cm->leaf);
+    if (!rec && kind != QDUCK_TYPE_TUPLE) return NULL;
     qd_colmap_t dec  = { NULL, NULL, 0, false };
     duck_type   miss = 0;
     const char* why  = NULL;
+    bool decl = lt && qd_map_read_logical(lt, &dec, &miss, &why) && q_duckdb_codec_is_rec(dec.leaf);
+    /* q collapses a TUPLE's row to whatever vector it fits — (1i;2i) is 1 2i, a LIST to the data — so a TUPLE
+     * declaration over a column that mapped as no record puts the rows where the declaration says they are */
+    if (!rec) {
+        if (!decl || dec.leaf->dk_type != QDUCK_TYPE_TUPLE) { q_duckdb_codec_map_free(&dec); return NULL; }
+        q_duckdb_codec_map_free(cm);
+        *cm = (qd_colmap_t){ qd_map_read(QDUCK_TYPE_TUPLE), NULL, dec.depth, false };
+    }
     /* UNDER a list the rows are in the cells, and both derivations below read a column OF ROWS */
     ray_t* rows = cm->depth ? qd_rec_spine(slot, col, cm->depth) : NULL;
-    if (rows && RAY_IS_ERR(rows)) return rows;
+    if (rows && RAY_IS_ERR(rows)) { q_duckdb_codec_map_free(&dec); return rows; }
     ray_t* v = rows ? rows : col;
     ray_t* e = NULL;
-    if (lt && qd_map_read_logical(lt, &dec, &miss, &why) &&
-        q_duckdb_codec_is_rec(dec.leaf) && dec.depth == cm->depth) {
+    if (decl && dec.depth == cm->depth) {
         qd_map_stage(&dec);
         if (!(e = qd_decl_merge(slot, v, &dec))) { q_duckdb_codec_map_free(cm); *cm = dec; }
         else q_duckdb_codec_map_free(&dec);
