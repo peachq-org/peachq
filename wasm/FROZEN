@@ -1,0 +1,2 @@
+frozen 2026-10-15 — the published browser build (release v0.88: DuckDB-wasm 1.5.4 over the v1 bridge shim) stays live until duckdb-wasm ships a 2.0 bundle and wasm/q_wasm_duckdb.c is rebuilt on the v2 C API the bridge now drives (owner ruling 2026-10-15)
+This file makes every `make -f Makefile.wasm wasm*` target and the release workflow's wasm job a loud skip, so no build from a v2-bridge commit replaces the live site. Delete it with the rebuilt shim.

@@ -2,10 +2,15 @@
 
 - **Upstream, as we take it:** `third_party/re2` from the DuckDB source tree,
   https://github.com/duckdb/duckdb
-- **Version pin:** DuckDB **v1.5.5** (`v1.5.5.tar.gz`, GitHub release tag)
-- **Tarball sha256:** `f33155ff962e6e1e08fd1e9caffa487d4325aa60999e2eabc76feff534d6558b`
-- **Vendored-tree sha256:** `64705ec0efb60af16572736fc478b1ef89de4d264056dc7b29dd433d34eae7d1`
-  (see *Drift* below)
+- **Version pin:** DuckDB **v2.0.0-alpha46057**, the staged 2.0 pre-release, built from commit
+  `b15358c371` on `v2.0-cyanoptera` (no release tag yet: the source archive is
+  `https://github.com/duckdb/duckdb/archive/b15358c371.tar.gz`)
+- **Tarball sha256:** `43926bf5be7c6a97233923fe23e8c6e5f308e2b51d24d9ee8d34d19776e19a2a`
+- **Vendored-tree sha256:** `3a853ae9a5e9acca0e27d5b6a4e911d536dc6bdd460743afb87724ea433dd21e`
+  (see *Drift* below). The v1.5.5 tree it replaces digested
+  `64705ec0efb60af16572736fc478b1ef89de4d264056dc7b29dd433d34eae7d1`; the whole delta is one
+  `static_cast<size_t>` in `re2/regexp.h` (`Regexp::AllocSub`), a warning fix with no change in what a pattern
+  means, plus CMake policy lines in the `CMakeLists.txt` we do not carry.
 - **License:** BSD-3-Clause — `LICENSE` in this directory is upstream's, shipped
   verbatim, and also recorded under `docs/licenses/re2-LICENSE`. `AUTHORS` is
   upstream's too. Fits the vendoring policy (small, permissive, yyjson precedent).
@@ -71,15 +76,16 @@ libstdc++ does not define. On Debian/Ubuntu: `apt install g++-mingw-w64-x86-64`.
 ## Regeneration recipe (version bump)
 
 ```sh
-V=1.4.6
-curl -LO https://github.com/duckdb/duckdb/archive/refs/tags/v$V.tar.gz
+V=1.4.6                                    # a release tag; a pre-release pins its COMMIT instead:
+curl -LO https://github.com/duckdb/duckdb/archive/refs/tags/v$V.tar.gz   # .../archive/<commit>.tar.gz
 sha256sum v$V.tar.gz                       # record it above
-tar xzf v$V.tar.gz duckdb-$V/third_party/re2
+tar xzf v$V.tar.gz --wildcards '*/third_party/re2/*'
+D=$(ls -d duckdb-*/)                       # duckdb-$V/ for a tag, duckdb-<full sha>/ for a commit
 rm -rf third_party/re2/re2 third_party/re2/util
-cp -r duckdb-$V/third_party/re2/re2 duckdb-$V/third_party/re2/util third_party/re2/
-cp duckdb-$V/third_party/re2/LICENSE duckdb-$V/third_party/re2/AUTHORS third_party/re2/
+cp -r $D/third_party/re2/re2 $D/third_party/re2/util third_party/re2/
+cp $D/third_party/re2/LICENSE $D/third_party/re2/AUTHORS third_party/re2/
 cp third_party/re2/LICENSE docs/licenses/re2-LICENSE
-grep -rl absl third_party/re2 && echo "STOP: abseil reappeared — not vendorable"
+grep -rl absl third_party/re2 --exclude=README.peachq.md && echo "STOP: abseil reappeared — not vendorable"
 tools/re2-pin.sh --print                   # the new tree digest
 # then edit src/qlang/io/q_re2_pin.h: PQRE2_DUCKDB_PIN + PQRE2_SRC_SHA256,
 # and the two hashes + the release above; finally
@@ -89,5 +95,5 @@ make && make q-test
 Bumping the pin changes `.regexp.version`, so every golden asserting it moves
 with it: `test/q/aigenerated/regex_version.qcmd` (the pin's ledger, and the row
 that also compares the pin against the DuckDB actually shipped) and
-`wasm/smoke.js`, which is outside `make q-test` and so fails later rather than
-in the gate. `grep -rn "$OLD_PIN"` before you call the bump done.
+`wasm/node/01-basics.qcmd`, which is outside `make q-test` and so fails later
+rather than in the gate. `grep -rn "$OLD_PIN"` before you call the bump done.
