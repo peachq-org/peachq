@@ -1,12 +1,9 @@
-/* q_duckdb_api — private, transcribed subset of DuckDB's stable C ABI.
+/* q_duckdb_api — private, transcribed subset of DuckDB's v2 C API.
  *
- * Transcribed from the MIT-licensed `duckdb.h` shipped with the DuckDB v1.4.5
- * prebuilt (github.com/duckdb/duckdb).  Deliberately NOT #include'd: the
- * bridge reaches DuckDB ONLY via dlopen + a dlsym'd fn-pointer table
- * (docs/duckdb-api.md, Packaging decision), so a plain `make` compiles with no
- * vendor tree present.  Struct layouts here are DuckDB's frozen C ABI (the
- * "deprecated_*" result fields are kept upstream precisely for stability); the
- * >= 1.4 version gate in q_duckdb.c is the tripwire if a future major breaks it. */
+ * Transcribed from the MIT-licensed `duckdb_v2.h` of DuckDB v2.0.0-alpha46057 (github.com/duckdb/duckdb).
+ * Deliberately NOT #include'd: the bridge reaches DuckDB ONLY via dlopen + a dlsym'd fn-pointer table
+ * (docs/duckdb-api.md, Packaging), so a plain `make` compiles with no vendor tree present.  The v2 surface is the
+ * whole table — a library without it is refused by the loader (docs/duckdb-architecture.md). */
 #ifndef Q_DUCKDB_API_H
 #define Q_DUCKDB_API_H
 
@@ -16,94 +13,150 @@
 
 typedef uint64_t duck_idx_t;
 
-typedef enum { QDuckSuccess = 0, QDuckError = 1 } duck_state;
+/* DUCKDB_V2_ERROR: 0 is success; every other code comes with an error-info handle carrying DuckDB's text */
+typedef int32_t duck_state;
+#define QDuckSuccess 0
 
-/* What a statement answered (values are ABI): a query returned rows, anything else counted or did nothing. */
-typedef enum {
-    QDuckReturnInvalid = 0, QDuckReturnChangedRows = 1, QDuckReturnNothing = 2, QDuckReturnQuery = 3
-} duck_return_t;
+/* DUCKDB_V2_RESULT_TYPE: a query returned rows, anything else counted or did nothing. */
+typedef enum { QDuckReturnQuery = 0, QDuckReturnChangedRows = 1, QDuckReturnNothing = 2 } duck_return_t;
 
-/* duckdb_type ids the bridge dispatches on (values are ABI). */
+/* DUCKDB_V2_LOGICAL_TYPE_ID — the ids the bridge dispatches on (values are ABI). */
 enum {
-    QDUCK_TYPE_BOOLEAN      = 1,
-    QDUCK_TYPE_TINYINT      = 2,
-    QDUCK_TYPE_SMALLINT     = 3,
-    QDUCK_TYPE_INTEGER      = 4,
-    QDUCK_TYPE_BIGINT       = 5,
-    QDUCK_TYPE_UTINYINT     = 6,
-    QDUCK_TYPE_USMALLINT    = 7,
-    QDUCK_TYPE_UINTEGER     = 8,
-    QDUCK_TYPE_UBIGINT      = 9,
-    QDUCK_TYPE_FLOAT        = 10,
-    QDUCK_TYPE_DOUBLE       = 11,
-    QDUCK_TYPE_TIMESTAMP    = 12,   /* int64 µs since 1970 */
-    QDUCK_TYPE_DATE         = 13,
-    QDUCK_TYPE_TIME         = 14,
-    QDUCK_TYPE_INTERVAL     = 15,   /* {months; days; int64 µs} — the q durations' carrier (ADR 19) */
-    QDUCK_TYPE_HUGEINT      = 16,
-    QDUCK_TYPE_VARCHAR      = 17,
-    QDUCK_TYPE_BLOB         = 18,
-    QDUCK_TYPE_DECIMAL      = 19,
-    QDUCK_TYPE_TIMESTAMP_S  = 20,   /* int64 s since 1970 */
-    QDUCK_TYPE_TIMESTAMP_MS = 21,   /* int64 ms since 1970 */
-    QDUCK_TYPE_TIMESTAMP_NS = 22,   /* int64 ns since 1970 — q timestamp's pair */
-    QDUCK_TYPE_ENUM         = 23,
-    QDUCK_TYPE_LIST         = 24,
-    QDUCK_TYPE_STRUCT       = 25,
-    QDUCK_TYPE_MAP          = 26,
-    QDUCK_TYPE_UUID         = 27,
-    QDUCK_TYPE_UNION        = 28,
-    QDUCK_TYPE_BIT          = 29,   /* string_t: one padding-count byte, then the bits MSB-first */
-    QDUCK_TYPE_TIME_TZ      = 30,   /* uint64 bits: µs << 24, then 57599 - the offset's seconds (ADR 21) */
-    QDUCK_TYPE_TIMESTAMP_TZ = 31,   /* int64 µs since 1970, UTC — the zone is the session's, never stored */
-    QDUCK_TYPE_UHUGEINT     = 32,
-    QDUCK_TYPE_ARRAY        = 33,
-    QDUCK_TYPE_VARINT       = 35,   /* string_t: a 3-byte header, then big-endian magnitude bytes (ADR 21) */
-    QDUCK_TYPE_TIME_NS      = 39,   /* int64 ns since midnight, never past the 24th hour — q timespan's pair */
+    QDUCK_TYPE_SQLNULL      = 1,
+    QDUCK_TYPE_BOOLEAN      = 10,
+    QDUCK_TYPE_TINYINT      = 11,
+    QDUCK_TYPE_SMALLINT     = 12,
+    QDUCK_TYPE_INTEGER      = 13,
+    QDUCK_TYPE_BIGINT       = 14,
+    QDUCK_TYPE_DATE         = 15,
+    QDUCK_TYPE_TIME         = 16,   /* int64 µs since midnight */
+    QDUCK_TYPE_TIMESTAMP_S  = 17,   /* int64 s since 1970 */
+    QDUCK_TYPE_TIMESTAMP_MS = 18,   /* int64 ms since 1970 */
+    QDUCK_TYPE_TIMESTAMP    = 19,   /* int64 µs since 1970 */
+    QDUCK_TYPE_TIMESTAMP_NS = 20,   /* int64 ns since 1970 — q timestamp's pair */
+    QDUCK_TYPE_DECIMAL      = 21,
+    QDUCK_TYPE_FLOAT        = 22,
+    QDUCK_TYPE_DOUBLE       = 23,
+    QDUCK_TYPE_VARCHAR      = 25,
+    QDUCK_TYPE_BLOB         = 26,
+    QDUCK_TYPE_INTERVAL     = 27,   /* {months; days; int64 µs} — the q durations' carrier (ADR 19) */
+    QDUCK_TYPE_UTINYINT     = 28,
+    QDUCK_TYPE_USMALLINT    = 29,
+    QDUCK_TYPE_UINTEGER     = 30,
+    QDUCK_TYPE_UBIGINT      = 31,
+    QDUCK_TYPE_TIMESTAMP_TZ = 32,   /* int64 µs since 1970, UTC — the zone is the session's, never stored */
+    QDUCK_TYPE_TIMESTAMP_TZ_NS = 33,
+    QDUCK_TYPE_TIME_TZ      = 34,   /* uint64 bits: µs << 24, then 57599 - the offset's seconds (ADR 21) */
+    QDUCK_TYPE_TIME_NS      = 35,   /* int64 ns since midnight, never past the 24th hour — q timespan's pair */
+    QDUCK_TYPE_BIT          = 36,   /* string_t: one padding-count byte, then the bits MSB-first */
+    QDUCK_TYPE_BIGNUM       = 39,   /* a 3-byte header, then big-endian magnitude bytes (ADR 21) */
+    QDUCK_TYPE_UHUGEINT     = 49,
+    QDUCK_TYPE_HUGEINT      = 50,
+    QDUCK_TYPE_UUID         = 54,
+    QDUCK_TYPE_GEOMETRY     = 60,
+    QDUCK_TYPE_STRUCT       = 100,
+    QDUCK_TYPE_LIST         = 101,
+    QDUCK_TYPE_MAP          = 102,
+    QDUCK_TYPE_ENUM         = 104,
+    QDUCK_TYPE_UNION        = 107,
+    QDUCK_TYPE_ARRAY        = 108,
+    QDUCK_TYPE_VARIANT      = 109,
+    QDUCK_TYPE_TUPLE        = 110,
 };
 typedef int32_t duck_type;
 
-/* Every DuckDB type id spelled as DuckDB itself declares it (`typeof`/DESCRIBE), in DUCKDB_TYPE enum order, the ids
- * above included.  The base word of the envelope's `dtype` and of the message channel; dispatch stays on the enum.
- * Slots 37 and 38 are the two LITERAL types the binder resolves before execution, so no result vector can carry one
- * and no probe can confirm their spelling: they keep the fallback rather than a guess. */
+/* Every DuckDB type id spelled as DuckDB itself declares it (`typeof`/DESCRIBE): the base word of the envelope's
+ * `dtype` and of the message channel; dispatch stays on the enum.  "?" for an id this build does not know. */
 static inline const char* q_duckdb_type_name(duck_type t) {
-    static const char* const names[] = {
-        "INVALID", "BOOLEAN", "TINYINT", "SMALLINT", "INTEGER", "BIGINT", "UTINYINT", "USMALLINT", "UINTEGER",
-        "UBIGINT", "FLOAT", "DOUBLE", "TIMESTAMP", "DATE", "TIME", "INTERVAL", "HUGEINT", "VARCHAR", "BLOB",
-        "DECIMAL", "TIMESTAMP_S", "TIMESTAMP_MS", "TIMESTAMP_NS", "ENUM", "LIST", "STRUCT", "MAP", "UUID", "UNION",
-        "BIT", "TIME WITH TIME ZONE", "TIMESTAMP WITH TIME ZONE", "UHUGEINT", "ARRAY", "ANY", "VARINT", "SQLNULL",
-        "?", "?", "TIME_NS", "GEOMETRY", "VARIANT",
-    };
-    return t >= 0 && (size_t)t < sizeof names / sizeof *names ? names[t] : "?";
+    switch (t) {
+        case 0:                         return "INVALID";
+        case QDUCK_TYPE_SQLNULL:        return "\"NULL\"";
+        case 3:                         return "ANY";
+        case QDUCK_TYPE_BOOLEAN:        return "BOOLEAN";
+        case QDUCK_TYPE_TINYINT:        return "TINYINT";
+        case QDUCK_TYPE_SMALLINT:       return "SMALLINT";
+        case QDUCK_TYPE_INTEGER:        return "INTEGER";
+        case QDUCK_TYPE_BIGINT:         return "BIGINT";
+        case QDUCK_TYPE_DATE:           return "DATE";
+        case QDUCK_TYPE_TIME:           return "TIME";
+        case QDUCK_TYPE_TIMESTAMP_S:    return "TIMESTAMP_S";
+        case QDUCK_TYPE_TIMESTAMP_MS:   return "TIMESTAMP_MS";
+        case QDUCK_TYPE_TIMESTAMP:      return "TIMESTAMP";
+        case QDUCK_TYPE_TIMESTAMP_NS:   return "TIMESTAMP_NS";
+        case QDUCK_TYPE_DECIMAL:        return "DECIMAL";
+        case QDUCK_TYPE_FLOAT:          return "FLOAT";
+        case QDUCK_TYPE_DOUBLE:         return "DOUBLE";
+        case QDUCK_TYPE_VARCHAR:        return "VARCHAR";
+        case QDUCK_TYPE_BLOB:           return "BLOB";
+        case QDUCK_TYPE_INTERVAL:       return "INTERVAL";
+        case QDUCK_TYPE_UTINYINT:       return "UTINYINT";
+        case QDUCK_TYPE_USMALLINT:      return "USMALLINT";
+        case QDUCK_TYPE_UINTEGER:       return "UINTEGER";
+        case QDUCK_TYPE_UBIGINT:        return "UBIGINT";
+        case QDUCK_TYPE_TIMESTAMP_TZ:   return "TIMESTAMP WITH TIME ZONE";
+        case QDUCK_TYPE_TIMESTAMP_TZ_NS: return "TIMESTAMPTZ_NS";
+        case QDUCK_TYPE_TIME_TZ:        return "TIME WITH TIME ZONE";
+        case QDUCK_TYPE_TIME_NS:        return "TIME_NS";
+        case QDUCK_TYPE_BIT:            return "BIT";
+        case QDUCK_TYPE_BIGNUM:         return "BIGNUM";
+        case QDUCK_TYPE_UHUGEINT:       return "UHUGEINT";
+        case QDUCK_TYPE_HUGEINT:        return "HUGEINT";
+        case QDUCK_TYPE_UUID:           return "UUID";
+        case QDUCK_TYPE_GEOMETRY:       return "GEOMETRY";
+        case QDUCK_TYPE_STRUCT:         return "STRUCT";
+        case QDUCK_TYPE_LIST:           return "LIST";
+        case QDUCK_TYPE_MAP:            return "MAP";
+        case QDUCK_TYPE_ENUM:           return "ENUM";
+        case QDUCK_TYPE_UNION:          return "UNION";
+        case QDUCK_TYPE_ARRAY:          return "ARRAY";
+        case QDUCK_TYPE_VARIANT:        return "VARIANT";
+        case QDUCK_TYPE_TUPLE:          return "TUPLE";
+        default:                        return "?";
+    }
 }
 
-typedef struct duck_database_o*   duck_database;
-typedef struct duck_connection_o* duck_connection;
-typedef struct duck_config_o*     duck_config;
-typedef struct duck_data_chunk_o* duck_data_chunk;
-typedef struct duck_vector_o*     duck_vector;
-typedef struct duck_appender_o*   duck_appender;
-typedef struct duck_logical_o*    duck_logical_type;
-typedef struct duck_prepared_o*   duck_prepared;
-typedef struct duck_value_o*      duck_value;
+/* the owned and borrowed handles, all one pointer wide */
+typedef struct duck_env_o*          duck_env;
+typedef struct duck_instance_o*     duck_instance;
+typedef struct duck_connection_o*   duck_connection;
+typedef struct duck_option_o*       duck_option;
+typedef struct duck_err_o*          duck_err;            /* error info: text borrowed until destroyed */
+typedef struct duck_logical_o*      duck_logical_type;
+typedef struct duck_value_o*        duck_value;
+typedef struct duck_cursor_o*       duck_cursor;         /* the streaming result (duckdb_v2_result) */
+typedef struct duck_schema_o*       duck_schema;
+typedef struct duck_data_chunk_o*   duck_data_chunk;
+typedef struct duck_vector_o*       duck_vector;
+typedef struct duck_arena_o*        duck_arena;
+typedef struct duck_stmt_iter_o*    duck_stmt_iter;
+typedef struct duck_stmt_o*         duck_stmt;
+typedef struct duck_collection_o*   duck_collection;
+typedef struct duck_append_state_o* duck_append_state;
+typedef struct duck_rscan_o*        duck_rscan;
+typedef struct duck_rscan_info_o*   duck_rscan_info;
+typedef struct duck_qname_o*        duck_qname;
+typedef struct duck_context_o*      duck_context;
 
-/* the by-value temporal cells of the value API (duckdb_date / duckdb_timestamp / duckdb_timestamp_ns) */
-typedef struct { int32_t days; }   duck_date;
-typedef struct { int64_t micros; } duck_timestamp;
-typedef struct { int64_t nanos; }  duck_timestamp_ns;
+/* duckdb_v2_str: a borrowed, length-delimited view, never assumed NUL-terminated; identifiers share the layout */
+typedef struct { const char* ptr; duck_idx_t len; } duck_str;
+
+/* duckdb_v2_vector_view: a flat vector's elements, validity (NULL = all valid) and, for a dictionary vector, the
+ * selection; the bridge flattens before viewing, so `sel` is always NULL here */
+typedef struct { const void* data; const uint64_t* validity; const uint32_t* sel; duck_idx_t count; } duck_view;
+
+/* duckdb_v2_opaque: user data with an optional destructor and comparator */
+typedef struct { void* ptr; void (*destroy)(void*); bool (*equals)(void*, void*); } duck_opaque;
 
 typedef struct { uint64_t lower; int64_t  upper; } duck_hugeint;   /* HUGEINT, and UUID storage */
 typedef struct { uint64_t lower; uint64_t upper; } duck_uhugeint;
 
-/* One INTERVAL cell — 16 bytes, the same chunk shape HUGEINT and UUID already read and write, so the appender
- * needs no symbol of its own.  Months and days are units of no fixed length; only micros is a duration. */
+/* One INTERVAL cell — 16 bytes.  Months and days are units of no fixed length; only micros is a duration. */
 typedef struct { int32_t months; int32_t days; int64_t micros; } duck_interval;
 
 /* One LIST cell: a {start,count} window into the vector's flat child. */
 typedef struct { uint64_t offset; uint64_t length; } duck_list_entry;
 
-/* Inline-or-pointer string cell used inside VARCHAR/BLOB vectors. */
+/* The 16-byte inline-or-pointer cell of VARCHAR/BLOB/BIT/BIGNUM vectors (duckdb_v2_bytes). */
 typedef struct {
     union {
         struct { uint32_t length; char prefix[4]; char* ptr; } pointer;
@@ -121,146 +174,131 @@ static inline uint32_t q_duckdb_string_len(const duck_string_t* s) {
     return s->value.inlined.length;
 }
 
-/* duckdb_result — layout frozen by upstream; only ever passed by address. */
-typedef struct {
-    duck_idx_t deprecated_column_count;
-    duck_idx_t deprecated_row_count;
-    duck_idx_t deprecated_rows_changed;
-    void*      deprecated_columns;
-    char*      deprecated_error_message;
-    void*      internal_data;
-} duck_result;
-
-/* Validity bitmask (documented layout: 64 rows per word, bit set = valid);
- * decoded inline on read, official setter used on write. */
+/* Validity bitmask (documented layout: 64 rows per word, bit set = valid). */
 static inline bool q_duckdb_validity_ok(const uint64_t* validity, duck_idx_t row) {
     return validity == NULL || (validity[row >> 6] & (1ULL << (row & 63))) != 0;
 }
 
+/* The bridge's MATERIALISED result: the schema and every chunk, fetched whole before the cursor is destroyed, so a
+ * connection never holds a live result between calls (one is allowed per connection) and a statement's failure is
+ * known when it runs.  ncols is the schema's count; names are NUL-terminated copies; the column types are BORROWED
+ * from the schema (never destroyed by a reader). */
 typedef struct {
-    const char* (*library_version)(void);
-    duck_state (*open_ext)(const char* path, duck_database* out, duck_config cfg, char** out_err);
-    void       (*close)(duck_database* db);
-    duck_state (*create_config)(duck_config* out);
-    duck_state (*set_config)(duck_config cfg, const char* name, const char* option);
-    void       (*destroy_config)(duck_config* cfg);
-    duck_state (*connect)(duck_database db, duck_connection* out);
-    void       (*disconnect)(duck_connection* con);
-    duck_state (*query)(duck_connection con, const char* sql, duck_result* out);
-    void       (*destroy_result)(duck_result* res);
-    duck_idx_t (*column_count)(duck_result* res);
-    const char* (*column_name)(duck_result* res, duck_idx_t col);
-    duck_data_chunk (*fetch_chunk)(duck_result res);          /* by value (ABI) */
-    void       (*destroy_data_chunk)(duck_data_chunk* chunk);
-    duck_idx_t (*data_chunk_get_size)(duck_data_chunk chunk);
-    duck_vector (*data_chunk_get_vector)(duck_data_chunk chunk, duck_idx_t col);
-    void*      (*vector_get_data)(duck_vector vec);
-    uint64_t*  (*vector_get_validity)(duck_vector vec);
-    void       (*vector_ensure_validity_writable)(duck_vector vec);
-    void       (*validity_set_row_invalid)(uint64_t* validity, duck_idx_t row);
-    void       (*vector_assign_string_element_len)(duck_vector vec, duck_idx_t idx,
-                                                   const char* str, duck_idx_t len);
-    duck_idx_t (*vector_size)(void);
-    duck_logical_type (*create_logical_type)(duck_type type);
-    void       (*destroy_logical_type)(duck_logical_type* type);
-    duck_data_chunk (*create_data_chunk)(duck_logical_type* types, duck_idx_t ncols);
-    void       (*data_chunk_reset)(duck_data_chunk chunk);
-    void       (*data_chunk_set_size)(duck_data_chunk chunk, duck_idx_t size);
-    duck_state (*appender_create_ext)(duck_connection con, const char* catalog,
-                                      const char* schema, const char* table, duck_appender* out);
-    duck_state (*appender_destroy)(duck_appender* app);       /* flushes */
-    duck_state (*append_data_chunk)(duck_appender app, duck_data_chunk chunk);
-    /* .duckdb.err[] sources — diagnostic text, never error-value payload */
-    const char* (*result_error)(duck_result* res);
-    const char* (*appender_error)(duck_appender app);
-    void       (*duck_free)(void* p);
-    duck_state (*appender_flush)(duck_appender app);  /* flush BEFORE destroy so
-                                                       * deferred errors are readable */
-    /* LIST columns: the child type is carried by the logical type, the child
-     * data by a second vector the entries index into. */
-    duck_logical_type (*create_list_type)(duck_logical_type child);
-    duck_logical_type (*list_type_child_type)(duck_logical_type t);
-    duck_logical_type (*column_logical_type)(duck_result* res, duck_idx_t col);
-    duck_type  (*get_type_id)(duck_logical_type t);
-    duck_vector (*list_vector_get_child)(duck_vector vec);
-    duck_idx_t  (*list_vector_get_size)(duck_vector vec);
-    duck_state (*list_vector_reserve)(duck_vector vec, duck_idx_t required);
-    duck_state (*list_vector_set_size)(duck_vector vec, duck_idx_t size);
-    /* the declaration spelling of a result column (the envelope's dtype): the alias JSON rides on a VARCHAR,
-     * DECIMAL/ENUM/ARRAY carry their parameters.  The char* results are freed with duck_free. */
-    char*      (*logical_type_get_alias)(duck_logical_type t);
-    uint8_t    (*decimal_width)(duck_logical_type t);
-    uint8_t    (*decimal_scale)(duck_logical_type t);
-    duck_logical_type (*array_type_child_type)(duck_logical_type t);
-    duck_idx_t (*array_type_array_size)(duck_logical_type t);
-    uint32_t   (*enum_dictionary_size)(duck_logical_type t);
-    char*      (*enum_dictionary_value)(duck_logical_type t, duck_idx_t index);
-    /* the read side of ENUM and fixed ARRAY: an enum vector holds dictionary indices as wide as its internal type
-     * says; an array vector's child holds every row's elements back to back, array_size each */
-    duck_logical_type (*vector_get_column_type)(duck_vector vec);
-    duck_type  (*enum_internal_type)(duck_logical_type t);
-    duck_vector (*array_vector_get_child)(duck_vector vec);
-    duck_return_t (*result_return_type)(duck_result res);     /* by value (ABI) */
-    /* the integer storage a DECIMAL keeps its unscaled value in: SMALLINT, INTEGER, BIGINT or HUGEINT by width */
-    duck_type  (*decimal_internal_type)(duck_logical_type t);
-    /* the nested records (ADR 12).  A STRUCT's children, a UNION's members and a MAP's key/value are all read
-     * through one shape; physically a UNION vector is a struct whose child 0 is the UTINYINT tag and a MAP
-     * vector is a LIST whose child is STRUCT("key", "value"), so both ride the struct and list vector calls. */
-    duck_idx_t (*struct_type_child_count)(duck_logical_type t);
-    char*      (*struct_type_child_name)(duck_logical_type t, duck_idx_t index);
-    duck_logical_type (*struct_type_child_type)(duck_logical_type t, duck_idx_t index);
-    duck_vector (*struct_vector_get_child)(duck_vector vec, duck_idx_t index);
-    duck_logical_type (*create_struct_type)(duck_logical_type* types, const char** names, duck_idx_t n);
-    duck_logical_type (*map_type_key_type)(duck_logical_type t);
-    duck_logical_type (*map_type_value_type)(duck_logical_type t);
-    duck_logical_type (*create_map_type)(duck_logical_type key, duck_logical_type value);
-    duck_idx_t (*union_type_member_count)(duck_logical_type t);
-    char*      (*union_type_member_name)(duck_logical_type t, duck_idx_t index);
-    duck_logical_type (*union_type_member_type)(duck_logical_type t, duck_idx_t index);
-    duck_logical_type (*create_union_type)(duck_logical_type* types, const char** names, duck_idx_t n);
-    /* The DEPRECATED materialised-result readers, reached ONLY by .duckdb.unsafeExecText: they force the legacy
-     * column materialisation, after which duckdb_fetch_chunk on that SAME result yields nothing — so no result is
-     * ever read both ways.  value_varchar's text is DuckDB's own, freed with duck_free; NULL = SQL NULL. */
-    duck_idx_t (*row_count)(duck_result* res);
-    char*      (*value_varchar)(duck_result* res, duck_idx_t col, duck_idx_t row);
-    bool       (*value_is_null)(duck_result* res, duck_idx_t col, duck_idx_t row);
-    /* Prepared statements — the pair door's rows, the loader's optional tail (a library without them loads, and
-     * only that door refuses).  A statement failing to prepare still owns its error text until destroyed;
-     * parameter_name's text is freed with duck_free; bind_value COPIES, so the caller destroys its own value;
-     * the C API refuses a bad index or name with no text at all. */
-    duck_state  (*prepare)(duck_connection con, const char* sql, duck_prepared* out);
-    void        (*destroy_prepare)(duck_prepared* ps);
-    const char* (*prepare_error)(duck_prepared ps);
-    duck_idx_t  (*nparams)(duck_prepared ps);
-    char*       (*parameter_name)(duck_prepared ps, duck_idx_t index);
-    duck_state  (*bind_parameter_index)(duck_prepared ps, duck_idx_t* index, const char* name);
-    duck_state  (*bind_value)(duck_prepared ps, duck_idx_t index, duck_value v);
-    duck_state  (*execute_prepared)(duck_prepared ps, duck_result* out);
-    void        (*destroy_value)(duck_value* v);
-    duck_value  (*create_bool)(bool v);
-    duck_value  (*create_uint8)(uint8_t v);
-    duck_value  (*create_int16)(int16_t v);
-    duck_value  (*create_int32)(int32_t v);
-    duck_value  (*create_int64)(int64_t v);
-    duck_value  (*create_float)(float v);
-    duck_value  (*create_double)(double v);
-    duck_value  (*create_varchar_length)(const char* s, duck_idx_t n);
-    duck_value  (*create_date)(duck_date v);
-    duck_value  (*create_interval)(duck_interval v);
-    duck_value  (*create_timestamp)(duck_timestamp v);
-    duck_value  (*create_timestamp_ns)(duck_timestamp_ns v);
-    duck_value  (*create_uuid)(duck_uhugeint v);
-    /* the typed NULL the value API has no constructor for: a LIST casts its children to its child type, so an
-     * untyped null put into a one-element LIST of type T and taken back out is NULL of type T */
-    duck_value  (*create_null_value)(void);
-    duck_value  (*create_list_value)(duck_logical_type t, duck_value* values, duck_idx_t n);
-    duck_value  (*get_list_child)(duck_value list, duck_idx_t index);
-} duck_api_t;
+    duck_schema      schema;
+    duck_data_chunk* chunks;
+    duck_idx_t       nchunks;
+    duck_idx_t       ncols;
+    char**           names;
+    duck_return_t    rtype;
+} duck_result;
 
-#if defined(__EMSCRIPTEN__)
-/* A browser tab cannot dlopen: wasm/q_wasm_duckdb.c fills the table from DuckDB's own wasm build, which the host
- * loads on this first call.  1 bound; 0 when the host offers no DuckDB or could not load it. */
-int q_wasm_duck_bind(duck_api_t* api);
-#endif
+typedef void (*duck_rscan_fn)(duck_rscan_info info, duck_context ctx, duck_err* err);
+
+typedef struct {
+    duck_state (*environment_create)(duck_env* out, duck_err* err);
+    duck_state (*environment_destroy)(duck_env* env);
+    duck_state (*instance_create)(duck_env env, duck_instance* out, duck_err* err);
+    duck_state (*instance_destroy)(duck_instance* inst);
+    duck_state (*instance_attach)(duck_instance inst, const duck_str* path, const duck_str* name, void* options,
+                                  bool make_default, duck_err* err);
+    duck_state (*instance_set_option)(duck_instance inst, const duck_str* name, const duck_str* setting, duck_err* err);
+    duck_state (*instance_get_option_by_name)(duck_instance inst, const duck_str* name, duck_option* out, duck_err* err);
+    duck_state (*option_destroy)(duck_option* opt);
+    duck_state (*connection_create)(duck_instance inst, duck_connection* out, duck_err* err);
+    duck_state (*connection_destroy)(duck_connection* con);
+    duck_state (*error_info_get_text)(duck_err err, duck_str* out);
+    duck_state (*error_info_destroy)(duck_err* err);
+    /* statements: parsed into an iterator, each executed into a cursor, bound by name or position at execution */
+    duck_state (*parse_sql)(duck_connection con, const char* sql, duck_stmt_iter* out, duck_err* err);
+    duck_state (*statement_iterator_next)(duck_stmt_iter it, duck_stmt* out, duck_err* err);
+    duck_state (*statement_iterator_destroy)(duck_stmt_iter* it);
+    duck_state (*sql_statement_destroy)(duck_stmt* st);
+    duck_state (*sql_statement_get_parameter_count)(duck_stmt st, duck_idx_t* out, duck_err* err);
+    duck_state (*sql_statement_get_parameter_name)(duck_stmt st, duck_idx_t index, duck_str* out, duck_err* err);
+    duck_state (*statement_bind)(duck_connection con, duck_stmt st, duck_schema* out, duck_schema* params, duck_err* err);
+    duck_state (*statement_execute)(duck_connection con, duck_stmt st, const duck_str* names, const duck_value* values,
+                                    duck_idx_t n, duck_cursor* out, duck_err* err);
+    duck_state (*result_destroy)(duck_cursor* res);
+    duck_state (*result_fetch_chunk)(duck_cursor res, duck_data_chunk* out, duck_err* err);   /* NULL at the end */
+    duck_state (*result_get_result_type)(duck_cursor res, int32_t* out, duck_err* err);
+    duck_state (*result_get_schema)(duck_cursor res, duck_schema* out, duck_err* err);
+    duck_state (*schema_get_count)(duck_schema s, duck_idx_t* out, duck_err* err);
+    duck_state (*schema_get_field)(duck_schema s, duck_idx_t i, duck_str* name, duck_logical_type* type, duck_err* err);
+    duck_state (*schema_destroy)(duck_schema* s);
+    /* chunks and vectors: a view to read, mutable data + validity + an arena to write, children by index */
+    duck_state (*data_chunk_create_with_connection)(duck_connection con, const duck_logical_type* types, duck_idx_t n,
+                                                    duck_data_chunk* out, duck_err* err);
+    duck_state (*data_chunk_destroy)(duck_data_chunk* chunk);
+    duck_state (*data_chunk_get_size)(duck_data_chunk chunk, duck_idx_t* out, duck_err* err);
+    duck_state (*data_chunk_get_vector)(duck_data_chunk chunk, duck_idx_t col, duck_vector* out, duck_err* err);
+    duck_state (*vector_get_logical_type)(duck_vector vec, duck_logical_type* out, duck_err* err);
+    duck_state (*vector_flatten)(duck_vector vec, duck_err* err);
+    duck_state (*vector_get_view)(duck_vector vec, duck_view* out, duck_err* err);
+    duck_state (*vector_get_data_mutable)(duck_vector vec, void** out, duck_err* err);
+    duck_state (*vector_flat_get_validity_mutable)(duck_vector vec, uint64_t** out, duck_err* err);
+    duck_state (*vector_get_size)(duck_vector vec, duck_idx_t* out, duck_err* err);
+    duck_state (*vector_set_size)(duck_vector vec, duck_idx_t size, duck_err* err);
+    duck_state (*vector_get_arena)(duck_vector vec, duck_arena* out, duck_err* err);
+    duck_state (*arena_allocate)(duck_arena arena, duck_idx_t n, uint8_t** out, duck_err* err);
+    duck_state (*vector_get_child)(duck_vector vec, duck_idx_t index, duck_vector* out, duck_err* err);
+    duck_state (*vector_get_value)(duck_vector vec, duck_idx_t row, duck_value* out, duck_err* err);
+    /* logical types: an id, a name (the alias when one is set) and the value parameters that rebuild it */
+    duck_state (*logical_type_copy)(duck_logical_type t, duck_logical_type* out, duck_err* err);
+    duck_state (*logical_type_destroy)(duck_logical_type* t);
+    duck_state (*logical_type_get_id)(duck_logical_type t, int32_t* out, duck_err* err);
+    duck_state (*logical_type_get_name)(duck_logical_type t, duck_str* out, duck_err* err);
+    duck_state (*logical_type_get_param_count)(duck_logical_type t, duck_idx_t* out, duck_err* err);
+    duck_state (*logical_type_get_param)(duck_logical_type t, duck_idx_t i, duck_str* name, duck_value* out, duck_err* err);
+    duck_state (*connection_create_type_from_id)(duck_connection con, int32_t id, const duck_str* names,
+                                                 const duck_value* values, duck_idx_t n, duck_logical_type* out,
+                                                 duck_err* err);
+    duck_state (*connection_create_type_from_text)(duck_connection con, const duck_str* text, duck_logical_type* out,
+                                                   duck_err* err);
+    /* values: the parameters bound and the type parameters read */
+    duck_state (*value_destroy)(duck_value* v);
+    duck_state (*value_is_null)(duck_value v, bool* out, duck_err* err);
+    duck_state (*value_to_string)(duck_value v, char* out, duck_idx_t cap, duck_idx_t* len, duck_err* err);
+    duck_state (*value_get_type)(duck_value v, duck_logical_type* out, duck_err* err);
+    duck_state (*value_get_varchar)(duck_value v, duck_str* out, duck_err* err);
+    duck_state (*value_get_utinyint)(duck_value v, uint8_t* out, duck_err* err);
+    duck_state (*value_get_bigint)(duck_value v, int64_t* out, duck_err* err);
+    duck_state (*value_create_type)(duck_connection con, duck_logical_type t, duck_value* out, duck_err* err);
+    duck_state (*value_create_null)(duck_logical_type t, duck_value* out, duck_err* err);
+    duck_state (*value_create_bool)(duck_connection con, bool v, duck_value* out, duck_err* err);
+    duck_state (*value_create_utinyint)(duck_connection con, uint8_t v, duck_value* out, duck_err* err);
+    duck_state (*value_create_smallint)(duck_connection con, int16_t v, duck_value* out, duck_err* err);
+    duck_state (*value_create_int)(duck_connection con, int32_t v, duck_value* out, duck_err* err);
+    duck_state (*value_create_bigint)(duck_connection con, int64_t v, duck_value* out, duck_err* err);
+    duck_state (*value_create_float)(duck_connection con, float v, duck_value* out, duck_err* err);
+    duck_state (*value_create_double)(duck_connection con, double v, duck_value* out, duck_err* err);
+    duck_state (*value_create_varchar)(duck_connection con, const duck_str* v, duck_value* out, duck_err* err);
+    duck_state (*value_create_date)(duck_connection con, int32_t days, duck_value* out, duck_err* err);
+    duck_state (*value_create_interval)(duck_connection con, const duck_interval* v, duck_value* out, duck_err* err);
+    duck_state (*value_create_timestamp)(duck_connection con, int64_t micros, duck_value* out, duck_err* err);
+    duck_state (*value_create_timestamp_ns)(duck_connection con, int64_t nanos, duck_value* out, duck_err* err);
+    duck_state (*value_create_uuid)(duck_connection con, const duck_hugeint* storage, duck_value* out, duck_err* err);
+    duck_state (*value_create_list)(duck_connection con, duck_logical_type child, const duck_value* kids, duck_idx_t n,
+                                    duck_value* out, duck_err* err);
+    /* the write path: chunks appended to a collection, served under a transient name by the connection's
+     * replacement scan (docs/duckdb-architecture.md) */
+    duck_state (*column_data_collection_create_with_connection)(duck_connection con, const duck_logical_type* types,
+                                                                duck_idx_t n, duck_collection* out, duck_err* err);
+    duck_state (*column_data_collection_destroy)(duck_collection* c);
+    duck_state (*column_data_collection_append_state_create)(duck_collection c, duck_append_state* out, duck_err* err);
+    duck_state (*column_data_collection_append_state_destroy)(duck_append_state* s);
+    duck_state (*column_data_collection_append)(duck_collection c, duck_append_state s, duck_data_chunk chunk, duck_err* err);
+    duck_state (*replacement_scan_create_with_connection)(duck_connection con, duck_rscan* out, duck_err* err);
+    duck_state (*replacement_scan_set_callback)(duck_rscan scan, duck_rscan_fn fn, duck_err* err);
+    duck_state (*replacement_scan_set_user_data)(duck_rscan scan, duck_opaque* data, duck_err* err);
+    duck_state (*replacement_scan_register)(duck_rscan scan, duck_err* err);
+    duck_state (*replacement_scan_destroy)(duck_rscan* scan);
+    duck_state (*replacement_scan_get_user_data)(duck_rscan_info info, void** out, duck_err* err);
+    duck_state (*replacement_scan_get_name)(duck_rscan_info info, duck_qname* out, duck_err* err);
+    duck_state (*replacement_scan_set_collection)(duck_rscan_info info, duck_collection c, const duck_str* names,
+                                                  duck_idx_t n, duck_err* err);
+    duck_state (*qname_get_part_count)(duck_qname q, duck_idx_t* out, duck_err* err);
+    duck_state (*qname_get_part)(duck_qname q, duck_idx_t i, duck_str* out, duck_err* err);
+    duck_state (*qname_destroy)(duck_qname* q);
+} duck_api_t;
 
 #endif /* Q_DUCKDB_API_H */

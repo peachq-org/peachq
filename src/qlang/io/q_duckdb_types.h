@@ -89,6 +89,8 @@ static const qd_tmap_t QD_TYPES[] = {
     { RAY_LIST,      QDUCK_TYPE_STRUCT,       "STRUCT",       "struct",      ' ', true },
     { RAY_LIST,      QDUCK_TYPE_MAP,          "MAP",          "map",         ' ', true },
     { RAY_LIST,      QDUCK_TYPE_UNION,        "UNION",        "union",       ' ', true },
+    /* the fourth record is POSITIONAL, so its cell is a plain LIST and only its declaration can write it back */
+    { RAY_LIST,      QDUCK_TYPE_TUPLE,        "TUPLE",        "tuple",       ' ', true },
     /* ADR 20 (2026-09-09): a BIT is an ordered bit SEQUENCE whose length is part of its identity, so it carries as
      * a q boolean vector per cell — `count` is the bit count and leading zeros survive.  Null-less like BLOB, and
      * like BLOB it wears the compound meta char of the cells it holds. */
@@ -98,11 +100,13 @@ static const qd_tmap_t QD_TYPES[] = {
      * BIGNUM is unbounded — ::BIGINT and ::HUGEINT both refuse it — so no fixed-width carrier can ever suffice:
      * the slot takes 0N and the digits ride the raw companion, ADR 11's mechanism unchanged. */
     { RAY_TIME,      QDUCK_TYPE_TIME_TZ,      "TIME WITH TIME ZONE", "timetz", 't', true },
-    { RAY_I64,       QDUCK_TYPE_VARINT,       "VARINT",       "varint",      'j', true },
+    { RAY_I64,       QDUCK_TYPE_BIGNUM,       "BIGNUM",       "bignum",      'j', true },
     /* ADR 2a (2026-09-11): TIME_NS is a NANOSECOND time of day, so `t` would read nearly every value as 0Nt — `n` is
      * exact and total instead, its 0..24h domain six orders inside the carrier and unable to reach 0Nn, so this is
      * the one temporal that needs no companion in either direction.  A q-BORN `n` still stores BIGINT above. */
     { RAY_TIMESPAN,  QDUCK_TYPE_TIME_NS,      "TIME_NS",      "timens",      'n', true },
+    /* DuckDB's UNTYPED null (a bare NULL literal, an all-null JSON key): a :: per cell, as .j.k reads a JSON null */
+    { RAY_NULL,      QDUCK_TYPE_SQLNULL,      "\"NULL\"",     "null",        ' ', true },
 };
 #define QD_NTYPES (sizeof QD_TYPES / sizeof *QD_TYPES)
 
