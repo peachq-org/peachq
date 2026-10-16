@@ -38,7 +38,7 @@ static void qd_spell_canon(const qd_colmap_t* cm, qd_buf* b);
 
 /* ---- THE table-name grammar (docs/duckdb-api.md, Table names): a symbol with NO double quote is one exact
  * name, dots and all; a symbol with one is SQL identifier syntax.  Every spelling a door needs — the SQL text,
- * the appender's parts, the catalog predicate, the sidecar key — is read off this ONE parse. ---- */
+ * the row move's name, the catalog predicate, the sidecar key — is read off this ONE parse. ---- */
 
 static bool qd_bare_ident(unsigned char c) { return isalnum(c) || c == '_' || c == '$' || c >= 0x80; }
 
@@ -151,9 +151,23 @@ ray_t* q_duckdb_schema_catalog_cols(int slot, const qd_name_t* nm) {
     return q_duckdb_query_buf(slot, &b, 1);
 }
 
+/* DuckDB resolves a name case-folded, so a reserved name is reserved in every spelling of its case */
 bool q_duckdb_schema_reserved_name(const qd_name_t* nm) {
     const char* t = nm->part[nm->n - 1];
-    return strcmp(t, QD_SCHEMA_TBL) == 0 || strcmp(t, QD_STAGE_TBL) == 0;
+    return strcasecmp(t, QD_SCHEMA_TBL) == 0 || strcasecmp(t, QD_STAGE_TBL) == 0 || strcasecmp(t, QD_BATCH_TBL) == 0;
+}
+
+/* The catalog is consulted before the replacement scan, so a table or view of the batch name anywhere — a file the
+ * bridge did not write, SQL's own DDL — would be the rows a move reads instead of the q table's: refused first. */
+ray_t* q_duckdb_schema_batch_clear(int slot) {
+    ray_t* hit = q_duckdb_query(slot, "SELECT 1 AS v FROM duckdb_tables() WHERE lower(table_name) = '" QD_BATCH_TBL "' UNION ALL "
+                                      "SELECT 1 FROM duckdb_views() WHERE lower(view_name) = '" QD_BATCH_TBL "'", 1);
+    if (RAY_IS_ERR(hit)) return hit;
+    bool shadowed = q_count(hit) > 0;
+    ray_release(hit);
+    return shadowed ? q_duckdb_fail(slot, "table " QD_BATCH_TBL ": reserved for the bridge's row moves, and a catalog "
+                                          "object of that name stands")
+                    : NULL;
 }
 
 const qd_desc_t* q_duckdb_schema_desc_find(const char* name, size_t len, const qd_desc_t* desc, int64_t ndesc) {
@@ -248,7 +262,7 @@ static ray_t* qd_desc_rows_delete(int slot, const char* tname, int stash) {
     duck_result res;
     ray_t* e = q_duckdb_run(slot, b.p, &res, stash);
     q_duckdb_buf_free(&b);
-    if (!e) QAPI.destroy_result(&res);
+    if (!e) q_duckdb_result_free(&res);
     return e;
 }
 
@@ -514,26 +528,28 @@ ray_t* q_duckdb_schema_check(int slot, const qd_name_t* nm, ray_t* tbl,
 /* The declaration spelling of a logical type, as `typeof`/DESCRIBE print it: an alias (JSON) wins outright,
  * LIST/ARRAY suffix their child, DECIMAL and ENUM carry their parameters, everything else is its bare name. */
 static void qd_spell_type(duck_logical_type lt, qd_buf* b) {
-    char* alias = QAPI.logical_type_get_alias(lt);
-    if (alias) { q_duckdb_puts(b, alias); QAPI.duck_free(alias); return; }
-    duck_type id = QAPI.get_type_id(lt);
+    char alias[256];
+    if (q_duckdb_type_alias(lt, alias, sizeof alias)) { q_duckdb_puts(b, alias); return; }
+    duck_type id = q_duckdb_type_id(lt);
     char num[48];
     duck_logical_type child = NULL;
     switch (id) {
         case QDUCK_TYPE_LIST:
         case QDUCK_TYPE_ARRAY:
-            child = id == QDUCK_TYPE_LIST ? QAPI.list_type_child_type(lt) : QAPI.array_type_child_type(lt);
-            if (child) { qd_spell_type(child, b); QAPI.destroy_logical_type(&child); }
+            child = q_duckdb_type_param(lt, 0, NULL);
+            if (child) { qd_spell_type(child, b); QAPI.logical_type_destroy(&child); }
             if (id == QDUCK_TYPE_LIST) q_duckdb_puts(b, "[]");
-            else { snprintf(num, sizeof num, "[%llu]", (unsigned long long)QAPI.array_type_array_size(lt)); q_duckdb_puts(b, num); }
+            else { snprintf(num, sizeof num, "[%lld]", (long long)q_duckdb_type_param_int(lt, 1)); q_duckdb_puts(b, num); }
             return;
         case QDUCK_TYPE_DECIMAL:
-            snprintf(num, sizeof num, "DECIMAL(%u,%u)", QAPI.decimal_width(lt), QAPI.decimal_scale(lt));
+            snprintf(num, sizeof num, "DECIMAL(%lld,%lld)", (long long)q_duckdb_type_param_int(lt, 0),
+                     (long long)q_duckdb_type_param_int(lt, 1));
             q_duckdb_puts(b, num);
             return;
         case QDUCK_TYPE_STRUCT:
         case QDUCK_TYPE_MAP:
-        case QDUCK_TYPE_UNION: {   /* ADR 12's three records: a MAP declares two types, the others named fields */
+        case QDUCK_TYPE_UNION:
+        case QDUCK_TYPE_TUPLE: {   /* the records: a MAP declares two types, a TUPLE its positions, the others named fields */
             int n = q_duckdb_codec_rec_nfields(lt, id);
             q_duckdb_puts(b, q_duckdb_type_name(id));
             q_duckdb_puts(b, "(");
@@ -541,20 +557,21 @@ static void qd_spell_type(duck_logical_type lt, qd_buf* b) {
                 char* nm;
                 child = q_duckdb_codec_rec_child(lt, id, i, &nm);
                 if (i) q_duckdb_puts(b, ", ");
-                if (nm) { q_duckdb_put_ident(b, nm, strlen(nm)); q_duckdb_puts(b, " "); QAPI.duck_free(nm); }
-                if (child) { qd_spell_type(child, b); QAPI.destroy_logical_type(&child); }
+                if (nm && id != QDUCK_TYPE_TUPLE) { q_duckdb_put_ident(b, nm, strlen(nm)); q_duckdb_puts(b, " "); }
+                free(nm);
+                if (child) { qd_spell_type(child, b); QAPI.logical_type_destroy(&child); }
             }
             q_duckdb_puts(b, ")");
             return;
         }
         case QDUCK_TYPE_ENUM: {
-            uint32_t n = QAPI.enum_dictionary_size(lt);
+            duck_idx_t n = q_duckdb_type_nparams(lt);
             q_duckdb_puts(b, "ENUM(");
-            for (uint32_t i = 0; i < n; i++) {
-                char* v = QAPI.enum_dictionary_value(lt, i);
+            for (duck_idx_t i = 0; i < n; i++) {
+                char* v = q_duckdb_type_param_text(lt, i);
                 if (i) q_duckdb_puts(b, ", ");
                 q_duckdb_put_strlit(b, QD_TEXT(v), strlen(QD_TEXT(v)));
-                if (v) QAPI.duck_free(v);
+                free(v);
             }
             q_duckdb_puts(b, ")");
             return;
@@ -671,17 +688,19 @@ static ray_t* qd_schema_fail(int slot, const char* why) { return q_duckdb_fail(s
 
 /* A declared dtype is spliced into a CAST verbatim, so it must be ONE type declaration and nothing else: a name,
  * balanced (…) parameters and […] suffixes, and inside them quoted literals (ENUM('a', 'b')) or quoted field
- * names (STRUCT("Bird Name" INTEGER)) — never a quote left open, a top-level comma, a `;` or a comment start,
- * which is what would let text escape the CAST.  What passes here and is still no type fails inside the CAST,
- * where DuckDB's parser judges it.  `q` is the quote a run opened; a doubled one is that character escaped. */
+ * names (STRUCT("Bird Name" INTEGER)), or opening it as the quoted name of a type ("NULL", "NULL"[]) — never a
+ * quote left open, a top-level comma, a `;` or a comment start, which is what would let text escape the CAST.
+ * What passes here and is still no type fails inside the CAST, where DuckDB's parser judges it.  `q` is the quote
+ * a run opened; a doubled one is that character escaped. */
 static bool qd_dtype_wellformed(const char* s) {
     int depth = 0;
     char q = 0;
-    if (!*s || !(isalpha((unsigned char)*s) || *s == '_')) return false;
+    const char* start = s;
+    if (!*s || !(isalpha((unsigned char)*s) || *s == '_' || *s == '"')) return false;
     for (; *s; s++) {
         unsigned char ch = (unsigned char)*s;
         if (q) { if (ch == (unsigned char)q) { if (s[1] == q) s++; else q = 0; } continue; }
-        if (ch == '\'' || ch == '"') { if (depth == 0) return false; q = (char)ch; continue; }
+        if (ch == '\'' || ch == '"') { if (depth == 0 && !(ch == '"' && s == start)) return false; q = (char)ch; continue; }
         if (ch == '(' || ch == '[') { depth++; continue; }
         if (ch == ')' || ch == ']') { if (--depth < 0) return false; continue; }
         if (ch == ',' && depth == 0) return false;
@@ -724,7 +743,8 @@ ray_t* q_duckdb_schema_desc_parse(int slot, ray_t* schema, qd_desc_t** out, int6
 /* the record kind a declaration names, STRUCT where it names none (which is what a bare dict column stages as) */
 static duck_type qd_rec_kind(const char* dt) {
     return strncasecmp(dt, "MAP(", 4) == 0   ? QDUCK_TYPE_MAP
-         : strncasecmp(dt, "UNION(", 6) == 0 ? QDUCK_TYPE_UNION : QDUCK_TYPE_STRUCT;
+         : strncasecmp(dt, "UNION(", 6) == 0 ? QDUCK_TYPE_UNION
+         : strncasecmp(dt, "TUPLE(", 6) == 0 ? QDUCK_TYPE_TUPLE : QDUCK_TYPE_STRUCT;
 }
 
 static ray_t* qd_declare_fail(int slot, const qd_desc_t* d, const char* why) {
@@ -766,8 +786,9 @@ static ray_t* qd_declared_logical(int slot, const char* dtype, duck_logical_type
     ray_t* e = q_duckdb_run(slot, b.p, &res, 1);
     q_duckdb_buf_free(&b);
     if (e) return e;
-    *out = QAPI.column_logical_type(&res, 0);
-    QAPI.destroy_result(&res);
+    duck_logical_type lt = q_duckdb_result_col_type(&res, 0);   /* borrowed: copied to outlive the result */
+    if (lt && QAPI.logical_type_copy(lt, out, NULL) != QDuckSuccess) *out = NULL;
+    q_duckdb_result_free(&res);
     return NULL;
 }
 
@@ -791,8 +812,10 @@ ray_t* q_duckdb_schema_declare(int slot, ray_t* tbl, qd_colmap_t* cms, qd_desc_t
         if (d->logical[0] && !q_duckdb_codec_parse_logical(d->logical, &ref))
             return qd_declare_fail(slot, d, "unknown logical type");
         bool bits = d->logical[0] && ref.leaf->dk_type == QDUCK_TYPE_BIT;
+        /* a TUPLE's rows collapse to whatever vector they fit, so its logical is judged by the dtype leg below */
+        bool tuple = d->logical[0] && ref.leaf->dk_type == QDUCK_TYPE_TUPLE;
         if (d->logical[0] && !bits) {
-            if (!cms[c].undet && (ref.depth != cms[c].depth || ref.leaf->ray_type != cms[c].leaf->ray_type))
+            if (!cms[c].undet && !tuple && (ref.depth != cms[c].depth || ref.leaf->ray_type != cms[c].leaf->ray_type))
                 return qd_declare_fail(slot, d, "logical type does not fit the column");
             /* ADR 15: an empty 0h column has no carrier to fit AGAINST — the row IS the carrier, so it is adopted.
              * What it adopts is the q type's CANONICAL row, never the declared row itself: a column with rows
@@ -807,7 +830,7 @@ ray_t* q_duckdb_schema_declare(int slot, ray_t* tbl, qd_colmap_t* cms, qd_desc_t
         ray_t* e = qd_canon_dtype(slot, d);
         if (e) return e;
         /* ADR 20: BIT is the one declaration that REMAPS instead of casting — a boolean-list column derives
-         * BOOLEAN[] and DuckDB implements no cast either way, so the appender must write BIT directly.  The
+         * BOOLEAN[] and DuckDB implements no cast either way, so the chunk writer must write BIT directly.  The
          * remap is per LEVEL: a BIT[] is one LIST over the bitstring the innermost booleans spell. */
         if (bits) {
             qd_buf sp = {0};
@@ -830,12 +853,13 @@ ray_t* q_duckdb_schema_declare(int slot, ray_t* tbl, qd_colmap_t* cms, qd_desc_t
             if ((e = qd_declared_logical(slot, d->dtype, &lt))) return e;
             qd_colmap_t stage = { NULL, NULL, 0, false };
             bool mapped = lt && q_duckdb_codec_declared_stage_map(lt, &stage);
-            if (lt) QAPI.destroy_logical_type(&lt);
+            if (lt) QAPI.logical_type_destroy(&lt);
             bool rows = q_count(tbl) > 0, rec = mapped && q_duckdb_codec_is_rec(stage.leaf);
-            const char* why = !mapped       ? "the declared type has no mapping"
-                            : rec           ? "a () cell spells no record: an empty record cell is an empty table"
-                            : !stage.depth  ? "a () cell is a list, so the declared type must be a LIST" : NULL;
-            bool adopt = mapped && !rec && !(rows && why);
+            bool tuple = rec && stage.leaf->dk_type == QDUCK_TYPE_TUPLE;   /* () IS the NULL tuple, so rows of it read */
+            const char* why = !mapped        ? "the declared type has no mapping"
+                            : rec && !tuple  ? "a () cell spells no record: an empty record cell is an empty table"
+                            : !rec && !stage.depth ? "a () cell is a list, so the declared type must be a LIST" : NULL;
+            bool adopt = mapped && (!rec || (tuple && rows)) && !(rows && why);
             if (adopt) { q_duckdb_codec_map_free(&cms[c]); cms[c] = stage; }
             else if (mapped) q_duckdb_codec_map_free(&stage);
             if (rows && why) return qd_declare_fail(slot, d, why);
@@ -845,12 +869,13 @@ ray_t* q_duckdb_schema_declare(int slot, ray_t* tbl, qd_colmap_t* cms, qd_desc_t
         if (d->dtype[0] && (q_duckdb_schema_needs(&cms[c], d->dtype, cms[c].undet) & QD_NEED_DTYPE)) dtypes[c] = d->dtype;
         /* ADR 12: a dict spells a STRUCT by itself, so a declared record's fields — which of the three it is, in
          * what order, and the ones no row is live in — are read off the DECLARATION, never off the rows. */
-        if (dtypes[c] && !cms[c].undet && q_duckdb_codec_is_rec(cms[c].leaf)) {
+        if (dtypes[c] && !cms[c].undet &&
+            (q_duckdb_codec_is_rec(cms[c].leaf) || qd_rec_kind(d->dtype) == QDUCK_TYPE_TUPLE)) {
             duck_logical_type lt = NULL;
             if ((e = qd_declared_logical(slot, d->dtype, &lt))) return e;
             e = q_duckdb_codec_map_declared(slot, ray_table_get_col_idx(tbl, c), lt, qd_rec_kind(d->dtype), &cms[c]);
             if (!e) e = q_duckdb_codec_check_fields(slot, tbl, c, lt, &cms[c]);
-            if (lt) QAPI.destroy_logical_type(&lt);
+            if (lt) QAPI.logical_type_destroy(&lt);
             if (e) return e;
         }
     }
@@ -862,9 +887,15 @@ ray_t* q_duckdb_schema_declare(int slot, ray_t* tbl, qd_colmap_t* cms, qd_desc_t
         const char* np = q_duckdb_col_name(tbl, c, &nl);
         return q_duckdb_fail_col(slot, np, nl, "an empty untyped column needs a schema row to say what type it is");
     }
-    /* undeclared, a dict spells itself: the STRUCT of the fields its cells agree on, which is all a row can say */
+    /* undeclared, a dict spells itself: the STRUCT of the fields its cells agree on, which is all a row can say;
+     * a list of lists spells nothing — a TUPLE's width and types live in its declaration alone */
     for (int64_t c = 0; c < ncols; c++) {
         if (!q_duckdb_codec_is_rec(cms[c].leaf) || cms[c].undet || dtypes[c]) continue;
+        if (cms[c].leaf->dk_type == QDUCK_TYPE_TUPLE) {
+            size_t nl;
+            const char* np = q_duckdb_col_name(tbl, c, &nl);
+            return q_duckdb_fail_col(slot, np, nl, "%s", QD_NO_SQL_MEANING);
+        }
         ray_t* e = q_duckdb_codec_map_declared(slot, ray_table_get_col_idx(tbl, c), NULL, QDUCK_TYPE_STRUCT, &cms[c]);
         if (!e) e = q_duckdb_codec_check_fields(slot, tbl, c, NULL, &cms[c]);
         if (e) return e;

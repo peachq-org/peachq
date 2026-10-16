@@ -76,6 +76,21 @@ EMFLAGS = \
   -s EXPORT_NAME=createPeachQ \
   --no-entry
 
+# The emscripten glue uses syntax a pre-v18 node cannot parse; emsdk_env.sh
+# exports its own node as EMSDK_NODE.
+NODE ?= $(if $(EMSDK_NODE),$(EMSDK_NODE),node)
+
+# DuckDB's browser build, fetched once and checked against the pin, where wasm/server.py serves it at /duckdb/.
+duckdb-wasm:
+	tools/duckdb-wasm-fetch.sh $(DUCKDB_WASM)
+
+# FROZEN while wasm/FROZEN exists (owner, 2026-10-15): the bridge speaks DuckDB's v2 C API and duckdb-wasm has no
+# 2.0 bundle, so q_wasm_duckdb.c (the v1 table) cannot be rebuilt and the published build stays live. Every wasm
+# target is a loud skip, never a compiler error. Delete the marker with the shim rebuilt on a 2.0 bundle.
+ifneq ($(wildcard wasm/FROZEN),)
+wasm wasm-smoke wasm-browser-smoke wasm-duckdb-suites:
+	@echo "wasm: SKIPPED, $$(head -1 wasm/FROZEN)"
+else
 # The page, Worker and client are copied, and examples/q (bar the terminal games) is
 # re-staged with its manifest, on every run: both are cheap, and a stale copy is not.
 wasm: $(OUTDIR)/$(TARGET).js
@@ -86,10 +101,6 @@ $(OUTDIR)/$(TARGET).js: $(WASM_OBJ) $(RE2_LIB) $(FMT_LIB)
 	@mkdir -p $(OUTDIR)
 	$(CXX) -O3 -o $@ $(WASM_OBJ) $(RE2_LIB) $(FMT_LIB) $(EMFLAGS)
 
-# The emscripten glue uses syntax a pre-v18 node cannot parse; emsdk_env.sh
-# exports its own node as EMSDK_NODE.
-NODE ?= $(if $(EMSDK_NODE),$(EMSDK_NODE),node)
-
 wasm-smoke: wasm
 	$(NODE) wasm/smoke.js $(OUTDIR)
 
@@ -98,14 +109,11 @@ wasm-smoke: wasm
 wasm-browser-smoke: wasm duckdb-wasm
 	$(NODE) wasm/browser-smoke.cjs $(OUTDIR) $(PLAYWRIGHT)
 
-# DuckDB's browser build, fetched once and checked against the pin, where wasm/server.py serves it at /duckdb/.
-duckdb-wasm:
-	tools/duckdb-wasm-fetch.sh $(DUCKDB_WASM)
-
 # test/q/duckdb replayed in the browser, by hand before a release (never in make q-test): red off the recorded
 # divergences (wasm/README.md).
 wasm-duckdb-suites: wasm duckdb-wasm
 	$(NODE) wasm/duckdb-suites.cjs $(OUTDIR) $(PLAYWRIGHT)
+endif
 
 clean::
 	-rm -rf $(OUTDIR)

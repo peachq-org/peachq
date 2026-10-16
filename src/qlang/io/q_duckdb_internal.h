@@ -33,27 +33,34 @@ void   q_duckdb_err_stash(int slot, const char* fmt, ...);
 size_t q_duckdb_err_mark(void);
 void   q_duckdb_err_rewind(int slot, size_t mark);
 ray_t* q_duckdb_fail(int slot, const char* fmt, ...);
+ray_t* q_duckdb_fail_err(int slot, duck_err* e);
 ray_t* q_duckdb_fail_col(int slot, const char* name, size_t n, const char* fmt, ...);
 const char* q_duckdb_col_name(ray_t* tbl, int64_t c, size_t* len);
 const char* q_duckdb_err_text(int slot);
 
-/* One row of `.duckdb.sqllog`: t0 = q_dotz_now_ns(0) read before the work, rows = NULL_I64 where the count is not
- * the bridge's to know, err = NULL when it succeeded.  Every SQL statement is noted inside q_duckdb_run; the
- * appender, which is not SQL at all, notes a `/ appender ...` line of its own so the timeline has no hole. */
+/* One row of `.duckdb.sqllog`: t0 = q_dotz_now_ns(0) read before the work, rows = the rows a query answered or a
+ * DML statement changed (NULL_I64 where there is no count), err = NULL when it succeeded.  Every statement is noted
+ * inside q_duckdb_run — the row move of a write included, now that it is an INSERT. */
 void q_duckdb_stmt_note(int slot, const char* sql, int64_t t0, bool ok, int64_t rows, const char* err);
 
 /* growable SQL text; `oom` latches and every put behind it is a no-op */
 typedef struct { char* p; size_t len, cap; int oom; } qd_buf;
 
-/* the statement seam.  run: NULL and *out filled (the caller destroys it), or an owned error with the result already
- * destroyed; stash=0 is a probe whose failure stays off err[].  exec: run, the result dropped.  query: the result as
- * an OWNED table, `::` for a column-less statement, an owned error otherwise — never NULL.  The _buf forms consume
- * the built buffer either way; one that lost its text answers 'wsfull. */
+/* the statement seam.  run: NULL and *out filled (the caller frees it with q_duckdb_result_free), or an owned error
+ * with nothing to free; stash=0 is a probe whose failure stays off err[].  exec: run, the result dropped.  query: the
+ * result as an OWNED table, `::` for a column-less statement, an owned error otherwise — never NULL.  The _buf forms
+ * consume the built buffer either way; one that lost its text answers 'wsfull. */
 ray_t* q_duckdb_run(int slot, const char* sql, duck_result* out, int stash);
 ray_t* q_duckdb_exec(int slot, const char* sql);
 ray_t* q_duckdb_exec_buf(int slot, qd_buf* b);
 ray_t* q_duckdb_query(int slot, const char* sql, int stash);
 ray_t* q_duckdb_query_buf(int slot, qd_buf* b, int stash);
+void   q_duckdb_result_free(duck_result* r);
+duck_logical_type q_duckdb_result_col_type(const duck_result* r, duck_idx_t c);   /* borrowed */
+
+/* the name a write's row move reads its collection under, through the connection's replacement scan; reserved at
+ * the write door and probed in the catalog before every move (q_duckdb_schema_batch_clear) */
+#define QD_BATCH_TBL "_q_batch"
 
 void q_duckdb_puts(qd_buf* b, const char* s);
 void q_duckdb_putn(qd_buf* b, const char* s, size_t n);
@@ -118,8 +125,20 @@ bool   q_duckdb_codec_parse_logical(const char* s, qd_colmap_t* out);
 const qd_tmap_t* q_duckdb_codec_canon_leaf(int8_t ray_type);
 bool   q_duckdb_codec_raw_is_text(int8_t ray_type);
 bool   q_duckdb_codec_is_rec(const qd_tmap_t* tm);
-/* a record type's field count, and field i: its type OWNED (destroy_logical_type), its name OWNED (duck_free; a
- * MAP's halves have none, so *name is NULL there) */
+extern const char QD_NO_SQL_MEANING[];
+/* the logical-type ladder over the v2 parameters (q_duckdb_codec.c): the id; the parameter count; parameter i's
+ * TYPE (owned) with its name (owned copy, NULL where positional); a flat type built from an id; a vector read as a
+ * flat view (false where DuckDB refuses) */
+duck_type  q_duckdb_type_id(duck_logical_type lt);
+duck_idx_t q_duckdb_type_nparams(duck_logical_type lt);
+duck_logical_type q_duckdb_type_param(duck_logical_type lt, duck_idx_t i, char** name);
+int64_t q_duckdb_type_param_int(duck_logical_type lt, duck_idx_t i);    /* a width, scale or array size; -1 = none */
+char*   q_duckdb_type_param_text(duck_logical_type lt, duck_idx_t i);   /* an ENUM entry, owned */
+bool    q_duckdb_type_alias(duck_logical_type lt, char* buf, size_t cap);
+duck_logical_type q_duckdb_type_make(int slot, duck_type id);
+bool   q_duckdb_vec_view(duck_vector v, duck_view* out);
+/* a record type's field count, and field i: its type OWNED, its name OWNED (a MAP's halves have none, so *name is
+ * NULL there) */
 int    q_duckdb_codec_rec_nfields(duck_logical_type lt, duck_type id);
 duck_logical_type q_duckdb_codec_rec_child(duck_logical_type lt, duck_type id, int i, char** name);
 void   q_duckdb_codec_map_free(qd_colmap_t* cm);
@@ -145,15 +164,17 @@ ray_t* q_duckdb_codec_stage_image(ray_t* tbl, const qd_colmap_t* cms, ray_t* con
                                   ray_t* const* keeps, qd_colmap_t* scms, ray_t** smasks, ray_t** skeeps);
 void   q_duckdb_codec_refine(const char* cname, size_t n, const qd_desc_t* desc, int64_t ndesc, qd_colmap_t* cm);
 ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_t* desc, int64_t ndesc, ray_t** schema);
-/* a q value as the value the appender stores for the one-row column ([] v:enlist v): an atom or string its type, a
- * vector or list a LIST of the codec's element type, a null a NULL of that type; *out owned (destroy_value).
+/* a q value as the value the write path stores for the one-row column ([] v:enlist v): an atom or string its type, a
+ * vector or list a LIST of the codec's element type, a null a NULL of that type; *out owned (value_destroy).
  * 'type for a dict, a table or a byte vector; what the codec refuses ('duckdb, its reason) this refuses */
 ray_t* q_duckdb_codec_bind_value(int slot, ray_t* v, duck_value* out);
 ray_t* q_duckdb_codec_check_table(int slot, ray_t* tbl, qd_colmap_t* cms);
 ray_t* q_duckdb_codec_check_fields(int slot, ray_t* tbl, int64_t c, duck_logical_type lt, const qd_colmap_t* cm);
 ray_t* q_duckdb_codec_decay_enums(int slot, ray_t* tbl, qd_enum_t* en);
-ray_t* q_duckdb_codec_append_table(int slot, const qd_name_t* nm, bool temp, ray_t* tbl,
-                                   const qd_colmap_t* cms, ray_t* const* masks, ray_t* const* keeps);
+/* the rows of a q table as ONE column data collection (owned: column_data_collection_destroy), the write path's
+ * unit of transfer */
+ray_t* q_duckdb_codec_collect(int slot, ray_t* tbl, const qd_colmap_t* cms, ray_t* const* masks, ray_t* const* keeps,
+                              duck_collection* out);
 ray_t* q_duckdb_codec_strip_companions(int slot, ray_t* tbl, ray_t** masks, ray_t** offs, ray_t** keeps,
                                        bool* iskey, qd_enum_t* en, bool bare);
 
@@ -169,6 +190,7 @@ void        q_duckdb_schema_name_resolve(int slot, qd_name_t* nm);
 void        q_duckdb_schema_put_name(qd_buf* b, const qd_name_t* nm);
 ray_t*      q_duckdb_schema_catalog_cols(int slot, const qd_name_t* nm);
 bool        q_duckdb_schema_reserved_name(const qd_name_t* nm);
+ray_t*      q_duckdb_schema_batch_clear(int slot);   /* no catalog object stands under the batch name */
 const char* q_duckdb_schema_text_cell(ray_t* tbl, int64_t col, int64_t row, size_t* len);
 const qd_desc_t* q_duckdb_schema_desc_find(const char* name, size_t len, const qd_desc_t* desc, int64_t ndesc);
 ray_t*      q_duckdb_schema_check_names(int slot, ray_t* tbl);

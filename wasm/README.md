@@ -13,7 +13,8 @@ small client library. The build output, `build/wasm/www/`, is a directory any st
 | `index.html`         | The minimal reference page, built on the client API. |
 | `q_wasm.c`           | The C ABI: `q_wasm_init`, `q_wasm_eval` (text through `q_ctx_eval_src`, the `value`/IPC text function, answered on stdout/stderr as the console displays it), `q_wasm_qcmd` (a `.qcmd` replayed through the transcript door, scored by the host). |
 | `q_wasm_http.c`      | The wasm side of the HTTP exchange seam: calls the host's `Module.peachqFetch`, rebuilds the raw response. |
-| `q_wasm_duckdb.c`    | The DuckDB C-API table (`duck_api_t`) bound across to DuckDB's own wasm module, which the host loads on first use. |
+| `q_wasm_duckdb.c`    | The DuckDB v1 C-API table bound across to DuckDB's own wasm module, which the host loads on first use. FROZEN (below): the desktop bridge drives the v2 API, which no duckdb-wasm bundle has yet. |
+| `FROZEN`             | While present, every wasm target and the release's wasm job SKIP loudly: the published build (v0.88, duckdb-wasm 1.5.4) stays live, never replaced by a build from a v2-bridge commit. Delete it with the shim rebuilt on a 2.0 bundle. |
 | `duck-loader.js`     | Loads DuckDB's published browser build synchronously in the Worker; main is its WebDB, over q's filesystem. |
 | `duckdb-wasm.pin`    | The DuckDB browser build a peachq build loads: version, and every file's sha256 and upstream URL. |
 | `q_wasm_shell.c`     | The `system` mini-shell over the in-memory FS: `pwd ls cat echo mkdir rm head tail`. |
@@ -83,7 +84,7 @@ WebDB: local paths read and write q's filesystem, `http(s)://` and `s3://` go th
 
 Divergences from the desktop (`make -f Makefile.wasm wasm-duckdb-suites` fails on any other count):
 
-- **The bundle's DuckDB version**, which may differ from the desktop pin (release.yml): v1.5.4 here, v1.5.5 on the
+- **The bundle's DuckDB version**, which may differ from the desktop pin (release.yml): v1.5.4 here, v2.0.0-alpha46057 on the
   desktop — visible only in `version()`. Realigned by one small PR when duckdb-wasm ships a build on the desktop's
   version.
 - **Single-threaded.** The build has no threads, so `threads` above 1 is refused (`handles`, `main`: 3 rows each).
