@@ -532,9 +532,9 @@ static int sym_scheme(const char* sp, size_t sl) {
     return sl && sp[0] == ':' && q_http_client_scheme_is(sp + 1, sl - 1) ? SCHEME_HTTP : SCHEME_NONE;
 }
 
-static const char* const PQ_KINDS[] = { NULL, "q", "qfork", "qspawn", "duckdb" };
+static const char* const PQ_KINDS[] = { NULL, "q", "qfork", "qspawn", "duckdb", "kafka" };
 
-const char* q_handles_pq_kind_name(q_pq_kind k) { return k > Q_PQ_NONE && k <= Q_PQ_DUCKDB ? PQ_KINDS[k] : NULL; }
+const char* q_handles_pq_kind_name(q_pq_kind k) { return k > Q_PQ_NONE && k < Q_PQ_BAD ? PQ_KINDS[k] : NULL; }
 
 int q_handles_name_ok(const char* p, size_t n) {
     if (!n || !((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z'))) return 0;
@@ -559,12 +559,12 @@ q_pq_kind q_handles_pq(const char* s, size_t n, q_pq_parts* parts) {
         i = j + 1;
     }
     q_pq_kind kind = Q_PQ_BAD;
-    for (int k = Q_PQ_Q; k <= Q_PQ_DUCKDB && nf; k++)
+    for (int k = Q_PQ_Q; k < Q_PQ_BAD && nf; k++)
         if (strlen(PQ_KINDS[k]) == fn[0] && memcmp(f[0], PQ_KINDS[k], fn[0]) == 0) kind = (q_pq_kind)k;
     if (!parts) return kind;
     *parts = (q_pq_parts){ f[1], fn[1], tbl ? (f[2] ? f[2] : s + e) : NULL, tbl ? fn[2] : 0, 0 };
     parts->ok = kind != Q_PQ_BAD && !extra && nf == (tbl ? 3 : 2) && q_handles_name_ok(f[1], fn[1]) &&
-                (!tbl || q_handles_name_ok(f[2], fn[2]));
+                (!tbl || fn[2]);   /* a table name goes to its provider as written: the provider judges it */
     return kind;
 }
 

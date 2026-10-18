@@ -114,10 +114,14 @@ int q_provider_coord_sym_form(ray_t* x) {
     return x && x->type == -RAY_SYM ? coord_sym_form(x->i64) : 0;
 }
 
-/* where a kind's table hooks live: DuckDB's own namespace, the q peers' internal one; qfork/qspawn have no tables */
+/* where a kind's table hooks live: DuckDB's own namespace, the q peers' internal one, Kafka's own; qfork/qspawn
+ * have no tables */
 static const char* hook_ns(q_pq_kind kind) {
-    return kind == Q_PQ_DUCKDB ? "duckdb" : kind == Q_PQ_Q ? "pq.i.q" : NULL;
+    return kind == Q_PQ_DUCKDB ? "duckdb" : kind == Q_PQ_Q ? "pq.i.q" : kind == Q_PQ_KAFKA ? "kafka" : NULL;
 }
+
+/* a kind whose connection is opened and closed by its own hooks (`.X.i.open[alias; arg]` answers the token) */
+static int hook_owns_conn(q_pq_kind kind) { return kind == Q_PQ_DUCKDB || kind == Q_PQ_KAFKA; }
 
 /* ".<ns>.<hook>" interned; -1 when the kind has no hooks */
 static int64_t hook_sym(q_pq_kind kind, const char* hook) {
@@ -272,12 +276,12 @@ static ray_t* logs_absolute(ray_t* d) {
 }
 
 /* The one open every hopen and re-dial runs.  A q kind's token must be a q IPC connection this call made — its open
- * stamp, which is also what says the alias is a peer (a file hopen_q reached is closed again, 'domain); DuckDB's is
- * whatever `.duckdb.i.open[alias; arg]` answered. */
+ * stamp, which is also what says the alias is a peer (a file hopen_q reached is closed again, 'domain); a hooked
+ * kind's is whatever `.X.i.open[alias; arg]` answered. */
 static ray_t* conn_open(q_pq_kind kind, int64_t alias, ray_t* arg, ray_t** connid_out, int64_t* stamp_out) {
     *connid_out = NULL;
     *stamp_out = 0;
-    if (kind == Q_PQ_DUCKDB) {
+    if (hook_owns_conn(kind)) {
         ray_t* a = ray_sym(alias);
         ray_t* args[2] = { a, arg };
         ray_t* c = hook_call(kind, "i.open", args, 2);
@@ -303,7 +307,7 @@ static ray_t* conn_open(q_pq_kind kind, int64_t alias, ray_t* arg, ray_t** conni
 }
 
 static void conn_close(q_pq_kind kind, ray_t* connid) {
-    if (kind != Q_PQ_DUCKDB) {
+    if (!hook_owns_conn(kind)) {
         ray_t* r = q_handles_close(token_fd(connid));
         if (r) ray_release(r);
         return;
@@ -567,7 +571,8 @@ static ray_t* prov_bind(prov_ent* e, ray_t* name) {
 
 /* A q peer's alias is exactly a kdb handle: every message goes to the peer unchanged, async is its negative.  On
  * DuckDB text is SQL — bare, or first in a pair with its parameters, which the provider's own door judges — and a
- * name binds a carrier; nothing else is a message. */
+ * name binds a carrier; nothing else is a message.  A Kafka alias's message is the whole value: its `call` hook
+ * judges it (a `(topic; key; bytes)` list publishes). */
 static ray_t* prov_dispatch(prov_ent* e, ray_t* y, int sync) {
     if (e->stamp) {
         int64_t fd = token_fd(e->connid);
@@ -589,8 +594,13 @@ static ray_t* prov_dispatch(prov_ent* e, ray_t* y, int sync) {
         return r;
     }
     const char* bp; size_t bn;
-    if (sym_text(y, &bp, &bn)) return q_handles_name_ok(bp, bn) ? prov_bind(e, y) : q_err(QE_DOMAIN);
-    return q_err(QE_TYPE);
+    if (sym_text(y, &bp, &bn)) return prov_bind(e, y);
+    if (e->kind != Q_PQ_KAFKA) return q_err(QE_TYPE);
+    ray_t* flag = ray_bool(sync != 0);
+    ray_t* args[3] = { e->connid, y, flag };
+    ray_t* r = hook_call(e->kind, "call", args, 3);
+    ray_release(flag);
+    return r;
 }
 
 ray_t* q_provider_apply(int64_t qh, ray_t* y) {
@@ -908,6 +918,31 @@ ray_t* q_provider_load(const char* s, size_t n, ray_t* tables) {
     ray_release(names);
     if (err) { ray_release(out); return err; }
     return out;
+}
+
+/* `key` of a `:pq:` sym: a connection answers the names its load would bind (.X.i.load[token; ::]), a table
+ * coordinate its advisory column names (.X.bind); NULL = not a `:pq:` sym, 'conn when the alias is not open */
+ray_t* q_provider_key(ray_t* x) {
+    const char* s; size_t n;
+    q_pq_parts p;
+    q_pq_kind kind = sym_text(x, &s, &n) ? q_handles_pq(s, n, &p) : Q_PQ_NONE;
+    if (!kind) return NULL;
+    if (!p.ok) return q_err(QE_DOMAIN);
+    if (p.table) {
+        tref_t tr;
+        ray_t* err = tref_open(s, n, &tr);
+        return err ? err : tref_hook(&tr, "bind");
+    }
+    prov_ent* e;
+    ray_t* err = alias_live(kind, &p, &e);
+    if (err) return err;
+    ray_t* f = hook_fn(kind, "i.load");
+    if (!f) return q_err(QE_NYI);
+    ray_t* args[2] = { e->connid, RAY_NULL_OBJ };
+    ray_t* names = q_eval_apply_value(f, args, 2);
+    ray_release(f);
+    err = load_names_ok(names);
+    return err ? err : names;
 }
 
 /* .pq.i.load[h; tables] — the handle (the alias sym, or the legacy int) spelled back to its coordinate */

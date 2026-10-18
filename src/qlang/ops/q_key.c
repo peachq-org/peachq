@@ -6,6 +6,7 @@
 #include "qlang/base/q_type.h"             /* q_type_qname + the is_dict/is_str_atom/is_keyed probes */
 #include "qlang/q_registry_internal.h" /* q_til_wrap — the til arm */
 #include "qlang/ops/q_table.h"        /* q_table_operand — `keys` takes a table by name */
+#include "qlang/io/q_provider.h"      /* q_provider_key — a `:pq:` alias lists its tables, a coordinate its columns */
 #include "lang/internal.h"            /* ray_fs_list_fn — the quarry's sorted directory listing */
 #include "table/sym.h"                /* ray_sym_intern_runtime, ray_sym_str */
 #include <errno.h>
@@ -51,7 +52,13 @@ ray_t* q_key_name(int64_t sym) {
         ray_t* r = q_env_ns_roster();
         return r ? r : q_err(QE_WSFULL);
     }
-    if (nm[0] == ':') { ray_release(s); return q_key_dir(sym); }
+    if (nm[0] == ':') {
+        ray_release(s);
+        ray_t* a = ray_sym(sym);
+        ray_t* pk = q_provider_key(a);
+        ray_release(a);
+        return pk ? pk : q_key_dir(sym);
+    }
     if (l == 2 && nm[0] == '.' && nm[1] == 'z') {   /* ref/dotz.md: a pseudo-namespace no key enumerates */
         ray_release(s);
         return ray_list_new(1);

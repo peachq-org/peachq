@@ -16,6 +16,7 @@
 #include "qlang/io/q_io.h"        /* q_io_set — `set`'s file half */
 #include "qlang/io/q_provider.h"  /* the link seam: q_provider_carrier_is, _link/_unlink — the HOST, never a provider */
 #include "qlang/q_pq.h"           /* q_pq_autoload / _autoload_ns — a first `.pq` or missed library reference loads its file */
+#include "qlang/q_registry.h"     /* q_registry_sealed — a core file's writes never autoload */
 #include "qlang/q_prim.h"         /* q_enum_deref — FK/link dotted-walk gather */
 #include "lang/internal.h"        /* ray_error */
 #include "table/sym.h"         /* ray_sym_intern_runtime, ray_sym_str, ray_read_sym */
@@ -62,8 +63,9 @@ static ray_t* env_pq_hook(const char* p, size_t n) {
     return hit ? q_pq_autoload() : NULL;
 }
 
-/* Every other library namespace autoloads on a MISSED read of a dotted name (owner 2026-09-25): a found name never
- * gets here, so a user's definition wins and core `.j` still gains the library's `.j`. */
+/* Every other library namespace autoloads on a MISSED read of a dotted name (owner 2026-09-25), and on the first
+ * write into it (owner 2026-10-17): a found name never gets here, so a user's definition wins and core `.j` still
+ * gains the library's `.j`. */
 static ray_t* env_lib_hook(const char* p, size_t n) {
     if (n < 2 || p[0] != '.' || p[1] == '.') return NULL;
     size_t k = 1;
@@ -442,6 +444,9 @@ ray_err_t q_env_set(int64_t sym, ray_t* val) {
     int root = n == 1 && p[0] == '.';
     ray_t* le = n > 0 ? env_pq_hook(p, n) : NULL;
     if (le) ray_release(le);                 /* the load displayed it; the write itself still lands */
+    /* a library loads BEFORE a user's first write into it, so the write is the one that stays */
+    ray_t* lib = n > 0 && q_registry_sealed() ? env_lib_hook(p, n) : NULL;   /* the core files' writes precede it */
+    if (lib) ray_release(lib);
     ray_release(s);
     ray_err_t e;
     if (root) e = env_root_splat(val);

@@ -107,11 +107,12 @@ q_sym_kind q_handles_sym_kind(ray_t* sym);
 
 /* `:pq:<kind>:<alias>` is a connection, `:pq:<kind>:<alias>:<table>/` a table coordinate.  BAD = the reserved `:pq:`
  * namespace holding anything else (never a file). */
-typedef enum { Q_PQ_NONE = 0, Q_PQ_Q, Q_PQ_QFORK, Q_PQ_QSPAWN, Q_PQ_DUCKDB, Q_PQ_BAD } q_pq_kind;
+typedef enum { Q_PQ_NONE = 0, Q_PQ_Q, Q_PQ_QFORK, Q_PQ_QSPAWN, Q_PQ_DUCKDB, Q_PQ_KAFKA, Q_PQ_BAD } q_pq_kind;
 typedef struct { const char* alias; size_t alias_n; const char* table; size_t table_n; int ok; } q_pq_parts;
 
 /* The kind `s` names, NONE outside `:pq:`.  parts (may be NULL) gets the alias and table spans (table NULL = the
- * connection) and ok 0 unless the text is exactly one of the two forms with both names valid — 'domain where used. */
+ * connection) and ok 0 unless the text is exactly one of the two forms, the alias a q name and the table non-empty —
+ * 'domain where used.  The table is the provider's name as written: its handler, and the system under it, judge it. */
 q_pq_kind    q_handles_pq(const char* s, size_t n, q_pq_parts* parts);
 q_pq_kind    q_handles_pq_of(ray_t* x, const char** s, size_t* n);   /* a sym/string, or the head of a list of them */
 const char* q_handles_pq_kind_name(q_pq_kind k);

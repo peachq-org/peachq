@@ -29,7 +29,8 @@ ray_t* q_key(ray_t* x);
 
 /* Every SYMBOL operand (ref/key.md).  `` ` `` -> the root's namespaces;
  * `` `. `` -> objects in the root; `` `.foo `` -> that namespace's keys (the
- * marker included, as kdb prints it); `` `:path `` -> q_key_dir; otherwise the
+ * marker included, as kdb prints it); a `:pq:` alias -> its provider's table names, a `:pq:` table coordinate ->
+ * its column names (q_provider_key); any other `` `:path `` -> q_key_dir; otherwise the
  * name trichotomy — a dict's keys, else the sym itself when the name is bound,
  * else `()`.  Returns an OWNED value or error. */
 ray_t* q_key_name(int64_t sym);
