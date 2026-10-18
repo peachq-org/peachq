@@ -30,6 +30,7 @@ ray_t* q_provider_load(const char* s, size_t n, ray_t* tables);
 void   q_provider_pq_register(void);
 
 ray_t* q_provider_hdel(ray_t* x);                     /* NULL = not a `:pq:` sym */
+ray_t* q_provider_key(ray_t* x);                      /* `key`: an alias's table names, a coordinate's columns; NULL = not ours */
 ray_t* q_provider_apply(int64_t qh, ray_t* y);        /* the legacy int handle; qh < 0 = async */
 ray_t* q_provider_token(ray_t* handle, q_pq_kind kind); /* BORROWED; NULL = not a live alias of that kind */
 ray_t* q_provider_sym_apply(ray_t* head, ray_t** args, int64_t n);
