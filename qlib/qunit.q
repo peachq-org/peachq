@@ -322,7 +322,8 @@ runNsTests:{ [ns]
         run each ff "beforeNamespace*";
         testList: ff "test*";
         runRes: runTest each  testList;
-        runRes:update parameter:(count testList)#enlist pVals idx from runRes;
+        / a namespace with setup but no tests yet runs none and answers ()
+        if[count testList; runRes:update parameter:(count testList)#enlist pVals idx from runRes];
         / uj, not comma: peachq signals type joining a typed column onto a general one; for same-column tables they agree
         c:$[count c; c uj runRes; runRes];
         run each ff "afterNamespace*";

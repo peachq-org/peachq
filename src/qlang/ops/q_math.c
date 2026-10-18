@@ -195,6 +195,15 @@ ray_t* q_xlog_wrap(ray_t* x, ray_t* y) {
     return make_f64(log(yf) / log(xf));
 }
 
+/* mmu, inv and lsq are plain IEEE arithmetic in their written order: the build's -fassociative-math and
+ * -ffp-contract=fast would let any change elsewhere in this unit move their last bits, which the doc goldens pin. */
+#if defined(__clang__)
+#pragma float_control(push)
+#pragma clang fp contract(off) reassociate(off)
+#elif defined(__GNUC__)
+#pragma GCC push_options
+#pragma GCC optimize("no-associative-math", "fp-contract=off")
+#endif
 /* q `x mmu y` — matrix multiply / dot product (ref/mmu.md).  f64-only (`real`/int
  * -> type; the doc says "float").  Each entry is mmu_dot over a row of x and a
  * column of q_flip_wrap y.  A vector is an f64 vec whose axis drops from the
@@ -413,6 +422,11 @@ ray_t* q_lsq_wrap(ray_t* x, ray_t* y) {
     free(c); free(g);
     return out;
 }
+#if defined(__clang__)
+#pragma float_control(pop)
+#elif defined(__GNUC__)
+#pragma GCC pop_options
+#endif
 
 /* q char-string comparison — q treats a string as a char vector, so `=`/`<>`
  * compare element-wise and yield a boolean vector (`"abc"="abd"` -> 110b).

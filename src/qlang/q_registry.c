@@ -602,6 +602,8 @@ void q_registry_seal(void) {
     g_sealed = true;
 }
 
+bool q_registry_sealed(void) { return g_sealed; }
+
 int q_registry_locked(int64_t sym_id) {
     return g_sealed && sym_slot(sym_id, 0);
 }
