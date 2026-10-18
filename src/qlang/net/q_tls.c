@@ -2,7 +2,8 @@
 #include "qlang/q_count.h"
 #include "qlang/net/q_tls.h"
 #include "qlang/base/q_err.h"
-#include "qlang/io/q_dl.h"   /* q_dl_unavailable — a static build cannot dlopen OpenSSL */
+#include "qlang/io/q_dl.h"   /* q_dl_sym; q_dl_unavailable — a static build cannot dlopen OpenSSL */
+#include "qlang/io/q_openssl.h" /* the libssl / libcrypto handles */
 #include "core/timer.h"      /* ray_time_now_ms — send/handshake deadlines */
 #include "table/sym.h"
 #include "qlang/q_env.h"     /* q_env_bind_native — the .pq.i.tlsinfo native */
@@ -18,16 +19,6 @@
   #define WIN32_LEAN_AND_MEAN
   #include <windows.h>
   #include <wincrypt.h>
-  typedef HMODULE dso_t;
-  #define DSO_OPEN(p)     LoadLibraryA(p)
-  #define DSO_SYM(h, n)   ((void*)GetProcAddress((h), (n)))
-  #define DSO_NULL        NULL
-#else
-  #include <dlfcn.h>
-  typedef void* dso_t;
-  #define DSO_OPEN(p)     dlopen((p), RTLD_NOW | RTLD_GLOBAL)
-  #define DSO_SYM(h, n)   dlsym((h), (n))
-  #define DSO_NULL        NULL
 #endif
 
 #define TLS_VERIFY_NONE          0x00
@@ -45,7 +36,7 @@
 #define TLS_VERSION_STRING       0
 
 typedef struct {
-    dso_t ssl, crypto;
+    void* ssl;
     int         (*OPENSSL_init_ssl)(uint64_t, const void*);
     int         (*SSL_library_init)(void);
     const void* (*TLS_client_method)(void);
@@ -112,49 +103,16 @@ typedef struct {
 static tls_api_t A;
 static int       g_loaded = 0;    /* 0 untried, 1 ready, -1 unavailable */
 
-/* kb/ssl.md:25; two doc entries lack `.so`, so both spellings are tried. */
-static const char* const SSL_SONAMES[] = {
-#ifdef RAY_OS_WINDOWS
-    "libssl-3-x64.dll", "libssl-1_1-x64.dll", "libssl-3.dll", "libssl-1_1.dll",
-#elif defined(__APPLE__)
-    "libssl.3.dylib", "libssl.1.1.dylib", "libssl.dylib",
-#else
-    "libssl.so", "libssl.so.3", "libssl.so.1.1", "libssl.1.1", "libssl.so.1.0",
-    "libssl.so.10", "libssl.so.1.0.2", "libssl.so.1.0.1", "libssl.so.1.0.0",
-    "libssl.1.0.0",
-#endif
-    NULL
-};
-static const char* const CRYPTO_SONAMES[] = {
-#ifdef RAY_OS_WINDOWS
-    "libcrypto-3-x64.dll", "libcrypto-1_1-x64.dll", "libcrypto-3.dll", "libcrypto-1_1.dll",
-#elif defined(__APPLE__)
-    "libcrypto.3.dylib", "libcrypto.1.1.dylib", "libcrypto.dylib",
-#else
-    "libcrypto.so", "libcrypto.so.3", "libcrypto.so.1.1", "libcrypto.so.1.0.0",
-#endif
-    NULL
-};
-
-static dso_t dso_first(const char* const* names) {
-    for (int i = 0; names[i]; i++) {
-        dso_t h = DSO_OPEN(names[i]);
-        if (h != DSO_NULL) return h;
-    }
-    return DSO_NULL;
-}
-
 /* Via a void* slot: casting dlsym's result to a function pointer is not ISO C. */
-#define SYM(h, f)  (*(void**)(&A.f) = DSO_SYM((h), #f))
+#define SYM(h, f)  (*(void**)(&A.f) = q_dl_sym((h), #f))
 
 static int tls_load(void) {
     if (g_loaded) return g_loaded;
     g_loaded = -1;
     memset(&A, 0, sizeof A);
-    A.ssl = dso_first(SSL_SONAMES);
-    if (A.ssl == DSO_NULL) return g_loaded;
-    A.crypto = dso_first(CRYPTO_SONAMES);
-    dso_t cr = (A.crypto != DSO_NULL) ? A.crypto : A.ssl;
+    A.ssl = q_openssl_ssl();
+    if (!A.ssl) return g_loaded;
+    void* cr = q_openssl_crypto();
 
     SYM(A.ssl, OPENSSL_init_ssl);     SYM(A.ssl, SSL_library_init);
     SYM(A.ssl, TLS_client_method);    SYM(A.ssl, SSLv23_client_method);
