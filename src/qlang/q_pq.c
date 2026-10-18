@@ -29,6 +29,7 @@
 #include "qlang/io/q_ffi.h"    /* q_ffi_register — the .ffi.i.* natives */
 #include "qlang/io/q_termbox.h" /* q_termbox_register — the .termbox.i.* natives */
 #include "qlang/io/q_beep.h"    /* q_beep_register — the .termbox.i.beep native */
+#include "qlang/ops/q_hash.h"  /* q_hash_register — the .hash.i.hash native */
 #include "qlang/ops/q_regex.h" /* q_regex_register — the .regexp.i.* natives */
 #include "qlang/ops/q_strfmt.h" /* q_strfmt_register — the .str.i.printf/.format natives */
 #include "qlang/ops/q_strns.h" /* q_strns_register — the .str.i.* strip natives */
@@ -116,9 +117,9 @@ static void pq_set_str(void)     { q_strfmt_register(); q_strns_register(); }
 static void pq_set_termbox(void) { q_termbox_register(); q_beep_register(); }
 static const struct { const char* name; void (*bind)(void); } PQ_SETS[] = {
     { "pq", pq_set_pq },            { "csv", q_csv_register },     { "duckdb", q_duckdb_register },
-    { "ffi", q_ffi_register },      { "fs", q_io_fs_register },    { "j", q_json_register },
-    { "md", q_md_register },        { "regexp", q_regex_register }, { "str", pq_set_str },
-    { "termbox", pq_set_termbox },
+    { "ffi", q_ffi_register },      { "fs", q_io_fs_register },    { "hash", q_hash_register },
+    { "j", q_json_register },       { "md", q_md_register },       { "regexp", q_regex_register },
+    { "str", pq_set_str },          { "termbox", pq_set_termbox },
 };
 
 /* `.pq.load_natives`name` — the C root of a native-backed library file, its FIRST

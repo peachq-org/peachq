@@ -68,6 +68,9 @@ bool q_str_text_bytes(ray_t* x, const char** p, int64_t* n);
 /* The same, widened to the byte type: where bytes ARE the text (.j.k of read1, vs/sv, the codecs). */
 bool q_str_text_or_bytes(ray_t* x, const char** p, int64_t* n);
 
+/* The same minus the byte ATOM: text or a byte VECTOR, what the codecs and the hashes consume. */
+bool q_str_text_or_bytevec(ray_t* x, const char** p, int64_t* n);
+
 /* The same, widened to a SYM atom (which reads as its string, the null symbol
  * as "") — "a symbol or character data is one subject", the rule the matching
  * verbs share: like's glob, and rlike/.regex's patterns and subjects. */
