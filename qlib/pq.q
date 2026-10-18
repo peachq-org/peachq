@@ -39,6 +39,11 @@
 / @param arg (any) the path or ":memory:", or a dict of `path beside DuckDB's own ATTACH and SET options
 .pq.hopen_duckdb:{[alias;arg] hopen (`$":pq:duckdb:",string alias;arg)};
 
+/ Open a Kafka client as the alias `:pq:kafka:alias; arg is librdkafka's config as a dict of its keys, metadata.broker.list
+/ at least and group.id to subscribe.  The alias consumes and publishes.
+/ @eg .pq.hopen_kafka[`c1;`metadata.broker.list`group.id!`localhost:9092`myapp]
+.pq.hopen_kafka:{[alias;arg] hopen (`$":pq:kafka:",string alias;arg)};
+
 / How each HTTPS client in this process checks a server's certificate, one row per transport: `peachq for .Q.hg, read0,
 / select from an https URL and hopen of tcps:// or wss://, and `duckdb once DuckDB's httpfs extension is loaded.
 / With no SSL_CA_CERT_FILE or SSL_CA_CERT_PATH set, peachq trusts the operating system's roots: Windows' root store, or
@@ -120,8 +125,8 @@
 / @ignore
 .pq.i.resolveTree:{[cl;tree] (enlist tree 0),.pq.i.rnode[cl,`i] each 1_tree}
 
-.pq.i.q.bind:{[c;t] c "cols ",string t};
-.pq.i.q.get:{[c;t] c string t};
+.pq.i.q.bind:{[c;t] c ({[t] cols get t};t)};
+.pq.i.q.get:{[c;t] c (`get;t)};
 .pq.i.q.set:{[c;t;d] c (`set;t;d); t};
 .pq.i.q.upsert:{[c;t;d] c (`upsert;t;d); t};
 .pq.i.q.hdel:{[c;t] c (!;`.;();0b;enlist t); t};
@@ -382,7 +387,10 @@
   };
 
 / Every standard-library file, in load order.
-.pq.i.files:`csv`duckdb`s`ffi`hash`crypto`j`massive`md`parquet`pq`regexp`str`termbox`fs`path`pkg`qunit`yml;
+.pq.i.files:`csv`duckdb`s`ffi`hash`crypto`j`kafka`massive`md`parquet`pq`regexp`str`termbox`fs`path`pkg`qunit`yml;
+
+/ A file's one-line examples: the text after "/ @eg " on every line that carries one.
+.pq.i.egs:{[file] lines:read0 file; 6_/:lines where lines like "/ @eg ?*"};
 
 / Run each file as \l pq/<file>.q: a pq/ directory's (the working directory's, then QHOME's), else the built-in copy.
 .pq.i.run:{[files] {system "l pq/",string[x],".q"} each files; files};
