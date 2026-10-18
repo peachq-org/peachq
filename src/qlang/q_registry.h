@@ -105,6 +105,8 @@ int q_registry_is_syntax_word(int64_t sym_id);
 /* End of bootstrap: record every `.q` name defined so far as builtin and engage q_registry_locked.  Before it,
  * q.q is still defining its own `.q` entries. */
 void q_registry_seal(void);
+/* True once the bootstrap has sealed: a core file's own writes come before it. */
+bool q_registry_sealed(void);
 
 /* True iff sym_id is a reserved word or a builtin `.q` name, once sealed.  Callers apply it: q_env_set to a root or
  * `.q.<sym_id>` target (and to each entry of a whole-`.q` write), q_eval to a bare global `name:` spelling. */
