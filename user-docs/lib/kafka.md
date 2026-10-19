@@ -17,6 +17,9 @@ q).kafka.version[]
 'kafka: librdkafka not found - set PEACHQ_KAFKA_LIB or install librdkafka 2.0 or later
 ```
 
+The `-duckdb` download carries librdkafka 2.12.1 beside `q`, so it needs nothing installed. That build has no
+GSSAPI (Kerberos): to use Kerberos, name your own librdkafka with `PEACHQ_KAFKA_LIB`. Windows has no Kafka yet.
+
 ## A connection is a handle
 
 `hopen` of a `:pq:kafka:` alias opens it, `hclose` closes it, and `.pq.conns[]` lists it. The configuration is
