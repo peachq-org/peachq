@@ -337,9 +337,9 @@ duck_logical_type q_duckdb_type_make(int slot, duck_type id) {
     duck_logical_type t = NULL;
     if (id == QDUCK_TYPE_SQLNULL) {   /* bind-time-only to the id constructor; its text spells it */
         const duck_str nul = { "\"NULL\"", 6 };
-        return QAPI.connection_create_type_from_text(q_duckdb_con(slot), &nul, &t, NULL) == QDuckSuccess ? t : NULL;
+        return QAPI.factory_create_type_from_text(q_duckdb_factory(slot), &nul, &t, NULL) == QDuckSuccess ? t : NULL;
     }
-    return QAPI.connection_create_type_from_id(q_duckdb_con(slot), id, NULL, NULL, 0, &t, NULL) == QDuckSuccess ? t : NULL;
+    return QAPI.factory_create_type_from_id(q_duckdb_factory(slot), id, NULL, NULL, 0, &t, NULL) == QDuckSuccess ? t : NULL;
 }
 
 /* a parameterised type from its children: LIST(elem), MAP(key, value), STRUCT/UNION(name field, ...) */
@@ -350,10 +350,10 @@ static duck_logical_type qd_type_compose(int slot, duck_type id, const char* con
     duck_logical_type t = NULL;
     bool ok = vals != NULL;
     for (int i = 0; ok && i < n; i++) {
-        ok = QAPI.value_create_type(q_duckdb_con(slot), kids[i], &vals[i], NULL) == QDuckSuccess;
+        ok = QAPI.value_create_type(q_duckdb_factory(slot), kids[i], &vals[i], NULL) == QDuckSuccess;
         if (names) nm[i] = (duck_str){ names[i], strlen(names[i]) };
     }
-    if (ok && QAPI.connection_create_type_from_id(q_duckdb_con(slot), id, names ? nm : NULL, vals, (duck_idx_t)n, &t,
+    if (ok && QAPI.factory_create_type_from_id(q_duckdb_factory(slot), id, names ? nm : NULL, vals, (duck_idx_t)n, &t,
                                                   NULL) != QDuckSuccess) t = NULL;
     for (int i = 0; vals && i < n; i++) if (vals[i]) QAPI.value_destroy(&vals[i]);
     free(vals);
@@ -2087,12 +2087,12 @@ static ray_t* qd_atom_value(int slot, ray_t* v, duck_value* out) {
     if (!tm) return q_err(QE_TYPE);
     ray_t* col = ray_enlist_fn(&v, 1);
     if (!col || RAY_IS_ERR(col)) return col ? col : q_err(QE_WSFULL);
-    duck_connection   con = q_duckdb_con(slot);
+    duck_factory      fac = q_duckdb_factory(slot);
     duck_logical_type lt  = q_duckdb_type_make(slot, tm->dk_type);
     duck_data_chunk   ch  = NULL;
     duck_vector       dv  = NULL;
     uint64_t*         validity = NULL;
-    ray_t* e = lt && QAPI.data_chunk_create_with_connection(con, &lt, 1, &ch, NULL) == QDuckSuccess &&
+    ray_t* e = lt && QAPI.data_chunk_create(fac, &lt, 1, &ch, NULL) == QDuckSuccess &&
                QAPI.data_chunk_get_vector(ch, 0, &dv, NULL) == QDuckSuccess &&
                QAPI.vector_set_size(dv, 1, NULL) == QDuckSuccess
                    ? qd_write_leaf(slot, dv, col, tm, 0, 0, 1, NULL, NULL)
@@ -2100,28 +2100,28 @@ static ray_t* qd_atom_value(int slot, ray_t* v, duck_value* out) {
     ray_release(col);
     if (!e && QAPI.vector_flat_get_validity_mutable(dv, &validity, NULL) != QDuckSuccess) e = q_err(QE_DUCKDB);
     if (!e && !q_duckdb_validity_ok(validity, 0)) {
-        if (QAPI.value_create_null(lt, out, NULL) != QDuckSuccess) e = q_err(QE_WSFULL);
+        if (QAPI.value_create_null(fac, lt, out, NULL) != QDuckSuccess) e = q_err(QE_WSFULL);
     } else if (!e) {
         const void* d = qd_data_mut(dv);
         duck_state  st;
         switch (tm->dk_type) {
-            case QDUCK_TYPE_BOOLEAN:      st = QAPI.value_create_bool(con, *(const uint8_t*)d != 0, out, NULL); break;
-            case QDUCK_TYPE_UTINYINT:     st = QAPI.value_create_utinyint(con, *(const uint8_t*)d, out, NULL); break;
-            case QDUCK_TYPE_SMALLINT:     st = QAPI.value_create_smallint(con, *(const int16_t*)d, out, NULL); break;
-            case QDUCK_TYPE_INTEGER:      st = QAPI.value_create_int(con, *(const int32_t*)d, out, NULL); break;
-            case QDUCK_TYPE_BIGINT:       st = QAPI.value_create_bigint(con, *(const int64_t*)d, out, NULL); break;
-            case QDUCK_TYPE_FLOAT:        st = QAPI.value_create_float(con, *(const float*)d, out, NULL); break;
-            case QDUCK_TYPE_DOUBLE:       st = QAPI.value_create_double(con, *(const double*)d, out, NULL); break;
+            case QDUCK_TYPE_BOOLEAN:      st = QAPI.value_create_bool(fac, *(const uint8_t*)d != 0, out, NULL); break;
+            case QDUCK_TYPE_UTINYINT:     st = QAPI.value_create_utinyint(fac, *(const uint8_t*)d, out, NULL); break;
+            case QDUCK_TYPE_SMALLINT:     st = QAPI.value_create_smallint(fac, *(const int16_t*)d, out, NULL); break;
+            case QDUCK_TYPE_INTEGER:      st = QAPI.value_create_int(fac, *(const int32_t*)d, out, NULL); break;
+            case QDUCK_TYPE_BIGINT:       st = QAPI.value_create_bigint(fac, *(const int64_t*)d, out, NULL); break;
+            case QDUCK_TYPE_FLOAT:        st = QAPI.value_create_float(fac, *(const float*)d, out, NULL); break;
+            case QDUCK_TYPE_DOUBLE:       st = QAPI.value_create_double(fac, *(const double*)d, out, NULL); break;
             case QDUCK_TYPE_VARCHAR: {
                 duck_str s = { q_duckdb_string_data(d), q_duckdb_string_len(d) };
-                st = QAPI.value_create_varchar(con, &s, out, NULL);
+                st = QAPI.value_create_varchar(fac, &s, out, NULL);
                 break;
             }
-            case QDUCK_TYPE_DATE:         st = QAPI.value_create_date(con, *(const int32_t*)d, out, NULL); break;
-            case QDUCK_TYPE_INTERVAL:     st = QAPI.value_create_interval(con, (const duck_interval*)d, out, NULL); break;
-            case QDUCK_TYPE_TIMESTAMP:    st = QAPI.value_create_timestamp(con, *(const int64_t*)d, out, NULL); break;
-            case QDUCK_TYPE_TIMESTAMP_NS: st = QAPI.value_create_timestamp_ns(con, *(const int64_t*)d, out, NULL); break;
-            case QDUCK_TYPE_UUID:         st = QAPI.value_create_uuid(con, (const duck_hugeint*)d, out, NULL); break;   /* the storage form, as the vector holds it */
+            case QDUCK_TYPE_DATE:         st = QAPI.value_create_date(fac, *(const int32_t*)d, out, NULL); break;
+            case QDUCK_TYPE_INTERVAL:     st = QAPI.value_create_interval(fac, (const duck_interval*)d, out, NULL); break;
+            case QDUCK_TYPE_TIMESTAMP:    st = QAPI.value_create_timestamp(fac, *(const int64_t*)d, out, NULL); break;
+            case QDUCK_TYPE_TIMESTAMP_NS: st = QAPI.value_create_timestamp_ns(fac, *(const int64_t*)d, out, NULL); break;
+            case QDUCK_TYPE_UUID:         st = QAPI.value_create_uuid(fac, (const duck_hugeint*)d, out, NULL); break;   /* the storage form, as the vector holds it */
             default:                      st = -1; e = q_err(QE_TYPE);
         }
         if (!e && st != QDuckSuccess) e = q_err(QE_WSFULL);
@@ -2141,7 +2141,7 @@ static ray_t* qd_list_value(int slot, ray_t* v, const qd_tmap_t* leaf, int depth
     if (qd_cell_is_0n(v)) {
         const qd_colmap_t self = { leaf, NULL, depth, false };
         duck_logical_type lt = qd_make_logical(slot, &self);
-        bool ok = lt && QAPI.value_create_null(lt, out, NULL) == QDuckSuccess;
+        bool ok = lt && QAPI.value_create_null(q_duckdb_factory(slot), lt, out, NULL) == QDuckSuccess;
         if (lt) QAPI.logical_type_destroy(&lt);
         return ok ? NULL : q_err(QE_WSFULL);
     }
@@ -2155,7 +2155,7 @@ static ray_t* qd_list_value(int slot, ray_t* v, const qd_tmap_t* leaf, int depth
         if (el && !RAY_IS_ERR(el)) ray_release(el);
     }
     duck_logical_type ct = e ? NULL : qd_make_logical(slot, &child);
-    if (!e && !(ct && QAPI.value_create_list(q_duckdb_con(slot), ct, kids, (duck_idx_t)n, out, NULL) == QDuckSuccess))
+    if (!e && !(ct && QAPI.value_create_list(q_duckdb_factory(slot), ct, kids, (duck_idx_t)n, out, NULL) == QDuckSuccess))
         e = q_err(QE_WSFULL);
     if (ct) QAPI.logical_type_destroy(&ct);
     for (int64_t i = 0; i < n; i++) if (kids[i]) QAPI.value_destroy(&kids[i]);
@@ -2281,7 +2281,7 @@ ray_t* q_duckdb_codec_collect(int slot, ray_t* tbl, const qd_colmap_t* cms, ray_
                               duck_collection* out) {
     int64_t ncols = ray_table_ncols(tbl);
     int64_t nrows = q_count(tbl);
-    duck_connection    con    = q_duckdb_con(slot);
+    duck_factory       fac    = q_duckdb_factory(slot);
     duck_logical_type* ltypes = q_duckdb_cols(ncols, sizeof *ltypes);
     duck_append_state  state  = NULL;
     *out = NULL;
@@ -2289,14 +2289,14 @@ ray_t* q_duckdb_codec_collect(int slot, ray_t* tbl, const qd_colmap_t* cms, ray_
     ray_t* err = NULL;
     for (int64_t c = 0; c < ncols; c++)
         if (!(ltypes[c] = qd_make_logical(slot, &cms[c]))) err = q_err(QE_WSFULL);
-    if (!err && (QAPI.column_data_collection_create_with_connection(con, ltypes, (duck_idx_t)ncols, out, NULL) != QDuckSuccess ||
+    if (!err && (QAPI.column_data_collection_create(fac, ltypes, (duck_idx_t)ncols, out, NULL) != QDuckSuccess ||
                  QAPI.column_data_collection_append_state_create(*out, &state, NULL) != QDuckSuccess))
         err = q_err(QE_DUCKDB);
     for (int64_t base = 0; base < nrows && !err; base += QD_CHUNK_ROWS) {
         int64_t n = nrows - base < QD_CHUNK_ROWS ? nrows - base : QD_CHUNK_ROWS;
         duck_data_chunk chunk = NULL;
         duck_err        e     = NULL;
-        if (QAPI.data_chunk_create_with_connection(con, ltypes, (duck_idx_t)ncols, &chunk, NULL) != QDuckSuccess) { err = q_err(QE_DUCKDB); break; }
+        if (QAPI.data_chunk_create(fac, ltypes, (duck_idx_t)ncols, &chunk, NULL) != QDuckSuccess) { err = q_err(QE_DUCKDB); break; }
         for (int64_t c = 0; c < ncols && !err; c++) {
             ray_t* col = ray_table_get_col_idx(tbl, c);   /* borrowed */
             duck_vector dv = NULL;
