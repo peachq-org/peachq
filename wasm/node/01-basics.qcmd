@@ -24,7 +24,7 @@ q).regexp.replace_all["a1b2";"[0-9]";"#"]
 q).regexp.escape["a.b"]
 "a\\.b"
 q).regexp.version
-"v2.0.0-alpha46057"
+"v2.0.0-alpha48841"
 q)\pwd
 "/home/q"
 q)any (enlist "x")~/:system "ls"
