@@ -78,7 +78,7 @@ static int64_t env_marker(void) { return ray_sym_intern_runtime("", 0); }
 /* q_env_marker_sym — see q_env.h. */
 int64_t q_env_marker_sym(void) { return env_marker(); }
 
-ray_t* q_env_marker_dict(void) {
+static ray_t* env_marker_dict(void) {
     ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, 1);
     ray_t* vals = ray_list_new(1);
     if (!keys || RAY_IS_ERR(keys) || !vals || RAY_IS_ERR(vals)) {
@@ -224,7 +224,7 @@ static ray_t* env_amend(ray_t* d, const int64_t* segs, int nseg, int i, ray_t* v
         ray_t* child = ray_dict_probe_sym_borrowed(d, segs[i]);
         ray_t* sub = NULL;
         if (child && child->type == RAY_DICT) { ray_retain(child); sub = child; }
-        else if (!child && ray_dict_find_sym(d, segs[i]) < 0) sub = q_env_marker_dict();
+        else if (!child && ray_dict_find_sym(d, segs[i]) < 0) sub = env_marker_dict();
         if (!sub) {
             ray_release(d);
             ray_release(k);
@@ -741,9 +741,10 @@ static ray_t* frames_lookup(int64_t sym) { return frames_lookup_at(sym, 0); }
 /* ---- resolution ---- */
 
 /* successive per-segment indexing off a borrowed base: dict/table probe,
- * linked-column deref (errors surface), temporal accessor.  Owned result. */
+ * linked-column deref (errors surface), temporal accessor.  A trailing dot walks the empty segment: `k.` is k[`].
+ * Owned result. */
 static ray_t* walk_segs(ray_t* v, int fresh, const char* p, size_t n, size_t pos) {
-    while (v && pos < n) {
+    while (v && pos <= n) {
         if (q_view_is(v)) {                  /* "Views do not support dot notation" */
             if (fresh) ray_release(v);
             return q_err(QE_NYI);
@@ -990,9 +991,9 @@ int64_t q_env_scope_ctx(void) { return ENV_CTX; }
 
 ray_err_t q_env_init(void) {
     if (env_root) return RAY_OK;
-    env_root = q_env_marker_dict();
-    env_ns   = q_env_marker_dict();
-    env_boot = q_env_marker_dict();
+    env_root = env_marker_dict();
+    env_ns   = env_marker_dict();
+    env_boot = env_marker_dict();
     g_pq_seg = ray_sym_intern_runtime("pq", 2);
     g_q_seg  = ray_sym_intern_runtime("q", 1);
     if (!env_root || !env_ns || !env_boot) {

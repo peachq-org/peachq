@@ -164,6 +164,7 @@ static int32_t lex_name(hl_t* h, int32_t i) {
     while (j < h->len && is_word(b[j])) j++;
     while (j + 1 < h->len && b[j] == '.' && is_word(b[j + 1]))
         for (j++; j < h->len && is_word(b[j]); j++) {}
+    if (j < h->len && b[j] == '.') j++;
     span(h, name_role(b + i, j - i), i, j);
     return j;
 }
