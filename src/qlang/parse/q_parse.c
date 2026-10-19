@@ -452,6 +452,7 @@ static Tokens scan(const char *src) {
                 p++;
                 while (CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) p++;
             }
+            if (src[p] == '.') p++;   /* `k.` names k[`]: the empty last component is the null-symbol key */
             int len = p - start;
             if (len >= MAX_NAME) q_die("name too long");
             /* Only reclassify in true infix position (after a noun): a prefix,

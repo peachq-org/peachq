@@ -9,7 +9,7 @@ kx's [Using C functions](https://code.kx.com/q/interfaces/using-c-functions/) de
 | Platform | Status |
 |---|---|
 | Linux x86-64 | Supported |
-| Windows x64 | Supported, except `sd1` |
+| Windows x64 | Supported |
 | macOS | Not yet |
 
 If you want to call a plain C library (libm, libc, your own `.so` that knows nothing about `k.h`), you want
@@ -127,7 +127,7 @@ The rules are kdb's, from its [C API reference](https://code.kx.com/q/interfaces
 - **Signal an error with `krr("text")`.** q sees `'text`.
 - **`k(0, "expr", args…, (K)0)`** evaluates in the running q and takes ownership of `args`.
 - **`sd1(fd, callback)`** puts your file descriptor on q's event loop; q calls `callback` on the main thread
-  when it is readable. This is how a GUI or a background thread wakes q up. Linux only for now.
+  when it is readable. This is how a GUI or a background thread wakes q up. On Windows the descriptor is a `SOCKET`.
 
 ## Projects known to work
 
@@ -147,7 +147,7 @@ The rules are kdb's, from its [C API reference](https://code.kx.com/q/interfaces
 |---|---|
 | `'foo.so …` listing paths | Not found at any of them — or found but it needs a function peachq does not provide. Run `nm -u foo.so`. |
 | `'myfunc` | The library loaded but does not export `myfunc`. `nm -D foo.so` shows what it does export. |
-| `'nyi` from inside a call | `k()` with a non-zero handle, or `sd1` on Windows. |
+| `'nyi` from inside a call | `k()` with a non-zero handle. |
 | `'kapi bad-return: lib:fn` | (debug builds) Your function returned a malformed object — bad type, negative count, or one already freed. |
 | `'rank` at `2:` | Rank must be 1 to 8. |
 
