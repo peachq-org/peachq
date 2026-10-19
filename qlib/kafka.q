@@ -10,7 +10,7 @@
 / commit `manual, when it hands .kafka.commit what it processed), and a batch that fails is held unread, the topic
 / paused and .kafka.errcb called - never a silent drop, never a redelivery loop.
 / `:pq:kafka:c1:trades/ is the topic as an append-only table: select reads it to its high-water mark at the call,
-/ count is 0N (the rows need a read: count select from it), meta and key decode a sample of its tail, and upsert
+/ count get is 0N (the rows need a read: count select from it), meta and key decode a sample of its tail, and upsert
 / publishes rows as JSON.
 / h (`trades;msgkey;bytes) publishes one message and waits for its delivery; neg h is fire-and-forget.  hclose closes
 / the alias; .pq.conns[] lists it.

@@ -52,7 +52,9 @@ q).kafka.pub[h;`trades;"1001";::]                                  / a tombstone
 A string or byte vector is ONE message; a list of them is one message each. The arguments are checked before
 anything is queued, but a call that fails while queueing (`Local: Queue full`) or a `flush` that times out may
 already have queued some messages, so a retry can double them. A message the broker never takes is a flush error and
-reaches `.kafka.errcb`, never a silent success.
+reaches `.kafka.errcb`, never a silent success. A topic the broker does not have is the broker's call: one with
+`auto_create_topics_enabled` creates it on the first publish (a misspelled name included), and one without never
+takes the message (`Local: Message timed out`).
 
 ## Subscribing
 
@@ -60,8 +62,10 @@ reaches `.kafka.errcb`, never a silent success.
 the batch's offsets when the target returns. The target decides what a batch becomes:
 
 - a **symbol** names a table the decoded JSON rows are upserted into, created when absent. Types come from the
-  `types` option, else the table's meta, else a sniff of the batch; they convert values, they do not check them
-  (`100.75` lands in a long column as `101`). A message must be one JSON object, or it is a decode reject;
+  `types` option, else the table's meta, else a sniff of the batch. Into a table that exists, a value converts to its
+  column's type where it reads as one (`100.75` lands in a long column as `101`, `"12"` as `12`) and is a `type`
+  reject where it does not (`"abc"` for a long, a number for a symbol). A message must be one JSON object, or it is a
+  decode reject;
 - a **function of three arguments** `{[rows;rejects;misc] …}` receives the decoded rows, the batch's rejects and
   `misc`, and lands them itself;
 - a **function of one argument** receives the raw batch: `topic partition offset msgtime msgkey headers data`.
@@ -103,6 +107,11 @@ topic  partition offset msgtime                       msgkey error   bytes
 trades 0         5      2026.10.16D13:44:17.443000000 0x     "parse: not JSON: \"not json\"" 0x6e6f74206a736f6e
 ```
 
+An error starts with its kind: `empty` (a blank message), `parse` (not JSON, or more than one document), `type` (not
+a JSON object, a field missing, or a value its column cannot take), `mismatch` (the fields are not the table's
+columns), `dupkey` (a key twice in one object), `tombstone` (a null value the `tombstones` option rejects), or
+another verdict of the JSON loader's.
+
 Replace `.kafka.errcb` as you would `.z.pc`; if yours signals, the error it was given is still printed. librdkafka's own
 errors (a broker down, a rebalance failing) arrive there too.
 
@@ -126,10 +135,12 @@ q)meta `:pq:kafka:c1:trades/
 q)`:pq:kafka:c1:trades/ upsert ([] sym:`AAPL`MSFT; px:1.5 2.5)  / publishes each row as JSON
 ```
 
-`select` pushes its partition, offset and msgtime constraints into the bounds. `count` of the topic is `0N`: Kafka
-knows its offsets, not its rows (bad messages, tombstones and compaction gaps all take offsets), so count a read. Every read is strict and changes no
-state: a message that does not decode signals `'kafka` naming it and the way past it (`ignore_errors` or
-`store_rejects` in `.kafka.read`'s options). `upsert` writes floats at full precision and times as ISO 8601.
+`select` pushes its partition, offset and msgtime constraints into the bounds. `count get` of the topic is `0N`:
+Kafka knows its offsets, not its rows (bad messages, tombstones and compaction gaps all take offsets), so count a
+read. Every read is strict about decoding and changes no state: a message that does not decode signals `'kafka`
+naming it and the way past it (`ignore_errors` or `store_rejects` in `.kafka.read`'s options). A tombstone is no
+decode error: a read lands it as a row of nulls beside its message columns, and counts it; `.kafka.read`'s
+`tombstones` as `` `skip `` leaves it out. `upsert` writes floats at full precision and times as ISO 8601.
 
 ## Committing
 
@@ -164,7 +175,7 @@ group assigns partitions, so caught up is a non-empty table whose lag is all 0:
 
 ```q
 q)o:.kafka.offsets h
-q)(count o) and all 0=o`lag
+q)(0<count o) and all 0=o`lag
 1b
 ```
 
@@ -197,12 +208,16 @@ if[not ()~key `:trade; trade:get `:trade; rejects:get `:rejects]
 land:{[rows;bad;misc] `trade upsert update rtime:.z.p from rows; `:trade set trade; `:rejects set rejects}
 opts:`meta`types`store_rejects`rejects_table!(`partition`offset;`sym`px`qty!"sfj";1b;`rejects)
 .kafka.sub[h;`trades;(land;opts)]
-.z.ts:{o:.kafka.offsets h; if[(count o) and all 0=o`lag; exit 0]}
+.z.ts:{o:.kafka.offsets h; if[(0<count o) and all 0=o`lag; exit 0]}
 \t 1000
 ```
 
 `land` saves before it returns, so the commit never runs ahead of the disk; a batch delivered again after a stop
 overwrites its own rows, since both tables are keyed by `(partition;offset)`.
+
+Run as a script, a consumer must stay up to be delivered to. As in any q, a script whose stdin is closed or runs out
+(`q ingest.q </dev/null`, a cron job, a pipe that ends) exits at the end of that input, and `\t` alone does not keep
+it up; a port (`-p`) or stdin held open (`q ingest.q < <(sleep infinity)`) does.
 
 ## Change data (Debezium)
 
