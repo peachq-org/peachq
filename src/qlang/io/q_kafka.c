@@ -23,7 +23,7 @@
 #include "qlang/q_env.h"            /* q_env_bind_native / q_env_get */
 #include "qlang/q_prim.h"           /* q_str_subject_bytes / q_str_text_or_bytes — names, keys and payloads */
 #include "core/poll.h"
-#include "core/sock.h"              /* ray_sock_pair / _set_nonblocking / _close — the wake's two ends */
+#include "core/sock.h"              /* ray_sock_pair / _send / _recv / _close — the wake's two ends */
 #include "core/runtime.h"           /* ray_runtime_get_poll */
 #include "lang/env.h"               /* ray_fn_vary */
 #include "lang/eval.h"              /* RAY_FN_NONE */
@@ -54,7 +54,7 @@ typedef struct {
     int               role;        /* KFK_CONSUMER / KFK_PRODUCER, its index in owner->side */
     rd_kafka_t*       rk;
     rd_kafka_queue_t* q;
-    int               fd[2];       /* [0] the poll's end, [1] librdkafka's */
+    ray_sock_t        fd[2];       /* [0] the poll's end, [1] librdkafka's */
     int64_t           sel;         /* poll selector id, -1 = none (an embedder without a loop) */
     rd_kafka_topic_partition_list_t* owed;   /* a consumer's async commits, made durable by a sync one at close */
 } kfk_side;
@@ -460,6 +460,12 @@ static void kfk_poll(kfk_side* s, int timeout_ms) {
     if (c->closing) kfk_drop(c);
 }
 
+/* empties the wake socket; before a re-arm it also bounds what the socket holds, so the re-arm's send never waits */
+static void kfk_quiet(kfk_side* s) {
+    char buf[64];
+    while (ray_sock_recv(s->fd[0], buf, sizeof buf) > 0) {}
+}
+
 /* ONE wake: the queue drained into one table and delivered once; a drain that hit the cap re-arms the fd so the
  * loop comes back for the rest.  A producer's wake serves its delivery reports.  Answers the messages delivered. */
 static int64_t kfk_serve(kfk_side* s, int timeout_ms) {
@@ -486,30 +492,31 @@ static int64_t kfk_serve(kfk_side* s, int timeout_ms) {
             ray_release(args[0]);
         }
         if (t) kfk_report(t);
-#if !defined(_WIN32)
-        if (n >= c->max_wake && s->fd[1] >= 0) (void)!write(s->fd[1], "1", 1);
-#endif
+        if (n >= c->max_wake && s->fd[1] != RAY_INVALID_SOCK) {
+            kfk_quiet(s);
+            ray_sock_send(s->fd[1], "1", 1);
+        }
     }
     c->serving = 0;
     if (c->closing) kfk_drop(c);
     return n;
 }
 
-#if !defined(_WIN32)
 static ray_t* kfk_readable(ray_poll_t* poll, ray_selector_t* sel) {
     (void)poll;
     kfk_side* s = sel->data;
-    char buf[64];
-    while (read((int)sel->fd, buf, sizeof buf) > 0) {}
+    kfk_quiet(s);
     if (s->owner->live) kfk_serve(s, 0);
     return NULL;
 }
 
-/* the io-event fd on the poll, non-blocking at both ends */
+/* the io-event socket on the poll, non-blocking at both ends; librdkafka takes it as an int, a SOCKET included */
 static ray_t* kfk_wire(kfk_side* s) {
     if (ray_sock_pair(s->fd) != 0) return q_err(QE_OS);
-    for (int i = 0; i < 2; i++) ray_sock_set_nonblocking(s->fd[i]);
-    A.queue_io_event_enable(s->q, s->fd[1], "1", 1);
+    if (s->fd[1] != (int)s->fd[1] || ray_sock_set_nonblocking(s->fd[0]) != RAY_OK ||
+        ray_sock_set_nonblocking(s->fd[1]) != RAY_OK)
+        return q_err(QE_OS);
+    A.queue_io_event_enable(s->q, (int)s->fd[1], "1", 1);
     ray_poll_t* p = (ray_poll_t*)ray_runtime_get_poll();
     if (!p) return NULL;
     ray_poll_reg_t reg = { 0 };
@@ -520,7 +527,6 @@ static ray_t* kfk_wire(kfk_side* s) {
     s->sel = ray_poll_register(p, &reg);
     return s->sel < 0 ? q_err(QE_IO) : NULL;
 }
-#endif
 
 /* a closing producer delivers what it holds within its own message.timeout.ms; the rest is purged and each one told
  * to .kafka.errcb, or at exit, where no q runs, counted on one stderr line: never dropped in silence */
@@ -551,10 +557,8 @@ static void kfk_side_close(kfk_side* s) {
         else kfk_deliver_out(s);
         A.destroy(s->rk);
     }
-#if !defined(_WIN32)
-    for (int i = 0; i < 2; i++) if (s->fd[i] >= 0) ray_sock_close(s->fd[i]);
-#endif
-    *s = (kfk_side){ .owner = s->owner, .role = s->role, .fd = { -1, -1 }, .sel = -1 };
+    for (int i = 0; i < 2; i++) ray_sock_close(s->fd[i]);
+    *s = (kfk_side){ .owner = s->owner, .role = s->role, .fd = { RAY_INVALID_SOCK, RAY_INVALID_SOCK }, .sel = -1 };
 }
 
 static void kfk_drop(kfk_client* c) {
@@ -639,10 +643,8 @@ static ray_t* kfk_side_open(kfk_client* c, int role) {
     rd_kafka_resp_err_t r = role == KFK_CONSUMER ? A.poll_set_consumer(s->rk) : KFK_ERR_NO_ERROR;
     s->q = r ? NULL : role == KFK_CONSUMER ? A.queue_get_consumer(s->rk) : A.queue_get_main(s->rk);
     if (!s->q) { kfk_side_close(s); return r ? kfk_err(r) : q_err(QE_DOMAIN); }   /* a consumer without group.id */
-#if !defined(_WIN32)
     e = kfk_wire(s);
     if (e) kfk_side_close(s);
-#endif
     return e;
 }
 
@@ -659,9 +661,6 @@ static ray_t* kfk_side_of(ray_t* h, int role, kfk_side** out) {
 /* [alias; consumer cfg; producer cfg] -> the token.  Both configs are judged now; the clients wait for first use. */
 static ray_t* kfk_new_fn(ray_t** args, int64_t n) {
     if (n != 3) return q_err(QE_RANK);
-#if defined(_WIN32)
-    return q_err(QE_NYI);
-#else
     ray_t* e = kfk_load();
     if (e) return e;
     char alias[KFK_NAME_MAX];
@@ -677,7 +676,7 @@ static ray_t* kfk_new_fn(ray_t** args, int64_t n) {
     kfk_client* c = &g_cl[slot];
     memset(c, 0, sizeof *c);
     for (int role = 0; role < 2; role++) {
-        c->side[role] = (kfk_side){ .owner = c, .role = role, .fd = { -1, -1 }, .sel = -1 };
+        c->side[role] = (kfk_side){ .owner = c, .role = role, .fd = { RAY_INVALID_SOCK, RAY_INVALID_SOCK }, .sel = -1 };
         c->cfg[role] = args[role == KFK_CONSUMER ? 1 : 2];
         ray_retain(c->cfg[role]);
     }
@@ -688,7 +687,6 @@ static ray_t* kfk_new_fn(ray_t** args, int64_t n) {
     c->handle = ray_sym_intern_runtime(hs, (size_t)m);
     if (!g_atexit) { g_atexit = 1; atexit(kfk_shutdown); }
     return ray_i32(KFK_TOKEN_MARK | slot);
-#endif
 }
 
 static ray_t* kfk_ok(void) { ray_retain(RAY_NULL_OBJ); return RAY_NULL_OBJ; }
