@@ -9,16 +9,18 @@ Every function and option: [.kafka API](https://peachq.org/docs/api/kafka.q.html
 ## Loading
 
 The library is librdkafka, 2.0 or later: `PEACHQ_KAFKA_LIB` names it outright, else it is looked for in `$QHOME`,
-beside `q`, then on the system (`librdkafka.so.1`). Without it the first open is refused with one line naming the fix,
-and an older one (Ubuntu 22.04's is 1.8) with `'kafka: librdkafka 2.0 or later required (found 1.8.0)`:
+beside `q`, then on the system (`librdkafka.so.1`; `librdkafka.dll` on Windows). Without it the first open is refused
+with one line naming the fix, and an older one (Ubuntu 22.04's is 1.8) with
+`'kafka: librdkafka 2.0 or later required (found 1.8.0)`:
 
 ```q
 q).kafka.version[]
 'kafka: librdkafka not found - set PEACHQ_KAFKA_LIB or install librdkafka 2.0 or later
 ```
 
-The `-duckdb` download carries librdkafka 2.12.1 beside `q`, so it needs nothing installed. That build has no
-GSSAPI (Kerberos): to use Kerberos, name your own librdkafka with `PEACHQ_KAFKA_LIB`. Windows has no Kafka yet.
+The `-duckdb` download carries librdkafka 2.12.1 beside `q`, so it needs nothing installed; on Windows the DLLs it
+needs (OpenSSL, curl, zlib, zstd and the Visual C++ runtime) sit beside it too. That build has no GSSAPI (Kerberos):
+to use Kerberos, name your own librdkafka with `PEACHQ_KAFKA_LIB`.
 
 ## A connection is a handle
 
