@@ -1,6 +1,6 @@
 /* q_duckdb_api — private, transcribed subset of DuckDB's v2 C API.
  *
- * Transcribed from the MIT-licensed `duckdb_v2.h` of DuckDB v2.0.0-alpha46057 (github.com/duckdb/duckdb).
+ * Transcribed from the MIT-licensed `duckdb_v2.h` of DuckDB v2.0.0-alpha48841 (github.com/duckdb/duckdb).
  * Deliberately NOT #include'd: the bridge reaches DuckDB ONLY via dlopen + a dlsym'd fn-pointer table
  * (docs/duckdb-api.md, Packaging), so a plain `make` compiles with no vendor tree present.  The v2 surface is the
  * whole table — a library without it is refused by the loader (docs/duckdb-architecture.md). */
@@ -119,7 +119,7 @@ static inline const char* q_duckdb_type_name(duck_type t) {
 typedef struct duck_env_o*          duck_env;
 typedef struct duck_instance_o*     duck_instance;
 typedef struct duck_connection_o*   duck_connection;
-typedef struct duck_option_o*       duck_option;
+typedef struct duck_factory_o*      duck_factory;        /* borrowed from a connection, lives as long as it */
 typedef struct duck_err_o*          duck_err;            /* error info: text borrowed until destroyed */
 typedef struct duck_logical_o*      duck_logical_type;
 typedef struct duck_value_o*        duck_value;
@@ -197,15 +197,15 @@ typedef void (*duck_rscan_fn)(duck_rscan_info info, duck_context ctx, duck_err* 
 typedef struct {
     duck_state (*environment_create)(duck_env* out, duck_err* err);
     duck_state (*environment_destroy)(duck_env* env);
-    duck_state (*instance_create)(duck_env env, duck_instance* out, duck_err* err);
+    /* startup options are (name, SET-text) pairs; a repeated name takes its last value */
+    duck_state (*instance_create_with_options)(duck_env env, const duck_str* names, const duck_str* values,
+                                               duck_idx_t n, duck_instance* out, duck_err* err);
     duck_state (*instance_destroy)(duck_instance* inst);
-    duck_state (*instance_attach)(duck_instance inst, const duck_str* path, const duck_str* name, void* options,
+    duck_state (*instance_attach)(duck_instance inst, const duck_str* name, const duck_str* path, void* options,
                                   bool make_default, duck_err* err);
-    duck_state (*instance_set_option)(duck_instance inst, const duck_str* name, const duck_str* setting, duck_err* err);
-    duck_state (*instance_get_option_by_name)(duck_instance inst, const duck_str* name, duck_option* out, duck_err* err);
-    duck_state (*option_destroy)(duck_option* opt);
     duck_state (*connection_create)(duck_instance inst, duck_connection* out, duck_err* err);
     duck_state (*connection_destroy)(duck_connection* con);
+    duck_state (*connection_get_factory)(duck_connection con, duck_factory* out, duck_err* err);
     duck_state (*error_info_get_text)(duck_err err, duck_str* out);
     duck_state (*error_info_destroy)(duck_err* err);
     /* statements: parsed into an iterator, each executed into a cursor, bound by name or position at execution */
@@ -226,8 +226,8 @@ typedef struct {
     duck_state (*schema_get_field)(duck_schema s, duck_idx_t i, duck_str* name, duck_logical_type* type, duck_err* err);
     duck_state (*schema_destroy)(duck_schema* s);
     /* chunks and vectors: a view to read, mutable data + validity + an arena to write, children by index */
-    duck_state (*data_chunk_create_with_connection)(duck_connection con, const duck_logical_type* types, duck_idx_t n,
-                                                    duck_data_chunk* out, duck_err* err);
+    duck_state (*data_chunk_create)(duck_factory f, const duck_logical_type* types, duck_idx_t n, duck_data_chunk* out,
+                                    duck_err* err);
     duck_state (*data_chunk_destroy)(duck_data_chunk* chunk);
     duck_state (*data_chunk_get_size)(duck_data_chunk chunk, duck_idx_t* out, duck_err* err);
     duck_state (*data_chunk_get_vector)(duck_data_chunk chunk, duck_idx_t col, duck_vector* out, duck_err* err);
@@ -249,11 +249,10 @@ typedef struct {
     duck_state (*logical_type_get_name)(duck_logical_type t, duck_str* out, duck_err* err);
     duck_state (*logical_type_get_param_count)(duck_logical_type t, duck_idx_t* out, duck_err* err);
     duck_state (*logical_type_get_param)(duck_logical_type t, duck_idx_t i, duck_str* name, duck_value* out, duck_err* err);
-    duck_state (*connection_create_type_from_id)(duck_connection con, int32_t id, const duck_str* names,
-                                                 const duck_value* values, duck_idx_t n, duck_logical_type* out,
-                                                 duck_err* err);
-    duck_state (*connection_create_type_from_text)(duck_connection con, const duck_str* text, duck_logical_type* out,
-                                                   duck_err* err);
+    duck_state (*factory_create_type_from_id)(duck_factory f, int32_t id, const duck_str* names, const duck_value* values,
+                                              duck_idx_t n, duck_logical_type* out, duck_err* err);
+    duck_state (*factory_create_type_from_text)(duck_factory f, const duck_str* text, duck_logical_type* out,
+                                                duck_err* err);
     /* values: the parameters bound and the type parameters read */
     duck_state (*value_destroy)(duck_value* v);
     duck_state (*value_is_null)(duck_value v, bool* out, duck_err* err);
@@ -262,35 +261,35 @@ typedef struct {
     duck_state (*value_get_varchar)(duck_value v, duck_str* out, duck_err* err);
     duck_state (*value_get_utinyint)(duck_value v, uint8_t* out, duck_err* err);
     duck_state (*value_get_bigint)(duck_value v, int64_t* out, duck_err* err);
-    duck_state (*value_create_type)(duck_connection con, duck_logical_type t, duck_value* out, duck_err* err);
-    duck_state (*value_create_null)(duck_logical_type t, duck_value* out, duck_err* err);
-    duck_state (*value_create_bool)(duck_connection con, bool v, duck_value* out, duck_err* err);
-    duck_state (*value_create_utinyint)(duck_connection con, uint8_t v, duck_value* out, duck_err* err);
-    duck_state (*value_create_smallint)(duck_connection con, int16_t v, duck_value* out, duck_err* err);
-    duck_state (*value_create_int)(duck_connection con, int32_t v, duck_value* out, duck_err* err);
-    duck_state (*value_create_bigint)(duck_connection con, int64_t v, duck_value* out, duck_err* err);
-    duck_state (*value_create_float)(duck_connection con, float v, duck_value* out, duck_err* err);
-    duck_state (*value_create_double)(duck_connection con, double v, duck_value* out, duck_err* err);
-    duck_state (*value_create_varchar)(duck_connection con, const duck_str* v, duck_value* out, duck_err* err);
-    duck_state (*value_create_date)(duck_connection con, int32_t days, duck_value* out, duck_err* err);
-    duck_state (*value_create_interval)(duck_connection con, const duck_interval* v, duck_value* out, duck_err* err);
-    duck_state (*value_create_timestamp)(duck_connection con, int64_t micros, duck_value* out, duck_err* err);
-    duck_state (*value_create_timestamp_ns)(duck_connection con, int64_t nanos, duck_value* out, duck_err* err);
-    duck_state (*value_create_uuid)(duck_connection con, const duck_hugeint* storage, duck_value* out, duck_err* err);
-    duck_state (*value_create_list)(duck_connection con, duck_logical_type child, const duck_value* kids, duck_idx_t n,
+    duck_state (*value_create_type)(duck_factory f, duck_logical_type t, duck_value* out, duck_err* err);
+    duck_state (*value_create_null)(duck_factory f, duck_logical_type t, duck_value* out, duck_err* err);
+    duck_state (*value_create_bool)(duck_factory f, bool v, duck_value* out, duck_err* err);
+    duck_state (*value_create_utinyint)(duck_factory f, uint8_t v, duck_value* out, duck_err* err);
+    duck_state (*value_create_smallint)(duck_factory f, int16_t v, duck_value* out, duck_err* err);
+    duck_state (*value_create_int)(duck_factory f, int32_t v, duck_value* out, duck_err* err);
+    duck_state (*value_create_bigint)(duck_factory f, int64_t v, duck_value* out, duck_err* err);
+    duck_state (*value_create_float)(duck_factory f, float v, duck_value* out, duck_err* err);
+    duck_state (*value_create_double)(duck_factory f, double v, duck_value* out, duck_err* err);
+    duck_state (*value_create_varchar)(duck_factory f, const duck_str* v, duck_value* out, duck_err* err);
+    duck_state (*value_create_date)(duck_factory f, int32_t days, duck_value* out, duck_err* err);
+    duck_state (*value_create_interval)(duck_factory f, const duck_interval* v, duck_value* out, duck_err* err);
+    duck_state (*value_create_timestamp)(duck_factory f, int64_t micros, duck_value* out, duck_err* err);
+    duck_state (*value_create_timestamp_ns)(duck_factory f, int64_t nanos, duck_value* out, duck_err* err);
+    duck_state (*value_create_uuid)(duck_factory f, const duck_hugeint* storage, duck_value* out, duck_err* err);
+    duck_state (*value_create_list)(duck_factory f, duck_logical_type child, const duck_value* kids, duck_idx_t n,
                                     duck_value* out, duck_err* err);
     /* the write path: chunks appended to a collection, served under a transient name by the connection's
      * replacement scan (docs/duckdb-architecture.md) */
-    duck_state (*column_data_collection_create_with_connection)(duck_connection con, const duck_logical_type* types,
-                                                                duck_idx_t n, duck_collection* out, duck_err* err);
+    duck_state (*column_data_collection_create)(duck_factory f, const duck_logical_type* types, duck_idx_t n,
+                                                duck_collection* out, duck_err* err);
     duck_state (*column_data_collection_destroy)(duck_collection* c);
     duck_state (*column_data_collection_append_state_create)(duck_collection c, duck_append_state* out, duck_err* err);
     duck_state (*column_data_collection_append_state_destroy)(duck_append_state* s);
     duck_state (*column_data_collection_append)(duck_collection c, duck_append_state s, duck_data_chunk chunk, duck_err* err);
-    duck_state (*replacement_scan_create_with_connection)(duck_connection con, duck_rscan* out, duck_err* err);
+    duck_state (*replacement_scan_create)(duck_factory f, duck_rscan* out, duck_err* err);
     duck_state (*replacement_scan_set_callback)(duck_rscan scan, duck_rscan_fn fn, duck_err* err);
     duck_state (*replacement_scan_set_user_data)(duck_rscan scan, duck_opaque* data, duck_err* err);
-    duck_state (*replacement_scan_register)(duck_rscan scan, duck_err* err);
+    duck_state (*connection_register_replacement_scan)(duck_connection con, duck_rscan scan, duck_err* err);
     duck_state (*replacement_scan_destroy)(duck_rscan* scan);
     duck_state (*replacement_scan_get_user_data)(duck_rscan_info info, void** out, duck_err* err);
     duck_state (*replacement_scan_get_name)(duck_rscan_info info, duck_qname* out, duck_err* err);

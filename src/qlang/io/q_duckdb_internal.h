@@ -28,7 +28,7 @@ extern duck_api_t qd_api;          /* the dlsym'd fn table; all-zero until the l
 /* drop an owned value that may be an error: ray_release short-circuits on errors, which ray_error_free reclaims */
 static inline void q_duckdb_drop(ray_t* x) { if (RAY_IS_ERR(x)) ray_error_free(x); else ray_release(x); }
 
-duck_connection q_duckdb_con(int slot);
+duck_factory q_duckdb_factory(int slot);
 void   q_duckdb_err_stash(int slot, const char* fmt, ...);
 size_t q_duckdb_err_mark(void);
 void   q_duckdb_err_rewind(int slot, size_t mark);

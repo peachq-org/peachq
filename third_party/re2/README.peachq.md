@@ -2,12 +2,13 @@
 
 - **Upstream, as we take it:** `third_party/re2` from the DuckDB source tree,
   https://github.com/duckdb/duckdb
-- **Version pin:** DuckDB **v2.0.0-alpha46057**, the staged 2.0 pre-release, built from commit
-  `b15358c371` on `v2.0-cyanoptera` (no release tag yet: the source archive is
-  `https://github.com/duckdb/duckdb/archive/b15358c371.tar.gz`)
-- **Tarball sha256:** `43926bf5be7c6a97233923fe23e8c6e5f308e2b51d24d9ee8d34d19776e19a2a`
+- **Version pin:** DuckDB **v2.0.0-alpha48841**, the staged 2.0 pre-release, built from commit
+  `804b3f2070` on `v2.0-cyanoptera` (no release tag yet: the source archive is
+  `https://github.com/duckdb/duckdb/archive/804b3f2070.tar.gz`)
+- **Tarball sha256:** `885008aadac9b9d91fae70a90087f0314f98d355ecd9636d6cb5467d7a36efcc`
 - **Vendored-tree sha256:** `3a853ae9a5e9acca0e27d5b6a4e911d536dc6bdd460743afb87724ea433dd21e`
-  (see *Drift* below). The v1.5.5 tree it replaces digested
+  (see *Drift* below), unchanged from alpha46057 (`b15358c371`): DuckDB's `third_party/re2` is byte-identical
+  across the two. The v1.5.5 tree it replaces digested
   `64705ec0efb60af16572736fc478b1ef89de4d264056dc7b29dd433d34eae7d1`; the whole delta is one
   `static_cast<size_t>` in `re2/regexp.h` (`Regexp::AllocSub`), a warning fix with no change in what a pattern
   means, plus CMake policy lines in the `CMakeLists.txt` we do not carry.

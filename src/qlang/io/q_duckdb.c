@@ -109,14 +109,12 @@ void* q_duckdb_cols(int64_t n, size_t per) { return calloc(n > 0 ? (size_t)n : 1
 static const char* const QD_SYMS[] = {
     "duckdb_v2_environment_create",
     "duckdb_v2_environment_destroy",
-    "duckdb_v2_instance_create",
+    "duckdb_v2_instance_create_with_options",
     "duckdb_v2_instance_destroy",
     "duckdb_v2_instance_attach",
-    "duckdb_v2_instance_set_option",
-    "duckdb_v2_instance_get_option_by_name",
-    "duckdb_v2_option_destroy",
     "duckdb_v2_connection_create",
     "duckdb_v2_connection_destroy",
+    "duckdb_v2_connection_get_factory",
     "duckdb_v2_error_info_get_text",
     "duckdb_v2_error_info_destroy",
     "duckdb_v2_parse_sql",
@@ -134,7 +132,7 @@ static const char* const QD_SYMS[] = {
     "duckdb_v2_schema_get_count",
     "duckdb_v2_schema_get_field",
     "duckdb_v2_schema_destroy",
-    "duckdb_v2_data_chunk_create_with_connection",
+    "duckdb_v2_data_chunk_create",
     "duckdb_v2_data_chunk_destroy",
     "duckdb_v2_data_chunk_get_size",
     "duckdb_v2_data_chunk_get_vector",
@@ -155,8 +153,8 @@ static const char* const QD_SYMS[] = {
     "duckdb_v2_logical_type_get_name",
     "duckdb_v2_logical_type_get_param_count",
     "duckdb_v2_logical_type_get_param",
-    "duckdb_v2_connection_create_type_from_id",
-    "duckdb_v2_connection_create_type_from_text",
+    "duckdb_v2_factory_create_type_from_id",
+    "duckdb_v2_factory_create_type_from_text",
     "duckdb_v2_value_destroy",
     "duckdb_v2_value_is_null",
     "duckdb_v2_value_to_string",
@@ -164,31 +162,31 @@ static const char* const QD_SYMS[] = {
     "duckdb_v2_value_get_varchar",
     "duckdb_v2_value_get_utinyint",
     "duckdb_v2_value_get_bigint",
-    "duckdb_v2_value_create_type_with_connection",
+    "duckdb_v2_value_create_type",
     "duckdb_v2_value_create_null",
-    "duckdb_v2_value_create_bool_with_connection",
-    "duckdb_v2_value_create_utinyint_with_connection",
-    "duckdb_v2_value_create_smallint_with_connection",
-    "duckdb_v2_value_create_int_with_connection",
-    "duckdb_v2_value_create_bigint_with_connection",
-    "duckdb_v2_value_create_float_with_connection",
-    "duckdb_v2_value_create_double_with_connection",
-    "duckdb_v2_value_create_varchar_with_connection",
-    "duckdb_v2_value_create_date_with_connection",
-    "duckdb_v2_value_create_interval_with_connection",
-    "duckdb_v2_value_create_timestamp_with_connection",
-    "duckdb_v2_value_create_timestamp_ns_with_connection",
-    "duckdb_v2_value_create_uuid_with_connection",
-    "duckdb_v2_value_create_list_with_connection",
-    "duckdb_v2_column_data_collection_create_with_connection",
+    "duckdb_v2_value_create_bool",
+    "duckdb_v2_value_create_utinyint",
+    "duckdb_v2_value_create_smallint",
+    "duckdb_v2_value_create_int",
+    "duckdb_v2_value_create_bigint",
+    "duckdb_v2_value_create_float",
+    "duckdb_v2_value_create_double",
+    "duckdb_v2_value_create_varchar",
+    "duckdb_v2_value_create_date",
+    "duckdb_v2_value_create_interval",
+    "duckdb_v2_value_create_timestamp",
+    "duckdb_v2_value_create_timestamp_ns",
+    "duckdb_v2_value_create_uuid",
+    "duckdb_v2_value_create_list",
+    "duckdb_v2_column_data_collection_create",
     "duckdb_v2_column_data_collection_destroy",
     "duckdb_v2_column_data_collection_append_state_create",
     "duckdb_v2_column_data_collection_append_state_destroy",
     "duckdb_v2_column_data_collection_append",
-    "duckdb_v2_replacement_scan_create_with_connection",
+    "duckdb_v2_replacement_scan_create",
     "duckdb_v2_replacement_scan_set_callback",
     "duckdb_v2_replacement_scan_set_user_data",
-    "duckdb_v2_replacement_scan_register",
+    "duckdb_v2_connection_register_replacement_scan",
     "duckdb_v2_replacement_scan_destroy",
     "duckdb_v2_replacement_scan_get_user_data",
     "duckdb_v2_replacement_scan_get_name",
@@ -351,6 +349,7 @@ static struct {
  * (docs/duckdb-architecture.md: a q table reaches DuckDB as a column data collection, never as text). */
 static struct {
     duck_connection con;
+    duck_factory    fac;         /* the connection's, borrowed: types, values, chunks and collections are made here */
     int             cat;         /* the catalog this connection USEs; -1 = main's own */
     uint32_t        gen;         /* bumped on close — stale handles error */
     bool            live;
@@ -360,7 +359,7 @@ static struct {
     duck_idx_t      coll_ncols;
 } g_cons[QD_MAX_CON];
 
-duck_connection q_duckdb_con(int slot) { return g_cons[slot].con; }
+duck_factory q_duckdb_factory(int slot) { return g_cons[slot].fac; }
 
 /* most recent captured text, any connection — .duckdb.err[] reads this */
 static char g_err_last[1024];
@@ -719,11 +718,12 @@ static ray_t* qd_connect(int slot) {
     duck_err   e  = NULL;
     duck_rscan rs = NULL;
     duck_opaque ud = { (void*)(intptr_t)slot, NULL, NULL };
-    bool ok = QAPI.connection_create(g_main.inst, &g_cons[slot].con, &e) == QDuckSuccess;
-    if (ok) ok = QAPI.replacement_scan_create_with_connection(g_cons[slot].con, &rs, &e) == QDuckSuccess &&
+    bool ok = QAPI.connection_create(g_main.inst, &g_cons[slot].con, &e) == QDuckSuccess &&
+              QAPI.connection_get_factory(g_cons[slot].con, &g_cons[slot].fac, &e) == QDuckSuccess;
+    if (ok) ok = QAPI.replacement_scan_create(g_cons[slot].fac, &rs, &e) == QDuckSuccess &&
                  QAPI.replacement_scan_set_callback(rs, qd_batch_scan, &e) == QDuckSuccess &&
                  QAPI.replacement_scan_set_user_data(rs, &ud, &e) == QDuckSuccess &&
-                 QAPI.replacement_scan_register(rs, &e) == QDuckSuccess;
+                 QAPI.connection_register_replacement_scan(g_cons[slot].con, rs, &e) == QDuckSuccess;
     if (rs) QAPI.replacement_scan_destroy(&rs);
     if (ok) return NULL;
     if (g_cons[slot].con) QAPI.connection_destroy(&g_cons[slot].con);
@@ -795,42 +795,56 @@ static int qd_free_slot(void) {
     return -1;
 }
 
-/* THE startup config every open of main starts from, on a fresh instance (not yet started, so an option that can
- * only be chosen at startup still can be).  A fat install ships `extensions/` beside `q` (the release's
- * `<dir>/v<ver>/<platform>/<name>.duckdb_extension` tree): that directory becomes DuckDB's extension_directory and
- * autoinstall goes off, so LOAD/autoload find the bundle and never reach for the network.  No such directory (a thin
- * install) leaves both at DuckDB's defaults.  The caller's own keys land after these, so they win. */
-static ray_t* qd_instance_new(void) {
-    duck_err e = NULL;
-    if (QAPI.environment_create(&g_main.env, &e) != QDuckSuccess ||
-        QAPI.instance_create(g_main.env, &g_main.inst, &e) != QDuckSuccess) {
-        qd_instance_drop();
-        return q_duckdb_fail_err(-1, &e);
-    }
+typedef struct { char k[128]; char t[256]; } qd_opt;
+
+/* THE startup config every open of main starts from, handed to DuckDB as the instance is created (the one moment an
+ * option that can only be chosen at startup still can be).  A fat install ships `extensions/` beside `q` (the
+ * release's `<dir>/v<ver>/<platform>/<name>.duckdb_extension` tree): that directory becomes DuckDB's
+ * extension_directory and autoinstall goes off, so LOAD/autoload find the bundle and never reach for the network.  No
+ * such directory (a thin install) leaves both at DuckDB's defaults.  The caller's own keys land after these, so they
+ * win; an unknown one is DuckDB's own refusal. */
+static ray_t* qd_instance_new(const qd_opt* opts, int64_t n) {
+    duck_str* kv = q_duckdb_cols(2 * (n + 2), sizeof *kv);
+    if (!kv) return q_err(QE_WSFULL);
+    duck_str*  ks = kv;
+    duck_str*  vs = kv + n + 2;
+    duck_idx_t m  = 0;
     char exe[512], dir[600];
     struct stat sb;
-    if (!q_exedir(exe, sizeof exe)) return NULL;
-    snprintf(dir, sizeof dir, "%s/extensions", exe);
-    if (stat(dir, &sb) != 0 || !S_ISDIR(sb.st_mode)) return NULL;
-    duck_str k1 = qd_str("extension_directory"), v1 = qd_str(dir);
-    duck_str k2 = qd_str("autoinstall_known_extensions"), v2 = qd_str("false");
-    QAPI.instance_set_option(g_main.inst, &k1, &v1, NULL);
-    QAPI.instance_set_option(g_main.inst, &k2, &v2, NULL);
-    return NULL;
+    if (q_exedir(exe, sizeof exe)) {
+        snprintf(dir, sizeof dir, "%s/extensions", exe);
+        if (stat(dir, &sb) == 0 && S_ISDIR(sb.st_mode)) {
+            ks[m] = qd_str("extension_directory");
+            vs[m++] = qd_str(dir);
+            ks[m] = qd_str("autoinstall_known_extensions");
+            vs[m++] = qd_str("false");
+        }
+    }
+    for (int64_t i = 0; i < n; i++) {
+        ks[m] = qd_str(opts[i].k);
+        vs[m++] = qd_str(opts[i].t);
+    }
+    duck_err e = NULL;
+    bool ok = QAPI.environment_create(&g_main.env, &e) == QDuckSuccess &&
+              QAPI.instance_create_with_options(g_main.env, ks, vs, m, &g_main.inst, &e) == QDuckSuccess;
+    free(kv);
+    if (ok) return NULL;
+    qd_instance_drop();
+    return q_duckdb_fail_err(-1, &e);
 }
 
 /* Open main: the file `-duckdb` named, else PEACHQ_DUCKDB_MAIN, else in-memory, attached as the instance's default
  * database; the instance (qd_instance_new, carrying the SET keys of the open that creates it) starts here. */
-static ray_t* qd_main_open(void) {
+static ray_t* qd_main_open(const qd_opt* opts, int64_t n) {
     const char* path = g_main_path[0] ? g_main_path : getenv("PEACHQ_DUCKDB_MAIN");
     if (path && !*path) path = NULL;
-    ray_t* e = g_main.inst ? NULL : qd_instance_new();
+    ray_t* e = qd_instance_new(opts, n);
     if (e) return e;
     int slot = qd_free_slot();
     if (slot < 0) { qd_instance_drop(); return q_duckdb_fail(-1, "open: every connection slot is live"); }
     duck_err de  = NULL;
     duck_str ps  = qd_str(path ? path : ":memory:");
-    if (QAPI.instance_attach(g_main.inst, &ps, NULL, NULL, true, &de) != QDuckSuccess) {
+    if (QAPI.instance_attach(g_main.inst, NULL, &ps, NULL, true, &de) != QDuckSuccess) {
         qd_instance_drop();
         return q_duckdb_fail_err(-1, &de);
     }
@@ -855,7 +869,7 @@ static ray_t* qd_main_open(void) {
     return q_duckdb_fail(-1, "open: the host could not register the main handle");
 }
 
-static ray_t* qd_main_need(void) { return g_main.open ? NULL : qd_main_open(); }
+static ray_t* qd_main_need(void) { return g_main.open ? NULL : qd_main_open(NULL, 0); }
 
 /* the ATTACH options (docs: sql/statements/attach), case-insensitive; every other config key is a SET on main */
 static bool qd_attach_option(const char* k) {
@@ -891,22 +905,6 @@ static void qd_cfg_put(qd_buf* b, const char* t, bool quote) {
     else       q_duckdb_puts(b, t);
 }
 
-/* a key of the open that CREATES main goes into the instance's startup config: an unknown one is refused here, as
- * DuckDB only names it once the instance starts */
-static ray_t* qd_startup_option(const char* k, const char* t) {
-    duck_err    e  = NULL;
-    duck_option o  = NULL;
-    duck_str    ks = qd_str(k), ts = qd_str(t);
-    ray_t* err = g_main.inst ? NULL : qd_instance_new();
-    if (err) return err;
-    if (QAPI.instance_get_option_by_name(g_main.inst, &ks, &o, &e) != QDuckSuccess) {
-        if (e) QAPI.error_info_destroy(&e);
-        return q_duckdb_fail(-1, "%s: not a DuckDB config option", k);
-    }
-    QAPI.option_destroy(&o);
-    return QAPI.instance_set_option(g_main.inst, &ks, &ts, &e) == QDuckSuccess ? NULL : q_duckdb_fail_err(-1, &e);
-}
-
 /* The config dict split by key (ADR: DuckDB has no per-database settings): ATTACH options into *attach as the
  * parenthesised clause, every other key SET on main — through the startup config when this open creates main, else
  * as SET statements, so an open-only setting gets DuckDB's own refusal.  Owned error, else NULL. */
@@ -915,30 +913,36 @@ static ray_t* qd_config_apply(ray_t* cfg, qd_buf* attach) {
     ray_t* vals = ray_dict_vals(cfg);   /* borrowed */
     int64_t np = q_count(cfg);
     if (keys->type != RAY_SYM && np) return q_duckdb_fail(-1, "open: a config key is not a symbol");
-    for (int64_t i = 0; i < np; i++) {
+    qd_opt* opts = g_main.open ? NULL : q_duckdb_cols(np, sizeof *opts);
+    if (!g_main.open && !opts) return q_err(QE_WSFULL);
+    int64_t no = 0;
+    ray_t*  e  = NULL;
+    for (int64_t i = 0; !e && i < np; i++) {
         ray_t* ks = ray_sym_vec_cell(keys, i);
         char k[128], t[256];
         bool quote;
         snprintf(k, sizeof k, "%.*s", ks ? (int)ray_str_len(ks) : 0, ks ? ray_str_ptr(ks) : "");
         if (strcmp(k, "path") == 0) continue;
         if (strcmp(k, "timeout") == 0 || strcmp(k, "stdout") == 0 || strcmp(k, "stderr") == 0) {
-            if (!g_main.open) qd_instance_drop();
-            return q_err(QE_DOMAIN);
+            e = q_err(QE_DOMAIN);
+            break;
         }
         ray_t* iv = ray_i64(i);
         ray_t* v = ray_at_fn(vals, iv);
         ray_release(iv);
         bool ok = qd_cfg_text(v, t, sizeof t, &quote);
         ray_release(v);
-        ray_t* e = NULL;
         if (!ok) e = q_duckdb_fail(-1, "%s: a config value must be text, a symbol, a number or a boolean", k);
         else if (qd_attach_option(k)) {
             q_duckdb_puts(attach, attach->len ? ", " : "(");
             q_duckdb_puts(attach, k);
             q_duckdb_puts(attach, " ");
             qd_cfg_put(attach, t, quote);
-        } else if (!g_main.open) e = qd_startup_option(k, t);
-        else {
+        } else if (opts) {
+            snprintf(opts[no].k, sizeof opts[no].k, "%s", k);
+            snprintf(opts[no].t, sizeof opts[no].t, "%s", t);
+            no++;
+        } else {
             qd_buf sb = {0};
             q_duckdb_puts(&sb, "SET ");
             q_duckdb_put_ident(&sb, k, strlen(k));
@@ -946,11 +950,12 @@ static ray_t* qd_config_apply(ray_t* cfg, qd_buf* attach) {
             qd_cfg_put(&sb, t, quote);
             e = q_duckdb_exec_buf(g_main.slot, &sb);
         }
-        if (e) { if (!g_main.open) qd_instance_drop(); return e; }
     }
-    if (attach->len) q_duckdb_puts(attach, ")");
-    if (attach->oom) { if (!g_main.open) qd_instance_drop(); return q_err(QE_WSFULL); }
-    return g_main.open ? NULL : qd_main_open();
+    if (!e && attach->len) q_duckdb_puts(attach, ")");
+    if (!e && attach->oom) e = q_err(QE_WSFULL);
+    if (!e && opts) e = qd_main_open(opts, no);
+    free(opts);
+    return e;
 }
 
 static int qd_cat_find(const char* path) {
