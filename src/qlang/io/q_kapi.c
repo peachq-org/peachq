@@ -18,7 +18,8 @@
 #include "qlang/io/q_io.h"           /* q_io_abs_path — a Windows candidate's lexical absolute path */
 #include "qlang/net/q_wire.h"        /* b9/d9/okx are the -8!/-9! codec */
 #include "core/poll.h"
-#include "mem/heap.h"                /* ray_free_set_qfn_fin_fn — the foreign-destructor choke point */
+#include "core/sock.h"               /* ray_sock_set_nonblocking / _close — an sd1 descriptor is a socket */
+#include "mem/heap.h"               /* ray_free_set_qfn_fin_fn — the foreign-destructor choke point */
 #include "core/runtime.h"
 #include "core/types.h"              /* ray_elem_size — the overlay widths */
 #include "ops/idxop.h"               /* ray_attr_drop_fn — a relabelled result sheds its old attribute */
@@ -36,7 +37,6 @@
 #include <string.h>
 
 #if !defined(_WIN32)
-#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -887,18 +887,11 @@ static int seam_ok(K x, int depth) {
 
 /* ===== sd1 / sd0x — an extension fd on the runtime poll ==================================== */
 
+/* `d` is a SOCKET on Windows, registered as the IOCP loop's level-readiness selector (as the Kafka wake) */
 typedef struct { I fd; int64_t id; } sd_reg_t;
 static sd_reg_t g_sd[32];
 static int      g_nsd;
 
-#if defined(_WIN32)
-/* Out of scope on Windows (owner ruling 2026-09-24): `d` there is a SOCKET, and handing one to the iocp
- * poll from an extension is unproven. */
-K sd1(I d, K (*f)(I)) {
-    (void)d; (void)f;
-    return krr((S) "nyi");
-}
-#else
 static ray_t* sd_readable(ray_poll_t* poll, ray_selector_t* sel) {
     (void)poll;
     K (*f)(I) = (K(*)(I))(uintptr_t)sel->data;
@@ -913,11 +906,8 @@ K sd1(I d, K (*f)(I)) {
     I fd = d < 0 ? -d : d;   /* capiref.md sd1: a negative d asks for a non-blocking socket */
     ray_poll_t* p = (ray_poll_t*)ray_runtime_get_poll();
     if (!p || g_nsd >= (int)(sizeof g_sd / sizeof g_sd[0])) { sd0x(fd, 1); return krr((S) "io"); }
+    if (d < 0 && ray_sock_set_nonblocking((ray_sock_t)fd) != RAY_OK) { sd0x(fd, 1); return krr((S) "io"); }
 
-    if (d < 0) {
-        int fl = fcntl(fd, F_GETFL, 0);
-        if (fl >= 0) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
-    }
     ray_poll_reg_t reg = { 0 };
     reg.fd = fd;
     reg.type = RAY_SEL_SOCKET;
@@ -931,7 +921,6 @@ K sd1(I d, K (*f)(I)) {
     g_nsd++;
     return ki(fd);           /* capiref.md: on success an integer K holding d */
 }
-#endif
 
 V sd0x(I d, I f) {
     ray_poll_t* p = (ray_poll_t*)ray_runtime_get_poll();
@@ -941,11 +930,7 @@ V sd0x(I d, I f) {
         g_sd[i] = g_sd[--g_nsd];
         break;
     }
-#if !defined(_WIN32)
-    if (f) close(d);
-#else
-    (void)f;
-#endif
+    if (f) ray_sock_close((ray_sock_t)d);
 }
 
 V sd0(I d) { sd0x(d, 1); }
