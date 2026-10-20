@@ -256,6 +256,11 @@ assertEmpty:{ [actual; msg]  assertThat[count actual;=;0; msg]};
 // @return actual object
 assertNotEmpty:{ [actual; msg]  assertThat[count actual;>;0; msg]};
 
+// delete every table of the root namespace, other globals untouched; with no table it deletes nothing, since a
+// functional delete given no names would empty the whole namespace
+// @return the names deleted
+deleteGlobalTables:{ [] t:tables[]; if[count t; ![`.;();0b;t]]; t};
+
 / One line saying how the run went, for a reader who reads nothing else.
 / Carries no timestamp, so two runs of the same suite diff to nothing.
 / @param resultTbl Table as returned by runTests
