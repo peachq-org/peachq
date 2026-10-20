@@ -142,7 +142,7 @@
 
 / The statement log: one row per statement the bridge issued, newest last.
 / @eg select time, dur, sql from .duckdb.sqllog
-.duckdb.sqllog:([] time:0#0Np; dur:0#0Nn; ok:0#0b; conn:0#0Ni; rows:0#0N; sql:(); err:())
+.duckdb.sqllog:([] time:0#0Np; dur:0#0Nn; ok:0#0b; conn:0#0Ni; rows:0#0N; ncols:0#0N; sql:(); err:())
 
 / How many rows .duckdb.sqllog keeps: 0 keeps nothing; at the cap the older half is dropped.
 .duckdb.sqllogmax:4096
