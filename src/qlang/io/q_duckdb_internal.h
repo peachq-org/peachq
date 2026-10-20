@@ -41,7 +41,8 @@ const char* q_duckdb_err_text(int slot);
 /* One row of `.duckdb.sqllog`: t0 = q_dotz_now_ns(0) read before the work, rows = the rows a query answered or a
  * DML statement changed (NULL_I64 where there is no count), err = NULL when it succeeded.  Every statement is noted
  * inside q_duckdb_run — the row move of a write included, now that it is an INSERT. */
-void q_duckdb_stmt_note(int slot, const char* sql, int64_t t0, bool ok, int64_t rows, const char* err);
+void q_duckdb_stmt_note(int slot, const char* sql, int64_t t0, bool ok, int64_t rows, int64_t cols,
+                        const char* err);
 
 /* growable SQL text; `oom` latches and every put behind it is a no-op */
 typedef struct { char* p; size_t len, cap; int oom; } qd_buf;
