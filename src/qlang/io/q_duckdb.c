@@ -589,17 +589,30 @@ static int64_t qd_result_cols(const duck_result* r) {
     return r->rtype == QDuckReturnQuery ? (int64_t)r->ncols : NULL_I64;
 }
 
-/* Drain one cursor into *out — the result type, the schema, every column name NUL-terminated, every chunk — and
- * destroy it; an execution error (they surface while stepping) lands in `why` and leaves *out empty.  The cursor
- * dies on every path, so the connection never keeps a live result between calls. */
-static duck_state qd_result_take(duck_cursor* cur, duck_result* out, char* why, size_t cap) {
-    duck_err   e  = NULL;
-    duck_state st = QDuckSuccess;
+static duck_state qd_result_meta(duck_cursor cur, duck_result* out, duck_err* e) {
     int32_t    rt = 0;
-    duck_idx_t ccap = 0;
+    duck_state st = QAPI.result_get_result_type(cur, &rt, e);
+    if (st == QDuckSuccess) out->rtype = (duck_return_t)rt;
+    return st == QDuckSuccess ? QAPI.result_get_schema(cur, &out->schema, e) : st;
+}
+
+/* Drain one cursor into *out — the result type, the schema, every column name NUL-terminated, every chunk — and
+ * destroy it; an execution error (they surface while stepping) lands in `why` and leaves *out empty.  A statement
+ * that expands into a group (a dynamic PIVOT) has no metadata until it steps, so the first chunk is fetched first
+ * and kept; a NULL one is a group that ended without a row-producing statement.  The cursor dies on every path, so
+ * the connection never keeps a live result between calls. */
+static duck_state qd_result_take(duck_cursor* cur, duck_result* out, char* why, size_t cap) {
+    duck_err        e     = NULL;
+    duck_state      st    = QDuckSuccess;
+    duck_idx_t      ccap  = 0;
+    duck_data_chunk first = NULL;
+    bool            ended = false;
     memset(out, 0, sizeof *out);
-    if ((st = QAPI.result_get_result_type(*cur, &rt, &e)) == QDuckSuccess) out->rtype = (duck_return_t)rt;
-    if (st == QDuckSuccess) st = QAPI.result_get_schema(*cur, &out->schema, &e);
+    if ((st = qd_result_meta(*cur, out, &e)) == QDuckMetadataDeferred) {
+        if (e) QAPI.error_info_destroy(&e);
+        if ((st = QAPI.result_fetch_chunk(*cur, &first, &e)) == QDuckSuccess) st = qd_result_meta(*cur, out, &e);
+        ended = st == QDuckSuccess && !first;
+    }
     if (st == QDuckSuccess) st = QAPI.schema_get_count(out->schema, &out->ncols, &e);
     if (st == QDuckSuccess && !(out->names = q_duckdb_cols((int64_t)out->ncols, sizeof *out->names))) st = -1;
     for (duck_idx_t c = 0; st == QDuckSuccess && c < out->ncols; c++) {
@@ -608,9 +621,10 @@ static duck_state qd_result_take(duck_cursor* cur, duck_result* out, char* why, 
         st = QAPI.schema_get_field(out->schema, c, &nm, &lt, &e);
         if (st == QDuckSuccess && !(out->names[c] = q_duckdb_text(nm.ptr ? nm.ptr : "", nm.len))) st = -1;
     }
-    while (st == QDuckSuccess) {
-        duck_data_chunk ch = NULL;
-        if ((st = QAPI.result_fetch_chunk(*cur, &ch, &e)) != QDuckSuccess || !ch) break;
+    while (st == QDuckSuccess && !ended) {
+        duck_data_chunk ch = first;
+        first = NULL;
+        if (!ch && ((st = QAPI.result_fetch_chunk(*cur, &ch, &e)) != QDuckSuccess || !ch)) break;
         if (out->nchunks == ccap) {
             duck_idx_t nc = ccap ? 2 * ccap : 8;
             duck_data_chunk* grown = realloc(out->chunks, nc * sizeof *grown);
@@ -620,6 +634,7 @@ static duck_state qd_result_take(duck_cursor* cur, duck_result* out, char* why, 
         }
         out->chunks[out->nchunks++] = ch;
     }
+    if (first) QAPI.data_chunk_destroy(&first);
     QAPI.result_destroy(cur);
     if (st == QDuckSuccess) return st;
     if (e) qd_etext(&e, why, cap);
@@ -1656,7 +1671,8 @@ static ray_t* qd_sqlx_wrap(ray_t** args, int64_t n) { return qd_sql_any(args, n,
 
 /* .duckdb.i.prepnames[h;sql] — DuckDB's own parameter names of the text, statement by statement in index order:
  * the oracle the scanner (.duckdb.i.params) is tested against, and nothing else's.  Each statement is bound as a
- * prepare would be, so one DuckDB will not bind refuses with its text. */
+ * prepare would be, so one DuckDB will not bind refuses with its text — except one that expands into a group (a
+ * dynamic PIVOT), which DuckDB binds only when it runs: its markers are answered unvalidated. */
 static ray_t* qd_prepnames_wrap(ray_t** args, int64_t n) {
     int slot;
     ray_t* e = qd_door(args, n, 2, &slot);
@@ -1678,8 +1694,10 @@ static ray_t* qd_prepnames_wrap(ray_t** args, int64_t n) {
         duck_str*   mk  = NULL;
         int64_t     np  = 0;
         duck_schema sch = NULL;
-        if (qd_stmt_markers(slot, st, &mk, &np, &e) &&
-            QAPI.statement_bind(con, st, &sch, NULL, &de) != QDuckSuccess) e = q_duckdb_fail_err(slot, &de);
+        duck_state  bs  = qd_stmt_markers(slot, st, &mk, &np, &e) ? QAPI.statement_bind(con, st, &sch, NULL, &de)
+                                                                   : QDuckSuccess;
+        if (bs == QDuckMetadataDeferred) { if (de) QAPI.error_info_destroy(&de); }
+        else if (bs != QDuckSuccess) e = q_duckdb_fail_err(slot, &de);
         for (int64_t i = 0; !e && i < np; i++) {
             int64_t id = ray_sym_intern_runtime(mk[i].ptr, (int64_t)mk[i].len);
             r = ray_vec_append(r, &id);
