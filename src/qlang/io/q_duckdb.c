@@ -461,7 +461,7 @@ static ray_t* qd_door(ray_t** args, int64_t n, int64_t want, int* slot) {
  * an ordinary table and `.duckdb` owns the insert and the cap, so the schema and the retention are readable and
  * changeable there. */
 
-enum { QD_L_TIME, QD_L_DUR, QD_L_OK, QD_L_CONN, QD_L_ROWS, QD_L_SQL, QD_L_ERR, QD_L_NCOL };
+enum { QD_L_TIME, QD_L_DUR, QD_L_OK, QD_L_CONN, QD_L_ROWS, QD_L_COLS, QD_L_SQL, QD_L_ERR, QD_L_NCOL };
 
 /* `.duckdb.onsql` — the per-statement hook, fired from the one place the ring is fed, so a handler sees every
  * statement the bridge issues and not only the ones a public door names.  Unbound costs one borrowed lookup and
@@ -481,11 +481,11 @@ static ray_t* qd_sym_list(const char* const* names, int n) {
 }
 
 static void sqllog_fire(int32_t conn, const char* sql, int64_t t, int64_t dur, bool ok, int64_t rows,
-                        const char* err) {
+                        int64_t cols, const char* err) {
     if (g_in_onsql) return;
     int64_t hook = ray_sym_intern(".duckdb.onsql", 13);
     if (!q_env_get(hook)) return;                                        /* unbound: build nothing */
-    static const char* const NAMES[QD_L_NCOL] = { "time", "dur", "ok", "conn", "rows", "sql", "err" };
+    static const char* const NAMES[QD_L_NCOL] = { "time", "dur", "ok", "conn", "rows", "ncols", "sql", "err" };
     uint8_t okb = ok ? 1 : 0;
     ray_t* val[QD_L_NCOL];
     val[QD_L_TIME] = ray_timestamp(t);
@@ -493,6 +493,7 @@ static void sqllog_fire(int32_t conn, const char* sql, int64_t t, int64_t dur, b
     val[QD_L_OK]   = ray_bool(okb);
     val[QD_L_CONN] = ray_i32(conn);
     val[QD_L_ROWS] = ray_i64(rows);
+    val[QD_L_COLS] = ray_i64(cols);
     val[QD_L_SQL]  = ray_charv(sql ? sql : "", sql ? (int64_t)strlen(sql) : 0);
     val[QD_L_ERR]  = ray_charv(err ? err : "", err ? (int64_t)strlen(err) : 0);
     ray_t* k = qd_sym_list(NAMES, QD_L_NCOL);
@@ -522,8 +523,9 @@ static void sqllog_fire(int32_t conn, const char* sql, int64_t t, int64_t dur, b
     ray_release(rec);
 }
 
-void q_duckdb_stmt_note(int slot, const char* sql, int64_t t0, bool ok, int64_t rows, const char* err) {
-    sqllog_fire(slot >= 0 ? qd_handle_of(slot) : NULL_I32, sql, t0, q_dotz_now_ns(0) - t0, ok, rows, err);
+void q_duckdb_stmt_note(int slot, const char* sql, int64_t t0, bool ok, int64_t rows, int64_t cols,
+                        const char* err) {
+    sqllog_fire(slot >= 0 ? qd_handle_of(slot) : NULL_I32, sql, t0, q_dotz_now_ns(0) - t0, ok, rows, cols, err);
 }
 
 /* the instance and the environment it hangs off, together: the one teardown every path to a dead main takes */
@@ -580,6 +582,11 @@ static int64_t qd_result_rows(const duck_result* r) {
     if (QAPI.data_chunk_get_vector(r->chunks[0], 0, &v, NULL) != QDuckSuccess ||
         QAPI.vector_get_view(v, &w, NULL) != QDuckSuccess) return NULL_I64;
     return ((const int64_t*)w.data)[0];
+}
+
+/* the columns a query result moved; a DML Count chunk and DDL are no result set */
+static int64_t qd_result_cols(const duck_result* r) {
+    return r->rtype == QDuckReturnQuery ? (int64_t)r->ncols : NULL_I64;
 }
 
 /* Drain one cursor into *out — the result type, the schema, every column name NUL-terminated, every chunk — and
@@ -656,11 +663,11 @@ ray_t* q_duckdb_run(int slot, const char* sql, duck_result* out, int stash) {
     int64_t t0 = q_dotz_now_ns(0);
     char why[1024] = "";
     if (!qd_run_text(slot, sql, out, why, sizeof why)) {
-        q_duckdb_stmt_note(slot, sql, t0, false, NULL_I64, why);
+        q_duckdb_stmt_note(slot, sql, t0, false, NULL_I64, NULL_I64, why);
         if (stash) q_duckdb_err_stash(slot, "%s", why);
         return q_err(QE_DUCKDB);
     }
-    q_duckdb_stmt_note(slot, sql, t0, true, qd_result_rows(out), NULL);
+    q_duckdb_stmt_note(slot, sql, t0, true, qd_result_rows(out), qd_result_cols(out), NULL);
     return NULL;
 }
 
@@ -1596,7 +1603,8 @@ static ray_t* qd_run_bound(int slot, const char* sql, ray_t* params, duck_result
     if (st) QAPI.sql_statement_destroy(&st);
     if (it) QAPI.statement_iterator_destroy(&it);
     if (e) q_duckdb_result_free(out);
-    q_duckdb_stmt_note(slot, sql, t0, !e, e ? NULL_I64 : qd_result_rows(out), e ? q_duckdb_err_text(slot) : NULL);
+    q_duckdb_stmt_note(slot, sql, t0, !e, e ? NULL_I64 : qd_result_rows(out), e ? NULL_I64 : qd_result_cols(out),
+                       e ? q_duckdb_err_text(slot) : NULL);
     return e;
 }
 
@@ -1728,7 +1736,7 @@ static ray_t* qd_unsafe_exec_text_wrap(ray_t** args, int64_t n) {
     int64_t t0 = q_dotz_now_ns(0);
     char why[1024] = "";
     if (!qd_run_text(slot, s.p, &res, why, sizeof why)) {
-        q_duckdb_stmt_note(slot, s.p, t0, false, NULL_I64, why);
+        q_duckdb_stmt_note(slot, s.p, t0, false, NULL_I64, NULL_I64, why);
         q_duckdb_buf_free(&s);
         return diag_text(why);
     }
@@ -1782,7 +1790,7 @@ static ray_t* qd_unsafe_exec_text_wrap(ray_t** args, int64_t n) {
         }
         nrow += (int64_t)rows;
     }
-    q_duckdb_stmt_note(slot, s.p, t0, true, ncol ? nrow : NULL_I64, NULL);
+    q_duckdb_stmt_note(slot, s.p, t0, true, ncol ? nrow : NULL_I64, ncol ? ncol : NULL_I64, NULL);
     q_duckdb_buf_free(&s);
     q_duckdb_result_free(&res);
     ray_t* out = b.oom ? q_err(QE_WSFULL) : ray_charv(b.len ? b.p : "", (int64_t)b.len);
