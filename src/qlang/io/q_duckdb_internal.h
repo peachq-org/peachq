@@ -129,14 +129,14 @@ extern const char QD_NO_SQL_MEANING[];
 /* the logical-type ladder over the v2 parameters (q_duckdb_codec.c): the id; the parameter count; parameter i's
  * TYPE (owned) with its name (owned copy, NULL where positional); a flat type built from an id; a vector read as a
  * flat view (false where DuckDB refuses) */
-duck_type  q_duckdb_type_id(duck_logical_type lt);
-duck_idx_t q_duckdb_type_nparams(duck_logical_type lt);
-duck_logical_type q_duckdb_type_param(duck_logical_type lt, duck_idx_t i, char** name);
-int64_t q_duckdb_type_param_int(duck_logical_type lt, duck_idx_t i);    /* a width, scale or array size; -1 = none */
-char*   q_duckdb_type_param_text(duck_logical_type lt, duck_idx_t i);   /* an ENUM entry, owned */
-bool    q_duckdb_type_alias(duck_logical_type lt, char* buf, size_t cap);
-duck_logical_type q_duckdb_type_make(int slot, duck_type id);
-bool   q_duckdb_vec_view(duck_vector v, duck_view* out);
+duck_type  q_duckdb_codec_type_id(duck_logical_type lt);
+duck_idx_t q_duckdb_codec_type_nparams(duck_logical_type lt);
+duck_logical_type q_duckdb_codec_type_param(duck_logical_type lt, duck_idx_t i, char** name);
+int64_t q_duckdb_codec_type_param_int(duck_logical_type lt, duck_idx_t i);    /* a width, scale or array size; -1 = none */
+char*   q_duckdb_codec_type_param_text(duck_logical_type lt, duck_idx_t i);   /* an ENUM entry, owned */
+bool    q_duckdb_codec_type_alias(duck_logical_type lt, char* buf, size_t cap);
+duck_logical_type q_duckdb_codec_type_make(int slot, duck_type id);
+bool   q_duckdb_codec_vec_view(duck_vector v, duck_view* out);
 /* a record type's field count, and field i: its type OWNED, its name OWNED (a MAP's halves have none, so *name is
  * NULL there) */
 int    q_duckdb_codec_rec_nfields(duck_logical_type lt, duck_type id);
