@@ -516,6 +516,8 @@ static ray_t* h_p(const char* arg, size_t alen) {
         g_listen_port = 0;
         return NULL;                                     /* silent */
     }
+    /* the port already held is a no-op, not a rebind that collides with itself (owner 2026-10-20) */
+    if (!spec.any && !spec.host[0] && spec.lo == spec.hi && spec.lo == g_listen_port) return NULL;
     if (!q_sys_listen(&spec)) return q_err(QE_IO);
     return NULL;                                          /* setter: silent */
 }
