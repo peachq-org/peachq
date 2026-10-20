@@ -95,7 +95,8 @@ assertEquals:{ [actual; expected; msg]
 // Assert that actual and expected values are almost equal i.e. that floating types 8/9h are within a small specified difference.
 // @param actual An object representing the actual result value
 // @param expected An object representing the expected value
-// @param permittedDifferenceInFloats The permitted absolute difference in value between actual/expected. i.e. permittedDifferenceInFloats>=abs actual-expected
+// @param permittedDifferenceInFloats An atom: the permitted absolute difference, i.e. permittedDifferenceInFloats>=abs actual-expected.
+//        A pair abs rel: a float passes when abs[actual-expected] <= abs | rel*abs expected
 // @return actual object
 assertAlmostEquals:{ [actual; expected; permittedDifferenceInFloats]
     a:actual; e:expected;
@@ -119,7 +120,9 @@ assertAlmostEquals:{ [actual; expected; permittedDifferenceInFloats]
         :a];
     / List or atoms with types<>0 left
     $[(abs type a) in 8 9h;
-        doCheck[all/[?[null a;null e;permittedDifferenceInFloats >= abs a-e]]; "assertEquals data has big difference"];
+        [p:2#permittedDifferenceInFloats,0f;
+         / an infinite expected makes the relative bound infinite too, so it must match exactly
+         doCheck[all/[?[null a;null e;((abs a-e) <= p[0]|p[1]*abs e) and (a=e) or not 0w=abs e]]; "assertEquals data has big difference"]];
         doCheck[all/[a=e]; "Almost equal exact type match fail"]];
     a};
 
