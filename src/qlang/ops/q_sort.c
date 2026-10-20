@@ -12,6 +12,7 @@
 #include "qlang/q_builtins.h"  /* q_builtins_type_num — the q type-id key */
 #include "qlang/eval/q_eval.h" /* carrier kind / iter id / lambda source */
 #include "qlang/ops/q_index.h" /* q_index_elem_at — THE element read */
+#include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home */
 #include "lang/eval.h"     /* ray_at_fn, ray_xbar_fn */
 #include "lang/internal.h" /* ray_iasc_fn / ray_idesc_fn, as_f64 */
 #include <assert.h>
@@ -387,8 +388,24 @@ ray_t* q_idesc_wrap(ray_t* x) {
 /* q `width xbar list` — interval bucketing.  rayfall ray_xbar_fn is (col,
  * bucket); q spells it (bucket, col), so swap the arguments.  Everything else
  * (numeric int/float bucket, temporal cols, list zip) is handled by the base
- * kernel; dict/keyed-table/qSQL forms fall through to whatever the base does. */
+ * kernel; dict/keyed-table/qSQL forms fall through to whatever the base does.
+ * A null in either atom answers the null of the type the non-null pair gives
+ * (owner ruling 2026-10-20): the kernel names that type on a stand-in pair of 1s. */
 ray_t* q_xbar_wrap(ray_t* bucket, ray_t* col) {
-    return ray_xbar_fn(col, bucket);
+    if (bucket->type >= 0 || col->type >= 0 || (!RAY_ATOM_IS_NULL(bucket) && !RAY_ATOM_IS_NULL(col)))
+        return ray_xbar_fn(col, bucket);
+    ray_t* one = ray_i64(1);
+    ray_t* b = q_dollar_cast((int8_t)-bucket->type, one);
+    ray_t* c = RAY_IS_ERR(b) ? NULL : q_dollar_cast((int8_t)-col->type, one);
+    ray_release(one);
+    if (RAY_IS_ERR(b)) return b;
+    if (RAY_IS_ERR(c)) { ray_release(b); return c; }
+    ray_t* r = ray_xbar_fn(c, b);
+    ray_release(b);
+    ray_release(c);
+    if (RAY_IS_ERR(r)) return r;
+    int8_t t = r->type;
+    ray_release(r);
+    return ray_typed_null(t);
 }
 
