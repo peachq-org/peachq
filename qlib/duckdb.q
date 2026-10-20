@@ -41,7 +41,9 @@
 
 / Run SQL on a handle and answer the result as a table; a statement without a result answers ::.  sql is a string, or the
 / pair (string;dict) binding each $name by name or (string;list) binding $1, $2 ... by position; values are atoms or strings
-/ (a null is SQL NULL), DuckDB's refusal is 'duckdb with the reason in .duckdb.err[], anything else 'type.
+/ (a null is SQL NULL), DuckDB's refusal is 'duckdb with the reason in .duckdb.err[], anything else 'type.  The triple
+/ (string;params;schema), params () for none and schema the table getx answers, reads the result as .duckdb.get reads a table.
+/ @eg .duckdb.exec[.duckdb.main[];("SELECT 'a' AS s";();([] col:enlist `s; dtype:enlist "VARCHAR"; logical:enlist `symbol))]
 / @eg .duckdb.exec[.duckdb.main[];"SELECT 1 AS one, 'a' AS s"]
 / @eg .duckdb.exec[.duckdb.main[];("SELECT $a + $b AS n";`a`b!1 2)]
 .duckdb.exec:{[handle;sql] .duckdb.i.exec[handle;sql]}
