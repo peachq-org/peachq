@@ -529,21 +529,21 @@ ray_t* q_duckdb_schema_check(int slot, const qd_name_t* nm, ray_t* tbl,
  * LIST/ARRAY suffix their child, DECIMAL and ENUM carry their parameters, everything else is its bare name. */
 static void qd_spell_type(duck_logical_type lt, qd_buf* b) {
     char alias[256];
-    if (q_duckdb_type_alias(lt, alias, sizeof alias)) { q_duckdb_puts(b, alias); return; }
-    duck_type id = q_duckdb_type_id(lt);
+    if (q_duckdb_codec_type_alias(lt, alias, sizeof alias)) { q_duckdb_puts(b, alias); return; }
+    duck_type id = q_duckdb_codec_type_id(lt);
     char num[48];
     duck_logical_type child = NULL;
     switch (id) {
         case QDUCK_TYPE_LIST:
         case QDUCK_TYPE_ARRAY:
-            child = q_duckdb_type_param(lt, 0, NULL);
+            child = q_duckdb_codec_type_param(lt, 0, NULL);
             if (child) { qd_spell_type(child, b); QAPI.logical_type_destroy(&child); }
             if (id == QDUCK_TYPE_LIST) q_duckdb_puts(b, "[]");
-            else { snprintf(num, sizeof num, "[%lld]", (long long)q_duckdb_type_param_int(lt, 1)); q_duckdb_puts(b, num); }
+            else { snprintf(num, sizeof num, "[%lld]", (long long)q_duckdb_codec_type_param_int(lt, 1)); q_duckdb_puts(b, num); }
             return;
         case QDUCK_TYPE_DECIMAL:
-            snprintf(num, sizeof num, "DECIMAL(%lld,%lld)", (long long)q_duckdb_type_param_int(lt, 0),
-                     (long long)q_duckdb_type_param_int(lt, 1));
+            snprintf(num, sizeof num, "DECIMAL(%lld,%lld)", (long long)q_duckdb_codec_type_param_int(lt, 0),
+                     (long long)q_duckdb_codec_type_param_int(lt, 1));
             q_duckdb_puts(b, num);
             return;
         case QDUCK_TYPE_STRUCT:
@@ -565,10 +565,10 @@ static void qd_spell_type(duck_logical_type lt, qd_buf* b) {
             return;
         }
         case QDUCK_TYPE_ENUM: {
-            duck_idx_t n = q_duckdb_type_nparams(lt);
+            duck_idx_t n = q_duckdb_codec_type_nparams(lt);
             q_duckdb_puts(b, "ENUM(");
             for (duck_idx_t i = 0; i < n; i++) {
-                char* v = q_duckdb_type_param_text(lt, i);
+                char* v = q_duckdb_codec_type_param_text(lt, i);
                 if (i) q_duckdb_puts(b, ", ");
                 q_duckdb_put_strlit(b, QD_TEXT(v), strlen(QD_TEXT(v)));
                 free(v);
