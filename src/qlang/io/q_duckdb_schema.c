@@ -710,7 +710,7 @@ static bool qd_dtype_wellformed(const char* s) {
 }
 
 /* the schema half of an incoming pair -> rows (col, dtype, logical): every row declares a dtype (a blank one would
- * be a silent no-op), the logical is optional; iskey is the data's keyed shape, not read */
+ * be a silent no-op), the logical and iskey are optional; the write door takes its keyed shape from the data */
 ray_t* q_duckdb_schema_desc_parse(int slot, ray_t* schema, qd_desc_t** out, int64_t* n) {
     *out = NULL;
     *n   = 0;
@@ -718,7 +718,9 @@ ray_t* q_duckdb_schema_desc_parse(int slot, ray_t* schema, qd_desc_t** out, int6
     ray_t* cv = ray_table_get_col(schema, ray_sym_intern_runtime("col", 3));       /* borrowed */
     ray_t* dv = ray_table_get_col(schema, ray_sym_intern_runtime("dtype", 5));
     ray_t* lv = ray_table_get_col(schema, ray_sym_intern_runtime("logical", 7));
+    ray_t* kv = ray_table_get_col(schema, ray_sym_intern_runtime("iskey", 5));
     if (!cv || !dv) return qd_schema_fail(slot, "schema needs col and dtype columns");
+    if (kv && kv->type != RAY_BOOL) return qd_schema_fail(slot, "schema iskey is not boolean");
     int64_t    rows = q_count(schema);
     qd_desc_t* d    = q_duckdb_cols(rows, sizeof *d);
     if (!d) return q_err(QE_WSFULL);
@@ -733,6 +735,7 @@ ray_t* q_duckdb_schema_desc_parse(int slot, ray_t* schema, qd_desc_t** out, int6
         else if (lv && !qd_schema_text(lv, i, &lp, &ll)) e = qd_schema_fail(slot, "schema logical is not text");
         else if (ll >= (int64_t)sizeof d[i].logical) e = qd_schema_fail(slot, "schema logical is not a logical type");
         else snprintf(d[i].logical, sizeof d[i].logical, "%.*s", (int)ll, lp);
+        d[i].iskey = kv && *(uint8_t*)ray_vec_get(kv, i) != 0;
     }
     if (e) { q_duckdb_schema_desc_free(d, rows); return e; }
     *out = d;
