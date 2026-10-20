@@ -1738,7 +1738,7 @@ static ray_t* qd_unsafe_exec_text_wrap(ray_t** args, int64_t n) {
     for (int64_t c = 0; c < ncol; c++) {
         if (c) q_duckdb_puts(&b, " | ");
         q_duckdb_puts(&b, res.names[c]);
-        walk &= q_duckdb_type_id(q_duckdb_result_col_type(&res, (duck_idx_t)c)) == QDUCK_TYPE_VARCHAR;
+        walk &= q_duckdb_codec_type_id(q_duckdb_result_col_type(&res, (duck_idx_t)c)) == QDUCK_TYPE_VARCHAR;
     }
     int64_t nrow = 0;
     for (duck_idx_t k = 0; k < res.nchunks; k++) {
@@ -1754,7 +1754,7 @@ static ray_t* qd_unsafe_exec_text_wrap(ray_t** args, int64_t n) {
                  * rendering of the cell, which a C string carries whole */
                 if (walk) {
                     duck_view w;
-                    if (!q_duckdb_vec_view(dv, &w) || !q_duckdb_validity_ok(w.validity, r)) { q_duckdb_puts(&b, "NULL"); continue; }
+                    if (!q_duckdb_codec_vec_view(dv, &w) || !q_duckdb_validity_ok(w.validity, r)) { q_duckdb_puts(&b, "NULL"); continue; }
                     const duck_string_t* v = (const duck_string_t*)w.data + r;
                     q_duckdb_putn(&b, q_duckdb_string_data(v), q_duckdb_string_len(v));
                     continue;
@@ -1774,7 +1774,7 @@ static ray_t* qd_unsafe_exec_text_wrap(ray_t** args, int64_t n) {
                     free(big);
                 } else {
                     q_duckdb_puts(&b, "<");
-                    q_duckdb_puts(&b, q_duckdb_type_name(q_duckdb_type_id(q_duckdb_result_col_type(&res, (duck_idx_t)c))));
+                    q_duckdb_puts(&b, q_duckdb_type_name(q_duckdb_codec_type_id(q_duckdb_result_col_type(&res, (duck_idx_t)c))));
                     q_duckdb_puts(&b, " unrenderable>");
                 }
                 if (val) QAPI.value_destroy(&val);
