@@ -16,6 +16,8 @@ typedef uint64_t duck_idx_t;
 /* DUCKDB_V2_ERROR: 0 is success; every other code comes with an error-info handle carrying DuckDB's text */
 typedef int32_t duck_state;
 #define QDuckSuccess 0
+/* ERROR_INPUT_METADATA_DEFERRED: a statement that expands into a group knows its metadata only once it steps */
+#define QDuckMetadataDeferred 2005
 
 /* DUCKDB_V2_RESULT_TYPE: a query returned rows, anything else counted or did nothing. */
 typedef enum { QDuckReturnQuery = 0, QDuckReturnChangedRows = 1, QDuckReturnNothing = 2 } duck_return_t;
