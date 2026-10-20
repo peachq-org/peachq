@@ -1623,47 +1623,59 @@ static ray_t* qd_run_bound(int slot, const char* sql, ray_t* params, duck_result
     return e;
 }
 
-/* The pair law (docs/duckdb-api.md § Parameters): a 2-item list whose first item is the SQL and whose second is a
- * symbol-keyed dict (named) or any other list (positional); an EMPTY dict or list is the bare string (*params
- * NULL), and every other list is 'type.  A non-list is the bare string, judged by the door. */
-static ray_t* qd_pair_split(ray_t* x, ray_t** sql, ray_t** params) {
+/* The pair and triple laws (docs/duckdb-api.md § Parameters): the pair (sql;params), params a symbol-keyed dict
+ * (named) or any other list (positional), an EMPTY one being no parameters (*params NULL); the triple
+ * (sql;params;schema), schema the envelope's TABLE (*schema, else NULL).  Every other list is 'type; a non-list is
+ * the bare string, judged by the door. */
+static ray_t* qd_sql_split(ray_t* x, ray_t** sql, ray_t** params, ray_t** schema) {
     *sql = x;
-    *params = NULL;
+    *params = *schema = NULL;
     if (!x || x->type != RAY_LIST) return NULL;
-    ray_t* p = q_count(x) == 2 ? ray_list_get(x, 1) : NULL;
+    int64_t n = q_count(x);
+    ray_t* p = n == 2 || n == 3 ? ray_list_get(x, 1) : NULL;
     bool list = p && p->type >= RAY_LIST && p->type <= RAY_TIME;
     bool dict = p && p->type == RAY_DICT && (ray_dict_keys(p)->type == RAY_SYM || !q_count(p));
-    if (!list && !dict) return q_err(QE_TYPE);
+    ray_t* s = n == 3 ? ray_list_get(x, 2) : NULL;
+    if ((!list && !dict) || (s && s->type != RAY_TABLE)) return q_err(QE_TYPE);
     *sql = ray_list_get(x, 0);
     if (q_count(p)) *params = p;
+    *schema = s;
     return NULL;
 }
 
 /* .duckdb.exec[h;"..."] / .duckdb.execx — run any statement (python-API parity), or the pair (sql;params) with its
  * parameters bound: a result WITH columns converts per the default read mapping (no sidecar; unsupported column
- * types error as ever), execx pairing it with its schema; a column-less result (DDL) answers `::` (execx: beside
- * an empty schema). */
+ * types error as ever), or, given the triple, refined and keyed by its schema as qd_read_table's sidecar rows
+ * refine; execx pairs it with its schema; a column-less result (DDL) answers `::` (execx: beside an empty schema). */
 static ray_t* qd_sql_any(ray_t** args, int64_t n, bool pair) {
     int slot;
     ray_t* e = qd_door(args, n, 2, &slot);
     if (e) return e;
     ray_t* sql;
     ray_t* params;
-    if ((e = qd_pair_split(args[1], &sql, &params))) return e;
+    ray_t* decl;
+    if ((e = qd_sql_split(args[1], &sql, &params, &decl))) return e;
     const char* tp; int64_t tn;
     if (!sql || !q_str_text_bytes(sql, &tp, &tn))
         return sql == args[1] ? q_duckdb_fail(slot, "sql: not a string") : q_err(QE_TYPE);
+    qd_desc_t* desc  = NULL;
+    int64_t    ndesc = 0;
+    if (decl && (e = q_duckdb_schema_desc_parse(slot, decl, &desc, &ndesc))) return e;
     qd_buf b = {0};
     q_duckdb_putn(&b, tp, (size_t)tn);
-    if (b.oom) { q_duckdb_buf_free(&b); return q_err(QE_WSFULL); }
     duck_result res;
-    e = params ? qd_run_bound(slot, b.p, params, &res) : q_duckdb_run(slot, b.p, &res, 1);
+    e = b.oom ? q_err(QE_WSFULL) : params ? qd_run_bound(slot, b.p, params, &res) : q_duckdb_run(slot, b.p, &res, 1);
     q_duckdb_buf_free(&b);
-    if (e) return e;
-    ray_t* schema = NULL;
-    ray_t* out = q_duckdb_codec_result_to_table(slot, &res, NULL, 0, pair ? &schema : NULL);
-    q_duckdb_result_free(&res);
-    return pair ? qd_pair(out, schema) : out;
+    ray_t* out = e;
+    if (!e) {
+        ray_t* schema = NULL;
+        out = q_duckdb_codec_result_to_table(slot, &res, desc, ndesc, pair ? &schema : NULL);
+        q_duckdb_result_free(&res);
+        out = q_duckdb_schema_rekey(out, desc, ndesc);
+        if (pair) out = qd_pair(out, schema);
+    }
+    q_duckdb_schema_desc_free(desc, ndesc);
+    return out;
 }
 
 static ray_t* qd_sql_wrap(ray_t** args, int64_t n)  { return qd_sql_any(args, n, false); }
