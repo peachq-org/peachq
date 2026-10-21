@@ -942,6 +942,27 @@ ray_t* q_duckdb_schema_desc_parse(int slot, ray_t* schema, qd_desc_t** out, int6
     return NULL;
 }
 
+/* ADR 21: a bare table's zoned column declares the type its offsets name, so it writes back as its pair would */
+ray_t* q_duckdb_schema_desc_zoned(int slot, ray_t* tbl, ray_t* const* offs, qd_desc_t** out, int64_t* n) {
+    int64_t ncols = ray_table_ncols(tbl), k = 0;
+    qd_desc_t* d = q_duckdb_cols(ncols, sizeof *d);
+    if (!d) return q_err(QE_WSFULL);
+    for (int64_t c = 0; c < ncols; c++) {
+        qd_buf dt = {0};
+        size_t nl;
+        const char* np = q_duckdb_col_name(tbl, c, &nl);
+        if (!offs[c] || !q_duckdb_codec_zoned_decl(slot, ray_table_get_col_idx(tbl, c), &dt, d[k].logical,
+                                                   sizeof d[k].logical)) { q_duckdb_buf_free(&dt); continue; }
+        bool ok = qd_desc_set(&d[k], np, nl, dt.p, strlen(dt.p));
+        q_duckdb_buf_free(&dt);
+        if (!ok) { q_duckdb_schema_desc_free(d, k); return q_err(QE_WSFULL); }
+        k++;
+    }
+    *out = d;
+    *n   = k;
+    return NULL;
+}
+
 /* the record kind a declaration names, STRUCT where it names none (which is what a bare dict column stages as) */
 static duck_type qd_rec_kind(const char* dt) {
     return strncasecmp(dt, "MAP(", 4) == 0   ? QDUCK_TYPE_MAP
