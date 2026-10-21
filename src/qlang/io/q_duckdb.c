@@ -1515,30 +1515,82 @@ static ray_t* qd_write_rows(int slot, const qd_name_t* nm, ray_t* tbl, const qd_
     return e;
 }
 
+/* a user column spelled as the row index is refused, in every case DuckDB folds to it */
+static ray_t* qd_index_free(int slot, ray_t* tbl) {
+    for (int64_t c = 0; c < ray_table_ncols(tbl); c++) {
+        size_t nl;
+        const char* np = q_duckdb_col_name(tbl, c, &nl);
+        if (nl == 1 && strcasecmp(np, QD_INDEX_COL) == 0) return q_duckdb_fail_col(slot, np, nl, "reserved for the row index");
+    }
+    return NULL;
+}
+
+/* the table with the row index laid last, dense from 0 (owned); the batch's own columns are shared */
+static ray_t* qd_with_index(ray_t* tbl) {
+    int64_t n = q_count(tbl), ncols = ray_table_ncols(tbl);
+    ray_t*  ix = ray_vec_new(RAY_I64, n > 0 ? n : 1);
+    if (!ix || RAY_IS_ERR(ix)) return ix ? ix : q_err(QE_WSFULL);
+    int64_t* p = ray_data(ix);
+    for (int64_t k = 0; k < n; k++) p[k] = k;
+    ix->len = n;
+    ray_t* out = ray_table_new(ncols + 1);
+    for (int64_t c = 0; c < ncols; c++) out = ray_table_add_col(out, ray_table_col_name(tbl, c), ray_table_get_col_idx(tbl, c));
+    out = ray_table_add_col(out, ray_sym_intern_runtime(QD_INDEX_COL, 1), ix);
+    ray_release(ix);
+    return out ? out : q_err(QE_WSFULL);
+}
+
+/* append continues the index: the batch's last column, laid dense from 0, moves up by what the table holds */
+static ray_t* qd_index_continue(int slot, const qd_name_t* nm, ray_t* tbl) {
+    qd_buf b = {0};
+    q_duckdb_puts(&b, "SELECT coalesce(max(" QD_INDEX_COL ") + 1, 0) AS n FROM ");
+    q_duckdb_schema_put_name(&b, nm);
+    ray_t* row = q_duckdb_query_buf(slot, &b, 1);
+    if (RAY_IS_ERR(row)) return row;
+    ray_t*  nv  = row->type == RAY_TABLE ? ray_table_get_col_idx(row, 0) : NULL;   /* borrowed */
+    int64_t off = nv && nv->type == RAY_I64 && q_count(nv) ? *(int64_t*)ray_vec_get(nv, 0) : 0;
+    q_duckdb_drop(row);
+    ray_t*   ix = ray_table_get_col_idx(tbl, ray_table_ncols(tbl) - 1);   /* borrowed: qd_with_index's own */
+    int64_t* p  = ray_data(ix);
+    for (int64_t k = 0; k < q_count(ix); k++) p[k] += off;
+    return NULL;
+}
+
 /* The write body over the flattened table, ONE transaction: `create` lays the DDL and records the descriptor
  * (the set law), else the rows go into a table whose schema this batch was already checked against.  An enum
- * column is already its symbols (decayed at the door); `en` carries what the descriptor records of it. */
+ * column is already its symbols (decayed at the door); `en` carries what the descriptor records of it.  Every
+ * q-origin table carries the row index (docs/duckdb-architecture.md): laid with a create, continued by an append,
+ * backfilled first where the table pre-dates it; a TEMP staging table and a Duck-origin table go without. */
 static ray_t* qd_write_impl(int slot, const qd_name_t* nm, ray_t* tbl, const bool* iskey, const qd_enum_t* en,
                             ray_t* const* masks, ray_t* const* offs, ray_t* const* keeps, qd_desc_t* decl,
                             int64_t ndecl, bool replace) {
     int64_t ncols = ray_table_ncols(tbl);
-    qd_colmap_t* tms = q_duckdb_cols(ncols, sizeof *tms + sizeof(char*));   /* the maps, then the declared types */
+    qd_colmap_t* tms = q_duckdb_cols(ncols + 1, sizeof *tms + sizeof(char*));   /* the maps, then the declared types */
     if (!tms) return q_err(QE_WSFULL);
-    const char** dtypes = (const char**)(tms + ncols);
+    const char** dtypes = (const char**)(tms + ncols + 1);
     bool missing = false;
+    int  index   = QD_IDX_NONE;
     ray_t* e = q_duckdb_schema_check_names(slot, tbl);
+    if (!e && !nm->temp) e = qd_index_free(slot, tbl);
     if (!e) e = q_duckdb_codec_check_table(slot, tbl, tms);
     if (!e) e = q_duckdb_schema_declare(slot, tbl, tms, decl, ndecl, dtypes);
-    if (!e && !replace) e = q_duckdb_schema_check(slot, nm, tbl, tms, dtypes, &missing);
+    if (!e && !replace) e = q_duckdb_schema_check(slot, nm, tbl, tms, dtypes, &missing, &index);
+    bool create = replace || missing;
+    bool indexed = !nm->temp && (create || index != QD_IDX_NONE);
+    ray_t* w = e ? NULL : indexed ? qd_with_index(tbl) : tbl;
+    if (!e && RAY_IS_ERR(w)) e = w;
+    if (indexed) tms[ncols].leaf = q_duckdb_codec_canon_leaf(RAY_I64);
     bool open = false;
     if (!e && !(e = q_duckdb_exec(slot, "BEGIN TRANSACTION"))) {
-        bool create = replace || missing;
         open = true;
-        if (!(e = qd_write_rows(slot, nm, tbl, tms, masks, offs, keeps, dtypes, create)) &&
-            (!create || !(e = q_duckdb_schema_write_desc(slot, nm, tbl, tms, iskey, en, dtypes))))
+        if (index == QD_IDX_BACKFILL) e = q_duckdb_schema_index_backfill(slot, nm);
+        if (!e && indexed && !create) e = qd_index_continue(slot, nm, w);
+        if (!e && !(e = qd_write_rows(slot, nm, w, tms, masks, offs, keeps, dtypes, create)) &&
+            (!create || !(e = q_duckdb_schema_write_desc(slot, nm, w, tms, iskey, en, dtypes, indexed ? ncols : -1))))
             e = q_duckdb_exec(slot, "COMMIT");
     }
-    q_duckdb_codec_maps_free(tms, ncols);
+    if (indexed && w) ray_release(w);
+    q_duckdb_codec_maps_free(tms, ncols + 1);
     free(tms);
     if (e) { if (open) qd_rollback(slot); return e; }
     return RAY_NULL_OBJ;
@@ -1577,8 +1629,8 @@ static ray_t* qd_write_wrap(ray_t** args, int64_t n, bool replace) {
     ray_t*  r     = NULL;
     int64_t ncols = tbl && tbl->type == RAY_TABLE ? ray_table_ncols(tbl) : -1;
     /* the shape mirrors, then the zoned offsets (ADR 21), then a nested column's element companion, then what an
-     * enum column was, then keyedness */
-    ray_t** masks = ncols < 0 ? NULL : q_duckdb_cols(ncols, 3 * sizeof *masks + sizeof(qd_enum_t) + sizeof(bool));
+     * enum column was, then keyedness — one slot more than the columns, for the row index the body lays last */
+    ray_t** masks = ncols < 0 ? NULL : q_duckdb_cols(ncols + 1, 3 * sizeof *masks + sizeof(qd_enum_t) + sizeof(bool));
     /* `([k:1 2])` reaches here as the column dict it parses to: a keyed table with no value columns is not valid q */
     if (ncols < 0) r = tbl && tbl->type == RAY_DICT && ray_dict_keys(tbl)->type == RAY_SYM &&
                        ray_dict_vals(tbl)->type == RAY_LIST
@@ -1586,10 +1638,10 @@ static ray_t* qd_write_wrap(ray_t** args, int64_t n, bool replace) {
                            : q_duckdb_fail(slot, "value: not a table");
     else if (!masks) r = q_err(QE_WSFULL);
     else {
-        ray_t**  offs  = masks + ncols;
-        ray_t**  keeps = offs + ncols;
-        qd_enum_t* en    = (qd_enum_t*)(keeps + ncols);
-        bool*      iskey = (bool*)(en + ncols);
+        ray_t**  offs  = masks + ncols + 1;
+        ray_t**  keeps = offs + ncols + 1;
+        qd_enum_t* en    = (qd_enum_t*)(keeps + ncols + 1);
+        bool*      iskey = (bool*)(en + ncols + 1);
         for (int64_t c = 0; c < nk; c++) iskey[c] = true;
         /* THE one enum site: a 20h column is its symbols before anything downstream sees it (2026-09-14) */
         ray_t* syms  = q_duckdb_codec_decay_enums(slot, tbl, en);
@@ -1615,13 +1667,23 @@ static ray_t* qd_set_wrap(ray_t** args, int64_t n)    { return qd_write_wrap(arg
 static ray_t* qd_append_wrap(ray_t** args, int64_t n) { return qd_write_wrap(args, n, false); }
 
 /* THE table reader: the whole table refined by the bound table's sidecar rows, the envelope's schema beside it when
- * asked.  A SELECT DuckDB refuses lets the entry go: whatever it knew, the catalog says otherwise. */
+ * asked.  A table with the row index is read in its order and WITHOUT it — the bound entry's columns are listed, so
+ * the index never crosses the boundary (the codec would drop it, the transfer would not).  A SELECT DuckDB refuses
+ * lets the entry go: whatever it knew, the catalog says otherwise. */
 static ray_t* qd_read_table(int slot, const qd_name_t* nm, ray_t** schema) {
     ray_t* e;
-    if (!q_duckdb_bound(slot, nm, &e)) return e;
+    const qd_bound_t* bound = q_duckdb_bound(slot, nm, &e);
+    if (!bound) return e;
     qd_buf b = {0};
-    q_duckdb_puts(&b, "SELECT * FROM ");
+    q_duckdb_puts(&b, bound->icol < 0 ? "SELECT *" : "SELECT ");
+    for (int64_t c = 0, n = 0; bound->icol >= 0 && c < bound->ncol; c++) {
+        if (c == bound->icol) continue;
+        if (n++) q_duckdb_puts(&b, ", ");
+        q_duckdb_put_ident(&b, bound->col[c].col, strlen(bound->col[c].col));
+    }
+    q_duckdb_puts(&b, " FROM ");
     q_duckdb_schema_put_name(&b, nm);
+    if (bound->icol >= 0) q_duckdb_puts(&b, " ORDER BY " QD_INDEX_COL);
     duck_result res;
     ray_t* tbl = b.oom ? q_err(QE_WSFULL) : q_duckdb_run(slot, b.p, &res, 1);
     q_duckdb_buf_free(&b);

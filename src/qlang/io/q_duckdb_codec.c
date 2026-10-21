@@ -1705,7 +1705,8 @@ ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_
     ray_t**      cols  = (ray_t**)(cms + ncols);
     qd_racc_t**  accs  = (qd_racc_t**)(cols + ncols);
     qd_cos_t*    cos   = (qd_cos_t*)(accs + ncols);
-    bool*        taken = (bool*)(cos + ncols);   /* a store column that IS another column's companion */
+    bool*        taken = (bool*)(cos + ncols);   /* a store column that is no column of the answer: another column's
+                                                  * companion, or the row index (read for its ORDER BY, never q's) */
     bool*        want  = rows ? (bool*)(rows + ncols) : NULL;   /* one flag a column, decided twice (see below) */
     ray_t*       err   = NULL;
     for (int64_t c = 0; !err && c < ncols; c++) {
@@ -1721,6 +1722,8 @@ ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_
         if (!ok && why) q_duckdb_err_stash(slot, "column %s: %s", nm, why);
         else if (!ok) q_duckdb_err_stash(slot, "column %s: %s has no mapping", nm, q_duckdb_type_name(miss));
         else {
+            const qd_desc_t* d = q_duckdb_schema_desc_find(nm, strlen(nm), desc, ndesc);
+            taken[c] = d && strcmp(d->logical, QD_INDEX_LOGICAL) == 0;
             q_duckdb_codec_refine(nm, strlen(nm), desc, ndesc, &cms[c]);
             /* the type alone answers here; whether the column also turns out to be EMPTY is not known until the
              * chunks are in, and the logical type is gone by then — so the row is spelled now and re-judged later */
@@ -1731,6 +1734,7 @@ ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_
 
     for (int64_t c = 0; c < ncols && !err; c++) {
         memset(&cos[c], 0, sizeof cos[c]);
+        if (taken[c]) continue;
         /* a record's companions are its FIELDS' (ADR 12), decided at the build; nothing accumulates here.  UNDER a
          * LIST the cells are where that build happens, so the column reads as the nest it is (ADR 16) */
         if (cms[c].rec && !cms[c].depth)
@@ -1748,6 +1752,7 @@ ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_
         QAPI.data_chunk_get_size(res->chunks[k], &n, NULL);
         for (int64_t c = 0; c < ncols && !err; c++) {
             duck_vector dv = NULL;
+            if (taken[c]) continue;
             if (QAPI.data_chunk_get_vector(res->chunks[k], (duck_idx_t)c, &dv, NULL) != QDuckSuccess) { err = q_err(QE_DUCKDB); break; }
             if (accs[c]) { err = qd_read_rec(slot, accs[c], &cms[c], dv, 0, n); continue; }
             cols[c] = qd_read_col(slot, cols[c], &cms[c], dv, 0, n, &cos[c]);

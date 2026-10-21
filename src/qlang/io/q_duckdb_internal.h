@@ -139,6 +139,7 @@ typedef struct {
     qd_desc_t* desc;                /* the sidecar's rows, as the read path refines by them */
     int64_t    ndesc;
     int64_t    at;                  /* bound when (ns) */
+    int64_t    icol;                /* the row index column's position, -1 for none (docs/duckdb-architecture.md) */
     bool       q;                   /* a q-origin table: the sidecar names it */
 } qd_bound_t;
 
@@ -213,6 +214,13 @@ ray_t* q_duckdb_codec_strip_companions(int slot, ray_t* tbl, ray_t** masks, ray_
 #define QD_SCHEMA_TBL "_q_schema"     /* the sidecar: a q-written table's declared types, in the database's `main` */
 #define QD_STAGE_TBL "_q_stage"       /* the temp table a declared type is staged in, then CAST out of */
 #define QD_STAGING_TBL "_q_staging"   /* the reserved temp table `.parquet` stages a q table in; set may name it */
+/* q's row index, stored on every q-origin table under the sidecar logical that marks it: the write door lays it dense,
+ * the readers hide it, the pull orders by it */
+#define QD_INDEX_COL "i"
+#define QD_INDEX_LOGICAL "index"
+/* what append found of the index on its target: no index to continue (a Duck-origin table), one to continue, or a
+ * q-origin table from before the index, to backfill once */
+enum { QD_IDX_NONE, QD_IDX_HAS, QD_IDX_BACKFILL };
 #define QD_NEED_LOGICAL 1
 #define QD_NEED_DTYPE   2
 
@@ -228,13 +236,14 @@ ray_t*      q_duckdb_schema_check_names(int slot, ray_t* tbl);
 int64_t     q_duckdb_schema_fetch_desc(int slot, const qd_name_t* nm, qd_desc_t** out);
 void        q_duckdb_schema_desc_free(qd_desc_t* d, int64_t n);
 ray_t*      q_duckdb_schema_write_desc(int slot, const qd_name_t* nm, ray_t* tbl, const qd_colmap_t* cms,
-                                       const bool* iskey, const qd_enum_t* en, const char* const* dtypes);
+                                       const bool* iskey, const qd_enum_t* en, const char* const* dtypes, int64_t icol);
+ray_t*      q_duckdb_schema_index_backfill(int slot, const qd_name_t* nm);
 void        q_duckdb_schema_drop_desc(int slot, const qd_name_t* nm);
 ray_t*      q_duckdb_schema_rekey(ray_t* tbl, const qd_desc_t* desc, int64_t ndesc);
 bool        q_duckdb_schema_catalog_col(const char* dt, size_t n, qd_colmap_t* out);
 void        q_duckdb_schema_create_ddl(qd_buf* b, const qd_name_t* nm, ray_t* tbl, const qd_colmap_t* cms, bool temp);
 ray_t*      q_duckdb_schema_check(int slot, const qd_name_t* nm, ray_t* tbl, const qd_colmap_t* cms,
-                                  const char* const* dtypes, bool* missing);
+                                  const char* const* dtypes, bool* missing, int* index);
 int         q_duckdb_schema_needs(const qd_colmap_t* cm, const char* dtype, bool empty);
 ray_t*      q_duckdb_schema_desc_of(const char* cname, duck_logical_type lt, const qd_colmap_t* cm,
                                     const qd_desc_t* desc, int64_t ndesc, bool empty, qd_desc_t* out, bool* wanted);
