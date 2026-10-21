@@ -215,13 +215,13 @@
 / qTree) for a ? parse tree over a table whose schema is the envelope .duckdb.getx answers (col dtype logical iskey),
 / the row index i among its rows on a table that stores one.  sqlTree selects the columns qTree names (every column
 / when its select phrase is empty; i never, unless the phrase names it bare, then as i AS its q output name) under the
-/ moved terms, params binds their literals as $pq1 $pq2 ..., schema is the rows of those columns, and qTree is the
-/ tree minus what moved with the table name still at slot 1, :: when nothing is left for q.  A select phrase of
-/ aggregates, or a by, whose every item .sql.i.whole can spell moves whole with the entire where: sqlTree groups, its
-/ schema rows carry q's result types with the by keys marked, and qTree is ::.
+/ moved terms, params binds their literals as $pq1 $pq2 ... in the order the SQL text reads them, schema is the rows of
+/ those columns, and qTree is the tree minus what moved with the table name still at slot 1, :: when nothing is left
+/ for q.  A select phrase of aggregates, or a by, whose every item .sql.i.whole can spell moves whole with the entire
+/ where: sqlTree groups, its schema rows carry q's result types with the by keys marked, and qTree is ::.
 / Five stages, each reading the tree and what the stages before it decided: the select phrase (.sql.i.phrase), the
 / where (.sql.i.where), the whole push of aggregates and by (.sql.i.whole), the limit and order (.sql.i.limit) and the
-/ assembly of the answer (.sql.i.assemble).
+/ assembly of the answer (.sql.i.assemble), which numbers the literals each stage left as placeholders (.sql.i.number).
 / @eg .sql.translate[parse "select max price by sym from t where qty>100, f price";
 /   ([] col:`sym`qty`price; dtype:("VARCHAR";"BIGINT";"DOUBLE"); logical:`symbol`int64`float64; iskey:000b)]
 .sql.translate:{[tree;schema]
@@ -242,82 +242,76 @@
   if[99h<>type a; :`barrier`renames!(`i in .sql.i.names[0b] a;none)];
   b:`i~/:value a; v:(value a) where not b;
   `barrier`renames!(`i in raze .sql.i.names[0b] each v where not ((count);`i)~/:v; (key[a] where b)!(sum b)#`i)};
-/ The where stage, a dict: cls (column to logical class), ix (the table stores i), stop (no term may move), terms and
-/ vals (the moved terms as SQL, the literals they bind) and rest (the terms left for q, in order).  q runs term k+1 on
-/ the rows passing terms 1..k, so a term that reads only its own row commutes with the others: every such term before
-/ the first that does not (.sql.i.pure) moves when .sql.i.VERBS can spell it and stays for q, in order, when it cannot.
-/ A term on i left for q would read positions the pull no longer has, so it stops every term; on a table without i, i
-/ anywhere does (the virtual index).  So do the phrase's barrier, a rename onto a column, an empty schema, and a table
-/ or column name holding a dot (the SQL tree would read it as a path).
+/ The where stage, a dict: cls (column to logical class), ix (the table stores i), stop (no term may move), terms (the
+/ moved terms as SQL) and rest (the terms left for q, in order).  q runs term k+1 on the rows passing terms 1..k, so a
+/ term that reads only its own row commutes with the others: every such term before the first that does not
+/ (.sql.i.pure) moves when .sql.i.VERBS can spell it and stays for q, in order, when it cannot.  A term on i left for
+/ q would read positions the pull no longer has, so it stops every term; on a table without i, i anywhere does (the
+/ virtual index).  So do the phrase's barrier, a rename onto a column, an empty schema, and a table or column name
+/ holding a dot (the SQL tree would read it as a path).
 .sql.i.where:{[tree;schema;phrase]
   cl:exec col from schema; cls:cl!exec logical from schema; ix:`i in cl;
   wh:$[count tree 2; tree[2;0]; ()];
   stop:(phrase`barrier) or (0=count cl) or (any (key phrase`renames) in cl) or (any "." in/: string (tree 1),cl) or
     `i in raze .sql.i.names[0b] each $[ix; enlist tree 3; 2_tree];
-  step:{[cls;wh;acc;j] x:.sql.i.term[cls;0b;count acc 1;wh j];
-    $[x~(::); acc; (acc[0],enlist x 0; acc[1],x 1; acc[2],j)]}[cls;wh];
-  r:step/[(();();`long$()); $[stop; `long$(); til (.sql.i.pure[0b] each wh)?0b]];
-  rest:wh (til count wh) except r 2;
-  if[`i in raze .sql.i.names[0b] each rest; r:(();();`long$()); rest:wh];
-  `cls`ix`stop`terms`vals`rest!(cls;ix;stop;r 0;r 1;rest)};
+  x:$[stop; (); .sql.i.term[cls;0b] each ((.sql.i.pure[0b] each wh)?0b)#wh];
+  m:where not (::)~/:x; rest:wh (til count wh) except m;
+  stop:stop or `i in raze .sql.i.names[0b] each rest;
+  `cls`ix`stop`terms`rest!(cls;ix;stop;$[stop; (); x m];$[stop; wh; rest])};
 / The whole-push stage, a dict: ok (the select phrase and by move whole, so q is left nothing), byrow (the select by g
-/ form: the last row of each group, so the SQL keeps every column that is not a key, as q does), vals (the literals the
-/ phrase binds, numbered after the where's), by (the GROUP BY expressions, 0b for none), cols (the SQL columns, keys
-/ first), rows (their schema rows: q's result type of each aggregate, the keys marked) and order (the keys ascending,
-/ nulls first, as q sorts a by).  All or nothing: ok needs the whole where moved, no limit or order, a phrase that is
-/ a dict of aggregates .sql.i.agg spells (or empty, over a by, on a table with i) and by keys .sql.i.key spells, under
-/ distinct output names.  Anything else leaves the phrase and by to q over the where-only push.
+/ form: the last row of each group, so the SQL keeps every column that is not a key, as q does), by (the GROUP BY
+/ expressions, 0b for none), cols (the SQL columns, keys first), rows (their schema rows: q's result type of each
+/ aggregate, the keys marked) and order (the keys ascending, nulls first, as q sorts a by).  All or nothing: ok needs
+/ the whole where moved, no limit or order, a phrase that is a dict of aggregates .sql.i.agg spells (or empty, over a
+/ by, on a table with i) and by keys .sql.i.key spells, under distinct output names.  Anything else leaves the phrase
+/ and by to q over the where-only push.
 .sql.i.whole:{[tree;schema;w]
-  off:`ok`byrow`vals`by`cols`rows`order!(0b;0b;();0b;()!();0#schema;());
+  off:`ok`byrow`by`cols`rows`order!(0b;0b;0b;()!();0#schema;());
   a:tree 4; by:tree 3; grouped:99h=type by; byrow:()~a;
   shape:$[99h=type a; grouped or 0b~by; byrow and grouped and w`ix];
   if[(5<count tree) or w[`stop] or (0<count w`rest) or not shape; :off];
-  fold:{[f;acc;e] if[acc~(::); :(::)]; x:f[acc 0;e]; $[x~(::); (::); (acc[0]+count x 1; acc[1],enlist x; acc[2],x 1)]};
-  k:fold[.sql.i.key schema]/[(count w`vals;();()); $[grouped; value by; ()]];
-  g:fold[.sql.i.agg[w`ix;schema]]/[k; $[byrow; (); value a]];
-  if[g~(::); :off];
+  x:$[grouped; .sql.i.key[schema]'[key by;value by]; ()],$[byrow; (); .sql.i.agg[w`ix;schema] each value a];
   names:$[grouped; key by; `$()],$[byrow; `$(); key a]; nk:$[grouped; count by; 0];
-  vals:$[byrow; (exec col from schema) except `i,names; `$()];
-  if[count[names]<>count distinct names; :off];
-  x:g 1; e:x[;0]; nulls:.sql.i.CLASSES[`nullable] .sql.i.CLASSES[`logical]?x[til nk;3];
-  rows:([] col:names; dtype:x[;2]; logical:x[;3]; iskey:(nk#1b),(count[names]-nk)#0b);
-  rows,:update iskey:0b from select from schema where col in vals;
-  `ok`byrow`vals`by`cols`rows`order!(1b;byrow;g 2;$[grouped; names[til nk]!e til nk; 0b];(names!e),vals!vals;rows;
-    {[e;nl] (`;e),$[nl; enlist `$"nulls first"; ()]}'[e til nk;nulls])};
-/ the schema row of a column, :: for none
-.sql.i.row:{[schema;c] $[count w:where c=schema`col; schema first w; (::)]};
-/ the .sql.i.CLASSES row of a logical name whose values q and DuckDB order alike, :: otherwise: an unknown class, or
+  if[(any (::)~/:x) or count[names]<>count distinct names; :off];
+  vals:$[byrow; (exec col from schema) except `i,names; `$()]; e:x[;0];
+  rows:([] col:names; dtype:x[;1]; logical:x[;2]; iskey:(nk#1b),(count[names]-nk)#0b),
+    update iskey:0b from select from schema where col in vals;
+  `ok`byrow`by`cols`rows`order!(1b;byrow;$[grouped; names[til nk]!e til nk; 0b];(names!e),vals!vals;rows;
+    {[e;lg] (`;e),$[.sql.i.class[lg]`nullable; enlist `$"nulls first"; ()]}'[e til nk;x[til nk;2]])};
+/ the .sql.i.CLASS row of a logical name whose values q and DuckDB order alike, :: otherwise: an unknown class, or
 / char, whose null q orders below every byte
-.sql.i.sortable:{[lg]
-  $[(k:.sql.i.CLASSES[`logical]?lg)=count .sql.i.CLASSES; (::); `char=.sql.i.CLASSES[k;`class]; (::); .sql.i.CLASSES k]};
-/ one by key as (expr;vals;dtype;logical), or :: for one the SQL cannot group and sort as q does: a bare column of a
-/ sortable class, or n xbar of an int column with n a positive int, as the long q answers, floored as q floors
-/ (DuckDB's // truncates): c - (c % n + n) % n
+.sql.i.sortable:{[lg] $[(null k`class) or `char=(k:.sql.i.class lg)`class; (::); k]};
+/ one by key named n as (expr;dtype;logical), or :: for one the SQL cannot group and sort as q does: a bare column of a
+/ sortable class, or m xbar of an int column with m a positive int, as the long q answers, floored as q floors
+/ (DuckDB's // truncates): c - (c % m + m) % m, m one parameter wherever the key is written
 .sql.i.key:{[schema;n;e]
   xb:$[0h=type e; (3=count e) and (xbar)~e 0; 0b];
-  c:$[xb; e 2; e]; if[not (-11h=type c) and not c~`i; :(::)]; row:.sql.i.row[schema;c]; if[row~(::); :(::)];
-  if[(::)~.sql.i.sortable row`logical; :(::)];
-  if[not xb; :(c;();row`dtype;row`logical)];
+  c:$[xb; e 2; e]; if[not -11h=type c; :(::)]; if[(c=`i) or not c in schema`col; :(::)];
+  row:schema (schema`col)?c; if[(::)~.sql.i.sortable row`logical; :(::)];
+  if[not xb; :(c;row`dtype;row`logical)];
   m:e 1; if[not ((type m) in -5 -6 -7h) and (not null m) and (m>0) and (row`logical) in `int16`int32`int64; :(::)];
-  p:.sql.i.param n+1;
-  ((`cast;`BIGINT;(`$"-";c;(`$"%";(`$"+";(`$"%";c;p);p);p)));enlist m;"BIGINT";`int64)};
-/ The q aggregates the select phrase may push: the SQL function, the form its SQL takes (.sql.i.agg), how many
-/ columns it reads and the column classes it is exact for.  Each carries q's identity and result type: count counts
-/ the group's rows, nulls included; sum is cast to its column's type (short and boolean to int) with 0 for an all-null
-/ group; max and min of an all-null group are the type's -0W and 0W; first and last read the group in i order, nulls
-/ included; prd keeps the column's type with 1 for an all-null group; avg, dev, var, sdev, svar, wavg, cor and cov
-/ are floats, dev and var the population forms, cov as q computes it (avg(x*y) - avg(x)*avg(y), each average over
-/ its own non-null rows), wavg over the pairs where both sides are non-null; wsum is a real where a real meets an int
-/ or a real and a float otherwise, as q types x*y, and multiplies as stored; a real operand of wavg or cov is cast to
-/ a double before the product, as q converts both sides to floats first; a computed float answer is nullif'd against
-/ NaN, which DuckDB computes from 0/0 or infinities of both signs and q calls null.  Not here, and so left to q: med (q ranks
-/ a null as the lowest value, which no SQL quantile does), sum of temporals, prd of ints (DuckDB's product is a
-/ double), aggregates of char and of INTERVAL columns.
+  p:.sql.i.lit[m],n;
+  ((`cast;`BIGINT;(`$"-";c;(`$"%";(`$"+";(`$"%";c;p);p);p)));"BIGINT";`int64)};
+/ The q aggregates the select phrase may push, one row each: sql, its SQL over the columns x and y (X and Y cast to
+/ DOUBLE when real, as q converts both sides to floats; T the result's type; i the row index, needing a table with
+/ it); arity; the column classes it is exact for, none meaning any column or i; result, a logical or the law naming
+/ one: column (the first column's), int32up (short and boolean sum to int), wsum (a real where a real meets an int or
+/ a real, as q types x*y, multiplied as stored); identity, the value a NULL answer becomes, coalesced inside any cast
+/ (0N: none, DuckDB's NULL being q's null, but a symbol's NULL is the empty string); nulls, NaN where DuckDB computes
+/ a float NaN (0/0, opposite infinities) that q calls null.  cov's averages each skip their own null rows, as q's do.
+/ Left to q: med (q ranks a null lowest, which no SQL quantile does), sum of temporals, prd of ints (DuckDB's product
+/ is a double), char and INTERVAL columns.
 .sql.i.AGGS:([] verb:((count);(sum);(avg);(dev);(var);(sdev);(svar);(max);(min);(first);(last);(prd);(cor);(cov);(wsum);(wavg));
-  sql:`count`sum`avg`stddev_pop`var_pop`stddev_samp`var_samp`max`min`first`last`product`corr`cov`wsum`wavg;
-  form:`count`sum`float`float`float`float`float`lo`hi`ordered`ordered`prd`pair`cov`wsum`wavg; arity:1 1 1 1 1 1 1 1 1 1 1 1 2 2 2 2;
+  sql:(`count,`$"*";(`cast;`T;`sum`x);`avg`x;`stddev_pop`x;`var_pop`x;`stddev_samp`x;`var_samp`x;`max`x;`min`x;
+    (`first;`x;(`$"order by";`i));(`last;`x;(`$"order by";`i));(`cast;`T;`product`x);`corr`x`y;
+    (`$"-";(`avg;(`$"*";`X;`Y));(`$"*";`avg`x;`avg`y));(`cast;`T;(`sum;(`$"*";`x;`y)));
+    (`$"/";(`sum;(`$"*";`X;`Y));(`sum;(`$"*";`x;(`cast;`INTEGER;(`$"is not null";`y))))));
+  arity:1 1 1 1 1 1 1 1 1 1 1 1 2 2 2 2;
   classes:(enlist `$()),(enlist `int`float`bool),(5#enlist `int`float),(4#enlist `int`float`symbol`temporal),
-    (enlist enlist `float),4#enlist `int`float);
+    (enlist enlist `float),4#enlist `int`float;
+  result:`int64`int32up`float64`float64`float64`float64`float64`column`column`column`column`column`float64`float64`wsum`float64;
+  identity:0N 0 0N 0N 0N 0N 0N -0W 0W 0N 0N 1 0N 0N 0 0N;
+  nulls:`null`NaN`NaN`NaN`NaN`NaN`NaN`null`null`null`null`NaN`NaN`NaN`NaN`NaN);
 / the aggregate identity v (0, 1, -0W, 0W) in the type of the logical lg, as a parameter binds it: the null symbol is
 / the empty string, and a float type takes the float infinities (cast carries a long infinity to the ints and
 / temporals only); the type map is .duckdb.types[], the one owner of logical names
@@ -325,27 +319,17 @@
   $[`symbol=lg; ""; (exec logical!ktype from .duckdb.types[])[lg]$$[lg in `float32`float64; (0 1 -0W 0W!0 1 -0w 0w) v; v]]};
 / the DuckDB type a logical name stores as, as the schema spells it
 .sql.i.dtype:{[lg] string (exec logical!dtype from .duckdb.types[] where canon) lg};
-/ one aggregate of the phrase as (expr;vals;dtype;logical) under .sql.i.AGGS, its identity bound as $pq(n+1), or ::
-.sql.i.agg:{[ix;schema;n;e]
-  if[0h<>type e; :(::)]; i:first where .sql.i.AGGS[`verb]~\:e 0; if[null i; :(::)]; if[(count e)<>1+.sql.i.AGGS[i;`arity]; :(::)];
-  r:.sql.i.AGGS i; f:r`form; a:1_e; c:a 0; x:last a; p:.sql.i.param n+1;
-  if[f=`count; :$[(-11h=type c) and (c=`i) or c in schema`col; ((`count;`$"*");();"BIGINT";`int64); (::)]];
-  if[not all -11h=type each a; :(::)]; rows:.sql.i.row[schema] each a; if[any (::)~/:rows; :(::)];
-  k:.sql.i.CLASSES[`logical]?L:rows[;`logical]; if[any k=count .sql.i.CLASSES; :(::)];
-  if[not all .sql.i.CLASSES[k;`class] in r`classes; :(::)];
-  lg:L 0; dt:rows[0;`dtype]; F:("DOUBLE";`float64); m:(`$"*"),{[c;lg] $[`float32=lg; (`cast;`DOUBLE;c); c]}'[a;L];
-  if[f=`ordered; if[not ix; :(::)]; o:(r`sql;c;(`$"order by";`i)); :$[`symbol=lg; ((`coalesce;o;p);enlist "";dt;lg); (o;();dt;lg)]];
-  if[f in `lo`hi; :((`coalesce;(r`sql;c);p);enlist .sql.i.identity[lg;$[f=`lo;-0W;0W]];dt;lg)];
-  sl:$[lg in `int16`bool; `int32; lg]; wl:$[(`float32 in L) and not `float64 in L; `float32; `float64];
-  q:$[f=`float; ((r`sql;c);()),F;
-    f=`pair; ((r`sql;c;x);()),F;
-    f=`cov; ((`$"-";(`avg;m);(`$"*";(`avg;c);(`avg;x)));()),F;
-    f=`wavg; ((`$"/";(`sum;m);(`sum;(`$"*";c;(`cast;`INTEGER;(`$"is not null";x)))));()),F;
-    f=`wsum; ((`cast;`$.sql.i.dtype wl;(`coalesce;(`sum;(`$"*";c;x));p));enlist .sql.i.identity[wl;0];.sql.i.dtype wl;wl);
-    f=`sum; ((`cast;`$.sql.i.dtype sl;(`coalesce;(`sum;c);p));enlist .sql.i.identity[sl;0];.sql.i.dtype sl;sl);
-    ((`cast;`$dt;(`coalesce;(`product;c);p));enlist .sql.i.identity[lg;1];dt;lg)];
-  $[q[3] in `float32`float64; @[q;0;{[e;dt] (`nullif;e;(`cast;`$dt;enlist `NaN))}[;q 2]]; q]};
-.sql.i.FLIP:(`;`$"<:";`$">:";`$"nulls first";`$"nulls last")!(`$">:";`$">:";`$"<:";`$"nulls last";`$"nulls first");
+/ one aggregate of the phrase as (expr;dtype;logical) under its .sql.i.AGGS row, or :: for none
+.sql.i.agg:{[ix;schema;e]
+  if[0h<>type e; :(::)]; if[null i:first where .sql.i.AGGS[`verb]~\:e 0; :(::)]; r:.sql.i.AGGS i; a:1_e; f:r`result;
+  if[((count a)<>r`arity) or not all -11h=type each a; :(::)]; s:schema (schema`col)?a; L:s`logical;
+  if[$[count r`classes; not all (.sql.i.class each L)[`class] in r`classes; not all a in `i,schema`col] or
+    (`i in raze/[r`sql]) and not ix; :(::)];
+  t:$[f=`column; L 0; f=`int32up; $[(L 0) in `int16`bool; `int32; L 0]; f=`wsum; `float64`float32(`float32 in L)>`float64 in L; f];
+  dt:$[f=`column; first s`dtype; .sql.i.dtype t]; d:{[c;lg] $[`float32=lg; (`cast;`DOUBLE;c); c]}'[a;L];
+  x:{[m;e] $[-11h=type e; $[e in key m; m e; e]; (type e) in 0 11h; .z.s[m] each e; e]}[(`T,raze (count a)#/:(`x`y;`X`Y))!(`$dt),a,d;r`sql];
+  if[(not null r`identity) or `symbol=t; c:{(`coalesce;x;y)}[;.sql.i.lit .sql.i.identity[t;r`identity]]; x:$[`cast~first x; @[x;2;c]; c x]];
+  ($[(`NaN=r`nulls) and t in `float32`float64; (`nullif;x;(`cast;`$dt;enlist `NaN)); x];dt;t)};
 / The limit and order stage, a dict: limit and order (SQL's; :: and at most the i order where they stay with q), inner,
 / moved (anything moved) and clear (the limit and order moved).  select[n] / [m n] / [-n] / [order] move only over a
 / table with i, the whole where moved and no by (the limit counts the rows the where kept, before the select phrase,
@@ -369,16 +353,17 @@
   lim:$[ok; pick[w`cls;tree]; (::;())];
   clear:not lim~(::;()); moved:clear or 0<count w`terms;
   o:lim[1],$[moved and w`ix; enlist (`;`i); ()];
-  inner:$[$[(type lim 0) in -5 -6 -7h; (lim 0)<0; 0b]; {[o] @[o;$[3=count o; 0 2; 0];.sql.i.FLIP]} each o; ()];
+  rev:(`;`$"<:";`$">:";`$"nulls first";`$"nulls last")!(`$">:";`$">:";`$"<:";`$"nulls last";`$"nulls first");
+  inner:$[$[(type lim 0) in -5 -6 -7h; (lim 0)<0; 0b]; {[f;o] @[o;$[3=count o; 0 2; 0];f]}[rev] each o; ()];
   `limit`order`inner`moved`clear!(lim 0;o;inner;moved;clear)};
 / The assembly.  A whole push groups under the where (the select by g form keeps the rows holding each group's last i,
 / WHERE i IN a grouped subquery) and leaves q nothing.  Otherwise q's tree keeps the terms left, a bare i under the
 / name the phrase gives it, and the limit and order where they stay (:: when nothing is left); the SQL selects the
 / columns that tree reads, the key columns with them.
 .sql.i.assemble:{[tree;schema;phrase;w;g;l]
-  v:w[`vals],g`vals; params:(`$"pq",/:string 1+til count v)!v;
   if[g`ok; last_:(`sql;tree 1;w`terms;g`by;(enlist `i)!enlist (`max;`i);::;());
-    :($[g`byrow; (`sql;tree 1;enlist (`in;`i;last_);0b;g`cols;::;l`order); (`sql;tree 1;w`terms;g`by;g`cols;::;l`order)];params;g`rows;::)];
+    :.sql.i.number[$[g`byrow; (`sql;tree 1;enlist (`in;`i;last_);0b;g`cols;::;l`order); (`sql;tree 1;w`terms;g`by;g`cols;::;l`order)]],
+      (g`rows;::)];
   rn:phrase`renames; rest:w`rest; q:tree;
   if[l`moved; q:@[tree;2;:;$[count rest; enlist rest; ()]];
     if[count rn; q[4]:$[-11h=type q 4; first key rn; 11h=type q 4; key rn; @[q 4;key rn;:;key rn]]];
@@ -390,7 +375,17 @@
   c:$[count c:(need!need),$[l`moved; rn; ()!()]; c; ()!()];
   s:(`sql;tree 1;w`terms;0b;c;l`limit;l`order);
   if[count l`inner; s:(`sql;(`sql;tree 1;w`terms;0b;u!u:distinct need,l[`order][;1];neg l`limit;l`inner);();0b;c;::;l`order)];
-  (s;params;select from schema where col in need;q)};
+  (.sql.i.number s),(select from schema where col in need;q)};
+/ the sql tree with each placeholder (::;v) numbered $pq1 $pq2 ... in the order .sql.render writes it, and the params they
+/ bind; a placeholder with a third item is one parameter wherever it is written
+.sql.i.number:{[tree]
+  place:{[acc;e]
+    if[99h=type e; r:.z.s[acc;value e]; :(r 0;key[e]!r 1)];
+    if[0h<>type e; :(acc;e)];
+    if[(1<count e) and (::)~first e; k:$[3=count e; (acc~\:e)?1b; count acc]; :($[k=count acc; acc,enlist e; acc];`$"$pq",string k+1)];
+    {[f;x;i] y:f[x 0;x[1] i]; (y 0;@[x 1;i;:;y 1])}[.z.s]/[(acc;e);o where (type each e o:$[.sql.i.derived e; 4 1 2 3 6; til count e]) in 0 99h]};
+  r:place[();tree]; (r 1;(`$"pq",/:string 1+til count r 0)!$[count r 0; r[0][;1]; ()])};
+.sql.i.lit:{[v] (::;v)};
 
 / The q verbs a where term may push: the head .sql.render spells it with (in is list_contains over ONE list
 / parameter, which is what DuckDB rewrites IN over a list to), the head the term takes with its literal on the left,
@@ -405,20 +400,24 @@
   keepsnull:01101000000000b;
   classes:(2#enlist `int`bool`symbol`temporal`char),(5#enlist `int`bool`symbol`temporal),
     (enlist `int`float`bool`symbol`temporal`char),(enlist `int`float`bool`symbol`temporal),5#enlist `$());
-/ The heads a where term may apply and still read only its own row: the map's verbs, the int arithmetic, like, $ by a
-/ type name (.sql.i.pure) and the constructor of a literal list.  Any other head (an aggregate, fby, prev, a lambda)
-/ may read other rows.
-.sql.i.PURE:.sql.i.VERBS[`verb],((+);(-);(*);(neg);(abs);(like);($);(enlist));
-/ The column types a term may push, by the sidecar's logical name: the class a verb is exact for, the q types of a
-/ literal vector that compares with it exactly (an atom is the negative; a float literal would compare with
-/ tolerance, so an int class takes none), and whether the column holds a SQL NULL for a q null (a null symbol is the
-/ empty string and a null char the space, both values; a boolean has no null).  A char is a one-character VARCHAR:
-/ equal exactly, but q orders the space below every char and DuckDB by byte, so only =, <> and in push it.  INTERVAL
-/ columns (minute, second, time) are lossy and stay with q.
-.sql.i.CLASSES:([] logical:`int16`int32`int64`float32`float64`bool`symbol`date`month`timestamp`timespan`char;
-  class:`int`int`int`float`float`bool`symbol`temporal`temporal`temporal`temporal`char;
-  literal:(5 6 7h;5 6 7h;5 6 7h;5 6 7 8 9h;5 6 7 8 9h;enlist 1h;enlist 11h;enlist 14h;enlist 13h;enlist 12h;enlist 16h;enlist 10h);
-  nullable:111110011110b);
+/ The column classes a term or an aggregate may push: the .duckdb.types[] ktype letters of the logicals in each, the
+/ q types of a literal vector that compares with it exactly (an atom is the negative; none is the column's own type;
+/ an int class takes no float, which q compares with tolerance), and whether it holds a SQL NULL for a q null (a null
+/ symbol is the empty string and a null char the space, both values; a boolean has none).  A char is a one-character
+/ VARCHAR: equal exactly, but q orders the space below every char and DuckDB by byte, so only =, <> and in push it;
+/ INTERVAL (minute, second, time) is lossy and has no class.
+.sql.i.CLASS:([] class:`int`float`bool`symbol`temporal`char; ktype:("hij";"ef";"b";"s";"dmpn";"c");
+  literal:(5 6 7h;5 6 7 8 9h;0#0h;0#0h;0#0h;0#0h); nullable:110010b);
+/ the class row of each q logical, derived from .duckdb.types[] on the first lookup after a load
+.sql.i.CLASSES:(::);
+/ the row (logical class literal nullable) of a q logical in .sql.i.CLASS, a null row for any other
+.sql.i.class:{[lg]
+  if[(::)~.sql.i.CLASSES;
+    t:select logical, ktype from .duckdb.types[] where needs<>`dtype, ktype in raze .sql.i.CLASS`ktype;
+    c:.sql.i.CLASS {[k] first where k in/: .sql.i.CLASS`ktype} each t`ktype;
+    .sql.i.CLASSES::([] logical:t`logical; class:c`class; literal:{[l;k] $[count l; l; enlist type k$()]}'[c`literal;t`ktype];
+      nullable:c`nullable)];
+  .sql.i.CLASSES .sql.i.CLASSES[`logical]?lg};
 
 / the names a tree fragment refers to: a bare symbol, or a symbol vector outside an application (inside one it is
 / a literal, as parse enlists a symbol constant); a projection's elided argument (101h) is skipped, never applied
@@ -433,63 +432,60 @@
   if[list; :$[(type v) in k`literal; v; (::)]];
   if[(11h=type v) and 1=count v; v:first v];
   $[(neg type v) in k`literal; v; (::)]};
-/ whether a where term reads only its own row: every head in .sql.i.PURE and no vector but a constant (one item, or
-/ anywhere in the last argument of in, within or like, lit), since q pairs any other vector with the rows by
-/ position; a name there reads a whole column.  $ casts row by row only by a type name: ` and `symbol, or a char
-/ (tok), turn a char column into ONE value
+/ whether a where term reads only its own row: every head is a .sql.i.VERBS verb, int arithmetic, like, $ by a type
+/ name or enlist of a literal list (any other head - an aggregate, fby, prev, a lambda - may read other rows), and no
+/ vector but a constant (one item, or anywhere in the last argument of in, within or like, lit), since q pairs any
+/ other vector with the rows by position; a name there reads a whole column.  $ casts row by row only by a type name:
+/ ` and `symbol, or a char (tok), turn a char column into ONE value
 .sql.i.pure:{[lit;e]
   t:type e; if[-11h=t; :not lit]; if[t<0; :1b]; if[t within 1 19h; :lit or 1=count e]; if[0h<>t; :0b];
   if[1=count e; :.z.s[lit] first e];
-  if[not any (e 0)~/:.sql.i.PURE; :0b];
+  if[not any (e 0)~/:.sql.i.VERBS[`verb],((+);(-);(*);(neg);(abs);(like);($);(enlist)); :0b];
   if[$[($)~e 0; not $[(11h=type e 1) and 1=count e 1; not (first e 1) in `,`symbol; 0b]; 0b]; :0b];
   a:1_e; all .z.s'[$[lit; (count a)#1b; (-1_(count a)#0b),any (e 0)~/:((in);(within);(like))]; a]};
 .sql.i.bind:{[v] $[-11h=type v; $[null v; ""; v]; -10h=type v; enlist v; 10h=type v; enlist each v; v]};
-.sql.i.param:{[n] `$"$pq",string n};
-/ the SQL that is true exactly where the column holds a q null, with the literals it binds; :: for a class without one
-.sql.i.nullpred:{[k;c;n] $[k`nullable; ((`$"is null";c);()); `symbol=k`logical; ((`$"=";c;.sql.i.param n+1);enlist ""); (::)]};
-/ term:(expr;vals) over a nullable column reads NULL on its null row: keeps adds the rows q keeps there, strict makes
-/ the expression false there instead (under NOT, where NULL would not flip)
-.sql.i.arm:{[k;strict;keeps;n;c;term]
-  if[keeps; q:.sql.i.nullpred[k;c;n]; :$[q~(::); term; ((`or;term 0;q 0); term[1],q 1)]];
-  $[k[`nullable] and strict; ((`and;term 0;(`$"is not null";c)); term 1); term]};
+/ the SQL that is true exactly where the column holds a q null; :: for a class without one
+.sql.i.nullpred:{[k;c] $[k`nullable; (`$"is null";c); `symbol=k`logical; (`$"=";c;.sql.i.lit ""); (::)]};
+/ e over a nullable column reads NULL on its null row: keeps adds the rows q keeps there, strict makes the expression
+/ false there instead (under NOT, where NULL would not flip)
+.sql.i.arm:{[k;strict;keeps;c;e]
+  if[keeps; q:.sql.i.nullpred[k;c]; :$[q~(::); e; (`or;e;q)]];
+  $[k[`nullable] and strict; (`and;e;(`$"is not null";c)); e]};
 
-/ one where term as (expr;vals), its k-th literal bound as $pq(n+k), or :: for a term the map cannot push
-.sql.i.term:{[cls;strict;n;e]
+/ one where term as SQL, or :: for a term the map cannot push
+.sql.i.term:{[cls;strict;e]
   if[0h<>type e; :(::)]; if[(any 101h=type each 1_e) or not (type e 0) within 100 112h; :(::)];
-  i:.sql.i.VERBS[`verb]?e 0; if[i=count .sql.i.VERBS; :(::)]; r:.sql.i.VERBS i; a:1_e;
-  if[r[`shape]=`logic; if[2<>count a; :(::)]; l:.z.s[cls;strict;n;a 0]; if[l~(::); :(::)];
-    m:.z.s[cls;strict;n+count l 1;a 1]; :$[m~(::); (::); ((r`sql;l 0;m 0); l[1],m 1)]];
-  if[r[`shape]=`not; :$[(::)~t:.z.s[cls;1b;n;a 0]; (::); ((r`sql;t 0);t 1)]];
-  .sql.i.compare[cls;strict;n;r;a]};
+  if[null i:first where .sql.i.VERBS[`verb]~\:e 0; :(::)]; r:.sql.i.VERBS i; a:1_e;
+  if[r[`shape]=`logic; if[2<>count a; :(::)]; l:.z.s[cls;strict] each a; :$[any (::)~/:l; (::); (r`sql),l]];
+  if[r[`shape]=`not; :$[(::)~t:.z.s[cls;1b;a 0]; (::); (r`sql;t)]];
+  .sql.i.compare[cls;strict;r;a]};
 / the compared side, a column or an .sql.i.arith expression, is c; an expression compares only by scalar verbs with a
-/ non-null literal inside its type's range, and its own literals bind first
-.sql.i.compare:{[cls;strict;n;r;a]
+/ non-null literal inside its type's range
+.sql.i.compare:{[cls;strict;r;a]
   c:a 0; v:a 1; side:{[x] (-11h=type x) or (0h=type x) and any (first x)~/:.sql.i.ARITH};
   if[(not side c) and (side v) and not null r`mirror; c:v; v:a 0; r:.sql.i.VERBS first where .sql.i.VERBS[`sql]=r`mirror];
-  x:$[-11h=type c; $[(i:.sql.i.CLASSES[`logical]?cls c)<count .sql.i.CLASSES; (c;.sql.i.CLASSES i;()); (::)];
-    `scalar=r`shape; .sql.i.arith[cls;n;c]; (::)];
-  if[x~(::); :(::)]; c:x 0; k:x 1; p:x 2; n+:count p; s:r`sql; h:r`shape;
+  x:$[-11h=type c; (c;.sql.i.class cls c); `scalar=r`shape; .sql.i.arith[cls;c]; (::)];
+  if[x~(::); :(::)]; c:x 0; k:x 1; s:r`sql; h:r`shape;
   if[not k[`class] in r`classes; :(::)];
-  if[h=`isnull; :.sql.i.nullpred[k;c;n]];
+  if[h=`isnull; :.sql.i.nullpred[k;c]];
   w:.sql.i.operand[k;h in `range`list;v]; if[w~(::); :(::)];
   if[$[-11h=type c; 0b; (null w) or (abs w)>(`int16`int32`int64!(0Wh;0Wi;0W)) k`logical]; :(::)];
   if[h=`range; if[(2<>count w) or k[`nullable] and any null w; :(::)];
-    :.sql.i.arm[k;strict;0b;n;c;((s;c;.sql.i.param n+1;.sql.i.param n+2);.sql.i.bind each w)]];
-  if[h=`list; :.sql.i.arm[k;strict;any null w;n+1;c;((s;.sql.i.param n+1;c);enlist .sql.i.bind w)]];
-  if[k[`nullable] and null w; :$[null r`nulllit; (::); ((r`nulllit;c);())]];
-  .sql.i.arm[k;strict;k[`nullable] and r`keepsnull;n;c;((s;c;.sql.i.param n+1);p,enlist .sql.i.bind w)]};
+    :.sql.i.arm[k;strict;0b;c;(s;c),.sql.i.lit each .sql.i.bind each w]];
+  if[h=`list; :.sql.i.arm[k;strict;any null w;c;(s;.sql.i.lit .sql.i.bind w;c)]];
+  if[k[`nullable] and null w; :$[null r`nulllit; (::); (r`nulllit;c)]];
+  .sql.i.arm[k;strict;k[`nullable] and r`keepsnull;c;(s;c;.sql.i.lit .sql.i.bind w)]};
 / the q heads of int arithmetic, spelt by .sql.i.arith as + - * and unary -
 .sql.i.ARITH:((+);(-);(*);(neg));
-/ an int expression as (sql;class;vals), its literals bound as $pq(n+1) ...: ONE +, - or * over int columns and
-/ non-null int literals, or neg of one, naming a column; :: otherwise.  class is the row of its widest operand, the
-/ type DuckDB computes it in.  q nulls a result landing on the null bit pattern that DuckDB keeps as the type's lowest
-/ value: alike under a compare with a literal inside the type's range (q nulls sort lowest), but not under a further
-/ operation, so one operation only; an overflow DuckDB refuses where q wraps is answered by q (.duckdb.i.push).
-.sql.i.arith:{[cls;n;e]
+/ an int expression as (sql;class row): ONE +, - or * over int columns and non-null int literals, or neg of one,
+/ naming a column; :: otherwise.  The class is the row of its widest operand, the type DuckDB computes it in.  q nulls
+/ a result landing on the null bit pattern that DuckDB keeps as the type's lowest value: alike under a compare with a
+/ literal inside the type's range (q nulls sort lowest), but not under a further operation, so one operation only; an
+/ overflow DuckDB refuses where q wraps is answered by q (.duckdb.i.push).
+.sql.i.arith:{[cls;e]
   if[0h<>type e; :(::)]; i:.sql.i.ARITH?e 0; if[(i=4) or (count e)<>3-i=3; :(::)];
   a:1_e; col:-11h=type each a; ints:`int16`int32`int64;
   ok:{[ints;cls;x] $[-11h=type x; cls[x] in ints; (type x) in -5 -6 -7h; not null x; 0b]}[ints;cls];
   if[(not any col) or not all ok each a; :(::)];
-  p:a where not col; wide:max {[ints;cls;x] $[-11h=type x; ints?cls x; -5h-type x]}[ints;cls] each a;
-  ((`$("+";"-";"*";"-") i),@[a;where not col;:;.sql.i.param each n+1+til count p];
-    .sql.i.CLASSES .sql.i.CLASSES[`logical]?ints wide; p)};
+  wide:max {[ints;cls;x] $[-11h=type x; ints?cls x; -5h-type x]}[ints;cls] each a;
+  ((`$("+";"-";"*";"-") i),@[a;where not col;.sql.i.lit]; .sql.i.class ints wide)};
