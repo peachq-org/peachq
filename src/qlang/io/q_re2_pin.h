@@ -13,7 +13,7 @@
 #ifndef Q_RE2_PIN_H
 #define Q_RE2_PIN_H
 
-#define PQRE2_DUCKDB_PIN "v2.0.0-alpha48841"
+#define PQRE2_DUCKDB_PIN "v2.0.0"
 #define PQRE2_SRC_SHA256 "3a853ae9a5e9acca0e27d5b6a4e911d536dc6bdd460743afb87724ea433dd21e"
 
 #endif
