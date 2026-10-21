@@ -25,11 +25,6 @@
   r:.duckdb.exec[c;"SELECT decode(value) AS v FROM parquet_kv_metadata(",(.parquet.i.file file),") WHERE decode(key) = 'q_schema' LIMIT 1"];
   $[count r;first r`v;""]}
 / @ignore
-.parquet.i.schema:{[c;t]
-  k:.duckdb.i.lit lower string t;
-  if[0=first (.duckdb.exec[c;"SELECT count(*) AS n FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = 'main' AND table_name = '_q_schema'"])`n; :()];
-  .duckdb.exec[c;"SELECT c.column_name AS col, c.data_type AS dtype, s.logical, s.iskey FROM main._q_schema s JOIN duckdb_columns() c ON c.database_name = ",$[t=.duckdb.i.staging;"'temp'";"current_database()"]," AND c.schema_name = 'main' AND c.table_name = ",(.duckdb.i.lit string t)," AND translate(c.column_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = s.col WHERE s.tbl = ",k," AND s.col <> '' ORDER BY c.column_index"]}
-/ @ignore
 .parquet.i.coord:{[t]
   if[-11h<>type v:value flip t; :()];
   if[not (s:string v) like ":pq:duckdb:*"; :()];
@@ -53,9 +48,9 @@
   if[-11h<>type file; '`type];
   if[98h<>type table; '`type];
   if[count ct:.parquet.i.coord table;
-    .parquet.i.copy[ct 0;"(SELECT * FROM ",(.duckdb.i.qname ct 1),")";file;.parquet.i.schema . ct;opts]; :file];
+    .parquet.i.copy[ct 0;"(SELECT * FROM ",(.duckdb.i.qname ct 1),")";file;.duckdb.i.schema . ct;opts]; :file];
   c:.duckdb.main[]; .duckdb.set[c;.duckdb.i.staging;$[-11h=type value flip table;select from table;table]];
-  .parquet.i.copy[c;.duckdb.i.qname .duckdb.i.staging;file;.parquet.i.schema[c;.duckdb.i.staging];opts];
+  .parquet.i.copy[c;.duckdb.i.qname .duckdb.i.staging;file;.duckdb.i.schema[c;.duckdb.i.staging];opts];
   .duckdb.hdel[c;.duckdb.i.staging]; file}
 
 / @ignore
