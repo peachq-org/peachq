@@ -47,8 +47,8 @@
 .parquet.write:{[file;table;opts]
   if[-11h<>type file; '`type];
   if[98h<>type table; '`type];
-  if[count ct:.parquet.i.coord table;
-    .parquet.i.copy[ct 0;"(SELECT * FROM ",(.duckdb.i.qname ct 1),")";file;.duckdb.i.schema . ct;opts]; :file];
+  if[count ct:.parquet.i.coord table; sc:.duckdb.i.schema[ct 0;ct 1]; if[count sc; sc:select from sc where col<>`i];
+    .parquet.i.copy[ct 0;"(SELECT ",($[count sc; ", " sv .duckdb.i.qname each sc`col; "*"])," FROM ",(.duckdb.i.qname ct 1),")";file;sc;opts]; :file];
   c:.duckdb.main[]; .duckdb.set[c;.duckdb.i.staging;$[-11h=type value flip table;select from table;table]];
   .parquet.i.copy[c;.duckdb.i.qname .duckdb.i.staging;file;.duckdb.i.schema[c;.duckdb.i.staging];opts];
   .duckdb.hdel[c;.duckdb.i.staging]; file}
