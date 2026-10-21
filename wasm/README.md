@@ -84,7 +84,7 @@ WebDB: local paths read and write q's filesystem, `http(s)://` and `s3://` go th
 
 Divergences from the desktop (`make -f Makefile.wasm wasm-duckdb-suites` fails on any other count):
 
-- **The bundle's DuckDB version**, which may differ from the desktop pin (release.yml): v1.5.4 here, v2.0.0-alpha48841 on the
+- **The bundle's DuckDB version**, which may differ from the desktop pin (release.yml): v1.5.4 here, v2.0.0 on the
   desktop — visible only in `version()`. Realigned by one small PR when duckdb-wasm ships a build on the desktop's
   version.
 - **Single-threaded.** The build has no threads, so `threads` above 1 is refused (`handles`, `main`: 3 rows each).
