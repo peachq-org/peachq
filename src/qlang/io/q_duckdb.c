@@ -1597,8 +1597,8 @@ static ray_t* qd_write_impl(int slot, const qd_name_t* nm, ray_t* tbl, const boo
 }
 /* THE write door.  `.duckdb.set` create-or-replaces; `.duckdb.append` grows a table and, when there is none yet,
  * IS a set — so the first batch declares the schema (ADR 11).  A keyed table flattens key-columns-first with
- * iskey recorded (NO DuckDB PRIMARY KEY); the envelope pair declares types the q carrier alone cannot, and is
- * the ONLY value that may carry a companion. */
+ * iskey recorded (NO DuckDB PRIMARY KEY); the envelope pair declares types the q carrier alone cannot, so a bare
+ * table carries only the companions whose kind fixes their meaning (isnull, notnull, tzoff). */
 static ray_t* qd_write_wrap(ray_t** args, int64_t n, bool replace) {
     int slot;
     qd_name_t name;
@@ -1647,8 +1647,8 @@ static ray_t* qd_write_wrap(ray_t** args, int64_t n, bool replace) {
         ray_t* syms  = q_duckdb_codec_decay_enums(slot, tbl, en);
         ray_t* store = RAY_IS_ERR(syms) ? syms
                      : q_duckdb_codec_strip_companions(slot, syms, masks, offs, keeps, iskey, en, bare);
-        r = RAY_IS_ERR(store) ? store
-                              : qd_write_impl(slot, &name, store, iskey, en, masks, offs, keeps, decl, ndecl, replace);
+        r = RAY_IS_ERR(store) ? store : bare ? q_duckdb_schema_desc_zoned(slot, store, offs, &decl, &ndecl) : NULL;
+        if (!r) r = qd_write_impl(slot, &name, store, iskey, en, masks, offs, keeps, decl, ndecl, replace);
         if (!RAY_IS_ERR(store)) ray_release(store);
         if (!RAY_IS_ERR(syms) && syms != store) ray_release(syms);
         free(masks);

@@ -190,6 +190,7 @@ int    q_duckdb_codec_mask_kind(const qd_colmap_t* cm, ray_t* mask);
 int    q_duckdb_codec_keep_kind(const qd_colmap_t* cm, ray_t* keep);
 bool   q_duckdb_codec_companion_name(const char* s, size_t n);
 bool   q_duckdb_codec_tz_all_zero(ray_t* off);
+bool   q_duckdb_codec_zoned_decl(int slot, ray_t* col, qd_buf* dtype, char* logical, size_t cap);
 int    q_duckdb_codec_companions_of(const qd_colmap_t* cm, const char* out[QD_CO_MAX]);
 ray_t* q_duckdb_codec_stage_image(ray_t* tbl, const qd_colmap_t* cms, ray_t* const* masks, ray_t* const* offs,
                                   ray_t* const* keeps, qd_colmap_t* scms, ray_t** smasks, ray_t** skeeps);
@@ -249,6 +250,7 @@ ray_t*      q_duckdb_schema_desc_of(const char* cname, duck_logical_type lt, con
                                     const qd_desc_t* desc, int64_t ndesc, bool empty, qd_desc_t* out, bool* wanted);
 ray_t*      q_duckdb_schema_desc_table(const qd_desc_t* rows, int64_t n);
 ray_t*      q_duckdb_schema_desc_parse(int slot, ray_t* schema, qd_desc_t** out, int64_t* n);
+ray_t*      q_duckdb_schema_desc_zoned(int slot, ray_t* tbl, ray_t* const* offs, qd_desc_t** out, int64_t* n);
 ray_t*      q_duckdb_schema_declare(int slot, ray_t* tbl, qd_colmap_t* cms, qd_desc_t* decl, int64_t ndecl,
                                     const char** dtypes);
 ray_t*      q_duckdb_schema_cast_select(int slot, qd_buf* b, ray_t* tbl, const qd_colmap_t* cms, const char* const* dtypes,
