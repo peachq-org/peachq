@@ -85,6 +85,10 @@ typedef struct {
     bool temp;                      /* one of the bridge's TEMP tables: in `temp`, which current_database() never names */
 } qd_name_t;
 
+/* the database and schema a bare name binds in (borrowed; "" where DuckDB refused the read), read once and kept
+ * until a non-SELECT text runs */
+void q_duckdb_ctx(int slot, const char** db, const char** schema);
+
 /* ---- column map: a manifest row under N levels of DuckDB LIST.  QD_TYPES[] is
  * an append-only contract (fidelity spec 2026-07-14), so nesting is code over
  * the flat table — never rows in it. */
@@ -116,6 +120,31 @@ typedef struct {
     char  logical[QD_LOGICAL_MAX]; /* logical-type name (validated against the manifest) */
     bool  iskey;                   /* q keyed-table key column */
 } qd_desc_t;
+
+/* The BOUND TABLE: what one metadata read of a table answers, held per connection until a door lets it go
+ * (docs/duckdb-architecture.md): every column as the catalog spells and types it, refined by its sidecar row where
+ * it has one, and those rows as the read path's descriptors.  OWNED throughout (q_duckdb_schema_bound_free). */
+typedef struct {
+    char* col;                      /* as the catalog spells it */
+    char* dtype;                    /* the catalog's type spelling */
+    char  logical[QD_LOGICAL_MAX];  /* the refined logical name; "" where the type has no manifest row */
+    bool  iskey;
+    bool  has;                      /* the sidecar has this column's row */
+    char  t;                        /* the meta char; ' ' where the type has no manifest row */
+} qd_bcol_t;
+typedef struct {
+    char*      key;                 /* qd_name_t.key: the identity */
+    qd_bcol_t* col;
+    int64_t    ncol;
+    qd_desc_t* desc;                /* the sidecar's rows, as the read path refines by them */
+    int64_t    ndesc;
+    int64_t    at;                  /* bound when (ns) */
+    bool       q;                   /* a q-origin table: the sidecar names it */
+} qd_bound_t;
+
+/* the connection's bound tables (q_duckdb.c): the entry for a name, read on the first touch and held — BORROWED,
+ * good until the next door runs.  NULL with *err owned when the read failed. */
+const qd_bound_t* q_duckdb_bound(int slot, const qd_name_t* nm, ray_t** err);
 
 /* ---- q_duckdb_codec.c: the type contract, both directions ---- */
 
@@ -181,6 +210,7 @@ ray_t* q_duckdb_codec_strip_companions(int slot, ray_t* tbl, ray_t** masks, ray_
 
 /* ---- q_duckdb_schema.c: the sidecar, the catalog spellings, the DDL, the envelope's schema ---- */
 
+#define QD_SCHEMA_TBL "_q_schema"     /* the sidecar: a q-written table's declared types, in the database's `main` */
 #define QD_STAGE_TBL "_q_stage"       /* the temp table a declared type is staged in, then CAST out of */
 #define QD_STAGING_TBL "_q_staging"   /* the reserved temp table `.parquet` stages a q table in; set may name it */
 #define QD_NEED_LOGICAL 1
@@ -216,5 +246,13 @@ ray_t*      q_duckdb_schema_cast_select(int slot, qd_buf* b, ray_t* tbl, const q
                                         ray_t* const* masks, ray_t* const* offs, ray_t* const* keeps, const char* from);
 ray_t*      q_duckdb_schema_exact_check(int slot, ray_t* tbl, const qd_colmap_t* cms, const char* const* dtypes,
                                         ray_t* const* masks, ray_t* const* offs, ray_t* const* keeps);
+/* the bound table: read in one statement (an owned error on refusal, *out untouched), then what the doors answer from
+ * it — kdb's meta; the push's schema `col dtype logical iskey`, () for a table the sidecar does not name; with info,
+ * every column and its meta char beside */
+ray_t*      q_duckdb_schema_table(ray_t** cols, const char* const* names, int64_t n);   /* owned columns in, released */
+ray_t*      q_duckdb_schema_bound_read(int slot, const qd_name_t* nm, bool sidecar, qd_bound_t* out);
+void        q_duckdb_schema_bound_free(qd_bound_t* b);
+ray_t*      q_duckdb_schema_bound_meta(const qd_bound_t* b);
+ray_t*      q_duckdb_schema_bound_schema(const qd_bound_t* b, bool info);
 
 #endif /* Q_DUCKDB_INTERNAL_H */
