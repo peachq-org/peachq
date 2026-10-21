@@ -30,7 +30,7 @@ These capabilities overlap. They are not intended to form a rigid hierarchy of m
 | File | ```:data/x``` | `get`, `set`, `read0`, `read1`, file I/O |
 | Splayed table | ```:data/trade/``` | `get`, `select`, `exec`, table operations |
 | q IPC endpoint | ```:localhost:5000``` | open, synchronous call, asynchronous send |
-| HTTP resource | ```:http://host/x``` | retrieve remote content; planned table resolution |
+| HTTP resource | ```:http://host/x``` | `read0`, `read1` (ranged), `select` when the ending names a table format |
 | WebSocket endpoint | ```:ws://host/x``` | connect, then persistent framed messaging |
 | Alias | ```:pq:q:srv```, ```:pq:duckdb:prod:trade/``` | a named connection of one kind, and its tables |
 
@@ -96,7 +96,7 @@ When resolving data resources, it is useful to separate four concepts.
 
 These concepts can compose.
 
-For example, the proposed:
+For example:
 
 ```q
 select from `:https://www.timestored.com/data/sample/dowjones.csv
@@ -178,7 +178,7 @@ reads them all (DuckDB's door), while `read0`/`read1`/csv/json read ONE resource
 
 Writes follow the same law. `` `:s3://bucket/x.parquet set t `` is DuckDB's `COPY TO`; `` `:s3://bucket/x.csv set t ``
 (and `.json`, `.txt`, `.xml`, `.xls` — every `.h.tx` key that produces lines) writes peachq's own lines through
-DuckDB as a dumb line transport (`.duckdb.i.write0`), byte for byte what the same `set` writes to a local file, so
+DuckDB as a dumb line transport, byte for byte what the same `set` writes to a local file, so
 `select from` reads them back. The lines must be UTF-8 (DuckDB text is). A `.h.tx` entry that produces BYTES has no
 remote transport (`'nyi`); parquet does not reach that arm.
 
@@ -194,8 +194,9 @@ Credentials are DuckDB secrets on the main instance, through the standard librar
 
 Opts ride verbatim as `KEY value` clauses (a string or symbol quoted, a bool or number bare), so DuckDB's own
 documentation of a secret type is the reference and an unknown key is DuckDB's own refusal (`'duckdb`, `.duckdb.err[]`
-the reason). The `httpfs` extension autoloads on first use — a fresh box fetches it from DuckDB's repository once, and
-a failed load is the same `'duckdb` with `.duckdb.err[]` saying why. In restricted mode (`-U`) every remote door is
+the reason). `httpfs` loads on first use — from the bundled `extensions/` directory with the `-duckdb` archive, from
+DuckDB's repository once with a library you supplied — and a failed load is the same `'duckdb` with `.duckdb.err[]`
+saying why. In restricted mode (`-U`) every remote door is
 `'access` before DuckDB is asked.
 
 ### HTTPS certificates
@@ -244,10 +245,10 @@ read0 `:some-resource
 read1 `:some-resource
 ```
 
-ask for the textual or binary contents of a resource. PeachQ should preserve the existing q distinction: `read0` is the text-oriented read operation
+ask for the textual or binary contents of a resource. PeachQ keeps the existing q distinction: `read0` is the text-oriented read operation
 and `read1` is the binary read operation.
 
-Both operations should preserve q's ranged-read forms:
+Both operations keep q's ranged-read forms:
 
 ```q
 read0 (`:some-resource;offset;length)
@@ -258,7 +259,7 @@ Offsets are resource byte offsets. A transport that supports native range reads,
 whole object. A transport that does not support efficient ranges falls back to fetching and slicing — the DuckDB-carried schemes (`s3://`
 and the rest of § Remote schemes) do, since `read_blob` answers the whole object.
 
-For HTTP, the intended PeachQ direction is therefore:
+For HTTP, therefore:
 
 ```q
 read0 `:http://example.com/a.txt
@@ -272,7 +273,7 @@ while:
 select from `:http://example.com/a.csv
 ```
 
-will mean:
+means:
 
 ```text
 HTTP transport
@@ -282,16 +283,12 @@ HTTP transport
     -> qSQL
 ```
 
-HTTP table selection is a **proposal/planned extension**, not a statement of current support.
-
 The important rule is that `read0` and `read1` retrieve resource content, while the **table resolver used by qSQL**
 performs format interpretation — and `get` asks that resolver, never a resolver of its own.
 
 ## Format inference
 
-For table selection, PeachQ should prefer explicit interpretation over inference.
-
-The initial rule is:
+For table selection, PeachQ prefers explicit interpretation over inference. The rule is:
 
 1. An explicit scheme or `:pq:` alias wins.
 2. Otherwise, a recognised file ending selects the format.
@@ -314,7 +311,7 @@ file is JSON Lines and it is read that way; `.json` says only JSON, and the read
 document or a stream. Nothing is inferred from the bytes: a `.jsonl` holding a single JSON array is an error rather than a
 quiet re-reading. [Reading JSON](lib/j.md) covers framing.
 
-The same rule is intended to apply after transport resolution:
+The same rule applies after transport resolution:
 
 ```q
 select from `:https://www.timestored.com/data/sample/dowjones.csv
@@ -328,7 +325,7 @@ If the resource does not have a recognised table format:
 select from `:trades.dat
 ```
 
-PeachQ should fail rather than guess.
+PeachQ fails (`'type`) rather than guess.
 
 `get` (and `value`, its synonym) asks the same resolver ahead of the q binary reader: a recognised ending answers the
 table, no recognised ending is the q object load as in kx, and a missing file is the reader's own error (`'io`). kx
@@ -346,8 +343,7 @@ and `raw` have writers and no reader, so `` get `:f.xml `` stays `'type`.
 
 Applications that know an ambiguously named file is CSV can use the explicit CSV API rather than relying on qSQL inference.
 
-PeachQ should not initially make HTTP `Content-Type`, magic-byte sniffing, or other heuristics part of this contract. They can be considered later
-without changing the basic model.
+HTTP `Content-Type`, magic-byte sniffing and other heuristics are not part of this contract.
 
 ## CSV and other decoded formats
 
@@ -357,7 +353,7 @@ The explicit CSV API remains:
 .csv.read[file;target;types;opts]
 ```
 
-`.csv.read` is a local CSV loader and decoder. It should not need to understand HTTP, ZIP, S3, or every future transport.
+`.csv.read` is a CSV loader and decoder. It does not understand HTTP, ZIP, S3, or any other transport.
 
 For direct qSQL over a local CSV:
 
@@ -367,7 +363,7 @@ select from `:trades.csv
 
 PeachQ can use the CSV decoder to obtain a table and execute qSQL locally.
 
-For a future remote CSV:
+For a remote CSV:
 
 ```q
 select from `:https://www.timestored.com/data/sample/dowjones.csv
@@ -384,8 +380,8 @@ HTTP retrieves content
 The CSV implementation does not become an HTTP implementation. PeachQ's resource layer obtains the content first and then invokes the CSV decoding
 path.
 
-TSV and JSON follow the same general model where they can be interpreted as tables. Parquet table resources are planned and should follow the same
-resource model, although their implementation may support more efficient projection or predicate pushdown than a simple materialising decoder.
+TSV and JSON follow the same model where they can be interpreted as tables. Parquet follows the same resource model, read in place by DuckDB with
+projection and predicate pushdown rather than a materialising decoder ([parquet.md](lib/parquet.md)).
 
 ## Ranged reads
 
@@ -486,6 +482,8 @@ hclose h                                        / the one close door
   everywhere else, the socket beneath the alias included, so `count select from .pq.conns[] where owned` counts
   workers. `hclose` of an owned handle kills and reaps the worker, and so does this process's exit (`exit`, `\\` or the
   end of its script), without firing `.z.pc`.
+- `.pq.info` on a DuckDB alias lists the tables the connection has bound, with their row counts, and on a table
+  coordinate answers that table's schema ([Storing tables in DuckDB](sql-duckdb-storage.md)).
 - **A q peer's handle is a kdb handle**: on a `:pq:q:`, `:pq:qfork:` or `:pq:qspawn:` alias every message is sent to the
   other process unchanged, exactly as on an int handle, whatever names exist here. The async send is `neg` of the
   alias, as on an int: `neg h` is the alias with a leading `-` (`` `:pq:qfork:-w1 ``), so `neg[h] "x:1"` sends
@@ -579,25 +577,7 @@ The extended resource model is intended to explain and extend those behaviours, 
 
 This gives existing q code the familiar compact syntax while allowing new code to treat external data sources consistently.
 
-# Dev Work
-Your order is good. I’d tighten it to this:
-
-1. Generalize read0 / read1 to resource identifiers
-   Support :http://... first, including ranged reads; move .Q.hg and similar HTTP helpers onto the same underlying transport calls.
-2. Refactor .csv.read around generic readable inputs
-	.csv.read[fileOrString;...] should accept raw content or any readable resource and rely only on shared read0/read1 primitives, never implement HTTP itself.
-3. Add qSQL over CSV resources
-	Support select from :a.csv and select from :http://.../a.csv; resolve → read → .csv.i.read/C decoder → in-memory table → host qSQL, without requiring \l pq.
-4. Add ZIP as a readable container resource
-	Support read0/read1 :zip://file.zip/a.csv (or final chosen syntax), so CSV-over-ZIP works automatically through the same resource pipeline.
-5. Only specialize local/ZIP CSV if profiling justifies it
-	If .csv.i.read can consume the same low-level streaming/ranged reader used by read0/read1, avoid separate ZIP/HTTP code paths; optimize underneath that common seam.
-6. Add .j.read later using the same source contract
-	JSON should reuse the same resource layer from day one: raw string/bytes or any readable :... resource, with no transport-specific logic.
-	
-	
-## Points
-
+## Design principles
 
 1. Keep one low-level resource-read seam beneath read0/read1; HTTP, ZIP, CSV, .Q.hg, S3, etc. must reuse it.
 2. Treat strings/byte vectors as content and :... symbols as resource identifiers. Never make plain strings implicitly mean filenames.
