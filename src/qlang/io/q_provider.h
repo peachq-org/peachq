@@ -47,7 +47,8 @@ ray_t* q_provider_flip(ray_t* cols, int64_t sym);     /* `cols!`:pq:duckdb:db:t/
 ray_t* q_provider_unflip(ray_t* car);                 /* the pointer -> that pair, plain */
 int    q_provider_coord_sym_form(ray_t* x);           /* 0 none, 1 connection, 2 table coordinate */
 
-ray_t* q_provider_get_carrier(ray_t* x);              /* `get` of a coordinate; NULL = not a `:pq:` sym */
+ray_t* q_provider_get_carrier(ray_t* x);              /* the carrier of a coordinate (cols/meta); NULL = not a `:pq:` sym */
+ray_t* q_provider_get_fresh(ray_t* x);                /* the user's `get`: the same, the table read afresh */
 ray_t* q_provider_carrier_table(ray_t* car);
 ray_t* q_provider_carrier_count(ray_t* car);
 ray_t* q_provider_carrier_meta(ray_t* car);

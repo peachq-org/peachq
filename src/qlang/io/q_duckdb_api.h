@@ -23,6 +23,9 @@ typedef int32_t duck_state;
 /* DUCKDB_V2_RESULT_TYPE: a query returned rows, anything else counted or did nothing. */
 typedef enum { QDuckReturnQuery = 0, QDuckReturnChangedRows = 1, QDuckReturnNothing = 2 } duck_return_t;
 
+/* DUCKDB_V2_STATEMENT_TYPE: the one value the bridge reads — every other statement kind may change the catalog */
+#define QDuckStmtSelect 1
+
 /* DUCKDB_V2_LOGICAL_TYPE_ID — the ids the bridge dispatches on (values are ABI). */
 enum {
     QDUCK_TYPE_SQLNULL      = 1,
@@ -218,6 +221,7 @@ typedef struct {
     duck_state (*sql_statement_destroy)(duck_stmt* st);
     duck_state (*sql_statement_get_parameter_count)(duck_stmt st, duck_idx_t* out, duck_err* err);
     duck_state (*sql_statement_get_parameter_name)(duck_stmt st, duck_idx_t index, duck_str* out, duck_err* err);
+    duck_state (*sql_statement_get_type)(duck_stmt st, int32_t* out, duck_err* err);
     duck_state (*statement_bind)(duck_connection con, duck_stmt st, duck_schema* out, duck_schema* params, duck_err* err);
     duck_state (*statement_execute)(duck_connection con, duck_stmt st, const duck_str* names, const duck_value* values,
                                     duck_idx_t n, duck_cursor* out, duck_err* err);
