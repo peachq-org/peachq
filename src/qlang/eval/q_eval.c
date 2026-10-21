@@ -680,7 +680,7 @@ ray_t* q_eval_value_wrap(ray_t* x) {
     if (x->type == -RAY_SYM) {
         ray_t* m = q_splay_get(x);           /* NULL unless a `:dir/ table folder */
         if (m) return m;
-        ray_t* pc = q_provider_get_carrier(x);   /* `:pq:duckdb:db:t/ -> the carrier;
+        ray_t* pc = q_provider_get_fresh(x);     /* `:pq:duckdb:db:t/ -> the carrier, the table read afresh;
                                                   * connection form -> 'domain */
         if (pc) return pc;
         ray_t* rt = q_io_resource_table(x);  /* `:f.csv etc.: the ending `select from` speaks */
