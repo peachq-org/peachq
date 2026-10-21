@@ -507,6 +507,13 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
         return tag == RAY_TIMESPAN ? cast_delegate(tag, x) : cast_temporal32(tag, x);
     }
     case RAY_MONTH: case RAY_DATE: case RAY_TIME:
+        if (tag == RAY_MONTH && q_type_elem_tag(x) == -RAY_DATETIME) {   /* ref/cast.md:160 datetime has month */
+            ray_t* d = q_dollar_cast(RAY_DATE, x);
+            if (!d || RAY_IS_ERR(d)) return d;
+            ray_t* r = cast_temporal32(RAY_MONTH, d);
+            ray_release(d);
+            return r;
+        }
         return cast_temporal32(tag, x);
     case RAY_F64: case RAY_DATETIME:
         return cast_delegate(tag, x);
@@ -759,6 +766,8 @@ static ray_t* component_leaf(ray_t* x, int64_t comp) {
     int temporal = RAY_IS_TEMPORAL32(at) || RAY_IS_TEMPORAL64(at) ||
                    RAY_IS_TEMPORALF(at);
     if (!temporal) return q_err(QE_TYPE);
+    if (c == QCOMP_MM && component_valid(at, QCOMP_UU) && !component_valid(at, QCOMP_YEAR))
+        c = QCOMP_UU;                    /* kdb+1.txt:146 `time.mm 10`: a time of day has no month */
     if (!component_valid(at, c))
         return q_err(QE_TYPE);
     /* A non-finite DATETIME (canonically 0n) has no meaningful field AND would
@@ -806,6 +815,11 @@ static ray_t* cast_tod(int8_t tag, ray_t* x) {
     ray_t* r = cast_delegate(tag, span);
     ray_release(span);
     return r;
+}
+
+int q_dollar_names_field(ray_t* t) {
+    int is_tok = 0;
+    return t && t->type == -RAY_SYM && (q_cast_designator(t, &is_tok, NULL) || component_of_sym(t) >= 0);
 }
 
 /* `sym$temporal` component extraction; NULL if `sym` names no component. */
