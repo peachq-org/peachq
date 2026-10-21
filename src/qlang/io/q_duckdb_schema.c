@@ -31,7 +31,6 @@
  * its own yet, so when it was written and by whom are not recorded. */
 #define QD_SCHEMA_TABLE_ROW "table"
 
-#define QD_SCHEMA_TBL "_q_schema"
 #define QD_SCHEMA_REF "\"main\".\"" QD_SCHEMA_TBL "\""   /* pinned to DuckDB's default schema, whatever the session's */
 
 static void qd_spell_canon(const qd_colmap_t* cm, qd_buf* b);
@@ -94,14 +93,9 @@ static bool qd_fold_eq(const char* a, const char* b, size_t n) {
  * database and the default schema `main` implied — so `t, "main"."t" and "T" key one row and pre-2026-09-14 rows
  * still match; the parts stay as written, they are the address the SQL uses */
 void q_duckdb_schema_name_resolve(int slot, qd_name_t* nm) {
-    char db[256];
-    ray_t* row = q_duckdb_query(slot, "SELECT current_database() AS d, current_schema() AS s", 0);
-    size_t dn = 0, sn = 0;
-    const char* dp = q_duckdb_schema_text_cell(row, 0, 0, &dn);
-    const char* sp = q_duckdb_schema_text_cell(row, 1, 0, &sn);
-    snprintf(db, sizeof db, "%.*s", (int)dn, dp ? dp : "");
-    snprintf(nm->schema, sizeof nm->schema, "%.*s", (int)sn, sp ? sp : "");
-    q_duckdb_drop(row);
+    const char *db, *schema;
+    q_duckdb_ctx(slot, &db, &schema);
+    snprintf(nm->schema, sizeof nm->schema, "%s", schema);
     if (nm->n >= 2) memcpy(nm->schema, nm->part[nm->n - 2], strlen(nm->part[nm->n - 2]) + 1);
     if (nm->temp) memcpy(nm->schema, "main", 5);   /* the temp catalog has the one schema, whatever the session's */
     qd_buf b = {0};
@@ -239,6 +233,160 @@ int64_t q_duckdb_schema_fetch_desc(int slot, const qd_name_t* nm, qd_desc_t** ou
     ray_release(rows);
     *out = d;
     return k;
+}
+
+static bool qd_bool_cell(ray_t* tbl, int64_t col, int64_t row) {
+    ray_t* v = col < ray_table_ncols(tbl) ? ray_table_get_col_idx(tbl, col) : NULL;   /* borrowed */
+    return v && v->type == RAY_BOOL && *(uint8_t*)ray_vec_get(v, row) != 0;
+}
+
+/* The bound table's ONE statement: every column in catalog order with its sidecar row beside it when the sidecar
+ * stands — the cells coalesced, since a NULL would grow a companion column — and whether the sidecar names the
+ * table at all.  The sidecar's rows become the read path's descriptors; each column's map is the catalog type
+ * refined by its row, the get law, so meta and the push read the same type. */
+ray_t* q_duckdb_schema_bound_read(int slot, const qd_name_t* nm, bool sidecar, qd_bound_t* out) {
+    memset(out, 0, sizeof *out);
+    qd_buf name = {0}, b = {0};
+    q_duckdb_schema_put_name(&name, nm);
+    if (sidecar) {
+        q_duckdb_puts(&b, "SELECT c.name AS col, c.type AS dtype, coalesce(s.logical, '') AS logical, "
+                          "coalesce(s.iskey, false) AS iskey, s.col IS NOT NULL AS has, EXISTS (SELECT 1 FROM "
+                          QD_SCHEMA_REF " WHERE tbl = ");
+        q_duckdb_put_strlit(&b, nm->key, strlen(nm->key));
+        q_duckdb_puts(&b, ") AS q FROM pragma_table_info(");
+        q_duckdb_put_strlit(&b, QD_TEXT(name.p), name.len);
+        q_duckdb_puts(&b, ") c LEFT JOIN " QD_SCHEMA_REF " s ON s.tbl = ");
+        q_duckdb_put_strlit(&b, nm->key, strlen(nm->key));
+        q_duckdb_puts(&b, " AND s.col = translate(c.name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') "
+                          "ORDER BY c.cid");
+    } else {
+        q_duckdb_puts(&b, "SELECT name AS col, type AS dtype FROM pragma_table_info(");
+        q_duckdb_put_strlit(&b, QD_TEXT(name.p), name.len);
+        q_duckdb_puts(&b, ") ORDER BY cid");
+    }
+    b.oom |= q_duckdb_buf_free(&name);
+    ray_t* rows = q_duckdb_query_buf(slot, &b, 1);
+    if (RAY_IS_ERR(rows)) return rows;
+    int64_t n = rows->type == RAY_TABLE ? q_count(rows) : 0;
+    out->key  = q_duckdb_text(nm->key, strlen(nm->key));
+    out->col  = q_duckdb_cols(n, sizeof *out->col);
+    out->desc = q_duckdb_cols(n, sizeof *out->desc);
+    out->q    = sidecar && n > 0 && qd_bool_cell(rows, 5, 0);
+    bool ok = out->key && out->col && out->desc;
+    for (int64_t i = 0; ok && i < n; i++) {
+        size_t cl = 0, dl = 0, ll = 0;
+        const char* cn = q_duckdb_schema_text_cell(rows, 0, i, &cl);
+        const char* dt = q_duckdb_schema_text_cell(rows, 1, i, &dl);
+        const char* ln = sidecar ? q_duckdb_schema_text_cell(rows, 2, i, &ll) : NULL;
+        qd_bcol_t* c = &out->col[i];
+        c->has   = sidecar && qd_bool_cell(rows, 4, i);
+        c->iskey = c->has && qd_bool_cell(rows, 3, i);
+        c->col   = q_duckdb_text(cn ? cn : "", cl);
+        c->dtype = q_duckdb_text(dt ? dt : "", dl);
+        ok = c->col && c->dtype;
+        out->ncol = i + 1;
+        if (!c->has) continue;
+        qd_desc_t* d = &out->desc[out->ndesc];
+        ok = ok && qd_desc_set(d, c->col, cl, "", 0);
+        if (!ok) break;
+        snprintf(d->logical, sizeof d->logical, "%.*s", (int)ll, ln ? ln : "");
+        d->iskey = c->iskey;
+        out->ndesc++;
+    }
+    ray_release(rows);
+    for (int64_t i = 0; ok && i < n; i++) {
+        qd_bcol_t*  c = &out->col[i];
+        qd_colmap_t cm;
+        c->t = ' ';
+        if (!q_duckdb_schema_catalog_col(c->dtype, strlen(c->dtype), &cm)) {
+            const qd_desc_t* d = c->has ? q_duckdb_schema_desc_find(c->col, strlen(c->col), out->desc, out->ndesc) : NULL;
+            snprintf(c->logical, sizeof c->logical, "%s", d ? d->logical : "");
+            continue;
+        }
+        q_duckdb_codec_refine(c->col, strlen(c->col), out->desc, out->ndesc, &cm);
+        q_duckdb_codec_logical_name(&cm, c->logical, sizeof c->logical);
+        c->t = q_duckdb_codec_meta_char(&cm);
+    }
+    if (ok) return NULL;
+    q_duckdb_schema_bound_free(out);
+    return q_err(QE_WSFULL);
+}
+
+void q_duckdb_schema_bound_free(qd_bound_t* b) {
+    for (int64_t i = 0; i < b->ncol; i++) { free(b->col[i].col); free(b->col[i].dtype); }
+    free(b->col);
+    free(b->key);
+    q_duckdb_schema_desc_free(b->desc, b->ndesc);
+    memset(b, 0, sizeof *b);
+}
+
+/* n owned columns under n names as one table; the columns are released, an error in any is the answer */
+ray_t* q_duckdb_schema_table(ray_t** cols, const char* const* names, int64_t n) {
+    ray_t* bad = NULL;
+    for (int64_t i = 0; i < n && !bad; i++) if (!cols[i] || RAY_IS_ERR(cols[i])) bad = cols[i] ? cols[i] : q_err(QE_WSFULL);
+    ray_t* t = bad ? NULL : ray_table_new(n);
+    for (int64_t i = 0; i < n; i++) {
+        if (!bad) t = ray_table_add_col(t, ray_sym_intern_runtime(names[i], strlen(names[i])), cols[i]);
+        if (cols[i] != bad) q_duckdb_drop(cols[i]);
+    }
+    return bad ? bad : t;
+}
+
+/* one symbol per column: its name, its refined logical type, or the blank (the meta's f and a); owned, never NULL */
+enum { QD_BC_NAME, QD_BC_LOGICAL, QD_BC_BLANK };
+static ray_t* qd_bound_syms(const qd_bound_t* b, int what) {
+    ray_t* v = ray_sym_vec_new(RAY_SYM_W64, b->ncol > 0 ? b->ncol : 1);
+    for (int64_t i = 0; i < b->ncol && v && !RAY_IS_ERR(v); i++) {
+        const char* s = what == QD_BC_NAME ? b->col[i].col : what == QD_BC_LOGICAL ? b->col[i].logical : "";
+        int64_t id = ray_sym_intern_runtime(s, strlen(s));
+        v = ray_vec_append(v, &id);
+    }
+    return v ? v : q_err(QE_WSFULL);
+}
+
+/* the meta chars as one string; owned, never NULL */
+static ray_t* qd_bound_tchars(const qd_bound_t* b) {
+    char* t = malloc(b->ncol > 0 ? (size_t)b->ncol : 1);
+    if (!t) return q_err(QE_WSFULL);
+    for (int64_t i = 0; i < b->ncol; i++) t[i] = b->col[i].t;
+    ray_t* v = ray_charv(t, b->ncol);
+    free(t);
+    return v ? v : q_err(QE_WSFULL);
+}
+
+/* kdb-exact ([c] t;f;a): f and a are the null sym throughout — DuckDB has no fkey domain or attribute */
+ray_t* q_duckdb_schema_bound_meta(const qd_bound_t* b) {
+    ray_t* c = qd_bound_syms(b, QD_BC_NAME);
+    ray_t* t = qd_bound_tchars(b);
+    ray_t* f = qd_bound_syms(b, QD_BC_BLANK);
+    ray_t* a = qd_bound_syms(b, QD_BC_BLANK);
+    if (RAY_IS_ERR(c) || RAY_IS_ERR(t) || RAY_IS_ERR(f) || RAY_IS_ERR(a)) {
+        q_duckdb_drop(c);
+        q_duckdb_drop(t);
+        q_duckdb_drop(f);
+        q_duckdb_drop(a);
+        return q_err(QE_WSFULL);
+    }
+    return q_table_meta_assemble(c, t, f, a);
+}
+
+/* the push's schema (col dtype logical iskey), () for a table the sidecar does not name — nothing to push on; with
+ * info, every table's rows and the meta char beside them */
+ray_t* q_duckdb_schema_bound_schema(const qd_bound_t* b, bool info) {
+    if (!info && !b->q) return ray_list_new(0);
+    static const char* const NAMES[] = { "col", "dtype", "logical", "iskey", "t" };
+    ray_t* d = ray_list_new(b->ncol > 0 ? b->ncol : 1);
+    ray_t* k = ray_vec_new(RAY_BOOL, b->ncol > 0 ? b->ncol : 1);
+    for (int64_t i = 0; i < b->ncol && d && !RAY_IS_ERR(d) && k && !RAY_IS_ERR(k); i++) {
+        uint8_t key = b->col[i].iskey;
+        ray_t*  s   = ray_charv(b->col[i].dtype, (int64_t)strlen(b->col[i].dtype));
+        if (!s || RAY_IS_ERR(s)) { ray_release(d); d = s; break; }
+        d = ray_list_append(d, s);
+        ray_release(s);
+        k = ray_vec_append(k, &key);
+    }
+    ray_t* cols[5] = { qd_bound_syms(b, QD_BC_NAME), d, qd_bound_syms(b, QD_BC_LOGICAL), k, info ? qd_bound_tchars(b) : NULL };
+    return q_duckdb_schema_table(cols, NAMES, info ? 5 : 4);
 }
 
 /* One descriptor row to write (name and enumdom are NOT NUL-terminated: ptr+len). */

@@ -21,6 +21,13 @@
 / @eg exec handle from .pq.conns[] where spec=`:pq:qfork:w1
 .pq.conns:{[] .pq.i.conns[]}
 
+/ What peachq itself holds behind a `:pq: handle, a dict of tables: a table coordinate answers `schema (col dtype
+/ logical iskey t, as bound on first touch); an alias answers `tables (table origin bound: what is bound, `q or `duckdb
+/ by the sidecar, when) and `stats (binds hits rebinds dropped).  Connection facts are .pq.conns[]; the catalog is SQL.
+/ @param x the `:pq: symbol; anything else is 'type, an alias that is not open 'conn
+/ @eg .pq.info hopen (`:pq:duckdb:demo;":memory:")
+.pq.info:{[x] .pq.i.info x}
+
 / Open (or re-point) `:pq:q:alias on another q process, the same call as hopen (`:pq:q:alias;arg); answers that symbol.
 / @param arg (any) what hopen takes (port, `::5000, `:host:port:user:pass, (conn;timeout) ...), or a `conn`timeout dict
 .pq.hopen_q:{[alias;arg] hopen (`$":pq:q:",string alias;arg)};

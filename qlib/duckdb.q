@@ -28,6 +28,10 @@
 .duckdb.call:{[c;q;sync] if[not sync; '`domain]; .duckdb.lastsql::q; .duckdb.i.exec[c;q]}
 / @ignore
 .duckdb.bind:{[c;t] (key .duckdb.i.meta[c;t])`c}
+/ @ignore
+.duckdb.rebind:{[c;t] .duckdb.i.unbind[c;t]; .duckdb.bind[c;t]}
+/ @ignore
+.duckdb.info:{[c;t] .duckdb.i.info[c;t]}
 / A table of the handle's catalog as a q table.
 .duckdb.get:{[c;t] .duckdb.i.get[c;t]}
 / Create or replace a table of the handle's catalog from a q table, or from the pair .duckdb.getx answers.
@@ -166,15 +170,19 @@
 .duckdb.pushdown:1b
 
 / @ignore
-.duckdb.i.schema:{[c;t]
-  sql:"SELECT c.column_name AS col, c.data_type AS dtype, s.logical, s.iskey FROM main._q_schema s JOIN duckdb_columns() c ON c.database_name = ",$[t=.duckdb.i.staging;"'temp'";"current_database()"]," AND c.schema_name = 'main' AND c.table_name = ",(.duckdb.i.lit string t)," AND translate(c.column_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = s.col WHERE s.tbl = ",(.duckdb.i.lit lower string t)," AND s.col <> '' ORDER BY c.column_index";
-  r:@[.duckdb.exec[c];sql;{[e] ()}];
-  $[count r; update `$col, `$logical from r; ()]}
+.duckdb.i.stale:{[c] any (first "\n" vs .duckdb.err c) like/: ("Binder Error: Referenced column*";"Catalog Error: Table with name*")}
+/ @ignore
+.duckdb.i.pushed:{[c;rt]
+  if[0=count sc:.duckdb.i.schema[c;rt 0]; :(::)];
+  r:.sql.translate[((?);rt 0;$[count rt 1;enlist rt 1;()]),2_rt;sc];
+  if[0=n:count r[0;2]; :(::)];
+  t:.duckdb.exec[c;(.sql.render r 0;r 1;r 2)];
+  $[(::)~r 3; t; (?) . (t;n _ rt 1),2_rt]}
 / @ignore
 .duckdb.i.push:{[c;rt]
-  if[.duckdb.pushdown and -11h=type rt 0; if[count sc:.duckdb.i.schema[c;rt 0];
-    r:.sql.translate[((?);rt 0;$[count rt 1;enlist rt 1;()]),2_rt;sc];
-    if[n:count r[0;2]; t:.duckdb.exec[c;(.sql.render r 0;r 1;r 2)]; :$[(::)~r 3; t; (?) . (t;n _ rt 1),2_rt]]]];
+  if[.duckdb.pushdown and -11h=type rt 0;
+    r:@[.duckdb.i.pushed[c];rt;{[c;rt;e] if[not .duckdb.i.stale c; 'e]; .duckdb.i.unbind[c;rt 0]; .duckdb.i.pushed[c;rt]}[c;rt]];
+    if[not (::)~r; :r]];
   t:$[10h=type rt 0;.duckdb.exec[c;"SELECT * FROM ",rt 0];.duckdb.get[c;rt 0]]; (?) . (enlist t),1_rt}
 / @ignore
 .duckdb.qsql:{[c;cl;tree]
