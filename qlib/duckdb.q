@@ -165,8 +165,8 @@
 / The row count of a table of the handle's catalog, counted by DuckDB.
 .duckdb.count:{[c;t] first .duckdb.i.exec[c; "SELECT COUNT(*) AS n FROM ",.duckdb.i.qname t]`n}
 
-/ Whether a qSQL select on a q-origin table of the handle runs the where terms .sql.translate can move inside DuckDB
-/ before q runs the rest; off, every select pulls the whole table.  A pushed statement DuckDB refuses stays in
+/ Whether a qSQL select on a q-origin table of the handle runs the where terms, limit and order .sql.translate can move
+/ inside DuckDB before q runs the rest; off, every select pulls the whole table.  A pushed statement DuckDB refuses stays in
 / .duckdb.sqllog and the select pulls the table instead, so the answer is q's.  Read on every select.
 .duckdb.pushdown:1b
 
@@ -176,9 +176,9 @@
 .duckdb.i.pushed:{[c;rt]
   if[0=count sc:.duckdb.i.schema[c;rt 0]; :(::)];
   r:.sql.translate[((?);rt 0;$[count rt 1;enlist rt 1;()]),2_rt;sc];
-  if[0=count r[0;2]; :(::)];
+  if[all ((0=count r[0;2]);(::)~r[0;5];0=count r[0;6]); :(::)];
   t:.duckdb.exec[c;(.sql.render r 0;r 1;r 2)];
-  $[(::)~r 3; t; (?) . (t;$[count r[3;2]; r[3;2;0]; ()]),2_rt]}
+  $[(::)~r 3; t; (?) . (t;$[count r[3;2]; r[3;2;0]; ()]),3_r 3]}
 / @ignore
 .duckdb.i.push:{[c;rt]
   if[.duckdb.pushdown and -11h=type rt 0;
