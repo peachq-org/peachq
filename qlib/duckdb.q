@@ -161,10 +161,29 @@
 / The row count of a table of the handle's catalog, counted by DuckDB.
 .duckdb.count:{[c;t] first .duckdb.i.exec[c; "SELECT COUNT(*) AS n FROM ",.duckdb.i.qname t]`n}
 
+/ Whether a qSQL select on a q-origin table of the handle runs its leading where terms inside DuckDB (.sql.translate)
+/ before q runs the rest; off, every select pulls the whole table.  Read on every select.
+.duckdb.pushdown:1b
+
 / @ignore
-.duckdb.i.push:{[c;rt] t:$[10h=type rt 0;.duckdb.exec[c;"SELECT * FROM ",rt 0];.duckdb.get[c;rt 0]]; (?) . (enlist t),1_rt}
+.duckdb.i.schema:{[c;t]
+  sql:"SELECT c.column_name AS col, c.data_type AS dtype, s.logical, s.iskey FROM main._q_schema s JOIN duckdb_columns() c ON c.database_name = ",$[t=.duckdb.i.staging;"'temp'";"current_database()"]," AND c.schema_name = 'main' AND c.table_name = ",(.duckdb.i.lit string t)," AND translate(c.column_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = s.col WHERE s.tbl = ",(.duckdb.i.lit lower string t)," AND s.col <> '' ORDER BY c.column_index";
+  r:@[.duckdb.exec[c];sql;{[e] ()}];
+  $[count r; update `$col, `$logical from r; ()]}
 / @ignore
-.duckdb.qsql:{[c;cl;tree] rt:@[.pq.i.resolveTree[cl];tree;{[e] ::}]; $[rt~(::);::;.duckdb.i.push[c;rt]]}
+.duckdb.i.push:{[c;rt]
+  if[.duckdb.pushdown and -11h=type rt 0; if[count sc:.duckdb.i.schema[c;rt 0];
+    r:.sql.translate[((?);rt 0;$[count rt 1;enlist rt 1;()]),2_rt;sc];
+    if[n:count r[0;2]; t:.duckdb.exec[c;(.sql.render r 0;r 1;r 2)]; :$[(::)~r 3; t; (?) . (t;n _ rt 1),2_rt]]]];
+  t:$[10h=type rt 0;.duckdb.exec[c;"SELECT * FROM ",rt 0];.duckdb.get[c;rt 0]]; (?) . (enlist t),1_rt}
+/ @ignore
+.duckdb.qsql:{[c;cl;tree]
+  node:{[cl;nd]
+    if[99h=type nd; :key[nd]!.z.s[cl] value nd];
+    if[0h=type nd; i:where 101h<>type each nd; :@[nd;i;:;.z.s[cl] each nd i]];
+    $[-11h<>type nd; nd; nd in cl; nd; 100h<=type v:@[value;nd;{[e] 'unpush}]; nd; (11h=abs type v) or (type v) in 0 98 99h; enlist v; v]};
+  rt:.[{[node;cl;t] (enlist t 0),node[cl,`i] each 1_t}[node];(cl;tree);{[e] ::}];
+  $[rt~(::);::;.duckdb.i.push[c;rt]]}
 
 / The handle of the process's own DuckDB database, `:pq:duckdb:main: in-memory, or the file q -duckdb path names.
 / Opened on the first call; every alias is a catalog attached to it, and .parquet and s) run here.
