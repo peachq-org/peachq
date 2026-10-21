@@ -79,7 +79,7 @@ The intended meaning in each case is:
 The mechanism used to obtain the table may be completely different for each resource.
 
 A local CSV may be read and decoded into a table. An HTTP CSV may first be downloaded and then decoded. A DuckDB provider may translate and push the
-qSQL query into DuckDB without materialising the full table.
+qSQL query into DuckDB without materialising the full table ([Storing tables in DuckDB](sql-duckdb-storage.md)).
 
 The qSQL expression should not need to know which path was taken.
 

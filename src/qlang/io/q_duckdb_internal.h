@@ -85,6 +85,10 @@ typedef struct {
     bool temp;                      /* one of the bridge's TEMP tables: in `temp`, which current_database() never names */
 } qd_name_t;
 
+/* the database and schema a bare name binds in (borrowed; "" where DuckDB refused the read), read once and kept
+ * until a non-SELECT text runs */
+void q_duckdb_ctx(int slot, const char** db, const char** schema);
+
 /* ---- column map: a manifest row under N levels of DuckDB LIST.  QD_TYPES[] is
  * an append-only contract (fidelity spec 2026-07-14), so nesting is code over
  * the flat table — never rows in it. */
@@ -116,6 +120,33 @@ typedef struct {
     char  logical[QD_LOGICAL_MAX]; /* logical-type name (validated against the manifest) */
     bool  iskey;                   /* q keyed-table key column */
 } qd_desc_t;
+
+/* The BOUND TABLE: what one metadata read of a table answers, held per connection until a door lets it go
+ * (docs/duckdb-architecture.md): every column as the catalog spells and types it, refined by its sidecar row where
+ * it has one, and those rows as the read path's descriptors.  OWNED throughout (q_duckdb_schema_bound_free). */
+typedef struct {
+    char* col;                      /* as the catalog spells it */
+    char* dtype;                    /* the catalog's type spelling */
+    char  logical[QD_LOGICAL_MAX];  /* the refined logical name; "" where the type has no manifest row */
+    bool  iskey;
+    bool  has;                      /* the sidecar has this column's row */
+    char  t;                        /* the meta char; ' ' where the type has no manifest row */
+} qd_bcol_t;
+typedef struct {
+    char*      key;                 /* qd_name_t.key: the identity */
+    qd_bcol_t* col;
+    int64_t    ncol;
+    qd_desc_t* desc;                /* the sidecar's rows, as the read path refines by them */
+    int64_t    ndesc;
+    int64_t    at;                  /* bound when (ns) */
+    int64_t    icol;                /* the row index column's position, -1 for none (docs/duckdb-architecture.md) */
+    int64_t    rows;                /* counted at bind for a q-origin table, NULL_I64 for any other */
+    bool       q;                   /* a q-origin table: the sidecar names it */
+} qd_bound_t;
+
+/* the connection's bound tables (q_duckdb.c): the entry for a name, read on the first touch and held — BORROWED,
+ * good until the next door runs.  NULL with *err owned when the read failed. */
+const qd_bound_t* q_duckdb_bound(int slot, const qd_name_t* nm, ray_t** err);
 
 /* ---- q_duckdb_codec.c: the type contract, both directions ---- */
 
@@ -160,6 +191,7 @@ int    q_duckdb_codec_mask_kind(const qd_colmap_t* cm, ray_t* mask);
 int    q_duckdb_codec_keep_kind(const qd_colmap_t* cm, ray_t* keep);
 bool   q_duckdb_codec_companion_name(const char* s, size_t n);
 bool   q_duckdb_codec_tz_all_zero(ray_t* off);
+bool   q_duckdb_codec_zoned_decl(int slot, ray_t* col, qd_buf* dtype, char* logical, size_t cap);
 int    q_duckdb_codec_companions_of(const qd_colmap_t* cm, const char* out[QD_CO_MAX]);
 ray_t* q_duckdb_codec_stage_image(ray_t* tbl, const qd_colmap_t* cms, ray_t* const* masks, ray_t* const* offs,
                                   ray_t* const* keeps, qd_colmap_t* scms, ray_t** smasks, ray_t** skeeps);
@@ -181,8 +213,16 @@ ray_t* q_duckdb_codec_strip_companions(int slot, ray_t* tbl, ray_t** masks, ray_
 
 /* ---- q_duckdb_schema.c: the sidecar, the catalog spellings, the DDL, the envelope's schema ---- */
 
+#define QD_SCHEMA_TBL "_q_schema"     /* the sidecar: a q-written table's declared types, in the database's `main` */
 #define QD_STAGE_TBL "_q_stage"       /* the temp table a declared type is staged in, then CAST out of */
 #define QD_STAGING_TBL "_q_staging"   /* the reserved temp table `.parquet` stages a q table in; set may name it */
+/* q's row index, stored on every q-origin table under the sidecar logical that marks it: the write door lays it dense,
+ * the readers hide it, the pull orders by it */
+#define QD_INDEX_COL "i"
+#define QD_INDEX_LOGICAL "index"
+/* what append found of the index on its target: no index to continue (a Duck-origin table), one to continue, or a
+ * q-origin table from before the index, to backfill once */
+enum { QD_IDX_NONE, QD_IDX_HAS, QD_IDX_BACKFILL };
 #define QD_NEED_LOGICAL 1
 #define QD_NEED_DTYPE   2
 
@@ -198,23 +238,33 @@ ray_t*      q_duckdb_schema_check_names(int slot, ray_t* tbl);
 int64_t     q_duckdb_schema_fetch_desc(int slot, const qd_name_t* nm, qd_desc_t** out);
 void        q_duckdb_schema_desc_free(qd_desc_t* d, int64_t n);
 ray_t*      q_duckdb_schema_write_desc(int slot, const qd_name_t* nm, ray_t* tbl, const qd_colmap_t* cms,
-                                       const bool* iskey, const qd_enum_t* en, const char* const* dtypes);
+                                       const bool* iskey, const qd_enum_t* en, const char* const* dtypes, int64_t icol);
+ray_t*      q_duckdb_schema_index_backfill(int slot, const qd_name_t* nm);
 void        q_duckdb_schema_drop_desc(int slot, const qd_name_t* nm);
 ray_t*      q_duckdb_schema_rekey(ray_t* tbl, const qd_desc_t* desc, int64_t ndesc);
 bool        q_duckdb_schema_catalog_col(const char* dt, size_t n, qd_colmap_t* out);
 void        q_duckdb_schema_create_ddl(qd_buf* b, const qd_name_t* nm, ray_t* tbl, const qd_colmap_t* cms, bool temp);
 ray_t*      q_duckdb_schema_check(int slot, const qd_name_t* nm, ray_t* tbl, const qd_colmap_t* cms,
-                                  const char* const* dtypes, bool* missing);
+                                  const char* const* dtypes, bool* missing, int* index);
 int         q_duckdb_schema_needs(const qd_colmap_t* cm, const char* dtype, bool empty);
 ray_t*      q_duckdb_schema_desc_of(const char* cname, duck_logical_type lt, const qd_colmap_t* cm,
                                     const qd_desc_t* desc, int64_t ndesc, bool empty, qd_desc_t* out, bool* wanted);
 ray_t*      q_duckdb_schema_desc_table(const qd_desc_t* rows, int64_t n);
 ray_t*      q_duckdb_schema_desc_parse(int slot, ray_t* schema, qd_desc_t** out, int64_t* n);
+ray_t*      q_duckdb_schema_desc_zoned(int slot, ray_t* tbl, ray_t* const* offs, qd_desc_t** out, int64_t* n);
 ray_t*      q_duckdb_schema_declare(int slot, ray_t* tbl, qd_colmap_t* cms, qd_desc_t* decl, int64_t ndecl,
                                     const char** dtypes);
 ray_t*      q_duckdb_schema_cast_select(int slot, qd_buf* b, ray_t* tbl, const qd_colmap_t* cms, const char* const* dtypes,
                                         ray_t* const* masks, ray_t* const* offs, ray_t* const* keeps, const char* from);
 ray_t*      q_duckdb_schema_exact_check(int slot, ray_t* tbl, const qd_colmap_t* cms, const char* const* dtypes,
                                         ray_t* const* masks, ray_t* const* offs, ray_t* const* keeps);
+/* the bound table: read in one statement (an owned error on refusal, *out untouched), then what the doors answer from
+ * it — kdb's meta; the push's schema `col dtype logical iskey`, () for a table the sidecar does not name; with info,
+ * every column and its meta char beside */
+ray_t*      q_duckdb_schema_table(ray_t** cols, const char* const* names, int64_t n);   /* owned columns in, released */
+ray_t*      q_duckdb_schema_bound_read(int slot, const qd_name_t* nm, bool sidecar, qd_bound_t* out);
+void        q_duckdb_schema_bound_free(qd_bound_t* b);
+ray_t*      q_duckdb_schema_bound_meta(const qd_bound_t* b);
+ray_t*      q_duckdb_schema_bound_schema(const qd_bound_t* b, bool info);
 
 #endif /* Q_DUCKDB_INTERNAL_H */
