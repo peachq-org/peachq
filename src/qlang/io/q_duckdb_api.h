@@ -1,6 +1,7 @@
 /* q_duckdb_api — private, transcribed subset of DuckDB's v2 C API.
  *
- * Transcribed from the MIT-licensed `duckdb_v2.h` of DuckDB v2.0.0-alpha48841 (github.com/duckdb/duckdb).
+ * Transcribed from the MIT-licensed `duckdb_v2.h` of DuckDB v2.0.0 (github.com/duckdb/duckdb); the GA header is
+ * byte-identical to the alpha48841 one it was first taken from.
  * Deliberately NOT #include'd: the bridge reaches DuckDB ONLY via dlopen + a dlsym'd fn-pointer table
  * (docs/duckdb-api.md, Packaging), so a plain `make` compiles with no vendor tree present.  The v2 surface is the
  * whole table — a library without it is refused by the loader (docs/duckdb-architecture.md). */
