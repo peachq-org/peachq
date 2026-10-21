@@ -205,3 +205,93 @@
   if[null[h] or (not `is_operator in key e) and h in .sql.i.HEADS; .sql.i.no "operator ",f];
   .sql.i.only[;enlist `expression] each e`arguments;
   (enlist h),.sql.i.node each {x`expression} each e`arguments};
+
+/ The leading run of a select's where terms as SQL, the rest left to q: (sqlTree;params;schema;qTree) for a ? parse
+/ tree over a table whose schema is the envelope .duckdb.getx answers (col dtype logical iskey).  sqlTree selects the
+/ columns qTree names (every column when its select phrase is empty) under the moved terms, params binds their
+/ literals as $pq1 $pq2 ..., schema is the rows of those columns, and qTree is the tree minus the moved terms with the
+/ table name still at slot 1, :: when nothing is left for q.  The first term .sql.i.VERBS cannot spell ends the run;
+/ a tree naming i anywhere, or a table or column name holding a dot (the SQL tree would read it as a path), pushes no
+/ term, and the where of sqlTree is () when none moved.
+/ @eg .sql.translate[parse "select max price by sym from t where qty>100, f price";
+/   ([] col:`sym`qty`price; dtype:("VARCHAR";"BIGINT";"DOUBLE"); logical:`symbol`int64`float64; iskey:000b)]
+.sql.translate:{[tree;schema]
+  cl:exec col from schema; cls:cl!exec logical from schema;
+  wh:$[count tree 2; tree[2;0]; ()];
+  step:{[cls;acc;e] if[acc 2; :acc]; x:.sql.i.term[cls;0b;count acc 1;e];
+    $[x~(::); @[acc;2;:;1b]; (acc[0],enlist x 0; acc[1],x 1; 0b)]};
+  stop:(`i in raze .sql.i.names[0b] each 2_tree) or (0=count cl) or any "." in/: string (tree 1),cl;
+  r:$[stop; ((); ()); step[cls]/[((); (); 0b); wh]];
+  rest:(count r 0) _ wh;
+  s2:$[0=count r 0; tree; (5=count tree) and (0=count rest) and (0b~tree 3) and (()~tree 4); (::);
+    @[tree;2;:;$[count rest; enlist rest; ()]]];
+  base:{[s2] {[n] `$first "." vs string n} each raze .sql.i.names[0b] each 2_s2};
+  need:$[()~tree 4; cl; cl where cl in base[s2],exec col from schema where iskey];
+  s1:(`sql;tree 1;r 0;0b;$[()~tree 4; ()!(); need!need];::;());
+  (s1; (`$"pq",/:string 1+til count r 1)!r 1; select from schema where col in need; s2)};
+
+/ The q verbs a where term may push: the head .sql.render spells it with (in is list_contains over ONE list
+/ parameter, which is what DuckDB rewrites IN over a list to), the head the term takes with its literal on the left,
+/ whether q keeps a null row under it (q nulls sort lowest, so the SQL adds OR col IS NULL; in keeps the null row
+/ exactly when its literal has a null member), and the column classes it is exact for: q compares a float with
+/ tolerance (basics/precision.md) and DuckDB does not, so only in and null push a float column.
+.sql.i.VERBS:([] verb:((=);(<>);(<);(>);(<=);(>=);(within);(in);(null);(not);(and);(&);(or);(|));
+  sql:`$("=";"<>";"<";">";"<=";">=";"between";"list_contains";"is null";"not";"and";"and";"or";"or");
+  shape:`scalar`scalar`scalar`scalar`scalar`scalar`range`list`isnull`not`logic`logic`logic`logic;
+  mirror:`$("=";"<>";">";"<";">=";"<=";"";"";"";"";"";"";"";"");
+  nulllit:`$("is null";"is not null";"";"";"";"";"";"";"";"";"";"";"";"");
+  keepsnull:01101000000000b;
+  classes:(7#enlist `int`bool`symbol`temporal),(2#enlist `int`float`bool`symbol`temporal),5#enlist `$());
+/ The column types a term may push, by the sidecar's logical name: the class a verb is exact for, the q types of a
+/ literal vector that compares with it exactly (an atom is the negative; a float literal would compare with
+/ tolerance, so an int class takes none), and whether the column holds a SQL NULL for a q null (a null symbol is the
+/ empty string, a boolean has no null).  INTERVAL columns (minute, second, time) are lossy and stay with q.
+.sql.i.CLASSES:([] logical:`int16`int32`int64`float32`float64`bool`symbol`date`month`timestamp`timespan;
+  class:`int`int`int`float`float`bool`symbol`temporal`temporal`temporal`temporal;
+  literal:(5 6 7h;5 6 7h;5 6 7h;5 6 7 8 9h;5 6 7 8 9h;enlist 1h;enlist 11h;enlist 14h;enlist 13h;enlist 12h;enlist 16h);
+  nullable:11111001111b);
+
+/ the names a tree fragment refers to: a bare symbol, or a symbol vector outside an application (inside one it is
+/ a literal, as parse enlists a symbol constant); a projection's elided argument (101h) is skipped, never applied
+.sql.i.names:{[inapp;node]
+  $[99h=type node; raze .z.s[0b] each value node; 0h=type node; raze .z.s[1b] each node where 101h<>type each node;
+    -11h=type node; enlist node; (11h=type node) and not inapp; node; `$()]};
+/ the literal a term compares with, as q evaluates the node: a one-item list is its constant, a symbol rides
+/ enlisted, a bare symbol is a name; list asks for a vector of the class, else an atom
+.sql.i.operand:{[k;list;v]
+  if[(0h=type v) and 1=count v; v:first v];
+  if[-11h=type v; :(::)];
+  if[list; :$[(type v) in k`literal; v; (::)]];
+  if[(11h=type v) and 1=count v; v:first v];
+  $[(neg type v) in k`literal; v; (::)]};
+.sql.i.bind:{[v] $[-11h=type v; $[null v; ""; v]; v]};
+.sql.i.param:{[n] `$"$pq",string n};
+/ the SQL that is true exactly where the column holds a q null, with the literals it binds; :: for a class without one
+.sql.i.nullpred:{[k;c;n] $[k`nullable; ((`$"is null";c);()); `symbol=k`logical; ((`$"=";c;.sql.i.param n+1);enlist ""); (::)]};
+/ term:(expr;vals) over a nullable column reads NULL on its null row: keeps adds the rows q keeps there, strict makes
+/ the expression false there instead (under NOT, where NULL would not flip)
+.sql.i.arm:{[k;strict;keeps;n;c;term]
+  if[keeps; q:.sql.i.nullpred[k;c;n]; :$[q~(::); term; ((`or;term 0;q 0); term[1],q 1)]];
+  $[k[`nullable] and strict; ((`and;term 0;(`$"is not null";c)); term 1); term]};
+
+/ one where term as (expr;vals), its k-th literal bound as $pq(n+k), or :: for a term the map cannot push
+.sql.i.term:{[cls;strict;n;e]
+  if[0h<>type e; :(::)]; if[(any 101h=type each 1_e) or not (type e 0) within 100 112h; :(::)];
+  i:.sql.i.VERBS[`verb]?e 0; if[i=count .sql.i.VERBS; :(::)]; r:.sql.i.VERBS i; a:1_e;
+  if[r[`shape]=`logic; if[2<>count a; :(::)]; l:.z.s[cls;strict;n;a 0]; if[l~(::); :(::)];
+    m:.z.s[cls;strict;n+count l 1;a 1]; :$[m~(::); (::); ((r`sql;l 0;m 0); l[1],m 1)]];
+  if[r[`shape]=`not; :$[(::)~t:.z.s[cls;1b;n;a 0]; (::); ((r`sql;t 0);t 1)]];
+  .sql.i.compare[cls;strict;n;r;a]};
+.sql.i.compare:{[cls;strict;n;r;a]
+  c:a 0; v:a 1;
+  if[(-11h<>type c) and (-11h=type v) and not null r`mirror; c:v; v:a 0; r:.sql.i.VERBS first where .sql.i.VERBS[`sql]=r`mirror];
+  if[-11h<>type c; :(::)];
+  i:.sql.i.CLASSES[`logical]?cls c; if[i=count .sql.i.CLASSES; :(::)]; k:.sql.i.CLASSES i; s:r`sql; h:r`shape;
+  if[not k[`class] in r`classes; :(::)];
+  if[h=`isnull; :.sql.i.nullpred[k;c;n]];
+  w:.sql.i.operand[k;h in `range`list;v]; if[w~(::); :(::)];
+  if[h=`range; if[(2<>count w) or k[`nullable] and any null w; :(::)];
+    :.sql.i.arm[k;strict;0b;n;c;((s;c;.sql.i.param n+1;.sql.i.param n+2);.sql.i.bind each w)]];
+  if[h=`list; :.sql.i.arm[k;strict;any null w;n+1;c;((s;.sql.i.param n+1;c);enlist w)]];
+  if[k[`nullable] and null w; :$[null r`nulllit; (::); ((r`nulllit;c);())]];
+  .sql.i.arm[k;strict;k[`nullable] and r`keepsnull;n;c;((s;c;.sql.i.param n+1);enlist .sql.i.bind w)]};
