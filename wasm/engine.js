@@ -15,16 +15,14 @@
     }
 
     /* factory: createPeachQ.  fetch: the Module.peachqFetch hook (q_wasm_http.c).
-     * locateFile: where peachq.wasm lives.  duckLoad: the Module.peachqDuckLoad hook (q_wasm_duckdb.c),
-     * absent where DuckDB is not offered. */
-    async function boot({ factory, fetch, locateFile, duckLoad }) {
+     * locateFile: where peachq.wasm lives. */
+    async function boot({ factory, fetch, locateFile }) {
         let out = [], err = [], seq = [];
         const M = await factory({
             locateFile,
             print: (s) => { out.push(s); seq.push(s); },
             printErr: (s) => { err.push(s); seq.push(s); },
             peachqFetch: fetch,
-            peachqDuckLoad: duckLoad,
         });
         M.FS.mkdirTree(HOME);
         M.FS.chdir(HOME);

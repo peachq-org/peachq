@@ -61,6 +61,47 @@ q)system "ls nosuch"
 q)all ("adverbs.q";"csv.q";"prices.csv";"trades.q") in system "ls"
 1b
 q)\l trades.q
+| time         | sym    | price  | size |
+| time         | symbol | float  | long |
+|--------------|--------|--------|------|
+| 09:30:03.615 | AMZN   | 123.14 | 3700 |
+| 09:30:04.000 | AAPL   | 101.04 | 2300 |
+| 09:30:04.232 | AAPL   | 125.26 | 600  |
+| 09:30:04.880 | IBM    | 110.12 | 1900 |
+| 09:30:05.631 | AMZN   | 141.06 | 400  |
+| sym    | trades | volume  | vwap     |
+| symbol | long   | long    | float    |
+|========|--------|---------|----------|
+| AAPL   | 2018   | 5021700 | 125.1743 |
+| AMZN   | 1998   | 5126400 | 124.4528 |
+| GOOG   | 1933   | 4871500 | 124.8937 |
+| IBM    | 1974   | 5074600 | 125.4509 |
+| MSFT   | 2077   | 5306300 | 125.351  |
+| sym    | hour | open   | high   | low    | close  |
+| symbol | int  | float  | float  | float  | float  |
+|========|======|--------|--------|--------|--------|
+| AAPL   | 9    | 101.04 | 149    | 100.53 | 123.8  |
+| AAPL   | 10   | 139.05 | 149.73 | 100.21 | 106.23 |
+| AAPL   | 11   | 106.91 | 149.92 | 100.09 | 115.08 |
+| AAPL   | 12   | 125.91 | 149.93 | 100.15 | 133.95 |
+| AAPL   | 13   | 143.3  | 149.93 | 100.34 | 102.86 |
+| AAPL   | 14   | 146.91 | 149.95 | 100    | 140.77 |
+| AAPL   | 15   | 137.13 | 149.82 | 100.06 | 135.88 |
+| IBM    | 9    | 110.12 | 149.98 | 100    | 145.41 |
+| IBM    | 10   | 117.99 | 149.76 | 100.24 | 130.78 |
+| IBM    | 11   | 121.57 | 149.8  | 100.22 | 146.02 |
+| IBM    | 12   | 102.32 | 149.98 | 100.3  | 111.14 |
+| IBM    | 13   | 115.76 | 149.76 | 100.06 | 125.31 |
+| IBM    | 14   | 132.13 | 149.94 | 100.28 | 107.11 |
+| IBM    | 15   | 124.3  | 149.87 | 100.05 | 103.18 |
+| time         | sym    | price  | size |
+| time         | symbol | float  | long |
+|--------------|--------|--------|------|
+| 09:31:16.665 | AMZN   | 127.06 | 5000 |
+| 09:37:10.085 | MSFT   | 145.71 | 5000 |
+| 09:38:20.146 | AAPL   | 142.2  | 5000 |
+| 09:43:05.912 | IBM    | 108.63 | 5000 |
+| 09:45:45.157 | IBM    | 115.77 | 5000 |
 q)count trades
 10000
 q)select trades:count i, volume:sum size, vwap:size wavg price by sym from trades
@@ -73,6 +114,28 @@ q)select trades:count i, volume:sum size, vwap:size wavg price by sym from trade
 | IBM    | 1974   | 5074600 | 125.4509 |
 | MSFT   | 2077   | 5306300 | 125.351  |
 q)\l csv.q
+| c      | t    | f      | a      |
+| symbol | char | symbol | symbol |
+|========|------|--------|--------|
+| date   | d    |        |        |
+| sym    | s    |        |        |
+| close  | f    |        |        |
+| volume | j    |        |        |
+| sym    | close  | move      |
+| symbol | float  | float     |
+|========|--------|-----------|
+| AAPL   | 231.89 | 1.015369  |
+| IBM    | 256    | 0.9828387 |
+| MSFT   | 485.39 | 0.9557743 |
+| date       | sym    | close  | volume  |
+| date       | symbol | float  | long    |
+|------------|--------|--------|---------|
+| 2026.09.03 | IBM    | 256.72 | 5700000 |
+| 2026.09.08 | IBM    | 259.9  | 5700000 |
+| 2026.09.14 | MSFT   | 499.23 | 5400000 |
+| 2026.09.18 | AAPL   | 231.15 | 5700000 |
+`:returns.csv
+43
 q)count prices
 45
 q)select last close, move:(last close)%first close by sym from prices
@@ -85,10 +148,23 @@ q)select last close, move:(last close)%first close by sym from prices
 q)count read0 `:returns.csv
 43
 q)\l adverbs.q
+5f
+3 5 5
+5 13 17f
+15
+1 3 6 10 15
+0 1 1 2 3 5 8 13 21 34 55 89
+3 4 5 8 11
+1 2 3
+2 4 6
+3 6 9
+4 8 12
+13 23
+100 50 25 12 6 3 1 0
 q)fib
 0 1 1 2 3 5 8 13 21 34 55 89
 q)hyp[3;4]
 5f
-q)/ the node smoke offers no DuckDB host (Module.peachqDuckLoad), so the bridge answers as with no library
+q)/ the build has no DuckDB (wasm/DUCKDB_FROZEN): the bridge refuses as with no library, naming the freeze
 q).duckdb.main[]
 'duckdb

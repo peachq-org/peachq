@@ -3,9 +3,9 @@
  * Worker.  The q is wasm/browser/NN-name.qcmd, replayed in order in ONE session by the native
  * transcript door inside the Worker, with ORIGIN bound to this server.  This file keeps what q text
  * cannot say: the network log between ledgers (files listed before any is fetched and fetched
- * only when read; DuckDB's browser build loaded on its first use, from the pinned local copy
- * (make -f Makefile.wasm duckdb-wasm); every request off localhost refused), and the page and
- * client — the input box, responsiveness while q computes, addFiles, restart.
+ * only when read; no DuckDB request ever, since the build has none (wasm/DUCKDB_FROZEN); every
+ * request off localhost refused), and the page and client — the input box, responsiveness while
+ * q computes, addFiles, restart.
  *
  *   node wasm/browser-smoke.cjs build/wasm/www [/path/to/node_modules]
  *
@@ -88,11 +88,7 @@ async function main() {
         check('the page answers while q computes', answered === 'busy' && lag < 200 && ms > 4 * lag,
               `page answered in ${lag} ms, q ran ${ms} ms`);
 
-        check('no DuckDB request before its first use', duckFetches().length === 0, duckFetches().join(' '));
         await ledger('04-duckdb.qcmd');
-        check('... and DuckDB loaded in the Worker', duckFetches().length > 0);
-        const jsonExt = /\/duckdb\/[^/]+\/extensions\/v[\d.]+\/wasm_eh\/json\.duckdb_extension\.wasm$/;
-        check('the json extension autoloaded, from the pinned directory', fetched.some((p) => jsonExt.test(p)));
         check('nothing was fetched from off localhost', offsite.length === 0, offsite.join(' '));
 
         await page.evaluate(() => q.addFiles([{ path: 'more/adverbs.q' }], 'files/'));
@@ -109,6 +105,7 @@ async function main() {
         const again = await run('2+3');
         check('a restart during a restart leaves one live engine', again.out === '5' &&
               await page.evaluate(() => q.status) === 'ready', JSON.stringify(again));
+        check('the session never requested /duckdb/', duckFetches().length === 0, duckFetches().join(' '));
     } finally {
         await browser.close();
         child.kill();

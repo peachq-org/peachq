@@ -64,9 +64,10 @@ ray_err_t ray_ipc_send_deferred(int64_t handle, ray_t* msg) {
     return RAY_ERR_DOMAIN;
 }
 
-/* Poll/handle plumbing referenced by q_sys.c and q_wrap_io.c but backed by the
+/* Poll/handle plumbing referenced by retained TUs (q_sys.c, q_handles.c, q_kafka.c among them) but backed by the
  * platform poll cores (epoll/kqueue/iocp), which compile empty on wasm — inert
  * stubs so the browser build links with no networking. */
+int64_t ray_poll_register(ray_poll_t* poll, ray_poll_reg_t* reg) { (void)poll; (void)reg; return -1; }
 void ray_poll_deregister(ray_poll_t* poll, int64_t id) { (void)poll; (void)id; }
 int64_t ray_ipc_fd_of_handle(int64_t handle) { (void)handle; return -1; }
 int64_t ray_ipc_handle_of_fd(int64_t fd) { (void)fd; return -1; }
