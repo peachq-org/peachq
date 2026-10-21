@@ -2,13 +2,12 @@
 
 - **Upstream, as we take it:** `third_party/re2` from the DuckDB source tree,
   https://github.com/duckdb/duckdb
-- **Version pin:** DuckDB **v2.0.0-alpha48841**, the staged 2.0 pre-release, built from commit
-  `804b3f2070` on `v2.0-cyanoptera` (no release tag yet: the source archive is
-  `https://github.com/duckdb/duckdb/archive/804b3f2070.tar.gz`)
-- **Tarball sha256:** `885008aadac9b9d91fae70a90087f0314f98d355ecd9636d6cb5467d7a36efcc`
+- **Version pin:** DuckDB **v2.0.0**, the 2.0 GA release (tag `v2.0.0`, commit `d54cbbe3df`; the source archive
+  is `https://github.com/duckdb/duckdb/archive/refs/tags/v2.0.0.tar.gz`)
+- **Tarball sha256:** `7e89053255046bfb26afbd7f524a2fb84df7dbef496aa911ea35e4a1182fdc00`
 - **Vendored-tree sha256:** `3a853ae9a5e9acca0e27d5b6a4e911d536dc6bdd460743afb87724ea433dd21e`
-  (see *Drift* below), unchanged from alpha46057 (`b15358c371`): DuckDB's `third_party/re2` is byte-identical
-  across the two. The v1.5.5 tree it replaces digested
+  (see *Drift* below), unchanged since alpha46057 (`b15358c371`): DuckDB's `third_party/re2` is byte-identical
+  across alpha46057, alpha48841 (`804b3f2070`) and v2.0.0. The v1.5.5 tree it replaces digested
   `64705ec0efb60af16572736fc478b1ef89de4d264056dc7b29dd433d34eae7d1`; the whole delta is one
   `static_cast<size_t>` in `re2/regexp.h` (`Regexp::AllocSub`), a warning fix with no change in what a pattern
   means, plus CMake policy lines in the `CMakeLists.txt` we do not carry.
@@ -77,7 +76,7 @@ libstdc++ does not define. On Debian/Ubuntu: `apt install g++-mingw-w64-x86-64`.
 ## Regeneration recipe (version bump)
 
 ```sh
-V=1.4.6                                    # a release tag; a pre-release pins its COMMIT instead:
+V=2.0.0                                    # a release tag; a pre-release pins its COMMIT instead:
 curl -LO https://github.com/duckdb/duckdb/archive/refs/tags/v$V.tar.gz   # .../archive/<commit>.tar.gz
 sha256sum v$V.tar.gz                       # record it above
 tar xzf v$V.tar.gz --wildcards '*/third_party/re2/*'
