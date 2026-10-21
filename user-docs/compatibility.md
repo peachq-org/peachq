@@ -27,7 +27,7 @@ compression.
 
 **Splayed and partitioned writing.** `.Q.dpft`, `dsave`, partitioned `set`, `save`'s binary arm, `rsave` and `-24!`
 are unavailable. Flat `set`, `` `:dir/ set `` and `.z.zd` all work. For large local storage the route is the
-`.duckdb` provider — see [Handles and resources](handles.md).
+`.duckdb` provider — see [Storing tables in DuckDB](sql-duckdb-storage.md) and [Handles and resources](handles.md).
 
 **`set` writes the format the suffix names.** `` `:f.csv set t `` writes CSV (the lines `save` writes),
 `` `:f.parquet set t `` writes parquet, and so on for every `.h.tx` key, where kx writes the q binary form under any
@@ -76,6 +76,7 @@ and its domain file binds under its own name at `get`.
 | **Reading CSV** — `.csv.read`, `.csv.info` | Type inference, quoting dialects, streaming targets, a reject channel. | [csv.md](lib/csv.md) |
 | **Reading JSON** — `.j.read`, `.j.info` | A reader beside kdb's `.j.k` converter: written forms, a table, a schema. | [json.md](lib/j.md) |
 | **The shared loader laws** | What a cell means, the freeze, the error classes, the tolerance levers. | [loading.md](loading.md), [bad-rows.md](bad-rows.md) |
+| **Tables stored in DuckDB** — `:pq:duckdb:` | Keep q tables in a DuckDB file; qSQL and SQL query them in place. | [sql-duckdb-storage.md](sql-duckdb-storage.md) |
 | **Resources at a URL** | A `` `: `` symbol can name a resource anywhere; `read0`, `read1` and qSQL resolve it. | [handles.md](handles.md) |
 | **`neg` of a `:pq:` handle symbol** | The async form, the alias with a leading `-`, where kx signals `'type`: `neg[h] msg` sends async. | [handles.md](handles.md) |
 | **Regular expressions** — `.regexp`, `rlike` | RE2-backed matching, extraction, replacement and splitting. | [regexp.md](lib/regexp.md) |
