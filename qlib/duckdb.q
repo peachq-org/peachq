@@ -170,6 +170,11 @@
 / off, every select pulls the whole table.  A statement DuckDB refuses stays in .duckdb.sqllog and the select pulls instead.
 .duckdb.pushdown:1b
 
+/ The row count above which a qSQL select on a q-origin table of a handle needs a where term .sql.translate moves into
+/ DuckDB: without one it is 'limit before any query runs, the table, its count and this threshold in .duckdb.err[].
+/ The count is the one taken when the table was bound, read afresh after the bridge's own writes; get stays unlimited.
+.duckdb.maxrows:0W
+
 / The .sql.translate answer (sqlTree;params;schema;qTree) of the last linked select that ran a pushed statement, qTree ::
 / when DuckDB answered it whole; :: when the last select pushed nothing (pushdown off, nothing to move, or a refusal).
 .duckdb.lastpush:(::)
@@ -177,9 +182,12 @@
 / @ignore
 .duckdb.i.stale:{[c] any (first "\n" vs .duckdb.err c) like/: ("Binder Error: Referenced column*";"Catalog Error: Table with name*")}
 / @ignore
+.duckdb.i.big:{[c;t] .duckdb.maxrows<.[.duckdb.i.rows;(c;t);0N]}
+/ @ignore
 .duckdb.i.pushed:{[c;rt]
   if[0=count sc:.duckdb.i.schema[c;rt 0]; :(::)];
   r:.sql.translate[((?);rt 0;$[count rt 1;enlist rt 1;()]),2_rt;sc];
+  if[(0=count r[0;2]) and .duckdb.i.big[c;rt 0]; :(::)];
   if[(not (::)~r 3) and all ((0=count r[0;2]);(::)~r[0;5];0=count r[0;6]); :(::)];
   t:.duckdb.exec[c;(.sql.render r 0;r 1;r 2)]; .duckdb.lastpush::r;
   $[(::)~r 3; t; (?) . (t;$[count r[3;2]; r[3;2;0]; ()]),3_r 3]}
@@ -190,6 +198,7 @@
     r:@[.duckdb.i.pushed[c];rt;{[c;rt;e] if[not .duckdb.i.stale c; :(::)]; .duckdb.i.unbind[c;rt 0];
       @[.duckdb.i.pushed[c];rt;{[e] ::}]}[c;rt]];
     if[not (::)~r; :r]];
+  if[$[-11h=type rt 0;.duckdb.i.big[c;rt 0];0b]; .duckdb.i.maxrows[c;rt 0;"j"$.duckdb.maxrows]];
   t:$[10h=type rt 0;.duckdb.exec[c;"SELECT * FROM ",rt 0];.duckdb.get[c;rt 0]]; (?) . (enlist t),1_rt}
 / @ignore
 .duckdb.qsql:{[c;cl;tree]
