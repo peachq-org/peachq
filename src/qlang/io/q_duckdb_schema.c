@@ -240,10 +240,16 @@ static bool qd_bool_cell(ray_t* tbl, int64_t col, int64_t row) {
     return v && v->type == RAY_BOOL && *(uint8_t*)ray_vec_get(v, row) != 0;
 }
 
+static int64_t qd_i64_cell(ray_t* tbl, int64_t col, int64_t row) {
+    ray_t* v = col < ray_table_ncols(tbl) ? ray_table_get_col_idx(tbl, col) : NULL;   /* borrowed */
+    return v && v->type == RAY_I64 ? *(int64_t*)ray_vec_get(v, row) : NULL_I64;
+}
+
 /* The bound table's ONE statement: every column in catalog order with its sidecar row beside it when the sidecar
- * stands — the cells coalesced, since a NULL would grow a companion column — and whether the sidecar names the
- * table at all.  The sidecar's rows become the read path's descriptors; each column's map is the catalog type
- * refined by its row, the get law, so meta and the push read the same type. */
+ * stands — the cells coalesced, since a NULL would grow a companion column — whether the sidecar names the table at
+ * all, and its row count, scanned only when it does (the false EXISTS spares a Duck-origin view its scan).  The
+ * sidecar's rows become the read path's descriptors; each column's map is the catalog type refined by its row, the
+ * get law, so meta and the push read the same type. */
 ray_t* q_duckdb_schema_bound_read(int slot, const qd_name_t* nm, bool sidecar, qd_bound_t* out) {
     memset(out, 0, sizeof *out);
     qd_buf name = {0}, b = {0};
@@ -253,7 +259,11 @@ ray_t* q_duckdb_schema_bound_read(int slot, const qd_name_t* nm, bool sidecar, q
                           "coalesce(s.iskey, false) AS iskey, s.col IS NOT NULL AS has, EXISTS (SELECT 1 FROM "
                           QD_SCHEMA_REF " WHERE tbl = ");
         q_duckdb_put_strlit(&b, nm->key, strlen(nm->key));
-        q_duckdb_puts(&b, ") AS q FROM pragma_table_info(");
+        q_duckdb_puts(&b, ") AS q, (SELECT count(*) FROM ");
+        q_duckdb_putn(&b, QD_TEXT(name.p), name.len);
+        q_duckdb_puts(&b, " WHERE EXISTS (SELECT 1 FROM " QD_SCHEMA_REF " WHERE tbl = ");
+        q_duckdb_put_strlit(&b, nm->key, strlen(nm->key));
+        q_duckdb_puts(&b, ")) AS n FROM pragma_table_info(");
         q_duckdb_put_strlit(&b, QD_TEXT(name.p), name.len);
         q_duckdb_puts(&b, ") c LEFT JOIN " QD_SCHEMA_REF " s ON s.tbl = ");
         q_duckdb_put_strlit(&b, nm->key, strlen(nm->key));
@@ -272,6 +282,7 @@ ray_t* q_duckdb_schema_bound_read(int slot, const qd_name_t* nm, bool sidecar, q
     out->col  = q_duckdb_cols(n, sizeof *out->col);
     out->desc = q_duckdb_cols(n, sizeof *out->desc);
     out->q    = sidecar && n > 0 && qd_bool_cell(rows, 5, 0);
+    out->rows = out->q ? qd_i64_cell(rows, 6, 0) : NULL_I64;
     out->icol = -1;
     bool ok = out->key && out->col && out->desc;
     for (int64_t i = 0; ok && i < n; i++) {

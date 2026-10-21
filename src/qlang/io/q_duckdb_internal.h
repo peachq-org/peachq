@@ -140,6 +140,7 @@ typedef struct {
     int64_t    ndesc;
     int64_t    at;                  /* bound when (ns) */
     int64_t    icol;                /* the row index column's position, -1 for none (docs/duckdb-architecture.md) */
+    int64_t    rows;                /* counted at bind for a q-origin table, NULL_I64 for any other */
     bool       q;                   /* a q-origin table: the sidecar names it */
 } qd_bound_t;
 
