@@ -1,32 +1,11 @@
 /* The Web Worker that hosts the peachq engine, so a long query never freezes the page and
- * the engine may block: q's HTTP rides a synchronous XHR, lazy files a synchronous Range
- * XHR and DuckDB's first use a synchronous load, all legal only off the page thread.  peachq-client.js is the page side; the
+ * the engine may block: q's HTTP rides a synchronous XHR and lazy files a synchronous Range
+ * XHR, both legal only off the page thread.  peachq-client.js is the page side; the
  * protocol is {id, op, ...} in and {id, result} | {id, error, fatal} out. */
 'use strict';
-importScripts('engine.js', 'peachq.js', 'duck-loader.js');
+importScripts('engine.js', 'peachq.js');
 
 const HTTP_TIMEOUT_MS = 30000;
-
-/* No timeout, unlike xhrFetch: DuckDB's module is tens of megabytes. */
-function syncGet(url, responseType) {
-    const x = new XMLHttpRequest();
-    x.open('GET', url, false);
-    x.responseType = responseType;
-    x.send(null);
-    if (x.status !== 200) throw new Error(url + ': HTTP ' + x.status);
-    return x.response;
-}
-
-/* Module.peachqDuckLoad (q_wasm_duckdb.c): DuckDB's browser build, from the version directory the build pins —
- * /wasm/duckdb/<version>/ beside /wasm/latest/ on the site. */
-function duckLoad(M, version) {
-    return loadDuckSync({
-        base: new URL('../duckdb/' + version + '/', self.location.href).href,
-        get: syncGet,
-        hostFS: M.FS,
-        mounts: ['/home', '/tmp'],
-    });
-}
 
 /* Module.peachqFetch (q_wasm_http.c): the browser follows redirects and decodes gzip
  * itself and drops the headers it forbids a page to set; CORS decides what is reachable. */
@@ -58,7 +37,6 @@ async function start({ files }) {
         factory: createPeachQ,
         fetch: xhrFetch,
         locateFile: (p) => here + p,
-        duckLoad,
     });
     if (files) {
         const r = await fetch(here + 'files.json', { cache: 'no-cache' });
