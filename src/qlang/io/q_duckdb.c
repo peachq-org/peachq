@@ -1363,6 +1363,29 @@ static ray_t* qd_schema_wrap(ray_t** args, int64_t n) {
     return b ? q_duckdb_schema_bound_schema(b, false) : e;
 }
 
+/* .duckdb.i.rows[h;`t] — the bound entry's row count: the maxrows check's whole knowledge, no statement on a hit */
+static ray_t* qd_rows_wrap(ray_t** args, int64_t n) {
+    int slot;
+    qd_name_t name;
+    ray_t* e;
+    const qd_bound_t* b = qd_bound_door(args, n, &slot, &name, &e);
+    return b ? ray_i64(b->rows) : e;
+}
+
+/* .duckdb.i.maxrows[h;`t;n] — the maxrows refusal: 'limit, the table, its count and the threshold in .duckdb.err[] */
+static ray_t* qd_maxrows_wrap(ray_t** args, int64_t n) {
+    int slot;
+    qd_name_t name;
+    ray_t* e;
+    if (n != 3) return q_err(QE_RANK);
+    const qd_bound_t* b = qd_bound_door(args, 2, &slot, &name, &e);
+    if (!b) return e;
+    if (args[2]->type != -RAY_I64) return q_err(QE_TYPE);
+    q_duckdb_err_stash(slot, "%s: %lld rows exceed .duckdb.maxrows %lld; a where term the translator can push is required",
+                       b->key, (long long)b->rows, (long long)args[2]->i64);
+    return q_err(QE_LIMIT);
+}
+
 /* .duckdb.i.unbind[h;`t] — the entry let go, a REBIND: the next touch reads the table afresh (get, the self-heal),
  * the resolution context with it — another connection may have raised the sidecar since */
 static ray_t* qd_unbind_wrap(ray_t** args, int64_t n) {
@@ -1409,19 +1432,20 @@ static ray_t* qd_info_wrap(ray_t** args, int64_t n) {
         ray_t* v[1] = { q_duckdb_schema_bound_schema(b, true) };
         return qd_dict(SCHEMA, v, 1);
     }
-    static const char* const TABLES[] = { "table", "origin", "bound" };
+    static const char* const TABLES[] = { "table", "origin", "bound", "rows" };
     static const char* const STATS[]  = { "binds", "hits", "rebinds", "dropped" };
     static const char* const INFO[]   = { "tables", "stats" };
     int64_t nb  = g_cons[slot].nbound;
     int64_t org = ray_sym_intern_runtime("q", 1), dk = ray_sym_intern_runtime("duckdb", 6);
-    ray_t*  tc[3] = { ray_sym_vec_new(RAY_SYM_W64, nb > 0 ? nb : 1), ray_sym_vec_new(RAY_SYM_W64, nb > 0 ? nb : 1),
-                      ray_vec_new(RAY_TIMESTAMP, nb > 0 ? nb : 1) };
+    ray_t*  tc[4] = { ray_sym_vec_new(RAY_SYM_W64, nb > 0 ? nb : 1), ray_sym_vec_new(RAY_SYM_W64, nb > 0 ? nb : 1),
+                      ray_vec_new(RAY_TIMESTAMP, nb > 0 ? nb : 1), ray_vec_new(RAY_I64, nb > 0 ? nb : 1) };
     for (int64_t i = 0; i < nb; i++) {
         const qd_bound_t* b = &g_cons[slot].bound[i];
         int64_t id = ray_sym_intern_runtime(b->key, strlen(b->key));
         if (tc[0] && !RAY_IS_ERR(tc[0])) tc[0] = ray_vec_append(tc[0], &id);
         if (tc[1] && !RAY_IS_ERR(tc[1])) tc[1] = ray_vec_append(tc[1], b->q ? &org : &dk);
         if (tc[2] && !RAY_IS_ERR(tc[2])) tc[2] = ray_vec_append(tc[2], &b->at);
+        if (tc[3] && !RAY_IS_ERR(tc[3])) tc[3] = ray_vec_append(tc[3], &b->rows);
     }
     int64_t cnt[4] = { g_cons[slot].binds, g_cons[slot].hits, g_cons[slot].rebinds, g_cons[slot].dropped };
     ray_t*  sc[4];
@@ -1429,7 +1453,7 @@ static ray_t* qd_info_wrap(ray_t** args, int64_t n) {
         sc[i] = ray_vec_new(RAY_I64, 1);
         if (sc[i] && !RAY_IS_ERR(sc[i])) sc[i] = ray_vec_append(sc[i], &cnt[i]);
     }
-    ray_t* v[2] = { q_duckdb_schema_table(tc, TABLES, 3), q_duckdb_schema_table(sc, STATS, 4) };
+    ray_t* v[2] = { q_duckdb_schema_table(tc, TABLES, 4), q_duckdb_schema_table(sc, STATS, 4) };
     return qd_dict(INFO, v, 2);
 }
 /* The write door's value is a bare table (keyed or not) or the envelope pair (data;schema): the data half comes
@@ -2159,6 +2183,8 @@ void q_duckdb_register(void) {
     qd_bind_vary (".duckdb.i.meta",   2, qd_meta_wrap);
     qd_bind_vary (".duckdb.i.schema", 2, qd_schema_wrap);
     qd_bind_vary (".duckdb.i.unbind", 2, qd_unbind_wrap);
+    qd_bind_vary (".duckdb.i.rows",   2, qd_rows_wrap);
+    qd_bind_vary (".duckdb.i.maxrows", 3, qd_maxrows_wrap);
     qd_bind_vary (".duckdb.i.info",   2, qd_info_wrap);
     qd_bind_vary (".duckdb.i.types",  1, qd_types_fn);
     /* the two DIAGNOSTICS, bound under .duckdb directly: neither has q-side logic, and a shim in front of a
