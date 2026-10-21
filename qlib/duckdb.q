@@ -28,6 +28,10 @@
 .duckdb.call:{[c;q;sync] if[not sync; '`domain]; .duckdb.lastsql::q; .duckdb.i.exec[c;q]}
 / @ignore
 .duckdb.bind:{[c;t] (key .duckdb.i.meta[c;t])`c}
+/ @ignore
+.duckdb.rebind:{[c;t] .duckdb.i.unbind[c;t]; .duckdb.bind[c;t]}
+/ @ignore
+.duckdb.info:{[c;t] .duckdb.i.info[c;t]}
 / A table of the handle's catalog as a q table.
 .duckdb.get:{[c;t] .duckdb.i.get[c;t]}
 / Create or replace a table of the handle's catalog from a q table, or from the pair .duckdb.getx answers.
@@ -161,10 +165,49 @@
 / The row count of a table of the handle's catalog, counted by DuckDB.
 .duckdb.count:{[c;t] first .duckdb.i.exec[c; "SELECT COUNT(*) AS n FROM ",.duckdb.i.qname t]`n}
 
+/ Whether a qSQL select on a q-origin table of the handle runs what .sql.translate can move (where terms, limit, order;
+/ the select phrase and by whole when every item translates) inside DuckDB before q runs the rest, read on every select;
+/ off, every select pulls the whole table.  A statement DuckDB refuses stays in .duckdb.sqllog and the select pulls instead.
+.duckdb.pushdown:1b
+
+/ The row count above which a qSQL select on a q-origin table of a handle needs a where term .sql.translate moves into
+/ DuckDB: without one it is 'limit before any query runs, the table, its count and this threshold in .duckdb.err[].
+/ The count is the one taken when the table was bound, read afresh after the bridge's own writes; get stays unlimited.
+.duckdb.maxrows:0W
+
+/ The .sql.translate answer (sqlTree;params;schema;qTree) of the last linked select that ran a pushed statement, qTree ::
+/ when DuckDB answered it whole; :: when the last select pushed nothing (pushdown off, nothing to move, or a refusal).
+.duckdb.lastpush:(::)
+
 / @ignore
-.duckdb.i.push:{[c;rt] t:$[10h=type rt 0;.duckdb.exec[c;"SELECT * FROM ",rt 0];.duckdb.get[c;rt 0]]; (?) . (enlist t),1_rt}
+.duckdb.i.stale:{[c] any (first "\n" vs .duckdb.err c) like/: ("Binder Error: Referenced column*";"Catalog Error: Table with name*")}
 / @ignore
-.duckdb.qsql:{[c;cl;tree] rt:@[.pq.i.resolveTree[cl];tree;{[e] ::}]; $[rt~(::);::;.duckdb.i.push[c;rt]]}
+.duckdb.i.big:{[c;t] .duckdb.maxrows<.[.duckdb.i.rows;(c;t);0N]}
+/ @ignore
+.duckdb.i.pushed:{[c;rt]
+  if[0=count sc:.duckdb.i.schema[c;rt 0]; :(::)];
+  r:.sql.translate[((?);rt 0;$[count rt 1;enlist rt 1;()]),2_rt;sc];
+  if[(0=count r[0;2]) and .duckdb.i.big[c;rt 0]; :(::)];
+  if[(not (::)~r 3) and all ((0=count r[0;2]);(::)~r[0;5];0=count r[0;6]); :(::)];
+  t:.duckdb.exec[c;(.sql.render r 0;r 1;r 2)]; .duckdb.lastpush::r;
+  $[(::)~r 3; t; (?) . (t;$[count r[3;2]; r[3;2;0]; ()]),3_r 3]}
+/ @ignore
+.duckdb.i.push:{[c;rt]
+  .duckdb.lastpush::(::);
+  if[.duckdb.pushdown and -11h=type rt 0;
+    r:@[.duckdb.i.pushed[c];rt;{[c;rt;e] if[not .duckdb.i.stale c; :(::)]; .duckdb.i.unbind[c;rt 0];
+      @[.duckdb.i.pushed[c];rt;{[e] ::}]}[c;rt]];
+    if[not (::)~r; :r]];
+  if[$[-11h=type rt 0;.duckdb.i.big[c;rt 0];0b]; .duckdb.i.maxrows[c;rt 0;"j"$.duckdb.maxrows]];
+  t:$[10h=type rt 0;.duckdb.exec[c;"SELECT * FROM ",rt 0];.duckdb.get[c;rt 0]]; (?) . (enlist t),1_rt}
+/ @ignore
+.duckdb.qsql:{[c;cl;tree]
+  node:{[cl;nd]
+    if[99h=type nd; :key[nd]!.z.s[cl] value nd];
+    if[0h=type nd; i:where 101h<>type each nd; :@[nd;i;:;.z.s[cl] each nd i]];
+    $[-11h<>type nd; nd; (`$first "." vs string nd) in cl; nd; 100h<=type v:@[value;nd;{[e] 'unpush}]; nd; (11h=abs type v) or (type v) in 0 98h; enlist v; v]};
+  rt:.[{[node;cl;t] (enlist t 0),node[cl,`i] each 1_t}[node];(cl;tree);{[e] ::}];
+  $[rt~(::);::;.duckdb.i.push[c;rt]]}
 
 / The handle of the process's own DuckDB database, `:pq:duckdb:main: in-memory, or the file q -duckdb path names.
 / Opened on the first call; every alias is a catalog attached to it, and .parquet and s) run here.
