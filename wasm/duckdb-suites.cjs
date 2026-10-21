@@ -1,7 +1,7 @@
 /* The DuckDB ledgers (test/q/duckdb/*.qcmd) replayed in the browser: each suite runs in a fresh Worker through the
  * transcript door (q_wasm_qcmd), with the parquet fixtures mounted where the suites read them.  A by-hand check
  * of the browser's DuckDB before a release, never part of make q-test: it fails when a suite's failing-row count is
- * not the recorded divergence's (wasm/README.md), and prints every failing row either way.
+ * not the recorded divergence's (DIVERGES, measured on the v0.88 v1 bundle), and prints every failing row either way.
  *
  *   node wasm/duckdb-suites.cjs build/wasm/www [/path/to/node_modules] [suite ...]
  *
