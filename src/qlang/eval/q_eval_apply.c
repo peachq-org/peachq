@@ -1307,6 +1307,7 @@ static ray_t* sym_head_apply(ray_t* head, ray_t** args, int64_t n) {
     if (q_handles_sym_kind(head) != Q_SYM_NAME)
         return q_handles_sym_apply(head, args, n);
     ray_t* v = q_env_resolve(head->i64);             /* owned or NULL */
+    if (!v) v = q_eval_dot_cast(head->i64);
     if (!v) return q_err(QE_TYPE);
     if (RAY_IS_ERR(v)) return v;
     if (v->type == -RAY_SYM) { ray_release(v); return q_err(QE_TYPE); }

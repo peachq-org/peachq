@@ -22,7 +22,6 @@
 #include "table/sym.h"         /* ray_sym_intern_runtime, ray_sym_str, ray_read_sym */
 #include "table/dict.h"        /* ray_dict_* probes/upsert */
 #include "ops/linkop.h"        /* ray_link_has / ray_link_deref */
-#include "ops/temporal.h"      /* ray_temporal_accessor — the dotted accessor roster */
 #include "mem/sys.h"
 #include <stdlib.h>            /* qsort — the member listings are sorted */
 #include <string.h>
@@ -741,7 +740,7 @@ static ray_t* frames_lookup(int64_t sym) { return frames_lookup_at(sym, 0); }
 /* ---- resolution ---- */
 
 /* successive per-segment indexing off a borrowed base: dict/table probe,
- * linked-column deref (errors surface), temporal accessor.  A trailing dot walks the empty segment: `k.` is k[`].
+ * linked-column deref (errors surface).  A trailing dot walks the empty segment: `k.` is k[`].
  * Owned result. */
 static ray_t* walk_segs(ray_t* v, int fresh, const char* p, size_t n, size_t pos) {
     while (v && pos <= n) {
@@ -765,19 +764,6 @@ static ray_t* walk_segs(ray_t* v, int fresh, const char* p, size_t n, size_t pos
         }
         next_fresh = (next != NULL);
         if (!next) next = ray_container_probe_sym(v, seg);
-        if (!next && v->type != RAY_DICT) {
-            /* never on a dict: `.q.date` must not fire the date clock */
-            ray_t* (*fn)(ray_t*) = ray_temporal_accessor(seg);
-            if (fn) {
-                next = fn(v);
-                if (!next || RAY_IS_ERR(next)) {
-                    if (next) ray_release(next);
-                    next = NULL;
-                } else {
-                    next_fresh = 1;
-                }
-            }
-        }
         if (fresh) ray_release(v);
         v = next;
         fresh = next_fresh;

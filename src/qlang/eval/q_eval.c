@@ -144,16 +144,12 @@ static ray_t* resolve(int64_t id, const q_op_t** row_out) {
  * owns which designators exist — BOTH readings, the type targets and the
  * `uu`/`year`/`week` components, so it is `$` entire and not q_dollar_cast.
  *
- * Runs LAST, after resolve(): the env walk's accessor roster (q_env.c
- * walk_segs) keeps its owner-ruled `mm`/`minute`/`date`/`time`, and this
- * reaches only what that roster never had — the spellings it records as
- * parked, and bases that are a LOCAL (a qSQL column), which it never sees.
- * Kept only when the cast SUCCEEDS, so nothing resolvable changes meaning.
- *
- * COUPLING: `$` falls through to q_dollar_enum for a sym it cannot read as a
- * cast target — 'nyi today, so a miss still lands on the name error.  When
- * enum domains land, gate this or `x.dom` will silently enumerate. */
-static ray_t* dot_cast(int64_t id) {
+ * Runs LAST, after resolve(), so a dict key or table column of that name wins.
+ * On a temporal base this is THE accessor on every path (global, qSQL column,
+ * lambda local) and the cast's 'type refusal is the answer (`m.hh`); any
+ * other failure leaves the name error.  Only a field name reaches `$`, so
+ * `x.dom` never enumerates. */
+ray_t* q_eval_dot_cast(int64_t id) {
     ray_t* nm = ray_sym_str(id);
     if (!nm) return NULL;
     const char* p = ray_str_ptr(nm);
@@ -166,13 +162,15 @@ static ray_t* dot_cast(int64_t id) {
          * the registry or a `.z` builtin: `.z.p.year` is 'name until `.z.p` is
          * assigned to a variable (temporal_dot_accessor.qcmd pins the oddity) */
         ray_t* base = q_env_resolve(ray_sym_intern_runtime(p, (int64_t)cut));
-        if (base && !RAY_IS_ERR(base) && !q_view_is(base)) {
-            ray_t* attr = ray_sym(ray_sym_intern_runtime(p + cut + 1,
-                                                         (int64_t)(n - cut - 1)));
+        ray_t* attr = ray_sym(ray_sym_intern_runtime(p + cut + 1, (int64_t)(n - cut - 1)));
+        if (base && !RAY_IS_ERR(base) && !q_view_is(base) && q_dollar_names_field(attr)) {
             r = q_dollar(attr, base);
-            ray_release(attr);
-            if (r && RAY_IS_ERR(r)) { ray_release(r); r = NULL; }
+            int8_t bt = base->type < 0 ? (int8_t)-base->type : base->type;
+            const char* cls = r ? q_err_class(r) : NULL;
+            int refusal = (RAY_IS_TEMPORAL(bt) || RAY_IS_TEMPORALF(bt)) && cls && !strcmp(cls, "type");
+            if (r && RAY_IS_ERR(r) && !refusal) { ray_release(r); q_err_drop(); r = NULL; }
         }
+        ray_release(attr);
         if (base) ray_release(base);
     }
     ray_release(nm);
@@ -182,7 +180,7 @@ static ray_t* dot_cast(int64_t id) {
 static ray_t* name_value(ray_t* sym, const q_op_t** row_out) {
     if (row_out) *row_out = NULL;
     ray_t* v = resolve(sym->i64, row_out);
-    if (!v) v = dot_cast(sym->i64);
+    if (!v) v = q_eval_dot_cast(sym->i64);
     return v ? v : name_error(sym->i64);
 }
 
