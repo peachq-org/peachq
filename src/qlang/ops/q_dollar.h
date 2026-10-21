@@ -26,6 +26,9 @@ ray_t* q_dollar(ray_t* x, ray_t* y);
  * Returns 0 (RAY_LIST — never a valid target) for unknown/identity/deferred. */
 int8_t q_cast_designator(ray_t* t, int* is_tok, int* is_identity);
 
+/* a symbol `$` reads as a cast target or a temporal component (`year`mm`dd`hh`uu`ss`week), never an enum domain */
+int q_dollar_names_field(ray_t* t);
+
 /* Convert x to the tag type with q semantics: a boxed list distributes per
  * element (collapsed); float sources pre-round via rint (kdb ties-even) for
  * integer targets; symbol target is identity on syms and Tok on strings; "c"$
