@@ -272,6 +272,7 @@ ray_t* q_duckdb_schema_bound_read(int slot, const qd_name_t* nm, bool sidecar, q
     out->col  = q_duckdb_cols(n, sizeof *out->col);
     out->desc = q_duckdb_cols(n, sizeof *out->desc);
     out->q    = sidecar && n > 0 && qd_bool_cell(rows, 5, 0);
+    out->icol = -1;
     bool ok = out->key && out->col && out->desc;
     for (int64_t i = 0; ok && i < n; i++) {
         size_t cl = 0, dl = 0, ll = 0;
@@ -291,6 +292,7 @@ ray_t* q_duckdb_schema_bound_read(int slot, const qd_name_t* nm, bool sidecar, q
         if (!ok) break;
         snprintf(d->logical, sizeof d->logical, "%.*s", (int)ll, ln ? ln : "");
         d->iskey = c->iskey;
+        if (strcmp(d->logical, QD_INDEX_LOGICAL) == 0) out->icol = i;
         out->ndesc++;
     }
     ray_release(rows);
@@ -332,34 +334,39 @@ ray_t* q_duckdb_schema_table(ray_t** cols, const char* const* names, int64_t n) 
     return bad ? bad : t;
 }
 
-/* one symbol per column: its name, its refined logical type, or the blank (the meta's f and a); owned, never NULL */
-enum { QD_BC_NAME, QD_BC_LOGICAL, QD_BC_BLANK };
-static ray_t* qd_bound_syms(const qd_bound_t* b, int what) {
+/* one symbol per column, the index column only when `all`: its name, its refined logical type, that type with the
+ * index column's sidecar marker in its place (marked), or the blank (the meta's f and a); owned, never NULL */
+enum { QD_BC_NAME, QD_BC_LOGICAL, QD_BC_MARKED, QD_BC_BLANK };
+static ray_t* qd_bound_syms(const qd_bound_t* b, int what, bool all) {
     ray_t* v = ray_sym_vec_new(RAY_SYM_W64, b->ncol > 0 ? b->ncol : 1);
     for (int64_t i = 0; i < b->ncol && v && !RAY_IS_ERR(v); i++) {
-        const char* s = what == QD_BC_NAME ? b->col[i].col : what == QD_BC_LOGICAL ? b->col[i].logical : "";
+        if (i == b->icol && !all) continue;
+        const char* s = what == QD_BC_BLANK ? "" : what == QD_BC_NAME ? b->col[i].col
+                      : what == QD_BC_MARKED && i == b->icol ? QD_INDEX_LOGICAL : b->col[i].logical;
         int64_t id = ray_sym_intern_runtime(s, strlen(s));
         v = ray_vec_append(v, &id);
     }
     return v ? v : q_err(QE_WSFULL);
 }
 
-/* the meta chars as one string; owned, never NULL */
-static ray_t* qd_bound_tchars(const qd_bound_t* b) {
+/* the meta chars as one string, the index column's only when `all`; owned, never NULL */
+static ray_t* qd_bound_tchars(const qd_bound_t* b, bool all) {
     char* t = malloc(b->ncol > 0 ? (size_t)b->ncol : 1);
     if (!t) return q_err(QE_WSFULL);
-    for (int64_t i = 0; i < b->ncol; i++) t[i] = b->col[i].t;
-    ray_t* v = ray_charv(t, b->ncol);
+    int64_t n = 0;
+    for (int64_t i = 0; i < b->ncol; i++) if (i != b->icol || all) t[n++] = b->col[i].t;
+    ray_t* v = ray_charv(t, n);
     free(t);
     return v ? v : q_err(QE_WSFULL);
 }
 
-/* kdb-exact ([c] t;f;a): f and a are the null sym throughout — DuckDB has no fkey domain or attribute */
+/* kdb-exact ([c] t;f;a) without the index column: f and a are the null sym throughout — DuckDB has no fkey domain or
+ * attribute */
 ray_t* q_duckdb_schema_bound_meta(const qd_bound_t* b) {
-    ray_t* c = qd_bound_syms(b, QD_BC_NAME);
-    ray_t* t = qd_bound_tchars(b);
-    ray_t* f = qd_bound_syms(b, QD_BC_BLANK);
-    ray_t* a = qd_bound_syms(b, QD_BC_BLANK);
+    ray_t* c = qd_bound_syms(b, QD_BC_NAME, false);
+    ray_t* t = qd_bound_tchars(b, false);
+    ray_t* f = qd_bound_syms(b, QD_BC_BLANK, false);
+    ray_t* a = qd_bound_syms(b, QD_BC_BLANK, false);
     if (RAY_IS_ERR(c) || RAY_IS_ERR(t) || RAY_IS_ERR(f) || RAY_IS_ERR(a)) {
         q_duckdb_drop(c);
         q_duckdb_drop(t);
@@ -370,8 +377,8 @@ ray_t* q_duckdb_schema_bound_meta(const qd_bound_t* b) {
     return q_table_meta_assemble(c, t, f, a);
 }
 
-/* the push's schema (col dtype logical iskey), () for a table the sidecar does not name — nothing to push on; with
- * info, every table's rows and the meta char beside them */
+/* the push's schema (col dtype logical iskey), the index column among them as the int64 it reads as, () for a table
+ * the sidecar does not name — nothing to push on; with info, every table's rows and the meta char beside them */
 ray_t* q_duckdb_schema_bound_schema(const qd_bound_t* b, bool info) {
     if (!info && !b->q) return ray_list_new(0);
     static const char* const NAMES[] = { "col", "dtype", "logical", "iskey", "t" };
@@ -385,7 +392,8 @@ ray_t* q_duckdb_schema_bound_schema(const qd_bound_t* b, bool info) {
         ray_release(s);
         k = ray_vec_append(k, &key);
     }
-    ray_t* cols[5] = { qd_bound_syms(b, QD_BC_NAME), d, qd_bound_syms(b, QD_BC_LOGICAL), k, info ? qd_bound_tchars(b) : NULL };
+    ray_t* cols[5] = { qd_bound_syms(b, QD_BC_NAME, true), d, qd_bound_syms(b, info ? QD_BC_MARKED : QD_BC_LOGICAL, true), k,
+                       info ? qd_bound_tchars(b, true) : NULL };
     return q_duckdb_schema_table(cols, NAMES, info ? 5 : 4);
 }
 
@@ -460,7 +468,7 @@ static ray_t* qd_write_desc_rows(int slot, const char* tname,
  * not the carrier's canonical one, NULL otherwise.  `attr` and `enumdom` are RECORDED, never re-applied (ADR 8):
  * off the column itself, or off en[c] for a column the door decayed from an enum. */
 ray_t* q_duckdb_schema_write_desc(int slot, const qd_name_t* nm, ray_t* tbl, const qd_colmap_t* cms,
-                                  const bool* iskey, const qd_enum_t* en, const char* const* dtypes) {
+                                  const bool* iskey, const qd_enum_t* en, const char* const* dtypes, int64_t icol) {
     int64_t ncols = ray_table_ncols(tbl);
     qd_descrow_t* rows = q_duckdb_cols(ncols, sizeof *rows);
     if (!rows) return q_err(QE_WSFULL);
@@ -481,11 +489,36 @@ ray_t* q_duckdb_schema_write_desc(int slot, const qd_name_t* nm, ray_t* tbl, con
         rows[c].enumdom = dn ? ray_str_ptr(dn) : "";
         rows[c].domlen  = dn ? (size_t)ray_str_len(dn) : 0;
         q_duckdb_codec_logical_name(&cms[c], rows[c].logical, sizeof rows[c].logical);
+        if (c == icol) snprintf(rows[c].logical, sizeof rows[c].logical, "%s", QD_INDEX_LOGICAL);
     }
     ray_t* e = qd_write_desc_rows(slot, nm->key, rows, ncols);
     for (int64_t c = 0; c < ncols; c++) free((char*)rows[c].name);
     free(rows);
     return e;
+}
+
+/* A q-origin table from before the index gets it once, inside append's transaction: the column, its rows numbered
+ * dense in rowid order (insertion order, the gaps a delete left closed), and its sidecar row. */
+ray_t* q_duckdb_schema_index_backfill(int slot, const qd_name_t* nm) {
+    qd_buf b = {0};
+    q_duckdb_puts(&b, "ALTER TABLE ");
+    q_duckdb_schema_put_name(&b, nm);
+    q_duckdb_puts(&b, " ADD COLUMN " QD_INDEX_COL " BIGINT");
+    ray_t* e = q_duckdb_exec_buf(slot, &b);
+    if (e) return e;
+    q_duckdb_puts(&b, "UPDATE ");
+    q_duckdb_schema_put_name(&b, nm);
+    q_duckdb_puts(&b, " SET " QD_INDEX_COL " = r.rn FROM (SELECT rowid AS rid, row_number() OVER (ORDER BY rowid) - 1 AS rn FROM ");
+    q_duckdb_schema_put_name(&b, nm);
+    q_duckdb_puts(&b, ") r WHERE ");
+    q_duckdb_schema_put_name(&b, nm);
+    q_duckdb_puts(&b, ".rowid = r.rid");
+    if ((e = q_duckdb_exec_buf(slot, &b))) return e;
+    qd_buf ins = {0};
+    q_duckdb_puts(&ins, "INSERT INTO " QD_SCHEMA_REF "(tbl, col, logical, iskey, valid, v, dtype, attr, enumdom) VALUES (");
+    q_duckdb_put_strlit(&ins, nm->key, strlen(nm->key));
+    q_duckdb_puts(&ins, ", '" QD_INDEX_COL "', '" QD_INDEX_LOGICAL "', FALSE, '', 1, '', '', '')");
+    return q_duckdb_exec_buf(slot, &ins);
 }
 
 /* two q columns DuckDB reads as one name: refused before any DDL, naming both, where DuckDB would name one */
@@ -615,22 +648,40 @@ static ray_t* qd_column_set_fail(int slot, ray_t* tbl, ray_t* cat, int64_t nrows
  * column can't append into a symbol column).  `missing` ASKS instead of refusing
  * when the table is not there at all — the create-on-first-append law. */
 ray_t* q_duckdb_schema_check(int slot, const qd_name_t* nm, ray_t* tbl,
-                             const qd_colmap_t* cms, const char* const* dtypes, bool* missing) {
+                             const qd_colmap_t* cms, const char* const* dtypes, bool* missing, int* index) {
     ray_t* cat = q_duckdb_schema_catalog_cols(slot, nm);
     if (RAY_IS_ERR(cat)) return cat;
-
-    int64_t nrows = q_count(cat);
-    int64_t ncols = ray_table_ncols(tbl);
+    qd_desc_t* desc  = NULL;
+    int64_t    ndesc = q_duckdb_schema_fetch_desc(slot, nm, &desc);
+    int64_t    nrows = q_count(cat);
+    int64_t    ncols = ray_table_ncols(tbl);
+    /* the index stands last and outside the comparison: the batch never carries it */
+    const qd_desc_t* ix = q_duckdb_schema_desc_find(QD_INDEX_COL, 1, desc, ndesc);
+    bool has = nrows > 0 && ix && strcmp(ix->logical, QD_INDEX_LOGICAL) == 0;
+    if (has) {
+        size_t ll = 0;
+        const char* last = q_duckdb_schema_text_cell(cat, 0, nrows - 1, &ll);
+        has = last && ll == 1 && qd_fold_c(*last) == QD_INDEX_COL[0];
+    }
+    *index = QD_IDX_NONE;
+    nrows -= has;
     if (nrows == 0 || nrows != ncols) {
         ray_t* f = nrows ? qd_column_set_fail(slot, tbl, cat, nrows) : NULL;
+        q_duckdb_schema_desc_free(desc, ndesc);
         ray_release(cat);
         if (nrows) return f;
         if (missing) { *missing = true; return NULL; }
         return q_err(QE_DUCKDB);
     }
-    ray_t*     e     = NULL;
-    qd_desc_t* desc  = NULL;
-    int64_t    ndesc = q_duckdb_schema_fetch_desc(slot, nm, &desc);
+    *index = has ? QD_IDX_HAS : ndesc ? QD_IDX_BACKFILL : QD_IDX_NONE;
+    ray_t* e = NULL;
+    /* a user column spelled rowid hides the row identity the backfill numbers by: refused, a set lays the index afresh */
+    for (int64_t c = 0; !e && *index == QD_IDX_BACKFILL && c < nrows; c++) {
+        size_t nl = 0;
+        const char* cn = q_duckdb_schema_text_cell(cat, 0, c, &nl);
+        if (cn && nl == 5 && strncasecmp(cn, "rowid", 5) == 0)
+            e = q_duckdb_fail_col(slot, cn, nl, "hides the row identity the index is backfilled by; set the table again");
+    }
     for (int64_t c = 0; !e && c < ncols; c++) {
         size_t nl = 0, dl = 0;
         const char* nm = q_duckdb_schema_text_cell(cat, 0, c, &nl);
