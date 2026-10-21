@@ -618,8 +618,8 @@ bool q_duckdb_codec_companion_name(const char* s, size_t n) {
     return qd_companion_kind(s, n, &sl) != QD_CO_NONE;
 }
 
-/* The bridge's reserved namespace is the _q_ infix: a BARE table carries none, because a companion travels only
- * inside the pair (data;schema) and a q-born column of that spelling is a user's, colliding (ADR 11). */
+/* The bridge's reserved namespace is the _q_ infix: in a BARE table only a companion beside its parent may wear it,
+ * since any other q-born column of that spelling is a user's, colliding (ADR 11). */
 static bool qd_reserved_col(const char* s, size_t n) {
     for (size_t i = 0; i + 3 <= n; i++) if (memcmp(s + i, QD_CO_INFIX, 3) == 0) return true;
     return false;
@@ -2437,6 +2437,27 @@ static ray_t* qd_reject(int slot, const char* nm, size_t n, const char* why) {
     return q_duckdb_fail(slot, "companion %.*s: %s", (int)n, nm, why);
 }
 
+/* the zoned row a carrier's offsets complete (ADR 21): TIMESTAMPTZ over a timestamp, TIMETZ over a time */
+static const qd_tmap_t* qd_zoned_leaf(int8_t ray_type) {
+    for (size_t i = 0; i < QD_NTYPES; i++)
+        if (QD_TYPES[i].ray_type == ray_type && qd_zoned(&(const qd_colmap_t){ &QD_TYPES[i], NULL, 0, false }))
+            return &QD_TYPES[i];
+    return NULL;
+}
+
+/* The declaration a bare column's offsets name, spelled as the pair's schema row spells it; false = none */
+bool q_duckdb_codec_zoned_decl(int slot, ray_t* col, qd_buf* dtype, char* logical, size_t cap) {
+    qd_colmap_t cm = { NULL, NULL, 0, false };
+    const qd_tmap_t* z = qd_map_write(slot, col, 0, &cm, NULL) && !cm.rec && !cm.undet ? qd_zoned_leaf(cm.leaf->ray_type) : NULL;
+    if (z) {
+        cm.leaf = z;
+        q_duckdb_codec_spell_map(&cm, dtype);
+        q_duckdb_codec_logical_name(&cm, logical, cap);
+    }
+    q_duckdb_codec_map_free(&cm);
+    return z && !dtype->oom;
+}
+
 /* A companion is admissible on a parent iff some manifest row of the parent's carrier can emit it: a j column may
  * carry notnull (BIGINT) or hi (the 128-bit family), a temporal raw, a null-less carrier isnull and nothing else. */
 static bool qd_co_admissible(const qd_colmap_t* pcm, int kind) {
@@ -2447,10 +2468,7 @@ static bool qd_co_admissible(const qd_colmap_t* pcm, int kind) {
             if (qd_co_admissible(&pcm->rec->f[i].map, kind)) return true;
         return false;
     }
-    for (size_t i = 0; kind == QD_CO_TZOFF && i < QD_NTYPES; i++)   /* ADR 21: it rides beside, so nesting is no bar */
-        if (QD_TYPES[i].ray_type == pcm->leaf->ray_type &&
-            qd_zoned(&(const qd_colmap_t){ &QD_TYPES[i], NULL, 0, false })) return true;
-    if (kind == QD_CO_TZOFF) return false;
+    if (kind == QD_CO_TZOFF) return qd_zoned_leaf(pcm->leaf->ray_type) != NULL;   /* ADR 21: nesting is no bar */
     if (kind == QD_CO_ISNULL) return qd_cm_nullless(pcm);
     /* Depth is no bar to any of them: an element companion is the chunk writer's to consume and it reaches
      * every depth, while hi and raw are rebuilt by a CAST LEG, which reaches every depth too now that the legs
@@ -2681,14 +2699,21 @@ static ray_t* qd_strip(int slot, ray_t* tbl, ray_t** masks, ray_t** offs, ray_t*
     for (int64_t c = 0; c < ncols; c++) {
         size_t n, sl = 0;
         const char* np = q_duckdb_col_name(tbl, c, &n);
-        if (bare && qd_reserved_col(np, n))
-            return q_duckdb_fail_col(slot, np, n, "_q_ is reserved; a companion rides the pair (data;schema)");
         int kind = qd_companion_kind(np, n, &sl);
         parent[c] = -1;
         nest[c]   = 0;
+        if (kind != QD_CO_NONE) {
+            int64_t pid = ray_sym_intern_runtime(np, n - sl);
+            for (int64_t p = 0; p < ncols; p++) if (ray_table_col_name(tbl, p) == pid) parent[c] = p;
+        }
+        /* a bare table folds the companions whose kind fixes their meaning; raw and hi mean what a dtype says */
+        if (bare && qd_reserved_col(np, n)) {
+            if (kind == QD_CO_NONE || parent[c] < 0)
+                return q_duckdb_fail_col(slot, np, n, "_q_ is reserved; a companion rides the pair (data;schema)");
+            if (kind == QD_CO_RAW || kind == QD_CO_HI)
+                return qd_reject(slot, np, n, "needs the pair (data;schema) for its dtype");
+        }
         if (kind == QD_CO_NONE) { nkeep++; continue; }
-        int64_t pid = ray_sym_intern_runtime(np, n - sl);
-        for (int64_t p = 0; p < ncols; p++) if (ray_table_col_name(tbl, p) == pid) parent[c] = p;
         ray_t* col = ray_table_get_col_idx(tbl, c);
         if (parent[c] < 0) return qd_reject(slot, np, n, "no parent column");
         /* the parent's map first: which CARRIER a raw companion wears is the parent's business (ADR 19 — a raw over
