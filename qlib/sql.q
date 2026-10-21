@@ -214,38 +214,20 @@
 / the row index i among its rows on a table that stores one.  sqlTree selects the columns qTree names (every column
 / when its select phrase is empty; i never, unless the phrase names it bare, then as i AS its q output name) under the
 / moved terms, params binds their literals as $pq1 $pq2 ..., schema is the rows of those columns, and qTree is the
-/ tree minus what moved with the table name still at slot 1, :: when nothing is left for q.  q runs term k+1 on the
-/ rows passing terms 1..k, so a term that reads only its own row commutes with the others: every such term before the
-/ first that does not (.sql.i.pure) moves when .sql.i.VERBS can spell it and stays for q, in order, when it cannot.
-/ A term on i left for q would read positions the pull no longer has, so it stops every term; on a table without i,
-/ i anywhere does (the virtual index).  With the whole where moved and no by, select[n] / [m n] / [-n] / [order] move
-/ too (.sql.i.limit), and a statement that moves anything orders its rows by i.  A table or column name holding a dot
-/ (the SQL tree would read it as a path) pushes no term, and the where of sqlTree is () when none moved.
+/ tree minus what moved with the table name still at slot 1, :: when nothing is left for q.
+/ Four stages, each reading the tree and what the stages before it decided: the select phrase (.sql.i.phrase), the
+/ where (.sql.i.where), the limit and order (.sql.i.limit) and the assembly of the answer (.sql.i.assemble).
 / @eg .sql.translate[parse "select max price by sym from t where qty>100, f price";
 /   ([] col:`sym`qty`price; dtype:("VARCHAR";"BIGINT";"DOUBLE"); logical:`symbol`int64`float64; iskey:000b)]
 .sql.translate:{[tree;schema]
-  cl:exec col from schema; cls:cl!exec logical from schema; ix:`i in cl;
-  wh:$[count tree 2; tree[2;0]; ()];
-  step:{[cls;wh;acc;j] x:.sql.i.term[cls;0b;count acc 1;wh j];
-    $[x~(::); acc; (acc[0],enlist x 0; acc[1],x 1; acc[2],j)]}[cls;wh];
-  rn:.sql.i.phrase tree 4;
-  stop:(rn 0) or (0=count cl) or (any (key rn 1) in cl) or any "." in/: string (tree 1),cl;
-  stop:stop or `i in raze .sql.i.names[0b] each $[ix; enlist tree 3; 2_tree];
-  r:step/[(();();`long$()); $[stop; `long$(); til (.sql.i.pure[0b] each wh)?0b]];
-  rest:wh (til count wh) except r 2;
-  if[`i in raze .sql.i.names[0b] each rest; r:(();();`long$()); rest:wh];
-  lim:.sql.i.limit[cls;ix and (not stop) and (0=count rest) and 0b~tree 3;tree];
-  moved:(0<count r 0) or not lim~(::;());
-  s2:$[moved; .sql.i.step2[tree;rest;rn 1;not lim~(::;())]; tree];
-  base:{[n] `$first "." vs string n} each raze .sql.i.names[0b] each 2_$[s2~(::); tree; s2];
-  need:$[()~tree 4; cl except `i; (cl except `i) where (cl except `i) in base,exec col from schema where iskey];
-  c:$[count c:(need!need),$[moved; rn 1; ()!()]; c; ()!()]; o:lim[1],$[moved and ix; enlist (`;`i); ()];
-  s1:$[not .sql.i.lastrows lim 0; (`sql;tree 1;r 0;0b;c;lim 0;o);
-    (`sql;(`sql;tree 1;r 0;0b;(u!u:distinct need,o[;1]);neg lim 0;.sql.i.flip each o);();0b;c;::;o)];
-  (s1; (`$"pq",/:string 1+til count r 1)!r 1; select from schema where col in need; s2)};
+  p:.sql.i.phrase tree 4;
+  w:.sql.i.where[tree;schema;p];
+  l:.sql.i.limit[tree;w];
+  .sql.i.assemble[tree;schema;p;w;l]};
 
-/ (barrier;renames): the barrier is up where i sits inside an expression of the select phrase; the renames are the
-/ names the phrase gives a bare i (`x for exec i, as q names a bare one; parse enlists that one column, eval bares it)
+/ The select phrase stage, (barrier;renames): the barrier is up where i sits inside an expression of the phrase; the
+/ renames are the names the phrase gives a bare i (`x for exec i, as q names a bare one; parse enlists that one column,
+/ eval bares it)
 .sql.i.phrase:{[a]
   none:(0#`)!0#`;
   if[()~a; :(0b;none)];
@@ -254,33 +236,64 @@
   if[99h<>type a; :(`i in .sql.i.names[0b] a;none)];
   b:`i~/:value a;
   (`i in raze .sql.i.names[0b] each (value a) where not b; (key[a] where b)!(sum b)#`i)};
-/ the tree q runs after the pull: the terms left, a bare i under the name the statement gives it, the limit and order
-/ gone where they moved; :: when nothing is left
-.sql.i.step2:{[tree;rest;rn;clear]
-  q:@[tree;2;:;$[count rest; enlist rest; ()]];
-  if[count rn; q[4]:$[-11h=type q 4; first key rn; 11h=type q 4; key rn; @[q 4;key rn;:;key rn]]];
-  if[clear; q:5#q];
-  $[(5>=count q) and (0=count rest) and (0b~q 3) and (()~q 4); (::); q]};
-/ a select[-n] limit: the LAST n rows, an inner query in the reversed order cut to n and re-ordered outside
-.sql.i.lastrows:{[n] $[(type n) in -5 -6 -7h; n<0; 0b]};
+/ The where stage, a dict: cls (column to logical class), ix (the table stores i), stop (no term may move), terms and
+/ vals (the moved terms as SQL, the literals they bind) and rest (the terms left for q, in order).  q runs term k+1 on
+/ the rows passing terms 1..k, so a term that reads only its own row commutes with the others: every such term before
+/ the first that does not (.sql.i.pure) moves when .sql.i.VERBS can spell it and stays for q, in order, when it cannot.
+/ A term on i left for q would read positions the pull no longer has, so it stops every term; on a table without i, i
+/ anywhere does (the virtual index).  So do the phrase's barrier, a rename onto a column, an empty schema, and a table
+/ or column name holding a dot (the SQL tree would read it as a path).
+.sql.i.where:{[tree;schema;phrase]
+  cl:exec col from schema; cls:cl!exec logical from schema; ix:`i in cl;
+  wh:$[count tree 2; tree[2;0]; ()];
+  stop:(phrase 0) or (0=count cl) or (any (key phrase 1) in cl) or (any "." in/: string (tree 1),cl) or
+    `i in raze .sql.i.names[0b] each $[ix; enlist tree 3; 2_tree];
+  step:{[cls;wh;acc;j] x:.sql.i.term[cls;0b;count acc 1;wh j];
+    $[x~(::); acc; (acc[0],enlist x 0; acc[1],x 1; acc[2],j)]}[cls;wh];
+  r:step/[(();();`long$()); $[stop; `long$(); til (.sql.i.pure[0b] each wh)?0b]];
+  rest:wh (til count wh) except r 2;
+  if[`i in raze .sql.i.names[0b] each rest; r:(();();`long$()); rest:wh];
+  `cls`ix`stop`terms`vals`rest!(cls;ix;stop;r 0;r 1;rest)};
 .sql.i.FLIP:(`;`$"<:";`$">:";`$"nulls first";`$"nulls last")!(`$">:";`$">:";`$"<:";`$"nulls last";`$"nulls first");
-.sql.i.flip:{[o] @[o;$[3=count o; 0 2; 0];.sql.i.FLIP]};
-/ select[n] / [m n] / [-n] / [order] as SQL's (limit;order), (::;()) where they stay with q: only over a table with i,
-/ the whole where moved and no by (the limit counts the rows the where kept, before the select phrase, select.md); the
-/ order needs a column of a class q and DuckDB sort alike (never char, whose null q orders below every byte), nulls
-/ first ascending and last descending as q sorts them, and i after it since q's sort is stable; a limit q refuses
-/ (a null, a negative count in a pair) stays with q, which raises
-.sql.i.limit:{[cls;ok;tree]
-  none:(::;());
-  if[(not ok) or 5>=count tree; :none];
-  n:tree 5; o:$[6<count tree; tree 6; ()];
-  if[(0h=type o) and (1=count o) and 0h=type first o; o:first o];
-  if[count o; if[(2<>count o) or -11h<>type c:o 1; :none]; d:((<:);(>:))?o 0; k:.sql.i.CLASSES[`logical]?cls c;
-    if[(d=2) or (k=count .sql.i.CLASSES) or `char=.sql.i.CLASSES[k;`class]; :none];
-    o:enlist ((`$("<:";">:") d);c),$[.sql.i.CLASSES[k;`nullable]; enlist `$("nulls first";"nulls last") d; ()]];
-  if[(type n) in -5 -6 -7h; :$[null n; none; n=0W; $[count o; (::;o); none]; (n;o)]];
-  if[((type n) in 5 6 7h) and 2=count n; if[(not any null n) and (n[0]>=0) and n[1]>0; :(n;o)]];
-  none};
+/ The limit and order stage, a dict: limit and order (SQL's; :: and at most the i order where they stay with q), inner,
+/ moved (anything moved) and clear (the limit and order moved).  select[n] / [m n] / [-n] / [order] move only over a
+/ table with i, the whole where moved and no by (the limit counts the rows the where kept, before the select phrase,
+/ select.md); the order needs a column of a class q and DuckDB sort alike (never char, whose null q orders below every
+/ byte), nulls first ascending and last descending as q sorts them, and i after it since q's sort is stable; a limit q
+/ refuses (a null, a negative count in a pair) stays with q, which raises.  On a table with i, a statement that moves
+/ anything orders its rows by i.  select[-n] is the LAST n rows: inner is the reversed order an inner query cuts them
+/ by, () for any other limit.
+.sql.i.limit:{[tree;w]
+  pick:{[cls;tree]
+    none:(::;()); n:tree 5; o:$[6<count tree; tree 6; ()];
+    if[(0h=type o) and (1=count o) and 0h=type first o; o:first o];
+    if[count o; if[(2<>count o) or -11h<>type c:o 1; :none]; d:((<:);(>:))?o 0; k:.sql.i.CLASSES[`logical]?cls c;
+      if[(d=2) or (k=count .sql.i.CLASSES) or `char=.sql.i.CLASSES[k;`class]; :none];
+      o:enlist ((`$("<:";">:") d);c),$[.sql.i.CLASSES[k;`nullable]; enlist `$("nulls first";"nulls last") d; ()]];
+    if[(type n) in -5 -6 -7h; :$[null n; none; n=0W; $[count o; (::;o); none]; (n;o)]];
+    if[((type n) in 5 6 7h) and 2=count n; if[(not any null n) and (n[0]>=0) and n[1]>0; :(n;o)]];
+    none};
+  ok:w[`ix] and (not w`stop) and (0=count w`rest) and (0b~tree 3) and 5<count tree;
+  lim:$[ok; pick[w`cls;tree]; (::;())];
+  clear:not lim~(::;()); moved:clear or 0<count w`terms;
+  o:lim[1],$[moved and w`ix; enlist (`;`i); ()];
+  inner:$[$[(type lim 0) in -5 -6 -7h; (lim 0)<0; 0b]; {[o] @[o;$[3=count o; 0 2; 0];.sql.i.FLIP]} each o; ()];
+  `limit`order`inner`moved`clear!(lim 0;o;inner;moved;clear)};
+/ The assembly.  q's tree keeps the terms left, a bare i under the name the phrase gives it, and the limit and order
+/ where they stay (:: when nothing is left); the SQL selects the columns that tree reads, the key columns with them.
+.sql.i.assemble:{[tree;schema;phrase;w;l]
+  rn:phrase 1; rest:w`rest; q:tree;
+  if[l`moved; q:@[tree;2;:;$[count rest; enlist rest; ()]];
+    if[count rn; q[4]:$[-11h=type q 4; first key rn; 11h=type q 4; key rn; @[q 4;key rn;:;key rn]]];
+    if[l`clear; q:5#q];
+    if[(5>=count q) and (0=count rest) and (0b~q 3) and ()~q 4; q:(::)]];
+  cl:(exec col from schema) except `i;
+  base:{[n] `$first "." vs string n} each raze .sql.i.names[0b] each 2_$[q~(::); tree; q];
+  need:$[()~tree 4; cl; cl where cl in base,exec col from schema where iskey];
+  c:$[count c:(need!need),$[l`moved; rn; ()!()]; c; ()!()];
+  s:(`sql;tree 1;w`terms;0b;c;l`limit;l`order);
+  if[count l`inner; s:(`sql;(`sql;tree 1;w`terms;0b;u!u:distinct need,l[`order][;1];neg l`limit;l`inner);();0b;c;::;l`order)];
+  (s;(`$"pq",/:string 1+til count w`vals)!w`vals;select from schema where col in need;q)};
 
 / The q verbs a where term may push: the head .sql.render spells it with (in is list_contains over ONE list
 / parameter, which is what DuckDB rewrites IN over a list to), the head the term takes with its literal on the left,
