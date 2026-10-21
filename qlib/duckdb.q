@@ -165,10 +165,14 @@
 / The row count of a table of the handle's catalog, counted by DuckDB.
 .duckdb.count:{[c;t] first .duckdb.i.exec[c; "SELECT COUNT(*) AS n FROM ",.duckdb.i.qname t]`n}
 
-/ Whether a qSQL select on a q-origin table of the handle runs the where terms, limit and order .sql.translate can move
-/ inside DuckDB before q runs the rest; off, every select pulls the whole table.  A pushed statement DuckDB refuses stays in
-/ .duckdb.sqllog and the select pulls the table instead, so the answer is q's.  Read on every select.
+/ Whether a qSQL select on a q-origin table of the handle runs what .sql.translate can move (where terms, limit, order;
+/ the select phrase and by whole when every item translates) inside DuckDB before q runs the rest, read on every select;
+/ off, every select pulls the whole table.  A statement DuckDB refuses stays in .duckdb.sqllog and the select pulls instead.
 .duckdb.pushdown:1b
+
+/ The .sql.translate answer (sqlTree;params;schema;qTree) of the last linked select that ran a pushed statement, qTree ::
+/ when DuckDB answered it whole; :: when the last select pushed nothing (pushdown off, nothing to move, or a refusal).
+.duckdb.lastpush:(::)
 
 / @ignore
 .duckdb.i.stale:{[c] any (first "\n" vs .duckdb.err c) like/: ("Binder Error: Referenced column*";"Catalog Error: Table with name*")}
@@ -176,11 +180,12 @@
 .duckdb.i.pushed:{[c;rt]
   if[0=count sc:.duckdb.i.schema[c;rt 0]; :(::)];
   r:.sql.translate[((?);rt 0;$[count rt 1;enlist rt 1;()]),2_rt;sc];
-  if[all ((0=count r[0;2]);(::)~r[0;5];0=count r[0;6]); :(::)];
-  t:.duckdb.exec[c;(.sql.render r 0;r 1;r 2)];
+  if[(not (::)~r 3) and all ((0=count r[0;2]);(::)~r[0;5];0=count r[0;6]); :(::)];
+  t:.duckdb.exec[c;(.sql.render r 0;r 1;r 2)]; .duckdb.lastpush::r;
   $[(::)~r 3; t; (?) . (t;$[count r[3;2]; r[3;2;0]; ()]),3_r 3]}
 / @ignore
 .duckdb.i.push:{[c;rt]
+  .duckdb.lastpush::(::);
   if[.duckdb.pushdown and -11h=type rt 0;
     r:@[.duckdb.i.pushed[c];rt;{[c;rt;e] if[not .duckdb.i.stale c; :(::)]; .duckdb.i.unbind[c;rt 0];
       @[.duckdb.i.pushed[c];rt;{[e] ::}]}[c;rt]];
@@ -191,7 +196,7 @@
   node:{[cl;nd]
     if[99h=type nd; :key[nd]!.z.s[cl] value nd];
     if[0h=type nd; i:where 101h<>type each nd; :@[nd;i;:;.z.s[cl] each nd i]];
-    $[-11h<>type nd; nd; (`$first "." vs string nd) in cl; nd; 100h<=type v:@[value;nd;{[e] 'unpush}]; nd; (11h=abs type v) or (type v) in 0 98 99h; enlist v; v]};
+    $[-11h<>type nd; nd; (`$first "." vs string nd) in cl; nd; 100h<=type v:@[value;nd;{[e] 'unpush}]; nd; (11h=abs type v) or (type v) in 0 98h; enlist v; v]};
   rt:.[{[node;cl;t] (enlist t 0),node[cl,`i] each 1_t}[node];(cl;tree);{[e] ::}];
   $[rt~(::);::;.duckdb.i.push[c;rt]]}
 
