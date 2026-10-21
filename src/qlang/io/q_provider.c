@@ -717,20 +717,25 @@ ray_t* q_provider_carrier_count(ray_t* car) { return carrier_ask(car, "count", q
 ray_t* q_provider_carrier_meta(ray_t* car)  { return carrier_ask(car, "meta", q_meta_fn); }
 
 /* `get `:pq:duckdb:db:t/` — the carrier, splay symmetry: cols via bind on the live alias; the carrier keeps the
- * coordinate VERBATIM.  NULL = not a `:pq:` sym. */
-ray_t* q_provider_get_carrier(ray_t* x) {
+ * coordinate VERBATIM.  NULL = not a `:pq:` sym.  fresh is the user's get, the act of mapping a splay: the kind's
+ * optional `rebind` hook reads the table afresh where `bind` answers from what the connection holds. */
+static ray_t* carrier_of(ray_t* x, int fresh) {
     const char* p; size_t n;
     if (!sym_text(x, &p, &n) || !q_handles_pq(p, n, NULL)) return NULL;
     tref_t tr;
     ray_t* err = tref_open(p, n, &tr);         /* connection form -> 'domain */
     if (err) return err;
-    ray_t* cols = tref_hook(&tr, "bind");
+    ray_t* cols = fresh ? tref_hook_opt(&tr, "rebind") : NULL;
+    if (!cols) cols = tref_hook(&tr, "bind");
     if (!cols || RAY_IS_ERR(cols)) return cols ? cols : q_err(QE_TYPE);
     if (cols->type != RAY_SYM) { ray_release(cols); return q_err(QE_TYPE); }
     ray_t* car = ray_dict_new(cols, ray_sym(x->i64));
     q_type_coord_mark(car, Q_COORD_PROVIDER, x->i64);
     return car;
 }
+
+ray_t* q_provider_get_carrier(ray_t* x) { return carrier_of(x, 0); }
+ray_t* q_provider_get_fresh(ray_t* x)   { return carrier_of(x, 1); }
 
 /* the from-slot: carrier value, table coordinate, or a name resolving to a carrier.  0 = not a provider table; a
  * connection sym in a table position fills err_out with 'domain. */
@@ -959,9 +964,35 @@ static ray_t* pq_load_fn(ray_t** args, int64_t n) {
     return r;
 }
 
+/* .pq.i.info x — the provider's own hidden data, by coordinate form as `key` dispatches: a table coordinate asks
+ * .X.info[token; name], a connection .X.info[token; ::]; a non-`:pq:` argument is 'type, a kind without the hook 'nyi */
+static ray_t* pq_info_fn(ray_t* x) {
+    const char* s; size_t n;
+    q_pq_parts p;
+    q_pq_kind kind = sym_text(x, &s, &n) ? q_handles_pq(s, n, &p) : Q_PQ_NONE;
+    if (!kind) return q_err(QE_TYPE);
+    if (!p.ok) return q_err(QE_DOMAIN);
+    ray_t* f = hook_fn(kind, "info");
+    if (!f) return q_err(QE_NYI);
+    ray_release(f);
+    if (p.table) {
+        tref_t tr;
+        ray_t* err = tref_open(s, n, &tr);
+        return err ? err : tref_hook(&tr, "info");
+    }
+    prov_ent* e;
+    ray_t* err = alias_live(kind, &p, &e);
+    if (err) return err;
+    ray_t* args[2] = { e->connid, RAY_NULL_OBJ };
+    return hook_call(kind, "info", args, 2);
+}
+
 void q_provider_pq_register(void) {
-    static const char nm[] = ".pq.i.load";
+    static const char nm[] = ".pq.i.load", in[] = ".pq.i.info";
     ray_t* obj = ray_fn_vary(nm, RAY_FN_NONE, pq_load_fn);
     q_env_bind_native(nm, obj, 2);
+    ray_release(obj);
+    obj = ray_fn_unary(in, RAY_FN_NONE, pq_info_fn);
+    q_env_bind_native(in, obj, 1);
     ray_release(obj);
 }
