@@ -571,7 +571,7 @@ ray_t* q_dollar_tok(int8_t tag, ray_t* x) {
 }
 
 /* q `w$s` PAD (ref/pad.md): a LONG width w left-justifies the string s in a
- * field of |w| spaces (w<0 right-justifies); longer strings truncate to |w|.
+ * field of |w| spaces (w<0 right-justifies); longer strings truncate to |w|, from the justified side.
  * Non-string operands are a 'type error.  Output mirrors the input's string
  * form (charv vs -RAY_STR). */
 static ray_t* pad_leaf(int64_t w, ray_t* x) {
@@ -615,7 +615,8 @@ static ray_t* pad_leaf(int64_t w, ray_t* x) {
     char* b = (width < (int64_t)sizeof stack) ? stack : malloc((size_t)width + 1);
     if (!b) return q_err(QE_WSFULL);
     memset(b, ' ', (size_t)width);
-    memcpy(w < 0 ? b + (width - copy) : b, p, (size_t)copy);   /* w<0: text at right */
+    if (w < 0) memcpy(b + (width - copy), p + (pn - copy), (size_t)copy);   /* the tail survives truncation */
+    else memcpy(b, p, (size_t)copy);
     ray_t* r = (x->type == -RAY_STR) ? ray_str(b, (size_t)width)
                                      : ray_charv(b, width);
     if (b != stack) free(b);
@@ -839,8 +840,8 @@ static ray_t* dollar_col(void* ctx, ray_t* col) {
  * WHOLE args and self-distributes.  DICT/TABLE are UNIFORM structure — handled
  * once here by re-entering q_dollar per value/column (keys/colnames kept), so
  * every overload inherits them.  Then LEFT-operand dispatch: a LONG width is
- * PAD; mmu-shaped float operands (both sides) are matrix multiply; a
- * multi-designator LHS ("fiij", `int`float, 5 6h, (`int;"i";6h)) zips over x,
+ * PAD; mmu-shaped float operands (both sides) are matrix multiply; a LONG
+ * width vector or a multi-designator LHS ("fiij", `int`float, 5 6h, (`int;"i";6h)) zips over x,
  * RE-ENTERING q_dollar per pair (ref/cast.md pins (`int;"i";6h)$10 -> 10 10
  * 10i: an ATOM rhs is broadcast); a single designator resolves via
  * q_cast_designator into q_dollar_cast / q_dollar_tok, each of which owns its
@@ -861,7 +862,7 @@ ray_t* q_dollar(ray_t* t, ray_t* x) {
         return q_dollar_mmu(t, x);   /* ragged included: mmu owns its 'length */
     int multi = t && ((t->type == -RAY_STR && ray_str_len(t) > 1) ||
                       (t->type == RAY_CHARV && q_count(t) > 1) ||
-                      t->type == RAY_SYM || t->type == RAY_I16 ||
+                      t->type == RAY_SYM || t->type == RAY_I16 || t->type == RAY_I64 ||
                       t->type == RAY_LIST);
     if (multi) {
         int64_t n = q_count(t);
