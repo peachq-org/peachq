@@ -20,7 +20,8 @@ listed behave as the reference body further down describes.
 | `\T` | **differs** — `\T 30` is accepted silently but not applied; the getter answers `'nyi`. |
 | `\u` | **differs** — the bare reload answers `'nyi`; `\u file` is accepted silently. |
 | `\e \g \o \s \W` | **partly** — get and set round-trip the value, but the behaviour behind the number (error trapping, real collection, the UTC offset reaching `.z.Z`, thread re-tuning, the week start) is not wired yet. |
-| everything else | **answers as documented at the command surface** — `\a \b \B \c \cd \C \d \f \l \p \P \S \t \ts \v \w \z \E \1 \2 \\` and the unknown-token OS escape. This table is re-derived per command, not a clause-by-clause conformance audit of the reference body below. |
+| `\c` | **differs** — modern mode (the default) answers `25 0Ni`: `0N` columns auto-fits the live terminal at each render. `-classic` gives kdb's `25 80`; `LINES` and `COLUMNS`, `-c` or `\c h w` set explicit values. |
+| everything else | **answers as documented at the command surface** — `\a \b \B \cd \C \d \f \l \p \P \S \t \ts \v \w \z \E \1 \2 \\` and the unknown-token OS escape. This table is re-derived per command, not a clause-by-clause conformance audit of the reference body below. |
 
 ---
 
@@ -159,6 +160,9 @@ If the environment variables are undefined, the defaults are
 V4.0 or less   25 80
 V4.1+          dimensions of the command-shell window
 ```
+
+> **peachq:** modern mode (the default) reports `25 0Ni` with no `LINES`/`COLUMNS` set: `0N` columns means "fit the live
+> terminal", re-read at each render so a resize follows. `-classic` reports kdb's `25 80`.
 
 > **Tip: Environment variables `LINES` and `COLUMNS`**
 >

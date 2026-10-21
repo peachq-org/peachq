@@ -1482,32 +1482,27 @@ void q_fmt_console(ray_t* val, char* buf, size_t bufsz) {
  * slot layout stays opaque): lambda = verbatim source, iterator/derived =
  * head + adverb glyph, composition = "u g", projection = verbatim head +
  * the bound-argument echo, holes empty — {x+y}[1;], +[;2] (kdb shape,
- * owner ruling 2026-07-23).  Returns 1 iff v was rendered as a carrier. */
-static int carrier_fmt(ray_t* v, char* buf, size_t bufsz) {
+ * owner ruling 2026-07-23).  Straight into the emitter: source text is unbounded. */
+static void carrier_fmt(ray_t* v) {
     q_car_kind_t kind = q_eval_apply_carrier_kind(v);
-    if (kind == Q_EVAL_CAR_NONE || bufsz == 0) return 0;
+    if (kind == Q_EVAL_CAR_NONE) return;
     const char* nm = q_eval_apply_car_head_name(v);
     ray_t* head = q_eval_apply_car_head(v);
     switch (kind) {
     case Q_EVAL_CAR_VIEW: {                /* `. `d shows the bare text: b+a */
         ray_t* t = q_view_text(v);
-        snprintf(buf, bufsz, "%.*s", t ? (int) q_count(t) : 0,
-                 t ? (const char*)ray_data(t) : "");
-        if (t) ray_release(t);
-        return 1;
+        if (t) { qe_putn((const char*)ray_data(t), (size_t)q_count(t)); ray_release(t); }
+        return;
     }
     case Q_EVAL_CAR_LAMBDA: {
         ray_t* src = q_eval_apply_lambda_src(v);
-        if (src)
-            snprintf(buf, bufsz, "%.*s", (int)ray_str_len(src),
-                     ray_str_ptr(src));
-        else
-            snprintf(buf, bufsz, "{..}");
-        return 1;
+        if (src) qe_putn(ray_str_ptr(src), ray_str_len(src));
+        else qe_puts("{..}");
+        return;
     }
     case Q_EVAL_CAR_FOREIGN:               /* an opaque pointer: nothing to show but what it is */
-        snprintf(buf, bufsz, "foreign");
-        return 1;
+        qe_puts("foreign");
+        return;
     case Q_EVAL_CAR_KFN: {                 /* the `2:` call that made it, read back off the slots */
         int64_t rank = 0, lib = 0, sym = 0;
         q_eval_apply_kfn_parts(v, NULL, &rank, &lib, &sym);
@@ -1516,63 +1511,53 @@ static int carrier_fmt(ray_t* v, char* buf, size_t bufsz) {
         /* `dl` mints the same carrier from a pointer the extension already held: no library, no
          * dlsym name, and no `2:` call that would reproduce it (owner ruling 2026-09-22). */
         if (!ls || ray_str_len(ls) == 0) {
-            snprintf(buf, bufsz, "dl(%lld)", (long long)rank);
-            return 1;
+            qe_printf("dl(%lld)", (long long)rank);
+            return;
         }
-        snprintf(buf, bufsz, "`%.*s 2:(`%.*s;%lld)",
-                 ls ? (int)ray_str_len(ls) : 0, ls ? ray_str_ptr(ls) : "",
-                 fs ? (int)ray_str_len(fs) : 0, fs ? ray_str_ptr(fs) : "", (long long)rank);
-        return 1;
+        qe_putc('`');
+        qe_putn(ray_str_ptr(ls), ray_str_len(ls));
+        qe_puts(" 2:(`");
+        if (fs) qe_putn(ray_str_ptr(fs), ray_str_len(fs));
+        qe_printf(";%lld)", (long long)rank);
+        return;
     }
     case Q_EVAL_CAR_ITER: {
         int adv = q_eval_apply_iter_id(v);
-        snprintf(buf, bufsz, "%s",
-                 (adv >= 0 && adv < 6) ? ADVERB_NAMES[adv] : "");
-        return 1;
+        if (adv >= 0 && adv < 6) qe_puts(ADVERB_NAMES[adv]);
+        return;
     }
     case Q_EVAL_CAR_DERIV: {
         int adv = q_eval_apply_deriv_adv(v);
-        char fb[128] = "";
-        if (nm) snprintf(fb, sizeof fb, "%s", nm);
-        else if (head) q_fmt(head, fb, sizeof fb);
-        snprintf(buf, bufsz, "%s%s", fb,
-                 (adv >= 0 && adv < 6) ? ADVERB_NAMES[adv] : "");
-        return 1;
+        if (nm) qe_puts(nm);
+        else fmt_render(head);
+        if (adv >= 0 && adv < 6) qe_puts(ADVERB_NAMES[adv]);
+        return;
     }
-    case Q_EVAL_CAR_COMP: {
-        ray_t* g = q_eval_apply_comp_inner(v);
-        char ub[128] = "", gb[128] = "";
-        if (head) q_fmt(head, ub, sizeof ub);
-        if (g) q_fmt(g, gb, sizeof gb);
-        snprintf(buf, bufsz, "%s %s", ub, gb);
-        return 1;
-    }
+    case Q_EVAL_CAR_COMP:
+        fmt_render(head);
+        qe_putc(' ');
+        fmt_render(q_eval_apply_comp_inner(v));
+        return;
     case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_PROJ: break;
     }
-    char fb[256] = "";
-    if (nm) snprintf(fb, sizeof fb, "%s", nm);
-    else if (head) q_fmt(head, fb, sizeof fb);
-    size_t off = 0;
+    if (nm) qe_puts(nm);
+    else fmt_render(head);
+    qe_putc('[');
     int64_t slots = q_eval_apply_proj_nslots(v);
-    #define PUT(...) do { \
-        if (off < bufsz) { \
-            int w = snprintf(buf + off, bufsz - off, __VA_ARGS__); \
-            off += (w > 0) ? (size_t)w : 0; \
-        } \
-    } while (0)
-    PUT("%s[", fb);
     for (int64_t i = 0; i < slots; i++) {
-        if (i) PUT(";");
+        if (i) qe_putc(';');
         ray_t* a = q_eval_apply_proj_arg(v, i);
-        if (a && !Q_IS_HOLE(a)) {
-            char ab[128] = "";
-            q_fmt(a, ab, sizeof ab);
-            PUT("%s", ab);
-        }
+        if (a && !Q_IS_HOLE(a)) fmt_render(a);
     }
-    PUT("]");
-    #undef PUT
-    return 1;
+    qe_putc(']');
+}
+
+/* A list item: single-line k-repr through a fixed stage, except a carrier, whose source spans lines. */
+static void fmt_list_elem(ray_t* e) {
+    if (e && e->type == RAY_QFN) { fmt_render(e); return; }
+    char elem[2048]; elem[0] = '\0';
+    q_fmt_krepr(e, elem, sizeof elem);
+    qe_puts(elem);
 }
 
 /* a registry spelling that is a GLYPH (`+`, `%`, `0:`) rather than a keyword —
@@ -1620,10 +1605,7 @@ static void q_fmt_body(ray_t* val) {
             if (gpv.valence == Q_MONADIC) qe_putc(':');
             return;
         }
-        char cb[512];
-        cb[0] = '\0';
-        if (carrier_fmt(val, cb, sizeof cb))
-            qe_puts(cb);
+        carrier_fmt(val);
         return;
     }
 
@@ -1899,11 +1881,13 @@ static void q_fmt_body(ray_t* val) {
                 ray_t* ve = v ? ray_at_fn(v, ja) : NULL;
                 ray_release(ja);
                 /* len-1 strings render "c" NOT ,"c" (list/first pins `c| "h"`) */
-                if (ve && !RAY_IS_ERR(ve)) fmt_dict_elem(v, ve, vb, sizeof vb);
-                if (ve && !RAY_IS_ERR(ve)) ray_release(ve);
+                int car = ve && !RAY_IS_ERR(ve) && ve->type == RAY_QFN;
+                if (ve && !RAY_IS_ERR(ve) && !car) fmt_dict_elem(v, ve, vb, sizeof vb);
                 size_t need = (i ? 1 : 0) + maxk + 2 + strlen(vb);
-                if (!qe_fits(need)) break;
+                if (!qe_fits(need)) { if (ve && !RAY_IS_ERR(ve)) ray_release(ve); break; }
                 qe_printf("%s%-*s| %s", i ? "\n" : "", (int)maxk, kb, vb);
+                if (car) fmt_render(ve);
+                if (ve && !RAY_IS_ERR(ve)) ray_release(ve);
             }
         }
         if (dw && dw != dstackw) free(dw);
@@ -1924,18 +1908,14 @@ static void q_fmt_body(ray_t* val) {
         if (n == 0) { qe_puts("()"); return; }
         if (is_matrix(e, n)) { fmt_matrix(e, n); return; }
         if (n == 1 && e[0] && e[0]->type != RAY_CHARV) {   /* enlist: ,x */
-            char elem[2048]; elem[0] = '\0';
-            q_fmt_krepr(e[0], elem, sizeof elem);
             qe_putc(',');
-            qe_puts(elem);
+            fmt_list_elem(e[0]);
             return;
         }
         for (int64_t i = 0; i < n; i++) {
             if (qe_done()) break;                /* height cap hit — early exit */
-            char elem[2048]; elem[0] = '\0';
-            q_fmt_krepr(e[i], elem, sizeof elem);
             if (i) qe_putc('\n');
-            qe_puts(elem);
+            fmt_list_elem(e[i]);
         }
         return;
     }
