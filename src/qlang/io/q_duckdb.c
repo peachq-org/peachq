@@ -255,6 +255,11 @@ static void qd_floor_refuse(void* dl) {
 static void qd_load(void) {
     if (g_qd.state == 1) return;
     g_qd.why[0] = '\0';
+#if defined(__EMSCRIPTEN__)
+    snprintf(g_qd.why, sizeof g_qd.why, "bridge: DuckDB is not in the browser build until duckdb-wasm ships a 2.0 bundle");
+    g_qd.state = 2;
+    return;
+#endif
     void* dl = NULL;
     const char* envp = getenv("PEACHQ_DUCKDB_LIB");
     if (envp && *envp) {
