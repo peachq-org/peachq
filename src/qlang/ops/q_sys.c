@@ -31,7 +31,7 @@
 #include "qlang/io/q_provider.h" /* q_provider_load — the `\l `:pq:duckdb:al` form */
 #include "qlang/q_pq.h"       /* q_pq_load / _load_file — `\l pq` and `\l pq/<file>.q` */
 #include "qlang/q_env.h"      /* q_env_ctx_set/_ctx + q_env_ns_names — `\d` and the `\v`/`\f`/`\a` rosters */
-#include "qlang/q_dotz.h"     /* q_dotz_timer_thunk (`\t`), q_dotz_exit_fire (`\\`), q_dotz_expungeable (`\x`) */
+#include "qlang/q_dotz.h"     /* q_dotz_timer_thunk (`\t`), q_dotz_exit_fire (`\\`), q_dotz_expungeable (`\x`), q_dotz_quiet */
 #include "qlang/eval/q_view.h" /* q_view_names — `\b` / `\B` */
 #include "qlang/parse/q_parse.h"    /* q_parse — `\t expr` / `\ts expr` timing */
 #include "qlang/parse/q_tok.h" /* q_tok_date_order_set/_order — `\z` */
@@ -93,6 +93,7 @@ extern char** environ;
 void q_sys_ctx_reset(void) { q_env_ctx_set(0); }
 
 int q_sys_prompt(char* buf, size_t cap) {
+    if (q_dotz_quiet()) { if (cap) buf[0] = '\0'; return 0; }
     ray_t* s = ray_sym_str(q_env_ctx());          /* NULL at root */
     int n = snprintf(buf, cap, "q%.*s)", s ? (int)ray_str_len(s) : 0,
                      s ? ray_str_ptr(s) : "");
