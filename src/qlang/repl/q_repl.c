@@ -18,7 +18,7 @@
 #include "qlang/eval/q_dbg.h"    /* debug-loop line readers (basics/debug.md) */
 #include "qlang/q_console.h"
 #include "qlang/ops/q_sys.h"      /* q_sys_prompt / q_sys_listen_port — the front end's two asks */
-#include "qlang/q_dotz.h"         /* q_dotz_quiet — `-q` silences the piped transcript's prompt and echo */
+#include "qlang/q_dotz.h"         /* q_dotz_quiet (`-q`), q_dotz_now_ns (the history clock) */
 #include "qlang/q_fmt.h"          /* a history record's time prints as the console prints a timestamp */
 #include "store/fileio.h"         /* ray_file_rename — a history rewrite replaces the file whole */
 #include "app/term.h"       /* ray_term_* line editor + highlighter hook */
@@ -253,7 +253,7 @@ static void repl_update_hint(ray_term_t* t, const char* s, size_t n) {
  * prompt ghost with the help door (Tab/→ accepts `\?`).  Modern only; the
  * first evaluated line replaces or clears it. */
 static void repl_teach_hint(ray_term_t* t) {
-    if (t->hist.count == 0 && q_console_pipe_on())
+    if (t->hist.count == 0 && q_console_pipe_on() && !q_dotz_quiet())
         ray_term_set_hint(t, "\\? / help", 2);
 }
 
@@ -265,11 +265,15 @@ static void tty_eval_begin(ray_term_t* t) {
     ray_term_eval_begin(t);
 }
 
-static void tty_eval_end(ray_term_t* t) {
-    ray_term_eval_end(t);
+static void tty_prompt(ray_term_t* t) {
     char prompt[80];
     int  pl = q_sys_prompt(prompt, sizeof prompt);
     ray_term_set_prompt(t, prompt, pl);
+}
+
+static void tty_eval_end(ray_term_t* t) {
+    ray_term_eval_end(t);
+    tty_prompt(t);
 }
 
 static const char* const* g_startup;   /* q_repl_prime's queue; taken by the first tty loop to run */
@@ -310,7 +314,7 @@ static void repl_interactive(FILE* out, FILE* err) {
     g_live_term = t;
     qhist_open(&t->hist);
     ray_term_set_highlighter(t, q_highlight);
-    ray_term_set_prompt(t, "q)", 2);   /* exact kdb-style prompt, no glyph */
+    tty_prompt(t);   /* exact kdb-style prompt, no glyph */
     ray_term_set_continuation_fn(t, no_continuation);  /* kdb: line-at-a-time */
 
     /* SIGINT/console-ctrl plumbing (mirrors rayforce's repl.c contract):
@@ -503,7 +507,6 @@ static ray_t* poll_tty_data(ray_poll_t* poll, ray_selector_t* sel, void* data) {
 
 static void pipe_prompt(q_poll_repl_t* c) {
     char prompt[80];
-    if (q_dotz_quiet()) return;
     q_sys_prompt(prompt, sizeof prompt);
     fputs(prompt, c->out);
     fflush(c->out);
@@ -616,7 +619,7 @@ static ray_t* poll_pipe_read(ray_poll_t* poll, ray_selector_t* sel) {
 
 /* piped debug readers own the transcript shape: prompt, then input echo */
 static int pipe_dbg_echo(char* buf, int n) {
-    if (n < 0) return n;
+    if (n < 0 || q_dotz_quiet()) return n;
     fputs(buf, stdout);
     fputc('\n', stdout);
     fflush(stdout);
@@ -714,11 +717,11 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err, int stdin_tty) {
             fprintf(err, "q: terminal init failed\n");
             return -1;
         }
-        /* Same setup as repl_interactive: q history, q highlighter, kdb
-         * `q)` prompt, line-at-a-time (no continuation), SIGINT plumbing. */
+        /* Same setup as repl_interactive: q history, q highlighter, the
+         * context prompt, line-at-a-time (no continuation), SIGINT plumbing. */
         qhist_open(&t->hist);
         ray_term_set_highlighter(t, q_highlight);
-        ray_term_set_prompt(t, "q)", 2);
+        tty_prompt(t);
         ray_term_set_continuation_fn(t, no_continuation);
         ray_term_install_signals(t);
         c->term = t;
@@ -781,7 +784,7 @@ void q_repl_run(FILE* in, FILE* out, FILE* err, int echo) {
 
     /* Piped / redirected stdin: original fgets loop, kept byte-for-byte
      * identical so the qcmd transcript tests stay stable.  The prompt is
-     * context-derived: `q)` at root, `q.foo)` after `\d .foo`. */
+     * context-derived: `q)` at root, `q.foo)` after `\d .foo`, none under `-q`. */
     char line[4096];
     int  quiet = q_dotz_quiet();
 
@@ -790,10 +793,8 @@ void q_repl_run(FILE* in, FILE* out, FILE* err, int echo) {
 
     for (;;) {
         char prompt[80];
-        if (!quiet) {
-            q_sys_prompt(prompt, sizeof prompt);
-            fputs(prompt, out);
-        }
+        q_sys_prompt(prompt, sizeof prompt);
+        fputs(prompt, out);
         fflush(out);
 
         if (!fgets(line, sizeof line, in)) { if (!quiet) fputc('\n', out); break; }
