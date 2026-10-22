@@ -233,10 +233,10 @@ ray_t* q_ws_client_open(ray_t* hsym, ray_t* request) {
     if (!keyb64 || RAY_IS_ERR(keyb64)) return keyb64 ? keyb64 : q_err(QE_OOM);
 
     static const char guid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-    size_t kl = ray_str_len(keyb64);
+    size_t kl = (size_t)q_count(keyb64);
     if (kl > 64) { ray_release(keyb64); return q_err(QE_LIMIT); }
     char cat[64 + sizeof guid];
-    memcpy(cat, ray_str_ptr(keyb64), kl);
+    memcpy(cat, ray_data(keyb64), kl);
     memcpy(cat + kl, guid, sizeof guid - 1);
     ray_t* catin = ray_str(cat, kl + sizeof guid - 1);
     if (!catin || RAY_IS_ERR(catin)) { ray_release(keyb64); return catin ? catin : q_err(QE_OOM); }
@@ -255,7 +255,7 @@ ray_t* q_ws_client_open(ray_t* hsym, ray_t* request) {
         if (uin && !RAY_IS_ERR(uin)) ray_release(uin);
         if (!enc || RAY_IS_ERR(enc)) { ray_release(keyb64); ray_release(accept); return enc ? enc : q_err(QE_OOM); }
         snprintf(authhdr, sizeof authhdr, "Authorization: Basic %.*s\r\n",
-                 (int)ray_str_len(enc), ray_str_ptr(enc));
+                 (int)q_count(enc), (const char*)ray_data(enc));
         ray_release(enc);
     }
 
@@ -274,7 +274,7 @@ ray_t* q_ws_client_open(ray_t* hsym, ray_t* request) {
     int extra = snprintf(req + head, reqcap - head,
         "Upgrade: websocket\r\nConnection: Upgrade\r\n"
         "Sec-WebSocket-Key: %.*s\r\nSec-WebSocket-Version: 13\r\n%s\r\n",
-        (int)kl, ray_str_ptr(keyb64), authhdr);
+        (int)kl, (const char*)ray_data(keyb64), authhdr);
     ray_release(keyb64);
     if (extra <= 0 || (size_t)(head + extra) >= reqcap) {
         free(req); ray_release(accept); return q_err(QE_LIMIT);
@@ -318,8 +318,8 @@ ray_t* q_ws_client_open(ray_t* hsym, ray_t* request) {
     const struct phr_header* ah = ws_hdr(h, nh, "sec-websocket-accept");
     int ok = up && ws_tok_ieq(up->value, up->value_len, "websocket") &&
              co && ws_list_has(co->value, co->value_len, "upgrade") &&
-             ah && ah->value_len == ray_str_len(accept) &&
-             memcmp(ah->value, ray_str_ptr(accept), ah->value_len) == 0;
+             ah && ah->value_len == (size_t)q_count(accept) &&
+             memcmp(ah->value, ray_data(accept), ah->value_len) == 0;
     ray_release(accept);
     if (!ok) { free(resp); ray_sock_close(fd); return q_err(QE_CONN); }
 
