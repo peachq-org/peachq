@@ -500,7 +500,7 @@ int q_ws_handshake(ray_sock_t fd, const struct phr_header* hdrs, size_t nh) {
                        "HTTP/1.1 101 Switching Protocols\r\n"
                        "Connection: Upgrade\r\nUpgrade: websocket\r\n"
                        "Sec-WebSocket-Accept: %.*s\r\n\r\n",
-                       (int)ray_str_len(accept), ray_str_ptr(accept));
+                       (int)q_count(accept), (const char*)ray_data(accept));
     ray_release(accept);
     if (rl <= 0 || (size_t)rl >= sizeof resp ||
         q_http_send_all(fd, resp, (size_t)rl, Q_WS_CTRL_SECS) != 0)
