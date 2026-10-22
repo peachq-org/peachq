@@ -25,6 +25,7 @@
 #include "qlang/q_console.h"  /* q_console_flush (the exit path); q_console_pipe_* (`\classic`) */
 #include "qlang/q_ctx.h"           /* the engine context: `\l` source seam, console teardown */
 #include "qlang/io/q_io.h"    /* q_io_mkdir_parents — `\1`/`\2` create the path they name */
+#include "store/fileio.h"     /* ray_mkdir_p — `\cd` creates a missing target */
 #include "qlang/io/q_handles.h" /* q_handles_end_owned — the exit home ends every owned worker */
 #include "qlang/io/q_mount.h" /* q_mount_dir / _object — the `\l <dir>` and serialized-object forms */
 #include "qlang/net/q_wirefile.h" /* q_wirefile_is_data — `\l` tells a data file from a script */
@@ -524,9 +525,8 @@ static ray_t* h_p(const char* arg, size_t alen) {
 }
 
 /* `\cd` — change directory (basics/syscmds.md).  getter -> current directory as
- * a char vector; `\cd fp` -> real chdir (the kx "wrong directory" footgun fix,
- * ARCHITECTURE decision: cwd must be controllable + predictable).  DEFERRED:
- * kdb's create-if-missing on a set (a missing target -> 'os here). */
+ * a char vector; `\cd fp` -> real chdir, creating fp if missing (the kx "wrong
+ * directory" footgun fix, ARCHITECTURE decision: cwd must be controllable + predictable). */
 static ray_t* h_cd(const char* arg, size_t alen) {
     if (alen == 0) {                                     /* getter: current dir */
         char buf[PATH_MAX];
@@ -536,6 +536,7 @@ static ray_t* h_cd(const char* arg, size_t alen) {
     if (alen >= PATH_MAX) return q_err(QE_OS);
     char path[PATH_MAX];
     memcpy(path, arg, alen); path[alen] = '\0';
+    (void)ray_mkdir_p(path);                              /* a failure surfaces as chdir's 'os */
     if (chdir(path) != 0) return q_err(QE_OS);
     q_pq_path_changed();
     return NULL;                                          /* setter: silent */
