@@ -213,7 +213,7 @@ ray_t* q_dotq_btoa_fn(ray_t* x) {
     size_t olen = 0;
     char* enc = codec_b64_encode(p, n, &olen);
     if (!enc) return q_err(QE_WSFULL);
-    ray_t* r = ray_str(enc, olen);
+    ray_t* r = ray_charv(enc, (int64_t)olen);
     free(enc);
     return r;
 }
