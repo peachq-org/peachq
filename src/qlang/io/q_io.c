@@ -25,6 +25,7 @@
 #include "lang/env.h"       /* ray_fn_unary — the .fs.i.rmtree native */
 #include "store/fileio.h"   /* ray_mkdir_p — the parent directories a write promises */
 #include "table/sym.h"      /* ray_sym_intern_runtime, ray_sym_vec_cell */
+#include "app/term.h"       /* ray_term_line_begin/end — a terminal `read0 0` shows what is typed */
 #include <limits.h>         /* PATH_MAX — q_io_abs_path */
 #include <stdio.h>
 #include <stdlib.h>
@@ -837,17 +838,22 @@ static ray_t* io_stdin_read(void) {
     int     tty = isatty(0);
     char    rbuf[4096];
     ssize_t got;
+    ray_term_mode_t prev;
+    int     oom = 0;
+    if (tty) ray_term_line_begin(&prev);
     while ((got = read(0, rbuf, tty ? 1 : sizeof rbuf)) > 0) {
         if (tty && rbuf[0] == '\n') break;
         if (n + (size_t)got > cap) {
             while (n + (size_t)got > cap) cap = cap ? cap * 2 : 128;
             char* nb = (char*)realloc(buf, cap);
-            if (!nb) { free(buf); return q_err(QE_OOM); }
+            if (!nb) { oom = 1; break; }
             buf = nb;
         }
         memcpy(buf + n, rbuf, (size_t)got);
         n += (size_t)got;
     }
+    if (tty) ray_term_line_end(&prev);
+    if (oom) { free(buf); return q_err(QE_OOM); }
     if (tty && n && buf[n - 1] == '\r') n--;      /* a CRLF source loses both */
     ray_t* r = ray_charv(buf ? buf : "", (int64_t)n);
     free(buf);
