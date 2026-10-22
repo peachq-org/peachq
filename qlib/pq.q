@@ -139,14 +139,14 @@
 .pq.i.q.hdel:{[c;t] c (!;`.;();0b;enlist t); t};
 .pq.i.q.qsql:{[c;cl;tree] c (?),.pq.i.resolveTree[cl;tree]};
 
-/ One line of facts about a table, one per column in column order: numeric columns as min-max, booleans as the
+/ One line of facts about a table, one per column in column order: numeric columns as a range, booleans as the
 / share true, everything else as a distinct count (`all distinct` when every row differs; a temporal column that
 / repeats shows its range), with a null count where there are nulls.  The same facts the console digest prints
 / under a clipped table, so the two never disagree.
 / @param t (table) a table or keyed table
 / @return string, `-1`-ready
 / @eg .pq.summary ([]a:1 2 3;b:`x`y`x)
-.pq.summary:{[t] " " sv .pq.i.facts t};
+.pq.summary:{[t] "  " sv .pq.i.facts t};
 
 / The qStudio evaluation wrapper, sent byte-identical (firms detect its prefix); 10485760 is qStudio's default size
 / gate.  Answers (sizeOk; $[sizeOk; ((runOk;`);value or (error;backtrace)); 0b]; consoleText).

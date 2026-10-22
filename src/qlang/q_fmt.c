@@ -1120,6 +1120,11 @@ static int64_t qp_gather(ray_t* val, qp_col* cs, int64_t max, int64_t* nrows, in
     return qp_take(vv, cs, nk, max);
 }
 
+static int64_t qp_ncols(ray_t* val) {
+    return val->type == RAY_TABLE ? ray_table_ncols(val)
+         : side_ncols(ray_dict_keys(val)) + side_ncols(ray_dict_vals(val));
+}
+
 static void qp_widths(qp_col* cs, int64_t nc, int64_t shown, int* w) {
     for (int64_t c = 0; c < nc; c++) {
         int m = (int)strlen(cs[c].name);
@@ -1226,7 +1231,7 @@ static void qp_minmax(ray_t* col, char* out, size_t outsz) {
     qp_atom_tok(hi, col->type, b, sizeof b);
     if (lo) ray_release(lo);
     if (hi) ray_release(hi);
-    snprintf(out, outsz, "%s-%s", a, b);
+    snprintf(out, outsz, "%s to %s", a, b);
 }
 
 /* One fact per column, in column order (spec "Digest content").  `all distinct`
@@ -1252,9 +1257,9 @@ static void qp_fact(qp_col* c, int64_t nr, char* out, size_t outsz) {
     }
 
     if (nulls > 0)
-        snprintf(out, outsz, "%s=%s (%lld nulls).", c->name, f, (long long)nulls);
+        snprintf(out, outsz, "%s=%s (%lld nulls)", c->name, f, (long long)nulls);
     else
-        snprintf(out, outsz, "%s=%s.", c->name, f);
+        snprintf(out, outsz, "%s=%s", c->name, f);
 }
 
 /* ---- digest -------------------------------------------------------------- */
@@ -1279,8 +1284,8 @@ static int qp_digest(qp_col* cs, int64_t nc, int64_t nr, int32_t cols,
     for (int64_t c = 0; c < nc; c++) {
         qp_fact(&cs[c], nr, tok, sizeof tok);
         size_t have = strlen(lines[li]), need = strlen(tok);
-        if (have + (have ? 1 : 0) + need <= lim) {
-            if (have) strcat(lines[li], " ");
+        if (have + (have ? 2 : 0) + need <= lim) {
+            if (have) strcat(lines[li], "  ");
             strcat(lines[li], tok);
             continue;
         }
@@ -1299,8 +1304,7 @@ static int qp_digest(qp_col* cs, int64_t nc, int64_t nr, int32_t cols,
  * what the console digest says. */
 static ray_t* qp_facts_fn(ray_t* t) {
     if (!fmt_pipe_is_table(t)) return q_err(QE_TYPE);
-    int64_t max = t->type == RAY_TABLE ? ray_table_ncols(t)
-                : side_ncols(ray_dict_keys(t)) + side_ncols(ray_dict_vals(t));   /* every column, no display cap */
+    int64_t max = qp_ncols(t);                       /* every column, no display cap */
     qp_col* cs = calloc((size_t)(max > 0 ? max : 1), sizeof *cs);
     if (!cs) return q_err(QE_WSFULL);
     int64_t nr = 0, nk = 0;
@@ -1378,7 +1382,7 @@ static void fmt_pipe_render(ray_t* val, char* buf, size_t bufsz, int* trunc) {
     char dl[QP_DIGEST][QP_DGLINE];
     int  dn = (clipped && nr > QP_MIN_ROWS) ? qp_digest(cs, nc, nr, cols, dl) : 0;
     if (clipped) {
-        shown = budget - QP_FIXED - 1 - (dn ? dn + 1 : 0);   /* footer; blank + digest */
+        shown = budget - QP_FIXED - 1 - dn;                  /* footer + digest */
         if (shown < 1) shown = 1;
     }
 
@@ -1390,6 +1394,7 @@ static void fmt_pipe_render(ray_t* val, char* buf, size_t bufsz, int* trunc) {
         snprintf(cells[c], QP_CELL, "%s", cs[c].name);
     qp_cells(line, sizeof line, cells, w, nc);
     qp_line(&o, line, cols);
+    bool cols_hidden = cols > 0 && strlen(line) > (size_t)(cols - 1);
 
     for (int64_t c = 0; c < nc; c++)
         snprintf(cells[c], QP_CELL, "%s", cs[c].type);
@@ -1407,13 +1412,12 @@ static void fmt_pipe_render(ray_t* val, char* buf, size_t bufsz, int* trunc) {
     }
 
     if (clipped) {
-        snprintf(line, sizeof line, "... (showing first %lld of %lld rows)",
-                 (long long)shown, (long long)nr);
+        if (cols_hidden)
+            snprintf(line, sizeof line, "... %lld rows, %lld cols", (long long)nr, (long long)qp_ncols(val));
+        else
+            snprintf(line, sizeof line, "... %lld rows", (long long)nr);
         qp_line(&o, line, cols);
-        for (int i = 0; i < dn; i++) {
-            if (!i) qp_line(&o, "", cols);
-            qp_line(&o, dl[i], cols);
-        }
+        for (int i = 0; i < dn; i++) qp_line(&o, dl[i], cols);
     }
     *trunc = o.trunc;
 }

@@ -164,7 +164,8 @@ q -conn :localhost:5000 -ls
   a file, or an `-eval` with newlines — runs as a script on the server: statement by statement, the last
   statement's value comes back.
 - **Display.** The value of each call is shown as the console would show it: a table as the pipe table, clipped to
-  `\c` rows with the `... (showing first n of N rows)` line and the per-column summary (`px=1-3. sym=all distinct.`)
+  `\c` rows with the `... N rows` line (`... N rows, M cols` when the width hides columns) and the per-column
+  summary (`px=1 to 3  sym=all distinct`)
   under it; anything else in the usual form. On a terminal the console is the terminal's size; when stdout is a
   pipe or a file the rows stay 25 but the WIDTH is unbounded, so every column reaches the reader. stdout carries only
   values; notices and errors go to stderr. A server that answers by deferred reply (a TorQ gateway) hands back the
