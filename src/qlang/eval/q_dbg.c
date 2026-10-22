@@ -282,7 +282,7 @@ static void dbg_banner(ray_t* err, int idx) {
 
 static void dbg_prompt_str(char* p, size_t cap) {
     int n = q_sys_prompt(p, (int)cap - 16);
-    for (int i = 0; i < g_dbg_depth && n + 1 < (int)cap; i++) p[n++] = ')';
+    for (int i = 0; n && i < g_dbg_depth && n + 1 < (int)cap; i++) p[n++] = ')';
     p[n] = '\0';
 }
 
