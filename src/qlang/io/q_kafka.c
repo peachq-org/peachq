@@ -279,7 +279,7 @@ static void kfk_batch_add(kfk_batch* b, const rd_kafka_message_t* m) {
     b->ts    = kfk_vec_push(b->ts, &ns);
     b->key   = kfk_list_push(b->key, ray_vec_from_raw(RAY_BYTE_ONLY, m->key ? m->key : "", m->key ? (int64_t)m->key_len : 0));
     b->hdr   = kfk_list_push(b->hdr, kfk_headers_of(m));
-    /* a tombstone (Kafka's null value) is :: beside an empty value's 0x */
+    /* a tombstone (Kafka's null value) is :: beside an empty value's `byte$() */
     ray_t* val = m->payload ? ray_vec_from_raw(RAY_BYTE_ONLY, m->payload, (int64_t)m->len) : (ray_retain(RAY_NULL_OBJ), RAY_NULL_OBJ);
     b->data  = kfk_list_push(b->data, val);
 }
