@@ -28,8 +28,11 @@ static bool lane_vec_bytes(ray_t* v, const char** p, int64_t* n) {
 
 /* ---- integer-kinded y for base-x: the int lanes plus byte and boolean (tracked aoc programs ran `2 vs 0x05`,
  * `256 sv 0x...`, `2 sv` over booleans on kdb); local so bytes never leak into til/#/indexing ---- */
+/* encode reads an int y unsigned at its own 32 bits: `256 vs .z.a` is four octets (ref/vs.md, peachq#96) */
+static int64_t at_own_width(int8_t t, int64_t v) { return t == RAY_I32 || t == -RAY_I32 ? (int64_t)(uint32_t)v : v; }
+
 static bool ikind_atom(ray_t* v, int64_t* out) {
-    if (q_type_is_int_atom(v)) { *out = q_type_iatom_val(v); return true; }
+    if (q_type_is_int_atom(v)) { *out = at_own_width(v->type, q_type_iatom_val(v)); return true; }
     if (!v) return false;
     switch (v->type) {
     case -RAY_BOOL: *out = v->b8 ? 1 : 0; return true;
@@ -45,6 +48,8 @@ static bool ikind_vec(ray_t* v) {
 static int64_t ikind_get(ray_t* v, int64_t i) {
     return q_type_is_int_vec(v) ? q_type_ivec_get(v, i) : ((const uint8_t*)ray_data(v))[i];
 }
+
+static int64_t ikind_enc(ray_t* v, int64_t i) { return at_own_width(v->type, ikind_get(v, i)); }
 
 /* sv's decode also takes float digits and radices (ref/sv.md: "numeric atoms or lists") */
 static bool fkind(ray_t* v) { return v && q_type_is_float_tag(v->type); }
@@ -156,7 +161,7 @@ static int64_t max_width(ray_t* x, ray_t* y) {
     if (ikind_atom(y, &v)) return leaf_width(x, v);
     if (!y || (!ikind_vec(y) && y->type != RAY_LIST)) return -1;
     for (int64_t j = 0; j < q_count(y); j++) {
-        int64_t wj = y->type == RAY_LIST ? max_width(x, ((ray_t**)ray_data(y))[j]) : leaf_width(x, ikind_get(y, j));
+        int64_t wj = y->type == RAY_LIST ? max_width(x, ((ray_t**)ray_data(y))[j]) : leaf_width(x, ikind_enc(y, j));
         if (wj < 0) return -1;
         if (wj > w) w = wj;
     }
@@ -191,7 +196,7 @@ static ray_t* base_encode(ray_t* x, ray_t* y, int64_t w) {
     ray_t* cols = ray_list_new(m > 0 ? m : 1);
     if (RAY_IS_ERR(cols)) return cols;
     for (int64_t j = 0; j < m; j++) {
-        ray_t* c = gen ? base_encode(x, e[j], w) : digits_of(x, ikind_get(y, j), w);
+        ray_t* c = gen ? base_encode(x, e[j], w) : digits_of(x, ikind_enc(y, j), w);
         if (RAY_IS_ERR(c)) { ray_release(cols); return c; }
         cols = ray_list_append(cols, c); ray_release(c);
         if (RAY_IS_ERR(cols)) return cols;
