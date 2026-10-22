@@ -1413,8 +1413,9 @@ static void fmt_pipe_render(ray_t* val, char* buf, size_t bufsz, int* trunc) {
     }
 
     if (clipped) {
-        if (cols_hidden)
-            snprintf(line, sizeof line, "... %lld rows, %lld cols", (long long)nr, (long long)qp_ncols(val));
+        int64_t mc = qp_ncols(val);
+        if (cols_hidden || mc > 8)
+            snprintf(line, sizeof line, "... %lld rows, %lld cols", (long long)nr, (long long)mc);
         else
             snprintf(line, sizeof line, "... %lld rows", (long long)nr);
         qp_line(&o, line, cols);
