@@ -367,7 +367,7 @@ int main(int argc, char** argv) {
             const char* peach = color ? "\033[38;5;215m" : "";
             const char* grey  = color ? "\033[90m" : "";
             const char* off   = color ? "\033[0m" : "";
-            printf("%stype %s\\?%s%s for help · %s\\l pq%s%s loads the standard library%s\n",
+            printf("%stype %s\\?%s%s for help, %s\\l pq%s%s loads the standard library%s\n",
                    grey, peach, off, grey, peach, off, grey, off);
         }
         fflush(stdout);
