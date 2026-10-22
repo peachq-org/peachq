@@ -4,6 +4,7 @@
 #include "qlang/q_fmt_internal.h" /* q_fmt_cell — shared with the pipe renderer */
 #include "qlang/q_console.h"  /* q_console_pipe_* — the modern display config */
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
+#include "qlang/q_builtins.h" /* q_type_is_fn — a lone function item prints bare */
 #include "qlang/base/q_calendar.h" /* q_calendar_days_from_civil — date display domain */
 #include "qlang/base/q_type.h" /* q_type_char — a sentinel run's one type letter */
 #include "qlang/base/q_err.h" /* QE_WSFULL — the allocating krepr's one failure */
@@ -1894,7 +1895,8 @@ static void q_fmt_body(ray_t* val) {
      * k-repr — parse trees and values alike (basics/parsetrees.md; implicit-
      * iteration.md pins nested items inline `(110b;0b)`) — where a lone item
      * prints `,x` unless it is a string: the string-list idiom at one row
-     * (ref/system.md:46 `system "pwd"` -> "/home/guest/q"). */
+     * (ref/system.md:46 `system "pwd"` -> "/home/guest/q"), a function or an
+     * empty vector (peachq-org/peachq#88: kdb prints `{value}`, `byte$()). */
     if (val->type == RAY_LIST) {
         int64_t n = q_count(val);
         ray_t** e = (ray_t**)ray_data(val);
@@ -1902,7 +1904,9 @@ static void q_fmt_body(ray_t* val) {
         if (n == 1 && e[0] == q_registry_list_value()) { qe_puts("()"); return; }
         if (n == 0) { qe_puts("()"); return; }
         if (is_matrix(e, n)) { fmt_matrix(e, n); return; }
-        if (n == 1 && e[0] && e[0]->type != RAY_CHARV) {   /* enlist: ,x */
+        if (n == 1 && e[0] && e[0]->type != RAY_CHARV
+            && (!q_type_is_fn(e[0]) || Q_IS_GENERIC_NULL(e[0]))
+            && !(ray_is_vec(e[0]) && q_count(e[0]) == 0)) {   /* enlist: ,x */
             qe_putc(',');
             fmt_list_elem(e[0]);
             return;
