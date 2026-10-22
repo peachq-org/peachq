@@ -1859,9 +1859,13 @@ static ray_t* feed_normal(ray_term_t* term, int key) {
     }
 
     case KEYCODE_CTRL_U: {
-        term->buf_len = 0;
-        term->buf_pos = 0;
-        ray_term_redraw(term);
+        if (term->buf_pos > 0) {
+            memmove(term->buf, term->buf + term->buf_pos,
+                    (size_t)(term->buf_len - term->buf_pos));
+            term->buf_len -= term->buf_pos;
+            term->buf_pos = 0;
+            ray_term_redraw(term);
+        }
         return NULL;
     }
 
