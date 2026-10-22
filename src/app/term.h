@@ -282,6 +282,19 @@ void ray_term_request_interrupt(void);
 void ray_term_eval_begin(ray_term_t* term);
 void ray_term_eval_end(ray_term_t* term);
 
+/* A program read of the console line (q `read0 0`): the OS edits and echoes it, Ctrl-C still signals.
+ * When stdin is not a console, end restores nothing. */
+typedef struct ray_term_mode {
+    int32_t saved;
+#if defined(RAY_OS_WINDOWS)
+    DWORD   mode;
+#else
+    struct termios attr;
+#endif
+} ray_term_mode_t;
+void ray_term_line_begin(ray_term_mode_t* prev);
+void ray_term_line_end(const ray_term_mode_t* prev);
+
 #define HIST_MAX_ENTRIES 5000
 #define HIST_DEFAULT_PATH ".rayforce_history"
 

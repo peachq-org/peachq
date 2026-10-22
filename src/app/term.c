@@ -235,6 +235,31 @@ void ray_term_eval_end(ray_term_t* term) {
 #endif
 }
 
+void ray_term_line_begin(ray_term_mode_t* prev) {
+#if defined(RAY_OS_WINDOWS)
+    HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+    prev->saved = GetConsoleMode(in, &prev->mode) != 0;
+    if (prev->saved)
+        SetConsoleMode(in, prev->mode | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT);
+#else
+    prev->saved = tcgetattr(STDIN_FILENO, &prev->attr) == 0;
+    if (prev->saved) {
+        struct termios tio = prev->attr;
+        tio.c_lflag |= ICANON | ECHO | ISIG;
+        tcsetattr(STDIN_FILENO, TCSANOW, &tio);
+    }
+#endif
+}
+
+void ray_term_line_end(const ray_term_mode_t* prev) {
+    if (!prev->saved) return;
+#if defined(RAY_OS_WINDOWS)
+    SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), prev->mode);
+#else
+    tcsetattr(STDIN_FILENO, TCSANOW, &prev->attr);
+#endif
+}
+
 /* ===== Cursor helpers (engine-internal; every byte rides the transport) ===== */
 
 static void cursor_csi(ray_term_t* t, int32_t n, char dir) {
