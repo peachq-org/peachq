@@ -29,7 +29,7 @@ void q_sys_cfg_init(void);
 
 /* `\d` current context — STATE lives in q_env (q_env.h), this is its command
  * surface.  reset = back to root (q_runtime lifecycle); prompt writes
- * "q)"/"q.foo)" into buf and returns its length (0 on overflow). */
+ * "q)"/"q.foo)" into buf and returns its length (empty under `-q`; 0 on overflow). */
 void        q_sys_ctx_reset(void);
 int         q_sys_prompt(char* buf, size_t cap);
 

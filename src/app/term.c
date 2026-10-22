@@ -1151,7 +1151,7 @@ int32_t ray_term_count_unmatched(ray_term_t* term) {
 
 void ray_term_prompt(ray_term_t* term) {
     term->last_cursor_row = 0;
-    if (term->prompt_override_len > 0) {
+    if (term->prompt_override_on) {
         term_write(term, term->prompt_override, (size_t)term->prompt_override_len);
         term->prompt_len = term->prompt_override_vis;
         return;
@@ -1200,20 +1200,16 @@ void ray_term_set_prompt_prefix(ray_term_t* term, const char* prefix) {
 
 void ray_term_set_prompt(ray_term_t* term, const char* ansi, int32_t vis_width) {
     if (!term) return;
-    if (!ansi || !*ansi) {
-        term->prompt_override_len = 0;
-        term->prompt_override_vis = 0;
-        term->prompt_override[0]  = '\0';
-        return;
-    }
-    int n = snprintf(term->prompt_override, sizeof(term->prompt_override), "%s", ansi);
+    int n = ansi ? snprintf(term->prompt_override, sizeof(term->prompt_override), "%s", ansi) : -1;
     if (n < 0 || n >= (int)sizeof(term->prompt_override)) {
-        /* Too long for the buffer — clear rather than truncate mid-escape. */
+        /* NULL, or too long for the buffer (clear rather than truncate mid-escape): the default prompt. */
+        term->prompt_override_on  = 0;
         term->prompt_override_len = 0;
         term->prompt_override_vis = 0;
         term->prompt_override[0]  = '\0';
         return;
     }
+    term->prompt_override_on  = 1;
     term->prompt_override_len = n;
     term->prompt_override_vis = vis_width;
 }
@@ -1288,7 +1284,7 @@ void ray_term_redraw(ray_term_t* term) {
         if (term->multiline_len > 0) {
             memcpy(hlbuf + hlen, CONT_PROMPT_STR, CONT_PROMPT_LEN);
             hlen += CONT_PROMPT_LEN;
-        } else if (term->prompt_override_len > 0) {
+        } else if (term->prompt_override_on) {
             memcpy(hlbuf + hlen, term->prompt_override, (size_t)term->prompt_override_len);
             hlen += term->prompt_override_len;
         } else {
@@ -1764,7 +1760,7 @@ static ray_t* feed_normal(ray_term_t* term, int key) {
             if (term->multiline_len > 0) {
                 memcpy(hlbuf + hlen, CONT_PROMPT_STR, CONT_PROMPT_LEN);
                 hlen += CONT_PROMPT_LEN;
-            } else if (term->prompt_override_len > 0) {
+            } else if (term->prompt_override_on) {
                 memcpy(hlbuf + hlen, term->prompt_override, (size_t)term->prompt_override_len);
                 hlen += term->prompt_override_len;
             } else {

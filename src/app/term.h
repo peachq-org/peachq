@@ -131,9 +131,10 @@ typedef struct ray_term {
     int32_t  prompt_prefix_vis;
     /* Optional full-prompt override (openq): when set, ray_term_prompt draws
      * exactly this ANSI string in place of the prefix + built-in `‣` glyph, so
-     * the q REPL can show a bare `q)`.  Empty by default → glyph behaviour
+     * the q REPL can show a bare `q)`.  Off by default → glyph behaviour
      * unchanged.  vis is the rendered column width (for cursor math). */
     char     prompt_override[64];
+    int32_t  prompt_override_on;
     int32_t  prompt_override_len;
     int32_t  prompt_override_vis;
     int32_t  last_total_rows;
@@ -225,7 +226,7 @@ void   ray_term_set_continuation_fn(ray_term_t* term, ray_continuation_fn fn);
 void   ray_term_set_prompt_prefix(ray_term_t* term, const char* prefix);
 
 /* Override the entire main prompt with a caller-supplied ANSI string of the
- * given visual width; pass NULL/"" to restore the default `‣` prompt. */
+ * given visual width ("" = no prompt); pass NULL to restore the default `‣` prompt. */
 void   ray_term_set_prompt(ray_term_t* term, const char* ansi, int32_t vis_width);
 
 /* Event-driven terminal API — split the former blocking line reader into begin + feed.
