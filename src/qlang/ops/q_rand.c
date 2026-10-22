@@ -9,8 +9,9 @@
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home */
+#include "qlang/ops/q_index.h"  /* q_index_at — out-of-range index yields typed nulls */
 #include "core/rand.h"     /* ray_rand_u64 / ray_rand_below — THE rng owner */
-#include "lang/internal.h" /* ray_rand_fn, ray_guid_fn, RAY_IS_TEMPORAL64/F */
+#include "lang/internal.h" /* ray_rand_fn, ray_take_fn, ray_guid_fn, RAY_IS_TEMPORAL64/F */
 #include "table/sym.h"     /* ray_sym_intern, RAY_SYM_W64 — sym generate */
 #include <math.h>          /* nextafter/nextafterf — float roll clamp */
 #include <stdint.h>        /* INT32/64 MIN/MAX */
@@ -240,6 +241,18 @@ ray_t* q_roll_wrap(ray_t* x, ray_t* y) {
         /* n?list — pick.  Indices draw via the engine KERNEL directly
          * (ray_rand_fn), not the env name — the bootstrap shadow-rebinds root
          * `rand` to `.q.rand`. */
+        if (q_count(y) == 0) {
+            /* n?empty indexes past the end: n nulls of y's type, so rand stays {first 1?x} */
+            ray_t* zero = ray_i64(0);
+            ray_t* cnt = ray_i64(n);
+            ray_t* idx = ray_take_fn(zero, cnt);
+            ray_release(zero);
+            ray_release(cnt);
+            if (!idx || RAY_IS_ERR(idx)) return idx;
+            ray_t* out = q_index_at(y, &idx, 1);
+            ray_release(idx);
+            return out;
+        }
         ray_t* cnt = ray_i64(n);
         ray_t* len = ray_i64(q_count(y));
         ray_t* idx = ray_rand_fn(cnt, len);

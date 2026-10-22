@@ -773,15 +773,6 @@ static int list_is_parse_tree(ray_t* v, int depth) {
     return 0;
 }
 
-/* Empty-vector name (`long$()`) via the guarded q_type_qname home; byte alone
- * stays bare-0x (byte_impl.qcmd:120 pin), so it names no `byte$()`. Composing on
- * the single home means the #209 value-band guard there transitively protects
- * empty-vec display — no parallel table to keep in sync. */
-static const char* empty_vec_qname(int8_t type) {
-    if (type == RAY_BYTE_ONLY) return NULL;
-    return q_type_qname(type);
-}
-
 /* Escape one byte kdb-style — THE display-inverse of the scanner decode. */
 static size_t char_esc(unsigned char ch, char out[8]) {
     switch (ch) {
@@ -1632,9 +1623,9 @@ static void q_fmt_body(ray_t* val) {
         return;
     }
 
-    /* empty typed vector: `` `type$() `` (byte keeps its bare-0x arm) */
+    /* empty typed vector: `` `type$() `` */
     if (val->type > 0 && ray_is_vec(val) && q_count(val) == 0) {
-        const char* qn = empty_vec_qname(val->type);
+        const char* qn = q_type_qname(val->type);
         if (qn) { qe_printf("`%s$()", qn); return; }
     }
 
@@ -1699,7 +1690,7 @@ static void q_fmt_body(ray_t* val) {
         qe_putc('b');
         return;
     }
-    /* byte vector: 0x + hex pairs (ref/sv.md); empty is bare `0x` */
+    /* byte vector: 0x + hex pairs (ref/sv.md) */
     if (val->type == RAY_BYTE_ONLY) {
         int64_t n = q_count(val);
         const uint8_t* d = (const uint8_t*)ray_data(val);
