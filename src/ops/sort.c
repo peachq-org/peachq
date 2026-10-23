@@ -125,11 +125,17 @@ int sort_cmp(const sort_cmp_ctx_t* ctx, int64_t a, int64_t b) {
 
 /* RADIX_SORT_THRESHOLD, SMALL_POOL_THRESHOLD defined in exec_internal.h */
 
+/* Neither quicksort nor heapsort is stable, and q's grade must be (ref/asc.md):
+ * ties are ordered by row index, which every caller hands in ascending. */
+static inline bool key_lt(uint64_t ka, int64_t ia, uint64_t kb, int64_t ib) {
+    return ka < kb || (ka == kb && ia < ib);
+}
+
 static void key_sift_down(uint64_t* keys, int64_t* idx, int64_t n, int64_t i) {
     for (;;) {
         int64_t largest = i, l = 2*i+1, r = 2*i+2;
-        if (l < n && keys[l] > keys[largest]) largest = l;
-        if (r < n && keys[r] > keys[largest]) largest = r;
+        if (l < n && key_lt(keys[largest], idx[largest], keys[l], idx[l])) largest = l;
+        if (r < n && key_lt(keys[largest], idx[largest], keys[r], idx[r])) largest = r;
         if (largest == i) return;
         uint64_t tk = keys[i]; keys[i] = keys[largest]; keys[largest] = tk;
         int64_t  ti = idx[i];  idx[i]  = idx[largest];  idx[largest]  = ti;
@@ -152,7 +158,7 @@ static void key_insertion_sort(uint64_t* keys, int64_t* idx, int64_t n) {
         uint64_t kk = keys[i];
         int64_t  ii = idx[i];
         int64_t j = i - 1;
-        while (j >= 0 && keys[j] > kk) {
+        while (j >= 0 && key_lt(kk, ii, keys[j], idx[j])) {
             keys[j+1] = keys[j];
             idx[j+1]  = idx[j];
             j--;
@@ -174,9 +180,10 @@ static void key_introsort_impl(uint64_t* keys, int64_t* idx,
         /* Median-of-3 pivot */
         int64_t mid = n / 2;
         uint64_t a = keys[0], b = keys[mid], c = keys[n-1];
+        int64_t ia = idx[0], ib = idx[mid], ic = idx[n-1];
         int64_t pi;
-        if (a < b) pi = (b < c) ? mid : (a < c ? n-1 : 0);
-        else       pi = (a < c) ? 0   : (b < c ? n-1 : mid);
+        if (key_lt(a, ia, b, ib)) pi = key_lt(b, ib, c, ic) ? mid : (key_lt(a, ia, c, ic) ? n-1 : 0);
+        else                      pi = key_lt(a, ia, c, ic) ? 0   : (key_lt(b, ib, c, ic) ? n-1 : mid);
 
         /* Move pivot to end */
         uint64_t pk = keys[pi]; keys[pi] = keys[n-1]; keys[n-1] = pk;
@@ -185,7 +192,7 @@ static void key_introsort_impl(uint64_t* keys, int64_t* idx,
         /* Partition */
         int64_t lo = 0;
         for (int64_t i = 0; i < n - 1; i++) {
-            if (keys[i] < pk) {
+            if (key_lt(keys[i], idx[i], pk, pv)) {
                 uint64_t tk = keys[i]; keys[i] = keys[lo]; keys[lo] = tk;
                 int64_t  ti = idx[i];  idx[i]  = idx[lo];  idx[lo]  = ti;
                 lo++;
@@ -293,7 +300,9 @@ static void key_range_fn(void* arg, uint32_t wid, int64_t start, int64_t end) {
     key_range_ctx_t* c = (key_range_ctx_t*)arg;
     const uint64_t* keys = c->keys;
     uint64_t local_or = c->pw_or[wid];
-    uint64_t first = keys[start];
+    /* One reference for every task: a per-task first element misses every bit
+     * that differs only between tasks (`iasc til 100000` lost its third byte). */
+    uint64_t first = keys[0];
     for (int64_t i = start; i < end; i++)
         local_or |= keys[i] ^ first;
     c->pw_or[wid] = local_or;
@@ -311,14 +320,6 @@ uint8_t compute_key_nbytes(ray_pool_t* pool, const uint64_t* keys,
         ray_pool_dispatch(pool, key_range_fn, &ctx, n);
         diff = 0;
         for (uint32_t w = 0; w < nw; w++) diff |= pw_or[w];
-        /* Also XOR the first element from different worker ranges to
-         * catch cross-worker differences (workers' "first" may differ) */
-        uint64_t first = keys[0];
-        int64_t chunk = (n + nw - 1) / nw;
-        for (uint32_t w = 1; w < nw; w++) {
-            int64_t wstart = (int64_t)w * chunk;
-            if (wstart < n) diff |= keys[wstart] ^ first;
-        }
     } else {
         diff = 0;
         uint64_t first = keys[0];
