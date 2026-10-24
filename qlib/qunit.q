@@ -269,20 +269,34 @@ deleteGlobalTables:{ [] t:tables[]; if[count t; ![`.;();0b;t]]; t};
 / @param resultTbl Table as returned by runTests
 / @return string
 verdict:{ [resultTbl]
-    p:sum `pass=resultTbl`status;
-    $[p=n:count resultTbl;
+    s:resultTbl[`status] except `skip;
+    p:sum `pass=s;
+    $[p=n:count s;
         "=== PASS - ",string[p]," of ",string[n]," ===";
         "=== FAILED - ",string[p]," of ",string[n]," passed, ",string[n-p]," failed ==="]};
 
 / Run all tests in selected namespaces, return table of pass/fails/timings.
-/ @param nsList symbol list of namespaces that contains test e.g. `.mytests`yourtests
-/ @return a table containing one row for each test, detailing if it passed/failed.
+/ @param nsList symbol list of namespaces that contains test e.g. `.mytests`yourtests, run as named; or :: for every
+/        namespace ending in test; or a dict of include and/or exclude, each a symbol list used as given or a string
+/        "a,b" of case-insensitive words matched anywhere in those namespace names
+/ @return a table containing one row for each test, detailing if it passed/failed, and one skip row per excluded namespace.
 / @throws nsNoExist If the namespace you selected does not exist.
+/ @throws noTestsFound If include and exclude leave no namespace.
 runTests:{ [nsList]
-    l::("  ";"   ");
-    lg "\r\n"; lg "########## .qunit.runTests `",("`" sv string (),nsList)," ##########";
-    / no namespaces specified, find all ending with test
     nsl:$[11h~abs type nsList; nsList; `$".",/:string a where (lower a:key `) like "*test"];
+    sk:`$();
+    if[99h=type nsList;
+        raw:{ [d; k] $[k in key d; d k; ::]} nsList;
+        sel:{ [v] $[10h<>abs type v; v; 0=count v; ::; [w:w where 0<count each w:"," vs (),v; "*",/:lower[w],\:"*"]]};
+        hit:{ [v; l] $[11h=abs type v; l where l in v; count v; l where any (lower string l) like/: v; 0#l]};
+        i:sel raw`include; e:sel raw`exclude;
+        nsl:$[(::)~i; nsl; 11h=abs type i; (),i; hit[i; nsl]];
+        if[not (::)~e; nsl:nsl except sk:hit[e; nsl]];
+        if[0=count nsl;
+            t:{ [s; r; d] $[(::)~s; d; 10h=abs type r; (),r; "," sv string (),r]};
+            '"noTestsFound: no namespace selected - include ",t[i; raw`include; "*"],"; exclude ",t[e; raw`exclude; ""]]];
+    l::("  ";"   ");
+    lg "\r\n"; lg "########## .qunit.runTests `",("`" sv string (),nsl)," ##########";
     / uj, not raze: a parameterised namespace's parameter column is typed, an ordinary one's holds (), and only
     / uj joins the two either way round; a namespace with no tests answers () and must not reach it
     results:runNsTests each (),nsl;
@@ -290,12 +304,13 @@ runTests:{ [nsList]
     if[0=count a; 'noTestsFound];
     // if no parameters actually used, remove the column
     a:$[all ()~/:a`parameter; delete parameter from a; a];
-    / what failed goes first, and stays first: `error and `fail sort ahead of `pass
-    a:`status xasc a;
+    / what failed goes first, and stays first: `error and `fail sort ahead of `pass, and `skip after it
+    a:`status xasc a uj ([] status:(count sk)#`skip; name:sk; namespace:sk);
     / the verdict leads so a long table cannot push it off the top, and trails so
-    / it is the last line on screen. The table between them is still the return.
+    / it is the last line on screen but one: what was skipped is the last. The table between them is still the return.
     v:verdict a;
     1 v,"\r\n"; lg a; 1 v,"\r\n";
+    1 "skipped: ",$[count sk; " " sv string sk; "none"],"\r\n";
     a};
         
 / find functions with a certain name pattern within the selected namespace
