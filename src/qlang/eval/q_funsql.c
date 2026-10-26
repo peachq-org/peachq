@@ -16,6 +16,7 @@
 #include "qlang/ops/q_bang.h"
 #include "qlang/ops/q_dollar.h"        /* q_dollar_cast — the Where-form update keeps the column type */
 #include "qlang/ops/q_index.h"
+#include "qlang/ops/q_table.h"         /* q_table_bcast_col — an empty Update result fills its rows */
 #include "qlang/io/q_splay.h"          /* mapped splays: from materializes, writes 'splay */
 #include "qlang/io/q_io.h"             /* q_io_is_fsym / q_io_resource_table — resource From-resolve */
 #include "qlang/io/q_provider.h"         /* provider carriers: qsql push / materialize */
@@ -1183,6 +1184,18 @@ static ray_t* upd_amend(ray_t* cur, ray_t* rows, ray_t* v) {
     return r;
 }
 
+/* An empty result is a constant in Update (peachq#101): a zero-item list of any type fills each of the n rows it
+ * reaches, as an atom does — the count-mismatch 'length stays for every other list. */
+static int upd_is_empty(ray_t* v, int64_t n) {
+    return n > 0 && !ray_is_atom(v) && q_count(v) == 0 && (ray_is_vec(v) || v->type == RAY_ENUM || v->type == RAY_LIST);
+}
+
+static ray_t* upd_fill(ray_t* v, int64_t n) {                 /* consumes v */
+    ray_t* c = q_table_bcast_col(v, n);
+    ray_release(v);
+    return c;
+}
+
 /* What the amend starts from.  `full` = the update reaches EVERY row, so no
  * value of the old column survives and its type has no claim — a fresh null
  * column of the PHRASE's type is why `update avg weight by city from p` turns
@@ -1217,6 +1230,7 @@ static ray_t* upd_cols(ray_t* a, ray_t* t, ray_t* idx, ray_t* gidxs) {
             err = q_err(QE_TYPE);
         } else if (!gidxs) {                             /* ungrouped */
             ray_t* v = phrase_eval(tree, t, idx);
+            if (v && !RAY_IS_ERR(v) && upd_is_empty(v, q_count(idx))) v = upd_fill(v, q_count(idx));
             if (!v || RAY_IS_ERR(v)) err = v ? v : q_err(QE_TYPE);
             else if (full && (ray_is_vec(v) || v->type == RAY_ENUM || v->type == RAY_LIST) &&
                      q_count(v) == q_count(t)) {
@@ -1235,8 +1249,10 @@ static ray_t* upd_cols(ray_t* a, ray_t* t, ray_t* idx, ray_t* gidxs) {
             ray_t** gi = (ray_t**)ray_data(gidxs);
             for (int64_t k = 0; k < ng && !err; k++) {
                 ray_t* v = phrase_eval(tree, t, gi[k]);
+                int konst = v && !RAY_IS_ERR(v) && upd_is_empty(v, q_count(gi[k]));
+                if (konst) v = upd_fill(v, q_count(gi[k]));
                 if (!v || RAY_IS_ERR(v)) { err = v ? v : q_err(QE_TYPE); break; }
-                if (!cur) cur = upd_col_start(t, nm->i64, v, full);
+                if (!cur) cur = (full && konst) ? null_col_like(v, q_count(t)) : upd_col_start(t, nm->i64, v, full);
                 cur = upd_amend(cur, gi[k], v);
                 if (RAY_IS_ERR(cur)) { err = cur; cur = NULL; }
                 ray_release(v);
