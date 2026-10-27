@@ -124,6 +124,9 @@ static inline void datetime_to_day_ns(double val, int64_t* day, int64_t* tod_ns)
     *tod_ns = (int64_t)tod;
 }
 
+/* A timestamp's datetime: the f64 day count, unrounded. */
+static inline double ts_to_datetime(int64_t ns) { return (double)ns / NS_PER_DAY; }
+
 /* The datetime's integer form, saturating at ±0Wp (datatypes.md:146). */
 static inline int64_t datetime_to_ns(double val) {
     int64_t day, tod, ns;

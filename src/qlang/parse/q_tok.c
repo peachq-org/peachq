@@ -8,6 +8,7 @@
 #include "qlang/base/q_calendar.h"  /* q_calendar_days_from_civil, q_calendar_date_valid, q_calendar_ts_compose(_checked) */
 #include "core/numparse.h"     /* ray_parse_f64/i64 — float twin + numeric Tok */
 #include "lang/internal.h"      /* ray_typed_null, ray_guid, ray_error — q_tok() values */
+#include "lang/cal.h"           /* THE datetime and timestamp splits — a clocked point's time of day */
 #include "qlang/parse/q_parse_internal.h"  /* MAX_VEC — one literal cap for both scanners */
 #include <math.h>
 #include <string.h>
@@ -136,6 +137,7 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
                 out->kind = Q_TOK_EL_TS;
                 out->i = q_calendar_ts_compose(q_calendar_days_from_civil(y, mo, d), tok_clock_ns(&c));
                 if (neg) out->i = -out->i;
+                out->clocked = c.fields || c.fd;
                 *p = end;
                 return 1;
             }
@@ -153,6 +155,7 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
                     out->kind = Q_TOK_EL_TS;
                     out->i = q_calendar_ts_compose(q_calendar_days_from_civil(y, mo, d), tok_clock_ns(&c));
                     if (neg) out->i = -out->i;
+                    out->clocked = c.fields || c.fd;
                     *p = end;
                     return 1;
                 }
@@ -162,6 +165,7 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
                 out->kind = Q_TOK_EL_DT;
                 out->f = (double)q_calendar_days_from_civil(y, mo, d) + (double)(tok_clock_ns(&c) / 1000000) / 86400000.0;
                 if (neg) out->f = -out->f;   /* glued sign negates the payload (kdb date-literal rule; derived for T) */
+                out->clocked = c.fields || c.fd;
                 *p = end;
                 return 1;
             }
@@ -301,7 +305,7 @@ static int lit_special(const char *s, int p, q_tok_el *out) {
 /* Scan one magnitude at src[*p]: 1 on success, 0 on no match, -1 with *err on a
  * malformed temporal shape (an invalid civil date never falls back to a float). */
 int q_tok_magnitude(const char *src, int *p, q_tok_el *out, const char **err) {
-    out->forces_float = 0;
+    out->forces_float = out->clocked = 0;
     int used = lit_special(src, *p, out);
     if (used) { *p += used; return 1; }
 
@@ -412,38 +416,48 @@ static const lit_ctx *lit_ctx_of_kind(q_tok_el_kind k) {
  * same quantity — a calendar point or an amount of time, never one relabelled as the other (`"t"$2000.01.02` is
  * 00:00:00.001): a POINT takes only a finer point, since dropping precision moves the instant (`2000.01.01T06:00:00d`,
  * owner ruling 2026-09-04), while an AMOUNT takes any other amount, coarser included, because kdb is inconsistent
- * there and `$` rescales all four freely (`"u"$00:00:10` is 00:00, owner ruling 2026-09-04); datetime has no integer
- * payload, so it is a destination only.  An UNSUFFIXED strand only INFERS its type and keeps the single
- * date->timestamp promotion — `13:30 13:30:01` stays 'parse, never quietly `13:30 13:30`. */
+ * there and `$` rescales all four freely (`"u"$00:00:10` is 00:00, owner ruling 2026-09-04).  A point written with
+ * a CLOCK also takes p z n t u v (owner ruling 2026-10-27); the bare `2000.01.01Dz` wrote none.  An UNSUFFIXED strand
+ * only INFERS its type and keeps the single date->timestamp promotion — `13:30 13:30:01` stays 'parse. */
 static int lit_el_ok(const q_tok_el *e, const lit_ctx *c, int suffixed) {
     if (e->forces_float && e->kind != Q_TOK_EL_NULL && e->kind != c->kind &&
         !(lit_el_special(e) && c->kind == Q_TOK_EL_DT)) return 0;
     if (e->kind == c->kind || e->kind == Q_TOK_EL_INT || lit_el_special(e)) return 1;
     if (!suffixed) return c->kind == Q_TOK_EL_TS && e->kind == Q_TOK_EL_DATE;
+    if (e->clocked) return c->kind == Q_TOK_EL_TS || c->kind == Q_TOK_EL_DT || !c->point;
     const lit_ctx *s = lit_ctx_of_kind(e->kind);
     return s && !RAY_IS_TEMPORALF(s->type) && s->unit && c->unit && s->point == c->point && (!s->point || s->unit % c->unit == 0);
 }
 
-/* The date->timestamp arm keeps the saturating compose (a bare multiply overflows int64 for far dates); every other
- * conversion is the unit ratio — a 2-digit clock times 1e9 ns stays far inside int64 — floored, since narrowing
- * truncates toward -inf (cast.md:168: `"u"$-00:00:10` is -00:01). */
+/* The date->timestamp arm keeps the saturating compose (a bare multiply overflows int64 for far dates); a clocked
+ * point takes what `$` gives; every other conversion is the unit ratio — a 2-digit clock times 1e9 ns stays far
+ * inside int64 — floored, since narrowing truncates toward -inf (cast.md:168: `"u"$-00:00:10` is -00:01). */
 static int64_t lit_payload(const lit_ctx *c, const q_tok_el *e) {
     if (c->kind == Q_TOK_EL_TS && e->kind == Q_TOK_EL_DATE)
         return q_calendar_ts_compose(e->i, 0);      /* days -> ns */
+    if (e->clocked && e->kind != c->kind) {         /* a point, else the time of day */
+        if (e->kind == Q_TOK_EL_TS) return ts_ns_in_day(e->i) / c->unit;
+        if (c->kind == Q_TOK_EL_TS) return datetime_to_ns(e->f);
+        int64_t day, tod;
+        datetime_to_day_ns(e->f, &day, &tod);
+        return tod / c->unit;
+    }
     const lit_ctx *s = lit_ctx_of_kind(e->kind);
     if (!s || s == c) return lit_int(e, ray_type_sizes[c->type]);
     int64_t v = e->i * s->unit;
     return v / c->unit - (v % c->unit < 0);
 }
 
+static double lit_days(const q_tok_el *e) { return e->kind == Q_TOK_EL_TS ? ts_to_datetime(e->i) : lit_float(e); }
+
 static ray_t *lit_temporal(const lit_ctx *c, const q_tok_el *buf, int m) {
     if (RAY_IS_TEMPORALF(c->type)) {
         if (m == 1) {
-            if (buf[0].kind != Q_TOK_EL_NULL && buf[0].kind != Q_TOK_EL_INT) return ray_datetime(lit_float(&buf[0]));
+            if (buf[0].kind != Q_TOK_EL_NULL && buf[0].kind != Q_TOK_EL_INT) return ray_datetime(lit_days(&buf[0]));
             return ray_typed_null(-RAY_DATETIME);   /* incl. a bare int: see PLAN.md */
         }
         double t[MAX_VEC];
-        for (int i = 0; i < m; i++) t[i] = lit_float(&buf[i]);
+        for (int i = 0; i < m; i++) t[i] = lit_days(&buf[i]);
         return lit_mark_nulls(ray_vec_from_raw(RAY_DATETIME, t, m), buf, m);
     }
     if (m == 1)

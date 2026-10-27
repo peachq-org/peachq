@@ -1288,7 +1288,7 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             return ray_datetime(val->f64);
         if (val->type == -RAY_DATE) return ray_datetime((double)val->i32);
         if (val->type == -RAY_TIMESTAMP)
-            return ray_datetime((double)val->i64 / 86400000000000.0);
+            return ray_datetime(ts_to_datetime(val->i64));
         /* Vector cast: same-tag identity; int-temporal sources need the
          * per-element unit conversion (cast_vec_temporal_elems — the atom
          * arm's semantics; sources without an atom arm error there);
