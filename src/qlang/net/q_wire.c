@@ -518,7 +518,8 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
          * canonical form.  SERDE mode: engine boxing is value state —
          * never collapse, and carry the engine attrs byte (QUOTED lists
          * are journaled expression trees). */
-        if (!b->serde) {
+        /* a list of dicts goes as the list q sees (a stored table column); a run of rows that IS a table is one */
+        if (!b->serde && !q_type_is_row_list(x)) {
             ray_t* cx = q_list_collapse(x);
             if (cx && !RAY_IS_ERR(cx) && cx->type != RAY_LIST) {
                 rc = q_wire_write_obj(b, cx);
@@ -1035,6 +1036,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
             l->attrs |= attrs & (uint8_t)~RAY_ATTR_SLICE;
             return l;
         }
+        if (q_type_is_row_list(l)) return rd_attr(c, l, attrs);   /* the writer's list of dicts */
         ray_t* out = q_list_collapse(l);              /* owned; parser-identical shape */
         ray_release(l);
         return rd_attr(c, out, attrs);
