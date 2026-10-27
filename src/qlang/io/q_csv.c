@@ -31,6 +31,7 @@
 #include "core/numparse.h"      /* ray_parse_i64/f64 */
 #include "lang/env.h"           /* ray_fn_vary */
 #include "lang/eval.h"          /* RAY_FN_NONE, ray_at_fn */
+#include "lang/cal.h"           /* ts_to_datetime — the z cell */
 #include "ops/hash.h"           /* ray_hash_bytes — the cardinality sample */
 #include "table/sym.h"          /* ray_sym_intern_runtime / ray_sym_str */
 #include <rayforce.h>
@@ -566,7 +567,7 @@ static int csv_int_cell(const char* f, size_t n, int64_t lim, int64_t* out) {
 /* the ns instant under the char that asked for it: p is the native payload, z the
  * kdb-legacy fractional days, converted as Tok converts it (tok.md:222-227) */
 static ray_t* csv_instant_atom(char c, int64_t ns) {
-    return c == 'p' ? ray_timestamp(ns) : ray_datetime((double)ns / 86400000000000.0);
+    return c == 'p' ? ray_timestamp(ns) : ray_datetime(ts_to_datetime(ns));
 }
 
 /* one cell -> an OWNED atom under its FROZEN type char, or 'csv.  The clock
