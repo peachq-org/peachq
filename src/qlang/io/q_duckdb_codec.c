@@ -1800,6 +1800,12 @@ ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_
     for (int64_t c = 0; c < ncols; c++) {
         const char* nm = res->names[c];
         if (taken[c]) continue;
+        if (tbl && !RAY_IS_ERR(tbl) && cols[c]) {   /* a record column is stored as its rows, as q builds one */
+            ray_t* stored = q_table_col_rows(cols[c]);
+            ray_release(cols[c]);
+            cols[c] = stored && !RAY_IS_ERR(stored) ? stored : NULL;
+            if (!cols[c]) { ray_release(tbl); tbl = NULL; err = stored ? stored : q_err(QE_WSFULL); break; }
+        }
         if (tbl && !RAY_IS_ERR(tbl)) tbl = ray_table_add_col(tbl, ray_sym_intern_runtime(nm, strlen(nm)), cols[c]);
         for (int i = 0; i < QD_NCOS && tbl && !RAY_IS_ERR(tbl); i++) {
             ray_t* co = cos[c].co[i].acc;
@@ -2405,7 +2411,8 @@ ray_t* q_duckdb_codec_check_fields(int slot, ray_t* tbl, int64_t c, duck_logical
 }
 
 /* THE enum site, at the write door's entry (2026-09-14): decayed before the schema check, the sidecar, the chunk writer
- * or rekey can see a 20h column, an enum is STORED as its symbols (ADR 8) and cannot go stale when its domain changes */
+ * or rekey can see a 20h column, an enum is STORED as its symbols (ADR 8) and cannot go stale when its domain changes.
+ * A table column stored as its rows (q_table_col_rows) is the table again here, the record carrier the codec maps. */
 ray_t* q_duckdb_codec_decay_enums(int slot, ray_t* tbl, qd_enum_t* en) {
     int64_t ncols = ray_table_ncols(tbl);
     bool any = false;
@@ -2414,13 +2421,19 @@ ray_t* q_duckdb_codec_decay_enums(int slot, ray_t* tbl, qd_enum_t* en) {
         bool   e   = col && col->type == RAY_ENUM;
         en[c].dom  = e ? q_enum_domain(col) : 0;
         en[c].attr = e ? q_attr_letter(col) : 0;
-        any |= e;
+        any |= e || q_type_is_row_list(col);
     }
     if (!any) { ray_retain(tbl); return tbl; }
     ray_t* out = ray_table_new(ncols);
     for (int64_t c = 0; c < ncols && out && !RAY_IS_ERR(out); c++) {
         ray_t* col = ray_table_get_col_idx(tbl, c);   /* borrowed */
-        if (!en[c].dom) { out = ray_table_add_col(out, ray_table_col_name(tbl, c), col); continue; }   /* retains */
+        if (!en[c].dom) {
+            ray_t* rec = q_type_is_row_list(col) ? q_list_collapse(col) : (ray_retain(col), col);
+            if (!rec || RAY_IS_ERR(rec)) { ray_release(out); return rec ? rec : q_err(QE_WSFULL); }
+            out = ray_table_add_col(out, ray_table_col_name(tbl, c), rec);   /* retains */
+            ray_release(rec);
+            continue;
+        }
         ray_t* val = q_enum_resolve(col);
         if (!val || RAY_IS_ERR(val) || val->type != RAY_SYM) {
             ray_release(val);

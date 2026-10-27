@@ -27,6 +27,11 @@ ray_t* q_list_collapse(ray_t* l);
  * home), so a walker can dispatch on the items.  Borrows `v`; OWNED list, or an owned error.  DEFINED in ops/q_list.c. */
 ray_t* q_list_uncollapse(ray_t* v);
 
+/* What a table stores for a column value: a non-empty table is kept as the general list of its row dicts, so exec,
+ * meta and the wire see the list, as kx does (user transcript, owner 2026-10-27); an empty one keeps its schema.
+ * Borrows `col`; OWNED result.  DEFINED in ops/q_table.c. */
+ray_t* q_table_col_rows(ray_t* col);
+
 /* THE per-column table walk (colfn owns any lazy-materialize).  DEFINED in
  * ops/q_table.c; declared here (like q_list_collapse) so env-using callers
  * (apply, dollar) reach it without the poisoned q_registry_internal.h. */

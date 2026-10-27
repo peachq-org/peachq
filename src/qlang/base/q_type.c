@@ -321,6 +321,11 @@ int q_type_is_plain_dict(ray_t* x) {
     return x && x->type == RAY_DICT && !q_type_is_keyed(x);
 }
 
+int q_type_is_row_list(ray_t* x) {
+    return x && x->type == RAY_LIST && q_count(x) > 0 && ((ray_t**)ray_data(x))[0]
+        && ((ray_t**)ray_data(x))[0]->type == RAY_DICT;
+}
+
 /* Any dictionary, keyed table included — for laws on the entries axis that
  * cover both (group's dict arm, `!`'s refusal of a dict operand). */
 int q_type_is_dict(ray_t* x) {

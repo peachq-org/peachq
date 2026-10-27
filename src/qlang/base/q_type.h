@@ -101,6 +101,10 @@ int q_type_is_keyed(ray_t* y);
 /* A plain key!value dict (a dict that is NOT a keyed table). */
 int q_type_is_plain_dict(ray_t* x);
 
+/* A general list led by a dict: the rows a table stores for a table-valued column (it collapses back to that table
+ * only when the dicts share keys — q_list_collapse decides). */
+int q_type_is_row_list(ray_t* x);
+
 /* any dictionary, keyed table included (entries-axis laws) */
 int q_type_is_dict(ray_t* x);
 
