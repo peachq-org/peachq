@@ -1909,6 +1909,14 @@ static void q_fmt_body(ray_t* val) {
         /* a bare constructor (parse "()") is the empty-list application */
         if (n == 1 && e[0] == q_registry_list_value()) { qe_puts("()"); return; }
         if (n == 0) { qe_puts("()"); return; }
+        if (q_type_is_row_list(val)) {           /* same-keyed row dicts (a stored table column) print as their table */
+            ray_t* tb = q_list_collapse(val);
+            int is_tb = tb && !RAY_IS_ERR(tb) && tb->type == RAY_TABLE;
+            if (is_tb) q_fmt_body(tb);
+            if (tb && RAY_IS_ERR(tb)) ray_error_free(tb);
+            else if (tb) ray_release(tb);
+            if (is_tb) return;
+        }
         if (is_matrix(e, n)) { fmt_matrix(e, n); return; }
         if (n == 1 && e[0] && e[0]->type != RAY_CHARV
             && (!q_type_is_fn(e[0]) || Q_IS_GENERIC_NULL(e[0]))

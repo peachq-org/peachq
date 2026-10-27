@@ -203,9 +203,13 @@ ray_t* q_table_row_at(ray_t* t, int64_t row) {
 /* t[idx] dispatcher over the single-home gather: an integer ATOM is the row
  * dict, an integer VECTOR is a row gather (misses null-filled).  Returns
  * NULL to DECLINE any other index shape — the caller keeps its historic
- * path (sym -> column access, boxed lists, errors). */
+ * path (sym -> column access, boxed lists, errors); a sym naming a column of rows re-collapses. */
 ray_t* q_table_at(ray_t* t, ray_t* idx) {
     if (!t || t->type != RAY_TABLE || !idx) return NULL;
+    if (idx->type == -RAY_SYM) {   /* a column stored as its rows reads back as their table (kx: t`m 98h, exec 0h) */
+        ray_t* col = ray_table_get_col(t, idx->i64);
+        return q_type_is_row_list(col) ? q_list_collapse(col) : NULL;
+    }
     if (ray_is_atom(idx)) {
         if (!q_type_int_index_width((int8_t)-idx->type)) return NULL;
         return q_table_row_at(t, as_i64(idx));               /* int/temporal nulls land <0 -> miss */
@@ -250,12 +254,18 @@ int q_table_row_eq(ray_t* ta, int64_t ra, ray_t* tb, int64_t rb, int64_t ncmp) {
 
 /* The row-append's column from a run of record cells: an atom run types the column (`meta u` after the first
  * insert into `()`), but a run of DICTS stays the general list it is — the list->table collapse belongs to
- * enlist/flip/literal construction, never to insert/upsert (owner ruling 2026-09-18; TorQ stpmeta.q:38 upserts a
- * differently-keyed dict per row into `schema:()`).  q_list_collapse's contract: borrows, owned result. */
+ * enlist/literal construction, never to insert/upsert (owner ruling 2026-09-18; TorQ stpmeta.q:38 upserts a
+ * differently-keyed dict per row into `schema:()`) — and a table column is stored as rows anyway (q_table_col_rows).
+ * q_list_collapse's contract: borrows, owned result. */
 static ray_t* rows_col(ray_t* cells) {
-    ray_t** e = (ray_t**)ray_data(cells);
-    if (q_count(cells) > 0 && e[0] && e[0]->type == RAY_DICT) { ray_retain(cells); return cells; }
+    if (q_type_is_row_list(cells)) { ray_retain(cells); return cells; }
     return q_list_collapse(cells);
+}
+
+ray_t* q_table_col_rows(ray_t* col) {
+    if (col && col->type == RAY_TABLE && q_count(col) > 0) return q_list_uncollapse(col);
+    if (col) ray_retain(col);
+    return col;
 }
 
 /* Per-column boxed accumulators into a table named by the sym ids `names`, each run
@@ -794,6 +804,10 @@ ray_t* q_flip_wrap(ray_t* x) {
                 col = b;
                 if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : q_err(QE_OOM); }
             }
+            ray_t* stored = q_table_col_rows(col);
+            ray_release(col);
+            col = stored;
+            if (!col || RAY_IS_ERR(col)) { ray_release(out); return col ? col : q_err(QE_OOM); }
             out = ray_table_add_col(out, nm, col);
             ray_release(col);
         }
@@ -1069,7 +1083,9 @@ ray_t* q_ungroup_wrap(ray_t* x) {
                 ray_t* cell = q_join_item(col, r);
                 if (!cell || RAY_IS_ERR(cell)) { err = cell ? cell : q_err(QE_OOM); break; }
                 int64_t l = (ray_is_vec(cell) || cell->type == RAY_LIST || cell->type == -RAY_STR) ? q_count(cell) : 1;
+                int row = cell->type == RAY_DICT;
                 ray_release(cell);
+                if (row) continue;
                 if (cnt < 0) cnt = l;
                 else if (l != cnt) err = q_err(QE_LENGTH);
             }
@@ -1080,7 +1096,7 @@ ray_t* q_ungroup_wrap(ray_t* x) {
             ray_t* col = ray_table_get_col_idx(flat, c);
             ray_t* cell = q_join_item(col, r);
             if (!cell || RAY_IS_ERR(cell)) { err = cell ? cell : q_err(QE_OOM); break; }
-            if (col && col->type == RAY_LIST) {           /* explode nested cell */
+            if (col && col->type == RAY_LIST && cell->type != RAY_DICT) {   /* explode nested cell; a row dict is one */
                 for (int64_t i = 0; i < cnt && !err; i++) {
                     ray_t* e = q_join_item(cell, i);
                     if (!e || RAY_IS_ERR(e)) { err = e ? e : q_err(QE_OOM); break; }
@@ -1103,7 +1119,7 @@ ray_t* q_ungroup_wrap(ray_t* x) {
         ray_release(flat);
         return err;
     }
-    ray_t* out = q_table_cols_from_accs((const int64_t*)ray_data(ray_table_schema(flat)), acc, nc, q_list_collapse);
+    ray_t* out = q_table_cols_from_accs((const int64_t*)ray_data(ray_table_schema(flat)), acc, nc, rows_col);
     ray_release(flat);
     return out;
 }
