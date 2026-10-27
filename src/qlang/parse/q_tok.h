@@ -21,11 +21,12 @@ ray_t* q_tok(int8_t tag, const char* p, size_t len);
 
 /* One scanned literal magnitude (the parser's element).  Q_TOK_EL_MONTH carries
  * BOTH the month payload (.i) and its float twin (.f): bare `2000.01` is the
- * float, only a trailing `m` reads the payload. */
+ * float, only a trailing `m` reads the payload.  `clocked`: a D/T point that
+ * wrote a clock after its separator, so a clock letter may follow. */
 typedef enum { Q_TOK_EL_INT, Q_TOK_EL_FLOAT, Q_TOK_EL_NULL, Q_TOK_EL_PINF, Q_TOK_EL_NINF, Q_TOK_EL_DATE, Q_TOK_EL_TIME,
                Q_TOK_EL_TS, Q_TOK_EL_MONTH, Q_TOK_EL_MINUTE, Q_TOK_EL_SECOND, Q_TOK_EL_TIMESPAN,
                Q_TOK_EL_DT /* datetime: f64 days in .f */ } q_tok_el_kind;
-typedef struct { q_tok_el_kind kind; int64_t i; double f; int forces_float; } q_tok_el;
+typedef struct { q_tok_el_kind kind; int64_t i; double f; int forces_float, clocked; } q_tok_el;
 
 /* Scan one TEMPORAL literal magnitude at src[*p] (date / timestamp / datetime
  * / month-shaped / time / timespan / second / minute).  Returns 1 and
