@@ -134,12 +134,9 @@ static ray_t* dict_rows_table(ray_t* const* rows, int64_t n) {
 }
 
 ray_t* q_list_collapse(ray_t* l) {
-    if (l && !RAY_IS_ERR(l) && l->type == RAY_LIST && q_count(l) > 0) {
-        ray_t** e = (ray_t**)ray_data(l);
-        if (e[0] && e[0]->type == RAY_DICT) {   /* a run of like rows IS a table */
-            ray_t* tb = dict_rows_table(e, q_count(l));
-            if (tb) return tb;
-        }
+    if (l && !RAY_IS_ERR(l) && q_type_is_row_list(l)) {   /* a run of like rows IS a table */
+        ray_t* tb = dict_rows_table((ray_t**)ray_data(l), q_count(l));
+        if (tb) return tb;
     }
     return atom_run_collapse(l);
 }
