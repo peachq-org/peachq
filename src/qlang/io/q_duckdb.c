@@ -1229,7 +1229,7 @@ static void qd_main_view_drop(const char* qn) {
  * catalog under the global's own name already IS that name there: nothing to make (the view would collide with the
  * table it names; DuckDB folds identifier case). */
 static ray_t* qd_link_wrap(ray_t** args, int64_t n) {
-    int slot;
+    int slot = -1;
     qd_name_t name;
     char qn[256];
     ray_t* e = qd_door(args, n, 3, &slot);
@@ -1285,7 +1285,7 @@ static ray_t* qd_unlink_wrap(ray_t** args, int64_t n) {
 /* .duckdb.i.hdel[c; t] — drop the OBJECT t names (a view when that is what it is, else a table) and, with a table,
  * its sidecar rows: the one key law spells them, so nothing of a dropped table outlives it in _q_schema. */
 static ray_t* qd_hdel_wrap(ray_t** args, int64_t n) {
-    int slot;
+    int slot = -1;
     qd_name_t name;
     ray_t* e = qd_door(args, n, 2, &slot);
     if (!e) e = qd_name_arg(slot, args[1], &name);
@@ -1311,7 +1311,7 @@ static ray_t* qd_hdel_wrap(ray_t** args, int64_t n) {
  * schema (a bare name binds there) less the bridge's own (the _q_schema sidecar; the link views, each already a q
  * name).  What .duckdb.load[h;::] binds. */
 static ray_t* qd_tables_fn(ray_t* x) {
-    int slot;
+    int slot = -1;
     ray_t* e = qd_door(&x, 1, 1, &slot);
     if (e) return e;
     ray_t* rows = q_duckdb_query(slot, "SELECT table_name AS n FROM duckdb_tables() WHERE NOT internal AND database_name = "
@@ -1352,7 +1352,7 @@ static const qd_bound_t* qd_bound_door(ray_t** args, int64_t n, int* slot, qd_na
 
 /* .duckdb.i.meta[h;`t] — kdb-exact ([c] t;f;a) from the bound table: t is the char of the column a fetch would yield */
 static ray_t* qd_meta_wrap(ray_t** args, int64_t n) {
-    int slot;
+    int slot = -1;
     qd_name_t name;
     ray_t* e;
     const qd_bound_t* b = qd_bound_door(args, n, &slot, &name, &e);
@@ -1361,7 +1361,7 @@ static ray_t* qd_meta_wrap(ray_t** args, int64_t n) {
 
 /* .duckdb.i.schema[h;`t] — the push's schema from the bound table, () for a table the sidecar does not name */
 static ray_t* qd_schema_wrap(ray_t** args, int64_t n) {
-    int slot;
+    int slot = -1;
     qd_name_t name;
     ray_t* e;
     const qd_bound_t* b = qd_bound_door(args, n, &slot, &name, &e);
@@ -1370,7 +1370,7 @@ static ray_t* qd_schema_wrap(ray_t** args, int64_t n) {
 
 /* .duckdb.i.rows[h;`t] — the bound entry's row count: the maxrows check's whole knowledge, no statement on a hit */
 static ray_t* qd_rows_wrap(ray_t** args, int64_t n) {
-    int slot;
+    int slot = -1;
     qd_name_t name;
     ray_t* e;
     const qd_bound_t* b = qd_bound_door(args, n, &slot, &name, &e);
@@ -1379,7 +1379,7 @@ static ray_t* qd_rows_wrap(ray_t** args, int64_t n) {
 
 /* .duckdb.i.maxrows[h;`t;n] — the maxrows refusal: 'limit, the table, its count and the threshold in .duckdb.err[] */
 static ray_t* qd_maxrows_wrap(ray_t** args, int64_t n) {
-    int slot;
+    int slot = -1;
     qd_name_t name;
     ray_t* e;
     if (n != 3) return q_err(QE_RANK);
@@ -1394,7 +1394,7 @@ static ray_t* qd_maxrows_wrap(ray_t** args, int64_t n) {
 /* .duckdb.i.unbind[h;`t] — the entry let go, a REBIND: the next touch reads the table afresh (get, the self-heal),
  * the resolution context with it — another connection may have raised the sidecar since */
 static ray_t* qd_unbind_wrap(ray_t** args, int64_t n) {
-    int slot;
+    int slot = -1;
     qd_name_t name;
     ray_t* e = qd_door(args, n, 2, &slot);
     if (!e) e = qd_name_arg(slot, args[1], &name);
@@ -1425,7 +1425,7 @@ static ray_t* qd_dict(const char* const* names, ray_t** vals, int n) {
 /* .duckdb.i.info[h;`t] / [h;::] — the bridge's own hidden data (docs/duckdb-api.md): a table's bound schema with the
  * meta char beside each row, binding it first; or what the connection holds bound and its counters */
 static ray_t* qd_info_wrap(ray_t** args, int64_t n) {
-    int slot;
+    int slot = -1;
     ray_t* e = qd_door(args, n, 2, &slot);
     if (e) return e;
     if (!RAY_IS_NULL(args[1])) {
@@ -1629,7 +1629,7 @@ static ray_t* qd_write_impl(int slot, const qd_name_t* nm, ray_t* tbl, const boo
  * iskey recorded (NO DuckDB PRIMARY KEY); the envelope pair declares types the q carrier alone cannot, so a bare
  * table carries only the companions whose kind fixes their meaning (isnull, notnull, tzoff). */
 static ray_t* qd_write_wrap(ray_t** args, int64_t n, bool replace) {
-    int slot;
+    int slot = -1;
     qd_name_t name;
     ray_t* e = qd_door(args, n, 3, &slot);
     if (!e) e = qd_name_arg(slot, args[1], &name);
@@ -1742,7 +1742,7 @@ static ray_t* qd_pair(ray_t* data, ray_t* schema) {
 }
 
 static ray_t* qd_get_any(ray_t** args, int64_t n, bool pair) {
-    int slot;
+    int slot = -1;
     qd_name_t name;
     ray_t* e = qd_door(args, n, 2, &slot);
     if (!e) e = qd_name_arg(slot, args[1], &name);
@@ -1898,7 +1898,7 @@ static ray_t* qd_sql_split(ray_t* x, ray_t** sql, ray_t** params, ray_t** schema
  * types error as ever), or, given the triple, refined and keyed by its schema as qd_read_table's sidecar rows
  * refine; execx pairs it with its schema; a column-less result (DDL) answers `::` (execx: beside an empty schema). */
 static ray_t* qd_sql_any(ray_t** args, int64_t n, bool pair) {
-    int slot;
+    int slot = -1;
     ray_t* e = qd_door(args, n, 2, &slot);
     if (e) return e;
     ray_t* sql;
@@ -1936,7 +1936,7 @@ static ray_t* qd_sqlx_wrap(ray_t** args, int64_t n) { return qd_sql_any(args, n,
  * prepare would be, so one DuckDB will not bind refuses with its text — except one that expands into a group (a
  * dynamic PIVOT), which DuckDB binds only when it runs: its markers are answered unvalidated. */
 static ray_t* qd_prepnames_wrap(ray_t** args, int64_t n) {
-    int slot;
+    int slot = -1;
     ray_t* e = qd_door(args, n, 2, &slot);
     if (e) return e;
     const char* tp; int64_t tn;

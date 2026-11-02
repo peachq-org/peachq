@@ -654,12 +654,19 @@ static int64_t sym_intern_nolock(uint32_t hash, const char* str, size_t len) {
     return main_id;
 }
 
+/* A name is a C string: bytes past the first NUL are not part of it. */
+static size_t sym_name_len(const char* str, size_t len) {
+    const char* nul = len ? memchr(str, 0, len) : NULL;
+    return nul ? (size_t)(nul - str) : len;
+}
+
 /* --------------------------------------------------------------------------
  * ray_sym_intern — locked public API
  * -------------------------------------------------------------------------- */
 
 int64_t ray_sym_intern(const char* str, size_t len) {
     if (!atomic_load_explicit(&g_sym_inited, memory_order_acquire)) return -1;
+    len = sym_name_len(str, len);
     uint32_t hash = (uint32_t)ray_hash_bytes(str, len);
     sym_lock();
     int64_t id = sym_intern_nolock(hash, str, len);
@@ -709,12 +716,12 @@ int ray_sym_segs(int64_t sym_id, const int64_t** out_segs) {
 
 int64_t ray_sym_find(const char* str, size_t len) {
     if (!atomic_load_explicit(&g_sym_inited, memory_order_acquire)) return -1;
+    len = sym_name_len(str, len);
+    uint32_t hash = (uint32_t)ray_hash_bytes(str, len);
 
     /* Lock required: concurrent ray_sym_intern may trigger ht_grow which
      * frees and replaces g_sym.buckets -- reading without lock is UAF. */
     sym_lock();
-
-    uint32_t hash = (uint32_t)ray_hash_bytes(str, len);
     uint32_t mask = g_sym.bucket_cap - 1;
     uint32_t slot = hash & mask;
 
