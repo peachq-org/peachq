@@ -1279,7 +1279,7 @@ static void dl_candidates(const char* lib, dl_paths* c) {
             const char* slash = dl_lastsep(script);
             if (slash) {
                 script[slash - script + 1] = '\0';
-                char dir[576];
+                char dir[1024];   /* script[512] + lib[512]: -Wformat-truncation needs the sum */
                 snprintf(dir, sizeof dir, "%s%s", script, p);
                 dl_add(c, "%s%s", dir, ext);
             }

@@ -155,7 +155,7 @@ static ray_t* acc_item(ray_t* v, int64_t i) {
 static ray_t* acc_reduce(ray_t* fv, const q_op_t* frow, ray_t* seed,
                          ray_t** it, int64_t nit, int keep) {
     if (nit < 1 || nit + 1 > APPLY_MAX_ARGS) return q_err(QE_RANK);
-    ray_t* iv[APPLY_MAX_ARGS];
+    ray_t* iv[APPLY_MAX_ARGS] = {0};
     ray_t* av[APPLY_MAX_ARGS];
     ray_t* dk = NULL;                 /* first dict argument: the result's keys */
     int64_t len = -1;
