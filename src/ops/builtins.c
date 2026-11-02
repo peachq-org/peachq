@@ -1383,11 +1383,13 @@ ray_t* ray_cast_fn(ray_t* type_sym, ray_t* val) {
             }
             return ray_date(days);
         }
-        /* Vector cast: same-tag = identity; a TEMPORAL source needs the
-         * per-element unit conversion (cast_vec_temporal_elems — the atom
-         * arm's semantics); int-family stays on the generic fast path. */
+        /* Vector cast: same-tag = identity; TIMESTAMP has a fast-worker leaf;
+         * another TEMPORAL source needs the per-element unit conversion
+         * (cast_vec_temporal_elems — the atom arm's semantics); int-family
+         * stays on the generic fast path. */
         if (ray_is_vec(val)) {
             if (val->type == RAY_DATE) { ray_retain(val); return val; }
+            if (val->type == RAY_TIMESTAMP) return cast_vec_numeric(type_sym, val, RAY_DATE);
             if (RAY_IS_TEMPORAL32(val->type) || RAY_IS_TEMPORAL64(val->type) ||
                 RAY_IS_TEMPORALF(val->type))
                 return cast_vec_temporal_elems(type_sym, val, RAY_DATE);
