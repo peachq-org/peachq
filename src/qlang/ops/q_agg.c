@@ -346,24 +346,28 @@ ray_t* q_mmin_wrap(ray_t* n, ray_t* x){ return mwin(n, x, MW_MIN); }
 ray_t* q_mcount_wrap(ray_t* n, ray_t* x){ return mwin(n, x, MW_COUNT); }
 ray_t* q_mdev_wrap(ray_t* n, ray_t* x){ return mwin(n, x, MW_DEV); }
 
-/* q `a ema x` — exponential moving average: e[0]=x[0], e[i]=a*x[i]+(1-a)*e[i-1].
- * `a` is a float atom (the smoothing factor). */
+/* q `a ema x` — exponential moving average: e[0]=x[0], e[i]=a[i]*x[i]+(1-a[i])*e[i-1].
+ * `a` is an atom or a list of count x (ref/ema.md:19), so a[0] never weighs in. */
 ray_t* q_ema_wrap(ray_t* a, ray_t* x) {
-    if (!a || !ray_is_atom(a)) return q_err(QE_TYPE);
-    int an; double alpha = q_velem_f(a, 0, &an);
+    int wv = a && !ray_is_atom(a);
+    if (!a || !q_type_is_num_tag(a->type)) return q_err(QE_TYPE);
     if (!x || !q_vec_is_num(x)) {
-        if (x && ray_is_atom(x)) { ray_retain(x); return x; }
+        if (x && ray_is_atom(x) && !wv) { ray_retain(x); return x; }
         return q_err(QE_TYPE);
     }
     int64_t n = q_count(x);
+    if (wv && q_count(a) != n) return q_err(QE_LENGTH);
     ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1); out->len = n;
     double* o = (double*)ray_data(out);
-    double e = 0; int started = 0;
+    double e = 0;
     for (int64_t i = 0; i < n; i++) {
         int nu; double v = q_velem_f(x, i, &nu);
         double xv = nu ? 0 : v;
-        if (!started) { e = xv; started = 1; }
-        else e = alpha * xv + (1.0 - alpha) * e;
+        if (i == 0) e = xv;
+        else {
+            double alpha = q_velem_f(a, wv ? i : 0, &nu);
+            e = alpha * xv + (1.0 - alpha) * e;
+        }
         o[i] = e;
     }
     return out;
