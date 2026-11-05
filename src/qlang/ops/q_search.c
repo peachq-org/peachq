@@ -21,7 +21,7 @@
 #include "qlang/ops/q_index.h"  /* q_index_elem_at, q_index_rank — THE element-read home and its rank axis */
 #include "qlang/ops/q_bang.h"   /* q_bang — a dict left of `in` rebuilt through the `!` home */
 #include "lang/eval.h"     /* ray_in_fn, ray_find_fn */
-#include "lang/internal.h" /* atom_eq */
+#include "lang/internal.h" /* atom_eq, ray_sorted_bound */
 #include "mem/heap.h"      /* RAY_ATTR_HAS_NULLS — ? find miss remap */
 #include <stdint.h>
 #include <stdlib.h>
@@ -445,10 +445,11 @@ ray_t* q_search_find(ray_t* x, ray_t* y) {
 
 /* ===== q `x bin y` / `x binr y` — binary search ============================
  * ref/bin.md: x sorted, y the same type (no promotion).  `bin` -> index of
- * the LAST item <= y (-1 below the domain); `binr` -> the FIRST item >= y.
- * The base kernels are i64-only, so the ordering here comes from the `<`
- * VERB — one type home, and every sorted type (sym, float, char, temporal,
- * short, …) falls out.  Row-wise domains are below (bin_rows). */
+ * the LAST item <= y (-1 below the domain); `binr` -> the FIRST item >= y
+ * (count x past the end).  A simple same-type vector searches its storage
+ * (bin_lane); every other shape orders through the `<` VERB, which errors
+ * rather than guess an order the docs do not give.  Row-wise domains are
+ * below (bin_rows). */
 
 /* Total order on two values: -1/0/1, *err on an incomparable pair.  Atoms
  * defer to `<`; deeper ranks compare item-by-item then break ties on length
@@ -511,12 +512,6 @@ static int64_t bin_probe(ray_t* x, const int64_t* sel, int64_t n, ray_t* y,
     return r;
 }
 
-/* A LIST domain's overrun: bin.md documents no answer for a binr past the end
- * and no row pins one, so the retired kernel's clamp is carried forward. */
-static int64_t bin_clamp(int64_t r, int64_t n, int right) {
-    return right && r >= n ? n - 1 : r;
-}
-
 /* `t bin row` — bin.md Tables: the LAST row of x whose leading k-1 values MATCH the probe's and whose last value
  * does not exceed it; `0N` when no row matches the leading columns, or none within them is low enough.  The
  * equivalence classes come from the row Find over the leading columns (one pass for a run of probes); ORDER on the
@@ -562,6 +557,70 @@ static ray_t* bin_rows(ray_t* x, ray_t* y, int right) {
     return row_answer(out, rec);
 }
 
+/* A simple vector x searched straight off its storage, y an item or a vector of its own type: 1 when the lane
+ * serves the pair. */
+static int bin_lane(ray_t* x, ray_t* y) {
+    if (!ray_is_vec(x) || (y->type != x->type && y->type != -x->type)) return 0;
+    switch (x->type) {
+    case RAY_BOOL: RAY_BYTE_CASES: case RAY_I16: case RAY_I32: case RAY_I64: case RAY_F32: case RAY_F64:
+    RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: RAY_TEMPORALF_CASES: case RAY_SYM:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int bin_isnan(ray_t* v, int64_t i) {
+    if (ray_is_atom(v)) return isnan(v->f64);
+    return v->type == RAY_F32 ? isnan(((const float*)ray_data(v))[i]) : isnan(((const double*)ray_data(v))[i]);
+}
+
+/* Symbols order by their strings, never their ids (interning order is not alphabetic). */
+static int64_t bin_sym_bound(ray_t* x, int64_t n, ray_t* y, int64_t j, int upper, int* err) {
+    ray_t* k = ray_is_atom(y) ? ray_sym_str(y->i64) : ray_sym_vec_cell(y, j);
+    int64_t lo = 0, hi = n;
+    while (lo < hi && k) {
+        int64_t mid = lo + (hi - lo) / 2;
+        ray_t* s = ray_sym_vec_cell(x, mid);
+        if (!s) { k = NULL; break; }
+        int c = ray_str_cmp(s, k);
+        if (upper ? c <= 0 : c < 0) lo = mid + 1; else hi = mid;
+    }
+    if (!k) *err = 1;
+    return lo;
+}
+
+/* bin = (first index > y) - 1, binr = first index >= y.  Nulls sort first: a float lane's NaN prefix (nn items) is
+ * below every number and equal to a NaN probe, while an int lane's null sentinel is already its lane minimum. */
+static int64_t bin_lane_probe(ray_t* x, int64_t n, int64_t nn, ray_t* y, int64_t j, int right, int* err) {
+    int64_t b;
+    if (x->type == RAY_SYM) b = bin_sym_bound(x, n, y, j, !right, err);
+    else if (nn >= 0 && bin_isnan(y, j)) b = right ? 0 : nn;
+    else b = ray_sorted_bound(x, nn > 0 ? nn : 0, n, y, j, !right);
+    if (b < 0) *err = 1;
+    return right ? b : b - 1;
+}
+
+static ray_t* bin_lane_search(ray_t* x, ray_t* y, int right) {
+    int64_t n = x->len, nn = -1, lo = 0, hi = n;
+    int err = 0;
+    if (x->type == RAY_F32 || x->type == RAY_F64 || RAY_IS_TEMPORALF(x->type)) {
+        while (lo < hi) { int64_t mid = lo + (hi - lo) / 2; if (bin_isnan(x, mid)) lo = mid + 1; else hi = mid; }
+        nn = lo;
+    }
+    if (ray_is_atom(y)) {
+        int64_t r = bin_lane_probe(x, n, nn, y, 0, right, &err);
+        return err ? q_err(QE_TYPE) : ray_i64(r);
+    }
+    ray_t* out = ray_vec_new(RAY_I64, y->len > 0 ? y->len : 1);
+    if (RAY_IS_ERR(out)) return out;
+    out->len = y->len;
+    int64_t* o = (int64_t*)ray_data(out);
+    for (int64_t j = 0; j < y->len && !err; j++) o[j] = bin_lane_probe(x, n, nn, y, j, right, &err);
+    if (err) { ray_release(out); return q_err(QE_TYPE); }
+    return out;
+}
+
 static ray_t* bin_search(ray_t* x, ray_t* y, int right) {
     if (!x || !y) return q_err(QE_TYPE);
     if (q_type_is_table(x)) return bin_rows(x, y, right);
@@ -586,10 +645,11 @@ static ray_t* bin_search(ray_t* x, ray_t* y, int right) {
         return keys_at(keys, i);
     }
     if (!ray_is_vec(x) && x->type != RAY_LIST) return q_err(QE_TYPE);
+    if (bin_lane(x, y)) return bin_lane_search(x, y, right);
     int64_t n = q_count(x);
     int err = 0;
     if (ray_is_atom(y) || q_index_is_nested(y) != q_index_is_nested(x)) {
-        int64_t r = bin_clamp(bin_probe(x, NULL, n, y, right, &err), n, right);
+        int64_t r = bin_probe(x, NULL, n, y, right, &err);
         return err ? q_err(QE_TYPE) : ray_i64(r);
     }
     int64_t ny = q_count(y);
@@ -600,7 +660,7 @@ static ray_t* bin_search(ray_t* x, ray_t* y, int right) {
     for (int64_t j = 0; j < ny && !err; j++) {
         ray_t* e = q_index_elem_at(y, j);
         if (!e || RAY_IS_ERR(e)) err = 1;
-        else o[j] = bin_clamp(bin_probe(x, NULL, n, e, right, &err), n, right);
+        else o[j] = bin_probe(x, NULL, n, e, right, &err);
         if (e) ray_release(e);
     }
     if (err) { ray_release(out); return q_err(QE_TYPE); }

@@ -618,6 +618,10 @@ ray_t* ray_find_fn(ray_t* vec, ray_t* val);
 /* [*lo, *hi) of a null-free RAY_ATTR_SORTED vector holding values in [a, b] (same-type atoms; b NULL = a); false
  * when the lane does not apply — the scan owns promotion, nulls and every other type. */
 bool   ray_sorted_span(ray_t* vec, ray_t* a, ray_t* b, int64_t* lo, int64_t* hi);
+/* First i in [lo, hi) of a sorted vector with vec[i] >= key (upper=0) or > key (upper=1), hi when none; -1 on a lane
+ * it does not serve.  key is an atom of the item type or a vector of vec's own type read at j; one storage width is
+ * compared, so float NaNs and every promotion are the caller's. */
+int64_t ray_sorted_bound(ray_t* vec, int64_t lo, int64_t hi, ray_t* key, int64_t j, int upper);
 ray_t* ray_til_fn(ray_t* x);
 ray_t* ray_reverse_fn(ray_t* x);
 ray_t* ray_rand_fn(ray_t* a, ray_t* b);
