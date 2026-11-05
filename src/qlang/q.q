@@ -10,8 +10,16 @@
 / ---- wave 2 ----
 / prefix keywords (no manifest row; bare name resolves via .q)
 .q.rand:{first 1?x}
+/ a variadic keyword that covers an extension IS it, unary and binary-bracket alike (basics/exposed-infrastructure.md:72-113)
 .q.deltas:(-':)
-.q.differ:{not(~':)x}
+.q.differ:('[not;~':])
+/ the covers with a QR_COVER manifest row: the row keeps the name reserved and names the unary C kernel (ref/raze.md:50)
+.q.sums:(+\)
+.q.prds:(*\)
+.q.maxs:(|\)
+.q.mins:(&\)
+.q.raze:(,/)
+.q.ratios:(%':)
 / ref/md5.md: verbatim q.k spelling - the -15! internal fn (q_bang.c -> q_md5_fn)
 .q.md5:(-15!)
 / ref/hcount.md: file size in bytes - the -7! internal fn (q_bang.c -> h_hcount)

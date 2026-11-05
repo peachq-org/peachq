@@ -11,7 +11,7 @@
 #include "qlang/eval/q_eval_internal.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_ops.h"       /* q_ops_find + manifest columns + the identity-table accessors */
-#include "qlang/q_registry.h"  /* q_registry_row_of */
+#include "qlang/q_registry.h"  /* q_registry_row_of, q_registry_row_kernel */
 #include "qlang/base/q_type.h"
 #include "qlang/ops/q_index.h" /* q_index_elem_at — the one element accessor */
 #include "qlang/ops/q_dollar.h"
@@ -239,10 +239,10 @@ static const char* acc_mono_name(const q_op_t* frow, int keep) {
 
 static ray_t* acc_mono(const q_op_t* frow, int keep, const q_op_t** mrow) {
     const char* nm = acc_mono_name(frow, keep);
-    if (!nm) return NULL;
-    ray_t* mv = q_eval_apply_manifest_value(q_ops_find(nm, (int)strlen(nm)),
-                                            Q_MONADIC, mrow);
-    return (mv && q_eval_apply_is_fnval(mv)) ? mv : NULL;
+    const q_op_t* row = nm ? q_ops_find(nm, (int)strlen(nm)) : NULL;
+    ray_t* mv = q_registry_row_kernel(row);
+    *mrow = mv ? row : NULL;
+    return mv;
 }
 
 /* Unary application of a non-unary value (:259): the seed is the value's
@@ -435,6 +435,15 @@ static ray_t* prior_each(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
     if (dv) return dict_rekey(x, prior_each(fv, frow, seed, dv));
     ray_retain(x);
     x = q_eval_apply_concrete(x);
+    /* unseeded `%':` on a typed vector IS ratios (ref/ratios.md:87), the one Each Prior with a kernel — the
+     * pairing is detected by name at this site, never a manifest column (owner 2026-10-21); the kernel owns the
+     * vector domain (a char vector is 'type, Dazlln) */
+    if (!seed && frow && strcmp(frow->name, "%") == 0 && ray_is_vec(x)) {
+        const q_op_t* rrow = q_ops_find("ratios", 6);
+        ray_t* r = q_eval_apply(q_registry_row_kernel(rrow), rrow, &x, 1);
+        ray_release(x);
+        return r;
+    }
     ray_t* prev = seed;
     if (prev) ray_retain(prev);
     else {
