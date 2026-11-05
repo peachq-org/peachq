@@ -122,6 +122,11 @@ int q_registry_is_infix(const char* s, size_t n);
  * static storage, so callers may hold one across calls. */
 ray_t* q_registry_row_value(const struct q_op* row, q_valence_t valence);
 
+/* The unary C kernel a glyph+adverb arm monomorphizes to for a `mono`/`mono_scan` row: a QR_COVER row's kernel
+ * (its value is the extension itself, so applying that would recurse), else the row's monadic value (`sum`).
+ * Borrowed; NULL when the row has no monadic cell. */
+ray_t* q_registry_row_kernel(const struct q_op* row);
+
 /* THE fn-value -> kdb primitive code home (`value +` and the wire's 101h/102h
  * byte share it): the value's manifest row's kdb_op column, falling back for an
  * aliased env snapshot (`count` and monadic `#` are one kernel) to the code its
