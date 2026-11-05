@@ -256,8 +256,9 @@ static void qd_load(void) {
     if (g_qd.state == 1) return;
     g_qd.why[0] = '\0';
 #if defined(__EMSCRIPTEN__)
-    snprintf(g_qd.why, sizeof g_qd.why, "bridge: DuckDB is not in the browser build until duckdb-wasm ships a 2.0 bundle");
-    g_qd.state = 2;
+    /* no dynamic loading in the wasm build: wasm/q_wasm_duckdb.c binds the table to DuckDB's own wasm module */
+    int q_wasm_duck_bind(duck_api_t* api, char* why, size_t cap);
+    g_qd.state = q_wasm_duck_bind(&qd_api, g_qd.why, sizeof g_qd.why) ? 1 : 2;
     return;
 #endif
     void* dl = NULL;
