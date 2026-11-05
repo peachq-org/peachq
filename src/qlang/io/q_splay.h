@@ -4,7 +4,8 @@
  * (the fault handler), nested/string/enum columns decode — and the table block's aux bytes carry the directory sym,
  * which is what `flip`, the k-repr, `value`, the wire and the write refusals read.  Every lane dies by refcount with
  * its last holder through ONE unmap choke point; a global bound by `\l` keeps its maps for the session (kx's law).
- * The per-runtime registry here backs only what the files must be probed for: validated headers and the domain. */
+ * The per-runtime registry here backs only what the files must be probed for: validated headers and the domain,
+ * each entry re-checked against its files' stamps at every dereference. */
 #ifndef QLANG_Q_SPLAY_H
 #define QLANG_Q_SPLAY_H
 #include <rayforce.h>
@@ -12,11 +13,6 @@
 
 void q_splay_init(void);
 void q_splay_destroy(void);
-
-/* Drop the entry behind a `:dir/ handle sym — the splay WRITER's hook, so an in-process overwrite never serves
- * stale headers. */
-void q_splay_invalidate(int64_t sym);
-void q_splay_invalidate_under(const char* path, size_t n);   /* flat write inside a mapped dir */
 
 /* `get `:dir/` — NULL unless x is a `:path/ sym atom naming a directory with a .d (the caller falls through to the
  * flat reader); else the owned mapped table or a RAY_ERROR from load-time HEADER validation ('type/'corrupt/'nyi/'io). */
