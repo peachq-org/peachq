@@ -1,7 +1,7 @@
 /* The DuckDB ledgers (test/q/duckdb/*.qcmd) replayed in the browser: each suite runs in a fresh Worker through the
  * transcript door (q_wasm_qcmd), with the parquet fixtures mounted where the suites read them.  A by-hand check
  * of the browser's DuckDB before a release, never part of make q-test: it fails when a suite's failing-row count is
- * not the recorded divergence's (DIVERGES, measured on the v0.88 v1 bundle), and prints every failing row either way.
+ * not the recorded divergence's (DIVERGES, measured on the pinned bundle), and prints every failing row either way.
  *
  *   node wasm/duckdb-suites.cjs build/wasm/www [/path/to/node_modules] [suite ...]
  *
@@ -25,8 +25,8 @@ const ledgers = path.join(repo, 'test', 'q', 'duckdb');
 const suites = process.argv.length > 4 ? process.argv.slice(4)
     : fs.readdirSync(ledgers).filter((f) => f.endsWith('.qcmd')).map((f) => f.slice(0, -5)).sort();
 const FIXTURES = 'test/data/parquet';
-/* The recorded divergences, as failing rows per suite: threads > 1, s3 secrets, the stdlib loaded at start. */
-const DIVERGES = { handles: 3, main: 3, pqgate: 2, remote: 10 };
+/* The recorded divergences, as failing rows per suite: threads > 1 (the build has none). */
+const DIVERGES = { handles: 3, main: 3 };
 
 async function main() {
     const manifest = fs.readdirSync(path.join(repo, FIXTURES)).map((n) => ({ path: FIXTURES + '/' + n }));
@@ -40,12 +40,14 @@ async function main() {
             const context = await browser.newContext();
             await context.route(/.*/, (r) => (new URL(r.request().url()).hostname === 'localhost' ? r.continue() : r.abort()));
             const page = await context.newPage();
+            /* a renderer crash never answers the pending evaluate: it is a failed suite, not a hung run */
+            const crashed = new Promise((_, reject) => page.on('crash', () => reject(new Error('the page crashed'))));
             await page.goto(origin + '/index.html');
             await page.waitForFunction(() => document.getElementById('status').textContent === 'ready', null, { timeout: 60000 });
             await page.evaluate(([m, base]) => q.addFiles(m, base), [manifest, origin + '/']);
             await page.evaluate(() => q.eval('\\classic 1'));
             const t0 = Date.now();
-            const r = await page.evaluate((x) => q.call({ op: 'qcmd', text: x }), text)
+            const r = await Promise.race([page.evaluate((x) => q.call({ op: 'qcmd', text: x }), text), crashed])
                 .catch((e) => ({ failed: -1, report: String(e) }));
             const ok = r.failed < 0 ? 0 : rows - r.failed;
             const expected = r.failed === (DIVERGES[s] || 0);
