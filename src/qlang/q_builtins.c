@@ -238,12 +238,6 @@ static void bind_vary(const char* name, int rank, ray_vary_fn fn) {
     ray_release(obj);
 }
 
-static void bind_binary(const char* name, ray_binary_fn fn) {
-    ray_t* obj = ray_fn_binary(name, RAY_FN_NONE, fn);
-    q_env_bind_native(name, obj, 2);
-    ray_release(obj);
-}
-
 static void bind_value(const char* name, ray_t* val) {
     q_env_bind(ray_sym_intern(name, strlen(name)), val);
     ray_release(val);
@@ -342,7 +336,6 @@ void q_builtins_register(void) {
     bind_vary (".Q.c.ops", 1, q_dotq_ops_fn);   /* niladic .Q.ops[] + unary .Q.ops x */
     bind_vary (".Q.c.w",   1, q_dotq_w_fn);     /* memory stats dict (ref/dotq.md) */
     bind_vary (".Q.c.gc",  1, q_dotq_gc_fn);    /* garbage collect (ref/dotq.md) */
-    bind_binary(".Q.c.en", q_dotq_en_fn);    /* enumerate-varchar-cols shim (ref/dotq.md) */
     bind_vary (".Q.c.zblocks", 1, q_dotq_zblocks_fn); /* inflated-blocks witness (internal) */
     bind_vary (".Q.c.hp", 3, q_dotq_hp_fn);     /* HTTP POST [url;mime;body] (ref/dotq.md) */
     bind_vary (".Q.c.gz", 1, q_dotq_gz_fn);     /* GZip ::/inflate/deflate (ref/dotq.md) */

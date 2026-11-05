@@ -15,7 +15,6 @@
 .Q.trpd:.Q.c.trpd;
 .Q.sbt:.Q.c.sbt;
 .Q.bt:.Q.c.bt;
-.Q.en:.Q.c.en;
 / .Q.btoa/.Q.sha1: the bang is the single C home (`-32!`/`-33!`); delegate here so a user rebind never touches the bang.
 .Q.btoa:-32!;
 .Q.atob:.Q.c.atob;
@@ -30,6 +29,17 @@
 / .Q.gz/.Q.ts: the bang is the single C home (`-35!`/`-34!`, the q.k spellings); .Q.ts packs Apply's two args.
 .Q.gz:-35!;
 .Q.ts:{-34!(x;y)};
+
+/ ---- Enumeration (ref/dotq.md en/ens; KX 2025.01.17 enxs): `?` grows the domain, then f (only `$`) enumerates.
+.Q.enxs:{[f;d;t;n]
+  if[not f~($);'"nyi"];
+  if[not 98h=type t;'"type"];
+  c:where 11h=type each flip t;
+  h:$[d~(::);n;` sv d,n];
+  h?/:(enlist`symbol$()),t c;
+  @[t;c;f n]};
+.Q.en:{[d;t] .Q.enxs[$;d;t;`sym]};
+.Q.ens:{[d;t;n] .Q.enxs[$;d;t;n]};
 
 / ---- Constants (ref/dotq.md) ----
 .Q.b6:"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

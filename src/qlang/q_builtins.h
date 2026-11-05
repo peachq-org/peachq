@@ -53,7 +53,6 @@ ray_t* q_dotq_qp_fn(ray_t* x);
 ray_t* q_dotq_s_fn(ray_t* x);
 ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs);
 ray_t* q_dotq_w_fn(ray_t** args, int64_t nargs);
-ray_t* q_dotq_en_fn(ray_t* dom, ray_t* t);
 ray_t* q_dotq_zblocks_fn(ray_t** args, int64_t nargs);
 ray_t* q_dotq_gc_fn(ray_t** args, int64_t nargs);
 

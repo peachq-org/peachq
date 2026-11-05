@@ -9,11 +9,13 @@
 #include "qlang/q_env.h"
 #include "mem/heap.h"   /* RAY_ATTR_SORTED / HAS_INDEX / HAS_NULLS */
 #include "lang/internal.h" /* ray_concat_fn — the col-append seam's one concat */
-#include "lang/eval.h"     /* ray_take_fn — the empty-source take fill */
+#include "lang/eval.h"     /* ray_take_fn, ray_eval_get_restricted */
 #include "qlang/ops/q_index.h" /* q_index_at — the one TOTAL gather (resolve, deref) */
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — the one int-family widen (R2 construction) */
 #include "table/dict.h"        /* ray_dict_slots — keyed-target halves at deref */
 #include "table/sym.h"
+#include "qlang/io/q_io.h"     /* q_io_file_path */
+#include "qlang/net/q_wirefile.h" /* q_wirefile_domain_extend — the one domain-file writer */
 #include <assert.h>
 #include <string.h>
 
@@ -312,9 +314,16 @@ ray_t* q_enum_dollar(ray_t* x, ray_t* y) {
 /* `x?y` Enum Extend, variable form (ref/enum-extend.md): fill missing items of y
  * into the GLOBAL x (q_env_set — the one global-set home), then enumerate.  An
  * unbound x starts empty, per the doc's Filepath steps (absent file = created).
- * _try is the `?` wrap's probe: NULL = not the extend shape (sym handle ? syms);
- * the filepath form (`:x?y) stays 'nyi. */
+ * _try is the `?` wrap's probe: NULL = not the extend shape (sym handle ? syms). */
 static ray_t* enum_extend(ray_t* x, ray_t* y);
+static ray_t* enum_extend_file(ray_t* x, ray_t* y);
+
+/* `?` keeps y's attribute (ref/enum-extend.md); `s#` is left off, since positions need not sort as the names do. */
+static ray_t* enum_extend_attr(ray_t* r, ray_t* y) {
+    char a = q_attr_letter(y);
+    if (r && !RAY_IS_ERR(r) && r->type == RAY_ENUM && (a == 'g' || a == 'u' || a == 'p')) (void)q_enum_attr_set(r, a);
+    return r;
+}
 
 ray_t* q_enum_extend_try(ray_t* x, ray_t* y) {
     if (!x || x->type != -RAY_SYM || !y) return NULL;
@@ -322,12 +331,12 @@ ray_t* q_enum_extend_try(ray_t* x, ray_t* y) {
     ray_t* s = ray_sym_str(x->i64);
     int isfile = s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == ':';
     if (s) ray_release(s);
-    if (isfile) return q_err(QE_NYI);
+    if (isfile) return enum_extend_attr(enum_extend_file(x, y), y);
     /* a bound non-symlist global (a table domain included) is not extendable —
      * writing the union would CLOBBER it (ref/enum-extend.md's d is a list) */
     ray_t* g = q_env_handle_get(x->i64);
     if (g && !RAY_IS_ERR(g) && g->type != RAY_SYM) return q_err(QE_TYPE);
-    return enum_extend(x, y);
+    return enum_extend_attr(enum_extend(x, y), y);
 }
 
 static ray_t* enum_extend(ray_t* x, ray_t* y) {
@@ -355,6 +364,39 @@ static ray_t* enum_extend(ray_t* x, ray_t* y) {
     ray_t* p = q_enum_coerce(x->i64, y);
     if (!p || RAY_IS_ERR(p)) return p ? p : q_err(QE_TYPE);
     return q_enum_stamp(p, x->i64);
+}
+
+/* Filepath form (ref/enum-extend.md): the domain FILE grows append-only, then
+ * loads as the global named by the file's basename. */
+static ray_t* enum_extend_file(ray_t* x, ray_t* y) {
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    ray_t* path = q_io_file_path(x);
+    if (!path) return q_err(QE_TYPE);
+    const char* p = ray_str_ptr(path);
+    size_t n = ray_str_len(path), base = n;
+    while (base && p[base - 1] != '/') base--;
+    if (base == n) { ray_release(path); return q_err(QE_TYPE); }
+    int64_t dom = ray_sym_intern_runtime(p + base, n - base);
+    ray_t* ys = y->type == -RAY_SYM ? q_enlist_wrap(&y, 1) : y;
+    if (!ys || RAY_IS_ERR(ys)) { ray_release(path); return ys ? ys : q_err(QE_OOM); }
+    ray_t* pos = NULL;
+    ray_t* bad = q_wirefile_domain_extend(path, ys, &pos);
+    if (ys != y) ray_release(ys);
+    ray_t* full = bad ? NULL : q_wirefile_read_column(path);
+    ray_release(path);
+    if (!bad && (!full || RAY_IS_ERR(full))) bad = full ? full : q_err(QE_IO);
+    if (!bad) {
+        ray_err_t e = q_env_handle_set(dom, full);   /* retains */
+        if (e != RAY_OK) bad = q_env_err(e);
+    }
+    if (full && !RAY_IS_ERR(full)) ray_release(full);
+    if (bad) { if (pos) ray_release(pos); return bad; }
+    if (y->type == -RAY_SYM) {
+        int64_t k = ((int64_t*)ray_data(pos))[0];
+        ray_release(pos);
+        pos = ray_i64(k);
+    }
+    return q_enum_stamp(pos, dom);
 }
 
 /* `x!y` Enumeration — ENV-BLIND construction (R2, 2026-08-23): a sym atom
