@@ -264,6 +264,7 @@
 .help.i.r[`.Q.dsftg;".Q.dsftg[(0;10);h;4;3 1;`I`s;g]     /                         load, convert and save data in fixed-size chunks"]
 .help.i.r[`.Q.en;".Q.en[`:db;trade]                   /                         enumerate a table's symbol columns against a sym file"]
 .help.i.r[`.Q.ens;".Q.ens[`:db;trade;`mysym]           /                         enumerate against a named domain rather than sym"]
+.help.i.r[`.Q.enxs;".Q.enxs[$;`:db;trade;`sym]          /                         enumerate with an explicit enumerator (base of .Q.en/.Q.ens)"]
 .help.i.r[`.Q.f;".Q.f[2;3.14159]                     / \"3.14\"                  format a number to x decimal places"]
 .help.i.r[`.Q.fmt;".Q.fmt[8;2;3.14159]                 / \"    3.14\"              format a number to x characters and y decimals"]
 .help.i.r[`.Q.fc;".Q.fc[sum;til 10]                   /                         apply a function to a vector split across threads"]
