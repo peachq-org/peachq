@@ -32,15 +32,19 @@
 #define O_BINARY 0
 #endif
 
+typedef struct { int64_t dev, ino, size, sec, nsec; } splay_stamp;
+
 typedef struct {
     int64_t     name;     /* column sym id */
     q_wf_colhdr h;
+    splay_stamp st;
 } splay_col;
 
 typedef struct {
     int64_t    sym;       /* the `:dir/ handle sym — the table's aux path + key */
     ray_t*     dir;       /* owned RAY_STR path, trailing slash kept */
     ray_t*     keys;      /* owned .d sym vector */
+    splay_stamp dst;      /* the .d file's */
     splay_col* cols;
     int64_t    ncols;
     char       domname[256];   /* enum domain name ("" = no enum columns) */
@@ -48,6 +52,12 @@ typedef struct {
 
 static splay_ent* g_ents = NULL;
 static int64_t    g_n = 0, g_cap = 0;
+
+static void splay_free_partial(splay_ent* e) {
+    free(e->cols);
+    if (e->keys) ray_release(e->keys);
+    if (e->dir)  ray_release(e->dir);
+}
 
 /* ONE reservation: a guard block whose 16-byte TAIL carries the ray_t header's
  * front, payload at base+guard — so kdb's byte-16 payload lands on header+32.
@@ -347,12 +357,7 @@ void q_splay_destroy(void) {
     sigaction(SIGSEGV, &g_prev_segv, NULL);
     sigaction(SIGBUS, &g_prev_bus, NULL);
 #endif
-    for (int64_t i = 0; i < g_n; i++) {
-        splay_ent* e = &g_ents[i];
-        free(e->cols);
-        if (e->keys)   ray_release(e->keys);
-        if (e->dir)    ray_release(e->dir);
-    }
+    for (int64_t i = 0; i < g_n; i++) splay_free_partial(&g_ents[i]);
     free(g_ents);
     g_ents = NULL; g_n = 0; g_cap = 0;
 }
@@ -384,31 +389,25 @@ static int64_t splay_find(int64_t sym) {
     return -1;
 }
 
-/* An overwrite of the directory makes the entry a LIE — drop it whole; the
- * next resolve re-opens from the files (the writer's one hook into here). */
-void q_splay_invalidate(int64_t sym) {
-    int64_t i = splay_find(sym);
-    if (i < 0) return;
-    splay_ent* e = &g_ents[i];
-    free(e->cols);
-    if (e->keys)   ray_release(e->keys);
-    if (e->dir)    ray_release(e->dir);
-    g_ents[i] = g_ents[--g_n];   /* swap-remove */
-}
-
-/* A flat write INSIDE a mapped directory makes that entry a lie too — the
- * kb/linking-columns.md splayed-link workflow writes t1link and .d beside a
- * live mapping, then remaps.  Drop every entry whose dir prefixes the path. */
-void q_splay_invalidate_under(const char* path, size_t n) {
-    for (int64_t i = 0; i < g_n; ) {
-        splay_ent* e = &g_ents[i];
-        const char* d = e->dir ? ray_str_ptr(e->dir) : NULL;
-        size_t dn = d ? ray_str_len(e->dir) : 0;
-        if (d && dn > 0 && dn <= n && memcmp(d, path, dn) == 0 &&
-            (d[dn - 1] == '/' || dn == n || path[dn] == '/'))
-            q_splay_invalidate(e->sym);              /* swap-remove: re-check i */
-        else i++;
-    }
+/* What says a file is still the one whose header an entry holds: a rename-replace moves the inode, an in-place
+ * rewrite the size or the nanosecond mtime.  0 when the path will not stat — and always where stat has no file
+ * identity or only second mtimes (Windows CRT), so there every dereference reopens. */
+static int splay_stamp_of(const char* path, splay_stamp* s) {
+#if defined(RAY_OS_LINUX) || defined(RAY_OS_MACOS)
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+    s->dev = (int64_t)st.st_dev; s->ino = (int64_t)st.st_ino; s->size = (int64_t)st.st_size;
+    s->sec = (int64_t)st.st_mtime;
+#if defined(RAY_OS_LINUX)
+    s->nsec = (int64_t)st.st_mtim.tv_nsec;
+#else
+    s->nsec = (int64_t)st.st_mtimespec.tv_nsec;
+#endif
+    return 1;
+#else
+    (void)path; (void)s;
+    return 0;
+#endif
 }
 
 /* dir + column name as an owned NUL-terminated RAY_STR path. */
@@ -481,13 +480,25 @@ static int splay_name_sym_is(int64_t sym) {
 
 static ray_t* splay_open(int64_t sym, ray_t* dir, splay_ent** out);
 
-/* Entry behind handle-sym `sym`: found, or opened from its own path (a cold
- * carrier — wire round-trip, fresh runtime — heals here).  NULL with *err
- * NULL = not a table folder; NULL with *err = the open's error. */
+/* Is every file the entry read (.d and each column) still the one it read?  A write that finished before this
+ * dereference — through another spelling of the directory, or from another process — shows up here. */
+static int splay_fresh(splay_ent* e, const char* dotd) {
+    splay_stamp now;
+    if (!splay_stamp_of(dotd, &now) || memcmp(&now, &e->dst, sizeof now)) return 0;
+    for (int64_t i = 0; i < e->ncols; i++) {
+        ray_t* cp = splay_col_path(e, e->cols[i].name);
+        int ok = cp && splay_stamp_of(ray_str_ptr(cp), &now) && !memcmp(&now, &e->cols[i].st, sizeof now);
+        if (cp) ray_release(cp);
+        if (!ok) return 0;
+    }
+    return 1;
+}
+
+/* Entry behind handle-sym `sym`: found and still fresh, or opened from its own path (a cold carrier — wire
+ * round-trip, fresh runtime — heals here; a stale one reopens).  NULL with *err NULL = not a table folder; NULL with
+ * *err = the open's error. */
 static splay_ent* splay_resolve_sym(int64_t sym, ray_t** err) {
     *err = NULL;
-    int64_t i = splay_find(sym);
-    if (i >= 0) return &g_ents[i];
     ray_t* hs = ray_sym(sym);
     ray_t* path = q_io_file_path(hs);
     ray_release(hs);
@@ -504,18 +515,16 @@ static splay_ent* splay_resolve_sym(int64_t sym, ray_t** err) {
     memcpy(dp, p, n);
     memcpy(dp + n, ".d", 3);
     int has_d = stat(dp, &st) == 0 && S_ISREG(st.st_mode);
+    int64_t i = has_d ? splay_find(sym) : -1;
+    int fresh = i >= 0 && splay_fresh(&g_ents[i], dp);
     free(dp);
+    if (fresh) { ray_release(path); return &g_ents[i]; }
+    if (i >= 0) { splay_free_partial(&g_ents[i]); g_ents[i] = g_ents[--g_n]; }
     if (!has_d) { ray_release(path); return NULL; }     /* flat reader answers 'type */
     if (ray_eval_get_restricted()) { ray_release(path); *err = q_err(QE_ACCESS); return NULL; }
     splay_ent* e = NULL;
     *err = splay_open(sym, path, &e);                   /* consumes path */
     return e;
-}
-
-static void splay_free_partial(splay_ent* e) {
-    free(e->cols);
-    if (e->keys) ray_release(e->keys);
-    if (e->dir)  ray_release(e->dir);
 }
 
 static ray_t* splay_open(int64_t sym, ray_t* dir, splay_ent** out) {
@@ -528,6 +537,7 @@ static ray_t* splay_open(int64_t sym, ray_t* dir, splay_ent** out) {
     memcpy(dp, ray_str_ptr(dir), dn);
     memcpy(dp + dn, ".d", 3);
     ray_t* dps = ray_str(dp, dn + 2);
+    (void)splay_stamp_of(dp, &e.dst);                   /* stamp BEFORE the read: a racing writer reads as stale */
     free(dp);
     if (!dps) { splay_free_partial(&e); return q_err(QE_OOM); }
     ray_t* dotd = q_wirefile_read_column(dps);
@@ -552,6 +562,7 @@ static ray_t* splay_open(int64_t sym, ray_t* dir, splay_ent** out) {
         e.cols[i].h.count = -1;
         ray_t* cp = splay_col_path(&e, id);
         if (!cp) { splay_free_partial(&e); return q_err(QE_OOM); }
+        (void)splay_stamp_of(ray_str_ptr(cp), &e.cols[i].st);
         ray_t* err = q_wirefile_probe(cp, &e.cols[i].h);
         ray_release(cp);
         if (err) { splay_free_partial(&e); return err; }

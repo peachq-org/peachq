@@ -9,7 +9,6 @@
 #include "qlang/q_env.h"        /* q_env_get — `.z.zd` lives as a plain global */
 #include "qlang/q_prim.h"       /* q_str_text_bytes — nested CHAR rows; q_attr_stamp_trusted — the disk `s` */
 #include "qlang/ops/q_index.h"  /* q_index_elem_at — nested row reads */
-#include "qlang/io/q_splay.h"   /* q_splay_invalidate(_under) — writes drop stale map entries */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_concrete, q_eval_apply_value */
 #include "qlang/q_registry.h"   /* the `,` value the append fallback composes on */
 #include "lang/eval.h"          /* ray_eval_get_restricted */
@@ -783,8 +782,6 @@ static ray_t* wf_write_flat(ray_t* x, ray_t* y, int lbs, int alg, int lvl) {
     if (!path) return NULL;
     if (ray_eval_get_restricted()) { ray_release(path); return q_err(QE_ACCESS); }
     ray_t* bad = wf_write_flat_path(path, y, lbs, alg, lvl);
-    if (!bad)   /* a write inside a mapped dir stales its entry (link workflow) */
-        q_splay_invalidate_under(ray_str_ptr(path), ray_str_len(path));
     ray_release(path);
     if (bad) return bad;
     ray_retain(x);
@@ -1310,7 +1307,6 @@ ray_t* q_wirefile_write_splay(ray_t* dirsym, ray_t* domsym, ray_t* y,
     ray_release(y);
     ray_release(dir);
     if (bad) return bad;
-    q_splay_invalidate(dirsym->i64);   /* a warm entry is now a lie */
     ray_retain(dirsym);
     return dirsym;
 }
