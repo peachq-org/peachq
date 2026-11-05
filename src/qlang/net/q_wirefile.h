@@ -42,15 +42,11 @@ ray_t* q_wirefile_append_path(ray_t* pathstr, ray_t* y);
 ray_t* q_wirefile_write_splay(ray_t* dirsym, ray_t* domsym, ray_t* y,
                               int lbs, int alg, int lvl);
 
-/* The domain-append primitive `.Q.en` and the splay writer share: intern
+/* The domain-append primitive filepath Enum Extend (`:d?y) and the splay writer share: intern
  * symv's symbols into the domain FILE (append-only, new names only, positions
  * never rewritten, never compressed).  *positions (may be NULL) receives the
  * owned i64 domain positions of symv's cells.  NULL on success. */
 ray_t* q_wirefile_domain_extend(ray_t* dompathstr, ray_t* symv, ray_t** positions);
-
-/* `.Q.en[dom;t]` — the compat shim over domain_extend (body here, the format
- * home; ops/q_dotq.c only delegates).  Owned t back unchanged, or an error. */
-ray_t* q_wirefile_en(ray_t* dom, ray_t* t);
 
 /* ---- the splay authority's window on the format (io/q_splay.h) ---------- */
 

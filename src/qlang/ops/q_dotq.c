@@ -11,7 +11,6 @@
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_rank — .Q.ops q-side valence */
 #include "qlang/q_registry.h"   /* q_registry_qsrc_ns — the `.q` roster */
 #include "qlang/io/q_splay.h"   /* q_splay_mapped_bytes/_zblocks — .Q.w, .Q.c.zblocks */
-#include "qlang/net/q_wirefile.h" /* q_wirefile_en — .Q.en's format-home body */
 #include "table/dict.h"         /* ray_dict_find_sym — the `.q` roster probe */
 #include "mem/heap.h"           /* ray_mem_stats — .Q.w's heap fields */
 #include "lang/internal.h"
@@ -161,12 +160,6 @@ ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs) {
         ray_release(c[i]);                /* ...but always drop our ref (add_col retains) */
     }
     return t;
-}
-
-/* (.Q.en[dom;t]) — the thin compat shim over the domain-append primitive
- * (ref/dotq.md#en-enumerate-varchar-cols); the body lives at the format home. */
-ray_t* q_dotq_en_fn(ray_t* dom, ray_t* t) {
-    return q_wirefile_en(dom, t);
 }
 
 /* (.Q.c.zblocks[]) — cumulative compressed blocks inflated (internal witness:
