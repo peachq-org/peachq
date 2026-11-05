@@ -15,6 +15,7 @@
 #include "qlang/base/q_type.h"
 #include "qlang/ops/q_index.h" /* q_index_elem_at — the one element accessor */
 #include "qlang/ops/q_dollar.h"
+#include "lang/eval.h"          /* ray_eval_is_interrupted */
 #include "table/dict.h"
 #include <string.h>
 
@@ -151,7 +152,7 @@ static ray_t* acc_item(ray_t* v, int64_t i) {
 /* Binary and higher-rank values (:217, :322): the running left argument is
  * `seed`, or — applied as a unary with no known identity — the first item,
  * which is then the first result (:272).  it[0..nit) are the iterated
- * arguments; the count is the longest of them. */
+ * arguments, conforming lists (:331). */
 static ray_t* acc_reduce(ray_t* fv, const q_op_t* frow, ray_t* seed,
                          ray_t** it, int64_t nit, int keep) {
     if (nit < 1 || nit + 1 > APPLY_MAX_ARGS) return q_err(QE_RANK);
@@ -159,6 +160,7 @@ static ray_t* acc_reduce(ray_t* fv, const q_op_t* frow, ray_t* seed,
     ray_t* av[APPLY_MAX_ARGS];
     ray_t* dk = NULL;                 /* first dict argument: the result's keys */
     int64_t len = -1;
+    int ragged = 0;
     for (int64_t p = 0; p < nit; p++) {
         ray_retain(it[p]);
         iv[p] = q_eval_apply_concrete(it[p]);   /* an iterated DAG has no items */
@@ -171,10 +173,13 @@ static ray_t* acc_reduce(ray_t* fv, const q_op_t* frow, ray_t* seed,
         }
         if (!q_type_is_iter(iv[p])) continue;
         int64_t c = q_count(iv[p]);
-        if (len < 0 || c > len) len = c;
+        ragged |= len >= 0 && c != len;
+        if (len < 0) len = c;
     }
     ray_t* r;
-    if (len == 0) {
+    if (ragged) {
+        r = q_err(QE_LENGTH);
+    } else if (len == 0) {
         r = acc_empty(fv, frow, seed, keep, 0);      /* :385, seeded branch */
     } else if (len < 0) {
         /* nothing to iterate over: one evaluation, and the result stays an
@@ -283,6 +288,39 @@ static ray_t* acc_unary(ray_t* fv, const q_op_t* frow, ray_t* x, int keep) {
     return r;
 }
 
+static ray_t* acc_apply(ray_t* fv, const q_op_t* frow, ray_t** args,
+                        int64_t n, int keep);
+
+/* `a b\c` with a float b IS `{z+x*y}\[a;b;c]` (accumulators.md:372, V3.1); the
+ * loop only runs the shape whose answer it cannot change, the rest go to the lambda */
+static ray_t* acc_float_scan(ray_t* a, ray_t* b, ray_t* c) {
+    int64_t len = c->type == RAY_F64 ? q_count(c) : 0;
+    int bv_vec = b->type == RAY_F64;
+    if (a->type == -RAY_F64 && len > 0 && !ray_is_lazy(c) &&
+        (!bv_vec || (!ray_is_lazy(b) && q_count(b) == len))) {
+        ray_t* out = ray_vec_new(RAY_F64, len);
+        if (RAY_IS_ERR(out)) return out;
+        out->len = len;
+        const double* cv = (const double*)ray_data(c);
+        const double* bv = bv_vec ? (const double*)ray_data(b) : &b->f64;
+        double* o = (double*)ray_data(out);
+        double s = a->f64;
+        for (int64_t i = 0; i < len; i++) {
+            if (!(i & 0xffff) && ray_eval_is_interrupted()) { ray_release(out); return q_err(QE_STOP); }
+            volatile double p = s * bv[bv_vec ? i : 0];   /* no FMA: the lambda rounds x*y first */
+            s = cv[i] + p;
+            if (__builtin_isnan(s)) s = NULL_F64;   /* the arithmetic kernels' one NaN */
+            o[i] = s;
+        }
+        return out;
+    }
+    ray_t* lam = q_eval_statement("{z+x*y}", NULL);
+    if (RAY_IS_ERR(lam)) return lam;
+    ray_t* r = acc_apply(lam, NULL, (ray_t*[]){ a, b, c }, 3, 1);
+    ray_release(lam);
+    return r;
+}
+
 /* Scan `\` and Over `/`: one classifier over the doc's own taxonomy — the
  * value's rank picks unary-value control flow (Converge / Do / While, :81)
  * or the reduction of a binary-or-higher value (:217, :322). */
@@ -300,6 +338,8 @@ static ray_t* acc_apply(ray_t* fv, const q_op_t* frow, ray_t** args,
     if (n == 1 && !q_eval_apply_is_fn(fv) && q_type_is_iter(args[0]) &&
         args[0]->type != RAY_TABLE && q_count(args[0]) == 0)
         return q_typed_empty_like(ray_list_new(0), fv);
+    if (keep && n == 2 && (fv->type == RAY_F64 || fv->type == -RAY_F64))
+        return acc_float_scan(args[0], fv, args[1]);
     int64_t rank = acc_rank(fv);
     if (rank < 0 && n <= 2 && q_eval_apply_fnv_matrix_row(frow)) rank = 2;   /* `(!/)x` reduces */
     /* a variadic value reads as the UNARY form in both binary shapes:
