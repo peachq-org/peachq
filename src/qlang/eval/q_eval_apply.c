@@ -1723,9 +1723,10 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
                 return atomic2((ray_binary_fn)(uintptr_t)fv->i64, row,
                                args[0], args[1]);
         } else if (strcmp(fam, "aggregate") == 0) {
-            /* the fold group answers `()` as it answers the typed empty: `max ()` is `max 0#0` (owner ruling
-             * 2026-10-09), as `sum ()` is 0 */
-            if (n == 1 && q_ops_nested_dyad(row) && q_type_is_empty_list(args[0])) {
+            /* the fold group folds `()` to `()`: a list with no type has no identity (owner ruling 2026-11-05,
+             * #87); avg keeps `avg 0#0`, its SQL-compat 0n */
+            if (n == 1 && row->nested == QNEST_FOLD && q_type_is_empty_list(args[0])) return ray_list_new(0);
+            if (n == 1 && row->nested == QNEST_MEAN && q_type_is_empty_list(args[0])) {
                 ray_t* e = q_type_empty(RAY_I64);
                 ray_t* r = q_eval_apply(fv, row, &e, 1);
                 ray_release(e);
