@@ -390,6 +390,8 @@ ray_t* q_search_find(ray_t* x, ray_t* y) {
     }
     if (x && (ray_is_vec(x) || x->type == RAY_LIST)) {          /* find */
         if (ray_is_vec(x) && x->type != RAY_STR && !q_search_admits(x, y)) return q_err(QE_TYPE);
+        if (x->type == RAY_LIST && y && y->type == RAY_LIST && q_count(y) == 0)
+            return q_type_empty(RAY_I64);            /* `()` has no first item to read a rank off: zero items sought */
         int64_t cnt = q_count(x);
         int xd = q_index_rank(x) - 1;                /* the rank of x's items, read off the first (find.md) */
         int yd = q_index_rank(y);
