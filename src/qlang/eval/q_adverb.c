@@ -272,7 +272,8 @@ static ray_t* acc_unary(ray_t* fv, const q_op_t* frow, ray_t* x, int keep) {
     ray_t* r;
     /* raze owns its empties: `(,/)""` is `""` (owner 2026-10-04), so `,`'s identity `()` must not answer first */
     if (q_type_is_iter(x) && q_count(x) == 0 && !structural) {
-        r = acc_empty(fv, frow, NULL, keep, mv != NULL);
+        /* `()` has no type to name an identity, so its keyword answers: `(+/)()` is `sum ()` (#87) */
+        r = mv && x->type == RAY_LIST ? NULL : acc_empty(fv, frow, NULL, keep, mv != NULL);
         if (!r) r = q_eval_apply(mv, mrow, &x, 1);
     } else if (mv)
         r = q_eval_apply(mv, mrow, &x, 1);
