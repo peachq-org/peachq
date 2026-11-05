@@ -167,11 +167,9 @@ ray_t* q_maxs_wrap(ray_t* x){ return runscan(x, RS_MAXS); }
 ray_t* q_mins_wrap(ray_t* x){ return runscan(x, RS_MINS); }
 ray_t* q_avgs_wrap(ray_t* x){ return runscan(x, RS_AVGS); }
 
-/* q `ratios x` — pairwise ratio: r[0]=x[0], r[i]=x[i] % x[i-1] (float). */
+/* the `%':` kernel on a numeric vector (q_adverb.c prior_each): r[0]=x[0], r[i]=x[i]%x[i-1] (float). */
 ray_t* q_ratios_wrap(ray_t* x) {
-    if (!x) return q_err(QE_TYPE);
-    if (ray_is_atom(x)) { ray_retain(x); return x; }
-    if (!ray_is_vec(x) || !q_type_is_num_tag(x->type)) return q_err(QE_TYPE);
+    if (!x || !ray_is_vec(x) || !q_type_is_num_tag(x->type)) return q_err(QE_TYPE);
     int64_t n = q_count(x);
     ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1); out->len = n;
     double* o = (double*)ray_data(out);
@@ -182,11 +180,9 @@ ray_t* q_ratios_wrap(ray_t* x) {
             continue;
         }
         int pnu; double pv = q_velem_f(x, i-1, &pnu);
-        /* r[i] = x[i] % x[i-1] with q float-divide semantics: a null operand or
-         * a zero divisor yields null (the engine's `%` canonicalizes ±inf/NaN
-         * to 0n), not a fabricated value. */
-        if (nu || pnu || pv == 0) { o[i] = 0; ray_vec_set_null(out, i, true); }
-        else o[i] = v / pv;
+        /* a null operand nulls; a zero divisor is live-infinity `%` (`1b%0b` is 0w, ref/divide.md:27) */
+        if (nu || pnu) { o[i] = 0; ray_vec_set_null(out, i, true); }
+        else { o[i] = v / pv; if (o[i] != o[i]) ray_vec_set_null(out, i, true); }
     }
     return out;
 }

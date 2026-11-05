@@ -123,7 +123,7 @@
 / @param verb a symbol or char naming a verb in .Q.ops[], or a function
 / @eg .pq.dr `neg
 / @eg .pq.dr "+"
-.pq.dr:{[verb] t:.Q.ops[]; i:(t`name)?$[-11h=type verb;verb;`$$[-10h=type verb;enlist verb;verb]]; $[i>=count t`name;"not in .Q.ops[]";t[`dyadic]i;.pq.drform[verb;`dyadic];t[`monadic]i;.pq.drform[verb;`monadic];"no valence in .Q.ops[]"]}
+.pq.dr:{[verb] t:.Q.ops[]; i:(t`name)?$[-11h=type verb;verb;`$$[-10h=type verb;enlist verb;verb]]; $[i>=count t`name;"not in .Q.ops[]";t[`dyadic]i;.pq.drform[verb;`dyadic];.pq.drform[verb;`monadic]]}
 
 / @ignore
 .pq.i.rval:{[x] v:@[value;x;{[e] 'unpush}]; $[100h<=type v;'unpush;((11h=abs type v)or(type v) in 0 98 99h);enlist v;v]}
