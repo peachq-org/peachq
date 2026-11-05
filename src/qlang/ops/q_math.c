@@ -205,10 +205,9 @@ ray_t* q_xlog_wrap(ray_t* x, ray_t* y) {
 #pragma GCC optimize("no-associative-math", "fp-contract=off")
 #endif
 /* q `x mmu y` — matrix multiply / dot product (ref/mmu.md).  f64-only (`real`/int
- * -> type; the doc says "float").  Each entry is mmu_dot over a row of x and a
- * column of q_flip_wrap y.  A vector is an f64 vec whose axis drops from the
+ * -> type; the doc says "float").  A vector is an f64 vec whose axis drops from the
  * result; a matrix is a rectangular list of f64 vecs.  Shape validated up front:
- * ragged / count-y != count-first-x / empty inner axis -> length. */
+ * ragged / count-y != count-first-x -> length; an empty inner axis sums to 0f (#107). */
 int q_mmu_class(ray_t* v, int64_t* first) {  /* 0=vector, 1=matrix, else QMMU_* */
     if (v && v->type == RAY_F64) { *first = q_count(v); return 0; }   /* count x */
     if (v && v->type == RAY_LIST && q_count(v) > 0) {
@@ -234,55 +233,107 @@ static double mmu_dot(const double* a, const double* b, int64_t n) {
     return __builtin_isnan(acc) ? NULL_F64 : acc;
 }
 
+static void mmu_fold_nan(double* d, int64_t n) {
+    for (int64_t j = 0; j < n; j++) if (__builtin_isnan(d[j])) d[j] = NULL_F64;
+}
+
+typedef double mmu_v4 __attribute__((vector_size(32)));
+enum { MMU_MR = 4, MMU_NR = 8, MMU_KC = 256, MMU_NC = 512 };
+
+/* Every cell is mmu_dot's sum, bit for bit: 0.0 then + x[i;k]*y[k;j] in ascending k, carried across k tiles in
+ * out — speed may only come from vectorising across cells and from tiling, never from reordering the sum. */
+static void mmu_gemm(ray_t* const* xr, ray_t* const* yr, ray_t* const* outr, int64_t R, int64_t K, int64_t C) {
+    const double* yp[MMU_KC];
+    for (int64_t i = 0; i < R; i++) memset(ray_data(outr[i]), 0, (size_t)C * sizeof(double));
+    for (int64_t jc = 0; jc < C; jc += MMU_NC) {
+        int64_t je = C - jc < MMU_NC ? C : jc + MMU_NC;
+        for (int64_t kc = 0; kc < K; kc += MMU_KC) {
+            int64_t kn = K - kc < MMU_KC ? K - kc : MMU_KC;
+            for (int64_t k = 0; k < kn; k++) yp[k] = (const double*)ray_data(yr[kc + k]);
+            for (int64_t i = 0; i < R; i += MMU_MR) {
+                int64_t mr = R - i < MMU_MR ? R - i : MMU_MR, j = jc;
+                const double* xp[MMU_MR];
+                double* op[MMU_MR];
+                for (int64_t r = 0; r < mr; r++) {
+                    xp[r] = (const double*)ray_data(xr[i + r]) + kc;
+                    op[r] = (double*)ray_data(outr[i + r]);
+                }
+                if (mr == MMU_MR)
+                    for (; j + MMU_NR <= je; j += MMU_NR) {
+                        mmu_v4 c[MMU_MR][2];
+                        for (int r = 0; r < MMU_MR; r++) memcpy(c[r], op[r] + j, sizeof c[r]);
+                        for (int64_t k = 0; k < kn; k++) {
+                            mmu_v4 y0, y1;
+                            memcpy(&y0, yp[k] + j, sizeof y0);
+                            memcpy(&y1, yp[k] + j + 4, sizeof y1);
+                            for (int r = 0; r < MMU_MR; r++) {
+                                double a = xp[r][k];
+                                c[r][0] += a * y0;
+                                c[r][1] += a * y1;
+                            }
+                        }
+                        for (int r = 0; r < MMU_MR; r++) memcpy(op[r] + j, c[r], sizeof c[r]);
+                    }
+                for (int64_t r = 0; r < mr; r++)
+                    for (int64_t k = 0; k < kn; k++) {
+                        double a = xp[r][k];
+                        for (int64_t jj = j; jj < je; jj++) op[r][jj] += a * yp[k][jj];
+                    }
+            }
+        }
+    }
+    for (int64_t i = 0; i < R; i++) mmu_fold_nan(ray_data(outr[i]), C);
+}
+
+static void mmu_rows_dot(ray_t* const* xr, const double* y, double* od, int64_t R, int64_t K) {
+    int64_t i = 0;
+    for (; i + 4 <= R; i += 4) {
+        const double *a0 = ray_data(xr[i]), *a1 = ray_data(xr[i + 1]), *a2 = ray_data(xr[i + 2]), *a3 = ray_data(xr[i + 3]);
+        double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
+        for (int64_t k = 0; k < K; k++) {
+            double b = y[k];
+            s0 += a0[k] * b; s1 += a1[k] * b; s2 += a2[k] * b; s3 += a3[k] * b;
+        }
+        od[i] = s0; od[i + 1] = s1; od[i + 2] = s2; od[i + 3] = s3;
+    }
+    for (; i < R; i++) od[i] = mmu_dot(ray_data(xr[i]), y, K);
+    mmu_fold_nan(od, R);
+}
+
 ray_t* q_mmu_wrap(ray_t* x, ray_t* y) {
     int64_t kx, ky;                                     /* count-first (matrix) / count (vec) */
     int xc = q_mmu_class(x, &kx), yc = q_mmu_class(y, &ky);
     if (xc == QMMU_BAD || yc == QMMU_BAD) return q_err(QE_TYPE);
     if (xc == QMMU_RAGGED || yc == QMMU_RAGGED) return q_err(QE_LENGTH);
     if (kx != q_count(y)) return q_err(QE_LENGTH);          /* count y must match */
-    if (kx <= 0) return q_err(QE_LENGTH);                   /* no product over an empty axis */
 
-    ray_t* ycols = yc ? q_flip_wrap(y) : NULL;          /* owned: cols of y as f64 vecs */
-    if (yc && (!ycols || RAY_IS_ERR(ycols))) return ycols ? ycols : q_err(QE_OOM);
-    if (yc && ky > 0) {                                 /* the flip is what mmu_dot reads */
-        int64_t w;
-        if (q_mmu_class(ycols, &w) != 1 || w != kx || q_count(ycols) != ky) { ray_release(ycols); return q_err(QE_TYPE); }
-    }
-    ray_t** rowv = xc ? (ray_t**)ray_data(x) : NULL;
-    ray_t** colv = yc ? (ray_t**)ray_data(ycols) : NULL;
-    int64_t R = xc ? q_count(x) : 1;                    /* result rows (dropped if x is a vec) */
-    int64_t C = yc ? ky : 1;                            /* result cols (dropped if y is a vec) */
-
-    /* scalar: vector . vector -> float atom */
     if (!xc && !yc) return make_f64(mmu_dot(ray_data(x), ray_data(y), kx));
 
-    /* matrix . matrix -> list of R f64 vecs, each length C */
-    if (xc && yc) {
-        ray_t* out = ray_list_new(R > 0 ? R : 1);
-        if (!out || RAY_IS_ERR(out)) { ray_release(ycols); return out ? out : q_err(QE_OOM); }
-        for (int64_t i = 0; i < R; i++) {
-            ray_t* row = ray_vec_new(RAY_F64, C > 0 ? C : 1);
-            if (!row || RAY_IS_ERR(row)) { ray_release(out); ray_release(ycols); return row ? row : q_err(QE_OOM); }
-            row->len = C;
-            double* od = (double*)ray_data(row);
-            for (int64_t j = 0; j < C; j++)
-                od[j] = mmu_dot(ray_data(rowv[i]), ray_data(colv[j]), kx);
-            out = ray_list_append(out, row); ray_release(row);   /* append RETAINS */
-            if (RAY_IS_ERR(out)) { ray_release(ycols); return out; }
-        }
-        ray_release(ycols);
+    int64_t R = xc ? q_count(x) : 1, C = yc ? ky : 1;   /* result rows / cols (an axis drops for a vec operand) */
+    if (xc && !yc) {
+        ray_t* out = ray_vec_new(RAY_F64, R);
+        if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
+        out->len = R;
+        mmu_rows_dot((ray_t**)ray_data(x), ray_data(y), ray_data(out), R, kx);
         return out;
     }
-
-    /* exactly one matrix operand -> f64 vec (the other axis drops) */
-    int64_t n = xc ? R : C;
-    ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1);
-    if (!out || RAY_IS_ERR(out)) { if (ycols) ray_release(ycols); return out ? out : q_err(QE_OOM); }
-    out->len = n;
-    double* od = (double*)ray_data(out);
-    for (int64_t k = 0; k < n; k++)
-        od[k] = mmu_dot(ray_data(xc ? rowv[k] : x), ray_data(yc ? colv[k] : y), kx);
-    if (ycols) ray_release(ycols);
+    if (!xc) {
+        ray_t* out = ray_vec_new(RAY_F64, C > 0 ? C : 1);
+        if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
+        out->len = C;
+        mmu_gemm(&x, (ray_t**)ray_data(y), &out, 1, kx, C);
+        return out;
+    }
+    ray_t* out = ray_list_new(R);
+    if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
+    for (int64_t i = 0; i < R; i++) {
+        ray_t* row = ray_vec_new(RAY_F64, C > 0 ? C : 1);
+        if (!row || RAY_IS_ERR(row)) { ray_release(out); return row ? row : q_err(QE_OOM); }
+        row->len = C;
+        out = ray_list_append(out, row); ray_release(row);   /* append RETAINS */
+        if (RAY_IS_ERR(out)) return out;
+    }
+    mmu_gemm((ray_t**)ray_data(x), (ray_t**)ray_data(y), (ray_t**)ray_data(out), R, kx, C);
     return out;
 }
 
@@ -313,7 +364,7 @@ static ray_t* mat_rows_new(const double* a, int64_t rows, int64_t cols) {
  * decomposition"; float-only per ref/matrixes.md).  Right-looking elimination,
  * then one permuted-identity solve per result column — this exact order
  * reproduces the doc goldens' rounding noise (`a mmu inv a` off-diagonals).
- * Singular pivot -> 'domain (undocumented; lsq's non-PD case matches). */
+ * A zero pivot (singular) answers an n x n of 0n: quantQ inspects inv's nulls (#113). */
 ray_t* q_inv_wrap(ray_t* x) {
     int64_t w;
     int xc = q_mmu_class(x, &w);
@@ -329,11 +380,12 @@ ray_t* q_inv_wrap(ray_t* x) {
     double* b = r + n * n;
     for (int64_t i = 0; i < n; i++) piv[i] = i;
 
-    for (int64_t k = 0; k < n; k++) {
+    int singular = 0;
+    for (int64_t k = 0; k < n && !singular; k++) {
         int64_t p = k;
         for (int64_t i = k + 1; i < n; i++)
             if (fabs(a[i * n + k]) > fabs(a[p * n + k])) p = i;
-        if (a[p * n + k] == 0.0) { free(r); free(piv); free(a); return q_err(QE_DOMAIN); }
+        if (a[p * n + k] == 0.0) { singular = 1; break; }
         if (p != k) {
             for (int64_t j = 0; j < n; j++) { double t = a[k * n + j]; a[k * n + j] = a[p * n + j]; a[p * n + j] = t; }
             int64_t t = piv[k]; piv[k] = piv[p]; piv[p] = t;
@@ -344,7 +396,8 @@ ray_t* q_inv_wrap(ray_t* x) {
         }
     }
 
-    for (int64_t c = 0; c < n; c++) {
+    for (int64_t i = 0; singular && i < n * n; i++) r[i] = NULL_F64;
+    for (int64_t c = 0; !singular && c < n; c++) {
         for (int64_t i = 0; i < n; i++) b[i] = piv[i] == c ? 1.0 : 0.0;
         for (int64_t i = 0; i < n; i++) {                    /* L (unit diag) forward */
             double s = b[i];
@@ -370,7 +423,7 @@ ray_t* q_inv_wrap(ray_t* x) {
  * `x mmu inv y` — that shortcut needs square y, and ref/lsq.md's own second
  * example divides a 3x4 by a 3x4.  G = y mmu flip y, C = x mmu flip y (the
  * existing kernels); G symmetric makes R G = C a per-row solve through the
- * Cholesky factor.  Non-positive-definite G -> 'domain, the inv singular class. */
+ * Cholesky factor.  Non-positive-definite G -> 'domain. */
 ray_t* q_lsq_wrap(ray_t* x, ray_t* y) {
     int64_t px, py;
     int xc = q_mmu_class(x, &px), yc = q_mmu_class(y, &py);
