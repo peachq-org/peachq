@@ -86,6 +86,9 @@ typedef struct {
  * point per overloaded glyph (`?` `!` `@` `.`) dispatching on call rank */
 #define QR_FNV(t, f)  { QK_FN,   (t),  (q_wrap_fn_t)(f),   0, 0 }
 #define QR_QSRC(t)    { QK_QSRC, (t),  NULL,               0, 0 }
+/* COVER = a QSRC cell whose `.q.<t>` value is an extension (`sums` IS `+\`, exposed-infrastructure.md:72) and
+ * whose `f` is the unary C kernel that extension's one-argument arm reaches (q_registry_row_kernel) */
+#define QR_COVER(t, f) { QK_QSRC, (t),  (q_wrap_fn_t)(f),   1, 0 }
 #define QR_ALIAS(t)   { QK_ALIAS,(t),  NULL,               0, 0 }
 
 /* One manifest row: a q verb, its lexical class, its monadic/dyadic build recipes
