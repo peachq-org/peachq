@@ -1151,10 +1151,20 @@ ray_t* q_funsql_dict_drop_keys(ray_t* keys, ray_t* d) { return dict_drop_keys(ke
 
 /* ===== `!` rank 4: Update / Delete (wave 4) ============================== */
 
+static ray_t* upd_fill(ray_t* v, int64_t n) {                 /* consumes v */
+    ray_t* c = q_table_bcast_col(v, n);
+    ray_release(v);
+    return c;
+}
+
 /* a fresh column of v's null, length n (update.md: a created column has
  * nulls wherever the Where phrase did not reach) */
 static ray_t* null_col_like(ray_t* v, int64_t n) {
     if (v && q_enum_is(v)) return q_enum_null_col(q_enum_domain(v), n);
+    if (v && v->type >= RAY_LAMBDA) {                    /* a function has no typed null: () holds the row */
+        ray_t* e = ray_list_new(1);
+        return RAY_IS_ERR(e) ? e : upd_fill(e, n);
+    }
     int8_t ty = q_type_elem_tag(v);
     ray_t* na = ty ? ray_typed_null(ty) : NULL;
     if (!na) { na = RAY_NULL_OBJ; ray_retain(na); }
@@ -1188,12 +1198,6 @@ static ray_t* upd_amend(ray_t* cur, ray_t* rows, ray_t* v) {
  * reaches, as an atom does — the count-mismatch 'length stays for every other list. */
 static int upd_is_empty(ray_t* v, int64_t n) {
     return n > 0 && !ray_is_atom(v) && q_count(v) == 0 && (ray_is_vec(v) || v->type == RAY_ENUM || v->type == RAY_LIST);
-}
-
-static ray_t* upd_fill(ray_t* v, int64_t n) {                 /* consumes v */
-    ray_t* c = q_table_bcast_col(v, n);
-    ray_release(v);
-    return c;
 }
 
 /* What the amend starts from.  `full` = the update reaches EVERY row, so no
@@ -1239,6 +1243,9 @@ static ray_t* upd_cols(ray_t* a, ray_t* t, ray_t* idx, ray_t* gidxs) {
                                           * (set-attribute.md apply form 3) */
                 ray_retain(cur);
                 ray_release(v);
+            } else if (full && ray_is_atom(v) && !q_enum_is(v)) {      /* n#enum-atom drops the domain */
+                cur = conform_col(v, q_count(t));
+                if (!cur || RAY_IS_ERR(cur)) { err = cur ? cur : q_err(QE_TYPE); cur = NULL; }
             } else {
                 cur = upd_amend(upd_col_start(t, nm->i64, v, full), idx, v);
                 if (RAY_IS_ERR(cur)) { err = cur; cur = NULL; }
