@@ -2007,27 +2007,25 @@ static int64_t find_scan(ray_t* vec, ray_t* val, int64_t start) {
 #undef FIND_SCAN
 }
 
-/* First i with vec[i] >= key (upper=0) or > key (upper=1) over a sorted null-free vector of the widths below; -1
- * on any other type.  The needle carries the vector's own type, so each lane compares one storage width. */
-static int64_t sorted_bound(ray_t* vec, ray_t* key, int upper) {
+int64_t ray_sorted_bound(ray_t* vec, int64_t lo, int64_t hi, ray_t* key, int64_t j, int upper) {
     const void* a = ray_data(vec);
-    int64_t lo = 0, hi = vec->len;
-#define SORTED_BOUND(T, K) do {                                                          \
+#define SORTED_BOUND(T, F) do {                                                          \
         const T* p = (const T*)a;                                                        \
+        T k = ray_is_atom(key) ? (T)key->F : ((const T*)ray_data(key))[j];               \
         while (lo < hi) {                                                                \
             int64_t mid = lo + (hi - lo) / 2;                                            \
-            if (upper ? p[mid] <= (K) : p[mid] < (K)) lo = mid + 1; else hi = mid;       \
+            if (upper ? p[mid] <= k : p[mid] < k) lo = mid + 1; else hi = mid;           \
         }                                                                                \
         return lo;                                                                       \
     } while (0)
     switch (vec->type) {
-    case RAY_I64: RAY_TEMPORAL64_CASES: SORTED_BOUND(int64_t, key->i64);
-    case RAY_I32: RAY_TEMPORAL32_CASES: SORTED_BOUND(int32_t, key->i32);
-    case RAY_I16:                       SORTED_BOUND(int16_t, key->i16);
-    case RAY_BOOL:                      SORTED_BOUND(bool,    key->b8);
-    RAY_BYTE_CASES:                     SORTED_BOUND(uint8_t, key->u8);
-    case RAY_F64: RAY_TEMPORALF_CASES:  SORTED_BOUND(double,  key->f64);
-    case RAY_F32:                       SORTED_BOUND(float,   key->f64);
+    case RAY_I64: RAY_TEMPORAL64_CASES: SORTED_BOUND(int64_t, i64);
+    case RAY_I32: RAY_TEMPORAL32_CASES: SORTED_BOUND(int32_t, i32);
+    case RAY_I16:                       SORTED_BOUND(int16_t, i16);
+    case RAY_BOOL:                      SORTED_BOUND(bool,    b8);
+    RAY_BYTE_CASES:                     SORTED_BOUND(uint8_t, u8);
+    case RAY_F64: RAY_TEMPORALF_CASES:  SORTED_BOUND(double,  f64);
+    case RAY_F32:                       SORTED_BOUND(float,   f64);
     default:                            return -1;
     }
 #undef SORTED_BOUND
@@ -2037,9 +2035,9 @@ bool ray_sorted_span(ray_t* vec, ray_t* a, ray_t* b, int64_t* lo, int64_t* hi) {
     if (!ray_attr_is_sorted(vec) || (vec->attrs & RAY_ATTR_HAS_NULLS)) return false;
     if (!a || !ray_is_atom(a) || a->type != -vec->type || atom_is_oob_null(a)) return false;
     if (b && (!ray_is_atom(b) || b->type != -vec->type || atom_is_oob_null(b))) return false;
-    *lo = sorted_bound(vec, a, 0);
+    *lo = ray_sorted_bound(vec, 0, vec->len, a, 0, 0);
     if (*lo < 0) return false;
-    *hi = sorted_bound(vec, b ? b : a, 1);
+    *hi = ray_sorted_bound(vec, 0, vec->len, b ? b : a, 0, 1);
     return true;
 }
 
