@@ -39,6 +39,7 @@
 #include "lang/eval.h"
 #include "lang/internal.h"   /* call_lambda — bare engine-lambda application */
 #include "ops/ops.h"
+#include "core/pool.h"       /* the worker count that decides a float pair's DAG */
 #include "table/sym.h"
 #include <assert.h>
 #include <stdio.h>
@@ -566,7 +567,8 @@ static ray_t* binary_elem(ray_binary_fn fn, const q_op_t* row, ray_t* a, ray_t* 
  * opcode; this carve kept only its boxed loop, so `v+v` paid three heap atoms
  * per element.  The gate below is a STRICT SUBSET of eval.c's can_dag, so the
  * executor always takes it and base's boxed fallback — a second
- * result-construction home — stays unreachable from here. */
+ * result-construction home — stays unreachable from here.  It runs only where
+ * it pays (dag_pays); every other plain-number pair is q_vecop's double lane. */
 static uint16_t dag_op_of(ray_binary_fn f) {
     uintptr_t p = (uintptr_t)f;
     if (p == (uintptr_t)ray_add_fn) return OP_ADD;
@@ -596,6 +598,15 @@ static int dag_pair_ok(ray_t* l, ray_t* r, int lc, int rc) {
 }
 #undef DAG_ATOMT
 
+/* Building the executor's graph costs tens of microseconds, which only parallel workers pay back: single-threaded,
+ * or below the crossover (about 120k elements at -s 4, measured 2026-11-05), q_vecop's double lane is faster. */
+static int dag_pays(ray_t* l, ray_t* r, int lc, int rc) {
+    int64_t n = lc ? q_count(l) : q_count(r);
+    if (lc && rc && q_count(r) != n) return 0;
+    ray_pool_t* pool = ray_pool_get();
+    return pool && pool->n_active > 0 && n >= 2 * RAY_PARALLEL_THRESHOLD;
+}
+
 static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r) {
     int8_t lt = (int8_t)-q_type_elem_tag(l), rt = (int8_t)-q_type_elem_tag(r);
     int8_t to_l = q_type_cmp_as(lt, rt), to_r = to_l ? 0 : q_type_cmp_as(rt, lt);
@@ -609,12 +620,11 @@ static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r
     }
     int lc = is_coll(l), rc = is_coll(r);
     if (!lc && !rc) return fn(l, r);
+    uint16_t dop = dag_op_of(fn);
+    if (dop && dag_pair_ok(l, r, lc, rc) && dag_pays(l, r, lc, rc))
+        return atomic_map_binary_op(fn, dop, l, r);
     ray_t* fast = q_vecop_binary(fn, l, r);
     if (fast) return fast;
-    uint16_t dop = dag_op_of(fn);
-    if (dop && dag_pair_ok(l, r, lc, rc) &&
-        !(lc && rc && q_count(l) != q_count(r)))
-        return atomic_map_binary_op(fn, dop, l, r);
     /* a length mismatch still probes the first pair, so an out-of-domain pair answers 'type before 'length
      * (`"abac" xexp `a`b`a`); an empty side has no pair to probe and is 'length outright */
     int mismatch = lc && rc && q_count(l) != q_count(r);
