@@ -303,16 +303,17 @@ static const q_op_t Q_OPS[] = {
     { "xrank", QLEX_KW,        QR_NONE,                        QR_QSRC("xrank"),  NULL, 1, 0, "rowid", NULL },
     { "xbar",  QLEX_KW,        QR_NONE,                        QR_FN2("xbar", q_xbar_wrap), NULL, 1, 0, "atomic", NULL },
     /* ---- running scans ---- `ratios` is a border case: its page's LABEL says
-     * aggregate, its documented behaviour is uniform (FAMILY AUDIT). */
-    { "sums",  QLEX_KW,        QR_FN1("sums", q_sums_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },
-    { "prds",  QLEX_KW,        QR_FN1("prds", q_prds_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },
+     * aggregate, its documented behaviour is uniform (FAMILY AUDIT).  A COVER row is the extension its q.q line
+     * names (`sums` IS `+\`): the row keeps the name reserved and the kernel the glyph+adverb arm reaches. */
+    { "sums",  QLEX_KW,        QR_COVER("sums", q_sums_wrap),  QR_NONE,           NULL, 1, 0, "map", NULL },
+    { "prds",  QLEX_KW,        QR_COVER("prds", q_prds_wrap),  QR_NONE,           NULL, 1, 0, "map", NULL },
     /* nested prd is the multiply-over fold (owner 2026-09-13: a one-item fold returns the item, `prd enlist 01011b`
      * is 01011b like sum's); basics/math.md:173-178 names only avg min max sum as null-special */
     { "prd",   QLEX_KW,        QR_FN1("prd", q_prd_wrap),      QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_FOLD, QKOP(26) },
-    { "maxs",  QLEX_KW,        QR_FN1("maxs", q_maxs_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },
-    { "mins",  QLEX_KW,        QR_FN1("mins", q_mins_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },
+    { "maxs",  QLEX_KW,        QR_COVER("maxs", q_maxs_wrap),  QR_NONE,           NULL, 1, 0, "map", NULL },
+    { "mins",  QLEX_KW,        QR_COVER("mins", q_mins_wrap),  QR_NONE,           NULL, 1, 0, "map", NULL },
     { "avgs",  QLEX_KW,        QR_FN1("avgs", q_avgs_wrap),    QR_NONE,           NULL, 1, 0, "map", NULL },
-    { "ratios",QLEX_KW,        QR_FN1("ratios", q_ratios_wrap),QR_NONE,           NULL, 1, 0, "map", NULL },
+    { "ratios",QLEX_KW,        QR_COVER("ratios", q_ratios_wrap), QR_NONE,        NULL, 1, 0, "map", NULL },
     /* ---- weighted ---- wavg stays a wrapper: its q.q composition's
      * bool-multiply path measured 16x slower, so the structure that
      * composition would have given it is DECLARED: on a DYAD QNEST_COLUMNS is
@@ -444,7 +445,7 @@ static const q_op_t Q_OPS[] = {
     { "max",     QLEX_KW,        QR_ENV("max"),                QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_FOLD, QKOP(28) },
     { "min",     QLEX_KW,        QR_ENV("min"),                QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_FOLD, QKOP(27) },
     /* rank == iasc iasc (ref/rank.md) — the grade family, rowid. */
-    { "raze",    QLEX_KW,        QR_FN1("raze", q_raze_wrap),  QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "raze",    QLEX_KW,        QR_COVER("raze", q_raze_wrap), QR_NONE,          NULL, 1, 0, "structural", NULL },
     /* `enlist` is its OWN unary primitive 41, NOT a keyword cover for `,:` (12)
      * — owner ruling 2026-07-30.  Its value IS the paren-literal ctor head, so
      * the recipe must build a UNIQUE object: reusing `,`-monadic's env snapshot
