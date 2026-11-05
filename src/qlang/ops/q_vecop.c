@@ -28,6 +28,13 @@
  * off lang/internal.h's arith_int_type / div_type / mod_type, never a table.
  * Overflow is left alone: two's-complement wrap in unsigned space, whose
  * landing on a sentinel (`0W+1` is 0N) is incidental and stays so.
+ *
+ * + - * beside a float or real, and % on every plain number, ride DBL instead:
+ * ops/arith.c answers a null for either null operand, else reads each through
+ * as_f64 (`0W` a large finite), applies one IEEE op and answers
+ * promote_float_type's tag (% always a float).  The lane reads nulls as NaN,
+ * which every op propagates, narrows a real through `float` and writes every
+ * NaN as the null.  A char, a temporal and a byte vector stay out.
  */
 #include "qlang/q_count.h"
 #include "qlang/ops/q_vecop.h"
@@ -40,7 +47,7 @@
 
 typedef enum {
     VO_NONE = 0, VO_LT, VO_LE, VO_GT, VO_GE, VO_EQ, VO_NE, VO_MIN, VO_MAX, VO_FILL,
-    VO_ADD, VO_SUB, VO_MUL, VO_IDIV, VO_MOD
+    VO_ADD, VO_SUB, VO_MUL, VO_IDIV, VO_MOD, VO_DIV
 } vop_t;
 typedef enum { LN_BYTE = 1, LN_INT, LN_DBL } lane_t;
 
@@ -60,6 +67,7 @@ static vop_t op_of(ray_t* (*f)(ray_t*, ray_t*)) {
     if (p == (uintptr_t)ray_mul_fn) return VO_MUL;
     if (p == (uintptr_t)ray_idiv_fn) return VO_IDIV;
     if (p == (uintptr_t)ray_mod_fn) return VO_MOD;
+    if (p == (uintptr_t)ray_div_fn) return VO_DIV;
     return VO_NONE;
 }
 
@@ -145,6 +153,8 @@ static void widen_j(int64_t* o, const void* s, int8_t t, int64_t n) {
     }
 }
 
+static double atom_f(ray_t* v) { return RAY_ATOM_IS_NULL(v) ? NULL_F64 : as_f64(v); }
+
 /* One operand as a lane-width array plus a stride (0 = an atom broadcasts).
  * `own` takes the widening buffer when one was needed, for the caller to free. */
 typedef struct {
@@ -161,7 +171,7 @@ static int band_make(band_t* o, ray_t* v, int8_t tag, int vec, lane_t ln, int64_
         switch (ln) {
             case LN_BYTE: o->scalar.b = tag == RAY_BOOL ? (v->b8 ? 1 : 0) : v->u8; break;
             case LN_INT: o->scalar.j = atom_is_oob_null(v) ? NULL_I64 : as_i64(v); break;
-            default: o->scalar.d = RAY_ATOM_IS_NULL(v) ? NULL_F64 : as_f64(v); break;
+            default: o->scalar.d = atom_f(v); break;
         }
         o->p = &o->scalar;
         return 1;
@@ -271,9 +281,9 @@ static void pick_into(ray_t* out, int8_t rt, lane_t ln, band_t xb, band_t yb, co
 }
 
 /* ===== the arithmetic lane ===============================================
- * The tags + - * read: plain integers only.  A char is out (its 0x20 null is
- * in-band, and the byte lane's own reading of it is not arithmetic's), a float
- * and a temporal are out (each has a payload law of its own).
+ * The tags + - * read on INT: plain integers only.  A char is out (its 0x20 null
+ * is in-band, and the byte lane's own reading of it is not arithmetic's), a
+ * temporal is out (it has a payload law of its own); a float goes to DBL.
  * ray_is_byte_only keeps a byte ATOM, which widens like any other operand.
  * div and mod read every int-backed count, a char's code point included. */
 static int arith_tag(int8_t t) {
@@ -340,13 +350,71 @@ static void arith_into(ray_t* out, int8_t rt, vop_t op, band_t xb, band_t yb, in
     if (nul >= 0) ray_vec_set_null(out, nul, true);   /* the sentinel is written; this is the attr */
 }
 
-/* A byte VECTOR operand of + - * is 'type on this road today (`(0x01 0x02)+0x03`),
- * the element store having no byte arm; declining one leaves that error where it
- * is.  div and mod never answer a byte. */
+/* The double lane's tag: % answers make_f64 for every pair, + - * need a float side.  0 = not this lane's. */
+static int8_t float_rt(vop_t op, int8_t xt, int8_t yt) {
+    if (op == VO_IDIV || op == VO_MOD || !q_type_is_num_tag(xt) || !q_type_is_num_tag(yt)) return 0;
+    if (op == VO_DIV) return RAY_F64;
+    if (!q_type_is_float_tag(xt) && !q_type_is_float_tag(yt)) return 0;
+    return (int8_t)-promote_float_type((int8_t)-xt, (int8_t)-yt);
+}
+
+/* Widened in cache-sized runs, not whole: a real or int operand of a big vector would otherwise cost a heap buffer
+ * the size of the answer, which outweighs the arithmetic. */
+enum { FLT_RUN = 1024 };
+
+static const double* flt_run(double* buf, ray_t* v, int8_t t, int vec, const double* atom, int64_t i, int64_t m) {
+    if (!vec) return atom;
+    if (t == RAY_F64) return (const double*)ray_data(v) + i;
+    widen_f(buf, (const char*)ray_data(v) + i * ray_type_sizes[t], t, m);
+    return buf;
+}
+
+#define FLT_W(T, NUL, EXPR)                                                        \
+    do {                                                                           \
+        T* d = (T*)ray_data(out) + i0;                                             \
+        for (int64_t i = 0; i < m; i++, px += xv, py += yv) {                      \
+            double a = *px, b = *py, v = (EXPR);                                   \
+            if (v != v) { d[i] = (NUL); nul = i0 + i; }                            \
+            else d[i] = (T)v;                                                      \
+        }                                                                          \
+    } while (0)
+
+#define FLT_OP(EXPR)                                                               \
+    do {                                                                           \
+        if (rt == RAY_F32) FLT_W(float, NULL_F32, EXPR);                           \
+        else FLT_W(double, NULL_F64, EXPR);                                        \
+    } while (0)
+
+static ray_t* float_binary(vop_t op, int8_t rt, ray_t* x, ray_t* y, int8_t xt, int8_t yt, int xv, int yv, int64_t n) {
+    ray_t* out = ray_vec_new(rt, n);
+    if (!out || RAY_IS_ERR(out)) return out;
+    out->len = n;
+    double xa = xv ? 0 : atom_f(x), ya = yv ? 0 : atom_f(y), xbuf[FLT_RUN], ybuf[FLT_RUN];
+    int64_t nul = -1;
+    for (int64_t i0 = 0; i0 < n; i0 += FLT_RUN) {
+        int64_t m = n - i0 < FLT_RUN ? n - i0 : FLT_RUN;
+        const double* px = flt_run(xbuf, x, xt, xv, &xa, i0, m);
+        const double* py = flt_run(ybuf, y, yt, yv, &ya, i0, m);
+        switch (op) {
+            case VO_ADD: FLT_OP(a + b); break;
+            case VO_SUB: FLT_OP(a - b == 0.0 ? 0.0 : a - b); break;   /* ray_sub_fn's -0.0 normalization */
+            case VO_MUL: FLT_OP(a * b); break;
+            default: FLT_OP(a / b); break;
+        }
+    }
+    if (nul >= 0) ray_vec_set_null(out, nul, true);
+    return out;
+}
+
+/* A byte VECTOR operand of + - * % stays on the element road: + - * answer 'type
+ * there today (`(0x01 0x02)+0x03`), the element store having no byte arm, and
+ * declining leaves that error where it is.  div and mod never answer a byte. */
 static ray_t* arith_binary(vop_t op, ray_t* x, ray_t* y, int8_t xt, int8_t yt, int xv, int yv, int64_t n) {
-    if (!counts_tag(op, xt) || !counts_tag(op, yt)) return NULL;
     if (op != VO_IDIV && op != VO_MOD && ((xv && ray_is_byte_only(xt)) || (yv && ray_is_byte_only(yt)))) return NULL;
-    int8_t rt = arith_rt(op, xt, yt);
+    int8_t rt = float_rt(op, xt, yt);
+    if (rt) return float_binary(op, rt, x, y, xt, yt, xv, yv, n);
+    if (op == VO_DIV || !counts_tag(op, xt) || !counts_tag(op, yt)) return NULL;
+    rt = arith_rt(op, xt, yt);
     if (!rt) return NULL;
 
     band_t xb, yb;
