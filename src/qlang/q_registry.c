@@ -50,6 +50,7 @@ typedef struct {
     int64_t     sym_id;
     q_valence_t valence;
     ray_t*      value;       /* owned (rc>=1) */
+    ray_t*      kernel;      /* QR_COVER: the owned unary C kernel under the extension; else NULL */
     const q_op_t* row;       /* the manifest row this entry was built from */
     /* provenance */
     const char* spelling;    /* q surface name (static, from the manifest) */
@@ -391,6 +392,7 @@ static ray_err_t add_entry(const q_op_t* op, q_valence_t valence,
     e->sym_id     = sym_id;
     e->valence    = valence;
     e->value      = val;
+    e->kernel     = NULL;
     e->row        = op;
     e->spelling   = op->name;
     e->lower_name = tgt ? tgt->lower_name : r->target;  /* rayfall routing name */
@@ -518,11 +520,14 @@ static ray_err_t bind_qsrc_one(const q_op_t* op, q_valence_t valence,
     memcpy(full + 3, r->target, tl);
     ray_t* val = q_env_get(ray_sym_intern(full, tl + 3));     /* borrowed */
     if (!val || RAY_IS_ERR(val)) return RAY_ERR_DOMAIN;       /* q.q drift bug */
+    ray_t* kernel = r->fn ? build_wrapper(r) : NULL;
+    if (r->fn && (!kernel || RAY_IS_ERR(kernel))) return RAY_ERR_DOMAIN;
     ray_retain(val);
     entry_t* e    = &g_entries[g_count++];
     e->sym_id     = ray_sym_intern(op->name, strlen(op->name));
     e->valence    = valence;
     e->value      = val;
+    e->kernel     = kernel;
     e->row        = op;
     e->spelling   = op->name;
     e->lower_name = r->target;
@@ -619,6 +624,11 @@ ray_t* q_registry_row_value(const q_op_t* row, q_valence_t valence) {
     return e ? e->value : NULL;   /* borrowed */
 }
 
+ray_t* q_registry_row_kernel(const q_op_t* row) {
+    entry_t* e = row_entry(row, Q_MONADIC);
+    return !e ? NULL : e->kernel ? e->kernel : e->value;   /* borrowed */
+}
+
 /* One env kernel shared by two manifest rows (`count` and monadic `#`) has no
  * EXACT row, but interchangeable spellings of one kdb primitive agree on the
  * code — and the code is all the caller wanted.  Disagreement stays -1. */
@@ -712,8 +722,10 @@ bool q_registry_provenance(const ray_t* value, q_provenance_t* out) {
 void q_registry_destroy(void) {
     ray_serde_set_fn_hooks(NULL, NULL);   /* hooks read g_entries — detach first */
     g_list_ctor = NULL;                   /* borrowed from an entry released below */
-    for (int i = 0; i < g_count; i++)
+    for (int i = 0; i < g_count; i++) {
         if (g_entries[i].value) ray_release(g_entries[i].value);
+        if (g_entries[i].kernel) ray_release(g_entries[i].kernel);
+    }
     for (int s = 0; s < SPEC_N; s++)
         if (g_specials[s]) { ray_release(g_specials[s]); g_specials[s] = NULL; }
     for (int a = 0; a < 6; a++)
