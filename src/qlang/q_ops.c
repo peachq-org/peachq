@@ -480,9 +480,8 @@ static const q_op_t Q_OPS[] = {
     { "xgroup", QLEX_KW,        QR_NONE,                       QR_FN2("xgroup", q_xgroup_wrap), NULL, 1, 0, "rowid", NULL },
     { "insert", QLEX_KW,        QR_NONE,                       QR_FN2("insert", q_insert_wrap), NULL, 1, 1, "structural", NULL, QKOP(28) },
     { "upsert", QLEX_KW,        QR_NONE,                       QR_FN2("upsert", q_upsert_wrap), NULL, 1, 1, "structural", NULL },
-    /* `any`/`all` are q.q-hosted: the rows reserve the names, the VALUE comes from `.q`. */
-    { "any",     QLEX_KW,        QR_NONE,                      QR_NONE,           NULL, 1, 0, "aggregate", NULL },
-    { "all",     QLEX_KW,        QR_NONE,                      QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+    { "any",     QLEX_KW,        QR_FN1("any", q_any_wrap),    QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+    { "all",     QLEX_KW,        QR_FN1("all", q_all_wrap),    QR_NONE,           NULL, 1, 0, "aggregate", NULL },
     /* ---- IPC client ---- `hopen` returns the connection's socket fd as the
      * handle (kdb-faithful: 0/1/2 reserved, connections at 3+). The send verb
      * `h"query"` is handle-as-verb application, not a manifest row. */
