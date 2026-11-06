@@ -74,9 +74,14 @@ int q_ctx_run_named_src(const char* name, const char* s, FILE* out, FILE* err, r
 ray_t* q_ctx_eval_src(const char* s, size_t n);
 
 /* Text cut into the statements a load of it would run (the via-file column), each handed NUL-terminated to `fn`
- * without running it; the first non-zero return stops the walk and is returned.  `-conn f.q` sends these. */
-typedef int (*q_ctx_stmt_fn)(const char* s, size_t n, void* u);
+ * with the 1-based line it starts on, without running it; the first non-zero return stops the walk and is
+ * returned.  `-conn f.q` sends these. */
+typedef int (*q_ctx_stmt_fn)(const char* s, size_t n, int64_t line, void* u);
 int q_ctx_file_statements(const char* s, size_t n, q_ctx_stmt_fn fn, void* u);
+
+/* (.Q.c.ld x) — text x grouped as a load groups it, comment lines kept as entries of their own: (start lines;texts),
+ * in walk order (a comment inside a continued statement precedes it).  'type unless x is text. */
+ray_t* q_ctx_ld_fn(ray_t* x);
 
 /* q_ctx_eval_src in the console's session, its answer displayed as the console displays a line's (`\c`, nothing for
  * `::`, an error's trace) — the browser's one door.  Unlike an IPC request it keeps `\d`; it never suspends. */

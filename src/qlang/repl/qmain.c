@@ -57,7 +57,7 @@ static int conn_call(const char* src, size_t n, const char* save, int last, int 
  * it; a statement is held until the next arrives, so the file's last one can be the run's last text. */
 typedef struct { char* held; size_t n; const char* save; } conn_file_t;
 
-static int conn_file_stmt(const char* s, size_t n, void* u) {
+static int conn_file_stmt(const char* s, size_t n, int64_t line, void* u) {
     conn_file_t* f = (conn_file_t*)u;
     if (f->held && conn_call(f->held, f->n, f->save, 0, 1)) return 1;
     free(f->held);
