@@ -30,6 +30,7 @@
 #include "core/profile.h"
 #include "mem/sys.h"
 #include "mem/heap.h"
+#include "lang/eval.h"   /* ray_cmp_tol_eq */
 #include <math.h>
 #include <string.h>
 
@@ -256,8 +257,6 @@ static ray_op_ext_t* ensure_ext_node(ray_graph_t* g, uint32_t node_id) {
     }
     return ext;
 }
-
-int ray_cmp_tol_eq(double x, double y);   /* src/ops/cmp.c (decl: lang/eval.h) */
 
 static bool atom_to_numeric(ray_t* v, double* out_f, int64_t* out_i, bool* is_f64) {
     if (!v || !ray_is_atom(v)) return false;
