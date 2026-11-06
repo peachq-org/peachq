@@ -2354,9 +2354,10 @@ static ray_t *intake_tree(const char *name, size_t nl, ray_t *arg) {
 static ray_t *parse_text(const char *src);
 static ray_t *die_answer(void);
 
-/* k texts a client is witnessed sending, byte for byte bar trailing blanks, beside their q transliteration —
- * qStudio's Server Properties (qstudio-private ServerSlashConfig.java:36, ServerReport.java:54-63,74).  Not a k
- * evaluator: an entry needs a witness of the text (the real k mode is Dirscx). */
+/* k texts a client or library is witnessed sending, byte for byte bar a trailing comment and blanks, beside their q
+ * transliteration — qStudio's Server Properties (qstudio-private ServerSlashConfig.java:36, ServerReport.java:54-63,74)
+ * and embedPy's compose helpers (KxSystems/embedPy p.q:23-24).  Not a k evaluator: an entry needs a witness of the text
+ * (the real k mode is Dirscx). */
 static const struct { const char *k, *q; } k_known[] = {
     { ".:'[\"\\\\\",/:\"cCegopPstTWz\"]",
       "value each \"\\\\\",/:\"cCegopPstTWz\"" },
@@ -2366,14 +2367,36 @@ static const struct { const char *k, *q; } k_known[] = {
       "({$[min `PV`PD`D`pf in key `.Q; ([] desc:key b; val:value b:(`Segments`Partitions`PartitionType)!"
       "(count .Q.D;count .Q.PD;.Q.pf)); ([] Data:enlist \"Not partitioned or segmented\")]}[]; "
       "flip {enlist x} each .Q.w[]; value each string `.z.a`.z.h`.z.i`.z.k`.z.K`.z.l`.z.o`.z.u`.z.x,`$\"\\\\s\")" },
+    { "c:{'[y;x]}/|:",         "c:{{'[y;x]}/[reverse x]}" },
+    { "ce:{'[y;x]}/enlist,|:", "ce:{{'[y;x]}/[enlist,reverse x]}" },
 };
+
+/* The text before a trailing comment (a `/` after a blank, outside a string, as the scanner reads one), blanks trimmed.
+ * A comment with code on a later line is not trailing: the whole text is kept, so it matches no entry. */
+static size_t k_code_len(const char *p, size_t n) {
+    size_t m = n;
+    int str = 0;
+    init_class();
+    for (size_t i = 0; i < n; i++) {
+        if (str) { if (p[i] == '\\') i++; else if (p[i] == '"') str = 0; }
+        else if (p[i] == '"') str = 1;
+        else if (p[i] == '/' && i && (CLASS[(uint8_t)p[i - 1]] & CL_WS)) {
+            size_t j = i;
+            while (j < n && p[j] != '\n') j++;
+            while (j < n && (CLASS[(uint8_t)p[j]] & CL_WS)) j++;
+            if (j == n) m = i;
+            break;
+        }
+    }
+    while (m && (CLASS[(uint8_t)p[m - 1]] & CL_WS)) m--;
+    return m;
+}
 
 ray_t *q_parse_lang_tree(char letter, const char *p, int64_t n) {
     char nm[5] = { '.', letter, '.', 'e', '\0' };
     if (letter == 'q') return intake_tree("value", 5, ray_charv(p, n));
     if (letter == 'k') {
-        size_t m = (size_t)n;
-        while (m && (p[m - 1] == ' ' || p[m - 1] == '\t' || p[m - 1] == '\n' || p[m - 1] == '\r')) m--;
+        size_t m = k_code_len(p, (size_t)n);
         for (size_t i = 0; i < sizeof k_known / sizeof k_known[0]; i++)
             if (strlen(k_known[i].k) == m && !memcmp(k_known[i].k, p, m)) return parse_text(k_known[i].q);
     }
