@@ -1179,6 +1179,8 @@ void ray_term_prompt(ray_term_t* term) {
     if (term->prompt_override_on) {
         term_write(term, term->prompt_override, (size_t)term->prompt_override_len);
         term->prompt_len = term->prompt_override_vis;
+        /* an exact-width prompt leaves the cursor pending-wrap on its last column, not on the next row */
+        if (term->term_width > 0 && term->prompt_len > 0) term->last_cursor_row = (term->prompt_len - 1) / term->term_width;
         return;
     }
     if (term->prompt_prefix_len > 0)
