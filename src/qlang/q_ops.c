@@ -525,9 +525,12 @@ static const q_op_t Q_OPS[] = {
  * fold and whether it FILLS a dict key-union's missing side are two
  * independent doc-pinned axes — the `-`/`%` split proves neither is derivable
  * from the value or from each other. ==== */
+#define ID_EMPTY        (-1)   /* the generic empty () */
+#define ID_OPERAND_NULL (-2)   /* the other operand's own null: no single value, so callers' typed-null fallbacks stand */
+
 typedef struct {
     const char* name;   /* verb spelling, keyed by name so each row can cite its doc */
-    int8_t      val;    /* the element: 0/1 long, -1 = the generic empty () */
+    int8_t      val;    /* the element: a 0/1 long, ID_EMPTY or ID_OPERAND_NULL */
     int8_t      seeds;  /* accumulators.md unary-seed: `(I f/x)~(f/)x` — two-sided identities only */
     int8_t      fills;  /* dict key-union: identity applied on the missing side */
 } identity_t;
@@ -537,9 +540,10 @@ static const identity_t IDENTITY[] = {
     { "-",  0, 0, 1 },   /* element: ref/deltas.md; seeds: (-/)x folds from x[0] (euler i506); fills: ref/subtract.md:46 (0-y) */
     { "*",  1, 1, 1 },
     { "%",  1, 0, 0 },   /* element: ref/ratios.md; seeds: ref/divide.md:38 ((%/)x is x[0]%x[1]); fills: ref/divide.md:65 (passes through) */
-    { ",", -1, 1, 0 },   /* seeds LIVE, not inert: `,` has no mono_scan, so `(,\)2 3 4` reaches the generic
-                          * fold and its first item is ,2 ONLY because () seeds the first evaluation
-                          * (accumulators.md:262).  fills UNSET: dict `,` is upsert, never element-wise */
+    { ",", ID_EMPTY, 1, 0 },   /* seeds LIVE, not inert: `,` has no mono_scan, so `(,\)2 3 4` reaches the generic
+                                 * fold and its first item is ,2 ONLY because () seeds the first evaluation
+                                 * (accumulators.md:262).  fills UNSET: dict `,` is upsert, never element-wise */
+    { "^", ID_OPERAND_NULL, 0, 0 },   /* ref/fill.md: no ONE typed null fills a sym, a list and a table alike, so null^y is y */
 };
 
 static const identity_t* identity_row(const char* spelling) {
@@ -551,15 +555,20 @@ static const identity_t* identity_row(const char* spelling) {
 
 static ray_t* identity_value(const identity_t* r) {
     if (!r) return NULL;
-    return r->val < 0 ? ray_list_new(0) : ray_i64(r->val);
+    return r->val == ID_EMPTY ? ray_list_new(0) : ray_i64(r->val);
 }
 
 ray_t* q_ops_identity(const char* spelling, q_id_use_t use) {
     const identity_t* r = identity_row(spelling);
-    if (!r) return NULL;
+    if (!r || r->val == ID_OPERAND_NULL) return NULL;
     if (use == QI_SEED && !r->seeds) return NULL;
     if (use == QI_FILL && !r->fills) return NULL;
     return identity_value(r);
+}
+
+int q_ops_identity_is_null(const char* spelling) {
+    const identity_t* r = identity_row(spelling);
+    return r && r->val == ID_OPERAND_NULL;
 }
 
 const q_op_t* q_ops_table(int* n) {

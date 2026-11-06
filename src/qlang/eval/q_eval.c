@@ -855,9 +855,11 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
     ray_t* cur = name_value(target, &trow);
     /* undefined name: the op's identity element is the default (ref/assign.md
      * "Assign through operator"); an op without one keeps signalling 'name */
+    int passes = 0;
     if (RAY_IS_ERR(cur) && q_err_is(cur, QE_NAME) && row) {
         ray_t* id = q_ops_identity(row->name, QI_VALUE);
-        if (id) { q_err_drop(); ray_error_free(cur); cur = id; }
+        passes = !id && q_ops_identity_is_null(row->name);
+        if (id || passes) { q_err_drop(); ray_error_free(cur); cur = id; }
     }
     if (RAY_IS_ERR(cur)) { ray_release(rv); return cur; }
     int local = write_is_local(target->i64);
@@ -884,6 +886,9 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
         nv = q_join_amend(&cur, rv, stole);
         if (stole && RAY_IS_ERR(nv)) unpark(local, target->i64, cur);
         else if (stole) cur = NULL;                  /* consumed */
+    } else if (passes) {
+        ray_retain(rv);
+        nv = rv;
     } else {
         ray_t* av[2] = { cur, rv };
         nv = q_eval_apply(opv, row, av, 2);

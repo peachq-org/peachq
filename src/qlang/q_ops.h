@@ -174,8 +174,12 @@ typedef enum { QI_VALUE, QI_SEED, QI_FILL } q_id_use_t;
 
 /* THE identity-element home: a small name-keyed table in q_ops.c BESIDE the
  * manifest, never a Q_OPS[] column (ruling 2026-08-12).  Returns the OWNED
- * element (rc=1), or NULL when q knows none for that use. */
+ * element (rc=1), or NULL when q knows none for that use or no single value
+ * names it (q_ops_identity_is_null). */
 ray_t* q_ops_identity(const char* spelling, q_id_use_t use);
+
+/* 1 when the identity is the OTHER operand's own null, so `null op y` is y. */
+int q_ops_identity_is_null(const char* spelling);
 
 /* The row a QK_ALIAS row is a second spelling of, or NULL when `row` is not an
  * alias.  An alias declares no metadata of its own — every dispatch and
