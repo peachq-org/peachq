@@ -283,7 +283,10 @@ int q_ctx_run_debug_line(const char* s, size_t n, FILE* out, FILE* err) {
  * text and an IPC request: there EVERY line continues the one before,
  * `;` alone separates statements (owner ruling 2026-10-08). */
 /* docs/text-entry-law.md: the via-file and IPC columns */
-static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int value_door, q_ctx_stmt_fn fn, void* u) {
+/* `keep_comments` (.Q.ld) only groups: each comment line is an entry of its own, borrowed and not NUL-terminated,
+ * and nothing is captured as documentation. */
+static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int value_door, int keep_comments,
+                           q_ctx_stmt_fn fn, void* u) {
     if (!src) { src = ""; len = 0; }     /* an empty read owns no buffer; `src + len` must stay defined */
 
     /* ONE logical line, joined.  Bounded by the SOURCE: a physical line adds
@@ -311,13 +314,15 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
     const char* p = src;
     const char* pend = src + len;
     int64_t     lineno = 0;
+    int64_t     start = 0;
     q_parse_open_t open = { 0 };               /* stays zeroed at the script door */
 
     /* Doc headers ride this same classification — see q_comment.h.  Every arm
      * below states what it means for the run: a blank line, a `/`..`\` block
      * and any CONTINUATION line all end it, so a mid-body comment can never
      * leak onto the next definition. */
-    q_comment_script_t dsaved = q_comment_script_begin(file_sym);
+    q_comment_script_t dsaved = { 0 };
+    if (!keep_comments) dsaved = q_comment_script_begin(file_sym);
 
     /* ANY failing statement aborts the LOAD (kdb stops a script at the error;
      * qsql.md:168's parse-time 'dup and a mid-file eval error both fire here,
@@ -325,7 +330,7 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
      * console the eval error may first SUSPEND into the debugger — ctx_line's
      * load seam — and a `:r` resume continues the load instead of aborting. */
     int lrc = 0;
-    #define FLUSH() do { if (alen) { lrc = fn(acc, alen, u); alen = 0; } } while (0)
+    #define FLUSH() do { if (alen) { lrc = fn(acc, alen, start, u); alen = 0; } } while (0)
 
     while (p < pend) {
         const char* line = p;
@@ -354,21 +359,29 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
 
         if (in_block) {                          /* inside a /..\ block comment */
             if (tlen == 1 && trim[0] == '\\') in_block = 0;   /* singleton \ closes; no flush */
+            if (tlen && keep_comments && (lrc = fn(line, n, lineno, u))) break;
             continue;
         }
         if (!open.in_string && !open.in_literal) {
-            if (tlen == 0) { q_comment_break(); continue; }  /* blank/whitespace-only: ignored, no flush */
-            if (tlen == 1 && trim[0] == '/') { in_block = 1; q_comment_break(); continue; }  /* open block; no flush */
+            if (tlen == 0) { if (!keep_comments) q_comment_break(); continue; }  /* blank: ignored, no flush */
             if (tlen == 1 && trim[0] == '\\') break; /* singleton \ exits (post-loop FLUSH runs)  */
-            if (trim[0] == '/') { q_comment_line(trim, tlen); continue; }  /* comment-only line: ignored, no flush */
+            if (trim[0] == '/') {                    /* a comment line, or the `/` opening a block: no flush */
+                in_block = tlen == 1;
+                if (keep_comments) {
+                    if ((lrc = fn(line, n, lineno, u))) break;
+                } else if (in_block) q_comment_break();
+                else q_comment_line(trim, tlen);
+                continue;
+            }
         }
 
         int is_cont = alen > 0 && (value_door || indented);
-        if (is_cont) q_comment_break();                 /* a continuation cannot be documented */
-        else {                                          /* eval the prior line, arm this one */
+        if (is_cont) { if (!keep_comments) q_comment_break(); }  /* a continuation cannot be documented */
+        else {                                          /* flush the prior line, arm this one */
             FLUSH();
             if (lrc) break;
-            q_comment_fresh_line(lineno);
+            start = lineno;
+            if (!keep_comments) q_comment_fresh_line(lineno);
             open = (q_parse_open_t){ 0 };
         }
 
@@ -385,9 +398,9 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
             acc[alen] = '\0';
         }
     }
-    if (!lrc) FLUSH();                             /* eval any pending logical line (incl. before a lone \) */
+    if (!lrc) FLUSH();                             /* flush any pending logical line (incl. before a lone \) */
     #undef FLUSH
-    q_comment_script_end(dsaved);
+    if (!keep_comments) q_comment_script_end(dsaved);
     ray_sys_free(acc);
     return lrc;
 }
@@ -399,7 +412,7 @@ typedef struct { FILE* out; FILE* err; int print_result; char lang; ray_t** esig
  * through `.X.e` — embedPy's `.t` suites are scored that way.  Prefixing is the whole routing: the
  * text seam already strips every leading `<letter>)` and keeps the RIGHTMOST, so a `p)` line inside
  * a `.t` file still reaches `.p.e`.  `q` and `k` keep their own doors. */
-static int ctx_load_stmt(const char* s, size_t n, void* u) {
+static int ctx_load_stmt(const char* s, size_t n, int64_t line, void* u) {
     ctx_load_t* ld = (ctx_load_t*)u;
     if (!ld->lang) return ctx_line(s, n, ld->out, ld->err, ld->print_result, 1, -1, 0, ld->esig);
     char* t = (char*)ray_sys_alloc(n + 3);
@@ -450,14 +463,14 @@ static int ctx_run_script(const char* src, size_t len, int64_t file_sym, int pri
                           char lang, FILE* out, FILE* err, ray_t** esig) {
     ctx_load_scope_t scope = ctx_load_enter();
     ctx_load_t       ld    = { out, err, print_result, lang, esig };
-    int              lrc   = ctx_walk_script(src, len, file_sym, 0, ctx_load_stmt, &ld);
+    int              lrc   = ctx_walk_script(src, len, file_sym, 0, 0, ctx_load_stmt, &ld);
     ctx_load_leave(scope, !lrc);
     if (lrc && esig && *esig && !q_dbg_trapped()) q_dbg_mark_reported(*esig);
     return lrc ? 1 + lrc : 0;
 }
 
 /* The value door's line: keep the latest answer, stop at the first error. */
-static int ctx_eval_stmt(const char* s, size_t n, void* u) {
+static int ctx_eval_stmt(const char* s, size_t n, int64_t line, void* u) {
     ray_t** last = (ray_t**)u;
     ray_t*  r    = q_eval_statement(s, NULL);
     if (ray_is_lazy(r)) r = ray_lazy_materialize(r);
@@ -468,13 +481,44 @@ static int ctx_eval_stmt(const char* s, size_t n, void* u) {
 }
 
 int q_ctx_file_statements(const char* s, size_t n, q_ctx_stmt_fn fn, void* u) {
-    return ctx_walk_script(s, n, 0, 0, fn, u);
+    return ctx_walk_script(s, n, 0, 0, 0, fn, u);
+}
+
+static int ctx_ld_entry(const char* s, size_t n, int64_t line, void* u) {
+    ray_t** cols = (ray_t**)u;
+    ray_t*  text = ray_charv(s, (int64_t)n);
+    if (!text || RAY_IS_ERR(text)) return 1;
+    cols[0] = ray_vec_append(cols[0], &line);
+    cols[1] = ray_list_append(cols[1], text);
+    ray_release(text);
+    return !cols[0] || RAY_IS_ERR(cols[0]) || !cols[1] || RAY_IS_ERR(cols[1]);
+}
+
+ray_t* q_ctx_ld_fn(ray_t* x) {
+    const char* p;
+    int64_t     n;
+    if (!q_str_text_bytes(x, &p, &n)) return q_err(QE_TYPE);
+    ray_t* cols[2] = { ray_vec_new(RAY_I64, 8), ray_list_new(8) };
+    ray_t* out     = NULL;
+    int    ok      = cols[0] && !RAY_IS_ERR(cols[0]) && cols[1] && !RAY_IS_ERR(cols[1]);
+    if (ok && !ctx_walk_script(p, (size_t)n, 0, 0, 1, ctx_ld_entry, cols)) {
+        out = ray_list_new(2);
+        out = ray_list_append(out, cols[0]);
+        out = ray_list_append(out, cols[1]);
+    }
+    for (int i = 0; i < 2; i++) {
+        if (RAY_IS_ERR(cols[i])) ray_error_free(cols[i]);
+        else ray_release(cols[i]);
+    }
+    if (out && !RAY_IS_ERR(out)) return out;
+    ray_error_free(out);
+    return q_err(QE_OOM);
 }
 
 /* docs/text-entry-law.md: the IPC column */
 ray_t* q_ctx_eval_src(const char* s, size_t n) {
     ray_t* last = NULL;
-    int    rc   = ctx_walk_script(s, n, 0, 1, ctx_eval_stmt, &last);
+    int    rc   = ctx_walk_script(s, n, 0, 1, 0, ctx_eval_stmt, &last);
     if (last) return last;
     if (rc) return q_err(QE_OOM);          /* the one non-statement stop: the walker's own buffer */
     ray_retain(RAY_NULL_OBJ);              /* no statement ran: what an assignment answers */
