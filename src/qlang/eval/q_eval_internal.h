@@ -17,10 +17,6 @@ struct q_op;
 ray_t* q_eval_apply_proj_new(ray_t* fv, const struct q_op* row, ray_t** args,
                              int64_t n, int64_t rank);
 
-/* native fn VALUE (RAY_UNARY/BINARY/VARY) — narrower than q_eval_apply_is_fn,
- * which also admits carriers and engine lambdas */
-int q_eval_apply_is_fnval(ray_t* v);
-
 /* q_list_collapse that CONSUMES l */
 ray_t* q_eval_apply_collapse(ray_t* l);
 
