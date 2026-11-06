@@ -173,14 +173,18 @@ static ray_t* take_unify(ray_t* r) {
     return c;
 }
 
-/* q `x # y` — Take (ref/take.md); borrows both args */
-ray_t* q_take_wrap(ray_t* x, ray_t* y) {
-    if (q_attr_set_admits(x, y)) return q_attr_set_dispatch(x, y);   /* `s#v — set attribute */
+/* an int (or bool) atom counts; any other x is the kernel's to refuse */
+static ray_t* count_take(ray_t* x, ray_t* y) {
+    int64_t n;
+    return take_unify(q_type_count_i64(x, &n) ? take_run(y, n) : take_kernel(y, x));
+}
+
+/* ref/take.md "Atom or list": an int atom counts, an int vector shapes */
+static ray_t* list_take(ray_t* x, ray_t* y) {
     /* the parse tree of `update `g#c from t` carries the ENLISTED sym ((#;,`g;`c)),
      * and kx still applies the attribute when the target is a plain vector — the
-     * functional-qsql attr idiom.  Containers keep their take-columns meaning. */
-    if (x && x->type == RAY_SYM && q_count(x) == 1 && y &&
-        (ray_is_vec(y) || y->type == RAY_ENUM || y->type == RAY_LIST)) {
+     * functional-qsql attr idiom. */
+    if (x->type == RAY_SYM && q_count(x) == 1 && (ray_is_vec(y) || y->type == RAY_ENUM || y->type == RAY_LIST)) {
         ray_t* nm = ray_sym_str(ray_vec_get_sym_id(x, 0));       /* borrowed */
         size_t nl = nm ? ray_str_len(nm) : (size_t)-1;
         if (nl == 0 || (nl == 1 && y->type != RAY_LIST && strchr("supg", ray_str_ptr(nm)[0]))) {
@@ -191,17 +195,14 @@ ray_t* q_take_wrap(ray_t* x, ray_t* y) {
         }
     }
     if (RAY_IS_NULL(y) || q_eval_apply_is_fn(y)) {   /* an atom with no element lane: `::` or a function (`3#{x}`) */
-        ray_t* e = ray_list_new(1);
-        if (RAY_IS_ERR(e)) return e;
-        e = ray_list_append(e, y);
-        ray_t* r = RAY_IS_ERR(e) ? e : q_take_wrap(x, e);
-        if (!RAY_IS_ERR(e)) ray_release(e);
+        ray_t* e = q_enlist_wrap(&y, 1);
+        if (!e || RAY_IS_ERR(e)) return e ? e : q_err(QE_TYPE);
+        ray_t* r = q_take_wrap(x, e);
+        ray_release(e);
         return r;
     }
-    if (q_type_is_int_vec(x) && q_count(x) >= 2) return reshape(x, y);
-    ray_t* es = q_funsql_entries_take(x, y);  /* dict keys / table cols / keyed */
-    if (es) return es;
     int64_t n;
+    if (q_type_is_int_vec(x) && q_count(x) >= 2) return reshape(x, y);
     if (q_type_is_int_vec(x) && q_count(x) == 1)
         n = q_type_ivec_get(x, 0);            /* V3.4: a rank-1 shape is n#y */
     else if (!q_type_count_i64(x, &n))
@@ -209,7 +210,7 @@ ray_t* q_take_wrap(ray_t* x, ray_t* y) {
     /* take from an empty GENERAL list fills with its prototype — the empty
      * list itself: `flip (5#.Q.res)!(5#())` must be a 0-row table
      * (ref/dotq.md:1311); the typed twin `3#0#0` -> `0 0 0` already fills. */
-    if (y && y->type == RAY_LIST && q_count(y) == 0 && n != 0 && n != NULL_I64) {
+    if (y->type == RAY_LIST && q_count(y) == 0 && n != 0 && n != NULL_I64) {
         int64_t k = n < 0 ? -n : n;
         ray_t* out = ray_list_new(k);
         if (RAY_IS_ERR(out)) return out;
@@ -222,6 +223,20 @@ ray_t* q_take_wrap(ray_t* x, ray_t* y) {
         return out;
     }
     return take_unify(take_run(y, n));
+}
+
+/* q `x # y` — Take (ref/take.md): the kind of y picks the section, then the kind of x; borrows both args */
+ray_t* q_take_wrap(ray_t* x, ray_t* y) {
+    int64_t n;
+    if (q_attr_set_admits(x, y)) return q_attr_set_dispatch(x, y);   /* `s#v — set attribute */
+    if (!x || !y) return q_err(QE_TYPE);
+    if (q_type_is_plain_dict(y))                                       /* any list names keys: x!y x */
+        return q_type_strict_i64(x, &n) ? count_take(x, y) : q_funsql_entries_take(x, y);
+    if (!q_type_is_keyed(y) && !q_type_is_table(y)) return list_take(x, y);
+    if (ray_is_atom(x)) return count_take(x, y);                       /* rows */
+    if (q_type_is_keyed(y)) return q_type_is_table(x) ? q_funsql_entries_take(x, y) : q_err(QE_TYPE);
+    if (q_type_is_int_vec(x)) return list_take(x, y);                  /* a table is a list of rows: shape */
+    return x->type == RAY_SYM ? q_funsql_entries_take(x, y) : q_err(QE_TYPE);   /* columns */
 }
 
 /* q `x _ y` — Drop (ref/drop.md); borrows both args */
@@ -242,8 +257,8 @@ ray_t* q_drop_wrap(ray_t* x, ray_t* y) {
         if (!y || !ray_is_atom(y)) return q_err(QE_TYPE);
         return q_funsql_dict_drop_keys(y, x);
     }
-    ray_t* es = q_funsql_entries_drop(x, y);  /* keyed tables + table columns */
-    if (es) return es;
+    if (x && y && !ray_is_atom(x) && (q_type_is_keyed(y) || (x->type == RAY_SYM && q_type_is_table(y))))
+        return q_funsql_entries_drop(x, y);   /* keyed tables + table columns */
     int64_t i;
     if (x && (ray_is_vec(x) || x->type == RAY_LIST) &&
         q_type_strict_i64(y, &i)) {           /* x _ i — delete the item at i */
