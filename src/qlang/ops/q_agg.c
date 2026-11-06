@@ -1,5 +1,5 @@
 /* ops/q_agg.c — running/weighted/covariance/moving-window aggregates (wave 5),
- * the list-arm sum wrapper and the first/last index-miss adapters
+ * the list-arm sum wrapper, the first/last index-miss adapters and all/any
  *
  * Split from q_registry.c (2026-07-14) — pure function moves; the shared
  * internal surface lives in q_registry_internal.h.  See q_registry.h for
@@ -9,6 +9,8 @@
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
 #include "qlang/ops/q_index.h" /* q_index_at — first/last of an empty ride the miss law */
+#include "qlang/ops/q_dollar.h" /* q_dollar_cast — all/any read their argument as boolean */
+#include "qlang/eval/q_eval.h"  /* q_eval_apply_value — all/any apply min/max */
 #include "lang/eval.h"     /* ray_sum_fn, ray_avg_fn, ray_mul_fn, ray_first_fn, ray_last_fn — engine arms */
 #include "lang/internal.h" /* atomic_map_binary, make_f64, is_list, is_numeric, as_f64 */
 #include <math.h>          /* isnan, sqrt — sentinel-null discipline, mdev/cov */
@@ -431,3 +433,17 @@ ray_t* q_avg_wrap(ray_t* x) {
     }
     return ray_avg_fn(x);
 }
+
+/* `all x` is `min "b"$x` and `any x` is `max "b"$x` (docs-v1 ref/logic.md:15,43): every container, empty and type
+ * rule is the one min, max and the boolean cast already have. */
+static ray_t* bool_extreme(ray_t* x, const char* name) {
+    ray_t* b = q_dollar_cast(RAY_BOOL, x);
+    if (!b || RAY_IS_ERR(b)) return b ? b : q_err(QE_TYPE);
+    ray_t* f = q_registry_lookup_name(name, 3, Q_MONADIC);   /* borrowed */
+    ray_t* r = f ? q_eval_apply_value(f, &b, 1) : q_err(QE_TYPE);
+    ray_release(b);
+    return r;
+}
+
+ray_t* q_all_wrap(ray_t* x) { return bool_extreme(x, "min"); }
+ray_t* q_any_wrap(ray_t* x) { return bool_extreme(x, "max"); }

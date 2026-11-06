@@ -41,7 +41,7 @@
 .q.sublist:{$[2=count x;x[0]_((sum x)&count y)#y;0<=x;(x&count y)#y;(max 0,x+count y)_y]}
 / ref/sum.md "equivalent to {sum x*y}", float ONLY "when both x and y are
 / integer lists" - an atom operand is not a list, so it never promotes
-.q.wsum:{sum x*$[all (type x;type y)in 5 6 7h;"f"$y;y]}
+.q.wsum:{sum x*$[(type x)in 5 6 7h;$[(type y)in 5 6 7h;"f"$y;y];y]}
 .q.cov:{x:"f"$x; y:"f"$y; avg[x*y]-avg[x]*avg y}
 .q.scov:{cov[x;y]*count[x]%-1+count x}
 .q.mavg:{(x msum y)%x mcount y}
@@ -79,14 +79,6 @@
 .q.xcols:{[x;y] .Q.ft[{[x;t] c:cols t; n:x,c except x; flip n!(.Q.V t) n inter c}[x;];y]}
 
 / ---- wave 4: verbs with no kernel to lose ----
-/ ref/all-any.md: CAST then fold - (&/)1 2 3 is 1 (a raw min), but `all 1 2 3` is 1b.
-/ Three arms the fold cannot serve: 98h table "iterates over its columns and returns a
-/ dictionary" (flip gives the 99h dict; each gives the doc's shape); an atom cast is an
-/ atom ("a nonzero atom" -> 1b) and folding an atom throws; the empty list is the fold's
-/ identity ("this includes the empty list" -> 1b).  Sym/GUID exclusion is the cast's own
-/ 'type, never a hand-written gate.  Bare all/any recurse via .q at call time.
-.q.all:{$[98h=type x;all each .Q.V x;0h>type b:"b"$x;b;0=count b;1b;(&/)b]}
-.q.any:{$[98h=type x;any each .Q.V x;0h>type b:"b"$x;b;0=count b;0b;(|/)b]}
 / ref/tables.md "default is root namespace" - and bare `system"a"` lists the CURRENT
 / context, so [] must pass `. itself.  f[] binds x to :: , and the kdb null-test
 / idiom `(::)~x` is the one total test.  A bad namespace throws \a's own error.

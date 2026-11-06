@@ -1937,6 +1937,8 @@ static ray_t* reduction_extreme_result(ray_op_t* op, int8_t in_type, bool found,
         if (!found) fval = (op->opcode == OP_MIN) ? INFINITY : -INFINITY;
         return reduction_f_result(fval, out_type);
     }
+    /* a boolean has no infinity: its identity is `&`'s and `|`'s, so `min 0#0b` is 1b (ref/logic.md:15) */
+    if (!found && out_type == RAY_BOOL) return ray_bool(op->opcode == OP_MIN);
     if (!found && !ray_type_inf(out_type, op->opcode == OP_MIN, &ival))
         return ray_typed_null(-out_type);
     return reduction_i64_result(ival, out_type, out_type == RAY_SYM ? src : NULL);
