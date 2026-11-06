@@ -32,6 +32,7 @@ void q_sys_cfg_init(void);
  * "q)"/"q.foo)" into buf and returns its length (empty under `-q`; 0 on overflow). */
 void        q_sys_ctx_reset(void);
 int         q_sys_prompt(char* buf, size_t cap);
+#define     Q_SYS_PROMPT_CAP 512   /* every prompt buffer; `\d` refuses a name whose prompt would not fit */
 
 /* The live `\g` gc mode (0 deferred / 1 immediate).  Consumed ONLY by the
  * q_ctx statement seam — the one place that acts on it. */

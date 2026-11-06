@@ -347,7 +347,7 @@ static ray_t* dbg_suspend(ray_t* err) {
     dbg_banner(err, g_cursor);
     ray_t* out = NULL;
     char line[DBG_LINE_MAX];
-    char prompt[80];
+    char prompt[Q_SYS_PROMPT_CAP + 16];
     for (;;) {
         dbg_prompt_str(prompt, sizeof prompt);
         int n = g_reader(prompt, line, sizeof line);
