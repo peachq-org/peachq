@@ -44,6 +44,8 @@ ray_t* q_mdev_wrap(ray_t* n, ray_t* x);
 ray_t* q_ema_wrap(ray_t* a, ray_t* x);
 ray_t* q_sum_wrap(ray_t* x);
 ray_t* q_avg_wrap(ray_t* x);
+ray_t* q_all_wrap(ray_t* x);
+ray_t* q_any_wrap(ray_t* x);
 
 /* ---- defined in ops/q_math.c (float-matrix verbs) ---- */
 ray_t* q_mmu_wrap(ray_t* x, ray_t* y);                        /* matrix multiply / dot product — used by: math, dollar */
