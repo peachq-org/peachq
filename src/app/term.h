@@ -133,7 +133,7 @@ typedef struct ray_term {
      * exactly this ANSI string in place of the prefix + built-in `‣` glyph, so
      * the q REPL can show a bare `q)`.  Off by default → glyph behaviour
      * unchanged.  vis is the rendered column width (for cursor math). */
-    char     prompt_override[64];
+    char     prompt_override[1024];
     int32_t  prompt_override_on;
     int32_t  prompt_override_len;
     int32_t  prompt_override_vis;
