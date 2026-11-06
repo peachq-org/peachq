@@ -25,7 +25,6 @@
 #include "qlang/q_builtins.h"  /* q_builtins_type_num */
 #include "qlang/q_registry.h"
 #include "qlang/base/q_type.h"     /* q_type_is_keyed — the type axis home */
-#include "qlang/parse/q_parse_internal.h"
 #include "qlang/io/q_handles.h"
 #include "qlang/io/q_io.h"     /* q_io_set — Amend Entire `:` on a file target */
 #include "qlang/io/q_kapi.h"   /* q_kapi_invoke — the 112h (`2:`-loaded) arm */
@@ -1404,16 +1403,6 @@ static int64_t rank_of(ray_t* fv) {
 
 int64_t q_eval_apply_rank(ray_t* fv) { return fv ? rank_of(fv) : -1; }
 
-/* `a v g` composes the juxtaposed projection `v[a]` onto g (`0|+`, `1~count@`): the one "project then compose"
- * home; a juxtaposition writes no slot */
-static ray_t* proj_compose(ray_t* fv, const q_op_t* row, ray_t* a, ray_t* g) {
-    ray_t* p = q_eval_apply_proj_new(fv, row, &a, 1, 2);
-    if (RAY_IS_ERR(p)) return p;
-    ray_t* c = comp_new(p, g);
-    ray_release(p);
-    return c;
-}
-
 static ray_t* comp_call(ray_t* comp, ray_t** args, int64_t n) {
     ray_t** c = car_slots(comp);
     ray_t* inner = q_eval_apply(c[1], NULL, args, n);
@@ -1630,12 +1619,6 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
         return q_adverb_apply((int)c[2]->i64, c[0], row_unbox(c[1]),
                                    args, n);
     }
-    case Q_EVAL_CAR_COMP: {
-        /* an elision projects the composition ITSELF; pushed down into the inner value it raised 'type */
-        for (int64_t i = 0; i < n; i++)
-            if (!args[i]) return q_eval_apply_proj_new(fv, NULL, args, n, rank_of(fv));
-        return comp_call(fv, args, n);
-    }
     case Q_EVAL_CAR_NONE:
         if (!q_eval_apply_is_fnval(fv)) {
             /* bare ENGINE lambda (rayfall-defined .rfl/serde values): base call */
@@ -1643,8 +1626,9 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
             return noun_index(fv, args, n);
         }
         break;
-    /* the rank/hole laws below run first for these */
-    case Q_EVAL_CAR_LAMBDA: case Q_EVAL_CAR_KFN: case Q_EVAL_CAR_VIEW: break;
+    /* the rank/hole laws below run first for these; an elided or short composition projects ITSELF (pushed down
+     * into the inner value it raised 'type) */
+    case Q_EVAL_CAR_LAMBDA: case Q_EVAL_CAR_KFN: case Q_EVAL_CAR_VIEW: case Q_EVAL_CAR_COMP: break;
     }
 
     int64_t rank = rank_of(fv), holes = 0;
@@ -1657,6 +1641,7 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
     if (fv == q_registry_compose_value()) return compose_apply(args, n);
     if (rank >= 0 && n < rank) return q_eval_apply_proj_new(fv, row, args, n, rank);
     if (rank >= 0 && n > rank) return q_err(QE_RANK);
+    if (kind == Q_EVAL_CAR_COMP) return comp_call(fv, args, n);
     /* a manifest FNV overload matrix applied below its minimum rank PROJECTS
      * like any operator (kdb `?[x]` is `?[x;]`) */
     if (fv->type == RAY_VARY && n < 2 && fnv_matrix_value(fv)) {
@@ -1786,22 +1771,6 @@ ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     }
     if (r && RAY_IS_ERR(r)) return q_dbg_filter(r, fv, args, n);
     return r;
-}
-
-/* A TRAIN node (Q_ATTR_TRAIN, parser-marked): the last argument is the tail the syntax defers, so a unary head
- * composes onto it (`first asc@`, `u v w@`) and a noun-headed infix composes its projection (`1~count@`, `0|+`,
- * `(1b;)@-9!`).  THE one composition home: the evaluator carries no value test (composition is syntactic).
- * A variadic derived head's one-argument form IS its unary (`f over g@`, #42); a fixed rank >= 2 projects instead. */
-ray_t* q_eval_apply_train(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
-    ray_t* g = args[n - 1];
-    if (fv && !RAY_IS_ERR(fv) && q_eval_apply_is_fn(fv) && g && q_eval_apply_is_fn(g)) {
-        int64_t rank = rank_of(fv);
-        if (n == 1 && (rank == 1 || (rank < 0 && q_eval_apply_carrier_kind(fv) == Q_EVAL_CAR_DERIV)))
-            return comp_new(fv, g);
-        if (n == 2 && args[0] && (rank == 2 || rank < 0))
-            return proj_compose(fv, row, args[0], g);
-    }
-    return q_eval_apply(fv, row, args, n);
 }
 
 /* ===== the public value-apply seam ======================================= */

@@ -224,7 +224,7 @@ static ray_t* operand_value(ray_t* F, const q_op_t** row_out) {
 }
 
 /* args RIGHT-to-left into argv (owned).  On error the already-evaluated tail (indices > i) is released.  A
- * `;`-elided slot stays C NULL — open — for the index home and the train seam; a lone hole is a value like any
+ * `;`-elided slot stays C NULL — open — for the index home and the postfix seam; a lone hole is a value like any
  * other, judged by the apply module's hole law. */
 static ray_t* eval_args_rtl(ray_t** e, int64_t argc, ray_t** argv) {
     for (int64_t i = argc - 1; i >= 0; i--) {
@@ -1125,10 +1125,7 @@ ray_t* q_eval(ray_t* node) {
             if (val) row = q_registry_row_of(fv, val);
         }
         int64_t nap = (node->attrs & Q_ATTR_POSTFIX) && !argv[argc - 1] ? argc - 1 : argc;
-        /* a parser-marked TRAIN (`1~count@`): its rightmost operand is deferred, so the head composes onto it */
-        ret = (node->attrs & Q_ATTR_TRAIN) && argv[argc - 1]
-                  ? q_eval_apply_train(fv, row, argv, argc)
-                  : q_eval_apply(fv, row, argv, nap);
+        ret = q_eval_apply(fv, row, argv, nap);
         release_args(argv, argc);
         ray_release(fv);
     }

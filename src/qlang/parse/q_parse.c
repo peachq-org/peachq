@@ -28,7 +28,7 @@
 #include "qlang/q_ops.h"      /* q_ops_find — the static lexical manifest */
 #include "qlang/q_env.h"      /* q_env_ident_ok — a captured marker must be a q name */
 #include "qlang/io/q_duckdb.h" /* q_duckdb_params — the markers of a capturing text literal */
-#include "qlang/eval/q_eval.h" /* q_eval_apply_is_fn, q_eval_apply_carrier_kind */
+#include "qlang/eval/q_eval.h" /* q_eval_apply_is_fn(val), q_eval_apply_carrier_kind */
 #include "qlang/eval/q_dbg.h"  /* q_dbg_statement_origin — the lambda's file + line */
 #include "table/sym.h"       /* ray_sym_vec_cell — qSQL dict-key/col names */
 #include <ctype.h>       /* isalpha — the `<letter>)` intake prefix */
@@ -375,7 +375,7 @@ static Tokens scan(const char *src) {
     Token *toks = NULL;
     int n = 0, cap = 0;
     int p = 0;
-    int noun_pos = 0;
+    int noun_pos = 0, in_sig = 0;
 
 /* KK runs FIRST: a literal payload advances p (so .len is only right after it) and may q_die (the deferred `0we`
  * float-infinity literal) before the slot exists.  g_toks.t follows every realloc so the longjmp handler frees the
@@ -624,8 +624,9 @@ static Tokens scan(const char *src) {
             case ')': kk = T_RPAREN; noun_pos = 1; break;
             case '{': kk = T_LBRACE; noun_pos = 0; break;
             case '}': kk = T_RBRACE; noun_pos = 1; break;
-            case '[': kk = T_LBRACK; noun_pos = 0; break;
-            case ']': kk = T_RBRACK; noun_pos = 1; break;
+            case '[': kk = T_LBRACK; noun_pos = 0; in_sig = n > 0 && toks[n - 1].kind == T_LBRACE; break;
+            /* a lambda signature's `]` starts the body, so `{[y;p].5*y}` reads a float (funq/ml.q:932) */
+            case ']': kk = T_RBRACK; noun_pos = !in_sig; in_sig = 0; break;
             case ';': kk = T_SEMI;   noun_pos = 0; break;
             /* Unknown byte (string quote, hex, stray char, non-ASCII): error
              * rather than silently skip it — a dropped byte turns unsupported
@@ -655,9 +656,10 @@ static void free_tokens(Tokens ts) {
 
 typedef enum { R_NONE, R_NOUN, R_VERB } Role;
 /* train: the rightmost operand is WRITTEN as a verb — a postfix elision (`count@`, `-9!`), a lone glyph (`0|+`) or
- * an iterator-suffixed expression (`neg\`) — a value that applies LATER, so what stands to its left COMPOSES onto it
- * (ref/apply.md "u v w@", ref/compose.md "(0|+)").  Set only in parse_e_from_body and carried left through infix and
- * juxtaposition; a keyword, a lambda, a name, parens and brackets end it (composition is syntactic, 2026-09-17). */
+ * an iterator-suffixed expression (`neg\`) or a glued `g::` — a value that applies LATER, so what stands to its left
+ * COMPOSES onto it (ref/apply.md "u v w@", ref/compose.md "(0|+)") as a compose node.  Set only in parse_e_from_body
+ * and carried left through infix and juxtaposition; a keyword, a lambda, a name, parens and brackets end it
+ * (composition is syntactic, 2026-09-17). */
 typedef struct { Role role; ray_t *v; int train; } P;
 static const P EMPTY = { R_NONE, NULL, 0 };
 
@@ -1695,11 +1697,14 @@ static P parse_e_body(Parser *p, QCtx ctx) {
     return parse_e_from(p, t, ctx);
 }
 
-/* A node built ONTO a train tail (`1~` onto `count@`) is flagged Q_ATTR_TRAIN so the walker composes instead of
- * applying; a postfix elision (`count@` itself) starts a train but stays an ordinary projection node. */
-static P train_node(ray_t *node, int postfix, int onto_train) {
-    if (onto_train && node && !RAY_IS_ERR(node)) node->attrs |= Q_ATTR_TRAIN;
-    return (P){ R_NOUN, node, postfix || onto_train };
+/* What stands left of a train tail composes onto it: the node (';f;tail), one per level, right-nested — kdb's
+ * `parse "sum abs max::"` is (';sum;(';abs;(::;max))).  A keyword operand is its VALUE, as kdb displays it. */
+static P compose_node(ray_t *f, ray_t *tail) {
+    ray_t *cv = q_registry_compose_value();
+    if (!cv) q_die("compose: registry not initialized");
+    ray_retain(cv);
+    ray_t *xs[3] = { cv, q_embed(f, Q_MONADIC), tail };
+    return (P){ R_NOUN, q_list(xs, 3), 1 };
 }
 
 static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
@@ -1750,22 +1755,25 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
         }
         P e = parse_e(p, ctx);
         /* postfix form (`1+`, `-15!`): the missing rhs is the projection HOLE, as a bracket elision's is — an
-         * explicit `::` operand is the identity VALUE.
-         * A glued `f::` with nothing to assign is the identity closing a train
-         * (funq/ml.q `sum abs::`): the `f@` node, so the walker composes onto it. */
-        ray_t *rhs = e.v ? e.v : Q_HOLE_OBJ;
+         * explicit `::` operand is the identity VALUE.  A glued `g::` with nothing to assign is the train tail
+         * (::;g) (funq/ml.q `hdist:sum (<>)::`), so the composition keeps g's rank (ref/compose.md:23). */
         if (!e.v && sym_name_is(u.v, "::")) {
-            ray_release(u.v);
-            u.v = q_verb('@');
+            ray_t *xs[2] = { q_embed(u.v, Q_DYADIC), q_embed(q_embed(t.v, Q_MONADIC), Q_DYADIC) };
+            return (P){ R_NOUN, q_list(xs, 2), 1 };
         }
+        int assign = verb_marked(u.v) || sym_name_is(u.v, ":") || sym_name_is(u.v, "::");
         if (!verb_marked(u.v))
             u.v = q_embed(u.v, Q_DYADIC);      /* infix head: the dyadic row */
-        ray_t *xs[3] = { u.v, t.v, rhs };
-        P r = train_node(q_list(xs, 3), !e.v, e.train);
+        /* onto a train tail the infix head is its own postfix elision (`1~` of `1~count@`), composed onto the tail;
+         * an assignment (`hdist:sum (<>)::`) binds the train instead */
+        int onto = e.train && !assign;
+        ray_t *xs[3] = { u.v, t.v, e.v && !onto ? e.v : Q_HOLE_OBJ };
+        ray_t *r = q_list(xs, 3);
         int8_t ut = u.v->type;
-        if (!e.v && r.v && !RAY_IS_ERR(r.v) && (ut == RAY_UNARY || ut == RAY_BINARY || ut == RAY_VARY))
-            r.v->attrs |= Q_ATTR_POSTFIX;
-        return r;
+        if ((!e.v || onto) && r && !RAY_IS_ERR(r) && (ut == RAY_UNARY || ut == RAY_BINARY || ut == RAY_VARY))
+            r->attrs |= Q_ATTR_POSTFIX;
+        if (onto) return compose_node(r, e.v);
+        return (P){ R_NOUN, r, !e.v };
     }
 
     P e = parse_e_from(p, u, ctx);
@@ -1825,7 +1833,7 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
      * `(,)2` is `,2`, `(-)5` is `-5` (owner ruling 2026-07-23), `(!)10` is
      * `til 10` and `(@)t` is `type t`; bracket-apply `+[10]` stays a projection
      * (assign/apply-forms contract, ref/value.md `value +[2]`) and a fn-value
-     * operand keeps the dyad ((+)(*) pins (+;*) — parse/cases.tsv).  The
+     * operand keeps the dyad (`(+)(*)` composes below).  The
      * MANIFEST decides: any dyadic row with a monadic cell has a unary form,
      * whatever shape that cell's value takes (`%:` is a q.q projection). */
     if (t.role == R_NOUN && t.v &&
@@ -1844,8 +1852,10 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
             }
         }
     }
+    /* two juxtaposed glyph VALUES compose too (`(+)(*)`, owner ruling 2026-11-06); a keyword head is a name */
+    if (e.train || (q_eval_apply_is_fnval(t.v) && q_eval_apply_is_fnval(e.v))) return compose_node(t.v, e.v);
     ray_t *xs[2] = { t.v, e.v };
-    return train_node(q_list(xs, 2), 0, e.train);
+    return (P){ R_NOUN, q_list(xs, 2), 0 };
 }
 
 /* ===== qSQL SELECT parser (piece 3) =========================================
@@ -2067,7 +2077,6 @@ static ray_t *qsql_convert_expr(ray_t *x) {
                 ray_t *c = qsql_convert_expr(e[i]);
                 node = ray_list_append(node, c); ray_release(c);
             }
-            if (node && !RAY_IS_ERR(node)) node->attrs |= x->attrs & Q_ATTR_TRAIN;   /* the clone is a train too */
         }
         return node;
     }
