@@ -8,6 +8,7 @@
 #include "qlang/base/q_type.h"
 #include "qlang/q_env.h"
 #include "mem/heap.h"   /* RAY_ATTR_SORTED / HAS_INDEX / HAS_NULLS */
+#include "ops/idxop.h"  /* ray_index_drop — a re-stamp sheds the positions' index */
 #include "lang/internal.h" /* ray_concat_fn — the col-append seam's one concat */
 #include "lang/eval.h"     /* ray_take_fn, ray_eval_get_restricted */
 #include "qlang/ops/q_index.h" /* q_index_at — the one TOTAL gather (resolve, deref) */
@@ -24,11 +25,10 @@ int q_enum_is(ray_t* x) {
            (x->type == RAY_ENUM || x->type == -RAY_ENUM);
 }
 
-/* The TOP BYTE of the domain slot carries the enum's kdb attribute letter
- * ('u'/'p'/'g', 0 = none): an enum cannot take an engine index block (aux 8-15
- * IS the domain), so the letter rides the id.  Sym ids are intern-table
- * indices, far below 2^56; every reader masks, every plain set clears — so a
- * re-stamp DROPS the letter, matching "removed by any operation". */
+/* The TOP BYTE of the domain slot carries a vouched `s` (0 = none) — the one
+ * letter with no index; u/g/p are the positions' index block at aux 0-7.  Sym
+ * ids are intern-table indices, far below 2^56; every reader masks, every plain
+ * set clears — so a re-stamp DROPS the letter, matching "removed by any operation". */
 #define ENUM_ATTR_MASK 0xff00000000000000ULL
 
 /* Slice-aware: slice headers keep parent/offset in aux, so the domain rides the parent. */
@@ -44,8 +44,9 @@ static void enum_set_domain(ray_t* x, int64_t dom) {
     memcpy(x->aux + 8, &dom, 8);
 }
 
-/* The letter of a 20h vector (0 = none).  A slice is an operation result, so
- * it reads unattributed rather than borrowing the parent's letter. */
+/* The domain slot's letter of a 20h vector (0 = none; an index's u/g/p is
+ * q_attr_letter's).  A slice is an operation result, so it reads unattributed
+ * rather than borrowing the parent's letter. */
 char q_enum_attr(ray_t* x) {
     if (!x || RAY_IS_ERR(x) || x->type != RAY_ENUM || (x->attrs & RAY_ATTR_SLICE)) return 0;
     uint64_t raw;
@@ -84,8 +85,9 @@ ray_t* q_enum_stamp(ray_t* v, int64_t dom) {
             v = c;
             if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_OOM);
         }
+        if (ray_index_has(v)) ray_index_drop(&v);
         v->type = RAY_ENUM;
-        v->attrs &= (uint8_t)~(RAY_ATTR_SORTED | RAY_ATTR_HAS_INDEX);
+        v->attrs &= (uint8_t)~RAY_ATTR_SORTED;
         enum_set_domain(v, dom);
         return v;
     }
@@ -321,8 +323,7 @@ static ray_t* enum_extend_file(ray_t* x, ray_t* y);
 /* `?` keeps y's attribute (ref/enum-extend.md); `s#` is left off, since positions need not sort as the names do. */
 static ray_t* enum_extend_attr(ray_t* r, ray_t* y) {
     char a = q_attr_letter(y);
-    if (r && !RAY_IS_ERR(r) && r->type == RAY_ENUM && (a == 'g' || a == 'u' || a == 'p')) (void)q_enum_attr_set(r, a);
-    return r;
+    return r && !RAY_IS_ERR(r) && r->type == RAY_ENUM && (a == 'g' || a == 'u' || a == 'p') ? q_attr_rebuild(r, a) : r;
 }
 
 ray_t* q_enum_extend_try(ray_t* x, ray_t* y) {
