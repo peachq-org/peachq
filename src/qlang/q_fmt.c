@@ -1678,6 +1678,7 @@ static void q_fmt_body(ray_t* val) {
         val->type == RAY_VARY) {
         /* the paren-list ctor IS kdb's enlist (basics/parsetrees.md fby) */
         if (val == q_registry_list_value()) { qe_puts("enlist"); return; }
+        if (val == q_registry_compose_value()) { qe_putc('\''); return; }
         q_provenance_t pv;
         if (q_registry_provenance(val, &pv) && pv.spelling && pv.spelling[0]) {
             qe_puts(pv.spelling);
