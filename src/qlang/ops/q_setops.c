@@ -87,6 +87,70 @@ ray_t* q_except_wrap(ray_t* x, ray_t* y) {
     return setop_compose(x, y, 1);
 }
 
+/* Item i equals item i-1 under the group kernel's key: one null bucket, -0 is 0, a non-null NaN equals nothing.
+ * -1 = the pass does not apply: an uncovered type, or items out of EXACT order — an append keeps a float `s` on a
+ * tolerant check, so `(`s#1 1+1e-14),1f` is marked sorted with its two 1s apart. */
+static int sorted_same(ray_t* x, int64_t i) {
+    int na = ray_vec_is_null(x, i - 1), nb = ray_vec_is_null(x, i);
+    if (na || nb) return nb ? (na ? 1 : -1) : 0;
+    const void* d = ray_data(x);
+    switch (x->type) {
+        case RAY_SYM: return ray_read_sym(d, i - 1, x->type, x->attrs) == ray_read_sym(d, i, x->type, x->attrs);
+        case RAY_I64: RAY_TEMPORAL64_CASES: return ((const int64_t*)d)[i - 1] == ((const int64_t*)d)[i];
+        case RAY_I32: RAY_TEMPORAL32_CASES: return ((const int32_t*)d)[i - 1] == ((const int32_t*)d)[i];
+        case RAY_I16: return ((const int16_t*)d)[i - 1] == ((const int16_t*)d)[i];
+        case RAY_F64: RAY_TEMPORALF_CASES: {
+            double a = ((const double*)d)[i - 1], b = ((const double*)d)[i];
+            return a == b ? 1 : (b < a ? -1 : 0);
+        }
+        case RAY_F32: {
+            float a = ((const float*)d)[i - 1], b = ((const float*)d)[i];
+            return a == b ? 1 : (b < a ? -1 : 0);
+        }
+        case RAY_GUID: return memcmp((const uint8_t*)d + (i - 1) * 16, (const uint8_t*)d + i * 16, 16) == 0;
+        case RAY_BOOL: RAY_BYTE_CASES: return ((const uint8_t*)d)[i - 1] == ((const uint8_t*)d)[i];
+        default: return -1;
+    }
+}
+
+/* An exactly sorted vector keeps each value in one run, so its uniques are each run's first item, still sorted (owner
+ * ruling 2026-11-06).  The keys are written as ray_group_fn writes them: null slots hold the width's sentinel and a
+ * float -0 is 0, by bits since -fno-signed-zeros folds `f==0`.  NULL = the pass does not apply. */
+static ray_t* sorted_distinct(ray_t* x) {
+    int64_t n = q_count(x), m = 0;
+    ray_t* ix = ray_vec_new(RAY_I64, n > 0 ? n : 1);
+    if (RAY_IS_ERR(ix)) return ix;
+    int64_t* p = (int64_t*)ray_data(ix);
+    for (int64_t i = 0; i < n; i++) {
+        int same = i == 0 ? 0 : sorted_same(x, i);
+        if (same < 0) { ray_release(ix); return NULL; }
+        if (!same) p[m++] = i;
+    }
+    ix->len = m;
+    ray_t* r = q_index_at(x, &ix, 1);
+    ray_release(ix);
+    if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_TYPE);
+    void* d = ray_data(r);
+    for (int64_t g = 0; g < m; g++) {
+        int nul = ray_vec_is_null(r, g);
+        switch (r->type) {
+            case RAY_I64: RAY_TEMPORAL64_CASES: if (nul) ((int64_t*)d)[g] = NULL_I64; break;
+            case RAY_I32: RAY_TEMPORAL32_CASES: if (nul) ((int32_t*)d)[g] = NULL_I32; break;
+            case RAY_I16: if (nul) ((int16_t*)d)[g] = NULL_I16; break;
+            case RAY_F64: RAY_TEMPORALF_CASES:
+                if (nul) ((double*)d)[g] = NULL_F64;
+                else if (((uint64_t*)d)[g] == UINT64_C(0x8000000000000000)) ((uint64_t*)d)[g] = 0;
+                break;
+            case RAY_F32:
+                if (nul) ((float*)d)[g] = (float)NULL_F64;
+                else if (((uint32_t*)d)[g] == UINT32_C(0x80000000)) ((uint32_t*)d)[g] = 0;
+                break;
+            default: break;
+        }
+    }
+    return q_attr_stamp_trusted(r, 's');
+}
+
 /* q `distinct x` / monadic `?` — unique items in FIRST-OCCURRENCE order
  * (kdb), item equality being `~`: type-strict, nulls equal.
  * A TYPED VECTOR's items share one type, so `~` and the group kernel's atom
@@ -97,7 +161,7 @@ ray_t* q_except_wrap(ray_t* x, ray_t* y) {
  * cell (string model); atoms are kdb 'type.
  * An ATTRIBUTED vector reads its index (set-attribute.md:128): `u#` is a copy
  * without the marker (distinct.md:15 — the result carries no attribute), `g#`/`p#`
- * gather the key set; a null-bearing column keeps the scan, which owns nulls. */
+ * gather the key set, `s#` takes one adjacent pass and keeps `s`; a null-bearing column keeps the scan. */
 ray_t* q_distinct_wrap(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (x->type == RAY_TABLE) return table_distinct(x);   /* row dedup */
@@ -107,6 +171,11 @@ ray_t* q_distinct_wrap(ray_t* x) {
         if (ray_index_has(x) && q_attr_letter(x) == 'u' && !(x->attrs & RAY_ATTR_HAS_NULLS) &&
             ray_index_payload(x->index)->built_for_len == q_count(x))
             return ray_attr_drop_fn(x);
+        int sorted = q_attr_letter(x) == 's';
+        if (sorted) {
+            ray_t* sd = sorted_distinct(x);
+            if (sd) return sd;
+        }
         ray_t* ik = q_attr_index_keys(x, NULL);
         if (ik) return ik;
         ray_t* g = ray_group_fn(x);
@@ -114,7 +183,7 @@ ray_t* q_distinct_wrap(ray_t* x) {
         ray_t* k = ray_dict_keys(g);
         ray_retain(k);
         ray_release(g);
-        return k;
+        return sorted ? q_attr_stamp_trusted(k, 's') : k;   /* first occurrences of an `s` list keep its order */
     }
     if (x->type != RAY_LIST)
         return q_err(QE_TYPE);
