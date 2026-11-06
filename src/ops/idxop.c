@@ -66,7 +66,7 @@ static int numeric_elem_size(int8_t t) {
     case RAY_I32: case RAY_DATE: case RAY_TIME: case RAY_F32:
     case RAY_MONTH: case RAY_MINUTE: case RAY_SECOND:          return 4;
     case RAY_I64: case RAY_TIMESTAMP: case RAY_F64:
-    case RAY_TIMESPAN: case RAY_DATETIME:                      return 8;
+    case RAY_TIMESPAN: case RAY_DATETIME: case RAY_ENUM:       return 8;
     default:                                          return 0;
     }
 }
@@ -655,10 +655,11 @@ static ray_t* attach_finalize(ray_t* parent, ray_t* idx) {
      * via ray_vec_is_null (sentinel-based), which is unaffected by the
      * index pointer overlay at bytes 0-7. */
     parent->index    = idx;
-    /* _idx_pad (bytes 8-15) aliases str_pool on a RAY_STR parent and sym_domain on
-     * a RAY_SYM one — NEVER clear it there (ray_sym_vec_domain reads it in place
-     * while indexed).  HAS_LINK uses it too. */
-    if (!(parent->attrs & RAY_ATTR_HAS_LINK) && parent->type != RAY_STR && parent->type != RAY_SYM)
+    /* _idx_pad (bytes 8-15) aliases str_pool on a RAY_STR parent, sym_domain on
+     * a RAY_SYM one and the domain id on a RAY_ENUM one — NEVER clear it there
+     * (each is read in place while indexed).  HAS_LINK uses it too. */
+    if (!(parent->attrs & RAY_ATTR_HAS_LINK) && parent->type != RAY_STR && parent->type != RAY_SYM &&
+        parent->type != RAY_ENUM)
         parent->_idx_pad = NULL;
     parent->attrs   |= RAY_ATTR_HAS_INDEX;
     return parent;
@@ -671,7 +672,7 @@ static ray_t* prepare_attach_ex(ray_t** vp, const char* what, int8_t extra_type)
     if (!vp || !*vp || RAY_IS_ERR(*vp))
         return ray_error("type", "%s: null/error vector", what);
     ray_t* v = *vp;
-    if (!ray_is_vec(v))
+    if (!ray_is_vec(v) && v->type != RAY_ENUM)
         return ray_error("type", "%s: index can only attach to a vector", what);
     if (v->attrs & RAY_ATTR_SLICE)
         return ray_error("type", "%s: cannot index a slice; materialize first", what);
@@ -1030,8 +1031,9 @@ static bool plain_int(int8_t t) {
     switch (t) { case RAY_BOOL: RAY_BYTE_CASES: case RAY_I16: case RAY_I32: case RAY_I64: return true; default: return false; }
 }
 static bool plain_float(int8_t t) { return t == RAY_F32 || t == RAY_F64; }
+/* Two enums' positions meet only over one domain, which this layer cannot see. */
 static bool types_meet(int8_t a, int8_t b) {
-    return a == b || (plain_int(a) && plain_int(b)) || (plain_float(a) && plain_float(b));
+    return (a == b && a != RAY_ENUM) || (plain_int(a) && plain_int(b)) || (plain_float(a) && plain_float(b));
 }
 
 static int hash_key_in_range(int8_t t, int64_t k) {

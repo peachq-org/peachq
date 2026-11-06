@@ -129,7 +129,7 @@ typedef enum {
 q_edom_t q_enum_domain_kind(int64_t dom, ray_t** vals); /* *vals = borrowed VALUE LIST (SYMLIST/KEYED1) */
 int     q_enum_is(ray_t* x);                       /* vec 20h / atom -20h */
 int64_t q_enum_domain(ray_t* x);                   /* domain-name sym id (slice-aware, letter masked) */
-char    q_enum_attr(ray_t* x);                     /* the 20h attribute letter, 0 = none */
+char    q_enum_attr(ray_t* x);                     /* the domain slot's vouched `s`, 0 = none (u/g/p: q_attr_letter) */
 int     q_enum_attr_set(ray_t* x, char letter);    /* EXCLUSIVE x: stamp/clear the letter */
 ray_t*  q_enum_stamp(ray_t* v, int64_t dom);       /* consumes owned i64 value -> enum */
 ray_t*  q_enum_positions(ray_t* e);                /* owned plain-i64 copy */
