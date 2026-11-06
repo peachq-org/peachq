@@ -231,6 +231,14 @@ $(BUILD_DIR)/src/qlang/io/q_ffi.win.o: DEFS += $(QFFI_DEF)
 $(BUILD_DIR)/src/qlang/%.o: CFLAGS += -Wmissing-prototypes
 $(BUILD_DIR)/src/qlang/%.win.o: WIN_CFLAGS += -Wmissing-prototypes
 
+# The elementwise lanes are written to vectorize, which GCC below 12 does not do at -O2, and its
+# default model there refuses the runtime alias check those loops need.  A flag, not a pragma:
+# `#pragma GCC optimize` drops -fno-signed-zeros, and the lanes must fold as the kernels do.
+# Clang vectorizes at -O2 already and rejects the cost-model flag.
+VEC_CFLAGS = $(if $(shell $(CC) -dM -E -x c /dev/null 2>/dev/null | grep __clang__),,-ftree-vectorize -fvect-cost-model=dynamic)
+$(BUILD_DIR)/src/qlang/ops/q_vecop.o: CFLAGS += $(VEC_CFLAGS)
+$(BUILD_DIR)/src/qlang/ops/q_vecop.win.o: WIN_CFLAGS += -ftree-vectorize -fvect-cost-model=dynamic
+
 $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
