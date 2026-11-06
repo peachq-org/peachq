@@ -5,8 +5,8 @@
  * and DBL (double, nulls as NaN).  A same-type temporal rides INT on its own
  * PAYLOAD — a common unit would buy nothing and overflow i64 past year 2292.
  * Each operand is brought to its lane's width once — an already-wide vector in
- * place, a narrow one through a widening pass, an atom as a zero-stride
- * broadcast — and then ONE loop decides the whole vector.  Which lane a pair
+ * place, a narrow one through a widening pass, an atom read once — and then one
+ * loop per operand shape decides the whole vector.  Which lane a pair
  * lands on is not a preference: it reproduces the kernels' own split, so the
  * answer is the kernels' answer.
  *   ordering (< <= > >=)  ops/cmp.c int_cmp_lane: INT only when both operands
@@ -191,31 +191,86 @@ static int band_make(band_t* o, ray_t* v, int8_t tag, int vec, lane_t ln, int64_
     return 1;
 }
 
-/* ===== the decision pass =================================================
- * One byte per element: a comparison's own answer, or for & | ^ the mask
- * "take the LEFT operand here". */
-
-#define DEC_LOOP(T, ISNULL, BOTH, ONLYX, ONLYY, EXPR)                              \
+/* One loop per operand shape (vector-vector, vector-atom, atom-vector), so every
+ * loop reads at a compile-time stride and vectorizes; BODY sees x, y and i. */
+#define SHAPED(T, PX, PY, XV, YV, N, BODY)                                         \
     do {                                                                           \
-        const T *px = xb.p, *py = yb.p;                                            \
-        for (int64_t i = 0; i < n; i++, px += xb.step, py += yb.step) {            \
-            T x = *px, y = *py;                                                    \
-            int nx = (ISNULL(x)), ny = (ISNULL(y));                                \
-            m[i] = (uint8_t)((nx && ny) ? (BOTH) : nx ? (ONLYX) : ny ? (ONLYY) : (EXPR)); \
+        const T *px_ = (const T*)(PX), *py_ = (const T*)(PY);                      \
+        if ((XV) && (YV)) {                                                        \
+            for (int64_t i = 0; i < (N); i++) {                                    \
+                T x = px_[i], y = py_[i];                                          \
+                (void)x;                   /* ^ on the int lane reads y alone */   \
+                BODY;                                                              \
+            }                                                                      \
+        } else if (XV) {                                                           \
+            const T y = *py_;                                                      \
+            for (int64_t i = 0; i < (N); i++) { T x = px_[i]; (void)x; BODY; }     \
+        } else {                                                                   \
+            const T x = *px_;                                                      \
+            (void)x;                                                               \
+            for (int64_t i = 0; i < (N); i++) { T y = py_[i]; BODY; }              \
         }                                                                          \
     } while (0)
 
-#define NUL_D(v) ((v) != (v))
+/* The loops write the sentinels themselves, and a fresh vector has no index to
+ * drop, so the attr is all ray_vec_set_null would add — once, not per null. */
+static void mark_nulls(ray_t* out, int any) {
+    if (any) out->attrs |= RAY_ATTR_HAS_NULLS;
+}
+
+/* The double lane's store at OFF: V is the answer, Z whether it is the null, which
+ * lands as the result tag's own sentinel; a real result narrows through float. */
+#define DBL_W(T, NUL, OFF, PX, PY, XV, YV, N, V, Z)                                \
+    do {                                                                           \
+        T* d = (T*)ray_data(out) + (OFF);                                          \
+        SHAPED(double, PX, PY, XV, YV, N, {                                        \
+            double v = (V);                                                        \
+            int z = (Z);                                                           \
+            d[i] = z ? (NUL) : (T)v;                                               \
+            any |= z;                                                              \
+        });                                                                        \
+    } while (0)
+#define DBL_STORE(OFF, PX, PY, XV, YV, N, V, Z)                                    \
+    do {                                                                           \
+        if (rt == RAY_F32) DBL_W(float, NULL_F32, OFF, PX, PY, XV, YV, N, V, Z);   \
+        else DBL_W(double, NULL_F64, OFF, PX, PY, XV, YV, N, V, Z);                \
+    } while (0)
+
+/* ===== the decision pass =================================================
+ * One byte per element: a comparison's own answer, or for & | ^ the mask
+ * "take the LEFT operand here".  Branch-free, so the null cases select rather
+ * than jump. */
+
+#define DEC_LOOP(T, ISNULL, BOTH, ONLYX, ONLYY, EXPR)                              \
+    SHAPED(T, xb.p, yb.p, xb.step, yb.step, n, {                                   \
+        int nx = (ISNULL(x));                                                      \
+        int ny = (ISNULL(y));                                                      \
+        int e = (EXPR);                                                            \
+        m[i] = (uint8_t)((nx & ny) ? (BOTH) : nx ? (ONLYX) : ny ? (ONLYY) : e);    \
+    })
+
+/* The same roster as plain boolean algebra: GCC if-converts a double compare's
+ * nested selects no further than one level, and the int lanes the other way round. */
+#define DEC_D(BOTH, ONLYX, ONLYY, EXPR)                                            \
+    SHAPED(double, xb.p, yb.p, xb.step, yb.step, n, {                              \
+        int nx = x != x;                                                           \
+        int ny = y != y;                                                           \
+        int e = (EXPR);                                                            \
+        m[i] = (uint8_t)((nx & ny & (BOTH)) | (nx & (!ny) & (ONLYX)) |             \
+                         ((!nx) & ny & (ONLYY)) | ((!(nx | ny)) & e));             \
+    })
+
 #define NUL_J(v) ((v) == NULL_I64)
 #define NUL_B(v) ((int)(v) == bnul)
-#define DEC_D(B, X, Y, E) DEC_LOOP(double, NUL_D, B, X, Y, E)
-#define DEC_J(B, X, Y, E) DEC_LOOP(int64_t, NUL_J, B, X, Y, E)
 #define DEC_B(B, X, Y, E) DEC_LOOP(uint8_t, NUL_B, B, X, Y, E)
+/* NULL_I64 is the least int64, so the plain signed order already gives every
+ * roster answer below: a null under each value and equal to itself. */
+#define DEC_J(B, X, Y, E) SHAPED(int64_t, xb.p, yb.p, xb.step, yb.step, n, m[i] = (uint8_t)(E))
 
 /* The int and byte lanes decide by the same exact ordering, so one roster of
  * (both-null, x-null, y-null, value) answers serves both — the ^ default is
  * "take x exactly where y is null". */
-#define DEC_EXACT(DEC)                                                             \
+#define DEC_EXACT(DEC, ISNUL)                                                      \
     switch (op) {                                                                  \
         case VO_LT: case VO_MIN: DEC(0, 1, 0, x < y); break;                       \
         case VO_LE: DEC(1, 1, 0, x <= y); break;                                   \
@@ -223,27 +278,41 @@ static int band_make(band_t* o, ray_t* v, int8_t tag, int vec, lane_t ln, int64_
         case VO_GE: DEC(1, 0, 1, x >= y); break;                                   \
         case VO_EQ: DEC(1, 0, 0, x == y); break;                                   \
         case VO_NE: DEC(0, 1, 1, x != y); break;                                   \
-        default: DEC(1, 0, 1, 0); break;                                           \
+        default: DEC(1, 0, 1, ISNUL(y)); break;                                    \
     }
 
-/* `tol` is ops/cmp.c's tol_pair for this pair, and 0 for the & | picks.  `bnul`
+/* `tol` is ops/cmp.c's tol_pair for this pair, which only the orderings consult:
+ * = and <> tolerate on the double lane whatever the pair.  `bnul`
  * is the byte lane's null: 0x20 for a char (kdb-true `null " "`), and a value no
  * byte can hold for the bool/byte tags, which have none. */
 static void decide(uint8_t* m, vop_t op, lane_t ln, band_t xb, band_t yb, int tol, int bnul, int64_t n) {
     if (ln == LN_DBL) {
+        /* `tol` is hoisted out of the loops: a run-time flag in the body stops GCC vectorizing it */
         switch (op) {
-            case VO_LT: case VO_MIN: DEC_D(0, 1, 0, x < y && !(tol && ray_cmp_tol_eq(x, y))); break;
-            case VO_LE: DEC_D(1, 1, 0, x <= y || (tol && ray_cmp_tol_eq(x, y))); break;
-            case VO_GT: case VO_MAX: DEC_D(0, 0, 1, x > y && !(tol && ray_cmp_tol_eq(x, y))); break;
-            case VO_GE: DEC_D(1, 0, 1, x >= y || (tol && ray_cmp_tol_eq(x, y))); break;
+            case VO_LT:
+                if (tol) DEC_D(0, 1, 0, (x < y) & !ray_cmp_tol_eq(x, y));
+                else DEC_D(0, 1, 0, x < y);
+                break;
+            case VO_LE:
+                if (tol) DEC_D(1, 1, 0, (x <= y) | ray_cmp_tol_eq(x, y));
+                else DEC_D(1, 1, 0, x <= y);
+                break;
+            case VO_GT:
+                if (tol) DEC_D(0, 0, 1, (x > y) & !ray_cmp_tol_eq(x, y));
+                else DEC_D(0, 0, 1, x > y);
+                break;
+            case VO_GE:
+                if (tol) DEC_D(1, 0, 1, (x >= y) | ray_cmp_tol_eq(x, y));
+                else DEC_D(1, 0, 1, x >= y);
+                break;
             case VO_EQ: DEC_D(1, 0, 0, ray_cmp_tol_eq(x, y)); break;
             case VO_NE: DEC_D(0, 1, 1, !ray_cmp_tol_eq(x, y)); break;
-            default: DEC_D(1, 0, 1, 0); break;
+            default: break;                /* & | ^ decide as they pick: pick_dbl */
         }
     } else if (ln == LN_INT) {
-        DEC_EXACT(DEC_J);
+        DEC_EXACT(DEC_J, NUL_J);
     } else {
-        DEC_EXACT(DEC_B);
+        DEC_EXACT(DEC_B, NUL_B);
     }
 }
 
@@ -253,31 +322,45 @@ static void decide(uint8_t* m, vop_t op, lane_t ln, band_t xb, band_t yb, int to
 static void pick_into(ray_t* out, int8_t rt, lane_t ln, band_t xb, band_t yb, const uint8_t* m, int64_t n) {
     void* o = ray_data(out);
     if (ln == LN_BYTE) {
-        const uint8_t *px = xb.p, *py = yb.p;
         uint8_t* d = o;
-        for (int64_t i = 0; i < n; i++, px += xb.step, py += yb.step) d[i] = m[i] ? *px : *py;
+        SHAPED(uint8_t, xb.p, yb.p, xb.step, yb.step, n, d[i] = m[i] ? x : y);
         return;
     }
-    if (ln == LN_DBL) {
-        const double *px = xb.p, *py = yb.p;
-        for (int64_t i = 0; i < n; i++, px += xb.step, py += yb.step) {
-            double v = m[i] ? *px : *py;
-            if (rt == RAY_F32) ((float*)o)[i] = (float)v;
-            else ((double*)o)[i] = v;
-            if (v != v) ray_vec_set_null(out, i, true);
-        }
-        return;
-    }
-    const int64_t *px = xb.p, *py = yb.p;
     int w = ray_type_sizes[rt];          /* a temporal narrows by its payload width, not its tag */
-    for (int64_t i = 0; i < n; i++, px += xb.step, py += yb.step) {
-        int64_t v = m[i] ? *px : *py;
-        int isnull = (v == NULL_I64);
-        if (w == 2) ((int16_t*)o)[i] = isnull ? NULL_I16 : (int16_t)v;
-        else if (w == 4) ((int32_t*)o)[i] = isnull ? NULL_I32 : (int32_t)v;
-        else ((int64_t*)o)[i] = v;
-        if (isnull) ray_vec_set_null(out, i, true);
+    int any = 0;
+#define PICK_J(T, NUL)                                                             \
+    do {                                                                           \
+        T* d = o;                                                                  \
+        SHAPED(int64_t, xb.p, yb.p, xb.step, yb.step, n, {                         \
+            int64_t v = m[i] ? x : y;                                              \
+            int z = v == NULL_I64;                                                 \
+            d[i] = z ? (NUL) : (T)v;                                               \
+            any |= z;                                                              \
+        });                                                                        \
+    } while (0)
+    if (w == 2) PICK_J(int16_t, NULL_I16);
+    else if (w == 4) PICK_J(int32_t, NULL_I32);
+    else PICK_J(int64_t, NULL_I64);
+#undef PICK_J
+    mark_nulls(out, any);
+}
+
+/* & | ^ on the double lane, decided and picked in one pass, each a plain select
+ * GCC can vectorize.  Nulls are the least value: & is null where either side is,
+ * | reads a null y as -0w and is null only where both are, ^ takes x exactly
+ * where y is null.  Ties take y, as the decision pass's roster does. */
+static void pick_dbl(ray_t* out, int8_t rt, vop_t op, band_t xb, band_t yb, int64_t n) {
+    int any = 0;
+#define NUL_LEAST(v) ((v) != (v) ? -INFINITY : (v))
+#define PICK_D(V, Z) DBL_STORE(0, xb.p, yb.p, xb.step, yb.step, n, V, Z)
+    switch (op) {
+        case VO_MIN: PICK_D(x < y ? x : y, (x != x) | (y != y)); break;
+        case VO_MAX: PICK_D(x > NUL_LEAST(y) ? x : NUL_LEAST(y), (x != x) & (y != y)); break;
+        default: PICK_D(y != y ? x : y, (x != x) & (y != y)); break;
     }
+#undef PICK_D
+#undef NUL_LEAST
+    mark_nulls(out, any);
 }
 
 /* ===== the arithmetic lane ===============================================
@@ -319,13 +402,12 @@ static int8_t arith_rt(vop_t op, int8_t xt, int8_t yt) {
 #define ARI_W(T, NUL, EXPR)                                                        \
     do {                                                                           \
         T* d = o;                                                                  \
-        for (int64_t i = 0; i < n; i++, px += xb.step, py += yb.step) {            \
-            int64_t a = *px, b = *py;                                              \
-            int64_t v = (a == NULL_I64 || b == NULL_I64) ? NULL_I64 : (EXPR);      \
+        SHAPED(int64_t, xb.p, yb.p, xb.step, yb.step, n, {                         \
+            int64_t v = (x == NULL_I64 || y == NULL_I64) ? NULL_I64 : (EXPR);      \
             T r = v == NULL_I64 ? (NUL) : (T)v;                                    \
             d[i] = r;                                                              \
-            if (r == (NUL)) nul = i;                                               \
-        }                                                                          \
+            any |= r == (NUL);                                                     \
+        });                                                                        \
     } while (0)
 
 #define ARI_OP(EXPR)                                                               \
@@ -338,16 +420,15 @@ static int8_t arith_rt(vop_t op, int8_t xt, int8_t yt) {
 static void arith_into(ray_t* out, int8_t rt, vop_t op, band_t xb, band_t yb, int64_t n) {
     void* o = ray_data(out);
     int w = ray_type_sizes[rt];
-    int64_t nul = -1;
-    const int64_t *px = xb.p, *py = yb.p;
+    int any = 0;
     switch (op) {
-        case VO_ADD: ARI_OP((int64_t)((uint64_t)a + (uint64_t)b)); break;
-        case VO_SUB: ARI_OP((int64_t)((uint64_t)a - (uint64_t)b)); break;
-        case VO_MUL: ARI_OP((int64_t)((uint64_t)a * (uint64_t)b)); break;
-        case VO_IDIV: ARI_OP(floor_div64(a, b)); break;
-        default: ARI_OP(floor_mod64(a, b)); break;
+        case VO_ADD: ARI_OP((int64_t)((uint64_t)x + (uint64_t)y)); break;
+        case VO_SUB: ARI_OP((int64_t)((uint64_t)x - (uint64_t)y)); break;
+        case VO_MUL: ARI_OP((int64_t)((uint64_t)x * (uint64_t)y)); break;
+        case VO_IDIV: ARI_OP(floor_div64(x, y)); break;
+        default: ARI_OP(floor_mod64(x, y)); break;
     }
-    if (nul >= 0) ray_vec_set_null(out, nul, true);   /* the sentinel is written; this is the attr */
+    mark_nulls(out, any);
 }
 
 /* The double lane's tag: % answers make_f64 for every pair, + - * need a float side.  0 = not this lane's. */
@@ -369,40 +450,26 @@ static const double* flt_run(double* buf, ray_t* v, int8_t t, int vec, const dou
     return buf;
 }
 
-#define FLT_W(T, NUL, EXPR)                                                        \
-    do {                                                                           \
-        T* d = (T*)ray_data(out) + i0;                                             \
-        for (int64_t i = 0; i < m; i++, px += xv, py += yv) {                      \
-            double a = *px, b = *py, v = (EXPR);                                   \
-            if (v != v) { d[i] = (NUL); nul = i0 + i; }                            \
-            else d[i] = (T)v;                                                      \
-        }                                                                          \
-    } while (0)
-
-#define FLT_OP(EXPR)                                                               \
-    do {                                                                           \
-        if (rt == RAY_F32) FLT_W(float, NULL_F32, EXPR);                           \
-        else FLT_W(double, NULL_F64, EXPR);                                        \
-    } while (0)
+#define FLT_OP(EXPR) DBL_STORE(i0, px, py, xv, yv, m, EXPR, v != v)
 
 static ray_t* float_binary(vop_t op, int8_t rt, ray_t* x, ray_t* y, int8_t xt, int8_t yt, int xv, int yv, int64_t n) {
     ray_t* out = ray_vec_new(rt, n);
     if (!out || RAY_IS_ERR(out)) return out;
     out->len = n;
     double xa = xv ? 0 : atom_f(x), ya = yv ? 0 : atom_f(y), xbuf[FLT_RUN], ybuf[FLT_RUN];
-    int64_t nul = -1;
+    int any = 0;
     for (int64_t i0 = 0; i0 < n; i0 += FLT_RUN) {
         int64_t m = n - i0 < FLT_RUN ? n - i0 : FLT_RUN;
         const double* px = flt_run(xbuf, x, xt, xv, &xa, i0, m);
         const double* py = flt_run(ybuf, y, yt, yv, &ya, i0, m);
         switch (op) {
-            case VO_ADD: FLT_OP(a + b); break;
-            case VO_SUB: FLT_OP(a - b == 0.0 ? 0.0 : a - b); break;   /* ray_sub_fn's -0.0 normalization */
-            case VO_MUL: FLT_OP(a * b); break;
-            default: FLT_OP(a / b); break;
+            case VO_ADD: FLT_OP(x + y); break;
+            case VO_SUB: FLT_OP(x - y == 0.0 ? 0.0 : x - y); break;   /* ray_sub_fn's -0.0 normalization */
+            case VO_MUL: FLT_OP(x * y); break;
+            default: FLT_OP(x / y); break;
         }
     }
-    if (nul >= 0) ray_vec_set_null(out, nul, true);
+    mark_nulls(out, any);
     return out;
 }
 
@@ -472,14 +539,17 @@ ray_t* q_vecop_binary(ray_t* (*f)(ray_t*, ray_t*), ray_t* x, ray_t* y) {
 
     ray_t* out = ray_vec_new(rt, n);
     uint8_t* m = NULL;
-    if (out && !RAY_IS_ERR(out)) {
+    if (out && !RAY_IS_ERR(out) && ln == LN_DBL && !answers_bool(op)) {
+        out->len = n;
+        pick_dbl(out, rt, op, xb, yb, n);
+    } else if (out && !RAY_IS_ERR(out)) {
         out->len = n;
         /* a comparison's decision IS its result, so it lands in the output
          * itself; a pick needs the mask alongside the values it selects */
         m = answers_bool(op) ? ray_data(out) : malloc((size_t)n);
         if (!m) { ray_release(out); out = NULL; }
     }
-    if (out && !RAY_IS_ERR(out)) {
+    if (m) {
         int tol = (op == VO_MIN || op == VO_MAX) ? 0 : (q_type_is_float_tag(xt) || q_type_is_float_tag(yt));
         decide(m, op, ln, xb, yb, tol, xt == RAY_CHARV ? 0x20 : 0x100, n);
         if (!answers_bool(op)) {

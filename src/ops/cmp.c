@@ -26,19 +26,6 @@
 #include "lang/format.h"   /* ray_type_name (error context) */
 
 #include <assert.h>
-#include <math.h>
-
-/* Comparison tolerance E=2^-43 (qdocs basics/precision.md): x=y iff |x-y| <= E*max(|x|,|y|),
- * applied only where an operand is real/float/datetime — the finite-float lanes.  Exact
- * equality first (±0w=±0w must answer without arithmetic; inf-inf is NaN), infinities then
- * compare exactly (the law covers FINITE floats).  This is the exact inequality, NOT the
- * integer-ULP approximation: ULP is a superset at binade bottoms, so it cannot be swapped
- * in without re-checking the pinned band grid in test/q/aigenerated/compare_tolerance.qcmd. */
-int ray_cmp_tol_eq(double x, double y) {
-    if (x == y) return 1;
-    if (isinf(x) || isinf(y)) return 0;
-    return fabs(x - y) <= 0x1p-43 * fmax(fabs(x), fabs(y));
-}
 
 static inline int tol_lane(ray_t* x) {
     return x->type == -RAY_F64 || x->type == -RAY_F32 || RAY_IS_TEMPORALF(-x->type);
