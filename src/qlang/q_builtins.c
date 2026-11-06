@@ -15,6 +15,7 @@
 #include "qlang/q_env.h"      /* q_env_bind — q's own name surface */
 #include "qlang/ops/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
 #include "qlang/q_console.h"  /* q_console_show — show's display sink */
+#include "qlang/q_ctx.h"      /* q_ctx_ld_fn — .Q.c.ld, the load's grouping */
 #include "qlang/base/q_type.h"     /* q_type_of — the `type` verb's type-number home */
 #include "qlang/io/q_provider.h"     /* provider carriers: 98h, count via provider */
 #include "ops/ops.h"                 /* ray_is_lazy / ray_lazy_materialize */
@@ -327,6 +328,7 @@ void q_builtins_register(void) {
         { ".Q.c.qt",   q_dotq_qt_fn   }, { ".Q.c.qp",   q_dotq_qp_fn   },
         { ".Q.c.s",    q_dotq_s_fn    }, { ".Q.c.atob", q_dotq_atob_fn },
         { ".Q.c.hg",   q_dotq_hg_fn   },   /* HTTP GET (ref/dotq.md) */
+        { ".Q.c.ld",   q_ctx_ld_fn    },
         /* No public `.Q` twins — producer seams for q.q's asc/xasc, not keywords. */
         { ".Q.c.sorted", q_attr_stamp_sorted },
         { ".Q.c.parted", q_attr_stamp_parted },
