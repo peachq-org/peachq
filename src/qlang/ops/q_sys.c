@@ -107,7 +107,7 @@ static ray_t* ctx_switch(const char* name, size_t len) {
         return NULL;
     }
     /* nested `.a.b` is a superset of kdb 4.x (q4m3 §12.7: one level only); the first definition creates it */
-    if (len >= 2 && len < 64 && name[0] == '.' &&
+    if (len >= 2 && len + sizeof "q)" <= Q_SYS_PROMPT_CAP && name[0] == '.' &&
         q_env_ctx_ok(name + 1, len - 1)) {
         q_env_ctx_set(ray_sym_intern_runtime(name, len));
         return NULL;

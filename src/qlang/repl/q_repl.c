@@ -265,8 +265,10 @@ static void tty_eval_begin(ray_term_t* t) {
     ray_term_eval_begin(t);
 }
 
+_Static_assert(sizeof ((ray_term_t*)0)->prompt_override >= Q_SYS_PROMPT_CAP + 16, "the line editor must hold every q prompt, q_dbg's depth parens included");
+
 static void tty_prompt(ray_term_t* t) {
-    char prompt[80];
+    char prompt[Q_SYS_PROMPT_CAP];
     int  pl = q_sys_prompt(prompt, sizeof prompt);
     ray_term_set_prompt(t, prompt, pl);
 }
@@ -506,7 +508,7 @@ static ray_t* poll_tty_data(ray_poll_t* poll, ray_selector_t* sel, void* data) {
 /* --- piped flavour: fgets-loop transcript over poll-driven read(2) --- */
 
 static void pipe_prompt(q_poll_repl_t* c) {
-    char prompt[80];
+    char prompt[Q_SYS_PROMPT_CAP];
     q_sys_prompt(prompt, sizeof prompt);
     fputs(prompt, c->out);
     fflush(c->out);
@@ -792,7 +794,7 @@ void q_repl_run(FILE* in, FILE* out, FILE* err, int echo) {
         q_dbg_set_reader(repl_fgets_dbg_read);
 
     for (;;) {
-        char prompt[80];
+        char prompt[Q_SYS_PROMPT_CAP];
         q_sys_prompt(prompt, sizeof prompt);
         fputs(prompt, out);
         fflush(out);

@@ -595,7 +595,7 @@ static ray_t* pq_console_fn(ray_t* x) {
     FILE* out = g_console_out ? g_console_out : stdout;
     FILE* err = g_console_err ? g_console_err : stderr;
     if (!q_dotz_quiet()) {
-        char prompt[80];
+        char prompt[Q_SYS_PROMPT_CAP];
         int  pl = q_sys_prompt(prompt, sizeof prompt);
         fwrite(prompt, 1, (size_t)pl, out);
         fwrite(p, 1, (size_t)n, out);
