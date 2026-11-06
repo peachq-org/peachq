@@ -1483,8 +1483,10 @@ void q_fmt_console(ray_t* val, char* buf, size_t bufsz) {
 /* RAY_QFN carrier display over the apply module's read-out accessors (the
  * slot layout stays opaque): lambda = verbatim source, iterator/derived =
  * head + adverb glyph, composition = "u g", projection = verbatim head +
- * the bound-argument echo, holes empty — {x+y}[1;], +[;2] (kdb shape,
- * owner ruling 2026-07-23).  Straight into the emitter: source text is unbounded. */
+ * the bound-argument echo, holes empty — {x+y}[1;], +[;2] — but never the
+ * rank padding the call did not write: {x+y}[1], 10# is #[10] (owner rulings
+ * 2026-07-23, 2026-11-06 Dyrheb).  Only a head whose fixed rank restores the
+ * padding drops it.  Straight into the emitter: source text is unbounded. */
 static void carrier_fmt(ray_t* v) {
     q_car_kind_t kind = q_eval_apply_carrier_kind(v);
     if (kind == Q_EVAL_CAR_NONE) return;
@@ -1545,7 +1547,9 @@ static void carrier_fmt(ray_t* v) {
     if (nm) qe_puts(nm);
     else fmt_render(head);
     qe_putc('[');
-    int64_t slots = q_eval_apply_proj_nslots(v);
+    int64_t slots = q_eval_apply_proj_nslots(v), shown = slots;
+    while (shown > 0 && !q_eval_apply_proj_arg(v, shown - 1)) shown--;
+    if (shown > 0 && q_eval_apply_rank(head) == slots) slots = shown;
     for (int64_t i = 0; i < slots; i++) {
         if (i) qe_putc(';');
         ray_t* a = q_eval_apply_proj_arg(v, i);
