@@ -22,15 +22,6 @@
  * values.  A node whose one sym is the NULL sym is never a key list. */
 #define Q_ATTR_KEYLIST 0x40
 
-/* Q_ATTR_TRAIN: flag on a RAY_LIST call node whose rightmost operand is a train tail — WRITTEN as a verb: a
- * postfix elision (`count@`, `-9!`, `x each`), a lone glyph (`0|+`), an iterator-suffixed expression (`neg\`) or a
- * node so flagged — so `1~count@` composes `~[1;]` onto `count@` where the same tree built by hand, or by a bracket
- * elision (`count y[0;]`), applies; a keyword or lambda there (`3#{x}`) is a noun.  Only the parser knows the syntax,
- * so only the parser sets it; the walker reads it at the application arm, THE one composition home.  0x02 is
- * unclaimed on a general list (heap.h's legend gives it to -RAY_I64 atoms); the wire codec does not carry it, so a
- * serialised tree applies. */
-#define Q_ATTR_TRAIN 0x02
-
 /* Q_ATTR_POSTFIX: flag on the call node of a postfix elision (`2+`, `-15!`, `count@`): its trailing hole was never
  * WRITTEN, so the walker applies the head to the bound operand alone and the projection is `+[2]`'s (qPython's md5
  * fixture is two items) — parse still shows kdb's (+;2;::).  0x04 is unclaimed on a general list. */
