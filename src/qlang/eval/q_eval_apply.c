@@ -1390,10 +1390,13 @@ static int64_t rank_of(ray_t* fv) {
     case Q_EVAL_CAR_DERIV: {
         /* ref/maps.md:11-16: Each keeps its operand's rank, `\:` `/:` are binary, `':` is Each Parallel on a unary */
         int adv = (int)car_slots(fv)[2]->i64;
-        ray_t* op = car_slots(fv)[0];
-        if (adv == 0) return op ? rank_of(op) : -1;
         if (adv == 4 || adv == 5) return 2;
-        if (adv == 3 && op && rank_of(op) == 1) return 1;
+        ray_t* op = car_slots(fv)[0];
+        int64_t r = op ? rank_of(op) : -1;
+        if (adv == 0) return r;
+        if (adv == 3 && r == 1) return 1;
+        /* accumulators.md "Ternary values": past two, Over and Scan keep the operand's rank */
+        if ((adv == 1 || adv == 2) && r >= 3) return r;
         return -1;
     }
     case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_VIEW: case Q_EVAL_CAR_FOREIGN: break;
@@ -1616,6 +1619,9 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
     case Q_EVAL_CAR_PROJ: return proj_call(fv, args, n);
     case Q_EVAL_CAR_DERIV: {
         ray_t** c = car_slots(fv);
+        /* ternary-and-up has no unary reading: a short Over or Scan projects (ref/accumulators.md "Ternary values") */
+        int64_t rank = c[2]->i64 == 1 || c[2]->i64 == 2 ? rank_of(fv) : -1;
+        if (rank >= 3 && n < rank) return q_eval_apply_proj_new(fv, NULL, args, n, rank);
         return q_adverb_apply((int)c[2]->i64, c[0], row_unbox(c[1]),
                                    args, n);
     }
