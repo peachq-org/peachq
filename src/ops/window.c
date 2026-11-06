@@ -909,9 +909,9 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
                         }
                         mins[k] = kmin;
                         maxs[k] = kmax;
-                        uint64_t range = (uint64_t)(kmax - kmin);
+                        uint64_t range = (uint64_t)kmax - (uint64_t)kmin;
                         uint8_t bits = 1;
-                        while (((uint64_t)1 << bits) <= range && bits < 64)
+                        while (bits < 64 && ((uint64_t)1 << bits) <= range)
                             bits++;
                         total_bits += bits;
                     }
@@ -958,9 +958,9 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
                         }
                         mins[k] = kmin;
                         maxs[k] = kmax;
-                        uint64_t range = (uint64_t)(kmax - kmin);
+                        uint64_t range = (uint64_t)kmax - (uint64_t)kmin;
                         uint8_t bits = 1;
-                        while (((uint64_t)1 << bits) <= range && bits < 64)
+                        while (bits < 64 && ((uint64_t)1 << bits) <= range)
                             bits++;
                         total_bits += bits;
                     }
@@ -973,9 +973,9 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
                     uint8_t accum = 0;
                     for (int k = n_sort - 1; k >= 0; k--) {
                         bit_shifts[k] = accum;
-                        uint64_t range = (uint64_t)(maxs[k] - mins[k]);
+                        uint64_t range = (uint64_t)maxs[k] - (uint64_t)mins[k];
                         uint8_t bits = 1;
-                        while (((uint64_t)1 << bits) <= range && bits < 64)
+                        while (bits < 64 && ((uint64_t)1 << bits) <= range)
                             bits++;
                         accum += bits;
                     }
@@ -993,7 +993,7 @@ ray_t* exec_window(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
                         };
                         for (uint8_t k = 0; k < n_sort; k++) {
                             enc.mins[k] = mins[k];
-                            enc.ranges[k] = maxs[k] - mins[k];
+                            enc.ranges[k] = (int64_t)((uint64_t)maxs[k] - (uint64_t)mins[k]);
                             enc.bit_shifts[k] = bit_shifts[k];
                             enc.descs[k] = sort_descs[k];
                             enc.enum_ranks[k] = enum_ranks[k];

@@ -1879,19 +1879,22 @@ static bool sort_str_msd_inplace(int64_t* sorted_idx, int64_t nrows,
 }
 
 /* Build SYM rank mapping: intern_id → sorted rank by string value.
+ * Only the ids the column holds are ranked (dense, 0..K-1); every other
+ * slot is 0 and never read, since consumers index it by the column's own
+ * cells.  Ranking all ids up to max_id made a sort cost O(session symbols).
  * Caller must scratch_free(*hdr_out) when done.
  * Returns pointer to rank array of size (max_id + 1), or NULL on error. */
-/* Parallel max_id scan context */
 typedef struct {
     const void* data;
     int8_t      type;
     uint8_t     attrs;
     uint32_t*   pw_max;  /* per-worker max */
-} enum_max_ctx_t;
+    uint32_t*   mark;
+} enum_scan_ctx_t;
 
 static void enum_max_fn(void* arg, uint32_t wid,
                          int64_t start, int64_t end) {
-    enum_max_ctx_t* c = (enum_max_ctx_t*)arg;
+    enum_scan_ctx_t* c = (enum_scan_ctx_t*)arg;
     uint32_t local_max = c->pw_max[wid];
     for (int64_t i = start; i < end; i++) {
         uint32_t v = (uint32_t)ray_read_sym(c->data, i, c->type, c->attrs);
@@ -1900,22 +1903,37 @@ static void enum_max_fn(void* arg, uint32_t wid,
     c->pw_max[wid] = local_max;
 }
 
+/* Load before store: a low-cardinality column would otherwise have every
+ * worker writing the same few cache lines. */
+static void enum_mark_fn(void* arg, uint32_t wid,
+                          int64_t start, int64_t end) {
+    (void)wid;
+    enum_scan_ctx_t* c = (enum_scan_ctx_t*)arg;
+    for (int64_t i = start; i < end; i++) {
+        uint32_t v = (uint32_t)ray_read_sym(c->data, i, c->type, c->attrs);
+        if (!ray_atomic_load(&c->mark[v])) ray_atomic_store(&c->mark[v], 1u);
+    }
+}
+
 uint32_t* build_enum_rank(ray_t* col, int64_t nrows, ray_t** hdr_out) {
     const void* data = ray_data(col);
     int8_t type = col->type;
     uint8_t attrs = col->attrs;
+    *hdr_out = NULL;
 
-    /* Find max intern ID (parallel for large columns) */
     uint32_t max_id = 0;
     ray_pool_t* pool = ray_pool_get();
-    if (pool && nrows > 100000) {
+    bool par = pool && nrows > 100000;
+    enum_scan_ctx_t ectx = { .data = data, .type = type, .attrs = attrs };
+    if (par) {
         uint32_t nw = ray_pool_total_workers(pool);
         uint32_t pw_max[nw];
         memset(pw_max, 0, nw * sizeof(uint32_t));
-        enum_max_ctx_t ectx = { .data = data, .type = type, .attrs = attrs, .pw_max = pw_max };
+        ectx.pw_max = pw_max;
         ray_pool_dispatch(pool, enum_max_fn, &ectx, nrows);
         for (uint32_t w = 0; w < nw; w++)
             if (pw_max[w] > max_id) max_id = pw_max[w];
+        ectx.pw_max = NULL;
     } else {
         for (int64_t i = 0; i < nrows; i++) {
             uint32_t v = (uint32_t)ray_read_sym(data, i, type, attrs);
@@ -1923,26 +1941,41 @@ uint32_t* build_enum_rank(ray_t* col, int64_t nrows, ray_t** hdr_out) {
         }
     }
 
-    if (max_id >= UINT32_MAX - 1) { *hdr_out = NULL; return NULL; }
+    if (max_id >= UINT32_MAX - 1) return NULL;
     uint32_t n_ids = max_id + 1;
 
-    /* Arena for temporaries (ids, ptrs, lens, tmp) — single reset at end */
+    /* The output LUT doubles as the presence mark (not arena'd). */
+    ray_t* rank_hdr;
+    uint32_t* rank = (uint32_t*)scratch_calloc(&rank_hdr,
+                        (size_t)n_ids * sizeof(uint32_t));
+    if (!rank) return NULL;
+    ectx.mark = rank;
+    if (par)
+        ray_pool_dispatch(pool, enum_mark_fn, &ectx, nrows);
+    else
+        enum_mark_fn(&ectx, 0, 0, nrows);
+
+    uint32_t n_present = 0;
+    for (uint32_t i = 0; i < n_ids; i++) n_present += rank[i];
+
     ray_scratch_arena_t arena;
     ray_scratch_arena_init(&arena);
 
-    /* Allocate array of intern IDs to sort */
+    /* ids[] holds positions into ptrs/lens; raw[] maps a position back to
+     * its intern id.  Filled in ascending id order so the stable sort keeps
+     * the id tie-break among equal strings. */
+    uint32_t* raw = (uint32_t*)ray_scratch_arena_push(&arena,
+                        (size_t)n_present * sizeof(uint32_t));
     uint32_t* ids = (uint32_t*)ray_scratch_arena_push(&arena,
-                        (size_t)n_ids * sizeof(uint32_t));
-    if (!ids) { ray_scratch_arena_reset(&arena); *hdr_out = NULL; return NULL; }
-    for (uint32_t i = 0; i < n_ids; i++) ids[i] = i;
-
-    /* Pre-cache raw string pointers and lengths for fast comparison */
+                        (size_t)n_present * sizeof(uint32_t));
+    uint32_t* tmp = (uint32_t*)ray_scratch_arena_push(&arena,
+                        (size_t)n_present * sizeof(uint32_t));
     const char** ptrs = (const char**)ray_scratch_arena_push(&arena,
-                             (size_t)n_ids * sizeof(const char*));
+                             (size_t)n_present * sizeof(const char*));
     uint32_t* lens = (uint32_t*)ray_scratch_arena_push(&arena,
-                         (size_t)n_ids * sizeof(uint32_t));
-    if (!ptrs || !lens) {
-        ray_scratch_arena_reset(&arena); *hdr_out = NULL; return NULL;
+                         (size_t)n_present * sizeof(uint32_t));
+    if (n_present && (!raw || !ids || !tmp || !ptrs || !lens)) {
+        ray_scratch_arena_reset(&arena); scratch_free(rank_hdr); return NULL;
     }
     /* The ids being ranked are CELL DATA of `col`: resolve each through
      * the COLUMN's domain (sym-domain Phase 2).  Every consumer of the
@@ -1950,64 +1983,46 @@ uint32_t* build_enum_rank(ray_t* col, int64_t nrows, ray_t** hdr_out) {
      * cell ids — only the id→string source changes.  Runtime singleton
      * delegates to ray_sym_str: exact no-op pre-flip. */
     struct ray_sym_domain_s* dom = ray_sym_vec_domain(col);
-    for (uint32_t i = 0; i < n_ids; i++) {
+    for (uint32_t i = 0, k = 0; i < n_ids; i++) {
+        if (!rank[i]) continue;
+        raw[k] = i;
+        ids[k] = k;
         ray_t* s = ray_sym_domain_str(dom, (int64_t)i);
-        if (s) {
-            ptrs[i] = ray_str_ptr(s);
-            lens[i] = (uint32_t)ray_str_len(s);
-        } else {
-            ptrs[i] = NULL;
-            lens[i] = 0;
-        }
+        ptrs[k] = s ? ray_str_ptr(s) : NULL;
+        lens[k] = s ? (uint32_t)ray_str_len(s) : 0;
+        k++;
     }
 
-    /* Merge sort intern IDs by full string comparison.  For ≤100K SYM
-     * values this completes in <1ms and correctly handles strings that
-     * share long common prefixes (e.g. "id000000001"–"id000099999"). */
-    {
-        uint32_t* tmp = (uint32_t*)ray_scratch_arena_push(&arena,
-                             (size_t)n_ids * sizeof(uint32_t));
-        if (!tmp) { ray_scratch_arena_reset(&arena);
-                    *hdr_out = NULL; return NULL; }
-
-        /* Bottom-up merge sort */
-        for (uint32_t width = 1; width < n_ids; width *= 2) {
-            for (uint32_t i = 0; i < n_ids; i += 2 * width) {
-                uint32_t lo = i;
-                uint32_t mid = lo + width;
-                if (mid > n_ids) mid = n_ids;
-                uint32_t hi = lo + 2 * width;
-                if (hi > n_ids) hi = n_ids;
-                /* Merge ids[lo..mid) and ids[mid..hi) into tmp[lo..hi) */
-                uint32_t a = lo, b = mid, k = lo;
-                while (a < mid && b < hi) {
-                    uint32_t ia = ids[a], ib = ids[b];
-                    uint32_t la = lens[ia], lb = lens[ib];
-                    uint32_t ml = la < lb ? la : lb;
-                    int cmp = 0;
-                    if (ml > 0) cmp = memcmp(ptrs[ia], ptrs[ib], ml);
-                    if (cmp == 0) cmp = (la > lb) - (la < lb);
-                    if (cmp <= 0) tmp[k++] = ids[a++];
-                    else          tmp[k++] = ids[b++];
-                }
-                while (a < mid) tmp[k++] = ids[a++];
-                while (b < hi)  tmp[k++] = ids[b++];
+    /* Bottom-up merge sort by full string comparison: correct for strings
+     * that share long common prefixes (e.g. "id000000001"–"id000099999"). */
+    for (uint32_t width = 1; width < n_present; width *= 2) {
+        for (uint32_t i = 0; i < n_present; i += 2 * width) {
+            uint32_t lo = i;
+            uint32_t mid = lo + width;
+            if (mid > n_present) mid = n_present;
+            uint32_t hi = lo + 2 * width;
+            if (hi > n_present) hi = n_present;
+            uint32_t a = lo, b = mid, k = lo;
+            while (a < mid && b < hi) {
+                uint32_t ia = ids[a], ib = ids[b];
+                uint32_t la = lens[ia], lb = lens[ib];
+                uint32_t ml = la < lb ? la : lb;
+                int cmp = 0;
+                if (ml > 0) cmp = memcmp(ptrs[ia], ptrs[ib], ml);
+                if (cmp == 0) cmp = (la > lb) - (la < lb);
+                if (cmp <= 0) tmp[k++] = ids[a++];
+                else          tmp[k++] = ids[b++];
             }
-            /* Swap ids and tmp */
-            uint32_t* s = ids; ids = tmp; tmp = s;
+            while (a < mid) tmp[k++] = ids[a++];
+            while (b < hi)  tmp[k++] = ids[b++];
         }
+        uint32_t* s = ids; ids = tmp; tmp = s;
     }
 
-    /* Build rank[intern_id] = sorted position (output — not arena'd) */
-    ray_t* rank_hdr;
-    uint32_t* rank = (uint32_t*)scratch_calloc(&rank_hdr,
-                        (size_t)n_ids * sizeof(uint32_t));
-    if (!rank) { ray_scratch_arena_reset(&arena); *hdr_out = NULL; return NULL; }
+    for (uint32_t i = 0; i < n_present; i++)
+        rank[raw[ids[i]]] = i;
 
-    for (uint32_t i = 0; i < n_ids; i++)
-        rank[ids[i]] = i;
-
-    ray_scratch_arena_reset(&arena);  /* free all temporaries at once */
+    ray_scratch_arena_reset(&arena);
     *hdr_out = rank_hdr;
     return rank;
 }
@@ -2554,9 +2569,9 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
                         }
                         mins[k] = kmin;
                         maxs[k] = kmax;
-                        uint64_t range = (uint64_t)(kmax - kmin);
+                        uint64_t range = (uint64_t)kmax - (uint64_t)kmin;
                         uint8_t bits = 1;
-                        while (((uint64_t)1 << bits) <= range && bits < 64)
+                        while (bits < 64 && ((uint64_t)1 << bits) <= range)
                             bits++;
                         total_bits = (uint16_t)(total_bits + bits);
                     }
@@ -2616,9 +2631,9 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
 
                         mins[k] = kmin;
                         maxs[k] = kmax;
-                        uint64_t range = (uint64_t)(kmax - kmin);
+                        uint64_t range = (uint64_t)kmax - (uint64_t)kmin;
                         uint8_t bits = 1;
-                        while (((uint64_t)1 << bits) <= range && bits < 64)
+                        while (bits < 64 && ((uint64_t)1 << bits) <= range)
                             bits++;
                         total_bits = (uint16_t)(total_bits + bits);
                     }
@@ -2747,9 +2762,9 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
                     uint8_t accum = 0;
                     for (int k = n_cols - 1; k >= 0; k--) {
                         bit_shifts[k] = accum;
-                        uint64_t range = (uint64_t)(maxs[k] - mins[k]);
+                        uint64_t range = (uint64_t)maxs[k] - (uint64_t)mins[k];
                         uint8_t bits = 1;
-                        while (((uint64_t)1 << bits) <= range && bits < 64)
+                        while (bits < 64 && ((uint64_t)1 << bits) <= range)
                             bits++;
                         accum += bits;
                     }
@@ -2770,7 +2785,7 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
                             };
                             for (uint8_t k = 0; k < n_cols; k++) {
                                 enc.mins[k] = mins[k];
-                                enc.ranges[k] = maxs[k] - mins[k];
+                                enc.ranges[k] = (int64_t)((uint64_t)maxs[k] - (uint64_t)mins[k]);
                                 enc.bit_shifts[k] = bit_shifts[k];
                                 enc.descs[k] = descs ? descs[k] : 0;
                                 enc.enum_ranks[k] = enum_ranks[k];
