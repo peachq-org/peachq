@@ -16,7 +16,7 @@ ray_t* q_funsql_bang_wrap(ray_t** args, int64_t n);
 /* `#` / `_` on the ENTRIES axis — the ONE selection home: one index off the
  * domain applied to both halves, take keeping what Find found and drop the
  * complement (dict keys, keyed tables, and a table's columns through flip).
- * NULL = not an entries selection, the take/drop wrapper's fall-through. */
+ * The caller has ruled that x names entries of y. */
 ray_t* q_funsql_entries_take(ray_t* x, ray_t* y);
 ray_t* q_funsql_entries_drop(ray_t* x, ray_t* y);
 
