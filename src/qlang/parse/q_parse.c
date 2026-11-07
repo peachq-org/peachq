@@ -1000,15 +1000,49 @@ static int assign_target_next(Parser *p) {
     return sym_name_is(t->k, ":") || verb_marked(t->k);
 }
 
+/* One nesting level of shadow_locals' scan, up to and through its `close`.  A `name:` that opens a table literal's
+ * column or a qSQL select/by phrase names a column, not a local (`{update prev:1 from t; prev 1 2}`). */
+static void scan_locals(Parser *p, TKind close, int table) {
+    int col = table, phrase = 0;
+    while (p->pos < p->t.n) {
+        Token *tk = &p->t.t[p->pos++];
+        int was = col;
+        col = 0;
+        if (tk->kind == close) return;
+        if (tk->kind == T_EOF || tk->kind == T_RPAREN || tk->kind == T_RBRACK || tk->kind == T_RBRACE) {
+            p->pos--;
+            return;
+        }
+        if (tk->kind == T_LBRACE) {
+            scan_locals(p, T_RBRACE, -1);
+        } else if (tk->kind == T_LBRACK) {
+            scan_locals(p, T_RBRACK, table < 0 ? -1 : 0);
+            col = was && phrase;
+        } else if (tk->kind == T_LPAREN && p->pos < p->t.n && p->t.t[p->pos].kind == T_LBRACK) {
+            p->pos++;
+            scan_locals(p, T_RBRACK, table < 0 ? -1 : 1);
+            scan_locals(p, T_RPAREN, table < 0 ? -1 : 1);
+        } else if (tk->kind == T_LPAREN) {
+            scan_locals(p, T_RPAREN, table < 0 ? -1 : 0);
+        } else if (tk->kind == T_SEMI) {
+            col = table > 0;
+            phrase = 0;
+        } else if (qtok_is_query_verb(tk) || (phrase && (qtok_sym_is(tk, "by") || qtok_is_join_comma(tk)))) {
+            col = phrase = 1;
+        } else if (phrase && was && qtok_sym_is(tk, "distinct")) {
+            col = 1;
+        } else if (qtok_sym_is(tk, "from")) {
+            phrase = 0;
+        }
+        if (tk->kind == T_NOUN && table >= 0 && !was && sym_is_nameref(tk->k) && assign_target_next(p))
+            shadow_add(p, tk->k->i64);
+    }
+}
+
 /* a lambda's locals are its whole body's, wherever the binding stands (`{(prev;prev:42)}` reads the local twice) */
 static void shadow_locals(Parser *p) {
     int start = p->pos;
-    for (int depth = 0; p->pos < p->t.n; ) {
-        Token *tk = &p->t.t[p->pos++];
-        if (tk->kind == T_LBRACE) depth++;
-        else if (tk->kind == T_RBRACE && depth-- == 0) break;
-        else if (!depth && tk->kind == T_NOUN && sym_is_nameref(tk->k) && assign_target_next(p)) shadow_add(p, tk->k->i64);
-    }
+    scan_locals(p, T_RBRACE, 0);
     p->pos = start;
 }
 
@@ -1071,6 +1105,16 @@ static ray_t *parse_table_lit(Parser *p) {
     ray_t *vcols = parse_E(p, Q_NONE);
     expect(p, T_RPAREN, "expected ')'");
     return bang_tree(table_lit_flip(kcols), table_lit_flip(vcols));
+}
+
+/* `(+)` or `((+))`, the cursor past the first `(`: a glyph written alone in parens */
+static int lone_glyph(Parser *p) {
+    int i = p->pos, n = 0;
+    for (; i < p->t.n && p->t.t[i].kind == T_LPAREN; i++) n++;
+    if (i >= p->t.n || p->t.t[i].kind != T_VERB || sym_glyph_form(p->t.t[i].k) == GF_NONE) return 0;
+    while (n-- >= 0)
+        if (++i >= p->t.n || p->t.t[i].kind != T_RPAREN) return 0;
+    return 1;
 }
 
 /* `( … )`, the cursor past its `(`: a table literal, grouping, or a list literal */
@@ -1271,7 +1315,7 @@ static P parse_base(Parser *p) {
     }
     case T_LPAREN: {
         adv(p);
-        int glyph = at(p, T_VERB) && peek(p) == T_RPAREN && sym_glyph_form(cur(p)->k) != GF_NONE;
+        int glyph = lone_glyph(p);
         return (P){ R_NOUN, parse_paren(p), 0, glyph };
     }
     case T_LBRACE:
