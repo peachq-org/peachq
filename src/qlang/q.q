@@ -4,7 +4,7 @@
 
 / ---- wave 1 (ref/reciprocal.md, ref/next.md) ----
 .q.reciprocal:(%:)
-.q.prev:{1 xprev x}
+.q.prev:xprev[1;]
 .q.next:{-1 xprev x}
 
 / ---- wave 2 ----
