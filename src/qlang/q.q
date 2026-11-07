@@ -3,9 +3,9 @@
 / dotq.q (which may use these names, never the reverse).  See q_runtime.c.
 
 / ---- wave 1 (ref/reciprocal.md, ref/next.md) ----
-.q.reciprocal:%[1;]
-.q.prev:xprev[1;]
-.q.next:xprev[-1;]
+.q.reciprocal:(%:)
+.q.prev:{1 xprev x}
+.q.next:{-1 xprev x}
 
 / ---- wave 2 ----
 / prefix keywords (no manifest row; bare name resolves via .q)
@@ -95,4 +95,11 @@
 .q.save:{f:{p:"." vs last "/" vs 1_string h:hsym x;$[2>count p;h set get `$"." sv p;not (e:`$last p) in key .h.tx;'e;4h=type r:.h.tx[e] get `$"." sv -1_p;h 1: r;h 0: r]};$[-11h=type x;f x;11h=type x;f each x;'`type]}
 / ref/load.md: `load `t` is `t:get `:t` - the file's name IS the global's, and the name is
 / returned; a filesymbol names the same global.  The directory-recursion arm is deferred.
-.q.load:{f:{h:hsym x;(`$last "/" vs 1_string h) set get h};$[-11h=type x;f x;11h=type x;f each x;'`type]}
+.q.load:{(`$last "/" vs 1_string h) set get h:hsym x}'
+/ ref/save.md rsave, ref/load.md rload: a table name and the splayed directory of the same name; ref/dsave.md: each
+/ table enumerated against the root (the first item of x), `p# on its first column, splayed under the path x
+.q.rsave:{(`$":",string[x],"/") set get x}'
+.q.rload:{x set get `$":",string[x],"/"}'
+.q.dsave:{[x;y] t:.Q.en[first x] get y; (` sv x,y,`) set @[t;first cols t;`p#]; y}/:
+/ basics/internal.md: reval is the -24! internal
+.q.reval:(-24!)

@@ -302,10 +302,11 @@
   (hsym `$file) set reply 1;
   };
 
-/ The launcher's connection under -conn: any hopen target as written - all digits a port, anything else the symbol -
-/ with the connect timeout; the handle, or hopen's own reason on stderr and exit 2.
+/ The launcher's connection under -conn: any hopen target as written - all digits a local port, anything else the
+/ symbol - with the connect timeout; the handle, or hopen's own reason on stderr and exit 2.  A port is spelled `::port:
+/ (port;timeout) is a long vector, which hopen (it IS <:) grades.
 .pq.i.conn_open:{[target]
-  where_to:$[(count target) and all target in .Q.n; "J"$target; `$target];
+  where_to:`$$[(count target) and all target in .Q.n; "::",target; target];
   @[hopen;(where_to;5000);{[target;err] -2 "q: cannot connect to ",target,": ",err; exit 2}[target]]};
 
 / One launcher call under -conn: a display, or with a file the last text's value saved and the earlier ones run
