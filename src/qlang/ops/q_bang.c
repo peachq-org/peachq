@@ -12,7 +12,8 @@
 #include "qlang/ops/q_bang.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_registry_internal.h"  /* q_hsym_wrap, q_attr_wrap, q_type_strict_i64,
-                                         * q_type_is_int_atom, q_type_iatom_val, q_table_flatten */
+                                         * q_type_is_int_atom, q_type_iatom_val, q_table_flatten,
+                                         * q_mmu_class/q_math_numeric_matrix/q_lsq_wrap (lsq) */
 #include "qlang/q_builtins.h"   /* q_parse_builtin_fn, q_tokens_fn, q_md5_fn, q_dotq_btoa_fn, q_dotq_sha1_fn */
 #include "qlang/q_env.h"        /* q_env_set — the one global-set home (`N!`name`) */
 #include "qlang/ops/q_table.h"  /* q_table_operand — a table by value or by name */
@@ -354,5 +355,12 @@ ray_t* q_bang(ray_t* x, ray_t* y) {
             return q_enum_ref(x->i64, y);
         return q_err(QE_TYPE);
     }
+    /* kdb writes lsq as `!`: two float matrixes solve, and two numeric ones that could never pair as a dict are
+     * lsq's own 'type (ref/lsq.md: matrix functions work on floats) */
+    int64_t w;
+    int xc = q_mmu_class(x, &w), yc = q_mmu_class(y, &w);
+    if (((xc == 1 || xc == QMMU_RAGGED) && (yc == 1 || yc == QMMU_RAGGED)) ||
+        (q_count(x) != q_count(y) && q_math_numeric_matrix(x) && q_math_numeric_matrix(y)))
+        return q_lsq_wrap(x, y);
     return bang_make_dict(x, y);
 }

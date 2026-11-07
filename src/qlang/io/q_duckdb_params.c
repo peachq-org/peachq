@@ -5,6 +5,7 @@
  * and $tag$…$tag$ / $$…$$ dollar quotes; a $ glued to an identifier (a$x) is part of it.  A name folds to lowercase
  * as DuckDB folds an identifier, or keeps its spelling for the parser's capture; `?` is the positional after the
  * highest numbered so far. */
+#include "qlang/q_count.h"
 #include "qlang/io/q_duckdb.h"
 #include "qlang/base/q_err.h"
 #include "table/sym.h"

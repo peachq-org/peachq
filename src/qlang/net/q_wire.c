@@ -184,6 +184,104 @@ static int w_dl_call(q_wire_wbuf_t* b, int64_t lib_sym, int64_t fn_sym, int64_t 
     return rc;
 }
 
+/* A keyword kdb writes as no primitive travels as kdb writes it (owner 2026-11-07): where kdb sends a composition,
+ * projection or derived function, that structure as the docs equate it; otherwise the root lambda that calls it,
+ * spelled by rank (kw_lambda_text).  The decoder maps either back to the native, so `(-9!-8!mod)~mod`. */
+static const struct { const char* name; const char* form; } KW_FORMS[] = {
+    { "<>",      "'[not;=]" },               /* ref/not-equal.md */
+    { "<=",      "'[not;>]" },
+    { ">=",      "'[not;<]" },
+    { "union",   "'[distinct;,]" },          /* ref/union.md: distinct x,y */
+    { "all",     "'[min;\"b\"$]" },          /* docs-v1 ref/logic.md: min "b"$x */
+    { "ceiling", "'[neg;floor;neg]" },       /* the least integer >= x */
+    { "fills",   "^\\" },                    /* each null filled from its predecessor */
+    { "attr",    "(-2!)" },                  /* basics/internal.md */
+};
+#define KW_FORM_N ((int)(sizeof KW_FORMS / sizeof KW_FORMS[0]))
+#define KW_FORM_MAX 48
+static _Thread_local uint8_t g_form_bytes[KW_FORM_N][KW_FORM_MAX];
+static _Thread_local int g_form_len[KW_FORM_N];   /* 0 = not built yet, -1 = failed */
+
+/* form i's wire bytes, built once per thread by evaluating it at root */
+static int kw_form_bytes(int i, const uint8_t** out) {
+    if (!g_form_len[i]) {
+        g_form_len[i] = -1;
+        int64_t saved = q_env_scope(0);
+        ray_t* ast = q_parse(KW_FORMS[i].form);
+        ray_t* v = ast && !RAY_IS_ERR(ast) ? q_eval(ast) : NULL;
+        q_env_scope(saved);
+        if (ast) ray_release(ast);
+        q_wire_wbuf_t wb = {0};
+        if (v && !RAY_IS_ERR(v) && !q_wire_write_obj(&wb, v) && wb.len <= KW_FORM_MAX) {
+            memcpy(g_form_bytes[i], wb.p, wb.len);
+            g_form_len[i] = (int)wb.len;
+        }
+        q_wire_wbuf_free(&wb);
+        if (v) ray_release(v);
+    }
+    *out = g_form_bytes[i];
+    return g_form_len[i];
+}
+
+static int kw_form_of(const char* nm, size_t n) {
+    for (int i = 0; i < KW_FORM_N; i++)
+        if (strlen(KW_FORMS[i].name) == n && memcmp(KW_FORMS[i].name, nm, n) == 0) return i;
+    return -1;
+}
+
+/* the calling lambda: `{f x}`, `{x f y}`, `{f[x;y;z]}`, past z with its parameters named */
+static int kw_lambda_text(const char* nm, size_t n, int rank, char* out, size_t cap) {
+    if (!n || !((nm[0] >= 'a' && nm[0] <= 'z') || (nm[0] >= 'A' && nm[0] <= 'Z')) || dl_name_len(nm, n, 0) != n ||
+        memchr(nm, '.', n) || rank < 1 || rank > (int)strlen(DL_PARAMS))
+        return 0;
+    char ps[2 * sizeof DL_PARAMS];
+    int pn = 0;
+    for (int i = 0; i < rank; i++) {
+        if (i) ps[pn++] = ';';
+        ps[pn++] = DL_PARAMS[i];
+    }
+    int k = rank == 1 ? snprintf(out, cap, "{%.*s x}", (int)n, nm)
+          : rank == 2 ? snprintf(out, cap, "{x %.*s y}", (int)n, nm)
+          : rank == 3 ? snprintf(out, cap, "{%.*s[%.*s]}", (int)n, nm, pn, ps)
+                      : snprintf(out, cap, "{[%.*s] %.*s[%.*s]}", pn, ps, (int)n, nm, pn, ps);
+    return k > 0 && (size_t)k < cap ? k : 0;
+}
+
+/* The keyword a native value is, by its manifest spelling or its root native name, and the rank it is called at */
+static int kw_name(ray_t* x, const char** nm, size_t* n, int* rank) {
+    q_provenance_t pv;
+    int nrank = 0;
+    int64_t nat = q_env_native_name(x, &nrank);
+    *rank = x->type == RAY_UNARY ? 1 : x->type == RAY_BINARY ? 2 : nrank;
+    if (q_registry_provenance(x, &pv) && pv.spelling) {
+        *nm = pv.spelling;
+        *n = strlen(pv.spelling);
+        return 1;
+    }
+    ray_t* s = nat ? ray_sym_str(nat) : NULL;         /* borrowed */
+    if (!s || RAY_IS_ERR(s)) return 0;
+    *nm = ray_str_ptr(s);
+    *n = ray_str_len(s);
+    return 1;
+}
+
+static int w_keyword(q_wire_wbuf_t* b, ray_t* x) {
+    const char* nm;
+    size_t n;
+    int rank;
+    if (!kw_name(x, &nm, &n, &rank)) return wbuf_fail(b, q_err(QE_NYI));
+    int f = kw_form_of(nm, n);
+    if (f >= 0) {
+        const uint8_t* fb;
+        int fl = kw_form_bytes(f, &fb);
+        return fl > 0 ? w_raw(b, fb, (size_t)fl) : wbuf_fail(b, q_err(QE_NYI));
+    }
+    char t[160];
+    int tl = kw_lambda_text(nm, n, rank, t, sizeof t);
+    if (!tl) return wbuf_fail(b, q_err(QE_NYI));
+    return (w_u8(b, 100) || w_u8(b, 0) || w_charvec(b, t, tl, 0)) ? -1 : 0;
+}
+
 int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     if (b->err) return -1;
     /* serde mode: a C-NULL slot (v4 wrote marker 126, read back as the null
@@ -233,6 +331,12 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
      * needing no count at all.  Serde still
      * refuses every carrier: its records are a separately versioned format. */
     if (x->type == RAY_QFN) {
+        q_valence_t pval = Q_DYADIC;
+        int pcode = b->serde ? -1 : q_registry_kdb_op_of(x, &pval);   /* a q.q-hosted primitive (`wsum`) */
+        if (pcode >= 0) {
+            rc = w_prim(b, pval == Q_MONADIC ? 101 : 102, (uint8_t)pcode);
+            goto out;
+        }
         int adv = q_eval_apply_iter_id(x);
         if (!b->serde && adv >= 0) {
             rc = w_prim(b, 103, (uint8_t)adv);
@@ -288,7 +392,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     int8_t t = x->type;
 
     /* fn values, wire mode: 101h/102h from the manifest row's kdb_op column; a library native with no code travels
-     * as its `2:` call.  Anything else (a keyword native, Drlwud; an aliased env snapshot, q_registry.h) -> 'nyi. */
+     * as its `2:` call, a keyword native as kdb writes it (w_keyword). */
     if (!b->serde && (t == RAY_UNARY || t == RAY_BINARY || t == RAY_VARY)) {
         q_valence_t val = Q_DYADIC;
         int code = q_registry_kdb_op_of(x, &val);
@@ -298,7 +402,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
         if (!ns || RAY_IS_ERR(ns) || !dl_library_native(ray_str_ptr(ns), ray_str_len(ns))) nat = 0;
         rc = code >= 0 ? w_prim(b, val == Q_MONADIC ? 101 : 102, (uint8_t)code)
            : nat       ? w_dl_call(b, ray_sym_intern_runtime("pq", 2), nat, rank)
-                       : wbuf_fail(b, q_err(QE_NYI));
+                       : w_keyword(b, x);
         goto out;
     }
 
@@ -903,6 +1007,77 @@ static ray_t* dl_call_value(const char* s, size_t n) {
     return q_dl_loaded(lib, ln, fn, fnn, rank);
 }
 
+/* kw_lambda_text read back: the native whose own calling lambda is exactly s, retained, else NULL */
+static ray_t* kw_template_value(const char* s, size_t n) {
+    const char* p = s + 1;
+    const char* end = s + n;
+    if (n < 4 || s[0] != '{') return NULL;
+    if (*p == '[') {
+        while (p < end && *p != ']') p++;
+        p += 2;
+    } else if (end - p > 2 && p[0] == 'x' && p[1] == ' ') {
+        p += 2;
+    }
+    if (p >= end) return NULL;
+    size_t nn = dl_name_len(p, (size_t)(end - p), 0);
+    if (!nn) return NULL;
+    ray_t* v = q_registry_lookup_name(p, nn, Q_MONADIC);
+    if (!v) v = q_registry_lookup_name(p, nn, Q_DYADIC);
+    if (!v) v = q_env_native_get(p, nn, -1);
+    if (!v || (v->type != RAY_UNARY && v->type != RAY_BINARY && v->type != RAY_VARY) || q_registry_kdb_op_of(v, NULL) >= 0)
+        return NULL;
+    const char* nm;
+    size_t kn;
+    int rank;
+    char t[160];
+    int tl = kw_name(v, &nm, &kn, &rank) && kw_form_of(nm, kn) < 0 ? kw_lambda_text(nm, kn, rank, t, sizeof t) : 0;
+    if (!tl || (size_t)tl != n || memcmp(t, s, n) != 0) return NULL;
+    ray_retain(v);
+    return v;
+}
+
+/* the keyword whose KW_FORMS structure starts at the tag byte just read, retained and consumed, else NULL */
+static ray_t* kw_form_value(rcur_t* c) {
+    for (int i = 0; i < KW_FORM_N; i++) {
+        const uint8_t* fb;
+        int fl = kw_form_bytes(i, &fb);
+        if (fl <= 0 || (size_t)fl - 1 > c->rem || memcmp(c->p - 1, fb, (size_t)fl) != 0) continue;
+        const char* nm = KW_FORMS[i].name;
+        ray_t* v = q_registry_lookup_name(nm, strlen(nm), Q_DYADIC);
+        if (!v) v = q_registry_lookup_name(nm, strlen(nm), Q_MONADIC);
+        if (!v) return NULL;
+        c->p += fl - 1;
+        c->rem -= (size_t)fl - 1;
+        ray_retain(v);
+        return v;
+    }
+    return NULL;
+}
+
+/* A lambda literal evaluated in scope ns, which is restored on EVERY exit so a decode never moves the session; only
+ * a literal is evaluated — its body runs at application, never here; `{x}[…]` would */
+static ray_t* rd_lambda_text(rcur_t* c, int64_t ns, const char* sp, size_t n) {
+    char* z = (char*)ray_alloc_raw(n + 1);
+    if (!z) return q_err(QE_WSFULL);
+    memcpy(z, sp, n); z[n] = 0;
+    int64_t saved = q_env_scope(ns);
+    ray_t* ast = q_parse(z);
+    ray_free_raw(z);
+    ray_t* lam;
+    if (ast && RAY_IS_ERR(ast)) { q_err_drop(); ray_error_free(ast); lam = q_err(QE_BADFUNC); }
+    else if (ast && q_eval_apply_carrier_kind(ast) == Q_EVAL_CAR_LAMBDA) { lam = q_eval(ast); ray_release(ast); }
+    else { if (ast) ray_release(ast); lam = q_err(QE_BADFUNC); }
+    q_env_scope(saved);
+    return rd_value_err(c, lam);
+}
+
+/* Primitive codes kdb no longer holds a primitive for: its decoder answers the calling lambda in context Q, as the
+ * kdb-written byte tables in community/wire/functions.qcmd show. */
+static const struct { uint8_t cls, code; const char* src; } KDB_LAMBDA_CODES[] = {
+    { 101, 42, "{var x}" }, { 101, 43, "{dev x}" }, { 101, 44, "{hopen x}" },
+    { 102, 35, "{cov[x;y]}" }, { 102, 36, "{cor[x;y]}" },
+};
+
 static ray_t* rd_obj_inner(rcur_t* c) {
     if (!r_need(c, 1)) return trunc_err("type tag");
     uint8_t raw = r_u8(c);
@@ -1012,6 +1187,11 @@ static ray_t* rd_obj_inner(rcur_t* c) {
             return rd_fixed_vec(c, t);
         }
         }
+    }
+
+    if (!c->serde && (t == 104 || t == 105 || t == 108)) {
+        ray_t* kw = kw_form_value(c);
+        if (kw) return kw;
     }
 
     switch (t) {
@@ -1125,27 +1305,16 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         }
         size_t n = ray_str_len(src);
         const char* sp = ray_str_ptr(src);
-        ray_t* dl = ctxn ? NULL : dl_call_value(sp, n);
-        if (dl) { ray_release(src); return dl; }
+        ray_t* known = ctxn ? NULL : dl_call_value(sp, n);
+        if (!known && !ctxn) known = kw_template_value(sp, n);
+        if (known) { ray_release(src); return known; }
         if (n < 2 || sp[0] != '{') {
             ray_release(src);
             return rd_value_err(c, q_err(QE_BADFUNC));
         }
-        char* z = (char*)ray_alloc_raw(n + 1);
-        if (!z) { ray_release(src); return q_err(QE_WSFULL); }
-        memcpy(z, sp, n); z[n] = 0;
+        ray_t* lam = rd_lambda_text(c, ns, sp, n);
         ray_release(src);
-        /* the lambda's namespace is its SCOPE; restored on EVERY exit, so a decode never moves the session */
-        int64_t saved = q_env_scope(ns);
-        ray_t* ast = q_parse(z);
-        ray_free_raw(z);
-        ray_t* lam;
-        /* only a lambda LITERAL is evaluated — its body runs at application, never here; `{x}[…]` would */
-        if (ast && RAY_IS_ERR(ast)) { q_err_drop(); ray_error_free(ast); lam = q_err(QE_BADFUNC); }
-        else if (ast && q_eval_apply_carrier_kind(ast) == Q_EVAL_CAR_LAMBDA) { lam = q_eval(ast); ray_release(ast); }
-        else { if (ast) ray_release(ast); lam = q_err(QE_BADFUNC); }
-        q_env_scope(saved);
-        return rd_value_err(c, lam);
+        return lam;
     }
     case 101:                                         /* (::) / unary primitive */
     case 102: {                                       /* binary primitive */
@@ -1155,6 +1324,10 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         if (t == 101 && which == 0xff) return Q_HOLE_OBJ;
         ray_t* v = q_registry_kdb_op_value((int)which,
                                            t == 101 ? Q_MONADIC : Q_DYADIC);
+        for (size_t i = 0; !v && i < sizeof KDB_LAMBDA_CODES / sizeof KDB_LAMBDA_CODES[0]; i++)
+            if (KDB_LAMBDA_CODES[i].cls == (uint8_t)t && KDB_LAMBDA_CODES[i].code == which)
+                return rd_lambda_text(c, ray_sym_intern_runtime(".Q", 2), KDB_LAMBDA_CODES[i].src,
+                                      strlen(KDB_LAMBDA_CODES[i].src));
         if (!v) return rd_value_err(c, q_err(QE_NYI));
         ray_retain(v);
         return v;
