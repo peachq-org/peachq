@@ -1000,6 +1000,18 @@ static int assign_target_next(Parser *p) {
     return sym_name_is(t->k, ":") || verb_marked(t->k);
 }
 
+/* a lambda's locals are its whole body's, wherever the binding stands (`{(prev;prev:42)}` reads the local twice) */
+static void shadow_locals(Parser *p) {
+    int start = p->pos;
+    for (int depth = 0; p->pos < p->t.n; ) {
+        Token *tk = &p->t.t[p->pos++];
+        if (tk->kind == T_LBRACE) depth++;
+        else if (tk->kind == T_RBRACE && depth-- == 0) break;
+        else if (!depth && tk->kind == T_NOUN && sym_is_nameref(tk->k) && assign_target_next(p)) shadow_add(p, tk->k->i64);
+    }
+    p->pos = start;
+}
+
 /* ===== the parser's die-path leak guard ======================================
  * A frame that holds an owned ref across a descent that can die (a phrase list,
  * a from-expression, a lambda's signature and body, a statement list) parks it
@@ -1170,6 +1182,7 @@ static ray_t *parse_lambda(Parser *p) {
     ray_t **outer = p->shadow;
     p->shadow = pend_push();
     if (at(p, T_LBRACK)) parse_signature(p, params, ptypes);
+    shadow_locals(p);
     uint8_t mine = 0;
     uint8_t *saved = p->xyz_mask;
     p->xyz_mask = *params ? NULL : &mine;
@@ -1232,7 +1245,6 @@ static P parse_base(Parser *p) {
         if (kw && assign_target_next(p)) {
             /* refused HERE, not at the write: dropping the entry later must not turn a parsed `k:` into a global */
             if (!builtin) { ray_release(v); die_err(QE_ASSIGN); }
-            shadow_add(p, v->i64);
         } else if (kw) {
             ray_release(v);
             v = keyword_constant(kw);
