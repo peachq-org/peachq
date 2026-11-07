@@ -87,6 +87,8 @@ ray_err_t q_env_handle_bind(int64_t sym, ray_t* val);
 int    q_env_ns_exists(int64_t path_sym);
 /* The member of namespace ns_sym spelled member[0..n), borrowed, or NULL — a pure probe that interns nothing. */
 ray_t* q_env_ns_probe(int64_t ns_sym, const char* member, size_t n);
+/* The same probe by an already-interned member id. */
+ray_t* q_env_ns_member(int64_t ns_sym, int64_t member);
 /* The stored namespace dict itself (marker included), retained for the
  * caller.  OWNED; NULL if the name is not bound to a dict. */
 ray_t* q_env_ns_view(int64_t path_sym);
