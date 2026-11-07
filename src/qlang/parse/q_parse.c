@@ -1004,14 +1004,15 @@ static int assign_target_next(Parser *p) {
  * column or a qSQL select/by phrase names a column, not a local (`{update prev:1 from t; prev 1 2}`). */
 static void scan_locals(Parser *p, TKind close, int table) {
     int col = table, phrase = 0;
+    if (++p->depth > Q_PARSE_MAX_DEPTH) die_err(QE_LIMIT);
     while (p->pos < p->t.n) {
         Token *tk = &p->t.t[p->pos++];
         int was = col;
         col = 0;
-        if (tk->kind == close) return;
+        if (tk->kind == close) break;
         if (tk->kind == T_EOF || tk->kind == T_RPAREN || tk->kind == T_RBRACK || tk->kind == T_RBRACE) {
             p->pos--;
-            return;
+            break;
         }
         if (tk->kind == T_LBRACE) {
             scan_locals(p, T_RBRACE, -1);
@@ -1037,6 +1038,7 @@ static void scan_locals(Parser *p, TKind close, int table) {
         if (tk->kind == T_NOUN && table >= 0 && !was && sym_is_nameref(tk->k) && assign_target_next(p))
             shadow_add(p, tk->k->i64);
     }
+    p->depth--;
 }
 
 /* a lambda's locals are its whole body's, wherever the binding stands (`{(prev;prev:42)}` reads the local twice) */
