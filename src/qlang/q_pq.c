@@ -96,10 +96,13 @@ static void pq_note(ray_t** v, int64_t sym) {
 }
 
 static void pq_drop(ray_t** v) { if (*v) ray_release(*v); *v = NULL; }
+static uint32_t g_miss_gen = 1;
 
-void q_pq_path_changed(void) { pq_drop(&g_misses); }
+uint32_t q_pq_miss_gen(void) { return g_miss_gen; }
 
-void q_pq_reset(void) { g_helpdb_state = g_pq_state = LOAD_COLD; pq_drop(&g_loaded); pq_drop(&g_misses); }
+void q_pq_path_changed(void) { pq_drop(&g_misses); g_miss_gen++; }
+
+void q_pq_reset(void) { g_helpdb_state = g_pq_state = LOAD_COLD; pq_drop(&g_loaded); pq_drop(&g_misses); g_miss_gen++; }
 
 /* `.pq.i.loaded[]` — the files the record holds as loaded, in load order */
 static ray_t* pq_loaded_fn(ray_t* x) {
