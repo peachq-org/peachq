@@ -99,7 +99,7 @@
 / ref/save.md rsave, ref/load.md rload: a table name and the splayed directory of the same name; ref/dsave.md: each
 / table enumerated against the root (the first item of x), `p# on its first column, splayed under the path x
 .q.rsave:{(`$":",string[x],"/") set get x}'
-.q.rload:{x set get `$":",string[x],"/"}'
+.q.rload:{$[-11h=type x;x set get `$":",string[x],"/";'`type]}'
 .q.dsave:{[x;y] t:.Q.en[first x] get y; (` sv x,y,`) set @[t;first cols t;`p#]; y}/:
 / basics/internal.md: reval is the -24! internal
 .q.reval:(-24!)
