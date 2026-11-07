@@ -109,29 +109,13 @@ static ray_t* name_error(int64_t id) {
     return e;
 }
 
-/* Name resolution with the base name hook INLINED (finding 6 / carve-eval
- * quarry): manifest verbs are reserved so the registry wins for them; then
- * env (scopes + globals), `.z.*`, and a q.q builtin as sealed — a local may
- * still reuse that spelling.  A user `.q` entry was bound at parse, so the
- * live `.q` is never read here.  Owned result or NULL.  *row_out set when
- * the hit came from the registry. */
-static ray_t* resolve(int64_t id, const q_op_t** row_out) {
-    if (row_out) *row_out = NULL;
-    const q_op_t* row = NULL;
-    ray_t* hit = q_registry_lookup_row(id, Q_MONADIC, &row);
-    if (!hit) hit = q_registry_lookup_row(id, Q_DYADIC, &row);
-    if (hit) {
-        if (row_out) *row_out = row;
-        ray_retain(hit);
-        return hit;
-    }
+/* A symbol is ONLY ever a global lookup (owner kdb transcript 2026-11-07): env (scopes + globals), then `.z.*`.
+ * A keyword exists only at parse, which binds its value, so neither the registry nor `.q` is read here.  Owned
+ * result or NULL. */
+static ray_t* resolve(int64_t id) {
     ray_t* v = q_env_resolve(id);            /* owned (or an owned error) */
     if (v) return q_view_deref(v);           /* a view reference recalcs */
-    v = q_dotz_resolve(id);                  /* owned */
-    if (v) return v;
-    v = q_registry_builtin_value(id);
-    if (v) ray_retain(v);
-    return v;
+    return q_dotz_resolve(id);               /* owned */
 }
 
 /* Dot notation whose last segment names a cast target IS that cast:
@@ -173,9 +157,8 @@ ray_t* q_eval_dot_cast(int64_t id) {
     return r;
 }
 
-static ray_t* name_value(ray_t* sym, const q_op_t** row_out) {
-    if (row_out) *row_out = NULL;
-    ray_t* v = resolve(sym->i64, row_out);
+static ray_t* name_value(ray_t* sym) {
+    ray_t* v = resolve(sym->i64);
     if (!v) v = q_eval_dot_cast(sym->i64);
     return v ? v : name_error(sym->i64);
 }
@@ -191,21 +174,13 @@ static ray_t* modassign_op(ray_t* h, const q_op_t** row) {
     return (opv && (opv->type == RAY_UNARY || opv->type == RAY_BINARY || opv->type == RAY_VARY)) ? opv : NULL;
 }
 
-/* adverb operand -> VALUE (+ row): `+/` derives from the DYAD */
+/* adverb operand -> VALUE (+ row) */
 static ray_t* operand_value(ray_t* F, const q_op_t** row_out) {
     if (row_out) *row_out = NULL;
     if (!F) return q_err(QE_TYPE);
     ray_t* v;
     if (F->type == -RAY_SYM) {
-        const q_op_t* row = NULL;
-        ray_t* hit = q_registry_lookup_row(F->i64, Q_DYADIC, &row);
-        if (hit && (hit->type == RAY_UNARY || hit->type == RAY_BINARY ||
-                    hit->type == RAY_VARY)) {
-            if (row_out) *row_out = row;
-            ray_retain(hit);
-            return hit;
-        }
-        v = name_value(F, row_out);
+        v = name_value(F);
     } else if (F->type == RAY_LIST) {
         v = q_eval(F);
     } else {
@@ -214,7 +189,7 @@ static ray_t* operand_value(ray_t* F, const q_op_t** row_out) {
     }
     /* the manifest row travels with the VALUE, however the operand was spelt:
      * without it the derived call loses `family` and its container lift */
-    if (row_out && !*row_out && v && !RAY_IS_ERR(v))
+    if (row_out && v && !RAY_IS_ERR(v))
         *row_out = q_registry_operand_row(v);
     return v;
 }
@@ -304,7 +279,7 @@ static ray_t* indexed_assign(ray_t* target, ray_t* opv, ray_t* rhs) {
     ray_t* err = eval_args_rtl(te + 1, k, idxv);
     if (err) { ray_release(rv); return err; }
     ray_t* ret = NULL;
-    ray_t* cur = name_value(te[0], NULL);
+    ray_t* cur = name_value(te[0]);
     if (RAY_IS_ERR(cur)) ret = cur;
     else if (q_splay_table_path(cur)) {          /* a mapped global takes no write (kb/splayed-tables.md:350) */
         ray_release(cur);
@@ -689,7 +664,7 @@ ray_t* q_eval_value_wrap(ray_t* x) {
          * and a handle resolves at the session `\d`, as the string form below does (q_env.h, the handle lane) */
         q_eval_frames_t frames = q_eval_frames_suspend();
         int64_t scope = q_env_scope(Q_ENV_SCOPE_SESSION);
-        ray_t* v = name_value(x, NULL);
+        ray_t* v = name_value(x);
         q_env_scope(scope);
         q_eval_frames_resume(frames);
         return v;
@@ -849,8 +824,7 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
     if (q_eval_assign_locked(target->i64)) return q_err(QE_ASSIGN);
     ray_t* rv = q_eval(rhs);
     if (RAY_IS_ERR(rv)) return rv;
-    const q_op_t* trow = NULL;
-    ray_t* cur = name_value(target, &trow);
+    ray_t* cur = name_value(target);
     /* undefined name: the op's identity element is the default (ref/assign.md
      * "Assign through operator"); an op without one keeps signalling 'name */
     int passes = 0;
@@ -991,25 +965,12 @@ ray_t* q_eval(ray_t* node) {
 
     ray_t* ret;
     if (node->type == -RAY_SYM) {
-        ret = name_value(node, NULL);
+        ret = name_value(node);
         goto out;
     }
     /* the enlisted sym-constant unwrap (parsetrees.md:26: eval enlist`x -> `x):
      * a 1-element sym vector in tree position IS the sym atom constant */
     if (sym_const(node)) {
-        /* a Q_ATTR_KEYLIST-marked node is the 1-col table-literal KEY (see
-         * q_parse_internal.h): a genuine 1-name LIST, not the enlisted atom —
-         * it evaluates to a fresh unmarked copy of itself, so `!` sees
-         * list!list and the mark never escapes into values */
-        if ((node->attrs & Q_ATTR_KEYLIST) && ray_vec_get_sym_id(node, 0) != 0) {
-            ret = ray_sym_vec_new(RAY_SYM_W64, 1);
-            if (ret && !RAY_IS_ERR(ret)) {
-                int64_t id = ray_vec_get_sym_id(node, 0);
-                ret = ray_vec_append(ret, &id);
-            }
-            if (!ret) ret = q_err(QE_OOM);
-            goto out;
-        }
         ret = q_index_elem_at(node, 0);
         /* the unwrap is the enlist's inverse, so it must restore the DATA mark
          * too: without it a verb-glyph sym (`. `+) prints as a bare name-ref */
@@ -1035,8 +996,9 @@ ray_t* q_eval(ray_t* node) {
         ray_t** e = (ray_t**)ray_data(node);
         ray_t* h = e[0];
 
-        /* literal-ctor interception seam (header note) */
-        if (h == q_registry_list_value())  { ret = list_lit(e + 1, n - 1); goto out; }
+        /* literal-ctor interception seam (header note).  One item is `enlist x` (a paren of one is grouping), which
+         * applies as any monad does: whether a hole VALUE there projects is unwitnessed (parse-tree programme) */
+        if (h == q_registry_list_value() && n != 2) { ret = list_lit(e + 1, n - 1); goto out; }
 
         /* the `;` statement sequence — a CHAR head, like `:` return and `'`
          * signal below (q_parse.h: q_parse_is_seq_head is the one test) */
@@ -1113,7 +1075,7 @@ ray_t* q_eval(ray_t* node) {
         if (!h) {
             fv = q_err(QE_TYPE);
         } else if (h->type == -RAY_SYM) {
-            fv = name_value(h, &row);
+            fv = name_value(h);
         } else if (h->type == RAY_LIST || sym_const(h)) {
             fv = q_eval(h);
         } else {
@@ -1130,7 +1092,13 @@ ray_t* q_eval(ray_t* node) {
             if (val) row = q_registry_row_of(fv, val);
         }
         int64_t nap = (node->attrs & Q_ATTR_POSTFIX) && !argv[argc - 1] ? argc - 1 : argc;
-        ret = q_eval_apply(fv, row, argv, nap);
+        /* the train tail `g::` of a function g is the composition '[::;g] (owner 2026-11-07, Daxwzj); data passes */
+        if (fv == RAY_NULL_OBJ && (node->attrs & Q_ATTR_POSTFIX) && argc == 1 && q_eval_apply_is_fn(argv[0])) {
+            ray_t* parts[2] = { RAY_NULL_OBJ, argv[0] };
+            ret = q_eval_apply_value(q_registry_compose_value(), parts, 2);
+        } else {
+            ret = q_eval_apply(fv, row, argv, nap);
+        }
         release_args(argv, argc);
         ray_release(fv);
     }
