@@ -131,6 +131,7 @@ ray_t *q_embed(ray_t *sym, q_valence_t val) {
     if (marker_row(nm, nl)) { val = Q_MONADIC; nl--; }   /* "+:"->"+", "0::"->"0:" */
     ray_t *hit = q_registry_lookup_name(nm, nl, val);
     ray_release(s);
+    if (!hit) hit = q_registry_dotq_ext(sym->i64);
     if (!hit) return sym;
     /* q.q-hosted (QK_QSRC) carriers embed too: eval retains a non-sym head as a
      * value rather than re-walking it (#351) */
@@ -848,7 +849,7 @@ static int names_have_reserved(ray_t *phrases) {
     for (int64_t i = 0; i < n; i++) {
         ray_t *name = NULL;
         if (!binding_node(ph[i], &name, NULL) && sym_is_nameref(ph[i])) name = ph[i];
-        if (name && q_registry_is_reserved(name->i64)) return 1;
+        if (name && (q_registry_is_reserved(name->i64) || q_registry_dotq_ext(name->i64))) return 1;
     }
     return 0;
 }
@@ -1004,6 +1005,37 @@ static ray_t *text_capture(ray_t *text, uint8_t *xyz_mask) {
     return pair;
 }
 
+/* A `.q` keyword's value as a tree constant (funsql.md:769 — a keyword is replaced by its definition): a symbol or
+ * a list would read back as a name or a call, so it is enlisted as a sym literal is (parsetrees.md:80). */
+static ray_t *keyword_constant(ray_t *v) {
+    if (v->type == RAY_LIST) return ray_list_append(ray_list_new(1), v);
+    if (v->type == -RAY_SYM) {
+        v = ray_sym(v->i64);
+        if (v && !RAY_IS_ERR(v)) v->attrs |= Q_ATTR_QUOTED;
+    } else ray_retain(v);
+    return noun_tree_value(v);
+}
+
+/* what follows a name makes it the TARGET of an assignment (`k:`, `k+:`, `k[i]:`, and a GLUED `k::y` — parse_e's
+ * reading: a spaced `k ::` applies k, a `k::` with nothing after is a train tail) */
+static int assign_target_next(Parser *p) {
+    int i = p->pos;
+    while (i < p->t.n && p->t.t[i].kind == T_LBRACK)
+        for (int depth = 0; i < p->t.n; ) {
+            TKind k = p->t.t[i++].kind;
+            depth += (k == T_LBRACK) - (k == T_RBRACK);
+            if (!depth) break;
+        }
+    if (i >= p->t.n || p->t.t[i].kind != T_VERB) return 0;
+    Token *t = &p->t.t[i], *prev = &p->t.t[i - 1];
+    if (sym_name_is(t->k, "::")) {
+        TKind after = i + 1 < p->t.n ? p->t.t[i + 1].kind : T_EOF;
+        return prev->start + prev->len == t->start &&
+               after != T_EOF && after != T_SEMI && after != T_RPAREN && after != T_RBRACK && after != T_RBRACE;
+    }
+    return sym_name_is(t->k, ":") || verb_marked(t->k);
+}
+
 static P parse_base(Parser *p) {
     Token *tk = cur(p);
     /* A qSQL template may stand as a primary term (an operand), e.g. the
@@ -1028,6 +1060,13 @@ static P parse_base(Parser *p) {
         ray_t *v = tk->k; tk->k = NULL;
         v = tk->capture ? text_capture(v, p->xyz_mask) : noun_tree_value(v);
         adv(p);
+        ray_t *kw = sym_is_nameref(v) ? q_registry_dotq_ext(v->i64) : NULL;
+        if (kw) {
+            ray_release(v);
+            /* refused HERE, not at the write: dropping the entry later must not turn a parsed `k:` into a global */
+            if (assign_target_next(p)) die_err(QE_ASSIGN);
+            v = keyword_constant(kw);
+        }
         return (P){ R_NOUN, v, 0 };
     }
     case T_VERB: {
@@ -1149,7 +1188,7 @@ static P parse_base(Parser *p) {
                     int64_t id = nt->k->i64;
                     /* a binding position: the slot used to bind nothing and the
                      * body resolved to the keyword */
-                    if (q_registry_is_reserved(id)) {
+                    if (q_registry_is_reserved(id) || q_registry_dotq_ext(id)) {
                         ray_release(params);
                         if (ptypes) ray_release(ptypes);
                         die_err(QE_ASSIGN);

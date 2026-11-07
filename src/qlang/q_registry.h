@@ -112,6 +112,15 @@ bool q_registry_sealed(void);
  * `.q.<sym_id>` target (and to each entry of a whole-`.q` write), q_eval to a bare global `name:` spelling. */
 int q_registry_locked(int64_t sym_id);
 
+/* A builtin `.q` entry's value as sealed, BORROWED — what a symbol resolves to when the manifest holds no value for
+ * it (`asc`, `prev`, `tables`); NULL for any other name and before the seal.  Never the live `.q`. */
+ray_t* q_registry_builtin_value(int64_t sym_id);
+
+/* A USER `.q` entry (a key of the live `.q` that is no builtin): its value, BORROWED; NULL otherwise and before the
+ * seal.  Such a name is a keyword from the moment it exists: the parser binds it and every `name:` spelling of it is
+ * refused, so a call never consults `.q`. */
+ray_t* q_registry_dotq_ext(int64_t sym_id);
+
 /* The infix rule: s[0..n) is infix iff its `.q` entry has rank >= 2.  A keyword's entry is the immutable
  * registry value, so the manifest answers for it; any other name is a pure probe of `.q` that interns nothing. */
 int q_registry_is_infix(const char* s, size_t n);

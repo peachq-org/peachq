@@ -32,11 +32,12 @@
 #include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
 #include "qlang/base/q_err.h"
-#include "qlang/q_env.h"   /* q_env_get — q-bound builtins are snapshot sources too; q_env_ns_probe */
+#include "qlang/q_env.h"   /* q_env_get — q-bound builtins are snapshot sources too; q_env_ns_probe/_member */
 #include "lang/env.h"      /* ray_env_get (bootstrap catalogue); ray_fn_unary/binary/vary */
 #include "lang/eval.h"     /* RAY_FN_ATOMIC/SPECIAL_FORM/Q_LOWER — attrs stamped on built values */
 #include "lang/internal.h" /* ray_sym_str — name display */
 #include "table/sym.h"     /* ray_sym_intern_runtime, RAY_SYM_W64 — name interning */
+#include "table/dict.h"    /* ray_dict_probe_sym_borrowed — reading a `.q` entry */
 #include "store/serde.h"   /* ray_serde_set_fn_hooks — fn-value serde round-trip */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_iter_new — the iterator carriers */
 #include "qlang/base/q_type.h"  /* q_type_init — bakes the result-type matrix */
@@ -73,6 +74,7 @@ static int     g_count    = 0;
 static bool    g_inited   = false;
 static bool    g_sealed   = false;   /* reserved names locked (q_registry_seal) */
 static int64_t g_dotq;
+static ray_t*  g_dotq_builtins;      /* the marker-free `.q` at seal: the q.q-defined entries' values */
 static bool    g_building = false;   /* debug re-entry guard (see header note) */
 
 /* ---- O(1) resolution indexes -------------------------------------------
@@ -603,8 +605,17 @@ void q_registry_seal(void) {
     ray_t* k = ns ? ray_dict_keys(ns) : NULL;
     for (int64_t i = 0; k && i < q_count(k); i++)
         reserve_name(ray_read_sym(ray_data(k), i, RAY_SYM, k->attrs), &DOTQ_BUILTIN);
-    if (ns) ray_release(ns);
+    g_dotq_builtins = ns;
     g_sealed = true;
+}
+
+ray_t* q_registry_builtin_value(int64_t sym_id) {
+    return g_dotq_builtins && sym_slot(sym_id, 0) ? ray_dict_probe_sym_borrowed(g_dotq_builtins, sym_id) : NULL;
+}
+
+ray_t* q_registry_dotq_ext(int64_t sym_id) {
+    if (!g_sealed || sym_slot(sym_id, 0) || sym_id == q_env_marker_sym()) return NULL;
+    return q_env_ns_member(g_dotq, sym_id);
 }
 
 bool q_registry_sealed(void) { return g_sealed; }
@@ -730,6 +741,7 @@ void q_registry_destroy(void) {
         if (g_specials[s]) { ray_release(g_specials[s]); g_specials[s] = NULL; }
     for (int a = 0; a < 6; a++)
         if (g_iters[a]) { ray_release(g_iters[a]); g_iters[a] = NULL; }
+    if (g_dotq_builtins) { ray_release(g_dotq_builtins); g_dotq_builtins = NULL; }
     g_count  = 0;
     g_inited = false;
     g_sealed = false;
