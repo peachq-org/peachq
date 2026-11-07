@@ -1,5 +1,6 @@
 /* q_eval walker — see q_eval.h.  jq-EvalOp shape: visit -> resolve heads
- * (registry by valence, then env / `.z` / `.q`) -> eval-time forms (`;` seq,
+ * (a keyword head is already its value, bound at parse; a symbol is a global:
+ * env, then `.z`) -> eval-time forms (`;` seq,
  * `:`/`::`/`op:` assign, `$[c;t;f]` + if/do/while control,
  * literal-ctor interception) -> eval args RIGHT-to-left, THEN the head, which
  * is the node's leftmost expression (#177 + basics/syntax.md: mid-line `x:e`
@@ -174,7 +175,6 @@ static ray_t* modassign_op(ray_t* h, const q_op_t** row) {
     return (opv && (opv->type == RAY_UNARY || opv->type == RAY_BINARY || opv->type == RAY_VARY)) ? opv : NULL;
 }
 
-/* adverb operand -> VALUE (+ row) */
 static ray_t* operand_value(ray_t* F, const q_op_t** row_out) {
     if (row_out) *row_out = NULL;
     if (!F) return q_err(QE_TYPE);
