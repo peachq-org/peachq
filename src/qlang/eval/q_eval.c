@@ -933,8 +933,8 @@ static ray_t* return_eval(ray_t* expr) {
 }
 
 /* paren list literal: elements RTL, boxed build + collapse.  An ELIDED
- * element is a projection HOLE: the literal is a projection of the list
- * constructor ("omission of values results in projection",
+ * element, or one whose VALUE is the hole, is a projection HOLE: the literal
+ * is a projection of the list constructor ("omission of values results in projection",
  * releases/ChangesIn4.1.md; >8 elided = 'rank, basics/application.md).
  * EVAL_MAX_ARGS bounds a CALL's arity, which a literal has none of, so the
  * element buffer spills to the heap rather than capping the literal's length. */
@@ -948,8 +948,8 @@ static ray_t* list_lit(ray_t** e, int64_t n) {
     ray_t* ret;
     int64_t holes = 0;
     for (int64_t i = n - 1; i >= 0; i--) {
-        if (e[i] == Q_HOLE_OBJ) { argv[i] = NULL; holes++; continue; }
         argv[i] = e[i] ? q_eval_apply_concrete(q_eval(e[i])) : RAY_NULL_OBJ;
+        if (Q_IS_HOLE(argv[i])) { argv[i] = NULL; holes++; continue; }
         if (RAY_IS_ERR(argv[i])) {
             ret = argv[i];
             for (int64_t j = i + 1; j < n; j++)
