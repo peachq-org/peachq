@@ -189,6 +189,7 @@ int8_t q_type_common(int8_t a, int8_t b) {
 int8_t q_type_cmp_as(int8_t a, int8_t b) {
     int dated = a == RAY_TIMESTAMP || a == RAY_DATETIME;
     int clock = b == RAY_MINUTE || b == RAY_SECOND || b == RAY_TIME || b == RAY_TIMESPAN;
+    if (a == RAY_DATETIME && b == RAY_TIMESTAMP) return b;
     return dated && clock ? b : 0;
 }
 
