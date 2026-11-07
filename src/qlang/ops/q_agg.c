@@ -92,8 +92,10 @@ static ray_t* runscan(ray_t* x, q_rs_kind k) {
     }
     if ((k == RS_MAXS || k == RS_MINS) && ray_is_vec(x) && ray_is_bytelike(x->type))
         return runscan_bytes(x, k);
-    /* a char is not a number in arithmetic: `sums "abc"` is 'type (sum.md:113, owner ruling 2026-10-09) */
-    if (!ray_is_vec(x) || !q_type_is_num_tag(x->type)) return q_err(QE_TYPE);
+    /* a char is not a number in arithmetic: `sums "abc"` is 'type (sum.md:113, owner ruling 2026-10-09);
+     * a temporal is ordered, so maxs/mins keep it (max.md:65-66) */
+    int ordered = (k == RS_MAXS || k == RS_MINS) && ray_is_vec(x) && temporal_tag(x->type);
+    if (!ray_is_vec(x) || !(q_type_is_num_tag(x->type) || ordered)) return q_err(QE_TYPE);
     int64_t n = q_count(x);
     if (k == RS_AVGS) {
         ray_t* out = ray_vec_new(RAY_F64, n > 0 ? n : 1); out->len = n;
@@ -106,7 +108,7 @@ static ray_t* runscan(ray_t* x, q_rs_kind k) {
         }
         return out;
     }
-    int isf = q_vec_is_float(x);
+    int isf = q_vec_is_float(x) || RAY_IS_TEMPORALF(x->type);
     if (k == RS_MAXS || k == RS_MINS) {
         if (isf) {
             ray_t* out = ray_vec_new(x->type, n > 0 ? n : 1); out->len = n;
