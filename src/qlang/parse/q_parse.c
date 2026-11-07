@@ -455,11 +455,12 @@ static Tokens scan(const char *src) {
             if (src[p] == '.') p++;   /* `k.` names k[`]: the empty last component is the null-symbol key */
             int len = p - start;
             if (len >= MAX_NAME) q_die("name too long");
-            /* Only reclassify in true infix position (after a noun): a prefix,
-             * standalone or BINDING `div` stays a name-ref noun — else the
+            /* Reclassify only in infix position (after a noun) or glued to an iterator (`xexp'[a;b]` has the head
+             * `a xexp' b` has): a prefix, standalone or BINDING `div` stays a name-ref noun — else the
              * reserved-name gate never sees a name to refuse, and the `:` is
              * silently discarded (`w[1] div:3` computing `2 div 3`). */
-            if (noun_pos && !lone_colon_next(src, p) && q_registry_is_infix(src + start, (size_t)len)) {
+            if ((noun_pos || (CLASS[(uint8_t)src[p]] & CL_ADVERB)) && !lone_colon_next(src, p) &&
+                q_registry_is_infix(src + start, (size_t)len)) {
                 EMIT(T_VERB, q_verb_name(src + start, len));
                 noun_pos = 0;
             } else {
