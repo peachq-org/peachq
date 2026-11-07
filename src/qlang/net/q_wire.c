@@ -8,7 +8,7 @@
 #include "qlang/base/q_type.h"     /* Q_HOLE_OBJ — the projection hole, 101h 0xff */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_lambda_src / q_eval — lambda serde;
                                  * q_eval_apply_concrete — the IPC boundary force */
-#include "qlang/q_registry.h"   /* q_list_collapse + the kdb_op identity pair */
+#include "qlang/q_registry.h"   /* the kdb_op identity pair, provenance and lookup by name — keyword wire forms */
 #include "qlang/io/q_splay.h"   /* a mapped splay travels as 98 over (99: cols; `:dir/) and re-opens */
 #include "qlang/io/q_provider.h" /* a provider pointer travels the same shape and rebinds */
 #include "qlang/io/q_kapi.h"    /* q_dl_loaded — a function a `2:` already resolved */
@@ -142,6 +142,7 @@ static int w_lambda_ctx(q_wire_wbuf_t* b, ray_t* ctx) {
  * natives.
  * w_dl_call and dl_call_scan own the template together; a byte changed in one must change in the other. */
 #define DL_PARAMS "xyzabcde"
+#define DL_PARAM_LIST "x;y;z;a;b;c;d;e"   /* DL_PARAMS as a lambda's parameter list: rank r is its first 2r-1 bytes */
 
 /* the leading run of p a name in the template may hold — a library name also takes a path's `:` and `/` */
 static size_t dl_name_len(const char* p, size_t n, int lib) {
@@ -169,16 +170,12 @@ static int w_dl_call(q_wire_wbuf_t* b, int64_t lib_sym, int64_t fn_sym, int64_t 
     if (rank < 1 || rank > (int64_t)strlen(DL_PARAMS) || !ln || !fnn ||
         dl_name_len(lib, ln, 1) != ln || dl_name_len(fn, fnn, 0) != fnn)
         return wbuf_fail(b, q_err(QE_NYI));
-    char ps[2 * sizeof DL_PARAMS];
-    int pn = 0;
-    for (int64_t i = 0; i < rank; i++) {
-        if (i) ps[pn++] = ';';
-        ps[pn++] = DL_PARAMS[i];
-    }
+    int pn = (int)(2 * rank - 1);
     size_t cap = ln + fnn + 2 * (size_t)pn + 32;
     char* s = (char*)ray_alloc_raw(cap);
     if (!s) return wbuf_fail(b, q_err(QE_WSFULL));
-    int n = snprintf(s, cap, "{[%.*s] (`%.*s 2:(`%.*s;%d))[%.*s]}", pn, ps, (int)ln, lib, (int)fnn, fn, (int)rank, pn, ps);
+    int n = snprintf(s, cap, "{[%.*s] (`%.*s 2:(`%.*s;%d))[%.*s]}", pn, DL_PARAM_LIST, (int)ln, lib, (int)fnn, fn,
+                     (int)rank, pn, DL_PARAM_LIST);
     int rc = (w_u8(b, 100) || w_u8(b, 0) || w_charvec(b, s, n, 0)) ? -1 : 0;
     ray_free_raw(s);
     return rc;
@@ -202,7 +199,7 @@ static const struct { const char* name; const char* form; } KW_FORMS[] = {
 static _Thread_local uint8_t g_form_bytes[KW_FORM_N][KW_FORM_MAX];
 static _Thread_local int g_form_len[KW_FORM_N];   /* 0 = not built yet, -1 = failed */
 
-/* form i's wire bytes, built once per thread by evaluating it at root */
+/* evaluated at root, so a form's lambda never carries the caller's context */
 static int kw_form_bytes(int i, const uint8_t** out) {
     if (!g_form_len[i]) {
         g_form_len[i] = -1;
@@ -229,30 +226,25 @@ static int kw_form_of(const char* nm, size_t n) {
     return -1;
 }
 
-/* the calling lambda: `{f x}`, `{x f y}`, `{f[x;y;z]}`, past z with its parameters named */
+/* past z, implicit parameters run out: the lambda names its own */
 static int kw_lambda_text(const char* nm, size_t n, int rank, char* out, size_t cap) {
     if (!n || !((nm[0] >= 'a' && nm[0] <= 'z') || (nm[0] >= 'A' && nm[0] <= 'Z')) || dl_name_len(nm, n, 0) != n ||
         memchr(nm, '.', n) || rank < 1 || rank > (int)strlen(DL_PARAMS))
         return 0;
-    char ps[2 * sizeof DL_PARAMS];
-    int pn = 0;
-    for (int i = 0; i < rank; i++) {
-        if (i) ps[pn++] = ';';
-        ps[pn++] = DL_PARAMS[i];
-    }
+    int pn = 2 * rank - 1;
     int k = rank == 1 ? snprintf(out, cap, "{%.*s x}", (int)n, nm)
           : rank == 2 ? snprintf(out, cap, "{x %.*s y}", (int)n, nm)
-          : rank == 3 ? snprintf(out, cap, "{%.*s[%.*s]}", (int)n, nm, pn, ps)
-                      : snprintf(out, cap, "{[%.*s] %.*s[%.*s]}", pn, ps, (int)n, nm, pn, ps);
+          : rank == 3 ? snprintf(out, cap, "{%.*s[%.*s]}", (int)n, nm, pn, DL_PARAM_LIST)
+                      : snprintf(out, cap, "{[%.*s] %.*s[%.*s]}", pn, DL_PARAM_LIST, (int)n, nm, pn, DL_PARAM_LIST);
     return k > 0 && (size_t)k < cap ? k : 0;
 }
 
-/* The keyword a native value is, by its manifest spelling or its root native name, and the rank it is called at */
+/* a VARY native's rank is the one it was bound at */
 static int kw_name(ray_t* x, const char** nm, size_t* n, int* rank) {
     q_provenance_t pv;
     int nrank = 0;
     int64_t nat = q_env_native_name(x, &nrank);
-    *rank = x->type == RAY_UNARY ? 1 : x->type == RAY_BINARY ? 2 : nrank;
+    *rank = x->type == RAY_VARY ? nrank : (int)q_eval_apply_rank(x);
     if (q_registry_provenance(x, &pv) && pv.spelling) {
         *nm = pv.spelling;
         *n = strlen(pv.spelling);
@@ -1007,7 +999,7 @@ static ray_t* dl_call_value(const char* s, size_t n) {
     return q_dl_loaded(lib, ln, fn, fnn, rank);
 }
 
-/* kw_lambda_text read back: the native whose own calling lambda is exactly s, retained, else NULL */
+/* recognised by rendering the named native's own text, never by parsing s: decoding must not evaluate what it reads */
 static ray_t* kw_template_value(const char* s, size_t n) {
     const char* p = s + 1;
     const char* end = s + n;
