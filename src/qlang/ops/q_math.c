@@ -13,6 +13,7 @@
 #include "lang/internal.h" /* atomic_map_unary, as_f64, is_numeric_or_temporal, make_f64, ray_pow_fn */
 #include "qlang/base/q_type.h"  /* q_type_as_i64 / q_type_is_bool / q_type_is_char_atom */
 #include "qlang/io/q_handles.h" /* q_handles_pq_neg — a `:pq:` handle's async form */
+#include "qlang/eval/q_eval.h"  /* q_eval_apply_value — `%:` applies `%` and ltime */
 #include <math.h>          /* sin/cos/tan/asin/acos/atan, exp/log, isfinite, floor/floorf, ceil/ceilf */
 #include <string.h>        /* memcpy */
 #include <stdlib.h>        /* malloc, free */
@@ -222,6 +223,16 @@ int q_mmu_class(ray_t* v, int64_t* first) {  /* 0=vector, 1=matrix, else QMMU_* 
         return 1;
     }
     return QMMU_BAD;
+}
+
+int q_math_numeric_matrix(ray_t* v) {
+    if (!v || v->type != RAY_LIST || q_count(v) == 0) return 0;
+    ray_t** e = (ray_t**)ray_data(v);
+    for (int64_t i = 0; i < q_count(v); i++) {
+        int8_t t = e[i] ? e[i]->type : 0;
+        if (t != RAY_BOOL && t != RAY_I16 && t != RAY_I32 && t != RAY_I64 && t != RAY_F32 && t != RAY_F64) return 0;
+    }
+    return 1;
 }
 
 /* The inner product mmu is built from — every operand reaching it has already been
@@ -546,13 +557,28 @@ static ray_t* minmax2(ray_t* a, ray_t* b, int want_min) {
     return c;
 }
 
+/* `%:` is reciprocal and, on a temporal, ltime — one kdb primitive (code 4), so a temporal ltime refuses
+ * (ref/gtime.md: timestamp or datetime) is refused whichever name applies it */
+ray_t* q_reciprocal_wrap(ray_t* x) {
+    int8_t t = x ? (int8_t)(x->type < 0 ? -x->type : x->type) : 0;
+    if (t >= RAY_TIMESTAMP && t <= RAY_TIME)
+        return x->type < 0 ? q_ltime_wrap(x) : q_eval_apply_value(q_registry_lookup_name("ltime", 5, Q_MONADIC), &x, 1);
+    ray_t* args[2] = { ray_i64(1), x };
+    ray_t* r = q_eval_apply_value(q_registry_lookup_name("%", 1, Q_DYADIC), args, 2);
+    ray_release(args[0]);
+    return r;
+}
+
 ray_t* q_min2_wrap(ray_t* a, ray_t* b) { return minmax2(a, b, 1); }
 ray_t* q_max2_wrap(ray_t* a, ray_t* b) { return minmax2(a, b, 0); }
 
 /* q `not x` — "0b where x is not equal to zero, and 1b otherwise" (ref/not.md).
  * That IS `x=0`: ray_eq_fn already owns every lane's zero, the null rule
- * ("nulls and infinities never equal zero") and the symbol refusal. */
+ * ("nulls and infinities never equal zero") and the symbol refusal.  `~:` is
+ * also hdel (basics/parsetrees.md qfind"~:" -> `not`hdel): the symbol not
+ * refuses is the file hdel deletes. */
 ray_t* q_not_wrap(ray_t* x) {
+    if (x && x->type == -RAY_SYM) return q_hdel_wrap(x);
     ray_t* z = ray_i64(0);
     ray_t* r = ray_eq_fn(x, z);
     ray_release(z);

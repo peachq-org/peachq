@@ -4,7 +4,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/q_env.h"              /* q_env_handle_resolve / _ns_roster / _marker_sym */
 #include "qlang/base/q_type.h"             /* q_type_qname + the is_dict/is_str_atom/is_keyed probes */
-#include "qlang/q_registry_internal.h" /* q_til_wrap — the til arm */
+#include "qlang/q_registry_internal.h" /* q_til_wrap — the til arm; q_mmu_class/q_inv_wrap — the inv arm */
 #include "qlang/ops/q_table.h"        /* q_table_operand — `keys` takes a table by name */
 #include "qlang/io/q_provider.h"      /* q_provider_key — a `:pq:` alias lists its tables, a coordinate its columns */
 #include "lang/internal.h"            /* ray_fs_list_fn — the quarry's sorted directory listing */
@@ -117,7 +117,12 @@ ray_t* q_key(ray_t* x) {
     return k;
 }
 
-ray_t* q_key_wrap(ray_t* x) { return q_key(x); }
+/* `!:` is also inv: a float matrix, which key refuses, inverts (kdb writes inv as `!:`) */
+ray_t* q_key_wrap(ray_t* x) {
+    int64_t w;
+    int c = q_mmu_class(x, &w);
+    return c == 1 || c == QMMU_RAGGED ? q_inv_wrap(x) : q_key(x);
+}
 
 /* q `keys x` — key column names (empty sym vector if unkeyed; table by value
  * or by name). */
