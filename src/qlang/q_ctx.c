@@ -303,7 +303,7 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
      *  - blank lines, whitespace-only lines, and comment lines (trimmed first
      *    char '/') are IGNORED for continuation — they do NOT flush the
      *    accumulator (so `a:1 2` <blank> `/c` <blank> ` 3` ` + 4` => a:5 6 7);
-     *  - a trimmed singleton `/` opens a `/`..`\` block comment (skip to a
+     *  - a column-0 singleton `/` opens a `/`..`\` block comment (skip to a
      *    trimmed singleton `\`); a trimmed singleton `\` (outside a block) EXITS
      *    the script (load-time syntax); `\\` / `exit x` evaluate normally and
      *    terminate the PROCESS via q_sys_exit (kdb-true).
@@ -366,7 +366,7 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
             if (tlen == 0) { if (!keep_comments) q_comment_break(); continue; }  /* blank: ignored, no flush */
             if (tlen == 1 && trim[0] == '\\') break; /* singleton \ exits (post-loop FLUSH runs)  */
             if (trim[0] == '/') {                    /* a comment line, or the `/` opening a block: no flush */
-                in_block = tlen == 1;
+                in_block = tlen == 1 && !indented;   /* an indented lone `/` is a comment (qstats linalg.q:50) */
                 if (keep_comments) {
                     if ((lrc = fn(line, n, lineno, u))) break;
                 } else if (in_block) q_comment_break();
