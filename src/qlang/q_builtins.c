@@ -147,7 +147,11 @@ static int8_t type_of(ray_t* x) {
     }
     if (x->type == RAY_LAMBDA) return 100;
     if (x->type == RAY_UNARY) return 101;
-    if (x->type == RAY_BINARY || x->type == RAY_VARY) return 102;
+    if (x->type == RAY_VARY) {
+        q_valence_t val = Q_DYADIC;
+        return q_registry_kdb_op_of(x, &val) >= 0 && val == Q_MONADIC ? 101 : 102;
+    }
+    if (x->type == RAY_BINARY) return 102;
     if (q_provider_carrier_is(x))
         return 98;                             /* a bound provider pointer IS a table (its flip is the 99h pair) */
     return x->type;
