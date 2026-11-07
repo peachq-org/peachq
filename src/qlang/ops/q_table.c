@@ -174,14 +174,19 @@ ray_t* q_table_row_at(ray_t* t, int64_t row) {
                 cell = ((ray_t**)ray_data(col))[row];
                 ray_retain(cell);
             } else {
-                /* miss: the null of the first item's type (doc law); a string
-                 * item nulls to the empty string, non-atom items to :: */
+                /* miss: the index miss law, which builds no null for a STR-atom item (a string): that is the empty
+                 * string; a () column has no item type, so its row reads as atoms (::), the join-rank convention */
                 ray_t** e = (ray_t**)ray_data(col);
-                if (q_count(col) > 0 && e[0] && e[0]->type == -RAY_STR)
+                if (q_count(col) == 0) {
+                    ray_retain(RAY_NULL_OBJ);
+                    cell = RAY_NULL_OBJ;
+                } else if (e[0] && e[0]->type == -RAY_STR) {
                     cell = ray_str("", 0);
-                else if (q_count(col) > 0 && e[0] && e[0]->type < 0)
-                    cell = ray_typed_null(e[0]->type);
-                else { ray_retain(RAY_NULL_OBJ); cell = RAY_NULL_OBJ; }
+                } else {
+                    ray_t* ix = ray_i64(nr);
+                    cell = q_index_at(col, &ix, 1);
+                    ray_release(ix);
+                }
             }
         } else if (col) {                                    /* typed vector: ray_at null-fills a miss */
             cell = q_join_item(col, row);

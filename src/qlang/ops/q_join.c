@@ -97,7 +97,8 @@ static ray_t* qj_col_gather(ray_t* col, const int64_t* idx, int64_t n) {
         ((int64_t*)ray_data(iv))[i] = (idx[i] < 0) ? 0 : idx[i];
         if (idx[i] < 0) ray_vec_set_null(iv, i, true);
     }
-    ray_t* g = ray_at_fn(col, iv);
+    /* a general list's miss is q's, shaped by its first item; base indexing answers 0N */
+    ray_t* g = col && col->type == RAY_LIST ? q_index_at(col, &iv, 1) : ray_at_fn(col, iv);
     ray_release(iv);
     if (!g || RAY_IS_ERR(g)) return g ? g : q_err(QE_TYPE);
     if (g->type == RAY_LIST) {
@@ -240,10 +241,10 @@ static int64_t* qj_first_map(const qj_pair_t* pairs, int64_t np, int64_t nx) {
 }
 
 /* TYPE-PRESERVING column fill (codex plan-review F2): result[i] = gy[i]
- * unless gy[i] is a q-null, else xc[i].  A pure gather over concat(xc, gy)
- * keeps the column type exact (no I64/F64 widening); the per-cell null test
- * reads boxed items. */
-static ray_t* qj_fill_col(ray_t* xc, ray_t* gy, int64_t nx) {
+ * unless row i missed (map[i] < 0) or gy[i] is a q-null, else xc[i].  A pure
+ * gather over concat(xc, gy) keeps the column type exact (no I64/F64
+ * widening); the per-cell null test reads boxed items. */
+static ray_t* qj_fill_col(ray_t* xc, ray_t* gy, const int64_t* map, int64_t nx) {
     ray_t* cat = ray_concat_fn(xc, gy);
     if (!cat || RAY_IS_ERR(cat)) return cat ? cat : q_err(QE_TYPE);
     int64_t* idx2 = (int64_t*)malloc((size_t)(nx > 0 ? nx : 1) * sizeof(int64_t));
@@ -251,7 +252,7 @@ static ray_t* qj_fill_col(ray_t* xc, ray_t* gy, int64_t nx) {
     for (int64_t i = 0; i < nx; i++) {
         ray_t* yi = q_join_gen_item(gy, i);
         if (!yi || RAY_IS_ERR(yi)) { free(idx2); ray_release(cat); return yi ? yi : q_err(QE_TYPE); }
-        idx2[i] = qj_atom_is_qnull(yi) ? i : nx + i;
+        idx2[i] = map[i] < 0 || qj_atom_is_qnull(yi) ? i : nx + i;
         ray_release(yi);
     }
     ray_t* r = qj_col_gather(cat, idx2, nx);
@@ -287,7 +288,7 @@ static ray_t* qj_merge_col(ray_t* xc, ray_t* yc, const int64_t* fmap,
     if (!gy || RAY_IS_ERR(gy)) return gy ? gy : q_err(QE_TYPE);
     ray_t* r;
     if (mode == 1) {
-        r = qj_fill_col(xc, gy, nx);               /* y nulls keep x, type-safe */
+        r = qj_fill_col(xc, gy, fmap, nx);         /* y nulls keep x, type-safe */
     } else {
         ray_t* zero = ray_i64(0);
         ray_t* zf = q_fill_wrap(zero, gy);         /* 0^gathered (pj is numeric) */
@@ -787,7 +788,7 @@ static ray_t* qj_aj_core(ray_t* c, ray_t* t1, ray_t* t2, int t0mode, int fill) {
                 ray_t* gt = tt ? qj_col_gather(tt, map, n1)
                                : q_err(QE_TYPE);
                 if (gt && !RAY_IS_ERR(gt) && fill) {
-                    ray_t* f = qj_fill_col(xc, gt, n1);
+                    ray_t* f = qj_fill_col(xc, gt, map, n1);
                     ray_release(gt);
                     gt = f;
                 }
@@ -803,7 +804,7 @@ static ray_t* qj_aj_core(ray_t* c, ray_t* t1, ray_t* t2, int t0mode, int fill) {
                  * ajf keeps t1 where t2 is null / missed */
                 ray_t* gy = qj_col_gather(yc, map, n1);
                 if (gy && !RAY_IS_ERR(gy) && fill) {
-                    ray_t* f = qj_fill_col(xc, gy, n1);
+                    ray_t* f = qj_fill_col(xc, gy, map, n1);
                     ray_release(gy);
                     gy = f;
                 }
