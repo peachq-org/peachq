@@ -183,7 +183,7 @@
  * THE KEYWORD-COVER RULE (uniform over BOTH valences): a q keyword that IS a k
  * primitive under another spelling carries that primitive's code.  Unary covers
  * per basics/exposed-infrastructure.md "Unary forms" + ref/value.md (`value
- * each (get;value)` -> 19 19): neg -:, count #:, key/til !:, get/value .:, ...
+ * each (get;value)` -> 19 19): neg -:, count #:, key !:, get/value .:, ...
  * Dyadic covers per the ref page that names them SYNONYMS: `and` IS `&`
  * (ref/lesser.md "Lesser and `and` are synonyms") and `or` IS `|`
  * (ref/greater.md).  Where kdb writes a keyword as a primitive's code it IS
