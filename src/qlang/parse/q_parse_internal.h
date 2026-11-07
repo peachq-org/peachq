@@ -5,8 +5,6 @@
 #ifndef Q_PARSE_INTERNAL_H
 #define Q_PARSE_INTERNAL_H
 #include "qlang/parse/q_parse.h"
-#include "qlang/q_registry.h"
-#include <setjmp.h>
 
 /* ATTR_QUOTED: flag on a -RAY_SYM atom.  SET = literal symbol; CLEAR
  * (default) = name reference, resolved at eval.  Mirrors the definition in
@@ -34,10 +32,6 @@ static inline int q_parse_drop_lead(char c) { return c == '_'; }
 #define MAX_NAME 256
 
 /* ---- defined in q_parse.c ---- */
-ray_t *q_verb(char c);
-ray_t *q_verb_name(const char *s, int len);
-ray_t *q_embed(ray_t *sym, q_valence_t val);
-ray_t *q_symvec_append(ray_t *vec, const char *s, int len);
 extern const char VERB_CHARS[];
 extern const char *ADVERB_NAMES[];
 
