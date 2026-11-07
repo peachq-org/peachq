@@ -376,12 +376,13 @@ static int recipe_same(const q_recipe_t* a, const q_recipe_t* b) {
            (a->target == b->target || (a->target && b->target && strcmp(a->target, b->target) == 0));
 }
 
-/* the entry already built at this valence for op's kdb primitive code, or NULL */
-static const entry_t* code_holder(const q_op_t* op, q_valence_t valence) {
-    int code = q_ops_kdb_op(op);
-    for (int i = 0; code >= 0 && i < g_count; i++)
-        if (g_entries[i].valence == valence && !g_entries[i].alias_of && q_ops_kdb_op(g_entries[i].row) == code)
-            return &g_entries[i];
+static const entry_t* code_entry(int code, q_valence_t valence) {
+    int n = 0;
+    const q_op_t* ops = q_ops_table(&n);
+    for (int i = 0; code >= 0 && i < n; i++) {
+        const entry_t* e = q_ops_kdb_op(&ops[i]) == code ? row_entry(&ops[i], valence) : NULL;
+        if (e) return e;
+    }
     return NULL;
 }
 
@@ -407,7 +408,7 @@ static ray_err_t add_entry(const q_op_t* op, q_valence_t valence,
     /* One value per primitive: a row whose kdb code an earlier row already holds at this valence IS that value,
      * so `neg~(-:)`.  It keeps its own row (the value index prefers it as the one-valence spelling); a recipe that
      * disagrees with the holder's is a manifest bug. */
-    const entry_t* prim = !tgt ? code_holder(op, valence) : NULL;
+    const entry_t* prim = !tgt ? code_entry(q_ops_kdb_op(op), valence) : NULL;
     if (prim && !recipe_same(prim->recipe, r)) return RAY_ERR_DOMAIN;
     const entry_t* src = tgt ? tgt : prim;
     ray_t* val = src ? (ray_retain(src->value), src->value)
@@ -702,15 +703,8 @@ int q_registry_kdb_op_of(const ray_t* value, q_valence_t* valence_out) {
 }
 
 ray_t* q_registry_kdb_op_value(int code, q_valence_t valence) {
-    if (code < 0) return NULL;
-    int n = 0;
-    const q_op_t* ops = q_ops_table(&n);
-    for (int i = 0; i < n; i++) {
-        if (q_ops_kdb_op(&ops[i]) != code) continue;
-        ray_t* v = q_registry_row_value(&ops[i], valence);
-        if (v) return v;
-    }
-    return NULL;
+    const entry_t* e = code_entry(code, valence);
+    return e ? e->value : NULL;
 }
 
 /* Exact for unique values; NULL when several rows alias one env object at
@@ -726,13 +720,13 @@ const q_op_t* q_registry_operand_row(const ray_t* value) {
 }
 
 bool q_registry_provenance(const ray_t* value, q_provenance_t* out) {
-    /* Wrapper values are UNIQUE objects (born rc=1 per row) — pointer identity
-     * is exact for them.  Pass-through/rename values ARE the shared env builtin
+    /* A wrapper value is unique to its primitive: rows sharing a kdb code share
+     * it, and the first-registered (the glyph) names it.  Pass-through/rename values ARE the shared env builtin
      * object, and several q spellings can alias one env object (e.g. `#`-monadic
      * and `count` both embed env `count`; `-`-monadic and `neg` both embed env
      * `neg`).  For those, pointer identity alone cannot recover THE q spelling —
      * an inherent limitation of the reuse-the-env-object design.  So: prefer the
-     * unique WRAPPER entry (always correct); for an aliased pass-through, return
+     * first WRAPPER entry; for an aliased pass-through, return
      * the first-registered spelling (2b's formatter disambiguates aliased
      * pass-throughs from the parse-site glyph, not from this value-keyed API).
      * QK_ALIAS entries are skipped outright: they are a second NAME for a value
