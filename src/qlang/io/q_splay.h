@@ -14,7 +14,7 @@
 void q_splay_init(void);
 void q_splay_destroy(void);
 
-/* `get `:dir/` — NULL unless x is a `:path/ sym atom naming a directory with a .d (the caller falls through to the
+/* `get `:dir/` (or `:dir) — NULL unless x is a `:path sym atom naming a directory with a .d (the caller falls through to the
  * flat reader); else the owned mapped table or a RAY_ERROR from load-time HEADER validation ('type/'corrupt/'nyi/'io). */
 ray_t* q_splay_get(ray_t* x);
 

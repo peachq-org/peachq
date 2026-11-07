@@ -1396,7 +1396,7 @@ static ray_t* bang_qsql(ray_t** args) {
     int64_t nk = 0;                 /* keyed source: re-key the result */
     if (q_type_is_dict(src) && !q_type_is_keyed(src)) {
         if (q_type_is_dict(a))      r = update_dict(a, b, c, src);
-        else if (is_symvec(a) && is_empty_gen(c)) r = dict_drop_keys(a, src);
+        else if ((is_symvec(a) || is_empty_gen(a)) && is_empty_gen(c)) r = dict_drop_keys(a, src);
         else                        r = q_err(QE_NYI);
     } else {
         ray_t* t = src;
