@@ -51,6 +51,10 @@ ray_t* q_index_at(ray_t* x, ray_t* const* ix, int64_t k);
  * else u[S] / v[S;y].  x consumed on success, the caller's on error. */
 ray_t* q_index_amend(ray_t* x, ray_t* const* ix, int64_t k, ray_t* f, ray_t* y);
 
+/* The caller's word that the write it brackets lands on a name in place (`d[k]:v`, `d,:e`, by-name amend and
+ * upsert), where a new key in a step dict is 'step (basics/errors.md); answers the previous word for the restore. */
+int q_index_in_place(int on);
+
 /* `x,y` for two plain dicts — THE dict write (ref/join.md:94 upsert): `keys?key y` once, then the hits store into
  * the values and the misses grow both slots; a repeated key appends once and its last occurrence wins.  strict is
  * Append's law (`,:`, ref/join.md:173: a value the slot cannot hold is 'type, nothing written); else Join's
