@@ -97,7 +97,8 @@ static inline int int_cmp_lane(ray_t* x) {
 
 /* Comparison.  `tol` — ordering is defined off the tolerance (`a>b` is `a>b and not a=b`),
  * so inside the band < and > are both 0b, <= and >= both 1b; cmp_pick passes 0 (Lesser/
- * Greater are absent from precision.md §Use — a tolerant pick returns the wrong OPERAND). */
+ * Greater are absent from precision.md §Use — a tolerant pick returns the wrong OPERAND).
+ * "null" below is the out-of-band null: the char blank orders as 32 (comparison.md:174). */
 static ray_t* gt_impl(ray_t* a, ray_t* b, int tol) {
     { int c; if (char_str_cmp(a, b, &c) == 0) return make_bool(c > 0 ? 1 : 0); }
     if (a->type == -RAY_SYM && b->type == -RAY_SYM)
@@ -109,7 +110,7 @@ static ray_t* gt_impl(ray_t* a, ray_t* b, int tol) {
     if (!is_numeric_or_temporal(a) || !is_numeric_or_temporal(b))
         return ray_error("type", "cannot compare %s and %s",
                          ray_type_name(a->type), ray_type_name(b->type));
-    int na = RAY_ATOM_IS_NULL(a), nb = RAY_ATOM_IS_NULL(b);
+    int na = atom_is_oob_null(a), nb = atom_is_oob_null(b);
     if (na && nb) return make_bool(0);       /* null == null → not > */
     if (na) return make_bool(0);             /* null > X → false */
     if (nb) return make_bool(1);             /* X > null → true */
@@ -130,7 +131,7 @@ static ray_t* lt_impl(ray_t* a, ray_t* b, int tol) {
     if (!is_numeric_or_temporal(a) || !is_numeric_or_temporal(b))
         return ray_error("type", "cannot compare %s and %s",
                          ray_type_name(a->type), ray_type_name(b->type));
-    int na = RAY_ATOM_IS_NULL(a), nb = RAY_ATOM_IS_NULL(b);
+    int na = atom_is_oob_null(a), nb = atom_is_oob_null(b);
     if (na && nb) return make_bool(0);       /* null == null → not < */
     if (na) return make_bool(1);             /* null < X → true */
     if (nb) return make_bool(0);             /* X < null → false */
@@ -151,7 +152,7 @@ ray_t* ray_gte_fn(ray_t* a, ray_t* b) {
     if (!is_numeric_or_temporal(a) || !is_numeric_or_temporal(b))
         return ray_error("type", "cannot compare %s and %s",
                          ray_type_name(a->type), ray_type_name(b->type));
-    int na = RAY_ATOM_IS_NULL(a), nb = RAY_ATOM_IS_NULL(b);
+    int na = atom_is_oob_null(a), nb = atom_is_oob_null(b);
     if (na && nb) return make_bool(1);       /* null == null → >= true */
     if (na) return make_bool(0);             /* null >= X → false */
     if (nb) return make_bool(1);             /* X >= null → true */
@@ -171,7 +172,7 @@ ray_t* ray_lte_fn(ray_t* a, ray_t* b) {
     if (!is_numeric_or_temporal(a) || !is_numeric_or_temporal(b))
         return ray_error("type", "cannot compare %s and %s",
                          ray_type_name(a->type), ray_type_name(b->type));
-    int na = RAY_ATOM_IS_NULL(a), nb = RAY_ATOM_IS_NULL(b);
+    int na = atom_is_oob_null(a), nb = atom_is_oob_null(b);
     if (na && nb) return make_bool(1);       /* null == null → <= true */
     if (na) return make_bool(1);             /* null <= X → true */
     if (nb) return make_bool(0);             /* X <= null → false */

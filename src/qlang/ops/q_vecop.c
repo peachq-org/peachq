@@ -241,16 +241,8 @@ static void mark_nulls(ray_t* out, int any) {
  * "take the LEFT operand here".  Branch-free, so the null cases select rather
  * than jump. */
 
-#define DEC_LOOP(T, ISNULL, BOTH, ONLYX, ONLYY, EXPR)                              \
-    SHAPED(T, xb.p, yb.p, xb.step, yb.step, n, {                                   \
-        int nx = (ISNULL(x));                                                      \
-        int ny = (ISNULL(y));                                                      \
-        int e = (EXPR);                                                            \
-        m[i] = (uint8_t)((nx & ny) ? (BOTH) : nx ? (ONLYX) : ny ? (ONLYY) : e);    \
-    })
-
-/* The same roster as plain boolean algebra: GCC if-converts a double compare's
- * nested selects no further than one level, and the int lanes the other way round. */
+/* NaN's roster (both, x-only, y-only null) as plain boolean algebra: GCC
+ * if-converts a double compare's nested selects no further than one level. */
 #define DEC_D(BOTH, ONLYX, ONLYY, EXPR)                                            \
     SHAPED(double, xb.p, yb.p, xb.step, yb.step, n, {                              \
         int nx = x != x;                                                           \
@@ -262,29 +254,25 @@ static void mark_nulls(ray_t* out, int any) {
 
 #define NUL_J(v) ((v) == NULL_I64)
 #define NUL_B(v) ((int)(v) == bnul)
-#define DEC_B(B, X, Y, E) DEC_LOOP(uint8_t, NUL_B, B, X, Y, E)
-/* NULL_I64 is the least int64, so the plain signed order already gives every
- * roster answer below: a null under each value and equal to itself. */
-#define DEC_J(B, X, Y, E) SHAPED(int64_t, xb.p, yb.p, xb.step, yb.step, n, m[i] = (uint8_t)(E))
-
-/* The int and byte lanes decide by the same exact ordering, so one roster of
- * (both-null, x-null, y-null, value) answers serves both — the ^ default is
- * "take x exactly where y is null". */
-#define DEC_EXACT(DEC, ISNUL)                                                      \
+/* The exact lanes order by value alone: NULL_I64 is the least int64, so a null
+ * already sits under each value and equals itself, and the byte lane's blank is
+ * an in-band 32 (basics/comparison.md).  Only ^ asks for the null. */
+#define DEC_V(T, E) SHAPED(T, xb.p, yb.p, xb.step, yb.step, n, m[i] = (uint8_t)(E))
+#define DEC_EXACT(T, ISNUL)                                                        \
     switch (op) {                                                                  \
-        case VO_LT: case VO_MIN: DEC(0, 1, 0, x < y); break;                       \
-        case VO_LE: DEC(1, 1, 0, x <= y); break;                                   \
-        case VO_GT: case VO_MAX: DEC(0, 0, 1, x > y); break;                       \
-        case VO_GE: DEC(1, 0, 1, x >= y); break;                                   \
-        case VO_EQ: DEC(1, 0, 0, x == y); break;                                   \
-        case VO_NE: DEC(0, 1, 1, x != y); break;                                   \
-        default: DEC(1, 0, 1, ISNUL(y)); break;                                    \
+        case VO_LT: case VO_MIN: DEC_V(T, x < y); break;                           \
+        case VO_LE: DEC_V(T, x <= y); break;                                       \
+        case VO_GT: case VO_MAX: DEC_V(T, x > y); break;                           \
+        case VO_GE: DEC_V(T, x >= y); break;                                       \
+        case VO_EQ: DEC_V(T, x == y); break;                                       \
+        case VO_NE: DEC_V(T, x != y); break;                                       \
+        default: DEC_V(T, ISNUL(y)); break;                                        \
     }
 
 /* `tol` is ops/cmp.c's tol_pair for this pair, which only the orderings consult:
- * = and <> tolerate on the double lane whatever the pair.  `bnul`
- * is the byte lane's null: 0x20 for a char (kdb-true `null " "`), and a value no
- * byte can hold for the bool/byte tags, which have none. */
+ * = and <> tolerate on the double lane whatever the pair.  `bnul` is the null ^
+ * fills: 0x20 for a char (kdb-true `null " "`), and a value no byte can hold for
+ * the bool/byte tags, which have none. */
 static void decide(uint8_t* m, vop_t op, lane_t ln, band_t xb, band_t yb, int tol, int bnul, int64_t n) {
     if (ln == LN_DBL) {
         /* `tol` is hoisted out of the loops: a run-time flag in the body stops GCC vectorizing it */
@@ -310,9 +298,9 @@ static void decide(uint8_t* m, vop_t op, lane_t ln, band_t xb, band_t yb, int to
             default: break;                /* & | ^ decide as they pick: pick_dbl */
         }
     } else if (ln == LN_INT) {
-        DEC_EXACT(DEC_J, NUL_J);
+        DEC_EXACT(int64_t, NUL_J);
     } else {
-        DEC_EXACT(DEC_B, NUL_B);
+        DEC_EXACT(uint8_t, NUL_B);
     }
 }
 
