@@ -109,8 +109,7 @@ typedef struct {
 
 /* Parse a container's tail header + block boundaries into *zm (free the
  * ends with q_io_zipmap_free).  NULL on success; 'type when the file is no
- * container; 'corrupt/'nyi otherwise.  nb==1: the data area is the block;
- * nb>1: the per-block length prefixes are skip-chained, bounds-checked. */
+ * container; 'corrupt/'nyi otherwise. */
 ray_t* q_io_zip_open(ray_t* pathstr, q_io_zipmap_t* zm);
 void   q_io_zipmap_free(q_io_zipmap_t* zm);
 
