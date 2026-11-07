@@ -728,6 +728,27 @@ static ray_t* splay_table(splay_ent* e, ray_t* cols) {
 
 ray_t* q_splay_get(ray_t* x) {
     if (!x || x->type != -RAY_SYM) return NULL;
+    ray_t* s = ray_sym_str(x->i64);                     /* borrowed */
+    size_t sn = s ? ray_str_len(s) : 0;
+    const char* sp = s ? ray_str_ptr(s) : NULL;
+    if (sn >= 2 && sp[0] == ':' && sp[sn - 1] != '/' && !q_handles_pq(sp, sn, NULL)) {
+        /* `get `:db/t` reads the folder as `get `:db/t/` does (kb/splayed-tables.md:273) */
+        ray_t* path = q_io_file_path(x);
+        struct stat st;
+        int dir = path && stat(ray_str_ptr(path), &st) == 0 && S_ISDIR(st.st_mode);
+        if (path) ray_release(path);
+        if (!dir) return NULL;
+        char* d = (char*)malloc(sn + 1);
+        if (!d) return q_err(QE_OOM);
+        memcpy(d, sp, sn);
+        d[sn] = '/';
+        ray_t* ds = ray_sym(ray_sym_intern_runtime(d, sn + 1));
+        free(d);
+        if (!ds || RAY_IS_ERR(ds)) return ds;
+        ray_t* r = q_splay_get(ds);
+        ray_release(ds);
+        return r;
+    }
     ray_t* err = NULL;
     splay_ent* e = splay_resolve_sym(x->i64, &err);
     if (err) return err;
