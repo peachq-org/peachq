@@ -44,4 +44,7 @@ void q_pq_reset(void);
 /* The cwd or $QHOME moved: a namespace remembered as having no library file is looked for again. */
 void q_pq_path_changed(void);
 
+/* Steps whenever the record of misses is dropped: a NULL from q_pq_autoload_ns stays final while it is unchanged. */
+uint32_t q_pq_miss_gen(void);
+
 #endif /* PEACHQ_Q_PQ_H */
