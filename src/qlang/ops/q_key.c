@@ -105,8 +105,8 @@ ray_t* q_key(ray_t* x) {
         const char* nm = q_type_qname(RAY_CHARV);
         return ray_sym(ray_sym_intern_runtime(nm, strlen(nm)));
     }
-    if (q_type_is_int_atom(x) && !RAY_ATOM_IS_NULL(x) && q_type_iatom_val(x) >= 0)
-        return q_til_wrap(x);                    /* key n == til n */
+    if ((q_type_is_int_atom(x) && !RAY_ATOM_IS_NULL(x) && q_type_iatom_val(x) >= 0) || (x && x->type == -RAY_BOOL))
+        return q_til_wrap(x);                    /* key n == til n, and `til 1b` is ,0 (ref/til.md) */
     if (q_type_is_sym_atom(x))
         return q_key_name(x->i64);
     if (!q_type_is_dict(x))                      /* a keyed table IS a dict */

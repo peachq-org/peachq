@@ -477,7 +477,8 @@ ray_t* ray_abs_fn(ray_t* x) {
         if (RAY_UNLIKELY(x->i16 == INT16_MIN)) return ray_typed_null(-RAY_I16);
         return make_i16(x->i16 < 0 ? -x->i16 : x->i16);
     }
-    if (x->type == -RAY_CHARV) return make_i32(x->u8);   /* ref/abs.md range c -> i */
+    if (x->type == -RAY_CHARV || x->type == -RAY_BYTE_ONLY) return make_i32(x->u8);   /* ref/abs.md range c x -> i */
+    if (x->type == -RAY_BOOL) return make_i32(x->b8);                                 /* and b -> i */
     return ray_error("type", "abs: expects a numeric argument, got %s", ray_type_name(x->type));
 }
 
