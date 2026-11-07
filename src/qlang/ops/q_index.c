@@ -944,9 +944,21 @@ static ray_t* dict_put1(ray_t* x, ray_t* key, int64_t p, ray_t* v) {
     ray_t** slots = ray_dict_slots(x);
     if (q_type_is_keyed(x)) return keyed_put1(x, key, v);
     if (q_type_is_table(slots[1])) {
+        /* a row at a NEW key is a row of the table: Join's row law null-fills an absent column and refuses a foreign
+         * one (uqf test_registries.q:53, a registry of declarations) */
+        ray_t* row = NULL;
+        if (p >= q_count(slots[0]) && q_type_is_plain_dict(v)) {
+            ray_t* rows = q_table_rows_normalize(slots[1], v, Q_ROWS_JOIN);
+            if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_OOM);
+            row = q_index_elem_at(rows, 0);
+            ray_release(rows);
+            if (!row || RAY_IS_ERR(row)) return row ? row : q_err(QE_OOM);
+            v = row;
+        }
         ray_t* d = dict_rows(x);
-        if (RAY_IS_ERR(d)) return d;
+        if (RAY_IS_ERR(d)) { if (row) ray_release(row); return d; }
         ray_t* r = dict_put1(d, key, p, v);
+        if (row) ray_release(row);
         if (RAY_IS_ERR(r)) { ray_release(d); return r; }
         ray_release(x);
         return r;

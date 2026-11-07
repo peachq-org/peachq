@@ -1063,13 +1063,14 @@ ray_t* q_ungroup_wrap(ray_t* x) {
     if (!flat || RAY_IS_ERR(flat)) return flat;
     int64_t nc = ray_table_ncols(flat);
     int64_t nr = q_count(flat);
-    if (nc > 64) { ray_release(flat); return q_err(QE_LIMIT); }
-    ray_t* acc[64];
+    ray_t** acc = malloc((size_t)(nc > 0 ? nc : 1) * sizeof *acc);
+    if (!acc) { ray_release(flat); return q_err(QE_OOM); }
     for (int64_t c = 0; c < nc; c++) {
         acc[c] = ray_list_new(nr > 0 ? nr : 1);
         if (RAY_IS_ERR(acc[c])) {
             ray_t* err = acc[c];
             for (int64_t j = 0; j < c; j++) ray_release(acc[j]);
+            free(acc);
             ray_release(flat);
             return err;
         }
@@ -1116,10 +1117,12 @@ ray_t* q_ungroup_wrap(ray_t* x) {
     if (err) {
         for (int64_t c = 0; c < nc; c++)
             if (acc[c] && !RAY_IS_ERR(acc[c])) ray_release(acc[c]);
+        free(acc);
         ray_release(flat);
         return err;
     }
     ray_t* out = q_table_cols_from_accs((const int64_t*)ray_data(ray_table_schema(flat)), acc, nc, rows_col);
+    free(acc);
     ray_release(flat);
     return out;
 }

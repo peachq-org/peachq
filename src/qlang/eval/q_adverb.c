@@ -12,6 +12,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/q_ops.h"       /* q_ops_find + manifest columns + the identity-table accessors */
 #include "qlang/q_registry.h"  /* q_registry_row_of, q_registry_row_kernel */
+#include "qlang/q_registry_internal.h" /* q_flip_wrap, q_join_wrap — Join Each of two empty tables */
 #include "qlang/base/q_type.h"
 #include "qlang/ops/q_index.h" /* q_index_elem_at — the one element accessor */
 #include "qlang/ops/q_dollar.h"
@@ -373,6 +374,20 @@ static ray_t* map_zip_pair(void* c, ray_t* x, ray_t* y) {
     return map_zip(((map_zip_t*)c)->fv, ((map_zip_t*)c)->frow, av, 2, 3);
 }
 
+/* Tables Join Each column-wise (ref/join.md:128), so two empty ones keep both column sets: flip (flip x),flip y */
+static ray_t* join_each_empty(ray_t* x, ray_t* y) {
+    ray_t* fx = q_flip_wrap(x);
+    if (!fx || RAY_IS_ERR(fx)) return fx ? fx : q_err(QE_OOM);
+    ray_t* fy = q_flip_wrap(y);
+    ray_t* d = fy && !RAY_IS_ERR(fy) ? q_join_wrap(fx, fy) : fy;
+    ray_release(fx);
+    if (fy && !RAY_IS_ERR(fy)) ray_release(fy);
+    if (!d || RAY_IS_ERR(d)) return d ? d : q_err(QE_OOM);
+    ray_t* r = q_flip_wrap(d);
+    ray_release(d);
+    return r;
+}
+
 /* Each, Each Left and Each Right are ONE law (ref/maps.md: `x f\:y` is
  * `f[;y] each x`).  `mask` names the ITERATED positions — fixed by the
  * operator, never auto-detected — read at i; every other position is held
@@ -413,8 +428,11 @@ static ray_t* map_zip(ray_t* fv, const q_op_t* frow, ray_t** args, int64_t n,
     int whole = r != NULL;                 /* a whole answer or an error: nothing to re-key */
     if (!r && len < 0) r = q_eval_apply(fv, frow, av, n);
     /* a map is uniform: an empty iterated side returns the GENERIC empty list
-     * without an evaluation — `type (2*')til 0` is 0h, not 7h (ref/maps.md) */
-    if (!r && len == 0) r = ray_list_new(0);
+     * without an evaluation — `type (2*')til 0` is 0h, not 7h (ref/maps.md) — save that tables Join Each
+     * column-wise (uqf test_superbook.q:236; SO 73139865) */
+    int tables = n == 2 && iter == 3 && q_type_is_table(av[0]) && q_type_is_table(av[1]);
+    if (!r && len == 0)
+        r = tables && frow && !strcmp(frow->name, ",") ? join_each_empty(av[0], av[1]) : ray_list_new(0);
     if (!r) {
         ray_t* l = ray_list_new(len);
         ray_t* ev[APPLY_MAX_ARGS];
