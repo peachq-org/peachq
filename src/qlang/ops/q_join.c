@@ -1354,7 +1354,10 @@ ray_t* q_join_amend(ray_t** px, ray_t* y, int exclusive) {
         return q_err(QE_TYPE);
     ray_t* py = pair ? q_dollar_cast(x->type, y) : y;
     if (pair && (!py || RAY_IS_ERR(py))) return py ? py : q_err(QE_OOM);
-    if (x && y && (x->type == RAY_LIST || x->type == RAY_STR) && q_count(x) > 0 && q_index_rank(x) == q_index_rank(y) + 1) {
+    /* `()` has no first element to rank, so it appends nothing (uqf dag.q:256 `lines,:f each ext` on an empty ext) */
+    int none = y && y->type == RAY_LIST && q_count(y) == 0;
+    if (x && y && !none && (x->type == RAY_LIST || x->type == RAY_STR) && q_count(x) > 0 &&
+        q_index_rank(x) == q_index_rank(y) + 1) {
         py = ray_enlist_fn(&y, 1);
         if (!py || RAY_IS_ERR(py)) return py ? py : q_err(QE_OOM);
     }

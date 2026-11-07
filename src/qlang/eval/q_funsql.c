@@ -10,7 +10,7 @@
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_eval_internal.h" /* q_eval_symvec_has */
 #include "qlang/base/q_err.h"
-#include "qlang/base/q_type.h"         /* q_type_widens — the one int/long pair */
+#include "qlang/base/q_type.h"         /* q_type_widens, q_type_common — the numeric pair laws */
 #include "qlang/q_prim.h"              /* q_cols_fn */
 #include "qlang/q_registry_internal.h" /* q_take_wrap, q_where_wrap, q_flip_wrap, ... */
 #include "qlang/ops/q_bang.h"
@@ -1008,6 +1008,20 @@ static ray_t* vec_cond(ray_t* b, ray_t* x, ray_t* y) {
     if ((q_type_is_iter(x) && q_count(x) != n) ||
         (q_type_is_iter(y) && q_count(y) != n))
         return q_err(QE_LENGTH);
+    int8_t xt = (int8_t)-q_type_elem_tag(x), yt = (int8_t)-q_type_elem_tag(y);
+    if (xt != yt && q_type_is_num_tag(xt) && q_type_is_num_tag(yt)) {
+        /* two numeric sides merge in their common type (uqf microstructure.q:617 `?[0=n;0n;n]` is a float vector) */
+        int8_t to = q_type_common(xt, yt);
+        ray_t* cx = to ? q_dollar_cast(to, x) : q_err(QE_TYPE);
+        if (!cx || RAY_IS_ERR(cx)) return cx ? cx : q_err(QE_OOM);
+        ray_t* cy = q_dollar_cast(to, y);
+        if (!cy || RAY_IS_ERR(cy)) { ray_release(cx); return cy ? cy : q_err(QE_OOM); }
+        ray_t* r = vec_cond(b, cx, cy);
+        ray_release(cx);
+        ray_release(cy);
+        return r;
+    }
+    if (n == 0 && xt == yt && q_type_char(xt) && xt != RAY_STR) return q_type_empty(xt);
     const bool* bp = (const bool*)ray_data(b);
     ray_t* l = ray_list_new(n > 0 ? n : 1);
     for (int64_t j = 0; j < n && !RAY_IS_ERR(l); j++) {
