@@ -229,8 +229,7 @@ int q_math_numeric_matrix(ray_t* v) {
     if (!v || v->type != RAY_LIST || q_count(v) == 0) return 0;
     ray_t** e = (ray_t**)ray_data(v);
     for (int64_t i = 0; i < q_count(v); i++) {
-        int8_t t = e[i] ? e[i]->type : 0;
-        if (t != RAY_BOOL && t != RAY_I16 && t != RAY_I32 && t != RAY_I64 && t != RAY_F32 && t != RAY_F64) return 0;
+        if (!e[i] || e[i]->type <= 0 || !q_type_is_num_tag(e[i]->type)) return 0;
     }
     return 1;
 }
@@ -560,8 +559,7 @@ static ray_t* minmax2(ray_t* a, ray_t* b, int want_min) {
 /* `%:` is reciprocal and, on a temporal, ltime — one kdb primitive (code 4), so a temporal ltime refuses
  * (ref/gtime.md: timestamp or datetime) is refused whichever name applies it */
 ray_t* q_reciprocal_wrap(ray_t* x) {
-    int8_t t = x ? (int8_t)(x->type < 0 ? -x->type : x->type) : 0;
-    if (t >= RAY_TIMESTAMP && t <= RAY_TIME)
+    if (x && temporal_tag((int8_t)(x->type < 0 ? -x->type : x->type)))
         return x->type < 0 ? q_ltime_wrap(x) : q_eval_apply_value(q_registry_lookup_name("ltime", 5, Q_MONADIC), &x, 1);
     ray_t* args[2] = { ray_i64(1), x };
     ray_t* r = q_eval_apply_value(q_registry_lookup_name("%", 1, Q_DYADIC), args, 2);
