@@ -133,9 +133,9 @@
 .pq.i.resolveTree:{[cl;tree] (enlist tree 0),.pq.i.rnode[cl,`i] each 1_tree}
 
 .pq.i.q.bind:{[c;t] c ({[t] cols get t};t)};
-.pq.i.q.get:{[c;t] c (`get;t)};
-.pq.i.q.set:{[c;t;d] c (`set;t;d); t};
-.pq.i.q.upsert:{[c;t;d] c (`upsert;t;d); t};
+.pq.i.q.get:{[c;t] c (get;t)};
+.pq.i.q.set:{[c;t;d] c (set;t;d); t};
+.pq.i.q.upsert:{[c;t;d] c (upsert;t;d); t};
 .pq.i.q.hdel:{[c;t] c (!;`.;();0b;enlist t); t};
 .pq.i.q.qsql:{[c;cl;tree] c (?),.pq.i.resolveTree[cl;tree]};
 
