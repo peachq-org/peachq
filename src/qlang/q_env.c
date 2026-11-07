@@ -16,7 +16,7 @@
 #include "qlang/io/q_io.h"        /* q_io_set — `set`'s file half */
 #include "qlang/io/q_provider.h"  /* the link seam: q_provider_carrier_is, _link/_unlink — the HOST, never a provider */
 #include "qlang/q_pq.h"           /* q_pq_autoload / _autoload_ns — a first `.pq` or missed library reference loads its file */
-#include "qlang/q_registry.h"     /* q_registry_sealed — a core file's writes never autoload */
+#include "qlang/q_registry.h"     /* q_registry_sealed, _is_reserved — core-file writes, keyword kernels */
 #include "qlang/q_prim.h"         /* q_enum_deref — FK/link dotted-walk gather */
 #include "lang/internal.h"        /* ray_error */
 #include "table/sym.h"         /* ray_sym_intern_runtime, ray_sym_str, ray_read_sym */
@@ -901,7 +901,8 @@ static ray_t* env_resolve(int64_t sym, int lib) {
             ray_t* home = ENV_DEPTH ? ctx_home() : env_root;
             if (home) base = ray_dict_probe_sym_borrowed(home, head);
         }
-        if (!base) base = ray_dict_probe_sym_borrowed(env_boot, head);
+        /* a keyword's bootstrap kernel is the registry's to hand out, never a global's */
+        if (!base && !q_registry_is_reserved(head)) base = ray_dict_probe_sym_borrowed(env_boot, head);
     }
     ray_t* r = NULL;
     if (base) {

@@ -11,18 +11,10 @@
  * src/lang/eval.h (0x20) — kept local so the parser needs no eval header. */
 #define Q_ATTR_QUOTED 0x20
 
-/* Q_ATTR_KEYLIST: flag on a 1-elem RAY_SYM VECTOR node — the 1-col table-literal
- * KEY LIST (q_parse.c table_lit_dict).  That node is byte-identical to the
- * enlisted-sym-ATOM constant (,`a — parsetrees.md:26 unwraps it), so this is the
- * only signal that the node is a genuine 1-NAME LIST and `!` must see list!list.
- * Numerically RAY_ATTR_HAS_NULLS — chosen because it has no display glyph and no
- * serde footprint; q_eval answers a fresh unmarked copy, so it never escapes into
- * values.  A node whose one sym is the NULL sym is never a key list. */
-#define Q_ATTR_KEYLIST 0x40
-
 /* Q_ATTR_POSTFIX: flag on the call node of a postfix elision (`2+`, `-15!`, `count@`): its trailing hole was never
  * WRITTEN, so the walker applies the head to the bound operand alone and the projection is `+[2]`'s (qPython's md5
- * fixture is two items) — parse still shows kdb's (+;2;::).  0x04 is unclaimed on a general list. */
+ * fixture is two items) — parse still shows kdb's (+;2;::).  On a `g::` train tail (::;g) it makes a function g the
+ * composition '[::;g].  0x04 is unclaimed on a general list. */
 #define Q_ATTR_POSTFIX 0x04
 
 /* A leading '_' is the drop/cut verb: no name or symbol constant begins with it (basics/syntax.md:601). */
