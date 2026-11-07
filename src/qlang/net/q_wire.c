@@ -1036,22 +1036,26 @@ static ray_t* kw_template_value(const char* s, size_t n) {
     return v;
 }
 
-/* the keyword whose KW_FORMS structure starts at the tag byte just read, retained and consumed, else NULL */
-static ray_t* kw_form_value(rcur_t* c) {
-    for (int i = 0; i < KW_FORM_N; i++) {
-        const uint8_t* fb;
-        int fl = kw_form_bytes(i, &fb);
-        if (fl <= 0 || (size_t)fl - 1 > c->rem || memcmp(c->p - 1, fb, (size_t)fl) != 0) continue;
-        const char* nm = KW_FORMS[i].name;
-        ray_t* v = q_registry_lookup_name(nm, strlen(nm), Q_DYADIC);
-        if (!v) v = q_registry_lookup_name(nm, strlen(nm), Q_MONADIC);
-        if (!v) return NULL;
-        c->p += fl - 1;
-        c->rem -= (size_t)fl - 1;
-        ray_retain(v);
-        return v;
+/* The keyword whose KW_FORMS structure the decoded carrier r is, retained, else NULL.  r is re-encoded rather than
+ * its frame bytes compared, so a big-endian sender is recognised too; used, the bytes r was read from, bounds that
+ * to a structure no larger than a form. */
+static ray_t* kw_form_value(ray_t* r, size_t used) {
+    if (used > KW_FORM_MAX || !r || RAY_IS_ERR(r) || r->type != RAY_QFN) return NULL;
+    q_wire_wbuf_t wb = {0};
+    ray_t* v = NULL;
+    if (!q_wire_write_obj(&wb, r)) {
+        for (int i = 0; i < KW_FORM_N && !v; i++) {
+            const uint8_t* fb;
+            int fl = kw_form_bytes(i, &fb);
+            if (fl <= 0 || (size_t)fl != wb.len || memcmp(wb.p, fb, wb.len) != 0) continue;
+            const char* nm = KW_FORMS[i].name;
+            v = q_registry_lookup_name(nm, strlen(nm), Q_DYADIC);
+            if (!v) v = q_registry_lookup_name(nm, strlen(nm), Q_MONADIC);
+        }
     }
-    return NULL;
+    q_wire_wbuf_free(&wb);
+    if (v) ray_retain(v);
+    return v;
 }
 
 /* A lambda literal evaluated in scope ns, which is restored on EVERY exit so a decode never moves the session; only
@@ -1187,11 +1191,6 @@ static ray_t* rd_obj_inner(rcur_t* c) {
             return rd_fixed_vec(c, t);
         }
         }
-    }
-
-    if (!c->serde && (t == 104 || t == 105 || t == 108)) {
-        ray_t* kw = kw_form_value(c);
-        if (kw) return kw;
     }
 
     switch (t) {
@@ -1392,8 +1391,11 @@ static ray_t* rd_obj(rcur_t* c) {
     if (g_wire_depth >= Q_WIRE_MAX_DEPTH)
         return q_err(QE_DOMAIN);
     g_wire_depth++;
+    size_t rem0 = c->rem;
     ray_t* r = rd_obj_inner(c);
     g_wire_depth--;
+    ray_t* kw = c->serde ? NULL : kw_form_value(r, rem0 - c->rem);
+    if (kw) { ray_release(r); r = kw; }
     return r;
 }
 

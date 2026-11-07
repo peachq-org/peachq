@@ -47,7 +47,7 @@ static ray_t* scan_add(ray_t* v, const char* s, size_t n, bool fold) {
     for (size_t k = 0; k < n; k++) low[k] = fold ? (char)tolower((unsigned char)s[k]) : s[k];
     int64_t id = ray_sym_intern_runtime(low, n);
     free(low);
-    for (int64_t k = 0; k < ray_len(v); k++) if (*(const int64_t*)ray_vec_get(v, k) == id) return v;
+    for (int64_t k = 0; k < q_count(v); k++) if (*(const int64_t*)ray_vec_get(v, k) == id) return v;
     return ray_vec_append(v, &id);
 }
 
