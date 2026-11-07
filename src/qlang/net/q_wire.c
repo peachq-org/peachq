@@ -190,6 +190,7 @@ static const struct { const char* name; const char* form; } KW_FORMS[] = {
     { ">=",      "'[not;<]" },
     { "union",   "'[distinct;,]" },          /* ref/union.md: distinct x,y */
     { "all",     "'[min;\"b\"$]" },          /* docs-v1 ref/logic.md: min "b"$x */
+    { "any",     "'[max;\"b\"$]" },          /* max "b"$x */
     { "ceiling", "'[neg;floor;neg]" },       /* the least integer >= x */
     { "fills",   "^\\" },                    /* each null filled from its predecessor */
     { "attr",    "(-2!)" },                  /* basics/internal.md */
