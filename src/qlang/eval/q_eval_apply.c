@@ -2057,6 +2057,9 @@ const char* q_eval_apply_car_head_name(ray_t* v) {
     q_car_kind_t kind = q_eval_apply_carrier_kind(v);
     if (kind != Q_EVAL_CAR_DERIV && kind != Q_EVAL_CAR_PROJ) return NULL;
     const q_op_t* row = row_unbox(car_slots(v)[1]);
+    ray_t* h = car_slots(v)[0];
+    /* a kdb primitive shows its glyph whichever keyword row carries it (`|[1;]`, not `or[1;]`) */
+    if (row && h->type != RAY_QFN && q_registry_kdb_op_of(h, NULL) >= 0) return NULL;
     return row ? row->name : NULL;
 }
 

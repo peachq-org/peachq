@@ -52,6 +52,7 @@ typedef struct {
     q_valence_t valence;
     ray_t*      value;       /* owned (rc>=1) */
     ray_t*      kernel;      /* QR_COVER: the owned unary C kernel under the extension; else NULL */
+    const q_recipe_t* recipe; /* the cell this entry was built from */
     const q_op_t* row;       /* the manifest row this entry was built from */
     /* provenance */
     const char* spelling;    /* q surface name (static, from the manifest) */
@@ -153,13 +154,15 @@ static val_slot_t* val_slot(const ray_t* value, q_valence_t valence, int insert)
 }
 
 /* Two rows can share one value at one valence (`reverse` and `|`-monadic are one
- * env object).  A two-valence row's `family` describes its DYAD, so it is the wrong
- * answer for the other valence: prefer the row that has no recipe at that other
- * valence, and only a pair with no such winner stays undecidable. */
+ * env object; `$` and `mmu` one primitive).  A two-valence row's `family` describes
+ * its DYAD, so it is the wrong answer for the monad and the right one for the dyad:
+ * the monad prefers the row with no dyad, the dyad the row with both, and only a
+ * pair with no such winner stays undecidable. */
 static const q_op_t* row_prefer(const q_op_t* a, const q_op_t* b, q_valence_t v) {
-    int a1 = (v == Q_MONADIC) ? a->dyad.kind == QK_NONE : a->mon.kind == QK_NONE;
-    int b1 = (v == Q_MONADIC) ? b->dyad.kind == QK_NONE : b->mon.kind == QK_NONE;
-    return a1 == b1 ? NULL : (a1 ? a : b);
+    int a2 = a->mon.kind != QK_NONE && a->dyad.kind != QK_NONE;
+    int b2 = b->mon.kind != QK_NONE && b->dyad.kind != QK_NONE;
+    if (a2 == b2) return NULL;
+    return (v == Q_DYADIC) == (a2 != 0) ? a : b;
 }
 
 /* Register g_entries[idx] in every index.  The sharing verdict is a static
@@ -368,6 +371,20 @@ static ray_t* build_wrapper(const q_recipe_t* r) {
     }
 }
 
+static int recipe_same(const q_recipe_t* a, const q_recipe_t* b) {
+    return a->kind == b->kind && a->fn == b->fn && a->arity == b->arity && a->atomic == b->atomic &&
+           (a->target == b->target || (a->target && b->target && strcmp(a->target, b->target) == 0));
+}
+
+/* the entry already built at this valence for op's kdb primitive code, or NULL */
+static const entry_t* code_holder(const q_op_t* op, q_valence_t valence) {
+    int code = q_ops_kdb_op(op);
+    for (int i = 0; code >= 0 && i < g_count; i++)
+        if (g_entries[i].valence == valence && !g_entries[i].alias_of && q_ops_kdb_op(g_entries[i].row) == code)
+            return &g_entries[i];
+    return NULL;
+}
+
 /* Record one (name, valence) entry.  Returns RAY_OK, or RAY_ERR_DOMAIN if the
  * builder produced NULL/err for a non-QR_NONE recipe (audited source missing). */
 static ray_err_t add_entry(const q_op_t* op, q_valence_t valence,
@@ -387,7 +404,13 @@ static ray_err_t add_entry(const q_op_t* op, q_valence_t valence,
     const entry_t* tgt = (r->kind == QK_ALIAS)
         ? row_entry(q_ops_alias_target(op), valence) : NULL;
     if (r->kind == QK_ALIAS && !tgt) return RAY_ERR_DOMAIN;
-    ray_t* val = tgt ? (ray_retain(tgt->value), tgt->value)
+    /* One value per primitive: a row whose kdb code an earlier row already holds at this valence IS that value,
+     * so `neg~(-:)`.  It keeps its own row (the value index prefers it as the one-valence spelling); a recipe that
+     * disagrees with the holder's is a manifest bug. */
+    const entry_t* prim = !tgt ? code_holder(op, valence) : NULL;
+    if (prim && !recipe_same(prim->recipe, r)) return RAY_ERR_DOMAIN;
+    const entry_t* src = tgt ? tgt : prim;
+    ray_t* val = src ? (ray_retain(src->value), src->value)
                : (r->kind == QK_ENV) ? build_env(r->target) : build_wrapper(r);
     if (!val || RAY_IS_ERR(val)) return RAY_ERR_DOMAIN; /* fail-fast: audited bug */
     entry_t* e    = &g_entries[g_count++];
@@ -395,6 +418,7 @@ static ray_err_t add_entry(const q_op_t* op, q_valence_t valence,
     e->valence    = valence;
     e->value      = val;
     e->kernel     = NULL;
+    e->recipe     = r;
     e->row        = op;
     e->spelling   = op->name;
     e->lower_name = tgt ? tgt->lower_name : r->target;  /* rayfall routing name */
@@ -530,6 +554,7 @@ static ray_err_t bind_qsrc_one(const q_op_t* op, q_valence_t valence,
     e->valence    = valence;
     e->value      = val;
     e->kernel     = kernel;
+    e->recipe     = r;
     e->row        = op;
     e->spelling   = op->name;
     e->lower_name = r->target;

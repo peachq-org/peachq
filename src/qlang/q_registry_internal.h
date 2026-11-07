@@ -53,6 +53,7 @@ ray_t* q_inv_wrap(ray_t* x);                                  /* matrix inverse 
 ray_t* q_lsq_wrap(ray_t* x, ray_t* y);                        /* least squares (normal equations, Cholesky) */
 enum { QMMU_BAD = -1, QMMU_RAGGED = -2 };                     /* RAGGED is mmu-shaped: mmu owns its 'length */
 int q_mmu_class(ray_t* v, int64_t* first);                    /* 0 vec, 1 matrix, else QMMU_*; *first = count(-first) — used by: dollar */
+int q_math_numeric_matrix(ray_t* v);                           /* a list of numeric vectors, float or not — used by: bang */
 
 /* ---- defined in ops/q_null.c ---- */
 ray_t* q_null_wrap(ray_t* x);
@@ -131,6 +132,7 @@ ray_t* q_eq_wrap(ray_t* a, ray_t* b);
 ray_t* q_ne_wrap(ray_t* a, ray_t* b);
 ray_t* q_neg_wrap(ray_t* x);
 ray_t* q_not_wrap(ray_t* x);
+ray_t* q_reciprocal_wrap(ray_t* x);
 
 /* ---- defined in ops/q_table.c ---- */
 ray_t* q_keys_wrap(ray_t* x);
@@ -169,6 +171,8 @@ int q_vec_is_num(ray_t* x);                                   /* used by: list *
 /* ---- defined in q_handles.c ---- */
 ray_t* q_hopen_wrap(ray_t* x);                                /* used by: apply, registry */
 ray_t* q_hclose_wrap(ray_t* x);                               /* used by: apply, registry */
+ray_t* q_hopen_grade_wrap(ray_t* x);                         /* `<:`: hopen, or iasc of a list naming no connection */
+ray_t* q_hclose_grade_wrap(ray_t* x);                        /* `>:`: hclose an atom, else idesc */
 
 /* ---- defined in io/q_io.c (the byte core itself is io/q_io.h) ---- */
 ray_t* q_hsym_wrap(ray_t* x);                                 /* used by: bang, registry */

@@ -860,6 +860,8 @@ ray_t* q_dollar(ray_t* t, ray_t* x) {
     int64_t k;
     if (q_mmu_class(t, &k) != QMMU_BAD && q_mmu_class(x, &k) != QMMU_BAD)
         return q_dollar_mmu(t, x);   /* ragged included: mmu owns its 'length */
+    if (t && (t->type == RAY_F32 || t->type == -RAY_F32))
+        return q_err(QE_TYPE);       /* a real is no designator, and mmu takes floats only (ref/mmu.md) */
     int multi = t && ((t->type == -RAY_STR && ray_str_len(t) > 1) ||
                       (t->type == RAY_CHARV && q_count(t) > 1) ||
                       t->type == RAY_SYM || t->type == RAY_I16 || t->type == RAY_I64 ||

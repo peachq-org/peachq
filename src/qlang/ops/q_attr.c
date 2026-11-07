@@ -293,14 +293,15 @@ static ray_t* attr_set_table_s(ray_t* y) {
 
 /* `s#` on a KEYED table stamps the KEY table IN PLACE (set-attribute.md:63 — why the :35-37 pin sees
  * `s from an UNASSIGNED `s#t) and "copies the outer object" (:75), so the RESULT is a sorted dict
- * while the argument keeps its own attribute.  The key table's first column is NOT parted:
- * kb/serialization.md's keyed-table frame carries 00 there where the plain-table frame carries 03. */
+ * while the argument keeps its own attribute.  The key table's first column is sorted, not parted: q 5
+ * writes it 0b 01 (community/wire/attributes.qcmd, Dcdmxr). */
 static ray_t* attr_set_keyed_s(ray_t* y) {
     ray_t* kt = ray_dict_keys(y);                            /* borrowed key TABLE */
     if (!kt || kt->type != RAY_TABLE || ray_table_ncols(kt) < 1) return q_err(QE_TYPE);
     ray_t* c0 = ray_table_get_col_idx(kt, 0);
     if (!c0 || !non_descending(c0, 0, q_count(c0))) return q_err(QE_SFAIL);
     kt->attrs |= RAY_ATTR_SORTED;
+    c0->attrs |= RAY_ATTR_SORTED;
     ray_t* vals = ray_dict_vals(y);
     ray_retain(kt); ray_retain(vals);
     ray_t* d = ray_dict_new(kt, vals);                       /* consumes both */

@@ -967,6 +967,27 @@ static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given) {
     return make_i32((int32_t)fd);
 }
 
+/* Does x name a connection — an atom, a string, a `:`-led symbol list, or a list led by a handle ((handle;timeout),
+ * (alias;port;timeout))? */
+static int conn_shaped(ray_t* x) {
+    if (!x) return 0;
+    if (x->type < 0 || x->type == RAY_CHARV) return 1;
+    if (x->type == RAY_SYM && q_count(x) > 0) {
+        ray_t* s = ray_sym_str(ray_vec_get_sym_id(x, 0));   /* borrowed */
+        return s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == ':';
+    }
+    if (x->type == RAY_LIST && q_count(x) > 0) {
+        ray_t* h = ((ray_t**)ray_data(x))[0];
+        return h && (h->type == -RAY_SYM || h->type == -RAY_STR || h->type == RAY_CHARV);
+    }
+    return 0;
+}
+
+/* `<:` and `>:` are hopen and hclose (basics/funsql.md:908, `.q?(<:;>:)` is `hopen`hclose`), and grade a list that
+ * names no connection — the same page's sort phrase `,(<:;`price)` */
+ray_t* q_hopen_grade_wrap(ray_t* x) { return conn_shaped(x) ? q_hopen_wrap(x) : q_iasc_wrap(x); }
+ray_t* q_hclose_grade_wrap(ray_t* x) { return x && x->type < 0 ? q_hclose_wrap(x) : q_idesc_wrap(x); }
+
 /* q `hclose h` — validate the handle, then delegate the file/fifo-vs-IPC
  * dispatch to this file's q_handles_close; a SYM is a `:pq:` alias
  * (what hopen `:pq:<kind>:alias` answers).  Restricted connections are refused, matching
