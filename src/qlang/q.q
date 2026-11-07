@@ -66,10 +66,10 @@
 .q.xrank:{(x*rank y) div count y}
 / ref/asc.md: by the first column given, then the second within it = the grade of the named
 / columns, then ONE gather.  y a SYMBOL updates in place, returns the name (set returns its
-/ target).  t@/:x throws 'domain on a bad column - (flip t)x misses silently and truncates.
+/ target).  A bad column is 'domain - t@/:x would answer the first column's empty and truncate.
 / asc.md:189 - the sorted attribute is set on the FIRST column given; xdesc sets none.  No columns: t unchanged.
-.q.xasc:{[x;y]$[-11h=type y;y set .q.xasc[x;get y];.Q.ft[{[x;t]x:$[0h>type x;1#x;x];$[count x;@[t iasc flip x!t@/:x;first x;.Q.c.sorted];t]}[x;];y]]}
-.q.xdesc:{[x;y]$[-11h=type y;y set .q.xdesc[x;get y];.Q.ft[{[x;t]x:$[0h>type x;1#x;x];$[count x;t idesc flip x!t@/:x;t]}[x;];y]]}
+.q.xasc:{[x;y]$[-11h=type y;y set .q.xasc[x;get y];.Q.ft[{[x;t]x:$[0h>type x;1#x;x];if[not all x in cols t;'domain];$[count x;@[t iasc flip x!t@/:x;first x;.Q.c.sorted];t]}[x;];y]]}
+.q.xdesc:{[x;y]$[-11h=type y;y set .q.xdesc[x;get y];.Q.ft[{[x;t]x:$[0h>type x;1#x;x];if[not all x in cols t;'domain];$[count x;t idesc flip x!t@/:x;t]}[x;];y]]}
 
 / ---- wave 3 (ref/cols.md) ----
 / lifted via .Q.ft (defined later, in dotq.q - a lambda resolves it at call time);

@@ -20,6 +20,13 @@
 
 static _Thread_local int g_depth;
 static _Thread_local int g_store;   /* Assign: an op-amend's computed row, redistributed by table_store, stays strict */
+static _Thread_local int g_in_place;
+
+int q_index_in_place(int on) {
+    int was = g_in_place;
+    g_in_place = on;
+    return was;
+}
 
 /* index admission: a bool, or any atom of the int-index lane (q_type_int_index_width — bytes, chars and
  * temporals included; floats and syms are not, ref/apply.md errors) */
@@ -111,8 +118,9 @@ static ray_t* boxed1(ray_t* v) {
 /* miss result for one absent/OOB element of c: the null SHAPED like the first
  * element (ref/apply.md Index; dict misses ride this via find).  A typed atom
  * item yields its typed null, a LIST-valued item the EMPTY of its own type —
- * the miss of ("aa";"bb") is "" and not " " — and an item with no typed null
- * (a function, say) answers ::.  With no item to read a shape from, the empty
+ * the miss of ("aa";"bb") is "" and not " " — a dict or table item itself with
+ * no rows (`0#first`, kb/alternative-in-memory-layouts.md:86) — and an item with
+ * no typed null (a function, say) answers ::.  With no item to read a shape from, the empty
  * general list answers the empty of its OWN type, which is what makes
  * `first ()` ~ `() 0` ~ `()`. */
 static ray_t* miss_null(ray_t* c) {
@@ -124,6 +132,12 @@ static ray_t* miss_null(ray_t* c) {
             if (e0->type < 0) return ray_typed_null(e0->type);
             if (ray_is_vec(e0)) return q_type_empty(e0->type);
             if (e0->type == RAY_LIST) return ray_list_new(0);
+            if (e0->type == RAY_DICT || e0->type == RAY_TABLE) {
+                ray_t* n0 = ray_i64(0);
+                ray_t* r = q_take_wrap(n0, e0);
+                ray_release(n0);
+                return r ? r : q_err(QE_TYPE);
+            }
         }
     }
     ray_retain(RAY_NULL_OBJ);
@@ -373,7 +387,7 @@ static ray_t* table_level(ray_t* t, ray_t* i, int write) {
     if (i->type == -RAY_SYM) {
         ray_t* fd = q_table_to_dict(t);
         if (!fd || RAY_IS_ERR(fd)) return fd ? fd : q_err(QE_TYPE);
-        ray_t* r = index_level(fd, i, 1);    /* a table has no absent column */
+        ray_t* r = index_level(fd, i, write);   /* an absent column is the column dict's miss */
         ray_release(fd);
         return r;
     }
@@ -514,10 +528,17 @@ static ray_t* index_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
     if (x->type == RAY_DICT) {                       /* `d[x] ~ v[k?x]`, whatever shape x has */
         ray_t* pos = dict_pos(x, i0);
         if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_TYPE);
-        return elem_rest(dict_read(x, pos, i0), rest, k);
+        if (k == 0 || ray_is_atom(pos)) return elem_rest(dict_read(x, pos, i0), rest, k);
+        if (pos->type == RAY_LIST) { ray_release(pos); return index_map(x, i0, rest, k); }
+        ray_t* g = dict_read(x, pos, i0);              /* a run: the rest applies to each key (ref/apply.md:233-239) */
+        if (!g || RAY_IS_ERR(g)) return g ? g : q_err(QE_TYPE);
+        ray_t* r = index_map(g, NULL, rest, k);
+        ray_release(g);
+        return r;
     }
     if (x->type == RAY_TABLE) {                      /* pure delegation */
         ray_t* nx = q_table_at(x, i0);
+        if (!nx && i0->type == -RAY_SYM && !ray_table_get_col(x, i0->i64)) nx = table_level(x, i0, 0);
         if (!nx) nx = ray_at_fn(x, i0);
         return elem_rest(nx, rest, k);
     }
@@ -557,7 +578,10 @@ static ray_t* amend_r(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k,
 static ray_t* leaf_apply(ray_t* f, ray_t* s, ray_t* y) {
     if (!f) { ray_retain(y); return mat(y); }
     ray_t* av[2] = { s, y };
+    int was = g_in_place;
+    if (q_registry_row_of(f, Q_DYADIC) != q_ops_find(",", 1)) g_in_place = 0;   /* only `,:` writes in place */
     ray_t* r = q_eval_apply_value(f, av, y ? 2 : 1);
+    g_in_place = was;
     return r ? mat(r) : q_err(QE_TYPE);
 }
 
@@ -736,6 +760,10 @@ static ray_t* dict_put(ray_t* x, ray_t* ky, ray_t* vy, ray_t* pos, int strict) {
     if (!misses_fit(slots[0], ky, d, m, n0) || (strict && !run_fits(slots[1], vy))) {
         ray_release(pos);
         return q_err(QE_TYPE);
+    }
+    if (added && g_in_place && ray_is_vec(slots[0]) && (slots[0]->attrs & RAY_ATTR_SORTED)) {   /* a step domain */
+        ray_release(pos);
+        return q_err(QE_STEP);
     }
     int excl = x->rc == 1 && !(x->attrs & (RAY_ATTR_ARENA | RAY_ATTR_SLICE));
     ray_t* nk = slots[0];
@@ -1045,8 +1073,8 @@ static ray_t* amend_entire(ray_t* x, ray_t* f, ray_t* y) {
 /* leaf store at ONE index i0: read S, apply, store (a dict key miss reads the typed null and the store INSERTS —
  * ref/amend.md).  p >= 0 is a dict key's position the run's Find already settled; -1 looks it up here.
  * An ABSENT key under an operator is undefined, exactly `a+:5` on an unbound name (ref/assign.md:135; owner ruling
- * 2026-09-17): S is the operator's identity, never the miss null, so `()!()` accumulates under `+` (i100).  The
- * step dictionary (`s#) is excluded — it defines every key. */
+ * 2026-09-17): S is the operator's identity, never the miss null, so `()!()` accumulates under `+` (i100) and `^`,
+ * whose identity is y's own null, stores y.  The step dictionary (`s#) is excluded — it defines every key. */
 static ray_t* leaf1(ray_t* x, ray_t* i0, int64_t p, ray_t* f, ray_t* y) {
     ray_t* nv;
     if (f) {
@@ -1054,10 +1082,13 @@ static ray_t* leaf1(ray_t* x, ray_t* i0, int64_t p, ray_t* f, ray_t* y) {
         const q_op_t* row = keys && p >= q_count(keys) && !(keys->attrs & RAY_ATTR_SORTED) && y
                           ? q_registry_row_of(f, Q_DYADIC) : NULL;
         ray_t* s = row ? q_ops_identity(row->name, QI_VALUE) : NULL;
-        if (!s) s = p >= 0 ? dict_read(x, ray_i64(p), i0) : index_level(x, i0, 0);
-        if (!s || RAY_IS_ERR(s)) return s ? s : q_err(QE_TYPE);
-        nv = leaf_apply(f, s, y);
-        ray_release(s);
+        if (!s && row && q_ops_identity_is_null(row->name)) nv = leaf_apply(NULL, NULL, y);
+        else {
+            if (!s) s = p >= 0 ? dict_read(x, ray_i64(p), i0) : index_level(x, i0, 0);
+            if (!s || RAY_IS_ERR(s)) return s ? s : q_err(QE_TYPE);
+            nv = leaf_apply(f, s, y);
+            ray_release(s);
+        }
     } else {
         nv = leaf_apply(NULL, NULL, y);
         if (g_store) nv = pair_cast(q_type_is_plain_dict(x) ? ray_dict_slots(x)[1] : x, nv);
@@ -1180,7 +1211,7 @@ static ray_t* amend_one(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k, ray_
         *slot = level_collapse(nc);
         return x;
     }
-    ray_t* child = index_level(x, i0, 1);            /* absent path: 'index */
+    ray_t* child = index_level(x, i0, !q_type_is_keyed(x));   /* absent: 'index, but a keyed miss amends its null row */
     if (!child || RAY_IS_ERR(child)) return child ? child : q_err(QE_TYPE);
     ray_t* nc = level_collapse(amend_r(child, rest[0], rest + 1, k - 1, f, y));
     if (RAY_IS_ERR(nc)) { ray_release(child); return nc; }

@@ -1930,8 +1930,10 @@ static ray_t* name_lift(const q_op_t* row, ray_t** args, int64_t n, int dot) {
         return q_err(QE_DOMAIN);                     /* not a handle */
     }
     ray_t* y = n == 4 ? args[3] : NULL;
+    int was = q_index_in_place(1);
     ray_t* r = dot ? q_index_amend_dot(cur, args[1], args[2], y)
                    : q_index_amend_at(cur, args[1], args[2], y);
+    q_index_in_place(was);
     if (!r || RAY_IS_ERR(r)) {
         if (stole) q_env_handle_bind(id, cur);       /* restore the binding */
         ray_release(cur);
