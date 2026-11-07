@@ -28,7 +28,7 @@
 #include "qlang/q_ops.h"      /* q_ops_find — the static lexical manifest */
 #include "qlang/q_env.h"      /* q_env_ident_ok — a captured marker must be a q name */
 #include "qlang/io/q_duckdb.h" /* q_duckdb_params — the markers of a capturing text literal */
-#include "qlang/eval/q_eval.h" /* q_eval_apply_is_fn(val), q_eval_apply_carrier_kind */
+#include "qlang/eval/q_eval.h" /* q_eval_apply_is_fn(val) */
 #include "qlang/eval/q_dbg.h"  /* q_dbg_statement_origin — the lambda's file + line */
 #include "table/sym.h"       /* ray_sym_vec_cell — qSQL dict-key/col names */
 #include <ctype.h>       /* isalpha — the `<letter>)` intake prefix */
@@ -638,10 +638,10 @@ static void free_tokens(Tokens ts) {
 
 typedef enum { R_NONE, R_NOUN, R_VERB } Role;
 /* train: the rightmost operand is WRITTEN as a verb — a postfix elision (`count@`, `-9!`), a lone glyph (`0|+`) or
- * an iterator-suffixed expression (`neg\`) or a glued `g::` — a value that applies LATER, so what stands to its left
- * COMPOSES onto it (ref/apply.md "u v w@", ref/compose.md "(0|+)") as a compose node.  Set only in parse_e_from_body
- * and carried left through infix and juxtaposition; a keyword, a lambda, a name, parens and brackets end it
- * (composition is syntactic, 2026-09-17).  glyph: the term is a glyph WRITTEN alone in parens, `(+)` — a keyword is
+ * an iterator-suffixed expression (`neg\`) or a `g ::` tail, spaced or glued — a value that applies LATER, so what
+ * stands to its left COMPOSES onto it (ref/apply.md "u v w@", ref/compose.md "(0|+)") as a compose node.  Carried left
+ * through infix and juxtaposition; a keyword, a lambda, a name, parens and brackets end it (composition is syntactic,
+ * 2026-09-17).  glyph: the term is a glyph WRITTEN alone in parens, `(+)` — a keyword is
  * a value too, so only the token can tell `(+)(*)` (composes) from `count distinct` (applies). */
 typedef struct { Role role; ray_t *v; int train; int glyph; } P;
 static const P EMPTY = { R_NONE, NULL, 0, 0 };
@@ -792,6 +792,10 @@ static int binding_node(ray_t *x, ray_t **name, ray_t **val) {
     return 1;
 }
 
+static int keyword_phrase(const ray_t *x) {
+    return x && x->type != -RAY_SYM && x->type != RAY_LIST && q_registry_operand_row(x);
+}
+
 /* Reserved-ness is LEXICAL — refused wherever SOURCE names a column, exactly as
  * `null:5` is (owner ruling 2026-08-15: "columns cant be reserved words"), in
  * BOTH spellings above.  A name arriving as DATA never reaches here, so
@@ -800,10 +804,6 @@ static int binding_node(ray_t *x, ray_t **name, ray_t **val) {
  * already its value (the head law), and lends its spelling all the same.
  * Answers rather than dies: each caller owns different refs at the point it can
  * afford to longjmp. */
-static int keyword_phrase(const ray_t *x) {
-    return x && x->type != -RAY_SYM && x->type != RAY_LIST && q_registry_operand_row(x);
-}
-
 static int names_have_reserved(ray_t *phrases) {
     if (!phrases || phrases->type != RAY_LIST) return 0;
     int64_t n = q_count(phrases);
