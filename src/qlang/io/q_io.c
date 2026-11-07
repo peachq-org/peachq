@@ -171,8 +171,8 @@ ray_t* q_io_write_all(ray_t* pathstr, const void* bytes, size_t n) {
 
 #define ZIP_MAGIC     "kxzipped"
 #define ZIP_MAGIC_LEN 8
-#define ZIP_TRAIL_LEN 48   /* ONE fixed tail header — never per-block (dissection r2) */
-#define ZIP_PFX_LEN   8    /* nb>1: each block is prefixed by its compressed length */
+#define ZIP_HEAD_LEN  32   /* the tail's fixed head; then (len i32; alg i32) per block, then numBlocks i64 */
+#define ZIP_TAIL_LEN(nb) (ZIP_HEAD_LEN + 8 * (nb) + 8)
 
 int64_t q_io_clamp(int64_t n, int64_t* off, int64_t want) {
     if (*off < 0) *off = 0;
@@ -376,25 +376,38 @@ static int32_t zip_log2(int64_t v) {
     return k;
 }
 
-/* Decode the FIXED 48-byte tail header at `t` (dissection r2, practitioner-
- * confirmed): version i32 | codec u8 | level u8 | pad u16 | decompressedLength
- * i64 | compressedLength-incl-magic i64 | logicalBlockSize i64 | dataArea i32
- * | algorithm i32 | numBlocks i64.  `file_len` closes the arithmetic, so a
- * truncation is detectable.  NULL on success, else an owned 'corrupt. */
-static ray_t* zip_trailer(const uint8_t* t, size_t file_len, zip_hdr_t* z) {
+/* The block count, the tail's last 8 bytes, as far as the file can hold its tail; 0 = it cannot. */
+static int64_t zip_nblocks(const uint8_t* last8, size_t file_len) {
+    int64_t nb = io_i64(last8);
+    if (file_len < ZIP_MAGIC_LEN + ZIP_TAIL_LEN(1) || nb <= 0) return 0;
+    return nb <= (int64_t)((file_len - ZIP_MAGIC_LEN - ZIP_TAIL_LEN(0)) / 8) ? nb : 0;
+}
+
+static int32_t zip_blen(const uint8_t* t, int64_t k) { return io_i32(t + ZIP_HEAD_LEN + 8 * k); }
+static int32_t zip_balg(const uint8_t* t, int64_t k) { return io_i32(t + ZIP_HEAD_LEN + 8 * k + 4); }
+
+/* Decode the tail at `t` of an nb-block container: version i32 | codec u8 | level u8 | pad u16 | decompressedLength
+ * i64 | compressedLength-incl-magic i64 | logicalBlockSize i64 | (length i32; algorithm i32) per block | numBlocks
+ * i64.  The blocks sit back to back after the magic; the two-block layout is a KDB-X-written file's (uqf
+ * tests/q/test_compression_primitives.q:44-49).  `file_len` closes the arithmetic, so a truncation is detectable.
+ * A block whose algorithm is not block 0's is 'corrupt: every reader inflates a file with one codec.  NULL on
+ * success, else an owned 'corrupt. */
+static ray_t* zip_trailer(const uint8_t* t, int64_t nb, size_t file_len, zip_hdr_t* z) {
     z->version      = io_i32(t);
     z->level        = t[5];
     z->uncompressed = io_i64(t + 8);
     z->block_size   = io_i64(t + 24);
-    z->compressed   = io_i32(t + 32);
-    z->algorithm    = io_i32(t + 36);
-    z->num_blocks   = io_i64(t + 40);
-    size_t room = file_len - ZIP_MAGIC_LEN - ZIP_TRAIL_LEN;
-    if (z->uncompressed < 0 || z->compressed < 0 || z->num_blocks <= 0)
+    z->algorithm    = zip_balg(t, 0);
+    z->num_blocks   = nb;
+    int64_t sum = 0;
+    for (int64_t k = 0; k < nb; k++) {
+        if (zip_blen(t, k) < 0 || zip_balg(t, k) != z->algorithm) return q_err(QE_CORRUPT);
+        sum += zip_blen(t, k);
+    }
+    if (z->uncompressed < 0 || sum > INT32_MAX ||
+        (size_t)sum != file_len - ZIP_MAGIC_LEN - ZIP_TAIL_LEN(nb) || io_i64(t + 16) != ZIP_MAGIC_LEN + sum)
         return q_err(QE_CORRUPT);
-    if ((size_t)z->compressed != room ||
-        io_i64(t + 16) != (int64_t)(ZIP_MAGIC_LEN + z->compressed))
-        return q_err(QE_CORRUPT);
+    z->compressed = (int32_t)sum;
     return NULL;
 }
 
@@ -402,19 +415,23 @@ static ray_t* zip_trailer(const uint8_t* t, size_t file_len, zip_hdr_t* z) {
  * with *found=0 when it carries no magic, NULL with *found=1 and `z` filled
  * when it holds a well-formed container; else an owned error — 'io from the
  * read, 'corrupt from a layout the magic promised and the trailer denies. */
-static ray_t* io_zip_hdr(ray_t* pathstr, int64_t file_len, zip_hdr_t* z, int* found) {
+static ray_t* io_zip_hdr(ray_t* pathstr, int64_t file_len, zip_hdr_t* z, int* found, ray_t** tail_out) {
     *found = 0;
+    if (tail_out) *tail_out = NULL;
     int wrapped = 0;
-    ray_t* tail = io_read_raw(pathstr, file_len - ZIP_TRAIL_LEN, ZIP_TRAIL_LEN, &wrapped);
+    ray_t* last = io_read_raw(pathstr, file_len - 8, 8, &wrapped);
+    if (RAY_IS_ERR(last)) return last;
+    int64_t nb = wrapped && q_count(last) == 8 ? zip_nblocks((const uint8_t*)ray_data(last), (size_t)file_len) : 0;
+    ray_release(last);
+    if (!wrapped) return NULL;
+    if (!nb) return q_err(QE_CORRUPT);
+    ray_t* tail = io_read_raw(pathstr, file_len - ZIP_TAIL_LEN(nb), ZIP_TAIL_LEN(nb), NULL);
     if (RAY_IS_ERR(tail)) return tail;
-    ray_t* bad = NULL;
-    if (wrapped) {
-        bad = file_len < ZIP_MAGIC_LEN + ZIP_TRAIL_LEN || q_count(tail) != ZIP_TRAIL_LEN
-                  ? q_err(QE_CORRUPT)
-                  : zip_trailer((const uint8_t*)ray_data(tail), (size_t)file_len, z);
-        *found = bad == NULL;
-    }
-    ray_release(tail);
+    ray_t* bad = q_count(tail) != ZIP_TAIL_LEN(nb) ? q_err(QE_CORRUPT)
+               : zip_trailer((const uint8_t*)ray_data(tail), nb, (size_t)file_len, z);
+    *found = bad == NULL;
+    if (!bad && tail_out) *tail_out = tail;
+    else ray_release(tail);
     return bad;
 }
 
@@ -424,19 +441,21 @@ static ray_t* io_zip_hdr(ray_t* pathstr, int64_t file_len, zip_hdr_t* z, int* fo
  * length is all there is — the magic is a claim, and `-21!` is what signals. */
 int64_t q_io_file_size(ray_t* pathstr) {
     int64_t n = io_stat_size(pathstr);
-    if (n < ZIP_MAGIC_LEN + ZIP_TRAIL_LEN) return n;
+    if (n < ZIP_MAGIC_LEN + ZIP_TAIL_LEN(1)) return n;
     zip_hdr_t z;
     int found = 0;
-    ray_t* bad = io_zip_hdr(pathstr, n, &z, &found);
+    ray_t* bad = io_zip_hdr(pathstr, n, &z, &found, NULL);
     if (bad) { ray_release(bad); return n; }
     return found ? z.uncompressed : n;
 }
 
 ray_t* q_io_unzip(const uint8_t* buf, size_t len) {
     if (!buf || len < ZIP_MAGIC_LEN || memcmp(buf, ZIP_MAGIC, ZIP_MAGIC_LEN) != 0) return NULL;
-    if (len < ZIP_MAGIC_LEN + ZIP_TRAIL_LEN) return q_err(QE_CORRUPT);
+    int64_t nb = len >= 8 ? zip_nblocks(buf + len - 8, len) : 0;
+    if (!nb) return q_err(QE_CORRUPT);
+    const uint8_t* t = buf + len - ZIP_TAIL_LEN(nb);
     zip_hdr_t z;
-    ray_t* bad = zip_trailer(buf + len - ZIP_TRAIL_LEN, len, &z);
+    ray_t* bad = zip_trailer(t, nb, len, &z);
     if (bad) return bad;
     if (z.algorithm != ZIP_NONE && z.algorithm != ZIP_GZIP) return q_err(QE_NYI);
     int32_t log2bs = zip_log2(z.block_size);
@@ -458,22 +477,10 @@ ray_t* q_io_unzip(const uint8_t* buf, size_t len) {
 
     uint8_t* dst = (uint8_t*)malloc(z.uncompressed > 0 ? (size_t)z.uncompressed : 1);
     if (!dst) return q_err(QE_OOM);
-    /* nb==1: the data area IS the stream; nb>1: each block is length-prefixed
-     * (the skip-chain random access needs — dissection r2) */
     size_t produced = 0, pos = 0;
     int ok = 1;
     for (int64_t k = 0; ok && k < z.num_blocks; k++) {
-        size_t start, clen;
-        if (z.num_blocks == 1) {
-            start = 0;
-            clen = (size_t)z.compressed;
-        } else {
-            int64_t L = pos + ZIP_PFX_LEN <= (size_t)z.compressed
-                            ? io_i64(buf + ZIP_MAGIC_LEN + pos) : -1;
-            if (L <= 0 || pos + ZIP_PFX_LEN + (size_t)L > (size_t)z.compressed) { ok = 0; break; }
-            start = pos + ZIP_PFX_LEN;
-            clen = (size_t)L;
-        }
+        size_t start = pos, clen = (size_t)zip_blen(t, k);
         int64_t plain = z.uncompressed - (int64_t)produced;
         if (plain > z.block_size) plain = z.block_size;
         size_t got = 0, used = 0;
@@ -525,7 +532,7 @@ ray_t* q_io_zip_stats(ray_t* x) {
     int64_t file_len = io_stat_size(path);       /* the CONTAINER's own length */
     zip_hdr_t z;
     int found = 0;
-    ray_t* r = io_zip_hdr(path, file_len, &z, &found);
+    ray_t* r = io_zip_hdr(path, file_len, &z, &found, NULL);
     if (!r && !found)                   /* not compressed -> the empty dict */
         r = ray_dict_new(ray_sym_vec_new(RAY_SYM_W64, 0), ray_list_new(0));
     else if (!r) {
@@ -547,40 +554,21 @@ ray_t* q_io_zip_open(ray_t* pathstr, q_io_zipmap_t* zm) {
     int64_t file_len = io_stat_size(pathstr);
     zip_hdr_t z;
     int found = 0;
-    ray_t* bad = io_zip_hdr(pathstr, file_len, &z, &found);
+    ray_t* tail = NULL;
+    ray_t* bad = io_zip_hdr(pathstr, file_len, &z, &found, &tail);
     if (bad) return bad;
     if (!found) return q_err(QE_TYPE);
-    if (z.algorithm != ZIP_NONE && z.algorithm != ZIP_GZIP) return q_err(QE_NYI);
+    const uint8_t* t = (const uint8_t*)ray_data(tail);
     int32_t log2bs = zip_log2(z.block_size);
-    if (z.block_size != (int64_t)1 << log2bs ||
-        log2bs < ZIP_LOG2_MIN || log2bs > ZIP_LOG2_MAX)
-        return q_err(QE_CORRUPT);
-    int64_t need = z.uncompressed / z.block_size + (z.uncompressed % z.block_size ? 1 : 0);
-    if (need > z.num_blocks || z.num_blocks <= 0) return q_err(QE_CORRUPT);
-    zm->ends = (int64_t*)malloc((size_t)z.num_blocks * sizeof(int64_t));
-    if (!zm->ends) return q_err(QE_OOM);
-    if (z.num_blocks == 1) {
-        zm->ends[0] = z.compressed;      /* one block IS the data area, no prefix */
-    } else {
-        /* nb>1: skip-chain the per-block length prefixes (offsets are stored
-         * NOWHERE else — dissection r2).  A prefix that runs past the data
-         * area, or a chain that misses its end, is 'corrupt. */
-        int64_t pos = 0, ok = 1;
-        for (int64_t k = 0; ok && k < z.num_blocks; k++) {
-            ray_t* pfx = io_read_raw(pathstr, ZIP_MAGIC_LEN + pos, ZIP_PFX_LEN, NULL);
-            if (!pfx || RAY_IS_ERR(pfx) || q_count(pfx) != ZIP_PFX_LEN) {
-                if (pfx && !RAY_IS_ERR(pfx)) ray_release(pfx);
-                q_io_zipmap_free(zm);
-                return pfx && RAY_IS_ERR(pfx) ? pfx : q_err(QE_IO);
-            }
-            int64_t L = io_i64((const uint8_t*)ray_data(pfx));
-            ray_release(pfx);
-            if (L <= 0 || pos + ZIP_PFX_LEN + L > z.compressed) ok = 0;
-            else { pos += ZIP_PFX_LEN + L; zm->ends[k] = pos; }
-        }
-        if (ok && pos != z.compressed) ok = 0;
-        if (!ok) { q_io_zipmap_free(zm); return q_err(QE_CORRUPT); }
-    }
+    int sized = z.block_size == (int64_t)1 << log2bs && log2bs >= ZIP_LOG2_MIN && log2bs <= ZIP_LOG2_MAX;
+    bad = z.algorithm != ZIP_NONE && z.algorithm != ZIP_GZIP ? q_err(QE_NYI)
+        : !sized || z.uncompressed / z.block_size + (z.uncompressed % z.block_size ? 1 : 0) > z.num_blocks
+              ? q_err(QE_CORRUPT) : NULL;
+    zm->ends = bad ? NULL : (int64_t*)malloc((size_t)z.num_blocks * sizeof(int64_t));
+    if (!bad && !zm->ends) bad = q_err(QE_OOM);
+    for (int64_t k = 0, pos = 0; !bad && k < z.num_blocks; k++) zm->ends[k] = pos += zip_blen(t, k);
+    ray_release(tail);
+    if (bad) return bad;
     zm->uncompressed = z.uncompressed;
     zm->block_size = z.block_size;
     zm->num_blocks = z.num_blocks;
@@ -591,7 +579,7 @@ ray_t* q_io_zip_open(ray_t* pathstr, q_io_zipmap_t* zm) {
 }
 
 static int64_t zip_block_span(const q_io_zipmap_t* zm, int64_t k, int64_t* start) {
-    *start = (k ? zm->ends[k - 1] : 0) + (zm->num_blocks > 1 ? ZIP_PFX_LEN : 0);
+    *start = k ? zm->ends[k - 1] : 0;
     return zm->ends[k] - *start;
 }
 
@@ -679,11 +667,10 @@ ray_t* q_io_zip_write(ray_t* pathstr, const uint8_t* img, size_t n,
         total += bl[k];
     }
     ray_t* bad = NULL;
-    /* did not pay AND fits one block: kdb's alg-0 wrapper (a multi-block raw
-     * area would need prefixes the alg-0 exact-length law cannot carry) */
+    /* did not pay AND fits one block: kdb's alg-0 wrapper (no sample shows a multi-block one) */
     int raw0 = !gerr && total >= n && nb == 1;
-    size_t C = raw0 ? n : total + (nb > 1 ? (size_t)nb * ZIP_PFX_LEN : 0);
-    size_t flen = ZIP_MAGIC_LEN + C + ZIP_TRAIL_LEN;
+    size_t C = raw0 ? n : total;
+    size_t flen = ZIP_MAGIC_LEN + C + ZIP_TAIL_LEN(nb);
     uint8_t* out = gerr ? NULL : (uint8_t*)malloc(flen);
     if (gerr) {
         bad = q_err(QE_OOM);
@@ -695,15 +682,12 @@ ray_t* q_io_zip_write(ray_t* pathstr, const uint8_t* img, size_t n,
         if (raw0) {
             memcpy(w, img, n); w += n;
         } else {
-            for (int64_t k = 0; k < nb; k++) {       /* nb>1: length-prefixed blocks */
-                if (nb > 1) { int64_t L = (int64_t)bl[k]; memcpy(w, &L, 8); w += 8; }
-                memcpy(w, blk[k], bl[k]); w += bl[k];
-            }
+            for (int64_t k = 0; k < nb; k++) { memcpy(w, blk[k], bl[k]); w += bl[k]; }
         }
         int32_t ver = 3;                             /* the observed 2025-era stamp */
         int64_t unc = (int64_t)n, bsz = bs, nbl = nb;
         int64_t cim = (int64_t)(ZIP_MAGIC_LEN + C);
-        int32_t csz = (int32_t)C, walg = raw0 ? ZIP_NONE : alg;
+        int32_t walg = raw0 ? ZIP_NONE : alg;
         memcpy(w, &ver, 4); w += 4;
         *w++ = (uint8_t)ZIP_GZIP;                    /* codec: the REQUESTED pair */
         *w++ = (uint8_t)lvl;
@@ -711,8 +695,11 @@ ray_t* q_io_zip_write(ray_t* pathstr, const uint8_t* img, size_t n,
         memcpy(w, &unc, 8);  w += 8;
         memcpy(w, &cim, 8);  w += 8;
         memcpy(w, &bsz, 8);  w += 8;
-        memcpy(w, &csz, 4);  w += 4;
-        memcpy(w, &walg, 4); w += 4;
+        for (int64_t k = 0; k < nb; k++) {
+            int32_t csz = raw0 ? (int32_t)n : (int32_t)bl[k];
+            memcpy(w, &csz, 4);  w += 4;
+            memcpy(w, &walg, 4); w += 4;
+        }
         memcpy(w, &nbl, 8);  w += 8;
         bad = q_io_write_all(pathstr, out, flen);
     }
