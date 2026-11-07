@@ -133,6 +133,17 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
     }
     int64_t sym;
     ray_t* t = q_table_operand(x, &sym);
+    if (!t && q_type_is_plain_dict(car)) {               /* a dict's upsert is its Join */
+        int was = q_index_in_place(car != x);
+        ray_t* nd = q_join_wrap(car, y);
+        q_index_in_place(was);
+        if (car == x || !nd || RAY_IS_ERR(nd)) return nd ? nd : q_err(QE_TYPE);
+        ray_err_t e = q_env_handle_set(x->i64, nd);   /* retains */
+        ray_release(nd);
+        if (e != RAY_OK) return q_env_err(e);
+        ray_retain(x);
+        return x;
+    }
     if (!t) {
         if (x && x->type == -RAY_SYM && !q_env_handle_get(x->i64) &&
             y && (y->type == RAY_TABLE || q_type_is_keyed(y))) {

@@ -316,7 +316,9 @@ static ray_t* indexed_assign(ray_t* target, ray_t* opv, ray_t* rhs) {
          * amend would copy the whole vector: park it (q_env.h q_env_take) */
         int stole = local ? q_env_local_take(te[0]->i64, cur)
                           : q_env_take(te[0]->i64, cur);
+        int was = q_index_in_place(1);
         ray_t* amended = q_index_amend(cur, idxv, k, opv, rv);
+        q_index_in_place(was);
         if (RAY_IS_ERR(amended)) {
             if (stole) unpark(local, te[0]->i64, cur);
             ray_release(cur);
@@ -879,7 +881,9 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
         if (RAY_IS_ERR(rv)) { ray_release(cur); return rv; }
         stole = local ? q_env_local_take(target->i64, cur)
                       : q_env_take(target->i64, cur);
+        int was = q_index_in_place(1);
         nv = q_join_amend(&cur, rv, stole);
+        q_index_in_place(was);
         if (stole && RAY_IS_ERR(nv)) unpark(local, target->i64, cur);
         else if (stole) cur = NULL;                  /* consumed */
     } else if (passes) {
