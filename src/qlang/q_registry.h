@@ -113,9 +113,10 @@ bool q_registry_sealed(void);
  * `.q.<sym_id>` target (and to each entry of a whole-`.q` write), q_eval to a bare global `name:` spelling. */
 int q_registry_locked(int64_t sym_id);
 
-/* A builtin `.q` entry's value as sealed, BORROWED — what a symbol resolves to when the manifest holds no value for
- * it (`asc`, `prev`, `tables`); NULL for any other name and before the seal.  Never the live `.q`. */
-ray_t* q_registry_builtin_value(int64_t sym_id);
+/* THE keyword lookup the parser binds by: a manifest verb's value (the monadic cell, else the dyadic), else the `.q`
+ * entry of that name (a q.q builtin, or a user extension once sealed), BORROWED; NULL for any other name.
+ * *builtin (when non-NULL) is set for a q.q builtin, whose spelling a local may still bind. */
+ray_t* q_registry_keyword(int64_t sym_id, int* builtin);
 
 /* A USER `.q` entry (a key of the live `.q` that is no builtin): its value, BORROWED; NULL otherwise and before the
  * seal.  Such a name is a keyword from the moment it exists: the parser binds it and every `name:` spelling of it is
