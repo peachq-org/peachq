@@ -43,49 +43,38 @@
 
 /* ===== parse-error escape =====================================================
  * kparser die()s (exit) on malformed input.  A REPL must not exit, so a
- * malformed parse longjmps back to parse_text, which returns a ray_error. */
+ * malformed parse longjmps back to its entry point, whose handler answers
+ * die_answer().  die_err is the one longjmp; the others only stage its class
+ * and payload. */
 static jmp_buf q_err_jmp;
-static q_err_e g_die_class = QE_PARSE;   /* die_err overrides for one longjmp */
+static q_err_e g_die_class = QE_PARSE;
 
-static _Noreturn void q_die(const char *msg) {
-    (void)msg;   /* class-only errors (bare 'parse); msg documents the call site */
-    longjmp(q_err_jmp, 1);
-}
+/* a classed error whose TEXT is the payload — the handler answers q_err_signal:
+ * a refused k-unary glyph AS the class (`$42` -> '$, `+d` -> '+, the
+ * offending-text-itself shape of undefined names, basics/parsetrees.md) and
+ * kx 4.0's `dup names for cols/groups b` (qsql.md:168) */
+static ray_t *g_die_payload = NULL;   /* owned charv across the longjmp */
 
 static _Noreturn void die_err(q_err_e cls) {
     g_die_class = cls;
     longjmp(q_err_jmp, 1);
 }
 
-/* a classed error whose TEXT is p[0..n) — the handler answers q_err_signal:
- * a refused k-unary glyph AS the class (`$42` -> '$, `+d` -> '+, the
- * offending-text-itself shape of undefined names, basics/parsetrees.md) and
- * kx 4.0's `dup names for cols/groups b` (qsql.md:168) */
-static ray_t *g_die_payload = NULL;   /* owned charv across the longjmp */
+static _Noreturn void q_die(const char *msg) {
+    (void)msg;   /* class-only errors (bare 'parse); msg documents the call site */
+    die_err(QE_PARSE);
+}
 
 static _Noreturn void die_signal(q_err_e cls, const char *p, size_t n) {
-    g_die_class = cls;
     g_die_payload = ray_charv(p, (int64_t)n);
-    longjmp(q_err_jmp, 1);
+    die_err(cls);
 }
 
 /* ===== ray_t leaf builders =================================================== */
 
-/* name reference (ATTR_QUOTED clear): resolved by eval */
+/* name reference (ATTR_QUOTED clear): resolved by eval.  A verb is one too —
+ * monadic vs dyadic is a valence decision, so kparser's KV1/KV2 split is gone. */
 static ray_t *i_name(const char *s, int len) {
-    return ray_sym(ray_sym_intern_runtime(s, (size_t)len));
-}
-
-/* verb: a name-ref sym of the verb char, e.g. "+", ":".  Monadic vs dyadic
- * is a valence decision left to eval, so we drop kparser's KV1/KV2 split. */
-ray_t *q_verb(char c) {
-    char b[2] = { c, '\0' };
-    return ray_sym(ray_sym_intern_runtime(b, 1));
-}
-
-/* verb by name (multi-char glyph like "<=", "<>", or keyword like "div"):
- * a name-ref sym, ATTR_QUOTED clear; the parser embeds its registry value. */
-ray_t *q_verb_name(const char *s, int len) {
     return ray_sym(ray_sym_intern_runtime(s, (size_t)len));
 }
 
@@ -97,6 +86,22 @@ static ray_t *iter_value(int adv) {
     if (!v) q_die("iterator: registry not initialized");
     ray_retain(v);
     return v;
+}
+
+static int sym_is_nameref(const ray_t *v) {
+    return v && v->type == -RAY_SYM && !(v->attrs & Q_ATTR_QUOTED);
+}
+
+/* the spelling of a NAME-REF sym, owned, or NULL for anything else */
+static ray_t *nameref_str(const ray_t *v) {
+    return sym_is_nameref(v) ? ray_sym_str(v->i64) : NULL;
+}
+
+/* True iff v is a NAME-REF sym spelled exactly s — the one home for the
+ * "compare a sym to a spelling" walk the tree checks repeat (`;` statement
+ * heads, `:` alias heads, the `::` token, the join `,`). */
+static int sym_name_is(const ray_t *v, const char *s) {
+    return sym_is_nameref(v) && v->i64 == ray_sym_intern_runtime(s, strlen(s));
 }
 
 /* THE MONADIC MARKER, one home.  A trailing `:` on a spelling whose remainder
@@ -116,9 +121,8 @@ static const q_op_t *marker_row(const char *nm, size_t len) {
  * ("<g>:") probes the registry under the bare glyph.  On a miss the sym is
  * returned unchanged (unknown -> name-ref, ADR 0002).  Consumes `sym`,
  * returns owned. */
-ray_t *q_embed(ray_t *sym, q_valence_t val) {
-    if (!sym || sym->type != -RAY_SYM || (sym->attrs & Q_ATTR_QUOTED)) return sym;
-    ray_t *s = ray_sym_str(sym->i64);
+static ray_t *q_embed(ray_t *sym, q_valence_t val) {
+    ray_t *s = nameref_str(sym);
     if (!s) return sym;
     const char *nm = ray_str_ptr(s);
     size_t nl = ray_str_len(s);
@@ -132,72 +136,29 @@ ray_t *q_embed(ray_t *sym, q_valence_t val) {
     ray_t *hit = q_registry_lookup_name(nm, nl, val);
     ray_release(s);
     if (!hit) hit = q_registry_dotq_ext(sym->i64);
-    if (!hit) return sym;
     /* q.q-hosted (QK_QSRC) carriers embed too: eval retains a non-sym head as a
      * value rather than re-walking it (#351) */
-    if (!q_eval_apply_is_fn(hit)) return sym;
+    if (!hit || !q_eval_apply_is_fn(hit)) return sym;
     ray_retain(hit);
     ray_release(sym);
     return hit;
 }
 
-/* True iff a sym spells a glyph verb (1 char from VERB_CHARS, optionally with
- * the monadic marker) — used to keep bare-verb embedding away from user
- * names, which must stay env-resolved name-refs. */
-static int sym_is_glyph(ray_t *sym);   /* defined after VERB_CHARS */
-
-/* True iff v is a NAME-REF sym (unquoted -RAY_SYM) whose spelling is exactly s
- * — the one home for the "read a sym back and compare it" walk the tree checks
- * repeat (`;` statement heads, `:` alias heads, the `::` token, the join `,`). */
-static int sym_name_is(const ray_t *v, const char *s) {
-    if (!v || v->type != -RAY_SYM || (v->attrs & Q_ATTR_QUOTED)) return 0;
-    ray_t *str = ray_sym_str(v->i64);
-    if (!str) return 0;
-    size_t sl = strlen(s);
-    int r = ray_str_len(str) == sl && memcmp(ray_str_ptr(str), s, sl) == 0;
-    ray_release(str);
-    return r;
+static ray_t *embed_glyph(const char *g, q_valence_t val) {
+    return q_embed(i_name(g, (int)strlen(g)), val);
 }
 
-/* Append an already-interned symbol id to a RAY_SYM vector.  The id-taking
- * twin of q_symvec_append: callers that hold an id must not round-trip it
- * through the string table just to intern it back. */
+/* Append an already-interned symbol id to a RAY_SYM vector (W64 index width:
+ * no public width-picker, and correctness beats compactness for literals). */
 static ray_t *symvec_add(ray_t *vec, int64_t id) {
     return ray_vec_append(vec, &id);
 }
 
 /* symbol literal (ATTR_QUOTED set) */
-static ray_t *symlit(const char *s, int len) {
-    ray_t *x = ray_sym(ray_sym_intern_runtime(s, (size_t)len));
+static ray_t *symlit_id(int64_t id) {
+    ray_t *x = ray_sym(id);
     if (x && !RAY_IS_ERR(x)) x->attrs |= Q_ATTR_QUOTED;
     return x;
-}
-
-/* Sym CONSTANTS entering a tree are visibly enlisted (parsetrees.md:80 — a
- * bare sym in a tree is a name reference): atom -> 1-elem sym vector (,`x),
- * vector -> 1-elem general list (,`a`b`c).  The scanner's Q_ATTR_QUOTED mark
- * stays token-internal; the emitted tree is attr-free data.  Consumes v. */
-static ray_t *noun_tree_value(ray_t *v) {
-    if (!v || RAY_IS_ERR(v)) return v;
-    if (v->type == -RAY_SYM && (v->attrs & Q_ATTR_QUOTED)) {
-        ray_t *vec = symvec_add(ray_sym_vec_new(RAY_SYM_W64, 1), v->i64);
-        ray_release(v);
-        return vec;
-    }
-    if (v->type == RAY_SYM) {
-        ray_t *l = ray_list_new(1);
-        l = ray_list_append(l, v);
-        ray_release(v);
-        return l;
-    }
-    return v;
-}
-
-/* Append one interned symbol id into a RAY_SYM vector (W64 index width: no
- * public width-picker, and correctness beats compactness for literals). */
-ray_t *q_symvec_append(ray_t *vec, const char *s, int len) {
-    int64_t id = ray_sym_intern_runtime(s, (size_t)len);
-    return ray_vec_append(vec, &id);
 }
 
 /* Build a ray list from n owned children, releasing each after append
@@ -213,6 +174,20 @@ static ray_t *q_list(ray_t **xs, int n) {
         if (xs[i]) ray_release(xs[i]);
     }
     return l;
+}
+
+/* Sym CONSTANTS entering a tree are visibly enlisted (parsetrees.md:80 — a
+ * bare sym in a tree is a name reference): atom -> 1-elem sym vector (,`x),
+ * vector -> 1-elem general list (,`a`b`c).  The scanner's Q_ATTR_QUOTED mark
+ * stays token-internal; the emitted tree is attr-free data.  Consumes v. */
+static ray_t *noun_tree_value(ray_t *v) {
+    if (!v || RAY_IS_ERR(v)) return v;
+    if (v->type == -RAY_SYM && (v->attrs & Q_ATTR_QUOTED)) {
+        ray_t *vec = symvec_add(ray_sym_vec_new(RAY_SYM_W64, 1), v->i64);
+        ray_release(v);
+        return vec;
+    }
+    return v->type == RAY_SYM ? q_list(&v, 1) : v;
 }
 
 /* (head; e0; e1; …) — a fresh list of `head` followed by every element of the
@@ -234,20 +209,25 @@ const char VERB_CHARS[] = ":+-*%!&|<>=~,^#_$?@.";
 
 const char *ADVERB_NAMES[] = { "'", "/", "\\", "':", "/:", "\\:" };
 
-static int sym_is_glyph(ray_t *sym) {
-    if (!sym || sym->type != -RAY_SYM || (sym->attrs & Q_ATTR_QUOTED)) return 0;
-    ray_t *s = ray_sym_str(sym->i64);
-    if (!s) return 0;
-    const char *nm = ray_str_ptr(s);
-    size_t l = ray_str_len(s);
-    int r = (l >= 1 && l <= 2 && strchr(VERB_CHARS, nm[0]) != NULL &&
-             (l == 1 || nm[1] == ':' || strchr(VERB_CHARS, nm[1]) != NULL));
-    /* the digit-colon verbs and their markers (`0:` `0::`) are glyphs too — the
-     * manifest, not VERB_CHARS, is what says so */
-    if (!r) {
-        const q_op_t *row = q_ops_find(nm, (int)l);
-        r = (row && row->lex == QLEX_GLYPH) || marker_row(nm, l) != NULL;
+/* THE glyph predicate: how a spelling stands as a glyph verb.  GF_ONE is one VERB_CHARS byte, GF_MARKED one with the
+ * monadic `:` (`::` included), GF_OTHER the two-glyph comparisons and the digit-colon verbs with their markers (`0:`
+ * `0::`) — the manifest, not VERB_CHARS, names those. */
+enum { GF_NONE, GF_ONE, GF_MARKED, GF_OTHER };
+
+static int glyph_form(const char *nm, size_t l) {
+    if (l >= 1 && l <= 2 && strchr(VERB_CHARS, nm[0]) != NULL) {
+        if (l == 1) return GF_ONE;
+        if (nm[1] == ':') return GF_MARKED;
+        if (strchr(VERB_CHARS, nm[1]) != NULL) return GF_OTHER;
     }
+    const q_op_t *row = q_ops_find(nm, (int)l);
+    return (row && row->lex == QLEX_GLYPH) || marker_row(nm, l) ? GF_OTHER : GF_NONE;
+}
+
+static int sym_glyph_form(const ray_t *sym) {
+    ray_t *s = nameref_str(sym);
+    if (!s) return GF_NONE;
+    int r = glyph_form(ray_str_ptr(s), ray_str_len(s));
     ray_release(s);
     return r;
 }
@@ -255,9 +235,8 @@ static int sym_is_glyph(ray_t *sym) {
 /* True iff a verb sym carries the MONADIC MARKER.  Standing INFIX that spelling
  * is modified assignment (`x,:y` == `x:x,y`), which modassign_eval reads off the
  * SYM — so that one site must not resolve it. */
-static int verb_marked(ray_t *sym) {
-    if (!sym || sym->type != -RAY_SYM || (sym->attrs & Q_ATTR_QUOTED)) return 0;
-    ray_t *s = ray_sym_str(sym->i64);
+static int verb_marked(const ray_t *sym) {
+    ray_t *s = nameref_str(sym);
     if (!s) return 0;
     int r = marker_row(ray_str_ptr(s), ray_str_len(s)) != NULL;
     ray_release(s);
@@ -439,7 +418,7 @@ static Tokens scan(const char *src) {
             int marked = (src[p+2] == ':');
             char nm[3] = { c, ':', ':' };
             p += marked ? 3 : 2;
-            EMIT(T_VERB, q_verb_name(nm, marked ? 3 : 2));
+            EMIT(T_VERB, i_name(nm, marked ? 3 : 2));
             noun_pos = 0;
         }
         else if ((cl & CL_DIGIT) || neg_sign || dot_float) {
@@ -462,7 +441,7 @@ static Tokens scan(const char *src) {
              * silently discarded (`w[1] div:3` computing `2 div 3`). */
             if ((noun_pos || (CLASS[(uint8_t)src[p]] & CL_ADVERB)) && !lone_colon_next(src, p) &&
                 q_registry_is_infix(src + start, (size_t)len)) {
-                EMIT(T_VERB, q_verb_name(src + start, len));
+                EMIT(T_VERB, i_name(src + start, len));
                 noun_pos = 0;
             } else {
                 EMIT(T_NOUN, i_name(src + start, len));
@@ -560,14 +539,15 @@ static Tokens scan(const char *src) {
                         p = sep;
                     }
                 }
+                int64_t id = ray_sym_intern_runtime(src + s, (size_t)(p - s));
                 if (count == 0) {
-                    first = symlit(src + s, p - s);
-                } else if (count == 1) {
-                    vec = symvec_add(ray_sym_vec_new(RAY_SYM_W64, 4), first->i64);
-                    ray_release(first); first = NULL;
-                    vec = q_symvec_append(vec, src + s, p - s);
+                    first = symlit_id(id);
                 } else {
-                    vec = q_symvec_append(vec, src + s, p - s);
+                    if (count == 1) {
+                        vec = symvec_add(ray_sym_vec_new(RAY_SYM_W64, 4), first->i64);
+                        ray_release(first); first = NULL;
+                    }
+                    vec = symvec_add(vec, id);
                 }
                 count++;
             }
@@ -582,7 +562,7 @@ static Tokens scan(const char *src) {
                 (c == '>' &&  src[p+1] == '=')) {
                 char nm[2] = { c, src[p+1] };
                 p += 2;
-                EMIT(T_VERB, q_verb_name(nm, 2));
+                EMIT(T_VERB, i_name(nm, 2));
             } else {
                 p++;
                 if (src[p] == ':') {
@@ -595,9 +575,9 @@ static Tokens scan(const char *src) {
                     p++;
                     if (c != ':' && src[p] == ':') p++;
                     char nm[2] = { c, ':' };
-                    EMIT(T_VERB, q_verb_name(nm, 2));
+                    EMIT(T_VERB, i_name(nm, 2));
                 } else {
-                    EMIT(T_VERB, q_verb(c));
+                    EMIT(T_VERB, i_name(&c, 1));
                 }
             }
             noun_pos = 0;
@@ -767,21 +747,16 @@ void q_ast_fill_empty_stmts(ray_t *ast) {
         if (!e[i]) e[i] = ray_list_new(1);   /* len-0 general list: () */
 }
 
-/* ===== qSQL context predicates (Task 1 scaffolding) =========================
+/* ===== qSQL context predicates ===============================================
  * Pure token reads used by parse_base_q to decide where an ordinary-q phrase
  * must stop inside a qSQL clause.  All are inert while ctx == Q_NONE. */
 
-/* name atom (unquoted -RAY_SYM) whose interned spelling equals s */
 static int qtok_sym_is(const Token *tk, const char *s) {
     return tk->kind == T_NOUN && sym_name_is(tk->k, s);
 }
 
-/* the qSQL query verbs routed through the unified real-parser path (parse_query).
- * Task 3: ALL four verbs — parse_query captures the keyword and builds the
- * per-verb 5-list (head `?`/`!`, is_exec/is_delete slot shapes) itself.  Enabling
- * a verb here is what lets a nested query appear as an operand (e.g. `count select
- * a from (select b from t)`): parse_base_q routes the nested query verb into
- * parse_query. */
+/* the qSQL query verbs: parse_base_q routes each into parse_query, in statement
+ * and operand position alike (`count select a from (select b from t)`) */
 static int qtok_is_query_verb(const Token *tk) {
     return qtok_sym_is(tk, "select") || qtok_sym_is(tk, "exec") ||
            qtok_sym_is(tk, "update") || qtok_sym_is(tk, "delete");
@@ -793,37 +768,14 @@ static int qtok_is_clause_kw(const Token *tk) {
            qtok_sym_is(tk, "where");
 }
 
-/* the dyadic bare join `,` verb token (NOT monadic enlist `,:`) — mirrors the
- * comma test in qsql_boundary (a len-1 T_VERB whose spelling is ","). */
+/* the dyadic bare join `,` verb token (NOT monadic enlist `,:`) */
 static int qtok_is_join_comma(const Token *tk) {
     return tk->kind == T_VERB && sym_name_is(tk->k, ",");
-}
-
-/* qSQL interception (piece 3): if the cursor sits on a `select`/`delete`/
- * `update`/`exec` keyword, lower it to kdb's functional parse tree
- * (?;`t;c;b;a) / (!;…) via parse_query and return the OWNED tree; otherwise
- * return NULL with p->pos unchanged so the ordinary parser consumes the tokens.
- * Called both at statement start (parse_e) AND as a primary term (parse_base),
- * so a query can appear as an operand — e.g. `show select from t`, the argument
- * of any prefix fn. */
-static ray_t *try_parse_qsql(Parser *p) {
-    if (cur(p)->kind != T_NOUN) return NULL;
-    /* Task 3: all four query verbs (select/exec/update/delete) commit onto the
-     * unified real-parser path — parse_query captures the keyword and emits the
-     * per-verb 5-list.  It never soft-fails to NULL (the QCtx-threaded parser
-     * handles every ordinary-q phrase), so the token is always consumed. */
-    if (qtok_is_query_verb(cur(p)))
-        return parse_query(p).v;
-    return NULL;
 }
 
 /* ===== source column names — the two shapes both column syntaxes read ========
  * A table literal and a qSQL clause name a column the same two ways: written
  * `name:expr`, or a bare name-ref lending its own spelling (syntax.md:218). */
-
-static int sym_is_nameref(ray_t *v) {
-    return v && v->type == -RAY_SYM && !(v->attrs & Q_ATTR_QUOTED);
-}
 
 /* The (:;name;expr) node.  Rejects `::`, `+:` (a marked verb head) and a QUOTED
  * lhs, so ``(`a:1)`` is not a binding. */
@@ -887,15 +839,9 @@ static int64_t qsql_cross_names_dup(ray_t *A, ray_t *B) {
     return -1;
 }
 
-/* the registry value for spelling s at valence v (q_embed's policy); q_parse
- * fails fast on a cold registry, so a miss cannot occur here */
-static ray_t *table_lit_head(const char *s, q_valence_t v) {
-    return q_embed(ray_sym(ray_sym_intern_runtime(s, strlen(s))), v);
-}
-
 /* (!;a;b) — consumes a,b */
 static ray_t *bang_tree(ray_t *a, ray_t *b) {
-    ray_t *xs[3] = { table_lit_head("!", Q_DYADIC), a, b };
+    ray_t *xs[3] = { embed_glyph("!", Q_DYADIC), a, b };
     return q_list(xs, 3);
 }
 
@@ -941,7 +887,7 @@ static ray_t *table_lit_dict(ray_t *defs) {
 
 /* col defs -> (+:;(!;…)) — flip of the dictionary arm; consumes defs */
 static ray_t *table_lit_flip(ray_t *defs) {
-    ray_t *xs[2] = { table_lit_head("+", Q_MONADIC), table_lit_dict(defs) };
+    ray_t *xs[2] = { embed_glyph("+", Q_MONADIC), table_lit_dict(defs) };
     return q_list(xs, 2);
 }
 
@@ -1036,22 +982,219 @@ static int assign_target_next(Parser *p) {
     return sym_name_is(t->k, ":") || verb_marked(t->k);
 }
 
+/* ===== the parser's die-path leak guard ======================================
+ * A frame that holds an owned ref across a descent that can die (a phrase list,
+ * a from-expression, a lambda's signature and body, a statement list) parks it
+ * in a slot on this stack; every entry point's handler (die_answer) releases
+ * what is still parked.  LIFO: each frame pops what it pushed before returning,
+ * having moved the refs into its result or released them.
+ *
+ * The slot lives IN the frame, on the heap: longjmp resets the stack pointer,
+ * so the handler's own calls reuse the abandoned parser frames as it walks —
+ * a slot addressed into a caller's locals would be read after something else
+ * had overwritten it. */
+typedef struct pend { ray_t *v; struct pend *prev; } pend_t;
+static pend_t *g_pend = NULL;
+
+/* the caller's handle on its in-flight ref, valid until its pop */
+static ray_t **pend_push(void) {
+    pend_t *f = (pend_t *)malloc(sizeof *f);
+    if (!f) q_die("out of memory");
+    f->v = NULL; f->prev = g_pend; g_pend = f;
+    return &f->v;
+}
+static void pend_pop(void) {                      /* success: just unlink */
+    pend_t *f = g_pend;
+    if (!f) return;
+    g_pend = f->prev;
+    free(f);
+}
+static void pend_unwind(void) {                   /* a die: release every ref */
+    while (g_pend) {
+        if (g_pend->v) ray_release(g_pend->v);
+        pend_pop();
+    }
+}
+
+/* Table literal `([k…] c1:e1; …)`, the cursor past its `(` and on the `[`.
+ * Emits kdb's dict-then-flip parse tree: unkeyed (+:;(!;…)); keyed
+ * keytab!valtab; NO value columns (`([a:`A;c:`C])`, xcol's rename
+ * map) = the DICTIONARY literal (ref/cols.md; ChangesIn4.1.md). */
+static ray_t *parse_table_lit(Parser *p) {
+    adv(p);
+    if (at(p, T_RBRACK)) {
+        adv(p);
+        /* `([])` is the ZERO-column empty table (qlib/src/unit.q:180
+         * `tmpDirs:([])`), not one elided column auto-named x. */
+        ray_t *cols = at(p, T_RPAREN) ? ray_list_new(1) : parse_E(p, Q_NONE);
+        expect(p, T_RPAREN, "expected ')'");
+        return table_lit_flip(cols);
+    }
+    ray_t *kcols = parse_E(p, Q_NONE);
+    expect(p, T_RBRACK, "expected ']' in keyed table literal");
+    /* optional `;` after `]` — `([a:`x`y];b:10 20)` == `([a:`x`y]b:10 20)` */
+    if (at(p, T_SEMI)) adv(p);
+    if (at(p, T_RPAREN)) {
+        adv(p);
+        return table_lit_dict(kcols);
+    }
+    ray_t *vcols = parse_E(p, Q_NONE);
+    expect(p, T_RPAREN, "expected ')'");
+    return bang_tree(table_lit_flip(kcols), table_lit_flip(vcols));
+}
+
+/* `( … )`, the cursor past its `(`: a table literal, grouping, or a list literal */
+static ray_t *parse_paren(Parser *p) {
+    if (at(p, T_LBRACK)) return parse_table_lit(p);
+    ray_t *e = parse_E(p, Q_NONE);
+    expect(p, T_RPAREN, "expected ')'");
+    int64_t n = q_count(e);
+    ray_t **slots = (ray_t **)ray_data(e);
+    /* Inside parens an elided element is a projection HOLE — the literal
+     * becomes a projection of the list constructor ("omission of values
+     * results in projection", releases/ChangesIn4.1.md; the 8-item cap in
+     * basics/application.md is the function-rank cap), so `(1;;3) 7` fills
+     * while a list holding an explicit `::` value stays data and indexes. */
+    if (n > 1)
+        for (int64_t i = 0; i < n; i++)
+            if (!slots[i]) slots[i] = Q_HOLE_OBJ;
+    /* `(1)` is grouping -> the lone element.  A NULL slot is the EMPTY paren
+     * `()` — the empty general list (type 0h), NOT `::` — which falls through
+     * as a zero-element list literal. */
+    if (n == 1) {
+        ray_t *only = slots[0];
+        if (only) ray_retain(only);
+        ray_release(e);
+        if (only) return only;
+        e = ray_list_new(1);
+    }
+    /* A list literal: prepend the internal list-constructor value so eval
+     * builds (and collapses) it.  The head value is the only thing
+     * distinguishing `(1 2;3 4)` from the shape-identical bracket-index call
+     * (v;i); q_fmt hides it so the tree still displays (1;2;3).  A cold
+     * registry (no q_runtime) has no constructor, so the list stays bare. */
+    ray_t *lv = q_registry_list_value();
+    if (!lv) return e;
+    ray_t *w = cons_head(lv, e, NULL);
+    ray_release(e);
+    return w;
+}
+
+/* A lambda signature `[a;b:`j;…]`, the cursor on its `[`, into the parked
+ * *params (a RAY_SYM vector) and *ptypes (i64 kdb type nums, 0 = untyped slot;
+ * NULL while no slot is typed). */
+static void parse_signature(Parser *p, ray_t **params, ray_t **ptypes) {
+    adv(p);
+    *params = ray_sym_vec_new(RAY_SYM_W64, 4);
+    if (!at(p, T_RBRACK)) for (;;) {
+        Token *nt = cur(p);
+        if (nt->kind != T_NOUN || !sym_is_nameref(nt->k))
+            q_die("expected parameter name in lambda signature");
+        int64_t id = nt->k->i64;
+        /* a parameter is a binding position, so a reserved name or a user `.q` keyword is refused */
+        if (q_registry_is_reserved(id) || q_registry_dotq_ext(id)) die_err(QE_ASSIGN);
+        *params = ray_vec_append(*params, &id);
+        adv(p);
+        /* `name:`c` type annotation (kx type-check pattern, 4.1+): ONE quoted
+         * one-char sym; lowercase = atom (negative kdb type num), uppercase =
+         * list.  Every other spelling — bare identifier (kx's filter slot,
+         * reserved), sym-vector union `j`J, long name `long, unknown char —
+         * dies at DEFINITION so its grammar stays reachable later. */
+        int64_t tnum = 0;
+        if (cur(p)->kind == T_VERB && sym_name_is(cur(p)->k, ":")) {
+            adv(p);
+            Token *tt = cur(p);
+            ray_t *ts = tt->kind == T_NOUN && tt->k && tt->k->type == -RAY_SYM && (tt->k->attrs & Q_ATTR_QUOTED)
+                      ? ray_sym_str(tt->k->i64) : NULL;
+            char tc = ts && ray_str_len(ts) == 1 ? ray_str_ptr(ts)[0] : 0;
+            ray_release(ts);
+            int list = (tc >= 'A' && tc <= 'Z');
+            int8_t tag = q_type_of_char(list ? (char)(tc - 'A' + 'a') : tc);
+            if (!tag) q_die("expected `<typechar> in lambda signature");
+            tnum = list ? tag : -tag;
+            adv(p);
+        }
+        if (tnum && !*ptypes) {
+            *ptypes = ray_vec_new(RAY_I64, 4);
+            for (int64_t z = 1; z < q_count(*params); z++) {
+                int64_t zero = 0;
+                *ptypes = ray_vec_append(*ptypes, &zero);
+            }
+        }
+        if (*ptypes) *ptypes = ray_vec_append(*ptypes, &tnum);
+        if (!at(p, T_SEMI)) break;
+        adv(p);
+    }
+    expect(p, T_RBRACK, "expected ']' after lambda signature");
+    if (q_count(*params) > 8) die_err(QE_PARAMS);   /* basics/errors.md: "Too many parameters (8 max)" */
+    /* `{[] ...}` is RANK 1 with an UNNAMEABLE slot: the null symbol is no
+     * variable's name, so a spare argument lands where no body can read it
+     * and `x` stays GLOBAL — default names come with OMITTING the signature
+     * (function-notation.md "Signature").  Owner ruling 2026-08-12. */
+    if (!q_count(*params)) {
+        int64_t nul = ray_sym_intern_runtime("", 0);
+        *params = ray_vec_append(*params, &nul);
+    }
+}
+
+/* Lambda literal `{[sig] stmt;...}` -> the RAY_QFN carrier VALUE, built AT
+ * PARSE (value-heads-at-parse; kdb parse of a lambda returns the function
+ * atom).  src is the VERBATIM `{...}` span (kdb echoes it byte-for-byte);
+ * params is an explicit signature, x/y/z inferred by highest implicit used
+ * (min rank 1), or ONE null-named slot for `{[] ...}`.  No VALUE capture:
+ * globals resolve at CALL time, in the `\d` context the carrier records
+ * (q_eval_apply_lambda_new's layout). */
+static ray_t *parse_lambda(Parser *p) {
+    int lb_start = cur(p)->start;
+    adv(p);
+    ray_t **params = pend_push(), **ptypes = pend_push(), **body = pend_push();
+    if (at(p, T_LBRACK)) parse_signature(p, params, ptypes);
+    uint8_t mine = 0;
+    uint8_t *saved = p->xyz_mask;
+    p->xyz_mask = *params ? NULL : &mine;
+    p->lambda_depth++;
+    *body = parse_E(p, Q_NONE);
+    p->lambda_depth--;
+    p->xyz_mask = saved;
+    expect(p, T_RBRACE, "expected '}'");
+    Token *rb = &p->t.t[p->pos - 1];
+    ray_t *src = ray_str(p->src + lb_start, (size_t)(rb->start + rb->len - lb_start));
+    if (!*params) {
+        int hi = (mine & 4) ? 3 : (mine & 2) ? 2 : 1;
+        *params = ray_sym_vec_new(RAY_SYM_W64, 4);
+        static const char *xyz[3] = { "x", "y", "z" };
+        for (int i = 0; i < hi; i++)
+            *params = symvec_add(*params, ray_sym_intern_runtime(xyz[i], 1));
+    }
+    int64_t bn = q_count(*body);
+    ray_t **bs = (ray_t **)ray_data(*body);
+    /* empty statements (`{2*x;}`) become the generic null: the carrier
+     * retains every body expr, so a C NULL here would be fatal */
+    for (int64_t i = 0; i < bn; i++)
+        if (!bs[i]) bs[i] = RAY_NULL_OBJ;
+    ray_t *fn = q_eval_apply_lambda_new(*params, bs, bn, src, *ptypes);
+    /* ref/value.md `f`/`l`: the lambda's origin is where it is PARSED — the loading script's
+     * file, and the line its `{` sits on (a multi-line statement's inner lambda has its own) */
+    int64_t line = 0, file = q_dbg_statement_origin(&line);
+    if (file) {
+        for (int i = 0; i < lb_start; i++) line += p->src[i] == '\n';
+        q_eval_apply_lambda_origin(fn, file, line);
+    }
+    ray_release(src);
+    ray_release(*body);
+    ray_release(*ptypes);
+    ray_release(*params);
+    pend_pop(); pend_pop(); pend_pop();
+    return fn;
+}
+
 static P parse_base(Parser *p) {
     Token *tk = cur(p);
-    /* A qSQL template may stand as a primary term (an operand), e.g. the
-     * argument of `show`.  Attempt the interception here too; it soft-fails and
-     * restores on any non-template so ordinary operands are unaffected. */
-    if (tk->kind == T_NOUN) {
-        ray_t *q = try_parse_qsql(p);
-        if (q) return (P){ R_NOUN, q, 0 };
-        tk = cur(p);                /* pos unchanged on soft-fail, but re-fetch */
-    }
     switch (tk->kind) {
     case T_NOUN: {
         /* implicit-arg inference: a bare 1-char x/y/z name inside the current
          * UNSIGNED lambda body bumps its arity (kdb ranks by highest used) */
-        if (p->xyz_mask && tk->len == 1 && tk->k && tk->k->type == -RAY_SYM &&
-            !(tk->k->attrs & Q_ATTR_QUOTED)) {
+        if (p->xyz_mask && tk->len == 1 && sym_is_nameref(tk->k)) {
             char c = p->src[tk->start];
             if      (c == 'x') *p->xyz_mask |= 1;
             else if (c == 'y') *p->xyz_mask |= 2;
@@ -1087,217 +1230,11 @@ static P parse_base(Parser *p) {
         expect(p, T_RBRACK, "expected ']' closing expression block");
         return (P){ R_NOUN, b ? b : RAY_NULL_OBJ, 0 };
     }
-    case T_LPAREN: {
+    case T_LPAREN:
         adv(p);
-        /* Table literal `([k…] c1:e1; …)` — a paren whose first token is `[`.
-         * Emits kdb's dict-then-flip parse tree: unkeyed (+:;(!;…)); keyed
-         * keytab!valtab; NO value columns (`([a:`A;c:`C])`, xcol's rename
-         * map) = the DICTIONARY literal (ref/cols.md; ChangesIn4.1.md). */
-        if (at(p, T_LBRACK)) {
-            adv(p);                                   /* consume '[' */
-            if (at(p, T_RBRACK)) {
-                expect(p, T_RBRACK, "expected ']' in table literal");
-                /* `([])` is the ZERO-column empty table (qlib/src/unit.q:180
-                 * `tmpDirs:([])`), not one elided column auto-named x. */
-                ray_t *cols = at(p, T_RPAREN) ? ray_list_new(1) : parse_E(p, Q_NONE);
-                expect(p, T_RPAREN, "expected ')'");
-                return (P){ R_NOUN, table_lit_flip(cols), 0 };
-            }
-            ray_t *kcols = parse_E(p, Q_NONE);
-            expect(p, T_RBRACK, "expected ']' in keyed table literal");
-            /* optional `;` after `]` — `([a:`x`y];b:10 20)` == `([a:`x`y]b:10 20)` */
-            if (at(p, T_SEMI)) adv(p);
-            if (at(p, T_RPAREN)) {
-                expect(p, T_RPAREN, "expected ')'");
-                return (P){ R_NOUN, table_lit_dict(kcols), 0 };
-            }
-            ray_t *vcols = parse_E(p, Q_NONE);
-            expect(p, T_RPAREN, "expected ')'");
-            return (P){ R_NOUN, bang_tree(table_lit_flip(kcols), table_lit_flip(vcols)), 0 };
-        }
-        ray_t *e = parse_E(p, Q_NONE);
-        expect(p, T_RPAREN, "expected ')'");
-        /* Inside parens an elided element is a projection HOLE — the literal
-         * becomes a projection of the list constructor ("omission of values
-         * results in projection", releases/ChangesIn4.1.md; the 8-item cap in
-         * basics/application.md is the function-rank cap), so `(1;;3) 7` fills
-         * while a list holding an explicit `::` value stays data and indexes. */
-        if (q_count(e) > 1) {
-            ray_t **slots = (ray_t **)ray_data(e);
-            for (int64_t i = 0; i < q_count(e); i++) {
-                if (!slots[i]) slots[i] = Q_HOLE_OBJ;
-            }
-        }
-        if (q_count(e) == 1) {
-            ray_t **slots = (ray_t **)ray_data(e);
-            ray_t *only = slots[0];
-            /* A NULL slot is the EMPTY paren `()` — the empty general list
-             * (type 0h), NOT `::`.  Drop e and fall through to the
-             * list-literal block below (it prepends the list-constructor to a
-             * zero-element list, yielding the empty list).  `(1)` is grouping
-             * -> the lone element; only `()` reaches here with a NULL slot. */
-            if (only) {
-                ray_retain(only);
-                ray_release(e);
-                return (P){ R_NOUN, only, 0 };
-            }
-            ray_release(e);
-            e = ray_list_new(1);   /* 0 elements -> empty list literal below */
-        }
-        /* Multi-element paren list is a LITERAL: prepend the internal
-         * list-constructor value so eval builds (and collapses) it.  The
-         * head value is the only thing distinguishing `(1 2;3 4)` from the
-         * shape-identical bracket-index call (v;i); q_fmt hides it so the
-         * tree still displays (1;2;3).  Cold registry (no q_runtime): keep
-         * the bare list — pre-2b behaviour. */
-        {
-            ray_t *lv = q_registry_list_value();
-            if (lv) {
-                ray_t *w = cons_head(lv, e, NULL);
-                ray_release(e);
-                e = w;
-            }
-        }
-        return (P){ R_NOUN, e, 0 };
-    }
-    case T_LBRACE: {
-        /* Lambda literal `{[sig] stmt;...}` -> the RAY_QFN carrier VALUE,
-         * built AT PARSE (value-heads-at-parse; kdb parse of a lambda returns
-         * the function atom).  src is the VERBATIM `{...}` span (kdb echoes
-         * it byte-for-byte); params is a RAY_SYM vector — explicit signature,
-         * x/y/z inferred by highest implicit used (min rank 1), or ONE
-         * null-named slot for `{[] ...}`.  No VALUE capture: globals
-         * resolve at CALL time, in the `\d` context the carrier records
-         * (q_eval_apply_lambda_new's layout). */
-        int lb_start = tk->start;
-        adv(p);
-        ray_t *params = NULL;              /* NULL until signed / inferred */
-        ray_t *ptypes = NULL;              /* i64 kdb type nums, 0 = untyped slot */
-        if (at(p, T_LBRACK)) {
-            adv(p);
-            params = ray_sym_vec_new(RAY_SYM_W64, 4);
-            if (!at(p, T_RBRACK)) {
-                for (;;) {
-                    Token *nt = cur(p);
-                    if (nt->kind != T_NOUN || !nt->k || nt->k->type != -RAY_SYM ||
-                        (nt->k->attrs & Q_ATTR_QUOTED)) {
-                        ray_release(params);
-                        if (ptypes) ray_release(ptypes);
-                        q_die("expected parameter name in lambda signature");
-                    }
-                    int64_t id = nt->k->i64;
-                    /* a binding position: the slot used to bind nothing and the
-                     * body resolved to the keyword */
-                    if (q_registry_is_reserved(id) || q_registry_dotq_ext(id)) {
-                        ray_release(params);
-                        if (ptypes) ray_release(ptypes);
-                        die_err(QE_ASSIGN);
-                    }
-                    params = ray_vec_append(params, &id);
-                    adv(p);
-                    /* `name:`c` type annotation (kx type-check pattern, 4.1+):
-                     * ONE quoted one-char sym; lowercase = atom (negative kdb
-                     * type num), uppercase = list.  Every other spelling —
-                     * bare identifier (kx's filter slot, reserved), sym-vector
-                     * union `j`J, long name `long, unknown char — dies at
-                     * DEFINITION so its grammar stays reachable later. */
-                    int64_t tnum = 0;
-                    if (cur(p)->kind == T_VERB && sym_name_is(cur(p)->k, ":")) {
-                        adv(p);
-                        Token *tt = cur(p);
-                        char tc = 0;
-                        if (tt->kind == T_NOUN && tt->k &&
-                            tt->k->type == -RAY_SYM &&
-                            (tt->k->attrs & Q_ATTR_QUOTED)) {
-                            ray_t *ts = ray_sym_str(tt->k->i64);
-                            if (ts) {
-                                if (ray_str_len(ts) == 1) tc = ray_str_ptr(ts)[0];
-                                ray_release(ts);
-                            }
-                        }
-                        int list = (tc >= 'A' && tc <= 'Z');
-                        int8_t tag = q_type_of_char(list ? (char)(tc - 'A' + 'a')
-                                                         : tc);
-                        if (!tag) {
-                            ray_release(params);
-                            if (ptypes) ray_release(ptypes);
-                            q_die("expected `<typechar> in lambda signature");
-                        }
-                        tnum = list ? tag : -tag;
-                        adv(p);
-                    }
-                    if (tnum && !ptypes) {
-                        ptypes = ray_vec_new(RAY_I64, 4);
-                        for (int64_t z = 1; z < q_count(params); z++) {
-                            int64_t zero = 0;
-                            ptypes = ray_vec_append(ptypes, &zero);
-                        }
-                    }
-                    if (ptypes) ptypes = ray_vec_append(ptypes, &tnum);
-                    if (at(p, T_SEMI)) { adv(p); continue; }
-                    break;
-                }
-            }
-            if (!at(p, T_RBRACK)) {
-                ray_release(params);
-                if (ptypes) ray_release(ptypes);
-                q_die("expected ']' after lambda signature");
-            }
-            adv(p);
-            if (q_count(params) > 8) {                  /* basics/errors.md: "Too many parameters (8 max)" */
-                ray_release(params);
-                if (ptypes) ray_release(ptypes);
-                die_err(QE_PARAMS);
-            }
-            /* `{[] ...}` is RANK 1 with an UNNAMEABLE slot: the null symbol is no
-             * variable's name, so a spare argument lands where no body can read it
-             * and `x` stays GLOBAL — default names come with OMITTING the signature
-             * (function-notation.md "Signature").  Owner ruling 2026-08-12. */
-            if (!q_count(params)) {
-                int64_t nul = ray_sym_intern_runtime("", 0);
-                params = ray_vec_append(params, &nul);
-            }
-        }
-        uint8_t mine = 0;
-        uint8_t *saved = p->xyz_mask;
-        p->xyz_mask = params ? NULL : &mine;
-        p->lambda_depth++;
-        ray_t *e = parse_E(p, Q_NONE);
-        p->lambda_depth--;
-        p->xyz_mask = saved;
-        expect(p, T_RBRACE, "expected '}'");
-        Token *rb = &p->t.t[p->pos - 1];   /* the consumed '}' */
-        ray_t *src = ray_str(p->src + lb_start,
-                             (size_t)(rb->start + rb->len - lb_start));
-        if (!params) {
-            int hi = (mine & 4) ? 3 : (mine & 2) ? 2 : 1;
-            params = ray_sym_vec_new(RAY_SYM_W64, 4);
-            static const char *xyz[3] = { "x", "y", "z" };
-            for (int i = 0; i < hi; i++) {
-                int64_t id = ray_sym_intern_runtime(xyz[i], 1);
-                params = ray_vec_append(params, &id);
-            }
-        }
-        int64_t bn = q_count(e);
-        ray_t **bs = (ray_t **)ray_data(e);
-        /* empty statements (`{2*x;}`) become the generic null: the carrier
-         * retains every body expr, so a C NULL here would be fatal */
-        for (int64_t i = 0; i < bn; i++)
-            if (!bs[i]) bs[i] = RAY_NULL_OBJ;
-        ray_t *fn = q_eval_apply_lambda_new(params, bs, bn, src, ptypes);
-        /* ref/value.md `f`/`l`: the lambda's origin is where it is PARSED — the loading script's
-         * file, and the line its `{` sits on (a multi-line statement's inner lambda has its own) */
-        int64_t line = 0, file = q_dbg_statement_origin(&line);
-        if (file) {
-            for (int i = 0; i < lb_start; i++) line += p->src[i] == '\n';
-            q_eval_apply_lambda_origin(fn, file, line);
-        }
-        ray_release(src);
-        ray_release(params);
-        if (ptypes) ray_release(ptypes);
-        ray_release(e);
-        return (P){ R_NOUN, fn, 0 };
-    }
+        return (P){ R_NOUN, parse_paren(p), 0 };
+    case T_LBRACE:
+        return (P){ R_NOUN, parse_lambda(p), 0 };
     case T_ADVERB: {
         /* Compose `'[f;g;…]` — the `'` adverb in BRACKET form composes
          * functions (rightmost consumes the args, each leftward applied
@@ -1330,46 +1267,6 @@ static P parse_base(Parser *p) {
     }
 }
 
-/* ===== the parser's die-path leak guard ======================================
- * parse_query allocates raw phrase lists (a/b/c) and the from-expression (t)
- * BEFORE it can q_die (empty by/where, missing from, trailing junk, or a nested
- * parse_e failure deeper in the clause).  q_die longjmps to parse_text's handler,
- * skipping parse_query's tail, so those refs would leak under ASan.  Register
- * each live slot ADDRESS on this stack; the parse_text / probe error handlers walk
- * it and release *slot for every in-flight ref.  LIFO: nested parse_phrase_list
- * / parse_query calls push and pop within their own frame, so the stack stays
- * balanced.  On the success path parse_query pops its own registrations (the
- * refs have by then been transferred into the result tree or released).
- *
- * The slot lives IN the frame, on the heap: longjmp resets the stack pointer,
- * so the handler's own calls reuse the abandoned parser frames as it walks —
- * a slot addressed into a caller's locals would be read after something else
- * had overwritten it. */
-typedef struct qsql_pend { ray_t *v; struct qsql_pend *prev; } qsql_pend_t;
-static qsql_pend_t *g_qsql_pend = NULL;
-
-/* the caller's handle on its in-flight ref, valid until its pop */
-static ray_t **qsql_pend_push(void) {
-    qsql_pend_t *f = (qsql_pend_t *)malloc(sizeof *f);
-    if (!f) q_die("out of memory");
-    f->v = NULL; f->prev = g_qsql_pend; g_qsql_pend = f;
-    return &f->v;
-}
-static void qsql_pend_pop(void) {                 /* success: just unlink */
-    qsql_pend_t *f = g_qsql_pend;
-    if (!f) return;
-    g_qsql_pend = f->prev;
-    free(f);
-}
-static void qsql_pend_unwind(void) {              /* q_die: release every ref */
-    while (g_qsql_pend) {
-        qsql_pend_t *f = g_qsql_pend;
-        if (f->v) ray_release(f->v);
-        g_qsql_pend = f->prev;
-        free(f);
-    }
-}
-
 /* select[…] sort spec `<c` / `>c` -> kdb's ENLISTED k-unary pair `,(<:;`c)`; the key may be an expression
  * (`select[>x+1]`, uqf lib/unparse/testcases.q, which KDB-X parses)
  * (extracted/basics/funsql.qcmd:391) — the registry VALUE at the head, never
@@ -1384,46 +1281,37 @@ static ray_t *qsql_sortspec(Parser *p) {
     adv(p);
     P key = parse_e(p, Q_NONE);
     if (key.role == R_NONE) q_die("qsql: expected a sort key after < / > in select[...]");
-    ray_t *xs[2] = { q_embed(q_verb(desc ? '>' : '<'), Q_MONADIC), key.v };
+    ray_t *xs[2] = { embed_glyph(desc ? ">" : "<", Q_MONADIC), key.v };
     ray_t *pair = q_list(xs, 2);
-    ray_t *l = ray_list_new(1);
-    l = ray_list_append(l, pair);
-    ray_release(pair);
-    return l;
+    return q_list(&pair, 1);
 }
 
-/* parse_query: the UNIFIED qSQL query-tree parser.  Parses
+/* parse_query: THE qSQL query-tree parser.  Parses
  *     verb [phrases] [by L] from e [where L]
- * and emits the SAME functional 5-list the bespoke clones do — but building the
- * c/b/a slots by normalizing raw parse_e phrase lists (qsql_normalize_phrases)
- * instead of the clone's hand-rolled qsql_expr/qsql_term.  Slot order matches
- * the clones exactly: (head; t; c=where; b=by; a=phrases); a select[…] bracket
- * appends n (slot 5) and the enlisted sort pair (slot 6).
+ * into the functional list (head; t; c=where; b=by; a=phrases), building the
+ * c/b/a slots by normalizing raw parse_e phrase lists (qsql_normalize_phrases);
+ * a select[…] bracket appends n (slot 5) and the enlisted sort pair (slot 6).
  *
  *   head  `?` (select/exec) | `!` (update/delete)
- *   t     the from-expression (a bare name lowers by-name via ql_qsql's
- *         `t->type == -RAY_SYM` check — same as the clone's qsql_colsym)
+ *   t     the from-expression (a bare name stays a name-ref)
  *   c     where: `()` when omitted, else enlist(constraint-list)
  *   b     by:    select/update `0b`, exec `()` when omitted, else the by shape
  *   a     phrases: the per-verb select shape (dict / symvec / value)
  *
- * Unlike the clones this NEVER soft-fails — it commits (the QCtx-threaded real
- * parser handles every ordinary-q phrase), so a form the clone rejected (e.g. an
- * undefined-fn application `select f price`, keyword-infix `where s in `a`b`) now
- * PARSES to a functional tree rather than falling back to the ordinary parser.
- * Task 3: all four verbs (select/exec/update/delete) reach this. */
+ * It commits once on the verb keyword: every ordinary-q phrase parses through
+ * the QCtx-threaded expression parser, so there is no fallback. */
 static P parse_query(Parser *p) {
     ray_t *A = NULL, *B = NULL, *C = NULL, *head = NULL, *node = NULL;
 
     /* The raw phrase lists and the from-expression live in the q_die leak
      * guard's own slots, taken here (all NULL) so any die between here and the
      * pops frees whatever is live. */
-    ray_t **a = qsql_pend_push();      /* select phrases */
-    ray_t **b = qsql_pend_push();      /* by phrases    */
-    ray_t **c = qsql_pend_push();      /* where phrases */
-    ray_t **t = qsql_pend_push();      /* from-expr     */
-    ray_t **lim = qsql_pend_push();    /* select[n] limit expr (slot 5) */
-    ray_t **ord = qsql_pend_push();    /* select[n;<c] sort spec (slot 6) */
+    ray_t **a = pend_push();      /* select phrases */
+    ray_t **b = pend_push();      /* by phrases    */
+    ray_t **c = pend_push();      /* where phrases */
+    ray_t **t = pend_push();      /* from-expr     */
+    ray_t **lim = pend_push();    /* select[n] limit expr (slot 5) */
+    ray_t **ord = pend_push();    /* select[n;<c] sort spec (slot 6) */
 
     /* verb keyword (cursor is on it) */
     Token *vk = cur(p);
@@ -1516,7 +1404,7 @@ static P parse_query(Parser *p) {
      * it names no column. */
     if (names_have_reserved(*a) || names_have_reserved(*b)) die_err(QE_ASSIGN);
 
-    /* ---- normalize the raw phrase lists into the clone's functional slots ---
+    /* ---- normalize the raw phrase lists into the functional slots ----------
      * No q_die past this point, so the raw refs can be released as they are
      * consumed (qsql_norm_delete_a's non-name die is unreachable from here —
      * the delete prevalidation above already excludes that shape; only the
@@ -1553,14 +1441,12 @@ static P parse_query(Parser *p) {
      * into the tree below, so take them before the pops free their frames. */
     ray_t *from = *t;
     ray_t *limv = *lim, *ordv = *ord;
-    qsql_pend_pop(); qsql_pend_pop(); qsql_pend_pop();
-    qsql_pend_pop(); qsql_pend_pop(); qsql_pend_pop();
+    pend_pop(); pend_pop(); pend_pop();
+    pend_pop(); pend_pop(); pend_pop();
 
     /* the VALUE head (value-heads-at-parse): the same immutable registry cell
      * the functional spelling carries — never a bare sym name-ref */
-    head = q_embed((verb == QSQL_V_SELECT || verb == QSQL_V_EXEC) ? q_verb('?')
-                                                                  : q_verb('!'),
-                   Q_DYADIC);
+    head = embed_glyph(verb == QSQL_V_SELECT || verb == QSQL_V_EXEC ? "?" : "!", Q_DYADIC);
     node = ray_list_new(limv ? (ordv ? 7 : 6) : 5);
     node = ray_list_append(node, head); ray_release(head);
     node = ray_list_append(node, from); ray_release(from);
@@ -1572,12 +1458,12 @@ static P parse_query(Parser *p) {
     return (P){ R_NOUN, node, 0 };
 }
 
-/* Query-aware wrapper around the UNCHANGED parse_base.  Returns EMPTY (without
- * consuming) at a clause boundary / separator so the enclosing parse_e halts.
- * With ctx == Q_NONE it is behaviourally identical to parse_base. */
+/* Query-aware wrapper around parse_base.  Returns EMPTY (without consuming) at
+ * a clause boundary / separator so the enclosing parse_e halts.  With
+ * ctx == Q_NONE only a query verb is intercepted. */
 static P parse_base_q(Parser *p, QCtx ctx) {
     Token *tk = cur(p);
-    if (qtok_is_query_verb(tk)) return parse_query(p);   /* qSQL verb -> unified path */
+    if (qtok_is_query_verb(tk)) return parse_query(p);
     if (ctx != Q_NONE && qtok_is_clause_kw(tk)) {
         int is_by = qtok_sym_is(tk, "by"), is_from = qtok_sym_is(tk, "from"),
             is_where = qtok_sym_is(tk, "where");
@@ -1613,15 +1499,9 @@ static P parse_term(Parser *p, QCtx ctx) {
             /* bracket-apply on a bare verb (`+[2;]`) embeds the dyadic row —
              * an underapplied call becomes a projection downstream (2c). */
             if (t.role == R_VERB) t.v = q_embed(t.v, Q_DYADIC);
-            int64_t en = q_count(e);
-            ray_t **es = (ray_t **)ray_data(e);
-            ray_t *w = ray_list_new(en + 1);
-            w = ray_list_append(w, t.v);
+            /* an empty call `f[]` passes identity (ref/identity.md); an elided `;` slot is the projection hole */
+            ray_t *w = cons_head(t.v, e, q_count(e) == 1 ? RAY_NULL_OBJ : Q_HOLE_OBJ);
             ray_release(t.v);
-            for (int64_t i = 0; i < en; i++) {
-                /* an empty call `f[]` passes identity (ref/identity.md); an elided `;` slot is the projection hole */
-                w = ray_list_append(w, es[i] ? es[i] : en == 1 ? RAY_NULL_OBJ : Q_HOLE_OBJ);
-            }
             ray_release(e);
             t.v = w; t.role = R_NOUN;
         } else if (tk->kind == T_ADVERB) {
@@ -1642,7 +1522,7 @@ static P parse_term(Parser *p, QCtx ctx) {
 
 /* The two charged wrappers: every recursion cycle in the descent crosses
  * parse_E, parse_e or parse_e_from, so charging these three bounds them all.
- * die_err longjmps to parse_text's setjmp, which abandons the whole Parser —
+ * die_err longjmps to the entry point's setjmp, which abandons the whole Parser —
  * an unwound-past decrement is unreachable, so no cleanup handler is needed. */
 static P parse_e(Parser *p, QCtx ctx) {
     if (++p->depth > Q_PARSE_MAX_DEPTH) die_err(QE_LIMIT);
@@ -1658,52 +1538,39 @@ static P parse_e_from(Parser *p, P t, QCtx ctx) {
     return r;
 }
 
+/* (c; expr) for the syntax word c at expression start — a char-atom head, NOT a verb or `.q` entry */
+static P char_head_node(Parser *p, QCtx ctx, char c) {
+    adv(p);
+    P e = parse_e(p, ctx);
+    ray_t *xs[2] = { ray_char(c), (e.role != R_NONE && e.v) ? e.v : RAY_NULL_OBJ };
+    return (P){ R_NOUN, q_list(xs, 2), 0 };
+}
+
 static P parse_e_body(Parser *p, QCtx ctx) {
+    Token *st = cur(p);
+    TKind nk = peek(p);
     /* Lambda-body early return `:expr` (basics/function-notation.md): a bare
      * `:` at expression START inside a lambda body.  Infix assignment never
      * reaches here with a leading `:` (its lhs noun is consumed first), and
-     * `::` is len 2.  Emits (":";expr) — a char-atom head, NOT a verb or
-     * `.q` entry: kdb display shows lambdas verbatim, so no parse row pins it. */
-    if (p->lambda_depth > 0) {
-        Token *rt = cur(p);
-        /* a LONE `:` (next token closes the expression) is the assign-verb
-         * OPERAND (`{@[x;1;:;"Z"]}`, ref/amend.md), not an early return */
-        TKind nk = peek(p);
-        if (rt->kind == T_VERB && rt->len == 1 && p->src[rt->start] == ':' &&
-            nk != T_SEMI && nk != T_RBRACK && nk != T_RPAREN && nk != T_RBRACE) {
-            adv(p);
-            P e = parse_e(p, ctx);
-            ray_t *rhs = (e.role != R_NONE && e.v) ? e.v : RAY_NULL_OBJ;
-            ray_t *xs[2] = { ray_char(':'), rhs };
-            return (P){ R_NOUN, q_list(xs, 2), 0 };
-        }
+     * `::` is len 2.  Emits (":";expr): kdb display shows lambdas verbatim, so
+     * no parse row pins it.  A LONE `:` (next token closes the expression) is
+     * the assign-verb OPERAND (`{@[x;1;:;"Z"]}`, ref/amend.md). */
+    if (p->lambda_depth > 0 && st->kind == T_VERB && st->len == 1 && p->src[st->start] == ':' &&
+        nk != T_SEMI && nk != T_RBRACK && nk != T_RPAREN && nk != T_RBRACE) {
+        /* `:[v;p1;r1;…;rd]` is the pattern conditional (basics/pattern.md:42), deferred by owner ruling
+         * 2026-11-07: refused, never read as a return of the expression block `[…]`, which answers its last item */
+        if (nk == T_LBRACK) die_err(QE_NYI);
+        return char_head_node(p, ctx, ':');
     }
     /* Signal `'expr` (ref/signal.md): a bare `'` adverb at expression start
      * that is NOT the compose form `'[f;g]`.  Emits ("'";expr) — a char-atom
      * head distinct from the each-adverb value (f' -> (';`f)); Signal "is
      * part of q syntax ... not an operator", so never a registry row.  With
      * nothing to signal (`(';/;\)`) the `'` is the ITERATOR VALUE instead. */
-    {
-        Token *st = cur(p);
-        TKind nk = peek(p);
-        if (st->kind == T_ADVERB && st->len == 1 && p->src[st->start] == '\'' &&
-            nk != T_LBRACK && nk != T_SEMI && nk != T_RPAREN &&
-            nk != T_RBRACK && nk != T_RBRACE && nk != T_EOF) {
-            adv(p);
-            P e = parse_e(p, ctx);
-            ray_t *rhs = (e.role != R_NONE && e.v) ? e.v : RAY_NULL_OBJ;
-            ray_t *xs[2] = { ray_char('\''), rhs };
-            return (P){ R_NOUN, q_list(xs, 2), 0 };
-        }
-    }
-    /* qSQL interception (piece 3): a `select …` statement lowers to kdb's
-     * functional parse tree (?;`t;c;b;a).  On any unsupported form parse_qsql
-     * soft-fails (restores p->pos, leaves tokens intact) and we fall through to
-     * the ordinary parser — so previously-parseable selects never regress. */
-    {
-        ray_t *q = try_parse_qsql(p);
-        if (q) return (P){ R_NOUN, q, 0 };
-    }
+    if (st->kind == T_ADVERB && st->len == 1 && p->src[st->start] == '\'' &&
+        nk != T_LBRACK && nk != T_SEMI && nk != T_RPAREN &&
+        nk != T_RBRACK && nk != T_RBRACE && nk != T_EOF)
+        return char_head_node(p, ctx, '\'');
     /* A k-unary glyph applied to a juxtaposed operand is k, NOT q — q spells
      * the monadic with its keyword (first, flip, count, …), the glyph wrapped
      * ((,)2, (,/)x) or bracketed (,/[x]).  Owner rulings 2026-07-30 (the colon
@@ -1715,18 +1582,16 @@ static P parse_e_body(Parser *p, QCtx ctx) {
      * two-glyph comparisons (`<=`), and every non-operand next token past the
      * adverb run, which keeps `+:` alone, `f:+/`, `,/[x]`, slots, postfix and
      * the parenthesised values intact. */
-    {
-        Token *ht = cur(p);
-        char h0 = p->src[ht->start];
-        if (ht->kind == T_VERB && h0 != ':' && strchr(VERB_CHARS, h0) != NULL &&
-            (ht->len == 1 || (ht->len == 2 && p->src[ht->start + 1] == ':'))) {
+    if (st->kind == T_VERB && p->src[st->start] != ':') {
+        int gf = glyph_form(p->src + st->start, (size_t)st->len);
+        if (gf == GF_ONE || gf == GF_MARKED) {
             int j = p->pos + 1;
             while (j < p->t.n && p->t.t[j].kind == T_ADVERB) j++;
-            TKind nk = (j < p->t.n) ? p->t.t[j].kind : T_EOF;
+            TKind ak = (j < p->t.n) ? p->t.t[j].kind : T_EOF;
             /* kdb-published class: THE GLYPH ITSELF (`$42` -> '$, `+d` -> '+
              * — basics/parsetrees.md "//$ unary form disabled in q") */
-            if (nk == T_NOUN || nk == T_LPAREN || nk == T_LBRACE || nk == T_VERB)
-                die_signal(QE_NAME, &p->src[ht->start], 1);
+            if (ak == T_NOUN || ak == T_LPAREN || ak == T_LBRACE || ak == T_VERB)
+                die_signal(QE_NAME, &p->src[st->start], 1);
         }
     }
     P t = parse_term(p, ctx);
@@ -1744,100 +1609,64 @@ static P compose_node(ray_t *f, ray_t *tail) {
     return (P){ R_NOUN, q_list(xs, 3), 1 };
 }
 
-static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
-    Token *ut = cur(p);
-    P u = parse_term(p, ctx);
-
-    if (u.role == R_NONE) {
-        /* a LONE glyph is the bare-verb VALUE: the dyadic row, a suffixed-colon marker (`#:`) selecting the monad, a
-         * bare `:` staying the syntax sym and `::` the identity value (q_embed's guard).  Every expression end — `(+)`, slots, statements, lambda
-         * bodies, an assignment rhs — arrives here, so this is the ONE site beside the bracket head and adverb root.
-         * Written as a verb, the value is a train tail (`0|+`, `-2_(1_)\`); a keyword or lambda there is a noun. */
-        if (t.role == R_VERB && sym_is_glyph(t.v)) {
-            ray_t *v = q_embed(t.v, Q_DYADIC);
-            return (P){ R_NOUN, v, v->type != -RAY_SYM && v != RAY_NULL_OBJ };
-        }
-        if (t.role == R_VERB && t.v && t.v->type == RAY_LIST) t.train = 1;
-        return t;
-    }
-
-    /* SPACED `x ::` is APPLICATION — `::` a noun operand, the generic-null
-     * VALUE (owner ruling 2026-07-23; `value ::` is 0, ref/value.md:96); only GLUED
-     * `x::y` keeps global-assign.  Demote the verb to a noun and fall into
-     * the ordinary juxtaposition build below. */
-    if (t.role == R_NOUN && u.role == R_VERB && u.v &&
-        u.v->type == -RAY_SYM && ut->kind == T_VERB && ut->len == 2 &&
-        p->src[ut->start] == ':' && p->src[ut->start + 1] == ':' &&
-        ut->start > 0 && (p->src[ut->start - 1] == ' ' ||
-                          p->src[ut->start - 1] == '\t')) {
+/* `t u e` with u written as a verb: infix application, assignment, or a postfix elision */
+static P parse_infix(Parser *p, P t, P u, QCtx ctx) {
+    /* `1 2 3:x` — the bare `:` verb assigning INTO a literal.  q assigns
+     * to a name, an index/apply form, or a file/global SYMBOL (`\`:f.txt:
+     * "…"` is save-by-assignment, ref/save.md); a non-sym data literal
+     * lhs is the k identity monad leaking through the script seam
+     * ("x:1 2 3\n:x" joins to exactly this shape).  Names, call trees and
+     * sym constants pass; other atoms and typed vectors refuse.  Marked
+     * verbs (`x+:1`) and `::` are other spellings. */
+    if (sym_name_is(u.v, ":") &&
+        !(t.v->type == -RAY_SYM || t.v->type == RAY_SYM ||
+          t.v->type == RAY_LIST)) {
+        ray_release(t.v);
         ray_release(u.v);
-        u.v = RAY_NULL_OBJ;
-        u.role = R_NOUN;
+        q_die("assignment needs a name or an index form on the left");
     }
-
-    if (t.role == R_NOUN && u.role == R_VERB) {
-        /* `1 2 3:x` — the bare `:` verb assigning INTO a literal.  q assigns
-         * to a name, an index/apply form, or a file/global SYMBOL (`\`:f.txt:
-         * "…"` is save-by-assignment, ref/save.md); a non-sym data literal
-         * lhs is the k identity monad leaking through the script seam
-         * ("x:1 2 3\n:x" joins to exactly this shape).  Names, call trees and
-         * sym constants pass; other atoms and typed vectors refuse.  Marked
-         * verbs (`x+:1`) and `::` are other spellings. */
-        if (sym_name_is(u.v, ":") &&
-            !(t.v->type == -RAY_SYM || t.v->type == RAY_SYM ||
-              t.v->type == RAY_LIST)) {
-            ray_release(t.v);
-            ray_release(u.v);
-            q_die("assignment needs a name or an index form on the left");
-        }
-        P e = parse_e(p, ctx);
-        /* postfix form (`1+`, `-15!`): the missing rhs is the projection HOLE, as a bracket elision's is — an
-         * explicit `::` operand is the identity VALUE.  A glued `g::` with nothing to assign is the train tail
-         * (::;g) (funq/ml.q `hdist:sum (<>)::`), so the composition keeps g's rank (ref/compose.md:23). */
-        if (!e.v && sym_name_is(u.v, "::")) {
-            ray_t *xs[2] = { q_embed(u.v, Q_DYADIC), q_embed(q_embed(t.v, Q_MONADIC), Q_DYADIC) };
-            return (P){ R_NOUN, q_list(xs, 2), 1 };
-        }
-        int assign = verb_marked(u.v) || sym_name_is(u.v, ":") || sym_name_is(u.v, "::");
-        if (!verb_marked(u.v))
-            u.v = q_embed(u.v, Q_DYADIC);      /* infix head: the dyadic row */
-        /* onto a train tail the infix head is its own postfix elision (`1~` of `1~count@`), composed onto the tail;
-         * an assignment (`hdist:sum (<>)::`) binds the train instead */
-        int onto = e.train && !assign;
-        ray_t *xs[3] = { u.v, t.v, e.v && !onto ? e.v : Q_HOLE_OBJ };
-        ray_t *r = q_list(xs, 3);
-        int8_t ut = u.v->type;
-        if ((!e.v || onto) && r && !RAY_IS_ERR(r) && (ut == RAY_UNARY || ut == RAY_BINARY || ut == RAY_VARY))
-            r->attrs |= Q_ATTR_POSTFIX;
-        if (onto) return compose_node(r, e.v);
-        return (P){ R_NOUN, r, !e.v };
+    P e = parse_e(p, ctx);
+    /* postfix form (`1+`, `-15!`): the missing rhs is the projection HOLE, as a bracket elision's is — an
+     * explicit `::` operand is the identity VALUE.  A glued `g::` with nothing to assign is the train tail
+     * (::;g) (funq/ml.q `hdist:sum (<>)::`), so the composition keeps g's rank (ref/compose.md:23). */
+    if (!e.v && sym_name_is(u.v, "::")) {
+        ray_t *xs[2] = { q_embed(u.v, Q_DYADIC), q_embed(q_embed(t.v, Q_MONADIC), Q_DYADIC) };
+        return (P){ R_NOUN, q_list(xs, 2), 1 };
     }
+    int assign = verb_marked(u.v) || sym_name_is(u.v, ":") || sym_name_is(u.v, "::");
+    if (!verb_marked(u.v))
+        u.v = q_embed(u.v, Q_DYADIC);      /* infix head: the dyadic row */
+    /* onto a train tail the infix head is its own postfix elision (`1~` of `1~count@`), composed onto the tail;
+     * an assignment (`hdist:sum (<>)::`) binds the train instead */
+    int onto = e.train && !assign;
+    ray_t *xs[3] = { u.v, t.v, e.v && !onto ? e.v : Q_HOLE_OBJ };
+    ray_t *r = q_list(xs, 3);
+    int8_t ut = u.v->type;
+    if ((!e.v || onto) && r && !RAY_IS_ERR(r) && (ut == RAY_UNARY || ut == RAY_BINARY || ut == RAY_VARY))
+        r->attrs |= Q_ATTR_POSTFIX;
+    if (onto) return compose_node(r, e.v);
+    return (P){ R_NOUN, r, !e.v };
+}
 
-    P e = parse_e_from(p, u, ctx);
+/* `t e`: t applied to the expression e right of it (juxtaposition) */
+static P parse_juxt(P t, P e) {
     /* `:` at prefix position respells to the generic `::` ((::;5) for ":5") —
      * assignment syntax, not a manifest verb, so the k-unary law does not
      * govern it.  Any OTHER bare glyph reaching here bypassed the
      * expression-start check (`count - 5` — the `-` never stands at expression
-     * start): same law, same refusal.  The old respell-to-monadic grant this
-     * replaces is what let every glyph keep its k unary form. */
-    if (t.role == R_VERB && t.v && t.v->type == -RAY_SYM &&
-        !(t.v->attrs & Q_ATTR_QUOTED)) {
-        ray_t *s = ray_sym_str(t.v->i64);
-        if (s) {
-            if (ray_str_len(s) == 1 && strchr(VERB_CHARS, ray_str_ptr(s)[0])) {
-                if (ray_str_ptr(s)[0] != ':') {
-                    char g = ray_str_ptr(s)[0];
-                    ray_release(s);
-                    ray_release(t.v);
-                    if (e.v) ray_release(e.v);
-                    die_signal(QE_NAME, &g, 1);
-                }
-                ray_release(t.v);
-                t.v = RAY_NULL_OBJ;
-            }
+     * start): same law, same refusal. */
+    ray_t *s = t.role == R_VERB ? nameref_str(t.v) : NULL;
+    if (s && glyph_form(ray_str_ptr(s), ray_str_len(s)) == GF_ONE) {
+        char g = ray_str_ptr(s)[0];
+        ray_release(t.v);
+        if (g != ':') {
             ray_release(s);
+            ray_release(e.v);
+            die_signal(QE_NAME, &g, 1);
         }
+        t.v = RAY_NULL_OBJ;
     }
+    ray_release(s);
     /* A derived FUNCTION has no prefix-juxtaposed form in q, whatever its
      * root — `,/x`, `f'1 2 3`, `{x}/1 2 3` are the permissive-grammar
      * spellings; q requires the bracket (`f'[x]`) or the parens (`(f')x`).
@@ -1856,11 +1685,11 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
                q_registry_iter_of(((ray_t **)ray_data(root))[0]) >= 0)
             root = ((ray_t **)ray_data(root))[1];
         if (q_registry_iter_of(((ray_t **)ray_data(t.v))[0]) >= 0 && root &&
-            ((root->type == -RAY_SYM && !(root->attrs & Q_ATTR_QUOTED)) ||
+            (sym_is_nameref(root) ||
              root->type == RAY_UNARY || root->type == RAY_BINARY ||
              root->type == RAY_VARY || root->type == RAY_QFN)) {
             ray_release(t.v);
-            if (e.v) ray_release(e.v);
+            ray_release(e.v);
             q_die("a derived function applies with brackets or parens in q");
         }
     }
@@ -1895,41 +1724,60 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
     return (P){ R_NOUN, q_list(xs, 2), 0 };
 }
 
-/* ===== qSQL SELECT parser (piece 3) =========================================
- * Lowers a `select …` statement to kdb's functional parse tree:
+static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
+    Token *ut = cur(p);
+    P u = parse_term(p, ctx);
+
+    if (u.role == R_NONE) {
+        /* a LONE glyph is the bare-verb VALUE: the dyadic row, a suffixed-colon marker (`#:`) selecting the monad, a
+         * bare `:` staying the syntax sym and `::` the identity value (q_embed's guard).  Every expression end — `(+)`,
+         * slots, statements, lambda bodies, an assignment rhs — arrives here, so this is the ONE site beside the
+         * bracket head and adverb root.  Written as a verb, the value is a train tail (`0|+`, `-2_(1_)\`); a keyword
+         * or lambda there is a noun. */
+        if (t.role == R_VERB && sym_glyph_form(t.v) != GF_NONE) {
+            ray_t *v = q_embed(t.v, Q_DYADIC);
+            return (P){ R_NOUN, v, v->type != -RAY_SYM && v != RAY_NULL_OBJ };
+        }
+        if (t.role == R_VERB && t.v && t.v->type == RAY_LIST) t.train = 1;
+        return t;
+    }
+
+    /* SPACED `x ::` is APPLICATION — `::` a noun operand, the generic-null
+     * VALUE (owner ruling 2026-07-23; `value ::` is 0, ref/value.md:96); only GLUED
+     * `x::y` keeps global-assign.  Demote the verb to a noun, so parse_juxt
+     * builds the application. */
+    if (t.role == R_NOUN && u.role == R_VERB && u.v &&
+        u.v->type == -RAY_SYM && ut->kind == T_VERB && ut->len == 2 &&
+        p->src[ut->start] == ':' && p->src[ut->start + 1] == ':' &&
+        ut->start > 0 && (p->src[ut->start - 1] == ' ' ||
+                          p->src[ut->start - 1] == '\t')) {
+        ray_release(u.v);
+        u.v = RAY_NULL_OBJ;
+        u.role = R_NOUN;
+    }
+
+    if (t.role == R_NOUN && u.role == R_VERB) return parse_infix(p, t, u, ctx);
+    return parse_juxt(t, parse_e_from(p, u, ctx));
+}
+
+/* ===== qSQL phrase normalization ==============================================
+ * parse_query parses each clause through the expression parser (parse_e with a
+ * QCtx), which emits RAW phrase trees — `(:;name;expr)` alias nodes, bare
+ * name-refs and constraint exprs.  qsql_normalize_phrases turns a raw phrase
+ * list into kdb's functional slot:
  *
- *     (?; `t; c; b; a)
- *
- *   `t  the from-table NAME as a symbol literal
  *   c   where-constraints: () when none, else enlist(constraint-list) where
  *       each constraint is a parse tree (op;`col;arg) — so one constraint
  *       displays ,,(op;…) and two ,((…);(…)), matching the docs' vertical form.
  *   b   by-clause: 0b when none, else a name!expr dict.
  *   a   select-columns: () when none, else a name!expr dict.
  *
- * Inside clause expressions a bare identifier is a COLUMN reference (a symbol
- * literal `col`) unless it resolves to a function value (an aggregate/keyword
- * like `sum`, embedded as its value so it prints bare); a `sym literal is a
- * VALUE so it is enlisted (,`s); numbers stay as-is.  This is q's qSQL rule.
- *
- * The parser is deliberately CORE-only (no joins/fby/subqueries); on any shape
- * it does not recognise it sets *ok=0, and the caller restores the token
- * position and re-parses the statement the ordinary way (no parse regression). */
-
-/* a symbol-literal column reference `col (ATTR_QUOTED set) from an interned id */
-static ray_t *qsql_colsym(int64_t id) {
-    ray_t *s = ray_sym(id);
-    if (s && !RAY_IS_ERR(s)) s->attrs |= Q_ATTR_QUOTED;
-    return s;
-}
-
-/* enlist an owned value into a 1-element general list (consumes v) */
-static ray_t *qsql_enlist(ray_t *v) {
-    ray_t *l = ray_list_new(1);
-    l = ray_list_append(l, v);
-    ray_release(v);
-    return l;
-}
+ * Inside clause expressions a bare identifier STANDING ALONE is a COLUMN
+ * reference (a symbol literal `col`) unless it resolves to a function value (an
+ * aggregate/keyword like `sum`, embedded as its value so it prints bare); a
+ * reserved verb APPLIED to an operand (`sum i`) embeds as its value; an
+ * embedded infix glyph head (`>` in `price>10`) is kept as it is; a `sym
+ * literal is a VALUE so it is enlisted (,`s); numbers stay as-is. */
 
 /* A callable VALUE usable as a select/exec/update phrase head: a builtin verb
  * (RAY_UNARY/BINARY/VARY), a bare RAY_LAMBDA, or a RAY_QFN carrier (a named
@@ -2014,30 +1862,15 @@ static ray_t *qsql_exec_by(ray_t **bk, ray_t **bv, const int *bnamed, int nb) {
     return qsql_build_dict(bk, bv, nb);              /* consumes bk/bv */
 }
 
-/* ===== qSQL phrase normalization (parser-unification piece) ==================
- * The migration routes qSQL clause phrases through the REAL expression parser
- * (parse_e with a QCtx) instead of the bespoke qsql_expr/qsql_term clones.  The
- * real parser emits RAW phrase trees — a RAY_LIST of `(:;name;expr)` alias
- * nodes, bare name-refs and constraint exprs — NOT the functional slot shapes
- * the query engine + lowering consume.  qsql_normalize_phrases converts a raw
- * phrase list into EXACTLY the slot the clones produce, so `parse` display,
- * display and the downstream consumers are all unchanged.
- *
- * The one representational nuance: the real parser embeds a fn-VALUE at every
- * infix GLYPH head (`>` in `price>10`), whereas the clone left that head a bare
- * glyph name-ref sym.  Both render identically through q_registry provenance
- * (q_fmt) and resolve identically in the engine (funsql_is_fn accepts the
- * value; the lowering walker embeds the bare glyph to the same value), so the
- * pass PRESERVES an applied fn-value head as-is.  Conversely a RESERVED verb
- * APPLIED to an operand (`sum i`) is a function call whose head must be
- * embedded as its registry value (else it would print `` `sum `` and the
- * engine would mistake it for a column); a name-ref STANDING ALONE is a column
- * symbol.  This is the crux we re-express here over the raw phrase trees. */
-
-/* qSQL statement verb codes (QSQL_V_SELECT/EXEC/UPDATE/DELETE) are declared up
- * near the parse_query forward decls; they select the per-verb slot shape. */
-
 static ray_t *qsql_convert_expr(ray_t *x);
+
+/* the registry MONADIC value spelled by sym id when it is callable, owned, or NULL */
+static ray_t *qsql_verb_value(int64_t id) {
+    ray_t *ev = q_registry_lookup(id, Q_MONADIC);
+    if (!qsql_is_fn_value(ev)) return NULL;
+    ray_retain(ev);
+    return ev;
+}
 
 /* An APPLIED phrase head: a RESERVED q verb embeds as its registry MONADIC
  * value (kdb shows `.q` definitions in full — funsql.md:730); the keyword
@@ -2056,18 +1889,15 @@ static ray_t *qsql_convert_head(ray_t *h) {
         if (h) ray_retain(h);
         return h;                                  /* fn value / literal: as-is */
     }
-    ray_t *ev = NULL;
-    ray_t *s = ray_sym_str(h->i64);
-    if (s) { ev = q_registry_lookup_name(ray_str_ptr(s), ray_str_len(s), Q_MONADIC);
-             ray_release(s); }
-    if (qsql_is_fn_value(ev)) { ray_retain(ev); return ev; }
+    ray_t *ev = qsql_verb_value(h->i64);
+    if (ev) return ev;
     ray_retain(h);
     return h;                                       /* not a verb: leave name-ref */
 }
 
-/* Rewrite ONE raw phrase expr into the clone's leaf representation:
+/* Rewrite ONE raw phrase expr into its functional leaf representation:
  *   - bare name-ref standing alone -> column symbol (a reserved registry verb
- *     standing alone embeds as its value, matching qsql_term);
+ *     standing alone embeds as its value);
  *   - `sym scalar literal -> the enlisted 1-element sym VECTOR `,`sym`;
  *   - a paren `(e1;e2;…)` list -> kdb's `(enlist;e1;…)` (monadic enlist head);
  *   - an application `(head; args…)` -> converted head + column-ised args.
@@ -2077,12 +1907,8 @@ static ray_t *qsql_convert_expr(ray_t *x) {
     if (x->type == -RAY_SYM) {
         /* `sym constants arrive pre-wrapped (,`sym) from noun_tree_value and
          * pass through the tail below; a sym ATOM here is always a name-ref. */
-        ray_t *ev = NULL;                          /* standalone name-ref */
-        ray_t *s = ray_sym_str(x->i64);
-        if (s) { ev = q_registry_lookup_name(ray_str_ptr(s), ray_str_len(s),
-                                             Q_MONADIC); ray_release(s); }
-        if (qsql_is_fn_value(ev)) { ray_retain(ev); return ev; }
-        return qsql_colsym(x->i64);                /* else column symbol */
+        ray_t *ev = qsql_verb_value(x->i64);
+        return ev ? ev : symlit_id(x->i64);        /* else column symbol */
     }
     if (x->type == RAY_LIST) {
         int64_t n = q_count(x);
@@ -2126,21 +1952,21 @@ static ray_t *qsql_alias_dedup(int64_t id, ray_t **aliases, int na) {
     int64_t used[QSQL_MAXCOLS];
     for (int j = 0; j < na; j++) used[j] = aliases[j]->i64;
     if (id < 0) id = ray_sym_intern_runtime("x", 1);
-    return qsql_colsym(q_name_dedup(id, used, na, 0));
+    return symlit_id(q_name_dedup(id, used, na, 0));
 }
 
-/* Fold a phrase list into a q name!expr DICT (select/update `a`, by-key `b`):
- * an alias phrase keys on its written name; a bare phrase derives its output
- * name via qsql_derive_alias over the clone. */
-static ray_t *qsql_norm_dict(ray_t *phrases) {
+/* A phrase list's columns: an alias phrase keys on its written name (*named
+ * set); a bare phrase derives its output name via qsql_derive_alias over the
+ * converted phrase.  Fills the OWNED aliases/vals; answers the count. */
+static int qsql_phrase_cols(ray_t *phrases, ray_t **aliases, ray_t **vals, int *named) {
     int64_t n = q_count(phrases);
     ray_t **ph = (ray_t **)ray_data(phrases);
-    ray_t *aliases[QSQL_MAXCOLS], *vals[QSQL_MAXCOLS];
     int na = 0;
     for (int64_t i = 0; i < n && na < QSQL_MAXCOLS; i++) {
         ray_t *name = NULL, *val = NULL;
-        if (binding_node(ph[i], &name, &val)) {
-            aliases[na] = qsql_colsym(name->i64);
+        named[na] = binding_node(ph[i], &name, &val);
+        if (named[na]) {
+            aliases[na] = symlit_id(name->i64);
             vals[na]    = qsql_convert_expr(val);
         } else {
             ray_t *v    = qsql_convert_expr(ph[i]);
@@ -2149,6 +1975,14 @@ static ray_t *qsql_norm_dict(ray_t *phrases) {
         }
         na++;
     }
+    return na;
+}
+
+/* select/update `a`, select/update by-key `b`: a name!expr DICT */
+static ray_t *qsql_norm_dict(ray_t *phrases) {
+    ray_t *aliases[QSQL_MAXCOLS], *vals[QSQL_MAXCOLS];
+    int named[QSQL_MAXCOLS];
+    int na = qsql_phrase_cols(phrases, aliases, vals, named);
     return qsql_build_dict(aliases, vals, na);       /* consumes aliases/vals */
 }
 
@@ -2169,7 +2003,7 @@ static ray_t *qsql_norm_exec_a(ray_t *phrases) {
             ray_release(v);
             return sv;
         }
-        return qsql_enlist(v);
+        return q_list(&v, 1);
     }
     return qsql_norm_dict(phrases);                  /* named / multiple -> dict */
 }
@@ -2186,27 +2020,13 @@ static ray_t *qsql_norm_by(ray_t *phrases, int verb) {
         ray_retain(ph[0]);
         return ph[0];
     }
-    ray_t *bk[QSQL_MAXCOLS], *bv[QSQL_MAXCOLS]; int bnamed[QSQL_MAXCOLS];
-    int nb = 0;
-    for (int64_t i = 0; i < n && nb < QSQL_MAXCOLS; i++) {
-        ray_t *name = NULL, *val = NULL;
-        if (binding_node(ph[i], &name, &val)) {
-            bk[nb] = qsql_colsym(name->i64);
-            bv[nb] = qsql_convert_expr(val);
-            bnamed[nb] = 1;
-        } else {
-            ray_t *v = qsql_convert_expr(ph[i]);
-            bk[nb] = qsql_alias_dedup(qsql_derive_alias(v), bk, nb);
-            bv[nb] = v;
-            bnamed[nb] = 0;
-        }
-        nb++;
-    }
+    ray_t *bk[QSQL_MAXCOLS], *bv[QSQL_MAXCOLS];
+    int bnamed[QSQL_MAXCOLS];
+    int nb = qsql_phrase_cols(phrases, bk, bv, bnamed);
     return qsql_exec_by(bk, bv, bnamed, nb);         /* consumes bk/bv */
 }
 
-/* where-phrase `c`: enlist the already-parsed constraint exprs (each converted),
- * matching qsql_where's enlist(constraint-list). */
+/* where-phrase `c`: the converted constraint exprs, enlisted */
 static ray_t *qsql_norm_where(ray_t *phrases) {
     int64_t n = q_count(phrases);
     ray_t **ph = (ray_t **)ray_data(phrases);
@@ -2215,7 +2035,7 @@ static ray_t *qsql_norm_where(ray_t *phrases) {
         ray_t *c = qsql_convert_expr(ph[i]);
         clist = ray_list_append(clist, c); ray_release(c);
     }
-    return qsql_enlist(clist);                        /* enlist(list); consumes clist */
+    return q_list(&clist, 1);
 }
 
 /* delete column-list `a`: the col names as a symbol VECTOR, ENLISTED like every
@@ -2236,10 +2056,10 @@ static ray_t *qsql_norm_delete_a(ray_t *phrases) {
         }
         a = symvec_add(a, x->i64);
     }
-    return qsql_enlist(a);
+    return q_list(&a, 1);
 }
 
-/* Normalize a raw phrase list into the functional slot the clones emit.
+/* Normalize a raw phrase list into its functional slot.
  *   origin  which clause the phrases came from (Q_SELECT main phrase / Q_BY /
  *           Q_WHERE) — picks the sub-shaper;
  *   verb    the statement (QSQL_V_*) — picks the per-verb `a`/`b` shape.
@@ -2280,7 +2100,7 @@ static void phrase_head_guard(Parser *p) {
 static ray_t *parse_phrase_list(Parser *p, QCtx ctx) {
     /* A parse_e under a non-Q_NONE ctx can q_die (a misplaced clause keyword in
      * parse_base_q); hold the partial list where the longjmp handler frees it. */
-    ray_t **lst = qsql_pend_push();
+    ray_t **lst = pend_push();
     *lst = ray_list_new(0);
     phrase_head_guard(p);
     P first = parse_e(p, ctx);
@@ -2296,44 +2116,56 @@ static ray_t *parse_phrase_list(Parser *p, QCtx ctx) {
         }
     }
     ray_t *done = *lst;
-    qsql_pend_pop();                                 /* success: unlink, keep it */
+    pend_pop();                                 /* success: unlink, keep it */
     return done;
 }
 
-/* ---- test hook (oracle unit test) ------------------------------------------
+/* ---- entry-point plumbing ----------------------------------------------------
+ * Every entry point opens with parse_begin, then its own setjmp, whose handler
+ * answers die_answer(): the parked refs released, the live token buffer freed,
+ * the staged class (and payload) answered as the error. */
+static void parse_begin(void) {
+    init_class();
+    g_toks.t = NULL;
+    g_toks.n = 0;
+}
+
+static void drop_tokens(void) {
+    free_tokens(g_toks);
+    g_toks.t = NULL;
+    g_toks.n = 0;
+}
+
+static ray_t *die_answer(void) {
+    pend_unwind();
+    drop_tokens();
+    q_err_e cls = g_die_class; g_die_class = QE_PARSE;
+    if (g_die_payload) {
+        ray_t *e = q_err_signal(cls, g_die_payload);
+        ray_release(g_die_payload); g_die_payload = NULL;
+        return e;
+    }
+    return q_err(cls);
+}
+
+/* ---- test hook --------------------------------------------------------------
  * Scan `src` as a bare clause phrase list in `ctx`, then normalize it to the
- * `verb` slot shape.  Lets test/q_qsql_normalize.c drive the NEW parse_e path
- * over phrase substrings and compare the slot to the CLONE's output.  Not on any
- * runtime path — the migration wires parse_query, not this.  Returns OWNED. */
+ * `verb` slot shape, so test/q_qsql_normalize.c can drive the parse_e path over
+ * phrase substrings.  Not on any runtime path.  Returns OWNED. */
 ray_t *q_qsql_normalize_probe(const char *src, int ctx, int verb) {
     if (!q_registry_ready())
         return q_err(QE_INIT);
-    init_class();
-    g_toks.t = NULL; g_toks.n = 0;
-    if (setjmp(q_err_jmp)) {
-        qsql_pend_unwind();
-        free_tokens(g_toks);
-        g_toks.t = NULL; g_toks.n = 0;
-        q_err_e cls = g_die_class; g_die_class = QE_PARSE;
-        if (g_die_payload) {
-            ray_t *e = q_err_signal(cls, g_die_payload);
-            ray_release(g_die_payload); g_die_payload = NULL;
-            return e;
-        }
-        return q_err(cls);
-    }
-    Tokens ts = scan(src);
-    Parser p = { .src = src, .t = ts, .pos = 0, .xyz_mask = NULL, .lambda_depth = 0 };
+    parse_begin();
+    if (setjmp(q_err_jmp)) return die_answer();
+    Parser p = { .src = src, .t = scan(src) };
     /* pend-held across normalize: qsql_norm_delete_a can q_die on a non-name
      * phrase (parse_query prevalidates; this probe does not) */
-    ray_t **ph = qsql_pend_push();
+    ray_t **ph = pend_push();
     *ph = parse_phrase_list(&p, (QCtx)ctx);
     ray_t *slot = qsql_normalize_phrases(*ph, (QCtx)ctx, verb);
-    ray_t *phrases = *ph;
-    qsql_pend_pop();
-    ray_release(phrases);
-    free_tokens(ts);
-    g_toks.t = NULL; g_toks.n = 0;
+    ray_release(*ph);
+    pend_pop();
+    drop_tokens();
     return slot;
 }
 
@@ -2347,25 +2179,20 @@ static ray_t *parse_E(Parser *p, QCtx ctx) {
      * seq_of and the evaluator read it as a no-op that yields no output, where
      * the generic null would print `::`. */
     if (++p->depth > Q_PARSE_MAX_DEPTH) die_err(QE_LIMIT);
-    /* The FIRST expression is parsed before the list exists, so the die that
-     * ends a run of nested brackets — every level of it dies here, in its own
-     * first parse_e — strands nothing.  A die in a later `;` element still
-     * abandons that level's list: see PLAN.md on the die-path guard, which
-     * cannot hold this frame's slot. */
-    ray_t *v = parse_e(p, Q_NONE).v;
-    ray_t *l = ray_list_new(1);
-    int n = 0;
-    for (;;) {
-        l = ray_list_append(l, v);
-        if (v) ray_release(v);
-        n++;
+    ray_t **l = pend_push();
+    *l = ray_list_new(1);
+    for (int n = 1;; n++) {
+        ray_t *v = parse_e(p, Q_NONE).v;
+        *l = ray_list_append(*l, v);
+        ray_release(v);
         if (!at(p, T_SEMI)) break;
         if (n >= MAX_VEC) q_die("too many ';'-separated expressions");
         adv(p);
-        v = parse_e(p, Q_NONE).v;
     }
+    ray_t *done = *l;
+    pend_pop();
     p->depth--;
-    return l;
+    return done;
 }
 
 /* ===== text intake =========================================================
@@ -2379,17 +2206,11 @@ static ray_t *parse_E(Parser *p, QCtx ctx) {
 /* `(name; text)` — head is a NAME ref, so an undefined handler fails as
  * ordinary resolution (`'.g.e`).  Consumes `arg`. */
 static ray_t *intake_tree(const char *name, size_t nl, ray_t *arg) {
-    ray_t *hd = ray_sym(ray_sym_intern_runtime(name, nl));
-    ray_t *t = ray_list_new(2);
-    t = ray_list_append(t, hd);
-    ray_release(hd);
-    t = ray_list_append(t, arg);
-    ray_release(arg);
-    return t;
+    ray_t *xs[2] = { i_name(name, (int)nl), arg };
+    return q_list(xs, 2);
 }
 
 static ray_t *parse_text(const char *src);
-static ray_t *die_answer(void);
 
 /* k texts a client or library is witnessed sending, byte for byte bar a trailing comment and blanks, beside their q
  * transliteration — qStudio's Server Properties (qstudio-private ServerSlashConfig.java:36, ServerReport.java:54-63,74)
@@ -2438,7 +2259,7 @@ ray_t *q_parse_lang_tree(char letter, const char *p, int64_t n) {
             if (strlen(k_known[i].k) == m && !memcmp(k_known[i].k, p, m)) return parse_text(k_known[i].q);
     }
     if (letter == 's') {
-        g_toks.t = NULL; g_toks.n = 0;
+        parse_begin();
         if (setjmp(q_err_jmp)) return die_answer();
         return intake_tree(nm, 4, text_capture(ray_charv(p, n), NULL));
     }
@@ -2495,48 +2316,24 @@ ray_t *q_parse(const char *src) {
     return parse_text(src);
 }
 
-static ray_t *die_answer(void) {
-    free_tokens(g_toks);
-    g_toks.t = NULL;
-    g_toks.n = 0;
-    q_err_e cls = g_die_class; g_die_class = QE_PARSE;
-    if (g_die_payload) {
-        ray_t *e = q_err_signal(cls, g_die_payload);
-        ray_release(g_die_payload); g_die_payload = NULL;
-        return e;
-    }
-    return q_err(cls);
-}
-
 static ray_t *parse_text(const char *src) {
-    init_class();
-    g_toks.t = NULL;
-    g_toks.n = 0;
-    if (setjmp(q_err_jmp)) {
-        /* q_die() longjmped here; free whatever the scanner had emitted, plus
-         * every ref the abandoned frames registered on the pending guard. */
-        qsql_pend_unwind();
-        return die_answer();
-    }
-
-    Tokens ts = scan(src);
-    Parser p = { .src = src, .t = ts, .pos = 0 };
+    parse_begin();
+    if (setjmp(q_err_jmp)) return die_answer();
+    Parser p = { .src = src, .t = scan(src) };
     ray_t *e = parse_E(&p, Q_NONE);
-    if (!at(&p, T_EOF)) {
+    int whole = at(&p, T_EOF);
+    drop_tokens();
+    if (!whole) {
         ray_release(e);
-        free_tokens(ts);
-        g_toks.t = NULL; g_toks.n = 0;
         return q_err(QE_PARSE);
     }
-    ray_t *prog = seq_of(e);
-    free_tokens(ts);
-    g_toks.t = NULL; g_toks.n = 0;
     /* An empty program (a whole-line comment, or blank/whitespace-only input)
      * collapses to a C NULL in seq_of.  Return the value-null singleton
      * instead so callers get an explicit no-op sentinel: RAY_IS_NULL()
      * recognises it (the REPL prints nothing; qdoc matches empty output) and
      * ray_eval() self-evaluates it, rather than every caller having to treat a
      * bare C NULL specially. */
+    ray_t *prog = seq_of(e);
     return prog ? prog : RAY_NULL_OBJ;
 }
 
@@ -2562,9 +2359,7 @@ static ray_t *tokens_gap(ray_t *l, const char *s, int a, int b) {
 ray_t *q_parse_tokens(const char *src, int64_t n) {
     if (n > INT_MAX - 1) return q_err(QE_DOMAIN);
     if (!q_registry_ready()) return q_err(QE_INIT);
-    init_class();
-    g_toks.t = NULL;
-    g_toks.n = 0;
+    parse_begin();
     if (setjmp(q_err_jmp)) return die_answer();
     Tokens ts = scan(src);
     ray_t *l = ray_list_new(ts.n > 1 ? ts.n * 2 : 1);
@@ -2575,24 +2370,19 @@ ray_t *q_parse_tokens(const char *src, int64_t n) {
         at = ts.t[i].start + ts.t[i].len;
     }
     l = tokens_gap(l, src, at, (int)n);
-    free_tokens(ts);
-    g_toks.t = NULL;
-    g_toks.n = 0;
+    drop_tokens();
     return l;
 }
 
 static void open_scan(q_parse_open_t *st, const char *src) {
-    init_class();
-    g_toks.t = NULL;
-    g_toks.n = 0;
+    parse_begin();
     g_scan_open_str = 0;
     g_scan_open_lit = 0;
     if (setjmp(q_err_jmp)) {
         ray_error_free(die_answer());
     } else {
-        free_tokens(scan(src));
-        g_toks.t = NULL;
-        g_toks.n = 0;
+        scan(src);
+        drop_tokens();
     }
     st->in_string = g_scan_open_str;
     st->in_literal = g_scan_open_lit;
@@ -2634,8 +2424,7 @@ int q_parse_is_assign(const ray_t *cast) {
     }
     int asg = RAY_IS_NULL(h);
     if (!asg) {
-        if (!h || h->type != -RAY_SYM || (h->attrs & Q_ATTR_QUOTED)) return 0;
-        ray_t *s = ray_sym_str(h->i64);
+        ray_t *s = nameref_str(h);
         if (!s) return 0;
         const char *nm = ray_str_ptr(s);
         size_t l = ray_str_len(s);
@@ -2644,11 +2433,7 @@ int q_parse_is_assign(const ray_t *cast) {
     }
     if (!asg || q_count(ast) != 3) return 0;
     ray_t *t = e[1];
-    if (t && t->type == -RAY_SYM && !(t->attrs & Q_ATTR_QUOTED)) return 1;
+    if (sym_is_nameref(t)) return 1;
     /* indexed assignment `name[i;…]:v` is silent too — kdb console */
-    if (t && t->type == RAY_LIST && q_count(t) >= 2) {
-        ray_t *th = ((ray_t **)ray_data(t))[0];
-        return th && th->type == -RAY_SYM && !(th->attrs & Q_ATTR_QUOTED);
-    }
-    return 0;
+    return t && t->type == RAY_LIST && q_count(t) >= 2 && sym_is_nameref(((ray_t **)ray_data(t))[0]);
 }
