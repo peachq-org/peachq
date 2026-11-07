@@ -374,9 +374,13 @@ static int env_q_changes_builtin(ray_t* nq) {
 }
 
 /* Judged by the TARGET after `\d` re-rooting — a root reserved word or a `.q` builtin entry, and `.q` itself by
- * effect; a colon assignment's bare SPELLING is refused upstream in q_eval (owner ruling 2026-09-23). */
+ * effect; a colon assignment's bare SPELLING is refused upstream in q_eval (owner ruling 2026-09-23).  A namespace
+ * already under a root reserved word (made by `` `..var.n set ``) is the user's, so a dict write of it is a member
+ * edit (owner ruling 2026-11-07). */
 static int env_locked(ray_t** home, const int64_t* segs, int k, ray_t* val) {
-    if (home != &env_ns) return k == 1 && q_registry_locked(segs[0]);
+    if (home != &env_ns)
+        return k == 1 && q_registry_locked(segs[0]) &&
+               !(val && val->type == RAY_DICT && env_is_marked(ray_dict_probe_sym_borrowed(*home, segs[0])));
     if (segs[0] != g_q_seg) return 0;
     return k == 1 ? env_q_changes_builtin(val) : q_registry_locked(segs[1]);
 }
@@ -507,7 +511,9 @@ static void env_scope_restore(const env_scope_t* prev) {
  * globals (ref/get.md `set`) — the ` -> :: marker is representation, skipped.
  * Members go back through q_env_set, so each gets the same name policy, AT THE
  * ROOT whatever `\d` or a lambda scope says (`` `. `` is absolute); a member
- * already bound to that very value is the amend's untouched node, not a write. */
+ * already bound to that very value is the amend's untouched node, not a write.
+ * A root name the dict lacks is unbound, so `.[`.;();_;`n]` is `delete n from `.`
+ * (ref/delete.md:125). */
 static ray_err_t env_root_splat(ray_t* d) {
     if (!d || d->type != RAY_DICT) return RAY_ERR_TYPE;
     ray_t*  dk = ray_dict_keys(d);                  /* borrowed */
@@ -525,6 +531,13 @@ static ray_err_t env_root_splat(ray_t* d) {
         if (k && !RAY_IS_ERR(k)) ray_release(k);
         if (v && !RAY_IS_ERR(v)) ray_release(v);
     }
+    ray_t* rk = e == RAY_OK ? ray_dict_keys(env_root) : NULL;
+    if (rk) ray_retain(rk);
+    for (int64_t i = 0, rn = rk ? q_count(rk) : 0; i < rn && e == RAY_OK; i++) {
+        int64_t id = ray_read_sym(ray_data(rk), i, RAY_SYM, rk->attrs);
+        if (id != marker && ray_dict_find_sym(d, id) < 0) e = q_env_unbind(id);
+    }
+    if (rk) ray_release(rk);
     env_scope_restore(&sc);
     return e;
 }
@@ -675,8 +688,12 @@ int q_env_ns_exists(int64_t path_sym) { return env_is_marked(q_env_get(path_sym)
 
 ray_t* q_env_ns_probe(int64_t ns_sym, const char* member, size_t n) {
     int64_t id = ray_sym_find(member, n);
-    ray_t* d = id < 0 ? NULL : q_env_get(ns_sym);
-    return d && d->type == RAY_DICT ? ray_dict_probe_sym_borrowed(d, id) : NULL;
+    return id < 0 ? NULL : q_env_ns_member(ns_sym, id);
+}
+
+ray_t* q_env_ns_member(int64_t ns_sym, int64_t member) {
+    ray_t* d = q_env_get(ns_sym);
+    return d && d->type == RAY_DICT ? ray_dict_probe_sym_borrowed(d, member) : NULL;
 }
 
 ray_t* q_env_ns_view(int64_t path_sym) {

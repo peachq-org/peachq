@@ -111,8 +111,10 @@ static ray_t* name_error(int64_t id) {
 
 /* Name resolution with the base name hook INLINED (finding 6 / carve-eval
  * quarry): manifest verbs are reserved so the registry wins for them; then
- * env (scopes + globals), `.z.*`, and the `.q` namespace.  Owned result or
- * NULL.  *row_out set when the hit came from the registry. */
+ * env (scopes + globals), `.z.*`, and a q.q builtin as sealed — a local may
+ * still reuse that spelling.  A user `.q` entry was bound at parse, so the
+ * live `.q` is never read here.  Owned result or NULL.  *row_out set when
+ * the hit came from the registry. */
 static ray_t* resolve(int64_t id, const q_op_t** row_out) {
     if (row_out) *row_out = NULL;
     const q_op_t* row = NULL;
@@ -127,13 +129,7 @@ static ray_t* resolve(int64_t id, const q_op_t** row_out) {
     if (v) return q_view_deref(v);           /* a view reference recalcs */
     v = q_dotz_resolve(id);                  /* owned */
     if (v) return v;
-    /* bare identifier -> `.q.<name>` (kdb: keywords ARE .q entries) */
-    ray_t* nm = ray_sym_str(id);
-    if (!nm) return NULL;
-    const char* p = ray_str_ptr(nm);
-    size_t n = ray_str_len(nm);
-    v = n > 0 && !memchr(p, '.', n) ? q_env_ns_probe(ray_sym_intern_runtime(".q", 2), p, n) : NULL;
-    ray_release(nm);
+    v = q_registry_builtin_value(id);
     if (v) ray_retain(v);
     return v;
 }
@@ -279,7 +275,7 @@ static int write_is_local(int64_t sym) {
 int q_eval_assign_locked(int64_t sym) {
     int global = !write_is_local(sym);
     if (global && q_env_scope_ctx() && q_registry_is_syntax_word(sym)) return 0;
-    return q_registry_is_reserved(sym) || (global && q_registry_locked(sym));
+    return q_registry_is_reserved(sym) || (global && (q_registry_locked(sym) || q_registry_dotq_ext(sym)));
 }
 
 /* undo a park (q_env_take / q_env_local_take) on a failed write: the value
