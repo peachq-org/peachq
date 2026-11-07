@@ -913,7 +913,7 @@ static ray_t* by_exec_vec(ray_t* a, ray_t* t, ray_t* idx) {
 static ray_t* sort_idx(ray_t* spec, ray_t* t, ray_t* idx) {
     ray_t** e = (spec && spec->type == RAY_LIST && q_count(spec) == 2)
                     ? (ray_t**)ray_data(spec) : NULL;
-    if (!e || !e[0] || !e[1] || e[1]->type != -RAY_SYM) {
+    if (!e || !e[0] || !e[1]) {
         ray_release(idx);
         return q_err(QE_TYPE);
     }
