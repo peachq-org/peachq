@@ -83,7 +83,8 @@ ray_t* q_registry_lookup_row(int64_t sym_id, q_valence_t valence,
                              const struct q_op** row_out);
 
 /* Manifest row for a PARSER-EMBEDDED head value at the given valence.
- * Exact for wrapper/QSRC cells (unique objects).  A pass-through env value
+ * Exact for wrapper/QSRC cells unique to one row; a primitive several rows
+ * share answers the row registry.c's row_prefer picks.  A pass-through env value
  * aliased by several rows at that valence returns NULL — ambiguous by
  * construction (the `#`-monadic vs `count` class); the fresh apply module
  * then dispatches on the value's own attrs (RAY_FN_ATOMIC) alone. */
@@ -156,7 +157,8 @@ ray_t* q_registry_kdb_op_value(int code, q_valence_t valence);
  * Returns true and fills *out on a hit; false if `value` is not a registry
  * value.  Consumed by the 2b formatter to print the original q glyph.
  *
- * EXACT for WRAPPER values (unique objects).  Pass-through/rename values are the
+ * For a WRAPPER value, the first row registered with it (a shared primitive's
+ * glyph: `neg` names `-`).  Pass-through/rename values are the
  * shared env builtin object, and several q spellings may alias one env object
  * (e.g. `#`-monadic and `count`); for those, this returns the first-registered
  * spelling — 2b disambiguates aliased pass-throughs from the parse-site glyph,
