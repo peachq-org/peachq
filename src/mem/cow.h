@@ -40,4 +40,9 @@
  * The thread pool sets true before parallel dispatch. */
 extern RAY_TLS bool ray_rc_sync;
 
+/* sole owner — what ray_cow tests before it mutates in place, without the consume */
+static inline bool ray_rc_sole(ray_t* v) {
+    return (RAY_LIKELY(!ray_rc_sync) ? v->rc : ray_atomic_load(&v->rc)) == 1;
+}
+
 #endif /* RAY_COW_H */
