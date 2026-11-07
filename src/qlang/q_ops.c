@@ -192,6 +192,7 @@
 #define QKOP(n) .kdb_op1 = (int8_t)((n) + 1)
 /* Doc citations below name only the NON-derivable ones: unless a comment says
  * otherwise, a row's reference page is ref/<its own name>.md. */
+/* No more columns (owner 2026-10-21): a property a few verbs need is detected by name at its one site. */
 static const q_op_t Q_OPS[] = {
     /* name    lex            monadic-recipe             dyadic-recipe            hof  det eff family mono (mono_scan designated) */
     /* ---- arithmetic / compare glyphs: dyads atomic (ref/{add,subtract,
@@ -254,8 +255,8 @@ static const q_op_t Q_OPS[] = {
     { "in",    QLEX_KW,        QR_NONE,                        QR_FN2("in", q_in_wrap), NULL, 1, 0, "none", NULL, QKOP(23) },
     /* Monadic cells stay QR_NONE: both are dyadic-only in q, so prefix `and x`
      * misses and eval falls through to rayfall's scalar special form. */
-    { "and",   QLEX_KW,        QR_NONE,                        QR_FN2A("and", q_min2_wrap), NULL, 1, 0, "atomic", NULL, QKOP(5) },
-    { "or",    QLEX_KW,        QR_NONE,                        QR_FN2A("or", q_max2_wrap), NULL, 1, 0, "atomic", NULL, QKOP(6) },
+    { "and",   QLEX_KW,        QR_NONE,                        QR_FN2A("and", q_min2_wrap), NULL, 1, 0, "atomic", "min", .mono_scan = "mins", QKOP(5) },
+    { "or",    QLEX_KW,        QR_NONE,                        QR_FN2A("or", q_max2_wrap), NULL, 1, 0, "atomic", "max", .mono_scan = "maxs", QKOP(6) },
     /* `within` y is BOUNDS, not an operand conforming to x, so no lift law
      * fits: family `none`, wrapper takes whole args (border ruling: AUDIT). */
     { "within",QLEX_KW,        QR_NONE,                        QR_FN2("within", q_within_wrap), NULL, 1, 0, "none", NULL, QKOP(24) },
