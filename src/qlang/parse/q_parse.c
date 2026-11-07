@@ -1331,7 +1331,8 @@ static void qsql_pend_unwind(void) {              /* q_die: release every ref */
     }
 }
 
-/* select[…] sort spec `<c` / `>c` -> kdb's ENLISTED k-unary pair `,(<:;`c)`
+/* select[…] sort spec `<c` / `>c` -> kdb's ENLISTED k-unary pair `,(<:;`c)`; the key may be an expression
+ * (`select[>x+1]`, uqf lib/unparse/testcases.q, which KDB-X parses)
  * (extracted/basics/funsql.qcmd:391) — the registry VALUE at the head, never
  * an iasc/idesc spelling; the enlist is the tree quote, so the pair reaches
  * `?` as DATA in slot 6. */
@@ -1342,13 +1343,9 @@ static int qtok_is_sort_glyph(const Token *tk) {
 static ray_t *qsql_sortspec(Parser *p) {
     int desc = sym_name_is(cur(p)->k, ">");
     adv(p);
-    Token *ct = cur(p);
-    if (ct->kind != T_NOUN || !ct->k || ct->k->type != -RAY_SYM ||
-        (ct->k->attrs & Q_ATTR_QUOTED))
-        q_die("qsql: expected column name after < / > in select[...]");
-    ray_t *xs[2] = { q_embed(q_verb(desc ? '>' : '<'), Q_MONADIC), ct->k };
-    ct->k = NULL;
-    adv(p);
+    P key = parse_e(p, Q_NONE);
+    if (key.role == R_NONE) q_die("qsql: expected a sort key after < / > in select[...]");
+    ray_t *xs[2] = { q_embed(q_verb(desc ? '>' : '<'), Q_MONADIC), key.v };
     ray_t *pair = q_list(xs, 2);
     ray_t *l = ray_list_new(1);
     l = ray_list_append(l, pair);
