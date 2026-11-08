@@ -1480,14 +1480,26 @@ void q_fmt_console(ray_t* val, char* buf, size_t bufsz) {
     fmt_console_into(val, buf, bufsz, &trunc);
 }
 
+/* a registry spelling that is a GLYPH (`+`, `%`, `0:`) rather than a keyword —
+ * glyphs take the `:` monadic marker on display, keywords never do */
+static int fn_glyph_spelling(const char* s) {
+    char c = s[0];
+    return !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
+}
+
+/* a fn value's provenance spelling, `:` after a monadic glyph when mark is set; 0 when it has none */
+static int fmt_fn_spelling(ray_t* v, int mark) {
+    q_provenance_t pv;
+    if (!q_registry_provenance(v, &pv) || !pv.spelling || !pv.spelling[0]) return 0;
+    qe_puts(pv.spelling);
+    if (mark && pv.valence == Q_MONADIC && fn_glyph_spelling(pv.spelling)) qe_putc(':');
+    return 1;
+}
+
 /* A composition's part: a primitive by its bare spelling, so kdb's `'[not;=]` prints `~=` and `'[neg;abs]` `-abs`
  * (owner kdb transcript 2026-11-08); anything else as itself. */
 static void fmt_comp_part(ray_t* p) {
-    q_provenance_t pv;
-    if (q_eval_apply_is_fnval(p) && q_registry_provenance(p, &pv) && pv.spelling && pv.spelling[0])
-        qe_puts(pv.spelling);
-    else
-        fmt_render(p);
+    if (!q_eval_apply_is_fnval(p) || !fmt_fn_spelling(p, 0)) fmt_render(p);
 }
 
 /* RAY_QFN carrier display over the apply module's read-out accessors (the
@@ -1573,13 +1585,6 @@ static void fmt_list_elem(ray_t* e) {
     qe_puts(elem);
 }
 
-/* a registry spelling that is a GLYPH (`+`, `%`, `0:`) rather than a keyword —
- * glyphs take the `:` monadic marker on display, keywords never do */
-static int fn_glyph_spelling(const char* s) {
-    char c = s[0];
-    return !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
-}
-
 static void q_fmt_body(ray_t* val) {
     if (!val) return;
 
@@ -1606,7 +1611,6 @@ static void q_fmt_body(ray_t* val) {
         return;
     }
 
-    /* RAY_QFN carrier: its structure, whatever keyword names it (`<>` IS `'[not;=]` and prints `~=`) */
     if (val->type == RAY_QFN) {
         carrier_fmt(val);
         return;
@@ -1680,13 +1684,7 @@ static void q_fmt_body(ray_t* val) {
         /* the paren-list ctor IS kdb's enlist (basics/parsetrees.md fby) */
         if (val == q_registry_list_value()) { qe_puts("enlist"); return; }
         if (val == q_registry_compose_value()) { qe_putc('\''); return; }
-        q_provenance_t pv;
-        if (q_registry_provenance(val, &pv) && pv.spelling && pv.spelling[0]) {
-            qe_puts(pv.spelling);
-            if (pv.valence == Q_MONADIC && fn_glyph_spelling(pv.spelling))
-                qe_putc(':');
-            return;
-        }
+        if (fmt_fn_spelling(val, 1)) return;
     }
 
     {
