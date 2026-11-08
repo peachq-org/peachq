@@ -41,9 +41,12 @@ void q_ctx_set_line_done(void (*fn)(const char* s, size_t n, const char* status,
  * line — `\l` raises it so the abort propagates out of nested loads. */
 int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig);
 
-/* `.pq`'s native `.pq.i.console x` — the console line for a transcript's input x: the live prompt and x echoed
- * (neither under `-q`, as the piped console), then x run as the console runs a line, on the streams of the load in
- * progress (else stdout/stderr).  `.pq.i.qcmd` applies it per prompt line.  Bound by `.pq.load_natives`pq`. */
+/* `.pq`'s native `.pq.i.console[x;nested]` — the console line for a transcript's input x: the live prompt and x
+ * echoed (neither under `-q`, as the piped console), then x run as the console runs a line, on the streams of the
+ * load in progress (else stdout/stderr).  An error suspends into the debugger as at the console, `nested` (the
+ * transcript's following `q))` lines, their prompts stripped) being what it reads; they are spent, or the
+ * suspension ends, before the call returns.  x `::` is a transcript opening at `q))`: nothing to run, the lines are
+ * echoed.  `.pq.i.qcmd` applies it per `q)` line.  Bound by `.pq.load_natives`pq`. */
 void q_ctx_pq_register(void);
 
 /* The error a load ANSWERS with, from a run's return and esig: the eval abort's
