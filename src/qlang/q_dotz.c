@@ -106,7 +106,8 @@ void q_dotz_doors_restore(void) {
     }
 }
 
-/* basics/cmdline.md's options, then peachq's own launcher flags: what q consumes from argv. */
+/* basics/cmdline.md's options, then peachq's own launcher flags: what q consumes from argv outside -conn mode.
+ * -conn mode's -save and -ls are absent: conn_main parses them, so a script's own -save/-ls reach .z.x. */
 static const q_dotz_opt_t Q_OPTS[] = {
     { "-b", 0, NULL, NULL }, { "-c", 2, "c", NULL }, { "-C", 2, "C", NULL }, { "-e", 1, "e", "012" },
     { "-E", 1, NULL, "012" }, { "-g", 1, "g", "01" }, { "-l", 0, NULL, NULL }, { "-L", 0, NULL, NULL },
@@ -116,7 +117,6 @@ static const q_dotz_opt_t Q_OPTS[] = {
     { "-w", 1, NULL, NULL }, { "-W", 1, "W", NULL }, { "-z", 1, "z", "01" },
     { "--port", 1, NULL, NULL }, { "-classic", 0, NULL, NULL }, { "-eval", 1, NULL, NULL },
     { "-eval-before", 1, NULL, NULL }, { "-duckdb", 1, NULL, NULL }, { "-conn", 1, NULL, NULL },
-    { "-save", 1, NULL, NULL }, { "-ls", 0, NULL, NULL },
 };
 
 const q_dotz_opt_t* q_dotz_opt(const char* token) {
