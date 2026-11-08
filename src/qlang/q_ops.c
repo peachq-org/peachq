@@ -593,7 +593,10 @@ int q_lex_is_kw_infix(const char* s, int len) {
     return r && r->lex == QLEX_KW && r->dyad.kind != QK_NONE;
 }
 
-static const char* const SYNTAX_WORDS[] = { "do", "if", "while", "select", "exec", "update", "delete" };
+static const char* const SYNTAX_WORDS[] = {
+    [Q_SYNTAX_DO] = "do", [Q_SYNTAX_IF] = "if", [Q_SYNTAX_WHILE] = "while", [Q_SYNTAX_SELECT] = "select",
+    [Q_SYNTAX_EXEC] = "exec", [Q_SYNTAX_UPDATE] = "update", [Q_SYNTAX_DELETE] = "delete",
+};
 
 const char* q_ops_syntax_word(int i) {
     return i >= 0 && i < (int)(sizeof SYNTAX_WORDS / sizeof *SYNTAX_WORDS) ? SYNTAX_WORDS[i] : NULL;

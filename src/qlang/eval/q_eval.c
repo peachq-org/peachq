@@ -315,19 +315,14 @@ static ray_t* indexed_assign(ray_t* target, ray_t* opv, ray_t* rhs) {
     return ret;
 }
 
-/* what a tree can assign INTO: a name, or an index form `a[i;…]` headed by one — a sym atom in a tree is always a
- * name (parsetrees.md:80), so an eval'd `(::;`d;5)` assigns exactly as the parsed `d::5` does */
-static int assign_target(ray_t* x) {
-    if (nameref(x)) return 1;
-    return x && x->type == RAY_LIST && q_count(x) >= 2 && nameref(((ray_t**)ray_data(x))[0]);
-}
-
 /* `:`/`::` assignment — both take THE locality law: a `:` target is in the frame by construction (a parse-time
  * local, seeded at entry), `::` on a param/local writes the local (function-notation.md "Name scope"), anything
  * else is the global.  Returns the assigned value. */
 static ray_t* assign_eval(ray_t* target, ray_t* rhs) {
-    if (!assign_target(target)) return q_err(QE_NYI);
-    if (!nameref(target)) return indexed_assign(target, NULL, rhs);
+    q_assign_target_t k = q_parse_assign_target(target);
+    if (k == Q_TARGET_NONE) return q_err(QE_ASSIGN);
+    if (k == Q_TARGET_PATTERN) return q_err(QE_NYI);   /* 4.1 pattern assignment (basics/pattern.md): deferred */
+    if (k == Q_TARGET_INDEX) return indexed_assign(target, NULL, rhs);
     if (q_eval_assign_locked(target->i64)) return q_err(QE_ASSIGN);
     ray_t* v = q_eval_apply_concrete(q_eval(rhs));    /* boundary seam: assignment */
     if (RAY_IS_ERR(v)) return v;
@@ -816,11 +811,10 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
     const q_op_t* row = NULL;
     ray_t* opv = modassign_op(h, &row);
     if (!opv) return NULL;                           /* not an op: -> 'name path */
-    if (!nameref(target)) {
-        if (target && target->type == RAY_LIST && q_count(target) >= 2)
-            return indexed_assign(target, opv, rhs);
-        return q_err(QE_NYI);
-    }
+    q_assign_target_t k = q_parse_assign_target(target);
+    if (k == Q_TARGET_INDEX) return indexed_assign(target, opv, rhs);
+    if (k == Q_TARGET_PATTERN) return q_err(QE_NYI);
+    if (k != Q_TARGET_NAME) return q_err(QE_ASSIGN);
     if (q_eval_assign_locked(target->i64)) return q_err(QE_ASSIGN);
     ray_t* rv = q_eval(rhs);
     if (RAY_IS_ERR(rv)) return rv;
@@ -1005,7 +999,7 @@ ray_t* q_eval(ray_t* node) {
         if (q_parse_is_seq_head(h)) { ret = seq_eval(e + 1, n - 1); goto out; }
 
         /* global assign is the identity value heading (::;name;rhs) — `a::1` and `::[a;1]` are one tree */
-        if (RAY_IS_NULL(h) && n == 3 && assign_target(e[1])) {
+        if (RAY_IS_NULL(h) && n == 3 && q_parse_assign_target(e[1])) {
             ret = assign_eval(e[1], e[2]);
             goto out;
         }
