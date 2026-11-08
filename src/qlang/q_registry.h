@@ -96,8 +96,8 @@ const struct q_op* q_registry_row_of(const ray_t* value, q_valence_t valence);
  * the container lift the per-item apply needs (`sum each t`). */
 const struct q_op* q_registry_operand_row(const ray_t* value);
 
-/* True iff sym_id is a manifest row (any valence, values or not) or a syntax word.  O(1), for the lexical assign
- * gates — what they make of it is theirs.  False before q_registry_init. */
+/* True iff sym_id is a manifest row (any valence, values or not), a syntax word or, once sealed, a q.q builtin `.q`
+ * name.  O(1), for the lexical assign gates — what they make of it is theirs.  False before q_registry_init. */
 int q_registry_is_reserved(int64_t sym_id);
 
 /* True iff sym_id is one of the `.Q.res` syntax words — the `SYNTAX_WORDS[]` roster, reached by q_ops_syntax_word. */
@@ -110,13 +110,12 @@ void q_registry_seal(void);
 bool q_registry_sealed(void);
 
 /* True iff sym_id is a reserved word or a builtin `.q` name, once sealed.  Callers apply it: q_env_set to a root or
- * `.q.<sym_id>` target (and to each entry of a whole-`.q` write), q_eval to a bare global `name:` spelling. */
+ * `.q.<sym_id>` target (and to each entry of a whole-`.q` write). */
 int q_registry_locked(int64_t sym_id);
 
 /* THE keyword lookup the parser binds by: a manifest verb's value (the monadic cell, else the dyadic), else the `.q`
- * entry of that name (a q.q builtin, or a user extension once sealed), BORROWED; NULL for any other name.
- * *builtin (when non-NULL) is set for a q.q builtin, whose spelling a local may still bind. */
-ray_t* q_registry_keyword(int64_t sym_id, int* builtin);
+ * entry of that name (a q.q builtin, or a user extension once sealed), BORROWED; NULL for any other name. */
+ray_t* q_registry_keyword(int64_t sym_id);
 
 /* A USER `.q` entry (a key of the live `.q` that is no builtin): its value, BORROWED; NULL otherwise and before the
  * seal.  Such a name is a keyword from the moment it exists: the parser binds it and every `name:` spelling of it is

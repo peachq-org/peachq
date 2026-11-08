@@ -503,8 +503,8 @@ static ray_t* prior_each(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
         ray_release(x);
         return r;
     }
-    /* unseeded `:':` IS prev, the unit shift `1 xprev x` (W-EXX-091), detected the same way: prev keeps no row,
-     * so a local may still reuse its name (docs/eval-architecture.md, the q.q-builtin allowance) */
+    /* unseeded `:':` IS prev, the unit shift `1 xprev x` (W-EXX-091), detected the same way: prev is a q.q
+     * builtin, so it keeps no manifest row */
     if (!seed && frow && strcmp(frow->name, ":") == 0) {
         const q_op_t* xrow = q_ops_find("xprev", 5);
         ray_t* av[2] = { ray_i64(1), x };
