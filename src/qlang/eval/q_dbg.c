@@ -145,7 +145,11 @@ void q_dbg_trap_exit(int64_t ctx, ray_t* r) {
     if (r && RAY_IS_ERR(r) && !q_err_is(r, QE_RETURN)) q_env_ctx_set(ctx);
 }
 
-void q_dbg_set_reader(q_dbg_read_fn fn) { g_reader = fn; }
+q_dbg_read_fn q_dbg_set_reader(q_dbg_read_fn fn) {
+    q_dbg_read_fn prev = g_reader;
+    g_reader = fn;
+    return prev;
+}
 
 void q_dbg_reset(void) {
     q_dbg_snapshot_clear();
@@ -263,11 +267,12 @@ void q_dbg_print_trace(FILE* out, ray_t* err) {
     fflush(out);   /* Windows buffers stderr to a file: a worker killed later would lose its trace */
 }
 
-/* one backtrace-shaped line for frame `idx` (0 = the statement frame) */
+/* one backtrace-shaped line for live frame `idx`, numbered from the statement's own [0]: the frames at and
+ * beneath g_frame_base are its runner's (a transcript line's door) and never show */
 static void dbg_show_frame(int idx) {
     char line[DBG_STMT_MAX + 160];
-    frame_line(line, sizeof line, idx, 0, idx > 0 ? live_lam(idx) : NULL,
-               &g_stmt);
+    int own = idx > g_frame_base;
+    frame_line(line, sizeof line, own ? idx - g_frame_base : 0, 0, own ? live_lam(idx) : NULL, &g_stmt);
     fputs(line, stderr);
 }
 
@@ -292,7 +297,7 @@ static void dbg_prompt_str(char* p, size_t cap) {
 static int32_t cursor_view(void) {
     if (g_cursor >= g_live_depth || g_cursor > DBG_LIVE_MAX)
         return Q_ENV_FRAME_VIEW_OFF;
-    if (g_cursor <= 0) return Q_ENV_FRAME_VIEW_NONE;
+    if (g_cursor <= g_frame_base) return Q_ENV_FRAME_VIEW_NONE;
     return g_live_env[g_cursor - 1];
 }
 
@@ -359,7 +364,7 @@ static ray_t* dbg_suspend(ray_t* err) {
         if (n == 1 && line[0] == '\\') break;             /* exit one level */
         if (n == 1 && line[0] == '&') { dbg_banner(err, g_cursor); continue; }
         if (n == 1 && (line[0] == '`' || line[0] == '.')) {   /* up / down */
-            if (line[0] == '`') { if (g_cursor > 0) g_cursor--; }
+            if (line[0] == '`') { if (g_cursor > g_frame_base) g_cursor--; }
             else if (g_cursor < g_live_depth) g_cursor++;
             fflush(stdout);
             dbg_show_frame(g_cursor);
@@ -538,10 +543,11 @@ ray_t* q_dbg_bt_fn(ray_t** args, int64_t n) {
     char line[DBG_STMT_MAX + 160];
     /* suspended: [0] is the statement the LIVE frames belong to, not this line */
     const dbg_stmt_t* stmt = g_dbg_depth > 0 ? &snap_stmt : &g_stmt;
-    for (int i = g_live_depth; i >= 0; i--) {
+    for (int i = g_live_depth; i >= g_frame_base; i--) {   /* the statement's own frames, numbered from its [0] */
+        int own  = i > g_frame_base;
         int mark = g_dbg_depth > 0 && i == g_cursor;   /* >> = the current frame */
-        size_t ln = frame_line(line, sizeof line, i, mark,
-                               i ? live_lam(i) : NULL, stmt);
+        size_t ln = frame_line(line, sizeof line, own ? i - g_frame_base : 0, mark,
+                               own ? live_lam(i) : NULL, stmt);
         q_console_write(line, ln, false);
     }
     ray_retain(RAY_NULL_OBJ);
