@@ -20,6 +20,7 @@
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_value — within composes on `>=`/`<=`/`&` */
 #include "qlang/ops/q_index.h"  /* q_index_elem_at, q_index_rank — THE element-read home and its rank axis */
 #include "qlang/ops/q_bang.h"   /* q_bang — a dict left of `in` rebuilt through the `!` home */
+#include "qlang/ops/q_table.h"  /* q_table_is_cell — the per-column rank rule a record probe is read under */
 #include "lang/eval.h"     /* ray_in_fn, ray_find_fn */
 #include "lang/internal.h" /* atom_eq, ray_sorted_bound */
 #include "mem/heap.h"      /* RAY_ATTR_HAS_NULLS — ? find miss remap */
@@ -63,8 +64,8 @@ ray_t* q_within_wrap(ray_t* x, ray_t* y) {
 
 /* ===== q `x in y` — membership ============================================= */
 
-/* Whole-item scan over a STR list-of-strings: does any ITEM of y match v (kdb
- * `~`)?  Indexes via ray_at_fn, the one read of that physical lane.  Borrows
+/* Whole-item scan over a STR list-of-strings: does any ITEM of y match v (Find's
+ * sameness, q_match_exact)?  Indexes via ray_at_fn, the one read of that physical lane.  Borrows
  * both. */
 static int seq_has_item(ray_t* y, ray_t* v) {
     int64_t n = q_count(y);
@@ -73,7 +74,7 @@ static int seq_has_item(ray_t* y, ray_t* v) {
         ray_t* ye = ray_at_fn(y, ia);                /* owned item */
         ray_release(ia);
         if (!ye || RAY_IS_ERR(ye)) { if (ye) ray_release(ye); continue; }
-        int hit = v && (ye == v || atom_eq(ye, v));
+        int hit = v && q_match_exact(ye, v);
         ray_release(ye);
         if (hit) return 1;
     }
@@ -175,13 +176,15 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
 
 /* ===== row-wise search =====================================================
  * A table row is searched IN PLACE: the row kernel (ray_find_rows_fn) walks the domain comparing key columns cell
- * by cell under Find's own compare law, so `0N~0N` and the int/long widening are inherited and nothing proportional
- * to the domain is built per call.  The q layer owns the probe's SHAPE (probe_cols) and the type gate. */
+ * by cell, a typed cell under the kernel's compare (`0N~0N`, the int/long widening) and a boxed one under
+ * q_match_exact, so nothing proportional to the domain is built per call but a table-valued column's rows
+ * (row_col).  The q layer owns the probe's SHAPE (probe_cols) and the type gate. */
 
 /* A column as the row kernel reads it: an atom is its one-row column, an enumeration its values (q_enum owns the
  * 20h representation; the kernel knows base types only).  Consumes c; owned. */
 static ray_t* row_col(ray_t* c) {
     if (c && ray_is_atom(c)) { ray_t* v = ray_enlist_fn(&c, 1); ray_release(c); c = v; }
+    if (c && q_type_is_table(c)) { ray_t* v = q_list_uncollapse(c); ray_release(c); c = v; }
     if (c && !RAY_IS_ERR(c) && q_enum_is(c)) { ray_t* v = q_enum_val_image(c); ray_release(c); c = v; }
     return c ? c : q_err(QE_OOM);
 }
@@ -227,6 +230,24 @@ static int probe_is_rowlist(ray_t* dom, ray_t* y) {
 /* probe_cols' fault code as the q error it means */
 static ray_t* probe_err(int bad) { return q_err(bad == 2 ? QE_LENGTH : QE_TYPE); }
 
+/* One probe value v (consumed) against domain column col, into *pc as the kernel reads it, under Find's rank law
+ * (ref/find.md:106): a value that is one ITEM of col is one field, anything else a run, and every value of a table
+ * probe (`cols`) is a run.  Nonzero, probe_cols' arity fault, for a run of another width. */
+static int probe_field(ray_t* col, ray_t* v, int cols, ray_t** pc, int64_t* m, int* rec) {
+    int64_t l = -1;
+    if (!ray_is_atom(v)) {
+        if (cols || q_table_is_cell(col, v) != 1) l = q_count(v);
+        else { ray_t* e = ray_list_append(ray_list_new(1), v); ray_release(v); v = e; }
+    }
+    *pc = row_col(v);
+    if (RAY_IS_ERR(*pc)) return 1;
+    if (l < 0) return 0;
+    if (!*rec && l != *m) return 2;                   /* rows of unequal width */
+    *rec = 0;
+    *m = l;
+    return 0;
+}
+
 /* Split a probe into one value per DOMAIN column.  A table probe FLIPS to its
  * column dict, so a table and a dict record share ONE path: named entries are
  * matched to the domain's own column names through find — order-free, and a
@@ -237,7 +258,7 @@ static ray_t* probe_err(int bad) { return q_err(bad == 2 ? QE_LENGTH : QE_TYPE);
  * shape mismatch, reported as 1 for a TYPE fault and 2 for an ARITY one. */
 static int probe_cols(ray_t* x, ray_t* y, ray_t** pc, int64_t k, int64_t* m, int* rec) {
     if (ray_is_atom(y)) return -1;               /* find.md: a rank-2 x seeks rank-1 records */
-    int rows = probe_is_rowlist(x, y);
+    int rows = probe_is_rowlist(x, y), cols = rows || q_type_is_table(y);
     ray_t* fy = q_type_is_table(y) ? q_table_to_dict(y) : rows ? q_flip_wrap(y) : NULL;   /* owned */
     ray_t* d = fy ? fy : y;
     ray_t* pn = q_type_is_plain_dict(d) ? ray_dict_keys(d) : NULL;  /* borrowed */
@@ -251,6 +272,8 @@ static int probe_cols(ray_t* x, ray_t* y, ray_t** pc, int64_t k, int64_t* m, int
      * disagrees is an arity fault, not a type one: `.Q.ft` (ref/dotq.md) pins
      * `s 2 3` — two elements against one key column — as 'length. */
     if (!bad && q_count(pv) != k) bad = pn ? 1 : 2;
+    *rec = 1;
+    *m = 1;
     int64_t got = 0;
     for (; got < k && !bad; got++) {
         int64_t at = got;
@@ -261,17 +284,8 @@ static int probe_cols(ray_t* x, ray_t* y, ray_t** pc, int64_t k, int64_t* m, int
         }
         ray_t* v = at >= 0 && at < k ? q_index_elem_at(pv, at) : NULL;
         if (!v || RAY_IS_ERR(v)) { if (v) ray_release(v); bad = 1; break; }
-        pc[got] = v;
+        bad = probe_field(ray_table_get_col_idx(x, got), v, cols, &pc[got], m, rec);
     }
-    *rec = 1;
-    *m = 1;
-    for (int64_t j = 0; j < k && !bad; j++) {
-        if (ray_is_atom(pc[j])) continue;            /* an atom column broadcasts */
-        int64_t l = q_count(pc[j]);
-        if (!*rec && l != *m) bad = 2;                /* rows of unequal width */
-        else { *rec = 0; *m = l; }
-    }
-    for (int64_t j = 0; j < k && !bad; j++) bad = RAY_IS_ERR(pc[j] = row_col(pc[j]));
     if (bad)
         for (int64_t j = 0; j < got; j++) ray_release(pc[j]);
     if (fy) ray_release(fy);
@@ -309,7 +323,7 @@ static ray_t* find_rows(ray_t* x, ray_t* y) {
     int bad = probe_cols(x, y, pc, k, &m, &rec);
     if (bad) { free(pc); return probe_err(bad); }
     bad = row_domain(x, dc, pc, k);
-    ray_t* r = bad ? q_err(QE_TYPE) : ray_find_rows_fn(dc, pc, k, m);
+    ray_t* r = bad ? q_err(QE_TYPE) : ray_find_rows_fn(dc, pc, k, m, q_match_exact);
     for (int64_t j = 0; j < 2 * k; j++) ray_release(pc[j]);
     free(pc);
     return row_answer(miss_is_count(r, n), rec);
@@ -341,7 +355,7 @@ static ray_t* keys_at(ray_t* keys, ray_t* i) {
 int64_t q_search_find_item(ray_t* x, ray_t* v, int64_t cnt) {
     ray_t** ex = (ray_t**)ray_data(x);
     for (int64_t i = 0; i < cnt; i++)
-        if (ex[i] && v && (ex[i] == v || atom_eq(ex[i], v))) return i;
+        if (ex[i] && v && q_match_exact(ex[i], v)) return i;
     return cnt;
 }
 
@@ -406,27 +420,30 @@ ray_t* q_search_find(ray_t* x, ray_t* y) {
             ray_release(ey);
             return ray_i64(i);
         }
-        if (y && y->type == RAY_LIST) {
+        if (y && (y->type == RAY_LIST || (x->type == RAY_LIST && xd <= 0 && !ray_is_atom(y)))) {
             /* Find is right-atomic to the rank of x's items ("x?y looks for objects of rank n-1", find.md): an
              * item deeper than that rank is a run of them, found item by item — an atom item over a SIMPLE x
              * HITS, as the older editions print `w?(10 5 -1;-8;3 17)` -> (0 3 4;1;2 7) (docs-v1 search.md:132,
              * q1.txt:1046; the current page's miss is the divergence list/find.qcmd records), over a deeper x it
              * is the rank law's miss — and one at that rank is matched whole (`u?(2 3;\`ab)` -> 3 3, never the
              * whole of y).  The answer keeps y's shape, a run of atoms collapsing to the index vector.  Empty x
-             * has no rank to read, so every item is one miss (D2: a list probe on `()` is item-wise). */
+             * has no rank to read, so every item is one miss (D2: a list probe on `()` is item-wise).  A simple y
+             * over a boxed x of atoms is a run too, so each atom meets x's items under Find's own sameness. */
             int64_t ny = q_count(y);
-            ray_t** e = (ray_t**)ray_data(y);
             ray_t* out = ray_list_new(ny > 0 ? ny : 1);
             if (RAY_IS_ERR(out)) return out;
             for (int64_t j = 0; j < ny; j++) {
                 ray_t* rr;
-                int ed = q_index_rank(e[j]);
-                if (!e[j] || cnt == 0 || (xd > 0 && ed == 0))
+                ray_t* ej = q_index_elem_at(y, j);
+                if (ej && RAY_IS_ERR(ej)) { ray_release(out); return ej; }
+                int ed = q_index_rank(ej);
+                if (!ej || cnt == 0 || (xd > 0 && ed == 0))
                     rr = ray_i64(cnt);
                 else if (xd > 0 && ed <= xd)
-                    rr = ray_i64(q_search_find_item(x, e[j], cnt));
+                    rr = ray_i64(q_search_find_item(x, ej, cnt));
                 else
-                    rr = q_search_find(x, e[j]);
+                    rr = q_search_find(x, ej);
+                if (ej) ray_release(ej);
                 if (!rr || RAY_IS_ERR(rr)) { ray_release(out); return rr; }
                 out = ray_list_append(out, rr);      /* retains */
                 ray_release(rr);
@@ -440,6 +457,7 @@ ray_t* q_search_find(ray_t* x, ray_t* y) {
             /* list-of-lists x, SIMPLE vector y: whole-y match (`u?10 2 -6` -> 1). */
             return ray_i64(q_search_find_item(x, y, cnt));
         }
+        if (x->type == RAY_LIST) return ray_i64(q_search_find_item(x, y, cnt));
         return miss_is_count(ray_find_fn(x, y), cnt);
     }
     return q_err(QE_TYPE);   /* unreachable: q_roll_wrap routes only find shapes here */
@@ -530,7 +548,8 @@ static ray_t* bin_rows(ray_t* x, ray_t* y, int right) {
     if (err) { free(pc); return probe_err(err); }
     err = row_domain(x, dc, pc, k - 1);
     ray_t* last = ray_table_get_col_idx(x, k - 1);
-    ray_t* cls = err || k == 1 ? NULL : ray_find_rows_class_fn(dc, pc, k - 1, m);   /* no leading columns: one class */
+    /* bin keeps the kernel's cell compare: the owner ruled Find's sameness, not bin's (a question on #1124) */
+    ray_t* cls = err || k == 1 ? NULL : ray_find_rows_class_fn(dc, pc, k - 1, m, atom_eq);   /* no leading columns: one class */
     ray_t* out = cls && RAY_IS_ERR(cls) ? cls : ray_vec_new(RAY_I64, m > 0 ? m : 1);
     if (RAY_IS_ERR(out)) {                            /* the kernel's own error, propagated unmodified */
         for (int64_t j = 0; j < 2 * k; j++) if (pc[j]) ray_release(pc[j]);
