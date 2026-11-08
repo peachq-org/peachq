@@ -17,7 +17,7 @@
  * composition '[::;g].  0x04 is unclaimed on a general list. */
 #define Q_ATTR_POSTFIX 0x04
 
-/* A leading '_' is the drop/cut verb: no name or symbol constant begins with it (basics/syntax.md:601). */
+/* A leading '_' is the drop/cut verb: no name, and no first item of a symbol run, begins with it (basics/syntax.md:601). */
 static inline int q_parse_drop_lead(char c) { return c == '_'; }
 
 #define MAX_NAME 256

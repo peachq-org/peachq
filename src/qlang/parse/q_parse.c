@@ -540,8 +540,9 @@ static Tokens scan(const char *src) {
                     /* A BARE symbol takes ':' and '/' too (ref/doth.md .h.ha:
                      * `http://www.example.com), but only where more body
                      * follows — a trailing ':' is still the operator, and '-'
-                     * is never a bare-symbol byte (`a-b stays subtraction). */
-                    if (!q_parse_drop_lead(src[p])) for (;;) {
+                     * is never a bare-symbol byte (`a-b stays subtraction).
+                     * Only a run's FIRST item may not lead with '_' (`a`_ is two symbols, Dvybco). */
+                    if (count > 0 || !q_parse_drop_lead(src[p])) for (;;) {
                         while ((CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) ||
                                src[p] == '.')
                             p++;
