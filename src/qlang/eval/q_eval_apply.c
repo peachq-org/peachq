@@ -1287,10 +1287,30 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
 
 /* ===== projections ======================================================= */
 
+/* A keyword whose value is a projection keeps its row through partial application (`upsert[`t;]` is kdb's
+ * `.[`t;();,;]`), so once full, the values in the keyword's own holes are its kernel's arguments.  NULL when row
+ * is no such keyword. */
+static ray_t* cover_fill(ray_t* fv, const q_op_t* row, ray_t** merged, int64_t rank) {
+    for (q_valence_t v = Q_MONADIC; v <= Q_DYADIC; v++) {
+        ray_t* k = q_registry_row_kernel_at(row, v);
+        ray_t* cv = q_registry_row_value(row, v);
+        if (!k || q_eval_apply_carrier_kind(cv) != Q_EVAL_CAR_PROJ || car_slots(cv)[0] != fv ||
+            ray_block_len(cv) - 2 != rank)
+            continue;
+        ray_t* ka[2];
+        int64_t nk = 0;
+        for (int64_t i = 0; i < rank; i++)
+            if (slot_open(car_slots(cv)[2 + i]) && nk++ < 2) ka[nk - 1] = merged[i];
+        if (nk == (int64_t)v) return q_eval_apply(k, row, ka, nk);
+    }
+    return NULL;
+}
+
 static ray_t* proj_call(ray_t* proj, ray_t** args, int64_t n) {
     ray_t** c = car_slots(proj);
     ray_t* fv = c[0];
-    const q_op_t* row = row_unbox(c[1]);
+    const q_op_t* row = q_registry_operand_row(proj);
+    if (!row) row = row_unbox(c[1]);
     int64_t rank = ray_block_len(proj) - 2;
     ray_t* merged[APPLY_MAX_ARGS];
     int64_t ai = 0, holes = 0, fn_rank = 0, written = 0;
@@ -1310,7 +1330,8 @@ static ray_t* proj_call(ray_t* proj, ray_t** args, int64_t n) {
             return q_eval_apply_proj_new(proj, NULL, args, n, fn_rank);
         return q_eval_apply_proj_new(fv, row, merged, written, rank);
     }
-    return q_eval_apply(fv, row, merged, rank);
+    ray_t* r = cover_fill(fv, row, merged, rank);
+    return r ? r : q_eval_apply(fv, row, merged, rank);
 }
 
 /* ===== noun-head application ============================================
