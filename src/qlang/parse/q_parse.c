@@ -121,7 +121,7 @@ static const q_op_t *marker_row(const char *nm, size_t len) {
  * ("<g>:") probes the registry under the bare glyph.  On a miss the sym is
  * returned unchanged (unknown -> name-ref, ADR 0002).  Consumes `sym`,
  * returns owned. */
-static ray_t *q_embed(ray_t *sym, q_valence_t val) {
+static ray_t *embed_sym(ray_t *sym, q_valence_t val) {
     ray_t *s = nameref_str(sym);
     if (!s) return sym;
     const char *nm = ray_str_ptr(s);
@@ -145,7 +145,7 @@ static ray_t *q_embed(ray_t *sym, q_valence_t val) {
 }
 
 static ray_t *embed_glyph(const char *g, q_valence_t val) {
-    return q_embed(i_name(g, (int)strlen(g)), val);
+    return embed_sym(i_name(g, (int)strlen(g)), val);
 }
 
 /* Append an already-interned symbol id to a RAY_SYM vector (W64 index width:
@@ -1585,7 +1585,7 @@ static P parse_term(Parser *p, QCtx ctx) {
             expect(p, T_RBRACK, "expected ']'");
             /* bracket-apply on a bare verb (`+[2;]`) embeds the dyadic row —
              * an underapplied call becomes a projection downstream (2c). */
-            if (t.role == R_VERB) t.v = q_embed(t.v, Q_DYADIC);
+            if (t.role == R_VERB) t.v = embed_sym(t.v, Q_DYADIC);
             /* an empty call `f[]` passes identity (ref/identity.md); an elided `;` slot is the projection hole */
             ray_t *w = cons_head(t.v, e, q_count(e) == 1 ? RAY_NULL_OBJ : Q_HOLE_OBJ);
             ray_release(t.v);
@@ -1594,7 +1594,7 @@ static P parse_term(Parser *p, QCtx ctx) {
         } else if (tk->kind == T_ADVERB) {
             /* a glyph verb under an adverb (`+/`) is a bare-verb VALUE:
              * embed its dyadic row (names/lambdas stay for eval to resolve) */
-            if (t.role == R_VERB) t.v = q_embed(t.v, Q_DYADIC);
+            if (t.role == R_VERB) t.v = embed_sym(t.v, Q_DYADIC);
             ray_t *xs[2] = { tk->k, t.v };
             tk->k = NULL;
             t.v = q_list(xs, 2);
@@ -1693,7 +1693,7 @@ static P compose_node(ray_t *f, ray_t *tail) {
     ray_t *cv = q_registry_compose_value();
     if (!cv) q_die("compose: registry not initialized");
     ray_retain(cv);
-    ray_t *xs[3] = { cv, q_embed(f, Q_MONADIC), tail };
+    ray_t *xs[3] = { cv, embed_sym(f, Q_MONADIC), tail };
     return (P){ R_NOUN, q_list(xs, 3), 1, 0 };
 }
 
@@ -1718,14 +1718,14 @@ static P parse_infix(Parser *p, P t, P u, QCtx ctx) {
      * explicit `::` operand is the identity VALUE.  A `g ::` with nothing to assign, spaced or glued, is the train
      * tail (::;g) (funq/ml.q `hdist:sum (<>)::`), a composition keeping g's rank (ref/compose.md:23). */
     if (!e.v && sym_name_is(u.v, "::")) {
-        ray_t *xs[2] = { q_embed(u.v, Q_DYADIC), q_embed(q_embed(t.v, Q_MONADIC), Q_DYADIC) };
+        ray_t *xs[2] = { embed_sym(u.v, Q_DYADIC), embed_sym(embed_sym(t.v, Q_MONADIC), Q_DYADIC) };
         ray_t *r = q_list(xs, 2);
         if (r && !RAY_IS_ERR(r)) r->attrs |= Q_ATTR_POSTFIX;
         return (P){ R_NOUN, r, 1, 0 };
     }
     int assign = verb_marked(u.v) || sym_name_is(u.v, ":") || sym_name_is(u.v, "::");
     if (!verb_marked(u.v) && !sym_name_is(u.v, ":"))
-        u.v = q_embed(u.v, Q_DYADIC);      /* infix head: the dyadic row */
+        u.v = embed_sym(u.v, Q_DYADIC);      /* infix head: the dyadic row */
     /* onto a train tail the infix head is its own postfix elision (`1~` of `1~count@`), composed onto the tail;
      * an assignment (`hdist:sum (<>)::`) binds the train instead */
     int onto = e.train && !assign;
@@ -1784,7 +1784,7 @@ static P parse_juxt(P t, P e) {
         }
     }
     /* Prefix glyph head embeds its MONADIC registry value */
-    if (t.role == R_VERB) t.v = q_embed(t.v, Q_MONADIC);
+    if (t.role == R_VERB) t.v = embed_sym(t.v, Q_MONADIC);
     /* JUXTAPOSED paren-glyph on a DATA operand takes its unary meaning —
      * `(,)2` is `,2`, `(-)5` is `-5` (owner ruling 2026-07-23), `(!)10` is
      * `til 10` and `(@)t` is `type t`; bracket-apply `+[10]` stays a projection
@@ -1824,7 +1824,7 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
          * (`0|+`, `-2_(1_)\`); a keyword or lambda there is a noun. */
         if (t.role == R_VERB && sym_glyph_form(t.v) != GF_NONE) {
             int assign = sym_name_is(t.v, ":");
-            ray_t *v = q_embed(t.v, Q_DYADIC);
+            ray_t *v = embed_sym(t.v, Q_DYADIC);
             return (P){ R_NOUN, v, !assign && v->type != -RAY_SYM && v != RAY_NULL_OBJ, 0 };
         }
         if (t.role == R_VERB && t.v && t.v->type == RAY_LIST) t.train = 1;
@@ -2245,7 +2245,7 @@ static ray_t *parse_E(Parser *p, QCtx ctx) {
 /* `(name; text)` — a keyword head (`system`, `value`) is its value, as anywhere in a tree; a handler head is a NAME
  * ref, so an undefined one fails as ordinary resolution (`'.g.e`).  Consumes `arg`. */
 static ray_t *intake_tree(const char *name, size_t nl, ray_t *arg) {
-    ray_t *xs[2] = { q_embed(i_name(name, (int)nl), Q_MONADIC), arg };
+    ray_t *xs[2] = { embed_sym(i_name(name, (int)nl), Q_MONADIC), arg };
     return q_list(xs, 2);
 }
 
