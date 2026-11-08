@@ -1,6 +1,7 @@
 /* q — the launcher: arg parse, runtime/poll/listener bring-up, `-eval-before` texts, the startup script, `-eval`
  * texts, then REPL / server / exit.  q_dotz.c's option table
- * (q_dotz_opt) is what q consumes from argv.  The interactive loop lives in q_repl.c. */
+ * (q_dotz_opt) is what q consumes from argv; conn_main parses -conn mode's own flags.  The interactive loop lives in
+ * q_repl.c. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "qlang/q_count.h"
