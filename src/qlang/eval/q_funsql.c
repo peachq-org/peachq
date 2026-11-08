@@ -11,7 +11,7 @@
 #include "qlang/eval/q_eval_internal.h" /* q_eval_symvec_has */
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"         /* q_type_widens, q_type_common — the numeric pair laws */
-#include "qlang/q_prim.h"              /* q_cols_fn */
+#include "qlang/q_prim.h"              /* q_cols_fn, q_attr_sort_keyed_key */
 #include "qlang/q_registry_internal.h" /* q_take_wrap, q_where_wrap, q_flip_wrap, ... */
 #include "qlang/ops/q_bang.h"
 #include "qlang/ops/q_dollar.h"        /* q_dollar_cast — the Where-form update keeps the column type */
@@ -826,6 +826,17 @@ static ray_t* by_select(ray_t* names, ray_t* trees, ray_t* a, ray_t* t,
     return r;
 }
 
+/* ref/select.md:206 — no sort order, so the key IS ascending, and it is marked as an unassigned `s#r`
+ * marks it (kdb writes 62 01 under an unmarked 63).  A key the `s#` verifier cannot vouch for (a nested
+ * column: `<=` is item-wise) stays unmarked rather than failing the select. */
+static ray_t* by_mark_sorted(ray_t* r) {
+    if (r && !RAY_IS_ERR(r) && q_type_is_keyed(r)) {
+        ray_t* e = q_attr_sort_keyed_key(r);
+        if (e) ray_release(e);
+    }
+    return r;
+}
+
 /* Exec-by, b a sym ATOM: plain dict keyed by the column's distinct values,
  * ascending like Select-by (law 15 — the hand-curated qsql/exec ledger decides
  * what the docs leave open); a=dict keys by a one-ANONYMOUS-column table
@@ -967,6 +978,7 @@ static ray_t* ques_select(ray_t** args, int64_t n) {
         else {
             r = (b->type == -RAY_SYM) ? by_exec_atom(names, trees, a, t, idx)
                                       : by_select(names, trees, a, t, idx);
+            if (b->type != -RAY_SYM && n != 6) r = by_mark_sorted(r);
             ray_release(names);
             ray_release(trees);
         }
