@@ -246,7 +246,7 @@ static const q_op_t Q_OPS[] = {
      * lift law fits, so each overload SELF-RECURSES with its own boundary
      * (ruling 2026-07-24). `$[c;t;f]` is a q_eval control form, not a row. */
     { "$",     QLEX_GLYPH,     QR_ENV("string"),               QR_FN2("as", q_dollar), NULL, 1, 0, "none", NULL, QKOP(11) },
-    /* `:` Assign as an operand VALUE. Assignment/return stay SYNTAX — q_embed
+    /* `:` Assign as an operand VALUE. Assignment/return stay SYNTAX — embed_sym
      * never embeds a colon head, so this row is reachable only as an operand. */
     { ":",     QLEX_GLYPH,     QR_NONE,                        QR_FN2("assign", q_index_assign_wrap), NULL, 1, 0, "none", NULL, QKOP(0) },
     /* `@`/`.` family none: Apply/Index ARE the application machinery (spec §5),
