@@ -584,27 +584,63 @@ static const char* ctx_known_file(const char* p, int64_t n) {
 static FILE* g_console_out;   /* the load in progress's streams: what `.pq.i.console` prints to; NULL = stdout/stderr */
 static FILE* g_console_err;
 
-/* `.pq.i.console` — see q_ctx.h: prompt and input echo (none under `-q`, as
- * the piped console), then the line as the console runs it — `.z.pi`,
- * display, an error printed and the run continuing.  Never suspends (a
- * transcript's expected answer is often an error), never a history record
- * (nobody typed it), and at top level: a transcript's `a:1` is the session's. */
-static ray_t* pq_console_fn(ray_t* x) {
-    const char* p; int64_t n;
-    if (!q_str_text_bytes(x, &p, &n)) return q_err(QE_TYPE);
+/* The transcript's `q))` lines, served to the debugger a line of it suspends into: the console's reader while that
+ * line runs.  One slot: a served line that loads another transcript saves and restores it. */
+typedef struct { ray_t* lines; int64_t next, count; FILE* out; } ctx_qcmd_t;
+static ctx_qcmd_t g_qcmd;
+
+static void ctx_qcmd_echo(const char* prompt, const char* p, size_t n, FILE* out) {
+    if (q_dotz_quiet()) return;
+    fputs(prompt, out);
+    fwrite(p, 1, n, out);
+    fputc('\n', out);
+    fflush(out);
+}
+
+static int64_t ctx_qcmd_text(int64_t i, const char** p) {
+    ray_t* ln = ray_list_get(g_qcmd.lines, i);
+    int64_t n = 0;
+    *p = "";
+    if (ln) q_str_text_bytes(ln, p, &n);
+    return n;
+}
+
+/* q_dbg_read_fn: the next q)) line under the LIVE prompt (the transcript's own depth is not consulted — the echo
+ * shows where the replay really is); -1 once they are spent, so the suspension unwinds and the next q) line runs
+ * at top level.  The tail of a line past the buffer is dropped. */
+static int ctx_qcmd_read(const char* prompt, char* buf, size_t cap) {
+    if (g_qcmd.next >= g_qcmd.count) return -1;
+    const char* p;
+    int64_t n = ctx_qcmd_text(g_qcmd.next++, &p);
+    if ((size_t)n >= cap) n = (int64_t)cap - 1;
+    ctx_qcmd_echo(prompt, p, (size_t)n, g_qcmd.out);
+    memcpy(buf, p, (size_t)n);
+    buf[n] = '\0';
+    return (int)n;
+}
+
+/* `.pq.i.console[x;nested]` — see q_ctx.h: prompt and input echo (none under `-q`, as the piped console), then the
+ * line as the console runs it — `.z.pi`, display, an error suspending into the debugger with `nested` (the
+ * transcript's following `q))` lines) as its input, else printed and the run continuing.  Never a history record
+ * (nobody typed it), and at top level: a transcript's `a:1` is the session's.  A q)) line the replay did not need
+ * (it never suspended, or `\` left early) is echoed under the live prompt and NOT run: its row fails on the prompt,
+ * the rows after it stay paired, and a `\` meant for the debugger never toggles the session into k. */
+static ray_t* pq_console_fn(ray_t* x, ray_t* nested) {
+    const char* p = ""; int64_t n = 0;
+    int head = q_str_text_bytes(x, &p, &n);   /* x = `::`: no q) line — a transcript opening at q)) */
+    if (!head && x != RAY_NULL_OBJ) return q_err(QE_TYPE);
+    if (!nested || nested->type != RAY_LIST) return q_err(QE_TYPE);
     FILE* out = g_console_out ? g_console_out : stdout;
     FILE* err = g_console_err ? g_console_err : stderr;
-    if (!q_dotz_quiet()) {
-        char prompt[Q_SYS_PROMPT_CAP];
-        int  pl = q_sys_prompt(prompt, sizeof prompt);
-        fwrite(prompt, 1, (size_t)pl, out);
-        fwrite(p, 1, (size_t)n, out);
-        fputc('\n', out);
-        fflush(out);   /* a terminal shows the echo before anything the line writes to stderr */
-    }
+    char prompt[Q_SYS_PROMPT_CAP];
+    q_sys_prompt(prompt, sizeof prompt);
+    if (head) ctx_qcmd_echo(prompt, p, (size_t)n, out);   /* a terminal shows the echo before anything the line writes to stderr */
+    ctx_qcmd_t saved = g_qcmd;
+    g_qcmd = (ctx_qcmd_t){ nested, 0, q_count(nested), out };
+    q_dbg_read_fn reader = q_dbg_set_reader(ctx_qcmd_read);
     if (n) {
         char* s = (char*)ray_sys_alloc((size_t)n + 1);   /* q_parse reads a C string */
-        if (!s) return q_err(QE_OOM);
+        if (!s) { q_dbg_set_reader(reader); g_qcmd = saved; return q_err(QE_OOM); }
         memcpy(s, p, (size_t)n);
         s[n] = '\0';
         ctx_line_t      prev   = g_line;
@@ -613,21 +649,29 @@ static ray_t* pq_console_fn(ray_t* x) {
         int64_t         conn   = __VM ? __VM->ipc_handle : -1;
         if (__VM) __VM->ipc_handle = -1;           /* the console's handle context: .z.w 0i, as `0 x` sets it */
         g_line.s = NULL;
-        ctx_line(s, (size_t)n, out, err, 1, 0, 0, 0, NULL);
+        ctx_line(s, (size_t)n, out, err, 1, 0, 1, 0, NULL);
         if (__VM) __VM->ipc_handle = conn;
         q_dbg_frame_base(base);
         g_line = prev;
         q_eval_frames_resume(frames);
         ray_sys_free(s);
     }
+    q_dbg_set_reader(reader);
+    q_sys_prompt(prompt, sizeof prompt);
+    for (; g_qcmd.next < g_qcmd.count; g_qcmd.next++) {
+        const char* lp;
+        int64_t     ln = ctx_qcmd_text(g_qcmd.next, &lp);
+        ctx_qcmd_echo(prompt, lp, (size_t)ln, out);
+    }
+    g_qcmd = saved;
     fflush(out);
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;
 }
 
 void q_ctx_pq_register(void) {
-    ray_t* fn = ray_fn_unary(".pq.i.console", RAY_FN_NONE, pq_console_fn);
-    q_env_bind_native(".pq.i.console", fn, 1);
+    ray_t* fn = ray_fn_binary(".pq.i.console", RAY_FN_NONE, pq_console_fn);
+    q_env_bind_native(".pq.i.console", fn, 2);
     ray_release(fn);
 }
 

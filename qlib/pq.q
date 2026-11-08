@@ -184,7 +184,12 @@
   lines:$[10h=type lines; "\n" vs lines; lines];
   at:.pq.i.qcmd_prompt each lines;
   keep:where at>0;
-  .pq.i.console each at[keep] _' lines keep};
+  texts:at[keep] _' lines keep;
+  heads:where not texts like ")*";   / a q)) line is input to the debugger the q) line before it suspends into
+  texts:{x where maxs not x=")"} each texts;
+  lead:texts til first heads,count texts;
+  if[count lead; .pq.i.console[::;lead]];
+  {.pq.i.console[first x;1_x]} each heads cut texts};
 
 / The text as a q string literal's body (qStudio's KdbHelper.escape, in its order): backslash, tab, CR, LF, quote.
 .pq.i.remote_escape:{[text]
