@@ -34,6 +34,11 @@ ray_t* q_table_cols_from_accs(const int64_t* names, ray_t** accs, int64_t nc, ra
 /* n copies of `a` as a column (broadcast): an atom run collapses, a dict is one ITEM per copy, never a row. */
 ray_t* q_table_bcast_col(ray_t* a, int64_t n);
 
+/* Whether v is ONE item of column col, the per-column rule a record probe and a positional row are read under
+ * (ref/find.md:106, ref/join.md:192): 1 an item (an atom, a dict for a table column, a value no deeper than a
+ * general column's items), 0 a run, -1 undecided (an empty general column has no item rank). */
+int q_table_is_cell(ray_t* col, ray_t* v);
+
 /* Column index of name id in t, or -1. */
 int64_t q_table_col_index(ray_t* t, int64_t nm);
 
