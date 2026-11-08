@@ -138,6 +138,15 @@ ray_t* q_registry_row_value(const struct q_op* row, q_valence_t valence);
  * Borrowed; NULL when the row has no monadic cell. */
 ray_t* q_registry_row_kernel(const struct q_op* row);
 
+/* The C kernel a cover or composition row runs when its structured value is applied at this valence (`<>` is
+ * `'[not;=]`, its dyadic kernel q_ne_wrap); NULL when the row has none there.  Borrowed. */
+ray_t* q_registry_row_kernel_at(const struct q_op* row, q_valence_t valence);
+
+/* The registry carrier that fresh, a just-built composition, projection or derived function (its carrier kind and
+ * slot-0 head passed in, as the constructor has them), structurally IS (a user's `'[not;=]` is `<>`), so every
+ * construction of a keyword's structure is the one registry value.  Borrowed; NULL when fresh matches none. */
+ray_t* q_registry_intern_carrier(ray_t* fresh, int kind, ray_t* head);
+
 /* THE fn-value -> kdb primitive code home (`value +` and the wire's 101h/102h
  * byte share it): the value's manifest row's kdb_op column, falling back for an
  * aliased env snapshot (`count` and monadic `#` are one kernel) to the code its
