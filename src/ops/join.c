@@ -1745,6 +1745,23 @@ static inline int64_t asof_eq_lread(ray_t* lc, const int64_t* xlut, int64_t xn,
  * ids never leak into the right id space. */
 static const int64_t g_asof_empty_xlut[1] = { -1 };
 
+/* The merge only orders and compares times, so a float lane becomes the
+ * order-preserving image of its double bits (sign-magnitude flipped to two's
+ * complement).  A numeric integer lane against a float one reaches here from
+ * rayfall only: peachq's aj/asof reject that pair first (q_join.c qj_aj_map). */
+static inline int64_t asof_time_key(ray_t* v, int64_t row, bool as_float) {
+    const void* d = ray_data(v);
+    if (v->type == RAY_ENUM) return ((const int64_t*)d)[row];   /* read_col_i64 has no enum lane */
+    if (!as_float) return read_col_i64(d, row, v->type, v->attrs);
+    double x = v->type == RAY_F32 ? (double)((const float*)d)[row]
+             : float_family(v->type) ? ((const double*)d)[row]
+             : (double)read_col_i64(d, row, v->type, v->attrs);
+    x = clear_neg_zero(x);
+    int64_t b;
+    memcpy(&b, &x, sizeof b);
+    return b < 0 ? b ^ INT64_MAX : b;
+}
+
 static bool asof_time_sorted_within_parts(const ray_t* keycol, const int64_t* tvals) {
     ray_index_t* ix = ray_index_payload(((ray_t*)keycol)->index);
     const int64_t* st = (const int64_t*)ray_data(ix->u.part.starts);
@@ -1789,17 +1806,10 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
     ray_t* lt_time_vec = ray_table_get_col(left_table, time_sym);
     ray_t* rt_time_vec = ray_table_get_col(right_table, time_sym);
     if (!lt_time_vec || !rt_time_vec) return ray_error("schema", NULL);
-    int8_t time_type = lt_time_vec->type;
-
-    /* Helper macro to read time value as int64_t regardless of storage type.
-     * ALL 4-byte temporals must take the i32 lane (RAY_IS_TEMPORAL32:
-     * DATE/TIME/MONTH/MINUTE/SECOND — the original TIME||DATE test predated
-     * the later temporal types and read MINUTE/SECOND columns as i64,
-     * pairing adjacent i32 lanes into garbage keys). */
-    #define READ_TIME(vec, idx) \
-        (RAY_IS_TEMPORAL32(time_type) \
-            ? (int64_t)((int32_t*)ray_data(vec))[(idx)] \
-            : ((int64_t*)ray_data(vec))[(idx)])
+    /* Each side reads at its OWN width: an 8-byte read of an int/short/real
+     * lane fused neighbours and ran past the column's end (Dyxipy). */
+    bool time_as_float = float_family(lt_time_vec->type)
+                      || float_family(rt_time_vec->type);
 
     /* Build i64 time arrays for efficient comparison */
     ray_t* lt_time_hdr = NULL, *rt_time_hdr = NULL;
@@ -1810,9 +1820,8 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         if (rt_time_hdr) scratch_free(rt_time_hdr);
         return ray_error("oom", NULL);
     }
-    for (int64_t i = 0; i < left_n; i++) lt_time[i] = READ_TIME(lt_time_vec, i);
-    for (int64_t i = 0; i < right_n; i++) rt_time[i] = READ_TIME(rt_time_vec, i);
-    #undef READ_TIME
+    for (int64_t i = 0; i < left_n; i++) lt_time[i] = asof_time_key(lt_time_vec, i, time_as_float);
+    for (int64_t i = 0; i < right_n; i++) rt_time[i] = asof_time_key(rt_time_vec, i, time_as_float);
 
     /* Get eq key vectors — stored as ray_t* for type-safe access */
     ray_t* lt_eq[256], *rt_eq[256];
