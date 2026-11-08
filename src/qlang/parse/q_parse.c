@@ -205,23 +205,17 @@ static ray_t *cons_head(ray_t *head, ray_t *e, ray_t *nul) {
 
 /* ===== verb / adverb tables ================================================== */
 
-const char VERB_CHARS[] = ":+-*%!&|<>=~,^#_$?@.";
-
 const char *ADVERB_NAMES[] = { "'", "/", "\\", "':", "/:", "\\:" };
 
-/* THE glyph predicate: how a spelling stands as a glyph verb.  GF_ONE is one VERB_CHARS byte, GF_MARKED one with the
- * monadic `:` (`::` included), GF_OTHER the two-glyph comparisons and the digit-colon verbs with their markers (`0:`
- * `0::`) — the manifest, not VERB_CHARS, names those. */
+/* THE glyph predicate, read off the manifest: how a spelling stands as a glyph verb.  GF_ONE is a one-byte glyph,
+ * GF_MARKED one with the monadic `:` (`::` included), GF_OTHER the longer glyphs (`<=`, `0:`) and their markers. */
 enum { GF_NONE, GF_ONE, GF_MARKED, GF_OTHER };
 
 static int glyph_form(const char *nm, size_t l) {
-    if (l >= 1 && l <= 2 && strchr(VERB_CHARS, nm[0]) != NULL) {
-        if (l == 1) return GF_ONE;
-        if (nm[1] == ':') return GF_MARKED;
-        if (strchr(VERB_CHARS, nm[1]) != NULL) return GF_OTHER;
-    }
     const q_op_t *row = q_ops_find(nm, (int)l);
-    return (row && row->lex == QLEX_GLYPH) || marker_row(nm, l) ? GF_OTHER : GF_NONE;
+    if (row && row->lex == QLEX_GLYPH) return l == 1 ? GF_ONE : GF_OTHER;
+    if (marker_row(nm, l) || (l == 2 && nm[0] == ':' && nm[1] == ':')) return l == 2 ? GF_MARKED : GF_OTHER;
+    return GF_NONE;
 }
 
 static int sym_glyph_form(const ray_t *sym) {
@@ -254,13 +248,23 @@ enum {
 };
 
 static uint8_t CLASS[256];
+static int g_glyph_max;   /* the longest glyph spelling in the manifest */
 
+/* A byte starts a verb iff the manifest spells a one-byte glyph with it (CLAUDE.md rule 3: no scanner glyph list). */
 static void init_class(void) {
+    if (g_glyph_max) return;
+    int n = 0;
+    const q_op_t *ops = q_ops_table(&n);
+    for (int i = 0; i < n; i++) {
+        if (ops[i].lex != QLEX_GLYPH) continue;
+        int l = (int)strlen(ops[i].name);
+        if (l == 1) CLASS[(uint8_t)ops[i].name[0]] |= CL_VERB;
+        if (l > g_glyph_max) g_glyph_max = l;
+    }
     for (int c = '0'; c <= '9'; c++) CLASS[c] |= CL_DIGIT;
     for (int c = 'a'; c <= 'z'; c++) CLASS[c] |= CL_ALPHA;
     for (int c = 'A'; c <= 'Z'; c++) CLASS[c] |= CL_ALPHA;
     CLASS[(int)'_'] |= CL_ALPHA;
-    for (const char *p = VERB_CHARS; *p; p++) CLASS[(uint8_t)*p] |= CL_VERB;
     CLASS[(int)'\''] |= CL_ADVERB;
     CLASS[(int)'/']  |= CL_ADVERB;
     CLASS[(int)'\\'] |= CL_ADVERB;
@@ -303,11 +307,13 @@ static int g_scan_open_lit;   /* … or inside a text literal: its fence length 
 
 /* Whole literals (numeric / boolean / byte / guid / temporal) are scanned and
  * BUILT by q_tok.c — the single string->value home the `$` Tok scanners already
- * share.  Here it only has to become a token or a 'parse. */
+ * share.  Here it only has to become a token, or the error that names the
+ * malformed one (`'0Wd`). */
 static ray_t *scan_num_literal(const char *src, int *p) {
-    const char *err = NULL;
-    ray_t *v = q_tok_literal(src, p, &err);
-    if (!v) q_die(err);
+    int bad = 0;
+    ray_t *v = q_tok_literal(src, p, &bad);
+    if (!v) die_signal(QE_NAME, src + *p, (size_t)bad);
+    if (RAY_IS_ERR(v)) { ray_release(v); die_err(QE_WSFULL); }
     return v;
 }
 
@@ -349,6 +355,16 @@ static ray_t *scan_text_literal(const char *src, int *pp, int *capture) {
     }
     *pp = e + n;
     return ray_charv(src + s, (int64_t)(e - s));
+}
+
+/* The longest manifest glyph spelled at s — `<=` over `<`, `0:` over the digit — or 0. */
+static int glyph_len(const char *s) {
+    int best = 0;
+    for (int l = 1; l <= g_glyph_max && s[l - 1]; l++) {
+        const q_op_t *r = q_ops_find(s, l);
+        if (r && r->lex == QLEX_GLYPH) best = l;
+    }
+    return best;
 }
 
 static Tokens scan(const char *src) {
@@ -406,27 +422,26 @@ static Tokens scan(const char *src) {
         int dot_float = (c == '.' && (CLASS[(uint8_t)src[p+1]] & CL_DIGIT) &&
                          (!noun_pos || p == 0 || (CLASS[(uint8_t)src[p-1]] & CL_WS)));
 
-        /* kdb digit-colon verbs: `0:` (File Text; ref/file-text.md), `1:`/`2:`
-         * (File Binary / Dynamic Load — tokenized identically; without a
-         * manifest row the name stays a name-ref per the registry-miss rule).
-         * A single digit glued to ':' can never start a clock literal (minute
-         * / second / time / timespan all need tok_dig_run == 2 before ':'), so
-         * this is unambiguous.  A second ':' is the MONADIC MARKER (`0::` read0,
-         * `1::` read1 — basics/exposed-infrastructure.md), never an assign: no
-         * q name starts with a digit, so there is nothing for it to assign to. */
-        if ((c == '0' || c == '1' || c == '2') && src[p+1] == ':') {
-            int marked = (src[p+2] == ':');
-            char nm[3] = { c, ':', ':' };
-            p += marked ? 3 : 2;
-            EMIT(T_VERB, i_name(nm, marked ? 3 : 2));
+        /* A glyph is the longest manifest spelling at p.  It may start with a digit (`0:` File Text, `1:` File
+         * Binary, `2:` Dynamic Load), which can never start a clock literal: every clock needs two hour digits. */
+        int name_start = ((cl & CL_ALPHA) && !q_parse_drop_lead(c)) || (c == '.' && (CLASS[(uint8_t)src[p+1]] & CL_ALPHA));
+        int g = neg_sign || dot_float || name_start ? 0 : glyph_len(src + p);
+        if (g) {
+            /* A trailing `:` is the MONADIC MARKER, kept in the token so the tree displays kdb-style (`+:` `0::`) and
+             * the parser embeds the monadic row; `::` is also the generic null / global-assign verb, the same
+             * spelling.  `x op::y` is the op-assign head too (interfaces/kafka.md:53 `data,::enlist msg`), and
+             * `x<>:y` assigns through the operator (ref/assign.md:100). */
+            int marked = src[p + g] == ':';
+            p += g + marked;
+            if (marked && !(g == 1 && c == ':') && src[p] == ':') p++;
+            EMIT(T_VERB, i_name(src + start, g + marked));
             noun_pos = 0;
         }
         else if ((cl & CL_DIGIT) || neg_sign || dot_float) {
             EMIT(T_NOUN, scan_num_literal(src, &p));
             noun_pos = 1;
         }
-        else if (((cl & CL_ALPHA) && !q_parse_drop_lead(c)) ||
-                 (c == '.' && (CLASS[(uint8_t)src[p+1]] & CL_ALPHA))) {
+        else if (name_start) {
             while (CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) p++;
             while (src[p] == '.' && (CLASS[(uint8_t)src[p+1]] & (CL_ALPHA | CL_DIGIT))) {
                 p++;
@@ -553,36 +568,6 @@ static Tokens scan(const char *src) {
             }
             EMIT(T_NOUN, count > 1 ? vec : first);
             noun_pos = 1;
-        }
-        else if (cl & CL_VERB) {
-            /* Two-char comparison operators are single q verbs (kdb q.flex:
-             * '<=' LESS_OR_EQUAL, '>=' MORE_OR_EQUAL, '<>' NOT_EQUAL).  p is at
-             * `c` here, so src[p+1] is the following byte. */
-            if ((c == '<' && (src[p+1] == '=' || src[p+1] == '>')) ||
-                (c == '>' &&  src[p+1] == '=')) {
-                char nm[3] = { c, src[p+1], ':' };
-                p += 2;
-                int marked = src[p] == ':';    /* `x<>:y` assigns through the operator (ref/assign.md:100) */
-                if (marked && src[++p] == ':') p++;
-                EMIT(T_VERB, i_name(nm, 2 + marked));
-            } else {
-                p++;
-                if (src[p] == ':') {
-                    /* explicit monadic marker: keep it in the token name so the
-                     * tree displays kdb-style (+: |: ::) and the parser embeds
-                     * the monadic row.  `::` (c==':' marked) is also the q
-                     * generic null / global-assign verb — same spelling.
-                     * `x op::y` is the SAME op-assign head (interfaces/kafka.md:53
-                     * `data,::enlist msg`): a lambda body never sees a stray `:`. */
-                    p++;
-                    if (c != ':' && src[p] == ':') p++;
-                    char nm[2] = { c, ':' };
-                    EMIT(T_VERB, i_name(nm, 2));
-                } else {
-                    EMIT(T_VERB, i_name(&c, 1));
-                }
-            }
-            noun_pos = 0;
         }
         else if (cl & CL_ADVERB) {
             /* q line comment: a '/' with leading whitespace (or at the start
@@ -2142,9 +2127,7 @@ ray_t *q_qsql_normalize_probe(const char *src, int ctx, int verb) {
 }
 
 static ray_t *parse_E(Parser *p, QCtx ctx) {
-    /* Appended one at a time rather than staged through a MAX_VEC array: this
-     * frame is charged once per bracket level, so a 32KB local would exhaust
-     * the stack long before Q_PARSE_MAX_DEPTH.  ray_list_append stores a C
+    /* Appended one at a time, so a `;` list has no length cap.  ray_list_append stores a C
      * NULL without retaining, so the list PRESERVES the C-NULL slots (unlike
      * q_list, which normalises them to the generic null).  An empty statement — a
      * whole-line comment, the `;;` between two expressions — is such a NULL;
@@ -2153,12 +2136,11 @@ static ray_t *parse_E(Parser *p, QCtx ctx) {
     if (++p->depth > Q_PARSE_MAX_DEPTH) die_err(QE_LIMIT);
     ray_t **l = pend_push();
     *l = ray_list_new(1);
-    for (int n = 1;; n++) {
+    for (;;) {
         ray_t *v = parse_e(p, Q_NONE).v;
         *l = ray_list_append(*l, v);
         ray_release(v);
         if (!at(p, T_SEMI)) break;
-        if (n >= MAX_VEC) q_die("too many ';'-separated expressions");
         adv(p);
     }
     ray_t *done = *l;
