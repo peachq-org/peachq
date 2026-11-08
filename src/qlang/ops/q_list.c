@@ -310,52 +310,29 @@ ray_t* q_xprev_wrap(ray_t* nx, ray_t* x) {
     return out;
 }
 
-/* q `fills x` — forward-fill: each null takes the last preceding non-null
- * (ref/fill.md; `fills` is the `^\` fill-scan).  Leading nulls stay null.
- * Numeric vectors keep q_fill_wrap's I64/F64 result split; SYM vectors carry
- * the last non-null sym id (id 0 IS q's null sym, same test as q_fill_wrap).
- * Atoms and the empty general list pass through; other shapes are deferred cells. */
+/* q `fills x` — forward-fill: each null takes the last preceding non-null (ref/fill.md; `fills` is the `^\`
+ * fill-scan, so the result keeps x's type).  Leading nulls stay null.  Atoms and the empty general list pass
+ * through; other shapes are deferred cells. */
 ray_t* q_fills_wrap(ray_t* x) {
     if (x && (ray_is_atom(x) || (x->type == RAY_LIST && q_count(x) == 0))) { ray_retain(x); return x; }
-    if (x && x->type == RAY_SYM) {
-        int64_t n = q_count(x);
-        ray_t* outl = ray_list_new(n > 0 ? n : 1);
-        if (RAY_IS_ERR(outl)) return outl;
-        int64_t carry = 0;
-        for (int64_t i = 0; i < n; i++) {
-            ray_t* ia = ray_i64(i);
-            ray_t* se = ray_at_fn(x, ia);            /* owned sym atom */
-            ray_release(ia);
-            if (!se || RAY_IS_ERR(se)) { ray_release(outl); return se; }
-            int64_t id = se->i64;
-            ray_release(se);
-            if (id != 0) carry = id;                 /* 0 == null sym */
-            ray_t* oe = ray_sym(carry);
-            outl = ray_list_append(outl, oe);
-            ray_release(oe);
-            if (RAY_IS_ERR(outl)) return outl;
-        }
-        ray_t* c = q_list_collapse(outl);
-        ray_release(outl);
-        return c;
-    }
-    if (!x || !q_vec_is_num(x))
+    if (!x || !ray_is_vec(x) || x->type == RAY_LIST || x->type == RAY_STR)
         return q_err(QE_NYI);
-    int isf = q_vec_is_float(x);
-    int64_t n = q_count(x);
-    ray_t* out = ray_vec_new(isf ? RAY_F64 : RAY_I64, n > 0 ? n : 1);
+    int8_t t = x->type;
+    int64_t len = q_count(x);
+    size_t esz = ray_sym_elem_size(t, x->attrs);
+    ray_t* out = t == RAY_SYM ? ray_sym_vec_new(x->attrs & RAY_SYM_W_MASK, len > 0 ? len : 1)
+                              : ray_vec_new(t, len > 0 ? len : 1);
     if (RAY_IS_ERR(out)) return out;
-    out->len = n;
-    void* o = ray_data(out);
-    double carry = 0; int have = 0;
-    for (int64_t i = 0; i < n; i++) {
-        int nu; double v = q_velem_f(x, i, &nu);
-        if (!nu) { carry = v; have = 1; }
-        int isnull = nu && !have;
-        double use = nu ? carry : v;
-        if (isf) ((double*)o)[i]  = isnull ? NULL_F64 : use;
-        else     ((int64_t*)o)[i] = isnull ? NULL_I64 : (int64_t)use;
-        if (isnull) ray_vec_set_null(out, i, true);
+    if (t == RAY_SYM) ray_sym_vec_adopt_domain(out, x);
+    out->len = len;
+    char* o = (char*)ray_data(out);
+    const char* in = len > 0 ? ray_vec_get(x, 0) : NULL;
+    const char* carry = NULL;
+    for (int64_t i = 0; i < len; i++) {
+        const char* cell = in + (size_t)i * esz;
+        if (!q_type_vec_is_null(x, i)) carry = cell;
+        memcpy(o + (size_t)i * esz, carry ? carry : cell, esz);
+        if (!carry) ray_vec_set_null(out, i, true);
     }
     return out;
 }
