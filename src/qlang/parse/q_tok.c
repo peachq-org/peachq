@@ -7,10 +7,11 @@
 #include "qlang/base/q_type.h"      /* q_type_char — THE tag<->type-letter map */
 #include "qlang/base/q_calendar.h"  /* q_calendar_days_from_civil, q_calendar_date_valid, q_calendar_ts_compose(_checked) */
 #include "core/numparse.h"     /* ray_parse_f64/i64 — float twin + numeric Tok */
-#include "lang/internal.h"      /* ray_typed_null, ray_guid, ray_error — q_tok() values */
+#include "lang/internal.h"      /* ray_typed_null, ray_guid — q_tok() values */
 #include "lang/cal.h"           /* THE datetime and timestamp splits — a clocked point's time of day */
-#include "qlang/parse/q_parse_internal.h"  /* MAX_VEC — one literal cap for both scanners */
+#include <ctype.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int tok_digit(char c) { return c >= '0' && c <= '9'; }
@@ -89,18 +90,16 @@ static int tok_clock_frac9(const tok_clock *c) { return !(c->dot && !c->fd) && c
  * appears (`0D08:30.5` is 08:30:00.5); HH is uncapped and normalises into the payload (`D99` is four days and three
  * hours), so no arm caps the hour.  The hour is 1 or 2 digits bare but EXACTLY 2 when a colon follows — `D8:30` dies.
  * Nothing derives that: it is a tokenizer disambiguation rule, implemented as observed (owner transcript 2026-09-10);
- * do not "fix" it.  Returns 1 with *e past the clock, 0 with *err on a malformed clock (3+ hour digits, a colon not
+ * do not "fix" it.  Returns 1 with *e past the clock, 0 on a malformed clock (3+ hour digits, a colon not
  * followed by two digits, a field out of range, a dot after clock digits that brings no fraction digit, 10+ of them).
  * The byte after the clock is caller policy: a timestamp hands it to the literal builder (a type letter), a timespan
  * yields to a name byte (`1D45x` stays a juxtaposition) unless it is a type letter it takes, and a dot after a BARE separator is not a clock byte at all
  * (`0D.x` is a dotted name; the p/z arms die on it). */
-static int tok_clock_tail(const char *src, int *e, tok_clock *c, const char **err) {
+static int tok_clock_tail(const char *src, int *e, tok_clock *c) {
     size_t q = tok_clock_scan(src, SIZE_MAX, (size_t)*e, c);
     if (!c->ok || c->hd > 2 || (c->fields > 1 && c->hd != 2) || (c->fields && c->fields < 3 && !c->dot && src[q] == ':') ||
-        !tok_clock_frac9(c)) {
-        *err = "bad clock";
+        !tok_clock_frac9(c))
         return 0;
-    }
     *e = (int)q;
     return 1;
 }
@@ -108,32 +107,34 @@ static int tok_clock_tail(const char *src, int *e, tok_clock *c, const char **er
 static int lit_temporal_letter(char c, const q_tok_el *last);
 
 /* ===== 1. literal magnitudes (the code parser's temporal arm) ===== */
-int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
-    /* Date literal magnitude: strictly yyyy.mm.dd (every published spelling is zero-padded), next byte neither digit
-     * nor dot.  Checked BEFORE the float peek, which would otherwise eat `2000.01` and strand `.01`; exactly ONE dot
-     * stays a float (kdb's bare `2000.01` IS the float — a month needs the `m` suffix).  A glued sign negates the day
-     * count (kdb `-2012.01.01` is 1988.01.01).  An invalid civil date (2000.13.01, 2000.02.30, 0000.01.01) dies
-     * rather than falling back to the float strand. */
+int q_tok_temporal(const char* src, int* p, q_tok_el* out) {
+    /* Date literal magnitude: yyyy.mm.dd (every published spelling is zero-padded), next byte neither digit nor dot.
+     * A three-digit day reads as its number in the D form only (`2000.01.010D` is day 10: owner kdb transcript
+     * 2026-11-07, TorQ's dataaccess testdata; a bare `2000.01.010` errs, owner ruling 2026-11-08).  Checked BEFORE the float peek, which would otherwise eat `2000.01` and strand `.01`;
+     * exactly ONE dot stays a float (kdb's bare `2000.01` IS the float — a month needs the `m` suffix).  A glued sign
+     * negates the day count (kdb `-2012.01.01` is 1988.01.01).  An invalid civil date (2000.13.01, 2000.02.30,
+     * 0000.01.01) dies rather than falling back to the float strand. */
     {
         int q = *p;
         int neg = (src[q] == '-');
         if (neg) q++;
+        int dd = 0, z = 0;
         if (tok_dig_run(src, q) == 4 && src[q + 4] == '.' &&
             tok_dig_run(src, q + 5) == 2 && src[q + 7] == '.' &&
-            tok_dig_run(src, q + 8) == 2 &&
-            !(tok_digit(src[q + 10])) && src[q + 10] != '.') {
+            (dd = tok_dig_run(src, q + 8)) >= 2 && dd <= 3 && src[z = q + 8 + dd] != '.') {
             int64_t y = (src[q]     - '0') * 1000 + (src[q + 1] - '0') * 100
                       + (src[q + 2] - '0') * 10   + (src[q + 3] - '0');
             int64_t mo = (src[q + 5] - '0') * 10 + (src[q + 6] - '0');
-            int64_t d  = (src[q + 8] - '0') * 10 + (src[q + 9] - '0');
-            if (!q_calendar_date_valid(y, mo, d)) { *err = "bad date"; return -1; }
-            if (src[q + 10] == 'D') {
+            int64_t d = 0;
+            for (int k = q + 8; k < z; k++) d = d * 10 + (src[k] - '0');
+            if ((dd == 3 && src[z] != 'D') || !q_calendar_date_valid(y, mo, d)) return -1;
+            if (src[z] == 'D') {
                 /* Timestamp literal: dateDclock (datatypes.md row 12; cast.md pins the full 2015.10.28D03:55:58 and
                  * the 9-digit fraction, wp/iot-mqtt/index.md:753 passes the truncated `2021.03.05D0`).  A malformed
                  * clock dies rather than half-matching a date and stranding the tail (the invalid-civil-date rule). */
-                int end = q + 11;
+                int end = z + 1;
                 tok_clock c;
-                if (!tok_clock_tail(src, &end, &c, err) || src[end] == '.') { *err = "bad clock"; return -1; }
+                if (!tok_clock_tail(src, &end, &c) || src[end] == '.') return -1;
                 out->kind = Q_TOK_EL_TS;
                 out->i = q_calendar_ts_compose(q_calendar_days_from_civil(y, mo, d), tok_clock_ns(&c));
                 if (neg) out->i = -out->i;
@@ -141,15 +142,15 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
                 *p = end;
                 return 1;
             }
-            if (src[q + 10] == 'T') {
+            if (src[z] == 'T') {
                 /* Datetime literal: dateTclock (datatypes.md row 15; cast.md:172 pins the full 2017.08.23T23:50:12,
                  * tok.md:227 the .123 form).  The same clock as the D arm — an hour >= 24 rolls into the next day
                  * (owner 2026-09-10) — on a MILLISECOND carrier: 1..3 fraction digits, and a fraction on a truncated
                  * clock (`T12.5`) dies because its reading is ambiguous at ms resolution — the one sanctioned exception
                  * to the shared grammar (owner 2026-09-10), not an oversight.  Payload = f64 days since 2000.01.01. */
-                int end = q + 11;
+                int end = z + 1;
                 tok_clock c;
-                if (tok_clock_tail(src, &end, &c, err) && src[end] == 'p') {
+                if (tok_clock_tail(src, &end, &c) && src[end] == 'p') {
                     /* the p letter makes a T-spelt stamp a timestamp at full precision (qstudio-private
                      * KdbHelperTest.testP, kdb 3.x: 2023.02.10T15:36:36.576232p) */
                     out->kind = Q_TOK_EL_TS;
@@ -159,9 +160,9 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
                     *p = end;
                     return 1;
                 }
-                end = q + 11;
-                if (!tok_clock_tail(src, &end, &c, err) || src[end] == '.' || c.fd > 3 || (c.fd && c.fields < 3))
-                    { *err = "bad datetime"; return -1; }
+                end = z + 1;
+                if (!tok_clock_tail(src, &end, &c) || src[end] == '.' || c.fd > 3 || (c.fd && c.fields < 3))
+                    return -1;
                 out->kind = Q_TOK_EL_DT;
                 out->f = (double)q_calendar_days_from_civil(y, mo, d) + (double)(tok_clock_ns(&c) / 1000000) / 86400000.0;
                 if (neg) out->f = -out->f;   /* glued sign negates the payload (kdb date-literal rule; derived for T) */
@@ -172,7 +173,7 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
             out->kind = Q_TOK_EL_DATE;
             out->i = q_calendar_days_from_civil(y, mo, d);
             if (neg) out->i = -out->i;
-            *p = q + 10;
+            *p = z;
             return 1;
         }
     }
@@ -197,10 +198,9 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
                        + (src[q + 2] - '0') * 10   + (src[q + 3] - '0');
             int64_t mo = (src[q + 5] - '0') * 10 + (src[q + 6] - '0');
             int valid = (y >= 1 && mo >= 1 && mo <= 12);
-            if (!valid && src[q + 7] == 'm') { *err = "bad number"; return -1; }
+            if (!valid && src[q + 7] == 'm') return -1;
             if (valid) {
-                size_t rem2 = strlen(src + *p);
-                double fv; size_t u = ray_parse_f64(src + *p, rem2, &fv);
+                double fv; size_t u = ray_parse_f64(src + *p, (size_t)(q + 7 - *p), &fv);
                 if (u == (size_t)(q + 7 - *p)) {   /* float twin spans yyyy.mm */
                     out->kind = Q_TOK_EL_MONTH;
                     out->i = (y - 2000) * 12 + (mo - 1);
@@ -234,7 +234,7 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
         else if (hms && c.fd >= 1 && c.fd <= 3) { k = Q_TOK_EL_TIME; v = c.secs * 1000 + c.frac / 1000000; }
         else if (hms && c.fd >= 4 && c.fd <= 9) { k = Q_TOK_EL_TIMESPAN; v = tok_clock_ns(&c); }
         if (k != Q_TOK_EL_INT) {
-            if (!c.ok) { *err = "bad clock"; return -1; }
+            if (!c.ok) return -1;
             out->kind = k;
             out->i = neg ? -v : v;
             *p = (int)e;
@@ -257,7 +257,7 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
         if (dd >= 1 && src[q + dd] == 'D' && tok_dig_run(src, q + dd + 1) <= 2) {
             int e = q + dd + 1;
             tok_clock c;
-            if (!tok_clock_tail(src, &e, &c, err)) return -1;
+            if (!tok_clock_tail(src, &e, &c)) return -1;
             int bare = !c.fields && !c.fd;
             q_tok_el ts = { .kind = Q_TOK_EL_TIMESPAN };
             int letter = lit_temporal_letter(src[e], &ts) && !tok_name_byte(src[e + 1]);
@@ -281,8 +281,6 @@ int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err) {
  * type builds identically — admit the element kinds, atom-or-vector over one payload width — so the eight are ONE
  * table walked by one builder (eight hand-copied arms until 2026-07-30).  Doc pins: basics/datatypes.md rows 12-19. */
 
-#define LIT_ERR(M) do { *err = (M); return NULL; } while (0)
-
 static int lit_ws(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
@@ -295,39 +293,45 @@ static int lit_special(const char *s, int p, q_tok_el *out) {
     char k = s[q + 1];
     if (k != 'N' && k != 'W' && k != 'n' && k != 'w') return 0;
     int is_null = (k == 'N' || k == 'n');
-    if (neg && is_null) return 0;            /* -0N is not a literal */
+    if (neg && k == 'N') return 0;            /* -0N is not a literal; -0n is 0n (owner ruling 2026-11-08) */
     out->forces_float = (k == 'n' || k == 'w');
     out->i = 0; out->f = 0.0;
     out->kind = is_null ? Q_TOK_EL_NULL : (neg ? Q_TOK_EL_NINF : Q_TOK_EL_PINF);
     return (q + 2) - p;
 }
 
-/* Scan one magnitude at src[*p]: 1 on success, 0 on no match, -1 with *err on a
+/* Scan one magnitude at src[*p]: 1 on success, 0 on no match, -1 on a
  * malformed temporal shape (an invalid civil date never falls back to a float). */
-int q_tok_magnitude(const char *src, int *p, q_tok_el *out, const char **err) {
+int q_tok_magnitude(const char *src, int *p, q_tok_el *out) {
     out->forces_float = out->clocked = 0;
+    out->at = *p;
     int used = lit_special(src, *p, out);
     if (used) { *p += used; return 1; }
 
-    int tm = q_tok_temporal(src, p, out, err);
+    int tm = q_tok_temporal(src, p, out);
     if (tm) return tm;
 
     /* Float vs int: a float magnitude contains '.' or an exponent among its own bytes (before the next space / letter). */
     int q = *p;
     if (src[q] == '-' || src[q] == '+') q++;
     int is_float = 0, saw_digit = 0;
-    for (int r = q; ; r++) {
+    int r = q;
+    for (;; r++) {
         char c = src[r];
         if (c >= '0' && c <= '9') { saw_digit = 1; continue; }
         if (c == '.') { is_float = 1; continue; }
         if ((c == 'e' || c == 'E') && saw_digit &&
             (src[r + 1] == '+' || src[r + 1] == '-' ||
-             (src[r + 1] >= '0' && src[r + 1] <= '9'))) { is_float = 1; continue; }
+             (src[r + 1] >= '0' && src[r + 1] <= '9'))) {
+            is_float = 1;
+            r += src[r + 1] == '+' || src[r + 1] == '-';
+            continue;
+        }
         break;
     }
     if (!saw_digit) return 0;
 
-    size_t rem = strlen(src + *p);
+    size_t rem = (size_t)(r - *p);   /* the magnitude's own extent: a whole-source strlen is quadratic in a strand */
     if (is_float) {
         double v; size_t u = ray_parse_f64(src + *p, rem, &v);
         if (u == 0) return 0;
@@ -380,22 +384,23 @@ typedef struct {
     q_tok_el_kind  kind;
     int8_t         type;
     uint8_t        bare;
-    uint8_t        int_ok;   /* a plain int carries this letter as a raw payload (owner: p u v t only) */
+    uint8_t        int_ok;   /* a plain int of any size carries this letter (owner: p u v t only; see lit_hours) */
     uint8_t        point;    /* a calendar point (epoch 2000.01.01), not an amount of time */
     int64_t        unit;     /* ns per payload tick; 0 = converts to and from nothing */
     ray_t        *(*atom)(int64_t);
 } lit_ctx;
 
+/* Finest first on each axis: an unsuffixed strand takes the first context one of its elements names, so a mixed
+ * strand promotes to its finest kind (`12:00 12:00:01` is seconds, owner kdb transcript 2026-11-07). */
 static const lit_ctx LIT_CTX[] = {
-    /* timestamp FIRST: a mixed date+timestamp strand must promote days->ns rather than truncate ns into an i32 date. */
     { Q_TOK_EL_TS,       RAY_TIMESTAMP, 1, 1, 1, 1,                ray_timestamp },
-    { Q_TOK_EL_DATE,     RAY_DATE,      1, 0, 1, 86400000000000LL, ray_date      },
-    { Q_TOK_EL_TIME,     RAY_TIME,      1, 1, 0, 1000000,          ray_time      },
-    { Q_TOK_EL_MONTH,    RAY_MONTH,     0, 0, 1, 0,                ray_month     },
-    { Q_TOK_EL_MINUTE,   RAY_MINUTE,    1, 1, 0, 60000000000LL,    ray_minute    },
-    { Q_TOK_EL_SECOND,   RAY_SECOND,    1, 1, 0, 1000000000,       ray_second    },
     { Q_TOK_EL_TIMESPAN, RAY_TIMESPAN,  1, 0, 0, 1,                ray_timespan  },
     { Q_TOK_EL_DT,       RAY_DATETIME,  1, 0, 1, 86400000000000LL, NULL          },
+    { Q_TOK_EL_TIME,     RAY_TIME,      1, 1, 0, 1000000,          ray_time      },
+    { Q_TOK_EL_SECOND,   RAY_SECOND,    1, 1, 0, 1000000000,       ray_second    },
+    { Q_TOK_EL_MINUTE,   RAY_MINUTE,    1, 1, 0, 60000000000LL,    ray_minute    },
+    { Q_TOK_EL_DATE,     RAY_DATE,      1, 0, 1, 86400000000000LL, ray_date      },
+    { Q_TOK_EL_MONTH,    RAY_MONTH,     0, 0, 1, 0,                ray_month     },
 };
 
 /* 0N / 0W / -0W: TYPELESS, so a Special takes the literal's type. */
@@ -410,7 +415,16 @@ static const lit_ctx *lit_ctx_of_kind(q_tok_el_kind k) {
     return NULL;
 }
 
-/* An element belongs to context c iff it is c's own shape, a Special, or a plain int (a raw payload count).  A
+#define LIT_HOUR_NS 3600000000000LL
+
+/* A compact suffix counts HOURS first (`10t` is 10:00, `9u` 09:00, `2p` 2000.01.01D02:00), as the `$` casts read a
+ * digit run (owner ruling 2026-11-07, Dyirvt): an int of at most two digits under the letter of a type with an hour
+ * field.  A longer run keeps int_ok's raw payload, and one strand never mixes the two (owner ruling 2026-11-08). */
+static int lit_hours(const lit_ctx *c, const q_tok_el *e) {
+    return e->kind == Q_TOK_EL_INT && e->i >= -99 && e->i <= 99 && c->unit && LIT_HOUR_NS % c->unit == 0;
+}
+
+/* An element belongs to context c iff it is c's own shape, a Special, or, under a suffix, a plain int.  A
  * float-forcing element (a fraction, or a lowercase `0w`) may only be c's own shape or the null — `0nd` is the K-ism
  * spelling of `0Nd`, `0wd` is not a literal (float-backed `0wz` is).  A SUFFIXED literal DECLARES its type and converts a magnitude of the
  * same quantity — a calendar point or an amount of time, never one relabelled as the other (`"t"$2000.01.02` is
@@ -418,21 +432,23 @@ static const lit_ctx *lit_ctx_of_kind(q_tok_el_kind k) {
  * owner ruling 2026-09-04), while an AMOUNT takes any other amount, coarser included, because kdb is inconsistent
  * there and `$` rescales all four freely (`"u"$00:00:10` is 00:00, owner ruling 2026-09-04).  A point written with
  * a CLOCK also takes p z n t u v (owner ruling 2026-10-27); the bare `2000.01.01Dz` wrote none.  An UNSUFFIXED strand
- * only INFERS its type and keeps the single date->timestamp promotion — `13:30 13:30:01` stays 'parse. */
+ * only INFERS its type, the finest its elements name, so every element is a coarser-or-equal kind on the same axis. */
 static int lit_el_ok(const q_tok_el *e, const lit_ctx *c, int suffixed) {
     if (e->forces_float && e->kind != Q_TOK_EL_NULL && e->kind != c->kind &&
         !(lit_el_special(e) && c->kind == Q_TOK_EL_DT)) return 0;
-    if (e->kind == c->kind || e->kind == Q_TOK_EL_INT || lit_el_special(e)) return 1;
-    if (!suffixed) return c->kind == Q_TOK_EL_TS && e->kind == Q_TOK_EL_DATE;
-    if (e->clocked) return c->kind == Q_TOK_EL_TS || c->kind == Q_TOK_EL_DT || !c->point;
+    if (e->kind == Q_TOK_EL_INT) return suffixed;   /* `12:00 5` errs, `12:00 5u` reads 5u (owner ruling 2026-11-08) */
+    if (e->kind == c->kind || lit_el_special(e)) return 1;
+    if (suffixed && e->clocked) return c->kind == Q_TOK_EL_TS || c->kind == Q_TOK_EL_DT || !c->point;
     const lit_ctx *s = lit_ctx_of_kind(e->kind);
-    return s && !RAY_IS_TEMPORALF(s->type) && s->unit && c->unit && s->point == c->point && (!s->point || s->unit % c->unit == 0);
+    return s && !RAY_IS_TEMPORALF(s->type) && s->unit && c->unit && s->point == c->point &&
+           ((suffixed && !s->point) || s->unit % c->unit == 0);
 }
 
 /* The date->timestamp arm keeps the saturating compose (a bare multiply overflows int64 for far dates); a clocked
  * point takes what `$` gives; every other conversion is the unit ratio — a 2-digit clock times 1e9 ns stays far
  * inside int64 — floored, since narrowing truncates toward -inf (cast.md:168: `"u"$-00:00:10` is -00:01). */
-static int64_t lit_payload(const lit_ctx *c, const q_tok_el *e) {
+static int64_t lit_payload(const lit_ctx *c, const q_tok_el *e, int hours) {
+    if (hours && e->kind == Q_TOK_EL_INT) return e->i * (LIT_HOUR_NS / c->unit);
     if (c->kind == Q_TOK_EL_TS && e->kind == Q_TOK_EL_DATE)
         return q_calendar_ts_compose(e->i, 0);      /* days -> ns */
     if (e->clocked && e->kind != c->kind) {         /* a point, else the time of day */
@@ -450,36 +466,43 @@ static int64_t lit_payload(const lit_ctx *c, const q_tok_el *e) {
 
 static double lit_days(const q_tok_el *e) { return e->kind == Q_TOK_EL_TS ? ts_to_datetime(e->i) : lit_float(e); }
 
-static ray_t *lit_temporal(const lit_ctx *c, const q_tok_el *buf, int m) {
-    if (RAY_IS_TEMPORALF(c->type)) {
-        if (m == 1) {
-            if (buf[0].kind != Q_TOK_EL_NULL && buf[0].kind != Q_TOK_EL_INT) return ray_datetime(lit_days(&buf[0]));
-            return ray_typed_null(-RAY_DATETIME);   /* incl. a bare int: see PLAN.md */
+/* THE fill: m elements into a vector of `type`, each read through its lane — f64/f32 as floats (a datetime's as
+ * days), an integer lane at its width through the temporal context c when there is one. */
+static ray_t *lit_vec(int8_t type, const lit_ctx *c, int hours, const q_tok_el *buf, int m) {
+    ray_t *v = ray_vec_new(type, m);
+    if (!v || RAY_IS_ERR(v)) return v;
+    v->len = m;
+    void *d = ray_data(v);
+    int w = ray_type_sizes[type];
+    for (int i = 0; i < m; i++) {
+        const q_tok_el *e = &buf[i];
+        if (type == RAY_DATETIME) ((double *)d)[i] = lit_days(e);
+        else if (type == RAY_F64) ((double *)d)[i] = lit_float(e);
+        else if (type == RAY_F32) ((float *)d)[i] = (float)lit_float(e);
+        else {
+            ray_vec_set_i64(v, i, c ? lit_payload(c, e, hours) : lit_int(e, w));
         }
-        double t[MAX_VEC];
-        for (int i = 0; i < m; i++) t[i] = lit_days(&buf[i]);
-        return lit_mark_nulls(ray_vec_from_raw(RAY_DATETIME, t, m), buf, m);
     }
-    if (m == 1)
-        return buf[0].kind == Q_TOK_EL_NULL ? ray_typed_null((int8_t)-c->type)
-                                            : c->atom(lit_payload(c, &buf[0]));
-    if (ray_type_sizes[c->type] == 4) {
-        int32_t t[MAX_VEC];
-        for (int i = 0; i < m; i++) t[i] = (int32_t)lit_payload(c, &buf[i]);
-        return lit_mark_nulls(ray_vec_from_raw(c->type, t, m), buf, m);
-    }
-    int64_t t[MAX_VEC];
-    for (int i = 0; i < m; i++) t[i] = lit_payload(c, &buf[i]);
-    return lit_mark_nulls(ray_vec_from_raw(c->type, t, m), buf, m);
+    return lit_mark_nulls(v, buf, m);
 }
 
-/* A TEMPORAL letter asks a narrower question than lit_el_ok — a plain int is a raw payload in EVERY temporal context
- * (`2000.01.01 5` is a date vector) but only p/u/v/t let one CARRY the letter — so `3d` / `3m` / `3z` keep parsing as
- * `3` juxtaposed with the name (no parse-display churn) while `0p` / `1t` / `13:30 20:00t` are literals. */
+static ray_t *lit_temporal(const lit_ctx *c, int hours, const q_tok_el *buf, int m) {
+    if (m > 1) return lit_vec(c->type, c, hours, buf, m);
+    if (RAY_IS_TEMPORALF(c->type))   /* a bare int (`0z`) has no datetime reading: the null */
+        return buf[0].kind != Q_TOK_EL_NULL && buf[0].kind != Q_TOK_EL_INT ? ray_datetime(lit_days(&buf[0]))
+                                                                          : ray_typed_null(-RAY_DATETIME);
+    return buf[0].kind == Q_TOK_EL_NULL ? ray_typed_null((int8_t)-c->type) : c->atom(lit_payload(c, &buf[0], hours));
+}
+
+/* A TEMPORAL letter asks a narrower question than lit_el_ok — only p/u/v/t, or an hour count (lit_hours), let a plain
+ * int CARRY the letter — so
+ * `3d` / `3m` / `3z` keep parsing as `3` juxtaposed with the name (no parse-display churn) while `0p` / `1t` / `4n` /
+ * `13:30 20:00t` are literals. */
 static int lit_temporal_letter(char c, const q_tok_el *last) {
     for (size_t k = 0; c && k < sizeof LIT_CTX / sizeof *LIT_CTX; k++)
         if (c == q_type_char(LIT_CTX[k].type))
-            return last->kind == Q_TOK_EL_INT ? LIT_CTX[k].int_ok : lit_el_ok(last, &LIT_CTX[k], 1);
+            return last->kind == Q_TOK_EL_INT ? LIT_CTX[k].int_ok || lit_hours(&LIT_CTX[k], last)
+                                              : lit_el_ok(last, &LIT_CTX[k], 1);
     return 0;
 }
 
@@ -490,6 +513,15 @@ void q_tok_type_letter(const char *src, int *p, char *letter, const q_tok_el *la
     if (c && (strchr("bhijef", c) || ((c == 'g' || c == 'c') && last->kind == Q_TOK_EL_NULL) ||
               lit_temporal_letter(c, last)))
         *letter = src[(*p)++];
+}
+
+/* The text a malformed literal names (`'0Wd`, `'10f`, `'18.cs`): kdb reads a numeric token's last letter as its type
+ * and signals the bad magnitude (SO 51200197, 57623039; owner kdb transcript 2026-11-07).  So: the element's run of
+ * token bytes, less its final letter when that letter ends the literal (`ends`). */
+static int lit_bad_len(const char *src, int at, int ends) {
+    int q = at + (src[at] == '-');
+    while (isalnum((unsigned char)src[q]) || src[q] == '.' || src[q] == ':') q++;
+    return q - at - (ends && q > at && isalpha((unsigned char)src[q - 1]));
 }
 
 /* ---- byte literals (q type 4, char x): glued `0x` consumes the maximal hex-digit run.  Doc pins (CLEAN ROOM,
@@ -510,97 +542,78 @@ static int lit_hex_val(char c) {
 int q_tok_byte_lit_starts(const char *src, int p) {
     return src[p] == '0' && src[p + 1] == 'x';
 }
-static ray_t *lit_byte(const char *src, int *p, const char **err) {
+static ray_t *lit_byte(const char *src, int *p, int *bad) {
     int q = *p + 2;                               /* past "0x" */
     int d0 = q;
     while (lit_hex_digit(src[q])) q++;
     int nd = q - d0;
     char t = src[q];                              /* run terminator */
-    if ((t >= 'a' && t <= 'z') || (t >= 'A' && t <= 'Z') || t == '_' || t == '.')
-        LIT_ERR("bad number");                    /* 0xzz / 0x0az / 0x1.5 */
-    if (nd > 2 * MAX_VEC) LIT_ERR("numeric literal too long");
-    uint8_t bytes[MAX_VEC]; int nb = 0;
-    int i = d0;
-    if (nd & 1) bytes[nb++] = (uint8_t)lit_hex_val(src[i++]);   /* left-pad nibble */
-    for (; i < q; i += 2)
-        bytes[nb++] = (uint8_t)((lit_hex_val(src[i]) << 4) | lit_hex_val(src[i + 1]));
+    if ((t >= 'a' && t <= 'z') || (t >= 'A' && t <= 'Z') || t == '_' || t == '.') {   /* 0xzz / 0x0az / 0x1.5 */
+        *bad = lit_bad_len(src, *p, 0);
+        return NULL;
+    }
+    int nb = (nd + 1) / 2, odd = nd & 1;
+    ray_t *v = nb == 1 ? NULL : ray_vec_new(RAY_BYTE_ONLY, nb);   /* nb==0: empty byte vec */
+    if (v && RAY_IS_ERR(v)) return v;
+    uint8_t one, *bytes = v ? ray_data(v) : &one;
+    for (int k = 0; k < nb; k++) {
+        int i = d0 + 2 * k - odd;                 /* an odd count left-pads one nibble */
+        bytes[k] = (uint8_t)((i < d0 ? 0 : lit_hex_val(src[i]) << 4) | lit_hex_val(src[i + 1]));
+    }
     *p = q;
-    if (nb == 1) return ray_u8(bytes[0]);
-    return ray_vec_from_raw(RAY_BYTE_ONLY, bytes, nb);   /* nb==0: empty byte vec */
+    if (!v) return ray_u8(one);
+    v->len = nb;
+    return v;
 }
 
-ray_t* q_tok_literal(const char *src, int *p, const char **err) {
-    *err = NULL;
-    if (q_tok_byte_lit_starts(src, *p)) return lit_byte(src, p, err);
-    int start = *p;
-    /* A glued 0/1 run ending in 'b' never goes through the integer parser: `00000000000000000000b` is 20 digits,
-     * one past what an int64 holds, and it is a boolean vector of any length. */
-    int nb1 = 0;
-    while (src[start + nb1] == '0' || src[start + nb1] == '1') nb1++;
-    if (nb1 && src[start + nb1] == 'b') {
-        if (nb1 > MAX_VEC) LIT_ERR("boolean literal too long");
-        uint8_t bits[MAX_VEC];
-        for (int i = 0; i < nb1; i++) bits[i] = (uint8_t)(src[start + i] - '0');
-        *p = start + nb1 + 1;
-        return nb1 == 1 ? ray_bool(bits[0]) : ray_vec_from_raw(RAY_BOOL, bits, nb1);
-    }
-    q_tok_el buf[MAX_VEC]; int m = 0;
-    char letter = 0;
-    if (q_tok_magnitude(src, p, &buf[m++], err) != 1)
-        LIT_ERR(*err ? *err : "bad number");
-    q_tok_type_letter(src, p, &letter, &buf[m - 1]);
-    for (;;) {
-        int sp = *p;
-        while (lit_ws(src[sp])) sp++;
-        if (sp == *p) break;                     /* no space => run ended */
-        if (q_tok_byte_lit_starts(src, sp)) break;   /* byte literal: own noun */
-        q_tok_el e; int q = sp;
-        int got = q_tok_magnitude(src, &q, &e, err);
-        if (got < 0) return NULL;
-        if (!got) break;                         /* not another magnitude */
-        /* q prints one trailing suffix for the whole vector (basics/datatypes.md:254-259): `1 2h`, never `1h 2h`
-         * (owner ruling 2026-07-30), and a special is no exception — `0N 0W 09:30u` (owner ruling 2026-09-23). */
-        if (letter) LIT_ERR("type suffix must end the literal");
-        if (m >= MAX_VEC) LIT_ERR("numeric literal too long");
-        *p = q; buf[m++] = e;
-        q_tok_type_letter(src, p, &letter, &buf[m - 1]);
-    }
+/* the strand's magnitudes, grown on the heap: a literal has no size cap */
+typedef struct { q_tok_el *e; int n, cap; } lit_els;
 
-    /* Booleans: a 0/1 run ending in 'b' (spaces flattened). */
-    if (letter == 'b') {
-        uint8_t bits[MAX_VEC]; int nb = 0;
-        for (int i = start; i < *p - 1; i++) {
-            if (src[i] == ' ' || src[i] == '\t') continue;
-            if (src[i] != '0' && src[i] != '1') LIT_ERR("bad boolean literal");
-            if (nb >= MAX_VEC) LIT_ERR("boolean literal too long");
-            bits[nb++] = (uint8_t)(src[i] - '0');
-        }
-        if (nb == 0) LIT_ERR("bad boolean literal");
-        if (nb == 1) return ray_bool(bits[0]);
-        return ray_vec_from_raw(RAY_BOOL, bits, nb);
+static q_tok_el *lit_push(lit_els *b) {
+    if (b->n == b->cap) {
+        int cap = b->cap ? b->cap * 2 : 16;
+        q_tok_el *e = realloc(b->e, (size_t)cap * sizeof *e);
+        if (!e) return NULL;
+        b->e = e; b->cap = cap;
     }
+    return &b->e[b->n++];
+}
+
+/* Booleans: every magnitude a 0/1 digit run, flattened (`1 01b` is 101b).  -1 = built; else the bad element. */
+static int lit_bool(const char *src, const q_tok_el *buf, int m, ray_t **out) {
+    int64_t nb = 0;
+    for (int i = 0; i < m; i++) {
+        int dr = tok_dig_run(src, buf[i].at);
+        if (dr != lit_bad_len(src, buf[i].at, i == m - 1) || (int)strspn(src + buf[i].at, "01") < dr) return i;
+        nb += dr;
+    }
+    ray_t *v = nb == 1 ? ray_bool(src[buf[0].at] == '1') : ray_vec_new(RAY_BOOL, nb);
+    if (nb > 1 && v && !RAY_IS_ERR(v))
+        for (int i = 0; i < m; i++)
+            for (int k = 0, dr = tok_dig_run(src, buf[i].at); k < dr; k++)
+                ((uint8_t *)ray_data(v))[v->len++] = (uint8_t)(src[buf[i].at + k] - '0');
+    *out = v;
+    return -1;
+}
+
+/* The value of m scanned magnitudes under `letter`, or NULL with *badi the element that does not fit. */
+static ray_t *lit_build(const char *src, const q_tok_el *buf, int m, char letter, int *badi) {
+    ray_t *v = NULL;
+    if (letter == 'b') { *badi = lit_bool(src, buf, m, &v); return v; }
 
     /* Guid: the null is guid's ONLY literal (basics/datatypes.md §Guid), so every element must be 0N; a multi-0N
-     * run builds an all-null guid vector by the same strand-suffix rule as `1 2h` (derived). */
-    if (letter == 'g') {
+     * run builds an all-null guid vector by the same strand-suffix rule as `1 2h` (derived).  `0Nc` is the char null,
+     * a blank — qstudio-private KdbTypeTest.testSpecialNulls (kdb 3.x). */
+    if (letter == 'g' || letter == 'c') {
         for (int i = 0; i < m; i++)
-            if (buf[i].kind != Q_TOK_EL_NULL) LIT_ERR("bad number");
-        if (m == 1) return ray_typed_null(-RAY_GUID);
-        ray_t *vec = ray_vec_new(RAY_GUID, m);
-        if (vec && !RAY_IS_ERR(vec)) {
-            vec->len = m;
-            memset(ray_data(vec), 0, (size_t)m * 16);   /* all-null guids */
+            if (buf[i].kind != Q_TOK_EL_NULL) { *badi = i; return NULL; }
+        if (m == 1) return letter == 'g' ? ray_typed_null(-RAY_GUID) : ray_char(' ');
+        v = ray_vec_new(letter == 'g' ? RAY_GUID : RAY_CHARV, m);
+        if (v && !RAY_IS_ERR(v)) {
+            v->len = m;
+            memset(ray_data(v), letter == 'g' ? 0 : ' ', (size_t)m * ray_type_sizes[v->type]);
         }
-        return vec;
-    }
-
-    /* `0Nc` is the char null, a blank — qstudio-private KdbTypeTest.testSpecialNulls (kdb 3.x) */
-    if (letter == 'c') {
-        char blanks[MAX_VEC];
-        for (int i = 0; i < m; i++)
-            if (buf[i].kind != Q_TOK_EL_NULL) LIT_ERR("bad number");
-        memset(blanks, ' ', (size_t)m);
-        return m == 1 ? ray_char(' ') : ray_charv(blanks, m);
+        return v;
     }
 
     /* A temporal letter NAMES its context (`13:30v` would otherwise reach the minute row first and drop the `v`);
@@ -612,9 +625,14 @@ ray_t* q_tok_literal(const char *src, int *p, const char **err) {
         for (int i = 0; !suffixed && i < m && !hit; i++)
             if (c->bare && buf[i].kind == c->kind) hit = 1;
         if (!hit) continue;
-        for (int i = 0; i < m; i++)
-            if (!lit_el_ok(&buf[i], c, suffixed)) LIT_ERR("bad number");
-        return lit_temporal(c, buf, m);
+        int hours = -1;
+        for (int i = 0; i < m; i++) {
+            if (!lit_el_ok(&buf[i], c, suffixed)) { *badi = i; return NULL; }
+            if (buf[i].kind != Q_TOK_EL_INT) continue;
+            if (hours >= 0 && hours != lit_hours(c, &buf[i])) { *badi = i; return NULL; }   /* `12 100 13t` */
+            hours = lit_hours(c, &buf[i]);
+        }
+        return lit_temporal(c, hours > 0, buf, m);
     }
 
     /* The letter decides; only a letter-free literal is floated by a fraction or a lowercase special. */
@@ -622,47 +640,66 @@ ray_t* q_tok_literal(const char *src, int *p, const char **err) {
     for (int i = 0; i < m && !letter; i++)
         if (buf[i].forces_float) is_float = 1;
     if (is_float) {
-        int f32 = (letter == 'e');
-        if (m == 1) {
-            double v = lit_float(&buf[0]);
-            return f32 ? ray_f32((float)v) : ray_f64(v);
-        }
-        if (f32) {
-            float t[MAX_VEC];
-            for (int i = 0; i < m; i++) t[i] = (float)lit_float(&buf[i]);
-            return lit_mark_nulls(ray_vec_from_raw(RAY_F32, t, m), buf, m);
-        }
-        double t[MAX_VEC];
-        for (int i = 0; i < m; i++) t[i] = lit_float(&buf[i]);
-        return lit_mark_nulls(ray_vec_from_raw(RAY_F64, t, m), buf, m);
+        if (m > 1) return lit_vec(letter == 'e' ? RAY_F32 : RAY_F64, NULL, 0, buf, m);
+        return letter == 'e' ? ray_f32((float)lit_float(&buf[0])) : ray_f64(lit_float(&buf[0]));
     }
 
     /* Integer context: h=i16, i=i32, j/none=i64.  Without HAS_NULLS a reduction cannot tell 0Ni/0Nh from data. */
     for (int i = 0; i < m; i++)
-        if (buf[i].forces_float && !lit_el_special(&buf[i])) LIT_ERR("bad number");
-    int width = (letter == 'h') ? 2 : (letter == 'i') ? 4 : 8;
-    if (m == 1) {
-        int64_t v = lit_int(&buf[0], width);
-        if (width == 2) return ray_i16((int16_t)v);
-        if (width == 4) return ray_i32((int32_t)v);
-        return ray_i64(v);
-    }
-    if (width == 8) {
-        int64_t t[MAX_VEC];
-        for (int i = 0; i < m; i++) t[i] = lit_int(&buf[i], 8);
-        return lit_mark_nulls(ray_vec_from_raw(RAY_I64, t, m), buf, m);
-    }
-    if (width == 4) {
-        int32_t t[MAX_VEC];
-        for (int i = 0; i < m; i++) t[i] = (int32_t)lit_int(&buf[i], 4);
-        return lit_mark_nulls(ray_vec_from_raw(RAY_I32, t, m), buf, m);
-    }
-    int16_t t[MAX_VEC];
-    for (int i = 0; i < m; i++) t[i] = (int16_t)lit_int(&buf[i], 2);
-    return lit_mark_nulls(ray_vec_from_raw(RAY_I16, t, m), buf, m);
+        if (buf[i].forces_float && !lit_el_special(&buf[i])) { *badi = i; return NULL; }
+    int8_t type = letter == 'h' ? RAY_I16 : letter == 'i' ? RAY_I32 : RAY_I64;
+    if (m > 1) return lit_vec(type, NULL, 0, buf, m);
+    int64_t x = lit_int(&buf[0], ray_type_sizes[type]);
+    return type == RAY_I16 ? ray_i16((int16_t)x) : type == RAY_I32 ? ray_i32((int32_t)x) : ray_i64(x);
 }
 
-#undef LIT_ERR
+ray_t* q_tok_literal(const char *src, int *p, int *bad) {
+    if (q_tok_byte_lit_starts(src, *p)) return lit_byte(src, p, bad);
+    lit_els els = { 0 };
+    char letter = 0;
+    int badi = -1, ends = 1;
+    q_tok_el *e = lit_push(&els);
+    if (!e) return q_err(QE_OOM);
+    /* A glued 0/1 run ending in 'b' never goes through the integer parser: `00000000000000000000b` is 20 digits,
+     * one past what an int64 holds, and it is a boolean vector of any length. */
+    int nb1 = (int)strspn(src + *p, "01"), glued = nb1 && src[*p + nb1] == 'b';
+    if (glued) {
+        *e = (q_tok_el){ .kind = Q_TOK_EL_INT, .at = *p };
+        *p += nb1 + 1;
+        letter = 'b';
+    } else if (q_tok_magnitude(src, p, e) != 1) {
+        badi = 0;
+    } else {
+        q_tok_type_letter(src, p, &letter, e);
+    }
+    while (badi < 0 && !glued) {
+        int sp = *p;
+        while (lit_ws(src[sp])) sp++;
+        if (sp == *p) break;                     /* no space => run ended */
+        if (q_tok_byte_lit_starts(src, sp)) break;   /* byte literal: own noun */
+        q_tok_el el; int q = sp;
+        int got = q_tok_magnitude(src, &q, &el);
+        if (!got) break;                         /* not another magnitude */
+        /* q prints one trailing suffix for the whole vector (basics/datatypes.md:254-259): `1 2h`, never `1h 2h`
+         * (owner ruling 2026-07-30), and a special is no exception — `0N 0W 09:30u` (owner ruling 2026-09-23) — so
+         * the element that carries a letter mid-literal is the malformed one, letter and all (`'0Wd`). */
+        if (letter) { badi = els.n - 1; ends = 0; break; }
+        if (!(e = lit_push(&els))) { free(els.e); return q_err(QE_OOM); }
+        *e = el;
+        if (got < 0) { badi = els.n - 1; break; }
+        *p = q;
+        q_tok_type_letter(src, p, &letter, e);
+    }
+    /* a fraction glued to a name byte is one malformed token (`18.csv` is '18.cs); an int's stays a juxtaposition */
+    if (badi < 0 && els.e[els.n - 1].kind == Q_TOK_EL_FLOAT && isalpha((unsigned char)src[*p])) badi = els.n - 1;
+    ray_t *v = badi < 0 ? lit_build(src, els.e, els.n, letter, &badi) : NULL;
+    if (!v) {
+        *p = els.e[badi].at;
+        *bad = lit_bad_len(src, *p, ends && badi == els.n - 1);
+    }
+    free(els.e);
+    return v;
+}
 
 /* ===== 2. `$` Tok whole-string scanners ===== */
 
