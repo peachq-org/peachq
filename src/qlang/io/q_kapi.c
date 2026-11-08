@@ -1380,6 +1380,8 @@ ray_t* q_dl_wrap(ray_t* x, ray_t* y) {
     return q_eval_apply_kfn_new(fn, rank, lsym, fsym);
 }
 
+ray_t* q_dl1_wrap(ray_t* x) { (void)x; return q_err(QE_NYI); }
+
 ray_t* q_dl_loaded(const char* lib, size_t ln, const char* fn, size_t fnn, int64_t rank) {
     int64_t lsym = ray_sym_find(lib, ln), fsym = ray_sym_find(fn, fnn);
     if (rank < 1 || rank > KAPI_MAX_RANK || lsym < 0 || fsym < 0) return NULL;
