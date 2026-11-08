@@ -172,7 +172,7 @@ static ray_t* modassign_op(ray_t* h, const q_op_t** row) {
     size_t l = ray_str_len(s);
     if (l < 2 || nm[l - 1] != ':' || nm[0] == ':') return NULL;
     ray_t* opv = q_registry_lookup_row(ray_sym_intern_runtime(nm, l - 1), Q_DYADIC, row);
-    return (opv && (opv->type == RAY_UNARY || opv->type == RAY_BINARY || opv->type == RAY_VARY)) ? opv : NULL;
+    return opv && q_eval_apply_is_fn(opv) ? opv : NULL;
 }
 
 static ray_t* operand_value(ray_t* F, const q_op_t** row_out) {
