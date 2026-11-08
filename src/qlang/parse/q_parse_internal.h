@@ -20,11 +20,9 @@
 /* A leading '_' is the drop/cut verb: no name or symbol constant begins with it (basics/syntax.md:601). */
 static inline int q_parse_drop_lead(char c) { return c == '_'; }
 
-#define MAX_VEC  4096
 #define MAX_NAME 256
 
 /* ---- defined in q_parse.c ---- */
-extern const char VERB_CHARS[];
 extern const char *ADVERB_NAMES[];
 
 #endif

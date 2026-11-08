@@ -2,7 +2,8 @@
 #include "qlang/q_count.h"
 #include "qlang/repl/q_highlight.h"
 #include "qlang/parse/q_tok.h"             /* q_tok_magnitude / q_tok_type_letter / q_tok_byte_lit_starts */
-#include "qlang/parse/q_parse_internal.h"  /* VERB_CHARS */
+#include "qlang/parse/q_parse_internal.h"  /* q_parse_drop_lead */
+#include "qlang/q_ops.h"                   /* q_ops_find — a glyph byte is a manifest spelling */
 #include "qlang/base/q_type.h"             /* q_type_of_char; q_type_is_int_atom — a .pq.hl colour number */
 #include "qlang/q_console.h"               /* q_console_color — the colour on/off law */
 #include "qlang/q_env.h"                   /* q_env_peek — .pq.hl without the .pq autoload */
@@ -196,10 +197,9 @@ static int32_t lex_number(hl_t* h, int32_t i) {
         return j;
     }
     q_tok_el    el;
-    const char* err    = NULL;
     char        letter = 0;
     int         p      = 0;
-    if (q_tok_magnitude(z, &p, &el, &err) != 1 || p == 0) {
+    if (q_tok_magnitude(z, &p, &el) != 1 || p == 0) {
         for (j = d; j < h->len && (is_word(b[j]) || b[j] == '.'); j++) {}
         span(h, HL_NUMBER, i, j);
         return j;
@@ -229,7 +229,8 @@ static int32_t lex_one(hl_t* h, int32_t i) {
     else if (is_digit(c) || num)                                        j = lex_number(h, i);
     else {
         noun = c == ')' || c == ']' || c == '}' || ((c == ' ' || c == '\t') && h->noun);
-        span(h, c && (strchr(VERB_CHARS, c) || strchr("'/\\", c)) ? HL_OP : HL_NONE, i, j);
+        const q_op_t* r = c ? q_ops_find(&c, 1) : NULL;
+        span(h, (r && r->lex == QLEX_GLYPH) || (c && strchr("'/\\", c)) ? HL_OP : HL_NONE, i, j);
     }
     h->noun = noun;
     return j;

@@ -26,25 +26,21 @@ ray_t* q_tok(int8_t tag, const char* p, size_t len);
 typedef enum { Q_TOK_EL_INT, Q_TOK_EL_FLOAT, Q_TOK_EL_NULL, Q_TOK_EL_PINF, Q_TOK_EL_NINF, Q_TOK_EL_DATE, Q_TOK_EL_TIME,
                Q_TOK_EL_TS, Q_TOK_EL_MONTH, Q_TOK_EL_MINUTE, Q_TOK_EL_SECOND, Q_TOK_EL_TIMESPAN,
                Q_TOK_EL_DT /* datetime: f64 days in .f */ } q_tok_el_kind;
-typedef struct { q_tok_el_kind kind; int64_t i; double f; int forces_float, clocked; } q_tok_el;
+typedef struct { q_tok_el_kind kind; int64_t i; double f; int forces_float, clocked, at /* source offset */; } q_tok_el;
 
 /* Scan one TEMPORAL literal magnitude at src[*p] (date / timestamp / datetime
  * / month-shaped / time / timespan / second / minute).  Returns 1 and
  * advances *p on a match, 0 on no match (caller falls through to the numeric
- * scan), -1 on a malformed shape with *err set to the parse-error text (the
- * caller dies — invalid civil dates/clocks never fall back to floats). */
-int q_tok_temporal(const char* src, int* p, q_tok_el* out, const char** err);
+ * scan), -1 on a malformed shape (the caller dies; never a float fallback). */
+int q_tok_temporal(const char* src, int* p, q_tok_el* out);
 
 /* One magnitude (a Special, a temporal or a number), returning as above; then its admitted type letter, if any. */
-int q_tok_magnitude(const char* src, int* p, q_tok_el* out, const char** err);
+int q_tok_magnitude(const char* src, int* p, q_tok_el* out);
 void q_tok_type_letter(const char* src, int* p, char* letter, const q_tok_el* last);
 
-/* Scan ONE whole literal (atom or space-separated vector strand) at src[*p]:
- * numeric, boolean, byte-hex, guid-null and every temporal type, including the
- * trailing type letter.  Returns the OWNED value and advances *p, or NULL with
- * *err set to the parse-error text (the caller raises 'parse).  The code
- * parser's only literal entrance. */
-ray_t* q_tok_literal(const char* src, int* p, const char** err);
+/* Scan ONE whole literal (atom or strand of any length, type letter included) at src[*p]: the OWNED value, *p past
+ * it; or NULL with *p at the malformed token and *bad its length, the text the caller signals (`'0Wd`). */
+ray_t* q_tok_literal(const char* src, int* p, int* bad);
 
 /* True iff src[p] starts a byte literal ("0x…" glued).  The scanner's sign-glue
  * and strand rules use it to keep byte literals out of numeric strands
