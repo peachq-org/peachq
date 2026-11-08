@@ -133,8 +133,7 @@ static sym_slot_t* sym_slot(int64_t sym_id, int insert) {
     }
 }
 
-/* a name with no manifest row holds a valueless slot: a syntax word is reserved in every spelling, a q.q-defined
- * `.q` name only as a global (q_registry_locked) — a local or another context's member may reuse it */
+/* a name with no manifest row holds a valueless slot: a syntax word, or a q.q-defined `.q` name once sealed */
 static const q_op_t SYNTAX_WORD, DOTQ_BUILTIN;
 static void reserve_name(int64_t sym_id, const q_op_t* mark) {
     sym_slot_t* s = sym_slot(sym_id, 1);
@@ -655,8 +654,7 @@ ray_t* q_registry_lookup_row(int64_t sym_id, q_valence_t valence,
 }
 
 int q_registry_is_reserved(int64_t sym_id) {
-    sym_slot_t* s = sym_slot(sym_id, 0);
-    return s && s->row != &DOTQ_BUILTIN;
+    return sym_slot(sym_id, 0) != NULL;
 }
 
 int q_registry_is_syntax_word(int64_t sym_id) {
@@ -673,11 +671,10 @@ void q_registry_seal(void) {
     g_sealed = true;
 }
 
-ray_t* q_registry_keyword(int64_t sym_id, int* builtin) {
+ray_t* q_registry_keyword(int64_t sym_id) {
     ray_t* v = q_registry_lookup(sym_id, Q_MONADIC);
     if (!v) v = q_registry_lookup(sym_id, Q_DYADIC);
     sym_slot_t* s = sym_slot(sym_id, 0);
-    if (builtin) *builtin = !v && (s ? s->row == &DOTQ_BUILTIN : !g_sealed);
     if (v || (s && s->row == &SYNTAX_WORD) || sym_id == q_env_marker_sym()) return v;
     return q_env_ns_member(g_dotq, sym_id);
 }
@@ -690,7 +687,7 @@ ray_t* q_registry_dotq_ext(int64_t sym_id) {
 bool q_registry_sealed(void) { return g_sealed; }
 
 int q_registry_locked(int64_t sym_id) {
-    return g_sealed && sym_slot(sym_id, 0);
+    return g_sealed && q_registry_is_reserved(sym_id);
 }
 
 int q_registry_is_infix(const char* s, size_t n) {
