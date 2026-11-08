@@ -41,6 +41,10 @@ int q_parse_is_assign(const ray_t* ast);
  * "no-op statement, no output".  No-op on any other tree shape. */
 void q_ast_fill_empty_stmts(ray_t* ast);
 
+/* THE assignment-target classifier both parser and evaluator ask; PATTERN is kdb 4.1's (basics/pattern.md). */
+typedef enum { Q_TARGET_NONE, Q_TARGET_NAME, Q_TARGET_INDEX, Q_TARGET_PATTERN } q_assign_target_t;
+q_assign_target_t q_parse_assign_target(const ray_t* lhs);
+
 /* True iff h is the statement-sequence HEAD — the char ";" (-10h), not a
  * symbol.  THE one test; q_eval's head dispatch and the parser both ask it. */
 int q_parse_is_seq_head(const ray_t* h);

@@ -207,6 +207,7 @@ const q_op_t* q_ops_nested_dyad(const q_op_t* row);
 int q_lex_is_kw_infix(const char* s, int len);
 
 /* The reserved words that are SYNTAX, not functions (control words, qSQL verbs) — `.Q.res`; NULL past the end. */
+enum { Q_SYNTAX_DO, Q_SYNTAX_IF, Q_SYNTAX_WHILE, Q_SYNTAX_SELECT, Q_SYNTAX_EXEC, Q_SYNTAX_UPDATE, Q_SYNTAX_DELETE };
 const char* q_ops_syntax_word(int i);
 
 /* True iff s[0..len) is a RESERVED q verb name (any manifest row).  q reserves
