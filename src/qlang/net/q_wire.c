@@ -181,53 +181,10 @@ static int w_dl_call(q_wire_wbuf_t* b, int64_t lib_sym, int64_t fn_sym, int64_t 
     return rc;
 }
 
-/* A keyword kdb writes as no primitive travels as kdb writes it (owner 2026-11-07): where kdb sends a composition,
- * projection or derived function, that structure as the docs equate it; otherwise the root lambda that calls it,
- * spelled by rank (kw_lambda_text).  The decoder maps either back to the native, so `(-9!-8!mod)~mod`. */
-static const struct { const char* name; const char* form; } KW_FORMS[] = {
-    { "<>",      "'[not;=]" },               /* ref/not-equal.md */
-    { "<=",      "'[not;>]" },
-    { ">=",      "'[not;<]" },
-    { "union",   "'[distinct;,]" },          /* ref/union.md: distinct x,y */
-    { "all",     "'[min;\"b\"$]" },          /* docs-v1 ref/logic.md: min "b"$x */
-    { "any",     "'[max;\"b\"$]" },          /* max "b"$x */
-    { "ceiling", "'[neg;floor;neg]" },       /* the least integer >= x */
-    { "fills",   "^\\" },                    /* each null filled from its predecessor */
-    { "attr",    "(-2!)" },                  /* basics/internal.md */
-};
-#define KW_FORM_N ((int)(sizeof KW_FORMS / sizeof KW_FORMS[0]))
-#define KW_FORM_MAX 48
-static _Thread_local uint8_t g_form_bytes[KW_FORM_N][KW_FORM_MAX];
-static _Thread_local int g_form_len[KW_FORM_N];   /* 0 = not built yet, -1 = failed */
-
-/* evaluated at root, so a form's lambda never carries the caller's context */
-static int kw_form_bytes(int i, const uint8_t** out) {
-    if (!g_form_len[i]) {
-        g_form_len[i] = -1;
-        int64_t saved = q_env_scope(0);
-        ray_t* ast = q_parse(KW_FORMS[i].form);
-        ray_t* v = ast && !RAY_IS_ERR(ast) ? q_eval(ast) : NULL;
-        q_env_scope(saved);
-        if (ast) ray_release(ast);
-        q_wire_wbuf_t wb = {0};
-        if (v && !RAY_IS_ERR(v) && !q_wire_write_obj(&wb, v) && wb.len <= KW_FORM_MAX) {
-            memcpy(g_form_bytes[i], wb.p, wb.len);
-            g_form_len[i] = (int)wb.len;
-        }
-        q_wire_wbuf_free(&wb);
-        if (v) ray_release(v);
-    }
-    *out = g_form_bytes[i];
-    return g_form_len[i];
-}
-
-static int kw_form_of(const char* nm, size_t n) {
-    for (int i = 0; i < KW_FORM_N; i++)
-        if (strlen(KW_FORMS[i].name) == n && memcmp(KW_FORMS[i].name, nm, n) == 0) return i;
-    return -1;
-}
-
-/* past z, implicit parameters run out: the lambda names its own */
+/* A keyword native kdb writes as no primitive travels as the root lambda that calls it, spelled by rank (owner
+ * 2026-11-07), which the decoder maps back to the native, so `(-9!-8!mod)~mod`.  A keyword kdb writes as a
+ * structure needs nothing here: its value IS that structure.  Past z, implicit parameters run out: the lambda names
+ * its own */
 static int kw_lambda_text(const char* nm, size_t n, int rank, char* out, size_t cap) {
     if (!n || !((nm[0] >= 'a' && nm[0] <= 'z') || (nm[0] >= 'A' && nm[0] <= 'Z')) || dl_name_len(nm, n, 0) != n ||
         memchr(nm, '.', n) || rank < 1 || rank > (int)strlen(DL_PARAMS))
@@ -263,12 +220,6 @@ static int w_keyword(q_wire_wbuf_t* b, ray_t* x) {
     size_t n;
     int rank;
     if (!kw_name(x, &nm, &n, &rank)) return wbuf_fail(b, q_err(QE_NYI));
-    int f = kw_form_of(nm, n);
-    if (f >= 0) {
-        const uint8_t* fb;
-        int fl = kw_form_bytes(f, &fb);
-        return fl > 0 ? w_raw(b, fb, (size_t)fl) : wbuf_fail(b, q_err(QE_NYI));
-    }
     char t[160];
     int tl = kw_lambda_text(nm, n, rank, t, sizeof t);
     if (!tl) return wbuf_fail(b, q_err(QE_NYI));
@@ -1023,31 +974,9 @@ static ray_t* kw_template_value(const char* s, size_t n) {
     size_t kn;
     int rank;
     char t[160];
-    int tl = kw_name(v, &nm, &kn, &rank) && kw_form_of(nm, kn) < 0 ? kw_lambda_text(nm, kn, rank, t, sizeof t) : 0;
+    int tl = kw_name(v, &nm, &kn, &rank) ? kw_lambda_text(nm, kn, rank, t, sizeof t) : 0;
     if (!tl || (size_t)tl != n || memcmp(t, s, n) != 0) return NULL;
     ray_retain(v);
-    return v;
-}
-
-/* The keyword whose KW_FORMS structure the decoded carrier r is, retained, else NULL.  r is re-encoded rather than
- * its frame bytes compared, so a big-endian sender is recognised too; used, the bytes r was read from, bounds that
- * to a structure no larger than a form. */
-static ray_t* kw_form_value(ray_t* r, size_t used) {
-    if (used > KW_FORM_MAX || !r || RAY_IS_ERR(r) || r->type != RAY_QFN) return NULL;
-    q_wire_wbuf_t wb = {0};
-    ray_t* v = NULL;
-    if (!q_wire_write_obj(&wb, r)) {
-        for (int i = 0; i < KW_FORM_N && !v; i++) {
-            const uint8_t* fb;
-            int fl = kw_form_bytes(i, &fb);
-            if (fl <= 0 || (size_t)fl != wb.len || memcmp(wb.p, fb, wb.len) != 0) continue;
-            const char* nm = KW_FORMS[i].name;
-            v = q_registry_lookup_name(nm, strlen(nm), Q_DYADIC);
-            if (!v) v = q_registry_lookup_name(nm, strlen(nm), Q_MONADIC);
-        }
-    }
-    q_wire_wbuf_free(&wb);
-    if (v) ray_retain(v);
     return v;
 }
 
@@ -1384,11 +1313,8 @@ static ray_t* rd_obj(rcur_t* c) {
     if (g_wire_depth >= Q_WIRE_MAX_DEPTH)
         return q_err(QE_DOMAIN);
     g_wire_depth++;
-    size_t rem0 = c->rem;
     ray_t* r = rd_obj_inner(c);
     g_wire_depth--;
-    ray_t* kw = c->serde ? NULL : kw_form_value(r, rem0 - c->rem);
-    if (kw) { ray_release(r); r = kw; }
     return r;
 }
 
