@@ -200,6 +200,7 @@ ray_t* q_attr_stamp_byte(ray_t* v, uint8_t byte);
  * column (or a remapped q error).  Exposed for the attribute-acceleration
  * C-unit (test/q_attr_accel.c) to exercise the real q set-attribute path. */
 ray_t* q_attr_set_letter(char letter, ray_t* vec);
+ray_t* q_attr_sort_keyed_key(ray_t* y);   /* the in-place half of `s#kt`: borrows y; NULL or the owned error */
 
 /* q `ssr[s;p;r]` — string search-and-replace (feat/q-string-fns).  Exposed so
  * q_builtins_register can env-bind it (a triadic prefix keyword: the parser
