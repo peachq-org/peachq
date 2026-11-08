@@ -74,10 +74,11 @@ ray_t* q_dbg_self(void);
 
 /* Console line reader for the suspend loop (front end installs; NULL = no
  * suspension possible).  The reader owns prompt display and echo — piped
- * flavours print both, the tty flavour drives the line editor.  Returns line
- * length, or -1 on EOF. */
+ * flavours print both, the tty flavour drives the line editor, a transcript
+ * serves its q)) lines.  Returns line length, or -1 on EOF.  set_reader hands
+ * back the previous reader, so a nested door restores it. */
 typedef int (*q_dbg_read_fn)(const char* prompt, char* buf, size_t cap);
-void q_dbg_set_reader(q_dbg_read_fn fn);
+q_dbg_read_fn q_dbg_set_reader(q_dbg_read_fn fn);
 
 void q_dbg_reset(void);              /* runtime teardown, or a forked child starting at top level: drop retained refs */
 
