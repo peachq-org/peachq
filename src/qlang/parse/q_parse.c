@@ -560,9 +560,11 @@ static Tokens scan(const char *src) {
              * `c` here, so src[p+1] is the following byte. */
             if ((c == '<' && (src[p+1] == '=' || src[p+1] == '>')) ||
                 (c == '>' &&  src[p+1] == '=')) {
-                char nm[2] = { c, src[p+1] };
+                char nm[3] = { c, src[p+1], ':' };
                 p += 2;
-                EMIT(T_VERB, i_name(nm, 2));
+                int marked = src[p] == ':';    /* `x<>:y` assigns through the operator (ref/assign.md:100) */
+                if (marked && src[++p] == ':') p++;
+                EMIT(T_VERB, i_name(nm, 2 + marked));
             } else {
                 p++;
                 if (src[p] == ':') {
@@ -1731,8 +1733,7 @@ static P parse_infix(Parser *p, P t, P u, QCtx ctx) {
     int onto = e.train && !assign;
     ray_t *xs[3] = { u.v, t.v, e.v && !onto ? e.v : Q_HOLE_OBJ };
     ray_t *r = q_list(xs, 3);
-    int8_t ut = u.v->type;
-    if ((!e.v || onto) && r && !RAY_IS_ERR(r) && (ut == RAY_UNARY || ut == RAY_BINARY || ut == RAY_VARY))
+    if ((!e.v || onto) && r && !RAY_IS_ERR(r) && q_eval_apply_is_fn(u.v))
         r->attrs |= Q_ATTR_POSTFIX;
     if (onto) return compose_node(r, e.v);
     return (P){ R_NOUN, r, !e.v, 0 };
