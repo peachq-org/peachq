@@ -159,6 +159,9 @@ static inline int64_t sym_intern_safe(const char* s, size_t len) {
  * Unified column read/write helpers
  * ══════════════════════════════════════════ */
 
+/* The float family: real (widened to double), float and datetime (an f64 of days). */
+static inline bool float_family(int8_t t) { return t == RAY_F32 || t == RAY_F64 || t == RAY_DATETIME; }
+
 static inline int64_t read_col_i64(const void* data, int64_t row,
                                     int8_t type, uint8_t attrs) {
     switch (type) {

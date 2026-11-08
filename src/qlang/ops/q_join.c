@@ -13,6 +13,7 @@
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — Append's int/long pair cast to the vector's type */
 #include "qlang/ops/q_index.h" /* q_index_grow* — a parked vector grows where it stands; q_index_rank — the `,:` rank rule */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_value — pj rides q's own `+` */
+#include "qlang/q_builtins.h"    /* q_builtins_type_num — the time columns' q type */
 #include "lang/eval.h"     /* ray_left_join_fn, ray_window_join*_fn */
 #include "lang/internal.h" /* ray_asof_join_fn, ray_concat_fn, ray_vec_set_null, ray_error */
 #include "table/sym.h"     /* ray_sym_intern_runtime, RAY_SYM_W64 */
@@ -731,10 +732,31 @@ ray_t* q_ujf_wrap(ray_t* x, ray_t* y) { return qj_uj_core(x, y, 1); }
  * returns a per-t1-row match INDEX into t2 (null=miss) and all column
  * assembly is the same gather/merge machinery as lj. */
 
+/* The time column's q type for the matching-type rule; 0 = left unchecked.  An enum reads as its sym domain, a native
+ * string as a char vector; a general list or physical string storage is not ruled on (owner 2026-11-08: storage
+ * alone is never a mismatch). */
+static int8_t qj_time_type(ray_t* col) {
+    int8_t t = q_builtins_type_num(col);
+    if (t == RAY_ENUM) return RAY_SYM;
+    if (t == -RAY_STR) return RAY_CHARV;
+    return t == RAY_LIST || t == RAY_STR ? 0 : t;
+}
+
 /* per-t1-row match index into t2 (or -1), via engine asof-join.  Returns
  * owned malloc'd array of n1 entries or NULL with *err set. */
 static int64_t* qj_aj_map(ray_t* keys, ray_t* t1, ray_t* t2, ray_t** err) {
     *err = NULL;
+    int64_t nk = q_count(keys);
+    if (nk > 0) {
+        int64_t time_sym = ((ray_t**)ray_data(keys))[nk - 1]->i64;
+        ray_t* lt = ray_table_get_col(t1, time_sym);       /* borrowed */
+        ray_t* rt = ray_table_get_col(t2, time_sym);       /* borrowed */
+        /* owner ruling 2026-11-08 + ref/aj.md:21 "of matching type": the time columns' q types must agree */
+        if (lt && rt) {
+            int8_t lq = qj_time_type(lt), rq = qj_time_type(rt);
+            if (lq && rq && lq != rq) { *err = q_err(QE_TYPE); return NULL; }
+        }
+    }
     int64_t rid = qj_tmp_colname("ajr", t1, t2);
     ray_t* rk = qj_keyid_table(t2, keys, rid);
     if (!rk || RAY_IS_ERR(rk)) { *err = rk ? rk : q_err(QE_TYPE); return NULL; }

@@ -71,9 +71,6 @@ static int numeric_elem_size(int8_t t) {
     }
 }
 
-/* The float family: real (widened to double), float and datetime (an f64 of days). */
-static bool float_family(int8_t t) { return t == RAY_F32 || t == RAY_F64 || t == RAY_DATETIME; }
-
 /* Read row i of a numeric vector as a 64-bit hash-input word — THE one representation law, on the build side and
  * the probe side alike, so the index's equality is the scan's: -0.0 / +0.0 collapse, a NaN routes per-row (its own
  * bucket, which is why a NaN needle never probes). */
