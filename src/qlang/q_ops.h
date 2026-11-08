@@ -34,7 +34,7 @@ typedef enum {
     QLEX_ADVERB         /* / \ ' /: \: ':                                       */
 } q_lex_class;
 
-/* How the registry builds the value for one (row, valence).  Three kinds only
+/* How the registry builds the value for one (row, valence).  No per-verb kinds
  * (the per-verb QK_* members were retired 2026-07-14 — rows now carry the
  * wrapper FUNCTION POINTER directly, so adding a common verb is one manifest
  * row + one wrapper body + one decl, with no enum member or switch case): */
@@ -46,6 +46,11 @@ typedef enum {
     QK_QSRC,            /* value is the q.q definition `.q.<target>`: skipped at
                          * registry init (q.q loads after), installed by the
                          * post-bootstrap q_registry_bind_qsrc pass             */
+    QK_COMP,            /* value is the composition of the rows named in
+                         * `target` (space-separated, in `'[…]` order), every
+                         * part monadic but the last, which is at this cell's
+                         * valence, built once every row is.  `fn` is the C
+                         * kernel the apply module runs for it                */
     QK_ALIAS            /* SHARE the value already built for row `target` at
                          * THIS valence — a second reserved spelling, never a
                          * second object (`not` is `~:`, `type` is `@:`).  The
@@ -86,9 +91,14 @@ typedef struct {
  * point per overloaded glyph (`?` `!` `@` `.`) dispatching on call rank */
 #define QR_FNV(t, f)  { QK_FN,   (t),  (q_wrap_fn_t)(f),   0, 0 }
 #define QR_QSRC(t)    { QK_QSRC, (t),  NULL,               0, 0 }
-/* COVER = a QSRC cell whose `.q.<t>` value is an extension (`sums` IS `+\`, exposed-infrastructure.md:72) and
- * whose `f` is the unary C kernel that extension's one-argument arm reaches (q_registry_row_kernel) */
-#define QR_COVER(t, f) { QK_QSRC, (t),  (q_wrap_fn_t)(f),   1, 0 }
+/* COVER = a QSRC cell whose `.q.<t>` value is kdb's structure for the keyword (`sums` IS `+\`,
+ * exposed-infrastructure.md:72; `union` IS `'[distinct;,]`) and whose `f` is the C kernel the apply module runs
+ * when that value is applied at this valence (q_registry_row_kernel_at); COMP2 = the same for a glyph whose parts
+ * q.q cannot spell (`<>` IS `'[not;=]`) */
+#define QR_COVER(t, f)  { QK_QSRC, (t), (q_wrap_fn_t)(f),   1, 0 }
+#define QR_COVERA(t, f) { QK_QSRC, (t), (q_wrap_fn_t)(f),   1, 1 }
+#define QR_COVER2(t, f) { QK_QSRC, (t), (q_wrap_fn_t)(f),   2, 0 }
+#define QR_COMP2(t, f)  { QK_COMP, (t), (q_wrap_fn_t)(f),   2, 0 }
 #define QR_ALIAS(t)   { QK_ALIAS,(t),  NULL,               0, 0 }
 
 /* One manifest row: a q verb, its lexical class, its monadic/dyadic build recipes
