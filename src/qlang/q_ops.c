@@ -44,6 +44,7 @@
 #include "qlang/ops/q_bang.h"               /* q_bang — the `!` row */
 #include "qlang/ops/q_dollar.h"             /* q_dollar — the `$` row */
 #include "qlang/ops/q_index.h"              /* q_index_assign_wrap — the `:` row */
+#include "lang/eval.h"                      /* ray_lte_fn / ray_gte_fn — the `<=` `>=` kernels */
 #include <assert.h>
 #include <string.h>
 
@@ -168,6 +169,8 @@
  * and each overload recurses with its OWN boundary (Cast leaves at typed
  * vectors, Tok/Pad at strings); an exception-catalogue member, its container
  * probes live in q_dollar.c (see tools/lint-type-axis.sh BOTTOM_BAND).
+ * A cover or composition row (QR_COVER*, QR_COMP2) is classified by its KERNEL: the lift runs on the kernel the
+ * apply module substitutes for the row's structured value, which itself carries no family.
  * ========================================================================== */
 
 /* trailing name_lift zero-defaults on unflagged rows (no 166-row churn) */
@@ -211,10 +214,12 @@ static const q_op_t Q_OPS[] = {
     { "%",     QLEX_GLYPH,     QR_FN1("reciprocal", q_reciprocal_wrap),          QR_ENV("/"),       NULL, 1, 0, "atomic", NULL, QKOP(4) },
     { "<",     QLEX_GLYPH,     QR_FN1("hopen", q_hopen_grade_wrap), QR_ENV("<"),       NULL, 1, 0, "atomic", NULL, QKOP(9) },
     { ">",     QLEX_GLYPH,     QR_FN1("hclose", q_hclose_grade_wrap), QR_ENV(">"),       NULL, 1, 0, "atomic", NULL, QKOP(10) },
-    { "<=",    QLEX_GLYPH,     QR_NONE,                        QR_ENV("<="),      NULL, 1, 0, "atomic", NULL },
-    { ">=",    QLEX_GLYPH,     QR_NONE,                        QR_ENV(">="),      NULL, 1, 0, "atomic", NULL },
     { "=",     QLEX_GLYPH,     QR_FN1("group", q_group_wrap),  QR_FN2("==", q_eq_wrap) , NULL, 1, 0, "atomic", NULL, QKOP(8) },
-    { "<>",    QLEX_GLYPH,     QR_NONE,                        QR_FN2("!=", q_ne_wrap) , NULL, 1, 0, "atomic", NULL },
+    /* kdb's value of each is a composition (owner kdb transcript 2026-11-08: `-8!(<>)` is `'[not;=]`); the parts
+     * of `<=` and `>=` are inferred from that sibling and their kdb-written 105h type bytes */
+    { "<>",    QLEX_GLYPH,     QR_NONE,                        QR_COMP2("not =", q_ne_wrap), NULL, 1, 0, "atomic", NULL },
+    { "<=",    QLEX_GLYPH,     QR_NONE,                        QR_COMP2("not >", ray_lte_fn), NULL, 1, 0, "atomic", NULL },
+    { ">=",    QLEX_GLYPH,     QR_NONE,                        QR_COMP2("not <", ray_gte_fn), NULL, 1, 0, "atomic", NULL },
     /* ---- structural glyphs ---- */
     /* `#`/`_` dyads are family `none`: the left arg SELECTS the arm, so a
      * container must reach the wrapper whole (FAMILY AUDIT). */
@@ -229,7 +234,7 @@ static const q_op_t Q_OPS[] = {
      * the DYAD; Match takes both values whole (see AUDIT). */
     { "~",     QLEX_GLYPH,     QR_FN1A("not", q_not_wrap),     QR_FN2("match", q_match_wrap), NULL, 1, 0, "none", NULL, QKOP(15) },
     /* `^` fill: "Fill is an atomic function" (ref/fill.md). */
-    { "^",     QLEX_GLYPH,     QR_FN1("nil?", q_null_wrap),    QR_FN2("fill", q_fill_wrap), NULL, 1, 0, "atomic", NULL, QKOP(7) },
+    { "^",     QLEX_GLYPH,     QR_FN1("nil?", q_null_wrap),    QR_FN2("fill", q_fill_wrap), NULL, 1, 0, "atomic", NULL, .mono_scan = "fills", QKOP(7) },
     /* ---- type-dispatch glyphs ---- */
     /* `!` family "structural" is DOCUMENTATION ONLY — no lift arm dispatches
      * on it. Monadic `!` is a K-ism superset of `key`. */
@@ -278,7 +283,7 @@ static const q_op_t Q_OPS[] = {
     /* ---- set operations: rowid (item identity, spec §3) ---- */
     { "except",QLEX_KW,        QR_NONE,                        QR_FN2("except", q_except_wrap), NULL, 1, 0, "rowid", NULL },
     /* WRAPPER, not a rename: rayfall union keeps x-duplicates, kdb dedups. */
-    { "union", QLEX_KW,        QR_NONE,                        QR_FN2("union", q_union_wrap), NULL, 1, 0, "rowid", NULL },
+    { "union", QLEX_KW,        QR_NONE,                        QR_COVER2("union", q_union_wrap), NULL, 1, 0, "rowid", NULL },
     /* WRAPPER over rayfall `sect`: guards dict/table operands 'nyi (sect returns
      * a wrong-shaped dict there). */
     { "inter", QLEX_KW,        QR_NONE,                        QR_FN2("sect", q_inter_wrap), NULL, 1, 0, "rowid", NULL },
@@ -378,7 +383,7 @@ static const q_op_t Q_OPS[] = {
      * are its unit shifts, self-hosted in q.q — no rows. */
     { "xprev",   QLEX_KW,        QR_NONE,                      QR_FN2("xprev", q_xprev_wrap), NULL, 1, 0, "index", NULL },
     /* `fills` computes values rather than gathering -> map. */
-    { "fills",   QLEX_KW,        QR_FN1("fills", q_fills_wrap), QR_NONE,          NULL, 1, 0, "map", NULL },
+    { "fills",   QLEX_KW,        QR_COVER("fills", q_fills_wrap), QR_NONE,        NULL, 1, 0, "map", NULL },
     /* `where` is an index-space generator but NOT the L4 one: its entries index
      * comes from `where value d`, never `til count d`, so the positional lift
      * would silently mis-answer it. family none until the values-derived arm. */
@@ -440,7 +445,7 @@ static const q_op_t Q_OPS[] = {
     { "meta",    QLEX_KW,        QR_ENV("meta"),               QR_NONE,           NULL, 1, 0, "structural", NULL },
     { "cols",    QLEX_KW,        QR_ENV("cols"),               QR_NONE,           NULL, 1, 0, "structural", NULL },
     /* The attribute SET/CLEAR side is the `#` verb's symbol-atom arm, not a row. */
-    { "attr",    QLEX_KW,        QR_FN1("attr", q_attr_wrap),  QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "attr",    QLEX_KW,        QR_COVER("attr", q_attr_wrap), QR_NONE,          NULL, 1, 0, "structural", NULL },
     /* ---- monadic pass-throughs (rayfall name == q name, audited kdb-true) ---- */
     { "abs",     QLEX_KW,        QR_ENV("abs"),                QR_NONE,           NULL, 1, 0, "atomic", NULL, QKOP(31) },
     /* `null` routes to the engine's atomic `nil?`; the wrapper collapses a
@@ -469,11 +474,11 @@ static const q_op_t Q_OPS[] = {
     { "atan",      QLEX_KW,        QR_FN1A("atan", q_atan_wrap), QR_NONE, NULL, 1, 0, "atomic", NULL, QKOP(40) },
     /* `reciprocal` IS `%:` (`.q.reciprocal:(%:)` in q.q) — no row. */
     { "signum",    QLEX_KW,        QR_FN1("signum", q_signum_wrap), QR_NONE, NULL, 1, 0, "atomic", NULL },
-    { "ceiling",   QLEX_KW,        QR_FN1A("ceiling", q_ceiling_wrap), QR_NONE, NULL, 1, 0, "atomic", NULL },
+    { "ceiling",   QLEX_KW,        QR_COVERA("ceiling", q_ceiling_wrap), QR_NONE, NULL, 1, 0, "atomic", NULL },
     /* ---- table verbs ---- `insert`/`upsert` intentionally SHADOW the base env
      * special forms of the same name: q semantics differ (by-name targets,
-     * keyed collision/update, row-index results), so the registry value is a
-     * wrapper, never the env snapshot. xasc/xdesc/xgroup are rowid, the rest
+     * keyed collision/update, row-index results), so each runs a wrapper (upsert's
+     * under its kdb value `.[;();,;]`), never the env snapshot. xasc/xdesc/xgroup are rowid, the rest
      * structural (spec §3; xgroup is a border ruling in the AUDIT). */
     { "flip",   QLEX_KW,        QR_FN1("flip", q_flip_wrap),   QR_NONE,           NULL, 1, 0, "structural", NULL, QKOP(1) },
     { "keys",   QLEX_KW,        QR_FN1("keys", q_keys_wrap),   QR_NONE,           NULL, 1, 0, "structural", NULL },
@@ -486,9 +491,9 @@ static const q_op_t Q_OPS[] = {
     { "xdesc",  QLEX_KW,        QR_NONE,                       QR_QSRC("xdesc"),  NULL, 1, 0, "rowid", NULL },
     { "xgroup", QLEX_KW,        QR_NONE,                       QR_FN2("xgroup", q_xgroup_wrap), NULL, 1, 0, "rowid", NULL },
     { "insert", QLEX_KW,        QR_NONE,                       QR_FN2("insert", q_insert_wrap), NULL, 1, 1, "structural", NULL, QKOP(28) },
-    { "upsert", QLEX_KW,        QR_NONE,                       QR_FN2("upsert", q_upsert_wrap), NULL, 1, 1, "structural", NULL },
-    { "any",     QLEX_KW,        QR_FN1("any", q_any_wrap),    QR_NONE,           NULL, 1, 0, "aggregate", NULL },
-    { "all",     QLEX_KW,        QR_FN1("all", q_all_wrap),    QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+    { "upsert", QLEX_KW,        QR_NONE,                       QR_COVER2("upsert", q_upsert_wrap), NULL, 1, 1, "structural", NULL },
+    { "any",     QLEX_KW,        QR_COVER("any", q_any_wrap),  QR_NONE,           NULL, 1, 0, "aggregate", NULL },
+    { "all",     QLEX_KW,        QR_COVER("all", q_all_wrap),  QR_NONE,           NULL, 1, 0, "aggregate", NULL },
     /* ---- IPC client ---- `hopen` returns the connection's socket fd as the
      * handle (kdb-faithful: 0/1/2 reserved, connections at 3+). The send verb
      * `h"query"` is handle-as-verb application, not a manifest row. */
