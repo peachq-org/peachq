@@ -65,6 +65,15 @@ q_car_kind_t q_eval_apply_carrier_kind(const ray_t* v) {
 
 static ray_t** car_slots(ray_t* c) { return (ray_t**)ray_data(c); }
 
+/* a structure built once is applied many times, so its registry twin is found here rather than per call */
+static ray_t* car_intern(ray_t* c) {
+    ray_t* k = RAY_IS_ERR(c) ? NULL : q_registry_intern_carrier(c, c->aux[0], car_slots(c)[0]);
+    if (!k) return c;
+    ray_release(c);
+    ray_retain(k);
+    return k;
+}
+
 /* manifest rows are static-storage; boxed as an i64 atom slot */
 static ray_t* row_box(const q_op_t* row) {
     return row ? ray_i64((int64_t)(uintptr_t)row) : NULL;
@@ -192,7 +201,7 @@ ray_t* q_eval_apply_deriv_new(int adv, ray_t* fv, const q_op_t* frow) {
         c = car_put(c, 1, row_box(frow));
         if (RAY_IS_ERR(c)) return c;
     }
-    return car_put(c, 2, ray_i64(adv));
+    return car_intern(car_put(c, 2, ray_i64(adv)));
 }
 
 /* kfn carrier: [fn ptr boxed i64, rank i64, lib sym, symbol sym] — a `2:`-loaded C function */
@@ -274,7 +283,7 @@ ray_t* q_eval_apply_proj_new(ray_t* fv, const q_op_t* row, ray_t** args,
         if (args[i]) ray_retain(args[i]);
         s[2 + i] = args[i] ? args[i] : Q_HOLE_OBJ;
     }
-    return c;
+    return car_intern(c);
 }
 
 /* view carrier: [body tree, deps symvec, text charv, cached|NULL]; the
@@ -302,7 +311,7 @@ static ray_t* comp_new(ray_t* u, ray_t* g) {
     car_slots(c)[0] = u;
     ray_retain(g);
     car_slots(c)[1] = g;
-    return c;
+    return car_intern(c);
 }
 
 /* ===== small helpers ===================================================== */
@@ -1576,8 +1585,9 @@ static ray_t* enum_route(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) 
             ray_t* r = enum_concat(fv, row, args);
             if (r) return r;
         }
-        if (n == 2 && (!strcmp(t, "==") || !strcmp(t, "!=") || !strcmp(t, "in"))) {
-            int op = !strcmp(t, "==") ? 0 : !strcmp(t, "!=") ? 1 : 2;
+        int ne = !strcmp(row->name, "<>");    /* its target names its parts, not a kernel */
+        if (n == 2 && (!strcmp(t, "==") || ne || !strcmp(t, "in"))) {
+            int op = !strcmp(t, "==") ? 0 : ne ? 1 : 2;
             ray_t* r = enum_cmp_route(fv, row, args, op);
             if (r) return r;
         }
@@ -1613,6 +1623,19 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
     if (hole_args(fv, args, n, elided)) args = elided;
 
     q_car_kind_t kind = q_eval_apply_carrier_kind(fv);
+    /* a keyword whose value is a composition or projection runs its row's kernel: recognised by the value, one index
+     * probe (a derived function's is the adverb engine's own, by its operand's mono/mono_scan) */
+    if ((kind == Q_EVAL_CAR_COMP || kind == Q_EVAL_CAR_PROJ) &&
+        (n == 1 || n == 2) && args[0] && args[n - 1]) {
+        q_valence_t val = n == 1 ? Q_MONADIC : Q_DYADIC;
+        const q_op_t* krow = q_registry_row_of(fv, val);
+        ray_t* k = q_registry_row_kernel_at(krow, val);
+        if (k) {
+            fv = k;
+            row = krow;
+            kind = Q_EVAL_CAR_NONE;
+        }
+    }
     switch (kind) {
     case Q_EVAL_CAR_FOREIGN: return q_err(QE_TYPE);   /* 112h, but opaque: never callable */
     case Q_EVAL_CAR_ITER: return iter_call(fv, args, n);
