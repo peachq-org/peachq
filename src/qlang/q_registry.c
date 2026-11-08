@@ -17,14 +17,14 @@
  * LOWERING METADATA: each wrapper's rayfall aux-name is set to the CANONICAL
  * rayfall verb it lowers as (== != take drop) and it carries RAY_FN_Q_LOWER
  * (RAY_FN_Q_LOWER, lang/eval.h), so the compiler + query DAG dispatch on that name
- * (q `=`/`<>` hit ray_eq/ray_ne) instead of declining every non-canonical
+ * (q `=` hits ray_eq) instead of declining every non-canonical
  * value head to the eval fallback.  Pass-through/rename values ARE the env
  * builtin object, so they name-route via the existing canonical-identity path.
  *
  * REGISTRY-INIT PRECONDITION (codex #1): value embedding requires an
  * initialised registry, and a registry builder MUST NEVER call q_parse during
  * bootstrap (it would recurse into a not-yet-ready registry).  Builders here
- * only touch ray_env_get / ray_fn_* — never the parser.  A debug re-entry
+ * touch ray_env_get / ray_fn_* and the apply module's compose head — never the parser.  A debug re-entry
  * guard (g_building) marks the bootstrap window and is the seam 2b's
  * parser-flip enforcement extends. */
 #define _POSIX_C_SOURCE 200809L
@@ -109,9 +109,8 @@ static int16_t       g_row_ent[REG_ROW_CAP][3];
 
 /* the values that are a composition, projection or derived function, by carrier kind, scanned on every such
  * construction (q_registry_intern_carrier): head is the primitive at slot 0, which a match must share, else NULL */
-#define CAR_CAP 32
 typedef struct { ray_t* value; ray_t* head; } car_ent_t;
-static car_ent_t g_car[Q_EVAL_CAR_COMP + 1][CAR_CAP];
+static car_ent_t g_car[Q_EVAL_CAR_COMP + 1][REG_ROW_CAP];
 static int       g_car_n[Q_EVAL_CAR_COMP + 1];
 
 static size_t idx_hash(uint64_t k, size_t mask) {
@@ -193,7 +192,6 @@ static void idx_add_entry(int idx) {
     q_car_kind_t k = q_eval_apply_carrier_kind(e->value);
     if (!e->alias_of && (k == Q_EVAL_CAR_COMP || k == Q_EVAL_CAR_PROJ || k == Q_EVAL_CAR_DERIV)) {
         ray_t* h = q_eval_apply_car_head(e->value);
-        assert(g_car_n[k] < CAR_CAP);
         g_car[k][g_car_n[k]++] = (car_ent_t){ e->value, q_eval_apply_is_fnval(h) ? h : NULL };
     }
 }
@@ -399,6 +397,23 @@ static const entry_t* code_entry(int code, q_valence_t valence) {
     return NULL;
 }
 
+/* Append and index one entry owning val (and kernel); tgt is the row a QK_ALIAS cell shares, else NULL. */
+static void push_entry(const q_op_t* op, q_valence_t valence, const q_recipe_t* r, int64_t sym_id, ray_t* val,
+                       ray_t* kernel, const entry_t* tgt) {
+    entry_t* e    = &g_entries[g_count++];
+    e->sym_id     = sym_id;
+    e->valence    = valence;
+    e->value      = val;
+    e->kernel     = kernel;
+    e->recipe     = r;
+    e->row        = op;
+    e->spelling   = op->name;
+    e->lower_name = tgt ? tgt->lower_name : r->target;  /* rayfall routing name */
+    e->is_wrapper = tgt ? tgt->is_wrapper : (r->kind != QK_ENV);
+    e->alias_of   = tgt ? tgt->row : NULL;
+    idx_add_entry(g_count - 1);
+}
+
 /* Record one (name, valence) entry.  Returns RAY_OK, or RAY_ERR_DOMAIN if the
  * builder produced NULL/err for a non-QR_NONE recipe (audited source missing). */
 static ray_err_t add_entry(const q_op_t* op, q_valence_t valence,
@@ -429,44 +444,21 @@ static ray_err_t add_entry(const q_op_t* op, q_valence_t valence,
     ray_t* val = src ? (ray_retain(src->value), src->value)
                : (r->kind == QK_ENV) ? build_env(r->target) : build_wrapper(r);
     if (!val || RAY_IS_ERR(val)) return RAY_ERR_DOMAIN; /* fail-fast: audited bug */
-    entry_t* e    = &g_entries[g_count++];
-    e->sym_id     = sym_id;
-    e->valence    = valence;
-    e->value      = val;
-    e->kernel     = NULL;
-    e->recipe     = r;
-    e->row        = op;
-    e->spelling   = op->name;
-    e->lower_name = tgt ? tgt->lower_name : r->target;  /* rayfall routing name */
-    e->is_wrapper = tgt ? tgt->is_wrapper : (r->kind != QK_ENV);
-    e->alias_of   = tgt ? tgt->row : NULL;
-    idx_add_entry(g_count - 1);
+    push_entry(op, valence, r, sym_id, val, NULL, tgt);
     return RAY_OK;
 }
 
 /* A cell whose value is a structure, owned here (a q.q snapshot or a composition), with the kernel its recipe names.
- * Same entry shape as add_entry, immutable like every other cell.  is_wrapper=1: the value is unique per cell, so
- * pointer-identity provenance is exact (q_registry_provenance).  Serde is UNTOUCHED by that flag: the `q!…` fn-hook
- * fires only for RAY_FN_Q_LOWER function values; carriers keep riding whatever generic carrier serde exists. */
+ * It counts as a wrapper: the value is unique per cell, so pointer-identity provenance is exact
+ * (q_registry_provenance).  Serde is UNTOUCHED by that: the `q!…` fn-hook fires only for RAY_FN_Q_LOWER function
+ * values; carriers keep riding whatever generic carrier serde exists. */
 static ray_err_t add_structure(const q_op_t* op, q_valence_t valence, const q_recipe_t* r, ray_t* val) {
     ray_t* kernel = r->fn ? build_wrapper(r) : NULL;
     if (r->fn && (!kernel || RAY_IS_ERR(kernel))) { ray_release(val); return RAY_ERR_DOMAIN; }
-    entry_t* e    = &g_entries[g_count++];
-    e->sym_id     = ray_sym_intern(op->name, strlen(op->name));
-    e->valence    = valence;
-    e->value      = val;
-    e->kernel     = kernel;
-    e->recipe     = r;
-    e->row        = op;
-    e->spelling   = op->name;
-    e->lower_name = r->target;
-    e->is_wrapper = 1;
-    e->alias_of   = NULL;
-    idx_add_entry(g_count - 1);
+    push_entry(op, valence, r, ray_sym_intern(op->name, strlen(op->name)), val, kernel, NULL);
     return RAY_OK;
 }
 
-/* A QK_COMP cell: `'[…]` over the values of the rows its target names, the last at this cell's valence. */
 static ray_err_t add_comp(const q_op_t* op, q_valence_t valence, const q_recipe_t* r) {
     if (r->kind != QK_COMP) return RAY_OK;
     ray_t* parts[4];
