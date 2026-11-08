@@ -135,7 +135,7 @@ static ray_t *embed_sym(ray_t *sym, q_valence_t val) {
     if (marker_row(nm, nl)) { val = Q_MONADIC; nl--; }   /* "+:"->"+", "0::"->"0:" */
     ray_t *hit = q_registry_lookup_name(nm, nl, val);
     ray_release(s);
-    if (!hit) hit = q_registry_keyword(sym->i64, NULL);
+    if (!hit) hit = q_registry_keyword(sym->i64);
     /* q.q-hosted (QK_QSRC) carriers embed too: eval retains a non-sym head as a
      * value rather than re-walking it (#351) */
     if (!hit || !q_eval_apply_is_fn(hit)) return sym;
@@ -660,9 +660,6 @@ typedef struct {
     int lambda_depth;
     /* recursive descents in flight — see Q_PARSE_MAX_DEPTH */
     int depth;
-    /* the innermost lambda's q.q-builtin spellings bound as params or locals (a W64 sym vector, or NULL): those
-     * stay names there, so the 2026-09-23 local-reuse allowance keeps reading the local */
-    ray_t **shadow;
 } Parser;
 
 /* The parser's recursion budget, charged by EVERY mutually-recursive descent
@@ -969,20 +966,6 @@ static ray_t *keyword_constant(ray_t *v) {
     return noun_tree_value(v);
 }
 
-static int shadowed(Parser *p, int64_t id) {
-    ray_t *sv = p->shadow ? *p->shadow : NULL;
-    for (int64_t i = 0; sv && i < q_count(sv); i++)
-        if (((const int64_t *)ray_data(sv))[i] == id) return 1;
-    return 0;
-}
-
-static void shadow_add(Parser *p, int64_t id) {
-    int builtin;
-    if (!p->shadow || shadowed(p, id) || !q_registry_keyword(id, &builtin) || !builtin) return;
-    if (!*p->shadow) *p->shadow = ray_sym_vec_new(RAY_SYM_W64, 4);
-    *p->shadow = ray_vec_append(*p->shadow, &id);
-}
-
 /* what follows a name makes it the TARGET of an assignment (`k:`, `k+:`, `k[i]:`, `k::y`); a `k::` with nothing
  * after is a train tail, spaced or glued */
 static int assign_target_next(Parser *p) {
@@ -1000,54 +983,6 @@ static int assign_target_next(Parser *p) {
         return after != T_EOF && after != T_SEMI && after != T_RPAREN && after != T_RBRACK && after != T_RBRACE;
     }
     return sym_name_is(t->k, ":") || verb_marked(t->k);
-}
-
-/* One nesting level of shadow_locals' scan, up to and through its `close`.  A `name:` that opens a table literal's
- * column or a qSQL select/by phrase names a column, not a local (`{update prev:1 from t; prev 1 2}`). */
-static void scan_locals(Parser *p, TKind close, int table) {
-    int col = table, phrase = 0;
-    if (++p->depth > Q_PARSE_MAX_DEPTH) die_err(QE_LIMIT);
-    while (p->pos < p->t.n) {
-        Token *tk = &p->t.t[p->pos++];
-        int was = col;
-        col = 0;
-        if (tk->kind == close) break;
-        if (tk->kind == T_EOF || tk->kind == T_RPAREN || tk->kind == T_RBRACK || tk->kind == T_RBRACE) {
-            p->pos--;
-            break;
-        }
-        if (tk->kind == T_LBRACE) {
-            scan_locals(p, T_RBRACE, -1);
-        } else if (tk->kind == T_LBRACK) {
-            scan_locals(p, T_RBRACK, table < 0 ? -1 : 0);
-            col = was && phrase;
-        } else if (tk->kind == T_LPAREN && p->pos < p->t.n && p->t.t[p->pos].kind == T_LBRACK) {
-            p->pos++;
-            scan_locals(p, T_RBRACK, table < 0 ? -1 : 1);
-            scan_locals(p, T_RPAREN, table < 0 ? -1 : 1);
-        } else if (tk->kind == T_LPAREN) {
-            scan_locals(p, T_RPAREN, table < 0 ? -1 : 0);
-        } else if (tk->kind == T_SEMI) {
-            col = table > 0;
-            phrase = 0;
-        } else if (qtok_is_query_verb(tk) || (phrase && (qtok_sym_is(tk, "by") || qtok_is_join_comma(tk)))) {
-            col = phrase = 1;
-        } else if (phrase && was && qtok_sym_is(tk, "distinct")) {
-            col = 1;
-        } else if (qtok_sym_is(tk, "from")) {
-            phrase = 0;
-        }
-        if (tk->kind == T_NOUN && table >= 0 && !was && sym_is_nameref(tk->k) && assign_target_next(p))
-            shadow_add(p, tk->k->i64);
-    }
-    p->depth--;
-}
-
-/* a lambda's locals are its whole body's, wherever the binding stands (`{(prev;prev:42)}` reads the local twice) */
-static void shadow_locals(Parser *p) {
-    int start = p->pos;
-    scan_locals(p, T_RBRACE, 0);
-    p->pos = start;
 }
 
 /* ===== the parser's die-path leak guard ======================================
@@ -1171,7 +1106,6 @@ static void parse_signature(Parser *p, ray_t **params, ray_t **ptypes) {
         int64_t id = nt->k->i64;
         /* a parameter is a binding position, so a reserved name or a user `.q` keyword is refused */
         if (q_registry_is_reserved(id) || q_registry_dotq_ext(id)) die_err(QE_ASSIGN);
-        shadow_add(p, id);
         *params = ray_vec_append(*params, &id);
         adv(p);
         /* `name:`c` type annotation (kx type-check pattern, 4.1+): ONE quoted
@@ -1227,10 +1161,7 @@ static ray_t *parse_lambda(Parser *p) {
     int lb_start = cur(p)->start;
     adv(p);
     ray_t **params = pend_push(), **ptypes = pend_push(), **body = pend_push();
-    ray_t **outer = p->shadow;
-    p->shadow = pend_push();
     if (at(p, T_LBRACK)) parse_signature(p, params, ptypes);
-    shadow_locals(p);
     uint8_t mine = 0;
     uint8_t *saved = p->xyz_mask;
     p->xyz_mask = *params ? NULL : &mine;
@@ -1238,9 +1169,6 @@ static ray_t *parse_lambda(Parser *p) {
     *body = parse_E(p, Q_NONE);
     p->lambda_depth--;
     p->xyz_mask = saved;
-    if (*p->shadow) ray_release(*p->shadow);
-    pend_pop();
-    p->shadow = outer;
     expect(p, T_RBRACE, "expected '}'");
     Token *rb = &p->t.t[p->pos - 1];
     ray_t *src = ray_str(p->src + lb_start, (size_t)(rb->start + rb->len - lb_start));
@@ -1288,11 +1216,11 @@ static P parse_base(Parser *p) {
         ray_t *v = tk->k; tk->k = NULL;
         v = tk->capture ? text_capture(v, p->xyz_mask) : noun_tree_value(v);
         adv(p);
-        int builtin = 0;
-        ray_t *kw = sym_is_nameref(v) && !shadowed(p, v->i64) ? q_registry_keyword(v->i64, &builtin) : NULL;
+        ray_t *kw = sym_is_nameref(v) ? q_registry_keyword(v->i64) : NULL;
         if (kw && assign_target_next(p)) {
             /* refused HERE, not at the write: dropping the entry later must not turn a parsed `k:` into a global */
-            if (!builtin) { ray_release(v); die_err(QE_ASSIGN); }
+            ray_release(v);
+            die_err(QE_ASSIGN);
         } else if (kw) {
             ray_release(v);
             v = keyword_constant(kw);
@@ -1822,13 +1750,17 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
          * bare `:` the assign verb (`@[x;i;:;y]`; the assignment syntax sym never stands alone) and `::` the identity
          * value.  Every expression end — `(+)`, slots, statements, lambda bodies, an assignment rhs — arrives here, so
          * this is the ONE site beside the bracket head and adverb root.  Written as a verb, the value is a train tail
-         * (`0|+`, `-2_(1_)\`); a keyword or lambda there is a noun. */
+         * (`0|+`, `-2_(1_)\`); a lambda or a prefix keyword there is a noun. */
         if (t.role == R_VERB && sym_glyph_form(t.v) != GF_NONE) {
             int assign = sym_name_is(t.v, ":");
             ray_t *v = embed_sym(t.v, Q_DYADIC);
             return (P){ R_NOUN, v, !assign && v->type != -RAY_SYM && v != RAY_NULL_OBJ, 0 };
         }
         if (t.role == R_VERB && t.v && t.v->type == RAY_LIST) t.train = 1;
+        /* an infix name standing last is written as a verb too, so `-8!union` composes as `-8!~` does */
+        Token *last = &p->t.t[p->pos - 1];
+        if (t.role == R_NOUN && last->kind == T_NOUN && q_registry_is_infix(p->src + last->start, (size_t)last->len))
+            t.train = 1;
         return t;
     }
 
@@ -2262,7 +2194,7 @@ static const struct { const char *k, *q; } k_known[] = {
     { "({$[min `PV`PD`D`pf in !: `.Q; ([] desc:! b; val:. b:(`Segments`Partitions`PartitionType)!(#.Q.D;#.Q.PD;.Q.pf)); "
       "([] Data:,\"Not partitioned or segmented\")]}[];+:{,x}'.Q.w[];"
       ".:'[$`.z.a`.z.h`.z.i`.z.k`.z.K`.z.l`.z.o`.z.u`.z.x,`$\"\\\\s\"])",
-      "({$[min `PV`PD`D`pf in key `.Q; ([] desc:key b; val:value b:(`Segments`Partitions`PartitionType)!"
+      "({$[min `PV`PD`D`pf in key `.Q; flip `desc`val!(key b; value b:(`Segments`Partitions`PartitionType)!"
       "(count .Q.D;count .Q.PD;.Q.pf)); ([] Data:enlist \"Not partitioned or segmented\")]}[]; "
       "flip {enlist x} each .Q.w[]; value each string `.z.a`.z.h`.z.i`.z.k`.z.K`.z.l`.z.o`.z.u`.z.x,`$\"\\\\s\")" },
     { "c:{'[y;x]}/|:",         "c:{{'[y;x]}/[reverse x]}" },

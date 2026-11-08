@@ -250,7 +250,7 @@ static int write_is_local(int64_t sym) {
 int q_eval_assign_locked(int64_t sym) {
     int global = !write_is_local(sym);
     if (global && q_env_scope_ctx() && q_registry_is_syntax_word(sym)) return 0;
-    return q_registry_is_reserved(sym) || (global && (q_registry_locked(sym) || q_registry_dotq_ext(sym)));
+    return q_registry_is_reserved(sym) || (global && q_registry_dotq_ext(sym));
 }
 
 /* undo a park (q_env_take / q_env_local_take) on a failed write: the value
