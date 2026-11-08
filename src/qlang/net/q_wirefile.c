@@ -204,7 +204,8 @@ static ray_t* wf_syms_to_eof(const uint8_t* p, size_t len) {
 }
 
 static ray_t* wf_read_a(const uint8_t* buf, size_t len) {
-    if (len < WF_A_OFF) return q_err(QE_CORRUPT);
+    /* only a vector carries the 8-byte header: an atom or a function (`1b`, `+`, `sums`) is shorter */
+    if (len < 3 || (buf[2] == RAY_SYM && len < WF_A_OFF)) return q_err(QE_CORRUPT);
     /* The symbol count is advisory in BOTH directions (`.Q.en appends without
      * rewriting it: 10 declared for 16 names, 0 for 55), so type 11 scans
      * NUL-terminated names to EOF instead of reaching the wire decoder. */
