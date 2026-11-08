@@ -46,6 +46,8 @@ static const char Q_VERBS[] = ":+-*%!&|<>=~,^#_$?@./\\'";
 static int sym_bare(const char* nm, size_t l) {
     if (l == 1 && nm[0] && strchr(Q_VERBS, nm[0])) return 1;
     if (l == 2 && nm[1] == ':' && nm[0] && strchr(Q_VERBS, nm[0])) return 1;
+    if (l == 3 && nm[2] == ':' && ((nm[0] == '<' && (nm[1] == '>' || nm[1] == '=')) || (nm[0] == '>' && nm[1] == '=')))
+        return 1;
     return 0;
 }
 
