@@ -10,7 +10,7 @@
 #include <stddef.h>
 
 /* Render val into buf (NUL-terminated, bounded by bufsz), UNCLIPPED.  The
- * round-trippable paths (`string`, `-3!`/`.Q.s1`, CSV) and every recursive
+ * round-trippable paths (`string`, CSV) and every recursive
  * cell/element render use this. */
 void q_fmt(ray_t* val, char* buf, size_t bufsz);
 
@@ -65,7 +65,8 @@ void q_fmt_float(double v, int f32, char* out, size_t n);
  * `,"c"` — the string-model conflation rule); vectors/atoms via q_fmt. */
 void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz);
 
-/* The ALLOCATING twin above, and the one `.Q.s1`/`-3!` body: grows until the whole repr fits.  Owned, or 'wsfull. */
+/* The ALLOCATING twin above: grows until the whole repr fits.  Owned, or 'wsfull.  `-3!`/`0N!`/`.Q.s1` cut it to the
+ * console line in q_bang.c; every other caller gets it whole. */
 ray_t* q_fmt_krepr_charv(ray_t* val);
 
 #endif /* Q_FMT_H */

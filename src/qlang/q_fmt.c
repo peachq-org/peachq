@@ -462,7 +462,7 @@ static void q_fmt_table(ray_t* tbl) {
     table_grid(nc, widths, hdr);
     qe_putc('\n');
     grid_rule(nc, widths);
-    qe_putc('\n');
+    if (nr) qe_putc('\n');
     for (int64_t r = 0; r < nr; r++) {
         grid_cells(tbl, nc, widths, mx, r);
         if (r + 1 < nr) qe_putc('\n');
@@ -490,7 +490,7 @@ static void fmt_keyed(ray_t* kt, ray_t* vt) {
     grid_rule(knc, kw);
     qe_putc('|'); qe_putc(' ');
     grid_rule(vnc, vw);
-    qe_putc('\n');
+    if (nr) qe_putc('\n');
     for (int64_t r = 0; r < nr; r++) {
         grid_cells(kt, knc, kw, km, r);
         qe_putc('|'); qe_putc(' ');
@@ -1038,7 +1038,7 @@ static void fmt_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
     *trunc = t->trunc;
 }
 
-/* Public entry, UNCLIPPED (`string`, `-3!`, CSV, recursive renders). */
+/* Public entry, UNCLIPPED (`string`, CSV, recursive renders, the `-3!` text before q_bang.c cuts it). */
 void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     int trunc;
     fmt_into(val, buf, bufsz, &trunc);
