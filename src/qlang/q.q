@@ -4,7 +4,6 @@
 
 / ---- wave 1 (ref/reciprocal.md, ref/next.md) ----
 .q.reciprocal:(%:)
-.q.prev:xprev[1;]
 .q.next:{-1 xprev x}
 
 / ---- wave 2 ----
@@ -12,14 +11,31 @@
 .q.rand:{first 1?x}
 / a variadic keyword that covers an extension IS it, unary and binary-bracket alike (basics/exposed-infrastructure.md:72-113)
 .q.deltas:(-':)
-.q.differ:('[not;~':])
-/ the covers with a QR_COVER manifest row: the row keeps the name reserved and names the unary C kernel (ref/raze.md:50)
+/ ref/value.md:89-92: value differ is $["b"] and ~~':
+.q.differ:('["b"$;not;~':])
+/ the covers with a QR_COVER manifest row: the value is kdb's, the row keeps the name reserved and names the C kernel
+/ the apply module runs when the value is applied (ref/raze.md:50, exposed-infrastructure.md:72)
 .q.sums:(+\)
 .q.prds:(*\)
 .q.maxs:(|\)
 .q.mins:(&\)
 .q.raze:(,/)
 .q.ratios:(%':)
+/ kdb-written bytes W-EXX-091
+.q.prev:(:':)
+/ ref/fill.md:136
+.q.fills:(^\)
+/ docs-v1 ref/logic.md:15,43; kdb-written bytes W-EXX-087
+.q.any:('[max;"b"$])
+.q.all:('[min;"b"$])
+/ ref/union.md:18: distinct x,y
+.q.union:('[distinct;,])
+/ wp/permissions/index.md:387
+.q.upsert:(.[;();,;])
+/ basics/internal.md:15
+.q.attr:(-2!)
+/ the parts are inferred from the kdb-written 105h type byte: the least integer not below x
+.q.ceiling:('[neg;floor;neg])
 / ref/md5.md: verbatim q.k spelling - the -15! internal fn (q_bang.c -> q_md5_fn)
 .q.md5:(-15!)
 / ref/hcount.md: file size in bytes - the -7! internal fn (q_bang.c -> h_hcount)
