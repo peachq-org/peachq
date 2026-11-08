@@ -93,8 +93,8 @@ typedef struct {
 #define QR_QSRC(t)    { QK_QSRC, (t),  NULL,               0, 0 }
 /* COVER = a QSRC cell whose `.q.<t>` value is kdb's structure for the keyword (`sums` IS `+\`,
  * exposed-infrastructure.md:72; `union` IS `'[distinct;,]`) and whose `f` is the C kernel the apply module runs
- * when that value is applied at this valence (q_registry_row_kernel_at); COMP2 = the same for a glyph whose parts
- * q.q cannot spell (`<>` IS `'[not;=]`) */
+ * when that value is applied at this valence (q_registry_row_kernel_at); COMP2 = the same for a glyph, which q.q
+ * cannot name as a `.q` entry (`<>` IS `'[not;=]`) */
 #define QR_COVER(t, f)  { QK_QSRC, (t), (q_wrap_fn_t)(f),   1, 0 }
 #define QR_COVERA(t, f) { QK_QSRC, (t), (q_wrap_fn_t)(f),   1, 1 }
 #define QR_COVER2(t, f) { QK_QSRC, (t), (q_wrap_fn_t)(f),   2, 0 }
