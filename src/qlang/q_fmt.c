@@ -1480,13 +1480,22 @@ void q_fmt_console(ray_t* val, char* buf, size_t bufsz) {
     fmt_console_into(val, buf, bufsz, &trunc);
 }
 
+/* A composition's part: a primitive by its bare spelling, so kdb's `'[not;=]` prints `~=` and `'[neg;abs]` `-abs`
+ * (owner kdb transcript 2026-11-08); anything else as itself. */
+static void fmt_comp_part(ray_t* p) {
+    q_provenance_t pv;
+    if (q_eval_apply_is_fnval(p) && q_registry_provenance(p, &pv) && pv.spelling && pv.spelling[0])
+        qe_puts(pv.spelling);
+    else
+        fmt_render(p);
+}
+
 /* RAY_QFN carrier display over the apply module's read-out accessors (the
  * slot layout stays opaque): lambda = verbatim source, iterator/derived =
- * head + adverb glyph, composition = "u g", projection = verbatim head +
+ * head + adverb glyph, composition = its parts run together, projection = verbatim head +
  * the bound-argument echo, holes empty — {x+y}[1;], +[;2] — but never the
- * rank padding the call did not write: {x+y}[1], 10# is #[10] (owner rulings
- * 2026-07-23, 2026-11-06 Dyrheb).  Only a head whose fixed rank restores the
- * padding drops it.  Straight into the emitter: source text is unbounded. */
+ * rank padding the call did not write: {x+y}[1], 10# is #[10], -8! is ![-8] (owner rulings
+ * 2026-07-23, 2026-11-06 Dyrheb, 2026-11-08).  Straight into the emitter: source text is unbounded. */
 static void carrier_fmt(ray_t* v) {
     q_car_kind_t kind = q_eval_apply_carrier_kind(v);
     if (kind == Q_EVAL_CAR_NONE) return;
@@ -1538,18 +1547,16 @@ static void carrier_fmt(ray_t* v) {
         return;
     }
     case Q_EVAL_CAR_COMP:
-        fmt_render(head);
-        qe_putc(' ');
-        fmt_render(q_eval_apply_comp_inner(v));
+        fmt_comp_part(head);
+        fmt_comp_part(q_eval_apply_comp_inner(v));
         return;
     case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_PROJ: break;
     }
     if (nm) qe_puts(nm);
     else fmt_render(head);
     qe_putc('[');
-    int64_t slots = q_eval_apply_proj_nslots(v), shown = slots;
-    while (shown > 0 && !q_eval_apply_proj_arg(v, shown - 1)) shown--;
-    if (shown > 0 && q_eval_apply_rank(head) == slots) slots = shown;
+    int64_t slots = q_eval_apply_proj_nslots(v);
+    while (slots > 0 && !q_eval_apply_proj_arg(v, slots - 1)) slots--;
     for (int64_t i = 0; i < slots; i++) {
         if (i) qe_putc(';');
         ray_t* a = q_eval_apply_proj_arg(v, i);
@@ -1599,18 +1606,8 @@ static void q_fmt_body(ray_t* val) {
         return;
     }
 
-    /* RAY_QFN carrier: lambda verbatim source / F+adverb / projection — EXCEPT
-     * that a k PRIMITIVE prints as its glyph whatever machinery implements it
-     * (`%:` is a q.q projection here; kdb still shows `%:` — `.q`reciprocal`,
-     * basics/funsql.md).  Keyword-spelled q.q definitions keep their source. */
+    /* RAY_QFN carrier: its structure, whatever keyword names it (`<>` IS `'[not;=]` and prints `~=`) */
     if (val->type == RAY_QFN) {
-        q_provenance_t gpv;
-        if (q_registry_provenance(val, &gpv) && gpv.spelling &&
-            fn_glyph_spelling(gpv.spelling)) {
-            qe_puts(gpv.spelling);
-            if (gpv.valence == Q_MONADIC) qe_putc(':');
-            return;
-        }
         carrier_fmt(val);
         return;
     }
