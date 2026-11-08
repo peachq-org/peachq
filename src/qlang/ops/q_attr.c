@@ -292,16 +292,25 @@ static ray_t* attr_set_table_s(ray_t* y) {
 }
 
 /* `s#` on a KEYED table stamps the KEY table IN PLACE (set-attribute.md:63 — why the :35-37 pin sees
- * `s from an UNASSIGNED `s#t) and "copies the outer object" (:75), so the RESULT is a sorted dict
- * while the argument keeps its own attribute.  The key table's first column is sorted, not parted: q 5
- * writes it 0b 01 (community/wire/attributes.qcmd, Dcdmxr). */
-static ray_t* attr_set_keyed_s(ray_t* y) {
+ * `s from an UNASSIGNED `s#t), the outer dict untouched: a select-by result's own shape.  The key
+ * table's first column is sorted, not parted: q 5 writes it 0b 01 (community/wire/attributes.qcmd,
+ * Dcdmxr).  Borrows y; NULL, or the owned error. */
+ray_t* q_attr_sort_keyed_key(ray_t* y) {
     ray_t* kt = ray_dict_keys(y);                            /* borrowed key TABLE */
     if (!kt || kt->type != RAY_TABLE || ray_table_ncols(kt) < 1) return q_err(QE_TYPE);
     ray_t* c0 = ray_table_get_col_idx(kt, 0);
     if (!c0 || !non_descending(c0, 0, q_count(c0))) return q_err(QE_SFAIL);
     kt->attrs |= RAY_ATTR_SORTED;
     c0->attrs |= RAY_ATTR_SORTED;
+    return NULL;
+}
+
+/* `s#kt` "copies the outer object" (set-attribute.md:75): the RESULT is a sorted dict, the argument's own
+ * dict keeps its attribute. */
+static ray_t* attr_set_keyed_s(ray_t* y) {
+    ray_t* e = q_attr_sort_keyed_key(y);
+    if (e) return e;
+    ray_t* kt = ray_dict_keys(y);
     ray_t* vals = ray_dict_vals(y);
     ray_retain(kt); ray_retain(vals);
     ray_t* d = ray_dict_new(kt, vals);                       /* consumes both */
