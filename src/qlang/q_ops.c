@@ -502,11 +502,11 @@ static const q_op_t Q_OPS[] = {
     /* ---- File Text / File Binary / Dynamic Load ---- all three are tokenized
      * by the scanner's digit-colon arm; `0:`/`1:` dispatch on the LEFT operand's
      * shape and `2:` reads a whole `(`sym;rank)` pair, so all three are family
-     * "none" exception-catalogue members. `2:` is DYADIC only (ref/dynamic-load.md
-     * gives no monadic form) and its result is a 112h carrier, not a kernel call. */
+     * "none" exception-catalogue members. No doc says what applying monadic `2::`
+     * does, so it is 'nyi; dyadic `2:` answers a 112h carrier, not a kernel call. */
     { "0:",     QLEX_GLYPH,     QR_FN1("read0", q_read0_wrap), QR_FN2("file-text", q_io_filetext_wrap), NULL, 1, 1, "none", NULL, QKOP(20) },
     { "1:",     QLEX_GLYPH,     QR_FN1("read1", q_read1_wrap), QR_FN2("file-binary", q_io_filebinary_wrap), NULL, 1, 1, "none", NULL, QKOP(21) },
-    { "2:",     QLEX_GLYPH,     QR_NONE,                       QR_FN2("dynamic-load", q_dl_wrap), NULL, 1, 1, "none", NULL, QKOP(22) },
+    { "2:",     QLEX_GLYPH,     QR_FN1("dl-unary", q_dl1_wrap), QR_FN2("dynamic-load", q_dl_wrap), NULL, 1, 1, "none", NULL, QKOP(22) },
     { "hsym",   QLEX_KW,        QR_FN1("hsym", q_hsym_wrap),   QR_NONE,           NULL, 1, 0, "atomic", NULL },
     { "read0",  QLEX_KW,        QR_FN1("read0", q_read0_wrap), QR_NONE,           NULL, 1, 1, "none", NULL, QKOP(20) },
     { "read1",  QLEX_KW,        QR_FN1("read1", q_read1_wrap), QR_NONE,           NULL, 1, 1, "none", NULL, QKOP(21) },
