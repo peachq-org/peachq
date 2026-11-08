@@ -453,6 +453,12 @@ static ray_err_t add_entry(const q_op_t* op, q_valence_t valence,
  * (q_registry_provenance).  Serde is UNTOUCHED by that: the `q!…` fn-hook fires only for RAY_FN_Q_LOWER function
  * values; carriers keep riding whatever generic carrier serde exists. */
 static ray_err_t add_structure(const q_op_t* op, q_valence_t valence, const q_recipe_t* r, ray_t* val) {
+    /* a primitive is never a structure, and one structure is one row: a duplicate would answer the earlier row */
+    if ((r->fn && q_ops_kdb_op(op) >= 0) ||
+        q_registry_intern_carrier(val, q_eval_apply_carrier_kind(val), q_eval_apply_car_head(val))) {
+        ray_release(val);
+        return RAY_ERR_DOMAIN;
+    }
     ray_t* kernel = r->fn ? build_wrapper(r) : NULL;
     if (r->fn && (!kernel || RAY_IS_ERR(kernel))) { ray_release(val); return RAY_ERR_DOMAIN; }
     push_entry(op, valence, r, ray_sym_intern(op->name, strlen(op->name)), val, kernel, NULL);

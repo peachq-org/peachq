@@ -1606,7 +1606,7 @@ static ray_t* enum_route(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) 
             ray_t* r = enum_concat(fv, row, args);
             if (r) return r;
         }
-        int ne = !strcmp(row->name, "<>");    /* its target names its parts, not a kernel */
+        int ne = row == q_ops_find("<>", 2);    /* its target names its parts, not a kernel */
         if (n == 2 && (!strcmp(t, "==") || ne || !strcmp(t, "in"))) {
             int op = !strcmp(t, "==") ? 0 : ne ? 1 : 2;
             ray_t* r = enum_cmp_route(fv, row, args, op);
