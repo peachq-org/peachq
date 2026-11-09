@@ -143,9 +143,9 @@ static ray_t* live_tab(int i) {
 }
 
 /* the caret offset of node in a frame's caret table; -1 when unknown.  The newest entry wins — a node the parser
- * dropped may have lent its address to a later one. */
+ * dropped may have lent its address to a later one.  A failed parse's table keys its die token by NULL. */
 static int frame_off(ray_t* tab, const ray_t* node) {
-    if (!tab || !node) return -1;
+    if (!tab) return -1;
     const int64_t* p = (const int64_t*)ray_data(tab);
     for (int64_t i = q_count(tab) - 2; i >= 0; i -= 2)
         if (p[i] == (int64_t)(uintptr_t)node) return (int)p[i + 1];
