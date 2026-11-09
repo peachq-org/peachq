@@ -35,7 +35,6 @@
 #include "qlang/io/q_splay.h"      /* q_splay_get — `get `:dir/ maps; value/amend read the aux path */
 #include "qlang/io/q_io.h"         /* q_io_resource_table — `get `:f.csv reads the format the ending names */
 #include "qlang/q_ctx.h"           /* q_ctx_eval_src — multi-line text under the value law */
-#include "lang/eval.h"
 #include "ops/ops.h"
 #include "table/sym.h"             /* ray_read_sym — sym vectors are width-adaptive */
 #include <signal.h>
@@ -54,8 +53,8 @@ int q_eval_interrupt_post(void) {
     return __atomic_add_fetch(&g_stop_pending, 1, __ATOMIC_ACQ_REL);
 }
 
-/* the plain read keeps the hot path a load and a branch; the exchange only runs once a signal has landed, so a
- * second one arriving meanwhile is kept, not erased */
+/* the plain read keeps the hot path a load and a branch; the exchange runs only once a signal has landed and takes
+ * the whole pending batch — one arriving after it stays pending */
 int q_eval_interrupt_take(void) {
     if (!g_stop_pending && !ray_interrupted()) return 0;
     __atomic_exchange_n(&g_stop_pending, 0, __ATOMIC_ACQ_REL);
