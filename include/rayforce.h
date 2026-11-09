@@ -540,8 +540,7 @@ static inline bool ray_type_inf(int8_t type, bool positive, int64_t* out) {
 
 /* Atom null check.  RAY_NULL_OBJ is the untyped null singleton.
  * Typed atoms with a defined NULL_* sentinel use payload-compare;
- * types without a sentinel (BOOL/U8/F32) fall back to the
- * aux[0]&1 bit written by ray_typed_null. */
+ * types with no null (SYM/BOOL/U8/STR) are never null. */
 static inline bool ray_atom_is_null_fn(const union ray_t* x) {
     if (RAY_IS_NULL(x)) return true;
     if (x->type >= 0) return false;
@@ -565,8 +564,10 @@ static inline bool ray_atom_is_null_fn(const union ray_t* x) {
         case RAY_TIME:      return x->i32 == NULL_I32;
         case RAY_I16:       return x->i16 == NULL_I16;
         case RAY_SYM:
-            /* SYM has no null — sym 0 is the empty symbol ' (a value), mirroring
-             * STR's empty "" below.  A SYM atom is never null. */
+        case RAY_BOOL:
+        case RAY_BYTE_ONLY:
+            /* SYM, boolean and byte have no null — sym 0 is the empty symbol ' and
+             * 0b / 0x00 are plain values (datatypes.md), mirroring STR's empty "" below. */
             return false;
         case RAY_STR:
             /* STR has no null distinct from "" (kdb+ model: char lists have no
