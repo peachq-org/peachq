@@ -975,7 +975,7 @@ static ray_t *table_lit_dict(ray_t *defs) {
     int64_t id_x = ray_sym_intern_runtime("x", 1);
     ray_t *keys = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
     ray_t *vals = ray_list_new(n + 1);
-    vals = ray_list_append(vals, lv);
+    if (n > 0) vals = ray_list_append(vals, lv);       /* no columns: the empty list itself */
     for (int64_t i = 0; i < n; i++) {
         ray_t *d = ds[i], *ex = d, *nmv = NULL;
         int64_t nm = -1;
@@ -1201,14 +1201,13 @@ static ray_t *parse_paren(Parser *p) {
         for (int64_t i = 0; i < n; i++)
             if (!slots[i]) slots[i] = Q_HOLE_OBJ;
     /* `(1)` is grouping -> the lone element.  A NULL slot is the EMPTY paren
-     * `()` — the empty general list (type 0h), NOT `::` — which falls through
-     * as a zero-element list literal. */
+     * `()`: the empty general list is its own constant tree, NOT `::` and not
+     * a bare constructor application (parsetrees.md:18). */
     if (n == 1) {
         ray_t *only = slots[0];
         if (only) ray_retain(only);
         ray_release(e);
-        if (only) return only;
-        e = ray_list_new(1);
+        return only ? only : ray_list_new(0);
     }
     /* A list literal: prepend the internal list-constructor value so eval
      * builds (and collapses) it.  The head value is the only thing
@@ -2051,7 +2050,7 @@ static ray_t *qsql_convert_head(ray_t *h) {
 /* Rewrite ONE raw phrase expr into its functional leaf representation:
  *   - bare name-ref standing alone -> column symbol;
  *   - `sym scalar literal -> the enlisted 1-element sym VECTOR `,`sym`;
- *   - a paren `(e1;e2;…)` list -> kdb's `(enlist;e1;…)` (monadic enlist head);
+ *   - a paren `(e1;e2;…)` list keeps its top-level `(enlist;e1;…)` tree (parsetrees.md:107-113);
  *   - an application `(head; args…)` -> converted head + column-ised args.
  * Returns an OWNED tree; does NOT consume x. */
 static ray_t *qsql_convert_expr(ray_t *x) {
@@ -2072,19 +2071,7 @@ static ray_t *qsql_convert_expr(ray_t *x) {
             return x;
         }
         ray_t *node = ray_list_new(n > 0 ? n : 1);
-        if (n == 1 && e[0] == q_registry_list_value()) return node;   /* `()` is the empty list, a constant */
-        if (n >= 1 && e[0] == q_registry_list_value()) {
-            /* paren literal -> (enlist; e1; …): the monadic enlist VALUE head so
-             * the exec fn-head branch enlists the per-column results. */
-            ray_t *enl = q_registry_lookup_name(",", 1, Q_MONADIC);
-            node = ray_list_append(node, enl ? enl : e[0]);  /* append retains */
-            for (int64_t i = 1; i < n; i++) {
-                ray_t *c = qsql_convert_expr(e[i]);
-                node = ray_list_append(node, c); ray_release(c);
-            }
-            return node;
-        }
-        if (n >= 1) {                              /* application */
+        if (n >= 1) {                    /* application; a paren literal keeps its enlist head */
             ray_t *h = qsql_convert_head(e[0]);
             node = ray_list_append(node, h); if (h) ray_release(h);
             for (int64_t i = 1; i < n; i++) {
