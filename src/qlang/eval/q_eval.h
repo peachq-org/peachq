@@ -16,12 +16,11 @@ struct q_op;
 /* Walker over the RAW q_parse tree; returns OWNED (RAY_ERROR on failure). */
 ray_t* q_eval(ray_t* node);
 
-/* the pending interrupt (SIGINT → `'stop`): post is the handler's, async-signal-safe, answers the unserviced count;
- * take consumes whatever is pending and answers 1 if there was any — the caller raises `'stop` (console-architecture).
- * The hot path is one load: every walker entry and apply exit takes. */
-extern volatile sig_atomic_t q_eval_stop_pending;
-int q_eval_interrupt_post(void);
+extern volatile sig_atomic_t q_eval_stop_pending;   /* SIGINT → `'stop` (console-architecture); take = one load */
+int q_eval_interrupt_post(void);      /* the handler's: answers the unserviced count */
 int q_eval_interrupt_consume(void);
+void q_eval_interrupt_served(void);   /* a human or client saw the stop: the count restarts */
+int q_eval_active(void);              /* a statement is in the walker (0 at an event-loop callback's entry) */
 static inline int q_eval_interrupt_take(void) { return q_eval_stop_pending ? q_eval_interrupt_consume() : 0; }
 
 /* Drop the walker's once-per-runtime fixed-sym-id cache (control-form and
