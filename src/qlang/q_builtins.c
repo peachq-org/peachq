@@ -10,6 +10,7 @@
 #include "qlang/parse/q_parse.h"
 #include "qlang/net/q_http_client.h" /* .Q.c.hg / .Q.c.hp — outbound HTTP client */
 #include "qlang/net/q_http.h"        /* .Q.c.rd — the hardened docroot read */
+#include "qlang/net/q_wire.h"        /* q_wire_keyword_lambda — a keyword with no wire code is 100h */
 #define Q_OPS_ENV_GRANDFATHER /* base-kernel snapshots (capture_base) read the bootstrap catalogue */
 #include "qlang/q_registry_internal.h" /* q_registry_init (shared; brings q_registry.h) */
 #include "qlang/q_env.h"      /* q_env_bind — q's own name surface */
@@ -125,7 +126,7 @@ static ray_t* id_fn(ray_t* x) {
 static ray_unary_fn g_base_type  = NULL;
 static ray_unary_fn g_base_count = NULL;
 
-/* q `type` as the kdb short: FUNCTION values report 100h lambda / 101h unary
+/* q `type` as the kdb short: FUNCTION values report 100h lambda (a keyword with no wire code too) / 101h unary
  * primitive (incl. the generic null) / 102h binary+overload primitive / 103h
  * iterator / 104h projection / 106+adv derived; every other value's internal tag ALREADY IS its kdb type
  * number (long 7, sym 11, list 0, table 98, dict 99), atoms stored NEGATIVE.
@@ -150,6 +151,8 @@ static int8_t type_of(ray_t* x) {
     case Q_EVAL_CAR_NONE: case Q_EVAL_CAR_COMP: case Q_EVAL_CAR_VIEW: break;
     }
     if (x->type == RAY_LAMBDA) return 100;
+    char kw[Q_WIRE_KW_LAMBDA_CAP];
+    if (q_wire_keyword_lambda(x, kw, sizeof kw)) return 100;
     if (x->type == RAY_UNARY) return 101;
     if (x->type == RAY_VARY) {
         q_valence_t val = Q_DYADIC;
