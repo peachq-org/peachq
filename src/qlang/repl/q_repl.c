@@ -23,13 +23,13 @@
 #include "store/fileio.h"         /* ray_file_rename — a history rewrite replaces the file whole */
 #include "app/term.h"       /* ray_term_* line editor + highlighter hook */
 #include "core/poll.h"      /* ray_poll_* — concurrent REPL + IPC event loop */
-#include "lang/eval.h"      /* ray_eval_clear_interrupt */
 #include <rayforce.h>
 #include <ctype.h>          /* isalpha/isalnum — the hint's name-token scan */
 #include <stdlib.h>         /* getenv */
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/stat.h>       /* S_ISREG — only a regular file is read as history */
 #include <unistd.h>         /* read, STDIN_FILENO — poll-driven stdin
                              * (mingw-w64 provides both; the CRT read() on fd 0
@@ -257,11 +257,18 @@ static void repl_teach_hint(ray_term_t* t) {
         ray_term_set_hint(t, "\\? / help", 2);
 }
 
+/* an interrupt the prompt answers (the line cleared, `^C`, a reprompt) is served: nothing is pending after it */
+static void interrupt_drop(void) {
+    q_eval_interrupt_take();
+    ray_term_clear_interrupt();
+}
+
+static void tty_signals(ray_term_t* t);
+
 /* The tty's eval window: Ctrl-C is SIGINT (POSIX, ISIG) / CTRL_C_EVENT (Windows) ONLY between begin and end — no
  * early exits inside the bracket; end re-derives the prompt (`\d` switched context; the debugger left `q))`). */
 static void tty_eval_begin(ray_term_t* t) {
-    ray_term_clear_interrupt();
-    ray_eval_clear_interrupt();
+    interrupt_drop();
     ray_term_eval_begin(t);
 }
 
@@ -324,7 +331,7 @@ static void repl_interactive(FILE* out, FILE* err) {
     /* SIGINT/console-ctrl plumbing (mirrors rayforce's repl.c contract):
      * at the prompt interrupts stay raw keypresses (0x03 clears the line);
      * ray_term_eval_begin below arms them only for the eval window. */
-    ray_term_install_signals(t);
+    tty_signals(t);
     q_dbg_set_reader(repl_tty_dbg_read);   /* `\e 1` debugger over this editor */
 
     tty_startup(t, out, err);
@@ -337,8 +344,7 @@ static void repl_interactive(FILE* out, FILE* err) {
         if (sz <= 0) {
             if (sz == -2) {
                 /* SIGINT: clear interrupt, reset the line, re-prompt. */
-                ray_term_clear_interrupt();
-                ray_eval_clear_interrupt();
+                interrupt_drop();
                 t->comp_cycling = 0;
                 t->esc_state = 0;
                 t->buf_len = 0;
@@ -406,6 +412,41 @@ typedef struct {
 
 static q_poll_repl_t g_q_poll_repl;
 
+/* ===== SIGINT ===== a SIGINT is `'stop` for the running statement (errors.md), never an exit; the count of
+ * unserviced ones warns at two and exits at three — the way out of an operation "coded so tightly the interrupt
+ * might not be registered" (syscmds.md).  term.c keeps SIGTERM/SIGQUIT (restore the tty, re-raise). */
+#ifndef RAY_OS_WINDOWS
+static void sigint_handler(int sig) {
+    int n = q_eval_interrupt_post();
+    ray_term_request_interrupt();          /* the editor's EINTR read answers the prompt-time signal with ^C */
+    if (n == 2) {
+        static const char w[] = "interrupt pending; ^C again to exit\n";
+        if (write(2, w, sizeof w - 1) < 0) return;
+    }
+    if (n < 3) return;
+    ray_term_t* t = g_live_term ? g_live_term : g_q_poll_repl.term;
+    if (t && t->owns_console) tcsetattr(STDIN_FILENO, TCSAFLUSH, &t->oldattr);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+#endif
+
+void q_repl_install_signals(void) {
+#ifndef RAY_OS_WINDOWS
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = sigint_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
+#endif
+}
+
+/* the editor's installer puts term.c's SIGINT back; ours goes on top of it */
+static void tty_signals(ray_term_t* t) {
+    ray_term_install_signals(t);
+    q_repl_install_signals();
+}
+
 /* Restore the terminal exactly once (idempotent). */
 static void poll_close_term(q_poll_repl_t* c) {
     if (!c->term)
@@ -446,8 +487,7 @@ static ray_t* poll_tty_read(ray_poll_t* poll, ray_selector_t* sel) {
     if (sz <= 0) {
         if (sz == -2) {
             /* SIGINT at the prompt: clear the line, re-prompt (repl.c contract). */
-            ray_term_clear_interrupt();
-            ray_eval_clear_interrupt();
+            interrupt_drop();
             t->comp_cycling = 0;
             t->esc_state = 0;
             t->buf_len = 0;
@@ -645,6 +685,7 @@ static int repl_poll_dbg_read(const char* prompt, char* buf, size_t cap) {
         }
         char tmp[1024];
         ssize_t rd = read(STDIN_FILENO, tmp, sizeof tmp);
+        if (rd < 0 && errno == EINTR) { interrupt_drop(); continue; }   /* a SIGINT at q)) is not EOF */
         if (rd <= 0) return -1;
         size_t off = 0;
         while (off < (size_t)rd)
@@ -661,6 +702,7 @@ static int repl_poll_dbg_read(const char* prompt, char* buf, size_t cap) {
 static int repl_tty_dbg_read(const char* prompt, char* buf, size_t cap) {
     ray_term_t* t = g_live_term ? g_live_term : g_q_poll_repl.term;
     if (!t) return -1;
+    interrupt_drop();
     ray_term_eval_end(t);
     ray_term_set_prompt(t, prompt, (int32_t)strlen(prompt));
     ray_term_begin(t);
@@ -669,8 +711,7 @@ static int repl_tty_dbg_read(const char* prompt, char* buf, size_t cap) {
         int64_t sz = ray_term_getc(t);
         if (sz <= 0) {
             if (sz == -2) {
-                ray_term_clear_interrupt();
-                ray_eval_clear_interrupt();
+                interrupt_drop();
                 t->comp_cycling = 0;
                 t->esc_state = 0;
                 t->buf_len = 0;
@@ -696,8 +737,7 @@ static int repl_tty_dbg_read(const char* prompt, char* buf, size_t cap) {
         out = (int)n;
         break;
     }
-    ray_term_clear_interrupt();
-    ray_eval_clear_interrupt();
+    interrupt_drop();
     ray_term_eval_begin(t);
     return out;
 }
@@ -727,7 +767,7 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err, int stdin_tty) {
         ray_term_set_highlighter(t, q_highlight);
         tty_prompt(t);
         ray_term_set_continuation_fn(t, no_continuation);
-        ray_term_install_signals(t);
+        tty_signals(t);
         c->term = t;
         reg.read_fn = poll_tty_read;
         q_dbg_set_reader(repl_tty_dbg_read);   /* `\e 1` debugger over this editor */
@@ -772,7 +812,11 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err, int stdin_tty) {
 static int repl_fgets_dbg_read(const char* prompt, char* buf, size_t cap) {
     fputs(prompt, stdout);
     fflush(stdout);
-    if (!fgets(buf, (int)cap, stdin)) return -1;
+    while (!fgets(buf, (int)cap, stdin)) {
+        if (!(ferror(stdin) && errno == EINTR)) return -1;
+        clearerr(stdin);
+        interrupt_drop();
+    }
     size_t n = strlen(buf);
     while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = '\0';
     return pipe_dbg_echo(buf, (int)n);
@@ -801,7 +845,11 @@ void q_repl_run(FILE* in, FILE* out, FILE* err, int echo) {
         fputs(prompt, out);
         fflush(out);
 
-        if (!fgets(line, sizeof line, in)) { if (!quiet) fputc('\n', out); break; }
+        if (!fgets(line, sizeof line, in)) {
+            if (ferror(in) && errno == EINTR) { clearerr(in); interrupt_drop(); continue; }   /* a SIGINT is not EOF */
+            if (!quiet) fputc('\n', out);
+            break;
+        }
 
         size_t n = strlen(line);
         while (n && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = '\0';

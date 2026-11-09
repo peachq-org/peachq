@@ -658,7 +658,7 @@ static int dbg_in_lambda(void) {
 /* Local errors ALWAYS suspend (debug.md — no toggle); `\e` gates only whether
  * the REMOTE door marks its statements console (q_ctx.c remote seams). */
 static int dbg_suspendable(ray_t* r) {
-    return g_reader && g_console_stmt && g_trap_depth == 0 && dbg_in_lambda() && !q_err_is(r, QE_STOP);
+    return g_reader && g_console_stmt && g_trap_depth == 0 && dbg_in_lambda();
 }
 
 static ray_t* dbg_observe(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {

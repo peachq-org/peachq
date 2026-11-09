@@ -38,6 +38,7 @@
 #include "lang/eval.h"
 #include "ops/ops.h"
 #include "table/sym.h"             /* ray_read_sym — sym vectors are width-adaptive */
+#include <signal.h>
 #include <string.h>
 
 #define EVAL_MAX_ARGS  60
@@ -45,6 +46,22 @@
 
 static _Thread_local int g_depth;
 _Thread_local const ray_t* q_eval_node;
+
+static volatile sig_atomic_t g_stop_pending;
+
+int q_eval_interrupt_post(void) {
+    ray_request_interrupt();
+    return __atomic_add_fetch(&g_stop_pending, 1, __ATOMIC_ACQ_REL);
+}
+
+/* the plain read keeps the hot path a load and a branch; the exchange only runs once a signal has landed, so a
+ * second one arriving meanwhile is kept, not erased */
+int q_eval_interrupt_take(void) {
+    if (!g_stop_pending && !ray_interrupted()) return 0;
+    __atomic_exchange_n(&g_stop_pending, 0, __ATOMIC_ACQ_REL);
+    ray_clear_interrupt();
+    return 1;
+}
 
 /* Fixed sym ids, interned ONCE per runtime (the env.c ipc-hook-syms
  * discipline).  Process-global like the registry itself — one live q runtime
@@ -806,6 +823,7 @@ static ray_t* if_eval(ray_t** e, int64_t n, int loop) {
         err = ctl_run_body(e, 1, n);
         if (err) return err;
         if (!loop) break;
+        if (q_eval_interrupt_take()) return q_err(QE_STOP);   /* an empty body never reaches the walker's check */
     }
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;
@@ -825,6 +843,7 @@ static ray_t* do_eval(ray_t** e, int64_t n) {
     for (int64_t k = 0; k < times; k++) {
         ray_t* err = ctl_run_body(e, 1, n);
         if (err) return err;
+        if (q_eval_interrupt_take()) return q_err(QE_STOP);
     }
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;
@@ -980,7 +999,7 @@ out:
 ray_t* q_eval(ray_t* node) {
     if (!node) return RAY_NULL_OBJ;
     if (RAY_IS_ERR(node)) return node;
-    if (ray_eval_is_interrupted()) return q_err(QE_STOP);
+    if (q_eval_interrupt_take()) return q_err(QE_STOP);
     if (++g_depth > EVAL_MAX_DEPTH) { g_depth--; return q_err(QE_LIMIT); }
 
     ray_t* ret;

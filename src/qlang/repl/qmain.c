@@ -274,6 +274,7 @@ int main(int argc, char** argv) {
     ray_runtime_t* rt = q_runtime_create(argc, argv);
     if (!rt) { fprintf(stderr, "runtime init failed\n"); return 1; }
     q_sys_own_process(true);   /* the real q binary: `\\`/`exit x` exit, `\cmd` shells */
+    q_repl_install_signals();  /* every stdin shape: a SIGINT during a startup script or a served request is 'stop */
 
     /* Poll owns the IPC handle namespace; publish it so `.ipc.open` /
      * listeners resolve handles the same way rayforce's main.c does. */
