@@ -148,8 +148,8 @@ int64_t q_env_scope_ctx(void);   /* the context a relative name resolves against
 ray_err_t q_env_frame_push(int barrier);
 void      q_env_frame_pop(void);
 ray_err_t q_env_local_set(int64_t sym, ray_t* val);
-ray_t*    q_env_local_get(int64_t sym);   /* TOP frame only; borrowed */
-int       q_env_local_take(int64_t sym, ray_t* cur);  /* q_env_take, TOP frame;
+ray_t*    q_env_local_get(int64_t sym);   /* the top frame, or the frame view's; borrowed */
+int       q_env_local_take(int64_t sym, ray_t* cur);  /* q_env_take on that frame;
                                                        * q_env_local_set puts back */
 int32_t   q_env_frame_depth(void);
 /* Read floor (< 0: floor at the current depth); returns the previous.  A
@@ -161,7 +161,7 @@ int32_t   q_env_frame_floor(int32_t floor);
 /* Debugger frame cursor (basics/debug.md navigation): ROOT the resolving walk at
  * frame `depth`; _OFF = the top frame, _NONE = no frame at all (console [0]).  A
  * frame push saves and clears it, so a call made from the debug prompt resolves
- * in its own scope.  READS only — q_env_local_set stays on the top frame. */
+ * in its own scope.  Local writes follow it too: `y:3` at q)) after `` ` `` sets that frame's y (Q4M §10.2.2). */
 #define Q_ENV_FRAME_VIEW_OFF  (-1)
 #define Q_ENV_FRAME_VIEW_NONE (-2)
 int32_t   q_env_frame_view(int32_t depth);

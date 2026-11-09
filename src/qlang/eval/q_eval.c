@@ -18,6 +18,7 @@
 #include "qlang/q_count.h"
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_eval_internal.h"
+#include "qlang/eval/q_dbg.h"             /* q_dbg_statement_pos — the statement's caret table */
 #include "qlang/eval/q_view.h"
 #include "qlang/base/q_err.h"
 #include "qlang/parse/q_parse_internal.h"
@@ -34,15 +35,35 @@
 #include "qlang/io/q_splay.h"      /* q_splay_get — `get `:dir/ maps; value/amend read the aux path */
 #include "qlang/io/q_io.h"         /* q_io_resource_table — `get `:f.csv reads the format the ending names */
 #include "qlang/q_ctx.h"           /* q_ctx_eval_src — multi-line text under the value law */
-#include "lang/eval.h"
 #include "ops/ops.h"
 #include "table/sym.h"             /* ray_read_sym — sym vectors are width-adaptive */
+#include <signal.h>
 #include <string.h>
 
 #define EVAL_MAX_ARGS  60
 #define EVAL_MAX_DEPTH 2048
 
 static _Thread_local int g_depth;
+_Thread_local const ray_t* q_eval_node;
+
+volatile sig_atomic_t q_eval_stop_pending;
+static volatile sig_atomic_t g_unserviced;   /* reset only where a seam SERVED the stop: a trapped loop keeps counting */
+
+int q_eval_interrupt_post(void) {
+    ray_request_interrupt();
+    q_eval_stop_pending = 1;
+    return __atomic_add_fetch(&g_unserviced, 1, __ATOMIC_ACQ_REL);
+}
+
+int q_eval_interrupt_consume(void) {
+    int n = __atomic_exchange_n(&q_eval_stop_pending, 0, __ATOMIC_ACQ_REL);
+    ray_clear_interrupt();
+    return n != 0;
+}
+
+void q_eval_interrupt_served(void) { g_unserviced = 0; }
+
+int q_eval_active(void) { return g_depth > 0; }
 
 /* Fixed sym ids, interned ONCE per runtime (the env.c ipc-hook-syms
  * discipline).  Process-global like the registry itself — one live q runtime
@@ -113,10 +134,13 @@ static ray_t* name_error(int64_t id) {
 /* A symbol is ONLY ever a global lookup (owner kdb transcript 2026-11-07): env (scopes + globals), then `.z.*`.
  * A keyword exists only at parse, which binds its value, so neither the registry nor `.q` is read here.  Owned
  * result or NULL. */
-static ray_t* resolve(int64_t id) {
-    ray_t* v = q_env_resolve(id);            /* owned (or an owned error) */
-    if (v) return q_view_deref(v);           /* a view reference recalcs */
-    return q_dotz_resolve(id);               /* owned */
+static ray_t* resolve(ray_t* sym) {
+    ray_t* v = q_env_resolve(sym->i64);      /* owned (or an owned error) */
+    if (v) {
+        if (q_view_is(v)) q_eval_node = sym;  /* a recalc walks the view's own tree: its caret stays on the name */
+        return q_view_deref(v);
+    }
+    return q_dotz_resolve(sym->i64);         /* owned */
 }
 
 /* Dot notation whose last segment names a cast target IS that cast:
@@ -159,7 +183,7 @@ ray_t* q_eval_dot_cast(int64_t id) {
 }
 
 static ray_t* name_value(ray_t* sym) {
-    ray_t* v = resolve(sym->i64);
+    ray_t* v = resolve(sym);
     if (!v) v = q_eval_dot_cast(sym->i64);
     return v ? v : name_error(sym->i64);
 }
@@ -589,11 +613,28 @@ static ray_t* lambda_structure(ray_t* v) {
 ray_t* q_eval_statement(const char* src, int* parsed) {
     if (parsed) *parsed = 1;
     int64_t scope = q_env_scope(Q_ENV_SCOPE_SESSION);   /* fresh text resolves at the session `\d`, as a load's frames do */
-    ray_t* ast = q_parse(src);
+    ray_t* pos = NULL;
+    ray_t* ast = q_parse_at(src, &pos);
     if (!ast || RAY_IS_ERR(ast)) {
         if (parsed) *parsed = 0;         /* the statement never ran — see q_eval.h */
+        ray_t* e = ast ? ast : q_err(QE_PARSE);
+        if (!q_dbg_statement_pos(pos)) {      /* a text run inside a statement: the frame above its runner */
+            q_dbg_parse_fail(e, src, (int64_t)strlen(src), pos, 0);
+            if (pos) ray_release(pos);
+        }                                     /* else a die the parser located carets frame [0] */
         q_env_scope(scope);
-        return ast ? ast : q_err(QE_PARSE);
+        return e;
+    }
+    ray_t* text = NULL;
+    if (!q_dbg_statement_pos(pos)) {      /* a text run INSIDE a statement (`value "…"`) is its own frame */
+        text = ray_charv(src, (int64_t)strlen(src));
+        if (!text || RAY_IS_ERR(text)) {
+            ray_release(ast);
+            if (pos) ray_release(pos);
+            q_env_scope(scope);
+            return text ? text : q_err(QE_OOM);
+        }
+        q_dbg_text_push(text, pos);
     }
     ray_t* r;
     int silent = 1;
@@ -602,6 +643,12 @@ ray_t* q_eval_statement(const char* src, int* parsed) {
         r = q_eval(ast);
     }
     ray_release(ast);
+    if (text) {
+        r = q_dbg_filter(r, NULL, NULL, 0);   /* an error no application observed (an undefined name) is the text's */
+        q_dbg_frame_pop();
+        ray_release(text);
+        if (pos) ray_release(pos);
+    }
     q_env_scope(scope);
     if (silent && r && !RAY_IS_ERR(r)) {
         ray_release(r);
@@ -718,6 +765,7 @@ ray_t* q_eval_value_wrap(ray_t* x) {
         int code = q_registry_kdb_op_of(x, NULL);
         if (code >= 0) return ray_i64(code);
     }
+    if (x->type < 0) return q_err(QE_TYPE);   /* any other atom: SO 64109959 "'value 42' results in a type error" */
     return q_err(QE_NYI);       /* enumeration/view/bare-iterator: deferred */
 }
 
@@ -781,6 +829,7 @@ static ray_t* if_eval(ray_t** e, int64_t n, int loop) {
         err = ctl_run_body(e, 1, n);
         if (err) return err;
         if (!loop) break;
+        if (q_eval_interrupt_take()) return q_err(QE_STOP);   /* an empty body never reaches the walker's check */
     }
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;
@@ -800,6 +849,7 @@ static ray_t* do_eval(ray_t** e, int64_t n) {
     for (int64_t k = 0; k < times; k++) {
         ray_t* err = ctl_run_body(e, 1, n);
         if (err) return err;
+        if (q_eval_interrupt_take()) return q_err(QE_STOP);
     }
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;
@@ -877,20 +927,23 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
 
 /* `'x`: symbol atom or string, else 'stype (ref/signal.md Restrictions);
  * signals the text */
-static ray_t* signal_eval(ray_t* expr) {
+static ray_t* signal_text(ray_t* v) {   /* a string or symbol's text, else NULL */
+    if (v->type == RAY_CHARV) { ray_retain(v); return v; }
+    return v->type == -RAY_SYM ? q_str_charv_of_str(ray_sym_str(v->i64)) : NULL;
+}
+
+/* `'(msg;bt)` re-signals msg with a saved backtrace, `'(msg;())` plainly (SO 65303811) */
+static ray_t* signal_eval(ray_t* node, ray_t* expr) {
     ray_t* v = q_eval_apply_concrete(q_eval(expr));
     if (RAY_IS_ERR(v)) return v;
-    ray_t* txt = NULL;
-    if (v->type == RAY_CHARV) { ray_retain(v); txt = v; }
-    else if (v->type == -RAY_SYM) {
-        ray_t* s = ray_sym_str(v->i64);
-        if (s && !RAY_IS_ERR(s))
-            txt = ray_charv(ray_str_ptr(s), (int64_t)ray_str_len(s));
-    }
+    ray_t* bt = v->type == RAY_LIST && q_count(v) == 2 ? ray_list_get(v, 1) : NULL;
+    ray_t* txt = signal_text(bt ? ray_list_get(v, 0) : v);
+    q_eval_node = node;                        /* the caret sits under the `'`, not inside its operand */
+    ray_t* r = !txt || RAY_IS_ERR(txt) ? (txt ? txt : q_err(QE_STYPE))
+             : bt && (bt->type != RAY_LIST || q_count(bt)) ? q_dbg_resignal(txt, bt)
+                                       : q_err_signal(QE_SIGNAL, txt);
+    if (txt && !RAY_IS_ERR(txt)) ray_release(txt);
     ray_release(v);
-    if (!txt || RAY_IS_ERR(txt)) return txt ? txt : q_err(QE_STYPE);
-    ray_t* r = q_err_signal(QE_SIGNAL, txt);
-    ray_release(txt);
     return r;
 }
 
@@ -954,12 +1007,13 @@ out:
 ray_t* q_eval(ray_t* node) {
     if (!node) return RAY_NULL_OBJ;
     if (RAY_IS_ERR(node)) return node;
-    if (ray_eval_is_interrupted()) return q_err(QE_STOP);
+    if (q_eval_interrupt_take()) return q_err(QE_STOP);
     if (++g_depth > EVAL_MAX_DEPTH) { g_depth--; return q_err(QE_LIMIT); }
 
     ray_t* ret;
     if (node->type == -RAY_SYM) {
         ret = name_value(node);
+        if (RAY_IS_ERR(ret)) q_eval_node = node;
         goto out;
     }
     /* the enlisted sym-constant unwrap (parsetrees.md:26: eval enlist`x -> `x):
@@ -989,6 +1043,7 @@ ray_t* q_eval(ray_t* node) {
         int64_t n = q_count(node);
         ray_t** e = (ray_t**)ray_data(node);
         ray_t* h = e[0];
+        q_eval_node = node;
 
         /* literal-ctor interception seam (header note).  One item is `enlist x` (a paren of one is grouping), which
          * applies as any monad does: whether a hole VALUE there projects is unwitnessed (parse-tree programme) */
@@ -1022,7 +1077,7 @@ ray_t* q_eval(ray_t* node) {
          * eval'd `("'";`e)` signals exactly like parsed source */
         if (h && h->type == -RAY_CHARV && n == 2 &&
             (h->u8 == '\'' || h->u8 == ':')) {
-            ret = h->u8 == '\'' ? signal_eval(e[1]) : return_eval(e[1]);
+            ret = h->u8 == '\'' ? signal_eval(node, e[1]) : return_eval(e[1]);
             goto out;
         }
 
@@ -1076,6 +1131,7 @@ ray_t* q_eval(ray_t* node) {
             ray_retain(h);                          /* embedded value / noun */
             fv = h;
         }
+        q_eval_node = node;                         /* the arguments' and a list head's applications moved it */
         if (RAY_IS_ERR(fv)) { release_args(argv, argc); ret = fv; goto out; }
         /* ONE recovery for every spelling of the head: a verb reached through a
          * name, a variable or an expression keeps its family and its enum arm */
