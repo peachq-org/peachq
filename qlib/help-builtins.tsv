@@ -247,6 +247,9 @@ while	i:0;while[i<3;i+:1];i	repeat expressions while a condition holds
 .Q.sbt	.Q.sbt .Q.bt[]	render a backtrace object as display text
 .Q.trp	.Q.trp[{x+1};`a;{y}]	trap a unary and hand the handler a backtrace
 .Q.trpd	.Q.trpd[+;(1;2);{y}]	trap a function of any rank with a backtrace
+.Q.Ll	.Q.Ll`	list the live call stack as backtrace frame records
+.Q.btx	.Q.btx .Q.Ll`	format a call stack as backtrace frame records
+.Q.fqk	.Q.fqk "qlib/pq.q"	test whether a frame file name holds built-in functions
 .Q.btoa	.Q.btoa "hello"	encode text as base-64
 .Q.atob	.Q.atob "aGVsbG8="	decode base-64 text back to bytes
 .Q.sha1	.Q.sha1 "hello"	hash text with SHA-1

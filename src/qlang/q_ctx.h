@@ -41,9 +41,12 @@ void q_ctx_set_line_done(void (*fn)(const char* s, size_t n, const char* status,
  * line — `\l` raises it so the abort propagates out of nested loads. */
 int q_ctx_run_file(const char* path, FILE* out, FILE* err, ray_t** esig);
 
-/* `.pq`'s native `.pq.i.console x` — the console line for a transcript's input x: the live prompt and x echoed
- * (neither under `-q`, as the piped console), then x run as the console runs a line, on the streams of the load in
- * progress (else stdout/stderr).  `.pq.i.qcmd` applies it per prompt line.  Bound by `.pq.load_natives`pq`. */
+/* `.pq`'s native `.pq.i.console[x;nested]` — the console line for a transcript's input x: the live prompt and x
+ * echoed (neither under `-q`, as the piped console), then x run as the console runs a line, on the streams of the
+ * load in progress (else stdout/stderr).  An error suspends into the debugger as at the console, `nested` (the
+ * transcript's following `q))` lines, their prompts stripped) being what it reads; they are spent, or the
+ * suspension ends, before the call returns.  x `::` is a transcript opening at `q))`: nothing to run, the lines are
+ * echoed.  `.pq.i.qcmd` applies it per `q)` line.  Bound by `.pq.load_natives`pq`. */
 void q_ctx_pq_register(void);
 
 /* The error a load ANSWERS with, from a run's return and esig: the eval abort's
@@ -93,9 +96,14 @@ void q_ctx_run_value_src(const char* s, size_t n, FILE* out, FILE* err);
  * abort the load.  An abort is reported here; the return is q_ctx_run_src's. */
 int q_ctx_run_console_src(const char* s, FILE* out, FILE* err);
 
-/* Install the callback the IPC layer answers a request with no .z.pg/.z.ps through: `value` of the message, as
- * handle 0 does, answering with a value instead of printing.  q_runtime owns the paired teardown. */
-void q_ctx_install_remote_hooks(void);
+void q_ctx_install_remote_hooks(void);   /* handle 0's answer (q_ctx_remote_call, fn NULL); q_runtime tears down */
+
+int q_ctx_interrupt_take(int served);   /* consume the pending SIGINT (eval + editor flags), 1 if any; served: seen */
+
+/* A client callback under `\e`: fn (borrowed) applied to msg, or `value` of msg; the value or the error answers.  An
+ * HTTP caller's trace/tn: under `\e 2` the stack (owned, ray_free_raw) and its byte length, else untouched. */
+enum { Q_CTX_SYNC, Q_CTX_ASYNC, Q_CTX_HTTP };
+ray_t* q_ctx_remote_call(ray_t* fn, ray_t* msg, int kind, char** trace, size_t* tn);
 
 /* Console teardown before exit.  The context knows only that SOMETHING may need
  * restoring before `.z.exit` runs (its 0N! output must land on a cooked
