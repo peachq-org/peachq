@@ -841,13 +841,30 @@ static int binding_node(ray_t *x, ray_t **name, ray_t **val) {
 
 static int qsql_glyph_names_right(const q_op_t *row);
 
-/* Which argument names an unnamed phrase (qsql.md:234): a glyph's first, any other function's last; -1 for none. */
+/* A term built of quoted symbols only: ,`s or ,`s`t as noun_tree_value wraps them, a paren list of them, or one
+ * applied to another (`. `sym, TorQ tickerlogreplay.q:310). */
+static int sym_only_term(ray_t *e) {
+    if (e && e->type == RAY_SYM) return 1;
+    if (!e || e->type != RAY_LIST || q_count(e) < 1) return 0;
+    ray_t **a = (ray_t **)ray_data(e);
+    int64_t n = q_count(e), i = a[0] == q_registry_list_value();
+    if (i >= n) return 0;
+    for (; i < n; i++)
+        if (!sym_only_term(a[i])) return 0;
+    return 1;
+}
+
+/* Which argument names an unnamed phrase (qsql.md:234): a glyph's first, any other function's last; -1 for none.
+ * A quoted symbol is skipped for the next term (funq decisiontree.q:56, TorQ tickerlogreplay.q:310, Diljhu). */
 static int alias_arg(ray_t *expr) {
     if (!expr || expr->type != RAY_LIST || q_count(expr) < 2) return -1;
-    ray_t *h = ((ray_t **)ray_data(expr))[0];
-    const q_op_t *row = q_registry_operand_row(h);
-    int first = h == q_registry_list_value() || (row && row->lex == QLEX_GLYPH && !qsql_glyph_names_right(row));
-    return first ? 1 : (int)q_count(expr) - 1;
+    ray_t **a = (ray_t **)ray_data(expr);
+    int n = (int)q_count(expr);
+    const q_op_t *row = q_registry_operand_row(a[0]);
+    int first = a[0] == q_registry_list_value() || (row && row->lex == QLEX_GLYPH && !qsql_glyph_names_right(row));
+    int k = first ? 1 : n - 1;
+    while (k < n && sym_only_term(a[k])) k++;
+    return k < n ? k : -1;
 }
 
 /* The binding on a phrase's naming path (the phrase itself, or `g#sym:…'s), else NULL. */
