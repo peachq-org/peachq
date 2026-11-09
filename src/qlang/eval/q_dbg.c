@@ -30,16 +30,16 @@
 static _Thread_local ray_t* g_live[DBG_LIVE_MAX];  /* borrowed lambda values */
 static _Thread_local int32_t g_live_env[DBG_LIVE_MAX];  /* their q_env frames */
 static _Thread_local const ray_t* g_live_call[DBG_LIVE_MAX];  /* the caller's node in flight at the push */
+static _Thread_local const ray_t* g_frozen[DBG_LIVE_MAX + 1];  /* a lambda frame's node, HELD while a nested run walks */
 static _Thread_local int    g_live_depth;
 static _Thread_local int    g_frame_base;          /* the first live frame a snapshot reports */
 static _Thread_local int    g_cursor;              /* navigated frame, 0 = [0] */
-static _Thread_local int          g_susp_depth;    /* the suspended frame, whose node the q)) lines must not move */
-static _Thread_local const ray_t* g_susp_node;
 
 /* file/line: the loading script's, for a load line; 0 for console input (a q))
  * line typed into a suspended load included), so its lambdas and frame stay bare.
- * pos: the statement's caret table (owned), set once its text has parsed. */
-typedef struct { char text[DBG_STMT_MAX]; int64_t file, line; ray_t* pos; } dbg_stmt_t;
+ * pos: the statement's caret table (owned), set once its text has parsed; depth: the live frames beneath it;
+ * node: its own node, held while a nested run walks (NULL = live). */
+typedef struct { char text[DBG_STMT_MAX]; int64_t file, line; ray_t* pos; int depth; const ray_t* node; } dbg_stmt_t;
 
 static dbg_stmt_t g_stmts[DBG_NEST_MAX];
 static int  g_console_stmt;
@@ -55,6 +55,7 @@ typedef struct {
     int    off[DBG_SNAP_MAX];      /* their caret offsets, -1 = none */
     int    stmt_off;               /* frame [0]'s */
     int    depth;
+    int    taken;                  /* the statement level (unclamped g_depth) that took it: it ends with that level */
     ray_t* ex;                     /* retained failed-primitive value */
     ray_t* ey[DBG_EY_MAX];         /* retained args of the failed apply */
     int    eyn;
@@ -70,6 +71,7 @@ typedef struct {
 static dbg_snap_t g_snaps[DBG_NEST_MAX];
 static ray_t*     g_held[DBG_NEST_MAX];    /* the payload the level beneath had */
 static int8_t     g_outer[DBG_NEST_MAX];   /* the slot it was reading */
+static q_dbg_hold_t g_holds[DBG_NEST_MAX]; /* the frame beneath keeps its node while this level runs */
 static int        g_depth, g_snap_lvl;
 #define LVL(d)  ((d) <= 0 ? 0 : (d) < DBG_NEST_MAX ? (d) : DBG_NEST_MAX - 1)
 #define g_stmt  g_stmts[LVL(g_depth - 1)]
@@ -89,11 +91,29 @@ void q_dbg_frame_push(ray_t* lam) {
 static int live_clamp(int i) { return i > DBG_LIVE_MAX ? DBG_LIVE_MAX : i; }
 static ray_t* live_lam(int i) { return g_live[live_clamp(i) - 1]; }
 
-/* the node in flight in live frame i (0 = the statement): the walker's for the deepest, else the one that
- * called the frame above it */
-static const ray_t* live_node(int i) {
-    if (g_dbg_depth > 0 && i == g_susp_depth) return g_susp_node;
+/* the node a frame reports: held while a nested run walks in it (a load line, a q)) line, `value "…"`, a qSQL
+ * phrase, a view, a suspension), else the walker's for the deepest frame and the call site for every other */
+static const ray_t* lam_node(int i) {                    /* live lambda frame i, 1-based */
+    if (i <= DBG_LIVE_MAX && g_frozen[i]) return g_frozen[i];
     return i >= g_live_depth || i >= DBG_LIVE_MAX ? q_eval_node : g_live_call[i];
+}
+
+static const ray_t* stmt_node(const dbg_stmt_t* s) {
+    if (s->node) return s->node;
+    return g_live_depth > s->depth && s->depth < DBG_LIVE_MAX ? g_live_call[s->depth] : q_eval_node;
+}
+
+q_dbg_hold_t q_dbg_hold(void) {
+    q_dbg_hold_t h;
+    h.slot = g_live_depth > g_stmt.depth && g_live_depth <= DBG_LIVE_MAX ? &g_frozen[g_live_depth] : &g_stmt.node;
+    h.prev = *h.slot;
+    if (!h.prev) *h.slot = q_eval_node;
+    return h;
+}
+
+void q_dbg_release(q_dbg_hold_t h) {
+    q_eval_node = *h.slot;
+    *h.slot = h.prev;
 }
 
 /* the caret offset of node in a frame's text: the lambda's table, or the statement's; -1 when unknown.  The
@@ -137,16 +157,18 @@ static void stmt_pos_drop(dbg_stmt_t* s) {
     s->pos = NULL;
 }
 
-ray_t* q_dbg_statement_pos(ray_t* pos) {
-    ray_t* prev = g_stmt.pos;
+int q_dbg_statement_pos(ray_t* pos) {
+    if (g_stmt.pos) { if (pos) ray_release(pos); return 0; }
     g_stmt.pos = pos;
-    return prev;
+    return 1;
 }
 
 int q_dbg_statement_begin(const char* src, size_t n, int console) {
     int load_line = console < 0;
     if (load_line) console = g_console_stmt ? 2 : 0;   /* load line: inherit */
-    int d = g_depth++;
+    int d = g_depth;
+    if (d > 0 && d < DBG_NEST_MAX) g_holds[d] = q_dbg_hold();   /* the level beneath, before g_stmt moves */
+    g_depth++;
     if (d > 0 && d < DBG_NEST_MAX) {
         g_held[d] = q_err_take();
         g_outer[d] = (int8_t)g_snap_lvl;
@@ -157,6 +179,8 @@ int q_dbg_statement_begin(const char* src, size_t n, int console) {
     g_stmt.text[n] = '\0';
     g_stmt.file = load_line ? q_comment_origin(&g_stmt.line) : 0;
     stmt_pos_drop(&g_stmt);
+    g_stmt.depth = g_live_depth;
+    g_stmt.node = NULL;
     q_eval_node = NULL;
     int prev = g_console_stmt | g_trap_depth << DBG_TRAP_SHIFT;
     if (!load_line) g_trap_depth = 0;   /* a load line is its asker's; any other statement owns its errors */
@@ -175,8 +199,11 @@ void q_dbg_statement_end(int tok) {
     g_trap_depth = tok >> DBG_TRAP_SHIFT;
     stmt_pos_drop(&g_stmt);
     int d = --g_depth;
+    /* whatever this level took goes with it: its error is freed now, and a later error at the same address
+     * must never read as already seen (the shared slot past DBG_NEST_MAX included) */
+    if (g_snap.taken == d + 1) q_dbg_snapshot_clear();
     if (d <= 0 || d >= DBG_NEST_MAX) return;
-    if (g_snap_lvl == d) q_dbg_snapshot_clear();   /* whatever this level took */
+    q_dbg_release(g_holds[d]);
     g_snap_lvl = g_outer[d];
     if (tok & DBG_KEEP_ERR) { if (g_held[d]) ray_release(g_held[d]); }
     else q_err_put(g_held[d]);
@@ -199,7 +226,8 @@ q_dbg_read_fn q_dbg_set_reader(q_dbg_read_fn fn) {
 void q_dbg_reset(void) {
     q_dbg_snapshot_clear();
     g_live_depth = g_frame_base = g_cursor = 0;
-    for (int i = 0; i < DBG_NEST_MAX; i++) stmt_pos_drop(&g_stmts[i]);
+    memset(g_frozen, 0, sizeof g_frozen);
+    for (int i = 0; i < DBG_NEST_MAX; i++) { stmt_pos_drop(&g_stmts[i]); g_stmts[i].node = NULL; g_stmts[i].depth = 0; }
     g_stmt.text[0] = '\0';
     g_stmt.file = 0;
     g_console_stmt = g_trap_depth = g_dbg_depth = g_prompt_frames = g_depth = 0;
@@ -294,15 +322,16 @@ static void snap_take(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
     g_snap_lvl = LVL(g_depth - 1);   /* this level's own slot; an inherited one stands */
     q_dbg_snapshot_clear();
     g_snap.err = r;
+    g_snap.taken = g_depth;
     int stored = g_live_depth < DBG_LIVE_MAX ? g_live_depth : DBG_LIVE_MAX;
     int base   = g_frame_base < stored ? g_frame_base : stored;
     g_snap.depth = stored - base < DBG_SNAP_MAX ? stored - base : DBG_SNAP_MAX;
     for (int i = 0; i < g_snap.depth; i++) {
         g_snap.lam[i] = g_live[base + i];
         ray_retain(g_snap.lam[i]);
-        g_snap.off[i] = frame_off(g_snap.lam[i], NULL, live_node(base + i + 1));
+        g_snap.off[i] = frame_off(g_snap.lam[i], NULL, lam_node(base + i + 1));
     }
-    g_snap.stmt_off = frame_off(NULL, &snap_stmt, live_node(base));
+    g_snap.stmt_off = frame_off(NULL, &snap_stmt, stmt_node(&snap_stmt));
     if (fv) {
         g_snap.ex = fv;
         ray_retain(fv);
@@ -338,7 +367,7 @@ void q_dbg_print_trace(FILE* out, ray_t* err) {
     if (g_snap.err == err)
         for (int i = g_snap.depth; i >= 0; i--) frame_put(out, snap_text(&n, i, i));
     else
-        frame_put(out, frame_text(&n, 0, 0, NULL, &g_stmt, frame_off(NULL, &g_stmt, q_eval_node)));
+        frame_put(out, frame_text(&n, 0, 0, NULL, &g_stmt, frame_off(NULL, &g_stmt, stmt_node(&g_stmt))));
     fflush(out);   /* Windows buffers stderr to a file: a worker killed later would lose its trace */
 }
 
@@ -347,7 +376,8 @@ void q_dbg_print_trace(FILE* out, ray_t* err) {
 static char* live_text(size_t* n, int idx, int mark, const dbg_stmt_t* stmt) {
     int own = idx > g_frame_base;
     ray_t* lam = own ? live_lam(idx) : NULL;
-    return frame_text(n, own ? idx - g_frame_base : 0, mark, lam, stmt, frame_off(lam, stmt, live_node(idx)));
+    const ray_t* node = own ? lam_node(idx) : stmt_node(stmt);
+    return frame_text(n, own ? idx - g_frame_base : 0, mark, lam, stmt, frame_off(lam, stmt, node));
 }
 
 static void dbg_show_frame(int idx) {
@@ -426,11 +456,10 @@ static void dbg_run_line(const char* line, size_t n) {
 static ray_t* dbg_suspend(ray_t* err) {
     g_dbg_depth++;
     int outer_cursor = g_cursor;
-    int outer_frames = g_prompt_frames, outer_depth = g_susp_depth;
-    const ray_t* outer_node = g_susp_node;
+    int outer_frames = g_prompt_frames;
+    q_dbg_hold_t hold = q_dbg_hold();          /* the q)) lines must not move the suspended frame's caret */
     g_prompt_frames = q_eval_apply_frame_depth();
-    g_cursor = g_susp_depth = g_live_depth;
-    g_susp_node = q_eval_node;
+    g_cursor = g_live_depth;
     q_console_flush();
     dbg_banner(err, g_cursor);
     ray_t* out = NULL;
@@ -470,8 +499,7 @@ static ray_t* dbg_suspend(ray_t* err) {
     }
     g_cursor = outer_cursor;
     g_prompt_frames = outer_frames;
-    g_susp_depth = outer_depth;
-    g_susp_node = outer_node;
+    q_dbg_release(hold);
     g_dbg_depth--;
     return out;
 }
@@ -535,6 +563,7 @@ void q_dbg_mark_reported(ray_t* e) {
     g_snap_lvl = LVL(g_depth - 1);
     q_dbg_snapshot_clear();
     g_snap.err = e;
+    g_snap.taken = g_depth;
     g_snap.reported = 1;
 }
 

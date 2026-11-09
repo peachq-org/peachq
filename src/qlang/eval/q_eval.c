@@ -115,10 +115,13 @@ static ray_t* name_error(int64_t id) {
 /* A symbol is ONLY ever a global lookup (owner kdb transcript 2026-11-07): env (scopes + globals), then `.z.*`.
  * A keyword exists only at parse, which binds its value, so neither the registry nor `.q` is read here.  Owned
  * result or NULL. */
-static ray_t* resolve(int64_t id) {
-    ray_t* v = q_env_resolve(id);            /* owned (or an owned error) */
-    if (v) return q_view_deref(v);           /* a view reference recalcs */
-    return q_dotz_resolve(id);               /* owned */
+static ray_t* resolve(ray_t* sym) {
+    ray_t* v = q_env_resolve(sym->i64);      /* owned (or an owned error) */
+    if (v) {
+        if (q_view_is(v)) q_eval_node = sym;  /* a recalc walks the view's own tree: its caret stays on the name */
+        return q_view_deref(v);
+    }
+    return q_dotz_resolve(sym->i64);         /* owned */
 }
 
 /* Dot notation whose last segment names a cast target IS that cast:
@@ -161,7 +164,7 @@ ray_t* q_eval_dot_cast(int64_t id) {
 }
 
 static ray_t* name_value(ray_t* sym) {
-    ray_t* v = resolve(sym->i64);
+    ray_t* v = resolve(sym);
     if (!v) v = q_eval_dot_cast(sym->i64);
     return v ? v : name_error(sym->i64);
 }
@@ -598,7 +601,9 @@ ray_t* q_eval_statement(const char* src, int* parsed) {
         q_env_scope(scope);
         return ast ? ast : q_err(QE_PARSE);
     }
-    ray_t* outer = q_dbg_statement_pos(pos);   /* non-NULL: this text runs inside a statement (`value "…"`) */
+    q_dbg_hold_t hold = { NULL, NULL };
+    int own = q_dbg_statement_pos(pos);   /* else this text runs INSIDE a statement (`value "…"`): its frame's caret stays */
+    if (!own) hold = q_dbg_hold();
     ray_t* r;
     int silent = 1;
     if (!q_view_intercept(ast, src, &r)) {
@@ -606,7 +611,7 @@ ray_t* q_eval_statement(const char* src, int* parsed) {
         r = q_eval(ast);
     }
     ray_release(ast);
-    if (outer) ray_release(q_dbg_statement_pos(outer));
+    if (!own) q_dbg_release(hold);
     q_env_scope(scope);
     if (silent && r && !RAY_IS_ERR(r)) {
         ray_release(r);
@@ -1071,7 +1076,6 @@ ray_t* q_eval(ray_t* node) {
         if (argc > EVAL_MAX_ARGS) { ret = q_err(QE_RANK); goto out; }
         ray_t* err = eval_args_rtl(e + 1, argc, argv);
         if (err) { ret = err; goto out; }
-        q_eval_node = node;                     /* the arguments' applications moved it */
 
         const q_op_t* row = NULL;
         ray_t* fv;
@@ -1085,6 +1089,7 @@ ray_t* q_eval(ray_t* node) {
             ray_retain(h);                          /* embedded value / noun */
             fv = h;
         }
+        q_eval_node = node;                         /* the arguments' and a list head's applications moved it */
         if (RAY_IS_ERR(fv)) { release_args(argv, argc); ret = fv; goto out; }
         /* ONE recovery for every spelling of the head: a verb reached through a
          * name, a variable or an expression keeps its family and its enum arm */
