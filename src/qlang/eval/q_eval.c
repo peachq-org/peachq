@@ -256,16 +256,17 @@ static ray_t* seq_eval(ray_t** e, int64_t n) {
 }
 
 /* ray_sym_str is BORROWED (PLAN.md register, 2026-07-30) — no release here */
-static int sym_dotted(int64_t id) {
+static int sym_compound(int64_t id) {
     ray_t* s = ray_sym_str(id);
-    return s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == '.';
+    return s && ray_str_len(s) > 0 && memchr(ray_str_ptr(s), '.', (size_t)ray_str_len(s)) != NULL;
 }
 
-/* THE locality law (function-notation.md "Name scope", owner ruling 2026-09-11): a non-dotted name is local iff the
+/* THE locality law (function-notation.md "Name scope", owner ruling 2026-09-11): a name with no dot is local iff the
  * running lambda's frame holds it — its params and parse-time locals, seeded by lambda_call — else the write is
- * global.  The depth gate keeps a script load (floor raised) and a view recalc global. */
+ * global; a compound name is relative to the K-tree, never local (basics/syntax.md:623).  The depth gate keeps a
+ * script load (floor raised) and a view recalc global. */
 static int write_is_local(int64_t sym) {
-    return !sym_dotted(sym) && q_eval_apply_frame_depth() > 0 && q_env_local_get(sym) != NULL;
+    return !sym_compound(sym) && q_eval_apply_frame_depth() > 0 && q_env_local_get(sym) != NULL;
 }
 
 /* A colon assignment is judged by its SPELLING, a `set` by its target (owner rulings 2026-09-23) — q_env_set sees
@@ -366,7 +367,7 @@ static ray_t* assign_eval(ray_t* target, ray_t* rhs) {
  * loader carries a file.  Scope follows function-notation.md "Name scope": a
  * `:` target is local for the WHOLE body (the CARRIER-BORNE locals slot,
  * q_eval_lambda_locals — the same set lambda_call seeds), a `::` target is
- * global unless the name is a local, dotted targets and every other name are
+ * global unless the name is a local, compound targets and every other name are
  * global references.  Verbs are fn
  * VALUES after parse so they never read as names, and a nested lambda carrier
  * is opaque: its locals are its own. */
@@ -425,7 +426,7 @@ static void lam_scan(ray_t* n, lam_scan_t* s) {
     const eval_syms_t* S = syms();
     if (k == 3 && (RAY_IS_NULL(e[0]) || (nameref(e[0]) && e[0]->i64 == S->colon))) {
         if (nameref(e[1])) {
-            int global = RAY_IS_NULL(e[0]) || sym_dotted(e[1]->i64);
+            int global = RAY_IS_NULL(e[0]) || sym_compound(e[1]->i64);
             sym_add(global ? &s->glb : &s->loc, e[1]->i64, &s->oom);
         } else {
             lam_scan(e[1], s);
