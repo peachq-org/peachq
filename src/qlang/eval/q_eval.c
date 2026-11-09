@@ -617,9 +617,13 @@ ray_t* q_eval_statement(const char* src, int* parsed) {
     ray_t* ast = q_parse_at(src, &pos);
     if (!ast || RAY_IS_ERR(ast)) {
         if (parsed) *parsed = 0;         /* the statement never ran — see q_eval.h */
-        if (pos && !q_dbg_statement_pos(pos)) ray_release(pos);   /* a die the parser located carets frame [0] */
+        ray_t* e = ast ? ast : q_err(QE_PARSE);
+        if (!q_dbg_statement_pos(pos)) {      /* a text run inside a statement: the frame above its runner */
+            q_dbg_parse_fail(e, src, (int64_t)strlen(src), pos, 0);
+            if (pos) ray_release(pos);
+        }                                     /* else a die the parser located carets frame [0] */
         q_env_scope(scope);
-        return ast ? ast : q_err(QE_PARSE);
+        return e;
     }
     ray_t* text = NULL;
     if (!q_dbg_statement_pos(pos)) {      /* a text run INSIDE a statement (`value "…"`) is its own frame */
