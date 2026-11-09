@@ -148,8 +148,8 @@ int64_t q_env_scope_ctx(void);   /* the context a relative name resolves against
 ray_err_t q_env_frame_push(int barrier);
 void      q_env_frame_pop(void);
 ray_err_t q_env_local_set(int64_t sym, ray_t* val);
-ray_t*    q_env_local_get(int64_t sym);   /* TOP frame only; borrowed */
-int       q_env_local_take(int64_t sym, ray_t* cur);  /* q_env_take, TOP frame;
+ray_t*    q_env_local_get(int64_t sym);   /* the top frame, or the frame view's; borrowed */
+int       q_env_local_take(int64_t sym, ray_t* cur);  /* q_env_take on that frame;
                                                        * q_env_local_set puts back */
 int32_t   q_env_frame_depth(void);
 /* Read floor (< 0: floor at the current depth); returns the previous.  A
