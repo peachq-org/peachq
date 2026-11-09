@@ -285,7 +285,8 @@ static int lit_ws(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
-/* q Specials: 0N/0n (null), 0W/0w (+inf), -0W/-0w (-inf); lowercase forces a float context.  Returns bytes consumed. */
+/* q Specials: 0N/0n (null), 0W/0w (+inf), -0W/-0w (-inf).  The case picks the type only without a type letter: lowercase
+ * floats the literal (`0w 1 2`), while `0wp` is `0Wp` (Dkmajc).  Returns bytes consumed. */
 static int lit_special(const char *s, int p, q_tok_el *out) {
     int neg = (s[p] == '-');
     int q = p + (neg ? 1 : 0);
@@ -424,9 +425,8 @@ static int lit_hours(const lit_ctx *c, const q_tok_el *e) {
     return e->kind == Q_TOK_EL_INT && e->i >= -99 && e->i <= 99 && c->unit && LIT_HOUR_NS % c->unit == 0;
 }
 
-/* An element belongs to context c iff it is c's own shape, a Special, or, under a suffix, a plain int.  A
- * float-forcing element (a fraction, or a lowercase `0w`) may only be c's own shape or the null — `0nd` is the K-ism
- * spelling of `0Nd`, `0wd` is not a literal (float-backed `0wz` is).  A SUFFIXED literal DECLARES its type and converts a magnitude of the
+/* An element belongs to context c iff it is c's own shape, a Special, or, under a suffix, a plain int; a fraction
+ * belongs only as c's own shape.  A SUFFIXED literal DECLARES its type and converts a magnitude of the
  * same quantity — a calendar point or an amount of time, never one relabelled as the other (`"t"$2000.01.02` is
  * 00:00:00.001): a POINT takes only a finer point, since dropping precision moves the instant (`2000.01.01T06:00:00d`,
  * owner ruling 2026-09-04), while an AMOUNT takes any other amount, coarser included, because kdb is inconsistent
@@ -434,8 +434,7 @@ static int lit_hours(const lit_ctx *c, const q_tok_el *e) {
  * a CLOCK also takes p z n t u v (owner ruling 2026-10-27); the bare `2000.01.01Dz` wrote none.  An UNSUFFIXED strand
  * only INFERS its type, the finest its elements name, so every element is a coarser-or-equal kind on the same axis. */
 static int lit_el_ok(const q_tok_el *e, const lit_ctx *c, int suffixed) {
-    if (e->forces_float && e->kind != Q_TOK_EL_NULL && e->kind != c->kind &&
-        !(lit_el_special(e) && c->kind == Q_TOK_EL_DT)) return 0;
+    if (e->forces_float && !lit_el_special(e) && e->kind != c->kind) return 0;
     if (e->kind == Q_TOK_EL_INT) return suffixed;   /* `12:00 5` errs, `12:00 5u` reads 5u (owner ruling 2026-11-08) */
     if (e->kind == c->kind || lit_el_special(e)) return 1;
     if (suffixed && e->clocked) return c->kind == Q_TOK_EL_TS || c->kind == Q_TOK_EL_DT || !c->point;
