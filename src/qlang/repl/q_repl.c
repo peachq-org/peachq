@@ -262,9 +262,12 @@ static void tty_install_signals(ray_term_t* t);
 /* The tty's eval window: Ctrl-C is SIGINT (POSIX, ISIG) / CTRL_C_EVENT (Windows) ONLY between begin and end — no
  * early exits inside the bracket; end re-derives the prompt (`\d` switched context; the debugger left `q))`). */
 static int g_tty_eval;   /* a console line is running: a suspension inside it hands the editor back on its own */
+static volatile sig_atomic_t g_tty_idle;   /* the editor waits for a line: a SIGINT there only clears it (served) */
+static volatile sig_atomic_t g_dbg_idle;   /* the q)) reader waits for a line, even inside a suspended callback */
 
 static void tty_eval_begin(ray_term_t* t) {
     q_ctx_interrupt_take(1);
+    g_tty_idle = 0;
     g_tty_eval = 1;
     ray_term_eval_begin(t);
 }
@@ -294,6 +297,7 @@ static void tty_eval_end(ray_term_t* t) {
     g_tty_eval = 0;
     ray_term_eval_end(t);
     tty_prompt(t);
+    g_tty_idle = 1;
 }
 
 static const char* const* g_startup;   /* q_repl_prime's queue; taken by the first tty loop to run */
@@ -346,6 +350,7 @@ static void repl_interactive(FILE* out, FILE* err) {
     q_dbg_set_reader(repl_tty_dbg_read);   /* `\e 1` debugger over this editor */
 
     tty_startup(t, out, err);
+    g_tty_idle = 1;
     repl_teach_hint(t);
     ray_term_begin(t);
     if (t->hint_len > 0)
@@ -421,6 +426,7 @@ static void sigint_handler(int sig) {
     int n = q_eval_interrupt_post();
     ray_term_request_interrupt();          /* the editor's EINTR read answers the prompt-time signal with ^C */
     if (g_sigint_wake >= 0) (void)!write(g_sigint_wake, "", 1);   /* a full pipe is already a wake */
+    if (g_dbg_idle || (g_tty_idle && !q_ctx_in_callback())) { q_eval_interrupt_served(); return; }   /* clears the line */
     if (n == 2) {
         static const char w[] = "interrupt pending; ^C again to exit\n";
         if (write(2, w, sizeof w - 1) < 0) return;
@@ -430,6 +436,34 @@ static void sigint_handler(int sig) {
     if (t && t->owns_console) tcsetattr(STDIN_FILENO, TCSAFLUSH, &t->oldattr);
     signal(sig, SIG_DFL);
     raise(sig);
+}
+
+/* Ctrl-Z is job control, as on kdb's cooked console: the terminal goes back to how q found it, the process stops,
+ * and on SIGCONT the editor's mode returns and the prompt and the half-typed line are redrawn (by the poll loop, off
+ * the wake pipe).  Its mode is read here, not assumed: a stop inside `read0 0` resumes in that line mode. */
+static volatile sig_atomic_t g_tty_redraw;
+
+static void sigtstp_handler(int sig) {
+    int e = errno;
+    ray_term_t* t = g_live_term ? g_live_term : g_q_poll_repl.term;
+    struct termios mode;
+    int own = t && t->owns_console && tcgetattr(STDIN_FILENO, &mode) == 0;
+    if (own) tcsetattr(STDIN_FILENO, TCSANOW, &t->oldattr);
+    signal(sig, SIG_DFL);
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, sig);
+    sigprocmask(SIG_UNBLOCK, &set, NULL);
+    raise(sig);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = sigtstp_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTSTP, &sa, NULL);
+    if (own) tcsetattr(STDIN_FILENO, TCSANOW, &mode);
+    g_tty_redraw = 1;
+    if (g_sigint_wake >= 0) (void)!write(g_sigint_wake, "", 1);
+    errno = e;
 }
 #else
 /* registered after term.c's, so the console calls it first; TRUE ends the chain (the editor's eval window has
@@ -454,10 +488,23 @@ void q_repl_install_signals(void) {
 #endif
 }
 
-/* the editor's installer puts term.c's SIGINT back; ours goes on top of it */
+/* the editor's installer puts term.c's SIGINT back; ours goes on top of it.  Ctrl-C is SIGINT in the raw editor too
+ * (ISIG stays on): a console line, a timer and a client's handler all see it, and an idle prompt clears its line
+ * through the wake pipe; Ctrl-Z and Ctrl-\ keep their job-control meaning (owner 2026-11-09) */
 static void tty_install_signals(ray_term_t* t) {
     ray_term_install_signals(t);
     q_repl_install_signals();
+#ifndef RAY_OS_WINDOWS
+    if (t->owns_console) {
+        t->newattr.c_lflag |= ISIG;
+        tcsetattr(STDIN_FILENO, TCSANOW, &t->newattr);
+    }
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = sigtstp_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTSTP, &sa, NULL);
+#endif
 }
 
 #ifndef RAY_OS_WINDOWS
@@ -467,6 +514,7 @@ static ray_t* poll_sigint_read(ray_poll_t* poll, ray_selector_t* sel) {
     q_poll_repl_t* c = (q_poll_repl_t*)sel->data;
     char drain[64];
     while (read((int)sel->fd, drain, sizeof drain) > 0) {}
+    if (c->term && g_tty_redraw) { g_tty_redraw = 0; ray_term_redraw(c->term); }
     if (c->term && (q_eval_stop_pending || ray_term_interrupted())) tty_ctrl_c(c->term, c->out);
     return NULL;
 }
@@ -730,13 +778,18 @@ static int repl_tty_dbg_read(const char* prompt, char* buf, size_t cap) {
     ray_term_t* t = g_live_term ? g_live_term : g_q_poll_repl.term;
     if (!t) return -1;
     if (!prompt) {   /* a suspension from the idle prompt (an async/HTTP callback) ended: the editor is the console's again */
-        if (!g_tty_eval) { ray_term_eval_end(t); tty_prompt(t); ray_term_begin(t); }
+        if (!g_tty_eval) {
+            ray_term_eval_end(t);
+            tty_prompt(t);
+            ray_term_begin(t);
+        }
         return 0;
     }
     q_ctx_interrupt_take(1);
     ray_term_eval_end(t);
     ray_term_set_prompt(t, prompt, (int32_t)strlen(prompt));
     ray_term_begin(t);
+    g_dbg_idle = 1;
     int out = -1;
     for (;;) {
         int64_t sz = ray_term_getc(t);
@@ -757,6 +810,7 @@ static int repl_tty_dbg_read(const char* prompt, char* buf, size_t cap) {
         out = (int)n;
         break;
     }
+    g_dbg_idle = 0;
     q_ctx_interrupt_take(1);
     ray_term_eval_begin(t);
     return out;
@@ -814,6 +868,7 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err, int stdin_tty) {
         poll_sigint_wake_register(poll, c);
 #endif
         tty_startup(c->term, out, err);
+        g_tty_idle = 1;
         repl_teach_hint(c->term);
         ray_term_begin(c->term);   /* draw the first prompt */
         if (c->term->hint_len > 0)

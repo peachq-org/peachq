@@ -7,6 +7,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_count.h"
 #include "qlang/q_env.h"
+#include "qlang/eval/q_eval.h"      /* Q_EVAL_DEPTH_CEIL — the frame backstop */
 #include "qlang/q_registry_internal.h"
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"     /* q_type_is_table / _is_keyed — the \v|\a split */
@@ -30,7 +31,7 @@
 #define ENV_NAME_MAX 256
 #define ENV_SEG_MAX 64
 #define ENV_CTX_MAX 16
-#define ENV_FRAME_MAX 2048
+#define ENV_FRAME_MAX Q_EVAL_DEPTH_CEIL   /* a backstop: the walker's depth guard governs, its q)) reserve included */
 #define ENV_FRAME_INLINE 16
 
 /* The three directory dicts.  Each carries the load-bearing ` -> :: marker:

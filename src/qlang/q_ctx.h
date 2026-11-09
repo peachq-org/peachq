@@ -100,6 +100,10 @@ void q_ctx_install_remote_hooks(void);   /* handle 0's answer (q_ctx_remote_call
 
 int q_ctx_interrupt_take(int served);   /* consume the pending SIGINT (eval + editor flags), 1 if any; served: seen */
 
+void q_ctx_callback_begin(void);   /* an event-loop callback runs inside: the outermost drops a stale SIGINT */
+void q_ctx_callback_end(void);
+int  q_ctx_in_callback(void);      /* async-signal-safe: a callback is running (a SIGINT then has work to stop) */
+
 /* A client callback under `\e`: fn (borrowed) applied to msg, or `value` of msg; the value or the error answers.  An
  * HTTP caller's trace/tn: under `\e 2` the stack (owned, ray_free_raw) and its byte length, else untouched. */
 enum { Q_CTX_SYNC, Q_CTX_ASYNC, Q_CTX_HTTP };

@@ -9,7 +9,8 @@ What you see and can do when you run `q` at a terminal.
   failing frame shown; each extra `)` is one more level of suspension. At `q))` you can look at the function's
   local variables, and:
   - `\` leaves one level (back to `q)` from `q))`);
-  - `:` resumes, and `:value` resumes with that value as the result;
+  - `:` resumes, and `:value` resumes with that value as the result; after a Ctrl-C (`'stop`), `:` carries on with
+    what was interrupted, so a loop runs to its end;
   - `'text` signals a new error from here;
   - `&` shows where you are again; `` ` `` and `.` move up and down the call stack;
   - `\\` quits q altogether.
@@ -27,7 +28,8 @@ What you see and can do when you run `q` at a terminal.
 | Tab or Right at the end of the line | accept the grey hint |
 | Ctrl-W / Ctrl-U / Ctrl-K | delete the word before the cursor / to the start / to the end |
 | Ctrl-L | clear the screen |
-| Ctrl-C | while a line runs: interrupt it (`'stop`); at the prompt: clear the line (on Windows, at an empty prompt: quit) |
+| Ctrl-C | while a line, a timer (`.z.ts`) or a client's request runs: interrupt it (`'stop`); at the prompt: clear the line (on Windows, at an empty prompt: quit) |
+| Ctrl-Z | suspend q (job control); `fg` brings it back with the prompt and the half-typed line redrawn |
 | Ctrl-D | at an empty prompt: end the session (a process serving a port keeps its console) |
 | `\\` then Enter | quit |
 
@@ -42,7 +44,7 @@ What you see and can do when you run `q` at a terminal.
 
 Every line you enter at a terminal is saved to `~/.qhist` (or `./.qhist` when `HOME` is unset), duplicates included.
 Lines piped into `q` are not saved. Each record is one line: the time, the status (`ok`, the error, or `exit`), how
-many milliseconds it ran, and the line itself, ending with `NSL888`. Lines typed at `q))` are saved too; the line
+many milliseconds it ran, and the line itself, ending with `NSL888`. Lines typed at `q))` are not saved; the line
 that opened `q))` is saved when it finishes, with its error:
 
 ```

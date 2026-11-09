@@ -7,6 +7,7 @@
  * refcount contract: args borrowed, result owned. */
 #include "qlang/q_count.h"
 #include "qlang/eval/q_eval.h"
+#include "qlang/eval/q_dbg.h"   /* q_dbg_stop — an interrupted scan suspends where it stopped */
 #include "qlang/q_prim.h"
 #include "qlang/eval/q_eval_internal.h"
 #include "qlang/base/q_err.h"
@@ -307,7 +308,8 @@ static ray_t* acc_float_scan(ray_t* a, ray_t* b, ray_t* c) {
         double* o = (double*)ray_data(out);
         double s = a->f64;
         for (int64_t i = 0; i < len; i++) {
-            if (!(i & 0xffff) && q_eval_interrupt_take()) { ray_release(out); return q_err(QE_STOP); }
+            ray_t* stop = !(i & 0xffff) && q_eval_interrupt_take() ? q_dbg_stop() : NULL;
+            if (stop) { ray_release(out); return stop; }
             volatile double p = s * bv[bv_vec ? i : 0];   /* no FMA: the lambda rounds x*y first */
             s = cv[i] + p;
             if (__builtin_isnan(s)) s = NULL_F64;   /* the arithmetic kernels' one NaN */
