@@ -1729,38 +1729,35 @@ static P compose_node(ray_t *f, ray_t *tail) {
     return (P){ R_NOUN, q_list(xs, 3), 1, 0, 0 };
 }
 
-/* The parse-time half of the assignment law: the left side must be a target (q_parse_assign_target).  A lambda's
- * `n:` makes n a local, so a reserved spelling
- * is refused here, at definition, as eval refuses it at the call (D500a; a syntax word is a context member only
- * outside a lambda).  An application such as `[`$"test"]` is no target (Dlnkjq).  Consumes all three on a refusal. */
-static int lam_param(const Parser *p, int64_t id) {
-    if (!p->params) return id == ray_sym_intern_runtime("x", 1) || id == ray_sym_intern_runtime("y", 1) ||
-                           id == ray_sym_intern_runtime("z", 1);
-    const int64_t *d = (const int64_t *)ray_data(p->params);
-    for (int64_t i = 0; i < q_count(p->params); i++) if (d[i] == id) return 1;
+static int symvec_has(const ray_t *v, int64_t id) {
+    for (int64_t i = 0; i < q_count(v); i++) if (ray_read_sym(ray_data((ray_t *)v), i, RAY_SYM, v->attrs) == id) return 1;
     return 0;
+}
+
+static int lam_param(const Parser *p, int64_t id) {
+    if (p->params) return symvec_has(p->params, id);
+    return id == ray_sym_intern_runtime("x", 1) || id == ray_sym_intern_runtime("y", 1) ||
+           id == ray_sym_intern_runtime("z", 1);
 }
 
 /* `a::1` then `a:1` in one lambda is a global used as a local: 'a at the local's target, at definition
  * (basics/debug.md §Errors, ChangesIn4.0.md).  Assignments are checked in evaluation order, so `a:1;a::2` (the
  * local first) stays legal — `::` on a local writes the local. */
-static int seen_as(const Parser *p, int64_t key) {
-    const int64_t *d = (const int64_t *)ray_data(*p->globals);
-    for (int64_t i = 0; i < q_count(*p->globals); i++) if (d[i] == key) return 1;
-    return 0;
-}
-
 static void global_local_check(Parser *p, ray_t *lhs, ray_t *verb, int at) {
     int64_t id = lhs->i64;
     int local = sym_name_is(verb, ":");
     if (!p->globals || lam_param(p, id) || (!local && !sym_name_is(verb, "::"))) return;
     ray_t *s = ray_sym_str(id);
     if (!s || !ray_str_len(s) || ray_str_ptr(s)[0] == '.') return;   /* dotted names are global by spelling */
-    if (seen_as(p, ~id)) return;                                     /* a local already: `::` writes it */
-    if (local && seen_as(p, id)) { g_die_at = at; die_signal(QE_NAME, ray_str_ptr(s), ray_str_len(s)); }
+    if (symvec_has(*p->globals, ~id)) return;                        /* a local already: `::` writes it */
+    if (local && symvec_has(*p->globals, id)) { g_die_at = at; die_signal(QE_NAME, ray_str_ptr(s), ray_str_len(s)); }
     *p->globals = symvec_add(*p->globals, local ? ~id : id);
 }
 
+/* The parse-time half of the assignment law: the left side must be a target (q_parse_assign_target).  A lambda's
+ * `n:` makes n a local, so a reserved spelling
+ * is refused here, at definition, as eval refuses it at the call (D500a; a syntax word is a context member only
+ * outside a lambda).  An application such as `[`$"test"]` is no target (Dlnkjq).  Consumes all three on a refusal. */
 static void assign_check(Parser *p, ray_t *lhs, ray_t *verb, ray_t *rhs, int at) {
     q_assign_target_t k = q_parse_assign_target(lhs);
     int colon = sym_name_is(verb, ":") || verb_marked(verb);
