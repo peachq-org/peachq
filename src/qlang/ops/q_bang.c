@@ -287,7 +287,12 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -3:  return bang_s1(y);
         case -4:  return q_tokens_fn(y);
         case -5:  return q_parse_builtin_fn(y);
-        case -6:  return q_eval(y);              /* internal.md: -6! is eval */
+        case -6: {   /* internal.md: -6! is eval; a tree's names are handles, so they resolve at the session `\d` */
+            int64_t scope = q_env_scope(Q_ENV_SCOPE_SESSION);
+            ray_t* r = q_eval(y);
+            q_env_scope(scope);
+            return r;
+        }
         case -7:  return h_hcount(y);
         case -8:  return q_wire_serialize(y, Q_WIRE_ASYNC);
         case -22: return q_wire_serialize_len(y);
