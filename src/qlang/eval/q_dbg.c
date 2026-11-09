@@ -9,6 +9,8 @@
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_eval_internal.h"   /* q_eval_node */
 #include "qlang/base/q_err.h"
+#include "qlang/base/q_type.h"    /* q_type_is_int_atom — a frame record's numbers */
+#include "qlang/q_prim.h"         /* q_str_charv_of_str, q_str_text_bytes — its strings */
 #include "qlang/parse/q_parse.h"
 #include "qlang/q_ctx.h"
 #include "qlang/q_comment.h"   /* q_comment_origin — a load line's file + line */
@@ -327,12 +329,13 @@ static ray_t* lam_name(ray_t* lam) {
         int64_t q = q_env_qualify(ns, m->i64);
         ray_t* s = q >= 0 && q_env_get(q) == lam ? ray_sym_str(q) : NULL;
         if (s && !RAY_IS_ERR(s)) {
-            size_t sn = ray_str_len(s), pre = ns ? 0 : 2;
-            char* b = (char*)ray_alloc_raw(sn + 2);
-            if (b) {
+            size_t sn = ray_str_len(s);
+            char* b = ns ? NULL : (char*)ray_alloc_raw(sn + 2);
+            if (ns) out = q_str_charv_of_str(s);
+            else if (b) {
                 memcpy(b, "..", 2);
-                memcpy(b + pre, ray_str_ptr(s), sn);
-                out = ray_charv(b, (int64_t)(sn + pre));
+                memcpy(b + 2, ray_str_ptr(s), sn);
+                out = ray_charv(b, (int64_t)sn + 2);
                 ray_free_raw(b);
             }
             ray_release(s);
@@ -440,19 +443,17 @@ static void frame_put(FILE* out, char* text) {
 
 /* ===== the frame record (code;(name;file;line;text);pos;n), built only when asked: .Q.Ll, a trap, a trace ===== */
 
-static void push(ray_t** l, ray_t* item) {   /* consumes item */
-    if (!item || RAY_IS_ERR(item)) { if (item) ray_release(item); return; }
-    if (*l && !RAY_IS_ERR(*l)) *l = ray_list_append(*l, item);
-    ray_release(item);
+/* consumes item; a failed item fails the list, so a record is never short (its builder answers 'wsfull) */
+static void push(ray_t** l, ray_t* item) {
+    if (*l && !RAY_IS_ERR(*l) && item && !RAY_IS_ERR(item)) *l = ray_list_append(*l, item);
+    else if (*l && !RAY_IS_ERR(*l)) { ray_release(*l); *l = q_err(QE_WSFULL); }
+    if (item) ray_release(item);
 }
 
 /* enlist v — item 0, a list whose first is the function (kx-vscode `(.Q.trp ~ first first @) each bt`) */
 static ray_t* boxed(ray_t* v) {
     ray_t* c = ray_list_new(1);
-    if (!v) v = RAY_NULL_OBJ;
-    ray_retain(v);
-    push(&c, v);
-    return c;
+    return c && !RAY_IS_ERR(c) ? ray_list_append(c, v ? v : RAY_NULL_OBJ) : c;
 }
 
 static ray_t* rec_new(ray_t* code, const dbg_frame_t* f, int64_t num) {   /* code borrowed */
@@ -485,21 +486,17 @@ static ray_t* rec_live(ray_t* lam, const dbg_stmt_t* stmt, int64_t off, int64_t 
     return r;
 }
 
-static int rec_str(ray_t* v, const char** p, size_t* n) {
-    if (v && v->type == RAY_CHARV) { *p = (const char*)ray_data(v); *n = (size_t)q_count(v); return 1; }
-    if (v && v->type == -RAY_CHARV) { *p = (const char*)&v->u8; *n = 1; return 1; }
+static int rec_str(ray_t* v, const char** p, size_t* n) {   /* a string, or () */
+    int64_t k = 0;
     if (v && v->type == RAY_LIST && !q_count(v)) { *p = ""; *n = 0; return 1; }
-    return 0;
+    if (!q_str_text_bytes(v, p, &k)) return 0;
+    *n = (size_t)k;
+    return 1;
 }
 
-static int rec_int(ray_t* v, int64_t* x) {
-    if (!v) return 0;
-    switch (v->type) {
-    case -RAY_I64: *x = v->i64; break;
-    case -RAY_I32: *x = v->i32 == NULL_I32 ? NULL_I64 : v->i32; break;
-    case -RAY_I16: *x = v->i16 == NULL_I16 ? NULL_I64 : v->i16; break;
-    default: return 0;
-    }
+static int rec_int(ray_t* v, int64_t* x) {   /* an integer atom; its null is -1 (no caret) */
+    if (!q_type_is_int_atom(v)) return 0;
+    *x = RAY_ATOM_IS_NULL(v) ? -1 : q_type_iatom_val(v);
     return 1;
 }
 
@@ -513,18 +510,14 @@ static int rec_fields(ray_t* r, dbg_frame_t* f, int64_t* num) {
         !rec_int(ray_list_get(info, 2), &f->line) || !rec_str(ray_list_get(info, 3), &f->text, &f->tn) ||
         !rec_int(ray_list_get(r, 2), &f->off) || !rec_int(ray_list_get(r, 3), num))
         return 0;
-    if (f->off == NULL_I64) f->off = -1;
     return 1;
 }
 
-static ray_t* rec_renum(ray_t* r, int64_t num) {
-    ray_t* c = ray_list_new(4);
-    for (int i = 0; i < 3; i++) {
-        ray_t* v = ray_list_get(r, i);
-        ray_retain(v);
-        push(&c, v);
-    }
-    push(&c, ray_i64(num));
+static ray_t* rec_renum(ray_t* r, int64_t num) {   /* r borrowed: shared, so the set copies it */
+    ray_t* n = ray_i64(num);
+    ray_retain(r);
+    ray_t* c = ray_list_set(r, 3, n);
+    ray_release(n);
     return c;
 }
 
