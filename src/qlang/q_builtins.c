@@ -42,12 +42,16 @@ static ray_t* on_text(ray_t* x, ray_t* (*f)(const char*, int64_t)) {
     return r;
 }
 
+/* a failure hands the debugger its text and die token: `[2] text` + `(.q.parse)` frames (basics/debug.md §Trap) */
 static ray_t* parse_src(const char* src, int64_t n) {
-    (void)n;
-    ray_t* ast = q_parse(src);
+    ray_t* pos = NULL;
+    ray_t* ast = q_parse_at(src, &pos);
+    if (!ast) ast = q_err(QE_PARSE);
     /* handed out as DATA: empty statements become () (kdb parse ";") */
-    if (ast && !RAY_IS_ERR(ast)) q_ast_fill_empty_stmts(ast);
-    return ast ? ast : q_err(QE_PARSE);
+    if (!RAY_IS_ERR(ast)) q_ast_fill_empty_stmts(ast);
+    else q_dbg_parse_fail(ast, src, n, pos);
+    if (pos) ray_release(pos);
+    return ast;
 }
 
 /* (parse str) — overrides rayfall's lisp parse.  Exported (q_builtins.h) so the `-5!` alias single-homes here. */
@@ -348,6 +352,8 @@ void q_builtins_register(void) {
     bind_vary (".Q.c.trp", 3, q_dbg_trp_fn);    /* trap-at + backtrace (ref/dotq.md) */
     bind_vary (".Q.c.trpd", 3, q_dbg_trpd_fn);  /* trap + backtrace, any rank (ref/dotq.md) */
     bind_unary(".Q.c.sbt", q_dbg_sbt_fn);    /* string backtrace (ref/dotq.md) */
+    bind_unary(".Q.c.Ll", q_dbg_ll_fn);      /* the live stack's frame records (SO 76408267) */
+    bind_unary(".Q.c.btx", q_dbg_btx_fn);
     bind_vary (".Q.c.bt",  1, q_dbg_bt_fn);     /* dump backtrace (ref/dotq.md) */
     bind_value(".Q.c.res", q_registry_name_reserved_words());
     /* `.Q.c.rd` — the hardened docroot read h.q's default `.z.ph` serves through.
