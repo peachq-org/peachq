@@ -53,6 +53,7 @@ static ray_t* gen_syms(int64_t n, ray_t* ysym, int distinct) {
     ray_t* out = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
     if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
     for (int64_t i = 0; i < n; i++) {
+        if ((i & 0xFFFF) == 0 && ray_interrupted()) { ray_release(out); return q_err(QE_STOP); }
         char buf[8];
         int64_t id;
         for (;;) {
