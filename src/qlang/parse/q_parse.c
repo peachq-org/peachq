@@ -1110,7 +1110,7 @@ static void pend_unwind(void) {                   /* a die: release every ref */
  * Emits kdb's dict-then-flip parse tree: unkeyed (+:;(!;…)); keyed
  * keytab!valtab; NO value columns (`([a:`A;c:`C])`, xcol's rename
  * map) = the DICTIONARY literal (ref/cols.md; ChangesIn4.1.md). */
-static ray_t *parse_table_lit(Parser *p) {
+static ray_t *table_lit_cols(Parser *p) {
     adv(p);
     if (at(p, T_RBRACK)) {
         adv(p);
@@ -1134,6 +1134,15 @@ static ray_t *parse_table_lit(Parser *p) {
     expect(p, T_RPAREN, "expected ')'");
     xyz_unbind(p->xyz, vcols);
     return bang_tree(table_lit_flip(kcols), table_lit_flip(vcols));
+}
+
+/* A column label is no assignment, so the global-as-local check skips the literal (`{sym::1; ([]sym:())}`) */
+static ray_t *parse_table_lit(Parser *p) {
+    ray_t **globals = p->globals;
+    p->globals = NULL;
+    ray_t *t = table_lit_cols(p);
+    p->globals = globals;
+    return t;
 }
 
 /* `(+)` or `((+))`, the cursor past the first `(`: a glyph written alone in parens */
@@ -2213,6 +2222,8 @@ static ray_t *parse_phrase_list(Parser *p, QCtx ctx) {
      * parse_base_q); hold the partial list where the longjmp handler frees it. */
     ray_t **lst = pend_push();
     *lst = ray_list_new(0);
+    ray_t **globals = p->globals;   /* a phrase's `n:` labels a column: no assignment for the global-as-local check */
+    p->globals = NULL;
     phrase_head_guard(p);
     P first = parse_e(p, ctx);
     if (first.role != R_NONE) {
@@ -2226,6 +2237,7 @@ static ray_t *parse_phrase_list(Parser *p, QCtx ctx) {
             ray_release(f.v);
         }
     }
+    p->globals = globals;
     ray_t *done = *lst;
     pend_pop();                                 /* success: unlink, keep it */
     return done;
