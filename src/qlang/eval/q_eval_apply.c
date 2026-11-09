@@ -1457,8 +1457,11 @@ static ray_t* comp_call(ray_t* comp, ray_t** args, int64_t n) {
 }
 
 /* An iterator value applied to its one operand IS the derived function —
- * `(/)[+]`, `+/` and the literal `(/;+)` are all this one call. */
+ * `(/)[+]`, `+/` and the literal `(/;+)` are all this one call.  `(')` applied to 2+ values composes
+ * as `'[f;ff]` does (ref/compose.md:16-23; qchk qchk_tests.q:238). */
 static ray_t* iter_call(ray_t* it, ray_t** args, int64_t n) {
+    if (n >= 2 && q_eval_apply_iter_id(it) == 0)
+        return q_eval_apply(q_registry_compose_value(), NULL, args, n);
     if (n != 1) return q_err(QE_RANK);
     if (!args[0]) return q_eval_apply_proj_new(it, NULL, args, n, 1);
     const q_op_t* frow = q_eval_apply_is_fnval(args[0])
