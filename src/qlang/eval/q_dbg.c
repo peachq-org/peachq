@@ -217,8 +217,10 @@ int q_dbg_statement_begin(const char* src, size_t n, int console) {
     return prev;
 }
 
+/* once the statement's own text has parsed (its caret table is in), a parse is another text's — `value "…"` — and
+ * what it makes is console-made */
 int64_t q_dbg_statement_origin(int64_t* line) {
-    if (g_depth <= 0 || !g_stmt.file) return 0;   /* between statements the slot is stale */
+    if (g_depth <= 0 || !g_stmt.file || g_stmt.pos) return 0;   /* between statements the slot is stale */
     *line = g_stmt.line;
     return g_stmt.file;
 }
