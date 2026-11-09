@@ -288,11 +288,13 @@ static const char* const* startup_take(void) {
     return s;
 }
 
+/* under -q the startup texts load non-interactively: an error dumps its stack and never suspends (debug.md "Mode 2
+ * ... default for loading scripts non-interactively (e.g. with -q)") */
 static void tty_startup(ray_term_t* t, FILE* out, FILE* err) {
     int rc = 0;
     for (const char* const* s = startup_take(); s && *s && rc == 0; s++) {   /* an abort skips the rest, as in batch */
         tty_eval_begin(t);
-        rc = q_ctx_run_console_src(*s, out, err);
+        rc = q_dotz_quiet() ? q_ctx_run_src(*s, out, err, NULL) : q_ctx_run_console_src(*s, out, err);
         tty_eval_end(t);
     }
 }
