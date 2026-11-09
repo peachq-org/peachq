@@ -26,11 +26,10 @@ int  q_dbg_frame_base(int base);
  * (inherits suspendability from the statement that asked for the load). */
 int  q_dbg_statement_begin(const char* src, size_t n, int console);
 void q_dbg_statement_end(int tok);
-/* the current statement's file + line when it is a loaded script's (the origin its lambdas and
- * its frame-[0] line report); 0 for console input, line untouched */
+/* the current statement's file + line while a loaded script's own text parses (the origin its lambdas and
+ * its frame-[0] line report); 0 for console input or a text parsed after it (`value`), line untouched */
 int64_t q_dbg_statement_origin(int64_t* line);
-int  q_dbg_statement_pos(ray_t* pos);   /* the caret table (q_parse_at), consumed — 0: a text INSIDE the statement,
-                                         * pos left to the caller (its text frame's) */
+int  q_dbg_statement_pos(ray_t* pos);   /* the caret table (q_parse_at), consumed; 0 = a nested text's, kept */
 typedef struct { const ray_t** slot; const ray_t* prev; } q_dbg_hold_t;
 q_dbg_hold_t q_dbg_hold(void);          /* the running frame keeps its caret node while another text's trees walk */
 void         q_dbg_release(q_dbg_hold_t h);
@@ -60,8 +59,7 @@ int  q_dbg_reported(ray_t* err);
 /* Apply-frame depth a `q))` statement runs at (0 = not suspended): those
  * frames are parked BENEATH the prompt, not evaluating it. */
 int  q_dbg_prompt_frames(void);
-/* the uncaught display: 'text + the numbered frames, each with its caret line (all = 0: frame [0] only).  _trace
- * builds it as OWNED NUL-terminated text (ray_free_raw), *len its length; NULL on OOM. */
+/* the uncaught display: 'text + numbered frames with carets (all = 0: frame [0] only); _trace OWNS it (or NULL) */
 void  q_dbg_print_trace(FILE* out, ray_t* err, int all);
 char* q_dbg_trace(ray_t* err, int all, size_t* len);
 void q_dbg_snapshot_clear(void);     /* a trap consumed the error */
@@ -76,8 +74,8 @@ ray_t* q_dbg_trp_dot(ray_t* y);                 /* -105!(f;args;g): .Q.trpd on a
 
 ray_t* q_dbg_zex(void);              /* owned failed-primitive value or NULL */
 ray_t* q_dbg_zey(void);              /* owned arg list or NULL */
-/* `.z.s` (ref/dotz.md#zs-self) — the executing lambda: the TOP live frame, so a
- * suspended session sees the failing function.  NULL at top level. */
+/* `.z.s` (ref/dotz.md#zs-self) — the executing lambda, text frames skipped; at q)) the navigated frame's
+ * (KDB-X "It follows you as you navigate").  NULL at top level. */
 ray_t* q_dbg_self(void);
 
 /* Console line reader for the suspend loop (front end installs; NULL = no suspension possible).  The reader owns

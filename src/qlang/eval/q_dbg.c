@@ -557,8 +557,6 @@ static void dbg_run_line(const char* line, size_t n) {
     q_env_frame_view(prev);
 }
 
-/* Returns NULL to propagate err (\ or EOF), a value to resume (:r), or a new
- * error to signal from this frame ('err). */
 /* the `\d` a frame runs in: a lambda's, where it was written; a statement's or a text's, the session's at the error */
 static int64_t frame_ctx(int idx, int64_t session) {
     ray_t* lam = idx > 0 && idx <= g_live_depth ? live_lam(idx) : NULL;
@@ -567,8 +565,9 @@ static int64_t frame_ctx(int idx, int64_t session) {
     return ctx ? ctx->i64 : 0;
 }
 
-/* A q)) line reports its own frames only, numbered past the suspended ones and two hidden frames — the debugger's
- * own and the line's — as kdb numbers them (debug.md `{x+y}[a;y]` -> [5] under a [2] suspension; Q4M `b:a+y`). */
+/* Returns NULL to propagate err (\ or EOF), a value to resume (:r), or a new error to signal from this frame
+ * ('err).  A q)) line reports its own frames only, numbered past the suspended ones and two hidden frames — the
+ * debugger's own and the line's — as kdb numbers them (debug.md `{x+y}[a;y]` -> [5] under a [2] suspension). */
 static ray_t* dbg_suspend(ray_t* err) {
     g_dbg_depth++;
     int outer_cursor = g_cursor;
@@ -641,8 +640,6 @@ static ray_t* dbg_suspend(ray_t* err) {
     return out;
 }
 
-/* Local errors ALWAYS suspend (debug.md — no toggle); `\e` gates only whether
- * the REMOTE door marks its statements console (q_ctx.c remote seams). */
 /* "inside a lambda": an apply frame above the prompt's, or a `value`d text (whose door floors the apply frames) run
  * above a lambda frame of the statement's own */
 static int dbg_in_lambda(void) {
@@ -653,6 +650,8 @@ static int dbg_in_lambda(void) {
     return i > g_frame_base && i < g_live_depth;
 }
 
+/* Local errors ALWAYS suspend (debug.md — no toggle); `\e` gates only whether
+ * the REMOTE door marks its statements console (q_ctx.c remote seams). */
 static int dbg_suspendable(ray_t* r) {
     return g_reader && g_console_stmt && g_trap_depth == 0 && dbg_in_lambda() && !q_err_is(r, QE_STOP);
 }
