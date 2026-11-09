@@ -526,10 +526,15 @@ static bool str_pat_like(const char* s, size_t sn, const char* p, size_t pn, boo
     }
 }
 
-/* ss/ssr take neither a star nor an empty pattern — both are 'length. */
-static bool str_pat_fixed(const char* p, size_t pn) {
+/* ss/ssr's pattern.  One character is itself: alone it opens no construct (q-desc's "[",
+ * resq's "*").  Longer, it takes neither a star nor emptiness — both are 'length. */
+static bool str_ss_pattern_ok(const char* p, size_t pn) {
     size_t at[1];
-    return pn > 0 && str_pat_stars(p, pn, at, 1) == 0;
+    return pn == 1 || (pn > 0 && str_pat_stars(p, pn, at, 1) == 0);
+}
+
+static bool str_ss_match_at(const char* s, size_t sn, size_t i, const char* p, size_t pn) {
+    return pn == 1 ? s[i] == p[0] : str_pat_run(s, sn, i, p, pn, NULL);
 }
 
 bool q_str_subject_bytes(ray_t* x, const char** p, int64_t* n) {
@@ -609,12 +614,12 @@ ray_t* q_ss_wrap(ray_t* s, ray_t* p) {
     if (!q_str_text_bytes(s, &sp, &sn64) || !q_str_text_bytes(p, &pp, &pn64))
         return q_err(QE_TYPE);
     size_t sn = (size_t)sn64, pn = (size_t)pn64;
-    if (!str_pat_fixed(pp, pn)) return q_err(QE_LENGTH);
+    if (!str_ss_pattern_ok(pp, pn)) return q_err(QE_LENGTH);
     size_t w = str_pat_width(pp, pn);
     ray_t* out = ray_vec_new(RAY_I64, 8);
     if (RAY_IS_ERR(out)) return out;
     for (size_t i = 0; i + w <= sn; ) {
-        if (!str_pat_run(sp, sn, i, pp, pn, NULL)) { i++; continue; }
+        if (!str_ss_match_at(sp, sn, i, pp, pn)) { i++; continue; }
         int64_t idx = (int64_t)i;
         out = ray_vec_append(out, &idx);
         if (RAY_IS_ERR(out)) return out;
@@ -637,7 +642,7 @@ ray_t* q_ssr_wrap(ray_t** args, int64_t n) {
       if (!r_is_fn && !q_str_text_bytes(r, &rp_, &rn_))
           return q_err(QE_TYPE); }
     size_t sn = (size_t)sn64, pn = (size_t)pn64;
-    if (!str_pat_fixed(pp, pn)) return q_err(QE_LENGTH);
+    if (!str_ss_pattern_ok(pp, pn)) return q_err(QE_LENGTH);
     size_t w = str_pat_width(pp, pn);
     size_t cap = sn + 16, blen = 0;
     char* b = (char*)malloc(cap);
@@ -650,7 +655,7 @@ ray_t* q_ssr_wrap(ray_t** args, int64_t n) {
     ray_t* err = NULL;
     size_t i = 0;
     while (i < sn) {
-        bool m = i + w <= sn && str_pat_run(sp, sn, i, pp, pn, NULL);
+        bool m = i + w <= sn && str_ss_match_at(sp, sn, i, pp, pn);
         if (m) {
             if (r_is_fn) {
                 ray_t* sub = ray_charv(sp + i, (int64_t)w); /* matched text, in flight */
