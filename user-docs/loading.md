@@ -27,12 +27,13 @@ load nothing: using a name loads its file. Five spellings drive it by hand:
 **Nothing is loaded at start-up; a file loads the first time you use one of its names.** Reading `.regexp.extract`
 when it does not exist yet — from the console, a script or a connection — loads `pq/regexp.q` (first `.pq` itself),
 then the reference proceeds; so does opening a `` `:pq:duckdb: `` connection. It happens once per file: after that a
-missing `.regexp` name is the usual `'name` error. Only reading a missing name triggers it: assigning
-`.regexp.mine:1` does not, and a name you defined yourself is found, so it loads nothing. But when some other missing
-`.regexp` name loads the file, the file redefines its own names over yours — keep your code out of library
-namespaces. `.pq` is the one exception: assigning `.pq.mine:1` also loads `pq.q`. A
+missing `.regexp` name is the usual `'name` error. Only reading a missing name triggers it, and only in a namespace
+you have not written into: assigning `.regexp.mine:1` — or defining `mine` under `\d .regexp` — loads nothing and
+makes `.regexp` yours, so the file never loads into it on its own and reading `.regexp.extract` is `'.regexp.extract`
+(`\l pq` and `\l pq/regexp.q` still load it when you ask). `.pq` is the one exception: assigning `.pq.mine:1` loads
+`pq.q` first. A
 namespace the core already has, like `.j`, still gets its library half on the first missing name. Until a file loads,
-its namespace is absent from `` key ` ``.
+its namespace is absent from `` key ` `` unless you wrote into it or the core has it.
 
 **Disk wins over the built-in copy.** `\l pq/<file>.q` looks for `pq/<file>.q` in the working directory, then under
 `$QHOME`, and only then uses the copy built into the binary. So a `pq/` directory beside your scripts — or the one a
