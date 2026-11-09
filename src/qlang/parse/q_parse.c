@@ -328,6 +328,13 @@ static int lone_colon_next(const char *src, int p) {
     return src[p] == ':' && src[p + 1] != ':';
 }
 
+static int symbol_colon_ends(const char *src, int p) {
+    if (src[p] == '`') return 1;
+    int b = p;
+    while (src[p] == ' ' || src[p] == '\t') p++;
+    return !src[p] || src[p] == '\n' || src[p] == '\r' || (src[p] == '/' && p > b);
+}
+
 /* The tagged text literal (docs/parser-architecture.md § Rules): at a token start, N >= 2 backticks + a tag + one
  * whitespace byte open it and the next run of exactly N backticks closes it; the value is the bytes between, verbatim,
  * always a char vector.  NULL when no tag follows the run: it is symbols, so p is untouched. */
@@ -541,15 +548,16 @@ static Tokens scan(const char *src) {
                 } else {
                     /* A BARE symbol takes ':' and '/' too (ref/doth.md .h.ha:
                      * `http://www.example.com), but only where more body
-                     * follows — a trailing ':' is still the operator, and '-'
-                     * is never a bare-symbol byte (`a-b stays subtraction).
+                     * follows, or as colons before a back-quote, end of line or a blank-led comment (`a:`b, qchk.q:100),
+                     * and '-' is never a bare-symbol byte (`a-b stays subtraction).
                      * Only a run's FIRST item may not lead with '_' (`a`_ is two symbols, Dvybco). */
                     if (count > 0 || !q_parse_drop_lead(src[p])) for (;;) {
                         while ((CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) ||
                                src[p] == '.')
                             p++;
-                        int sep = p;
-                        while (src[sep] == ':' || src[sep] == '/') sep++;
+                        int sep = p, colons = 1;
+                        while (src[sep] == ':' || src[sep] == '/') colons &= src[sep++] == ':';
+                        if (sep > p && colons && symbol_colon_ends(src, sep)) { p = sep; break; }
                         if (sep == p ||
                             !((CLASS[(uint8_t)src[sep]] & (CL_ALPHA | CL_DIGIT)) ||
                               src[sep] == '.'))
@@ -2518,8 +2526,18 @@ ray_t *q_parse_tokens(const char *src, int64_t n) {
     int at = 0;
     for (int i = 0; i < ts.n - 1; i++) {
         l = tokens_gap(l, src, at, ts.t[i].start);
-        l = tokens_push(l, src, ts.t[i].start, ts.t[i].start + ts.t[i].len);
-        at = ts.t[i].start + ts.t[i].len;
+        int a = ts.t[i].start, b = a + ts.t[i].len;
+        /* kdb tokenises a numeric strand item by item, its blanks between (Dbzjyl; kdb-q-ext-vscode lexing.json) */
+        int strand = ts.t[i].kind == T_NOUN && src[a] != '"' && src[a] != '`';
+        for (int e = a; strand && e < b; e++)
+            if (CLASS[(uint8_t)src[e]] & CL_WS) {
+                int w = e;
+                while (CLASS[(uint8_t)src[w]] & CL_WS) w++;
+                l = tokens_push(tokens_push(l, src, a, e), src, e, w);
+                a = e = w;
+            }
+        l = tokens_push(l, src, a, b);
+        at = b;
     }
     l = tokens_gap(l, src, at, (int)n);
     drop_tokens();
