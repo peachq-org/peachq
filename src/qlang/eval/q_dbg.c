@@ -558,6 +558,14 @@ static void dbg_run_line(const char* line, size_t n) {
 
 /* Returns NULL to propagate err (\ or EOF), a value to resume (:r), or a new
  * error to signal from this frame ('err). */
+/* the `\d` a frame runs in: a lambda's, where it was written; a statement's or a text's, the session's at the error */
+static int64_t frame_ctx(int idx, int64_t session) {
+    ray_t* lam = idx > 0 && idx <= g_live_depth ? live_lam(idx) : NULL;
+    ray_t* ctx = NULL;
+    if (!lam || is_text(lam) || !q_eval_apply_lambda_parts(lam, NULL, NULL, &ctx)) return session;
+    return ctx ? ctx->i64 : 0;
+}
+
 /* A q)) line reports its own frames only, numbered past the suspended ones and two hidden frames — the debugger's
  * own and the line's — as kdb numbers them (debug.md `{x+y}[a;y]` -> [5] under a [2] suspension; Q4M `b:a+y`). */
 static ray_t* dbg_suspend(ray_t* err) {
@@ -576,10 +584,12 @@ static ray_t* dbg_suspend(ray_t* err) {
     q_console_flush();
     dbg_banner(err, g_cursor);
     unsigned shown = g_errs_shown;
+    int64_t session = q_env_ctx();
     ray_t* out = NULL;
     char line[DBG_LINE_MAX];
     char prompt[Q_SYS_PROMPT_CAP + 16];
     for (;;) {
+        q_env_ctx_set(frame_ctx(g_cursor, session));   /* each frame's own namespace (debug.md §Context) */
         dbg_prompt_str(prompt, sizeof prompt);
         int n = g_reader(prompt, line, sizeof line);
         /* the debug-only tokens (basics/debug.md) peeled first; everything
@@ -617,6 +627,7 @@ static ray_t* dbg_suspend(ray_t* err) {
         }
         dbg_run_line(line, (size_t)n);
     }
+    q_env_ctx_set(session);
     g_cursor = outer_cursor;
     g_prompt_frames = outer_frames;
     g_frame_base = sus.base;
