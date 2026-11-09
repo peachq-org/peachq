@@ -601,9 +601,17 @@ ray_t* q_eval_statement(const char* src, int* parsed) {
         q_env_scope(scope);
         return ast ? ast : q_err(QE_PARSE);
     }
-    q_dbg_hold_t hold = { NULL, NULL };
-    int own = q_dbg_statement_pos(pos);   /* else this text runs INSIDE a statement (`value "…"`): its frame's caret stays */
-    if (!own) hold = q_dbg_hold();
+    ray_t* text = NULL;
+    if (!q_dbg_statement_pos(pos)) {      /* a text run INSIDE a statement (`value "…"`) is its own frame */
+        text = ray_charv(src, (int64_t)strlen(src));
+        if (!text || RAY_IS_ERR(text)) {
+            ray_release(ast);
+            if (pos) ray_release(pos);
+            q_env_scope(scope);
+            return text ? text : q_err(QE_OOM);
+        }
+        q_dbg_text_push(text, pos);
+    }
     ray_t* r;
     int silent = 1;
     if (!q_view_intercept(ast, src, &r)) {
@@ -611,7 +619,12 @@ ray_t* q_eval_statement(const char* src, int* parsed) {
         r = q_eval(ast);
     }
     ray_release(ast);
-    if (!own) q_dbg_release(hold);
+    if (text) {
+        r = q_dbg_filter(r, NULL, NULL, 0);   /* an error no application observed (an undefined name) is the text's */
+        q_dbg_frame_pop();
+        ray_release(text);
+        if (pos) ray_release(pos);
+    }
     q_env_scope(scope);
     if (silent && r && !RAY_IS_ERR(r)) {
         ray_release(r);
