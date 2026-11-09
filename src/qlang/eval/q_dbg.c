@@ -33,6 +33,7 @@ static _Thread_local const ray_t* g_live_call[DBG_LIVE_MAX];  /* the caller's no
 static _Thread_local const ray_t* g_frozen[DBG_LIVE_MAX + 1];  /* a lambda frame's node, HELD while a nested run walks */
 static _Thread_local int    g_live_depth;
 static _Thread_local int    g_frame_base;          /* the first live frame a snapshot reports */
+static _Thread_local int    g_frame_num;           /* the number its statement frame shows: 0, or a q)) line's */
 static _Thread_local int    g_cursor;              /* navigated frame, 0 = [0] */
 /* a `'err` typed at q)) leaves the frames from cut_depth up unobserved: kdb destroys that frame (debug.md §Signal) */
 static _Thread_local const ray_t* g_cut_err;
@@ -49,6 +50,10 @@ static int  g_console_stmt;
 static int  g_trap_depth;
 static int  g_dbg_depth;
 static int  g_prompt_frames;
+/* a suspension, on dbg_suspend's C stack: the statement it holds — its frames base+1..top numbered from num — which
+ * navigation, the banner and .Q.bt show; outer = the suspension whose q)) line this one interrupted */
+typedef struct dbg_sus { int base, num, top; const dbg_stmt_t* stmt; struct dbg_sus* outer; } dbg_sus_t;
+static _Thread_local dbg_sus_t* g_sus;
 
 static q_dbg_read_fn g_reader;
 
@@ -58,6 +63,7 @@ typedef struct {
     int    off[DBG_SNAP_MAX];      /* their caret offsets, -1 = none */
     int    stmt_off;               /* frame [0]'s */
     int    depth;
+    int    num;                    /* the number frame [0] shows (g_frame_num) */
     int    taken;                  /* the statement level (unclamped g_depth) that took it: it ends with that level */
     ray_t* ex;                     /* retained failed-primitive value */
     ray_t* ey[DBG_EY_MAX];         /* retained args of the failed apply */
@@ -230,7 +236,8 @@ q_dbg_read_fn q_dbg_set_reader(q_dbg_read_fn fn) {
 
 void q_dbg_reset(void) {
     q_dbg_snapshot_clear();
-    g_live_depth = g_frame_base = g_cursor = 0;
+    g_live_depth = g_frame_base = g_frame_num = g_cursor = 0;
+    g_sus = NULL;
     g_cut_err = NULL;
     memset(g_frozen, 0, sizeof g_frozen);
     for (int i = 0; i < DBG_NEST_MAX; i++) { stmt_pos_drop(&g_stmts[i]); g_stmts[i].node = NULL; g_stmts[i].depth = 0; }
@@ -348,6 +355,7 @@ static void snap_take(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
     int stored = g_live_depth < DBG_LIVE_MAX ? g_live_depth : DBG_LIVE_MAX;
     int base   = g_frame_base < stored ? g_frame_base : stored;
     g_snap.depth = stored - base < DBG_SNAP_MAX ? stored - base : DBG_SNAP_MAX;
+    g_snap.num = g_frame_num;
     for (int i = 0; i < g_snap.depth; i++) {
         g_snap.lam[i] = g_live[base + i];
         ray_retain(g_snap.lam[i]);
@@ -380,7 +388,7 @@ static void dbg_err_line(FILE* out, ray_t* err) {
 
 /* snapshot frame i (0 = the statement), numbered as `idx` (the bt object shifts the lambdas up by one) */
 static char* snap_text(size_t* n, int i, int idx) {
-    return frame_text(n, idx, 0, i ? g_snap.lam[i - 1] : NULL, &snap_stmt, i ? g_snap.off[i - 1] : g_snap.stmt_off);
+    return frame_text(n, g_snap.num + idx, 0, i ? g_snap.lam[i - 1] : NULL, &snap_stmt, i ? g_snap.off[i - 1] : g_snap.stmt_off);
 }
 
 void q_dbg_print_trace(FILE* out, ray_t* err) {
@@ -389,22 +397,22 @@ void q_dbg_print_trace(FILE* out, ray_t* err) {
     if (g_snap.err == err)
         for (int i = g_snap.depth; i >= 0; i--) frame_put(out, snap_text(&n, i, i));
     else
-        frame_put(out, frame_text(&n, 0, 0, NULL, &g_stmt, frame_off(NULL, &g_stmt, stmt_node(&g_stmt))));
+        frame_put(out, frame_text(&n, g_frame_num, 0, NULL, &g_stmt, frame_off(NULL, &g_stmt, stmt_node(&g_stmt))));
     fflush(out);   /* Windows buffers stderr to a file: a worker killed later would lose its trace */
 }
 
-/* live frame idx (1-based; g_frame_base = the statement), numbered from the statement's own [0]: the frames
- * beneath g_frame_base are its runner's (a transcript line's door) and never show */
-static char* live_text(size_t* n, int idx, int mark, const dbg_stmt_t* stmt) {
-    int own = idx > g_frame_base;
+/* live frame idx (1-based; base = the statement), numbered from the statement's own [num]: the frames beneath
+ * base are its runner's (a transcript line's door, the suspended statement under a q)) line) and never show */
+static char* live_text(size_t* n, int idx, int mark, const dbg_stmt_t* stmt, int base, int num) {
+    int own = idx > base;
     ray_t* lam = own ? live_lam(idx) : NULL;
     const ray_t* node = own ? lam_node(idx) : stmt_node(stmt);
-    return frame_text(n, own ? idx - g_frame_base : 0, mark, lam, stmt, frame_off(lam, stmt, node));
+    return frame_text(n, num + (own ? idx - base : 0), mark, lam, stmt, frame_off(lam, stmt, node));
 }
 
 static void dbg_show_frame(int idx) {
     size_t n;
-    frame_put(stderr, live_text(&n, idx, 0, &g_stmt));
+    frame_put(stderr, live_text(&n, idx, 0, g_sus->stmt, g_sus->base, g_sus->num));
 }
 
 /* error text + the frame the cursor sits on, kdb's suspension banner (and `&`).
@@ -428,7 +436,7 @@ static void dbg_prompt_str(char* p, size_t cap) {
 static int32_t cursor_view(void) {
     if (g_cursor >= g_live_depth || g_cursor > DBG_LIVE_MAX)
         return Q_ENV_FRAME_VIEW_OFF;
-    if (g_cursor <= g_frame_base) return Q_ENV_FRAME_VIEW_NONE;
+    if (g_cursor <= g_sus->base) return Q_ENV_FRAME_VIEW_NONE;
     return g_live_env[g_cursor - 1];
 }
 
@@ -475,13 +483,19 @@ static void dbg_run_line(const char* line, size_t n) {
 
 /* Returns NULL to propagate err (\ or EOF), a value to resume (:r), or a new
  * error to signal from this frame ('err). */
+/* A q)) line reports its own frames only, numbered past the suspended ones and two hidden frames — the debugger's
+ * own and the line's — as kdb numbers them (debug.md `{x+y}[a;y]` -> [5] under a [2] suspension; Q4M `b:a+y`). */
 static ray_t* dbg_suspend(ray_t* err) {
     g_dbg_depth++;
     int outer_cursor = g_cursor;
     int outer_frames = g_prompt_frames;
+    dbg_sus_t sus = { g_frame_base, g_frame_num, g_live_depth, &g_stmt, g_sus };
     q_dbg_hold_t hold = q_dbg_hold();          /* the q)) lines must not move the suspended frame's caret */
     g_prompt_frames = q_eval_apply_frame_depth();
     g_cursor = g_live_depth;
+    g_sus = &sus;
+    g_frame_base = sus.top;
+    g_frame_num = sus.num + sus.top - sus.base + 2;
     q_console_flush();
     dbg_banner(err, g_cursor);
     ray_t* out = NULL;
@@ -498,7 +512,7 @@ static ray_t* dbg_suspend(ray_t* err) {
         if (n == 1 && line[0] == '\\') break;             /* exit one level */
         if (n == 1 && line[0] == '&') { dbg_banner(err, g_cursor); continue; }
         if (n == 1 && (line[0] == '`' || line[0] == '.')) {   /* up / down */
-            if (line[0] == '`') { if (g_cursor > g_frame_base) g_cursor--; }
+            if (line[0] == '`') { if (g_cursor > sus.base) g_cursor--; }
             else if (g_cursor < g_live_depth) g_cursor++;
             fflush(stdout);
             dbg_show_frame(g_cursor);
@@ -521,6 +535,9 @@ static ray_t* dbg_suspend(ray_t* err) {
     }
     g_cursor = outer_cursor;
     g_prompt_frames = outer_frames;
+    g_frame_base = sus.base;
+    g_frame_num = sus.num;
+    g_sus = sus.outer;
     q_dbg_release(hold);
     g_dbg_depth--;
     return out;
@@ -530,7 +547,7 @@ static ray_t* dbg_suspend(ray_t* err) {
  * the REMOTE door marks its statements console (q_ctx.c remote seams). */
 static int dbg_suspendable(ray_t* r) {
     return g_reader && g_console_stmt && g_trap_depth == 0 &&
-           q_eval_apply_frame_depth() > 0 && !q_err_is(r, QE_STOP);
+           q_eval_apply_frame_depth() > q_dbg_prompt_frames() && !q_err_is(r, QE_STOP);
 }
 
 static ray_t* dbg_observe(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
@@ -683,18 +700,23 @@ ray_t* q_dbg_sbt_fn(ray_t* x) {
     return ray_charv(buf, (int64_t)used);
 }
 
-ray_t* q_dbg_bt_fn(ray_t** args, int64_t n) {
-    (void)args; (void)n;                       /* .Q.bt[] — arg ignored */
-    /* suspended: [0] is the statement the LIVE frames belong to, not this line */
-    const dbg_stmt_t* stmt = g_dbg_depth > 0 ? &snap_stmt : &g_stmt;
-    for (int i = g_live_depth; i >= g_frame_base; i--) {   /* the statement's own frames, numbered from its [0] */
-        int mark = g_dbg_depth > 0 && i == g_cursor;   /* >> = the current frame */
+static void bt_frames(int hi, int lo, const dbg_stmt_t* stmt, int base, int num, int cursor) {
+    for (int i = hi; i >= lo; i--) {
         size_t ln = 0;
-        char* text = live_text(&ln, i, mark, stmt);
+        char* text = live_text(&ln, i, i == cursor, stmt, base, num);
         if (!text) continue;
         q_console_write(text, ln, false);
         ray_free_raw(text);
     }
+}
+
+/* suspended: the frames a q)) line runs above the suspension — the line's own statement frame hidden, as the page
+ * shows none for `.Q.bt[]` typed there — then every suspended statement's down to [0], >> on the current frame */
+ray_t* q_dbg_bt_fn(ray_t** args, int64_t n) {
+    (void)args; (void)n;                       /* .Q.bt[] — arg ignored */
+    bt_frames(g_live_depth, g_frame_base + (g_sus != NULL), &g_stmt, g_frame_base, g_frame_num, -1);
+    for (dbg_sus_t* s = g_sus; s; s = s->outer)
+        bt_frames(s->top, s->base, s->stmt, s->base, s->num, s == g_sus ? g_cursor : -1);
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;
 }
