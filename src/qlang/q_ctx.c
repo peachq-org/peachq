@@ -43,8 +43,10 @@ void q_ctx_set_console_close(void (*fn)(void)) { g_console_close = fn; }
 void q_ctx_set_tty_restore(void (*fn)(void))   { g_tty_restore = fn; }
 static void ctx_tty_restore(void) { if (g_tty_restore) g_tty_restore(); }
 
+/* the base flag is the backstop for an embedder's own ray_request_interrupt: read once per statement, never per node */
 int q_ctx_interrupt_take(void) {
     int took = q_eval_interrupt_take();
+    if (ray_interrupted()) { ray_clear_interrupt(); took = 1; }
     ray_term_clear_interrupt();
     return took;
 }
