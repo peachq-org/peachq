@@ -69,6 +69,7 @@
 #include "core/timer.h"        /* ray_time_now_ms — TLS negotiation deadlines */
 #include "qlang/net/q_ws.h"
 #include "qlang/eval/q_eval.h"   /* q_eval_apply_value — q hook firing */
+#include "qlang/q_ctx.h"         /* q_ctx_remote_call — a client callback under `\e` */
 #include "qlang/q_env.h"         /* q_env_get — the `.z.p*` hooks are ordinary globals */
 #include "qlang/q_dotz.h"        /* q_dotz_now_ns — connection open-time stamp */
 #include "qlang/q_builtins.h"    /* q_md5_fn / q_dotq_sha1_fn — the password file's hashed secrets */
@@ -760,7 +761,8 @@ static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
     ray_t* hook = hook_lookup(hook_idx);
     ray_t* result = NULL;
 
-    if (hook) {
+    int async = msgtype == RAY_IPC_MSG_ASYNC;
+    if (hook && !hook_is_q(hook)) {
         /* Dialect seam (string-C3): wire text decodes to a char vector; a
          * pure-rayfall process (no q runtime hook installed) still expects
          * the legacy string atom. */
@@ -769,19 +771,19 @@ static int ipc_dispatch(uint8_t msgtype, uint8_t* payload, size_t plen,
             ray_release(msg);
             msg = s;
         }
-        result = msgtype == RAY_IPC_MSG_ASYNC ? hook_fire_swallowed(hook, &msg, 1) : hook_fire(hook, &msg, 1);
+        result = async ? hook_fire_swallowed(hook, &msg, 1) : hook_fire(hook, &msg, 1);
         ray_release(msg);
-        /* Async errors have nowhere to go on the wire (async never sends
-         * a response) — log + drop so the operator sees the hook
-         * misbehaving. */
-        if (result && RAY_IS_ERR(result) && msgtype == RAY_IPC_MSG_ASYNC) {
-            fprintf(stderr, "ipc: .z.ps hook raised an error\n");
-            ray_error_free(result);
-            result = NULL;
-        }
+    } else if (ray_eval_remote_value_installed()) {
+        /* q: the handler, or handle 0's `value` of the message, under `\e` — the q layer shows an async error */
+        result = q_ctx_remote_call(hook, msg, async ? Q_CTX_ASYNC : Q_CTX_SYNC, NULL, NULL);
+        ray_release(msg);
     } else {
-        result = ray_eval_remote_value(msg);   /* handle 0: `value` of the message, whatever its shape */
+        result = ray_eval_remote_value(msg);
         ray_release(msg);
+    }
+    if (async && result && RAY_IS_ERR(result)) {   /* async never sends a response */
+        ray_error_free(result);
+        result = NULL;
     }
 
     /* A lazy result is an internal deferred-DAG representation that cannot

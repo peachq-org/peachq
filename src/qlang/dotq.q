@@ -15,6 +15,10 @@
 .Q.trpd:.Q.c.trpd;
 .Q.sbt:.Q.c.sbt;
 .Q.bt:.Q.c.bt;
+.Q.Ll:.Q.c.Ll;
+.Q.btx:.Q.c.btx;
+/ kb/profiler.md: true for a file name that holds system and built-in functions - peachq's embedded library members
+.Q.fqk:{x like "qlib/*"};
 / .Q.btoa/.Q.sha1: the bang is the single C home (`-32!`/`-33!`); delegate here so a user rebind never touches the bang.
 .Q.btoa:-32!;
 .Q.atob:.Q.c.atob;

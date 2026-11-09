@@ -7,6 +7,7 @@
 #define Q_EVAL_H
 
 #include <rayforce.h>
+#include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -14,6 +15,13 @@ struct q_op;
 
 /* Walker over the RAW q_parse tree; returns OWNED (RAY_ERROR on failure). */
 ray_t* q_eval(ray_t* node);
+
+extern volatile sig_atomic_t q_eval_stop_pending;   /* SIGINT → `'stop` (console-architecture); take = one load */
+int q_eval_interrupt_post(void);      /* the handler's: answers the unserviced count */
+int q_eval_interrupt_consume(void);
+void q_eval_interrupt_served(void);   /* a human or client saw the stop: the count restarts */
+int q_eval_active(void);              /* a statement is in the walker (0 at an event-loop callback's entry) */
+static inline int q_eval_interrupt_take(void) { return q_eval_stop_pending ? q_eval_interrupt_consume() : 0; }
 
 /* Drop the walker's once-per-runtime fixed-sym-id cache (control-form and
  * adverb spellings).  q_runtime_destroy MUST call this: sym ids are not
@@ -123,10 +131,10 @@ int    q_eval_apply_kfn_parts(ray_t* v, void** fn, int64_t* rank, int64_t* lib_s
  * pointer's own destructor runs on the last reference through the heap's RAY_QFN finalizer hook. */
 ray_t* q_eval_apply_foreign_new(void* obj);
 int    q_eval_apply_foreign_parts(ray_t* v, void** obj);
-/* types: i64 vector of declared kdb type nums parallel to params (0 = untyped
- * slot), or NULL for an undecorated lambda; checked exactly on entry ('type) */
+/* types: i64 vector of declared kdb type nums parallel to params (0 = untyped slot), NULL for an undecorated
+ * lambda, checked exactly on entry ('type); pos: the parser's caret table, i64 (node pointer; head-token offset) pairs */
 ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
-                               ray_t* src, ray_t* types);
+                               ray_t* src, ray_t* types, ray_t* pos);
 ray_t* q_eval_apply_deriv_new(int adv, ray_t* fv, const struct q_op* frow);
 /* An iterator IS a value (103h, basics/datatypes.md); a derived function is
  * that value applied to its ONE operand.  `_iter_id` reads the adverb id
@@ -161,6 +169,7 @@ void q_eval_apply_lambda_origin(ray_t* v, int64_t file_sym, int64_t line);
 void q_eval_apply_lambda_name(ray_t* v, const char* name, int64_t nn);
 int  q_eval_apply_lambda_prov(ray_t* v, ray_t** name, int64_t* file_sym,
                               int64_t* line);
+ray_t* q_eval_apply_lambda_pos(ray_t* v);           /* BORROWED caret table, NULL when none */
 
 /* Carrier read-out for display (q_fmt renders; slot layout stays opaque):
  * BORROWED parts, NULL when v is not that carrier kind — deriv/proj head

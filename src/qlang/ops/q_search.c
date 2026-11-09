@@ -637,7 +637,10 @@ static ray_t* bin_lane_search(ray_t* x, ray_t* y, int right) {
     if (RAY_IS_ERR(out)) return out;
     out->len = y->len;
     int64_t* o = (int64_t*)ray_data(out);
-    for (int64_t j = 0; j < y->len && !err; j++) o[j] = bin_lane_probe(x, n, nn, y, j, right, &err);
+    for (int64_t j = 0; j < y->len && !err; j++) {
+        if ((j & 0xFFFFF) == 0 && ray_interrupted()) { ray_release(out); return q_err(QE_STOP); }
+        o[j] = bin_lane_probe(x, n, nn, y, j, right, &err);
+    }
     if (err) { ray_release(out); return q_err(QE_TYPE); }
     return out;
 }

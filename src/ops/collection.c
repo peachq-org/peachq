@@ -2511,7 +2511,11 @@ ray_t* ray_rand_fn(ray_t* a, ray_t* b) {
     ray_t* vec = ray_vec_new(RAY_I64, n);
     if (RAY_IS_ERR(vec)) return vec;
     int64_t* d = (int64_t*)ray_data(vec);
-    for (int64_t i = 0; i < n; i++) d[i] = (int64_t)ray_rand_below((uint64_t)mx);
+    for (int64_t at = 0; at < n; at += 1 << 20) {   /* a poll per chunk keeps the draw loop branch-free */
+        if (ray_interrupted()) { ray_release(vec); return ray_error("stop", "interrupted"); }
+        int64_t end = n - at < 1 << 20 ? n : at + (1 << 20);
+        for (int64_t i = at; i < end; i++) d[i] = (int64_t)ray_rand_below((uint64_t)mx);
+    }
     vec->len = n;
     return vec;
 }
