@@ -2355,9 +2355,10 @@ static ray_t *intake_tree(const char *name, size_t nl, ray_t *arg) {
 static ray_t *parse_text(const char *src, ray_t **pos, int shift);
 
 /* k texts a client or library is witnessed sending, byte for byte bar a trailing comment and blanks, beside their q
- * transliteration — qStudio's Server Properties (qstudio-private ServerSlashConfig.java:36, ServerReport.java:54-63,74)
- * and embedPy's compose helpers (KxSystems/embedPy p.q:23-24).  Not a k evaluator: an entry needs a witness of the text
- * (the real k mode is Dirscx). */
+ * transliteration — qStudio's Server Properties (qstudio-private ServerSlashConfig.java:36, ServerReport.java:54-63,74),
+ * embedPy's compose helpers (KxSystems/embedPy p.q:23-24) and kdb-q-ext-vscode's corpus (test/fixtures/corpus.q:316,
+ * its kdb value in corpus.ipc.json:279).  Not a k evaluator: an entry needs a witness of the text (the real k mode is
+ * Dirscx). */
 static const struct { const char *k, *q; } k_known[] = {
     { ".:'[\"\\\\\",/:\"cCegopPstTWz\"]",
       "value each \"\\\\\",/:\"cCegopPstTWz\"" },
@@ -2369,6 +2370,7 @@ static const struct { const char *k, *q; } k_known[] = {
       "flip {enlist x} each .Q.w[]; value each string `.z.a`.z.h`.z.i`.z.k`.z.K`.z.l`.z.o`.z.u`.z.x,`$\"\\\\s\")" },
     { "c:{'[y;x]}/|:",         "c:{{'[y;x]}/[reverse x]}" },
     { "ce:{'[y;x]}/enlist,|:", "ce:{{'[y;x]}/[enlist,reverse x]}" },
+    { ".corpus.k:+/1 2 3",     ".corpus.k:(+/)1 2 3" },
 };
 
 /* The text before a trailing comment (a `/` after a blank, outside a string, as the scanner reads one), blanks trimmed.
