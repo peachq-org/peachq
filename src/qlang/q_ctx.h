@@ -96,12 +96,10 @@ void q_ctx_run_value_src(const char* s, size_t n, FILE* out, FILE* err);
  * abort the load.  An abort is reported here; the return is q_ctx_run_src's. */
 int q_ctx_run_console_src(const char* s, FILE* out, FILE* err);
 
-/* Install the callback the IPC layer answers a request with no .z.pg/.z.ps through: `value` of the message, as
- * handle 0 does, answering with a value instead of printing.  q_runtime owns the paired teardown. */
-void q_ctx_install_remote_hooks(void);
+void q_ctx_install_remote_hooks(void);   /* handle 0's answer (q_ctx_remote_call, fn NULL); q_runtime tears down */
 
-/* A client callback under `\e` (q_ctx.c): the handler fn (borrowed) applied to msg, or with fn NULL `value` of msg.
- * The value or the error answers; an HTTP caller under `\e 2` gets the stack as owned text in *trace (ray_free_raw). */
+/* A client callback under `\e`: fn (borrowed) applied to msg, or `value` of msg; the value or the error answers.  An
+ * HTTP caller's trace/tn: under `\e 2` the stack (owned, ray_free_raw) and its byte length, else untouched. */
 enum { Q_CTX_SYNC, Q_CTX_ASYNC, Q_CTX_HTTP };
 ray_t* q_ctx_remote_call(ray_t* fn, ray_t* msg, int kind, char** trace, size_t* tn);
 
