@@ -944,6 +944,59 @@ static ray_t* sort_idx(ray_t* spec, ray_t* t, ray_t* idx) {
     return r;
 }
 
+static int64_t dict_key_at(ray_t* d, int64_t sym) {
+    ray_t* k = q_type_is_dict(d) ? ray_dict_keys(d) : NULL;
+    if (!k || k->type != RAY_SYM) return -1;
+    const int64_t* s = (const int64_t*)ray_data(k);
+    for (int64_t i = 0, n = q_count(k); i < n; i++)
+        if (s[i] == sym) return i;
+    return -1;
+}
+
+/* Rank 6 sorts the RESULT (basics/funsql.md:227): cn names a column the phrase or the by computes.  A by-less
+ * passthrough (`cn:cn`) or a source-only cn keeps the source-row sort: the same rows, without the full select. */
+static int orders_result(ray_t* spec, ray_t* b, ray_t* a) {
+    ray_t** e = (spec && spec->type == RAY_LIST && q_count(spec) == 2) ? (ray_t**)ray_data(spec) : NULL;
+    if (!e || !e[1] || e[1]->type != -RAY_SYM) return 0;
+    int64_t cn = e[1]->i64;
+    if (q_type_is_dict(b))
+        return is_empty_gen(a) || (q_type_is_dict(a) && (dict_key_at(b, cn) >= 0 || dict_key_at(a, cn) >= 0));
+    int64_t at = dict_key_at(a, cn);
+    if (at < 0 || !(is_bool_atom(b, 0) || is_bool_atom(b, 1))) return 0;
+    ray_t* tree = q_index_elem_at(ray_dict_vals(a), at);
+    int passthrough = tree && !RAY_IS_ERR(tree) && tree->type == -RAY_SYM && tree->i64 == cn;
+    if (tree) ray_release(tree);
+    return !passthrough;
+}
+
+/* the result's rows permuted by `g cn`, then the rank-5 take: a keyed result sorts and re-keys as one table */
+static ray_t* sort_result(ray_t* spec, ray_t* nspec, ray_t* r) {
+    ray_t** e = (ray_t**)ray_data(spec);
+    int64_t nk = q_type_is_keyed(r) ? ray_table_ncols(ray_dict_keys(r)) : 0;
+    ray_t* flat = nk ? q_bang_enkey(0, r) : r;
+    if (!nk) ray_retain(flat);
+    ray_release(r);
+    if (!flat || RAY_IS_ERR(flat)) return flat ? flat : q_err(QE_TYPE);
+    ray_t* col = flat->type == RAY_TABLE ? ray_table_get_col(flat, e[1]->i64) : NULL;
+    if (col) ray_retain(col);
+    else {                                                /* not a result column: the name's own error */
+        ray_t* all = til_count(flat);
+        col = phrase_eval(e[1], flat, all);
+        ray_release(all);
+    }
+    ray_t* perm = col && !RAY_IS_ERR(col) ? q_eval_apply_value(e[0], &col, 1) : col;
+    if (col && !RAY_IS_ERR(col)) ray_release(col);
+    if (nspec && perm && !RAY_IS_ERR(perm)) perm = limit_apply(nspec, perm);
+    if (!perm || RAY_IS_ERR(perm)) { ray_release(flat); return perm ? perm : q_err(QE_TYPE); }
+    ray_t* rows = gather(flat, perm);
+    ray_release(perm);
+    ray_release(flat);
+    if (!nk || !rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_TYPE);
+    ray_t* rk = q_bang_enkey(nk, rows);
+    ray_release(rows);
+    return rk;
+}
+
 static ray_t* ques_select(ray_t** args, int64_t n) {
     ray_t* pushed = q_provider_qsql_push(args, n); /* NULL: not provider / no qsql hook */
     if (pushed) return pushed;
@@ -955,8 +1008,9 @@ static ray_t* ques_select(ray_t** args, int64_t n) {
         return q_err(QE_NYI);
     }
     ray_t* idx = where_fold(args[1], t, til_count(t));
-    if (n == 6 && !RAY_IS_ERR(idx)) idx = sort_idx(args[5], t, idx);
-    if (n >= 5 && !RAY_IS_ERR(idx)) idx = limit_apply(args[4], idx);
+    int on_result = n == 6 && !q_type_is_dict(t) && orders_result(args[5], args[2], args[3]);   /* a dict answers a dict */
+    if (n == 6 && !on_result && !RAY_IS_ERR(idx)) idx = sort_idx(args[5], t, idx);
+    if (n >= 5 && !on_result && !RAY_IS_ERR(idx)) idx = limit_apply(args[4], idx);
     if (RAY_IS_ERR(idx)) { ray_release(t); return idx; }
     ray_t* b = args[2];
     ray_t* a = args[3];
@@ -994,6 +1048,7 @@ static ray_t* ques_select(ray_t** args, int64_t n) {
     }
     ray_release(idx);
     ray_release(t);
+    if (on_result && r && !RAY_IS_ERR(r)) r = sort_result(args[5], args[4], r);
     if (nk > 0 && r && !RAY_IS_ERR(r)) {
         ray_t* rk = q_bang_enkey(nk, r);
         ray_release(r);
