@@ -60,8 +60,10 @@ int  q_dbg_reported(ray_t* err);
 /* Apply-frame depth a `q))` statement runs at (0 = not suspended): those
  * frames are parked BENEATH the prompt, not evaluating it. */
 int  q_dbg_prompt_frames(void);
-/* mode-2 uncaught display: 'text + numbered frames, each with its caret line. */
-void q_dbg_print_trace(FILE* out, ray_t* err);
+/* the uncaught display: 'text + the numbered frames, each with its caret line (all = 0: frame [0] only).  _trace
+ * builds it as OWNED NUL-terminated text (ray_free_raw), *len its length; NULL on OOM. */
+void  q_dbg_print_trace(FILE* out, ray_t* err, int all);
+char* q_dbg_trace(ray_t* err, int all, size_t* len);
 void q_dbg_snapshot_clear(void);     /* a trap consumed the error */
 
 /* .Q surface bodies (bound as .Q.c.* in q_builtins.c; aliased in dotq.q). */
