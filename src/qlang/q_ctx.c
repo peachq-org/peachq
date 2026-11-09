@@ -86,7 +86,7 @@ static void ctx_show_err(FILE* out, FILE* err, ray_t* e) {
     ctx_tty_restore();
     if (!q_dbg_reported(e)) {
         fflush(out);               /* echo/prompt land before the trace */
-        q_dbg_print_trace(err, e);
+        q_dbg_print_trace(err, e, 1);
     }
     q_err_drop();
     ray_error_free(e);
@@ -111,7 +111,7 @@ static int ctx_load_abort(ray_t* e, FILE* out, FILE* err, q_err_sig_t* t) {
     ctx_tty_restore();
     if (!q_dbg_reported(e) && !q_dbg_trapped()) {
         fflush(out);
-        q_dbg_print_trace(err, e);
+        q_dbg_print_trace(err, e, 1);
     }
     q_err_detach(e, t);
     ray_error_free(e);
@@ -790,35 +790,43 @@ int q_ctx_run_load(const char* name, FILE* out, FILE* err) {
  * `value` of the message under the statement seam, answering over the wire instead of to `out`; errors propagate
  * as owned values the IPC layer serializes as -128h.  Console output is written to the SERVER's stdout as issued. */
 
-/* `\e` error-trap-CLIENTS mode (syscmds.md#e-error-trap-clients) applied to a
- * request: 1 = the statement is console-marked, so an error suspends on the
- * server's console (the parked event loop is what blocks other requests);
- * 2 = dump the stack to stderr for an untrapped error, still answer (V3.5). */
-static int remote_console(void)      { return q_sys_err_trap_mode() == 1 ? 1 : 0; }
-static void remote_err_dump(ray_t* r) {
-    if (r && RAY_IS_ERR(r) && q_sys_err_trap_mode() == 2)
-        q_dbg_print_trace(stderr, r);
-}
-
-/* docs/text-entry-law.md (target state; peachq may differ): IPC column; an IPC request's session.
- * A request with no .z.pg/.z.ps answers as handle 0, ONE `value` of the message (owner 2026-10-03): basics/ipc.md's
- * `h"fn:{2+x}"` answers nothing because `value` does.  Only source text has a `[0]` line to stash for `\e`. */
-static ray_t* remote_value(ray_t* msg) {
-    /* OWNER RULING 2026-08-10: restore `\d` on success (no client parks a shared server), not after an abort. */
+/* `\e` error-trap-CLIENTS mode (syscmds.md#e-error-trap-clients, debug.md §Error trap modes) governs every client
+ * callback — sync, async and HTTP, a handler's or handle 0's `value` (owner R5): 1 marks the statement console, so an
+ * error suspends on the server's console (the parked event loop is what blocks other requests); 2 dumps the stack
+ * to stderr, or into an HTTP caller's response; 0 aborts, an async error still showing its line and frame [0] on the
+ * server console (SO 64109959).  The client is answered in every mode.  A handler call has no text: the handler is
+ * frame [0].  OWNER RULING 2026-08-10: `\d` is restored on success (no client parks a shared server), not after an
+ * abort. */
+ray_t* q_ctx_remote_call(ray_t* fn, ray_t* msg, int kind, char** trace, size_t* tn) {
     int64_t     saved_ctx = q_env_ctx();
+    int         mode = q_sys_err_trap_mode();
     const char* src = NULL;
     int64_t     len = 0;
-    (void)q_str_text_bytes(msg, &src, &len);   /* leaves them NULL/0 for a non-text message */
-    int    dbg_prev = q_dbg_statement_begin(src, (size_t)len, remote_console());
+    if (!fn) (void)q_str_text_bytes(msg, &src, &len);   /* leaves them NULL/0 for a non-text message */
+    int    dbg_prev = q_dbg_statement_begin(src, (size_t)len, mode == 1);
     FILE*  door     = q_console_door(stdout);
-    ray_t* r        = q_eval_value_wrap(msg);
+    ray_t* r;
+    if (fn) {
+        ray_retain(fn);                        /* a body that rebinds its own name frees what we hold */
+        r = q_eval_apply_concrete(q_eval_apply_value(fn, &msg, 1));
+        ray_release(fn);
+    } else
+        r = q_eval_value_wrap(msg);
     q_console_door(door);
     ctx_statement_end();
-    remote_err_dump(r);                  /* `\e 2`: trace before the seam closes */
+    if (r && RAY_IS_ERR(r) && !q_dbg_reported(r) && (mode == 2 || kind == Q_CTX_ASYNC)) {
+        if (kind == Q_CTX_HTTP) *trace = q_dbg_trace(r, 1, tn);
+        else q_dbg_print_trace(stderr, r, mode == 2);
+    }
     q_dbg_statement_end(dbg_prev);
     if (!RAY_IS_ERR(r)) q_env_ctx_set(saved_ctx);
     return r;                            /* an error propagates as the -128h answer */
 }
+
+/* docs/text-entry-law.md (target state; peachq may differ): IPC column; an IPC request's session.
+ * A request with no .z.pg/.z.ps answers as handle 0, ONE `value` of the message (owner 2026-10-03): basics/ipc.md's
+ * `h"fn:{2+x}"` answers nothing because `value` does. */
+static ray_t* remote_value(ray_t* msg) { return q_ctx_remote_call(NULL, msg, Q_CTX_SYNC, NULL, NULL); }
 
 void q_ctx_install_remote_hooks(void) {
     ray_eval_set_remote_value_fn(remote_value);

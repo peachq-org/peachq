@@ -100,6 +100,11 @@ int q_ctx_run_console_src(const char* s, FILE* out, FILE* err);
  * handle 0 does, answering with a value instead of printing.  q_runtime owns the paired teardown. */
 void q_ctx_install_remote_hooks(void);
 
+/* A client callback under `\e` (q_ctx.c): the handler fn (borrowed) applied to msg, or with fn NULL `value` of msg.
+ * The value or the error answers; an HTTP caller under `\e 2` gets the stack as owned text in *trace (ray_free_raw). */
+enum { Q_CTX_SYNC, Q_CTX_ASYNC, Q_CTX_HTTP };
+ray_t* q_ctx_remote_call(ray_t* fn, ray_t* msg, int kind, char** trace, size_t* tn);
+
 /* Console teardown before exit.  The context knows only that SOMETHING may need
  * restoring before `.z.exit` runs (its 0N! output must land on a cooked
  * terminal); the front end that owns a terminal registers the how.  Unset —

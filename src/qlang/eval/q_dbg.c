@@ -47,6 +47,10 @@ static _Thread_local int    g_cut_depth;
 typedef struct { char text[DBG_STMT_MAX]; int64_t file, line; ray_t* pos; int depth; const ray_t* node; } dbg_stmt_t;
 
 static dbg_stmt_t g_stmts[DBG_NEST_MAX];
+
+/* A statement with no text — a client callback's handler call — has no frame of its own: its first lambda (the
+ * handler) is [0] (SO 64109959 `[0]  .z.pg:{value x}`; debug.md trp `[0]  .z.pg:{.Q.trp[…]}`). */
+static int stmt_bare(const dbg_stmt_t* s) { return !s->text[0]; }
 static int  g_console_stmt;
 static int  g_trap_depth;
 static int  g_dbg_depth;
@@ -187,7 +191,7 @@ static void stmt_pos_drop(dbg_stmt_t* s) {
 }
 
 int q_dbg_statement_pos(ray_t* pos) {
-    if (g_stmt.pos) return 0;
+    if (g_stmt.pos || stmt_bare(&g_stmt)) return 0;   /* a bare statement's texts are all a handler's */
     g_stmt.pos = pos;
     return 1;
 }
@@ -320,6 +324,11 @@ static int lam_name(ray_t* lam, char* buf, size_t cap) {
     return 1;
 }
 
+/* the number live frame idx shows in a statement whose frame [base] is numbered num */
+static int frame_number(const dbg_stmt_t* s, int num, int idx, int base) {
+    return idx > base ? num + idx - base - stmt_bare(s) : num;
+}
+
 /* one frame: `  [i]  file:line: name:src` then its caret line (basics/debug.md — file:line only "if such
  * information is available"; the `^` under the head token at `off`, a blank line when off < 0).  A multi-line
  * text shows the lines through the failing one, the caret, then the rest (KDB-X how-to).  lam NULL = the
@@ -381,7 +390,7 @@ static void snap_take(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
     int stored = g_live_depth < DBG_LIVE_MAX ? g_live_depth : DBG_LIVE_MAX;
     int base   = g_frame_base < stored ? g_frame_base : stored;
     g_snap.depth = stored - base < DBG_SNAP_MAX ? stored - base : DBG_SNAP_MAX;
-    g_snap.num = g_frame_num;
+    g_snap.num = g_frame_num - stmt_bare(&snap_stmt);
     for (int i = 0; i < g_snap.depth; i++) {
         g_snap.lam[i] = g_live[base + i];
         ray_retain(g_snap.lam[i]);
@@ -407,26 +416,61 @@ int q_dbg_prompt_frames(void) { return g_dbg_depth > 0 ? g_prompt_frames : 0; }
 
 static _Thread_local unsigned g_errs_shown;   /* error lines printed: a q)) line's error since the banner shows */
 
-static void dbg_err_line(FILE* out, ray_t* err) {
-    g_errs_shown++;
+static const char* err_text(ray_t* err, int* n) {
     int64_t tn = 0;
     const char* text = q_err_text(err, &tn);
-    fprintf(out, "'%.*s\n", (text && tn) ? (int)tn : 4,
-            (text && tn) ? text : "eval");
+    *n = (text && tn) ? (int)tn : 4;
+    return (text && tn) ? text : "eval";
 }
 
-/* snapshot frame i (0 = the statement), numbered as `idx` (the bt object shifts the lambdas up by one) */
+static void dbg_err_line(FILE* out, ray_t* err) {
+    g_errs_shown++;
+    int n;
+    const char* text = err_text(err, &n);
+    fprintf(out, "'%.*s\n", n, text);
+}
+
+/* snapshot frame i (0 = the statement), numbered as `idx` (the bt object shifts the lambdas up by one); NULL for a
+ * bare statement's frame */
 static char* snap_text(size_t* n, int i, int idx) {
+    if (!i && stmt_bare(&snap_stmt)) return NULL;
     return frame_text(n, g_snap.num + idx, 0, i ? g_snap.lam[i - 1] : NULL, &snap_stmt, i ? g_snap.off[i - 1] : g_snap.stmt_off);
 }
 
-void q_dbg_print_trace(FILE* out, ray_t* err) {
-    dbg_err_line(out, err);
-    size_t n;
-    if (g_snap.err == err)
-        for (int i = g_snap.depth; i >= 0; i--) frame_put(out, snap_text(&n, i, i));
-    else
-        frame_put(out, frame_text(&n, g_frame_num, 0, NULL, &g_stmt, frame_off(g_stmt.pos, stmt_node(&g_stmt))));
+static void text_cat(char** buf, size_t* len, char* part, size_t n) {   /* consumes part */
+    if (!part) return;
+    char* b = *buf ? (char*)ray_realloc_raw(*buf, *len + n + 1) : NULL;
+    if (b) { memcpy(b + *len, part, n + 1); *buf = b; *len += n; }
+    ray_free_raw(part);
+}
+
+char* q_dbg_trace(ray_t* err, int all, size_t* len) {
+    int en;
+    const char* et = err_text(err, &en);
+    char* buf = (char*)ray_alloc_raw((size_t)en + 3);
+    if (!buf) return NULL;
+    *len = (size_t)snprintf(buf, (size_t)en + 3, "'%.*s\n", en, et);
+    size_t n = 0;
+    char* part;
+    if (g_snap.err == err) {
+        int lo = stmt_bare(&snap_stmt) && g_snap.depth ? 1 : 0;
+        for (int i = all ? g_snap.depth : lo; i >= lo; i--) {
+            part = snap_text(&n, i, i);
+            text_cat(&buf, len, part, n);
+        }
+    } else if (!stmt_bare(&g_stmt)) {
+        part = frame_text(&n, g_frame_num, 0, NULL, &g_stmt, frame_off(g_stmt.pos, stmt_node(&g_stmt)));
+        text_cat(&buf, len, part, n);
+    }
+    return buf;
+}
+
+void q_dbg_print_trace(FILE* out, ray_t* err, int all) {
+    g_errs_shown++;
+    size_t n = 0;
+    char* t = q_dbg_trace(err, all, &n);
+    if (t) fwrite(t, 1, n, out);
+    ray_free_raw(t);
     fflush(out);   /* Windows buffers stderr to a file: a worker killed later would lose its trace */
 }
 
@@ -434,9 +478,11 @@ void q_dbg_print_trace(FILE* out, ray_t* err) {
  * base are its runner's (a transcript line's door, the suspended statement under a q)) line) and never show */
 static char* live_text(size_t* n, int idx, int mark, const dbg_stmt_t* stmt, int base, int num) {
     int own = idx > base;
+    if (!own && stmt_bare(stmt)) return NULL;
     ray_t* lam = own ? live_lam(idx) : NULL;
     const ray_t* node = own ? lam_node(idx) : stmt_node(stmt);
-    return frame_text(n, num + (own ? idx - base : 0), mark, lam, stmt, frame_off(own ? live_tab(idx) : stmt->pos, node));
+    return frame_text(n, frame_number(stmt, num, idx, base), mark, lam, stmt,
+                      frame_off(own ? live_tab(idx) : stmt->pos, node));
 }
 
 static void dbg_show_frame(int idx) {
@@ -526,7 +572,7 @@ static ray_t* dbg_suspend(ray_t* err) {
     g_cursor = g_live_depth;
     g_sus = &sus;
     g_frame_base = sus.top;
-    g_frame_num = sus.num + sus.top - sus.base + 2;
+    g_frame_num = frame_number(sus.stmt, sus.num, sus.top, sus.base) + 2;
     q_console_flush();
     dbg_banner(err, g_cursor);
     unsigned shown = g_errs_shown;
@@ -545,7 +591,7 @@ static ray_t* dbg_suspend(ray_t* err) {
         /* `.` onto the error frame after another error was shown reprints the banner (Q4M §10.2; KDB-X's plain `.`
          * onto it does not) */
         if (n == 1 && (line[0] == '`' || line[0] == '.' || line[0] == '&')) {   /* up / down / where */
-            if (line[0] == '`') { if (g_cursor > sus.base) g_cursor--; }
+            if (line[0] == '`') { if (g_cursor > sus.base + stmt_bare(sus.stmt)) g_cursor--; }
             else if (line[0] == '.' && g_cursor < g_live_depth) g_cursor++;
             if (line[0] == '&' || (line[0] == '.' && g_cursor == g_live_depth && g_errs_shown != shown)) {
                 dbg_banner(err, g_cursor);
@@ -687,7 +733,7 @@ static ray_t* dbg_bt_object(const char* trap, int below) {
     for (int i = g_snap.depth; i > below; i--) bt_append_snap(&l, i, i + 1);
     char door[64];
     bt_append(&l, door, (size_t)snprintf(door, sizeof door, "  [%d]  (%s)\n", g_snap.num + below + 1, trap));
-    for (int i = below; i >= 0; i--) bt_append_snap(&l, i, i);
+    for (int i = below; i >= 0; i--) bt_append_snap(&l, i, i);   /* a bare statement's [0] appends nothing */
     return l;
 }
 
