@@ -385,17 +385,6 @@ int main(int argc, char** argv) {
      * law, results NOT echoed.  An abort skips everything after it — on a non-tty the REPL/server loop included.
      * On a tty the `-eval` texts follow the script into the REPL (console-initiated, so they suspend as it does);
      * `-eval-before` precedes the script by definition, so it stays the batch idiom on both. */
-    int script_rc = 0;
-    /* a file-backed main loads its tables first, like `q dir/` — which implies `\l pq`, the loader's home */
-    if (duckdb_main && *duckdb_main)
-        script_rc = q_ctx_run_src("\\l pq\n.duckdb.load[.duckdb.main[];::]", stdout, stderr, NULL);
-    if (qinit && !stdin_tty && script_rc == 0)
-        script_rc = q_ctx_run_file(qinit, stdout, stderr, NULL);
-    /* docs/text-entry-law.md (target state; peachq may differ): `q f.q` is via file; `-eval` text is the IPC column */
-    for (int i = 0; i < n_before && script_rc == 0; i++)
-        script_rc = q_ctx_run_src(eval_before[i], stdout, stderr, NULL);
-    free(eval_before);
-
     const char*  files[] = { qinit, script };   /* the tty console's first `\l`s, QINIT ahead of the script */
     char         load[2][PATH_MAX + 4];
     char         abs[PATH_MAX];
@@ -404,6 +393,17 @@ int main(int argc, char** argv) {
         snprintf(load[0], sizeof load[0], "\\l %s", q_io_abs_path(qinit, abs, sizeof abs) ? abs : qinit);
     if (script)
         snprintf(load[1], sizeof load[1], "\\l %s", script);
+    int script_rc = 0;
+    /* a file-backed main loads its tables first, like `q dir/` — which implies `\l pq`, the loader's home */
+    if (duckdb_main && *duckdb_main)
+        script_rc = q_ctx_run_src("\\l pq\n.duckdb.load[.duckdb.main[];::]", stdout, stderr, NULL);
+    if (qinit && !stdin_tty && script_rc == 0)
+        script_rc = q_ctx_run_load(load[0] + 3, stdout, stderr);
+    /* docs/text-entry-law.md (target state; peachq may differ): `q f.q` is via file; `-eval` text is the IPC column */
+    for (int i = 0; i < n_before && script_rc == 0; i++)
+        script_rc = q_ctx_run_src(eval_before[i], stdout, stderr, NULL);
+    free(eval_before);
+
     if (stdin_tty) {
         int k = 0;
         for (int i = 0; i < 2; i++)
