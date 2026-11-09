@@ -81,8 +81,9 @@ static ray_t* pq_helpdb_fn(ray_t* x) {
 void q_pq_helpdb_register(void) { pq_bind(".help.i.loaddb", pq_helpdb_fn); }
 
 /* The per-file load record: a file is LOADED once `\l pq/<file>.q` has run it (a failed run too: no retry); a MISS is a
- * namespace with no library file, remembered so a probed-for name costs its stats once until the search path moves. */
-static ray_t *g_loaded, *g_misses;
+ * namespace with no library file, remembered so a probed-for name costs its stats once until the search path moves; an
+ * OWNED namespace is one the user wrote into first, which no autoload ever runs into. */
+static ray_t *g_loaded, *g_misses, *g_owned;
 
 static int pq_has(ray_t* v, int64_t sym) {
     for (int64_t i = 0; v && i < v->len; i++) if (((int64_t*)ray_data(v))[i] == sym) return 1;
@@ -102,7 +103,13 @@ uint32_t q_pq_miss_gen(void) { return g_miss_gen; }
 
 void q_pq_path_changed(void) { pq_drop(&g_misses); g_miss_gen++; }
 
-void q_pq_reset(void) { g_helpdb_state = g_pq_state = LOAD_COLD; pq_drop(&g_loaded); pq_drop(&g_misses); g_miss_gen++; }
+void q_pq_reset(void) {
+    g_helpdb_state = g_pq_state = LOAD_COLD;
+    pq_drop(&g_loaded); pq_drop(&g_misses); pq_drop(&g_owned);
+    g_miss_gen++;
+}
+
+void q_pq_claim_ns(int64_t ns) { if (!pq_has(g_loaded, ns)) pq_note(&g_owned, ns); }
 
 /* `.pq.i.loaded[]` — the files the record holds as loaded, in load order */
 static ray_t* pq_loaded_fn(ray_t* x) {
@@ -179,7 +186,7 @@ ray_t* q_pq_load_file(const char* lit, size_t alen, const char* path) {
 ray_t* q_pq_autoload_ns(const char* stem, size_t n) {
     if (n > 64 || (n == 2 && memcmp(stem, "pq", 2) == 0) || !q_env_ident_ok(stem, n)) return NULL;
     int64_t sym = ray_sym_intern_runtime(stem, n);
-    if (pq_has(g_loaded, sym) || pq_has(g_misses, sym)) return NULL;
+    if (pq_has(g_loaded, sym) || pq_has(g_misses, sym) || pq_has(g_owned, sym)) return NULL;
     char lit[80];
     const char* src;
     int len = snprintf(lit, sizeof lit, "pq/%.*s.q", (int)n, stem);
