@@ -78,6 +78,9 @@ ray_err_t q_env_settle(int64_t sym, int stole, ray_t* val);
  * suspended for the call (the suspension fresh text already gets) and restored on every exit.  Contracts as their
  * bare-name twins: _get borrowed or NULL, _resolve owned (the full walk), _take/_settle/_bind the park protocol. */
 ray_t*    q_env_handle_get(int64_t sym);
+/* _get without the library autoload: the probe a by-name WRITE (amend, insert, upsert) makes, since a write never
+ * loads a library (platform-architecture.md). */
+ray_t*    q_env_handle_peek(int64_t sym);
 ray_t*    q_env_handle_resolve(int64_t sym);
 ray_err_t q_env_handle_set(int64_t sym, ray_t* val);
 int       q_env_handle_take(int64_t sym, ray_t* cur);
