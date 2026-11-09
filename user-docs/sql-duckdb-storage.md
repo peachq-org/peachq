@@ -175,9 +175,9 @@ come back. The answer is always q's answer. What moves is only where the work ha
   move to it.
 - **If DuckDB fails** on something q answers (an int overflow that q wraps, say), q answers the whole select. You
   get q's result, never a different one.
-- **`.duckdb.maxrows`** (default `0W`, no limit) refuses a select on a table larger than it unless a where term can
+- **`.duckdb.maxrows`** (default `0W`, no limit; set it with `.duckdb.set_maxrows n`) refuses a select on a table larger than it unless a where term can
   run in DuckDB. You get `'limit` before anything is fetched, never a partial answer. `get` is never limited.
-- **`.duckdb.pushdown:0b`** turns pushdown off: every select fetches the whole table and runs in q.
+- **`.duckdb.set_pushdown 0b`** turns pushdown off: every select fetches the whole table and runs in q.
 - **To see what ran,** read `.duckdb.sqllog`. Below, a float filter fetches the whole table, and with `.duckdb.maxrows`
   set, a select with nothing to push is refused while a symbol filter still runs:
 
@@ -191,7 +191,7 @@ q)select from `:pq:duckdb:mkt:trade/ where price>200
 | MSFT   | 251   | 50   |
 q)exec sql from .duckdb.sqllog
 "SELECT \"sym\", \"price\", \"size\" FROM \"trade\" ORDER BY i"
-q).duckdb.maxrows:3
+q).duckdb.set_maxrows 3
 q)@[{select from x}; `:pq:duckdb:mkt:trade/; {"error: ",x}]
 "error: limit"
 q).duckdb.err[]
@@ -202,7 +202,7 @@ q)select from `:pq:duckdb:mkt:trade/ where sym=`MSFT
 |--------|-------|------|
 | MSFT   | 250.2 | 200  |
 | MSFT   | 251   | 50   |
-q).duckdb.maxrows:0W
+q).duckdb.set_maxrows 0W
 ```
 
 - **Tables created by SQL** (not written from q) carry none of the q type information, so a select on one fetches
