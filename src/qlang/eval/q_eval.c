@@ -47,18 +47,23 @@ static _Thread_local int g_depth;
 _Thread_local const ray_t* q_eval_node;
 
 volatile sig_atomic_t q_eval_stop_pending;
+static volatile sig_atomic_t g_unserviced;   /* reset only where a seam SERVED the stop: a trapped loop keeps counting */
 
 int q_eval_interrupt_post(void) {
     ray_request_interrupt();
-    return __atomic_add_fetch(&q_eval_stop_pending, 1, __ATOMIC_ACQ_REL);
+    q_eval_stop_pending = 1;
+    return __atomic_add_fetch(&g_unserviced, 1, __ATOMIC_ACQ_REL);
 }
 
-/* takes the whole pending batch — one arriving after the exchange stays pending */
 int q_eval_interrupt_consume(void) {
     int n = __atomic_exchange_n(&q_eval_stop_pending, 0, __ATOMIC_ACQ_REL);
     ray_clear_interrupt();
     return n != 0;
 }
+
+void q_eval_interrupt_served(void) { g_unserviced = 0; }
+
+int q_eval_active(void) { return g_depth > 0; }
 
 /* Fixed sym ids, interned ONCE per runtime (the env.c ipc-hook-syms
  * discipline).  Process-global like the registry itself — one live q runtime

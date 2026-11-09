@@ -98,9 +98,7 @@ int q_ctx_run_console_src(const char* s, FILE* out, FILE* err);
 
 void q_ctx_install_remote_hooks(void);   /* handle 0's answer (q_ctx_remote_call, fn NULL); q_runtime tears down */
 
-/* consume the pending SIGINT (both the eval and the editor flag): 1 if there was one.  A statement starts with none
- * (one that arrived idle had nothing to stop); a prompt that answered it with ^C has served it. */
-int q_ctx_interrupt_take(void);
+int q_ctx_interrupt_take(int served);   /* consume the pending SIGINT (eval + editor flags), 1 if any; served: seen */
 
 /* A client callback under `\e`: fn (borrowed) applied to msg, or `value` of msg; the value or the error answers.  An
  * HTTP caller's trace/tn: under `\e 2` the stack (owned, ray_free_raw) and its byte length, else untouched. */
