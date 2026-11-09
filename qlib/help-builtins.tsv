@@ -316,6 +316,8 @@ while	i:0;while[i<3;i+:1];i	repeat expressions while a condition holds
 .Q.res	.Q.res	list the reserved words and control words
 .Q.s	.Q.s til 3	format a value as the console would print it
 .Q.s1	.Q.s1 til 3	format a value on one line, as 0N! does
+.Q.S	.Q.S[5 40;0] ([]a:til 9)	format a value as console lines within a size, from a row
+.Q.s2	", " sv .Q.s2 `a`b`c	format a value as uncut console lines, a vector one item a line
 .Q.t	.Q.t	list the type character of every datatype, indexed by type
 .Q.ty	.Q.ty 1 2 3	report the type character of a value
 .Q.V	.Q.V ([]a:1 2)	take a table's columns as a dictionary
