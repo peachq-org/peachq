@@ -1097,6 +1097,11 @@ static int assign_target_at(Parser *p, int i) {
     return sym_name_is(t->k, ":") || verb_marked(t->k);
 }
 
+/* `k::y` with no index is a global write, which binds a keyword's root slot (owner ruling 2026-11-08) */
+static int global_assign_at(Parser *p, int i) {
+    return i < p->t.n && p->t.t[i].kind == T_VERB && sym_name_is(p->t.t[i].k, "::") && assign_target_at(p, i);
+}
+
 /* ===== the parser's die-path leak guard ======================================
  * A frame that holds an owned ref across a descent that can die (a phrase list,
  * a from-expression, a lambda's signature and body, a statement list) parks it
@@ -1344,7 +1349,7 @@ static P parse_base(Parser *p) {
         ray_t *v = tk->k; tk->k = NULL;
         v = tk->capture ? text_capture(v, p->xyz) : noun_tree_value(v);
         adv(p);
-        ray_t *kw = sym_is_nameref(v) ? q_registry_keyword(v->i64) : NULL;
+        ray_t *kw = sym_is_nameref(v) && !global_assign_at(p, p->pos) ? q_registry_keyword(v->i64) : NULL;
         if (kw && assign_target_at(p, p->pos)) {
             /* refused HERE, not at the write: dropping the entry later must not turn a parsed `k:` into a global */
             ray_release(v);

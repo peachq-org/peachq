@@ -373,15 +373,11 @@ static int env_q_changes_builtin(ray_t* nq) {
     return 0;
 }
 
-/* Judged by the TARGET after `\d` re-rooting — a root reserved word or a `.q` builtin entry, and `.q` itself by
- * effect; a colon assignment's bare SPELLING is refused upstream in q_eval (owner ruling 2026-09-23).  A namespace
- * already under a root reserved word (made by `` `..var.n set ``) is the user's, so a dict write of it is a member
- * edit (owner ruling 2026-11-07). */
+/* Judged by the TARGET after `\d` re-rooting: a `.q` builtin entry, and `.q` itself by effect.  A root reserved
+ * word's slot is the user's — the keyword lives in the registry, bound at parse (owner rulings 2026-11-07/08); a
+ * colon assignment's bare SPELLING is refused upstream in q_eval. */
 static int env_locked(ray_t** home, const int64_t* segs, int k, ray_t* val) {
-    if (home != &env_ns)
-        return k == 1 && q_registry_locked(segs[0]) &&
-               !(val && val->type == RAY_DICT && env_is_marked(ray_dict_probe_sym_borrowed(*home, segs[0])));
-    if (segs[0] != g_q_seg) return 0;
+    if (home != &env_ns || segs[0] != g_q_seg) return 0;
     return k == 1 ? env_q_changes_builtin(val) : q_registry_locked(segs[1]);
 }
 
@@ -391,8 +387,9 @@ static ray_t** env_home(uint8_t kind, int64_t* segs, int* k, int boot_new) {
     ray_t** home = &env_root;
     *k = ctx_reroot(segs, *k, &home);
     if (*k <= 0) return NULL;
+    /* a sealed keyword's bootstrap kernel is never a user write's target */
     if (home == &env_root && ray_dict_find_sym(env_root, segs[0]) < 0 &&
-        (ray_dict_find_sym(env_boot, segs[0]) >= 0 || boot_new))
+        !q_registry_locked(segs[0]) && (ray_dict_find_sym(env_boot, segs[0]) >= 0 || boot_new))
         home = &env_boot;
     return home;
 }
