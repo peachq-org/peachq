@@ -9,8 +9,9 @@
 #include "qlang/q_dotz.h"
 #include "qlang/q_env.h"       /* q_env_get — the settable handlers are globals */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_call_sym — handler firing */
+#include "qlang/base/q_err.h"     /* q_err_is — a tick's displayed 'stop was seen */
 #include "qlang/eval/q_view.h" /* q_view_zb — `.z.b` dependency dict */
-#include "qlang/eval/q_dbg.h"  /* q_dbg_zex/_zey — `.z.ex`/`.z.ey` (basics/debug.md) */
+#include "qlang/eval/q_dbg.h"  /* q_dbg_zex/_zey — `.z.ex`/`.z.ey` (basics/debug.md); a tick's error trace */
 #include "qlang/net/q_tls.h"   /* q_tls_dotz_e — `.z.e` TLS connection status */
 #include "qlang/ops/q_sys.h"       /* q_sys_timer_active / q_sys_utc_offset_secs — timer guard, `\o` */
 #include "qlang/q_console.h"   /* q_console_door — .z.ts/.z.exit output is the server console's */
@@ -377,10 +378,18 @@ static ray_t* zts_tick(ray_t* tick) {
     if (!q_env_get(zts)) return NULL;             /* .z.ts unset → no-op */
     ray_t* ts = ray_timestamp(q_dotz_now_ns(1));       /* .z.P local timestamp arg */
     FILE*  door = q_console_door(stdout);          /* the timer's output is the SERVER console's */
+    int    tok  = q_dbg_statement_begin(NULL, 0, 0);   /* the handler is frame [0]; a tick never suspends */
     ray_t* r    = q_eval_apply_call_sym(zts, &ts, 1);
     q_console_door(door);
     ray_release(ts);
-    return r;                                      /* fire_expired frees/prints it */
+    if (r && RAY_IS_ERR(r)) {                      /* shown as a console error is: its text, frames and carets */
+        if (q_err_is(r, QE_STOP)) q_eval_interrupt_served();
+        if (!q_dbg_reported(r)) q_dbg_print_trace(stderr, r, 1);
+        ray_error_free(r);
+        r = NULL;
+    }
+    q_dbg_statement_end(tok);
+    return r;                                      /* fire_expired frees it */
 }
 
 /* Call `.z.exit` (if set) with the exit code (ref/dotz.md: unary, arg = the

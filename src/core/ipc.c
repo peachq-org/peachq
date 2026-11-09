@@ -833,6 +833,7 @@ typedef struct {
     bool             sync_waiting;
     bool             sync_ready;
     bool             sync_badmsg;   /* deposited resp is a local 'badmsg — waiter closes after consuming */
+    uint32_t         sync_owed;     /* responses to waits a SIGINT abandoned: dropped as they arrive, in order */
     ray_t*           sync_resp;
     /* `-30!` deferred response, keyed to the request FRAME: every SYNC
      * dispatch on this conn takes the next sync_seq, and cur_sync_seq is the
@@ -1342,7 +1343,11 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
         }
         if (payload) ray_poll_buf_free(payload);
         if (uz) ray_release(uz);
-        if (cd->sync_waiting && !cd->sync_ready) {
+        if (cd->sync_owed) {
+            cd->sync_owed--;
+            if (RAY_IS_ERR(obj)) ray_error_free(obj);
+            else if (obj != RAY_NULL_OBJ) ray_release(obj);
+        } else if (cd->sync_waiting && !cd->sync_ready) {
             cd->sync_resp  = obj;
             cd->sync_ready = true;
         } else {
@@ -2291,9 +2296,17 @@ static ray_t* sync_send(int64_t handle, ray_t* msg)
              * defensive: treat as closed. */
             return ray_error("io", "connection closed");
         }
-        if (ray_sock_wait_readable((ray_sock_t)sel->fd, -1) < 0) {
+        /* a SIGINT stops the wait ('stop, as for any running statement); the answer still owed is dropped
+         * when it comes, so the handle's next round trip reads its own */
+        int w = ray_sock_wait_readable((ray_sock_t)sel->fd, 100);
+        if (w < 0) {
             cd->sync_waiting = false;
             return ray_error("io", "ipc recv failed");
+        }
+        if (w == 0 && ray_interrupted()) {
+            cd->sync_waiting = false;
+            cd->sync_owed++;
+            return ray_error("stop", "interrupted");
         }
     }
 }

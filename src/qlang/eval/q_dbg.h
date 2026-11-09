@@ -46,6 +46,7 @@ int     q_dbg_trapped(void);
  * the frame still live (pre-pop). */
 ray_t* q_dbg_filter(ray_t* r, ray_t* fv, ray_t** args, int64_t n);
 ray_t* q_dbg_lambda_filter(ray_t* r);
+ray_t* q_dbg_stop(void);   /* a check site took the interrupt: NULL continues it, else what the site returns */
 /* Statement-boundary seam for a load line's error (no lambda frame observed
  * it): may suspend with frame [0] = the script statement.  NULL = abort the
  * load; a plain value = `:r`, discard and continue; an error = `'e` re-signal. */
