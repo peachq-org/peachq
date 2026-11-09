@@ -18,12 +18,12 @@
 #include "qlang/q_prim.h"
 #include "qlang/parse/q_parse.h"  /* q_parse_lang_tree — the char-atom language arm */
 #include "qlang/eval/q_eval_internal.h"
+#include "qlang/eval/q_pattern.h"
 #include "qlang/eval/q_view.h"     /* view carriers apply as their value */
 #include "qlang/eval/q_funsql.h"  /* the `?`/`!` matrix entry points (fnv_matrix_value) */
 #include "qlang/base/q_err.h"
 #include <ctype.h>            /* isalpha — the char-atom language arm */
 #include "qlang/q_ops.h"
-#include "qlang/q_builtins.h"  /* q_builtins_type_num */
 #include "qlang/q_registry.h"
 #include "qlang/base/q_type.h"     /* q_type_is_keyed — the type axis home */
 #include "qlang/io/q_handles.h"
@@ -97,7 +97,8 @@ static ray_t* car_put(ray_t* c, int64_t i, ray_t* child) {
 /* lambda carrier: [params symvec, body list, src string, defining `\d` context,
  * declared types i64vec (NULL = undecorated), n name charv, f file sym, l line
  * i64, locals symvec (q_eval_lambda_locals, params excluded), caret table i64vec
- * (the parser's node -> head-token offset pairs, NULL when none)] — 5..7 are the
+ * (the parser's node -> head-token offset pairs, NULL when none), slot patterns list (a destructured slot's pattern
+ * tree, the generic null on a plain slot; NULL when no slot destructures)] — 5..7 are the
  * ref/value.md provenance slots, NULL until stamped: f/l by the parser
  * (q_eval_apply_lambda_origin), n by the first global assignment
  * (q_eval_apply_lambda_name).
@@ -105,10 +106,15 @@ static ray_t* car_put(ray_t* c, int64_t i, ray_t* child) {
  * globals belong to the namespace it was written in, not the one it is called
  * from (ref/value.md: the globals list of `.test.f` reads `` `test`d`e ``).
  * NULL slot = root. */
-enum { LAM_NAME = 5, LAM_FILE = 6, LAM_LINE = 7, LAM_LOCALS = 8, LAM_POS = 9, LAM_SLOTS = 10 };
+enum { LAM_NAME = 5, LAM_FILE = 6, LAM_LINE = 7, LAM_LOCALS = 8, LAM_POS = 9, LAM_PATS = 10, LAM_SLOTS = 11 };
+
+static void lam_local_add(int64_t sym, void* ctx) {
+    ray_t** locals = ctx;
+    if (*locals && !RAY_IS_ERR(*locals) && !q_eval_symvec_has(*locals, sym)) *locals = ray_vec_append(*locals, &sym);
+}
 
 ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
-                               ray_t* src, ray_t* types, ray_t* pos) {
+                               ray_t* src, ray_t* types, ray_t* pats, ray_t* pos) {
     ray_t* b = ray_list_new(nbody > 0 ? nbody : 1);
     for (int64_t i = 0; i < nbody; i++)
         b = ray_list_append(b, body[i]);
@@ -129,10 +135,17 @@ ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
         ray_retain(pos);
         s[LAM_POS] = pos;
     }
+    if (pats) {
+        ray_retain(pats);
+        s[LAM_PATS] = pats;
+    }
     int64_t ctx = q_env_scope_ctx();
     if (ctx) c = car_put(c, 3, ray_sym(ctx));
     if (RAY_IS_ERR(c)) return c;
-    return car_put(c, LAM_LOCALS, q_eval_lambda_locals(params, b));
+    ray_t* locals = q_eval_lambda_locals(params, b);
+    for (int64_t i = 0, n = pats ? q_count(pats) : 0; i < n; i++)
+        q_pattern_names(ray_list_get(pats, i), lam_local_add, &locals);
+    return car_put(c, LAM_LOCALS, locals);
 }
 
 static void owned_drop(ray_t* x) {
@@ -1237,13 +1250,24 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
         const int64_t* tn = (const int64_t*)ray_data(c[4]);
         int64_t nt = q_count(c[4]);
         for (int64_t i = 0; i < n && i < nt; i++)
-            if (tn[i] && q_builtins_type_num(args[i]) != (int8_t)tn[i])
+            if (tn[i] && !q_pattern_type_ok(args[i], tn[i]))
                 return q_err(QE_TYPE);
+    }
+    /* a destructured slot matches whole before the frame exists; its names are locals, bound once it does */
+    ray_t* binds = NULL;
+    if (c[LAM_PATS]) {
+        binds = ray_list_new(4);
+        if (!binds || RAY_IS_ERR(binds)) return binds ? binds : q_err(QE_OOM);
+        for (int64_t i = 0, np = q_count(c[LAM_PATS]); i < n && i < np; i++) {
+            ray_t* pat = ray_list_get(c[LAM_PATS], i);
+            ray_t* err = RAY_IS_NULL(pat) ? NULL : q_pattern_collect(pat, args[i], &binds);
+            if (err) { ray_release(binds); return err; }
+        }
     }
     /* barrier frame: strictly-local resolution (function-notation.md) —
      * the body sees its params/locals and globals, never a caller frame */
-    if (RAY_UNLIKELY(q_eval_stack_low())) return q_err(QE_LIMIT);
-    if (q_env_frame_push(1) != RAY_OK) return q_err(QE_STACK);
+    if (RAY_UNLIKELY(q_eval_stack_low())) { ray_release(binds); return q_err(QE_LIMIT); }
+    if (q_env_frame_push(1) != RAY_OK) { ray_release(binds); return q_err(QE_STACK); }
     for (int64_t i = 0; i < n; i++) {
         ray_t* p = q_index_elem_at(params, i);          /* sym atom */
         if (p && !RAY_IS_ERR(p)) {
@@ -1259,8 +1283,13 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
         ray_err_t se = e ? q_env_local_set(ray_read_sym(ray_data(locals), i, RAY_SYM, locals->attrs), e)
                          : RAY_ERR_OOM;                                              /* retains */
         if (e) ray_release(e);
-        if (se != RAY_OK) { q_env_frame_pop(); return q_err(QE_WSFULL); }
+        if (se != RAY_OK) { q_env_frame_pop(); ray_release(binds); return q_err(QE_WSFULL); }
     }
+    for (int64_t i = 0, nb = binds ? q_count(binds) : 0; i < nb; i += 2) {
+        ray_t** b = (ray_t**)ray_data(binds);
+        if (q_env_local_set(b[i]->i64, b[i + 1]) != RAY_OK) { q_env_frame_pop(); ray_release(binds); return q_err(QE_WSFULL); }
+    }
+    ray_release(binds);
     g_frame_depth++;
     q_dbg_frame_push(lam);
     /* the body resolves in the namespace the lambda was DEFINED in (q_eval_apply_lambda_new); the session `\d`
