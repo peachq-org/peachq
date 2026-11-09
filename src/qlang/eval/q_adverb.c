@@ -539,11 +539,13 @@ static ray_t* prior_each(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
         r = q_eval_apply(fv, frow, av, 2);
     } else {
         int64_t len = q_count(x);
+        /* unseeded `~':` never matches its first item (ref/differ.md:19); the typed-null seed would match a leading 0b or null */
+        bool lead_miss = !seed && frow && strcmp(frow->name, "~") == 0;
         ray_t* l = ray_list_new(len);
         for (int64_t i = 0; i < len; i++) {
             ray_t* cur = q_index_elem_at(x, i);
             ray_t* av[2] = { cur, prev };
-            ray_t* e = q_eval_apply_concrete(q_eval_apply(fv, frow, av, 2));
+            ray_t* e = i == 0 && lead_miss ? ray_bool(false) : q_eval_apply_concrete(q_eval_apply(fv, frow, av, 2));
             ray_release(prev);
             prev = cur;
             if (RAY_IS_ERR(e)) { ray_release(l); l = e; break; }

@@ -260,8 +260,8 @@ ray_t* q_drop_wrap(ray_t* x, ray_t* y) {
     if (x && y && !ray_is_atom(x) && (q_type_is_keyed(y) || (x->type == RAY_SYM && q_type_is_table(y))))
         return q_funsql_entries_drop(x, y);   /* keyed tables + table columns */
     int64_t i;
-    if (x && (ray_is_vec(x) || x->type == RAY_LIST) &&
-        q_type_strict_i64(y, &i)) {           /* x _ i — delete the item at i */
+    if (x && (ray_is_vec(x) || x->type == RAY_LIST || q_type_is_table(x)) &&
+        q_type_strict_i64(y, &i)) {           /* x _ i — delete the item at i; a table's items are its rows */
         int64_t len = q_count(x);
         if (i < 0 || i >= len) { ray_retain(x); return x; }   /* Drop is tolerant */
         ray_t* idx = ray_vec_new(RAY_I64, len > 1 ? len - 1 : 1);
