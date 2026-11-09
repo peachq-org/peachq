@@ -12,7 +12,8 @@
 #include "qlang/html_assets_gen.h" /* q_html_assets[] — codegen'd from src/qlang/html/ */
 #include "qlang/q_console.h"   /* q_console_door — handler output is the server console's */
 #include "qlang/q_env.h"       /* q_env_get — `.h.HOME` / `.h.ty`, the `.z.*` handlers */
-#include "qlang/eval/q_eval.h" /* q_eval_apply_call_name — handler firing */
+#include "qlang/eval/q_eval.h"
+#include "qlang/q_ctx.h"       /* q_ctx_remote_call — a handler runs as a client callback under `\e` */
 #include "mem/sys.h"
 #include "picohttpparser.h"
 #include <stdlib.h>
@@ -648,10 +649,22 @@ static int zh_dispatch_call(ray_sock_t fd, const char* method, size_t mlen,
     ray_t* arg = zh_build_arg(method, mlen, text_p, text_len, hdrs, nh);
     if (!arg) { q_http_send_simple(fd, 500, "Internal Server Error"); return 0; }
 
-    FILE*  door = q_console_door(stdout);        /* handler show/0N! is the SERVER console's */
-    ray_t* r    = q_eval_apply_call_name(which, strlen(which), &arg, 1);
-    q_console_door(door);
+    char*  trace = NULL;
+    size_t tn = 0;
+    ray_t* fn = q_env_resolve(ray_sym_intern_runtime(which, strlen(which)));
+    ray_t* r  = fn && !RAY_IS_ERR(fn) ? q_ctx_remote_call(fn, arg, Q_CTX_HTTP, &trace, &tn) : fn;
+    if (fn && !RAY_IS_ERR(fn)) ray_release(fn);
     ray_release(arg);
+    if (trace) {                                 /* `\e 2`: the stack goes into the socket (debug.md) */
+        char hdr[160];
+        int  hl = snprintf(hdr, sizeof hdr, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n"
+                           "Content-Length: %zu\r\nConnection: close\r\n\r\n", tn);
+        if (hl > 0 && q_http_send_all(fd, hdr, (size_t)hl, Q_HTTP_SEND_SECS) == 0)
+            q_http_send_all(fd, trace, tn, Q_HTTP_SEND_SECS);
+        ray_free_raw(trace);
+        if (r && RAY_IS_ERR(r)) ray_error_free(r);
+        return 0;
+    }
 
     { const char* rp; int64_t rn;
       if (r && !RAY_IS_ERR(r) && q_str_text_bytes(r, &rp, &rn)) {
