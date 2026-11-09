@@ -141,6 +141,11 @@ typedef struct q_wire_wbuf {
 int  q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x);
 void q_wire_wbuf_free(q_wire_wbuf_t* b);
 
+/* A keyword native with no kdb primitive code travels as the root lambda that calls it, spelled by rank: writes
+ * that text (`{til x}`, NUL-terminated) into out and returns its length; 0 for any other value or too small a cap. */
+#define Q_WIRE_KW_LAMBDA_CAP 160
+int  q_wire_keyword_lambda(ray_t* x, char* out, size_t cap);
+
 /* Decode ONE object from buf[0..len).  swap = nonzero when the frame was
  * encoded big-endian.  On success *consumed is the byte count read.
  * Returns an owned value or a RAY_ERROR. */

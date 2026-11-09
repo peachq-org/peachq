@@ -215,15 +215,18 @@ static int kw_name(ray_t* x, const char** nm, size_t* n, int* rank) {
     return 1;
 }
 
-static int w_keyword(q_wire_wbuf_t* b, ray_t* x) {
+/* The one classification of a keyword native with no primitive code: `type` and `value` answer through it too, so
+ * wire, type and value never disagree (Dffqch) */
+int q_wire_keyword_lambda(ray_t* x, char* out, size_t cap) {
+    if (!x || (x->type != RAY_UNARY && x->type != RAY_BINARY && x->type != RAY_VARY) || q_registry_kdb_op_of(x, NULL) >= 0)
+        return 0;
+    int rank = 0;
+    int64_t nat = q_env_native_name(x, &rank);
+    ray_t* ns = nat ? ray_sym_str(nat) : NULL;    /* borrowed */
+    if (ns && !RAY_IS_ERR(ns) && dl_library_native(ray_str_ptr(ns), ray_str_len(ns))) return 0;
     const char* nm;
     size_t n;
-    int rank;
-    if (!kw_name(x, &nm, &n, &rank)) return wbuf_fail(b, q_err(QE_NYI));
-    char t[160];
-    int tl = kw_lambda_text(nm, n, rank, t, sizeof t);
-    if (!tl) return wbuf_fail(b, q_err(QE_NYI));
-    return (w_u8(b, 100) || w_u8(b, 0) || w_charvec(b, t, tl, 0)) ? -1 : 0;
+    return kw_name(x, &nm, &n, &rank) ? kw_lambda_text(nm, n, rank, out, cap) : 0;
 }
 
 int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
@@ -336,17 +339,20 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     int8_t t = x->type;
 
     /* fn values, wire mode: 101h/102h from the manifest row's kdb_op column; a library native with no code travels
-     * as its `2:` call, a keyword native as kdb writes it (w_keyword). */
+     * as its `2:` call, a keyword native as kdb writes it (q_wire_keyword_lambda). */
     if (!b->serde && (t == RAY_UNARY || t == RAY_BINARY || t == RAY_VARY)) {
         q_valence_t val = Q_DYADIC;
         int code = q_registry_kdb_op_of(x, &val);
+        char kt[Q_WIRE_KW_LAMBDA_CAP];
+        int tl = code < 0 ? q_wire_keyword_lambda(x, kt, sizeof kt) : 0;
         int rank = 0;
-        int64_t nat = code < 0 ? q_env_native_name(x, &rank) : 0;
+        int64_t nat = code < 0 && !tl ? q_env_native_name(x, &rank) : 0;
         ray_t* ns = nat ? ray_sym_str(nat) : NULL;    /* borrowed */
         if (!ns || RAY_IS_ERR(ns) || !dl_library_native(ray_str_ptr(ns), ray_str_len(ns))) nat = 0;
         rc = code >= 0 ? w_prim(b, val == Q_MONADIC ? 101 : 102, (uint8_t)code)
+           : tl        ? ((w_u8(b, 100) || w_u8(b, 0) || w_charvec(b, kt, tl, 0)) ? -1 : 0)
            : nat       ? w_dl_call(b, ray_sym_intern_runtime("pq", 2), nat, rank)
-                       : w_keyword(b, x);
+                       : wbuf_fail(b, q_err(QE_NYI));
         goto out;
     }
 
@@ -963,13 +969,8 @@ static ray_t* kw_template_value(const char* s, size_t n) {
     ray_t* v = q_registry_lookup_name(p, nn, Q_MONADIC);
     if (!v) v = q_registry_lookup_name(p, nn, Q_DYADIC);
     if (!v) v = q_env_native_get(p, nn, -1);
-    if (!v || (v->type != RAY_UNARY && v->type != RAY_BINARY && v->type != RAY_VARY) || q_registry_kdb_op_of(v, NULL) >= 0)
-        return NULL;
-    const char* nm;
-    size_t kn;
-    int rank;
-    char t[160];
-    int tl = kw_name(v, &nm, &kn, &rank) ? kw_lambda_text(nm, kn, rank, t, sizeof t) : 0;
+    char t[Q_WIRE_KW_LAMBDA_CAP];
+    int tl = q_wire_keyword_lambda(v, t, sizeof t);
     if (!tl || (size_t)tl != n || memcmp(t, s, n) != 0) return NULL;
     ray_retain(v);
     return v;
