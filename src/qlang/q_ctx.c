@@ -793,8 +793,8 @@ int q_ctx_run_load(const char* name, FILE* out, FILE* err) {
 /* `\e` error-trap-CLIENTS mode (syscmds.md#e-error-trap-clients, debug.md §Error trap modes) governs every client
  * callback — sync, async and HTTP, a handler's or handle 0's `value` (owner R5): 1 marks the statement console, so an
  * error suspends on the server's console (the parked event loop is what blocks other requests); 2 dumps the stack
- * to stderr, or into an HTTP caller's response; 0 aborts, an async error still showing its line and frame [0] on the
- * server console (SO 64109959).  The client is answered in every mode.  A handler call has no text: the handler is
+ * to stderr, or into an HTTP caller's response; 0 aborts, an async error still showing its error line (no frames)
+ * on the server console (SO 64109959's default-mode `q)'type`).  The client is answered in every mode.  A handler call has no text: the handler is
  * frame [0].  OWNER RULING 2026-08-10: `\d` is restored on success (no client parks a shared server), not after an
  * abort. */
 ray_t* q_ctx_remote_call(ray_t* fn, ray_t* msg, int kind, char** trace, size_t* tn) {
