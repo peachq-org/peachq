@@ -770,9 +770,15 @@ void q_env_frame_pop(void) {
     if (f->vals != f->vals_in) ray_sys_free(f->vals);
 }
 
+/* the frame local writes and reads address: the top one, or the debugger cursor's (NULL: no frame) */
+static frame_t* local_frame(void) {
+    if (g_fdepth <= 0 || g_fview == Q_ENV_FRAME_VIEW_NONE) return NULL;
+    return &g_frames[g_fview >= 0 && g_fview < g_fdepth - 1 ? g_fview : g_fdepth - 1];
+}
+
 ray_err_t q_env_local_set(int64_t sym, ray_t* val) {
-    if (g_fdepth <= 0) return q_env_set(sym, val);
-    frame_t* f = &g_frames[g_fdepth - 1];
+    frame_t* f = local_frame();
+    if (!f) return q_env_set(sym, val);
     for (int32_t i = 0; i < f->n; i++) {
         if (f->keys[i] != sym) continue;
         ray_retain(val);
@@ -803,16 +809,16 @@ ray_err_t q_env_local_set(int64_t sym, ray_t* val) {
 }
 
 ray_t* q_env_local_get(int64_t sym) {
-    if (g_fdepth <= 0) return NULL;
-    frame_t* f = &g_frames[g_fdepth - 1];
+    frame_t* f = local_frame();
+    if (!f) return NULL;
     for (int32_t i = 0; i < f->n; i++)
         if (f->keys[i] == sym) return f->vals[i];
     return NULL;
 }
 
 int q_env_local_take(int64_t sym, ray_t* cur) {
-    if (g_fdepth <= 0 || !cur) return 0;
-    frame_t* f = &g_frames[g_fdepth - 1];
+    frame_t* f = local_frame();
+    if (!f || !cur) return 0;
     for (int32_t i = 0; i < f->n; i++) {
         if (f->keys[i] != sym || f->vals[i] != cur) continue;
         f->vals[i] = RAY_NULL_OBJ;              /* the singleton is retain-free */
