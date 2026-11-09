@@ -78,7 +78,9 @@ static RAY_TLS struct {
     int32_t rows, cols;   /* live `\c` size (already clamped to [10,2000]) */
     int32_t nlines;       /* completed (flushed) display lines */
     int     stop;         /* height cap decided — swallow everything else */
-    char    line[2048];   /* physical prefix of the current line (>= cols) */
+    char*   line;         /* physical prefix of the current line (<= cols): line0, grown on the heap past it */
+    size_t  lcap;
+    char    line0[2048];
     size_t  llen;         /* buffered physical chars (<= cols) */
     size_t  llog;         /* LOGICAL chars on the line, incl. swallowed overflow */
     size_t  ltrail;       /* trailing-space run at the logical end (qe_trim) */
@@ -116,6 +118,15 @@ static void qe_flush_line(qe_tgt* t) {
     g_clip.llen = g_clip.llog = g_clip.ltrail = 0;
 }
 
+static int qe_line_grow(qe_tgt* t) {
+    char* nl = g_clip.line == g_clip.line0 ? malloc(g_clip.lcap * 2) : realloc(g_clip.line, g_clip.lcap * 2);
+    if (!nl) { t->trunc = 1; g_clip.stop = 1; return 0; }   /* stop: a flush would read past the short line */
+    if (g_clip.line == g_clip.line0) memcpy(nl, g_clip.line0, g_clip.lcap);
+    g_clip.line = nl;
+    g_clip.lcap *= 2;
+    return 1;
+}
+
 static void qe_putc(char c) {
     qe_tgt* t = qe_top();
     if (!t->clip) {
@@ -141,7 +152,7 @@ static void qe_putc(char c) {
     }
     g_clip.llog++;
     g_clip.ltrail = (c == ' ') ? g_clip.ltrail + 1 : 0;
-    if (g_clip.llen < (size_t)g_clip.cols && g_clip.llen < sizeof g_clip.line - 1)
+    if (g_clip.llen < (size_t)g_clip.cols && (g_clip.llen < g_clip.lcap || qe_line_grow(t)))
         g_clip.line[g_clip.llen++] = c;
 }
 
@@ -1432,28 +1443,34 @@ static void fmt_pipe_render(ray_t* val, char* buf, size_t bufsz, int* trunc) {
 }
 
 
-/* The classic console text under the `\c` clip, whatever the display mode. */
-static void fmt_classic_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
-    *trunc = 0;
-    if (bufsz == 0 || !buf) return;
-    int32_t rows = 0, cols = 0;
-    int armed = q_console_clip(&rows, &cols) && !g_clip_active;
-    if (armed && val && val->type == RAY_LIST && list_is_parse_tree(val, 0))
-        armed = 0;                             /* parse display NEVER clips */
-    if (!armed || rows < 10 || cols < 10 || cols > 2000) {
+/* val under the `\c rows cols` clip: over rows-2 lines ends in a `..` line, a line over cols-1 chars in `..`.  Inside
+ * another clip, or for a parse tree, it renders unclipped. */
+static void fmt_sized_into(ray_t* val, int32_t rows, int32_t cols, char* buf, size_t bufsz, int* trunc) {
+    if (g_clip_active || (val && val->type == RAY_LIST && list_is_parse_tree(val, 0))) {
         fmt_into(val, buf, bufsz, trunc);
         return;
     }
+    *trunc = 0;
+    if (bufsz == 0 || !buf) return;
     g_clip_active = 1;
     g_clip.rows = rows;   g_clip.cols = cols;
     g_clip.nlines = 0;    g_clip.stop = 0;
     g_clip.llen = g_clip.llog = g_clip.ltrail = 0;
+    g_clip.line = g_clip.line0; g_clip.lcap = sizeof g_clip.line0;
     qe_push(buf, bufsz, 1);
     fmt_render(val);
     qe_tgt* t = qe_top();
     qe_pop();
     *trunc = t->trunc;
+    if (g_clip.line != g_clip.line0) free(g_clip.line);
     g_clip_active = 0;
+}
+
+/* The classic console text under the `\c` clip, whatever the display mode. */
+static void fmt_classic_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
+    int32_t rows = 0, cols = 0;
+    if (!q_console_clip(&rows, &cols) || rows < 10 || cols < 10 || cols > 2000) fmt_into(val, buf, bufsz, trunc);
+    else fmt_sized_into(val, rows, cols, buf, bufsz, trunc);
 }
 
 /* The modern display: tables as the pipe table, everything else as the classic console text. */
@@ -2151,4 +2168,54 @@ ray_t* q_fmt_krepr_charv(ray_t* val) {
     ray_t* r = ray_charv(buf, (int64_t)len);
     free(buf);
     return r;
+}
+
+static RAY_TLS int32_t g_lines_rows, g_lines_cols;   /* fmt_grow passes no context: q_fmt_lines' clip size */
+static RAY_TLS int64_t g_cell_row;                   /* and q_fmt_cells' element */
+
+static void fmt_lines_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
+    fmt_sized_into(val, g_lines_rows, g_lines_cols, buf, bufsz, trunc);
+}
+
+static void fmt_cell_into(ray_t* vec, char* buf, size_t bufsz, int* trunc) {
+    q_fmt_cell(vec, g_cell_row, 1, buf, bufsz);
+    *trunc = strlen(buf) + 1 >= bufsz;
+}
+
+ray_t* q_fmt_lines(ray_t* val, int64_t rows, int64_t cols) {
+    if (q_fmt_shows_nothing(val)) return ray_list_new(0);
+    int32_t crows = 0, ccols = 0;
+    q_console_clip(&crows, &ccols);
+    g_lines_rows = rows == NULL_I64 ? crows : rows < 1 ? 3 : rows > INT32_MAX - 2 ? INT32_MAX : (int32_t)rows + 2;
+    g_lines_cols = cols == NULL_I64 ? ccols : cols < 2 ? 3 : cols > INT32_MAX - 1 ? INT32_MAX : (int32_t)cols + 1;
+    size_t len;
+    char*  buf = fmt_grow(fmt_lines_into, val, &len);
+    if (!buf) return q_err(QE_WSFULL);
+    ray_t* out = ray_list_new(0);
+    for (size_t at = 0; at <= len && !RAY_IS_ERR(out);) {
+        const char* nl = memchr(buf + at, '\n', len - at);
+        size_t l = nl ? (size_t)(nl - (buf + at)) : len - at;
+        ray_t* s = ray_charv(buf + at, (int64_t)l);
+        out = ray_list_append(out, s);
+        ray_release(s);
+        at += l + 1;
+    }
+    free(buf);
+    return out;
+}
+
+ray_t* q_fmt_cells(ray_t* vec) {
+    int64_t n = q_count(vec);
+    ray_t* out = ray_list_new(n);
+    for (int64_t i = 0; i < n && !RAY_IS_ERR(out); i++) {
+        size_t len;
+        g_cell_row = i;
+        char* cb = fmt_grow(fmt_cell_into, vec, &len);
+        if (!cb) { ray_release(out); return q_err(QE_WSFULL); }
+        ray_t* s = ray_charv(cb, (int64_t)len);
+        free(cb);
+        out = ray_list_append(out, s);
+        ray_release(s);
+    }
+    return out;
 }
