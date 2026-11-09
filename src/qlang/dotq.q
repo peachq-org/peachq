@@ -10,8 +10,9 @@
 .Q.qp:.Q.c.qp;
 / wp/permissions .h.jx, kdb-common util.q:118-120 (a modified .Q.s): x's console lines within (rows;cols), from row j
 .Q.S:{[b;j;x].Q.c.S[b;$[(j>0)&type[x]within 0 99;j _ x;x]]};
-/ kdb-q-ext-vscode src/format/console.ts:66-84 (a port of q's .Q.s2): uncut, a simple vector's elements as cells
-.Q.s2:{$[type[x]within 1 19;.Q.c.cells x;.Q.S[0W 0W;0]x]};
+/ kdb-q-ext-vscode src/format/console.ts:66-84 (a port of q's .Q.s2): uncut, a simple vector's elements as cells;
+/ an atom answers the cell it gets as an element (owner 2026-11-09)
+.Q.s2:{$[type[x]within 1 19;.Q.c.cells x;neg[type x]within 1 19;first .Q.c.cells enlist x;.Q.S[0W 0W;0]x]};
 .Q.s:.Q.c.s;
 .Q.w:.Q.c.w;
 .Q.gc:.Q.c.gc;

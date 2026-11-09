@@ -92,7 +92,8 @@
 / names pair with the unchanged column values, so a bad rename/reorder goes ragged
 / at `!` and throws its own 'length (ref/cols.md: nonexistent key x -> 'length)
 .q.xcol:{[x;y] .Q.ft[{[x;t] c:cols t; flip ($[99h=type x;{[c;m](c^m c),(key m)except c}[c;$[98h=type key x;first each flip key x;x]];x,(count x)_c])!value .Q.V t}[x;];y]}
-.q.xcols:{[x;y] .Q.ft[{[x;t] c:cols t; n:x,c except x; flip n!(.Q.V t) n inter c}[x;];y]}
+/ a dictionary's keys stand for the columns (TorQ dataaccess/queryorder.q:41; owner 2026-11-09)
+.q.xcols:{[x;y] $[(99h=type y)&not .Q.qt y;{[x;d] k:key d; n:x,k except x; n!d n inter k}[x;y];.Q.ft[{[x;t] flip .q.xcols[x;.Q.V t]}[x;];y]]}
 
 / ---- wave 4: verbs with no kernel to lose ----
 / ref/tables.md "default is root namespace" - and bare `system"a"` lists the CURRENT
