@@ -19,9 +19,9 @@ listed behave as the reference body further down describes.
 | `\r` | **differs** — both forms (replication primary; rename) are accepted silently but do nothing, and the getter answers `'nyi`. |
 | `\T` | **differs** — `\T 30` is accepted silently but not applied; the getter answers `'nyi`. |
 | `\u` | **differs** — the bare reload answers `'nyi`; `\u file` is accepted silently. |
-| `\e \g \o \s \W` | **partly** — get and set round-trip the value, but the behaviour behind the number (error trapping, real collection, the UTC offset reaching `.z.Z`, thread re-tuning, the week start) is not wired yet. |
+| `\g \o \s \W` | **partly** — get and set round-trip the value, but the behaviour behind the number (real collection, the UTC offset reaching `.z.Z`, thread re-tuning, the week start) is not wired yet. |
 | `\c` | **differs** — modern mode (the default) answers `25 0Ni`: `0N` columns auto-fits the live terminal at each render. `-classic` gives kdb's `25 80`; `LINES` and `COLUMNS`, `-c` or `\c h w` set explicit values. |
-| everything else | **answers as documented at the command surface** — `\a \b \B \cd \C \d \f \l \p \P \S \t \ts \v \w \z \E \1 \2 \\` and the unknown-token OS escape. This table is re-derived per command, not a clause-by-clause conformance audit of the reference body below. |
+| everything else | **answers as documented at the command surface** — `\a \b \B \cd \C \d \e \f \l \p \P \S \t \ts \v \w \z \E \1 \2 \\` and the unknown-token OS escape. This table is re-derived per command, not a clause-by-clause conformance audit of the reference body below. |
 
 ---
 

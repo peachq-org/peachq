@@ -20,7 +20,7 @@
 #include "qlang/ops/q_index.h"
 #include <string.h>
 
-#define DBG_LIVE_MAX 2048   /* q_eval.c EVAL_MAX_DEPTH: every live frame is stored, the innermost included */
+#define DBG_LIVE_MAX Q_EVAL_DEPTH_CEIL   /* every live frame is stored, the innermost included, q)) reserves too */
 #define DBG_SNAP_MAX 64
 #define DBG_STMT_MAX 4096
 #define DBG_LINE_MAX 4096
@@ -873,8 +873,12 @@ static int64_t frame_ctx(int idx, int64_t session) {
 /* Returns NULL to propagate err (\ or EOF), a value to resume (:r), or a new error to signal from this frame
  * ('err).  A q)) line reports its own frames only, numbered past the suspended ones and two hidden frames — the
  * debugger's own and the line's — as kdb numbers them (debug.md `{x+y}[a;y]` -> [5] under a [2] suspension). */
+static _Thread_local int g_resume_bare;   /* the last suspension ended with a bare `:` */
+
 static ray_t* dbg_suspend(ray_t* err) {
     g_dbg_depth++;
+    q_eval_reserve_t depth_cap = q_eval_depth_reserve();   /* at 'limit too, the prompt's lines run */
+    int bare = 0;
     int outer_cursor = g_cursor, outer_out = g_out;
     int outer_frames = g_prompt_frames;
     dbg_sus_t sus = { g_frame_base, g_frame_num, g_live_depth, &g_stmt, g_sus };
@@ -906,6 +910,7 @@ static ray_t* dbg_suspend(ray_t* err) {
         if (n < 0) break;                                 /* EOF: abort */
         if (n == 0) continue;
         if (n == 1 && line[0] == '\\') break;             /* exit one level */
+        if (n == 2 && line[0] == '\\' && line[1] == '\\') q_sys_exit(0);   /* never evaluated: it works at the limit */
         /* `.` onto the error frame after another error was shown reprints the banner (Q4M §10.2; KDB-X's plain `.`
          * onto it does not) */
         if (n == 1 && (line[0] == '`' || line[0] == '.' || line[0] == '&')) {   /* up / down / where */
@@ -931,7 +936,7 @@ static ray_t* dbg_suspend(ray_t* err) {
         if (line[0] == ':') {                             /* :r — resume */
             ray_t* v = (n == 1) ? (ray_retain(RAY_NULL_OBJ), RAY_NULL_OBJ)
                                 : dbg_value_at(line + 1, 0);
-            if (v) { out = v; break; }
+            if (v) { out = v; bare = n == 1; break; }
             continue;
         }
         if (line[0] == '\'') {                            /* 'err — re-signal */
@@ -942,6 +947,8 @@ static ray_t* dbg_suspend(ray_t* err) {
         }
         dbg_run_line(line, (size_t)n);
     }
+    g_resume_bare = bare;
+    q_eval_depth_restore(depth_cap);
     q_env_ctx_set(session);
     g_cursor = outer_cursor;
     g_out = outer_out;
@@ -972,6 +979,19 @@ static int dbg_suspendable(ray_t* r) {
     return g_reader && g_console_stmt && g_trap_depth == 0 && dbg_in_lambda();
 }
 
+/* rep replaces r: a resumed value drops the pending payload, an 'err OWNS it */
+static ray_t* dbg_replace(ray_t* r, ray_t* rep) {
+    if (!RAY_IS_ERR(rep)) {
+        q_err_drop();
+        q_dbg_snapshot_clear();
+    } else {
+        g_cut_err = rep;
+        g_cut_depth = g_live_depth;
+    }
+    ray_error_free(r);
+    return rep;
+}
+
 static ray_t* dbg_observe(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
     if (!r || !RAY_IS_ERR(r) || q_err_is(r, QE_RETURN)) return r;
     if (g_snap.err == r) return r;             /* already seen deeper */
@@ -982,23 +1002,30 @@ static ray_t* dbg_observe(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
     snap_take(r, fv, args, n);
     if (!g_snap.saved && dbg_suspendable(r)) {   /* a re-signal's frames are not live: nothing to suspend in */
         ray_t* rep = dbg_suspend(r);
-        if (rep) {
-            /* an 'err replacement OWNS the pending payload slot — drop only
-             * when resuming with a plain value */
-            if (!RAY_IS_ERR(rep)) {
-                q_err_drop();
-                q_dbg_snapshot_clear();
-            } else {
-                g_cut_err = rep;
-                g_cut_depth = g_live_depth;
-            }
-            ray_error_free(r);
-            return rep;                        /* resumed value or 'err */
-        }
+        if (rep) return dbg_replace(r, rep);
         if (g_snap.err != r) snap_take(r, fv, args, n);   /* past DBG_NEST_MAX only */
         g_snap.reported = 1;
     }
     return r;
+}
+
+/* An interrupt suspends where it was taken, so resuming continues the interrupted operation (a bare `:`); `:e`
+ * substitutes e for that operation as for any error, `\` or a trap sees the 'stop. */
+ray_t* q_dbg_stop(void) {
+    ray_t* r = q_err(QE_STOP);
+    if (!dbg_suspendable(r)) return r;
+    snap_take(r, NULL, NULL, 0);
+    ray_t* rep = dbg_suspend(r);
+    if (!rep) {
+        if (g_snap.err != r) snap_take(r, NULL, NULL, 0);
+        g_snap.reported = 1;
+        return r;
+    }
+    int bare = g_resume_bare;
+    rep = dbg_replace(r, rep);
+    if (!bare) return rep;
+    ray_release(rep);
+    return NULL;
 }
 
 ray_t* q_dbg_filter(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {

@@ -13,7 +13,7 @@
  * The walker intercepts the ctor heads BY POINTER IDENTITY and builds
  * literals natively; the follow-up PR makes the parser emit literal nodes
  * the q evaluator owns, retiring this seam. */
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE   /* pthread_getattr_np — the C stack's extent for the depth guard */
 
 #include "qlang/q_count.h"
 #include "qlang/eval/q_eval.h"
@@ -39,11 +39,62 @@
 #include "table/sym.h"             /* ray_read_sym — sym vectors are width-adaptive */
 #include <signal.h>
 #include <string.h>
+#if defined(RAY_OS_WINDOWS)
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
 
 #define EVAL_MAX_ARGS  60
 #define EVAL_MAX_DEPTH 2048
+#define EVAL_DBG_DEPTH 64        /* a q)) line's headroom past the depth it suspended at */
+_Static_assert(Q_EVAL_DEPTH_CEIL == EVAL_MAX_DEPTH + 8 * EVAL_DBG_DEPTH, "nested suspensions share one bounded reserve");
 
 static _Thread_local int g_depth;
+static _Thread_local int g_depth_cap = EVAL_MAX_DEPTH;
+
+/* The C stack guard: recursion through adverbs and kernels spends far more stack per walker level than `{.z.s[]}`
+ * does, so a lambda application also stops at a floor near the stack's end — one compare per call.  UINTPTR_MAX
+ * until this thread's extent is known (the first compare learns it); 0 where it cannot be learned. */
+static _Thread_local uintptr_t g_stack_floor = UINTPTR_MAX;
+static _Thread_local uintptr_t g_stack_lo, g_stack_margin, g_stack_dbg;   /* its end, a kernel's margin, q))'s share */
+static _Thread_local int       g_stack_known;
+
+static void stack_learn(void) {
+    g_stack_known = 1;
+    g_stack_floor = 0;
+    uintptr_t lo = 0, size = 0;
+#if defined(RAY_OS_WINDOWS)
+    ULONG_PTR l, h;
+    GetCurrentThreadStackLimits(&l, &h);
+    lo = (uintptr_t)l;
+    size = (uintptr_t)(h - l);
+#elif defined(RAY_OS_MACOS)
+    size = (uintptr_t)pthread_get_stacksize_np(pthread_self());
+    lo = (uintptr_t)pthread_get_stackaddr_np(pthread_self()) - size;
+#else
+    pthread_attr_t a;
+    void* addr = NULL;
+    size_t sz = 0;
+    if (pthread_getattr_np(pthread_self(), &a) == 0) {
+        pthread_attr_getstack(&a, &addr, &sz);
+        pthread_attr_destroy(&a);
+    }
+    lo = (uintptr_t)addr;
+    size = sz;
+#endif
+    if (!lo || size < (1u << 20)) return;
+    g_stack_lo = lo;
+    g_stack_margin = size / 16 > (256u << 10) ? size / 16 : (256u << 10);
+    g_stack_dbg = size / 8;
+    g_stack_floor = lo + g_stack_margin + g_stack_dbg;
+}
+
+int q_eval_stack_low(void) {
+    if (RAY_LIKELY((uintptr_t)__builtin_frame_address(0) >= g_stack_floor)) return 0;
+    if (!g_stack_known) stack_learn();
+    return (uintptr_t)__builtin_frame_address(0) < g_stack_floor;
+}
 _Thread_local const ray_t* q_eval_node;
 
 volatile sig_atomic_t q_eval_stop_pending;
@@ -64,6 +115,23 @@ int q_eval_interrupt_consume(void) {
 void q_eval_interrupt_served(void) { g_unserviced = 0; }
 
 int q_eval_active(void) { return g_depth > 0; }
+
+q_eval_reserve_t q_eval_depth_reserve(void) {
+    q_eval_reserve_t prev = { g_depth_cap, g_stack_floor };
+    int want = g_depth + EVAL_DBG_DEPTH;
+    if (want > g_depth_cap) g_depth_cap = want < Q_EVAL_DEPTH_CEIL ? want : Q_EVAL_DEPTH_CEIL;
+    if (g_stack_known && g_stack_floor) {   /* an eighth of q))'s share past here, never into the kernels' margin */
+        uintptr_t sp = (uintptr_t)__builtin_frame_address(0), step = g_stack_dbg / 4, hard = g_stack_lo + g_stack_margin;
+        uintptr_t want_sp = sp > hard + step ? sp - step : hard;
+        if (want_sp < g_stack_floor) g_stack_floor = want_sp;
+    }
+    return prev;
+}
+
+void q_eval_depth_restore(q_eval_reserve_t r) {
+    g_depth_cap = r.cap;
+    g_stack_floor = r.floor;
+}
 
 /* Fixed sym ids, interned ONCE per runtime (the env.c ipc-hook-syms
  * discipline).  Process-global like the registry itself — one live q runtime
@@ -835,7 +903,8 @@ static ray_t* if_eval(ray_t** e, int64_t n, int loop) {
         err = ctl_run_body(e, 1, n);
         if (err) return err;
         if (!loop) break;
-        if (q_eval_interrupt_take()) return q_err(QE_STOP);   /* an empty body never reaches the walker's check */
+        if (q_eval_interrupt_take() && (err = q_dbg_stop()))   /* an empty body never reaches the walker's check */
+            return err;
     }
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;
@@ -855,7 +924,7 @@ static ray_t* do_eval(ray_t** e, int64_t n) {
     for (int64_t k = 0; k < times; k++) {
         ray_t* err = ctl_run_body(e, 1, n);
         if (err) return err;
-        if (q_eval_interrupt_take()) return q_err(QE_STOP);
+        if (q_eval_interrupt_take() && (err = q_dbg_stop())) return err;
     }
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;
@@ -1013,8 +1082,12 @@ out:
 ray_t* q_eval(ray_t* node) {
     if (!node) return RAY_NULL_OBJ;
     if (RAY_IS_ERR(node)) return node;
-    if (q_eval_interrupt_take()) return q_err(QE_STOP);
-    if (++g_depth > EVAL_MAX_DEPTH) { g_depth--; return q_err(QE_LIMIT); }
+    if (q_eval_interrupt_take()) {
+        if (node->type == RAY_LIST) q_eval_node = node;   /* the caret: the node the stop fell before */
+        ray_t* s = q_dbg_stop();
+        if (s) return s;
+    }
+    if (++g_depth > g_depth_cap) { g_depth--; return q_err(QE_LIMIT); }
 
     ray_t* ret;
     if (node->type == -RAY_SYM) {
