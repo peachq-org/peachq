@@ -1925,8 +1925,6 @@ static void q_fmt_body(ray_t* val) {
     if (val->type == RAY_LIST) {
         int64_t n = q_count(val);
         ray_t** e = (ray_t**)ray_data(val);
-        /* a bare constructor (parse "()") is the empty-list application */
-        if (n == 1 && e[0] == q_registry_list_value()) { qe_puts("()"); return; }
         if (n == 0) { qe_puts("()"); return; }
         if (q_type_is_row_list(val)) {           /* same-keyed row dicts (a stored table column) print as their table */
             ray_t* tb = q_list_collapse(val);
@@ -2053,7 +2051,7 @@ static void krepr_into(ray_t* val, char* buf, size_t bufsz, int* tr) {
     if (val->type == RAY_LIST) {
         int64_t n = q_count(val);
         ray_t** e = (ray_t**)ray_data(val);
-        if (n == 0 || (n == 1 && e[0] == q_registry_list_value())) {
+        if (n == 0) {
             if ((size_t)snprintf(buf, bufsz, "()") >= bufsz) *tr = 1;
             return;
         }
