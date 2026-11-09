@@ -137,9 +137,13 @@ int    q_eval_apply_kfn_parts(ray_t* v, void** fn, int64_t* rank, int64_t* lib_s
 ray_t* q_eval_apply_foreign_new(void* obj);
 int    q_eval_apply_foreign_parts(ray_t* v, void** obj);
 /* types: i64 vector of declared kdb type nums parallel to params (0 = untyped slot), NULL for an undecorated
- * lambda, checked exactly on entry ('type); pos: the parser's caret table, i64 (node pointer; head-token offset) pairs */
+ * lambda, checked exactly on entry ('type); pats: general list parallel to params, a destructured slot's pattern
+ * tree (q_pattern.h) or the generic null, NULL when no slot destructures; pos: the parser's caret table, i64 (node
+ * pointer; head-token offset) pairs */
 ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
-                               ray_t* src, ray_t* types, ray_t* pos);
+                               ray_t* src, ray_t* types, ray_t* pats, ray_t* pos);
+/* is this tree node the name-ref `:`, the head of an assignment and of a `p:`c` type check? */
+int q_eval_is_colon(const ray_t* x);
 ray_t* q_eval_apply_deriv_new(int adv, ray_t* fv, const struct q_op* frow);
 /* An iterator IS a value (103h, basics/datatypes.md); a derived function is
  * that value applied to its ONE operand.  `_iter_id` reads the adverb id
