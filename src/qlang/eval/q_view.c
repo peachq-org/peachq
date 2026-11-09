@@ -135,7 +135,9 @@ static ray_t* view_recalc(ray_t* c) {
     if (q_env_frame_push(1) != RAY_OK) return q_err(QE_STACK);
     c->aux[1] |= VIEW_INRECALC;
     int64_t scope = q_env_scope(0);   /* a view and its dependencies live in the root only (learn/views.md:20) */
+    q_dbg_hold_t hold = q_dbg_hold();  /* the view's tree is not the frame's text: its caret stays on the name */
     ray_t* r = q_eval_apply_concrete(q_eval(s[0]));
+    q_dbg_release(hold);
     q_env_scope(scope);
     c->aux[1] &= (uint8_t)~VIEW_INRECALC;
     q_env_frame_pop();
