@@ -269,6 +269,22 @@ static int lam_global_name(ray_t* lam, char* buf, size_t cap) {
     return found;
 }
 
+/* else the name its first assignment stamped: an anonymous inner lambda's `f@` (basics/debug.md §Errors), a dotted
+ * handler's `.z.pg` — a root name's `..` dropped */
+static int lam_name(ray_t* lam, char* buf, size_t cap) {
+    if (lam_global_name(lam, buf, cap)) return 1;
+    ray_t* nm = NULL;
+    q_eval_apply_lambda_prov(lam, &nm, NULL, NULL);
+    if (!nm) return 0;
+    const char* p = (const char*)ray_data(nm);
+    size_t n = (size_t)q_count(nm);
+    if (n > 2 && p[0] == '.' && p[1] == '.') { p += 2; n -= 2; }
+    if (n + 1 >= cap) return 0;
+    memcpy(buf, p, n);
+    buf[n] = '\0';
+    return 1;
+}
+
 /* one frame: `  [i]  file:line: name:src` then its caret line (basics/debug.md — file:line only "if such
  * information is available"; the `^` under the head token at `off`, a blank line when off < 0).  A multi-line
  * text shows the lines through the failing one, the caret, then the rest (KDB-X how-to).  lam NULL = the
@@ -283,7 +299,7 @@ static char* frame_text(size_t* n, int idx, int mark, ray_t* lam, const dbg_stmt
         ray_t* s = q_eval_apply_lambda_src(lam);
         src = s ? ray_str_ptr(s) : "{}";
         sn = s ? ray_str_len(s) : 2;
-        if (lam_global_name(lam, name, sizeof name - 1)) strcat(name, ":");
+        if (lam_name(lam, name, sizeof name - 1)) strcat(name, ":");
         q_eval_apply_lambda_prov(lam, NULL, &fs, &ln);
     }
     ray_t* fp = fs ? ray_sym_str(fs) : NULL;             /* borrowed */
