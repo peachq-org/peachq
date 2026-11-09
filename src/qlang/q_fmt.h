@@ -47,6 +47,10 @@ int  q_fmt_prec(void);
 /* A display as a q string ending in the console's line terminator, under the `\c` clip: the classic console text
  * (modern=0, `.Q.s`) or the modern display (modern=1), whatever the session's mode.  Owned, or 'wsfull. */
 ray_t* q_fmt_display_charv(ray_t* val, int modern);
+/* `.Q.S`: val's classic console lines, at most rows of cols chars cut as the console cuts; a null bound is \c's. */
+ray_t* q_fmt_lines(ray_t* val, int64_t rows, int64_t cols);
+/* `.Q.s2` of a vector: one string per element, as its table cell shows it. */
+ray_t* q_fmt_cells(ray_t* vec);
 
 /* Bind `.pq.i.facts` (the pipe digest's per-column facts as strings) and `.pq.i.render_modern` for `\l pq`. */
 void q_fmt_pq_register(void);
