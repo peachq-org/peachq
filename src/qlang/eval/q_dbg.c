@@ -589,8 +589,10 @@ static ray_t* dbg_suspend(ray_t* err) {
     ray_t* out = NULL;
     char line[DBG_LINE_MAX];
     char prompt[Q_SYS_PROMPT_CAP + 16];
+    int navigated = 1;   /* a `\d` typed at q)) holds until the next navigation applies the frame's own again */
     for (;;) {
-        q_env_ctx_set(frame_ctx(g_cursor, session));   /* each frame's own namespace (debug.md §Context) */
+        if (navigated) q_env_ctx_set(frame_ctx(g_cursor, session));   /* each frame's namespace (debug.md §Context) */
+        navigated = 0;
         dbg_prompt_str(prompt, sizeof prompt);
         int n = g_reader(prompt, line, sizeof line);
         /* the debug-only tokens (basics/debug.md) peeled first; everything
@@ -602,6 +604,7 @@ static ray_t* dbg_suspend(ray_t* err) {
         /* `.` onto the error frame after another error was shown reprints the banner (Q4M §10.2; KDB-X's plain `.`
          * onto it does not) */
         if (n == 1 && (line[0] == '`' || line[0] == '.' || line[0] == '&')) {   /* up / down / where */
+            navigated = 1;
             if (line[0] == '`') { if (g_cursor > sus.base + stmt_bare(sus.stmt)) g_cursor--; }
             else if (line[0] == '.' && g_cursor < g_live_depth) g_cursor++;
             if (line[0] == '&' || (line[0] == '.' && g_cursor == g_live_depth && g_errs_shown != shown)) {
@@ -614,6 +617,7 @@ static ray_t* dbg_suspend(ray_t* err) {
             fflush(stderr);
             continue;
         }
+        navigated = line[0] == ':' || line[0] == '\'';
         if (line[0] == ':') {                             /* :r — resume */
             ray_t* v = (n == 1) ? (ray_retain(RAY_NULL_OBJ), RAY_NULL_OBJ)
                                 : dbg_value_at(line + 1, 0);
