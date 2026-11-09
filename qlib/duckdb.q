@@ -198,7 +198,9 @@
   if[(0=count r[0;2]) and .duckdb.i.big[c;rt 0]; :(::)];
   if[(not (::)~r 3) and all ((0=count r[0;2]);(::)~r[0;5];0=count r[0;6]); :(::)];
   t:.duckdb.exec[c;(.sql.render r 0;r 1;r 2)]; .duckdb.lastpush::r;
-  $[(::)~r 3; t; (?) . (t;$[count r[3;2]; r[3;2;0]; ()]),3_r 3]}
+  / a by with no sort order answers a key marked s#, as q's own select does; a key s# cannot verify stays unmarked
+  if[(::)~r 3; :$[(99h=type rt 2) and (6>count rt) and 99h=type t; @[`s#;t;t]; t]];
+  (?) . (t;$[count r[3;2]; r[3;2;0]; ()]),3_r 3}
 / @ignore
 .duckdb.i.push:{[c;rt]
   .duckdb.lastpush::(::);
