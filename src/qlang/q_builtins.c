@@ -335,6 +335,7 @@ void q_builtins_register(void) {
         { ".Q.c.id",   id_fn        }, { ".Q.c.ty",   q_dotq_ty_fn   },
         { ".Q.c.qt",   q_dotq_qt_fn   }, { ".Q.c.qp",   q_dotq_qp_fn   },
         { ".Q.c.s",    q_dotq_s_fn    }, { ".Q.c.atob", q_dotq_atob_fn },
+        { ".Q.c.cells", q_dotq_cells_fn },
         { ".Q.c.hg",   q_dotq_hg_fn   },   /* HTTP GET (ref/dotq.md) */
         { ".Q.c.ld",   q_ctx_ld_fn    },
         /* No public `.Q` twins — producer seams for q.q's asc/xasc, not keywords. */
@@ -344,6 +345,7 @@ void q_builtins_register(void) {
     for (size_t i = 0; i < sizeof dotq_c_unary / sizeof *dotq_c_unary; i++)
         bind_unary(dotq_c_unary[i].name, dotq_c_unary[i].fn);
     bind_vary (".Q.c.ops", 1, q_dotq_ops_fn);   /* niladic .Q.ops[] + unary .Q.ops x */
+    bind_vary (".Q.c.S",   2, q_dotq_S_fn);     /* console lines within bounds (wp/permissions .h.jx) */
     bind_vary (".Q.c.w",   1, q_dotq_w_fn);     /* memory stats dict (ref/dotq.md) */
     bind_vary (".Q.c.gc",  1, q_dotq_gc_fn);    /* garbage collect (ref/dotq.md) */
     bind_vary (".Q.c.zblocks", 1, q_dotq_zblocks_fn); /* inflated-blocks witness (internal) */

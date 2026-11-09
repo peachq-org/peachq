@@ -297,6 +297,8 @@
 .help.i.r[`.Q.res;".Q.res                              /                         list the reserved words and control words"]
 .help.i.r[`.Q.s;".Q.s til 3                          / \"0 1 2\\n\"               format a value as the console would print it"]
 .help.i.r[`.Q.s1;".Q.s1 til 3                         / \"0 1 2\"                 format a value on one line, as 0N! does"]
+.help.i.r[`.Q.S;".Q.S[5 40;0] ([]a:til 9)            /                         format a value as console lines within a size, from a row"]
+.help.i.r[`.Q.s2;"\", \" sv .Q.s2 `a`b`c                / \"a, b, c\"               format a value as uncut console lines, a vector one item a line"]
 .help.i.r[`.Q.t;".Q.t                                / \" bg xhijefcspmdznuvts\" list the type character of every datatype, indexed by type"]
 .help.i.r[`.Q.ty;".Q.ty 1 2 3                         / \"j\"                     report the type character of a value"]
 .help.i.r[`.Q.V;".Q.V ([]a:1 2)                      / (,`a)!,1 2              take a table's columns as a dictionary"]
