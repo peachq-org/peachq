@@ -18,6 +18,7 @@
 #include "qlang/q_count.h"
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_eval_internal.h"
+#include "qlang/eval/q_dbg.h"             /* q_dbg_statement_pos — the statement's caret table */
 #include "qlang/eval/q_view.h"
 #include "qlang/base/q_err.h"
 #include "qlang/parse/q_parse_internal.h"
@@ -43,6 +44,7 @@
 #define EVAL_MAX_DEPTH 2048
 
 static _Thread_local int g_depth;
+_Thread_local const ray_t* q_eval_node;
 
 /* Fixed sym ids, interned ONCE per runtime (the env.c ipc-hook-syms
  * discipline).  Process-global like the registry itself — one live q runtime
@@ -589,12 +591,14 @@ static ray_t* lambda_structure(ray_t* v) {
 ray_t* q_eval_statement(const char* src, int* parsed) {
     if (parsed) *parsed = 1;
     int64_t scope = q_env_scope(Q_ENV_SCOPE_SESSION);   /* fresh text resolves at the session `\d`, as a load's frames do */
-    ray_t* ast = q_parse(src);
+    ray_t* pos = NULL;
+    ray_t* ast = q_parse_at(src, &pos);
     if (!ast || RAY_IS_ERR(ast)) {
         if (parsed) *parsed = 0;         /* the statement never ran — see q_eval.h */
         q_env_scope(scope);
         return ast ? ast : q_err(QE_PARSE);
     }
+    ray_t* outer = q_dbg_statement_pos(pos);   /* non-NULL: this text runs inside a statement (`value "…"`) */
     ray_t* r;
     int silent = 1;
     if (!q_view_intercept(ast, src, &r)) {
@@ -602,6 +606,7 @@ ray_t* q_eval_statement(const char* src, int* parsed) {
         r = q_eval(ast);
     }
     ray_release(ast);
+    if (outer) ray_release(q_dbg_statement_pos(outer));
     q_env_scope(scope);
     if (silent && r && !RAY_IS_ERR(r)) {
         ray_release(r);
@@ -877,7 +882,7 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
 
 /* `'x`: symbol atom or string, else 'stype (ref/signal.md Restrictions);
  * signals the text */
-static ray_t* signal_eval(ray_t* expr) {
+static ray_t* signal_eval(ray_t* node, ray_t* expr) {
     ray_t* v = q_eval_apply_concrete(q_eval(expr));
     if (RAY_IS_ERR(v)) return v;
     ray_t* txt = NULL;
@@ -888,6 +893,7 @@ static ray_t* signal_eval(ray_t* expr) {
             txt = ray_charv(ray_str_ptr(s), (int64_t)ray_str_len(s));
     }
     ray_release(v);
+    q_eval_node = node;                        /* the caret sits under the `'`, not inside its operand */
     if (!txt || RAY_IS_ERR(txt)) return txt ? txt : q_err(QE_STYPE);
     ray_t* r = q_err_signal(QE_SIGNAL, txt);
     ray_release(txt);
@@ -960,6 +966,7 @@ ray_t* q_eval(ray_t* node) {
     ray_t* ret;
     if (node->type == -RAY_SYM) {
         ret = name_value(node);
+        if (RAY_IS_ERR(ret)) q_eval_node = node;
         goto out;
     }
     /* the enlisted sym-constant unwrap (parsetrees.md:26: eval enlist`x -> `x):
@@ -989,6 +996,7 @@ ray_t* q_eval(ray_t* node) {
         int64_t n = q_count(node);
         ray_t** e = (ray_t**)ray_data(node);
         ray_t* h = e[0];
+        q_eval_node = node;
 
         /* literal-ctor interception seam (header note).  One item is `enlist x` (a paren of one is grouping), which
          * applies as any monad does: whether a hole VALUE there projects is unwitnessed (parse-tree programme) */
@@ -1022,7 +1030,7 @@ ray_t* q_eval(ray_t* node) {
          * eval'd `("'";`e)` signals exactly like parsed source */
         if (h && h->type == -RAY_CHARV && n == 2 &&
             (h->u8 == '\'' || h->u8 == ':')) {
-            ret = h->u8 == '\'' ? signal_eval(e[1]) : return_eval(e[1]);
+            ret = h->u8 == '\'' ? signal_eval(node, e[1]) : return_eval(e[1]);
             goto out;
         }
 
@@ -1063,6 +1071,7 @@ ray_t* q_eval(ray_t* node) {
         if (argc > EVAL_MAX_ARGS) { ret = q_err(QE_RANK); goto out; }
         ray_t* err = eval_args_rtl(e + 1, argc, argv);
         if (err) { ret = err; goto out; }
+        q_eval_node = node;                     /* the arguments' applications moved it */
 
         const q_op_t* row = NULL;
         ray_t* fv;

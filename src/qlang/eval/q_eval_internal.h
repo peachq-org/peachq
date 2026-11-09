@@ -12,6 +12,9 @@ struct q_op;
 
 #define APPLY_MAX_ARGS 60
 
+/* the tree node the walker is applying NOW — what a caret points at (q_dbg reads it per frame) */
+extern _Thread_local const ray_t* q_eval_node;
+
 /* projection carrier ctor: [fv, row box, slot0..slotR-1]; holes = C NULL;
  * args borrowed, result owned */
 ray_t* q_eval_apply_proj_new(ray_t* fv, const struct q_op* row, ray_t** args,
