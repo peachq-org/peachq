@@ -1,4 +1,4 @@
-/* ops/q_dotq.c — the .Q introspection surface: .Q.ty / .Q.qt / .Q.qp / .Q.s
+/* ops/q_dotq.c — the .Q introspection surface: .Q.ty / .Q.qt / .Q.qp / .Q.S / .Q.s2
  * (via the .Q.c.* C seam) and .Q.ops (the whole verb surface as a read-only
  * table: the C manifest unioned with the q-source stdlib).
  * Evicted from q_builtins.c; the type-letter kernel (q_ty_char) stays there. */
@@ -7,7 +7,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/q_ops.h"        /* q_ops_table — the .Q.ops source */
 #include "qlang/base/q_type.h"       /* q_type_is_keyed — .Q.qt keyed arm */
-#include "qlang/q_fmt.h"        /* .Q.s — the q console display string */
+#include "qlang/q_fmt.h"        /* .Q.S / .Q.s2 — the q console display lines */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_rank — .Q.ops q-side valence */
 #include "qlang/q_registry.h"   /* q_registry_qsrc_ns — the `.q` roster */
 #include "qlang/io/q_splay.h"   /* q_splay_mapped_bytes/_zblocks — .Q.w, .Q.c.zblocks */
@@ -43,10 +43,29 @@ ray_t* q_dotq_qp_fn(ray_t* x) {
 }
 
 /* (.Q.s x) — x as the classic console prints it, `\c`-clipped and line-terminated (ref/dotq.md `.Q.s`), whatever the
- * display mode: the returned string is data. */
+ * display mode: the returned string is data.  The lines of `.Q.S[(."\\c")-2 1;0]` joined, kept in C because
+ * a q lambda cannot take the elided hole `(value(1;))2` without projecting. */
 ray_t* q_dotq_s_fn(ray_t* x) {
     if (q_fmt_shows_nothing(x)) return ray_charv("", 0);
     return q_fmt_display_charv(x, 0);
+}
+
+/* (.Q.c.S[(rows;cols);x]) — x's classic console lines within the bounds, whatever the display mode: `.Q.S` without
+ * its start row (KX wp/permissions .h.jx).  The returned strings are data. */
+ray_t* q_dotq_S_fn(ray_t** args, int64_t nargs) {
+    if (nargs != 2) return q_err(QE_RANK);
+    ray_t* b = args[0];
+    if (!q_type_is_int_vec(b)) return q_err(QE_TYPE);
+    if (q_count(b) != 2) return q_err(QE_LENGTH);
+    int64_t rc[2];
+    for (int64_t i = 0; i < 2; i++) rc[i] = q_type_vec_is_null(b, i) ? NULL_I64 : q_type_ivec_get(b, i);
+    return q_fmt_lines(args[1], rc[0], rc[1]);
+}
+
+/* (.Q.c.cells v) — a vector's elements as the strings its table cells show (.Q.s2 of a simple vector). */
+ray_t* q_dotq_cells_fn(ray_t* x) {
+    if (!x || !ray_is_vec(x) || x->type == RAY_LIST) return q_err(QE_TYPE);
+    return q_fmt_cells(x);
 }
 
 /* ---- .Q.ops — the whole verb surface as a read-only introspection table ----
