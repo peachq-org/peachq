@@ -335,7 +335,7 @@ int q_view_intercept(ray_t* ast, const char* src, ray_t** out) {
     ray_t* tgt = a[1];
     if (!tgt || tgt->type != -RAY_SYM || !a[2])
         return 0;
-    if (q_eval_assign_locked(tgt->i64) || name_dotted(tgt->i64)) return 0;
+    if (q_eval_global_assign_locked(tgt->i64) || name_dotted(tgt->i64)) return 0;
     const char* txt;
     int64_t tn;
     if (!text_slice(src, tgt->i64, &txt, &tn)) return 0;
