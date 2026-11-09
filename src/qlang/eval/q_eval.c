@@ -278,6 +278,11 @@ int q_eval_assign_locked(int64_t sym) {
     return q_registry_is_reserved(sym) || (global && q_registry_dotq_ext(sym));
 }
 
+/* `name::v` at the root binds a reserved name's root slot as `set` does; bare `name` still parses to the keyword */
+int q_eval_global_assign_locked(int64_t sym) {
+    return q_env_scope_ctx() && q_eval_assign_locked(sym);
+}
+
 /* undo a park (q_env_take / q_env_local_take) on a failed write: the value
  * read goes back into the slot the write would have rebound */
 static void unpark(int local, int64_t sym, ray_t* v) {
@@ -343,12 +348,12 @@ static ray_t* indexed_assign(ray_t* target, ray_t* opv, ray_t* rhs) {
 /* `:`/`::` assignment — both take THE locality law: a `:` target is in the frame by construction (a parse-time
  * local, seeded at entry), `::` on a param/local writes the local (function-notation.md "Name scope"), anything
  * else is the global.  Returns the assigned value. */
-static ray_t* assign_eval(ray_t* target, ray_t* rhs) {
+static ray_t* assign_eval(ray_t* target, ray_t* rhs, int global) {
     q_assign_target_t k = q_parse_assign_target(target);
     if (k == Q_TARGET_NONE) return q_err(QE_ASSIGN);
     if (k == Q_TARGET_PATTERN) return q_err(QE_NYI);   /* 4.1 pattern assignment (basics/pattern.md): deferred */
     if (k == Q_TARGET_INDEX) return indexed_assign(target, NULL, rhs);
-    if (q_eval_assign_locked(target->i64)) return q_err(QE_ASSIGN);
+    if (global ? q_eval_global_assign_locked(target->i64) : q_eval_assign_locked(target->i64)) return q_err(QE_ASSIGN);
     ray_t* v = q_eval_apply_concrete(q_eval(rhs));    /* boundary seam: assignment */
     if (RAY_IS_ERR(v)) return v;
     Q_ASSERT_CONCRETE(v);                  /* env-set tripwire */
@@ -1056,13 +1061,13 @@ ray_t* q_eval(ray_t* node) {
 
         /* global assign is the identity value heading (::;name;rhs) — `a::1` and `::[a;1]` are one tree */
         if (RAY_IS_NULL(h) && n == 3 && q_parse_assign_target(e[1])) {
-            ret = assign_eval(e[1], e[2]);
+            ret = assign_eval(e[1], e[2], 1);
             goto out;
         }
         if (nameref(h)) {
             const eval_syms_t* S = syms();
             if (h->i64 == S->colon && n == 3) {
-                ret = assign_eval(e[1], e[2]);
+                ret = assign_eval(e[1], e[2], 0);
                 goto out;
             }
             if (h->i64 == S->kif)    { ret = if_eval(e + 1, n - 1, 0); goto out; }
