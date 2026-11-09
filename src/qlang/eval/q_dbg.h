@@ -72,7 +72,7 @@ ray_t* q_dbg_bt_fn(ray_t** args, int64_t n);    /* .Q.bt[] -> console dump */
 ray_t* q_dbg_ll_fn(ray_t* x);                   /* .Q.Ll x -> the live stack's frame records, innermost first */
 ray_t* q_dbg_btx_fn(ray_t* x);                  /* .Q.btx frames -> the frame records */
 ray_t* q_dbg_resignal(ray_t* msg, ray_t* bt);   /* `'(msg;bt)`: the error, carrying bt (borrowed); 'stype if not frames */
-void   q_dbg_parse_fail(ray_t* err, const char* src, int64_t n, ray_t* pos);   /* `parse` died: its text frame */
+void   q_dbg_parse_fail(ray_t* err, const char* src, int64_t n, ray_t* pos, int keyword);   /* a text failed to parse */
 
 ray_t* q_dbg_trp_dot(ray_t* y);                 /* -105!(f;args;g): .Q.trpd on a 3-list, for q_bang */
 
