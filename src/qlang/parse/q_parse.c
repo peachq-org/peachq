@@ -485,7 +485,7 @@ static Tokens scan(const char *src) {
                 if (src[p] == '\\' && src[p+1]) p += 2;   /* skip escaped char */
                 else p++;
             }
-            if (src[p] != '"') { g_scan_open_str = 1; q_die("unterminated string"); }
+            if (src[p] != '"') { g_scan_open_str = 1; g_die_at = s - 1; q_die("unterminated string"); }
             int len = p - s;
             p++;                     /* past closing quote */
             char* db = malloc((size_t)len + 1);
@@ -611,7 +611,7 @@ static Tokens scan(const char *src) {
             /* Unknown byte (string quote, hex, stray char, non-ASCII): error
              * rather than silently skip it — a dropped byte turns unsupported
              * q into a false "parse OK". */
-            default:  q_die("unexpected character");
+            default:  g_die_at = p; q_die("unexpected character");
             }
             p++;
             EMIT(kk, NULL);
@@ -2476,19 +2476,33 @@ ray_t *q_parse_at(const char *text, ray_t **pos) {
 }
 
 /* shift: how far the intake moved src past the caller's text, so the statement's caret offsets index THAT text */
+static Parser *g_parser;   /* parse_text's, while it runs: the token a die stopped at */
+
 static ray_t *parse_text(const char *src, ray_t **pos, int shift) {
     parse_begin();
+    g_parser = NULL;
     if (setjmp(q_err_jmp)) {
+        if (g_die_at < 0 && g_parser) {   /* unwitnessed column: the first token the parser could not take */
+            int k = g_parser->pos < g_parser->t.n ? g_parser->pos : g_parser->t.n - 1;
+            int n = (int)strlen(src);
+            g_die_at = k >= 0 && g_parser->t.t[k].start < n ? g_parser->t.t[k].start : n - 1;
+        }
+        g_parser = NULL;
         int64_t die[2] = { 0, g_die_at + shift };   /* node NULL: the die token, frame [0]'s caret */
         if (pos && g_die_at >= 0) *pos = ray_vec_from_raw(RAY_I64, die, 2);
         return die_answer();
     }
     Parser p = { .src = src, .t = scan(src) };
+    g_parser = &p;
     ray_t *e = parse_E(&p, Q_NONE);
+    g_parser = NULL;
     int whole = at(&p, T_EOF);
+    int stop = !whole && p.pos < p.t.n ? p.t.t[p.pos].start : -1;   /* the token after the whole expression */
     if (pos && whole) *pos = pos_take(0, -shift);
     drop_tokens();
     if (!whole) {
+        int64_t die[2] = { 0, stop + shift };
+        if (pos && stop >= 0) *pos = ray_vec_from_raw(RAY_I64, die, 2);
         ray_release(e);
         return q_err(QE_PARSE);
     }

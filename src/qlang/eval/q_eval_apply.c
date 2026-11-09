@@ -296,10 +296,10 @@ ray_t* q_eval_apply_proj_new(ray_t* fv, const q_op_t* row, ray_t** args,
     return car_intern(c);
 }
 
-/* view carrier: [body tree, deps symvec, text charv, cached|NULL]; the
+/* view carrier: [body tree, deps symvec, text charv, cached|NULL, its debug frame|NULL]; the
  * pending/in-recalc flags live in aux[1], owned by q_view.c */
 ray_t* q_eval_apply_view_new(ray_t* body, ray_t* deps, ray_t* text) {
-    ray_t* c = car_new(Q_EVAL_CAR_VIEW, 4);
+    ray_t* c = car_new(Q_EVAL_CAR_VIEW, 5);
     if (RAY_IS_ERR(c)) return c;
     c->aux[1] = 0;
     ray_retain(body); car_slots(c)[0] = body;
