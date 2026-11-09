@@ -18,6 +18,9 @@
  *
  * Requires an initialised rayforce runtime (symbol interning). */
 ray_t* q_parse(const char* src);
+/* q_parse that also hands back the statement's caret table (OWNED i64 pairs: node pointer, head-token offset into
+ * src; NULL when the text parsed to no tree of its own) — the lambdas inside carry theirs on the carrier */
+ray_t* q_parse_at(const char* src, ray_t** pos);
 
 /* `(.X.e; "text")` application tree (`q` -> `value`) — the language-handler
  * dispatch q_parse applies to a `<letter>)` prefix, shared with the char-atom

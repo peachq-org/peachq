@@ -631,8 +631,48 @@ typedef enum { R_NONE, R_NOUN, R_VERB } Role;
  * through infix and juxtaposition; a keyword, a lambda, a name, parens and brackets end it (composition is syntactic,
  * 2026-09-17).  glyph: the term is a glyph WRITTEN alone in parens, `(+)` — a keyword is
  * a value too, so only the token can tell `(+)(*)` (composes) from `count distinct` (applies). */
-typedef struct { Role role; ray_t *v; int train; int glyph; } P;
-static const P EMPTY = { R_NONE, NULL, 0, 0 };
+typedef struct { Role role; ray_t *v; int train; int glyph; int at; /* source offset of the term's head token */ } P;
+static const P EMPTY = { R_NONE, NULL, 0, 0, 0 };
+
+/* The caret table (basics/debug.md): every application node, name reference and signal built, with the source
+ * offset of its head token.  A lambda takes the entries made inside its body as it closes; the statement takes
+ * the rest.  Static like g_toks so a q_die unwind can drop it. */
+static struct { ray_t **node; int *at; int n, cap; } g_pos;
+
+static void pos_note(ray_t *node, int at) {
+    if (!node || RAY_IS_ERR(node)) return;
+    if (g_pos.n == g_pos.cap) {
+        int cap = g_pos.cap ? 2 * g_pos.cap : 64;
+        ray_t **nd = (ray_t **)realloc(g_pos.node, (size_t)cap * sizeof *nd);
+        int *at2 = (int *)realloc(g_pos.at, (size_t)cap * sizeof *at2);
+        if (nd) g_pos.node = nd;
+        if (at2) g_pos.at = at2;
+        if (!nd || !at2) q_die("out of memory");
+        g_pos.cap = cap;
+    }
+    g_pos.node[g_pos.n] = node;
+    g_pos.at[g_pos.n++] = at;
+}
+
+/* the entries from `from` on as an OWNED i64 (node; at - base) pair vector, the table truncated back to `from` */
+static ray_t *pos_take(int from, int base) {
+    int n = g_pos.n - from;
+    ray_t *v = ray_vec_new(RAY_I64, n > 0 ? 2 * n : 1);
+    for (int i = from; v && !RAY_IS_ERR(v) && i < g_pos.n; i++) {
+        int64_t ptr = (int64_t)(uintptr_t)g_pos.node[i], off = g_pos.at[i] - base;
+        v = ray_vec_append(v, &ptr);
+        if (v && !RAY_IS_ERR(v)) v = ray_vec_append(v, &off);
+    }
+    if (!v || RAY_IS_ERR(v)) q_die("out of memory");
+    g_pos.n = from;
+    return v;
+}
+
+static void pos_drop(void) {
+    free(g_pos.node);
+    free(g_pos.at);
+    memset(&g_pos, 0, sizeof g_pos);
+}
 
 typedef struct {
     const char *src;
@@ -1203,7 +1243,7 @@ static void parse_signature(Parser *p, ray_t **params, ray_t **ptypes) {
  * globals resolve at CALL time, in the `\d` context the carrier records
  * (q_eval_apply_lambda_new's layout). */
 static ray_t *parse_lambda(Parser *p) {
-    int lb_start = cur(p)->start;
+    int lb_start = cur(p)->start, mark = g_pos.n;
     adv(p);
     ray_t **params = pend_push(), **ptypes = pend_push(), **body = pend_push();
     if (at(p, T_LBRACK)) parse_signature(p, params, ptypes);
@@ -1230,7 +1270,9 @@ static ray_t *parse_lambda(Parser *p) {
      * retains every body expr, so a C NULL here would be fatal */
     for (int64_t i = 0; i < bn; i++)
         if (!bs[i]) bs[i] = RAY_NULL_OBJ;
-    ray_t *fn = q_eval_apply_lambda_new(*params, bs, bn, src, *ptypes);
+    ray_t *pos = pos_take(mark, lb_start);
+    ray_t *fn = q_eval_apply_lambda_new(*params, bs, bn, src, *ptypes, pos);
+    ray_release(pos);
     /* ref/value.md `f`/`l`: the lambda's origin is where it is PARSED — the loading script's
      * file, and the line its `{` sits on (a multi-line statement's inner lambda has its own) */
     int64_t line = 0, file = q_dbg_statement_origin(&line);
@@ -1264,13 +1306,15 @@ static P parse_base(Parser *p) {
         } else if (kw) {
             ray_release(v);
             v = keyword_constant(kw);
+        } else if (sym_is_nameref(v)) {
+            pos_note(v, tk->start);            /* an undefined name's error points at the name */
         }
-        return (P){ R_NOUN, v, 0, 0 };
+        return (P){ R_NOUN, v, 0, 0, tk->start };
     }
     case T_VERB: {
         ray_t *v = tk->k; tk->k = NULL;
         adv(p);
-        return (P){ R_VERB, v, 0, 0 };
+        return (P){ R_VERB, v, 0, 0, tk->start };
     }
     case T_LBRACK: {
         /* Expression block `[e1;e2;…]` — the SAME `;` statement sequence a
@@ -1283,15 +1327,15 @@ static P parse_base(Parser *p) {
         adv(p);
         ray_t *b = seq_of(parse_E(p, Q_NONE));
         expect(p, T_RBRACK, "expected ']' closing expression block");
-        return (P){ R_NOUN, b ? b : RAY_NULL_OBJ, 0, 0 };
+        return (P){ R_NOUN, b ? b : RAY_NULL_OBJ, 0, 0, tk->start };
     }
     case T_LPAREN: {
         adv(p);
         int glyph = lone_glyph(p);
-        return (P){ R_NOUN, parse_paren(p), 0, glyph };
+        return (P){ R_NOUN, parse_paren(p), 0, glyph, tk->start };
     }
     case T_LBRACE:
-        return (P){ R_NOUN, parse_lambda(p), 0, 0 };
+        return (P){ R_NOUN, parse_lambda(p), 0, 0, tk->start };
     case T_ADVERB: {
         /* Compose `'[f;g;…]` — the `'` adverb in BRACKET form composes
          * functions (rightmost consumes the args, each leftward applied
@@ -1310,14 +1354,15 @@ static P parse_base(Parser *p) {
             if (!cv) q_die("compose: registry not initialized");
             ray_t *w = cons_head(cv, args, Q_HOLE_OBJ);   /* `'[;]` projects the compose value itself */
             ray_release(args);
-            return (P){ R_NOUN, w, 0, 0 };
+            pos_note(w, tk->start);
+            return (P){ R_NOUN, w, 0, 0, tk->start };
         }
         /* otherwise a bare iterator in TERM position is its own VALUE — the
          * `\` of `type each(…;\;…)` (basics/datatypes.md) */
         ray_t *iv = tk->k;
         tk->k = NULL;
         adv(p);
-        return (P){ R_NOUN, iv, 0, 0 };
+        return (P){ R_NOUN, iv, 0, 0, tk->start };
     }
     default:
         return EMPTY;
@@ -1370,7 +1415,7 @@ static P parse_query(Parser *p) {
     ray_t **lim = pend_push();    /* select[n] limit expr (slot 5) */
     ray_t **ord = pend_push();    /* select[n;<c] sort spec (slot 6) */
 
-    int verb = qtok_query_verb(cur(p));           /* the cursor is on the verb keyword */
+    int verb = qtok_query_verb(cur(p)), start = cur(p)->start;   /* the cursor is on the verb keyword */
     adv(p);
 
     /* select[n] / select[m n] / select[n;<c] / select[<c] (ref/select.md:104-121):
@@ -1508,7 +1553,8 @@ static P parse_query(Parser *p) {
     node = ray_list_append(node, A);    ray_release(A);
     if (limv) { node = ray_list_append(node, limv); ray_release(limv); }
     if (ordv) { node = ray_list_append(node, ordv); ray_release(ordv); }
-    return (P){ R_NOUN, node, 0, 0 };
+    pos_note(node, start);
+    return (P){ R_NOUN, node, 0, 0, start };
 }
 
 /* Query-aware wrapper around parse_base.  Returns EMPTY (without consuming) at
@@ -1560,6 +1606,7 @@ static P parse_term(Parser *p, QCtx ctx) {
             ray_t *w = cons_head(t.v, e, q_count(e) == 1 ? RAY_NULL_OBJ : Q_HOLE_OBJ);
             ray_release(t.v);
             ray_release(e);
+            pos_note(w, t.at);
             t.v = w; t.role = R_NOUN; t.glyph = 0;
         } else if (tk->kind == T_ADVERB) {
             /* a glyph verb under an adverb (`+/`) is a bare-verb VALUE:
@@ -1598,10 +1645,13 @@ static P parse_e_from(Parser *p, P t, QCtx ctx) {
 
 /* (c; expr) for the syntax word c at expression start — a char-atom head, NOT a verb or `.q` entry */
 static P char_head_node(Parser *p, QCtx ctx, char c) {
+    int start = cur(p)->start;
     adv(p);
     P e = parse_e(p, ctx);
     ray_t *xs[2] = { ray_char(c), (e.role != R_NONE && e.v) ? e.v : RAY_NULL_OBJ };
-    return (P){ R_NOUN, q_list(xs, 2), 0, 0 };
+    ray_t *node = q_list(xs, 2);
+    pos_note(node, start);
+    return (P){ R_NOUN, node, 0, 0, start };
 }
 
 static P parse_e_body(Parser *p, QCtx ctx) {
@@ -1664,7 +1714,7 @@ static P compose_node(ray_t *f, ray_t *tail) {
     if (!cv) q_die("compose: registry not initialized");
     ray_retain(cv);
     ray_t *xs[3] = { cv, embed_sym(f, Q_MONADIC), tail };
-    return (P){ R_NOUN, q_list(xs, 3), 1, 0 };
+    return (P){ R_NOUN, q_list(xs, 3), 1, 0, 0 };
 }
 
 /* The parse-time half of the assignment law: the left side must be a target (q_parse_assign_target).  A lambda's
@@ -1691,7 +1741,7 @@ static P parse_infix(Parser *p, P t, P u, QCtx ctx) {
         ray_t *xs[2] = { embed_sym(u.v, Q_DYADIC), embed_sym(embed_sym(t.v, Q_MONADIC), Q_DYADIC) };
         ray_t *r = q_list(xs, 2);
         if (r && !RAY_IS_ERR(r)) r->attrs |= Q_ATTR_POSTFIX;
-        return (P){ R_NOUN, r, 1, 0 };
+        return (P){ R_NOUN, r, 1, 0, t.at };
     }
     int assign = verb_marked(u.v) || sym_name_is(u.v, ":") || sym_name_is(u.v, "::");
     if (assign) assign_check(p, t.v, u.v, e.v);
@@ -1704,8 +1754,9 @@ static P parse_infix(Parser *p, P t, P u, QCtx ctx) {
     ray_t *r = q_list(xs, 3);
     if ((!e.v || onto) && r && !RAY_IS_ERR(r) && q_eval_apply_is_fn(u.v))
         r->attrs |= Q_ATTR_POSTFIX;
+    pos_note(r, u.at);
     if (onto) return compose_node(r, e.v);
-    return (P){ R_NOUN, r, !e.v, 0 };
+    return (P){ R_NOUN, r, !e.v, 0, t.at };
 }
 
 /* `t e`: t applied to the expression e right of it (juxtaposition) */
@@ -1771,7 +1822,9 @@ static P parse_juxt(P t, P e) {
     /* two juxtaposed WRITTEN glyphs compose too (`(+)(*)`, owner ruling 2026-11-06); `count distinct` applies */
     if (e.train || (t.glyph && e.glyph)) return compose_node(t.v, e.v);
     ray_t *xs[2] = { t.v, e.v };
-    return (P){ R_NOUN, q_list(xs, 2), 0, 0 };
+    ray_t *node = q_list(xs, 2);
+    pos_note(node, t.at);
+    return (P){ R_NOUN, node, 0, 0, t.at };
 }
 
 static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
@@ -1786,7 +1839,7 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
         if (t.role == R_VERB && sym_glyph_form(t.v) != GF_NONE) {
             int assign = sym_name_is(t.v, ":");
             ray_t *v = embed_sym(t.v, Q_DYADIC);
-            return (P){ R_NOUN, v, !assign && v->type != -RAY_SYM && v != RAY_NULL_OBJ, 0 };
+            return (P){ R_NOUN, v, !assign && v->type != -RAY_SYM && v != RAY_NULL_OBJ, 0, t.at };
         }
         if (t.role == R_VERB && t.v && t.v->type == RAY_LIST) t.train = 1;
         /* an infix name standing last is written as a verb too, so `-8!union` composes as `-8!~` does */
@@ -2154,6 +2207,7 @@ static void drop_tokens(void) {
     free_tokens(g_toks);
     g_toks.t = NULL;
     g_toks.n = 0;
+    pos_drop();
 }
 
 static ray_t *die_answer(void) {
@@ -2227,7 +2281,7 @@ static ray_t *intake_tree(const char *name, size_t nl, ray_t *arg) {
     return q_list(xs, 2);
 }
 
-static ray_t *parse_text(const char *src);
+static ray_t *parse_text(const char *src, ray_t **pos, int shift);
 
 /* k texts a client or library is witnessed sending, byte for byte bar a trailing comment and blanks, beside their q
  * transliteration — qStudio's Server Properties (qstudio-private ServerSlashConfig.java:36, ServerReport.java:54-63,74)
@@ -2273,7 +2327,7 @@ ray_t *q_parse_lang_tree(char letter, const char *p, int64_t n) {
     if (letter == 'k') {
         size_t m = k_code_len(p, (size_t)n);
         for (size_t i = 0; i < sizeof k_known / sizeof k_known[0]; i++)
-            if (strlen(k_known[i].k) == m && !memcmp(k_known[i].k, p, m)) return parse_text(k_known[i].q);
+            if (strlen(k_known[i].k) == m && !memcmp(k_known[i].k, p, m)) return parse_text(k_known[i].q, NULL, 0);
     }
     if (letter == 's') {
         parse_begin();
@@ -2300,7 +2354,11 @@ static const char *intake_sys(const char *src) {
     return *src == '\\' ? src : NULL;
 }
 
-ray_t *q_parse(const char *src) {
+ray_t *q_parse(const char *src) { return q_parse_at(src, NULL); }
+
+ray_t *q_parse_at(const char *text, ray_t **pos) {
+    const char *src = text;
+    if (pos) *pos = NULL;
     /* Value embedding requires a live registry (codex #1): fail fast rather
      * than silently emit a mixed sym/value tree.  Every q entry point
      * bootstraps via q_runtime_create, which initializes the registry. */
@@ -2330,15 +2388,17 @@ ray_t *q_parse(const char *src) {
                                rn == 1 ? ray_char((uint8_t)r[0]) : ray_charv(r, rn));
         }
     }
-    return parse_text(src);
+    return parse_text(src, pos, (int)(src - text));
 }
 
-static ray_t *parse_text(const char *src) {
+/* shift: how far the intake moved src past the caller's text, so the statement's caret offsets index THAT text */
+static ray_t *parse_text(const char *src, ray_t **pos, int shift) {
     parse_begin();
     if (setjmp(q_err_jmp)) return die_answer();
     Parser p = { .src = src, .t = scan(src) };
     ray_t *e = parse_E(&p, Q_NONE);
     int whole = at(&p, T_EOF);
+    if (pos && whole) *pos = pos_take(0, -shift);
     drop_tokens();
     if (!whole) {
         ray_release(e);
