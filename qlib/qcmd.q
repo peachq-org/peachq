@@ -2,11 +2,14 @@
 / Score .qcmd console transcripts: each file is replayed in a forked worker exactly as `q f.qcmd` replays it, the
 / replay lands under an out directory at the file's own relative path, and each replayed row is scored against the
 / transcript's by the row rule of tools/qcmd/run.sh.  The worker copies this session, so its flags set the replay's.
-/ .qcmd.e is never defined: it is the whole-file load hook every .qcmd load looks up.
+/ .qcmd.e is never defined here: it is the whole-file load hook every .qcmd load looks up, set with .qcmd.set_load_hook.
 / @eg exit .qcmd.run `test/q/ipc
 / @eg .qcmd.check[`tx.qcmd;`out`n!(`:replays;4)]
 
 .qcmd.i.EMPTY:([] file:`symbol$(); line:`long$(); prompt:(); want:(); got:(); why:());
+
+/ Set .qcmd.e, the function every .qcmd load hands the file's lines to in place of the built-in replay.
+.qcmd.set_load_hook:{[f] .qcmd.e::f;};
 
 / Absolute against the working directory and lexically normal; a leading "/" or a drive ("c:/") is already absolute.
 / Symlinks are not resolved.
