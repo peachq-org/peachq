@@ -53,8 +53,6 @@ void q_repl_prime(const char* const* startup);
  * REPL-then-serve shape. */
 int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err, int stdin_tty);
 
-/* POSIX: the SIGINT handler (console-architecture "SIGINT is 'stop"); installed once before the startup scripts, and
- * again by each tty loop over the editor's.  A no-op on Windows, whose console ctrl handler sets the eval flag. */
-void q_repl_install_signals(void);
+void q_repl_install_signals(void);   /* SIGINT / console ctrl-C → 'stop (console-architecture); once at start, per tty loop */
 
 #endif /* Q_REPL_H */

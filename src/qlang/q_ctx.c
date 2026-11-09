@@ -44,10 +44,11 @@ void q_ctx_set_tty_restore(void (*fn)(void))   { g_tty_restore = fn; }
 static void ctx_tty_restore(void) { if (g_tty_restore) g_tty_restore(); }
 
 /* the base flag is the backstop for an embedder's own ray_request_interrupt: read once per statement, never per node */
-int q_ctx_interrupt_take(void) {
+int q_ctx_interrupt_take(int served) {
     int took = q_eval_interrupt_take();
     if (ray_interrupted()) { ray_clear_interrupt(); took = 1; }
     ray_term_clear_interrupt();
+    if (served) q_eval_interrupt_served();
     return took;
 }
 /* The console line running now (innermost: a q)) line inside the q) line it suspended), for the line-done hook. */
@@ -141,7 +142,7 @@ static int ctx_line_run(const char* s, size_t n, FILE* out, FILE* err,
                         int print_result, int in_load, int console, int dbg_line, ray_t** esig) {
     if (n == 0)
         return 0;
-    if (!in_load && !dbg_line) q_ctx_interrupt_take();   /* a nested line keeps the one meant for its statement */
+    if (!in_load && !dbg_line) q_ctx_interrupt_take(1);   /* a nested line keeps the one meant for its statement */
 
     /* The statement seam: frame-[0] text + suspendability (IPC never suspends;
      * a load line INHERITS it from the statement that asked for the load), and
@@ -193,7 +194,7 @@ static int ctx_line_run(const char* s, size_t n, FILE* out, FILE* err,
 
     /* a Ctrl-C that landed during eval means "stop" even when a non-polling C kernel absorbed it and the eval
      * completed with a normal result — the result is discarded, never printed (errors.md `stop`) */
-    if (q_ctx_interrupt_take()) {
+    if (q_ctx_interrupt_take(1)) {
         if (RAY_IS_ERR(r)) ray_error_free(r); else ray_release(r);
         q_err_drop();              /* the discarded error's text never re-renders */
         ray_t* stop = q_err(QE_STOP);
@@ -209,6 +210,7 @@ static int ctx_line_run(const char* s, size_t n, FILE* out, FILE* err,
     }
 
     if (RAY_IS_ERR(r)) {
+        if (q_err_is(r, QE_STOP)) q_eval_interrupt_served();   /* a 'stop that reaches the console was seen */
         if (in_load) {
             ray_t* rep = q_dbg_load_filter(r);
             if (rep && !RAY_IS_ERR(rep)) {     /* :r — discard, the load continues */
@@ -808,17 +810,18 @@ ray_t* q_ctx_remote_call(ray_t* fn, ray_t* msg, int kind, char** trace, size_t* 
     int    dbg_prev = q_dbg_statement_begin(src, (size_t)len, mode == 1);
     FILE*  door     = q_console_door(stdout);
     ray_t* r;
-    q_ctx_interrupt_take();
+    q_ctx_interrupt_take(1);                   /* a request is a client's seam: an idle SIGINT before it is served */
     if (fn) {
         ray_retain(fn);                        /* a body that rebinds its own name frees what we hold */
         r = q_eval_apply_concrete(q_eval_apply_value(fn, &msg, 1));
         ray_release(fn);
     } else
         r = q_eval_value_wrap(msg);
-    if (q_ctx_interrupt_take()) {                /* a SIGINT a kernel ran through answers THIS request, not the next */
+    if (q_ctx_interrupt_take(0)) {               /* a SIGINT a kernel ran through answers THIS request, not the next */
         if (RAY_IS_ERR(r)) ray_error_free(r); else ray_release(r);
         r = q_err(QE_STOP);
     }
+    if (r && q_err_is(r, QE_STOP)) q_eval_interrupt_served();   /* the client receives it */
     q_console_door(door);
     ctx_statement_end();
     if (r && RAY_IS_ERR(r) && !q_dbg_reported(r) && (mode == 2 || kind == Q_CTX_ASYNC)) {
