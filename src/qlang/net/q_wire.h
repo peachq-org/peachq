@@ -80,7 +80,7 @@ enum { Q_WIRE_ASYNC = 0, Q_WIRE_SYNC = 1, Q_WIRE_RESP = 2 };
  *   201  engine lambda   := 0xC9 attrs(1) obj(params) obj(body)
  *   202  str vector      := 0xCA attrs(1) count(int32) [len(int32) bytes]*
  *   203  quoted sym atom := 0xCB cstr
- *   204  typed-null atom := 0xCC type(int8)   ; BOOL/U8 aux-bit nulls
+ *   204  typed-null atom := 0xCC type(int8)   ; read-only legacy: BOOL/U8 -> plain zero
  *   205  str atom        := 0xCD len(int32) bytes   ; internal -RAY_STR carrier
  * 206..236 reserved for future serde records. */
 #define Q_WIRE_EXT_TAG_FIRST 200
