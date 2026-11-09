@@ -16,7 +16,6 @@
 #include "qlang/base/q_type.h"
 #include "qlang/ops/q_index.h" /* q_index_elem_at — the one element accessor */
 #include "qlang/ops/q_dollar.h"
-#include "lang/eval.h"          /* ray_eval_is_interrupted */
 #include "table/dict.h"
 #include <string.h>
 
@@ -308,7 +307,7 @@ static ray_t* acc_float_scan(ray_t* a, ray_t* b, ray_t* c) {
         double* o = (double*)ray_data(out);
         double s = a->f64;
         for (int64_t i = 0; i < len; i++) {
-            if (!(i & 0xffff) && ray_eval_is_interrupted()) { ray_release(out); return q_err(QE_STOP); }
+            if (!(i & 0xffff) && q_eval_interrupt_take()) { ray_release(out); return q_err(QE_STOP); }
             volatile double p = s * bv[bv_vec ? i : 0];   /* no FMA: the lambda rounds x*y first */
             s = cv[i] + p;
             if (__builtin_isnan(s)) s = NULL_F64;   /* the arithmetic kernels' one NaN */

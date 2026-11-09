@@ -12,6 +12,7 @@
 
 void q_dbg_frame_push(ray_t* lam);   /* borrowed; lambda application entry */
 void q_dbg_frame_pop(void);
+void q_dbg_text_push(ray_t* text, ray_t* pos);   /* a `value`d text is its own frame (ref/dotq.md trp); both borrowed */
 /* The live frames a statement REPORTS: an error's snapshot (the trace, .Q.sbt) starts at this base, 0 = every frame.
  * -1 sets it at the live depth now — a transcript's line reports its own frames, never its runner's — and returns
  * the previous, which the same C frame restores.  The suspend loop navigates the true stack regardless. */
@@ -25,9 +26,13 @@ int  q_dbg_frame_base(int base);
  * (inherits suspendability from the statement that asked for the load). */
 int  q_dbg_statement_begin(const char* src, size_t n, int console);
 void q_dbg_statement_end(int tok);
-/* the current statement's file + line when it is a loaded script's (the origin its lambdas and
- * its frame-[0] line report); 0 for console input, line untouched */
+/* the current statement's file + line while a loaded script's own text parses (the origin its lambdas and
+ * its frame-[0] line report); 0 for console input or a text parsed after it (`value`), line untouched */
 int64_t q_dbg_statement_origin(int64_t* line);
+int  q_dbg_statement_pos(ray_t* pos);   /* the caret table (q_parse_at), consumed; 0 = a nested text's, kept */
+typedef struct { const ray_t** slot; const ray_t* prev; } q_dbg_hold_t;
+q_dbg_hold_t q_dbg_hold(void);          /* the running frame keeps its caret node while another text's trees walk */
+void         q_dbg_release(q_dbg_hold_t h);
 
 /* Inside @[;;]/.[;;]/.Q.trp protection: error-trap mode 0, never suspend.  enter hands back the session `\d`;
  * exit restores it when r is a caught error (a `:x` return is not one) — owner ruling 2026-09-17. */
@@ -54,8 +59,9 @@ int  q_dbg_reported(ray_t* err);
 /* Apply-frame depth a `q))` statement runs at (0 = not suspended): those
  * frames are parked BENEATH the prompt, not evaluating it. */
 int  q_dbg_prompt_frames(void);
-/* mode-2 uncaught display: 'text + numbered frames (no carets yet). */
-void q_dbg_print_trace(FILE* out, ray_t* err);
+/* the uncaught display: 'text + numbered frames with carets (frames = 0: the 'text only); _trace OWNS it (or NULL) */
+void  q_dbg_print_trace(FILE* out, ray_t* err, int frames);
+char* q_dbg_trace(ray_t* err, int frames, size_t* len);
 void q_dbg_snapshot_clear(void);     /* a trap consumed the error */
 
 /* .Q surface bodies (bound as .Q.c.* in q_builtins.c; aliased in dotq.q). */
@@ -63,21 +69,23 @@ ray_t* q_dbg_trp_fn(ray_t** args, int64_t n);   /* .Q.trp[f;x;g] */
 ray_t* q_dbg_trpd_fn(ray_t** args, int64_t n);  /* .Q.trpd[f;x;g] */
 ray_t* q_dbg_sbt_fn(ray_t* x);                  /* .Q.sbt bt-object -> string */
 ray_t* q_dbg_bt_fn(ray_t** args, int64_t n);    /* .Q.bt[] -> console dump */
+ray_t* q_dbg_ll_fn(ray_t* x);                   /* .Q.Ll x -> the live stack's frame records, innermost first */
+ray_t* q_dbg_btx_fn(ray_t* x);                  /* .Q.btx frames -> the frame records */
+ray_t* q_dbg_resignal(ray_t* msg, ray_t* bt);   /* `'(msg;bt)`: the error, carrying bt (borrowed); 'stype if not frames */
+void   q_dbg_parse_fail(ray_t* err, const char* src, int64_t n, ray_t* pos, int keyword);   /* a text failed to parse */
 
 ray_t* q_dbg_trp_dot(ray_t* y);                 /* -105!(f;args;g): .Q.trpd on a 3-list, for q_bang */
 
 ray_t* q_dbg_zex(void);              /* owned failed-primitive value or NULL */
 ray_t* q_dbg_zey(void);              /* owned arg list or NULL */
-/* `.z.s` (ref/dotz.md#zs-self) — the executing lambda: the TOP live frame, so a
- * suspended session sees the failing function.  NULL at top level. */
+/* `.z.s` (ref/dotz.md#zs-self) — the executing lambda, text frames skipped; at q)) the navigated frame's
+ * (KDB-X "It follows you as you navigate").  NULL at top level. */
 ray_t* q_dbg_self(void);
 
-/* Console line reader for the suspend loop (front end installs; NULL = no
- * suspension possible).  The reader owns prompt display and echo — piped
- * flavours print both, the tty flavour drives the line editor.  Returns line
- * length, or -1 on EOF. */
+/* Console line reader for the suspend loop (front end installs; NULL = no suspension possible).  The reader owns
+ * prompt display and echo.  Returns line length, or -1 on EOF.  set_reader hands back the previous reader. */
 typedef int (*q_dbg_read_fn)(const char* prompt, char* buf, size_t cap);
-void q_dbg_set_reader(q_dbg_read_fn fn);
+q_dbg_read_fn q_dbg_set_reader(q_dbg_read_fn fn);
 
 void q_dbg_reset(void);              /* runtime teardown, or a forked child starting at top level: drop retained refs */
 
