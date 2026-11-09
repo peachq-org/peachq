@@ -444,7 +444,7 @@ static void text_cat(char** buf, size_t* len, char* part, size_t n) {   /* consu
     ray_free_raw(part);
 }
 
-char* q_dbg_trace(ray_t* err, int all, size_t* len) {
+char* q_dbg_trace(ray_t* err, int frames, size_t* len) {
     int en;
     const char* et = err_text(err, &en);
     char* buf = (char*)ray_alloc_raw((size_t)en + 3);
@@ -452,9 +452,10 @@ char* q_dbg_trace(ray_t* err, int all, size_t* len) {
     *len = (size_t)snprintf(buf, (size_t)en + 3, "'%.*s\n", en, et);
     size_t n = 0;
     char* part;
+    if (!frames) return buf;
     if (g_snap.err == err) {
         int lo = stmt_bare(&snap_stmt) && g_snap.depth ? 1 : 0;
-        for (int i = all ? g_snap.depth : lo; i >= lo; i--) {
+        for (int i = g_snap.depth; i >= lo; i--) {
             part = snap_text(&n, i, i);
             text_cat(&buf, len, part, n);
         }
@@ -465,10 +466,10 @@ char* q_dbg_trace(ray_t* err, int all, size_t* len) {
     return buf;
 }
 
-void q_dbg_print_trace(FILE* out, ray_t* err, int all) {
+void q_dbg_print_trace(FILE* out, ray_t* err, int frames) {
     g_errs_shown++;
     size_t n = 0;
-    char* t = q_dbg_trace(err, all, &n);
+    char* t = q_dbg_trace(err, frames, &n);
     if (t) fwrite(t, 1, n, out);
     ray_free_raw(t);
     fflush(out);   /* Windows buffers stderr to a file: a worker killed later would lose its trace */
