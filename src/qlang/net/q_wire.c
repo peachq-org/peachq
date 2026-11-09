@@ -384,11 +384,6 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
             if (rc == 0) rc = w_sym_id(b, x->i64) ? -1 : 0;
             goto out;
         }
-        if ((t == -RAY_BOOL || t == -RAY_BYTE_ONLY) && RAY_ATOM_IS_NULL(x)) {
-            /* ext 204: aux-bit typed null (no in-band sentinel exists) */
-            rc = (w_u8(b, Q_WIRE_EXT_TNULL) || w_u8(b, (uint8_t)t)) ? -1 : 0;
-            goto out;
-        }
         if (t == RAY_STR) {
             /* ext 202: string COLUMN keeps its type */
             if (w_u8(b, Q_WIRE_EXT_STRVEC) ||
@@ -892,7 +887,7 @@ static ray_t* rd_ext(rcur_t* c, uint8_t tag) {
         c->p += (size_t)n; c->rem -= (size_t)n;
         return s;
     }
-    case Q_WIRE_EXT_TNULL: {              /* aux-bit typed null (BOOL/U8) */
+    case Q_WIRE_EXT_TNULL: {              /* legacy BOOL/U8 typed null: now the plain zero */
         if (!r_need(c, 1)) return trunc_err("typed null");
         int8_t nt = (int8_t)r_u8(c);
         if (nt != -RAY_BOOL && nt != -RAY_BYTE_ONLY)

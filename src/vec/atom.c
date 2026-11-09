@@ -243,7 +243,7 @@ ray_t* ray_typed_null(int8_t type) {
     if (type >= 0) return ray_error("type", "typed_null: expects a negative atom type tag, got %s", ray_type_name(type));
     /* GUID null is the canonical all-zero 16-byte value.  Other types use the
      * payload union — the sentinel write below is the source of truth; the
-     * aux[0] bit is retained for atom types without a sentinel (BOOL/U8/F32). */
+     * aux[0] bit is retained for atom types without a sentinel (F32). */
     if (type == -RAY_GUID) {
         static const uint8_t NULL_GUID_BYTES[16] = {0};
         ray_t* v = ray_guid(NULL_GUID_BYTES);
@@ -266,9 +266,9 @@ ray_t* ray_typed_null(int8_t type) {
         case -RAY_MINUTE: case -RAY_SECOND:            v->i64 = NULL_I32; break;
         case -RAY_CHARV:                               v->u8  = 0x20; break;  /* char null = " " */
         case -RAY_I16:                                 v->i16 = NULL_I16; break;
-        case -RAY_SYM:
-            /* SYM has no null — a SYM "typed null" is just the empty symbol '
-             * (sym 0), a value, mirroring STR.  No aux[0] null bit. */
+        /* SYM, boolean and byte have no null: their "typed null" is the plain zero value
+         * (` / 0b / 0x00), so a miss reads as that value everywhere.  No aux[0] null bit. */
+        case -RAY_SYM: case -RAY_BOOL: case -RAY_BYTE_ONLY:
             v->i64 = 0;
             return v;
         default:                                       v->i64 = 0; break;

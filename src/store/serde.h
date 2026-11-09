@@ -52,9 +52,9 @@
  *               kdb bytes for every kdb-expressible value plus a serde-only
  *               extension-tag band (unsigned 200..236, q_wire.h) for engine
  *               values kdb can't express (builtin fns by name, raw lambdas,
- *               STR vectors, quoted syms, BOOL/U8 typed nulls).  Atom records
- *               drop v3's flags byte (nulls are in-band sentinels; aux-bit
- *               nulls use ext 204); vector counts are int32 ('limit beyond
+ *               STR vectors, quoted syms).  Atom records
+ *               drop v3's flags byte (nulls are in-band sentinels; BOOL/U8
+ *               have none, legacy ext 204 reads as zero); vector counts are int32 ('limit beyond
  *               2^31-1).  v4 journals/files are rejected by the existing
  *               version checks (pre-v1 ruling: no migration). */
 #define RAY_SERDE_WIRE_VERSION 5

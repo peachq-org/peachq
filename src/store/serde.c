@@ -35,8 +35,8 @@
  * mode (src/qlang/q_wire.c/h): kdb bytes for every kdb-expressible value
  * plus the serde-only extension band (unsigned tags 200..236) for engine
  * values kdb cannot express — builtin fns by name (through the hooks
- * below), raw lambdas (params+body), RAY_STR vectors, quoted syms, and
- * BOOL/U8 aux-bit typed nulls.  Payloads are always little-endian.
+ * below), raw lambdas (params+body), RAY_STR vectors and quoted syms
+ * (ext 204, a BOOL/U8 typed null, is read but no longer written).  Payloads are always little-endian.
  *
  * This file keeps the public serde API and the fn-serde hooks; the byte
  * grammar lives in ONE place (q_wire.c — single-home rule).  Known v5
