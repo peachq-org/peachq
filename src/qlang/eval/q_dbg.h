@@ -12,6 +12,7 @@
 
 void q_dbg_frame_push(ray_t* lam);   /* borrowed; lambda application entry */
 void q_dbg_frame_pop(void);
+void q_dbg_text_push(ray_t* text, ray_t* pos);   /* a `value`d text is its own frame (ref/dotq.md trp); both borrowed */
 /* The live frames a statement REPORTS: an error's snapshot (the trace, .Q.sbt) starts at this base, 0 = every frame.
  * -1 sets it at the live depth now — a transcript's line reports its own frames, never its runner's — and returns
  * the previous, which the same C frame restores.  The suspend loop navigates the true stack regardless. */
@@ -28,7 +29,8 @@ void q_dbg_statement_end(int tok);
 /* the current statement's file + line when it is a loaded script's (the origin its lambdas and
  * its frame-[0] line report); 0 for console input, line untouched */
 int64_t q_dbg_statement_origin(int64_t* line);
-int  q_dbg_statement_pos(ray_t* pos);   /* the caret table (q_parse_at), consumed; 0 = a text INSIDE the statement */
+int  q_dbg_statement_pos(ray_t* pos);   /* the caret table (q_parse_at), consumed — 0: a text INSIDE the statement,
+                                         * pos left to the caller (its text frame's) */
 typedef struct { const ray_t** slot; const ray_t* prev; } q_dbg_hold_t;
 q_dbg_hold_t q_dbg_hold(void);          /* the running frame keeps its caret node while another text's trees walk */
 void         q_dbg_release(q_dbg_hold_t h);

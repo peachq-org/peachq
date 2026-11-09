@@ -27,7 +27,8 @@
 #define DBG_KEEP_ERR 4   /* _end token bit: this statement leaves with its own payload */
 #define DBG_TRAP_SHIFT 3 /* _end token bits from here: the trap depth the level beneath had */
 
-static _Thread_local ray_t* g_live[DBG_LIVE_MAX];  /* borrowed lambda values */
+static _Thread_local ray_t* g_live[DBG_LIVE_MAX];  /* borrowed lambda values, or a `value`d text's charv */
+static _Thread_local ray_t* g_live_pos[DBG_LIVE_MAX];  /* a text frame's caret table (borrowed), NULL for a lambda */
 static _Thread_local int32_t g_live_env[DBG_LIVE_MAX];  /* their q_env frames */
 static _Thread_local const ray_t* g_live_call[DBG_LIVE_MAX];  /* the caller's node in flight at the push */
 static _Thread_local const ray_t* g_frozen[DBG_LIVE_MAX + 1];  /* a lambda frame's node, HELD while a nested run walks */
@@ -90,11 +91,21 @@ static int        g_depth, g_snap_lvl;
 void q_dbg_frame_push(ray_t* lam) {
     if (g_live_depth < DBG_LIVE_MAX) {
         g_live[g_live_depth] = lam;
+        g_live_pos[g_live_depth] = NULL;
         g_live_env[g_live_depth] = q_env_frame_depth() - 1;   /* its own frame */
         g_live_call[g_live_depth] = q_eval_node;
     }
     g_live_depth++;
 }
+
+void q_dbg_text_push(ray_t* text, ray_t* pos) {
+    q_dbg_frame_push(text);
+    if (g_live_depth > DBG_LIVE_MAX) return;
+    g_live_pos[g_live_depth - 1] = pos;
+    g_live_env[g_live_depth - 1] = Q_ENV_FRAME_VIEW_NONE;   /* a text reads globals only */
+}
+
+static int is_text(const ray_t* v) { return v->type == RAY_CHARV; }
 
 /* frame i, 1-based; past the stored window the deepest stored lambda stands in */
 static int live_clamp(int i) { return i > DBG_LIVE_MAX ? DBG_LIVE_MAX : i; }
@@ -125,10 +136,15 @@ void q_dbg_release(q_dbg_hold_t h) {
     *h.slot = h.prev;
 }
 
-/* the caret offset of node in a frame's text: the lambda's table, or the statement's; -1 when unknown.  The
- * newest entry wins — a node the parser dropped may have lent its address to a later one. */
-static int frame_off(ray_t* lam, const dbg_stmt_t* stmt, const ray_t* node) {
-    ray_t* tab = lam ? q_eval_apply_lambda_pos(lam) : stmt->pos;
+/* live frame i's caret table: a text frame's own, else its lambda's */
+static ray_t* live_tab(int i) {
+    ray_t* t = g_live_pos[live_clamp(i) - 1];
+    return t ? t : q_eval_apply_lambda_pos(live_lam(i));
+}
+
+/* the caret offset of node in a frame's caret table; -1 when unknown.  The newest entry wins — a node the parser
+ * dropped may have lent its address to a later one. */
+static int frame_off(ray_t* tab, const ray_t* node) {
     if (!tab || !node) return -1;
     const int64_t* p = (const int64_t*)ray_data(tab);
     for (int64_t i = q_count(tab) - 2; i >= 0; i -= 2)
@@ -139,7 +155,9 @@ static int frame_off(ray_t* lam, const dbg_stmt_t* stmt, const ray_t* node) {
 /* at q)) with no lambda of the line's own live, the navigated frame's (KDB-X: "It follows you as you navigate") */
 ray_t* q_dbg_self(void) {
     int i = g_sus && g_live_depth == g_frame_base ? g_cursor : g_live_depth;
-    if (i <= (g_sus ? g_sus->base : 0)) return NULL;
+    int floor = g_sus ? g_sus->base : 0;
+    while (i > floor && is_text(live_lam(i))) i--;
+    if (i <= floor) return NULL;
     ray_t* lam = live_lam(i);
     ray_retain(lam);
     return lam;
@@ -169,7 +187,7 @@ static void stmt_pos_drop(dbg_stmt_t* s) {
 }
 
 int q_dbg_statement_pos(ray_t* pos) {
-    if (g_stmt.pos) { if (pos) ray_release(pos); return 0; }
+    if (g_stmt.pos) return 0;
     g_stmt.pos = pos;
     return 1;
 }
@@ -310,7 +328,11 @@ static char* frame_text(size_t* n, int idx, int mark, ray_t* lam, const dbg_stmt
     int64_t fs = stmt->file, ln = stmt->line;
     char name[128], floc[300], pre[480];
     name[0] = floc[0] = '\0';
-    if (lam) {
+    if (lam && is_text(lam)) {
+        src = (const char*)ray_data(lam);
+        sn = (size_t)q_count(lam);
+        fs = 0;
+    } else if (lam) {
         ray_t* s = q_eval_apply_lambda_src(lam);
         src = s ? ray_str_ptr(s) : "{}";
         sn = s ? ray_str_len(s) : 2;
@@ -361,9 +383,9 @@ static void snap_take(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
     for (int i = 0; i < g_snap.depth; i++) {
         g_snap.lam[i] = g_live[base + i];
         ray_retain(g_snap.lam[i]);
-        g_snap.off[i] = frame_off(g_snap.lam[i], NULL, lam_node(base + i + 1));
+        g_snap.off[i] = frame_off(live_tab(base + i + 1), lam_node(base + i + 1));
     }
-    g_snap.stmt_off = frame_off(NULL, &snap_stmt, stmt_node(&snap_stmt));
+    g_snap.stmt_off = frame_off(snap_stmt.pos, stmt_node(&snap_stmt));
     if (fv) {
         g_snap.ex = fv;
         ray_retain(fv);
@@ -402,7 +424,7 @@ void q_dbg_print_trace(FILE* out, ray_t* err) {
     if (g_snap.err == err)
         for (int i = g_snap.depth; i >= 0; i--) frame_put(out, snap_text(&n, i, i));
     else
-        frame_put(out, frame_text(&n, g_frame_num, 0, NULL, &g_stmt, frame_off(NULL, &g_stmt, stmt_node(&g_stmt))));
+        frame_put(out, frame_text(&n, g_frame_num, 0, NULL, &g_stmt, frame_off(g_stmt.pos, stmt_node(&g_stmt))));
     fflush(out);   /* Windows buffers stderr to a file: a worker killed later would lose its trace */
 }
 
@@ -412,7 +434,7 @@ static char* live_text(size_t* n, int idx, int mark, const dbg_stmt_t* stmt, int
     int own = idx > base;
     ray_t* lam = own ? live_lam(idx) : NULL;
     const ray_t* node = own ? lam_node(idx) : stmt_node(stmt);
-    return frame_text(n, num + (own ? idx - base : 0), mark, lam, stmt, frame_off(lam, stmt, node));
+    return frame_text(n, num + (own ? idx - base : 0), mark, lam, stmt, frame_off(own ? live_tab(idx) : stmt->pos, node));
 }
 
 static void dbg_show_frame(int idx) {
@@ -496,6 +518,8 @@ static ray_t* dbg_suspend(ray_t* err) {
     int outer_frames = g_prompt_frames;
     dbg_sus_t sus = { g_frame_base, g_frame_num, g_live_depth, &g_stmt, g_sus };
     q_dbg_hold_t hold = q_dbg_hold();          /* the q)) lines must not move the suspended frame's caret */
+    int32_t env_floor = q_env_frame_floor(0);  /* q)) lines reach every suspended frame, a `value`d text's door floors */
+    int     app_floor = q_eval_apply_frame_floor(0);
     g_prompt_frames = q_eval_apply_frame_depth();
     g_cursor = g_live_depth;
     g_sus = &sus;
@@ -550,6 +574,8 @@ static ray_t* dbg_suspend(ray_t* err) {
     g_frame_base = sus.base;
     g_frame_num = sus.num;
     g_sus = sus.outer;
+    q_eval_apply_frame_floor(app_floor);
+    q_env_frame_floor(env_floor);
     q_dbg_release(hold);
     g_dbg_depth--;
     return out;
@@ -557,9 +583,18 @@ static ray_t* dbg_suspend(ray_t* err) {
 
 /* Local errors ALWAYS suspend (debug.md — no toggle); `\e` gates only whether
  * the REMOTE door marks its statements console (q_ctx.c remote seams). */
+/* "inside a lambda": an apply frame above the prompt's, or a `value`d text (whose door floors the apply frames) run
+ * above a lambda frame of the statement's own */
+static int dbg_in_lambda(void) {
+    if (q_eval_apply_frame_depth() > q_dbg_prompt_frames()) return 1;
+    int i = g_live_depth;
+    if (i > DBG_LIVE_MAX) return 0;
+    while (i > g_frame_base && is_text(live_lam(i))) i--;
+    return i > g_frame_base && i < g_live_depth;
+}
+
 static int dbg_suspendable(ray_t* r) {
-    return g_reader && g_console_stmt && g_trap_depth == 0 &&
-           q_eval_apply_frame_depth() > q_dbg_prompt_frames() && !q_err_is(r, QE_STOP);
+    return g_reader && g_console_stmt && g_trap_depth == 0 && dbg_in_lambda() && !q_err_is(r, QE_STOP);
 }
 
 static ray_t* dbg_observe(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
@@ -643,16 +678,20 @@ static void bt_append_snap(ray_t** l, int i, int idx) {   /* the frame without i
     ray_free_raw(text);
 }
 
-static ray_t* dbg_bt_object(const char* door) {
+/* the trap's own frame sits where it was called: above the `below` frames that called it (KDB-X safeRun) */
+static ray_t* dbg_bt_object(const char* trap, int below) {
+    if (below > g_snap.depth) below = g_snap.depth;
     ray_t* l = ray_list_new(g_snap.depth + 2);
-    for (int i = g_snap.depth; i >= 1; i--) bt_append_snap(&l, i, i + 1);   /* lambdas: [depth+1] .. [2] */
-    bt_append(&l, door, strlen(door));
-    bt_append_snap(&l, 0, 0);
+    for (int i = g_snap.depth; i > below; i--) bt_append_snap(&l, i, i + 1);
+    char door[64];
+    bt_append(&l, door, (size_t)snprintf(door, sizeof door, "  [%d]  (%s)\n", g_snap.num + below + 1, trap));
+    for (int i = below; i >= 0; i--) bt_append_snap(&l, i, i);
     return l;
 }
 
 /* .Q.trp applies f to x; .Q.trpd (= -105!) is its dot form, spreading x as the argument list */
 static ray_t* dbg_trap(ray_t** args, int dot) {
+    int below = g_live_depth - g_frame_base;
     int64_t ctx = q_dbg_trap_enter();
     ray_t* r = dot ? q_eval_dot_wrap(args, 2) : q_eval_apply_concrete(q_eval_apply_value(args[0], &args[1], 1));
     q_dbg_trap_exit(ctx, r);
@@ -666,7 +705,7 @@ static ray_t* dbg_trap(ray_t** args, int dot) {
     }
     ray_error_free(r);
     if (!msg || RAY_IS_ERR(msg)) return msg ? msg : q_err(QE_OOM);
-    ray_t* bt = dbg_bt_object(dot ? "  [1]  (.Q.trpd)\n" : "  [1]  (.Q.trp)\n");
+    ray_t* bt = dbg_bt_object(dot ? ".Q.trpd" : ".Q.trp", below);
     q_dbg_snapshot_clear();
     if (!bt || RAY_IS_ERR(bt)) { ray_release(msg); return bt ? bt : q_err(QE_OOM); }
     ray_t* av[2] = { msg, bt };
