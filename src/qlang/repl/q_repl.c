@@ -261,8 +261,11 @@ static void tty_install_signals(ray_term_t* t);
 
 /* The tty's eval window: Ctrl-C is SIGINT (POSIX, ISIG) / CTRL_C_EVENT (Windows) ONLY between begin and end — no
  * early exits inside the bracket; end re-derives the prompt (`\d` switched context; the debugger left `q))`). */
+static int g_tty_eval;   /* a console line is running: a suspension inside it hands the editor back on its own */
+
 static void tty_eval_begin(ray_term_t* t) {
     q_ctx_interrupt_take(1);
+    g_tty_eval = 1;
     ray_term_eval_begin(t);
 }
 
@@ -288,6 +291,7 @@ static void tty_prompt(ray_term_t* t) {
 }
 
 static void tty_eval_end(ray_term_t* t) {
+    g_tty_eval = 0;
     ray_term_eval_end(t);
     tty_prompt(t);
 }
@@ -696,6 +700,7 @@ static int pipe_dbg_echo(char* buf, int n) {
  * then block on stdin directly — the poll loop is parked beneath us on the C
  * stack, so a plain read(2) cannot race it. */
 static int repl_poll_dbg_read(const char* prompt, char* buf, size_t cap) {
+    if (!prompt) return 0;
     fputs(prompt, stdout);
     fflush(stdout);
     q_poll_repl_t* c = &g_q_poll_repl;
@@ -724,6 +729,10 @@ static int repl_poll_dbg_read(const char* prompt, char* buf, size_t cap) {
 static int repl_tty_dbg_read(const char* prompt, char* buf, size_t cap) {
     ray_term_t* t = g_live_term ? g_live_term : g_q_poll_repl.term;
     if (!t) return -1;
+    if (!prompt) {   /* a suspension from the idle prompt (an async/HTTP callback) ended: the editor is the console's again */
+        if (!g_tty_eval) { ray_term_eval_end(t); tty_prompt(t); ray_term_begin(t); }
+        return 0;
+    }
     q_ctx_interrupt_take(1);
     ray_term_eval_end(t);
     ray_term_set_prompt(t, prompt, (int32_t)strlen(prompt));
@@ -824,6 +833,7 @@ int q_repl_run_poll(ray_poll_t* poll, FILE* out, FILE* err, int stdin_tty) {
 /* Debug-loop reader for the fgets-piped console: the same FILE* buffering as
  * the outer loop, so the nested read continues exactly where it stopped. */
 static int repl_fgets_dbg_read(const char* prompt, char* buf, size_t cap) {
+    if (!prompt) return 0;
     fputs(prompt, stdout);
     fflush(stdout);
     while (!fgets(buf, (int)cap, stdin)) {

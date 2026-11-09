@@ -72,6 +72,9 @@ ray_t* q_dbg_bt_fn(ray_t** args, int64_t n);    /* .Q.bt[] -> console dump */
 ray_t* q_dbg_ll_fn(ray_t* x);                   /* .Q.Ll x -> the live stack's frame records, innermost first */
 ray_t* q_dbg_btx_fn(ray_t* x);                  /* .Q.btx frames -> the frame records */
 ray_t* q_dbg_resignal(ray_t* msg, ray_t* bt);   /* `'(msg;bt)`: the error, carrying bt (borrowed); 'stype if not frames */
+ray_t* q_dbg_view_frame(void);                 /* at `v::e`: OWNED, the frame its recalculations show (debug.md:233) */
+void   q_dbg_view_push(ray_t* frame);            /* a recalculation's frame (borrowed; pop with q_dbg_frame_pop) */
+void   q_dbg_statement_startup(void);            /* this statement runs a startup script: no frame of its own */
 void   q_dbg_parse_fail(ray_t* err, const char* src, int64_t n, ray_t* pos, int keyword);   /* a text failed to parse */
 
 ray_t* q_dbg_trp_dot(ray_t* y);                 /* -105!(f;args;g): .Q.trpd on a 3-list, for q_bang */
@@ -83,7 +86,8 @@ ray_t* q_dbg_zey(void);              /* owned arg list or NULL */
 ray_t* q_dbg_self(void);
 
 /* Console line reader for the suspend loop (front end installs; NULL = no suspension possible).  The reader owns
- * prompt display and echo.  Returns line length, or -1 on EOF.  set_reader hands back the previous reader. */
+ * prompt display and echo.  Returns line length, or -1 on EOF.  A NULL prompt says the outermost suspension ended
+ * (the console's prompt comes back).  set_reader hands back the previous reader. */
 typedef int (*q_dbg_read_fn)(const char* prompt, char* buf, size_t cap);
 q_dbg_read_fn q_dbg_set_reader(q_dbg_read_fn fn);
 

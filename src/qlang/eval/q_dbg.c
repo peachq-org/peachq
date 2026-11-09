@@ -47,9 +47,10 @@ static _Thread_local int    g_cut_depth;
  * line typed into a suspended load included), so its lambdas and frame stay bare.
  * pos: the statement's caret table (owned), set once its text has parsed; depth: the live frames beneath it;
  * node: its own node, held while a nested run walks (NULL = live). */
-typedef struct { char text[DBG_STMT_MAX]; int64_t file, line, ctx; ray_t* pos; int depth, num; const ray_t* node; } dbg_stmt_t;
+typedef struct { char text[DBG_STMT_MAX]; int64_t file, line, ctx; ray_t* pos; int depth, num, hidden; const ray_t* node; } dbg_stmt_t;
 
 static dbg_stmt_t g_stmts[DBG_NEST_MAX];
+typedef struct { int live; const dbg_stmt_t* s; int num, synth; } dbg_fr_t;   /* live 0: s's statement, or its `\l` */
 
 /* A statement with no text — a client callback's handler call — has no frame of its own: its first lambda (the
  * handler) is [0] (SO 64109959 `[0]  .z.pg:{value x}`; debug.md trp `[0]  .z.pg:{.Q.trp[…]}`). */
@@ -83,7 +84,8 @@ typedef struct {
     int    eyn;
     int    reported;
     ray_t* saved;                  /* `'(msg;bt)`: the retained frame records that replace frames sig and up */
-    int    sig;
+    int    sig, own;                /* own: bt holds the signalling frame itself (.Q.Ll here): its numbers stand */
+    int    skip;                   /* live frames between the statement and the stored innermost DBG_SNAP_MAX */
     ray_t* ptext;                  /* a failed parse: its retained text and die offset, frames above the live ones */
     int64_t poff;
     int    pkw;                    /* 1: by `parse`, which has its keyword frame (.q.parse) beneath the text */
@@ -99,7 +101,7 @@ typedef struct {
 } dbg_frame_t;
 
 /* an error made by `'(msg;bt)` or by `parse`, waiting for the seam that snapshots it */
-static _Thread_local struct { ray_t* err; ray_t* bt; int sig; int lvl; } g_resig;
+static _Thread_local struct { ray_t* err; ray_t* bt; int sig, lvl, own; } g_resig;
 static _Thread_local struct { ray_t* err; ray_t* text; int64_t off; int kw; } g_pf;
 
 /* Statement state is per LEVEL, so a nested statement (a q)) line, a `\l`
@@ -129,6 +131,35 @@ void q_dbg_frame_push(ray_t* lam) {
     g_live_depth++;
 }
 
+static int is_text(const ray_t* v) { return v->type == RAY_CHARV; }
+static int is_view(const ray_t* v) { return v->type == RAY_LIST; }   /* a view recalculation: (text;pos;file;line) */
+static ray_t* live_lam(int i);
+
+/* a view's frame, held by the view itself: (text;pos;file;line) of the statement that defined it */
+ray_t* q_dbg_view_frame(void) {
+    ray_t* text = g_live_depth > g_stmt.depth && g_live_depth <= DBG_LIVE_MAX && is_text(live_lam(g_live_depth))
+                      ? live_lam(g_live_depth) : NULL;   /* `value "v::…"`: the text frame's own */
+    ray_t* pos = text ? g_live_pos[g_live_depth - 1] : g_stmt.pos;
+    ray_t* f = ray_list_new(4);
+    if (!f || RAY_IS_ERR(f)) return NULL;
+    ray_t* t = text ? text : ray_charv(g_stmt.text, (int64_t)strlen(g_stmt.text));
+    f = ray_list_append(f, t);
+    if (!text) ray_release(t);
+    f = ray_list_append(f, pos ? pos : RAY_NULL_OBJ);
+    ray_t* fl = ray_i64(text ? 0 : g_stmt.file), *ln = ray_i64(text ? 0 : g_stmt.line);
+    f = ray_list_append(f, fl);
+    f = ray_list_append(f, ln);
+    ray_release(fl);
+    ray_release(ln);
+    if (RAY_IS_ERR(f)) return NULL;
+    return f;
+}
+
+void q_dbg_view_push(ray_t* frame) {
+    ray_t* pos = ray_list_get(frame, 1);
+    q_dbg_text_push(frame, RAY_IS_NULL(pos) ? NULL : pos);
+}
+
 void q_dbg_text_push(ray_t* text, ray_t* pos) {
     q_dbg_frame_push(text);
     if (g_live_depth > DBG_LIVE_MAX) return;
@@ -136,7 +167,6 @@ void q_dbg_text_push(ray_t* text, ray_t* pos) {
     g_live_env[g_live_depth - 1] = Q_ENV_FRAME_VIEW_NONE;   /* a text reads globals only */
 }
 
-static int is_text(const ray_t* v) { return v->type == RAY_CHARV; }
 
 /* frame i, 1-based; past the stored window the deepest stored lambda stands in */
 static int live_clamp(int i) { return i > DBG_LIVE_MAX ? DBG_LIVE_MAX : i; }
@@ -184,10 +214,13 @@ static int frame_off(ray_t* tab, const ray_t* node) {
 }
 
 /* at q)) with no lambda of the line's own live, the navigated frame's (KDB-X: "It follows you as you navigate") */
+static int g_out;   /* navigated below the suspended statement: the g_out-th frame beneath it (0 = within it) */
+static int outer_live(void);
+
 ray_t* q_dbg_self(void) {
-    int i = g_sus && g_live_depth == g_frame_base ? g_cursor : g_live_depth;
-    int floor = g_sus ? g_sus->base : 0;
-    while (i > floor && is_text(live_lam(i))) i--;
+    int i = g_sus && g_live_depth == g_frame_base ? (g_out ? outer_live() : g_cursor) : g_live_depth;
+    int floor = g_sus && !g_out ? g_sus->base : 0;
+    while (i > floor && (is_text(live_lam(i)) || is_view(live_lam(i)))) i--;
     if (i <= floor) return NULL;
     ray_t* lam = live_lam(i);
     ray_retain(lam);
@@ -237,12 +270,7 @@ int q_dbg_statement_pos(ray_t* pos) {
     return 1;
 }
 
-/* the startup script's own statement (q_ctx_run_load: its text is the path) is no frame: its lines number from it */
-static int stmt_container(const dbg_stmt_t* below, int64_t file) {
-    ray_t* fp = file ? ray_sym_str(file) : NULL;   /* borrowed */
-    size_t bn = strlen(below->text), fn = fp ? ray_str_len(fp) : 0;
-    return fp && bn && bn <= fn && below->text[0] != '\\' && !memcmp(ray_str_ptr(fp) + fn - bn, below->text, bn);
-}
+void q_dbg_statement_startup(void) { if (g_depth > 0) g_stmt.hidden = 1; }
 
 int q_dbg_statement_begin(const char* src, size_t n, int console) {
     int load_line = console < 0;
@@ -261,10 +289,13 @@ int q_dbg_statement_begin(const char* src, size_t n, int console) {
     g_stmt.text[n] = '\0';
     g_stmt.file = load_line ? q_comment_origin(&g_stmt.line) : 0;
     if (d > 0 && d < DBG_NEST_MAX) { g_pnum[d] = g_frame_num; g_pbase[d] = g_frame_base; }
+    const dbg_stmt_t* below = &g_stmts[LVL(d - 1)];
     /* a script line numbers past the frames beneath it and the `\l` between (debug.md §Resume: func is [3] under a
-     * console `\l test.q`), as a q)) line numbers past the suspension and the debugger's frame */
-    if (load_line && d > 0 && d < DBG_NEST_MAX && !stmt_container(&g_stmts[LVL(d - 1)], g_stmt.file)) {
-        g_frame_num = top + 2;
+     * console `\l test.q`), as a q)) line numbers past the suspension and the debugger's frame; a command-line
+     * script is a `\l` with nothing beneath: [0] the `\l`, [1] its line */
+    g_stmt.hidden = d > 0 && below->hidden && !g_stmt.file && !strncmp(g_stmt.text, "\\l", 2);
+    if (load_line && g_stmt.file && d > 0 && d < DBG_NEST_MAX) {
+        g_frame_num = below->hidden ? below->num + 1 : top + 2;
         g_frame_base = g_live_depth;
     }
     g_stmt.num = g_frame_num;
@@ -390,6 +421,12 @@ static void fields_of(dbg_frame_t* f, ray_t* lam, const dbg_stmt_t* stmt, int64_
         f->text = (const char*)ray_data(lam);
         f->tn = (size_t)q_count(lam);
         fs = 0;
+    } else if (lam && is_view(lam)) {
+        ray_t* t = ray_list_get(lam, 0);
+        f->text = (const char*)ray_data(t);
+        f->tn = (size_t)q_count(t);
+        fs = ray_list_get(lam, 2)->i64;
+        f->line = ray_list_get(lam, 3)->i64;
     } else if (lam) {
         ray_t* s = q_eval_apply_lambda_src(lam);
         f->text = s ? ray_str_ptr(s) : "{}";
@@ -509,7 +546,7 @@ static ray_t* rec_live(ray_t* lam, const dbg_stmt_t* stmt, int64_t off, int64_t 
     dbg_frame_t f;
     fields_of(&f, lam, stmt, off);
     if (!lam && !stmt->file) f.prompt = stmt;
-    ray_t* code = lam ? lam : ray_charv(stmt->text, (int64_t)strlen(stmt->text));
+    ray_t* code = !lam ? ray_charv(stmt->text, (int64_t)strlen(stmt->text)) : is_view(lam) ? ray_list_get(lam, 0) : lam;
     ray_t* r = rec_new(code, &f, num);
     if (!lam && code) ray_release(code);
     fields_drop(&f);
@@ -569,7 +606,9 @@ static void snap_take(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
     g_snap.taken = g_depth;
     int stored = g_live_depth < DBG_LIVE_MAX ? g_live_depth : DBG_LIVE_MAX;
     int base   = g_frame_base < stored ? g_frame_base : stored;
-    g_snap.depth = stored - base < DBG_SNAP_MAX ? stored - base : DBG_SNAP_MAX;
+    g_snap.skip = stored - base > DBG_SNAP_MAX ? stored - base - DBG_SNAP_MAX : 0;   /* the innermost are kept */
+    base += g_snap.skip;
+    g_snap.depth = stored - base;
     g_snap.num = g_frame_num;
     for (int i = 0; i < g_snap.depth; i++) {
         g_snap.lam[i] = g_live[base + i];
@@ -590,6 +629,7 @@ static void snap_take(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
         g_snap.saved = g_resig.bt;
         g_resig.bt = NULL;
         g_snap.sig = g_resig.sig > base ? g_resig.sig - base : 0;
+        g_snap.own = g_resig.own;
         resig_drop();
     }
     if (r == g_pf.err) {
@@ -629,20 +669,41 @@ static void dbg_err_line(FILE* out, ray_t* err) {
  * the `below` frames that called it (KDB-X safeRun); a bare statement has no frame [0]. */
 static ray_t* snap_records(const char* trap, int below) {
     int top = g_snap.depth, lo = stmt_bare(&snap_stmt);
-    if (g_snap.saved && g_snap.sig - 1 < top) top = g_snap.sig - 1;
-    if (below > top) below = top;
     int64_t ns = g_snap.saved ? q_count(g_snap.saved) : 0;
+    if (g_snap.saved && g_snap.own) {   /* the saved list already is this stack: the trap goes beneath the frames it ran */
+        int64_t at = g_snap.num + below;
+        ray_t* l = ray_list_new(ns + 1);
+        int trapped = trap == NULL;
+        for (int64_t k = 0; k < ns; k++) {
+            ray_t* r = ray_list_get(g_snap.saved, k);
+            dbg_frame_t f;
+            int64_t n;
+            int above = rec_fields(r, &f, &n) && n > at;
+            if (!trapped && !above) { push(&l, rec_named(trap, trap, at + 1)); trapped = 1; }
+            if (above && !trapped) push(&l, rec_renum(r, n + 1));
+            else { ray_retain(r); push(&l, r); }
+        }
+        if (!trapped) push(&l, rec_named(trap, trap, at + 1));
+        return l;
+    }
+    if (g_snap.saved && g_snap.sig - 1 < top) top = g_snap.sig - 1;
+    below -= g_snap.skip;                    /* a trap called beneath the dropped frames sits on the statement */
+    int sunk = below < lo && g_snap.skip;
+    if (below < lo) below = lo;
+    if (below > top) below = top;
     int64_t total = (g_snap.ptext ? 1 + g_snap.pkw : 0) + ns + (top >= lo ? top - lo + 1 : 0) + (trap != NULL);
-    int64_t num = g_snap.num + total - 1;
+    int64_t num = g_snap.num + total - 1 + g_snap.skip;
     ray_t* l = ray_list_new(total ? total : 1);
     if (g_snap.ptext) {
         push(&l, rec_live(g_snap.ptext, &snap_stmt, g_snap.poff, num--));
         if (g_snap.pkw) push(&l, rec_named(".q.parse", "parse", num--));
     }
     for (int64_t k = 0; k < ns; k++) push(&l, rec_renum(ray_list_get(g_snap.saved, k), num--));
-    int trapped = trap == NULL;
+    int trapped = trap == NULL, skipped = 0;
     for (int i = top; i >= lo; i--) {
+        if (i <= below && sunk && !skipped) { num -= g_snap.skip; skipped = 1; }
         if (!trapped && i <= below) { push(&l, rec_named(trap, trap, num--)); trapped = 1; }
+        if (!i && !skipped) { num -= g_snap.skip; skipped = 1; }
         push(&l, rec_live(i ? g_snap.lam[i - 1] : NULL, &snap_stmt, i ? g_snap.off[i - 1] : g_snap.stmt_off, num--));
     }
     if (!trapped) push(&l, rec_named(trap, trap, num--));
@@ -719,9 +780,14 @@ static char* live_text(size_t* n, int idx, int mark, const dbg_stmt_t* stmt, int
                       frame_off(own ? live_tab(idx) : stmt->pos, node));
 }
 
+static char* fr_text(size_t* n, const dbg_fr_t* f, int mark);
+static int outer_frame(int k, dbg_fr_t* hit);
+
 static void dbg_show_frame(int idx) {
     size_t n;
-    frame_put(stderr, live_text(&n, idx, 0, g_sus->stmt, g_sus->base, g_sus->num));
+    dbg_fr_t f;
+    if (g_out && outer_frame(g_out, &f)) frame_put(stderr, fr_text(&n, &f, 0));
+    else frame_put(stderr, live_text(&n, idx, 0, g_sus->stmt, g_sus->base, g_sus->num));
 }
 
 /* error text + the frame the cursor sits on, kdb's suspension banner (and `&`).
@@ -743,7 +809,11 @@ static void dbg_prompt_str(char* p, size_t cap) {
  * Past DBG_LIVE_MAX no env depth was stored, so rather than reroot at the
  * clamped slot's UNRELATED frame we decline and stay where the walk already is. */
 static int32_t cursor_view(void) {
-    if (g_cursor <= g_sus->base || (g_cursor <= DBG_LIVE_MAX && is_text(live_lam(g_cursor))))
+    if (g_out) {
+        int i = outer_live();
+        return i && !is_text(live_lam(i)) && !is_view(live_lam(i)) ? g_live_env[i - 1] : Q_ENV_FRAME_VIEW_NONE;
+    }
+    if (g_cursor <= g_sus->base || (g_cursor <= DBG_LIVE_MAX && (is_text(live_lam(g_cursor)) || is_view(live_lam(g_cursor)))))
         return Q_ENV_FRAME_VIEW_NONE;
     if (g_cursor >= g_live_depth || g_cursor > DBG_LIVE_MAX)
         return Q_ENV_FRAME_VIEW_OFF;
@@ -793,6 +863,7 @@ static void dbg_run_line(const char* line, size_t n) {
 
 /* the `\d` a frame runs in: a lambda's, where it was written; a statement's or a text's, the session's at the error */
 static int64_t frame_ctx(int idx, int64_t session) {
+    if (g_out) idx = outer_live();
     ray_t* lam = idx > 0 && idx <= g_live_depth ? live_lam(idx) : NULL;
     ray_t* ctx = NULL;
     if (!lam || is_text(lam) || !q_eval_apply_lambda_parts(lam, NULL, NULL, &ctx)) return session;
@@ -804,7 +875,7 @@ static int64_t frame_ctx(int idx, int64_t session) {
  * debugger's own and the line's — as kdb numbers them (debug.md `{x+y}[a;y]` -> [5] under a [2] suspension). */
 static ray_t* dbg_suspend(ray_t* err) {
     g_dbg_depth++;
-    int outer_cursor = g_cursor;
+    int outer_cursor = g_cursor, outer_out = g_out;
     int outer_frames = g_prompt_frames;
     dbg_sus_t sus = { g_frame_base, g_frame_num, g_live_depth, &g_stmt, g_sus };
     q_dbg_hold_t hold = q_dbg_hold();          /* the q)) lines must not move the suspended frame's caret */
@@ -812,6 +883,7 @@ static ray_t* dbg_suspend(ray_t* err) {
     int     app_floor = q_eval_apply_frame_floor(0);
     g_prompt_frames = q_eval_apply_frame_depth();
     g_cursor = g_live_depth;
+    g_out = 0;
     g_sus = &sus;
     g_frame_base = sus.top;
     g_frame_num = frame_number(sus.stmt, sus.num, sus.top, sus.base) + 2;
@@ -838,9 +910,14 @@ static ray_t* dbg_suspend(ray_t* err) {
          * onto it does not) */
         if (n == 1 && (line[0] == '`' || line[0] == '.' || line[0] == '&')) {   /* up / down / where */
             navigated = 1;
-            if (line[0] == '`') { if (g_cursor > sus.base + stmt_bare(sus.stmt)) g_cursor--; }
-            else if (line[0] == '.' && g_cursor < g_live_depth) g_cursor++;
-            if (line[0] == '&' || (line[0] == '.' && g_cursor == g_live_depth && g_errs_shown != shown)) {
+            if (line[0] == '`') {
+                if (!g_out && g_cursor > sus.base + stmt_bare(sus.stmt)) g_cursor--;
+                else if (outer_frame(g_out + 1, NULL)) g_out++;   /* past [base]: the `\l`, the line beneath */
+            } else if (line[0] == '.') {
+                if (g_out) g_out--;
+                else if (g_cursor < g_live_depth) g_cursor++;
+            }
+            if (line[0] == '&' || (line[0] == '.' && !g_out && g_cursor == g_live_depth && g_errs_shown != shown)) {
                 dbg_banner(err, g_cursor);
                 shown = g_errs_shown;
                 continue;
@@ -867,6 +944,7 @@ static ray_t* dbg_suspend(ray_t* err) {
     }
     q_env_ctx_set(session);
     g_cursor = outer_cursor;
+    g_out = outer_out;
     g_prompt_frames = outer_frames;
     g_frame_base = sus.base;
     g_frame_num = sus.num;
@@ -874,7 +952,7 @@ static ray_t* dbg_suspend(ray_t* err) {
     q_eval_apply_frame_floor(app_floor);
     q_env_frame_floor(env_floor);
     q_dbg_release(hold);
-    g_dbg_depth--;
+    if (!--g_dbg_depth && g_reader) g_reader(NULL, NULL, 0);   /* a callback's suspension: the console prompt comes back */
     return out;
 }
 
@@ -885,7 +963,7 @@ static int dbg_in_lambda(void) {
     int i = g_live_depth;
     if (i > DBG_LIVE_MAX) return 0;
     while (i > g_frame_base && is_text(live_lam(i))) i--;
-    return i > g_frame_base && i < g_live_depth;
+    return i > g_frame_base && (i < g_live_depth || is_view(live_lam(i)));
 }
 
 /* Local errors ALWAYS suspend (debug.md — no toggle); `\e` gates only whether
@@ -1011,6 +1089,20 @@ ray_t* q_dbg_sbt_fn(ray_t* x) {
     return s;
 }
 
+/* bt holds the frame that signals — a .Q.Ll taken right here — so it is already this stack, numbers and all */
+static int resig_owns(ray_t* bt) {
+    ray_t* top = g_live_depth > g_frame_base && g_live_depth <= DBG_LIVE_MAX ? live_lam(g_live_depth) : NULL;
+    size_t tn = strlen(g_stmt.text);
+    for (int64_t i = 0; i < q_count(bt); i++) {
+        ray_t* code = ray_list_get(ray_list_get(bt, i), 0);
+        ray_t* c = code && code->type == RAY_LIST && q_count(code) ? ray_list_get(code, 0) : NULL;
+        if (!c) continue;
+        if (top ? c == top : c->type == RAY_CHARV && (size_t)q_count(c) == tn && !memcmp(ray_data(c), g_stmt.text, tn))
+            return 1;
+    }
+    return 0;
+}
+
 /* `'(msg;bt)`: msg signalled carrying bt, which the snapshot of this error adopts */
 ray_t* q_dbg_resignal(ray_t* msg, ray_t* bt) {
     if (!rec_list_ok(bt)) return q_err(QE_STYPE);
@@ -1021,6 +1113,7 @@ ray_t* q_dbg_resignal(ray_t* msg, ray_t* bt) {
     g_resig.bt = bt;
     g_resig.sig = g_live_depth;
     g_resig.lvl = g_depth;
+    g_resig.own = resig_owns(bt);
     return r;
 }
 
@@ -1033,49 +1126,104 @@ void q_dbg_parse_fail(ray_t* err, const char* src, int64_t n, ray_t* pos, int ke
     g_pf.kw = keyword;
 }
 
-/* the live stack (debug.md §Context: "system commands, including \l, correspond to individual debug stack frames"):
- * every statement level from the innermost down to the runner's floor — its lambda and text frames, its statement
- * frame, and beneath a script's line the `\l` that loads it (finos_init.q reads it), numbered as the printed frames
- * are: a level from its own [num], its `\l` one below (a startup script has neither).  l NULL counts. */
-static int64_t ll_walk(ray_t** l) {
-    int64_t k = 0;
-    int hi = g_live_depth, floor = LVL(g_level_base), hide = 0;
-    for (int lv = LVL(g_depth - 1); g_depth > 0 && lv >= floor; lv--) {
+/* The live stack (debug.md §Context: "system commands, including \l, correspond to individual debug stack frames"):
+ * every statement level from lv down to the runner's floor — its lambda, text and view frames below hi, its
+ * statement frame, and beneath a script's line the `\l` that loads it (finos_init.q reads it), numbered as the
+ * printed frames are.  A startup container and its typed `\l` line are no frames. */
+typedef int (*dbg_fr_fn)(const dbg_fr_t* f, void* u);                          /* nonzero stops the walk */
+
+static int lvl_of(const dbg_stmt_t* s) { return (int)(s - g_stmts); }
+
+static void fr_walk(int lv, int hi, dbg_fr_fn fn, void* u) {
+    int floor = LVL(g_level_base);
+    for (; g_depth > 0 && lv >= floor; lv--) {
         const dbg_stmt_t* s = &g_stmts[lv];
-        for (int i = hi < DBG_LIVE_MAX ? hi : DBG_LIVE_MAX; i > s->depth; i--, k++)
-            if (l) push(l, rec_live(live_lam(i), s, frame_off(live_tab(i), lam_node(i)), frame_number(s, s->num, i, s->depth)));
+        dbg_fr_t f = { 0, s, 0, 0 };
+        for (int i = hi < DBG_LIVE_MAX ? hi : DBG_LIVE_MAX; i > s->depth; i--) {
+            f.live = i;
+            f.num = frame_number(s, s->num, i, s->depth);
+            if (fn(&f, u)) return;
+        }
         hi = s->depth;
-        if (!stmt_bare(s) && !hide) {
-            if (l) push(l, rec_live(NULL, s, frame_off(s->pos, stmt_node(s)), s->num));
-            k++;
-        }
-        hide = s->file && lv > floor && stmt_container(&g_stmts[lv - 1], s->file);
-        if (!s->file || lv <= floor || hide) continue;
-        if (l) {
-            ray_t* fp = ray_sym_str(s->file);   /* borrowed */
-            size_t fn = fp ? ray_str_len(fp) : 0;
-            char* t = (char*)ray_alloc_raw(fn + 4);
-            if (t) {
-                memcpy(t, "\\l ", 3);
-                if (fn) memcpy(t + 3, ray_str_ptr(fp), fn);
-                t[fn + 3] = '\0';
-                dbg_frame_t f = { .name = "", .file = "", .text = t, .tn = fn + 3, .off = -1 };
-                ray_t* code = ray_charv(t, (int64_t)fn + 3);
-                push(l, rec_new(code, &f, s->num - 1));
-                if (code) ray_release(code);
-                ray_free_raw(t);
-            }
-        }
-        k++;
+        f.live = 0;
+        f.num = s->num;
+        if (!stmt_bare(s) && !s->hidden && fn(&f, u)) return;
+        f.num = s->num - 1;
+        f.synth = 1;
+        if (s->file && lv > floor && fn(&f, u)) return;
     }
-    return k;
 }
 
+/* a script line's `\l <file>` frame text: OWNED (ray_free_raw), *n its length */
+static char* load_text(const dbg_stmt_t* s, size_t* n) {
+    ray_t* fp = ray_sym_str(s->file);   /* borrowed */
+    size_t fn = fp ? ray_str_len(fp) : 0;
+    char* t = (char*)ray_alloc_raw(fn + 4);
+    if (!t) return NULL;
+    memcpy(t, "\\l ", 3);
+    if (fn) memcpy(t + 3, ray_str_ptr(fp), fn);
+    t[fn + 3] = '\0';
+    *n = fn + 3;
+    return t;
+}
+
+static char* fr_text(size_t* n, const dbg_fr_t* f, int mark) {
+    if (f->live) return frame_text(n, f->num, mark, live_lam(f->live), f->s, frame_off(live_tab(f->live), lam_node(f->live)));
+    if (!f->synth) return frame_text(n, f->num, mark, NULL, f->s, frame_off(f->s->pos, stmt_node(f->s)));
+    size_t tn = 0;
+    char* t = load_text(f->s, &tn);
+    if (!t) return NULL;
+    dbg_frame_t d = { .name = "", .file = "", .text = t, .tn = tn, .off = -1 };
+    char* out = frame_render(n, &d, f->num, mark);
+    ray_free_raw(t);
+    return out;
+}
+
+static ray_t* fr_rec(const dbg_fr_t* f) {
+    if (f->live) return rec_live(live_lam(f->live), f->s, frame_off(live_tab(f->live), lam_node(f->live)), f->num);
+    if (!f->synth) return rec_live(NULL, f->s, frame_off(f->s->pos, stmt_node(f->s)), f->num);
+    size_t tn = 0;
+    char* t = load_text(f->s, &tn);
+    if (!t) return q_err(QE_WSFULL);
+    dbg_frame_t d = { .name = "", .file = "", .text = t, .tn = tn, .off = -1 };
+    ray_t* code = ray_charv(t, (int64_t)tn);
+    ray_t* r = rec_new(code, &d, f->num);
+    if (code) ray_release(code);
+    ray_free_raw(t);
+    return r;
+}
+
+static int fr_count(const dbg_fr_t* f, void* u) { (void)f; ++*(int64_t*)u; return 0; }
+static int fr_push(const dbg_fr_t* f, void* u) { push((ray_t**)u, fr_rec(f)); return 0; }
+
 static ray_t* ll_list(void) {
-    int64_t total = ll_walk(NULL);
+    int64_t total = 0;
+    fr_walk(LVL(g_depth - 1), g_live_depth, fr_count, &total);
     ray_t* l = ray_list_new(total ? total : 1);
-    ll_walk(&l);
+    fr_walk(LVL(g_depth - 1), g_live_depth, fr_push, &l);
     return l;
+}
+
+/* the frames beneath the suspended statement, reached by `` ` `` past it: its `\l`, the console line, outer levels */
+typedef struct { int want, seen; dbg_fr_t hit; } fr_pick_t;
+static int fr_pick(const dbg_fr_t* f, void* u) {
+    fr_pick_t* p = (fr_pick_t*)u;
+    if (f->s == g_sus->stmt && !f->synth) return 0;
+    if (++p->seen == p->want) { p->hit = *f; return 1; }
+    return 0;
+}
+
+static int outer_frame(int k, dbg_fr_t* hit) {
+    fr_pick_t p = { k, 0, { 0, NULL, 0, 0 } };
+    fr_walk(lvl_of(g_sus->stmt), g_sus->top, fr_pick, &p);
+    if (p.seen < k) return 0;
+    if (hit) *hit = p.hit;
+    return 1;
+}
+
+static int outer_live(void) {
+    dbg_fr_t f;
+    return g_out && outer_frame(g_out, &f) ? f.live : 0;
 }
 
 ray_t* q_dbg_ll_fn(ray_t* x) {
@@ -1089,36 +1237,30 @@ ray_t* q_dbg_btx_fn(ray_t* x) {
     return x;
 }
 
-static void bt_frames(int hi, int lo, const dbg_stmt_t* stmt, int base, int num, int cursor) {
-    for (int i = hi; i >= lo; i--) {
-        size_t ln = 0;
-        char* text = live_text(&ln, i, i == cursor, stmt, base, num);
-        if (!text) continue;
-        q_console_write(text, ln, false);
-        ray_free_raw(text);
-    }
+/* .Q.bt[]: the live stack, every level down to [0], >> on the navigated frame.  At q)) the line's own statement
+ * frame is hidden, as the page shows none for `.Q.bt[]` typed there. */
+typedef struct { const dbg_stmt_t* hide; int in, outer; } fr_bt_t;
+static int fr_print(const dbg_fr_t* f, void* u) {
+    fr_bt_t* b = (fr_bt_t*)u;
+    if (f->s == b->hide && !f->live && !f->synth) return 0;
+    int own = g_sus && f->s == g_sus->stmt && !f->synth, mark = 0;
+    if (own) b->in = 1;
+    if (own && !g_out) mark = f->live ? f->live == g_cursor : g_cursor == g_sus->base;
+    else if (g_sus && g_out && b->in && !own) mark = ++b->outer == g_out;
+    size_t n = 0;
+    char* t = fr_text(&n, f, mark);
+    if (t) { q_console_write(t, n, false); ray_free_raw(t); }
+    return 0;
 }
 
-/* the live stack as .Q.Ll has it, every level down to [0].  Suspended: the frames a q)) line runs above the suspension
- * — the line's own statement frame hidden, as the page shows none for `.Q.bt[]` typed there — then every suspended
- * statement's down to [0], >> on the current frame */
 ray_t* q_dbg_bt_fn(ray_t** args, int64_t n) {
     (void)args; (void)n;                       /* .Q.bt[] — arg ignored */
-    if (!g_sus) {
-        char* buf = (char*)ray_alloc_raw(1);
-        size_t len = 0;
-        ray_t* recs = ll_list();
-        if (buf) { buf[0] = '\0'; recs_cat(&buf, &len, recs); q_console_write(buf, len, false); ray_free_raw(buf); }
-        if (recs) ray_release(recs);
-        ray_retain(RAY_NULL_OBJ);
-        return RAY_NULL_OBJ;
-    }
-    bt_frames(g_live_depth, g_frame_base + 1, &g_stmt, g_frame_base, g_frame_num, -1);
-    for (dbg_sus_t* s = g_sus; s; s = s->outer)
-        bt_frames(s->top, s->base, s->stmt, s->base, s->num, s == g_sus ? g_cursor : -1);
+    fr_bt_t b = { g_sus ? &g_stmt : NULL, 0, 0 };
+    fr_walk(LVL(g_depth - 1), g_live_depth, fr_print, &b);
     ray_retain(RAY_NULL_OBJ);
     return RAY_NULL_OBJ;
 }
+
 
 ray_t* q_dbg_zex(void) {
     if (!g_snap.ex) return NULL;
