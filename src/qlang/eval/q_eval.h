@@ -123,10 +123,8 @@ int    q_eval_apply_kfn_parts(ray_t* v, void** fn, int64_t* rank, int64_t* lib_s
  * pointer's own destructor runs on the last reference through the heap's RAY_QFN finalizer hook. */
 ray_t* q_eval_apply_foreign_new(void* obj);
 int    q_eval_apply_foreign_parts(ray_t* v, void** obj);
-/* types: i64 vector of declared kdb type nums parallel to params (0 = untyped
- * slot), or NULL for an undecorated lambda; checked exactly on entry ('type).
- * pos: the parser's caret table (basics/debug.md) — an i64 vector of (tree-node
- * pointer; head-token offset into src) pairs — or NULL.  All borrowed. */
+/* types: i64 vector of declared kdb type nums parallel to params (0 = untyped slot), NULL for an undecorated
+ * lambda, checked exactly on entry ('type); pos: the parser's caret table, i64 (node pointer; head-token offset) pairs */
 ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
                                ray_t* src, ray_t* types, ray_t* pos);
 ray_t* q_eval_apply_deriv_new(int adv, ray_t* fv, const struct q_op* frow);

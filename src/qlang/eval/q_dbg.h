@@ -28,10 +28,10 @@ void q_dbg_statement_end(int tok);
 /* the current statement's file + line when it is a loaded script's (the origin its lambdas and
  * its frame-[0] line report); 0 for console input, line untouched */
 int64_t q_dbg_statement_origin(int64_t* line);
-/* the statement's caret table (q_parse_at), CONSUMED: frame [0]'s caret resolves against it until the statement
- * ends.  Hands back the table it replaces (OWNED, NULL on a fresh level): a text run INSIDE a statement (`value`)
- * restores it when done, so the statement's own caret survives the nested text */
-ray_t* q_dbg_statement_pos(ray_t* pos);
+int  q_dbg_statement_pos(ray_t* pos);   /* the caret table (q_parse_at), consumed; 0 = a text INSIDE the statement */
+typedef struct { const ray_t** slot; const ray_t* prev; } q_dbg_hold_t;
+q_dbg_hold_t q_dbg_hold(void);          /* the running frame keeps its caret node while another text's trees walk */
+void         q_dbg_release(q_dbg_hold_t h);
 
 /* Inside @[;;]/.[;;]/.Q.trp protection: error-trap mode 0, never suspend.  enter hands back the session `\d`;
  * exit restores it when r is a caught error (a `:x` return is not one) — owner ruling 2026-09-17. */
@@ -76,11 +76,8 @@ ray_t* q_dbg_zey(void);              /* owned arg list or NULL */
  * suspended session sees the failing function.  NULL at top level. */
 ray_t* q_dbg_self(void);
 
-/* Console line reader for the suspend loop (front end installs; NULL = no
- * suspension possible).  The reader owns prompt display and echo — piped
- * flavours print both, the tty flavour drives the line editor, a transcript
- * serves its q)) lines.  Returns line length, or -1 on EOF.  set_reader hands
- * back the previous reader, so a nested door restores it. */
+/* Console line reader for the suspend loop (front end installs; NULL = no suspension possible).  The reader owns
+ * prompt display and echo.  Returns line length, or -1 on EOF.  set_reader hands back the previous reader. */
 typedef int (*q_dbg_read_fn)(const char* prompt, char* buf, size_t cap);
 q_dbg_read_fn q_dbg_set_reader(q_dbg_read_fn fn);
 
