@@ -76,7 +76,7 @@ static ray_t* carrier_insert(ray_t* car, ray_t* y) {
 ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
     if (!x || x->type != -RAY_SYM)
         return q_err(QE_TYPE);
-    ray_t* g = q_env_handle_get(x->i64);                         /* borrowed */
+    ray_t* g = q_env_handle_peek(x->i64);                        /* borrowed; a write loads no library */
     if (!g) {                                             /* create */
         if (y && (y->type == RAY_TABLE || q_type_is_keyed(y))) {
             q_env_handle_set(x->i64, y);                         /* retains */
@@ -123,7 +123,7 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
     if (pr) return pr;
     if (q_io_is_fsym(x)) return q_wirefile_append(x, y);  /* file target: the one
                                                            * flat-append kernel */
-    ray_t* car = x && x->type == -RAY_SYM ? q_env_handle_get(x->i64) : x;   /* a carrier, named or as the value */
+    ray_t* car = x && x->type == -RAY_SYM ? q_env_handle_peek(x->i64) : x;   /* a carrier, named or as the value */
     if (q_provider_carrier_is(car)) {
         pr = q_provider_write(ray_dict_vals(car), y, 1);
         if (!pr || RAY_IS_ERR(pr)) return pr ? pr : q_err(QE_TYPE);
@@ -131,8 +131,8 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
         ray_retain(x);
         return x;
     }
-    int64_t sym;
-    ray_t* t = q_table_operand(x, &sym);
+    int64_t sym = -1;
+    ray_t* t = car ? q_table_operand(x, &sym) : NULL;   /* an unbound name is no table, and its probe loads nothing */
     if (!t && q_type_is_plain_dict(car)) {               /* a dict's upsert is its Join */
         int was = q_index_in_place(car != x);
         ray_t* nd = q_join_wrap(car, y);
@@ -145,7 +145,7 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
         return x;
     }
     if (!t) {
-        if (x && x->type == -RAY_SYM && !q_env_handle_get(x->i64) &&
+        if (x && x->type == -RAY_SYM && !car &&
             y && (y->type == RAY_TABLE || q_type_is_keyed(y))) {
             q_env_handle_set(x->i64, y);                         /* create, like insert */
             ray_retain(x);

@@ -18,7 +18,7 @@ ray_t* q_pq_autoload(void);
 ray_t* q_pq_load(void);
 
 /* A missing `.<stem>…` read: when `<stem>.q` is a library file (a pq/ directory's,
- * else the bundle member's) the load record has not seen, load `.pq` then run
+ * else the bundle member's) the load record has not seen and the user has not claimed, load `.pq` then run
  * `\l pq/<stem>.q`.
  * NULL when nothing ran; else RAY_NULL_OBJ on a load, or the abort's owned
  * re-signal.  `.pq` itself is q_pq_autoload's. */
@@ -37,6 +37,10 @@ ray_t* q_pq_load_file(const char* lit, size_t alen, const char* path);
  * reader door in help.q calls it, `\l pq` does NOT, and the load is once per
  * runtime. */
 void q_pq_helpdb_register(void);
+
+/* A user's write into namespace ns (its sym, `csv` for `.csv`) before its library loaded: ns is the user's from now
+ * on, and no autoload runs into it.  Explicit loads (`\l pq`, `\l pq/<file>.q`) still do. */
+void q_pq_claim_ns(int64_t ns);
 
 /* Forget the once-per-runtime flags and the load record (a fresh runtime reloads everything). */
 void q_pq_reset(void);

@@ -137,9 +137,10 @@ static size_t env_start(const char* p, size_t n) {
  * Entries live in an open-addressing table by sym id (ids are shared with data symbols, so a direct array would
  * scale with the data); the segments of every name sit end to end in one pool, addressed by offset so an entry
  * copied out stays valid when a re-entrant lookup grows either store. `lib` is the q_pq_miss_gen at which the library
- * autoload last answered NULL for the name: while it stands, the name need not ask again. */
+ * autoload last answered NULL for the name: while it stands, the name need not ask again; `claimed` marks a dotted name
+ * whose write has claimed its namespace (env_claim), which no search-path move undoes. */
 enum { EN_PLAIN = 1, EN_ABS, EN_ROOTQ, EN_ROOT, EN_EMPTY, EN_BAD };   /* a.b  .a.b  ..a  `.`  ``  beyond any count */
-typedef struct { int64_t sym; uint32_t off, lib; uint16_t n; uint8_t kind; } env_name_t;
+typedef struct { int64_t sym; uint32_t off, lib; uint16_t n; uint8_t kind, claimed; } env_name_t;
 static env_name_t* g_names;
 static uint32_t g_names_cap, g_names_n;
 static int64_t* g_segs;
@@ -205,6 +206,7 @@ static const env_name_t* env_name(int64_t sym, env_name_t* out) {
     e->kind = kind;
     e->n = (uint16_t)(k > 0 ? k : 0);
     e->lib = 0;
+    e->claimed = 0;
     if (k > 0) g_segs_n += (uint32_t)k;
     g_names_n++;
     *out = *e;
@@ -227,9 +229,10 @@ static ray_t* env_pq_hook(const env_name_t* e) {
     return hit ? q_pq_autoload() : NULL;
 }
 
-/* Every other library namespace autoloads on a MISSED read of a dotted name (owner 2026-09-25), and on the first
- * write into it (owner 2026-10-17): a found name never gets here, so a user's definition wins and core `.j` still
- * gains the library's `.j`.  A NULL answer is final for the name (the library is loaded, missing, or not one). */
+/* Every other library namespace autoloads on a MISSED read of a dotted name (owner 2026-09-25), never on a write and
+ * never into a namespace the user wrote into first (owner 2026-11-09, env_claim): a found name never gets here, so a
+ * user's definition wins and core `.j` still gains the library's `.j`.  A NULL answer is final for the name (the
+ * library is loaded, missing, claimed, or not one). */
 static ray_t* env_lib_hook(int64_t sym, const env_name_t* e) {
     uint32_t gen = q_pq_miss_gen();
     if (e->kind != EN_ABS || e->lib == gen) return NULL;
@@ -239,6 +242,15 @@ static ray_t* env_lib_hook(int64_t sym, const env_name_t* e) {
     ray_release(s);
     if (!r && q_pq_miss_gen() == gen) names_slot(g_names, g_names_cap, sym)->lib = gen;
     return r;
+}
+
+/* A user's write claims its namespace — dotted, or relative under `\d` — so a later missed read there stays a miss. */
+static void env_claim(int64_t sym, const env_name_t* e) {
+    if (e->kind == EN_PLAIN && ENV_DEPTH) q_pq_claim_ns(ENV_PATH->seg[0]);
+    else if (e->kind == EN_ABS && !e->claimed) {
+        q_pq_claim_ns(SEG(e, 0));
+        names_slot(g_names, g_names_cap, sym)->claimed = 1;
+    }
 }
 
 /* `\d .a.b` re-roots a RELATIVE name: the context path becomes its first steps, so a write lands in — and thereby
@@ -463,13 +475,13 @@ static ray_err_t env_link(int64_t sym, ray_t* old, ray_t* val) {
     return e;
 }
 
-static ray_t* env_addr_get(int64_t sym);
+static ray_t* env_addr_get(int64_t sym, int load);
 
 /* q_env_take — see q_env.h.  The park is a plain bind, so it stays invisible
  * to views: only the caller's rebind is an observable write.  The slot parked is the one the bind lands on —
  * under `\d .ns` a relative name's node in the context, where its reads resolve too. */
 int q_env_take(int64_t sym, ray_t* cur) {
-    if (!cur || env_addr_get(sym) != cur) return 0;
+    if (!cur || env_addr_get(sym, 0) != cur) return 0;
     return q_env_bind(sym, RAY_NULL_OBJ) == RAY_OK;
 }
 
@@ -553,9 +565,6 @@ ray_err_t q_env_set(int64_t sym, ray_t* val) {
     if (!env_name(sym, &nm)) return RAY_ERR_DOMAIN;
     ray_t* le = env_pq_hook(&nm);
     if (le) ray_release(le);                 /* the load displayed it; the write itself still lands */
-    /* a library loads BEFORE a user's first write into it, so the write is the one that stays */
-    ray_t* lib = q_registry_sealed() ? env_lib_hook(sym, &nm) : NULL;   /* the core files' writes precede it */
-    if (lib) ray_release(lib);
     ray_err_t e;
     if (nm.kind == EN_ROOT) e = env_root_splat(val);
     else {
@@ -567,6 +576,7 @@ ray_err_t q_env_set(int64_t sym, ray_t* val) {
         }
         if (old) ray_release(old);
     }
+    if (e == RAY_OK && q_registry_sealed()) env_claim(sym, &nm);   /* the core files' writes are not the user's */
     if (e == RAY_OK) q_comment_on_global_set(sym, val);
     return e;
 }
@@ -628,21 +638,24 @@ ray_err_t q_env_unbind(int64_t sym) {
 
 /* the node a relative name's write LANDS on under `\d .ns` — ctx_reroot's read twin, so read-name == write-name
  * by construction; a dotted name and the root context read as q_env_get */
-static ray_t* env_addr_get(int64_t sym) {
+static ray_t* env_addr_get(int64_t sym, int load) {
     env_name_t e;
     if (!env_name(sym, &e)) return NULL;
-    if (!ENV_DEPTH || e.kind != EN_PLAIN) return q_env_get(sym);
+    if (!ENV_DEPTH || e.kind != EN_PLAIN) return env_get(sym, load);
     ray_t* v = ctx_home();
     for (int i = 0; v && i < e.n; i++) v = ray_dict_probe_sym_borrowed(v, SEG(&e, i));
     return v;
 }
 
-ray_t* q_env_handle_get(int64_t sym) {
+static ray_t* env_handle_addr(int64_t sym, int load) {
     env_scope_t sc = env_scope_as(0, 0);
-    ray_t* v = env_addr_get(sym);
+    ray_t* v = env_addr_get(sym, load);
     env_scope_restore(&sc);
     return v;
 }
+
+ray_t* q_env_handle_get(int64_t sym)  { return env_handle_addr(sym, 1); }
+ray_t* q_env_handle_peek(int64_t sym) { return env_handle_addr(sym, 0); }
 
 ray_t* q_env_handle_resolve(int64_t sym) {
     env_scope_t sc = env_scope_as(0, 0);
@@ -663,7 +676,7 @@ ray_err_t q_env_handle_set(int64_t sym, ray_t* val) {
 int q_env_handle_take(int64_t sym, ray_t* cur) {
     if (!cur) return 0;
     env_scope_t sc = env_scope_as(0, 0);
-    int r = env_addr_get(sym) == cur && q_env_bind(sym, RAY_NULL_OBJ) == RAY_OK;
+    int r = env_addr_get(sym, 0) == cur && q_env_bind(sym, RAY_NULL_OBJ) == RAY_OK;
     env_scope_restore(&sc);
     return r;
 }
@@ -682,7 +695,7 @@ ray_err_t q_env_handle_bind(int64_t sym, ray_t* val) {
     return e;
 }
 
-int q_env_ns_exists(int64_t path_sym) { return env_is_marked(q_env_get(path_sym)); }
+int q_env_ns_exists(int64_t path_sym) { return env_is_marked(q_env_peek(path_sym)); }
 
 ray_t* q_env_ns_probe(int64_t ns_sym, const char* member, size_t n) {
     int64_t id = ray_sym_find(member, n);

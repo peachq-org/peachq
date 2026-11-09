@@ -27,7 +27,7 @@
 / @eg .kafka.sub[h;`quotes;(`quote;`meta`store_rejects!(`topic`offset`msgtime;1b))]
 / @eg .kafka.subs h
 / @eg .kafka.subs[]
-/ @eg .kafka.errcb:{[h;code;reason] -2 "kafka ",string[code]," ",reason`error;}
+/ @eg .kafka.set_errcb {[h;code;reason] -2 "kafka ",string[code]," ",reason`error;}
 
 .pq.load_natives`kafka;
 
@@ -49,15 +49,23 @@
 
 / Called with every error an alias meets: a message that does not decode or a target that signals (code `decode or
 / `target), a refused commit, librdkafka's own errors; reason is `topic`partition`offset`error!(...), the message
-/ fields null for a library error.  The default writes one line to stderr; replace it as you would .z.pc - a
-/ reload of the library keeps the one you set.
-.kafka.errcb:@[get;`.kafka.errcb;{[err] {[h;code;reason]
+/ fields null for a library error.  The default writes one line to stderr; .kafka.set_errcb replaces it.
+.kafka.errcb:{[h;code;reason]
   -2 @[{[code;reason]
     at:$[null reason`topic; ""; " ",string[reason`topic]," partition ",string[reason`partition]," offset ",string reason`offset];
-    "kafka: ",string[code],at,": ",$[10h=type reason`error; reason`error; -3!reason`error]}[code];reason;{[code;reason;err] "kafka: ",(-3!code)," ",-3!reason}[code;reason]];}}];
+    "kafka: ",string[code],at,": ",$[10h=type reason`error; reason`error; -3!reason`error]}[code];reason;{[code;reason;err] "kafka: ",(-3!code)," ",-3!reason}[code;reason]];};
 / Called with librdkafka's statistics JSON (a string) every statistics.interval.ms, when that key is set.  The
-/ default does nothing; a reload of the library keeps the one you set.
-.kafka.statcb:@[get;`.kafka.statcb;{[err] {[h;json] }}];
+/ default does nothing; .kafka.set_statcb replaces it.
+.kafka.statcb:{[h;json] };
+
+/ Set the function every error an alias meets is handed to, in place of .kafka.errcb's default.
+/ @param f (function) {[h;code;reason] ...}
+/ @eg .kafka.set_errcb {[h;code;reason] -2 "kafka ",string[code]," ",reason`error;}
+.kafka.set_errcb:{[f] .kafka.errcb::f;};
+/ Set the function librdkafka's statistics JSON is handed to, every statistics.interval.ms.
+/ @param f (function) {[h;json] ...}
+/ @eg .kafka.set_statcb {[h;json] stats,:enlist .j.k json}
+.kafka.set_statcb:{[f] .kafka.statcb::f;};
 
 / the keys librdkafka 2.12 scopes to one role (its configuration table's C and P columns): each is left out of the
 / other role's client, which would log it as ignored; a key an older librdkafka lacks is only ever left out
