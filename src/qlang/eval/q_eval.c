@@ -19,6 +19,7 @@
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_eval_internal.h"
 #include "qlang/eval/q_dbg.h"             /* q_dbg_statement_pos — the statement's caret table */
+#include "qlang/eval/q_pattern.h"
 #include "qlang/eval/q_view.h"
 #include "qlang/base/q_err.h"
 #include "qlang/parse/q_parse_internal.h"
@@ -414,21 +415,46 @@ static ray_t* indexed_assign(ray_t* target, ray_t* opv, ray_t* rhs) {
     return ret;
 }
 
+static ray_err_t name_set(int64_t sym, ray_t* v) {
+    return write_is_local(sym) ? q_env_local_set(sym, v) : q_env_set(sym, v);
+}
+
+/* A pattern target (basics/pattern.md): the whole match is collected before the first write, so a failed one
+ * assigns nothing; the value is the whole right side. */
+static ray_t* pattern_assign(ray_t* target, ray_t* rhs) {
+    ray_t* v = q_eval_apply_concrete(q_eval(rhs));
+    if (RAY_IS_ERR(v)) return v;
+    ray_t* binds = ray_list_new(4);
+    if (!binds || RAY_IS_ERR(binds)) { ray_release(v); return binds ? binds : q_err(QE_OOM); }
+    ray_t* err = q_pattern_collect(target, v, &binds);
+    ray_t** b = (ray_t**)ray_data(binds);
+    int64_t n = q_count(binds);
+    for (int64_t i = 0; !err && i < n; i += 2)
+        if (q_eval_assign_locked(b[i]->i64)) err = q_err(QE_ASSIGN);
+    for (int64_t i = 0; !err && i < n; i += 2) {
+        ray_err_t e = name_set(b[i]->i64, b[i + 1]);
+        if (e != RAY_OK) err = q_env_err(e);
+    }
+    ray_release(binds);
+    if (!err) return v;
+    ray_release(v);
+    return err;
+}
+
 /* `:`/`::` assignment — both take THE locality law: a `:` target is in the frame by construction (a parse-time
  * local, seeded at entry), `::` on a param/local writes the local (function-notation.md "Name scope"), anything
  * else is the global.  Returns the assigned value. */
 static ray_t* assign_eval(ray_t* target, ray_t* rhs, int global) {
     q_assign_target_t k = q_parse_assign_target(target);
     if (k == Q_TARGET_NONE) return q_err(QE_ASSIGN);
-    if (k == Q_TARGET_PATTERN) return q_err(QE_NYI);   /* 4.1 pattern assignment (basics/pattern.md): deferred */
+    /* the patterns outside the list slice, and `::` onto one, stay refused */
+    if (k == Q_TARGET_PATTERN) return !global && q_pattern_supported(target) ? pattern_assign(target, rhs) : q_err(QE_NYI);
     if (k == Q_TARGET_INDEX) return indexed_assign(target, NULL, rhs);
     if (global ? q_eval_global_assign_locked(target->i64) : q_eval_assign_locked(target->i64)) return q_err(QE_ASSIGN);
     ray_t* v = q_eval_apply_concrete(q_eval(rhs));    /* boundary seam: assignment */
     if (RAY_IS_ERR(v)) return v;
     Q_ASSERT_CONCRETE(v);                  /* env-set tripwire */
-    int local = write_is_local(target->i64);
-    ray_err_t err = local ? q_env_local_set(target->i64, v)
-                          : q_env_set(target->i64, v);
+    ray_err_t err = name_set(target->i64, v);
     if (err != RAY_OK) { ray_release(v); return q_env_err(err); }
     return v;
 }
@@ -472,10 +498,20 @@ int q_eval_ctl_sym(int64_t id) {
            id == S->kif || id == S->kwhile || id == S->kdo;
 }
 
+int q_eval_is_colon(const ray_t* x) {
+    return x && x->type == -RAY_SYM && x->i64 == syms()->colon;
+}
+
 int q_eval_fn_value(ray_t* x) {
     return x && (x->type == RAY_LAMBDA || x->type == RAY_UNARY ||
                  x->type == RAY_BINARY || x->type == RAY_VARY ||
                  x->type == RAY_QFN);
+}
+
+/* a pattern target's names are locals, as `n:` is; a compound name stays the global its spelling makes it */
+static void lam_scan_local(int64_t sym, void* ctx) {
+    lam_scan_t* s = ctx;
+    if (!sym_compound(sym)) sym_add(&s->loc, sym, &s->oom);
 }
 
 static void lam_scan(ray_t* n, lam_scan_t* s) {
@@ -502,6 +538,8 @@ static void lam_scan(ray_t* n, lam_scan_t* s) {
         if (nameref(e[1])) {
             int global = RAY_IS_NULL(e[0]) || sym_compound(e[1]->i64);
             sym_add(global ? &s->glb : &s->loc, e[1]->i64, &s->oom);
+        } else if (!RAY_IS_NULL(e[0]) && q_pattern_supported(e[1])) {
+            q_pattern_names(e[1], lam_scan_local, s);
         } else {
             lam_scan(e[1], s);
         }
