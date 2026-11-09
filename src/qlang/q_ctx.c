@@ -319,7 +319,7 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
      *    char '/') are IGNORED for continuation — they do NOT flush the
      *    accumulator (so `a:1 2` <blank> `/c` <blank> ` 3` ` + 4` => a:5 6 7);
      *  - a column-0 singleton `/` opens a `/`..`\` block comment (skip to a
-     *    trimmed singleton `\`); a trimmed singleton `\` (outside a block) EXITS
+     *    column-0 singleton `\`); a trimmed singleton `\` (outside a block) EXITS
      *    the script (load-time syntax); `\\` / `exit x` evaluate normally and
      *    terminate the PROCESS via q_sys_exit (kdb-true).
      * Continuation fragments are joined with '\n' (now whitespace to the
@@ -373,7 +373,7 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
         int indented = (lead > 0);
 
         if (in_block) {                          /* inside a /..\ block comment */
-            if (tlen == 1 && trim[0] == '\\') in_block = 0;   /* singleton \ closes; no flush */
+            if (tlen == 1 && trim[0] == '\\' && !indented) in_block = 0;   /* only a column-0 singleton \ closes (corpus.q:300) */
             if (tlen && keep_comments && (lrc = fn(line, n, lineno, u))) break;
             continue;
         }
