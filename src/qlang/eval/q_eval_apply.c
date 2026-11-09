@@ -13,6 +13,7 @@
 
 #include "qlang/q_count.h"
 #include "qlang/eval/q_eval.h"
+#include "qlang/q_ctx.h"          /* q_ctx_interrupt_take — a callback's entry drops a stale SIGINT */
 #include "qlang/eval/q_dbg.h"  /* frame list + the error seams (basics/debug.md) */
 #include "qlang/q_prim.h"
 #include "qlang/parse/q_parse.h"  /* q_parse_lang_tree — the char-atom language arm */
@@ -1866,6 +1867,7 @@ static ray_t* apply_valence_sibling(ray_t* head, int64_t n, const q_op_t** row) 
 
 ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n) {
     if (!head || RAY_IS_ERR(head)) return q_err(QE_TYPE);
+    if (!q_eval_active()) q_ctx_interrupt_take(0);   /* an event-loop callback (a hook, a timer) starts with none pending */
     if (q_view_is(head)) {                    /* applying a view applies its value */
         ray_t* dv = q_view_deref_borrowed(head);
         if (RAY_IS_ERR(dv)) return dv;
@@ -1899,6 +1901,7 @@ ray_t* q_eval_apply_proj_value(ray_t* head, ray_t** args, int64_t n) {
 }
 
 ray_t* q_eval_apply_call_sym(int64_t sym, ray_t** args, int64_t argc) {
+    if (!q_eval_active()) q_ctx_interrupt_take(0);
     ray_t* f = q_env_resolve(sym);
     if (!f || RAY_IS_ERR(f)) {
         if (f) ray_error_free(f);
