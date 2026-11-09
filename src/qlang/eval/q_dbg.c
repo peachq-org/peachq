@@ -509,9 +509,10 @@ static void dbg_prompt_str(char* p, size_t cap) {
  * Past DBG_LIVE_MAX no env depth was stored, so rather than reroot at the
  * clamped slot's UNRELATED frame we decline and stay where the walk already is. */
 static int32_t cursor_view(void) {
+    if (g_cursor <= g_sus->base || (g_cursor <= DBG_LIVE_MAX && is_text(live_lam(g_cursor))))
+        return Q_ENV_FRAME_VIEW_NONE;
     if (g_cursor >= g_live_depth || g_cursor > DBG_LIVE_MAX)
         return Q_ENV_FRAME_VIEW_OFF;
-    if (g_cursor <= g_sus->base) return Q_ENV_FRAME_VIEW_NONE;
     return g_live_env[g_cursor - 1];
 }
 
