@@ -1,6 +1,6 @@
 / Market data from the Massive REST API (massive.com) as q tables: bars, daily aggregates, snapshots, trades,
 / quotes, tickers, splits, dividends, IPOs and news. Export MASSIVE_API_KEY before starting q, or call
-/ .massive.setKey. Every call that takes options takes them last, as a dict (()!() or :: for none): `max and
+/ .massive.set_key. Every call that takes options takes them last, as a dict (()!() or :: for none): `max and
 / `maxpages bound the paging (10000 rows, 10 pages), any other key goes to the API as a query parameter, so `limit
 / is the API's page size and `max the rows you want; a walk that stopped with pages outstanding says so on stderr
 / and sets .massive.envelope`truncated.
@@ -13,26 +13,30 @@
 / and the whole response, status included, is in .massive.envelope.
 / .
 / @eg
-/ .massive.setKey "your-api-key"
+/ .massive.set_key "your-api-key"
 / r:.massive.bars[`AAPL;2026.08.01;2026.09.04;()!()]
 / 1-min r[`c]%maxs r`c                                          / the max drawdown over the range
 / .massive.bars[`AAPL;2026.09.04;2026.09.04;`mult`span!(5;`minute)]
 / n:.massive.news[`ticker`max!(`AAPL;20)]; .massive.envelope`truncated
 / `$(.massive.tickers[(enlist `search)!enlist "apple"])`ticker
 
-/ The API base URL.
+/ The API base URL; set with .massive.set_url.
 .massive.url:"https://api.massive.com";
-/ The API key, read from MASSIVE_API_KEY at load.
+/ Set .massive.url, the base every path hangs off.
+.massive.set_url:{[url] .massive.url::url;};
+/ The API key, read from MASSIVE_API_KEY at load; set with .massive.set_key.
 .massive.apikey:getenv `MASSIVE_API_KEY;
 / Convert the epoch (.massive.tcols) and ISO (*_utc) columns to q timestamps on the way in; 0b keeps them raw.
 .massive.times:1b;
+/ Set .massive.times: 0b keeps the epoch and ISO columns raw.
+.massive.set_times:{[on] .massive.times::on;};
 / @ignore
 .massive.i.nul:(0#`)!();
 / The last response's envelope: status, count, next_url and, after a paged call, truncated.
 .massive.envelope:.massive.i.nul;
 
 / Set the API key for this session.
-.massive.setKey:{[apikey] .massive.apikey::apikey;};
+.massive.set_key:{[apikey] .massive.apikey::apikey;};
 
 / @ignore
 .massive.i.fmt:{[v] t:type v;

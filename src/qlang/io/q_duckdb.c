@@ -565,7 +565,7 @@ enum { QD_L_TIME, QD_L_DUR, QD_L_OK, QD_L_CONN, QD_L_ROWS, QD_L_COLS, QD_L_SQL, 
 /* `.duckdb.onsql` — the per-statement hook, fired from the one place the ring is fed, so a handler sees every
  * statement the bridge issues and not only the ones a public door names.  Unbound costs one borrowed lookup and
  * builds nothing.  A handler that signals is swallowed (the statement already ran) and a nested fire is skipped:
- * the shape `.z.vs` uses at q_view.c.  It fires even with the ring off, so `.duckdb.sqllogmax:0` is a valid way to
+ * the shape `.z.vs` uses at q_view.c.  It fires even with the ring off, so `.duckdb.set_sqllogmax 0` is a valid way to
  * route the log entirely into q. */
 static int g_in_onsql;
 

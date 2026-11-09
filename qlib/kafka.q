@@ -46,6 +46,10 @@
 / The ms a bounded read waits for a quiet partition before it signals; the messages per partition a sniff samples.
 .kafka.TIMEOUT:10000;
 .kafka.SAMPLE:20480;
+/ Set .kafka.TIMEOUT, the ms a bounded read waits for a quiet partition.
+.kafka.set_timeout:{[ms] .kafka.TIMEOUT::ms;};
+/ Set .kafka.SAMPLE, the messages per partition a sniff samples.
+.kafka.set_sample:{[n] .kafka.SAMPLE::n;};
 
 / Called with every error an alias meets: a message that does not decode or a target that signals (code `decode or
 / `target), a refused commit, librdkafka's own errors; reason is `topic`partition`offset`error!(...), the message

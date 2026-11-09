@@ -146,6 +146,10 @@ naming it and the way past it (`ignore_errors` or `store_rejects` in `.kafka.rea
 decode error: a read lands it as a row of nulls beside its message columns, and counts it; `.kafka.read`'s
 `tombstones` as `` `skip `` leaves it out. `upsert` writes floats at full precision and times as ISO 8601.
 
+A bounded read waits up to `.kafka.TIMEOUT` ms (10000) for a quiet partition before it signals, and a topic's schema is
+sniffed from the last `.kafka.SAMPLE` messages of each partition (20480). Set them with `.kafka.set_timeout ms` and
+`.kafka.set_sample n`.
+
 ## Committing
 
 Delivery is at-least-once: an offset is committed only after its target has processed the message, so a process
