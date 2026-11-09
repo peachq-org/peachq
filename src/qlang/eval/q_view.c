@@ -135,9 +135,13 @@ static ray_t* view_recalc(ray_t* c) {
     if (q_env_frame_push(1) != RAY_OK) return q_err(QE_STACK);
     c->aux[1] |= VIEW_INRECALC;
     int64_t scope = q_env_scope(0);   /* a view and its dependencies live in the root only (learn/views.md:20) */
-    q_dbg_hold_t hold = q_dbg_hold();  /* the view's tree is not the frame's text: its caret stays on the name */
+    int framed = s[4] != NULL;   /* a recalculation is a frame of its own (debug.md:233) */
+    if (framed) q_dbg_view_push(s[4]);
     ray_t* r = q_eval_apply_concrete(q_eval(s[0]));
-    q_dbg_release(hold);
+    if (framed) {
+        r = q_dbg_filter(r, NULL, NULL, 0);   /* an error no application observed (an undefined name) is the view's */
+        q_dbg_frame_pop();
+    }
     q_env_scope(scope);
     c->aux[1] &= (uint8_t)~VIEW_INRECALC;
     q_env_frame_pop();
@@ -257,6 +261,7 @@ static ray_t* view_define(int64_t name, ray_t* body, const char* txt,
     ray_t* text = ray_charv(txt, tn);
     ray_t* c = (oom || !text || RAY_IS_ERR(text))
                    ? NULL : q_eval_apply_view_new(body, deps, text);
+    if (c && !RAY_IS_ERR(c)) q_eval_apply_view_slots(c)[4] = q_dbg_view_frame();
     ray_release(body);
     ray_release(deps);
     if (text && !RAY_IS_ERR(text)) ray_release(text);
