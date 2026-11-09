@@ -15,6 +15,13 @@ struct q_op;
 /* Walker over the RAW q_parse tree; returns OWNED (RAY_ERROR on failure). */
 ray_t* q_eval(ray_t* node);
 
+/* The pending interrupt (SIGINT / Ctrl-C → `'stop`, basics/errors.md).  post: the signal handler's side,
+ * async-signal-safe, returns how many are unserviced (the front end warns at 2, exits at 3).  take: the consumer's
+ * side — 1 ONCE per interrupt, at the first check to see it (the walker, the apply exit, a loop iteration, the
+ * statement seam): the `'stop` it raises then travels as any error does, so a live lambda frame suspends on it. */
+int q_eval_interrupt_post(void);
+int q_eval_interrupt_take(void);
+
 /* Drop the walker's once-per-runtime fixed-sym-id cache (control-form and
  * adverb spellings).  q_runtime_destroy MUST call this: sym ids are not
  * stable across runtimes, and a stale cache silently un-recognises if/while/do. */

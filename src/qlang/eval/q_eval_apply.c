@@ -539,7 +539,7 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
         q_eval_apply_store_elem(vec, 0, e0);
         ray_release(e0);
         for (int64_t i = 1; i < len; i++) {
-            if ((i & 0xFFF) == 0 && ray_eval_is_interrupted()) {
+            if ((i & 0xFFF) == 0 && q_eval_interrupt_take()) {
                 ray_release(vec);
                 return q_err(QE_STOP);
             }
@@ -708,7 +708,7 @@ static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r
         q_eval_apply_store_elem(vec, 0, e0);
         ray_release(e0);
         for (int64_t i = 1; i < len; i++) {
-            if ((i & 0xFFF) == 0 && ray_eval_is_interrupted()) {
+            if ((i & 0xFFF) == 0 && q_eval_interrupt_take()) {
                 ray_release(vec);
                 return q_err(QE_STOP);
             }
@@ -1647,7 +1647,7 @@ static int hole_args(ray_t* fv, ray_t** args, int64_t n, ray_t** out) {
 
 static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     if (!fv || RAY_IS_ERR(fv)) return q_err(QE_TYPE);
-    if (ray_eval_is_interrupted()) return q_err(QE_STOP);
+    if (q_eval_interrupt_take()) return q_err(QE_STOP);
     if (n < 0 || n > APPLY_MAX_ARGS) return q_err(QE_RANK);
     ray_t* elided[APPLY_MAX_ARGS];
     if (hole_args(fv, args, n, elided)) args = elided;
@@ -1827,6 +1827,10 @@ ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     if (q_splay_fault_pending() && r && !RAY_IS_ERR(r)) {   /* a torn zip block under this apply's read */
         ray_release(r);
         r = q_err(QE_CORRUPT);
+    }
+    if (q_eval_interrupt_take()) {   /* a kernel that ran through the signal: 'stop here, while its frame is live */
+        if (r) { if (RAY_IS_ERR(r)) ray_error_free(r); else ray_release(r); }
+        r = q_err(QE_STOP);
     }
     if (r && RAY_IS_ERR(r)) return q_dbg_filter(r, fv, args, n);
     return r;
