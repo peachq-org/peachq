@@ -423,10 +423,21 @@ static void sigint_handler(int sig) {
     signal(sig, SIG_DFL);
     raise(sig);
 }
+#else
+/* registered after term.c's, so the console calls it first; TRUE ends the chain (the editor's eval window has
+ * turned Ctrl-C into this event) */
+static BOOL WINAPI win_ctrl_handler(DWORD type) {
+    if (type != CTRL_C_EVENT) return FALSE;
+    q_eval_interrupt_post();
+    ray_term_request_interrupt();
+    return TRUE;
+}
 #endif
 
 void q_repl_install_signals(void) {
-#ifndef RAY_OS_WINDOWS
+#ifdef RAY_OS_WINDOWS
+    SetConsoleCtrlHandler(win_ctrl_handler, TRUE);
+#else
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = sigint_handler;

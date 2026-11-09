@@ -7,6 +7,7 @@
 #define Q_EVAL_H
 
 #include <rayforce.h>
+#include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -16,9 +17,12 @@ struct q_op;
 ray_t* q_eval(ray_t* node);
 
 /* the pending interrupt (SIGINT → `'stop`): post is the handler's, async-signal-safe, answers the unserviced count;
- * take consumes whatever is pending and answers 1 if there was any — the caller raises `'stop` (console-architecture) */
+ * take consumes whatever is pending and answers 1 if there was any — the caller raises `'stop` (console-architecture).
+ * The hot path is one load: every walker entry and apply exit takes. */
+extern volatile sig_atomic_t q_eval_stop_pending;
 int q_eval_interrupt_post(void);
-int q_eval_interrupt_take(void);
+int q_eval_interrupt_consume(void);
+static inline int q_eval_interrupt_take(void) { return q_eval_stop_pending ? q_eval_interrupt_consume() : 0; }
 
 /* Drop the walker's once-per-runtime fixed-sym-id cache (control-form and
  * adverb spellings).  q_runtime_destroy MUST call this: sym ids are not

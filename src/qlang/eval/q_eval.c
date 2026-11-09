@@ -46,20 +46,18 @@
 static _Thread_local int g_depth;
 _Thread_local const ray_t* q_eval_node;
 
-static volatile sig_atomic_t g_stop_pending;
+volatile sig_atomic_t q_eval_stop_pending;
 
 int q_eval_interrupt_post(void) {
     ray_request_interrupt();
-    return __atomic_add_fetch(&g_stop_pending, 1, __ATOMIC_ACQ_REL);
+    return __atomic_add_fetch(&q_eval_stop_pending, 1, __ATOMIC_ACQ_REL);
 }
 
-/* the plain read keeps the hot path a load and a branch; the exchange runs only once a signal has landed and takes
- * the whole pending batch — one arriving after it stays pending */
-int q_eval_interrupt_take(void) {
-    if (!g_stop_pending && !ray_interrupted()) return 0;
-    __atomic_exchange_n(&g_stop_pending, 0, __ATOMIC_ACQ_REL);
+/* takes the whole pending batch — one arriving after the exchange stays pending */
+int q_eval_interrupt_consume(void) {
+    int n = __atomic_exchange_n(&q_eval_stop_pending, 0, __ATOMIC_ACQ_REL);
     ray_clear_interrupt();
-    return 1;
+    return n != 0;
 }
 
 /* Fixed sym ids, interned ONCE per runtime (the env.c ipc-hook-syms
