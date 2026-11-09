@@ -70,6 +70,8 @@ static _Noreturn void die_signal(q_err_e cls, const char *p, size_t n) {
     die_err(cls);
 }
 
+static int g_die_at = -1;   /* the die token's source offset when the parser knows it: the error frame's caret */
+
 /* ===== ray_t leaf builders =================================================== */
 
 /* name reference (ATTR_QUOTED clear): resolved by eval.  A verb is one too —
@@ -683,6 +685,8 @@ typedef struct {
     int *xyz;
     /* >0 while parsing a lambda body — enables `:expr` early-return syntax */
     int lambda_depth;
+    /* innermost lambda's names assigned with `::` so far (a pend slot, W64 syms) and its signature (NULL: x y z) */
+    ray_t **globals, *params;
     /* recursive descents in flight — see Q_PARSE_MAX_DEPTH */
     int depth;
 } Parser;
@@ -1249,11 +1253,17 @@ static ray_t *parse_lambda(Parser *p) {
     if (at(p, T_LBRACK)) parse_signature(p, params, ptypes);
     int mine[3] = { 0, 0, 0 };
     int *saved = p->xyz;
+    ray_t **saved_globals = p->globals, *saved_params = p->params, **globals = pend_push();
+    *globals = ray_sym_vec_new(RAY_SYM_W64, 4);
     p->xyz = *params ? NULL : mine;
+    p->globals = globals;
+    p->params = *params;
     p->lambda_depth++;
     *body = parse_E(p, Q_NONE);
     p->lambda_depth--;
     p->xyz = saved;
+    p->globals = saved_globals;
+    p->params = saved_params;
     expect(p, T_RBRACE, "expected '}'");
     Token *rb = &p->t.t[p->pos - 1];
     ray_t *src = ray_str(p->src + lb_start, (size_t)(rb->start + rb->len - lb_start));
@@ -1281,10 +1291,11 @@ static ray_t *parse_lambda(Parser *p) {
         q_eval_apply_lambda_origin(fn, file, line);
     }
     ray_release(src);
+    ray_release(*globals);
     ray_release(*body);
     ray_release(*ptypes);
     ray_release(*params);
-    pend_pop(); pend_pop(); pend_pop();
+    pend_pop(); pend_pop(); pend_pop(); pend_pop();
     return fn;
 }
 
@@ -1721,7 +1732,29 @@ static P compose_node(ray_t *f, ray_t *tail) {
  * `n:` makes n a local, so a reserved spelling
  * is refused here, at definition, as eval refuses it at the call (D500a; a syntax word is a context member only
  * outside a lambda).  An application such as `[`$"test"]` is no target (Dlnkjq).  Consumes all three on a refusal. */
-static void assign_check(Parser *p, ray_t *lhs, ray_t *verb, ray_t *rhs) {
+static int lam_param(const Parser *p, int64_t id) {
+    if (!p->params) return id == ray_sym_intern_runtime("x", 1) || id == ray_sym_intern_runtime("y", 1) ||
+                           id == ray_sym_intern_runtime("z", 1);
+    const int64_t *d = (const int64_t *)ray_data(p->params);
+    for (int64_t i = 0; i < q_count(p->params); i++) if (d[i] == id) return 1;
+    return 0;
+}
+
+/* `a::1` then `a:1` in one lambda is a global used as a local: 'a at the local's target, at definition
+ * (basics/debug.md §Errors, ChangesIn4.0.md).  Assignments are checked in evaluation order, so `a:1;a::2` (the
+ * local first) stays legal — `::` on a local writes the local. */
+static void global_local_check(Parser *p, ray_t *lhs, ray_t *verb, int at) {
+    if (!p->globals || lam_param(p, lhs->i64)) return;
+    ray_t *s = ray_sym_str(lhs->i64);
+    if (!s || !ray_str_len(s) || ray_str_ptr(s)[0] == '.') return;   /* dotted names are global by spelling */
+    if (sym_name_is(verb, "::")) { *p->globals = symvec_add(*p->globals, lhs->i64); return; }
+    if (!sym_name_is(verb, ":")) return;
+    const int64_t *d = (const int64_t *)ray_data(*p->globals);
+    for (int64_t i = 0; i < q_count(*p->globals); i++)
+        if (d[i] == lhs->i64) { g_die_at = at; die_signal(QE_NAME, ray_str_ptr(s), ray_str_len(s)); }
+}
+
+static void assign_check(Parser *p, ray_t *lhs, ray_t *verb, ray_t *rhs, int at) {
     q_assign_target_t k = q_parse_assign_target(lhs);
     int colon = sym_name_is(verb, ":") || verb_marked(verb);
     if (k == Q_TARGET_NONE ||
@@ -1729,6 +1762,7 @@ static void assign_check(Parser *p, ray_t *lhs, ray_t *verb, ray_t *rhs) {
         ray_release(lhs); ray_release(verb); ray_release(rhs);
         die_err(QE_ASSIGN);
     }
+    if (k == Q_TARGET_NAME) global_local_check(p, lhs, verb, at);
 }
 
 /* `t u e` with u written as a verb: infix application, assignment, or a postfix elision */
@@ -1744,7 +1778,7 @@ static P parse_infix(Parser *p, P t, P u, QCtx ctx) {
         return (P){ R_NOUN, r, 1, 0, t.at };
     }
     int assign = verb_marked(u.v) || sym_name_is(u.v, ":") || sym_name_is(u.v, "::");
-    if (assign) assign_check(p, t.v, u.v, e.v);
+    if (assign) assign_check(p, t.v, u.v, e.v, t.at);
     if (!verb_marked(u.v) && !sym_name_is(u.v, ":"))
         u.v = embed_sym(u.v, Q_DYADIC);      /* infix head: the dyadic row */
     /* onto a train tail the infix head is its own postfix elision (`1~` of `1~count@`), composed onto the tail;
@@ -2199,6 +2233,7 @@ static ray_t *parse_phrase_list(Parser *p, QCtx ctx) {
  * the staged class (and payload) answered as the error. */
 static void parse_begin(void) {
     init_class();
+    g_die_at = -1;
     g_toks.t = NULL;
     g_toks.n = 0;
 }
@@ -2394,7 +2429,11 @@ ray_t *q_parse_at(const char *text, ray_t **pos) {
 /* shift: how far the intake moved src past the caller's text, so the statement's caret offsets index THAT text */
 static ray_t *parse_text(const char *src, ray_t **pos, int shift) {
     parse_begin();
-    if (setjmp(q_err_jmp)) return die_answer();
+    if (setjmp(q_err_jmp)) {
+        int64_t die[2] = { 0, g_die_at + shift };   /* node NULL: the die token, frame [0]'s caret */
+        if (pos && g_die_at >= 0) *pos = ray_vec_from_raw(RAY_I64, die, 2);
+        return die_answer();
+    }
     Parser p = { .src = src, .t = scan(src) };
     ray_t *e = parse_E(&p, Q_NONE);
     int whole = at(&p, T_EOF);
