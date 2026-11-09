@@ -685,7 +685,8 @@ typedef struct {
     int *xyz;
     /* >0 while parsing a lambda body — enables `:expr` early-return syntax */
     int lambda_depth;
-    /* innermost lambda's names assigned with `::` so far (a pend slot, W64 syms) and its signature (NULL: x y z) */
+    /* innermost lambda's names assigned so far (a pend slot, W64 syms: id for `::`, ~id for `:`) and its signature
+     * (NULL: x y z) */
     ray_t **globals, *params;
     /* recursive descents in flight — see Q_PARSE_MAX_DEPTH */
     int depth;
@@ -1743,15 +1744,21 @@ static int lam_param(const Parser *p, int64_t id) {
 /* `a::1` then `a:1` in one lambda is a global used as a local: 'a at the local's target, at definition
  * (basics/debug.md §Errors, ChangesIn4.0.md).  Assignments are checked in evaluation order, so `a:1;a::2` (the
  * local first) stays legal — `::` on a local writes the local. */
-static void global_local_check(Parser *p, ray_t *lhs, ray_t *verb, int at) {
-    if (!p->globals || lam_param(p, lhs->i64)) return;
-    ray_t *s = ray_sym_str(lhs->i64);
-    if (!s || !ray_str_len(s) || ray_str_ptr(s)[0] == '.') return;   /* dotted names are global by spelling */
-    if (sym_name_is(verb, "::")) { *p->globals = symvec_add(*p->globals, lhs->i64); return; }
-    if (!sym_name_is(verb, ":")) return;
+static int seen_as(const Parser *p, int64_t key) {
     const int64_t *d = (const int64_t *)ray_data(*p->globals);
-    for (int64_t i = 0; i < q_count(*p->globals); i++)
-        if (d[i] == lhs->i64) { g_die_at = at; die_signal(QE_NAME, ray_str_ptr(s), ray_str_len(s)); }
+    for (int64_t i = 0; i < q_count(*p->globals); i++) if (d[i] == key) return 1;
+    return 0;
+}
+
+static void global_local_check(Parser *p, ray_t *lhs, ray_t *verb, int at) {
+    int64_t id = lhs->i64;
+    int local = sym_name_is(verb, ":");
+    if (!p->globals || lam_param(p, id) || (!local && !sym_name_is(verb, "::"))) return;
+    ray_t *s = ray_sym_str(id);
+    if (!s || !ray_str_len(s) || ray_str_ptr(s)[0] == '.') return;   /* dotted names are global by spelling */
+    if (seen_as(p, ~id)) return;                                     /* a local already: `::` writes it */
+    if (local && seen_as(p, id)) { g_die_at = at; die_signal(QE_NAME, ray_str_ptr(s), ray_str_len(s)); }
+    *p->globals = symvec_add(*p->globals, local ? ~id : id);
 }
 
 static void assign_check(Parser *p, ray_t *lhs, ray_t *verb, ray_t *rhs, int at) {
