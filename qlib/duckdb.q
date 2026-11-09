@@ -150,30 +150,38 @@
 / @eg select time, dur, sql from .duckdb.sqllog
 .duckdb.sqllog:([] time:0#0Np; dur:0#0Nn; ok:0#0b; conn:0#0Ni; rows:0#0N; ncols:0#0N; sql:(); err:())
 
-/ How many rows .duckdb.sqllog keeps: 0 keeps nothing; at the cap the older half is dropped.
+/ How many rows .duckdb.sqllog keeps: 0 keeps nothing; at the cap the older half is dropped.  Set it with .duckdb.set_sqllogmax.
 .duckdb.sqllogmax:4096
+/ Set .duckdb.sqllogmax, the rows .duckdb.sqllog keeps.
+.duckdb.set_sqllogmax:{[n] .duckdb.sqllogmax::n;}
 
-/ Called once per statement with its log row as a dict.  Rebind it to route the log elsewhere, or set it to (::)
-/ for none.  Do not close the connection or issue transaction control from a handler: it runs mid-statement.
-/ @eg .duckdb.onsql:{[row] -1 row`sql;}
+/ Called once per statement with its log row as a dict.  Replace it with .duckdb.set_onsql to route the log elsewhere,
+/ or with (::) for none.  Do not close the connection or issue transaction control from a handler: it runs mid-statement.
+/ @eg .duckdb.set_onsql {[row] -1 row`sql;}
 .duckdb.onsql:{[row]
   m:$[(type .duckdb.sqllogmax) in -7 -6h; .duckdb.sqllogmax; 0];
   if[0>=m; :.duckdb.sqllog::0#.duckdb.sqllog];
   insert[`.duckdb.sqllog; enlist row];
   if[m<count .duckdb.sqllog; .duckdb.sqllog::(neg m div 2)#.duckdb.sqllog]}
+/ Set .duckdb.onsql, the function each statement's log row is handed to, or (::) for none.
+.duckdb.set_onsql:{[f] .duckdb.onsql::f;}
 
 / The row count of a table of the handle's catalog, counted by DuckDB.
 .duckdb.count:{[c;t] first .duckdb.i.exec[c; "SELECT COUNT(*) AS n FROM ",.duckdb.i.qname t]`n}
 
-/ Whether a qSQL select on a q-origin table of the handle runs what .sql.translate can move (where terms, limit, order;
-/ the select phrase and by whole when every item translates) inside DuckDB before q runs the rest, read on every select;
-/ off, every select pulls the whole table.  A statement DuckDB refuses stays in .duckdb.sqllog and the select pulls instead.
+/ Whether a qSQL select on a q-origin table of the handle runs what .sql.translate can move (where terms, limit, order; the select
+/ phrase and by whole when every item translates) inside DuckDB before q runs the rest, read on every select; off, every select pulls
+/ the whole table.  A statement DuckDB refuses stays in .duckdb.sqllog and the select pulls instead.  Set it with .duckdb.set_pushdown.
 .duckdb.pushdown:1b
+/ Set .duckdb.pushdown: 1b moves what a select can into DuckDB, 0b pulls every select whole.
+.duckdb.set_pushdown:{[on] .duckdb.pushdown::on;}
 
-/ The row count above which a qSQL select on a q-origin table of a handle needs a where term .sql.translate moves into
-/ DuckDB: without one it is 'limit before any query runs, the table, its count and this threshold in .duckdb.err[].
-/ The count is the one taken when the table was bound, read afresh after the bridge's own writes; get stays unlimited.
+/ The row count above which a qSQL select on a q-origin table of a handle needs a where term .sql.translate moves into DuckDB: without
+/ one it is 'limit before any query runs, the table, its count and this threshold in .duckdb.err[]. The count is the one taken when the
+/ table was bound, read afresh after the bridge's own writes; get stays unlimited. Set it with .duckdb.set_maxrows.
 .duckdb.maxrows:0W
+/ Set .duckdb.maxrows, the row count above which a select needs a where term DuckDB runs; 0W for no limit.
+.duckdb.set_maxrows:{[n] .duckdb.maxrows::n;}
 
 / The .sql.translate answer (sqlTree;params;schema;qTree) of the last linked select that ran a pushed statement, qTree ::
 / when DuckDB answered it whole; :: when the last select pushed nothing (pushdown off, nothing to move, or a refusal).
