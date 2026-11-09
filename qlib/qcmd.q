@@ -46,7 +46,8 @@
     keep:where not .str.startswith[absolute; out,"/"];
     ([] file:`$src keep; src:absolute keep; out:join[out] each rel keep; k:til count keep)};
   batch:{[setup;jobs]
-    / Answers (worker;pid).  The worker appends, so a stale replay goes first; it replays in a directory of its own.
+    / Answers (worker;pid).  The worker appends, so a stale replay goes first; it replays in a directory of its own,
+    / at the root context whatever the caller's \d, as a fresh `q f.qcmd` does.
     / No local may share a .pq.conns[] column name: `where spec=alias` would compare two columns.
     start:{[setup;job]
       target:.path.path job`out;
@@ -54,7 +55,7 @@
       worker:@[.pq.hopen_qfork[`$"qcmdrun",string job`k];`stdout`stderr!2#target;{[err] `}];
       if[null worker; :(worker;0Ni)];
       conn:exec handle:first handle, pid:first pid from .pq.conns[] where spec=worker;
-      replay:{[dir;setup;file] system "cd ",dir; setup dir; system "l ",file};
+      replay:{[dir;setup;file] system "d ."; system "cd ",dir; setup dir; system "l ",file};
       @[neg conn`handle;(replay;job`dir;setup;job`src);::];
       (worker;conn`pid)};
     / A sync call on a dead qfork alias forks a fresh worker, so a changed .z.i is a death too.
