@@ -613,6 +613,7 @@ static int64_t ctx_qcmd_text(int64_t i, const char** p) {
  * shows where the replay really is); -1 once they are spent, so the suspension unwinds and the next q) line runs
  * at top level.  The tail of a line past the buffer is dropped. */
 static int ctx_qcmd_read(const char* prompt, char* buf, size_t cap) {
+    if (!prompt) return 0;
     if (g_qcmd.next >= g_qcmd.count) return -1;
     const char* p;
     int64_t n = ctx_qcmd_text(g_qcmd.next++, &p);
@@ -771,6 +772,7 @@ int q_ctx_run_named_src(const char* name, const char* s, FILE* out, FILE* err, r
 
 int q_ctx_run_console_src(const char* s, FILE* out, FILE* err) {
     int tok = q_dbg_statement_begin(s, strlen(s), 1);   /* the statement the load's lines inherit console-ness from */
+    q_dbg_statement_startup();
     int rc  = ctx_run_script(s, strlen(s), 0, 0, 0, out, err, NULL);   /* argv text: silent, as q_ctx_run_src */
     q_dbg_statement_end(tok);
     return rc;
@@ -779,6 +781,7 @@ int q_ctx_run_console_src(const char* s, FILE* out, FILE* err) {
 int q_ctx_run_load(const char* name, FILE* out, FILE* err) {
     size_t n   = strlen(name);
     int    tok = q_dbg_statement_begin(name, n, 0);
+    q_dbg_statement_startup();
     ray_t* r   = q_sys_load(name, n);
     int    rc  = r && RAY_IS_ERR(r);
     if (rc) ctx_show_err(out, err, r);
