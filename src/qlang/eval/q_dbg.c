@@ -34,6 +34,7 @@ static _Thread_local const ray_t* g_live_call[DBG_LIVE_MAX];  /* the caller's no
 static _Thread_local const ray_t* g_frozen[DBG_LIVE_MAX + 1];  /* a lambda frame's node, HELD while a nested run walks */
 static _Thread_local int    g_live_depth;
 static _Thread_local int    g_frame_base;          /* the first live frame a snapshot reports */
+static _Thread_local int    g_level_base;          /* the first statement level .Q.Ll reports (the runner's are beneath) */
 static _Thread_local int    g_frame_num;           /* the number its statement frame shows: 0, or a q)) line's */
 static _Thread_local int    g_cursor;              /* navigated frame, 0 = [0] */
 /* a `'err` typed at q)) leaves the frames from cut_depth up unobserved: kdb destroys that frame (debug.md §Signal) */
@@ -74,7 +75,23 @@ typedef struct {
     ray_t* ey[DBG_EY_MAX];         /* retained args of the failed apply */
     int    eyn;
     int    reported;
+    ray_t* saved;                  /* `'(msg;bt)`: the retained frame records that replace frames sig and up */
+    int    sig;
+    ray_t* ptext;                  /* a failed `parse`: its retained text and die offset, frames above the live ones */
+    int64_t poff;
 } dbg_snap_t;
+
+/* a frame's fields: the one shape the renderer, the record and .Q.sbt share; own = the name's charv when owned */
+typedef struct {
+    const char *name, *file, *text;
+    size_t nn, fn, tn;
+    int64_t line, off;
+    ray_t* own;
+} dbg_frame_t;
+
+/* an error made by `'(msg;bt)` or by `parse`, waiting for the seam that snapshots it */
+static _Thread_local struct { ray_t* err; ray_t* bt; int sig; int lvl; } g_resig;
+static _Thread_local struct { ray_t* err; ray_t* text; int64_t off; } g_pf;
 
 /* Statement state is per LEVEL, so a nested statement (a q)) line, a `\l`
  * inside one, a remote callback) cannot take the level beneath its frame-[0]
@@ -172,16 +189,30 @@ void q_dbg_frame_pop(void) {
     if (--g_live_depth < DBG_LIVE_MAX) q_eval_node = g_live_call[g_live_depth];
 }
 
+#define DBG_LVL_SHIFT 20   /* q_dbg_frame_base's token: the level base above the frame base */
 int q_dbg_frame_base(int base) {
-    int prev = g_frame_base;
-    g_frame_base = base < 0 ? g_live_depth : base;
+    int prev = g_frame_base | g_level_base << DBG_LVL_SHIFT;
+    if (base < 0) { g_frame_base = g_live_depth; g_level_base = g_depth; }
+    else { g_frame_base = base & ((1 << DBG_LVL_SHIFT) - 1); g_level_base = base >> DBG_LVL_SHIFT; }
     return prev;
+}
+
+static void resig_drop(void) {
+    if (g_resig.bt) ray_release(g_resig.bt);
+    memset(&g_resig, 0, sizeof g_resig);
+}
+
+static void pf_drop(void) {
+    if (g_pf.text) ray_release(g_pf.text);
+    memset(&g_pf, 0, sizeof g_pf);
 }
 
 void q_dbg_snapshot_clear(void) {
     for (int i = 0; i < g_snap.depth; i++) ray_release(g_snap.lam[i]);
     if (g_snap.ex) ray_release(g_snap.ex);
     for (int i = 0; i < g_snap.eyn; i++) ray_release(g_snap.ey[i]);
+    if (g_snap.saved) ray_release(g_snap.saved);
+    if (g_snap.ptext) ray_release(g_snap.ptext);
     memset(&g_snap, 0, sizeof g_snap);
 }
 
@@ -234,7 +265,12 @@ void q_dbg_statement_end(int tok) {
     g_trap_depth = tok >> DBG_TRAP_SHIFT;
     stmt_pos_drop(&g_stmt);
     g_cut_err = NULL;
+    pf_drop();
     int d = --g_depth;
+    if (g_resig.err && g_resig.lvl == d + 1) {   /* a `'e` at q)) leaves its level carrying the error */
+        if (tok & DBG_KEEP_ERR) g_resig.lvl = d;
+        else resig_drop();
+    }
     /* whatever this level took goes with it: its error is freed now, and a later error at the same address
      * must never read as already seen (the shared slot past DBG_NEST_MAX included) */
     if (g_snap.taken == d + 1) q_dbg_snapshot_clear();
@@ -262,7 +298,9 @@ q_dbg_read_fn q_dbg_set_reader(q_dbg_read_fn fn) {
 
 void q_dbg_reset(void) {
     q_dbg_snapshot_clear();
-    g_live_depth = g_frame_base = g_frame_num = g_cursor = 0;
+    resig_drop();
+    pf_drop();
+    g_live_depth = g_frame_base = g_level_base = g_frame_num = g_cursor = 0;
     g_sus = NULL;
     g_cut_err = NULL;
     memset(g_frozen, 0, sizeof g_frozen);
@@ -273,99 +311,103 @@ void q_dbg_reset(void) {
     g_reader = NULL;
 }
 
-/* the `g:` prefix — a display-time scan of the definition namespace's
- * functions recovers the global a frame's lambda is bound to */
-static int lam_global_name(ray_t* lam, char* buf, size_t cap) {
+/* a lambda's name, OWNED charv or NULL: the global it is bound to — a display-time scan of its definition namespace,
+ * qualified, a root one as `..f` (SO 76408267, kb/profiler.md) — else the name its first assignment stamped (an
+ * anonymous inner lambda's `..f@`, basics/debug.md §Errors; a dotted handler's `.z.pg`) */
+static ray_t* lam_name(ray_t* lam) {
     ray_t* ctx = NULL;
     q_eval_apply_lambda_parts(lam, NULL, NULL, &ctx);
     int64_t ns = ctx ? ctx->i64 : 0;
     ray_t* names = q_env_ns_names(ns, Q_ENV_NS_FNS);
-    if (!names || RAY_IS_ERR(names)) {
-        if (names) ray_release(names);
-        return 0;
-    }
-    int found = 0;
-    int64_t cnt = q_count(names);
-    for (int64_t i = 0; i < cnt && !found; i++) {
+    ray_t* out = NULL;
+    int64_t cnt = names && !RAY_IS_ERR(names) ? q_count(names) : 0;
+    for (int64_t i = 0; i < cnt && !out; i++) {
         ray_t* m = q_index_elem_at(names, i);
         if (!m || RAY_IS_ERR(m)) { if (m) ray_release(m); continue; }
         int64_t q = q_env_qualify(ns, m->i64);
-        if (q >= 0 && q_env_get(q) == lam) {
-            ray_t* s = ray_sym_str(m->i64);
-            if (s && !RAY_IS_ERR(s)) {
-                size_t sn = ray_str_len(s);
-                if (sn + 1 < cap) {
-                    memcpy(buf, ray_str_ptr(s), sn);
-                    buf[sn] = '\0';
-                    found = 1;
-                }
-                ray_release(s);
+        ray_t* s = q >= 0 && q_env_get(q) == lam ? ray_sym_str(q) : NULL;
+        if (s && !RAY_IS_ERR(s)) {
+            size_t sn = ray_str_len(s), pre = ns ? 0 : 2;
+            char* b = (char*)ray_alloc_raw(sn + 2);
+            if (b) {
+                memcpy(b, "..", 2);
+                memcpy(b + pre, ray_str_ptr(s), sn);
+                out = ray_charv(b, (int64_t)(sn + pre));
+                ray_free_raw(b);
             }
+            ray_release(s);
         }
         ray_release(m);
     }
-    ray_release(names);
-    return found;
+    if (names) ray_release(names);
+    if (out && RAY_IS_ERR(out)) { ray_release(out); out = NULL; }
+    if (out) return out;
+    q_eval_apply_lambda_prov(lam, &out, NULL, NULL);
+    if (out) ray_retain(out);
+    return out;
 }
 
-/* else the name its first assignment stamped: an anonymous inner lambda's `f@` (basics/debug.md §Errors), a dotted
- * handler's `.z.pg` — a root name's `..` dropped */
-static int lam_name(ray_t* lam, char* buf, size_t cap) {
-    if (lam_global_name(lam, buf, cap)) return 1;
-    ray_t* nm = NULL;
-    q_eval_apply_lambda_prov(lam, &nm, NULL, NULL);
-    if (!nm) return 0;
-    const char* p = (const char*)ray_data(nm);
-    size_t n = (size_t)q_count(nm);
-    if (n > 2 && p[0] == '.' && p[1] == '.') { p += 2; n -= 2; }
-    if (n + 1 >= cap) return 0;
-    memcpy(buf, p, n);
-    buf[n] = '\0';
-    return 1;
-}
-
-/* the number live frame idx shows in a statement whose frame [base] is numbered num */
-static int frame_number(const dbg_stmt_t* s, int num, int idx, int base) {
-    return idx > base ? num + idx - base - stmt_bare(s) : num;
-}
-
-/* one frame: `  [i]  file:line: name:src` then its caret line (basics/debug.md — file:line only "if such
- * information is available"; the `^` under the head token at `off`, a blank line when off < 0).  A multi-line
- * text shows the lines through the failing one, the caret, then the rest (KDB-X how-to).  lam NULL = the
- * statement frame (from stmt).  OWNED NUL-terminated text (ray_free_raw), *n its length; NULL on OOM. */
-static char* frame_text(size_t* n, int idx, int mark, ray_t* lam, const dbg_stmt_t* stmt, int off) {
-    const char* src = stmt->text;
-    size_t sn = strlen(src);
-    int64_t fs = stmt->file, ln = stmt->line;
-    char name[128], floc[300], pre[480];
-    name[0] = floc[0] = '\0';
+/* the fields of a lambda, a `value`d text (charv) or — lam NULL — the statement; a file-less frame's line is 0 */
+static void fields_of(dbg_frame_t* f, ray_t* lam, const dbg_stmt_t* stmt, int64_t off) {
+    memset(f, 0, sizeof *f);
+    f->name = f->file = "";
+    f->text = stmt->text;
+    f->tn = strlen(stmt->text);
+    f->off = off;
+    int64_t fs = stmt->file;
+    f->line = stmt->line;
     if (lam && is_text(lam)) {
-        src = (const char*)ray_data(lam);
-        sn = (size_t)q_count(lam);
+        f->text = (const char*)ray_data(lam);
+        f->tn = (size_t)q_count(lam);
         fs = 0;
     } else if (lam) {
         ray_t* s = q_eval_apply_lambda_src(lam);
-        src = s ? ray_str_ptr(s) : "{}";
-        sn = s ? ray_str_len(s) : 2;
-        if (lam_name(lam, name, sizeof name - 1)) strcat(name, ":");
-        q_eval_apply_lambda_prov(lam, NULL, &fs, &ln);
+        f->text = s ? ray_str_ptr(s) : "{}";
+        f->tn = s ? ray_str_len(s) : 2;
+        if ((f->own = lam_name(lam))) { f->name = (const char*)ray_data(f->own); f->nn = (size_t)q_count(f->own); }
+        q_eval_apply_lambda_prov(lam, NULL, &fs, &f->line);
     }
     ray_t* fp = fs ? ray_sym_str(fs) : NULL;             /* borrowed */
-    if (fp)
-        snprintf(floc, sizeof floc, "%.*s:%lld: ", (int)ray_str_len(fp),
-                 ray_str_ptr(fp), (long long)ln);
+    if (fp) { f->file = ray_str_ptr(fp); f->fn = ray_str_len(fp); }
+    else f->line = 0;
+}
+
+static void fields_drop(dbg_frame_t* f) { if (f->own) ray_release(f->own); }
+
+/* one frame: `  [n]  file:line: name:text` then its caret line (basics/debug.md — file:line only "if such
+ * information is available"; the `^` under the head token at off, a blank line when off is outside the text).  A
+ * multi-line text shows the lines through the failing one, the caret, then the rest (KDB-X how-to).  A frame with no
+ * text is `(name)` — the trap's own, a keyword's (debug.md `(.Q.trp)`, `(.q.parse)`).  A root `..` never shows.
+ * OWNED NUL-terminated text (ray_free_raw), *n its length; NULL on OOM. */
+static char* frame_render(size_t* n, const dbg_frame_t* f, int64_t num, int mark) {
+    const char* nm = f->name;
+    size_t nn = f->nn;
+    if (nn > 2 && nm[0] == '.' && nm[1] == '.') { nm += 2; nn -= 2; }
+    int paren = !f->tn && nn;
+    const char* src = paren ? nm : f->text;
+    size_t sn = paren ? nn : f->tn;
+    char head[48], ln[32];
+    size_t hl = (size_t)snprintf(head, sizeof head, "%s[%lld]  ", mark ? ">>" : "  ", (long long)num);
+    size_t ll = f->fn ? (size_t)snprintf(ln, sizeof ln, ":%lld: ", (long long)f->line) : 0;
+    size_t named = paren || !nn ? 0 : nn + 1;
+    size_t plen = hl + f->fn + ll + named + (size_t)paren;
+    int64_t off = f->off >= 0 && (size_t)f->off < sn && !paren ? f->off : -1;
     size_t ls = 0, le = sn;                              /* the failing line's span in src */
-    if (off >= 0 && (size_t)off < sn) {
+    if (off >= 0) {
         for (size_t i = 0; i < (size_t)off; i++) if (src[i] == '\n') ls = i + 1;
         for (le = (size_t)off; le < sn && src[le] != '\n'; le++) ;
-    } else off = -1;
-    size_t plen = (size_t)snprintf(pre, sizeof pre, "%s[%d]  %s%s", mark ? ">>" : "  ", idx, floc, name);
+    }
     size_t col = off < 0 ? 0 : (ls ? 0 : plen) + ((size_t)off - ls);
-    char* dst = (char*)ray_alloc_raw(plen + sn + col + 4);
+    char* dst = (char*)ray_alloc_raw(plen + sn + col + 5);
     if (!dst) return NULL;
-    size_t k = plen;
-    memcpy(dst, pre, plen);
+    size_t k = 0;
+    memcpy(dst, head, hl); k += hl;
+    memcpy(dst + k, f->file, f->fn); k += f->fn;
+    memcpy(dst + k, ln, ll); k += ll;
+    if (named) { memcpy(dst + k, nm, nn); k += nn; dst[k++] = ':'; }
+    if (paren) dst[k++] = '(';
     memcpy(dst + k, src, le); k += le;
+    if (paren) dst[k++] = ')';
     dst[k++] = '\n';
     memset(dst + k, ' ', col); k += col;
     if (off >= 0) dst[k++] = '^';
@@ -376,10 +418,124 @@ static char* frame_text(size_t* n, int idx, int mark, ray_t* lam, const dbg_stmt
     return dst;
 }
 
+/* the number live frame idx shows in a statement whose frame [base] is numbered num */
+static int frame_number(const dbg_stmt_t* s, int num, int idx, int base) {
+    return idx > base ? num + idx - base - stmt_bare(s) : num;
+}
+
+/* lam NULL = the statement frame (from stmt) */
+static char* frame_text(size_t* n, int idx, int mark, ray_t* lam, const dbg_stmt_t* stmt, int off) {
+    dbg_frame_t f;
+    fields_of(&f, lam, stmt, off);
+    char* t = frame_render(n, &f, idx, mark);
+    fields_drop(&f);
+    return t;
+}
+
 static void frame_put(FILE* out, char* text) {
     if (!text) return;
     fputs(text, out);
     ray_free_raw(text);
+}
+
+/* ===== the frame record (code;(name;file;line;text);pos;n), built only when asked: .Q.Ll, a trap, a trace ===== */
+
+static void push(ray_t** l, ray_t* item) {   /* consumes item */
+    if (!item || RAY_IS_ERR(item)) { if (item) ray_release(item); return; }
+    if (*l && !RAY_IS_ERR(*l)) *l = ray_list_append(*l, item);
+    ray_release(item);
+}
+
+/* enlist v — item 0, a list whose first is the function (kx-vscode `(.Q.trp ~ first first @) each bt`) */
+static ray_t* boxed(ray_t* v) {
+    ray_t* c = ray_list_new(1);
+    if (!v) v = RAY_NULL_OBJ;
+    ray_retain(v);
+    push(&c, v);
+    return c;
+}
+
+static ray_t* rec_new(ray_t* code, const dbg_frame_t* f, int64_t num) {   /* code borrowed */
+    ray_t* info = ray_list_new(4);
+    push(&info, ray_charv(f->name, (int64_t)f->nn));
+    push(&info, ray_charv(f->file, (int64_t)f->fn));
+    push(&info, ray_i64(f->line));
+    push(&info, ray_charv(f->text, (int64_t)f->tn));
+    ray_t* r = ray_list_new(4);
+    push(&r, boxed(code));
+    push(&r, info);
+    push(&r, ray_i64(f->off));
+    push(&r, ray_i64(num));
+    return r;
+}
+
+/* a frame of no text: the trap's own, a keyword's; its code is the global `global` names */
+static ray_t* rec_named(const char* name, const char* global, int64_t num) {
+    dbg_frame_t f = { .name = name, .file = "", .text = "", .nn = strlen(name), .off = -1 };
+    return rec_new(q_env_get(ray_sym_intern(global, strlen(global))), &f, num);
+}
+
+static ray_t* rec_live(ray_t* lam, const dbg_stmt_t* stmt, int64_t off, int64_t num) {   /* lam NULL = stmt's */
+    dbg_frame_t f;
+    fields_of(&f, lam, stmt, off);
+    ray_t* code = lam ? lam : ray_charv(stmt->text, (int64_t)strlen(stmt->text));
+    ray_t* r = rec_new(code, &f, num);
+    if (!lam && code) ray_release(code);
+    fields_drop(&f);
+    return r;
+}
+
+static int rec_str(ray_t* v, const char** p, size_t* n) {
+    if (v && v->type == RAY_CHARV) { *p = (const char*)ray_data(v); *n = (size_t)q_count(v); return 1; }
+    if (v && v->type == -RAY_CHARV) { *p = (const char*)&v->u8; *n = 1; return 1; }
+    if (v && v->type == RAY_LIST && !q_count(v)) { *p = ""; *n = 0; return 1; }
+    return 0;
+}
+
+static int rec_int(ray_t* v, int64_t* x) {
+    if (!v) return 0;
+    switch (v->type) {
+    case -RAY_I64: *x = v->i64; break;
+    case -RAY_I32: *x = v->i32 == NULL_I32 ? NULL_I64 : v->i32; break;
+    case -RAY_I16: *x = v->i16 == NULL_I16 ? NULL_I64 : v->i16; break;
+    default: return 0;
+    }
+    return 1;
+}
+
+/* a record's fields (borrowed from it) and number; 0 when it is not (code;(name;file;line;text);pos;n) */
+static int rec_fields(ray_t* r, dbg_frame_t* f, int64_t* num) {
+    if (!r || r->type != RAY_LIST || q_count(r) != 4) return 0;
+    ray_t* info = ray_list_get(r, 1);
+    if (!info || info->type != RAY_LIST || q_count(info) != 4) return 0;
+    memset(f, 0, sizeof *f);
+    if (!rec_str(ray_list_get(info, 0), &f->name, &f->nn) || !rec_str(ray_list_get(info, 1), &f->file, &f->fn) ||
+        !rec_int(ray_list_get(info, 2), &f->line) || !rec_str(ray_list_get(info, 3), &f->text, &f->tn) ||
+        !rec_int(ray_list_get(r, 2), &f->off) || !rec_int(ray_list_get(r, 3), num))
+        return 0;
+    if (f->off == NULL_I64) f->off = -1;
+    return 1;
+}
+
+static ray_t* rec_renum(ray_t* r, int64_t num) {
+    ray_t* c = ray_list_new(4);
+    for (int i = 0; i < 3; i++) {
+        ray_t* v = ray_list_get(r, i);
+        ray_retain(v);
+        push(&c, v);
+    }
+    push(&c, ray_i64(num));
+    return c;
+}
+
+/* `'(msg;bt)` takes a list of records (SO 65303811); anything else is 'stype */
+static int rec_list_ok(ray_t* bt) {
+    dbg_frame_t f;
+    int64_t num;
+    if (!bt || bt->type != RAY_LIST) return 0;
+    for (int64_t i = 0; i < q_count(bt); i++)
+        if (!rec_fields(ray_list_get(bt, i), &f, &num)) return 0;
+    return 1;
 }
 
 static void snap_take(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
@@ -390,7 +546,7 @@ static void snap_take(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
     int stored = g_live_depth < DBG_LIVE_MAX ? g_live_depth : DBG_LIVE_MAX;
     int base   = g_frame_base < stored ? g_frame_base : stored;
     g_snap.depth = stored - base < DBG_SNAP_MAX ? stored - base : DBG_SNAP_MAX;
-    g_snap.num = g_frame_num - stmt_bare(&snap_stmt);
+    g_snap.num = g_frame_num;
     for (int i = 0; i < g_snap.depth; i++) {
         g_snap.lam[i] = g_live[base + i];
         ray_retain(g_snap.lam[i]);
@@ -406,6 +562,18 @@ static void snap_take(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
             ray_retain(args[i]);
         }
     }
+    if (r == g_resig.err) {
+        g_snap.saved = g_resig.bt;
+        g_resig.bt = NULL;
+        g_snap.sig = g_resig.sig > base ? g_resig.sig - base : 0;
+        resig_drop();
+    }
+    if (r == g_pf.err) {
+        g_snap.ptext = g_pf.text;
+        g_snap.poff = g_pf.off;
+        g_pf.text = NULL;
+    }
+    pf_drop();
 }
 
 int q_dbg_reported(ray_t* err) {
@@ -430,11 +598,30 @@ static void dbg_err_line(FILE* out, ray_t* err) {
     fprintf(out, "'%.*s\n", n, text);
 }
 
-/* snapshot frame i (0 = the statement), numbered as `idx` (the bt object shifts the lambdas up by one); NULL for a
- * bare statement's frame */
-static char* snap_text(size_t* n, int i, int idx) {
-    if (!i && stmt_bare(&snap_stmt)) return NULL;
-    return frame_text(n, g_snap.num + idx, 0, i ? g_snap.lam[i - 1] : NULL, &snap_stmt, i ? g_snap.off[i - 1] : g_snap.stmt_off);
+/* The snapshot as records, innermost first, numbered by position up from the statement's [num]: a failed parse's
+ * text and `(.q.parse)` frames (debug.md §Trap); a re-signal's saved frames, which REPLACE the signalling frame and
+ * stack on the live frames beneath it (SO 65303811); the live frames, with a trap's own frame (trap non-NULL) above
+ * the `below` frames that called it (KDB-X safeRun); a bare statement has no frame [0]. */
+static ray_t* snap_records(const char* trap, int below) {
+    int top = g_snap.depth, lo = stmt_bare(&snap_stmt);
+    if (g_snap.saved && g_snap.sig - 1 < top) top = g_snap.sig - 1;
+    if (below > top) below = top;
+    int64_t ns = g_snap.saved ? q_count(g_snap.saved) : 0;
+    int64_t total = (g_snap.ptext ? 2 : 0) + ns + (top >= lo ? top - lo + 1 : 0) + (trap != NULL);
+    int64_t num = g_snap.num + total - 1;
+    ray_t* l = ray_list_new(total ? total : 1);
+    if (g_snap.ptext) {
+        push(&l, rec_live(g_snap.ptext, &snap_stmt, g_snap.poff, num--));
+        push(&l, rec_named(".q.parse", "parse", num--));
+    }
+    for (int64_t k = 0; k < ns; k++) push(&l, rec_renum(ray_list_get(g_snap.saved, k), num--));
+    int trapped = trap == NULL;
+    for (int i = top; i >= lo; i--) {
+        if (!trapped && i <= below) { push(&l, rec_named(trap, trap, num--)); trapped = 1; }
+        push(&l, rec_live(i ? g_snap.lam[i - 1] : NULL, &snap_stmt, i ? g_snap.off[i - 1] : g_snap.stmt_off, num--));
+    }
+    if (!trapped) push(&l, rec_named(trap, trap, num--));
+    return l;
 }
 
 static void text_cat(char** buf, size_t* len, char* part, size_t n) {   /* consumes part */
@@ -444,6 +631,29 @@ static void text_cat(char** buf, size_t* len, char* part, size_t n) {   /* consu
     ray_free_raw(part);
 }
 
+/* the records rendered onto buf, each with its own [n]; 0 when one is not a record (a string item prints as a line) */
+static int recs_cat(char** buf, size_t* len, ray_t* recs) {
+    for (int64_t i = 0; recs && !RAY_IS_ERR(recs) && i < q_count(recs); i++) {
+        ray_t* r = ray_list_get(recs, i);
+        dbg_frame_t f;
+        int64_t num;
+        size_t n = 0;
+        if (r && r->type == RAY_CHARV) {
+            char* line = (char*)ray_alloc_raw((size_t)q_count(r) + 2);
+            if (!line) continue;
+            memcpy(line, ray_data(r), (size_t)q_count(r));
+            line[q_count(r)] = '\n';
+            line[q_count(r) + 1] = '\0';
+            text_cat(buf, len, line, (size_t)q_count(r) + 1);
+            continue;
+        }
+        if (!rec_fields(r, &f, &num)) return 0;
+        char* part = frame_render(&n, &f, num, 0);
+        text_cat(buf, len, part, n);
+    }
+    return 1;
+}
+
 char* q_dbg_trace(ray_t* err, int frames, size_t* len) {
     int en;
     const char* et = err_text(err, &en);
@@ -451,16 +661,14 @@ char* q_dbg_trace(ray_t* err, int frames, size_t* len) {
     if (!buf) return NULL;
     *len = (size_t)snprintf(buf, (size_t)en + 3, "'%.*s\n", en, et);
     size_t n = 0;
-    char* part;
     if (!frames) return buf;
+    if (g_snap.err != err && err == g_resig.err) snap_take(err, NULL, NULL, 0);   /* a top-level `'(msg;bt)` */
     if (g_snap.err == err) {
-        int lo = stmt_bare(&snap_stmt) && g_snap.depth ? 1 : 0;
-        for (int i = g_snap.depth; i >= lo; i--) {
-            part = snap_text(&n, i, i);
-            text_cat(&buf, len, part, n);
-        }
+        ray_t* recs = snap_records(NULL, 0);
+        recs_cat(&buf, len, recs);
+        if (recs) ray_release(recs);
     } else if (!stmt_bare(&g_stmt)) {
-        part = frame_text(&n, g_frame_num, 0, NULL, &g_stmt, frame_off(g_stmt.pos, stmt_node(&g_stmt)));
+        char* part = frame_text(&n, g_frame_num, 0, NULL, &g_stmt, frame_off(g_stmt.pos, stmt_node(&g_stmt)));
         text_cat(&buf, len, part, n);
     }
     return buf;
@@ -669,7 +877,7 @@ static ray_t* dbg_observe(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
         g_cut_err = NULL;
     }
     snap_take(r, fv, args, n);
-    if (dbg_suspendable(r)) {
+    if (!g_snap.saved && dbg_suspendable(r)) {   /* a re-signal's frames are not live: nothing to suspend in */
         ray_t* rep = dbg_suspend(r);
         if (rep) {
             /* an 'err replacement OWNS the pending payload slot — drop only
@@ -724,35 +932,6 @@ void q_dbg_mark_reported(ray_t* e) {
     g_snap.reported = 1;
 }
 
-/* opaque backtrace object: a list of formatted frame strings, each its frame line plus caret line (only .Q.sbt's
- * rendering is contract; kdb's object internals are undocumented).  The trap's own frame has an empty caret line. */
-static void bt_append(ray_t** l, const char* line, size_t n) {
-    ray_t* s = ray_charv(line, (int64_t)n);
-    if (s && !RAY_IS_ERR(s)) {
-        *l = ray_list_append(*l, s);
-        ray_release(s);
-    }
-}
-
-static void bt_append_snap(ray_t** l, int i, int idx) {   /* the frame without its final \n */
-    size_t n = 0;
-    char* text = snap_text(&n, i, idx);
-    if (!text) return;
-    bt_append(l, text, n ? n - 1 : 0);
-    ray_free_raw(text);
-}
-
-/* the trap's own frame sits where it was called: above the `below` frames that called it (KDB-X safeRun) */
-static ray_t* dbg_bt_object(const char* trap, int below) {
-    if (below > g_snap.depth) below = g_snap.depth;
-    ray_t* l = ray_list_new(g_snap.depth + 2);
-    for (int i = g_snap.depth; i > below; i--) bt_append_snap(&l, i, i + 1);
-    char door[64];
-    bt_append(&l, door, (size_t)snprintf(door, sizeof door, "  [%d]  (%s)\n", g_snap.num + below + 1, trap));
-    for (int i = below; i >= 0; i--) bt_append_snap(&l, i, i);   /* a bare statement's [0] appends nothing */
-    return l;
-}
-
 /* .Q.trp applies f to x; .Q.trpd (= -105!) is its dot form, spreading x as the argument list */
 static ray_t* dbg_trap(ray_t** args, int dot) {
     int below = g_live_depth - g_frame_base;
@@ -767,9 +946,9 @@ static ray_t* dbg_trap(ray_t** args, int dot) {
         const char* tp = q_err_text(r, &tn);
         msg = ray_charv(tp ? tp : "", tn);
     }
+    if (!msg || RAY_IS_ERR(msg)) { ray_error_free(r); return msg ? msg : q_err(QE_OOM); }
+    ray_t* bt = g_snap.err == r ? snap_records(dot ? ".Q.trpd" : ".Q.trp", below) : ray_list_new(0);
     ray_error_free(r);
-    if (!msg || RAY_IS_ERR(msg)) return msg ? msg : q_err(QE_OOM);
-    ray_t* bt = dbg_bt_object(dot ? ".Q.trpd" : ".Q.trp", below);
     q_dbg_snapshot_clear();
     if (!bt || RAY_IS_ERR(bt)) { ray_release(msg); return bt ? bt : q_err(QE_OOM); }
     ray_t* av[2] = { msg, bt };
@@ -793,26 +972,89 @@ ray_t* q_dbg_trp_dot(ray_t* y) {
     return q_dbg_trpd_fn(av, 3);
 }
 
+/* records render with their own numbers, text and caret — an edited list (kx-vscode) prints what it says */
 ray_t* q_dbg_sbt_fn(ray_t* x) {
     if (!x || (x->type != RAY_LIST && !ray_is_vec(x))) return q_err(QE_TYPE);
-    char buf[8192];
-    size_t used = 0;
-    int64_t cnt = q_count(x);
-    for (int64_t i = 0; i < cnt; i++) {
-        ray_t* s = q_index_elem_at(x, i);
-        if (!s || RAY_IS_ERR(s)) { if (s) ray_release(s); continue; }
-        if (s->type == RAY_CHARV) {
-            size_t sn = (size_t) q_count(s);
-            const char* sp = (const char*)ray_data(s);
-            if (used + sn + 1 < sizeof buf) {
-                memcpy(buf + used, sp, sn);
-                used += sn;
-                buf[used++] = '\n';
+    char* buf = (char*)ray_alloc_raw(1);
+    if (!buf) return q_err(QE_OOM);
+    buf[0] = '\0';
+    size_t len = 0;
+    int ok = x->type != RAY_LIST || recs_cat(&buf, &len, x);
+    ray_t* s = ok ? ray_charv(buf, (int64_t)len) : q_err(QE_TYPE);
+    ray_free_raw(buf);
+    return s;
+}
+
+/* `'(msg;bt)`: msg signalled carrying bt, which the snapshot of this error adopts */
+ray_t* q_dbg_resignal(ray_t* msg, ray_t* bt) {
+    if (!rec_list_ok(bt)) return q_err(QE_STYPE);
+    ray_t* r = q_err_signal(QE_SIGNAL, msg);
+    resig_drop();
+    ray_retain(bt);
+    g_resig.err = r;
+    g_resig.bt = bt;
+    g_resig.sig = g_live_depth;
+    g_resig.lvl = g_depth;
+    return r;
+}
+
+void q_dbg_parse_fail(ray_t* err, const char* src, int64_t n, ray_t* pos) {
+    pf_drop();
+    g_pf.text = ray_charv(src, n);
+    if (!g_pf.text || RAY_IS_ERR(g_pf.text)) { if (g_pf.text) ray_release(g_pf.text); g_pf.text = NULL; return; }
+    g_pf.err = err;
+    g_pf.off = frame_off(pos, NULL);
+}
+
+/* the live stack (debug.md §Context: "system commands, including \l, correspond to individual debug stack frames"):
+ * every statement level from the innermost down to the runner's floor — its lambda and text frames, its statement
+ * frame, and beneath a script's line the `\l` that loads it (finos_init.q reads it) unless that level typed one.
+ * l NULL counts; numbered by position, innermost first. */
+static int64_t ll_walk(ray_t** l, int64_t num) {
+    int64_t k = 0;
+    int hi = g_live_depth;
+    for (int lv = LVL(g_depth - 1); g_depth > 0 && lv >= LVL(g_level_base); lv--) {
+        const dbg_stmt_t* s = &g_stmts[lv];
+        for (int i = hi < DBG_LIVE_MAX ? hi : DBG_LIVE_MAX; i > s->depth; i--, k++)
+            if (l) push(l, rec_live(live_lam(i), s, frame_off(live_tab(i), lam_node(i)), num - k));
+        hi = s->depth;
+        if (!stmt_bare(s)) {
+            if (l) push(l, rec_live(NULL, s, frame_off(s->pos, stmt_node(s)), num - k));
+            k++;
+        }
+        if (!s->file || lv <= LVL(g_level_base) || !strncmp(g_stmts[lv - 1].text, "\\l", 2)) continue;
+        if (l) {
+            ray_t* fp = ray_sym_str(s->file);   /* borrowed */
+            size_t fn = fp ? ray_str_len(fp) : 0;
+            char* t = (char*)ray_alloc_raw(fn + 4);
+            if (t) {
+                memcpy(t, "\\l ", 3);
+                if (fn) memcpy(t + 3, ray_str_ptr(fp), fn);
+                t[fn + 3] = '\0';
+                dbg_frame_t f = { .name = "", .file = "", .text = t, .tn = fn + 3, .off = -1 };
+                ray_t* code = ray_charv(t, (int64_t)fn + 3);
+                push(l, rec_new(code, &f, num - k));
+                if (code) ray_release(code);
+                ray_free_raw(t);
             }
         }
-        ray_release(s);
+        k++;
     }
-    return ray_charv(buf, (int64_t)used);
+    return k;
+}
+
+ray_t* q_dbg_ll_fn(ray_t* x) {
+    (void)x;                                   /* .Q.Ll` / .Q.Ll[] — any argument */
+    int64_t total = ll_walk(NULL, 0);
+    ray_t* l = ray_list_new(total ? total : 1);
+    ll_walk(&l, total - 1);
+    return l;
+}
+
+ray_t* q_dbg_btx_fn(ray_t* x) {
+    if (!x || x->type != RAY_LIST) return q_err(QE_TYPE);
+    ray_retain(x);
+    return x;
 }
 
 static void bt_frames(int hi, int lo, const dbg_stmt_t* stmt, int base, int num, int cursor) {

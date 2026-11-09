@@ -923,21 +923,25 @@ static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
 
 /* `'x`: symbol atom or string, else 'stype (ref/signal.md Restrictions);
  * signals the text */
+static ray_t* signal_text(ray_t* v) {
+    if (v->type == RAY_CHARV) { ray_retain(v); return v; }
+    if (v->type != -RAY_SYM) return NULL;
+    ray_t* s = ray_sym_str(v->i64);
+    return s && !RAY_IS_ERR(s) ? ray_charv(ray_str_ptr(s), (int64_t)ray_str_len(s)) : NULL;
+}
+
+/* `'(msg;bt)` re-signals msg with a saved backtrace, `'(msg;())` plainly (SO 65303811) */
 static ray_t* signal_eval(ray_t* node, ray_t* expr) {
     ray_t* v = q_eval_apply_concrete(q_eval(expr));
     if (RAY_IS_ERR(v)) return v;
-    ray_t* txt = NULL;
-    if (v->type == RAY_CHARV) { ray_retain(v); txt = v; }
-    else if (v->type == -RAY_SYM) {
-        ray_t* s = ray_sym_str(v->i64);
-        if (s && !RAY_IS_ERR(s))
-            txt = ray_charv(ray_str_ptr(s), (int64_t)ray_str_len(s));
-    }
-    ray_release(v);
+    ray_t* bt = v->type == RAY_LIST && q_count(v) == 2 ? ray_list_get(v, 1) : NULL;
+    ray_t* txt = signal_text(bt ? ray_list_get(v, 0) : v);
     q_eval_node = node;                        /* the caret sits under the `'`, not inside its operand */
-    if (!txt || RAY_IS_ERR(txt)) return txt ? txt : q_err(QE_STYPE);
-    ray_t* r = q_err_signal(QE_SIGNAL, txt);
-    ray_release(txt);
+    ray_t* r = !txt || RAY_IS_ERR(txt) ? (txt ? txt : q_err(QE_STYPE))
+             : bt && q_count(bt)       ? q_dbg_resignal(txt, bt)
+                                       : q_err_signal(QE_SIGNAL, txt);
+    if (txt && !RAY_IS_ERR(txt)) ray_release(txt);
+    ray_release(v);
     return r;
 }
 
