@@ -31,6 +31,7 @@
 #include "qlang/ops/q_index.h"
 #include "qlang/ops/q_dollar.h"   /* q_dollar — the cast home `x.attr` rides */
 #include "qlang/net/q_wirefile.h"  /* q_wirefile_read — `get `:file */
+#include "qlang/net/q_wire.h"      /* q_wire_keyword_lambda — `value` of a keyword with no wire code */
 #include "qlang/io/q_provider.h"   /* q_provider_get_carrier — `get `:pq:duckdb:db:t/ */
 #include "qlang/io/q_splay.h"      /* q_splay_get — `get `:dir/ maps; value/amend read the aux path */
 #include "qlang/io/q_io.h"         /* q_io_resource_table — `get `:f.csv reads the format the ending names */
@@ -744,6 +745,19 @@ void q_eval_frames_resume(q_eval_frames_t f) {
     q_eval_apply_frame_floor(f.floor);
 }
 
+/* A keyword with no wire code is, to `value`, the root lambda it travels as (Dffqch) */
+static ray_t* keyword_lambda_value(const char* src) {
+    int64_t scope = q_env_scope(0);
+    ray_t* ast = q_parse(src);
+    ray_t* lam = !ast ? q_err(QE_PARSE) : RAY_IS_ERR(ast) ? ast : q_eval(ast);
+    if (ast && !RAY_IS_ERR(ast)) ray_release(ast);
+    q_env_scope(scope);
+    if (RAY_IS_ERR(lam)) return lam;
+    ray_t* r = q_eval_value_wrap(lam);
+    ray_release(lam);
+    return r;
+}
+
 /* `value`/`get` (ref/value.md; get is the synonym).  q `eval` needs no body
  * here — it is .q.eval:(-6!), the q_bang.c arm over q_eval.  value applies
  * ONCE, non-recursively: a string parses+evaluates in the current context, a
@@ -838,6 +852,8 @@ ray_t* q_eval_value_wrap(ray_t* x) {
     if (x->type == RAY_UNARY || x->type == RAY_BINARY || x->type == RAY_VARY) {
         int code = q_registry_kdb_op_of(x, NULL);
         if (code >= 0) return ray_i64(code);
+        char kw[Q_WIRE_KW_LAMBDA_CAP];
+        if (q_wire_keyword_lambda(x, kw, sizeof kw)) return keyword_lambda_value(kw);
     }
     if (x->type < 0) return q_err(QE_TYPE);   /* any other atom: SO 64109959 "'value 42' results in a type error" */
     return q_err(QE_NYI);       /* enumeration/view/bare-iterator: deferred */
