@@ -9,6 +9,7 @@
 #include "qlang/eval/q_funsql.h"
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_eval_internal.h" /* q_eval_symvec_has */
+#include "qlang/eval/q_dbg.h"           /* q_dbg_hold — a phrase tree's errors caret the query */
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"         /* q_type_widens, q_type_common — the numeric pair laws */
 #include "qlang/q_prim.h"              /* q_cols_fn, q_attr_sort_keyed_key */
@@ -219,7 +220,9 @@ static ray_t* phrase_eval(ray_t* tree, ray_t* t, ray_t* idx) {
         }
     }
     if (!err) q_env_local_set(ray_sym_intern_runtime("i", 1), idx);
+    q_dbg_hold_t hold = q_dbg_hold();              /* the phrase tree is not the frame's text: its caret stays on the query */
     ray_t* r = err ? err : q_eval_apply_concrete(q_eval(tree));
+    q_dbg_release(hold);
     q_env_frame_pop();
     return r;
 }
@@ -381,7 +384,9 @@ static ray_t* where_attr(ray_t* tree, ray_t* t, ray_t* idx) {
     int ident = idx_is_identity(idx, n);
     if (!ident && !idx_is_ascending(idx)) return NULL;
     ray_t* x = swapped ? e[1] : e[2];
+    q_dbg_hold_t hold = q_dbg_hold();
     ray_t* v = x->type == -RAY_SYM || x->type == RAY_LIST ? phrase_eval(x, t, idx) : q_eval(x);
+    q_dbg_release(hold);
     if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_TYPE);
     ray_t* rows = attr_rows(col, v, op);
     if (rows) { ray_release(v); return RAY_IS_ERR(rows) ? rows : idx_restrict(idx, ident, rows); }
