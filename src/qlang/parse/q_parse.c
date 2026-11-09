@@ -30,6 +30,7 @@
 #include "qlang/io/q_duckdb.h" /* q_duckdb_params — the markers of a capturing text literal */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_is_fn(val) */
 #include "qlang/eval/q_dbg.h"  /* q_dbg_statement_origin — the lambda's file + line */
+#include "qlang/eval/q_pattern.h"
 #include "table/sym.h"       /* ray_sym_vec_cell — qSQL dict-key/col names */
 #include <ctype.h>       /* isalpha — the `<letter>)` intake prefix */
 #include <stdio.h>
@@ -781,6 +782,9 @@ q_assign_target_t q_parse_assign_target(const ray_t *lhs) {
     if (lhs->type != RAY_LIST) return q_eval_apply_is_fn((ray_t *)lhs) ? Q_TARGET_NONE : Q_TARGET_PATTERN;
     const ray_t *h = q_count(lhs) > 1 ? ((ray_t **)ray_data((ray_t *)lhs))[0] : NULL;
     if (!h) return Q_TARGET_PATTERN;   /* () or an enclosed constant, ,`a`b */
+    /* `p:`c` is the type-check pattern; `:` is no variable's name, so any other `p:e` (a filter) is no target */
+    if (sym_name_is(h, ":"))
+        return q_count(lhs) == 3 && q_pattern_type_check(((ray_t **)ray_data((ray_t *)lhs))[2]) ? Q_TARGET_PATTERN : Q_TARGET_NONE;
     if (h->type == -RAY_SYM) return Q_TARGET_INDEX;
     /* the heads the parser gives a pattern: a list, a dictionary (and keyed table), a table, and the type check
      * `(:`f)` (basics/pattern.md) */
@@ -1221,22 +1225,62 @@ static ray_t *parse_paren(Parser *p) {
     return w;
 }
 
-/* A lambda signature `[a;b:`j;…]`, the cursor on its `[`, into the parked
- * *params (a RAY_SYM vector) and *ptypes (i64 kdb type nums, 0 = untyped slot;
- * NULL while no slot is typed). */
-static void parse_signature(Parser *p, ray_t **params, ray_t **ptypes) {
+/* a parameter is a binding position, so a reserved name or a user `.q` keyword is refused */
+static void sig_name_check(int64_t id, void *ctx) {
+    (void)ctx;
+    if (q_registry_is_reserved(id) || q_registry_dotq_ext(id)) die_err(QE_ASSIGN);
+}
+
+/* a general list parallel to the signature's slots so far, the generic null on each */
+static ray_t *sig_pats_new(int64_t nslots) {
+    ray_t *pats = ray_list_new(nslots + 1);
+    for (int64_t i = 0; i < nslots; i++) pats = ray_list_append(pats, RAY_NULL_OBJ);
+    return pats;
+}
+
+/* A parenthesised slot, the cursor on its `(`: the same tree an assignment target parses to, appended to *pats.
+ * It reads no implicit x/y/z and declares nothing in the enclosing lambda. */
+static void sig_pattern(Parser *p, ray_t **pats, int64_t nslots) {
+    int *xyz = p->xyz;
+    ray_t **globals = p->globals;
+    p->xyz = NULL;
+    p->globals = NULL;
+    adv(p);
+    ray_t *pat = parse_paren(p);
+    p->xyz = xyz;
+    p->globals = globals;
+    if (!*pats) *pats = sig_pats_new(nslots);
+    *pats = ray_list_append(*pats, pat);
+    ray_release(pat);
+    pat = ray_list_get(*pats, q_count(*pats) - 1);   /* borrowed from the parked list, so a die below leaks nothing */
+    if (!q_pattern_supported(pat)) q_die("expected parameter name in lambda signature");
+    q_pattern_names(pat, sig_name_check, NULL);
+}
+
+/* A lambda signature `[a;b:`j;(c;d);;…]`, the cursor on its `[`, into the parked *params (a RAY_SYM vector),
+ * *ptypes (i64 kdb type nums, 0 = untyped slot; NULL while no slot is typed) and *pats (a slot's list pattern,
+ * the generic null on a plain slot; NULL while no slot destructures).  An elided slot is the null pattern and a
+ * destructured one binds only its pattern's names: both are named by the null symbol, as `{[]}` is. */
+static void parse_signature(Parser *p, ray_t **params, ray_t **ptypes, ray_t **pats) {
     adv(p);
     *params = ray_sym_vec_new(RAY_SYM_W64, 4);
+    int64_t nul = ray_sym_intern_runtime("", 0);
     if (!at(p, T_RBRACK)) for (;;) {
         Token *nt = cur(p);
-        if (nt->kind != T_NOUN || !sym_is_nameref(nt->k))
-            q_die("expected parameter name in lambda signature");
-        int64_t id = nt->k->i64;
-        /* a parameter is a binding position, so a reserved name or a user `.q` keyword is refused */
-        if (q_registry_is_reserved(id) || q_registry_dotq_ext(id)) die_err(QE_ASSIGN);
+        int64_t id = nul, nslots = q_count(*params);
+        int typed = nt->kind == T_VERB && sym_name_is(nt->k, ":");
+        int destructured = nt->kind == T_LPAREN;
+        if (destructured) sig_pattern(p, pats, nslots);
+        if (!destructured && !typed && !at(p, T_SEMI) && !at(p, T_RBRACK)) {
+            if (nt->kind != T_NOUN || !sym_is_nameref(nt->k))
+                q_die("expected parameter name in lambda signature");
+            id = nt->k->i64;
+            sig_name_check(id, NULL);
+            adv(p);
+        }
+        if (!destructured && *pats) *pats = ray_list_append(*pats, RAY_NULL_OBJ);
         *params = ray_vec_append(*params, &id);
-        adv(p);
-        /* `name:`c` type annotation (kx type-check pattern, 4.1+): ONE quoted
+        /* `slot:`c` type annotation (kx type-check pattern, 4.1+): ONE quoted
          * one-char sym; lowercase = atom (negative kdb type num), uppercase =
          * list.  Every other spelling — bare identifier (kx's filter slot,
          * reserved), sym-vector union `j`J, long name `long, unknown char —
@@ -1245,19 +1289,14 @@ static void parse_signature(Parser *p, ray_t **params, ray_t **ptypes) {
         if (cur(p)->kind == T_VERB && sym_name_is(cur(p)->k, ":")) {
             adv(p);
             Token *tt = cur(p);
-            ray_t *ts = tt->kind == T_NOUN && tt->k && tt->k->type == -RAY_SYM && (tt->k->attrs & Q_ATTR_QUOTED)
-                      ? ray_sym_str(tt->k->i64) : NULL;
-            char tc = ts && ray_str_len(ts) == 1 ? ray_str_ptr(ts)[0] : 0;
-            ray_release(ts);
-            int list = (tc >= 'A' && tc <= 'Z');
-            int8_t tag = q_type_of_char(list ? (char)(tc - 'A' + 'a') : tc);
-            if (!tag) q_die("expected `<typechar> in lambda signature");
-            tnum = list ? tag : -tag;
+            if (tt->kind == T_NOUN && tt->k && tt->k->type == -RAY_SYM && (tt->k->attrs & Q_ATTR_QUOTED))
+                tnum = q_pattern_type_num(tt->k->i64);
+            if (!tnum) q_die("expected `<typechar> in lambda signature");
             adv(p);
         }
         if (tnum && !*ptypes) {
             *ptypes = ray_vec_new(RAY_I64, 4);
-            for (int64_t z = 1; z < q_count(*params); z++) {
+            for (int64_t z = 0; z < nslots; z++) {
                 int64_t zero = 0;
                 *ptypes = ray_vec_append(*ptypes, &zero);
             }
@@ -1272,10 +1311,13 @@ static void parse_signature(Parser *p, ray_t **params, ray_t **ptypes) {
      * variable's name, so a spare argument lands where no body can read it
      * and `x` stays GLOBAL — default names come with OMITTING the signature
      * (function-notation.md "Signature").  Owner ruling 2026-08-12. */
-    if (!q_count(*params)) {
-        int64_t nul = ray_sym_intern_runtime("", 0);
-        *params = ray_vec_append(*params, &nul);
-    }
+    if (!q_count(*params)) *params = ray_vec_append(*params, &nul);
+}
+
+/* a destructured slot's names are locals before the first statement, as a parameter is: `a::` writes the local */
+static void sig_local(int64_t id, void *ctx) {
+    ray_t **globals = ctx;
+    *globals = symvec_add(*globals, ~id);
 }
 
 /* Lambda literal `{[sig] stmt;...}` -> the RAY_QFN carrier VALUE, built AT
@@ -1288,12 +1330,14 @@ static void parse_signature(Parser *p, ray_t **params, ray_t **ptypes) {
 static ray_t *parse_lambda(Parser *p) {
     int lb_start = cur(p)->start, mark = g_pos.n;
     adv(p);
-    ray_t **params = pend_push(), **ptypes = pend_push(), **body = pend_push();
-    if (at(p, T_LBRACK)) parse_signature(p, params, ptypes);
+    ray_t **params = pend_push(), **ptypes = pend_push(), **pats = pend_push(), **body = pend_push();
+    if (at(p, T_LBRACK)) parse_signature(p, params, ptypes, pats);
     int mine[3] = { 0, 0, 0 };
     int *saved = p->xyz;
     ray_t **saved_globals = p->globals, *saved_params = p->params, **globals = pend_push();
     *globals = ray_sym_vec_new(RAY_SYM_W64, 4);
+    for (int64_t i = 0, n = *pats ? q_count(*pats) : 0; i < n; i++)
+        q_pattern_names(ray_list_get(*pats, i), sig_local, globals);
     p->xyz = *params ? NULL : mine;
     p->globals = globals;
     p->params = *params;
@@ -1320,7 +1364,7 @@ static ray_t *parse_lambda(Parser *p) {
     for (int64_t i = 0; i < bn; i++)
         if (!bs[i]) bs[i] = RAY_NULL_OBJ;
     ray_t *pos = pos_take(mark, lb_start);
-    ray_t *fn = q_eval_apply_lambda_new(*params, bs, bn, src, *ptypes, pos);
+    ray_t *fn = q_eval_apply_lambda_new(*params, bs, bn, src, *ptypes, *pats, pos);
     ray_release(pos);
     /* ref/value.md `f`/`l`: the lambda's origin is where it is PARSED — the loading script's
      * file, and the line its `{` sits on (a multi-line statement's inner lambda has its own) */
@@ -1332,9 +1376,10 @@ static ray_t *parse_lambda(Parser *p) {
     ray_release(src);
     ray_release(*globals);
     ray_release(*body);
+    ray_release(*pats);
     ray_release(*ptypes);
     ray_release(*params);
-    pend_pop(); pend_pop(); pend_pop(); pend_pop();
+    pend_pop(); pend_pop(); pend_pop(); pend_pop(); pend_pop();
     return fn;
 }
 
@@ -1783,8 +1828,7 @@ static int lam_param(const Parser *p, int64_t id) {
 /* `a::1` then `a:1` in one lambda is a global used as a local: 'a at the local's target, at definition
  * (basics/debug.md §Errors, ChangesIn4.0.md).  Assignments are checked in evaluation order, so `a:1;a::2` (the
  * local first) stays legal — `::` on a local writes the local. */
-static void global_local_check(Parser *p, ray_t *lhs, ray_t *verb, int at) {
-    int64_t id = lhs->i64;
+static void global_local_check(Parser *p, int64_t id, ray_t *verb, int at) {
     int local = sym_name_is(verb, ":");
     if (!p->globals || lam_param(p, id) || (!local && !sym_name_is(verb, "::"))) return;
     ray_t *s = ray_sym_str(id);
@@ -1792,6 +1836,13 @@ static void global_local_check(Parser *p, ray_t *lhs, ray_t *verb, int at) {
     if (symvec_has(*p->globals, ~id)) return;                        /* a local already: `::` writes it */
     if (local && symvec_has(*p->globals, id)) { g_die_at = at; die_signal(QE_NAME, ray_str_ptr(s), ray_str_len(s)); }
     *p->globals = symvec_add(*p->globals, local ? ~id : id);
+}
+
+typedef struct { Parser *p; ray_t *verb; int at; } pattern_check_t;
+
+static void pattern_local_check(int64_t id, void *ctx) {
+    pattern_check_t *c = ctx;
+    global_local_check(c->p, id, c->verb, c->at);
 }
 
 /* The parse-time half of the assignment law: the left side must be a target (q_parse_assign_target).  A lambda's
@@ -1806,7 +1857,9 @@ static void assign_check(Parser *p, ray_t *lhs, ray_t *verb, ray_t *rhs, int at)
         ray_release(lhs); ray_release(verb); ray_release(rhs);
         die_err(QE_ASSIGN);
     }
-    if (k == Q_TARGET_NAME) global_local_check(p, lhs, verb, at);
+    if (k == Q_TARGET_NAME) global_local_check(p, lhs->i64, verb, at);
+    else if (sym_name_is(verb, ":") && q_pattern_supported(lhs))
+        q_pattern_names(lhs, pattern_local_check, &(pattern_check_t){ p, verb, at });
 }
 
 /* `t u e` with u written as a verb: infix application, assignment, or a postfix elision */
@@ -2589,7 +2642,7 @@ void q_parse_open_feed(q_parse_open_t *st, const char *piece) {
 }
 
 /* q_parse_is_assign — see q_parse.h.  Head is the identity value (`a::1`) or
- * the name-ref `:` / modified-assign `<op>:`, with a name/indexed-name target;
+ * the name-ref `:` / modified-assign `<op>:`, with a name/indexed-name target or a `:` pattern;
  * a `;` statement sequence (char head) asks its last statement. */
 int q_parse_is_assign(const ray_t *cast) {
     ray_t *ast = (ray_t *)cast;   /* read-only walk; ray_data lacks a const view */
@@ -2609,7 +2662,7 @@ int q_parse_is_assign(const ray_t *cast) {
         asg = (l == 1 && nm[0] == ':') || (l >= 2 && nm[l - 1] == ':' && nm[0] != ':');
         ray_release(s);
     }
-    /* every target is silent, an indexed `name[i;…]:v` too — kdb console */
+    /* every target is silent, an indexed `name[i;…]:v` and a `:` pattern too — kdb console (basics/pattern.md:14-20) */
     q_assign_target_t k = asg && q_count(ast) == 3 ? q_parse_assign_target(e[1]) : Q_TARGET_NONE;
-    return k == Q_TARGET_NAME || k == Q_TARGET_INDEX;
+    return k == Q_TARGET_NAME || k == Q_TARGET_INDEX || (k == Q_TARGET_PATTERN && !RAY_IS_NULL(h));
 }
