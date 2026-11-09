@@ -70,10 +70,11 @@
         $[.fs.isdir sub; (string[kid],"/"),/:found; found]}[p;pattern] each key p};
 
 / the directory temporary files belong in: the first of the TMPDIR, TEMP and TMP environment variables that is set and
-/ not empty, else "/tmp".
+/ not empty, else "/tmp". On Windows its separators are "/", the form q's own paths and frames take.
 .fs.gettempdir:{[]
     dirs:getenv each `TMPDIR`TEMP`TMP;
-    first (dirs where 0<count each dirs),enlist "/tmp"};
+    dir:first (dirs where 0<count each dirs),enlist "/tmp";
+    $[.z.o like "w*"; ssr[dir;"\\";"/"]; dir]};
 
 / a new, empty directory under .fs.gettempdir[], its path as a string.
 .fs.mkdtemp:{[]
