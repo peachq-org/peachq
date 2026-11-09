@@ -95,7 +95,8 @@ static ray_t* car_put(ray_t* c, int64_t i, ray_t* child) {
 
 /* lambda carrier: [params symvec, body list, src string, defining `\d` context,
  * declared types i64vec (NULL = undecorated), n name charv, f file sym, l line
- * i64, locals symvec (q_eval_lambda_locals, params excluded)] — 5..7 are the
+ * i64, locals symvec (q_eval_lambda_locals, params excluded), caret table i64vec
+ * (the parser's node -> head-token offset pairs, NULL when none)] — 5..7 are the
  * ref/value.md provenance slots, NULL until stamped: f/l by the parser
  * (q_eval_apply_lambda_origin), n by the first global assignment
  * (q_eval_apply_lambda_name).
@@ -103,10 +104,10 @@ static ray_t* car_put(ray_t* c, int64_t i, ray_t* child) {
  * globals belong to the namespace it was written in, not the one it is called
  * from (ref/value.md: the globals list of `.test.f` reads `` `test`d`e ``).
  * NULL slot = root. */
-enum { LAM_NAME = 5, LAM_FILE = 6, LAM_LINE = 7, LAM_LOCALS = 8, LAM_SLOTS = 9 };
+enum { LAM_NAME = 5, LAM_FILE = 6, LAM_LINE = 7, LAM_LOCALS = 8, LAM_POS = 9, LAM_SLOTS = 10 };
 
 ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
-                               ray_t* src, ray_t* types) {
+                               ray_t* src, ray_t* types, ray_t* pos) {
     ray_t* b = ray_list_new(nbody > 0 ? nbody : 1);
     for (int64_t i = 0; i < nbody; i++)
         b = ray_list_append(b, body[i]);
@@ -122,6 +123,10 @@ ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
     if (types) {
         ray_retain(types);
         s[4] = types;
+    }
+    if (pos) {
+        ray_retain(pos);
+        s[LAM_POS] = pos;
     }
     int64_t ctx = q_env_scope_ctx();
     if (ctx) c = car_put(c, 3, ray_sym(ctx));
@@ -179,6 +184,10 @@ void q_eval_apply_lambda_origin(ray_t* v, int64_t file_sym, int64_t line) {
     if (!f || RAY_IS_ERR(f) || !l || RAY_IS_ERR(l)) { lam_drop(f); lam_drop(l); return; }
     s[LAM_FILE] = f;
     s[LAM_LINE] = l;
+}
+
+ray_t* q_eval_apply_lambda_pos(ray_t* v) {
+    return q_eval_apply_carrier_kind(v) == Q_EVAL_CAR_LAMBDA ? car_slots(v)[LAM_POS] : NULL;
 }
 
 int q_eval_apply_lambda_prov(ray_t* v, ray_t** name, int64_t* file_sym,

@@ -124,9 +124,11 @@ int    q_eval_apply_kfn_parts(ray_t* v, void** fn, int64_t* rank, int64_t* lib_s
 ray_t* q_eval_apply_foreign_new(void* obj);
 int    q_eval_apply_foreign_parts(ray_t* v, void** obj);
 /* types: i64 vector of declared kdb type nums parallel to params (0 = untyped
- * slot), or NULL for an undecorated lambda; checked exactly on entry ('type) */
+ * slot), or NULL for an undecorated lambda; checked exactly on entry ('type).
+ * pos: the parser's caret table (basics/debug.md) — an i64 vector of (tree-node
+ * pointer; head-token offset into src) pairs — or NULL.  All borrowed. */
 ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
-                               ray_t* src, ray_t* types);
+                               ray_t* src, ray_t* types, ray_t* pos);
 ray_t* q_eval_apply_deriv_new(int adv, ray_t* fv, const struct q_op* frow);
 /* An iterator IS a value (103h, basics/datatypes.md); a derived function is
  * that value applied to its ONE operand.  `_iter_id` reads the adverb id
@@ -161,6 +163,7 @@ void q_eval_apply_lambda_origin(ray_t* v, int64_t file_sym, int64_t line);
 void q_eval_apply_lambda_name(ray_t* v, const char* name, int64_t nn);
 int  q_eval_apply_lambda_prov(ray_t* v, ray_t** name, int64_t* file_sym,
                               int64_t* line);
+ray_t* q_eval_apply_lambda_pos(ray_t* v);           /* BORROWED caret table, NULL when none */
 
 /* Carrier read-out for display (q_fmt renders; slot layout stays opaque):
  * BORROWED parts, NULL when v is not that carrier kind — deriv/proj head
