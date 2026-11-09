@@ -161,7 +161,7 @@ int32_t   q_env_frame_floor(int32_t floor);
 /* Debugger frame cursor (basics/debug.md navigation): ROOT the resolving walk at
  * frame `depth`; _OFF = the top frame, _NONE = no frame at all (console [0]).  A
  * frame push saves and clears it, so a call made from the debug prompt resolves
- * in its own scope.  READS only — q_env_local_set stays on the top frame. */
+ * in its own scope.  Local writes follow it too: `y:3` at q)) after `` ` `` sets that frame's y (Q4M §10.2.2). */
 #define Q_ENV_FRAME_VIEW_OFF  (-1)
 #define Q_ENV_FRAME_VIEW_NONE (-2)
 int32_t   q_env_frame_view(int32_t depth);
