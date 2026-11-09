@@ -34,6 +34,9 @@ static _Thread_local const ray_t* g_frozen[DBG_LIVE_MAX + 1];  /* a lambda frame
 static _Thread_local int    g_live_depth;
 static _Thread_local int    g_frame_base;          /* the first live frame a snapshot reports */
 static _Thread_local int    g_cursor;              /* navigated frame, 0 = [0] */
+/* a `'err` typed at q)) leaves the frames from cut_depth up unobserved: kdb destroys that frame (debug.md §Signal) */
+static _Thread_local const ray_t* g_cut_err;
+static _Thread_local int    g_cut_depth;
 
 /* file/line: the loading script's, for a load line; 0 for console input (a q))
  * line typed into a suspended load included), so its lambdas and frame stay bare.
@@ -198,6 +201,7 @@ void q_dbg_statement_end(int tok) {
     g_console_stmt = tok & 3;
     g_trap_depth = tok >> DBG_TRAP_SHIFT;
     stmt_pos_drop(&g_stmt);
+    g_cut_err = NULL;
     int d = --g_depth;
     /* whatever this level took goes with it: its error is freed now, and a later error at the same address
      * must never read as already seen (the shared slot past DBG_NEST_MAX included) */
@@ -214,6 +218,7 @@ int64_t q_dbg_trap_enter(void) { g_trap_depth++; return q_env_ctx(); }
 int     q_dbg_trapped(void) { return g_trap_depth > 0; }
 void q_dbg_trap_exit(int64_t ctx, ray_t* r) {
     g_trap_depth--;
+    g_cut_err = NULL;
     if (r && RAY_IS_ERR(r) && !q_err_is(r, QE_RETURN)) q_env_ctx_set(ctx);
 }
 
@@ -226,6 +231,7 @@ q_dbg_read_fn q_dbg_set_reader(q_dbg_read_fn fn) {
 void q_dbg_reset(void) {
     q_dbg_snapshot_clear();
     g_live_depth = g_frame_base = g_cursor = 0;
+    g_cut_err = NULL;
     memset(g_frozen, 0, sizeof g_frozen);
     for (int i = 0; i < DBG_NEST_MAX; i++) { stmt_pos_drop(&g_stmts[i]); g_stmts[i].node = NULL; g_stmts[i].depth = 0; }
     g_stmt.text[0] = '\0';
@@ -530,6 +536,10 @@ static int dbg_suspendable(ray_t* r) {
 static ray_t* dbg_observe(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
     if (!r || !RAY_IS_ERR(r) || q_err_is(r, QE_RETURN)) return r;
     if (g_snap.err == r) return r;             /* already seen deeper */
+    if (r == g_cut_err) {
+        if (g_live_depth >= g_cut_depth) return r;
+        g_cut_err = NULL;
+    }
     snap_take(r, fv, args, n);
     if (dbg_suspendable(r)) {
         ray_t* rep = dbg_suspend(r);
@@ -539,6 +549,9 @@ static ray_t* dbg_observe(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
             if (!RAY_IS_ERR(rep)) {
                 q_err_drop();
                 q_dbg_snapshot_clear();
+            } else {
+                g_cut_err = rep;
+                g_cut_depth = g_live_depth;
             }
             ray_error_free(r);
             return rep;                        /* resumed value or 'err */
