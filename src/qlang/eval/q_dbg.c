@@ -136,9 +136,11 @@ static int frame_off(ray_t* lam, const dbg_stmt_t* stmt, const ray_t* node) {
     return -1;
 }
 
+/* at q)) with no lambda of the line's own live, the navigated frame's (KDB-X: "It follows you as you navigate") */
 ray_t* q_dbg_self(void) {
-    if (g_live_depth <= 0) return NULL;
-    ray_t* lam = live_lam(g_live_depth);
+    int i = g_sus && g_live_depth == g_frame_base ? g_cursor : g_live_depth;
+    if (i <= (g_sus ? g_sus->base : 0)) return NULL;
+    ray_t* lam = live_lam(i);
     ray_retain(lam);
     return lam;
 }
@@ -379,7 +381,10 @@ int q_dbg_reported(ray_t* err) {
 
 int q_dbg_prompt_frames(void) { return g_dbg_depth > 0 ? g_prompt_frames : 0; }
 
+static _Thread_local unsigned g_errs_shown;   /* error lines printed: a q)) line's error since the banner shows */
+
 static void dbg_err_line(FILE* out, ray_t* err) {
+    g_errs_shown++;
     int64_t tn = 0;
     const char* text = q_err_text(err, &tn);
     fprintf(out, "'%.*s\n", (text && tn) ? (int)tn : 4,
@@ -498,6 +503,7 @@ static ray_t* dbg_suspend(ray_t* err) {
     g_frame_num = sus.num + sus.top - sus.base + 2;
     q_console_flush();
     dbg_banner(err, g_cursor);
+    unsigned shown = g_errs_shown;
     ray_t* out = NULL;
     char line[DBG_LINE_MAX];
     char prompt[Q_SYS_PROMPT_CAP + 16];
@@ -510,10 +516,16 @@ static ray_t* dbg_suspend(ray_t* err) {
         if (n < 0) break;                                 /* EOF: abort */
         if (n == 0) continue;
         if (n == 1 && line[0] == '\\') break;             /* exit one level */
-        if (n == 1 && line[0] == '&') { dbg_banner(err, g_cursor); continue; }
-        if (n == 1 && (line[0] == '`' || line[0] == '.')) {   /* up / down */
+        /* `.` onto the error frame after another error was shown reprints the banner (Q4M §10.2; KDB-X's plain `.`
+         * onto it does not) */
+        if (n == 1 && (line[0] == '`' || line[0] == '.' || line[0] == '&')) {   /* up / down / where */
             if (line[0] == '`') { if (g_cursor > sus.base) g_cursor--; }
-            else if (g_cursor < g_live_depth) g_cursor++;
+            else if (line[0] == '.' && g_cursor < g_live_depth) g_cursor++;
+            if (line[0] == '&' || (line[0] == '.' && g_cursor == g_live_depth && g_errs_shown != shown)) {
+                dbg_banner(err, g_cursor);
+                shown = g_errs_shown;
+                continue;
+            }
             fflush(stdout);
             dbg_show_frame(g_cursor);
             fflush(stderr);
