@@ -1719,8 +1719,10 @@ static P parse_e_body(Parser *p, QCtx ctx) {
             TKind ak = (j < p->t.n) ? p->t.t[j].kind : T_EOF;
             /* kdb-published class: THE GLYPH ITSELF (`$42` -> '$, `+d` -> '+
              * — basics/parsetrees.md "//$ unary form disabled in q") */
-            if (ak == T_NOUN || ak == T_LPAREN || ak == T_LBRACE || ak == T_VERB)
+            if (ak == T_NOUN || ak == T_LPAREN || ak == T_LBRACE || ak == T_VERB) {
+                g_die_at = st->start;
                 die_signal(QE_NAME, &p->src[st->start], 1);
+            }
         }
     }
     P t = parse_term(p, ctx);
@@ -1820,6 +1822,7 @@ static P parse_juxt(P t, P e) {
         if (g != ':') {
             ray_release(s);
             ray_release(e.v);
+            g_die_at = t.at;
             die_signal(QE_NAME, &g, 1);
         }
         t.v = RAY_NULL_OBJ;
