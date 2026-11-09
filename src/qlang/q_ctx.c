@@ -51,6 +51,17 @@ int q_ctx_interrupt_take(int served) {
     if (served) q_eval_interrupt_served();
     return took;
 }
+static volatile sig_atomic_t g_cb_depth;
+
+void q_ctx_callback_begin(void) {
+    if (g_cb_depth++) return;
+    q_ctx_interrupt_take(0);
+}
+
+void q_ctx_callback_end(void) { g_cb_depth--; }
+
+int q_ctx_in_callback(void) { return g_cb_depth > 0; }
+
 /* The console line running now (innermost: a q)) line inside the q) line it suspended), for the line-done hook. */
 typedef struct { const char* s; size_t n; int64_t t0; } ctx_line_t;
 static ctx_line_t g_line;
@@ -813,6 +824,7 @@ ray_t* q_ctx_remote_call(ray_t* fn, ray_t* msg, int kind, char** trace, size_t* 
     int    dbg_prev = q_dbg_statement_begin(src, (size_t)len, mode == 1);
     FILE*  door     = q_console_door(stdout);
     ray_t* r;
+    q_ctx_callback_begin();
     q_ctx_interrupt_take(1);                   /* a request is a client's seam: an idle SIGINT before it is served */
     if (fn) {
         ray_retain(fn);                        /* a body that rebinds its own name frees what we hold */
@@ -825,6 +837,7 @@ ray_t* q_ctx_remote_call(ray_t* fn, ray_t* msg, int kind, char** trace, size_t* 
         r = q_err(QE_STOP);
     }
     if (r && q_err_is(r, QE_STOP)) q_eval_interrupt_served();   /* the client receives it */
+    q_ctx_callback_end();
     q_console_door(door);
     ctx_statement_end();
     if (r && RAY_IS_ERR(r) && !q_dbg_reported(r) && (mode == 2 || kind == Q_CTX_ASYNC)) {

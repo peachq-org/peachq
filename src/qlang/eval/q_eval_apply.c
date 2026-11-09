@@ -13,7 +13,7 @@
 
 #include "qlang/q_count.h"
 #include "qlang/eval/q_eval.h"
-#include "qlang/q_ctx.h"          /* q_ctx_interrupt_take — a callback's entry drops a stale SIGINT */
+#include "qlang/q_ctx.h"          /* q_ctx_callback_begin — a callback's entry: no stale SIGINT, Ctrl-C live */
 #include "qlang/eval/q_dbg.h"  /* frame list + the error seams (basics/debug.md) */
 #include "qlang/q_prim.h"
 #include "qlang/parse/q_parse.h"  /* q_parse_lang_tree — the char-atom language arm */
@@ -135,7 +135,7 @@ ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
     return car_put(c, LAM_LOCALS, q_eval_lambda_locals(params, b));
 }
 
-static void lam_drop(ray_t* x) {
+static void owned_drop(ray_t* x) {
     if (!x) return;
     if (RAY_IS_ERR(x)) ray_error_free(x); else ray_release(x);
 }
@@ -144,7 +144,7 @@ static void lam_stamp(ray_t* v, const char* name, int64_t nn) {
     ray_t** s = car_slots(v);
     if (s[LAM_NAME]) return;                    /* the FIRST assignment wins */
     ray_t* nm = ray_charv(name, nn);
-    if (!nm || RAY_IS_ERR(nm)) { lam_drop(nm); return; }
+    if (!nm || RAY_IS_ERR(nm)) { owned_drop(nm); return; }
     s[LAM_NAME] = nm;
 }
 
@@ -182,7 +182,7 @@ void q_eval_apply_lambda_origin(ray_t* v, int64_t file_sym, int64_t line) {
     if (s[LAM_FILE]) return;
     ray_t* f = ray_sym(file_sym);
     ray_t* l = ray_i64(line);
-    if (!f || RAY_IS_ERR(f) || !l || RAY_IS_ERR(l)) { lam_drop(f); lam_drop(l); return; }
+    if (!f || RAY_IS_ERR(f) || !l || RAY_IS_ERR(l)) { owned_drop(f); owned_drop(l); return; }
     s[LAM_FILE] = f;
     s[LAM_LINE] = l;
 }
@@ -540,10 +540,8 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
         q_eval_apply_store_elem(vec, 0, e0);
         ray_release(e0);
         for (int64_t i = 1; i < len; i++) {
-            if ((i & 0xFFF) == 0 && q_eval_interrupt_take()) {
-                ray_release(vec);
-                return q_err(QE_STOP);
-            }
+            ray_t* stop = (i & 0xFFF) == 0 && q_eval_interrupt_take() ? q_dbg_stop() : NULL;
+            if (stop) { ray_release(vec); return stop; }
             ray_t* e = q_index_elem_at(arg, i);
             ray_t* r = RAY_IS_ERR(e) ? e : fn(e);
             if (r != e) ray_release(e);
@@ -709,10 +707,8 @@ static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r
         q_eval_apply_store_elem(vec, 0, e0);
         ray_release(e0);
         for (int64_t i = 1; i < len; i++) {
-            if ((i & 0xFFF) == 0 && q_eval_interrupt_take()) {
-                ray_release(vec);
-                return q_err(QE_STOP);
-            }
+            ray_t* stop = (i & 0xFFF) == 0 && q_eval_interrupt_take() ? q_dbg_stop() : NULL;
+            if (stop) { ray_release(vec); return stop; }
             ray_t* a = lc ? q_index_elem_at(l, i) : l;
             ray_t* b = rc ? q_index_elem_at(r, i) : r;
             ray_t* e = (RAY_IS_ERR(a) || RAY_IS_ERR(b)) ? q_err(QE_TYPE)
@@ -1246,6 +1242,7 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
     }
     /* barrier frame: strictly-local resolution (function-notation.md) —
      * the body sees its params/locals and globals, never a caller frame */
+    if (RAY_UNLIKELY(q_eval_stack_low())) return q_err(QE_LIMIT);
     if (q_env_frame_push(1) != RAY_OK) return q_err(QE_STACK);
     for (int64_t i = 0; i < n; i++) {
         ray_t* p = q_index_elem_at(params, i);          /* sym atom */
@@ -1651,7 +1648,10 @@ static int hole_args(ray_t* fv, ray_t** args, int64_t n, ray_t** out) {
 
 static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     if (!fv || RAY_IS_ERR(fv)) return q_err(QE_TYPE);
-    if (q_eval_interrupt_take()) return q_err(QE_STOP);
+    if (q_eval_interrupt_take()) {
+        ray_t* stop = q_dbg_stop();
+        if (stop) return stop;
+    }
     if (n < 0 || n > APPLY_MAX_ARGS) return q_err(QE_RANK);
     ray_t* elided[APPLY_MAX_ARGS];
     if (hole_args(fv, args, n, elided)) args = elided;
@@ -1826,15 +1826,29 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
  * fusion) flip; the boundary seams then catch lazy at each observable edge. */
 /* the ONE dispatch exit: the deepest apply to produce an error snapshots the
  * live frames here (and, under `\e 1`, suspends into the debugger) */
+/* a polling kernel — a builtin, never a lambda or a derived function, whose body might have had effects — that saw
+ * the signal bails with its own 'stop or the base's 'stop/'cancel and keeps no partial state */
+static int abandoned(ray_t* fv, ray_t* r) {
+    if (!q_eval_apply_is_fnval(fv) || !RAY_IS_ERR(r)) return 0;
+    const char* c = q_err_class(r);
+    return q_err_is(r, QE_STOP) || (c && !strcmp(c, "cancel")) || (c && !strcmp(c, "stop") && !q_err_is(r, QE_SIGNAL));
+}
+
+/* A kernel that ran through the signal stops here, while its frame is live: resuming keeps what it answered, or
+ * re-runs the application a polling kernel abandoned (its arguments are intact). */
 ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
-    ray_t* r = q_eval_apply_concrete(apply_inner(fv, row, args, n));
-    if (q_splay_fault_pending() && r && !RAY_IS_ERR(r)) {   /* a torn zip block under this apply's read */
-        ray_release(r);
-        r = q_err(QE_CORRUPT);
-    }
-    if (q_eval_interrupt_take()) {   /* a kernel that ran through the signal: 'stop here, while its frame is live */
-        if (r) { if (RAY_IS_ERR(r)) ray_error_free(r); else ray_release(r); }
-        r = q_err(QE_STOP);
+    ray_t* r;
+    for (;;) {
+        r = q_eval_apply_concrete(apply_inner(fv, row, args, n));
+        if (q_splay_fault_pending() && r && !RAY_IS_ERR(r)) {   /* a torn zip block under this apply's read */
+            ray_release(r);
+            r = q_err(QE_CORRUPT);
+        }
+        if (!q_eval_interrupt_take()) break;
+        ray_t* stop = q_dbg_stop();
+        if (!stop && !(r && abandoned(fv, r))) break;
+        owned_drop(r);
+        if (stop) { r = stop; break; }
     }
     if (r && RAY_IS_ERR(r)) return q_dbg_filter(r, fv, args, n);
     return r;
@@ -1868,13 +1882,12 @@ static ray_t* apply_valence_sibling(ray_t* head, int64_t n, const q_op_t** row) 
     return head;
 }
 
-ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n) {
+static ray_t* apply_value(ray_t* head, ray_t** args, int64_t n) {
     if (!head || RAY_IS_ERR(head)) return q_err(QE_TYPE);
-    if (!q_eval_active()) q_ctx_interrupt_take(0);   /* an event-loop callback (a hook, a timer) starts with none pending */
     if (q_view_is(head)) {                    /* applying a view applies its value */
         ray_t* dv = q_view_deref_borrowed(head);
         if (RAY_IS_ERR(dv)) return dv;
-        ray_t* r = q_eval_apply_value(dv, args, n);
+        ray_t* r = apply_value(dv, args, n);
         ray_release(dv);
         return r;
     }
@@ -1884,6 +1897,15 @@ ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n) {
         return q_eval_apply(head, row, args, n);
     }
     return noun_index(head, args, n);
+}
+
+/* nothing in the walker: an event-loop callback (a hook, a timer, a client's handler) — it runs in the callback window */
+ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n) {
+    if (q_eval_active()) return apply_value(head, args, n);
+    q_ctx_callback_begin();
+    ray_t* r = apply_value(head, args, n);
+    q_ctx_callback_end();
+    return r;
 }
 
 /* A projection of head over args (C NULL = hole) CONSTRUCTED, never applied — the codec's seam: a decoder builds
@@ -1904,7 +1926,6 @@ ray_t* q_eval_apply_proj_value(ray_t* head, ray_t** args, int64_t n) {
 }
 
 ray_t* q_eval_apply_call_sym(int64_t sym, ray_t** args, int64_t argc) {
-    if (!q_eval_active()) q_ctx_interrupt_take(0);
     ray_t* f = q_env_resolve(sym);
     if (!f || RAY_IS_ERR(f)) {
         if (f) ray_error_free(f);
