@@ -28,6 +28,10 @@ void q_dbg_statement_end(int tok);
 /* the current statement's file + line when it is a loaded script's (the origin its lambdas and
  * its frame-[0] line report); 0 for console input, line untouched */
 int64_t q_dbg_statement_origin(int64_t* line);
+/* the statement's caret table (q_parse_at), CONSUMED: frame [0]'s caret resolves against it until the statement
+ * ends.  Hands back the table it replaces (OWNED, NULL on a fresh level): a text run INSIDE a statement (`value`)
+ * restores it when done, so the statement's own caret survives the nested text */
+ray_t* q_dbg_statement_pos(ray_t* pos);
 
 /* Inside @[;;]/.[;;]/.Q.trp protection: error-trap mode 0, never suspend.  enter hands back the session `\d`;
  * exit restores it when r is a caught error (a `:x` return is not one) — owner ruling 2026-09-17. */
@@ -54,7 +58,7 @@ int  q_dbg_reported(ray_t* err);
 /* Apply-frame depth a `q))` statement runs at (0 = not suspended): those
  * frames are parked BENEATH the prompt, not evaluating it. */
 int  q_dbg_prompt_frames(void);
-/* mode-2 uncaught display: 'text + numbered frames (no carets yet). */
+/* mode-2 uncaught display: 'text + numbered frames, each with its caret line. */
 void q_dbg_print_trace(FILE* out, ray_t* err);
 void q_dbg_snapshot_clear(void);     /* a trap consumed the error */
 
