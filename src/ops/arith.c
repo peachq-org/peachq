@@ -78,6 +78,18 @@ static ray_t* duration_pair(ray_t* a, ray_t* b, int sub) {
     }
 }
 
+/* ref/add.md:82-104, ref/subtract.md:74-95, the f row and column: a float beside an int-backed temporal answers a
+ * float of the temporal's count +|- the float, either order, except that a date answers datetime
+ * (basics/precision.md:264-271).  A null on either side is the result's null (owner ruling 2026-11-09). */
+static int float_beside_temporal(ray_t* a, ray_t* b) {
+    return (a->type == -RAY_F64 && is_temporal(b)) || (is_temporal(a) && b->type == -RAY_F64);
+}
+static ray_t* addsub_float_temporal(ray_t* a, ray_t* b, int sub) {
+    int8_t rt = a->type == -RAY_DATE || b->type == -RAY_DATE ? -RAY_DATETIME : -RAY_F64;
+    if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(rt);
+    return float_lane_atom(rt, sub ? as_f64(a) - as_f64(b) : as_f64(a) + as_f64(b));
+}
+
 ray_t* ray_add_fn(ray_t* a, ray_t* b) {
     if ((a && RAY_IS_PARTED(a->type)) || (b && RAY_IS_PARTED(b->type)))
         return atomic_map_binary_op(ray_add_fn, OP_ADD, a, b);
@@ -97,20 +109,10 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
         if (RAY_ATOM_IS_NULL(a)) return ray_typed_null(-RAY_DATETIME);
         return ray_datetime(as_f64(a) + b->f64);
     }
-    /* date + float -> DATETIME (basics/precision.md:264-271: 2000.01.02 +
-     * sum 1000#1%86400 is 2000.01.02T00:16:40.000), both orders.  Must sit
-     * before the float+temporal reject below. */
-    if (a->type == -RAY_DATE && b->type == -RAY_F64) {
-        if (RAY_ATOM_IS_NULL(a)) return ray_typed_null(-RAY_DATETIME);
-        return ray_datetime((double)a->i32 + b->f64);
-    }
-    if (a->type == -RAY_F64 && b->type == -RAY_DATE) {
-        if (RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_DATETIME);
-        return ray_datetime(a->f64 + (double)b->i32);
-    }
+    if (float_beside_temporal(a, b)) return addsub_float_temporal(a, b, 0);
 
-    /* Temporal + integer arithmetic (only int types, not float) */
-    if (is_temporal(a) && is_numeric(b) && b->type != -RAY_F64) {
+    /* temporal + an int-family or real offset keeps the temporal (a float answered above) */
+    if (is_temporal(a) && is_numeric(b)) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))
             return ray_typed_null(a->type);
 
@@ -123,7 +125,7 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
         if (a->type == -RAY_TIMESPAN)  return ray_timespan(wrap_add64(a->i64, v));
         if (a->type == -RAY_TIMESTAMP) return ray_timestamp(wrap_add64(a->i64, v));
     }
-    if (is_numeric(a) && a->type != -RAY_F64 && is_temporal(b)) {
+    if (is_numeric(a) && is_temporal(b)) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))
             return ray_typed_null(b->type);
 
@@ -136,17 +138,6 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
         if (b->type == -RAY_TIMESPAN)  return ray_timespan(wrap_add64(b->i64, v));
         if (b->type == -RAY_TIMESTAMP) return ray_timestamp(wrap_add64(b->i64, v));
     }
-    /* Reject float + temporal */
-    if ((a->type == -RAY_F64 && is_temporal(b)) || (is_temporal(a) && b->type == -RAY_F64))
-        return ray_error("type", "add: temporal arithmetic requires integer offsets, got %s and %s",
-                         ray_type_name(a->type), ray_type_name(b->type));
-    /* Reject null_numeric + temporal (for null floats etc) */
-    if (is_numeric(a) && RAY_ATOM_IS_NULL(a) && is_temporal(b))
-        return ray_error("type", "add: unsupported temporal operand combination, got %s and %s",
-                         ray_type_name(a->type), ray_type_name(b->type));
-    if (is_temporal(a) && is_numeric(b) && RAY_ATOM_IS_NULL(b))
-        return ray_error("type", "add: unsupported temporal operand combination, got %s and %s",
-                         ray_type_name(a->type), ray_type_name(b->type));
     /* DATE + TIME → TIMESTAMP */
     if (a->type == -RAY_DATE && b->type == -RAY_TIME) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESTAMP);
@@ -225,6 +216,7 @@ ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
         return ray_datetime(a->f64 - as_f64(b));
     }
 
+    if (float_beside_temporal(a, b)) return addsub_float_temporal(a, b, 1);
     /* Temporal - int null propagation (both operands) */
     if (is_temporal(a) && is_numeric(b)) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))
@@ -307,8 +299,9 @@ ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(-RAY_TIMESTAMP);
         return ray_timestamp(wrap_sub64(temporal_as_ns(a), temporal_as_ns(b)));
     }
-    /* int - absolute keeps the absolute (ref/subtract.md rows b..e, cols p m d z); a float row is D672a's */
-    if (is_numeric(a) && a->type != -RAY_F64) {
+    /* a number - absolute keeps the absolute (ref/subtract.md rows b..f, cols p m d z; a float before p m d
+     * answered above) */
+    if (is_numeric(a)) {
         if (is_absolute_temporal(b)) return make_typed_int(b->type, wrap_sub64(as_i64(a), as_i64(b)));
         if (b->type == -RAY_DATETIME)
             return RAY_ATOM_IS_NULL(a) ? ray_typed_null(-RAY_DATETIME) : ray_datetime(as_f64(a) - b->f64);
