@@ -49,7 +49,7 @@ static ray_t* parse_src(const char* src, int64_t n) {
     if (!ast) ast = q_err(QE_PARSE);
     /* handed out as DATA: empty statements become () (kdb parse ";") */
     if (!RAY_IS_ERR(ast)) q_ast_fill_empty_stmts(ast);
-    else q_dbg_parse_fail(ast, src, n, pos);
+    else q_dbg_parse_fail(ast, src, n, pos, 1);
     if (pos) ray_release(pos);
     return ast;
 }
