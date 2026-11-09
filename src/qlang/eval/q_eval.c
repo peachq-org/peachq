@@ -742,6 +742,7 @@ ray_t* q_eval_value_wrap(ray_t* x) {
         int code = q_registry_kdb_op_of(x, NULL);
         if (code >= 0) return ray_i64(code);
     }
+    if (x->type < 0) return q_err(QE_TYPE);   /* any other atom: SO 64109959 "'value 42' results in a type error" */
     return q_err(QE_NYI);       /* enumeration/view/bare-iterator: deferred */
 }
 
