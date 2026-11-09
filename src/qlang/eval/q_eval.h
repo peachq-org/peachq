@@ -15,10 +15,8 @@ struct q_op;
 /* Walker over the RAW q_parse tree; returns OWNED (RAY_ERROR on failure). */
 ray_t* q_eval(ray_t* node);
 
-/* The pending interrupt (SIGINT / Ctrl-C → `'stop`, basics/errors.md).  post: the signal handler's side,
- * async-signal-safe, returns how many are unserviced (the front end warns at 2, exits at 3).  take: the consumer's
- * side — 1 ONCE per interrupt, at the first check to see it (the walker, the apply exit, a loop iteration, the
- * statement seam): the `'stop` it raises then travels as any error does, so a live lambda frame suspends on it. */
+/* the pending interrupt (SIGINT → `'stop`): post is the handler's, async-signal-safe, answers the unserviced count;
+ * take consumes whatever is pending and answers 1 if there was any — the caller raises `'stop` (console-architecture) */
 int q_eval_interrupt_post(void);
 int q_eval_interrupt_take(void);
 
