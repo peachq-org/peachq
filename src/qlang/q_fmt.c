@@ -1521,6 +1521,8 @@ static void fmt_comp_part(ray_t* p) {
     if (!q_eval_apply_is_fnval(p) || !fmt_fn_spelling(p, 0)) fmt_render(p);
 }
 
+static void fmt_bound_arg(ray_t* a);   /* fwd — over fmt_grow, below */
+
 /* RAY_QFN carrier display over the apply module's read-out accessors (the
  * slot layout stays opaque): lambda = verbatim source, iterator/derived =
  * head + adverb glyph, composition = its parts run together, projection = verbatim head +
@@ -1591,7 +1593,7 @@ static void carrier_fmt(ray_t* v) {
     for (int64_t i = 0; i < slots; i++) {
         if (i) qe_putc(';');
         ray_t* a = q_eval_apply_proj_arg(v, i);
-        if (a && !Q_IS_HOLE(a)) fmt_render(a);
+        if (a && !Q_IS_HOLE(a)) fmt_bound_arg(a);
     }
     qe_putc(']');
 }
@@ -2166,6 +2168,15 @@ ray_t* q_fmt_krepr_charv(ray_t* val) {
     ray_t* r = ray_charv(buf, (int64_t)len);
     free(buf);
     return r;
+}
+
+/* A projection's bound argument is an item, one line of k-repr (`{x}[(1;`a)]`), grown like `-3!`: no per-item cap. */
+static void fmt_bound_arg(ray_t* a) {
+    size_t len;
+    char*  buf = a->type == RAY_QFN ? NULL : fmt_grow(fmt_krepr_into, a, &len);
+    if (!buf) { fmt_list_elem(a); return; }
+    qe_putn(buf, len);
+    free(buf);
 }
 
 static RAY_TLS int32_t g_lines_rows, g_lines_cols;   /* fmt_grow passes no context: q_fmt_lines' clip size */
