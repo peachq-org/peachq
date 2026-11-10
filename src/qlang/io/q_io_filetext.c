@@ -27,7 +27,7 @@
 
 /* ---- Save Text: `:path 0: strings -------------------------------------- */
 static ray_t* ft_save_text(ray_t* fsym, ray_t* y) {
-    ray_t* path = q_io_file_path(fsym);
+    ray_t* path = q_io_path_operand(fsym);
     if (!path) return q_err(QE_TYPE);
     if (!y || !(y->type == RAY_LIST || y->type == RAY_STR)) {
         ray_release(path);
