@@ -1524,7 +1524,10 @@ static int64_t rank_of(ray_t* fv) {
             if (slot_open(car_slots(fv)[2 + i])) holes++;
         return holes;
     }
-    case Q_EVAL_CAR_COMP: return rank_of(car_slots(fv)[1]);
+    case Q_EVAL_CAR_COMP: {                 /* basics/glossary.md "Rank": a vector has rank 1 */
+        ray_t* inner = car_slots(fv)[1];
+        return ray_is_vec(inner) ? 1 : rank_of(inner);
+    }
     case Q_EVAL_CAR_ITER: return 1;  /* exactly one operand */
     case Q_EVAL_CAR_KFN: return car_slots(fv)[KFN_RANK]->i64;   /* `2:` declared it */
     case Q_EVAL_CAR_DERIV: {
@@ -1577,7 +1580,8 @@ static ray_t* apply_valence_sibling(ray_t* head, int64_t n, const q_op_t** row);
 
 static ray_t* compose_apply(ray_t** args, int64_t n) {
     if (n < 1) return q_err(QE_RANK);
-    if (!q_eval_apply_is_fn(args[n - 1])) return q_err(QE_TYPE);
+    /* the innermost value may be a list or dict, an applicable value of rank 1 (ref/compose.md:21-23) */
+    if (!q_eval_apply_is_fn(args[n - 1]) && !(n >= 2 && indexable(args[n - 1]))) return q_err(QE_TYPE);
     if (n == 1)
         return q_eval_apply_deriv_new(0, args[0],
                                       q_eval_apply_is_fnval(args[0])
@@ -1779,9 +1783,11 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
     case Q_EVAL_CAR_PROJ: return proj_call(fv, args, n);
     case Q_EVAL_CAR_DERIV: {
         ray_t** c = car_slots(fv);
-        /* ternary-and-up has no unary reading: a short Over or Scan projects (ref/accumulators.md "Ternary values") */
-        int64_t rank = c[2]->i64 == 1 || c[2]->i64 == 2 ? rank_of(fv) : -1;
-        if (rank >= 3 && n < rank) return q_eval_apply_proj_new(fv, NULL, args, n, rank);
+        /* a derived function has its map's rank (ref/maps.md), and any value applied short projects
+         * (basics/application.md); an ambivalent Over/Scan/Each Prior reads -1 and keeps its unary form, and a
+         * data operand is no map (`" "/:` is sv, `0x0\:` vs) */
+        int64_t rank = q_eval_apply_is_fn(c[0]) ? rank_of(fv) : -1;
+        if (rank >= 2 && n < rank) return q_eval_apply_proj_new(fv, NULL, args, n, rank);
         return q_adverb_apply((int)c[2]->i64, c[0], row_unbox(c[1]),
                                    args, n);
     }
