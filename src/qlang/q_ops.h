@@ -191,6 +191,12 @@ ray_t* q_ops_identity(const char* spelling, q_id_use_t use);
 /* 1 when the identity is the OTHER operand's own null, so `null op y` is y. */
 int q_ops_identity_is_null(const char* spelling);
 
+/* 1 when a dict key-union's missing cells are the other side's typed nulls instead of a fill identity. */
+int q_ops_fill_is_null(const char* spelling);
+
+/* 1 when a dict key-union runs x op y as y op' x, so y's keys come first (x>y is y<x). */
+int q_ops_pair_flips(const char* spelling);
+
 /* The row a QK_ALIAS row is a second spelling of, or NULL when `row` is not an
  * alias.  An alias declares no metadata of its own — every dispatch and
  * introspection column is the target's — so both the registry builder and

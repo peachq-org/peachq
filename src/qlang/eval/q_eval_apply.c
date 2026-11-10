@@ -806,12 +806,89 @@ static ray_t* gather(ray_t* v, const int64_t* p, int64_t n) {
     return r;
 }
 
+/* The values of keys on one side only (g, consumed): a verb whose fill is null meets as many of the other side's
+ * nulls (its values read past their end, so a table gives null rows of its own columns), another meets its fill
+ * identity where it has one, else g is kept. */
+static ray_t* dict_pair_unmatched(q_eval_zip_fn f, void* ctx, ray_t* id, int nulls, ray_t* other, ray_t* g,
+                                  int g_left) {
+    if (RAY_IS_ERR(g)) return g;
+    ray_t* fill = id;
+    if (nulls) {
+        ray_t* ta[2] = { ray_i64(q_count(g)), ray_i64(q_count(other)) };
+        ray_t* ix = apply_named("#", ta, 2);
+        ray_release(ta[0]);
+        ray_release(ta[1]);
+        fill = RAY_IS_ERR(ix) ? ix : q_index_at(other, &ix, 1);
+        if (!RAY_IS_ERR(ix)) ray_release(ix);
+        if (RAY_IS_ERR(fill)) { ray_release(g); return fill; }
+    }
+    ray_t* r = !fill ? g : g_left ? f(ctx, g, fill) : f(ctx, fill, g);
+    if (fill && fill != id && r != fill) ray_release(fill);
+    if (r != g) ray_release(g);
+    return r;
+}
+
+typedef struct { q_eval_zip_fn f; void* ctx; } swap_ctx;
+
+static ray_t* swap_zip(void* vctx, ray_t* y, ray_t* x) { return ((swap_ctx*)vctx)->f(((swap_ctx*)vctx)->ctx, x, y); }
+
+static ray_t* dict_pair(const q_op_t* row, ray_t* x, ray_t* y, q_eval_zip_fn f, void* ctx, int nulls);
+
+/* keyed table d with the value columns only `other` has added as typed null columns, its own kept as they are:
+ * `key[d]!value[d] uj 0#(cols[o] except cols value d)#o` for o the value of `other` (owned) */
+static ray_t* cols_union(ray_t* d, ray_t* other) {
+    ray_t* v = ray_dict_vals(d);
+    ray_t* o = ray_dict_vals(other);
+    ray_t* ca[2] = { q_cols_fn(o), q_cols_fn(v) };
+    ray_t* miss = RAY_IS_ERR(ca[0]) ? ca[0] : RAY_IS_ERR(ca[1]) ? ca[1] : apply_named("except", ca, 2);
+    for (int i = 0; i < 2; i++) if (ca[i] != miss && !RAY_IS_ERR(ca[i])) ray_release(ca[i]);
+    if (RAY_IS_ERR(miss) || q_count(miss) == 0) {
+        if (RAY_IS_ERR(miss)) return miss;
+        ray_release(miss);
+        ray_retain(d);
+        return d;
+    }
+    ray_t* sa[2] = { miss, o };
+    ray_t* sub = apply_named("#", sa, 2);
+    ray_release(miss);
+    if (RAY_IS_ERR(sub)) return sub;
+    ray_t* zero = ray_i64(0);
+    ray_t* ta[2] = { zero, sub };
+    ray_t* empty = apply_named("#", ta, 2);
+    ray_release(zero);
+    ray_release(sub);
+    if (RAY_IS_ERR(empty)) return empty;
+    ray_t* ua[2] = { v, empty };
+    ray_t* u = apply_named("uj", ua, 2);
+    ray_release(empty);
+    if (RAY_IS_ERR(u)) return u;
+    ray_retain(ray_dict_keys(d));
+    return ray_dict_new(ray_dict_keys(d), u);
+}
+
 /* THE dict-pair law (owner ruling 2026-09-23): the keys align through the index home's one Find
  * (q_index_dict_align) and the verb runs ONCE per aligned group — the shared keys' two gathers, an x-only group
  * against the row's fill identity where it has one (`d1-d2` is 0-y, ref/subtract.md) else kept, a y-only group
- * likewise else appended (ref/divide.md) — then the x half goes back to x's key order by one gather.  `f` sees
+ * likewise else appended (ref/divide.md), a comparison's against the other side's nulls — then the x half goes back
+ * to x's key order by one gather.  A flipping verb runs with y's keys first (x>y is y<x).  `f` sees
  * collections, so a keyed pair's gathered ROWS meet the table law inside it: a keyed table is a dict here. */
 ray_t* q_eval_apply_dict_pair(const q_op_t* row, ray_t* x, ray_t* y, q_eval_zip_fn f, void* ctx) {
+    int nulls = row && q_ops_fill_is_null(row->name);
+    ray_t* cx = nulls && ray_dict_vals(x)->type == RAY_TABLE && ray_dict_vals(y)->type == RAY_TABLE
+                    ? cols_union(x, y) : NULL;
+    ray_t* cy = cx && !RAY_IS_ERR(cx) ? cols_union(y, x) : NULL;
+    if (cx && RAY_IS_ERR(cx)) return cx;
+    if (cy && RAY_IS_ERR(cy)) { ray_release(cx); return cy; }
+    ray_t* ux = cx ? cx : x;
+    ray_t* uy = cy ? cy : y;
+    ray_t* r = row && q_ops_pair_flips(row->name) ? dict_pair(row, uy, ux, swap_zip, &(swap_ctx){ f, ctx }, nulls)
+                                                   : dict_pair(row, ux, uy, f, ctx, nulls);
+    if (cx) ray_release(cx);
+    if (cy) ray_release(cy);
+    return r;
+}
+
+static ray_t* dict_pair(const q_op_t* row, ray_t* x, ray_t* y, q_eval_zip_fn f, void* ctx, int nulls) {
     ray_t* xk = ray_dict_keys(x); ray_t* xv = ray_dict_vals(x);
     ray_t* yk = ray_dict_keys(y); ray_t* yv = ray_dict_vals(y);
     ray_t* al = q_index_dict_align(x, yk);
@@ -836,16 +913,12 @@ ray_t* q_eval_apply_dict_pair(const q_op_t* row, ray_t* x, ray_t* y, q_eval_zip_
         if (gy && part != gy) ray_release(gy);
     }
     if (!same && nh < nx && (!part || !RAY_IS_ERR(part))) {
-        ray_t* gx = gather(xv, xo, nx - nh);
-        ray_t* g = id && !RAY_IS_ERR(gx) ? f(ctx, gx, id) : gx;
-        if (g != gx) ray_release(gx);
+        ray_t* g = dict_pair_unmatched(f, ctx, id, nulls, yv, gather(xv, xo, nx - nh), 1);
         part = part ? join_owned(part, g) : g;
         if (nh > 0 && !RAY_IS_ERR(part)) { ray_t* o = gather(part, perm, nx); ray_release(part); part = o; }
     }
     if (n > nx && (!part || !RAY_IS_ERR(part))) {
-        ray_t* gy = gather(yv, iy + nx, n - nx);
-        ray_t* g = id && !RAY_IS_ERR(gy) ? f(ctx, id, gy) : gy;
-        if (g != gy) ray_release(gy);
+        ray_t* g = dict_pair_unmatched(f, ctx, id, nulls, xv, gather(yv, iy + nx, n - nx), 0);
         part = part ? join_owned(part, g) : g;
     }
     ray_t* keys = xk;
@@ -874,11 +947,12 @@ static ray_t* atomic2_zip(void* vctx, ray_t* x, ray_t* y) {
 }
 
 /* two tables pair column by column: the dict-pair law over their column dicts, flipped back (`t+t`, owner ruling
- * 2026-09-23); each side's dict is owned here and released once the pair has answered */
+ * 2026-09-23), without the comparisons' null fill and flip, which belong to keyed pairs; each side's dict is owned
+ * here and released once the pair has answered */
 static ray_t* table_pair(const q_op_t* row, ray_t* x, ray_t* y, q_eval_zip_fn f, void* ctx) {
     ray_t* cx = flip_of(x);
     ray_t* cy = RAY_IS_ERR(cx) ? NULL : flip_of(y);
-    ray_t* r = RAY_IS_ERR(cx) ? cx : RAY_IS_ERR(cy) ? cy : q_eval_apply_dict_pair(row, cx, cy, f, ctx);
+    ray_t* r = RAY_IS_ERR(cx) ? cx : RAY_IS_ERR(cy) ? cy : dict_pair(row, cx, cy, f, ctx, 0);
     if (r != cx) ray_release(cx);
     if (cy && r != cy) ray_release(cy);
     return r;
