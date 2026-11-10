@@ -11,8 +11,7 @@
  * so its classifier receives WHOLE args and each overload owns its own
  * boundary.  Unlike q_bang.c this file is NOT pure value semantics: q's name
  * and namespace overloads are DEFINED over the name environment
- * (ref/key.md:119), so the sym arms read it through q_env.h.  Which symbol
- * marks a namespace dictionary stays q_env's to know (q_env_marker_sym).
+ * (ref/key.md:119), so the sym arms read it through q_env.h.
  *
  * The foreign-key and enumerator arms (ref/key.md:148) are the enumerations
  * divergence — WON'T DO, see ARCHITECTURE.md. */
