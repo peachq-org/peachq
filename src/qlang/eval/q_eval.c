@@ -142,7 +142,7 @@ void q_eval_depth_restore(q_eval_reserve_t r) {
  * hand the next runtime stale ids and control forms would degrade to 'name. */
 typedef struct {
     int64_t adv[6];
-    int64_t semi, colon, dollar, kif, kwhile, kdo;
+    int64_t semi, dollar, kif, kwhile, kdo;
     int     ready;
 } eval_syms_t;
 static eval_syms_t g_syms;
@@ -153,7 +153,6 @@ static const eval_syms_t* syms(void) {
             g_syms.adv[i] = ray_sym_intern_runtime(ADVERB_NAMES[i],
                                                    strlen(ADVERB_NAMES[i]));
         g_syms.semi   = ray_sym_intern_runtime(";", 1);
-        g_syms.colon  = ray_sym_intern_runtime(":", 1);
         g_syms.dollar = ray_sym_intern_runtime("$", 1);
         g_syms.kif    = ray_sym_intern_runtime("if", 2);
         g_syms.kwhile = ray_sym_intern_runtime("while", 5);
@@ -256,17 +255,6 @@ static ray_t* name_value(ray_t* sym) {
     ray_t* v = resolve(sym);
     if (!v) v = q_eval_dot_cast(sym->i64);
     return v ? v : name_error(sym->i64);
-}
-
-/* `<op>:` head -> the op's dyadic registry value (BORROWED) + row; NULL when h is not one */
-static ray_t* modassign_op(ray_t* h, const q_op_t** row) {
-    ray_t* s = ray_sym_str(h->i64);                       /* borrowed */
-    if (!s) return NULL;
-    const char* nm = ray_str_ptr(s);
-    size_t l = ray_str_len(s);
-    if (l < 2 || nm[l - 1] != ':' || nm[0] == ':') return NULL;
-    ray_t* opv = q_registry_lookup_row(ray_sym_intern_runtime(nm, l - 1), Q_DYADIC, row);
-    return opv && q_eval_apply_is_fn(opv) ? opv : NULL;
 }
 
 static ray_t* operand_value(ray_t* F, const q_op_t** row_out) {
@@ -494,12 +482,7 @@ static void sym_add(ray_t** v, int64_t id, int* oom) {
 
 int q_eval_ctl_sym(int64_t id) {
     const eval_syms_t* S = syms();
-    return id == S->semi || id == S->colon ||
-           id == S->kif || id == S->kwhile || id == S->kdo;
-}
-
-int q_eval_is_colon(const ray_t* x) {
-    return x && x->type == -RAY_SYM && x->i64 == syms()->colon;
+    return id == S->semi || id == S->kif || id == S->kwhile || id == S->kdo;
 }
 
 int q_eval_fn_value(ray_t* x) {
@@ -533,12 +516,12 @@ static void lam_scan(ray_t* n, lam_scan_t* s) {
     int64_t k = q_count(n);
     ray_t** e = (ray_t**)ray_data(n);
     if (k == 0) return;
-    const eval_syms_t* S = syms();
-    if (k == 3 && (RAY_IS_NULL(e[0]) || (nameref(e[0]) && e[0]->i64 == S->colon))) {
+    q_assign_head_t asg = k == 3 ? q_parse_assign_head(e[0], NULL, NULL) : Q_HEAD_NONE;
+    if (asg == Q_HEAD_ASSIGN || asg == Q_HEAD_GLOBAL) {
         if (nameref(e[1])) {
-            int global = RAY_IS_NULL(e[0]) || sym_compound(e[1]->i64);
+            int global = asg == Q_HEAD_GLOBAL || sym_compound(e[1]->i64);
             sym_add(global ? &s->glb : &s->loc, e[1]->i64, &s->oom);
-        } else if (!RAY_IS_NULL(e[0]) && q_pattern_supported(e[1])) {
+        } else if (asg == Q_HEAD_ASSIGN && q_pattern_supported(e[1])) {
             q_pattern_names(e[1], lam_scan_local, s);
         } else {
             lam_scan(e[1], s);
@@ -546,8 +529,7 @@ static void lam_scan(ray_t* n, lam_scan_t* s) {
         lam_scan(e[2], s);
         return;
     }
-    /* `x op:y` READS x (only `x:y` declares a local); the `op:` head is registry spelling, never a name */
-    if (k == 3 && nameref(e[0]) && modassign_op(e[0], NULL)) {
+    if (asg == Q_HEAD_THROUGH) {   /* `x op:y` reads x; a marked `<>:` head is no name */
         lam_scan(e[1], s);
         lam_scan(e[2], s);
         return;
@@ -984,12 +966,8 @@ static ray_t* do_eval(ray_t** e, int64_t n) {
     return RAY_NULL_OBJ;
 }
 
-/* modified assignment `x op: y` == `x: x op y` — head `<op>:` where op is a
- * registry dyad; name targets only (indexed mod-assign: rebuild wave) */
-static ray_t* modassign_eval(ray_t* h, ray_t* target, ray_t* rhs) {
-    const q_op_t* row = NULL;
-    ray_t* opv = modassign_op(h, &row);
-    if (!opv) return NULL;                           /* not an op: -> 'name path */
+/* modified assignment `x op: y` == `x: x op y` — opv is op's dyadic value, row its manifest row */
+static ray_t* modassign_eval(ray_t* opv, const q_op_t* row, ray_t* target, ray_t* rhs) {
     q_assign_target_t k = q_parse_assign_target(target);
     if (k == Q_TARGET_INDEX) return indexed_assign(target, opv, rhs);
     if (k == Q_TARGET_PATTERN) return q_err(QE_NYI);
@@ -1186,24 +1164,23 @@ ray_t* q_eval(ray_t* node) {
          * signal below (q_parse.h: q_parse_is_seq_head is the one test) */
         if (q_parse_is_seq_head(h)) { ret = seq_eval(e + 1, n - 1); goto out; }
 
-        /* global assign is the identity value heading (::;name;rhs) — `a::1` and `::[a;1]` are one tree */
-        if (RAY_IS_NULL(h) && n == 3 && q_parse_assign_target(e[1])) {
-            ret = assign_eval(e[1], e[2], 1);
-            goto out;
+        /* an assignment is its head VALUE, however it was written (`-:[a;1]` assigns as `a-:1` does, ref/assign.md:103
+         * `op:[x;y]`); over anything that is no target the head applies as the value it is */
+        if (n == 3) {
+            ray_t* opv = NULL;
+            const q_op_t* row = NULL;
+            q_assign_head_t asg = q_parse_assign_head(h, &opv, &row);
+            if (asg != Q_HEAD_NONE && q_parse_assign_target(e[1]) != Q_TARGET_NONE) {
+                ret = asg == Q_HEAD_THROUGH ? modassign_eval(opv, row, e[1], e[2])
+                                            : assign_eval(e[1], e[2], asg == Q_HEAD_GLOBAL);
+                goto out;
+            }
         }
         if (nameref(h)) {
             const eval_syms_t* S = syms();
-            if (h->i64 == S->colon && n == 3) {
-                ret = assign_eval(e[1], e[2], 0);
-                goto out;
-            }
             if (h->i64 == S->kif)    { ret = if_eval(e + 1, n - 1, 0); goto out; }
             if (h->i64 == S->kwhile) { ret = if_eval(e + 1, n - 1, 1); goto out; }
             if (h->i64 == S->kdo)    { ret = do_eval(e + 1, n - 1); goto out; }
-            if (n == 3) {
-                ray_t* ma = modassign_eval(h, e[1], e[2]);
-                if (ma) { ret = ma; goto out; }
-            }
         }
 
         /* trees are DATA: the char-atom heads match by CONTENT, so an
