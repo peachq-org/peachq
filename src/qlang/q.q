@@ -91,7 +91,7 @@
 / lifted via .Q.ft (defined later, in dotq.q - a lambda resolves it at call time);
 / names pair with the unchanged column values, so a bad rename/reorder goes ragged
 / at `!` and throws its own 'length (ref/cols.md: nonexistent key x -> 'length)
-.q.xcol:{[x;y] .Q.ft[{[x;t] c:cols t; flip ($[99h=type x;{[c;m](c^m c),(key m)except c}[c;$[98h=type key x;first each flip key x;x]];x,(count x)_c])!value .Q.V t}[x;];y]}
+.q.xcol:{[x;y] .Q.ft[{[x;t] c:cols t; flip ($[99h=type x;{[c;m] w:where c in k:key m; @[c;w;:;m c w],k except c}[c;$[98h=type key x;first each flip key x;x]];x,(count x)_c])!value .Q.V t}[x;];y]}
 / a dictionary's keys stand for the columns (TorQ dataaccess/queryorder.q:41; owner 2026-11-09)
 .q.xcols:{[x;y] $[(99h=type y)&not .Q.qt y;{[x;d] k:key d; n:x,k except x; n!d n inter k}[x;y];.Q.ft[{[x;t] flip .q.xcols[x;.Q.V t]}[x;];y]]}
 
