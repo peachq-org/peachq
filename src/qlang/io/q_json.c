@@ -161,11 +161,12 @@ static void j_tok(jbuf* b, ray_t* a, int flags) {
         return;
     }
     q_fmt(a, t, sizeof t);
-    size_t n = strlen(t);
+    char* s = t + (a->type == -RAY_BYTE_ONLY && t[0] == '0' && t[1] == 'x' ? 2 : 0);   /* `$x` of a byte is "0a" */
+    size_t n = strlen(s);
     if (flags & JT_DASH8)
         for (size_t i = 0; i < n && i < 8; i++)
-            if (t[i] == '.') t[i] = '-';
-    jbuf_str(b, t, n);
+            if (s[i] == '.') s[i] = '-';
+    jbuf_str(b, s, n);
 }
 
 /* One atom (x->type < 0). */
