@@ -130,8 +130,7 @@ static ray_t *embed_sym(ray_t *sym, q_valence_t val) {
     const char *nm = ray_str_ptr(s);
     size_t nl = ray_str_len(s);
     /* `::` IS the identity value wherever it lands (a tree carries values, never a `::` symbol: the global-assign
-     * head, an empty call, a bare term); `:` is the assign verb (`@[x;i;:;y]`, `:/`) — its SYNTAX sym, the head of
-     * an assignment node, is never embedded (parse_infix) */
+     * head, an empty call, a bare term) */
     if (nl == 2 && nm[0] == ':' && nm[1] == ':') { ray_release(s); ray_release(sym); return RAY_NULL_OBJ; }
     /* the marker IS the valence, so it wins over whatever the SITE asked for —
      * `(*:)`, `*:[x]` and `@[|:;x]` all reach here as operands, asking dyadic */
@@ -230,8 +229,7 @@ static int sym_glyph_form(const ray_t *sym) {
 }
 
 /* True iff a verb sym carries the MONADIC MARKER.  Standing INFIX that spelling
- * is modified assignment (`x,:y` == `x:x,y`), which modassign_eval reads off the
- * SYM — so that one site must not resolve it. */
+ * is modified assignment (`x,:y` == `x:x,y`). */
 static int verb_marked(const ray_t *sym) {
     ray_t *s = nameref_str(sym);
     if (!s) return 0;
@@ -768,13 +766,13 @@ static ray_t *seq_of(ray_t *e) {
 
 /* A sym atom in a tree is a name (parsetrees.md:80); a constant, `n included, is a pattern (owner ruling 2026-11-08). */
 q_assign_target_t q_parse_assign_target(const ray_t *lhs) {
-    if (!lhs) return Q_TARGET_NONE;
+    if (!lhs || Q_IS_HOLE(lhs)) return Q_TARGET_NONE;   /* `neg[;1]` projects */
     if (lhs->type == -RAY_SYM) return Q_TARGET_NAME;
     if (lhs->type != RAY_LIST) return q_eval_apply_is_fn((ray_t *)lhs) ? Q_TARGET_NONE : Q_TARGET_PATTERN;
     const ray_t *h = q_count(lhs) > 1 ? ((ray_t **)ray_data((ray_t *)lhs))[0] : NULL;
     if (!h) return Q_TARGET_PATTERN;   /* () or an enclosed constant, ,`a`b */
     /* `p:`c` is the type-check pattern; `:` is no variable's name, so any other `p:e` (a filter) is no target */
-    if (sym_name_is(h, ":"))
+    if (q_parse_assign_head(h, NULL, NULL) == Q_HEAD_ASSIGN)
         return q_count(lhs) == 3 && q_pattern_type_check(((ray_t **)ray_data((ray_t *)lhs))[2]) ? Q_TARGET_PATTERN : Q_TARGET_NONE;
     if (h->type == -RAY_SYM) return Q_TARGET_INDEX;
     /* the heads the parser gives a pattern: a list, a dictionary (and keyed table), a table, and the type check
@@ -782,6 +780,29 @@ q_assign_target_t q_parse_assign_target(const ray_t *lhs) {
     if (h == q_registry_list_value() || h == q_registry_lookup_name("!", 1, Q_DYADIC) ||
         h == q_registry_lookup_name("+", 1, Q_MONADIC) || RAY_IS_NULL(h)) return Q_TARGET_PATTERN;
     return Q_TARGET_NONE;
+}
+
+/* the head test app code run on kdb trees applies, qchk.q:83 `$[101=type e0;20>value e0;e0~(:)]` */
+q_assign_head_t q_parse_assign_head(const ray_t *h, ray_t **op, const q_op_t **row) {
+    if (RAY_IS_NULL(h)) return Q_HEAD_GLOBAL;
+    /* `<>:` `<=:` `>=:` (ref/assign.md:100) have no unary value to stand for them, so their marked spelling stays */
+    ray_t *s = nameref_str(h);
+    const q_op_t *mr = s ? marker_row(ray_str_ptr(s), ray_str_len(s)) : NULL;
+    if (s) ray_release(s);
+    if (mr) {
+        if (op) *op = q_registry_row_value(mr, Q_DYADIC);
+        if (row) *row = mr;
+        return Q_HEAD_THROUGH;
+    }
+    q_valence_t val = Q_DYADIC;
+    /* only a primitive's own ray type asks: a miss in the registry scans the manifest, and this runs per node */
+    int code = h && (h->type == RAY_UNARY || h->type == RAY_BINARY || h->type == RAY_VARY) ? q_registry_kdb_op_of(h, &val) : -1;
+    if (code == 0) return val == Q_DYADIC ? Q_HEAD_ASSIGN : Q_HEAD_GLOBAL;
+    if (code < 0 || code >= 20 || val != Q_MONADIC) return Q_HEAD_NONE;
+    ray_t *v = q_registry_kdb_op_value(code, Q_DYADIC);
+    if (op) *op = v;
+    if (row) *row = v ? q_registry_row_of(v, Q_DYADIC) : NULL;
+    return v ? Q_HEAD_THROUGH : Q_HEAD_NONE;
 }
 
 /* the char-";" sequence head (see seq_of) */
@@ -831,12 +852,12 @@ static int qtok_is_join_comma(const Token *tk) {
  * A table literal and a qSQL clause name a column the same two ways: written
  * `name:expr`, or a bare name-ref lending its own spelling (syntax.md:218). */
 
-/* The (:;name;expr) node.  Rejects `::`, `+:` (a marked verb head) and a QUOTED
+/* The (:;name;expr) node.  Rejects `::`, `+:` (an assign-through head) and a QUOTED
  * lhs, so ``(`a:1)`` is not a binding. */
 static int binding_node(ray_t *x, ray_t **name, ray_t **val) {
     if (!x || x->type != RAY_LIST || q_count(x) != 3) return 0;
     ray_t **e = (ray_t **)ray_data(x);
-    if (!sym_name_is(e[0], ":") || !sym_is_nameref(e[1])) return 0;
+    if (q_parse_assign_head(e[0], NULL, NULL) != Q_HEAD_ASSIGN || !sym_is_nameref(e[1])) return 0;
     if (name) *name = e[1];
     if (val)  *val  = e[2];
     return 1;
@@ -1863,14 +1884,13 @@ static P parse_infix(Parser *p, P t, P u, QCtx ctx) {
     }
     int assign = verb_marked(u.v) || sym_name_is(u.v, ":") || sym_name_is(u.v, "::");
     if (assign) assign_check(p, t.v, u.v, e.v, t.at);
-    if (!verb_marked(u.v) && !sym_name_is(u.v, ":"))
-        u.v = embed_sym(u.v, Q_DYADIC);      /* infix head: the dyadic row */
+    u.v = embed_sym(u.v, Q_DYADIC);      /* the dyadic row; an `op:` marker selects the monad, kdb's assign-through head */
     /* onto a train tail the infix head is its own postfix elision (`1~` of `1~count@`), composed onto the tail;
      * an assignment (`hdist:sum (<>)::`) binds the train instead */
     int onto = e.train && !assign;
     ray_t *xs[3] = { u.v, t.v, e.v && !onto ? e.v : Q_HOLE_OBJ };
     ray_t *r = q_list(xs, 3);
-    if ((!e.v || onto) && r && !RAY_IS_ERR(r) && q_eval_apply_is_fn(u.v))
+    if ((!e.v || onto) && !assign && r && !RAY_IS_ERR(r) && q_eval_apply_is_fn(u.v))
         r->attrs |= Q_ATTR_POSTFIX;
     pos_note(r, u.at);
     if (onto) return compose_node(r, e.v);
@@ -2622,9 +2642,8 @@ void q_parse_open_feed(q_parse_open_t *st, const char *piece) {
     free(quoted);
 }
 
-/* q_parse_is_assign — see q_parse.h.  Head is the identity value (`a::1`) or
- * the name-ref `:` / modified-assign `<op>:`, with a name/indexed-name target or a `:` pattern;
- * a `;` statement sequence (char head) asks its last statement. */
+/* q_parse_is_assign — see q_parse.h.  An assignment head (q_parse_assign_head) with a name/indexed-name target or a
+ * `:` pattern; a `;` statement sequence (char head) asks its last statement. */
 int q_parse_is_assign(const ray_t *cast) {
     ray_t *ast = (ray_t *)cast;   /* read-only walk; ray_data lacks a const view */
     if (!ast || ast->type != RAY_LIST || q_count(ast) < 1) return 0;
@@ -2634,16 +2653,8 @@ int q_parse_is_assign(const ray_t *cast) {
         int64_t n = q_count(ast);
         return n >= 2 ? q_parse_is_assign(e[n - 1]) : 0;
     }
-    int asg = RAY_IS_NULL(h);
-    if (!asg) {
-        ray_t *s = nameref_str(h);
-        if (!s) return 0;
-        const char *nm = ray_str_ptr(s);
-        size_t l = ray_str_len(s);
-        asg = (l == 1 && nm[0] == ':') || (l >= 2 && nm[l - 1] == ':' && nm[0] != ':');
-        ray_release(s);
-    }
+    q_assign_head_t asg = q_count(ast) == 3 ? q_parse_assign_head(h, NULL, NULL) : Q_HEAD_NONE;
     /* every target is silent, an indexed `name[i;…]:v` and a `:` pattern too — kdb console (basics/pattern.md:14-20) */
-    q_assign_target_t k = asg && q_count(ast) == 3 ? q_parse_assign_target(e[1]) : Q_TARGET_NONE;
-    return k == Q_TARGET_NAME || k == Q_TARGET_INDEX || (k == Q_TARGET_PATTERN && !RAY_IS_NULL(h));
+    q_assign_target_t k = asg ? q_parse_assign_target(e[1]) : Q_TARGET_NONE;
+    return k == Q_TARGET_NAME || k == Q_TARGET_INDEX || (k == Q_TARGET_PATTERN && asg != Q_HEAD_GLOBAL);
 }
