@@ -329,13 +329,6 @@ static int lone_colon_next(const char *src, int p) {
     return src[p] == ':' && src[p + 1] != ':';
 }
 
-static int symbol_colon_ends(const char *src, int p) {
-    if (src[p] == '`') return 1;
-    int b = p;
-    while (src[p] == ' ' || src[p] == '\t') p++;
-    return !src[p] || src[p] == '\n' || src[p] == '\r' || (src[p] == '/' && p > b);
-}
-
 /* The tagged text literal (docs/parser-architecture.md § Rules): at a token start, N >= 2 backticks + a tag + one
  * whitespace byte open it and the next run of exactly N backticks closes it; the value is the bytes between, verbatim,
  * always a char vector.  NULL when no tag follows the run: it is symbols, so p is untouched. */
@@ -547,18 +540,16 @@ static Tokens scan(const char *src) {
                            src[p] == '.' || src[p] == ':' || src[p] == '/')
                         p++;
                 } else {
-                    /* A BARE symbol takes ':' and '/' too (ref/doth.md .h.ha:
-                     * `http://www.example.com), but only where more body
-                     * follows, or as colons before a back-quote, end of line or a blank-led comment (`a:`b, qchk.q:100),
-                     * and '-' is never a bare-symbol byte (`a-b stays subtraction).
+                    /* ':' is an ordinary bare-symbol byte (`a: 1 is the symbol `a: then 1; owner 2026-11-09,
+                     * timestored man.q:519); '/' joins only where more body follows (ref/doth.md .h.ha:
+                     * `http://www.example.com), and '-' never does (`a-b stays subtraction).
                      * Only a run's FIRST item may not lead with '_' (`a`_ is two symbols, Dvybco). */
                     if (count > 0 || !q_parse_drop_lead(src[p])) for (;;) {
                         while ((CLASS[(uint8_t)src[p]] & (CL_ALPHA | CL_DIGIT)) ||
-                               src[p] == '.')
+                               src[p] == '.' || src[p] == ':')
                             p++;
-                        int sep = p, colons = 1;
-                        while (src[sep] == ':' || src[sep] == '/') colons &= src[sep++] == ':';
-                        if (sep > p && colons && symbol_colon_ends(src, sep)) { p = sep; break; }
+                        int sep = p;
+                        while (src[sep] == ':' || src[sep] == '/') sep++;
                         if (sep == p ||
                             !((CLASS[(uint8_t)src[sep]] & (CL_ALPHA | CL_DIGIT)) ||
                               src[sep] == '.'))
@@ -1432,22 +1423,17 @@ static P parse_base(Parser *p) {
     case T_LBRACE:
         return (P){ R_NOUN, parse_lambda(p), 0, 0, tk->start };
     case T_ADVERB: {
-        /* Compose `'[f;g;…]` — the `'` adverb in BRACKET form composes
-         * functions (rightmost consumes the args, each leftward applied
-         * monadically).  Only this bracketed form is a primary term; a bare
-         * postfix adverb (`f'`) is consumed by parse_term's postfix loop and a
-         * leading signal `'expr` by parse_e, so a `'` here NOT followed by `[`
-         * is not a term.  Emits (compose-value; f; g; …); parse_term's postfix
-         * loop then applies any trailing `[args]`. */
+        /* `'[f;g;…]` applies the one `'` iterator value, as `f'` does (`'[;]` resolves the overloads on `'`,
+         * ref/compose.md:38), so `'[+]` and `+'` are one tree (unparse testcases.q:100, run on KDB-X); the apply
+         * module composes two or more values.  A bare postfix adverb (`f'`) is consumed by parse_term's postfix
+         * loop and a leading signal `'expr` by parse_e, so a `'` here NOT followed by `[` is not a term. */
         if (tk->len == 1 && p->src[tk->start] == '\'' &&
             peek(p) == T_LBRACK) {
             adv(p);                          /* consume ' */
             adv(p);                          /* consume [ */
             ray_t *args = parse_E(p, Q_NONE);
             expect(p, T_RBRACK, "expected ']' in compose '[...]'");
-            ray_t *cv = q_registry_compose_value();
-            if (!cv) q_die("compose: registry not initialized");
-            ray_t *w = cons_head(cv, args, Q_HOLE_OBJ);   /* `'[;]` projects the compose value itself */
+            ray_t *w = cons_head(tk->k, args, Q_HOLE_OBJ);   /* `'[;]` projects the iterator value itself */
             ray_release(args);
             pos_note(w, tk->start);
             return (P){ R_NOUN, w, 0, 0, tk->start };
@@ -1522,9 +1508,10 @@ static P parse_query(Parser *p) {
             P le = parse_e(p, Q_NONE);
             if (le.role == R_NONE) q_die("qsql: expected limit expression in select[...]");
             *lim = le.v;
+            /* an empty order slot is no order: unparse writes `select[n;]` for `select[n]` (testcases.q:43,63,71) */
             if (at(p, T_SEMI)) {
                 adv(p);
-                *ord = qsql_sortspec(p);
+                if (!at(p, T_RBRACK)) *ord = qsql_sortspec(p);
             }
         } else {
             *ord = qsql_sortspec(p);
@@ -2179,10 +2166,9 @@ static ray_t *qsql_norm_dict(ray_t *phrases) {
     return qsql_build_dict(aliases, vals, na);       /* consumes aliases/vals */
 }
 
-/* exec select-phrase `a`: omitted -> `()`; a single unnamed column -> the
- * QUOTED bare value (parsetrees.md: constants are enlisted, so one eval of
- * the slot yields the functional a-value — a col sym as `,`c1`, a computed
- * expr as its enlisted tree); named / multiple -> a name!expr dict. */
+/* exec select-phrase `a`: omitted -> `()`; a single unnamed column -> its tree
+ * enlisted in a 1-item general list, a bare name included (unparse.q:28-29,
+ * testcases.q:47); named / multiple -> a name!expr dict. */
 static ray_t *qsql_norm_exec_a(ray_t *phrases) {
     int64_t n = q_count(phrases);
     ray_t **ph = (ray_t **)ray_data(phrases);
@@ -2191,11 +2177,6 @@ static ray_t *qsql_norm_exec_a(ray_t *phrases) {
     if (n == 1 && !binding_node(ph[0], &name, &val)) {
         ray_t *v = qsql_convert_expr(ph[0]);
         if (!v || RAY_IS_ERR(v)) return v;
-        if (v->type == -RAY_SYM) {
-            ray_t *sv = symvec_add(ray_sym_vec_new(RAY_SYM_W64, 1), v->i64);
-            ray_release(v);
-            return sv;
-        }
         return q_list(&v, 1);
     }
     return qsql_norm_dict(phrases);                  /* named / multiple -> dict */
