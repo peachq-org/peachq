@@ -391,14 +391,13 @@ static ray_t* ft_fields(ray_t* fields, const char* r, size_t n, char delim) {
         if (!fb) { ray_release(fields); return q_err(QE_OOM); }
         size_t fl = 0;
         if (i < n && r[i] == '"') {
-            i++;
-            while (i < n) {
-                if (r[i] == '"') {
-                    if (i + 1 < n && r[i + 1] == '"') { fb[fl++] = '"'; i += 2; }
-                    else { i++; break; }
-                } else fb[fl++] = r[i++];
+            /* each " toggles quoting; "" while quoted is one ", text after a close is kept (TorQ filterformat.csv:6) */
+            int quoted = 0;
+            while (i < n && (quoted || r[i] != delim)) {
+                if (r[i] != '"') fb[fl++] = r[i++];
+                else if (quoted && i + 1 < n && r[i + 1] == '"') { fb[fl++] = '"'; i += 2; }
+                else { quoted = !quoted; i++; }
             }
-            while (i < n && r[i] != delim) i++;             /* junk after quote */
         } else {
             while (i < n && r[i] != delim) fb[fl++] = r[i++];
         }
