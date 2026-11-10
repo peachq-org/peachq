@@ -1234,7 +1234,9 @@ ray_t* q_funsql_dict_drop_keys(ray_t* keys, ray_t* d) { return dict_drop_keys(ke
 /* ===== `!` rank 4: Update / Delete (wave 4) ============================== */
 
 static ray_t* upd_fill(ray_t* v, int64_t n) {                 /* consumes v */
-    ray_t* c = q_table_bcast_col(v, n);
+    ray_t* nn = q_count(v) == 1 ? ray_i64(n) : NULL;
+    ray_t* c = nn ? q_take_wrap(nn, v) : q_table_bcast_col(v, n);
+    if (nn) ray_release(nn);
     ray_release(v);
     return c;
 }
@@ -1276,10 +1278,14 @@ static ray_t* upd_amend(ray_t* cur, ray_t* rows, ray_t* v) {
     return r;
 }
 
-/* An empty result is a constant in Update (peachq#101): a zero-item list of any type fills each of the n rows it
- * reaches, as an atom does — the count-mismatch 'length stays for every other list. */
-static int upd_is_empty(ray_t* v, int64_t n) {
-    return n > 0 && !ray_is_atom(v) && q_count(v) == 0 && (ray_is_vec(v) || v->type == RAY_ENUM || v->type == RAY_LIST);
+/* A result too short to be a column is a constant in Update: a zero-item list fills each of the n rows it reaches
+ * whole (peachq#101); when the update reaches every row of an ungrouped table, a one-item list gives each row its
+ * item, n#v (owner 2026-11-09, Dznwxm) — a Where phrase reaching fewer rows keeps 'length (DefconQ concepts/qsql.mdx); every
+ * other count mismatch stays 'length. */
+static int upd_is_const(ray_t* v, int64_t n, int whole) {
+    if (ray_is_atom(v) || !(ray_is_vec(v) || v->type == RAY_ENUM || v->type == RAY_LIST)) return 0;
+    int64_t c = q_count(v);
+    return c == 0 ? n > 0 : whole && c == 1 && n != 1;
 }
 
 /* What the amend starts from.  `full` = the update reaches EVERY row, so no
@@ -1316,7 +1322,7 @@ static ray_t* upd_cols(ray_t* a, ray_t* t, ray_t* idx, ray_t* gidxs) {
             err = q_err(QE_TYPE);
         } else if (!gidxs) {                             /* ungrouped */
             ray_t* v = phrase_eval(tree, t, idx);
-            if (v && !RAY_IS_ERR(v) && upd_is_empty(v, q_count(idx))) v = upd_fill(v, q_count(idx));
+            if (v && !RAY_IS_ERR(v) && upd_is_const(v, q_count(idx), full)) v = upd_fill(v, q_count(idx));
             if (!v || RAY_IS_ERR(v)) err = v ? v : q_err(QE_TYPE);
             else if (full && (ray_is_vec(v) || v->type == RAY_ENUM || v->type == RAY_LIST) &&
                      q_count(v) == q_count(t)) {
@@ -1338,7 +1344,7 @@ static ray_t* upd_cols(ray_t* a, ray_t* t, ray_t* idx, ray_t* gidxs) {
             ray_t** gi = (ray_t**)ray_data(gidxs);
             for (int64_t k = 0; k < ng && !err; k++) {
                 ray_t* v = phrase_eval(tree, t, gi[k]);
-                int konst = v && !RAY_IS_ERR(v) && upd_is_empty(v, q_count(gi[k]));
+                int konst = v && !RAY_IS_ERR(v) && upd_is_const(v, q_count(gi[k]), 0);
                 if (konst) v = upd_fill(v, q_count(gi[k]));
                 if (!v || RAY_IS_ERR(v)) { err = v ? v : q_err(QE_TYPE); break; }
                 if (!cur) cur = (full && konst) ? null_col_like(v, q_count(t)) : upd_col_start(t, nm->i64, v, full);
