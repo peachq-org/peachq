@@ -532,7 +532,8 @@ static ray_t* index_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
         if (pos->type == RAY_LIST) { ray_release(pos); return index_map(x, i0, rest, k); }
         ray_t* g = dict_read(x, pos, i0);              /* a run: the rest applies to each key (ref/apply.md:233-239) */
         if (!g || RAY_IS_ERR(g)) return g ? g : q_err(QE_TYPE);
-        ray_t* r = index_map(g, NULL, rest, k);
+        /* a keyed table's rows are a table: `kt[t;c]` is its column even when t has no rows */
+        ray_t* r = g->type == RAY_TABLE ? index_r(g, NULL, rest, k) : index_map(g, NULL, rest, k);
         ray_release(g);
         return r;
     }
