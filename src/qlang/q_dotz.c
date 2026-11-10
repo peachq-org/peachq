@@ -397,7 +397,7 @@ static ray_t* zts_tick(ray_t* tick) {
 void q_dotz_exit_fire(int code) {
     int64_t zexit = ray_sym_intern_runtime(".z.exit", 7);
     if (!q_env_get(zexit)) return;
-    ray_t* arg  = ray_i64(code);
+    ray_t* arg  = ray_i32(code);
     FILE*  door = q_console_door(stdout);
     ray_t* r    = q_eval_apply_call_sym(zexit, &arg, 1);
     q_console_door(door);
