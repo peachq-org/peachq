@@ -1007,13 +1007,14 @@ static ray_t* ques_select(ray_t** args, int64_t n) {
         ray_release(t);
         return q_err(QE_NYI);
     }
+    ray_t* empty = q_type_is_dict(args[3]) && q_count(args[3]) == 0 ? ray_list_new(0) : NULL;
+    ray_t* a = empty ? empty : args[3];         /* any empty dict phrase is () (owner 2026-11-09, btick2 qtx.q:28) */
     ray_t* idx = where_fold(args[1], t, til_count(t));
-    int on_result = n == 6 && !q_type_is_dict(t) && orders_result(args[5], args[2], args[3]);   /* a dict answers a dict */
+    int on_result = n == 6 && !q_type_is_dict(t) && orders_result(args[5], args[2], a);   /* a dict answers a dict */
     if (n == 6 && !on_result && !RAY_IS_ERR(idx)) idx = sort_idx(args[5], t, idx);
     if (n >= 5 && !on_result && !RAY_IS_ERR(idx)) idx = limit_apply(args[4], idx);
-    if (RAY_IS_ERR(idx)) { ray_release(t); return idx; }
+    if (RAY_IS_ERR(idx)) { if (empty) ray_release(empty); ray_release(t); return idx; }
     ray_t* b = args[2];
-    ray_t* a = args[3];
     ray_t* r;
     /* only the by-less, phrase-less form returns the evaluated table expression (ref/select.md:47) */
     if (!(is_bool_atom(b, 0) && is_empty_gen(a))) nk = 0;
@@ -1046,6 +1047,7 @@ static ray_t* ques_select(ray_t** args, int64_t n) {
     } else {
         r = q_err(QE_TYPE);
     }
+    if (empty) ray_release(empty);
     ray_release(idx);
     ray_release(t);
     if (on_result && r && !RAY_IS_ERR(r)) r = sort_result(args[5], args[4], r);
