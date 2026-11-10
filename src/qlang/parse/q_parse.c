@@ -743,7 +743,7 @@ static ray_t  *qsql_normalize_phrases(ray_t *phrase_list, QCtx origin, int verb)
 enum { QSQL_V_SELECT, QSQL_V_EXEC, QSQL_V_UPDATE, QSQL_V_DELETE };
 _Static_assert(Q_SYNTAX_EXEC - Q_SYNTAX_SELECT == QSQL_V_EXEC && Q_SYNTAX_UPDATE - Q_SYNTAX_SELECT == QSQL_V_UPDATE &&
                Q_SYNTAX_DELETE - Q_SYNTAX_SELECT == QSQL_V_DELETE, "qtok_query_verb reads the verbs by index");
-#define QSQL_MAXCOLS 256
+#define QSQL_MAXCOLS 1024
 
 /* Statement sequence: one -> its element; two+ -> (";"; ...).  The head is the
  * CHAR ";" (owner-reported kdb display: `parse "a:1;b:2"` shows `";"`, -10h) —
