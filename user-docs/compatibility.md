@@ -15,7 +15,8 @@ Ordered by how likely each is to stop a real migration.
 |---|---|---|
 | **Partitioned and segmented databases** | Do not load. Splayed tables do. | below |
 | **Splayed and partitioned writing** | Reading kx on-disk format is in scope; writing it is not. | below |
-| **Pattern matching (kdb+ 4.1)** | The 4.1 assignment and parameter forms signal `'parse`. | [typed-parameters.md](typed-parameters.md) |
+| **Pattern matching (kdb+ 4.1)** | List patterns work; dictionary, table and filter-function patterns do not. | below |
+| **Serializing functions (`-8!`, IPC)** | Primitives use kx's bytes; keywords kx defines in k travel as a q lambda. | below |
 | **Reserved words in name positions** | Refused wherever a name is bound, not only at `name:`. | below |
 | **Load CSV (`0:`)** | Unchanged, and still needs the full type string and a clean file. | [csv.md](lib/csv.md) |
 | **`set` to a `.csv`/`.json`/`.txt`/`.xml`/`.xls`/`.parquet` path** | Writes that format, not the q binary form; `t` must be a table. | below |
@@ -41,16 +42,49 @@ for any file that is not a kdb+ data file. An error becomes a value, so no worki
 with no recognised ending is the kdb+ file read as in kx; an ending with a writer and no reader (`.xml`, `.xls`,
 `.txt`) is `'type` as in kx.
 
-**Pattern matching.** It will not be implemented; [typed parameters](typed-parameters.md) are the replacement for
-the part of it that declares what a function accepts. Since there is no equivalent form to link to:
+**Pattern matching.** The kdb+ 4.1 list patterns work in assignment and in a function's parameter list: names,
+nested lists, the null pattern (an empty slot), constants and type checks. Names bound inside a lambda are local to it.
 
 ```q
-(1 2):1 3                      / 'match in kx 4.1; 'parse here
-c2f:{[x:tempCheck]32+1.8*x}    / runs tempCheck on entry in kx 4.1; 'parse here
+q)(b;c):(2;3)
+q)(h;g):(c;b)
+q)(a;(d;e)):(1;(2;3))
+q)(s:`s;n:`j):(`x;5)
+q)(s:`s;n:`j):(`x;5.0)
+'type
+q)(1 2):1 3
+'match
+q)r:{[x;(m;n)] x*m+n}
+q)r[2;3 4]
+14
 ```
 
-Use `~` and a signal in place of the assertion forms, a declared type in place of an entry check where a type
-suffices, and an ordinary check in the body where it does not.
+Dictionary and table patterns, such as `` (i:`a;j:`c):d ``, signal `'nyi`. Filter functions, such as
+`{[x:tempCheck]32+1.8*x}`, signal `'parse` and are not planned; use an ordinary check in the body, or a declared
+type where a type suffices (see [typed parameters](typed-parameters.md)).
+
+**Serializing functions.** Every function value serializes, through `-8!`, `-9!` and IPC, and `-9!-8!f` answers
+a value matching `f`. What goes on the wire depends on what the function is:
+
+- **A primitive, or a composition of primitives**, uses the kx wire form: `-8!neg` is `0x010000000a0000006502`
+  and `-8!ceiling` is the composition `0x0100000018000000690200000065026902000000650e6502`.
+- **A keyword kx defines in k** (`ej`, `mod`, `xbar`, `lj` and others) travels as a q lambda that calls it, not as
+  kx's k source: `-8!ej` carries `{ej[x;y;z]}`. peachq decodes that exact text back to the keyword itself; a kx
+  process receives an ordinary lambda that calls its own `ej`.
+- **A library function implemented in C** (`.regexp.i.*`, `.duckdb.i.*` and others) travels as its `2:` call, such
+  as `` {[x;y;z] (`pq 2:(`.regexp.i.test;3))[x;y;z]} ``. A peachq process decodes it to its own native; a kx process
+  cannot run it.
+
+```q
+q)-8!ej
+0x010000001b00000064000a000b0000007b656a5b783b793b7a5d7d
+q)(-9!-8!ej)~ej
+1b
+```
+
+Two gaps remain. A parse tree holding a composition head, such as `-8!parse "sum abs::"`, signals `'nyi`. A
+malformed message given to `-9!` signals `'domain` or `'badfunc` where kx signals `'badmsg`, and a lambda written in
+k (`k){...}`) does not decode, since peachq does not run k.
 
 **Reserved words in name positions.** `([] null)`, `select null from t`, `{[null] null}` and `w[1] div:3` all signal
 `'assign` where kx accepts them. Each was silently producing a broken table, or resolving to the keyword's own
