@@ -59,7 +59,8 @@ static int64_t env_marker(void) { return ray_sym_intern_runtime("", 0); }
 /* q_env_marker_sym — see q_env.h. */
 int64_t q_env_marker_sym(void) { return env_marker(); }
 
-static ray_t* env_marker_dict(void) {
+/* The root carries no back-reference (uqf tests/q/test_namespaces.q:37 on KDB-X): it is a namespace by identity. */
+static ray_t* env_dict(int marked) {
     ray_t* keys = ray_sym_vec_new(RAY_SYM_W64, 1);
     ray_t* vals = ray_list_new(1);
     if (!keys || RAY_IS_ERR(keys) || !vals || RAY_IS_ERR(vals)) {
@@ -67,9 +68,11 @@ static ray_t* env_marker_dict(void) {
         if (vals && !RAY_IS_ERR(vals)) ray_release(vals);
         return NULL;
     }
-    int64_t m = env_marker();
-    keys = ray_vec_append(keys, &m);
-    vals = ray_list_append(vals, RAY_NULL_OBJ);
+    if (marked) {
+        int64_t m = env_marker();
+        keys = ray_vec_append(keys, &m);
+        vals = ray_list_append(vals, RAY_NULL_OBJ);
+    }
     if (!keys || RAY_IS_ERR(keys) || !vals || RAY_IS_ERR(vals)) {
         if (keys && !RAY_IS_ERR(keys)) ray_release(keys);
         if (vals && !RAY_IS_ERR(vals)) ray_release(vals);
@@ -79,8 +82,11 @@ static ray_t* env_marker_dict(void) {
     return (d && !RAY_IS_ERR(d)) ? d : NULL;
 }
 
-static int env_is_marked(ray_t* v) {
+static ray_t* env_marker_dict(void) { return env_dict(1); }
+
+static int env_is_ns(ray_t* v) {
     if (!v || RAY_IS_ERR(v) || v->type != RAY_DICT) return 0;
+    if (v == env_root) return 1;
     ray_t* k = ray_dict_keys(v);
     ray_t* vl = ray_dict_vals(v);
     return k && k->type == RAY_SYM && q_count(k) >= 1 &&
@@ -518,7 +524,7 @@ static void env_scope_restore(const env_scope_t* prev) {
 }
 
 /* `` `. `` names the root itself, so assigning a dict RESTORES its members as
- * globals (ref/get.md `set`) — the ` -> :: marker is representation, skipped.
+ * globals (ref/get.md `set`) — a child's ` -> :: marker in d is representation, skipped.
  * Members go back through q_env_set, so each gets the same name policy, AT THE
  * ROOT whatever `\d` or a lambda scope says (`` `. `` is absolute); a member
  * already bound to that very value is the amend's untouched node, not a write.
@@ -545,7 +551,7 @@ static ray_err_t env_root_splat(ray_t* d) {
     if (rk) ray_retain(rk);
     for (int64_t i = 0, rn = rk ? q_count(rk) : 0; i < rn && e == RAY_OK; i++) {
         int64_t id = ray_read_sym(ray_data(rk), i, RAY_SYM, rk->attrs);
-        if (id != marker && ray_dict_find_sym(d, id) < 0) e = q_env_unbind(id);
+        if (ray_dict_find_sym(d, id) < 0) e = q_env_unbind(id);
     }
     if (rk) ray_release(rk);
     env_scope_restore(&sc);
@@ -695,7 +701,7 @@ ray_err_t q_env_handle_bind(int64_t sym, ray_t* val) {
     return e;
 }
 
-int q_env_ns_exists(int64_t path_sym) { return env_is_marked(q_env_peek(path_sym)); }
+int q_env_ns_exists(int64_t path_sym) { return env_is_ns(q_env_peek(path_sym)); }
 
 ray_t* q_env_ns_probe(int64_t ns_sym, const char* member, size_t n) {
     int64_t id = ray_sym_find(member, n);
@@ -1049,7 +1055,7 @@ static ray_t* env_dict_names(ray_t* d, q_env_ns_kind_t kind, int members) {
         int64_t id = ray_read_sym(ray_data(dk), i, RAY_SYM, dk->attrs);
         if (id == marker) continue;
         int keep = members ? env_kind_match(kind, vs[i])
-                           : (env_is_marked(vs[i]) && id != zed && id != duck);
+                           : (env_is_ns(vs[i]) && id != zed && id != duck);
         if (keep) sel[m++] = id;
     }
     if (members) qsort(sel, (size_t)m, sizeof *sel, q_env_name_cmp);
@@ -1062,7 +1068,7 @@ static ray_t* env_dict_names(ray_t* d, q_env_ns_kind_t kind, int members) {
 
 ray_t* q_env_ns_names(int64_t ns_sym, q_env_ns_kind_t kind) {
     ray_t* d = ns_sym ? q_env_get(ns_sym) : env_root;
-    if (!env_is_marked(d)) return NULL;
+    if (!env_is_ns(d)) return NULL;
     return env_dict_names(d, kind, 1);
 }
 
@@ -1093,7 +1099,7 @@ int64_t q_env_scope_ctx(void) { return ENV_CTX; }
 
 ray_err_t q_env_init(void) {
     if (env_root) return RAY_OK;
-    env_root = env_marker_dict();
+    env_root = env_dict(0);
     env_ns   = env_marker_dict();
     env_boot = env_marker_dict();
     g_pq_seg = ray_sym_intern_runtime("pq", 2);
