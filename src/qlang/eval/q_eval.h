@@ -142,8 +142,6 @@ int    q_eval_apply_foreign_parts(ray_t* v, void** obj);
  * pointer; head-token offset) pairs */
 ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
                                ray_t* src, ray_t* types, ray_t* pats, ray_t* pos);
-/* is this tree node the name-ref `:`, the head of an assignment and of a `p:`c` type check? */
-int q_eval_is_colon(const ray_t* x);
 ray_t* q_eval_apply_deriv_new(int adv, ray_t* fv, const struct q_op* frow);
 /* An iterator IS a value (103h, basics/datatypes.md); a derived function is
  * that value applied to its ONE operand.  `_iter_id` reads the adverb id

@@ -1,7 +1,8 @@
 /* q_pattern — see q_pattern.h. */
 #include "qlang/q_count.h"
 #include "qlang/eval/q_pattern.h"
-#include "qlang/eval/q_eval.h"      /* q_eval — a constant's value; q_eval_apply_is_fn, q_eval_is_colon */
+#include "qlang/eval/q_eval.h"      /* q_eval — a constant's value; q_eval_apply_is_fn */
+#include "qlang/parse/q_parse.h"    /* q_parse_assign_head — the `p:`c` head */
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"      /* q_type_of_char, q_type_is_iter, the hole */
 #include "qlang/q_builtins.h"       /* q_builtins_type_num */
@@ -45,7 +46,7 @@ static pat_kind_t pat_kind(ray_t* p, int64_t* tnum, ray_t** sub) {
     if (!e[0]) return PAT_NONE;
     if (n == 1) return PAT_CONST;
     if (e[0] == q_registry_list_value()) return PAT_LIST;
-    if (n == 3 && q_eval_is_colon(e[0])) {
+    if (n == 3 && q_parse_assign_head(e[0], NULL, NULL) == Q_HEAD_ASSIGN) {
         *sub = e[1];
         *tnum = q_pattern_type_check(e[2]);
     } else if (n == 2 && Q_IS_GENERIC_NULL(e[0])) {
