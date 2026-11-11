@@ -1227,6 +1227,16 @@ ray_t* q_system_fn(ray_t* x) {
     return q_str_charv_out(out);            /* captured lines cross as char vectors */
 }
 
+/* A path is the rest of the line up to a trailing ` / comment`, blanks trimmed, so it may hold blanks (peachq#122). */
+static size_t path_len(const char* rest, size_t restlen) {
+    if (restlen && rest[0] == '/' && (restlen == 1 || rest[1] == ' ' || rest[1] == '\t')) return 0;
+    size_t m = restlen;
+    for (size_t i = 1; i < restlen; i++)
+        if (rest[i] == '/' && (rest[i - 1] == ' ' || rest[i - 1] == '\t')) { m = i; break; }
+    while (m && (rest[m - 1] == ' ' || rest[m - 1] == '\t')) m--;
+    return m;
+}
+
 ray_t* q_sys_run(const char* line, size_t n) {
     size_t i = 0;
     while (i < n && (line[i] == ' ' || line[i] == '\t')) i++;
@@ -1298,7 +1308,7 @@ ray_t* q_sys_run(const char* line, size_t n) {
             case 'W': return h_W(arg, alen);                     /* week offset         */
             case 'e': return h_e(arg, alen);                     /* error-trap mode     */
             case 'w': return h_w(alen);                          /* workspace stats     */
-            case 'l': return q_sys_load(arg, alen);              /* load q script       */
+            case 'l': return q_sys_load(rest, path_len(rest, restlen)); /* load q script */
             case 'p': return h_p(arg, alen);                     /* listening port      */
             case 't': return h_t(arg, alen, rest, restlen, rep); /* timer / \t exp      */
             case 'b': return h_bB(0, arg, alen);                 /* views               */
@@ -1318,7 +1328,7 @@ ray_t* q_sys_run(const char* line, size_t n) {
     } else if (cmd_len == 2 && cmd[0] == 't' && cmd[1] == 's') {
         return h_ts(alen, rest, restlen, rep);                   /* time and space      */
     } else if (cmd_len == 2 && cmd[0] == 'c' && cmd[1] == 'd') {
-        return h_cd(arg, alen);                                  /* change directory    */
+        return h_cd(rest, path_len(rest, restlen));              /* change directory    */
     } else if (cmd_len == 7 && memcmp(cmd, "classic", 7) == 0) {
         return h_classic(arg, alen);                            /* display-mode toggle (peachq) */
     } else if (cmd_len == 0) {
