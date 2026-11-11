@@ -264,6 +264,34 @@ assertNotEmpty:{ [actual; msg]  assertThat[count actual;>;0; msg]};
 // @return the names deleted
 deleteGlobalTables:{ [] t:tables[]; if[count t; ![`.;();0b;t]]; t};
 
+// Call niladic f until check holds for its result, for up to 10 seconds. An error signalled by f or check counts as
+// not yet. Polls back off from 10ms, doubling up to 200ms; no sleep asked for ends past the deadline.
+// @param f niladic function polled for a result
+// @param check unary function of f's result, true once it is ready; :: accepts any result not 0b, null or empty
+// @return the first result check accepted
+// @throws waitFor timeout naming the last error seen: waitFor timeout 10000ms, last: file
+waitFor:{ [f; check]
+    c:$[(::)~check; {$[(::)~x; 0b; 0>type x; not (0b~x) or null x; 0<count x]}; check];
+    / a subprocess, not a busy-wait: this file runs standalone on kx q too, so no peachq builtin
+    sleep:{ [ms] n:1|"j"$ms;
+        system $["w"=first string .z.o;
+            "powershell -nop -c Start-Sleep -Milliseconds ",string n;
+            "sleep ",string[n div 1000],".",-3#"00",string n mod 1000]};
+    t0:.z.p; w:10; e:"none";
+    while[1b;
+        a:.[{[f;c] r:f[]; $[c r; (`ok; r); (`no; ::)]}; (f; c); {(`err; x)}];
+        if[`ok~a 0; :a 1];
+        if[`err~a 0; e:a 1];
+        left:10000-1e-6*"j"$.z.p-t0;
+        if[left<=0; '"waitFor timeout 10000ms, last: ",e];
+        sleep w&left;
+        w:200&2*w]};
+
+// waitFor that answers dflt on its timeout, as @[f;x;dflt] does: a function dflt is called with the error text,
+// any other value is the answer
+// @return the first result check accepted, else dflt or what dflt answered
+waitForOrElse:{ [f; check; dflt] @[waitFor[f;]; check; dflt]};
+
 / One line saying how the run went, for a reader who reads nothing else.
 / Carries no timestamp, so two runs of the same suite diff to nothing.
 / @param resultTbl Table as returned by runTests
