@@ -1543,15 +1543,32 @@ static P parse_query(Parser *p) {
 
     /* `select distinct` claims the b slot (basics/funsql.md:161-175) — SELECT
      * only: exec/update/delete keep distinct as an ordinary phrase verb, and
-     * `distinct:e` is a column alias, not the modifier */
+     * `distinct:e` is a column alias, not the modifier.  The phrases parse with
+     * distinct as that ordinary verb; b holds 1b OR the by-dict, so only with no
+     * By phrase is it lifted back off into b (wp/disaster-floods:274,
+     * kb/programming-examples.md:120 write `select distinct c by g`). */
     int dist = verb == QSQL_V_SELECT && qtok_sym_is(cur(p), "distinct") &&
                !(p->pos + 1 < p->t.n && p->t.t[p->pos + 1].kind == T_VERB &&
                  sym_name_is(p->t.t[p->pos + 1].k, ":"));
-    if (dist) adv(p);
 
     /* select-phrase list: stops at by / from */
     *a = parse_phrase_list(p, Q_SELECT);
     if (q_count(*a) > QSQL_MAXCOLS) die_err(QE_LIMIT);
+    if (dist && !qtok_sym_is(cur(p), "by")) {
+        ray_t *dv = q_registry_lookup_name("distinct", 8, Q_MONADIC), **ap = (ray_t **)ray_data(*a);
+        int64_t an = q_count(*a);
+        if (ap[0] == dv) {
+            ray_t *rest = ray_list_new(an > 1 ? an - 1 : 1);
+            for (int64_t i = 1; i < an; i++) rest = ray_list_append(rest, ap[i]);
+            ray_release(*a);
+            *a = rest;
+        } else if (ap[0] && ap[0]->type == RAY_LIST && q_count(ap[0]) == 2 && ((ray_t **)ray_data(ap[0]))[0] == dv) {
+            ray_t *arg = ((ray_t **)ray_data(ap[0]))[1];
+            ray_retain(arg);
+            *a = ray_list_set(*a, 0, arg);
+            ray_release(arg);
+        } else dist = 0;
+    }
 
     /* ref/delete.md:63: a delete phrase list is "a list of column names" —
      * anything else once slipped through qsql_norm_delete_a as a silent skip,
@@ -1567,7 +1584,6 @@ static P parse_query(Parser *p) {
      * (ref/delete.md's template omits it; kdb rejects at parse) */
     if (qtok_sym_is(cur(p), "by")) {
         if (verb == QSQL_V_DELETE) q_die("qsql: by is not a delete clause");
-        if (dist) q_die("qsql: distinct with by (b is one slot)");
         adv(p);
         *b = parse_phrase_list(p, Q_BY);
         if (q_count(*b) == 0) q_die("qsql: empty by phrase");
