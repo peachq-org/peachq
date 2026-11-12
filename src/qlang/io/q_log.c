@@ -91,8 +91,9 @@ static ray_t* log_pair(int64_t chunks, int64_t valid) {
     return v;
 }
 
-/* limit < 0 = every chunk; eval 0 is the (-2;x) count, which never evaluates. */
-static ray_t* log_scan(log_cur_t* c, int64_t limit, int eval) {
+/* limit < 0 = every chunk; eval 0 is the (-2;x) count, which never evaluates.  `keep` (eval 0) collects the chunks
+ * instead of counting them: `get` of a general-list file, where a torn tail is 'corrupt. */
+static ray_t* log_scan(log_cur_t* c, int64_t limit, int eval, ray_t** keep) {
     int64_t r = 0;
     while (c->len < LOG_HDR && (r = log_fill(c)) > 0) {}
     if (c->len < LOG_HDR) return r < 0 ? log_fill_err(r) : q_err(QE_CORRUPT);
@@ -108,8 +109,15 @@ static ray_t* log_scan(log_cur_t* c, int64_t limit, int eval) {
                 ray_release(v);
                 if (!res || RAY_IS_ERR(res)) return res ? res : q_err(QE_OOM);
                 ray_release(res);
-            } else
+            } else {
+                if (keep) *keep = ray_list_append(*keep, v);
                 ray_release(v);
+                if (keep && (!*keep || RAY_IS_ERR(*keep))) {
+                    ray_t* e = *keep;
+                    *keep = NULL;
+                    return e ? e : q_err(QE_OOM);
+                }
+            }
             off += used;
             n++;
             valid = c->pos + (int64_t)off;
@@ -124,7 +132,7 @@ static ray_t* log_scan(log_cur_t* c, int64_t limit, int eval) {
         if (r < 0 && r != LOG_F_TOOBIG) return log_fill_err(r);
         if (r > 0) continue;
         if (c->len == 0) break;                            /* a clean end: the last chunk closed the file */
-        return eval ? q_err(QE_BADTAIL) : log_pair(n, valid);
+        return keep ? q_err(QE_CORRUPT) : eval ? q_err(QE_BADTAIL) : log_pair(n, valid);
     }
     return ray_i64(n);
 }
@@ -151,8 +159,20 @@ ray_t* q_log_replay(ray_t* y) {
     if (RAY_IS_ERR(path)) return path;
     log_cur_t c;
     ray_t* res = log_open(&c, path);
-    if (!res) res = log_scan(&c, n >= 0 ? n : -1, n != -2);
+    if (!res) res = log_scan(&c, n >= 0 ? n : -1, n != -2, NULL);
     log_close(&c);
     ray_release(path);
     return res;
+}
+
+ray_t* q_log_records(ray_t* pathstr) {
+    ray_t* out = ray_list_new(0);
+    if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
+    log_cur_t c;
+    ray_t* res = log_open(&c, pathstr);
+    if (!res) res = log_scan(&c, -1, 0, &out);
+    log_close(&c);
+    if (res && !RAY_IS_ERR(res)) { ray_release(res); return out; }
+    if (out) ray_release(out);
+    return res ? res : q_err(QE_OOM);
 }

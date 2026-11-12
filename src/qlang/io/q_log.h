@@ -11,4 +11,8 @@
  * inside a chunk, the long pair (chunks;validLength) instead of 'badtail. */
 ray_t* q_log_replay(ray_t* y);
 
+/* `get` of a general-list file whose items run past its header count (a log): every item to EOF, decoded by the
+ * same walker as a replay (pathstr borrowed, a RAY_STR).  Owned list, or an error — 'corrupt for a torn tail. */
+ray_t* q_log_records(ray_t* pathstr);
+
 #endif

@@ -169,8 +169,9 @@ ray_t* q_wire_fixed_vec(int8_t t, const uint8_t* p, int64_t count, int swap);
  * QUOTED restored on read; SLICE never restored).  Payloads are always
  * emitted little-endian. */
 int    q_wire_write_obj_ex(q_wire_wbuf_t* b, ray_t* x, int serde);
-/* `mode` bits: Q_WIRE_READ_SERDE = the serde grammar above; Q_WIRE_READ_DISK = an image off disk, whose
- * u/g/p bytes are dropped (a live decode rebuilds them — a disk lane never builds an index on load).
+/* `mode` bits: Q_WIRE_READ_SERDE = the serde grammar above; Q_WIRE_READ_DISK = a shape-A image off disk, whose
+ * attribute bytes are stamped only where the read makes them true without trusting the writer (owner ruling
+ * 2026-11-12, q_attr_stamp_disk): `s`, u and p verified, `g` always — a live decode takes `s` on the sender's word.
  * *value_err (may be NULL) says an error result is the decoded value's own ('badfunc, an unknown
  * primitive's 'nyi, a projection that fails to apply), not a malformed structure. */
 #define Q_WIRE_READ_SERDE 1
