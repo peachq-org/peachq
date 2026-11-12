@@ -669,14 +669,14 @@ typedef struct {
     int    top_err_ok;  /* the TOP-LEVEL object decoded as a wire -128h error */
     int    depth0;      /* g_wire_depth at cursor creation (top-level marker) */
     int    serde;       /* serde mode: ext band on, list collapse off */
-    int    disk;        /* an image off disk: u/g/p bytes dropped, `s` kept */
+    int    disk;        /* an image off disk: every attribute byte verified, `s` included */
     ray_t* verr;        /* the first error that is a value's own, not the structure's (D0731b) */
 } rcur_t;
 
 static int r_need(rcur_t* c, size_t n) { return c->rem >= n; }
 
 static ray_t* rd_attr(rcur_t* c, ray_t* v, uint8_t byte) {
-    return c->disk && byte != 1 ? v : q_attr_stamp_byte(v, byte);
+    return c->disk ? q_attr_stamp_disk(v, byte) : q_attr_stamp_byte(v, byte);
 }
 
 static uint8_t r_u8(rcur_t* c) { uint8_t v = c->p[0]; c->p++; c->rem--; return v; }
@@ -1100,7 +1100,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
                 if (r_cstr(c, &s, &n)) { v->len = i; ray_release(v); return trunc_err("sym vector cell"); }
                 ids[i] = ray_sym_intern(s, n);
             }
-            return rd_attr(c, v, wattrs);             /* `u/`p/`g have no symbol carrier: DROPPED, never lied about */
+            return rd_attr(c, v, wattrs);
         }
         default: {
             uint8_t esz = ray_type_sizes[(uint8_t)t];
@@ -1155,9 +1155,10 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         }
         /* 127 marks the dict itself; the key carries its own byte, but a peer that sends only the tag
          * must not leave `attr` saying `s while the lookup refuses to step (ref/apply.md:308). */
-        if (t == 127) k = q_attr_stamp_trusted(k, 's');
+        if (t == 127) k = c->disk ? q_attr_stamp_disk(k, 1) : q_attr_stamp_trusted(k, 's');
+        int sorted = t == 127 && (!c->disk || (k->attrs & RAY_ATTR_SORTED));
         ray_t* d = ray_dict_new(k, v);                /* consumes both */
-        return t == 127 ? q_attr_stamp_trusted(d, 's') : d;
+        return sorted ? q_attr_stamp_trusted(d, 's') : d;
     }
     case 98: {                                        /* table */
         if (!r_need(c, 2)) return trunc_err("table header");
