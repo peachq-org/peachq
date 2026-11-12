@@ -1,7 +1,9 @@
-/* q_gz — RFC 1952 gzip framing over miniz raw deflate/inflate (see q_gz.h). */
+/* q_gz — the DEFLATE seam over vendored zlib (see q_gz.h). */
 #include "qlang/q_count.h"
 #include "qlang/net/q_gz.h"
-#include "miniz.h"
+#define ZLIB_CONST
+#include "zlib.h"
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,6 +15,10 @@
 #define GZ_FCOMMENT 0x10
 #define GZ_FRESERVED 0xE0   /* bits 5-7 must be zero */
 
+/* zlib counts in uInt (and uLong, 32 bits on Win64), so lengths are fed to it in
+ * chunks of at most this and every count is kept here as a size_t. */
+#define GZ_CHUNK ((size_t)UINT_MAX)
+
 static uint32_t gz_rd32le(const uint8_t* p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
@@ -22,31 +28,91 @@ static void gz_wr32le(uint8_t* p, uint32_t v) {
     p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
 }
 
+static uInt gz_take(size_t* left) {
+    size_t k = *left < GZ_CHUNK ? *left : GZ_CHUNK;
+    *left -= k;
+    return (uInt)k;
+}
+
+/* One deflate stream into a malloc'd buffer with `head` bytes free before it and
+ * `tail` after; *zlen is the stream's width.  memLevel 8 and the default strategy
+ * are deflateInit's, so wbits 15 is compress2 — the call kdb's blocks reproduce.
+ * The buffer starts at half the input and grows; deflate's bytes do not depend on
+ * how its input or output is split. */
+static uint8_t* gz_deflate(const uint8_t* src, size_t n, int level, int wbits,
+                           size_t head, size_t tail, size_t* zlen, const char** err) {
+    z_stream zs;
+    memset(&zs, 0, sizeof zs);
+    if (deflateInit2(&zs, level, Z_DEFLATED, wbits, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        *err = "wsfull"; return NULL;
+    }
+    size_t room = n / 2 + 64, done = 0, in_left = n;
+    uint8_t* out = (uint8_t*)malloc(head + room + tail);
+    zs.next_in = src;
+    int rc = Z_OK;
+    while (out && rc == Z_OK) {
+        if (done == room) {
+            size_t grown = room + room / 2;
+            uint8_t* bigger = grown > room ? (uint8_t*)realloc(out, head + grown + tail) : NULL;
+            if (!bigger) { free(out); out = NULL; break; }
+            out = bigger;
+            room = grown;
+        }
+        if (zs.avail_in == 0) zs.avail_in = gz_take(&in_left);
+        size_t free_out = room - done;
+        zs.next_out = out + head + done;
+        zs.avail_out = gz_take(&free_out);
+        uInt before = zs.avail_out;
+        rc = deflate(&zs, in_left ? Z_NO_FLUSH : Z_FINISH);
+        done += before - zs.avail_out;
+    }
+    deflateEnd(&zs);
+    if (!out || rc != Z_STREAM_END) { free(out); *err = "wsfull"; return NULL; }
+    *zlen = done;
+    return out;
+}
+
+/* One stream from src into out[0..cap): 0 once it ends cleanly (zlib checks the
+ * adler32 of a wbits-15 stream), with *out_len produced and *used consumed.  The
+ * loop ends because zlib answers Z_BUF_ERROR once neither side can move. */
+static int gz_inflate(const uint8_t* src, size_t n, int wbits, uint8_t* out, size_t cap,
+                      size_t* out_len, size_t* used, const char** err) {
+    z_stream zs;
+    memset(&zs, 0, sizeof zs);
+    if (inflateInit2(&zs, wbits) != Z_OK) { *err = "wsfull"; return -1; }
+    size_t in_left = n, out_left = cap;
+    zs.next_in = src;
+    zs.next_out = out;
+    int rc;
+    do {
+        if (zs.avail_in == 0) zs.avail_in = gz_take(&in_left);
+        if (zs.avail_out == 0) zs.avail_out = gz_take(&out_left);
+        rc = inflate(&zs, Z_NO_FLUSH);
+    } while (rc == Z_OK);
+    *out_len = cap - out_left - zs.avail_out;
+    *used = n - in_left - zs.avail_in;
+    inflateEnd(&zs);
+    if (rc == Z_STREAM_END) return 0;
+    *err = rc == Z_MEM_ERROR ? "wsfull" : "domain";
+    return -1;
+}
+
 uint8_t* q_gz_deflate(const uint8_t* src, size_t src_len, int level,
                       size_t* out_len, const char** err) {
     if (level < 1 || level > 9) { *err = "domain"; return NULL; }
-    mz_uint flags =
-        tdefl_create_comp_flags_from_zip_params(level, -15, MZ_DEFAULT_STRATEGY);
     size_t defl_len = 0;
-    /* raw deflate stream (no zlib header) on the heap. */
-    void* defl = tdefl_compress_mem_to_heap(src, src_len, &defl_len, flags);
-    if (!defl) { *err = "wsfull"; return NULL; }
-    if (defl_len > SIZE_MAX - 18) { mz_free(defl); *err = "limit"; return NULL; }
-    size_t total = 10 + defl_len + 8;
-    uint8_t* out = (uint8_t*)malloc(total);
-    if (!out) { mz_free(defl); *err = "wsfull"; return NULL; }
-    /* 10-byte header: magic, CM=deflate, no flags, mtime=0, XFL=0, OS=255. */
+    uint8_t* out = gz_deflate(src, src_len, level, -15, 10, 8, &defl_len, err);
+    if (!out) return NULL;
+    /* 10-byte header: magic, CM=deflate, no flags, mtime=0, XFL=0, OS=255 — by hand,
+     * because zlib's windowBits+16 mode writes the build platform's OS byte. */
     out[0] = 0x1f; out[1] = 0x8b; out[2] = 8; out[3] = 0;
     out[4] = out[5] = out[6] = out[7] = 0;   /* MTIME */
     out[8] = 0;                              /* XFL */
     out[9] = 0xff;                           /* OS = unknown */
-    memcpy(out + 10, defl, defl_len);
-    mz_free(defl);
     /* CRC-32 of the uncompressed data, then ISIZE (input length mod 2^32). */
-    uint32_t crc = (uint32_t)mz_crc32(mz_crc32(0L, NULL, 0), src, src_len);
-    gz_wr32le(out + 10 + defl_len, crc);
+    gz_wr32le(out + 10 + defl_len, (uint32_t)crc32_z(0L, src, src_len));
     gz_wr32le(out + 10 + defl_len + 4, (uint32_t)(src_len & 0xffffffffu));
-    *out_len = total;
+    *out_len = 10 + defl_len + 8;
     *err = NULL;
     return out;
 }
@@ -80,7 +146,7 @@ uint8_t* q_gz_inflate(const uint8_t* src, size_t src_len,
     }
     if (flg & GZ_FHCRC) {
         if (pos + 2 > foot) { *err = "domain"; return NULL; }
-        uint32_t hcrc = (uint32_t)mz_crc32(mz_crc32(0L, NULL, 0), src, pos);
+        uint32_t hcrc = (uint32_t)crc32_z(0L, src, pos);
         if ((hcrc & 0xffff) != ((uint32_t)src[pos] | ((uint32_t)src[pos + 1] << 8))) {
             *err = "domain"; return NULL;
         }
@@ -90,21 +156,16 @@ uint8_t* q_gz_inflate(const uint8_t* src, size_t src_len,
     uint32_t crc_expect = gz_rd32le(src + foot);
     uint32_t isize = gz_rd32le(src + foot + 4);
     if (isize > Q_GZ_MAX_OUTPUT) { *err = "limit"; return NULL; }       /* bomb guard */
-    size_t cap = isize ? isize : 1;                                     /* malloc(0) guard */
-    uint8_t* out = (uint8_t*)malloc(cap);
+    uint8_t* out = (uint8_t*)malloc(isize ? isize : 1);                 /* malloc(0) guard */
     if (!out) { *err = "wsfull"; return NULL; }
-    tinfl_decompressor d;
-    tinfl_init(&d);
-    size_t in_sz = foot - pos;                                          /* deflate payload */
-    size_t out_sz = isize;
-    tinfl_status st = tinfl_decompress(&d, src + pos, &in_sz, out, out, &out_sz,
-                                       TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
+    size_t out_sz = 0, used = 0;
     /* Require: clean finish, exact declared output, and full input consumption
      * (no junk / hidden second member). The fixed buffer bounds a lying ISIZE. */
-    if (st != TINFL_STATUS_DONE || out_sz != isize || in_sz != foot - pos) {
-        free(out); *err = "domain"; return NULL;
+    if (gz_inflate(src + pos, foot - pos, -15, out, isize, &out_sz, &used, err) != 0) {
+        free(out); return NULL;
     }
-    if ((uint32_t)mz_crc32(mz_crc32(0L, NULL, 0), out, out_sz) != crc_expect) {
+    if (out_sz != isize || used != foot - pos) { free(out); *err = "domain"; return NULL; }
+    if ((uint32_t)crc32_z(0L, out, out_sz) != crc_expect) {
         free(out); *err = "domain"; return NULL;
     }
     *out_len = out_sz;
@@ -116,17 +177,7 @@ int q_gz_inflate_zlib(const uint8_t* src, size_t src_len,
                       uint8_t* out, size_t out_cap,
                       size_t* out_len, size_t* consumed, const char** err) {
     if (!src || src_len < 2 || !out || out_cap == 0) { *err = "domain"; return -1; }
-    tinfl_decompressor d;
-    tinfl_init(&d);
-    size_t in_sz = src_len, out_sz = out_cap;
-    /* PARSE_ZLIB_HEADER also consumes and checks the trailing adler32, so a
-     * DONE status means the stream ended cleanly and in_sz is its true width. */
-    tinfl_status st = tinfl_decompress(&d, src, &in_sz, out, out, &out_sz,
-                                       TINFL_FLAG_PARSE_ZLIB_HEADER |
-                                       TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
-    if (st != TINFL_STATUS_DONE) { *err = "domain"; return -1; }
-    *out_len = out_sz;
-    *consumed = in_sz;
+    if (gz_inflate(src, src_len, 15, out, out_cap, out_len, consumed, err) != 0) return -1;
     *err = NULL;
     return 0;
 }
@@ -134,18 +185,7 @@ int q_gz_inflate_zlib(const uint8_t* src, size_t src_len,
 uint8_t* q_gz_deflate_zlib(const uint8_t* src, size_t src_len, int level,
                            size_t* out_len, const char** err) {
     if (level < 0 || level > 9) { *err = "domain"; return NULL; }
-    mz_ulong cap = mz_compressBound((mz_ulong)src_len);
-    uint8_t* p = (uint8_t*)malloc(cap ? cap : 1);
-    if (!p) { *err = "wsfull"; return NULL; }
-    mz_ulong n = cap;
-    /* mz_compress2, not tdefl-to-heap: its stream is the one that matched the
-     * btick2 exemplars byte-for-byte on the anchor case (dissection §5). */
-    if (mz_compress2(p, &n, src, (mz_ulong)src_len, level) != MZ_OK) {
-        free(p);
-        *err = "wsfull";
-        return NULL;
-    }
-    *out_len = (size_t)n;
-    *err = NULL;
+    uint8_t* p = gz_deflate(src, src_len, level, 15, 0, 0, out_len, err);
+    if (p) *err = NULL;
     return p;
 }
