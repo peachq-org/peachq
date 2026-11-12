@@ -26,8 +26,8 @@ void q_fmt_console(ray_t* val, char* buf, size_t bufsz);
 
 /* q_fmt_console into a HEAP buffer grown to fit — the console seam's ONE growth home (REPL
  * auto-echo, `show`).  Nothing is dropped at the DESTINATION buffer, so the truncation a
- * reader sees is `\c`, which shows itself as `..`.  (The renderers still stage each nested
- * ELEMENT through a fixed array of their own — a separate cap, PLAN.md.)  *len is the rendered
+ * reader sees is `\c`, which shows itself as `..`.  (The renderers still stage each list
+ * ITEM through a fixed array of their own, a separate cap; a grid cell grows.)  *len is the rendered
  * length.  CALLER MUST free().  NULL = it could not be produced (allocation failure, or past the
  * growth cap): signal, never print a prefix. */
 char* q_fmt_console_alloc(ray_t* val, size_t* len);
