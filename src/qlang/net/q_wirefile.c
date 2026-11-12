@@ -280,6 +280,179 @@ static ray_t* wf_read_nested(int8_t elem, ray_t* path, const uint8_t* off, int64
     return out;
 }
 
+/* ---- anymap (type 77) ---------------------------------------------------
+ * `<col>` holds one i64 slot per row, `(tag << 56) | offset` into the arena `<col>#` (a shape D page, then objects);
+ * `<col>##` is the symbol table the arena's i32 symbol indices name.  Grammar (format findings Q7, 65 of 71 heads;
+ * tools/kdbfix/kx.py is the same reading): a long header `fb 00 type attr 01000000 count(8)`, a short header
+ * `0x80|(type-1)` + 1-byte count, or an atom `0x7f - type` + its bytes.  A list (type 0 or 77) and a table (98: names,
+ * then the list of columns) hold slots of their own.  Slot tag 0 or 1 is an offset; tag 3 and a dict object are not
+ * decoded and answer 'nyi, as does any header this grammar does not name.  A child sits after its parent, so no slot
+ * can close a cycle; nesting is capped (WF_ANY_DEPTH; the deepest sampled is 3), and `budget` bounds what a file of shared children
+ * can make the reader build.  An object's attr byte is bare, as in a serialized image: stamped when the read verifies. */
+typedef struct {
+    const uint8_t* a;
+    size_t   n;
+    ray_t*   syms;      /* the `##` vector, NULL when the column has none */
+    int64_t  budget;
+    int      depth;
+} wf_any_t;
+
+#define WF_ANY_LONG  0xfb
+#define WF_ANY_OFF   (((uint64_t)1 << 56) - 1)
+#define WF_ANY_TABLE 98
+#define WF_ANY_DEPTH 64
+
+static ray_t* wf_any_slot(wf_any_t* c, int64_t slot, int64_t parent);
+
+static int wf_any_sym(wf_any_t* c, const uint8_t* p, int64_t* id) {
+    int32_t i;
+    memcpy(&i, p, 4);
+    if (!c->syms || i < 0 || i >= q_count(c->syms)) return 0;
+    *id = ray_vec_get_sym_id(c->syms, i);
+    return 1;
+}
+
+static ray_t* wf_any_syms(wf_any_t* c, const uint8_t* p, int64_t n) {
+    ray_t* v = ray_sym_vec_new(RAY_SYM_W64, n);
+    for (int64_t i = 0; i < n && v && !RAY_IS_ERR(v); i++) {
+        int64_t id;
+        if (!wf_any_sym(c, p + 4 * i, &id)) { ray_release(v); return q_err(QE_CORRUPT); }
+        v = ray_vec_append(v, &id);
+    }
+    return v ? v : q_err(QE_OOM);
+}
+
+/* `n` slots at `p` as a general list: atoms stay boxed, never collapsed to a vector. */
+static ray_t* wf_any_list(wf_any_t* c, const uint8_t* p, int64_t n, int64_t parent) {
+    ray_t* out = ray_list_new(n);
+    for (int64_t i = 0; i < n && out && !RAY_IS_ERR(out); i++) {
+        ray_t* e = wf_any_slot(c, wf_i64(p + 8 * i), parent);
+        if (!e || RAY_IS_ERR(e)) { ray_release(out); return e ? e : q_err(QE_OOM); }
+        out = ray_list_append(out, e);
+        ray_release(e);
+    }
+    return out ? out : q_err(QE_OOM);
+}
+
+static ray_t* wf_any_table(ray_t* pair) {
+    ray_t** kv = (ray_t**)ray_data(pair);
+    ray_t* names = kv[0];
+    ray_t* cols = kv[1];
+    if (names->type != RAY_SYM || cols->type != RAY_LIST || !q_count(names) || q_count(names) != q_count(cols))
+        return q_err(QE_CORRUPT);
+    int64_t nc = q_count(names), rows = -1;
+    ray_t* t = ray_table_new(nc);
+    for (int64_t i = 0; i < nc && t && !RAY_IS_ERR(t); i++) {
+        ray_t* col = ((ray_t**)ray_data(cols))[i];
+        if ((!ray_is_vec(col) && col->type != RAY_LIST) || (rows >= 0 && q_count(col) != rows)) {
+            ray_release(t);
+            return q_err(QE_CORRUPT);
+        }
+        rows = q_count(col);
+        t = ray_table_add_col(t, ray_vec_get_sym_id(names, i), col);
+    }
+    return t ? t : q_err(QE_OOM);
+}
+
+static ray_t* wf_any_obj(wf_any_t* c, size_t o) {
+    if (o >= c->n) return q_err(QE_CORRUPT);
+    const uint8_t* a = c->a + o;
+    size_t room = c->n - o, hdr;
+    uint8_t lead = a[0], attr = 0;
+    int t;
+    int64_t n;
+    if (lead == WF_ANY_LONG) {
+        static const uint8_t one[4] = { 1, 0, 0, 0 };
+        if (room < 16) return q_err(QE_CORRUPT);
+        if (a[1] || memcmp(a + 4, one, 4) != 0) return q_err(QE_NYI);
+        t = (int8_t)a[2]; attr = a[3]; n = wf_i64(a + 8); hdr = 16;
+    } else if (lead & 0x80) {
+        if (room < 2) return q_err(QE_CORRUPT);
+        t = (lead & 0x7f) + 1; n = a[1]; hdr = 2;
+    } else if (lead >= 0x6c && lead <= 0x7e) {
+        t = 0x7f - lead;
+        int8_t tag = t == RAY_SYM ? 0 : wf_simple_tag((uint8_t)t);
+        size_t w = t == RAY_SYM ? 4 : tag ? ray_type_sizes[(uint8_t)tag] : 0;
+        if (!w) return q_err(QE_NYI);
+        if (room < 1 + w) return q_err(QE_CORRUPT);
+        c->budget -= 1 + (int64_t)w;
+        if (c->budget < 0) return q_err(QE_CORRUPT);
+        if (t == RAY_SYM) {
+            int64_t id;
+            return wf_any_sym(c, a + 1, &id) ? ray_sym(id) : q_err(QE_CORRUPT);
+        }
+        ray_t* one = q_wire_fixed_vec(tag, a + 1, 1, 0);
+        if (!one || RAY_IS_ERR(one)) return one ? one : q_err(QE_OOM);
+        ray_t* atom = q_index_elem_at(one, 0);
+        ray_release(one);
+        return atom ? atom : q_err(QE_OOM);
+    } else
+        return q_err(QE_NYI);
+    room -= hdr;
+    int box = t == RAY_LIST || t == WF_NEST_BIAS || t == WF_ANY_TABLE;
+    int8_t tag = box || t == RAY_SYM || t < 0 || t > 0xff ? 0 : wf_simple_tag((uint8_t)t);
+    if (!box && t != RAY_SYM && !tag) return q_err(QE_NYI);
+    size_t w = box ? 8 : t == RAY_SYM ? 4 : ray_type_sizes[(uint8_t)tag];
+    if (n < 0 || (uint64_t)n > room / w) return q_err(QE_CORRUPT);
+    c->budget -= 1 + n * (int64_t)w;
+    if (c->budget < 0) return q_err(QE_CORRUPT);
+    if (t == WF_ANY_TABLE) {
+        if (n != 2) return q_err(QE_CORRUPT);
+        ray_t* pair = wf_any_list(c, a + hdr, 2, (int64_t)o);
+        if (RAY_IS_ERR(pair)) return pair;
+        ray_t* tbl = wf_any_table(pair);
+        ray_release(pair);
+        return tbl;
+    }
+    if (box) return wf_any_list(c, a + hdr, n, (int64_t)o);
+    if (t == RAY_SYM) return q_attr_stamp_disk(wf_any_syms(c, a + hdr, n), attr);
+    return q_attr_stamp_disk(q_wire_fixed_vec(tag, a + hdr, n, 0), attr);
+}
+
+static ray_t* wf_any_slot(wf_any_t* c, int64_t slot, int64_t parent) {
+    uint64_t tag = (uint64_t)slot >> 56, off = (uint64_t)slot & WF_ANY_OFF;
+    if (tag > 1) return q_err(QE_NYI);
+    if (off >= c->n || (int64_t)off <= parent || c->depth >= WF_ANY_DEPTH) return q_err(QE_CORRUPT);
+    c->depth++;
+    ray_t* r = wf_any_obj(c, (size_t)off);
+    c->depth--;
+    return r;
+}
+
+/* The head's header count is usually stale (58 of 71 sampled), so the slots are the file's length — for the reader and
+ * for the splay probe alike. */
+static ray_t* wf_any_count(int64_t* count, size_t room) {
+    *count = (int64_t)(room / 8);
+    return room % 8 ? q_err(QE_CORRUPT) : NULL;
+}
+
+static ray_t* wf_read_anymap(ray_t* path, const uint8_t* slots, size_t room) {
+    int64_t n;
+    if (!path) return q_err(QE_TYPE);
+    ray_t* odd = wf_any_count(&n, room);
+    if (odd) return odd;
+    ray_t* arena = wf_companion(path);
+    if (RAY_IS_ERR(arena)) return arena;
+    const uint8_t* ab = (const uint8_t*)ray_data(arena);
+    size_t alen = (size_t)q_count(arena);
+    ray_t* out = alen >= WF_D_OFF && ab[0] == 0xfd && ab[1] == 0x20 ? NULL : q_err(QE_CORRUPT);
+    ray_t* sp = out ? NULL : wf_join(ray_str_ptr(path), ray_str_len(path), "##", 2);
+    if (!out && !sp) out = q_err(QE_OOM);
+    ray_t* syms = sp && wf_is_file(sp) ? wf_read_path(sp, 0) : NULL;
+    if (sp) ray_release(sp);
+    if (syms && (RAY_IS_ERR(syms) || syms->type != RAY_SYM)) {
+        if (RAY_IS_ERR(syms)) out = syms; else { ray_release(syms); out = q_err(QE_CORRUPT); }
+        syms = NULL;
+    }
+    if (!out) {
+        wf_any_t c = { ab + WF_D_OFF, alen - WF_D_OFF, syms, 4 * (int64_t)alen + 16 * n + WF_D_OFF, 0 };
+        out = wf_any_list(&c, slots, n, -1);
+    }
+    if (syms) ray_release(syms);
+    ray_release(arena);
+    return out;
+}
+
 /* The 2009 32-bit layout (the format doc's `legacy` row; qspec fixtures are the
  * witnesses): 4-byte type and count where B has 1-byte type and count(8), no attr
  * byte, payload at 16 exactly like B — so the mmap lane serves it unchanged.
@@ -306,8 +479,7 @@ static ray_t* wf_read_legacy(const uint8_t* buf, size_t len) {
 static ray_t* wf_read_b(const uint8_t* buf, size_t len, ray_t* path, size_t empty) {
     if (len < WF_B_OFF) return q_err(QE_CORRUPT);
     uint8_t disk = buf[2];
-    /* The bias itself is anymap — an arena plus a `##` intern file, not this. */
-    if (disk == WF_NEST_BIAS) return q_err(QE_NYI);
+    if (disk == WF_NEST_BIAS) return wf_read_anymap(path, buf + WF_B_OFF, len - WF_B_OFF);
     int nested = disk > WF_NEST_BIAS && disk <= WF_NEST_HI;
     int8_t tag = wf_simple_tag(nested ? (uint8_t)(disk - WF_NEST_BIAS) : disk);
     if (!tag) return q_err(QE_TYPE);
@@ -505,12 +677,12 @@ ray_t* q_wirefile_read_column(ray_t* pathstr) {
 /* Shape B / embedded-B tag classification shared by the probe's two arms. */
 static ray_t* wf_probe_b(const uint8_t* hdr, q_wf_colhdr* out) {
     uint8_t disk = hdr[2];
-    if (disk == WF_NEST_BIAS) return q_err(QE_NYI);            /* anymap */
     int nested = disk > WF_NEST_BIAS && disk <= WF_NEST_HI;
     int8_t tag = wf_simple_tag(nested ? (uint8_t)(disk - WF_NEST_BIAS) : disk);
-    if (!tag) return q_err(QE_TYPE);
+    out->anymap = disk == WF_NEST_BIAS;
+    if (!tag && !out->anymap) return q_err(QE_TYPE);
     out->tag = tag;
-    out->nested = (uint8_t)nested;
+    out->nested = (uint8_t)(nested || out->anymap);
     out->disk_attr = hdr[3];
     out->count = wf_i64(hdr + 8);
     return NULL;
@@ -531,7 +703,8 @@ static ray_t* wf_probe_classify(const uint8_t* buf, size_t got, size_t fsz,
         ray_t* e = wf_probe_b(buf, out);
         if (e) return e;
         uint8_t esz = out->nested ? 8 : ray_type_sizes[(uint8_t)out->tag];
-        e = wf_count(&out->count, fsz - WF_B_OFF, esz, out->disk_attr, WF_P0_B);
+        e = out->anymap ? wf_any_count(&out->count, fsz - WF_B_OFF)
+                        : wf_count(&out->count, fsz - WF_B_OFF, esz, out->disk_attr, WF_P0_B);
         if (e) return e;
         out->mappable = !out->nested;
         return NULL;
@@ -554,7 +727,8 @@ static ray_t* wf_probe_classify(const uint8_t* buf, size_t got, size_t fsz,
             ray_t* e = wf_probe_b(desc, out);           /* B header on a D page */
             if (e) return e;
             uint8_t esz = out->nested ? 8 : ray_type_sizes[(uint8_t)out->tag];
-            return wf_count(&out->count, fsz - WF_D_OFF, esz, out->disk_attr, WF_P0_CD);
+            return out->anymap ? wf_any_count(&out->count, fsz - WF_D_OFF)
+                               : wf_count(&out->count, fsz - WF_D_OFF, esz, out->disk_attr, WF_P0_CD);
         }
         const uint8_t* nul = (const uint8_t*)memchr(buf + WF_D_NAME, 0,
                                                     WF_D_DESC - WF_D_NAME);
@@ -948,7 +1122,7 @@ static ray_t* wf_append_path(ray_t* path, ray_t* y) {
     q_wf_colhdr h;
     ray_t* e = q_wirefile_probe(path, &h);
     if (e) { ray_release(y); return e; }
-    if (h.is_enum) { ray_release(y); return q_err(QE_NYI); }   /* enum: won't-do */
+    if (h.is_enum || h.anymap) { ray_release(y); return q_err(QE_NYI); }   /* enum: won't-do; anymap: read only */
     if (h.tag && y->type != h.tag && y->type != -h.tag) {
         ray_release(y);
         return q_err(QE_TYPE);        /* a typed file keeps its element type */

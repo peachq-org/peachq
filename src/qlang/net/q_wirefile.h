@@ -58,6 +58,7 @@ typedef struct {
     int8_t  tag;
     uint8_t disk_attr;
     uint8_t nested;
+    uint8_t anymap;        /* type 77: slots into `<col>#`; nested is set too, tag is 0 */
     uint8_t is_enum;
     uint8_t zipped;
     uint8_t mappable;
