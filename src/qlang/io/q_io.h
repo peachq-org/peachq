@@ -102,9 +102,10 @@ typedef struct {
     int64_t  block_size;
     int64_t  num_blocks;
     int64_t  payload;      /* compressed bytes, magic excluded */
-    int32_t  algorithm;
+    int32_t  algorithm;    /* the tail's REQUESTED codec; algs[k] is what block k holds */
     int32_t  level;
-    int64_t* ends;         /* cumulative compressed END of each block; malloc'd */
+    int64_t* ends;         /* cumulative compressed END of each block; malloc'd, algs rides the same block */
+    int32_t* algs;
 } q_io_zipmap_t;
 
 /* Parse a container's tail header + block boundaries into *zm (free the
@@ -127,10 +128,12 @@ size_t q_io_zipmap_maxblock(const q_io_zipmap_t* zm);
 int    q_io_zip_block_fd(int fd, const q_io_zipmap_t* zm, int64_t k,
                          uint8_t* scratch, uint8_t* dst, size_t cap);
 
-/* Write `img` as a container: 2^lbs blocks, each an independent zlib stream
- * (gzip alg 2 only — others 'nyi; a deflate that does not pay writes the
- * alg-0 wrapper).  NULL on success or an owned error. */
+/* Write `img` as a container: 2^lbs blocks, each an independent zlib stream (alg 2) or raw lz4hc block (alg 4);
+ * others 'nyi.  A block compression does not pay for is stored (alg 0).  NULL on success or an owned error. */
 ray_t* q_io_zip_write(ray_t* pathstr, const uint8_t* img, size_t n,
                       int lbs, int alg, int lvl);
+
+/* A q long saturated to an int, so a (lbs;alg;lvl) cell past the int range is refused or clamped as itself. */
+int q_io_zip_param(int64_t v);
 
 #endif /* Q_IO_H */
