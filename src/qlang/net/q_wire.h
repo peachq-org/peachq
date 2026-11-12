@@ -121,8 +121,12 @@ ray_t* q_wire_compress(ray_t* frame);
 
 /* Decompress a compressed frame's payload (the bytes AFTER the 8-byte
  * header).  Bounds-checked against corrupt/bomb frames ('domain).  Returns
- * an owned RAY_U8 holding the uncompressed payload, or a RAY_ERROR. */
+ * an owned byte vector holding the uncompressed payload, or a RAY_ERROR. */
 ray_t* q_wire_uncompress_payload(const uint8_t* pl, size_t plen, int frame_be);
+
+/* The same payload decoded into the caller's `cap` bytes: allocation-free and async-signal-safe (the splay fault
+ * handler decodes kxzipped algorithm-1 blocks with it).  The uncompressed length, or -1 for a corrupt stream. */
+int64_t q_wire_uncompress_into(const uint8_t* pl, size_t plen, int frame_be, uint8_t* out, size_t cap);
 
 /* ---- payload-only entry points (Phase B serde v5 / Phase C ipc.c) ---- */
 

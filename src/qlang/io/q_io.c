@@ -20,6 +20,7 @@
 #include "qlang/q_env.h"        /* q_env_get — `.h.tx`, the format table `set` reads at call time */
 #include "qlang/net/q_gz.h"     /* q_gz_inflate_zlib — the kxzip block codec */
 #include "lz4hc.h"               /* the lz4hc (algorithm 4) block codec */
+#include "qlang/net/q_wire.h"   /* q_wire_uncompress_into — the kdb-IPC (algorithm 1) block codec */
 #include "qlang/net/q_wirefile.h" /* the format writers behind q_io_set */
 #include "qlang/net/q_http_client.h" /* the http half of the resource-read seam */
 #include "lang/eval.h"      /* ray_eval_get_restricted */
@@ -417,18 +418,26 @@ static ray_t* zip_trailer(const uint8_t* t, int64_t nb, size_t file_len, zip_hdr
 static ray_t* zip_codecs(const uint8_t* t, int64_t nb) {
     for (int64_t k = 0; k < nb; k++) {
         int32_t a = zip_balg(t, k);
-        if (a != ZIP_NONE && a != ZIP_GZIP && a != ZIP_LZ4) return q_err(QE_NYI);
+        if (a != ZIP_NONE && a != ZIP_IPC && a != ZIP_GZIP && a != ZIP_LZ4) return q_err(QE_NYI);
     }
     return NULL;
 }
 
-/* One block into exactly `plain` bytes: 0, else -1.  A zlib or lz4 stream must end exactly at the block's end. */
+/* An algorithm-1 block is one whole compressed IPC message: 01 00 01 00, its own length, then the payload. */
+static int zip_ipc_decode(const uint8_t* src, size_t clen, uint8_t* dst, size_t plain) {
+    static const uint8_t head[4] = { 1, 0, 1, 0 };
+    if (clen < 12 || memcmp(src, head, 4) != 0 || (uint32_t)io_i32(src + 4) != clen) return -1;
+    return q_wire_uncompress_into(src + 8, clen - 8, 0, dst, plain) == (int64_t)plain ? 0 : -1;
+}
+
+/* One block into exactly `plain` bytes: 0, else -1.  A zlib, lz4 or IPC stream must end exactly at the block's end. */
 static int zip_block_decode(int32_t alg, const uint8_t* src, size_t clen, uint8_t* dst, size_t plain) {
     if (alg == ZIP_NONE) {
         if (clen != plain) return -1;
         memcpy(dst, src, plain);
         return 0;
     }
+    if (alg == ZIP_IPC) return zip_ipc_decode(src, clen, dst, plain);
     if (alg == ZIP_LZ4)
         return LZ4_decompress_safe((const char*)src, (char*)dst, (int)clen, (int)plain) == (int)plain ? 0 : -1;
     size_t got = 0, used = 0;

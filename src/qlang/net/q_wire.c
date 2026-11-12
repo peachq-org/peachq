@@ -1410,60 +1410,65 @@ ray_t* q_wire_compress(ray_t* frame) {
     return out;
 }
 
-/* Decompress a compressed frame's PAYLOAD (bytes after the 8-byte header:
- * uint32 uncompressed total, then tokens).  Inbound bytes are attacker-
- * controlled: the claimed size is capped, and every stream read / output write
- * is bounds-checked — corrupt frames return 'domain, never scribble. */
-ray_t* q_wire_uncompress_payload(const uint8_t* pl, size_t plen, int frame_be) {
-    if (plen < 6)
-        return q_err(QE_DOMAIN);
-    uint32_t usz = frame_be
-        ? ((uint32_t)pl[0] << 24 | (uint32_t)pl[1] << 16 | (uint32_t)pl[2] << 8 | pl[3])
-        : ((uint32_t)pl[3] << 24 | (uint32_t)pl[2] << 16 | (uint32_t)pl[1] << 8 | pl[0]);
-    if (usz < 9 || usz > Q_WIRE_MSG_MAX)
-        return q_err(QE_DOMAIN);
+static uint32_t wire_usz(const uint8_t* pl, int frame_be) {
+    return frame_be ? ((uint32_t)pl[0] << 24 | (uint32_t)pl[1] << 16 | (uint32_t)pl[2] << 8 | pl[3])
+                    : ((uint32_t)pl[3] << 24 | (uint32_t)pl[2] << 16 | (uint32_t)pl[1] << 8 | pl[0]);
+}
+
+/* c.java indexes one whole-frame buffer whose [0..8) header is never written: position x of it is out[x - 8], and a
+ * back-reference an unset table entry sends below 8 reads zero.  Inbound bytes are attacker-controlled: every stream
+ * read and output write is bounds-checked. */
+int64_t q_wire_uncompress_into(const uint8_t* pl, size_t plen, int frame_be, uint8_t* out, size_t cap) {
+    if (plen < 6) return -1;
+    uint32_t usz = wire_usz(pl, frame_be);
+    if (usz < 9 || usz > Q_WIRE_MSG_MAX || (size_t)usz - 8 > cap) return -1;
     /* bomb guard: a back-reference token is 2 stream bytes writing at most 257 (c.java u()) */
-    if ((uint64_t)usz - 8 > (uint64_t)((plen - 4) / 2) * 257)
-        return q_err(QE_DOMAIN);
-    /* dst mirrors c.java's whole-frame buffer: [0..8) is the never-written
-     * header region, zeroed so a corrupt back-reference reads zeros in-bounds. */
-    uint8_t* dst = (uint8_t*)ray_alloc_raw(usz);
-    if (!dst) return q_err(QE_WSFULL);
-    memset(dst, 0, 8);
+    if ((uint64_t)usz - 8 > (uint64_t)((plen - 4) / 2) * 257) return -1;
     size_t n = 0, r = 0, f = 0, s = 8, p = 8, d = 4;
     uint32_t i = 0;
     size_t aa[256] = {0};
     while (s < usz) {
         if (i == 0) {
-            if (d >= plen) goto corrupt;
+            if (d >= plen) return -1;
             f = pl[d++];
             i = 1;
         }
         if (f & i) {
-            if (d >= plen || s + 2 > usz) goto corrupt;
+            if (d + 1 >= plen || s + 2 > usz) return -1;
             r = aa[pl[d++]];
-            dst[s++] = dst[r++];
-            dst[s++] = dst[r++];
-            if (d >= plen) goto corrupt;
             n = pl[d++];
-            if (s + n > usz) goto corrupt;
-            for (size_t m = 0; m < n; m++) dst[s + m] = dst[r + m];
+            if (s + 2 + n > usz) return -1;
+            if (r >= 8) for (size_t m = 0; m < 2 + n; m++) out[s + m - 8] = out[r + m - 8];
+            else for (size_t m = 0; m < 2 + n; m++) out[s + m - 8] = r + m < 8 ? 0 : out[r + m - 8];
+            s += 2;
         } else {
-            if (d >= plen) goto corrupt;
-            dst[s++] = pl[d++];
+            if (d >= plen) return -1;
+            out[s++ - 8] = pl[d++];
         }
-        while (p < s - 1) { aa[dst[p] ^ dst[p + 1]] = p; p++; }
+        while (p < s - 1) { aa[out[p - 8] ^ out[p - 7]] = p; p++; }
         if (f & i) p = s += n;
         i *= 2;
         if (i == 256) i = 0;
     }
-    if (d != plen) goto corrupt;    /* whole-stream consumption, like raw frames */
-    ray_t* out = ray_vec_from_raw(RAY_BYTE_ONLY, dst + 8, (int64_t)(usz - 8));
+    return d == plen ? (int64_t)usz - 8 : -1;   /* whole-stream consumption, like raw frames */
+}
+
+/* Decompress a compressed frame's PAYLOAD (bytes after the 8-byte header: uint32 uncompressed total, then tokens).
+ * The claimed size is capped; a corrupt frame returns 'domain, never scribbles. */
+ray_t* q_wire_uncompress_payload(const uint8_t* pl, size_t plen, int frame_be) {
+    if (plen < 6)
+        return q_err(QE_DOMAIN);
+    uint32_t usz = wire_usz(pl, frame_be);
+    if (usz < 9 || usz > Q_WIRE_MSG_MAX)
+        return q_err(QE_DOMAIN);
+    if ((uint64_t)usz - 8 > (uint64_t)((plen - 4) / 2) * 257)
+        return q_err(QE_DOMAIN);
+    uint8_t* dst = (uint8_t*)ray_alloc_raw(usz - 8);
+    if (!dst) return q_err(QE_WSFULL);
+    ray_t* out = q_wire_uncompress_into(pl, plen, frame_be, dst, usz - 8) < 0
+                     ? q_err(QE_DOMAIN) : ray_vec_from_raw(RAY_BYTE_ONLY, dst, (int64_t)(usz - 8));
     ray_free_raw(dst);
     return out;
-corrupt:
-    ray_free_raw(dst);
-    return q_err(QE_DOMAIN);
 }
 
 ray_t* q_wire_deserialize(ray_t* bytes) { return q_wire_deserialize_ex(bytes, NULL); }
