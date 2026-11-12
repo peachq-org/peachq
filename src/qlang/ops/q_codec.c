@@ -246,12 +246,21 @@ ray_t* q_dotq_sha1_fn(ray_t* x) {
     return ray_vec_from_raw(RAY_BYTE_ONLY, digest, 20);
 }
 
+static ray_t* gz_result_like(ray_t* in, uint8_t* out, size_t olen) {
+    int text = in->type == -RAY_STR || in->type == RAY_CHARV || in->type == -RAY_CHARV;
+    ray_t* r = text ? ray_charv((const char*)out, (int64_t)olen)
+                    : ray_vec_from_raw(RAY_BYTE_ONLY, out, (int64_t)olen);
+    free(out);
+    return r ? r : q_err(QE_WSFULL);
+}
+
 /* (.Q.c.gz x) — GZip (ref/dotq.md). x is one of:
  *   general null (::)  → 1b   (capability is embedded; owner-ratified divergence
  *                              from the doc's "whether Zlib is loaded")
- *   char/byte vector   → the INFLATED vector (string→string atom, bytes→byte vec)
- *   2-list (cl;cbv)    → the DEFLATED BYTE vector (gzip bytes contain NULs; a
- *                        pre-C3 string atom can't carry them), cl a long 1..9.
+ *   char/byte vector   → the INFLATED vector
+ *   2-list (cl;cbv)    → the DEFLATED vector, cl a long 1..9
+ * Both answer the type of the vector given, so a string round-trips as a string
+ * (ref/dotq.md's `.Q.gz .Q.gz(9;10000#"helloworld")` prints the string).
  * A VARY (not unary): the VM's op_call1 null gate hard-whitelists only nil/type,
  * so a unary here could never see the general null; the VARY apply path has no
  * such gate, so `.Q.gz[::]` reaches this fn as `::` and answers the capability.
@@ -272,18 +281,12 @@ ray_t* q_dotq_gz_fn(ray_t** args, int64_t argc) {
         size_t olen = 0; const char* err = NULL;
         uint8_t* out = q_gz_deflate(p, n, (int)cl->i64, &olen, &err);
         if (!out) return ray_error(err ? err : "wsfull", NULL);
-        ray_t* r = ray_vec_from_raw(RAY_BYTE_ONLY, out, (int64_t)olen);
-        free(out);
-        return r ? r : q_err(QE_WSFULL);
+        return gz_result_like(cbv, out, olen);
     }
     const uint8_t* p; size_t n;                          /* inflate */
     if (!codec_bytes_of(x, &p, &n)) return q_err(QE_TYPE);
     size_t olen = 0; const char* err = NULL;
     uint8_t* out = q_gz_inflate(p, n, &olen, &err);
     if (!out) return ray_error(err ? err : "domain", NULL);
-    int textin = x->type == -RAY_STR || x->type == RAY_CHARV || x->type == -RAY_CHARV;
-    ray_t* r = textin ? ray_charv((const char*)out, (int64_t)olen)
-                      : ray_vec_from_raw(RAY_BYTE_ONLY, out, (int64_t)olen);
-    free(out);
-    return r ? r : q_err(QE_WSFULL);
+    return gz_result_like(x, out, olen);
 }

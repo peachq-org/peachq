@@ -11,7 +11,7 @@ RAY_LIB_SRC   = $(filter-out $(RAY_ENTRY_SRC), $(wildcard src/*/*.c src/qlang/ev
 
 RAY_VENDOR_SRC = third_party/yyjson/yyjson.c \
                  third_party/picohttpparser/picohttpparser.c \
-                 third_party/miniz/miniz.c \
+                 $(addprefix third_party/zlib/,adler32.c crc32.c deflate.c inffast.c inflate.c inftrees.c trees.c zutil.c) \
                  third_party/md4c/md4c.c third_party/md4c/md4c-html.c third_party/md4c/entity.c \
                  third_party/xxhash/xxhash.c third_party/murmurhash3/MurmurHash3.c
 
@@ -34,16 +34,13 @@ LIBFFI_NATIVE_OBJ = $(addprefix $(BUILD_DIR)/third_party/libffi/src/x86/,ffi64.o
 QFFI_DEF          = -DRAY_FFI=1
 endif
 
-# q_gz.c hand-rolls RFC 1952 framing: miniz has no gzip windowBits+16 mode.
-RAY_MINIZ_DEFS = -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_ARCHIVE_WRITING_APIS -DMINIZ_NO_STDIO
-
 BUILD_DIR ?= build
 # Generated headers land in $(BUILD_DIR)/gen (never the source tree); its -I
 # sits AHEAD of -Isrc so every `#include "qlang/X_gen.h"` line stays byte-identical.
 GEN_DIR = $(BUILD_DIR)/gen
 
 RAY_INCLUDES = -Iinclude -I$(GEN_DIR) -Isrc \
-               -Ithird_party/yyjson -Ithird_party/picohttpparser -Ithird_party/miniz -Ithird_party/md4c \
+               -Ithird_party/yyjson -Ithird_party/picohttpparser -Ithird_party/zlib -Ithird_party/md4c \
                -Ithird_party/xxhash -Ithird_party/rapidhash -Ithird_party/murmurhash3
 
 RAY_GEN_HDRS = $(GEN_DIR)/qlang/dotq_gen.h $(GEN_DIR)/qlang/h_gen.h \
@@ -208,10 +205,6 @@ $(BUILD_DIR)/third_party/%.o: third_party/%.c
 	@mkdir -p $(dir $@)
 	$(CC) -c $(filter-out -Wextra,$(CFLAGS)) -Wno-error $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
-$(BUILD_DIR)/third_party/miniz/miniz.o: third_party/miniz/miniz.c
-	@mkdir -p $(dir $@)
-	$(CC) -c $(filter-out -Wextra,$(CFLAGS)) -Wno-error $(RAY_MINIZ_DEFS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
-
 $(BUILD_DIR)/third_party/libffi/%.o: third_party/libffi/%.c
 	@mkdir -p $(dir $@)
 	$(CC) -c $(filter-out -Wextra,$(CFLAGS)) -Wno-error $(DEPFLAGS) $(FFI_INC) -o $@ $<
@@ -353,10 +346,6 @@ WIN_DEPS = $(WIN_LIB_OBJ:.o=.d) $(WIN_Q_MAIN_OBJ:.o=.d)
 $(BUILD_DIR)/third_party/%.win.o: third_party/%.c
 	@mkdir -p $(dir $@)
 	$(WIN_CC) -c $(filter-out -Wextra,$(WIN_CFLAGS)) -Wno-error $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
-
-$(BUILD_DIR)/third_party/miniz/miniz.win.o: third_party/miniz/miniz.c
-	@mkdir -p $(dir $@)
-	$(WIN_CC) -c $(filter-out -Wextra,$(WIN_CFLAGS)) -Wno-error $(RAY_MINIZ_DEFS) $(DEPFLAGS) $(DEFS) $(INCLUDES) -o $@ $<
 
 $(BUILD_DIR)/third_party/libffi/%.win.o: third_party/libffi/%.c
 	@mkdir -p $(dir $@)
