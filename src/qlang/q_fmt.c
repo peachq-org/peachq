@@ -269,19 +269,62 @@ static size_t char_esc(unsigned char ch, char out[8]);   /* fwd — fmt_dict_ele
 static int elem_tok(ray_t* a, char* out, size_t n);      /* fwd — THE cell law, defined below */
 static int col_uniform_type(ray_t* col);                 /* fwd — its precondition */
 
+/* A token that fills its buffer is read as a cut one; an exact fit costs the caller one retry. */
+static int tok_filled(const char* out, size_t n) { return strlen(out) + 1 >= n; }
+
 /* Tables: every cell, the last column's too, pads to its column width, so each line is as wide as its dashed rule;
  * keyed tables put key columns left of `|`. */
 
 #define QF_MAXCOL 64
-#define QF_CELL   64
-#define QF_DICTV  1024
+#define QF_CELL   256   /* a cell's stack stage; a wider cell grows on the heap */
+#define QF_TOK    64    /* no number, temporal or guid token is longer: a render that ran out of room stops within this */
+
+/* Growth cap: 16 MiB of rendered text.  A `\c`-armed display cannot approach it (rows*cols is
+ * capped at 2000*2000), so it binds only the deliberately unclipped paths. */
+#define FMT_GROW_MAX (1u << 24)
+
+/* A cell's staging text.  Only the `\c` clip may cut a cell, and it says so with `..` (peachq-org/peachq#119), so the
+ * stage grows while the render reports dropped bytes: to the visible line when one is set (cols; a cell that wide
+ * already forces the `..`), else whole.  `lost` = bytes dropped that nothing will mark, which the caller reports. */
+typedef struct { char* s; size_t cap, lim; int lost; char st[QF_CELL]; } qcell;
+
+static void qcell_init(qcell* b, int64_t cols) {
+    b->s = b->st; b->cap = sizeof b->st; b->lost = 0; b->st[0] = '\0';
+    b->lim = (cols > 0 && cols + QF_TOK < FMT_GROW_MAX) ? (size_t)cols + QF_TOK : FMT_GROW_MAX;
+}
+
+static void qcell_done(qcell* b, int* trunc) {
+    if (b->lost && trunc) *trunc = 1;
+    if (b->s != b->st) free(b->s);
+}
+
+static int qcell_reserve(qcell* b, size_t need) {
+    if (need <= b->cap) return 1;
+    char* nb = need <= FMT_GROW_MAX ? malloc(need) : NULL;
+    if (!nb) { b->lost = 1; return 0; }
+    if (b->s != b->st) free(b->s);
+    b->s = nb; b->cap = need; nb[0] = '\0';
+    return 1;
+}
+
+/* After a cut render: 1 = wider, render again. */
+static int qcell_grow(qcell* b) {
+    if (b->cap < b->lim) return qcell_reserve(b, b->cap * 2 < b->lim ? b->cap * 2 : b->lim);
+    if (b->lim == FMT_GROW_MAX) b->lost = 1;
+    return 0;
+}
+
+static void fmt_into(ray_t* val, char* buf, size_t bufsz, int* trunc);         /* fwd */
+static void fmt_krepr_into(ray_t* val, char* buf, size_t bufsz, int* trunc);   /* fwd */
 
 /* THE inline-cell law (ref/trim.md, ref/dotq.md:1655): a dict row, a table
  * cell and a list-row cell are ELEMENTS, and an element renders single-line —
- * every NON-ATOM via the k-repr renderer, never the top-level layout. */
-static void fmt_elem_inline(ray_t* e, char* out, size_t cap) {
-    if (e && !RAY_IS_ERR(e) && !ray_is_atom(e)) q_fmt_krepr(e, out, cap);
-    else q_fmt(e, out, cap);
+ * every NON-ATOM via the k-repr renderer, never the top-level layout.  Non-zero = cut for want of room. */
+static int fmt_elem_inline(ray_t* e, char* out, size_t cap) {
+    int cut = 0;
+    if (e && !RAY_IS_ERR(e) && !ray_is_atom(e)) fmt_krepr_into(e, out, cap, &cut);
+    else fmt_into(e, out, cap, &cut);
+    return cut;
 }
 
 /* Uniformly-singleton nested column collapses (`1| 10`); mixed keeps `,50`. */
@@ -305,7 +348,7 @@ static int col_uniform_singleton(ray_t* col) {
  * list keeps its token, and so does the generic null `::` in any cell (owner
  * witness 2026-10-08).  A cell sheds the suffix only where the CONTAINER names
  * the type — `col_uniform_type`, the same gate the dict rows use. */
-void q_fmt_cell(ray_t* col, int64_t row, int blank_null, char* out, size_t outsz) {
+static int cell_into(ray_t* col, int64_t row, int blank_null, char* out, size_t outsz) {
     out[0] = '\0';
     if (col && col->type == -RAY_STR) {     /* char-column shim: bare char */
         size_t l = ray_str_len(col);
@@ -313,22 +356,23 @@ void q_fmt_cell(ray_t* col, int64_t row, int blank_null, char* out, size_t outsz
             out[0] = ray_str_ptr(col)[row];
             out[1] = '\0';
         }
-        return;
+        return 0;
     }
     if (col && col->type == RAY_CHARV) {    /* char column: bare char cell */
         if (row >= 0 && row < q_count(col) && outsz > 1) {
             out[0] = ((const char*)ray_data(col))[row];
             out[1] = '\0';
         }
-        return;
+        return 0;
     }
     if (col && col->type == RAY_ENUM) {     /* enum cell by DOMAIN SHAPE (R5):
                                              * value-list domain -> resolved
                                              * value; reference/unbound -> the
                                              * raw position */
-        if (row < 0 || row >= q_count(col)) return;
+        if (row < 0 || row >= q_count(col)) return 0;
         int64_t p = ((const int64_t*)ray_data(col))[row];
-        if (p == NULL_I64) return;          /* null position: gap, like a null cell */
+        if (p == NULL_I64) return 0;        /* null position: gap, like a null cell */
+        int cut = 0;
         ray_t* e1 = q_enum_stamp(ray_i64(p), q_enum_domain(col));
         ray_t* s = (e1 && !RAY_IS_ERR(e1)) ? q_enum_resolve(e1) : NULL;
         if (e1 && !RAY_IS_ERR(e1)) ray_release(e1);
@@ -340,44 +384,60 @@ void q_fmt_cell(ray_t* col, int64_t row, int blank_null, char* out, size_t outsz
                                              * their value */
                 ray_t* nm = ray_sym_str(s->i64);
                 if (nm) {
-                    snprintf(out, outsz, "%.*s", (int)ray_str_len(nm), ray_str_ptr(nm));
+                    cut = (size_t)snprintf(out, outsz, "%.*s", (int)ray_str_len(nm), ray_str_ptr(nm)) >= outsz;
                     ray_release(nm);
                 }
             } else
-                fmt_elem_inline(s, out, outsz);
+                cut = fmt_elem_inline(s, out, outsz);
             ray_release(s);
         } else
             snprintf(out, outsz, "%lld", (long long)p);
-        return;
+        return cut;
     }
     ray_t* ia = ray_i64(row);
     ray_t* c  = ray_at_fn(col, ia);
     ray_release(ia);
-    if (!c || RAY_IS_ERR(c)) { if (c) ray_release(c); return; }
+    if (!c || RAY_IS_ERR(c)) { if (c) ray_release(c); return 0; }
     if (blank_null && q_type_is_empty_list(c)) {
         ray_release(c);
-        return;
+        return 0;
     }
     if (blank_null && ray_is_atom(c) && c->type != -RAY_STR &&
         c->type != -RAY_SYM && !Q_IS_GENERIC_NULL(c) && RAY_ATOM_IS_NULL(c)) {
         ray_release(c);
-        return;
+        return 0;
     }
-    if (!col_uniform_type(col) || !elem_tok(c, out, outsz)) {
-        fmt_elem_inline(c, out, outsz);
+    int cut;
+    if (col_uniform_type(col) && elem_tok(c, out, outsz)) cut = tok_filled(out, outsz);
+    else {
+        cut = fmt_elem_inline(c, out, outsz);
         if (out[0] == ',' && col_uniform_singleton(col))
             memmove(out, out + 1, strlen(out));
     }
     ray_release(c);
+    return cut;
+}
+
+void q_fmt_cell(ray_t* col, int64_t row, int blank_null, char* out, size_t outsz) {
+    (void)cell_into(col, row, blank_null, out, outsz);
+}
+
+/* The cell whole, or as wide as b may get. */
+static const char* cell_text(ray_t* col, int64_t row, qcell* b) {
+    while (cell_into(col, row, 1, b->s, b->cap) && qcell_grow(b)) {}
+    return b->s;
 }
 
 /* One side of a table-sided dict: a table is its columns, any other list is ONE headerless column. */
 static int64_t side_ncols(ray_t* x) { return x->type == RAY_TABLE ? ray_table_ncols(x) : 1; }
 static ray_t* side_col(ray_t* x, int64_t c) { return x->type == RAY_TABLE ? ray_table_get_col_idx(x, c) : x; }
 
-static void side_name(ray_t* x, int64_t c, char* out, size_t n) {
+static void side_name(ray_t* x, int64_t c, qcell* b) {
     ray_t* s = x->type == RAY_TABLE ? ray_sym_str(ray_table_col_name(x, c)) : NULL;
-    snprintf(out, n, "%.*s", s ? (int)ray_str_len(s) : 0, s ? ray_str_ptr(s) : "");
+    size_t l = s ? ray_str_len(s) : 0;
+    if (!qcell_reserve(b, l + 1)) l = 0;
+    if (l) memcpy(b->s, ray_str_ptr(s), l);
+    b->s[l] = '\0';
     if (s) ray_release(s);
 }
 
@@ -395,9 +455,9 @@ typedef struct { int64_t n; int* w; int st[16]; } col_mx;
 static int is_matrix(ray_t** e, int64_t n);   /* fwd */
 static int* matrix_widths(ray_t** e, int64_t nr, int64_t nc, int blank_null, int64_t lim, int64_t* nw,
                           int* stackw, int64_t stackn);   /* fwd */
-static void matrix_row_str(ray_t* row, int64_t nc, const int* w, char* out, size_t outsz);   /* fwd */
+static int matrix_row_str(ray_t* row, int64_t nc, const int* w, char* out, size_t outsz);   /* fwd */
 
-static void col_mx_init(col_mx* m, ray_t* col, int64_t nr) {
+static void col_mx_init(col_mx* m, ray_t* col, int64_t nr, size_t lim) {
     m->n = 0; m->w = NULL;
     int64_t n = col && col->type == RAY_LIST ? q_count(col) : 0;
     ray_t** e = n > 0 ? (ray_t**)ray_data(col) : NULL;
@@ -405,7 +465,7 @@ static void col_mx_init(col_mx* m, ray_t* col, int64_t nr) {
         if (!e[i] || e[i]->type <= 0 || e[i]->type == RAY_LIST) return;
     if (!e || !is_matrix(e, n)) return;
     int64_t nw;
-    m->w = matrix_widths(e, nr, q_count(e[0]), 1, QF_CELL - 1, &nw, m->st, 16);
+    m->w = matrix_widths(e, nr, q_count(e[0]), 1, (int64_t)lim, &nw, m->st, 16);
     if (m->w) m->n = nw;
 }
 
@@ -414,38 +474,46 @@ static void col_mx_free(col_mx* m, int64_t nc) {
         if (m[c].w != m[c].st) free(m[c].w);
 }
 
-static void col_cell(ray_t* col, const col_mx* m, int64_t r, char* out, size_t n) {
-    if (m->n) matrix_row_str(((ray_t**)ray_data(col))[r], m->n, m->w, out, n);
-    else q_fmt_cell(col, r, 1, out, n);
+static const char* col_cell(ray_t* col, const col_mx* m, int64_t r, qcell* b) {
+    if (!m->n) return cell_text(col, r, b);
+    while (matrix_row_str(((ray_t**)ray_data(col))[r], m->n, m->w, b->s, b->cap) && qcell_grow(b)) {}
+    return b->s;
 }
 
-static void table_widths(ray_t* tbl, int64_t nc, int64_t nr,
-                           int* widths, char hdr[][64], col_mx* mx) {
+/* Sizes nc columns over nr rows and stages their names in hdr[0..nc), which table_grid_done frees. */
+static void table_widths(ray_t* tbl, int64_t nc, int64_t nr, int* widths, qcell* hdr, col_mx* mx) {
+    qcell cb;
+    qcell_init(&cb, qe_clip_cols());
     for (int64_t c = 0; c < nc; c++) {
-        side_name(tbl, c, hdr[c], 64);
-        int w = (int)strlen(hdr[c]);
+        qcell_init(&hdr[c], 0);
+        side_name(tbl, c, &hdr[c]);
+        int w = (int)strlen(hdr[c].s);
         ray_t* col = side_col(tbl, c);
-        col_mx_init(&mx[c], col, nr);
+        col_mx_init(&mx[c], col, nr, cb.lim);
         for (int64_t r = 0; r < nr; r++) {
-            char cb[QF_CELL]; col_cell(col, &mx[c], r, cb, sizeof cb);
-            int l = (int)strlen(cb); if (l > w) w = l;
+            int l = (int)strlen(col_cell(col, &mx[c], r, &cb)); if (l > w) w = l;
         }
         widths[c] = w;
     }
+    qcell_done(&cb, &qe_top()->trunc);
 }
 
-static void table_grid(int64_t nc, const int* widths, char hdr[][64]) {
+static void table_grid(int64_t nc, const int* widths, const qcell* hdr) {
     for (int64_t c = 0; c < nc; c++) {
         if (c) qe_putc(' ');
-        qe_pad(hdr[c], widths[c]);
+        qe_pad(hdr[c].s, widths[c]);
     }
 }
 
-static void grid_cells(ray_t* t, int64_t nc, const int* w, const col_mx* mx, int64_t r) {
+static void table_grid_done(qcell* hdr, col_mx* mx, int64_t nc) {
+    for (int64_t c = 0; c < nc; c++) qcell_done(&hdr[c], &qe_top()->trunc);
+    col_mx_free(mx, nc);
+}
+
+static void grid_cells(ray_t* t, int64_t nc, const int* w, const col_mx* mx, int64_t r, qcell* cb) {
     for (int64_t c = 0; c < nc; c++) {
         if (c) qe_putc(' ');
-        char cb[QF_CELL]; col_cell(side_col(t, c), &mx[c], r, cb, sizeof cb);
-        qe_pad(cb, w[c]);
+        qe_pad(col_cell(side_col(t, c), &mx[c], r, cb), w[c]);
     }
 }
 
@@ -466,7 +534,7 @@ static void q_fmt_table(ray_t* tbl) {
     if (nc <= 0) { qe_puts("+`!()"); return; }   /* empty schema */
     if (nc > QF_MAXCOL) nc = QF_MAXCOL;
     int  widths[QF_MAXCOL];
-    char hdr[QF_MAXCOL][64];
+    qcell hdr[QF_MAXCOL], cb;
     col_mx mx[QF_MAXCOL];
     table_widths(tbl, nc, size_rows(nr), widths, hdr, mx);
 
@@ -474,12 +542,14 @@ static void q_fmt_table(ray_t* tbl) {
     qe_putc('\n');
     grid_rule(nc, widths);
     if (nr) qe_putc('\n');
+    qcell_init(&cb, qe_clip_cols());
     for (int64_t r = 0; r < nr; r++) {
-        grid_cells(tbl, nc, widths, mx, r);
+        grid_cells(tbl, nc, widths, mx, r, &cb);
         if (r + 1 < nr) qe_putc('\n');
         if (qe_done()) break;                    /* height cap hit — early exit */
     }
-    col_mx_free(mx, nc);
+    qcell_done(&cb, &qe_top()->trunc);
+    table_grid_done(hdr, mx, nc);
 }
 
 static void fmt_keyed(ray_t* kt, ray_t* vt) {
@@ -489,7 +559,7 @@ static void fmt_keyed(ray_t* kt, ray_t* vt) {
     if (knc > QF_MAXCOL) knc = QF_MAXCOL;
     if (vnc > QF_MAXCOL) vnc = QF_MAXCOL;
     int  kw[QF_MAXCOL], vw[QF_MAXCOL];
-    char kh[QF_MAXCOL][64], vh[QF_MAXCOL][64];
+    qcell kh[QF_MAXCOL], vh[QF_MAXCOL], cb;
     col_mx km[QF_MAXCOL], vm[QF_MAXCOL];
     table_widths(kt, knc, size_rows(nr), kw, kh, km);
     table_widths(vt, vnc, size_rows(nr), vw, vh, vm);
@@ -502,15 +572,17 @@ static void fmt_keyed(ray_t* kt, ray_t* vt) {
     qe_putc('|'); qe_putc(' ');
     grid_rule(vnc, vw);
     if (nr) qe_putc('\n');
+    qcell_init(&cb, qe_clip_cols());
     for (int64_t r = 0; r < nr; r++) {
-        grid_cells(kt, knc, kw, km, r);
+        grid_cells(kt, knc, kw, km, r, &cb);
         qe_putc('|'); qe_putc(' ');
-        grid_cells(vt, vnc, vw, vm, r);
+        grid_cells(vt, vnc, vw, vm, r, &cb);
         if (r + 1 < nr) qe_putc('\n');
         if (qe_done()) break;                    /* height cap hit — early exit */
     }
-    col_mx_free(km, knc);
-    col_mx_free(vm, vnc);
+    qcell_done(&cb, &qe_top()->trunc);
+    table_grid_done(kh, km, knc);
+    table_grid_done(vh, vm, vnc);
 }
 
 /* Integer-backed sentinels (kdb datatypes table): MIN->0N, MAX->0W, -MAX->-0W, + suffix (0=bare).
@@ -559,6 +631,16 @@ void q_fmt_float(double v, int f32, char* out, size_t n) {
     snprintf(out, n, "%.48s%s", mag, f32 ? "e" : "");
 }
 
+/* The DISPLAY float token: q_fmt_float, plus the sign of a negative zero (`-0f`, `-0 1f`, `-0e`: q 5's console in
+ * kdb-q-ext-vscode test/fixtures/corpus.ipc.json:149-150,161).  The bits are read, since the release build compiles
+ * with -fno-signed-zeros; `string` keeps q_fmt_float's unsigned "0". */
+static void float_tok(double v, int f32, char* out, size_t n) {
+    uint64_t bits;
+    memcpy(&bits, &v, sizeof bits);
+    if (bits == UINT64_C(1) << 63) snprintf(out, n, f32 ? "-0e" : "-0");
+    else q_fmt_float(v, f32, out, n);
+}
+
 /* An f32 token is payload + `e` (`0Ne`, `0we`, `1.5e`) — drop the letter where
  * the CONTAINER prints it instead. */
 static void real_shed_e(char* out) {
@@ -593,12 +675,20 @@ static void date_payload(int64_t v, char* out, size_t n) {
     tok_via_atom(ray_date(v), out, n);
 }
 
-/* Month payload: months since 2000.01; outside year [1,9999] -> `0000.00`. */
+/* Month payload: months since 2000.01; outside year [0,9999] -> `0000.00`.  Year 0 keeps its month (`month$-23989` is
+ * `0000.12m`: q 5, kdb-q-ext-vscode test/fixtures/corpus.ipc.json:36). */
 static void month_payload(int64_t p, char* out, size_t n) {
     int64_t y = 2000 + (p >= 0 ? p / 12 : -((-p + 11) / 12));
     int64_t m = 1 + (p % 12 + 12) % 12;
-    if (y < 1 || y > 9999) { snprintf(out, n, "0000.00"); return; }
+    if (y < 0 || y > 9999) { snprintf(out, n, "0000.00"); return; }
     snprintf(out, n, "%04lld.%02lld", (long long)y, (long long)m);
+}
+
+/* Minute payload: an hour count past two digits prints `**` (`"u"$6000` is `**:00`: q 5, kdb-q-ext-vscode
+ * test/fixtures/corpus.ipc.json:37).  Only the minute type and only the positive side are witnessed. */
+static void minute_payload(int64_t v, char* out, size_t n) {
+    if (v < 6000) tok_via_atom(ray_minute(v), out, n);
+    else snprintf(out, n, "**:%02lld", (long long)(v % 60));
 }
 
 /* GUID: 8-4-4-4-12 lowercase hex; null = zero UUID, never 0Ng (datatypes.md). */
@@ -646,7 +736,7 @@ static const q_ttok_t Q_TTOK[] = {
     { RAY_DATE,      0,   4, NULL,          date_payload },
     { RAY_MONTH,     1,   4, NULL,          month_payload },
     { RAY_TIME,      0,   4, ray_time,      NULL },
-    { RAY_MINUTE,    0,   4, ray_minute,    NULL },
+    { RAY_MINUTE,    0,   4, NULL,          minute_payload },
     { RAY_SECOND,    0,   4, ray_second,    NULL },
     { RAY_TIMESPAN,  0,   8, ray_timespan,  NULL },
     { RAY_TIMESTAMP, 0,   8, ray_timestamp, NULL },
@@ -701,12 +791,12 @@ static int atom_tok(ray_t* a, int suffixed, char* out, size_t n) {
     case -RAY_I64:       int_tok(a->i64,          8, 0, out, n);     return 1;
     case -RAY_F32:
         /* the value form narrows through float first; the element form never has */
-        q_fmt_float(suffixed ? (double)(float)a->f64 : a->f64, 1, out, n);
+        float_tok(suffixed ? (double)(float)a->f64 : a->f64, 1, out, n);
         /* the container carries the `e`; a SENTINEL keeps its own (`0Ne`/`0we`) */
         if (!suffixed && isfinite(a->f64)) real_shed_e(out);
         return 1;
     case -RAY_F64:
-        q_fmt_float(a->f64, 0, out, n);
+        float_tok(a->f64, 0, out, n);
         /* digit-only tokens take `f` (`5f`); `3e+11` self-identifies */
         if (suffixed && fmt_tok_is_bare_int(out)) tok_append(out, n, 'f');
         return 1;
@@ -752,19 +842,19 @@ static int col_uniform_type(ray_t* col) {
  * The char atom is the exception: bare like a sym key but via char_esc, keeping
  * control/non-ASCII bytes safe (#320) — an escape a grid cell must not carry,
  * char_esc also quoting `"`. */
-static void fmt_dict_elem(ray_t* col, ray_t* e, char* out, size_t cap) {
+static int fmt_dict_elem(ray_t* col, ray_t* e, char* out, size_t cap) {
     out[0] = '\0';
-    if (!e || RAY_IS_ERR(e)) return;
+    if (!e || RAY_IS_ERR(e)) return 0;
     if (col_uniform_type(col)) {
         if (e->type == -RAY_CHARV) {
             char esc[8];
             size_t el = char_esc(e->u8, esc);
             if (el < cap) { memcpy(out, esc, el); out[el] = '\0'; }
-            return;
+            return 0;
         }
-        if (elem_tok(e, out, cap)) return;
+        if (elem_tok(e, out, cap)) return tok_filled(out, cap);
     }
-    fmt_elem_inline(e, out, cap);
+    return fmt_elem_inline(e, out, cap);
 }
 
 static void qe_join(const char* tok, int first) {
@@ -872,34 +962,34 @@ static int row_all_sym(ray_t* v) {
 /* One cell of an aligned row.  A TYPED row's cell IS a column cell — same owner.
  * Only the BOXED row differs: `bare` (row_all_sym, once per row by the caller)
  * decides a sym's backtick, and a boxed atom keeps its suffix. */
-static void matrix_cell(ray_t* rv, int64_t c, int bare, int blank_null,
-                        char* out, size_t outsz) {
-    if (rv->type != RAY_LIST) { q_fmt_cell(rv, c, blank_null, out, outsz); return; }
+static int matrix_cell(ray_t* rv, int64_t c, int bare, int blank_null,
+                       char* out, size_t outsz) {
+    if (rv->type != RAY_LIST) return cell_into(rv, c, blank_null, out, outsz);
     out[0] = '\0';
     ray_t* a = ((ray_t**)ray_data(rv))[c];
-    if (!a) return;
+    if (!a) return 0;
     if (a->type == -RAY_SYM) {
         ray_t* s = ray_sym_str(a->i64);   /* borrowed */
         const char* tick = bare ? "" : "`";
-        if (s) snprintf(out, outsz, "%s%.*s", tick,
-                        (int)ray_str_len(s), ray_str_ptr(s));
-    } else if (a->type == -RAY_STR) {
-        if (ray_str_len(a) == 1 && outsz > 1) {
-            out[0] = ',';
-            fmt_qstring(a, out + 1, outsz - 1);
-        } else
-            fmt_qstring(a, out, outsz);
-    } else if (a->type == -RAY_CHARV) {
-        fmt_qtext((const char*)&a->u8, 1, out, outsz);
-    } else if (a->type == RAY_CHARV) {
-        if (q_count(a) == 1 && outsz > 1) {
-            out[0] = ',';
-            fmt_qtext((const char*)ray_data(a), 1, out + 1, outsz - 1);
-        } else
-            fmt_qtext((const char*)ray_data(a), (size_t) q_count(a), out,
-                      outsz);
-    } else
-        fmt_elem_inline(a, out, outsz);
+        return s && (size_t)snprintf(out, outsz, "%s%.*s", tick, (int)ray_str_len(s), ray_str_ptr(s)) >= outsz;
+    }
+    if (a->type == -RAY_STR) {
+        if (ray_str_len(a) != 1 || outsz <= 1) return fmt_qstring(a, out, outsz);
+        out[0] = ',';
+        return fmt_qstring(a, out + 1, outsz - 1);
+    }
+    if (a->type == -RAY_CHARV) return fmt_qtext((const char*)&a->u8, 1, out, outsz);
+    if (a->type == RAY_CHARV) {
+        if (q_count(a) != 1 || outsz <= 1) return fmt_qtext((const char*)ray_data(a), (size_t)q_count(a), out, outsz);
+        out[0] = ',';
+        return fmt_qtext((const char*)ray_data(a), 1, out + 1, outsz - 1);
+    }
+    return fmt_elem_inline(a, out, outsz);
+}
+
+static const char* matrix_cell_text(ray_t* rv, int64_t c, int bare, int blank_null, qcell* b) {
+    while (matrix_cell(rv, c, bare, blank_null, b->s, b->cap) && qcell_grow(b)) {}
+    return b->s;
 }
 
 /* A boxed row aligns when its cells agree on ONE display class — all collections,
@@ -929,22 +1019,27 @@ static int matrix_row_ok(ray_t* r) {
 
 /* One row into a buffer: cells space-joined, each padded to w[c] (w NULL =
  * unpadded); trailing pad trimmed.  THE row renderer for the dict value column,
- * which IS a column — hence blank_null. */
-static void matrix_row_str(ray_t* row, int64_t nc, const int* w,
-                           char* out, size_t outsz) {
+ * which IS a column — hence blank_null.  Non-zero = cut for want of room. */
+static int matrix_row_str(ray_t* row, int64_t nc, const int* w,
+                          char* out, size_t outsz) {
     size_t pos = 0;
-    int bare = row_all_sym(row);
-    out[0] = '\0';
-    for (int64_t c = 0; c < nc && pos + 1 < outsz; c++) {
-        char cb[512]; matrix_cell(row, c, bare, 1, cb, sizeof cb);
-        if (c && pos + 1 < outsz) out[pos++] = ' ';
-        int l = (int)strlen(cb);
+    int bare = row_all_sym(row), cut = 0;
+    qcell cb;
+    qcell_init(&cb, qe_clip_cols());
+    for (int64_t c = 0; c < nc && !cut; c++) {
+        const char* s = matrix_cell_text(row, c, bare, 1, &cb);
+        int l = (int)strlen(s);
         int pad = w ? w[c] : l;
-        for (int k = 0; k < pad && pos + 1 < outsz; k++)
-            out[pos++] = (k < l) ? cb[k] : ' ';
+        if (c && pos + 1 < outsz) out[pos++] = ' ';
+        for (int k = 0; k < pad && !cut; k++) {
+            if (pos + 1 < outsz) out[pos++] = (k < l) ? s[k] : ' ';
+            else cut = 1;
+        }
     }
+    qcell_done(&cb, &qe_top()->trunc);
     while (pos > 0 && out[pos - 1] == ' ') pos--;
     out[pos] = '\0';
+    return cut;
 }
 
 /* e[0..n) is >=1 same-length alignable rows: a LEFT-aligned matrix (ref/mmu.md).
@@ -987,14 +1082,16 @@ static int* matrix_widths(ray_t** e, int64_t nr, int64_t nc, int blank_null, int
     }
     for (int64_t r = 0; r < nr; r++) bare[r] = (char)row_all_sym(e[r]);
     int64_t c = 0, start = 0;
+    qcell cb;
+    qcell_init(&cb, qe_clip_cols());
     for (; c < cap && (!lim || start < lim); c++) {
         w[c] = 0;
         for (int64_t r = 0; r < nr; r++) {
-            char cb[512]; matrix_cell(e[r], c, bare[r], blank_null, cb, sizeof cb);
-            int l = (int)strlen(cb); if (l > w[c]) w[c] = l;
+            int l = (int)strlen(matrix_cell_text(e[r], c, bare[r], blank_null, &cb)); if (l > w[c]) w[c] = l;
         }
         start += w[c] + 1;
     }
+    qcell_done(&cb, &qe_top()->trunc);
     *nw = c;
     if (bare != bst) free(bare);
     return w;
@@ -1007,21 +1104,23 @@ static void fmt_matrix(ray_t** e, int64_t nr) {
     int  stackw[64];
     int* widths = matrix_widths(e, size_rows(nr), nc, 0, qe_clip_cols(), &nw, stackw, 64);
     if (!widths) return;
+    qcell cb;
+    qcell_init(&cb, qe_clip_cols());
     for (int64_t r = 0; r < nr; r++) {
         if (qe_done()) break;                    /* height cap hit — early exit */
         if (r) qe_putc('\n');
         int bare = row_all_sym(e[r]);
         for (int64_t c = 0; c < nw; c++) {
             if (c) qe_putc(' ');
-            char cb[512]; matrix_cell(e[r], c, bare, 0, cb, sizeof cb);
-            qe_pad(cb, widths[c]);                    /* left-align */
+            qe_pad(matrix_cell_text(e[r], c, bare, 0, &cb), widths[c]);   /* left-align */
         }
         for (int64_t c = nw; c < nc; c++) {          /* unsized columns start past the edge: only the `..` asks */
-            char cb[512]; matrix_cell(e[r], c, bare, 0, cb, sizeof cb);
-            if (cb[strspn(cb, " ")]) { qe_putc(' '); qe_puts(cb); break; }
+            const char* s = matrix_cell_text(e[r], c, bare, 0, &cb);
+            if (s[strspn(s, " ")]) { qe_putc(' '); qe_puts(s); break; }
         }
         qe_trim();                                    /* no trailing spaces */
     }
+    qcell_done(&cb, &qe_top()->trunc);
     if (widths != stackw) free(widths);
 }
 
@@ -1061,7 +1160,6 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
 
 #define QP_MAXCOL   64
 #define QP_CELL     64
-#define QP_LINE     8192   /* >= QP_MAXCOL * (QP_CELL + 3) */
 #define QP_DIGEST   2      /* digest line cap (spec decision 6) */
 #define QP_DGLINE   2048
 #define QP_DIST_CAP 10000  /* bounded distinct (spec decision 7 = DBHelper MAX_SIZE) */
@@ -1100,7 +1198,7 @@ static void qp_line(qp_out* o, const char* s, int32_t cols) {
 
 /* ---- columns ------------------------------------------------------------- */
 
-typedef struct { ray_t* col; char name[QP_CELL]; const char* type; } qp_col;
+typedef struct { ray_t* col; ray_t* side; int64_t at; char name[QP_CELL]; const char* type; } qp_col;
 
 /* Type-row name via q_type_qname (the cast home); char-column shim = `char`
  * (as `key x` names it); a nested/mixed list has no vector-type name — blank. */
@@ -1114,7 +1212,13 @@ static const char* qp_typename(ray_t* col) {
 static int64_t qp_take(ray_t* t, qp_col* cs, int64_t at, int64_t max) {
     int64_t nc = side_ncols(t);
     for (int64_t c = 0; c < nc && at < max; c++, at++) {
-        side_name(t, c, cs[at].name, QP_CELL);
+        qcell nm;
+        qcell_init(&nm, 0);
+        side_name(t, c, &nm);
+        snprintf(cs[at].name, QP_CELL, "%s", nm.s);  /* the digest's short name; the grid reads side/at whole */
+        qcell_done(&nm, NULL);
+        cs[at].side = t;                             /* borrowed */
+        cs[at].at   = c;
         cs[at].col  = side_col(t, c);                /* borrowed */
         cs[at].type = qp_typename(cs[at].col);
     }
@@ -1144,15 +1248,14 @@ static int64_t qp_ncols(ray_t* val) {
          : side_ncols(ray_dict_keys(val)) + side_ncols(ray_dict_vals(val));
 }
 
-static void qp_widths(qp_col* cs, int64_t nc, int64_t shown, int* w) {
+static void qp_widths(qp_col* cs, int64_t nc, int64_t shown, int* w, qcell* cb) {
     for (int64_t c = 0; c < nc; c++) {
-        int m = (int)strlen(cs[c].name);
+        side_name(cs[c].side, cs[c].at, cb);
+        int m = (int)strlen(cb->s);
         int t = (int)strlen(cs[c].type);
         if (t > m) m = t;
         for (int64_t r = 0; r < shown; r++) {
-            char cb[QP_CELL];
-            q_fmt_cell(cs[c].col, r, 1, cb, sizeof cb);
-            int l = (int)strlen(cb);
+            int l = (int)strlen(cell_text(cs[c].col, r, cb));
             if (l > m) m = l;
         }
         w[c] = m;
@@ -1368,12 +1471,12 @@ static void qp_bar(char* line, size_t lsz, const int* w, int64_t nc, int64_t nk)
     line[p] = '\0';
 }
 
-static void qp_cells(char* line, size_t lsz, char (*cells)[QP_CELL],
-                     const int* w, int64_t nc) {
-    size_t p = 0;
-    for (int64_t c = 0; c < nc && p + 1 < lsz; c++)
-        p += (size_t)snprintf(line + p, lsz - p, "| %-*s ", w[c], cells[c]);
-    if (p + 1 < lsz) { line[p++] = '|'; line[p] = '\0'; }
+/* One `| cell ` onto the line at *p, or the closing `|` (s NULL); a line longer than its stage ends there, and the
+ * `\c` cut in qp_line marks it. */
+static void qp_cell(char* line, size_t lsz, size_t* p, const char* s, int w) {
+    if (*p + 1 >= lsz) return;
+    *p += s ? (size_t)snprintf(line + *p, lsz - *p, "| %-*s ", w, s) : (size_t)snprintf(line + *p, lsz - *p, "|");
+    if (*p >= lsz) *p = lsz - 1;
 }
 
 static void fmt_pipe_render(ray_t* val, char* buf, size_t bufsz, int* trunc) {
@@ -1405,41 +1508,51 @@ static void fmt_pipe_render(ray_t* val, char* buf, size_t bufsz, int* trunc) {
         if (shown < 1) shown = 1;
     }
 
-    int w[QP_MAXCOL];
-    qp_widths(cs, nc, shown, w);
+    int   w[QP_MAXCOL];
+    qcell cb;
+    qcell_init(&cb, cols);
+    qp_widths(cs, nc, shown, w, &cb);
 
-    char line[QP_LINE], cells[QP_MAXCOL][QP_CELL];
-    for (int64_t c = 0; c < nc; c++)
-        snprintf(cells[c], QP_CELL, "%s", cs[c].name);
-    qp_cells(line, sizeof line, cells, w, nc);
+    /* a grid line is staged only as far as it shows: two bytes past `\c`, which is what makes qp_line cut it */
+    size_t lsz = 64;
+    for (int64_t c = 0; c < nc; c++) lsz += (size_t)w[c] + 3;
+    if (cols > 0 && lsz > (size_t)cols + 2) lsz = (size_t)cols + 2;
+    char* line = lsz <= FMT_GROW_MAX ? malloc(lsz) : NULL;
+    if (!line) { qcell_done(&cb, trunc); *trunc = 1; return; }
+    size_t p = 0;
+
+    for (int64_t c = 0; c < nc; c++) { side_name(cs[c].side, cs[c].at, &cb); qp_cell(line, lsz, &p, cb.s, w[c]); }
+    qp_cell(line, lsz, &p, NULL, 0);
     qp_line(&o, line, cols);
     bool cols_hidden = cols > 0 && strlen(line) > (size_t)(cols - 1);
 
-    for (int64_t c = 0; c < nc; c++)
-        snprintf(cells[c], QP_CELL, "%s", cs[c].type);
-    qp_cells(line, sizeof line, cells, w, nc);
+    p = 0;
+    for (int64_t c = 0; c < nc; c++) qp_cell(line, lsz, &p, cs[c].type, w[c]);
+    qp_cell(line, lsz, &p, NULL, 0);
     qp_line(&o, line, cols);
 
-    qp_bar(line, sizeof line, w, nc, nk);
+    qp_bar(line, lsz, w, nc, nk);
     qp_line(&o, line, cols);
 
     for (int64_t r = 0; r < shown; r++) {
-        for (int64_t c = 0; c < nc; c++)
-            q_fmt_cell(cs[c].col, r, 1, cells[c], QP_CELL);
-        qp_cells(line, sizeof line, cells, w, nc);
+        p = 0;
+        for (int64_t c = 0; c < nc; c++) qp_cell(line, lsz, &p, cell_text(cs[c].col, r, &cb), w[c]);
+        qp_cell(line, lsz, &p, NULL, 0);
         qp_line(&o, line, cols);
     }
 
     if (clipped) {
         int64_t mc = qp_ncols(val);
         if (cols_hidden || mc > 8)
-            snprintf(line, sizeof line, "... %lld rows, %lld cols", (long long)nr, (long long)mc);
+            snprintf(line, lsz, "... %lld rows, %lld cols", (long long)nr, (long long)mc);
         else
-            snprintf(line, sizeof line, "... %lld rows", (long long)nr);
+            snprintf(line, lsz, "... %lld rows", (long long)nr);
         qp_line(&o, line, cols);
         for (int i = 0; i < dn; i++) qp_line(&o, dl[i], cols);
     }
+    free(line);
     *trunc = o.trunc;
+    qcell_done(&cb, trunc);
 }
 
 
@@ -1604,6 +1717,12 @@ static void fmt_list_elem(ray_t* e) {
     char elem[2048]; elem[0] = '\0';
     q_fmt_krepr(e, elem, sizeof elem);
     qe_puts(elem);
+}
+
+/* `()`, or a one-item list of such: a nest of enlists round the empty list has nothing to put on its line. */
+static int item_shows_nothing(ray_t* v) {
+    while (v && v->type == RAY_LIST && q_count(v) == 1) v = ((ray_t**)ray_data(v))[0];
+    return q_type_is_empty_list(v);
 }
 
 static void q_fmt_body(ray_t* val) {
@@ -1792,7 +1911,7 @@ static void q_fmt_body(ray_t* val) {
             double v = is64 ? ((const double*)ray_data(val))[i]
                             : (double)((const float*)ray_data(val))[i];
             char e[64];
-            q_fmt_float(v, !is64, e, sizeof e);
+            float_tok(v, !is64, e, sizeof e);
             /* the f32 token minus its letter: `0N` — NOT f64's `0n` — 0w 1.5 */
             if (!is64) real_shed_e(e);
             qe_join(e, i == 0);
@@ -1814,7 +1933,6 @@ static void q_fmt_body(ray_t* val) {
             ray_t* s = ray_sym_vec_cell(val, i);   /* borrowed -RAY_STR */
             const char* nm = ray_str_ptr(s);
             size_t l = ray_str_len(s);
-            if (!qe_fits(1 + l)) break;
             qe_putc('`');
             qe_putn(nm, l);
         }
@@ -1866,10 +1984,13 @@ static void q_fmt_body(ray_t* val) {
         int  dstackw[64];
         int* dw = NULL;
         int64_t dnc = 0;
+        qcell kb, vb;
+        qcell_init(&kb, qe_clip_cols());
+        qcell_init(&vb, qe_clip_cols());
         if (v && v->type == RAY_LIST && q_count(v) == n &&
             is_matrix((ray_t**)ray_data(v), n)) {
             dnc = q_count(((ray_t **)ray_data(v))[0]);
-            dw  = matrix_widths((ray_t**)ray_data(v), n_size, dnc, 1, QF_DICTV - 1, &dnc, dstackw, 64);
+            dw  = matrix_widths((ray_t**)ray_data(v), n_size, dnc, 1, (int64_t)vb.lim, &dnc, dstackw, 64);
         } else if (v && v->type == RAY_LIST && q_count(v) == n && n > 0) {
             /* UNIFORM zero-length rows are zero padded columns — blank, where
              * the ragged dict keeps `()` (ref/dotq.md:1322 vs :1655) */
@@ -1884,35 +2005,40 @@ static void q_fmt_body(ray_t* val) {
                 ray_t* ia = ray_i64(i);
                 ray_t* ke = ray_at_fn(k, ia);
                 ray_release(ia);
-                char kb[256]; kb[0] = '\0';
-                fmt_dict_elem(k, ke, kb, sizeof kb);
+                while (fmt_dict_elem(k, ke, kb.s, kb.cap) && qcell_grow(&kb)) {}
                 if (ke && !RAY_IS_ERR(ke)) ray_release(ke);
-                size_t kl = strlen(kb);
+                size_t kl = strlen(kb.s);
                 if (pass == 0) {
                     if (kl > maxk) maxk = kl;
                     continue;
                 }
-                char vb[QF_DICTV]; vb[0] = '\0';
+                ray_t* ve = NULL;
+                vb.s[0] = '\0';
                 if (dw) {
-                    matrix_row_str(((ray_t**)ray_data(v))[i], dnc, dw, vb, sizeof vb);
-                    size_t aneed = (i ? 1 : 0) + maxk + 2 + strlen(vb);
-                    if (!qe_fits(aneed)) break;
-                    qe_printf("%s%-*s| %s", i ? "\n" : "", (int)maxk, kb, vb);
-                    continue;
+                    while (matrix_row_str(((ray_t**)ray_data(v))[i], dnc, dw, vb.s, vb.cap) && qcell_grow(&vb)) {}
+                } else {
+                    ray_t* ja = ray_i64(i);
+                    ve = v ? ray_at_fn(v, ja) : NULL;
+                    ray_release(ja);
+                    if (ve && RAY_IS_ERR(ve)) { ray_release(ve); ve = NULL; }
+                    /* len-1 strings render "c" NOT ,"c" (list/first pins `c| "h"`); a carrier renders after the bar */
+                    while (ve && ve->type != RAY_QFN && fmt_dict_elem(v, ve, vb.s, vb.cap) && qcell_grow(&vb)) {}
                 }
-                ray_t* ja = ray_i64(i);
-                ray_t* ve = v ? ray_at_fn(v, ja) : NULL;
-                ray_release(ja);
-                /* len-1 strings render "c" NOT ,"c" (list/first pins `c| "h"`) */
-                int car = ve && !RAY_IS_ERR(ve) && ve->type == RAY_QFN;
-                if (ve && !RAY_IS_ERR(ve) && !car) fmt_dict_elem(v, ve, vb, sizeof vb);
-                size_t need = (i ? 1 : 0) + maxk + 2 + strlen(vb);
-                if (!qe_fits(need)) { if (ve && !RAY_IS_ERR(ve)) ray_release(ve); break; }
-                qe_printf("%s%-*s| %s", i ? "\n" : "", (int)maxk, kb, vb);
-                if (car) fmt_render(ve);
-                if (ve && !RAY_IS_ERR(ve)) ray_release(ve);
+                int fits = qe_fits((i ? 1 : 0) + (kl > maxk ? kl : maxk) + 2 + strlen(vb.s));
+                if (fits) {
+                    if (i) qe_putc('\n');
+                    qe_puts(kb.s);
+                    for (size_t j = kl; j < maxk; j++) qe_putc(' ');
+                    qe_puts("| ");
+                    qe_puts(vb.s);
+                    if (ve && ve->type == RAY_QFN) fmt_render(ve);
+                }
+                if (ve) ray_release(ve);
+                if (!fits) break;
             }
         }
+        qcell_done(&kb, &qe_top()->trunc);
+        qcell_done(&vb, &qe_top()->trunc);
         if (dw && dw != dstackw) free(dw);
         return;
     }
@@ -1923,7 +2049,9 @@ static void q_fmt_body(ray_t* val) {
      * iteration.md pins nested items inline `(110b;0b)`) — where a lone item
      * prints `,x` unless it is a string: the string-list idiom at one row
      * (ref/system.md:46 `system "pwd"` -> "/home/guest/q"), a function or an
-     * empty vector (peachq-org/peachq#88: kdb prints `{value}`, `byte$()). */
+     * empty vector (peachq-org/peachq#88: kdb prints `{value}`, `byte$()), the
+     * generic null (ref/identity.md:80 `enlist {1;}[]` -> `::`), or an item that
+     * itself shows as nothing, whose line is empty (peachq-org/peachq#121). */
     if (val->type == RAY_LIST) {
         int64_t n = q_count(val);
         ray_t** e = (ray_t**)ray_data(val);
@@ -1937,8 +2065,8 @@ static void q_fmt_body(ray_t* val) {
             if (is_tb) return;
         }
         if (is_matrix(e, n)) { fmt_matrix(e, n); return; }
-        if (n == 1 && e[0] && e[0]->type != RAY_CHARV
-            && (!q_type_is_fn(e[0]) || Q_IS_GENERIC_NULL(e[0]))
+        if (n == 1 && item_shows_nothing(e[0])) return;
+        if (n == 1 && e[0] && e[0]->type != RAY_CHARV && !q_type_is_fn(e[0])
             && !(ray_is_vec(e[0]) && q_count(e[0]) == 0)) {   /* enlist: ,x */
             qe_putc(',');
             fmt_list_elem(e[0]);
@@ -2114,19 +2242,15 @@ void q_fmt_krepr(ray_t* val, char* buf, size_t bufsz) {
     fmt_krepr_into(val, buf, bufsz, &tr);
 }
 
-/* Growth cap: 16 MiB of rendered text.  A `\c`-armed display cannot approach it (rows*cols is
- * capped at 2000*2000), so it binds only the deliberately unclipped paths. */
-#define FMT_GROW_MAX (1u << 24)
-
 /* THE growth home: render into a heap buffer big enough for the WHOLE display, and hand it over
  * with *len set.  NULL means it could not be produced (allocation failure, or past the cap) —
  * never a silent prefix.  Grows while the render REPORTS it dropped bytes, which every write into
  * the DESTINATION now answers exactly: comparing rendered LENGTHS instead would be unsound, because
  * the unclipped renderer SKIPS a whole token it cannot fit (qe_fits) and so can produce the same
  * length at two capacities and far more at a third — a long enough symbol made `-3!` answer "".
- * The report does NOT cover a renderer's own fixed per-ELEMENT staging in the DISPLAY grid: a
- * bigger destination cannot fix a per-element cap, so reporting one would only run growth to the
- * cap.  Those stagers are bounded by `\c` (cols <= 2000, and the clip cannot be switched off). */
+ * The report does NOT cover the fixed per-ELEMENT staging of a list item or a k-form line: a bigger
+ * destination cannot fix a per-element cap, so reporting one would only run growth to the cap.
+ * A grid cell and a dict row are not among them: their stage grows (qcell). */
 static char* fmt_grow(void (*render)(ray_t*, char*, size_t, int*), ray_t* val, size_t* len) {
     size_t cap = 8192;
     char*  buf = malloc(cap);
@@ -2151,7 +2275,10 @@ bool q_fmt_shows_nothing(ray_t* val) {
 
 ray_t* q_fmt_display_charv(ray_t* val, int modern) {
     size_t len;
-    char*  buf = fmt_grow(modern ? fmt_modern_into : fmt_classic_into, val, &len);
+    /* kdb's `.Q.s enlist(::)` is ",::\n" where its console prints `::` (peachq-org/peachq#121) */
+    int lone_null = !modern && val && val->type == RAY_LIST && q_count(val) == 1
+                    && Q_IS_GENERIC_NULL(((ray_t**)ray_data(val))[0]);
+    char*  buf = fmt_grow(lone_null ? fmt_krepr_into : modern ? fmt_modern_into : fmt_classic_into, val, &len);
     if (!buf) return q_err(QE_WSFULL);
     char* nb = realloc(buf, len + 2);
     if (!nb) { free(buf); return q_err(QE_WSFULL); }
@@ -2187,8 +2314,7 @@ static void fmt_lines_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
 }
 
 static void fmt_cell_into(ray_t* vec, char* buf, size_t bufsz, int* trunc) {
-    q_fmt_cell(vec, g_cell_row, 1, buf, bufsz);
-    *trunc = strlen(buf) + 1 >= bufsz;
+    *trunc = cell_into(vec, g_cell_row, 1, buf, bufsz);
 }
 
 ray_t* q_fmt_lines(ray_t* val, int64_t rows, int64_t cols) {
