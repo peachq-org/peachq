@@ -12,6 +12,7 @@ RAY_LIB_SRC   = $(filter-out $(RAY_ENTRY_SRC), $(wildcard src/*/*.c src/qlang/ev
 RAY_VENDOR_SRC = third_party/yyjson/yyjson.c \
                  third_party/picohttpparser/picohttpparser.c \
                  $(addprefix third_party/zlib/,adler32.c crc32.c deflate.c inffast.c inflate.c inftrees.c trees.c zutil.c) \
+                 third_party/lz4/lz4.c third_party/lz4/lz4hc.c \
                  third_party/md4c/md4c.c third_party/md4c/md4c-html.c third_party/md4c/entity.c \
                  third_party/xxhash/xxhash.c third_party/murmurhash3/MurmurHash3.c
 
@@ -40,7 +41,7 @@ BUILD_DIR ?= build
 GEN_DIR = $(BUILD_DIR)/gen
 
 RAY_INCLUDES = -Iinclude -I$(GEN_DIR) -Isrc \
-               -Ithird_party/yyjson -Ithird_party/picohttpparser -Ithird_party/zlib -Ithird_party/md4c \
+               -Ithird_party/yyjson -Ithird_party/picohttpparser -Ithird_party/zlib -Ithird_party/lz4 -Ithird_party/md4c \
                -Ithird_party/xxhash -Ithird_party/rapidhash -Ithird_party/murmurhash3
 
 RAY_GEN_HDRS = $(GEN_DIR)/qlang/dotq_gen.h $(GEN_DIR)/qlang/h_gen.h \
