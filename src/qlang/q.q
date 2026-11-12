@@ -67,14 +67,14 @@
 .q.fby:{[x;y] g:group y; r:(first x) each (last x) g; $[0h>type first value r; r y; (raze value r) iasc raze value g]}
 
 / ---- wave 3: the sort wave - every sort verb derives from the grade ----
-/ ref/asc.md: atom = already sorted (carries the RAY_STR atom too); 99h = dict AND keyed
+/ an atom is iasc's 'rank (basics/funsql.md:925, peachq#125); 99h = dict AND keyed
 / table, entries gathered by the value grade (the non-key-column rule; .Q.ft would sort a
 / keyed table by its KEY cols).  asc.md:18-28 - s stamps the attribute via the producer
 / seams .Q.c.sorted/.Q.c.parted: a lone table column takes `s#, several take `p# on the
 / FIRST (asc.md's meta rows); a keyed table stamps its VALUE table only (`::` covers the
 / plain-dict value).  desc.md:110 - desc sets NO attribute.
-.q.asc:{s:{$[98h<>type x;.Q.c.sorted x;0=count c:cols x;x;1=count c;@[x;first c;.Q.c.sorted];@[x;first c;.Q.c.parted]]};$[0h>type x;x;99h=type x;(key x)[g]!$[98h=type value x;s;::](value x)g:iasc value x;s $[(g:iasc x)~til count x;x;x g]]}
-.q.desc:{$[0h>type x;x;99h=type x;(key x)[g]!(value x)g:idesc value x;x idesc x]}
+.q.asc:{s:{$[98h<>type x;.Q.c.sorted x;0=count c:cols x;x;1=count c;@[x;first c;.Q.c.sorted];@[x;first c;.Q.c.parted]]};$[99h=type x;(key x)[g]!$[98h=type value x;s;::](value x)g:iasc value x;s $[(g:iasc x)~til count x;x;x g]]}
+.q.desc:{$[99h=type x;(key x)[g]!(value x)g:idesc value x;x idesc x]}
 / ref/rank.md: "the same as calling iasc twice on the list"
 .q.rank:{iasc iasc x}
 / ref/xrank.md prints no source; bucket = floor(x*rank y % count y) reproduces all 5
