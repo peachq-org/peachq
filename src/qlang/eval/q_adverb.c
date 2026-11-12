@@ -514,6 +514,8 @@ static ray_t* prior_each(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
         ray_release(x);
         return r;
     }
+    /* an atom has no prior: unary Each Prior answers it unchanged (``deltas `a`` is `a, KDB-X peachq#125); prev's is xprev's */
+    if (!seed && x->type < 0 && !q_type_is_str_atom(x)) return x;
     ray_t* prev = seed;
     if (prev) ray_retain(prev);
     else {
