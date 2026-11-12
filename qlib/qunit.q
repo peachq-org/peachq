@@ -36,7 +36,13 @@ mocks:{x!x}enlist (::); / dictionary from mock names to their original value etc
 unsetMocks:`$(); / list of variables that are mocked but were unset beforehand
 
 l:("  ";"   "); / stores log entries to allow generating HTML report if required.
-lg:{a:string[.z.t],$[type[x]=98h; "\r\n"; "  "],$[type[x] in 10 -10h; x; .Q.s x],"\r\n"; l::l,enlist a; 1 a; x};
+lg:{a:string[.z.t],$[type[x]=98h; "\r\n"; "  "],$[type[x] in 10 -10h; x; .Q.s x],"\r\n"; l::l,enlist a; if[not quiet; 1 a]; x};
+
+quiet:0b;
+/ Stop qunit printing while it runs: the log still fills .qunit.l, and runTests still returns its table.
+/ @param b boolean 1b to silence, 0b to print as before (the default)
+/ @return the previous setting
+setQuiet:{[b] p:quiet; quiet::b; p};
 
 // Assert that the relation between expected and actual value holds
 // @param actual An object representing the actual result value
@@ -337,8 +343,8 @@ runTests:{ [nsList]
     / the verdict leads so a long table cannot push it off the top, and trails so
     / it is the last line on screen but one: what was skipped is the last. The table between them is still the return.
     v:verdict a;
-    1 v,"\r\n"; lg a; 1 v,"\r\n";
-    1 "skipped: ",$[count sk; " " sv string sk; "none"],"\r\n";
+    if[not quiet; 1 v,"\r\n"]; lg a;
+    if[not quiet; 1 v,"\r\n"; 1 "skipped: ",$[count sk; " " sv string sk; "none"],"\r\n"];
     a};
         
 / find functions with a certain name pattern within the selected namespace
