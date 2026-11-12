@@ -276,6 +276,7 @@ typedef enum { MW_SUM, MW_MAX, MW_MIN, MW_COUNT, MW_DEV } q_mw_kind;
 
 static ray_t* mwin(ray_t* nx, ray_t* x, q_mw_kind k) {
     int64_t N;
+    if (nx && !ray_is_atom(nx)) return q_err(QE_DOMAIN);
     if (!nx || RAY_IS_TEMPORAL(-nx->type) || !q_type_count_i64(nx, &N)) return q_err(QE_TYPE);   /* grid rows b x h i j */
     if (!x) return q_err(QE_TYPE);
     if (ray_is_atom(x)) {          /* the dyadic grids probe atoms (tools.q ddt2): an atom answers as its one-item window */

@@ -410,7 +410,8 @@ int q_search_admits(ray_t* x, ray_t* y) {
  * of atoms collapsing to the index vector.  Borrows both. */
 static ray_t* find_items(ray_t* x, ray_t* y, int whole, int64_t cnt) {
     int64_t ny = q_count(y);
-    ray_t* out = ray_list_new(ny > 0 ? ny : 1);
+    if (ny == 0) return q_type_empty(RAY_I64);    /* no items sought: the long empty, so `x in ()` stays boolean */
+    ray_t* out = ray_list_new(ny);
     if (RAY_IS_ERR(out)) return out;
     for (int64_t j = 0; j < ny; j++) {
         ray_t* ej = q_index_elem_at(y, j);
