@@ -128,6 +128,16 @@ ray_t* q_attr_stamp_byte(ray_t* v, uint8_t byte) {
     return q_attr_rebuild(v, attr_byte_letters[byte]);
 }
 
+/* THE disk door (owner ruling 2026-11-12): a byte off a file is stamped only where the read makes it true without
+ * trusting the writer.  `s` is verified by the scan (a vector, or a table's first column; an enum's order needs its
+ * domain, so there it is dropped), u and p by attr_build's own checks, and g has no precondition. */
+ray_t* q_attr_stamp_disk(ray_t* v, uint8_t byte) {
+    if (!v || RAY_IS_ERR(v) || byte != 1) return q_attr_stamp_byte(v, byte);
+    ray_t* key = v->type == RAY_TABLE && ray_table_ncols(v) ? ray_table_get_col_idx(v, 0) : v;
+    if (!key || !ray_is_vec(key) || key->type == RAY_ENUM || !non_descending(key, 0, q_count(key))) return v;
+    return q_attr_stamp_trusted(v, 's');
+}
+
 /* Remap the engine's set-attribute failure codes to kdb's error text.  The
  * verification failures use "domain"; the engine's numeric-only gate (reached
  * by `s#`) uses "nyi"; type guards use "type".  kdb signals: `'s-fail` (sorted not ascending), `'u-fail`
