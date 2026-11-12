@@ -19,6 +19,7 @@
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_call_name — the .parquet doors and the .duckdb transport are bound by `\l pq`, not linked */
 #include "qlang/q_env.h"        /* q_env_get — `.h.tx`, the format table `set` reads at call time */
 #include "qlang/net/q_gz.h"     /* q_gz_inflate_zlib — the kxzip block codec */
+#include "lz4hc.h"               /* the lz4hc (algorithm 4) block codec */
 #include "qlang/net/q_wirefile.h" /* the format writers behind q_io_set */
 #include "qlang/net/q_http_client.h" /* the http half of the resource-read seam */
 #include "lang/eval.h"      /* ray_eval_get_restricted */
@@ -351,7 +352,7 @@ ray_t* q_io_file_triple(ray_t* fsym, ray_t* offv, ray_t* wantv, int clamp,
 
 /* ---- the kxzip container (kb/file-compression.md) ----------------------- */
 
-enum { ZIP_NONE = 0, ZIP_IPC = 1, ZIP_GZIP = 2, ZIP_SNAPPY = 3, ZIP_ENCRYPTED = 16 };
+enum { ZIP_NONE = 0, ZIP_IPC = 1, ZIP_GZIP = 2, ZIP_SNAPPY = 3, ZIP_LZ4 = 4, ZIP_ENCRYPTED = 16 };
 
 /* kb/file-compression.md: a power of 2 between 12 and 20. */
 #define ZIP_LOG2_MIN 12
@@ -362,7 +363,7 @@ typedef struct {
     int64_t block_size;     /* logicalBlockSize in BYTES; -21! reports its log2 */
     int64_t num_blocks;
     int32_t compressed;     /* the data area's bytes, magic and tail excluded */
-    int32_t algorithm;
+    int32_t algorithm;      /* the tail's codec byte: what was REQUESTED; each block names its own */
     int32_t level;
     int32_t version;        /* the writer-era stamp: 2 (kdb 3.x corpus) / 3 (2025) */
 } zip_hdr_t;
@@ -390,18 +391,17 @@ static int32_t zip_balg(const uint8_t* t, int64_t k) { return io_i32(t + ZIP_HEA
  * i64 | compressedLength-incl-magic i64 | logicalBlockSize i64 | (length i32; algorithm i32) per block | numBlocks
  * i64.  The blocks sit back to back after the magic; the two-block layout is a KDB-X-written file's (uqf
  * tests/q/test_compression_primitives.q:44-49).  `file_len` closes the arithmetic, so a truncation is detectable.
- * A block whose algorithm is not block 0's is 'corrupt: every reader inflates a file with one codec.  NULL on
- * success, else an owned 'corrupt. */
+ * NULL on success, else an owned 'corrupt. */
 static ray_t* zip_trailer(const uint8_t* t, int64_t nb, size_t file_len, zip_hdr_t* z) {
     z->version      = io_i32(t);
+    z->algorithm    = t[4];
     z->level        = t[5];
     z->uncompressed = io_i64(t + 8);
     z->block_size   = io_i64(t + 24);
-    z->algorithm    = zip_balg(t, 0);
     z->num_blocks   = nb;
     int64_t sum = 0;
     for (int64_t k = 0; k < nb; k++) {
-        if (zip_blen(t, k) < 0 || zip_balg(t, k) != z->algorithm) return q_err(QE_CORRUPT);
+        if (zip_blen(t, k) < 0) return q_err(QE_CORRUPT);
         sum += zip_blen(t, k);
     }
     if (z->uncompressed < 0 || sum > INT32_MAX ||
@@ -409,6 +409,31 @@ static ray_t* zip_trailer(const uint8_t* t, int64_t nb, size_t file_len, zip_hdr
         return q_err(QE_CORRUPT);
     z->compressed = (int32_t)sum;
     return NULL;
+}
+
+/* Stored blocks sit anywhere, whatever the file requested (format findings Q4), so each block is decoded by its own
+ * algorithm.  'nyi when one names a codec without a decoder, checked before any block is touched: the splay fault
+ * handler that decodes later cannot raise. */
+static ray_t* zip_codecs(const uint8_t* t, int64_t nb) {
+    for (int64_t k = 0; k < nb; k++) {
+        int32_t a = zip_balg(t, k);
+        if (a != ZIP_NONE && a != ZIP_GZIP && a != ZIP_LZ4) return q_err(QE_NYI);
+    }
+    return NULL;
+}
+
+/* One block into exactly `plain` bytes: 0, else -1.  A zlib or lz4 stream must end exactly at the block's end. */
+static int zip_block_decode(int32_t alg, const uint8_t* src, size_t clen, uint8_t* dst, size_t plain) {
+    if (alg == ZIP_NONE) {
+        if (clen != plain) return -1;
+        memcpy(dst, src, plain);
+        return 0;
+    }
+    if (alg == ZIP_LZ4)
+        return LZ4_decompress_safe((const char*)src, (char*)dst, (int)clen, (int)plain) == (int)plain ? 0 : -1;
+    size_t got = 0, used = 0;
+    const char* err = NULL;
+    return q_gz_inflate_zlib(src, clen, dst, plain, &got, &used, &err) == 0 && used == clen && got == plain ? 0 : -1;
 }
 
 /* The container trailer of a file whose on-disk length is `file_len`.  NULL
@@ -456,8 +481,8 @@ ray_t* q_io_unzip(const uint8_t* buf, size_t len) {
     const uint8_t* t = buf + len - ZIP_TAIL_LEN(nb);
     zip_hdr_t z;
     ray_t* bad = zip_trailer(t, nb, len, &z);
+    if (!bad) bad = zip_codecs(t, nb);
     if (bad) return bad;
-    if (z.algorithm != ZIP_NONE && z.algorithm != ZIP_GZIP) return q_err(QE_NYI);
     int32_t log2bs = zip_log2(z.block_size);
     if (z.block_size != (int64_t)1 << log2bs ||
         log2bs < ZIP_LOG2_MIN || log2bs > ZIP_LOG2_MAX)
@@ -468,13 +493,6 @@ ray_t* q_io_unzip(const uint8_t* buf, size_t len) {
     int64_t need = z.uncompressed / z.block_size + (z.uncompressed % z.block_size ? 1 : 0);
     if (need > z.num_blocks) return q_err(QE_CORRUPT);
 
-    /* Algorithm 0 is the wrapper kdb still writes when compression did not pay;
-     * no corpus sample, so accept it only when the two lengths agree exactly. */
-    if (z.algorithm == ZIP_NONE) {
-        if ((int64_t)z.compressed != z.uncompressed) return q_err(QE_CORRUPT);
-        return ray_vec_from_raw(RAY_BYTE_ONLY, buf + ZIP_MAGIC_LEN, z.uncompressed);
-    }
-
     uint8_t* dst = (uint8_t*)malloc(z.uncompressed > 0 ? (size_t)z.uncompressed : 1);
     if (!dst) return q_err(QE_OOM);
     size_t produced = 0, pos = 0;
@@ -483,14 +501,11 @@ ray_t* q_io_unzip(const uint8_t* buf, size_t len) {
         size_t start = pos, clen = (size_t)zip_blen(t, k);
         int64_t plain = z.uncompressed - (int64_t)produced;
         if (plain > z.block_size) plain = z.block_size;
-        size_t got = 0, used = 0;
-        const char* err = NULL;
-        if (plain <= 0 ||
-            q_gz_inflate_zlib(buf + ZIP_MAGIC_LEN + start, clen, dst + produced,
-                              (size_t)plain, &got, &used, &err) != 0 ||
-            used != clen || got != (size_t)plain)
+        if (plain <= 0 || zip_block_decode(zip_balg(t, k), buf + ZIP_MAGIC_LEN + start, clen, dst + produced,
+                                           (size_t)plain) != 0)
             ok = 0;
-        produced += got;
+        else
+            produced += (size_t)plain;
         pos = start + clen;
     }
     ray_t* out = (ok && produced == (size_t)z.uncompressed &&
@@ -547,6 +562,7 @@ ray_t* q_io_zip_stats(ray_t* x) {
 void q_io_zipmap_free(q_io_zipmap_t* zm) {
     free(zm->ends);
     zm->ends = NULL;
+    zm->algs = NULL;
 }
 
 ray_t* q_io_zip_open(ray_t* pathstr, q_io_zipmap_t* zm) {
@@ -561,12 +577,16 @@ ray_t* q_io_zip_open(ray_t* pathstr, q_io_zipmap_t* zm) {
     const uint8_t* t = (const uint8_t*)ray_data(tail);
     int32_t log2bs = zip_log2(z.block_size);
     int sized = z.block_size == (int64_t)1 << log2bs && log2bs >= ZIP_LOG2_MIN && log2bs <= ZIP_LOG2_MAX;
-    bad = z.algorithm != ZIP_NONE && z.algorithm != ZIP_GZIP ? q_err(QE_NYI)
-        : !sized || z.uncompressed / z.block_size + (z.uncompressed % z.block_size ? 1 : 0) > z.num_blocks
-              ? q_err(QE_CORRUPT) : NULL;
-    zm->ends = bad ? NULL : (int64_t*)malloc((size_t)z.num_blocks * sizeof(int64_t));
+    bad = zip_codecs(t, z.num_blocks);
+    if (!bad && (!sized || z.uncompressed / z.block_size + (z.uncompressed % z.block_size ? 1 : 0) > z.num_blocks))
+        bad = q_err(QE_CORRUPT);
+    zm->ends = bad ? NULL : (int64_t*)malloc((size_t)z.num_blocks * (sizeof(int64_t) + sizeof(int32_t)));
     if (!bad && !zm->ends) bad = q_err(QE_OOM);
-    for (int64_t k = 0, pos = 0; !bad && k < z.num_blocks; k++) zm->ends[k] = pos += zip_blen(t, k);
+    if (!bad) zm->algs = (int32_t*)(zm->ends + z.num_blocks);
+    for (int64_t k = 0, pos = 0; !bad && k < z.num_blocks; k++) {
+        zm->ends[k] = pos += zip_blen(t, k);
+        zm->algs[k] = zip_balg(t, k);
+    }
     ray_release(tail);
     if (bad) return bad;
     zm->uncompressed = z.uncompressed;
@@ -625,15 +645,7 @@ int q_io_zip_block_fd(int fd, const q_io_zipmap_t* zm, int64_t k,
         if (n <= 0) return -2;
         got += n;
     }
-    if (zm->algorithm == ZIP_NONE) {
-        if (clen != plain) return -1;
-        memcpy(dst, scratch, (size_t)plain);
-        return 0;
-    }
-    size_t got = 0, used = 0;
-    const char* err = NULL;
-    return q_gz_inflate_zlib(scratch, (size_t)clen, dst, (size_t)plain, &got, &used, &err) == 0 &&
-           used == (size_t)clen && got == (size_t)plain ? 0 : -1;   /* must terminate exactly at its end */
+    return zip_block_decode(zm->algs[k], scratch, (size_t)clen, dst, (size_t)plain);
 }
 
 ray_t* q_io_zip_block(ray_t* pathstr, const q_io_zipmap_t* zm, int64_t k,
@@ -649,54 +661,63 @@ ray_t* q_io_zip_block(ray_t* pathstr, const q_io_zipmap_t* zm, int64_t k,
     return rc == 0 ? NULL : q_err(rc == -1 ? QE_CORRUPT : rc == -2 ? QE_IO : QE_OOM);
 }
 
+int q_io_zip_param(int64_t v) { return v < INT_MIN ? INT_MIN : v > INT_MAX ? INT_MAX : (int)v; }
+
 ray_t* q_io_zip_write(ray_t* pathstr, const uint8_t* img, size_t n,
                       int lbs, int alg, int lvl) {
-    if (alg != ZIP_GZIP) return q_err(QE_NYI);       /* 1/3/4/5: the request site */
-    if (lbs < ZIP_LOG2_MIN || lbs > ZIP_LOG2_MAX || lvl < 0 || lvl > 9 || n == 0)
+    if (alg != ZIP_GZIP && alg != ZIP_LZ4) return q_err(QE_NYI);       /* 1/3/5: the request site */
+    if (lbs < ZIP_LOG2_MIN || lbs > ZIP_LOG2_MAX || lvl < 0 || (alg == ZIP_GZIP && lvl > 9) || n == 0)
         return q_err(QE_DOMAIN);
+    if (lvl > 16) lvl = 16;                          /* kb/file-compression.md: lz4hc level>16 is 16 */
     int64_t bs = (int64_t)1 << lbs;
     int64_t nb = ((int64_t)n + bs - 1) / bs;
     uint8_t** blk = (uint8_t**)calloc((size_t)nb, sizeof(uint8_t*));
     size_t* bl = (size_t*)calloc((size_t)nb, sizeof(size_t));
     if (!blk || !bl) { free(blk); free(bl); return q_err(QE_OOM); }
-    size_t total = 0;
-    const char* gerr = NULL;
-    for (int64_t k = 0; k < nb && !gerr; k++) {
+    size_t C = 0;
+    int oom = 0;
+    for (int64_t k = 0; k < nb && !oom; k++) {
         size_t plain = (size_t)((k + 1) * bs <= (int64_t)n ? bs : (int64_t)n - k * bs);
-        blk[k] = q_gz_deflate_zlib(img + k * bs, plain, lvl, &bl[k], &gerr);
-        total += bl[k];
+        const uint8_t* src = img + k * bs;
+        if (alg == ZIP_GZIP) {
+            const char* gerr = NULL;
+            blk[k] = q_gz_deflate_zlib(src, plain, lvl, &bl[k], &gerr);
+        } else {
+            int cap = LZ4_compressBound((int)plain);
+            blk[k] = (uint8_t*)malloc((size_t)cap);
+            int got = blk[k] ? LZ4_compress_HC((const char*)src, (char*)blk[k], (int)plain, cap, lvl) : 0;
+            bl[k] = got > 0 ? (size_t)got : 0;
+        }
+        oom = !blk[k] || !bl[k];
+        /* kdb stores a block that did not pay; for gzip only a one-block file is witnessed (Q4) */
+        if (!oom && bl[k] >= plain && (alg == ZIP_LZ4 || nb == 1)) {
+            free(blk[k]);
+            blk[k] = NULL;
+            bl[k] = plain;
+        }
+        C += bl[k];
     }
-    ray_t* bad = NULL;
-    /* did not pay AND fits one block: kdb's alg-0 wrapper (no sample shows a multi-block one) */
-    int raw0 = !gerr && total >= n && nb == 1;
-    size_t C = raw0 ? n : total;
     size_t flen = ZIP_MAGIC_LEN + C + ZIP_TAIL_LEN(nb);
-    uint8_t* out = gerr ? NULL : (uint8_t*)malloc(flen);
-    if (gerr) {
-        bad = q_err(QE_OOM);
-    } else if (!out) {
+    uint8_t* out = oom ? NULL : (uint8_t*)malloc(flen);
+    ray_t* bad = NULL;
+    if (!out) {
         bad = q_err(QE_OOM);
     } else {
         uint8_t* w = out;
         memcpy(w, ZIP_MAGIC, ZIP_MAGIC_LEN); w += ZIP_MAGIC_LEN;
-        if (raw0) {
-            memcpy(w, img, n); w += n;
-        } else {
-            for (int64_t k = 0; k < nb; k++) { memcpy(w, blk[k], bl[k]); w += bl[k]; }
-        }
+        for (int64_t k = 0; k < nb; k++) { memcpy(w, blk[k] ? blk[k] : img + k * bs, bl[k]); w += bl[k]; }
         int32_t ver = 3;                             /* the observed 2025-era stamp */
         int64_t unc = (int64_t)n, bsz = bs, nbl = nb;
         int64_t cim = (int64_t)(ZIP_MAGIC_LEN + C);
-        int32_t walg = raw0 ? ZIP_NONE : alg;
         memcpy(w, &ver, 4); w += 4;
-        *w++ = (uint8_t)ZIP_GZIP;                    /* codec: the REQUESTED pair */
+        *w++ = (uint8_t)alg;                         /* codec: the REQUESTED pair */
         *w++ = (uint8_t)lvl;
         *w++ = 0; *w++ = 0;
         memcpy(w, &unc, 8);  w += 8;
         memcpy(w, &cim, 8);  w += 8;
         memcpy(w, &bsz, 8);  w += 8;
         for (int64_t k = 0; k < nb; k++) {
-            int32_t csz = raw0 ? (int32_t)n : (int32_t)bl[k];
+            int32_t csz = (int32_t)bl[k], walg = blk[k] ? alg : ZIP_NONE;
             memcpy(w, &csz, 4);  w += 4;
             memcpy(w, &walg, 4); w += 4;
         }
@@ -953,7 +974,7 @@ ray_t* q_io_set(ray_t* x, ray_t* y) {
                 !q_type_strict_i64(e[3], &lvl))
                 return q_err(QE_TYPE);
             /* an explicit alg (0 included) OVERRIDES `.z.zd` — 0 writes plain */
-            return q_wirefile_write_zip(e[0], y, (int)lbs, (int)alg, (int)lvl);
+            return q_wirefile_write_zip(e[0], y, q_io_zip_param(lbs), q_io_zip_param(alg), q_io_zip_param(lvl));
         }
         if (n == 2 && q_io_is_fsym(e[0]) && q_io_is_fsym(e[1])) {
             return q_wirefile_write_splay(e[0], e[1], y, -1, -1, -1);

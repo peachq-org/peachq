@@ -712,9 +712,9 @@ static ray_t* wf_write_image(ray_t* x) {
 static int wf_zd(int* lbs, int* alg, int* lvl) {
     ray_t* zd = q_env_get(ray_sym_intern_runtime(".z.zd", 5));   /* borrowed */
     if (!zd || !q_type_is_int_vec(zd) || q_count(zd) != 3) return 0;
-    *lbs = (int)q_type_ivec_get(zd, 0);
-    *alg = (int)q_type_ivec_get(zd, 1);
-    *lvl = (int)q_type_ivec_get(zd, 2);
+    *lbs = q_io_zip_param(q_type_ivec_get(zd, 0));
+    *alg = q_io_zip_param(q_type_ivec_get(zd, 1));
+    *lvl = q_io_zip_param(q_type_ivec_get(zd, 2));
     return *alg != 0;
 }
 
@@ -900,8 +900,9 @@ static ray_t* wf_append_rewrite(ray_t* path, ray_t* y, int zipped) {
         q_io_zipmap_t zm;
         ray_t* e = q_io_zip_open(path, &zm);
         if (e) { ray_release(joined); return e; }
-        alg = zm.algorithm ? (int)zm.algorithm : 2;
-        lvl = zm.algorithm ? (int)zm.level : 0;
+        int keep = zm.algorithm == 2 || zm.algorithm == 4;   /* a codec we write: the file's own pair */
+        alg = keep ? (int)zm.algorithm : 2;
+        lvl = keep ? (int)zm.level : 0;
         while ((1LL << lbs) < zm.block_size) lbs++;
         q_io_zipmap_free(&zm);
     }
@@ -1314,7 +1315,7 @@ ray_t* q_wirefile_write_splay(ray_t* dirsym, ray_t* domsym, ray_t* y,
 
 ray_t* q_wirefile_write_zip(ray_t* x, ray_t* y, int lbs, int alg, int lvl) {
     if (!y) return q_err(QE_TYPE);
-    if (alg == 1 || alg == 3 || alg == 4 || alg == 5)
+    if (alg == 1 || alg == 3 || alg == 5)
         return q_err(QE_NYI);                        /* the request site */
     ray_t* path = q_io_file_path(x);
     if (!path) return q_err(QE_TYPE);
