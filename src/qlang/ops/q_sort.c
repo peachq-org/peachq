@@ -373,12 +373,14 @@ static ray_t* grade_dict(ray_t* d, int desc) {
 }
 
 ray_t* q_iasc_wrap(ray_t* x) {
+    if (x && x->type < 0 && !q_type_is_str_atom(x)) return q_err(QE_RANK);
     if (q_type_is_dict(x))         return grade_dict(x, 0);
     if (q_type_is_table(x))        return grade_table(x, 0);
     if (x && x->type == RAY_LIST)  return grade_general(x, 0);
     return ray_iasc_fn(x);
 }
 ray_t* q_idesc_wrap(ray_t* x) {
+    if (x && x->type < 0 && !q_type_is_str_atom(x)) return q_err(QE_RANK);
     if (q_type_is_dict(x))         return grade_dict(x, 1);
     if (q_type_is_table(x))        return grade_table(x, 1);
     if (x && x->type == RAY_LIST)  return grade_general(x, 1);
