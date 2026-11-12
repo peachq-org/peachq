@@ -193,9 +193,11 @@ ray_t* q_attr_rebuild(ray_t* v, char letter);         /* OWNED v: verify + hash 
 /* kdb's attribute BYTE (0 none, 1 `s, 2 `u, 3 `p, 4 `g) — one spelling shared by the IPC wire
  * (kb/serialization.md:39) and the kx on-disk header.  It COLLIDES with rayforce's attrs bits, so both
  * directions go through the letter above and never copy the bitfield.  q_attr_byte borrows v;
- * q_attr_stamp_byte is the WIRE decoder's door onto q_attr_rebuild (the disk readers keep `s` alone). */
+ * q_attr_stamp_byte is the WIRE decoder's door onto q_attr_rebuild; q_attr_stamp_disk is the file readers', which
+ * verifies `s` too instead of taking the writer's word.  Both consume an owned v. */
 uint8_t q_attr_byte(ray_t* v);
 ray_t* q_attr_stamp_byte(ray_t* v, uint8_t byte);
+ray_t* q_attr_stamp_disk(ray_t* v, uint8_t byte);
 
 /* Set a column attribute via the q `#` surface (`s`/`u`/`g`/`p`, or 0 to clear).
  * The kdb u#/p# accelerator (find-hash + marker) is COMPOSED in the q layer here,
