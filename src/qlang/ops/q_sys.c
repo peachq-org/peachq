@@ -1346,10 +1346,10 @@ ray_t* q_sys_run(const char* line, size_t n) {
  * variable; returns its value as a string, or "" when the variable is unset
  * (kdb-true, and exactly what the base ray_getenv_fn already returns for a
  * missing var).  The base primitive wants a -RAY_STR arg, so coerce the
- * symbol's name to a string atom first — the ONLY divergence from the raw C,
- * hence a wrapper rather than a QK_ENV rename.
- * String-model seam: the result is a native -RAY_STR atom, so `type getenv`X`
- * is -10h where kdb's char vector is 10h (a known, tracked divergence). */
+ * symbol's name to a string atom first, hence a wrapper rather than a QK_ENV
+ * rename.  No variable has the empty name, so the null symbol is unset ("")
+ * where the base says 'domain: the atomic lift probes an empty list with it,
+ * and a 'domain there would type `getenv `symbol$()` as long. */
 ray_t* q_getenv_wrap(ray_t* x) {
     /* .os.getenv is RAY_FN_RESTRICTED; calling the C fn directly bypasses the
      * eval-layer check, so re-assert it here (the q_hopen_wrap/file precedent). */
@@ -1358,6 +1358,7 @@ ray_t* q_getenv_wrap(ray_t* x) {
         return q_err(QE_TYPE);
     ray_t* s = ray_sym_str(x->i64);                     /* borrowed */
     if (!s) return q_err(QE_TYPE);
+    if (!ray_str_len(s)) return q_str_charv_out(ray_str("", 0));
     ray_t* name = ray_str(ray_str_ptr(s), ray_str_len(s));  /* owned -RAY_STR */
     if (!name || RAY_IS_ERR(name)) return name ? name : q_err(QE_OOM);
     ray_t* r = ray_getenv_fn(name);                     /* "" when unset */
