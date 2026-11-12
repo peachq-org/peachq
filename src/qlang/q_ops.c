@@ -512,8 +512,9 @@ static const q_op_t Q_OPS[] = {
     { "read1",  QLEX_KW,        QR_FN1("read1", q_read1_wrap), QR_NONE,           NULL, 1, 1, "none", NULL, QKOP(21) },
     { "hdel",   QLEX_KW,        QR_FN1A("not", q_not_wrap),    QR_NONE,           NULL, 1, 1, "none", NULL, QKOP(15) },
     /* ---- environment variables ---- Both coerce the q symbol arg to -RAY_STR: a real divergence, so QR_FN
-     * wrappers rather than QR_ENV renames. */
-    { "getenv", QLEX_KW,        QR_FN1("getenv", q_getenv_wrap), QR_NONE,         NULL, 1, 0, "none", NULL, QKOP(30) },
+     * wrappers rather than QR_ENV renames.  getenv is atomic over names: ref/getenv.md shows only the atom, the
+     * witness is the KDB-X transcript in peachq-org/peachq#123 (`getenv `HOME`USER` -> a list of strings). */
+    { "getenv", QLEX_KW,        QR_FN1A("getenv", q_getenv_wrap), QR_NONE,        NULL, 1, 0, "atomic", NULL, QKOP(30) },
     { "setenv", QLEX_KW,        QR_NONE,                       QR_FN2("setenv", q_setenv_wrap), NULL, 1, 1, "none", NULL, QKOP(33) },
     /* ---- local and UTC time ---- both on ref/gtime.md */
     { "gtime",  QLEX_KW,        QR_FN1("gtime", q_gtime_wrap), QR_NONE,           NULL, 1, 0, "atomic", NULL },
