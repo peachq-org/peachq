@@ -2014,9 +2014,8 @@ int64_t ray_ipc_conn_stamp(int64_t fd, bool drain)
     return sel && sel->data == (void*)cd ? cd->open_ns : -1;
 }
 
-int64_t ray_ipc_connect(const char* host, uint16_t port,
-                         const char* user, const char* password,
-                         int timeout_ms)
+static int64_t ipc_connect(const char* host, uint16_t port, const char* user, const char* password,
+                           int timeout_ms, ray_ipc_upgrade_fn up, void* ctx)
 {
     /* The connection lives in the active poll's selector table — its
      * selector id IS the handle.  No poll, no handle namespace: refuse
@@ -2028,10 +2027,21 @@ int64_t ray_ipc_connect(const char* host, uint16_t port,
     int connect_to = timeout_ms > 0 ? timeout_ms : 5000;
     ray_sock_t fd = ray_sock_connect(host, port, connect_to);
     if (fd == RAY_INVALID_SOCK) return errno == ETIMEDOUT ? -5 : errno == ENXIO ? -6 : -1;
+    if (up && up(fd, host, ctx) != 0) { ray_sock_close(fd); return -8; }
     return ray_ipc_adopt_client(fd, user, password);
 }
 
+int64_t ray_ipc_connect(const char* host, uint16_t port, const char* user, const char* password, int timeout_ms)
+{
+    return ipc_connect(host, port, user, password, timeout_ms, NULL, NULL);
+}
+
 int64_t ray_ipc_connect_desc(const char* s, size_t n, int timeout_ms)
+{
+    return ray_ipc_connect_desc_over(s, n, timeout_ms, NULL, NULL);
+}
+
+int64_t ray_ipc_connect_desc_over(const char* s, size_t n, int timeout_ms, ray_ipc_upgrade_fn up, void* ctx)
 {
     const char* f[4] = {0};
     size_t fl[4] = {0};
@@ -2046,7 +2056,7 @@ int64_t ray_ipc_connect_desc(const char* s, size_t n, int timeout_ms)
     memcpy(host, f[0], fl[0]); host[fl[0]] = '\0';
     if (nf > 2) { memcpy(user, f[2], fl[2]); user[fl[2]] = '\0'; }
     if (nf > 3) { memcpy(pass, f[3], fl[3]); pass[fl[3]] = '\0'; }
-    return ray_ipc_connect(host, (uint16_t)port, nf > 2 ? user : NULL, nf > 3 ? pass : NULL, timeout_ms);
+    return ipc_connect(host, (uint16_t)port, nf > 2 ? user : NULL, nf > 3 ? pass : NULL, timeout_ms, up, ctx);
 }
 
 int64_t ray_ipc_adopt_client(ray_sock_t fd, const char* user, const char* password)
@@ -2072,10 +2082,12 @@ int64_t ray_ipc_adopt_client(ray_sock_t fd, const char* user, const char* passwo
     uint8_t common;
     int64_t got = ray_sock_recv(fd, &common, 1);
     if (got != 1) {
-        /* the handshake SO_RCVTIMEO expiring is a silent server, not a rejection */
+        /* the handshake SO_RCVTIMEO expiring is a silent server, not a rejection; an overlay that fails rather than
+         * closes is the transport refusing (a TLS 1.3 server judges the client certificate only after the handshake) */
         bool timed_out = got < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT);
+        bool refused   = got < 0 && errno == EIO && ray_sock_io_active(fd);
         ray_sock_close(fd);
-        return timed_out ? -5 : -3;
+        return timed_out ? -5 : refused ? -8 : -3;
     }
     /* A compliant kdb server replies with the NEGOTIATED capability =
      * min(client, server), so it can never exceed what we offered.  A byte
