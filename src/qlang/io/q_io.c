@@ -157,6 +157,30 @@ int q_io_write_fd(int fd, const void* bytes, size_t n) {
     return 0;
 }
 
+/* A POSIX record lock, so a kdb writer's lockf waits on it and it on lockf.  The open-file-description form is
+ * dropped by this descriptor's close alone; the classic form by any close of the file, hence the one descriptor. */
+int q_io_open_locked(const char* path) {
+    int fd = open(path, O_RDWR | O_CREAT | O_APPEND | O_BINARY, 0666);
+    if (fd < 0) return -1;
+#ifdef RAY_OS_WINDOWS
+    OVERLAPPED ov = {0};
+    int ok = LockFileEx((HANDLE)_get_osfhandle(fd), LOCKFILE_EXCLUSIVE_LOCK, 0, MAXDWORD, MAXDWORD, &ov) != 0;
+#else
+    struct flock fl = { .l_type = F_WRLCK, .l_whence = SEEK_SET };
+    int ok = 0, cmds[2] = { F_SETLKW, F_SETLKW };
+#ifdef F_OFD_SETLKW
+    cmds[0] = F_OFD_SETLKW;
+#endif
+    for (int k = 0; k < 2 && !ok; k++) {
+        do ok = fcntl(fd, cmds[k], &fl) == 0;
+        while (!ok && errno == EINTR && !q_eval_stop_pending);   /* Ctrl+C ends the wait */
+        if (errno != EINVAL) break;              /* only a kernel without the first form tries the second */
+    }
+#endif
+    if (!ok) { close(fd); return -1; }
+    return fd;
+}
+
 ray_t* q_io_write_all(ray_t* pathstr, const void* bytes, size_t n) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     const char* p = ray_str_ptr(pathstr);

@@ -89,6 +89,9 @@ int q_io_fwrite(FILE* fp, const void* bytes, size_t n);
  * than asked without erroring).  0, or -1 on an error. */
 int q_io_write_fd(int fd, const void* bytes, size_t n);
 
+/* `path` opened read+append (created if absent) and write-locked, waiting: -1, or the ONE descriptor to read, write and close. */
+int q_io_open_locked(const char* path);
+
 /* A kxzip container held whole in memory: NULL = none (buf IS the plaintext),
  * else owned plaintext bytes, or 'corrupt/'nyi.  q_io_zip_stats is `-21!x` —
  * an owned five-key dict, EMPTY when the file carries no container. */
