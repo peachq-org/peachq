@@ -1591,8 +1591,7 @@ static void fmt_classic_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
 static void fmt_modern_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
     *trunc = 0;
     if (bufsz == 0 || !buf) return;
-    /* mapped to be shown; a partitioned table shows as its flip (ref/dotq.md:303) */
-    ray_t* dm = val && val->type == RAY_TABLE && !q_splay_table_named(val) ? q_splay_deferred_map(val, NULL) : NULL;
+    ray_t* dm = val && val->type == RAY_TABLE ? q_splay_deferred_shown(val, INT64_MAX) : NULL;
     if (dm && !RAY_IS_ERR(dm)) { fmt_pipe_render(dm, buf, bufsz, trunc); ray_release(dm); return; }
     if (dm) ray_error_free(dm);
     else if (fmt_pipe_is_table(val) && !q_splay_table_deferred(val)) { fmt_pipe_render(val, buf, bufsz, trunc); return; }
@@ -1953,7 +1952,7 @@ static void q_fmt_body(ray_t* val) {
 
     if (val->type == RAY_TABLE) {
         if (q_splay_table_deferred(val)) {     /* mapped to be shown; `+(,`a)!`:./s/` when nothing is there */
-            ray_t* m = q_splay_table_named(val) ? NULL : q_splay_deferred_map(val, NULL);
+            ray_t* m = q_splay_deferred_shown(val, g_clip_active ? g_clip.rows : INT64_MAX);
             if (m && !RAY_IS_ERR(m)) {
                 q_fmt_table(m);
                 ray_release(m);
