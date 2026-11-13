@@ -38,16 +38,16 @@
  */
 #include "qlang/q_count.h"
 #include "qlang/ops/q_vecop.h"
-#include "qlang/q_registry_internal.h" /* the compare/min2/max2/fill/null wrapper roster */
+#include "qlang/q_registry_internal.h" /* the compare/min2/max2/fill/null/xbar wrapper roster */
 #include "qlang/base/q_type.h"         /* q_type_common + the numeric/float tag memberships */
-#include "lang/eval.h"                 /* ray_lt_fn/ray_gt_fn/..., ray_cmp_tol_eq */
+#include "lang/eval.h"                 /* ray_lt_fn/ray_gt_fn/..., ray_cmp_tol_eq, ray_xbar_fn */
 #include "lang/internal.h"             /* as_f64 / as_i64 / arith_int_type — the atom lane reads */
 #include <stdlib.h>
 #include <string.h>
 
 typedef enum {
     VO_NONE = 0, VO_LT, VO_LE, VO_GT, VO_GE, VO_EQ, VO_NE, VO_MIN, VO_MAX, VO_FILL,
-    VO_ADD, VO_SUB, VO_MUL, VO_IDIV, VO_MOD, VO_DIV
+    VO_ADD, VO_SUB, VO_MUL, VO_IDIV, VO_MOD, VO_DIV, VO_XBAR
 } vop_t;
 typedef enum { LN_BYTE = 1, LN_INT, LN_DBL } lane_t;
 
@@ -68,10 +68,11 @@ static vop_t op_of(ray_t* (*f)(ray_t*, ray_t*)) {
     if (p == (uintptr_t)ray_idiv_fn) return VO_IDIV;
     if (p == (uintptr_t)ray_mod_fn) return VO_MOD;
     if (p == (uintptr_t)ray_div_fn) return VO_DIV;
+    if (p == (uintptr_t)q_xbar_wrap) return VO_XBAR;
     return VO_NONE;
 }
 
-static int is_arith(vop_t op) { return op >= VO_ADD; }
+static int is_arith(vop_t op) { return op >= VO_ADD && op <= VO_DIV; }
 
 /* the lane memberships ops/cmp.c turns on and the type axis does not name: the
  * 1-byte payloads, and int_cmp_lane's own set (which excludes bool) */
@@ -481,6 +482,28 @@ static ray_t* arith_binary(vop_t op, ray_t* x, ray_t* y, int8_t xt, int8_t yt, i
     return out;
 }
 
+/* xbar over a column, on the base kernel: taken only where the kernel's answer (the column's own type, floor
+ * division by an integer count) is the law's — q_xbar_wrap on the bucket and a null of the column's type names
+ * that type.  A zero or null bucket, a float one, and every other pair are the atom law's. */
+static ray_t* xbar_binary(ray_t* bucket, ray_t* col, int8_t bt, int8_t ct) {
+    if (!ray_is_atom(bucket) || !ray_is_vec(col) || !int_tag(ct) || q_type_is_float_tag(bt) || q_type_is_bool(bucket)
+        || RAY_ATOM_IS_NULL(bucket))
+        return NULL;
+    int64_t count = as_i64(bucket);
+    if (!count) return NULL;
+    ray_t* probe = ray_typed_null((int8_t)-ct);
+    ray_t* law = q_xbar_wrap(bucket, probe);
+    ray_release(probe);
+    int same = !RAY_IS_ERR(law) && law->type == -ct;
+    if (RAY_IS_ERR(law)) ray_error_free(law);
+    else ray_release(law);
+    if (!same) return NULL;
+    ray_t* b = ray_i64(count);
+    ray_t* r = ray_xbar_fn(col, b);
+    ray_release(b);
+    return r;
+}
+
 /* ===== the binary seam =================================================== */
 
 ray_t* q_vecop_binary(ray_t* (*f)(ray_t*, ray_t*), ray_t* x, ray_t* y) {
@@ -495,6 +518,7 @@ ray_t* q_vecop_binary(ray_t* (*f)(ray_t*, ray_t*), ray_t* x, ray_t* y) {
     if (xv && yv && x->len != y->len) return NULL;     /* 'length stays the caller's to raise */
     int64_t n = xv ? x->len : y->len;
     if (n <= 0) return NULL;                           /* so does the empty's carried type */
+    if (op == VO_XBAR) return xbar_binary(x, y, xt, yt);
     if (is_arith(op)) return arith_binary(op, x, y, xt, yt, xv, yv, n);
     if (!lane_tag(xt) || !lane_tag(yt)) return NULL;
     /* Across a type difference the lanes take the plain numerics only.  A
