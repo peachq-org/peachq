@@ -13,7 +13,7 @@
 #include "qlang/eval/q_eval.h" /* carrier kind / iter id / lambda source */
 #include "qlang/ops/q_index.h" /* q_index_elem_at — THE element read */
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home */
-#include "lang/eval.h"     /* ray_at_fn, ray_xbar_fn */
+#include "lang/eval.h"     /* ray_at_fn, ray_idiv_fn, ray_mul_fn */
 #include "lang/internal.h" /* ray_iasc_fn / ray_idesc_fn, as_f64 */
 #include <assert.h>
 #include <math.h>
@@ -25,7 +25,7 @@
  * ray_iasc_fn; general list → ord_grade; dict → keys by the value grade;
  * table/keyed → grade_table), and asc/desc/rank/xrank/xasc/xdesc are q.q
  * derivations over them (index once, ONE
- * gather).  xbar is an arg-swap over ray_xbar_fn.  DEFERRED (error, never a
+ * gather).  xbar is `x*y div x`.  DEFERRED (error, never a
  * wrong answer): the `s#` attribute on asc results — the attr-take arm accepts
  * long vectors only, so setting it would regress symbol/nested sorts (PLAN.md). */
 
@@ -387,27 +387,15 @@ ray_t* q_idesc_wrap(ray_t* x) {
     return ray_idesc_fn(x);
 }
 
-/* q `width xbar list` — interval bucketing.  rayfall ray_xbar_fn is (col,
- * bucket); q spells it (bucket, col), so swap the arguments.  Everything else
- * (numeric int/float bucket, temporal cols, list zip) is handled by the base
- * kernel; dict/keyed-table/qSQL forms fall through to whatever the base does.
- * A null in either atom answers the null of the type the non-null pair gives
- * (owner ruling 2026-10-20): the kernel names that type on a stand-in pair of 1s. */
+/* q `x xbar y` is `x*y div x`, a timespan bucket counting as its long: xbar.md:115-134 is the div.md grid composed
+ * with multiply.md's, and its errors and nulls are theirs.  Atoms reach here; a vector's fast path is q_vecop's. */
 ray_t* q_xbar_wrap(ray_t* bucket, ray_t* col) {
-    if (bucket->type >= 0 || col->type >= 0 || (!RAY_ATOM_IS_NULL(bucket) && !RAY_ATOM_IS_NULL(col)))
-        return ray_xbar_fn(col, bucket);
-    ray_t* one = ray_i64(1);
-    ray_t* b = q_dollar_cast((int8_t)-bucket->type, one);
-    ray_t* c = RAY_IS_ERR(b) ? NULL : q_dollar_cast((int8_t)-col->type, one);
-    ray_release(one);
+    ray_t* b = bucket->type == -RAY_TIMESPAN ? q_dollar_cast(RAY_I64, bucket) : (ray_retain(bucket), bucket);
     if (RAY_IS_ERR(b)) return b;
-    if (RAY_IS_ERR(c)) { ray_release(b); return c; }
-    ray_t* r = ray_xbar_fn(c, b);
+    ray_t* d = ray_idiv_fn(col, b);
+    ray_t* r = RAY_IS_ERR(d) ? d : ray_mul_fn(b, d);
+    if (r != d) ray_release(d);
     ray_release(b);
-    ray_release(c);
-    if (RAY_IS_ERR(r)) return r;
-    int8_t t = r->type;
-    ray_release(r);
-    return ray_typed_null(t);
+    return r;
 }
 

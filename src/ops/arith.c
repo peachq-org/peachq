@@ -552,38 +552,24 @@ static void xbar_par_fn(void* vctx, uint32_t worker_id,
             int64_t mask = ~(b - 1);
             for (int64_t i = start; i < end; i++) o[i] = in[i] & mask;
         } else {
-            for (int64_t i = start; i < end; i++) {
-                int64_t a = in[i];
-                int64_t q = a / b;
-                if ((a ^ b) < 0 && q * b != a) q--;
-                o[i] = q * b;
-            }
+            for (int64_t i = start; i < end; i++)
+                o[i] = wrap_mul64(floor_div64(in[i], b), b);
         }
     } else if (c->out_type == RAY_I32 || RAY_IS_TEMPORAL32(c->out_type)) {
         const int32_t* in = (const int32_t*)c->in;
         int32_t* o = (int32_t*)c->out;
-        int32_t b32 = (int32_t)b;
         if (c->pow2) {
-            int32_t mask = (int32_t)~((uint32_t)b32 - 1);
+            int32_t mask = (int32_t)~((uint32_t)b - 1);
             for (int64_t i = start; i < end; i++) o[i] = in[i] & mask;
         } else {
-            for (int64_t i = start; i < end; i++) {
-                int32_t a = in[i];
-                int64_t q = (int64_t)a / b32;
-                if ((a ^ b32) < 0 && q * b32 != a) q--;
-                o[i] = (int32_t)(q * b32);
-            }
+            for (int64_t i = start; i < end; i++)
+                o[i] = (int32_t)wrap_mul64(floor_div64(in[i], b), b);
         }
     } else { /* RAY_I16 */
         const int16_t* in = (const int16_t*)c->in;
         int16_t* o = (int16_t*)c->out;
-        int16_t b16 = (int16_t)b;
-        for (int64_t i = start; i < end; i++) {
-            int16_t a = in[i];
-            int16_t q = a / b16;
-            if ((a ^ b16) < 0 && q * b16 != a) q--;
-            o[i] = q * b16;
-        }
+        for (int64_t i = start; i < end; i++)
+            o[i] = (int16_t)wrap_mul64(floor_div64(in[i], b), b);
     }
 }
 
@@ -604,10 +590,9 @@ ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket) {
         (bucket->type == -RAY_I64 || bucket->type == -RAY_I32 ||
          bucket->type == -RAY_I16) &&
         (col->type == RAY_I64 || col->type == RAY_I32 ||
-         col->type == RAY_I16 || col->type == RAY_TIMESTAMP ||
-         RAY_IS_TEMPORAL32(col->type)) &&
+         col->type == RAY_I16 || RAY_IS_TEMPORAL(col->type)) &&
         !RAY_ATOM_IS_NULL(bucket)) {
-        int64_t b = bucket->i64;
+        int64_t b = as_i64(bucket);
         if (b == 0) return ray_error("domain", "xbar: bucket size must be non-zero");
         int64_t n = col->len;
         ray_t* out = ray_vec_new(col->type, n);
@@ -619,8 +604,7 @@ ray_t* ray_xbar_fn(ray_t* col, ray_t* bucket) {
         if (out_type == RAY_I64 || RAY_IS_TEMPORAL64(out_type)) {
             pow2 = (b > 0 && (b & (b - 1)) == 0);
         } else if (out_type == RAY_I32 || RAY_IS_TEMPORAL32(out_type)) {
-            int32_t b32 = (int32_t)b;
-            pow2 = (b32 > 0 && ((uint32_t)b32 & ((uint32_t)b32 - 1)) == 0);
+            pow2 = (b > 0 && b <= INT32_MAX && (b & (b - 1)) == 0);
         }
 
         ray_pool_t* pool = ray_pool_get();
