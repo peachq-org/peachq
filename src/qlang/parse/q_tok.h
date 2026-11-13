@@ -42,6 +42,10 @@ void q_tok_type_letter(const char* src, int* p, char* letter, const q_tok_el* la
  * it; or NULL with *p at the malformed token and *bad its length, the text the caller signals (`'0Wd`). */
 ray_t* q_tok_literal(const char* src, int* p, int* bad);
 
+/* Past the gap between two strand items at src[p]: blanks, and any whole comment LINE among them — a script's
+ * `a:1 2` / `/c` / ` 3` is one strand (learn/startingkdb/language.md:378) and the statement's text keeps the comment. */
+int q_tok_strand_gap(const char* src, int p);
+
 /* True iff src[p] starts a byte literal ("0x…" glued).  The scanner's sign-glue
  * and strand rules use it to keep byte literals out of numeric strands
  * (`1 0x0a` is noun-noun juxtaposition, never a vector). */

@@ -285,6 +285,16 @@ static int lit_ws(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
+int q_tok_strand_gap(const char *src, int p) {
+    for (int at_line = 0;; p++) {
+        if (src[p] == '\n') at_line = 1;
+        else if (src[p] == '/' && at_line) {
+            while (src[p + 1] && src[p + 1] != '\n') p++;
+            at_line = 0;
+        } else if (!lit_ws(src[p])) return p;
+    }
+}
+
 /* q Specials: 0N/0n (null), 0W/0w (+inf), -0W/-0w (-inf).  The case picks the type only without a type letter: lowercase
  * floats the literal (`0w 1 2`), while `0wp` is `0Wp` (Dkmajc).  Returns bytes consumed. */
 static int lit_special(const char *s, int p, q_tok_el *out) {
@@ -673,7 +683,7 @@ ray_t* q_tok_literal(const char *src, int *p, int *bad) {
     }
     while (badi < 0 && !glued) {
         int sp = *p;
-        while (lit_ws(src[sp])) sp++;
+        sp = q_tok_strand_gap(src, sp);
         if (sp == *p) break;                     /* no space => run ended */
         if (q_tok_byte_lit_starts(src, sp)) break;   /* byte literal: own noun */
         q_tok_el el; int q = sp;

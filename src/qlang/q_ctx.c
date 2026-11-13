@@ -289,8 +289,75 @@ int q_ctx_run_debug_line(const char* s, size_t n, FILE* out, FILE* err) {
     return ctx_console_line(s, n, out, err, 1, 1);
 }
 
+/* One statement's text as the walker finds it: its SOURCE SPAN, first line to last, the comment and blank lines
+ * between included (ChangesIn3.5.md:123, peachq#126) and the lines after its last line not.  Copied lazily, so a
+ * statement with no cut is one copy; a cut (a `/`..`\` block, .Q.ld's own entries) is all that is left out. */
+typedef struct {
+    char*       acc;
+    const char* pend;
+    const char* seg;            /* the next uncopied byte; NULL inside a cut */
+    const char* code_end;       /* the end of the statement's last line */
+    size_t      alen, code_len; /* bytes in acc; acc's length at code_end once copied */
+    int         live, code_copied;
+} ctx_span_t;
+
+/* A CR that ends a line reads as LF, so the text a CRLF file's function keeps has no '\r'. */
+static void ctx_span_put(ctx_span_t* s, const char* a, const char* b) {
+    while (a < b) {
+        const char* r = (const char*)memchr(a, '\r', (size_t)(b - a));
+        const char* e = r ? r : b;
+        memcpy(s->acc + s->alen, a, (size_t)(e - a));
+        s->alen += (size_t)(e - a);
+        if (!r) break;
+        if (r + 1 < s->pend && r[1] != '\n') s->acc[s->alen++] = '\r';
+        a = r + 1;
+    }
+}
+
+static void ctx_span_code(ctx_span_t* s, const char* line, size_t raw, int fresh) {
+    if (fresh) { s->live = 1; s->alen = 0; s->seg = NULL; }
+    if (!s->seg) s->seg = line;
+    s->code_end = line + raw;
+    s->code_copied = 0;
+}
+
+static void ctx_span_gap(ctx_span_t* s, const char* line) {
+    if (s->live && !s->seg) s->seg = line;
+}
+
+/* The lines after code_end may yet prove interior, so a cut copies them too; the text stops at code_len. */
+static void ctx_span_cut(ctx_span_t* s, const char* line) {
+    if (!s->live || !s->seg) return;
+    if (!s->code_copied) {
+        ctx_span_put(s, s->seg, s->code_end);
+        s->code_len = s->alen;
+        s->seg = s->code_end;
+        s->code_copied = 1;
+    }
+    ctx_span_put(s, s->seg, line);
+    s->seg = NULL;
+}
+
+/* The CR ending the statement's last line is a byte of the string that line ends inside (`count value
+ * "\"ab\r\ncd\""` is 6). */
+static void ctx_span_keep_cr(ctx_span_t* s) {
+    ctx_span_put(s, s->seg, s->code_end - 1);
+    s->acc[s->alen++] = '\r';
+    s->seg = s->code_end;
+}
+
+static size_t ctx_span_text(ctx_span_t* s) {
+    if (!s->code_copied) {
+        ctx_span_put(s, s->seg, s->code_end);
+        s->code_len = s->alen;
+    }
+    s->acc[s->code_len] = '\0';
+    s->live = 0;
+    return s->code_len;
+}
+
 /* THE multiline law as ONE walker every text door rides — the script runner
- * (prints) and the value door (answers).  Yields each logical line, NUL-
+ * (prints) and the value door (answers).  Yields each statement, NUL-
  * terminated, to `fn`; the first non-zero return stops the walk and is the
  * walker's own.  It reads BYTES — `\l file` arrives through the q_io byte core
  * and the embedded stdlib bundle (`\l pq`) is already a string, so one law
@@ -299,32 +366,26 @@ int q_ctx_run_debug_line(const char* s, size_t n, FILE* out, FILE* err) {
  * `;` alone separates statements (owner ruling 2026-10-08). */
 /* docs/text-entry-law.md: the via-file and IPC columns */
 /* `keep_comments` (.Q.ld) only groups: each comment line is an entry of its own, borrowed and not NUL-terminated,
- * and nothing is captured as documentation. */
+ * cut out of the statement around it, and nothing is captured as documentation. */
 static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int value_door, int keep_comments,
                            q_ctx_stmt_fn fn, void* u) {
     if (!src) { src = ""; len = 0; }     /* an empty read owns no buffer; `src + len` must stay defined */
 
-    /* ONE logical line, joined.  Bounded by the SOURCE: a physical line adds
-     * its own trimmed bytes plus at most the '\n' its own newline already paid
-     * for.  Heap, not static — a loaded script may `\l` another while this one
-     * still holds the line that invoked it. */
-    char* acc = (char*)ray_sys_alloc(len + 2);
-    if (!acc) return 1 + (int)QE_OOM;
+    /* Heap, not static — a loaded script may `\l` another while this one still holds the line that invoked it. */
+    ctx_span_t span = { .acc = (char*)ray_sys_alloc(len + 1), .pend = src + len };
+    if (!span.acc) return 1 + (int)QE_OOM;
 
     /* kdb script semantics (learn/startingkdb/language.md):
-     *  - an INDENTED line CONTINUES the previous logical line (at the value
+     *  - an INDENTED line CONTINUES the previous statement (at the value
      *    door, so does EVERY line — a line inside a string is raw bytes there:
-     *    never classified, never trimmed);
+     *    never classified);
      *  - blank lines, whitespace-only lines, and comment lines (trimmed first
-     *    char '/') are IGNORED for continuation — they do NOT flush the
-     *    accumulator (so `a:1 2` <blank> `/c` <blank> ` 3` ` + 4` => a:5 6 7);
+     *    char '/') are IGNORED for continuation — they do NOT end the
+     *    statement (so `a:1 2` <blank> `/c` <blank> ` 3` ` + 4` => a:5 6 7);
      *  - a column-0 singleton `/` opens a `/`..`\` block comment (skip to a
      *    column-0 singleton `\`); a trimmed singleton `\` (outside a block) EXITS
      *    the script (load-time syntax); `\\` / `exit x` evaluate normally and
-     *    terminate the PROCESS via q_sys_exit (kdb-true).
-     * Continuation fragments are joined with '\n' (now whitespace to the
-     * scanner), so each fragment's trailing `/ comment` ends at its own newline. */
-    size_t      alen = 0;
+     *    terminate the PROCESS via q_sys_exit (kdb-true). */
     int         in_block = 0;
     const char* p = src;
     const char* pend = src + len;
@@ -345,24 +406,18 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
      * console the eval error may first SUSPEND into the debugger — ctx_line's
      * load seam — and a `:r` resume continues the load instead of aborting. */
     int lrc = 0;
-    #define FLUSH() do { if (alen) { lrc = fn(acc, alen, start, u); alen = 0; } } while (0)
+    #define FLUSH() do { if (span.live) lrc = fn(span.acc, ctx_span_text(&span), start, u); } while (0)
 
     while (p < pend) {
         const char* line = p;
         const char* nl   = (const char*)memchr(p, '\n', (size_t)(pend - p));
-        size_t      n    = nl ? (size_t)(nl - line) : (size_t)(pend - line);
+        size_t      raw  = nl ? (size_t)(nl - line) : (size_t)(pend - line);
         p = nl ? nl + 1 : pend;
         lineno++;
-        size_t raw = n;
-        /* The span is BORROWED (it IS the source's bytes), so every trim below
-         * moves the LENGTH, never writes a NUL — and nothing caps it.  The
-         * split already ate the '\n'; only a CRLF's '\r' can be left. */
+        /* Classification reads the line without its CR and trailing blanks, so a block delimiter with superfluous
+         * blanks (`/   ` / `\   `) still classifies as a singleton (kdb ignores superfluous blanks — language.md). */
+        size_t n = raw;
         while (n && line[n - 1] == '\r') n--;
-        /* Strip TRAILING whitespace too, so a block delimiter with superfluous
-         * blanks (`/   ` / `\   `) still classifies as a singleton and a code
-         * line's insignificant trailing spaces don't skew anything (kdb ignores
-         * superfluous blanks — language.md).  A line that ENDS inside a string
-         * gets its trimmed bytes back below. */
         while (n && (line[n - 1] == ' ' || line[n - 1] == '\t')) n--;
 
         /* trimmed view (leading whitespace skipped) drives classification */
@@ -378,10 +433,19 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
             continue;
         }
         if (!open.in_string && !open.in_literal) {
-            if (tlen == 0) { if (!keep_comments) q_comment_break(); continue; }  /* blank: ignored, no flush */
+            if (tlen == 0) {                     /* blank: ignored, no flush */
+                if (keep_comments) ctx_span_cut(&span, line);
+                else {
+                    q_comment_break();
+                    ctx_span_gap(&span, line);
+                }
+                continue;
+            }
             if (tlen == 1 && trim[0] == '\\') break; /* singleton \ exits (post-loop FLUSH runs)  */
             if (trim[0] == '/') {                    /* a comment line, or the `/` opening a block: no flush */
                 in_block = tlen == 1 && !indented;   /* an indented lone `/` is a comment (qstats linalg.q:50) */
+                if (keep_comments || in_block) ctx_span_cut(&span, line);
+                else ctx_span_gap(&span, line);
                 if (keep_comments) {
                     if ((lrc = fn(line, n, lineno, u))) break;
                 } else if (in_block) q_comment_break();
@@ -390,33 +454,26 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
             }
         }
 
-        int is_cont = alen > 0 && (value_door || indented);
-        if (is_cont) { if (!keep_comments) q_comment_break(); }  /* a continuation cannot be documented */
-        else {                                          /* flush the prior line, arm this one */
+        int fresh = !span.live || !(value_door || indented);
+        if (!fresh) {                                   /* a continuation cannot be documented */
+            if (!keep_comments) q_comment_break();
+        } else {                                        /* flush the prior statement, arm this one */
             FLUSH();
             if (lrc) break;
             start = lineno;
             if (!keep_comments) q_comment_fresh_line(lineno);
             open = (q_parse_open_t){ 0 };
         }
-
-        /* append this physical line (join continuation fragments with '\n') */
-        size_t piece = alen;
-        if (alen) acc[alen++] = '\n';
-        memcpy(acc + alen, line, n);
-        alen += n;
-        acc[alen] = '\0';                          /* q_ctx_run_line's q_parse reads it as a C string */
-        if (value_door) q_parse_open_feed(&open, acc + piece);
-        if ((open.in_string || open.in_literal) && raw > n) {
-            memcpy(acc + alen, line + n, raw - n);
-            alen += raw - n;
-            acc[alen] = '\0';
+        ctx_span_code(&span, line, raw, fresh);
+        if (value_door) {
+            q_parse_open_feed(&open, line, raw);
+            if ((open.in_string || open.in_literal) && raw && line[raw - 1] == '\r') ctx_span_keep_cr(&span);
         }
     }
-    if (!lrc) FLUSH();                             /* flush any pending logical line (incl. before a lone \) */
+    if (!lrc) FLUSH();                             /* flush any pending statement (incl. before a lone \) */
     #undef FLUSH
     if (!keep_comments) q_comment_script_end(dsaved);
-    ray_sys_free(acc);
+    ray_sys_free(span.acc);
     return lrc;
 }
 

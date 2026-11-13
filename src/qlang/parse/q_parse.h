@@ -63,9 +63,10 @@ int q_parse_is_seq_head(const ray_t* h);
 ray_t* q_parse_tokens(const char* src, int64_t n);
 
 /* The scanner's view of one statement's text as it grows a line at a time: whether it ends inside a string or text
- * literal.  Start zeroed and feed each piece once, so the cost stays linear.  The first piece takes the text intake: a
- * `\` command or a non-q `<letter>)` is opaque and never open.  A scan error leaves the statement's own parse to report. */
+ * literal.  Start zeroed and feed each piece (n bytes, not NUL-terminated) once, so the cost stays linear.  The first
+ * piece takes the text intake: a `\` command or a non-q `<letter>)` is opaque and never open.  A scan error leaves the
+ * statement's own parse to report. */
 typedef struct { int in_string, in_literal /* the open fence length */, opaque, fed; } q_parse_open_t;
-void q_parse_open_feed(q_parse_open_t *st, const char *piece);
+void q_parse_open_feed(q_parse_open_t *st, const char *piece, size_t n);
 
 #endif /* Q_PARSE_H */
