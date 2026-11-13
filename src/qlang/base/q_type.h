@@ -157,7 +157,7 @@ int q_type_is_inf(ray_t* x);
  * and the coordinate sym the block was flipped from at aux[8..15].  It is what separates a POINTER from data of the
  * same shape (`!` builds `cols!`:dir/` as ordinary data), so recognition is never a shape test: io/q_splay.c marks a
  * mapped RAY_TABLE, io/q_provider.c a provider RAY_DICT, and the kinds are distinct so one reading serves both. */
-enum { Q_COORD_SPLAY = 1, Q_COORD_SPLAY_UNRESOLVED = 2, Q_COORD_PROVIDER = 3 };
+enum { Q_COORD_SPLAY = 1, Q_COORD_SPLAY_UNRESOLVED = 2, Q_COORD_PROVIDER = 3, Q_COORD_SPLAY_DEFERRED = 4 };
 void    q_type_coord_mark(ray_t* x, uint8_t kind, int64_t sym);
 uint8_t q_type_coord_kind(ray_t* x);
 int64_t q_type_coord_sym(ray_t* x);

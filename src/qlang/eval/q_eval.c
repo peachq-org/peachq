@@ -34,7 +34,7 @@
 #include "qlang/net/q_wirefile.h"  /* q_wirefile_read — `get `:file */
 #include "qlang/net/q_wire.h"      /* q_wire_keyword_lambda — `value` of a keyword with no wire code */
 #include "qlang/io/q_provider.h"   /* q_provider_get_carrier — `get `:pq:duckdb:db:t/ */
-#include "qlang/io/q_splay.h"      /* q_splay_get — `get `:dir/ maps; value/amend read the aux path */
+#include "qlang/io/q_splay.h"      /* q_splay_get — `get `:dir/ defers, `:dir and a vector file map; value/amend read the aux path */
 #include "qlang/io/q_io.h"         /* q_io_resource_table — `get `:f.csv reads the format the ending names */
 #include "qlang/q_ctx.h"           /* q_ctx_eval_src — multi-line text under the value law */
 #include "ops/ops.h"
@@ -1080,7 +1080,7 @@ static ray_t* list_lit(ray_t** e, int64_t n) {
     ray_t* ret;
     int64_t holes = 0;
     for (int64_t i = n - 1; i >= 0; i--) {
-        argv[i] = e[i] ? q_eval_apply_concrete(q_eval(e[i])) : RAY_NULL_OBJ;
+        argv[i] = e[i] ? q_splay_contained(q_eval_apply_concrete(q_eval(e[i]))) : RAY_NULL_OBJ;
         if (Q_IS_HOLE(argv[i])) { argv[i] = NULL; holes++; continue; }
         if (RAY_IS_ERR(argv[i])) {
             ret = argv[i];
