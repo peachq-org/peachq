@@ -1,6 +1,6 @@
 /* q_handles — the q-layer handle authority (actionable-plans/
  * 2026-07-22-handle-registry.md, Phase 1).  SINGLE home for the handle
- * abstraction: open/apply/close/read for q-opened file+fifo fds, apply/close
+ * abstraction: open/apply/close/read for q-opened file+fifo fds and zip streams, apply/close
  * dispatch onto the IPC layer for sockets, and the fd-keyed registry of
  * open-time metadata (redacted at capture — a password never enters a record).
  * No other file branches on handle kind — the apply module delegates here, and
@@ -18,6 +18,7 @@ typedef enum {
     Q_HANDLE_FIFO   = 1,
     Q_HANDLE_SOCKET = 2,
     Q_HANDLE_PROVIDER = 3,   /* io/q_provider.h — a `:pq:` alias's connection */
+    Q_HANDLE_ZIP    = 4,     /* io/q_zip.h — a `:zip://` entry read forward */
 } q_handle_kind;
 
 void q_handles_init(void);

@@ -16,6 +16,7 @@
 #include "qlang/io/q_provider.h"  /* q_io_set: a table coordinate routes to .X.set; hdel: to .X.hdel */
 #include "qlang/io/q_csv.h"     /* the CSV/TSV decoder behind a recognised tabular suffix */
 #include "qlang/io/q_json.h"    /* the JSON decoder, and the framing a suffix declares to it */
+#include "qlang/io/q_zip.h"     /* q_zip_* — the zip:// arm of the byte core */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_call_name — the .parquet doors and the .duckdb transport are bound by `\l pq`, not linked */
 #include "qlang/q_env.h"        /* q_env_get — `.h.tx`, the format table `set` reads at call time */
 #include "qlang/net/q_gz.h"     /* q_gz_inflate_zlib — the kxzip block codec */
@@ -201,6 +202,7 @@ ray_t* q_io_write_all(ray_t* pathstr, const void* bytes, size_t n) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     const char* p = ray_str_ptr(pathstr);
     if (!p) return q_err(QE_DOMAIN);
+    if (q_zip_is(p, ray_str_len(pathstr))) return q_err(QE_NYI);
     q_io_mkdir_parents(p, ray_str_len(pathstr));
     FILE* fp = fopen(p, "wb");
     if (!fp) return q_err(QE_IO);
@@ -272,6 +274,7 @@ static ray_t* io_zip_slice(ray_t* pathstr, int64_t off, int64_t want);
 ray_t* q_io_read_slice(ray_t* pathstr, int64_t off, int64_t want, int* zipped) {
     if (zipped) *zipped = 0;
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (q_zip_is(ray_str_ptr(pathstr), ray_str_len(pathstr))) return q_zip_read(pathstr, off, want);
     int wrapped = 0;
     ray_t* out = io_read_raw(pathstr, off, want, &wrapped);
     if (!wrapped || RAY_IS_ERR(out)) return out;
@@ -309,7 +312,9 @@ static int io_is_remote(ray_t* pathstr) {
 
 static int io_is_url(ray_t* pathstr) { return io_is_http(pathstr) || io_is_remote(pathstr); }
 
-int q_io_resource_chunkable(ray_t* pathstr) { return !io_is_url(pathstr); }
+int q_io_resource_chunkable(ray_t* pathstr) {
+    return !io_is_url(pathstr) && !q_zip_is(ray_str_ptr(pathstr), ray_str_len(pathstr));
+}
 
 /* the length of the path that carries a format claim: on a URL a query or fragment names no format */
 static size_t io_claim_len(ray_t* pathstr) {
@@ -516,14 +521,16 @@ static ray_t* io_zip_hdr(ray_t* pathstr, int64_t file_len, zip_hdr_t* z, int* fo
  * answered past the container exactly as q_io_read_slice answers "what bytes".
  * Too small to hold one, or holding one that will not decode, and the on-disk
  * length is all there is — the magic is a claim, and `-21!` is what signals. */
-int64_t q_io_file_size(ray_t* pathstr) {
+ray_t* q_io_file_size(ray_t* pathstr) {
+    if (q_zip_is(ray_str_ptr(pathstr), ray_str_len(pathstr))) return q_zip_size(pathstr);
     int64_t n = io_stat_size(pathstr);
-    if (n < ZIP_MAGIC_LEN + ZIP_TAIL_LEN(1)) return n;
+    if (n < 0) return q_err(QE_IO);
+    if (n < ZIP_MAGIC_LEN + ZIP_TAIL_LEN(1)) return ray_i64(n);
     zip_hdr_t z;
     int found = 0;
     ray_t* bad = io_zip_hdr(pathstr, n, &z, &found, NULL);
-    if (bad) { ray_release(bad); return n; }
-    return found ? z.uncompressed : n;
+    if (bad) { ray_release(bad); return ray_i64(n); }
+    return ray_i64(found ? z.uncompressed : n);
 }
 
 ray_t* q_io_unzip(const uint8_t* buf, size_t len) {
@@ -1101,6 +1108,10 @@ ray_t* q_io_set(ray_t* x, ray_t* y) {
         return r;
     }
     if (!x || x->type != -RAY_SYM || !q_io_is_fsym(x)) return q_err(QE_NYI);
+    ray_t* path = q_io_file_path(x);
+    int zip = path && q_zip_is(ray_str_ptr(path), ray_str_len(path));
+    if (path) ray_release(path);
+    if (zip) return q_err(QE_NYI);
     ray_t* r = io_set_format(x, y);
     if (!r) r = q_wirefile_write(x, y);
     return r ? r : q_err(QE_TYPE);

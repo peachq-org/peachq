@@ -212,3 +212,32 @@ uint8_t* q_gz_deflate_zlib(const uint8_t* src, size_t src_len, int level,
     if (p) *err = NULL;
     return p;
 }
+
+struct q_gz_raw { z_stream zs; };
+
+q_gz_raw_t* q_gz_raw_new(void) {
+    q_gz_raw_t* s = (q_gz_raw_t*)calloc(1, sizeof *s);
+    if (s && inflateInit2(&s->zs, -15) != Z_OK) { free(s); s = NULL; }
+    return s;
+}
+
+int q_gz_raw_step(q_gz_raw_t* s, const uint8_t* in, size_t in_len, size_t* in_used,
+                  uint8_t* out, size_t out_cap, size_t* out_len) {
+    s->zs.next_in = in;
+    s->zs.avail_in = gz_take(&in_len);
+    s->zs.next_out = out;
+    s->zs.avail_out = gz_take(&out_cap);
+    uInt ai = s->zs.avail_in, ao = s->zs.avail_out;
+    int rc = inflate(&s->zs, Z_NO_FLUSH);
+    *in_used = ai - s->zs.avail_in;
+    *out_len = ao - s->zs.avail_out;
+    return rc == Z_STREAM_END ? 1 : (rc == Z_OK || rc == Z_BUF_ERROR) ? 0 : -1;
+}
+
+void q_gz_raw_free(q_gz_raw_t* s) {
+    if (!s) return;
+    inflateEnd(&s->zs);
+    free(s);
+}
+
+uint32_t q_gz_crc32(uint32_t crc, const uint8_t* p, size_t n) { return (uint32_t)crc32_z(crc, p, n); }
