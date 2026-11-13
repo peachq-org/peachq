@@ -133,6 +133,9 @@ ray_t* q_io_zip_block(ray_t* pathstr, const q_io_zipmap_t* zm, int64_t k,
 /* Portable positional read: pread, or ReadFile at an overlapped offset on Windows (errno set on failure). */
 ssize_t q_io_pread(int fd, void* buf, size_t n, int64_t off);
 
+/* All n bytes at off, retrying short reads and EINTR: 0, or -1 at an error or end of file before n. */
+int q_io_pread_all(int fd, void* buf, size_t n, int64_t off);
+
 /* The same block through an open fd (pread) into the caller's scratch.  The scratch MUST be q_io_zipmap_maxblock
  * bytes: room for the largest compressed block and, where a block is gzip, for zlib's inflate state after it — so
  * the read is allocation-free and async-signal-safe whatever the codec (the splay fault handler runs it).
