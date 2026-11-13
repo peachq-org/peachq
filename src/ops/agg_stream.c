@@ -39,7 +39,7 @@ static void sum_i64_update(void* base, size_t stride, const uint32_t* gids,
     const int64_t* d = (const int64_t*)vals;
     AGG_UPDATE_LOOP(valid, n, {
         sum_i64_state* st = (sum_i64_state*)((char*)base + (size_t)gids[i]*stride);
-        st->sum = (int64_t)((uint64_t)st->sum + (uint64_t)d[i]); /* unsigned wrap: group.c:185 */
+        st->sum = (int64_t)((uint64_t)st->sum + (uint64_t)d[i]); /* unsigned wrap, as REDUCE_LOOP_I */
     });
 }
 
@@ -229,7 +229,7 @@ static const agg_vtable_t AVG_F64 = {
     .merge = avg_f64_merge, .finalize = avg_f64_final,
 };
 
-/* ---- variance family, I64 (sumsq as int64 unsigned-wrap; formula group.c:2190) -- */
+/* ---- variance family, I64 (sumsq as int64 unsigned-wrap; formula as exec_reduction) -- */
 typedef struct { double sum; int64_t sumsq; int64_t cnt; } var_i64_state;
 static void var_i64_init(void* s) { var_i64_state* st = s; st->sum = 0; st->sumsq = 0; st->cnt = 0; }
 static void var_i64_update(void* base, size_t stride, const uint32_t* gids,
@@ -239,7 +239,7 @@ static void var_i64_update(void* base, size_t stride, const uint32_t* gids,
     AGG_UPDATE_LOOP(valid, n, {
         var_i64_state* st = (var_i64_state*)((char*)base + (size_t)gids[i]*stride);
         int64_t v = d[i]; st->sum += (double)v;
-        st->sumsq = (int64_t)((uint64_t)st->sumsq + (uint64_t)v*(uint64_t)v); /* wrap: group.c:185 */
+        st->sumsq = (int64_t)((uint64_t)st->sumsq + (uint64_t)v*(uint64_t)v); /* wrap, as REDUCE_LOOP_I */
         st->cnt++;
     });
 }

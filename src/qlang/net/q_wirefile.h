@@ -78,6 +78,9 @@ void q_wirefile_parted_adopt(ray_t* v, const uint8_t* tail, size_t len, char lay
  * tag, 'corrupt inconsistent lengths, 'nyi recognized-but-deferred layouts. */
 ray_t* q_wirefile_probe(ray_t* pathstr, q_wf_colhdr* out);
 
+/* Rows [lo, lo+n) of the column *h describes, read alone; NULL = no row address, read it whole (see the definition). */
+ray_t* q_wirefile_read_rows(ray_t* pathstr, const q_wf_colhdr* h, int64_t lo, int64_t n);
+
 /* Does the file (or the kxzip container's plaintext) open with a kdb data header?  Never true of q
  * source text: no UTF-8 byte is fd-ff. */
 int q_wirefile_is_data(const char* path);

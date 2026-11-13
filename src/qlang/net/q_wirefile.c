@@ -176,28 +176,34 @@ static ray_t* wf_companion(ray_t* path) {
 }
 
 /* N cumulative END offsets counted in ELEMENTS of the companion, row i spanning elements [off[i-1], off[i]): kdb's
- * unit (char hides it at one byte an element).  The offsets are the column; arena bytes past the last are not read. */
-static ray_t* wf_read_nested(int8_t elem, ray_t* path, const uint8_t* off, int64_t count) {
-    if (!path) return q_err(QE_TYPE);
+ * unit (char hides it at one byte an element).  `data` holds the elements [prev, prev + have): the whole companion,
+ * or the span a row read fetched. */
+static ray_t* wf_nested_rows(int8_t elem, const uint8_t* data, int64_t prev, int64_t have,
+                             const uint8_t* off, int64_t count) {
     uint8_t w = ray_type_sizes[(uint8_t)elem];
+    int64_t base = prev, size = prev + have;
     ray_t* out = ray_list_new(count);
     if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
-    ray_t* comp = wf_companion(path);
-    if (RAY_IS_ERR(comp)) { ray_release(out); return comp; }
-    const uint8_t* data = (const uint8_t*)ray_data(comp);
-    int64_t size = q_count(comp), prev = 0;
     for (int64_t i = 0; i < count; i++) {
         int64_t end = wf_i64(off + i * 8);
-        if (end < prev || end > size / w) {
-            ray_release(out); out = q_err(QE_CORRUPT); break;
-        }
-        ray_t* e = q_wire_fixed_vec(elem, data + prev * w, end - prev, 0);
-        if (RAY_IS_ERR(e)) { ray_release(out); out = e; break; }
+        if (end < prev || end > size) { ray_release(out); return q_err(QE_CORRUPT); }
+        ray_t* e = q_wire_fixed_vec(elem, data + (prev - base) * w, end - prev, 0);
+        if (RAY_IS_ERR(e)) { ray_release(out); return e; }
         out = ray_list_append(out, e);
         ray_release(e);
-        if (!out || RAY_IS_ERR(out)) { out = out ? out : q_err(QE_OOM); break; }
+        if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
         prev = end;
     }
+    return out;
+}
+
+/* The offsets are the column; arena bytes past the last are not read. */
+static ray_t* wf_read_nested(int8_t elem, ray_t* path, const uint8_t* off, int64_t count) {
+    if (!path) return q_err(QE_TYPE);
+    ray_t* comp = wf_companion(path);
+    if (RAY_IS_ERR(comp)) return comp;
+    ray_t* out = wf_nested_rows(elem, (const uint8_t*)ray_data(comp), 0,
+                                q_count(comp) / ray_type_sizes[(uint8_t)elem], off, count);
     ray_release(comp);
     return out;
 }
@@ -711,6 +717,7 @@ static ray_t* wf_probe_classify(const uint8_t* buf, size_t got, size_t fsz,
         memcpy(out->domain, buf + 1, nn);
         out->is_enum = 1;
         out->tag = RAY_SYM;
+        out->payload = (uint16_t)(coff + 8);
         out->count = wf_i64(buf + coff);
         return wf_count(&out->count, fsz - coff - 8, 4, out->disk_attr);
     }
@@ -791,6 +798,49 @@ ray_t* q_wirefile_probe(ray_t* pathstr, q_wf_colhdr* out) {
         return e;
     }
     return wf_probe_classify(buf, got, fsz, 0, out);
+}
+
+/* exactly `len` bytes at `off`, or 'corrupt: a header that promised them */
+static ray_t* wf_exact(ray_t* path, int64_t off, int64_t len) {
+    ray_t* b = q_io_read_slice(path, off, len, NULL);
+    if (b && !RAY_IS_ERR(b) && q_count(b) != len) { ray_release(b); return q_err(QE_CORRUPT); }
+    return b ? b : q_err(QE_IO);
+}
+
+static ray_t* wf_nested_slice(ray_t* path, const q_wf_colhdr* h, int64_t lo, int64_t n) {
+    int64_t first = lo ? lo - 1 : 0;                    /* row lo starts where row lo-1 ends */
+    ray_t* off = wf_exact(path, h->payload + 8 * first, 8 * (lo + n - first));
+    if (RAY_IS_ERR(off)) return off;
+    const uint8_t* o = (const uint8_t*)ray_data(off);
+    int64_t prev = lo ? wf_i64(o) : 0, end = wf_i64(o + 8 * (lo + n - first - 1));
+    uint8_t w = ray_type_sizes[(uint8_t)h->tag];
+    int sane = prev >= 0 && end >= prev && end <= INT64_MAX / w;
+    ray_t* cp = sane ? wf_join(ray_str_ptr(path), ray_str_len(path), "#", 1) : NULL;
+    ray_t* data = cp ? wf_exact(cp, prev * w, (end - prev) * w) : q_err(QE_CORRUPT);
+    if (cp) ray_release(cp);
+    ray_t* out = RAY_IS_ERR(data) ? data
+               : wf_nested_rows(h->tag, (const uint8_t*)ray_data(data), prev, end - prev, o + 8 * (lo - first), n);
+    if (!RAY_IS_ERR(data)) ray_release(data);
+    ray_release(off);
+    return out;
+}
+
+/* Rows [lo, lo+n) of the column file the probe described as *h, reading those rows' bytes and no others: a nested
+ * column's offsets for them and the companion span they name, a fixed-width or enum column's cells; of a container,
+ * the blocks those bytes lie in.  NULL where a row has no address the header gives — an anymap, a file written as one
+ * serialized value, an attributed column (its letter is the whole column's) — or the rows are not all there: the
+ * caller reads the column whole.  Else an owned plain heap value (no map mark, no attribute), or a RAY_ERROR. */
+ray_t* q_wirefile_read_rows(ray_t* pathstr, const q_wf_colhdr* h, int64_t lo, int64_t n) {
+    if (h->anymap || h->disk_attr || !h->payload || lo < 0 || n < 0 || h->count < 0 || lo > h->count - n) return NULL;
+    if (h->nested) return n ? wf_nested_slice(pathstr, h, lo, n) : ray_list_new(0);
+    uint8_t w = h->is_enum ? (h->mappable ? 8 : 4) : ray_type_sizes[(uint8_t)h->tag];
+    ray_t* b = wf_exact(pathstr, h->payload + lo * w, n * w);
+    if (RAY_IS_ERR(b)) return b;
+    const uint8_t* p = (const uint8_t*)ray_data(b);
+    ray_t* out = h->is_enum ? q_enum_from_indices(ray_sym_intern_runtime(h->domain, strlen(h->domain)), p, n, w)
+                            : q_wire_fixed_vec(h->tag, p, n, 0);
+    ray_release(b);
+    return out;
 }
 
 /* Through the byte core, so a kxzip container is judged by the header it holds. */

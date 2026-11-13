@@ -25,6 +25,7 @@
 #include "ops/ops.h"
 #include "ops/internal.h"   /* exec_reduction — the eager vector aggregates */
 #include "ops/idxop.h"   /* RAY_IDX_CHUNK_ZONE fast path for min/max */
+#include "ops/agg_acc.h" /* ray_valid_t — the in-line sentinel test the parted lanes share with the engine */
 #include "ops/hash.h"    /* ray_hash_bytes — wide (STR) group-key hashing */
 #include "mem/heap.h"
 
@@ -103,6 +104,12 @@ static int64_t agg_read_i64(ray_t* v, int64_t i) {
     }
 }
 
+/* A segment's nulls for the parted lanes, tested in line (ray_valid_at): a call per cell cost more than the
+ * reduction it guarded. */
+static ray_valid_t agg_seg_valid(ray_t* seg) {
+    return (ray_valid_t){ ray_data(seg), seg->type, (seg->attrs & RAY_ATTR_HAS_NULLS) != 0 };
+}
+
 static ray_t* agg_parted_sum(ray_t* x) {
     int8_t base = (int8_t)RAY_PARTED_BASETYPE(x->type);
     if (!agg_parted_numeric_base(base) || base == RAY_DATE || base == RAY_MONTH)
@@ -114,9 +121,9 @@ static ray_t* agg_parted_sum(ray_t* x) {
             ray_t* seg = segs[s];
             if (!seg) continue;
             double* d = (double*)ray_data(seg);
-            int has_nulls = (seg->attrs & RAY_ATTR_HAS_NULLS) != 0;
+            ray_valid_t live = agg_seg_valid(seg);
             for (int64_t i = 0; i < seg->len; i++)
-                if (!has_nulls || !ray_vec_is_null(seg, i)) sum += d[i];
+                if (ray_valid_at(&live, i)) sum += d[i];
         }
         return make_f64(sum);
     }
@@ -124,9 +131,9 @@ static ray_t* agg_parted_sum(ray_t* x) {
     for (int64_t s = 0; s < x->len; s++) {
         ray_t* seg = segs[s];
         if (!seg) continue;
-        int has_nulls = (seg->attrs & RAY_ATTR_HAS_NULLS) != 0;
+        ray_valid_t live = agg_seg_valid(seg);
         for (int64_t i = 0; i < seg->len; i++)
-            if (!has_nulls || !ray_vec_is_null(seg, i)) sum += agg_read_i64(seg, i);
+            if (ray_valid_at(&live, i)) sum += agg_read_i64(seg, i);
     }
     if (base == RAY_TIME) return ray_time(sum);
     if (base == RAY_TIMESTAMP) return ray_timestamp(sum);
@@ -142,16 +149,16 @@ static ray_t* agg_parted_avg(ray_t* x) {
     for (int64_t s = 0; s < x->len; s++) {
         ray_t* seg = segs[s];
         if (!seg) continue;
-        int has_nulls = (seg->attrs & RAY_ATTR_HAS_NULLS) != 0;
+        ray_valid_t live = agg_seg_valid(seg);
         if (base == RAY_F64) {
             double* d = (double*)ray_data(seg);
             for (int64_t i = 0; i < seg->len; i++) {
-                if (has_nulls && ray_vec_is_null(seg, i)) continue;
+                if (!ray_valid_at(&live, i)) continue;
                 sum += d[i]; cnt++;
             }
         } else {
             for (int64_t i = 0; i < seg->len; i++) {
-                if (has_nulls && ray_vec_is_null(seg, i)) continue;
+                if (!ray_valid_at(&live, i)) continue;
                 sum += (double)agg_read_i64(seg, i); cnt++;
             }
         }
@@ -170,11 +177,11 @@ static ray_t* agg_parted_minmax(ray_t* x, int want_max) {
     for (int64_t s = 0; s < x->len; s++) {
         ray_t* seg = segs[s];
         if (!seg) continue;
-        int has_nulls = (seg->attrs & RAY_ATTR_HAS_NULLS) != 0;
+        ray_valid_t live = agg_seg_valid(seg);
         if (base == RAY_F64) {
             double* d = (double*)ray_data(seg);
             for (int64_t i = 0; i < seg->len; i++) {
-                if (has_nulls && ray_vec_is_null(seg, i)) continue;
+                if (!ray_valid_at(&live, i)) continue;
                 double v = d[i];
                 if (!found || (want_max ? v > best_f : v < best_f)) {
                     best_f = v; found = 1;
@@ -182,7 +189,7 @@ static ray_t* agg_parted_minmax(ray_t* x, int want_max) {
             }
         } else {
             for (int64_t i = 0; i < seg->len; i++) {
-                if (has_nulls && ray_vec_is_null(seg, i)) continue;
+                if (!ray_valid_at(&live, i)) continue;
                 int64_t v = agg_read_i64(seg, i);
                 if (!found || (want_max ? v > best_i : v < best_i)) {
                     best_i = v; found = 1;
@@ -217,6 +224,19 @@ static ray_t* sum_result(int8_t in_type, int64_t sum) {
     return agg_sum_overflows(t, sum) ? ray_typed_null(-RAY_I32) : make_typed_int((int8_t)-t, sum);
 }
 
+/* The flat sum of a sentinel type.  A null is not branched round: every cell is added and the nulls counted beside
+ * it, then their sentinels taken back out (exact: the arithmetic wraps), so a column whose flag only says "may hold
+ * nulls" (every mapped one) sums at the plain loop's speed. */
+#define AGG_SUM_LIVE(T, SENT, x, has_nulls, sum) do { \
+        const T* d = (const T*)ray_data(x); \
+        int64_t n_ = (x)->len; \
+        if (has_nulls) { \
+            uint64_t all = 0, nulls = 0; \
+            for (int64_t i = 0; i < n_; i++) { all += (uint64_t)(int64_t)d[i]; nulls += d[i] == (T)(SENT); } \
+            sum = (int64_t)(all - nulls * (uint64_t)(int64_t)(T)(SENT)); \
+        } else { for (int64_t i = 0; i < n_; i++) sum += d[i]; } \
+    } while (0)
+
 ray_t* ray_sum_fn(ray_t* x) {
     if (ray_is_lazy(x)) return ray_lazy_append(x, OP_SUM);
     if (RAY_IS_PARTED(x->type)) return agg_parted_sum(x);
@@ -250,41 +270,28 @@ ray_t* ray_sum_fn(ray_t* x) {
                 for (int64_t i = 0; i < n; i++) sum += d[i] != 0;
                 return sum_result(x->type, sum);
             } else if (x->type == RAY_I32) {
-                int32_t* d = (int32_t*)ray_data(x);
-                if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
-                else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
+                AGG_SUM_LIVE(int32_t, NULL_I32, x, has_nulls, sum);
                 return sum_result(x->type, sum);
             } else if (x->type == RAY_I16) {
-                int16_t* d = (int16_t*)ray_data(x);
-                if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
-                else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
+                AGG_SUM_LIVE(int16_t, NULL_I16, x, has_nulls, sum);
                 return sum_result(x->type, sum);
             } else if (ray_is_bytelike(x->type)) {
                 uint8_t* d = (uint8_t*)ray_data(x);
-                if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
-                else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
+                for (int64_t i = 0; i < n; i++) sum += d[i];   /* a byte has no null */
                 return sum_result(x->type, sum);
             } else if (x->type == RAY_TIME) {
-                int32_t* d = (int32_t*)ray_data(x);
-                if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
-                else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
+                AGG_SUM_LIVE(int32_t, NULL_I32, x, has_nulls, sum);
                 return ray_time(sum);
             } else if (x->type == RAY_MINUTE || x->type == RAY_SECOND) {
                 /* duration sums keep the type (the TIME rule; kdb sums
                  * durations — OP_SUM admits them, absolute types reject). */
-                int32_t* d = (int32_t*)ray_data(x);
-                if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
-                else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
+                AGG_SUM_LIVE(int32_t, NULL_I32, x, has_nulls, sum);
                 return x->type == RAY_MINUTE ? ray_minute(sum) : ray_second(sum);
             } else if (x->type == RAY_TIMESPAN) {
-                int64_t* d = (int64_t*)ray_data(x);
-                if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
-                else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
+                AGG_SUM_LIVE(int64_t, NULL_I64, x, has_nulls, sum);
                 return ray_timespan(sum);
             } else {
-                int64_t* d = (int64_t*)ray_data(x);
-                if (has_nulls) { for (int64_t i = 0; i < n; i++) if (!ray_vec_is_null(x, i)) sum += d[i]; }
-                else { for (int64_t i = 0; i < n; i++) sum += d[i]; }
+                AGG_SUM_LIVE(int64_t, NULL_I64, x, has_nulls, sum);
                 return ray_timestamp(sum);
             }
         }
