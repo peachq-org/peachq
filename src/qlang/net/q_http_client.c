@@ -534,7 +534,7 @@ static char* http_exchange(const q_http_url_t* u, const char* req, size_t req_le
     ray_sock_t fd = q_http_client_connect(u->host, u->port, Q_HTTP_CONNECT_MS, err);
     if (fd == RAY_INVALID_SOCK) return NULL;
     char* resp = NULL;
-    if (u->scheme == 1 && q_tls_client_start(fd, u->host, err) != 0) goto done;
+    if (u->scheme == 1 && q_tls_client_start(fd, u->host, false, err) != 0) goto done;
     if (q_http_client_send_all(fd, req, req_len, deadline) != 0) { *err = "conn"; goto done; }
     if (body_len && q_http_client_send_all(fd, body, body_len, deadline) != 0) { *err = "conn"; goto done; }
     resp = q_http_client_read_response(fd, len, deadline, err, no_body);

@@ -141,6 +141,10 @@ int64_t   ray_ipc_connect(const char* host, uint16_t port,
                            int timeout_ms);
 /* ray_ipc_connect on a "host:port[:user[:password]]" descriptor; -7 when it is malformed. */
 int64_t   ray_ipc_connect_desc(const char* s, size_t n, int timeout_ms);
+/* Runs on the connected socket before the kdb handshake (TLS lives above the base): 0 to go on, else -8 — also
+ * the code when the overlay it attached fails, rather than closes, during the handshake. */
+typedef int (*ray_ipc_upgrade_fn)(ray_sock_t fd, const char* host, void* ctx);
+int64_t   ray_ipc_connect_desc_over(const char* s, size_t n, int timeout_ms, ray_ipc_upgrade_fn up, void* ctx);
 void      ray_ipc_close(int64_t handle);
 /* The same close, initiated by this side's q `hclose`: `.z.pc` does not fire. */
 void      ray_ipc_close_local(int64_t handle);

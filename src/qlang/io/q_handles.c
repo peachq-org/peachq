@@ -17,13 +17,14 @@
 #include "qlang/net/q_wirefile.h"    /* q_wirefile_append_path — typed handle append */
 #include "qlang/net/q_ws.h"          /* q_ws_client_open — `:ws:// sym handles */
 #include "qlang/net/q_http_client.h" /* q_http_client_raw + the scheme spelling — `:http:// sym handles */
+#include "qlang/net/q_tls.h"         /* q_tls_client_start — `:tcps:// handles */
 #include "qlang/eval/q_eval.h"       /* q_eval_value_wrap / q_eval_apply_value — handle 0 IS `.z.ps`/value */
 #include "qlang/q_env.h"            /* q_env_resolve — `.z.ps` is an ordinary global */
 #include "lang/eval.h"       /* ray_eval_get_restricted, ray_at_fn */
 #include "lang/internal.h"   /* make_i32/make_i64, ray_hsend_fn/ray_hpost_fn/ray_hclose_fn */
 #include "core/runtime.h"    /* __VM->ipc_handle — the handle context handle 0 swaps */
 #include "table/sym.h"       /* ray_sym_intern_runtime, ray_sym_str */
-#include "core/ipc.h"        /* ray_ipc_connect_desc; ray_ipc_handle_of_fd/fd_of_handle — q true-fd handle <-> selector id */
+#include "core/ipc.h"        /* ray_ipc_connect_desc_over; ray_ipc_handle_of_fd/fd_of_handle — q true-fd handle <-> selector id */
 #include "core/sock.h"       /* ray_sock_resolve4 — hopen of an interface-bound own listener */
 #include "core/numparse.h"   /* ray_parse_i64 — hopen's own-listener port */
 #include <rayforce.h>
@@ -304,8 +305,15 @@ ray_t* q_handles_open(const char* path, size_t plen, int is_fifo) {
         q_io_mkdir_parents(p, plen);
     int flags = O_BINARY |           /* a handle writes/reads bytes VERBATIM */
                 (is_fifo ? O_RDONLY : (O_WRONLY | O_CREAT | O_APPEND));
+#ifndef RAY_OS_WINDOWS
+    if (is_fifo == 2) flags |= O_NONBLOCK;
+#endif
     int fd = open(p, flags, 0666);
     if (fd < 0) { free(p); return q_err(QE_IO); }
+#ifndef RAY_OS_WINDOWS
+    /* read1.md:65-75: the open returns with no writer, the read then blocks until EOF */
+    if (is_fifo == 2) fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK);
+#endif
     if (fd < 3) {                    /* std fds closed: 0 is rejected by dispatch,
                                       * 1/2 are console handles — force fd >= 3 */
         int hi = dup_above_std(fd);
@@ -612,25 +620,37 @@ ray_t* q_handles_close(int64_t qh) {
 
 /* One blocking read of up to `count` bytes.  A fifo blocks for data; an empty
  * read is EOF (all writers closed) — the `.Q.fpn`/`.Q.fps` `while[count b]`
- * loop terminates on it.  Restricted mode refuses (reads the pipe). */
+ * loop terminates on it.  No count reads to EOF (read1.md:67).  Restricted
+ * mode refuses (reads the pipe). */
 ray_t* q_handles_read1(int64_t fd, ray_t* count) {
     if (q_handles_kind(fd) != Q_HANDLE_FIFO) return NULL;
-    int64_t want;
-    if (!q_type_strict_i64(count, &want)) return q_err(QE_TYPE);
+    int64_t want = 0;
+    if (count && !q_type_strict_i64(count, &want)) return q_err(QE_TYPE);
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     if (want <= 0) want = 65536;
-    uint8_t* buf = (uint8_t*)malloc((size_t)want);
-    if (!buf) return q_err(QE_OOM);
-    ssize_t got = read((int)fd, buf, (size_t)want);
-    if (got < 0) { free(buf); return q_err(QE_IO); }
-    ray_t* out = ray_vec_from_raw(RAY_BYTE_ONLY, buf, (int64_t)got);
+    uint8_t* buf = NULL;
+    size_t   n = 0, cap = 0;
+    ssize_t  got;
+    do {
+        if (n + (size_t)want > cap) {
+            cap = n + (size_t)want;
+            uint8_t* nb = (uint8_t*)realloc(buf, cap);
+            if (!nb) { free(buf); return q_err(QE_OOM); }
+            buf = nb;
+        }
+        do got = read((int)fd, buf + n, (size_t)want);
+        while (got < 0 && errno == EINTR && !ray_interrupted());
+        if (got < 0) { free(buf); return q_err(errno == EINTR ? QE_STOP : QE_IO); }
+        n += (size_t)got;
+    } while (!count && got > 0);
+    ray_t* out = ray_vec_from_raw(RAY_BYTE_ONLY, buf, (int64_t)n);
     free(buf);
     return out;
 }
 
 /* ---- the q verbs: hopen / hclose ---------------------------------------
  * (feat/q-ipc-client Phase D; hsym Bundle 2b; moved off ops/q_io.c 2026-07-31.)
- * hopen connects through ray_ipc_connect_desc, which takes a
+ * hopen connects through ray_ipc_connect_desc_over, which takes a
  * "host:port[:user:password]" string + optional connect-timeout.  q `hopen`
  * accepts an int PORT (localhost), a "host:port[:user:pass]" STRING or the
  * equivalent hsym SYMBOL (both with the kdb "::PORT"/":host:port" leading-colon
@@ -640,18 +660,18 @@ ray_t* q_handles_read1(int64_t fd, ray_t* count) {
  * `(`:pq:<kind>:alias; arg)` or the bare spec (arg `::`) and answers the alias SYM,
  * not an int (q_provider_hopen).  A `:path` / `:fifo://path`
  * descriptor is NOT IPC — hopen_transport routes it to q_handles_open above.
+ * `tcps://` is the same connection with TLS run beneath the kdb handshake.
  * DEFERRED (clean 'nyi, not a silent TCP attempt): the transport schemes
- * `unix://` / `tcps://` / `unixs://`, which need a transport layer peachq lacks,
- * and single-colon `` `fifo:path `` (kdb opens it non-blocking; see
- * hopen_transport). */
+ * `unix://` / `unixs://`, which need a transport layer peachq lacks. */
 
 /* Normalize a "host:port[:user:password]" descriptor string (raw name text of a
  * string atom or an hsym symbol) into the form .ipc.open expects.  Applies the
- * kdb leading-colon conventions ("::rest" = localhost, ":rest" = strip one ':')
- * and rejects the not-yet-supported transport schemes with a clean 'nyi (so
- * BOTH the string and symbol surfaces decline them the same way, rather than
- * feeding e.g. "unix://5000" into a TCP connect).  Owned RAY_STR or error. */
-static ray_t* hopen_norm_descriptor(const char* s, size_t n) {
+ * kdb leading-colon conventions ("::rest" = localhost, ":rest" = strip one ':'),
+ * strips `tcps://` into *tls, and rejects the not-yet-supported transport
+ * schemes with a clean 'nyi (so BOTH the string and symbol surfaces decline them
+ * the same way, rather than feeding e.g. "unix://5000" into a TCP connect).
+ * Owned RAY_STR or error. */
+static ray_t* hopen_norm_descriptor(const char* s, size_t n, bool* tls) {
     if (n > 512) return q_err(QE_DOMAIN);
     /* Strip the leading-colon marker: "::rest" localhost, single ":rest" strip 1. */
     const char* rest = s;
@@ -659,8 +679,9 @@ static ray_t* hopen_norm_descriptor(const char* s, size_t n) {
     bool        localhost = false;
     if (rn >= 2 && rest[0] == ':' && rest[1] == ':') { rest += 2; rn -= 2; localhost = true; }
     else if (rn >= 1 && rest[0] == ':')              { rest += 1; rn -= 1; }
+    if (!localhost && rn >= 7 && memcmp(rest, "tcps://", 7) == 0) { rest += 7; rn -= 7; *tls = true; }
     /* Deferred transports: a "scheme://" prefix after the leading colon(s). */
-    static const char* const schemes[] = { "unixs://", "unix://", "tcps://", "fifo://" };
+    static const char* const schemes[] = { "unixs://", "unix://", "fifo://" };
     for (size_t i = 0; i < sizeof schemes / sizeof *schemes; i++) {
         size_t sl = strlen(schemes[i]);
         if (rn >= sl && memcmp(rest, schemes[i], sl) == 0)
@@ -679,7 +700,7 @@ static ray_t* hopen_norm_descriptor(const char* s, size_t n) {
 /* Normalize a connection descriptor (int atom, string atom, or hsym symbol)
  * into the "host:port[:user:password]" form .ipc.open expects.  Owned RAY_STR
  * or error. */
-static ray_t* hopen_connstr(ray_t* c) {
+static ray_t* hopen_connstr(ray_t* c, bool* tls) {
     if (q_type_is_int_atom(c)) {
         int64_t p = q_type_iatom_val(c);
         if (p <= 0 || p > 65535)
@@ -690,14 +711,14 @@ static ray_t* hopen_connstr(ray_t* c) {
         return ray_str(buf, (size_t)m);
     }
     if (c && c->type == -RAY_STR)
-        return hopen_norm_descriptor(ray_str_ptr(c), ray_str_len(c));
+        return hopen_norm_descriptor(ray_str_ptr(c), ray_str_len(c), tls);
     if (c && c->type == -RAY_SYM) {
         /* ray_sym_str returns a BORROWED interned string (table/sym.c) — do NOT
          * release it (that over-releases the sym table's own ref; the
          * q_io_file_path precedent).  hopen_norm_descriptor copies a new atom. */
         ray_t* nm = ray_sym_str(c->i64);
         if (!nm) return q_err(QE_TYPE);
-        return hopen_norm_descriptor(ray_str_ptr(nm), ray_str_len(nm));
+        return hopen_norm_descriptor(ray_str_ptr(nm), ray_str_len(nm), tls);
     }
     return q_err(QE_TYPE);
 }
@@ -705,10 +726,11 @@ static ray_t* hopen_connstr(ray_t* c) {
 /* Classify a hopen descriptor into a transport (handle-registry Phase 1).  `s`/`n`
  * are the raw descriptor bytes (leading colon conventions intact).  On FILE/FIFO,
  * path and plen receive the filesystem path inside `s`.  IPC covers `::port`,
- * `:host:port[:user:pass]`, a bare `:port`, and the deferred `scheme://` forms
- * (the existing hopen_norm_descriptor rejects those with 'nyi); a `:fifo://path`
- * is a FIFO and any other `:path` is a FILE. */
-enum { HT_IPC = 0, HT_FILE = 1, HT_FIFO = 2, HT_FIFO_NYI = 3 };
+ * `:host:port[:user:pass]`, a bare `:port`, `tcps://` and the deferred `scheme://`
+ * forms (hopen_norm_descriptor rejects those with 'nyi); a `:fifo://path` is a
+ * FIFO, a single-colon `fifo:path` a FIFO opened without waiting for a writer,
+ * and any other `:path` is a FILE. */
+enum { HT_IPC = 0, HT_FILE = 1, HT_FIFO = 2, HT_FIFO_NB = 3 };
 static int hopen_transport(const char* s, size_t n, const char** path, size_t* plen) {
     *path = s; *plen = n;
     if (n >= 2 && s[0] == ':' && s[1] == ':') return HT_IPC;   /* ::port localhost */
@@ -717,10 +739,8 @@ static int hopen_transport(const char* s, size_t n, const char** path, size_t* p
     size_t      rn = n - off;
     if (rn >= 5 && memcmp(r, "fifo:", 5) == 0) {
         if (rn >= 7 && r[5] == '/' && r[6] == '/') { *path = r + 7; *plen = rn - 7; return HT_FIFO; }
-        /* single-colon `fifo:path (read1.md): kdb's non-blocking fifo open is
-         * NYI here — Phase-1 O_RDONLY would hang without a writer, and falling
-         * through to FILE would create a junk file named "fifo:path". */
-        return HT_FIFO_NYI;
+        *path = r + 5; *plen = rn - 5;
+        return HT_FIFO_NB;
     }
     static const char* const sch[] = { "unixs://", "unix://", "tcps://" };
     for (size_t i = 0; i < sizeof sch / sizeof *sch; i++)
@@ -860,11 +880,13 @@ static bool hopen_is_self(const char* s, size_t n) {
 }
 
 /* A failed connect in kdb's classes (basics/errors.md:192,488); the text after the class is ours, the OS clause in
- * kdb's "OS reports:" form (basics/ipc.md:180).  `d` is the normalized descriptor: only its host:port is shown. */
-static ray_t* hopen_fail(int64_t code, const char* d, size_t n, int64_t tmo) {
+ * kdb's "OS reports:" form (basics/ipc.md:180).  `d` is the normalized descriptor: only its host:port is shown.
+ * A TLS-layer failure (-8) is 'conn (kb/ssl.md:296), `why` its class word. */
+static ray_t* hopen_fail(int64_t code, const char* why, const char* d, size_t n, int64_t tmo) {
     const char* os = strerror(errno);
     if (code == -7) return q_err(QE_DOMAIN);
-    q_err_e cls = code == -3 ? QE_ACCESS : code == -5 ? QE_TIMEOUT : QE_HOP;
+    if (code == -8 && why && strcmp(why, "conn")) return q_err_from_text(why, strlen(why));
+    q_err_e cls = code == -3 ? QE_ACCESS : code == -5 ? QE_TIMEOUT : code == -8 ? QE_CONN : QE_HOP;
     const char* c = memchr(d, ':', n);
     const char* u = c ? memchr(c + 1, ':', n - (size_t)(c + 1 - d)) : NULL;
     int hp = (int)(u ? (size_t)(u - d) : n);
@@ -875,10 +897,15 @@ static ray_t* hopen_fail(int64_t code, const char* d, size_t n, int64_t tmo) {
           : code == -5 && tmo ? snprintf(buf, sizeof buf, "%s. %.*s: no reply within %lldms", cn, hp, d, (long long)tmo)
           : code == -5 ? snprintf(buf, sizeof buf, "%s. %.*s: no reply in time", cn, hp, d)
           : code == -6 ? snprintf(buf, sizeof buf, "%s. %.*s: host not found", cn, hp, d)
+          : code == -8 ? snprintf(buf, sizeof buf, "%s. %.*s: TLS %s", cn, hp, d, q_tls_last_error())
           : snprintf(buf, sizeof buf, "%s. %.*s. OS reports: %s", cn, hp, d, os);
     ray_t* t = m > 0 ? ray_charv(buf, m < (int)sizeof buf ? m : (int)sizeof buf - 1) : NULL;
     if (t && !RAY_IS_ERR(t)) q_err_put(t);
     return e;
+}
+
+static int hopen_tls(ray_sock_t fd, const char* host, void* why) {
+    return q_tls_client_start(fd, host, true, (const char**)why);
 }
 
 static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given, bool socket_only) {
@@ -921,14 +948,13 @@ static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given, bool socket_only) {
             if (pair_to)   ray_release(pair_to);
             if (socket_only)
                 return q_err(QE_TYPE);
-            if (ht == HT_FIFO_NYI)
-                return q_err(QE_NYI);
             if (plen >= 2 && path[0] == 'p' && path[1] == 'q' && (plen == 2 || path[2] == ':'))
                 return q_err(QE_DOMAIN);   /* `pq` is the alias namespace, never a file */
-            return q_handles_open(path, plen, ht == HT_FIFO);
+            return q_handles_open(path, plen, ht == HT_FIFO ? 1 : ht == HT_FIFO_NB ? 2 : 0);
         }
     }
-    ray_t* cs = hopen_connstr(conn);                   /* owned or error */
+    bool tls = false;
+    ray_t* cs = hopen_connstr(conn, &tls);             /* owned or error */
     if (!cs || RAY_IS_ERR(cs)) {
         if (pair_conn) ray_release(pair_conn);
         if (pair_to)   ray_release(pair_to);
@@ -957,11 +983,13 @@ static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given, bool socket_only) {
     size_t desclen = ray_str_len(cs);
     if (desclen >= sizeof descbuf) desclen = sizeof descbuf - 1;
     memcpy(descbuf, ray_str_ptr(cs), desclen);
-    int64_t raw = ray_ipc_connect_desc(ray_str_ptr(cs), ray_str_len(cs), tmo > INT_MAX ? INT_MAX : (int)tmo);
+    const char* why = NULL;
+    int64_t raw = ray_ipc_connect_desc_over(ray_str_ptr(cs), ray_str_len(cs), tmo > INT_MAX ? INT_MAX : (int)tmo,
+                                            tls ? hopen_tls : NULL, &why);
     ray_release(cs);
     if (pair_conn) ray_release(pair_conn);
     if (pair_to)   ray_release(pair_to);
-    if (raw < 0) return hopen_fail(raw, descbuf, desclen, tmo);
+    if (raw < 0) return hopen_fail(raw, why, descbuf, desclen, tmo);
     /* kdb-faithful "true fd" handle model: a q connection handle IS the socket
      * fd (qdocs basics/handles.md — 0 console, 1 stdout, 2 stderr, connections
      * at 3+).  ray_ipc_connect_desc returns the rayfall poll SELECTOR ID (dense, starts
