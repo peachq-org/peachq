@@ -64,8 +64,14 @@ typedef struct {
     uint8_t mappable;
     uint16_t payload;
     int64_t count;
+    char    layout;        /* 'B' or 'D', for q_wirefile_parted_adopt */
+    uint64_t tail;         /* a mappable file's bytes after its elements: a p# column's index trailer */
     char    domain[256];   /* enum domain name, else "" */
 } q_wf_colhdr;
+
+/* v's pending p# index (q_attr_parted_pending) adopted from `tail`, what its file holds after the elements, or the
+ * letter dropped when that is no p# trailer.  layout 'B'/'C'/'D' as at the definition; w the width on disk. */
+void q_wirefile_parted_adopt(ray_t* v, const uint8_t* tail, size_t len, char layout, uint8_t w);
 
 /* Probe `pathstr` (owned by caller, RAY_STR).  NULL on success with *out
  * filled; else an owned error: 'io unreadable, 'type unrecognized magic or

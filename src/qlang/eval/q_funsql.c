@@ -355,9 +355,21 @@ static ray_t* rows_sorted_in(ray_t* col, ray_t* set) {
 typedef enum { WA_EQ, WA_IN, WA_WITHIN } where_attr_op;
 
 /* The rows of the FULL column a constraint keeps, off its attribute — NULL when no lane applies and the verb answers.
- * The needle carries the column's own type (a widening pair is the verb's law) and nulls stay with the verb. */
+ * The needle carries the column's own type (a widening pair is the verb's law); a null needle stays with the verb. */
 static ray_t* attr_rows(ray_t* col, ray_t* v, where_attr_op op) {
-    if (!v || RAY_IS_ERR(v) || (col->attrs & RAY_ATTR_HAS_NULLS)) return NULL;
+    if (!v || RAY_IS_ERR(v)) return NULL;
+    if (q_enum_is(col)) {                               /* an indexed enum is asked in position space */
+        ray_t* k = op != WA_WITHIN && ray_index_has(col) && ray_is_atom(v) == (op == WA_EQ) ? q_enum_keys(col, v) : NULL;
+        if (!k) return NULL;
+        ray_idx_consults[IDX_SITE_FILTER_HASH]++;
+        ray_t* r = rows_of_rowsel(op == WA_EQ ? ray_index_eq_rowsel(col, k->i64) : ray_index_in_rowsel(col, k));
+        ray_release(k);
+        if (r) ray_idx_hits[IDX_SITE_FILTER_HASH]++;
+        return r;
+    }
+    /* a PART index keys every row, nulls among them; every other lane leaves a nullable column to the verb */
+    int nulls = (col->attrs & RAY_ATTR_HAS_NULLS) != 0;
+    if (nulls && ray_index_wake(col) != RAY_IDX_PART) return NULL;
     int64_t key, lo, hi;
     if (op == WA_IN) {
         if (!ray_is_vec(v)) return NULL;
@@ -366,14 +378,14 @@ static ray_t* attr_rows(ray_t* col, ray_t* v, where_attr_op op) {
             ray_t* r = rows_of_rowsel(ray_index_in_rowsel(col, v));
             if (r) { ray_idx_hits[IDX_SITE_FILTER_HASH]++; return r; }
         }
-        if (!ray_attr_is_sorted(col)) return NULL;
+        if (nulls || !ray_attr_is_sorted(col)) return NULL;
         ray_idx_consults[IDX_SITE_FILTER_RANGE]++;
         ray_t* r = rows_sorted_in(col, v);
         if (r) ray_idx_hits[IDX_SITE_FILTER_RANGE]++;
         return r;
     }
     if (op == WA_WITHIN) {
-        if (!ray_is_vec(v) || q_count(v) != 2 || !ray_attr_is_sorted(col)) return NULL;
+        if (nulls || !ray_is_vec(v) || q_count(v) != 2 || !ray_attr_is_sorted(col)) return NULL;
         ray_t* a = q_index_elem_at(v, 0);
         ray_t* b = q_index_elem_at(v, 1);
         ray_idx_consults[IDX_SITE_FILTER_RANGE]++;
@@ -420,9 +432,10 @@ static ray_t* idx_restrict(ray_t* idx, int ident, ray_t* rows) {
  * the where clause is where `=`/`within` answer positions) takes its rows off the index.  A literal right operand
  * is taken as is; any other is evaluated once, as the phrase would (right to left, same scope), and when no lane
  * applies the verb runs on that value — so nothing evaluates twice.  NULL = not this shape, or idx is not an
- * ascending subsequence: the phrase evaluates as before.  Mapped splays are the owner's deferral. */
+ * ascending subsequence: the phrase evaluates as before.  A mapped column answers like any other: its lookup reads
+ * the index and the cells at the edges of the runs it keeps, never the column. */
 static ray_t* where_attr(ray_t* tree, ray_t* t, ray_t* idx) {
-    if (!tree || tree->type != RAY_LIST || q_count(tree) != 3 || q_splay_table_path(t) || q_type_is_dict(t)) return NULL;
+    if (!tree || tree->type != RAY_LIST || q_count(tree) != 3 || q_type_is_dict(t)) return NULL;
     ray_t** e = (ray_t**)ray_data(tree);
     if (!e[0] || !e[1] || !e[2]) return NULL;
     where_attr_op op;
@@ -766,9 +779,7 @@ static uint8_t* rows_bitmap(ray_t* rows, int64_t n) {
  * NULL for the scan path: not this shape, the fronts declined, or no memory for the bitmap (the scan says so). */
 static ray_t* by_group_idx(ray_t* names, ray_t* trees, ray_t* t, ray_t* idx) {
     int64_t n = src_count(t);
-    if (names->type != RAY_SYM || q_count(names) != 1 || q_count(trees) != 1 || q_type_is_dict(t)
-        || q_splay_table_path(t))
-        return NULL;
+    if (names->type != RAY_SYM || q_count(names) != 1 || q_count(trees) != 1 || q_type_is_dict(t)) return NULL;
     ray_t* tree = q_index_elem_at(trees, 0);
     int name = tree && !RAY_IS_ERR(tree) && tree->type == -RAY_SYM && tree->i64 != ray_sym_intern_runtime("i", 1);
     ray_t* col = name ? ray_table_get_col(t, tree->i64) : NULL;       /* virtual `i` shadows a column, as the phrase */
@@ -798,7 +809,11 @@ static ray_t* by_group_idx(ray_t* names, ray_t* trees, ray_t* t, ray_t* idx) {
     }
     free(bm);
     ray_release(first);
-    if (!vals || RAY_IS_ERR(vals)) { if (!RAY_IS_ERR(keep)) ray_release(keep); return vals ? vals : keep; }
+    if (!vals || RAY_IS_ERR(vals)) {                    /* NULL: a front declined mid-way, the scan answers */
+        if (RAY_IS_ERR(keep)) return keep;
+        ray_release(keep);
+        return vals;
+    }
     keep->len = m;
     ray_t* kc = gather(col, keep);
     ray_release(keep);
