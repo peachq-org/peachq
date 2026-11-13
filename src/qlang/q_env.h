@@ -151,6 +151,10 @@ int64_t q_env_scope_ctx(void);   /* the context a relative name resolves against
  * pushed above a barrier (query column scopes) still see it. */
 ray_err_t q_env_frame_push(int barrier);
 void      q_env_frame_pop(void);
+/* Names the top frame stands for but does not bind (borrowed sym vector, the frame's life): a lookup that passes
+ * the frame for one of them is counted, so whoever pushed it learns the name was wanted. */
+void      q_env_frame_watch(ray_t* names);
+int64_t   q_env_frame_watch_hits(void);
 ray_err_t q_env_local_set(int64_t sym, ray_t* val);
 ray_t*    q_env_local_get(int64_t sym);   /* the top frame, or the frame view's; borrowed */
 int       q_env_local_take(int64_t sym, ray_t* cur);  /* q_env_take on that frame;

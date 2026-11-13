@@ -4,6 +4,7 @@
 #include "qlang/ops/q_bang.h"   /* q_bang — the `!` verb, which rebuilds a selection */
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — the int/long miss cast to its domain */
 #include "qlang/ops/q_table.h"  /* the keyed write's shape law and row-append home */
+#include "qlang/io/q_splay.h"   /* q_splay_deferred_map — a deferred table met by an index */
 #include "qlang/eval/q_eval.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_registry_internal.h"
@@ -549,7 +550,11 @@ static ray_t* index_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
 static ray_t* index_r(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
     if (!x || RAY_IS_ERR(x)) return x ? x : q_err(QE_TYPE);
     if (++g_depth > IDX_MAX_DEPTH) { g_depth--; return q_err(QE_STACK); }
-    ray_t* r = index_step(x, i0, rest, k);
+    /* a deferred splay met at any depth: the columns this index names (`t`a`, `t[i;`a]`), mapped while it runs */
+    ray_t* m = x->type == RAY_TABLE ? q_splay_deferred_map(x, k > 1 ? NULL : k ? rest[0] : i0) : NULL;
+    int bad = m && RAY_IS_ERR(m);
+    ray_t* r = bad ? m : index_step(m ? m : x, i0, rest, k);
+    if (m && !bad) ray_release(m);
     g_depth--;
     return r;
 }
@@ -576,7 +581,7 @@ static ray_t* amend_r(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k,
 /* new value for one selection S: f NULL replaces with y, y NULL is the
  * ternary u[S], else v[S;y] — f fully general through the apply seam */
 static ray_t* leaf_apply(ray_t* f, ray_t* s, ray_t* y) {
-    if (!f) { ray_retain(y); return mat(y); }
+    if (!f) { ray_retain(y); return q_splay_contained(mat(y)); }
     ray_t* av[2] = { s, y };
     int was = g_in_place;
     if (q_registry_row_of(f, Q_DYADIC) != q_ops_find(",", 1)) g_in_place = 0;   /* only `,:` writes in place */
