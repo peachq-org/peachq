@@ -669,6 +669,7 @@ static ray_t* wf_probe_classify(const uint8_t* buf, size_t got, size_t fsz,
                         : wf_count(&out->count, fsz - WF_B_OFF, esz, out->disk_attr, WF_P0_B);
         if (e) return e;
         out->mappable = !out->nested;
+        out->payload = WF_B_OFF;
         return NULL;
     }
     case WF_C: {
@@ -689,6 +690,8 @@ static ray_t* wf_probe_classify(const uint8_t* buf, size_t got, size_t fsz,
             ray_t* e = wf_probe_b(desc, out);           /* B header on a D page */
             if (e) return e;
             uint8_t esz = out->nested ? 8 : ray_type_sizes[(uint8_t)out->tag];
+            out->mappable = !out->nested;
+            out->payload = WF_D_OFF;
             return out->anymap ? wf_any_count(&out->count, fsz - WF_D_OFF)
                                : wf_count(&out->count, fsz - WF_D_OFF, esz, out->disk_attr, WF_P0_CD);
         }
@@ -696,9 +699,11 @@ static ray_t* wf_probe_classify(const uint8_t* buf, size_t got, size_t fsz,
                                                     WF_D_DESC - WF_D_NAME);
         if (!nul || nul == buf + WF_D_NAME) return q_err(QE_CORRUPT);
         size_t nn = (size_t)(nul - (buf + WF_D_NAME));
-        if (nn >= sizeof out->domain) return q_err(QE_CORRUPT);
+        if (nn >= sizeof out->domain || !wf_leaf_name((const char*)buf + WF_D_NAME, nn)) return q_err(QE_CORRUPT);
         memcpy(out->domain, buf + WF_D_NAME, nn);
         out->is_enum = 1;
+        out->mappable = 1;
+        out->payload = WF_D_OFF;
         out->tag = RAY_SYM;
         out->disk_attr = desc[3];
         out->count = wf_i64(desc + 8);
@@ -708,6 +713,7 @@ static ray_t* wf_probe_classify(const uint8_t* buf, size_t got, size_t fsz,
         ray_t* e = wf_legacy_hdr(buf, got, fsz, &out->tag, &out->count);
         if (e) return e;
         out->mappable = 1;
+        out->payload = WF_L_OFF;
         return NULL;
     }
     case WF_DEFER: return q_err(QE_NYI);
@@ -1091,7 +1097,7 @@ static ray_t* wf_append_path(ray_t* path, ray_t* y) {
         bad = plain ? wf_append_syms(path, y) : wf_append_rewrite(path, y, 0);
     } else if (!h.zipped && h.tag == 0 && h.count >= 0) {
         bad = wf_append_a_list(path, y, (int32_t)h.count);
-    } else if (!h.zipped && h.mappable && !h.nested && h.disk_attr == 0 &&
+    } else if (!h.zipped && h.mappable && h.payload == WF_B_OFF && !h.is_enum && h.disk_attr == 0 &&
                (int64_t)st.st_size ==
                    WF_B_OFF + h.count * (int64_t)ray_type_sizes[(uint8_t)h.tag]) {
         ray_t* v = y->type < 0 ? q_enlist_wrap(&y, 1) : (ray_retain(y), y);

@@ -53,9 +53,14 @@ ray_t* q_table_map_cols(ray_t* (*colfn)(void* ctx, ray_t* col), void* ctx, ray_t
 }
 
 /* Flatten a plain-or-keyed table to a single plain table (key cols then value
- * cols).  Returns owned. */
+ * cols).  Returns owned.  A deferred splay a verb reached by NAME (meta`t) is mapped here, for that verb. */
 ray_t* q_table_flatten(ray_t* y) {
-    if (y->type == RAY_TABLE) { ray_retain(y); return y; }
+    if (y->type == RAY_TABLE) {
+        ray_t* m = q_splay_deferred_map(y, NULL);
+        if (m) return m;
+        ray_retain(y);
+        return y;
+    }
     ray_t* kt = ray_dict_keys(y);          /* borrowed */
     ray_t* vt = ray_dict_vals(y);          /* borrowed */
     int64_t knc = ray_table_ncols(kt), vnc = ray_table_ncols(vt);
@@ -768,7 +773,7 @@ static ray_t* table_colnames(ray_t* x);
  *   POINTER dict  -> the same pair unmarked (a provider table is that flip too — q_provider.h)
  *   dict          -> table (sym keys; vector vals share one length L, atoms
  *                    broadcast to L; mismatched vector length -> 'length);
- *                    `cols!`:dir/` -> the mapped table, `cols!`:pq:duckdb:db:t/` the bound provider pointer,
+ *                    `cols!`:dir/` -> the deferred table, `cols!`:pq:duckdb:db:t/` the bound provider pointer,
  *                    `cols!`name` the unresolved partitioned table
  *   list of lists -> transposed list (atom items broadcast; a table item is its list of rows)
  * Keyed tables, atoms, and an ALL-ATOM list are 'rank.  An ALL-ATOM dict is 'rank
@@ -1155,10 +1160,12 @@ ray_t* q_ungroup_wrap(ray_t* x) {
 }
 
 /* Column name ids of a table as a RAY_SYM vector.  A keyed table yields key
- * cols ++ value cols — which is exactly the flatten order. */
+ * cols ++ value cols — which is exactly the flatten order; a plain one is read as it is, so a deferred splay
+ * answers its names with nothing mapped. */
 static ray_t* table_colnames(ray_t* x) {
     if (!q_type_is_table(x) && !q_type_is_keyed(x)) return q_err(QE_TYPE);
-    ray_t* flat = q_table_flatten(x);
+    ray_t* flat = x->type == RAY_TABLE ? x : q_table_flatten(x);
+    if (flat == x) ray_retain(x);
     if (!flat || RAY_IS_ERR(flat)) return flat ? flat : q_err(QE_OOM);
     int64_t nc = ray_table_ncols(flat);
     ray_t* out = ray_sym_vec_new(RAY_SYM_W64, nc > 0 ? nc : 1);

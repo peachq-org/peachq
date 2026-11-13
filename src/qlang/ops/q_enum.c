@@ -7,6 +7,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"
 #include "qlang/q_env.h"
+#include "qlang/io/q_splay.h"     /* q_splay_deferred_col — a deferred foreign-key target */
 #include "mem/heap.h"   /* RAY_ATTR_SORTED / HAS_INDEX / HAS_NULLS */
 #include "ops/idxop.h"  /* ray_index_drop — a re-stamp sheds the positions' index */
 #include "lang/internal.h" /* ray_concat_fn — the col-append seam's one concat */
@@ -530,7 +531,9 @@ ray_t* q_enum_deref(ray_t* v, int64_t fld) {
         if (!c) c = ray_table_get_col(ray_dict_slots(t)[1], fld);
         if (c) { ray_retain(c); col = c; }
     } else if (t->type == RAY_TABLE) {
-        ray_t* c = ray_table_get_col(t, fld);
+        col = q_splay_deferred_col(t, fld);              /* a deferred target maps the field's column */
+        if (col && RAY_IS_ERR(col)) return col;
+        ray_t* c = col ? NULL : ray_table_get_col(t, fld);
         if (c) { ray_retain(c); col = c; }
     }
     if (!col) return NULL;
