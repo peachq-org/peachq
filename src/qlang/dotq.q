@@ -177,6 +177,35 @@
 / .Q.bvi/.Q.MAP: nullary no-ops yielding `()` - kdb's generic null is neither `type`-able nor `~`-able here (PLAN.md defect).
 .Q.bvi:{[] ()};
 .Q.MAP:{[] ()};
+/ ref/dotq.md:452-540: enumerated before the sort (its .Q.dpfts mysym is arrival order), as kb/loading-from-large-files.md
+/ sketches; a field of :: saves unsorted with no attribute; a table without a symbol column writes no sym file
+.Q.i.save_partition:{[dir;part;field;name;domain]
+  table:value name;
+  sorted:not field~(::);
+  if[98h<>type table;'"type"];
+  if[sorted;if[not field in cols table;'field]];
+  table:@[table;cols table;`#];
+  if[any 11h=type each flip table;table:.Q.ens[dir;table;domain]];
+  mappable:{[column]
+    if[type[column]|not count column;:1b];
+    types:type each column;
+    (0h<>first types)&all types=first types};
+  if[not all mappable each flip table;'"unmappable"];
+  if[sorted;table:@[field xcols field xasc table;field;`p#]];
+  .Q.par[dir;part;`$string[name],"/"]set table;
+  name};
+.Q.dpfts:{[d;p;f;t;s] .Q.i.save_partition[d;p;f;t;s]};
+.Q.dpft:{[d;p;f;t] .Q.i.save_partition[d;p;f;t;`sym]};
+.Q.dpts:{[d;p;t;s] .Q.i.save_partition[d;p;::;t;s]};
+.Q.dpt:{[d;p;t] .Q.i.save_partition[d;p;::;t;`sym]};
+/ ref/dotq.md:1155-1175
+.Q.hdpf:{[port;dir;part;field]
+  names:tables`.;
+  .Q.dpft[dir;part;field;]each names;
+  @[`.;names;0#];
+  handle:hopen port;
+  handle"\\l .";
+  hclose handle;};
 
 / ---- File / pipe streaming (ref/dotq.md #fs-file-streaming/#fps-pipe-streaming; ref/read1.md ranged form) ----
 / .Q.fsn: loop file y in z-byte lumps of complete "\n" records - the partial tail record carries into the
