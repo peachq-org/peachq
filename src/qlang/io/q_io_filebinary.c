@@ -222,7 +222,7 @@ ray_t* q_io_filebinary_wrap(ray_t* x, ray_t* y) {
             if (!q_type_strict_i64(e[1], &lbs) || !q_type_strict_i64(e[2], &alg) ||
                 !q_type_strict_i64(e[3], &lvl))
                 return q_err(QE_TYPE);
-            if (alg == 1 || alg == 3 || alg == 5) return q_err(QE_NYI);
+            if (alg == 3 || alg == 5) return q_err(QE_NYI);
             if (alg == 0) return fb_save(e[0], y);
             if (!y || ray_is_atom(y) || y->type != RAY_BYTE_ONLY)
                 return q_err(QE_NYI);            /* raw-byte payloads only */

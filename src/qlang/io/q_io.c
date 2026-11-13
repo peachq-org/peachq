@@ -20,7 +20,7 @@
 #include "qlang/q_env.h"        /* q_env_get — `.h.tx`, the format table `set` reads at call time */
 #include "qlang/net/q_gz.h"     /* q_gz_inflate_zlib — the kxzip block codec */
 #include "lz4hc.h"               /* the lz4hc (algorithm 4) block codec */
-#include "qlang/net/q_wire.h"   /* q_wire_uncompress_into — the kdb-IPC (algorithm 1) block codec */
+#include "qlang/net/q_wire.h"   /* q_wire_uncompress_into, q_wire_compress — the kdb-IPC (algorithm 1) block codec */
 #include "qlang/net/q_wirefile.h" /* the format writers behind q_io_set */
 #include "qlang/net/q_http_client.h" /* the http half of the resource-read seam */
 #include "lang/eval.h"      /* ray_eval_get_restricted */
@@ -678,12 +678,35 @@ ray_t* q_io_zip_block(ray_t* pathstr, const q_io_zipmap_t* zm, int64_t k,
 
 int q_io_zip_param(int64_t v) { return v < INT_MIN ? INT_MIN : v > INT_MAX ? INT_MAX : (int)v; }
 
+/* One algorithm-1 block: `src` framed as a little-endian IPC message and run through the IPC compressor, whose
+ * answer is the whole block.  *len is 0 where that compressor gives up (2000 bytes or fewer, or not under half):
+ * kdb stores exactly those blocks (4,028/4,028).  NULL on OOM. */
+static uint8_t* zip_ipc_encode(const uint8_t* src, size_t plain, size_t* len) {
+    uint32_t total = (uint32_t)plain + 8;
+    uint8_t* out = (uint8_t*)calloc(1, total);
+    if (!out) return NULL;
+    out[0] = 1;
+    memcpy(out + 4, &total, 4);
+    memcpy(out + 8, src, plain);
+    ray_t* frame = ray_vec_from_raw(RAY_BYTE_ONLY, out, (int64_t)total);
+    ray_t* z = frame && !RAY_IS_ERR(frame) ? q_wire_compress(frame) : NULL;
+    int ok = z && !RAY_IS_ERR(z);
+    *len = ok && z != frame ? (size_t)q_count(z) : 0;
+    if (*len) memcpy(out, ray_data(z), *len);
+    if (ok) ray_release(z);
+    else if (z) ray_error_free(z);
+    if (frame && !RAY_IS_ERR(frame)) ray_release(frame);
+    else if (frame) ray_error_free(frame);
+    if (!ok) { free(out); out = NULL; }
+    return out;
+}
+
 ray_t* q_io_zip_write(ray_t* pathstr, const uint8_t* img, size_t n,
                       int lbs, int alg, int lvl) {
-    if (alg != ZIP_GZIP && alg != ZIP_LZ4) return q_err(QE_NYI);       /* 1/3/5: the request site */
+    if (alg != ZIP_IPC && alg != ZIP_GZIP && alg != ZIP_LZ4) return q_err(QE_NYI);       /* 3/5: the request site */
     if (lbs < ZIP_LOG2_MIN || lbs > ZIP_LOG2_MAX || lvl < 0 || (alg == ZIP_GZIP && lvl > 9) || n == 0)
         return q_err(QE_DOMAIN);
-    if (lvl > 16) lvl = 16;                          /* kb/file-compression.md: lz4hc level>16 is 16 */
+    if (lvl > 16 && alg == ZIP_LZ4) lvl = 16;        /* kb/file-compression.md: lz4hc level>16 is 16 */
     int64_t bs = (int64_t)1 << lbs;
     int64_t nb = ((int64_t)n + bs - 1) / bs;
     uint8_t** blk = (uint8_t**)calloc((size_t)nb, sizeof(uint8_t*));
@@ -694,7 +717,10 @@ ray_t* q_io_zip_write(ray_t* pathstr, const uint8_t* img, size_t n,
     for (int64_t k = 0; k < nb && !oom; k++) {
         size_t plain = (size_t)((k + 1) * bs <= (int64_t)n ? bs : (int64_t)n - k * bs);
         const uint8_t* src = img + k * bs;
-        if (alg == ZIP_GZIP) {
+        if (alg == ZIP_IPC) {
+            blk[k] = zip_ipc_encode(src, plain, &bl[k]);
+            if (blk[k] && !bl[k]) bl[k] = plain;     /* gave up: stored below */
+        } else if (alg == ZIP_GZIP) {
             const char* gerr = NULL;
             blk[k] = q_gz_deflate_zlib(src, plain, lvl, &bl[k], &gerr);
         } else {
@@ -705,7 +731,7 @@ ray_t* q_io_zip_write(ray_t* pathstr, const uint8_t* img, size_t n,
         }
         oom = !blk[k] || !bl[k];
         /* kdb stores a block that did not pay; for gzip only a one-block file is witnessed (Q4) */
-        if (!oom && bl[k] >= plain && (alg == ZIP_LZ4 || nb == 1)) {
+        if (!oom && bl[k] >= plain && (alg != ZIP_GZIP || nb == 1)) {
             free(blk[k]);
             blk[k] = NULL;
             bl[k] = plain;
@@ -721,7 +747,7 @@ ray_t* q_io_zip_write(ray_t* pathstr, const uint8_t* img, size_t n,
         uint8_t* w = out;
         memcpy(w, ZIP_MAGIC, ZIP_MAGIC_LEN); w += ZIP_MAGIC_LEN;
         for (int64_t k = 0; k < nb; k++) { memcpy(w, blk[k] ? blk[k] : img + k * bs, bl[k]); w += bl[k]; }
-        int32_t ver = 3;                             /* the observed 2025-era stamp */
+        int32_t ver = alg == ZIP_IPC ? 2 : 3;        /* as kdb stamps each codec: 156/156 alg-1 files say 2 */
         int64_t unc = (int64_t)n, bsz = bs, nbl = nb;
         int64_t cim = (int64_t)(ZIP_MAGIC_LEN + C);
         memcpy(w, &ver, 4); w += 4;
