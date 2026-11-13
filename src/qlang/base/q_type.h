@@ -163,4 +163,11 @@ uint8_t q_type_coord_kind(ray_t* x);
 int64_t q_type_coord_sym(ray_t* x);
 
 
+/* SPECULATIVE (stage A4): the mapped-list mark (mem/heap.h RAY_LIST_MAPMARK).  _mark stamps an owned, freshly read
+ * general list with its column's kdb type (77, or 77+t) and passes it through, errors untouched; _type answers that
+ * type, or 0 for a list that is not the block the reader made. */
+#define Q_TYPE_ANYMAP 77   /* the mark's value for an anymap; 77+t is a nested column of t vectors; 0 is never stored */
+ray_t* q_type_mapped_mark(ray_t* x, uint8_t ktype);
+uint8_t q_type_mapped_type(ray_t* x);
+
 #endif /* QLANG_Q_TYPE_H */

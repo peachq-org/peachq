@@ -48,7 +48,7 @@
 .h.val:value;
 
 / .h.cd joins NESTED columns' subitems with .h.d before Prepare Text (vectors / lists of strings only, ref/file-text.md); that pre-pass is .h.cd's OWN - .h.td, a bare `0:` call, has none.
-.h.cd:{"," 0: $[.Q.qt x;{flip (cols x)!{$[0h<>type x;x;10h=type first x;x;.h.d sv/: string each x]} each value flip x} 0!x;x]};
+.h.cd:{"," 0: $[.Q.qt x;{flip (cols x)!{$[0h<>.Q.c.lty x;x;10h=type first x;x;.h.d sv/: string each x]} each value flip x} 0!x;x]};
 .h.td:{"\t" 0: x};
 / .h.xd escapes cell text with .h.xs, as the printed source of `.h.tx[`xml]` does with `xs'`.
 .h.xd:{c:cols x; (enlist "<R>"),({[c;r] "<r>",(raze {[k;v] "<",(string k),">",(.h.xs $[10h=type v;v;string v]),"</",(string k),">"}'[c;r]),"</r>"}[c;] each value each 0!x),enlist "</R>"};
@@ -84,7 +84,7 @@
 / (save writes them with 1:, the download door sends them verbatim) through .parquet.i.bytes, bound when .parquet loads and
 / resolved by name at call time: unbound, the entry signals '.parquet.i.bytes.
 .h.i.tjs:{$[.Q.qt x;"[",(",\n " sv .j.j each 0!x),"]";.j.j x]};
-.h.tx:`raw`json`csv`txt`xml`xls`parquet!((,:);{$[.Q.qt x;.j.j each 0!x;(0h=type x)&1=count x;.h.i.tjs first x;.j.j each x]};.h.cd;.h.td;.h.xd;.h.ed;{.parquet.i.bytes x});
+.h.tx:`raw`json`csv`txt`xml`xls`parquet!((,:);{$[.Q.qt x;.j.j each 0!x;(0h=.Q.c.lty x)&1=count x;.h.i.tjs first x;.j.j each x]};.h.cd;.h.td;.h.xd;.h.ed;{.parquet.i.bytes x});
 
 .h.hug:{h:"0123456789abcdef"; c:"c"$til 256; c!{[s;h;c] i:"i"$c; $[c in s;enlist c;"%",h[i div 16],h[i mod 16]]}[x;h] each c};
 .h.hu:{raze .h.hug[.h.sc] x};
