@@ -874,8 +874,8 @@ static ray_t* hsym_wrap_impl(ray_t* x) {
  * bytes from offset o to EOF; (f;o;n) -> up to n bytes from o (short read at
  * EOF, offsets clamped).  A kxzip container is resolved away by the byte core,
  * so what comes back is the uncompressed data the doc's Compression section
- * promises.  `read1(h;n)` on a fifo handle is q_handles_read1's; any other
- * handle is 'nyi. */
+ * promises.  `read1(h;n)` and `read1 h` on a fifo handle are q_handles_read1's;
+ * any other handle is 'nyi. */
 static ray_t* read1_wrap_impl(ray_t* x);
 ray_t* q_read1_wrap(ray_t* x) {
     ray_t* xs = q_str_in(x);            /* charv args -> legacy STR forms */
@@ -921,8 +921,11 @@ static ray_t* read1_wrap_impl(ray_t* x) {
         }
         return q_err(QE_NYI);
     }
-    if (x && q_type_is_int_atom(x))
-        return q_err(QE_NYI);
+    if (x && q_type_is_int_atom(x)) {
+        int64_t fd;
+        ray_t*  r = q_type_strict_i64(x, &fd) ? q_handles_read1(fd, NULL) : NULL;
+        return r ? r : q_err(QE_NYI);
+    }
     return q_err(QE_TYPE);
 }
 
