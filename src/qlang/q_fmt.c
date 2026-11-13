@@ -1993,6 +1993,14 @@ static void q_fmt_body(ray_t* val) {
             qe_puts(kb);
             return;
         }
+        ray_t* img[2] = { NULL, NULL };         /* an enum side shows its values, as a table cell does */
+        for (int s = 0; s < 2; s++) {
+            ray_t** side = s ? &v : &k;
+            if (!*side || (*side)->type != RAY_ENUM) continue;
+            img[s] = q_enum_val_image(*side);
+            if (img[s] && !RAY_IS_ERR(img[s])) *side = img[s];
+            else { if (img[s]) ray_error_free(img[s]); img[s] = NULL; }
+        }
         /* entries, not slots: a TABLE domain (the iterators re-key onto one) counts its rows */
         int64_t n = k ? q_count(k) : 0;
         if (n < 0) n = 0;
@@ -2058,6 +2066,7 @@ static void q_fmt_body(ray_t* val) {
         qcell_done(&kb, &qe_top()->trunc);
         qcell_done(&vb, &qe_top()->trunc);
         if (dw && dw != dstackw) free(dw);
+        for (int s = 0; s < 2; s++) if (img[s]) ray_release(img[s]);
         return;
     }
 

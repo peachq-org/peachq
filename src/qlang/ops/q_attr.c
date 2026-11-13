@@ -441,10 +441,16 @@ static ray_t* attr_clear_container(ray_t* y) {
     return ray_dict_new(nk, vals);                           /* consumes both */
 }
 
-/* u/g/p on a 20h vector index its positions, the domain id staying beside the index;
- * `s#` orders by RESOLVED value — recorded deferral (D0918g), 'type.  `#` clears. */
-static ray_t* attr_set_enum(char letter, ray_t* y) {
-    if (letter == 's') return q_err(QE_TYPE);
+/* u/g/p on a 20h vector index its positions, the domain id staying beside the index; `s#` is the VALUES' own
+ * `s#` (n, the letter's symbol, asks it), since positions need not ascend where the symbols do.  `#` clears. */
+static ray_t* attr_set_enum(ray_t* n, char letter, ray_t* y) {
+    if (letter == 's') {
+        ray_t* v = q_enum_val_image(y);
+        ray_t* sv = v && !RAY_IS_ERR(v) ? q_attr_set_dispatch(n, v) : v;
+        if (v && v != sv) ray_release(v);
+        if (!sv || RAY_IS_ERR(sv)) return sv ? sv : q_err(QE_OOM);
+        ray_release(sv);
+    }
     ray_t* w;
     if (y->attrs & RAY_ATTR_SLICE) {                         /* a column VIEW: materialize */
         ray_t* pos = q_enum_positions(y);
@@ -456,8 +462,8 @@ static ray_t* attr_set_enum(char letter, ray_t* y) {
     }
     if (!w || RAY_IS_ERR(w)) return w ? w : q_err(QE_OOM);
     if (ray_index_has(w)) ray_index_drop(&w);
-    (void)q_enum_attr_set(w, 0);
-    ray_t* e = letter ? attr_build(&w, letter, false) : NULL;
+    (void)q_enum_attr_set(w, letter == 's' ? 's' : 0);
+    ray_t* e = letter && letter != 's' ? attr_build(&w, letter, false) : NULL;
     if (e) { ray_release(w); return attr_remap_err(e, letter); }
     return w;
 }
@@ -495,7 +501,7 @@ ray_t* q_attr_set_dispatch(ray_t* n, ray_t* vec) {
         return q_err(QE_TYPE);
     }
     if (vec && vec->type == RAY_ENUM)
-        return letter && !strchr("supg", letter) ? q_err(QE_TYPE) : attr_set_enum(letter, vec);
+        return letter && !strchr("supg", letter) ? q_err(QE_TYPE) : attr_set_enum(n, letter, vec);
     /* the empty general list holds no item to contradict a letter, so it takes any; a carrier it lacks drops */
     if (letter && strchr("supg", letter) && vec && vec->type == RAY_LIST && q_count(vec) == 0)
         return q_attr_rebuild(ray_cow(ray_attr_drop_fn(vec)), letter);

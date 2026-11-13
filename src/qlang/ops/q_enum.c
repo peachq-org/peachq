@@ -186,6 +186,24 @@ ray_t* q_enum_val_image(ray_t* e) {
     return r ? r : q_enum_positions(e);
 }
 
+/* THE MEETING LAW: two values compared, hashed, searched or joined against each other.  Enums of ONE domain meet as
+ * their positions, nothing resolved; any other enum meets as its values, so it answers a plain symbol or another
+ * domain by symbol and never by position.  `ordered` resolves a same-domain pair too: positions do not sort as the
+ * symbols do.  out[] owned (a non-enum side is retained); NULL, or the owned error. */
+ray_t* q_enum_meet(ray_t* a, ray_t* b, int ordered, ray_t* out[2]) {
+    ray_t* in[2] = { a, b };
+    int same = !ordered && q_enum_is(a) && q_enum_is(b) && q_enum_domain(a) == q_enum_domain(b);
+    for (int i = 0; i < 2; i++) {
+        ray_t* v = in[i];
+        if (!q_enum_is(v)) { if (v) ray_retain(v); out[i] = v; continue; }
+        out[i] = !same ? q_enum_val_image(v) : v->type == RAY_ENUM ? q_enum_positions_view(v) : q_enum_positions(v);
+        if (out[i] && !RAY_IS_ERR(out[i])) continue;
+        if (i && out[0]) ray_release(out[0]);
+        return out[i] ? out[i] : q_err(QE_OOM);
+    }
+    return NULL;
+}
+
 /* Decay (value-verb boundary): the value image, except an UNBOUND domain
  * signals its own name (resolution IS a read of that global and an undefined
  * word signals itself, ref/signal.md). */
@@ -207,7 +225,8 @@ static int64_t enum_find(ray_t* d, int64_t sym_id) {
     return -1;
 }
 
-/* Domain value/s (or a same-domain enum) -> owned i64 position/s; out-of-domain
+/* Domain value/s (or an enum: one domain's positions as they are, another's by
+ * its values) -> owned i64 position/s; out-of-domain
  * is 'cast (ref/enumerate.md; the training doc pins the same on the write
  * paths).  A non-sym single-key domain (ref/fkeys.md) looks values up through
  * the Find home — misses come back as count, kdb's own miss law.  A domain
@@ -216,8 +235,12 @@ static int64_t enum_find(ray_t* d, int64_t sym_id) {
  * kdb's link / compound-FK non-enforcement, derived from shape. */
 ray_t* q_enum_coerce(int64_t dom, ray_t* y) {
     if (q_enum_is(y)) {
-        if (q_enum_domain(y) != dom) return q_err(QE_TYPE);
-        return q_enum_positions(y);
+        if (q_enum_domain(y) == dom) return q_enum_positions(y);
+        ray_t* v = q_enum_resolve(y);                  /* another domain's enum enters by its values */
+        if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_TYPE);
+        ray_t* r = q_enum_coerce(dom, v);
+        ray_release(v);
+        return r;
     }
     ray_t* d = enum_domain_vals(dom);
     if (!d) {
