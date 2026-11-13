@@ -430,8 +430,10 @@ static int zip_ipc_decode(const uint8_t* src, size_t clen, uint8_t* dst, size_t 
     return q_wire_uncompress_into(src + 8, clen - 8, 0, dst, plain) == (int64_t)plain ? 0 : -1;
 }
 
-/* One block into exactly `plain` bytes: 0, else -1.  A zlib, lz4 or IPC stream must end exactly at the block's end. */
-static int zip_block_decode(int32_t alg, const uint8_t* src, size_t clen, uint8_t* dst, size_t plain) {
+/* One block into exactly `plain` bytes: 0, else -1.  A zlib, lz4 or IPC stream must end exactly at the block's end.
+ * `work` (Q_GZ_INFLATE_WORK bytes, or NULL for the heap) is where a gzip block's inflate state lives, so a caller
+ * that hands one in allocates nothing whatever the codec. */
+static int zip_block_decode(int32_t alg, const uint8_t* src, size_t clen, uint8_t* dst, size_t plain, void* work) {
     if (alg == ZIP_NONE) {
         if (clen != plain) return -1;
         memcpy(dst, src, plain);
@@ -442,7 +444,8 @@ static int zip_block_decode(int32_t alg, const uint8_t* src, size_t clen, uint8_
         return LZ4_decompress_safe((const char*)src, (char*)dst, (int)clen, (int)plain) == (int)plain ? 0 : -1;
     size_t got = 0, used = 0;
     const char* err = NULL;
-    return q_gz_inflate_zlib(src, clen, dst, plain, &got, &used, &err) == 0 && used == clen && got == plain ? 0 : -1;
+    return q_gz_inflate_zlib_in(src, clen, dst, plain, &got, &used, &err, work, work ? Q_GZ_INFLATE_WORK : 0) == 0 &&
+           used == clen && got == plain ? 0 : -1;
 }
 
 /* The container trailer of a file whose on-disk length is `file_len`.  NULL
@@ -511,7 +514,7 @@ ray_t* q_io_unzip(const uint8_t* buf, size_t len) {
         int64_t plain = z.uncompressed - (int64_t)produced;
         if (plain > z.block_size) plain = z.block_size;
         if (plain <= 0 || zip_block_decode(zip_balg(t, k), buf + ZIP_MAGIC_LEN + start, clen, dst + produced,
-                                           (size_t)plain) != 0)
+                                           (size_t)plain, NULL) != 0)
             ok = 0;
         else
             produced += (size_t)plain;
@@ -598,6 +601,13 @@ ray_t* q_io_zip_open(ray_t* pathstr, q_io_zipmap_t* zm) {
     }
     ray_release(tail);
     if (bad) return bad;
+    int64_t mx = 0;
+    for (int64_t k = 0; k < z.num_blocks; k++) {
+        int64_t c = zm->ends[k] - (k ? zm->ends[k - 1] : 0);
+        if (c > mx) mx = c;
+        if (zm->algs[k] == ZIP_GZIP) zm->gzip = 1;
+    }
+    zm->maxblock = ((size_t)mx + 15) & ~(size_t)15;
     zm->uncompressed = z.uncompressed;
     zm->block_size = z.block_size;
     zm->num_blocks = z.num_blocks;
@@ -613,12 +623,7 @@ static int64_t zip_block_span(const q_io_zipmap_t* zm, int64_t k, int64_t* start
 }
 
 size_t q_io_zipmap_maxblock(const q_io_zipmap_t* zm) {
-    int64_t mx = 0, start;
-    for (int64_t k = 0; k < zm->num_blocks; k++) {
-        int64_t c = zip_block_span(zm, k, &start);
-        if (c > mx) mx = c;
-    }
-    return (size_t)mx;
+    return zm->maxblock + (zm->gzip ? Q_GZ_INFLATE_WORK : 0);
 }
 
 #ifdef RAY_OS_WINDOWS
@@ -654,7 +659,8 @@ int q_io_zip_block_fd(int fd, const q_io_zipmap_t* zm, int64_t k,
         if (n <= 0) return -2;
         got += n;
     }
-    return zip_block_decode(zm->algs[k], scratch, (size_t)clen, dst, (size_t)plain);
+    uint8_t* work = zm->algs[k] == ZIP_GZIP ? scratch + zm->maxblock : NULL;
+    return zip_block_decode(zm->algs[k], scratch, (size_t)clen, dst, (size_t)plain, work);
 }
 
 ray_t* q_io_zip_block(ray_t* pathstr, const q_io_zipmap_t* zm, int64_t k,
