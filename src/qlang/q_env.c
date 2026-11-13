@@ -19,6 +19,7 @@
 #include "qlang/q_pq.h"           /* q_pq_autoload / _autoload_ns — a first `.pq` or missed library reference loads its file */
 #include "qlang/q_registry.h"     /* q_registry_sealed, _is_reserved — core-file writes, keyword kernels */
 #include "qlang/q_prim.h"         /* q_enum_deref — FK/link dotted-walk gather */
+#include "qlang/io/q_splay.h"     /* q_splay_deferred_col — a dotted walk into a deferred table */
 #include "lang/internal.h"        /* ray_error */
 #include "table/sym.h"         /* ray_sym_intern_runtime, ray_sym_str, ray_read_sym */
 #include "table/dict.h"        /* ray_dict_* probes/upsert */
@@ -728,6 +729,7 @@ typedef struct {
     int32_t  n, cap;
     uint8_t  barrier;
     int32_t  saved_view;
+    ray_t*   watch;
     int64_t  keys_in[ENV_FRAME_INLINE];
     ray_t*   vals_in[ENV_FRAME_INLINE];
 } frame_t;
@@ -736,6 +738,7 @@ static _Thread_local frame_t* g_frames;
 static _Thread_local int32_t g_fdepth, g_fcap;
 static _Thread_local int32_t g_fview = Q_ENV_FRAME_VIEW_OFF;
 static _Thread_local int32_t g_ffloor;
+static _Thread_local int64_t g_watch_hits;
 
 int32_t q_env_frame_depth(void) { return g_fdepth; }
 
@@ -772,6 +775,7 @@ ray_err_t q_env_frame_push(int barrier) {
     f->cap = ENV_FRAME_INLINE;
     f->n = 0;
     f->barrier = (uint8_t)(barrier != 0);
+    f->watch = NULL;
     f->saved_view = g_fview;
     g_fview = Q_ENV_FRAME_VIEW_OFF;
     return RAY_OK;
@@ -858,10 +862,18 @@ static ray_t* frames_lookup_at(int64_t sym, int skip_scopes) {
         if (skip_scopes && f->barrier) break;
         for (int32_t i = 0; i < f->n; i++)
             if (f->keys[i] == sym) return f->vals[i];
+        for (int64_t i = 0, n = f->watch ? q_count(f->watch) : 0; i < n; i++)
+            if (ray_vec_get_sym_id(f->watch, i) == sym) { g_watch_hits++; break; }
         if (f->barrier) break;
     }
     return NULL;
 }
+
+void q_env_frame_watch(ray_t* names) {
+    if (g_fdepth > 0) g_frames[g_fdepth - 1].watch = names && names->type == RAY_SYM ? names : NULL;
+}
+
+int64_t q_env_frame_watch_hits(void) { return g_watch_hits; }
 
 static ray_t* frames_lookup(int64_t sym) { return frames_lookup_at(sym, 0); }
 
@@ -885,6 +897,7 @@ static ray_t* walk_segs(ray_t* v, const env_name_t* e, int pos) {
          * rayfall-env fallback for links whose target lives only there */
         next = q_enum_deref(v, seg);
         if (!next && ray_link_has(v)) next = ray_link_deref(v, seg);
+        if (!next) next = q_splay_deferred_col(v, seg);   /* `t.a` on a deferred table: that column, mapped */
         if (next && RAY_IS_ERR(next)) {
             if (fresh) ray_release(v);
             return next;

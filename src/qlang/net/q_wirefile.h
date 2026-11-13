@@ -53,7 +53,7 @@ ray_t* q_wirefile_domain_extend(ray_t* dompathstr, ray_t* symv, ray_t** position
 /* One column file's HEADER, no payload read.  `tag` is the element tag (0 when
  * only a decode can tell: a kxzip container, a shape-A non-vector); `count` is
  * the row count (-1 unknown; a shape-A general list's int32; an unattributed column's from its length); `mappable` marks a fixed-width uncompressed
- * simple vector whose payload starts at byte 16. */
+ * simple vector, or a 64-bit enum, whose elements start at byte `payload` (16, or 4096 behind a shape-D page). */
 typedef struct {
     int8_t  tag;
     uint8_t disk_attr;
@@ -62,6 +62,7 @@ typedef struct {
     uint8_t is_enum;
     uint8_t zipped;
     uint8_t mappable;
+    uint16_t payload;
     int64_t count;
     char    domain[256];   /* enum domain name, else "" */
 } q_wf_colhdr;
