@@ -10,14 +10,9 @@
 .Q.bv	unimplemented	not-built
 .Q.Cf	unimplemented	out-of-scope
 .Q.chk	unimplemented	out-of-scope
-.Q.dpft	unimplemented	out-of-scope
-.Q.dpfts	unimplemented	out-of-scope
-.Q.dpt	unimplemented	out-of-scope
-.Q.dpts	unimplemented	out-of-scope
 .Q.dsftg	unimplemented	out-of-scope
 .Q.fc	unimplemented	not-built
 .Q.fk	unimplemented	not-built
-.Q.hdpf	unimplemented	out-of-scope
 .Q.l	unimplemented	not-built
 .Q.li	unimplemented	not-built
 .Q.lo	unimplemented	not-built
