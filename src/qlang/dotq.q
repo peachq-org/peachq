@@ -6,6 +6,9 @@
 / ---- C-backed members: each delegates to its raw `.Q.c.*` primitive (bound in C before this loads; `.Q.c.*` is internal/unstable) ----
 .Q.id:.Q.c.id;
 .Q.ty:.Q.c.ty;
+/ .Q.c.lty x (internal, no .Q alias): type x, with a mapped list (77h anymap, 77+t nested) answered as the general list
+/ it holds, 0h.  Library code that asks "is this a general list" asks through it, so a column read from a kdb file
+/ takes the same branch as its in-memory copy.
 .Q.qt:.Q.c.qt;
 .Q.qp:.Q.c.qp;
 / wp/permissions .h.jx, kdb-common util.q:118-120 (a modified .Q.s): x's console lines within (rows;cols), from row j

@@ -201,7 +201,7 @@
 / parsing for atomic values, handles
 / single quotes, double quotes, numbers, timestamps, hex, octal, nulls/booleans/inf and standard strings
 .yml.i.parseSimple:{[s]
-    if[0=type s; s:trim " "sv trim each s]; / if it is a list, fold it
+    if[0=.Q.c.lty s; s:trim " "sv trim each s]; / if it is a list, fold it
     s1:trim .yml.i.rmComment s; / for use once we have checked it is not a string literal with a '#'
     ls:lower s1;
     :$[

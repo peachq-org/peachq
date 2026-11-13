@@ -141,7 +141,7 @@
 / the target argument of .kafka.sub as (target; options; decode), the decode `batch for the raw form
 .kafka.i.sub_target:{[target]
   opts:.kafka.i.OPTS;
-  if[0h=type target;
+  if[0h=.Q.c.lty target;
     if[not 2=count target; '`length];
     if[not 99h=type target 1; '`type];
     .kafka.i.options[key opts;target 1];
@@ -212,7 +212,7 @@
 .kafka.i.payloads:{[msgkey;data]
   one:{[item] (item~(::)) or (type item) in -10 -4 4 10h};
   if[one data; :data];
-  if[not 0h=type data; '"kafka: pub data is of type ",(-3!type data),", not a string, a byte vector, :: or a list of them"];
+  if[not 0h=.Q.c.lty data; '"kafka: pub data is of type ",(-3!type data),", not a string, a byte vector, :: or a list of them"];
   if[0=count data; '"kafka: pub has nothing to publish: data is ()"];
   bad:where not one each data;
   if[count bad; '"kafka: pub data item ",string[first bad]," is of type ",(-3!type data first bad),
@@ -284,7 +284,7 @@
 / @eg .kafka.read[h;(`trades;(enlist `ignore_errors)!enlist 1b)]
 .kafka.read:{[h;spec]
   if[-11h=type spec; spec:(spec;()!())];
-  if[not (0h=type spec) and 2=count spec; '`type];
+  if[not (0h=.Q.c.lty spec) and 2=count spec; '`type];
   topic:spec 0; bounds:spec 1;
   if[not (-11h=type topic) and 99h=type bounds; '`type];
   .kafka.i.options[`partition`offset`msgtime,.kafka.i.READ_OPTS;bounds];
@@ -319,7 +319,7 @@
   .kafka.i.destroy token};
 / @ignore
 .kafka.call:{[token;msg;sync]
-  if[not 0h=type msg; '`type];
+  if[not 0h=.Q.c.lty msg; '`type];
   if[not count[msg] in 2 3; '`length];
   msgkey:$[3=count msg; msg 1; ::];
   .kafka.i.produce[token;msg 0;msgkey;.kafka.i.payloads[msgkey;last msg]];
@@ -395,7 +395,7 @@
   if[(mode=`reject) and count null_at; rejects,:.kafka.i.rejects[msgs;null_at;count[null_at]#enlist .kafka.i.TOMBSTONE]];
   if[(mode=`row) and (not inline) and count null_at;
     / a batch of nothing but tombstones has no decoded columns: the types asked for give the row its shape
-    blank:$[98h=type rows; {[col] $[0h=type col; $[(count col) and 10h=type first col; ""; ::]; first 0#col]} each flip rows;
+    blank:$[98h=type rows; {[col] $[0h=.Q.c.lty col; $[(count col) and 10h=type first col; ""; ::]; first 0#col]} each flip rows;
       99h=type opts`types; {[char] $[char="*"; ::; char="C"; ""; first char$()]} each opts`types; ()!()];
     if[(not 98h=type rows) and count blank; rows:0#enlist blank];
     rows:$[count blank; rows,count[null_at]#enlist blank; rows];
@@ -511,7 +511,7 @@
 / and msgtime within/>/>= constraints; the clause is re-applied in full afterwards, so a bound only prunes
 .kafka.i.bounds:{[clauses]
   parts:(::); span:0N 0N; since:0Np; idx:0;
-  clauses:(({[clause] (0h=type clause) and 3=count clause} each clauses)?0b)#clauses;
+  clauses:(({[clause] (0h=.Q.c.lty clause) and 3=count clause} each clauses)?0b)#clauses;
   while[idx<count clauses;
     clause:clauses idx; idx+:1;
     verb:clause 0; col:clause 1; lit:clause 2;

@@ -611,6 +611,7 @@ static ray_t* scatter_store(ray_t* x, ray_t* sel, ray_t* y) {
         if (ix[j] < 0 || ix[j] >= xn) return q_err(QE_INDEX);
     ray_t* nx = ray_cow(x);
     if (!nx || RAY_IS_ERR(nx)) return nx ? nx : q_err(QE_OOM);
+    ray_list_unmark(nx);
     if (bc) {
         for (int64_t j = 0; j < n; j++) q_eval_apply_store_elem(nx, ix[j], y);
         q_attr_store_keep(nx, ix, n);
@@ -1144,7 +1145,9 @@ static ray_t** slot_of(ray_t* x, ray_t* i0) {
     } else if (x->type != RAY_LIST || !idx_i64(i0, &p)) return NULL;
     if (p < 0 || p >= q_count(l)) return NULL;
     ray_t** slot = (ray_t**)ray_data(l) + p;
-    return *slot && !RAY_IS_ERR(*slot) ? slot : NULL;
+    if (!*slot || RAY_IS_ERR(*slot)) return NULL;
+    ray_list_unmark(l);
+    return slot;
 }
 
 /* slot_of when the child too is ours at rc 1 — what a grow in the slack (`x[i],:y`) needs; a shared level anywhere

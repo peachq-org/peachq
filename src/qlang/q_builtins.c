@@ -164,7 +164,15 @@ static int8_t type_of(ray_t* x) {
     return x->type;
 }
 
+/* `type`, a mapped list answered as the general list it holds: the q libraries' "is this a general list" */
+static ray_t* list_type_fn(ray_t* x) {
+    if (x) return ray_i16(type_of(x));
+    return g_base_type ? g_base_type(x) : q_err(QE_TYPE);
+}
+
 static ray_t* type_fn(ray_t* x) {
+    uint8_t mapped = q_type_mapped_type(x);
+    if (mapped) return ray_i16(mapped);
     if (x) return ray_i16(type_of(x));
     return g_base_type ? g_base_type(x)      /* base-verb fallback for NULL x */
                        : q_err(QE_TYPE);
@@ -335,7 +343,7 @@ void q_builtins_register(void) {
      * dotq.q delegates `.Q.btoa:-32!` / `.Q.sha1:-33!` (the bang is the single
      * home).  .Q.c.atob stays C-bound — it has no bang twin. */
     static const struct { const char* name; ray_unary_fn fn; } dotq_c_unary[] = {
-        { ".Q.c.id",   id_fn        }, { ".Q.c.ty",   q_dotq_ty_fn   },
+        { ".Q.c.id",   id_fn        }, { ".Q.c.ty",   q_dotq_ty_fn   }, { ".Q.c.lty", list_type_fn },
         { ".Q.c.qt",   q_dotq_qt_fn   }, { ".Q.c.qp",   q_dotq_qp_fn   },
         { ".Q.c.s",    q_dotq_s_fn    }, { ".Q.c.atob", q_dotq_atob_fn },
         { ".Q.c.cells", q_dotq_cells_fn },

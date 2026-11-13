@@ -220,7 +220,7 @@
 / The wrapper's triple, or a raw value from a server that answers by deferred reply (a TorQ gateway) rather than
 / evaluating the wrapper: anything but a 3-list of (boolean atom; ...; string) IS the value, made the triple here.
 .pq.i.remote_as_triple:{[reply]
-  triple:$[(0h=type reply) and 3=count reply; (-1h=type reply 0) and 10h=type reply 2; 0b];
+  triple:$[(0h=.Q.c.lty reply) and 3=count reply; (-1h=type reply 0) and 10h=type reply 2; 0b];
   $[triple; reply; (1b;((1b;`);reply);"")]};
 
 .pq.i.remote_unwrap:{[reply]

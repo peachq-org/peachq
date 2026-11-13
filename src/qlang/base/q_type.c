@@ -434,4 +434,20 @@ int64_t q_type_coord_sym(ray_t* x) {
     return sym;
 }
 
+ray_t* q_type_mapped_mark(ray_t* x, uint8_t ktype) {
+    if (!x || RAY_IS_ERR(x) || x->type != RAY_LIST || (x->attrs & (RAY_ATTR_SLICE | RAY_ATTR_ARENA))) return x;
+    memcpy(x->aux, RAY_LIST_MAPMARK, 3);
+    x->aux[3] = ktype;
+    return x;
+}
+
+uint8_t q_type_mapped_type(ray_t* x) {
+    uint8_t k = x && !RAY_IS_ERR(x) ? ray_list_mapmark(x) : 0;
+#ifdef DEBUG
+    for (int64_t i = 0; k > Q_TYPE_ANYMAP && i < x->len; i++)       /* a write that kept the mark shows here */
+        assert(((ray_t**)ray_data(x))[i] && ((ray_t**)ray_data(x))[i]->type == (int8_t)(k - Q_TYPE_ANYMAP));
+#endif
+    return k;
+}
+
 ray_t q_hole_obj = { .type = RAY_NULL, .attrs = RAY_ATTR_ARENA, .rc = 0, .len = 0 };

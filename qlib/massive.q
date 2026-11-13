@@ -39,7 +39,7 @@
 .massive.set_key:{[apikey] .massive.apikey::apikey;};
 
 / @ignore
-.massive.i.fmt:{[v] t:type v;
+.massive.i.fmt:{[v] t:.Q.c.lty v;
   $[10h=t;  v;
     -11h=t; string v;
     -1h=t;  $[v;"true";"false"];
@@ -79,7 +79,7 @@
 / @ignore
 .massive.i.pay:{[resp;k]
   v:resp[1] k;
-  $[(98h=type v) or (0h=type v) and count[v] and all 99h=type each v;
+  $[(98h=type v) or (0h=.Q.c.lty v) and count[v] and all 99h=type each v;
     .j.read[resp 0;::;::;(enlist `path)!enlist k]; v]};
 
 / @ignore

@@ -12,7 +12,7 @@
 .md.i.text:{[source]
   $[-11h=type source; "c"$read1 source;
     10h=abs type source; source;
-    (0h=type source) and all 10h=abs type each source; "\n" sv "",/:source;
+    (0h=.Q.c.lty source) and all 10h=abs type each source; "\n" sv "",/:source;
     '`type]};
 
 / @ignore

@@ -2,7 +2,7 @@
 
 / The s) handler: the line's text, or the pair (text;dict) a line with $name markers lowers to at parse (docs/duckdb-api.md § Parameters).
 / @ignore
-.s.e:{[x] r:.duckdb.main[] x; if[(.s.i.head $[0h=type x;first x;x]) in ("CREATE";"ALTER"); .s.i.sync[]]; r}
+.s.e:{[x] r:.duckdb.main[] x; if[(.s.i.head $[0h=.Q.c.lty x;first x;x]) in ("CREATE";"ALTER"); .s.i.sync[]]; r}
 / @ignore
 .s.i.sync:{[] h:.duckdb.main[]; .pq.i.load[h;.duckdb.i.tables[h] except key `.]}
 / @ignore

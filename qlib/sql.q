@@ -81,11 +81,11 @@
 .sql.i.HEADS:(key .sql.i.INFIX),`and`or`not`in`between`cast,`$("is null";"is not null");
 .sql.i.BASE:`class`type`query_location`query_location_length;
 
-.sql.i.derived:{[src] (0h=type src) and (7=count src) and `sql~first src};
+.sql.i.derived:{[src] (0h=.Q.c.lty src) and (7=count src) and `sql~first src};
 .sql.i.no:{[what] '`$"sql: unsupported ",what};
 .sql.i.only:{[d;ks] if[count b:(key d) except ks; .sql.i.no string first b]};
 .sql.i.sym:{[s] $[s~string v:`$s; v; .sql.i.no "blanks around ",s]};
-.sql.i.app:{[e] $[0h=type e; 1b; 11h=type e; 1<count e; 0b]};
+.sql.i.app:{[e] $[0h=.Q.c.lty e; 1b; 11h=type e; 1<count e; 0b]};
 .sql.i.quote:{[s]
   $[(not (`$lower s) in .sql.i.RESERVED) and (all s in .Q.an) and (first s) in .Q.a,.Q.A,"_"; s; "\"",ssr[s;"\"";"\"\""],"\""]};
 .sql.i.name:{[n] "." sv .sql.i.quote each "." vs string n};
@@ -285,7 +285,7 @@
 / sortable class, or m xbar of an int column with m a positive int, as the long q answers, floored as q floors
 / (DuckDB's // truncates): c - (c % m + m) % m, m one parameter wherever the key is written
 .sql.i.key:{[schema;n;e]
-  xb:$[0h=type e; (3=count e) and (xbar)~e 0; 0b];
+  xb:$[0h=.Q.c.lty e; (3=count e) and (xbar)~e 0; 0b];
   c:$[xb; e 2; e]; if[not -11h=type c; :(::)]; if[(c=`i) or not c in schema`col; :(::)];
   row:schema (schema`col)?c; if[(::)~.sql.i.sortable row`logical; :(::)];
   if[not xb; :(c;row`dtype;row`logical)];
@@ -321,7 +321,7 @@
 .sql.i.dtype:{[lg] string (exec logical!dtype from .duckdb.types[] where canon) lg};
 / one aggregate of the phrase as (expr;dtype;logical) under its .sql.i.AGGS row, or :: for none
 .sql.i.agg:{[ix;schema;e]
-  if[0h<>type e; :(::)]; if[null i:first where .sql.i.AGGS[`verb]~\:e 0; :(::)]; r:.sql.i.AGGS i; a:1_e; f:r`result;
+  if[0h<>.Q.c.lty e; :(::)]; if[null i:first where .sql.i.AGGS[`verb]~\:e 0; :(::)]; r:.sql.i.AGGS i; a:1_e; f:r`result;
   if[((count a)<>r`arity) or not all -11h=type each a; :(::)]; s:schema (schema`col)?a; L:s`logical;
   if[$[count r`classes; not all (.sql.i.class each L)[`class] in r`classes; not all a in `i,schema`col] or
     (`i in raze/[r`sql]) and not ix; :(::)];
@@ -342,7 +342,7 @@
   if[g`ok; :`limit`order`inner`moved`clear!(::;g`order;();1b;0b)];
   pick:{[cls;tree]
     none:(::;()); n:tree 5; o:$[6<count tree; tree 6; ()];
-    if[(0h=type o) and (1=count o) and 0h=type first o; o:first o];
+    if[(0h=.Q.c.lty o) and (1=count o) and 0h=.Q.c.lty first o; o:first o];
     if[count o; if[(2<>count o) or -11h<>type c:o 1; :none]; d:((<:);(>:))?o 0;
       if[(d=2) or (::)~k:.sql.i.sortable cls c; :none];
       o:enlist ((`$("<:";">:") d);c),$[k`nullable; enlist `$("nulls first";"nulls last") d; ()]];
@@ -381,7 +381,7 @@
 .sql.i.number:{[tree]
   place:{[acc;e]
     if[99h=type e; r:.z.s[acc;value e]; :(r 0;key[e]!r 1)];
-    if[0h<>type e; :(acc;e)];
+    if[0h<>.Q.c.lty e; :(acc;e)];
     if[(1<count e) and (::)~first e; k:$[3=count e; (acc~\:e)?1b; count acc]; :($[k=count acc; acc,enlist e; acc];`$"$pq",string k+1)];
     {[f;x;i] y:f[x 0;x[1] i]; (y 0;@[x 1;i;:;y 1])}[.z.s]/[(acc;e);o where (type each e o:$[.sql.i.derived e; 4 1 2 3 6; til count e]) in 0 99h]};
   r:place[();tree]; (r 1;(`$"pq",/:string 1+til count r 0)!$[count r 0; r[0][;1]; ()])};
@@ -422,12 +422,12 @@
 / the names a tree fragment refers to: a bare symbol, or a symbol vector outside an application (inside one it is
 / a literal, as parse enlists a symbol constant); a projection's elided argument (101h) is skipped, never applied
 .sql.i.names:{[inapp;node]
-  $[99h=type node; raze .z.s[0b] each value node; 0h=type node; raze .z.s[1b] each node where 101h<>type each node;
+  $[99h=type node; raze .z.s[0b] each value node; 0h=.Q.c.lty node; raze .z.s[1b] each node where 101h<>type each node;
     -11h=type node; enlist node; (11h=type node) and not inapp; node; `$()]};
 / the literal a term compares with, as q evaluates the node: a one-item list is its constant, a symbol rides
 / enlisted, a bare symbol is a name; list asks for a vector of the class, else an atom
 .sql.i.operand:{[k;list;v]
-  if[(0h=type v) and 1=count v; v:first v];
+  if[(0h=.Q.c.lty v) and 1=count v; v:first v];
   if[-11h=type v; :(::)];
   if[list; :$[(type v) in k`literal; v; (::)]];
   if[(11h=type v) and 1=count v; v:first v];
@@ -438,7 +438,7 @@
 / other vector with the rows by position; a name there reads a whole column.  $ casts row by row only by a type name:
 / ` and `symbol, or a char (tok), turn a char column into ONE value
 .sql.i.pure:{[lit;e]
-  t:type e; if[-11h=t; :not lit]; if[t<0; :1b]; if[t within 1 19h; :lit or 1=count e]; if[0h<>t; :0b];
+  t:.Q.c.lty e; if[-11h=t; :not lit]; if[t<0; :1b]; if[t within 1 19h; :lit or 1=count e]; if[0h<>t; :0b];
   if[1=count e; :.z.s[lit] first e];
   if[not any (e 0)~/:.sql.i.VERBS[`verb],((+);(-);(*);(neg);(abs);(like);($);(enlist)); :0b];
   if[$[($)~e 0; not $[(11h=type e 1) and 1=count e 1; not (first e 1) in `,`symbol; 0b]; 0b]; :0b];
@@ -454,7 +454,7 @@
 
 / one where term as SQL, or :: for a term the map cannot push
 .sql.i.term:{[cls;strict;e]
-  if[0h<>type e; :(::)]; if[(any 101h=type each 1_e) or not (type e 0) within 100 112h; :(::)];
+  if[0h<>.Q.c.lty e; :(::)]; if[(any 101h=type each 1_e) or not (type e 0) within 100 112h; :(::)];
   if[null i:first where .sql.i.VERBS[`verb]~\:e 0; :(::)]; r:.sql.i.VERBS i; a:1_e;
   if[r[`shape]=`logic; if[2<>count a; :(::)]; l:.z.s[cls;strict] each a; :$[any (::)~/:l; (::); (r`sql),l]];
   if[r[`shape]=`not; :$[(::)~t:.z.s[cls;1b;a 0]; (::); (r`sql;t)]];
@@ -462,7 +462,7 @@
 / the compared side, a column or an .sql.i.arith expression, is c; an expression compares only by scalar verbs with a
 / non-null literal inside its type's range
 .sql.i.compare:{[cls;strict;r;a]
-  c:a 0; v:a 1; side:{[x] (-11h=type x) or (0h=type x) and any (first x)~/:.sql.i.ARITH};
+  c:a 0; v:a 1; side:{[x] (-11h=type x) or (0h=.Q.c.lty x) and any (first x)~/:.sql.i.ARITH};
   if[(not side c) and (side v) and not null r`mirror; c:v; v:a 0; r:.sql.i.VERBS first where .sql.i.VERBS[`sql]=r`mirror];
   x:$[-11h=type c; (c;.sql.i.class cls c); `scalar=r`shape; .sql.i.arith[cls;c]; (::)];
   if[x~(::); :(::)]; c:x 0; k:x 1; s:r`sql; h:r`shape;
@@ -483,7 +483,7 @@
 / literal inside the type's range (q nulls sort lowest), but not under a further operation, so one operation only; an
 / overflow DuckDB refuses where q wraps is answered by q (.duckdb.i.push).
 .sql.i.arith:{[cls;e]
-  if[0h<>type e; :(::)]; i:.sql.i.ARITH?e 0; if[(i=4) or (count e)<>3-i=3; :(::)];
+  if[0h<>.Q.c.lty e; :(::)]; i:.sql.i.ARITH?e 0; if[(i=4) or (count e)<>3-i=3; :(::)];
   a:1_e; col:-11h=type each a; ints:`int16`int32`int64;
   ok:{[ints;cls;x] $[-11h=type x; cls[x] in ints; (type x) in -5 -6 -7h; not null x; 0b]}[ints;cls];
   if[(not any col) or not all ok each a; :(::)];

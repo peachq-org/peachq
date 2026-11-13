@@ -214,7 +214,7 @@
 .duckdb.qsql:{[c;cl;tree]
   node:{[cl;nd]
     if[99h=type nd; :key[nd]!.z.s[cl] value nd];
-    if[0h=type nd; i:where 101h<>type each nd; :@[nd;i;:;.z.s[cl] each nd i]];
+    if[0h=.Q.c.lty nd; i:where 101h<>type each nd; :@[nd;i;:;.z.s[cl] each nd i]];
     $[-11h<>type nd; nd; (`$first "." vs string nd) in cl; nd; 100h<=type v:@[value;nd;{[e] 'unpush}]; nd; (11h=abs type v) or (type v) in 0 98h; enlist v; v]};
   rt:.[{[node;cl;t] (enlist t 0),node[cl,`i] each 1_t}[node];(cl;tree);{[e] ::}];
   $[rt~(::);::;.duckdb.i.push[c;rt]]}

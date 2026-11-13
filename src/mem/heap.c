@@ -1304,6 +1304,7 @@ ray_t* ray_alloc_copy(ray_t* v) {
     copy->mmod  = new_mmod;
     copy->order = new_order;
     copy->kattr = 0;
+    ray_list_unmark(copy);
     if (RAY_UNLIKELY(ray_rc_sync))
         ray_atomic_store(&copy->rc, 1);
     else
