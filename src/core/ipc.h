@@ -130,14 +130,17 @@ int       ray_ipc_poll(ray_ipc_server_t* srv, int timeout_ms);
 
 /* timeout_ms > 0 bounds the TCP connect and the handshake I/O; <= 0 uses
  * the default budget.  Returns the handle (>= 0) or a negative code:
- * -1 refused/error, -3 auth rejected (kdb servers reject by closing the
- * connection without a capability byte), -5 connect timed out.
+ * -1 refused/error (errno says why), -3 auth rejected (kdb servers reject by
+ * closing the connection without a capability byte), -5 connect or handshake
+ * timed out, -6 the host does not resolve.
  * (The old -2 "auth required" and -4 "wire version mismatch" codes died
  * with the native protocol: the kdb handshake always carries creds and
  * has no version byte.) */
 int64_t   ray_ipc_connect(const char* host, uint16_t port,
                            const char* user, const char* password,
                            int timeout_ms);
+/* ray_ipc_connect on a "host:port[:user[:password]]" descriptor; -7 when it is malformed. */
+int64_t   ray_ipc_connect_desc(const char* s, size_t n, int timeout_ms);
 void      ray_ipc_close(int64_t handle);
 /* The same close, initiated by this side's q `hclose`: `.z.pc` does not fire. */
 void      ray_ipc_close_local(int64_t handle);
@@ -153,7 +156,7 @@ typedef void (*ray_ipc_closed_fn)(int64_t fd);
 void      ray_ipc_set_closed_fn(ray_ipc_closed_fn fn);
 
 /* The kdb handshake as the CLIENT on a socket already connected (blocking, under the socket's own timeouts), then an
- * OUTBOUND connection in the active poll.  Consumes fd whatever happens; the handle, or ray_ipc_connect's -1 / -3. */
+ * OUTBOUND connection in the active poll.  Consumes fd whatever happens; the handle, or ray_ipc_connect's -1 / -3 / -5. */
 int64_t   ray_ipc_adopt_client(ray_sock_t fd, const char* user, const char* password);
 
 /* Serve a connected socket as an INBOUND connection with no listener (a worker's link to the process that made it):
