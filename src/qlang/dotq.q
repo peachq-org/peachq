@@ -123,40 +123,56 @@
 .Q.pt:0#`;
 .Q.pn:()!();
 .Q.vp:()!();
+.Q.i.absent:()!();
 / .Q.qp: a table's flip names where it lives - a plain symbol for a partitioned table, a directory for a splayed one.
 .Q.qp:{$[98h<>type x;0;-11h<>type v:value flip x;0;not":"=first string v]};
-/ The partition type of an entry of a segment: the letter of the date, month or long its name spells, " " for any
-/ other name and for a file (kb/partition.md:11).
-.Q.i.part_type:{[segment;name]
-  letter:first("DMJ"where{[name;letter]name~string letter$name}[name;]each"DMJ")," ";
-  $[null letter;letter;0>type key .Q.dd[segment;`$name];" ";letter]};
-/ `\l` of a database root, the current directory (basics/syscmds.md:441): the partition directories of each segment
-/ (par.txt's rows, else the root itself) and the tables of the most recent one. It answers what the mount binds - the
-/ partition field!its values, then each table!its columns - and reads names and that partition's .d files alone.
-.Q.i.mount:{[]
-  segmented:`par.txt in key`:.;
-  segments:$[segmented;hsym`$read0`:par.txt;enlist`:.];
-  found:{[segment]names:string key segment;(names;.Q.i.part_type[segment;]each names)}each segments;
+/ The partitions of segments: their type letter (" " for none), the names and sorted values in each segment, and the
+/ segment and value of every partition in partition order. An entry's type is the letter of the date, month or long
+/ its name spells, " " for any other name and for a file (kb/partition.md:11).
+.Q.i.partitions:{[segments]
+  part_type:{[segment;name]
+    letter:first("DMJ"where{[name;letter]name~string letter$name}[name;]each"DMJ")," ";
+    $[null letter;letter;0>type key .Q.dd[segment;`$name];" ";letter]};
+  found:{[part_type;segment]
+    names:string key segment;
+    (names;part_type[segment;]each names)}[part_type;]each segments;
   letter:first("DMJ"inter raze found[;1])," ";
-  if[null letter;:(::)];
+  if[null letter;:`letter`dirs`parts!(letter;0#`;())];
   names:{[letter;found]found[0]where letter=found 1}[letter;]each found;
   values:{[letter;names]{x iasc x}letter$names}[letter;]each names;
   order:iasc raze values;
-  .Q.pf:(`date`month,$[all 4=count each raze names;`year;`int])"DMJ"?letter;
-  .Q.PV:.Q.pv:(raze values)order;
-  .Q.PD:.Q.pd:(raze(count each values)#'segments)order;
+  `letter`names`values`dirs`parts!(letter;names;values;(raze(count each values)#'segments)order;(raze values)order)};
+.Q.i.tabled:{[dir;name]
+  s:string name;
+  (first[s]in .Q.a,.Q.A)&(all s in .Q.an)&(not name in .Q.res,key`.q)&`.d in key .Q.dd[dir;name]};
+/ `\l` of a database root, the current directory (basics/syscmds.md:441): the partition directories of each segment
+/ (par.txt's rows, else the root itself) and the tables of the most recent one. It answers what the mount binds - the
+/ partition field!its values, then each table!its columns - and reads names and that partition's .d files alone.
+/ A mount forgets what .Q.bv built (ref/dotq.md .Q.bv: "After loading/re-loading ... invoke .Q.bv[]").
+.Q.i.mount:{[]
+  .Q.vp:()!();
+  .Q.i.absent:()!();
+  segmented:`par.txt in key`:.;
+  segments:$[segmented;hsym`$read0`:par.txt;enlist`:.];
+  found:.Q.i.partitions segments;
+  if[null found`letter;:(::)];
+  .Q.pf:(`date`month,$[all 4=count each raze found`names;`year;`int])"DMJ"?found`letter;
+  .Q.PV:.Q.pv:found`parts;
+  .Q.PD:.Q.pd:found`dirs;
   .Q.P:$[segmented;segments;()];
-  .Q.D:$[segmented;values;()];
+  .Q.D:$[segmented;found`values;()];
   latest:.Q.dd[last .Q.PD;last .Q.PV];
   dirs:key latest;
-  tabled:{[dir;name]s:string name;(first[s]in .Q.a,.Q.A)&(all s in .Q.an)&(not name in .Q.res,key`.q)&`.d in key .Q.dd[dir;name]};
-  .Q.pt:(`symbol$()),dirs where tabled[latest;]each dirs;
+  .Q.pt:(`symbol$()),dirs where .Q.i.tabled[latest;]each dirs;
   .Q.pn:.Q.pt!count[.Q.pt]#enlist`long$();
   (.Q.pf,.Q.pt)!enlist[.Q.PV],{[dir;name]get .Q.par[dir;name;`.d]}[latest;]each .Q.pt};
 / The partition values as a table of the partition column: what a query's partition constraints are answered over.
 .Q.i.values:{[] flip(1#.Q.pf)!enlist .Q.pv};
-/ Partition i of partitioned table `name: its columns c, mapped from that partition's directory.
-.Q.i.part:{[name;c;i] .Q.c.part[.Q.par[.Q.pd i;.Q.pv i;name];c]};
+/ Partition i of partitioned table `name: its columns c, mapped from that partition's directory, or the empty schema
+/ .Q.bv recorded where the table is missing from it.
+.Q.i.part:{[name;c;i]
+  if[i in .Q.i.absent name;:c#.Q.vp name];
+  .Q.c.part[.Q.par[.Q.pd i;.Q.pv i;name];c]};
 / The table a query over partitioned table `name reads: columns c of the partitions idx (:: is every one), the
 / partition column first, razed in partition order; :: for a name the database does not hold.
 .Q.i.table:{[name;c;idx]
@@ -174,6 +190,40 @@
   ref:flip t;
   .Q.pn[value ref]:{[name;c;i]count .Q.i.part[name;c;i]}[value ref;1#key ref;]each til count .Q.pv;
   .Q.pn value ref};
+/ ref/dotq.md .Q.bv: each mounted table missing from some partition gets its empty schema, the partition field first,
+/ from the last partition holding it, or the first for .Q.bv[`]
+.Q.bv:{[from]
+  dirs:.Q.dd'[.Q.pd;.Q.pv];
+  held:{[dirs;name]where .Q.i.tabled[;name]each dirs}[dirs;]each .Q.pt;
+  gaps:where count[dirs]>count each held;
+  schema:{[pick;dirs;name;held]
+    dir:.Q.dd[dirs pick held;name];
+    t:0#.Q.c.part[dir;get .Q.dd[dir;`.d]];
+    flip(.Q.pf,cols t)!enlist[0#.Q.pv],value flip t}[$[from~(::);last;first];dirs;;];
+  .Q.vp:.Q.pt[gaps]!schema'[.Q.pt gaps;held gaps];
+  .Q.i.absent:.Q.pt[gaps]!(til count dirs)except/:held gaps;};
+/ ref/dotq.md:328-342: per partition, () or the partition it filled; a table a partition lacks is written there as
+/ an empty splay of the most recent partition holding it. A name already present, table or not, is never written.
+.Q.chk:{[db]
+  absolute:{[path]("/"=first path)|":"=path 1};
+  text:{$[(1<count x)&"/"=last x;-1_x;x]}1_string db;
+  text:$["./"~2#text;2_text;text];
+  root:hsym`$$[absolute text;text;text~(),".";raze system"cd";(raze system"cd"),"/",text];
+  rows:$[`par.txt in key root;{x where 0<count each x}read0 .Q.dd[root;`par.txt];()];
+  resolve:{[absolute;root;row]$[absolute row;hsym`$row;.Q.dd[root;`$row]]}[absolute;root;];
+  segments:$[count rows;resolve each rows;enlist root];
+  found:.Q.i.partitions segments;
+  dirs:.Q.dd'[found`dirs;found`parts];
+  entries:key each dirs;
+  held:{[dir;names]names where .Q.i.tabled[dir;]each names}'[dirs;entries];
+  names:distinct raze held;
+  template:{[dirs;held;name]last dirs where name in/:held}[dirs;held;]each names;
+  fill:{[names;template;dir;entries]
+    missing:names except entries;
+    {[dir;source;name]
+      .Q.dd[dir;`$string[name],"/"]set 0#get .Q.dd[source;`$string[name],"/"]}[dir;;]'[template names?missing;missing];
+    $[count missing;enlist dir;()]}[names;template;;];
+  fill'[dirs;entries]};
 / .Q.bvi/.Q.MAP: nullary no-ops yielding `()` - kdb's generic null is neither `type`-able nor `~`-able here (PLAN.md defect).
 .Q.bvi:{[] ()};
 .Q.MAP:{[] ()};
