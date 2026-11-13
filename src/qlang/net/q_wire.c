@@ -229,6 +229,27 @@ int q_wire_keyword_lambda(ray_t* x, char* out, size_t cap) {
     return kw_name(x, &nm, &n, &rank) ? kw_lambda_text(nm, n, rank, out, cap) : 0;
 }
 
+/* A 20h vector inside an image bound for disk keeps its domain: tag 21, the domain name, then 32-bit positions —
+ * the bytes kdb gives a flat table's enum column (the data-file-viewer corpus `enumerated.kdb`; 21..76 is the 32-bit
+ * enum space, releases/ChangesIn3.6.md:39).  A position that needs more than 32 bits has no encoding here. */
+#define Q_WIRE_DISK_ENUM      21
+#define Q_WIRE_DISK_ENUM_LAST 76
+static int w_disk_enum(q_wire_wbuf_t* b, ray_t* x) {
+    ray_t* nm = ray_sym_str(q_enum_domain(x));        /* borrowed */
+    int64_t n = q_count(x);
+    if (!nm) return wbuf_fail(b, q_err(QE_TYPE));
+    if (n > INT32_MAX) return wbuf_fail(b, q_err(QE_LIMIT));
+    if (w_u8(b, Q_WIRE_DISK_ENUM) || w_raw(b, ray_str_ptr(nm), ray_str_len(nm)) || w_u8(b, 0) ||
+        w_u8(b, q_attr_byte(x)) || w_i32(b, (int32_t)n))
+        return -1;
+    const int64_t* pos = (const int64_t*)ray_data(x);
+    for (int64_t i = 0; i < n; i++) {
+        if (pos[i] != NULL_I64 && (pos[i] < 0 || pos[i] > INT32_MAX)) return wbuf_fail(b, q_err(QE_LIMIT));
+        if (w_i32(b, pos[i] == NULL_I64 ? NULL_I32 : (int32_t)pos[i])) return -1;
+    }
+    return 0;
+}
+
 int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
     if (b->err) return -1;
     /* serde mode: a C-NULL slot (v4 wrote marker 126, read back as the null
@@ -244,6 +265,7 @@ int q_wire_write_obj(q_wire_wbuf_t* b, ray_t* x) {
      * through IPC" (kb/serialization.md:361) — wire type 20 is never emitted,
      * serde included (an image must not depend on a session global).  A
      * reference/unbound domain sends the bare positions (R7). */
+    if (b->disk && x->type == RAY_ENUM) return w_disk_enum(b, x);
     if (q_enum_is(x)) {
         ray_t* r = q_enum_val_image(x);
         if (!r || RAY_IS_ERR(r)) return wbuf_fail(b, r ? r : q_err(QE_TYPE));
@@ -1110,6 +1132,16 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         }
         }
     }
+    if (c->disk && t >= Q_WIRE_DISK_ENUM && t <= Q_WIRE_DISK_ENUM_LAST) {
+        const char* name; size_t nn;
+        if (r_cstr(c, &name, &nn) || !r_need(c, 5)) return trunc_err("enum vector header");
+        uint8_t wattrs = r_u8(c);
+        int32_t count = r_i32(c);
+        if (!nn || count < 0 || (uint64_t)count > c->rem / 4) return q_err(QE_DOMAIN);
+        ray_t* v = q_enum_from_indices(ray_sym_intern_runtime(name, nn), c->p, count, 4);
+        c->p += (size_t)count * 4; c->rem -= (size_t)count * 4;
+        return rd_attr(c, v, wattrs);
+    }
 
     switch (t) {
     case RAY_LIST: {                                  /* 0h general list */
@@ -1144,9 +1176,9 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         ray_t* v = rd_obj(c);
         if (!v || RAY_IS_ERR(v)) { ray_release(k); return v ? v : q_err(QE_DOMAIN); }
         int64_t kl = k->type == RAY_TABLE ? q_count(k)
-                   : (ray_is_vec(k) || k->type == RAY_LIST) ? q_count(k) : -1;
+                   : (ray_is_vec(k) || k->type == RAY_LIST || k->type == RAY_ENUM) ? q_count(k) : -1;
         int64_t vl = v->type == RAY_TABLE ? q_count(v)
-                   : (ray_is_vec(v) || v->type == RAY_LIST) ? q_count(v) : -1;
+                   : (ray_is_vec(v) || v->type == RAY_LIST || v->type == RAY_ENUM) ? q_count(v) : -1;
         if (kl < 0 || vl < 0 || kl != vl) {
             /* `cols!`sym` is the ONE unconformed dict `!` makes (ref/flip-splayed.md) */
             if (k->type == RAY_SYM && v->type == -RAY_SYM) return ray_dict_new(k, v);   /* consumes both */
