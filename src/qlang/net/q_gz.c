@@ -75,10 +75,25 @@ static uint8_t* gz_deflate(const uint8_t* src, size_t n, int level, int wbits,
 /* One stream from src into out[0..cap): 0 once it ends cleanly (zlib checks the
  * adler32 of a wbits-15 stream), with *out_len produced and *used consumed.  The
  * loop ends because zlib answers Z_BUF_ERROR once neither side can move. */
+typedef struct { uint8_t* base; size_t len, at; } gz_arena_t;
+
+/* zlib's allocator over a caller's arena: a bump, freed all at once when the stream ends. */
+static voidpf gz_arena_alloc(voidpf opaque, uInt items, uInt size) {
+    gz_arena_t* a = (gz_arena_t*)opaque;
+    size_t need = ((size_t)items * size + 15) & ~(size_t)15;
+    if (need > a->len - a->at) return Z_NULL;
+    voidpf p = a->base + a->at;
+    a->at += need;
+    return p;
+}
+
+static void gz_arena_free(voidpf opaque, voidpf p) { (void)opaque; (void)p; }
+
 static int gz_inflate(const uint8_t* src, size_t n, int wbits, uint8_t* out, size_t cap,
-                      size_t* out_len, size_t* used, const char** err) {
+                      size_t* out_len, size_t* used, const char** err, gz_arena_t* arena) {
     z_stream zs;
     memset(&zs, 0, sizeof zs);
+    if (arena) { zs.zalloc = gz_arena_alloc; zs.zfree = gz_arena_free; zs.opaque = arena; }
     if (inflateInit2(&zs, wbits) != Z_OK) { *err = "wsfull"; return -1; }
     size_t in_left = n, out_left = cap;
     zs.next_in = src;
@@ -161,7 +176,7 @@ uint8_t* q_gz_inflate(const uint8_t* src, size_t src_len,
     size_t out_sz = 0, used = 0;
     /* Require: clean finish, exact declared output, and full input consumption
      * (no junk / hidden second member). The fixed buffer bounds a lying ISIZE. */
-    if (gz_inflate(src + pos, foot - pos, -15, out, isize, &out_sz, &used, err) != 0) {
+    if (gz_inflate(src + pos, foot - pos, -15, out, isize, &out_sz, &used, err, NULL) != 0) {
         free(out); return NULL;
     }
     if (out_sz != isize || used != foot - pos) { free(out); *err = "domain"; return NULL; }
@@ -173,13 +188,21 @@ uint8_t* q_gz_inflate(const uint8_t* src, size_t src_len,
     return out;
 }
 
+int q_gz_inflate_zlib_in(const uint8_t* src, size_t src_len,
+                         uint8_t* out, size_t out_cap,
+                         size_t* out_len, size_t* consumed, const char** err,
+                         void* work, size_t work_len) {
+    gz_arena_t arena = { (uint8_t*)work, work_len, 0 };
+    if (!src || src_len < 2 || !out || out_cap == 0) { *err = "domain"; return -1; }
+    if (gz_inflate(src, src_len, 15, out, out_cap, out_len, consumed, err, work ? &arena : NULL) != 0) return -1;
+    *err = NULL;
+    return 0;
+}
+
 int q_gz_inflate_zlib(const uint8_t* src, size_t src_len,
                       uint8_t* out, size_t out_cap,
                       size_t* out_len, size_t* consumed, const char** err) {
-    if (!src || src_len < 2 || !out || out_cap == 0) { *err = "domain"; return -1; }
-    if (gz_inflate(src, src_len, 15, out, out_cap, out_len, consumed, err) != 0) return -1;
-    *err = NULL;
-    return 0;
+    return q_gz_inflate_zlib_in(src, src_len, out, out_cap, out_len, consumed, err, NULL, 0);
 }
 
 uint8_t* q_gz_deflate_zlib(const uint8_t* src, size_t src_len, int level,
