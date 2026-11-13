@@ -4,6 +4,7 @@
  * sym in the block's aux bytes, nothing mapped.  Each use maps the columns it names into an ordinary table for that
  * use alone, and a map dies by refcount with its last holder through ONE unmap choke point — so a column a result
  * still holds stays mapped and the rest is gone when the application returns.  `get `:dir` maps every column at once.
+ * A row read (q_splay_deferred_rows) maps nothing it need not: it reads the rows it answers.
  * One lane serves a column and a vector file: fixed-width vectors and 64-bit enums mmap (mmod==3), compressed ones
  * inflate a block on first touch (the fault handler), the rest decode.  Open splays are keyed by the `:dir/ handle sym
  * (the q_handles.c pattern): open reads .d + column HEADERS and binds the domain.  Single-threaded q layer. */
@@ -17,6 +18,7 @@
 #include "qlang/base/q_type.h"      /* q_type_coord_mark — THE aux mark that says "flipped from a coordinate" */
 #include "qlang/q_env.h"             /* q_env_set — the one global-set home */
 #include "qlang/q_prim.h"            /* q_enum_stamp */
+#include "qlang/ops/q_index.h"       /* q_index_at — a row read gathers its rows from a mapped column */
 #include "lang/eval.h"               /* ray_eval_get_restricted */
 #include "table/sym.h"               /* ray_sym_intern_runtime, ray_sym_str */
 #include "mem/heap.h"                /* attrs + ray_free_set_mapped_fn */
@@ -730,16 +732,39 @@ static ray_t* splay_zip(ray_t* path, const q_wf_colhdr* h) {
     return splay_hdr_over(&r, h);                       /* header AFTER the fills */
 }
 
+/* does this file map (a region), or is it read to the heap? */
+static int splay_maps(const q_wf_colhdr* h) {
+    ray_pool_t* pool = h->mappable && h->zipped ? ray_pool_get() : NULL;
+    return h->mappable && !(pool && pool->n_active > 0);
+}
+
 /* THE first use of a file's bytes, for a splayed column and a vector file alike — the lanes: a map, a zip region
  * with block 0 inflated, or a decode (nested, string, symbol and 32-bit enum files).  The zip region is one
  * thread's: with worker threads admitted (`\s`) a kernel's second thread would read a block the first is still
  * filling, so a compressed file is decoded whole then. */
 static ray_t* splay_read(ray_t* path, const q_wf_colhdr* h) {
-    ray_pool_t* pool = h->mappable && h->zipped ? ray_pool_get() : NULL;
-    if (h->mappable && !(pool && pool->n_active > 0))
-        return h->zipped ? splay_zip(path, h) : splay_map(ray_str_ptr(path), h);
+    if (splay_maps(h)) return h->zipped ? splay_zip(path, h) : splay_map(ray_str_ptr(path), h);
     ray_t* v = q_wirefile_read_column(path);
     return v ? v : q_err(QE_IO);
+}
+
+/* Rows [lo, lo+n) of a column of `rows` rows as an owned heap value.  A column that maps gives them from its map
+ * (the pages those cells lie on); one that would be decoded is read for those rows alone, and whole only where its
+ * file has no row address (q_wirefile_read_rows) — its length is then checked as a whole read checks it. */
+static ray_t* splay_read_rows(ray_t* path, const q_wf_colhdr* h, int64_t rows, int64_t lo, int64_t n) {
+    ray_t* got = splay_maps(h) ? NULL : q_wirefile_read_rows(path, h, lo, n);
+    if (got) return got;
+    ray_t* col = splay_read(path, h);
+    if (RAY_IS_ERR(col)) return col;
+    int listy = ray_is_vec(col) || col->type == RAY_LIST || col->type == RAY_ENUM;
+    ray_t* ix = listy && q_count(col) == rows ? ray_vec_new(RAY_I64, n) : NULL;
+    if (!ix || RAY_IS_ERR(ix)) { ray_release(col); return ix ? ix : q_err(QE_CORRUPT); }
+    ix->len = n;
+    for (int64_t i = 0; i < n; i++) ((int64_t*)ray_data(ix))[i] = lo + i;
+    got = q_index_at(col, &ix, 1);
+    ray_release(ix);
+    ray_release(col);
+    return got;
 }
 
 static int64_t splay_col_find(splay_ent* e, int64_t name) {
@@ -747,9 +772,11 @@ static int64_t splay_col_find(splay_ent* e, int64_t name) {
     return -1;
 }
 
-/* the n named columns (ids NULL = every .d column) read whole into a table, the row-count agreement checked, the
- * directory sym marked in aux; NULL when a name is not on disk (the table stays deferred) */
-static ray_t* splay_table(splay_ent* e, const int64_t* ids, int64_t n) {
+/* the n named columns (ids NULL = every .d column) into a table, the row-count agreement checked: read whole with
+ * the directory sym marked in aux (cnt < 0), or the plain table of their rows [lo, lo+cnt), lo < 0 counted from the
+ * end.  NULL when a name is not on disk (the table stays deferred), those rows are not all there, or they are all
+ * of them. */
+static ray_t* splay_table(splay_ent* e, const int64_t* ids, int64_t n, int64_t lo, int64_t cnt) {
     int64_t nc = ids ? n : e->ncols;
     ray_t* tbl = ray_table_new(nc > 0 ? nc : 1);
     if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_OOM);
@@ -757,14 +784,23 @@ static ray_t* splay_table(splay_ent* e, const int64_t* ids, int64_t n) {
     for (int64_t c = 0; c < nc; c++) {
         int64_t i = ids ? splay_col_find(e, ids[c]) : c;
         if (i < 0) { ray_release(tbl); return NULL; }
+        const q_wf_colhdr* h = &e->cols[i].h;
         ray_t* cp = splay_col_path(e, e->cols[i].name);
         ray_t* col = cp ? splay_col_ready(e, i) : q_err(QE_OOM);
-        if (!col) col = splay_read(cp, &e->cols[i].h);
+        if (!col && cnt >= 0) {
+            if (rows < 0) rows = h->count;
+            int64_t at = lo < 0 ? rows + lo : lo;
+            /* every row is no row read: the mapped table answers it, attributes and all, without a copy */
+            if (at < 0 || at > rows - cnt || cnt == rows) { ray_release(cp); ray_release(tbl); return NULL; }
+            col = h->count < 0 || h->count == rows ? splay_read_rows(cp, h, rows, at, cnt) : q_err(QE_CORRUPT);
+        } else if (!col) {
+            col = splay_read(cp, h);
+        }
         if (cp) ray_release(cp);
         if (RAY_IS_ERR(col)) { ray_release(tbl); return col; }
         int64_t k = ray_is_vec(col) || col->type == RAY_LIST || col->type == RAY_ENUM ? q_count(col) : -1;
         if (rows < 0) rows = k;
-        if (k < 0 || k != rows) {
+        if (k < 0 || k != (cnt < 0 ? rows : cnt)) {
             ray_release(col); ray_release(tbl);
             return q_err(QE_CORRUPT);
         }
@@ -772,7 +808,7 @@ static ray_t* splay_table(splay_ent* e, const int64_t* ids, int64_t n) {
         ray_release(col);
         if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_OOM);
     }
-    q_type_coord_mark(tbl, Q_COORD_SPLAY, e->sym);
+    if (cnt < 0) q_type_coord_mark(tbl, Q_COORD_SPLAY, e->sym);
     return tbl;
 }
 
@@ -800,8 +836,8 @@ static int splay_wants(ray_t* want, int64_t id) {
     return 0;
 }
 
-/* the map itself, under whatever file restriction stands */
-static ray_t* splay_deferred_table(ray_t* t, ray_t* want) {
+/* the map itself (or the rows, as splay_table), under whatever file restriction stands */
+static ray_t* splay_deferred_table(ray_t* t, ray_t* want, int64_t lo, int64_t cnt) {
     ray_t* err = NULL;
     splay_ent* e = splay_resolve_sym(q_type_coord_sym(t), &err);
     if (!e) return err;
@@ -813,8 +849,19 @@ static ray_t* splay_deferred_table(ray_t* t, ray_t* want) {
         if (!want || splay_wants(want, id)) ids[n++] = id;
     }
     if (!n && nc) ids[n++] = ray_table_col_name(t, 0);  /* the row count is a column's */
-    ray_t* m = splay_table(e, ids, n);
+    ray_t* m = splay_table(e, ids, n, lo, cnt);
     free(ids);
+    return m;
+}
+
+/* a table the session holds re-maps whoever asks: the restriction (-u) was answered where its path was named,
+ * and every read below — .d, a header, a compressed or decoded column — is of that table */
+static ray_t* splay_deferred_use(ray_t* t, ray_t* want, int64_t lo, int64_t cnt) {
+    if (want && want->type != RAY_SYM && want->type != -RAY_SYM) want = NULL;
+    bool restricted = q_type_coord_kind(t) == Q_COORD_SPLAY_DEFERRED && ray_eval_get_restricted();
+    if (restricted) ray_eval_set_restricted(false);
+    ray_t* m = splay_deferred_table(t, want, lo, cnt);
+    if (restricted) ray_eval_set_restricted(true);
     return m;
 }
 
@@ -824,15 +871,19 @@ static ray_t* splay_deferred_table(ray_t* t, ray_t* want) {
  * files are there and bad.  THE seam a hold-the-maps mode (`.Q.MAP`) would cache behind. */
 ray_t* q_splay_deferred_map(ray_t* t, ray_t* want) {
     if (!q_splay_table_deferred(t) || !splay_dir_sym_is(q_type_coord_sym(t))) return NULL;
-    if (want && want->type != RAY_SYM && want->type != -RAY_SYM) want = NULL;
-    /* a table the session holds re-maps whoever asks: the restriction (-u) was answered where its path was named,
-     * and every read below — .d, a header, a compressed or decoded column — is of that table */
-    int held = q_type_coord_kind(t) == Q_COORD_SPLAY_DEFERRED;
-    bool restricted = held && ray_eval_get_restricted();
-    if (restricted) ray_eval_set_restricted(false);
-    ray_t* m = splay_deferred_table(t, want);
-    if (restricted) ray_eval_set_restricted(true);
-    return m || !held ? m : q_err(QE_IO);
+    ray_t* m = splay_deferred_use(t, want, 0, -1);
+    return m || q_type_coord_kind(t) != Q_COORD_SPLAY_DEFERRED ? m : q_err(QE_IO);
+}
+
+/* A row read (`t 0`, `first t`, `` t[i;`c] ``, `n#t`): the owned PLAIN table of rows [lo, lo+n) of t's columns named
+ * in `want`, lo < 0 counted from the end — those rows' bytes, a column read whole only where its file gives a row no
+ * address (splay_read_rows).  NULL when t is not a deferred table that resolves or the rows are not all there: the
+ * caller maps it, which says why. */
+ray_t* q_splay_deferred_rows(ray_t* t, ray_t* want, int64_t lo, int64_t n) {
+    uint8_t k = t && t->type == RAY_TABLE && n >= 0 ? q_type_coord_kind(t) : 0;
+    if ((k != Q_COORD_SPLAY_DEFERRED && k != Q_COORD_SPLAY_UNRESOLVED) || !splay_dir_sym_is(q_type_coord_sym(t)))
+        return NULL;
+    return splay_deferred_use(t, want, lo, n);
 }
 
 /* A value entering a list or dict (q_splay_contained, which sends only tables here): a deferred table goes in mapped
@@ -898,7 +949,7 @@ ray_t* q_splay_get(ray_t* x) {
     if (e) err = splay_validate(e);
     if (!e || err) return err;
     splay_bind_domain(e);                               /* bind-at-get refresh */
-    return deferred ? splay_deferred(e->keys, e->sym, Q_COORD_SPLAY_DEFERRED) : splay_table(e, NULL, 0);
+    return deferred ? splay_deferred(e->keys, e->sym, Q_COORD_SPLAY_DEFERRED) : splay_table(e, NULL, 0, 0, -1);
 }
 
 /* `flip cols!`:dir/` and `flip cols!`name`: the deferred table over exactly those columns — DEFERRED when the

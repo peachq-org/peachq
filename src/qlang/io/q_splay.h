@@ -19,6 +19,7 @@ int64_t q_splay_table_path(ray_t* t);
 int     q_splay_table_deferred(ray_t* t);
 ray_t*  q_splay_deferred_map(ray_t* t, ray_t* want);
 ray_t*  q_splay_deferred_col(ray_t* t, int64_t name);
+ray_t*  q_splay_deferred_rows(ray_t* t, ray_t* want, int64_t lo, int64_t n);
 ray_t*  q_splay_contained_table(ray_t* t);
 static inline ray_t* q_splay_contained(ray_t* v) { return v && v->type == RAY_TABLE ? q_splay_contained_table(v) : v; }
 

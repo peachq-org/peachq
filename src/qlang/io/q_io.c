@@ -253,24 +253,24 @@ static ray_t* io_slice(ray_t* all, int64_t off, int64_t want) {
     return out;
 }
 
+static ray_t* io_zip_slice(ray_t* pathstr, int64_t off, int64_t want);
+
 ray_t* q_io_read_slice(ray_t* pathstr, int64_t off, int64_t want, int* zipped) {
     if (zipped) *zipped = 0;
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     int wrapped = 0;
     ray_t* out = io_read_raw(pathstr, off, want, &wrapped);
     if (!wrapped || RAY_IS_ERR(out)) return out;
-    /* This byte-slice door inflates the WHOLE container (block-granular
-     * reads are the splay region's, io/q_splay.c); the offset addresses plaintext. */
     ray_release(out);
+    if (zipped) *zipped = 1;
+    if (want >= 0) return io_zip_slice(pathstr, off, want);
     ray_t* all = io_read_raw(pathstr, 0, -1, NULL);
     if (RAY_IS_ERR(all)) return all;
     ray_t* plain = q_io_unzip((const uint8_t*)ray_data(all),
                               (size_t) q_count(all));
     ray_release(all);
     if (!plain) return q_err(QE_CORRUPT);       /* magic promised what unzip denies */
-    if (RAY_IS_ERR(plain)) return plain;
-    if (zipped) *zipped = 1;
-    return io_slice(plain, off, want);
+    return RAY_IS_ERR(plain) ? plain : io_slice(plain, off, want);
 }
 
 /* ---- the resource-read seam ---- */
@@ -700,6 +700,31 @@ ray_t* q_io_zip_block(ray_t* pathstr, const q_io_zipmap_t* zm, int64_t k,
     free(scratch);
     close(fd);
     return rc == 0 ? NULL : q_err(rc == -1 ? QE_CORRUPT : rc == -2 ? QE_IO : QE_OOM);
+}
+
+/* A bounded slice of a container's plaintext: the blocks it spans are inflated and no others, so a row read of a
+ * compressed column costs its own blocks.  The offset addresses plaintext, under q_io_clamp's law. */
+static ray_t* io_zip_slice(ray_t* pathstr, int64_t off, int64_t want) {
+    q_io_zipmap_t zm;
+    ray_t* bad = q_io_zip_open(pathstr, &zm);
+    if (bad) return bad;
+    int64_t take = q_io_clamp(zm.uncompressed, &off, want), bs = zm.block_size;
+    uint8_t* buf = (uint8_t*)malloc(take > 0 ? (size_t)take : 1);
+    uint8_t* blk = (uint8_t*)malloc(bs > 0 ? (size_t)bs : 1);
+    if (!buf || !blk || bs <= 0) bad = q_err(buf && blk ? QE_CORRUPT : QE_OOM);
+    for (int64_t got = 0; !bad && got < take; ) {
+        int64_t k = (off + got) / bs, from = off + got - k * bs;
+        int64_t plain = zm.uncompressed - k * bs < bs ? zm.uncompressed - k * bs : bs;
+        bad = q_io_zip_block(pathstr, &zm, k, blk, (size_t)plain);
+        int64_t n = plain - from < take - got ? plain - from : take - got;
+        if (!bad) memcpy(buf + got, blk + from, (size_t)n);
+        got += n;
+    }
+    ray_t* out = bad ? bad : ray_vec_from_raw(RAY_BYTE_ONLY, buf, take);
+    free(buf);
+    free(blk);
+    q_io_zipmap_free(&zm);
+    return out;
 }
 
 int q_io_zip_param(int64_t v) { return v < INT_MIN ? INT_MIN : v > INT_MAX ? INT_MAX : (int)v; }
