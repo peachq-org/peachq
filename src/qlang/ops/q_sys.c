@@ -22,7 +22,8 @@
 #include "qlang/base/q_err.h"
 #include "qlang/eval/q_eval.h" /* q_eval / q_eval_dot_wrap — timing + .Q.ts */
 #include "qlang/q_fmt.h"      /* q_fmt_set_prec/q_fmt_prec (`\P`) */
-#include "qlang/q_console.h"  /* q_console_flush (the exit path); q_console_pipe_* (`\classic`) */
+#include "qlang/q_console.h"  /* q_console_flush (the exit path) */
+#include "qlang/base/q_classic.h"
 #include "qlang/q_ctx.h"           /* the engine context: `\l` source seam, console teardown */
 #include "qlang/io/q_io.h"    /* q_io_mkdir_parents — `\1`/`\2` create the path they name */
 #include "store/fileio.h"     /* ray_mkdir_p — `\cd` creates a missing target */
@@ -998,17 +999,17 @@ static ray_t* h_s(const char* arg, size_t alen) {
     return NULL;
 }
 
-/* `\classic` — display-mode toggle (peachq; runtime twin of qmain's launch-only
- * `-classic`, reachable from the argv-less wasm REPL).  `1` = classic kdb table
- * display, `0` = modern pipe-table display (the default).  Display ONLY — the
+/* `\classic` — the one kdb switch (peachq; runtime twin of qmain's launch-only
+ * `-classic`, reachable from the argv-less wasm REPL).  `1` = kdb's display and
+ * errors, `0` = modern display + friendly syntax (the default).  The
  * startup-time `\l pq` load is not replayed or undone.  Bare form shows the
  * state as a boolean (`1b`/`0b`, like bare `\c`); `1`/`0`/`1b`/`0b` sets it,
  * silent.  A non-boolean arg is a bare `'type` (a boolean is expected). */
 static ray_t* h_classic(const char* arg, size_t alen) {
-    if (alen == 0) return ray_bool(!q_console_pipe_on());    /* getter → 1b/0b */
+    if (alen == 0) return ray_bool(q_classic_on());    /* getter → 1b/0b */
     size_t n = (alen == 2 && arg[1] == 'b') ? 1 : alen;   /* strip the 1b/0b literal */
     if (n != 1 || (arg[0] != '0' && arg[0] != '1')) return q_err(QE_TYPE);
-    if (arg[0] == '1') q_console_pipe_disable(); else q_console_pipe_enable();
+    q_classic_set(arg[0] == '1');
     return NULL;                                     /* setter: silent */
 }
 
@@ -1330,7 +1331,7 @@ ray_t* q_sys_run(const char* line, size_t n) {
     } else if (cmd_len == 2 && cmd[0] == 'c' && cmd[1] == 'd') {
         return h_cd(rest, path_len(rest, restlen));              /* change directory    */
     } else if (cmd_len == 7 && memcmp(cmd, "classic", 7) == 0) {
-        return h_classic(arg, alen);                            /* display-mode toggle (peachq) */
+        return h_classic(arg, alen);                            /* the one kdb switch (peachq) */
     } else if (cmd_len == 0) {
         return NULL;                                            /* bare \ — silent q/k toggle */
     }
