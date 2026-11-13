@@ -26,6 +26,7 @@
 #include "qlang/io/q_io.h"     /* q_io_fs_register — the .fs.i.rmtree native */
 #include "qlang/io/q_json.h"  /* q_json_register — the .j.i.* natives */
 #include "qlang/io/q_md.h"    /* q_md_register — the .md.i.* natives */
+#include "qlang/io/q_zip.h"    /* q_zip_register — the .zip.i.info native */
 #include "qlang/io/q_ffi.h"    /* q_ffi_register — the .ffi.i.* natives */
 #include "qlang/io/q_termbox.h" /* q_termbox_register — the .termbox.i.* natives */
 #include "qlang/io/q_beep.h"    /* q_beep_register — the .termbox.i.beep native */
@@ -132,7 +133,7 @@ static const struct { const char* name; void (*bind)(void); } PQ_SETS[] = {
     { "duckdb", q_duckdb_register }, { "ffi", q_ffi_register },     { "fs", q_io_fs_register },
     { "hash", q_hash_register },    { "j", q_json_register },      { "kafka", q_kafka_register },
     { "md", q_md_register },        { "regexp", q_regex_register }, { "str", pq_set_str },
-    { "termbox", pq_set_termbox },
+    { "termbox", pq_set_termbox }, { "zip", q_zip_register },
 };
 
 /* `.pq.load_natives`name` — the C root of a native-backed library file, its FIRST

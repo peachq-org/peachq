@@ -1,4 +1,4 @@
-/* q_gz — the one DEFLATE seam: RFC 1952 gzip and the kxzip zlib stream, over
+/* q_gz — the one DEFLATE seam: RFC 1952 gzip, the kxzip zlib stream and a zip entry's raw stream, over
  * vendored zlib (third_party/zlib/README.peachq.md). */
 #ifndef Q_GZ_H
 #define Q_GZ_H
@@ -40,5 +40,16 @@ int q_gz_inflate_zlib_in(const uint8_t* src, size_t src_len,
                          uint8_t* out, size_t out_cap,
                          size_t* out_len, size_t* consumed, const char** err,
                          void* work, size_t work_len);
+
+/* A raw RFC 1951 stream inflated a buffer at a time (a zip entry, read forward).  q_gz_raw_step moves what it can
+ * from in into out, reporting both counts: 1 once the stream has ended, 0 when it needs more input or room, -1 on
+ * bad data. */
+typedef struct q_gz_raw q_gz_raw_t;
+q_gz_raw_t* q_gz_raw_new(void);
+int  q_gz_raw_step(q_gz_raw_t* s, const uint8_t* in, size_t in_len, size_t* in_used,
+                   uint8_t* out, size_t out_cap, size_t* out_len);
+void q_gz_raw_free(q_gz_raw_t* s);
+
+uint32_t q_gz_crc32(uint32_t crc, const uint8_t* p, size_t n);
 
 #endif /* Q_GZ_H */

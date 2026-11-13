@@ -1,6 +1,6 @@
 /* q_handles — see q_handles.h.  A compact grow-on-demand array of open-time
  * handle records, fd-keyed by linear scan (a process holds few handles; kdb's
- * own connection tables are small).  Register on hopen-file/fifo/socket,
+ * own connection tables are small).  Register on hopen-file/fifo/zip/socket,
  * deregister on hclose.  Redaction runs at CAPTURE so a password never enters a
  * record.  The `hopen`/`hclose` verb bodies sit at the tail, on top of the
  * transport open / kind dispatch / close they delegate to. */
@@ -14,6 +14,7 @@
 #include "qlang/ops/q_sys.h" /* q_sys_listen_port — hopen of the own listener is handle 0 */
 #include "qlang/io/q_io.h"   /* q_io_mkdir_parents — hopen creates missing directories; q_io_write_fd, q_io_read_fd */
 #include "qlang/io/q_provider.h" /* the `:pq:` aliases: `:pq:q:`, `:pq:qfork:`, `:pq:qspawn:`, `:pq:duckdb:` */
+#include "qlang/io/q_zip.h"      /* the `:zip:// stream handles */
 #include "qlang/net/q_wirefile.h"    /* q_wirefile_append_path — typed handle append */
 #include "qlang/net/q_ws.h"          /* q_ws_client_open — `:ws:// sym handles */
 #include "qlang/net/q_http_client.h" /* q_http_client_raw + the scheme spelling — `:http:// sym handles */
@@ -79,6 +80,7 @@ void q_handles_destroy(void) {
          * repeated runtime create/destroy cannot leak descriptors. */
         if (g_recs[i].kind == Q_HANDLE_FILE || g_recs[i].kind == Q_HANDLE_FIFO)
             close((int)g_recs[i].fd);
+        if (g_recs[i].kind == Q_HANDLE_ZIP) q_zip_handle_close(g_recs[i].fd);
         if (g_recs[i].open_args) ray_release(g_recs[i].open_args);
     }
     free(g_recs);
@@ -86,6 +88,7 @@ void q_handles_destroy(void) {
 }
 
 void q_handles_forget(void) {
+    q_zip_forget();
     for (int64_t i = 0; i < g_n; i++)
         if (g_recs[i].open_args) ray_release(g_recs[i].open_args);
     g_n = 0;
@@ -330,6 +333,19 @@ ray_t* q_handles_open(const char* path, size_t plen, int is_fifo) {
     return make_i32(fd);
 }
 
+/* hopen `:zip://archive.zip/entry`: q_zip holds the stream, keyed by the fd it reserved */
+static ray_t* handles_open_zip(const char* path, size_t plen) {
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    int64_t fd;
+    ray_t* bad = q_zip_handle_open(path, plen, &fd);
+    if (bad) return bad;
+    if (!q_handles_register(fd, Q_HANDLE_ZIP, 1, path, plen)) {
+        q_zip_handle_close(fd);
+        return q_err(QE_OOM);
+    }
+    return make_i32((int32_t)fd);
+}
+
 /* ---- apply: `h x` ------------------------------------------------------- */
 
 /* Raw file write.  A POSITIVE handle writes the payload bytes verbatim — NO
@@ -457,7 +473,7 @@ ray_t* q_handles_apply(ray_t* h, ray_t* y) {
             ray_release(p);
             return echo(h, bad);
         }
-        if (hk == Q_HANDLE_FIFO) {
+        if (hk == Q_HANDLE_FIFO || hk == Q_HANDLE_ZIP) {
             if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
             return q_err(QE_NYI);
         }
@@ -604,8 +620,9 @@ ray_t* q_handles_pq_neg(ray_t* x) {
 ray_t* q_handles_close(int64_t qh) {
     int k = q_handles_kind(qh);
     if (k == Q_HANDLE_PROVIDER) return q_provider_close(qh);
-    if (k == Q_HANDLE_FILE || k == Q_HANDLE_FIFO) {
-        close((int)qh);
+    if (k == Q_HANDLE_FILE || k == Q_HANDLE_FIFO || k == Q_HANDLE_ZIP) {
+        if (k == Q_HANDLE_ZIP) q_zip_handle_close(qh);
+        else close((int)qh);
         q_handles_deregister(qh);
         return RAY_NULL_OBJ;
     }
@@ -620,13 +637,15 @@ ray_t* q_handles_close(int64_t qh) {
 
 /* One blocking read of up to `count` bytes.  A fifo blocks for data; an empty
  * read is EOF (all writers closed) — the `.Q.fpn`/`.Q.fps` `while[count b]`
- * loop terminates on it.  No count reads to EOF (read1.md:67).  Restricted
- * mode refuses (reads the pipe). */
+ * loop terminates on it.  No count reads to EOF (read1.md:67).  A zip stream
+ * gives its next `count` bytes.  Restricted mode refuses (reads the pipe). */
 ray_t* q_handles_read1(int64_t fd, ray_t* count) {
-    if (q_handles_kind(fd) != Q_HANDLE_FIFO) return NULL;
+    int kind = q_handles_kind(fd);
+    if (kind != Q_HANDLE_FIFO && kind != Q_HANDLE_ZIP) return NULL;
     int64_t want = 0;
     if (count && !q_type_strict_i64(count, &want)) return q_err(QE_TYPE);
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (kind == Q_HANDLE_ZIP) return want < 0 ? q_err(QE_DOMAIN) : q_zip_handle_read(fd, count ? want : -1);
     if (want <= 0) want = 65536;
     uint8_t* buf = NULL;
     size_t   n = 0, cap = 0;
@@ -728,14 +747,16 @@ static ray_t* hopen_connstr(ray_t* c, bool* tls) {
  * `:host:port[:user:pass]`, a bare `:port`, `tcps://` and the deferred `scheme://`
  * forms (hopen_norm_descriptor rejects those with 'nyi); a `:fifo://path` is a
  * FIFO, a single-colon `fifo:path` a FIFO opened without waiting for a writer,
- * and any other `:path` is a FILE. */
-enum { HT_IPC = 0, HT_FILE = 1, HT_FIFO = 2, HT_FIFO_NB = 3 };
+ * a `:zip://…` an archive entry read forward (path keeps the scheme), and any
+ * other `:path` is a FILE. */
+enum { HT_IPC = 0, HT_FILE = 1, HT_FIFO = 2, HT_FIFO_NB = 3, HT_ZIP = 4 };
 static int hopen_transport(const char* s, size_t n, const char** path, size_t* plen) {
     *path = s; *plen = n;
     if (n >= 2 && s[0] == ':' && s[1] == ':') return HT_IPC;   /* ::port localhost */
     size_t off = (n >= 1 && s[0] == ':') ? 1 : 0;
     const char* r = s + off;
     size_t      rn = n - off;
+    if (q_zip_is(r, rn)) { *path = r; *plen = rn; return HT_ZIP; }
     if (rn >= 5 && memcmp(r, "fifo:", 5) == 0) {
         if (rn >= 7 && r[5] == '/' && r[6] == '/') { *path = r + 7; *plen = rn - 7; return HT_FIFO; }
         *path = r + 5; *plen = rn - 5;
@@ -949,6 +970,7 @@ static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given, bool socket_only) {
                 return q_err(QE_TYPE);
             if (plen >= 2 && path[0] == 'p' && path[1] == 'q' && (plen == 2 || path[2] == ':'))
                 return q_err(QE_DOMAIN);   /* `pq` is the alias namespace, never a file */
+            if (ht == HT_ZIP) return handles_open_zip(path, plen);
             return q_handles_open(path, plen, ht == HT_FIFO ? 1 : ht == HT_FIFO_NB ? 2 : 0);
         }
     }
