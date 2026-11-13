@@ -769,15 +769,15 @@ ray_t* q_wire_fixed_vec(int8_t t, const uint8_t* p, int64_t count, int swap) {
      * whether it carries an in-band sentinel null, or the build refuses. */
     switch ((ray_type_e)t) {
     case RAY_I16: { int16_t* e = (int16_t*)d;
-        for (int32_t i = 0; i < count; i++) if (e[i] == NULL_I16) { has_nulls = true; break; } } break;
+        for (int64_t i = 0; i < count; i++) if (e[i] == NULL_I16) { has_nulls = true; break; } } break;
     case RAY_I32: RAY_TEMPORAL32_CASES: { int32_t* e = (int32_t*)d;
-        for (int32_t i = 0; i < count; i++) if (e[i] == NULL_I32) { has_nulls = true; break; } } break;
+        for (int64_t i = 0; i < count; i++) if (e[i] == NULL_I32) { has_nulls = true; break; } } break;
     case RAY_I64: RAY_TEMPORAL64_CASES: case RAY_ENUM: { int64_t* e = (int64_t*)d;
-        for (int32_t i = 0; i < count; i++) if (e[i] == NULL_I64) { has_nulls = true; break; } } break;
+        for (int64_t i = 0; i < count; i++) if (e[i] == NULL_I64) { has_nulls = true; break; } } break;
     case RAY_F32: { float* e = (float*)d;
-        for (int32_t i = 0; i < count; i++) if (e[i] != e[i]) { has_nulls = true; break; } } break;
+        for (int64_t i = 0; i < count; i++) if (e[i] != e[i]) { has_nulls = true; break; } } break;
     case RAY_F64: RAY_TEMPORALF_CASES: { double* e = (double*)d;
-        for (int32_t i = 0; i < count; i++) if (e[i] != e[i]) { has_nulls = true; break; } } break;
+        for (int64_t i = 0; i < count; i++) if (e[i] != e[i]) { has_nulls = true; break; } } break;
     /* no in-band sentinel: bool/byte have no null; GUID's all-zero-payload null
      * is only knowable from the serde attrs flag (restored below).  CHARV's
      * blank "null" is an ordinary byte and never sets the flag. */

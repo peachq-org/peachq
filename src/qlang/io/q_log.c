@@ -35,11 +35,12 @@ typedef struct {
     int64_t  size, pos;                     /* file length; offset of buf[0] */
     uint8_t* buf;
     size_t   cap, len;
+    int      whole;                         /* buf is the caller's whole file: nothing to refill, nothing to free */
 } log_cur_t;
 
 static void log_close(log_cur_t* c) {
     if (c->fd >= 0) close(c->fd);
-    free(c->buf);
+    if (!c->whole) free(c->buf);
 }
 
 static ray_t* log_open(log_cur_t* c, ray_t* path) {
@@ -92,7 +93,8 @@ static ray_t* log_pair(int64_t chunks, int64_t valid) {
 }
 
 /* limit < 0 = every chunk; eval 0 is the (-2;x) count, which never evaluates.  `keep` (eval 0) collects the chunks
- * instead of counting them: `get` of a general-list file, where a torn tail is 'corrupt. */
+ * instead of counting them: `get` of a general-list file, where a torn tail is 'corrupt and each chunk is an item of
+ * a file, read through the disk door as the items inside the header count are. */
 static ray_t* log_scan(log_cur_t* c, int64_t limit, int eval, ray_t** keep) {
     int64_t r = 0;
     while (c->len < LOG_HDR && (r = log_fill(c)) > 0) {}
@@ -102,7 +104,8 @@ static ray_t* log_scan(log_cur_t* c, int64_t limit, int eval, ray_t** keep) {
     int64_t n = 0, valid = LOG_HDR;
     while (limit < 0 || n < limit) {
         size_t used = 0;
-        ray_t* v = off < c->len ? q_wire_read_obj(c->buf + off, c->len - off, &used, 0) : NULL;
+        ray_t* v = off >= c->len ? NULL
+                 : q_wire_read_obj_ex(c->buf + off, c->len - off, &used, 0, keep ? Q_WIRE_READ_DISK : 0, NULL);
         if (v && !RAY_IS_ERR(v) && used) {
             if (eval) {
                 ray_t* res = q_handles_console_eval(v);
@@ -124,6 +127,10 @@ static ray_t* log_scan(log_cur_t* c, int64_t limit, int eval, ray_t** keep) {
             continue;
         }
         if (v) ray_release(v);
+        if (c->whole) {
+            if (off == c->len) break;
+            return keep ? q_err(QE_CORRUPT) : eval ? q_err(QE_BADTAIL) : log_pair(n, (int64_t)off);
+        }
         memmove(c->buf, c->buf + off, c->len - off);      /* the straddling tail to the front */
         c->pos += (int64_t)off;
         c->len -= off;
@@ -165,13 +172,11 @@ ray_t* q_log_replay(ray_t* y) {
     return res;
 }
 
-ray_t* q_log_records(ray_t* pathstr) {
+ray_t* q_log_records(const uint8_t* img, size_t len) {
     ray_t* out = ray_list_new(0);
     if (!out || RAY_IS_ERR(out)) return out ? out : q_err(QE_OOM);
-    log_cur_t c;
-    ray_t* res = log_open(&c, pathstr);
-    if (!res) res = log_scan(&c, -1, 0, &out);
-    log_close(&c);
+    log_cur_t c = { .fd = -1, .size = (int64_t)len, .buf = (uint8_t*)(uintptr_t)img, .cap = len, .len = len, .whole = 1 };
+    ray_t* res = log_scan(&c, -1, 0, &out);
     if (res && !RAY_IS_ERR(res)) { ray_release(res); return out; }
     if (out) ray_release(out);
     return res ? res : q_err(QE_OOM);

@@ -128,7 +128,7 @@ ray_t* q_attr_stamp_byte(ray_t* v, uint8_t byte) {
     return q_attr_rebuild(v, attr_byte_letters[byte]);
 }
 
-/* THE disk door (owner ruling 2026-11-12): a byte off a file is stamped only where the read makes it true without
+/* THE disk door: a byte off a file is stamped only where the read makes it true without
  * trusting the writer.  `s` is verified by the scan (a vector, or a table's first column; an enum's order needs its
  * domain, so there it is dropped), u and p by attr_build's own checks, and g has no precondition. */
 ray_t* q_attr_stamp_disk(ray_t* v, uint8_t byte) {

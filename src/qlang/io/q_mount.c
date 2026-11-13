@@ -88,7 +88,7 @@ static int mount_skippable(ray_t* e) {
 
 /* Database-root walk, sorted for a deterministic bind/execute order.  A name that is not
  * a plain q identifier is SKIPPED — kx's binding of odd names is undocumented, and refusing
- * keeps `.pqattr` sidecars, `par.txt` and `sym##` interns out of the env for free. */
+ * keeps `par.txt` and `sym##` interns out of the env for free. */
 static ray_t* mount_root(const char* abs, size_t n, int scripts) {
     DIR* d = opendir(abs);
     if (!d) return q_err(QE_OS);

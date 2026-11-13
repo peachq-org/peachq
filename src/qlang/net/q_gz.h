@@ -33,4 +33,12 @@ int q_gz_inflate_zlib(const uint8_t* src, size_t src_len,
                       uint8_t* out, size_t out_cap,
                       size_t* out_len, size_t* consumed, const char** err);
 
+/* The same, with zlib's own state taken from `work` (Q_GZ_INFLATE_WORK bytes cover any stream) instead of the heap:
+ * allocation-free, so the splay fault handler can inflate a block.  work NULL = the heap. */
+#define Q_GZ_INFLATE_WORK ((size_t)64 << 10)
+int q_gz_inflate_zlib_in(const uint8_t* src, size_t src_len,
+                         uint8_t* out, size_t out_cap,
+                         size_t* out_len, size_t* consumed, const char** err,
+                         void* work, size_t work_len);
+
 #endif /* Q_GZ_H */
