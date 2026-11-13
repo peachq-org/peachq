@@ -494,7 +494,7 @@ static ray_t* atomic2(ray_binary_fn f, const q_op_t* row, ray_t* x, ray_t* y);
 
 static ray_t* unary_elem(ray_unary_fn fn, ray_t* e) {
     if (RAY_IS_ERR(e)) return e;
-    if (is_coll(e) || is_container(e)) return atomic1(fn, e);
+    if (is_coll(e) || is_container(e) || q_enum_is(e)) return atomic1(fn, e);
     return fn(e);
 }
 
@@ -587,7 +587,7 @@ static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r
 static ray_t* binary_elem(ray_binary_fn fn, const q_op_t* row, ray_t* a, ray_t* b) {
     if (RAY_IS_ERR(a)) return a;
     if (RAY_IS_ERR(b)) return b;
-    if (is_coll(a) || is_coll(b) || is_container(a) || is_container(b))
+    if (is_coll(a) || is_coll(b) || is_container(a) || is_container(b) || q_enum_is(a) || q_enum_is(b))
         return atomic2(fn, row, a, b);
     return map_binary(fn, row, a, b);
 }
@@ -765,6 +765,12 @@ static ray_t* atomic1_col(void* ctx, ray_t* col) {
 
 static ray_t* atomic1(ray_unary_fn f, ray_t* x) {
     if (!x) return q_err(QE_TYPE);
+    if (q_enum_is(x)) {                                    /* an enum INSIDE a container: the boundary's decay law */
+        ray_t* v = q_enum_decay(x);
+        ray_t* r = !v || RAY_IS_ERR(v) ? v : atomic1(f, v);
+        if (v && r != v) ray_release(v);
+        return r ? r : q_err(QE_TYPE);
+    }
     if (x->type == RAY_DICT) {
         ray_t* nv = atomic1(f, ray_dict_vals(x));
         if (RAY_IS_ERR(nv)) return nv;
@@ -961,6 +967,15 @@ static ray_t* table_pair(const q_op_t* row, ray_t* x, ray_t* y, q_eval_zip_fn f,
 
 static ray_t* atomic2(ray_binary_fn f, const q_op_t* row, ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);
+    if (q_enum_is(x) || q_enum_is(y)) {                    /* inside a container the pair meets by value */
+        ray_t* m[2];
+        ray_t* r = q_enum_meet(x, y, 1, m);
+        if (r) return r;
+        r = atomic2(f, row, m[0], m[1]);
+        ray_release(m[0]);
+        ray_release(m[1]);
+        return r;
+    }
     int xd = x->type == RAY_DICT, yd = y->type == RAY_DICT;
     a2ctx c = { f, row, NULL, 0 };
     if (xd && yd) return q_eval_apply_dict_pair(row, x, y, atomic2_zip, &c);
@@ -1604,11 +1619,15 @@ static ray_t* compose_apply(ray_t** args, int64_t n) {
  * A 20h arg at a verb boundary either reaches an ENUM-AWARE arm untouched
  * ($ cast, key, value, type, enlist, attr; amend forms go to the amend home),
  * rides the structural PRESERVE set (take/drop/sublist/xprev/reverse/first/last/
- * concat — strip to positions, apply, re-stamp the domain; indexing preserves
- * via noun_index above), or DECAYS to its resolved symlist so kernels never
- * meet tag 20 (2026-08-22 enum plan; ref/enumerate.md is the resolution law). */
+ * distinct/group/concat — strip to positions, apply, re-stamp the domain; indexing
+ * preserves via noun_index above), or DECAYS to its resolved symlist so kernels never
+ * meet tag 20 (2026-08-22 enum plan; ref/enumerate.md is the resolution law).  An enum
+ * INSIDE a container meets the same law where the atomic lifts reach it. */
 
 static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n);
+
+/* what of the answer is the enum's own items, to take the domain back: nothing, the value, a dictionary's keys */
+enum { ENUM_STAMP_NONE, ENUM_STAMP, ENUM_STAMP_KEYS };
 
 static ray_t* enum_strip_apply(ray_t* fv, const q_op_t* row, ray_t** args,
                                int64_t n, int64_t at, int restamp) {
@@ -1620,7 +1639,28 @@ static ray_t* enum_strip_apply(ray_t* fv, const q_op_t* row, ray_t** args,
     ray_t* r = q_eval_apply_concrete(apply_inner(fv, row, av, n));
     int64_t dom = q_enum_domain(args[at]);
     ray_release(p);
-    return restamp ? q_enum_stamp(r, dom) : r;
+    if (restamp == ENUM_STAMP_KEYS && r && r->type == RAY_DICT) {
+        ray_t* k = ray_dict_keys(r);
+        ray_t* v = ray_dict_vals(r);
+        ray_retain(k);
+        ray_retain(v);
+        ray_release(r);
+        k = q_enum_stamp(k, dom);
+        if (!k || RAY_IS_ERR(k)) { ray_release(v); return k ? k : q_err(QE_OOM); }
+        return ray_dict_new(k, v);
+    }
+    return restamp == ENUM_STAMP ? q_enum_stamp(r, dom) : r;
+}
+
+/* A pair of enums through the verb as they MEET (q_enum_meet): one domain's as plain positions. */
+static ray_t* enum_pair_apply(ray_t* fv, const q_op_t* row, ray_t** args) {
+    ray_t* side[2];
+    ray_t* r = q_enum_meet(args[0], args[1], 0, side);
+    if (r) return r;
+    r = q_eval_apply_concrete(apply_inner(fv, row, side, 2));
+    ray_release(side[0]);
+    ray_release(side[1]);
+    return r;
 }
 
 /* `e,y`: ONLY a same-domain enum pair joins as positions and keeps 20h; every
@@ -1631,19 +1671,7 @@ static ray_t* enum_concat(ray_t* fv, const q_op_t* row, ray_t** args) {
     if (!(q_enum_is(args[0]) && q_enum_is(args[1]) &&
           q_enum_domain(args[0]) == q_enum_domain(args[1])))
         return NULL;
-    int64_t dom = q_enum_domain(args[0]);
-    ray_t* side[2];
-    for (int i = 0; i < 2; i++) {
-        side[i] = q_enum_positions(args[i]);
-        if (!side[i] || RAY_IS_ERR(side[i])) {
-            if (i) ray_release(side[0]);
-            return side[i] ? side[i] : q_err(QE_OOM);
-        }
-    }
-    ray_t* r = q_eval_apply_concrete(apply_inner(fv, row, side, 2));
-    ray_release(side[0]);
-    ray_release(side[1]);
-    return q_enum_stamp(r, dom);
+    return q_enum_stamp(enum_pair_apply(fv, row, args), q_enum_domain(args[0]));
 }
 
 /* `=`/`<>`/`in` against an enum ride POSITION SPACE (owner amendment
@@ -1655,18 +1683,7 @@ static ray_t* enum_cmp_route(ray_t* fv, const q_op_t* row, ray_t** args, int op)
     int ex = q_enum_is(args[0]), ey = q_enum_is(args[1]);
     if (ex && ey) {
         if (q_enum_domain(args[0]) != q_enum_domain(args[1])) return NULL;
-        ray_t* side[2];
-        for (int i = 0; i < 2; i++) {
-            side[i] = q_enum_positions(args[i]);
-            if (!side[i] || RAY_IS_ERR(side[i])) {
-                if (i) ray_release(side[0]);
-                return side[i];
-            }
-        }
-        ray_t* r = q_eval_apply_concrete(apply_inner(fv, row, side, 2));
-        ray_release(side[0]);
-        ray_release(side[1]);
-        return r;
+        return enum_pair_apply(fv, row, args);
     }
     if (op <= 1)                         /* =/<> commute over position space */
         return q_enum_cmp(ex ? args[0] : args[1], ex ? args[1] : args[0], op);
@@ -1708,7 +1725,7 @@ static ray_t* enum_route(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) 
             !strcmp(t, "type") || !strcmp(t, "enlist") || !strcmp(t, "attr") ||
             !strcmp(t, "at") || !strcmp(t, "apply") || !strcmp(t, "show") ||
             !strcmp(t, "dict") || !strcmp(t, "set-g") ||
-            !strcmp(t, "except") || !strcmp(t, "sect"))
+            !strcmp(t, "except") || !strcmp(t, "sect") || !strcmp(t, "match"))
             return NULL;      /* enum-aware arms (show/-3! render 20h itself;
                                * enlist of a 20h VECTOR boxes like any list;
                                * set writes the reference SHAPE, wf_ref_image;
@@ -1716,15 +1733,21 @@ static ray_t* enum_route(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) 
         if (n == 2 && !strcmp(t, "upsert") && q_io_is_fsym(args[0]))
             return NULL;      /* a file takes the positions, as `.[f;();,;e]` hands them over */
         if (n == 1 && q_enum_is(args[0]) &&
-            (!strcmp(t, "reverse") || !strcmp(t, "first") || !strcmp(t, "last")))
-            return enum_strip_apply(fv, row, args, n, 0, 1);
+            (!strcmp(t, "reverse") || !strcmp(t, "first") || !strcmp(t, "last") || !strcmp(t, "distinct")))
+            return enum_strip_apply(fv, row, args, n, 0, ENUM_STAMP);
+        if (n == 1 && q_enum_is(args[0]) && !strcmp(t, "group"))
+            return enum_strip_apply(fv, row, args, n, 0, ENUM_STAMP_KEYS);
         if (n == 1 && q_enum_is(args[0]) && !strcmp(t, "count"))
             return enum_strip_apply(fv, row, args, n, 0, 0);
         if (n == 2 && q_enum_is(args[1]) &&
             (!strcmp(t, "take") || !strcmp(t, "drop") || !strcmp(t, "sublist") || !strcmp(t, "xprev"))) {
             if (!strcmp(t, "take") && args[0] && args[0]->type == -RAY_SYM)
                 return NULL;    /* `p#e — take's set-attribute arm is enum-aware */
-            return enum_strip_apply(fv, row, args, n, 1, 1);
+            /* `x _ i`: the enum is the INDEX, its position into a list and its value into a dictionary */
+            if (!strcmp(t, "drop") && args[1]->type == -RAY_ENUM && !ray_is_atom(args[0]) && !q_enum_is(args[0]))
+                return args[0]->type == RAY_DICT ? enum_decay_apply(fv, row, args, n)
+                                                 : enum_strip_apply(fv, row, args, n, 1, ENUM_STAMP_NONE);
+            return enum_strip_apply(fv, row, args, n, 1, ENUM_STAMP);
         }
         if (n == 2 && !strcmp(t, "concat")) {
             ray_t* r = enum_concat(fv, row, args);

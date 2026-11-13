@@ -190,9 +190,9 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
 /* A column as the row kernel reads it: an atom is its one-row column, an enumeration its values (q_enum owns the
  * 20h representation; the kernel knows base types only).  Consumes c; owned. */
 static ray_t* row_col(ray_t* c) {
-    if (c && ray_is_atom(c)) { ray_t* v = ray_enlist_fn(&c, 1); ray_release(c); c = v; }
+    if (c && q_enum_is(c)) { ray_t* v = q_enum_val_image(c); ray_release(c); c = v; }
+    if (c && !RAY_IS_ERR(c) && ray_is_atom(c)) { ray_t* v = ray_enlist_fn(&c, 1); ray_release(c); c = v; }
     if (c && q_type_is_table(c)) { ray_t* v = q_list_uncollapse(c); ray_release(c); c = v; }
-    if (c && !RAY_IS_ERR(c) && q_enum_is(c)) { ray_t* v = q_enum_val_image(c); ray_release(c); c = v; }
     return c ? c : q_err(QE_OOM);
 }
 
@@ -430,6 +430,15 @@ static ray_t* find_items(ray_t* x, ray_t* y, int whole, int64_t cnt) {
 }
 
 ray_t* q_search_find(ray_t* x, ray_t* y) {
+    if (q_enum_is(x) || q_enum_is(y)) {
+        ray_t* m[2];
+        ray_t* bad = q_enum_meet(x, y, 0, m);
+        if (bad) return bad;
+        ray_t* r = q_search_find(m[0], m[1]);
+        if (m[0]) ray_release(m[0]);
+        if (m[1]) ray_release(m[1]);
+        return r;
+    }
     if (q_type_is_table(x)) return find_rows(x, y);
     /* kt?row — a keyed table IS keytable!valuetable, so the dict's reverse
      * lookup reads through unchanged: the KEY row at the value row found. */
