@@ -49,7 +49,6 @@ char q_ty_char(ray_t* x);
 /* The .Q introspection surface (ops/q_dotq.c): bound by q_builtins_register. */
 ray_t* q_dotq_ty_fn(ray_t* x);
 ray_t* q_dotq_qt_fn(ray_t* x);
-ray_t* q_dotq_qp_fn(ray_t* x);
 ray_t* q_dotq_s_fn(ray_t* x);
 ray_t* q_dotq_S_fn(ray_t** args, int64_t nargs);
 ray_t* q_dotq_cells_fn(ray_t* x);

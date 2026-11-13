@@ -1,7 +1,7 @@
 /* q_mount — the `\l` DIRECTORY forms (basics/syscmds.md#l-load-file-or-directory): a splayed dir maps
  * to a variable named after it (header-only, kb/splayed-tables.md), a db root binds serialized objects
- * and splays and runs q scripts, and the opened dir becomes the current one.  Partition-typed entries
- * (date/month/year/long names) are stage 4's. */
+ * and splays and runs q scripts, and the opened dir becomes the current one.  A root's partitions (and
+ * par.txt's segments) are the partitioned mount's: names and the most recent partition's .d, no column file. */
 #ifndef PEACHQ_Q_MOUNT_H
 #define PEACHQ_Q_MOUNT_H
 
