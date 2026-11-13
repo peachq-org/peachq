@@ -133,6 +133,7 @@ ray_t* q_str_charv_out(ray_t* r) {
         int64_t n = q_count(r);
         ray_t** e = (ray_t**)ray_data(r);
         if (r->rc == 1) {                        /* sole owner: rewrite in place */
+            ray_list_unmark(r);
             for (int64_t i = 0; i < n; i++) {
                 ray_t* c = q_str_charv_out(e[i]);    /* consumes the slot's ref */
                 if (RAY_IS_ERR(c)) { e[i] = RAY_NULL_OBJ; ray_release(r); return c; }

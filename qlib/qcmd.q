@@ -113,7 +113,7 @@
     -1 "  want: ",pad row`want;
     -1 "  got:  ",pad row`got;
     };
-  args:$[0h=type input; input; (input;::)];
+  args:$[0h=.Q.c.lty input; input; (input;::)];
   opts:.qcmd.i.opts last args;
   results:.qcmd.check[first args;opts];
   ok:0=count each results`why;

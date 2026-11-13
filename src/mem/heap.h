@@ -79,6 +79,20 @@
 #define RAY_ATTR_HAS_NULLS    0x40
 #define RAY_ATTR_ARENA        0x80
 
+/* SPECULATIVE (kx storage stage A4): a general list read from a kdb mapped-list column carries that column's type
+ * (77 anymap, 77+t nested) in aux[0..3] — three magic bytes, then the type — and q's `type` answers it.  The mark
+ * names the block AS READ: every copy (ray_alloc_copy) and every in-place write (the vec/list.c mutators and the
+ * amend doors in qlang/ops) clears it, so a derived or amended list is a plain 0h list and nothing re-checks the
+ * items at read time (a debug build asserts them). */
+#define RAY_LIST_MAPMARK "kxn"
+static inline uint8_t ray_list_mapmark(const ray_t* v) {
+    return v->type == RAY_LIST && !(v->attrs & RAY_ATTR_SLICE) && v->aux[0] == 'k' && v->aux[1] == 'x' &&
+           v->aux[2] == 'n' ? v->aux[3] : 0;
+}
+static inline void ray_list_unmark(ray_t* v) {
+    if (ray_list_mapmark(v)) v->aux[0] = v->aux[1] = v->aux[2] = v->aux[3] = 0;
+}
+
 /* I64 atom carries an owning ray_hnsw_t* in its .i64 slot.
  * Checked by HNSW builtins before dereferencing.  User must (hnsw-free h). */
 #define RAY_ATTR_HNSW         0x04
