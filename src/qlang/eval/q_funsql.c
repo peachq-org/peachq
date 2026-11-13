@@ -110,7 +110,56 @@ static ray_t* til_count(ray_t* t) {
  * A name resolving to a name is followed, but not forever: `x:`x` (or a hook's local `t` holding
  * its own table name, seen from the debugger) is 'type, not a stack overflow. */
 #define QUES_FROM_HOPS 8
-static ray_t* ques_from_n(ray_t* t, int64_t* nkey, int hops) {
+
+/* a dotted name reads its head column: `sym.name` walks a foreign key from `sym` */
+static void phrase_name(int64_t id, ray_t** acc) {
+    const int64_t* segs;
+    if (ray_sym_segs(id, &segs)) id = segs[0];
+    if (!RAY_IS_ERR(*acc)) *acc = ray_vec_append(*acc, &id);
+}
+
+static void phrase_names(ray_t* x, ray_t** acc) {
+    if (!x || RAY_IS_ERR(*acc)) return;
+    if (x->type == -RAY_SYM) phrase_name(x->i64, acc);
+    else if (x->type == RAY_SYM) {
+        for (int64_t i = 0; i < q_count(x); i++) phrase_name(ray_vec_get_sym_id(x, i), acc);
+    } else if (x->type == RAY_LIST) {
+        for (int64_t i = 0; i < q_count(x); i++) phrase_names(((ray_t**)ray_data(x))[i], acc);
+    } else if (q_type_is_dict(x)) {
+        phrase_names(ray_dict_keys(x), acc);
+        phrase_names(ray_dict_vals(x), acc);
+    }
+}
+
+/* What a select names (kb/file-compression.md:150: "Columns are mapped for the duration of the select"): every
+ * symbol in its where, by, select and sort phrases — a superset of its columns — or NULL for all of them: no
+ * select phrase, or not a rank 4-6 select at all. */
+static ray_t* ques_names(ray_t** q, int64_t n) {
+    if (!q || is_empty_gen(q[3]) || (q_type_is_dict(q[3]) && q_count(q[3]) == 0)) return NULL;
+    ray_t* acc = ray_vec_new(RAY_SYM, 8);
+    for (int64_t i = 1; i < n; i++)
+        if (i != 4) phrase_names(q[i], &acc);
+    if (acc && !RAY_IS_ERR(acc)) return acc;
+    if (acc) ray_error_free(acc);
+    return NULL;
+}
+
+/* The columns of a deferred source its select did NOT map.  The phrase frames watch them (phrase_eval): a name that
+ * reaches one at run time — `eval cn`, a symbol applied, a string valued — was a column the scan of the phrases
+ * could not see, and the select is run again over every column rather than answer from a global of that name. */
+static ray_t* g_unmapped;
+
+static void ques_unmapped(ray_t* t, ray_t* mapped) {
+    ray_t* acc = ray_vec_new(RAY_SYM, 8);
+    for (int64_t c = 0; c < ray_table_ncols(t) && acc && !RAY_IS_ERR(acc); c++) {
+        int64_t id = ray_table_col_name(t, c);
+        if (!ray_table_get_col(mapped, id)) acc = ray_vec_append(acc, &id);
+    }
+    if (g_unmapped) ray_release(g_unmapped);
+    g_unmapped = acc && !RAY_IS_ERR(acc) ? acc : NULL;
+}
+
+static ray_t* ques_from_n(ray_t* t, int64_t* nkey, int hops, ray_t** q, int64_t qn) {
     if (!t) return q_err(QE_TYPE);
     ray_t* pm = q_provider_from_table(t);   /* carrier / table coordinate: provider truth */
     if (pm) return pm;
@@ -118,7 +167,7 @@ static ray_t* ques_from_n(ray_t* t, int64_t* nkey, int hops) {
         ray_t* v = q_io_resource_table(t);
         if (!v) v = q_eval_value_wrap(t);
         if (RAY_IS_ERR(v)) return v;
-        ray_t* r = ques_from_n(v, nkey, hops + 1);
+        ray_t* r = ques_from_n(v, nkey, hops + 1, q, qn);
         ray_release(v);
         return r;
     }
@@ -127,7 +176,7 @@ static ray_t* ques_from_n(ray_t* t, int64_t* nkey, int hops) {
         ray_t* v = q_env_handle_resolve(t->i64);
         if (!v) return q_err(QE_NAME);
         if (RAY_IS_ERR(v)) return v;
-        ray_t* r = ques_from_n(v, nkey, hops + 1);
+        ray_t* r = ques_from_n(v, nkey, hops + 1, q, qn);
         ray_release(v);
         return r;
     }
@@ -136,7 +185,12 @@ static ray_t* ques_from_n(ray_t* t, int64_t* nkey, int hops) {
         return q_bang_enkey(0, t);
     }
     if (q_type_is_dict(t)) { ray_retain(t); return t; }
-    if (q_splay_table_unresolved(t)) {   /* fails when queried: a missing dir 'io, an unknown name itself (`'s`) */
+    if (q_splay_table_deferred(t)) {     /* mapped for this query; a missing dir is 'io, an unknown name itself (`'s`) */
+        ray_t* names = ques_names(q, qn);
+        ray_t* m = q_splay_deferred_map(t, names);
+        if (names) ray_release(names);
+        if (m && !RAY_IS_ERR(m) && ray_table_ncols(m) < ray_table_ncols(t)) ques_unmapped(t, m);
+        if (m) return m;
         ray_t* s = ray_sym(q_splay_table_path(t));
         ray_t* nm = ray_sym_str(s->i64);                  /* borrowed */
         ray_t* e = q_io_is_fsym(s) ? q_err(QE_IO) : q_err_name(ray_str_ptr(nm), ray_str_len(nm));
@@ -147,8 +201,7 @@ static ray_t* ques_from_n(ray_t* t, int64_t* nkey, int hops) {
     return q_err(QE_TYPE);
 }
 
-static ray_t* ques_from(ray_t* t, int64_t* nkey) { return ques_from_n(t, nkey, 0);
-}
+static ray_t* ques_from(ray_t* t, int64_t* nkey) { return ques_from_n(t, nkey, 0, NULL, 0); }
 
 /* one column of the from-value, OWNED (NULL = no such column) */
 static ray_t* from_col_owned(ray_t* t, int64_t nm) {
@@ -220,6 +273,7 @@ static ray_t* phrase_eval(ray_t* tree, ray_t* t, ray_t* idx) {
         }
     }
     if (!err) q_env_local_set(ray_sym_intern_runtime("i", 1), idx);
+    q_env_frame_watch(g_unmapped);
     q_dbg_hold_t hold = q_dbg_hold();              /* the phrase tree is not the frame's text: its caret stays on the query */
     ray_t* r = err ? err : q_eval_apply_concrete(q_eval(tree));
     q_dbg_release(hold);
@@ -997,11 +1051,32 @@ static ray_t* sort_result(ray_t* spec, ray_t* nspec, ray_t* r) {
     return rk;
 }
 
+static ray_t* ques_select_over(ray_t** args, int64_t n, ray_t* t, int64_t nk);
+
 static ray_t* ques_select(ray_t** args, int64_t n) {
     ray_t* pushed = q_provider_qsql_push(args, n); /* NULL: not provider / no qsql hook */
     if (pushed) return pushed;
     int64_t nk = 0;                              /* keyed source: re-key the result */
-    ray_t* t = ques_from(args[0], &nk);
+    ray_t* outer = g_unmapped;                   /* an enclosing select's: restored when this one is done */
+    g_unmapped = NULL;
+    int64_t hits = q_env_frame_watch_hits();
+    ray_t* t = ques_from_n(args[0], &nk, 0, args, n);
+    ray_t* r = ques_select_over(args, n, t, nk);
+    if (g_unmapped && hits != q_env_frame_watch_hits()) {
+        if (r && RAY_IS_ERR(r)) ray_error_free(r);
+        else if (r) ray_release(r);
+        ray_release(g_unmapped);
+        g_unmapped = NULL;
+        nk = 0;
+        r = ques_select_over(args, n, ques_from_n(args[0], &nk, 0, NULL, 0), nk);
+    }
+    if (g_unmapped) ray_release(g_unmapped);
+    g_unmapped = outer;
+    return r;
+}
+
+/* the select over its resolved source; consumes t */
+static ray_t* ques_select_over(ray_t** args, int64_t n, ray_t* t, int64_t nk) {
     if (!t || RAY_IS_ERR(t)) return t ? t : q_err(QE_TYPE);
     if (q_type_is_dict(t) && !(is_bool_atom(args[2], 0) || is_empty_gen(args[2]))) {   /* by / distinct: no witness */
         ray_release(t);
@@ -1469,6 +1544,12 @@ static ray_t* bang_qsql(ray_t** args) {
         ray_retain(src = tslot);
     } else {
         return q_err(QE_TYPE);
+    }
+    ray_t* mapped = q_splay_deferred_map(src, NULL);
+    if (mapped) {
+        ray_release(src);
+        if (RAY_IS_ERR(mapped)) return mapped;
+        src = mapped;
     }
     /* A mapped splay refuses schema changes and every write-back — BOTH delete
      * forms and the name form (kb/splayed-tables.md:350-354: `delete volume

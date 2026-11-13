@@ -360,6 +360,7 @@ void q_builtins_register(void) {
     bind_vary (".Q.c.w",   1, q_dotq_w_fn);     /* memory stats dict (ref/dotq.md) */
     bind_vary (".Q.c.gc",  1, q_dotq_gc_fn);    /* garbage collect (ref/dotq.md) */
     bind_vary (".Q.c.zblocks", 1, q_dotq_zblocks_fn); /* inflated-blocks witness (internal) */
+    bind_vary (".Q.c.asks", 1, q_dotq_asks_fn);       /* deferred-table tests witness (internal) */
     bind_vary (".Q.c.hp", 3, q_dotq_hp_fn);     /* HTTP POST [url;mime;body] (ref/dotq.md) */
     bind_vary (".Q.c.gz", 1, q_dotq_gz_fn);     /* GZip ::/inflate/deflate (ref/dotq.md) */
     bind_vary (".Q.c.trp", 3, q_dbg_trp_fn);    /* trap-at + backtrace (ref/dotq.md) */

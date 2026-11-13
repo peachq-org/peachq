@@ -16,6 +16,7 @@
 #include "qlang/q_registry_internal.h" /* q_flip_wrap, q_join_wrap — Join Each of two empty tables */
 #include "qlang/base/q_type.h"
 #include "qlang/ops/q_index.h" /* q_index_elem_at — the one element accessor */
+#include "qlang/io/q_splay.h"  /* q_splay_contained — a result entering the list a map or scan assembles */
 #include "qlang/ops/q_dollar.h"
 #include "table/dict.h"
 #include <string.h>
@@ -57,7 +58,11 @@ static ray_t* acc_push(acc_t* a, ray_t* v) {
     ray_retain(v);
     a->last = v;
     if (!a->keep) return NULL;
+    ray_retain(v);
+    v = q_splay_contained(v);
+    if (RAY_IS_ERR(v)) return v;
     a->list = ray_list_append(a->list, v);
+    ray_release(v);
     if (!RAY_IS_ERR(a->list)) return NULL;
     ray_t* e = a->list;
     a->list = NULL;
@@ -440,7 +445,7 @@ static ray_t* map_zip(ray_t* fv, const q_op_t* frow, ray_t** args, int64_t n,
         for (int64_t i = 0; i < len; i++) {
             for (int64_t p = 0; p < n; p++)
                 ev[p] = (iter >> p & 1) ? q_index_elem_at(av[p], i) : av[p];
-            ray_t* e = q_eval_apply_concrete(q_eval_apply(fv, frow, ev, n));
+            ray_t* e = q_splay_contained(q_eval_apply_concrete(q_eval_apply(fv, frow, ev, n)));
             for (int64_t p = 0; p < n; p++)
                 if (iter >> p & 1) ray_release(ev[p]);
             if (RAY_IS_ERR(e)) { ray_release(l); l = e; break; }
@@ -549,7 +554,8 @@ static ray_t* prior_each(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
         for (int64_t i = 0; i < len; i++) {
             ray_t* cur = q_index_elem_at(x, i);
             ray_t* av[2] = { cur, prev };
-            ray_t* e = i == 0 && lead_miss ? ray_bool(false) : q_eval_apply_concrete(q_eval_apply(fv, frow, av, 2));
+            ray_t* e = i == 0 && lead_miss ? ray_bool(false)
+                                           : q_splay_contained(q_eval_apply_concrete(q_eval_apply(fv, frow, av, 2)));
             ray_release(prev);
             prev = cur;
             if (RAY_IS_ERR(e)) { ray_release(l); l = e; break; }

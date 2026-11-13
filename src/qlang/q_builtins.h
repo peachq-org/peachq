@@ -56,6 +56,7 @@ ray_t* q_dotq_cells_fn(ray_t* x);
 ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs);
 ray_t* q_dotq_w_fn(ray_t** args, int64_t nargs);
 ray_t* q_dotq_zblocks_fn(ray_t** args, int64_t nargs);
+ray_t* q_dotq_asks_fn(ray_t** args, int64_t nargs);
 ray_t* q_dotq_gc_fn(ray_t** args, int64_t nargs);
 
 /* Is x a FUNCTION value — the 100h-112h band?  `\f`/`\v` partition a namespace

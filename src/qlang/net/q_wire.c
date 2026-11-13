@@ -1121,7 +1121,7 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         ray_t* l = ray_list_new(count);
         if (!l || RAY_IS_ERR(l)) return l ? l : q_err(QE_WSFULL);
         for (int32_t i = 0; i < count; i++) {
-            ray_t* e = rd_obj(c);
+            ray_t* e = q_splay_contained(rd_obj(c));   /* an item: a splayed table goes in mapped */
             if (!e || RAY_IS_ERR(e)) { ray_release(l); return e ? e : q_err(QE_DOMAIN); }
             l = ray_list_append(l, e);
             ray_release(e);

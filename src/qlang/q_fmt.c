@@ -1591,7 +1591,10 @@ static void fmt_classic_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
 static void fmt_modern_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
     *trunc = 0;
     if (bufsz == 0 || !buf) return;
-    if (fmt_pipe_is_table(val)) { fmt_pipe_render(val, buf, bufsz, trunc); return; }
+    ray_t* dm = val && val->type == RAY_TABLE ? q_splay_deferred_map(val, NULL) : NULL;   /* mapped to be shown */
+    if (dm && !RAY_IS_ERR(dm)) { fmt_pipe_render(dm, buf, bufsz, trunc); ray_release(dm); return; }
+    if (dm) ray_error_free(dm);
+    else if (fmt_pipe_is_table(val) && !q_splay_table_deferred(val)) { fmt_pipe_render(val, buf, bufsz, trunc); return; }
     if (q_provider_carrier_is(val)) {   /* a pointer IS a table here; unreadable -> legacy */
         ray_t* mt = q_provider_carrier_table(val);
         if (mt && !RAY_IS_ERR(mt) && mt->type == RAY_TABLE) { fmt_pipe_render(mt, buf, bufsz, trunc); ray_release(mt); return; }
@@ -1941,7 +1944,14 @@ static void q_fmt_body(ray_t* val) {
     }
 
     if (val->type == RAY_TABLE) {
-        if (q_splay_table_unresolved(val)) {   /* `+(,`a)!`:./s/` — ref/flip-splayed.md, no rows to grid */
+        if (q_splay_table_deferred(val)) {     /* mapped to be shown; `+(,`a)!`:./s/` when nothing is there */
+            ray_t* m = q_splay_deferred_map(val, NULL);
+            if (m && !RAY_IS_ERR(m)) {
+                q_fmt_table(m);
+                ray_release(m);
+                return;
+            }
+            if (m) ray_error_free(m);
             char kb[2048];
             q_fmt_krepr(val, kb, sizeof kb);
             qe_puts(kb);

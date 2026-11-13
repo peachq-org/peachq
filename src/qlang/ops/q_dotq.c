@@ -188,6 +188,12 @@ ray_t* q_dotq_zblocks_fn(ray_t** args, int64_t nargs) {
     return ray_i64(q_splay_zblocks());
 }
 
+/* (.Q.c.asks[]) — how often a value was tested for being a deferred table (internal witness: zero over plain lists) */
+ray_t* q_dotq_asks_fn(ray_t** args, int64_t nargs) {
+    (void)args; (void)nargs;
+    return ray_i64(q_splay_asks());
+}
+
 /* (.Q.w[]) — memory stats as a dict (ref/dotq.md#w-memory-stats): the `\w`
  * slots plus syms/symw.  mmap = the splay registry's LIVE mapped bytes (its
  * region totals — what one munmap sweep would return); mphy = physical RAM;
