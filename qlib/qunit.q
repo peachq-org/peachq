@@ -121,7 +121,7 @@ assertAlmostEquals:{ [actual; expected; permittedDifferenceInFloats]
         doCheck[key[a]~key e; "dict keys match"];
         (.z.s[;;permittedDifferenceInFloats].)  each  flip (value a;value e);
         :a];
-    if[0h=type e;
+    if[0h=.Q.c.lty e;
         (.z.s[;;permittedDifferenceInFloats].)  each  flip (a;e);
         :a];
     / List or atoms with types<>0 left
@@ -167,7 +167,7 @@ roundTo:{h:x+y%2; x^h-h mod y};
 / the hash must forgive a float wherever assertAlmostEquals does: inside lists, dicts and nested tables too
 roundDeep:{
     $[(abs type x) in 8 9h; roundTo[x;knownPrecision];
-      0h=type x; .z.s each x;
+      0h=.Q.c.lty x; .z.s each x;
       99h=type x; key[x]!.z.s value x;
       98h=type x; flip .z.s flip x;
       x]};

@@ -75,6 +75,7 @@ ray_t* ray_list_append(ray_t* list, ray_t* item) {
     ray_t* original = list;
     list = ray_cow(list);
     if (!list || RAY_IS_ERR(list)) return list;
+    ray_list_unmark(list);
 
     int64_t cap = list_capacity(list);
 
@@ -135,6 +136,7 @@ ray_t* ray_list_set(ray_t* list, int64_t idx, ray_t* item) {
     /* COW if shared */
     list = ray_cow(list);
     if (!list || RAY_IS_ERR(list)) return list;
+    ray_list_unmark(list);
 
     ray_t** slots = (ray_t**)ray_data(list);
 
@@ -164,6 +166,7 @@ ray_t* ray_list_insert_at(ray_t* list, int64_t idx, ray_t* item) {
     ray_t* original = list;
     list = ray_cow(list);
     if (!list || RAY_IS_ERR(list)) return list;
+    ray_list_unmark(list);
 
     int64_t cap = list_capacity(list);
 

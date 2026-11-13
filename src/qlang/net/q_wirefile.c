@@ -404,7 +404,10 @@ static ray_t* wf_any_obj(wf_any_t* c, size_t o) {
         ray_release(pair);
         return tbl;
     }
-    if (box) return wf_any_list(c, a + hdr, n, (int64_t)o);
+    if (box) {
+        ray_t* l = wf_any_list(c, a + hdr, n, (int64_t)o);
+        return t == WF_NEST_BIAS ? q_type_mapped_mark(l, WF_NEST_BIAS) : l;
+    }
     if (t == RAY_SYM) return q_attr_stamp_disk(wf_any_syms(c, a + hdr, n), attr);
     return q_attr_stamp_disk(q_wire_fixed_vec(tag, a + hdr, n, 0), attr);
 }
@@ -479,7 +482,8 @@ static ray_t* wf_read_legacy(const uint8_t* buf, size_t len) {
 static ray_t* wf_read_b(const uint8_t* buf, size_t len, ray_t* path, size_t empty) {
     if (len < WF_B_OFF) return q_err(QE_CORRUPT);
     uint8_t disk = buf[2];
-    if (disk == WF_NEST_BIAS) return wf_read_anymap(path, buf + WF_B_OFF, len - WF_B_OFF);
+    if (disk == WF_NEST_BIAS)
+        return q_type_mapped_mark(wf_read_anymap(path, buf + WF_B_OFF, len - WF_B_OFF), WF_NEST_BIAS);
     int nested = disk > WF_NEST_BIAS && disk <= WF_NEST_HI;
     int8_t tag = wf_simple_tag(nested ? (uint8_t)(disk - WF_NEST_BIAS) : disk);
     if (!tag) return q_err(QE_TYPE);
@@ -487,7 +491,7 @@ static ray_t* wf_read_b(const uint8_t* buf, size_t len, ray_t* path, size_t empt
     int64_t count = wf_i64(buf + 8);
     ray_t* e = wf_count(&count, len - WF_B_OFF, esz, buf[3], empty);
     if (e) return e;
-    if (nested) return wf_read_nested(tag, path, buf + WF_B_OFF, count);
+    if (nested) return q_type_mapped_mark(wf_read_nested(tag, path, buf + WF_B_OFF, count), disk);
     return wf_disk_attr(q_wire_fixed_vec(tag, buf + WF_B_OFF, count, 0), buf[3]);
 }
 
