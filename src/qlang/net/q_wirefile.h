@@ -32,8 +32,8 @@ ray_t* q_wirefile_write(ray_t* x, ray_t* y);
 ray_t* q_wirefile_write_zip(ray_t* x, ray_t* y, int lbs, int alg, int lvl);
 
 /* The flat-append kernel behind ALL THREE append doors (`:f upsert y,
- * .[`:f;();,;y], file-handle apply): in-place on a plain shape-B vector file
- * and on a plain shape-A general list (the log-file record append),
+ * .[`:f;();,;y], file-handle apply): in-place on a plain shape-B vector file,
+ * a plain 64-bit enum column and a plain shape-A general list (the log-file record append),
  * read-`,`-rewrite otherwise (container state preserved), write-if-absent.
  * q_wirefile_append takes the file symbol and returns it (or an error); the
  * _path form borrows a RAY_STR path and answers NULL on success. */
@@ -43,8 +43,8 @@ ray_t* q_wirefile_write_splay(ray_t* dirsym, ray_t* domsym, ray_t* y,
                               int lbs, int alg, int lvl);
 
 /* The domain-append primitive filepath Enum Extend (`:d?y) and the splay writer share: intern
- * symv's symbols into the domain FILE (append-only, new names only, positions
- * never rewritten, never compressed).  *positions (may be NULL) receives the
+ * symv's symbols into the domain FILE under its lock (append-only, new names only, positions
+ * never rewritten; a compressed file refuses a new name).  *positions (may be NULL) receives the
  * owned i64 domain positions of symv's cells.  NULL on success. */
 ray_t* q_wirefile_domain_extend(ray_t* dompathstr, ray_t* symv, ray_t** positions);
 

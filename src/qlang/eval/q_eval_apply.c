@@ -1713,6 +1713,8 @@ static ray_t* enum_route(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) 
                                * enlist of a 20h VECTOR boxes like any list;
                                * set writes the reference SHAPE, wf_ref_image;
                                * except/inter gather through q_index_at) */
+        if (n == 2 && !strcmp(t, "upsert") && q_io_is_fsym(args[0]))
+            return NULL;      /* a file takes the positions, as `.[f;();,;e]` hands them over */
         if (n == 1 && q_enum_is(args[0]) &&
             (!strcmp(t, "reverse") || !strcmp(t, "first") || !strcmp(t, "last")))
             return enum_strip_apply(fv, row, args, n, 0, 1);
