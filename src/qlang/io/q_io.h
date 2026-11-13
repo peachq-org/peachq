@@ -106,6 +106,8 @@ typedef struct {
     int32_t  level;
     int64_t* ends;         /* cumulative compressed END of each block; malloc'd, algs rides the same block */
     int32_t* algs;
+    size_t   maxblock;     /* the largest compressed block, 16-aligned: where the inflate arena sits in a scratch */
+    int      gzip;         /* some block is gzip, so a scratch carries that arena */
 } q_io_zipmap_t;
 
 /* Parse a container's tail header + block boundaries into *zm (free the
@@ -122,8 +124,10 @@ ray_t* q_io_zip_block(ray_t* pathstr, const q_io_zipmap_t* zm, int64_t k,
 /* Portable positional read: pread, or ReadFile at an overlapped offset on Windows (errno set on failure). */
 ssize_t q_io_pread(int fd, void* buf, size_t n, int64_t off);
 
-/* The same block through an open fd (pread) into the caller's scratch (q_io_zipmap_maxblock bytes fit any block):
- * allocation-free and async-signal-safe — the splay fault handler runs it.  0, -1 'corrupt, -2 'io. */
+/* The same block through an open fd (pread) into the caller's scratch.  The scratch MUST be q_io_zipmap_maxblock
+ * bytes: room for the largest compressed block and, where a block is gzip, for zlib's inflate state after it — so
+ * the read is allocation-free and async-signal-safe whatever the codec (the splay fault handler runs it).
+ * 0, -1 'corrupt, -2 'io. */
 size_t q_io_zipmap_maxblock(const q_io_zipmap_t* zm);
 int    q_io_zip_block_fd(int fd, const q_io_zipmap_t* zm, int64_t k,
                          uint8_t* scratch, uint8_t* dst, size_t cap);
