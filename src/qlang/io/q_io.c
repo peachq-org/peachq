@@ -164,6 +164,13 @@ int q_io_write_fd(int fd, const void* bytes, size_t n) {
     return 0;
 }
 
+ssize_t q_io_read_fd(int fd, void* buf, size_t n) {
+    ssize_t r;
+    do r = read(fd, buf, n);
+    while (r < 0 && errno == EINTR && !q_eval_stop_pending);
+    return r;
+}
+
 /* A POSIX record lock, so a kdb writer's lockf waits on it and it on lockf.  The open-file-description form is
  * dropped by this descriptor's close alone; the classic form by any close of the file, hence the one descriptor. */
 int q_io_open_locked(const char* path) {

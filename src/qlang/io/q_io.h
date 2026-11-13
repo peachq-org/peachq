@@ -91,6 +91,10 @@ int q_io_fwrite(FILE* fp, const void* bytes, size_t n);
  * than asked without erroring).  0, or -1 on an error. */
 int q_io_write_fd(int fd, const void* bytes, size_t n);
 
+/* THE blocking forward read (a fifo): one read(2), retrying EINTR until Ctrl+C.  Bytes read, 0 at EOF, or -1 with
+ * errno EINTR for 'stop and anything else for 'io. */
+ssize_t q_io_read_fd(int fd, void* buf, size_t n);
+
 /* `path` opened read+append (created if absent) and write-locked, waiting: -1, or the ONE descriptor to read, write and close. */
 int q_io_open_locked(const char* path);
 
