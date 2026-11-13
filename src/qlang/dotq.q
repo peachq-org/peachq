@@ -168,27 +168,32 @@
   (.Q.pf,.Q.pt)!enlist[.Q.PV],{[dir;name]get .Q.par[dir;name;`.d]}[latest;]each .Q.pt};
 / The partition values as a table of the partition column: what a query's partition constraints are answered over.
 .Q.i.values:{[] flip(1#.Q.pf)!enlist .Q.pv};
-/ Partition i of partitioned table `name: its columns c, mapped from that partition's directory, or the empty schema
-/ .Q.bv recorded where the table is missing from it.
-.Q.i.part:{[name;c;i]
+/ Partition i of partitioned table `name: its columns c, mapped from that partition's directory with at most n rows
+/ read, or the empty schema .Q.bv recorded where the table is missing from it.
+.Q.i.part:{[name;c;n;i]
   if[i in .Q.i.absent name;:c#.Q.vp name];
-  .Q.c.part[.Q.par[.Q.pd i;.Q.pv i;name];c]};
+  .Q.c.part[.Q.par[.Q.pd i;.Q.pv i;name];c;n]};
+/ Partition i of `name with its partition column first: columns c (the field not among them), at most n rows.
+.Q.i.dated:{[name;c;n;i]
+  t:.Q.i.part[name;c;n;i];
+  if[n<count t;t:n#t];
+  flip(.Q.pf,c)!enlist[count[t]#.Q.pv i],t c};
 / The table a query over partitioned table `name reads: columns c of the partitions idx (:: is every one), the
 / partition column first, razed in partition order; :: for a name the database does not hold.
 .Q.i.table:{[name;c;idx]
   if[not name in .Q.pt;:(::)];
-  c:c except .Q.pf;
-  dated:{[name;c;i]
-    t:.Q.i.part[name;c;i];
-    flip(.Q.pf,c)!enlist[count[t]#.Q.pv i],t c}[name;c;];
+  dated:.Q.i.dated[name;c except .Q.pf;0W;];
   $[idx~(::);raze dated each til count .Q.pv;count idx;raze dated each idx;0#dated -1+count .Q.pv]};
 / The most recent partition of `name alone: what meta describes.
 .Q.i.latest:{[name;c] .Q.i.table[name;c;enlist -1+count .Q.pv]};
+/ At most n rows of the first partition of `name: what the console shows; :: when they cannot be read, so the display
+/ falls back to the reference (ref/dotq.md, the .Q.bv example).
+.Q.i.earliest:{[name;c;n] $[(name in .Q.pt)&0<count .Q.pv;@[.Q.i.dated[name;c except .Q.pf;n];0;::];::]};
 / .Q.cn: the row count of each partition of a partitioned table, kept in .Q.pn; one column of each is mapped.
 .Q.cn:{[t]
   if[not 1b~.Q.qp t;:count t];
   ref:flip t;
-  .Q.pn[value ref]:{[name;c;i]count .Q.i.part[name;c;i]}[value ref;1#key ref;]each til count .Q.pv;
+  .Q.pn[value ref]:{[name;c;i]count .Q.i.part[name;c;0W;i]}[value ref;1#key ref;]each til count .Q.pv;
   .Q.pn value ref};
 / ref/dotq.md .Q.bv: each mounted table missing from some partition gets its empty schema, the partition field first,
 / from the last partition holding it, or the first for .Q.bv[`]
@@ -198,7 +203,7 @@
   gaps:where count[dirs]>count each held;
   schema:{[pick;dirs;name;held]
     dir:.Q.dd[dirs pick held;name];
-    t:0#.Q.c.part[dir;get .Q.dd[dir;`.d]];
+    t:0#.Q.c.part[dir;get .Q.dd[dir;`.d];0W];
     flip(.Q.pf,cols t)!enlist[0#.Q.pv],value flip t}[$[from~(::);last;first];dirs;;];
   .Q.vp:.Q.pt[gaps]!schema'[.Q.pt gaps;held gaps];
   .Q.i.absent:.Q.pt[gaps]!(til count dirs)except/:held gaps;};

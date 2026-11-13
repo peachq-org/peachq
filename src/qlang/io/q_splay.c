@@ -1043,14 +1043,14 @@ int q_splay_table_named(ray_t* t) {
     return (k == Q_COORD_SPLAY_DEFERRED || k == Q_COORD_SPLAY_UNRESOLVED) && splay_name_sym_is(q_type_coord_sym(t));
 }
 
-/* `reader`[name;columns], or `reader`[name;columns;parts] where parts are given, for partitioned table t */
-static ray_t* splay_named(const char* reader, ray_t* t, ray_t* want, ray_t* parts) {
+/* `reader`[name;columns], or `reader`[name;columns;arg] where arg is given, for partitioned table t */
+static ray_t* splay_named(const char* reader, ray_t* t, ray_t* want, ray_t* arg) {
     if (!q_splay_table_named(t)) return NULL;
     ray_t* ids = splay_wanted(t, want);
     if (RAY_IS_ERR(ids)) return ids;
     ray_t* name = ray_sym(q_type_coord_sym(t));
-    ray_t* args[3] = { name, ids, parts };
-    ray_t* m = splay_dotq(reader, args, parts ? 3 : 2);
+    ray_t* args[3] = { name, ids, arg };
+    ray_t* m = splay_dotq(reader, args, arg ? 3 : 2);
     ray_release(name);
     ray_release(ids);
     return m;
@@ -1062,8 +1062,19 @@ ray_t* q_splay_named_map(ray_t* t, ray_t* want, ray_t* parts) {
 
 ray_t* q_splay_named_latest(ray_t* t) { return splay_named(".Q.i.latest", t, NULL, NULL); }
 
+ray_t* q_splay_deferred_shown(ray_t* t, int64_t rows) {
+    if (!q_splay_table_named(t)) return q_splay_deferred_map(t, NULL);
+    ray_t* n = ray_i64(rows);
+    ray_t* m = splay_named(".Q.i.earliest", t, NULL, n);
+    ray_release(n);
+    if (m && RAY_IS_ERR(m)) { ray_error_free(m); m = NULL; }
+    return m;
+}
+
 ray_t* q_splay_part_fn(ray_t** args, int64_t n) {
-    if (n != 2 || !args[0] || args[0]->type != -RAY_SYM || !args[1] || args[1]->type != RAY_SYM) return q_err(QE_TYPE);
+    if (n != 3 || !args[0] || args[0]->type != -RAY_SYM || !args[1] || args[1]->type != RAY_SYM) return q_err(QE_TYPE);
+    int64_t rows = 0;
+    if (!q_type_strict_i64(args[2], &rows) || rows < 0) return q_err(QE_TYPE);
     ray_t* s = ray_sym_str(args[0]->i64);                               /* borrowed */
     size_t sn = s ? ray_str_len(s) : 0;
     int64_t dirsym = sn > 1 && ray_str_ptr(s)[0] == ':' ? splay_slashed(ray_str_ptr(s), sn) : -1;
@@ -1072,7 +1083,9 @@ ray_t* q_splay_part_fn(ray_t** args, int64_t n) {
     if (lift) ray_eval_set_restricted(false);
     ray_t* err = NULL;
     splay_ent* e = dirsym < 0 ? NULL : splay_resolve_sym(dirsym, &err);
-    ray_t* m = e ? splay_table(e, args[1], 0, -1) : err;
+    /* the row read where the partition holds more than `rows` (q_splay_deferred_rows' seam), else the mapped whole */
+    ray_t* m = e && rows < INT64_MAX ? splay_table(e, args[1], 0, rows) : NULL;
+    if (!m) m = e ? splay_table(e, args[1], 0, -1) : err;
     if (lift) ray_eval_set_restricted(true);
     return m ? m : q_err(QE_IO);
 }
