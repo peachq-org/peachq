@@ -638,6 +638,7 @@ static int dag_pays(ray_t* l, ray_t* r, int lc, int rc) {
 
 static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r) {
     int8_t lt = (int8_t)-q_type_elem_tag(l), rt = (int8_t)-q_type_elem_tag(r);
+    if (q_type_cmp_refuses(lt, rt) && q_vecop_is_ordering(fn)) return q_err(QE_TYPE);
     int8_t to_l = q_type_cmp_as(lt, rt), to_r = to_l ? 0 : q_type_cmp_as(rt, lt);
     if ((to_l || to_r) && q_vecop_is_compare(fn)) {
         /* the date-bearing side is cast whole, never per element (basics/comparison.md:132) */
