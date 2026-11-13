@@ -84,6 +84,13 @@ int q_io_abs_spelling(const char* path, size_t n, char* abs, size_t cap) {
 #endif
 }
 
+int q_io_path_inside(const char* p, size_t n) {
+    if (!n || p[0] == '/' || memchr(p, ':', n) || memchr(p, '\\', n)) return 0;
+    for (size_t i = 0; i + 1 < n; i++)
+        if (p[i] == '.' && p[i + 1] == '.' && (!i || p[i - 1] == '/') && (i + 2 == n || p[i + 2] == '/')) return 0;
+    return 1;
+}
+
 ray_t* q_io_file_path(ray_t* x) {
     const char* p;
     size_t n;
