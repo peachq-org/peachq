@@ -7,9 +7,7 @@
 .Q.i	internal	-
 .Q.ops	internal	-
 .h.i	internal	-
-.Q.bv	unimplemented	not-built
 .Q.Cf	unimplemented	out-of-scope
-.Q.chk	unimplemented	out-of-scope
 .Q.dsftg	unimplemented	out-of-scope
 .Q.fc	unimplemented	not-built
 .Q.fk	unimplemented	not-built
