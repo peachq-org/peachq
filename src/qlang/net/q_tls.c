@@ -175,8 +175,8 @@ static const char* const CFG_NAMES[CFG_N] = {
     "SSL_CIPHER_LIST", "SSL_VERIFY_CLIENT", "SSL_VERIFY_SERVER"
 };
 static const char* const CFG_DEFAULTS[CFG_N] = {
-    /* kb/ssl.md:150,169.  VERIFY_SERVER defaults to HOSTIP, not kdb's YES: the
-     * ONE divergence, and -26! reads it back so the effective policy is visible. */
+    /* kb/ssl.md:150,169.  VERIFY_SERVER defaults to HOSTIP, not kdb's YES, for
+     * https only (a tcps:// handle takes kdb's YES); -26! reads back this one. */
     NULL, NULL, NULL, NULL, NULL, "NO", "HOSTIP"
 };
 
@@ -202,7 +202,9 @@ static const char* tls_version_string(void) {
     return NULL;
 }
 
-typedef struct { void* ctx; void* ssl; ray_sock_t fd; } tls_sess_t;
+typedef struct { void* ctx; void* ssl; ray_sock_t fd; bool client; } tls_sess_t;
+
+static void note_failure(void* ssl, const char* stage);
 
 /* An accepted server connection is NON-BLOCKING (it lives on the poll), so both
  * retries below are live; renegotiation is why a write can want a read.  Each
@@ -246,7 +248,9 @@ static int64_t sess_recv(void* p, void* buf, size_t len) {
     /* An exhausted SSL buffer is the poll pump's EAGAIN, not a dead peer —
      * without this the first drained record would tear the connection down.
      * errno is set on BOTH arms so a caller can tell retry from fatal. */
-    errno = (e == TLS_ERROR_WANT_READ || e == TLS_ERROR_WANT_WRITE) ? EAGAIN : EIO;
+    int retry = e == TLS_ERROR_WANT_READ || e == TLS_ERROR_WANT_WRITE;
+    if (!retry && s->client) note_failure(s->ssl, "session failed");
+    errno = retry ? EAGAIN : EIO;
     return -1;
 }
 
@@ -328,7 +332,7 @@ static int ctx_trust(void* ctx) {
 #endif
 }
 
-/* Why the last client handshake failed, "" after one that succeeded: the q error stays 'conn. */
+/* Why the last client handshake or session failed, "" after a handshake that succeeded: the q error stays 'conn. */
 static char g_last_error[256];
 
 static void note_failure(void* ssl, const char* stage) {
@@ -342,10 +346,10 @@ static void note_failure(void* ssl, const char* stage) {
     snprintf(g_last_error, sizeof g_last_error, "%s%s%s", stage, *detail ? ": " : "", detail);
 }
 
-static int sess_attach(ray_sock_t fd, void* ctx, void* ssl) {
+static int sess_attach(ray_sock_t fd, void* ctx, void* ssl, bool client) {
     tls_sess_t* s = (tls_sess_t*)calloc(1, sizeof *s);
     if (!s) return -1;
-    s->ctx = ctx; s->ssl = ssl; s->fd = fd;
+    s->ctx = ctx; s->ssl = ssl; s->fd = fd; s->client = client;
     ray_sock_io_t io = { s, sess_send, sess_recv, sess_close, sess_pending, 0 };
     if (ray_sock_io_attach(fd, &io) != 0) { free(s); return -1; }
     return 0;
@@ -373,7 +377,9 @@ static int set_peer_name(void* ssl, const char* host) {
     return -1;
 }
 
-int q_tls_client_start(ray_sock_t fd, const char* host, const char** err) {
+const char* q_tls_last_error(void) { return g_last_error; }
+
+int q_tls_client_start(ray_sock_t fd, const char* host, bool kdb, const char** err) {
     if (tls_load() != 1) {
         snprintf(g_last_error, sizeof g_last_error, "no usable OpenSSL library");
         const char* why = q_dl_unavailable();
@@ -390,7 +396,8 @@ int q_tls_client_start(ray_sock_t fd, const char* host, const char** err) {
 
     /* kb/ssl.md:161-169: NO verifies nothing, YES is chain-only, HOSTIP adds
      * host/IP checking.  An unrecognised value takes the strictest reading. */
-    const char* vs       = cfg_get(CFG_VERIFY_SERVER);
+    char        kx[64];
+    const char* vs       = kdb && !cfg_var(CFG_VERIFY_SERVER, kx) ? "YES" : cfg_get(CFG_VERIFY_SERVER);
     int         verify   = strcmp(vs, "NO") != 0;
     int         bindname = verify && strcmp(vs, "YES") != 0;
     const char* ciph     = cfg_get(CFG_CIPHER_LIST);
@@ -403,6 +410,16 @@ int q_tls_client_start(ray_sock_t fd, const char* host, const char** err) {
     } else {
         A.SSL_CTX_set_verify(ctx, TLS_VERIFY_NONE, NULL);
     }
+    /* Only the pair: a lone SSL_CERT_FILE is often another tool's CA bundle, and
+     * the server-crt.pem default (kb/ssl.md:89) is the server's identity. */
+    const char* cert = cfg_get(CFG_CERT_FILE);
+    const char* key  = cfg_get(CFG_KEY_FILE);
+    if (cert && key && (!A.SSL_CTX_use_certificate_chain_file || !A.SSL_CTX_use_PrivateKey_file ||
+                        A.SSL_CTX_use_certificate_chain_file(ctx, cert) != 1 ||
+                        A.SSL_CTX_use_PrivateKey_file(ctx, key, TLS_FILETYPE_PEM) != 1)) {
+        note_failure(NULL, "SSL_CERT_FILE/SSL_KEY_FILE could not be loaded");
+        goto fail_ctx;
+    }
 
     void* ssl = A.SSL_new(ctx);
     if (!ssl) { note_failure(NULL, "cannot create an SSL session"); goto fail_ctx; }
@@ -414,7 +431,7 @@ int q_tls_client_start(ray_sock_t fd, const char* host, const char** err) {
     }
     if (A.SSL_set_fd(ssl, (int)fd) != 1 || A.SSL_connect(ssl) != 1 ||
         (verify && A.SSL_get_verify_result(ssl) != TLS_X509_V_OK)) { note_failure(ssl, "handshake failed"); goto fail_ssl; }
-    if (sess_attach(fd, ctx, ssl) != 0) { note_failure(NULL, "cannot attach the session"); goto fail_ssl; }
+    if (sess_attach(fd, ctx, ssl, true) != 0) { note_failure(NULL, "cannot attach the session"); goto fail_ssl; }
     g_last_error[0] = 0;
     return 0;
 
@@ -511,7 +528,7 @@ int q_tls_server_handshake(ray_sock_t fd, void** state) {
 
     int rc = A.SSL_accept(h->ssl);
     if (rc == 1) {
-        if (sess_attach(fd, h->ctx, h->ssl) != 0) { hs_free(state); return -1; }
+        if (sess_attach(fd, h->ctx, h->ssl, false) != 0) { hs_free(state); return -1; }
         free(h); *state = NULL;                 /* the session owns ctx/ssl now */
         return 1;
     }

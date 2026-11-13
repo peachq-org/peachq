@@ -65,8 +65,9 @@ int64_t q_handles_count(void);
 /* Record `i` (0 <= i < count) into *out; 0 when out of range. */
 int q_handles_get(int64_t i, q_handle_info_t* out);
 
-/* Open a file (write/append) or fifo (read) fd and register it.  Owned int
- * handle atom (the real fd, >= 3) or error. */
+/* Open a file (write/append, is_fifo 0) or fifo (read) fd and register it;
+ * is_fifo 2 opens without waiting for a writer.  Owned int handle atom (the
+ * real fd, >= 3) or error. */
 ray_t* q_handles_open(const char* path, size_t plen, int is_fifo);
 
 /* Reserve a real fd (>= 3) on the null device — collision-free in the one
@@ -131,7 +132,8 @@ ray_t* q_handles_sym_apply(ray_t* head, ray_t** args, int64_t n);
 ray_t* q_handles_close(int64_t qh);
 
 /* One blocking read of up to `count` bytes from a registered FIFO handle
- * (`read1(h;n)`, `.Q.fpn`; empty read = EOF).  NULL when `fd` is not a
+ * (`read1(h;n)`, `.Q.fpn`; empty read = EOF), or to EOF when `count` is NULL
+ * (`read1 h`).  NULL when `fd` is not a
  * registered fifo — the caller keeps its historic errors. */
 ray_t* q_handles_read1(int64_t fd, ray_t* count);
 
