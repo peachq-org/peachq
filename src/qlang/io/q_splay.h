@@ -34,7 +34,11 @@ int     q_splay_table_named(ray_t* t);
 ray_t*  q_splay_named_values(void);
 ray_t*  q_splay_named_map(ray_t* t, ray_t* want, ray_t* parts);
 ray_t*  q_splay_named_latest(ray_t* t);
-/* `.Q.c.part[dir;names]`: the named columns of the splayed table in directory `dir`, mapped — one partition's. */
+/* What a display of deferred table t shows (owned): a splay mapped, a partitioned table at most `rows` rows of its
+ * first partition (owner ruling 2026-11-13).  NULL when those cannot be read — the display shows the reference. */
+ray_t*  q_splay_deferred_shown(ray_t* t, int64_t rows);
+/* `.Q.c.part[dir;names;rows]`: the named columns of the splayed table in directory `dir`, mapped — one partition's;
+ * a finite `rows` reads at most that many rows (0W: all of them). */
 ray_t*  q_splay_part_fn(ray_t** args, int64_t n);
 
 /* Cumulative inflated-block count — the compressed lane's laziness witness; and the deferred tests asked. */

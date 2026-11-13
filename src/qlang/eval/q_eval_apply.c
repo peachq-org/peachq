@@ -16,6 +16,7 @@
 #include "qlang/q_ctx.h"          /* q_ctx_callback_begin — a callback's entry: no stale SIGINT, Ctrl-C live */
 #include "qlang/eval/q_dbg.h"  /* frame list + the error seams (basics/debug.md) */
 #include "qlang/q_prim.h"
+#include "qlang/q_builtins.h"  /* q_dotq_s_fn — `.Q.s` passes a partitioned table on to the display */
 #include "qlang/parse/q_parse.h"  /* q_parse_lang_tree — the char-atom language arm */
 #include "qlang/eval/q_eval_internal.h"
 #include "qlang/eval/q_pattern.h"
@@ -1820,12 +1821,14 @@ static ray_t* rows_mapped(const q_op_t* row, ray_t** args, int64_t n, int64_t i)
     return c < 0 ? q_splay_deferred_rows(args[1], NULL, c, -c) : q_splay_deferred_rows(args[1], NULL, 0, c);
 }
 
-/* The applications that pass a partitioned table on as the reference it is, by name at this one site: `show`, the
- * internal functions (`-3!`, `-8!`, `0N!`) and `set` of a name — display and the wire show it as its flip
- * (ref/dotq.md:303), and a name bound to it is bound to the reference.  A file takes the table. */
-static int passes_named(const q_op_t* row, ray_t** args, int64_t n) {
+/* The applications that pass a partitioned table on as the reference it is, by name at this one site: `show` and
+ * `.Q.s` (the display reads its first partition, q_splay_deferred_shown), the internal functions (`-3!`, `-8!`,
+ * `0N!`) and `set` of a name — the k-repr and the wire show it as its flip (ref/dotq.md:303), and a name bound to it
+ * is bound to the reference.  A file takes the table. */
+static int passes_named(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     const char* nm = row ? row->name : NULL;
     int64_t c = 0;
+    if (n == 1 && fv->type == RAY_UNARY && (ray_unary_fn)(uintptr_t)fv->i64 == q_dotq_s_fn) return 1;
     if (!nm) return 0;
     if (n == 2 && !strcmp(nm, "!")) return args[0] && q_type_strict_i64(args[0], &c) && c < 0;
     return (n == 1 && !strcmp(nm, "show")) || (n == 2 && !strcmp(nm, "set") && !q_io_is_fsym(args[0]));
@@ -1858,7 +1861,7 @@ static int64_t map_deferred(ray_t* fv, const q_op_t* row, q_car_kind_t kind, ray
     int64_t k = 0;
     for (int64_t i = 0; i < n && !k; i++) k = args[i] && args[i]->type == RAY_TABLE && q_splay_table_deferred(args[i]);
     if (!k || !reads_args(fv, row, kind, args, n)) return 0;
-    if (passes_named(row, args, n) && q_splay_table_named(args[n - 1])) return 0;
+    if (passes_named(fv, row, args, n) && q_splay_table_named(args[n - 1])) return 0;
     int one = shape_verb(row, n) == 2 && q_splay_table_deferred(args[0]);
     k = 0;
     for (int64_t i = 0; i < n; i++) {
