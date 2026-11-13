@@ -1696,6 +1696,10 @@ static ray_t* enum_decay_apply(ray_t* fv, const q_op_t* row, ray_t** args,
 
 static ray_t* enum_route(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     const char* t = (n == 1) ? row->mon.target : row->dyad.target;
+    if (n == 2 && row == q_ops_find("?", 1) && q_enum_is(args[0])) {   /* Find asks an indexed enum by position */
+        ray_t* r = q_enum_find(args[0], args[1]);
+        if (r) return r;
+    }
     if (t) {
         if (n == 1 && args[0]->type == -RAY_ENUM && !strcmp(t, "enlist"))
             return enum_strip_apply(fv, row, args, n, 0, 1);   /* -20h atom ->
@@ -2019,7 +2023,7 @@ ray_t* q_eval_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     ray_t* r;
     for (;;) {
         r = q_eval_apply_concrete(apply_inner(fv, row, args, n));
-        if (q_splay_fault_pending() && r && !RAY_IS_ERR(r)) {   /* a torn zip block under this apply's read */
+        if (q_splay_fault_pending() && r && !RAY_IS_ERR(r)) {   /* a torn zip block, or a p# index its column denies */
             ray_release(r);
             r = q_err(QE_CORRUPT);
         }

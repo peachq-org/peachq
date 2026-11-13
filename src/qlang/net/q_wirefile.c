@@ -8,7 +8,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"  /* q_type_is_int_vec — the `.z.zd` triple */
 #include "qlang/q_env.h"        /* q_env_get — `.z.zd` lives as a plain global */
-#include "qlang/q_prim.h"       /* q_str_text_bytes — nested CHAR rows; q_attr_stamp_trusted — the disk `s` */
+#include "qlang/q_prim.h"       /* q_str_text_bytes — nested CHAR rows; q_attr_* — the disk attribute byte */
 #include "qlang/ops/q_index.h"  /* q_index_elem_at — nested row reads */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_concrete, q_eval_apply_value */
 #include "qlang/q_registry.h"   /* the `,` value the append fallback composes on */
@@ -81,10 +81,41 @@ static int8_t wf_simple_tag(uint8_t disk) {
     }
 }
 
-/* The kx byte off a COLUMN file (shapes B/C/D): `s` is kept when the data bears it out (never on an enum, whose
- * order is its domain's); u/g/p are dropped — their index is kx's trailer, skipped here. */
-static ray_t* wf_disk_attr(ray_t* v, uint8_t byte) {
-    return byte == 1 ? q_attr_stamp_disk(v, 1) : v;
+/* A p# column's index trailer, laid after the last element (docs/2026-07-27-kdb-ondisk-format.md § trailer): a lead,
+ * a 16-byte header `m a t u r n`, the n distinct values padded out to half the hash, H hash slots, a second header,
+ * then n group starts and the row count.  Only the two headers are read: 1 with the values and starts located when
+ * the sizes account for `len` exactly, else 0.  layout: 'B' after a 16-byte header, 'C' a 32-bit enum, 'D' behind
+ * a shape-D page. */
+static int wf_parted(const uint8_t* tail, size_t len, char layout, uint8_t w, int64_t count,
+                     const uint8_t** keys, const uint8_t** starts, int64_t* n) {
+    size_t lead = layout == 'D' ? 8 : layout == 'C' ? 4 * (size_t)(count & 1) : 0;
+    if (len < lead + 16) return 0;
+    *n = wf_i64(tail + lead + 8);
+    if (tail[lead + 3] != 2 || *n < 0 || (uint64_t)*n > len / 8) return 0;
+    size_t h = layout == 'C' ? 4 : 2;
+    while (h < 2 * (size_t)*n) h <<= 1;
+    size_t h2 = lead + 16 + (h / 2) * w + (layout == 'D' ? w : 0) + 8 * h;
+    if (len != h2 + 16 + 8 * ((size_t)*n + 1) || tail[h2 + 2] != RAY_I64 || wf_i64(tail + h2 + 8) != *n + 1) return 0;
+    *keys = tail + lead + 16;
+    *starts = tail + h2 + 16;
+    return 1;
+}
+
+void q_wirefile_parted_adopt(ray_t* v, const uint8_t* tail, size_t len, char layout, uint8_t w) {
+    const uint8_t *keys = NULL, *starts = NULL;
+    int64_t n = -1;
+    if (!wf_parted(tail, len, layout, w, q_count(v), &keys, &starts, &n)) n = -1;   /* -1: the letter drops */
+    q_attr_parted_adopt(v, keys, w, n, starts);
+}
+
+/* The kx byte off a DECODED column file (shapes B/C/D): `s` on the writer's word, as kdb trusts it; `p` with the
+ * index its trailer carries, adopted while the bytes are in hand; u and g column files are unsampled and drop. */
+static ray_t* wf_col_attr(ray_t* v, uint8_t byte, const uint8_t* tail, size_t len, char layout, uint8_t w) {
+    if (byte == 1) return q_attr_stamp_trusted(v, 's');
+    if (byte != 3 || !v || RAY_IS_ERR(v)) return v;
+    v = q_attr_parted_pending(v);
+    if (v && !RAY_IS_ERR(v)) q_wirefile_parted_adopt(v, tail, len, layout, w);
+    return v;
 }
 
 static ray_t* wf_syms_to_eof(const uint8_t* p, size_t len) {
@@ -123,15 +154,10 @@ static ray_t* wf_read_a(const uint8_t* buf, size_t len) {
 
 /* `*count` in is the header's, out the column's.  An unattributed column's payload length IS its count: kdb's append
  * leaves the header stale (3.5, peachq#70) and compression zeroes it, so the header only bounds it from below.
- * `u#/`p#/`g# append an index the length would eat, so there the header rules: kdb keeps an attributed column's
- * count true, compressed or not.  A count of 0 is believed only when what follows is exactly `empty` bytes, the size
- * of a p# trailer over no groups (WF_P0_*) — a zeroed count over real rows is 'corrupt, never a silently empty
- * column; the u#/g# trailer layout is unknown, so there 0 cannot be told apart: 'nyi. */
-#define WF_P0_B  64   /* 40 + 12H + 8n at H = 2, n = 0 */
-#define WF_P0_CD 80   /* C: 40 + 10H at H = 4; D: 56 + 12H at H = 2 */
-static ray_t* wf_count(int64_t* count, size_t room, uint8_t esz, uint8_t attr, size_t empty) {
+ * `u#/`p#/`g# append an index the length would eat, so there the header rules, as kdb trusts it: kdb keeps an
+ * attributed column's count true, compressed or not. */
+static ray_t* wf_count(int64_t* count, size_t room, uint8_t esz, uint8_t attr) {
     int64_t fit = (int64_t)(room / esz);
-    if (attr > 1 && *count == 0 && room) return attr == 3 && room == empty ? NULL : q_err(attr == 3 ? QE_CORRUPT : QE_NYI);
     if (*count < 0 || *count > fit || (attr <= 1 && room % esz)) return q_err(QE_CORRUPT);
     if (attr <= 1) *count = fit;
     return NULL;
@@ -185,8 +211,7 @@ static ray_t* wf_read_nested(int8_t elem, ray_t* path, const uint8_t* off, int64
  * nesting cap stops a slot that leads back to itself.  `budget` bounds the LOGICAL size of what is built — the size
  * the value has once written out, each use of a shared list or table counted in full, each use of a shared vector
  * or atom counted as one — so neither overlapping objects nor a small chain of lists that each name the next twice
- * can make a value many times its arena.  An object's attr byte is bare, as in a serialized image: stamped when the
- * read verifies. */
+ * can make a value many times its arena.  An object's attr byte is bare, as in a serialized image, and trusted as one. */
 typedef struct {
     const uint8_t* a;
     size_t    n;
@@ -437,7 +462,7 @@ static ray_t* wf_read_legacy(const uint8_t* buf, size_t len) {
     return e ? e : q_wire_fixed_vec(tag, buf + WF_L_OFF, count, 0);
 }
 
-static ray_t* wf_read_b(const uint8_t* buf, size_t len, ray_t* path, size_t empty) {
+static ray_t* wf_read_b(const uint8_t* buf, size_t len, ray_t* path, char layout) {
     if (len < WF_B_OFF) return q_err(QE_CORRUPT);
     uint8_t disk = buf[2];
     if (disk == WF_NEST_BIAS)
@@ -447,10 +472,11 @@ static ray_t* wf_read_b(const uint8_t* buf, size_t len, ray_t* path, size_t empt
     if (!tag) return q_err(QE_TYPE);
     uint8_t esz = nested ? 8 : ray_type_sizes[(uint8_t)tag];   /* offsets, not elements */
     int64_t count = wf_i64(buf + 8);
-    ray_t* e = wf_count(&count, len - WF_B_OFF, esz, buf[3], empty);
+    ray_t* e = wf_count(&count, len - WF_B_OFF, esz, buf[3]);
     if (e) return e;
     if (nested) return q_type_mapped_mark(wf_read_nested(tag, path, buf + WF_B_OFF, count), disk);
-    return wf_disk_attr(q_wire_fixed_vec(tag, buf + WF_B_OFF, count, 0), buf[3]);
+    size_t used = WF_B_OFF + (size_t)count * esz;
+    return wf_col_attr(q_wire_fixed_vec(tag, buf + WF_B_OFF, count, 0), buf[3], buf + used, len - used, layout, esz);
 }
 
 static ray_t* wf_read_path(ray_t* path, int follow);
@@ -459,16 +485,17 @@ static ray_t* wf_read_path(ray_t* path, int follow);
  * is ENUM-NATIVE (2026-08-22 plan): widen the indices to i64, stamp the
  * domain-NAME sym, return a 20h vector — the domain FILE is never touched
  * here; resolution is lazy through the env (the root `sym` binds at splay
- * registration, io/q_splay.c).  Sorted-by-domain-position is not sorted-by-
- * symbol, so the attribute cannot survive. */
+ * registration, io/q_splay.c). */
 static ray_t* wf_read_enum(const char* domain, const uint8_t* p, size_t room,
                            uint8_t w, uint8_t attr) {
     size_t nn = strlen(domain);
     if (!wf_leaf_name(domain, nn)) return q_err(QE_CORRUPT);
     int64_t count = wf_i64(p);
-    ray_t* e = wf_count(&count, room, w, attr, WF_P0_CD);
+    ray_t* e = wf_count(&count, room, w, attr);
     if (e) return e;
-    return wf_disk_attr(q_enum_from_indices(ray_sym_intern_runtime(domain, nn), p + 8, count, w), attr);
+    size_t used = (size_t)count * w;
+    return wf_col_attr(q_enum_from_indices(ray_sym_intern_runtime(domain, nn), p + 8, count, w), attr,
+                       p + 8 + used, room - used, w == 4 ? 'C' : 'D', w);
 }
 
 /* Two candidate count offsets: the terminator rounded up to the next 8-byte
@@ -520,7 +547,7 @@ static ray_t* wf_read_c(const uint8_t* buf, size_t len, int derive) {
 static ray_t* wf_read_d(const uint8_t* buf, size_t len, ray_t* path) {
     if (len < WF_D_OFF) return q_err(QE_CORRUPT);
     const uint8_t* desc = buf + WF_D_DESC;
-    if (desc[2] != WF_ENUM_TYPE) return wf_read_b(desc, len - WF_D_DESC, path, WF_P0_CD);
+    if (desc[2] != WF_ENUM_TYPE) return wf_read_b(desc, len - WF_D_DESC, path, 'D');
     const uint8_t* nul = (const uint8_t*)memchr(buf + WF_D_NAME, 0, WF_D_DESC - WF_D_NAME);
     if (!nul || nul == buf + WF_D_NAME) return q_err(QE_CORRUPT);
     return wf_read_enum((const char*)buf + WF_D_NAME,
@@ -541,7 +568,7 @@ static wf_shape_t wf_sniff(const uint8_t* p, size_t n) {
 static ray_t* wf_read_image(const uint8_t* buf, size_t len, int unzipped, ray_t* path) {
     switch (wf_sniff(buf, len)) {
     case WF_A:      return wf_read_a(buf, len);
-    case WF_B:      return wf_read_b(buf, len, path, WF_P0_B);
+    case WF_B:      return wf_read_b(buf, len, path, 'B');
     case WF_C:      return wf_read_c(buf, len, unzipped);
     case WF_D:      return wf_read_d(buf, len, path);
     case WF_LEGACY: return wf_read_legacy(buf, len);
@@ -666,10 +693,12 @@ static ray_t* wf_probe_classify(const uint8_t* buf, size_t got, size_t fsz,
         if (e) return e;
         uint8_t esz = out->nested ? 8 : ray_type_sizes[(uint8_t)out->tag];
         e = out->anymap ? wf_any_count(&out->count, fsz - WF_B_OFF)
-                        : wf_count(&out->count, fsz - WF_B_OFF, esz, out->disk_attr, WF_P0_B);
+                        : wf_count(&out->count, fsz - WF_B_OFF, esz, out->disk_attr);
         if (e) return e;
         out->mappable = !out->nested;
         out->payload = WF_B_OFF;
+        out->layout = 'B';
+        if (out->mappable) out->tail = fsz - WF_B_OFF - (size_t)out->count * esz;
         return NULL;
     }
     case WF_C: {
@@ -681,7 +710,7 @@ static ray_t* wf_probe_classify(const uint8_t* buf, size_t got, size_t fsz,
         out->is_enum = 1;
         out->tag = RAY_SYM;
         out->count = wf_i64(buf + coff);
-        return wf_count(&out->count, fsz - coff - 8, 4, out->disk_attr, WF_P0_CD);
+        return wf_count(&out->count, fsz - coff - 8, 4, out->disk_attr);
     }
     case WF_D: {
         if (fsz < WF_D_OFF || got < WF_D_OFF) return q_err(QE_CORRUPT);
@@ -692,8 +721,11 @@ static ray_t* wf_probe_classify(const uint8_t* buf, size_t got, size_t fsz,
             uint8_t esz = out->nested ? 8 : ray_type_sizes[(uint8_t)out->tag];
             out->mappable = !out->nested;
             out->payload = WF_D_OFF;
-            return out->anymap ? wf_any_count(&out->count, fsz - WF_D_OFF)
-                               : wf_count(&out->count, fsz - WF_D_OFF, esz, out->disk_attr, WF_P0_CD);
+            out->layout = 'D';
+            e = out->anymap ? wf_any_count(&out->count, fsz - WF_D_OFF)
+                            : wf_count(&out->count, fsz - WF_D_OFF, esz, out->disk_attr);
+            if (!e && out->mappable) out->tail = fsz - WF_D_OFF - (size_t)out->count * esz;
+            return e;
         }
         const uint8_t* nul = (const uint8_t*)memchr(buf + WF_D_NAME, 0,
                                                     WF_D_DESC - WF_D_NAME);
@@ -704,10 +736,13 @@ static ray_t* wf_probe_classify(const uint8_t* buf, size_t got, size_t fsz,
         out->is_enum = 1;
         out->mappable = 1;
         out->payload = WF_D_OFF;
+        out->layout = 'D';
         out->tag = RAY_SYM;
         out->disk_attr = desc[3];
         out->count = wf_i64(desc + 8);
-        return wf_count(&out->count, fsz - WF_D_OFF, 8, desc[3], WF_P0_CD);
+        ray_t* e = wf_count(&out->count, fsz - WF_D_OFF, 8, desc[3]);
+        if (!e) out->tail = fsz - WF_D_OFF - (size_t)out->count * 8;
+        return e;
     }
     case WF_LEGACY: {                       /* payload at 16 like B: mmap serves it */
         ray_t* e = wf_legacy_hdr(buf, got, fsz, &out->tag, &out->count);
