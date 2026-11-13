@@ -20,14 +20,16 @@
 #include "qlang/eval/q_eval.h"       /* q_eval_value_wrap / q_eval_apply_value — handle 0 IS `.z.ps`/value */
 #include "qlang/q_env.h"            /* q_env_resolve — `.z.ps` is an ordinary global */
 #include "lang/eval.h"       /* ray_eval_get_restricted, ray_at_fn */
-#include "lang/internal.h"   /* make_i32/make_i64, ray_hopen_fn/ray_hsend_fn/ray_hpost_fn/ray_hclose_fn */
+#include "lang/internal.h"   /* make_i32/make_i64, ray_hsend_fn/ray_hpost_fn/ray_hclose_fn */
 #include "core/runtime.h"    /* __VM->ipc_handle — the handle context handle 0 swaps */
 #include "table/sym.h"       /* ray_sym_intern_runtime, ray_sym_str */
-#include "core/ipc.h"        /* ray_ipc_handle_of_fd/fd_of_handle — q true-fd handle <-> selector id */
+#include "core/ipc.h"        /* ray_ipc_connect_desc; ray_ipc_handle_of_fd/fd_of_handle — q true-fd handle <-> selector id */
 #include "core/sock.h"       /* ray_sock_resolve4 — hopen of an interface-bound own listener */
 #include "core/numparse.h"   /* ray_parse_i64 — hopen's own-listener port */
 #include <rayforce.h>
 #include <stdio.h>           /* snprintf — hopen descriptor normalization */
+#include <limits.h>          /* INT_MAX — the connect timeout's int budget */
+#include <errno.h>           /* EINTR; a failed connect's OS clause */
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>           /* open — file/fifo transport handles */
@@ -39,7 +41,6 @@
 #include <signal.h>          /* kill — an owned worker dies with its link */
 #include <sys/wait.h>        /* waitpid */
 #include <time.h>            /* nanosleep */
-#include <errno.h>           /* EINTR */
 #endif
 
 typedef struct {
@@ -590,42 +591,6 @@ ray_t* q_handles_pq_neg(ray_t* x) {
     return r;
 }
 
-/* The `:`-prefixed SYM arm of the same abstraction: protocol dispatch on the
- * descriptor text — ws/wss and http/https clients, else one-shot sync IPC
- * (ref/hopen.md): connect -> send -> close.  A file-path SYM applies only
- * through an opened handle (q_handles_apply's FILE arm). */
-ray_t* q_handles_sym_apply(ray_t* head, ray_t** args, int64_t n) {
-    ray_t* s = ray_sym_str(head->i64);               /* borrowed */
-    const char* sp = ray_str_ptr(s);
-    size_t sl = ray_str_len(s);
-    if (q_handles_pq(sp, sl, NULL))
-        return q_provider_sym_apply(head, args, n);
-    int scheme = sym_scheme(sp, sl);
-    if (scheme == SCHEME_WS) {
-        if (n == 1 && is_text_atom(args[0]))
-            return q_ws_client_open(head, args[0]);
-        return q_err(QE_TYPE);
-    }
-    if (scheme == SCHEME_HTTP) {
-        if (n == 1 && is_text_atom(args[0]))
-            return q_http_client_raw(head, args[0]);
-        return q_err(QE_TYPE);
-    }
-    if (n == 1 && args[0] &&
-        (args[0]->type == -RAY_STR || args[0]->type == RAY_CHARV)) {
-        ray_t* h = q_hopen_wrap(head);           /* owned fd handle or error */
-        if (!h || RAY_IS_ERR(h)) return h;
-        ray_t* r = (h->type == -RAY_I64 || h->type == -RAY_I32)
-                 ? q_handles_apply(h, args[0])    /* SYNC send */
-                 : q_err(QE_TYPE);
-        ray_t* c = q_hclose_wrap(h);             /* close regardless of r */
-        if (c) ray_release(c);
-        ray_release(h);
-        return r;
-    }
-    return q_err(QE_TYPE);              /* file handle: no apply */
-}
-
 /* ---- close -------------------------------------------------------------- */
 
 ray_t* q_handles_close(int64_t qh) {
@@ -665,7 +630,7 @@ ray_t* q_handles_read1(int64_t fd, ray_t* count) {
 
 /* ---- the q verbs: hopen / hclose ---------------------------------------
  * (feat/q-ipc-client Phase D; hsym Bundle 2b; moved off ops/q_io.c 2026-07-31.)
- * hopen is a thin wrapper over `.ipc.open` (ray_hopen_fn), which takes a
+ * hopen connects through ray_ipc_connect_desc, which takes a
  * "host:port[:user:password]" string + optional connect-timeout.  q `hopen`
  * accepts an int PORT (localhost), a "host:port[:user:pass]" STRING or the
  * equivalent hsym SYMBOL (both with the kdb "::PORT"/":host:port" leading-colon
@@ -789,15 +754,53 @@ q_sym_kind q_handles_sym_kind(ray_t* sym) {
 }
 
 /* q `hopen y` — connect: an int handle (a `:pq:` alias: its sym).  Restricted connections must not
- * open outbound sockets (the `.ipc.open` primitive is RAY_FN_RESTRICTED; calling
- * ray_hopen_fn directly bypasses the eval-layer check, so re-assert it here). */
-static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given);
-ray_t* q_hopen_wrap(ray_t* x) {
+ * open outbound sockets.  socket_only (a one-shot) refuses a file, fifo or alias descriptor with 'type. */
+static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given, bool socket_only);
+static ray_t* hopen_conn(ray_t* x, bool socket_only) {
     ray_t* xs = q_str_in(x);            /* charv args -> legacy STR forms */
-    ray_t* r = hopen_wrap_impl(xs, x);
+    ray_t* r = hopen_wrap_impl(xs, x, socket_only);
     ray_release(xs);
     return r;
 }
+ray_t* q_hopen_wrap(ray_t* x) { return hopen_conn(x, false); }
+
+/* ref/hopen.md:136-151 — connect, sync-apply any payload `h x` takes (owner 2026-08-16), close whatever the answer */
+static ray_t* hopen_oneshot(ray_t* conn, ray_t* x) {
+    ray_t* h = hopen_conn(conn, true);           /* owned fd handle or error */
+    if (!h || RAY_IS_ERR(h)) return h;
+    ray_t* r = q_handles_apply(h, x);
+    ray_t* c = q_hclose_wrap(h);
+    if (c) ray_release(c);
+    ray_release(h);
+    return r;
+}
+
+/* The `:`-prefixed SYM arm of the same abstraction: protocol dispatch on the
+ * descriptor text — ws/wss and http/https clients, else a one-shot sync IPC
+ * request: `` `:h:p x `` or the V4.0 `` `::[conn;x] ``.  A file-path SYM applies
+ * only through an opened handle (q_handles_apply's FILE arm). */
+ray_t* q_handles_sym_apply(ray_t* head, ray_t** args, int64_t n) {
+    ray_t* s = ray_sym_str(head->i64);               /* borrowed */
+    const char* sp = ray_str_ptr(s);
+    size_t sl = ray_str_len(s);
+    if (q_handles_pq(sp, sl, NULL))
+        return q_provider_sym_apply(head, args, n);
+    int scheme = sym_scheme(sp, sl);
+    if (scheme == SCHEME_WS) {
+        if (n == 1 && is_text_atom(args[0]))
+            return q_ws_client_open(head, args[0]);
+        return q_err(QE_TYPE);
+    }
+    if (scheme == SCHEME_HTTP) {
+        if (n == 1 && is_text_atom(args[0]))
+            return q_http_client_raw(head, args[0]);
+        return q_err(QE_TYPE);
+    }
+    if (n == 2 && sl == 2 && !memcmp(sp, "::", 2)) return hopen_oneshot(args[0], args[1]);
+    if (n == 1) return hopen_oneshot(head, args[0]);
+    return q_err(QE_TYPE);
+}
+
 /* raw descriptor bytes of a string/hsym conn (borrowed), 0 otherwise.
  * ray_sym_str returns the INTERNED string — never release it. */
 static int hopen_conn_text(ray_t* c, const char** ds, size_t* dn) {
@@ -856,7 +859,29 @@ static bool hopen_is_self(const char* s, size_t n) {
     return me;
 }
 
-static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given) {
+/* A failed connect in kdb's classes (basics/errors.md:192,488); the text after the class is ours, the OS clause in
+ * kdb's "OS reports:" form (basics/ipc.md:180).  `d` is the normalized descriptor: only its host:port is shown. */
+static ray_t* hopen_fail(int64_t code, const char* d, size_t n, int64_t tmo) {
+    const char* os = strerror(errno);
+    if (code == -7) return q_err(QE_DOMAIN);
+    q_err_e cls = code == -3 ? QE_ACCESS : code == -5 ? QE_TIMEOUT : QE_HOP;
+    const char* c = memchr(d, ':', n);
+    const char* u = c ? memchr(c + 1, ':', n - (size_t)(c + 1 - d)) : NULL;
+    int hp = (int)(u ? (size_t)(u - d) : n);
+    ray_t* e = q_err(cls);
+    const char* cn = q_err_class(e);
+    char buf[800];
+    int m = code == -3 ? snprintf(buf, sizeof buf, "%s. %.*s: credentials or handshake rejected", cn, hp, d)
+          : code == -5 && tmo ? snprintf(buf, sizeof buf, "%s. %.*s: no reply within %lldms", cn, hp, d, (long long)tmo)
+          : code == -5 ? snprintf(buf, sizeof buf, "%s. %.*s: no reply in time", cn, hp, d)
+          : code == -6 ? snprintf(buf, sizeof buf, "%s. %.*s: host not found", cn, hp, d)
+          : snprintf(buf, sizeof buf, "%s. %.*s. OS reports: %s", cn, hp, d, os);
+    ray_t* t = m > 0 ? ray_charv(buf, m < (int)sizeof buf ? m : (int)sizeof buf - 1) : NULL;
+    if (t && !RAY_IS_ERR(t)) q_err_put(t);
+    return e;
+}
+
+static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given, bool socket_only) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* conn      = x;
     ray_t* timeout   = NULL;
@@ -864,6 +889,7 @@ static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given) {
     ray_t* pair_to   = NULL;
     const char* ds; size_t dn;
     if (x && (x->type == RAY_LIST || x->type == RAY_SYM) && q_handles_pq_of(x, &ds, &dn)) {   /* (spec; arg) */
+        if (socket_only) return q_err(QE_TYPE);
         if (q_count(x) != 2) return q_err(QE_RANK);
         if (x->type == RAY_LIST) return q_provider_hopen(ds, dn, ((ray_t**)ray_data(given))[1]);
         ray_t* arg = ray_sym(ray_vec_get_sym_id(x, 1));
@@ -887,12 +913,14 @@ static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given) {
      * `:host:port` classifies IPC and falls through. */
     if (hopen_conn_text(conn, &ds, &dn)) {
         if (q_handles_pq(ds, dn, NULL))
-            return q_provider_hopen(ds, dn, NULL);
+            return socket_only ? q_err(QE_TYPE) : q_provider_hopen(ds, dn, NULL);
         const char* path; size_t plen;
         int ht = hopen_transport(ds, dn, &path, &plen);
         if (ht != HT_IPC) {
             if (pair_conn) ray_release(pair_conn);
             if (pair_to)   ray_release(pair_to);
+            if (socket_only)
+                return q_err(QE_TYPE);
             if (ht == HT_FIFO_NYI)
                 return q_err(QE_NYI);
             if (plen >= 2 && path[0] == 'p' && path[1] == 'q' && (plen == 2 || path[2] == ':'))
@@ -906,11 +934,9 @@ static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given) {
         if (pair_to)   ray_release(pair_to);
         return cs;
     }
-    ray_t* args[2] = { cs, NULL };
-    int64_t nargs = 1;
-    ray_t* tv = NULL;
     int64_t tmo = 0;
     ray_t* terr = timeout ? q_type_i64_or_err(timeout, &tmo, "hopen: timeout") : NULL;
+    if (!terr && tmo < 0) terr = q_err(QE_DOMAIN);
     if (terr) {
         ray_release(cs);
         if (pair_conn) ray_release(pair_conn);
@@ -925,31 +951,24 @@ static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given) {
         if (pair_to)   ray_release(pair_to);
         return make_i32(0);
     }
-    if (timeout) {
-        tv = make_i64(tmo);
-        args[1] = tv; nargs = 2;
-    }
     /* Snapshot the descriptor for the socket registry BEFORE cs is released (the
      * fd it keys off is only known after the connect + fd translation below). */
     char descbuf[640];
     size_t desclen = ray_str_len(cs);
     if (desclen >= sizeof descbuf) desclen = sizeof descbuf - 1;
     memcpy(descbuf, ray_str_ptr(cs), desclen);
-    ray_t* h = ray_hopen_fn(args, nargs);                /* owned handle or error */
+    int64_t raw = ray_ipc_connect_desc(ray_str_ptr(cs), ray_str_len(cs), tmo > INT_MAX ? INT_MAX : (int)tmo);
     ray_release(cs);
-    if (tv)        ray_release(tv);
     if (pair_conn) ray_release(pair_conn);
     if (pair_to)   ray_release(pair_to);
-    if (!h || RAY_IS_ERR(h)) return h;
+    if (raw < 0) return hopen_fail(raw, descbuf, desclen, tmo);
     /* kdb-faithful "true fd" handle model: a q connection handle IS the socket
      * fd (qdocs basics/handles.md — 0 console, 1 stdout, 2 stderr, connections
-     * at 3+).  ray_hopen_fn returns the rayfall poll SELECTOR ID (dense, starts
+     * at 3+).  ray_ipc_connect_desc returns the rayfall poll SELECTOR ID (dense, starts
      * at 0); translate it to the connection's socket fd, which is always >= 3
      * (0/1/2 held by the std streams) and thus disjoint from the console-write
      * handles.  handle-apply / hclose translate the fd back to the selector id
      * the .ipc.* primitives expect. */
-    int64_t raw = (h->type == -RAY_I64) ? h->i64 : (int64_t)h->i32;
-    ray_release(h);
     int64_t fd = ray_ipc_fd_of_handle(raw);
     if (fd < 0) {
         /* Connection vanished between connect and fd lookup — close the raw
