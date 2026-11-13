@@ -72,7 +72,7 @@ and where a `\`-command merely shares the letter, it says so instead.
 | `-W N` | start-of-week offset | **applied** | `\W` |
 | `-z 0\|1` | date parse order (`"D"$`): 0 = mdy, 1 = dmy | **applied** | `\z` |
 | `--port N` | the long spelling of `-p` | **peachq only** | none |
-| `-classic` | legacy kx table display, kdb-clean environment | **peachq only** | `\classic` |
+| `-classic` | kx's table display and kx's errors (no qSQL trailing commas or all-atom tables — [compatibility.md](compatibility.md)), kdb-clean environment | **peachq only** | `\classic` |
 | `-eval "src"` | run q text **after** the startup script | **peachq only** | none |
 | `-eval-before "src"` | run q text **before** the startup script | **peachq only** | none |
 | `-duckdb path` | the main DuckDB database is this file, not memory; its tables load at startup (implies `\l pq`) | **peachq only** | none |

@@ -21,7 +21,8 @@
 #include "qlang/io/q_splay.h"    /* q_splay_init/destroy — the splay registry lifecycle */
 #include "qlang/io/q_duckdb.h"   /* q_duckdb_reset — close handles at teardown */
 #include "qlang/io/q_re2.h"      /* q_re2_reset — drop compiled patterns at teardown */
-#include "qlang/q_console.h"  /* q_console_pipe_disable — reset the `\classic` display global per runtime */
+#include "qlang/q_console.h"  /* q_console_help_register */
+#include "qlang/base/q_classic.h"
 #include "qlang/q_ctx.h"      /* remote-door install + q_ctx_run_src (the bootstrap loader) */
 #include "qlang/q_comment.h"  /* q_comment_boot — doc capture is inert over the core list */
 #include "qlang/eval/q_eval.h" /* q_eval_syms_reset — per-runtime teardown */
@@ -120,8 +121,6 @@ void q_runtime_destroy(ray_runtime_t* rt) {
                                 * The poll is still up too, so the sd1 fds deregister cleanly. */
     q_splay_destroy();         /* munmap column regions AFTER every holder released */
     q_sys_ctx_reset();         /* drop the `\d` context with its runtime */
-    q_console_pipe_disable();          /* reset the `\classic` display global — the
-                                * process-wide pipe mode never leaks into the next
-                                * runtime (fresh-per-file doctest, wasm re-init) */
+    q_classic_set(true);       /* a bare runtime is classic: no mode leaks into the next one */
     ray_runtime_destroy(rt);
 }

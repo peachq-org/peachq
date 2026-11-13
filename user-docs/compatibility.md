@@ -120,6 +120,16 @@ and its domain file binds under its own name at `get`.
 | **String helpers** — `.str` | `printf`/`format`, strip, prefix and suffix tests, character-class predicates. | at the REPL |
 | **DuckDB-backed storage** — `.duckdb` | Query it from q, and reach Parquet and S3 through it. | at the REPL |
 | **Parquet** — `.parquet.read`, `.parquet.write` | Read and write parquet through DuckDB; q types survive the round trip. | [parquet.md](lib/parquet.md) |
+| **qSQL trailing commas** | `select a,b, from t`, `exec a, from t`, `select from t where a>0,` read as without the comma. peachq only; off under `-classic` / `\classic 1`. | below |
+| **All-atom tables** | `([]a:1;b:2)` and `([k:1] v:2)` are one-row tables; with a vector column, atoms still take its count. peachq only; off under `-classic` / `\classic 1`. | below |
 
-Everything above arrives with `\l pq`, except URL resources, `rlike` and the startup flags, which are always there. The two rows with
+Everything above arrives with `\l pq`, except URL resources, `rlike`, the startup flags and the two syntax rows,
+which are always there. The two rows with
 no page of their own are documented by their own doc comments — type `.str.printf` or `.duckdb.exec` at the prompt.
+
+**Friendly syntax.** A trailing comma before a qSQL clause boundary (`from`, `by`, `where`, the end of the
+statement) ends the phrase list, so `select a,b, from t` is `select a,b from t`; an empty phrase between two commas
+is still an error. A table whose columns are all atoms has one row: `([]a:1;b:2)` is `([]a:enlist 1;b:enlist 2)`,
+and so is `` flip `a`b!1 2 ``. Both are kx errors (`'parse`, `'rank`), and the errors come back under `-classic` or `\classic 1`, where
+every error is kx's again. The parser reads the switch when it parses, so a function keeps the trailing commas it was
+parsed with; a table is built when the code runs, so the all-atom rule follows the switch at that moment. Library code (the `.q` files peachq ships) uses neither, because it must load under `-classic` too.

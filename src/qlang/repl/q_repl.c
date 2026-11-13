@@ -17,6 +17,7 @@
 #include "qlang/eval/q_eval.h"   /* q_eval — THE eval pipeline */
 #include "qlang/eval/q_dbg.h"    /* debug-loop line readers (basics/debug.md) */
 #include "qlang/q_console.h"
+#include "qlang/base/q_classic.h"
 #include "qlang/ops/q_sys.h"      /* q_sys_prompt / q_sys_listen_port — the front end's two asks */
 #include "qlang/q_dotz.h"         /* q_dotz_quiet (`-q`), q_dotz_now_ns (the history clock) */
 #include "qlang/q_fmt.h"          /* a history record's time prints as the console prints a timestamp */
@@ -253,7 +254,7 @@ static void repl_update_hint(ray_term_t* t, const char* s, size_t n) {
  * prompt ghost with the help door (Tab/→ accepts `\?`).  Modern only; the
  * first evaluated line replaces or clears it. */
 static void repl_teach_hint(ray_term_t* t) {
-    if (t->hist.count == 0 && q_console_pipe_on() && !q_dotz_quiet())
+    if (t->hist.count == 0 && !q_classic_on() && !q_dotz_quiet())
         ray_term_set_hint(t, "\\? / help", 2);
 }
 

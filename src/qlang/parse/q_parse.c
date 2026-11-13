@@ -23,6 +23,7 @@
 #include "qlang/parse/q_parse.h"
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"
+#include "qlang/base/q_classic.h"
 #include "qlang/parse/q_tok.h"    /* q_tok_literal, q_tok_byte_lit_starts, q_tok_strand_gap — the literal scanner */
 #include "qlang/q_registry.h" /* q_registry_lookup_name, q_registry_is_infix, Q_DYADIC */
 #include "qlang/q_ops.h"      /* q_ops_find — the static lexical manifest */
@@ -2298,8 +2299,9 @@ static void phrase_head_guard(Parser *p) {
 
 /* Parse one comma-separated qSQL clause into a RAY_LIST of raw phrase trees via
  * the real expression parser, halting at the clause boundary (parse_base_q
- * returns EMPTY at a section keyword / the join comma).  A separator comma must
- * be FOLLOWED by a phrase — a trailing `select a, from t` dies rather than
+ * returns EMPTY at a section keyword / the join comma).  Under classic a
+ * separator comma must be FOLLOWED by a phrase — kdb's `select a, from t` is
+ * 'parse; outside it a trailing comma before the boundary ends the list, never
  * minting a phantom `::` phrase.  Refcount: ray_list_append RETAINS, so the
  * local ref is released in both branches.  Returns an OWNED list ( `()` when
  * the clause is empty). */
@@ -2318,6 +2320,7 @@ static ray_t *parse_phrase_list(Parser *p, QCtx ctx) {
             adv(p);
             phrase_head_guard(p);
             P f = parse_e(p, ctx);
+            if (f.role == R_NONE && !q_classic_on() && !qtok_is_join_comma(cur(p))) break;   /* friendly trailing comma */
             if (f.role == R_NONE) q_die("qsql: empty phrase after ','");
             *lst = ray_list_append(*lst, f.v);
             ray_release(f.v);

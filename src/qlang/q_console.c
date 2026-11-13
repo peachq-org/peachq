@@ -1,4 +1,4 @@
-/* q_console — the console sink + the modern pipe-table mode.  See
+/* q_console — the console sink.  See
  * q_console.h for the contract; the value->string core stays in q_fmt.c. */
 #include "qlang/q_count.h"
 #include "qlang/q_console.h"
@@ -86,14 +86,6 @@ int q_console_show(ray_t* val) {
     free(txt);
     return rc;
 }
-
-
-/* ---- pipe-mode STATE (the renderer lives in q_fmt.c — a formatting mode) ---- */
-
-static bool g_pipe_on;
-void q_console_pipe_enable(void)  { g_pipe_on = true; }
-void q_console_pipe_disable(void) { g_pipe_on = false; }
-bool q_console_pipe_on(void)      { return g_pipe_on; }
 
 
 /* ---- `\c` console DISPLAY clip STATE (config beside the sink) ------------- */

@@ -14,6 +14,7 @@
 #include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h"
 #include "qlang/base/q_err.h"
+#include "qlang/base/q_classic.h"
 #include "qlang/base/q_type.h"       /* q_type_is_keyed / q_type_is_dense_group_col / q_type_is_iter */
 #include "qlang/q_builtins.h"   /* q_ty_char — meta column letters */
 #include "qlang/q_env.h"
@@ -770,10 +771,11 @@ static ray_t* table_colnames(ray_t* x);
  *                    `cols!`:dir/` -> the mapped table, `cols!`:pq:duckdb:db:t/` the bound provider pointer,
  *                    `cols!`name` the unresolved partitioned table
  *   list of lists -> transposed list (atom items broadcast; a table item is its list of rows)
- * Keyed tables, atoms, and an ALL-ATOM dict or list are 'rank: "to define a
- * 1-row table, enlist at least one of the column values" (basics/syntax.md:236)
- * — so `([]a:1)` is an error, and qSQL's one-row aggregate exception is stated
- * in q_funsql.c, not here.  An EMPTY dict is still the 0-column empty table. */
+ * Keyed tables, atoms, and an ALL-ATOM list are 'rank.  An ALL-ATOM dict is 'rank
+ * under classic only: "to define a 1-row table, enlist at least one of the column
+ * values" (basics/syntax.md:236); outside classic it is one row, so `([]a:1)` and
+ * `eval parse` of it agree.  qSQL's one-row aggregate exception is stated in
+ * q_funsql.c, not here.  An EMPTY dict is still the 0-column empty table. */
 ray_t* q_flip_wrap(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (x->type == RAY_TABLE) {
@@ -811,7 +813,10 @@ ray_t* q_flip_wrap(ray_t* x) {
             }
             ray_release(col);
         }
-        if (L < 0 && nc > 0) return q_err(QE_RANK);
+        if (L < 0 && nc > 0) {
+            if (q_classic_on()) return q_err(QE_RANK);
+            L = 1;
+        }
         /* pass 2: build the table (atoms broadcast to L) */
         ray_t* out = ray_table_new(nc > 0 ? nc : 1);
         for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
