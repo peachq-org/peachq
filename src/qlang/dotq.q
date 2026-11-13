@@ -10,7 +10,6 @@
 / it holds, 0h.  Library code that asks "is this a general list" asks through it, so a column read from a kdb file
 / takes the same branch as its in-memory copy.
 .Q.qt:.Q.c.qt;
-.Q.qp:.Q.c.qp;
 / wp/permissions .h.jx, kdb-common util.q:118-120 (a modified .Q.s): x's console lines within (rows;cols), from row j
 .Q.S:{[b;j;x].Q.c.S[b;$[(j>0)&type[x]within 0 99;j _ x;x]]};
 / kdb-q-ext-vscode src/format/console.ts:66-84 (a port of q's .Q.s2): uncut, a simple vector's elements as cells;
@@ -109,23 +108,72 @@
 / .Q.s1: single-line string repr, a thin wrapper over the `-3!` internal fn.
 .Q.s1:{-3!x};
 
-/ ---- No-partition surface (ref/dotq.md) ----
-/ peachq DOES NOT SUPPORT partitioned/segmented DBs - a PERMANENT divergence from kdb, not pending
-/ work: honest values where derivable, the empty DATE domain elsewhere, so a probe sees a well-typed
-/ EMPTY date-partitioned HDB (`type .Q.pv` -> 14h) rather than a 'name error. `.Q.D` is conformant
-/ to `.Q.P`, which has no segments here; `.Q.par` is a plain dir/partition/table join, no par.txt.
-.Q.cn:count;
+/ ---- Partitioned and segmented databases (kb/partition.md, database/segment.md, ref/dotq.md) ----
+/ Before a database is loaded the surface is a well-typed EMPTY date-partitioned one (`type .Q.pv` -> 14h), not a
+/ 'name error. `.Q.par` is a plain dir/partition/table join: it does not consult par.txt.
 .Q.ind:{[x;y] x y};
 .Q.par:{[d;p;t] .Q.dd[.Q.dd[d;p];t]};
 .Q.pf:`date;
 .Q.PV:0#0Nd;
 .Q.pv:0#0Nd;
+.Q.P:();
 .Q.D:();
 .Q.PD:0#`;
 .Q.pd:0#`;
 .Q.pt:0#`;
 .Q.pn:()!();
 .Q.vp:()!();
+/ .Q.qp: a table's flip names where it lives - a plain symbol for a partitioned table, a directory for a splayed one.
+.Q.qp:{$[98h<>type x;0;-11h<>type v:value flip x;0;not":"=first string v]};
+/ The partition type of an entry of a segment: the letter of the date, month or long its name spells, " " for any
+/ other name and for a file (kb/partition.md:11).
+.Q.i.part_type:{[segment;name]
+  letter:first("DMJ"where{[name;letter]name~string letter$name}[name;]each"DMJ")," ";
+  $[null letter;letter;0>type key .Q.dd[segment;`$name];" ";letter]};
+/ `\l` of a database root, the current directory (basics/syscmds.md:441): the partition directories of each segment
+/ (par.txt's rows, else the root itself) and the tables of the most recent one. It answers what the mount binds - the
+/ partition field!its values, then each table!its columns - and reads names and that partition's .d files alone.
+.Q.i.mount:{[]
+  segmented:`par.txt in key`:.;
+  segments:$[segmented;hsym`$read0`:par.txt;enlist`:.];
+  found:{[segment]names:string key segment;(names;.Q.i.part_type[segment;]each names)}each segments;
+  letter:first("DMJ"inter raze found[;1])," ";
+  if[null letter;:(::)];
+  names:{[letter;found]found[0]where letter=found 1}[letter;]each found;
+  values:{[letter;names]{x iasc x}letter$names}[letter;]each names;
+  order:iasc raze values;
+  .Q.pf:(`date`month,$[all 4=count each raze names;`year;`int])"DMJ"?letter;
+  .Q.PV:.Q.pv:(raze values)order;
+  .Q.PD:.Q.pd:(raze(count each values)#'segments)order;
+  .Q.P:$[segmented;segments;()];
+  .Q.D:$[segmented;values;()];
+  latest:.Q.dd[last .Q.PD;last .Q.PV];
+  dirs:key latest;
+  tabled:{[dir;name]s:string name;(first[s]in .Q.a,.Q.A)&(all s in .Q.an)&(not name in .Q.res,key`.q)&`.d in key .Q.dd[dir;name]};
+  .Q.pt:(`symbol$()),dirs where tabled[latest;]each dirs;
+  .Q.pn:.Q.pt!count[.Q.pt]#enlist`long$();
+  (.Q.pf,.Q.pt)!enlist[.Q.PV],{[dir;name]get .Q.par[dir;name;`.d]}[latest;]each .Q.pt};
+/ The partition values as a table of the partition column: what a query's partition constraints are answered over.
+.Q.i.values:{[] flip(1#.Q.pf)!enlist .Q.pv};
+/ Partition i of partitioned table `name: its columns c, mapped from that partition's directory.
+.Q.i.part:{[name;c;i] .Q.c.part[.Q.par[.Q.pd i;.Q.pv i;name];c]};
+/ The table a query over partitioned table `name reads: columns c of the partitions idx (:: is every one), the
+/ partition column first, razed in partition order; :: for a name the database does not hold.
+.Q.i.table:{[name;c;idx]
+  if[not name in .Q.pt;:(::)];
+  c:c except .Q.pf;
+  dated:{[name;c;i]
+    t:.Q.i.part[name;c;i];
+    flip(.Q.pf,c)!enlist[count[t]#.Q.pv i],t c}[name;c;];
+  $[idx~(::);raze dated each til count .Q.pv;count idx;raze dated each idx;0#dated -1+count .Q.pv]};
+/ The most recent partition of `name alone: what meta describes.
+.Q.i.latest:{[name;c] .Q.i.table[name;c;enlist -1+count .Q.pv]};
+/ .Q.cn: the row count of each partition of a partitioned table, kept in .Q.pn; one column of each is mapped.
+.Q.cn:{[t]
+  if[not 1b~.Q.qp t;:count t];
+  ref:flip t;
+  .Q.pn[value ref]:{[name;c;i]count .Q.i.part[name;c;i]}[value ref;1#key ref;]each til count .Q.pv;
+  .Q.pn value ref};
 / .Q.bvi/.Q.MAP: nullary no-ops yielding `()` - kdb's generic null is neither `type`-able nor `~`-able here (PLAN.md defect).
 .Q.bvi:{[] ()};
 .Q.MAP:{[] ()};

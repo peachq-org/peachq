@@ -19,6 +19,7 @@
 #include "qlang/q_env.h"             /* q_env_set — the one global-set home */
 #include "qlang/q_prim.h"            /* q_enum_stamp */
 #include "qlang/ops/q_index.h"       /* q_index_at — a row read gathers its rows from a mapped column */
+#include "qlang/eval/q_eval.h"       /* q_eval_apply_call_name — the partitioned database's q functions */
 #include "lang/eval.h"               /* ray_eval_get_restricted */
 #include "table/sym.h"               /* ray_sym_intern_runtime, ray_sym_str */
 #include "mem/heap.h"                /* attrs + ray_free_set_mapped_fn */
@@ -772,17 +773,17 @@ static int64_t splay_col_find(splay_ent* e, int64_t name) {
     return -1;
 }
 
-/* the n named columns (ids NULL = every .d column) into a table, the row-count agreement checked: read whole with
- * the directory sym marked in aux (cnt < 0), or the plain table of their rows [lo, lo+cnt), lo < 0 counted from the
- * end.  NULL when a name is not on disk (the table stays deferred), those rows are not all there, or they are all
- * of them. */
-static ray_t* splay_table(splay_ent* e, const int64_t* ids, int64_t n, int64_t lo, int64_t cnt) {
-    int64_t nc = ids ? n : e->ncols;
+/* the columns named in sym vector `ids` (NULL = every .d column) into a table, the row-count agreement checked: read
+ * whole with the directory sym marked in aux (cnt < 0), or the plain table of their rows [lo, lo+cnt), lo < 0 counted
+ * from the end.  NULL when a name is not on disk (the table stays deferred), those rows are not all there, or they
+ * are all of them. */
+static ray_t* splay_table(splay_ent* e, ray_t* ids, int64_t lo, int64_t cnt) {
+    int64_t nc = ids ? q_count(ids) : e->ncols;
     ray_t* tbl = ray_table_new(nc > 0 ? nc : 1);
     if (!tbl || RAY_IS_ERR(tbl)) return tbl ? tbl : q_err(QE_OOM);
     int64_t rows = -1;
     for (int64_t c = 0; c < nc; c++) {
-        int64_t i = ids ? splay_col_find(e, ids[c]) : c;
+        int64_t i = ids ? splay_col_find(e, ray_vec_get_sym_id(ids, c)) : c;
         if (i < 0) { ray_release(tbl); return NULL; }
         const q_wf_colhdr* h = &e->cols[i].h;
         ray_t* cp = splay_col_path(e, e->cols[i].name);
@@ -836,28 +837,38 @@ static int splay_wants(ray_t* want, int64_t id) {
     return 0;
 }
 
+/* t's columns named in `want` (a sym atom or vector; anything else = all of them), as an owned sym vector; none of
+ * them is the first, since a table's count is a column's */
+static ray_t* splay_wanted(ray_t* t, ray_t* want) {
+    if (want && want->type != RAY_SYM && want->type != -RAY_SYM) want = NULL;
+    int64_t nc = ray_table_ncols(t);
+    ray_t* ids = ray_sym_vec_new(RAY_SYM_W64, nc > 0 ? nc : 1);
+    for (int64_t i = 0; i < nc && ids && !RAY_IS_ERR(ids); i++) {
+        int64_t id = ray_table_col_name(t, i);
+        if (!want || splay_wants(want, id)) ids = ray_vec_append(ids, &id);
+    }
+    if (ids && !RAY_IS_ERR(ids) && !q_count(ids) && nc) {
+        int64_t id = ray_table_col_name(t, 0);
+        ids = ray_vec_append(ids, &id);
+    }
+    return ids ? ids : q_err(QE_OOM);
+}
+
 /* the map itself (or the rows, as splay_table), under whatever file restriction stands */
 static ray_t* splay_deferred_table(ray_t* t, ray_t* want, int64_t lo, int64_t cnt) {
     ray_t* err = NULL;
     splay_ent* e = splay_resolve_sym(q_type_coord_sym(t), &err);
     if (!e) return err;
-    int64_t nc = ray_table_ncols(t), n = 0;
-    int64_t* ids = (int64_t*)malloc((size_t)(nc > 0 ? nc : 1) * sizeof *ids);
-    if (!ids) return q_err(QE_OOM);
-    for (int64_t i = 0; i < nc; i++) {
-        int64_t id = ray_table_col_name(t, i);
-        if (!want || splay_wants(want, id)) ids[n++] = id;
-    }
-    if (!n && nc) ids[n++] = ray_table_col_name(t, 0);  /* the row count is a column's */
-    ray_t* m = splay_table(e, ids, n, lo, cnt);
-    free(ids);
+    ray_t* ids = splay_wanted(t, want);
+    if (RAY_IS_ERR(ids)) return ids;
+    ray_t* m = splay_table(e, ids, lo, cnt);
+    ray_release(ids);
     return m;
 }
 
 /* a table the session holds re-maps whoever asks: the restriction (-u) was answered where its path was named,
  * and every read below — .d, a header, a compressed or decoded column — is of that table */
 static ray_t* splay_deferred_use(ray_t* t, ray_t* want, int64_t lo, int64_t cnt) {
-    if (want && want->type != RAY_SYM && want->type != -RAY_SYM) want = NULL;
     bool restricted = q_type_coord_kind(t) == Q_COORD_SPLAY_DEFERRED && ray_eval_get_restricted();
     if (restricted) ray_eval_set_restricted(false);
     ray_t* m = splay_deferred_table(t, want, lo, cnt);
@@ -870,7 +881,8 @@ static ray_t* splay_deferred_use(ray_t* t, ray_t* want, int64_t lo, int64_t cnt)
  * its directory, a column file or its partitioned name does not resolve — the caller keeps t; a RAY_ERROR when the
  * files are there and bad.  THE seam a hold-the-maps mode (`.Q.MAP`) would cache behind. */
 ray_t* q_splay_deferred_map(ray_t* t, ray_t* want) {
-    if (!q_splay_table_deferred(t) || !splay_dir_sym_is(q_type_coord_sym(t))) return NULL;
+    if (!q_splay_table_deferred(t)) return NULL;
+    if (!splay_dir_sym_is(q_type_coord_sym(t))) return q_splay_named_map(t, want, NULL);
     ray_t* m = splay_deferred_use(t, want, 0, -1);
     return m || q_type_coord_kind(t) != Q_COORD_SPLAY_DEFERRED ? m : q_err(QE_IO);
 }
@@ -918,6 +930,17 @@ static ray_t* splay_vec_file(ray_t* path) {
     return h.mappable ? splay_read(path, &h) : NULL;
 }
 
+/* the handle sym of the folder a slash-less `:dir names, or -1 */
+static int64_t splay_slashed(const char* sp, size_t sn) {
+    char* d = (char*)malloc(sn + 1);
+    if (!d) return -1;
+    memcpy(d, sp, sn);
+    d[sn] = '/';
+    int64_t sym = ray_sym_intern_runtime(d, sn + 1);
+    free(d);
+    return sym;
+}
+
 /* `get` of a `:path sym atom: `:dir/` the deferred table, `:dir` the same folder mapped at once, a `:file` of one
  * fixed-width vector that vector mapped.  NULL for anything else (the caller falls through to the flat reader), or
  * a RAY_ERROR: a header that does not validate, a file that will not map. */
@@ -937,24 +960,20 @@ ray_t* q_splay_get(ray_t* x) {
         if (path) ray_release(path);
         if (v || !have || !S_ISDIR(st.st_mode)) return v;
         /* `get `:db/t` reads the folder `get `:db/t/` names (kb/splayed-tables.md:273), mapped at once */
-        char* d = (char*)malloc(sn + 1);
-        if (!d) return q_err(QE_OOM);
-        memcpy(d, sp, sn);
-        d[sn] = '/';
-        dirsym = ray_sym_intern_runtime(d, sn + 1);
-        free(d);
+        dirsym = splay_slashed(sp, sn);
+        if (dirsym < 0) return q_err(QE_OOM);
     }
     ray_t* err = NULL;
     splay_ent* e = splay_resolve_sym(dirsym, &err);
     if (e) err = splay_validate(e);
     if (!e || err) return err;
     splay_bind_domain(e);                               /* bind-at-get refresh */
-    return deferred ? splay_deferred(e->keys, e->sym, Q_COORD_SPLAY_DEFERRED) : splay_table(e, NULL, 0, 0, -1);
+    return deferred ? splay_deferred(e->keys, e->sym, Q_COORD_SPLAY_DEFERRED) : splay_table(e, NULL, 0, -1);
 }
 
 /* `flip cols!`:dir/` and `flip cols!`name`: the deferred table over exactly those columns — DEFERRED when the
  * directory holds them all now, else UNRESOLVED, which fails only when queried (ref/flip-splayed.md); a plain name
- * is a partitioned table, which no mount resolves yet.  NULL for a provider coordinate or the null sym. */
+ * is a partitioned table of the loaded database.  NULL for a provider coordinate or the null sym. */
 ray_t* q_splay_flip(ray_t* cols, int64_t dirsym) {
     if (!cols || cols->type != RAY_SYM) return NULL;
     uint8_t kind = Q_COORD_SPLAY_UNRESOLVED;
@@ -973,4 +992,79 @@ ray_t* q_splay_flip(ray_t* cols, int64_t dirsym) {
         return NULL;
     }
     return splay_deferred(cols, dirsym, kind);
+}
+
+/* The partitioned database is q's, as kdb's is: what a mount found lives in .Q, and the mount and the reads of a
+ * partitioned table are dotq.q's (.Q.i.*).  This is their call from the doors that meet one: the owned table a
+ * function answers, its error, or NULL for any other answer. */
+static ray_t* splay_dotq(const char* name, ray_t** args, int64_t n) {
+    ray_t* r = q_eval_apply_concrete(q_eval_apply_call_name(name, strlen(name), args, n));
+    if (r && !RAY_IS_ERR(r) && r->type != RAY_TABLE) { ray_release(r); r = NULL; }
+    return r;
+}
+
+/* .Q.i.mount answers what to bind: the partition field!its values, then each table!its columns.  The binds ride
+ * q_env_set here, as the root walk's do, so one mount's names land in one context. */
+ray_t* q_splay_named_mount(void) {
+    ray_t* nil = RAY_NULL_OBJ;
+    ray_t* r = q_eval_apply_concrete(q_eval_apply_call_name(".Q.i.mount", 10, &nil, 1));
+    if (!r || RAY_IS_ERR(r)) return r;
+    ray_t* names = q_type_is_dict(r) ? ray_dict_keys(r) : NULL;         /* borrowed */
+    ray_t* bad = NULL;
+    for (int64_t i = 0; names && names->type == RAY_SYM && i < q_count(names) && !bad; i++) {
+        int64_t name = ray_vec_get_sym_id(names, i);
+        ray_t* v = q_index_elem_at(ray_dict_vals(r), i);
+        ray_t* bound = i && v && !RAY_IS_ERR(v) ? q_splay_flip(v, name) : v;
+        ray_err_t rc = bound && !RAY_IS_ERR(bound) ? q_env_set(name, bound) : RAY_OK;
+        if (!bound || RAY_IS_ERR(bound)) bad = bound ? bound : q_err(QE_CORRUPT);
+        else if (rc != RAY_OK) bad = q_env_err(rc);
+        if (bound && bound != bad && bound != v) ray_release(bound);
+        if (v && v != bad) ray_release(v);
+    }
+    ray_release(r);
+    return bad;
+}
+
+ray_t* q_splay_named_values(void) {
+    ray_t* nil = RAY_NULL_OBJ;
+    return splay_dotq(".Q.i.values", &nil, 1);
+}
+
+int q_splay_table_named(ray_t* t) {
+    uint8_t k = t && t->type == RAY_TABLE ? q_type_coord_kind(t) : 0;
+    return (k == Q_COORD_SPLAY_DEFERRED || k == Q_COORD_SPLAY_UNRESOLVED) && splay_name_sym_is(q_type_coord_sym(t));
+}
+
+/* `reader`[name;columns], or `reader`[name;columns;parts] where parts are given, for partitioned table t */
+static ray_t* splay_named(const char* reader, ray_t* t, ray_t* want, ray_t* parts) {
+    if (!q_splay_table_named(t)) return NULL;
+    ray_t* ids = splay_wanted(t, want);
+    if (RAY_IS_ERR(ids)) return ids;
+    ray_t* name = ray_sym(q_type_coord_sym(t));
+    ray_t* args[3] = { name, ids, parts };
+    ray_t* m = splay_dotq(reader, args, parts ? 3 : 2);
+    ray_release(name);
+    ray_release(ids);
+    return m;
+}
+
+ray_t* q_splay_named_map(ray_t* t, ray_t* want, ray_t* parts) {
+    return splay_named(".Q.i.table", t, want, parts ? parts : RAY_NULL_OBJ);
+}
+
+ray_t* q_splay_named_latest(ray_t* t) { return splay_named(".Q.i.latest", t, NULL, NULL); }
+
+ray_t* q_splay_part_fn(ray_t** args, int64_t n) {
+    if (n != 2 || !args[0] || args[0]->type != -RAY_SYM || !args[1] || args[1]->type != RAY_SYM) return q_err(QE_TYPE);
+    ray_t* s = ray_sym_str(args[0]->i64);                               /* borrowed */
+    size_t sn = s ? ray_str_len(s) : 0;
+    int64_t dirsym = sn > 1 && ray_str_ptr(s)[0] == ':' ? splay_slashed(ray_str_ptr(s), sn) : -1;
+    /* -u keeps a remote query within the current directory, where the loaded database is (database/segment.md:54) */
+    bool lift = dirsym >= 0 && ray_eval_get_restricted() && q_io_path_inside(ray_str_ptr(s) + 1, sn - 1);
+    if (lift) ray_eval_set_restricted(false);
+    ray_t* err = NULL;
+    splay_ent* e = dirsym < 0 ? NULL : splay_resolve_sym(dirsym, &err);
+    ray_t* m = e ? splay_table(e, args[1], 0, -1) : err;
+    if (lift) ray_eval_set_restricted(true);
+    return m ? m : q_err(QE_IO);
 }

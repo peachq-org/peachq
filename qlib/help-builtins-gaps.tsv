@@ -4,6 +4,7 @@
 #   storage ADR rules partitioned/splayed WRITE out) or not-built.  The REPL highlighter leaves these uncoloured.
 # Read by tools/gen-hl-names.sh (the highlighter's name table) and test/q/namespace/builtins_documented.qcmd.
 .Q.c	internal	-
+.Q.i	internal	-
 .Q.ops	internal	-
 .h.i	internal	-
 .Q.bv	unimplemented	not-built
@@ -20,7 +21,6 @@
 .Q.l	unimplemented	not-built
 .Q.li	unimplemented	not-built
 .Q.lo	unimplemented	not-built
-.Q.P	unimplemented	not-built
 .Q.p1	unimplemented	not-built
 .Q.prf0	unimplemented	not-built
 .Q.ps	unimplemented	not-built
