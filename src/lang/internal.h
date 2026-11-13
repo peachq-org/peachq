@@ -127,6 +127,19 @@ static inline int64_t month_payload_as_days(int64_t p) {
     return era * 146097 + doe - 719468 - 10957;     /* rebase 1970 → 2000 */
 }
 
+/* ns per unit for the DURATION temporals (u/v/t/n), an ATOM tag; 0 = not a duration.
+ * The duration/absolute split mirrors ref/add.md / ref/subtract.md:
+ * durations combine to the FINER unit, absolute (p/d/m) ± duration -> p. */
+static inline int64_t duration_unit_ns(int8_t t) {
+    switch (-t) {
+        case RAY_MINUTE:   return 60000000000LL;
+        case RAY_SECOND:   return 1000000000LL;
+        case RAY_TIME:     return 1000000LL;
+        case RAY_TIMESPAN: return 1LL;
+        default:           return 0;
+    }
+}
+
 /* Convert temporal atom to nanoseconds for cross-temporal comparison.
  * DATE = days since epoch -> ns, TIME = ms since midnight -> ns,
  * TIMESTAMP = ns, MONTH = first-of-month days -> ns. */
@@ -205,14 +218,10 @@ static inline int float_lane(ray_t* a, ray_t* b) {
  * multiply.md:86 are the same table); the one law every arith path calls
  * ══════════════════════════════════════════ */
 
-/* Integer cells, vector tags in and out: b x h i combine to i, any j to j.  A byte
- * pair keeps its lane — string-C3 rules bytes byte-uniform (`0x01+0x02` is 0x03
- * here, a recorded divergence from the table's 3i). */
+/* Integer cells, vector tags in and out: b x h i combine to i, any j to j — a byte pair included (`0x01+0x02` is
+ * 3i, the x row x column). */
 static inline int8_t arith_int_type(int8_t a, int8_t b) {
-    if (a == RAY_I64 || b == RAY_I64) return RAY_I64;
-    if (ray_is_bytelike(a) && ray_is_bytelike(b))
-        return (a == RAY_CHARV || b == RAY_CHARV) ? RAY_CHARV : RAY_BYTE_ONLY;
-    return RAY_I32;
+    return a == RAY_I64 || b == RAY_I64 ? RAY_I64 : RAY_I32;
 }
 
 /* Char is not a number in arithmetic: a char operand reads as its code point only beside a float (row and column
@@ -276,12 +285,11 @@ static inline ray_t* null_for_promoted(ray_t* a, ray_t* b) {
                                             : promote_int_type(a, b));
 }
 
-/* ref/sum.md:212 and prd.md:115: an aggregate's range is its dyad's — b h i sum to i,
+/* ref/sum.md:212 and prd.md:115: an aggregate's range is its dyad's — b x h i sum to i,
  * j to j, e f and the durations keep their type; a char vector sums its code points to i (owner ruling
- * Dazlln).  Bytes stay j: `sum 0x0102` is deferred with the byte lane. */
+ * Dazlln). */
 static inline int8_t agg_sum_type(int8_t t) {
-    if (t == RAY_BOOL || t == RAY_I16 || t == RAY_I32 || t == RAY_CHARV) return RAY_I32;
-    return ray_is_bytelike(t) ? RAY_I64 : t;
+    return t == RAY_BOOL || ray_is_bytelike(t) || t == RAY_I16 || t == RAY_I32 ? RAY_I32 : t;
 }
 
 /* releases/ChangesIn3.3.md:22 "`+/I` will give 0Ni on overflow": an int-family SUM that leaves

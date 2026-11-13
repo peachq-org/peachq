@@ -568,10 +568,11 @@ static ray_t* vec_to_f64_scratch(ray_t* x, double** out_vals) {
     scratch->type = RAY_F64;
     double* vals = (double*)ray_data(scratch);
     int64_t cnt = 0;
-    if (x->type == RAY_I64) {
+    /* a temporal reads as its raw counts (result F64), per the canonical admission table */
+    if (x->type == RAY_I64 || RAY_IS_TEMPORAL64(x->type)) {
         int64_t* d = (int64_t*)ray_data(x);
         for (int64_t i = 0; i < len; i++) { if (!ray_vec_is_null(x, i)) vals[cnt++] = (double)d[i]; }
-    } else if (x->type == RAY_F64) {
+    } else if (x->type == RAY_F64 || RAY_IS_TEMPORALF(x->type)) {
         double* d = (double*)ray_data(x);
         for (int64_t i = 0; i < len; i++) { if (!ray_vec_is_null(x, i)) vals[cnt++] = d[i]; }
     } else if (x->type == RAY_F32) {
@@ -579,7 +580,7 @@ static ray_t* vec_to_f64_scratch(ray_t* x, double** out_vals) {
          * carry no HAS_NULLS attr, so the test is isnan, never the attr gate. */
         float* d = (float*)ray_data(x);
         for (int64_t i = 0; i < len; i++) { if (!isnan(d[i])) vals[cnt++] = (double)d[i]; }
-    } else if (x->type == RAY_I32) {
+    } else if (x->type == RAY_I32 || RAY_IS_TEMPORAL32(x->type)) {
         int32_t* d = (int32_t*)ray_data(x);
         for (int64_t i = 0; i < len; i++) { if (!ray_vec_is_null(x, i)) vals[cnt++] = (double)d[i]; }
     } else if (x->type == RAY_I16) {
@@ -587,14 +588,6 @@ static ray_t* vec_to_f64_scratch(ray_t* x, double** out_vals) {
         for (int64_t i = 0; i < len; i++) { if (!ray_vec_is_null(x, i)) vals[cnt++] = (double)d[i]; }
     } else if (ray_is_bytelike(x->type) || x->type == RAY_BOOL) {
         uint8_t* d = (uint8_t*)ray_data(x);
-        for (int64_t i = 0; i < len; i++) { if (!ray_vec_is_null(x, i)) vals[cnt++] = (double)d[i]; }
-    } else if (RAY_IS_TEMPORAL32(x->type)) {
-        /* temporal stored as int32 days/ms — avg/var/stddev compute over the
-         * raw counts (result F64), per the canonical admission table. */
-        int32_t* d = (int32_t*)ray_data(x);
-        for (int64_t i = 0; i < len; i++) { if (!ray_vec_is_null(x, i)) vals[cnt++] = (double)d[i]; }
-    } else if (x->type == RAY_TIMESTAMP) {
-        int64_t* d = (int64_t*)ray_data(x);
         for (int64_t i = 0; i < len; i++) { if (!ray_vec_is_null(x, i)) vals[cnt++] = (double)d[i]; }
     } else {
         ray_release(scratch);
