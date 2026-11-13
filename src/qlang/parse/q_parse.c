@@ -23,7 +23,7 @@
 #include "qlang/parse/q_parse.h"
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"
-#include "qlang/parse/q_tok.h"    /* q_tok_literal, q_tok_byte_lit_starts — the literal scanner */
+#include "qlang/parse/q_tok.h"    /* q_tok_literal, q_tok_byte_lit_starts, q_tok_strand_gap — the literal scanner */
 #include "qlang/q_registry.h" /* q_registry_lookup_name, q_registry_is_infix, Q_DYADIC */
 #include "qlang/q_ops.h"      /* q_ops_find — the static lexical manifest */
 #include "qlang/q_env.h"      /* q_env_ident_ok — a captured marker must be a q name */
@@ -271,9 +271,7 @@ static void init_class(void) {
     CLASS[(int)'\\'] |= CL_ADVERB;
     CLASS[(int)' ']  |= CL_WS;
     CLASS[(int)'\t'] |= CL_WS;
-    CLASS[(int)'\n'] |= CL_WS;   /* multiline scripts: a joined logical line
-                                  * carries embedded newlines between its
-                                  * continuation fragments (q_ctx_run_file). */
+    CLASS[(int)'\n'] |= CL_WS;   /* a statement's text is its source span: every line of it (ctx_walk_script) */
     CLASS[(int)'\r'] |= CL_WS;
 }
 
@@ -393,9 +391,7 @@ static Tokens scan(const char *src) {
 
         /* A '/' is a comment iff it has whitespace before it or starts the
          * line/input; otherwise it is an adverb (e.g. `2+3/x`).  Leading
-         * whitespace — not trailing — is what matters.  (q_parse is single-
-         * line today; the `src[p-1]=='\n'` arm is defensive for a future
-         * multi-line lexer.) */
+         * whitespace — not trailing — is what matters. */
         int leading_ws = (p == 0) || (p != ws0) || (src[p - 1] == '\n');
 
         int start = p;
@@ -2609,9 +2605,8 @@ ray_t *q_parse_tokens(const char *src, int64_t n) {
         int strand = ts.t[i].kind == T_NOUN && src[a] != '"' && src[a] != '`';
         for (int e = a; strand && e < b; e++)
             if (CLASS[(uint8_t)src[e]] & CL_WS) {
-                int w = e;
-                while (CLASS[(uint8_t)src[w]] & CL_WS) w++;
-                l = tokens_push(tokens_push(l, src, a, e), src, e, w);
+                int w = q_tok_strand_gap(src, e);
+                l = tokens_gap(tokens_push(l, src, a, e), src, e, w);
                 a = e = w;
             }
         l = tokens_push(l, src, a, b);
@@ -2636,26 +2631,24 @@ static void open_scan(q_parse_open_t *st, const char *src) {
     st->in_literal = g_scan_open_lit;
 }
 
-void q_parse_open_feed(q_parse_open_t *st, const char *piece) {
+void q_parse_open_feed(q_parse_open_t *st, const char *piece, size_t n) {
     if (st->opaque) return;
+    size_t fence = (size_t)st->in_literal, pre = fence ? fence + 4 : st->in_string ? 1 : 0;
+    char  *buf = malloc(pre + n + 1);
+    if (!buf) return;
+    if (fence) { memset(buf, '`', fence); memcpy(buf + fence, "raw ", 4); }   /* a piece inside a literal reopens it */
+    else if (pre) buf[0] = '"';
+    memcpy(buf + pre, piece, n);
+    buf[pre + n] = '\0';
+    const char *text = buf;
     if (!st->fed) {
         st->fed = 1;
-        size_t n = strlen(piece);
-        char   lang;
-        piece = intake_lang(piece, &n, &lang);
-        if ((n && lang && lang != 'q') || intake_sys(piece)) { st->opaque = 1; return; }
+        char lang;
+        text = intake_lang(buf, &n, &lang);
+        if ((n && lang && lang != 'q') || intake_sys(text)) st->opaque = 1;
     }
-    if (!q_registry_ready()) return;
-    if (!st->in_string && !st->in_literal) { open_scan(st, piece); return; }
-    size_t n = strlen(piece), fence = (size_t)st->in_literal;   /* the piece starts inside the literal: reopen it for the scanner */
-    char  *quoted = malloc(n + fence + 5);
-    if (!quoted) return;
-    size_t k = 0;
-    if (fence) { memset(quoted, '`', fence); k = fence; memcpy(quoted + k, "raw ", 4); k += 4; }
-    else quoted[k++] = '"';
-    memcpy(quoted + k, piece, n + 1);
-    open_scan(st, quoted);
-    free(quoted);
+    if (!st->opaque && q_registry_ready()) open_scan(st, text);
+    free(buf);
 }
 
 /* q_parse_is_assign — see q_parse.h.  An assignment head (q_parse_assign_head) with a name/indexed-name target or a
