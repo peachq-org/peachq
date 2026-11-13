@@ -120,8 +120,8 @@ static inline void out_col_adopt_str_pool(ray_t* dst, const ray_t* src) {
  *
  * The element type (STR vs GUID) and the direction (want_min) are resolved
  * ONCE here, before the single type-specialised compare loop.  (sel/has_nulls
- * remain a predictable per-row branch, exactly as the integer reduce loops
- * below do; the goal is no *type/op dispatch* inside the loop.) */
+ * remain a predictable per-row branch; the goal is no *type/op dispatch*
+ * inside the loop.) */
 static int64_t wide_winner_row(ray_t* input, uint16_t op,
                                const int64_t* sel, int64_t scan_n,
                                bool has_nulls) {
@@ -166,49 +166,69 @@ static ray_t* agg_wide_reduce(ray_t* input, uint16_t op,
 
 /* Integer reduction loop — reads native type T, accumulates as i64.
  * HAS_NULLS and HAS_IDX must be integer literal constants (0 or 1) so the
- * compiler dead-code-eliminates the corresponding branches in every
+ * compiler dead-code-eliminates the corresponding selects in every
  * specialisation.  reduce_range dispatches to the right combination
- * before calling this macro so the hot path (no nulls, no idx) contains
- * zero per-element runtime branches.
+ * before calling this macro.
  *
  * NULL_SENT is the type-correct NULL_* sentinel value for T (NULL_I16,
- * NULL_I32, NULL_I64).  For BOOL/U8 the sentinel slot is unused
- * (those types are non-nullable; dispatcher pins HAS_NULLS=0) so any
- * value works; we pass 0 for compileability. */
+ * NULL_I32, NULL_I64).  A null is SELECTED out, never branched round: it
+ * contributes each accumulator's identity (0 to the sums, 1 to the product,
+ * the far infinity to min/max).  The accumulators are locals for the loop,
+ * seeded from acc and stored back in the same order of operations: through
+ * the pointer the null-aware loop kept them in memory and ran at 2.4x the
+ * plain one, which is what every mapped column (flag = "may hold nulls")
+ * paid.  null_count is the rows scanned less the live ones. */
 #define REDUCE_LOOP_I(T, NULL_SENT, base, start, end, acc, HAS_NULLS, HAS_IDX, idx) \
     do { \
         const T* d = (const T*)(base); \
+        int64_t sum = (acc)->sum_i, sq = (acc)->sum_sq_i, prod = (acc)->prod_i; \
+        int64_t mn = (acc)->min_i, mx = (acc)->max_i, live_n = 0; \
+        double sum_d = (acc)->sum_d; \
         for (int64_t i = start; i < end; i++) { \
             int64_t row = (HAS_IDX) ? (idx)[i] : i; \
             T raw = d[row]; \
-            if ((HAS_NULLS) && raw == (T)(NULL_SENT)) { (acc)->null_count++; continue; } \
-            int64_t v = (int64_t)raw; \
+            bool live = !(HAS_NULLS) || raw != (T)(NULL_SENT); \
+            int64_t v = live ? (int64_t)raw : 0; \
+            int64_t lo = live ? v : INT64_MAX, hi = live ? v : INT64_MIN; \
             /* sum/sum_sq may overflow on signed arithmetic — use defined \
              * unsigned wrap (same semantic, no UBSan whine). */ \
-            (acc)->sum_i    = (int64_t)((uint64_t)(acc)->sum_i    + (uint64_t)v); \
-            (acc)->sum_sq_i = (int64_t)((uint64_t)(acc)->sum_sq_i + (uint64_t)v * (uint64_t)v); \
-            (acc)->prod_i   = (int64_t)((uint64_t)(acc)->prod_i   * (uint64_t)v); \
-            (acc)->sum_d   += (double)v; \
-            if (v < (acc)->min_i) (acc)->min_i = v; \
-            if (v > (acc)->max_i) (acc)->max_i = v; \
-            (acc)->cnt++; \
+            sum  = (int64_t)((uint64_t)sum  + (uint64_t)v); \
+            sq   = (int64_t)((uint64_t)sq   + (uint64_t)v * (uint64_t)v); \
+            prod = (int64_t)((uint64_t)prod * (uint64_t)(live ? v : 1)); \
+            sum_d += (double)v; \
+            if (lo < mn) mn = lo; \
+            if (hi > mx) mx = hi; \
+            live_n += live; \
         } \
+        (acc)->sum_i = sum; (acc)->sum_sq_i = sq; (acc)->prod_i = prod; \
+        (acc)->min_i = mn; (acc)->max_i = mx; (acc)->sum_d = sum_d; \
+        (acc)->cnt += live_n; \
+        (acc)->null_count += ((end) - (start)) - live_n; \
     } while (0)
 
 /* Float reduction loop — see REDUCE_LOOP_I for HAS_NULLS/HAS_IDX semantics.
- * F64 null = NaN (NULL_F64); detect via v != v (only NaN fails self-equality). */
+ * F64 null = NaN (NULL_F64); detect via v == v (only NaN fails self-equality).
+ * ±inf are live values.  A NaN loses both min/max compares by itself. */
 #define REDUCE_LOOP_F(base, start, end, acc, HAS_NULLS, HAS_IDX, idx) \
     do { \
         const double* d = (const double*)(base); \
+        double sum = (acc)->sum_f, sq = (acc)->sum_sq_f, prod = (acc)->prod_f; \
+        double mn = (acc)->min_f, mx = (acc)->max_f; \
+        int64_t live_n = 0; \
         for (int64_t i = start; i < end; i++) { \
             int64_t row = (HAS_IDX) ? (idx)[i] : i; \
-            double v = d[row]; \
-            if ((HAS_NULLS) && v != v) { (acc)->null_count++; continue; } \
-            (acc)->sum_f += v; (acc)->sum_sq_f += v * v; (acc)->prod_f *= v; \
-            if (v < (acc)->min_f) (acc)->min_f = v; \
-            if (v > (acc)->max_f) (acc)->max_f = v; \
-            (acc)->cnt++; \
+            double raw = d[row]; \
+            bool live = !(HAS_NULLS) || raw == raw; \
+            double v = live ? raw : 0.0; \
+            sum += v; sq += v * v; prod *= live ? raw : 1.0; \
+            if (raw < mn) mn = raw; \
+            if (raw > mx) mx = raw; \
+            live_n += live; \
         } \
+        (acc)->sum_f = sum; (acc)->sum_sq_f = sq; (acc)->prod_f = prod; \
+        (acc)->min_f = mn; (acc)->max_f = mx; \
+        (acc)->cnt += live_n; \
+        (acc)->null_count += ((end) - (start)) - live_n; \
     } while (0)
 
 /* Dispatch helper: expand REDUCE_LOOP_I/F with compile-time 0/1 constants for
