@@ -22,20 +22,6 @@
   #include <unistd.h>
 #endif
 
-/* A partition-typed dir name — date/month/year/long (basics/syscmds.md#l): stage 4's. */
-static int mount_part_name(const char* s, size_t n) {
-    size_t digits = 0, dots = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (s[i] >= '0' && s[i] <= '9') digits++;
-        else if (s[i] == '.') dots++;
-        else return 0;
-    }
-    if (digits == n) return n > 0;                                  /* year / long */
-    if (n == 7)  return dots == 1 && s[4] == '.';                   /* YYYY.MM */
-    if (n == 10) return dots == 2 && s[4] == '.' && s[7] == '.';    /* YYYY.MM.DD */
-    return 0;
-}
-
 static int mount_is_dir(const char* p) {
     struct stat st;
     return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
@@ -109,8 +95,9 @@ static ray_t* mount_root(const char* abs, size_t n, int scripts) {
         cnt++;
     }
     closedir(d);
-    qsort(names, cnt, sizeof *names, mount_name_cmp);
-    ray_t* bad = oom ? q_err(QE_OOM) : NULL;   /* a partial roster must not mount */
+    if (cnt) qsort(names, cnt, sizeof *names, mount_name_cmp);   /* an empty directory's roster is NULL */
+    /* a partial roster must not mount; the partitioned tables are bound before a root script can ask for them */
+    ray_t* bad = oom ? q_err(QE_OOM) : q_splay_named_mount();
     for (size_t i = 0; i < cnt && !bad; i++) {
         const char* nm = names[i];
         size_t nn = strlen(nm);
@@ -121,9 +108,8 @@ static ray_t* mount_root(const char* abs, size_t n, int scripts) {
         }
         size_t fn = n + 1 + nn;
         if (mount_is_dir(full)) {
-            /* stage 4's partitions, a plain subdir, an unbindable name */
-            if (mount_part_name(nm, nn) || !mount_has_dotd(full, fn) ||
-                !q_env_ident_ok(nm, nn)) continue;
+            /* a partition (the partitioned mount's), a plain subdir, an unbindable name */
+            if (!mount_has_dotd(full, fn) || !q_env_ident_ok(nm, nn)) continue;
             ray_t* e = mount_bind_splay(full, fn, nm, nn);
             if (e && mount_skippable(e)) ray_error_free(e);
             else if (e) bad = e;

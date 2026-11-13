@@ -1472,20 +1472,6 @@ static int8_t wf_col_nested_tag(ray_t* col) {
     return t0;
 }
 
-/* Domain path: named (2-item set), else `<parent-of-dir>/sym` — `.Q.en`'s
- * geography (an enumerated column of `` `:db/tr/ set t `` is re-enumerated against db/sym). */
-static ray_t* wf_domain_path(ray_t* dirstr, ray_t* domsym) {
-    if (domsym) {
-        ray_t* p = q_io_file_path(domsym);
-        return p ? p : q_err(QE_TYPE);
-    }
-    const char* p = ray_str_ptr(dirstr);
-    size_t n = ray_str_len(dirstr);
-    size_t cut = n > 1 ? n - 1 : n;              /* drop the trailing slash */
-    while (cut && p[cut - 1] != '/') cut--;
-    return wf_join(p, cut, "sym", 3);
-}
-
 static ray_t* wf_write_splay_dir(ray_t* dirstr, ray_t* domsym, ray_t* y,
                                  int lbs, int alg, int lvl) {
     if (!y || y->type != RAY_TABLE)
@@ -1513,12 +1499,10 @@ static ray_t* wf_write_splay_dir(ray_t* dirstr, ray_t* domsym, ray_t* y,
         ray_t* cp = wf_join(ray_str_ptr(dirstr), ray_str_len(dirstr),
                             ray_str_ptr(nm), ray_str_len(nm));
         if (!cp) { bad = q_err(QE_OOM); break; }
-        ray_t* dec = NULL;                           /* a SYMLIST-domain 20h column
-                                                      * writes as its resolved syms
-                                                      * and re-enumerates against
-                                                      * THIS dir's domain file (the
-                                                      * copy-a-splay idiom) */
-        ray_t* rimg = wf_ref_image(col);             /* FK/link: positions + name */
+        ray_t* dec = NULL;                           /* under a NAMED domain a 20h column re-enumerates against it */
+        /* an enumerated column is written as it is: its domain is the database root's, and a partition directory
+         * holds none (kb/partition.md:13-31) */
+        ray_t* rimg = col->type == RAY_ENUM && !domsym ? wf_write_image(col) : wf_ref_image(col);
         if (rimg && RAY_IS_ERR(rimg)) { bad = rimg; ray_release(cp); break; }
         if (!rimg && col->type == RAY_ENUM) {
             dec = q_enum_decay(col);
@@ -1530,8 +1514,8 @@ static ray_t* wf_write_splay_dir(ray_t* dirstr, ray_t* domsym, ray_t* y,
             if (rimg != bad) ray_release(rimg);
         } else if (col->type == RAY_SYM) {           /* auto-enumerate (fused) */
             if (!dompath) {
-                dompath = wf_domain_path(dirstr, domsym);
-                if (RAY_IS_ERR(dompath)) { bad = dompath; dompath = NULL; }
+                dompath = q_io_file_path(domsym);
+                if (!dompath) bad = q_err(QE_TYPE);
             }
             ray_t* pos = NULL;
             if (!bad) bad = q_wirefile_domain_extend(dompath, col, &pos);
