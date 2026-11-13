@@ -1785,12 +1785,14 @@ static int hole_args(ray_t* fv, ray_t** args, int64_t n, ray_t** out) {
 
 static int amend_head(ray_t* d);
 
-/* The unary verbs that read a table's shape and none of its cells, by name at this one site: 1 for `type` and
- * `cols`, which map nothing; 2 for `count`, a column's count (kdb's count of a splay is one column's). */
+/* The unary verbs that read a table's shape and none of its cells, by name at this one site: 1 for `type`, `cols`
+ * and `flip`, which map nothing, and `meta`, which maps what it reads itself (a partitioned table's most recent
+ * partition); 2 for `count`, a column's count (kdb's count of a splay is one column's). */
 static int shape_verb(const q_op_t* row, int64_t n) {
     const char* nm = row && n == 1 ? row->name : NULL;
     if (!nm) return 0;
-    if (!strcmp(nm, "type") || !strcmp(nm, "@") || !strcmp(nm, "cols")) return 1;
+    if (!strcmp(nm, "type") || !strcmp(nm, "@") || !strcmp(nm, "cols") || !strcmp(nm, "meta")) return 1;
+    if (!strcmp(nm, "flip") || !strcmp(nm, "+")) return 1;
     return !strcmp(nm, "count") || !strcmp(nm, "#") ? 2 : 0;
 }
 
@@ -1809,11 +1811,24 @@ static ray_t* rows_mapped(const q_op_t* row, ray_t** args, int64_t n, int64_t i)
     if (!nm || i != n - 1) return NULL;
     if (n == 1 && (!strcmp(nm, "first") || !strcmp(nm, "*"))) return q_splay_deferred_rows(args[0], NULL, 0, 1);
     if (n == 1 && !strcmp(nm, "last")) return q_splay_deferred_rows(args[0], NULL, -1, 1);
+    /* Take is not supported for a partitioned table, rows or columns (ref/take.md:239,260) */
+    if (n == 2 && !strcmp(nm, "#") && q_splay_table_named(args[1])) return q_err(QE_PAR);
     int64_t c = 0;
     int8_t ct = n == 2 && args[0] ? args[0]->type : 0;
     if ((ct != -RAY_I64 && ct != -RAY_I32 && ct != -RAY_I16) || strcmp(nm, "#")) return NULL;
     if (!q_type_strict_i64(args[0], &c) || c < -INT64_MAX) return NULL;
     return c < 0 ? q_splay_deferred_rows(args[1], NULL, c, -c) : q_splay_deferred_rows(args[1], NULL, 0, c);
+}
+
+/* The applications that pass a partitioned table on as the reference it is, by name at this one site: `show`, the
+ * internal functions (`-3!`, `-8!`, `0N!`) and `set` of a name — display and the wire show it as its flip
+ * (ref/dotq.md:303), and a name bound to it is bound to the reference.  A file takes the table. */
+static int passes_named(const q_op_t* row, ray_t** args, int64_t n) {
+    const char* nm = row ? row->name : NULL;
+    int64_t c = 0;
+    if (!nm) return 0;
+    if (n == 2 && !strcmp(nm, "!")) return args[0] && q_type_strict_i64(args[0], &c) && c < 0;
+    return (n == 1 && !strcmp(nm, "show")) || (n == 2 && !strcmp(nm, "set") && !q_io_is_fsym(args[0]));
 }
 
 /* Does this application read its arguments' cells?  One that projects reads none; a lambda, projection or
@@ -1843,6 +1858,7 @@ static int64_t map_deferred(ray_t* fv, const q_op_t* row, q_car_kind_t kind, ray
     int64_t k = 0;
     for (int64_t i = 0; i < n && !k; i++) k = args[i] && args[i]->type == RAY_TABLE && q_splay_table_deferred(args[i]);
     if (!k || !reads_args(fv, row, kind, args, n)) return 0;
+    if (passes_named(row, args, n) && q_splay_table_named(args[n - 1])) return 0;
     int one = shape_verb(row, n) == 2 && q_splay_table_deferred(args[0]);
     k = 0;
     for (int64_t i = 0; i < n; i++) {

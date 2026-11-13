@@ -1219,7 +1219,15 @@ ray_t* q_cols_fn(ray_t* x) {
         ray_retain(k);
         return k;
     }
-    return table_colnames(t);
+    ray_t* parts = q_splay_table_named(t) ? q_splay_named_values() : NULL;
+    if (!parts || RAY_IS_ERR(parts)) return parts ? parts : table_colnames(t);
+    ray_t* field = table_colnames(parts);     /* a partitioned table's first column is the partition's (kb/partition.md) */
+    ray_t* rest = table_colnames(t);
+    ray_t* all = RAY_IS_ERR(field) ? field : RAY_IS_ERR(rest) ? rest : q_join_wrap(field, rest);
+    if (all != field) ray_release(field);
+    if (all != rest) ray_release(rest);
+    ray_release(parts);
+    return all;
 }
 
 /* (meta x) — table metadata keyed by column name: (c) -> (t; f; a) — t via q_ty_char, a via q_attr_letter (a
@@ -1243,7 +1251,8 @@ ray_t* q_meta_fn(ray_t* x) {
     ray_t* t = x ? table_bi_deref(x) : NULL;
     if (q_provider_carrier_is(t)) return q_provider_carrier_meta(t);
     if (!q_type_is_table(t) && !q_type_is_keyed(t)) return q_err(QE_TYPE);
-    ray_t* flat = q_table_flatten(t);
+    ray_t* flat = q_splay_named_latest(t);   /* a partitioned table's meta is its most recent partition's */
+    if (!flat) flat = q_table_flatten(t);
     if (!flat || RAY_IS_ERR(flat)) return flat ? flat : q_err(QE_OOM);
     int64_t nc = ray_table_ncols(flat);
     int64_t cap = nc > 0 ? nc : 1;
