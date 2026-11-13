@@ -774,8 +774,13 @@ q_assign_target_t q_parse_assign_target(const ray_t *lhs) {
     if (h->type == -RAY_SYM) return Q_TARGET_INDEX;
     /* the heads the parser gives a pattern: a list, a dictionary (and keyed table), a table, and the type check
      * `(:`f)` (basics/pattern.md) */
-    if (h == q_registry_list_value() || h == q_registry_lookup_name("!", 1, Q_DYADIC) ||
+    ray_t *bang = q_registry_lookup_name("!", 1, Q_DYADIC);
+    if (h == q_registry_list_value() || h == bang ||
         h == q_registry_lookup_name("+", 1, Q_MONADIC) || RAY_IS_NULL(h)) return Q_TARGET_PATTERN;
+    /* a dictionary literal with null patterns, `([one:;four:d])`, parses to (';(!;keys);…) (basics/pattern.md:180) */
+    const ray_t *f = q_count(lhs) == 3 ? ((ray_t **)ray_data((ray_t *)lhs))[1] : NULL;
+    if (h == q_registry_compose_value() && f && f->type == RAY_LIST && q_count(f) == 2 &&
+        ((ray_t **)ray_data((ray_t *)f))[0] == bang) return Q_TARGET_PATTERN;
     return Q_TARGET_NONE;
 }
 
@@ -944,6 +949,7 @@ static int names_have_reserved(ray_t *phrases) {
 
 static int64_t qsql_derive_alias(ray_t *expr);
 static ray_t  *alias_unbind(ray_t *expr);
+static P       compose_node(ray_t *f, ray_t *tail);
 
 /* pairwise duplicate WITHIN one W64 sym-id vector */
 static int symvec_ids_dup(ray_t *a) {
@@ -978,8 +984,10 @@ static ray_t *bang_tree(ray_t *a, ray_t *b) {
     return q_list(xs, 3);
 }
 
-/* col defs -> the dictionary arm (!;names;(enlist;e…)); consumes defs */
-static ray_t *table_lit_dict(ray_t *defs) {
+/* col defs -> the dictionary arm (!;names;(enlist;e…)); consumes defs.  A dictionary literal with an elided value
+ * (`project`) is (';(!;names);(enlist;e…)): ![names] composed with the list projection (ChangesIn4.1.md:35) — two
+ * or more values, as a paren list's hole needs a `;`. */
+static ray_t *table_lit_dict(ray_t *defs, int project) {
     ray_t *lv = q_registry_list_value();
     if (!lv) q_die("table literal: registry not initialized");
     if (names_have_reserved(defs)) { ray_release(defs); die_err(QE_ASSIGN); }
@@ -988,6 +996,7 @@ static ray_t *table_lit_dict(ray_t *defs) {
     int64_t id_x = ray_sym_intern_runtime("x", 1);
     ray_t *keys = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
     ray_t *vals = ray_list_new(n + 1);
+    int elided = 0;
     if (n > 0) vals = ray_list_append(vals, lv);       /* no columns: the empty list itself */
     for (int64_t i = 0; i < n; i++) {
         ray_t *d = ds[i], *ex = d, *nmv = NULL;
@@ -1001,6 +1010,7 @@ static ray_t *table_lit_dict(ray_t *defs) {
             ex = d ? alias_unbind(d) : NULL;
         }
         keys = ray_vec_append(keys, &nm);
+        elided |= Q_IS_HOLE(ex);
         vals = ray_list_append(vals, ex ? ex : RAY_NULL_OBJ);
         ray_release(ex);
     }
@@ -1015,12 +1025,14 @@ static ray_t *table_lit_dict(ray_t *defs) {
      * one name ,,`a — bare, ,`a would be the enlisted atom and `a`b the tree a[b] */
     if (n > 0) keys = noun_tree_value(keys);
     ray_release(defs);
-    return bang_tree(keys, vals);
+    if (!project || !elided || n < 2) return bang_tree(keys, vals);
+    ray_t *bk[2] = { embed_glyph("!", Q_DYADIC), keys };
+    return compose_node(q_list(bk, 2), vals).v;
 }
 
 /* col defs -> (+:;(!;…)) — flip of the dictionary arm; consumes defs */
 static ray_t *table_lit_flip(ray_t *defs) {
-    ray_t *xs[2] = { embed_glyph("+", Q_MONADIC), table_lit_dict(defs) };
+    ray_t *xs[2] = { embed_glyph("+", Q_MONADIC), table_lit_dict(defs, 0) };
     return q_list(xs, 2);
 }
 
@@ -1171,7 +1183,7 @@ static ray_t *table_lit_cols(Parser *p) {
     if (at(p, T_SEMI)) adv(p);
     if (at(p, T_RPAREN)) {
         adv(p);
-        return table_lit_dict(kcols);
+        return table_lit_dict(kcols, 1);
     }
     ray_t *vcols = parse_E(p, Q_NONE);
     expect(p, T_RPAREN, "expected ')'");
