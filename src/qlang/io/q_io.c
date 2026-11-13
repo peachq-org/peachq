@@ -163,8 +163,10 @@ int q_io_open_locked(const char* path) {
     int fd = open(path, O_RDWR | O_CREAT | O_APPEND | O_BINARY, 0666);
     if (fd < 0) return -1;
 #ifdef RAY_OS_WINDOWS
-    OVERLAPPED ov = {0};
-    int ok = LockFileEx((HANDLE)_get_osfhandle(fd), LOCKFILE_EXCLUSIVE_LOCK, 0, MAXDWORD, MAXDWORD, &ov) != 0;
+    /* a Windows lock is MANDATORY over its range: on the file's own bytes it fails every other reader, so the one
+     * byte locked lies past any file's end — writers still queue on it, as they do on the advisory POSIX lock */
+    OVERLAPPED ov = { .OffsetHigh = 0x40000000 };
+    int ok = LockFileEx((HANDLE)_get_osfhandle(fd), LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &ov) != 0;
 #else
     struct flock fl = { .l_type = F_WRLCK, .l_whence = SEEK_SET };
     int ok = 0, cmds[2] = { F_SETLKW, F_SETLKW };
