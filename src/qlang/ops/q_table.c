@@ -255,7 +255,7 @@ int q_table_row_eq(ray_t* ta, int64_t ra, ray_t* tb, int64_t rb, int64_t ncmp) {
     for (int64_t c = 0; c < ncmp; c++) {
         ray_t* av = q_join_item(ray_table_get_col_idx(ta, c), ra);
         ray_t* bv = q_join_item(ray_table_get_col_idx(tb, c), rb);
-        int eq = (av && bv && !RAY_IS_ERR(av) && !RAY_IS_ERR(bv)) ? q_match_rec(av, bv) : 0;
+        int eq = (av && bv && !RAY_IS_ERR(av) && !RAY_IS_ERR(bv)) ? q_match_value(av, bv) : 0;
         if (av) ray_release(av);
         if (bv) ray_release(bv);
         if (!eq) return 0;
@@ -663,11 +663,16 @@ ray_t* q_table_rows_typed(ray_t* flat, ray_t* rows) {
     for (int64_t c = 0; c < nc && !RAY_IS_ERR(typed); c++) {
         ray_t* oc = ray_table_get_col_idx(flat, c);
         ray_t* col = ray_table_get_col_idx(rows, c);
+        /* ref/join.md:229: into unenumerated symbols an enum is de-enumerated as part of the append */
+        ray_t* vals = oc && col && checked && col->type == RAY_ENUM && ray_is_vec(oc) ? q_enum_val_image(col) : NULL;
+        if (vals && RAY_IS_ERR(vals)) { ray_release(typed); return vals; }
+        if (vals) col = vals;
         if (oc && col && checked && oc->type == RAY_ENUM)
             col = q_enum_col_ingest(oc, col);
         else if (oc && col && checked && ray_is_vec(oc) && col->type != oc->type)
             col = q_type_widens(oc->type, col->type) ? q_dollar_cast(oc->type, col) : q_err(QE_TYPE);
         else if (col) ray_retain(col);
+        if (vals) ray_release(vals);
         if (!col || RAY_IS_ERR(col)) { ray_release(typed); return col ? col : q_err(QE_TYPE); }
         typed = ray_table_add_col(typed, ray_table_col_name(flat, c), col);
         ray_release(col);
@@ -972,7 +977,7 @@ ray_t* q_xgroup_wrap(ray_t* x, ray_t* y) {
         ray_t* acc = ray_list_new(ng > 0 ? ng : 1);
         ray_t** ivs = (ray_t**)ray_data(gidx);
         for (int64_t j = 0; j < ng && !RAY_IS_ERR(acc); j++) {
-            ray_t* grp = ray_at_fn(ray_table_get_col_idx(reord, c), ivs[j]);
+            ray_t* grp = q_index_at(ray_table_get_col_idx(reord, c), &ivs[j], 1);
             if (!grp || RAY_IS_ERR(grp)) { ray_release(acc); acc = grp ? grp : q_err(QE_OOM); break; }
             if (grp->type == RAY_LIST) {
                 ray_t* gc = q_list_collapse(grp);
@@ -1115,7 +1120,8 @@ ray_t* q_ungroup_wrap(ray_t* x) {
             if (col && col->type == RAY_LIST) {
                 ray_t* cell = q_join_item(col, r);
                 if (!cell || RAY_IS_ERR(cell)) { err = cell ? cell : q_err(QE_OOM); break; }
-                int64_t l = (ray_is_vec(cell) || cell->type == RAY_LIST || cell->type == -RAY_STR) ? q_count(cell) : 1;
+                int nested = (q_type_is_iter(cell) && cell->type != RAY_TABLE) || cell->type == RAY_STR || cell->type == -RAY_STR;
+                int64_t l = nested ? q_count(cell) : 1;
                 int row = cell->type == RAY_DICT;
                 ray_release(cell);
                 if (row) continue;

@@ -165,29 +165,87 @@ static ray_t* qj_rowid_col(int64_t n) {
     return v;
 }
 
-/* Minimal join input: `keys` columns of t (borrowed, re-added under the same
- * names) plus a rowid column named rid_sym, none when it is -1.  keys = RAY_LIST
- * of sym atoms (kept BOXED end-to-end: the engine unboxes itself and the helpers
- * here index ray_t** — never collapse to a sym vector). */
-static ray_t* qj_keyid_table(ray_t* t, ray_t* keys, int64_t rid_sym) {
+static int qj_sym_in_list(ray_t* keys, int64_t sym_id);
+
+/* Two symbol columns as their shared lexical ranks, `(rank u) u?/:(a;b)` over `u:distinct a,b`: the engine orders a
+ * symbol by its intern id (basics/comparison.md orders it by its text).  Replaces m[]; NULL, or the owned error. */
+static ray_t* qj_sym_ranks(ray_t* m[2]) {
+    ray_t* j = q_join_wrap(m[0], m[1]);
+    if (!j || RAY_IS_ERR(j)) return j ? j : q_err(QE_OOM);
+    ray_t* u = q_distinct_wrap(j);
+    ray_release(j);
+    if (!u || RAY_IS_ERR(u)) return u ? u : q_err(QE_OOM);
+    ray_t* g = q_iasc_wrap(u);
+    ray_t* rank = g && !RAY_IS_ERR(g) ? q_iasc_wrap(g) : g;
+    if (g && g != rank) ray_release(g);
+    ray_t* bad = rank && !RAY_IS_ERR(rank) ? NULL : rank ? rank : q_err(QE_OOM);
+    for (int i = 0; i < 2 && !bad; i++) {
+        ray_t* at = q_search_find(u, m[i]);
+        ray_t* r = at && !RAY_IS_ERR(at) ? q_index_at(rank, &at, 1) : at;
+        if (at && at != r) ray_release(at);
+        if (!r || RAY_IS_ERR(r)) { bad = r ? r : q_err(QE_OOM); break; }
+        ray_release(m[i]);
+        m[i] = r;
+    }
+    ray_release(u);
+    if (rank && rank != bad) ray_release(rank);
+    return bad;
+}
+
+/* The join's two inputs: the `keys` columns of x and y AS THEY MEET (q_enum_meet), re-added under the same names,
+ * each with a rowid column named rid[side] (none when -1).  `ord` is the one key matched by ORDER, -1 when every
+ * key is matched for equality.  keys = RAY_LIST of sym atoms (kept BOXED end-to-end: the engine unboxes itself and
+ * the helpers here index ray_t** — never collapse to a sym vector).  out[] owned; NULL, or the owned error. */
+static ray_t* qj_key_tables(ray_t* x, ray_t* y, ray_t* keys, int64_t ord, const int64_t rid[2], ray_t* out[2]) {
     int64_t nk = q_count(keys);
     ray_t** ke = (ray_t**)ray_data(keys);
-    ray_t* out = ray_table_new(nk + 1);
-    if (RAY_IS_ERR(out)) return out;
-    for (int64_t i = 0; i < nk; i++) {
-        ray_t* col = ray_table_get_col(t, ke[i]->i64);     /* borrowed */
-        if (!col) {
-            ray_release(out);
-            return q_err(QE_TYPE);
+    ray_t* t[2] = { x, y };
+    ray_t* bad = NULL;
+    for (int s = 0; s < 2; s++) out[s] = ray_table_new(nk + 1);
+    for (int64_t i = 0; i < nk && !bad; i++) {
+        ray_t* m[2] = { NULL, NULL };
+        ray_t* xc = ray_table_get_col(x, ke[i]->i64);                      /* borrowed */
+        ray_t* yc = ray_table_get_col(y, ke[i]->i64);
+        bad = !xc || !yc ? q_err(QE_TYPE) : q_enum_meet(xc, yc, i == ord, m);
+        if (bad) break;
+        if (i == ord && m[0]->type == RAY_SYM && m[1]->type == RAY_SYM) bad = qj_sym_ranks(m);
+        for (int s = 0; s < 2; s++) {
+            if (!bad && !RAY_IS_ERR(out[s])) out[s] = ray_table_add_col(out[s], ke[i]->i64, m[s]);
+            ray_release(m[s]);
         }
-        out = ray_table_add_col(out, ke[i]->i64, col);
-        if (RAY_IS_ERR(out)) return out;
     }
-    if (rid_sym < 0) return out;
-    ray_t* rid = qj_rowid_col(q_count(t));
-    if (RAY_IS_ERR(rid)) { ray_release(out); return rid; }
-    out = ray_table_add_col(out, rid_sym, rid);
-    ray_release(rid);
+    for (int s = 0; s < 2 && !bad; s++) {
+        if (RAY_IS_ERR(out[s])) { bad = out[s]; out[s] = NULL; break; }
+        if (rid[s] < 0) continue;
+        ray_t* r = qj_rowid_col(q_count(t[s]));
+        if (RAY_IS_ERR(r)) { bad = r; break; }
+        out[s] = ray_table_add_col(out[s], rid[s], r);
+        ray_release(r);
+        if (RAY_IS_ERR(out[s])) { bad = out[s]; out[s] = NULL; }
+    }
+    if (!bad) return NULL;
+    for (int s = 0; s < 2; s++)
+        if (out[s] && !RAY_IS_ERR(out[s])) ray_release(out[s]);
+        else if (out[s]) ray_error_free(out[s]);
+    return bad;
+}
+
+/* t with each `keys` column among its first `lead` read from `from` instead (both borrowed; owned), t itself where
+ * none differs.  A later column of a key's name is not the key: wj appends an aggregate under its source name. */
+static ray_t* qj_keys_from(ray_t* t, ray_t* from, ray_t* keys, int64_t lead) {
+    int64_t nc = ray_table_ncols(t), differ = 0;
+    for (int64_t c = 0; c < lead && !differ; c++) {
+        int64_t nm = ray_table_col_name(t, c);
+        differ = qj_sym_in_list(keys, nm) && ray_table_get_col(from, nm) != ray_table_get_col_idx(t, c);
+    }
+    if (!differ) { ray_retain(t); return t; }
+    ray_t* out = ray_table_new(nc);
+    for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
+        int64_t nm = ray_table_col_name(t, c);
+        ray_t* col = c < lead && qj_sym_in_list(keys, nm) ? ray_table_get_col(from, nm) : ray_table_get_col_idx(t, c);
+        if (!col) { ray_release(out); return q_err(QE_TYPE); }
+        out = ray_table_add_col(out, nm, col);
+    }
     return out;
 }
 
@@ -204,9 +262,10 @@ static int qj_keys_nested(ray_t* t, ray_t* keys) {
 /* The relation for nested keys, matched by row Find (`~` without tolerance): x row l's first y match is (yk?xk)[l], and `all` adds
  * the rest of its class, the y rows whose own first match (yk?yk) is the same row.  qj_join_pairs' contract. */
 static int64_t qj_find_pairs(ray_t* x, ray_t* y, ray_t* keys, int all, qj_pair_t** out, ray_t** err) {
-    ray_t* o[4] = { qj_keyid_table(x, keys, -1), NULL, NULL, NULL };         /* xk, yk, yk?xk, yk?yk */
-    if (!RAY_IS_ERR(o[0])) o[1] = qj_keyid_table(y, keys, -1);
-    if (o[1] && !RAY_IS_ERR(o[1])) o[2] = q_search_find(o[1], o[0]);
+    ray_t* o[4] = { NULL, NULL, NULL, NULL };                                /* xk, yk, yk?xk, yk?yk */
+    *err = qj_key_tables(x, y, keys, -1, (int64_t[2]){ -1, -1 }, o);
+    if (*err) return -1;
+    o[2] = q_search_find(o[1], o[0]);
     if (all && o[2] && !RAY_IS_ERR(o[2])) o[3] = q_search_find(o[1], o[1]);
     for (int i = 0; i < 4 && !*err; i++) if (o[i] && RAY_IS_ERR(o[i])) { *err = o[i]; o[i] = NULL; }
     int64_t nx = q_count(x), ny = q_count(y), np = 0;
@@ -248,14 +307,13 @@ static int64_t qj_join_pairs(ray_t* x, ray_t* y, ray_t* keys, int all,
     if (qj_keys_nested(x, keys) || qj_keys_nested(y, keys)) return qj_find_pairs(x, y, keys, all, out, err);
     int64_t lrid = qj_tmp_colname("qjl", x, y);
     int64_t rrid = qj_tmp_colname("qjr", x, y);
-    ray_t* lk = qj_keyid_table(x, keys, lrid);
-    if (!lk || RAY_IS_ERR(lk)) { *err = lk ? lk : q_err(QE_TYPE); return -1; }
-    ray_t* rk = qj_keyid_table(y, keys, rrid);
-    if (!rk || RAY_IS_ERR(rk)) { ray_release(lk); *err = rk ? rk : q_err(QE_TYPE); return -1; }
-    ray_t* args[3] = { keys, lk, rk };
+    ray_t* kt[2];
+    *err = qj_key_tables(x, y, keys, -1, (int64_t[2]){ lrid, rrid }, kt);
+    if (*err) return -1;
+    ray_t* args[3] = { keys, kt[0], kt[1] };
     ray_t* res = ray_left_join_fn(args, 3);
-    ray_release(lk);
-    ray_release(rk);
+    ray_release(kt[0]);
+    ray_release(kt[1]);
     if (!res || RAY_IS_ERR(res)) { *err = res ? res : q_err(QE_TYPE); return -1; }
     ray_t* lc = ray_table_get_col(res, lrid);              /* borrowed */
     ray_t* rc = ray_table_get_col(res, rrid);              /* borrowed */
@@ -597,7 +655,9 @@ static ray_t* qj_uj_unkeyed(ray_t* x, ray_t* y) {
         ray_t* yc = ray_table_get_col(y, nm);              /* borrowed or NULL */
         ray_t* col;
         if (yc) {
-            col = ray_concat_fn(xc, yc);
+            ray_t* av[2] = { xc, yc };                     /* an enum joins as `,` joins it (ref/join.md:58-80) */
+            col = q_enum_is(xc) || q_enum_is(yc) ? q_eval_apply_value(q_registry_lookup_name(",", 1, Q_DYADIC), av, 2)
+                                                 : ray_concat_fn(xc, yc);
         } else {
             for (int64_t i = 0; i < nx + ny; i++) xi[i] = (i < nx) ? i : -1;
             col = qj_col_gather(xc, xi, nx + ny);
@@ -809,11 +869,13 @@ static int64_t* qj_aj_map(ray_t* keys, ray_t* t1, ray_t* t2, ray_t** err) {
         }
     }
     int64_t rid = qj_tmp_colname("ajr", t1, t2);
-    ray_t* rk = qj_keyid_table(t2, keys, rid);
-    if (!rk || RAY_IS_ERR(rk)) { *err = rk ? rk : q_err(QE_TYPE); return NULL; }
-    ray_t* args[3] = { keys, t1, rk };
+    ray_t* kt[2];
+    *err = qj_key_tables(t1, t2, keys, nk - 1, (int64_t[2]){ -1, rid }, kt);
+    if (*err) return NULL;
+    ray_t* args[3] = { keys, kt[0], kt[1] };
     ray_t* res = ray_asof_join_fn(args, 3);
-    ray_release(rk);
+    ray_release(kt[0]);
+    ray_release(kt[1]);
     if (!res || RAY_IS_ERR(res)) { *err = res ? res : q_err(QE_TYPE); return NULL; }
     ray_t* rc = ray_table_get_col(res, rid);               /* borrowed */
     int64_t n1 = q_count(t1);
@@ -1029,6 +1091,26 @@ ray_t* q_asof_wrap(ray_t* t, ray_t* d) {
  *     (list-constructor; lo; hi) application (the paren-literal head).
  * The `(::;`c)` raw-window form is 'nyi: the engine's bare-column arm emits
  * null placeholders — an error beats a wrong answer. */
+static ray_t* qj_wj_run(ray_t* kv, ray_t* w, ray_t* t, ray_t* qt, ray_t* spec, int mode);
+
+typedef struct { ray_t* qt; ray_t* spec; ray_t* keys; int64_t c; } qj_wj_read_t;
+
+/* q's next column as the engine reads it: an enum equality key that an aggregate reads goes as its values (the engine
+ * aggregates what it is handed, and a position is not a symbol). */
+static ray_t* qj_wj_read_col(void* ctx, ray_t* col) {
+    qj_wj_read_t* r = (qj_wj_read_t*)ctx;
+    int64_t nm = ray_table_col_name(r->qt, r->c++);
+    ray_t** se = (ray_t**)ray_data(r->spec);
+    int read = 0;
+    for (int64_t a = 1, na = q_count(r->spec); a < na && !read; a++) {
+        ray_t** pe = se[a] && se[a]->type == RAY_LIST && q_count(se[a]) == 2 ? (ray_t**)ray_data(se[a]) : NULL;
+        read = pe && pe[1] && pe[1]->type == -RAY_SYM && pe[1]->i64 == nm;
+    }
+    if (read && q_enum_is(col) && qj_sym_in_list(r->keys, nm)) return q_enum_val_image(col);
+    ray_retain(col);
+    return col;
+}
+
 static ray_t* qj_wj_core(ray_t** args, int64_t n, int mode) {
     if (n != 4) return q_err(QE_RANK);
     ray_t* w = args[0];
@@ -1062,7 +1144,39 @@ static ray_t* qj_wj_core(ray_t** args, int64_t n, int mode) {
         kv = ray_vec_append(kv, &id);
         if (!kv || RAY_IS_ERR(kv)) { ray_release(keys); return kv ? kv : q_err(QE_OOM); }
     }
+    /* the engine reads t and q whole: each takes its EQUALITY keys as the two sides meet on them (the last key is
+     * windowed against w, never matched), and the result takes t's own back */
+    ray_release(ke[--keys->len]);
+    qj_wj_read_t rd = { qt, spec, keys, 0 };
+    qt = q_table_map_cols(qj_wj_read_col, &rd, qt);
+    if (RAY_IS_ERR(qt)) { ray_release(kv); ray_release(keys); return qt; }
+    ray_t* kt[2];
+    ray_t* o[4] = { qj_key_tables(t, qt, keys, -1, (int64_t[2]){ -1, -1 }, kt), NULL, NULL, NULL };   /* fault; t, q met; answer */
+    if (!o[0]) {
+        o[1] = qj_keys_from(t, kt[0], keys, ray_table_ncols(t));
+        o[2] = qj_keys_from(qt, kt[1], keys, ray_table_ncols(qt));
+        ray_release(kt[0]);
+        ray_release(kt[1]);
+    }
+    int ok = !o[0] && !RAY_IS_ERR(o[1]) && !RAY_IS_ERR(o[2]);
+    if (ok) o[3] = qj_wj_run(kv, w, o[1], o[2], spec, mode);
+    else ray_release(kv);
+    ray_t* r = NULL;
+    if (ok && !RAY_IS_ERR(o[3]) && o[3]->type == RAY_TABLE) r = qj_keys_from(o[3], t, keys, ray_table_ncols(t));
+    for (int i = 3; i >= 0; i--) {                         /* else the answer as it is, or the first fault */
+        if (!o[i]) continue;
+        if (!r && (i == 3 || RAY_IS_ERR(o[i]))) r = o[i];
+        else if (RAY_IS_ERR(o[i])) ray_error_free(o[i]);
+        else ray_release(o[i]);
+    }
+    ray_release(qt);
     ray_release(keys);
+    return r ? r : q_err(QE_OOM);
+}
+
+/* The engine call over prepared tables: the agg dict, the intervals, the special form.  Consumes kv. */
+static ray_t* qj_wj_run(ray_t* kv, ray_t* w, ray_t* t, ray_t* qt, ray_t* spec, int mode) {
+    ray_t** se = (ray_t**)ray_data(spec);
     /* agg dict from the (fnvalue; `col) pairs */
     int64_t na = q_count(spec) - 1;
     ray_t* dk = ray_sym_vec_new(RAY_SYM_W64, na > 0 ? na : 1);
@@ -1128,13 +1242,7 @@ ray_t* q_wj1_wrap(ray_t** args, int64_t n) { return qj_wj_core(args, n, 1); }
  * One boxed item of any sequence: strings iterate CHARS (1-char -RAY_STR
  * cells, string-model shim), atoms behave as 1-item lists.  Owned result. */
 ray_t* q_join_item(ray_t* x, int64_t i) {
-    if (x && x->type == RAY_TABLE) return q_table_row_at(x, i);   /* base at reads a nested table column's slots */
-    if (x && x->type == RAY_ENUM) {              /* base at is enum-blind: the
-                                                  * item is the -20h atom */
-        if (i < 0 || i >= q_count(x)) return q_enum_null_atom(q_enum_domain(x));
-        return q_enum_stamp(ray_i64(((const int64_t*)ray_data(x))[i]),
-                            q_enum_domain(x));
-    }
+    if (x && (x->type == RAY_TABLE || x->type == RAY_ENUM)) return q_index_elem_at(x, i);   /* base at reads neither */
     ray_t* ia = ray_i64(i);
     ray_t* e = ray_at_fn(x, ia);
     ray_release(ia);
