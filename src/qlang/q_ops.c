@@ -446,8 +446,8 @@ static const q_op_t Q_OPS[] = {
     { "cols",    QLEX_KW,        QR_ENV("cols"),               QR_NONE,           NULL, 1, 0, "structural", NULL },
     /* The attribute SET/CLEAR side is the `#` verb's symbol-atom arm, not a row. */
     { "attr",    QLEX_KW,        QR_COVER("attr", q_attr_wrap), QR_NONE,          NULL, 1, 0, "structural", NULL },
+    { "abs",     QLEX_KW,        QR_FN1A("abs", q_abs_wrap),   QR_NONE,           NULL, 1, 0, "atomic", NULL, QKOP(31) },
     /* ---- monadic pass-throughs (rayfall name == q name, audited kdb-true) ---- */
-    { "abs",     QLEX_KW,        QR_ENV("abs"),                QR_NONE,           NULL, 1, 0, "atomic", NULL, QKOP(31) },
     /* `null` routes to the engine's atomic `nil?`; the wrapper collapses a
      * homogeneous top-level bool-atom run for kdb-true display. */
     { "null",    QLEX_KW,        QR_FN1("nil?", q_null_wrap),  QR_NONE,           NULL, 1, 0, "atomic", NULL, QKOP(7) },

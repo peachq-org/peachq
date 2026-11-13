@@ -132,6 +132,7 @@ ray_t* q_xlog_wrap(ray_t* x, ray_t* y);
 ray_t* q_eq_wrap(ray_t* a, ray_t* b);
 ray_t* q_ne_wrap(ray_t* a, ray_t* b);
 ray_t* q_neg_wrap(ray_t* x);
+ray_t* q_abs_wrap(ray_t* x);
 ray_t* q_not_wrap(ray_t* x);
 ray_t* q_reciprocal_wrap(ray_t* x);
 
