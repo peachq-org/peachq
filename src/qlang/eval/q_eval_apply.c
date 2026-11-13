@@ -1754,6 +1754,66 @@ static int hole_args(ray_t* fv, ray_t** args, int64_t n, ray_t** out) {
     return 1;
 }
 
+static int amend_head(ray_t* d);
+
+/* The unary verbs that read a table's shape and none of its cells, by name at this one site: 1 for `type` and
+ * `cols`, which map nothing; 2 for `count`, a column's count (kdb's count of a splay is one column's). */
+static int shape_verb(const q_op_t* row, int64_t n) {
+    const char* nm = row && n == 1 ? row->name : NULL;
+    if (!nm) return 0;
+    if (!strcmp(nm, "type") || !strcmp(nm, "@") || !strcmp(nm, "cols")) return 1;
+    return !strcmp(nm, "count") || !strcmp(nm, "#") ? 2 : 0;
+}
+
+static ray_t* count_mapped(ray_t* t) {
+    ray_t* first = ray_table_ncols(t) ? ray_sym(ray_table_col_name(t, 0)) : NULL;
+    ray_t* m = q_splay_deferred_map(t, first);
+    if (first) ray_release(first);
+    return m;
+}
+
+/* Does this application read its arguments' cells?  One that projects reads none; a lambda, projection or
+ * composition only passes them on, as do Apply and Trap; the index home and functional qSQL map the columns they
+ * name. */
+static int reads_args(ray_t* fv, const q_op_t* row, q_car_kind_t kind, ray_t** args, int64_t n) {
+    if (kind == Q_EVAL_CAR_LAMBDA || kind == Q_EVAL_CAR_PROJ || kind == Q_EVAL_CAR_COMP) return 0;
+    if (shape_verb(row, n) == 1 && q_splay_table_deferred(args[0])) return 0;
+    for (int64_t i = 0; i < n; i++)
+        if (!args[i]) return 0;
+    if (kind == Q_EVAL_CAR_NONE && fv->type == RAY_VARY) {
+        ray_vary_fn f = (ray_vary_fn)(uintptr_t)fv->i64;
+        if (n < 2 && fnv_matrix_value(fv)) return 0;
+        if (f == q_eval_at_wrap || f == q_eval_dot_wrap) return n > 3 || (n == 3 && amend_head(args[0]));
+        if (f == q_funsql_ques_wrap || f == q_funsql_bang_wrap) return n < 4;
+    }
+    int64_t rank = q_eval_apply_is_fn(fv) ? rank_of(fv) : -1;
+    return rank < 0 || n >= rank;
+}
+
+/* An application that reads a deferred argument (ref/get.md:29; kb/file-compression.md:150): `out` is args with
+ * each deferred table replaced by its owned mapped one, for this application alone.  Only an argument ITSELF is
+ * asked — no container holds a deferred table (q_splay_contained), so no list is ever searched.  The count
+ * replaced, or -1 with *err. */
+static int64_t map_deferred(ray_t* fv, const q_op_t* row, q_car_kind_t kind, ray_t** args, int64_t n, ray_t** out,
+                            ray_t** err) {
+    int64_t k = 0;
+    for (int64_t i = 0; i < n && !k; i++) k = args[i] && args[i]->type == RAY_TABLE && q_splay_table_deferred(args[i]);
+    if (!k || !reads_args(fv, row, kind, args, n)) return 0;
+    int one = shape_verb(row, n) == 2 && q_splay_table_deferred(args[0]);
+    k = 0;
+    for (int64_t i = 0; i < n; i++) {
+        ray_t* m = one ? count_mapped(args[0]) : q_splay_deferred_map(args[i], NULL);
+        if (m && !RAY_IS_ERR(m) && !k++) memcpy(out, args, (size_t)n * sizeof *out);
+        if (m && RAY_IS_ERR(m)) {
+            for (int64_t j = 0; k && j < i; j++) if (out[j] != args[j]) ray_release(out[j]);
+            *err = m;
+            return -1;
+        }
+        if (m) out[i] = m;
+    }
+    return k;
+}
+
 static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     if (!fv || RAY_IS_ERR(fv)) return q_err(QE_TYPE);
     if (q_eval_interrupt_take()) {
@@ -1777,6 +1837,15 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
             row = krow;
             kind = Q_EVAL_CAR_NONE;
         }
+    }
+    ray_t* mapped[APPLY_MAX_ARGS];
+    ray_t* bad = NULL;
+    int64_t nmapped = map_deferred(fv, row, kind, args, n, mapped, &bad);
+    if (nmapped < 0) return bad;
+    if (nmapped) {
+        ray_t* r = q_eval_apply_concrete(apply_inner(fv, row, mapped, n));
+        for (int64_t i = 0; i < n; i++) if (mapped[i] != args[i]) ray_release(mapped[i]);
+        return r;
     }
     switch (kind) {
     case Q_EVAL_CAR_FOREIGN: return q_err(QE_TYPE);   /* 112h, but opaque: never callable */
@@ -2188,6 +2257,14 @@ ray_t* q_eval_dot_wrap(ray_t** args, int64_t n) {
     }
     if (n == 3 || n == 4) return amend_value(args, n, 1);
     if (n != 2) return q_err(QE_RANK);
+    ray_t* rows = q_splay_deferred_map(args[1], NULL);   /* a deferred table's ROWS spread: mapped for the spread */
+    if (rows && !RAY_IS_ERR(rows)) {
+        ray_t* spread[2] = { args[0], rows };
+        ray_t* r = q_eval_dot_wrap(spread, 2);
+        ray_release(rows);
+        return r;
+    }
+    if (rows) return rows;
     ray_t* a = args[1];
     if (!a || (!ray_is_vec(a) && a->type != RAY_LIST && a->type != RAY_TABLE))
         return q_err(QE_TYPE);

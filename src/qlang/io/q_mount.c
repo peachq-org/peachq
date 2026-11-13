@@ -48,8 +48,6 @@ static int mount_has_dotd(const char* dir, size_t n) {
            stat(p, &st) == 0 && S_ISREG(st.st_mode);
 }
 
-/* Bind `name` to `dir`'s mapped table — `.d` and column HEADERS only, no column data
- * (kb/splayed-tables.md:217). */
 static ray_t* mount_bind_splay(const char* dir, size_t n, const char* name, size_t nn) {
     char h[PATH_MAX + 2];
     if (snprintf(h, sizeof h, ":%.*s/", (int)n, dir) >= (int)sizeof h) return q_err(QE_OS);
