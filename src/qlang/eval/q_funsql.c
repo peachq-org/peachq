@@ -159,7 +159,60 @@ static void ques_unmapped(ray_t* t, ray_t* mapped) {
     g_unmapped = acc && !RAY_IS_ERR(acc) ? acc : NULL;
 }
 
-static ray_t* ques_from_n(ray_t* t, int64_t* nkey, int hops, ray_t** q, int64_t qn) {
+static ray_t* where_fold(ray_t* c, ray_t* t, ray_t* idx0);
+
+/* does a constraint name the partition column, and neither a column of t's own nor the row index? */
+static int names_partition(ray_t* tree, ray_t* t, int64_t field) {
+    ray_t* acc = ray_vec_new(RAY_SYM, 8);
+    phrase_names(tree, &acc);
+    if (!acc || RAY_IS_ERR(acc)) { if (acc) ray_error_free(acc); return 0; }
+    int has = 0, other = 0;
+    int64_t row = ray_sym_intern_runtime("i", 1);
+    for (int64_t j = 0; j < q_count(acc); j++) {
+        int64_t id = ray_vec_get_sym_id(acc, j);
+        if (id == field) has = 1;
+        else if (id == row || ray_table_get_col(t, id)) other = 1;
+    }
+    ray_release(acc);
+    return has && !other;
+}
+
+/* only the select forms: a by that is a boolean or a dict over a phrase that is a dict or nothing */
+static int ques_is_exec(ray_t** q) {
+    int by = is_bool_atom(q[2], 0) || is_bool_atom(q[2], 1) || q_type_is_dict(q[2]);
+    return !(by && (q_type_is_dict(q[3]) || is_empty_gen(q[3])));
+}
+
+/* A partitioned source resolves to ONE in-memory table for the query (kb/partition.md; basics/qsql.md:306-308): the
+ * leading constraints that name only the partition column choose the partitions, answered over the partition
+ * values; those partitions' named columns are read and razed, and *lead counts the constraints so answered — the
+ * select runs the rest.  NULL: the loaded database holds no table of that name. */
+static ray_t* ques_partitioned(ray_t* t, ray_t* names, ray_t** q, int64_t qn, int64_t* lead) {
+    if (q && ques_is_exec(q)) return q_err(QE_PAR);       /* ref/exec.md:35-40: exec takes no partitioned table */
+    if (qn > 4) return q_err(QE_NYI);                     /* ref/flip-splayed.md:23: nor select's extra arguments */
+    ray_t* values = q ? q_splay_named_values() : NULL;
+    if (values && RAY_IS_ERR(values)) return values;
+    int64_t n = values && q[1] && q[1]->type == RAY_LIST ? q_count(q[1]) : 0, k = 0;
+    ray_t* head = ray_list_new(n > 0 ? n : 1);
+    for (int own = 1; own && k < n && !RAY_IS_ERR(head); k += own) {
+        ray_t* tree = q_index_elem_at(q[1], k);
+        own = tree && !RAY_IS_ERR(tree) && names_partition(tree, t, ray_table_col_name(values, 0));
+        if (own) head = ray_list_append(head, tree);
+        if (tree && RAY_IS_ERR(tree)) ray_error_free(tree);
+        else if (tree) ray_release(tree);
+    }
+    ray_t* parts = RAY_IS_ERR(head) ? head : k ? where_fold(head, values, til_count(values)) : NULL;
+    ray_t* m = parts && RAY_IS_ERR(parts) ? parts : q_splay_named_map(t, names, parts);
+    if (parts && parts != m) ray_release(parts);
+    if (head != m) ray_release(head);
+    if (values) ray_release(values);
+    if (m && !RAY_IS_ERR(m) && lead) *lead = k;
+    return m;
+}
+
+/* `names`: the columns the select names (NULL = every one); `q`: its arguments, by which a partitioned source
+ * chooses its partitions (NULL: no select), *lead then counting the constraints the partitions answered. */
+static ray_t* ques_from_n(ray_t* t, int64_t* nkey, int hops, ray_t* names, ray_t** q, int64_t qn, int64_t* lead) {
     if (!t) return q_err(QE_TYPE);
     ray_t* pm = q_provider_from_table(t);   /* carrier / table coordinate: provider truth */
     if (pm) return pm;
@@ -167,7 +220,7 @@ static ray_t* ques_from_n(ray_t* t, int64_t* nkey, int hops, ray_t** q, int64_t 
         ray_t* v = q_io_resource_table(t);
         if (!v) v = q_eval_value_wrap(t);
         if (RAY_IS_ERR(v)) return v;
-        ray_t* r = ques_from_n(v, nkey, hops + 1, q, qn);
+        ray_t* r = ques_from_n(v, nkey, hops + 1, names, q, qn, lead);
         ray_release(v);
         return r;
     }
@@ -176,7 +229,7 @@ static ray_t* ques_from_n(ray_t* t, int64_t* nkey, int hops, ray_t** q, int64_t 
         ray_t* v = q_env_handle_resolve(t->i64);
         if (!v) return q_err(QE_NAME);
         if (RAY_IS_ERR(v)) return v;
-        ray_t* r = ques_from_n(v, nkey, hops + 1, q, qn);
+        ray_t* r = ques_from_n(v, nkey, hops + 1, names, q, qn, lead);
         ray_release(v);
         return r;
     }
@@ -186,10 +239,9 @@ static ray_t* ques_from_n(ray_t* t, int64_t* nkey, int hops, ray_t** q, int64_t 
     }
     if (q_type_is_dict(t)) { ray_retain(t); return t; }
     if (q_splay_table_deferred(t)) {     /* mapped for this query; a missing dir is 'io, an unknown name itself (`'s`) */
-        ray_t* names = ques_names(q, qn);
-        ray_t* m = q_splay_deferred_map(t, names);
-        if (names) ray_release(names);
-        if (m && !RAY_IS_ERR(m) && ray_table_ncols(m) < ray_table_ncols(t)) ques_unmapped(t, m);
+        int named = q_splay_table_named(t);
+        ray_t* m = named ? ques_partitioned(t, names, q, qn, lead) : q_splay_deferred_map(t, names);
+        if (m && !RAY_IS_ERR(m) && ray_table_ncols(m) < ray_table_ncols(t) + named) ques_unmapped(t, m);
         if (m) return m;
         ray_t* s = ray_sym(q_splay_table_path(t));
         ray_t* nm = ray_sym_str(s->i64);                  /* borrowed */
@@ -201,7 +253,7 @@ static ray_t* ques_from_n(ray_t* t, int64_t* nkey, int hops, ray_t** q, int64_t 
     return q_err(QE_TYPE);
 }
 
-static ray_t* ques_from(ray_t* t, int64_t* nkey) { return ques_from_n(t, nkey, 0, NULL, 0); }
+static ray_t* ques_from(ray_t* t, int64_t* nkey) { return ques_from_n(t, nkey, 0, NULL, NULL, 0, NULL); }
 
 /* one column of the from-value, OWNED (NULL = no such column) */
 static ray_t* from_col_owned(ray_t* t, int64_t nm) {
@@ -1068,22 +1120,46 @@ static ray_t* sort_result(ray_t* spec, ray_t* nspec, ray_t* r) {
 
 static ray_t* ques_select_over(ray_t** args, int64_t n, ray_t* t, int64_t nk);
 
+/* the select over its source resolved for the columns `names` (NULL = every one); the constraints a partitioned
+ * source's partitions answered are not run again */
+static ray_t* ques_select_from(ray_t** args, int64_t n, ray_t* names) {
+    int64_t nk = 0, lead = 0;                    /* keyed source: re-key the result */
+    ray_t* t = ques_from_n(args[0], &nk, 0, names, args, n, &lead);
+    if (!lead) return ques_select_over(args, n, t, nk);
+    ray_t* rest[6];
+    memcpy(rest, args, (size_t)n * sizeof *rest);
+    /* not Drop: its result collapses two bare column names into a symbol vector, which is no constraint list */
+    int64_t nc = q_count(args[1]);
+    rest[1] = ray_list_new(nc - lead > 0 ? nc - lead : 1);
+    for (int64_t j = lead; j < nc && !RAY_IS_ERR(rest[1]); j++) {
+        ray_t* tree = q_index_elem_at(args[1], j);
+        rest[1] = ray_list_append(rest[1], tree);
+        ray_release(tree);
+    }
+    if (RAY_IS_ERR(rest[1])) {
+        if (t && !RAY_IS_ERR(t)) ray_release(t);
+        return rest[1];
+    }
+    ray_t* r = ques_select_over(rest, n, t, nk);
+    ray_release(rest[1]);
+    return r;
+}
+
 static ray_t* ques_select(ray_t** args, int64_t n) {
     ray_t* pushed = q_provider_qsql_push(args, n); /* NULL: not provider / no qsql hook */
     if (pushed) return pushed;
-    int64_t nk = 0;                              /* keyed source: re-key the result */
     ray_t* outer = g_unmapped;                   /* an enclosing select's: restored when this one is done */
     g_unmapped = NULL;
     int64_t hits = q_env_frame_watch_hits();
-    ray_t* t = ques_from_n(args[0], &nk, 0, args, n);
-    ray_t* r = ques_select_over(args, n, t, nk);
+    ray_t* names = ques_names(args, n);
+    ray_t* r = ques_select_from(args, n, names);
+    if (names) ray_release(names);
     if (g_unmapped && hits != q_env_frame_watch_hits()) {
         if (r && RAY_IS_ERR(r)) ray_error_free(r);
         else if (r) ray_release(r);
         ray_release(g_unmapped);
         g_unmapped = NULL;
-        nk = 0;
-        r = ques_select_over(args, n, ques_from_n(args[0], &nk, 0, NULL, 0), nk);
+        r = ques_select_from(args, n, NULL);
     }
     if (g_unmapped) ray_release(g_unmapped);
     g_unmapped = outer;
@@ -1560,6 +1636,8 @@ static ray_t* bang_qsql(ray_t** args) {
     } else {
         return q_err(QE_TYPE);
     }
+    /* by name it would rebind the database's table as its in-memory copy */
+    if (name >= 0 && q_splay_table_named(src)) { ray_release(src); return q_err(QE_PAR); }
     ray_t* mapped = q_splay_deferred_map(src, NULL);
     if (mapped) {
         ray_release(src);

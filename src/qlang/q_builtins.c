@@ -19,6 +19,7 @@
 #include "qlang/q_ctx.h"      /* q_ctx_ld_fn — .Q.c.ld, the load's grouping */
 #include "qlang/base/q_type.h"     /* q_type_of — the `type` verb's type-number home */
 #include "qlang/io/q_provider.h"     /* provider carriers: 98h, count via provider */
+#include "qlang/io/q_splay.h"        /* q_splay_part_fn — .Q.c.part */
 #include "ops/ops.h"                 /* ray_is_lazy / ray_lazy_materialize */
 #include "lang/env.h"       /* ray_fn_unary; ray_env_get = bootstrap catalogue reads */
 #include "lang/eval.h"      /* RAY_FN_NONE */
@@ -344,7 +345,7 @@ void q_builtins_register(void) {
      * home).  .Q.c.atob stays C-bound — it has no bang twin. */
     static const struct { const char* name; ray_unary_fn fn; } dotq_c_unary[] = {
         { ".Q.c.id",   id_fn        }, { ".Q.c.ty",   q_dotq_ty_fn   }, { ".Q.c.lty", list_type_fn },
-        { ".Q.c.qt",   q_dotq_qt_fn   }, { ".Q.c.qp",   q_dotq_qp_fn   },
+        { ".Q.c.qt",   q_dotq_qt_fn   },
         { ".Q.c.s",    q_dotq_s_fn    }, { ".Q.c.atob", q_dotq_atob_fn },
         { ".Q.c.cells", q_dotq_cells_fn },
         { ".Q.c.hg",   q_dotq_hg_fn   },   /* HTTP GET (ref/dotq.md) */
@@ -361,6 +362,7 @@ void q_builtins_register(void) {
     bind_vary (".Q.c.gc",  1, q_dotq_gc_fn);    /* garbage collect (ref/dotq.md) */
     bind_vary (".Q.c.zblocks", 1, q_dotq_zblocks_fn); /* inflated-blocks witness (internal) */
     bind_vary (".Q.c.asks", 1, q_dotq_asks_fn);       /* deferred-table tests witness (internal) */
+    bind_vary (".Q.c.part", 2, q_splay_part_fn);      /* one partition's columns, mapped (dotq.q .Q.i.part) */
     bind_vary (".Q.c.hp", 3, q_dotq_hp_fn);     /* HTTP POST [url;mime;body] (ref/dotq.md) */
     bind_vary (".Q.c.gz", 1, q_dotq_gz_fn);     /* GZip ::/inflate/deflate (ref/dotq.md) */
     bind_vary (".Q.c.trp", 3, q_dbg_trp_fn);    /* trap-at + backtrace (ref/dotq.md) */

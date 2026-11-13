@@ -23,6 +23,20 @@ ray_t*  q_splay_deferred_rows(ray_t* t, ray_t* want, int64_t lo, int64_t n);
 ray_t*  q_splay_contained_table(ray_t* t);
 static inline ray_t* q_splay_contained(ray_t* v) { return v && v->type == RAY_TABLE ? q_splay_contained_table(v) : v; }
 
+/* A partitioned table is the reference flipped from a plain name (kb/partition.md; ref/flip-splayed.md:21).  What the
+ * loaded database holds is q's (.Q.pf, .Q.pv, .Q.pd), set by _mount when `\l` meets a database root (NULL, or an
+ * owned error).  _values is the owned one-column table of the partition values under the partition field's name
+ * (NULL: none); _map the owned in-memory table of t's columns named in `want` over the partitions indexed by the
+ * long vector `parts` (NULL = all), the partition column first — NULL when t is no such reference or the database
+ * holds no table of its name; _latest that of the most recent partition alone. */
+ray_t*  q_splay_named_mount(void);
+int     q_splay_table_named(ray_t* t);
+ray_t*  q_splay_named_values(void);
+ray_t*  q_splay_named_map(ray_t* t, ray_t* want, ray_t* parts);
+ray_t*  q_splay_named_latest(ray_t* t);
+/* `.Q.c.part[dir;names]`: the named columns of the splayed table in directory `dir`, mapped — one partition's. */
+ray_t*  q_splay_part_fn(ray_t** args, int64_t n);
+
 /* Cumulative inflated-block count — the compressed lane's laziness witness; and the deferred tests asked. */
 int64_t q_splay_zblocks(void);
 int64_t q_splay_asks(void);

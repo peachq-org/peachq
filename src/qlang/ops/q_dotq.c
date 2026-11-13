@@ -1,4 +1,4 @@
-/* ops/q_dotq.c — the .Q introspection surface: .Q.ty / .Q.qt / .Q.qp / .Q.S / .Q.s2
+/* ops/q_dotq.c — the .Q introspection surface: .Q.ty / .Q.qt / .Q.S / .Q.s2
  * (via the .Q.c.* C seam) and .Q.ops (the whole verb surface as a read-only
  * table: the C manifest unioned with the q-source stdlib).
  * Evicted from q_builtins.c; the type-letter kernel (q_ty_char) stays there. */
@@ -32,14 +32,6 @@ ray_t* q_dotq_ty_fn(ray_t* x) {
  * (simple OR keyed), else 0b. */
 ray_t* q_dotq_qt_fn(ray_t* x) {
     return ray_bool(x && (x->type == RAY_TABLE || q_type_is_keyed(x)));
-}
-
-/* (.Q.qp x) — is-partitioned predicate (ref/dotq.md `qp`): partitioned table
- * -> 1b, splayed table -> 0b, anything else -> 0 (a LONG, not a bool).  peachq
- * has no partitioned tables; a MAPPED splay is the table whose aux carries its
- * directory, and a derived table is plain (`.Q.qp select from B -> 0`). */
-ray_t* q_dotq_qp_fn(ray_t* x) {
-    return q_splay_table_path(x) ? ray_bool(false) : ray_i64(0);
 }
 
 /* (.Q.s x) — x as the classic console prints it, `\c`-clipped and line-terminated (ref/dotq.md `.Q.s`), whatever the
