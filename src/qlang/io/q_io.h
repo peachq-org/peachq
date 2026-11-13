@@ -132,8 +132,8 @@ size_t q_io_zipmap_maxblock(const q_io_zipmap_t* zm);
 int    q_io_zip_block_fd(int fd, const q_io_zipmap_t* zm, int64_t k,
                          uint8_t* scratch, uint8_t* dst, size_t cap);
 
-/* Write `img` as a container: 2^lbs blocks, each an independent zlib stream (alg 2) or raw lz4hc block (alg 4);
- * others 'nyi.  A block compression does not pay for is stored (alg 0).  NULL on success or an owned error. */
+/* Write `img` as a container of 2^lbs blocks: a compressed IPC message (alg 1), a zlib stream (alg 2) or a raw lz4hc
+ * block (alg 4) each; others 'nyi.  A block compression does not pay for is stored (alg 0).  NULL or an owned error. */
 ray_t* q_io_zip_write(ray_t* pathstr, const uint8_t* img, size_t n,
                       int lbs, int alg, int lvl);
 
