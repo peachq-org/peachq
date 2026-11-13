@@ -148,6 +148,17 @@ ray_t* q_neg_wrap(ray_t* x) {
     return ray_neg_fn(x);
 }
 
+/* q `abs` (ref/abs.md:49-50, range keeps p m d z n u v t): a temporal with a negative count is its neg, any other
+ * is itself; the numbers stay the base kernel's. */
+ray_t* q_abs_wrap(ray_t* x) {
+    if (x && temporal_tag((int8_t)-x->type)) {
+        if (as_f64(x) < 0) return q_neg_wrap(x);
+        ray_retain(x);
+        return x;
+    }
+    return ray_abs_fn(x);
+}
+
 /* q `x xexp y` — C pow(), the kdb 4.0 2020.07.15 law (embedPy tests/curvefit.t), not ref/exp.md's older exp y * log x:
  * `2 xexp 3` is exactly 8f and `-1 xexp 2` is 1f.  A negative base with a fractional or infinite exponent is 0n,
  * which pow alone misses at pow(-2, inf) = inf and pow(-inf, .5) = inf.  The published domain is `b x h i j e f` on

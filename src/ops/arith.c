@@ -22,6 +22,7 @@
  */
 
 #include "lang/internal.h"
+#include "lang/cal.h"    /* datetime_to_ns — the one datetime split */
 #include "ops/ops.h"
 #include "core/pool.h"   /* ray_pool_dispatch — xbar's parallel morsel loop */
 
@@ -44,18 +45,6 @@ static inline int64_t wrap_mul64(int64_t a, int64_t b) {
     return (int64_t)((uint64_t)a * (uint64_t)b);
 }
 
-/* ns per unit for the DURATION temporals (u/v/t/n); 0 = not a duration.
- * The duration/absolute split mirrors ref/add.md / ref/subtract.md:
- * durations combine to the FINER unit, absolute (p/d/m) ± duration -> p. */
-static int64_t duration_unit_ns(int8_t t) {
-    switch (-t) {
-        case RAY_MINUTE:   return 60000000000LL;
-        case RAY_SECOND:   return 1000000000LL;
-        case RAY_TIME:     return 1000000LL;
-        case RAY_TIMESPAN: return 1LL;
-        default:           return 0;
-    }
-}
 static int is_absolute_temporal(ray_t* x) {
     return x->type == -RAY_DATE || x->type == -RAY_MONTH ||
            x->type == -RAY_TIMESTAMP;
@@ -90,6 +79,26 @@ static ray_t* addsub_float_temporal(ray_t* a, ray_t* b, int sub) {
     return float_lane_atom(rt, sub ? as_f64(a) - as_f64(b) : as_f64(a) + as_f64(b));
 }
 
+/* ref/add.md:83-104, ref/subtract.md:74-95, the z row and column: a datetime beside a timespan answers a timestamp,
+ * the datetime read through the one datetime split; beside a minute, second or time it stays a datetime, the
+ * duration read as fractional days as the z+number arm reads a number.  Either order. */
+static int datetime_beside_duration(ray_t* a, ray_t* b) {
+    return (a->type == -RAY_DATETIME && duration_unit_ns(b->type)) ||
+           (duration_unit_ns(a->type) && b->type == -RAY_DATETIME);
+}
+static ray_t* addsub_datetime_duration(ray_t* a, ray_t* b, int sub) {
+    int span = a->type == -RAY_TIMESPAN || b->type == -RAY_TIMESPAN;
+    if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b)) return ray_typed_null(span ? -RAY_TIMESTAMP : -RAY_DATETIME);
+    if (span) {
+        int64_t x = a->type == -RAY_DATETIME ? datetime_to_ns(a->f64) : a->i64;
+        int64_t y = b->type == -RAY_DATETIME ? datetime_to_ns(b->f64) : b->i64;
+        return ray_timestamp(sub ? wrap_sub64(x, y) : wrap_add64(x, y));
+    }
+    double x = a->type == -RAY_DATETIME ? a->f64 : as_f64(a) * (double)duration_unit_ns(a->type) / NS_PER_DAY;
+    double y = b->type == -RAY_DATETIME ? b->f64 : as_f64(b) * (double)duration_unit_ns(b->type) / NS_PER_DAY;
+    return ray_datetime(sub ? x - y : x + y);
+}
+
 ray_t* ray_add_fn(ray_t* a, ray_t* b) {
     if ((a && RAY_IS_PARTED(a->type)) || (b && RAY_IS_PARTED(b->type)))
         return atomic_map_binary_op(ray_add_fn, OP_ADD, a, b);
@@ -110,6 +119,7 @@ ray_t* ray_add_fn(ray_t* a, ray_t* b) {
         return ray_datetime(as_f64(a) + b->f64);
     }
     if (float_beside_temporal(a, b)) return addsub_float_temporal(a, b, 0);
+    if (datetime_beside_duration(a, b)) return addsub_datetime_duration(a, b, 0);
 
     /* temporal + an int-family or real offset keeps the temporal (a float answered above) */
     if (is_temporal(a) && is_numeric(b)) {
@@ -217,6 +227,7 @@ ray_t* ray_sub_fn(ray_t* a, ray_t* b) {
     }
 
     if (float_beside_temporal(a, b)) return addsub_float_temporal(a, b, 1);
+    if (datetime_beside_duration(a, b)) return addsub_datetime_duration(a, b, 1);
     /* Temporal - int null propagation (both operands) */
     if (is_temporal(a) && is_numeric(b)) {
         if (RAY_ATOM_IS_NULL(a) || RAY_ATOM_IS_NULL(b))

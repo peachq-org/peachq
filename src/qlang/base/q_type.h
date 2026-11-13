@@ -55,6 +55,9 @@ int8_t q_type_common(int8_t a, int8_t b);
 /* The tag `a` is cast to before it compares with `b`, 0 = as it stands (basics/comparison.md:78-87,132). */
 int8_t q_type_cmp_as(int8_t a, int8_t b);
 
+/* The orderings refuse m vs z/n/u/v/t and d vs n/u/v/t, either order (ref/less-than.md:86-95). */
+int q_type_cmp_refuses(int8_t a, int8_t b);
+
 /* The type of x-x for two items of vector tag t (ref/subtract.md's diagonal): the ints up to int and an absolute
  * date or month count in int, a timestamp in timespan, a datetime in float, the rest in themselves; 0 = no
  * difference (guid, char, symbol). */

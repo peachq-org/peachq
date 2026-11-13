@@ -34,7 +34,7 @@
  * as_f64 (`0W` a large finite), applies one IEEE op and answers
  * promote_float_type's tag (% always a float).  The lane reads nulls as NaN,
  * which every op propagates, narrows a real through `float` and writes every
- * NaN as the null.  A char, a temporal and a byte vector stay out.
+ * NaN as the null.  A char and a temporal stay out.
  */
 #include "qlang/q_count.h"
 #include "qlang/ops/q_vecop.h"
@@ -355,7 +355,7 @@ static void pick_dbl(ray_t* out, int8_t rt, vop_t op, band_t xb, band_t yb, int6
  * The tags + - * read on INT: plain integers only.  A char is out (its 0x20 null
  * is in-band, and the byte lane's own reading of it is not arithmetic's), a
  * temporal is out (it has a payload law of its own); a float goes to DBL.
- * ray_is_byte_only keeps a byte ATOM, which widens like any other operand.
+ * ray_is_byte_only keeps a byte, which widens like any other operand.
  * div and mod read every int-backed count, a char's code point included. */
 static int arith_tag(int8_t t) {
     return t == RAY_BOOL || t == RAY_I16 || t == RAY_I32 || t == RAY_I64 || ray_is_byte_only(t);
@@ -461,11 +461,7 @@ static ray_t* float_binary(vop_t op, int8_t rt, ray_t* x, ray_t* y, int8_t xt, i
     return out;
 }
 
-/* A byte VECTOR operand of + - * % stays on the element road: + - * answer 'type
- * there today (`(0x01 0x02)+0x03`), the element store having no byte arm, and
- * declining leaves that error where it is.  div and mod never answer a byte. */
 static ray_t* arith_binary(vop_t op, ray_t* x, ray_t* y, int8_t xt, int8_t yt, int xv, int yv, int64_t n) {
-    if (op != VO_IDIV && op != VO_MOD && ((xv && ray_is_byte_only(xt)) || (yv && ray_is_byte_only(yt)))) return NULL;
     int8_t rt = float_rt(op, xt, yt);
     if (rt) return float_binary(op, rt, x, y, xt, yt, xv, yv, n);
     if (op == VO_DIV || !counts_tag(op, xt) || !counts_tag(op, yt)) return NULL;
@@ -551,6 +547,7 @@ ray_t* q_vecop_binary(ray_t* (*f)(ray_t*, ray_t*), ray_t* x, ray_t* y) {
 }
 
 int q_vecop_is_compare(ray_t* (*f)(ray_t*, ray_t*)) { return answers_bool(op_of(f)); }
+int q_vecop_is_ordering(ray_t* (*f)(ray_t*, ray_t*)) { vop_t op = op_of(f); return op >= VO_LT && op <= VO_GE; }
 
 /* ===== the monadic seam: `null x` ======================================== */
 
