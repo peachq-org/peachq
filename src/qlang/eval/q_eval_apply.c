@@ -1778,6 +1778,21 @@ static ray_t* count_mapped(ray_t* t) {
     return m;
 }
 
+/* The verbs that read a run of rows off one end of a table, by name at this one site — `first t`, `last t`, `n#t`:
+ * the owned plain table of just those rows of deferred argument i (q_splay_deferred_rows reads the rows alone).
+ * NULL for any other application, and where the rows are not all there (`n` past the count): it maps as before. */
+static ray_t* rows_mapped(const q_op_t* row, ray_t** args, int64_t n, int64_t i) {
+    const char* nm = row ? row->name : NULL;
+    if (!nm || i != n - 1) return NULL;
+    if (n == 1 && (!strcmp(nm, "first") || !strcmp(nm, "*"))) return q_splay_deferred_rows(args[0], NULL, 0, 1);
+    if (n == 1 && !strcmp(nm, "last")) return q_splay_deferred_rows(args[0], NULL, -1, 1);
+    int64_t c = 0;
+    int8_t ct = n == 2 && args[0] ? args[0]->type : 0;
+    if ((ct != -RAY_I64 && ct != -RAY_I32 && ct != -RAY_I16) || strcmp(nm, "#")) return NULL;
+    if (!q_type_strict_i64(args[0], &c) || c < -INT64_MAX) return NULL;
+    return c < 0 ? q_splay_deferred_rows(args[1], NULL, c, -c) : q_splay_deferred_rows(args[1], NULL, 0, c);
+}
+
 /* Does this application read its arguments' cells?  One that projects reads none; a lambda, projection or
  * composition only passes them on, as do Apply and Trap; the index home and functional qSQL map the columns they
  * name. */
@@ -1808,7 +1823,8 @@ static int64_t map_deferred(ray_t* fv, const q_op_t* row, q_car_kind_t kind, ray
     int one = shape_verb(row, n) == 2 && q_splay_table_deferred(args[0]);
     k = 0;
     for (int64_t i = 0; i < n; i++) {
-        ray_t* m = one ? count_mapped(args[0]) : q_splay_deferred_map(args[i], NULL);
+        ray_t* m = one ? count_mapped(args[0]) : rows_mapped(row, args, n, i);
+        if (!m && !one) m = q_splay_deferred_map(args[i], NULL);
         if (m && !RAY_IS_ERR(m) && !k++) memcpy(out, args, (size_t)n * sizeof *out);
         if (m && RAY_IS_ERR(m)) {
             for (int64_t j = 0; k && j < i; j++) if (out[j] != args[j]) ray_release(out[j]);
