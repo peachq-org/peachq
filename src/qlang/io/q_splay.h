@@ -27,7 +27,7 @@ int64_t q_splay_zblocks(void);
 int64_t q_splay_asks(void);
 
 /* The fault handler cannot raise: a torn block reads back zero-filled, this answers 1 ONCE for it (the apply
- * answers 'corrupt) and re-arms the block so the next touch answers again. */
+ * answers 'corrupt) and re-arms the block; a trusted p# index its column's cells denied answers the same way. */
 int q_splay_fault_pending(void);
 
 /* Live mapped bytes (region totals) — `.Q.w[]`mmap`'s source. */

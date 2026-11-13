@@ -61,7 +61,7 @@ static ray_t* qj_col_gather(ray_t* col, const int64_t* idx, int64_t n) {
                                                   * the base paths are enum-blind
                                                   * and 20h must survive a
                                                   * group/distinct/merge gather */
-        ray_t* p = q_enum_positions(col);
+        ray_t* p = q_enum_positions_view(col);
         if (!p || RAY_IS_ERR(p)) return p ? p : q_err(QE_OOM);
         ray_t* g = qj_col_gather(p, idx, n);
         ray_release(p);
