@@ -273,8 +273,10 @@ ray_sock_t ray_sock_connect(const char* host, uint16_t port, int timeout_ms)
     char port_str[8];
     snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
 
-    if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res)
+    if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) {
+        errno = ENXIO;
         return RAY_INVALID_SOCK;
+    }
 
     /* Try every resolved address in turn, not just the first.  `localhost`
      * commonly resolves to BOTH ::1 (IPv6, often first) and 127.0.0.1; a
