@@ -19,7 +19,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>   /* ENOENT — append's write-if-absent arm */
+#include <limits.h>  /* INT_MAX — one read's ceiling */
 #include <sys/stat.h>
+#include <unistd.h>  /* read, close — the domain file's one locked descriptor */
 
 static int64_t wf_i64(const uint8_t* p) { int64_t v; memcpy(&v, p, 8); return v; }
 static uint32_t wf_u32(const uint8_t* p) { uint32_t v; memcpy(&v, p, 4); return v; }
@@ -1017,27 +1019,33 @@ static ray_t* wf_append_a_list(ray_t* path, ray_t* y, int32_t count) {
     return bad;
 }
 
-/* Shape-A sym file: NUL-terminated names at EOF, ONE buffer/ONE write (no torn
- * half-symbol), header count untouched — advisory, the reader scans to EOF. */
-static ray_t* wf_append_syms(ray_t* path, ray_t* y) {
+/* y's names (a symbol atom or vector), each NUL-terminated, as one owned buffer: what a shape-A symbol file holds
+ * after its header.  NULL on OOM. */
+static uint8_t* wf_sym_bytes(ray_t* y, size_t* total) {
     int64_t n = y->type == -RAY_SYM ? 1 : q_count(y);
-    size_t total = 0;
+    *total = 0;
     for (int64_t i = 0; i < n; i++) {
-        int64_t id = y->type == -RAY_SYM ? y->i64 : ray_vec_get_sym_id(y, i);
-        ray_t* nm = ray_sym_str(id);                     /* borrowed */
-        total += (nm ? ray_str_len(nm) : 0) + 1;
+        ray_t* nm = ray_sym_str(y->type == -RAY_SYM ? y->i64 : ray_vec_get_sym_id(y, i));   /* borrowed */
+        *total += (nm ? ray_str_len(nm) : 0) + 1;
     }
-    uint8_t* buf = (uint8_t*)malloc(total ? total : 1);
-    if (!buf) return q_err(QE_OOM);
+    uint8_t* buf = (uint8_t*)malloc(*total ? *total : 1);
     uint8_t* w = buf;
-    for (int64_t i = 0; i < n; i++) {
-        int64_t id = y->type == -RAY_SYM ? y->i64 : ray_vec_get_sym_id(y, i);
-        ray_t* nm = ray_sym_str(id);
+    for (int64_t i = 0; buf && i < n; i++) {
+        ray_t* nm = ray_sym_str(y->type == -RAY_SYM ? y->i64 : ray_vec_get_sym_id(y, i));
         size_t l = nm ? ray_str_len(nm) : 0;
         memcpy(w, nm ? ray_str_ptr(nm) : "", l);
         w += l;
         *w++ = 0;
     }
+    return buf;
+}
+
+/* Shape-A sym file: the names at EOF, ONE buffer/ONE write (no torn
+ * half-symbol), header count untouched — advisory, the reader scans to EOF. */
+static ray_t* wf_append_syms(ray_t* path, ray_t* y) {
+    size_t total = 0;
+    uint8_t* buf = wf_sym_bytes(y, &total);
+    if (!buf) return q_err(QE_OOM);
     FILE* fp = fopen(ray_str_ptr(path), "ab");
     int bad = !fp || fwrite(buf, 1, total, fp) != total;
     if (fp && fclose(fp) != 0) bad = 1;
@@ -1083,6 +1091,23 @@ static ray_t* wf_append_rewrite(ray_t* path, ray_t* y, int zipped) {
     return bad;
 }
 
+/* An enum column file takes positions at EOF and nothing else (ref/upsert.md:135-148) — its domain was extended
+ * first, by `?` on the sym file.  An attributed one is read and rewritten whole (kb/file-compression.md:130).  Only
+ * an enum over the file's own domain is taken: a plain symbol or another domain has no evidence either way, and
+ * 'type beats writing intern ids.  A compressed one is blocked (kb/file-compression.md:134); a 32-bit one is Dvvddq. */
+static ray_t* wf_append_enum(ray_t* path, ray_t* y, const q_wf_colhdr* h) {
+    if (h->zipped || h->layout != 'D') return q_err(QE_NYI);
+    if (!q_enum_is(y) || q_enum_domain(y) != ray_sym_intern_runtime(h->domain, strlen(h->domain)))
+        return q_err(QE_TYPE);
+    if (h->disk_attr) return wf_append_rewrite(path, y, 0);
+    ray_t* pos = q_enum_positions(y);
+    if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_OOM);
+    ray_t* bad = pos->type < 0 ? wf_append_bytes(path, &pos->i64, 8, 0, NULL, 0)
+                               : wf_append_bytes(path, ray_data(pos), (size_t)q_count(pos) * 8, 0, NULL, 0);
+    ray_release(pos);
+    return bad;
+}
+
 static ray_t* wf_append_path(ray_t* path, ray_t* y) {
     if (!y) return q_err(QE_TYPE);
     ray_retain(y);
@@ -1106,7 +1131,18 @@ static ray_t* wf_append_path(ray_t* path, ray_t* y) {
     q_wf_colhdr h;
     ray_t* e = q_wirefile_probe(path, &h);
     if (e) { ray_release(y); return e; }
-    if (h.is_enum || h.anymap) { ray_release(y); return q_err(QE_NYI); }   /* enum: won't-do; anymap: read only */
+    if (h.anymap) { ray_release(y); return q_err(QE_NYI); }   /* read only */
+    if (h.is_enum) {
+        bad = wf_append_enum(path, y, &h);
+        ray_release(y);
+        return bad;
+    }
+    if (q_enum_is(y)) {                              /* onto anything else an enum joins as its symbols */
+        ray_t* dec = q_enum_decay(y);
+        ray_release(y);
+        if (!dec || RAY_IS_ERR(dec)) return dec ? dec : q_err(QE_TYPE);
+        y = dec;
+    }
     if (h.tag && y->type != h.tag && y->type != -h.tag) {
         ray_release(y);
         return q_err(QE_TYPE);        /* a typed file keeps its element type */
@@ -1152,16 +1188,38 @@ ray_t* q_wirefile_append_path(ray_t* pathstr, ray_t* y) {
 
 /* ---- the domain-append primitive (enumeration's only trace) ------------- */
 
-/* Positions of symv's cells in the domain FILE at dompathstr, extending it
- * append-only with the new names: existing bytes (the advisory header count
- * included — kdb's own appends leave it stale, torq-hdb/sym proves it) are
- * never rewritten, and the file never compresses. */
-ray_t* q_wirefile_domain_extend(ray_t* dompathstr, ray_t* symv, ray_t** positions) {
-    if (positions) *positions = NULL;
-    if (!symv || symv->type != RAY_SYM) return q_err(QE_TYPE);
-    ray_t* dom = wf_is_file(dompathstr) ? wf_read_path(dompathstr, 0) : NULL;
-    if (dom && RAY_IS_ERR(dom)) return dom;
-    if (dom && dom->type != RAY_SYM) { ray_release(dom); return q_err(QE_TYPE); }
+/* What the locked descriptor holds: the domain as it is on disk NOW (another process may have grown it), or NULL
+ * for an empty file.  A compressed sym file still reads (wp/symfiles.md:360-366); *zipped says it must not grow. */
+static ray_t* wf_domain_read(int fd, ray_t** dom, int* zipped) {
+    struct stat st;
+    *dom = NULL;
+    *zipped = 0;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) return q_err(QE_IO);
+    size_t len = (size_t)st.st_size, got = 0;
+    if (!len) return NULL;
+    uint8_t* buf = (uint8_t*)malloc(len);
+    if (!buf) return q_err(QE_OOM);
+    while (got < len) {
+        ssize_t r = read(fd, buf + got, len - got < INT_MAX ? len - got : INT_MAX);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) { free(buf); return q_err(QE_IO); }
+        got += (size_t)r;
+    }
+    ray_t* plain = q_io_unzip(buf, len);             /* NULL: no container */
+    *zipped = plain != NULL;
+    ray_t* v = !plain ? wf_read_image(buf, len, 0, NULL)
+             : RAY_IS_ERR(plain) ? plain
+             : wf_read_image((const uint8_t*)ray_data(plain), (size_t)q_count(plain), 1, NULL);
+    if (plain && !RAY_IS_ERR(plain)) ray_release(plain);
+    free(buf);
+    if (RAY_IS_ERR(v)) return v;
+    if (v->type != RAY_SYM) { ray_release(v); return q_err(QE_TYPE); }
+    *dom = v;
+    return NULL;
+}
+
+/* symv's positions in `dom` (NULL = empty), and in *fresh the names it lacks, in first-seen order. */
+static ray_t* wf_domain_place(ray_t* dom, ray_t* symv, ray_t** fresh, ray_t** positions) {
     int64_t nold = dom ? q_count(dom) : 0;
     int64_t n = q_count(symv);
     /* open-addressed id->position map over the runtime sym ids both sides carry */
@@ -1169,77 +1227,78 @@ ray_t* q_wirefile_domain_extend(ray_t* dompathstr, ray_t* symv, ray_t** position
     while (hcap < (nold + n) * 2) hcap <<= 1;
     int64_t* hid = (int64_t*)malloc((size_t)hcap * sizeof(int64_t));
     int64_t* hpos = (int64_t*)malloc((size_t)hcap * sizeof(int64_t));
-    ray_t* fresh = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
+    ray_t* fr = ray_sym_vec_new(RAY_SYM_W64, n > 0 ? n : 1);
     ray_t* pos = ray_vec_new(RAY_I64, n > 0 ? n : 1);
-    if (!hid || !hpos || !fresh || RAY_IS_ERR(fresh) || !pos || RAY_IS_ERR(pos)) {
-        free(hid); free(hpos);
-        if (fresh && !RAY_IS_ERR(fresh)) ray_release(fresh);
-        if (pos && !RAY_IS_ERR(pos)) ray_release(pos);
-        if (dom) ray_release(dom);
-        return q_err(QE_OOM);
-    }
-    memset(hid, 0xff, (size_t)hcap * sizeof(int64_t));   /* -1 = empty slot */
-    for (int64_t i = 0; i < nold; i++) {
+    int ok = hid && hpos && fr && !RAY_IS_ERR(fr) && pos && !RAY_IS_ERR(pos);
+    if (ok) memset(hid, 0xff, (size_t)hcap * sizeof(int64_t));   /* -1 = empty slot */
+    for (int64_t i = 0; ok && i < nold; i++) {
         int64_t id = ray_vec_get_sym_id(dom, i);
         int64_t h = (int64_t)((uint64_t)id * 0x9e3779b97f4a7c15ULL >> 1) & (hcap - 1);
         while (hid[h] != -1 && hid[h] != id) h = (h + 1) & (hcap - 1);
         if (hid[h] == -1) { hid[h] = id; hpos[h] = i; }  /* first occurrence wins */
     }
     int64_t next = nold;
-    for (int64_t i = 0; i < n && pos && !RAY_IS_ERR(pos); i++) {
+    for (int64_t i = 0; ok && i < n; i++) {
         int64_t id = ray_vec_get_sym_id(symv, i);
         int64_t h = (int64_t)((uint64_t)id * 0x9e3779b97f4a7c15ULL >> 1) & (hcap - 1);
         while (hid[h] != -1 && hid[h] != id) h = (h + 1) & (hcap - 1);
         if (hid[h] == -1) {
             hid[h] = id; hpos[h] = next++;
-            fresh = ray_vec_append(fresh, &id);
-            if (!fresh || RAY_IS_ERR(fresh)) { ray_release(pos); pos = NULL; break; }
+            fr = ray_vec_append(fr, &id);
+            if (!fr || RAY_IS_ERR(fr)) { ok = 0; break; }
         }
         pos = ray_vec_append(pos, &hpos[h]);
+        ok = pos && !RAY_IS_ERR(pos);
     }
     free(hid); free(hpos);
-    if (dom) ray_release(dom);
-    if (!pos || RAY_IS_ERR(pos) || !fresh || RAY_IS_ERR(fresh)) {
-        if (fresh && !RAY_IS_ERR(fresh)) ray_release(fresh);
+    if (!ok) {
+        if (fr && !RAY_IS_ERR(fr)) ray_release(fr);
         if (pos && !RAY_IS_ERR(pos)) ray_release(pos);
         return q_err(QE_OOM);
     }
-    ray_t* bad = NULL;
-    if (nold == 0 && q_count(fresh) >= 0 && !wf_is_file(dompathstr)) {
-        ray_t* img = wf_write_image(fresh);
-        bad = RAY_IS_ERR(img) ? img
-            : q_io_write_all(dompathstr, ray_str_ptr(img), ray_str_len(img));
-        if (!RAY_IS_ERR(img) && img != bad) ray_release(img);
-    } else if (q_count(fresh) > 0) {
-        ray_t* old = q_io_read_slice(dompathstr, 0, -1, NULL);
-        if (!old || RAY_IS_ERR(old)) bad = old ? old : q_err(QE_IO);
-        else {
-            size_t add = 0;
-            for (int64_t i = 0; i < q_count(fresh); i++) {
-                ray_t* nm = ray_sym_str(ray_vec_get_sym_id(fresh, i));
-                add += (nm ? ray_str_len(nm) : 0) + 1;
-            }
-            uint8_t* buf = (uint8_t*)malloc((size_t) q_count(old) + add);
-            if (!buf) bad = q_err(QE_OOM);
-            else {
-                memcpy(buf, ray_data(old), (size_t) q_count(old));
-                uint8_t* w = buf + q_count(old);
-                for (int64_t i = 0; i < q_count(fresh); i++) {
-                    ray_t* nm = ray_sym_str(ray_vec_get_sym_id(fresh, i));
-                    size_t l = nm ? ray_str_len(nm) : 0;
-                    memcpy(w, nm ? ray_str_ptr(nm) : "", l);
-                    w += l;
-                    *w++ = 0;
-                }
-                bad = q_io_write_all(dompathstr, buf,
-                                     (size_t) q_count(old) + add);
-                free(buf);
-            }
-            ray_release(old);
-        }
+    *fresh = fr;
+    *positions = pos;
+    return NULL;
+}
+
+/* Positions of symv's cells in the domain FILE at dompathstr, which grows by the new names alone, appended: no
+ * existing byte is rewritten (the advisory header count included — kdb's own appends leave it stale, torq-hdb/sym
+ * proves it), so positions already on disk stay true.  ref/enum-extend.md:67-71: open and lock, read, enumerate,
+ * append, close — one descriptor throughout.  A file found empty under the lock is written whole, so two creators
+ * cannot both lay down a header. */
+ray_t* q_wirefile_domain_extend(ray_t* dompathstr, ray_t* symv, ray_t** positions) {
+    if (positions) *positions = NULL;
+    if (!symv || symv->type != RAY_SYM) return q_err(QE_TYPE);
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    int fd = q_io_open_locked(ray_str_ptr(dompathstr));
+    if (fd < 0 && errno == ENOENT) {                 /* a new db root: its directories first */
+        q_io_mkdir_parents(ray_str_ptr(dompathstr), ray_str_len(dompathstr));
+        fd = q_io_open_locked(ray_str_ptr(dompathstr));
     }
-    ray_release(fresh);
-    if (bad) { ray_release(pos); return bad; }
+    if (fd < 0) return q_err(QE_IO);
+    ray_t *dom = NULL, *fresh = NULL, *pos = NULL;
+    int zipped = 0;
+    ray_t* bad = wf_domain_read(fd, &dom, &zipped);
+    if (!bad) bad = wf_domain_place(dom, symv, &fresh, &pos);
+    if (!bad && zipped && q_count(fresh) > 0) {      /* wp/symfiles.md:374, the doc's text */
+        char msg[512];
+        int m = snprintf(msg, sizeof msg, "no append to zipped enums: %.*s",
+                         (int)ray_str_len(dompathstr), ray_str_ptr(dompathstr));
+        bad = q_err_from_text(msg, m < (int)sizeof msg ? (size_t)m : sizeof msg - 1);
+    } else if (!bad && !dom) {                              /* an empty file: the whole image */
+        ray_t* img = wf_write_image(fresh);
+        bad = RAY_IS_ERR(img) ? img : q_io_write_fd(fd, ray_str_ptr(img), ray_str_len(img)) ? q_err(QE_IO) : NULL;
+        if (!RAY_IS_ERR(img)) ray_release(img);
+    } else if (!bad && q_count(fresh) > 0) {
+        size_t add = 0;
+        uint8_t* names = wf_sym_bytes(fresh, &add);
+        bad = !names ? q_err(QE_OOM) : q_io_write_fd(fd, names, add) ? q_err(QE_IO) : NULL;
+        free(names);
+    }
+    if (close(fd) != 0 && !bad) bad = q_err(QE_IO);
+    if (dom) ray_release(dom);
+    if (fresh) ray_release(fresh);
+    if (bad) { if (pos) ray_release(pos); return bad; }
     if (positions) *positions = pos;
     else ray_release(pos);
     return NULL;
