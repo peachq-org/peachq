@@ -837,10 +837,12 @@ static ray_t* wf_write_b(ray_t* x, uint8_t disk) {
     return s ? s : q_err(QE_OOM);
 }
 
-/* `ff 01` then the -8! body — the same grammar q_wire.c puts on a socket.  A symbol vector AS THE FILE (`.d`, a db
- * `sym`, a top-level `set`) is a column file under the count law; one nested in an object keeps its wire count. */
+/* `ff 01` then the -8! body — the grammar q_wire.c puts on a socket, with two departures.  A symbol vector AS THE
+ * FILE (`.d`, a db `sym`, a top-level `set`) is a column file under the count law; one nested in an object keeps its
+ * wire count.  A table's enum column keeps its domain — only a table: kdb's bytes for an enum in any other image are
+ * unwitnessed, and a list file is a log that `-11!` replays as messages. */
 static ray_t* wf_write_a(ray_t* x) {
-    q_wire_wbuf_t b = {0};
+    q_wire_wbuf_t b = { .disk = x->type == RAY_TABLE || q_type_is_keyed(x) };
     if (q_wire_write_obj(&b, x)) {
         ray_t* e = b.err ? b.err : q_err(QE_TYPE);
         b.err = NULL;

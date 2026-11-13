@@ -138,6 +138,7 @@ typedef struct q_wire_wbuf {
     ray_t*   err;      /* set on failure (owned RAY_ERROR) */
     int      serde;    /* serde mode: ext tags on, list collapse off */
     int      measure;  /* measure mode: len counts the bytes, none are written */
+    int      disk;     /* a table image bound for disk: a 20h vector keeps its domain (IPC sends its values) */
 } q_wire_wbuf_t;
 
 /* Append x's payload bytes (no message header).  0 on success; -1 on
