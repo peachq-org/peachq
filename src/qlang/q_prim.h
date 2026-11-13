@@ -48,6 +48,8 @@ int q_match_rec(ray_t* a, ray_t* b);
 /* the same walk with no float tolerance: Find's sameness for a boxed cell (precision.md:217-219), so there `?` agrees
  * with `~` on all else; typed Find keeps its own lane rules (the int/long widening) */
 int q_match_exact(ray_t* a, ray_t* b);
+/* `~`'s walk with an enum met by its value: the sameness of two table rows, which the meeting law decides */
+int q_match_value(ray_t* a, ray_t* b);
 ray_t* q_match_wrap(ray_t* a, ray_t* b);
 
 /* `?` Find — x?y: the first index in x of y, or of each item of y; a miss is `count x`; a dict answers keys.
@@ -139,6 +141,7 @@ ray_t*  q_enum_positions(ray_t* e);                /* owned plain-i64 copy */
 ray_t*  q_enum_positions_view(ray_t* e);           /* owned plain-i64 VIEW of a 20h vector's cells: for a gather */
 ray_t*  q_enum_resolve(ray_t* e);                  /* owned TOTAL-resolved values; NULL = no value list */
 ray_t*  q_enum_val_image(ray_t* e);                /* resolved values, else positions; owned */
+ray_t*  q_enum_meet(ray_t* a, ray_t* b, int ordered, ray_t* out[2]); /* THE meeting law: one domain -> positions, else values; NULL or the owned error */
 ray_t*  q_enum_decay(ray_t* e);                    /* val image; an UNBOUND domain signals its name */
 ray_t*  q_enum_coerce(int64_t dom, ray_t* y);      /* values/enum/positions -> owned positions; 'cast/'type */
 ray_t*  q_enum_dollar(ray_t* x, ray_t* y);         /* `d$y  Enumerate (the one validator) */

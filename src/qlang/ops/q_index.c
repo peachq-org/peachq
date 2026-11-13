@@ -61,6 +61,9 @@ static ray_t* mat(ray_t* r) {                        /* consumes r */
 ray_t* q_index_elem_at(ray_t* v, int64_t i) {
     if (v && v->type == RAY_TABLE)      /* the items of a table are its ROWS */
         return q_table_row_at(v, i);
+    if (v && v->type == RAY_ENUM)       /* the item of an enum is its -20h atom, the null one past either end */
+        return i < 0 || i >= q_count(v) ? q_enum_null_atom(q_enum_domain(v))
+                                        : q_enum_stamp(ray_i64(((const int64_t*)ray_data(v))[i]), q_enum_domain(v));
     if (v && (ray_is_vec(v) || v->type == RAY_LIST)) {
         int alloc = 0;
         ray_t* e = collection_elem(v, i, &alloc);
@@ -492,7 +495,28 @@ static ray_t* index_map(ray_t* x, ray_t* i, ray_t* const* rest, int64_t k) {
     return k == 0 ? q_typed_empty_like(collapse(out), x) : collapse(out);
 }
 
+/* An enum INDEX (owned; NULL: i0 stands): its positions into a list, and its values into a keyed table, whose row
+ * probe is built of plain cells.  Into any other dictionary it stands, the keys being Find's to seek by value. */
+static ray_t* index_by_enum(ray_t* x, ray_t* i0) {
+    if (!i0 || !q_enum_is(i0)) return NULL;
+    if (x->type != RAY_DICT) return q_enum_positions(i0);
+    return q_type_is_table(ray_dict_slots(x)[0]) ? q_enum_val_image(i0) : NULL;
+}
+
 static ray_t* index_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
+    if (x->type == RAY_ENUM) {                       /* an enum at any depth indexes as its positions and keeps 20h */
+        ray_t* p = q_enum_positions_view(x);
+        if (!p || RAY_IS_ERR(p)) return p ? p : q_err(QE_OOM);
+        ray_t* r = index_step(p, i0, rest, k);
+        ray_release(p);
+        return q_enum_stamp(r, q_enum_domain(x));
+    }
+    ray_t* ei = index_by_enum(x, i0);
+    if (ei) {
+        ray_t* r = RAY_IS_ERR(ei) ? ei : index_step(x, ei, rest, k);
+        if (r != ei) ray_release(ei);
+        return r;
+    }
     if (!i0 || RAY_IS_NULL(i0)) {                    /* `::`: identity / all */
         /* `x[::]` IS x for every structure (ref/identity.md; ref/apply.md:151
          * "selects the entire left argument"); an ATOM is not applicable, so it
@@ -592,15 +616,6 @@ static ray_t* index_r(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
 }
 
 ray_t* q_index_at(ray_t* x, ray_t* const* ix, int64_t k) {
-    /* indexing PRESERVES the enum (`e 0` -> -20h atom): index the positions,
-     * re-stamp the domain — the structural preserve set's index arm. */
-    if (x && x->type == RAY_ENUM) {
-        ray_t* p = q_enum_positions_view(x);
-        if (!p || RAY_IS_ERR(p)) return p ? p : q_err(QE_OOM);
-        ray_t* r = q_index_at(p, ix, k);
-        ray_release(p);
-        return q_enum_stamp(r, q_enum_domain(x));
-    }
     if (k <= 0) { ray_retain(x); return x; }
     return index_r(x, ix[0], ix + 1, k - 1);
 }
@@ -1321,9 +1336,36 @@ static ray_t* amend_seq(ray_t* x, ray_t* sel, ray_t* const* rest, int64_t k,
 }
 
 static ray_t* amend_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k,
+                         ray_t* f, ray_t* y);
+
+/* An enum target at any depth (no path: amended entire): index-assign enforces the domain — an in-domain sym
+ * coerces to its position, out-of-domain is 'cast (owner training `` el[0]:`oo ``); only plain replacement is
+ * defined on 20h.  x consumed on success. */
+static ray_t* amend_enum(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k, ray_t* f, ray_t* y) {
+    if (f) return q_err(QE_TYPE);
+    ray_t* ny = q_enum_coerce(q_enum_domain(x), y);
+    if (!ny || RAY_IS_ERR(ny)) return ny ? ny : q_err(QE_TYPE);
+    ray_t* p = q_enum_positions(x);
+    if (!p || RAY_IS_ERR(p)) { ray_release(ny); return p ? p : q_err(QE_OOM); }
+    ray_t* r = rest ? amend_step(p, i0, rest, k, f, ny) : amend_entire(p, f, ny);
+    ray_release(ny);
+    if (!r || RAY_IS_ERR(r)) { ray_release(p); return r ? r : q_err(QE_TYPE); }
+    r = q_enum_stamp(r, q_enum_domain(x));
+    if (r && !RAY_IS_ERR(r)) ray_release(x);
+    return r;
+}
+
+static ray_t* amend_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k,
                          ray_t* f, ray_t* y) {
+    if (x->type == RAY_ENUM) return amend_enum(x, i0, rest, k, f, y);
     if (!is_coll(x) && x->type != RAY_DICT && x->type != RAY_TABLE) return q_err(QE_TYPE);
     if (!i0 || RAY_IS_NULL(i0)) return amend_seq(x, NULL, rest, k, f, y, 1, NULL);
+    ray_t* ei = index_by_enum(x, i0);
+    if (ei) {
+        ray_t* r = RAY_IS_ERR(ei) ? ei : amend_step(x, ei, rest, k, f, y);
+        if (r != ei) ray_release(ei);
+        return r;
+    }
     if (x->type == RAY_DICT && !ray_is_atom(i0)) {   /* Find's ruling: one key, a run of keys, nested selectors */
         ray_t* pos = dict_pos(x, i0);
         if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_TYPE);
@@ -1363,23 +1405,8 @@ ray_t* q_index_amend(ray_t* x, ray_t* const* ix, int64_t k, ray_t* f, ray_t* y) 
     if (!x || RAY_IS_ERR(x)) return q_err(QE_TYPE);
     if (x->type == -RAY_SYM) return q_err(QE_DOMAIN);
     if (f && y && q_registry_row_of(f, Q_DYADIC) == q_ops_find(":", 1)) f = NULL;   /* Assign IS plain replace (ref/amend.md) */
-    /* enum target: index-assign enforces the domain — an in-domain sym coerces
-     * to its position, out-of-domain is 'cast (owner training `` el[0]:`oo ``);
-     * only plain replacement is defined on 20h this phase. */
-    if (x->type == RAY_ENUM) {
-        if (f) return q_err(QE_TYPE);
-        ray_t* ny = q_enum_coerce(q_enum_domain(x), y);
-        if (!ny || RAY_IS_ERR(ny)) return ny ? ny : q_err(QE_TYPE);
-        ray_t* p = q_enum_positions(x);
-        if (!p || RAY_IS_ERR(p)) { ray_release(ny); return p ? p : q_err(QE_OOM); }
-        ray_t* r = q_index_amend(p, ix, k, f, ny);
-        ray_release(ny);
-        if (!r || RAY_IS_ERR(r)) { ray_release(p); return r ? r : q_err(QE_TYPE); }
-        r = q_enum_stamp(r, q_enum_domain(x));
-        if (r && !RAY_IS_ERR(r)) ray_release(x);         /* consumed on success */
-        return r;
-    }
-    if (k <= 0 || (!is_coll(x) && x->type != RAY_DICT && x->type != RAY_TABLE))
+    if (x->type == RAY_ENUM && k <= 0) return amend_enum(x, NULL, NULL, 0, f, y);
+    if (k <= 0 || (!is_coll(x) && x->type != RAY_DICT && x->type != RAY_TABLE && x->type != RAY_ENUM))
         return amend_entire(x, f, y);
     int was = g_store;
     g_store = !f && y;

@@ -369,7 +369,7 @@ int q_type_is_sym_atom(ray_t* x) {
 
 int q_type_is_iter(ray_t* v) {
     if (!v || RAY_IS_ERR(v)) return 0;
-    return v->type == RAY_LIST || v->type == RAY_TABLE ||
+    return v->type == RAY_LIST || v->type == RAY_TABLE || v->type == RAY_ENUM ||
            (ray_is_vec(v) && v->type != RAY_STR);
 }
 
