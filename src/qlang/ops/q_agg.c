@@ -100,9 +100,10 @@ static ray_t* runscan(ray_t* x, q_rs_kind k) {
     if ((k == RS_MAXS || k == RS_MINS) && ray_is_vec(x) && ray_is_bytelike(x->type))
         return runscan_bytes(x, k);
     /* a char is not a number in arithmetic: `sums "abc"` is 'type (sum.md:113, owner ruling 2026-10-09);
-     * a temporal is ordered, so maxs/mins keep it (max.md:65-66) */
+     * a temporal is ordered, so maxs/mins keep it (max.md:65-66), and sums takes the temporals sum takes */
     int ordered = (k == RS_MAXS || k == RS_MINS) && ray_is_vec(x) && temporal_tag(x->type);
-    if (!ray_is_vec(x) || !(q_type_is_num_tag(x->type) || ordered)) return q_err(QE_TYPE);
+    int summed = k == RS_SUMS && ray_is_vec(x) && RAY_IS_TEMPORAL(x->type) && agg_type_admitted(OP_SUM, x->type);
+    if (!ray_is_vec(x) || !(q_type_is_num_tag(x->type) || ordered || summed)) return q_err(QE_TYPE);
     int64_t n = q_count(x);
     if (k == RS_AVGS) {
         ray_t* out = agg_vec_out(RAY_F64, n); if (RAY_IS_ERR(out)) return out;
@@ -162,13 +163,12 @@ static ray_t* runscan(ray_t* x, q_rs_kind k) {
     }
     int8_t ot = agg_sum_type(x->type);
     ray_t* out = agg_vec_out(ot, n); if (RAY_IS_ERR(out)) return out;
-    void* o = ray_data(out);
     int64_t acc = (k==RS_PRDS) ? 1 : 0;
     for (int64_t i = 0; i < n; i++) {
-        int nu; double vd = q_velem_f(x, i, &nu); int64_t v = (int64_t)vd;
-        if (k==RS_SUMS) acc = (int64_t)((uint64_t)acc + (uint64_t)(nu?0:v));
-        else            acc = (int64_t)((uint64_t)acc * (uint64_t)(nu?1:v));
-        if (ot == RAY_I32) ((int32_t*)o)[i] = (int32_t)acc; else ((int64_t*)o)[i] = acc;
+        int nu; q_velem_f(x, i, &nu);
+        int64_t v = nu ? (k == RS_SUMS ? 0 : 1) : ray_vec_get_i64(x, i);   /* exact: a timespan passes 2^53 */
+        acc = (int64_t)(k == RS_SUMS ? (uint64_t)acc + (uint64_t)v : (uint64_t)acc * (uint64_t)v);
+        ray_vec_set_i64(out, i, acc);
     }
     return out;
 }
@@ -247,11 +247,14 @@ ray_t* q_prd_wrap(ray_t* x) {
  * is null excluded (kdb); an atom x broadcasts.  Kept in C: the q.q
  * composition's bool-multiply denominator measured 16x slower (2026-07-15).
  * wsum/cov/scov are q.q-hosted (their doc formulas ride engine kernels). */
+/* avg.md:180-203: wavg takes the vectors avg takes, a temporal read as its counts */
+static int wavg_operand(ray_t* v) { return ray_is_vec(v) && agg_type_admitted(OP_AVG, v->type); }
+
 ray_t* q_wavg_wrap(ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);
     int xatom = ray_is_atom(x);
-    if (!q_vec_is_num(y) && !ray_is_atom(y)) return q_err(QE_TYPE);
-    if (!xatom && !q_vec_is_num(x)) return q_err(QE_TYPE);
+    if (!wavg_operand(y) && !ray_is_atom(y)) return q_err(QE_TYPE);
+    if (!xatom && !wavg_operand(x)) return q_err(QE_TYPE);
     int64_t n = ray_is_atom(y) ? q_count(x) : q_count(y);
     if (!xatom && !ray_is_atom(y) && q_count(x) != q_count(y))
         return q_err(QE_LENGTH);
