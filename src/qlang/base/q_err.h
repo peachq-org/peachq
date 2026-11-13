@@ -17,6 +17,7 @@ typedef enum {
     QE_DUP, QE_RESTRICTED, QE_ACCESS, QE_OS, QE_CONN, QE_WSFULL, QE_BADTAIL,
     QE_SFAIL, QE_UFAIL,     /* set-attribute.md: `s#` not ascending / `u#`,`p#` not distinct-or-contiguous */
     QE_PARAMS,              /* a lambda signature past 8 names */
+    QE_HOP, QE_TIMEOUT,     /* hopen: unreachable / no connect or handshake within the timeout */
     /* ---- OURS: admitted non-kdb classes ---- */
     QE_OOM, QE_IO, QE_NAME, QE_INDEX, QE_RESERVE, QE_INIT,
     QE_RANGE, QE_SCHEMA, QE_CORRUPT, QE_CANCEL, QE_VERSION, QE_DUCKDB,

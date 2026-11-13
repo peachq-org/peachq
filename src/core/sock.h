@@ -52,7 +52,7 @@ int        ray_sock_pair(ray_sock_t sv[2]);
  * OS default), then the same value is applied as SO_RCVTIMEO/SO_SNDTIMEO
  * for the subsequent handshake I/O.  timeout_ms <= 0 = blocking connect,
  * no I/O timeout.  On a connect timeout, errno is set to ETIMEDOUT and
- * RAY_INVALID_SOCK is returned. */
+ * RAY_INVALID_SOCK is returned; a host that does not resolve sets ENXIO. */
 ray_sock_t ray_sock_connect(const char* host, uint16_t port, int timeout_ms);
 int64_t    ray_sock_send(ray_sock_t s, const void* buf, size_t len);
 int64_t    ray_sock_recv(ray_sock_t s, void* buf, size_t len);
