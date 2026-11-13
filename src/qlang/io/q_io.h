@@ -27,10 +27,10 @@ int q_io_abs_spelling(const char* path, size_t n, char* abs, size_t cap);
 /* is this spelling a relative path that never steps up — lexically under the current directory? */
 int q_io_path_inside(const char* path, size_t n);
 
-/* How big the file IS, or -1 when the path will not stat: a kxzip container
+/* How big the file IS as a long, 'io when the path will not stat: a kxzip container
  * answers with its ORIGINAL file's length (ref/hcount.md), one that will not
- * decode with its own. */
-int64_t q_io_file_size(ray_t* pathstr);
+ * decode with its own; a zip:// entry its uncompressed size. */
+ray_t* q_io_file_size(ray_t* pathstr);
 
 /* read0/read1/`0:`'s `(file;offset[;length])`.  NULL with *path OWNED and
  * *want -1 for the length-less form; else *path is released and an owned
@@ -52,7 +52,7 @@ int64_t q_io_clamp(int64_t size, int64_t* off, int64_t want);
 /* THE resource-read seam beneath read0/read1: an `http(s)://` path reads over
  * HTTP, a scheme DuckDB's httpfs speaks (s3:// gcs:// hf:// …) through
  * `.duckdb.i.read1` by name (restricted → 'access; the whole object, sliced here),
- * anything else off the filesystem, under q_io_read_slice's contract unchanged.
+ * anything else off the filesystem (a zip:// entry included), under q_io_read_slice's contract unchanged.
  * q_io_resource_chunkable is what a DECODER asks instead of naming a transport
  * — 0 means repeated ranged pulls are not cheap, so fetch once and slice.  Both
  * take a q_io_file_path result (no leading ':'). */
