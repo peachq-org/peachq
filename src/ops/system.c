@@ -699,55 +699,12 @@ ray_t* ray_hopen_fn(ray_t** args, int64_t n) {
         timeout_ms = (tv > INT_MAX) ? INT_MAX : (int)tv;
     }
 
-    const char* s = ray_str_ptr(x);
-    size_t slen = ray_str_len(x);
-
-    /* Split on colons */
-    const char* parts[4] = {0};
-    size_t part_lens[4] = {0};
-    int n_parts = 0;
-    const char* start = s;
-    for (size_t i = 0; i <= slen && n_parts < 4; i++) {
-        if (i == slen || s[i] == ':') {
-            parts[n_parts] = start;
-            part_lens[n_parts] = (size_t)(&s[i] - start);
-            n_parts++;
-            start = &s[i + 1];
-        }
-    }
-    if (n_parts < 2) return ray_error("domain", ".ipc.open expects \"host:port[:user[:password]]\", missing port");
-
-    char host[256];
-    if (part_lens[0] >= sizeof(host)) return ray_error("domain", ".ipc.open host too long, got %lld bytes", (long long)part_lens[0]);
-    memcpy(host, parts[0], part_lens[0]);
-    host[part_lens[0]] = '\0';
-
-    char port_str[8];
-    if (part_lens[1] >= sizeof(port_str)) return ray_error("domain", ".ipc.open port field too long, got %lld bytes", (long long)part_lens[1]);
-    memcpy(port_str, parts[1], part_lens[1]);
-    port_str[part_lens[1]] = '\0';
-    int port = atoi(port_str);
-    if (port <= 0 || port > 65535) return ray_error("domain", ".ipc.open port must be in 1..65535, got %d", port);
-
-    char user[128] = "";
-    char password[128] = "";
-    if (n_parts >= 3 && part_lens[2] < sizeof(user)) {
-        memcpy(user, parts[2], part_lens[2]);
-        user[part_lens[2]] = '\0';
-    }
-    if (n_parts >= 4 && part_lens[3] < sizeof(password)) {
-        memcpy(password, parts[3], part_lens[3]);
-        password[part_lens[3]] = '\0';
-    }
-
-    const char* pw_ptr = (n_parts >= 4) ? password : NULL;
-    const char* us_ptr = (n_parts >= 3) ? user : NULL;
-
-    int64_t h = ray_ipc_connect(host, (uint16_t)port, us_ptr, pw_ptr, timeout_ms);
-    if (h == -2) return ray_error("access", "server requires authentication");
+    int64_t h = ray_ipc_connect_desc(ray_str_ptr(x), ray_str_len(x), timeout_ms);
+    if (h == -7) return ray_error("domain", ".ipc.open expects \"host:port[:user[:password]]\" with a port in 1..65535");
     if (h == -3) return ray_error("access", "authentication failed");
-    if (h == -5) return ray_error("io", "connection timed out: %s:%d", host, port);
-    if (h < 0) return ray_error("io", "connection refused: %s:%d", host, port);
+    if (h == -5) return ray_error("io", "connection timed out");
+    if (h == -6) return ray_error("io", "host not found");
+    if (h < 0) return ray_error("io", "connection refused");
 
     return make_i64(h);
 }

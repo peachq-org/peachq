@@ -67,6 +67,7 @@
 #include "qlang/net/q_http.h"
 #include "qlang/net/q_tls.h"   /* the `-E` accept-side handshake */
 #include "core/timer.h"        /* ray_time_now_ms — TLS negotiation deadlines */
+#include "core/numparse.h"     /* ray_parse_i64 — a descriptor's port */
 #include "qlang/net/q_ws.h"
 #include "qlang/eval/q_eval.h"   /* q_eval_apply_value — q hook firing */
 #include "qlang/q_ctx.h"         /* q_ctx_remote_call — a client callback under `\e` */
@@ -1865,16 +1866,6 @@ int ray_ipc_poll(ray_ipc_server_t* srv, int timeout_ms)
  * runtime's main poll), so server-side code can write to the very
  * handles its hooks receive — server-initiated push. */
 
-static int64_t recv_full(ray_sock_t fd, void* buf, size_t len) {
-    size_t total = 0;
-    while (total < len) {
-        int64_t n = ray_sock_recv(fd, (uint8_t*)buf + total, len - total);
-        if (n <= 0) return -1;
-        total += (size_t)n;
-    }
-    return (int64_t)total;
-}
-
 /* Resolve `handle` to a handshake-complete IPC connection selector in
  * the active poll.  Rejects anything else living in the selector table
  * (listeners, the REPL's stdin, conns still mid-handshake) so a stray
@@ -2036,8 +2027,26 @@ int64_t ray_ipc_connect(const char* host, uint16_t port,
      * no explicit timeout, matching the long-standing handshake timeout. */
     int connect_to = timeout_ms > 0 ? timeout_ms : 5000;
     ray_sock_t fd = ray_sock_connect(host, port, connect_to);
-    if (fd == RAY_INVALID_SOCK) return (errno == ETIMEDOUT) ? -5 : -1;
+    if (fd == RAY_INVALID_SOCK) return errno == ETIMEDOUT ? -5 : errno == ENXIO ? -6 : -1;
     return ray_ipc_adopt_client(fd, user, password);
+}
+
+int64_t ray_ipc_connect_desc(const char* s, size_t n, int timeout_ms)
+{
+    const char* f[4] = {0};
+    size_t fl[4] = {0};
+    int nf = 0;
+    for (size_t i = 0, st = 0; i <= n && nf < 4; i++)
+        if (i == n || s[i] == ':') { f[nf] = s + st; fl[nf++] = i - st; st = i + 1; }
+    char host[256], user[128], pass[128];
+    int64_t port;
+    if (nf < 2 || fl[0] >= sizeof host || (nf > 2 && fl[2] >= sizeof user) || (nf > 3 && fl[3] >= sizeof pass) ||
+        !fl[1] || ray_parse_i64(f[1], fl[1], &port) != fl[1] || port <= 0 || port > 65535)
+        return -7;
+    memcpy(host, f[0], fl[0]); host[fl[0]] = '\0';
+    if (nf > 2) { memcpy(user, f[2], fl[2]); user[fl[2]] = '\0'; }
+    if (nf > 3) { memcpy(pass, f[3], fl[3]); pass[fl[3]] = '\0'; }
+    return ray_ipc_connect(host, (uint16_t)port, nf > 2 ? user : NULL, nf > 3 ? pass : NULL, timeout_ms);
 }
 
 int64_t ray_ipc_adopt_client(ray_sock_t fd, const char* user, const char* password)
@@ -2061,9 +2070,12 @@ int64_t ray_ipc_adopt_client(ray_sock_t fd, const char* user, const char* passwo
     /* Accept = one common-capability byte; reject = the server closes
      * the connection without sending anything (kdb behaviour). */
     uint8_t common;
-    if (recv_full(fd, &common, 1) < 0) {
+    int64_t got = ray_sock_recv(fd, &common, 1);
+    if (got != 1) {
+        /* the handshake SO_RCVTIMEO expiring is a silent server, not a rejection */
+        bool timed_out = got < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT);
         ray_sock_close(fd);
-        return -3; /* auth rejected (server closed the connection) */
+        return timed_out ? -5 : -3;
     }
     /* A compliant kdb server replies with the NEGOTIATED capability =
      * min(client, server), so it can never exceed what we offered.  A byte
@@ -2074,7 +2086,8 @@ int64_t ray_ipc_adopt_client(ray_sock_t fd, const char* user, const char* passwo
      * — Phase F), so any value in [0, KDB_CAPABILITY] is accepted. */
     if (common > KDB_CAPABILITY) {
         ray_sock_close(fd);
-        return -1; /* handshake failed: capability byte out of range */
+        errno = EPROTO;
+        return -1;
     }
 
 #ifdef RAY_OS_WINDOWS
