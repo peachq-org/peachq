@@ -1,7 +1,8 @@
 /* q_log — `-11!` streaming execute (see q_log.h).  A log is a plain shape-A
  * general list — ff 01 00 attr count:int32, then one -8! body per chunk
  * (kb/file-compression.md:39: never a compressed one).  The cursor holds ONE
- * pread window of the file plus at most the chunk straddling its end.  The
+ * window of the file plus at most the chunk straddling its end: pread from a
+ * file, forward reads from a fifo (releases/ChangesIn4.0.md:318).  The
  * header count is advisory (EOF terminates, as the (-2;x) length answer
  * needs).  The decoder answers one 'domain for "short" and "invalid" alike,
  * so a failure before EOF refills and one at EOF is 'badtail: a chunk that is
@@ -9,12 +10,13 @@
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_count.h"
 #include "qlang/io/q_log.h"
-#include "qlang/io/q_io.h"        /* q_io_file_path, q_io_pread */
+#include "qlang/io/q_io.h"        /* q_io_file_path, q_io_pread, q_io_read_fd */
 #include "qlang/io/q_handles.h"   /* q_handles_console_eval — the handle-0 door */
 #include "qlang/net/q_wire.h"     /* q_wire_read_obj — one chunk, bytes consumed */
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"    /* q_type_is_int_atom / q_type_iatom_val — the (n;x) form */
 #include "qlang/ops/q_index.h"    /* q_index_elem_at — the (n;x) pair's items */
+#include "qlang/eval/q_eval.h"    /* q_eval_stop_pending — Ctrl+C ends the wait for a writer */
 #include "lang/eval.h"            /* ray_eval_get_restricted */
 #include <errno.h>
 #include <fcntl.h>
@@ -32,10 +34,11 @@
 
 typedef struct {
     int      fd;
-    int64_t  size, pos;                     /* file length; offset of buf[0] */
+    int64_t  size, pos;                     /* file length (a fifo's is known at EOF); offset of buf[0] */
     uint8_t* buf;
     size_t   cap, len;
     int      whole;                         /* buf is the caller's whole file: nothing to refill, nothing to free */
+    int      stream;                        /* a fifo: forward reads only */
 } log_cur_t;
 
 static void log_close(log_cur_t* c) {
@@ -49,16 +52,20 @@ static ray_t* log_open(log_cur_t* c, ray_t* path) {
     const char* p = ray_str_ptr(path);
     struct stat st;
     if (stat(p, &st) != 0) return q_err(QE_IO);
-    if (!S_ISREG(st.st_mode)) return q_err(QE_NYI);        /* fifo replay: out of scope */
-    c->fd = open(p, O_RDONLY | O_BINARY);
-    if (c->fd < 0) return q_err(QE_IO);
-    c->size = (int64_t)st.st_size;
+#ifdef S_ISFIFO
+    c->stream = S_ISFIFO(st.st_mode);
+#endif
+    if (!S_ISREG(st.st_mode) && !c->stream) return q_err(QE_NYI);
+    do c->fd = open(p, O_RDONLY | O_BINARY);                  /* a fifo waits here for its writer */
+    while (c->fd < 0 && errno == EINTR && !q_eval_stop_pending);
+    if (c->fd < 0) return q_err(errno == EINTR ? QE_STOP : QE_IO);
+    c->size = c->stream ? INT64_MAX : (int64_t)st.st_size;
     c->cap = LOG_WINDOW;
     c->buf = (uint8_t*)malloc(c->cap);
     return c->buf ? NULL : q_err(QE_OOM);
 }
 
-enum { LOG_F_IO = -1, LOG_F_TOOBIG = -2, LOG_F_OOM = -3 };
+enum { LOG_F_IO = -1, LOG_F_TOOBIG = -2, LOG_F_OOM = -3, LOG_F_STOP = -4 };
 
 /* Bytes added after buf[len] — one window — 0 at EOF, else a LOG_F_ code. */
 static int64_t log_fill(log_cur_t* c) {
@@ -71,16 +78,21 @@ static int64_t log_fill(log_cur_t* c) {
         c->cap *= 2;
     }
     ssize_t r;
-    do r = q_io_pread(c->fd, c->buf + c->len, c->cap - c->len, c->pos + (int64_t)c->len);
-    while (r < 0 && errno == EINTR);
+    if (c->stream) {
+        r = q_io_read_fd(c->fd, c->buf + c->len, c->cap - c->len);
+        if (r < 0 && errno == EINTR) return LOG_F_STOP;
+    } else {
+        do r = q_io_pread(c->fd, c->buf + c->len, c->cap - c->len, c->pos + (int64_t)c->len);
+        while (r < 0 && errno == EINTR);
+    }
     if (r < 0) return LOG_F_IO;
-    if (r == 0) { c->size = c->pos + (int64_t)c->len; return 0; }   /* the file shrank under us */
+    if (r == 0) { c->size = c->pos + (int64_t)c->len; return 0; }   /* the file shrank under us, or the fifo ended */
     c->len += (size_t)r;
     return (int64_t)r;
 }
 
 static ray_t* log_fill_err(int64_t r) {
-    return q_err(r == LOG_F_IO ? QE_IO : r == LOG_F_OOM ? QE_OOM : QE_BADTAIL);
+    return q_err(r == LOG_F_IO ? QE_IO : r == LOG_F_OOM ? QE_OOM : r == LOG_F_STOP ? QE_STOP : QE_BADTAIL);
 }
 
 static ray_t* log_pair(int64_t chunks, int64_t valid) {

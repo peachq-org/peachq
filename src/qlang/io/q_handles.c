@@ -12,7 +12,7 @@
 #include "qlang/q_console.h" /* q_console_write/_err — the 1 -1 2 -2 console handles */
 #include "qlang/q_dotz.h"   /* q_dotz_now_ns — the portable wall clock; q_dotz_resolve — `.z.h`, hopen's own host */
 #include "qlang/ops/q_sys.h" /* q_sys_listen_port — hopen of the own listener is handle 0 */
-#include "qlang/io/q_io.h"   /* q_io_mkdir_parents — hopen creates missing directories; q_io_write_fd */
+#include "qlang/io/q_io.h"   /* q_io_mkdir_parents — hopen creates missing directories; q_io_write_fd, q_io_read_fd */
 #include "qlang/io/q_provider.h" /* the `:pq:` aliases: `:pq:q:`, `:pq:qfork:`, `:pq:qspawn:`, `:pq:duckdb:` */
 #include "qlang/net/q_wirefile.h"    /* q_wirefile_append_path — typed handle append */
 #include "qlang/net/q_ws.h"          /* q_ws_client_open — `:ws:// sym handles */
@@ -638,8 +638,7 @@ ray_t* q_handles_read1(int64_t fd, ray_t* count) {
             if (!nb) { free(buf); return q_err(QE_OOM); }
             buf = nb;
         }
-        do got = read((int)fd, buf + n, (size_t)want);
-        while (got < 0 && errno == EINTR && !ray_interrupted());
+        got = q_io_read_fd((int)fd, buf + n, (size_t)want);
         if (got < 0) { free(buf); return q_err(errno == EINTR ? QE_STOP : QE_IO); }
         n += (size_t)got;
     } while (!count && got > 0);
