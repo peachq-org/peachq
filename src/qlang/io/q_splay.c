@@ -32,11 +32,9 @@
 #ifdef RAY_OS_WINDOWS
   #define WIN32_LEAN_AND_MEAN
   #include <windows.h>
+  #include <io.h>
 #else
   #include <sys/mman.h>
-#endif
-#ifndef O_BINARY
-#define O_BINARY 0
 #endif
 
 typedef struct { int64_t dev, ino, size, sec, nsec; } splay_stamp;
@@ -175,7 +173,20 @@ static void splay_vm_release(const splay_vm* r) {
     if (r->base) VirtualFree(r->base, 0, MEM_RELEASE);
 }
 
+/* shared for delete as the file lane's view is: a held compressed column must not pin its file against hdel */
+static int splay_open_ro(const char* path) {
+    HANDLE fh = CreateFileA(path, GENERIC_READ,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (fh == INVALID_HANDLE_VALUE) return -1;
+    int fd = _open_osfhandle((intptr_t)fh, _O_RDONLY | _O_BINARY);
+    if (fd < 0) CloseHandle(fh);
+    return fd;
+}
+
 #else
+
+static int splay_open_ro(const char* path) { return open(path, O_RDONLY); }
 
 static ray_t* splay_vm_reserve(size_t need, splay_vm* r) {
     size_t g = (size_t)sysconf(_SC_PAGESIZE);
@@ -702,7 +713,7 @@ static ray_t* splay_zip(ray_t* path, const q_wf_colhdr* h) {
         splay_region_drop(&r);
         return q_wirefile_read_column(path);
     }
-    r.fd = open(ray_str_ptr(path), O_RDONLY | O_BINARY);
+    r.fd = splay_open_ro(ray_str_ptr(path));
     if (r.fd < 0 || h->count < 0 || (int64_t)r.data + h->count * (int64_t)splay_esz(h) > unc) {
         int io = r.fd < 0;
         splay_region_drop(&r);
