@@ -109,7 +109,9 @@ static size_t splay_page(void) {
     SYSTEM_INFO si; GetSystemInfo(&si); return (size_t)si.dwPageSize;
 }
 
-static ray_t* splay_vm_mapfile(const char* path, size_t need, splay_vm* r) {
+/* `head` is POSIX's concern: Windows refuses to truncate a file a view maps, so the header's page cannot be torn */
+static ray_t* splay_vm_mapfile(const char* path, size_t need, size_t head, splay_vm* r) {
+    (void)head;
     HANDLE fh = CreateFileA(path, GENERIC_READ,
                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                             NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -216,7 +218,10 @@ static int splay_vm_commit(const splay_vm* r, size_t off, size_t len) {
 
 static void splay_vm_release(const splay_vm* r) { if (r->base) munmap(r->base, r->total); }
 
-static ray_t* splay_vm_mapfile(const char* path, size_t need, splay_vm* r) {
+/* The pages holding the file's first `head` bytes (the ray_t header's half) are read into the reservation, never
+ * mapped: a truncation in place discards even a copy-on-write page, which would hand the header the file's own bytes
+ * when the rewrite lands.  The rest maps after them. */
+static ray_t* splay_vm_mapfile(const char* path, size_t need, size_t head, splay_vm* r) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) return q_err(QE_IO);
     struct stat st;
@@ -226,8 +231,11 @@ static ray_t* splay_vm_mapfile(const char* path, size_t need, splay_vm* r) {
     }
     ray_t* bad = splay_vm_reserve(need, r);
     if (bad) { close(fd); return bad; }
-    void* fm = mmap(r->base + r->guard, need, PROT_READ | PROT_WRITE,
-                    MAP_PRIVATE | MAP_FIXED, fd, 0);
+    size_t own = (head + r->guard - 1) / r->guard * r->guard;
+    if (own > need) own = need;
+    void* fm = q_io_pread_all(fd, r->base + r->guard, own, 0) ? MAP_FAILED : need == own ? NULL
+             : mmap(r->base + r->guard + own, need - own, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, fd,
+                    (off_t)own);
     close(fd);
     if (fm == MAP_FAILED) { splay_vm_release(r); return q_err(QE_IO); }
     return NULL;
@@ -698,7 +706,7 @@ static ray_t* splay_map(const char* path, const q_wf_colhdr* h) {
     if (!splay_region_room()) return q_err(QE_OOM);
     size_t tail = h->disk_attr == 3 ? (size_t)h->tail : 0;
     splay_region r = { .fd = -1, .data = h->payload, .tail = tail, .layout = h->layout };
-    ray_t* bad = splay_vm_mapfile(path, h->payload + (size_t)h->count * splay_esz(h) + tail, &r.vm);
+    ray_t* bad = splay_vm_mapfile(path, h->payload + (size_t)h->count * splay_esz(h) + tail, h->payload, &r.vm);
     return bad ? bad : splay_hdr_over(&r, h);
 }
 
