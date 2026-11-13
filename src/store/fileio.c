@@ -143,6 +143,8 @@ ray_err_t ray_mkdir_p(const char* path) {
     while (len > 1 && (buf[len - 1] == '/' || buf[len - 1] == '\\')) buf[--len] = '\0';
     for (size_t i = 1; i < len; i++) {
         if (buf[i] == '/' || buf[i] == '\\') {
+            /* a bare "C:" names that drive's CURRENT directory, which may be gone; it is never ours to create */
+            if (i == 2 && buf[1] == ':') continue;
             char saved = buf[i];
             buf[i] = '\0';
             if (!CreateDirectoryA(buf, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
