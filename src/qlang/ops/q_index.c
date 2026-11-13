@@ -547,14 +547,46 @@ static ray_t* index_step(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
     return elem_rest(index_level(x, i0, 0), rest, k);
 }
 
+/* Does i0 name one row, or a run of consecutive rows — `t 5`, `t 5 6 7`?  Then *z is the same index counted from
+ * the run's first row (owned), which is what reads the table of just those rows. */
+static int index_run(ray_t* i0, int64_t* lo, int64_t* n, ray_t** z) {
+    if (!i0) return 0;
+    if (ray_is_atom(i0)) {
+        if (!q_type_int_index_width((int8_t)-i0->type) || as_i64(i0) < 0) return 0;
+        *lo = as_i64(i0);
+        *n = 1;
+        *z = ray_i64(0);
+    } else {
+        if (i0->type != RAY_I64 || i0->len < 1 || (i0->attrs & RAY_ATTR_SLICE)) return 0;
+        const int64_t* d = (const int64_t*)ray_data(i0);
+        if (d[0] < 0 || d[0] > INT64_MAX - i0->len) return 0;
+        for (int64_t i = 1; i < i0->len; i++) if (d[i] != d[0] + i) return 0;
+        *lo = d[0];
+        *n = i0->len;
+        ray_t* len = ray_i64(*n);
+        *z = ray_til_fn(len);
+        ray_release(len);
+    }
+    if (*z && !RAY_IS_ERR(*z)) return 1;
+    if (*z) ray_error_free(*z);
+    return 0;
+}
+
 static ray_t* index_r(ray_t* x, ray_t* i0, ray_t* const* rest, int64_t k) {
     if (!x || RAY_IS_ERR(x)) return x ? x : q_err(QE_TYPE);
     if (++g_depth > IDX_MAX_DEPTH) { g_depth--; return q_err(QE_STACK); }
-    /* a deferred splay met at any depth: the columns this index names (`t`a`, `t[i;`a]`), mapped while it runs */
-    ray_t* m = x->type == RAY_TABLE ? q_splay_deferred_map(x, k > 1 ? NULL : k ? rest[0] : i0) : NULL;
+    /* a deferred splay met at any depth.  A row or a run of rows (`t 0`, `t[i;`a]`) is read as those rows alone, of
+     * the columns the index names; anything else maps those columns (`t`a`) while it runs. */
+    int64_t lo = 0, n = 0;
+    ray_t* z = NULL;
+    ray_t* m = x->type == RAY_TABLE && q_splay_table_path(x) && index_run(i0, &lo, &n, &z)
+             ? q_splay_deferred_rows(x, k == 1 ? rest[0] : NULL, lo, n) : NULL;
+    if (z && !m) { ray_release(z); z = NULL; }
+    if (!m) m = x->type == RAY_TABLE ? q_splay_deferred_map(x, k > 1 ? NULL : k ? rest[0] : i0) : NULL;
     int bad = m && RAY_IS_ERR(m);
-    ray_t* r = bad ? m : index_step(m ? m : x, i0, rest, k);
+    ray_t* r = bad ? m : index_step(m ? m : x, z ? z : i0, rest, k);
     if (m && !bad) ray_release(m);
+    if (z) ray_release(z);
     g_depth--;
     return r;
 }
