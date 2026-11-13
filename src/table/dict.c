@@ -695,6 +695,7 @@ ray_t* ray_dict_remove(ray_t* d, ray_t* key_atom) {
     vals = ray_cow(vals);
     if (!vals || RAY_IS_ERR(vals)) { ray_release(d); return vals; }
     slots[1] = vals;
+    ray_list_unmark(vals);
     ray_t** vslots = (ray_t**)ray_data(vals);
     if (vslots[idx]) ray_release(vslots[idx]);
     for (int64_t i = idx; i + 1 < vals->len; i++) vslots[i] = vslots[i + 1];

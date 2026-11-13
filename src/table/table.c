@@ -172,6 +172,7 @@ void ray_table_set_col_idx(ray_t* tbl, int64_t idx, ray_t* col_vec) {
     cols = ray_cow(cols);
     if (!cols || RAY_IS_ERR(cols)) return;
     slots[1] = cols;
+    ray_list_unmark(cols);
     ray_t** cv = (ray_t**)ray_data(cols);
     ray_retain(col_vec);
     ray_release(cv[idx]);
