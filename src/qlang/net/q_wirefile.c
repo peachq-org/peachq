@@ -14,7 +14,6 @@
 #include "qlang/q_registry.h"   /* the `,` value the append fallback composes on */
 #include "lang/eval.h"          /* ray_eval_get_restricted */
 #include "store/fileio.h"     /* ray_file_rename — THE platform-armed replace-by-rename */
-#include "mem/heap.h"           /* RAY_ATTR_SORTED */
 #include <stdio.h>   /* fopen/fread — the header probe reads raw prefix bytes */
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +24,7 @@
 
 static int64_t wf_i64(const uint8_t* p) { int64_t v; memcpy(&v, p, 8); return v; }
 static uint32_t wf_u32(const uint8_t* p) { uint32_t v; memcpy(&v, p, 4); return v; }
+static void wf_set_i64(uint8_t* p, int64_t v) { memcpy(p, &v, 8); }
 
 static ray_t* wf_read_path(ray_t* path, int follow);
 static ray_t* wf_write_a(ray_t* x);
@@ -83,23 +83,36 @@ static int8_t wf_simple_tag(uint8_t disk) {
     }
 }
 
+typedef struct { size_t h, hdr1, keys, hash, hdr2, starts, len; } wf_parted_geom;
+
 /* A p# column's index trailer, laid after the last element (docs/2026-07-27-kdb-ondisk-format.md § trailer): a lead,
  * a 16-byte header `m a t u r n`, the n distinct values padded out to half the hash, H hash slots, a second header,
- * then n group starts and the row count.  Only the two headers are read: 1 with the values and starts located when
- * the sizes account for `len` exactly, else 0.  layout: 'B' after a 16-byte header, 'C' a 32-bit enum, 'D' behind
- * a shape-D page. */
+ * then n group starts and the row count.  THE geometry, for the reader and the writer: byte offsets from the end of
+ * the elements, for n distinct values over `count` cells of width w.  layout: 'B' after a 16-byte header, 'C' a
+ * 32-bit enum, 'D' behind a shape-D page. */
+static wf_parted_geom wf_parted_at(char layout, uint8_t w, int64_t count, int64_t n) {
+    wf_parted_geom g = { .h = layout == 'C' ? 4 : 2 };
+    while (g.h < 2 * (size_t)n) g.h <<= 1;
+    g.hdr1 = layout == 'D' ? 8 : layout == 'C' ? 4 * (size_t)(count & 1) : 0;
+    g.keys = g.hdr1 + 16;
+    g.hash = g.keys + (g.h / 2) * w + (layout == 'D' ? w : 0);
+    g.hdr2 = g.hash + 8 * g.h;
+    g.starts = g.hdr2 + 16;
+    g.len = g.starts + 8 * ((size_t)n + 1);
+    return g;
+}
+
+/* Only the two headers are read: 1 with the values and starts located when the sizes account for `len` exactly. */
 static int wf_parted(const uint8_t* tail, size_t len, char layout, uint8_t w, int64_t count,
                      const uint8_t** keys, const uint8_t** starts, int64_t* n) {
-    size_t lead = layout == 'D' ? 8 : layout == 'C' ? 4 * (size_t)(count & 1) : 0;
-    if (len < lead + 16) return 0;
-    *n = wf_i64(tail + lead + 8);
-    if (tail[lead + 3] != 2 || *n < 0 || (uint64_t)*n > len / 8) return 0;
-    size_t h = layout == 'C' ? 4 : 2;
-    while (h < 2 * (size_t)*n) h <<= 1;
-    size_t h2 = lead + 16 + (h / 2) * w + (layout == 'D' ? w : 0) + 8 * h;
-    if (len != h2 + 16 + 8 * ((size_t)*n + 1) || tail[h2 + 2] != RAY_I64 || wf_i64(tail + h2 + 8) != *n + 1) return 0;
-    *keys = tail + lead + 16;
-    *starts = tail + h2 + 16;
+    wf_parted_geom g = wf_parted_at(layout, w, count, 0);
+    if (len < g.keys) return 0;
+    *n = wf_i64(tail + g.hdr1 + 8);
+    if (tail[g.hdr1 + 3] != 2 || *n < 0 || (uint64_t)*n > len / 8) return 0;
+    g = wf_parted_at(layout, w, count, *n);
+    if (len != g.len || tail[g.hdr2 + 2] != RAY_I64 || wf_i64(tail + g.hdr2 + 8) != *n + 1) return 0;
+    *keys = tail + g.keys;
+    *starts = tail + g.starts;
     return 1;
 }
 
@@ -860,28 +873,114 @@ int q_wirefile_is_data(const char* path) {
 
 #define WF_A_MAGIC 2   /* the `ff 01` before the -8! payload */
 
-/* Shape B header, then the elements verbatim.  The attribute byte is
- * TRANSLATED, never copied: rayforce's `attrs` packs the sym width, HAS_NULLS,
- * SLICE and the index flags into bits that collide with kdb's disk encoding
- * (0=none 1=s 2=u 3=p 4=g).  Only `s#` survives a rewrite — the other three
- * carry a side structure this writer does not build.
+#define WF_PART_MUL  0x9E3779B1u
+#define WF_PART_HMAX ((size_t)1 << 21)
+
+/* THE p# write gate: the cases whose trailer bytes follow from kdb's own files without a guess
+ * (actionable-plans/2026-11-09-kdb-format-findings.md Q1).  Past 2^21 slots a 32-bit and
+ * a 64-bit product pick different slots, and outside 0..2^32 a value's high word may enter the hash; every sampled
+ * value is small and non-negative.  kdb trusts the trailer, so an unproven one is not written.  Widening by element
+ * type is this predicate alone. */
+static int wf_parted_proven(uint8_t disk, size_t h, int64_t lo, int64_t hi) {
+    return (disk == RAY_I64 || disk == WF_ENUM_TYPE) && h <= WF_PART_HMAX && lo >= 0 && hi <= (int64_t)UINT32_MAX;
+}
+
+/* Signed as the reader's adopt takes a trailer key (q_attr_parted_adopt). */
+static int64_t wf_cell(const uint8_t* cells, uint8_t w, int64_t i) {
+    int64_t k = 0;
+    memcpy(&k, cells + (size_t)i * w, w);
+    return w == 2 ? (int16_t)k : w == 4 ? (int32_t)k : k;
+}
+
+/* kdb's allocator size class of an embedded vector: the power of two that holds it, less 4. */
+static uint8_t wf_size_class(size_t bytes) {
+    uint8_t m = 0;
+    while (((size_t)16 << m) < bytes) m++;
+    return m;
+}
+
+/* A p# column's index trailer (wf_parted_at): the distinct values in first-occurrence order, kdb's hash over them
+ * (linear probe, -1 empty), the group starts and the row count.  The bytes kdb leaves unwritten are zero, as most of
+ * its writers leave them.  *out stays NULL where the gate declines, or a value returns after its run ended: the column is
+ * then written unattributed. */
+static ray_t* wf_parted_build(const uint8_t* cells, uint8_t w, int64_t count, char layout, uint8_t disk,
+                              uint8_t** out, size_t* len) {
+    int64_t n = 0, lo = 0, hi = 0;
+    if (!wf_parted_proven(disk, 0, 0, 0)) return NULL;   /* the type alone: no scan of a column it cannot pass */
+    for (int64_t i = 0; i < count; i++) {
+        int64_t k = wf_cell(cells, w, i);
+        if (i && k == wf_cell(cells, w, i - 1)) continue;
+        if (!n || k < lo) lo = k;
+        if (!n || k > hi) hi = k;
+        n++;
+    }
+    wf_parted_geom g = wf_parted_at(layout, w, count, n);
+    if (!wf_parted_proven(disk, g.h, lo, hi)) return NULL;
+    uint8_t* t = (uint8_t*)calloc(1, g.len);
+    if (!t) return q_err(QE_OOM);
+    memset(t + g.hash, 0xff, 8 * g.h);
+    int64_t j = 0;
+    for (int64_t i = 0; i < count; i++) {
+        int64_t k = wf_cell(cells, w, i);
+        if (i && k == wf_cell(cells, w, i - 1)) continue;
+        size_t s = (size_t)(((uint64_t)k * WF_PART_MUL) >> 11) & (g.h - 1);
+        for (int64_t at; (at = wf_i64(t + g.hash + 8 * s)) >= 0; s = (s + 1) & (g.h - 1))
+            if (wf_cell(t + g.keys, w, at) == k) { free(t); return NULL; }
+        wf_set_i64(t + g.hash + 8 * s, j);
+        memcpy(t + g.keys + (size_t)j * w, cells + (size_t)i * w, w);
+        wf_set_i64(t + g.starts + 8 * j++, i);
+    }
+    wf_set_i64(t + g.starts + 8 * n, count);
+    t[g.hdr1] = wf_size_class(g.hdr2 - g.hdr1);
+    t[g.hdr1 + 2] = disk;
+    t[g.hdr1 + 3] = 2;
+    wf_set_i64(t + g.hdr1 + 8, n);
+    t[g.hdr2] = wf_size_class(g.len - g.hdr2);
+    t[g.hdr2 + 2] = RAY_I64;
+    wf_set_i64(t + g.hdr2 + 8, n + 1);
+    *out = t;
+    *len = g.len;
+    return NULL;
+}
+
+/* A column file's image in *img (malloc'd): `off` header bytes, zero but for the 16-byte descriptor that ends them
+ * (type, attribute, count), then v's cells, then a p# column's index trailer where the gate proves it.  The
+ * attribute byte is TRANSLATED from the letter, never copied: rayforce's `attrs` bits collide with kdb's disk
+ * encoding (0=none 1=s 2=u 3=p 4=g).  `s` is the byte alone; u and g carry an index no kdb file has shown, and drop.
  * THE COUNT LAW (every image builder here): a column file with attr 0 or 1 carries header count 0, as a current kdb
- * writes it — the reader takes the count from the payload length.  A nested column's offsets (disk 77+n) keep their
- * true count: every kdb-written one does (74/74). */
-static ray_t* wf_write_b(ray_t* x, uint8_t disk) {
-    int64_t n = q_count(x);
+ * writes it — the reader takes the count from the payload length.  A p# column keeps its true count, which is what
+ * tells its elements from its trailer; so do a nested column's offsets (disk 77+n): every kdb-written one does
+ * (74/74). */
+static ray_t* wf_col_image(ray_t* v, uint8_t disk, size_t off, char letter, uint8_t** img, size_t* total) {
+    int64_t n = q_count(v);
     int nested = disk > WF_NEST_BIAS;
-    size_t esz = nested ? 8 : ray_type_sizes[disk];
-    if (n < 0 || (uint64_t)n > (SIZE_MAX - WF_B_OFF) / esz) return q_err(QE_LIMIT);
-    size_t total = WF_B_OFF + (size_t)n * esz;
-    uint8_t* buf = (uint8_t*)calloc(1, total);
-    if (!buf) return q_err(QE_OOM);
+    size_t esz = nested || disk == WF_ENUM_TYPE ? 8 : ray_type_sizes[disk], tlen = 0;
+    if (n < 0 || (uint64_t)n > (SIZE_MAX - off) / esz) return q_err(QE_LIMIT);
+    uint8_t* trail = NULL;
+    ray_t* e = letter != 'p' ? NULL : wf_parted_build((const uint8_t*)ray_data(v), (uint8_t)esz, n,
+                                                      off == WF_D_OFF ? 'D' : 'B', disk, &trail, &tlen);
+    if (e) return e;
+    *total = off + (size_t)n * esz + tlen;
+    uint8_t* buf = (uint8_t*)calloc(1, *total);
+    if (!buf) { free(trail); return q_err(QE_OOM); }
+    uint8_t* desc = buf + off - 16;
+    desc[2] = disk;
+    desc[3] = trail ? 3 : letter == 's' ? 1 : 0;
+    if (nested || trail) wf_set_i64(desc + 8, n);
+    if (n) memcpy(buf + off, ray_data(v), (size_t)n * esz);
+    if (trail) memcpy(buf + *total - tlen, trail, tlen);
+    free(trail);
+    *img = buf;
+    return NULL;
+}
+
+static ray_t* wf_write_b(ray_t* x, uint8_t disk) {
+    uint8_t* buf = NULL;
+    size_t total = 0;
+    ray_t* e = wf_col_image(x, disk, WF_B_OFF, disk > WF_NEST_BIAS ? 0 : q_attr_letter(x), &buf, &total);
+    if (e) return e;
     buf[0] = 0xfe;
     buf[1] = 0x20;
-    buf[2] = disk;
-    buf[3] = !nested && (x->attrs & RAY_ATTR_SORTED) ? 1 : 0;
-    if (nested) memcpy(buf + 8, &n, 8);
-    if (n) memcpy(buf + WF_B_OFF, ray_data(x), (size_t)n * esz);
     ray_t* s = ray_str((const char*)buf, total);
     free(buf);
     return s ? s : q_err(QE_OOM);
@@ -915,7 +1014,7 @@ static ray_t* wf_write_a(ray_t* x) {
  * exactly wf_simple_tag's allowlist read backwards — one table, both
  * directions.  A tag it declines (RAY_SYM's adaptive width, RAY_SEL/RAY_STR
  * which kdb has no byte for, atoms, lists, dicts, tables) takes shape A. */
-static ray_t* wf_write_enum_img(ray_t* pos, const char* dn, size_t dnl);
+static ray_t* wf_write_enum_img(ray_t* pos, const char* dn, size_t dnl, char letter);
 
 /* Image for a REFERENCE-shaped column — a 20h enum whose domain is anything
  * but a bound SYMLIST (kb/linking-columns.md; FK enums, links, unbound alike):
@@ -930,7 +1029,7 @@ static ray_t* wf_ref_image(ray_t* x) {
     if (!nm || RAY_IS_ERR(nm)) return nm ? nm : q_err(QE_TYPE);
     ray_t* pos = q_enum_positions(x);
     if (!pos || RAY_IS_ERR(pos)) { ray_release(nm); return pos ? pos : q_err(QE_OOM); }
-    ray_t* img = wf_write_enum_img(pos, ray_str_ptr(nm), ray_str_len(nm));
+    ray_t* img = wf_write_enum_img(pos, ray_str_ptr(nm), ray_str_len(nm), q_attr_letter(x));
     ray_release(pos);
     ray_release(nm);
     return img;
@@ -948,7 +1047,7 @@ static ray_t* wf_write_image(ray_t* x) {
         ray_t* nm = ray_sym_str(q_enum_domain(x));           /* borrowed */
         ray_t* pos = q_enum_positions(x);
         if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_OOM);
-        ray_t* img = nm ? wf_write_enum_img(pos, ray_str_ptr(nm), ray_str_len(nm))
+        ray_t* img = nm ? wf_write_enum_img(pos, ray_str_ptr(nm), ray_str_len(nm), q_attr_letter(x))
                         : q_err(QE_TYPE);
         ray_release(pos);
         return img;
@@ -1359,23 +1458,21 @@ ray_t* q_wirefile_domain_extend(ray_t* dompathstr, ray_t* symv, ray_t** position
 /* ---- the splay writer (kb/splayed-tables.md guards) --------------------- */
 
 /* Shape D enum column against domain basename `dn`: fd20 page, name at +16, descriptor at 4080
- * (fd 00 14 attr, count i64 — 0, the count law), i64 positions from 4096. */
-static ray_t* wf_write_enum_img(ray_t* pos, const char* dn, size_t dnl) {
-    int64_t n = q_count(pos);
+ * (fd 00 14 attr, count i64 — the count law), i64 positions from 4096, a p# index trailer after them. */
+static ray_t* wf_write_enum_img(ray_t* pos, const char* dn, size_t dnl, char letter) {
     if (!wf_leaf_name(dn, dnl) || dnl > 255)   /* the probe's q_wf_colhdr.domain
                                                 * cap — never write a name the
                                                 * reader must refuse (codex r3) */
         return q_err(QE_DOMAIN);
-    size_t total = WF_D_OFF + (size_t)n * 8;
-    uint8_t* buf = (uint8_t*)calloc(1, total);
-    if (!buf) return q_err(QE_OOM);
+    uint8_t* buf = NULL;
+    size_t total = 0;
+    /* `s` is not written on an enum: no kdb file shows one, and whether kdb searches it by position is unknown */
+    ray_t* e = wf_col_image(pos, WF_ENUM_TYPE, WF_D_OFF, letter == 'p' ? 'p' : 0, &buf, &total);
+    if (e) return e;
     buf[0] = 0xfd;
     buf[1] = 0x20;
     memcpy(buf + WF_D_NAME, dn, dnl);
-    uint8_t* desc = buf + WF_D_DESC;
-    desc[0] = 0xfd;
-    desc[2] = WF_ENUM_TYPE;
-    if (n) memcpy(buf + WF_D_OFF, ray_data(pos), (size_t)n * 8);
+    buf[WF_D_DESC] = 0xfd;
     ray_t* s = ray_str((const char*)buf, total);
     free(buf);
     return s ? s : q_err(QE_OOM);
@@ -1500,6 +1597,7 @@ static ray_t* wf_write_splay_dir(ray_t* dirstr, ray_t* domsym, ray_t* y,
                             ray_str_ptr(nm), ray_str_len(nm));
         if (!cp) { bad = q_err(QE_OOM); break; }
         ray_t* dec = NULL;                           /* under a NAMED domain a 20h column re-enumerates against it */
+        char letter = q_attr_letter(col);
         /* an enumerated column is written as it is: its domain is the database root's, and a partition directory
          * holds none (kb/partition.md:13-31) */
         ray_t* rimg = col->type == RAY_ENUM && !domsym ? wf_write_image(col) : wf_ref_image(col);
@@ -1523,7 +1621,7 @@ static ray_t* wf_write_splay_dir(ray_t* dirstr, ray_t* domsym, ray_t* y,
                 const char* dp = ray_str_ptr(dompath);
                 size_t dn = ray_str_len(dompath), base = dn;
                 while (base && dp[base - 1] != '/') base--;
-                ray_t* img = wf_write_enum_img(pos, dp + base, dn - base);
+                ray_t* img = wf_write_enum_img(pos, dp + base, dn - base, letter);
                 bad = RAY_IS_ERR(img) ? img : wf_put(cp, img, lbs, alg, lvl);
                 if (!RAY_IS_ERR(img) && img != bad) ray_release(img);
             }
