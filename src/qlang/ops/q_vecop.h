@@ -1,5 +1,5 @@
 /* q_vecop — THE typed elementwise path for the compare / boolean / null /
- * fill verbs: the decision their kernels make for ONE atom pair, written once
+ * fill / arithmetic verbs and xbar: the decision their kernels make for ONE atom pair, written once
  * per numeric lane over ray_data() instead of through a heap atom per element.
  *
  * A probe, not a second dispatch home.  The caller hands over the kernel it

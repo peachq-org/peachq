@@ -308,8 +308,7 @@ static const q_op_t Q_OPS[] = {
     { "wj",    QLEX_KW,        QR_ENV("wj"),                   QR_NONE,           NULL, 1, 0, "structural", NULL },
     { "wj1",   QLEX_KW,        QR_ENV("wj1"),                  QR_NONE,           NULL, 1, 0, "structural", NULL },
     /* ---- sort / bucket ---- ordering-based search puts bin/binr/xrank in
-     * rowid. `xbar` is an ARG-SWAP wrapper (rayfall takes (col,bucket), q
-     * spells it (bucket,col)). All infix so `a verb b` is one statement. */
+     * rowid. `xbar` is `x*y div x` (q_xbar_wrap). All infix so `a verb b` is one statement. */
     { "bin",   QLEX_KW,        QR_NONE,                        QR_FN2("bin", q_bin_wrap),   NULL, 1, 0, "rowid", NULL, QKOP(26) },
     { "binr",  QLEX_KW,        QR_NONE,                        QR_FN2("binr", q_binr_wrap), NULL, 1, 0, "rowid", NULL, QKOP(34) },
     { "xrank", QLEX_KW,        QR_NONE,                        QR_QSRC("xrank"),  NULL, 1, 0, "rowid", NULL },
