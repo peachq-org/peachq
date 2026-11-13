@@ -1729,6 +1729,19 @@ static int item_shows_nothing(ray_t* v) {
     return q_type_is_empty_list(v);
 }
 
+/* What an enum shows after its domain name, by the domain's shape at render time (the constructor is irrelevant):
+ * `$` and the resolved values over a value list (out of range -> null); `$` and the raw positions when the domain is
+ * not loaded (owner witness 2026-11-12, Ddwkts: `sym$0 1 2 9 8 7 — a link's file page differs from an enum's only in
+ * the name, so the two cannot show differently); `!` and the positions over a bound table.  Owned, or NULL. */
+static ray_t* enum_shown(ray_t* val, char* glyph) {
+    ray_t* vals = NULL;
+    q_edom_t kind = q_enum_domain_kind(q_enum_domain(val), &vals);
+    *glyph = vals || kind == Q_EDOM_UNBOUND ? '$' : '!';
+    ray_t* r = q_enum_val_image(val);
+    if (r && RAY_IS_ERR(r)) { ray_error_free(r); r = NULL; }
+    return r;
+}
+
 static void q_fmt_body(ray_t* val) {
     if (!val) return;
 
@@ -1738,20 +1751,14 @@ static void q_fmt_body(ray_t* val) {
         return;
     }
 
-    /* enum, by DOMAIN SHAPE at render time (R5; basics/enumerations.md — the
-     * constructor is irrelevant): a value-list domain shows `d$ + the TOTAL-
-     * resolved values (OOB -> null); a reference or unbound domain shows
-     * `d! + the raw positions.  Never an error at display (owner oracle). */
-    if (q_enum_is(val)) {
+    if (q_enum_is(val)) {                          /* never an error at display (R5; basics/enumerations.md) */
         ray_t* s = ray_sym_str(q_enum_domain(val));
         qe_putc('`');
         if (s) { qe_putn(ray_str_ptr(s), ray_str_len(s)); ray_release(s); }
-        ray_t* r = q_enum_resolve(val);
-        if (r && RAY_IS_ERR(r)) { ray_error_free(r); r = NULL; }
-        qe_putc(r ? '$' : '!');
-        if (!r) r = q_enum_positions(val);
-        if (r && !RAY_IS_ERR(r)) { q_fmt_body(r); ray_release(r); }
-        else if (r) ray_error_free(r);
+        char glyph;
+        ray_t* r = enum_shown(val, &glyph);
+        qe_putc(glyph);
+        if (r) { q_fmt_body(r); ray_release(r); }
         return;
     }
 
@@ -2135,18 +2142,14 @@ static void krepr_into(ray_t* val, char* buf, size_t bufsz, int* tr) {
                              (size_t) q_count(val), buf, bufsz);
         return;
     }
-    if (q_enum_is(val)) {                          /* `d$values / `d!positions (R5) */
-        ray_t* r = q_enum_resolve(val);
-        if (r && RAY_IS_ERR(r)) { ray_error_free(r); r = NULL; }
+    if (q_enum_is(val)) {
+        char glyph;
+        ray_t* r = enum_shown(val, &glyph);
         ray_t* s = ray_sym_str(q_enum_domain(val));
-        size_t off = s ? (size_t)snprintf(buf, bufsz, "`%.*s%c",
-                                          (int)ray_str_len(s), ray_str_ptr(s),
-                                          r ? '$' : '!') : 0;
+        size_t off = s ? (size_t)snprintf(buf, bufsz, "`%.*s%c", (int)ray_str_len(s), ray_str_ptr(s), glyph) : 0;
         if (s) ray_release(s);
         if (off >= bufsz) { off = bufsz - 1; *tr = 1; }
-        if (!r) r = q_enum_positions(val);
-        if (r && !RAY_IS_ERR(r)) { krepr_into(r, buf + off, bufsz - off, tr); ray_release(r); }
-        else if (r) ray_error_free(r);
+        if (r) { krepr_into(r, buf + off, bufsz - off, tr); ray_release(r); }
         return;
     }
     /* whatever FLIPS to a dict prints as that flip: table, mapped splay, provider pointer alike — ref/dotq.md:308 */
