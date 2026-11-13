@@ -76,10 +76,9 @@ static ray_t* h_hcount(ray_t* y) {
     ray_release(xs);
     if (!path) return q_err(QE_TYPE);
     if (RAY_IS_ERR(path)) return path;
-    int64_t sz = q_io_file_size(path);
+    ray_t* sz = q_io_file_size(path);
     ray_release(path);
-    if (sz < 0) return q_err(QE_IO);
-    return ray_i64(sz);
+    return sz;
 }
 
 /* -34!(f;args) — .Q.ts, functional `\ts` (ref/dotq.md#ts-time-and-space).
