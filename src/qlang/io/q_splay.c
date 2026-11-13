@@ -21,6 +21,7 @@
 #include "table/sym.h"               /* ray_sym_intern_runtime, ray_sym_str */
 #include "mem/heap.h"                /* attrs + ray_free_set_mapped_fn */
 #include "core/pool.h"               /* ray_pool_get — are the kernels' worker threads admitted (`\s`)? */
+#include "ops/idxop.h"               /* ray_index_set_maker / _torn — a p# index is built on its first use */
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,6 +83,8 @@ typedef struct {
     uint8_t*      scratch;
     uint8_t*      blk;        /* per block: ZB_* */
     size_t        data;       /* the elements' offset in the plain image: the ray_t header is the 32 bytes before it */
+    size_t        tail;       /* bytes after the elements — a p# column's index trailer, read on the index's first use */
+    char          layout;     /* the probe's, for that read */
 } splay_region;
 static splay_region* g_regs = NULL;
 static int64_t g_regn = 0, g_regcap = 0;
@@ -277,7 +280,8 @@ static int splay_zip_touch(splay_region* r, int64_t k) {
 
 /* The failure the handler could not raise, answered once; torn blocks re-arm so the next touch answers again. */
 int q_splay_fault_pending(void) {
-    if (!g_zfault) return 0;
+    int torn = ray_index_torn();                        /* a trusted p# index its column's cells denied */
+    if (!g_zfault) return torn;
     g_zfault = 0;
     for (int64_t i = 0; i < g_regn; i++) {
         splay_region* r = &g_regs[i];
@@ -337,11 +341,25 @@ static void splay_fault(int sig, siginfo_t* si, void* uc) {
 }
 #endif
 
+/* The first consult of a mapped p# column's index: its trailer is read where it lies after the elements — two
+ * headers, the distinct values and the group starts, so a compressed column inflates those blocks and no other —
+ * and adopted, or the letter dropped.  A copy that left its map has no trailer and keeps scanning. */
+static void splay_parted_make(ray_t* col) {
+    for (int64_t i = 0; i < g_regn; i++) {
+        const splay_region* r = &g_regs[i];
+        if (r->hdr != col) continue;
+        uint8_t esz = col->type == RAY_ENUM ? 8 : ray_type_sizes[(uint8_t)col->type];
+        q_wirefile_parted_adopt(col, (const uint8_t*)ray_data(col) + (size_t)col->len * esz, r->tail, r->layout, esz);
+        return;
+    }
+}
+
 void q_splay_init(void) {
     g_ents = NULL; g_n = 0; g_cap = 0;
     g_regs = NULL; g_regn = 0; g_regcap = 0;
     g_mapped_bytes = 0; g_reg_created = 0; g_reg_freed = 0; g_zfault = 0;
     ray_free_set_mapped_fn(splay_region_free);
+    ray_index_set_maker(splay_parted_make);
 #ifdef RAY_OS_WINDOWS
     g_veh = AddVectoredExceptionHandler(1, splay_veh);
 #else
@@ -362,6 +380,7 @@ void q_splay_destroy(void) {
     free(g_regs);
     g_regs = NULL; g_regn = 0; g_regcap = 0; g_mapped_bytes = 0;
     ray_free_set_mapped_fn(NULL);
+    ray_index_set_maker(NULL);
 #ifdef RAY_OS_WINDOWS
     if (g_veh) { RemoveVectoredExceptionHandler(g_veh); g_veh = NULL; }
 #else
@@ -649,21 +668,23 @@ static ray_t* splay_hdr_over(const splay_region* r, const q_wf_colhdr* h) {
     memset(v, 0, sizeof(ray_t));
     v->mmod  = 3;                                       /* rc-driven release */
     v->type  = h->is_enum ? RAY_I64 : h->tag;
-    v->attrs = (uint8_t)((h->disk_attr == 1 && !h->is_enum ? RAY_ATTR_SORTED : 0) |
-                         (splay_nullable(h) ? RAY_ATTR_HAS_NULLS : 0));
+    v->attrs = (uint8_t)(splay_nullable(h) ? RAY_ATTR_HAS_NULLS : 0);
     v->rc    = 1;                                       /* the caller's ref */
     v->len   = h->count;
     splay_region_add(v, r);
-    /* a disk u/g/p byte is dropped: no index rides the map */
-    return h->is_enum ? q_enum_stamp(v, ray_sym_intern_runtime(h->domain, strlen(h->domain))) : v;
+    if (h->is_enum) v = q_enum_stamp(v, ray_sym_intern_runtime(h->domain, strlen(h->domain)));
+    /* the header byte is the attribute, as kdb reads it: `s` on the writer's word, `p` as a letter whose index
+     * waits for its first use (splay_parted_make); u and g column files are unsampled and drop */
+    return h->disk_attr == 1 ? q_attr_stamp_trusted(v, 's') : h->disk_attr == 3 ? q_attr_parted_pending(v) : v;
 }
 
 /* Map a fixed-width file copy-on-write behind a guard page: the ray_t header overlays the bytes before the
  * elements. */
 static ray_t* splay_map(const char* path, const q_wf_colhdr* h) {
     if (!splay_region_room()) return q_err(QE_OOM);
-    splay_region r = { .fd = -1, .data = h->payload };
-    ray_t* bad = splay_vm_mapfile(path, h->payload + (size_t)h->count * splay_esz(h), &r.vm);
+    size_t tail = h->disk_attr == 3 ? (size_t)h->tail : 0;
+    splay_region r = { .fd = -1, .data = h->payload, .tail = tail, .layout = h->layout };
+    ray_t* bad = splay_vm_mapfile(path, h->payload + (size_t)h->count * splay_esz(h) + tail, &r.vm);
     return bad ? bad : splay_hdr_over(&r, h);
 }
 
@@ -673,7 +694,7 @@ static ray_t* splay_map(const char* path, const q_wf_colhdr* h) {
  * one ledger.  A container whose first block ends before the elements start is decoded whole instead. */
 static ray_t* splay_zip(ray_t* path, const q_wf_colhdr* h) {
     if (!splay_region_room()) return q_err(QE_OOM);
-    splay_region r = { .fd = -1, .data = h->payload };
+    splay_region r = { .fd = -1, .data = h->payload, .tail = (size_t)h->tail, .layout = h->layout };
     ray_t* bad = q_io_zip_open(path, &r.zm);
     if (bad) return bad;
     int64_t unc = r.zm.uncompressed, nb = r.zm.num_blocks;
@@ -827,12 +848,12 @@ ray_t* q_splay_deferred_col(ray_t* t, int64_t name) {
 }
 
 /* `get `:file` of one fixed-width vector maps it; NULL leaves every other file, and one the probe refuses, to the
- * flat reader — one whose header claims `s` too, while that reader still checks the claim against the data. */
+ * flat reader. */
 static ray_t* splay_vec_file(ray_t* path) {
     q_wf_colhdr h;
     ray_t* bad = q_wirefile_probe(path, &h);
     if (bad) { ray_error_free(bad); return NULL; }
-    return h.mappable && h.disk_attr != 1 ? splay_read(path, &h) : NULL;
+    return h.mappable ? splay_read(path, &h) : NULL;
 }
 
 /* `get` of a `:path sym atom: `:dir/` the deferred table, `:dir` the same folder mapped at once, a `:file` of one

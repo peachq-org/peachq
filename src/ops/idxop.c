@@ -1263,6 +1263,126 @@ ray_t* ray_index_empty_rowsel(int64_t n) {
     return rowsel_from_sorted_ids(n, NULL, 0);
 }
 
+/* --------------------------------------------------------------------------
+ * Part lookups — value -> run, by binary search over the ascending keys
+ *
+ * Integer lanes only (a float key is a canonical word, which no part key is).  The parts cover every row, so a null
+ * is a key like any other and HAS_NULLS does not decline.
+ * -------------------------------------------------------------------------- */
+
+static void (*g_index_maker)(ray_t*) = NULL;
+static int g_index_torn = 0;
+static int g_index_making = 0;
+
+void ray_index_set_maker(void (*fn)(ray_t* col)) { g_index_maker = fn; }
+
+int ray_index_torn(void) {
+    int t = ray_atomic_load(&g_index_torn);
+    if (t) ray_atomic_store(&g_index_torn, 0);
+    return t;
+}
+
+/* One maker at a time, and the block re-read under the gate: a second thread's first consult (peach over the
+ * column) waits for the fill instead of building its own and clearing the marker the first one answered. */
+ray_idx_kind_t ray_index_wake(ray_t* col) {
+    if (!ray_index_has(col)) return RAY_IDX_NONE;
+    ray_index_t* ix = ray_index_payload(col->index);
+    if (ray_atomic_load(&ix->kind) == RAY_IDX_NONE && (ix->markers & RAY_MARK_PARTED) && g_index_maker) {
+        for (int open = 0; !ray_atomic_cas(&g_index_making, &open, 1); open = 0) { }
+        if (ix->kind == RAY_IDX_NONE && (ix->markers & RAY_MARK_PARTED)) g_index_maker(col);
+        ray_atomic_store(&g_index_making, 0);
+    }
+    return (ray_idx_kind_t)ray_atomic_load(&ix->kind);
+}
+
+bool ray_index_part_fill(ray_t* col, ray_t* keys, ray_t* starts, ray_t* lens) {
+    if (!ray_index_has(col)) return false;
+    ray_index_t* ix = ray_index_payload(col->index);
+    if (ix->kind != RAY_IDX_NONE) return false;
+    ix->u.part.keys    = keys;
+    ix->u.part.starts  = starts;
+    ix->u.part.lens    = lens;
+    ix->u.part.n_parts = keys->len;
+    ix->built_for_len  = col->len;
+    ray_atomic_store(&ix->kind, RAY_IDX_PART);        /* published last: a reader that sees PART sees its parts */
+    return true;
+}
+
+static ray_index_t* part_block(ray_t* col) {
+    if (!col || RAY_IS_ERR(col) || ray_index_wake(col) != RAY_IDX_PART) return NULL;
+    return idx_fresh(col, RAY_IDX_PART) && int_elem_size(col->type) ? ray_index_payload(col->index) : NULL;
+}
+
+/* key's run [*lo, *hi): 1 found, 0 no part holds it, -1 when the column's cells at the run's edges deny it — the
+ * four cells sit on the pages the answer's rows are read from, so the check costs no page of its own. */
+static int part_run(ray_t* col, const ray_index_t* ix, int64_t key, int64_t* lo, int64_t* hi) {
+    const uint8_t* kb = (const uint8_t*)ray_data(ix->u.part.keys);
+    int8_t kt = ix->u.part.keys->type, t = col->type;
+    int64_t a = 0, b = ix->u.part.n_parts;
+    while (a < b) {
+        int64_t m = a + (b - a) / 2;
+        if (hash_col_read_i64(kb, kt, m) < key) a = m + 1; else b = m;
+    }
+    if (a == ix->u.part.n_parts || hash_col_read_i64(kb, kt, a) != key) return 0;
+    int64_t s = ((const int64_t*)ray_data(ix->u.part.starts))[a];
+    int64_t e = s + ((const int64_t*)ray_data(ix->u.part.lens))[a];
+    const uint8_t* base = (const uint8_t*)ray_data(col);
+    if (s < 0 || e <= s || e > col->len ||
+        hash_col_read_i64(base, t, s) != key || hash_col_read_i64(base, t, e - 1) != key ||
+        (s > 0 && hash_col_read_i64(base, t, s - 1) == key) ||
+        (e < col->len && hash_col_read_i64(base, t, e) == key)) {
+        ray_atomic_store(&g_index_torn, 1);
+        return -1;
+    }
+    *lo = s; *hi = e;
+    return 1;
+}
+
+/* The ascending rows of m disjoint runs (lo/hi pairs, sorted by lo) as a rowsel. */
+static ray_t* part_rowsel(int64_t n, const int64_t* runs, int64_t m) {
+    int64_t total = 0;
+    for (int64_t j = 0; j < m; j++) total += runs[2 * j + 1] - runs[2 * j];
+    if (total == 0) return rowsel_from_sorted_ids(n, NULL, 0);
+    ray_t* buf = ray_alloc(total * (int64_t)sizeof(int64_t));
+    if (!buf) return NULL;
+    int64_t* ids = (int64_t*)ray_data(buf);
+    for (int64_t j = 0, k = 0; j < m; j++)
+        for (int64_t r = runs[2 * j]; r < runs[2 * j + 1]; r++) ids[k++] = r;
+    ray_t* block = rowsel_from_sorted_ids(n, ids, total);
+    ray_release(buf);
+    return block;
+}
+
+static ray_t* part_eq_rowsel(ray_t* col, const ray_index_t* ix, int64_t key) {
+    int64_t run[2];
+    int r = part_run(col, ix, key, &run[0], &run[1]);
+    return r < 0 ? NULL : part_rowsel(col->len, run, r);
+}
+
+/* The set is of the column's own type — a narrower one's null is another bit pattern, the scan's to widen — or an
+ * enum's positions as the plain longs its caller resolved (this layer cannot see a domain). */
+static ray_t* part_in_rowsel(ray_t* col, const ray_index_t* ix, ray_t* set_vec) {
+    if (!set_vec || RAY_IS_ERR(set_vec) || ray_is_atom(set_vec)) return NULL;
+    if (set_vec->type != col->type && !(col->type == RAY_ENUM && set_vec->type == RAY_I64)) return NULL;
+    ray_t* buf = ray_alloc((set_vec->len > 0 ? set_vec->len : 1) * 2 * (int64_t)sizeof(int64_t));
+    if (!buf) return NULL;
+    int64_t* runs = (int64_t*)ray_data(buf);
+    const uint8_t* sb = (const uint8_t*)ray_data(set_vec);
+    int64_t m = 0;
+    for (int64_t i = 0; i < set_vec->len; i++) {
+        int r = part_run(col, ix, hash_col_read_i64(sb, set_vec->type, i), &runs[2 * m], &runs[2 * m + 1]);
+        if (r < 0) { ray_release(buf); return NULL; }
+        m += r;
+    }
+    qsort(runs, (size_t)m, 2 * sizeof(int64_t), hash_match_cmp_i64);   /* by lo, the pair's first word */
+    int64_t u = 0;
+    for (int64_t j = 0; j < m; j++)                   /* a key the set repeats names its run once */
+        if (u == 0 || runs[2 * j] != runs[2 * u - 2]) { runs[2 * u] = runs[2 * j]; runs[2 * u + 1] = runs[2 * j + 1]; u++; }
+    ray_t* block = part_rowsel(col->len, runs, u);
+    ray_release(buf);
+    return block;
+}
+
 /* The rows equal to `key`, the column's word (ray_index_atom_key's output; an integer VALUE on the int lanes). */
 static ray_t* hash_eq_rowsel(ray_t* col, int64_t key) {
     /* Sanity precheck — idx_fresh validates parted/nulls/kind/staleness;
@@ -1354,6 +1474,8 @@ static bool set_elem_word(const uint8_t* sb, int8_t st, int64_t i, int8_t col_t,
 }
 
 ray_t* ray_index_in_rowsel(ray_t* col, ray_t* set_vec) {
+    ray_index_t* px = part_block(col);
+    if (px) return part_in_rowsel(col, px, set_vec);
     if (idx_fresh(col, RAY_IDX_CODES)) return codes_in_rowsel(col, set_vec);
     /* Gate: numeric column with fresh hash index, no nulls; a numeric non-atom set that meets its type. */
     if (!idx_fresh_nonull(col, RAY_IDX_HASH)) return NULL;
@@ -2568,6 +2690,12 @@ ray_t* ray_attr_set_fn(ray_t* name, ray_t* v) {
 
 int64_t ray_index_find_row(ray_t* col, int64_t key) {
     if (!col || RAY_IS_ERR(col)) return -2;
+    ray_index_t* px = part_block(col);
+    if (px) {
+        int64_t lo, hi;
+        int r = part_run(col, px, key, &lo, &hi);
+        return r > 0 ? lo : r == 0 ? -1 : -2;
+    }
     if (idx_fresh(col, RAY_IDX_CODES)) {
         const int64_t* s = codes_slots(ray_index_payload(col->index), key);
         return s ? s[0] - 1 : -1;   /* first / start / head: the minimum row either way */
@@ -2628,6 +2756,8 @@ ray_t* ray_index_hash_eq_rowsel(ray_t* col, int64_t key) {
 }
 
 ray_t* ray_index_eq_rowsel(ray_t* col, int64_t key) {
+    ray_index_t* px = part_block(col);
+    if (px) return part_eq_rowsel(col, px, key);
     if (ray_index_kind(col) == RAY_IDX_HASH)  return hash_eq_rowsel(col, key);
     if (ray_index_kind(col) == RAY_IDX_CODES) return codes_eq_rowsel(col, key);
     return NULL;
@@ -2635,6 +2765,12 @@ ray_t* ray_index_eq_rowsel(ray_t* col, int64_t key) {
 
 int ray_index_has_key(ray_t* col, int64_t key) {
     if (!col || RAY_IS_ERR(col)) return -2;
+    ray_index_t* px = part_block(col);
+    if (px) {
+        int64_t lo, hi;
+        int r = part_run(col, px, key, &lo, &hi);
+        return r < 0 ? -2 : r;
+    }
     if (idx_fresh(col, RAY_IDX_CODES)) return codes_slots(ray_index_payload(col->index), key) != NULL;
     if (!idx_fresh_nonull(col, RAY_IDX_HASH)) return -2;
     if (!hash_key_in_range(col->type, key)) return -2;
@@ -2649,9 +2785,12 @@ int ray_index_has_key(ray_t* col, int64_t key) {
     return 0;
 }
 
-/* The block behind col when a key-set read may trust it: fresh HASH or CODES, no nulls, at least one row. */
+/* The block behind col when a key-set read may trust it: fresh HASH or CODES, no nulls, at least one row — or a
+ * PART, whose parts cover the nulls too. */
 static ray_index_t* keyset_block(ray_t* col) {
     if (!col || RAY_IS_ERR(col) || col->len == 0) return NULL;
+    ray_index_t* px = part_block(col);
+    if (px) return px;
     if (!idx_fresh_nonull(col, RAY_IDX_HASH) && !idx_fresh_nonull(col, RAY_IDX_CODES)) return NULL;
     return ray_index_payload(col->index);
 }
@@ -2694,6 +2833,18 @@ static ray_t* codes_keys_rows(const ray_index_t* ix) {
 ray_t* ray_index_keys_rows(ray_t* col) {
     ray_index_t* ix = keyset_block(col);
     if (!ix) return NULL;
+    if (ix->kind == RAY_IDX_PART) {                   /* first occurrences are the starts, in row order */
+        ray_t* out = i64_or_null(ix->u.part.n_parts);
+        if (!out) return NULL;
+        memcpy(ray_data(out), ray_data(ix->u.part.starts), (size_t)out->len * sizeof(int64_t));
+        const int64_t* st = (const int64_t*)ray_data(out);
+        for (int64_t j = 0, lo, hi; j < out->len; j++) {   /* each start holds its key: the cells the caller gathers */
+            int64_t key = hash_col_read_i64((const uint8_t*)ray_data(ix->u.part.keys), ix->u.part.keys->type, j);
+            if (part_run(col, ix, key, &lo, &hi) != 1 || lo != st[j]) { ray_release(out); return NULL; }
+        }
+        qsort(ray_data(out), (size_t)out->len, sizeof(int64_t), hash_match_cmp_i64);
+        return out;
+    }
     if (ix->markers & RAY_MARK_UNIQUE) return i64_til(col->len);
     if (ix->kind == RAY_IDX_CODES) return codes_keys_rows(ix);
     if (!ix->u.hash.first) return NULL;
@@ -2742,6 +2893,14 @@ static ray_t* hash_group_rows(ray_t* col, const ray_index_t* ix, int64_t first_r
 ray_t* ray_index_group_rows(ray_t* col, int64_t first_row) {
     ray_index_t* ix = keyset_block(col);
     if (!ix || first_row < 0 || first_row >= col->len) return NULL;
+    if (ix->kind == RAY_IDX_PART) {
+        int64_t lo, hi;
+        int64_t key = hash_col_read_i64((const uint8_t*)ray_data(col), col->type, first_row);
+        if (part_run(col, ix, key, &lo, &hi) <= 0 || lo != first_row) return NULL;
+        ray_t* out = i64_or_null(hi - lo);
+        if (out) for (int64_t r = lo; r < hi; r++) ((int64_t*)ray_data(out))[r - lo] = r;
+        return out;
+    }
     if (ix->markers & RAY_MARK_UNIQUE) {
         ray_t* out = i64_or_null(1);
         if (out) ((int64_t*)ray_data(out))[0] = first_row;

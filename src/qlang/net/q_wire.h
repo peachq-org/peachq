@@ -170,8 +170,8 @@ ray_t* q_wire_fixed_vec(int8_t t, const uint8_t* p, int64_t count, int swap);
  * emitted little-endian. */
 int    q_wire_write_obj_ex(q_wire_wbuf_t* b, ray_t* x, int serde);
 /* `mode` bits: Q_WIRE_READ_SERDE = the serde grammar above; Q_WIRE_READ_DISK = a shape-A image off disk, whose
- * attribute bytes are stamped only where the read makes them true without trusting the writer (q_attr_stamp_disk):
- * `s`, u and p verified, `g` always — a live decode takes `s` on the sender's word.
+ * attribute bytes are trusted as kdb trusts them (q_attr_stamp_disk: the index is built, the layout never
+ * verified) — a live decode still drops a u or p its data contradicts.
  * *value_err (may be NULL) says an error result is the decoded value's own ('badfunc, an unknown
  * primitive's 'nyi, a projection that fails to apply), not a malformed structure. */
 #define Q_WIRE_READ_SERDE 1
