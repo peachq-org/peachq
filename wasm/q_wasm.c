@@ -3,7 +3,8 @@
  * wasm/engine.js is the one caller, and wasm/smoke.js runs its .qcmd ledger through q_wasm_qcmd. */
 #include "qlang/q_runtime.h"
 #include "qlang/q_ctx.h"
-#include "qlang/q_console.h"      /* pipe-table display + the console clip */
+#include "qlang/q_console.h"      /* the console clip */
+#include "qlang/base/q_classic.h"
 #include "qlang/q_pq.h"           /* q_pq_load — the embedded stdlib bundle */
 #include <rayforce.h>
 #include <stdio.h>
@@ -25,8 +26,8 @@ int q_wasm_init(void) {
     g_rt = q_runtime_create(0, NULL);
     if (!g_rt)
         return 1;
-    /* an argv-less ./q: modern display and the stdlib; no terminal to size, so a fixed \c */
-    q_console_pipe_enable();
+    /* an argv-less ./q: modern display, friendly syntax and the stdlib; no terminal to size, so a fixed \c */
+    q_classic_set(false);
     q_console_clip_set(25, 120);
     q_pq_load();
     return 0;

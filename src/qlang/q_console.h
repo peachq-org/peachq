@@ -23,17 +23,6 @@ FILE* q_console_door(FILE* out);
 /* The child of a fork writes the process stdout, and no thread of the parent can still hold the lock. */
 void  q_console_forked(void);
 
-/* Modern pipe-table display: a deliberate kdb divergence, the `./q`/wasm
- * DEFAULT (`-classic` at launch / `\classic 1` at runtime opt out; spec:
- * docs/superpowers/specs/2026-07-16-nonlegacy-display-design.md).  The global
- * itself starts OFF — each front end arms it — so embedders stay kdb-true.
- * Gated at ONE branch in q_fmt_console — the console seam — never
- * q_fmt_body, so round-trip surfaces (`string`, `-3!`, CSV, cells) keep the
- * legacy text.  q_runtime_destroy resets (no cross-runtime leak). */
-void q_console_pipe_enable(void);
-void q_console_pipe_disable(void);
-bool q_console_pipe_on(void);
-
 /* `\c` console DISPLAY clip (config beside the sink — base doctrine, format.h).
  * q_console_clip fills rows/cols with the live `\c` size and returns true iff
  * clipping is armed; q_fmt.c's console emitter reads it.  q_console_clip_set is

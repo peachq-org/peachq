@@ -270,7 +270,7 @@
         "quiet: no banner, and .z.q is 1b";"replicate from a primary";"secondary threads";"random seed";
         "timer period in ms";"client query timeout in seconds";"password file, and restrict client evals";
         "password file";"workspace memory limit in MB";"start-of-week offset";"date parse order: 0 mdy, 1 dmy";
-        "kx-classic mode: legacy table display, kdb-clean environment";
+        "kx-classic mode: kx table display and errors, kdb-clean environment";
         "run q text after the startup script";"run q text before the startup script";
         "print this table and exit";"the long spelling of -p";
         "the main DuckDB database is this file, not memory: \\?duckdb";

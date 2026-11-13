@@ -10,7 +10,8 @@
 #include "qlang/q_runtime.h"
 #include "qlang/q_dotz.h"
 #include "qlang/ops/q_sys.h"     /* q_sys_listen_spec_parse / q_sys_listen — the `-p` spec, shared with `\p` */
-#include "qlang/q_console.h"  /* q_console_pipe_enable — the modern pipe-table display; q_console_color */
+#include "qlang/q_console.h"  /* q_console_clip_set; q_console_color */
+#include "qlang/base/q_classic.h"
 #include "qlang/net/q_tls.h"  /* q_tls_server_mode_set — the `-E` TLS server mode */
 #include "qlang/io/q_duckdb.h" /* q_duckdb_main_path_set — the `-duckdb` main database file */
 #include "qlang/io/q_io.h"     /* q_io_abs_path — QINIT's startup `\l`; q_io_read_slice — the -conn file */
@@ -156,7 +157,7 @@ static int conn_main(int argc, char** argv) {
     q_sys_own_process(true);
     ray_poll_t* poll = ray_poll_create();
     if (poll) ray_runtime_set_poll(poll);
-    q_console_pipe_enable();                  /* the local console's display, as `q` itself shows a table */
+    q_classic_set(false);                     /* the local console's display and syntax, as `q` itself has them */
     q_console_clip_set(25, isatty(STDOUT_FILENO) ? NULL_I64 : 2000);   /* a pipe gets every column */
     const char* qh = getenv("PEACHQ_QHIST");  /* set-but-empty is the off switch q cannot see through getenv */
     if (q_ctx_run_src("\\l pq", stdout, stderr, NULL) ||
@@ -291,13 +292,13 @@ int main(int argc, char** argv) {
     const char* qinit = getenv("QINIT");
     if (qinit && !*qinit) qinit = NULL;
 
-    /* Modern mode (the default): switch the console to the pipe-table display
+    /* Modern mode (the default): leave classic (the pipe-table display, friendly syntax)
      * and auto-fit the console width (`\c 25 0N` — 0N re-resolves to the live
      * terminal at each render, so a resize follows).  The stdlib is NOT
      * auto-loaded (owner 2026-08-14, startup cost): `\l pq` is explicit.
      * `-classic` skips both (kdb-clean env, legacy display, kdb `\c 25 80`). */
     if (!classic) {
-        q_console_pipe_enable();
+        q_classic_set(false);
         q_console_clip_set(25, NULL_I64);
     }
 

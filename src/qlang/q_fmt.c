@@ -2,7 +2,8 @@
 #include "qlang/q_count.h"
 #include "qlang/q_fmt.h"
 #include "qlang/q_fmt_internal.h" /* q_fmt_cell — shared with the pipe renderer */
-#include "qlang/q_console.h"  /* q_console_pipe_* — the modern display config */
+#include "qlang/q_console.h"
+#include "qlang/base/q_classic.h"
 #include "qlang/q_registry.h" /* q_registry_list_value — hidden literal head */
 #include "qlang/q_builtins.h" /* q_type_is_fn — a lone function item prints bare */
 #include "qlang/base/q_calendar.h" /* q_calendar_days_from_civil — date display domain */
@@ -1154,7 +1155,7 @@ void q_fmt(ray_t* val, char* buf, size_t bufsz) {
     fmt_into(val, buf, bufsz, &trunc);
 }
 
-/* ---- pipe-table display: a FORMATTING MODE (state lives in q_console.c).
+/* ---- pipe-table display: a FORMATTING MODE (the switch is base/q_classic).
  * The renderer is value->text; its one caller is fmt_modern_into below. ---- */
 /* ---- modern pipe-table mode ---------------------------------------------- */
 
@@ -1602,7 +1603,7 @@ static void fmt_modern_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
 
 /* Only what prints follows the mode: gated HERE, never in q_fmt_body, which `string`, `-3!`, CSV and every cell share. */
 static void fmt_console_into(ray_t* val, char* buf, size_t bufsz, int* trunc) {
-    if (q_console_pipe_on()) fmt_modern_into(val, buf, bufsz, trunc);
+    if (!q_classic_on()) fmt_modern_into(val, buf, bufsz, trunc);
     else fmt_classic_into(val, buf, bufsz, trunc);
 }
 
