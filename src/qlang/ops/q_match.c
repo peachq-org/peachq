@@ -18,6 +18,7 @@
  * bound arguments, a composition its parts, an iterator its adverb id.
  * Native fn values are registry snapshots (one per (row,valence)), so the
  * pointer test at the head of q_match_rec already decides those. */
+enum { MATCH_TOL = 1, MATCH_ENUM = 2 };
 static int match_go(int tol, ray_t* a, ray_t* b);
 
 static int match_carrier(int tol, ray_t* a, ray_t* b) {
@@ -73,10 +74,12 @@ static int match_carrier(int tol, ray_t* a, ray_t* b) {
     return 0;
 }
 
-/* the float leaf, the walk's one switch: nulls of any type are equal, else ~'s shared tolerance or, for Find
+/* The walk's flavour is `tol`: MATCH_TOL compares floats under ~'s tolerance, MATCH_ENUM holds an enum to its type
+ * and domain.  `~` is both, a table row's sameness the first, Find neither.
+ * the float leaf: nulls of any type are equal, else ~'s shared tolerance or, for Find
  * (precision.md:217-249, `(a,a)?b` misses where `a~b`), exact equality */
 static int match_f64(int tol, double x, double y) {
-    return (isnan(x) && isnan(y)) || (tol ? ray_cmp_tol_eq(x, y) : x == y);
+    return (isnan(x) && isnan(y)) || ((tol & MATCH_TOL) ? ray_cmp_tol_eq(x, y) : x == y);
 }
 
 /* q `x~y` — recursive whole-value equivalence (kdb match): TYPE-strict
@@ -86,14 +89,12 @@ static int match_f64(int tol, double x, double y) {
 static int match_rec(int tol, ray_t* a, ray_t* b) {
     if (a == b) return 1;
     if (!a || !b) return 0;
-    /* one side enum, the other not: the enum compares as its VALUE IMAGE
-     * (resolved values, or bare positions for a reference domain — the decay
-     * law; the apply-level `~` already decays and the container walk must
-     * agree, e.g. a read-back splay table against its plain source).  An
-     * allocation error answers mismatch. */
+    /* an enum against a non-enum: `~` is type-strict (ref/match.md:30-34); Find's flavour meets the enum by its value
+     * image.  An allocation error answers mismatch. */
     int ea = a->type == RAY_ENUM || a->type == -RAY_ENUM;
     int eb = b->type == RAY_ENUM || b->type == -RAY_ENUM;
     if (ea != eb) {
+        if (tol & MATCH_ENUM) return 0;
         ray_t* r = q_enum_val_image(ea ? a : b);
         int m = r && !RAY_IS_ERR(r) && match_go(tol, ea ? r : a, ea ? b : r);
         if (r && RAY_IS_ERR(r)) ray_error_free(r);
@@ -107,16 +108,15 @@ static int match_rec(int tol, ray_t* a, ray_t* b) {
                memcmp(ray_str_ptr(a), ray_str_ptr(b), ray_str_len(a)) == 0;
     if (a->type == -RAY_GUID) return memcmp(ray_guid_bytes(a), ray_guid_bytes(b), 16) == 0;
     if (a->type == RAY_ENUM || a->type == -RAY_ENUM) {
-        /* 20h sits outside the ray_is_vec band, so the container walk lands
-         * here (the apply-level `~` decays before the kernel; children of a
-         * table/list do not).  Same domain: positions decide.  Different
-         * domains: the resolved values decide (the decay law's answer). */
+        /* Same domain: positions decide.  Different domains never match under `~`, even when equal
+         * (ref/match.md:36-45); Find's flavour lets the resolved values decide. */
         if (q_enum_domain(a) == q_enum_domain(b)) {
             if (a->type == -RAY_ENUM) return a->i64 == b->i64;
             int64_t la = q_count(a);
             return la == q_count(b) &&
                    memcmp(ray_data(a), ray_data(b), (size_t)la * 8) == 0;
         }
+        if (tol & MATCH_ENUM) return 0;
         ray_t* ra = q_enum_val_image(a);
         ray_t* rb = q_enum_val_image(b);
         int r = ra && rb && !RAY_IS_ERR(ra) && !RAY_IS_ERR(rb) && match_go(tol, ra, rb);
@@ -206,7 +206,9 @@ static int match_go(int tol, ray_t* a, ray_t* b) {
     return r;
 }
 
-int q_match_rec(ray_t* a, ray_t* b) { return match_go(1, a, b); }
+int q_match_rec(ray_t* a, ray_t* b) { return match_go(MATCH_TOL | MATCH_ENUM, a, b); }
+
+int q_match_value(ray_t* a, ray_t* b) { return match_go(MATCH_TOL, a, b); }
 
 int q_match_exact(ray_t* a, ray_t* b) { return match_go(0, a, b); }
 
