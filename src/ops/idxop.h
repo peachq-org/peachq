@@ -172,7 +172,7 @@ typedef struct {
             uint8_t  _pad[2];
         } chunk_zone;
         struct {                /* RAY_IDX_PART */
-            ray_t*  keys;       /* distinct partition values, in ascending block order */
+            ray_t*  keys;       /* distinct partition values, ascending (an enum's positions as RAY_I64) */
             ray_t*  starts;     /* RAY_I64, row offset where each part begins */
             ray_t*  lens;       /* RAY_I64, row count of each part */
             int64_t n_parts;
@@ -254,6 +254,15 @@ ray_t* ray_index_attach_dict(ray_t** vp);
 
 /* Attach an already-built standalone RAY_INDEX object (zero-copy on rc=1). */
 ray_t* ray_index_attach_built(ray_t** vp, ray_t* idx);
+
+/* A PARTED marker-only block (kind NONE) is an index not built yet: the first consult (wake: the kind a probe will
+ * meet) hands the column to the maker, which fills the block IN PLACE on its own word (no verify, no cow; keys
+ * ascending and distinct, all three consumed on true) or clears the marker.  A filled block is trusted, so a lookup
+ * whose run the column's cells deny at its edges declines to the scan and is reported by torn, once. */
+bool ray_index_part_fill(ray_t* col, ray_t* keys, ray_t* starts, ray_t* lens);
+void ray_index_set_maker(void (*fn)(ray_t* col));
+ray_idx_kind_t ray_index_wake(ray_t* col);
+int ray_index_torn(void);
 
 /* A standalone copy of a block: children shared by retain, a SYM parent's domain ref taken once more. */
 ray_t* ray_index_clone(ray_t* blk);

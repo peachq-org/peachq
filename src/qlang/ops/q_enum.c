@@ -9,7 +9,7 @@
 #include "qlang/q_env.h"
 #include "qlang/io/q_splay.h"     /* q_splay_deferred_col — a deferred foreign-key target */
 #include "mem/heap.h"   /* RAY_ATTR_SORTED / HAS_INDEX / HAS_NULLS */
-#include "ops/idxop.h"  /* ray_index_drop — a re-stamp sheds the positions' index */
+#include "ops/idxop.h"  /* ray_index_drop — a re-stamp sheds the positions' index; _find_row/_has_key — asked by position */
 #include "lang/internal.h" /* ray_concat_fn — the col-append seam's one concat */
 #include "lang/eval.h"     /* ray_take_fn, ray_eval_get_restricted */
 #include "qlang/ops/q_index.h" /* q_index_at — the one TOTAL gather (resolve, deref) */
@@ -102,6 +102,14 @@ ray_t* q_enum_stamp(ray_t* v, int64_t dom) {
         return v;
     }
     return v;                                      /* errors, nulls: untouched */
+}
+
+/* The positions as a plain-i64 VIEW over e's own cells: nothing is copied, so a gather through it reads only the
+ * rows it is asked for and a mapped column stays unread.  Owned; e a 20h vector. */
+ray_t* q_enum_positions_view(ray_t* e) {
+    ray_t* v = ray_vec_slice(e, 0, q_count(e));
+    if (v && !RAY_IS_ERR(v)) { v->type = RAY_I64; v->attrs |= e->attrs & RAY_ATTR_HAS_NULLS; }
+    return v;
 }
 
 /* Owned plain-i64 copy of the positions (the strip half of strip->op->stamp). */
@@ -481,12 +489,48 @@ ray_t* q_enum_cmp(ray_t* e, ray_t* y, int op) {
     uint8_t* o = (uint8_t*)ray_data(out);
     for (int64_t j = 0; j < yn; j++) {
         int64_t c = enum_pos_of_id(d, yatom ? y->i64 : ray_vec_get_sym_id(y, j));
-        uint8_t hit = 0;
-        for (int64_t i = 0; i < n && !hit; i++) hit = p[i] == c;
+        int has = c != NULL_I64 && !eatom && ray_index_has(e) ? ray_index_has_key(e, c) : -2;
+        uint8_t hit = has > 0;
+        for (int64_t i = 0; has < 0 && i < n && !hit; i++) hit = p[i] == c;
         o[j] = hit;
     }
     if (yatom) { int64_t b = o[0]; ray_release(out); return ray_bool((int32_t)b); }
     return out;
+}
+
+/* The keys an index over e's positions is asked with: the position each symbol of y (an atom or a vector) holds
+ * in e's domain, as plain longs; -1 for a symbol the domain lacks, which no row holds.  NULL = not that shape —
+ * y not sym-shaped, the domain unbound, or a symbol at the null position, whose rows are the verb's to answer. */
+ray_t* q_enum_keys(ray_t* e, ray_t* y) {
+    if (!y || (y->type != -RAY_SYM && y->type != RAY_SYM)) return NULL;
+    ray_t* d = enum_domain_syms(q_enum_domain(e));
+    if (!d) return NULL;
+    ray_t* out = ray_cow(q_search_find(d, y));          /* Find's own batch lookup: a miss is the count */
+    if (!out || RAY_IS_ERR(out)) { if (out) ray_error_free(out); return NULL; }
+    int64_t dn = q_count(d), n = ray_is_atom(out) ? 1 : q_count(out);
+    int64_t* p = ray_is_atom(out) ? &out->i64 : (int64_t*)ray_data(out);
+    for (int64_t j = 0; j < n; j++) {
+        if (p[j] < dn) continue;
+        if ((ray_is_atom(y) ? y->i64 : ray_vec_get_sym_id(y, j)) == 0) { ray_release(out); return NULL; }
+        p[j] = -1;
+    }
+    return out;
+}
+
+/* `e?y` off e's index: each symbol's first row, a miss the count — the positions are never decayed.  NULL when
+ * there is no index to ask, y is not that shape, or the index declines; the decay law answers then. */
+ray_t* q_enum_find(ray_t* e, ray_t* y) {
+    if (e->type != RAY_ENUM || !ray_index_has(e)) return NULL;
+    ray_t* k = q_enum_keys(e, y);
+    if (!k) return NULL;
+    int64_t cnt = q_count(e), n = ray_is_atom(k) ? 1 : q_count(k);
+    int64_t* p = ray_is_atom(k) ? &k->i64 : (int64_t*)ray_data(k);
+    for (int64_t j = 0; j < n; j++) {
+        int64_t row = ray_index_find_row(e, p[j]);
+        if (row < -1) { ray_release(k); return NULL; }
+        p[j] = row < 0 ? cnt : row;
+    }
+    return k;
 }
 
 /* insert/upsert write law (training doc §2): a payload column entering an

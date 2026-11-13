@@ -669,7 +669,7 @@ typedef struct {
     int    top_err_ok;  /* the TOP-LEVEL object decoded as a wire -128h error */
     int    depth0;      /* g_wire_depth at cursor creation (top-level marker) */
     int    serde;       /* serde mode: ext band on, list collapse off */
-    int    disk;        /* an image off disk: every attribute byte verified, `s` included */
+    int    disk;        /* an image off disk: its attribute bytes are trusted, as kdb trusts them */
     ray_t* verr;        /* the first error that is a value's own, not the structure's (D0731b) */
 } rcur_t;
 
@@ -1155,10 +1155,9 @@ static ray_t* rd_obj_inner(rcur_t* c) {
         }
         /* 127 marks the dict itself; the key carries its own byte, but a peer that sends only the tag
          * must not leave `attr` saying `s while the lookup refuses to step (ref/apply.md:308). */
-        if (t == 127) k = c->disk ? q_attr_stamp_disk(k, 1) : q_attr_stamp_trusted(k, 's');
-        int sorted = t == 127 && (!c->disk || (k->attrs & RAY_ATTR_SORTED));
+        if (t == 127) k = q_attr_stamp_trusted(k, 's');
         ray_t* d = ray_dict_new(k, v);                /* consumes both */
-        return sorted ? q_attr_stamp_trusted(d, 's') : d;
+        return t == 127 ? q_attr_stamp_trusted(d, 's') : d;
     }
     case 98: {                                        /* table */
         if (!r_need(c, 2)) return trunc_err("table header");

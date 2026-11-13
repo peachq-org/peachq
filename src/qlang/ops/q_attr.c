@@ -5,8 +5,8 @@
  * (ops/q_takedrop.c), q.q's asc/xasc via `.Q.c.sorted`/`.Q.c.parted`, the three
  * append verbs via q_table.c, and the wire decoder via q_attr_stamp_byte.
  * The lifecycle rule (ARCHITECTURE.md 2026-09-16): a u/g/p letter exists only
- * with its index on the same block — attr_build is the ONE place that mints one;
- * `s` needs no index and is the one letter a caller may vouch for.
+ * with its index on the same block — attr_build mints one, and a kx p# column file's
+ * waits for its own (q_attr_parted_pending); `s` needs no index, so a caller may vouch for it.
  * Design: docs/attributes-status.md. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_count.h"
@@ -18,6 +18,7 @@
 #include "ops/idxop.h"     /* .attr.* engine calls: ray_attr_*, RAY_IDX_*, RAY_MARK_* */
 #include "mem/heap.h"      /* RAY_ATTR_HAS_NULLS / RAY_ATTR_SORTED, ray_cow */
 #include "table/sym.h"     /* ray_sym_intern_runtime, ray_read_sym */
+#include <stdlib.h>        /* qsort — the adopted parts, by key */
 #include <string.h>        /* strcmp — the error remap; strchr — the letter set */
 
 /* Read a vector's attribute as kdb's SINGLE letter: 's'/'u'/'g'/'p', or 0 for
@@ -97,7 +98,7 @@ static bool non_descending(ray_t* r, int64_t from, int64_t n) {
 
 /* The vouched `s` stamp (the wire 127 tag, the disk byte 1): sortedness needs no
  * index, so the caller's word is enough.  Any other letter is DROPPED here — a
- * u/g/p letter is minted only by attr_build.  Owned exclusive v. */
+ * u/g/p letter comes with an index.  Owned exclusive v. */
 ray_t* q_attr_stamp_trusted(ray_t* v, char letter) {
     if (!v || RAY_IS_ERR(v) || letter != 's') return v;
     if (v->type == RAY_ENUM) {
@@ -123,19 +124,18 @@ uint8_t q_attr_byte(ray_t* v) {
     return 0;
 }
 
+static ray_t* attr_rebuild(ray_t* v, char letter, bool trusted);
+
 ray_t* q_attr_stamp_byte(ray_t* v, uint8_t byte) {
     if (!v || RAY_IS_ERR(v) || byte < 1 || byte > 4) return v;
-    return q_attr_rebuild(v, attr_byte_letters[byte]);
+    return attr_rebuild(v, attr_byte_letters[byte], false);
 }
 
-/* THE disk door: a byte off a file is stamped only where the read makes it true without
- * trusting the writer.  `s` is verified by the scan (a vector, or a table's first column; an enum's order needs its
- * domain, so there it is dropped), u and p by attr_build's own checks, and g has no precondition. */
+/* THE disk door: a read trusts the attribute byte, as kdb does — the image is in memory, so u/p/g take their index
+ * here, without the verifying scan the wire's letter gets. */
 ray_t* q_attr_stamp_disk(ray_t* v, uint8_t byte) {
-    if (!v || RAY_IS_ERR(v) || byte != 1) return q_attr_stamp_byte(v, byte);
-    ray_t* key = v->type == RAY_TABLE && ray_table_ncols(v) ? ray_table_get_col_idx(v, 0) : v;
-    if (!key || !ray_is_vec(key) || key->type == RAY_ENUM || !non_descending(key, 0, q_count(key))) return v;
-    return q_attr_stamp_trusted(v, 's');
+    if (!v || RAY_IS_ERR(v) || byte < 1 || byte > 4) return v;
+    return attr_rebuild(v, attr_byte_letters[byte], true);
 }
 
 /* Remap the engine's set-attribute failure codes to kdb's error text.  The
@@ -228,17 +228,18 @@ void q_attr_store_keep(ray_t* r, const int64_t* pos, int64_t m) {
     }
 }
 
-/* THE one place a u/g/p letter is minted: verify the layout (u distinct with
+/* Where a u/g/p letter is minted with its index: verify the layout (u distinct with
  * kdb's null policy, p contiguous, g nothing), build the index on the block,
  * set the identity marker.  A SYMBOL vector is already id-coded, so its index
  * is the direct-addressed CODES kind (its build is the verify; the domain
  * pointer stays in place beside it).  Every other numeric vector — the float
  * family and an enum's positions included — takes the hash, probed by the
  * builder's canonical word.
- * The engine attach contract: *vp is
+ * `trusted` is the disk door's: the layout is the writer's word and the scan is skipped (a symbol vector's build
+ * still refuses what it cannot hold).  The engine attach contract: *vp is
  * the caller's owned live vector, cow'd when shared; NULL on success, else an
  * owned RAW engine error with *vp untouched (the `#` door remaps it). */
-static ray_t* attr_build(ray_t** vp, char letter) {
+static ray_t* attr_build(ray_t** vp, char letter, bool trusted) {
     ray_t* v = *vp;
     uint8_t mark = letter == 'u' ? RAY_MARK_UNIQUE : letter == 'p' ? RAY_MARK_PARTED : RAY_MARK_GROUPED;
     if (ray_is_vec(v) && v->type == RAY_SYM) {
@@ -249,8 +250,8 @@ static ray_t* attr_build(ray_t** vp, char letter) {
         return NULL;
     }
     if ((!ray_is_vec(v) && v->type != RAY_ENUM) || ray_attr_numeric_class(v->type) < 0) return q_err(QE_TYPE);
-    bool ok = letter == 'u' ? (ray_attr_verify_distinct(v) && attr_no_dup_nulls(v))
-            : letter == 'p' ? ray_attr_verify_contiguous(v) : true;
+    bool ok = trusted || (letter == 'u' ? (ray_attr_verify_distinct(v) && attr_no_dup_nulls(v))
+                        : letter == 'p' ? ray_attr_verify_contiguous(v) : true);
     if (!ok) return q_err(QE_DOMAIN);
     ray_t* e = letter == 'u' ? ray_index_attach_hash_unique(vp) : ray_index_attach_hash(vp);
     if (RAY_IS_ERR(e)) return e;
@@ -260,18 +261,88 @@ static ray_t* attr_build(ray_t** vp, char letter) {
 
 /* The decode / producer door onto attr_build: IPC and `-9!` hand a letter with
  * no index, asc and `s#t` hand a column they just ordered.  A letter the
- * carrier cannot hold or the data contradicts is DROPPED, never an error (a
- * lying byte is corrupt-class); a resource failure is the caller's.  Owned v
+ * carrier cannot hold, or (untrusted) the data contradicts, is DROPPED, never an
+ * error; a resource failure is the caller's.  Owned v
  * in, owned out (consumed on that error). */
-ray_t* q_attr_rebuild(ray_t* v, char letter) {
+static ray_t* attr_rebuild(ray_t* v, char letter, bool trusted) {
     if (!v || RAY_IS_ERR(v) || !letter) return v;
     if (letter == 's') return q_attr_stamp_trusted(v, 's');
-    ray_t* e = attr_build(&v, letter);
+    ray_t* e = attr_build(&v, letter, trusted);
     if (!e) return v;
     const char* code = ray_err_code(e);
     if (code && (strcmp(code, "type") == 0 || strcmp(code, "domain") == 0)) { ray_error_free(e); return v; }
     ray_release(v);
     return e;
+}
+
+ray_t* q_attr_rebuild(ray_t* v, char letter) { return attr_rebuild(v, letter, false); }
+
+/* A kx `p#` column file's letter before its index: the PARTED marker on an empty block, in place (a mapped column
+ * stays on its map), so `attr` answers from the header byte and nothing is read.  A type no index holds passes
+ * through unlettered.  Owned v in and out. */
+ray_t* q_attr_parted_pending(ray_t* v) {
+    if (!v || RAY_IS_ERR(v) || (!ray_is_vec(v) && v->type != RAY_ENUM) || ray_attr_numeric_class(v->type) < 0) return v;
+    return ray_attr_mark_attach(v, RAY_MARK_PARTED);
+}
+
+typedef struct { int64_t key, start, len; } attr_part;
+
+static int attr_part_cmp(const void* a, const void* b) {
+    int64_t x = ((const attr_part*)a)->key, y = ((const attr_part*)b)->key;
+    return (x > y) - (x < y);
+}
+
+/* THE trusted sibling of attr_build: v's pending block (q_attr_parted_pending) filled from kx's own index — the n
+ * distinct values (width w, first-occurrence order) and the n+1 group starts the file carries after the data.
+ * A sort of the groups, and the column is never read; a 32-bit position widens as the reader widens the column's.  Checked on the bytes the build reads anyway: the starts begin at 0,
+ * ascend strictly and end on the row count, and no value is listed twice.  A trailer that fails drops the letter
+ * and the column scans. */
+void q_attr_parted_adopt(ray_t* v, const uint8_t* vals, int w, int64_t n, const uint8_t* starts) {
+    if (!ray_index_has(v)) return;
+    ray_index_t* ix = ray_index_payload(v->index);
+    if (ix->kind != RAY_IDX_NONE || !(ix->markers & RAY_MARK_PARTED)) return;
+    int8_t kt = v->type == RAY_ENUM ? RAY_I64 : v->type;
+    int kw = (int)ray_type_sizes[(uint8_t)kt];
+    int64_t rows = q_count(v), at = 0;
+    attr_part* parts = (attr_part*)malloc((size_t)(n > 0 ? n : 1) * sizeof *parts);
+    bool ok = parts && n >= 0 && (w == 1 || w == 2 || w == 4 || w == 8) && w <= kw;
+    for (int64_t i = 0; ok && i <= n; i++) {
+        int64_t s;
+        memcpy(&s, starts + 8 * i, 8);
+        ok = i == 0 ? s == 0 : s > at;
+        if (i > 0) parts[i - 1].len = s - at;
+        if (i < n) {
+            int64_t k = 0;
+            memcpy(&k, vals + (size_t)i * (size_t)w, (size_t)w);
+            parts[i].key = w == 1 ? k : w == 2 ? (int16_t)k : w == 4 ? (int32_t)k : k;
+            if (w == 4 && kw == 8 && parts[i].key == NULL_I32) parts[i].key = NULL_I64;
+            parts[i].start = s;
+        }
+        at = s;
+    }
+    ok = ok && at == rows;
+    if (ok) qsort(parts, (size_t)n, sizeof *parts, attr_part_cmp);
+    for (int64_t i = 1; ok && i < n; i++) ok = parts[i].key != parts[i - 1].key;
+    ray_t* keys = ok ? ray_vec_new(kt, n > 0 ? n : 1) : NULL;
+    ray_t* st   = ok ? ray_vec_new(RAY_I64, n > 0 ? n : 1) : NULL;
+    ray_t* ln   = ok ? ray_vec_new(RAY_I64, n > 0 ? n : 1) : NULL;
+    ok = keys && st && ln && !RAY_IS_ERR(keys) && !RAY_IS_ERR(st) && !RAY_IS_ERR(ln);
+    if (ok) {
+        keys->len = st->len = ln->len = n;
+        for (int64_t i = 0; i < n; i++) {
+            memcpy((uint8_t*)ray_data(keys) + (size_t)i * (size_t)kw, &parts[i].key, (size_t)kw);
+            ((int64_t*)ray_data(st))[i] = parts[i].start;
+            ((int64_t*)ray_data(ln))[i] = parts[i].len;
+        }
+        ok = ray_index_part_fill(v, keys, st, ln);
+    }
+    if (!ok) {
+        if (keys && !RAY_IS_ERR(keys)) ray_release(keys);
+        if (st && !RAY_IS_ERR(st)) ray_release(st);
+        if (ln && !RAY_IS_ERR(ln)) ray_release(ln);
+        ix->markers &= (uint8_t)~RAY_MARK_PARTED;
+    }
+    free(parts);
 }
 
 /* `s#` on a TABLE: verify the FIRST column, stamp parted on it (sortedness
@@ -386,7 +457,7 @@ static ray_t* attr_set_enum(char letter, ray_t* y) {
     if (!w || RAY_IS_ERR(w)) return w ? w : q_err(QE_OOM);
     if (ray_index_has(w)) ray_index_drop(&w);
     (void)q_enum_attr_set(w, 0);
-    ray_t* e = letter ? attr_build(&w, letter) : NULL;
+    ray_t* e = letter ? attr_build(&w, letter, false) : NULL;
     if (e) { ray_release(w); return attr_remap_err(e, letter); }
     return w;
 }
@@ -433,7 +504,7 @@ ray_t* q_attr_set_dispatch(ray_t* n, ray_t* vec) {
     case 'u': case 'p': case 'g': {
         ray_t* r = ray_attr_drop_fn(vec);            /* `` `x# `` REPLACES any prior attribute: cleared base, owned */
         if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_OOM);
-        ray_t* e = attr_build(&r, letter);
+        ray_t* e = attr_build(&r, letter, false);
         if (e) { ray_release(r); return attr_remap_err(e, letter); }
         return r;
     }

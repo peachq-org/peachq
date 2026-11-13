@@ -136,6 +136,7 @@ char    q_enum_attr(ray_t* x);                     /* the domain slot's vouched 
 int     q_enum_attr_set(ray_t* x, char letter);    /* EXCLUSIVE x: stamp/clear the letter */
 ray_t*  q_enum_stamp(ray_t* v, int64_t dom);       /* consumes owned i64 value -> enum */
 ray_t*  q_enum_positions(ray_t* e);                /* owned plain-i64 copy */
+ray_t*  q_enum_positions_view(ray_t* e);           /* owned plain-i64 VIEW of a 20h vector's cells: for a gather */
 ray_t*  q_enum_resolve(ray_t* e);                  /* owned TOTAL-resolved values; NULL = no value list */
 ray_t*  q_enum_val_image(ray_t* e);                /* resolved values, else positions; owned */
 ray_t*  q_enum_decay(ray_t* e);                    /* val image; an UNBOUND domain signals its name */
@@ -145,6 +146,8 @@ ray_t*  q_enum_extend_try(ray_t* x, ray_t* y);     /* `d?y  Enum Extend; NULL = 
 ray_t*  q_enum_ref(int64_t dom, ray_t* y);         /* `d!ints — env-blind reference construction (R2) */
 ray_t*  q_enum_from_indices(int64_t dom, const uint8_t* p, int64_t n, int w);
 ray_t*  q_enum_cmp(ray_t* e, ray_t* y, int op);    /* position-space =/<>/in scan; NULL = not that shape */
+ray_t*  q_enum_keys(ray_t* e, ray_t* y);           /* sym/s -> owned positions, an index's keys; NULL = not that shape */
+ray_t*  q_enum_find(ray_t* e, ray_t* y);           /* e?y off e's index; NULL = the decay law answers */
 ray_t*  q_enum_col_concat(ray_t* oc, ray_t* pc);   /* insert law: positions ++ coerced payload (plain i64) */
 ray_t*  q_enum_col_ingest(ray_t* oc, ray_t* pc);   /* a payload column coerced into oc's domain -> 20h */
 ray_t*  q_enum_deref(ray_t* v, int64_t fld);       /* v.fld reference gather; NULL = not referential */
@@ -194,10 +197,14 @@ ray_t* q_attr_rebuild(ray_t* v, char letter);         /* OWNED v: verify + hash 
  * (kb/serialization.md:39) and the kx on-disk header.  It COLLIDES with rayforce's attrs bits, so both
  * directions go through the letter above and never copy the bitfield.  q_attr_byte borrows v;
  * q_attr_stamp_byte is the WIRE decoder's door onto q_attr_rebuild; q_attr_stamp_disk is the file readers', which
- * verifies `s` too instead of taking the writer's word.  Both consume an owned v. */
+ * trusts the byte as kdb does (no verifying scan).  Both consume an owned v. */
 uint8_t q_attr_byte(ray_t* v);
 ray_t* q_attr_stamp_byte(ray_t* v, uint8_t byte);
 ray_t* q_attr_stamp_disk(ray_t* v, uint8_t byte);
+/* A kx `p#` column file: the letter first (a marker, nothing read), then its index adopted from the file's own
+ * trailer on first use — contracts at the definitions (ops/q_attr.c). */
+ray_t* q_attr_parted_pending(ray_t* v);
+void   q_attr_parted_adopt(ray_t* v, const uint8_t* vals, int w, int64_t n, const uint8_t* starts);
 
 /* Set a column attribute via the q `#` surface (`s`/`u`/`g`/`p`, or 0 to clear).
  * The kdb u#/p# accelerator (find-hash + marker) is COMPOSED in the q layer here,

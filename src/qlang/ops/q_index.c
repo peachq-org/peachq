@@ -563,7 +563,7 @@ ray_t* q_index_at(ray_t* x, ray_t* const* ix, int64_t k) {
     /* indexing PRESERVES the enum (`e 0` -> -20h atom): index the positions,
      * re-stamp the domain — the structural preserve set's index arm. */
     if (x && x->type == RAY_ENUM) {
-        ray_t* p = q_enum_positions(x);
+        ray_t* p = q_enum_positions_view(x);
         if (!p || RAY_IS_ERR(p)) return p ? p : q_err(QE_OOM);
         ray_t* r = q_index_at(p, ix, k);
         ray_release(p);

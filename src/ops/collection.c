@@ -2079,7 +2079,7 @@ static int64_t find_atom(ray_t* vec, ray_t* val) {
     bool val_null = atom_is_oob_null(val);
 
     /* Float and cross-family needles fall through to the scan, which owns promotion semantics. */
-    if (!has_nulls && !val_null && ray_is_atom(val) && ray_index_has(vec)) {
+    if (!val_null && ray_is_atom(val) && ray_index_has(vec) && (!has_nulls || ray_index_wake(vec) == RAY_IDX_PART)) {
         int64_t needle;
         if (ray_index_atom_key(vec, val, &needle)) {
             ray_idx_consults[IDX_SITE_FIND]++;
