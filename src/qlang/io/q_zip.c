@@ -2,7 +2,7 @@
  * directory record (and its zip64 twin) locates the central directory, each central record names an entry and
  * its local header, and the entry's bytes follow that header. */
 #include "qlang/io/q_zip.h"
-#include "qlang/io/q_io.h"          /* q_io_pread, q_io_path_operand */
+#include "qlang/io/q_io.h"          /* q_io_pread_all, q_io_path_operand */
 #include "qlang/io/q_handles.h"     /* q_handles_reserve_fd — a stream's handle number */
 #include "qlang/net/q_gz.h"         /* q_gz_raw_* — method 8; q_gz_crc32 */
 #include "qlang/base/q_err.h"
@@ -35,15 +35,6 @@
 static uint16_t rd16(const uint8_t* p) { return (uint16_t)(p[0] | p[1] << 8); }
 static uint32_t rd32(const uint8_t* p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 static uint64_t rd64(const uint8_t* p) { return (uint64_t)rd32(p) | (uint64_t)rd32(p + 4) << 32; }
-
-static int read_at(int fd, void* buf, size_t n, int64_t off) {
-    for (size_t got = 0; got < n; ) {
-        ssize_t r = q_io_pread(fd, (uint8_t*)buf + got, n - got, off + (int64_t)got);
-        if (r <= 0) return -1;
-        got += (size_t)r;
-    }
-    return 0;
-}
 
 static ray_t* zip_fail(q_err_e cls, const char* fmt, const char* a, size_t an, const char* b, size_t bn) {
     ray_t* e = q_err(cls);
@@ -98,7 +89,7 @@ static ray_t* arch_open(const char* path, zip_arch_t* a) {
     uint8_t* tail = (uint8_t*)malloc(tl);
     if (!tail) return q_err(QE_OOM);
     int64_t tail_at = a->fsize - (int64_t)tl;
-    if (read_at(a->fd, tail, tl, tail_at)) { free(tail); return q_err(QE_IO); }
+    if (q_io_pread_all(a->fd, tail, tl, tail_at)) { free(tail); return q_err(QE_IO); }
     int64_t e = -1;
     for (int64_t i = (int64_t)tl - EOCD_LEN; i >= 0 && e < 0; i--)
         if (rd32(tail + i) == SIG_EOCD && i + EOCD_LEN + rd16(tail + i + 20) == (int64_t)tl) e = i;
@@ -109,9 +100,9 @@ static ray_t* arch_open(const char* path, zip_arch_t* a) {
     int64_t eocd_at = tail_at + e, cd_end = eocd_at;
     if (count == 0xffff || cdsize == 0xffffffffu || cdoff == 0xffffffffu) {
         uint8_t loc[20], z[56];
-        if (eocd_at < 20 || read_at(a->fd, loc, 20, eocd_at - 20)) { free(tail); return corrupt(); }
+        if (eocd_at < 20 || q_io_pread_all(a->fd, loc, 20, eocd_at - 20)) { free(tail); return corrupt(); }
         uint64_t zat = rd64(loc + 8);
-        if (rd32(loc) != SIG_LOC64 || zat > (uint64_t)(eocd_at - 20 - 56) || read_at(a->fd, z, 56, (int64_t)zat)
+        if (rd32(loc) != SIG_LOC64 || zat > (uint64_t)(eocd_at - 20 - 56) || q_io_pread_all(a->fd, z, 56, (int64_t)zat)
             || rd32(z) != SIG_EOCD64) { free(tail); return corrupt(); }
         multi |= rd32(z + 16) != 0 || rd32(z + 20) != 0 || rd32(loc + 4) != 0;
         count = rd64(z + 32);
@@ -126,7 +117,7 @@ static ray_t* arch_open(const char* path, zip_arch_t* a) {
     a->count = (int64_t)count;
     a->cd = (uint8_t*)malloc(a->cdlen ? a->cdlen : 1);
     if (!a->cd) return q_err(QE_OOM);
-    if (read_at(a->fd, a->cd, a->cdlen, (int64_t)cdoff)) return q_err(QE_IO);
+    if (q_io_pread_all(a->fd, a->cd, a->cdlen, (int64_t)cdoff)) return q_err(QE_IO);
     return NULL;
 }
 
@@ -215,11 +206,11 @@ static ray_t* zip_entry(zip_arch_t* a, const char* arch, const char* ent, size_t
     }
     if (e->method == 0 && e->csize != e->usize) return corrupt();
     uint8_t h[LOCAL_LEN];
-    if (e->lho > a->fsize - LOCAL_LEN || read_at(a->fd, h, LOCAL_LEN, e->lho) || rd32(h) != SIG_LOCAL
+    if (e->lho > a->fsize - LOCAL_LEN || q_io_pread_all(a->fd, h, LOCAL_LEN, e->lho) || rd32(h) != SIG_LOCAL
         || rd16(h + 8) != e->method || rd16(h + 26) != elen) return corrupt();
     char* nm = (char*)malloc(elen ? elen : 1);
     if (!nm) return q_err(QE_OOM);
-    int same = read_at(a->fd, nm, elen, e->lho + LOCAL_LEN) == 0 && memcmp(nm, ent, elen) == 0;
+    int same = q_io_pread_all(a->fd, nm, elen, e->lho + LOCAL_LEN) == 0 && memcmp(nm, ent, elen) == 0;
     free(nm);
     *data = e->lho + LOCAL_LEN + (int64_t)elen + rd16(h + 28);
     if (!same || e->csize > a->fsize - *data) return corrupt();
@@ -287,7 +278,7 @@ static ray_t* zs_fail(zip_stream_t* s) {
 static int zs_inflate(zip_stream_t* s, uint8_t* out, size_t cap, size_t* made) {
     if (s->in_at == s->in_len && s->in_pos < s->csize) {
         int64_t k = s->csize - s->in_pos < (int64_t)ZIP_INBUF ? s->csize - s->in_pos : (int64_t)ZIP_INBUF;
-        if (read_at(s->fd, s->in, (size_t)k, s->data + s->in_pos)) return -1;
+        if (q_io_pread_all(s->fd, s->in, (size_t)k, s->data + s->in_pos)) return -1;
         s->in_pos += k;
         s->in_len = (size_t)k;
         s->in_at = 0;
@@ -325,7 +316,7 @@ static ray_t* zs_read(zip_stream_t* s, uint8_t* out, size_t want, size_t* got) {
         if ((int64_t)room > s->usize - s->out_pos) room = (size_t)(s->usize - s->out_pos);
         size_t made = 0;
         if (s->method == 0) {
-            if (read_at(s->fd, out + *got, room, s->data + s->out_pos)) return zs_fail(s);
+            if (q_io_pread_all(s->fd, out + *got, room, s->data + s->out_pos)) return zs_fail(s);
             made = room;
         } else if (zs_inflate(s, out + *got, room, &made) || (s->ended && s->out_pos + (int64_t)made < s->usize)) {
             return zs_fail(s);

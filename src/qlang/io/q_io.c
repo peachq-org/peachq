@@ -693,6 +693,16 @@ ssize_t q_io_pread(int fd, void* buf, size_t n, int64_t off) {
 }
 #endif
 
+int q_io_pread_all(int fd, void* buf, size_t n, int64_t off) {
+    for (size_t got = 0; got < n; ) {
+        ssize_t r = q_io_pread(fd, (uint8_t*)buf + got, n - got, off + (int64_t)got);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) return -1;
+        got += (size_t)r;
+    }
+    return 0;
+}
+
 int q_io_zip_block_fd(int fd, const q_io_zipmap_t* zm, int64_t k,
                       uint8_t* scratch, uint8_t* dst, size_t cap) {
     if (k < 0 || k >= zm->num_blocks) return -1;
@@ -700,12 +710,7 @@ int q_io_zip_block_fd(int fd, const q_io_zipmap_t* zm, int64_t k,
     int64_t plain = zm->uncompressed - k * zm->block_size;
     if (plain > zm->block_size) plain = zm->block_size;
     if (plain < 0 || (size_t)plain > cap || clen < 0) return -1;
-    for (int64_t got = 0; got < clen; ) {
-        ssize_t n = q_io_pread(fd, scratch + got, (size_t)(clen - got), ZIP_MAGIC_LEN + start + got);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) return -2;
-        got += n;
-    }
+    if (q_io_pread_all(fd, scratch, (size_t)clen, ZIP_MAGIC_LEN + start)) return -2;
     uint8_t* work = zm->algs[k] == ZIP_GZIP ? scratch + zm->maxblock : NULL;
     return zip_block_decode(zm->algs[k], scratch, (size_t)clen, dst, (size_t)plain, work);
 }
