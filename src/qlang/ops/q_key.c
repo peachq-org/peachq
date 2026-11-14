@@ -7,39 +7,19 @@
 #include "qlang/q_registry_internal.h" /* q_til_wrap — the til arm; q_mmu_class/q_inv_wrap — the inv arm */
 #include "qlang/ops/q_table.h"        /* q_table_operand — `keys` takes a table by name */
 #include "qlang/io/q_provider.h"      /* q_provider_key — a `:pq:` alias lists its tables, a coordinate its columns */
-#include "lang/internal.h"            /* ray_fs_list_fn — the quarry's sorted directory listing */
+#include "qlang/io/q_io.h"            /* q_io_list — the byte reader's listing */
 #include "table/sym.h"                /* ray_sym_intern_runtime, ray_sym_str */
-#include <errno.h>
 #include <string.h>
-#include <sys/stat.h>
 
 ray_t* q_key_dir(int64_t hsym) {
     ray_t* s = ray_sym_str(hsym);
     if (!s) return q_err(QE_TYPE);
-    char path[1024];
-    size_t n = ray_str_len(s) - 1;                   /* past the leading ':' */
-    if (n >= sizeof path) { ray_release(s); return q_err(QE_DOMAIN); }
-    memcpy(path, ray_str_ptr(s) + 1, n);
-    path[n] = '\0';
+    ray_t* p = ray_str(ray_str_ptr(s) + 1, ray_str_len(s) - 1);   /* past the leading ':' */
     ray_release(s);
-
-    /* Absent is determined POSITIVELY, never inferred from a failed listing:
-     * a directory we cannot open (EACCES) or that runs the allocator out is
-     * an ERROR, not a missing path (codex review 2026-07-30). */
-    struct stat st;
-    if (stat(path, &st) != 0)
-        return (errno == ENOENT || errno == ENOTDIR)
-             ? ray_list_new(1)                       /* () — absent, not empty */
-             : q_err(QE_IO);
-    if (!S_ISDIR(st.st_mode)) return ray_sym(hsym);  /* a file -> the descriptor */
-
-    /* The quarry's ls sorts ascending, drops `.`/`..`, and yields the empty
-     * SYMBOL vector for an empty directory; its own errors propagate. */
-    ray_t* p = ray_str(path, n);
     if (!p || RAY_IS_ERR(p)) return p ? p : q_err(QE_WSFULL);
-    ray_t* ls = ray_fs_list_fn(p);
+    ray_t* ls = q_io_list(p);
     ray_release(p);
-    return ls;
+    return ls ? ls : ray_sym(hsym);                  /* a file -> the descriptor */
 }
 
 ray_t* q_key_name(int64_t sym) {

@@ -544,6 +544,48 @@ done:
 #endif
 }
 
+void q_http_client_host(const q_http_url_t* u, char* out, size_t cap) {
+    int default_port = (u->scheme == 0 && u->port == 80) || (u->scheme == 1 && u->port == 443);
+    if (default_port) snprintf(out, cap, "%s", u->host);
+    else              snprintf(out, cap, "%s:%u", u->host, u->port);
+}
+
+ray_t* q_http_client_fetch(const q_http_url_t* u, const char* method, const char* headers, q_http_resp_t* r) {
+    memset(r, 0, sizeof *r);
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (!scan_ok(method, strlen(method))) return q_err(QE_DOMAIN);
+    char req[4096];
+    int rl = snprintf(req, sizeof req, "%s %s HTTP/1.1\r\nConnection: close\r\n%s\r\n", method, u->path, headers);
+    if (rl < 0 || (size_t)rl >= sizeof req) return q_err(QE_LIMIT);
+    const char* err = "conn";
+    r->buf = http_exchange(u, req, (size_t)rl, NULL, 0, now_ms() + Q_HTTP_TOTAL_MS, 0, &r->len, &err);
+    if (!r->buf) return q_err_from_text(err, strlen(err));
+    int ex = q_http_client_extract(r->buf, r->len, &r->status, &r->body, &r->body_len, NULL, 0, NULL, NULL);
+    if (ex == 0) return NULL;
+    q_http_client_resp_free(r);
+    return q_err(ex == -2 ? QE_WSFULL : QE_CONN);
+}
+
+q_http_span_t q_http_client_resp_header(const q_http_resp_t* r, const char* name) {
+    q_http_span_t v = { NULL, 0 };
+    int minor, st; const char* msg; size_t ml, nh = Q_HTTP_MAX_HDRS;
+    struct phr_header h[Q_HTTP_MAX_HDRS];
+    if (!r->buf || phr_parse_response(r->buf, r->len, &minor, &st, &msg, &ml, h, &nh, 0) <= 0) return v;
+    size_t n = strlen(name);
+    for (size_t i = 0; i < nh; i++) {
+        if (!h[i].name || h[i].name_len != n) continue;
+        size_t k = 0;
+        while (k < n && (h[i].name[k] | 0x20) == (name[k] | 0x20)) k++;
+        if (k == n) { v.p = h[i].value; v.n = h[i].value_len; return v; }
+    }
+    return v;
+}
+
+void q_http_client_resp_free(q_http_resp_t* r) {
+    free(r->buf);
+    memset(r, 0, sizeof *r);
+}
+
 /* Shared GET/HEAD/POST driver — THE one place a 3xx is followed (`.Q.hg`, `.Q.hp`
  * and the read0/read1 slice all ride it; q_http_client_raw does not).  Returns the
  * body (charv, or bytes when the caller asked) or a bare-class ray_error. */
@@ -579,11 +621,8 @@ static ray_t* http_do(ray_t* urlv, const http_req_t* r)
                 return q_err(QE_LIMIT);
             snprintf(authhdr, sizeof authhdr, "Authorization: Basic %s\r\n", enc);
         }
-        /* Host: include non-default port */
         char hosthdr[300];
-        int default_port = (u.scheme == 0 && u.port == 80) || (u.scheme == 1 && u.port == 443);
-        if (default_port) snprintf(hosthdr, sizeof hosthdr, "%s", u.host);
-        else              snprintf(hosthdr, sizeof hosthdr, "%s:%u", u.host, u.port);
+        q_http_client_host(&u, hosthdr, sizeof hosthdr);
 
         /* request head */
         char req[2048];
