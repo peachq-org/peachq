@@ -1,6 +1,5 @@
-/* q_s3 — see q_s3.h.  Requests follow the S3 API reference (GetObject with Range, ListObjectsV2); credentials resolve
- * as AWS's standard chain does for the environment and the shared files, endpoint and addressing as KX's objstor
- * variables say. */
+/* q_s3 — see q_s3.h.  Requests follow the S3 API reference (HeadObject, GetObject with Range, ListObjectsV2);
+ * endpoint and addressing are as KX's objstor variables say. */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L    /* gmtime_r */
 #endif
@@ -8,6 +7,7 @@
 #include "qlang/io/q_s3.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_env.h"              /* q_env_bind_native */
+#include "qlang/eval/q_eval.h"        /* q_eval_apply_call_name — .s3.config[::] is qlib/s3.q's, bound by name */
 #include "qlang/q_prim.h"             /* q_str_text_bytes */
 #include "qlang/net/q_http_client.h"
 #include "qlang/net/q_sigv4.h"
@@ -44,79 +44,19 @@ static void cfg_clear(char** v) {
     }
 }
 
-static char* env(const char* name) {
-    const char* e = getenv(name);
-    return e && *e ? dupn(e, strlen(e)) : NULL;
-}
-
-static void trim(const char** p, size_t* n) {
-    while (*n && ((*p)[0] == ' ' || (*p)[0] == '\t')) { (*p)++; (*n)--; }
-    while (*n && ((*p)[*n - 1] == ' ' || (*p)[*n - 1] == '\t' || (*p)[*n - 1] == '\r')) (*n)--;
-}
-
-/* `key = value` in section [sect] of an AWS shared file; NULL when the file, section or key is not there */
-static char* ini_get(const char* file, const char* sect, const char* key) {
-    FILE* fp = fopen(file, "rb");
-    if (!fp) return NULL;
-    char line[1024], *val = NULL;
-    int in = 0;
-    while (!val && fgets(line, sizeof line, fp)) {
-        const char* p = line;
-        size_t n = strcspn(line, "\n");
-        trim(&p, &n);
-        if (!n || p[0] == '#' || p[0] == ';') continue;
-        if (p[0] == '[') {
-            const char* s = p + 1;
-            size_t sn = n > 1 && p[n - 1] == ']' ? n - 2 : 0;
-            trim(&s, &sn);
-            in = sn == strlen(sect) && memcmp(s, sect, sn) == 0;
-            continue;
-        }
-        const char* eq = memchr(p, '=', n);
-        if (!in || !eq) continue;
-        const char* k = p;
-        size_t kn = (size_t)(eq - p), vn = n - kn - 1;
-        const char* v = eq + 1;
-        trim(&k, &kn);
-        trim(&v, &vn);
-        if (kn == strlen(key) && memcmp(k, key, kn) == 0 && vn) val = dupn(v, vn);
-    }
-    memset(line, 0, sizeof line);
-    fclose(fp);
-    return val;
-}
-
-/* The environment first, then the profile's sections of the shared credentials and config files.  The key id, secret
- * and session token come as one set from the first source holding a key id. */
-static void cfg_auto(char** v) {
-    for (int i = 0; i < S3_NKEYS; i++) v[i] = env(KEYS[i]);
-    if (!v[K_REGION]) v[K_REGION] = env("AWS_DEFAULT_REGION");
-    const char* home = getenv("HOME");
-    if (!home || !*home) home = getenv("USERPROFILE");
-    char cred[1024], conf[1024], sect[300];
-    const char* prof = v[K_PROFILE] ? v[K_PROFILE] : "default";
-    snprintf(cred, sizeof cred, "%s/.aws/credentials", home ? home : ".");
-    snprintf(conf, sizeof conf, "%s/.aws/config", home ? home : ".");
-    const char* cf = v[K_CREDFILE] ? v[K_CREDFILE] : cred;
-    const char* nf = v[K_CONFFILE] ? v[K_CONFFILE] : conf;
-    snprintf(sect, sizeof sect, strcmp(prof, "default") ? "profile %s" : "%s", prof);
-    static const char* const INI[3] = { "aws_access_key_id", "aws_secret_access_key", "aws_session_token" };
-    for (int src = 0; src < 2 && !v[K_ID]; src++) {
-        const char* file = src ? nf : cf;
-        const char* s = src ? sect : prof;
-        for (int i = K_ID; i <= K_TOKEN; i++) {
-            if (v[i]) { memset(v[i], 0, strlen(v[i])); free(v[i]); }
-            v[i] = ini_get(file, s, INI[i]);
-        }
-        if (!v[K_ID]) for (int i = K_ID; i <= K_TOKEN; i++) if (v[i]) { memset(v[i], 0, strlen(v[i])); free(v[i]); v[i] = NULL; }
-    }
-    if (!v[K_REGION]) v[K_REGION] = ini_get(nf, sect, "region");
-}
-
-static void cfg_ensure(void) {
-    if (g_cfg_set) return;
-    cfg_auto(g_cfg);
-    g_cfg_set = 1;
+/* The first access with nothing configured applies `.s3.config[::]` (qlib/s3.q) by name.  Its own reads are local
+ * files, but a shared file named by an s3:// path would come back here: that inner access finds it under way and goes
+ * anonymous rather than recursing. */
+static ray_t* cfg_ensure(void) {
+    static int busy;
+    if (g_cfg_set || busy) return NULL;
+    busy = 1;
+    ray_t* none = RAY_NULL_OBJ;
+    ray_t* r = q_eval_apply_call_name(".s3.config", 10, &none, 1);
+    busy = 0;
+    if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_OOM);
+    ray_release(r);
+    return NULL;
 }
 
 /* ---- a request ---------------------------------------------------------- */
@@ -175,7 +115,8 @@ static size_t xml_unescape(char* s, size_t n) {
     return o;
 }
 
-/* The error a failed answer means: 403 'access, anything else 'io, the text naming the object and S3's own code. */
+/* The error a failed answer means: 403 'access, anything else 'io, the text naming the object and S3's own code, or
+ * the status where there is no body to carry one (a HEAD). */
 static ray_t* s3_fail(const s3_loc_t* l, const q_http_resp_t* r) {
     const char* c = NULL;
     size_t cn = 0, at = 0;
@@ -200,8 +141,8 @@ static int hdr_line(char* out, size_t cap, size_t* o, const char* name, const ch
 }
 
 /* The request for one region: its URL, and its headers signed when a key id and secret are configured. */
-static ray_t* s3_request(const s3_loc_t* l, const char* region, const char* query, int64_t roff, int64_t rlen,
-                         q_http_url_t* u, char* hdrs, size_t cap) {
+static ray_t* s3_request(const s3_loc_t* l, const char* method, const char* region, const char* query, int64_t roff,
+                         int64_t rlen, q_http_url_t* u, char* hdrs, size_t cap) {
     char path[1100], url[1400], range[64] = "";
     const char* ep = g_cfg[K_ENDPOINT];
     int path_style = ep || (g_cfg[K_PATHSTYLE] && strcmp(g_cfg[K_PATHSTYLE], "1") == 0) || strchr(l->bucket, '.');
@@ -241,7 +182,7 @@ static ray_t* s3_request(const s3_loc_t* l, const char* region, const char* quer
     if (un >= sizeof uri) return q_err(QE_LIMIT);
     memcpy(uri, target, un);
     uri[un] = '\0';
-    if (q_sigv4_canonical("GET", uri, target[un] ? target + un + 1 : "", h, nh, S3_EMPTY_SHA256, canon, sizeof canon,
+    if (q_sigv4_canonical(method, uri, target[un] ? target + un + 1 : "", h, nh, S3_EMPTY_SHA256, canon, sizeof canon,
                           signed_h, sizeof signed_h) ||
         q_sigv4_authorization(g_cfg[K_ID], g_cfg[K_SECRET], region, "s3", amz, canon, signed_h, auth, sizeof auth))
         return q_err(QE_NYI);
@@ -253,18 +194,20 @@ static ray_t* s3_request(const s3_loc_t* l, const char* region, const char* quer
     return bad ? q_err(QE_LIMIT) : NULL;
 }
 
-/* One GET of the object (query NULL) or of the bucket's listing.  A bucket in another region than the one asked
+/* One request for the object (query NULL) or the bucket's listing.  A bucket in another region than the one asked
  * answers 301/400 naming its own in x-amz-bucket-region, and the request is made once more there. */
-static ray_t* s3_get(const s3_loc_t* l, const char* query, int64_t roff, int64_t rlen, q_http_resp_t* r) {
+static ray_t* s3_send(const s3_loc_t* l, const char* method, const char* query, int64_t roff, int64_t rlen,
+                      q_http_resp_t* r) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
-    cfg_ensure();
+    ray_t* bad = cfg_ensure();
+    if (bad) return bad;
     char region[64];
     snprintf(region, sizeof region, "%s", g_cfg[K_REGION] ? g_cfg[K_REGION] : "us-east-1");
     for (int tries = 0;; tries++) {
         q_http_url_t u;
         char hdrs[2048];
-        ray_t* bad = s3_request(l, region, query, roff, rlen, &u, hdrs, sizeof hdrs);
-        if (!bad) bad = q_http_client_fetch(&u, "GET", hdrs, r);
+        bad = s3_request(l, method, region, query, roff, rlen, &u, hdrs, sizeof hdrs);
+        if (!bad) bad = q_http_client_fetch(&u, method, hdrs, r);
         memset(hdrs, 0, sizeof hdrs);
         if (bad) return bad;
         q_http_span_t br = q_http_client_resp_header(r, "x-amz-bucket-region");
@@ -277,32 +220,29 @@ static ray_t* s3_get(const s3_loc_t* l, const char* query, int64_t roff, int64_t
     }
 }
 
-/* the T of a Content-Range `bytes a-b/T` or `bytes * /T`; -1 when absent or unknown */
-static int64_t s3_total(const q_http_resp_t* r) {
-    q_http_span_t cr = q_http_client_resp_header(r, "Content-Range");
-    const char* s = cr.p ? memchr(cr.p, '/', cr.n) : NULL;
-    if (!s) return -1;
+/* the decimal that ends a header value (all of Content-Length, the T of a Content-Range `bytes a-b/T`); -1 when the
+ * header is absent or that is no number */
+static int64_t s3_num(const q_http_resp_t* r, const char* name) {
+    q_http_span_t h = q_http_client_resp_header(r, name);
+    size_t i = h.n;
+    while (i && h.p[i - 1] >= '0' && h.p[i - 1] <= '9') i--;
+    if (!h.p || i == h.n) return -1;
     int64_t t = 0;
-    size_t i = (size_t)(s - cr.p) + 1;
-    if (i >= cr.n) return -1;
-    for (; i < cr.n; i++) {
-        if (cr.p[i] < '0' || cr.p[i] > '9' || t > (INT64_MAX - (cr.p[i] - '0')) / 10) return -1;
-        t = t * 10 + (cr.p[i] - '0');
+    for (; i < h.n; i++) {
+        if (t > (INT64_MAX - (h.p[i] - '0')) / 10) return -1;
+        t = t * 10 + (h.p[i] - '0');
     }
     return t;
 }
 
-/* the object's size from a one-byte ranged GET, whose Content-Range carries it; *status the answer's */
+/* the object's size from a HEAD's Content-Length; *status the answer's */
 static ray_t* s3_size(const s3_loc_t* l, int* status) {
     q_http_resp_t r;
-    ray_t* bad = s3_get(l, NULL, 0, 1, &r);
+    ray_t* bad = s3_send(l, "HEAD", NULL, -1, 0, &r);
     if (bad) return bad;
-    int64_t t = s3_total(&r);
+    int64_t n = s3_num(&r, "Content-Length");
     *status = r.status;
-    ray_t* out = r.status == 206 && t >= 0 ? ray_i64(t)
-               : r.status == 416           ? ray_i64(t > 0 ? t : 0)
-               : r.status == 200           ? ray_i64((int64_t)r.body_len)
-                                           : s3_fail(l, &r);
+    ray_t* out = r.status == 200 && n >= 0 ? ray_i64(n) : r.status == 200 ? q_err(QE_IO) : s3_fail(l, &r);
     q_http_client_resp_free(&r);
     return out;
 }
@@ -325,9 +265,9 @@ ray_t* q_s3_read(ray_t* pathstr, int64_t off, int64_t want) {
     for (int done = 0; !done && !bad; ) {
         int64_t ask = want < 0 || want - got > S3_CHUNK ? S3_CHUNK : want - got;
         q_http_resp_t r;
-        if ((bad = s3_get(&l, NULL, off + got, ask > 0 ? ask : 1, &r))) break;
+        if ((bad = s3_send(&l, "GET", NULL, off + got, ask > 0 ? ask : 1, &r))) break;
         const char* src = r.body;
-        int64_t n = (int64_t)r.body_len, t = s3_total(&r);
+        int64_t n = (int64_t)r.body_len, t = s3_num(&r, "Content-Range");
         if (r.status == 200) {
             int64_t at = off + got;
             n = at < n ? n - at : 0;
@@ -383,7 +323,7 @@ static ray_t* s3_list_page(const s3_loc_t* l, const char* prefix, char* token, s
     snprintf(query, sizeof query, "list-type=2&delimiter=%%2F&prefix=%s%s%s", ep, *token ? "&continuation-token=" : "",
              et);
     q_http_resp_t r;
-    ray_t* bad = s3_get(l, query, -1, 0, &r);
+    ray_t* bad = s3_send(l, "GET", query, -1, 0, &r);
     if (bad) return bad;
     if (r.status != 200) { bad = s3_fail(l, &r); q_http_client_resp_free(&r); return bad; }
     size_t at = 0, in;
@@ -446,14 +386,14 @@ ray_t* q_s3_list(ray_t* pathstr) {
 
 /* ---- the .s3 natives ---------------------------------------------------- */
 
-/* the settings in v as a dict in KEYS order; `masked` shows the secret and the token as "***" */
-static ray_t* cfg_dict(char** v, int masked) {
+/* the settings in v as a dict in KEYS order, the secret and the token shown as "***" */
+static ray_t* cfg_dict(char** v) {
     ray_t* k = ray_sym_vec_new(RAY_SYM_W64, S3_NKEYS);
     ray_t* d = ray_list_new(S3_NKEYS);
     for (int i = 0; i < S3_NKEYS && !RAY_IS_ERR(k) && !RAY_IS_ERR(d); i++) {
         if (!v[i]) continue;
         int64_t id = ray_sym_intern_runtime(KEYS[i], strlen(KEYS[i]));
-        const char* t = masked && (i == K_SECRET || i == K_TOKEN) ? "***" : v[i];
+        const char* t = i == K_SECRET || i == K_TOKEN ? "***" : v[i];
         ray_t* s = ray_charv(t, (int64_t)strlen(t));
         if (RAY_IS_ERR(s)) { ray_release(k); ray_release(d); return s; }
         k = ray_vec_append(k, &id);
@@ -468,27 +408,10 @@ static ray_t* cfg_dict(char** v, int masked) {
     return ray_dict_new(k, d);
 }
 
-/* `.s3.i.auto[]` — the settings the environment and the AWS shared files resolve to, the secret included */
-static ray_t* s3_auto_fn(ray_t* x) {
-    (void)x;
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
-    char* v[S3_NKEYS] = { 0 };
-    cfg_auto(v);
-    ray_t* d = cfg_dict(v, 0);
-    cfg_clear(v);
-    return d;
-}
-
-/* `.s3.i.config d` — d keyed by the setting names, each value a string, or :: for the auto configuration; it replaces
- * the whole configuration and answers it masked */
+/* `.s3.i.config d` — d keyed by the setting names, each value a string; it replaces the whole configuration, kept
+ * here and never in a q value, and answers it masked */
 static ray_t* s3_config_fn(ray_t* x) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
-    if (x && RAY_IS_NULL(x)) {
-        cfg_clear(g_cfg);
-        cfg_auto(g_cfg);
-        g_cfg_set = 1;
-        return cfg_dict(g_cfg, 1);
-    }
     if (!x || x->type != RAY_DICT) return q_err(QE_TYPE);
     ray_t* k = ray_dict_keys(x);
     ray_t* d = ray_dict_vals(x);
@@ -515,13 +438,10 @@ static ray_t* s3_config_fn(ray_t* x) {
     cfg_clear(g_cfg);
     memcpy(g_cfg, v, sizeof v);
     g_cfg_set = 1;
-    return cfg_dict(g_cfg, 1);
+    return cfg_dict(g_cfg);
 }
 
 void q_s3_register(void) {
-    ray_t* a = ray_fn_unary(".s3.i.auto", RAY_FN_NONE, s3_auto_fn);
-    q_env_bind_native(".s3.i.auto", a, 1);
-    ray_release(a);
     ray_t* c = ray_fn_unary(".s3.i.config", RAY_FN_NONE, s3_config_fn);
     q_env_bind_native(".s3.i.config", c, 1);
     ray_release(c);
