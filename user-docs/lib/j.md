@@ -325,6 +325,7 @@ The fourth argument is a dict. **An option is never silently ignored**: an unkno
 | `store_rejects` | boolean | `0b` | continue AND keep the reject records in a global table |
 | `rejects_table` | symbol | `` `reject_errors `` | names that table, and implies `store_rejects` |
 | `null_padding` | boolean | `0b` | accepted for `.csv.read` parity; changes nothing, since the key union already null-fills |
+| `compression` | symbol | `` `auto `` | `` `auto `` inflates a file whose name ends `.gz`; `` `gzip `` always, `` `none `` never ([as `.csv.read`](csv.md#options)) |
 
 The format subset is the one [`.csv.read` validates](csv.md#formats-for-dates-and-timestamps), and `xcol` is the
 rename described on [Loading a file](../loading.md#5-you-rename-with-xcol) — it applies before the target is consulted,

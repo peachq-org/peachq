@@ -90,7 +90,7 @@ When resolving data resources, it is useful to separate four concepts.
 | Concept | Examples | Responsibility |
 |---|---|---|
 | **Transport** | file, HTTP, HTTPS, S3 (and the other DuckDB-carried schemes) | Obtain underlying bytes or content; where possible support ranged `read0` / `read1` |
-| **Container** | ZIP | Expose a member or child resource |
+| **Container** | ZIP, tar, tar.gz, gzip | Expose a member or child resource; detected from the path, never a scheme |
 | **Format / decoder** | CSV, TSV, JSON, Parquet | Convert content into a logical value such as a table |
 | **Query provider** | DuckDB, q IPC provider | Expose table/query semantics directly, potentially with pushdown |
 
@@ -112,10 +112,10 @@ HTTP transport
     -> qSQL
 ```
 
-A proposed ZIP example:
+A ZIP example:
 
 ```q
-select from `:zip://archive.zip/trades.csv
+select from `:archive.zip/trades.csv
 ```
 
 is conceptually:
@@ -128,8 +128,6 @@ file transport
     -> table
     -> qSQL
 ```
-
-ZIP support and `zip://` syntax are **planned, not currently supported**.
 
 This separation is important. HTTP is not a CSV provider: it is a transport. ZIP is not a table format: it is a container. CSV describes how the final
 content is decoded.
@@ -400,34 +398,28 @@ whole object.
 
 ## Containers
 
-Containers introduce another resource-resolution step.
-
-The planned ZIP notation is:
-
-```q
-`:zip://archive.zip/member.csv
-```
-
-and, when table selection is supported:
+Containers introduce another resource-resolution step, and they are DETECTED, never spelled as a scheme. A scheme
+names a transport; a path component named `.zip`, `.tar`, `.tar.gz` or `.tgz` that is a FILE is an archive, walked
+into, while one that is a directory is a folder:
 
 ```q
-select from `:zip://archive.zip/member.csv
+select from `:archive.zip/member.csv
+select from `:s3://bucket/archive.tar.gz/member.csv
 ```
-
-`zip://` explicitly says that the outer resource is a ZIP container. This avoids relying on the outer filename ending in `.zip`.
 
 The member can then be interpreted independently from the container:
 
 ```text
-:zip://anything.dat/member.csv
-             ^          ^
-         ZIP container  CSV format
+:archive.zip/member.csv
+     ^          ^
+ ZIP container  CSV format
 ```
 
-This is deliberate. A ZIP file does not need to be named `.zip`, and a CSV file does not always need to be named `.csv` when the caller uses an
-explicit decoding API.
+Decompressing a `.gz` belongs to the table doors (`select from`, `get` of text, `.csv.read`, `.j.read`), as DuckDB's
+`compression='auto'` does; `read0` and `read1` return the stored bytes. [Reading archives](lib/zip.md) has the details.
 
-Future transports and containers should compose rather than require combined implementations such as "HTTP CSV" or "ZIP CSV".
+Transports and containers compose rather than require combined implementations such as "HTTP CSV" or "ZIP CSV": an
+archive is read through the same size, ranged read and list a transport offers, so it works over every transport.
 
 ## Aliases: `:pq:<kind>:<alias>`
 

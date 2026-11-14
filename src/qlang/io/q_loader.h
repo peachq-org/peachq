@@ -1,4 +1,4 @@
-/* q_loader — the TARGET seam .csv.read and .j.read share.
+/* q_loader — the TARGET seam .csv.read and .j.read share, and the one decompress step their bytes pass.
  *
  * A target is TWO things, and a caller uses both.  As a SCHEMA ORACLE an existing symbol target
  * answers, before a cell parses, what type a column is and whether it exists at all
@@ -9,6 +9,7 @@
 
 #include <rayforce.h>
 #include <stdint.h>
+#include "qlang/io/q_io.h"
 
 typedef struct q_loader_sink {
     int      kind;        /* 0 return the table, 1 a global name, 2 a rank-3 lambda */
@@ -19,6 +20,15 @@ typedef struct q_loader_sink {
     char*    chars;       /* per target column: its type char; '*' for a list/string column */
     int64_t  n;
 } q_loader_sink;
+
+/* The `compression` option both readers take: `auto (gzip when the name ends `.gz` — DuckDB's compression='auto',
+ * the default), `gzip or `none.  A symbol naming another codec is 'nyi, anything else 'type. */
+enum { Q_LOADER_AUTO, Q_LOADER_GZIP, Q_LOADER_NONE };
+ray_t* q_loader_compression(ray_t* v, int* mode);
+
+/* A resource's bytes as a table door reads them: forward, decompressed as `mode` says.  read0/read1 never come
+ * here — they answer the stored bytes. */
+ray_t* q_loader_open(ray_t* pathstr, int mode, q_io_stream_t** s);
 
 /* `::`/elided is kind 0; a lambda of any rank but 3 is 'rank; anything else 'type. */
 ray_t*  q_loader_sink_open(q_loader_sink* s, ray_t* target);

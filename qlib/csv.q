@@ -29,7 +29,8 @@
 / (char, default "; "" disables quoting); escape (char, default the quote char); comment (char, default off).
 / Bad-row levers, all default off: ignore_errors (skip bad rows); null_padding (pad short rows); strict_mode (default
 / 1b; 0b reads unparseable quotes as bytes); store_rejects (keep the reject records in a global table);
-/ rejects_table (symbol, default `reject_errors)
+/ rejects_table (symbol, default `reject_errors).  compression (`auto, the default: gzip when the name ends .gz;
+/ `gzip; `none) for a file symbol
 / @throws option an unknown or unimplemented option key
 / @throws csv a malformed file, an empty payload, or a cell that fails its fixed type
 / @throws length an xcol key naming no column
