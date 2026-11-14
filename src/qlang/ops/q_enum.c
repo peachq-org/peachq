@@ -11,7 +11,7 @@
 #include "mem/heap.h"   /* RAY_ATTR_SORTED / HAS_INDEX / HAS_NULLS */
 #include "ops/idxop.h"  /* ray_index_drop — a re-stamp sheds the positions' index; _find_row/_has_key — asked by position */
 #include "lang/internal.h" /* ray_concat_fn — the col-append seam's one concat */
-#include "lang/eval.h"     /* ray_take_fn, ray_eval_get_restricted */
+#include "lang/eval.h"     /* ray_take_fn */
 #include "qlang/ops/q_index.h" /* q_index_at — the one TOTAL gather (resolve, deref) */
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — the one int-family widen (R2 construction) */
 #include "table/dict.h"        /* ray_dict_slots — keyed-target halves at deref */
@@ -402,7 +402,6 @@ static ray_t* enum_extend(ray_t* x, ray_t* y) {
 /* Filepath form (ref/enum-extend.md): the domain FILE grows append-only, then
  * loads as the global named by the file's basename. */
 static ray_t* enum_extend_file(ray_t* x, ray_t* y) {
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* path = q_io_file_path(x);
     if (!path) return q_err(QE_TYPE);
     const char* p = ray_str_ptr(path);

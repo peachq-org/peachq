@@ -319,6 +319,8 @@ int ray_ipc_auth_file_load(const char* path) {
     return 0;
 }
 
+bool ray_ipc_auth_file_loaded(void) { return g_auth_file; }
+
 /* Does the stored hex secret (32 = md5, 40 = sha1; case-insensitive) equal `digest(pw)`? */
 static bool auth_hex_matches(const char* stored, size_t hex_len, const char* pw, size_t pw_len,
                              ray_t* (*digest)(ray_t*)) {

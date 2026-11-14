@@ -701,6 +701,9 @@ static ray_t* tbi_init_fn(ray_t** args, int64_t n) {
     ray_t* in  = q_io_path_operand(args[0]);
     ray_t* out = q_io_path_operand(args[1]);
     if (!in || !out) { if (in) ray_release(in); if (out) ray_release(out); return q_err(QE_TYPE); }
+    ray_t* refused = q_io_guard(ray_str_ptr(in), ray_str_len(in));
+    if (!refused) refused = q_io_guard(ray_str_ptr(out), ray_str_len(out));
+    if (refused) { ray_release(in); ray_release(out); return refused; }
     int ok = headless_open(ray_str_ptr(in), ray_str_ptr(out));
     ray_release(in);
     ray_release(out);
