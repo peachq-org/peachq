@@ -16,7 +16,8 @@
 #include "qlang/io/q_provider.h"  /* q_io_set: a table coordinate routes to .X.set; hdel: to .X.hdel */
 #include "qlang/io/q_csv.h"     /* the CSV/TSV decoder behind a recognised tabular suffix */
 #include "qlang/io/q_json.h"    /* the JSON decoder, and the framing a suffix declares to it */
-#include "qlang/io/q_zip.h"     /* q_zip_* — the zip:// arm of the byte core */
+#include "qlang/io/q_zip.h"     /* q_zip_* — the zip:// transport of the byte reader */
+#include "qlang/io/q_s3.h"      /* q_s3_* — the s3:// transport of the byte reader */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_call_name — the .parquet doors and the .duckdb transport are bound by `\l pq`, not linked */
 #include "qlang/q_env.h"        /* q_env_get — `.h.tx`, the format table `set` reads at call time */
 #include "qlang/net/q_gz.h"     /* q_gz_inflate_zlib — the kxzip block codec */
@@ -26,6 +27,7 @@
 #include "qlang/net/q_http_client.h" /* the http half of the resource-read seam */
 #include "lang/eval.h"      /* ray_eval_get_restricted */
 #include "lang/env.h"       /* ray_fn_unary — the .fs.i.rmtree native */
+#include "lang/internal.h"  /* ray_fs_list_fn — the quarry's sorted directory listing */
 #include "store/fileio.h"   /* ray_mkdir_p — the parent directories a write promises */
 #include "table/sym.h"      /* ray_sym_intern_runtime, ray_sym_vec_cell */
 #include "app/term.h"       /* ray_term_line_begin/end — a terminal `read0 0` shows what is typed */
@@ -46,6 +48,9 @@
 #endif
 #ifndef O_BINARY
 #define O_BINARY 0          /* only Windows has a text mode to opt out of */
+#endif
+#ifndef O_NONBLOCK
+#define O_NONBLOCK 0        /* Windows has no fifo to wait on */
 #endif
 
 /* ---- paths, size, write ------------------------------------------------- */
@@ -202,7 +207,7 @@ ray_t* q_io_write_all(ray_t* pathstr, const void* bytes, size_t n) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     const char* p = ray_str_ptr(pathstr);
     if (!p) return q_err(QE_DOMAIN);
-    if (q_zip_is(p, ray_str_len(pathstr))) return q_err(QE_NYI);
+    if (q_zip_is(p, ray_str_len(pathstr)) || q_s3_is(p, ray_str_len(pathstr))) return q_err(QE_NYI);
     q_io_mkdir_parents(p, ray_str_len(pathstr));
     FILE* fp = fopen(p, "wb");
     if (!fp) return q_err(QE_IO);
@@ -224,26 +229,18 @@ int64_t q_io_clamp(int64_t n, int64_t* off, int64_t want) {
     return (want < 0 || want > n - *off) ? n - *off : want;
 }
 
-/* Bytes exactly as they sit on disk.  One open answers the size and the
- * container magic too, so neither can change under the read (fstat on the open
- * fd, never a second stat). */
-static ray_t* io_read_raw(ray_t* pathstr, int64_t off, int64_t want, int* wrapped) {
-    if (wrapped) *wrapped = 0;
+/* Bytes exactly as they sit on disk: the size is fstat's on the open fd, so it cannot change under the read.  The
+ * open never waits, so a fifo in a directory being loaded is refused rather than blocking for a writer. */
+static ray_t* io_local_read(ray_t* pathstr, int64_t off, int64_t want) {
     const char* p = ray_str_ptr(pathstr);
     if (!p) return q_err(QE_DOMAIN);
-    FILE* fp = fopen(p, "rb");
-    if (!fp) return q_err(QE_IO);
+    int fd = open(p, O_RDONLY | O_BINARY | O_NONBLOCK);
     struct stat st;
-    if (fstat(fileno(fp), &st) != 0 || !S_ISREG(st.st_mode)) {
-        fclose(fp);
+    if (fd < 0) return q_err(QE_IO);
+    FILE* fp = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) ? fdopen(fd, "rb") : NULL;
+    if (!fp) {
+        close(fd);
         return q_err(QE_IO);
-    }
-    if (wrapped) {
-        char magic[ZIP_MAGIC_LEN];      /* the magic alone: a truncated container
-                                         * is still one, and must say 'corrupt */
-        *wrapped = st.st_size >= ZIP_MAGIC_LEN &&
-                   fread(magic, 1, ZIP_MAGIC_LEN, fp) == ZIP_MAGIC_LEN &&
-                   memcmp(magic, ZIP_MAGIC, ZIP_MAGIC_LEN) == 0;
     }
     int64_t take = q_io_clamp((int64_t)st.st_size, &off, want);
     uint8_t* buf = take > 0 ? (uint8_t*)malloc((size_t)take) : NULL;
@@ -260,6 +257,60 @@ static ray_t* io_read_raw(ray_t* pathstr, int64_t off, int64_t want, int* wrappe
     return out;
 }
 
+static ray_t* io_local_size(ray_t* pathstr) {
+    int64_t n = io_stat_size(pathstr);
+    return n < 0 ? q_err(QE_IO) : ray_i64(n);
+}
+
+/* Absent is determined POSITIVELY, never inferred from a failed listing: a directory we cannot open (EACCES) or that
+ * runs the allocator out is an ERROR, not a missing path (codex review 2026-07-30).  The quarry's ls sorts ascending,
+ * drops `.`/`..`, and yields the empty SYMBOL vector for an empty directory. */
+static ray_t* io_local_list(ray_t* pathstr) {
+    struct stat st;
+    if (stat(ray_str_ptr(pathstr), &st) != 0)
+        return errno == ENOENT || errno == ENOTDIR ? ray_list_new(1) : q_err(QE_IO);
+    return S_ISDIR(st.st_mode) ? ray_fs_list_fn(pathstr) : NULL;
+}
+
+static ray_t* io_none_list(ray_t* pathstr) { (void)pathstr; return ray_list_new(1); }
+
+/* THE byte reader: each transport is these three operations on bytes as stored, and every verb reaches a transport
+ * through io_src alone.  The kxzip container is read over them, whatever carries it.  `batch` is how many bytes
+ * beside those asked are worth fetching to save a request: none where a read is a syscall, the container's magic
+ * with a read near the front and its whole tail in one read where a read is a round trip. */
+typedef struct {
+    ray_t* (*size)(ray_t* pathstr);
+    ray_t* (*read)(ray_t* pathstr, int64_t off, int64_t want);
+    ray_t* (*list)(ray_t* pathstr);
+    int64_t batch;
+} io_src_t;
+
+static const io_src_t IO_LOCAL = { io_local_size, io_local_read, io_local_list, 0 };
+static const io_src_t IO_ZIP   = { q_zip_size, q_zip_read, io_none_list, 0 };
+static const io_src_t IO_S3    = { q_s3_size, q_s3_read, q_s3_list, 65536 };
+
+static const io_src_t* io_src(ray_t* pathstr) {
+    const char* p = ray_str_ptr(pathstr);
+    size_t n = ray_str_len(pathstr);
+    return q_zip_is(p, n) ? &IO_ZIP : q_s3_is(p, n) ? &IO_S3 : &IO_LOCAL;
+}
+
+ray_t* q_io_list(ray_t* pathstr) { return io_src(pathstr)->list(pathstr); }
+
+static int io_has_magic(ray_t* b) {
+    return q_count(b) >= ZIP_MAGIC_LEN && memcmp(ray_data(b), ZIP_MAGIC, ZIP_MAGIC_LEN) == 0;
+}
+
+/* does the object open with the kxzip magic?  1/0, or -1 with *err owned.  The magic alone: a truncated container
+ * is still one, and must say 'corrupt. */
+static int io_magic(const io_src_t* s, ray_t* pathstr, ray_t** err) {
+    ray_t* m = s->read(pathstr, 0, ZIP_MAGIC_LEN);
+    if (RAY_IS_ERR(m)) { *err = m; return -1; }
+    int w = io_has_magic(m);
+    ray_release(m);
+    return w;
+}
+
 /* `want` bytes from `off` of an OWNED whole, under q_io_clamp's law; consumes the whole */
 static ray_t* io_slice(ray_t* all, int64_t off, int64_t want) {
     if (off == 0 && want < 0) return all;
@@ -269,23 +320,31 @@ static ray_t* io_slice(ray_t* all, int64_t off, int64_t want) {
     return out;
 }
 
-static ray_t* io_zip_slice(ray_t* pathstr, int64_t off, int64_t want);
+static ray_t* io_zip_slice(const io_src_t* s, ray_t* pathstr, int64_t off, int64_t want);
 
 ray_t* q_io_read_slice(ray_t* pathstr, int64_t off, int64_t want, int* zipped) {
     if (zipped) *zipped = 0;
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
-    if (q_zip_is(ray_str_ptr(pathstr), ray_str_len(pathstr))) return q_zip_read(pathstr, off, want);
-    int wrapped = 0;
-    ray_t* out = io_read_raw(pathstr, off, want, &wrapped);
-    if (!wrapped || RAY_IS_ERR(out)) return out;
-    ray_release(out);
+    const io_src_t* s = io_src(pathstr);
+    if (off < 0) off = 0;
+    int64_t lo = off <= s->batch ? 0 : off, span = want < 0 || want > INT64_MAX - off ? -1 : off - lo + want;
+    ray_t* b = s->read(pathstr, lo, lo || span < 0 || span >= ZIP_MAGIC_LEN ? span : ZIP_MAGIC_LEN);
+    if (RAY_IS_ERR(b)) return b;
+    ray_t* err = NULL;
+    int wrapped = lo ? io_magic(s, pathstr, &err) : io_has_magic(b);
+    if (wrapped <= 0) {
+        if (err) { ray_release(b); return err; }
+        return io_slice(b, off - lo, want);
+    }
     if (zipped) *zipped = 1;
-    if (want >= 0) return io_zip_slice(pathstr, off, want);
-    ray_t* all = io_read_raw(pathstr, 0, -1, NULL);
-    if (RAY_IS_ERR(all)) return all;
-    ray_t* plain = q_io_unzip((const uint8_t*)ray_data(all),
-                              (size_t) q_count(all));
-    ray_release(all);
+    if (want >= 0) { ray_release(b); return io_zip_slice(s, pathstr, off, want); }
+    if (lo) {
+        ray_release(b);
+        b = s->read(pathstr, 0, -1);
+        if (RAY_IS_ERR(b)) return b;
+    }
+    ray_t* plain = q_io_unzip((const uint8_t*)ray_data(b), (size_t)q_count(b));
+    ray_release(b);
     if (!plain) return q_err(QE_CORRUPT);       /* magic promised what unzip denies */
     return RAY_IS_ERR(plain) ? plain : io_slice(plain, off, want);
 }
@@ -299,8 +358,9 @@ static int io_is_http(ray_t* pathstr) {
     return q_http_client_scheme_is(p, p ? ray_str_len(pathstr) : 0);
 }
 
-/* the remote schemes DuckDB's extensions speak and this file does not (ADR 2026-09-15 § B3): the bytes come and go
- * through .duckdb.i.read1 / .duckdb.i.write0, bound by `\l pq` like the .parquet doors; az:// is handed over, unsupported */
+/* the remote schemes DuckDB's extensions speak (ADR 2026-09-15 § B3): the bytes come and go through .duckdb.i.read1 /
+ * .duckdb.i.write0, bound by `\l pq` like the .parquet doors, except that s3:// is READ by the byte reader; az:// is
+ * handed over, unsupported */
 static int io_is_remote(ray_t* pathstr) {
     static const char* const S[] = { "s3://", "s3a://", "s3n://", "gcs://", "gs://", "r2://", "hf://", "az://" };
     const char* p = ray_str_ptr(pathstr);
@@ -370,14 +430,15 @@ ray_t* q_io_resource_table(ray_t* fsym) {
     else if (io_suffix_is(p, n, ".jsonl"))  out = q_json_read_table(fsym, Q_JSON_ND);
     else if (io_suffix_is(p, n, ".json"))   out = q_json_read_table(fsym, Q_JSON_AUTO);
     else if (io_suffix_is(p, n, ".parquet")) out = io_parquet_table(fsym);
-    else out = io_is_url(path) ? q_err(QE_TYPE) : NULL;
+    else out = io_is_url(path) && !q_s3_is(p, n) ? q_err(QE_TYPE) : NULL;
     ray_release(path);
     return out;
 }
 
 ray_t* q_io_resource_read(ray_t* pathstr, int64_t off, int64_t want) {
     if (io_is_http(pathstr)) return q_http_client_read_slice(pathstr, off, want);
-    if (io_is_remote(pathstr)) return io_remote_read(pathstr, off, want);
+    if (io_is_remote(pathstr) && !q_s3_is(ray_str_ptr(pathstr), ray_str_len(pathstr)))
+        return io_remote_read(pathstr, off, want);
     return q_io_read_slice(pathstr, off, want, NULL);
 }
 
@@ -493,21 +554,26 @@ static int zip_block_decode(int32_t alg, const uint8_t* src, size_t clen, uint8_
            used == clen && got == plain ? 0 : -1;
 }
 
-/* The container trailer of a file whose on-disk length is `file_len`.  NULL
+/* The container trailer of an object whose stored length is `file_len`.  NULL
  * with *found=0 when it carries no magic, NULL with *found=1 and `z` filled
- * when it holds a well-formed container; else an owned error — 'io from the
- * read, 'corrupt from a layout the magic promised and the trailer denies. */
-static ray_t* io_zip_hdr(ray_t* pathstr, int64_t file_len, zip_hdr_t* z, int* found, ray_t** tail_out) {
+ * when it holds a well-formed container; else an owned error — the transport's
+ * from the read, 'corrupt from a layout the magic promised and the trailer denies. */
+static ray_t* io_zip_hdr(const io_src_t* s, ray_t* pathstr, int64_t file_len, zip_hdr_t* z, int* found,
+                         ray_t** tail_out) {
     *found = 0;
     if (tail_out) *tail_out = NULL;
-    int wrapped = 0;
-    ray_t* last = io_read_raw(pathstr, file_len - 8, 8, &wrapped);
-    if (RAY_IS_ERR(last)) return last;
-    int64_t nb = wrapped && q_count(last) == 8 ? zip_nblocks((const uint8_t*)ray_data(last), (size_t)file_len) : 0;
-    ray_release(last);
-    if (!wrapped) return NULL;
-    if (!nb) return q_err(QE_CORRUPT);
-    ray_t* tail = io_read_raw(pathstr, file_len - ZIP_TAIL_LEN(nb), ZIP_TAIL_LEN(nb), NULL);
+    ray_t* err = NULL;
+    int wrapped = io_magic(s, pathstr, &err);
+    if (wrapped <= 0) return err;
+    int64_t span = s->batch > 8 ? s->batch : 8;
+    if (span > file_len - ZIP_MAGIC_LEN) span = file_len - ZIP_MAGIC_LEN;
+    if (span < 8) return q_err(QE_CORRUPT);
+    ray_t* tail = s->read(pathstr, file_len - span, span);
+    if (RAY_IS_ERR(tail)) return tail;
+    int64_t nb = q_count(tail) == span ? zip_nblocks((const uint8_t*)ray_data(tail) + span - 8, (size_t)file_len) : 0;
+    if (!nb) { ray_release(tail); return q_err(QE_CORRUPT); }
+    tail = ZIP_TAIL_LEN(nb) <= span ? io_slice(tail, span - ZIP_TAIL_LEN(nb), ZIP_TAIL_LEN(nb))
+         : (ray_release(tail), s->read(pathstr, file_len - ZIP_TAIL_LEN(nb), ZIP_TAIL_LEN(nb)));
     if (RAY_IS_ERR(tail)) return tail;
     ray_t* bad = q_count(tail) != ZIP_TAIL_LEN(nb) ? q_err(QE_CORRUPT)
                : zip_trailer((const uint8_t*)ray_data(tail), nb, (size_t)file_len, z);
@@ -517,19 +583,30 @@ static ray_t* io_zip_hdr(ray_t* pathstr, int64_t file_len, zip_hdr_t* z, int* fo
     return bad;
 }
 
+/* the stored length, as a long, from the transport's size operation */
+static ray_t* io_stored_len(const io_src_t* s, ray_t* pathstr, int64_t* n) {
+    ray_t* sz = s->size(pathstr);
+    if (RAY_IS_ERR(sz)) return sz;
+    *n = sz->i64;
+    ray_release(sz);
+    return NULL;
+}
+
 /* ref/hcount.md: a compressed file's size is its ORIGINAL file's, so size is
  * answered past the container exactly as q_io_read_slice answers "what bytes".
- * Too small to hold one, or holding one that will not decode, and the on-disk
+ * Too small to hold one, or holding one that will not decode, and the stored
  * length is all there is — the magic is a claim, and `-21!` is what signals. */
 ray_t* q_io_file_size(ray_t* pathstr) {
-    if (q_zip_is(ray_str_ptr(pathstr), ray_str_len(pathstr))) return q_zip_size(pathstr);
-    int64_t n = io_stat_size(pathstr);
-    if (n < 0) return q_err(QE_IO);
+    const io_src_t* s = io_src(pathstr);
+    int64_t n;
+    ray_t* bad = io_stored_len(s, pathstr, &n);
+    if (bad) return bad;
     if (n < ZIP_MAGIC_LEN + ZIP_TAIL_LEN(1)) return ray_i64(n);
     zip_hdr_t z;
     int found = 0;
-    ray_t* bad = io_zip_hdr(pathstr, n, &z, &found, NULL);
-    if (bad) { ray_release(bad); return ray_i64(n); }
+    bad = io_zip_hdr(s, pathstr, n, &z, &found, NULL);
+    if (bad && !q_err_is(bad, QE_CORRUPT)) return bad;
+    if (bad) ray_release(bad);
     return ray_i64(found ? z.uncompressed : n);
 }
 
@@ -603,10 +680,12 @@ ray_t* q_io_zip_stats(ray_t* x) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* path = q_io_file_path(x);
     if (!path) return q_err(QE_TYPE);
-    int64_t file_len = io_stat_size(path);       /* the CONTAINER's own length */
+    const io_src_t* s = io_src(path);
+    int64_t file_len = 0;                        /* the CONTAINER's own length */
     zip_hdr_t z;
     int found = 0;
-    ray_t* r = io_zip_hdr(path, file_len, &z, &found, NULL);
+    ray_t* r = io_stored_len(s, path, &file_len);
+    if (!r) r = io_zip_hdr(s, path, file_len, &z, &found, NULL);
     if (!r && !found)                   /* not compressed -> the empty dict */
         r = ray_dict_new(ray_sym_vec_new(RAY_SYM_W64, 0), ray_list_new(0));
     else if (!r) {
@@ -626,11 +705,13 @@ void q_io_zipmap_free(q_io_zipmap_t* zm) {
 
 ray_t* q_io_zip_open(ray_t* pathstr, q_io_zipmap_t* zm) {
     memset(zm, 0, sizeof *zm);
-    int64_t file_len = io_stat_size(pathstr);
+    const io_src_t* s = io_src(pathstr);
+    int64_t file_len = 0;
     zip_hdr_t z;
     int found = 0;
     ray_t* tail = NULL;
-    ray_t* bad = io_zip_hdr(pathstr, file_len, &z, &found, &tail);
+    ray_t* bad = io_stored_len(s, pathstr, &file_len);
+    if (!bad) bad = io_zip_hdr(s, pathstr, file_len, &z, &found, &tail);
     if (bad) return bad;
     if (!found) return q_err(QE_TYPE);
     const uint8_t* t = (const uint8_t*)ray_data(tail);
@@ -715,39 +796,48 @@ int q_io_zip_block_fd(int fd, const q_io_zipmap_t* zm, int64_t k,
     return zip_block_decode(zm->algs[k], scratch, (size_t)clen, dst, (size_t)plain, work);
 }
 
-ray_t* q_io_zip_block(ray_t* pathstr, const q_io_zipmap_t* zm, int64_t k,
-                      uint8_t* dst, size_t cap) {
-    const char* p = ray_str_ptr(pathstr);
-    int fd = p ? open(p, O_RDONLY | O_BINARY) : -1;
-    if (fd < 0) return q_err(QE_IO);
-    size_t sc = q_io_zipmap_maxblock(zm);
-    uint8_t* scratch = (uint8_t*)malloc(sc ? sc : 1);
-    int rc = scratch ? q_io_zip_block_fd(fd, zm, k, scratch, dst, cap) : -3;
-    free(scratch);
-    close(fd);
-    return rc == 0 ? NULL : q_err(rc == -1 ? QE_CORRUPT : rc == -2 ? QE_IO : QE_OOM);
+/* blocks k0..k1 inflated into dst, their compressed bytes fetched in ONE read */
+static ray_t* io_zip_blocks(const io_src_t* s, ray_t* pathstr, const q_io_zipmap_t* zm, int64_t k0, int64_t k1,
+                            uint8_t* dst) {
+    int64_t c0, c1;
+    zip_block_span(zm, k0, &c0);
+    c1 = zm->ends[k1];
+    ray_t* raw = s->read(pathstr, ZIP_MAGIC_LEN + c0, c1 - c0);
+    if (RAY_IS_ERR(raw)) return raw;
+    ray_t* bad = q_count(raw) == c1 - c0 ? NULL : q_err(QE_CORRUPT);
+    for (int64_t k = k0; !bad && k <= k1; k++) {
+        int64_t start, clen = zip_block_span(zm, k, &start);
+        int64_t plain = zm->uncompressed - k * zm->block_size;
+        if (plain > zm->block_size) plain = zm->block_size;
+        if (plain <= 0 || zip_block_decode(zm->algs[k], (const uint8_t*)ray_data(raw) + (start - c0), (size_t)clen,
+                                           dst + (k - k0) * zm->block_size, (size_t)plain, NULL) != 0)
+            bad = q_err(QE_CORRUPT);
+    }
+    ray_release(raw);
+    return bad;
 }
 
-/* A bounded slice of a container's plaintext: the blocks it spans are inflated and no others, so a row read of a
- * compressed column costs its own blocks.  The offset addresses plaintext, under q_io_clamp's law. */
-static ray_t* io_zip_slice(ray_t* pathstr, int64_t off, int64_t want) {
+ray_t* q_io_zip_block(ray_t* pathstr, const q_io_zipmap_t* zm, int64_t k,
+                      uint8_t* dst, size_t cap) {
+    int64_t plain = zm->uncompressed - k * zm->block_size;
+    if (k < 0 || k >= zm->num_blocks || (size_t)(plain > zm->block_size ? zm->block_size : plain) > cap)
+        return q_err(QE_CORRUPT);
+    return io_zip_blocks(io_src(pathstr), pathstr, zm, k, k, dst);
+}
+
+/* A bounded slice of a container's plaintext: the blocks it spans are fetched in one read and inflated, and no
+ * others, so a row read of a compressed column costs its own blocks.  The offset addresses plaintext, under
+ * q_io_clamp's law. */
+static ray_t* io_zip_slice(const io_src_t* s, ray_t* pathstr, int64_t off, int64_t want) {
     q_io_zipmap_t zm;
     ray_t* bad = q_io_zip_open(pathstr, &zm);
     if (bad) return bad;
     int64_t take = q_io_clamp(zm.uncompressed, &off, want), bs = zm.block_size;
-    uint8_t* buf = (uint8_t*)malloc(take > 0 ? (size_t)take : 1);
-    uint8_t* blk = (uint8_t*)malloc(bs > 0 ? (size_t)bs : 1);
-    if (!buf || !blk || bs <= 0) bad = q_err(buf && blk ? QE_CORRUPT : QE_OOM);
-    for (int64_t got = 0; !bad && got < take; ) {
-        int64_t k = (off + got) / bs, from = off + got - k * bs;
-        int64_t plain = zm.uncompressed - k * bs < bs ? zm.uncompressed - k * bs : bs;
-        bad = q_io_zip_block(pathstr, &zm, k, blk, (size_t)plain);
-        int64_t n = plain - from < take - got ? plain - from : take - got;
-        if (!bad) memcpy(buf + got, blk + from, (size_t)n);
-        got += n;
-    }
-    ray_t* out = bad ? bad : ray_vec_from_raw(RAY_BYTE_ONLY, buf, take);
-    free(buf);
+    int64_t k0 = take ? off / bs : 0, k1 = take ? (off + take - 1) / bs : -1;
+    uint8_t* blk = (uint8_t*)malloc(take ? (size_t)((k1 - k0 + 1) * bs) : 1);
+    if (!blk) bad = q_err(QE_OOM);
+    else if (take) bad = io_zip_blocks(s, pathstr, &zm, k0, k1, blk);
+    ray_t* out = bad ? bad : ray_vec_from_raw(RAY_BYTE_ONLY, blk + (take ? off - k0 * bs : 0), take);
     free(blk);
     q_io_zipmap_free(&zm);
     return out;
@@ -1115,10 +1205,11 @@ ray_t* q_io_set(ray_t* x, ray_t* y) {
     if (!x || x->type != -RAY_SYM || !q_io_is_fsym(x)) return q_err(QE_NYI);
     ray_t* path = q_io_file_path(x);
     int zip = path && q_zip_is(ray_str_ptr(path), ray_str_len(path));
+    int s3 = path && q_s3_is(ray_str_ptr(path), ray_str_len(path));
     if (path) ray_release(path);
     if (zip) return q_err(QE_NYI);
     ray_t* r = io_set_format(x, y);
-    if (!r) r = q_wirefile_write(x, y);
+    if (!r) r = s3 ? q_err(QE_NYI) : q_wirefile_write(x, y);
     return r ? r : q_err(QE_TYPE);
 }
 
