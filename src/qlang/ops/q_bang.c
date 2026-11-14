@@ -31,7 +31,6 @@
 #include "qlang/net/q_net.h"   /* q_net_host / q_net_addr — `-12!`/`-13!` */
 #include "qlang/net/q_tls.h"   /* q_tls_info — `-26!` */
 #include "core/ipc.h"          /* ray_ipc_handle_of_fd — `-26!handle` liveness */
-#include "lang/eval.h"          /* ray_eval_get_restricted — `-7!` file gate */
 #include "lang/internal.h"      /* ray_dict_fn — the `!` dict kernel */
 #include <rayforce.h>
 #include <stdint.h>
@@ -70,7 +69,6 @@ static ray_t* h_refcnt(ray_t* y) {
  * path tolerated like hopen.  A missing/unstatable file -> 'io (kdb pins
  * path:oserr, unrepresentable in 7-byte codes — the read0 precedent). */
 static ray_t* h_hcount(ray_t* y) {
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* xs = q_str_in(y);            /* charv path -> legacy STR form */
     ray_t* path = q_io_path_operand(xs);
     ray_release(xs);

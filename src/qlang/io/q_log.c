@@ -17,7 +17,6 @@
 #include "qlang/base/q_type.h"    /* q_type_is_int_atom / q_type_iatom_val — the (n;x) form */
 #include "qlang/ops/q_index.h"    /* q_index_elem_at — the (n;x) pair's items */
 #include "qlang/eval/q_eval.h"    /* q_eval_stop_pending — Ctrl+C ends the wait for a writer */
-#include "lang/eval.h"            /* ray_eval_get_restricted */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -157,7 +156,6 @@ static ray_t* log_scan(log_cur_t* c, int64_t limit, int eval, ray_t** keep) {
 }
 
 ray_t* q_log_replay(ray_t* y) {
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     int64_t n = -1;
     ray_t* f = y;
     if (y && y->type == RAY_LIST && q_count(y) == 2) {
@@ -176,6 +174,8 @@ ray_t* q_log_replay(ray_t* y) {
     ray_release(f);
     if (!path) return q_err(QE_TYPE);
     if (RAY_IS_ERR(path)) return path;
+    ray_t* refused = q_io_guard(ray_str_ptr(path), ray_str_len(path));
+    if (refused) { ray_release(path); return refused; }
     log_cur_t c;
     ray_t* res = log_open(&c, path);
     if (!res) res = log_scan(&c, n >= 0 ? n : -1, n != -2, NULL);

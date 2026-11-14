@@ -11,7 +11,7 @@
 #include "qlang/q_prim.h"           /* q_list_collapse, q_str_in */
 #include "qlang/q_env.h"            /* q_env_bind_native */
 #include "lang/env.h"               /* ray_fn_unary */
-#include "lang/eval.h"              /* RAY_FN_NONE, ray_eval_get_restricted */
+#include "lang/eval.h"              /* RAY_FN_NONE */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -372,7 +372,6 @@ static ray_t* info_keep(ray_t* v) {
 }
 
 static ray_t* zip_info_fn(ray_t* x) {
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* xs = q_str_in(x);
     ray_t* path = q_io_path_operand(xs);
     ray_release(xs);
