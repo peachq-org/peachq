@@ -250,6 +250,11 @@ short-dict idiom `` ``delim!(::;";") `` works.
 | `strict_mode` | boolean | `1b` | `0b` salvages a field whose quotes will not parse |
 | `store_rejects` | boolean | `0b` | continue AND keep the reject records in a global table |
 | `rejects_table` | symbol | `` `reject_errors `` | names that table, and implies `store_rejects` |
+| `compression` | symbol | `` `auto `` | `` `auto `` inflates a file whose name ends `.gz`; `` `gzip `` always, `` `none `` never |
+
+`compression` follows DuckDB's `compression='auto'`, and covers only a file symbol: text is content already. A gzip
+file of several members (gzip files concatenated) is read whole. Another codec's name signals `'nyi`. `read0` and
+`read1` of the same file still return its stored bytes.
 
 `nullstr` and `all_varchar` are recognised names that are **not implemented** — passing either signals `'option`,
 like an unknown key. There is no `encoding` option; the reader is byte-transparent, and

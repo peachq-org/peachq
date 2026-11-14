@@ -2,6 +2,7 @@
  * is a bootstrap-only kernel catalogue: capture_base and the registry snapshot
  * it here, then q never consults it. */
 #define _POSIX_C_SOURCE 200809L
+#include "qlang/io/q_io.h"      /* q_io_member_fn — .Q.c.member */
 #include "qlang/q_count.h"
 #include "qlang/q_builtins.h"
 #include "qlang/base/q_err.h"
@@ -350,6 +351,7 @@ void q_builtins_register(void) {
         { ".Q.c.cells", q_dotq_cells_fn },
         { ".Q.c.hg",   q_dotq_hg_fn   },   /* HTTP GET (ref/dotq.md) */
         { ".Q.c.ld",   q_ctx_ld_fn    },
+        { ".Q.c.member", q_io_member_fn }, /* an archive member: .Q.fsn streams it forward */
         /* No public `.Q` twins — producer seams for q.q's asc/xasc, not keywords. */
         { ".Q.c.sorted", q_attr_stamp_sorted },
         { ".Q.c.parted", q_attr_stamp_parted },
