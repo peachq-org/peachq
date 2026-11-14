@@ -165,6 +165,24 @@ static ray_t* crypto_algos_fn(ray_t** args, int64_t argc) {
     return v;
 }
 
+static const void* crypto_sha256(void) {
+    size_t i = 0;
+    while (strcmp(ALGOS[i].name, "sha2-256") != 0) i++;
+    return crypto_load() == 1 ? crypto_md(i) : NULL;
+}
+
+int q_crypto_sha256(const void* p, size_t n, unsigned char out[32]) {
+    const void* md = crypto_sha256();
+    unsigned int olen;
+    return md && A.EVP_Digest(p, n, out, &olen, md, NULL) == 1 ? 0 : -1;
+}
+
+int q_crypto_hmac_sha256(const void* key, size_t klen, const void* p, size_t n, unsigned char out[32]) {
+    const void* md = crypto_sha256();
+    unsigned int olen;
+    return md && klen <= INT_MAX && A.HMAC(md, key, (int)klen, (const unsigned char*)p, n, out, &olen) ? 0 : -1;
+}
+
 static void crypto_bind(const char* name, int rank, ray_vary_fn fn) {
     ray_t* obj = ray_fn_vary(name, RAY_FN_NONE, fn);
     q_env_bind_native(name, obj, rank);
