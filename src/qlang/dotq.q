@@ -288,14 +288,14 @@
 / .Q.fsn: loop file y in z-byte lumps of complete "\n" records - the partial tail record carries into the
 / next lump (no record split, no byte lost; a record longer than z grows the carry until its "\n" arrives),
 / apply unary x to each lump's record list, return hcount y. An unterminated final tail is still delivered.
-/ A zip:// entry cannot seek, so it streams through .Q.fpn's forward loop.
-.Q.fsn:{[x;y;z] if[z<=0;'`domain]; n:hcount y; if[(string y) like ":zip://*"; .Q.fpn[x;y;z]; :n]; o:0; c:""; while[count b:read1(y;o;z); o+:count b; c,:"c"$b; i:last where c="\n"; if[not null i; x "\n" vs i#c; c:(i+1)_c]]; if[count c; x enlist c]; n};
+/ An archive member cannot seek, so it streams through .Q.fpn's forward loop.
+.Q.fsn:{[x;y;z] if[z<=0;'`domain]; n:hcount y; if[.Q.c.member y; .Q.fpn[x;y;z]; :n]; o:0; c:""; while[count b:read1(y;o;z); o+:count b; c,:"c"$b; i:last where c="\n"; if[not null i; x "\n" vs i#c; c:(i+1)_c]]; if[count c; x enlist c]; n};
 / .Q.fs/.Q.fps are DOCUMENTED as projections `.Q.fsn[;;131000]`, but currying a projection one arg
 / at a time rank-errors here (the doc's own `.Q.fs[f]`:file shape; PLAN.md defect) - lambda until then.
 .Q.fs:{[x;y] .Q.fsn[x;y;131000]};
 / .Q.fpn: the same lump/carry loop over a fifo path - read1(h;z) blocks for data, empty read = writer
-/ closed = done; a zip:// entry opens as itself.  The handle is closed however the loop ends.
-.Q.fpn:{[x;y;z] if[z<=0;'`domain]; h:hopen $[(s:string y) like ":zip://*"; y; `$":fifo://",1_s];
+/ closed = done; an archive member opens as itself.  The handle is closed however the loop ends.
+.Q.fpn:{[x;y;z] if[z<=0;'`domain]; h:hopen $[.Q.c.member y; y; `$":fifo://",1_string y];
   .[{[x;h;z] c:""; b:read1(h;z); while[count b; c,:"c"$b; i:last where c="\n"; if[not null i; x "\n" vs i#c; c:(i+1)_c]; b:read1(h;z)]; if[count c; x enlist c]};
     (x;h;z); {[h;e] hclose h; 'e}h]; hclose h;};
 .Q.fps:{[x;y] .Q.fpn[x;y;131000]};

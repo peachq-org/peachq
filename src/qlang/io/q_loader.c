@@ -1,4 +1,4 @@
-/* io/q_loader.c — the target seam both readers reach (contract in q_loader.h). */
+/* io/q_loader.c — the target seam both readers reach, and their byte source (contract in q_loader.h). */
 #include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* q_insert_wrap / q_upsert_wrap — the by-name row-append */
 #include "qlang/base/q_err.h"
@@ -79,6 +79,19 @@ ray_t* q_loader_summary(int64_t rows, int64_t rejected, int64_t chunks, ray_t* i
     static const char* const kn[5] = { "rows", "rejected", "chunks", "ignored", "types" };
     ray_t* vs[5] = { ray_i64(rows), ray_i64(rejected), ray_i64(chunks), ignored, types };
     return loader_dict(kn, vs, 5, 0);
+}
+
+ray_t* q_loader_compression(ray_t* v, int* mode) {
+    static const char* const names[] = { "auto", "gzip", "none" };
+    if (v->type != -RAY_SYM) return q_err(QE_TYPE);
+    for (int i = 0; i < 3; i++)
+        if (v->i64 == ray_sym_intern_runtime(names[i], strlen(names[i]))) { *mode = i; return NULL; }
+    return q_err(QE_NYI);
+}
+
+ray_t* q_loader_open(ray_t* pathstr, int mode, q_io_stream_t** s) {
+    *s = NULL;
+    return q_io_resource_stream(pathstr, mode == Q_LOADER_GZIP || (mode == Q_LOADER_AUTO && q_io_gz_named(pathstr)), s);
 }
 
 int64_t q_loader_sink_find(const q_loader_sink* s, int64_t name) {

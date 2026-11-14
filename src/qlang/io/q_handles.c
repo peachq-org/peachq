@@ -1,6 +1,6 @@
 /* q_handles — see q_handles.h.  A compact grow-on-demand array of open-time
  * handle records, fd-keyed by linear scan (a process holds few handles; kdb's
- * own connection tables are small).  Register on hopen-file/fifo/zip/socket,
+ * own connection tables are small).  Register on hopen-file/fifo/stream/socket,
  * deregister on hclose.  Redaction runs at CAPTURE so a password never enters a
  * record.  The `hopen`/`hclose` verb bodies sit at the tail, on top of the
  * transport open / kind dispatch / close they delegate to. */
@@ -12,9 +12,9 @@
 #include "qlang/q_console.h" /* q_console_write/_err — the 1 -1 2 -2 console handles */
 #include "qlang/q_dotz.h"   /* q_dotz_now_ns — the portable wall clock; q_dotz_resolve — `.z.h`, hopen's own host */
 #include "qlang/ops/q_sys.h" /* q_sys_listen_port — hopen of the own listener is handle 0 */
-#include "qlang/io/q_io.h"   /* q_io_mkdir_parents — hopen creates missing directories; q_io_write_fd, q_io_read_fd */
+#include "qlang/io/q_io.h"   /* q_io_mkdir_parents — hopen creates missing directories; q_io_write_fd, q_io_read_fd;
+                               * q_io_member_stream — an archive member opened forward */
 #include "qlang/io/q_provider.h" /* the `:pq:` aliases: `:pq:q:`, `:pq:qfork:`, `:pq:qspawn:`, `:pq:duckdb:` */
-#include "qlang/io/q_zip.h"      /* the `:zip:// stream handles */
 #include "qlang/net/q_wirefile.h"    /* q_wirefile_append_path — typed handle append */
 #include "qlang/net/q_ws.h"          /* q_ws_client_open — `:ws:// sym handles */
 #include "qlang/net/q_http_client.h" /* q_http_client_raw + the scheme spelling — `:http:// sym handles */
@@ -52,6 +52,7 @@ typedef struct {
     int64_t       user_sym;
     int64_t       open_time_ns;
     ray_t*        open_args;   /* owned redacted charv */
+    q_io_stream_t* stream;     /* owned: a Q_HANDLE_STREAM's bytes */
 } q_handle_rec;
 
 static q_handle_rec* g_recs = NULL;
@@ -80,7 +81,8 @@ void q_handles_destroy(void) {
          * repeated runtime create/destroy cannot leak descriptors. */
         if (g_recs[i].kind == Q_HANDLE_FILE || g_recs[i].kind == Q_HANDLE_FIFO)
             close((int)g_recs[i].fd);
-        if (g_recs[i].kind == Q_HANDLE_ZIP) q_zip_handle_close(g_recs[i].fd);
+        if (g_recs[i].kind == Q_HANDLE_STREAM) close((int)g_recs[i].fd);
+        q_io_stream_close(g_recs[i].stream);
         if (g_recs[i].open_args) ray_release(g_recs[i].open_args);
     }
     free(g_recs);
@@ -88,9 +90,10 @@ void q_handles_destroy(void) {
 }
 
 void q_handles_forget(void) {
-    q_zip_forget();
-    for (int64_t i = 0; i < g_n; i++)
+    for (int64_t i = 0; i < g_n; i++) {
+        q_io_stream_close(g_recs[i].stream);
         if (g_recs[i].open_args) ray_release(g_recs[i].open_args);
+    }
     g_n = 0;
     g_owned_n = 0;
 }
@@ -194,8 +197,9 @@ static ray_t* redact(const char* s, size_t n, int64_t* user_sym) {
 int q_handles_register(int64_t fd, q_handle_kind kind, int initiated_out,
                        const char* args, size_t args_len) {
     int64_t existing = find_slot(fd);   /* an fd reused after close: overwrite */
-    if (existing >= 0 && g_recs[existing].open_args) {
-        ray_release(g_recs[existing].open_args);
+    if (existing >= 0) {
+        if (g_recs[existing].open_args) ray_release(g_recs[existing].open_args);
+        q_io_stream_close(g_recs[existing].stream);
         g_recs[existing].open_args = NULL;
     }
     if (existing < 0) {
@@ -219,6 +223,7 @@ int q_handles_register(int64_t fd, q_handle_kind kind, int initiated_out,
         red = ray_charv(args ? args : "", args ? (int64_t)args_len : 0);
     }
     g_recs[existing].fd            = fd;
+    g_recs[existing].stream        = NULL;
     g_recs[existing].kind          = kind;
     g_recs[existing].initiated_out = initiated_out;
     g_recs[existing].user_sym      = user_sym;
@@ -231,6 +236,7 @@ void q_handles_deregister(int64_t fd) {
     int64_t i = find_slot(fd);
     if (i < 0) return;
     if (g_recs[i].open_args) ray_release(g_recs[i].open_args);
+    q_io_stream_close(g_recs[i].stream);
     g_recs[i] = g_recs[--g_n];   /* swap-remove */
 }
 
@@ -333,16 +339,22 @@ ray_t* q_handles_open(const char* path, size_t plen, int is_fifo) {
     return make_i32(fd);
 }
 
-/* hopen `:zip://archive.zip/entry`: q_zip holds the stream, keyed by the fd it reserved */
-static ray_t* handles_open_zip(const char* path, size_t plen) {
+/* hopen of an archive member: its stream, keyed by a reserved fd.  NULL when the path is no member. */
+static ray_t* handles_open_stream(const char* path, size_t plen) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
-    int64_t fd;
-    ray_t* bad = q_zip_handle_open(path, plen, &fd);
-    if (bad) return bad;
-    if (!q_handles_register(fd, Q_HANDLE_ZIP, 1, path, plen)) {
-        q_zip_handle_close(fd);
-        return q_err(QE_OOM);
+    ray_t* ps = ray_str(path, plen);
+    if (!ps || RAY_IS_ERR(ps)) return q_err(QE_OOM);
+    q_io_stream_t* s;
+    ray_t* bad = q_io_member_stream(ps, &s);
+    ray_release(ps);
+    if (bad || !s) return bad;
+    int64_t fd = q_handles_reserve_fd();
+    if (fd < 0 || !q_handles_register(fd, Q_HANDLE_STREAM, 1, path, plen)) {
+        if (fd >= 0) close((int)fd);
+        q_io_stream_close(s);
+        return q_err(fd < 0 ? QE_IO : QE_OOM);
     }
+    g_recs[find_slot(fd)].stream = s;
     return make_i32((int32_t)fd);
 }
 
@@ -473,7 +485,7 @@ ray_t* q_handles_apply(ray_t* h, ray_t* y) {
             ray_release(p);
             return echo(h, bad);
         }
-        if (hk == Q_HANDLE_FIFO || hk == Q_HANDLE_ZIP) {
+        if (hk == Q_HANDLE_FIFO || hk == Q_HANDLE_STREAM) {
             if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
             return q_err(QE_NYI);
         }
@@ -620,9 +632,8 @@ ray_t* q_handles_pq_neg(ray_t* x) {
 ray_t* q_handles_close(int64_t qh) {
     int k = q_handles_kind(qh);
     if (k == Q_HANDLE_PROVIDER) return q_provider_close(qh);
-    if (k == Q_HANDLE_FILE || k == Q_HANDLE_FIFO || k == Q_HANDLE_ZIP) {
-        if (k == Q_HANDLE_ZIP) q_zip_handle_close(qh);
-        else close((int)qh);
+    if (k == Q_HANDLE_FILE || k == Q_HANDLE_FIFO || k == Q_HANDLE_STREAM) {
+        close((int)qh);
         q_handles_deregister(qh);
         return RAY_NULL_OBJ;
     }
@@ -637,15 +648,18 @@ ray_t* q_handles_close(int64_t qh) {
 
 /* One blocking read of up to `count` bytes.  A fifo blocks for data; an empty
  * read is EOF (all writers closed) — the `.Q.fpn`/`.Q.fps` `while[count b]`
- * loop terminates on it.  No count reads to EOF (read1.md:67).  A zip stream
+ * loop terminates on it.  No count reads to EOF (read1.md:67).  A member stream
  * gives its next `count` bytes.  Restricted mode refuses (reads the pipe). */
 ray_t* q_handles_read1(int64_t fd, ray_t* count) {
     int kind = q_handles_kind(fd);
-    if (kind != Q_HANDLE_FIFO && kind != Q_HANDLE_ZIP) return NULL;
+    if (kind != Q_HANDLE_FIFO && kind != Q_HANDLE_STREAM) return NULL;
     int64_t want = 0;
     if (count && !q_type_strict_i64(count, &want)) return q_err(QE_TYPE);
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
-    if (kind == Q_HANDLE_ZIP) return want < 0 ? q_err(QE_DOMAIN) : q_zip_handle_read(fd, count ? want : -1);
+    if (kind == Q_HANDLE_STREAM) {
+        q_io_stream_t* s = g_recs[find_slot(fd)].stream;
+        return want < 0 ? q_err(QE_DOMAIN) : q_io_stream_slice(s, s->pos, count ? want : -1);
+    }
     if (want <= 0) want = 65536;
     uint8_t* buf = NULL;
     size_t   n = 0, cap = 0;
@@ -747,16 +761,14 @@ static ray_t* hopen_connstr(ray_t* c, bool* tls) {
  * `:host:port[:user:pass]`, a bare `:port`, `tcps://` and the deferred `scheme://`
  * forms (hopen_norm_descriptor rejects those with 'nyi); a `:fifo://path` is a
  * FIFO, a single-colon `fifo:path` a FIFO opened without waiting for a writer,
- * a `:zip://…` an archive entry read forward (path keeps the scheme), and any
- * other `:path` is a FILE. */
-enum { HT_IPC = 0, HT_FILE = 1, HT_FIFO = 2, HT_FIFO_NB = 3, HT_ZIP = 4 };
+ * and any other `:path` is a FILE (an archive member among them, read forward). */
+enum { HT_IPC = 0, HT_FILE = 1, HT_FIFO = 2, HT_FIFO_NB = 3 };
 static int hopen_transport(const char* s, size_t n, const char** path, size_t* plen) {
     *path = s; *plen = n;
     if (n >= 2 && s[0] == ':' && s[1] == ':') return HT_IPC;   /* ::port localhost */
     size_t off = (n >= 1 && s[0] == ':') ? 1 : 0;
     const char* r = s + off;
     size_t      rn = n - off;
-    if (q_zip_is(r, rn)) { *path = r; *plen = rn; return HT_ZIP; }
     if (rn >= 5 && memcmp(r, "fifo:", 5) == 0) {
         if (rn >= 7 && r[5] == '/' && r[6] == '/') { *path = r + 7; *plen = rn - 7; return HT_FIFO; }
         *path = r + 5; *plen = rn - 5;
@@ -970,8 +982,8 @@ static ray_t* hopen_wrap_impl(ray_t* x, ray_t* given, bool socket_only) {
                 return q_err(QE_TYPE);
             if (plen >= 2 && path[0] == 'p' && path[1] == 'q' && (plen == 2 || path[2] == ':'))
                 return q_err(QE_DOMAIN);   /* `pq` is the alias namespace, never a file */
-            if (ht == HT_ZIP) return handles_open_zip(path, plen);
-            return q_handles_open(path, plen, ht == HT_FIFO ? 1 : ht == HT_FIFO_NB ? 2 : 0);
+            ray_t* member = ht == HT_FILE ? handles_open_stream(path, plen) : NULL;
+            return member ? member : q_handles_open(path, plen, ht == HT_FIFO ? 1 : ht == HT_FIFO_NB ? 2 : 0);
         }
     }
     bool tls = false;

@@ -39,7 +39,8 @@
 / each document, so `results, `data`items and (`data;`tables;0) are paths); format (`array, `newline_delimited or
 / `auto); records (1b every value is a record, 0b never expand, or `auto); sample_size (long); xcol (symbol vector
 / or dict renaming columns before the target is consulted); dateformat / timestampformat (the strptime subset
-/ .csv.read takes); ignore_errors, store_rejects, rejects_table (symbol, default `reject_errors)
+/ .csv.read takes); ignore_errors, store_rejects, rejects_table (symbol, default `reject_errors); compression (`auto,
+/ `gzip or `none, as .csv.read takes)
 / @throws option an unknown option key
 / @throws parse a malformed document, or a framing the file does not have
 / @throws type a document that is not a table shape, a value that does not fit its column, or a key first seen

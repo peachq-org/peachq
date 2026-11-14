@@ -77,6 +77,7 @@ typedef struct csv_st {
                                    * Set, the format REPLACES the writer's-forms grammar. */
     int      header;              /* -1 = sniff, else forced 0/1 */
     int64_t  skip_left;           /* records still to drop off the front */
+    int      compression;         /* Q_LOADER_AUTO / _GZIP / _NONE */
     int      info_only;
     int      frozen;
     int64_t  sample, bufsz;
@@ -1619,6 +1620,8 @@ static ray_t* csv_opts(csv_st* st, ray_t* opts) {
                 ray_retain(v);
                 st->xcol = v;
             }
+        } else if (csv_sym_is(k->i64, "compression")) {
+            bad = q_loader_compression(v, &st->compression);
         } else if (csv_sym_is(k->i64, "rejects_table")) {
             if (v->type != -RAY_SYM) bad = q_err(QE_TYPE);
             else {
@@ -1694,35 +1697,16 @@ static int64_t csv_want(const csv_st* st, int64_t off) {
     return (off == 0 && st->bufsz < 3) ? 3 : st->bufsz;
 }
 
-static ray_t* csv_run_mem(csv_st* st, const char* p, int64_t n);
-
-/* A resource that cannot serve cheap repeated ranges is fetched ONCE and handed to the memory driver — the
- * pull loop below would otherwise become one round trip per chunk. */
-static ray_t* csv_run_whole(csv_st* st, ray_t* path) {
-    ray_t* b = q_io_resource_read(path, 0, -1);
-    if (!b) return q_err(QE_OOM);
-    if (RAY_IS_ERR(b)) return b;
-    int64_t n = q_count(b);
-    ray_t* bad = csv_run_mem(st, n ? (const char*)ray_data(b) : "", n);
-    ray_release(b);
-    return bad;
-}
-
+/* the resource's text in bufsz chunks, from the loader seam's stream — a gzip file's inflated as it goes */
 static ray_t* csv_run_res(csv_st* st, ray_t* file) {
     ray_t* path = q_io_file_path(file);
     if (!path) return q_err(QE_TYPE);
-    ray_t* bad;
-    if (!q_io_resource_chunkable(path)) {
-        bad = csv_run_whole(st, path);
-        ray_release(path);
-        return bad;
-    }
-    int64_t off = 0;
-    bad = NULL;
-    for (;;) {
+    q_io_stream_t* s;
+    ray_t* bad = q_loader_open(path, st->compression, &s);
+    ray_release(path);
+    for (int64_t off = 0; !bad; ) {
         int64_t want = csv_want(st, off);
-        ray_t* b = q_io_resource_read(path, off, want);
-        if (!b) { bad = q_err(QE_OOM); break; }
+        ray_t* b = q_io_stream_slice(s, off, want);
         if (RAY_IS_ERR(b)) { bad = b; break; }
         int64_t got = q_count(b);
         bad = csv_pump(st, (const char*)ray_data(b), got, off == 0);
@@ -1730,7 +1714,7 @@ static ray_t* csv_run_res(csv_st* st, ray_t* file) {
         off += got;
         if (bad || got < want || (st->info_only && st->frozen)) break;
     }
-    ray_release(path);
+    q_io_stream_close(s);
     return bad;
 }
 
