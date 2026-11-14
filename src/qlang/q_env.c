@@ -21,6 +21,7 @@
 #include "qlang/q_prim.h"         /* q_enum_deref — FK/link dotted-walk gather */
 #include "qlang/io/q_splay.h"     /* q_splay_deferred_col — a dotted walk into a deferred table */
 #include "lang/internal.h"        /* ray_error */
+#include "lang/eval.h"            /* ray_eval_get_blocked — -b and reval refuse a global write */
 #include "table/sym.h"         /* ray_sym_intern_runtime, ray_sym_str, ray_read_sym */
 #include "table/dict.h"        /* ray_dict_* probes/upsert */
 #include "ops/linkop.h"        /* ray_link_has / ray_link_deref */
@@ -484,11 +485,40 @@ static ray_err_t env_link(int64_t sym, ray_t* old, ray_t* val) {
 
 static ray_t* env_addr_get(int64_t sym, int load);
 
+static _Thread_local int64_t g_engine_sym = -1;          /* the one write q_env_set_internal is making */
+static _Thread_local int64_t g_refused;                  /* the name the last refusal named, for q_env_err */
+
+/* the engine's write q_env_set_internal makes, spent on its first gate so a `.z.vs` hook it fires is the query's */
+static int env_engine_admits(int64_t sym) {
+    if (sym != g_engine_sym) return 0;
+    g_engine_sym = -1;
+    return 1;
+}
+
+/* THE mutation refusal (ref/eval.md:61, basics/cmdline.md:63): under blocked mode every gate a global write passes —
+ * q_env_writable, which a by-name write asks before it computes, then set, unbind and the park — refuses before the
+ * binding, a view or `.z.vs` is touched, so a refused write leaves the old value bound and fires nothing. */
+static int env_refuses(int64_t sym) {
+    if (!ray_eval_get_blocked() || env_engine_admits(sym)) return 0;
+    g_refused = sym;
+    return 1;
+}
+
+ray_err_t q_env_writable(int64_t sym) { return env_refuses(sym) ? RAY_ERR_NOUPDATE : RAY_OK; }
+
+ray_err_t q_env_set_internal(int64_t sym, ray_t* val) {
+    int64_t prev = g_engine_sym;
+    g_engine_sym = sym;
+    ray_err_t e = q_env_set(sym, val);
+    g_engine_sym = prev;
+    return e;
+}
+
 /* q_env_take — see q_env.h.  The park is a plain bind, so it stays invisible
  * to views: only the caller's rebind is an observable write.  The slot parked is the one the bind lands on —
  * under `\d .ns` a relative name's node in the context, where its reads resolve too. */
 int q_env_take(int64_t sym, ray_t* cur) {
-    if (!cur || env_addr_get(sym, 0) != cur) return 0;
+    if (!cur || env_refuses(sym) || env_addr_get(sym, 0) != cur) return 0;
     return q_env_bind(sym, RAY_NULL_OBJ) == RAY_OK;
 }
 
@@ -567,6 +597,7 @@ static ray_err_t env_root_splat(ray_t* d) {
  * q_wirefile the `.z.zd` zip triple).  Both branches converge on `e` so that
  * EVERY successful bind is a definition an armed doc header can name. */
 ray_err_t q_env_set(int64_t sym, ray_t* val) {
+    if (env_refuses(sym)) return RAY_ERR_NOUPDATE;
     if (!val) return q_env_unbind(sym);
     env_name_t nm;
     if (!env_name(sym, &nm)) return RAY_ERR_DOMAIN;
@@ -590,12 +621,28 @@ ray_err_t q_env_set(int64_t sym, ray_t* val) {
 
 /* q_env_err — see q_env.h. */
 ray_t* q_env_err(ray_err_t e) {
+    if (e == RAY_ERR_NOUPDATE) {
+        int64_t ns = 0, full = q_env_fullname(g_refused, &ns);
+        ray_t* fs = ray_sym_str(full);                          /* borrowed */
+        ray_t* nss = ray_sym_str(ns);                           /* borrowed */
+        const char* f = fs ? ray_str_ptr(fs) : "";
+        size_t fn = fs ? ray_str_len(fs) : 0, cut = fn;
+        while (cut && f[cut - 1] != '.') cut--;
+        char msg[600];
+        int k = snprintf(msg, sizeof msg, "noupdate: `%.*s `%.*s", nss ? (int)ray_str_len(nss) : 0,
+                         nss ? ray_str_ptr(nss) : "", (int)(fn - cut), f + cut);
+        ray_t* why = ray_charv(msg, k < (int)sizeof msg ? k : (int)sizeof msg - 1);
+        ray_t* err = q_err_signal(QE_NOUPDATE, why);
+        if (why && !RAY_IS_ERR(why)) ray_release(why);
+        return err;
+    }
     if (e == RAY_ERR_NYI)  return q_err(QE_NYI);
     if (e == RAY_ERR_TYPE) return q_err(QE_TYPE);
     return q_err(QE_ASSIGN);
 }
 
 ray_err_t q_env_unbind(int64_t sym) {
+    if (env_refuses(sym)) return RAY_ERR_NOUPDATE;
     env_name_t nm;
     if (!env_name(sym, &nm)) return RAY_ERR_TYPE;
     ray_err_t e = RAY_OK;
@@ -681,7 +728,7 @@ ray_err_t q_env_handle_set(int64_t sym, ray_t* val) {
 }
 
 int q_env_handle_take(int64_t sym, ray_t* cur) {
-    if (!cur) return 0;
+    if (!cur || env_refuses(sym)) return 0;
     env_scope_t sc = env_scope_as(0, 0);
     int r = env_addr_get(sym, 0) == cur && q_env_bind(sym, RAY_NULL_OBJ) == RAY_OK;
     env_scope_restore(&sc);

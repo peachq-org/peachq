@@ -842,7 +842,7 @@ ray_err_t q_provider_unlink(int64_t qname, ray_t* car) { return link_hook("i.unl
 ray_t* q_provider_write(ray_t* x, ray_t* y, int upsert) {
     const char* p; size_t n;
     if (!sym_text(x, &p, &n) || !q_handles_pq(p, n, NULL)) return NULL;
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (ray_eval_get_restricted() || ray_eval_get_blocked()) return q_err(QE_ACCESS);
     tref_t tr;
     ray_t* err = tref_open(p, n, &tr);
     if (err) return err;
@@ -856,7 +856,7 @@ ray_t* q_provider_write(ray_t* x, ray_t* y, int upsert) {
 ray_t* q_provider_hdel(ray_t* x) {
     const char* p; size_t n;
     if (!sym_text(x, &p, &n) || !q_handles_pq(p, n, NULL)) return NULL;
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (ray_eval_get_restricted() || ray_eval_get_blocked()) return q_err(QE_ACCESS);
     tref_t tr;
     ray_t* err = tref_open(p, n, &tr);
     if (err) return err;

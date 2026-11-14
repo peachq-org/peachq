@@ -259,6 +259,9 @@ void   ray_clear_error_trace(void);
 /* Restricted mode: when true, builtins with RAY_FN_RESTRICTED are blocked. */
 void ray_eval_set_restricted(bool on);
 bool ray_eval_get_restricted(void);
+/* Blocked mode (-b, reval): no update of a global or a file; the q layer enforces it. */
+void ray_eval_set_blocked(bool on);
+bool ray_eval_get_blocked(void);
 
 /* ===== Rayfall Builtin Functions ===== */
 

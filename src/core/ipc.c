@@ -819,6 +819,7 @@ typedef struct {
     int64_t          listener_id;  /* id of the listener selector; -1 = outbound, IPC_LINK = an adopted inbound link */
     bool             auth_required;  /* server has -u/-U */
     bool             restricted;     /* server has -u */
+    bool             blocked;        /* server has -b */
     /* HTTP mode (phase RAY_IPC_PHASE_HTTP): request-header accumulator, byte
      * at a time like the handshake (the rx pump fires read_fn only on a FULL
      * buffer, so delimiter-terminated input cannot bulk-read). */
@@ -1010,6 +1011,7 @@ static ray_t* ipc_accept(ray_poll_t* poll, ray_selector_t* sel)
     cd->open_ns = q_dotz_now_ns(0);
     cd->auth_required = (poll->auth_secret[0] != '\0') || g_auth_file;
     cd->restricted    = poll->restricted;
+    cd->blocked       = poll->blocked;
     cd->loopback      = ray_sock_is_loopback(new_fd);   /* emit-zip gate */
     cd->user_sym      = -1;
     conn_stamp_peer(cd, new_fd);
@@ -1140,11 +1142,13 @@ static ray_t* ipc_read_http(ray_poll_t* poll, ray_selector_t* sel)
         int64_t     hprev = ipc_ctx_handle();
         ray_poll_t* hpp   = ipc_ctx_poll();
         ipc_ctx_set(sel->id, poll);
-        bool prev_restricted = ray_eval_get_restricted();
+        bool prev_restricted = ray_eval_get_restricted(), prev_blocked = ray_eval_get_blocked();
         ray_eval_set_restricted(cd->restricted);
+        ray_eval_set_blocked(cd->blocked);
         int up = q_http_respond((ray_sock_t)sel->fd, cd->http_buf, cd->http_len,
                                 cd->auth_required);
         ray_eval_set_restricted(prev_restricted);
+        ray_eval_set_blocked(prev_blocked);
         ipc_ctx_set(hprev, hpp);
         /* 1 = 101 sent (kb/websockets.md): switch this connection to the WS
          * frame pump.  Alloc failure after the 101 just closes (plan D13). */
@@ -1185,8 +1189,9 @@ static ray_t* ipc_read_ws(ray_poll_t* poll, ray_selector_t* sel)
      * rx state under q_ws_feed. */
     ray_poll_buf_t* buf = sel->rx.buf;
     sel->rx.buf = NULL;
-    bool prev_restricted = ray_eval_get_restricted();
+    bool prev_restricted = ray_eval_get_restricted(), prev_blocked = ray_eval_get_blocked();
     ray_eval_set_restricted(cd->restricted);
+    ray_eval_set_blocked(cd->blocked);
     int64_t prev = ipc_ctx_handle();
     ray_poll_t* pp = ipc_ctx_poll();
     ipc_ctx_set(id, poll);
@@ -1194,6 +1199,7 @@ static ray_t* ipc_read_ws(ray_poll_t* poll, ray_selector_t* sel)
                              buf->data, (size_t)buf->offset);
     ipc_ctx_set(prev, pp);
     ray_eval_set_restricted(prev_restricted);
+    ray_eval_set_blocked(prev_blocked);
     ray_poll_buf_free(buf);
     /* Re-resolve: the handler may have closed us.  The read_fn check also
      * defeats slot-id/allocation reuse (a fresh conn can never be parked on
@@ -1362,8 +1368,9 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
         return NULL;
     }
 
-    bool prev_restricted = ray_eval_get_restricted();
+    bool prev_restricted = ray_eval_get_restricted(), prev_blocked = ray_eval_get_blocked();
     ray_eval_set_restricted(cd->restricted);
+    ray_eval_set_blocked(cd->blocked);
 
     /* Expose this connection's selector id to `.ipc.handle` (and its
      * poll to handle resolution) for the duration of any hook that
@@ -1382,6 +1389,7 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
 
     ipc_ctx_set(prev_handle, prev_poll);
     ray_eval_set_restricted(prev_restricted);
+    ray_eval_set_blocked(prev_blocked);
     /* the eval may have closed this very connection — revalidate before
      * touching cd again */
     ray_selector_t* cur = ray_poll_get(poll, id);
@@ -2126,6 +2134,7 @@ int64_t ray_ipc_adopt_client(ray_sock_t fd, const char* user, const char* passwo
     cd->listener_id = -1;               /* outbound: no `.z.po`; `.z.pc` still fires */
     cd->open_ns     = q_dotz_now_ns(0);
     cd->restricted  = poll->restricted; /* -u narrows pushed evals too */
+    cd->blocked     = poll->blocked;
     cd->peer_zip    = (common >= 1);    /* negotiated compression eligibility */
     cd->loopback    = ray_sock_is_loopback(fd);   /* emit-zip gate */
     cd->user_sym    = -1;
@@ -2173,6 +2182,7 @@ int64_t ray_ws_client_register(ray_sock_t fd, void* ws_conn)
     cd->listener_id = -1;               /* outbound client — no `.z.wo` */
     cd->open_ns     = q_dotz_now_ns(0);
     cd->restricted  = poll->restricted;
+    cd->blocked     = poll->blocked;
     cd->loopback    = ray_sock_is_loopback(fd);
     cd->ws          = ws_conn;
     cd->user_sym    = -1;
@@ -2209,6 +2219,7 @@ int64_t ray_ipc_serve_link(ray_sock_t fd)
     cd->open_ns     = q_dotz_now_ns(0);
     cd->loopback    = true;
     cd->restricted  = poll->restricted;
+    cd->blocked     = poll->blocked;
     cd->user_sym    = -1;
     conn_stamp_peer(cd, fd);
 

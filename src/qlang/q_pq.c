@@ -41,7 +41,7 @@
 #include "qlang/helpdb_gen.h"  /* PEACHQ_HELPDB_BOOTSTRAP — the codegen'd builtin help data */
 #include "qlang/q_env.h"       /* q_env_bind_native / q_env_ident_ok — the native bindings, a namespace name */
 #include "lang/env.h"          /* ray_fn_unary — the native values */
-#include "lang/eval.h"         /* RAY_FN_NONE — no dispatch attrs on those values */
+#include "lang/eval.h"         /* RAY_FN_NONE — no dispatch attrs on those values; the restricted and blocked modes */
 #include <stdio.h>
 #include <string.h>
 
@@ -151,7 +151,27 @@ static ray_t* pq_load_natives_fn(ray_t* x) {
     return RAY_NULL_OBJ;
 }
 
-ray_t* q_pq_autoload(void) { return g_pq_state == LOAD_COLD ? pq_run("\\l pq/pq.q") : NULL; }
+/* No code loads during a restricted evaluation, by `\l` or by a reference (owner 2026-11-14): under -u 1, -b or reval
+ * only what the process loaded beforehand answers. */
+static ray_t* pq_refused(const char* stem, size_t n) {
+    if (!ray_eval_get_restricted() && !ray_eval_get_blocked()) return NULL;
+    char msg[160];
+    int k = snprintf(msg, sizeof msg, "access: autoload of .%.*s refused under restricted evaluation; load it at startup (\\l pq)",
+                     (int)n, stem);
+    ray_t* why = ray_charv(msg, k < (int)sizeof msg ? k : (int)sizeof msg - 1);
+    ray_t* e = q_err_signal(QE_ACCESS, why);
+    if (why && !RAY_IS_ERR(why)) ray_release(why);
+    return e;
+}
+
+ray_t* q_pq_autoload(void) {
+    if (g_pq_state != LOAD_COLD) return NULL;
+    ray_t* refused = pq_refused("pq", 2);
+    if (refused) return refused;
+    ray_t* e = q_sys_load("pq/pq.q", 7);
+    if (e && !RAY_IS_ERR(e)) { ray_release(e); e = NULL; }
+    return e;
+}
 
 ray_t* q_pq_load(void) { return pq_run(".pq.i.run .pq.i.files;"); }
 
@@ -196,6 +216,8 @@ ray_t* q_pq_autoload_ns(const char* stem, size_t n) {
         pq_note(&g_misses, sym);
         return NULL;
     }
+    ray_t* refused = pq_refused(stem, n);
+    if (refused) return refused;
     ray_t* e = q_pq_autoload();                     /* `.pq` first: every autoload bootstraps the library root */
     if (!e) e = q_sys_load(lit, (size_t)len);       /* `\l`, not `.pq.load`: a failing file names its own line */
     if (e && !RAY_IS_ERR(e)) { ray_release(e); e = NULL; }
