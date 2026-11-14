@@ -1071,6 +1071,15 @@ ray_t* q_splay_deferred_shown(ray_t* t, int64_t rows) {
     return m;
 }
 
+ray_t* q_splay_named_rows(ray_t* t, ray_t* parts) {
+    if (!q_splay_table_named(t)) return NULL;
+    ray_t* name = ray_sym(q_type_coord_sym(t));
+    ray_t* args[2] = { name, parts ? parts : RAY_NULL_OBJ };
+    ray_t* r = q_eval_apply_concrete(q_eval_apply_call_name(".Q.i.rows", 9, args, 2));
+    ray_release(name);
+    return r;
+}
+
 ray_t* q_splay_part_fn(ray_t** args, int64_t n) {
     if (n != 3 || !args[0] || args[0]->type != -RAY_SYM || !args[1] || args[1]->type != RAY_SYM) return q_err(QE_TYPE);
     int64_t rows = 0;
