@@ -107,6 +107,7 @@ typedef struct { char* buf; size_t len; int status; const char* body; size_t bod
 
 /* ONE request to u: `method`, u's target, Connection: close and the caller's `headers` (each line CRLF-ended, Host
  * among them), with no redirect followed and no content coding offered — a signed request is answered as signed.
+ * A HEAD's answer is complete at its headers, whatever length they advertise.
  * NULL with *r filled (release it with q_http_client_resp_free), else an owned 'access under -u or a transport class. */
 ray_t* q_http_client_fetch(const q_http_url_t* u, const char* method, const char* headers, q_http_resp_t* r);
 

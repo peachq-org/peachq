@@ -44,10 +44,32 @@
 #define Q_HTTP_GZIP_MIN    2000                   /* body chars before gzip (kb/http.md L54, V4.0) */
 #define Q_HTTP_GZIP_LEVEL  6                      /* deflate level (doc-neutral; balanced) */
 
+/* While a HEAD is answered on g_head_fd: how much of the "\r\n\r\n" ending the response head has gone out (4 = all
+ * of it, so every later byte is body and is dropped), or -1 when the request is not a HEAD.  Any other socket written
+ * meanwhile (a WebSocket push from the handler) is untouched. */
+static _Thread_local int g_head = -1;
+static _Thread_local ray_sock_t g_head_fd;
+
+static int send_bounded(ray_sock_t fd, const void* buf, size_t len, int secs);
+
 /* Bounded-deadline send: ray_sock_send waits FOREVER, so a stalled reader on a
  * 32 MiB body would wedge the poll loop — sock.c's loop + a deadline.  0/-1.
- * Exported (q_http.h): q_ws.c frames ride the same bounded-send policy. */
+ * Exported (q_http.h): q_ws.c frames ride the same bounded-send policy.  Under a
+ * HEAD, only the bytes up to the end of the response head are sent (RFC 7231
+ * §4.3.2): the handlers answer exactly as for GET, Content-Length included. */
 int q_http_send_all(ray_sock_t fd, const void* buf, size_t len, int secs) {
+    if (g_head < 0 || fd != g_head_fd) return send_bounded(fd, buf, len, secs);
+    const char* b = (const char*)buf;
+    size_t n = 0;
+    while (n < len && g_head < 4) {
+        char want = g_head % 2 ? '\n' : '\r';
+        g_head = b[n] == want ? g_head + 1 : b[n] == '\r' ? 1 : 0;
+        n++;
+    }
+    return n ? send_bounded(fd, buf, n, secs) : 0;
+}
+
+static int send_bounded(ray_sock_t fd, const void* buf, size_t len, int secs) {
     /* A TLS record cannot be split by a raw send(): when a transport overlay is
      * attached IT owns framing, so the whole write goes through it — the same
      * rule q_http_client_send_all follows.  THIS function's `secs` is the
@@ -818,6 +840,9 @@ static int zac_gate(ray_sock_t fd, const char* target, size_t tlen,
     return result;
 }
 
+static int respond_get(ray_sock_t fd, const char* target, size_t tlen, const struct phr_header* hdrs, size_t nh,
+                       bool upgrade);
+
 int q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
                    bool auth_required)
 {
@@ -862,31 +887,36 @@ int q_http_respond(ray_sock_t fd, const uint8_t* req, size_t len,
         zpp_dispatch(fd, hdrs, nh);   /* `.z.pp` override, else 501 */
         return 0;
     }
+    /* HEAD is GET with the body dropped at the send (RFC 7231 §4.3.2): kdb's HEAD is undocumented, and this way
+     * every handler right for GET is right for HEAD, `.z.pm` unchanged. */
+    if (mlen == 4 && memcmp(method, "HEAD", 4) == 0) {
+        g_head = 0;
+        g_head_fd = fd;
+        int r = respond_get(fd, target, tlen, hdrs, nh, false);
+        g_head = -1;
+        return r;
+    }
     if (!(mlen == 3 && memcmp(method, "GET", 3) == 0)) {
         /* `.z.pm` methods (ref/dotz.md L739-744): OPTIONS/PUT/DELETE/PATCH.
-         * HEAD is NOT among them and is neither GET nor POST -> 501, but a HEAD
-         * response must carry NO body (RFC 7231 §4.3.2), so it gets a
-         * headers-only 501.  Any other unknown method keeps the textual 501. */
+         * Any other unknown method is 501. */
         bool pm = (mlen == 7 && memcmp(method, "OPTIONS", 7) == 0) ||
                   (mlen == 3 && memcmp(method, "PUT",     3) == 0) ||
                   (mlen == 6 && memcmp(method, "DELETE",  6) == 0) ||
                   (mlen == 5 && memcmp(method, "PATCH",   5) == 0);
-        if (pm) {
-            zpm_dispatch(fd, method, mlen, target, tlen, hdrs, nh);
-        } else if (mlen == 4 && memcmp(method, "HEAD", 4) == 0) {
-            static const char h[] = "HTTP/1.1 501 Not Implemented\r\n"
-                "Content-Type: text/plain\r\nContent-Length: 0\r\n"
-                "Connection: close\r\n\r\n";
-            q_http_send_all(fd, h, sizeof h - 1, Q_HTTP_SEND_SECS);
-        } else {
-            q_http_send_simple(fd, 501, "Not Implemented");
-        }
+        if (pm) zpm_dispatch(fd, method, mlen, target, tlen, hdrs, nh);
+        else    q_http_send_simple(fd, 501, "Not Implemented");
         return 0;
     }
+    return respond_get(fd, target, tlen, hdrs, nh, true);
+}
+
+/* The GET surface: a WebSocket upgrade (never for a HEAD), `.z.ph`, else the static tree. */
+static int respond_get(ray_sock_t fd, const char* target, size_t tlen, const struct phr_header* hdrs, size_t nh,
+                       bool upgrade) {
     /* WebSocket upgrade (kb/websockets.md: same-port WS server): a GET whose
      * Upgrade header names the websocket protocol hands off to q_ws.c.  Any
      * OTHER Upgrade target keeps #217's 501. */
-    for (size_t i = 0; i < nh; i++)
+    for (size_t i = 0; upgrade && i < nh; i++)
         if (hdrs[i].name && str_ieq(hdrs[i].name, hdrs[i].name_len, "upgrade")) {
             if (str_ieq(hdrs[i].value, hdrs[i].value_len, "websocket"))
                 return q_ws_handshake(fd, hdrs, nh);
