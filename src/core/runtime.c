@@ -108,6 +108,7 @@ const char* ray_err_code_str(ray_err_t e) {
          * is capped at 7 bytes — the past-tense form would truncate. */
         [RAY_ERR_RESERVED] = "reserve",
         [RAY_ERR_VERSION] = "version",
+        [RAY_ERR_NOUPDATE] = "noupdate",
     };
     if ((unsigned)e >= sizeof(codes)/sizeof(codes[0])) return "error";
     return codes[e];

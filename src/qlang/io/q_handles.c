@@ -303,9 +303,9 @@ int q_handles_reserve_fd(void) {
 }
 
 /* POSIX open, NOT .ipc.open (IPC-only).  Handle = the real fd; registered so
- * apply/hclose/read1 recognise it.  Restricted mode refuses (writes the fs). */
+ * apply/hclose/read1 recognise it.  q_io_locked refuses it (writes the fs). */
 ray_t* q_handles_open(const char* path, size_t plen, int is_fifo) {
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (q_io_locked()) return q_err(QE_ACCESS);
     char* p = (char*)malloc(plen + 1);
     if (!p) return q_err(QE_OOM);
     memcpy(p, path, plen); p[plen] = '\0';
@@ -341,7 +341,7 @@ ray_t* q_handles_open(const char* path, size_t plen, int is_fifo) {
 
 /* hopen of an archive member: its stream, keyed by a reserved fd.  NULL when the path is no member. */
 static ray_t* handles_open_stream(const char* path, size_t plen) {
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (q_io_locked()) return q_err(QE_ACCESS);
     ray_t* ps = ray_str(path, plen);
     if (!ps || RAY_IS_ERR(ps)) return q_err(QE_OOM);
     q_io_stream_t* s;
@@ -468,7 +468,7 @@ ray_t* q_handles_apply(ray_t* h, ray_t* y) {
     if (afd >= 3) {
         int hk = q_handles_kind(afd);
         if (hk == Q_HANDLE_FILE) {
-            if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+            if (ray_eval_get_restricted() || ray_eval_get_blocked()) return q_err(QE_ACCESS);
             /* text and bytes are raw; neg[h] keeps its line law over a list of
              * strings (basics/handles.md:70-76); every other payload is records
              * (kb/logging.md § Log writing) */

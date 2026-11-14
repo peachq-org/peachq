@@ -38,6 +38,12 @@ int q_io_path_inside(const char* path, size_t n);
  * thread, until it is lent NULL. */
 ray_t* q_io_guard(const char* path, size_t n);
 void   q_io_guard_lend(const char* root, size_t rn);
+/* the rule for a write: blocked mode (-b on a remote handle, reval) refuses every one, else q_io_guard
+ * (ref/eval.md:61, basics/cmdline.md:63) */
+ray_t* q_io_guard_write(const char* path, size_t n);
+/* hdel, a tree delete and hopen of a file or fifo are refused outright under restricted or blocked mode, and on every
+ * handle, the console's included, in a process started -u 1 or -b (basics/cmdline.md:64-65,381-384; owner Q2) */
+int    q_io_locked(void);
 
 /* How big the file IS as a long, 'io when it is not there: a kxzip container
  * answers with its ORIGINAL file's length (ref/hcount.md), one that will not

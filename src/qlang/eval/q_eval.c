@@ -38,6 +38,7 @@
 #include "qlang/io/q_io.h"         /* q_io_resource_table — `get `:f.csv reads the format the ending names */
 #include "qlang/q_ctx.h"           /* q_ctx_eval_src — multi-line text under the value law */
 #include "ops/ops.h"
+#include "lang/eval.h"             /* ray_eval_set_restricted / _blocked — reval's two modes */
 #include "table/sym.h"             /* ray_read_sym — sym vectors are width-adaptive */
 #include <signal.h>
 #include <string.h>
@@ -372,6 +373,10 @@ static ray_t* indexed_assign(ray_t* target, ray_t* opv, ray_t* rhs) {
     else if (q_splay_table_path(cur)) {          /* a mapped global takes no write (kb/splayed-tables.md:350) */
         ray_release(cur);
         ret = q_err(QE_SPLAY);
+    }
+    if (!ret && !write_is_local(te[0]->i64) && q_env_writable(te[0]->i64) != RAY_OK) {
+        ray_release(cur);
+        ret = q_env_err(RAY_ERR_NOUPDATE);
     }
     if (!ret) {
         int local = write_is_local(te[0]->i64);
@@ -778,6 +783,25 @@ static ray_t* keyword_lambda_value(const char* src) {
     return r;
 }
 
+static _Thread_local int  g_reval;          /* reval depth */
+static _Thread_local bool g_reval_outer;    /* restricted stood when the outermost reval began */
+
+ray_t* q_eval_reval(ray_t* x) {
+    bool restricted = ray_eval_get_restricted(), blocked = ray_eval_get_blocked();
+    if (!g_reval++) g_reval_outer = restricted;
+    ray_eval_set_restricted(true);
+    ray_eval_set_blocked(true);
+    int64_t scope = q_env_scope(Q_ENV_SCOPE_SESSION);
+    ray_t* r = q_eval(x);
+    q_env_scope(scope);
+    ray_eval_set_restricted(restricted);
+    ray_eval_set_blocked(blocked);
+    g_reval--;
+    return r;
+}
+
+int q_eval_reval_only(void) { return g_reval && !g_reval_outer; }
+
 /* `value`/`get` (ref/value.md; get is the synonym).  q `eval` needs no body
  * here — it is .q.eval:(-6!), the q_bang.c arm over q_eval.  value applies
  * ONCE, non-recursively: a string parses+evaluates in the current context, a
@@ -986,6 +1010,11 @@ static ray_t* modassign_eval(ray_t* opv, const q_op_t* row, ray_t* target, ray_t
     }
     if (RAY_IS_ERR(cur)) { ray_release(rv); return cur; }
     int local = write_is_local(target->i64);
+    if (!local && q_env_writable(target->i64) != RAY_OK) {
+        ray_release(cur);
+        ray_release(rv);
+        return q_env_err(RAY_ERR_NOUPDATE);
+    }
     int join = row && !strcmp(row->name, ",");
     int stole = 0;
     ray_t* nv;
