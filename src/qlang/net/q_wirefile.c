@@ -1550,11 +1550,15 @@ static ray_t* wf_write_nested(ray_t* path, ray_t* col, int8_t elem,
  * compound: sym rows and mixed rows are kx's anymap lane, deferred to 'type. */
 static int8_t wf_col_nested_tag(ray_t* col) {
     if (!col) return 0;
+    if (!q_count(col)) {                         /* only an empty column read from a nested file stays nested */
+        uint8_t k = q_type_mapped_type(col);
+        return k > WF_NEST_BIAS && k <= WF_NEST_HI ? (int8_t)(k - WF_NEST_BIAS) : 0;
+    }
     if (col->type == RAY_STR) return (int8_t)RAY_CHARV;
     if (col->type != RAY_LIST) return 0;
     int64_t n = q_count(col);
     ray_t** e = (ray_t**)ray_data(col);
-    int8_t t0 = (int8_t)RAY_CHARV;               /* empty column: char, as before */
+    int8_t t0 = 0;
     for (int64_t i = 0; i < n; i++) {
         ray_t* ei = e[i];
         int8_t ti;
@@ -1628,6 +1632,13 @@ static ray_t* wf_write_splay_dir(ray_t* dirstr, ray_t* domsym, ray_t* y,
             if (pos) ray_release(pos);
         } else if ((nt = wf_col_nested_tag(col))) {
             bad = wf_write_nested(cp, col, nt, lbs, alg, lvl);
+        } else if (!q_count(col) && (col->type == RAY_LIST || col->type == RAY_STR)) {
+            /* kdb writes an empty string column as the empty general list (torq-hdb packets/flags) */
+            ray_t* none = ray_list_new(0);
+            ray_t* img = none ? wf_write_a(none) : q_err(QE_OOM);
+            bad = RAY_IS_ERR(img) ? img : wf_put(cp, img, lbs, alg, lvl);
+            if (!RAY_IS_ERR(img) && img != bad) ray_release(img);
+            if (none) ray_release(none);
         } else if (col->type > 0 && wf_simple_tag((uint8_t)col->type)) {
             ray_t* img = wf_write_b(col, (uint8_t)col->type);
             bad = RAY_IS_ERR(img) ? img : wf_put(cp, img, lbs, alg, lvl);
