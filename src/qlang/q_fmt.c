@@ -1739,6 +1739,10 @@ static ray_t* enum_shown(ray_t* val, char* glyph) {
     *glyph = vals || kind == Q_EDOM_UNBOUND ? '$' : '!';
     ray_t* r = q_enum_val_image(val);
     if (r && RAY_IS_ERR(r)) { ray_error_free(r); r = NULL; }
+    if (r && *glyph == '$' && !q_count(r)) {       /* `sym$(), never `sym$`symbol$() (ref/dotq.md:2233) */
+        ray_release(r);
+        r = ray_list_new(0);
+    }
     return r;
 }
 
