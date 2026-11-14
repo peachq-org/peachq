@@ -5,13 +5,14 @@
 #endif
 #include "qlang/q_count.h"
 #include "qlang/io/q_s3.h"
+#include "qlang/io/q_duckdb.h"         /* q_duckdb_s3_secret — each config mirrored as a DuckDB secret */
 #include "qlang/base/q_err.h"
 #include "qlang/q_env.h"              /* q_env_bind_native */
-#include "qlang/eval/q_eval.h"        /* q_eval_apply_call_name — .s3.config[::] is qlib/s3.q's, bound by name */
+#include "qlang/eval/q_eval.h"        /* q_eval_apply_call_name — .s3.config[::;::] is qlib/s3.q's, bound by name */
 #include "qlang/q_prim.h"             /* q_str_text_bytes */
 #include "qlang/net/q_http_client.h"
 #include "qlang/net/q_sigv4.h"
-#include "lang/env.h"                 /* ray_fn_unary */
+#include "lang/env.h"                 /* ray_fn_unary, ray_fn_binary */
 #include "lang/eval.h"                /* ray_eval_get_restricted, RAY_FN_NONE */
 #include "table/sym.h"                /* ray_sym_intern_runtime, ray_sym_str */
 #include <stdio.h>
@@ -28,8 +29,18 @@ static const char* const KEYS[S3_NKEYS] = {
     "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "KX_S3_ENDPOINT", "KX_S3_USE_PATH_REQUEST_STYLE",
 };
 
-static char* g_cfg[S3_NKEYS];
-static int   g_cfg_set;
+/* A config and the scopes it serves.  A scope belongs to one config at most; "s3://" is the default's. */
+typedef struct {
+    char*  v[S3_NKEYS];
+    char** scope;
+    int    nscope;
+    int    id;                    /* names its DuckDB secret */
+} s3_cfg_t;
+
+static s3_cfg_t**  g_cfgs;
+static int         g_ncfg, g_next_id;
+static int         g_default_set;
+static char* const NONE[S3_NKEYS];
 
 static char* dupn(const char* p, size_t n) {
     char* s = malloc(n + 1);
@@ -44,19 +55,34 @@ static void cfg_clear(char** v) {
     }
 }
 
-/* The first access with nothing configured applies `.s3.config[::]` (qlib/s3.q) by name.  Its own reads are local
- * files, but a shared file named by an s3:// path would come back here: that inner access finds it under way and goes
- * anonymous rather than recursing. */
+/* The first access with the default unresolved applies `.s3.config[::;::]` (qlib/s3.q) by name.  Its own reads are
+ * local files, but a shared file named by an s3:// path would come back here: that inner access finds it under way
+ * and resolves without it rather than recursing. */
 static ray_t* cfg_ensure(void) {
     static int busy;
-    if (g_cfg_set || busy) return NULL;
+    if (g_default_set || busy) return NULL;
     busy = 1;
-    ray_t* none = RAY_NULL_OBJ;
-    ray_t* r = q_eval_apply_call_name(".s3.config", 10, &none, 1);
+    ray_t* args[2] = { RAY_NULL_OBJ, RAY_NULL_OBJ };
+    ray_t* r = q_eval_apply_call_name(".s3.config", 10, args, 2);
     busy = 0;
     if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_OOM);
     ray_release(r);
     return NULL;
+}
+
+/* The config serving the path: the longest scope that is a whole-component prefix of it, else the default's; NULL
+ * when neither is configured. */
+static const s3_cfg_t* cfg_for(const char* p, size_t n) {
+    const s3_cfg_t* best = NULL;
+    size_t at = 0;
+    for (int i = 0; i < g_ncfg; i++)
+        for (int j = 0; j < g_cfgs[i]->nscope; j++) {
+            const char* s = g_cfgs[i]->scope[j];
+            size_t sn = strcmp(s, "s3://") == 0 ? 0 : strlen(s);
+            int hit = !sn || (sn <= n && memcmp(s, p, sn) == 0 && (sn == n || s[sn - 1] == '/' || p[sn] == '/'));
+            if (hit && (!best || sn > at)) best = g_cfgs[i], at = sn;
+        }
+    return best;
 }
 
 /* ---- a request ---------------------------------------------------------- */
@@ -141,11 +167,11 @@ static int hdr_line(char* out, size_t cap, size_t* o, const char* name, const ch
 }
 
 /* The request for one region: its URL, and its headers signed when a key id and secret are configured. */
-static ray_t* s3_request(const s3_loc_t* l, const char* method, const char* region, const char* query, int64_t roff,
-                         int64_t rlen, q_http_url_t* u, char* hdrs, size_t cap) {
+static ray_t* s3_request(char* const* cfg, const s3_loc_t* l, const char* method, const char* region, const char* query,
+                         int64_t roff, int64_t rlen, q_http_url_t* u, char* hdrs, size_t cap) {
     char path[1100], url[1400], range[64] = "";
-    const char* ep = g_cfg[K_ENDPOINT];
-    int path_style = ep || (g_cfg[K_PATHSTYLE] && strcmp(g_cfg[K_PATHSTYLE], "1") == 0) || strchr(l->bucket, '.');
+    const char* ep = cfg[K_ENDPOINT];
+    int path_style = ep || (cfg[K_PATHSTYLE] && strcmp(cfg[K_PATHSTYLE], "1") == 0) || strchr(l->bucket, '.');
     int o = path_style ? snprintf(path, sizeof path, "/%s/", l->bucket) : snprintf(path, sizeof path, "/");
     if (q_sigv4_uri_encode(l->key, query ? 0 : l->klen, 1, path + o, sizeof path - (size_t)o) < 0) return q_err(QE_LIMIT);
     int w;
@@ -167,7 +193,7 @@ static ray_t* s3_request(const s3_loc_t* l, const char* method, const char* regi
     if (roff >= 0) snprintf(range, sizeof range, "bytes=%lld-%lld", (long long)roff, (long long)(roff + rlen - 1));
     if (hdr_line(hdrs, cap, &at, "Host", host) || (range[0] && hdr_line(hdrs, cap, &at, "Range", range)))
         return q_err(QE_LIMIT);
-    if (!g_cfg[K_ID] || !g_cfg[K_SECRET]) return NULL;
+    if (!cfg[K_ID] || !cfg[K_SECRET]) return NULL;
     char amz[20], canon[4096], signed_h[200], auth[600];
     time_t now = time(NULL);
     struct tm tm;
@@ -175,7 +201,7 @@ static ray_t* s3_request(const s3_loc_t* l, const char* method, const char* regi
     q_sigv4_hdr_t h[5] = { { "host", host }, { "x-amz-content-sha256", S3_EMPTY_SHA256 }, { "x-amz-date", amz } };
     size_t nh = 3;
     if (range[0]) h[nh++] = (q_sigv4_hdr_t){ "range", range };
-    if (g_cfg[K_TOKEN]) h[nh++] = (q_sigv4_hdr_t){ "x-amz-security-token", g_cfg[K_TOKEN] };
+    if (cfg[K_TOKEN]) h[nh++] = (q_sigv4_hdr_t){ "x-amz-security-token", cfg[K_TOKEN] };
     const char* target = u->path;
     char uri[1100];
     size_t un = strcspn(target, "?");
@@ -184,11 +210,11 @@ static ray_t* s3_request(const s3_loc_t* l, const char* method, const char* regi
     uri[un] = '\0';
     if (q_sigv4_canonical(method, uri, target[un] ? target + un + 1 : "", h, nh, S3_EMPTY_SHA256, canon, sizeof canon,
                           signed_h, sizeof signed_h) ||
-        q_sigv4_authorization(g_cfg[K_ID], g_cfg[K_SECRET], region, "s3", amz, canon, signed_h, auth, sizeof auth))
+        q_sigv4_authorization(cfg[K_ID], cfg[K_SECRET], region, "s3", amz, canon, signed_h, auth, sizeof auth))
         return q_err(QE_NYI);
     int bad = hdr_line(hdrs, cap, &at, "x-amz-content-sha256", S3_EMPTY_SHA256) ||
               hdr_line(hdrs, cap, &at, "x-amz-date", amz) ||
-              (g_cfg[K_TOKEN] && hdr_line(hdrs, cap, &at, "x-amz-security-token", g_cfg[K_TOKEN])) ||
+              (cfg[K_TOKEN] && hdr_line(hdrs, cap, &at, "x-amz-security-token", cfg[K_TOKEN])) ||
               hdr_line(hdrs, cap, &at, "Authorization", auth);
     memset(auth, 0, sizeof auth);
     return bad ? q_err(QE_LIMIT) : NULL;
@@ -201,12 +227,14 @@ static ray_t* s3_send(const s3_loc_t* l, const char* method, const char* query, 
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* bad = cfg_ensure();
     if (bad) return bad;
+    const s3_cfg_t* c = cfg_for(l->url, l->ulen);
+    char* const* cfg = c ? c->v : NONE;
     char region[64];
-    snprintf(region, sizeof region, "%s", g_cfg[K_REGION] ? g_cfg[K_REGION] : "us-east-1");
+    snprintf(region, sizeof region, "%s", cfg[K_REGION] ? cfg[K_REGION] : "us-east-1");
     for (int tries = 0;; tries++) {
         q_http_url_t u;
         char hdrs[2048];
-        bad = s3_request(l, method, region, query, roff, rlen, &u, hdrs, sizeof hdrs);
+        bad = s3_request(cfg, l, method, region, query, roff, rlen, &u, hdrs, sizeof hdrs);
         if (!bad) bad = q_http_client_fetch(&u, method, hdrs, r);
         memset(hdrs, 0, sizeof hdrs);
         if (bad) return bad;
@@ -387,7 +415,7 @@ ray_t* q_s3_list(ray_t* pathstr) {
 /* ---- the .s3 natives ---------------------------------------------------- */
 
 /* the settings in v as a dict in KEYS order, the secret and the token shown as "***" */
-static ray_t* cfg_dict(char** v) {
+static ray_t* cfg_dict(char* const* v) {
     ray_t* k = ray_sym_vec_new(RAY_SYM_W64, S3_NKEYS);
     ray_t* d = ray_list_new(S3_NKEYS);
     for (int i = 0; i < S3_NKEYS && !RAY_IS_ERR(k) && !RAY_IS_ERR(d); i++) {
@@ -408,17 +436,90 @@ static ray_t* cfg_dict(char** v) {
     return ray_dict_new(k, d);
 }
 
-/* `.s3.i.config d` — d keyed by the setting names, each value a string; it replaces the whole configuration, kept
- * here and never in a q value, and answers it masked */
-static ray_t* s3_config_fn(ray_t* x) {
+static void cfg_free(s3_cfg_t* c) {
+    cfg_clear(c->v);
+    for (int i = 0; i < c->nscope; i++) free(c->scope[i]);
+    free(c->scope);
+    free(c);
+}
+
+/* The config as its DuckDB secret, with the same keys and scopes.  DuckDB matches a scope as a plain prefix, so each
+ * goes over with a trailing '/' to match whole components as cfg_for does; the default covers all three schemes, as
+ * DuckDB's own default scope does.  A default with nothing DuckDB reads is DuckDB's no-secret state, so it goes over
+ * as no secret at all. */
+static void cfg_mirror(const s3_cfg_t* c, int drop) {
+    char name[32];
+    snprintf(name, sizeof name, "pq_s3_%d", c->id);
+    char* const* v = c->v;
+    const char* kv[16];
+    int n = 0;
+    if (v[K_ID] && v[K_SECRET]) {
+        kv[n++] = "KEY_ID", kv[n++] = v[K_ID], kv[n++] = "SECRET", kv[n++] = v[K_SECRET];
+        if (v[K_TOKEN]) kv[n++] = "SESSION_TOKEN", kv[n++] = v[K_TOKEN];
+    }
+    if (v[K_REGION]) kv[n++] = "REGION", kv[n++] = v[K_REGION];
+    char ep[512];
+    const char* e = v[K_ENDPOINT];
+    if (e) {
+        const char* h = strstr(e, "://");
+        const char* host = h ? h + 3 : e;
+        size_t en = strlen(host);
+        while (en && host[en - 1] == '/') en--;
+        snprintf(ep, sizeof ep, "%.*s", (int)en, host);
+        kv[n++] = "ENDPOINT", kv[n++] = ep;
+        if (h && h - e == 4 && memcmp(e, "http", 4) == 0) kv[n++] = "USE_SSL", kv[n++] = "false";
+    }
+    if (e || (v[K_PATHSTYLE] && strcmp(v[K_PATHSTYLE], "1") == 0)) kv[n++] = "URL_STYLE", kv[n++] = "path";
+    if (drop || (!n && c->nscope == 1 && strcmp(c->scope[0], "s3://") == 0)) {
+        q_duckdb_s3_secret(name, NULL, 0, NULL, 0);
+        return;
+    }
+    char** sc = calloc(3 * (size_t)c->nscope, sizeof *sc);
+    int ns = 0;
+    for (int i = 0; sc && i < c->nscope; i++) {
+        const char* s = c->scope[i];
+        size_t sn = strlen(s);
+        if (strcmp(s, "s3://") == 0) { sc[ns++] = dupn("s3n://", 6); sc[ns++] = dupn("s3a://", 6); }
+        if ((sc[ns] = malloc(sn + 2))) snprintf(sc[ns], sn + 2, "%s%s", s, s[sn - 1] == '/' ? "" : "/");
+        ns++;
+    }
+    int whole = sc != NULL;
+    for (int i = 0; i < ns; i++) whole &= sc[i] != NULL;
+    if (whole) q_duckdb_s3_secret(name, kv, n, (const char* const*)sc, ns);
+    for (int i = 0; i < ns; i++) free(sc[i]);
+    free(sc);
+}
+
+/* `.s3.i.config[scopes;cfg]` — scopes a list of path prefixes, cfg a dict keyed by the setting names with string
+ * values, or () to drop the scopes.  The config is kept here and never in a q value, takes each scope from whichever
+ * config held it, and answers masked. */
+static ray_t* s3_config_fn(ray_t* scopes, ray_t* x) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
-    if (!x || x->type != RAY_DICT) return q_err(QE_TYPE);
-    ray_t* k = ray_dict_keys(x);
-    ray_t* d = ray_dict_vals(x);
-    int64_t n = q_count(k);
-    if (n && (k->type != RAY_SYM || d->type != RAY_LIST)) return q_err(QE_TYPE);
-    char* v[S3_NKEYS] = { 0 };
+    int64_t ns = scopes && scopes->type == RAY_LIST ? q_count(scopes) : 0;
+    int drop = x && x->type == RAY_LIST && !q_count(x);
+    if (!ns || (!drop && (!x || x->type != RAY_DICT))) return q_err(QE_TYPE);
+    s3_cfg_t* nc = calloc(1, sizeof *nc);
+    s3_cfg_t** grown = nc ? realloc(g_cfgs, (size_t)(g_ncfg + 1) * sizeof *g_cfgs) : NULL;
+    if (grown) g_cfgs = grown;
+    if (!grown || !(nc->scope = calloc((size_t)ns, sizeof *nc->scope))) { free(nc); return q_err(QE_OOM); }
     ray_t* bad = NULL;
+    for (int64_t i = 0; i < ns && !bad; i++) {
+        const char* p;
+        int64_t pn;
+        if (!q_str_text_bytes(ray_list_get(scopes, i), &p, &pn)) { bad = q_err(QE_TYPE); break; }
+        if (pn && *p == ':') p++, pn--;
+        if (!q_s3_is(p, (size_t)pn)) { bad = q_err(QE_DOMAIN); break; }
+        int64_t root = p[2] == ':' ? 5 : 6;
+        while (pn > root && p[pn - 1] == '/') pn--;
+        int seen = 0;
+        for (int j = 0; j < nc->nscope && !seen; j++)
+            seen = strlen(nc->scope[j]) == (size_t)pn && memcmp(nc->scope[j], p, (size_t)pn) == 0;
+        if (!seen && !(nc->scope[nc->nscope++] = dupn(p, (size_t)pn))) bad = q_err(QE_OOM);
+    }
+    ray_t* k = drop ? NULL : ray_dict_keys(x);
+    ray_t* d = drop ? NULL : ray_dict_vals(x);
+    int64_t n = drop ? 0 : q_count(k);
+    if (!bad && n && (k->type != RAY_SYM || d->type != RAY_LIST)) bad = q_err(QE_TYPE);
     for (int64_t i = 0; i < n && !bad; i++) {
         ray_t* nm = ray_sym_str(ray_vec_get_sym_id(k, i));
         int j = 0;
@@ -429,20 +530,111 @@ static ray_t* s3_config_fn(ray_t* x) {
         if (j == S3_NKEYS) bad = q_err(QE_OPTION);
         else if (!q_str_text_bytes(ray_list_get(d, i), &p, &pn)) bad = q_err(QE_TYPE);
         else {
-            free(v[j]);
-            v[j] = pn ? dupn(p, (size_t)pn) : NULL;
-            if (pn && !v[j]) bad = q_err(QE_OOM);
+            free(nc->v[j]);
+            nc->v[j] = pn ? dupn(p, (size_t)pn) : NULL;
+            if (pn && !nc->v[j]) bad = q_err(QE_OOM);
         }
     }
-    if (bad) { cfg_clear(v); return bad; }
-    cfg_clear(g_cfg);
-    memcpy(g_cfg, v, sizeof v);
-    g_cfg_set = 1;
-    return cfg_dict(g_cfg);
+    ray_t* out = bad ? bad : cfg_dict(drop ? NONE : nc->v);
+    if (RAY_IS_ERR(out)) { cfg_free(nc); return out; }
+    for (int i = 0; i < g_ncfg; ) {
+        s3_cfg_t* c = g_cfgs[i];
+        int took = 0;
+        for (int j = 0; j < c->nscope; ) {
+            int mine = 0;
+            for (int m = 0; m < nc->nscope && !mine; m++) mine = strcmp(c->scope[j], nc->scope[m]) == 0;
+            if (!mine) { j++; continue; }
+            free(c->scope[j]);
+            c->scope[j] = c->scope[--c->nscope];
+            took = 1;
+        }
+        if (!c->nscope) {
+            cfg_mirror(c, 1);
+            cfg_free(c);
+            g_cfgs[i] = g_cfgs[--g_ncfg];
+            continue;
+        }
+        if (took) cfg_mirror(c, 0);
+        i++;
+    }
+    for (int m = 0; m < nc->nscope; m++) g_default_set |= strcmp(nc->scope[m], "s3://") == 0;
+    if (drop) { cfg_free(nc); return out; }
+    nc->id = g_next_id++;
+    g_cfgs[g_ncfg++] = nc;
+    cfg_mirror(nc, 0);
+    return out;
+}
+
+/* `.s3.i.which path` — the config a path is read with, masked; the empty dict for none */
+static ray_t* s3_which_fn(ray_t* x) {
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    const char* p;
+    int64_t pn;
+    if (!q_str_text_bytes(x, &p, &pn)) return q_err(QE_TYPE);
+    if (pn && *p == ':') p++, pn--;
+    if (!q_s3_is(p, (size_t)pn)) return q_err(QE_DOMAIN);
+    ray_t* bad = cfg_ensure();
+    if (bad) return bad;
+    const s3_cfg_t* c = cfg_for(p, (size_t)pn);
+    return cfg_dict(c ? c->v : NONE);
+}
+
+typedef struct { const char* scope; const s3_cfg_t* c; } s3_row_t;
+
+static int row_cmp(const void* a, const void* b) {
+    return strcmp(((const s3_row_t*)a)->scope, ((const s3_row_t*)b)->scope);
+}
+
+/* `.s3.i.configs[]` — a row per scope in scope order: the scope, then every setting, "" where unset and masked */
+static ray_t* s3_configs_fn(ray_t* x) {
+    (void)x;
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    ray_t* bad = cfg_ensure();
+    if (bad) return bad;
+    int64_t nr = 0;
+    for (int i = 0; i < g_ncfg; i++) nr += g_cfgs[i]->nscope;
+    s3_row_t* rows = calloc(nr ? (size_t)nr : 1, sizeof *rows);
+    if (!rows) return q_err(QE_OOM);
+    nr = 0;
+    for (int i = 0; i < g_ncfg; i++)
+        for (int j = 0; j < g_cfgs[i]->nscope; j++) rows[nr++] = (s3_row_t){ g_cfgs[i]->scope[j], g_cfgs[i] };
+    qsort(rows, (size_t)nr, sizeof *rows, row_cmp);
+    ray_t* t = ray_table_new(1 + S3_NKEYS);
+    for (int col = -1; col < S3_NKEYS && t && !RAY_IS_ERR(t); col++) {
+        ray_t* cv = ray_list_new(nr ? nr : 1);
+        for (int64_t r = 0; r < nr && cv && !RAY_IS_ERR(cv); r++) {
+            const char* s = col < 0 ? rows[r].scope : rows[r].c->v[col] ? rows[r].c->v[col] : "";
+            if (*s && (col == K_SECRET || col == K_TOKEN)) s = "***";
+            ray_t* e = ray_charv(s, (int64_t)strlen(s));
+            if (RAY_IS_ERR(e)) { ray_release(cv); cv = e; break; }
+            cv = ray_list_append(cv, e);
+            ray_release(e);
+        }
+        if (!cv || RAY_IS_ERR(cv)) { ray_release(t); t = cv ? cv : q_err(QE_OOM); break; }
+        const char* nm = col < 0 ? "scope" : KEYS[col];
+        t = ray_table_add_col(t, ray_sym_intern(nm, strlen(nm)), cv);
+        ray_release(cv);
+    }
+    free(rows);
+    return t ? t : q_err(QE_OOM);
+}
+
+/* DuckDB may be the first to read s3://, so the default resolves here too; a failure is the next native read's to
+ * report, never the open's. */
+void q_s3_mirror(void) {
+    for (int i = 0; i < g_ncfg; i++) cfg_mirror(g_cfgs[i], 0);
+    ray_t* e = cfg_ensure();
+    if (e) { ray_error_free(e); q_err_drop(); }
 }
 
 void q_s3_register(void) {
-    ray_t* c = ray_fn_unary(".s3.i.config", RAY_FN_NONE, s3_config_fn);
-    q_env_bind_native(".s3.i.config", c, 1);
+    ray_t* c = ray_fn_binary(".s3.i.config", RAY_FN_NONE, s3_config_fn);
+    q_env_bind_native(".s3.i.config", c, 2);
+    ray_release(c);
+    c = ray_fn_unary(".s3.i.which", RAY_FN_NONE, s3_which_fn);
+    q_env_bind_native(".s3.i.which", c, 1);
+    ray_release(c);
+    c = ray_fn_unary(".s3.i.configs", RAY_FN_NONE, s3_configs_fn);
+    q_env_bind_native(".s3.i.configs", c, 1);
     ray_release(c);
 }
