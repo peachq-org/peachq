@@ -11,7 +11,6 @@
 #include "qlang/base/q_err.h"
 #include "qlang/io/q_io.h"
 #include "qlang/ops/q_dollar.h"  /* q_cast_designator, q_dollar_cast */
-#include "lang/eval.h"           /* ray_eval_get_restricted — compressed save */
 #include <stdlib.h>
 #include <string.h>
 
@@ -228,10 +227,9 @@ ray_t* q_io_filebinary_wrap(ray_t* x, ray_t* y) {
                 return q_err(QE_NYI);            /* raw-byte payloads only */
             ray_t* path = q_io_file_path(e[0]);
             if (!path) return q_err(QE_TYPE);
-            ray_t* bad = ray_eval_get_restricted() ? q_err(QE_ACCESS)
-                       : q_io_zip_write(path, (const uint8_t*)ray_data(y),
-                                        (size_t) q_count(y), q_io_zip_param(lbs),
-                                        q_io_zip_param(alg), q_io_zip_param(lvl));
+            ray_t* bad = q_io_guard(ray_str_ptr(path), ray_str_len(path));
+            if (!bad) bad = q_io_zip_write(path, (const uint8_t*)ray_data(y), (size_t)q_count(y), q_io_zip_param(lbs),
+                                           q_io_zip_param(alg), q_io_zip_param(lvl));
             ray_release(path);
             if (bad) return bad;
             ray_retain(e[0]);
