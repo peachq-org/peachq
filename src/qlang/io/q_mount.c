@@ -3,7 +3,7 @@
 #define _GNU_SOURCE            /* strdup */
 #include "qlang/q_count.h"
 #include "qlang/io/q_mount.h"
-#include "qlang/io/q_io.h"      /* q_io_abs_path — the one path-resolution home */
+#include "qlang/io/q_io.h"      /* q_io_abs_path — the one path-resolution home; q_io_guard */
 #include "qlang/io/q_splay.h"
 #include "qlang/net/q_wirefile.h"
 #include "qlang/base/q_err.h"
@@ -132,6 +132,8 @@ static ray_t* mount_root(const char* abs, size_t n, int scripts) {
 
 ray_t* q_mount_object(const char* path) {
     size_t n = strlen(path);
+    ray_t* refused = q_io_guard(path, n);
+    if (refused) return refused;
     const char* base = strrchr(path, '/');
     base = base ? base + 1 : path;
     size_t bn = strlen(base);
@@ -140,6 +142,8 @@ ray_t* q_mount_object(const char* path) {
 }
 
 ray_t* q_mount_dir(const char* path, int scripts) {
+    ray_t* refused = q_io_guard(path, strlen(path));
+    if (refused) return refused;
     char abs[PATH_MAX];
     if (!q_io_abs_path(path, abs, sizeof abs) || !mount_is_dir(abs)) return q_err(QE_OS);
     size_t n = strlen(abs);

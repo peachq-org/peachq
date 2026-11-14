@@ -38,7 +38,7 @@
 #include "qlang/parse/q_parse.h"    /* q_parse — `\t expr` / `\ts expr` timing */
 #include "qlang/parse/q_tok.h" /* q_tok_date_order_set/_order — `\z` */
 #include "qlang/net/q_tls.h"  /* q_tls_server_mode — `\E` */
-#include "core/ipc.h"         /* ray_ipc_listen_at — `\p` binds a listener */
+#include "core/ipc.h"         /* ray_ipc_listen_at — `\p` binds a listener; ray_ipc_auth_file_loaded — `\x` */
 #include "core/sock.h"        /* ray_sock_resolve4 / _service_port — the listen spec host and servicename */
 #include "core/poll.h"        /* ray_poll_get / deregister — `\p 0W`/`\p 0`; poll->timers */
 #include "core/runtime.h"     /* ray_runtime_get_poll — the runtime event poll */
@@ -344,8 +344,9 @@ static ray_t* h_getset(size_t alen) {
 }
 
 /* `\x name` (basics/syscmds.md expunge): unbind a `.z` callback so its runtime default resumes; any other name errors
- * as `\l badfile` does. */
+ * as `\l badfile` does.  A password file (-U, -u file) disables it on every handle (basics/cmdline.md:393). */
 static ray_t* h_x(const char* arg, size_t alen) {
+    if (ray_ipc_auth_file_loaded()) return q_err(QE_ACCESS);
     if (alen == 0) return h_getset(alen);
     if (!q_dotz_expungeable(arg, alen)) return q_err_name(arg, alen);
     ray_err_t e = q_env_unbind(ray_sym_intern_runtime(arg, alen));

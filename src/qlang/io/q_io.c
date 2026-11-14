@@ -4,9 +4,8 @@
  * this file from io/q_io_filetext.c; hopen/hclose live with the handle
  * registry (q_handles.c) and getenv/setenv with the process commands (q_sys.c).
  *
- * RAY_FN_RESTRICTED note: the base file primitives carry the flag on their ENV
- * fn objects; calling the C functions directly bypasses the eval-layer check,
- * so every file-touching arm re-asserts ray_eval_get_restricted(). */
+ * Restricted mode: every local file door asks q_io_guard (the cwd path rule); a URL, and what stays forbidden
+ * outright (hdel, a tree delete), asks ray_eval_get_restricted(). */
 #define _GNU_SOURCE            /* realpath */
 #include "qlang/q_count.h"
 #include "qlang/io/q_io.h"
@@ -98,6 +97,91 @@ int q_io_path_inside(const char* p, size_t n) {
         if (p[i] == '.' && p[i + 1] == '.' && (!i || p[i - 1] == '/') && (i + 2 == n || p[i + 2] == '/')) return 0;
     return 1;
 }
+
+#ifdef RAY_OS_WINDOWS
+/* _fullpath is lexical, so a junction or symlink is not followed: a recorded gap (Dbidsz) */
+static int io_canonical(const char* p, size_t n, char* out, size_t cap) { return q_io_abs_spelling(p, n, out, cap); }
+#else
+/* The longest prefix that exists, its links resolved, then the rest applied lexically.  0 refuses: a link that will
+ * not resolve (dangling or looping), a path too long, and any `..` past a missing component, which could otherwise
+ * climb back onto existing names, links among them, without resolving them. */
+static int io_canonical(const char* p, size_t n, char* out, size_t cap) {
+    char abs[PATH_MAX], real[PATH_MAX];
+    if (!q_io_abs_spelling(p, n, abs, sizeof abs)) return 0;
+    size_t len = strlen(abs), cut;
+    while (len > 1 && abs[len - 1] == '/') abs[--len] = '\0';
+    for (cut = len;;) {
+        char at = abs[cut];
+        abs[cut] = '\0';
+        struct stat st;
+        int ok = realpath(abs, real) != NULL, entry = !ok && lstat(abs, &st) == 0;
+        abs[cut] = at;
+        if (ok) break;
+        if (entry || cut <= 1) return 0;
+        while (cut > 1 && abs[cut - 1] != '/') cut--;
+        while (cut > 1 && abs[cut - 1] == '/') cut--;
+    }
+    size_t m = strlen(real);
+    for (const char* c = abs + cut; *c; ) {
+        while (*c == '/') c++;
+        size_t k = strcspn(c, "/");
+        if (k == 2 && c[0] == '.' && c[1] == '.') return 0;
+        if (k && !(k == 1 && c[0] == '.')) {
+            if (m + 1 + k + 1 > sizeof real) return 0;
+            if (real[m - 1] != '/') real[m++] = '/';
+            memcpy(real + m, c, k);
+            m += k;
+        }
+        real[m] = '\0';
+        c += k;
+    }
+    if (m + 1 > cap) return 0;
+    memcpy(out, real, m + 1);
+    return 1;
+}
+#endif
+
+/* is p's canonical form root's (NULL = the current directory) or below it, whole components compared? */
+static int io_admits(const char* root, size_t rn, const char* p, size_t n) {
+    char top[PATH_MAX], at[PATH_MAX];
+    if (!(root ? io_canonical(root, rn, top, sizeof top) : q_io_abs_path(".", top, sizeof top))
+        || !io_canonical(p, n, at, sizeof at)) return 0;
+    size_t tl = strlen(top);
+#ifdef RAY_OS_WINDOWS
+    int same = _strnicmp(at, top, tl) == 0;      /* the filesystem folds case; _fullpath keeps the spelling's */
+#else
+    int same = strncmp(at, top, tl) == 0;
+#endif
+    return same && (!at[tl] || at[tl] == '/' || top[tl - 1] == '/');
+}
+
+static _Thread_local const char* g_lent;
+static _Thread_local size_t      g_lent_n;
+
+/* a segment's root is lent only where the database spells it inside the current directory (database/segment.md:54-73) */
+void q_io_guard_lend(const char* root, size_t rn) {
+    int inside = root && q_io_path_inside(root, rn);
+    g_lent = inside ? root : NULL;
+    g_lent_n = inside ? rn : 0;
+}
+
+static int io_allowed(const char* p, size_t n) {
+    return !ray_eval_get_restricted() || io_admits(NULL, 0, p, n) || (g_lent && io_admits(g_lent, g_lent_n, p, n));
+}
+
+static ray_t* io_refused(const char* p, size_t n) {
+    char msg[PATH_MAX + 64];
+    int k = snprintf(msg, sizeof msg, "access: %.*s (restricted to the current directory)",
+                     (int)(n < PATH_MAX ? n : PATH_MAX), p);
+    ray_t* why = ray_charv(msg, k < (int)sizeof msg ? k : (int)sizeof msg - 1);
+    ray_t* e = q_err_signal(QE_ACCESS, why);
+    if (why && !RAY_IS_ERR(why)) ray_release(why);
+    return e;
+}
+
+ray_t* q_io_guard(const char* p, size_t n) { return io_allowed(p, n) ? NULL : io_refused(p, n); }
+
+static ray_t* io_guard_str(ray_t* pathstr) { return q_io_guard(ray_str_ptr(pathstr), ray_str_len(pathstr)); }
 
 ray_t* q_io_file_path(ray_t* x) {
     const char* p;
@@ -205,10 +289,13 @@ int q_io_open_locked(const char* path) {
     return fd;
 }
 
+static ray_t* io_guard_resource(ray_t* pathstr);
+
 ray_t* q_io_write_all(ray_t* pathstr, const void* bytes, size_t n) {
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     const char* p = ray_str_ptr(pathstr);
     if (!p) return q_err(QE_DOMAIN);
+    ray_t* refused = io_guard_resource(pathstr);
+    if (refused) return refused;
     if (q_s3_is(p, ray_str_len(pathstr)) || q_io_is_member(pathstr)) return q_err(QE_NYI);
     q_io_mkdir_parents(p, ray_str_len(pathstr));
     FILE* fp = fopen(p, "wb");
@@ -236,6 +323,8 @@ int64_t q_io_clamp(int64_t n, int64_t* off, int64_t want) {
 static ray_t* io_local_read(ray_t* pathstr, int64_t off, int64_t want) {
     const char* p = ray_str_ptr(pathstr);
     if (!p) return q_err(QE_DOMAIN);
+    ray_t* refused = io_guard_str(pathstr);
+    if (refused) return refused;
     int fd = open(p, O_RDONLY | O_BINARY | O_NONBLOCK);
     struct stat st;
     if (fd < 0) return q_err(QE_IO);
@@ -260,6 +349,8 @@ static ray_t* io_local_read(ray_t* pathstr, int64_t off, int64_t want) {
 }
 
 static ray_t* io_local_size(ray_t* pathstr) {
+    ray_t* refused = io_guard_str(pathstr);
+    if (refused) return refused;
     int64_t n = io_stat_size(pathstr);
     return n < 0 ? q_err(QE_IO) : ray_i64(n);
 }
@@ -268,6 +359,8 @@ static ray_t* io_local_size(ray_t* pathstr) {
  * runs the allocator out is an ERROR, not a missing path (codex review 2026-07-30).  The quarry's ls sorts ascending,
  * drops `.`/`..`, and yields the empty SYMBOL vector for an empty directory. */
 static ray_t* io_local_list(ray_t* pathstr) {
+    ray_t* refused = io_guard_str(pathstr);
+    if (refused) return refused;
     struct stat st;
     if (stat(ray_str_ptr(pathstr), &st) != 0)
         return errno == ENOENT || errno == ENOTDIR ? ray_list_new(1) : q_err(QE_IO);
@@ -332,19 +425,15 @@ static const io_src_t* io_src(ray_t* pathstr) {
 }
 
 ray_t* q_io_list(ray_t* pathstr) { return io_src(pathstr)->list(pathstr); }
-ray_t* q_io_stored_size(ray_t* pathstr) {
-    return ray_eval_get_restricted() ? q_err(QE_ACCESS) : io_src(pathstr)->size(pathstr);
-}
-
-ray_t* q_io_stored_read(ray_t* pathstr, int64_t off, int64_t want) {
-    return ray_eval_get_restricted() ? q_err(QE_ACCESS) : io_src(pathstr)->read(pathstr, off, want);
-}
+ray_t* q_io_stored_size(ray_t* pathstr) { return io_src(pathstr)->size(pathstr); }
+ray_t* q_io_stored_read(ray_t* pathstr, int64_t off, int64_t want) { return io_src(pathstr)->read(pathstr, off, want); }
 
 /* The stored length of a path that is a FILE, or -1: a directory, an S3 prefix, a URL answering no length, or
  * nothing at all.  A probe, so whatever it signalled is dropped with its text. */
 static int64_t io_file_len(ray_t* pathstr) {
     const io_src_t* s = io_src(pathstr);
     if (s == &IO_LOCAL) {
+        if (!io_allowed(ray_str_ptr(pathstr), ray_str_len(pathstr))) return -1;
 #ifdef RAY_OS_WINDOWS
         struct _stat64 st;
         return _stat64(ray_str_ptr(pathstr), &st) == 0 && (st.st_mode & _S_IFREG) ? (int64_t)st.st_size : -1;
@@ -679,7 +768,6 @@ ray_t* q_io_gunzip_stream(q_io_stream_t* inner, q_io_stream_t** out) {
 }
 
 ray_t* q_io_resource_stream(ray_t* pathstr, int gzip, q_io_stream_t** out) {
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     q_io_stream_t* s = NULL;
     ray_t* bad = q_io_member_stream(pathstr, &s);
     if (bad) return bad;
@@ -724,7 +812,6 @@ static ray_t* io_zip_slice(const io_src_t* s, ray_t* pathstr, int64_t off, int64
 
 ray_t* q_io_read_slice(ray_t* pathstr, int64_t off, int64_t want, int* zipped) {
     if (zipped) *zipped = 0;
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     const io_src_t* s = io_src(pathstr);
     if (off < 0) off = 0;
     int64_t lo = off <= s->batch ? 0 : off, span = want < 0 || want > INT64_MAX - off ? -1 : off - lo + want;
@@ -772,6 +859,21 @@ static int io_is_remote(ray_t* pathstr) {
 
 static int io_is_url(ray_t* pathstr) { return io_is_http(pathstr) || io_is_remote(pathstr); }
 
+/* a URL has no place in the current directory, so restricted mode refuses one outright */
+static ray_t* io_guard_resource(ray_t* pathstr) {
+    if (io_is_url(pathstr)) return ray_eval_get_restricted() ? q_err(QE_ACCESS) : NULL;
+    return io_guard_str(pathstr);
+}
+
+/* DuckDB expands a glob and a leading ~ itself, so such a spelling names no one file the rule could judge */
+static ray_t* io_guard_duckdb(ray_t* pathstr) {
+    const char* p = ray_str_ptr(pathstr);
+    size_t n = ray_str_len(pathstr);
+    int expands = n && p[0] == '~';
+    for (size_t i = 0; i < n && !expands; i++) expands = p[i] == '*' || p[i] == '?' || p[i] == '[' || p[i] == '{';
+    return expands && ray_eval_get_restricted() ? io_refused(p, n) : io_guard_resource(pathstr);
+}
+
 int q_io_resource_chunkable(ray_t* pathstr) {
     return !io_is_url(pathstr) && !io_arch_claimed(ray_str_ptr(pathstr), ray_str_len(pathstr));
 }
@@ -803,8 +905,9 @@ static int io_suffix_is(const char* p, size_t n, const char* ext) {
 }
 
 /* `.parquet.read[fsym;();()]` by name at call time: standard library, never linked; unbound is '.parquet.read */
-static ray_t* io_parquet_table(ray_t* fsym) {
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+static ray_t* io_parquet_table(ray_t* fsym, ray_t* path) {
+    ray_t* refused = io_guard_duckdb(path);
+    if (refused) return refused;
     ray_t* none = ray_list_new(0);
     ray_t* args[3] = { fsym, none, none };
     ray_t* out = q_eval_apply_call_name(".parquet.read", 13, args, 3);
@@ -831,7 +934,7 @@ ray_t* q_io_resource_table(ray_t* fsym) {
     else if (io_suffix_is(p, n, ".ndjson")) out = q_json_read_table(fsym, Q_JSON_ND);
     else if (io_suffix_is(p, n, ".jsonl"))  out = q_json_read_table(fsym, Q_JSON_ND);
     else if (io_suffix_is(p, n, ".json"))   out = q_json_read_table(fsym, Q_JSON_AUTO);
-    else if (io_suffix_is(p, whole, ".parquet")) out = io_parquet_table(fsym);
+    else if (io_suffix_is(p, whole, ".parquet")) out = io_parquet_table(fsym, path);
     else out = io_is_url(path) && !q_s3_is(p, n) ? q_err(QE_TYPE) : NULL;
     ray_release(path);
     return out;
@@ -1083,7 +1186,6 @@ static ray_t* zip_stats_dict(const zip_hdr_t* z, int64_t file_len) {
 
 ray_t* q_io_zip_stats(ray_t* x) {
     if (!x || x->type != -RAY_SYM) return q_err(QE_TYPE);
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     ray_t* path = q_io_file_path(x);
     if (!path) return q_err(QE_TYPE);
     const io_src_t* s = io_src(path);
@@ -1544,22 +1646,21 @@ static ray_t* io_set_format(ray_t* x, ray_t* y) {
     if (!path) return NULL;
     int64_t ext = io_ext_sym(ray_str_ptr(path), io_claim_len(path));
     int remote = io_is_remote(path);
+    int parquet = ext == ray_sym_intern_runtime("parquet", 7);
+    ray_t* tx = ext < 0 || parquet ? NULL : q_env_get(ray_sym_intern_runtime(".h.tx", 5));   /* borrowed */
+    int64_t i = 0, n = tx && tx->type == RAY_DICT && ray_dict_keys(tx)->type == RAY_SYM ? q_count(ray_dict_keys(tx)) : 0;
+    while (i < n && ray_vec_get_sym_id(ray_dict_keys(tx), i) != ext) i++;
+    ray_t* refused = parquet ? io_guard_duckdb(path) : i < n ? io_guard_resource(path) : NULL;
     ray_release(path);
-    if (ext == ray_sym_intern_runtime("parquet", 7)) {
-        if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (refused) return refused;
+    if (parquet) {
         ray_t* none = ray_list_new(0);
         ray_t* args[3] = { x, y, none };
         ray_t* out = q_eval_apply_call_name(".parquet.write", 14, args, 3);
         ray_release(none);
         return out;
     }
-    ray_t* tx = ext < 0 ? NULL : q_env_get(ray_sym_intern_runtime(".h.tx", 5));   /* borrowed */
-    if (!tx || tx->type != RAY_DICT || ray_dict_keys(tx)->type != RAY_SYM) return NULL;
-    ray_t* keys = ray_dict_keys(tx);
-    int64_t i = 0, n = q_count(keys);
-    while (i < n && ray_vec_get_sym_id(keys, i) != ext) i++;
     if (i == n) return NULL;
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     if (!y || y->type != RAY_TABLE) return q_err(QE_TYPE);
     ray_t* r = q_eval_apply_value(ray_list_get(ray_dict_vals(tx), i), &y, 1);
     if (!r || RAY_IS_ERR(r)) return r ? r : q_err(QE_OOM);

@@ -32,6 +32,12 @@ int q_io_abs_path(const char* path, char* abs, size_t cap);
 int q_io_abs_spelling(const char* path, size_t n, char* abs, size_t cap);
 /* is this spelling a relative path that never steps up — lexically under the current directory? */
 int q_io_path_inside(const char* path, size_t n);
+/* THE restricted path rule (basics/cmdline.md:380, ref/eval.md:61), the one predicate every local file door asks: NULL
+ * when no restriction stands or the canonical path is the current directory or below it, else an owned 'access naming
+ * the path.  _lend admits paths below `root` (rn bytes) too when it is spelled inside the current directory, on this
+ * thread, until it is lent NULL. */
+ray_t* q_io_guard(const char* path, size_t n);
+void   q_io_guard_lend(const char* root, size_t rn);
 
 /* How big the file IS as a long, 'io when it is not there: a kxzip container
  * answers with its ORIGINAL file's length (ref/hcount.md), one that will not
