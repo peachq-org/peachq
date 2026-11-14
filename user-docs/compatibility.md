@@ -121,7 +121,7 @@ and its domain file binds under its own name at `get`.
 | **DuckDB-backed storage** — `.duckdb` | Query it from q, and reach Parquet and S3 through it. | at the REPL |
 | **Parquet** — `.parquet.read`, `.parquet.write` | Read and write parquet through DuckDB; q types survive the round trip. | [parquet.md](lib/parquet.md) |
 | **Zip archives** — `` `:zip://a.zip/f.csv ``, `.zip` | Every file reader reads an archive's entry in place; `.zip.info` lists the archive. | [zip.md](lib/zip.md) |
-| **S3 objects** — `` `:s3://bucket/key ``, `.s3` | `read1`, `read0`, `hcount`, `-21!`, `get` and `key` read an object in place, as they read a file; `.s3.config` sets credentials, region and endpoint by the AWS and KX environment variable names. | [s3.md](lib/s3.md) |
+| **S3 objects** — `` `:s3://bucket/key ``, `.s3` | `read1`, `read0`, `hcount`, `-21!`, `get` and `key` read an object in place, as they read a file; `.s3.config[scope;cfg]` sets credentials, region and endpoint per path prefix, by the AWS and KX environment variable names. | [s3.md](lib/s3.md) |
 | **qSQL trailing commas** | `select a,b, from t`, `exec a, from t`, `select from t where a>0,` read as without the comma. peachq only; off under `-classic` / `\classic 1`. | below |
 | **All-atom tables** | `([]a:1;b:2)` and `([k:1] v:2)` are one-row tables; with a vector column, atoms still take its count. peachq only; off under `-classic` / `\classic 1`. | below |
 

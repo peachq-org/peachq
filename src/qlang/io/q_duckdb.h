@@ -25,4 +25,9 @@ void q_duckdb_reset(void);
  * PEACHQ_DUCKDB_MAIN.  Read at that open, so it must precede any DuckDB use. */
 void q_duckdb_main_path_set(const char* path);
 
+/* Mirror one .s3 config into main as the s3 secret `name`: kv alternates CREATE SECRET keys and their values, scope
+ * the SCOPE list (none = DuckDB's default scope); kv NULL drops it.  Silent, and a no-op while main is closed: the
+ * open replays every config (q_s3_mirror). */
+void q_duckdb_s3_secret(const char* name, const char* const* kv, int nkv, const char* const* scope, int nscope);
+
 #endif /* Q_DUCKDB_H */

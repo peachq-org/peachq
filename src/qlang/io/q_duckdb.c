@@ -20,6 +20,7 @@
 #include "qlang/io/q_duckdb_types.h"
 #include "qlang/io/q_exedir.h"
 #include "qlang/io/q_provider.h"  /* q_provider_token — the alias handle behind a public verb's c; _register_internal — main's row */
+#include "qlang/io/q_s3.h"        /* q_s3_mirror — every .s3 config becomes a secret when main opens */
 #include "qlang/base/q_err.h"
 #include "qlang/q_env.h"
 #include "qlang/q_dotz.h"     /* q_dotz_now_ns — the sqllog clock */
@@ -989,7 +990,7 @@ static ray_t* qd_main_open(const qd_opt* opts, int64_t n) {
     ray_t* tok = ray_i32(qd_handle_of(slot));
     g_main.handle = q_provider_register_internal(Q_PQ_DUCKDB, QD_MAIN_ALIAS, tok);
     ray_release(tok);
-    if (g_main.handle) return NULL;
+    if (g_main.handle) { q_s3_mirror(); return NULL; }
     qd_slot_forget(slot);
     QAPI.connection_destroy(&g_cons[slot].con);
     qd_instance_drop();
@@ -999,6 +1000,34 @@ static ray_t* qd_main_open(const qd_opt* opts, int64_t n) {
 }
 
 static ray_t* qd_main_need(void) { return g_main.open ? NULL : qd_main_open(NULL, 0); }
+
+/* Off the statement log and .duckdb.err: the text carries the secret, which must never reach a q value. */
+void q_duckdb_s3_secret(const char* name, const char* const* kv, int nkv, const char* const* scope, int nscope) {
+    if (!g_main.open) return;
+    qd_buf b = { 0 };
+    q_duckdb_puts(&b, kv ? "CREATE OR REPLACE SECRET " : "DROP SECRET IF EXISTS ");
+    q_duckdb_put_ident(&b, name, strlen(name));
+    if (kv) {
+        q_duckdb_puts(&b, " (TYPE s3");
+        for (int i = 0; i + 1 < nkv; i += 2) {
+            q_duckdb_puts(&b, ", ");
+            q_duckdb_puts(&b, kv[i]);
+            q_duckdb_puts(&b, " ");
+            q_duckdb_put_strlit(&b, kv[i + 1], strlen(kv[i + 1]));
+        }
+        for (int i = 0; i < nscope; i++) {
+            q_duckdb_puts(&b, i ? ", " : ", SCOPE [");
+            q_duckdb_put_strlit(&b, scope[i], strlen(scope[i]));
+        }
+        q_duckdb_puts(&b, nscope ? "])" : ")");
+    }
+    duck_result r;
+    char why[1024];
+    if (!b.oom && qd_run_text(g_main.slot, b.p, &r, why, sizeof why, false)) q_duckdb_result_free(&r);
+    memset(why, 0, sizeof why);
+    if (b.p) memset(b.p, 0, b.cap);
+    q_duckdb_buf_free(&b);
+}
 
 /* the ATTACH options (docs: sql/statements/attach), case-insensitive; every other config key is a SET on main */
 static bool qd_attach_option(const char* k) {
