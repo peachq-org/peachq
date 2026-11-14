@@ -1119,7 +1119,7 @@ static ray_t* wf_write_flat_path(ray_t* path, ray_t* y, int lbs, int alg, int lv
 static ray_t* wf_write_flat(ray_t* x, ray_t* y, int lbs, int alg, int lvl) {
     ray_t* path = q_io_file_path(x);
     if (!path) return NULL;
-    ray_t* bad = q_io_guard(ray_str_ptr(path), ray_str_len(path));
+    ray_t* bad = q_io_guard_write(ray_str_ptr(path), ray_str_len(path));
     if (!bad) bad = wf_write_flat_path(path, y, lbs, alg, lvl);
     ray_release(path);
     if (bad) return bad;
@@ -1328,7 +1328,7 @@ static ray_t* wf_append_path(ray_t* path, ray_t* y) {
 ray_t* q_wirefile_append(ray_t* x, ray_t* y) {
     ray_t* path = q_io_file_path(x);
     if (!path) return q_err(QE_TYPE);
-    ray_t* bad = q_io_guard(ray_str_ptr(path), ray_str_len(path));
+    ray_t* bad = q_io_guard_write(ray_str_ptr(path), ray_str_len(path));
     if (!bad) bad = wf_append_path(path, y);
     ray_release(path);
     if (bad) return bad;
@@ -1337,7 +1337,7 @@ ray_t* q_wirefile_append(ray_t* x, ray_t* y) {
 }
 
 ray_t* q_wirefile_append_path(ray_t* pathstr, ray_t* y) {
-    ray_t* bad = q_io_guard(ray_str_ptr(pathstr), ray_str_len(pathstr));
+    ray_t* bad = q_io_guard_write(ray_str_ptr(pathstr), ray_str_len(pathstr));
     return bad ? bad : wf_append_path(pathstr, y);
 }
 
@@ -1424,7 +1424,7 @@ static ray_t* wf_domain_place(ray_t* dom, ray_t* symv, ray_t** fresh, ray_t** po
 ray_t* q_wirefile_domain_extend(ray_t* dompathstr, ray_t* symv, ray_t** positions) {
     if (positions) *positions = NULL;
     if (!symv || symv->type != RAY_SYM) return q_err(QE_TYPE);
-    ray_t* refused = q_io_guard(ray_str_ptr(dompathstr), ray_str_len(dompathstr));
+    ray_t* refused = q_io_guard_write(ray_str_ptr(dompathstr), ray_str_len(dompathstr));
     if (refused) return refused;
     int fd = q_io_open_locked(ray_str_ptr(dompathstr));
     if (fd < 0 && errno == ENOENT) {                 /* a new db root: its directories first */
@@ -1677,7 +1677,7 @@ ray_t* q_wirefile_write_splay(ray_t* dirsym, ray_t* domsym, ray_t* y,
                               int lbs, int alg, int lvl) {
     ray_t* dir = q_io_file_path(dirsym);
     if (!dir) return q_err(QE_TYPE);
-    ray_t* refused = q_io_guard(ray_str_ptr(dir), ray_str_len(dir));
+    ray_t* refused = q_io_guard_write(ray_str_ptr(dir), ray_str_len(dir));
     if (refused) { ray_release(dir); return refused; }
     size_t n = ray_str_len(dir);
     if (!n || ray_str_ptr(dir)[n - 1] != '/') { ray_release(dir); return q_err(QE_TYPE); }
