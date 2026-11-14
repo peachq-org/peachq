@@ -202,18 +202,12 @@ static int ques_names_row(ray_t** q, int64_t qn) {
     return (int)hit;
 }
 
-/* only the select forms: a by that is a boolean or a dict over a phrase that is a dict or nothing */
-static int ques_is_exec(ray_t** q) {
-    int by = is_bool_atom(q[2], 0) || is_bool_atom(q[2], 1) || q_type_is_dict(q[2]);
-    return !(by && (q_type_is_dict(q[3]) || is_empty_gen(q[3])));
-}
-
 /* A partitioned source resolves to ONE in-memory table for the query (kb/partition.md; basics/qsql.md:306-308): the
  * leading constraints that name only the partition column choose the partitions, answered over the partition
  * values; those partitions' named columns are read and razed, and *lead counts the constraints so answered — the
- * select runs the rest.  NULL: the loaded database holds no table of that name. */
+ * select runs the rest.  An exec reads the same table, so it answers what `exec … from select …` answers: kdb
+ * refuses it (ref/exec.md:35-40), a deliberate extension.  NULL: the loaded database holds no table of that name. */
 static ray_t* ques_partitioned(ray_t* t, ray_t* names, ray_t** q, int64_t qn, int64_t* lead) {
-    if (q && ques_is_exec(q)) return q_err(QE_PAR);       /* ref/exec.md:35-40: exec takes no partitioned table */
     if (qn > 4) return q_err(QE_NYI);                     /* ref/flip-splayed.md:23: nor select's extra arguments */
     ray_t* values = q ? q_splay_named_values() : NULL;
     if (values && RAY_IS_ERR(values)) return values;
