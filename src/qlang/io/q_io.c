@@ -16,7 +16,8 @@
 #include "qlang/io/q_provider.h"  /* q_io_set: a table coordinate routes to .X.set; hdel: to .X.hdel */
 #include "qlang/io/q_csv.h"     /* the CSV/TSV decoder behind a recognised tabular suffix */
 #include "qlang/io/q_json.h"    /* the JSON decoder, and the framing a suffix declares to it */
-#include "qlang/io/q_zip.h"     /* q_zip_* — the zip:// transport of the byte reader */
+#include "qlang/io/q_zip.h"     /* q_zip_* — a detected zip archive */
+#include "qlang/io/q_tar.h"     /* q_tar_* — a detected tar archive */
 #include "qlang/io/q_s3.h"      /* q_s3_* — the s3:// transport of the byte reader */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_call_name — the .parquet doors and the .duckdb transport are bound by `\l pq`, not linked */
 #include "qlang/q_env.h"        /* q_env_get — `.h.tx`, the format table `set` reads at call time */
@@ -31,6 +32,7 @@
 #include "store/fileio.h"   /* ray_mkdir_p — the parent directories a write promises */
 #include "table/sym.h"      /* ray_sym_intern_runtime, ray_sym_vec_cell */
 #include "app/term.h"       /* ray_term_line_begin/end — a terminal `read0 0` shows what is typed */
+#include <ctype.h>          /* tolower — an archive's ending in any case */
 #include <limits.h>         /* PATH_MAX — q_io_abs_path */
 #include <stdio.h>
 #include <stdlib.h>
@@ -207,7 +209,7 @@ ray_t* q_io_write_all(ray_t* pathstr, const void* bytes, size_t n) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     const char* p = ray_str_ptr(pathstr);
     if (!p) return q_err(QE_DOMAIN);
-    if (q_zip_is(p, ray_str_len(pathstr)) || q_s3_is(p, ray_str_len(pathstr))) return q_err(QE_NYI);
+    if (q_s3_is(p, ray_str_len(pathstr)) || q_io_is_member(pathstr)) return q_err(QE_NYI);
     q_io_mkdir_parents(p, ray_str_len(pathstr));
     FILE* fp = fopen(p, "wb");
     if (!fp) return q_err(QE_IO);
@@ -285,17 +287,415 @@ typedef struct {
     int64_t batch;
 } io_src_t;
 
-static const io_src_t IO_LOCAL = { io_local_size, io_local_read, io_local_list, 0 };
-static const io_src_t IO_ZIP   = { q_zip_size, q_zip_read, io_none_list, 0 };
-static const io_src_t IO_S3    = { q_s3_size, q_s3_read, q_s3_list, 65536 };
+static ray_t* io_arch_size(ray_t* pathstr);
+static ray_t* io_arch_read(ray_t* pathstr, int64_t off, int64_t want);
+static ray_t* io_arch_list(ray_t* pathstr);
 
-static const io_src_t* io_src(ray_t* pathstr) {
+static const io_src_t IO_LOCAL = { io_local_size, io_local_read, io_local_list, 0 };
+static const io_src_t IO_S3    = { q_s3_size, q_s3_read, q_s3_list, 65536 };
+static const io_src_t IO_HTTP  = { q_http_client_size, q_http_client_read_slice, io_none_list, 65536 };
+static const io_src_t IO_ARCH  = { io_arch_size, io_arch_read, io_arch_list, 0 };
+
+static const io_src_t* io_transport(ray_t* pathstr) {
     const char* p = ray_str_ptr(pathstr);
     size_t n = ray_str_len(pathstr);
-    return q_zip_is(p, n) ? &IO_ZIP : q_s3_is(p, n) ? &IO_S3 : &IO_LOCAL;
+    return q_s3_is(p, n) ? &IO_S3 : q_http_client_scheme_is(p, n) ? &IO_HTTP : &IO_LOCAL;
+}
+
+/* ---- containers: detected by name, confirmed as files ---- */
+
+enum { ARCH_NONE, ARCH_ZIP, ARCH_TAR, ARCH_TGZ };
+
+static int io_ends_ci(const char* p, size_t n, const char* ext) {
+    size_t k = strlen(ext);
+    if (n <= k || p[n - k - 1] == '/') return 0;
+    for (size_t i = 0; i < k; i++)
+        if ((char)tolower((unsigned char)p[n - k + i]) != ext[i]) return 0;
+    return 1;
+}
+
+/* the archive a component's name claims, by its ending in any case */
+static int io_arch_kind(const char* p, size_t n) {
+    return io_ends_ci(p, n, ".zip") ? ARCH_ZIP : io_ends_ci(p, n, ".tar") ? ARCH_TAR
+         : io_ends_ci(p, n, ".tar.gz") || io_ends_ci(p, n, ".tgz") ? ARCH_TGZ : ARCH_NONE;
+}
+
+/* does a component short of the last claim an archive?  Only such a path spends a stat or a HEAD */
+static int io_arch_claimed(const char* p, size_t n) {
+    for (size_t i = 1; i + 1 < n; i++)
+        if (p[i] == '/' && io_arch_kind(p, i)) return 1;
+    return 0;
+}
+
+static const io_src_t* io_src(ray_t* pathstr) {
+    return io_arch_claimed(ray_str_ptr(pathstr), ray_str_len(pathstr)) ? &IO_ARCH : io_transport(pathstr);
 }
 
 ray_t* q_io_list(ray_t* pathstr) { return io_src(pathstr)->list(pathstr); }
+ray_t* q_io_stored_size(ray_t* pathstr) {
+    return ray_eval_get_restricted() ? q_err(QE_ACCESS) : io_src(pathstr)->size(pathstr);
+}
+
+ray_t* q_io_stored_read(ray_t* pathstr, int64_t off, int64_t want) {
+    return ray_eval_get_restricted() ? q_err(QE_ACCESS) : io_src(pathstr)->read(pathstr, off, want);
+}
+
+/* The stored length of a path that is a FILE, or -1: a directory, an S3 prefix, a URL answering no length, or
+ * nothing at all.  A probe, so whatever it signalled is dropped with its text. */
+static int64_t io_file_len(ray_t* pathstr) {
+    const io_src_t* s = io_src(pathstr);
+    if (s == &IO_LOCAL) {
+#ifdef RAY_OS_WINDOWS
+        struct _stat64 st;
+        return _stat64(ray_str_ptr(pathstr), &st) == 0 && (st.st_mode & _S_IFREG) ? (int64_t)st.st_size : -1;
+#else
+        struct stat st;
+        return stat(ray_str_ptr(pathstr), &st) == 0 && S_ISREG(st.st_mode) ? (int64_t)st.st_size : -1;
+#endif
+    }
+    ray_t* sz = s->size(pathstr);
+    int64_t n = RAY_IS_ERR(sz) ? -1 : sz->i64;
+    ray_release(sz);
+    if (n < 0) q_err_drop();
+    return n;
+}
+
+typedef struct {
+    int         kind;
+    ray_t*      arch;                       /* owned */
+    int64_t     asize;
+    const char* m;
+    size_t      mn;
+} io_split_t;
+
+/* THE detection law: the archive a path walks into is the LAST component short of the end that claims one by name
+ * and is a file — one stat, or one HEAD, per such component; a directory so named is a folder.  kind ARCH_NONE when
+ * none is. */
+static void io_split(ray_t* pathstr, io_split_t* sp) {
+    const char* p = ray_str_ptr(pathstr);
+    size_t n = ray_str_len(pathstr);
+    memset(sp, 0, sizeof *sp);
+    for (size_t i = 1; i + 1 < n; i++) {
+        int k = p[i] == '/' ? io_arch_kind(p, i) : ARCH_NONE;
+        ray_t* a = k ? ray_str(p, i) : NULL;
+        if (!a || RAY_IS_ERR(a)) continue;
+        int64_t len = io_file_len(a);
+        if (len < 0) { ray_release(a); continue; }
+        if (sp->arch) ray_release(sp->arch);
+        *sp = (io_split_t){ k, a, len, p + i + 1, n - i - 1 };
+    }
+}
+
+static ray_t* io_split_member(const io_split_t* sp, q_io_stream_t** s, int64_t* size) {
+    return sp->kind == ARCH_ZIP ? q_zip_member(sp->arch, sp->asize, sp->m, sp->mn, s, size)
+                                : q_tar_member(sp->arch, sp->kind == ARCH_TGZ, sp->m, sp->mn, s, size);
+}
+
+/* the member a path names: *s NULL when no component is an archive, and the path is its transport's */
+static ray_t* io_member(ray_t* pathstr, q_io_stream_t** s, int64_t* size) {
+    *s = NULL;
+    io_split_t sp;
+    io_split(pathstr, &sp);
+    ray_t* bad = sp.kind ? io_split_member(&sp, s, size) : NULL;
+    if (sp.arch) ray_release(sp.arch);
+    return bad;
+}
+
+ray_t* q_io_member_stream(ray_t* pathstr, q_io_stream_t** s) {
+    int64_t size;
+    *s = NULL;
+    return io_arch_claimed(ray_str_ptr(pathstr), ray_str_len(pathstr)) ? io_member(pathstr, s, &size) : NULL;
+}
+
+int q_io_is_member(ray_t* pathstr) {
+    if (!io_arch_claimed(ray_str_ptr(pathstr), ray_str_len(pathstr))) return 0;
+    io_split_t sp;
+    io_split(pathstr, &sp);
+    if (sp.arch) ray_release(sp.arch);
+    return sp.kind != ARCH_NONE;
+}
+
+ray_t* q_io_member_fn(ray_t* x) {
+    ray_t* path = q_io_path_operand(x);
+    if (!path) return q_err(QE_TYPE);
+    int m = q_io_is_member(path);
+    ray_release(path);
+    return ray_bool(m);
+}
+
+ray_t* q_io_no_member(ray_t* arch, const char* m, size_t mn) {
+    ray_t* e = q_err(QE_DOMAIN);
+    char buf[700];
+    int k = snprintf(buf, sizeof buf, "domain. %.*s has no entry %.*s", (int)ray_str_len(arch), ray_str_ptr(arch),
+                     (int)mn, m);
+    ray_t* t = k > 0 ? ray_charv(buf, k < (int)sizeof buf ? k : (int)sizeof buf - 1) : NULL;
+    if (t && !RAY_IS_ERR(t)) q_err_put(t);
+    return e;
+}
+
+static ray_t* io_arch_size(ray_t* pathstr) {
+    q_io_stream_t* s;
+    int64_t n = 0;
+    ray_t* bad = io_member(pathstr, &s, &n);
+    if (bad) return bad;
+    if (!s) return io_transport(pathstr)->size(pathstr);
+    q_io_stream_close(s);
+    return ray_i64(n);
+}
+
+static ray_t* io_arch_read(ray_t* pathstr, int64_t off, int64_t want) {
+    q_io_stream_t* s;
+    int64_t n = 0;
+    ray_t* bad = io_member(pathstr, &s, &n);
+    if (bad) return bad;
+    if (!s) return io_transport(pathstr)->read(pathstr, off, want);
+    ray_t* out = q_io_stream_slice(s, off < 0 ? 0 : off, want);
+    q_io_stream_close(s);
+    return out;
+}
+
+static ray_t* io_arch_list(ray_t* pathstr) {
+    io_split_t sp;
+    io_split(pathstr, &sp);
+    if (!sp.kind) return io_transport(pathstr)->list(pathstr);
+    ray_release(sp.arch);
+    return NULL;
+}
+
+/* An archive named whole as a table: its one file entry, or 'type naming them all. */
+static ray_t* io_arch_table(ray_t* fsym, ray_t* path, int kind) {
+    int64_t len = io_file_len(path);
+    if (len < 0) return NULL;
+    ray_t* names = kind == ARCH_ZIP ? q_zip_names(path, len) : q_tar_names(path, kind == ARCH_TGZ);
+    if (RAY_IS_ERR(names)) return names;
+    int64_t k = q_count(names);
+    ray_t** e = (ray_t**)ray_data(names);
+    ray_t* out;
+    if (k == 1) {
+        ray_t* fs = ray_sym_str(fsym->i64);
+        size_t fn = ray_str_len(fs);
+        int64_t en = q_count(e[0]);
+        char* buf = (char*)malloc(fn + 1 + (size_t)en);
+        if (!buf) { ray_release(names); return q_err(QE_OOM); }
+        memcpy(buf, ray_str_ptr(fs), fn);
+        buf[fn] = '/';
+        memcpy(buf + fn + 1, ray_data(e[0]), (size_t)en);
+        ray_t* inner = ray_sym(ray_sym_intern_runtime(buf, fn + 1 + (size_t)en));
+        free(buf);
+        out = q_io_resource_table(inner);
+        ray_release(inner);
+    } else {
+        char buf[1024];
+        int at = snprintf(buf, sizeof buf, "type. %.*s holds %lld entries:", (int)ray_str_len(path), ray_str_ptr(path),
+                          (long long)k);
+        for (int64_t i = 0; i < k && at > 0 && at < (int)sizeof buf; i++)
+            at += snprintf(buf + at, sizeof buf - (size_t)at, " %.*s", (int)q_count(e[i]), (const char*)ray_data(e[i]));
+        out = q_err(QE_TYPE);
+        ray_t* t = at > 0 ? ray_charv(buf, at < (int)sizeof buf ? at : (int)sizeof buf - 1) : NULL;
+        if (t && !RAY_IS_ERR(t)) q_err_put(t);
+    }
+    ray_release(names);
+    return out;
+}
+
+/* ---- forward streams ---- */
+
+static ray_t* io_next(q_io_stream_t* s, uint8_t* out, size_t want, size_t* got) {
+    ray_t* bad = s->next(s, out, want, got);
+    if (!bad) s->pos += (int64_t)*got;
+    return bad;
+}
+
+void q_io_stream_close(q_io_stream_t* s) {
+    if (s) s->free(s);
+}
+
+/* a buffer grown as the bytes come, never sized from a header's promise alone */
+ray_t* q_io_stream_slice(q_io_stream_t* s, int64_t off, int64_t want) {
+    if (off < s->pos) return q_err(QE_DOMAIN);
+    if (s->seekable) s->pos = off;
+    uint8_t* buf = NULL;
+    size_t len = 0, cap = 0;
+    ray_t* bad = NULL;
+    for (;;) {
+        int skip = s->pos < off;
+        int64_t left = skip ? off - s->pos : want < 0 ? INT64_MAX : want - (int64_t)len;
+        if (!left) break;
+        size_t step = left < ((int64_t)1 << 20) ? (size_t)left : (size_t)1 << 20;
+        size_t at = skip ? 0 : len;
+        if (at + step > cap) {
+            size_t nc = cap ? cap * 2 : step;
+            while (nc < at + step) nc *= 2;
+            uint8_t* nb = (uint8_t*)realloc(buf, nc);
+            if (!nb) { bad = q_err(QE_OOM); break; }
+            buf = nb;
+            cap = nc;
+        }
+        size_t got = 0;
+        if ((bad = io_next(s, buf + at, step, &got)) || !got) break;
+        if (!skip) len += got;
+    }
+    ray_t* out = bad ? bad : ray_vec_from_raw(RAY_BYTE_ONLY, buf ? buf : (const uint8_t*)"", (int64_t)len);
+    free(buf);
+    return out;
+}
+
+/* a range read through `read`: a range promised by a container and cut short is 'corrupt */
+typedef struct {
+    q_io_stream_t io;
+    ray_t*  path;
+    int64_t base, limit;
+    ray_t*  (*read)(ray_t* pathstr, int64_t off, int64_t want);
+} io_range_t;
+
+static ray_t* io_range_next(q_io_stream_t* s, uint8_t* out, size_t want, size_t* got) {
+    io_range_t* r = (io_range_t*)s;
+    *got = 0;
+    int64_t left = r->limit < 0 ? INT64_MAX : r->limit - s->pos;
+    if (left <= 0) return NULL;
+    if ((int64_t)want > left) want = (size_t)left;
+    ray_t* b = r->read(r->path, r->base + s->pos, (int64_t)want);
+    if (RAY_IS_ERR(b)) return b;
+    *got = (size_t)q_count(b);
+    memcpy(out, ray_data(b), *got);
+    ray_release(b);
+    return r->limit >= 0 && *got < want ? q_err(QE_CORRUPT) : NULL;
+}
+
+static void io_range_free(q_io_stream_t* s) {
+    ray_release(((io_range_t*)s)->path);
+    free(s);
+}
+
+static q_io_stream_t* io_range_new(ray_t* pathstr, int64_t base, int64_t limit,
+                                   ray_t* (*read)(ray_t* pathstr, int64_t off, int64_t want)) {
+    io_range_t* r = (io_range_t*)calloc(1, sizeof *r);
+    if (!r) return NULL;
+    ray_retain(pathstr);
+    *r = (io_range_t){ { io_range_next, io_range_free, 1, 0 }, pathstr, base, limit, read };
+    return &r->io;
+}
+
+q_io_stream_t* q_io_range_stream(ray_t* pathstr, int64_t base, int64_t limit) {
+    return io_range_new(pathstr, base, limit, q_io_stored_read);
+}
+
+/* bytes held whole, for a resource that cannot serve cheap repeated ranges */
+typedef struct { q_io_stream_t io; ray_t* all; } io_held_t;
+
+static ray_t* io_held_next(q_io_stream_t* s, uint8_t* out, size_t want, size_t* got) {
+    ray_t* all = ((io_held_t*)s)->all;
+    int64_t at = s->pos;
+    *got = (size_t)q_io_clamp(q_count(all), &at, (int64_t)want);
+    if (*got) memcpy(out, (const uint8_t*)ray_data(all) + at, *got);
+    return NULL;
+}
+
+static void io_held_free(q_io_stream_t* s) {
+    ray_release(((io_held_t*)s)->all);
+    free(s);
+}
+
+typedef struct { q_io_stream_t io; q_io_stream_t* in; int64_t limit; } io_window_t;
+
+static ray_t* io_window_next(q_io_stream_t* s, uint8_t* out, size_t want, size_t* got) {
+    io_window_t* w = (io_window_t*)s;
+    *got = 0;
+    if ((int64_t)want > w->limit - s->pos) want = s->pos < w->limit ? (size_t)(w->limit - s->pos) : 0;
+    ray_t* bad = want ? io_next(w->in, out, want, got) : NULL;
+    return bad ? bad : want && !*got ? q_err(QE_CORRUPT) : NULL;
+}
+
+static void io_window_free(q_io_stream_t* s) {
+    q_io_stream_close(((io_window_t*)s)->in);
+    free(s);
+}
+
+q_io_stream_t* q_io_window_stream(q_io_stream_t* inner, int64_t limit) {
+    io_window_t* w = (io_window_t*)calloc(1, sizeof *w);
+    if (!w) { q_io_stream_close(inner); return NULL; }
+    *w = (io_window_t){ { io_window_next, io_window_free, 0, 0 }, inner, limit };
+    return &w->io;
+}
+
+#define IO_INBUF ((size_t)1 << 20)
+
+typedef struct {
+    q_io_stream_t io;
+    q_io_stream_t* in;
+    q_gz_raw_t*   z;
+    uint8_t*      buf;
+    size_t        len, at;
+    int           eof, live;
+} io_gunzip_t;
+
+/* zlib stops at a member's end; the next member, if any bytes follow, starts a fresh inflate */
+static ray_t* io_gunzip_next(q_io_stream_t* s, uint8_t* out, size_t want, size_t* got) {
+    io_gunzip_t* g = (io_gunzip_t*)s;
+    *got = 0;
+    while (*got < want) {
+        if (g->at == g->len && !g->eof) {
+            ray_t* bad = io_next(g->in, g->buf, IO_INBUF, &g->len);
+            if (bad) return bad;
+            g->at = 0;
+            g->eof = g->len == 0;
+        }
+        if (g->at == g->len) return g->live ? q_err(QE_CORRUPT) : NULL;
+        if (!g->live && q_gz_raw_reset(g->z)) return q_err(QE_CORRUPT);
+        g->live = 1;
+        size_t used = 0, made = 0;
+        int rc = q_gz_raw_step(g->z, g->buf + g->at, g->len - g->at, &used, out + *got, want - *got, &made);
+        g->at += used;
+        *got += made;
+        if (rc < 0 || (rc == 0 && !used && !made)) return q_err(QE_CORRUPT);
+        if (rc == 1) g->live = 0;
+    }
+    return NULL;
+}
+
+static void io_gunzip_free(q_io_stream_t* s) {
+    io_gunzip_t* g = (io_gunzip_t*)s;
+    q_io_stream_close(g->in);
+    q_gz_raw_free(g->z);
+    free(g->buf);
+    free(g);
+}
+
+ray_t* q_io_gunzip_stream(q_io_stream_t* inner, q_io_stream_t** out) {
+    io_gunzip_t* g = (io_gunzip_t*)calloc(1, sizeof *g);
+    q_gz_raw_t* z = q_gz_member_new();
+    uint8_t* buf = (uint8_t*)malloc(IO_INBUF);
+    if (!g || !z || !buf) {
+        free(g);
+        q_gz_raw_free(z);
+        free(buf);
+        q_io_stream_close(inner);
+        *out = NULL;
+        return q_err(QE_OOM);
+    }
+    *g = (io_gunzip_t){ .io = { io_gunzip_next, io_gunzip_free, 0, 0 }, .in = inner, .z = z, .buf = buf };
+    *out = &g->io;
+    return NULL;
+}
+
+ray_t* q_io_resource_stream(ray_t* pathstr, int gzip, q_io_stream_t** out) {
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    q_io_stream_t* s = NULL;
+    ray_t* bad = q_io_member_stream(pathstr, &s);
+    if (bad) return bad;
+    if (!s && !q_io_resource_chunkable(pathstr)) {
+        ray_t* all = q_io_resource_read(pathstr, 0, -1);
+        if (!all || RAY_IS_ERR(all)) return all ? all : q_err(QE_OOM);
+        io_held_t* h = (io_held_t*)calloc(1, sizeof *h);
+        if (!h) { ray_release(all); return q_err(QE_OOM); }
+        *h = (io_held_t){ { io_held_next, io_held_free, 1, 0 }, all };
+        s = &h->io;
+    } else if (!s && !(s = io_range_new(pathstr, 0, -1, q_io_resource_read))) {
+        return q_err(QE_OOM);
+    }
+    if (!gzip) { *out = s; return NULL; }
+    return q_io_gunzip_stream(s, out);
+}
 
 static int io_has_magic(ray_t* b) {
     return q_count(b) >= ZIP_MAGIC_LEN && memcmp(ray_data(b), ZIP_MAGIC, ZIP_MAGIC_LEN) == 0;
@@ -373,7 +773,7 @@ static int io_is_remote(ray_t* pathstr) {
 static int io_is_url(ray_t* pathstr) { return io_is_http(pathstr) || io_is_remote(pathstr); }
 
 int q_io_resource_chunkable(ray_t* pathstr) {
-    return !io_is_url(pathstr) && !q_zip_is(ray_str_ptr(pathstr), ray_str_len(pathstr));
+    return !io_is_url(pathstr) && !io_arch_claimed(ray_str_ptr(pathstr), ray_str_len(pathstr));
 }
 
 /* the length of the path that carries a format claim: on a URL a query or fragment names no format */
@@ -422,20 +822,26 @@ ray_t* q_io_resource_table(ray_t* fsym) {
     ray_t* path = q_io_file_path(fsym);
     if (!path) return NULL;
     const char* p = ray_str_ptr(path);
-    size_t n = io_claim_len(path);
+    size_t whole = io_claim_len(path), n = whole - (io_suffix_is(p, whole, ".gz") ? 3 : 0);
+    int kind = io_arch_kind(p, whole);
     ray_t* out;
+    if (kind && (out = io_arch_table(fsym, path, kind))) { ray_release(path); return out; }
     if (io_suffix_is(p, n, ".csv"))         out = q_csv_read_table(fsym, 0);
     else if (io_suffix_is(p, n, ".tsv"))    out = q_csv_read_table(fsym, '\t');
     else if (io_suffix_is(p, n, ".ndjson")) out = q_json_read_table(fsym, Q_JSON_ND);
     else if (io_suffix_is(p, n, ".jsonl"))  out = q_json_read_table(fsym, Q_JSON_ND);
     else if (io_suffix_is(p, n, ".json"))   out = q_json_read_table(fsym, Q_JSON_AUTO);
-    else if (io_suffix_is(p, n, ".parquet")) out = io_parquet_table(fsym);
+    else if (io_suffix_is(p, whole, ".parquet")) out = io_parquet_table(fsym);
     else out = io_is_url(path) && !q_s3_is(p, n) ? q_err(QE_TYPE) : NULL;
     ray_release(path);
     return out;
 }
 
+int q_io_gz_named(ray_t* pathstr) { return io_suffix_is(ray_str_ptr(pathstr), io_claim_len(pathstr), ".gz"); }
+
 ray_t* q_io_resource_read(ray_t* pathstr, int64_t off, int64_t want) {
+    if (io_arch_claimed(ray_str_ptr(pathstr), ray_str_len(pathstr)) && !io_is_remote(pathstr))
+        return q_io_read_slice(pathstr, off, want, NULL);
     if (io_is_http(pathstr)) return q_http_client_read_slice(pathstr, off, want);
     if (io_is_remote(pathstr) && !q_s3_is(ray_str_ptr(pathstr), ray_str_len(pathstr)))
         return io_remote_read(pathstr, off, want);
@@ -1204,10 +1610,10 @@ ray_t* q_io_set(ray_t* x, ray_t* y) {
     }
     if (!x || x->type != -RAY_SYM || !q_io_is_fsym(x)) return q_err(QE_NYI);
     ray_t* path = q_io_file_path(x);
-    int zip = path && q_zip_is(ray_str_ptr(path), ray_str_len(path));
+    int member = path && q_io_is_member(path);
     int s3 = path && q_s3_is(ray_str_ptr(path), ray_str_len(path));
     if (path) ray_release(path);
-    if (zip) return q_err(QE_NYI);
+    if (member) return q_err(QE_NYI);
     ray_t* r = io_set_format(x, y);
     if (!r) r = s3 ? q_err(QE_NYI) : q_wirefile_write(x, y);
     return r ? r : q_err(QE_TYPE);

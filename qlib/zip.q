@@ -1,12 +1,12 @@
 / Read zip archives: list what an archive holds, and read one entry's bytes.
-/ The reading itself is the `zip://` path every file reader takes - read0, read1, 0:, hcount, hopen, .Q.fs and
-/ .csv.read all accept `:zip://archive.zip/inner/path; these two functions are a thin door over it.
+/ The reading itself is the archive path every file reader takes - read0, read1, 0:, hcount, hopen, .Q.fs,
+/ select and .csv.read all accept `:archive.zip/inner/path; these two functions are a thin door over it.
 / .
 / @eg
 / .zip.info[`:data.zip;()!()]
 / "c"$.zip.read[`:data.zip;"trades.csv";()!()]
-/ select from `:zip://data.zip/trades.csv
-/ .Q.fs[{0N!count x}]`:zip://data.zip/trades.csv
+/ select from `:data.zip/trades.csv
+/ .Q.fs[{0N!count x}]`:data.zip/trades.csv
 
 .pq.load_natives`zip;
 
@@ -32,7 +32,7 @@
 / @throws nyi an encrypted entry, or a method other than stored and deflate
 / @eg "c"$.zip.read[`:data.zip;"trades.csv";()!()]
 .zip.read:{[file;entry;opts] .zip.i.opts opts;
-  read1 `$":zip://",(1_string hsym $[10h=type file;`$file;file]),"/",$[10h=type entry;entry;string entry]};
+  read1 hsym `$(1_string hsym $[10h=type file;`$file;file]),"/",$[10h=type entry;entry;string entry]};
 
 / opts is :: or a dict, and no key is known yet
 .zip.i.opts:{[opts] if[not (::)~opts; if[99h<>type opts; '`type]; if[count opts; '`option]]};

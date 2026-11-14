@@ -528,6 +528,7 @@ typedef struct {
     yyjson_doc** docs;                /* array framing holds one; the nd stream one per value */
     int64_t      ndocs, doccap;
     int          format;
+    int          compression;         /* Q_LOADER_AUTO / _GZIP / _NONE */
     int          records;
     int          ignore_errors;
     int          bare;                /* the non-record form: ONE column, DuckDB's `json` */
@@ -705,7 +706,7 @@ static ray_t* jr_select(const jr_st* st, yyjson_val** v) {
 /* THE SOURCE LAW: a SYMBOL is a resource, TEXT is content.  yyjson
  * parses a buffer, so the document is materialized whichever way it arrives —
  * and a leading UTF-8 BOM, which yyjson refuses, is stripped here. */
-static ray_t* jr_bytes(ray_t* src, char** out, int64_t* outn) {
+static ray_t* jr_bytes(ray_t* src, int compression, char** out, int64_t* outn) {
     const char* p = NULL;                            /* set by the two contiguous forms; the list form
                                                       * writes *out itself, having nothing to point at */
     ray_t* held = NULL;
@@ -716,9 +717,11 @@ static ray_t* jr_bytes(ray_t* src, char** out, int64_t* outn) {
     if (src->type == -RAY_SYM) {
         ray_t* path = q_io_file_path(src);
         if (!path) return q_err(QE_TYPE);
-        held = q_io_resource_read(path, 0, -1);
+        q_io_stream_t* s;
+        held = q_loader_open(path, compression, &s);
         ray_release(path);
-        if (!held) return q_err(QE_OOM);
+        if (!held) held = q_io_stream_slice(s, 0, -1);
+        q_io_stream_close(s);
         if (RAY_IS_ERR(held)) return held;
         n = q_count(held);
         p = n ? (const char*)ray_data(held) : "";
@@ -1586,6 +1589,8 @@ static ray_t* jr_opts(jr_st* st, ray_t* opts) {
             else if (jr_opt_is(v->i64, "newline_delimited")) st->format = Q_JSON_ND;
             else if (jr_opt_is(v->i64, "auto")) st->format = Q_JSON_AUTO;
             else bad = q_err(QE_NYI);
+        } else if (jr_opt_is(k->i64, "compression")) {
+            bad = q_loader_compression(v, &st->compression);
         } else if (jr_opt_is(k->i64, "records")) {
             if (v->type == -RAY_BOOL) st->records = v->u8 ? JR_REC_ALWAYS : JR_REC_NEVER;
             else if (v->type == -RAY_SYM && jr_opt_is(v->i64, "auto")) st->records = JR_REC_AUTO;
@@ -1675,7 +1680,7 @@ static ray_t* jr_read(ray_t* src, ray_t* target, ray_t* types, ray_t* opts, q_js
     int64_t n = 0;
     ray_t* bad = info_only ? NULL : q_loader_sink_open(&st.sink, target);
     if (!bad) bad = jr_opts(&st, opts);
-    if (!bad) bad = jr_bytes(src, &buf, &n);
+    if (!bad) bad = jr_bytes(src, st.compression, &buf, &n);
     if (!bad) bad = jr_frame(&st, buf, n);
     if (!bad) bad = jr_classify(&st);
     if (!bad) bad = jr_schema(&st);

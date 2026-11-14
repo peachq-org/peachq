@@ -122,4 +122,8 @@ void q_http_client_resp_free(q_http_resp_t* r);
  * not there.  want < 0 = to EOF. */
 ray_t* q_http_client_read_slice(ray_t* url, int64_t off, int64_t want);
 
+/* The resource's length from a HEAD, redirects followed: a long, or 'io when the answer is no 2xx with a
+ * Content-Length. */
+ray_t* q_http_client_size(ray_t* url);
+
 #endif /* Q_HTTP_CLIENT_H */
