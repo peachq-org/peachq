@@ -1,5 +1,7 @@
 /* q_io — THE byte core: what a path is, a file's size, its bytes, and how
- * bytes are written.  One clamp law, one mkdir law, one kxzip home. */
+ * bytes are written.  One clamp law, one mkdir law, one kxzip home.  Every read
+ * reaches its transport — the filesystem, a zip:// entry, an s3:// object —
+ * through one choke point of three operations: size, ranged read and list. */
 #ifndef Q_IO_H
 #define Q_IO_H
 
@@ -27,10 +29,14 @@ int q_io_abs_spelling(const char* path, size_t n, char* abs, size_t cap);
 /* is this spelling a relative path that never steps up — lexically under the current directory? */
 int q_io_path_inside(const char* path, size_t n);
 
-/* How big the file IS as a long, 'io when the path will not stat: a kxzip container
+/* How big the file IS as a long, 'io when it is not there: a kxzip container
  * answers with its ORIGINAL file's length (ref/hcount.md), one that will not
  * decode with its own; a zip:// entry its uncompressed size. */
 ray_t* q_io_file_size(ray_t* pathstr);
+
+/* `key` of a path: the sorted names in the directory (an s3:// prefix), () when
+ * nothing is there, NULL when it names a file. */
+ray_t* q_io_list(ray_t* pathstr);
 
 /* read0/read1/`0:`'s `(file;offset[;length])`.  NULL with *path OWNED and
  * *want -1 for the length-less form; else *path is released and an owned
@@ -50,9 +56,10 @@ ray_t* q_io_read_slice(ray_t* pathstr, int64_t off, int64_t want, int* zipped);
 int64_t q_io_clamp(int64_t size, int64_t* off, int64_t want);
 
 /* THE resource-read seam beneath read0/read1: an `http(s)://` path reads over
- * HTTP, a scheme DuckDB's httpfs speaks (s3:// gcs:// hf:// …) through
+ * HTTP, a scheme DuckDB's httpfs speaks (gcs:// hf:// …) through
  * `.duckdb.i.read1` by name (restricted → 'access; the whole object, sliced here),
- * anything else off the filesystem (a zip:// entry included), under q_io_read_slice's contract unchanged.
+ * anything else through the byte reader (a zip:// entry and an s3:// object included),
+ * under q_io_read_slice's contract unchanged.
  * q_io_resource_chunkable is what a DECODER asks instead of naming a transport
  * — 0 means repeated ranged pulls are not cheap, so fetch once and slice.  Both
  * take a q_io_file_path result (no leading ':'). */

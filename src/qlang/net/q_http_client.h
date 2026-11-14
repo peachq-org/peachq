@@ -99,6 +99,21 @@ ray_t* q_dotq_hp_fn(ray_t** args, int64_t nargs);
  * request are BORROWED; returns owned (or an owned bare-class ray_error). */
 ray_t* q_http_client_raw(ray_t* hsym, ray_t* request);
 
+/* The Host header's value for u: the host, and the port when it is not the scheme's default. */
+void q_http_client_host(const q_http_url_t* u, char* out, size_t cap);
+
+/* One response held whole: `status`, and `body` pointing into `buf`. */
+typedef struct { char* buf; size_t len; int status; const char* body; size_t body_len; } q_http_resp_t;
+
+/* ONE request to u: `method`, u's target, Connection: close and the caller's `headers` (each line CRLF-ended, Host
+ * among them), with no redirect followed and no content coding offered — a signed request is answered as signed.
+ * NULL with *r filled (release it with q_http_client_resp_free), else an owned 'access under -u or a transport class. */
+ray_t* q_http_client_fetch(const q_http_url_t* u, const char* method, const char* headers, q_http_resp_t* r);
+
+/* A response header's value by case-insensitive name; p NULL when absent. */
+q_http_span_t q_http_client_resp_header(const q_http_resp_t* r, const char* name);
+void q_http_client_resp_free(q_http_resp_t* r);
+
 /* The http transport beneath the resource-read seam (q_io_resource_read): `url`
  * is a RAY_STR/charv `http(s)://…` with no leading ':'.  Obeys q_io_clamp's
  * range/EOF law and the `-b` gate exactly as the file transport does; answers

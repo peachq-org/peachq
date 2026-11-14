@@ -55,9 +55,12 @@ static ray_t* wf_join(const char* prefix, size_t n, const char* name, size_t nn)
     return s;
 }
 
+/* asked of the byte reader, so a companion or a column on any transport is found where it is */
 static int wf_is_file(ray_t* path) {
-    struct stat st;
-    return stat(ray_str_ptr(path), &st) == 0 && S_ISREG(st.st_mode);
+    ray_t* ls = q_io_list(path);
+    if (ls && RAY_IS_ERR(ls)) { ray_error_free(ls); q_err_drop(); }
+    else if (ls) ray_release(ls);
+    return ls == NULL;
 }
 
 /* A `.d` entry and a shape C/D domain name are UNTRUSTED FILE CONTENT, so a
@@ -650,12 +653,11 @@ static ray_t* wf_read_folder(const char* dir, size_t n) {
 static ray_t* wf_read_path(ray_t* path, int follow) {
     const char* p = ray_str_ptr(path);
     size_t n = ray_str_len(path);
-    struct stat st;
-    if (stat(p, &st) != 0) return q_err(QE_IO);
-    /* The trailing slash asks for the folder form; without it, an unopenable file. */
-    if (S_ISDIR(st.st_mode))
-        return n && p[n - 1] == '/' ? wf_read_folder(p, n) : q_err(QE_IO);
-    if (!S_ISREG(st.st_mode)) return q_err(QE_IO);
+    /* The trailing slash asks for the folder form; without it the byte reader refuses a folder as it does a miss. */
+    if (n && p[n - 1] == '/') {
+        struct stat st;
+        return stat(p, &st) == 0 && S_ISDIR(st.st_mode) ? wf_read_folder(p, n) : q_err(QE_IO);
+    }
 
     /* A value spans its whole file, so the read is never partial; the byte core
      * resolves a kxzip container away and reports that it did, which is the one
