@@ -28,7 +28,8 @@ static inline ray_t* q_splay_contained(ray_t* v) { return v && v->type == RAY_TA
  * owned error).  _values is the owned one-column table of the partition values under the partition field's name
  * (NULL: none); _map the owned in-memory table of t's columns named in `want` over the partitions indexed by the
  * long vector `parts` (NULL = all), the partition column first — NULL when t is no such reference or the database
- * holds no table of its name; _latest that of the most recent partition alone. */
+ * holds no table of its name; _latest that of the most recent partition alone; _rows, for the same t and parts, the
+ * owned long vector of each row's number within its partition (the virtual `i`). */
 ray_t*  q_splay_named_mount(void);
 int     q_splay_table_named(ray_t* t);
 ray_t*  q_splay_named_values(void);
@@ -37,6 +38,7 @@ ray_t*  q_splay_named_latest(ray_t* t);
 /* What a display of deferred table t shows (owned): a splay mapped, a partitioned table at most `rows` rows of its
  * first partition (owner ruling 2026-11-13).  NULL when those cannot be read — the display shows the reference. */
 ray_t*  q_splay_deferred_shown(ray_t* t, int64_t rows);
+ray_t*  q_splay_named_rows(ray_t* t, ray_t* parts);
 /* `.Q.c.part[dir;names;rows]`: the named columns of the splayed table in directory `dir`, mapped — one partition's;
  * a finite `rows` reads at most that many rows (0W: all of them). */
 ray_t*  q_splay_part_fn(ray_t** args, int64_t n);

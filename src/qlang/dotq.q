@@ -178,12 +178,19 @@
   t:.Q.i.part[name;c;n;i];
   if[n<count t;t:n#t];
   flip(.Q.pf,c)!enlist[count[t]#.Q.pv i],t c};
+/ The row count of each partition idx of `name, read from its column c.
+.Q.i.counts:{[name;c;idx]{[name;c;i]count .Q.i.part[name;c;0W;i]}[name;c;]each idx};
 / The table a query over partitioned table `name reads: columns c of the partitions idx (:: is every one), the
 / partition column first, razed in partition order; :: for a name the database does not hold.
 .Q.i.table:{[name;c;idx]
   if[not name in .Q.pt;:(::)];
   dated:.Q.i.dated[name;c except .Q.pf;0W;];
   $[idx~(::);raze dated each til count .Q.pv;count idx;raze dated each idx;0#dated -1+count .Q.pv]};
+/ Each row's number within its partition (basics/qsql.md:250-252), for the partitions idx (:: is every one) .Q.i.table
+/ razes: counted per partition, as one date may be a partition of several segments (database/segment.md:121).
+.Q.i.rows:{[name;idx]
+  if[idx~(::);idx:til count .Q.pv];
+  (0#0),raze til each .Q.i.counts[name;1#key flip get name;idx]};
 / The most recent partition of `name alone: what meta describes.
 .Q.i.latest:{[name;c] .Q.i.table[name;c;enlist -1+count .Q.pv]};
 / At most n rows of the first partition of `name: what the console shows; :: when they cannot be read, so the display
@@ -193,7 +200,7 @@
 .Q.cn:{[t]
   if[not 1b~.Q.qp t;:count t];
   ref:flip t;
-  .Q.pn[value ref]:{[name;c;i]count .Q.i.part[name;c;0W;i]}[value ref;1#key ref;]each til count .Q.pv;
+  .Q.pn[value ref]:.Q.i.counts[value ref;1#key ref;til count .Q.pv];
   .Q.pn value ref};
 / ref/dotq.md .Q.bv: each mounted table missing from some partition gets its empty schema, the partition field first,
 / from the last partition holding it, or the first for .Q.bv[`]
