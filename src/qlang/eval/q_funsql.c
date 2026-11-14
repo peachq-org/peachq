@@ -159,6 +159,20 @@ static void ques_unmapped(ray_t* t, ray_t* mapped) {
     g_unmapped = acc && !RAY_IS_ERR(acc) ? acc : NULL;
 }
 
+/* The select's partitioned per-query table and each of its rows' number within its partition: the virtual `i` a
+ * phrase over that table sees (basics/qsql.md:250-252).  The table is borrowed, the numbers owned.  They are built
+ * when a phrase names `i`, or on the run again once a phrase reached it at run time (`eval`), so `i` is left unbound
+ * and watched until then. */
+static ray_t* g_part_tbl;
+static ray_t* g_part_rows;
+static int    g_part_every;
+
+static void part_rows_set(ray_t* tbl, ray_t* rows) {
+    if (g_part_rows) ray_release(g_part_rows);
+    g_part_tbl = tbl;
+    g_part_rows = rows;
+}
+
 static ray_t* where_fold(ray_t* c, ray_t* t, ray_t* idx0);
 
 /* does a constraint name the partition column, and neither a column of t's own nor the row index? */
@@ -175,6 +189,17 @@ static int names_partition(ray_t* tree, ray_t* t, int64_t field) {
     }
     ray_release(acc);
     return has && !other;
+}
+
+/* does a phrase of the select name the virtual `i`?  Only then are the partition-relative row numbers built. */
+static int ques_names_row(ray_t** q, int64_t qn) {
+    ray_t* acc = ray_vec_new(RAY_SYM, 8);
+    for (int64_t j = 1; j < qn; j++) phrase_names(q[j], &acc);
+    if (!acc || RAY_IS_ERR(acc)) { if (acc) ray_error_free(acc); return 1; }
+    int64_t row = ray_sym_intern_runtime("i", 1), hit = 0;
+    for (int64_t j = 0; j < q_count(acc) && !hit; j++) hit = ray_vec_get_sym_id(acc, j) == row;
+    ray_release(acc);
+    return (int)hit;
 }
 
 /* only the select forms: a by that is a boolean or a dict over a phrase that is a dict or nothing */
@@ -203,10 +228,16 @@ static ray_t* ques_partitioned(ray_t* t, ray_t* names, ray_t** q, int64_t qn, in
     }
     ray_t* parts = RAY_IS_ERR(head) ? head : k ? where_fold(head, values, til_count(values)) : NULL;
     ray_t* m = parts && RAY_IS_ERR(parts) ? parts : q_splay_named_map(t, names, parts);
+    int ok = m && !RAY_IS_ERR(m) && lead;
+    ray_t* rows = ok && (g_part_every || ques_names_row(q, qn)) ? q_splay_named_rows(t, parts) : NULL;
     if (parts && parts != m) ray_release(parts);
     if (head != m) ray_release(head);
     if (values) ray_release(values);
-    if (m && !RAY_IS_ERR(m) && lead) *lead = k;
+    if (rows && RAY_IS_ERR(rows)) { ray_release(m); return rows; }
+    if (ok) {
+        *lead = k;
+        part_rows_set(m, rows);
+    }
     return m;
 }
 
@@ -242,6 +273,12 @@ static ray_t* ques_from_n(ray_t* t, int64_t* nkey, int hops, ray_t* names, ray_t
         int named = q_splay_table_named(t);
         ray_t* m = named ? ques_partitioned(t, names, q, qn, lead) : q_splay_deferred_map(t, names);
         if (m && !RAY_IS_ERR(m) && ray_table_ncols(m) < ray_table_ncols(t) + named) ques_unmapped(t, m);
+        if (named && m == g_part_tbl && !g_part_rows) {
+            int64_t row = ray_sym_intern_runtime("i", 1);
+            if (!g_unmapped) g_unmapped = ray_vec_new(RAY_SYM, 1);
+            if (g_unmapped && !RAY_IS_ERR(g_unmapped)) g_unmapped = ray_vec_append(g_unmapped, &row);
+            if (g_unmapped && RAY_IS_ERR(g_unmapped)) { ray_error_free(g_unmapped); g_unmapped = NULL; }
+        }
         if (m) return m;
         ray_t* s = ray_sym(q_splay_table_path(t));
         ray_t* nm = ray_sym_str(s->i64);                  /* borrowed */
@@ -324,7 +361,10 @@ static ray_t* phrase_eval(ray_t* tree, ray_t* t, ray_t* idx) {
             ray_release(g);
         }
     }
-    if (!err) q_env_local_set(ray_sym_intern_runtime("i", 1), idx);
+    ray_t* rows = !err && g_part_rows && t == g_part_tbl ? q_index_at(g_part_rows, &idx, 1) : NULL;
+    if (rows && RAY_IS_ERR(rows)) err = rows;
+    else if (!err && (rows || t != g_part_tbl)) q_env_local_set(ray_sym_intern_runtime("i", 1), rows ? rows : idx);
+    if (rows && !RAY_IS_ERR(rows)) ray_release(rows);
     q_env_frame_watch(g_unmapped);
     q_dbg_hold_t hold = q_dbg_hold();              /* the phrase tree is not the frame's text: its caret stays on the query */
     ray_t* r = err ? err : q_eval_apply_concrete(q_eval(tree));
@@ -1149,7 +1189,11 @@ static ray_t* ques_select(ray_t** args, int64_t n) {
     ray_t* pushed = q_provider_qsql_push(args, n); /* NULL: not provider / no qsql hook */
     if (pushed) return pushed;
     ray_t* outer = g_unmapped;                   /* an enclosing select's: restored when this one is done */
+    ray_t *outer_tbl = g_part_tbl, *outer_rows = g_part_rows;
+    int outer_every = g_part_every;
     g_unmapped = NULL;
+    g_part_tbl = g_part_rows = NULL;
+    g_part_every = 0;
     int64_t hits = q_env_frame_watch_hits();
     ray_t* names = ques_names(args, n);
     ray_t* r = ques_select_from(args, n, names);
@@ -1159,10 +1203,14 @@ static ray_t* ques_select(ray_t** args, int64_t n) {
         else if (r) ray_release(r);
         ray_release(g_unmapped);
         g_unmapped = NULL;
+        part_rows_set(NULL, NULL);
+        g_part_every = 1;
         r = ques_select_from(args, n, NULL);
     }
     if (g_unmapped) ray_release(g_unmapped);
     g_unmapped = outer;
+    part_rows_set(outer_tbl, outer_rows);
+    g_part_every = outer_every;
     return r;
 }
 
