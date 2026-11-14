@@ -37,8 +37,18 @@ ray_t* q_env_resolve(int64_t sym);
 ray_err_t q_env_set(int64_t sym, ray_t* val);
 
 /* The q error class a failed q_env_set means: 'nyi and 'type where the env
- * raised them deliberately, else the assignment itself failed ('assign). */
+ * raised them deliberately, 'noupdate naming the global blocked mode refused, else the assignment itself failed
+ * ('assign). */
 ray_t* q_env_err(ray_err_t e);
+
+/* THE mutation refusal a by-name write asks before it computes anything (an amend's function included):
+ * RAY_ERR_NOUPDATE under blocked mode (-b on a remote handle, reval), naming sym for q_env_err; set, unbind and the
+ * park refuse the same way behind it. */
+ray_err_t q_env_writable(int64_t sym);
+
+/* q_env_set for the engine's own cache write (a splay's enum domain), which blocked mode admits: that one write,
+ * nothing it causes, a `.z.vs` hook's writes included. */
+ray_err_t q_env_set_internal(int64_t sym, ray_t* val);
 
 /* Same amend, but a NEW plain name binds into the hidden builtin shed
  * (bootstrap writers stay out of the `key `.` roster). */

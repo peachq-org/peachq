@@ -49,6 +49,13 @@ bool q_sys_utc_offset_secs(int64_t* secs);
 int  q_sys_err_trap_mode(void);
 void q_sys_err_trap_set(int mode);
 
+/* How the process was started: -u 1 (or -u file) and -b (basics/cmdline.md:57-94, 367-384).  Configuration, apart
+ * from the modes an evaluation runs under: _update_blocked is what `\_` and `.z.r` report, an update here would be
+ * blocked — in reval, on a -b remote handle, or anywhere in a -b process (ref/dotz.md:864-874). */
+int q_sys_started_restricted(void);
+int q_sys_started_blocked(void);
+int q_sys_update_blocked(void);
+
 /* True iff a `\t N` timer is currently armed (interval > 0).  The `.z.ts`
  * forwarding thunk (q_dotz.c) consults it to no-op after a reentrant `\t 0`
  * that could not delete the in-flight (popped) timer. */

@@ -1642,7 +1642,8 @@ static ray_t* expunge_ns(int64_t ns, ray_t* names) {
     for (int64_t i = 0; i < n && !e; i++) {
         int64_t member = ray_read_sym(ray_data(names), i, RAY_SYM, names->attrs);
         int64_t full = q_env_qualify(ns, member);
-        if (full < 0 || q_env_unbind(full) != RAY_OK) e = q_err(QE_ASSIGN);
+        ray_err_t rc = full < 0 ? RAY_ERR_DOMAIN : q_env_unbind(full);
+        if (rc != RAY_OK) e = rc == RAY_ERR_NOUPDATE ? q_env_err(rc) : q_err(QE_ASSIGN);
     }
     q_env_scope(scope);
     return e;
@@ -1663,6 +1664,7 @@ static ray_t* bang_qsql(ray_t** args) {
     }
     if (tslot && tslot->type == -RAY_SYM) {
         name = tslot->i64;
+        if (q_env_writable(name) != RAY_OK) return q_env_err(RAY_ERR_NOUPDATE);
         if (is_symvec(a) && q_count(a) > 0 && is_empty_gen(c) &&
             q_env_ns_exists(name)) {
             ray_t* e = expunge_ns(name, a);
