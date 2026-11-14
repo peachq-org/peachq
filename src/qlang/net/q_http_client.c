@@ -558,9 +558,10 @@ ray_t* q_http_client_fetch(const q_http_url_t* u, const char* method, const char
     int rl = snprintf(req, sizeof req, "%s %s HTTP/1.1\r\nConnection: close\r\n%s\r\n", method, u->path, headers);
     if (rl < 0 || (size_t)rl >= sizeof req) return q_err(QE_LIMIT);
     const char* err = "conn";
-    r->buf = http_exchange(u, req, (size_t)rl, NULL, 0, now_ms() + Q_HTTP_TOTAL_MS, 0, &r->len, &err);
+    int head = strcmp(method, "HEAD") == 0;
+    r->buf = http_exchange(u, req, (size_t)rl, NULL, 0, now_ms() + Q_HTTP_TOTAL_MS, head, &r->len, &err);
     if (!r->buf) return q_err_from_text(err, strlen(err));
-    int ex = q_http_client_extract(r->buf, r->len, &r->status, &r->body, &r->body_len, NULL, 0, NULL, NULL);
+    int ex = q_http_client_extract(r->buf, r->len, &r->status, &r->body, &r->body_len, NULL, head, NULL, NULL);
     if (ex == 0) return NULL;
     q_http_client_resp_free(r);
     return q_err(ex == -2 ? QE_WSFULL : QE_CONN);
