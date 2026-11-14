@@ -12,7 +12,6 @@
 #include "qlang/ops/q_index.h"  /* q_index_elem_at — nested row reads */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_concrete, q_eval_apply_value */
 #include "qlang/q_registry.h"   /* the `,` value the append fallback composes on */
-#include "lang/eval.h"          /* ray_eval_get_restricted */
 #include "store/fileio.h"     /* ray_file_rename — THE platform-armed replace-by-rename */
 #include <stdio.h>   /* fopen/fread — the header probe reads raw prefix bytes */
 #include <stdlib.h>
@@ -675,7 +674,8 @@ static ray_t* wf_read_path(ray_t* path, int follow) {
 ray_t* q_wirefile_read(ray_t* x) {
     ray_t* path = q_io_file_path(x);
     if (!path) return NULL;
-    ray_t* r = ray_eval_get_restricted() ? q_err(QE_ACCESS) : wf_read_path(path, 1);
+    ray_t* r = q_io_guard(ray_str_ptr(path), ray_str_len(path));
+    if (!r) r = wf_read_path(path, 1);
     ray_release(path);
     return r;
 }
@@ -785,6 +785,8 @@ ray_t* q_wirefile_probe(ray_t* pathstr, q_wf_colhdr* out) {
     memset(out, 0, sizeof *out);
     out->count = -1;
     const char* p = ray_str_ptr(pathstr);
+    ray_t* refused = q_io_guard(p, ray_str_len(pathstr));
+    if (refused) return refused;
     struct stat st;
     if (stat(p, &st) != 0 || !S_ISREG(st.st_mode)) return q_err(QE_CORRUPT);
     size_t fsz = (size_t)st.st_size;
@@ -1117,8 +1119,8 @@ static ray_t* wf_write_flat_path(ray_t* path, ray_t* y, int lbs, int alg, int lv
 static ray_t* wf_write_flat(ray_t* x, ray_t* y, int lbs, int alg, int lvl) {
     ray_t* path = q_io_file_path(x);
     if (!path) return NULL;
-    if (ray_eval_get_restricted()) { ray_release(path); return q_err(QE_ACCESS); }
-    ray_t* bad = wf_write_flat_path(path, y, lbs, alg, lvl);
+    ray_t* bad = q_io_guard(ray_str_ptr(path), ray_str_len(path));
+    if (!bad) bad = wf_write_flat_path(path, y, lbs, alg, lvl);
     ray_release(path);
     if (bad) return bad;
     ray_retain(x);
@@ -1326,8 +1328,8 @@ static ray_t* wf_append_path(ray_t* path, ray_t* y) {
 ray_t* q_wirefile_append(ray_t* x, ray_t* y) {
     ray_t* path = q_io_file_path(x);
     if (!path) return q_err(QE_TYPE);
-    if (ray_eval_get_restricted()) { ray_release(path); return q_err(QE_ACCESS); }
-    ray_t* bad = wf_append_path(path, y);
+    ray_t* bad = q_io_guard(ray_str_ptr(path), ray_str_len(path));
+    if (!bad) bad = wf_append_path(path, y);
     ray_release(path);
     if (bad) return bad;
     ray_retain(x);
@@ -1335,8 +1337,8 @@ ray_t* q_wirefile_append(ray_t* x, ray_t* y) {
 }
 
 ray_t* q_wirefile_append_path(ray_t* pathstr, ray_t* y) {
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
-    return wf_append_path(pathstr, y);
+    ray_t* bad = q_io_guard(ray_str_ptr(pathstr), ray_str_len(pathstr));
+    return bad ? bad : wf_append_path(pathstr, y);
 }
 
 /* ---- the domain-append primitive (enumeration's only trace) ------------- */
@@ -1422,7 +1424,8 @@ static ray_t* wf_domain_place(ray_t* dom, ray_t* symv, ray_t** fresh, ray_t** po
 ray_t* q_wirefile_domain_extend(ray_t* dompathstr, ray_t* symv, ray_t** positions) {
     if (positions) *positions = NULL;
     if (!symv || symv->type != RAY_SYM) return q_err(QE_TYPE);
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    ray_t* refused = q_io_guard(ray_str_ptr(dompathstr), ray_str_len(dompathstr));
+    if (refused) return refused;
     int fd = q_io_open_locked(ray_str_ptr(dompathstr));
     if (fd < 0 && errno == ENOENT) {                 /* a new db root: its directories first */
         q_io_mkdir_parents(ray_str_ptr(dompathstr), ray_str_len(dompathstr));
@@ -1674,7 +1677,8 @@ ray_t* q_wirefile_write_splay(ray_t* dirsym, ray_t* domsym, ray_t* y,
                               int lbs, int alg, int lvl) {
     ray_t* dir = q_io_file_path(dirsym);
     if (!dir) return q_err(QE_TYPE);
-    if (ray_eval_get_restricted()) { ray_release(dir); return q_err(QE_ACCESS); }
+    ray_t* refused = q_io_guard(ray_str_ptr(dir), ray_str_len(dir));
+    if (refused) { ray_release(dir); return refused; }
     size_t n = ray_str_len(dir);
     if (!n || ray_str_ptr(dir)[n - 1] != '/') { ray_release(dir); return q_err(QE_TYPE); }
     ray_retain(y);

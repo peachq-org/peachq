@@ -83,6 +83,7 @@ int64_t ray_ipc_listen_at(ray_poll_t* poll, uint32_t ip, uint16_t port, bool reu
 
 /* The kdb `-u`/`-U` password file (user:password per line; plain or md5/sha1 hex).  Process-wide.  0, or -1 + errno. */
 int ray_ipc_auth_file_load(const char* path);
+bool ray_ipc_auth_file_loaded(void);
 
 /* ===== Legacy server API (wraps poll internally for tests) ===== */
 
