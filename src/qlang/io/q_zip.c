@@ -1,9 +1,9 @@
-/* q_zip — the zip:// source (see q_zip.h).  Record layouts are APPNOTE.TXT 6.3.10 § 4.3: the end-of-central-
+/* q_zip — the zip archive (see q_zip.h).  Record layouts are APPNOTE.TXT 6.3.10 § 4.3: the end-of-central-
  * directory record (and its zip64 twin) locates the central directory, each central record names an entry and
  * its local header, and the entry's bytes follow that header. */
+#include "qlang/q_count.h"
 #include "qlang/io/q_zip.h"
-#include "qlang/io/q_io.h"          /* q_io_pread_all, q_io_path_operand */
-#include "qlang/io/q_handles.h"     /* q_handles_reserve_fd — a stream's handle number */
+#include "qlang/io/q_io.h"          /* q_io_stored_* — the archive's bytes over any transport; q_io_path_operand */
 #include "qlang/net/q_gz.h"         /* q_gz_raw_* — method 8; q_gz_crc32 */
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_calendar.h"  /* the DOS stamp as a timestamp */
@@ -12,15 +12,9 @@
 #include "qlang/q_env.h"            /* q_env_bind_native */
 #include "lang/env.h"               /* ray_fn_unary */
 #include "lang/eval.h"              /* RAY_FN_NONE, ray_eval_get_restricted */
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#ifndef O_BINARY
-#define O_BINARY 0
-#endif
 
 #define SIG_LOCAL 0x04034b50u
 #define SIG_CENTRAL 0x02014b50u
@@ -30,7 +24,7 @@
 #define EOCD_LEN 22
 #define CENTRAL_LEN 46
 #define LOCAL_LEN 30
-#define ZIP_INBUF ((size_t)64 << 10)
+#define ZIP_INBUF ((size_t)1 << 20)
 
 static uint16_t rd16(const uint8_t* p) { return (uint16_t)(p[0] | p[1] << 8); }
 static uint32_t rd32(const uint8_t* p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
@@ -46,7 +40,7 @@ static ray_t* zip_fail(q_err_e cls, const char* fmt, const char* a, size_t an, c
 }
 
 typedef struct {
-    int      fd;
+    ray_t*   path;               /* borrowed */
     int64_t  fsize;
     uint8_t* cd;
     size_t   cdlen;
@@ -61,14 +55,14 @@ typedef struct {
     int64_t  usize, csize, lho;
 } zip_ent_t;
 
-static void arch_close(zip_arch_t* a) {
-    if (a->fd >= 0) close(a->fd);
-    free(a->cd);
-    a->fd = -1;
-    a->cd = NULL;
-}
-
 static ray_t* corrupt(void) { return q_err(QE_CORRUPT); }
+
+/* `n` bytes at `off` of the archive, OWNED: the transport's error, or 'corrupt when it holds fewer */
+static ray_t* zip_bytes(ray_t* path, int64_t off, size_t n) {
+    ray_t* b = q_io_stored_read(path, off, (int64_t)n);
+    if (!RAY_IS_ERR(b) && q_count(b) != (int64_t)n) { ray_release(b); return corrupt(); }
+    return b;
+}
 
 /* a zip64 field: the 64-bit value stands where the 32-bit one is saturated; past INT64_MAX is no file */
 static int z64(int64_t* v, uint64_t wide) {
@@ -77,47 +71,65 @@ static int z64(int64_t* v, uint64_t wide) {
     return 1;
 }
 
-static ray_t* arch_open(const char* path, zip_arch_t* a) {
+/* The central directory, located from the end records.  `fsize` < 0 asks the transport for it. */
+static ray_t* arch_open(ray_t* path, int64_t fsize, zip_arch_t* a) {
     memset(a, 0, sizeof *a);
-    a->fd = open(path, O_RDONLY | O_BINARY);
-    if (a->fd < 0) return q_err(QE_IO);
-    struct stat st;
-    if (fstat(a->fd, &st) != 0 || !S_ISREG(st.st_mode)) return q_err(QE_IO);
-    a->fsize = (int64_t)st.st_size;
+    a->path = path;
+    if (fsize < 0) {
+        ray_t* sz = q_io_stored_size(path);
+        if (RAY_IS_ERR(sz)) return sz;
+        fsize = sz->i64;
+        ray_release(sz);
+    }
+    a->fsize = fsize;
     if (a->fsize < EOCD_LEN) return corrupt();
     size_t tl = a->fsize < EOCD_LEN + 65535 ? (size_t)a->fsize : EOCD_LEN + 65535;
-    uint8_t* tail = (uint8_t*)malloc(tl);
-    if (!tail) return q_err(QE_OOM);
     int64_t tail_at = a->fsize - (int64_t)tl;
-    if (q_io_pread_all(a->fd, tail, tl, tail_at)) { free(tail); return q_err(QE_IO); }
+    ray_t* tb = zip_bytes(path, tail_at, tl);
+    if (RAY_IS_ERR(tb)) return tb;
+    const uint8_t* tail = (const uint8_t*)ray_data(tb);
     int64_t e = -1;
     for (int64_t i = (int64_t)tl - EOCD_LEN; i >= 0 && e < 0; i--)
         if (rd32(tail + i) == SIG_EOCD && i + EOCD_LEN + rd16(tail + i + 20) == (int64_t)tl) e = i;
-    if (e < 0) { free(tail); return corrupt(); }
+    if (e < 0) { ray_release(tb); return corrupt(); }
     const uint8_t* r = tail + e;
     int multi = rd16(r + 4) != 0 || rd16(r + 6) != 0;
     uint64_t count = rd16(r + 10), cdsize = rd32(r + 12), cdoff = rd32(r + 16);
     int64_t eocd_at = tail_at + e, cd_end = eocd_at;
+    ray_release(tb);
     if (count == 0xffff || cdsize == 0xffffffffu || cdoff == 0xffffffffu) {
-        uint8_t loc[20], z[56];
-        if (eocd_at < 20 || q_io_pread_all(a->fd, loc, 20, eocd_at - 20)) { free(tail); return corrupt(); }
+        if (eocd_at < 20) return corrupt();
+        ray_t* lb = zip_bytes(path, eocd_at - 20, 20);
+        if (RAY_IS_ERR(lb)) return lb;
+        const uint8_t* loc = (const uint8_t*)ray_data(lb);
         uint64_t zat = rd64(loc + 8);
-        if (rd32(loc) != SIG_LOC64 || zat > (uint64_t)(eocd_at - 20 - 56) || q_io_pread_all(a->fd, z, 56, (int64_t)zat)
-            || rd32(z) != SIG_EOCD64) { free(tail); return corrupt(); }
-        multi |= rd32(z + 16) != 0 || rd32(z + 20) != 0 || rd32(loc + 4) != 0;
+        int bad = rd32(loc) != SIG_LOC64 || zat > (uint64_t)(eocd_at - 20 - 56);
+        multi |= rd32(loc + 4) != 0;
+        ray_release(lb);
+        if (bad) return corrupt();
+        ray_t* zb = zip_bytes(path, (int64_t)zat, 56);
+        if (RAY_IS_ERR(zb)) return zb;
+        const uint8_t* z = (const uint8_t*)ray_data(zb);
+        bad = rd32(z) != SIG_EOCD64;
+        multi |= rd32(z + 16) != 0 || rd32(z + 20) != 0;
         count = rd64(z + 32);
         cdsize = rd64(z + 40);
         cdoff = rd64(z + 48);
+        ray_release(zb);
+        if (bad) return corrupt();
         cd_end = (int64_t)zat;
     }
-    free(tail);
     if (multi) return q_err(QE_NYI);
     if (cdoff > (uint64_t)cd_end || cdsize > (uint64_t)cd_end - cdoff || count > cdsize / CENTRAL_LEN) return corrupt();
     a->cdlen = (size_t)cdsize;
     a->count = (int64_t)count;
     a->cd = (uint8_t*)malloc(a->cdlen ? a->cdlen : 1);
     if (!a->cd) return q_err(QE_OOM);
-    if (q_io_pread_all(a->fd, a->cd, a->cdlen, (int64_t)cdoff)) return q_err(QE_IO);
+    if (!a->cdlen) return NULL;
+    ray_t* cb = zip_bytes(path, (int64_t)cdoff, a->cdlen);
+    if (RAY_IS_ERR(cb)) return cb;
+    memcpy(a->cd, ray_data(cb), a->cdlen);
+    ray_release(cb);
     return NULL;
 }
 
@@ -158,25 +170,6 @@ static ray_t* arch_next(const zip_arch_t* a, size_t* at, zip_ent_t* e) {
     return NULL;
 }
 
-int q_zip_is(const char* p, size_t n) { return p && n >= 6 && memcmp(p, "zip://", 6) == 0; }
-
-/* zip://<archive>/<entry>: *arch an owned C string, the entry a span of p */
-static ray_t* zip_split(const char* p, size_t n, char** arch, const char** ent, size_t* elen) {
-    for (size_t i = 6; i + 5 <= n; i++) {
-        if (p[i] != '.' || (p[i + 1] | 0x20) != 'z' || (p[i + 2] | 0x20) != 'i' || (p[i + 3] | 0x20) != 'p'
-            || p[i + 4] != '/') continue;
-        if (i + 5 == n) return q_err(QE_DOMAIN);
-        size_t al = i + 4 - 6;
-        if (!(*arch = (char*)malloc(al + 1))) return q_err(QE_OOM);
-        memcpy(*arch, p + 6, al);
-        (*arch)[al] = '\0';
-        *ent = p + i + 5;
-        *elen = n - i - 5;
-        return NULL;
-    }
-    return q_err(QE_DOMAIN);
-}
-
 static const char* method_name(uint16_t m) {
     switch (m) {
         case 0: return "stored";   case 8: return "deflate";
@@ -187,8 +180,8 @@ static const char* method_name(uint16_t m) {
     }
 }
 
-/* The entry `ent` of the open archive `a` (named `arch` in errors), with *data the offset of its first byte. */
-static ray_t* zip_entry(zip_arch_t* a, const char* arch, const char* ent, size_t elen, zip_ent_t* e, int64_t* data) {
+/* The entry `ent` of the open archive `a`, with *data the offset of its first byte. */
+static ray_t* zip_entry(zip_arch_t* a, const char* ent, size_t elen, zip_ent_t* e, int64_t* data) {
     size_t at = 0;
     int64_t k = 0;
     for (; k < a->count; k++) {
@@ -196,7 +189,7 @@ static ray_t* zip_entry(zip_arch_t* a, const char* arch, const char* ent, size_t
         if (bad) return bad;
         if (e->nlen == elen && memcmp(e->name, ent, elen) == 0) break;
     }
-    if (k == a->count) return zip_fail(QE_DOMAIN, "%s. %.*s has no entry %.*s", arch, strlen(arch), ent, elen);
+    if (k == a->count) return q_io_no_member(a->path, ent, elen);
     if (e->flags & 1) return zip_fail(QE_NYI, "%s. zip entry %.*s is encrypted%.*s", ent, elen, "", 0);
     if (e->method != 0 && e->method != 8) {
         const char* mn = method_name(e->method);
@@ -205,14 +198,14 @@ static ray_t* zip_entry(zip_arch_t* a, const char* arch, const char* ent, size_t
         return zip_fail(QE_NYI, "%s. zip method %.*s of %.*s", m, (size_t)ml, ent, elen);
     }
     if (e->method == 0 && e->csize != e->usize) return corrupt();
-    uint8_t h[LOCAL_LEN];
-    if (e->lho > a->fsize - LOCAL_LEN || q_io_pread_all(a->fd, h, LOCAL_LEN, e->lho) || rd32(h) != SIG_LOCAL
-        || rd16(h + 8) != e->method || rd16(h + 26) != elen) return corrupt();
-    char* nm = (char*)malloc(elen ? elen : 1);
-    if (!nm) return q_err(QE_OOM);
-    int same = q_io_pread_all(a->fd, nm, elen, e->lho + LOCAL_LEN) == 0 && memcmp(nm, ent, elen) == 0;
-    free(nm);
+    if (e->lho > a->fsize - LOCAL_LEN - (int64_t)elen) return corrupt();
+    ray_t* hb = zip_bytes(a->path, e->lho, LOCAL_LEN + elen);
+    if (RAY_IS_ERR(hb)) return hb;
+    const uint8_t* h = (const uint8_t*)ray_data(hb);
+    int same = rd32(h) == SIG_LOCAL && rd16(h + 8) == e->method && rd16(h + 26) == elen
+            && memcmp(h + LOCAL_LEN, ent, elen) == 0;
     *data = e->lho + LOCAL_LEN + (int64_t)elen + rd16(h + 28);
+    ray_release(hb);
     if (!same || e->csize > a->fsize - *data) return corrupt();
     return NULL;
 }
@@ -222,74 +215,46 @@ static ray_t* zip_entry(zip_arch_t* a, const char* arch, const char* ent, size_t
 enum { ZS_LIVE, ZS_DONE, ZS_FAILED };
 
 typedef struct {
-    int          fd;
+    q_io_stream_t io;
+    ray_t*       path;                      /* owned */
     uint16_t     method;
     uint32_t     crc_want, crc;
     int64_t      data, csize, usize;
-    int64_t      in_pos, out_pos;           /* compressed bytes fetched; bytes produced */
-    uint8_t*     in;
-    size_t       in_len, in_at;
+    int64_t      in_pos;                    /* compressed bytes fetched */
+    ray_t*       in;
+    size_t       in_at;
     q_gz_raw_t*  z;
     int          ended, state;
 } zip_stream_t;
 
-static void zs_close(zip_stream_t* s) {
-    if (s->fd >= 0) close(s->fd);
-    s->fd = -1;
-    free(s->in);
-    s->in = NULL;
-    q_gz_raw_free(s->z);
-    s->z = NULL;
-}
-
-static ray_t* zs_open(const char* p, size_t n, zip_stream_t* s) {
-    memset(s, 0, sizeof *s);
-    s->fd = -1;
-    char* arch = NULL;
-    const char* ent = NULL;
-    size_t elen = 0;
-    ray_t* bad = zip_split(p, n, &arch, &ent, &elen);
-    if (bad) return bad;
-    zip_arch_t a;
-    zip_ent_t e;
-    bad = arch_open(arch, &a);
-    if (!bad) bad = zip_entry(&a, arch, ent, elen, &e, &s->data);
-    free(arch);
-    free(a.cd);
-    s->fd = a.fd;
-    if (bad) { zs_close(s); return bad; }
-    s->method = e.method;
-    s->crc_want = e.crc;
-    s->csize = e.csize;
-    s->usize = e.usize;
-    if (s->method == 8 && (!(s->in = (uint8_t*)malloc(ZIP_INBUF)) || !(s->z = q_gz_raw_new()))) {
-        zs_close(s);
-        return q_err(QE_OOM);
-    }
-    return NULL;
-}
-
-static ray_t* zs_fail(zip_stream_t* s) {
+static ray_t* zs_fail(zip_stream_t* s, ray_t* why) {
     s->state = ZS_FAILED;
-    return corrupt();
+    return why ? why : corrupt();
 }
 
-/* one inflate step into out[0..cap), fetching input when the buffer is spent; -1 = bad or truncated data */
-static int zs_inflate(zip_stream_t* s, uint8_t* out, size_t cap, size_t* made) {
-    if (s->in_at == s->in_len && s->in_pos < s->csize) {
+static size_t zs_avail(const zip_stream_t* s) { return s->in ? (size_t)q_count(s->in) - s->in_at : 0; }
+
+/* one inflate step into out[0..cap), fetching input when the buffer is spent: the transport's error, or 'corrupt
+ * for bad or truncated data */
+static ray_t* zs_inflate(zip_stream_t* s, uint8_t* out, size_t cap, size_t* made) {
+    if (!zs_avail(s) && s->in_pos < s->csize) {
         int64_t k = s->csize - s->in_pos < (int64_t)ZIP_INBUF ? s->csize - s->in_pos : (int64_t)ZIP_INBUF;
-        if (q_io_pread_all(s->fd, s->in, (size_t)k, s->data + s->in_pos)) return -1;
+        if (s->in) ray_release(s->in);
+        s->in = zip_bytes(s->path, s->data + s->in_pos, (size_t)k);
+        if (RAY_IS_ERR(s->in)) {
+            ray_t* e = s->in;
+            s->in = NULL;
+            return e;
+        }
         s->in_pos += k;
-        s->in_len = (size_t)k;
         s->in_at = 0;
     }
-    size_t used = 0;
-    int rc = q_gz_raw_step(s->z, s->in + s->in_at, s->in_len - s->in_at, &used, out, cap, made);
+    size_t used = 0, avail = zs_avail(s);
+    int rc = q_gz_raw_step(s->z, avail ? (const uint8_t*)ray_data(s->in) + s->in_at : (const uint8_t*)"", avail,
+                           &used, out, cap, made);
     s->in_at += used;
-    if (rc < 0) return -1;
     if (rc == 1) s->ended = 1;
-    else if (!used && !*made) return -1;
-    return 0;
+    return rc < 0 || (rc == 0 && !used && !*made) ? corrupt() : NULL;
 }
 
 /* the entry's end: the stream closes exactly at usize, on exactly csize bytes, with the central CRC */
@@ -298,128 +263,92 @@ static ray_t* zs_finish(zip_stream_t* s) {
         while (!s->ended) {
             uint8_t extra;
             size_t made = 0;
-            if (zs_inflate(s, &extra, 1, &made) || made) return zs_fail(s);
+            ray_t* bad = zs_inflate(s, &extra, 1, &made);
+            if (bad || made) return zs_fail(s, bad);
         }
-        if (s->in_pos - (int64_t)(s->in_len - s->in_at) != s->csize) return zs_fail(s);
+        if (s->in_pos - (int64_t)zs_avail(s) != s->csize) return zs_fail(s, NULL);
     }
-    if (s->crc != s->crc_want) return zs_fail(s);
+    if (s->crc != s->crc_want) return zs_fail(s, NULL);
     s->state = ZS_DONE;
     return NULL;
 }
 
-/* up to `want` bytes into out; *got what came; the entry's last bytes are only handed over once checked */
-static ray_t* zs_read(zip_stream_t* s, uint8_t* out, size_t want, size_t* got) {
+/* up to `want` bytes into out; the entry's last bytes are only handed over once checked */
+static ray_t* zs_next(q_io_stream_t* io, uint8_t* out, size_t want, size_t* got) {
+    zip_stream_t* s = (zip_stream_t*)io;
     *got = 0;
     if (s->state == ZS_FAILED) return corrupt();
-    while (s->state == ZS_LIVE && *got < want && s->out_pos < s->usize) {
+    int64_t at = io->pos;
+    while (s->state == ZS_LIVE && *got < want && at < s->usize) {
         size_t room = want - *got;
-        if ((int64_t)room > s->usize - s->out_pos) room = (size_t)(s->usize - s->out_pos);
+        if ((int64_t)room > s->usize - at) room = (size_t)(s->usize - at);
         size_t made = 0;
         if (s->method == 0) {
-            if (q_io_pread_all(s->fd, out + *got, room, s->data + s->out_pos)) return zs_fail(s);
+            ray_t* b = zip_bytes(s->path, s->data + at, room);
+            if (RAY_IS_ERR(b)) return zs_fail(s, b);
+            memcpy(out + *got, ray_data(b), room);
+            ray_release(b);
             made = room;
-        } else if (zs_inflate(s, out + *got, room, &made) || (s->ended && s->out_pos + (int64_t)made < s->usize)) {
-            return zs_fail(s);
+        } else {
+            ray_t* bad = zs_inflate(s, out + *got, room, &made);
+            if (bad || (s->ended && at + (int64_t)made < s->usize)) return zs_fail(s, bad);
         }
         s->crc = q_gz_crc32(s->crc, out + *got, made);
-        s->out_pos += (int64_t)made;
+        at += (int64_t)made;
         *got += made;
     }
-    return s->state == ZS_LIVE && s->out_pos == s->usize ? zs_finish(s) : NULL;
+    return s->state == ZS_LIVE && at == s->usize ? zs_finish(s) : NULL;
 }
 
-/* Bytes [off, off+want) of the stream from where it stands, want < 0 = to the end: a buffer grown as the entry
- * inflates, never sized from the central record alone. */
-static ray_t* zs_slice(zip_stream_t* s, int64_t off, int64_t want) {
-    uint8_t* buf = NULL;
-    size_t len = 0, cap = 0;
-    ray_t* bad = NULL;
-    for (;;) {
-        int skip = s->out_pos < off;
-        int64_t left = skip ? off - s->out_pos : want < 0 ? INT64_MAX : want - (int64_t)len;
-        if (!left) break;
-        size_t step = left < ((int64_t)1 << 20) ? (size_t)left : (size_t)1 << 20;
-        size_t at = skip ? 0 : len;
-        if (at + step > cap) {
-            size_t nc = cap ? cap * 2 : step;
-            while (nc < at + step) nc *= 2;
-            uint8_t* nb = (uint8_t*)realloc(buf, nc);
-            if (!nb) { bad = q_err(QE_OOM); break; }
-            buf = nb;
-            cap = nc;
-        }
-        size_t got = 0;
-        if ((bad = zs_read(s, buf + at, step, &got)) || !got) break;
-        if (!skip) len += got;
+static void zs_free(q_io_stream_t* io) {
+    zip_stream_t* s = (zip_stream_t*)io;
+    if (s->in) ray_release(s->in);
+    ray_release(s->path);
+    q_gz_raw_free(s->z);
+    free(s);
+}
+
+ray_t* q_zip_member(ray_t* arch, int64_t asize, const char* m, size_t mn, q_io_stream_t** out, int64_t* size) {
+    *out = NULL;
+    zip_arch_t a;
+    zip_ent_t e;
+    int64_t data = 0;
+    ray_t* bad = arch_open(arch, asize, &a);
+    if (!bad) bad = zip_entry(&a, m, mn, &e, &data);
+    free(a.cd);
+    if (bad) return bad;
+    zip_stream_t* s = (zip_stream_t*)calloc(1, sizeof *s);
+    q_gz_raw_t* z = e.method == 8 ? q_gz_raw_new() : NULL;
+    if (!s || (e.method == 8 && !z)) {
+        free(s);
+        q_gz_raw_free(z);
+        return q_err(QE_OOM);
     }
-    ray_t* out = bad ? bad : ray_vec_from_raw(RAY_BYTE_ONLY, buf ? buf : (const uint8_t*)"", (int64_t)len);
-    free(buf);
-    return out;
-}
-
-ray_t* q_zip_read(ray_t* pathstr, int64_t off, int64_t want) {
-    zip_stream_t s;
-    ray_t* bad = zs_open(ray_str_ptr(pathstr), ray_str_len(pathstr), &s);
-    if (bad) return bad;
-    ray_t* out = zs_slice(&s, off < 0 ? 0 : off, want);
-    zs_close(&s);
-    return out;
-}
-
-ray_t* q_zip_size(ray_t* pathstr) {
-    zip_stream_t s;
-    ray_t* bad = zs_open(ray_str_ptr(pathstr), ray_str_len(pathstr), &s);
-    if (bad) return bad;
-    zs_close(&s);
-    return ray_i64(s.usize);
-}
-
-/* ---- the handles: a reserved fd keys each open stream ---- */
-
-typedef struct { int64_t fd; zip_stream_t s; } zip_handle_t;
-static zip_handle_t* g_zh;
-static int64_t g_zh_n, g_zh_cap;
-
-ray_t* q_zip_handle_open(const char* path, size_t n, int64_t* fd) {
-    if (g_zh_n == g_zh_cap) {
-        int64_t nc = g_zh_cap ? g_zh_cap * 2 : 4;
-        zip_handle_t* nz = (zip_handle_t*)realloc(g_zh, (size_t)nc * sizeof *nz);
-        if (!nz) return q_err(QE_OOM);
-        g_zh = nz;
-        g_zh_cap = nc;
-    }
-    zip_stream_t s;
-    ray_t* bad = zs_open(path, n, &s);
-    if (bad) return bad;
-    *fd = q_handles_reserve_fd();
-    if (*fd < 0) { zs_close(&s); return q_err(QE_IO); }
-    g_zh[g_zh_n++] = (zip_handle_t){ *fd, s };
+    ray_retain(arch);
+    *s = (zip_stream_t){ .io = { zs_next, zs_free, 0, 0 }, .path = arch, .method = e.method, .crc_want = e.crc,
+                         .data = data, .csize = e.csize, .usize = e.usize, .z = z };
+    *out = &s->io;
+    *size = e.usize;
     return NULL;
 }
 
-ray_t* q_zip_handle_read(int64_t fd, int64_t want) {
-    for (int64_t i = 0; i < g_zh_n; i++)
-        if (g_zh[i].fd == fd) return zs_slice(&g_zh[i].s, g_zh[i].s.out_pos, want);
-    return NULL;
-}
-
-int q_zip_handle_close(int64_t fd) {
-    for (int64_t i = 0; i < g_zh_n; i++) {
-        if (g_zh[i].fd != fd) continue;
-        zs_close(&g_zh[i].s);
-        close((int)fd);
-        g_zh[i] = g_zh[--g_zh_n];
-        return 1;
+ray_t* q_zip_names(ray_t* arch, int64_t asize) {
+    zip_arch_t a;
+    ray_t* bad = arch_open(arch, asize, &a);
+    ray_t* out = bad ? NULL : ray_list_new(a.count);
+    size_t at = 0;
+    for (int64_t i = 0; !bad && i < a.count; i++) {
+        zip_ent_t e;
+        if ((bad = arch_next(&a, &at, &e))) break;
+        if (e.nlen && e.name[e.nlen - 1] == '/') continue;
+        ray_t* nm = ray_charv((const char*)e.name, (int64_t)e.nlen);
+        out = ray_list_append(out, nm);
+        ray_release(nm);
     }
-    return 0;
-}
-
-void q_zip_forget(void) {
-    for (int64_t i = 0; i < g_zh_n; i++) {
-        free(g_zh[i].s.in);
-        q_gz_raw_free(g_zh[i].s.z);
-    }
-    g_zh_n = 0;
+    free(a.cd);
+    if (!bad) return out;
+    if (out) ray_release(out);
+    return bad;
 }
 
 /* ---- .zip.i.info: the central directory as a table ---- */
@@ -449,8 +378,7 @@ static ray_t* zip_info_fn(ray_t* x) {
     ray_release(xs);
     if (!path) return q_err(QE_TYPE);
     zip_arch_t a;
-    ray_t* bad = arch_open(ray_str_ptr(path), &a);
-    ray_release(path);
+    ray_t* bad = arch_open(path, -1, &a);
     static const char* nm[] = { "name", "size", "csize", "method", "crc", "modified" };
     int64_t names[6];
     ray_t* accs[6];
@@ -474,7 +402,8 @@ static ray_t* zip_info_fn(ray_t* x) {
             ray_release(cell[k]);
         }
     }
-    arch_close(&a);
+    free(a.cd);
+    ray_release(path);
     if (bad) {
         for (int k = 0; k < 6; k++) ray_release(accs[k]);
         return bad;

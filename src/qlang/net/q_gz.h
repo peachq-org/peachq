@@ -43,9 +43,12 @@ int q_gz_inflate_zlib_in(const uint8_t* src, size_t src_len,
 
 /* A raw RFC 1951 stream inflated a buffer at a time (a zip entry, read forward).  q_gz_raw_step moves what it can
  * from in into out, reporting both counts: 1 once the stream has ended, 0 when it needs more input or room, -1 on
- * bad data. */
+ * bad data.  q_gz_member_new reads RFC 1952 members instead, each one's CRC-32 and length checked: 1 ends a member,
+ * and q_gz_raw_reset readies the stream for the next member of a concatenation. */
 typedef struct q_gz_raw q_gz_raw_t;
 q_gz_raw_t* q_gz_raw_new(void);
+q_gz_raw_t* q_gz_member_new(void);
+int  q_gz_raw_reset(q_gz_raw_t* s);
 int  q_gz_raw_step(q_gz_raw_t* s, const uint8_t* in, size_t in_len, size_t* in_used,
                    uint8_t* out, size_t out_cap, size_t* out_len);
 void q_gz_raw_free(q_gz_raw_t* s);
