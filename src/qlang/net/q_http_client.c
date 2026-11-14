@@ -708,14 +708,25 @@ static ray_t* http_status_body(ray_t* b, int status) {
     return q_err(QE_IO);
 }
 
+ray_t* q_http_client_size(ray_t* url) {
+    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    int st = 0;
+    int64_t total = -1;
+    http_req_t hr = { .head = 1, .roff = -1, .status = &st, .clen = &total };
+    ray_t* h = http_do(url, &hr);
+    if (RAY_IS_ERR(h)) return h;
+    ray_release(h);
+    return st >= 200 && st < 300 && total >= 0 ? ray_i64(total) : q_err(QE_IO);
+}
+
 /* ---- the http transport under the resource-read seam (q_io_resource_read) ----
  * read0/read1 reach HTTP through the SAME seam
  * the file transport sits behind, and a ranged call really does send `Range:`.
  * One q-level read is one GET; a ranged one first asks HEAD for the length so the
  * clamp is q_io_clamp's law rather than a server's 416 discipline.  That HEAD is a
  * BEST-EFFORT probe and can only ever improve the clamp: refused, failed outright,
- * or answering with no length at all (peachq's listener answers 501; a CDN-fronted
- * API answers chunked with no Content-Length), the read falls back to clamping the
+ * or answering with no length at all (a CDN-fronted API answers chunked with no
+ * Content-Length), the read falls back to clamping the
  * GET's own answer — which is the whole body when the server ignores `Range:`. */
 ray_t* q_http_client_read_slice(ray_t* url, int64_t off, int64_t want) {
     if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
@@ -726,11 +737,9 @@ ray_t* q_http_client_read_slice(ray_t* url, int64_t off, int64_t want) {
         return http_status_body(b, st);
     }
     if (off < 0) off = 0;
-    int hst = 0; int64_t total = -1;
-    http_req_t hr = { .head = 1, .roff = -1, .status = &hst, .clen = &total };
-    ray_t* h = http_do(url, &hr);
-    if (RAY_IS_ERR(h)) ray_error_free(h); else ray_release(h);
-    if (hst >= 200 && hst < 300 && total >= 0) want = q_io_clamp(total, &off, want);
+    ray_t* total = q_http_client_size(url);
+    if (RAY_IS_ERR(total)) ray_error_free(total);
+    else { want = q_io_clamp(total->i64, &off, want); ray_release(total); }
     if (want == 0) return ray_vec_from_raw(RAY_BYTE_ONLY, NULL, 0);
 
     http_req_t r = { .roff = off, .rlen = want, .as_bytes = 1, .status = &st };

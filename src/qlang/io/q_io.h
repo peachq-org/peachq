@@ -1,7 +1,11 @@
 /* q_io — THE byte core: what a path is, a file's size, its bytes, and how
  * bytes are written.  One clamp law, one mkdir law, one kxzip home.  Every read
- * reaches its transport — the filesystem, a zip:// entry, an s3:// object —
- * through one choke point of three operations: size, ranged read and list. */
+ * reaches its transport — the filesystem, an s3:// object, an https:// resource —
+ * through one choke point of three operations: size, ranged read and list.
+ * Schemes name transports; containers are DETECTED: a path component named
+ * `.zip`, `.tar`, `.tar.gz` or `.tgz` that is a FILE is an archive walked into,
+ * one that is a directory a folder.  An archive is read over the same three
+ * operations, so it works over every transport, and inside another archive. */
 #ifndef Q_IO_H
 #define Q_IO_H
 
@@ -31,11 +35,11 @@ int q_io_path_inside(const char* path, size_t n);
 
 /* How big the file IS as a long, 'io when it is not there: a kxzip container
  * answers with its ORIGINAL file's length (ref/hcount.md), one that will not
- * decode with its own; a zip:// entry its uncompressed size. */
+ * decode with its own; an archive member its uncompressed size. */
 ray_t* q_io_file_size(ray_t* pathstr);
 
 /* `key` of a path: the sorted names in the directory (an s3:// prefix), () when
- * nothing is there, NULL when it names a file. */
+ * nothing is there, NULL when it names a file (an archive member included). */
 ray_t* q_io_list(ray_t* pathstr);
 
 /* read0/read1/`0:`'s `(file;offset[;length])`.  NULL with *path OWNED and
@@ -58,7 +62,7 @@ int64_t q_io_clamp(int64_t size, int64_t* off, int64_t want);
 /* THE resource-read seam beneath read0/read1: an `http(s)://` path reads over
  * HTTP, a scheme DuckDB's httpfs speaks (gcs:// hf:// …) through
  * `.duckdb.i.read1` by name (restricted → 'access; the whole object, sliced here),
- * anything else through the byte reader (a zip:// entry and an s3:// object included),
+ * anything else through the byte reader (an archive member and an s3:// object included),
  * under q_io_read_slice's contract unchanged.
  * q_io_resource_chunkable is what a DECODER asks instead of naming a transport
  * — 0 means repeated ranged pulls are not cheap, so fetch once and slice.  Both
@@ -66,10 +70,58 @@ int64_t q_io_clamp(int64_t size, int64_t* off, int64_t want);
 ray_t* q_io_resource_read(ray_t* pathstr, int64_t off, int64_t want);
 int q_io_resource_chunkable(ray_t* pathstr);
 
-/* Does this `:…` resource decode to a table by its recognised final suffix?
- * NULL = no, and the caller falls back to q's own object load; else an OWNED
- * table, or an owned error for a resource claimed and not decodable. */
+/* Does this `:…` resource decode to a table by its recognised final suffix (a
+ * text format's under a `.gz`)?  NULL = no, and the caller falls back to q's own
+ * object load; else an OWNED table, or an owned error for a resource claimed and
+ * not decodable.  An archive is read as its one entry: several are 'type naming
+ * them. */
 ray_t* q_io_resource_table(ray_t* fsym);
+
+/* Does the name end `.gz` — the table doors' compression='auto' (DuckDB's)? */
+int q_io_gz_named(ray_t* pathstr);
+
+/* ---- forward streams ---- */
+
+/* Bytes handed over in order: an archive member as it inflates, a gzip file's text, a range of a file.  `next`
+ * gives up to `want` bytes from `pos` into out (*got 0 only at the end, never a short read before it); `seekable`
+ * says a forward skip is free, else skipping reads.  Every error is owned; after one the stream is only closed. */
+typedef struct q_io_stream q_io_stream_t;
+struct q_io_stream {
+    ray_t*  (*next)(q_io_stream_t* s, uint8_t* out, size_t want, size_t* got);
+    void    (*free)(q_io_stream_t* s);
+    int     seekable;
+    int64_t pos;
+};
+
+/* OWNED bytes [off, off+want) (want < 0 = to the end), from where the stream stands forward: an offset behind
+ * it is 'domain.  A short read is the end. */
+ray_t* q_io_stream_slice(q_io_stream_t* s, int64_t off, int64_t want);
+void   q_io_stream_close(q_io_stream_t* s);
+
+/* The stored bytes [base, base+limit) of a path, read in ranges (limit < 0 = to the end); NULL on OOM. */
+q_io_stream_t* q_io_range_stream(ray_t* pathstr, int64_t base, int64_t limit);
+/* The first `limit` bytes of `inner`, which it now owns; NULL on OOM (inner closed). */
+q_io_stream_t* q_io_window_stream(q_io_stream_t* inner, int64_t limit);
+/* `inner`'s gzip members inflated back to back (RFC 1952: a concatenation is ONE file), owning inner.  A member
+ * that will not inflate or check, or input ending inside one, is 'corrupt. */
+ray_t* q_io_gunzip_stream(q_io_stream_t* inner, q_io_stream_t** out);
+
+/* An archive's own bytes as stored, wherever it lives (inside another archive included). */
+ray_t* q_io_stored_size(ray_t* pathstr);
+ray_t* q_io_stored_read(ray_t* pathstr, int64_t off, int64_t want);
+
+/* 'domain naming the archive and the member it does not hold. */
+ray_t* q_io_no_member(ray_t* arch, const char* m, size_t mn);
+
+/* Is the path an archive member, whose bytes only come forward?  hopen streams one and .Q.fs loops over it. */
+int q_io_is_member(ray_t* pathstr);
+/* .Q.c.member: q_io_is_member of a path operand, as a boolean. */
+ray_t* q_io_member_fn(ray_t* x);
+/* A member's bytes forward, from the start; *s NULL when the path is no archive member. */
+ray_t* q_io_member_stream(ray_t* pathstr, q_io_stream_t** s);
+
+/* The table doors' bytes: the resource's bytes forward, its gzip members inflated when `gzip`. */
+ray_t* q_io_resource_stream(ray_t* pathstr, int gzip, q_io_stream_t** s);
 
 /* Is x the file-symbol shape (a nonempty `:…` sym atom)?  The ONE home for
  * the name-vs-path spelling — `set`'s env half asks it too. */

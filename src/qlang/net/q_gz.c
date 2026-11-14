@@ -215,11 +215,15 @@ uint8_t* q_gz_deflate_zlib(const uint8_t* src, size_t src_len, int level,
 
 struct q_gz_raw { z_stream zs; };
 
-q_gz_raw_t* q_gz_raw_new(void) {
+static q_gz_raw_t* gz_stream_new(int wbits) {
     q_gz_raw_t* s = (q_gz_raw_t*)calloc(1, sizeof *s);
-    if (s && inflateInit2(&s->zs, -15) != Z_OK) { free(s); s = NULL; }
+    if (s && inflateInit2(&s->zs, wbits) != Z_OK) { free(s); s = NULL; }
     return s;
 }
+
+q_gz_raw_t* q_gz_raw_new(void) { return gz_stream_new(-15); }
+q_gz_raw_t* q_gz_member_new(void) { return gz_stream_new(15 + 16); }
+int q_gz_raw_reset(q_gz_raw_t* s) { return inflateReset(&s->zs) == Z_OK ? 0 : -1; }
 
 int q_gz_raw_step(q_gz_raw_t* s, const uint8_t* in, size_t in_len, size_t* in_used,
                   uint8_t* out, size_t out_cap, size_t* out_len) {
