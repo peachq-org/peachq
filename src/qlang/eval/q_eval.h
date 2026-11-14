@@ -99,6 +99,12 @@ ray_t* q_eval_statement(const char* src, int* parsed);
  * the q_bang.c internal arm over q_eval (basics/internal.md). */
 ray_t* q_eval_value_wrap(ray_t* x);
 
+/* `reval` (-24!, ref/eval.md:41-69): the tree evaluated as `eval` does, with restricted AND blocked set on any
+ * handle, both restored on exit and on error.  _only: is the restriction in force reval's alone, so a read-only
+ * system command may run (owner Q4)?  Under an outer -u 1 it never is. */
+ray_t* q_eval_reval(ray_t* x);
+int    q_eval_reval_only(void);
+
 /* the ONE typed-vector element writer (result construction + amend leaves):
  * 0 on success, -1 when the width isn't reachable (callers splice); _ok = the
  * vec types it reaches, so gates stay in step with the writer. */

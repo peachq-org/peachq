@@ -507,7 +507,7 @@ static void splay_bind_domain(splay_ent* e) {
         ray_t* d = (ps && !RAY_IS_ERR(ps)) ? q_wirefile_read_column(ps) : NULL;
         if (ps && !RAY_IS_ERR(ps)) ray_release(ps);
         if (d && !RAY_IS_ERR(d) && d->type == RAY_SYM)
-            (void)q_env_set(ray_sym_intern_runtime(name, nn), d);   /* retains */
+            (void)q_env_set_internal(ray_sym_intern_runtime(name, nn), d);   /* retains */
         if (d && !RAY_IS_ERR(d)) ray_release(d);
         else if (d) ray_error_free(d);
         return;

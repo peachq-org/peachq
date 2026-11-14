@@ -25,6 +25,7 @@
 #include "qlang/net/q_wire.h"   /* q_wire_uncompress_into, q_wire_compress — the kdb-IPC (algorithm 1) block codec */
 #include "qlang/net/q_wirefile.h" /* the format writers behind q_io_set */
 #include "qlang/net/q_http_client.h" /* the http half of the resource-read seam */
+#include "qlang/ops/q_sys.h"     /* q_sys_started_restricted / _blocked — the -u 1 and -b a process started with */
 #include "lang/eval.h"      /* ray_eval_get_restricted */
 #include "lang/env.h"       /* ray_fn_unary — the .fs.i.rmtree native */
 #include "lang/internal.h"  /* ray_fs_list_fn — the quarry's sorted directory listing */
@@ -169,17 +170,26 @@ static int io_allowed(const char* p, size_t n) {
     return !ray_eval_get_restricted() || io_admits(NULL, 0, p, n) || (g_lent && io_admits(g_lent, g_lent_n, p, n));
 }
 
-static ray_t* io_refused(const char* p, size_t n) {
+static ray_t* io_refused(const char* p, size_t n, const char* rule) {
     char msg[PATH_MAX + 64];
-    int k = snprintf(msg, sizeof msg, "access: %.*s (restricted to the current directory)",
-                     (int)(n < PATH_MAX ? n : PATH_MAX), p);
+    int k = snprintf(msg, sizeof msg, "access: %.*s (%s)", (int)(n < PATH_MAX ? n : PATH_MAX), p, rule);
     ray_t* why = ray_charv(msg, k < (int)sizeof msg ? k : (int)sizeof msg - 1);
     ray_t* e = q_err_signal(QE_ACCESS, why);
     if (why && !RAY_IS_ERR(why)) ray_release(why);
     return e;
 }
 
-ray_t* q_io_guard(const char* p, size_t n) { return io_allowed(p, n) ? NULL : io_refused(p, n); }
+#define IO_CWD_ONLY "restricted to the current directory"
+
+ray_t* q_io_guard(const char* p, size_t n) { return io_allowed(p, n) ? NULL : io_refused(p, n, IO_CWD_ONLY); }
+
+ray_t* q_io_guard_write(const char* p, size_t n) {
+    return ray_eval_get_blocked() ? io_refused(p, n, "writes are blocked") : q_io_guard(p, n);
+}
+
+int q_io_locked(void) {
+    return ray_eval_get_restricted() || ray_eval_get_blocked() || q_sys_started_restricted() || q_sys_started_blocked();
+}
 
 static ray_t* io_guard_str(ray_t* pathstr) { return q_io_guard(ray_str_ptr(pathstr), ray_str_len(pathstr)); }
 
@@ -289,12 +299,12 @@ int q_io_open_locked(const char* path) {
     return fd;
 }
 
-static ray_t* io_guard_resource(ray_t* pathstr);
+static ray_t* io_guard_resource(ray_t* pathstr, int write);
 
 ray_t* q_io_write_all(ray_t* pathstr, const void* bytes, size_t n) {
     const char* p = ray_str_ptr(pathstr);
     if (!p) return q_err(QE_DOMAIN);
-    ray_t* refused = io_guard_resource(pathstr);
+    ray_t* refused = io_guard_resource(pathstr, 1);
     if (refused) return refused;
     if (q_s3_is(p, ray_str_len(pathstr)) || q_io_is_member(pathstr)) return q_err(QE_NYI);
     q_io_mkdir_parents(p, ray_str_len(pathstr));
@@ -859,19 +869,20 @@ static int io_is_remote(ray_t* pathstr) {
 
 static int io_is_url(ray_t* pathstr) { return io_is_http(pathstr) || io_is_remote(pathstr); }
 
-/* a URL has no place in the current directory, so restricted mode refuses one outright */
-static ray_t* io_guard_resource(ray_t* pathstr) {
-    if (io_is_url(pathstr)) return ray_eval_get_restricted() ? q_err(QE_ACCESS) : NULL;
-    return io_guard_str(pathstr);
+/* a URL has no place in the current directory, so restricted mode refuses one outright, as blocked mode refuses a
+ * write to one */
+static ray_t* io_guard_resource(ray_t* pathstr, int write) {
+    if (io_is_url(pathstr)) return ray_eval_get_restricted() || (write && ray_eval_get_blocked()) ? q_err(QE_ACCESS) : NULL;
+    return write ? q_io_guard_write(ray_str_ptr(pathstr), ray_str_len(pathstr)) : io_guard_str(pathstr);
 }
 
 /* DuckDB expands a glob and a leading ~ itself, so such a spelling names no one file the rule could judge */
-static ray_t* io_guard_duckdb(ray_t* pathstr) {
+static ray_t* io_guard_duckdb(ray_t* pathstr, int write) {
     const char* p = ray_str_ptr(pathstr);
     size_t n = ray_str_len(pathstr);
     int expands = n && p[0] == '~';
     for (size_t i = 0; i < n && !expands; i++) expands = p[i] == '*' || p[i] == '?' || p[i] == '[' || p[i] == '{';
-    return expands && ray_eval_get_restricted() ? io_refused(p, n) : io_guard_resource(pathstr);
+    return expands && ray_eval_get_restricted() ? io_refused(p, n, IO_CWD_ONLY) : io_guard_resource(pathstr, write);
 }
 
 int q_io_resource_chunkable(ray_t* pathstr) {
@@ -906,7 +917,7 @@ static int io_suffix_is(const char* p, size_t n, const char* ext) {
 
 /* `.parquet.read[fsym;();()]` by name at call time: standard library, never linked; unbound is '.parquet.read */
 static ray_t* io_parquet_table(ray_t* fsym, ray_t* path) {
-    ray_t* refused = io_guard_duckdb(path);
+    ray_t* refused = io_guard_duckdb(path, 0);
     if (refused) return refused;
     ray_t* none = ray_list_new(0);
     ray_t* args[3] = { fsym, none, none };
@@ -1650,7 +1661,7 @@ static ray_t* io_set_format(ray_t* x, ray_t* y) {
     ray_t* tx = ext < 0 || parquet ? NULL : q_env_get(ray_sym_intern_runtime(".h.tx", 5));   /* borrowed */
     int64_t i = 0, n = tx && tx->type == RAY_DICT && ray_dict_keys(tx)->type == RAY_SYM ? q_count(ray_dict_keys(tx)) : 0;
     while (i < n && ray_vec_get_sym_id(ray_dict_keys(tx), i) != ext) i++;
-    ray_t* refused = parquet ? io_guard_duckdb(path) : i < n ? io_guard_resource(path) : NULL;
+    ray_t* refused = parquet ? io_guard_duckdb(path, 1) : i < n ? io_guard_resource(path, 1) : NULL;
     ray_release(path);
     if (refused) return refused;
     if (parquet) {
@@ -1737,10 +1748,10 @@ static int io_remove_any(const char* p) {
  * file symbol `:path and return x.  POSIX remove() dispatches unlink/rmdir, so
  * a folder is removed only when empty (the doc's "folders only if empty").  A
  * missing path or non-empty folder surfaces 'io (the read0 ENOENT precedent).
- * WRITES the filesystem, so restricted mode refuses (the file-verb precedent).
+ * WRITES the filesystem, so q_io_locked refuses it.
  * A table coordinate (`:pq:duckdb:db:t/) drops that OBJECT through its provider. */
 ray_t* q_hdel_wrap(ray_t* x) {
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (q_io_locked()) return q_err(QE_ACCESS);
     if (!x || x->type != -RAY_SYM) return q_err(QE_TYPE);  /* a DELETE takes only the
                                                             * file symbol it documents */
     ray_t* pr = q_provider_hdel(x);
@@ -1954,7 +1965,7 @@ static ray_t* rmtree_path(const char* p) {
 
 /* `.fs.i.rmtree x` — delete the directory tree at the file symbol x and answer x; a link is removed, never followed */
 static ray_t* rmtree_fn(ray_t* x) {
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (q_io_locked()) return q_err(QE_ACCESS);
     ray_t* path = q_io_path_operand(x);
     if (!path) return q_err(QE_TYPE);
     const char* p = ray_str_ptr(path);

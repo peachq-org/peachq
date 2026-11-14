@@ -133,6 +133,8 @@ void   ray_clear_error_trace(void) {
 
 void ray_eval_set_restricted(bool on) { if (__VM) __VM->restricted = on; }
 bool ray_eval_get_restricted(void)    { return __VM && __VM->restricted; }
+void ray_eval_set_blocked(bool on)    { if (__VM) __VM->blocked = on; }
+bool ray_eval_get_blocked(void)       { return __VM && __VM->blocked; }
 
 static inline bool fn_is_restricted(ray_t* fn_obj) {
     return __VM->restricted && (fn_obj->attrs & RAY_FN_RESTRICTED);

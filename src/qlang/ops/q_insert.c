@@ -76,11 +76,12 @@ static ray_t* carrier_insert(ray_t* car, ray_t* y) {
 ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
     if (!x || x->type != -RAY_SYM)
         return q_err(QE_TYPE);
+    if (q_env_writable(x->i64) != RAY_OK) return q_env_err(RAY_ERR_NOUPDATE);
     ray_t* g = q_env_handle_peek(x->i64);                        /* borrowed; a write loads no library */
     if (!g) {                                             /* create */
         if (y && (y->type == RAY_TABLE || q_type_is_keyed(y))) {
-            q_env_handle_set(x->i64, y);                         /* retains */
-            return idx_range(0, q_count(y));
+            ray_err_t e = q_env_handle_set(x->i64, y);           /* retains */
+            return e == RAY_OK ? idx_range(0, q_count(y)) : q_env_err(e);
         }
         return q_err(QE_TYPE);
     }
@@ -123,6 +124,7 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
     if (pr) return pr;
     if (q_io_is_fsym(x)) return q_wirefile_append(x, y);  /* file target: the one
                                                            * flat-append kernel */
+    if (x && x->type == -RAY_SYM && q_env_writable(x->i64) != RAY_OK) return q_env_err(RAY_ERR_NOUPDATE);
     ray_t* car = x && x->type == -RAY_SYM ? q_env_handle_peek(x->i64) : x;   /* a carrier, named or as the value */
     if (q_provider_carrier_is(car)) {
         pr = q_provider_write(ray_dict_vals(car), y, 1);
@@ -147,7 +149,8 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
     if (!t) {
         if (x && x->type == -RAY_SYM && !car &&
             y && (y->type == RAY_TABLE || q_type_is_keyed(y))) {
-            q_env_handle_set(x->i64, y);                         /* create, like insert */
+            ray_err_t e = q_env_handle_set(x->i64, y);           /* create, like insert */
+            if (e != RAY_OK) return q_env_err(e);
             ray_retain(x);
             return x;
         }

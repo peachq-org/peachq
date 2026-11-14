@@ -67,7 +67,8 @@ typedef struct {
      * page+32, so offsets 0..31 share one cache line. */
     int32_t          eval_depth;
     int32_t          scope_depth;
-    bool             restricted; /* -U connection on this stack */
+    bool             restricted; /* -u connection or reval on this stack: files within the cwd */
+    bool             blocked;    /* -b connection or reval on this stack: no updates */
     int32_t          id;
     ray_t           *nfo;        /* source-info of the eval in progress (borrowed) */
     void            *heap;

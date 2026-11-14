@@ -212,6 +212,7 @@ int main(int argc, char** argv) {
     bool        classic = false;
     const char* auth_file = NULL;
     bool        auth_restricted = false;
+    bool        blocked = false;
     int         tls_mode = 0;
     bool        want_help = false;
     const char* duckdb_main = getenv("PEACHQ_DUCKDB_MAIN");
@@ -237,6 +238,7 @@ int main(int argc, char** argv) {
         if (strcmp(a, "-p") == 0 || strcmp(a, "--port") == 0) port_spec = v;
         else if (strcmp(a, "-E") == 0) tls_mode = v[0] - '0';
         else if (strcmp(a, "-classic") == 0) classic = true;
+        else if (strcmp(a, "-b") == 0) blocked = true;
         else if (strcmp(a, "-duckdb") == 0) q_duckdb_main_path_set(duckdb_main = v);
         else if (strcmp(a, "-U") == 0) auth_file = v;
         else if (strcmp(a, "-u") == 0) {
@@ -282,7 +284,10 @@ int main(int argc, char** argv) {
     ray_poll_t* poll = ray_poll_create();
     if (poll) ray_runtime_set_poll(poll);
 
-    if (poll) poll->restricted = auth_restricted;
+    if (poll) {
+        poll->restricted = auth_restricted;
+        poll->blocked = blocked;
+    }
 
     /* a worker is never a console, even where its NUL stdin reads as a character device (Windows) */
     int stdin_tty = link < 0 && isatty(STDIN_FILENO);
