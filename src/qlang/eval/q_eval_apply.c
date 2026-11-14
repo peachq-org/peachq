@@ -2239,6 +2239,7 @@ static ray_t* name_lift(const q_op_t* row, ray_t** args, int64_t n, int dot) {
         return q_err(QE_NYI);
     }
     int64_t id = args[0]->i64;
+    if (q_env_writable(id) != RAY_OK) return q_env_err(RAY_ERR_NOUPDATE);   /* before the amend's function runs */
     ray_t* cur = q_env_handle_peek(id);              /* borrowed, at the session `\d`; a write loads no library */
     int stole = 0;
     if (q_splay_table_path(cur)) return q_err(QE_SPLAY);   /* a mapped global takes no write (kb/splayed-tables.md:350) */

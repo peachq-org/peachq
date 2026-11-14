@@ -90,7 +90,8 @@ struct ray_poll {
     uint32_t         n_sels;
     uint32_t         sel_cap;
     char             auth_secret[256]; /* password from -u/-U, empty = no auth */
-    bool             restricted;       /* true if -U (read-only IPC mode) */
+    bool             restricted;       /* -u: remote evaluations restricted to the cwd */
+    bool             blocked;          /* -b: remote evaluations update nothing */
     void*            timers;           /* opaque ray_timers_t*; lazily allocated */
 };
 

@@ -215,12 +215,27 @@ void q_sys_forked(void) {
     g_listen_sel  = -1;
 }
 
-/* q `exit x` — terminate with exit code x (ref/exit.md; blocked during reval
- * -> 'access, kdb-true).  All processing lives in q_sys_exit (fires `.z.exit`,
+int q_sys_started_restricted(void) {
+    ray_poll_t* p = (ray_poll_t*)ray_runtime_get_poll();
+    return p && p->restricted;
+}
+
+int q_sys_started_blocked(void) {
+    ray_poll_t* p = (ray_poll_t*)ray_runtime_get_poll();
+    return p && p->blocked;
+}
+
+int q_sys_update_blocked(void) { return ray_eval_get_blocked() || q_sys_started_blocked(); }
+
+/* exit and `\\` under -u 1 or reval are refused on a remote handle only (releases/ChangesIn4.1.md:278), never on the
+ * console */
+static int sys_exit_refused(void) { return ray_eval_get_restricted() && ray_ipc_current_handle() >= 0; }
+
+/* q `exit x` — terminate with exit code x (ref/exit.md).  All processing lives in q_sys_exit (fires `.z.exit`,
  * capability-gated): under the doctest/wasm runtimes q_sys_exit returns and the
  * verb is a silent null — the runner survives corpus `exit 0` rows. */
 ray_t* q_exit_wrap(ray_t* x) {
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (sys_exit_refused()) return q_err(QE_ACCESS);
     if (!q_type_is_int_atom(x) || RAY_ATOM_IS_NULL(x)) return q_err(QE_TYPE);
     q_sys_exit((int)q_type_iatom_val(x));
     ray_retain(RAY_NULL_OBJ);
@@ -1203,10 +1218,10 @@ static ray_t* sys_shell_capture(const char* rem, size_t rlen) {
 /* The q-owned `system "…"` verb: prepend `\` and PASS THROUGH q_sys_run —
  * `system "X"` ≡ `\X` for every command, one path, and the
  * `\X` LINE arrives here too (q_parse builds this application).  An unknown
- * token shells out, stdout -> list of char vectors.  `system` is a
- * restricted primitive under IPC reval (kdb blocks it) -> 'access. */
+ * token shells out, stdout -> list of char vectors.  A -u 1 remote evaluation runs no system command, a nested
+ * reval included (basics/cmdline.md:379); reval alone runs the ones that change no state (q_sys_run). */
 ray_t* q_system_fn(ray_t* x) {
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
+    if (ray_eval_get_restricted() && !q_eval_reval_only()) return q_err(QE_ACCESS);
     const char* sp; int64_t sn;
     if (!q_str_text_bytes(x, &sp, &sn)) return q_err(QE_TYPE);
     size_t sl = (size_t)sn;
@@ -1237,6 +1252,13 @@ static size_t path_len(const char* rest, size_t restlen) {
         if (rest[i] == '/' && (rest[i - 1] == ' ' || rest[i - 1] == '\t')) { m = i; break; }
     while (m && (rest[m - 1] == ' ' || rest[m - 1] == '\t')) m--;
     return m;
+}
+
+/* the commands reval runs (ref/eval.md:60, owner Q4): a getter with no argument, never a load or a shell; `\\` keeps
+ * exit's own rule */
+static int sys_reads_only(const char* cmd, size_t n, size_t alen) {
+    if (n == 2 && memcmp(cmd, "cd", 2) == 0) return !alen;
+    return n == 1 && (cmd[0] == '\\' || (!alen && strchr("_dvfaSPcCozTgsWewptbBE", cmd[0])));
 }
 
 ray_t* q_sys_run(const char* line, size_t n) {
@@ -1284,6 +1306,7 @@ ray_t* q_sys_run(const char* line, size_t n) {
     /* A LONE `/` token is a bare trailing comment (`\P / default`) → no arg.
      * A multi-char `/…` token is a file PATH (`\l /tmp/db`) → keep it. */
     if (alen == 1 && arg[0] == '/') alen = 0;
+    if (q_eval_reval_only() && !sys_reads_only(cmd, cmd_len, alen)) return q_err(QE_ACCESS);
 
     /* Dispatch on the command TOKEN — a switch on the single command char in
      * the common case, a short length+char check for the multi-char forms
@@ -1320,12 +1343,17 @@ ray_t* q_sys_run(const char* line, size_t n) {
             case '2': return h_redirect(2, arg, alen);           /* stderr redirect     */
             case 'x': return h_x(arg, alen);                     /* expunge a .z callback */
             /* Silent setter/action form (arg present) → NULL; getter → 'nyi:
-             * \r replicate, \u user-pwd, \_ hide-q-code. */
-            case 'r': case 'u': case '_':
+             * \r replicate, \u user-pwd. */
+            case 'r': case 'u':
                 return h_getset(alen);
+            /* `\_` with no script: is client write-access blocked (basics/syscmds.md:1013-1016) */
+            case '_': return alen ? NULL : ray_bool(q_sys_update_blocked());
             /* \\ quit — q_sys_exit is capability-gated (a real process exits firing
              * .z.exit; an embedder returns silently, kdb-true either way). */
-            case '\\': q_sys_exit(0); return NULL;
+            case '\\':
+                if (sys_exit_refused()) return q_err(QE_ACCESS);
+                q_sys_exit(0);
+                return NULL;
         }
     } else if (cmd_len == 2 && cmd[0] == 't' && cmd[1] == 's') {
         return h_ts(alen, rest, restlen, rep);                   /* time and space      */

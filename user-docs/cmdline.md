@@ -48,7 +48,7 @@ and where a `\`-command merely shares the letter, it says so instead.
 
 | Flag | What it does | Status | Applied as |
 |---|---|---|---|
-| `-b` | block client write-access | **consumed only** | none — the reader is `\_`, which is not implemented |
+| `-b` | block client write-access | **applied** (remote handles; `hdel` and `hopen` of a file on every handle) | none — `\_` and `.z.r` read it |
 | `-c r c` | console size (rows, columns) | **applied** | `\c r c` |
 | `-C r c` | HTTP display size | **applied** | `\C r c` |
 | `-e 0\|1\|2` | error-trap mode for client evals | **applied** | `\e` |
@@ -204,8 +204,8 @@ This section is temporary bookkeeping and is expected to disappear as the entrie
   where the kx system-commands page shows `0b`. The cmdline/options qscript suite pins `1b`, following the
   system-commands page as the shape authority its header cites. Nothing to fix in the engine until the corpus is
   reconciled; recorded so the next reader does not "correct" the golden to the other page.
-- **`-b -T -w -l -L -r -m` are consumed but not applied** — none has a working `\` command to apply it through
-  (`\_` and `\T` answer `'nyi`), so the cmdline/options rows for `system "_"` and `system "T"` stay red. `\e \g \W`
+- **`-T -w -l -L -r -m` are consumed but not applied** — none has a working `\` command to apply it through
+  (`\T` answers `'nyi`), so the cmdline/options row for `system "T"` stays red. `\e \g \W`
   answer int by owner ruling (2026-09-24).
 - **`\l` text with a space in the name** — the file loads through the loader `\l` uses, handed the argv token whole,
   so `q 'my file.q'` works; how `\l my file.q` itself should be spelled is unpinned (defects.tsv Dqzvnk, a ruling).

@@ -23,7 +23,7 @@
 #include "qlang/io/q_conn.h"        /* q_conn_bang38 — `-38!` socket table */
 #include "qlang/io/q_handles.h"     /* q_handles_broadcast/deferred — `-25!` broadcast, `-30!` deferred reply */
 #include "qlang/io/q_log.h"         /* q_log_replay — `-11!` streaming execute */
-#include "qlang/eval/q_eval.h"  /* q_eval — `-6!` (internal.md: eval) */
+#include "qlang/eval/q_eval.h"  /* q_eval — `-6!` (internal.md: eval); q_eval_reval — `-24!` */
 #include "qlang/eval/q_dbg.h"   /* q_dbg_trp_dot — `-105!` */
 #include "qlang/q_fmt.h"        /* q_fmt_krepr_charv — the `-3!` / 0N! / .Q.s1 text */
 #include "qlang/q_console.h"    /* q_console_write — 0N!; q_console_clip — the `-3!` cut */
@@ -290,6 +290,7 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
             q_env_scope(scope);
             return r;
         }
+        case -24: return q_eval_reval(y);
         case -7:  return h_hcount(y);
         case -8:  return q_wire_serialize(y, Q_WIRE_ASYNC);
         case -22: return q_wire_serialize_len(y);
@@ -336,10 +337,6 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -19:  /* set / compress file (AMBIGUOUS doc — see PR Deferrals)    */
         case -20:  /* .Q.gc: garbage collect                                    */
         case -23:  /* memory map: mmap-backed objects                          */
-        case -24:  /* reval: restricted eval — PARKED with `value` itself
-                    * (eval-rebuild cutover); needs the RAY_FN_RESTRICTED gate
-                    * inside the fresh apply module so a nested value-apply of
-                    * a restricted VARY cannot bypass it (codex r1/r2 P1).      */
         case -36:  /* load master key: OpenSSL/DARE                            */
         case -37:  /* .Q.prf0: code profiler                                    */
         case -120: /* memory domain: .m namespace                               */

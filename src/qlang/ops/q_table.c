@@ -914,8 +914,9 @@ ray_t* q_xkey_wrap(ray_t* x, ray_t* y) {
         if (!keyed || RAY_IS_ERR(keyed)) return keyed;
     }
     if (sym >= 0) {
-        q_env_handle_set(sym, keyed);                     /* retains */
+        ray_err_t e = q_env_handle_set(sym, keyed);       /* retains */
         ray_release(keyed);
+        if (e != RAY_OK) return q_env_err(e);
         ray_retain(y);
         return y;
     }
