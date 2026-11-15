@@ -71,8 +71,9 @@ static void splay_free_partial(splay_ent* e) {
 
 /* ONE reservation: a guard block whose 16-byte TAIL carries the ray_t header's
  * front, payload at base+guard — so kdb's byte-16 payload lands on header+32.
- * `view` is the separately-unmapped Windows file view (POSIX leaves it NULL). */
-typedef struct { uint8_t* base; void* view; size_t guard, total; } splay_vm;
+ * `view` is the separately-unmapped Windows file view (POSIX leaves it NULL).
+ * `.Q.w` mmap charges `need`, not `total`: the guard and granule (64K on Windows) are ours, not the file's. */
+typedef struct { uint8_t* base; void* view; size_t guard, total, need; } splay_vm;
 
 /* THE unmap choke point's ledger: one row per live mapped column.  A zip row keeps what inflate-on-touch needs for
  * the region's life (kx: two descriptors per compressed file, kb/file-compression.md:159). */
@@ -132,6 +133,7 @@ static ray_t* splay_vm_mapfile(const char* path, size_t need, size_t head, splay
     size_t g = splay_gran();
     r->guard = g;
     r->total = g + ((need + g - 1) / g) * g;
+    r->need = need;
     r->base = NULL; r->view = NULL;
     for (int i = 0; i < 8 && !r->view; i++) {
         uint8_t* p = (uint8_t*)VirtualAlloc(NULL, r->total, MEM_RESERVE, PAGE_NOACCESS);
@@ -152,6 +154,7 @@ static ray_t* splay_vm_reserve(size_t need, splay_vm* r) {
     size_t g = splay_page();
     r->guard = g;
     r->total = g + ((need + g - 1) / g) * g;
+    r->need = need;
     r->view = NULL;
     r->base = (uint8_t*)VirtualAlloc(NULL, r->total, MEM_RESERVE, PAGE_READWRITE);
     /* the header STRADDLES guard|payload, so the first payload page is
@@ -198,6 +201,7 @@ static ray_t* splay_vm_reserve(size_t need, splay_vm* r) {
     size_t g = (size_t)sysconf(_SC_PAGESIZE);
     r->guard = g;
     r->total = g + ((need + g - 1) / g) * g;
+    r->need = need;
     r->view = NULL;
     r->base = (uint8_t*)mmap(NULL, r->total, PROT_READ | PROT_WRITE,
                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -257,7 +261,7 @@ static void splay_region_free(ray_t* v) {
     for (int64_t i = 0; i < g_regn; i++) {
         if (g_regs[i].hdr != v) continue;
         splay_region_drop(&g_regs[i]);
-        g_mapped_bytes -= (int64_t)g_regs[i].vm.total;
+        g_mapped_bytes -= (int64_t)g_regs[i].vm.need;
         g_reg_freed++;
         g_regs[i] = g_regs[--g_regn];   /* swap-remove */
         return;
@@ -435,7 +439,7 @@ static void splay_region_add(ray_t* hdr, const splay_region* r) {
     g_regs[g_regn] = *r;
     g_regs[g_regn].hdr = hdr;
     g_regn++;
-    g_mapped_bytes += (int64_t)r->vm.total;
+    g_mapped_bytes += (int64_t)r->vm.need;
     g_reg_created++;
 }
 
