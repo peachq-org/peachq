@@ -19,9 +19,9 @@
 #include <stdint.h>        /* uintptr_t */
 #include <string.h>
 
-/* ---- collapse: homogeneous atom list -> typed vector (q_registry_internal.h) ---- */
+/* ---- collapse: homogeneous atom list -> typed vector (q_prim.h) ---- */
 
-static ray_t* atom_run_collapse(ray_t* l) {
+ray_t* q_list_collapse_atoms(ray_t* l) {
     if (!l || RAY_IS_ERR(l) || l->type != RAY_LIST || q_count(l) == 0) {
         if (l) ray_retain(l);
         return l;
@@ -133,12 +133,18 @@ static ray_t* dict_rows_table(ray_t* const* rows, int64_t n) {
     return t;
 }
 
+ray_t* q_list_collapse_rows(ray_t* l) {
+    ray_t* tb = l && !RAY_IS_ERR(l) && q_type_is_row_list(l) ? dict_rows_table((ray_t**)ray_data(l), q_count(l)) : NULL;
+    if (tb) return tb;
+    if (l) ray_retain(l);
+    return l;
+}
+
 ray_t* q_list_collapse(ray_t* l) {
-    if (l && !RAY_IS_ERR(l) && q_type_is_row_list(l)) {   /* a run of like rows IS a table */
-        ray_t* tb = dict_rows_table((ray_t**)ray_data(l), q_count(l));
-        if (tb) return tb;
-    }
-    return atom_run_collapse(l);
+    ray_t* tb = q_list_collapse_rows(l);
+    if (tb != l) return tb;
+    if (l) ray_release(l);
+    return q_list_collapse_atoms(l);
 }
 
 ray_t* q_list_uncollapse(ray_t* v) {
