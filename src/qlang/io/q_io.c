@@ -39,7 +39,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>         /* read, isatty — `read0 0` is a raw read of fd 0 */
+#include <unistd.h>         /* read, isatty — `read0 0` is a raw read of fd 0; ftruncate */
 #include <fcntl.h>          /* open — the kxzip block reader's descriptor */
 #include <errno.h>
 #ifdef RAY_OS_WINDOWS
@@ -251,6 +251,13 @@ int q_io_fwrite(FILE* fp, const void* bytes, size_t n) {
         off += c;
     }
     return 0;
+}
+
+ray_t* q_io_truncate(const char* path, int64_t len) {
+    FILE* fp = fopen(path, "r+b");
+    int bad = !fp || ftruncate(fileno(fp), (off_t)len) != 0;
+    if (fp && fclose(fp) != 0) bad = 1;
+    return bad ? q_err(QE_IO) : NULL;
 }
 
 int q_io_write_fd(int fd, const void* bytes, size_t n) {
@@ -1689,6 +1696,16 @@ int q_io_is_fsym(ray_t* v) {
     int is = s && ray_str_len(s) > 0 && ray_str_ptr(s)[0] == ':';
     if (s) ray_release(s);
     return is;
+}
+
+int q_io_names_dir(ray_t* x) {
+    ray_t* path = q_io_is_fsym(x) ? q_io_file_path(x) : NULL;
+    if (!path) return 0;
+    size_t n = ray_str_len(path);
+    struct stat st;
+    int dir = (n && ray_str_ptr(path)[n - 1] == '/') || (stat(ray_str_ptr(path), &st) == 0 && S_ISDIR(st.st_mode));
+    ray_release(path);
+    return dir;
 }
 
 ray_t* q_io_set(ray_t* x, ray_t* y) {
