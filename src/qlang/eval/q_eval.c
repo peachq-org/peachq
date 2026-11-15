@@ -36,6 +36,7 @@
 #include "qlang/io/q_provider.h"   /* q_provider_get_carrier — `get `:pq:duckdb:db:t/ */
 #include "qlang/io/q_splay.h"      /* q_splay_get — `get `:dir/ defers, `:dir and a vector file map; value/amend read the aux path */
 #include "qlang/io/q_io.h"         /* q_io_resource_table — `get `:f.csv reads the format the ending names */
+#include "qlang/io/q_handles.h"    /* q_handles_pq_of — a `:pq: coordinate is no path in parts */
 #include "qlang/q_ctx.h"           /* q_ctx_eval_src — multi-line text under the value law */
 #include "ops/ops.h"
 #include "lang/eval.h"             /* ray_eval_set_restricted / _blocked — reval's two modes */
@@ -858,7 +859,8 @@ ray_t* q_eval_value_wrap(ray_t* x) {
     }
     if (x->type == RAY_SYM && q_count(x) > 1) {
         ray_t* head = ray_sym(ray_vec_get_sym_id(x, 0));
-        int file = q_io_is_fsym(head);
+        const char* ps; size_t pn;
+        int file = q_io_is_fsym(head) && q_handles_pq_of(x, &ps, &pn) == Q_PQ_NONE;
         ray_release(head);
         if (file) {                                /* a path in parts, `:db/t`.d: ` sv joins it (ref/sv.md) */
             ray_t* args[2] = { ray_sym(ray_sym_intern_runtime("", 0)), x };

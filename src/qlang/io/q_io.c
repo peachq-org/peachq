@@ -1717,7 +1717,8 @@ ray_t* q_io_dir_path(ray_t* x, const char* leaf, size_t n) {
 }
 
 int q_io_names_dir(ray_t* x) {
-    ray_t* path = q_io_is_fsym(x) ? q_io_file_path(x) : NULL;
+    const char* ps; size_t pn;
+    ray_t* path = q_io_is_fsym(x) && q_handles_pq_of(x, &ps, &pn) == Q_PQ_NONE ? q_io_file_path(x) : NULL;
     if (!path) return 0;
     size_t n = ray_str_len(path);
     struct stat st;
