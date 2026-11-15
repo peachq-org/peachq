@@ -1495,6 +1495,11 @@ static int wf_row_bytes(ray_t* e, int8_t elem, const char** p, int64_t* nbytes) 
     return 1;
 }
 
+static int64_t wf_size(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0 ? (int64_t)st.st_size : -1;
+}
+
 /* A nested column's two parts from the rows of `col`: the END offsets in elements, counted on from `base`, and the
  * element bytes (*body malloc'd, *total long).  'type for a row that is not a vector of `elem`. */
 static ray_t* wf_nested_parts(ray_t* col, int8_t elem, int64_t base, ray_t** offs, uint8_t** body, size_t* total) {
@@ -1545,6 +1550,9 @@ static ray_t* wf_write_nested(ray_t* path, ray_t* col, int8_t elem,
     ray_t* img = wf_write_b(offs, (uint8_t)(WF_NEST_BIAS + elem));
     ray_release(offs);
     if (RAY_IS_ERR(img)) { free(body); return img; }
+    /* the offsets go first: should the elements then fail, the old offsets come back to the old elements */
+    ray_t* old = wf_size(ray_str_ptr(path)) > 0 ? q_io_stored_read(path, 0, -1) : NULL;
+    if (old && RAY_IS_ERR(old)) { ray_release(img); free(body); return old; }
     bad = wf_put(path, img, lbs, alg, lvl);
     ray_release(img);
     if (!bad) {
@@ -1559,7 +1567,11 @@ static ray_t* wf_write_nested(ray_t* path, ray_t* col, int8_t elem,
             }
             ray_release(cp);
         }
+        ray_t* e = !bad ? NULL : old ? q_io_write_all(path, ray_data(old), (size_t)q_count(old))
+                                     : (remove(ray_str_ptr(path)), NULL);
+        if (e) { ray_error_free(e); q_err_drop(); }
     }
+    if (old) ray_release(old);
     free(body);
     return bad;
 }
@@ -1732,11 +1744,6 @@ typedef struct {
     size_t      hlen;
     int         attr_at;  /* the attribute byte, -1 for none */
 } wf_sa_col;
-
-static int64_t wf_size(const char* path) {
-    struct stat st;
-    return stat(path, &st) == 0 ? (int64_t)st.st_size : -1;
-}
 
 static ray_t* wf_sa_probe(wf_sa_col* c) {
     ray_t* e = q_wirefile_probe(c->path, &c->h);
@@ -1995,12 +2002,8 @@ static ray_t* wf_splay_append_dir(ray_t* dir, ray_t* y, int law, int create, int
 
 ray_t* q_wirefile_splay_append(ray_t* x, ray_t* y, int law, int create, int64_t* before, int64_t* added) {
     *before = *added = 0;
-    ray_t* path = y ? q_io_file_path(x) : NULL;
-    if (!path) return q_err(QE_TYPE);
-    size_t n = ray_str_len(path);
-    ray_t* dir = n && ray_str_ptr(path)[n - 1] == '/' ? (ray_retain(path), path) : wf_join(ray_str_ptr(path), n, "/", 1);
-    ray_release(path);
-    if (!dir) return q_err(QE_OOM);
+    ray_t* dir = y ? q_io_dir_path(x, NULL, 0) : NULL;
+    if (!dir) return q_err(QE_TYPE);
     ray_t* bad = q_io_guard_write(ray_str_ptr(dir), ray_str_len(dir));
     if (!bad) {
         ray_retain(y);
@@ -2010,6 +2013,49 @@ ray_t* q_wirefile_splay_append(ray_t* x, ray_t* y, int law, int create, int64_t*
     }
     ray_release(dir);
     return bad;
+}
+
+ray_t* q_wirefile_amend(ray_t** args, int64_t n, int dot) {
+    ray_t* x = args[0];
+    ray_t* i = args[1];
+    ray_t* y = n == 4 ? args[3] : NULL;
+    ray_t* path;
+    if (!dot && i && i->type == -RAY_SYM && q_io_names_dir(x)) {   /* one column of the splay (ref/amend.md:258-263) */
+        ray_t* nm = ray_sym_str(i->i64);                            /* borrowed */
+        if (!nm || !wf_leaf_name(ray_str_ptr(nm), ray_str_len(nm))) return q_err(QE_TYPE);
+        path = q_io_dir_path(x, ray_str_ptr(nm), ray_str_len(nm));
+        i = NULL;
+    } else {
+        path = q_io_file_path(x);
+        if (dot && i && i->type == RAY_LIST && !q_count(i)) i = NULL;
+    }
+    if (!path) return q_err(QE_TYPE);
+    ray_t* bad = q_io_guard_write(ray_str_ptr(path), ray_str_len(path));
+    ray_t* v = bad ? NULL : wf_read_path(path, 1);
+    if (v && RAY_IS_ERR(v)) { bad = v; v = NULL; }
+    ray_t* r = NULL;
+    if (v && i) {
+        r = dot ? q_index_amend_dot(v, i, args[2], y) : q_index_amend_at(v, i, args[2], y);
+        if (!r || RAY_IS_ERR(r)) ray_release(v);
+    } else if (v) {
+        ray_t* av[2] = { v, y };
+        r = q_eval_apply_concrete(q_eval_apply_value(args[2], av, y ? 2 : 1));
+        ray_release(v);
+    }
+    if (!bad && (!r || RAY_IS_ERR(r))) bad = r ? r : q_err(QE_TYPE);
+    if (!bad) {
+        q_wf_colhdr h;
+        ray_t* e = q_wirefile_probe(path, &h);
+        if (e) { ray_error_free(e); q_err_drop(); }
+        ray_t* dompath = NULL;
+        bad = !e && h.nested && !h.anymap ? wf_write_col(path, r, NULL, &dompath, 0, 0, 0)
+                                          : wf_write_flat_path(path, r, -1, -1, -1);
+    }
+    if (r && !RAY_IS_ERR(r)) ray_release(r);
+    ray_release(path);
+    if (bad) return bad;
+    ray_retain(x);
+    return x;
 }
 
 ray_t* q_wirefile_write_zip(ray_t* x, ray_t* y, int lbs, int alg, int lvl) {
