@@ -139,6 +139,9 @@ ray_t* q_io_resource_stream(ray_t* pathstr, int gzip, q_io_stream_t** s);
  * the name-vs-path spelling — `set`'s env half asks it too. */
 int q_io_is_fsym(ray_t* x);
 
+/* Does file symbol x name a directory: a trailing slash, or a directory there now? */
+int q_io_names_dir(ray_t* x);
+
 /* `set`'s file half — every path-shaped target (q_env.c's q_setg_wrap keeps
  * only name-vs-path).  Owns the on-disk-format classification: flat file,
  * the 4-item compression form, the (dir;sympath) domain overload; a
@@ -157,6 +160,9 @@ void q_io_fs_register(void);
 /* THE fwrite: n bytes through a bounded stack buffer, so a mapped-on-touch source (a compressed splay region)
  * faults in the memcpy and the syscall never meets an unmapped page.  0, or -1 on a short write. */
 int q_io_fwrite(FILE* fp, const void* bytes, size_t n);
+
+/* `path` cut (or grown) to len bytes in place: NULL, or an owned 'io. */
+ray_t* q_io_truncate(const char* path, int64_t len);
 
 /* THE descriptor write: all n bytes, retrying short writes and EINTR (a fifo or a large payload takes fewer bytes
  * than asked without erroring).  0, or -1 on an error. */

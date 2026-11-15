@@ -76,6 +76,11 @@ static ray_t* carrier_insert(ray_t* car, ray_t* y) {
 ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
     if (!x || x->type != -RAY_SYM)
         return q_err(QE_TYPE);
+    if (q_io_is_fsym(x)) {                       /* a file symbol is a splay, never a global name (owner 2026-11-15) */
+        int64_t before, added;
+        ray_t* bad = q_wirefile_splay_append(x, y, Q_ROWS_INSERT, 0, &before, &added);
+        return bad ? bad : idx_range(before, added);
+    }
     if (q_env_writable(x->i64) != RAY_OK) return q_env_err(RAY_ERR_NOUPDATE);
     ray_t* g = q_env_handle_peek(x->i64);                        /* borrowed; a write loads no library */
     if (!g) {                                             /* create */
@@ -122,6 +127,13 @@ ray_t* q_insert_wrap(ray_t* x, ray_t* y) {
 ray_t* q_upsert_wrap(ray_t* x, ray_t* y) {
     ray_t* pr = q_provider_write(x, y, 1);
     if (pr) return pr;
+    if (q_io_names_dir(x)) {   /* a splay appends per column file (ref/upsert.md:135-150) */
+        int64_t before, added;
+        ray_t* bad = q_wirefile_splay_append(x, y, Q_ROWS_JOIN, 1, &before, &added);
+        if (bad) return bad;
+        ray_retain(x);
+        return x;
+    }
     if (q_io_is_fsym(x)) return q_wirefile_append(x, y);  /* file target: the one
                                                            * flat-append kernel */
     if (x && x->type == -RAY_SYM && q_env_writable(x->i64) != RAY_OK) return q_env_err(RAY_ERR_NOUPDATE);
