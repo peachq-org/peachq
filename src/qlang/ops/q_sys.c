@@ -144,6 +144,7 @@ static int32_t g_utc_offset;              /* \o UTC offset    (default 0N)      
 static int32_t g_week_offset;             /* \W week offset   (default 2)       */
 static int32_t g_err_trap;                /* \e error trap    (default 0)       */
 static int32_t g_timeout_s;               /* \T client timeout, seconds (default 0) */
+static int32_t g_s_procs;                 /* \s when negative: processes asked for (default 0) */
 static int     g_launching;               /* the launcher is applying argv options */
 static int     g_own_process;             /* this runtime may exit the process   */
 static int     g_exiting;                 /* .z.exit reentry guard */
@@ -173,6 +174,7 @@ void q_sys_cfg_init(void) {
     q_tok_date_order_set(0);     /* `\z` — mm/dd/yyyy (state single-homed in q_tok.c) */
     g_err_trap  = 0;             /* trapping off */
     g_timeout_s = 0;             /* `\T` no timeout */
+    g_s_procs   = 0;             /* `\s` reports the pool, not processes */
     g_timer_ms  = 0;             /* `\t` off per runtime */
     g_timer_id  = -1;
     g_listen_port = 0;           /* `\p` — no listening port by default */
@@ -999,23 +1001,26 @@ static ray_t* h_e(const char* arg, size_t alen) {
  * g_launching is set, which sizes the pool, and its worker count is the ceiling `\s 0N` shows (`0W` = all cores but
  * one).  Later `\s N` lets N of those workers run at once — never a destroy + re-init, since a worker's heap dies
  * with its thread while values it allocated live on — and refuses a count past the ceiling, or 0 while workers exist:
- * switching between single- and multi-threaded is not designed yet.  Negative N (processes, .z.pd) is 'nyi. */
+ * switching between single- and multi-threaded is not designed yet.  A negative N (processes, .z.pd) is only
+ * recorded for `\s` to report: it starts no threads, so until process peach exists peach runs in this process; at
+ * runtime it is refused while worker threads exist. */
 static ray_t* h_s(const char* arg, size_t alen) {
     ray_pool_t* pool = ray_pool_get();
     if (!pool) return q_err(QE_OOM);
-    if (alen == 0) return ray_i32((int32_t)pool->n_active);
+    if (alen == 0) return ray_i32(g_s_procs ? g_s_procs : (int32_t)pool->n_active);
     if (alen == 2 && arg[0] == '0' && arg[1] == 'N') return ray_i32((int32_t)pool->n_workers);
     int64_t v;
     if (alen == 2 && arg[0] == '0' && arg[1] == 'W') v = (int64_t)ray_thread_count() - 1;
     else if (!parse_i64(arg, alen, &v)) return q_err(QE_PARSE);
-    if (v < 0) return q_err(QE_NYI);
+    if (v <= INT32_MIN) return q_err(QE_THREADS);
     if (g_launching) {
         if (v > UINT32_MAX) return q_err(QE_THREADS);
         ray_pool_destroy();
-        return ray_pool_init((uint32_t)v) == RAY_OK ? NULL : q_err(QE_THREADS);
-    }
-    if (v > pool->n_workers || (v == 0 && pool->n_workers > 0)) return q_err(QE_THREADS);
-    pool->n_active = (uint32_t)v;
+        if (ray_pool_init(v < 0 ? 0 : (uint32_t)v) != RAY_OK) return q_err(QE_THREADS);
+    } else if (v < 0 ? pool->n_workers > 0 : (v > pool->n_workers || (v == 0 && pool->n_workers > 0)))
+        return q_err(QE_THREADS);
+    if (v >= 0) pool->n_active = (uint32_t)v;
+    g_s_procs = v < 0 ? (int32_t)v : 0;
     return NULL;
 }
 
