@@ -70,6 +70,14 @@ static int mount_skippable(ray_t* e) {
     return !q_err_is(e, QE_OOM) && !q_err_is(e, QE_ACCESS);
 }
 
+/* A root splay never displaces the partitioned table of its name (owner 2026-11-15; TorQ tickerlog alltabs.csv:14) */
+static int mount_parted(ray_t* parted, const char* nm, size_t nn) {
+    int64_t id = parted ? ray_sym_intern_runtime(nm, nn) : -1;
+    for (int64_t i = 0; parted && i < q_count(parted); i++)
+        if (ray_vec_get_sym_id(parted, i) == id) return 1;
+    return 0;
+}
+
 /* Database-root walk, sorted for a deterministic bind/execute order.  A name that is not
  * a plain q identifier is SKIPPED — kx's binding of odd names is undocumented, and refusing
  * keeps `par.txt` and `sym##` interns out of the env for free. */
@@ -97,7 +105,8 @@ static ray_t* mount_root(const char* abs, size_t n, int scripts) {
     closedir(d);
     if (cnt) qsort(names, cnt, sizeof *names, mount_name_cmp);   /* an empty directory's roster is NULL */
     /* a partial roster must not mount; the partitioned tables are bound before a root script can ask for them */
-    ray_t* bad = oom ? q_err(QE_OOM) : q_splay_named_mount();
+    ray_t* parted = NULL;
+    ray_t* bad = oom ? q_err(QE_OOM) : q_splay_named_mount(&parted);
     for (size_t i = 0; i < cnt && !bad; i++) {
         const char* nm = names[i];
         size_t nn = strlen(nm);
@@ -109,7 +118,7 @@ static ray_t* mount_root(const char* abs, size_t n, int scripts) {
         size_t fn = n + 1 + nn;
         if (mount_is_dir(full)) {
             /* a partition (the partitioned mount's), a plain subdir, an unbindable name */
-            if (!mount_has_dotd(full, fn) || !q_env_ident_ok(nm, nn)) continue;
+            if (!mount_has_dotd(full, fn) || !q_env_ident_ok(nm, nn) || mount_parted(parted, nm, nn)) continue;
             ray_t* e = mount_bind_splay(full, fn, nm, nn);
             if (e && mount_skippable(e)) ray_error_free(e);
             else if (e) bad = e;
@@ -127,6 +136,7 @@ static ray_t* mount_root(const char* abs, size_t n, int scripts) {
     }
     for (size_t i = 0; i < cnt; i++) free(names[i]);
     free(names);
+    ray_release(parted);
     return bad;
 }
 
