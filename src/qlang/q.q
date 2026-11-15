@@ -84,7 +84,8 @@
 / columns, then ONE gather.  y a SYMBOL updates in place, returns the name (set returns its
 / target).  A bad column is 'domain - t@/:x would answer the first column's empty and truncate.
 / asc.md:189 - the sorted attribute is set on the FIRST column given; xdesc sets none.  No columns: t unchanged.
-.q.xasc:{[x;y]$[-11h=type y;y set .q.xasc[x;get y];.Q.ft[{[x;t]x:$[0h>type x;1#x;x];if[not all x in cols t;'domain];$[count x;@[t iasc flip x!t@/:x;first x;.Q.c.sorted];t]}[x;];y]]}
+/ asc.md:235-248 - `:dat/t names the directory without its slash; set writes a splay only to the slash form.
+.q.xasc:{[x;y]$[-11h=type y;[$[("/"=last s)|":"<>first s:string y;y;11h=type key y;`$s,"/";y] set .q.xasc[x;get y];y];.Q.ft[{[x;t]x:$[0h>type x;1#x;x];if[not all x in cols t;'domain];$[count x;@[t iasc flip x!t@/:x;first x;.Q.c.sorted];t]}[x;];y]]}
 .q.xdesc:{[x;y]$[-11h=type y;y set .q.xdesc[x;get y];.Q.ft[{[x;t]x:$[0h>type x;1#x;x];if[not all x in cols t;'domain];$[count x;t idesc flip x!t@/:x;t]}[x;];y]]}
 
 / ---- wave 3 (ref/cols.md) ----

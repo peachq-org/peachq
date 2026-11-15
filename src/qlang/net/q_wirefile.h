@@ -50,6 +50,13 @@ ray_t* q_wirefile_write_splay(ray_t* dirsym, ray_t* domsym, ray_t* y,
  * NULL on success with *before the old row count and *added the rows written; else an owned error. */
 ray_t* q_wirefile_splay_append(ray_t* x, ray_t* y, int law, int create, int64_t* before, int64_t* added);
 
+/* Amend on a file handle, args as `@`/`.` take them (n 3 or 4): the file read, amended, written back as `set` writes
+ * it (a nested splay column as the splay writer does).  `@[`:d/;`c;f]` (with or without the slash) is that amend of
+ * the one column file `:d/c` — `.d` included; the other files are untouched.  An error from the amend writes
+ * nothing; a write that fails part-way puts the old bytes back as far as the file system lets it.  Answers x, or an
+ * owned error. */
+ray_t* q_wirefile_amend(ray_t** args, int64_t n, int dot);
+
 /* The domain-append primitive filepath Enum Extend (`:d?y) and the splay writer share: intern
  * symv's symbols into the domain FILE under its lock (append-only, new names only, positions
  * never rewritten; a compressed file refuses a new name).  *positions (may be NULL) receives the
