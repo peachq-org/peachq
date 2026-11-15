@@ -253,10 +253,39 @@ int q_io_fwrite(FILE* fp, const void* bytes, size_t n) {
     return 0;
 }
 
+#ifdef RAY_OS_WINDOWS
+/* Windows refuses to shorten a file a live view maps (a held splay column), but lets it be renamed: the view keeps
+ * the old file under a side name and `path` becomes a fresh copy of its first `len` bytes. */
+static int io_truncate_aside(const char* path, int64_t len) {
+    static unsigned seq;
+    char aside[MAX_PATH + 32];
+    if (snprintf(aside, sizeof aside, "%s.~%lu.%u", path, (unsigned long)GetCurrentProcessId(), ++seq) >= (int)sizeof aside ||
+        !MoveFileExA(path, aside, 0))
+        return 1;
+    FILE* in = fopen(aside, "rb");
+    FILE* out = in ? fopen(path, "wb") : NULL;
+    int bad = !out;
+    uint8_t buf[65536];
+    for (int64_t left = len; !bad && left > 0; ) {
+        size_t c = left < (int64_t)sizeof buf ? (size_t)left : sizeof buf;
+        bad = fread(buf, 1, c, in) != c || fwrite(buf, 1, c, out) != c;
+        left -= (int64_t)c;
+    }
+    if (out && fclose(out) != 0) bad = 1;
+    if (in) fclose(in);
+    if (bad) { DeleteFileA(path); MoveFileExA(aside, path, 0); return 1; }
+    DeleteFileA(aside);                 /* pending while the view lives */
+    return 0;
+}
+#endif
+
 ray_t* q_io_truncate(const char* path, int64_t len) {
     FILE* fp = fopen(path, "r+b");
     int bad = !fp || ftruncate(fileno(fp), (off_t)len) != 0;
     if (fp && fclose(fp) != 0) bad = 1;
+#ifdef RAY_OS_WINDOWS
+    if (bad && fp) bad = io_truncate_aside(path, len);
+#endif
     return bad ? q_err(QE_IO) : NULL;
 }
 
@@ -1129,6 +1158,7 @@ ray_t* q_io_file_size(ray_t* pathstr) {
     ray_t* bad = io_stored_len(s, pathstr, &n);
     if (bad) return bad;
     if (n < ZIP_MAGIC_LEN + ZIP_TAIL_LEN(1)) return ray_i64(n);
+    if (s == &IO_LOCAL && io_file_len(pathstr) < 0) return ray_i64(n);   /* a directory has no tail to probe */
     zip_hdr_t z;
     int found = 0;
     bad = io_zip_hdr(s, pathstr, n, &z, &found, NULL);
