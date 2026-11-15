@@ -31,7 +31,7 @@
 #include "qlang/io/q_io.h"     /* q_io_set — Amend Entire `:` on a file target */
 #include "qlang/io/q_kapi.h"   /* q_kapi_invoke — the 112h (`2:`-loaded) arm */
 #include "qlang/io/q_splay.h"  /* q_splay_fault_pending; a mapped global refuses by-name amends */
-#include "qlang/net/q_wirefile.h"  /* q_wirefile_append — Amend Entire `,` */
+#include "qlang/net/q_wirefile.h"  /* q_wirefile_append, q_wirefile_amend — amend on a file */
 #include "qlang/ops/q_bang.h"
 #include "qlang/ops/q_dollar.h"
 #include "qlang/ops/q_index.h"
@@ -2231,12 +2231,11 @@ static ray_t* name_lift(const q_op_t* row, ray_t** args, int64_t n, int dot) {
     q_sym_kind kind = q_handles_sym_kind(args[0]);
     if (kind == Q_SYM_PROCESS) return q_err(QE_TYPE);   /* a process holds no data to amend */
     if (kind == Q_SYM_PATH) {
-        /* Amend Entire on a file (ref/amend.md; kb/performance-tips.md:151-152):
-         * dot form, empty path — `,` appends, `:` sets.  Every other file amend
-         * shape stays 'nyi (the file wave's remaining edge). */
+        /* Amend on a file (ref/amend.md; kb/performance-tips.md:151-152): Amend Entire `,` appends and `:` sets;
+         * any other amend reads the file, amends and writes it back — a directory's one column file. */
         if (amend_entire_with(args, n, dot, ",")) return q_wirefile_append(args[0], args[3]);
         if (amend_entire_with(args, n, dot, ":")) return q_io_set(args[0], args[3]);
-        return q_err(QE_NYI);
+        return q_wirefile_amend(args, n, dot);
     }
     int64_t id = args[0]->i64;
     if (q_env_writable(id) != RAY_OK) return q_env_err(RAY_ERR_NOUPDATE);   /* before the amend's function runs */

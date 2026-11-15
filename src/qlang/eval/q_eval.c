@@ -856,6 +856,20 @@ ray_t* q_eval_value_wrap(ray_t* x) {
         ray_retain(v);
         return v;
     }
+    if (x->type == RAY_SYM && q_count(x) > 1) {
+        ray_t* head = ray_sym(ray_vec_get_sym_id(x, 0));
+        int file = q_io_is_fsym(head);
+        ray_release(head);
+        if (file) {                                /* a path in parts, `:db/t`.d: ` sv joins it (ref/sv.md) */
+            ray_t* args[2] = { ray_sym(ray_sym_intern_runtime("", 0)), x };
+            ray_t* sv = q_registry_lookup_name("sv", 2, Q_DYADIC);
+            ray_t* p = sv ? q_eval_apply_value(sv, args, 2) : q_err(QE_TYPE);
+            ray_release(args[0]);
+            ray_t* r = RAY_IS_ERR(p) ? p : q_eval_value_wrap(p);
+            if (!RAY_IS_ERR(p)) ray_release(p);
+            return r;
+        }
+    }
     if (x->type == RAY_SYM && q_count(x) > 1) {   /* what `(`f;`)` collapses to (TorQ torq.q:678 `value (`init;`)`) */
         ray_t* l = q_list_uncollapse(x);
         ray_t* r = RAY_IS_ERR(l) ? l : q_eval_value_wrap(l);
