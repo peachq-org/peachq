@@ -180,9 +180,10 @@ ray_t* q_bang_enkey(int64_t nkey, ray_t* y) {
  * (rows).  ()!() is the empty dict; a keyed table is a table!table dict.  vals
  * pass through as-is (rayfall `dict` broadcasts/boxes). */
 static ray_t* dict_pair(ray_t* x, ray_t* y) {
-    /* `cols!`:dir/` or `cols!`name` — n symbols against ONE symbol atom, the flip of a splayed or partitioned
-     * table (ref/flip-splayed.md, ref/dotq.md `+`sym`time`num!`tt`); the count gate does not apply */
-    if (x->type == RAY_SYM && y->type == -RAY_SYM) {
+    /* `cols!`:dir/` or `cols!`name` — a key list against ONE symbol atom, the flip of a splayed or partitioned
+     * table (ref/flip-splayed.md, ref/dotq.md `+`sym`time`num!`tt`); the count gate does not apply. Any key list,
+     * not only symbols: TorQ wdb.q:494 `exec (w!x)` keys handles to one proctype (owner 2026-11-15) */
+    if ((ray_is_vec(x) || x->type == RAY_LIST) && y->type == -RAY_SYM) {
         ray_retain(x);
         ray_retain(y);
         return ray_dict_new(x, y);               /* consumes both retains */

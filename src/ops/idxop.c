@@ -230,22 +230,27 @@ static bool vec_all_distinct(const ray_t* v) {
     return ok;
 }
 
+/* every NaN reads as one word, where numeric_key_word gives each its own bucket */
+static uint64_t parted_key_word(const uint8_t* base, int8_t type, int64_t i) {
+    uint64_t w = numeric_key_word(base, type, i);
+    if (!float_family(type)) return w;
+    double d;
+    if (numeric_elem_size(type) == 4) { float t; memcpy(&t, base + i*4, 4); d = (double)t; }
+    else                              { memcpy(&d, base + i*8, 8); }
+    return d != d ? 0x7FF8000000000000ULL : w;
+}
+
 /* True iff every distinct value forms EXACTLY ONE contiguous run — the kdb `p#`
  * layout requirement.  Blocks may appear in ANY order (unlike `s#`, which needs
  * global ascending order); the sole failure is a distinct value re-appearing in
  * a later, separate run (e.g. `3 3 1 2 2 1` — value 1 in two runs).  Detection:
  * hash-set the value at each run boundary; a boundary value already in the set
  * means the value's blocks are not contiguous -> reject (maps to `'u-fail`).
- *
- * v1: rejects a null-bearing column (returns false).  Nulls in a parted column
- * are out of scope for now — and numeric_key_word buckets each NaN to its own
- * per-row word, which would spuriously split a null run; excluding nulls keeps
- * run detection exact for every accepted value.  Numeric vectors only (caller
- * guarantees numeric_elem_size>0).  Returns false on OOM (conservative). */
+ * A null is a value like any other (ref/set-attribute.md:25).  Numeric vectors
+ * only (caller guarantees numeric_elem_size>0).  Returns false on OOM. */
 static bool vec_is_parted_contiguous(const ray_t* v) {
     int64_t n = v->len;
     if (n < 2) return true;
-    if (vec_has_null(v)) return false;
     const uint8_t* base = (const uint8_t*)ray_data((ray_t*)v);
     uint64_t cap = next_pow2((uint64_t)n * 2 + 1);
     if (cap < 16) cap = 16;
@@ -255,14 +260,14 @@ static bool vec_is_parted_contiguous(const ray_t* v) {
     if (!slot) return false;
     bool ok = true;
     for (int64_t i = 0; i < n && ok; i++) {
-        uint64_t hi = numeric_key_word(base, v->type, i);
-        if (i > 0 && numeric_key_word(base, v->type, i - 1) == hi)
+        uint64_t hi = parted_key_word(base, v->type, i);
+        if (i > 0 && parted_key_word(base, v->type, i - 1) == hi)
             continue;                       /* same run — not a boundary */
         uint64_t h = mix64(hi) & mask;      /* run boundary: value must be new */
         for (;;) {
             int64_t cur = slot[h];
             if (cur == 0) { slot[h] = i + 1; break; }
-            if (numeric_key_word(base, v->type, cur - 1) == hi) { ok = false; break; }
+            if (parted_key_word(base, v->type, cur - 1) == hi) { ok = false; break; }
             h = (h + 1) & mask;
         }
     }
@@ -1974,7 +1979,7 @@ static ray_t* ray_index_attach_part(ray_t** vp) {
 
     /* numeric_key_word buckets a NaN per ROW, so two adjacent nulls would read as
      * two value-blocks — this index needs the null-free column vec_is_ascending
-     * no longer insists on.  Same gate vec_is_parted_contiguous applies. */
+     * no longer insists on. */
     if ((n >= 2 && vec_has_null(v)) || !vec_is_ascending(v))
         return ray_error("domain", "parted: column is not laid out as ascending value-blocks");
 

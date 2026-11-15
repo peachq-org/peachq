@@ -40,6 +40,13 @@ static ray_t* slice_at(ray_t* y, int64_t start, int64_t w, int64_t total,
  * columns, tables holding them) pay the index walk, via the enum home.  Also
  * the BOOLEAN count q_type_strict_i64 refuses (phrases). */
 static ray_t* take_kernel(ray_t* y, ray_t* n) {
+    if (q_type_is_keyed(y)) {   /* (n#key y)!n#value y: an enum key column must reach the enum home on its own */
+        ray_t* k = take_kernel(ray_dict_keys(y), n);
+        if (RAY_IS_ERR(k)) return k;
+        ray_t* v = take_kernel(ray_dict_vals(y), n);
+        if (RAY_IS_ERR(v)) { ray_release(k); return v; }
+        return ray_dict_new(k, v);
+    }
     ray_t* ref = q_enum_take(y, n);   /* reference-carrying shapes (enum home) */
     if (ref) return ref;
     ray_t* r = ray_take_fn(y, n);
