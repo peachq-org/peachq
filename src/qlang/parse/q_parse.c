@@ -690,8 +690,7 @@ typedef struct {
 /* The parser's recursion budget, charged by EVERY mutually-recursive descent
  * so no one site can exhaust the C stack alone.  Roughly two charges per level
  * of (…)/[…]/{…} and per term of `1+1+1+…`, so this supports nesting and flat
- * chains a couple of hundred deep and answers anything past that with the
- * 'limit q_eval already raises at EVAL_MAX_DEPTH. */
+ * chains a couple of hundred deep and answers anything past that with 'limit. */
 #define Q_PARSE_MAX_DEPTH 512
 
 static Token *cur(Parser *p) { return &p->t.t[p->pos]; }
