@@ -21,7 +21,9 @@
 #include "lang/eval.h"         /* RAY_FN_NONE — .z.ts timer thunk attrs */
 #include "core/ipc.h"          /* ray_ipc_current_handle / ray_ipc_fd_of_handle — .z.w */
 #include "core/platform.h"     /* ray_thread_count — .z.c off Linux */
+#include "core/sock.h"         /* ray_sock_resolve4 — .z.a local IPv4 */
 #include <rayforce.h>
+#include <ctype.h>             /* tolower — .z.h */
 #include <stdio.h>             /* snprintf / sscanf for the version producers */
 #include <stdlib.h>            /* getenv — .z.v environment */
 #include <string.h>
@@ -29,16 +31,13 @@
 #include <unistd.h>          /* getpid / gethostname / getuid — .z.i/.z.h/.z.u */
 #ifndef RAY_OS_WINDOWS
   #include <pwd.h>             /* getpwuid — .z.u OS username */
-  #include <netdb.h>          /* getaddrinfo — .z.a local IPv4 */
-  #include <netinet/in.h>     /* struct sockaddr_in */
   #include <arpa/inet.h>      /* ntohl */
   #if defined(__linux__)
     #include <sched.h>        /* sched_getaffinity / cpu_set_t — .z.c */
   #endif
 #else
   #define WIN32_LEAN_AND_MEAN
-  #include <winsock2.h>        /* gethostname/getaddrinfo/ntohl — .z.h/.z.a (winsock, needs WSAStartup) */
-  #include <ws2tcpip.h>        /* struct addrinfo / getaddrinfo on Windows */
+  #include <winsock2.h>        /* gethostname/ntohl — .z.h/.z.a (winsock, needs WSAStartup) */
   #include <windows.h>         /* GetSystemTimePreciseAsFileTime — CLOCK_REALTIME shim */
 #endif
 
@@ -185,6 +184,7 @@ static ray_t* z_h(void) {   /* .z.h — host name as a symbol (gethostname) */
 #endif
     if (gethostname(host, sizeof host) != 0) host[0] = '\0';
     host[sizeof host - 1] = '\0';
+    for (char* c = host; *c; c++) *c = (char)tolower((unsigned char)*c);
     return ray_sym(ray_sym_intern(host, strlen(host)));
 }
 
@@ -227,20 +227,10 @@ static ray_t* z_a(void) {
 #ifdef RAY_OS_WINDOWS
     win_wsa_ensure();        /* gethostname/getaddrinfo are winsock calls on Windows */
 #endif
-    /* Identical selection on both platforms: the FIRST AF_INET result of
-     * getaddrinfo(hostname) — winsock exposes the same getaddrinfo/addrinfo API
-     * as POSIX (ws2tcpip.h), so this is a single shared path, not a fork. */
+    uint32_t ip;
     if (gethostname(host, sizeof host) == 0) {
         host[sizeof host - 1] = '\0';
-        struct addrinfo hints;
-        struct addrinfo* res = NULL;
-        memset(&hints, 0, sizeof hints);
-        hints.ai_family = AF_INET;
-        if (getaddrinfo(host, NULL, &hints, &res) == 0 && res) {
-            struct sockaddr_in* sin = (struct sockaddr_in*)(void*)res->ai_addr;
-            addr = (int32_t)ntohl(sin->sin_addr.s_addr);
-            freeaddrinfo(res);
-        }
+        if (ray_sock_resolve4(host, &ip) == 0) addr = (int32_t)ntohl(ip);
     }
     return ray_i32(addr);
 }
