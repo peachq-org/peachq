@@ -1027,13 +1027,15 @@ static void splay_segments_keep(void) {
 
 /* .Q.i.mount answers what to bind: the partition field!its values, then each table!its columns.  The binds ride
  * q_env_set here, as the root walk's do, so one mount's names land in one context. */
-ray_t* q_splay_named_mount(void) {
+ray_t* q_splay_named_mount(ray_t** bound_names) {
     ray_t* nil = RAY_NULL_OBJ;
+    *bound_names = NULL;
     ray_t* r = q_eval_apply_concrete(q_eval_apply_call_name(".Q.i.mount", 10, &nil, 1));
     splay_segments_keep();
     if (!r || RAY_IS_ERR(r)) return r;
     ray_t* names = q_type_is_dict(r) ? ray_dict_keys(r) : NULL;         /* borrowed */
     ray_t* bad = NULL;
+    if (names && names->type == RAY_SYM) { ray_retain(names); *bound_names = names; }
     for (int64_t i = 0; names && names->type == RAY_SYM && i < q_count(names) && !bad; i++) {
         int64_t name = ray_vec_get_sym_id(names, i);
         ray_t* v = q_index_elem_at(ray_dict_vals(r), i);
