@@ -32,7 +32,7 @@
 #include "qlang/net/q_wirefile.h" /* q_wirefile_is_data — `\l` tells a data file from a script */
 #include "qlang/io/q_provider.h" /* q_provider_load — the `\l `:pq:duckdb:al` form */
 #include "qlang/q_pq.h"       /* q_pq_load / _load_file — `\l pq` and `\l pq/<file>.q` */
-#include "qlang/q_env.h"      /* q_env_ctx_set/_ctx + q_env_ns_names — `\d` and the `\v`/`\f`/`\a` rosters */
+#include "qlang/q_env.h"      /* q_env_ctx_set/_ctx/_scope + q_env_ns_names — `\d`, session-scoped loads, the `\v`/`\f`/`\a` rosters */
 #include "qlang/q_dotz.h"     /* q_dotz_timer_thunk (`\t`), q_dotz_exit_fire (`\\`), q_dotz_expungeable (`\x`), q_dotz_quiet */
 #include "qlang/eval/q_view.h" /* q_view_names — `\b` / `\B` */
 #include "qlang/parse/q_parse.h"    /* q_parse — `\t expr` / `\ts expr` timing */
@@ -626,20 +626,24 @@ ray_t* q_sys_load(const char* arg, size_t alen) {
     /* peachq: the standard library.  `\l pq/<file>.q` is the file a pq/ directory
      * (the cwd's or $QHOME's) has, else the embedded member, so a pq/ directory is
      * the library on disk, never a mount; `\l pq` reloads every library file
-     * (`.pq.i.files`) unless a disk file `pq`/`pq.q` wins above. */
+     * (`.pq.i.files`) unless a disk file `pq`/`pq.q` takes precedence. */
     if (alen > 3 && memcmp(lit, "pq/", 3) == 0) return q_pq_load_file(lit, alen, ok ? found : NULL);
-    if (ok && q_wirefile_is_data(found)) return q_mount_object(found);
-    if (ok) {   /* disk hit — load (silent); an ABORTED load signals */
+    if (ok && !q_wirefile_is_data(found)) {   /* disk hit — load (silent); an ABORTED load signals */
         /* docs/text-entry-law.md (target state; peachq may differ): `\l` and `system "l"` are the via-file column */
         ray_t* esig = NULL;
         int rc = q_ctx_run_file(found, stdout, stderr, &esig);
         return q_ctx_run_abort(rc, esig);
     }
-    if (alen == 2 && memcmp(lit, "pq", 2) == 0) return q_pq_load();
+    if (!ok && alen == 2 && memcmp(lit, "pq", 2) == 0) return q_pq_load();
     struct stat st;
-    if (stat(lit, &st) == 0 && S_ISDIR(st.st_mode))       /* `\l .` = data-only reload */
-        return q_mount_dir(lit, !(alen == 1 && lit[0] == '.'));
-    return q_err_name(lit, alen);                         /* kdb: 'path as given */
+    if (!ok && !(stat(lit, &st) == 0 && S_ISDIR(st.st_mode)))
+        return q_err_name(lit, alen);                     /* kdb: 'path as given */
+    /* a mount binds at the session `\d`, not the calling lambda's scope (Dpkedz) */
+    int64_t scope = q_env_scope(Q_ENV_SCOPE_SESSION);
+    ray_t*  r     = ok ? q_mount_object(found)
+                       : q_mount_dir(lit, !(alen == 1 && lit[0] == '.'));   /* `\l .` = data-only reload */
+    q_env_scope(scope);
+    return r;
 }
 
 /* ---- expression timing (`\t expr`, `\t:n`, `\ts expr`, `\ts:n`) ------------
