@@ -22,6 +22,9 @@
  * `l` retained).  DEFINED in ops/q_list.c; declared here so env-using callers
  * (net/, apply) reach it without the poisoned q_registry_internal.h. */
 ray_t* q_list_collapse(ray_t* l);
+/* its two halves, same contract: an amend collapses atoms only (ref/assign.md:57); Join also makes like rows a table */
+ray_t* q_list_collapse_atoms(ray_t* l);
+ray_t* q_list_collapse_rows(ray_t* l);
 
 /* Its inverse: a typed vector re-shaped into a boxed RAY_LIST of its atoms (each read through the element-read
  * home), so a walker can dispatch on the items.  Borrows `v`; OWNED list, or an owned error.  DEFINED in ops/q_list.c. */

@@ -1007,8 +1007,28 @@ static ray_t* run1(ray_t* v) {
     return ray_is_atom(v) ? ray_enlist_fn(&v, 1) : ray_list_append(ray_list_new(1), v);
 }
 
+/* x, or its dict value list, through `collapse`; the write stands whatever it answers.  Consumes x. */
+static ray_t* vals_collapse(ray_t* x, ray_t* (*collapse)(ray_t*)) {
+    if (!x || RAY_IS_ERR(x)) return x;
+    ray_t* v = x->type == RAY_LIST ? x : x->type == RAY_DICT ? ray_dict_slots(x)[1] : NULL;
+    if (!v || v->type != RAY_LIST) return x;
+    ray_t* cv = collapse(v);
+    if (!cv || RAY_IS_ERR(cv) || cv == v) {
+        if (cv && RAY_IS_ERR(cv)) ray_error_free(cv); else if (cv) ray_release(cv);
+        return x;
+    }
+    ray_t* nd = cv;
+    if (v != x) {
+        ray_retain(ray_dict_slots(x)[0]);
+        nd = ray_dict_new(ray_dict_slots(x)[0], cv);     /* consumes both, on failure too */
+        if (!nd || RAY_IS_ERR(nd)) { if (nd) ray_error_free(nd); return x; }
+    }
+    ray_release(x);
+    return nd;
+}
+
 /* A table value list is a list of records (basics/glossary.md:769): the same dict over its rows, which a write
- * extends and the level collapse makes a table again only if every value is still a like record.  Owned. */
+ * extends and dict_put1 makes a table again only if every value is still a like record.  Owned. */
 static ray_t* dict_rows(ray_t* x) {
     ray_t* rows = q_list_uncollapse(ray_dict_slots(x)[1]);
     if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_OOM);
@@ -1019,8 +1039,9 @@ static ray_t* dict_rows(ray_t* x) {
 
 /* one key at settled position p: the run of one — or the keyed table's row put, which finds its own row.  A table
  * domain over vector values is a dict (its keys grow by the row join).  A table as the VALUE list takes the row
- * among its rows (dict_rows) and the completed level collapses them, so a ragged one widens its columns (qcheck
- * qc.q:145) and no mid-amend collapse types the next key's write. */
+ * among its rows (dict_rows) and stays a table while they are like, so a ragged one widens its columns (qcheck
+ * qc.q:145); a NEW key's record grows the list as Join does (uqf test_registries.q:53-65).  Atoms wait for the
+ * level: typing them here would refuse the next key's write. */
 static ray_t* dict_put1(ray_t* x, ray_t* key, int64_t p, ray_t* v) {
     ray_t** slots = ray_dict_slots(x);
     if (q_type_is_keyed(x)) return keyed_put1(x, key, v);
@@ -1042,9 +1063,10 @@ static ray_t* dict_put1(ray_t* x, ray_t* key, int64_t p, ray_t* v) {
         if (row) ray_release(row);
         if (RAY_IS_ERR(r)) { ray_release(d); return r; }
         ray_release(x);
-        return r;
+        return vals_collapse(r, q_list_collapse_rows);
     }
     if (!(is_coll(slots[0]) || q_type_is_table(slots[0])) || !is_coll(slots[1])) return q_err(QE_TYPE);
+    int grow = p >= q_count(slots[0]) && q_type_is_plain_dict(v);
     ray_t* ky = run1(key);
     ray_t* vy = run1(v);
     ray_t* pos = ray_vec_new(RAY_I64, 1);
@@ -1059,7 +1081,7 @@ static ray_t* dict_put1(ray_t* x, ray_t* key, int64_t p, ray_t* v) {
     } else if (!RAY_IS_ERR(pos)) ray_release(pos);
     if (!RAY_IS_ERR(ky)) ray_release(ky);
     if (!RAY_IS_ERR(vy)) ray_release(vy);
-    return r;
+    return grow ? vals_collapse(r, q_list_collapse_rows) : r;
 }
 
 ray_t* q_index_dict_align(ray_t* x, ray_t* ykeys) {
@@ -1083,8 +1105,6 @@ ray_t* q_index_dict_align(ray_t* x, ray_t* ykeys) {
     return out;
 }
 
-static ray_t* level_collapse(ray_t* x);
-
 /* the join writes the rows (dict_rows), then collapses its completed level */
 static ray_t* dict_join_rows(ray_t* x, ray_t* y, int strict) {
     ray_t* d = dict_rows(x);
@@ -1092,7 +1112,7 @@ static ray_t* dict_join_rows(ray_t* x, ray_t* y, int strict) {
     ray_t* r = q_index_dict_join(d, y, strict);
     if (RAY_IS_ERR(r)) { ray_release(d); return r; }
     ray_release(x);
-    return level_collapse(r);
+    return vals_collapse(r, q_list_collapse);
 }
 
 ray_t* q_index_dict_join(ray_t* x, ray_t* y, int strict) {
@@ -1153,26 +1173,9 @@ static ray_t* leaf1(ray_t* x, ray_t* i0, int64_t p, ray_t* f, ray_t* y) {
 }
 
 /* A completed level owns the homogeneity invariant (owner ruling 2026-09-14: amends and removals collapse, appends
- * never do): a general list — or a dict's value list — that has become same-typed atoms is the typed vector.  Once
- * per level, when its whole amend is done: per item would type the second item of `x[0 1]:(`b;2)`.  Consumes x. */
-static ray_t* level_collapse(ray_t* x) {
-    if (!x || RAY_IS_ERR(x)) return x;
-    ray_t* v = x->type == RAY_LIST ? x : x->type == RAY_DICT ? ray_dict_slots(x)[1] : NULL;
-    if (!v || v->type != RAY_LIST) return x;
-    ray_t* cv = q_list_collapse(v);
-    if (!cv || RAY_IS_ERR(cv) || cv == v) {          /* the amend stood; uncollapsed is a legal value */
-        if (cv && RAY_IS_ERR(cv)) ray_error_free(cv); else if (cv) ray_release(cv);
-        return x;
-    }
-    ray_t* nd = cv;
-    if (v != x) {
-        ray_retain(ray_dict_slots(x)[0]);
-        nd = ray_dict_new(ray_dict_slots(x)[0], cv);     /* consumes both, on failure too */
-        if (!nd || RAY_IS_ERR(nd)) { if (nd) ray_error_free(nd); return x; }
-    }
-    ray_release(x);
-    return nd;
-}
+ * never do): same-typed ATOMS are the typed vector, like records stay a list (ref/assign.md:57; resq on kdb).  Once
+ * per level: per item would type the second item of `x[0 1]:(`b;2)`.  Consumes x. */
+static ray_t* level_collapse(ray_t* x) { return vals_collapse(x, q_list_collapse_atoms); }
 
 /* The slot x's child at atom index i0 sits in, when the LEVEL is ours to write: x at rc 1 and its slot array (a
  * list's own slots, a dict's value list, a table's column list) held by x alone.  The child itself may be shared —
