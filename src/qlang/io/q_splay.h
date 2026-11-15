@@ -25,12 +25,13 @@ static inline ray_t* q_splay_contained(ray_t* v) { return v && v->type == RAY_TA
 
 /* A partitioned table is the reference flipped from a plain name (kb/partition.md; ref/flip-splayed.md:21).  What the
  * loaded database holds is q's (.Q.pf, .Q.pv, .Q.pd), set by _mount when `\l` meets a database root (NULL, or an
- * owned error).  _values is the owned one-column table of the partition values under the partition field's name
- * (NULL: none); _map the owned in-memory table of t's columns named in `want` over the partitions indexed by the
- * long vector `parts` (NULL = all), the partition column first — NULL when t is no such reference or the database
- * holds no table of its name; _latest that of the most recent partition alone; _rows, for the same t and parts, the
- * owned long vector of each row's number within its partition (the virtual `i`). */
-ray_t*  q_splay_named_mount(void);
+ * owned error), handing back in *bound the owned names it bound (NULL: none).  _values is the owned one-column
+ * table of the partition values under the partition field's name (NULL: none); _map the owned in-memory table of
+ * t's columns named in `want` over the partitions indexed by the long vector `parts` (NULL = all), the partition
+ * column first — NULL when t is no such reference or the database holds no table of its name; _latest that of the
+ * most recent partition alone; _rows, for the same t and parts, the owned long vector of each row's number within
+ * its partition (the virtual `i`). */
+ray_t*  q_splay_named_mount(ray_t** bound);
 int     q_splay_table_named(ray_t* t);
 ray_t*  q_splay_named_values(void);
 ray_t*  q_splay_named_map(ray_t* t, ray_t* want, ray_t* parts);

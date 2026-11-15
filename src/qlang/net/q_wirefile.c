@@ -1374,7 +1374,8 @@ static ray_t* wf_domain_read(int fd, ray_t** dom, int* zipped) {
     return NULL;
 }
 
-/* symv's positions in `dom` (NULL = empty), and in *fresh the names it lacks, in first-seen order. */
+/* symv's positions in `dom` (NULL = empty), and in *fresh the names it lacks, in first-seen order; ` stays out of
+ * *fresh (owner 2026-11-15, TorQ intpartbyenum on KDB-X). */
 static ray_t* wf_domain_place(ray_t* dom, ray_t* symv, ray_t** fresh, ray_t** positions) {
     int64_t nold = dom ? q_count(dom) : 0;
     int64_t n = q_count(symv);
@@ -1398,7 +1399,9 @@ static ray_t* wf_domain_place(ray_t* dom, ray_t* symv, ray_t** fresh, ray_t** po
         int64_t id = ray_vec_get_sym_id(symv, i);
         int64_t h = (int64_t)((uint64_t)id * 0x9e3779b97f4a7c15ULL >> 1) & (hcap - 1);
         while (hid[h] != -1 && hid[h] != id) h = (h + 1) & (hcap - 1);
-        if (hid[h] == -1) {
+        if (hid[h] == -1 && id == 0) {              /* a null the domain lacks is the null position, never a name */
+            hid[h] = id; hpos[h] = NULL_I64;
+        } else if (hid[h] == -1) {
             hid[h] = id; hpos[h] = next++;
             fr = ray_vec_append(fr, &id);
             if (!fr || RAY_IS_ERR(fr)) { ok = 0; break; }
