@@ -1698,6 +1698,24 @@ int q_io_is_fsym(ray_t* v) {
     return is;
 }
 
+ray_t* q_io_dir_path(ray_t* x, const char* leaf, size_t n) {
+    ray_t* path = q_io_file_path(x);
+    if (!path) return NULL;
+    size_t pn = ray_str_len(path);
+    int slash = pn && ray_str_ptr(path)[pn - 1] == '/';
+    char* buf = (char*)malloc(pn + 1 + n + 1);
+    ray_t* r = NULL;
+    if (buf) {
+        memcpy(buf, ray_str_ptr(path), pn);
+        if (!slash) buf[pn++] = '/';
+        if (n) memcpy(buf + pn, leaf, n);
+        r = ray_str(buf, pn + n);
+        free(buf);
+    }
+    ray_release(path);
+    return r;
+}
+
 int q_io_names_dir(ray_t* x) {
     ray_t* path = q_io_is_fsym(x) ? q_io_file_path(x) : NULL;
     if (!path) return 0;

@@ -142,6 +142,9 @@ int q_io_is_fsym(ray_t* x);
 /* Does file symbol x name a directory: a trailing slash, or a directory there now? */
 int q_io_names_dir(ray_t* x);
 
+/* The directory file symbol x names as a path, its slash on and the n bytes of `leaf` after it: owned, or NULL. */
+ray_t* q_io_dir_path(ray_t* x, const char* leaf, size_t n);
+
 /* `set`'s file half — every path-shaped target (q_env.c's q_setg_wrap keeps
  * only name-vs-path).  Owns the on-disk-format classification: flat file,
  * the 4-item compression form, the (dir;sympath) domain overload; a
