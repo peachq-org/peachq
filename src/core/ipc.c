@@ -837,6 +837,7 @@ typedef struct {
     bool             sync_waiting;
     bool             sync_ready;
     bool             sync_badmsg;   /* deposited resp is a local 'badmsg — waiter closes after consuming */
+    bool             sync_async;    /* the waiter is `h[]`: it takes the next ASYNC frame, and no RESP */
     uint32_t         sync_owed;     /* responses to waits a SIGINT abandoned: dropped as they arrive, in order */
     ray_t*           sync_resp;
     /* `-30!` deferred response, keyed to the request FRAME: every SYNC
@@ -1322,13 +1323,14 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
         }
     }
 
-    /* Response frame: deposit it for the sync send waiting on this
-     * conn instead of evaluating it.  A response nobody waits for has
+    /* Response frame (or the ASYNC frame an `h[]` waits for): deposit it
+     * for the waiter on this conn instead of evaluating it.  A response nobody waits for has
      * no defined meaning — log and drop.  A malformed structure (or
      * trailing bytes) closes the connection so the waiter observes a clean
      * 'badmsg instead of a bogus value; a value-level decode error such as
      * 'badfunc is itself the response. */
-    if (msgtype == RAY_IPC_MSG_RESP) {
+    bool async_taken = msgtype == RAY_IPC_MSG_ASYNC && cd->sync_async && !cd->sync_ready;
+    if (msgtype == RAY_IPC_MSG_RESP || async_taken) {
         int is_wire_err = 0;
         ray_t* obj = zbad ? NULL : ipc_decode_payload(pdata, (size_t)plen, swap,
                                                       &is_wire_err, NULL);
@@ -1352,11 +1354,14 @@ static ray_t* ipc_read_payload(ray_poll_t* poll, ray_selector_t* sel)
         }
         if (payload) ray_poll_buf_free(payload);
         if (uz) ray_release(uz);
-        if (cd->sync_owed) {
+        if (async_taken) {
+            cd->sync_resp  = obj;
+            cd->sync_ready = true;
+        } else if (cd->sync_owed) {
             cd->sync_owed--;
             if (RAY_IS_ERR(obj)) ray_error_free(obj);
             else if (obj != RAY_NULL_OBJ) ray_release(obj);
-        } else if (cd->sync_waiting && !cd->sync_ready) {
+        } else if (cd->sync_waiting && !cd->sync_async && !cd->sync_ready) {
             cd->sync_resp  = obj;
             cd->sync_ready = true;
         } else {
@@ -2255,6 +2260,66 @@ static void ipc_close(int64_t handle, bool local)
 void ray_ipc_close(int64_t handle)       { ipc_close(handle, false); }
 void ray_ipc_close_local(int64_t handle) { ipc_close(handle, true); }
 
+/* Pumps this conn until its waiter's frame is deposited: the RESP, or with
+ * `async` the next ASYNC frame. */
+static ray_t* sync_wait(ray_poll_t* poll, ray_selector_t* sel, bool async)
+{
+    ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
+    cd->sync_waiting = true;
+    cd->sync_async   = async;
+    cd->sync_ready   = false;
+    cd->sync_badmsg  = false;
+    cd->sync_resp    = NULL;
+    int64_t id = sel->id;
+
+    for (;;) {
+        /* Process anything already buffered/readable first, then block
+         * for more.  The pump can deregister the selector (peer died) —
+         * conn data is freed with it, so re-resolve every iteration.
+         * The data-pointer compare also guards against this id being
+         * reused by a NEW connection opened inside a dispatched eval:
+         * that conn's state must not be mistaken for ours. */
+        int rc = conn_pump(poll, id);
+        sel = ray_poll_get(poll, id);
+        if (!sel || sel->data != (void*)cd)
+            return ray_error("io", "connection closed");
+        if (cd->sync_ready) {
+            ray_t* result = cd->sync_resp;
+            bool   badmsg = cd->sync_badmsg;
+            cd->sync_resp    = NULL;
+            cd->sync_ready   = false;
+            cd->sync_badmsg  = false;
+            cd->sync_waiting = false;
+            cd->sync_async   = false;
+            if (badmsg)                      /* local decode failure: close +
+                                              * .z.pc (2), then signal (3) */
+                ray_poll_deregister(poll, id);
+            if (!result)
+                return ray_error("io", "ipc bad response");
+            return result;
+        }
+        if (rc < 0) {
+            /* Deregistered but selector still resolves?  Can't happen —
+             * defensive: treat as closed. */
+            return ray_error("io", "connection closed");
+        }
+        /* a SIGINT stops the wait ('stop, as for any running statement); a sync answer still owed is dropped
+         * when it comes, so the handle's next round trip reads its own — `h[]` is owed nothing */
+        int w = ray_sock_wait_readable((ray_sock_t)sel->fd, 100);
+        if (w < 0) {
+            cd->sync_waiting = false;
+            cd->sync_async   = false;
+            return ray_error("io", "ipc recv failed");
+        }
+        if (w == 0 && ray_interrupted()) {
+            cd->sync_waiting = false;
+            if (!cd->sync_async) cd->sync_owed++;
+            cd->sync_async   = false;
+            return ray_error("stop", "interrupted");
+        }
+    }
+}
+
 /* Sync round-trip on any connection handle.  Writes a SYNC frame, then
  * pumps this connection's rx machinery until the matching RESP frame is
  * deposited — dispatching (not swallowing) any frames that arrive in
@@ -2284,9 +2349,9 @@ static ray_t* sync_send(int64_t handle, ray_t* msg)
         return ray_error("nyi", "sync send on a websocket handle");
     }
     if (cd->sync_waiting) {
-        /* A sync wait is already pumping this conn further down the
-         * stack (hook → nested send on the SAME handle).  Two waiters
-         * can't both claim the next RESP — refuse the inner one. */
+        /* A sync or `h[]` wait is already pumping this conn further down
+         * the stack (hook → nested send on the SAME handle).  The pump
+         * holds one waiter's slot — refuse the inner one. */
         if (owned) ray_release(msg);
         return ray_error("io", "nested sync send on busy handle");
     }
@@ -2298,55 +2363,23 @@ static ray_t* sync_send(int64_t handle, ray_t* msg)
     }
     if (owned) ray_release(msg);
 
-    cd->sync_waiting = true;
-    cd->sync_ready   = false;
-    cd->sync_badmsg  = false;
-    cd->sync_resp    = NULL;
-    int64_t id = sel->id;
+    return sync_wait(poll, sel, false);
+}
 
-    for (;;) {
-        /* Process anything already buffered/readable first, then block
-         * for more.  The pump can deregister the selector (peer died) —
-         * conn data is freed with it, so re-resolve every iteration.
-         * The data-pointer compare also guards against this id being
-         * reused by a NEW connection opened inside a dispatched eval:
-         * that conn's state must not be mistaken for ours. */
-        int rc = conn_pump(poll, id);
-        sel = ray_poll_get(poll, id);
-        if (!sel || sel->data != (void*)cd)
-            return ray_error("io", "connection closed");
-        if (cd->sync_ready) {
-            ray_t* result = cd->sync_resp;
-            bool   badmsg = cd->sync_badmsg;
-            cd->sync_resp    = NULL;
-            cd->sync_ready   = false;
-            cd->sync_badmsg  = false;
-            cd->sync_waiting = false;
-            if (badmsg)                      /* local decode failure: close +
-                                              * .z.pc (2), then signal (3) */
-                ray_poll_deregister(poll, id);
-            if (!result)
-                return ray_error("io", "ipc bad response");
-            return result;
-        }
-        if (rc < 0) {
-            /* Deregistered but selector still resolves?  Can't happen —
-             * defensive: treat as closed. */
-            return ray_error("io", "connection closed");
-        }
-        /* a SIGINT stops the wait ('stop, as for any running statement); the answer still owed is dropped
-         * when it comes, so the handle's next round trip reads its own */
-        int w = ray_sock_wait_readable((ray_sock_t)sel->fd, 100);
-        if (w < 0) {
-            cd->sync_waiting = false;
-            return ray_error("io", "ipc recv failed");
-        }
-        if (w == 0 && ray_interrupted()) {
-            cd->sync_waiting = false;
-            cd->sync_owed++;
-            return ray_error("stop", "interrupted");
-        }
-    }
+/* `h[]` (basics/ipc.md:294-300): writes nothing, and waits on the same pump
+ * as sync_send for the next ASYNC frame from this peer, which it answers
+ * instead of evaluating.  A SYNC request arriving meanwhile is served. */
+ray_t* ray_ipc_recv_async(int64_t handle)
+{
+    ray_poll_t* poll;
+    ray_selector_t* sel = conn_resolve(&poll, handle);
+    if (!sel) return ray_error("io", "connection closed");
+    ray_ipc_conn_data_t* cd = (ray_ipc_conn_data_t*)sel->data;
+    if (cd->phase == RAY_IPC_PHASE_WS)
+        return ray_error("nyi", "blocking receive on a websocket handle");
+    if (cd->sync_waiting)
+        return ray_error("io", "nested receive on busy handle");
+    return sync_wait(poll, sel, true);
 }
 
 ray_t* ray_ipc_send(int64_t handle, ray_t* msg)

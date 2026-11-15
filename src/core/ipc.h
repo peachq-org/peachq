@@ -178,6 +178,7 @@ int64_t   ray_ipc_serve_link(ray_sock_t fd);
 int64_t   ray_ws_client_register(ray_sock_t fd, void* ws_conn);
 
 ray_t*    ray_ipc_send(int64_t handle, ray_t* msg);
+ray_t*    ray_ipc_recv_async(int64_t handle);
 ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg);
 /* One async frame to every handle in `handles` (q `-25!`, basics/internal.md):
  * serialized once, written per connection.  Every handle is validated and the

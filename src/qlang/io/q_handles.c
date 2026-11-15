@@ -25,7 +25,8 @@
 #include "lang/internal.h"   /* make_i32/make_i64, ray_hsend_fn/ray_hpost_fn/ray_hclose_fn */
 #include "core/runtime.h"    /* __VM->ipc_handle — the handle context handle 0 swaps */
 #include "table/sym.h"       /* ray_sym_intern_runtime, ray_sym_str */
-#include "core/ipc.h"        /* ray_ipc_connect_desc_over; ray_ipc_handle_of_fd/fd_of_handle — q true-fd handle <-> selector id */
+#include "core/ipc.h"        /* ray_ipc_connect_desc_over; ray_ipc_handle_of_fd/fd_of_handle — q true-fd handle <-> selector id;
+                                ray_ipc_recv_async — `h[]` */
 #include "core/sock.h"       /* ray_sock_resolve4 — hopen of an interface-bound own listener */
 #include "core/numparse.h"   /* ray_parse_i64 — hopen's own-listener port */
 #include <rayforce.h>
@@ -501,6 +502,7 @@ ray_t* q_handles_apply(ray_t* h, ray_t* y) {
     int64_t raw = ray_ipc_handle_of_fd(fd);    /* fd -> poll selector id */
     if (raw < 0)
         return q_err(QE_TYPE);
+    if (qh > 0 && RAY_IS_NULL(y)) return ray_ipc_recv_async(raw);   /* `h[]` (basics/ipc.md:294-300) */
     ray_t* rawh = make_i64(raw);
     ray_t* r    = (qh > 0) ? ray_hsend_fn(rawh, y)   /* sync  */
                            : ray_hpost_fn(rawh, y);  /* async */
