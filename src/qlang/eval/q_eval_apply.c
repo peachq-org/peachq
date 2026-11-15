@@ -2235,6 +2235,8 @@ static ray_t* name_lift(const q_op_t* row, ray_t** args, int64_t n, int dot) {
          * any other amend reads the file, amends and writes it back — a directory's one column file. */
         if (amend_entire_with(args, n, dot, ",")) return q_wirefile_append(args[0], args[3]);
         if (amend_entire_with(args, n, dot, ":")) return q_io_set(args[0], args[3]);
+        const char* ps; size_t pn;
+        if (q_handles_pq_of(args[0], &ps, &pn) != Q_PQ_NONE) return q_err(QE_NYI);   /* a provider coordinate is no file */
         return q_wirefile_amend(args, n, dot);
     }
     int64_t id = args[0]->i64;
