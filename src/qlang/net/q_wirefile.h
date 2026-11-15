@@ -42,6 +42,14 @@ ray_t* q_wirefile_append_path(ray_t* pathstr, ray_t* y);
 ray_t* q_wirefile_write_splay(ray_t* dirsym, ray_t* domsym, ray_t* y,
                               int lbs, int alg, int lvl);
 
+/* Rows y appended to the splayed table in directory x (with or without its slash) under the row law `law`
+ * (ops/q_table.h Q_ROWS_INSERT / Q_ROWS_JOIN), all or none: every column is checked before anything is written, and
+ * a failure part-way puts back what was written, as far as the file system lets it.  `s#` stays while the column is
+ * still sorted; no other letter is proven true after it, so each is dropped.  A missing or empty directory is written
+ * as `set` writes it when `create` (upsert, ref/upsert.md:32), else 'io (insert: kdb sets first, owner 2026-11-15).
+ * NULL on success with *before the old row count and *added the rows written; else an owned error. */
+ray_t* q_wirefile_splay_append(ray_t* x, ray_t* y, int law, int create, int64_t* before, int64_t* added);
+
 /* The domain-append primitive filepath Enum Extend (`:d?y) and the splay writer share: intern
  * symv's symbols into the domain FILE under its lock (append-only, new names only, positions
  * never rewritten; a compressed file refuses a new name).  *positions (may be NULL) receives the

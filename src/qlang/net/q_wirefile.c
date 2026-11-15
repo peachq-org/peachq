@@ -10,6 +10,7 @@
 #include "qlang/q_env.h"        /* q_env_get — `.z.zd` lives as a plain global */
 #include "qlang/q_prim.h"       /* q_str_text_bytes — nested CHAR rows; q_attr_* — the disk attribute byte */
 #include "qlang/ops/q_index.h"  /* q_index_elem_at — nested row reads */
+#include "qlang/ops/q_table.h"  /* the row law a splay append types its new rows by */
 #include "qlang/eval/q_eval.h"  /* q_eval_apply_concrete, q_eval_apply_value */
 #include "qlang/q_registry.h"   /* the `,` value the append fallback composes on */
 #include "store/fileio.h"     /* ray_file_rename — THE platform-armed replace-by-rename */
@@ -1494,39 +1495,53 @@ static int wf_row_bytes(ray_t* e, int8_t elem, const char** p, int64_t* nbytes) 
     return 1;
 }
 
-/* Nested column pair: `<col>` = fe20 (77+elem) + cumulative END offsets in elements,
- * `<col>#` = the raw element bytes (headerless) — the read format, reversed. */
-static ray_t* wf_write_nested(ray_t* path, ray_t* col, int8_t elem,
-                              int lbs, int alg, int lvl) {
+/* A nested column's two parts from the rows of `col`: the END offsets in elements, counted on from `base`, and the
+ * element bytes (*body malloc'd, *total long).  'type for a row that is not a vector of `elem`. */
+static ray_t* wf_nested_parts(ray_t* col, int8_t elem, int64_t base, ray_t** offs, uint8_t** body, size_t* total) {
     int64_t n = q_count(col);
-    ray_t* offs = ray_vec_new(RAY_I64, n > 0 ? n : 1);
-    size_t total = 0;
+    ray_t* o = ray_vec_new(RAY_I64, n > 0 ? n : 1);
+    size_t sum = 0;
     ray_t* bad = NULL;
-    for (int64_t i = 0; i < n && offs && !RAY_IS_ERR(offs) && !bad; i++) {
+    for (int64_t i = 0; i < n && o && !RAY_IS_ERR(o) && !bad; i++) {
         ray_t* e = q_index_elem_at(col, i);
         const char* ep; int64_t el;
         if (!wf_row_bytes(e, elem, &ep, &el)) bad = q_err(QE_TYPE);
         else {
-            total += (size_t)el;
-            int64_t end = (int64_t)(total / ray_type_sizes[(uint8_t)elem]);
-            offs = ray_vec_append(offs, &end);
+            sum += (size_t)el;
+            int64_t end = base + (int64_t)(sum / ray_type_sizes[(uint8_t)elem]);
+            o = ray_vec_append(o, &end);
         }
         if (e && !RAY_IS_ERR(e)) ray_release(e);
     }
-    if (!offs || RAY_IS_ERR(offs)) bad = offs ? offs : q_err(QE_OOM);
-    if (bad) { if (offs && !RAY_IS_ERR(offs) && offs != bad) ray_release(offs); return bad; }
-    uint8_t* body = (uint8_t*)malloc(total ? total : 1);
-    if (!body) { ray_release(offs); return q_err(QE_OOM); }
+    if (!o || RAY_IS_ERR(o)) bad = o ? o : q_err(QE_OOM);
+    if (bad) { if (o && !RAY_IS_ERR(o) && o != bad) ray_release(o); return bad; }
+    uint8_t* buf = (uint8_t*)malloc(sum ? sum : 1);
+    if (!buf) { ray_release(o); return q_err(QE_OOM); }
     size_t w = 0;
     for (int64_t i = 0; i < n; i++) {
         ray_t* e = q_index_elem_at(col, i);
         const char* ep; int64_t el;
         if (wf_row_bytes(e, elem, &ep, &el)) {
-            memcpy(body + w, ep, (size_t)el);
+            memcpy(buf + w, ep, (size_t)el);
             w += (size_t)el;
         }
         if (e && !RAY_IS_ERR(e)) ray_release(e);
     }
+    *offs = o;
+    *body = buf;
+    *total = sum;
+    return NULL;
+}
+
+/* Nested column pair: `<col>` = fe20 (77+elem) + cumulative END offsets in elements,
+ * `<col>#` = the raw element bytes (headerless) — the read format, reversed. */
+static ray_t* wf_write_nested(ray_t* path, ray_t* col, int8_t elem,
+                              int lbs, int alg, int lvl) {
+    ray_t* offs = NULL;
+    uint8_t* body = NULL;
+    size_t total = 0;
+    ray_t* bad = wf_nested_parts(col, elem, 0, &offs, &body, &total);
+    if (bad) return bad;
     ray_t* img = wf_write_b(offs, (uint8_t)(WF_NEST_BIAS + elem));
     ray_release(offs);
     if (RAY_IS_ERR(img)) { free(body); return img; }
@@ -1578,6 +1593,63 @@ static int8_t wf_col_nested_tag(ray_t* col) {
     return t0;
 }
 
+/* One column file as the splay writer writes it: an enumerated or reference column as it is, a symbol column
+ * enumerated against the named domain (*dompath resolved from domsym on first use, the caller's to release), a
+ * compound column as its nested pair, an empty string column as the empty general list, a simple vector as itself;
+ * anything else 'type. */
+static ray_t* wf_write_col(ray_t* cp, ray_t* col, ray_t* domsym, ray_t** dompath, int lbs, int alg, int lvl) {
+    int8_t nt;
+    ray_t* bad = NULL;
+    ray_t* dec = NULL;                               /* under a NAMED domain a 20h column re-enumerates against it */
+    char letter = q_attr_letter(col);
+    /* an enumerated column is written as it is: its domain is the database root's, and a partition directory
+     * holds none (kb/partition.md:13-31) */
+    ray_t* rimg = col->type == RAY_ENUM && !domsym ? wf_write_image(col) : wf_ref_image(col);
+    if (rimg && RAY_IS_ERR(rimg)) return rimg;
+    if (!rimg && col->type == RAY_ENUM) {
+        dec = q_enum_decay(col);
+        if (!dec || RAY_IS_ERR(dec)) return dec ? dec : q_err(QE_TYPE);
+        col = dec;
+    }
+    if (rimg) {
+        bad = wf_put(cp, rimg, lbs, alg, lvl);
+        if (rimg != bad) ray_release(rimg);
+    } else if (col->type == RAY_SYM) {               /* auto-enumerate (fused) */
+        if (!*dompath) {
+            *dompath = domsym ? q_io_file_path(domsym) : NULL;
+            if (!*dompath) bad = q_err(QE_TYPE);
+        }
+        ray_t* pos = NULL;
+        if (!bad) bad = q_wirefile_domain_extend(*dompath, col, &pos);
+        if (!bad) {
+            const char* dp = ray_str_ptr(*dompath);
+            size_t dn = ray_str_len(*dompath), base = dn;
+            while (base && dp[base - 1] != '/') base--;
+            ray_t* img = wf_write_enum_img(pos, dp + base, dn - base, letter);
+            bad = RAY_IS_ERR(img) ? img : wf_put(cp, img, lbs, alg, lvl);
+            if (!RAY_IS_ERR(img) && img != bad) ray_release(img);
+        }
+        if (pos) ray_release(pos);
+    } else if ((nt = wf_col_nested_tag(col))) {
+        bad = wf_write_nested(cp, col, nt, lbs, alg, lvl);
+    } else if (!q_count(col) && (col->type == RAY_LIST || col->type == RAY_STR)) {
+        /* kdb writes an empty string column as the empty general list (torq-hdb packets/flags) */
+        ray_t* none = ray_list_new(0);
+        ray_t* img = none ? wf_write_a(none) : q_err(QE_OOM);
+        bad = RAY_IS_ERR(img) ? img : wf_put(cp, img, lbs, alg, lvl);
+        if (!RAY_IS_ERR(img) && img != bad) ray_release(img);
+        if (none) ray_release(none);
+    } else if (col->type > 0 && wf_simple_tag((uint8_t)col->type)) {
+        ray_t* img = wf_write_b(col, (uint8_t)col->type);
+        bad = RAY_IS_ERR(img) ? img : wf_put(cp, img, lbs, alg, lvl);
+        if (!RAY_IS_ERR(img) && img != bad) ray_release(img);
+    } else {
+        bad = q_err(QE_TYPE);                        /* kb: vectors/compound only */
+    }
+    if (dec) ray_release(dec);
+    return bad;
+}
+
 static ray_t* wf_write_splay_dir(ray_t* dirstr, ray_t* domsym, ray_t* y,
                                  int lbs, int alg, int lvl) {
     if (!y || y->type != RAY_TABLE)
@@ -1595,7 +1667,6 @@ static ray_t* wf_write_splay_dir(ray_t* dirstr, ray_t* domsym, ray_t* y,
     ray_t* bad = !names || RAY_IS_ERR(names) ? q_err(QE_OOM) : NULL;
     for (int64_t c = 0; c < nc && !bad; c++) {
         int64_t id = ray_table_col_name(y, c);
-        int8_t nt;
         ray_t* col = ray_table_get_col_idx(y, c);    /* borrowed */
         ray_t* nm = ray_sym_str(id);
         if (!col || !nm || !wf_leaf_name(ray_str_ptr(nm), ray_str_len(nm))) {
@@ -1605,53 +1676,7 @@ static ray_t* wf_write_splay_dir(ray_t* dirstr, ray_t* domsym, ray_t* y,
         ray_t* cp = wf_join(ray_str_ptr(dirstr), ray_str_len(dirstr),
                             ray_str_ptr(nm), ray_str_len(nm));
         if (!cp) { bad = q_err(QE_OOM); break; }
-        ray_t* dec = NULL;                           /* under a NAMED domain a 20h column re-enumerates against it */
-        char letter = q_attr_letter(col);
-        /* an enumerated column is written as it is: its domain is the database root's, and a partition directory
-         * holds none (kb/partition.md:13-31) */
-        ray_t* rimg = col->type == RAY_ENUM && !domsym ? wf_write_image(col) : wf_ref_image(col);
-        if (rimg && RAY_IS_ERR(rimg)) { bad = rimg; ray_release(cp); break; }
-        if (!rimg && col->type == RAY_ENUM) {
-            dec = q_enum_decay(col);
-            if (!dec || RAY_IS_ERR(dec)) { bad = dec ? dec : q_err(QE_TYPE); ray_release(cp); break; }
-            col = dec;
-        }
-        if (rimg) {
-            bad = wf_put(cp, rimg, lbs, alg, lvl);
-            if (rimg != bad) ray_release(rimg);
-        } else if (col->type == RAY_SYM) {           /* auto-enumerate (fused) */
-            if (!dompath) {
-                dompath = q_io_file_path(domsym);
-                if (!dompath) bad = q_err(QE_TYPE);
-            }
-            ray_t* pos = NULL;
-            if (!bad) bad = q_wirefile_domain_extend(dompath, col, &pos);
-            if (!bad) {
-                const char* dp = ray_str_ptr(dompath);
-                size_t dn = ray_str_len(dompath), base = dn;
-                while (base && dp[base - 1] != '/') base--;
-                ray_t* img = wf_write_enum_img(pos, dp + base, dn - base, letter);
-                bad = RAY_IS_ERR(img) ? img : wf_put(cp, img, lbs, alg, lvl);
-                if (!RAY_IS_ERR(img) && img != bad) ray_release(img);
-            }
-            if (pos) ray_release(pos);
-        } else if ((nt = wf_col_nested_tag(col))) {
-            bad = wf_write_nested(cp, col, nt, lbs, alg, lvl);
-        } else if (!q_count(col) && (col->type == RAY_LIST || col->type == RAY_STR)) {
-            /* kdb writes an empty string column as the empty general list (torq-hdb packets/flags) */
-            ray_t* none = ray_list_new(0);
-            ray_t* img = none ? wf_write_a(none) : q_err(QE_OOM);
-            bad = RAY_IS_ERR(img) ? img : wf_put(cp, img, lbs, alg, lvl);
-            if (!RAY_IS_ERR(img) && img != bad) ray_release(img);
-            if (none) ray_release(none);
-        } else if (col->type > 0 && wf_simple_tag((uint8_t)col->type)) {
-            ray_t* img = wf_write_b(col, (uint8_t)col->type);
-            bad = RAY_IS_ERR(img) ? img : wf_put(cp, img, lbs, alg, lvl);
-            if (!RAY_IS_ERR(img) && img != bad) ray_release(img);
-        } else {
-            bad = q_err(QE_TYPE);                    /* kb: vectors/compound only */
-        }
-        if (dec) ray_release(dec);
+        bad = wf_write_col(cp, col, domsym, &dompath, lbs, alg, lvl);
         ray_release(cp);
         if (!bad) {
             names = ray_vec_append(names, &id);
@@ -1689,6 +1714,302 @@ ray_t* q_wirefile_write_splay(ray_t* dirsym, ray_t* domsym, ray_t* y,
     if (bad) return bad;
     ray_retain(dirsym);
     return dirsym;
+}
+
+/* ---- the splay append (ref/upsert.md:135-150) --------------------------- */
+
+/* One column of a splay append and what its file held, so a failure part-way can put it back. */
+typedef struct {
+    ray_t*      path;
+    ray_t*      arena;    /* `<col>#`, where a nested column (or a rewrite to one) keeps its elements */
+    q_wf_colhdr h;
+    char        kind;     /* 'B' fixed width, 'E' enum, 'N' nested, 'A' general list; rewritten: 'R' an empty
+                           * general list, 'Z' a container */
+    int64_t     size;
+    int64_t     asize;    /* the arena's bytes, -1 when there was none */
+    int64_t     end;      /* where the elements end; an index trailer after them is cut */
+    uint8_t*    saved;    /* the header [0, hlen), then the trailer [end, size) */
+    size_t      hlen;
+    int         attr_at;  /* the attribute byte, -1 for none */
+} wf_sa_col;
+
+static int64_t wf_size(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0 ? (int64_t)st.st_size : -1;
+}
+
+static ray_t* wf_sa_probe(wf_sa_col* c) {
+    ray_t* e = q_wirefile_probe(c->path, &c->h);
+    if (e) return e;
+    const q_wf_colhdr* h = &c->h;
+    c->size = c->end = wf_size(ray_str_ptr(c->path));
+    c->attr_at = -1;
+    c->hlen = h->payload;
+    if (h->anymap || (h->zipped && (h->nested || h->is_enum))) return q_err(QE_NYI);   /* Dvvddq, Dgkzqw */
+    if (h->zipped) c->kind = 'Z';
+    else if (h->nested) c->kind = 'N';
+    else if (h->is_enum && h->mappable) c->kind = 'E';
+    else if (h->mappable && h->layout) c->kind = 'B';
+    else if (!h->payload && !h->tag && h->count >= 0) c->kind = h->count ? 'A' : 'R';
+    else return q_err(QE_NYI);                       /* a 32-bit enum (Dvvddq), a legacy or typed shape-A file */
+    if (c->kind == 'A') c->hlen = 8;
+    if (c->kind == 'R' || c->kind == 'Z') c->hlen = (size_t)c->size;
+    if (c->kind == 'B' || c->kind == 'E') c->end -= (int64_t)h->tail;
+    if (h->layout && c->kind != 'Z') c->attr_at = (h->layout == 'D' ? WF_D_DESC : 0) + 3;
+    if (c->kind == 'N' || c->kind == 'R') {
+        c->arena = wf_join(ray_str_ptr(c->path), ray_str_len(c->path), "#", 1);
+        if (!c->arena) return q_err(QE_OOM);
+        c->asize = wf_size(ray_str_ptr(c->arena));
+    }
+    int zipped = 0;
+    ray_t* head = c->kind == 'N' && c->asize > 0 ? q_io_read_slice(c->arena, 0, 1, &zipped) : NULL;
+    if (head && RAY_IS_ERR(head)) return head;
+    if (head) ray_release(head);
+    return zipped ? q_err(QE_NYI) : NULL;                        /* a compressed `<col>#`: Dgkzqw */
+}
+
+/* The column's last cell (none when it is empty), read alone whatever its letter: the template the row law types
+ * the new rows by, and the stored value `s#` must not fall below. */
+static ray_t* wf_sa_last(wf_sa_col* c) {
+    q_wf_colhdr h = c->h;
+    h.disk_attr = 0;
+    int64_t n = h.count > 0;
+    if (c->kind == 'R') return ray_list_new(0);
+    ray_t* r = q_wirefile_read_rows(c->path, &h, h.count - n, n);
+    if (r) return r;
+    ray_t* all = wf_read_path(c->path, 1);
+    if (RAY_IS_ERR(all)) return all;
+    ray_t* take = q_registry_lookup_name("#", 1, Q_DYADIC);
+    ray_t* k = ray_i64(-n);
+    ray_t* args[2] = { k, all };
+    r = take ? q_eval_apply_value(take, args, 2) : q_err(QE_TYPE);
+    ray_release(k);
+    ray_release(all);
+    return r;
+}
+
+static int wf_sa_sorted(ray_t* last, ray_t* cells) {
+    ray_t* cat = q_registry_lookup_name(",", 1, Q_DYADIC);
+    ray_t* args[2] = { last, cells };
+    ray_t* v = cat ? q_eval_apply_value(cat, args, 2) : NULL;
+    ray_t* s = v && !RAY_IS_ERR(v) ? q_attr_set_letter('s', v) : v;
+    int ok = s && !RAY_IS_ERR(s);
+    if (v && v != s) ray_release(v);
+    if (s && RAY_IS_ERR(s)) { ray_error_free(s); q_err_drop(); }
+    else if (s) ray_release(s);
+    return ok;
+}
+
+/* Can `cells` go on the end of this column as they are?  Decides the attribute too: `s` stays while the column is
+ * still sorted (the stored last cell and the new ones, owner 2026-11-15), every other letter is dropped. */
+static ray_t* wf_sa_check(wf_sa_col* c, ray_t* last, ray_t* cells) {
+    const q_wf_colhdr* h = &c->h;
+    int ok = 1;
+    if (c->kind == 'B' || c->kind == 'Z') ok = cells->type == h->tag;
+    if (c->kind == 'E') ok = q_enum_is(cells) && q_enum_domain(cells) == ray_sym_intern_runtime(h->domain, strlen(h->domain));
+    if (c->kind == 'R') ok = cells->type == RAY_ENUM || wf_col_nested_tag(cells) ||
+                             (cells->type > 0 && wf_simple_tag((uint8_t)cells->type));
+    for (int64_t i = 0, n = c->kind == 'N' ? q_count(cells) : 0; ok && i < n; i++) {
+        ray_t* e = q_index_elem_at(cells, i);
+        const char* p; int64_t len;
+        ok = wf_row_bytes(e, h->tag, &p, &len);
+        if (e && !RAY_IS_ERR(e)) ray_release(e);
+    }
+    if (!ok) return q_err(QE_TYPE);
+    if (!h->disk_attr || c->attr_at < 0 || (h->disk_attr == 1 && wf_sa_sorted(last, cells))) c->attr_at = -1;
+    return NULL;
+}
+
+static ray_t* wf_sa_save(wf_sa_col* c) {
+    size_t tail = (size_t)(c->size - c->end);
+    c->saved = (uint8_t*)malloc(c->hlen + tail + 1);
+    if (!c->saved) return q_err(QE_OOM);
+    FILE* fp = fopen(ray_str_ptr(c->path), "rb");
+    int bad = !fp || fread(c->saved, 1, c->hlen, fp) != c->hlen ||
+              (tail && (fseek(fp, (long)c->end, SEEK_SET) != 0 || fread(c->saved + c->hlen, 1, tail, fp) != tail));
+    if (fp) fclose(fp);
+    return bad ? q_err(QE_IO) : NULL;
+}
+
+/* A nested column: the elements onto `<col>#`, then their END offsets onto `<col>` and its count, which a nested
+ * offsets file keeps true. */
+static ray_t* wf_sa_nested(wf_sa_col* c, ray_t* cells) {
+    int64_t base = 0, cnt = c->h.count + q_count(cells);
+    if (c->h.count > 0) {
+        ray_t* b = wf_exact(c->path, c->h.payload + 8 * (c->h.count - 1), 8);
+        if (RAY_IS_ERR(b)) return b;
+        base = wf_i64((const uint8_t*)ray_data(b));
+        ray_release(b);
+    }
+    ray_t* offs = NULL;
+    uint8_t* body = NULL;
+    size_t total = 0;
+    ray_t* bad = wf_nested_parts(cells, c->h.tag, base, &offs, &body, &total);
+    if (bad) return bad;
+    FILE* fp = fopen(ray_str_ptr(c->arena), "ab");
+    int fail = !fp || q_io_fwrite(fp, body, total) != 0;
+    if (fp && fclose(fp) != 0) fail = 1;
+    free(body);
+    bad = fail ? q_err(QE_IO)
+               : wf_append_bytes(c->path, ray_data(offs), (size_t)q_count(offs) * 8,
+                                 (c->h.layout == 'D' ? WF_D_DESC : 0) + 8, &cnt, 8);
+    ray_release(offs);
+    return bad;
+}
+
+static ray_t* wf_sa_write(wf_sa_col* c, ray_t* cells) {
+    if (c->kind == 'R') {
+        ray_t* dompath = NULL;
+        return wf_write_col(c->path, cells, NULL, &dompath, 0, 0, 0);
+    }
+    if (c->kind == 'A') return wf_append_a_list(c->path, cells, (int32_t)c->h.count);
+    if (c->kind == 'Z') return wf_append_rewrite(c->path, cells, 1);   /* a container is rewritten with its codec */
+    ray_t* bad = c->end < c->size ? q_io_truncate(ray_str_ptr(c->path), c->end) : NULL;
+    if (!bad && c->kind == 'N') bad = wf_sa_nested(c, cells);
+    if (!bad && c->kind == 'E') {
+        ray_t* pos = q_enum_positions(cells);
+        bad = !pos || RAY_IS_ERR(pos) ? (pos ? pos : q_err(QE_OOM))
+                                      : wf_append_bytes(c->path, ray_data(pos), (size_t)q_count(pos) * 8, 0, NULL, 0);
+        if (pos && !RAY_IS_ERR(pos)) ray_release(pos);
+    }
+    if (!bad && c->kind == 'B')
+        bad = wf_append_bytes(c->path, ray_data(cells), (size_t)q_count(cells) * ray_type_sizes[(uint8_t)c->h.tag],
+                              0, NULL, 0);
+    uint8_t none = 0;
+    if (!bad && c->attr_at >= 0) bad = wf_append_bytes(c->path, NULL, 0, c->attr_at, &none, 1);
+    return bad;
+}
+
+/* Best effort, as every writer here: the saved header and trailer back in place, the file cut to its old length. */
+static void wf_sa_undo(wf_sa_col* c) {
+    const char* p = ray_str_ptr(c->path);
+    if (c->kind == 'R' || c->kind == 'Z') {
+        ray_t* e = q_io_write_all(c->path, c->saved, c->hlen);
+        if (e) { ray_error_free(e); q_err_drop(); }
+    } else {
+        FILE* fp = fopen(p, "r+b");
+        if (fp) {
+            if (fwrite(c->saved, 1, c->hlen, fp) == c->hlen && c->end < c->size && fseek(fp, (long)c->end, SEEK_SET) == 0)
+                (void)!fwrite(c->saved + c->hlen, 1, (size_t)(c->size - c->end), fp);
+            fclose(fp);
+        }
+        ray_t* e = q_io_truncate(p, c->size);
+        if (e) { ray_error_free(e); q_err_drop(); }
+    }
+    if (c->arena && c->asize < 0) remove(ray_str_ptr(c->arena));
+    else if (c->arena) {
+        ray_t* e = q_io_truncate(ray_str_ptr(c->arena), c->asize);
+        if (e) { ray_error_free(e); q_err_drop(); }
+    }
+}
+
+/* The splay at `dir` (its slash on) as a table of each column's last cell, `cols` probed for the append. */
+static ray_t* wf_sa_open(ray_t* dir, ray_t* names, wf_sa_col* cols, ray_t** tmpl) {
+    int64_t nc = q_count(names);
+    *tmpl = ray_table_new(nc);
+    for (int64_t i = 0; i < nc; i++) {
+        if (!*tmpl || RAY_IS_ERR(*tmpl)) return *tmpl ? *tmpl : q_err(QE_OOM);
+        int64_t id = ray_vec_get_sym_id(names, i);
+        ray_t* nm = ray_sym_str(id);                  /* borrowed */
+        if (!nm || !wf_leaf_name(ray_str_ptr(nm), ray_str_len(nm))) return q_err(QE_CORRUPT);
+        cols[i].path = wf_join(ray_str_ptr(dir), ray_str_len(dir), ray_str_ptr(nm), ray_str_len(nm));
+        if (!cols[i].path) return q_err(QE_OOM);
+        ray_t* e = wf_sa_probe(&cols[i]);
+        if (e) return e;
+        if (cols[i].h.count != cols[0].h.count) return q_err(QE_CORRUPT);
+        ray_t* last = wf_sa_last(&cols[i]);
+        if (!last || RAY_IS_ERR(last)) return last ? last : q_err(QE_OOM);
+        *tmpl = ray_table_add_col(*tmpl, id, last);
+        ray_release(last);
+    }
+    return !*tmpl ? q_err(QE_OOM) : RAY_IS_ERR(*tmpl) ? *tmpl : NULL;
+}
+
+/* The new rows of y under the row law of the door (Q_ROWS_INSERT / Q_ROWS_JOIN), typed by the template.  An enum
+ * column takes only values enumerated over its own domain (ref/upsert.md:24-28): the in-memory law would enumerate a
+ * plain symbol or another domain's. */
+static ray_t* wf_sa_rows(ray_t* tmpl, ray_t* y, int law) {
+    if (q_type_is_keyed(y)) return q_err(QE_TYPE);
+    ray_t* rows = q_table_rows_normalize(tmpl, y, law);
+    if (!rows || RAY_IS_ERR(rows)) return rows ? rows : q_err(QE_TYPE);
+    for (int64_t i = 0, nc = ray_table_ncols(tmpl); i < nc && q_count(rows); i++) {
+        ray_t* col = ray_table_get_col_idx(rows, i);
+        ray_t* oc = ray_table_get_col_idx(tmpl, i);
+        if (oc->type == RAY_ENUM && (!q_enum_is(col) || q_enum_domain(col) != q_enum_domain(oc))) {
+            ray_release(rows);
+            return q_err(QE_TYPE);
+        }
+    }
+    ray_t* typed = q_table_rows_typed(tmpl, rows);
+    ray_release(rows);
+    return typed;
+}
+
+static ray_t* wf_splay_append_dir(ray_t* dir, ray_t* y, int law, int create, int64_t* before, int64_t* added) {
+    ray_t* dp = wf_join(ray_str_ptr(dir), ray_str_len(dir), ".d", 2);
+    if (!dp) return q_err(QE_OOM);
+    if (wf_size(ray_str_ptr(dp)) < 0) {
+        ray_release(dp);
+        ray_t* ls = q_io_list(dir);
+        int fresh = !ls || RAY_IS_ERR(ls) || q_count(ls) == 0;
+        if (ls && RAY_IS_ERR(ls)) { ray_error_free(ls); q_err_drop(); }
+        else if (ls) ray_release(ls);
+        if (!fresh) return q_err(QE_TYPE);
+        if (!create) return q_err(QE_IO);
+        *added = q_count(y);
+        return wf_write_splay_dir(dir, NULL, y, -1, -1, -1);
+    }
+    ray_t* names = wf_read_path(dp, 0);
+    ray_release(dp);
+    if (RAY_IS_ERR(names)) return names;
+    int64_t nc = names->type == RAY_SYM ? q_count(names) : 0;
+    wf_sa_col* cols = nc ? (wf_sa_col*)calloc((size_t)nc, sizeof *cols) : NULL;
+    ray_t* tmpl = NULL;
+    ray_t* add = NULL;
+    ray_t* bad = !nc ? q_err(QE_CORRUPT) : !cols ? q_err(QE_OOM) : wf_sa_open(dir, names, cols, &tmpl);
+    if (!bad) {
+        *before = cols[0].h.count;
+        add = wf_sa_rows(tmpl, y, law);
+        if (!add || RAY_IS_ERR(add)) { bad = add ? add : q_err(QE_TYPE); add = NULL; }
+    }
+    int64_t k = add ? q_count(add) : 0;
+    for (int64_t i = 0; !bad && k && i < nc; i++)
+        bad = wf_sa_check(&cols[i], ray_table_get_col_idx(tmpl, i), ray_table_get_col_idx(add, i));
+    for (int64_t i = 0; !bad && k && i < nc; i++) bad = wf_sa_save(&cols[i]);
+    for (int64_t i = 0; !bad && k && i < nc; i++) {
+        bad = wf_sa_write(&cols[i], ray_table_get_col_idx(add, i));
+        for (int64_t j = i; bad && j >= 0; j--) wf_sa_undo(&cols[j]);
+    }
+    if (!bad) *added = k;
+    for (int64_t i = 0; i < nc && cols; i++) {
+        if (cols[i].path) ray_release(cols[i].path);
+        if (cols[i].arena) ray_release(cols[i].arena);
+        free(cols[i].saved);
+    }
+    free(cols);
+    if (tmpl && !RAY_IS_ERR(tmpl)) ray_release(tmpl);
+    if (add) ray_release(add);
+    ray_release(names);
+    return bad;
+}
+
+ray_t* q_wirefile_splay_append(ray_t* x, ray_t* y, int law, int create, int64_t* before, int64_t* added) {
+    *before = *added = 0;
+    ray_t* path = y ? q_io_file_path(x) : NULL;
+    if (!path) return q_err(QE_TYPE);
+    size_t n = ray_str_len(path);
+    ray_t* dir = n && ray_str_ptr(path)[n - 1] == '/' ? (ray_retain(path), path) : wf_join(ray_str_ptr(path), n, "/", 1);
+    ray_release(path);
+    if (!dir) return q_err(QE_OOM);
+    ray_t* bad = q_io_guard_write(ray_str_ptr(dir), ray_str_len(dir));
+    if (!bad) {
+        ray_retain(y);
+        y = q_eval_apply_concrete(y);
+        bad = !y || RAY_IS_ERR(y) ? (y ? y : q_err(QE_TYPE)) : wf_splay_append_dir(dir, y, law, create, before, added);
+        if (y && y != bad) ray_release(y);
+    }
+    ray_release(dir);
+    return bad;
 }
 
 ray_t* q_wirefile_write_zip(ray_t* x, ray_t* y, int lbs, int alg, int lvl) {
