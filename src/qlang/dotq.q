@@ -42,14 +42,14 @@
 .Q.gz:-35!;
 .Q.ts:{-34!(x;y)};
 
-/ ---- Enumeration (ref/dotq.md en/ens; KX 2025.01.17 enxs): `?` grows the domain, then f (only `$`) enumerates.
+/ ---- Enumeration (ref/dotq.md en/ens; KX 2025.01.17 enxs): `?` grows the domain and enumerates, as f (only `$`) would
+/ but for a null the domain file lacks: that one is the null position (owner 2026-11-15).
 .Q.enxs:{[f;d;t;n]
   if[not f~($);'"nyi"];
   if[not 98h=type t;'"type"];
   c:where 11h=type each flip t;
   h:$[d~(::);n;` sv d,n];
-  h?/:(enlist`symbol$()),t c;
-  @[t;c;f n]};
+  @[t;c;:;{`#x}each 1_h?/:(enlist`symbol$()),t c]};
 .Q.en:{[d;t] .Q.enxs[$;d;t;`sym]};
 .Q.ens:{[d;t;n] .Q.enxs[$;d;t;n]};
 
