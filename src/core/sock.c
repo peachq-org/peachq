@@ -37,6 +37,7 @@
 #else
   #include <fcntl.h>
   #include <netdb.h>
+  #include <strings.h>
   #include <sys/socket.h>
   #include <sys/time.h>
   #include <netinet/in.h>
@@ -80,15 +81,47 @@ static int sock_map_err(int e) { return e; }
 static int sock_errno(void) { return errno; }
 #endif
 
+#ifndef RAY_OS_WINDOWS
+/* musl matches /etc/hosts case-sensitively, but host names are case-insensitive (RFC 4343):
+ * retry under the file's own spelling so the libc still returns every address listed under it. */
+static int hosts_lookup(const char* host, const char* port, const struct addrinfo* hints, struct addrinfo** res)
+{
+    FILE* f = fopen("/etc/hosts", "r");
+    if (!f) return -1;
+    char line[512];
+    int rc = -1;
+    while (rc != 0 && fgets(line, sizeof line, f)) {
+        line[strcspn(line, "#")] = '\0';
+        char* save = NULL;
+        char* addr = strtok_r(line, " \t\r\n", &save);
+        for (char* name; rc != 0 && addr && (name = strtok_r(NULL, " \t\r\n", &save)); )
+            if (strcasecmp(name, host) == 0 && strcmp(name, host) != 0
+                && getaddrinfo(name, port, hints, res) == 0 && *res) rc = 0;
+    }
+    fclose(f);
+    return rc;
+}
+#endif
+
+static int sock_lookup(const char* host, const char* port, int family, struct addrinfo** res)
+{
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = family;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, port, &hints, res) == 0 && *res) return 0;
+#ifdef RAY_OS_WINDOWS
+    return -1;
+#else
+    return hosts_lookup(host, port, &hints, res);
+#endif
+}
+
 int ray_sock_resolve4(const char* host, uint32_t* ip)
 {
     if (!host || !*host) { *ip = htonl(INADDR_ANY); return 0; }
-    struct addrinfo hints, *res = NULL;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags    = AI_PASSIVE;
-    if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) { errno = EADDRNOTAVAIL; return -1; }
+    struct addrinfo* res = NULL;
+    if (sock_lookup(host, NULL, AF_INET, &res) != 0) { errno = EADDRNOTAVAIL; return -1; }
     *ip = ((struct sockaddr_in*)res->ai_addr)->sin_addr.s_addr;
     freeaddrinfo(res);
     return 0;
@@ -265,15 +298,11 @@ static int sock_connect_one(ray_sock_t fd, const struct sockaddr* addr,
 
 ray_sock_t ray_sock_connect(const char* host, uint16_t port, int timeout_ms)
 {
-    struct addrinfo hints, *res = NULL, *rp;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
+    struct addrinfo *res = NULL, *rp;
     char port_str[8];
     snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
 
-    if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) {
+    if (sock_lookup(host, port_str, AF_UNSPEC, &res) != 0) {
         errno = ENXIO;
         return RAY_INVALID_SOCK;
     }
