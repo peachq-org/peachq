@@ -139,7 +139,7 @@ ray_t* q_io_resource_stream(ray_t* pathstr, int gzip, q_io_stream_t** s);
  * the name-vs-path spelling — `set`'s env half asks it too. */
 int q_io_is_fsym(ray_t* x);
 
-/* Does file symbol x name a directory: a trailing slash, or a directory there now? */
+/* Does file symbol x name a local directory: a trailing slash, or a directory there now?  A `:pq:` coordinate never does. */
 int q_io_names_dir(ray_t* x);
 
 /* The directory file symbol x names as a path, its slash on and the n bytes of `leaf` after it: owned, or NULL. */
