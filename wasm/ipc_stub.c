@@ -42,11 +42,26 @@ int64_t ray_ipc_connect(const char* host, uint16_t port, const char* user,
     return -1; /* refused: no networking in wasm */
 }
 
+int64_t ray_ipc_connect_desc(const char* s, size_t n, int timeout_ms) {
+    (void)s; (void)n; (void)timeout_ms;
+    return -1;
+}
+
+int64_t ray_ipc_connect_desc_over(const char* s, size_t n, int timeout_ms, ray_ipc_upgrade_fn up, void* ctx) {
+    (void)s; (void)n; (void)timeout_ms; (void)up; (void)ctx;
+    return -1;
+}
+
 void ray_ipc_close(int64_t handle) { (void)handle; }
 
 ray_t* ray_ipc_send(int64_t handle, ray_t* msg) {
     (void)handle; (void)msg;
     return ray_error("ipc", "no networking in wasm"); /* inert */
+}
+
+ray_t* ray_ipc_recv_async(int64_t handle) {
+    (void)handle;
+    return ray_error("ipc", "no networking in wasm");
 }
 
 ray_err_t ray_ipc_send_async(int64_t handle, ray_t* msg) {
