@@ -25,7 +25,7 @@ int q_eval_active(void);              /* a statement is in the walker (0 at an e
 typedef struct { int cap; uintptr_t floor; } q_eval_reserve_t;
 q_eval_reserve_t q_eval_depth_reserve(void);   /* the debugger's headroom past the running depth and stack */
 void q_eval_depth_restore(q_eval_reserve_t r);
-int q_eval_stack_low(void);   /* the C stack is past its guard: a lambda application answers 'limit */
+int q_eval_stack_low(void);   /* the C stack is past its guard: a lambda application answers 'stack */
 static inline int q_eval_interrupt_take(void) { return q_eval_stop_pending ? q_eval_interrupt_consume() : 0; }
 
 /* Drop the walker's once-per-runtime fixed-sym-id cache (control-form and

@@ -1148,7 +1148,7 @@ ray_t* q_eval(ray_t* node) {
         ray_t* s = q_dbg_stop();
         if (s) return s;
     }
-    if (++g_depth > g_depth_cap) { g_depth--; return q_err(QE_LIMIT); }
+    if (++g_depth > g_depth_cap) { g_depth--; return q_err(QE_STACK); }
 
     ray_t* ret;
     if (node->type == -RAY_SYM) {

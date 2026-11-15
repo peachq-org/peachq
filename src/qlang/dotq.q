@@ -82,10 +82,10 @@
 / .Q.def: defaults + tok-typed coercion over .Q.opt output (typed null on absent value / bad coerce).
 .Q.def:{[d;o] key[d]!{[d;o;k] $[k in key o;$[count o k;(type d k)$first o k;first 0#d k];d k]}[d;o;]each key d};
 
-/ ---- Precision format (ref/dotq.md): thin wrappers over -27! (IEEE754 precision format) ----
-/ .Q.f[x;y]: y to x decimals as a string. DECIMAL rounding (not -27!'s IEEE754): nudge y by a
-/ tiny relative epsilon so decimal ties cross the boundary (.045->"0.05", cf -27!(2i;.045)->"0.04").
-.Q.f:{-27!(x;(1+1e-15)*"f"$y)};
+/ ---- Precision format (ref/dotq.md) ----
+/ .Q.f[x;y]: y to x decimals as a string: y*10^x rounded half-up, exact below dotq.md's 1e17 bound, -27! past it.
+.Q.f:{[x;y] y:"f"$y; s:abs[y]*10 xexp x; if[(x<0)|null[s]|s>=1e17;:-27!(x;y)]; n:string r+.5<=s-r:floor s;
+  n:((0|1+x-count n)#"0"),n; ($[y<0;"-";""]),$[x;(neg[x]_n),".",neg[x]#n;n]};
 / .Q.fmt[x;y;z]: z as a string of LENGTH x, formatted to y decimal places (left-padded via `$`).
 .Q.fmt:{[x;y;z] neg[x]$.Q.f[y;z]};
 

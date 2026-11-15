@@ -877,7 +877,7 @@ static _Thread_local int g_resume_bare;   /* the last suspension ended with a ba
 
 static ray_t* dbg_suspend(ray_t* err) {
     g_dbg_depth++;
-    q_eval_reserve_t depth_cap = q_eval_depth_reserve();   /* at 'limit too, the prompt's lines run */
+    q_eval_reserve_t depth_cap = q_eval_depth_reserve();   /* at 'stack too, the prompt's lines run */
     int bare = 0;
     int outer_cursor = g_cursor, outer_out = g_out;
     int outer_frames = g_prompt_frames;
