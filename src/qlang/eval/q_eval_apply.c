@@ -1357,7 +1357,7 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
     }
     /* barrier frame: strictly-local resolution (function-notation.md) —
      * the body sees its params/locals and globals, never a caller frame */
-    if (RAY_UNLIKELY(q_eval_stack_low())) { ray_release(binds); return q_err(QE_LIMIT); }
+    if (RAY_UNLIKELY(q_eval_stack_low())) { ray_release(binds); return q_err(QE_STACK); }
     if (q_env_frame_push(1) != RAY_OK) { ray_release(binds); return q_err(QE_STACK); }
     for (int64_t i = 0; i < n; i++) {
         ray_t* p = q_index_elem_at(params, i);          /* sym atom */
