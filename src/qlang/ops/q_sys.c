@@ -28,6 +28,7 @@
 #include "qlang/io/q_io.h"    /* q_io_mkdir_parents — `\1`/`\2` create the path they name */
 #include "store/fileio.h"     /* ray_mkdir_p — `\cd` creates a missing target */
 #include "qlang/io/q_handles.h" /* q_handles_end_owned — the exit home ends every owned worker */
+#include "qlang/io/q_splay.h" /* q_splay_mapped_bytes — `\w` mmap */
 #include "qlang/io/q_mount.h" /* q_mount_dir / _object — the `\l <dir>` and serialized-object forms */
 #include "qlang/net/q_wirefile.h" /* q_wirefile_is_data — `\l` tells a data file from a script */
 #include "qlang/io/q_provider.h" /* q_provider_load — the `\l `:pq:duckdb:al` form */
@@ -277,7 +278,7 @@ static int parse_ints(const char* s, size_t len, int64_t* out, int max) {
     return parse_ints_n(s, len, out, max, 0);
 }
 
-/* The `(ms; bytes)` 2-long the timing forms (`\ts`, `.Q.ts`) answer. */
+/* A 2-long: the timing forms' `(ms; bytes)` (`\ts`, `.Q.ts`) and `\w 0|1`'s `(syms; memory)`. */
 static ray_t* pair_i64(int64_t a, int64_t b) {
     ray_t* v = ray_vec_new(RAY_I64, 2);
     if (RAY_IS_ERR(v)) return v;
@@ -857,23 +858,22 @@ static ray_t* h_P(const char* arg, size_t alen) {
     return NULL;                                            /* setter: silent */
 }
 
-/* `\w` — workspace: 6 longs `used heap peak wmax mmap physical`
- * (syscmds.md#w-workspace).  Reuses ray_mem_stats (src/mem/heap.h) and maps its
- * subset onto the kdb shape; slots without a rayforce counterpart report 0
- * (wmax: no -w limit; physical: not introspected here — deferred).  Values are
- * host-variable; the ledger pins type/count, not the numbers.  `\w 0|1|n` (sym
- * stats / limit-set) is deferred → 'nyi. */
-static ray_t* h_w(size_t alen) {
+/* `\w` — workspace: 6 longs `used heap peak wmax mmap mphy` (basics/syscmds.md#w-workspace), the one source
+ * of .Q.w.  mmap is the splay registry's live mapped bytes; wmax 0 (no -w limit) is a recorded gap.
+ * `\w 0|1` → (internalized symbols; their memory), the memory 0: no cheap total, a recorded gap.
+ * `\w n` (set the limit) is deferred → 'nyi. */
+static ray_t* h_w(const char* arg, size_t alen) {
+    if (alen == 1 && (arg[0] == '0' || arg[0] == '1')) return pair_i64((int64_t)ray_sym_count(), 0);
     if (alen != 0) return q_err(QE_NYI);
     ray_mem_stats_t st;
     ray_mem_stats(&st);
+    int64_t mphy = 0;
+#ifndef RAY_OS_WINDOWS
+    long pages = sysconf(_SC_PHYS_PAGES), psz = sysconf(_SC_PAGE_SIZE);
+    if (pages > 0 && psz > 0) mphy = (int64_t)pages * (int64_t)psz;
+#endif
     int64_t vals[6] = {
-        (int64_t)st.bytes_allocated,   /* 0 used                 */
-        (int64_t)st.sys_current,       /* 1 heap                 */
-        (int64_t)st.peak_bytes,        /* 2 peak                 */
-        0,                             /* 3 wmax (no -w limit)   */
-        (int64_t)st.direct_bytes,      /* 4 mmap                 */
-        0,                             /* 5 physical (deferred)  */
+        (int64_t)st.bytes_allocated, (int64_t)st.sys_current, (int64_t)st.peak_bytes, 0, q_splay_mapped_bytes(), mphy,
     };
     ray_t* v = ray_vec_new(RAY_I64, 6);
     if (RAY_IS_ERR(v)) return v;
@@ -1345,7 +1345,7 @@ ray_t* q_sys_run(const char* line, size_t n) {
             case 's': return h_s(arg, alen);                     /* secondary threads   */
             case 'W': return h_W(arg, alen);                     /* week offset         */
             case 'e': return h_e(arg, alen);                     /* error-trap mode     */
-            case 'w': return h_w(alen);                          /* workspace stats     */
+            case 'w': return h_w(arg, alen);                     /* workspace stats     */
             case 'l': return q_sys_load(rest, path_len(rest, restlen)); /* load q script */
             case 'p': return h_p(arg, alen);                     /* listening port      */
             case 't': return h_t(arg, alen, rest, restlen, rep); /* timer / \t exp      */
