@@ -153,6 +153,8 @@ bool ray_vm_hugepage(void* ptr, size_t size);
 ray_err_t ray_thread_create(ray_thread_t* t, ray_thread_fn fn, void* arg);
 ray_err_t ray_thread_join(ray_thread_t t);
 uint32_t ray_thread_count(void);
+/* total physical memory in bytes; 0 when the OS will not say */
+int64_t  ray_phys_mem(void);
 
 void ray_parallel_begin(void);
 void ray_parallel_end(void);
