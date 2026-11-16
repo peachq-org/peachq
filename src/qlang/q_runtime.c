@@ -13,7 +13,7 @@
 #include "qlang/q_builtins.h"
 #include "qlang/q_registry.h"
 #include "qlang/q_dotz.h"     /* q_dotz_init/destroy — `.z.*` resolver */
-#include "qlang/eval/q_dbg.h" /* q_dbg_reset — snapshot refs die with the runtime */
+#include "qlang/eval/q_dbg.h" /* q_dbg_reset — snapshot refs die with the runtime; q_dbg_boot */
 #include "qlang/ops/q_sys.h"      /* q_sys_seed_init / q_sys_ctx_reset */
 #include "qlang/io/q_handles.h"  /* q_handles_init/destroy — the handle registry lifecycle */
 #include "qlang/io/q_provider.h"   /* q_provider_init/destroy — the provider registry lifecycle */
@@ -45,7 +45,9 @@
 static int bootstrap_run(const char* src, const char* what) {
     ray_t* esig = NULL;
     q_comment_boot(1);
+    q_dbg_boot(1);
     int rc = q_ctx_run_src(src, stdout, stderr, &esig);
+    q_dbg_boot(0);
     q_comment_boot(0);
     if (esig) ray_error_free(esig);
     if (rc)

@@ -183,6 +183,9 @@ void q_eval_apply_lambda_name(ray_t* v, const char* name, int64_t nn);
 int  q_eval_apply_lambda_prov(ray_t* v, ray_t** name, int64_t* file_sym,
                               int64_t* line);
 ray_t* q_eval_apply_lambda_pos(ray_t* v);           /* BORROWED caret table, NULL when none */
+/* peachq's q.k: a lambda parsed by the always-on bootstrap (q_runtime_create's core list) */
+void q_eval_apply_lambda_boot(ray_t* v);
+int  q_eval_apply_lambda_is_boot(ray_t* v);
 
 /* Carrier read-out for display (q_fmt renders; slot layout stays opaque):
  * BORROWED parts, NULL when v is not that carrier kind — deriv/proj head

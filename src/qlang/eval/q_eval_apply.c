@@ -99,7 +99,8 @@ static ray_t* car_put(ray_t* c, int64_t i, ray_t* child) {
  * declared types i64vec (NULL = undecorated), n name charv, f file sym, l line
  * i64, locals symvec (q_eval_lambda_locals, params excluded), caret table i64vec
  * (the parser's node -> head-token offset pairs, NULL when none), slot patterns list (a destructured slot's pattern
- * tree, the generic null on a plain slot; NULL when no slot destructures)] — 5..7 are the
+ * tree, the generic null on a plain slot; NULL when no slot destructures), boot mark (non-NULL: parsed by the
+ * always-on bootstrap)] — 5..7 are the
  * ref/value.md provenance slots, NULL until stamped: f/l by the parser
  * (q_eval_apply_lambda_origin), n by the first global assignment
  * (q_eval_apply_lambda_name).
@@ -107,7 +108,7 @@ static ray_t* car_put(ray_t* c, int64_t i, ray_t* child) {
  * globals belong to the namespace it was written in, not the one it is called
  * from (ref/value.md: the globals list of `.test.f` reads `` `test`d`e ``).
  * NULL slot = root. */
-enum { LAM_NAME = 5, LAM_FILE = 6, LAM_LINE = 7, LAM_LOCALS = 8, LAM_POS = 9, LAM_PATS = 10, LAM_SLOTS = 11 };
+enum { LAM_NAME = 5, LAM_FILE = 6, LAM_LINE = 7, LAM_LOCALS = 8, LAM_POS = 9, LAM_PATS = 10, LAM_BOOT = 11, LAM_SLOTS = 12 };
 
 static void lam_local_add(int64_t sym, void* ctx) {
     ray_t** locals = ctx;
@@ -203,6 +204,14 @@ void q_eval_apply_lambda_origin(ray_t* v, int64_t file_sym, int64_t line) {
 
 ray_t* q_eval_apply_lambda_pos(ray_t* v) {
     return q_eval_apply_carrier_kind(v) == Q_EVAL_CAR_LAMBDA ? car_slots(v)[LAM_POS] : NULL;
+}
+
+void q_eval_apply_lambda_boot(ray_t* v) {
+    if (q_eval_apply_carrier_kind(v) == Q_EVAL_CAR_LAMBDA && !car_slots(v)[LAM_BOOT]) car_slots(v)[LAM_BOOT] = ray_i64(1);
+}
+
+int q_eval_apply_lambda_is_boot(ray_t* v) {
+    return q_eval_apply_carrier_kind(v) == Q_EVAL_CAR_LAMBDA && car_slots(v)[LAM_BOOT];
 }
 
 int q_eval_apply_lambda_prov(ray_t* v, ray_t** name, int64_t* file_sym,
