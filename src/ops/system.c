@@ -563,11 +563,9 @@ ray_t* ray_sysinfo_fn(ray_t** args, int64_t n) {
     ray_t* v2 = make_i64(sysconf(_SC_PAGESIZE));
     vals = ray_list_append(vals, v2); ray_release(v2);
 
-    long pages = sysconf(_SC_PHYS_PAGES);
-    long psize = sysconf(_SC_PAGESIZE);
     int64_t s3 = ray_sym_intern("total-mem", 9);
     keys = ray_vec_append(keys, &s3);
-    ray_t* v3 = make_i64((int64_t)pages * (int64_t)psize);
+    ray_t* v3 = make_i64(ray_phys_mem());
     vals = ray_list_append(vals, v3); ray_release(v3);
 #else
     int64_t s1 = ray_sym_intern("cores", 5);
