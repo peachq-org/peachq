@@ -23,7 +23,7 @@
 #include "qlang/io/q_conn.h"        /* q_conn_bang38 — `-38!` socket table */
 #include "qlang/io/q_handles.h"     /* q_handles_broadcast/deferred — `-25!` broadcast, `-30!` deferred reply */
 #include "qlang/io/q_log.h"         /* q_log_replay — `-11!` streaming execute */
-#include "qlang/eval/q_eval.h"  /* q_eval — `-6!` (internal.md: eval); q_eval_reval — `-24!` */
+#include "qlang/eval/q_eval.h"  /* q_eval + q_eval_frames_suspend — `-6!` (internal.md: eval); q_eval_reval — `-24!` */
 #include "qlang/eval/q_dbg.h"   /* q_dbg_trp_dot — `-105!` */
 #include "qlang/q_fmt.h"        /* q_fmt_krepr_charv — the `-3!` / 0N! / .Q.s1 text */
 #include "qlang/q_console.h"    /* q_console_write — 0N!; q_console_clip — the `-3!` cut */
@@ -286,9 +286,11 @@ ray_t* q_bang_dispatch(int64_t id, ray_t* y) {
         case -4:  return q_tokens_fn(y);
         case -5:  return q_parse_builtin_fn(y);
         case -6: {   /* internal.md: -6! is eval; a tree's names are handles, so they resolve at the session `\d` */
+            q_eval_frames_t frames = q_eval_frames_suspend();   /* nor is a caller's local an assignment's target (#99) */
             int64_t scope = q_env_scope(Q_ENV_SCOPE_SESSION);
             ray_t* r = q_eval(y);
             q_env_scope(scope);
+            q_eval_frames_resume(frames);
             return r;
         }
         case -24: return q_eval_reval(y);
