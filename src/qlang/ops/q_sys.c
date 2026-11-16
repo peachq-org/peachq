@@ -695,13 +695,17 @@ static ray_t* time_expr(const char* expr, size_t len, int64_t reps,
     memcpy(s, expr, len);
     s[len] = '\0';
 
-    ray_t* ast = q_parse(s);                             /* strips a trailing /comment */
-    if (blk) ray_free(blk);
-    if (RAY_IS_ERR(ast)) return ast;
-
-    /* the text runs at top level, as `value` of a string does: a caller's locals are never its target (#99) */
+    /* the text runs at top level, as `value` of a string does: a caller's locals are never its target (#99), and a
+     * lambda literal takes the session `\d` because it is built at parse (#120) */
     q_eval_frames_t frames = q_eval_frames_suspend();
     int64_t         scope  = q_env_scope(Q_ENV_SCOPE_SESSION);
+    ray_t* ast = q_parse(s);                             /* strips a trailing /comment */
+    if (blk) ray_free(blk);
+    if (RAY_IS_ERR(ast)) {
+        q_env_scope(scope);
+        q_eval_frames_resume(frames);
+        return ast;
+    }
     tsmeas_t m;
     ts_begin(&m);
     ray_t*  r   = NULL;
