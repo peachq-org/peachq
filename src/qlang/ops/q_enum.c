@@ -204,7 +204,7 @@ ray_t* q_enum_meet(ray_t* a, ray_t* b, int ordered, ray_t* out[2]) {
     return NULL;
 }
 
-/* Decay (value-verb boundary): the value image, except an UNBOUND domain
+/* Decay (the de-enumerating boundaries, not `value`): the value image, except an UNBOUND domain
  * signals its own name (resolution IS a read of that global and an undefined
  * word signals itself, ref/signal.md). */
 ray_t* q_enum_decay(ray_t* e) {
