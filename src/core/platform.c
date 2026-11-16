@@ -179,6 +179,11 @@ uint32_t ray_thread_count(void) {
     return (n > 0) ? (uint32_t)n : 1;
 }
 
+int64_t ray_phys_mem(void) {
+    long pages = sysconf(_SC_PHYS_PAGES), psz = sysconf(_SC_PAGESIZE);
+    return (pages > 0 && psz > 0) ? (int64_t)pages * (int64_t)psz : 0;
+}
+
 /* --------------------------------------------------------------------------
  * Semaphore
  * -------------------------------------------------------------------------- */
@@ -311,6 +316,12 @@ uint32_t ray_thread_count(void) {
     return (uint32_t)si.dwNumberOfProcessors;
 }
 
+int64_t ray_phys_mem(void) {
+    MEMORYSTATUSEX ms;
+    ms.dwLength = sizeof(ms);
+    return GlobalMemoryStatusEx(&ms) ? (int64_t)ms.ullTotalPhys : 0;
+}
+
 /* --------------------------------------------------------------------------
  * Semaphore
  * -------------------------------------------------------------------------- */
@@ -400,6 +411,11 @@ ray_err_t ray_thread_join(ray_thread_t t) {
 }
 
 uint32_t ray_thread_count(void) { return 1; }
+
+int64_t ray_phys_mem(void) {
+    long pages = sysconf(_SC_PHYS_PAGES), psz = sysconf(_SC_PAGESIZE);
+    return (pages > 0 && psz > 0) ? (int64_t)pages * (int64_t)psz : 0;
+}
 
 /* Semaphore — counter-only.  Single-threaded so wait never blocks (the
  * counter must already be positive when wait fires). */
