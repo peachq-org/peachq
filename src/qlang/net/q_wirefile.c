@@ -1079,7 +1079,7 @@ static int wf_zd(int* lbs, int* alg, int* lvl) {
 #endif
 
 /* One data file: the image bytes, plain or through the container.  An EXISTING plain file
- * (never a link) with BYTES IN IT is replaced by `ray_file_rename` beside it: a
+ * (never a link) with BYTES IN IT is replaced by `ray_file_rename` from a staging name no other writer uses: a
  * live mapping keeps its inode where a truncate-in-place would SIGBUS it, and a
  * failed move leaves the old file whole.  An EMPTY file has no mapped page to
  * protect, so it keeps the direct write with every non-regular target — which is
@@ -1089,8 +1089,13 @@ static int wf_zd(int* lbs, int* alg, int* lvl) {
 static ray_t* wf_put(ray_t* path, ray_t* img, int lbs, int alg, int lvl) {
     struct stat st;
     int over = wf_lstat(ray_str_ptr(path), &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
-    ray_t* tmp = over ? wf_join(ray_str_ptr(path), ray_str_len(path), ".tmp", 4) : NULL;
-    if (over && !tmp) return q_err(QE_OOM);
+    ray_t* tmp = NULL;
+    if (over) {
+        char* nm = q_io_stage_name(ray_str_ptr(path));
+        tmp = nm ? ray_str(nm, strlen(nm)) : NULL;
+        free(nm);
+        if (!tmp) return q_err(QE_OOM);
+    }
     ray_t* dst = over ? tmp : path;
     ray_t* bad;
     if (alg > 0)
