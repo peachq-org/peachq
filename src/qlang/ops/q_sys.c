@@ -43,7 +43,7 @@
 #include "core/sock.h"        /* ray_sock_resolve4 / _service_port — the listen spec host and servicename */
 #include "core/poll.h"        /* ray_poll_get / deregister — `\p 0W`/`\p 0`; poll->timers */
 #include "core/runtime.h"     /* ray_runtime_get_poll — the runtime event poll */
-#include "core/platform.h"    /* ray_thread_count — `\s 0W` */
+#include "core/platform.h"    /* ray_thread_count — `\s 0W`; ray_phys_mem — `\w` mphy */
 #include "core/pool.h"        /* ray_pool_get / _init / _destroy — `\s` is the pool */
 #include "core/numparse.h"    /* ray_parse_i64 — the shared engine int parser (reuse) */
 #include "core/rand.h"        /* ray_rand_seed — `\S` re-seeds THE stream */
@@ -867,13 +867,9 @@ static ray_t* h_w(const char* arg, size_t alen) {
     if (alen != 0) return q_err(QE_NYI);
     ray_mem_stats_t st;
     ray_mem_stats(&st);
-    int64_t mphy = 0;
-#ifndef RAY_OS_WINDOWS
-    long pages = sysconf(_SC_PHYS_PAGES), psz = sysconf(_SC_PAGE_SIZE);
-    if (pages > 0 && psz > 0) mphy = (int64_t)pages * (int64_t)psz;
-#endif
     int64_t vals[6] = {
-        (int64_t)st.bytes_allocated, (int64_t)st.sys_current, (int64_t)st.peak_bytes, 0, q_splay_mapped_bytes(), mphy,
+        (int64_t)st.bytes_allocated, (int64_t)st.sys_current, (int64_t)st.peak_bytes, 0, q_splay_mapped_bytes(),
+        ray_phys_mem(),
     };
     ray_t* v = ray_vec_new(RAY_I64, 6);
     if (RAY_IS_ERR(v)) return v;

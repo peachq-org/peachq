@@ -28,11 +28,6 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
-#ifdef RAY_OS_WINDOWS
-#include <windows.h>
-#else
-#include <unistd.h>
-#endif
 
 /* Forward-declare lang init/destroy — keeps runtime.c decoupled from lang/eval.h */
 extern ray_err_t ray_lang_init(void);
@@ -257,22 +252,8 @@ ray_runtime_t* ray_runtime_create(int argc, char** argv) {
     ray_vm_init(rt->vms[0], 0);
     __VM = rt->vms[0];
 
-    /* Detect memory budget: 80% of physical RAM */
-#ifdef RAY_OS_WINDOWS
-    MEMORYSTATUSEX ms;
-    ms.dwLength = sizeof(ms);
-    if (GlobalMemoryStatusEx(&ms))
-        rt->mem_budget = (int64_t)(ms.ullTotalPhys * 0.8);
-    else
-        rt->mem_budget = (int64_t)(4ULL << 30);
-#else
-    long pages = sysconf(_SC_PHYS_PAGES);
-    long psize = sysconf(_SC_PAGESIZE);
-    if (pages > 0 && psize > 0)
-        rt->mem_budget = (int64_t)((double)pages * (double)psize * 0.8);
-    else
-        rt->mem_budget = (int64_t)(4ULL << 30);
-#endif
+    int64_t phys = ray_phys_mem();
+    rt->mem_budget = phys > 0 ? (int64_t)((double)phys * 0.8) : (int64_t)(4ULL << 30);
 
     __RUNTIME = rt;
 
