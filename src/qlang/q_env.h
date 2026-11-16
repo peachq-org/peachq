@@ -107,8 +107,8 @@ ray_t* q_env_ns_member(int64_t ns_sym, int64_t member);
 /* The stored namespace dict itself (a child's marker included), retained for the
  * caller.  OWNED; NULL if the name is not bound to a dict. */
 ray_t* q_env_ns_view(int64_t path_sym);
-/* A namespace holding only its marker drops it too (`delete from `.ns`: key is `symbol$()`).  A top-level one stays a
- * namespace by position and is re-marked by its next write; a nested one becomes a plain empty dict. */
+/* Drops the namespace's marker, whatever else it holds (`delete from `.ns`: key is `symbol$()`).  A top-level one stays
+ * a namespace by position, re-marked only by a write to it once empty; a nested one becomes a plain dict. */
 ray_err_t q_env_ns_unmark(int64_t path_sym);
 
 /* `<ns>.<member>` as one sym; ns 0 or `` `. `` leaves the member bare.  The
