@@ -821,17 +821,15 @@ int q_eval_reval_only(void) { return g_reval && !g_reval_outer; }
  * sym atom names a variable, a dict yields its values, () is itself (owner
  * ruling 2026-10-09), and a list applies its first item (string/sym heads
  * evaluated first, ref/value.md) to the rest AS LITERALS — nested trees stay data.  A sym vector of two or more is
- * that list; value of any OTHER typed vector (incl. the enlisted constant
- * ,`x) is doc-silent: 'nyi, never a guess. */
+ * that list; an enum is its values, or its positions when the domain holds no value list.  Value of any OTHER typed
+ * vector (incl. the enlisted constant ,`x) is doc-silent: 'nyi, never a guess. */
 /* docs/text-entry-law.md: `value "…"` is the IPC column */
 ray_t* q_eval_value_wrap(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (RAY_IS_NULL(x)) return ray_i64(0);   /* (::) IS unary primitive 0 —
                                               * ref/value.md operator arm */
-    if (q_enum_is(x)) return q_enum_decay(x);   /* `value e` -> resolved values,
-                                                 * or bare positions for a
-                                                 * reference domain (R1/R4;
-                                                 * wp/foreign-keys.md:188-213) */
+    /* an unbound domain answers positions too, never its name (owner 2026-11-16, Diwtdk; resq config.q:421) */
+    if (q_enum_is(x)) return q_enum_val_image(x);
     if (x->type == RAY_TABLE && q_splay_table_path(x))   /* the flip's dict value: its hsym (ref/value.md:20) */
         return ray_sym(q_splay_table_path(x));
     if (x->type == -RAY_SYM) {
