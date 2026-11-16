@@ -43,6 +43,9 @@ quiet:0b;
 / @return the previous setting
 setQuiet:{[b] p:quiet; quiet::b; p};
 
+/ put back a console size system "c" answered: a null (an auto-fit width) must go back as 0N, which string writes as ""
+setConsole:{[c] system "c "," " sv {$[null x; "0N"; string x]} each c};
+
 // Assert that the relation between expected and actual value holds
 // @param actual An object representing the actual result value
 // @param expected An object representing the expected value
@@ -145,7 +148,7 @@ assertKnown:{ [actual; expectedFilename; msg]
 saveActual:{ [actual; expectedFilename; msg]
     fn:`$$[":"=first p:string expectedFilename; 1 _ p; p];
     .Q.dd[actualPath;currentNamespaceBeingTested,fn] set actual;
-    c:system "c"; system "c 2000 2000"; s:render actual; system "c "," " sv string c;
+    c:system "c"; system "c 2000 2000"; s:render actual; setConsole c;
     ln:$[count msg; "\n" vs msg; ()];
     clipped:(2000<count ln) or any 2000<count each ln;
     ln:(2000 sublist 2000 sublist/: ln),$[clipped; enlist ".."; ()];
@@ -206,7 +209,7 @@ assertKnownRun:{ [func; arg]
         originalc:system "c";
         system "c 2000 2000";
         st:ssr[;"=";"_equals_"] ssr[;">";"_gt_"] -3!x;
-        system "c "," " sv string originalc;
+        setConsole originalc;
         / If st>33 characters add md5 and truncate.
         st:(-6#"" sv string md5 st),"-",44 sublist st;
         st:{@[x;where not lower[x] in .Q.an;:;"_"]} st;
@@ -493,8 +496,45 @@ generateReport:{ [runTestsResult; path]
     f "</textarea>";
     f "<script src='http://www.timestored.com/js/qunit.js'></script></div><div id='footer'> <p>&copy; 2013 <a class='qlogo' href='http://www.timestored.com/kdb-guides/kdb-regression-unit-tests?utm_source=qunitrun&utm_medium=app&utm_campaign=qunitrun' target='a'>q<span>Unit</span></a> | <a target='a' href='http://www.timestored.com'>TimeStored.com</a> | <a target='a' href='http://www.timestored.com/kdb-training?utm_source=qunitrun&utm_medium=app&utm_campaign=qunitrun'>KDB Training</a> | <a target='a' href='http://www.timestored.com/contact?utm_source=qunitrun&utm_medium=app&utm_campaign=qunitrun'>Contact Us</a></p></div></div></div>";
     hclose f;
-    system "c "," " sv string origC;
+    setConsole origC;
     };
+
+/ text safe in an XML attribute or element: XML 1.0 allows no control byte but tab, LF and CR, and .h.xs may leave
+/ the quote and > alone - a > escaped keeps a "]]>" in the text well-formed
+xmlText:{ssr[;">";"&gt;"] ssr[;"\"";"&quot;"] .h.xs @[x; where (x<" ") and not x in "\t\n\r"; :; " "]};
+
+/ JUnit XML of a run, the subset Jenkins, GitLab, Azure DevOps and the GitHub test reporters read: a testsuite per
+/ namespace, a fail as failure carrying expected and actual, an error as error, an excluded namespace as one skipped testcase
+/ @param results Table as returned by runTests
+/ @return list of strings, the lines of the XML document
+junit:{ [results]
+    t:update time:0^time from 0!results;
+    if[not `parameter in cols t; t:update parameter:(count t)#enlist () from t];
+    origC:system "c"; system "c 2000 2000";
+    attrs:{" " sv {string[x],"=\"",xmlText[y],"\""}'[key x; value x]};
+    tally:{`tests`failures`errors`skipped`time!(string count[x],sum each x[`status]=/:`fail`error`skip),
+        enlist string sum[x`time]%1000};
+    txt:{$[10h=abs type x; (),x; -11h=type x; string x; -3!x]};
+    case:{ [attrs; txt; r]
+        n:string[last ` vs r`name],$[0=count p:r`parameter; ""; "[",(-3!p),"]"];
+        a:"<testcase ",attrs `classname`name`time!(string r`namespace; n; string r[`time]%1000);
+        $[`pass=s:r`status; enlist a,"/>";
+          `skip=s; (a,">"; "<skipped/>"; "</testcase>");
+          `error=s; (a,">"; "<error message=\"",xmlText[txt r`result],"\"/>"; "</testcase>");
+          (a,">"; "<failure message=\"",xmlText[txt r`msg],"\">",xmlText["expected: ",-3!r`expected];
+            xmlText["actual: ",-3!r`actual],"</failure>"; "</testcase>")]}[attrs; txt];
+    suite:{ [attrs; tally; case; t; ns] r:select from t where namespace=ns;
+        (enlist "<testsuite ",attrs[(enlist[`name]!enlist string ns),tally r],">"),(raze case each r),enlist "</testsuite>"};
+    doc:("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"; "<testsuites ",attrs[tally t],">"),
+        (raze suite[attrs; tally; case; t] each distinct t`namespace),enlist "</testsuites>";
+    setConsole origC;
+    raze "\n" vs/: doc};
+
+/ Write the JUnit XML of a run to a file
+/ @param path symbol file handle or path e.g. `:reports/junit.xml
+/ @param results Table as returned by runTests
+/ @return the file handle written
+saveJUnit:{ [path; results] hsym[path] 0: junit results};
 
 / Display a kdb table as HTML, using cssClass column for css class in HTML
 formatTable:{  [tbl]
