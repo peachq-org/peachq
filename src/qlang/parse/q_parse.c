@@ -30,7 +30,7 @@
 #include "qlang/q_env.h"      /* q_env_ident_ok — a captured marker must be a q name */
 #include "qlang/io/q_duckdb.h" /* q_duckdb_params — the markers of a capturing text literal */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_is_fn(val) */
-#include "qlang/eval/q_dbg.h"  /* q_dbg_statement_origin — the lambda's file + line */
+#include "qlang/eval/q_dbg.h"  /* q_dbg_statement_origin / q_dbg_booting — the lambda's provenance */
 #include "qlang/eval/q_pattern.h"
 #include "table/sym.h"       /* ray_sym_vec_cell — qSQL dict-key/col names */
 #include <ctype.h>       /* isalpha — the `<letter>)` intake prefix */
@@ -1394,6 +1394,7 @@ static ray_t *parse_lambda(Parser *p) {
         for (int i = 0; i < lb_start; i++) line += p->src[i] == '\n';
         q_eval_apply_lambda_origin(fn, file, line);
     }
+    if (q_dbg_booting()) q_eval_apply_lambda_boot(fn);
     ray_release(src);
     ray_release(*globals);
     ray_release(*body);
@@ -2593,12 +2594,14 @@ static ray_t *tokens_push(ray_t *l, const char *s, int a, int b) {
     return l;
 }
 
-/* A gap between scanned tokens holds only blanks and comments; a comment takes the blank run before it. */
+/* A gap between scanned tokens holds only blanks and comments; each blank is a token, and a comment
+ * takes the one space or tab before it (issue #134; kdb-written kdb-q-ext-vscode lexing.json). */
 static ray_t *tokens_gap(ray_t *l, const char *s, int a, int b) {
     while (a < b) {
-        int e = a;
-        while (e < b && (CLASS[(uint8_t)s[e]] & CL_WS)) e++;
-        if (e < b) while (e < b && s[e] != '\n') e++;
+        int e = a + 1;
+        int lead = (s[a] == ' ' || s[a] == '\t') && e < b && !(CLASS[(uint8_t)s[e]] & CL_WS);
+        if (lead || !(CLASS[(uint8_t)s[a]] & CL_WS))
+            while (e < b && s[e] != '\n') e++;
         l = tokens_push(l, s, a, e);
         a = e;
     }

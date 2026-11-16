@@ -18,7 +18,7 @@
 #include "qlang/ops/q_sys.h"      /* q_system_fn — the q-owned `system` verb */
 #include "qlang/q_console.h"  /* q_console_show — show's display sink */
 #include "qlang/q_ctx.h"      /* q_ctx_ld_fn — .Q.c.ld, the load's grouping */
-#include "qlang/base/q_type.h"     /* q_type_of — the `type` verb's type-number home */
+#include "qlang/base/q_type.h"     /* q_type_char / q_type_mapped_type — the type-axis home */
 #include "qlang/io/q_provider.h"     /* provider carriers: 98h, count via provider */
 #include "qlang/io/q_splay.h"        /* q_splay_part_fn — .Q.c.part */
 #include "ops/ops.h"                 /* ray_is_lazy / ray_lazy_materialize */
@@ -27,7 +27,6 @@
 #include "table/sym.h"      /* ray_sym_vec_cell */
 #include <rayforce.h>
 #include <assert.h>
-#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -52,7 +51,7 @@ static ray_t* parse_src(const char* src, int64_t n) {
     if (!ast) ast = q_err(QE_PARSE);
     /* handed out as DATA: empty statements become () (kdb parse ";") */
     if (!RAY_IS_ERR(ast)) q_ast_fill_empty_stmts(ast);
-    else q_dbg_parse_fail(ast, src, n, pos, 1);
+    else q_dbg_parse_fail(ast, src, n, pos);
     if (pos) ray_release(pos);
     return ast;
 }
@@ -267,9 +266,8 @@ static void bind_value(const char* name, ray_t* val) {
 
 
 void q_builtins_register(void) {
-    bind_unary("parse", q_parse_builtin_fn);
-    /* q keywords with no rayfall counterpart — q-owned env bindings (same
-     * mechanism as `parse`), snapshotted by the registry as QK_ENV rows. */
+    /* q keywords with no rayfall counterpart — q-owned env bindings,
+     * snapshotted by the registry as QK_ENV rows. */
     bind_unary("string", q_string_fn);
     bind_unary("upper",  q_upper_fn);
     bind_unary("lower",  q_lower_fn);
@@ -293,11 +291,10 @@ void q_builtins_register(void) {
     bind_unary("system", q_system_fn);
     /* File Text companions (feat/q-file-text): `read0[(f;o)]` bracket calls
      * name-ref through the env (the ssr precedent — same C fn as the registry
-     * row); `csv` is kdb's comma global (ref/file-text.md `csv 0: t`). */
+     * row). */
     bind_unary("read0",  q_read0_wrap);
     bind_unary("read1",  q_read1_wrap);
     bind_unary("hdel",   q_hdel_wrap);
-    bind_value("csv",    ray_char(','));
     /* Table introspection — q-owned, snapshotted by the registry's QK_ENV rows
      * (q_ops.c) so the parser embeds these over the base env `meta`/(absent)
      * `cols`.  Bound BEFORE q_registry_init, like `string`/`show`. */
