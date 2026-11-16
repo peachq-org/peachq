@@ -321,7 +321,8 @@ static ray_t* env_amend(ray_t* d, const int64_t* segs, int nseg, int i, ray_t* v
     } else {
         ray_t* child = ray_dict_probe_sym_borrowed(d, segs[i]);
         ray_t* sub = NULL;
-        if (child && child->type == RAY_DICT) { ray_retain(child); sub = child; }
+        if (child && child->type == RAY_DICT && d == env_ns && q_count(child) == 0) sub = env_marker_dict();
+        else if (child && child->type == RAY_DICT) { ray_retain(child); sub = child; }
         else if (!child && ray_dict_find_sym(d, segs[i]) < 0) sub = env_marker_dict();
         if (!sub) {
             ray_release(d);
@@ -370,15 +371,41 @@ static int env_store_inplace(ray_t* d, const int64_t* segs, int nseg, ray_t* val
 
 /* The home is retained across the amend so a mid-path failure never loses
  * the tree (upsert consumes and path-copies via ray_cow at rc>1). */
+/* An emptied top-level namespace's next write re-marks it, whatever its form (`.ns[`c]:3` rebinds the whole dict).
+ * Owned; NULL when val needs no marker. */
+static ray_t* env_remarked(ray_t** home, const int64_t* segs, int nseg, ray_t* val) {
+    ray_t* prev = home == &env_ns && nseg == 1 ? ray_dict_probe_sym_borrowed(env_ns, segs[0]) : NULL;
+    if (!prev || prev->type != RAY_DICT || q_count(prev) || !val || val->type != RAY_DICT || !q_count(val) ||
+        env_is_ns(val) || !ray_dict_keys(val) || ray_dict_keys(val)->type != RAY_SYM)
+        return NULL;
+    ray_t* d = env_marker_dict();
+    for (int64_t i = 0, n = q_count(val); d && i < n; i++) {
+        ray_t* k = q_join_item(ray_dict_keys(val), i);
+        ray_t* v = q_join_item(ray_dict_vals(val), i);
+        int ok = k && !RAY_IS_ERR(k) && v && !RAY_IS_ERR(v);
+        ray_t* nd = ok ? ray_dict_upsert(d, k, v) : NULL;     /* consumes d */
+        if (!ok) ray_release(d);
+        if (nd && RAY_IS_ERR(nd)) { ray_release(nd); nd = NULL; }
+        d = nd;
+        if (k && !RAY_IS_ERR(k)) ray_release(k);
+        if (v && !RAY_IS_ERR(v)) ray_release(v);
+    }
+    return d;
+}
+
 static ray_err_t env_store(ray_t** home, const int64_t* segs, int nseg, ray_t* val, ray_t** disp) {
     if (!*home) return RAY_ERR_DOMAIN;
-    if (env_store_inplace(*home, segs, nseg, val, disp)) return RAY_OK;
-    ray_retain(*home);
-    ray_t* nd = env_amend(*home, segs, nseg, 0, val, disp);
-    if (!nd) return RAY_ERR_DOMAIN;
-    ray_release(*home);
-    *home = nd;
-    return RAY_OK;
+    ray_t* marked = env_remarked(home, segs, nseg, val);
+    if (marked) val = marked;
+    ray_err_t e = RAY_OK;
+    if (!env_store_inplace(*home, segs, nseg, val, disp)) {
+        ray_retain(*home);
+        ray_t* nd = env_amend(*home, segs, nseg, 0, val, disp);
+        if (nd) { ray_release(*home); *home = nd; }
+        else e = RAY_ERR_DOMAIN;
+    }
+    if (marked) ray_release(marked);
+    return e;
 }
 
 /* a write of `.q` whole is judged by its effect: each builtin entry keeps its very object (NULL drops them all) */
@@ -519,6 +546,7 @@ ray_err_t q_env_set_internal(int64_t sym, ray_t* val) {
  * under `\d .ns` a relative name's node in the context, where its reads resolve too. */
 int q_env_take(int64_t sym, ray_t* cur) {
     if (!cur || env_refuses(sym) || env_addr_get(sym, 0) != cur) return 0;
+    if (cur->type == RAY_DICT && !q_count(cur)) return 0;    /* an emptied namespace stays put for env_remarked */
     return q_env_bind(sym, RAY_NULL_OBJ) == RAY_OK;
 }
 
@@ -749,7 +777,14 @@ ray_err_t q_env_handle_bind(int64_t sym, ray_t* val) {
     return e;
 }
 
-int q_env_ns_exists(int64_t path_sym) { return env_is_ns(q_env_peek(path_sym)); }
+/* A top-level namespace is one by POSITION, as the root is by identity: `delete from `.ns` leaves it unmarked. */
+static int env_is_ns_named(int64_t sym, ray_t* v) {
+    env_name_t nm;
+    if (env_is_ns(v)) return 1;
+    return v && v->type == RAY_DICT && env_name(sym, &nm) && nm.kind == EN_ABS && nm.n == 1;
+}
+
+int q_env_ns_exists(int64_t path_sym) { return env_is_ns_named(path_sym, q_env_peek(path_sym)); }
 
 ray_t* q_env_ns_probe(int64_t ns_sym, const char* member, size_t n) {
     int64_t id = ray_sym_find(member, n);
@@ -759,6 +794,16 @@ ray_t* q_env_ns_probe(int64_t ns_sym, const char* member, size_t n) {
 ray_t* q_env_ns_member(int64_t ns_sym, int64_t member) {
     ray_t* d = q_env_get(ns_sym);
     return d && d->type == RAY_DICT ? ray_dict_probe_sym_borrowed(d, member) : NULL;
+}
+
+ray_err_t q_env_ns_unmark(int64_t path_sym) {
+    ray_t* v = q_env_peek(path_sym);
+    if (!v || v->type != RAY_DICT || v == env_root || q_count(v) != 1 || !env_is_ns(v)) return RAY_OK;
+    ray_t* d = env_dict(0);
+    if (!d) return RAY_ERR_OOM;
+    ray_err_t e = q_env_set(path_sym, d);
+    ray_release(d);
+    return e;
 }
 
 ray_t* q_env_ns_view(int64_t path_sym) {
@@ -1115,7 +1160,7 @@ static ray_t* env_dict_names(ray_t* d, q_env_ns_kind_t kind, int members) {
         int64_t id = ray_read_sym(ray_data(dk), i, RAY_SYM, dk->attrs);
         if (id == marker) continue;
         int keep = members ? env_kind_match(kind, vs[i])
-                           : (env_is_ns(vs[i]) && id != zed && id != duck);
+                           : (vs[i] && vs[i]->type == RAY_DICT && id != zed && id != duck);
         if (keep) sel[m++] = id;
     }
     if (members) qsort(sel, (size_t)m, sizeof *sel, q_env_name_cmp);
@@ -1128,7 +1173,7 @@ static ray_t* env_dict_names(ray_t* d, q_env_ns_kind_t kind, int members) {
 
 ray_t* q_env_ns_names(int64_t ns_sym, q_env_ns_kind_t kind) {
     ray_t* d = ns_sym ? q_env_get(ns_sym) : env_root;
-    if (!env_is_ns(d)) return NULL;
+    if (!env_is_ns_named(ns_sym, d)) return NULL;
     return env_dict_names(d, kind, 1);
 }
 
