@@ -22,6 +22,7 @@
 #include "qlang/q_dotz.h"         /* q_dotz_quiet (`-q`), q_dotz_now_ns (the history clock) */
 #include "qlang/q_fmt.h"          /* a history record's time prints as the console prints a timestamp */
 #include "store/fileio.h"         /* ray_file_rename — a history rewrite replaces the file whole */
+#include "qlang/io/q_io.h"        /* q_io_stage_name — where that rewrite is staged */
 #include "app/term.h"       /* ray_term_* line editor + highlighter hook */
 #include "core/poll.h"      /* ray_poll_* — concurrent REPL + IPC event loop */
 #include <rayforce.h>
@@ -75,11 +76,14 @@ static int qhist_write(const char* path, int flags, const char* b, size_t n) {
     return close(fd) || rc ? -1 : 0;
 }
 
-/* A rewrite goes to <path>.tmp and is renamed over, so a crash mid-way never costs the history. */
+/* A rewrite is staged beside the file and renamed over, so a crash mid-way never costs the history. */
 static int qhist_replace(const char* b, size_t n) {
-    char tmp[sizeof g_qhist_path + 8];
-    snprintf(tmp, sizeof tmp, "%s.tmp", g_qhist_path);
-    return qhist_write(tmp, O_TRUNC, b, n) || ray_file_rename(tmp, g_qhist_path) != RAY_OK ? -1 : 0;
+    char* tmp = q_io_stage_name(g_qhist_path);
+    if (!tmp) return -1;
+    int rc = qhist_write(tmp, O_TRUNC, b, n) || ray_file_rename(tmp, g_qhist_path) != RAY_OK ? -1 : 0;
+    if (rc) remove(tmp);
+    free(tmp);
+    return rc;
 }
 
 static void qhist_line(const char* s, size_t n, const char* status, int64_t ms) {
