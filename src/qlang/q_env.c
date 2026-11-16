@@ -798,9 +798,19 @@ ray_t* q_env_ns_member(int64_t ns_sym, int64_t member) {
 
 ray_err_t q_env_ns_unmark(int64_t path_sym) {
     ray_t* v = q_env_peek(path_sym);
-    if (!v || v->type != RAY_DICT || v == env_root || q_count(v) != 1 || !env_is_ns(v)) return RAY_OK;
-    ray_t* d = env_dict(0);
-    if (!d) return RAY_ERR_OOM;
+    if (v == env_root || !env_is_ns(v)) return RAY_OK;
+    ray_t* key = ray_sym(env_marker());
+    if (!key || RAY_IS_ERR(key)) {
+        if (key) ray_release(key);
+        return RAY_ERR_OOM;
+    }
+    ray_retain(v);
+    ray_t* d = ray_dict_remove(v, key);
+    ray_release(key);
+    if (!d || RAY_IS_ERR(d)) {
+        if (d) ray_release(d);
+        return RAY_ERR_OOM;
+    }
     ray_err_t e = q_env_set(path_sym, d);
     ray_release(d);
     return e;

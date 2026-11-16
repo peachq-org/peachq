@@ -1638,19 +1638,22 @@ static int is_symvec(ray_t* a) { return a && a->type == RAY_SYM; }
 /* `delete a from `.` / `![`.ns;();0b;`a`b]` — EXPUNGE (q4m3 §12.5).  A namespace
  * is not a dict to rewrite: each name is unbound from the K-tree, so an emptied
  * namespace survives (kdb keeps it in `key ``).  The names are the namespace's
- * own members, absolute — `` `. `` reaches the root under any `\d` or lambda scope. */
+ * own members, absolute — `` `. `` reaches the root under any `\d` or lambda scope.
+ * A named marker goes like any member (owner 2026-11-16, resq test_runner.q). */
 static ray_t* expunge_ns(int64_t ns, ray_t* names) {
     int64_t n = q_count(names);
     int64_t scope = q_env_scope(0);
     ray_t* e = NULL;
+    int marker = 0;
     for (int64_t i = 0; i < n && !e; i++) {
         int64_t member = ray_read_sym(ray_data(names), i, RAY_SYM, names->attrs);
-        if (member == q_env_marker_sym()) continue;
+        if (member == q_env_marker_sym()) { marker = 1; continue; }
         int64_t full = q_env_qualify(ns, member);
         ray_err_t rc = full < 0 ? RAY_ERR_DOMAIN : q_env_unbind(full);
         if (rc != RAY_OK) e = rc == RAY_ERR_NOUPDATE ? q_env_err(rc) : q_err(QE_ASSIGN);
     }
     q_env_scope(scope);
+    if (!e && marker && q_env_ns_unmark(ns) != RAY_OK) e = q_err(QE_ASSIGN);
     return e;
 }
 
@@ -1674,10 +1677,7 @@ static ray_t* bang_qsql(ray_t** args) {
             ray_t* names = q_count(a) > 0 ? a : q_key_name(name);   /* no names: every member (ref/delete.md:122) */
             if (RAY_IS_ERR(names)) return names;
             ray_t* e = expunge_ns(name, names);
-            if (names != a) {
-                ray_release(names);
-                if (!e && q_env_ns_unmark(name) != RAY_OK) e = q_err(QE_ASSIGN);
-            }
+            if (names != a) ray_release(names);
             if (e) return e;
             ray_retain(tslot);
             return tslot;
