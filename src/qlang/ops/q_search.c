@@ -81,6 +81,16 @@ static int seq_has_item(ray_t* y, ray_t* v) {
     return 0;
 }
 
+/* The pairs an atom or 1-item y mixes beyond Find's law (in.md:83-99): the numerics but byte (owner ruling
+ * 2026-11-16), and temporal against numeric, which no source rules, so it keeps the kernel's answer. */
+static int atom_mix(int8_t a, int8_t b) {
+    a = a < 0 ? (int8_t)-a : a;
+    b = b < 0 ? (int8_t)-b : b;
+    int an = q_type_is_num_tag(a), bn = q_type_is_num_tag(b);
+    int at = RAY_IS_TEMPORAL(a) || RAY_IS_TEMPORALF(a), bt = RAY_IS_TEMPORAL(b) || RAY_IS_TEMPORALF(b);
+    return (an && bn && !ray_is_byte_only(a) && !ray_is_byte_only(b)) || (at && bn) || (an && bt);
+}
+
 /* q `x in y` — membership (ref/in.md).  Where y is a TYPED vector the test is
  * left-atomic (delegates to base ray_in_fn).  Where y is a general LIST or a
  * TABLE, "in uses Find" (in.md:63) is the whole law: the flag is
@@ -138,10 +148,11 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
     /* mixed numeric families (ref/in.md Mixed argument types): allowed only
      * against an ATOM or 1-item y — elementwise numeric equality (q_velem_f
      * reads both families; nulls never match). */
+    int narrow = ray_is_atom(y) || q_count(y) == 1;
     if (q_type_is_num_tag(x->type) && q_type_is_num_tag(y->type)) {
         int xf = q_type_is_float_tag(x->type), yf = q_type_is_float_tag(y->type);
         if (xf != yf) {
-            if (!ray_is_atom(y) && q_count(y) != 1)
+            if (!narrow || !atom_mix(x->type, y->type))
                 return q_err(QE_TYPE);
             int yn; double yv = q_velem_f(y, 0, &yn);
             if (ray_is_atom(x)) {
@@ -160,9 +171,12 @@ ray_t* q_in_wrap(ray_t* x, ray_t* y) {
             return out;
         }
     }
-    /* a typed domain of two or more items is Find's (ref/find.md:102 "Find is implicit in ... in"), so its type
-     * law rules here too; the atom and the 1-item y above keep in.md's "wider input type mix" */
-    if (ray_is_vec(y) && y->type != RAY_STR && q_count(y) != 1 && !q_search_admits(y, x)) return q_err(QE_TYPE);
+    /* a typed domain is Find's (ref/find.md:102 "Find is implicit in ... in"), so its type law rules here at
+     * every length; an atom or 1-item y adds atom_mix's pairs, and a needle that is not typed data keeps the
+     * kernel's answer there, which no source rules */
+    if ((y->type < 0 || (ray_is_vec(y) && y->type != RAY_STR)) && !q_search_admits(y, x) &&
+        !(narrow && (atom_mix(x->type, y->type) || !(x->type < 0 || ray_is_vec(x)))))
+        return q_err(QE_TYPE);
     /* Against a non-list y the comparison is left-atomic (ref/in.md) — one
      * boolean per item of x, and NONE is still boolean, where the base kernel
      * answers the untyped `()` that no downstream `where` survives.  A STR y
@@ -382,9 +396,9 @@ int64_t q_search_find_item(ray_t* x, ray_t* v, int64_t cnt) {
 /* Find is type-specific relative to x (ref/find.md:42; owner ruling 2026-09-15): a needle reaches a typed domain at
  * the domain's own type or across the int/long pair (learn/python/examples/list.md:91 finds a long in an int
  * vector), and is 'type otherwise; a general-list needle is a run under the rank law, so each item is asked, and
- * an empty needle has nothing to compare.  The pairs the owner has not ruled keep the kernel's coercion: short in
- * the integer family, real against float, byte against the integers, an enum on a sym domain.  x a typed vector,
- * never STR. */
+ * an empty needle has nothing to compare.  Byte never mixes with the integers (owner ruling 2026-11-16).  The
+ * pairs the owner has not ruled keep the kernel's coercion: short in the integer family, real against float, an
+ * enum on a sym domain.  x a typed vector or atom, never STR. */
 int q_search_admits(ray_t* x, ray_t* y) {
     if (!y) return 1;
     if (y->type == RAY_LIST) {
@@ -392,12 +406,12 @@ int q_search_admits(ray_t* x, ray_t* y) {
         for (int64_t i = 0, n = q_count(y); i < n; i++) if (!q_search_admits(x, e[i])) return 0;
         return 1;
     }
-    if (y->type == RAY_STR) return x->type == RAY_CHARV;       /* a list of strings: char-vector items */
-    int8_t d = x->type, t = y->type == -RAY_STR ? RAY_CHARV : y->type < 0 ? (int8_t)-y->type : y->type;
+    int8_t d = x->type == -RAY_STR ? RAY_CHARV : x->type < 0 ? (int8_t)-x->type : x->type;
+    if (y->type == RAY_STR) return d == RAY_CHARV;             /* a list of strings: char-vector items */
+    int8_t t = y->type == -RAY_STR ? RAY_CHARV : y->type < 0 ? (int8_t)-y->type : y->type;
     if (t == d || t == RAY_ENUM || (ray_is_vec(y) && q_count(y) == 0)) return 1;
     int di = d == RAY_I16 || d == RAY_I32 || d == RAY_I64, ti = t == RAY_I16 || t == RAY_I32 || t == RAY_I64;
-    return (di && ti) || (di && t == RAY_BYTE_ONLY) || (ti && d == RAY_BYTE_ONLY) ||
-           (q_type_is_float_tag(d) && q_type_is_float_tag(t));
+    return (di && ti) || (q_type_is_float_tag(d) && q_type_is_float_tag(t));
 }
 
 /* A needle y above the rank x's items have ("x?y looks for objects of rank n-1", find.md:88) is a run: y's FIRST
