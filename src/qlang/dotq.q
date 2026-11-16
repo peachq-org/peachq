@@ -16,7 +16,7 @@
 / an atom answers the cell it gets as an element (owner 2026-11-09)
 .Q.s2:{$[type[x]within 1 19;.Q.c.cells x;neg[type x]within 1 19;first .Q.c.cells enlist x;.Q.S[0W 0W;0]x]};
 .Q.s:.Q.c.s;
-.Q.w:.Q.c.w;
+.Q.w:{`used`heap`peak`wmax`mmap`mphy`syms`symw!(system"w"),system"w 0"};
 .Q.gc:.Q.c.gc;
 .Q.trp:.Q.c.trp;
 .Q.trpd:.Q.c.trpd;

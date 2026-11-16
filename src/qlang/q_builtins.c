@@ -360,7 +360,6 @@ void q_builtins_register(void) {
         bind_unary(dotq_c_unary[i].name, dotq_c_unary[i].fn);
     bind_vary (".Q.c.ops", 1, q_dotq_ops_fn);   /* niladic .Q.ops[] + unary .Q.ops x */
     bind_vary (".Q.c.S",   2, q_dotq_S_fn);     /* console lines within bounds (wp/permissions .h.jx) */
-    bind_vary (".Q.c.w",   1, q_dotq_w_fn);     /* memory stats dict (ref/dotq.md) */
     bind_vary (".Q.c.gc",  1, q_dotq_gc_fn);    /* garbage collect (ref/dotq.md) */
     bind_vary (".Q.c.zblocks", 1, q_dotq_zblocks_fn); /* inflated-blocks witness (internal) */
     bind_vary (".Q.c.asks", 1, q_dotq_asks_fn);       /* deferred-table tests witness (internal) */
