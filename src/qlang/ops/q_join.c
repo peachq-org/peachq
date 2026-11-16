@@ -103,12 +103,11 @@ static ray_t* qj_col_gather(ray_t* col, const int64_t* idx, int64_t n) {
     ray_t* g = col && col->type == RAY_LIST ? q_index_at(col, &iv, 1) : ray_at_fn(col, iv);
     ray_release(iv);
     if (!g || RAY_IS_ERR(g)) return g ? g : q_err(QE_TYPE);
-    if (g->type == RAY_LIST) {
-        ray_t* cg = q_list_collapse(g);
-        ray_release(g);
-        return cg;
-    }
-    return g;
+    /* a selected general column stays general when its cells are dicts (TorQ pubsub.q:15,64,97 upserts a () after) */
+    ray_t* cg = g->type == RAY_TABLE ? q_table_col_rows(g) : g->type == RAY_LIST ? q_list_collapse_atoms(g) : NULL;
+    if (!cg) return g;
+    ray_release(g);
+    return cg;
 }
 
 /* Gather rows of table `t` by index map (idx[i] < 0 => null row cells). */

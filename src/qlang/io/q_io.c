@@ -42,6 +42,7 @@
 #include <unistd.h>         /* read, isatty — `read0 0` is a raw read of fd 0; ftruncate */
 #include <fcntl.h>          /* open — the kxzip block reader's descriptor */
 #include <errno.h>
+#include <stdatomic.h>
 #ifdef RAY_OS_WINDOWS
 #include <io.h>             /* _get_osfhandle — the positional block read */
 #include <windows.h>
@@ -253,15 +254,27 @@ int q_io_fwrite(FILE* fp, const void* bytes, size_t n) {
     return 0;
 }
 
+char* q_io_stage_name(const char* path) {
+    static atomic_uint seq;
+#ifdef RAY_OS_WINDOWS
+    unsigned long pid = GetCurrentProcessId();
+#else
+    unsigned long pid = (unsigned long)getpid();
+#endif
+    unsigned n = atomic_fetch_add(&seq, 1) + 1;
+    size_t cap = strlen(path) + 48;
+    char* s = (char*)malloc(cap);
+    if (s) snprintf(s, cap, "%s.tmp.%lu.%u", path, pid, n);
+    return s;
+}
+
 #ifdef RAY_OS_WINDOWS
 /* Windows refuses to shorten a file a live view maps (a held splay column), but lets it be renamed: the view keeps
  * the old file under a side name and `path` becomes a fresh copy of its first `len` bytes. */
 static int io_truncate_aside(const char* path, int64_t len) {
-    static unsigned seq;
-    char aside[MAX_PATH + 32];
-    if (snprintf(aside, sizeof aside, "%s.~%lu.%u", path, (unsigned long)GetCurrentProcessId(), ++seq) >= (int)sizeof aside ||
-        !MoveFileExA(path, aside, 0))
-        return 1;
+    char* aside = q_io_stage_name(path);
+    if (!aside) return 1;
+    if (!MoveFileExA(path, aside, 0)) { free(aside); return 1; }
     FILE* in = fopen(aside, "rb");
     FILE* out = in ? fopen(path, "wb") : NULL;
     int bad = !out;
@@ -273,9 +286,10 @@ static int io_truncate_aside(const char* path, int64_t len) {
     }
     if (out && fclose(out) != 0) bad = 1;
     if (in) fclose(in);
-    if (bad) { DeleteFileA(path); MoveFileExA(aside, path, 0); return 1; }
-    DeleteFileA(aside);                 /* pending while the view lives */
-    return 0;
+    if (bad) { DeleteFileA(path); MoveFileExA(aside, path, 0); }
+    else DeleteFileA(aside);            /* pending while the view lives */
+    free(aside);
+    return bad;
 }
 #endif
 

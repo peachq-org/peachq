@@ -164,6 +164,10 @@ void q_io_fs_register(void);
  * faults in the memcpy and the syscall never meets an unmapped page.  0, or -1 on a short write. */
 int q_io_fwrite(FILE* fp, const void* bytes, size_t n);
 
+/* A malloc'd name beside `path` that no other writer, process or thread, stages under (TorQ runs three wdbs on one
+ * splay), for a replace-by-rename; NULL on OOM. */
+char* q_io_stage_name(const char* path);
+
 /* `path` cut (or grown) to len bytes in place: NULL, or an owned 'io. */
 ray_t* q_io_truncate(const char* path, int64_t len);
 
