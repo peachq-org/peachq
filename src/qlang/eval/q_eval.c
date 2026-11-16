@@ -27,6 +27,7 @@
 #include "qlang/q_registry.h"
 #include "qlang/q_registry_internal.h"   /* q_type_strict_i64 — the do-count judgment */
 #include "qlang/q_prim.h"                /* q_join_amend — the `,:` home; q_list_uncollapse — the sym-vector tree */
+#include "qlang/q_builtins.h"           /* q_builtins_type_num — a 100h body value is a constant */
 #include "qlang/q_dotz.h"
 #include "qlang/q_env.h"
 #include "qlang/ops/q_index.h"
@@ -463,8 +464,8 @@ static ray_t* assign_eval(ray_t* target, ray_t* rhs, int global) {
  * q_eval_lambda_locals — the same set lambda_call seeds), a `::` target is
  * global unless the name is a local, compound targets and every other name are
  * global references.  Verbs are fn
- * VALUES after parse so they never read as names, and a nested lambda carrier
- * is opaque: its locals are its own. */
+ * VALUES after parse so they never read as names; a 100h one (a nested lambda
+ * or a keyword lambda alike) is a constant, opaque: its names are its own. */
 
 typedef struct {
     ray_t *loc, *glb, *ref, *con;
@@ -503,8 +504,19 @@ static void lam_scan_local(int64_t sym, void* ctx) {
     if (!sym_compound(sym)) sym_add(&s->loc, sym, &s->oom);
 }
 
+static void lam_scan_con(ray_t* n, lam_scan_t* s) {
+    if (!s->con) return;
+    ray_t* c = ray_list_append(s->con, n);
+    if (!c) { s->oom = 1; return; }
+    s->con = c;
+}
+
 static void lam_scan(ray_t* n, lam_scan_t* s) {
-    if (!n || s->oom || q_eval_fn_value(n)) return;
+    if (!n || s->oom) return;
+    if (q_eval_fn_value(n)) {
+        if (q_builtins_type_num(n) == 100) lam_scan_con(n, s);
+        return;
+    }
     if (nameref(n)) {
         /* a keyword head is a verb, not a free global: the registry owns the
          * name (assignment to it is 'assign), so it can never be a user's */
@@ -513,10 +525,7 @@ static void lam_scan(ray_t* n, lam_scan_t* s) {
         return;
     }
     if (n->type != RAY_LIST) {
-        if (!s->con || Q_IS_GENERIC_NULL(n)) return;
-        ray_t* c = ray_list_append(s->con, n);
-        if (!c) { s->oom = 1; return; }
-        s->con = c;
+        if (!Q_IS_GENERIC_NULL(n)) lam_scan_con(n, s);
         return;
     }
     int64_t k = q_count(n);
