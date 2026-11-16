@@ -29,6 +29,8 @@ void q_dbg_statement_end(int tok);
 /* the current statement's file + line while a loaded script's own text parses (the origin its lambdas and
  * its frame-[0] line report); 0 for console input or a text parsed after it (`value`), line untouched */
 int64_t q_dbg_statement_origin(int64_t* line);
+void    q_dbg_boot(int on);        /* q_runtime_create's core list is loading: its lambdas frame as (name) */
+int     q_dbg_booting(void);
 int  q_dbg_statement_pos(ray_t* pos);   /* the caret table (q_parse_at), consumed; 0 = a nested text's, kept */
 typedef struct { const ray_t** slot; const ray_t* prev; } q_dbg_hold_t;
 q_dbg_hold_t q_dbg_hold(void);          /* the running frame keeps its caret node while another text's trees walk */
@@ -76,7 +78,7 @@ ray_t* q_dbg_resignal(ray_t* msg, ray_t* bt);   /* `'(msg;bt)`: the error, carry
 ray_t* q_dbg_view_frame(void);                 /* at `v::e`: OWNED, the frame its recalculations show (debug.md:233) */
 void   q_dbg_view_push(ray_t* frame);            /* a recalculation's frame (borrowed; pop with q_dbg_frame_pop) */
 void   q_dbg_statement_startup(void);            /* this statement runs a startup script: no frame of its own */
-void   q_dbg_parse_fail(ray_t* err, const char* src, int64_t n, ray_t* pos, int keyword);   /* a text failed to parse */
+void   q_dbg_parse_fail(ray_t* err, const char* src, int64_t n, ray_t* pos);   /* a text failed to parse */
 
 ray_t* q_dbg_trp_dot(ray_t* y);                 /* -105!(f;args;g): .Q.trpd on a 3-list, for q_bang */
 

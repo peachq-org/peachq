@@ -88,7 +88,6 @@ typedef struct {
     int    skip;                   /* live frames between the statement and the stored innermost DBG_SNAP_MAX */
     ray_t* ptext;                  /* a failed parse: its retained text and die offset, frames above the live ones */
     int64_t poff;
-    int    pkw;                    /* 1: by `parse`, which has its keyword frame (.q.parse) beneath the text */
 } dbg_snap_t;
 
 /* a frame's fields: the one shape the renderer, the record and .Q.sbt share; own = the name's charv when owned */
@@ -102,7 +101,7 @@ typedef struct {
 
 /* an error made by `'(msg;bt)` or by `parse`, waiting for the seam that snapshots it */
 static _Thread_local struct { ray_t* err; ray_t* bt; int sig, lvl, own; } g_resig;
-static _Thread_local struct { ray_t* err; ray_t* text; int64_t off; int kw; } g_pf;
+static _Thread_local struct { ray_t* err; ray_t* text; int64_t off; } g_pf;
 
 /* Statement state is per LEVEL, so a nested statement (a q)) line, a `\l`
  * inside one, a remote callback) cannot take the level beneath its frame-[0]
@@ -312,6 +311,10 @@ int q_dbg_statement_begin(const char* src, size_t n, int console) {
 
 /* once the statement's own text has parsed (its caret table is in), a parse is another text's — `value "…"` — and
  * what it makes is console-made */
+static int g_boot;
+void q_dbg_boot(int on) { g_boot = on; }
+int  q_dbg_booting(void) { return g_boot; }
+
 int64_t q_dbg_statement_origin(int64_t* line) {
     if (g_depth <= 0 || !g_stmt.file || g_stmt.pos) return 0;   /* between statements the slot is stale */
     *line = g_stmt.line;
@@ -433,6 +436,7 @@ static void fields_of(dbg_frame_t* f, ray_t* lam, const dbg_stmt_t* stmt, int64_
         f->tn = s ? ray_str_len(s) : 2;
         if ((f->own = lam_name(lam))) { f->name = (const char*)ray_data(f->own); f->nn = (size_t)q_count(f->own); }
         q_eval_apply_lambda_prov(lam, NULL, &fs, &f->line);
+        if (q_eval_apply_lambda_is_boot(lam) && f->nn) { f->tn = 0; f->off = -1; fs = 0; }
     }
     ray_t* fp = fs ? ray_sym_str(fs) : NULL;             /* borrowed */
     if (fp) { f->file = ray_str_ptr(fp); f->fn = ray_str_len(fp); }
@@ -444,7 +448,7 @@ static void fields_drop(dbg_frame_t* f) { if (f->own) ray_release(f->own); }
 /* one frame: `  [n]  file:line: name:text` then its caret line (basics/debug.md — file:line only "if such
  * information is available"; the `^` under the head token at off, a blank line when off is outside the text).  A
  * multi-line text shows the lines through the failing one, the caret, then the rest (KDB-X how-to).  A frame with no
- * text is `(name)` — the trap's own, a keyword's (debug.md `(.Q.trp)`, `(.q.parse)`).  A root `..` never shows.
+ * text is `(name)` — the C trap's own, a bootstrap lambda's (debug.md `(.Q.trp)`, `(.q.parse)`).  A root `..` never shows.
  * OWNED NUL-terminated text (ray_free_raw), *n its length; NULL on OOM. */
 static char* frame_render(size_t* n, const dbg_frame_t* f, int64_t num, int mark) {
     const char* nm = f->name;
@@ -536,7 +540,7 @@ static ray_t* rec_new(ray_t* code, const dbg_frame_t* f, int64_t num) {   /* cod
     return r;
 }
 
-/* a frame of no text: the trap's own, a keyword's; its code is the global `global` names */
+/* a frame of no text: the C trap's own; its code is the global `global` names */
 static ray_t* rec_named(const char* name, const char* global, int64_t num) {
     dbg_frame_t f = { .name = name, .file = "", .text = "", .nn = strlen(name), .off = -1 };
     return rec_new(q_env_get(ray_sym_intern(global, strlen(global))), &f, num);
@@ -635,7 +639,6 @@ static void snap_take(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
     if (r == g_pf.err) {
         g_snap.ptext = g_pf.text;
         g_snap.poff = g_pf.off;
-        g_snap.pkw = g_pf.kw;
         g_pf.text = NULL;
     }
     pf_drop();
@@ -691,13 +694,10 @@ static ray_t* snap_records(const char* trap, int below) {
     int sunk = below < lo && g_snap.skip;
     if (below < lo) below = lo;
     if (below > top) below = top;
-    int64_t total = (g_snap.ptext ? 1 + g_snap.pkw : 0) + ns + (top >= lo ? top - lo + 1 : 0) + (trap != NULL);
+    int64_t total = (g_snap.ptext ? 1 : 0) + ns + (top >= lo ? top - lo + 1 : 0) + (trap != NULL);
     int64_t num = g_snap.num + total - 1 + g_snap.skip;
     ray_t* l = ray_list_new(total ? total : 1);
-    if (g_snap.ptext) {
-        push(&l, rec_live(g_snap.ptext, &snap_stmt, g_snap.poff, num--));
-        if (g_snap.pkw) push(&l, rec_named(".q.parse", "parse", num--));
-    }
+    if (g_snap.ptext) push(&l, rec_live(g_snap.ptext, &snap_stmt, g_snap.poff, num--));
     for (int64_t k = 0; k < ns; k++) push(&l, rec_renum(ray_list_get(g_snap.saved, k), num--));
     int trapped = trap == NULL, skipped = 0;
     for (int i = top; i >= lo; i--) {
@@ -1144,13 +1144,12 @@ ray_t* q_dbg_resignal(ray_t* msg, ray_t* bt) {
     return r;
 }
 
-void q_dbg_parse_fail(ray_t* err, const char* src, int64_t n, ray_t* pos, int keyword) {
+void q_dbg_parse_fail(ray_t* err, const char* src, int64_t n, ray_t* pos) {
     pf_drop();
     g_pf.text = ray_charv(src, n);
     if (!g_pf.text || RAY_IS_ERR(g_pf.text)) { if (g_pf.text) ray_release(g_pf.text); g_pf.text = NULL; return; }
     g_pf.err = err;
     g_pf.off = frame_off(pos, NULL);
-    g_pf.kw = keyword;
 }
 
 /* The live stack (debug.md §Context: "system commands, including \l, correspond to individual debug stack frames"):

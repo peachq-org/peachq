@@ -42,6 +42,10 @@
 .q.hcount:(-7!)
 / ref/eval.md over basics/internal.md: eval IS the -6! internal (q_bang.c -> q_eval)
 .q.eval:(-6!)
+/ basics/internal.md: parse is a lambda over the -5! internal (100h on the kdb wire)
+.q.parse:{-5!x}
+/ ref/file-text.md: csv is the comma
+.q.csv:","
 / ref/med.md "equivalent to {avg x (iasc x)@floor .5*-1 0+count x,:()}";
 / the atom-listify is spelled 1#x (`,:()` amend unsupported; `(),x` boxes)
 .q.med:{x:$[0h>type x;1#x;x];avg x (iasc x)@floor .5*-1 0+count x}
