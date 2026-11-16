@@ -792,9 +792,11 @@ ray_t* q_eval_reval(ray_t* x) {
     if (!g_reval++) g_reval_outer = restricted;
     ray_eval_set_restricted(true);
     ray_eval_set_blocked(true);
+    q_eval_frames_t frames = q_eval_frames_suspend();
     int64_t scope = q_env_scope(Q_ENV_SCOPE_SESSION);
     ray_t* r = q_eval(x);
     q_env_scope(scope);
+    q_eval_frames_resume(frames);
     ray_eval_set_restricted(restricted);
     ray_eval_set_blocked(blocked);
     g_reval--;

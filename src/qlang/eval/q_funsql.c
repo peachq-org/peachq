@@ -17,6 +17,7 @@
 #include "qlang/ops/q_bang.h"
 #include "qlang/ops/q_dollar.h"        /* q_dollar_cast — the Where-form update keeps the column type */
 #include "qlang/ops/q_index.h"
+#include "qlang/ops/q_key.h"           /* q_key_name — a namespace's members, for `delete from `.ns` */
 #include "qlang/ops/q_table.h"         /* q_table_bcast_col — an empty Update result fills its rows */
 #include "qlang/io/q_splay.h"          /* mapped splays: from materializes, writes 'splay */
 #include "qlang/io/q_io.h"             /* q_io_is_fsym / q_io_resource_table — resource From-resolve */
@@ -336,7 +337,8 @@ static ray_t* from_rows(ray_t* t, ray_t* idx) {
 }
 
 /* Law 4: THE evaluator runs the phrase inside one NON-barrier scope (qsql.md
- * name order: column -> enclosing locals -> global); virtual `i` = idx. */
+ * name order: column -> enclosing locals -> global in the SESSION `\d`, not the
+ * lambda's defining one); virtual `i` = idx. */
 static ray_t* phrase_eval(ray_t* tree, ray_t* t, ray_t* idx) {
     if (q_env_frame_push(0) != RAY_OK) return q_err(QE_STACK);
     ray_t* err = NULL;
@@ -361,7 +363,9 @@ static ray_t* phrase_eval(ray_t* tree, ray_t* t, ray_t* idx) {
     if (rows && !RAY_IS_ERR(rows)) ray_release(rows);
     q_env_frame_watch(g_unmapped);
     q_dbg_hold_t hold = q_dbg_hold();              /* the phrase tree is not the frame's text: its caret stays on the query */
+    int64_t scope = q_env_scope(Q_ENV_SCOPE_SESSION);
     ray_t* r = err ? err : q_eval_apply_concrete(q_eval(tree));
+    q_env_scope(scope);
     q_dbg_release(hold);
     q_env_frame_pop();
     return r;
@@ -1628,7 +1632,7 @@ static ray_t* update_dict(ray_t* a, ray_t* b, ray_t* c, ray_t* d) {
     return r;
 }
 
-/* is a the delete-columns shape: a non-empty symbol vector */
+/* is a the delete-columns shape: a symbol vector, empty included */
 static int is_symvec(ray_t* a) { return a && a->type == RAY_SYM; }
 
 /* `delete a from `.` / `![`.ns;();0b;`a`b]` — EXPUNGE (q4m3 §12.5).  A namespace
@@ -1641,6 +1645,7 @@ static ray_t* expunge_ns(int64_t ns, ray_t* names) {
     ray_t* e = NULL;
     for (int64_t i = 0; i < n && !e; i++) {
         int64_t member = ray_read_sym(ray_data(names), i, RAY_SYM, names->attrs);
+        if (member == q_env_marker_sym()) continue;
         int64_t full = q_env_qualify(ns, member);
         ray_err_t rc = full < 0 ? RAY_ERR_DOMAIN : q_env_unbind(full);
         if (rc != RAY_OK) e = rc == RAY_ERR_NOUPDATE ? q_env_err(rc) : q_err(QE_ASSIGN);
@@ -1665,9 +1670,14 @@ static ray_t* bang_qsql(ray_t** args) {
     if (tslot && tslot->type == -RAY_SYM) {
         name = tslot->i64;
         if (q_env_writable(name) != RAY_OK) return q_env_err(RAY_ERR_NOUPDATE);
-        if (is_symvec(a) && q_count(a) > 0 && is_empty_gen(c) &&
-            q_env_ns_exists(name)) {
-            ray_t* e = expunge_ns(name, a);
+        if ((is_symvec(a) || is_empty_gen(a)) && is_empty_gen(c) && q_env_ns_exists(name)) {
+            ray_t* names = q_count(a) > 0 ? a : q_key_name(name);   /* no names: every member (ref/delete.md:122) */
+            if (RAY_IS_ERR(names)) return names;
+            ray_t* e = expunge_ns(name, names);
+            if (names != a) {
+                ray_release(names);
+                if (!e && q_env_ns_unmark(name) != RAY_OK) e = q_err(QE_ASSIGN);
+            }
             if (e) return e;
             ray_retain(tslot);
             return tslot;
