@@ -97,10 +97,8 @@
 .q.xcols:{[x;y] $[(99h=type y)&not .Q.qt y;{[x;d] k:key d; n:x,k except x; n!d n inter k}[x;y];.Q.ft[{[x;t] flip .q.xcols[x;.Q.V t]}[x;];y]]}
 
 / ---- wave 4: verbs with no kernel to lose ----
-/ ref/tables.md "default is root namespace" - and bare `system"a"` lists the CURRENT
-/ context, so [] must pass `. itself.  f[] binds x to :: , and the kdb null-test
-/ idiom `(::)~x` is the one total test.  A bad namespace throws \a's own error.
-.q.tables:{system"a ",string $[(::)~x;`.;x]}
+/ [] lists the current \d, as \a does (owner 2026-11-16; basics/syscmds.md); f[] binds x to :: .
+.q.tables:{system"a ",$[(::)~x;"";string x]}
 / ref/view.md: views[] is niladic, "views defined in the default namespace".
 .q.views:{system"b"}
 
