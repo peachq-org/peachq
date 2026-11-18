@@ -457,25 +457,57 @@ static ray_t* elem_rest(ray_t* e, ray_t* const* ix, int64_t k) {
     return r;
 }
 
+static void drop_any(ray_t* r) {
+    if (r && RAY_IS_ERR(r)) ray_error_free(r);
+    else if (r) ray_release(r);
+}
+
+/* The terminal vector-by-long-vector step in one pass of the base typed-gather owner (gather_by_idx): the boxed walk
+ * costs ~3 allocations a row, which is what made 1M-row link deref lose to lj (2026-08-23 perf round).  The kernel
+ * gathers blind and owns no miss law, so a miss (a null or out-of-range index) is gathered from position 0 and then
+ * overwritten with the boxed walk's own answer for that index.  NULL when that answer is not an atom of x's type
+ * that x's slot can hold, or the gather failed: the boxed walk answers. */
+static ray_t* gather_at(ray_t* x, ray_t* i, ray_t* const* rest) {
+    int64_t xn = q_count(x), n = q_count(i), j = 0;
+    const int64_t* ix = (const int64_t*)ray_data(i);
+    if (n <= 0 || xn <= 0) return NULL;
+    while (j < n && ix[j] >= 0 && ix[j] < xn) j++;
+    int64_t* at = (int64_t*)ix;
+    if (j < n) {
+        if (x->type == RAY_STR || !(at = malloc((size_t)n * sizeof(int64_t)))) return NULL;
+        for (int64_t m = 0; m < n; m++) at[m] = ix[m] >= 0 && ix[m] < xn ? ix[m] : 0;
+    }
+    ray_t* r = gather_by_idx(x, at, n);
+    if (at != ix) free(at);
+    if (!r || RAY_IS_ERR(r)) { drop_any(r); return NULL; }
+    ray_t* fill = NULL;
+    int64_t fill_ix = 0;
+    for (int64_t m = j; m < n; m++) {
+        if (ix[m] >= 0 && ix[m] < xn) continue;
+        if (!fill || ix[m] != fill_ix) {
+            drop_any(fill);
+            fill_ix = ix[m];
+            ray_t* e = q_index_elem_at(i, m);
+            fill = e && !RAY_IS_ERR(e) ? mat(index_r(x, e, rest, 0)) : NULL;
+            drop_any(e);
+        }
+        if (!fill || RAY_IS_ERR(fill) || fill->type != -x->type || store_typed_elem(r, m, fill)) {
+            drop_any(fill);
+            ray_release(r);
+            return NULL;
+        }
+    }
+    drop_any(fill);
+    return r;
+}
+
 /* one result item per j — over the items of i (a collection index maps its
  * structure) or, when i is NULL (`::`), over the items of x themselves */
 
 static ray_t* index_map(ray_t* x, ray_t* i, ray_t* const* rest, int64_t k) {
-    /* terminal vector-by-i64-vector step: when every index is IN RANGE, the
-     * base typed-gather owner (gather_by_idx) does the run in one pass —
-     * the boxed walk below costs ~3 allocations a row, which is what made
-     * 1M-row link deref lose to lj (2026-08-23 perf round).  Any miss
-     * (OOB / null index -> the lane's null, the total-index law) keeps the
-     * boxed walk: the kernel gathers blind and owns no miss law. */
     if (i && k == 0 && x && ray_is_vec(x) && i->type == RAY_I64) {
-        int64_t xn = q_count(x), n = q_count(i), j = 0;
-        const int64_t* ix = (const int64_t*)ray_data(i);
-        while (j < n && ix[j] >= 0 && ix[j] < xn) j++;
-        if (j == n && n > 0) {
-            ray_t* r = gather_by_idx(x, (int64_t*)ix, n);
-            if (r && !RAY_IS_ERR(r)) return r;
-            if (r) ray_release(r);              /* OOM etc: the boxed walk answers */
-        }
+        ray_t* r = gather_at(x, i, rest);
+        if (r) return r;
     }
     ray_t* src = i ? i : x;
     int64_t n = q_count(src);
