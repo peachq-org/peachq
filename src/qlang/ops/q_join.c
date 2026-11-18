@@ -1305,7 +1305,9 @@ static ray_t* join_core(ray_t* x, ray_t* y, int exclusive, int append) {
     if (x && y) {
         ray_t* t = (x->type == RAY_LIST && q_count(x) == 0)   ? y
                  : (y->type == RAY_LIST && q_count(y) == 0)   ? x : NULL;
-        if (q_type_is_table(t) || q_type_is_dict(t) || (q_type_is_iter(t) && q_count(t) == 0)) {
+        int plain_vec = t && ray_is_vec(t) && t->type != RAY_STR && !q_enum_is(t) && !(t->attrs & RAY_ATTR_HAS_INDEX) &&
+                        !q_attr_letter(t);   /* boxing it through base concat cost ~40ns an item */
+        if (plain_vec || q_type_is_table(t) || q_type_is_dict(t) || (q_type_is_iter(t) && q_count(t) == 0)) {
             ray_retain(t);
             return t;
         }
