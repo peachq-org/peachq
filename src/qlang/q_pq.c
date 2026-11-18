@@ -22,6 +22,8 @@
 #include "qlang/q_console.h"   /* q_console_pq_register — the .pq.i.termsize native */
 #include "qlang/q_fmt.h"       /* q_fmt_pq_register — the .pq.i.facts native */
 #include "qlang/net/q_tls.h"   /* q_tls_pq_register — the .pq.i.tlsinfo native */
+#include "qlang/parse/q_syntax.h" /* q_syntax_pq_register — the .pq.i.syntax native */
+#include "qlang/parse/q_outline.h" /* q_outline_pq_register — the .pq.i.outline native */
 #include "qlang/io/q_csv.h"    /* q_csv_register — the .csv.i.* natives */
 #include "qlang/io/q_io.h"     /* q_io_fs_register — the .fs.i.rmtree native */
 #include "qlang/io/q_json.h"  /* q_json_register — the .j.i.* natives */
@@ -40,6 +42,7 @@
 #include "qlang/lib_gen.h"     /* PEACHQ_LIB_FILES — the codegen'd bundle, one entry per file */
 #include "qlang/helpdb_gen.h"  /* PEACHQ_HELPDB_BOOTSTRAP — the codegen'd builtin help data */
 #include "qlang/q_env.h"       /* q_env_bind_native / q_env_ident_ok — the native bindings, a namespace name */
+#include "qlang/eval/q_eval.h" /* q_eval_apply_ranks — the .pq.i.valence native */
 #include "lang/env.h"          /* ray_fn_unary — the native values */
 #include "lang/eval.h"         /* RAY_FN_NONE — no dispatch attrs on those values; the restricted and blocked modes */
 #include <stdio.h>
@@ -123,10 +126,12 @@ static ray_t* pq_loaded_fn(ray_t* x) {
 
 /* The native sets by file stem: `.pq.load_natives`csv` binds what `.csv`
  * calls.  `pq` is the session set `.pq` needs (connections, the provider
- * load, the terminal); `str` is both string engines; `termbox` includes the
+ * load, the terminal, the syntax tree, rank); `str` is both string engines; `termbox` includes the
  * beep.  Re-binding is idempotent, so a reload costs nothing but the bind. */
 static void pq_set_pq(void)      { q_conn_pq_register(); q_provider_pq_register(); q_console_pq_register(); q_fmt_pq_register();
-                                   q_ctx_pq_register(); q_tls_pq_register(); pq_bind(".pq.i.loaded", pq_loaded_fn); }
+                                   q_ctx_pq_register(); q_tls_pq_register(); q_syntax_pq_register();
+                                   q_outline_pq_register();
+                                   pq_bind(".pq.i.loaded", pq_loaded_fn); pq_bind(".pq.i.valence", q_eval_apply_ranks); }
 static void pq_set_str(void)     { q_strfmt_register(); q_strns_register(); }
 static void pq_set_termbox(void) { q_termbox_register(); q_beep_register(); }
 static const struct { const char* name; void (*bind)(void); } PQ_SETS[] = {
@@ -185,7 +190,11 @@ static const char* pq_member(const char* stem, size_t n, const char** src) {
     return NULL;
 }
 
+static bool g_bundle_only;
+void q_pq_bundle_only(void) { g_bundle_only = true; }
+
 ray_t* q_pq_load_file(const char* lit, size_t alen, const char* path) {
+    if (g_bundle_only) path = NULL;
     const char* stem = lit + 3;                     /* past "pq/" */
     size_t n = alen - 3;
     if (n > 2 && memcmp(stem + n - 2, ".q", 2) == 0) n -= 2;
@@ -212,7 +221,7 @@ ray_t* q_pq_autoload_ns(const char* stem, size_t n) {
     char lit[80];
     const char* src;
     int len = snprintf(lit, sizeof lit, "pq/%.*s.q", (int)n, stem);
-    if (!pq_member(stem, n, &src) && !q_sys_load_find(lit, (size_t)len, NULL)) {
+    if (!pq_member(stem, n, &src) && (g_bundle_only || !q_sys_load_find(lit, (size_t)len, NULL))) {
         pq_note(&g_misses, sym);
         return NULL;
     }

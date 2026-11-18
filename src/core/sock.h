@@ -46,6 +46,13 @@ uint16_t   ray_sock_service_port(const char* name);
 ray_sock_t ray_sock_accept(ray_sock_t srv);
 /* Two connected stream sockets, neither inherited by a child process; 0, or -1 + errno. */
 int        ray_sock_pair(ray_sock_t sv[2]);
+/* As ray_sock_pair, but AF_UNIX on every platform, so no TCP port ever exists; on Windows it needs 10 1803+ and is
+ * -1 + errno where the OS has no AF_UNIX. */
+int        ray_sock_pair_unix(ray_sock_t sv[2]);
+/* A second descriptor for the socket s, not inherited by a child process; RAY_INVALID_SOCK + errno on failure. */
+ray_sock_t ray_sock_dup(ray_sock_t s);
+/* No more sends on s: its peer reads end of stream once what was sent has arrived.  s stays open for reading. */
+void       ray_sock_shutdown_send(ray_sock_t s);
 /* Connect to host:port.  timeout_ms > 0 bounds the connect: the socket
  * connects non-blocking and waits at most timeout_ms for completion (a
  * blocking connect() ignores SO_*TIMEO and would otherwise hang for the
@@ -56,6 +63,9 @@ int        ray_sock_pair(ray_sock_t sv[2]);
 ray_sock_t ray_sock_connect(const char* host, uint16_t port, int timeout_ms);
 int64_t    ray_sock_send(ray_sock_t s, const void* buf, size_t len);
 int64_t    ray_sock_recv(ray_sock_t s, void* buf, size_t len);
+/* ray_sock_send / ray_sock_recv without the overlay: the plain socket, callable from any thread. */
+int64_t    ray_sock_send_plain(ray_sock_t s, const void* buf, size_t len);
+int64_t    ray_sock_recv_plain(ray_sock_t s, void* buf, size_t len);
 
 /* Overlay transport: send/recv replacements a socket may carry, so every
  * consumer of ray_sock_send/ray_sock_recv inherits TLS from one seam.  The

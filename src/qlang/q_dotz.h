@@ -62,8 +62,12 @@ typedef struct {
  * `.z.x`, `.z.q` and q_dotz_has_flag skip each with its parameters. */
 const q_dotz_opt_t* q_dotz_opt(const char* token);
 
-/* argv[1] when it is not an option, else NULL: `q [file] [-option [parameters] …]` (basics/cmdline.md). */
-const char* q_dotz_file_arg(int argc, char** argv);
+/* argv[1] when it is a peachq mode switch (-lint, -lsp, -stdio), else "". */
+const char* q_dotz_mode(int argc, char** argv);
+
+/* The argv index of the file, 0 when none: argv[1] when it is not an option (`q [file] [-option [parameters] …]`,
+ * basics/cmdline.md), or argv[2] after a leading -stdio (`q -stdio file`).  argv is never reordered: .z.X is as typed. */
+int q_dotz_file_at(int argc, char** argv);
 
 /* Whether `-q` (quiet mode, kdb .z.q) was on the command line — qmain reads
  * this to suppress the interactive startup banner.  Valid after q_dotz_init. */
