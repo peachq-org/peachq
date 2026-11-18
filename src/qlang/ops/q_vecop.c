@@ -4,6 +4,7 @@
  * only null is the char blank, and no tolerance), INT (int64, nulls as NULL_I64)
  * and DBL (double, nulls as NaN).  A same-type temporal rides INT on its own
  * PAYLOAD — a common unit would buy nothing and overflow i64 past year 2292.
+ * A symbol rides INT for = and <> alone, as its interned id.
  * Each operand is brought to its lane's width once — an already-wide vector in
  * place, a narrow one through a widening pass, an atom read once — and then one
  * loop per operand shape decides the whole vector.  Which lane a pair
@@ -43,6 +44,7 @@
 #include "qlang/q_builtins.h"         /* q_string_fn — a byte vector strings whole */
 #include "lang/eval.h"                 /* ray_lt_fn/ray_gt_fn/..., ray_cmp_tol_eq, ray_xbar_fn */
 #include "lang/internal.h"             /* as_f64 / as_i64 / arith_int_type — the atom lane reads */
+#include "table/sym.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -84,6 +86,11 @@ static int int_tag(int8_t t) {
 /* Every tag the lanes read; the datetime stays out, its tolerance band being
  * one q_type_is_float_tag does not name. */
 static int lane_tag(int8_t t) { return q_type_is_num_tag(t) || t == RAY_CHARV || RAY_IS_TEMPORAL(t); }
+/* = and <> read a symbol as its interned id, which a vector holds only on the runtime domain: a loaded file's ids
+ * are positions in its own. */
+static int sym_lane(vop_t op, ray_t* v, int8_t t, int vec) {
+    return t == RAY_SYM && (op == VO_EQ || op == VO_NE) && (!vec || ray_sym_vec_domain(v) == ray_sym_runtime_domain());
+}
 static int answers_bool(vop_t op) { return op >= VO_LT && op <= VO_NE; }
 
 /* ===== operand widening ==================================================
@@ -172,7 +179,7 @@ static int band_make(band_t* o, ray_t* v, int8_t tag, int vec, lane_t ln, int64_
         o->step = 0;
         switch (ln) {
             case LN_BYTE: o->scalar.b = tag == RAY_BOOL ? (v->b8 ? 1 : 0) : v->u8; break;
-            case LN_INT: o->scalar.j = atom_is_oob_null(v) ? NULL_I64 : as_i64(v); break;
+            case LN_INT: o->scalar.j = tag == RAY_SYM ? v->i64 : atom_is_oob_null(v) ? NULL_I64 : as_i64(v); break;
             default: o->scalar.d = atom_f(v); break;
         }
         o->p = &o->scalar;
@@ -180,13 +187,15 @@ static int band_make(band_t* o, ray_t* v, int8_t tag, int vec, lane_t ln, int64_
     }
     o->step = 1;
     const void* src = ray_data(v);
-    if (ln == LN_BYTE || (ln == LN_INT && (tag == RAY_I64 || RAY_IS_TEMPORAL64(tag))) || (ln == LN_DBL && tag == RAY_F64)) {
+    int sym64 = tag == RAY_SYM && (v->attrs & RAY_SYM_W_MASK) == RAY_SYM_W64;
+    if (ln == LN_BYTE || (ln == LN_INT && (tag == RAY_I64 || RAY_IS_TEMPORAL64(tag) || sym64)) || (ln == LN_DBL && tag == RAY_F64)) {
         o->p = src;
         return 1;
     }
     void* buf = malloc((ln == LN_INT ? sizeof(int64_t) : sizeof(double)) * (size_t)n);
     if (!buf) return 0;
-    if (ln == LN_INT) widen_j(buf, src, tag, n);
+    if (tag == RAY_SYM) for (int64_t i = 0; i < n; i++) ((int64_t*)buf)[i] = ray_read_sym(src, i, RAY_SYM, v->attrs);
+    else if (ln == LN_INT) widen_j(buf, src, tag, n);
     else widen_f(buf, src, tag, n);
     o->own = buf;
     o->p = buf;
@@ -521,7 +530,7 @@ ray_t* q_vecop_binary(ray_t* (*f)(ray_t*, ray_t*), ray_t* x, ray_t* y) {
     if (n <= 0) return NULL;                           /* so does the empty's carried type */
     if (op == VO_XBAR) return xbar_binary(x, y, xt, yt);
     if (is_arith(op)) return arith_binary(op, x, y, xt, yt, xv, yv, n);
-    if (!lane_tag(xt) || !lane_tag(yt)) return NULL;
+    if (!(lane_tag(xt) || sym_lane(op, x, xt, xv)) || !(lane_tag(yt) || sym_lane(op, y, yt, yv))) return NULL;
     /* Across a type difference the lanes take the plain numerics only.  A
      * cross-type temporal pair keeps the kernel's own reading (the pairs
      * q_type_cmp_as narrows arrive here already one type); a char beside a
@@ -574,7 +583,17 @@ ray_t* q_vecop_binary(ray_t* (*f)(ray_t*, ray_t*), ray_t* x, ray_t* y) {
 int q_vecop_is_compare(ray_t* (*f)(ray_t*, ray_t*)) { return answers_bool(op_of(f)); }
 int q_vecop_is_ordering(ray_t* (*f)(ray_t*, ray_t*)) { vop_t op = op_of(f); return op >= VO_LT && op <= VO_GE; }
 
-/* ===== the monadic seam: `null x` ======================================== */
+/* ===== the monadic seam: `null x`, `not x` ================================ */
+
+/* `not x` is `x=0` (ref/not.md), asked of the binary seam: a zero of x's own int-backed type, a long beside a float,
+ * and every pair the seam refuses goes the per-element road. */
+static ray_t* not_vec(ray_t* x) {
+    ray_t* z = make_typed_int((int8_t)-x->type, 0);
+    if (!z || RAY_IS_ERR(z)) return NULL;
+    ray_t* r = q_vecop_binary(q_eq_wrap, x, z);
+    ray_release(z);
+    return r;
+}
 
 #define NULL_SCAN(T, ISNULL)                                                       \
     do {                                                                           \
@@ -584,8 +603,9 @@ int q_vecop_is_ordering(ray_t* (*f)(ray_t*, ray_t*)) { vop_t op = op_of(f); retu
 
 ray_t* q_vecop_unary(ray_t* (*f)(ray_t*), ray_t* x) {
     if ((uintptr_t)f == (uintptr_t)q_string_fn && x && x->type == RAY_BYTE_ONLY && x->len > 0) return q_string_fn(x);
-    if ((uintptr_t)f != (uintptr_t)q_null_wrap) return NULL;
     if (!x || RAY_IS_ERR(x) || !ray_is_vec(x)) return NULL;
+    if ((uintptr_t)f == (uintptr_t)q_not_wrap) return not_vec(x);
+    if ((uintptr_t)f != (uintptr_t)q_null_wrap) return NULL;
     int64_t n = x->len;
     if (n <= 0) return NULL;
     int8_t t = x->type;
