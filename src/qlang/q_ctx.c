@@ -295,8 +295,10 @@ int q_ctx_run_debug_line(const char* s, size_t n, FILE* out, FILE* err) {
 typedef struct {
     char*       acc;
     const char* pend;
+    const char* first;          /* the start of the statement's first line */
     const char* seg;            /* the next uncopied byte; NULL inside a cut */
     const char* code_end;       /* the end of the statement's last line */
+    const char* code_last;      /* … without its CR and trailing blanks */
     size_t      alen, code_len; /* bytes in acc; acc's length at code_end once copied */
     int         live, code_copied;
 } ctx_span_t;
@@ -315,7 +317,7 @@ static void ctx_span_put(ctx_span_t* s, const char* a, const char* b) {
 }
 
 static void ctx_span_code(ctx_span_t* s, const char* line, size_t raw, int fresh) {
-    if (fresh) { s->live = 1; s->alen = 0; s->seg = NULL; }
+    if (fresh) { s->live = 1; s->alen = 0; s->seg = NULL; s->first = line; }
     if (!s->seg) s->seg = line;
     s->code_end = line + raw;
     s->code_copied = 0;
@@ -366,9 +368,10 @@ static size_t ctx_span_text(ctx_span_t* s) {
  * `;` alone separates statements (owner ruling 2026-10-08). */
 /* docs/text-entry-law.md: the via-file and IPC columns */
 /* `keep_comments` (.Q.ld) only groups: each comment line is an entry of its own, borrowed and not NUL-terminated,
- * cut out of the statement around it, and nothing is captured as documentation. */
+ * cut out of the statement around it, and nothing is captured as documentation.  `spans` (with keep_comments) takes
+ * every entry in fn's place as byte offsets into src, a block as one entry (q_ctx_file_spans). */
 static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int value_door, int keep_comments,
-                           q_ctx_stmt_fn fn, void* u) {
+                           q_ctx_stmt_fn fn, q_ctx_span_fn spans, void* u) {
     if (!src) { src = ""; len = 0; }     /* an empty read owns no buffer; `src + len` must stay defined */
 
     /* Heap, not static — a loaded script may `\l` another while this one still holds the line that invoked it. */
@@ -406,7 +409,11 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
      * console the eval error may first SUSPEND into the debugger — ctx_line's
      * load seam — and a `:r` resume continues the load instead of aborting. */
     int lrc = 0;
-    #define FLUSH() do { if (span.live) lrc = fn(span.acc, ctx_span_text(&span), start, u); } while (0)
+    #define FLUSH() do { if (span.live) { size_t tn_ = ctx_span_text(&span); \
+        lrc = spans ? spans((size_t)(span.first - src), (size_t)(span.code_last - src), start, Q_CTX_SPAN_STMT, u) \
+                    : fn(span.acc, tn_, start, u); } } while (0)
+    const char* block = NULL;                  /* spans: the open block's first line */
+    int64_t     block_line = 0;
 
     while (p < pend) {
         const char* line = p;
@@ -429,7 +436,13 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
 
         if (in_block) {                          /* inside a /..\ block comment */
             if (tlen == 1 && trim[0] == '\\' && !indented) in_block = 0;   /* only a column-0 singleton \ closes (corpus.q:300) */
-            if (tlen && keep_comments && (lrc = fn(line, n, lineno, u))) break;
+            if (spans) {
+                if (!in_block) {
+                    lrc = spans((size_t)(block - src), (size_t)(line + n - src), block_line, Q_CTX_SPAN_BLOCK, u);
+                    block = NULL;
+                    if (lrc) break;
+                }
+            } else if (tlen && keep_comments && (lrc = fn(line, n, lineno, u))) break;
             continue;
         }
         if (!open.in_string && !open.in_literal) {
@@ -441,12 +454,19 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
                 }
                 continue;
             }
-            if (tlen == 1 && trim[0] == '\\') break; /* singleton \ exits (post-loop FLUSH runs)  */
+            if (tlen == 1 && trim[0] == '\\') {      /* singleton \ exits (post-loop FLUSH runs)  */
+                if (spans) { block = line; block_line = lineno; }
+                break;
+            }
             if (trim[0] == '/') {                    /* a comment line, or the `/` opening a block: no flush */
                 in_block = tlen == 1 && !indented;   /* an indented lone `/` is a comment (qstats linalg.q:50) */
                 if (keep_comments || in_block) ctx_span_cut(&span, line);
                 else ctx_span_gap(&span, line);
-                if (keep_comments) {
+                if (spans && in_block) { block = line; block_line = lineno; }
+                else if (spans) {
+                    if ((lrc = spans((size_t)(line - src), (size_t)(line + n - src), lineno, Q_CTX_SPAN_COMMENT, u)))
+                        break;
+                } else if (keep_comments) {
                     if ((lrc = fn(line, n, lineno, u))) break;
                 } else if (in_block) q_comment_break();
                 else q_comment_line(trim, tlen);
@@ -465,6 +485,7 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
             open = (q_parse_open_t){ 0 };
         }
         ctx_span_code(&span, line, raw, fresh);
+        span.code_last = line + n;
         if (value_door) {
             q_parse_open_feed(&open, line, raw);
             if ((open.in_string || open.in_literal) && raw && line[raw - 1] == '\r') ctx_span_keep_cr(&span);
@@ -472,6 +493,10 @@ static int ctx_walk_script(const char* src, size_t len, int64_t file_sym, int va
     }
     if (!lrc) FLUSH();                             /* flush any pending statement (incl. before a lone \) */
     #undef FLUSH
+    if (!lrc && spans && block) {
+        while (pend > block && strchr(" \t\r\n", pend[-1])) pend--;
+        lrc = spans((size_t)(block - src), (size_t)(pend - src), block_line, Q_CTX_SPAN_BLOCK, u);
+    }
     if (!keep_comments) q_comment_script_end(dsaved);
     ray_sys_free(span.acc);
     return lrc;
@@ -535,7 +560,7 @@ static int ctx_run_script(const char* src, size_t len, int64_t file_sym, int pri
                           char lang, FILE* out, FILE* err, ray_t** esig) {
     ctx_load_scope_t scope = ctx_load_enter();
     ctx_load_t       ld    = { out, err, print_result, lang, esig };
-    int              lrc   = ctx_walk_script(src, len, file_sym, 0, 0, ctx_load_stmt, &ld);
+    int              lrc   = ctx_walk_script(src, len, file_sym, 0, 0, ctx_load_stmt, NULL, &ld);
     ctx_load_leave(scope, !lrc);
     if (lrc && esig && *esig && !q_dbg_trapped()) q_dbg_mark_reported(*esig);
     return lrc ? 1 + lrc : 0;
@@ -553,7 +578,11 @@ static int ctx_eval_stmt(const char* s, size_t n, int64_t line, void* u) {
 }
 
 int q_ctx_file_statements(const char* s, size_t n, q_ctx_stmt_fn fn, void* u) {
-    return ctx_walk_script(s, n, 0, 0, 0, fn, u);
+    return ctx_walk_script(s, n, 0, 0, 0, fn, NULL, u);
+}
+
+int q_ctx_file_spans(const char* s, size_t n, q_ctx_span_fn fn, void* u) {
+    return ctx_walk_script(s, n, 0, 0, 1, NULL, fn, u);
 }
 
 static int ctx_ld_entry(const char* s, size_t n, int64_t line, void* u) {
@@ -573,7 +602,7 @@ ray_t* q_ctx_ld_fn(ray_t* x) {
     ray_t* cols[2] = { ray_vec_new(RAY_I64, 8), ray_list_new(8) };
     ray_t* out     = NULL;
     int    ok      = cols[0] && !RAY_IS_ERR(cols[0]) && cols[1] && !RAY_IS_ERR(cols[1]);
-    if (ok && !ctx_walk_script(p, (size_t)n, 0, 0, 1, ctx_ld_entry, cols)) {
+    if (ok && !ctx_walk_script(p, (size_t)n, 0, 0, 1, ctx_ld_entry, NULL, cols)) {
         out = ray_list_new(2);
         out = ray_list_append(out, cols[0]);
         out = ray_list_append(out, cols[1]);
@@ -590,7 +619,7 @@ ray_t* q_ctx_ld_fn(ray_t* x) {
 /* docs/text-entry-law.md: the IPC column */
 ray_t* q_ctx_eval_src(const char* s, size_t n) {
     ray_t* last = NULL;
-    int    rc   = ctx_walk_script(s, n, 0, 1, 0, ctx_eval_stmt, &last);
+    int    rc   = ctx_walk_script(s, n, 0, 1, 0, ctx_eval_stmt, NULL, &last);
     if (last) return last;
     if (rc) return q_err(QE_OOM);          /* the one non-statement stop: the walker's own buffer */
     ray_retain(RAY_NULL_OBJ);              /* no statement ran: what an assignment answers */

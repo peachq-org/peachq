@@ -1364,20 +1364,21 @@ static ray_t* join_core(ray_t* x, ray_t* y, int exclusive, int append) {
         q_type_is_dict(x) || q_type_is_dict(y) ||
         q_type_is_table(x) || q_type_is_table(y))
         return r;                          /* keep the base error */
+    /* r is the 'type that chose the boxed list: ray_release never frees an error */
     ray_t* out = ray_list_new(nx + ny > 0 ? nx + ny : 1);
-    if (RAY_IS_ERR(out)) { if (r) ray_release(r); return out; }
+    if (RAY_IS_ERR(out)) { ray_error_free(r); return out; }
     for (int64_t i = 0; i < nx + ny; i++) {
         ray_t* e = (i < nx) ? q_join_gen_item(x, i) : q_join_gen_item(y, i - nx);
         if (!e || RAY_IS_ERR(e)) {
             ray_release(out);
-            if (e) { if (r) ray_release(r); return e; }
+            if (e) { ray_error_free(r); return e; }
             return r;
         }
         out = ray_list_append(out, e);
         ray_release(e);
-        if (RAY_IS_ERR(out)) { if (r) ray_release(r); return out; }
+        if (RAY_IS_ERR(out)) { ray_error_free(r); return out; }
     }
-    if (r) ray_release(r);
+    ray_error_free(r);
     return out;
 }
 

@@ -400,9 +400,17 @@ $(WIN_KAPI_DEF): tools/kapi.syms
 	@mkdir -p $(dir $@)
 	{ echo 'NAME q.exe'; echo 'EXPORTS'; sed -n '/{/,/}/p' $< | tr -d '{};' | tr -s ' \t' '\n' | grep .; } > $@
 
-q.exe: $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_RE2_LIB) $(WIN_FMT_LIB) $(WIN_KAPI_DEF)
+# The manifest makes UTF-8 the process ANSI code page (Windows 10 1903+), so a q string's UTF-8 bytes name the file
+# they spell; on the legacy page `set` into `josé/` wrote `josÃ©/`.
+WIN_MANIFEST_RES = $(BUILD_DIR)/src/app/q.res.win.o
+
+$(WIN_MANIFEST_RES): src/app/q.rc src/app/q.exe.manifest
+	@mkdir -p $(dir $@)
+	$(WIN_CROSS)windres -I src/app -O coff -o $@ $<
+
+q.exe: $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_MANIFEST_RES) $(WIN_RE2_LIB) $(WIN_FMT_LIB) $(WIN_KAPI_DEF)
 	$(WIN_CXX) $(WIN_OPT) -Wl,--stack,8388608 -static-libstdc++ -static-libgcc \
-	  -o $@ $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_LIBS) -Wl,-Bstatic -lwinpthread \
+	  -o $@ $(WIN_LIB_OBJ) $(WIN_Q_MAIN_OBJ) $(WIN_MANIFEST_RES) $(WIN_LIBS) -Wl,-Bstatic -lwinpthread \
 	  $(WIN_KAPI_DEF) -Wl,--out-implib,$(WIN_KAPI_IMPLIB)
 
 # Recursive so the -j lands on the object rules even when the outer make is

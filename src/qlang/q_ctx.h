@@ -82,6 +82,12 @@ ray_t* q_ctx_eval_src(const char* s, size_t n);
 typedef int (*q_ctx_stmt_fn)(const char* s, size_t n, int64_t line, void* u);
 int q_ctx_file_statements(const char* s, size_t n, q_ctx_stmt_fn fn, void* u);
 
+/* The same walk as byte offsets [start, end) into s, nothing run: a statement from its first line to its last code
+ * byte, and each comment line or `/`..`\` block (to the end when unclosed or after a lone `\`) yielded ahead of it. */
+enum { Q_CTX_SPAN_STMT, Q_CTX_SPAN_COMMENT, Q_CTX_SPAN_BLOCK };
+typedef int (*q_ctx_span_fn)(size_t start, size_t end, int64_t line, int kind, void* u);
+int q_ctx_file_spans(const char* s, size_t n, q_ctx_span_fn fn, void* u);
+
 /* (.Q.c.ld x) — text x grouped as a load groups it, comment lines kept as entries of their own: (start lines;texts),
  * in walk order (a comment inside a continued statement precedes it).  'type unless x is text. */
 ray_t* q_ctx_ld_fn(ray_t* x);

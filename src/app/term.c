@@ -105,6 +105,15 @@ static void term_refresh_size(ray_term_t* term) {
 static volatile sig_atomic_t g_interrupted = 0;
 static ray_term_t* g_active_term = NULL;
 
+#if defined(RAY_OS_WINDOWS)
+static void win_console_restore(const ray_term_t* term) {
+    SetConsoleMode(term->h_stdin,  term->old_stdin_mode);
+    SetConsoleMode(term->h_stdout, term->old_stdout_mode);
+    if (term->old_in_cp) SetConsoleCP(term->old_in_cp);
+    if (term->old_out_cp) SetConsoleOutputCP(term->old_out_cp);
+}
+#endif
+
 void ray_term_request_interrupt(void) {
     g_interrupted = 1;
     ray_eval_request_interrupt();
@@ -120,8 +129,7 @@ static void signal_handler(int sig) {
         /* Restore terminal and exit for fatal signals */
         if (g_active_term && g_active_term->owns_console) {
 #if defined(RAY_OS_WINDOWS)
-            SetConsoleMode(g_active_term->h_stdin,  g_active_term->old_stdin_mode);
-            SetConsoleMode(g_active_term->h_stdout, g_active_term->old_stdout_mode);
+            win_console_restore(g_active_term);
 #else
             tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_active_term->oldattr);
 #endif
@@ -147,8 +155,7 @@ static BOOL WINAPI win_ctrl_handler(DWORD type) {
     }
     if (type == CTRL_BREAK_EVENT || type == CTRL_CLOSE_EVENT) {
         if (g_active_term && g_active_term->owns_console) {
-            SetConsoleMode(g_active_term->h_stdin,  g_active_term->old_stdin_mode);
-            SetConsoleMode(g_active_term->h_stdout, g_active_term->old_stdout_mode);
+            win_console_restore(g_active_term);
         }
         return FALSE;   /* default action: terminate */
     }
@@ -159,8 +166,7 @@ static BOOL WINAPI win_ctrl_handler(DWORD type) {
 static void atexit_handler(void) {
     if (g_active_term && g_active_term->owns_console) {
 #if defined(RAY_OS_WINDOWS)
-        SetConsoleMode(g_active_term->h_stdin,  g_active_term->old_stdin_mode);
-        SetConsoleMode(g_active_term->h_stdout, g_active_term->old_stdout_mode);
+        win_console_restore(g_active_term);
 #else
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_active_term->oldattr);
 #endif
@@ -413,6 +419,9 @@ ray_term_t* ray_term_create_console(int hist_file) {
     term->h_stdin  = GetStdHandle(STD_INPUT_HANDLE);
     term->h_stdout = GetStdHandle(STD_OUTPUT_HANDLE);
 
+    term->old_in_cp  = GetConsoleCP();
+    term->old_out_cp = GetConsoleOutputCP();
+    SetConsoleCP(CP_UTF8);
     SetConsoleOutputCP(CP_UTF8);
 
     GetConsoleMode(term->h_stdin, &term->old_stdin_mode);
@@ -445,8 +454,7 @@ void ray_term_destroy(ray_term_t* term) {
     ray_hist_destroy(&term->hist);
     if (term->owns_console) {
 #if defined(RAY_OS_WINDOWS)
-        SetConsoleMode(term->h_stdin,  term->old_stdin_mode);
-        SetConsoleMode(term->h_stdout, term->old_stdout_mode);
+        win_console_restore(term);
 #else
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &term->oldattr);
 #endif

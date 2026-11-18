@@ -62,8 +62,11 @@ static _Noreturn void die_err(q_err_e cls) {
     longjmp(q_err_jmp, 1);
 }
 
+static const char *g_die_msg;   /* q_die's call-site text: the error stays a bare 'parse, a tool may show why */
+static const char DIE_OOM[] = "out of memory";
+
 static _Noreturn void q_die(const char *msg) {
-    (void)msg;   /* class-only errors (bare 'parse); msg documents the call site */
+    g_die_msg = msg;
     die_err(QE_PARSE);
 }
 
@@ -278,17 +281,6 @@ static void init_class(void) {
 
 /* ===== scanner =============================================================== */
 
-typedef enum {
-    T_EOF,
-    T_NOUN,
-    T_VERB,
-    T_ADVERB,
-    T_LPAREN, T_RPAREN,
-    T_LBRACE, T_RBRACE,
-    T_LBRACK, T_RBRACK,
-    T_SEMI
-} TKind;
-
 typedef struct {
     TKind  kind;
     int    start, len;
@@ -304,6 +296,7 @@ typedef struct { Token *t; int n; } Tokens;
 static Tokens g_toks = { NULL, 0 };
 static int g_scan_open_str;   /* the last scan ran off the end inside a string literal */
 static int g_scan_open_lit;   /* … or inside a text literal: its fence length */
+static int g_scan_tok;        /* where the token being scanned starts: a scan die with no caret stopped there */
 
 /* Whole literals (numeric / boolean / byte / guid / temporal) are scanned and
  * BUILT by q_tok.c — the single string->value home the `$` Tok scanners already
@@ -379,7 +372,7 @@ static Tokens scan(const char *src) {
 #define EMIT(TK, KK) do { \
         ray_t *kk_ = (KK); \
         if (n >= cap) { cap = cap ? cap * 2 : 32; toks = realloc(toks, (size_t)cap * sizeof(Token)); \
-                        if (!toks) { if (kk_) ray_release(kk_); q_die("out of memory"); } \
+                        if (!toks) { if (kk_) ray_release(kk_); q_die(DIE_OOM); } \
                         g_toks.t = toks; } \
         toks[n++] = (Token){ .kind = (TK), .start = start, .len = p - start, .k = kk_ }; \
         g_toks.n = n; \
@@ -396,6 +389,7 @@ static Tokens scan(const char *src) {
         int leading_ws = (p == 0) || (p != ws0) || (src[p - 1] == '\n');
 
         int start = p;
+        g_scan_tok = p;
         char c = src[p];
         uint8_t cl = CLASS[(uint8_t)c];
         ray_t *lit;
@@ -478,7 +472,7 @@ static Tokens scan(const char *src) {
             int len = p - s;
             p++;                     /* past closing quote */
             char* db = malloc((size_t)len + 1);
-            if (!db) q_die("out of memory");
+            if (!db) q_die(DIE_OOM);
             int dl = 0;
             for (int i = 0; i < len; ) {
                 char ch = src[s + i];
@@ -606,7 +600,7 @@ static Tokens scan(const char *src) {
     }
 
     if (n >= cap) { cap = cap ? cap * 2 : 32; toks = realloc(toks, (size_t)cap * sizeof(Token));
-                    if (!toks) q_die("out of memory"); }
+                    if (!toks) q_die(DIE_OOM); }
     toks[n++] = (Token){ .kind = T_EOF, .start = p, .len = 0, .k = NULL };
     g_toks.t = toks; g_toks.n = n;
 #undef EMIT
@@ -644,7 +638,7 @@ static void pos_note(ray_t *node, int at) {
         int *at2 = (int *)realloc(g_pos.at, (size_t)cap * sizeof *at2);
         if (nd) g_pos.node = nd;
         if (at2) g_pos.at = at2;
-        if (!nd || !at2) q_die("out of memory");
+        if (!nd || !at2) q_die(DIE_OOM);
         g_pos.cap = cap;
     }
     g_pos.node[g_pos.n] = node;
@@ -660,7 +654,7 @@ static ray_t *pos_take(int from, int base) {
         v = ray_vec_append(v, &ptr);
         if (v && !RAY_IS_ERR(v)) v = ray_vec_append(v, &off);
     }
-    if (!v || RAY_IS_ERR(v)) q_die("out of memory");
+    if (!v || RAY_IS_ERR(v)) q_die(DIE_OOM);
     g_pos.n = from;
     return v;
 }
@@ -1144,7 +1138,7 @@ static pend_t *g_pend = NULL;
 /* the caller's handle on its in-flight ref, valid until its pop */
 static ray_t **pend_push(void) {
     pend_t *f = (pend_t *)malloc(sizeof *f);
-    if (!f) q_die("out of memory");
+    if (!f) q_die(DIE_OOM);
     f->v = NULL; f->prev = g_pend; g_pend = f;
     return &f->v;
 }
@@ -1160,6 +1154,17 @@ static void pend_unwind(void) {                   /* a die: release every ref */
         pend_pop();
     }
 }
+static void park(ray_t *v) { *pend_push() = v; }
+
+/* A `;` list up to its closer, parked until the closer is there: a missing one dies with the list released. */
+static ray_t *parse_E_closed(Parser *p, TKind close, const char *msg) {
+    ray_t **l = pend_push();
+    *l = parse_E(p, Q_NONE);
+    expect(p, close, msg);
+    ray_t *e = *l;
+    pend_pop();
+    return e;
+}
 
 /* Table literal `([k…] c1:e1; …)`, the cursor past its `(` and on the `[`.
  * Emits kdb's dict-then-flip parse tree: unkeyed (+:;(!;…)); keyed
@@ -1171,13 +1176,13 @@ static ray_t *table_lit_cols(Parser *p) {
         adv(p);
         /* `([])` is the ZERO-column empty table (qlib/src/unit.q:180
          * `tmpDirs:([])`), not one elided column auto-named x. */
-        ray_t *cols = at(p, T_RPAREN) ? ray_list_new(1) : parse_E(p, Q_NONE);
-        expect(p, T_RPAREN, "expected ')'");
+        ray_t *cols;
+        if (at(p, T_RPAREN)) { adv(p); cols = ray_list_new(1); }
+        else cols = parse_E_closed(p, T_RPAREN, "expected ')'");
         xyz_unbind(p->xyz, cols);
         return table_lit_flip(cols);
     }
-    ray_t *kcols = parse_E(p, Q_NONE);
-    expect(p, T_RBRACK, "expected ']' in keyed table literal");
+    ray_t *kcols = parse_E_closed(p, T_RBRACK, "expected ']' in keyed table literal");
     xyz_unbind(p->xyz, kcols);
     /* optional `;` after `]` — `([a:`x`y];b:10 20)` == `([a:`x`y]b:10 20)` */
     if (at(p, T_SEMI)) adv(p);
@@ -1185,8 +1190,9 @@ static ray_t *table_lit_cols(Parser *p) {
         adv(p);
         return table_lit_dict(kcols, 1);
     }
-    ray_t *vcols = parse_E(p, Q_NONE);
-    expect(p, T_RPAREN, "expected ')'");
+    park(kcols);
+    ray_t *vcols = parse_E_closed(p, T_RPAREN, "expected ')'");
+    pend_pop();
     xyz_unbind(p->xyz, vcols);
     return bang_tree(table_lit_flip(kcols), table_lit_flip(vcols));
 }
@@ -1213,8 +1219,7 @@ static int lone_glyph(Parser *p) {
 /* `( … )`, the cursor past its `(`: a table literal, grouping, or a list literal */
 static ray_t *parse_paren(Parser *p) {
     if (at(p, T_LBRACK)) return parse_table_lit(p);
-    ray_t *e = parse_E(p, Q_NONE);
-    expect(p, T_RPAREN, "expected ')'");
+    ray_t *e = parse_E_closed(p, T_RPAREN, "expected ')'");
     int64_t n = q_count(e);
     ray_t **slots = (ray_t **)ray_data(e);
     /* Inside parens an elided element is a projection HOLE — the literal
@@ -1442,8 +1447,7 @@ static P parse_base(Parser *p) {
          * taken by parse_term's postfix loop, so kdb's argument-list-wins rule
          * survives (`3+[…]` is still +'s arguments, not a block). */
         adv(p);
-        ray_t *b = seq_of(parse_E(p, Q_NONE));
-        expect(p, T_RBRACK, "expected ']' closing expression block");
+        ray_t *b = seq_of(parse_E_closed(p, T_RBRACK, "expected ']' closing expression block"));
         return (P){ R_NOUN, b ? b : RAY_NULL_OBJ, 0, 0, tk->start };
     }
     case T_LPAREN: {
@@ -1462,8 +1466,7 @@ static P parse_base(Parser *p) {
             peek(p) == T_LBRACK) {
             adv(p);                          /* consume ' */
             adv(p);                          /* consume [ */
-            ray_t *args = parse_E(p, Q_NONE);
-            expect(p, T_RBRACK, "expected ']' in compose '[...]'");
+            ray_t *args = parse_E_closed(p, T_RBRACK, "expected ']' in compose '[...]'");
             ray_t *w = cons_head(tk->k, args, Q_HOLE_OBJ);   /* `'[;]` projects the iterator value itself */
             ray_release(args);
             pos_note(w, tk->start);
@@ -1726,8 +1729,9 @@ static P parse_term(Parser *p, QCtx ctx) {
         Token *tk = cur(p);
         if (tk->kind == T_LBRACK) {
             adv(p);
-            ray_t *e = parse_E(p, Q_NONE);
-            expect(p, T_RBRACK, "expected ']'");
+            park(t.v);
+            ray_t *e = parse_E_closed(p, T_RBRACK, "expected ']'");
+            pend_pop();
             /* bracket-apply on a bare verb (`+[2;]`) embeds the dyadic row —
              * an underapplied call becomes a projection downstream (2c). */
             if (t.role == R_VERB) t.v = embed_sym(t.v, Q_DYADIC);
@@ -1765,7 +1769,9 @@ static P parse_e(Parser *p, QCtx ctx) {
     return r;
 }
 
+/* t stays parked until parse_e_from_body has parsed what stands right of it */
 static P parse_e_from(Parser *p, P t, QCtx ctx) {
+    park(t.v);
     if (++p->depth > Q_PARSE_MAX_DEPTH) die_err(QE_LIMIT);
     P r = parse_e_from_body(p, t, ctx);
     p->depth--;
@@ -1882,23 +1888,29 @@ static void pattern_local_check(int64_t id, void *ctx) {
 /* The parse-time half of the assignment law: the left side must be a target (q_parse_assign_target).  A lambda's
  * `n:` makes n a local, so a reserved spelling
  * is refused here, at definition, as eval refuses it at the call (D500a; a syntax word is a context member only
- * outside a lambda).  An application such as `[`$"test"]` is no target (Dlnkjq).  Consumes all three on a refusal. */
-static void assign_check(Parser *p, ray_t *lhs, ray_t *verb, ray_t *rhs, int at) {
+ * outside a lambda).  An application such as `[`$"test"]` is no target (Dlnkjq).  The caller keeps both parked. */
+static void assign_check(Parser *p, ray_t *lhs, ray_t *verb, int at) {
     q_assign_target_t k = q_parse_assign_target(lhs);
     int colon = sym_name_is(verb, ":") || verb_marked(verb);
     if (k == Q_TARGET_NONE ||
-        (k == Q_TARGET_NAME && colon && p->lambda_depth > 0 && q_registry_is_reserved(lhs->i64))) {
-        ray_release(lhs); ray_release(verb); ray_release(rhs);
+        (k == Q_TARGET_NAME && colon && p->lambda_depth > 0 && q_registry_is_reserved(lhs->i64)))
         die_err(QE_ASSIGN);
-    }
     if (k == Q_TARGET_NAME) global_local_check(p, lhs->i64, verb, at);
     else if (sym_name_is(verb, ":") && q_pattern_supported(lhs))
         q_pattern_names(lhs, pattern_local_check, &(pattern_check_t){ p, verb, at });
 }
 
-/* `t u e` with u written as a verb: infix application, assignment, or a postfix elision */
+/* `t u e` with u written as a verb: infix application, assignment, or a postfix elision.  t arrives parked
+ * (parse_e_from); u, then e, are parked beside it until the assignment checks have passed. */
 static P parse_infix(Parser *p, P t, P u, QCtx ctx) {
+    park(u.v);
     P e = parse_e(p, ctx);
+    park(e.v);
+    int assign = verb_marked(u.v) || sym_name_is(u.v, ":") || sym_name_is(u.v, "::");
+    if (assign && (e.v || !sym_name_is(u.v, "::"))) assign_check(p, t.v, u.v, t.at);
+    pend_pop();
+    pend_pop();
+    pend_pop();
     /* postfix form (`1+`, `-15!`): the missing rhs is the projection HOLE, as a bracket elision's is — an
      * explicit `::` operand is the identity VALUE.  A `g ::` with nothing to assign, spaced or glued, is the train
      * tail (::;g) (funq/ml.q `hdist:sum (<>)::`), a composition keeping g's rank (ref/compose.md:23). */
@@ -1908,8 +1920,6 @@ static P parse_infix(Parser *p, P t, P u, QCtx ctx) {
         if (r && !RAY_IS_ERR(r)) r->attrs |= Q_ATTR_POSTFIX;
         return (P){ R_NOUN, r, 1, 0, t.at };
     }
-    int assign = verb_marked(u.v) || sym_name_is(u.v, ":") || sym_name_is(u.v, "::");
-    if (assign) assign_check(p, t.v, u.v, e.v, t.at);
     u.v = embed_sym(u.v, Q_DYADIC);      /* the dyadic row; an `op:` marker selects the monad, kdb's assign-through head */
     /* onto a train tail the infix head is its own postfix elision (`1~` of `1~count@`), composed onto the tail;
      * an assignment (`hdist:sum (<>)::`) binds the train instead */
@@ -1996,6 +2006,7 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
     P u = parse_term(p, ctx);
 
     if (u.role == R_NONE) {
+        pend_pop();
         /* a LONE glyph is the bare-verb VALUE: the dyadic row, a suffixed-colon marker (`#:`) selecting the monad, a
          * bare `:` the assign verb (`@[x;i;:;y]`; the assignment syntax sym never stands alone) and `::` the identity
          * value.  Every expression end — `(+)`, slots, statements, lambda bodies, an assignment rhs — arrives here, so
@@ -2015,7 +2026,9 @@ static P parse_e_from_body(Parser *p, P t, QCtx ctx) {
     }
 
     if (t.role == R_NOUN && u.role == R_VERB) return parse_infix(p, t, u, ctx);
-    return parse_juxt(t, parse_e_from(p, u, ctx));
+    P e = parse_e_from(p, u, ctx);
+    pend_pop();
+    return parse_juxt(t, e);
 }
 
 /* ===== qSQL phrase normalization ==============================================
@@ -2352,6 +2365,7 @@ static ray_t *parse_phrase_list(Parser *p, QCtx ctx) {
 static void parse_begin(void) {
     init_class();
     g_die_at = -1;
+    g_die_msg = NULL;
     g_toks.t = NULL;
     g_toks.n = 0;
 }
@@ -2363,16 +2377,18 @@ static void drop_tokens(void) {
     pos_drop();
 }
 
+static ray_t *die_error(void) {
+    q_err_e cls = g_die_class; g_die_class = QE_PARSE;
+    if (!g_die_payload) return q_err(cls);
+    ray_t *e = q_err_signal(cls, g_die_payload);
+    ray_release(g_die_payload); g_die_payload = NULL;
+    return e;
+}
+
 static ray_t *die_answer(void) {
     pend_unwind();
     drop_tokens();
-    q_err_e cls = g_die_class; g_die_class = QE_PARSE;
-    if (g_die_payload) {
-        ray_t *e = q_err_signal(cls, g_die_payload);
-        ray_release(g_die_payload); g_die_payload = NULL;
-        return e;
-    }
-    return q_err(cls);
+    return die_error();
 }
 
 /* ---- test hook --------------------------------------------------------------
@@ -2507,6 +2523,13 @@ static const char *intake_lang(const char *src, size_t *n, char *lang) {
 static const char *intake_sys(const char *src) {
     while (*src == ' ' || *src == '\t') src++;
     return *src == '\\' ? src : NULL;
+}
+
+size_t q_parse_intake(const char *src, size_t n, int *opaque) {
+    char lang;
+    const char *rest = intake_lang(src, &n, &lang);
+    *opaque = (n && lang && lang != 'q') || intake_sys(rest);
+    return (size_t)(rest - src);
 }
 
 ray_t *q_parse(const char *src) { return q_parse_at(src, NULL); }
@@ -2661,9 +2684,7 @@ void q_parse_open_feed(q_parse_open_t *st, const char *piece, size_t n) {
     const char *text = buf;
     if (!st->fed) {
         st->fed = 1;
-        char lang;
-        text = intake_lang(buf, &n, &lang);
-        if ((n && lang && lang != 'q') || intake_sys(text)) st->opaque = 1;
+        text += q_parse_intake(buf, n, &st->opaque);
     }
     if (!st->opaque && q_registry_ready()) open_scan(st, text);
     free(buf);
@@ -2684,4 +2705,82 @@ int q_parse_is_assign(const ray_t *cast) {
     /* every target is silent, an indexed `name[i;…]:v` and a `:` pattern too — kdb console (basics/pattern.md:14-20) */
     q_assign_target_t k = asg ? q_parse_assign_target(e[1]) : Q_TARGET_NONE;
     return k == Q_TARGET_NAME || k == Q_TARGET_INDEX || (k == Q_TARGET_PATTERN && asg != Q_HEAD_GLOBAL);
+}
+
+const char *q_parse_die_msg(void) { return g_die_msg; }
+
+int q_parse_lacked_memory(ray_t *err) {
+    return g_die_msg == DIE_OOM || q_err_is(err, QE_WSFULL) || q_err_is(err, QE_OOM);
+}
+
+ray_t *q_parse_state(void) {
+    ray_t *dotq = q_registry_dotq(), *s = ray_list_new(3);
+    ray_t *item[3] = { ray_bool(q_classic_on()), ray_bool(q_registry_sealed()), dotq ? dotq : ray_list_new(0) };
+    if (dotq) ray_retain(dotq);
+    for (int i = 0; i < 3; i++) {
+        s = ray_list_append(s, item[i]);
+        ray_release(item[i]);
+    }
+    return s;
+}
+
+static int scan_put(q_scan_t *s, int *cap, q_scan_tok_t tk) {
+    if (s->n == *cap) {
+        int c = *cap ? 2 * *cap : 64;
+        q_scan_tok_t *r = realloc(s->tok, (size_t)c * sizeof *r);
+        if (!r) return 0;
+        s->tok = r; *cap = c;
+    }
+    s->tok[s->n++] = tk;
+    return 1;
+}
+
+/* A gap between tokens holds only blanks and the comments scan() skipped, each running to its line's end. */
+static int scan_gap(q_scan_t *s, int *cap, const char *src, int a, int b) {
+    while (a < b) {
+        if (CLASS[(uint8_t)src[a]] & CL_WS) { a++; continue; }
+        int e = a, end;
+        while (e < b && src[e] != '\n') e++;
+        for (end = e; CLASS[(uint8_t)src[end - 1]] & CL_WS; end--) {}
+        if (!scan_put(s, cap, (q_scan_tok_t){ T_COMMENT, Q_NOUN_NONE, a, end - a })) return 0;
+        a = e;
+    }
+    return 1;
+}
+
+/* The live tokens up to stop, each after the comments before it. */
+static int scan_spans(q_scan_t *s, const char *src, int stop) {
+    int m = s->err ? g_toks.n : g_toks.n - 1, cap = 0, at = 0;   /* a whole scan ends in its T_EOF */
+    for (int i = 0; i < m; i++) {
+        const Token *t = &g_toks.t[i];
+        int8_t e = t->kind == T_NOUN ? q_type_elem_tag(t->k) : 0;
+        int noun = t->kind != T_NOUN ? Q_NOUN_NONE : sym_is_nameref(t->k) ? Q_NOUN_NAME
+                 : e == -RAY_CHARV ? Q_NOUN_STR : e == -RAY_SYM ? Q_NOUN_SYM : Q_NOUN_NUM;
+        if (!scan_gap(s, &cap, src, at, t->start) || !scan_put(s, &cap, (q_scan_tok_t){ t->kind, noun, t->start, t->len }))
+            return 0;
+        at = t->start + t->len;
+    }
+    return scan_gap(s, &cap, src, at, stop);
+}
+
+int q_parse_scan(const char *src, q_scan_t *s) {
+    *s = (q_scan_t){ NULL, 0, NULL, -1, 0 };
+    if (!q_registry_ready()) return -1;
+    parse_begin();
+    g_scan_open_str = g_scan_open_lit = 0;
+    int stop = (int)strlen(src);
+    if (setjmp(q_err_jmp)) {
+        stop = s->err_at = g_die_at >= 0 ? g_die_at : g_scan_tok;
+        int e = stop + 1;
+        while (src[e] && !(CLASS[(uint8_t)src[e]] & CL_WS) && !strchr(";()[]{}", src[e])) e++;
+        s->err_len = g_scan_open_str || g_scan_open_lit ? -1 : g_die_payload ? (int)g_die_payload->len : e - stop;
+        s->err = die_error();
+    } else scan(src);
+    int ok = scan_spans(s, src, stop);
+    drop_tokens();
+    if (ok) return 0;
+    free(s->tok);
+    if (s->err) ray_release(s->err);
+    *s = (q_scan_t){ NULL, 0, NULL, -1, 0 };
+    return -1;
 }

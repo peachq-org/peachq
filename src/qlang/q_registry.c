@@ -684,6 +684,8 @@ ray_t* q_registry_dotq_ext(int64_t sym_id) {
     return q_env_ns_member(g_dotq, sym_id);
 }
 
+ray_t* q_registry_dotq(void) { return q_env_peek(g_dotq); }
+
 bool q_registry_sealed(void) { return g_sealed; }
 
 int q_registry_locked(int64_t sym_id) {

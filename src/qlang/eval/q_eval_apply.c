@@ -502,6 +502,13 @@ static ray_t* atomic1(ray_unary_fn f, ray_t* x);
  * operand, #443): its spelling keys the dict pair's fill (q_ops_identity, QI_FILL) */
 static ray_t* atomic2(ray_binary_fn f, const q_op_t* row, ray_t* x, ray_t* y);
 
+/* Drops the caller's ref on e once r, the answer computed from it, is in hand.  A kernel that answers its argument
+ * (`abs 0n`, `0|1`) has retained it, so e is released whatever r is; only an error e that rode out as r is kept. */
+static void elem_drop(ray_t* e, ray_t* r) {
+    if (!RAY_IS_ERR(e)) ray_release(e);
+    else if (e != r) ray_error_free(e);
+}
+
 static ray_t* unary_elem(ray_unary_fn fn, ray_t* e) {
     if (RAY_IS_ERR(e)) return e;
     if (is_coll(e) || is_container(e) || q_enum_is(e)) return atomic1(fn, e);
@@ -552,7 +559,7 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
 
     ray_t* e0_in = q_index_elem_at(arg, 0);
     ray_t* e0 = unary_elem(fn, e0_in);
-    if (e0 != e0_in) ray_release(e0_in);
+    elem_drop(e0_in, e0);
     if (RAY_IS_ERR(e0)) return e0;
 
     int8_t out_type = (int8_t)(-e0->type);
@@ -567,7 +574,7 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
             if (stop) { ray_release(vec); return stop; }
             ray_t* e = q_index_elem_at(arg, i);
             ray_t* r = RAY_IS_ERR(e) ? e : fn(e);
-            if (r != e) ray_release(e);
+            elem_drop(e, r);
             if (RAY_IS_ERR(r)) { ray_release(vec); return r; }
             if (q_eval_apply_store_elem(vec, i, r) != 0) {
                 ray_release(r); ray_release(vec);
@@ -584,7 +591,7 @@ static ray_t* map_unary(ray_unary_fn fn, ray_t* arg) {
     for (int64_t i = 1; i < len; i++) {
         ray_t* e = q_index_elem_at(arg, i);
         ray_t* r = unary_elem(fn, e);
-        if (r != e) ray_release(e);
+        elem_drop(e, r);
         if (RAY_IS_ERR(r)) { ray_release(out); return r; }
         out = ray_list_append(out, r);
         ray_release(r);
@@ -702,8 +709,8 @@ static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r
     ray_t* a0 = lc ? q_index_elem_at(l, 0) : l;
     ray_t* b0 = rc ? q_index_elem_at(r, 0) : r;
     ray_t* e0 = binary_elem(fn, row, a0, b0);
-    if (lc && a0 != e0) ray_release(a0);
-    if (rc && b0 != e0) ray_release(b0);
+    if (lc) elem_drop(a0, e0);
+    if (rc) elem_drop(b0, e0);
     if (RAY_IS_ERR(e0)) return e0;
     if (mismatch) { ray_release(e0); return q_err(QE_LENGTH); }
 
@@ -737,8 +744,8 @@ static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r
             ray_t* b = rc ? q_index_elem_at(r, i) : r;
             ray_t* e = (RAY_IS_ERR(a) || RAY_IS_ERR(b)) ? q_err(QE_TYPE)
                                                         : fn(a, b);
-            if (lc && a != e) ray_release(a);
-            if (rc && b != e) ray_release(b);
+            if (lc) elem_drop(a, e);
+            if (rc) elem_drop(b, e);
             if (RAY_IS_ERR(e)) { ray_release(vec); return e; }
             if (q_eval_apply_store_elem(vec, i, e) != 0) {
                 ray_release(e); ray_release(vec);
@@ -756,8 +763,8 @@ static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r
         ray_t* a = lc ? q_index_elem_at(l, i) : l;
         ray_t* b = rc ? q_index_elem_at(r, i) : r;
         ray_t* e = binary_elem(fn, row, a, b);
-        if (lc && a != e) ray_release(a);
-        if (rc && b != e) ray_release(b);
+        if (lc) elem_drop(a, e);
+        if (rc) elem_drop(b, e);
         if (RAY_IS_ERR(e)) { ray_release(out); return e; }
         out = ray_list_append(out, e);
         ray_release(e);
@@ -778,7 +785,7 @@ static ray_t* atomic1(ray_unary_fn f, ray_t* x) {
     if (q_enum_is(x)) {                                    /* an enum INSIDE a container: the boundary's decay law */
         ray_t* v = q_enum_decay(x);
         ray_t* r = !v || RAY_IS_ERR(v) ? v : atomic1(f, v);
-        if (v && r != v) ray_release(v);
+        if (v) elem_drop(v, r);
         return r ? r : q_err(QE_TYPE);
     }
     if (x->type == RAY_DICT) {
@@ -839,9 +846,10 @@ static ray_t* dict_pair_unmatched(q_eval_zip_fn f, void* ctx, ray_t* id, int nul
         if (!RAY_IS_ERR(ix)) ray_release(ix);
         if (RAY_IS_ERR(fill)) { ray_release(g); return fill; }
     }
-    ray_t* r = !fill ? g : g_left ? f(ctx, g, fill) : f(ctx, fill, g);
-    if (fill && fill != id && r != fill) ray_release(fill);
-    if (r != g) ray_release(g);
+    if (!fill) return g;
+    ray_t* r = g_left ? f(ctx, g, fill) : f(ctx, fill, g);
+    if (fill != id) elem_drop(fill, r);
+    elem_drop(g, r);
     return r;
 }
 
@@ -926,8 +934,8 @@ static ray_t* dict_pair(const q_op_t* row, ray_t* x, ray_t* y, q_eval_zip_fn f, 
         ray_t* gx = gather(xv, hx, nh);
         ray_t* gy = RAY_IS_ERR(gx) ? NULL : gather(yv, hy, nh);
         part = RAY_IS_ERR(gx) ? gx : RAY_IS_ERR(gy) ? gy : f(ctx, gx, gy);
-        if (part != gx) ray_release(gx);
-        if (gy && part != gy) ray_release(gy);
+        elem_drop(gx, part);
+        if (gy) elem_drop(gy, part);
     }
     if (!same && nh < nx && (!part || !RAY_IS_ERR(part))) {
         ray_t* g = dict_pair_unmatched(f, ctx, id, nulls, yv, gather(xv, xo, nx - nh), 1);
@@ -958,9 +966,7 @@ static ray_t* atomic2_col(void* vctx, ray_t* col) {
 }
 
 static ray_t* atomic2_zip(void* vctx, ray_t* x, ray_t* y) {
-    ray_t* r = binary_elem(((a2ctx*)vctx)->f, ((a2ctx*)vctx)->row, x, y);
-    if (r == x || r == y) ray_retain(r);       /* binary_elem hands an error arg back unretained */
-    return r;
+    return binary_elem(((a2ctx*)vctx)->f, ((a2ctx*)vctx)->row, x, y);
 }
 
 /* two tables pair column by column: the dict-pair law over their column dicts, flipped back (`t+t`, owner ruling
@@ -970,8 +976,8 @@ static ray_t* table_pair(const q_op_t* row, ray_t* x, ray_t* y, q_eval_zip_fn f,
     ray_t* cx = flip_of(x);
     ray_t* cy = RAY_IS_ERR(cx) ? NULL : flip_of(y);
     ray_t* r = RAY_IS_ERR(cx) ? cx : RAY_IS_ERR(cy) ? cy : dict_pair(row, cx, cy, f, ctx, 0);
-    if (r != cx) ray_release(cx);
-    if (cy && r != cy) ray_release(cy);
+    elem_drop(cx, r);
+    if (cy) elem_drop(cy, r);
     return r;
 }
 
@@ -1004,7 +1010,7 @@ static ray_t* atomic2(ray_binary_fn f, const q_op_t* row, ray_t* x, ray_t* y) {
     if (xt && yt) {
         ray_t* d = table_pair(row, x, y, atomic2_zip, &c);
         ray_t* t = RAY_IS_ERR(d) ? d : flip_of(d);
-        if (t != d) ray_release(d);
+        elem_drop(d, t);
         return t;
     }
     if (xt || yt) {
@@ -1403,9 +1409,9 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
         /* the lambda-boundary error seam: locals still live; a `:r` resume
          * substitutes the statement's result and the body continues */
         if (RAY_IS_ERR(nr)) nr = q_dbg_lambda_filter(nr);
-        if (RAY_IS_ERR(nr)) { r = nr; break; }
         ray_release(r);
         r = nr;
+        if (RAY_IS_ERR(r)) break;
     }
     /* explicit return `:x`: the QE_RETURN sentinel unwinds to HERE, the
      * lambda boundary, and becomes the ordinary successful result */
@@ -1467,7 +1473,8 @@ static ray_t* proj_call(ray_t* proj, ray_t** args, int64_t n) {
         return q_eval_apply_proj_new(fv, row, merged, written, rank);
     }
     ray_t* r = cover_fill(fv, row, merged, rank);
-    return r ? r : q_eval_apply(fv, row, merged, rank);
+    /* the keyword's row only reaches its kernel; the projected value applies under its own (`eval` is `-6!`) */
+    return r ? r : q_eval_apply(fv, row_unbox(c[1]), merged, rank);
 }
 
 /* ===== noun-head application ============================================
@@ -1574,6 +1581,93 @@ static int64_t rank_of(ray_t* fv) {
 }
 
 int64_t q_eval_apply_rank(ray_t* fv) { return fv ? rank_of(fv) : -1; }
+
+/* rank sets are bitmasks, bit r for rank r */
+#define RANK_BIT(r) (UINT64_C(1) << (r))
+#define RANKS_UPTO(n) ((RANK_BIT((n) + 1) - 1) & ~RANK_BIT(0))
+
+/* ref/overloads.md tabulates each variadic operator's forms in its rank column; enlist takes any count (ref/enlist.md) */
+static uint64_t vary_ranks(const q_op_t* row) {
+    const char* nm = row ? row->name : "";
+    if (!strcmp(nm, "@") || !strcmp(nm, ".")) return RANKS_UPTO(4) & ~RANK_BIT(1);
+    if (!strcmp(nm, "?")) return RANKS_UPTO(6) & ~RANK_BIT(1);
+    if (!strcmp(nm, "!")) return RANK_BIT(2) | RANK_BIT(4);
+    if (!strcmp(nm, "enlist")) return RANKS_UPTO(APPLY_MAX_ARGS);
+    return 0;
+}
+
+/* a glyph's unary form counts (basics/exposed-infrastructure.md "Unary forms"): `-` is ranks 1 and 2 */
+static uint64_t fnval_ranks(ray_t* v) {
+    if (v->type == RAY_UNARY) return RANK_BIT(1);
+    const q_op_t* row = q_registry_row_of(v, Q_DYADIC);
+    uint64_t unary = row && row->mon.kind != QK_NONE ? RANK_BIT(1) : 0;
+    if (v->type == RAY_BINARY) return unary | RANK_BIT(2);
+    return row ? unary | vary_ranks(row) : vary_ranks(q_registry_row_of(v, Q_MONADIC));
+}
+
+/* ref/maps.md "Case": `int'` has rank max[int]+1, and extra arguments are no rank error */
+static uint64_t case_ranks(ray_t* sel) {
+    ray_t* m = ray_max_fn(sel);
+    int64_t top = m && !RAY_IS_ERR(m) && q_type_is_int_atom(m) ? q_type_as_i64(m) : -1;
+    ray_release(m);
+    if (top >= APPLY_MAX_ARGS) return 0;
+    return RANKS_UPTO(APPLY_MAX_ARGS) & ~(top < 0 ? 0 : RANKS_UPTO(top));
+}
+
+/* ref/maps.md, ref/accumulators.md: what each iterator derives from an operand of each rank */
+static uint64_t deriv_ranks(int adv, uint64_t op) {
+    if (adv == 0) return op;
+    if (adv == 4 || adv == 5) return RANK_BIT(2);
+    uint64_t r = 0;
+    if (adv == 3) {
+        if (op & RANK_BIT(1)) r |= RANK_BIT(1);
+        if (op & RANK_BIT(2)) r |= RANK_BIT(1) | RANK_BIT(2);
+        return r;
+    }
+    if (op & (RANK_BIT(1) | RANK_BIT(2))) r |= RANK_BIT(1) | RANK_BIT(2);
+    return r | (op & ~RANKS_UPTO(2));
+}
+
+static uint64_t rank_set(ray_t* v) {
+    if (RAY_IS_NULL(v)) return RANK_BIT(1);
+    if (!q_eval_apply_is_fn(v)) {
+        if (ray_is_atom(v) && !q_type_is_str_atom(v)) return 0;
+        int depth = q_index_rank(v);
+        return RANKS_UPTO(depth < APPLY_MAX_ARGS ? depth : APPLY_MAX_ARGS);
+    }
+    if (v->type == RAY_LAMBDA) return RANK_BIT(q_count(LAMBDA_PARAMS(v)));   /* call_lambda takes exactly these */
+    int bound = 0;
+    if (v->type == RAY_VARY && q_env_native_name(v, &bound) && bound > 0) return RANK_BIT(bound);
+    if (q_eval_apply_is_fnval(v)) return fnval_ranks(v);
+    switch (q_eval_apply_carrier_kind(v)) {
+    case Q_EVAL_CAR_COMP: {
+        ray_t* inner = car_slots(v)[1];
+        return q_eval_apply_is_fn(inner) ? rank_set(inner) : RANK_BIT(1);
+    }
+    case Q_EVAL_CAR_DERIV: {
+        ray_t* op = car_slots(v)[0];
+        int adv = (int)car_slots(v)[2]->i64;
+        if (adv == 0 && op && q_type_is_int_vec(op)) return case_ranks(op);
+        if (adv == 2 && op && op->type == -RAY_F64) return RANK_BIT(2);   /* `a b\c`, ref/accumulators.md:372 */
+        /* acc_rank and `':` read data as a unary map, never deeper (glossary.md "Unary function") */
+        if (adv != 0 && op && !q_eval_apply_is_fn(op)) return adv >= 4 ? RANK_BIT(2) : RANK_BIT(1) | RANK_BIT(2);
+        return deriv_ranks(adv, op ? rank_set(op) : 0);
+    }
+    case Q_EVAL_CAR_ITER:      /* `'` also composes two or more values (ref/compose.md) */
+        return q_eval_apply_iter_id(v) == 0 ? RANKS_UPTO(APPLY_MAX_ARGS) : RANK_BIT(1);
+    default: break;
+    }
+    int64_t r = rank_of(v);
+    return r >= 0 && r < 64 ? RANK_BIT(r) : 0;
+}
+
+ray_t* q_eval_apply_ranks(ray_t* v) {
+    uint64_t set = v ? rank_set(v) : 0;
+    ray_t* out = ray_vec_new(RAY_I64, 64);
+    for (int64_t r = 0; r < 64 && out && !RAY_IS_ERR(out); r++)
+        if (set & RANK_BIT(r)) out = ray_vec_append(out, &r);
+    return out;
+}
 
 static ray_t* comp_call(ray_t* comp, ray_t** args, int64_t n) {
     ray_t** c = car_slots(comp);

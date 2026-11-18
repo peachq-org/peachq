@@ -28,6 +28,101 @@
 / @eg .pq.info hopen (`:pq:duckdb:demo;":memory:")
 .pq.info:{[x] .pq.i.info x}
 
+/ The syntax tree of q source text, for tools: `nodes`errors!(nodes;errors).  It never stops at an error: every
+/ statement (cut as \l cuts them) and every closing bracket starts afresh, and a statement it finds well-formed is
+/ judged by the parser itself, whose refusal becomes an error row.  Offsets are bytes into src, end-exclusive.
+/ @param src (string) q source text, a whole file or a line
+/ @return a dict of two tables: nodes ([] id; parent; kind; start; end; scope; text), parent -1 at top level and
+/ always below id, scope the nearest enclosing lambda or params (-1 for none), text always a string; and errors
+/ ([] start; end; msg).  A kind is one of `stmt`cmd`comment`expr`lambda`params`args`block`paren`name`num`str`sym`verb
+/ `adverb: an expr is each ;-separated slot, a cmd an opaque \ or <letter>) statement, args a [ after a term
+/ @eg .pq.syntax "f:{[a;b] a+1}"
+/ @eg (.pq.syntax "f:{x+1\ng:2")`errors
+.pq.syntax:{[src] .pq.i.syntax src}
+
+/ Every top-level definition in q source text, documented or not, for editors and tools.  The text is cut and its
+/ comments read as \l reads them, and never run: a \l in it is not followed, \d is followed as text from the root, and
+/ the doc store is untouched.  A definition is a name a statement assigns outside any lambda (an amend, a,:1 or a[i]:1,
+/ is none), and its doc is the comment run \l would register for it: a chain a:b:3 documents b, assigned first.
+/ Positions are 1-based lines and byte columns, end inclusive: line to endcol spans the ;-separated slot that holds the
+/ definition, nameline and namecol its name.
+/ @param src (string) q source text, a whole file or a line
+/ @return a dict: file `doc`tags!(doc;tags) from the file's header run, and defs ([] name; ns; kind; params; line; col;
+/ endline; endcol; nameline; namecol; doc; tags; types) in source order.  name is the full name, kind one of `function
+/ `projection`table`view`value, params a function's (x y z by use when undeclared), doc "" when undocumented, tags
+/ ([] tag; param; description), param set for @param and @exception, and types one per param, the type its signature
+/ checks (x:`j is `j) or `
+/ @eg .pq.outline "/ Adds one.\n/ @param x (long)\nf:{x+1}"
+/ @eg exec name from (.pq.outline "\\d .ns\nf:{x}\ng:2")`defs
+/ @eg exec types from (.pq.outline "f:{[x:`j;y] x+y}")`defs
+.pq.outline:{[src] .pq.i.outline_of[src;(.pq.syntax src)`nodes]};
+
+/ .pq.outline of src from its .pq.syntax nodes, for a caller that has them.
+.pq.i.outline_of:{[src;nodes]
+    outline:.pq.i.outline src;
+    slots:`start xasc select start, end from nodes where kind=`expr, parent in exec id from nodes where parent=-1;
+    tokens:`start xasc select start, end from nodes where not kind in `stmt`cmd`comment`expr;
+    found:`at xasc outline`defs;
+    slot:0|slots[`start] bin found`at;
+    head:tokens[`start] binr slots[`start] slot;
+    tail:-1+"j"$max each tokens[`end] head+til each 1+(tokens[`start] bin slots[`end][slot]-1)-head;
+    line_col:{[starts;b] (1+starts bin b; 1+b-starts starts bin b)}[0,1+where src="\n"];
+    pos:line_col each (tokens[`start] head; tail; found`at);
+    docs:.pq.i.docs[(enlist `),found`name;enlist[outline`file],found`doc];
+    defs:([] name:found`name; ns:found`ns; kind:found`kind; params:{x where not null x} each found`params;
+        line:pos[0;0]; col:pos[0;1]; endline:pos[1;0]; endcol:pos[1;1]; nameline:pos[2;0]; namecol:pos[2;1];
+        doc:1_docs[;0]; tags:1_docs[;1]; types:.pq.i.types[nodes;found;slots[`end] slot]);
+    `file`defs!(`doc`tags!first docs; defs)};
+
+/ Per doc of docs, its lead text and its tags table (.help.i.parse), the file's header named `.  The answers of the
+/ last call are kept, so a name whose doc is unchanged since then is not parsed again.
+.pq.i.docs:{[names;docs]
+    split:{[header]
+        rows:.help.i.parse header;
+        tagged:rows where not null rows[;0];
+        (first ((rows where null rows[;0])[;2]),enlist "";
+            flip `tag`param`description!(`symbol$tagged[;0]; `symbol$tagged[;1]; tagged[;2]))};
+    held:@[get;`.pq.i.Docs;{[e] (`symbol$();();())}];
+    parsed:{[held;split;i;doc] $[(i<count held 0) and doc~held[1] i; held[2] i; split doc]}[held;split]'[held[0]?names;docs];
+    `.pq.i.Docs set (names;docs;parsed);
+    parsed};
+
+/ Per definition of found (.pq.i.outline's rows, by at), the type each declared parameter's signature slot checks
+/ (.pq.i.slot_type), ` where none, from the params of the first top-level lambda after its name within its slot,
+/ which ends at ends.
+.pq.i.types:{[nodes;found;ends]
+    lambdas:`start xasc select id, start from nodes where kind=`lambda, scope=-1;
+    after:lambdas[`start] binr found`at;
+    lambda:?[(after<count lambdas) and lambdas[`start][after]<ends; lambdas[`id] after; 0N];
+    kids:.pq.i.kids nodes;
+    slot:{[k;t;kids;e] c:kids e; .pq.i.slot_type[k c;t c]}[nodes`kind;nodes`text;kids];
+    typed:{[slot;kids;params;raw]
+        t:slot each kids params;
+        `symbol$$[count[raw]=count t; t where not null raw; sum[not null raw]#`]}[slot;kids];
+    typed'[(exec parent!id from nodes where kind=`params) lambda;found`params]};
+
+/ Per syntax node, its children by position, comments left out.
+.pq.i.kids:{[nodes]
+    order:(iasc nodes`start) except where nodes[`kind]=`comment;
+    order@:where nodes[`parent][order]>=0;
+    by_parent:order group nodes[`parent] order;
+    @[count[nodes`kind]#enlist `long$();key by_parent;:;value by_parent]};
+
+/ The type a signature slot's tokens check, kinds k and texts t (basics/pattern.md:225): `j for x:`j and (a;b):`j, else `.
+.pq.i.slot_type:{[k;t] $[2>count k; `; (`verb`sym~-2#k) and (enlist[":"]~t count[k]-2) and .pq.i.type_check last t; `$1_last t; `]};
+
+/ Whether sym is a type check's type, a backtick and one letter (basics/pattern.md:225).
+.pq.i.type_check:{[sym] (2=count sym) and ("`"=first sym) and last[sym] in .Q.a,.Q.A};
+
+/ The ranks x accepts (basics/glossary.md "Rank": of a function, the number of arguments it takes), sorted: a
+/ variadic answers each, a list every depth it indexes to, and a value that is not applicable `long$().
+/ @param x (any)
+/ @return (long list)
+/ @eg .pq.valence (-)
+/ @eg .pq.valence {x+y}[1]
+/ @eg .pq.valence (@)
+.pq.valence:{[x] .pq.i.valence x}
+
 / Open (or re-point) `:pq:q:alias on another q process, the same call as hopen (`:pq:q:alias;arg); answers that symbol.
 / @param arg (any) what hopen takes (port, `::5000, `:host:port:user:pass, (conn;timeout) ...), or a `conn`timeout dict
 .pq.hopen_q:{[alias;arg] hopen (`$":pq:q:",string alias;arg)};

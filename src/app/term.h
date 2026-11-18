@@ -109,6 +109,7 @@ typedef struct ray_term {
     HANDLE   h_stdout;
     DWORD    old_stdin_mode;
     DWORD    old_stdout_mode;
+    UINT     old_in_cp, old_out_cp;
 #else
     struct termios oldattr;
     struct termios newattr;

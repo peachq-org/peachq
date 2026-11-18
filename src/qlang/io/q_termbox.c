@@ -74,7 +74,7 @@ static struct {
 #if defined(RAY_OS_WINDOWS)
     HANDLE   h_in, h_out;
     DWORD    in_mode0, out_mode0;
-    UINT     out_cp0;
+    UINT     in_cp0, out_cp0;
 #else
     struct termios saved;
 #endif
@@ -203,7 +203,9 @@ static int tty_open(void) {
     DWORD m = tb.in_mode0 & ~(DWORD)(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
     SetConsoleMode(tb.h_in, m | ENABLE_VIRTUAL_TERMINAL_INPUT);
     SetConsoleMode(tb.h_out, tb.out_mode0 | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    tb.in_cp0 = GetConsoleCP();
     tb.out_cp0 = GetConsoleOutputCP();
+    SetConsoleCP(CP_UTF8);
     SetConsoleOutputCP(CP_UTF8);
 #else
     tb.fd_in = STDIN_FILENO;
@@ -222,6 +224,7 @@ static void tty_close(void) {
 #if defined(RAY_OS_WINDOWS)
     SetConsoleMode(tb.h_in, tb.in_mode0);
     SetConsoleMode(tb.h_out, tb.out_mode0);
+    if (tb.in_cp0) SetConsoleCP(tb.in_cp0);
     if (tb.out_cp0) SetConsoleOutputCP(tb.out_cp0);
 #else
     tcsetattr(tb.fd_in, TCSANOW, &tb.saved);

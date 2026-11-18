@@ -31,6 +31,10 @@ ray_t* q_pq_autoload_ns(const char* stem, size_t n);
  * q_pq_autoload. */
 ray_t* q_pq_load_file(const char* lit, size_t alen, const char* path);
 
+/* From now on every library file is the bundle member: a pq/ directory (the cwd's or $QHOME's) is never read, so
+ * `q -lint` on a tree that holds one runs none of it. */
+void q_pq_bundle_only(void);
+
 /* Bind `.help.i.loaddb` — the on-demand door onto the embedded help-db
  * bundle (the generated builtin one-liners).  Called at runtime create so a bare
  * prompt has it.  FIRST HELP ACCESS is the only trigger (owner 2026-09-03): every

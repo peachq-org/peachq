@@ -6,6 +6,7 @@
 #include "qlang/io/q_worker.h"
 #include "qlang/io/q_exedir.h"
 #include "qlang/io/q_handles.h"
+#include "qlang/io/q_io.h"
 #include "qlang/io/q_provider.h"
 #include "qlang/ops/q_sys.h"
 #include "qlang/q_console.h"
@@ -16,6 +17,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"
 #include "core/ipc.h"
+#include "core/platform.h"
 #include "core/poll.h"
 #include "core/pool.h"
 #include "core/runtime.h"
@@ -48,6 +50,8 @@
 #ifdef RAY_OS_WINDOWS
 #include <winsock2.h>
 #include <windows.h>
+#include <fcntl.h>
+#include <io.h>
 #endif
 
 #ifdef Q_WORKER_SPAWN
@@ -542,9 +546,109 @@ ray_t* q_worker_spawn(ray_t* args, ray_t* tmo, const char* const log[2]) {
     launched_release(proc);
     return r;
 }
+
+/* -stdio: the served end of a socket pair, its other end relayed to the parent's pipes by two threads, so the poll
+ * loop serves a socket on every platform (IOCP cannot read an anonymous pipe).  keep holds the served socket open
+ * past the server's close, so the exit drain can end the relay only once every frame has reached the pipe. */
+#ifdef RAY_OS_WINDOWS
+typedef HANDLE stdio_pipe;
+#else
+typedef int stdio_pipe;
+#endif
+static struct { stdio_pipe in, out; ray_sock_t end, keep; ray_thread_t out_thread; } g_stdio;
+
+static int64_t pipe_read(void* buf, size_t n) {
+#ifdef RAY_OS_WINDOWS
+    DWORD got;
+    return ReadFile(g_stdio.in, buf, (DWORD)n, &got, NULL) ? (int64_t)got : -1;
+#else
+    return q_io_read_fd(g_stdio.in, buf, n);
+#endif
+}
+
+static bool pipe_write(const char* p, size_t n) {
+#ifdef RAY_OS_WINDOWS
+    for (DWORD put; n; p += put, n -= put)
+        if (!WriteFile(g_stdio.out, p, (DWORD)n, &put, NULL)) return false;
+    return true;
+#else
+    return q_io_write_fd(g_stdio.out, p, n) == 0;
+#endif
+}
+
+static void stdio_in(void* u) {
+    (void)u;
+    char buf[1 << 16];
+    int64_t n;
+    while ((n = pipe_read(buf, sizeof buf)) > 0 && ray_sock_send_plain(g_stdio.end, buf, (size_t)n) >= 0) {}
+    ray_sock_shutdown_send(g_stdio.end);
+}
+
+/* a parent gone from stdout ends the link: the server reads end of stream, as from a peer that closed */
+static void stdio_out(void* u) {
+    (void)u;
+    char buf[1 << 16];
+    int64_t n;
+    while ((n = ray_sock_recv_plain(g_stdio.end, buf, sizeof buf)) > 0 && pipe_write(buf, (size_t)n)) {}
+    ray_sock_shutdown_send(g_stdio.end);
+}
+
+static void stdio_drain(void) {
+    ray_sock_shutdown_send(g_stdio.keep);
+    ray_thread_join(g_stdio.out_thread);
+}
+
+/* the relay threads block every signal, so a SIGINT reaches the thread that evaluates */
+static int stdio_relay(void) {
+    ray_sock_t sv[2];
+    if (ray_sock_pair_unix(sv) != 0 || (g_stdio.keep = ray_sock_dup(sv[0])) == RAY_INVALID_SOCK) return -1;
+    g_stdio.end = sv[1];
+    ray_thread_t in;
+#ifndef RAY_OS_WINDOWS
+    sigset_t all, was;
+    sigfillset(&all);
+    pthread_sigmask(SIG_BLOCK, &all, &was);
+#endif
+    bool ok = ray_thread_create(&in, stdio_in, NULL) == RAY_OK &&
+              ray_thread_create(&g_stdio.out_thread, stdio_out, NULL) == RAY_OK;
+#ifndef RAY_OS_WINDOWS
+    pthread_sigmask(SIG_SETMASK, &was, NULL);
+#endif
+    if (!ok || atexit(stdio_drain) != 0) return -1;
+    return (int)sv[0];
+}
+
+#ifdef RAY_OS_WINDOWS
+int q_worker_stdio_link(void) {
+    HANDLE self = GetCurrentProcess();
+    WSADATA wsa;
+    if (!DuplicateHandle(self, GetStdHandle(STD_INPUT_HANDLE), self, &g_stdio.in, 0, FALSE, DUPLICATE_SAME_ACCESS) ||
+        !DuplicateHandle(self, GetStdHandle(STD_OUTPUT_HANDLE), self, &g_stdio.out, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        return -1;
+    int nul = _open("NUL", _O_RDWR);
+    if (nul < 0 || _dup2(nul, 0) != 0 || _dup2(2, 1) != 0) return -1;
+    if (nul > 2) _close(nul);
+    SetStdHandle(STD_INPUT_HANDLE, (HANDLE)_get_osfhandle(0));
+    SetStdHandle(STD_OUTPUT_HANDLE, (HANDLE)_get_osfhandle(1));
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return -1;
+    return stdio_relay();
+}
+#else
+int q_worker_stdio_link(void) {
+    int nul = open("/dev/null", O_RDWR);
+    g_stdio.in = fcntl(0, F_DUPFD_CLOEXEC, 3);
+    g_stdio.out = fcntl(1, F_DUPFD_CLOEXEC, 3);
+    if (nul < 0 || g_stdio.in < 0 || g_stdio.out < 0 || dup2(nul, 0) < 0 || (dup2(2, 1) < 0 && dup2(nul, 1) < 0))
+        return -1;
+    if (nul > 2) close(nul);
+    signal(SIGPIPE, SIG_IGN);
+    return stdio_relay();
+}
+#endif
 #else
 ray_t* q_worker_fork(ray_t* tmo, const char* const log[2]) { (void)tmo; (void)log; return q_err(QE_NOFORK); }
 int q_worker_link(void) { return -1; }
+int q_worker_stdio_link(void) { return -1; }
 ray_t* q_worker_spawn(ray_t* args, ray_t* tmo, const char* const log[2]) {
     (void)args; (void)tmo; (void)log;
     return q_err(QE_NYI);

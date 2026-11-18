@@ -22,7 +22,30 @@ static inline int q_parse_drop_lead(char c) { return c == '_'; }
 
 #define MAX_NAME 256
 
+typedef enum {
+    T_EOF,
+    T_NOUN,
+    T_VERB,
+    T_ADVERB,
+    T_LPAREN, T_RPAREN,
+    T_LBRACE, T_RBRACE,
+    T_LBRACK, T_RBRACK,
+    T_SEMI,
+    T_COMMENT   /* q_parse_scan's alone: scan() skips comments */
+} TKind;
+
 /* ---- defined in q_parse.c ---- */
 extern const char *ADVERB_NAMES[];
+
+/* The scanner's tokens and the comments between them as spans, without their values, for the syntax tree
+ * (q_syntax.c); an infix keyword is a T_VERB, as the parser reads it.  -1 for a cold registry or no memory, else 0
+ * with tok to free, and when a scan error stopped it, err (owned) at err_at, err_len bytes or -1 (an unclosed string
+ * or literal runs to the end). */
+enum { Q_NOUN_NONE, Q_NOUN_NAME, Q_NOUN_NUM, Q_NOUN_STR, Q_NOUN_SYM };
+typedef struct { TKind kind; int noun, start, len; } q_scan_tok_t;
+typedef struct { q_scan_tok_t *tok; int n; ray_t *err; int err_at, err_len; } q_scan_t;
+int q_parse_scan(const char *src, q_scan_t *s);
+const char *q_parse_die_msg(void);   /* why the last parse or scan died a bare 'parse, else NULL */
+int q_parse_lacked_memory(ray_t *err);   /* whether err, the last refusal, was no memory and no verdict on the text */
 
 #endif

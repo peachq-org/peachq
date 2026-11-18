@@ -10,7 +10,7 @@
  *
  * Scope: every C-rostered q verb, including the type-dispatch glyphs (`! ? $ @ .
  * _`, landed in 2c-2+).  NOT every q KEYWORD: q.q-hosted keywords with no lexer
- * or registry involvement (rand, med, md5, ...) have no row — they resolve as
+ * or registry involvement and default purity (med, md5, ...) have no row — they resolve as
  * `.q` entries (q_eval's bare-name `.q.<name>` fallback).
  * A registry miss still means "not resolvable at that valence."  Cells whose
  * q semantics have NO clean rayfall target stay QR_NONE rather than a guessed
@@ -138,8 +138,8 @@ typedef struct q_op {
     const char*  adverb_hof;    /* adverb rows: the rayfall HOF the adverb IS (' map, / fold, \ scan).
                                  * Keyword-HOF rows (each/peach/over/scan/prior) also set it so the
                                  * evaluator routes them to native adverb arms; else NULL */
-    uint8_t      deterministic; /* 0 iff any valence is nondeterministic (rand/deal/?-roll); else 1 */
-    uint8_t      sideeffect;    /* 1 iff eval has an observable effect (assign/mutate/IPC/system/I/O); else 0 */
+    uint8_t      deterministic; /* 1 iff the result depends only on the arguments (no RNG/session/env/disk read) */
+    uint8_t      sideeffect;    /* 1 iff applying it can change state (assign by name/mutate/IPC/system/I/O) */
     const char*  family;        /* structure-dispatch family (see above); consumed by the apply module */
     const char*  mono;          /* dyad rows: keyword whose kernel a `/`-derivation monomorphizes to
                                  * (`+`->sum `*`->prd `|`->max `&`->min `,`->raze); else NULL */
@@ -167,7 +167,7 @@ static inline int q_ops_kdb_op(const struct q_op* row) { return (int)row->kdb_op
 const q_op_t* q_ops_table(int* n);
 
 /* The manifest row named s[0..len), or NULL if the name is not a C-rostered
- * verb (q.q-hosted keywords have no row).  The one lookup into Q_OPS[] by
+ * verb (a q.q-hosted keyword may have none).  The one lookup into Q_OPS[] by
  * spelling (rule 3: never an env lookup by q spelling). */
 const q_op_t* q_ops_find(const char* s, int len);
 
@@ -198,9 +198,9 @@ int q_ops_fill_is_null(const char* spelling);
 int q_ops_pair_flips(const char* spelling);
 
 /* The row a QK_ALIAS row is a second spelling of, or NULL when `row` is not an
- * alias.  An alias declares no metadata of its own — every dispatch and
- * introspection column is the target's — so both the registry builder and
- * `.Q.ops` resolve through here rather than reading a mirrored copy. */
+ * alias.  Every dispatch column (value, family, recipe shape) is the target's, so
+ * both the registry builder and `.Q.ops` resolve through here rather than reading
+ * a mirrored copy; only the purity flags are the alias row's own. */
 const q_op_t* q_ops_alias_target(const q_op_t* row);
 
 /* The atomic-dyad row that folds `row`'s outer axis under QNEST_FOLD/QNEST_MEAN
