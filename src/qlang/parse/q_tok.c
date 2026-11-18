@@ -2,6 +2,7 @@
  * Section 1: the literal-magnitude scanner the code parser calls.
  * Section 2: the `$` Tok whole-string scanners.  Both sit on q_calendar.c. */
 #include "qlang/q_count.h"
+#include "qlang/q_ops.h"
 #include "qlang/parse/q_tok.h"
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"      /* q_type_char — THE tag<->type-letter map */
@@ -324,7 +325,7 @@ int q_tok_magnitude(const char *src, int *p, q_tok_el *out) {
 
     /* Float vs int: a float magnitude contains '.' or an exponent among its own bytes (before the next space / letter). */
     int q = *p;
-    if (src[q] == '-' || src[q] == '+') q++;
+    if (src[q] == '-') q++;
     int is_float = 0, saw_digit = 0;
     int r = q;
     for (;; r++) {
@@ -352,6 +353,7 @@ int q_tok_magnitude(const char *src, int *p, q_tok_el *out) {
     int64_t v; size_t u = ray_parse_i64(src + *p, rem, &v);
     if (u == 0) return 0;
     *p += (int)u; out->kind = Q_TOK_EL_INT; out->i = v;
+    out->f = copysign((double)v, src[out->at] == '-' ? -1.0 : 1.0);   /* `-0e` is negative zero (Dtxdfk) */
     return 1;
 }
 
@@ -377,7 +379,7 @@ static double lit_float(const q_tok_el *e) {
     if (e->kind == Q_TOK_EL_PINF) return INFINITY;
     if (e->kind == Q_TOK_EL_NINF) return -INFINITY;
     if (e->kind == Q_TOK_EL_FLOAT || e->kind == Q_TOK_EL_MONTH ||
-        e->kind == Q_TOK_EL_DT) return e->f;
+        e->kind == Q_TOK_EL_DT || e->kind == Q_TOK_EL_INT) return e->f;
     return (double)e->i;
 }
 
@@ -686,6 +688,8 @@ ray_t* q_tok_literal(const char *src, int *p, int *bad) {
         sp = q_tok_strand_gap(src, sp);
         if (sp == *p) break;                     /* no space => run ended */
         if (q_tok_byte_lit_starts(src, sp)) break;   /* byte literal: own noun */
+        const q_op_t *verb = src[sp] ? q_ops_find(src + sp, 2) : NULL;
+        if (verb && verb->lex == QLEX_GLYPH) break;   /* `0:` is a verb, never a strand digit */
         q_tok_el el; int q = sp;
         int got = q_tok_magnitude(src, &q, &el);
         if (!got) break;                         /* not another magnitude */
