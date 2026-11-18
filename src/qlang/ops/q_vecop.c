@@ -40,6 +40,7 @@
 #include "qlang/ops/q_vecop.h"
 #include "qlang/q_registry_internal.h" /* the compare/min2/max2/fill/null/xbar wrapper roster */
 #include "qlang/base/q_type.h"         /* q_type_common + the numeric/float tag memberships */
+#include "qlang/q_builtins.h"         /* q_string_fn — a byte vector strings whole */
 #include "lang/eval.h"                 /* ray_lt_fn/ray_gt_fn/..., ray_cmp_tol_eq, ray_xbar_fn */
 #include "lang/internal.h"             /* as_f64 / as_i64 / arith_int_type — the atom lane reads */
 #include <stdlib.h>
@@ -582,6 +583,7 @@ int q_vecop_is_ordering(ray_t* (*f)(ray_t*, ray_t*)) { vop_t op = op_of(f); retu
     } while (0)
 
 ray_t* q_vecop_unary(ray_t* (*f)(ray_t*), ray_t* x) {
+    if ((uintptr_t)f == (uintptr_t)q_string_fn && x && x->type == RAY_BYTE_ONLY && x->len > 0) return q_string_fn(x);
     if ((uintptr_t)f != (uintptr_t)q_null_wrap) return NULL;
     if (!x || RAY_IS_ERR(x) || !ray_is_vec(x)) return NULL;
     int64_t n = x->len;

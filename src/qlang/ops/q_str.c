@@ -178,6 +178,8 @@ ray_t* q_str_charv_out(ray_t* r) {
  * -> "42").  VECTOR / LIST: q maps string over each item, yielding a LIST of
  * strings (`string 192 168 1 23` -> ("192";"168";"1";"23")) — the base
  * formatter would instead render the whole vector as one bracketed string. */
+static const char hex[] = "0123456789abcdef";
+
 ray_t* q_string_fn(ray_t* x) {
     if (!x) return q_err(QE_TYPE);
     if (Q_IS_GENERIC_NULL(x)) return ray_charv("::", 2);   /* its display form (owner ruling 2026-07-23) */
@@ -193,7 +195,6 @@ ray_t* q_string_fn(ray_t* x) {
      * "cat"` -> (,"c";,"a";,"t") (ref/string.md:37-39). */
     /* Bare hex, not the display's 0x; ahead of the null arm since 0x00 is a value. */
     if (x->type == -RAY_BYTE_ONLY) {
-        static const char hex[] = "0123456789abcdef";
         char h[2] = { hex[x->u8 >> 4], hex[x->u8 & 0x0F] };
         return ray_charv(h, 2);
     }
@@ -228,8 +229,22 @@ ray_t* q_string_fn(ray_t* x) {
         return src ? q_str_charv_of_str(src) : q_fmt_krepr_charv(x);
     }
     if (!ray_is_vec(x)) return q_str_charv_out(ray_fmt(x, 0));   /* remaining atoms */
-    /* vector: per-element string */
     int64_t n = q_count(x);
+    /* resQ digests a value as `raze string -8!x`: the boxed per-item loop below cost ~45ns a byte. */
+    if (x->type == RAY_BYTE_ONLY) {
+        ray_t* out = ray_list_new(n > 0 ? n : 1);
+        if (RAY_IS_ERR(out)) return out;
+        const uint8_t* p = (const uint8_t*)ray_data(x);
+        ray_t** slot = (ray_t**)ray_data(out);
+        for (int64_t i = 0; i < n; i++) {
+            char h[2] = { hex[p[i] >> 4], hex[p[i] & 0x0F] };
+            ray_t* s = ray_charv(h, 2);
+            if (RAY_IS_ERR(s)) { ray_release(out); return s; }
+            slot[i] = s;
+            out->len = i + 1;
+        }
+        return out;
+    }
     ray_t* out = ray_list_new(n > 0 ? n : 1);
     if (RAY_IS_ERR(out)) return out;
     for (int64_t i = 0; i < n; i++) {
