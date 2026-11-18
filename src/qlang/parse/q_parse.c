@@ -2690,17 +2690,21 @@ void q_parse_open_feed(q_parse_open_t *st, const char *piece, size_t n) {
     free(buf);
 }
 
-/* q_parse_is_assign — see q_parse.h.  An assignment head (q_parse_assign_head) with a name/indexed-name target or a
- * `:` pattern; a `;` statement sequence (char head) asks its last statement. */
+/* q_parse_is_assign — see q_parse.h.  A nested `;[…]` block is an expression, never silent
+ * (KxSystems/kx-vscode@ebcb2f71 test/q/tests/evaluateQ.quke:31). */
 int q_parse_is_assign(const ray_t *cast) {
     ray_t *ast = (ray_t *)cast;   /* read-only walk; ray_data lacks a const view */
     if (!ast || ast->type != RAY_LIST || q_count(ast) < 1) return 0;
     ray_t **e = (ray_t **)ray_data(ast);
-    ray_t *h = e[0];
-    if (q_parse_is_seq_head(h)) {
+    if (q_parse_is_seq_head(e[0])) {
         int64_t n = q_count(ast);
-        return n >= 2 ? q_parse_is_assign(e[n - 1]) : 0;
+        if (n < 2) return 0;
+        ast = e[n - 1];
+        if (!ast || ast->type != RAY_LIST || q_count(ast) < 1) return 0;
+        e = (ray_t **)ray_data(ast);
+        if (q_parse_is_seq_head(e[0])) return 0;
     }
+    ray_t *h = e[0];
     q_assign_head_t asg = q_count(ast) == 3 ? q_parse_assign_head(h, NULL, NULL) : Q_HEAD_NONE;
     /* every target is silent, an indexed `name[i;…]:v` and a `:` pattern too — kdb console (basics/pattern.md:14-20) */
     q_assign_target_t k = asg ? q_parse_assign_target(e[1]) : Q_TARGET_NONE;
