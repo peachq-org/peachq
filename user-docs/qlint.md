@@ -12,9 +12,9 @@ the q session, qStudio, VS Code and any editor that speaks LSP.
 ## Quick start
 
 ```
-$ q -lint src/
-src/feed.q:12:5: error COND_EVENARGS $[] with 4 arguments has no catch-all else: when no test is true there is no defined result
-src/feed.q:40:1: error SYNTAX missing }
+$ q -lint code/
+code/feed.q:12:5: error COND_EVENARGS $[] with 4 arguments has no catch-all else: when no test is true there is no defined result
+code/feed.q:40:1: error SYNTAX missing }
 2 findings (2 errors) in 14 files
 $ echo $?
 1
@@ -49,8 +49,8 @@ q).lint.rules[]
 q).lint.explain `COND_EVENARGS
 ```
 
-**A string is always source and a symbol is always a path.** `.lint.text "src/a.q"` lints the seven characters
-`src/a.q` as q, not the file; write `` .lint.path `:src/a.q ``. Lint never guesses which you meant from the text, so
+**A string is always source and a symbol is always a path.** `.lint.text "code/a.q"` lints the eight characters
+`code/a.q` as q, not the file; write `` .lint.path `:code/a.q ``. Lint never guesses which you meant from the text, so
 `.lint.text` refuses a symbol and `.lint.path` a string, each with a message saying which to use, and
 `.lint.run[target;opts]` takes either, by type. A path that does not exist is an error naming it.
 `.lint.explain` of a rule peachq does not have says whether it is a KX QLint rule not implemented yet or not a rule.
