@@ -379,11 +379,15 @@ static int set_peer_name(void* ssl, const char* host) {
 
 const char* q_tls_last_error(void) { return g_last_error; }
 
+/* q_dl_unavailable's class, in words for the commonest static-build failure */
+#define TLS_STATIC_UNAVAILABLE \
+    "static-dlopen: https (and any TLS) needs OpenSSL, which this static build cannot load - " \
+    "plain http:// still works; for https use a -glibc download: https://peachq.org/docs/basics/errors#static-dlopen"
+
 int q_tls_client_start(ray_sock_t fd, const char* host, bool kdb, const char** err) {
     if (tls_load() != 1) {
         snprintf(g_last_error, sizeof g_last_error, "no usable OpenSSL library");
-        const char* why = q_dl_unavailable();
-        if (err) *err = why ? why : "nyi";
+        if (err) *err = q_dl_unavailable() ? TLS_STATIC_UNAVAILABLE : "nyi";
         return -1;
     }
     if (err) *err = "conn";

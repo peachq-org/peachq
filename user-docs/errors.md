@@ -70,5 +70,7 @@ backreference, which RE2 does not support), or a replacement it cannot apply. Se
 
 The static (musl) build of peachq cannot load shared libraries, so `2:`, `.ffi` and TLS (which loads OpenSSL) are
 unavailable. The message reads `static-dlopen: this build cannot load shared libraries - use a -glibc download: `
-followed by a link to this entry.
+followed by a link to this entry. An `https://` request (`.Q.hg`, `read0`, a `tcps://` handle) says so in its own
+words: `static-dlopen: https (and any TLS) needs OpenSSL, which this static build cannot load - plain http:// still
+works; for https use a -glibc download: ` and the same link.
 Install the `-glibc` download for your platform instead; it behaves the same in every other way.

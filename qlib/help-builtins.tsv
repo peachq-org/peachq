@@ -302,6 +302,8 @@ while	i:0;while[i<3;i+:1];i	repeat expressions while a condition holds
 .Q.prf0	.Q.prf0 .z.i	snapshot another q process's call stack
 .Q.hg	.Q.hg `$":http://localhost"	fetch a URL with HTTP GET
 .Q.hp	.Q.hp[`$":http://x";.h.ty`json;"{}"]	post a body to a URL with HTTP POST
+.Q.hmb	.Q.hmb[`:http://localhost;`GET;()]	fetch a URL's HTTP header and content
+.Q.hap	.Q.hap "http://u:p@host:8080/path"	split a URL into scheme, user, host and path
 .Q.id	.Q.id `$"a b"	sanitize a symbol, or a table's columns, into valid names
 .Q.dd	.Q.dd[`a;`b]	glue two symbols together with a dot
 .Q.j10	.Q.j10 "hello"	encode a string as a long in base 36 with punctuation

@@ -37,6 +37,8 @@
 .Q.res:.Q.c.res;
 .Q.hg:.Q.c.hg;
 .Q.hp:.Q.c.hp;
+.Q.hmb:.Q.c.hmb;
+.Q.hap:.Q.c.hap;
 .Q.ld:{r:.Q.c.ld "\n" sv x;r[;iasc r 0]};
 / .Q.gz/.Q.ts: the bang is the single C home (`-35!`/`-34!`, the q.k spellings); .Q.ts packs Apply's two args.
 .Q.gz:-35!;

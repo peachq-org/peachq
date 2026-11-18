@@ -38,6 +38,7 @@
 #define Q_HTTP_MAX_HDRS   64
 #define Q_HTTP_HDR_CAP    (64 * 1024)  /* response header block cap (pre-body) */
 #define Q_HTTP_MAX_HOPS   10           /* redirect follows (urllib's number): 11 transactions, then the 3xx stands */
+#define Q_HTTP_USER_AGENT "peachq/" RAYFORCE_VERSION   /* some APIs (Coinbase) refuse a request without one */
 
 /* ---- monotonic milliseconds (absolute-deadline arithmetic) ---- */
 static int64_t now_ms(void) {
@@ -458,17 +459,19 @@ static int url_of(ray_t* x, char* out, size_t outsz, size_t* n) {
     return 0;
 }
 
-/* One outbound request.  mime non-NULL => POST; `head` => HEAD.  roff >= 0 adds a
+/* One outbound request.  mime adds a body (POST unless `method` names another); `head` => HEAD.  roff >= 0 adds a
  * `Range:` (rlen < 0 = open-ended) — always sent, never negotiated by probing
  * `Accept-Ranges` first (the DuckDB policy measured in the 2026-08-24 brief). */
 typedef struct {
     int         head;
+    const char* method;      /* `.Q.hmb`'s verb; NULL = POST/HEAD/GET from mime and head */
     const char* mime; size_t mime_len;
     const char* body; size_t body_len;
     int64_t     roff, rlen;
     int         as_bytes;    /* result is RAY_BYTE_ONLY (read1's shape), not charv */
     int*        status;      /* out, optional */
     int64_t*    clen;        /* out, optional: the length a HEAD advertised, else -1 */
+    ray_t**     head_text;   /* out, optional: the final hop's status line + headers */
 } http_req_t;
 
 /* The body in the shape the caller asked for: read1 wants bytes, `.Q.hg` chars. */
@@ -587,7 +590,7 @@ void q_http_client_resp_free(q_http_resp_t* r) {
     memset(r, 0, sizeof *r);
 }
 
-/* Shared GET/HEAD/POST driver — THE one place a 3xx is followed (`.Q.hg`, `.Q.hp`
+/* Shared request driver — THE one place a 3xx is followed (`.Q.hg`, `.Q.hp`, `.Q.hmb`
  * and the read0/read1 slice all ride it; q_http_client_raw does not).  Returns the
  * body (charv, or bytes when the caller asked) or a bare-class ray_error. */
 static ray_t* http_do(ray_t* urlv, const http_req_t* r)
@@ -600,6 +603,7 @@ static ray_t* http_do(ray_t* urlv, const http_req_t* r)
     const char* mime = r->mime; size_t mime_len = r->mime_len;
     const char* body = r->body; size_t body_len = r->body_len;
     if (mime && !scan_ok(mime, mime_len)) return q_err(QE_DOMAIN);   /* injection guard */
+    const char* method = r->method ? r->method : mime ? "POST" : r->head ? "HEAD" : "GET";
 
     /* A range names bytes of the RESOURCE, so a content coding would move them —
      * a ranged request never offers gzip, nor does the HEAD that measures it. */
@@ -625,21 +629,17 @@ static ray_t* http_do(ray_t* urlv, const http_req_t* r)
         char hosthdr[300];
         q_http_client_host(&u, hosthdr, sizeof hosthdr);
 
-        /* request head */
-        char req[2048];
-        int rl;
+        char ctype[600]; ctype[0] = '\0';
         if (mime) {
-            rl = snprintf(req, sizeof req,
-                "POST %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n"
-                "%s"
-                "Content-Type: %.*s\r\nContent-Length: %zu\r\n%s\r\n",
-                u.path, hosthdr, accept_enc, (int)mime_len, mime, body_len, authhdr);
-        } else {
-            rl = snprintf(req, sizeof req,
-                "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n"
-                "%s%s%s\r\n",
-                r->head ? "HEAD" : "GET", u.path, hosthdr, accept_enc, rangehdr, authhdr);
+            int cl = snprintf(ctype, sizeof ctype, "Content-Type: %.*s\r\nContent-Length: %zu\r\n",
+                              (int)mime_len, mime, body_len);
+            if (cl < 0 || (size_t)cl >= sizeof ctype) return q_err(QE_LIMIT);
         }
+        char req[2048];
+        int rl = snprintf(req, sizeof req,
+            "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nUser-Agent: " Q_HTTP_USER_AGENT "\r\n"
+            "%s%s%s%s\r\n",
+            method, u.path, hosthdr, accept_enc, ctype, rangehdr, authhdr);
         if (rl < 0 || (size_t)rl >= sizeof req) return q_err(QE_LIMIT);
 
         const char* err = "conn";
@@ -654,10 +654,13 @@ static ray_t* http_do(ray_t* urlv, const http_req_t* r)
             (st == 301 || st == 302 || st == 303 || st == 307 || st == 308)) {
             q_http_url_t nu;
             if (redirect_resolve(&u, loc.p, loc.n, &nu) == 0) {
-                /* the requests/browser law: a POST survives only 307/308; else it becomes a GET.
-                 * Credentials follow the host, never the redirect: a target that names its own
-                 * userinfo wins, the same host keeps the original, a new host gets none. */
-                if (mime && st != 307 && st != 308) { mime = NULL; body = NULL; body_len = 0; }
+                /* the requests/browser law: a 303 turns any method but HEAD into a GET, a 301/302 only
+                 * a POST; the body goes with it.  Credentials follow the host, never the redirect: a
+                 * target that names its own userinfo wins, the same host keeps the original, a new host gets none. */
+                int is_post = strcmp(method, "POST") == 0;
+                if ((st == 303 && !r->head) || ((st == 301 || st == 302) && is_post)) {
+                    method = "GET"; mime = NULL; body = NULL; body_len = 0;
+                }
                 if (!nu.userinfo[0] && host_ieq(nu.host, u.host))
                     memcpy(nu.userinfo, u.userinfo, sizeof nu.userinfo);
                 u = nu;
@@ -676,6 +679,11 @@ static ray_t* http_do(ray_t* urlv, const http_req_t* r)
         else if (ex == 0) result = http_body(r, rbody, rbl);
         else if (ex == -2) err = "wsfull";
         else err = "conn";
+        if (result && r->head_text) {
+            size_t hn = (size_t)(rbody - resp);
+            while (hn && (resp[hn - 1] == '\r' || resp[hn - 1] == '\n')) hn--;
+            *r->head_text = ray_charv(resp, (int64_t)hn);
+        }
         free(resp);
         if (result) return result;
         return ray_error(err, NULL);
@@ -697,6 +705,59 @@ ray_t* q_dotq_hp_fn(ray_t** args, int64_t nargs) {
     http_req_t r = { .mime = mp, .mime_len = (size_t)ml,
                      .body = bp, .body_len = (size_t)bl, .roff = -1 };
     return http_do(args[0], &r);
+}
+
+static ray_t* enlist_owned(ray_t** items, int n) {   /* consumes items */
+    ray_t* out = q_enlist_wrap(items, n);
+    for (int i = 0; i < n; i++) ray_release(items[i]);
+    return out;
+}
+
+ray_t* q_dotq_hmb_fn(ray_t** args, int64_t nargs) {
+    if (nargs != 3) return q_err(QE_RANK);
+    ray_t* mv = args[1];
+    ray_t* bv = args[2];
+    if (!mv || mv->type != -RAY_SYM || !bv) return q_err(QE_TYPE);
+    ray_t* ms = ray_sym_str(mv->i64);   /* borrowed */
+    if (!ms) return q_err(QE_TYPE);
+    char method[16];
+    size_t mn = ray_str_len(ms);
+    if (mn == 0 || mn >= sizeof method) return q_err(QE_DOMAIN);
+    memcpy(method, ray_str_ptr(ms), mn); method[mn] = '\0';
+    for (size_t i = 0; i < mn; i++)
+        if (method[i] < 'A' || method[i] > 'Z') return q_err(QE_DOMAIN);   /* the request line's first token */
+    http_req_t r = { .method = method, .head = strcmp(method, "HEAD") == 0, .roff = -1 };
+    int64_t bn = q_count(bv);
+    if (bn == 2 && bv->type == RAY_LIST) {
+        const char* mp; int64_t ml; const char* bp; int64_t bl;
+        if (!q_str_text_bytes(ray_list_get(bv, 0), &mp, &ml) || !q_str_text_bytes(ray_list_get(bv, 1), &bp, &bl))
+            return q_err(QE_TYPE);
+        r.mime = mp; r.mime_len = (size_t)ml; r.body = bp; r.body_len = (size_t)bl;
+    } else if (bn != 0) return q_err(QE_TYPE);
+    ray_t* head = NULL;
+    r.head_text = &head;
+    ray_t* content = http_do(args[0], &r);
+    if (RAY_IS_ERR(content)) return content;
+    if (!head || RAY_IS_ERR(head)) {
+        ray_release(content);
+        if (head) ray_error_free(head);
+        return ray_error("oom", NULL);
+    }
+    ray_t* parts[] = { head, content };
+    return enlist_owned(parts, 2);
+}
+
+ray_t* q_dotq_hap_fn(ray_t* x) {
+    char urlbuf[1280]; size_t un;
+    if (url_of(x, urlbuf, sizeof urlbuf, &un) != 0) return q_err(QE_TYPE);
+    q_http_url_t u;
+    if (q_http_client_url_parse(urlbuf, un, &u) != 0) return q_err(QE_DOMAIN);
+    char hostport[300];
+    q_http_client_host(&u, hostport, sizeof hostport);
+    const char* text[] = { u.scheme ? "https://" : "http://", u.userinfo, hostport, u.path };
+    ray_t* parts[4];
+    for (int i = 0; i < 4; i++) parts[i] = ray_charv(text[i], (int64_t)strlen(text[i]));
+    return enlist_owned(parts, 4);
 }
 
 /* A resource read answers a remote object that is not there the way it answers a

@@ -87,6 +87,10 @@ char* q_http_client_host_exchange(const q_http_url_t* u, const char* req, size_t
 ray_t* q_dotq_hg_fn(ray_t* x);
 /* `.Q.c.hp` — POST [url; mimeType; body], returns the body string (vary/3). */
 ray_t* q_dotq_hp_fn(ray_t** args, int64_t nargs);
+/* `.Q.c.hmb` — [url; method sym; () or (mime;body)] on .Q.hg's client, returns (header;content) (vary/3). */
+ray_t* q_dotq_hmb_fn(ray_t** args, int64_t nargs);
+/* `.Q.c.hap` — a URL's (scheme://; user:password; host[:port]; path); host[:port] as the Host header writes it. */
+ray_t* q_dotq_hap_fn(ray_t* x);
 
 /* Low-level raw HTTP client (kb/http.md §"low level HTTP request mechanism"):
  * apply a raw request STRING to a `:http://host[:port]` hsym.  Sends the request
