@@ -101,6 +101,8 @@
 .Q.addmonths:{[x;y] (`date$(`month$x)+y)+x-`date$`month$x};
 / .Q.fu: eval unary f on the DISTINCT items of y then reindex to full length (atom y -> f y).
 .Q.fu:{[f;y] $[0>type y;f y;{[f;y;u]f[u]u?y}[f;y]distinct y]};
+/ .Q.fc: f y, cut into one chunk per secondary thread for peach (ref/dotq.md §fc).
+.Q.fc:{[x;y] n:abs"j"$system"s"; $[(n<2)|n>count y;x y;raze x peach(n;0N)#y]};
 / .Q.ft: apply f to a keyed table's simple (0!) form, re-key on the original key cols.
 .Q.ft:{[f;t] k:keys t; $[count k;k xkey f 0!t;f t]};
 / .Q.ff: append y's missing columns to table x as count[x] typed nulls (via column dicts).
