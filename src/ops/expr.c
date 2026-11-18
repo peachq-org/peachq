@@ -2539,12 +2539,14 @@ static void par_binary_str_fn(void* ctx, uint32_t worker_id, int64_t start, int6
 }
 
 /* Inner loop for binary element-wise over a range [start, end) */
-static void binary_range(ray_op_t* op, int8_t out_type,
-                         ray_t* lhs, ray_t* rhs, ray_t* result,
-                         bool l_scalar, bool r_scalar,
-                         double l_f64, double r_f64,
-                         int64_t l_i64, int64_t r_i64,
-                         int64_t start, int64_t end) {
+/* At most RAY_MORSEL_ELEMS items (binary_range chunks): the sym buffers live
+ * on the stack, and a pool thread's stack can be small (musl: 128 KiB, Dlaupz). */
+static void binary_morsel(ray_op_t* op, int8_t out_type,
+                          ray_t* lhs, ray_t* rhs, ray_t* result,
+                          bool l_scalar, bool r_scalar,
+                          double l_f64, double r_f64,
+                          int64_t l_i64, int64_t r_i64,
+                          int64_t start, int64_t end) {
     uint8_t out_esz = ray_elem_size(out_type);
     void* dst = (char*)ray_data(result) + start * out_esz;
     int64_t n = end - start;
@@ -2683,10 +2685,7 @@ static void binary_range(ray_op_t* op, int8_t out_type,
     int32_t* lp_i32 = NULL; uint32_t* lp_u32 = NULL; int16_t* lp_i16 = NULL;
     int32_t* rp_i32 = NULL; uint32_t* rp_u32 = NULL; int16_t* rp_i16 = NULL;
 
-    /* VLA bound of zero is UB; guarantee >=1 slot.  The fill loops below
-     * are bounded by n so extra slots are harmless. */
-    int64_t _sym_buf_n = n ? n : 1;
-    int64_t lsym_buf[_sym_buf_n], rsym_buf[_sym_buf_n]; /* stack VLA for narrow RAY_SYM (n<=1024) */
+    int64_t lsym_buf[RAY_MORSEL_ELEMS], rsym_buf[RAY_MORSEL_ELEMS];
     /* sym-domain Phase 2: SYM column vs SYM column across DIFFERENT
      * domains cannot compare raw indices — re-express the rhs cells in
      * the lhs's domain via the buffer path (absent → -1: equals no lhs
@@ -2864,6 +2863,19 @@ static void binary_range(ray_op_t* op, int8_t out_type,
     }
 #undef LV_READ
 #undef RV_READ
+}
+
+static void binary_range(ray_op_t* op, int8_t out_type,
+                         ray_t* lhs, ray_t* rhs, ray_t* result,
+                         bool l_scalar, bool r_scalar,
+                         double l_f64, double r_f64,
+                         int64_t l_i64, int64_t r_i64,
+                         int64_t start, int64_t end) {
+    for (int64_t lo = start; lo < end; lo += RAY_MORSEL_ELEMS) {
+        int64_t hi = end - lo > RAY_MORSEL_ELEMS ? lo + RAY_MORSEL_ELEMS : end;
+        binary_morsel(op, out_type, lhs, rhs, result, l_scalar, r_scalar,
+                      l_f64, r_f64, l_i64, r_i64, lo, hi);
+    }
 }
 
 /* Context for parallel binary dispatch */
