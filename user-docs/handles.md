@@ -199,7 +199,7 @@ saying why. In restricted mode (`-U`) every remote door is
 
 ### HTTPS certificates
 
-peachq's own client (`https://` in `select from`, `read0`, `read1`, `.Q.hg`, `.Q.hp`, and `hopen` of `tcps://` or
+peachq's own client (`https://` in `select from`, `read0`, `read1`, `.Q.hg`, `.Q.hp`, `.Q.hmb`, and `hopen` of `tcps://` or
 `wss://`) always checks the server's certificate, and needs no setup to do it: with nothing configured it trusts the
 operating system's root certificates — the Windows root store on Windows, OpenSSL's default bundle elsewhere. kdb's
 environment variables change that, read afresh on every connection:

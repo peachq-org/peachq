@@ -12,7 +12,7 @@
  * name verification; `kdb` (a tcps:// handle) defaults SSL_VERIFY_SERVER to YES.
  * 0 ok; -1 with *err set to the error text: `nyi` when this
  * box has no usable OpenSSL (the degradation ladder), `conn` for a real TLS
- * failure, q_dl_unavailable's line in a static build that can load none. */
+ * failure, and in a static build that can load none a `static-dlopen` line saying https needs OpenSSL. */
 int q_tls_client_start(ray_sock_t fd, const char* host, bool kdb, const char** err);
 /* Why the last client handshake or session failed; "" after a handshake that succeeded. */
 const char* q_tls_last_error(void);
