@@ -283,6 +283,8 @@
 .help.i.r[`.Q.prf0;".Q.prf0 .z.i                        /                         snapshot another q process's call stack"]
 .help.i.r[`.Q.hg;".Q.hg `$\":http://localhost\"         /                         fetch a URL with HTTP GET"]
 .help.i.r[`.Q.hp;".Q.hp[`$\":http://x\";.h.ty`json;\"{}\"] /                         post a body to a URL with HTTP POST"]
+.help.i.r[`.Q.hmb;".Q.hmb[`:http://localhost;`GET;()]  /                         fetch a URL's HTTP header and content"]
+.help.i.r[`.Q.hap;".Q.hap \"http://u:p@host:8080/path\"  /                         split a URL into scheme, user, host and path"]
 .help.i.r[`.Q.id;".Q.id `$\"a b\"                       / `ab                     sanitize a symbol, or a table's columns, into valid names"]
 .help.i.r[`.Q.dd;".Q.dd[`a;`b]                        / `a.b                    glue two symbols together with a dot"]
 .help.i.r[`.Q.j10;".Q.j10 \"hello\"                      / 561666408               encode a string as a long in base 36 with punctuation"]

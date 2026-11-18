@@ -347,6 +347,7 @@ void q_builtins_register(void) {
         { ".Q.c.s",    q_dotq_s_fn    }, { ".Q.c.atob", q_dotq_atob_fn },
         { ".Q.c.cells", q_dotq_cells_fn },
         { ".Q.c.hg",   q_dotq_hg_fn   },   /* HTTP GET (ref/dotq.md) */
+        { ".Q.c.hap",  q_dotq_hap_fn  },
         { ".Q.c.ld",   q_ctx_ld_fn    },
         { ".Q.c.member", q_io_member_fn }, /* an archive member: .Q.fsn streams it forward */
         /* No public `.Q` twins — producer seams for q.q's asc/xasc, not keywords. */
@@ -362,6 +363,7 @@ void q_builtins_register(void) {
     bind_vary (".Q.c.asks", 1, q_dotq_asks_fn);       /* deferred-table tests witness (internal) */
     bind_vary (".Q.c.part", 3, q_splay_part_fn);      /* one partition's columns, mapped (dotq.q .Q.i.part) */
     bind_vary (".Q.c.hp", 3, q_dotq_hp_fn);     /* HTTP POST [url;mime;body] (ref/dotq.md) */
+    bind_vary (".Q.c.hmb", 3, q_dotq_hmb_fn);   /* HTTP [url;method;body] -> (header;content) */
     bind_vary (".Q.c.gz", 1, q_dotq_gz_fn);     /* GZip ::/inflate/deflate (ref/dotq.md) */
     bind_vary (".Q.c.trp", 3, q_dbg_trp_fn);    /* trap-at + backtrace (ref/dotq.md) */
     bind_vary (".Q.c.trpd", 3, q_dbg_trpd_fn);  /* trap + backtrace, any rank (ref/dotq.md) */
