@@ -126,6 +126,9 @@ ray_t* q_registry_dotq_ext(int64_t sym_id);
  * registry value, so the manifest answers for it; any other name is a pure probe of `.q` that interns nothing. */
 int q_registry_is_infix(const char* s, size_t n);
 
+/* The live `.q` the three reads above take, BORROWED; NULL for none. */
+ray_t* q_registry_dotq(void);
+
 /* Borrowed value for a MANIFEST ROW at one valence — the row-pointer twin of
  * q_registry_lookup; NULL when the row has no value at that valence (or the
  * registry is down).  `row` MUST be a Q_OPS[] row (q_ops_find/q_ops_table) —

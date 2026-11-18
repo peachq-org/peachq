@@ -41,44 +41,52 @@
 #include "qlang/eval/q_eval.h"              /* q_eval_at_wrap / q_eval_dot_wrap — the `@` `.` rows */
 #include "qlang/eval/q_view.h"              /* q_view_wrap — the `view` row */
 #include "qlang/eval/q_funsql.h"            /* q_funsql_ques_wrap / q_funsql_bang_wrap — `?` `!` */
-#include "qlang/ops/q_bang.h"               /* q_bang — the `!` row */
 #include "qlang/ops/q_dollar.h"             /* q_dollar — the `$` row */
 #include "qlang/ops/q_index.h"              /* q_index_assign_wrap — the `:` row */
 #include "lang/eval.h"                      /* ray_lte_fn / ray_gte_fn — the `<=` `>=` kernels */
 #include <assert.h>
 #include <string.h>
 
-/* ===== deterministic / sideeffect AUDIT (feat/q-ops-introspection) =========
- * Every row carries both flags explicitly (`deterministic`, `sideeffect`), the
- * common case being `1, 0` — except a QK_ALIAS row, which declares NO metadata
- * and whose readers resolve q_ops_alias_target.  This block is the roster of the
- * NON-default rows, audited mechanically against every manifest row (anything
- * unobvious doc-checked against qdocs/), and is exposed verbatim by `.Q.ops[]`.
+/* ===== deterministic / sideeffect AUDIT =====================================
+ * Every row carries both flags, the common case `1, 0`; this block is the roster of the NON-default rows, each
+ * doc-checked against qdocs/ (pages are ref/<name>.md unless named), exposed verbatim by `.Q.ops[]`.  An alias row
+ * declares its OWN flags (owner 2026-11-17): it shares its target's value and dispatch, not its purity.  A q.q-hosted
+ * verb with non-default flags gets a QR_QSRC (or alias) row; one with no row is audited 1,0 (qlib/test/qopsTest.q).
+ * One flag covers every valence and arm of a verb (`?` is 0 although monadic distinct is pure).
  *
- * deterministic = 0 (result varies run-to-run — RNG state):
- *   `?`   — dyadic `n?x` roll / `-n?x` deal / permute draw on the RNG
- *           (ref/deal.md, ref/roll.md).  Monadic `?` (distinct) is
- *           deterministic, but a row carries one flag for the whole verb, so
- *           the RNG valence makes the verb nondeterministic.  (`rand`, the
- *           other RNG keyword, is q.q-hosted — no manifest row.)
+ * deterministic = 1 iff the result, error included, depends ONLY on the arguments (owner 2026-11-17).  Reading RNG,
+ * session (globals, views, handles), environment (variables, timezone) or disk state makes it 0:
+ *   ?            RNG roll/deal (deal.md, roll.md); `?[`t;…]` reads a table by name (basics/funsql.md:40)
+ *   !            `!:` is key (key.md); `-n!` internals read state (basics/internal.md); enkey by name (enkey.md:61)
+ *   $            Enumerate reads the domain the left symbol names (enumerate.md)
+ *   @ .          a symbol argument applies/indexes the global it names (apply.md); `.:` is value/get
+ *   %            `%:` is ltime's value, which reads the timezone (gtime.md)
+ *   < >          `<:` `>:` are hopen/hclose (basics/funsql.md:916)
+ *   ~ not        `~:` is hdel's value, which reads the disk (hdel.md)
+ *   key inv      a directory, file or variable by name (key.md); inv is `!:`
+ *   value get    a global or file by name, a string evaluated (value.md, get.md)
+ *   eval reval   evaluate a parse tree in the session (eval.md)
+ *   tables views view meta cols attr keys   (tables.md, view.md, meta.md, cols.md, attr.md, keys.md: by name)
+ *   hcount getenv gtime ltime reciprocal      file size, the environment, the timezone (gtime.md: both directions)
+ *   rand         RNG (rand.md)
+ *   system hopen hclose 0: 1: 2: read0 read1 hdel load rload   read the shell, network or disk
+ *   insert upsert xasc xdesc xkey lj ljf pj aj aj0 ajf ajf0 wj wj1 save rsave dsave   read a target by name
  *
- * sideeffect = 1 (observable effect beyond the returned value):
- *   set     — assigns a global through a sym handle (ref/get.md `set`).
- *   insert  — appends rows to a NAMED global table by reference (ref/insert.md).
- *   upsert  — named-target upsert rebinds the global (ref/upsert.md).
- *   show    — writes the console display sink (ref/show.md).
- *   system  — runs a `\`-command / shell command (ref/system.md).
- *   exit    — terminates the process, firing `.z.exit` (ref/exit.md).
- *   hopen   — opens an IPC connection (ref/hopen.md).
- *   hclose  — closes an IPC connection (ref/hopen.md).
- *   0:      — File Text: Save Text writes / Load CSV reads a file (ref/file-text.md).
- *   2:      — Dynamic Load: dlopens a shared object and runs its initialisers (ref/dynamic-load.md).
- *   read0   — reads a file's lines (ref/read0.md).
- *   hdel    — deletes a file or (empty) folder (ref/hdel.md).
- *   setenv  — sets a process environment variable (ref/getenv.md).
- * (getenv READS the environment — deterministic given the process env, no
- * mutation — so it is NOT flagged; value/get resolve data purely, the
- * code-executing `value "…"` arm being the caller's effect, not the verb's.)
+ * sideeffect = 1 iff applying the verb can change state beyond its result; changing a target BY NAME is a side
+ * effect (owner 2026-11-17):
+ *   : set        assign a global by name (assign.md; `eval(:;`a;1)` assigns), set (get.md#set)
+ *   @ .          amend by name (amend.md); `.` monadic evaluates a string (value.md)
+ *   ? !          Enum Extend appends to the variable or file named (enum-extend.md); enkey/unkey and functional
+ *                update by name (enkey.md:61, basics/funsql.md:40); `0N!` writes the console (display.md)
+ *   < > ~ not    `<:` `>:` open/close a connection (basics/funsql.md:916); `~:` deletes a file (hdel.md)
+ *   value get eval reval   evaluate code, which can do anything (value.md, eval.md: reval blocks only writes)
+ *   insert upsert xasc xdesc xkey   update a table named (insert.md, upsert.md, asc.md:181, desc.md:103, keys.md:62)
+ *   lj ljf pj aj aj0 ajf ajf0 wj wj1   since 4.1t a table named is updated in place (lj.md, pj.md, aj.md, wj.md)
+ *   save rsave dsave load rload   write files, or set the global they load (save.md, dsave.md, load.md)
+ *   show exit system   console, process exit, shell (show.md, exit.md, system.md)
+ *   hopen hclose 0: 1: 2: read0 read1 hdel setenv   IPC, files, dlopen, environment (hopen.md, file-text.md,
+ *                file-binary.md, dynamic-load.md, read0.md, read1.md, hdel.md, getenv.md)
+ * By value only, so 1,0: xcol xcols (cols.md), xgroup, ungroup, fkeys, ij ijf uj ujf ej asof.
  * ========================================================================== */
 
 /* ===== FAMILY AUDIT (uniform-structure-dispatch stage 0 metadata) ==========
@@ -211,9 +219,9 @@ static const q_op_t Q_OPS[] = {
     { "+",     QLEX_GLYPH,     QR_FN1("flip", q_flip_wrap),    QR_ENV("+"),       NULL, 1, 0, "atomic", "sum", .mono_scan = "sums", QKOP(1) },
     { "-",     QLEX_GLYPH,     QR_FN1A("neg", q_neg_wrap),     QR_ENV("-"),       NULL, 1, 0, "atomic", NULL, QKOP(2) },
     { "*",     QLEX_GLYPH,     QR_FN1("first", q_first_wrap),  QR_ENV("*"),       NULL, 1, 0, "atomic", "prd", .mono_scan = "prds", QKOP(3) },
-    { "%",     QLEX_GLYPH,     QR_FN1("reciprocal", q_reciprocal_wrap),          QR_ENV("/"),       NULL, 1, 0, "atomic", NULL, QKOP(4) },
-    { "<",     QLEX_GLYPH,     QR_FN1("hopen", q_hopen_grade_wrap), QR_ENV("<"),       NULL, 1, 0, "atomic", NULL, QKOP(9) },
-    { ">",     QLEX_GLYPH,     QR_FN1("hclose", q_hclose_grade_wrap), QR_ENV(">"),       NULL, 1, 0, "atomic", NULL, QKOP(10) },
+    { "%",     QLEX_GLYPH,     QR_FN1("reciprocal", q_reciprocal_wrap),          QR_ENV("/"),       NULL, 0, 0, "atomic", NULL, QKOP(4) },
+    { "<",     QLEX_GLYPH,     QR_FN1("hopen", q_hopen_grade_wrap), QR_ENV("<"),       NULL, 0, 1, "atomic", NULL, QKOP(9) },
+    { ">",     QLEX_GLYPH,     QR_FN1("hclose", q_hclose_grade_wrap), QR_ENV(">"),       NULL, 0, 1, "atomic", NULL, QKOP(10) },
     { "=",     QLEX_GLYPH,     QR_FN1("group", q_group_wrap),  QR_FN2("==", q_eq_wrap) , NULL, 1, 0, "atomic", NULL, QKOP(8) },
     /* kdb's value of each is a composition (owner kdb transcript 2026-11-08: `-8!(<>)` is `'[not;=]`); the parts
      * of `<=` and `>=` are inferred from that sibling and their kdb-written 105h type bytes */
@@ -232,27 +240,27 @@ static const q_op_t Q_OPS[] = {
     { ",",     QLEX_GLYPH,     QR_ENV("enlist"),               QR_FN2("concat", q_join_wrap), NULL, 1, 0, "structural", "raze", QKOP(12) },
     /* `~` monadic not is ATOMIC on its own recipe, since `family` speaks for
      * the DYAD; Match takes both values whole (see AUDIT). */
-    { "~",     QLEX_GLYPH,     QR_FN1A("not", q_not_wrap),     QR_FN2("match", q_match_wrap), NULL, 1, 0, "none", NULL, QKOP(15) },
+    { "~",     QLEX_GLYPH,     QR_FN1A("not", q_not_wrap),     QR_FN2("match", q_match_wrap), NULL, 0, 1, "none", NULL, QKOP(15) },
     /* `^` fill: "Fill is an atomic function" (ref/fill.md). */
     { "^",     QLEX_GLYPH,     QR_FN1("nil?", q_null_wrap),    QR_FN2("fill", q_fill_wrap), NULL, 1, 0, "atomic", NULL, .mono_scan = "fills", QKOP(7) },
     /* ---- type-dispatch glyphs ---- */
     /* `!` family "structural" is DOCUMENTATION ONLY — no lift arm dispatches
      * on it. Monadic `!` is a K-ism superset of `key`. */
-    { "!",     QLEX_GLYPH,     QR_FN1("key", q_key_wrap),      QR_FNV("dict", q_funsql_bang_wrap), NULL, 1, 0, "structural", NULL, QKOP(16) },
+    { "!",     QLEX_GLYPH,     QR_FN1("key", q_key_wrap),      QR_FNV("dict", q_funsql_bang_wrap), NULL, 0, 1, "structural", NULL, QKOP(16) },
     /* `?` family "index" is KEPT OPERATIVE: the n==2 container lift (`-3?t`)
      * reads it before the kernel runs. Dict entries-axis collision: spec §9.1. */
-    { "?",     QLEX_GLYPH,     QR_FN1("distinct", q_distinct_wrap), QR_FNV("rand", q_funsql_ques_wrap), NULL, 0, 0, "index", NULL, QKOP(17) },
+    { "?",     QLEX_GLYPH,     QR_FN1("distinct", q_distinct_wrap), QR_FNV("rand", q_funsql_ques_wrap), NULL, 0, 1, "index", NULL, QKOP(17) },
     /* `$` is MULTI-CONCEPT (Cast/Tok/Pad/mmu/enum) so family "none": no one
      * lift law fits, so each overload SELF-RECURSES with its own boundary
      * (ruling 2026-07-24). `$[c;t;f]` is a q_eval control form, not a row. */
-    { "$",     QLEX_GLYPH,     QR_ENV("string"),               QR_FN2("as", q_dollar), NULL, 1, 0, "none", NULL, QKOP(11) },
+    { "$",     QLEX_GLYPH,     QR_ENV("string"),               QR_FN2("as", q_dollar), NULL, 0, 0, "none", NULL, QKOP(11) },
     /* `:` Assign: the operand VALUE and the head of an `x:y` node (q_parse_assign_head); a lambda's `:` return
      * stays a char head. */
-    { ":",     QLEX_GLYPH,     QR_NONE,                        QR_FN2("assign", q_index_assign_wrap), NULL, 1, 0, "none", NULL, QKOP(0) },
+    { ":",     QLEX_GLYPH,     QR_NONE,                        QR_FN2("assign", q_index_assign_wrap), NULL, 1, 1, "none", NULL, QKOP(0) },
     /* `@`/`.` family none: Apply/Index ARE the application machinery (spec §5),
      * not lifted. name_lift: a sym-atom d in the amend forms names a global. */
-    { "@",     QLEX_GLYPH,     QR_ENV("type"),                 QR_FNV("at", q_eval_at_wrap),    NULL, 1, 1, "none", NULL, .name_lift = 1, QKOP(18) },
-    { ".",     QLEX_GLYPH,     QR_FN1("value", q_eval_value_wrap), QR_FNV("apply", q_eval_dot_wrap), NULL, 1, 1, "none", NULL, .name_lift = 1, QKOP(19) },
+    { "@",     QLEX_GLYPH,     QR_ENV("type"),                 QR_FNV("at", q_eval_at_wrap),    NULL, 0, 1, "none", NULL, .name_lift = 1, QKOP(18) },
+    { ".",     QLEX_GLYPH,     QR_FN1("value", q_eval_value_wrap), QR_FNV("apply", q_eval_dot_wrap), NULL, 0, 1, "none", NULL, .name_lift = 1, QKOP(19) },
     /* ---- keyword-infix ---- */
     { "div",   QLEX_KW,        QR_NONE,                        QR_ENV("div"),     NULL, 1, 0, "atomic", NULL, QKOP(31) },
     /* PURE RENAME: rayfall `%` IS floored modulo, sign following the divisor,
@@ -290,23 +298,23 @@ static const q_op_t Q_OPS[] = {
     { "cross", QLEX_KW,        QR_NONE,                        QR_FN2("cross", q_cross_wrap), NULL, 1, 0, "structural", NULL },
     /* ---- q join family: structural (schema-defining; border ruling in the
      * AUDIT) ---- */
-    { "lj",    QLEX_KW,        QR_NONE,                        QR_FN2("lj", q_lj_wrap),   NULL, 1, 0, "structural", NULL },
-    { "ljf",   QLEX_KW,        QR_NONE,                        QR_FN2("ljf", q_ljf_wrap), NULL, 1, 0, "structural", NULL },
+    { "lj",    QLEX_KW,        QR_NONE,                        QR_FN2("lj", q_lj_wrap),   NULL, 0, 1, "structural", NULL },
+    { "ljf",   QLEX_KW,        QR_NONE,                        QR_FN2("ljf", q_ljf_wrap), NULL, 0, 1, "structural", NULL },
     { "ij",    QLEX_KW,        QR_NONE,                        QR_FN2("ij", q_ij_wrap),   NULL, 1, 0, "structural", NULL },
     { "ijf",   QLEX_KW,        QR_NONE,                        QR_FN2("ijf", q_ijf_wrap), NULL, 1, 0, "structural", NULL },
     { "uj",    QLEX_KW,        QR_NONE,                        QR_FN2("uj", q_uj_wrap),   NULL, 1, 0, "structural", NULL },
     { "ujf",   QLEX_KW,        QR_NONE,                        QR_FN2("ujf", q_ujf_wrap), NULL, 1, 0, "structural", NULL },
-    { "pj",    QLEX_KW,        QR_NONE,                        QR_FN2("pj", q_pj_wrap),   NULL, 1, 0, "structural", NULL },
+    { "pj",    QLEX_KW,        QR_NONE,                        QR_FN2("pj", q_pj_wrap),   NULL, 0, 1, "structural", NULL },
     { "asof",  QLEX_KW,        QR_NONE,                        QR_FN2("asof", q_asof_wrap), NULL, 1, 0, "structural", NULL },
     /* Bracket-form joins are q-owned env VARY bindings snapshotted as QR_ENV:
      * the parser name-refs `ej[a;b;c]`, so it resolves through the env. */
     { "ej",    QLEX_KW,        QR_ENV("ej"),                   QR_NONE,           NULL, 1, 0, "structural", NULL },
-    { "aj",    QLEX_KW,        QR_ENV("aj"),                   QR_NONE,           NULL, 1, 0, "structural", NULL },
-    { "aj0",   QLEX_KW,        QR_ENV("aj0"),                  QR_NONE,           NULL, 1, 0, "structural", NULL },
-    { "ajf",   QLEX_KW,        QR_ENV("ajf"),                  QR_NONE,           NULL, 1, 0, "structural", NULL },
-    { "ajf0",  QLEX_KW,        QR_ENV("ajf0"),                 QR_NONE,           NULL, 1, 0, "structural", NULL },
-    { "wj",    QLEX_KW,        QR_ENV("wj"),                   QR_NONE,           NULL, 1, 0, "structural", NULL },
-    { "wj1",   QLEX_KW,        QR_ENV("wj1"),                  QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "aj",    QLEX_KW,        QR_ENV("aj"),                   QR_NONE,           NULL, 0, 1, "structural", NULL },
+    { "aj0",   QLEX_KW,        QR_ENV("aj0"),                  QR_NONE,           NULL, 0, 1, "structural", NULL },
+    { "ajf",   QLEX_KW,        QR_ENV("ajf"),                  QR_NONE,           NULL, 0, 1, "structural", NULL },
+    { "ajf0",  QLEX_KW,        QR_ENV("ajf0"),                 QR_NONE,           NULL, 0, 1, "structural", NULL },
+    { "wj",    QLEX_KW,        QR_ENV("wj"),                   QR_NONE,           NULL, 0, 1, "structural", NULL },
+    { "wj1",   QLEX_KW,        QR_ENV("wj1"),                  QR_NONE,           NULL, 0, 1, "structural", NULL },
     /* ---- sort / bucket ---- ordering-based search puts bin/binr/xrank in
      * rowid. `xbar` is `x*y div x` (q_xbar_wrap). All infix so `a verb b` is one statement. */
     { "bin",   QLEX_KW,        QR_NONE,                        QR_FN2("bin", q_bin_wrap),   NULL, 1, 0, "rowid", NULL, QKOP(26) },
@@ -356,7 +364,7 @@ static const q_op_t Q_OPS[] = {
     { "ema",   QLEX_KW,        QR_NONE,                        QR_FN2("ema", q_ema_wrap), NULL, 1, 0, "map", NULL },
     /* mmu/inv/lsq ARE `$`, `!:` and `!`: those bodies route a float matrix here (family none, like `@`/`.`). */
     { "mmu",   QLEX_KW,        QR_NONE,                        QR_FN2("as", q_dollar), NULL, 1, 0, "none", NULL, QKOP(11) },
-    { "inv",   QLEX_KW,        QR_FN1("key", q_key_wrap),      QR_NONE,           NULL, 1, 0, "none", NULL, QKOP(16) },
+    { "inv",   QLEX_KW,        QR_FN1("key", q_key_wrap),      QR_NONE,           NULL, 0, 0, "none", NULL, QKOP(16) },
     { "lsq",   QLEX_KW,        QR_NONE,                        QR_FNV("dict", q_funsql_bang_wrap), NULL, 1, 0, "none", NULL, QKOP(16) },
     { "over",  QLEX_KW,        QR_NONE,                        QR_QSRC("over"),   "fold", 1, 0, "none", NULL },
     { "scan",  QLEX_KW,        QR_NONE,                        QR_QSRC("scan"),   "scan", 1, 0, "none", NULL },
@@ -367,10 +375,12 @@ static const q_op_t Q_OPS[] = {
      * SHARING its value — kdb prints `~:`/`@:` for them (basics/parsetrees.md
      * qfind"~:" -> `not`hdel; :53-56 bare `type` -> @:), and both are reserved
      * words (docs-v1/ref/elements.md).  These rows RESERVE the name and NAME the
-     * target; they declare no metadata of their own, so every reader resolves
-     * through q_ops_alias_target and nothing here can drift from `~`/`@`. */
-    { "not",     QLEX_KW,        QR_ALIAS("~"),                QR_NONE,           NULL, 0, 0, NULL, NULL },
-    { "type",    QLEX_KW,        QR_ALIAS("@"),                QR_NONE,           NULL, 0, 0, NULL, NULL },
+     * target, whose value, family and dispatch they share; the purity flags are
+     * their own, because one spelling can name only the pure arm (`type` is
+     * `@:`, never amend).  `reciprocal` is `.q.reciprocal:(%:)`. */
+    { "not",     QLEX_KW,        QR_ALIAS("~"),                QR_NONE,           NULL, 0, 1, NULL, NULL },
+    { "type",    QLEX_KW,        QR_ALIAS("@"),                QR_NONE,           NULL, 1, 0, NULL, NULL },
+    { "reciprocal", QLEX_KW,     QR_ALIAS("%"),                QR_NONE,           NULL, 0, 0, NULL, NULL },
     { "neg",     QLEX_KW,        QR_FN1A("neg", q_neg_wrap),   QR_NONE,           NULL, 1, 0, "atomic", NULL, QKOP(2) },
     /* `til` takes no structure input (family none); kdb accepts a boolean
      * (`til 1b` -> ,0) where base ray_til_fn is int-only. */
@@ -402,25 +412,25 @@ static const q_op_t Q_OPS[] = {
     { "idesc",   QLEX_KW,        QR_FN1("idesc", q_idesc_wrap), QR_NONE,          NULL, 1, 0, "rowid", NULL },
     { "avg",     QLEX_KW,        QR_FN1("avg", q_avg_wrap),    QR_NONE,           NULL, 1, 0, "aggregate", NULL, .nested = QNEST_MEAN, QKOP(23) },
     { "floor",   QLEX_KW,        QR_FN1A("floor", q_floor_wrap), QR_NONE,         NULL, 1, 0, "atomic", NULL, QKOP(14) },
-    /* `distinct` must preserve FIRST-OCCURRENCE order (ref/distinct.md) where
-     * rayfall's routes typed vectors through the sorting DAG group path —
-     * audited: `distinct 2 3 7 3 5 3` is 2 3 7 5, env distinct gives 2 3 5 7. */
-    { "key",     QLEX_KW,        QR_FN1("key", q_key_wrap),    QR_NONE,           NULL, 1, 0, "structural", NULL, QKOP(16) },
+    { "key",     QLEX_KW,        QR_FN1("key", q_key_wrap),    QR_NONE,           NULL, 0, 0, "structural", NULL, QKOP(16) },
     /* `tables`/`views` are q.q-hosted: the row reserves the name and fixes the
      * lexical class, the VALUE comes from `.q`. The argument is a namespace
      * REFERENCE, never data to lift over. */
-    { "tables",  QLEX_KW,        QR_NONE,                      QR_NONE,           NULL, 1, 0, "structural", NULL },
-    { "views",   QLEX_KW,        QR_NONE,                      QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "tables",  QLEX_KW,        QR_NONE,                      QR_NONE,           NULL, 0, 0, "structural", NULL },
+    { "views",   QLEX_KW,        QR_NONE,                      QR_NONE,           NULL, 0, 0, "structural", NULL },
     /* `view` takes a view by REFERENCE (ref/view.md) — never data to lift. */
-    { "view",    QLEX_KW,        QR_FN1("view", q_view_wrap),  QR_NONE,           NULL, 1, 0, "none", NULL },
-    { "value",   QLEX_KW,        QR_FN1("value", q_eval_value_wrap), QR_NONE,          NULL, 1, 0, "structural", NULL, QKOP(19) },
-    /* `get` is a SYNONYM of `value` (ref/get.md) — one home. `eval` has NO row:
-     * q.q-hosted over its internal (.q.eval:(-6!)). */
-    { "get",     QLEX_KW,        QR_FN1("value", q_eval_value_wrap), QR_NONE,          NULL, 1, 0, "structural", NULL, QKOP(19) },
+    { "view",    QLEX_KW,        QR_FN1("view", q_view_wrap),  QR_NONE,           NULL, 0, 0, "none", NULL },
+    { "value",   QLEX_KW,        QR_FN1("value", q_eval_value_wrap), QR_NONE,          NULL, 0, 1, "structural", NULL, QKOP(19) },
+    /* `get` is a SYNONYM of `value` (ref/get.md) — one home. */
+    { "get",     QLEX_KW,        QR_FN1("value", q_eval_value_wrap), QR_NONE,          NULL, 0, 1, "structural", NULL, QKOP(19) },
+    { "eval",    QLEX_KW,        QR_QSRC("eval"),              QR_NONE,           NULL, 0, 1, "none", NULL },
+    { "reval",   QLEX_KW,        QR_QSRC("reval"),             QR_NONE,           NULL, 0, 1, "none", NULL },
     { "set",     QLEX_KW,        QR_NONE,                      QR_FN2("set-g", q_setg_wrap), NULL, 1, 1, "none", NULL },
+    /* `distinct` must preserve FIRST-OCCURRENCE order (ref/distinct.md) where
+     * rayfall's routes typed vectors through the sorting DAG group path —
+     * audited: `distinct 2 3 7 3 5 3` is 2 3 7 5, env distinct gives 2 3 5 7. */
     { "distinct",QLEX_KW,        QR_FN1("distinct", q_distinct_wrap), QR_NONE,    NULL, 1, 0, "rowid", NULL, QKOP(17) },
-    /* `rand` is q.q-hosted with no row; the bootstrap shadow-rebind points root
-     * `rand` at `.q.rand` (rayfall's env `rand` is dyadic and would win). */
+    { "rand",    QLEX_KW,        QR_QSRC("rand"),              QR_NONE,           NULL, 0, 0, "none", NULL },
     /* string/upper/lower are atomic at STRING granularity (FAMILY AUDIT caveat). */
     { "string",  QLEX_KW,        QR_ENV("string"),             QR_NONE,           NULL, 1, 0, "atomic", NULL, QKOP(11) },
     { "upper",   QLEX_KW,        QR_ENV("upper"),              QR_NONE,           NULL, 1, 0, "atomic", NULL },
@@ -438,13 +448,13 @@ static const q_op_t Q_OPS[] = {
      * `.regexp.*` is stdlib q and has no row. */
     { "rlike",   QLEX_KW,        QR_NONE,                      QR_FN2("rlike", q_rlike_wrap), NULL, 1, 0, "none", NULL },
     { "show",    QLEX_KW,        QR_ENV("show"),               QR_NONE,           NULL, 1, 1, "none", NULL },
-    { "system",  QLEX_KW,        QR_ENV("system"),             QR_NONE,           NULL, 1, 1, "none", NULL },
+    { "system",  QLEX_KW,        QR_ENV("system"),             QR_NONE,           NULL, 0, 1, "none", NULL },
     /* `exit` is capability-gated so doctest/wasm runtimes survive it. */
     { "exit",    QLEX_KW,        QR_FN1("exit", q_exit_wrap), QR_NONE,           NULL, 1, 1, "none", NULL, QKOP(29) },
-    { "meta",    QLEX_KW,        QR_ENV("meta"),               QR_NONE,           NULL, 1, 0, "structural", NULL },
-    { "cols",    QLEX_KW,        QR_ENV("cols"),               QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "meta",    QLEX_KW,        QR_ENV("meta"),               QR_NONE,           NULL, 0, 0, "structural", NULL },
+    { "cols",    QLEX_KW,        QR_ENV("cols"),               QR_NONE,           NULL, 0, 0, "structural", NULL },
     /* The attribute SET/CLEAR side is the `#` verb's symbol-atom arm, not a row. */
-    { "attr",    QLEX_KW,        QR_COVER("attr", q_attr_wrap), QR_NONE,          NULL, 1, 0, "structural", NULL },
+    { "attr",    QLEX_KW,        QR_COVER("attr", q_attr_wrap), QR_NONE,          NULL, 0, 0, "structural", NULL },
     { "abs",     QLEX_KW,        QR_FN1A("abs", q_abs_wrap),   QR_NONE,           NULL, 1, 0, "atomic", NULL, QKOP(31) },
     /* ---- monadic pass-throughs (rayfall name == q name, audited kdb-true) ---- */
     /* `null` routes to the engine's atomic `nil?`; the wrapper collapses a
@@ -471,7 +481,6 @@ static const q_op_t Q_OPS[] = {
     { "asin",      QLEX_KW,        QR_FN1A("asin", q_asin_wrap), QR_NONE, NULL, 1, 0, "atomic", NULL, QKOP(36) },
     { "acos",      QLEX_KW,        QR_FN1A("acos", q_acos_wrap), QR_NONE, NULL, 1, 0, "atomic", NULL, QKOP(38) },
     { "atan",      QLEX_KW,        QR_FN1A("atan", q_atan_wrap), QR_NONE, NULL, 1, 0, "atomic", NULL, QKOP(40) },
-    /* `reciprocal` IS `%:` (`.q.reciprocal:(%:)` in q.q) — no row. */
     { "signum",    QLEX_KW,        QR_FN1("signum", q_signum_wrap), QR_NONE, NULL, 1, 0, "atomic", NULL },
     { "ceiling",   QLEX_KW,        QR_COVERA("ceiling", q_ceiling_wrap), QR_NONE, NULL, 1, 0, "atomic", NULL },
     /* ---- table verbs ---- `insert`/`upsert` intentionally SHADOW the base env
@@ -480,44 +489,50 @@ static const q_op_t Q_OPS[] = {
      * under its kdb value `.[;();,;]`), never the env snapshot. xasc/xdesc/xgroup are rowid, the rest
      * structural (spec §3; xgroup is a border ruling in the AUDIT). */
     { "flip",   QLEX_KW,        QR_FN1("flip", q_flip_wrap),   QR_NONE,           NULL, 1, 0, "structural", NULL, QKOP(1) },
-    { "keys",   QLEX_KW,        QR_FN1("keys", q_keys_wrap),   QR_NONE,           NULL, 1, 0, "structural", NULL },
+    { "keys",   QLEX_KW,        QR_FN1("keys", q_keys_wrap),   QR_NONE,           NULL, 0, 0, "structural", NULL },
     { "fkeys",  QLEX_KW,        QR_FN1("fkeys", q_fkeys_wrap), QR_NONE,           NULL, 1, 0, "structural", NULL },
     { "ungroup",QLEX_KW,        QR_FN1("ungroup", q_ungroup_wrap), QR_NONE,       NULL, 1, 0, "structural", NULL },
-    { "xkey",   QLEX_KW,        QR_NONE,                       QR_FN2("xkey", q_xkey_wrap), NULL, 1, 0, "structural", NULL },
+    { "xkey",   QLEX_KW,        QR_NONE,                       QR_FN2("xkey", q_xkey_wrap), NULL, 0, 1, "structural", NULL },
     { "xcol",   QLEX_KW,        QR_NONE,                       QR_QSRC("xcol"),   NULL, 1, 0, "structural", NULL },
     { "xcols",  QLEX_KW,        QR_NONE,                       QR_QSRC("xcols"),  NULL, 1, 0, "structural", NULL },
-    { "xasc",   QLEX_KW,        QR_NONE,                       QR_QSRC("xasc"),   NULL, 1, 0, "rowid", NULL },
-    { "xdesc",  QLEX_KW,        QR_NONE,                       QR_QSRC("xdesc"),  NULL, 1, 0, "rowid", NULL },
+    { "xasc",   QLEX_KW,        QR_NONE,                       QR_QSRC("xasc"),   NULL, 0, 1, "rowid", NULL },
+    { "xdesc",  QLEX_KW,        QR_NONE,                       QR_QSRC("xdesc"),  NULL, 0, 1, "rowid", NULL },
     { "xgroup", QLEX_KW,        QR_NONE,                       QR_FN2("xgroup", q_xgroup_wrap), NULL, 1, 0, "rowid", NULL },
-    { "insert", QLEX_KW,        QR_NONE,                       QR_FN2("insert", q_insert_wrap), NULL, 1, 1, "structural", NULL, QKOP(28) },
-    { "upsert", QLEX_KW,        QR_NONE,                       QR_COVER2("upsert", q_upsert_wrap), NULL, 1, 1, "structural", NULL },
+    { "insert", QLEX_KW,        QR_NONE,                       QR_FN2("insert", q_insert_wrap), NULL, 0, 1, "structural", NULL, QKOP(28) },
+    { "upsert", QLEX_KW,        QR_NONE,                       QR_COVER2("upsert", q_upsert_wrap), NULL, 0, 1, "structural", NULL },
     { "any",     QLEX_KW,        QR_COVER("any", q_any_wrap),  QR_NONE,           NULL, 1, 0, "aggregate", NULL },
     { "all",     QLEX_KW,        QR_COVER("all", q_all_wrap),  QR_NONE,           NULL, 1, 0, "aggregate", NULL },
     /* ---- IPC client ---- `hopen` returns the connection's socket fd as the
      * handle (kdb-faithful: 0/1/2 reserved, connections at 3+). The send verb
      * `h"query"` is handle-as-verb application, not a manifest row. */
-    { "hopen",  QLEX_KW,        QR_FN1("hopen", q_hopen_grade_wrap), QR_NONE, NULL, 1, 1, "none", NULL, QKOP(9) },
-    { "hclose", QLEX_KW,        QR_FN1("hclose", q_hclose_grade_wrap), QR_NONE, NULL, 1, 1, "none", NULL, QKOP(10) },
+    { "hopen",  QLEX_KW,        QR_FN1("hopen", q_hopen_grade_wrap), QR_NONE, NULL, 0, 1, "none", NULL, QKOP(9) },
+    { "hclose", QLEX_KW,        QR_FN1("hclose", q_hclose_grade_wrap), QR_NONE, NULL, 0, 1, "none", NULL, QKOP(10) },
     /* ---- File Text / File Binary / Dynamic Load ---- all three are tokenized
      * by the scanner's digit-colon arm; `0:`/`1:` dispatch on the LEFT operand's
      * shape and `2:` reads a whole `(`sym;rank)` pair, so all three are family
      * "none" exception-catalogue members. No doc says what applying monadic `2::`
      * does, so it is 'nyi; dyadic `2:` answers a 112h carrier, not a kernel call. */
-    { "0:",     QLEX_GLYPH,     QR_FN1("read0", q_read0_wrap), QR_FN2("file-text", q_io_filetext_wrap), NULL, 1, 1, "none", NULL, QKOP(20) },
-    { "1:",     QLEX_GLYPH,     QR_FN1("read1", q_read1_wrap), QR_FN2("file-binary", q_io_filebinary_wrap), NULL, 1, 1, "none", NULL, QKOP(21) },
-    { "2:",     QLEX_GLYPH,     QR_FN1("dl-unary", q_dl1_wrap), QR_FN2("dynamic-load", q_dl_wrap), NULL, 1, 1, "none", NULL, QKOP(22) },
+    { "0:",     QLEX_GLYPH,     QR_FN1("read0", q_read0_wrap), QR_FN2("file-text", q_io_filetext_wrap), NULL, 0, 1, "none", NULL, QKOP(20) },
+    { "1:",     QLEX_GLYPH,     QR_FN1("read1", q_read1_wrap), QR_FN2("file-binary", q_io_filebinary_wrap), NULL, 0, 1, "none", NULL, QKOP(21) },
+    { "2:",     QLEX_GLYPH,     QR_FN1("dl-unary", q_dl1_wrap), QR_FN2("dynamic-load", q_dl_wrap), NULL, 0, 1, "none", NULL, QKOP(22) },
     { "hsym",   QLEX_KW,        QR_FN1("hsym", q_hsym_wrap),   QR_NONE,           NULL, 1, 0, "atomic", NULL },
-    { "read0",  QLEX_KW,        QR_FN1("read0", q_read0_wrap), QR_NONE,           NULL, 1, 1, "none", NULL, QKOP(20) },
-    { "read1",  QLEX_KW,        QR_FN1("read1", q_read1_wrap), QR_NONE,           NULL, 1, 1, "none", NULL, QKOP(21) },
-    { "hdel",   QLEX_KW,        QR_FN1A("not", q_not_wrap),    QR_NONE,           NULL, 1, 1, "none", NULL, QKOP(15) },
+    { "read0",  QLEX_KW,        QR_FN1("read0", q_read0_wrap), QR_NONE,           NULL, 0, 1, "none", NULL, QKOP(20) },
+    { "read1",  QLEX_KW,        QR_FN1("read1", q_read1_wrap), QR_NONE,           NULL, 0, 1, "none", NULL, QKOP(21) },
+    { "hdel",   QLEX_KW,        QR_FN1A("not", q_not_wrap),    QR_NONE,           NULL, 0, 1, "none", NULL, QKOP(15) },
+    { "hcount", QLEX_KW,        QR_QSRC("hcount"),             QR_NONE,           NULL, 0, 0, "none", NULL },
+    { "save",   QLEX_KW,        QR_QSRC("save"),               QR_NONE,           NULL, 0, 1, "none", NULL },
+    { "load",   QLEX_KW,        QR_QSRC("load"),               QR_NONE,           NULL, 0, 1, "none", NULL },
+    { "rsave",  QLEX_KW,        QR_QSRC("rsave"),              QR_NONE,           NULL, 0, 1, "none", NULL },
+    { "rload",  QLEX_KW,        QR_QSRC("rload"),              QR_NONE,           NULL, 0, 1, "none", NULL },
+    { "dsave",  QLEX_KW,        QR_NONE,                       QR_QSRC("dsave"),  NULL, 0, 1, "none", NULL },
     /* ---- environment variables ---- Both coerce the q symbol arg to -RAY_STR: a real divergence, so QR_FN
      * wrappers rather than QR_ENV renames.  getenv is atomic over names: ref/getenv.md shows only the atom, the
      * witness is the KDB-X transcript in peachq-org/peachq#123 (`getenv `HOME`USER` -> a list of strings). */
-    { "getenv", QLEX_KW,        QR_FN1A("getenv", q_getenv_wrap), QR_NONE,        NULL, 1, 0, "atomic", NULL, QKOP(30) },
+    { "getenv", QLEX_KW,        QR_FN1A("getenv", q_getenv_wrap), QR_NONE,        NULL, 0, 0, "atomic", NULL, QKOP(30) },
     { "setenv", QLEX_KW,        QR_NONE,                       QR_FN2("setenv", q_setenv_wrap), NULL, 1, 1, "none", NULL, QKOP(33) },
     /* ---- local and UTC time ---- both on ref/gtime.md */
-    { "gtime",  QLEX_KW,        QR_FN1("gtime", q_gtime_wrap), QR_NONE,           NULL, 1, 0, "atomic", NULL },
-    { "ltime",  QLEX_KW,        QR_FN1("reciprocal", q_reciprocal_wrap), QR_NONE,  NULL, 1, 0, "atomic", NULL, QKOP(4) },
+    { "gtime",  QLEX_KW,        QR_FN1("gtime", q_gtime_wrap), QR_NONE,           NULL, 0, 0, "atomic", NULL },
+    { "ltime",  QLEX_KW,        QR_FN1("reciprocal", q_reciprocal_wrap), QR_NONE,  NULL, 0, 0, "atomic", NULL, QKOP(4) },
     /* ---- adverbs ---- `':` is variadic: Each Prior on a rank-2 value, Each
      * Parallel on a rank-1 one (ref/maps.md); the cell names the dyadic
      * reading. */

@@ -34,6 +34,11 @@
   #define WIN32_LEAN_AND_MEAN
   #include <winsock2.h>
   #include <ws2tcpip.h>
+  #if __has_include(<afunix.h>)
+    #include <afunix.h>
+  #else
+    struct sockaddr_un { ADDRESS_FAMILY sun_family; char sun_path[108]; };
+  #endif
 #else
   #include <fcntl.h>
   #include <netdb.h>
@@ -245,6 +250,67 @@ int ray_sock_pair(ray_sock_t sv[2])
     return 0;
 }
 
+int ray_sock_pair_unix(ray_sock_t sv[2])
+{
+#ifdef RAY_OS_WINDOWS
+    /* Windows 10 1803+ AF_UNIX: the listener's path is fresh, in this user's temp dir, and deleted at its one
+     * accept, so no TCP port and no reachable name outlive the pairing. */
+    static LONG seq;
+    struct sockaddr_un a = { AF_UNIX, "" };
+    wchar_t dir[MAX_PATH], path[MAX_PATH];
+    DWORD dn = GetTempPathW(MAX_PATH, dir);
+    int pn = dn && dn < MAX_PATH ? swprintf(path, MAX_PATH, L"%lspeachq-%lu-%ld.sock", dir, GetCurrentProcessId(),
+                                            InterlockedIncrement(&seq)) : -1;
+    /* sun_path is UTF-8 whatever the ANSI code page */
+    if (pn < 0 || !WideCharToMultiByte(CP_UTF8, 0, path, -1, a.sun_path, sizeof a.sun_path, NULL, NULL)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    ray_sock_t l = (ray_sock_t)socket(AF_UNIX, SOCK_STREAM, 0), c = RAY_INVALID_SOCK, s = RAY_INVALID_SOCK;
+    if (l != RAY_INVALID_SOCK && bind(l, (struct sockaddr*)&a, sizeof a) == 0 && listen(l, 1) == 0 &&
+        (c = (ray_sock_t)socket(AF_UNIX, SOCK_STREAM, 0)) != RAY_INVALID_SOCK &&
+        connect(c, (struct sockaddr*)&a, sizeof a) == 0)
+        s = (ray_sock_t)accept(l, NULL, NULL);
+    if (s == RAY_INVALID_SOCK) (void)sock_errno();
+    ray_sock_close(l);
+    DeleteFileW(path);
+    if (s == RAY_INVALID_SOCK) {
+        ray_sock_close(c);
+        return -1;
+    }
+    SetHandleInformation((HANDLE)c, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0);
+    sv[0] = s;
+    sv[1] = c;
+    return 0;
+#else
+    return ray_sock_pair(sv);
+#endif
+}
+
+ray_sock_t ray_sock_dup(ray_sock_t s)
+{
+#ifdef RAY_OS_WINDOWS
+    WSAPROTOCOL_INFOW info;
+    if (WSADuplicateSocketW((SOCKET)s, GetCurrentProcessId(), &info) != 0) { (void)sock_errno(); return RAY_INVALID_SOCK; }
+    SOCKET d = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &info, 0,
+                          WSA_FLAG_NO_HANDLE_INHERIT);
+    if (d == INVALID_SOCKET) { (void)sock_errno(); return RAY_INVALID_SOCK; }
+    return (ray_sock_t)d;
+#else
+    return fcntl(s, F_DUPFD_CLOEXEC, 3);
+#endif
+}
+
+void ray_sock_shutdown_send(ray_sock_t s)
+{
+#ifdef RAY_OS_WINDOWS
+    shutdown(s, SD_SEND);
+#else
+    shutdown(s, SHUT_WR);
+#endif
+}
+
 /* Connect an already-created socket `fd` to one resolved address.  With
  * timeout_ms > 0 the connect is driven non-blocking + poll (a blocking
  * connect() ignores SO_*TIMEO) and the same budget is then applied as the
@@ -389,8 +455,11 @@ void ray_sock_io_detach(ray_sock_t s)
 int64_t ray_sock_send(ray_sock_t s, const void* buf, size_t len)
 {
     ray_sock_io_t* ov = io_find(s);
-    if (ov) return ov->send(ov->ctx, buf, len);
+    return ov ? ov->send(ov->ctx, buf, len) : ray_sock_send_plain(s, buf, len);
+}
 
+int64_t ray_sock_send_plain(ray_sock_t s, const void* buf, size_t len)
+{
     const uint8_t* p   = (const uint8_t*)buf;
     size_t         rem = len;
     while (rem > 0) {
@@ -423,8 +492,11 @@ int64_t ray_sock_send(ray_sock_t s, const void* buf, size_t len)
 int64_t ray_sock_recv(ray_sock_t s, void* buf, size_t len)
 {
     ray_sock_io_t* ov = io_find(s);
-    if (ov) return ov->recv(ov->ctx, buf, len);
+    return ov ? ov->recv(ov->ctx, buf, len) : ray_sock_recv_plain(s, buf, len);
+}
 
+int64_t ray_sock_recv_plain(ray_sock_t s, void* buf, size_t len)
+{
     for (;;) {
 #ifdef RAY_OS_WINDOWS
         int n = recv(s, (char*)buf, (int)len, 0);

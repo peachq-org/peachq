@@ -1077,14 +1077,14 @@ int64_t q_env_qualify(int64_t ns_sym, int64_t member_sym) {
     return r;
 }
 
-/* q_env_fullname — see q_env.h. */
-int64_t q_env_fullname(int64_t sym, int64_t* ns) {
+/* Inlined into both doors, so the global-set path runs the same code it always did. */
+static inline int64_t env_fullname(int64_t ctx, int64_t sym, int64_t* ns) {
     const char* p; size_t n;
     ray_t* s = name_str(sym, &p, &n);
     int64_t full = sym;
     if (s) {
         if (n > 0 && p[0] != '.') {
-            int64_t q = q_env_qualify(ENV_CTX, sym);
+            int64_t q = q_env_qualify(ctx, sym);
             if (q >= 0) full = q;
         }
         ray_release(s);
@@ -1103,6 +1103,10 @@ int64_t q_env_fullname(int64_t sym, int64_t* ns) {
     }
     return full;
 }
+
+/* q_env_fullname — see q_env.h. */
+int64_t q_env_fullname(int64_t sym, int64_t* ns) { return env_fullname(ENV_CTX, sym, ns); }
+int64_t q_env_fullname_in(int64_t ctx, int64_t sym, int64_t* ns) { return env_fullname(ctx, sym, ns); }
 
 static int env_kind_match(q_env_ns_kind_t kind, ray_t* v) {
     switch (kind) {

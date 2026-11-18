@@ -103,18 +103,20 @@ int q_sys_prompt(char* buf, size_t cap) {
     return (n < 0 || (size_t)n >= cap) ? 0 : n;
 }
 
-static ray_t* ctx_switch(const char* name, size_t len) {
-    if (len == 1 && name[0] == '.') {          /* `\d .` — back to root */
-        q_env_ctx_set(0);
-        return NULL;
-    }
+int64_t q_sys_ctx_named(const char* name, size_t len) {
+    if (len == 1 && name[0] == '.') return 0;  /* `\d .` — back to root */
     /* nested `.a.b` is a superset of kdb 4.x (q4m3 §12.7: one level only); the first definition creates it */
     if (len >= 2 && len + sizeof "q)" <= Q_SYS_PROMPT_CAP && name[0] == '.' &&
-        q_env_ctx_ok(name + 1, len - 1)) {
-        q_env_ctx_set(ray_sym_intern_runtime(name, len));
-        return NULL;
-    }
-    return q_err_name(name, len);
+        q_env_ctx_ok(name + 1, len - 1))
+        return ray_sym_intern_runtime(name, len);
+    return -1;
+}
+
+static ray_t* ctx_switch(const char* name, size_t len) {
+    int64_t ctx = q_sys_ctx_named(name, len);
+    if (ctx < 0) return q_err_name(name, len);
+    q_env_ctx_set(ctx);
+    return NULL;
 }
 
 /* ---- `\S` random-seed state (moved from q_ns.c; \S is its only consumer) ----
