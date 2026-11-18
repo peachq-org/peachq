@@ -159,8 +159,20 @@ ray_err_t ray_thread_create(ray_thread_t* t, ray_thread_fn fn, void* arg) {
     ctx->fn  = fn;
     ctx->arg = arg;
 
+    /* glibc's default thread stack is 8 MiB, musl's 128 KiB: pin glibc's so the
+     * static release runs kernels the way every other build does (Dlaupz). */
+    pthread_attr_t attr;
+    pthread_attr_t* ap = NULL;
+    if (pthread_attr_init(&attr) == 0) {
+        ap = &attr;
+        if (pthread_attr_setstacksize(&attr, (size_t)8 << 20) != 0) {
+            pthread_attr_destroy(&attr);
+            ap = NULL;
+        }
+    }
     pthread_t pt;
-    int rc = pthread_create(&pt, NULL, thread_trampoline, ctx);
+    int rc = pthread_create(&pt, ap, thread_trampoline, ctx);
+    if (ap) pthread_attr_destroy(ap);
     if (rc != 0) {
         ray_sys_free(ctx);
         return RAY_ERR_OOM;
