@@ -20,6 +20,10 @@
 ray_t* q_parse(const char* src);
 ray_t* q_parse_at(const char* src, ray_t** pos);   /* + the statement's OWNED caret table (node; offset) i64 pairs */
 
+/* Everything a parse reads besides its text, OWNED: (\classic; the registry sealed; the live `.q`).  Two parses of one
+ * text agree under states that match (~); a namespace someone holds never changes, so the held `.q` stays as it was. */
+ray_t* q_parse_state(void);
+
 /* `(.X.e; "text")` application tree (`q` -> `value`) — the language-handler
  * dispatch q_parse applies to a `<letter>)` prefix, shared with the char-atom
  * apply arm (`"g" "4"`). */
@@ -68,5 +72,8 @@ ray_t* q_parse_tokens(const char* src, int64_t n);
  * statement's own parse to report. */
 typedef struct { int in_string, in_literal /* the open fence length */, opaque, fed; } q_parse_open_t;
 void q_parse_open_feed(q_parse_open_t *st, const char *piece, size_t n);
+
+/* q_parse_at's intake of src[0..n): the bytes of its `<letter>)` prefixes; *opaque: the rest is a `\` or not q. */
+size_t q_parse_intake(const char *src, size_t n, int *opaque);
 
 #endif /* Q_PARSE_H */

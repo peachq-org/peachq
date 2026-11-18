@@ -19,6 +19,7 @@
 
 #include <rayforce.h>
 #include <stddef.h>
+#include "qlang/q_ctx.h"   /* q_ctx_stmt_fn — q_comment_dry's statement callback */
 
 /* On over q_runtime_create's core list: nothing is armed, queued or fired. */
 void q_comment_boot(int on);
@@ -57,5 +58,12 @@ int64_t q_comment_origin(int64_t* line);
  * MUST be called between statements, never mid-eval, and before the console
  * drain so the hook's own output leaves with the statement. */
 void q_comment_stmt_end(void);
+
+/* The law without the load, for `.pq.outline`: src is walked as `\l` walks it and each statement reaches fn, never run;
+ * no hook fires and the store is untouched.  Inside fn, q_comment_dry_claim stands for a global write: the first call
+ * takes the header a load would arm for the statement (owned, NULL for none), as its first write would.  *header: the
+ * file's own (owned), NULL when it has none.  Answers the walk's code; the load never calls either. */
+int    q_comment_dry(const char* src, size_t n, q_ctx_stmt_fn fn, void* u, ray_t** header);
+ray_t* q_comment_dry_claim(void);
 
 #endif /* PEACHQ_Q_COMMENT_H */

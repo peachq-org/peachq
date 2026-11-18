@@ -9,18 +9,22 @@
 #include "qlang/q_ctx.h"   /* q_ctx_run_file/q_ctx_run_src — the non-tty script and -eval doors */
 #include "qlang/q_runtime.h"
 #include "qlang/q_dotz.h"
+#include "qlang/q_pq.h"       /* q_pq_bundle_only — `-lint` and `-lsp` read no library file from disk */
+#include "qlang/q_prim.h"     /* q_str_text_bytes — a message -lsp sends */
+#include "qlang/eval/q_eval.h" /* q_eval_apply_value — .lsp.on, once per message */
 #include "qlang/ops/q_sys.h"     /* q_sys_listen_spec_parse / q_sys_listen — the `-p` spec, shared with `\p` */
 #include "qlang/q_console.h"  /* q_console_clip_set; q_console_color */
 #include "qlang/base/q_classic.h"
 #include "qlang/net/q_tls.h"  /* q_tls_server_mode_set — the `-E` TLS server mode */
 #include "qlang/io/q_duckdb.h" /* q_duckdb_main_path_set — the `-duckdb` main database file */
 #include "qlang/io/q_io.h"     /* q_io_abs_path — QINIT's startup `\l`; q_io_read_slice — the -conn file */
-#include "qlang/io/q_worker.h" /* q_worker_link — a :pq:qspawn: worker's link to the process that launched it */
+#include "qlang/io/q_worker.h" /* q_worker_link / _stdio_link — the one link a worker or a -stdio process serves */
 #include "qlang/q_env.h"       /* q_env_set — the -conn texts bound as q values */
 #include "qlang/base/q_err.h"  /* q_err_drop — an unreadable -conn file */
 #include "core/numparse.h"     /* ray_parse_i64 — LINES/COLUMNS */
 #include "core/poll.h"
 #include "core/ipc.h"          /* ray_ipc_auth_file_load — the `-u`/`-U` password file */
+#include "core/sock.h"         /* ray_sock_recv_plain / _send_plain — the -lsp link */
 #include "core/runtime.h"
 #include <rayforce.h>
 #include <errno.h>
@@ -29,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>     /* strncasecmp — an LSP header name */
 #include <unistd.h>
 
 #define LISTEN_SPEC_FORMS "[rp,][host:](port|0W|lo/hi|servicename), port 1..65535"
@@ -176,6 +181,157 @@ done:
     return rc;
 }
 
+/* `q -lint`: .lint.main reads argv, prints and answers the exit code.  main dispatches here before every startup path
+ * (the worker link, `-duckdb`, QINIT, `-eval-before`, the script, `-eval`, `-p`, the option commands, the console) and
+ * the library comes from the bundle alone, so linting a tree runs none of its code. */
+static int lint_main(int argc, char** argv) {
+    if (!q_runtime_create(argc, argv)) { fprintf(stderr, "runtime init failed\n"); return 2; }
+    q_sys_own_process(true);
+    q_pq_bundle_only();
+    q_ctx_run_src("exit .lint.main 1_.z.X", stdout, stderr, NULL);
+    q_sys_exit(2);
+    return 2;
+}
+
+/* `q -lsp`: a language server on the -stdio link's pipes, so only its frames reach stdout.  Each JSON-RPC message,
+ * framed by its Content-Length header, goes to .lsp.on with the session the last call answered; each message .lsp.on
+ * answers goes back framed, and its `exit` ends the process.  The frames already waiting are read together and
+ * .lsp.i.stale names those a later one supersedes, which are skipped, so a burst of edits is linted once.  While no
+ * message waits, .lsp.i.idle does the session's background work a piece at a time, so a request is never held behind
+ * all of it.  Like -lint it runs no user startup code and reads the bundled library alone; the rest of argv is
+ * ignored, so an editor's own transport flag is harmless. */
+static struct { char* p; size_t n, cap, used; bool eof; } g_lsp;
+
+/* Without wait, false when nothing arrives within 2 ms: a client still writing a burst, held back by the pipe while the
+ * last lint ran, gets to finish it, and one that stalls mid-message keeps what it sent buffered for the next read. */
+static bool lsp_fill(ray_sock_t link, bool wait) {
+    if (!wait && ray_sock_wait_readable(link, 2) != 1) return false;
+    if (g_lsp.n == g_lsp.cap) {
+        size_t cap = g_lsp.cap ? 2 * g_lsp.cap : (size_t)1 << 16;
+        char*  p = realloc(g_lsp.p, cap);
+        if (!p) return false;
+        g_lsp.p = p;
+        g_lsp.cap = cap;
+    }
+    int64_t got = ray_sock_recv_plain(link, g_lsp.p + g_lsp.n, g_lsp.cap - g_lsp.n);
+    if (got > 0) g_lsp.n += (size_t)got;
+    else g_lsp.eof = true;
+    return got > 0;
+}
+
+/* The next message body as a char vector; NULL at the end of stdin, or after a header block with no Content-Length,
+ * past which the stream cannot be read in step.  Without wait, NULL too when no whole message is waiting. */
+static ray_t* lsp_next(ray_sock_t link, bool wait) {
+    if (g_lsp.used) memmove(g_lsp.p, g_lsp.p + g_lsp.used, g_lsp.n -= g_lsp.used);
+    g_lsp.used = 0;
+    size_t head = 0;
+    while (head + 4 > g_lsp.n || memcmp(g_lsp.p + head, "\r\n\r\n", 4) != 0)
+        if (head + 4 < g_lsp.n) head++;
+        else if (!lsp_fill(link, wait)) return NULL;
+    g_lsp.p[head] = '\0';
+    const char* h = g_lsp.p;
+    while (h && strncasecmp(h, "Content-Length:", 15) != 0) h = (h = strchr(h, '\n')) ? h + 1 : NULL;
+    long long len = h ? strtoll(h + 15, NULL, 10) : -1;
+    g_lsp.p[head] = '\r';
+    if (len < 0) return NULL;
+    while (g_lsp.n < head + 4 + (size_t)len)
+        if (!lsp_fill(link, wait)) return NULL;
+    g_lsp.used = head + 4 + (size_t)len;
+    return ray_charv(g_lsp.p + head + 4, len);
+}
+
+static void lsp_send(ray_sock_t link, ray_t* msg) {
+    const char* p;
+    int64_t     n;
+    char        head[48];
+    if (!q_str_text_bytes(msg, &p, &n)) return;
+    int h = snprintf(head, sizeof head, "Content-Length: %lld\r\n\r\n", (long long)n);
+    ray_sock_send_plain(link, head, (size_t)h);
+    ray_sock_send_plain(link, p, (size_t)n);
+}
+
+/* r is an error, or an answer not shaped as want */
+static void lsp_failed(ray_t* r, const char* want) {
+    int64_t     n = (int64_t)strlen(want);
+    const char* text = RAY_IS_ERR(r) ? q_err_text(r, &n) : want;
+    fprintf(stderr, "q -lsp: %.*s\n", (int)n, text ? text : "");
+    if (RAY_IS_ERR(r)) {
+        q_err_drop();
+        ray_error_free(r);
+    } else ray_release(r);
+}
+
+/* fn applied to args, the session first, its messages sent; the session it answers, or session as it was on a
+ * failure or an empty answer, which is .lsp.i.idle's when it has nothing to do and leaves *worked false. */
+static ray_t* lsp_answer(ray_sock_t link, ray_t* fn, ray_t** args, int64_t n, bool* worked) {
+    ray_t* session = args[0];
+    ray_t* r = q_eval_apply_value(fn, args, n);
+    *worked = RAY_IS_ERR(r) || r->type != RAY_LIST || q_count(r) != 0;
+    if (!*worked) {
+        ray_release(r);
+        return session;
+    }
+    if (RAY_IS_ERR(r) || r->type != RAY_LIST || q_count(r) != 2) {
+        lsp_failed(r, "not (session;messages)");
+        return session;
+    }
+    ray_release(session);
+    ray_retain(session = ray_list_get(r, 0));
+    ray_t* out = ray_list_get(r, 1);
+    for (int64_t i = 0; i < q_count(out); i++) lsp_send(link, ray_list_get(out, i));
+    ray_release(r);
+    return session;
+}
+
+static int lsp_main(int argc, char** argv) {
+    int link = q_worker_stdio_link();
+    if (link < 0) { fprintf(stderr, "q: -lsp cannot take over stdin and stdout: %s\n", strerror(errno)); return 2; }
+    if (!q_runtime_create(argc, argv)) { fprintf(stderr, "runtime init failed\n"); return 2; }
+    q_sys_own_process(true);
+    q_pq_bundle_only();
+    ray_t* on = q_ctx_eval_src(".lsp.on", 7);
+    if (RAY_IS_ERR(on)) {
+        lsp_failed(on, "");
+        q_sys_exit(2);
+    }
+    ray_t* stale = q_ctx_eval_src(".lsp.i.stale", 12);
+    if (RAY_IS_ERR(stale)) {
+        lsp_failed(stale, "");
+        q_sys_exit(2);
+    }
+    ray_t* idle = q_ctx_eval_src(".lsp.i.idle", 11);
+    if (RAY_IS_ERR(idle)) {
+        lsp_failed(idle, "");
+        q_sys_exit(2);
+    }
+    ray_t* session = RAY_NULL_OBJ;
+    bool   busy = false;
+    for (ray_t* first;; session = lsp_answer((ray_sock_t)link, idle, &session, 1, &busy)) {
+        if (!(first = lsp_next((ray_sock_t)link, !busy))) {
+            if (!busy || g_lsp.eof) break;
+            continue;
+        }
+        ray_t* batch = ray_list_append(ray_list_new(1), first);
+        ray_release(first);
+        for (ray_t* m; (m = lsp_next((ray_sock_t)link, false)); ray_release(m)) batch = ray_list_append(batch, m);
+        ray_t* skip = q_count(batch) > 1 ? q_eval_apply_value(stale, &batch, 1) : NULL;
+        if (skip && (RAY_IS_ERR(skip) || skip->type != RAY_BOOL || q_count(skip) != q_count(batch))) {
+            lsp_failed(skip, "not a boolean per message");
+            skip = NULL;
+        }
+        for (int64_t k = 0; k < q_count(batch); k++)
+            if (!skip || !((const uint8_t*)ray_data(skip))[k]) {
+                ray_t* args[2] = { session, ray_list_get(batch, k) };
+                bool   worked;
+                session = lsp_answer((ray_sock_t)link, on, args, 2, &worked);
+            }
+        ray_release(skip);
+        ray_release(batch);
+    }
+    q_sys_exit(1);
+    return 1;
+}
+
 static bool env_int(const char* name, int64_t* out) {
     const char* v = getenv(name);
     size_t      n = v ? strlen(v) : 0;
@@ -204,10 +360,19 @@ static bool option_apply(char** argv, int i) {
 }
 
 int main(int argc, char** argv) {
+    /* a peachq mode flag counts only as the first argument; after a script it is the script's own argument, as in kdb */
+    const char* mode = q_dotz_mode(argc, argv);
+    if (strcmp(mode, "-lint") == 0) return lint_main(argc, argv);
+    if (strcmp(mode, "-lsp") == 0) return lsp_main(argc, argv);
     int link = q_worker_link();
     if (q_dotz_has_flag(argc, argv, "-conn")) return conn_main(argc, argv);
+    if (link < 0 && strcmp(mode, "-stdio") == 0 && (link = q_worker_stdio_link()) < 0) {
+        fprintf(stderr, "q: -stdio cannot take over stdin and stdout: %s\n", strerror(errno));
+        return 2;
+    }
 
-    const char* script = q_dotz_file_arg(argc, argv);
+    int         file_at = q_dotz_file_at(argc, argv);
+    const char* script = file_at ? argv[file_at] : NULL;
     const char* port_spec = NULL;
     bool        classic = false;
     const char* auth_file = NULL;
@@ -217,7 +382,7 @@ int main(int argc, char** argv) {
     bool        want_help = false;
     const char* duckdb_main = getenv("PEACHQ_DUCKDB_MAIN");
 
-    for (int i = script ? 2 : 1; i < argc; i++) {
+    for (int i = 1; i < argc; i++) {
         const char*         a = argv[i];
         const q_dotz_opt_t* o = q_dotz_opt(a);
         if (!o) {
@@ -263,7 +428,7 @@ int main(int argc, char** argv) {
     const char** startup     = calloc((size_t)argc + 3, sizeof *startup);
     int          n_before = 0, n_after = 0, n_applied = 0;
     if (!eval_before || !eval_after || !applied || !startup) { fprintf(stderr, "q: out of memory\n"); return 1; }
-    for (int i = script ? 2 : 1; i < argc; i++) {
+    for (int i = 1; i < argc; i++) {
         const q_dotz_opt_t* o = q_dotz_opt(argv[i]);
         if (!o) continue;
         if (o->cmd) applied[n_applied++] = i;
@@ -425,8 +590,9 @@ int main(int argc, char** argv) {
     free(eval_after);
 
     if (link >= 0) {
-        /* A :pq:qspawn: worker: its startup ran as any q's (a script error does not stop it, kx's rule), then it serves
-         * its link — and any listener its script opened — until the link closes, and prints nothing of its own. */
+        /* A :pq:qspawn: worker or a -stdio process: its startup ran as any q's (a script error does not stop it, kx's
+         * rule), then it serves its link — and any listener its script opened — until the link closes, and prints
+         * nothing of its own. */
         if (poll && ray_ipc_serve_link(link) >= 0) ray_poll_run(poll);
         script_rc = 0;
     } else if (script_rc != 0) {

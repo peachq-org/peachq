@@ -79,6 +79,9 @@ and where a `\`-command merely shares the letter, it says so instead.
 | `-conn target` | run the file, `-eval` texts and stdin on a RUNNING q at any `hopen` target — a mode of its own, see below | **peachq only** | none |
 | `-save file` | with `-conn`: `set` the last result to this file, its ending choosing the format | **peachq only** | none |
 | `-ls` | with `-conn`: list the server's variables, tables first | **peachq only** | none |
+| `-stdio` | serve ONE kdb IPC link on stdin and stdout; everything printed goes to stderr — see below | **peachq only** | none |
+| `-lint path...` | lint q files and directories, running none of them — a mode of its own, see below | **peachq only** | none |
+| `-lsp` | a language server for editors: lint diagnostics over stdin and stdout — a mode of its own, see below | **peachq only** | none |
 
 `-h` / `--help` prints this table and exits when no file is named; after a file it is the file's own argument, in
 `.z.x`. Options are applied in the order they appear, after the display defaults (so `-c` wins over them) and before
@@ -195,6 +198,47 @@ bytes, rows, and the query flattened to one line of at most 200 characters — a
 display hid part of a table — rows beyond the console's height, columns beyond its width — it ends with
 `Full result saved locally to kdb binary: <path>` on stderr, so `-9!read1 `:<path>` gives the whole result back; a
 table shown whole is the full result and gets no notice, though its `.bin` is written and indexed all the same. `PEACHQ_QHIST=/some/dir` relocates the root; `PEACHQ_QHIST=` (set and empty) turns the history off.
+
+## `-stdio`: one IPC link on stdin and stdout
+
+```bash
+q -stdio [file.q] [-option ...]
+```
+
+For a program that starts q as a child and talks to it without a socket (an IDE). stdin and stdout carry one kdb
+IPC connection: the client sends the handshake (`user:password` may be empty, then the capability byte and `0x00`),
+q answers one capability byte (3, or less if the client offered less), then frames flow exactly as over TCP — sync,
+async, `-128h` errors, `neg[.z.w]` pushes. The 8-byte header's first byte is the byte order, `01` little-endian or
+`00` big-endian; both are accepted, as in kdb, and every reply is little-endian (`01`). Nothing else is ever written to stdout: `-1`, `show`, `0N!`, the startup
+file's output and every log line go to stderr, so a parent must drain stderr too or the child blocks on it. Every
+other flag means what it means for `q`; the file runs before the link is served. There is no console: stdin is
+never read as q text, and an error never stops at a `q))` prompt. SIGINT (`kill -INT <pid>`) stops the request
+running with `'stop` and the link carries on. When stdin closes, `.z.exit` runs and q exits 0; every frame sent
+before that reaches stdout first. The mode opens no TCP port of its own (`-p` still listens). Windows needs 10 1803 or later.
+
+## `-lint`: lint q files
+
+```bash
+q -lint path... [-format text|json|sarif]
+```
+
+Lints each file, and every `.q` file under each directory, with peachq's own parser; [qlint.md](qlint.md) is the
+guide. It is a mode of its own: no `QINIT`, no startup script, no `-eval` text and no listener runs, and the
+standard library is the one built in. Any other flag is a usage error (exit 2). Exit 0 clean, 1 an `error` finding,
+2 an input it cannot read.
+
+## `-lsp`: a language server for editors
+
+```bash
+q -lsp
+```
+
+Speaks the Language Server Protocol on stdin and stdout, so an editor shows lint findings as you type;
+[qlint.md](qlint.md#editors) says what it offers. Like `-lint` it is a mode of its own: no `QINIT`, no startup script,
+no `-eval` text and no listener runs, the standard library is the one built in, and every other argument is ignored.
+stdout carries protocol messages only; anything else goes to stderr. Exit 0 after the editor's `shutdown` and `exit`,
+1 when stdin closes first or `exit` comes without `shutdown`. Changes waiting together are linted once, at the newest
+version of each document.
 
 # Notes for dev
 

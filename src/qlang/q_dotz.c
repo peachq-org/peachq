@@ -66,7 +66,7 @@ static void win_wsa_ensure(void) {
  * producer; init/destroy are untouched. */
 static int    g_argc  = 0;
 static char** g_argv  = NULL;
-static bool   g_file  = false;   /* argv[1] is the file */
+static int    g_file  = 0;       /* argv index of the file; 0 = none */
 static bool   g_quiet = false;   /* `-q` on the command line (kdb .z.q) */
 
 /* door: a connection or message handler, which a forked worker resets to its startup value */
@@ -119,22 +119,32 @@ static const q_dotz_opt_t Q_OPTS[] = {
     { "-eval-before", 1, NULL, NULL }, { "-duckdb", 1, NULL, NULL }, { "-conn", 1, NULL, NULL },
 };
 
+static const char* const Q_MODES[] = { "-lint", "-lsp", "-stdio" };
+
+const char* q_dotz_mode(int argc, char** argv) {
+    for (size_t i = 0; argc > 1 && i < sizeof Q_MODES / sizeof *Q_MODES; i++)
+        if (strcmp(argv[1], Q_MODES[i]) == 0) return Q_MODES[i];
+    return "";
+}
+
 const q_dotz_opt_t* q_dotz_opt(const char* token) {
     for (size_t i = 0; i < sizeof Q_OPTS / sizeof *Q_OPTS; i++)
         if (strcmp(Q_OPTS[i].name, token) == 0) return &Q_OPTS[i];
     return NULL;
 }
 
-const char* q_dotz_file_arg(int argc, char** argv) {
-    return argc > 1 && argv[1][0] != '-' ? argv[1] : NULL;
+int q_dotz_file_at(int argc, char** argv) {
+    int i = argc > 2 && strcmp(argv[1], "-stdio") == 0 ? 2 : 1;
+    return i < argc && argv[i][0] != '-' ? i : 0;
 }
 
-/* argv[lo..hi) as a q list of strings, skipping every option and its parameters when `args` is set. */
+/* argv[lo..hi) as a q list of strings, skipping the file, every option and its parameters when `args` is set. */
 static ray_t* strings_list(int lo, int hi, bool args) {
     ray_t* out = ray_list_new(hi > lo ? hi - lo : 1);
     for (int i = lo; i < hi; i++) {
         const q_dotz_opt_t* o = args ? q_dotz_opt(g_argv[i]) : NULL;
         if (o) { i += o->nparam; continue; }
+        if (args && (i == g_file || (i == 1 && *q_dotz_mode(g_argc, g_argv)))) continue;
         ray_t* s = ray_charv(g_argv[i], (int64_t)strlen(g_argv[i]));
         out = ray_list_append(out, s);   /* append RETAINS */
         ray_release(s);
@@ -145,10 +155,10 @@ static ray_t* strings_list(int lo, int hi, bool args) {
 /* `.z.*` producers — each mints a FRESH owned ref (rc>=1), matching the
  * name-hook contract (the resolver returns an owned value or NULL). */
 static ray_t* z_f(void) {   /* the file as given; null sym when none */
-    const char* s = g_file ? g_argv[1] : "";
+    const char* s = g_file ? g_argv[g_file] : "";
     return ray_sym(ray_sym_intern(s, strlen(s)));
 }
-static ray_t* z_x(void) { return strings_list(g_file ? 2 : 1, g_argc, true); }
+static ray_t* z_x(void) { return strings_list(1, g_argc, true); }
 static ray_t* z_X(void) { return strings_list(0, g_argc, false); }
 
 /* ---- system / host / process producers (kdb .z.o/.z.i/.z.h/.z.u/.z.a) -------
@@ -402,14 +412,14 @@ ray_t* q_dotz_timer_thunk(void) {
 void q_dotz_init(int argc, char** argv) {
     g_argc  = argc;
     g_argv  = argv;
-    g_file  = q_dotz_file_arg(argc, argv) != NULL;
+    g_file  = q_dotz_file_at(argc, argv);
     g_quiet = q_dotz_has_flag(argc, argv, "-q");
 }
 
 bool q_dotz_quiet(void) { return g_quiet; }
 
 bool q_dotz_has_flag(int argc, char** argv, const char* flag) {
-    for (int i = q_dotz_file_arg(argc, argv) ? 2 : 1; i < argc; i++) {
+    for (int i = 1; i < argc; i++) {
         const q_dotz_opt_t* o = q_dotz_opt(argv[i]);
         if (o && strcmp(o->name, flag) == 0) return true;
         if (o) i += o->nparam;
@@ -487,6 +497,6 @@ void q_dotz_destroy(void) {
         if (g_door_boot[i]) { ray_release(g_door_boot[i]); g_door_boot[i] = NULL; }
     g_argc       = 0;
     g_argv       = NULL;
-    g_file       = false;
+    g_file       = 0;
     g_quiet      = false;
 }

@@ -120,6 +120,7 @@ int64_t q_env_qualify(int64_t ns_sym, int64_t member_sym);
  * tree can say which name was bound.  *ns (optional) is the namespace that
  * name sits in — `` `. `` at the root. */
 int64_t q_env_fullname(int64_t sym, int64_t* ns);
+int64_t q_env_fullname_in(int64_t ctx, int64_t sym, int64_t* ns);   /* the same under a `\d` the caller names */
 
 /* A namespace's own members by value KIND (`\v` `\f` `\a`, `tables`) — sorted,
  * never recursive; ns_sym 0 or `` `. `` is the root.  OWNED sym vector, or NULL

@@ -29,4 +29,9 @@ ray_t* q_worker_spawn(ray_t* argv, ray_t* tmo, const char* const log[2]);
 #define Q_WORKER_FD 3
 int q_worker_link(void);
 
+/* `-stdio` and `-lsp`: this process's link is its stdin and stdout.  stdin becomes the null device and fd 1 the stderr
+ * stream before anything else runs, so only frames ever reach the parent's stdout; the exit home delivers every frame
+ * the link sent before the process ends.  The link's fd, or -1 when the pipes cannot be taken over. */
+int q_worker_stdio_link(void);
+
 #endif

@@ -13,7 +13,6 @@
 #include "qlang/io/q_splay.h"   /* q_splay_zblocks/_asks — .Q.c.zblocks, .Q.c.asks */
 #include "table/dict.h"         /* ray_dict_find_sym — the `.q` roster probe */
 #include "mem/heap.h"           /* ray_tl_heap / BSIZEOF — .Q.gc pool bytes */
-#include "lang/internal.h"
 #include "table/sym.h"
 #include <string.h>
 #include <stdlib.h>
@@ -63,9 +62,9 @@ ray_t* q_dotq_cells_fn(ray_t* x) {
  * (peachq extension beside .Q.qt/.Q.qp; kdb has no .Q.ops).
  * The surface has TWO homes and this is their UNION (`impl` says which):
  *   `c  a Q_OPS[] row (src/qlang/q_ops.c) carrying a C build recipe;
- *   `q  the definition is q source in q.q.  Prefix keywords defined there get
- *       NO manifest row by design (docs/adding-q-function-guide.md) — the bare
- *       name resolves through `.q` — so they are gathered from that namespace,
+ *   `q  the definition is q source in q.q.  A prefix keyword defined there gets
+ *       no manifest row unless its purity is non-default — the bare name
+ *       resolves through `.q` — so they are gathered from that namespace,
  *       as are the QK_QSRC rows (a lexer row over a q.q body).
  * Columns: name lexclass monadic dyadic deterministic sideeffect family impl.
  * `monadic`/`dyadic` for an `impl`q` row is the RANK of the value that actually
@@ -73,8 +72,8 @@ ray_t* q_dotq_cells_fn(ray_t* x) {
  * manifest gives a recipe at that slot" — for the VARY prefix keywords
  * (ej/aj/wj...) that means "resolvable in prefix position", not arity 1.
  * `deterministic`/`sideeffect`/`family` are manifest data: an `impl`q` row with
- * no manifest row of its own carries the neutral 1b/0b, NOT an audit, and a NULL
- * family — `none is an operative lift-law value (exception-catalogue membership),
+ * no manifest row of its own carries 1b/0b, audited pure by the roster in
+ * qlib/test/qopsTest.q, and a NULL family — `none is an operative lift-law value (exception-catalogue membership),
  * so family is inapplicable here, not unclassified.
  * The x argument (`.Q.ops[]` passes `::`) is ignored. */
 static const char* dotq_lexclass_name(q_lex_class c, int64_t nm) {
@@ -137,11 +136,11 @@ ray_t* q_dotq_ops_fn(ray_t** args, int64_t nargs) {
             bm = r == 1;
             bd = r == 2;
         }
-        /* an alias row declares no metadata — describe the verb it names */
+        /* an alias row shares the family of the verb it names, but declares its own purity */
         const q_op_t* md = q_ops_alias_target(&ops[i]);
         if (!md) md = &ops[i];
         dotq_ops_row(c, &ok, nm, dotq_lexclass_name(ops[i].lex, nm), bm, bd,
-                     md->deterministic != 0, md->sideeffect != 0,
+                     ops[i].deterministic != 0, ops[i].sideeffect != 0,
                      md->family, qi >= 0 && !has_c ? "q" : "c");
     }
     for (int64_t j = 0; j < nsn && ok; j++) {

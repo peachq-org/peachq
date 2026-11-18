@@ -206,3 +206,28 @@ void q_comment_stmt_end(void) {
     g_firing = 0;
     ray_release(recs);
 }
+
+ray_t* q_comment_dry_claim(void) {
+    ray_t* hdr = g_pending;
+    g_pending = NULL;
+    return hdr;
+}
+
+/* Firing is held for the walk, so the file records it queues stay in hand; an enclosing statement's are set aside. */
+int q_comment_dry(const char* src, size_t n, q_ctx_stmt_fn fn, void* u, ray_t** header) {
+    ray_t* outer = g_claimed;
+    int firing = g_firing;
+    g_claimed = NULL;
+    g_firing = 1;
+    int rc = q_ctx_file_statements(src, n, fn, u);
+    *header = NULL;
+    for (int64_t i = 0; g_claimed && i < q_count(g_claimed); i++) {
+        ray_t* r = ((ray_t**)ray_data(g_claimed))[i];
+        if (q_count(r) == 3 && q_count(((ray_t**)ray_data(r))[2])) *header = ((ray_t**)ray_data(r))[2];
+    }
+    if (*header) ray_retain(*header);
+    if (g_claimed) ray_release(g_claimed);
+    g_claimed = outer;
+    g_firing = firing;
+    return rc;
+}

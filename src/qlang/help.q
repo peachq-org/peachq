@@ -258,11 +258,11 @@
   option:("-b";"-c r c";"-C r c";"-e 0|1|2";"-E 0|1|2";"-g 0|1";"-l";"-L";"-m path";"-o N";"-p N";"-P N";"-q";
           "-r :h:p";"-s N";"-S N";"-t N";"-T N";"-u file";"-U file";"-w N";"-W N";"-z 0|1";
           "-classic";"-eval \"src\"";"-eval-before \"src\"";"-h | --help";"--port N";"-duckdb path";
-          "-conn target";"-save file";"-ls");
+          "-conn target";"-save file";"-ls";"-stdio";"-lint path...";"-lsp");
   syscmd:`$("\\_";"\\c";"\\C";"\\e";"\\E";"\\g";"";"";"";"\\o";"\\p";"\\P";"";"\\r";"\\s";"\\S";"\\t";"\\T";"\\u";
-            "";"";"\\W";"\\z";"\\classic";"";"";"\\?cmdline";"\\p";"";"";"";"");
-  supported:01111100011110111011011111111111b;
-  new:      00000000000000000000000111111111b;
+            "";"";"\\W";"\\z";"\\classic";"";"";"\\?cmdline";"\\p";"";"";"";"";"";"";"");
+  supported:01111100011110111011011111111111111b;
+  new:      00000000000000000000000111111111111b;
   what:("block client write-access";"console size: rows and columns";"HTTP display size";
         "error-trap mode for client evals";"TLS server mode: 0 plain, 1 plain and TLS, 2 TLS only";"garbage-collection mode";
         "log updates to a file";"as -l, synchronous";"memory domain";"offset from UTC in hours";
@@ -276,7 +276,10 @@
         "the main DuckDB database is this file, not memory: \\?duckdb";
         "run the file, -eval texts and stdin on a RUNNING q at any hopen target; no other flag applies";
         "with -conn: set the last result to this file, its ending choosing csv, json, parquet or kdb binary";
-        "with -conn: list every variable on the server by namespace, tables first, whole"))
+        "with -conn: list every variable on the server by namespace, tables first, whole";
+        "serve one kdb IPC link on stdin and stdout; output goes to stderr";
+        "lint q files, running none of them: -format text|json|sarif; exit 0 clean, 1 errors, 2 unreadable";
+        "a language server for editors (lint diagnostics) on stdin and stdout, running no user code"))
 
 / .help.cmdline as page lines: `q -flag`, then the marker (- not supported,
 / * peachq only) and the \ command, then the meaning - padded as a table.
