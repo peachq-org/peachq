@@ -35,7 +35,7 @@ ray_t* q_parse_lang_tree(char letter, const char* p, int64_t n);
 ray_t* q_qsql_normalize_probe(const char* src, int ctx, int verb);
 
 /* True iff the statement's RESULT is an assignment's — the q console prints
- * nothing for `a:5` (statement sequences check their LAST statement).
+ * nothing for `a:5` (a sequence checks its own LAST statement; a nested `;[…]` block is never silent).
  * Consulted by the REPL/qdoc/remote-eval before printing. */
 int q_parse_is_assign(const ray_t* ast);
 
