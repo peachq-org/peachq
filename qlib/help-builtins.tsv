@@ -330,6 +330,7 @@ while	i:0;while[i<3;i+:1];i	repeat expressions while a condition holds
 .Q.ld	.Q.ld read0 `:script.q	group a script's lines into evaluable statements
 .Q.qt	.Q.qt ([]a:1 2)	tell whether a value is a table
 .Q.qp	.Q.qp trade	tell whether a table is partitioned
+.Q.nct	.Q.nct`	list every column of every table with its type number
 .Q.ps	.Q.ps[`trade;();();()]	run a select over each partition in turn
 .Q.p1	.Q.p1[`trade;2024.01.01;()]	select from one partition, for .Q.ps
 .Q.u	.Q.u	tell whether the partitions are date based

@@ -130,6 +130,13 @@
 .Q.i.absent:()!();
 / .Q.qp: a table's flip names where it lives - a plain symbol for a partitioned table, a directory for a splayed one.
 .Q.qp:{$[98h<>type x;0;-11h<>type v:value flip x;0;not":"=first string v]};
+/ .Q.nct: one row per column (table name n, column c, type number t; 0 for a nested or mixed column), read from meta
+/ so a splayed or partitioned table answers without reading data. Null ` lists every root table, leaving out one
+/ whose meta fails.
+.Q.nct:{[x]
+  describe:{[n;v] m:0!meta v; ([] n:(count m)#n; c:m`c; t:"h"$0^(.Q.t!til count .Q.t)m`t)};
+  if[not null x; :describe[x;x]];
+  ([] n:`symbol$(); c:`symbol$(); t:`short$()),raze {[describe;n] @[describe n;value[`.]n;()]}[describe] each tables`.};
 / The partitions of segments: their type letter (" " for none), the names and sorted values in each segment, and the
 / segment and value of every partition in partition order. An entry's type is the letter of the date, month or long
 / its name spells, " " for any other name and for a file (kb/partition.md:11).
