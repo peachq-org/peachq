@@ -124,8 +124,8 @@ int         q_handles_name_ok(const char* p, size_t n);   /* [a-zA-Z][a-zA-Z0-9_
 ray_t*      q_handles_pq_neg(ray_t* x);
 
 /* `` `:… `` sym-handle apply — the protocol arm (caller has checked
- * q_handles_sym_kind): ws/wss and http/https clients, else one-shot sync IPC
- * on a string argument; a file handle has no apply.  Args borrowed, result owned. */
+ * q_handles_sym_kind): ws/wss and http/https clients, a directory handle on symbols reads the files beneath it,
+ * else one-shot sync IPC on a string argument; any other file handle has no apply.  Args borrowed, result owned. */
 ray_t* q_handles_sym_apply(ray_t* head, ray_t** args, int64_t n);
 
 /* file/fifo -> close fd + deregister; else deregister + IPC close (dead
