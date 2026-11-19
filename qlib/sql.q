@@ -453,7 +453,8 @@
   p:$[-10h=type v; enlist v; v];
   $[10h<>type p; (::); (any p in "?[]\\\000") or "*" in 1_-1_p; (::); p]};
 / a text column under a cast between symbol and string, as (column;class row;SQL), :: for anything else.  `$c or `symbol$c
-/ of a string column is a symbol: the string without the blanks around it (ref/tok.md:119), the empty string for a NULL.
+/ of a string column is a symbol: the string without the spaces around it (ref/tok.md:119), cut at its first NUL byte, and
+/ the empty string for a NULL.
 / `symbol$c and string c of a symbol column are the column.  `$ of a symbol is 'type, and string of a string column the
 / strings of its chars: neither is such a cast.
 .sql.i.cast:{[cls;e]
@@ -461,7 +462,8 @@
   if[2=count e; :$[((string)~e 0) and `symbol=k; (c;@[.sql.i.class `utf8;`nullable;:;0b];c); (::)]];
   if[not (($)~e 0) and any e[1]~/:enlist each ``symbol; :(::)];
   s:.sql.i.class `symbol;
-  $[`string=k; (c;s;(`coalesce;(`trim;c);enlist `)); (`symbol=k) and e[1]~enlist `symbol; (c;s;c); (::)]};
+  x:(`coalesce;(`split_part;(`trim;c;(`chr;32));(`chr;0);1);enlist `);
+  $[`string=k; (c;s;x); (`symbol=k) and e[1]~enlist `symbol; (c;s;c); (::)]};
 / whether a where term reads only its own row: every head is a .sql.i.VERBS verb, int arithmetic, string, $ by a type
 / name or enlist of a literal list (any other head - an aggregate, fby, prev, a lambda - may read other rows), and no
 / vector but a constant (one item, or anywhere in the last argument of in, within or like, lit), since q pairs any
