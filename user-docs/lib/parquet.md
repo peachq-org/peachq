@@ -61,24 +61,12 @@ A URL is handed to DuckDB as-is: reading a parquet footer needs range reads, and
 them (it autoloads on first use). This is the one documented exception to the handles rule against combined
 transport-and-format implementations — peachq's own HTTP client never fetches the bytes.
 
-## Foreign files come back as DuckDB types
+## Foreign files read by one q type per DuckDB type
 
-A file peachq did not write carries no q schema, so you get what DuckDB reads: text is a string column (never
-symbols), `TIMESTAMP_MICROS` is `p`, `DATE` is `d`, `INT64` is `j`, `DOUBLE` is `f`, and a null is a null. Column
-names come through as-is, spaces and parentheses included:
-
-```q
-q)meta .parquet.read[`:data/bank_failures.parquet;();()]
-c             | t f a
---------------| -----
-c1            | j
-Bank          | C
-City          | C
-State         | C
-Date          | d
-Acquired by   | C
-Assets ($mil.)| f
-```
+A file peachq did not write carries no q schema, so each column reads by its DuckDB type: text is a string column
+(never symbols), `DECIMAL` a float, `TIME` a timespan, and a NULL is the q null. Column names come through as-is,
+spaces and parentheses included. [qSQL on DuckDB tables and parquet files](../qsql-foreign-tables.md) has the full
+mapping, the rules and the gotchas.
 
 ## The metadata verbs
 
