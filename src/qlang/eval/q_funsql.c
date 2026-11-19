@@ -556,12 +556,13 @@ static ray_t* where_attr(ray_t* tree, ray_t* t, ray_t* idx) {
 }
 
 /* Law 6: SUCCESSIVE refinement — each constraint sees only the rows the
- * previous ones kept; idx:=idx[where result].  Consumes idx0. */
+ * previous ones kept; idx:=idx[where result].  A symbol vector (a collapsed
+ * enlist) is that many bare-column constraints.  Consumes idx0. */
 static ray_t* where_fold(ray_t* c, ray_t* t, ray_t* idx0) {
     if (RAY_IS_ERR(idx0)) return idx0;
     if (!c || is_empty_gen(c) || (ray_is_vec(c) && q_count(c) == 0))
         return idx0;
-    if (c->type != RAY_LIST) { ray_release(idx0); return q_err(QE_TYPE); }
+    if (c->type != RAY_LIST && c->type != RAY_SYM) { ray_release(idx0); return q_err(QE_TYPE); }
     ray_t* idx = idx0;
     int64_t n = q_count(c);
     for (int64_t j = 0; j < n; j++) {
@@ -1171,17 +1172,12 @@ static ray_t* ques_select_from(ray_t** args, int64_t n, ray_t* names) {
     if (!lead) return ques_select_over(args, n, t, nk);
     ray_t* rest[6];
     memcpy(rest, args, (size_t)n * sizeof *rest);
-    /* not Drop: its result collapses two bare column names into a symbol vector, which is no constraint list */
-    int64_t nc = q_count(args[1]);
-    rest[1] = ray_list_new(nc - lead > 0 ? nc - lead : 1);
-    for (int64_t j = lead; j < nc && !RAY_IS_ERR(rest[1]); j++) {
-        ray_t* tree = q_index_elem_at(args[1], j);
-        rest[1] = ray_list_append(rest[1], tree);
-        ray_release(tree);
-    }
-    if (RAY_IS_ERR(rest[1])) {
+    ray_t* na = ray_i64(lead);
+    rest[1] = q_drop_wrap(na, args[1]);
+    ray_release(na);
+    if (!rest[1] || RAY_IS_ERR(rest[1])) {
         if (t && !RAY_IS_ERR(t)) ray_release(t);
-        return rest[1];
+        return rest[1] ? rest[1] : q_err(QE_TYPE);
     }
     ray_t* r = ques_select_over(rest, n, t, nk);
     ray_release(rest[1]);
@@ -1753,8 +1749,8 @@ static ray_t* bang_qsql(ray_t** args) {
             else if (q_type_is_dict(a)) {           /* UPDATE */
                 r = update_table(a, b, t, idx);
                 ray_release(idx);
-            } else if (is_empty_gen(a) || (is_symvec(a) && q_count(a) == 0)) {
-                /* law 19: delete rows ≡ the complement select */
+            } else if (is_symvec(a) && q_count(a) == 0) {
+                /* law 19: delete rows ≡ the complement select; () is no name list (funsql.md:570) */
                 ray_t* full = til_count(t);
                 ray_t* keep = RAY_IS_ERR(full) ? full : q_except_wrap(full, idx);
                 if (full != keep && !RAY_IS_ERR(full)) ray_release(full);
