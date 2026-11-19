@@ -1654,8 +1654,8 @@ static P parse_query(Parser *p) {
     /* qsql.md:168: a cols-vs-groups collision "throws a 'dup names for
      * cols/groups error during parse" — AT PARSE, so a script carrying the
      * bug fails to LOAD and the operator is alerted before the code runs.
-     * A within-phrase collision is NOT this law's (a derived name auto-aliases,
-     * a written duplicate dies at eval — q_funsql.c names_collide). */
+     * A within-phrase collision is NOT this law's: it auto-aliased above, so
+     * the check sees the suffixed names (`x:a,x:a by x1:a` collides on x1). */
     int64_t dup = verb == QSQL_V_SELECT ? qsql_cross_names_dup(A, B) : -1;
     if (dup >= 0) {
         ray_release(A); ray_release(B); ray_release(C);
@@ -2184,7 +2184,7 @@ static ray_t *qsql_convert_expr(ray_t *x) {
     return x;
 }
 
-/* a derived name in use suffixes 1,2,… (qsql.md:234 `c1 c11`) — never dropped */
+/* a name in use suffixes 1,2,… (qsql.md:234 `c1 c11`) — never dropped */
 static ray_t *qsql_alias_dedup(int64_t id, ray_t **aliases, int na) {
     int64_t used[QSQL_MAXCOLS];
     for (int j = 0; j < na; j++) used[j] = aliases[j]->i64;
@@ -2193,9 +2193,11 @@ static ray_t *qsql_alias_dedup(int64_t id, ray_t **aliases, int na) {
 }
 
 /* A phrase list's columns: an alias phrase keys on its written name (*named
- * set); a bare phrase derives its output name via qsql_derive_alias over the
- * converted phrase.  Fills the OWNED aliases/vals; answers the count. */
-static int qsql_phrase_cols(ray_t *phrases, ray_t **aliases, ray_t **vals, int *named) {
+ * set), suffixed like a derived one when `alias_written` (a select's list:
+ * the table it builds never holds one name twice); a bare phrase derives its
+ * output name via qsql_derive_alias over the converted phrase.  Fills the
+ * OWNED aliases/vals; answers the count. */
+static int qsql_phrase_cols(ray_t *phrases, ray_t **aliases, ray_t **vals, int *named, int alias_written) {
     int64_t n = q_count(phrases);
     ray_t **ph = (ray_t **)ray_data(phrases);
     int na = 0;
@@ -2203,7 +2205,7 @@ static int qsql_phrase_cols(ray_t *phrases, ray_t **aliases, ray_t **vals, int *
         ray_t *name = NULL, *val = NULL;
         named[na] = binding_node(ph[i], &name, &val);
         if (named[na]) {
-            aliases[na] = symlit_id(name->i64);
+            aliases[na] = alias_written ? qsql_alias_dedup(name->i64, aliases, na) : symlit_id(name->i64);
             vals[na]    = qsql_convert_expr(val);
         } else {
             ray_t *raw  = alias_unbind(ph[i]), *b = alias_binding(ph[i]);
@@ -2218,10 +2220,10 @@ static int qsql_phrase_cols(ray_t *phrases, ray_t **aliases, ray_t **vals, int *
 }
 
 /* select/update `a`, select/update by-key `b`: a name!expr DICT */
-static ray_t *qsql_norm_dict(ray_t *phrases) {
+static ray_t *qsql_norm_dict(ray_t *phrases, int verb) {
     ray_t *aliases[QSQL_MAXCOLS], *vals[QSQL_MAXCOLS];
     int named[QSQL_MAXCOLS];
-    int na = qsql_phrase_cols(phrases, aliases, vals, named);
+    int na = qsql_phrase_cols(phrases, aliases, vals, named, verb == QSQL_V_SELECT);
     return qsql_build_dict(aliases, vals, na);       /* consumes aliases/vals */
 }
 
@@ -2238,13 +2240,13 @@ static ray_t *qsql_norm_exec_a(ray_t *phrases) {
         if (!v || RAY_IS_ERR(v)) return v;
         return q_list(&v, 1);
     }
-    return qsql_norm_dict(phrases);                  /* named / multiple -> dict */
+    return qsql_norm_dict(phrases, QSQL_V_EXEC);     /* named / multiple -> dict */
 }
 
 /* by-phrase `b`: select/update use the name!expr dict; exec uses the bare By-symbol for one bare column, else the
  * same dict, via qsql_exec_by. */
 static ray_t *qsql_norm_by(ray_t *phrases, int verb) {
-    if (verb != QSQL_V_EXEC) return qsql_norm_dict(phrases);
+    if (verb != QSQL_V_EXEC) return qsql_norm_dict(phrases, verb);
     int64_t n = q_count(phrases);
     ray_t **ph = (ray_t **)ray_data(phrases);
     /* `by 0b` is already a functional b-value: pass it through so exec takes the
@@ -2255,7 +2257,7 @@ static ray_t *qsql_norm_by(ray_t *phrases, int verb) {
     }
     ray_t *bk[QSQL_MAXCOLS], *bv[QSQL_MAXCOLS];
     int bnamed[QSQL_MAXCOLS];
-    int nb = qsql_phrase_cols(phrases, bk, bv, bnamed);
+    int nb = qsql_phrase_cols(phrases, bk, bv, bnamed, 0);
     return qsql_exec_by(bk, bv, bnamed, nb);         /* consumes bk/bv */
 }
 
@@ -2305,7 +2307,7 @@ static ray_t *qsql_normalize_phrases(ray_t *phrase_list, QCtx origin, int verb) 
     case QSQL_V_DELETE: return qsql_norm_delete_a(phrase_list);
     default:                                         /* SELECT / UPDATE */
         if (q_count(phrase_list) == 0) return ray_list_new(0);   /* select () */
-        return qsql_norm_dict(phrase_list);
+        return qsql_norm_dict(phrase_list, verb);
     }
 }
 

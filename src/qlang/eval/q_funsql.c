@@ -593,24 +593,31 @@ static ray_t* sel_cols(ray_t* rng, ray_t* t, ray_t* idx, int conform) {
     return vals;
 }
 
-/* OWNER RULING 2026-08-05: qSQL must NEVER silently answer with duplicate
- * output column names — `select res,pass,total,tim,path,gg:t.path,...` once
- * produced two `tim` columns and the defect surfaced far downstream; default
- * to 'dup.  STRICTER than kdb here, deliberately: basics/qsql.md:168 says kdb
- * AUTO-ALIASES a collision WITHIN one phrase list (`select a,a`, `by c,c`)
- * and rejects only cols-vs-groups (that half lives at the PARSE seam,
- * q_parse.c, per the same doc line's "during parse").  These eval seams also
- * cover the functional door (`?[t;();0b;`a`a!...]`).  Raw construction stays
- * permissive — `` `p`o`p!1 2 3 `` and `flip` of such a dict are legal values,
- * so `!`/`flip` must not learn this rule. */
-static int names_collide(ray_t* names) {
-    if (!names || names->type != RAY_SYM) return 0;
-    int64_t n = q_count(names);
-    const int64_t* s = (const int64_t*)ray_data(names);
-    for (int64_t i = 1; i < n; i++)
-        for (int64_t j = 0; j < i; j++)
-            if (s[i] == s[j]) return 1;
-    return 0;
+/* A qSQL result table never holds one name twice: a collision WITHIN one name
+ * list renames the later column by the derived-name suffix (basics/qsql.md:168,
+ * :234 `c1 c11`).  The parser already aliased a select's list (where the
+ * cols-vs-groups 'dup lives); this seam covers the functional door and grouped
+ * exec.  Raw construction stays permissive — `` `p`o`p!1 2 3 `` and `flip` of
+ * such a dict are legal values, so `!`/`flip` must not learn this rule.
+ * Both args borrowed, as q_bang's are. */
+static ray_t* bang_unique(ray_t* names, ray_t* vals) {
+    int64_t n = names && names->type == RAY_SYM ? q_count(names) : 0;
+    ray_t* out = NULL;
+    for (int64_t i = 1; i < n && !out; i++)
+        for (int64_t j = 0; j < i && !out; j++)
+            if (ray_read_sym(ray_data(names), i, RAY_SYM, names->attrs) ==
+                ray_read_sym(ray_data(names), j, RAY_SYM, names->attrs))
+                out = ray_sym_vec_new(RAY_SYM_W64, n);
+    if (!out) return q_bang(names, vals);
+    for (int64_t i = 0; i < n && !RAY_IS_ERR(out); i++) {
+        int64_t id = ray_read_sym(ray_data(names), i, RAY_SYM, names->attrs);
+        id = q_name_dedup(id, (const int64_t*)ray_data(out), i, 0);
+        out = ray_vec_append(out, &id);
+    }
+    if (RAY_IS_ERR(out)) return out;
+    ray_t* d = q_bang(out, vals);
+    ray_release(out);
+    return d;
 }
 
 /* The AGGREGATE law (basics/qsql.md:430): phrases that ALL gave atoms make the
@@ -639,14 +646,13 @@ static ray_t* agg_conform(ray_t* vals) {
  * a column rides that column's length.  A By key instead spans the rows, so it
  * conforms first; an all-atom phrase list takes the aggregate law above. */
 static ray_t* cols_table(ray_t* names, ray_t* rng, ray_t* t, ray_t* idx, int conform) {
-    if (names_collide(names)) return q_err(QE_DUP);
     ray_t* vals = sel_cols(rng, t, idx, conform);
     if (RAY_IS_ERR(vals)) return vals;
     int dict = q_type_is_dict(t);            /* a dict source's Select is names!values: the flip back */
     if (dict) { ray_t* c = q_list_collapse(vals); ray_release(vals); vals = c; }
     else vals = agg_conform(vals);
     if (!vals || RAY_IS_ERR(vals)) return vals ? vals : q_err(QE_TYPE);
-    ray_t* d = q_bang(names, vals);
+    ray_t* d = bang_unique(names, vals);
     ray_release(vals);
     if (!d || RAY_IS_ERR(d) || dict) return d ? d : q_err(QE_TYPE);
     ray_t* r = q_flip_wrap(d);
@@ -726,8 +732,7 @@ static ray_t* limit_apply(ray_t* nspec, ray_t* r) {
 
 /* a value table from names + ready column list (no conform, no re-eval) */
 static ray_t* named_table(ray_t* names, ray_t* cols) {
-    if (names_collide(names)) return q_err(QE_DUP);
-    ray_t* d = q_bang(names, cols);
+    ray_t* d = bang_unique(names, cols);
     if (!d || RAY_IS_ERR(d)) return d ? d : q_err(QE_TYPE);
     ray_t* r = q_flip_wrap(d);
     ray_release(d);

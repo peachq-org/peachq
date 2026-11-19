@@ -311,6 +311,7 @@
 .help.i.r[`.Q.ld;".Q.ld read0 `:script.q              /                         group a script's lines into evaluable statements"]
 .help.i.r[`.Q.qt;".Q.qt ([]a:1 2)                     / 1b                      tell whether a value is a table"]
 .help.i.r[`.Q.qp;".Q.qp trade                         /                         tell whether a table is partitioned"]
+.help.i.r[`.Q.nct;".Q.nct`                             /                         list every column of every table with its type number"]
 .help.i.r[`.Q.ps;".Q.ps[`trade;();();()]              /                         run a select over each partition in turn"]
 .help.i.r[`.Q.p1;".Q.p1[`trade;2024.01.01;()]         /                         select from one partition, for .Q.ps"]
 .help.i.r[`.Q.u;".Q.u                                /                         tell whether the partitions are date based"]
