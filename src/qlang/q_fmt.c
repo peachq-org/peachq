@@ -270,6 +270,19 @@ static size_t char_esc(unsigned char ch, char out[8]);   /* fwd — fmt_dict_ele
 static int elem_tok(ray_t* a, char* out, size_t n);      /* fwd — THE cell law, defined below */
 static int col_uniform_type(ray_t* col);                 /* fwd — its precondition */
 
+/* A column's gaps, asked ONCE per column (the scan is the whole column): a null is a gap in any column, an
+ * empty-list cell only in a column of nothing else (peachq#101's all-() column; a kdb .Q.s golden prints ()
+ * beside other values). */
+enum { CELL_GAP_NULL = 1, CELL_GAP_EMPTY = 2 };
+static int cell_gaps(ray_t* col) {
+    if (!col || col->type != RAY_LIST) return CELL_GAP_NULL;
+    int64_t n = q_count(col);
+    ray_t** e = (ray_t**)ray_data(col);
+    for (int64_t i = 0; i < n; i++)
+        if (!q_type_is_empty_list(e[i])) return CELL_GAP_NULL;
+    return CELL_GAP_NULL | CELL_GAP_EMPTY;
+}
+
 /* A token that fills its buffer is read as a cut one; an exact fit costs the caller one retry. */
 static int tok_filled(const char* out, size_t n) { return strlen(out) + 1 >= n; }
 
@@ -343,13 +356,13 @@ static int col_uniform_singleton(ray_t* col) {
 }
 
 
-/* THE cell renderer — table, keyed table, dict and aligned row.  `blank_null` =
- * a COLUMN, where a null shows as a gap (ref/lj.md, ref/log.md:50-52) and an empty
- * general list `()` is blank, as the prompt prints it (peachq#101); a general
+/* THE cell renderer — table, keyed table, dict and aligned row.  `gaps` (non-zero
+ * = a COLUMN, cell_gaps) says which cells show as a gap: a null (ref/lj.md,
+ * ref/log.md:50-52), and an empty general list `()` under CELL_GAP_EMPTY; a general
  * list keeps its token, and so does the generic null `::` in any cell (owner
  * witness 2026-10-08).  A cell sheds the suffix only where the CONTAINER names
  * the type — `col_uniform_type`, the same gate the dict rows use. */
-static int cell_into(ray_t* col, int64_t row, int blank_null, char* out, size_t outsz) {
+static int cell_into(ray_t* col, int64_t row, int gaps, char* out, size_t outsz) {
     out[0] = '\0';
     if (col && col->type == -RAY_STR) {     /* char-column shim: bare char */
         size_t l = ray_str_len(col);
@@ -399,11 +412,11 @@ static int cell_into(ray_t* col, int64_t row, int blank_null, char* out, size_t 
     ray_t* c  = ray_at_fn(col, ia);
     ray_release(ia);
     if (!c || RAY_IS_ERR(c)) { if (c) ray_release(c); return 0; }
-    if (blank_null && q_type_is_empty_list(c)) {
+    if ((gaps & CELL_GAP_EMPTY) && q_type_is_empty_list(c)) {
         ray_release(c);
         return 0;
     }
-    if (blank_null && ray_is_atom(c) && c->type != -RAY_STR &&
+    if ((gaps & CELL_GAP_NULL) && ray_is_atom(c) && c->type != -RAY_STR &&
         c->type != -RAY_SYM && !Q_IS_GENERIC_NULL(c) && RAY_ATOM_IS_NULL(c)) {
         ray_release(c);
         return 0;
@@ -424,8 +437,8 @@ void q_fmt_cell(ray_t* col, int64_t row, int blank_null, char* out, size_t outsz
 }
 
 /* The cell whole, or as wide as b may get. */
-static const char* cell_text(ray_t* col, int64_t row, qcell* b) {
-    while (cell_into(col, row, 1, b->s, b->cap) && qcell_grow(b)) {}
+static const char* cell_text(ray_t* col, int64_t row, int gaps, qcell* b) {
+    while (cell_into(col, row, gaps, b->s, b->cap) && qcell_grow(b)) {}
     return b->s;
 }
 
@@ -451,7 +464,7 @@ static int dict_is_tabular(ray_t* val) {
 }
 
 /* A column of same-length simple vectors is a matrix: its per-position widths, else n == 0 and cells render alone. */
-typedef struct { int64_t n; int* w; int st[16]; } col_mx;
+typedef struct { int64_t n; int* w; int st[16]; int gaps; } col_mx;
 
 static int is_matrix(ray_t** e, int64_t n);   /* fwd */
 static int* matrix_widths(ray_t** e, int64_t nr, int64_t nc, int blank_null, int64_t lim, int64_t* nw,
@@ -459,7 +472,7 @@ static int* matrix_widths(ray_t** e, int64_t nr, int64_t nc, int blank_null, int
 static int matrix_row_str(ray_t* row, int64_t nc, const int* w, char* out, size_t outsz);   /* fwd */
 
 static void col_mx_init(col_mx* m, ray_t* col, int64_t nr, size_t lim) {
-    m->n = 0; m->w = NULL;
+    m->n = 0; m->w = NULL; m->gaps = cell_gaps(col);
     int64_t n = col && col->type == RAY_LIST ? q_count(col) : 0;
     ray_t** e = n > 0 ? (ray_t**)ray_data(col) : NULL;
     for (int64_t i = 0; i < n; i++)
@@ -476,7 +489,7 @@ static void col_mx_free(col_mx* m, int64_t nc) {
 }
 
 static const char* col_cell(ray_t* col, const col_mx* m, int64_t r, qcell* b) {
-    if (!m->n) return cell_text(col, r, b);
+    if (!m->n) return cell_text(col, r, m->gaps, b);
     while (matrix_row_str(((ray_t**)ray_data(col))[r], m->n, m->w, b->s, b->cap) && qcell_grow(b)) {}
     return b->s;
 }
@@ -1199,7 +1212,7 @@ static void qp_line(qp_out* o, const char* s, int32_t cols) {
 
 /* ---- columns ------------------------------------------------------------- */
 
-typedef struct { ray_t* col; ray_t* side; int64_t at; char name[QP_CELL]; const char* type; } qp_col;
+typedef struct { ray_t* col; ray_t* side; int64_t at; char name[QP_CELL]; const char* type; int gaps; } qp_col;
 
 /* Type-row name via q_type_qname (the cast home); char-column shim = `char`
  * (as `key x` names it); a nested/mixed list has no vector-type name — blank. */
@@ -1222,6 +1235,7 @@ static int64_t qp_take(ray_t* t, qp_col* cs, int64_t at, int64_t max) {
         cs[at].at   = c;
         cs[at].col  = side_col(t, c);                /* borrowed */
         cs[at].type = qp_typename(cs[at].col);
+        cs[at].gaps = cell_gaps(cs[at].col);
     }
     return at;
 }
@@ -1256,7 +1270,7 @@ static void qp_widths(qp_col* cs, int64_t nc, int64_t shown, int* w, qcell* cb) 
         int t = (int)strlen(cs[c].type);
         if (t > m) m = t;
         for (int64_t r = 0; r < shown; r++) {
-            int l = (int)strlen(cell_text(cs[c].col, r, cb));
+            int l = (int)strlen(cell_text(cs[c].col, r, cs[c].gaps, cb));
             if (l > m) m = l;
         }
         w[c] = m;
@@ -1537,7 +1551,7 @@ static void fmt_pipe_render(ray_t* val, char* buf, size_t bufsz, int* trunc) {
 
     for (int64_t r = 0; r < shown; r++) {
         p = 0;
-        for (int64_t c = 0; c < nc; c++) qp_cell(line, lsz, &p, cell_text(cs[c].col, r, &cb), w[c]);
+        for (int64_t c = 0; c < nc; c++) qp_cell(line, lsz, &p, cell_text(cs[c].col, r, cs[c].gaps, &cb), w[c]);
         qp_cell(line, lsz, &p, NULL, 0);
         qp_line(&o, line, cols);
     }
