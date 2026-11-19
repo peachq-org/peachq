@@ -27,13 +27,19 @@
 / @ignore
 .duckdb.call:{[c;q;sync] if[not sync; '`domain]; .duckdb.lastsql::q; .duckdb.i.exec[c;q]}
 / @ignore
-.duckdb.bind:{[c;t] (key .duckdb.i.meta[c;t])`c}
+.duckdb.bind:{[c;t] $[.duckdb.i.foreign[c;t];.duckdb.i.ftable[c;t]`cols;(key .duckdb.i.meta[c;t])`c]}
 / @ignore
 .duckdb.rebind:{[c;t] .duckdb.i.unbind[c;t]; .duckdb.bind[c;t]}
 / @ignore
 .duckdb.info:{[c;t] .duckdb.i.info[c;t]}
-/ A table of the handle's catalog as a q table.
-.duckdb.get:{[c;t] .duckdb.i.get[c;t]}
+/ A table of the handle's catalog as a q table.  A table q wrote reads back as written.  Any other table reads by one q type
+/ per DuckDB type, with no companion columns: NULL, INT_MIN and NaN are the q null, a NULL VARCHAR is "", a NULL BOOLEAN 0b,
+/ a NULL list empty; VARCHAR is a string, DECIMAL a float, TIME a timespan, TIMESTAMPTZ its UTC instant; a date or timestamp
+/ outside q's range is 'duckdb; a column whose type q does not hold is left out (.duckdb.hidden names them).  Rows come in
+/ rowid order where the table has one.  .duckdb.getx and SQL read every column exactly.
+.duckdb.get:{[c;t]
+  if[not .duckdb.i.foreign[c;t]; :.duckdb.i.get[c;t]];
+  .[.duckdb.i.fpull;(c;.duckdb.i.ftable[c;t]);{[c;t;e] if[.duckdb.i.stale c; .duckdb.i.unbind[c;t]]; 'e}[c;t]]}
 / Create or replace a table of the handle's catalog from a q table, or from the pair .duckdb.getx answers.
 .duckdb.set:{[c;t;d] .duckdb.i.set[c;t;d]; t}
 / @ignore
@@ -41,7 +47,16 @@
 / @ignore
 .duckdb.upsert:.duckdb.append
 / The meta of a table of the handle's catalog, read from DuckDB without fetching a row.
-.duckdb.meta:{[c;t] .duckdb.i.meta[c;t]}
+.duckdb.meta:{[c;t]
+  if[not .duckdb.i.foreign[c;t]; :.duckdb.i.meta[c;t]];
+  v:.duckdb.i.ftable[c;t]; n:count v`cols; ([c:v`cols] t:v`t; f:n#`; a:n#`)}
+/ The columns of a table that q does not show because it has no type for theirs: absent from cols, meta, get and select,
+/ read by SQL and .duckdb.getx.  A table q wrote hides none.
+/ @return a table ([] col; dtype), dtype as DuckDB declares it
+/ @eg
+/ .duckdb.exec[.duckdb.main[];"CREATE OR REPLACE TABLE u AS SELECT 1 AS a, 1::HUGEINT AS h"]
+/ .duckdb.hidden[.duckdb.main[];`u]
+.duckdb.hidden:{[c;t] $[.duckdb.i.foreign[c;t];.duckdb.i.ftable[c;t]`hidden;([] col:0#`; dtype:())]}
 
 / Run SQL on a handle and answer the result as a table; a statement without a result answers ::.  sql is a string, or the
 / pair (string;dict) binding each $name by name or (string;list) binding $1, $2 ... by position; values are atoms or strings
@@ -93,6 +108,82 @@
 / @ignore
 .duckdb.i.file:{[f] .duckdb.i.lit $[-11h=type f;$[":"=first s:string f;1_s;s];10h=type f;f;'`type]}
 
+/ The foreign view, how a table without q's schema reads: a rule per logical name of .duckdb.types[], no rule = hidden.
+/ @ignore
+.duckdb.i.FMIN:`int16`int32`int64!("-32768";"-2147483648";"-9223372036854775808")
+/ @ignore
+.duckdb.i.FNULL:`float32`float64`guid!("'NaN'";"'NaN'";"'00000000-0000-0000-0000-000000000000'")
+/ @ignore
+.duckdb.i.FZERO:`utf8`bool`uint8`bytes!("''";"false";"0";"''::BLOB")
+/ @ignore
+.duckdb.i.FCAST:`decimal`timeus!("DOUBLE";"TIME_NS")
+/ the first and last instant of each grain that reads as a q timestamp
+/ @ignore
+.duckdb.i.FSPAN:`timestampsec`timestampms`timestampus`timestamp!(("1707-09-22 00:12:44";"2262-04-11 23:47:16");
+  ("1707-09-22 00:12:43.146";"2262-04-11 23:47:16.854");("1707-09-22 00:12:43.145225";"2262-04-11 23:47:16.854775");
+  ("1707-09-22 00:12:43.145224194";"2262-04-11 23:47:16.854775806"))
+/ @ignore
+.duckdb.i.quote:{[s] "\"",ssr[s;"\"";"\"\""],"\""}
+/ @ignore
+.duckdb.i.fguard:{[nm;x;ok]
+  "CASE WHEN ",x," IS NULL OR NOT isfinite(",x,") OR ",ok," THEN ",x,
+    " ELSE error(",(.duckdb.i.lit "column ",nm,": a value outside q's range"),") END"}
+/ One value x of logical lg and DuckDB type dt as the SQL that reads it, () for a logical with no rule; nm names the column
+/ in an error.  TINYINT, USMALLINT, UINTEGER and TIME_NS widen into a carrier whose null no value of theirs reaches.
+/ @ignore
+.duckdb.i.fwrap:{[nm;lg;dt;x]
+  $[lg in key .duckdb.i.FMIN;"nullif(",x,", (",.duckdb.i.FMIN[lg],")::",dt,")";
+    lg in key .duckdb.i.FNULL;"nullif(",x,", ",.duckdb.i.FNULL[lg],"::",dt,")";
+    lg in key .duckdb.i.FZERO;"coalesce(",x,", ",.duckdb.i.FZERO[lg],")";
+    lg=`categorical;"coalesce(CAST(",x," AS VARCHAR), '')";
+    lg=`bitstring;
+      "coalesce(list_transform(range(bit_length(",x,")), lambda _q_bit: get_bit(",x,", _q_bit::INTEGER) = 1), [])";
+    lg in key .duckdb.i.FCAST;"CAST(",x," AS ",.duckdb.i.FCAST[lg],")";
+    lg=`date;.duckdb.i.fguard[nm;x;"date_diff('day', DATE '2000-01-01', ",x,") >= -2147483646"];
+    lg=`timestamptz;.z.s[nm;`timestampus;"TIMESTAMP";"timezone('UTC', ",x,")"];
+    lg in key .duckdb.i.FSPAN;
+      .duckdb.i.fguard[nm;x;x," BETWEEN ",(" AND " sv {[dt;b] "'",b,"'::",dt}[dt] each .duckdb.i.FSPAN lg)];
+    lg in `int8`uint16`uint32`timens;x;
+    ()]}
+/ One column, or one level of a list, x the SQL naming it: (sql;meta char;dtype;logical), the last two the schema row the read
+/ needs ("" for none); () when the type is hidden.  ty is .duckdb.types[]'s canon rows, dtype!(logical;ktype).
+/ @ignore
+.duckdb.i.fcol:{[ty;nm;dt;x;depth]
+  if["]"=last dt;
+    el:(i:last where dt="[")#dt; v:"x",string depth;
+    if[()~e:.z.s[ty;nm;el;v;depth+1]; :()];
+    src:$["[]"~i _ dt;x;"CAST(",x," AS ",el,"[])"];
+    :("coalesce(",$[v~e 0;src;"list_transform(",src,", lambda ",v,": ",e[0],")"],", [])";$[e[1] in .Q.a;upper e 1;" "];
+      $[count e 2;e[2],"[]";""];$[count e 2;`$"list(",string[e 3],")";`])];
+  if[not (b:`$first "(" vs dt) in key ty; :()];
+  if[()~w:.duckdb.i.fwrap[nm;lg:ty[b] 0;string b;x]; :()];
+  sym:lg=`categorical;
+  (w;$[lg in key .duckdb.i.FCAST;ty[`$.duckdb.i.FCAST lg] 1;ty[b] 1];$[sym;"VARCHAR";""];$[sym;`symbol;`])}
+/ THE foreign view of a source, for a pull and for a push: rel its FROM text, sch its columns ([] col; dtype) as DuckDB declares
+/ them, order its row-number expression ("" for none).  Answers sel, the SELECT list; cols and t, what q shows and its meta
+/ chars; schema, the rows .duckdb.exec's triple needs beside the statement; hidden, the columns left out.
+/ @ignore
+.duckdb.i.fview:{[rel;sch;order]
+  ty:exec dtype!flip (logical;ktype) from .duckdb.types[] where canon;
+  qn:.duckdb.i.quote each string sch`col;
+  r:.duckdb.i.fcol[ty]'[string sch`col;sch`dtype;qn;0];
+  j:where 0=count each r; i:where 0<count each r; s:i where 0<count each r[i;2];
+  `rel`order`sel`cols`t`schema`hidden!(rel;order;", " sv {[e;q] e[0]," AS ",q}'[r i;qn i];sch[`col] i;"c"$r[i;1];
+    ([] col:sch[`col] s; dtype:r[s;2]; logical:r[s;3]);([] col:sch[`col] j; dtype:sch[`dtype] j))}
+/ @ignore
+.duckdb.i.foreign:{[c;t] 0=count .duckdb.i.schema[c;t]}
+/ @ignore
+.duckdb.i.ftable:{[c;t]
+  sch:select col, dtype from .duckdb.i.info[c;t]`schema;
+  .duckdb.i.fview[.duckdb.i.qname t;sch;$[`rowid in sch`col;"";"rowid"]]}
+/ The rows of a foreign view.  A view has no rowid: DuckDB's refusal of the order is answered by the same read without it.
+/ @ignore
+.duckdb.i.fpull:{[c;v]
+  if[0=count v`cols; '`type];
+  q:{[v;o] s:"SELECT ",v[`sel]," FROM ",v[`rel],$[count o;" ORDER BY ",o;""]; $[count v`schema;(s;();v`schema);s]}[v];
+  .[.duckdb.exec;(c;q v`order);{[c;v;q;e]
+    if[("rowid"~v`order) and .duckdb.err[c] like "Binder Error: Referenced column \"rowid\"*"; :.duckdb.exec[c;q ""]]; 'e}[c;v;q]]}
+
 / @ignore
 .duckdb.i.read1:{[url]
   r:.duckdb.exec[.duckdb.main[];"SELECT content FROM read_blob(",(.duckdb.i.file url),")"];
@@ -142,7 +233,7 @@
 / .duckdb.unsafeText[.duckdb.main[];`u]
 .duckdb.unsafeText:{[handle;tableName]
   names:1_"\n" vs .duckdb.i.unsafeExecText[handle;"SELECT column_name FROM (DESCRIBE ",(.duckdb.i.qname tableName),")"];
-  quoted:{"\"",ssr[x;"\"";"\"\""],"\""} each names;
+  quoted:.duckdb.i.quote each names;
   r:"\n" vs .duckdb.i.unsafeExecText[handle;"SELECT ",(", " sv {x,"::VARCHAR AS ",x} each quoted)," FROM ",(.duckdb.i.qname tableName)," ORDER BY rowid"];
   flip (`$" | " vs r 0)!$[count 1_r; flip " | " vs/: 1_r; (count names)#enlist ()]}
 
@@ -204,12 +295,12 @@
 / @ignore
 .duckdb.i.push:{[c;rt]
   .duckdb.lastpush::(::);
-  if[.duckdb.pushdown and -11h=type rt 0;
+  if[.duckdb.pushdown;
     r:@[.duckdb.i.pushed[c];rt;{[c;rt;e] if[not .duckdb.i.stale c; :(::)]; .duckdb.i.unbind[c;rt 0];
       @[.duckdb.i.pushed[c];rt;{[e] ::}]}[c;rt]];
     if[not (::)~r; :r]];
-  if[$[-11h=type rt 0;.duckdb.i.big[c;rt 0];0b]; .duckdb.i.maxrows[c;rt 0;"j"$.duckdb.maxrows]];
-  t:$[10h=type rt 0;.duckdb.exec[c;"SELECT * FROM ",rt 0];.duckdb.get[c;rt 0]]; (?) . (enlist t),1_rt}
+  if[.duckdb.i.big[c;rt 0]; .duckdb.i.maxrows[c;rt 0;"j"$.duckdb.maxrows]];
+  (?) . (enlist .duckdb.get[c;rt 0]),1_rt}
 / @ignore
 .duckdb.qsql:{[c;cl;tree]
   node:{[cl;nd]
