@@ -39,7 +39,10 @@
 / rowid order where the table has one.  .duckdb.getx and SQL read every column exactly.
 .duckdb.get:{[c;t]
   if[not .duckdb.i.foreign[c;t]; :.duckdb.i.get[c;t]];
-  .[.duckdb.i.fpull;(c;.duckdb.i.ftable[c;t]);{[c;t;e] if[.duckdb.i.stale c; .duckdb.i.unbind[c;t]]; 'e}[c;t]]}
+  / the catalog no longer has what the bound entry lists (DDL from another connection): bind afresh and read once more
+  .[.duckdb.i.fpull;(c;.duckdb.i.ftable[c;t]);{[c;t;e]
+    if[not any .duckdb.err[c] like/: ("Binder Error*";"Catalog Error*"); 'e];
+    .duckdb.i.unbind[c;t]; .duckdb.i.fpull[c;.duckdb.i.ftable[c;t]]}[c;t]]}
 / Create or replace a table of the handle's catalog from a q table, or from the pair .duckdb.getx answers.
 .duckdb.set:{[c;t;d] .duckdb.i.set[c;t;d]; t}
 / @ignore
@@ -136,8 +139,7 @@
     lg in key .duckdb.i.FNULL;"nullif(",x,", ",.duckdb.i.FNULL[lg],"::",dt,")";
     lg in key .duckdb.i.FZERO;"coalesce(",x,", ",.duckdb.i.FZERO[lg],")";
     lg=`categorical;"coalesce(CAST(",x," AS VARCHAR), '')";
-    lg=`bitstring;
-      "coalesce(list_transform(range(bit_length(",x,")), lambda _q_bit: get_bit(",x,", _q_bit::INTEGER) = 1), [])";
+    lg=`bitstring;"coalesce(CAST(string_split(CAST(",x," AS VARCHAR), '') AS BOOLEAN[]), [])";
     lg in key .duckdb.i.FCAST;"CAST(",x," AS ",.duckdb.i.FCAST[lg],")";
     lg=`date;.duckdb.i.fguard[nm;x;"date_diff('day', DATE '2000-01-01', ",x,") >= -2147483646"];
     lg=`timestamptz;.z.s[nm;`timestampus;"TIMESTAMP";"timezone('UTC', ",x,")"];
