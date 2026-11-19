@@ -99,8 +99,8 @@
   rel:.parquet.i.rel[file;opts]; c:.duckdb.main[];
   if[not .duckdb.i.none query; if[not (?)~query 0; '`type]];
   if[count kv:.parquet.i.kv[c;file]; :.parquet.i.restore[rel;kv;query]];
-  t:.duckdb.i.fpull[c;.parquet.i.fview[c;file;opts]];
-  $[.duckdb.i.none query;t;(?) . (enlist t),1_.pq.i.resolveTree[cols t;(enlist rel),eval each 2_query]]}
+  v:.parquet.i.fview[c;file;opts]; t:.duckdb.i.fpull[c;v];
+  $[.duckdb.i.none query;t;(?) . (enlist t),1_.duckdb.i.ftext[v;.pq.i.resolveTree[cols t;(enlist rel),eval each 2_query]]]}
 
 / @ignore
 .parquet.i.bytes:{[t]
