@@ -6,6 +6,7 @@
  * transport open / kind dispatch / close they delegate to. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_count.h"
+#include "qlang/q_prim.h"     /* q_hsym_wrap — a directory read names its file */
 #include "qlang/io/q_handles.h"
 #include "qlang/base/q_err.h"
 #include "qlang/q_registry_internal.h" /* q_str_text_bytes, q_type_strict_i64 */
@@ -829,10 +830,26 @@ static ray_t* hopen_oneshot(ray_t* conn, ray_t* x) {
     return r;
 }
 
+/* `` `:dir `f `` ≡ get .Q.dd[`:dir;`f]; a symbol vector maps (wp/hdb-analysis/index.md:568) */
+static ray_t* dir_read(ray_t* dir, ray_t* s) {
+    if (s->type == RAY_SYM) return q_adverb_apply(0 /* `'` each */, dir, NULL, &s, 1);
+    ray_t* nm = ray_sym_str(s->i64);                 /* borrowed */
+    ray_t* p = nm ? q_io_dir_path(dir, ray_str_ptr(nm), ray_str_len(nm)) : NULL;
+    if (!p) return q_err(QE_TYPE);
+    ray_t* ps = ray_sym(ray_sym_intern_runtime(ray_str_ptr(p), ray_str_len(p)));
+    ray_release(p);
+    ray_t* f = q_hsym_wrap(ps);
+    ray_release(ps);
+    if (!f || RAY_IS_ERR(f)) return f ? f : q_err(QE_TYPE);
+    ray_t* r = q_eval_value_wrap(f);
+    ray_release(f);
+    return r;
+}
+
 /* The `:`-prefixed SYM arm of the same abstraction: protocol dispatch on the
- * descriptor text — ws/wss and http/https clients, else a one-shot sync IPC
- * request: `` `:h:p x `` or the V4.0 `` `::[conn;x] ``.  A file-path SYM applies
- * only through an opened handle (q_handles_apply's FILE arm). */
+ * descriptor text — ws/wss and http/https clients, a directory read on symbols,
+ * else a one-shot sync IPC request: `` `:h:p x `` or the V4.0 `` `::[conn;x] ``.
+ * Any other file-path SYM applies only through an opened handle (q_handles_apply's FILE arm). */
 ray_t* q_handles_sym_apply(ray_t* head, ray_t** args, int64_t n) {
     ray_t* s = ray_sym_str(head->i64);               /* borrowed */
     const char* sp = ray_str_ptr(s);
@@ -851,6 +868,9 @@ ray_t* q_handles_sym_apply(ray_t* head, ray_t** args, int64_t n) {
         return q_err(QE_TYPE);
     }
     if (n == 2 && sl == 2 && !memcmp(sp, "::", 2)) return hopen_oneshot(args[0], args[1]);
+    if (n == 1 && (args[0]->type == -RAY_SYM || args[0]->type == RAY_SYM)
+        && q_handles_sym_kind(head) == Q_SYM_PATH && q_io_names_dir(head))
+        return dir_read(head, args[0]);
     if (n == 1) return hopen_oneshot(head, args[0]);
     return q_err(QE_TYPE);
 }
