@@ -186,6 +186,10 @@
   .[.duckdb.exec;(c;q v`order);{[c;v;q;e]
     if[("rowid"~v`order) and .duckdb.err[c] like "Binder Error: Referenced column \"rowid\"*"; :.duckdb.exec[c;q ""]]; 'e}[c;v;q]]}
 
+/ A select tree over a foreign view, its string columns compared as text (.sql.i.either).
+/ @ignore
+.duckdb.i.ftext:{[v;rt] .sql.i.either[v[`cols] where "C"=v`t;rt]}
+
 / @ignore
 .duckdb.i.read1:{[url]
   r:.duckdb.exec[.duckdb.main[];"SELECT content FROM read_blob(",(.duckdb.i.file url),")"];
@@ -302,7 +306,8 @@
       @[.duckdb.i.pushed[c];rt;{[e] ::}]}[c;rt]];
     if[not (::)~r; :r]];
   if[.duckdb.i.big[c;rt 0]; .duckdb.i.maxrows[c;rt 0;"j"$.duckdb.maxrows]];
-  (?) . (enlist .duckdb.get[c;rt 0]),1_rt}
+  t:.duckdb.get[c;rt 0];
+  (?) . (enlist t),1_$[.duckdb.i.foreign[c;rt 0];.duckdb.i.ftext[.duckdb.i.ftable[c;rt 0];rt];rt]}
 / @ignore
 .duckdb.qsql:{[c;cl;tree]
   node:{[cl;nd]
