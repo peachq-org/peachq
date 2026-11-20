@@ -245,7 +245,9 @@
 / The where stage, a dict: cls (column to logical class), ix (the table stores i), stop (no term may move), terms (the
 / moved terms as SQL) and rest (the terms left for q, in order).  q runs term k+1 on the rows passing terms 1..k, so a
 / term that reads only its own row commutes with the others: every such term before the first that does not
-/ (.sql.i.pure) moves when .sql.i.VERBS can spell it and stays for q, in order, when it cannot.  A term on i left for
+/ (.sql.i.pure) moves when .sql.i.VERBS can spell it and stays for q, in order, when it cannot.  A term that reads its
+/ own row only through a text cast (.sql.i.cast) ends the region when it cannot move: left for q it may be an error,
+/ which a later term moved ahead of it could hide by leaving it no rows.  A term on i left for
 / q would read positions the pull no longer has, so it stops every term; on a table without i, i anywhere does (the
 / virtual index).  So do the phrase's barrier, a rename onto a column, an empty schema, and a table or column name
 / holding a dot (the SQL tree would read it as a path).
@@ -255,6 +257,7 @@
   stop:(phrase`barrier) or (0=count cl) or (any (key phrase`renames) in cl) or (any "." in/: string (tree 1),cl) or
     `i in raze .sql.i.names[0b] each $[ix; enlist tree 3; 2_tree];
   x:$[stop; (); .sql.i.term[cls;0b] each ((.sql.i.pure[cls;0b] each wh)?0b)#wh];
+  x:(((((::)~/:x) and not .sql.i.pure[(0#`)!0#`;0b] each (count x)#wh),1b)?1b)#x;
   m:where not (::)~/:x; rest:wh (til count wh) except m;
   stop:stop or `i in raze .sql.i.names[0b] each rest;
   `cls`ix`stop`terms`rest!(cls;ix;stop;$[stop; (); x m];$[stop; wh; rest])};
@@ -333,7 +336,8 @@
   t:$[f=`column; L 0; f=`int32up; $[(L 0) in `int16`bool; `int32; L 0]; f=`wsum; `float64`float32(`float32 in L)>`float64 in L; f];
   dt:$[f=`column; first s`dtype; .sql.i.dtype t]; d:{[c;lg] $[`float32=lg; (`cast;`DOUBLE;c); c]}'[a;L];
   v:{[a;ct;y] $[y; ct 2; a]}'[a;ct;sy];
-  x:{[m;e] $[-11h=type e; $[e in key m; m e; e]; (type e) in 0 11h; .z.s[m] each e; e]}[(`T,raze (count a)#/:(`x`y;`X`Y))!(enlist `$dt),v,d;r`sql];
+  m:(`T,raze (count a)#/:(`x`y;`X`Y))!(enlist `$dt),v,d;
+  x:{[m;e] $[-11h=type e; $[e in key m; m e; e]; (type e) in 0 11h; .z.s[m] each e; e]}[m;r`sql];
   if[(not null r`identity) or `symbol=t; c:{(`coalesce;x;y)}[;.sql.i.lit .sql.i.identity[t;r`identity]]; x:$[`cast~first x; @[x;2;c]; c x]];
   ($[(`NaN=r`nulls) and t in `float32`float64; (`nullif;x;(`cast;`$dt;enlist `NaN)); x];dt;t)};
 / The limit and order stage, a dict: limit and order (SQL's; :: and at most the i order where they stay with q), inner,
@@ -464,15 +468,16 @@
   s:.sql.i.class `symbol;
   x:(`coalesce;(`split_part;(`trim;c;(`chr;32));(`chr;0);1);enlist `);
   $[`string=k; (c;s;x); (`symbol=k) and e[1]~enlist `symbol; (c;s;c); (::)]};
-/ whether a where term reads only its own row: every head is a .sql.i.VERBS verb, int arithmetic, string, $ by a type
+/ whether a where term reads only its own row: every head is a .sql.i.VERBS verb, int arithmetic, $ by a type
 / name or enlist of a literal list (any other head - an aggregate, fby, prev, a lambda - may read other rows), and no
 / vector but a constant (one item, or anywhere in the last argument of in, within or like, lit), since q pairs any
 / other vector with the rows by position; a name there reads a whole column.  $ casts row by row only by a type name:
-/ ` and `symbol, or a char (tok), turn a char column into ONE value, so they are pure only as a .sql.i.cast
+/ ` and `symbol, or a char (tok), turn a char column into ONE value, so they, and string, are pure only as a .sql.i.cast
 .sql.i.pure:{[cls;lit;e]
   t:.Q.c.lty e; if[-11h=t; :not lit]; if[t<0; :1b]; if[t within 1 19h; :lit or 1=count e]; if[0h<>t; :0b];
   if[1=count e; :.z.s[cls;lit] first e];
   if[not any (e 0)~/:.sql.i.VERBS[`verb],((+);(-);(*);(neg);(abs);($);(enlist);(string)); :0b];
+  if[(string)~e 0; if[(::)~.sql.i.cast[cls;e]; :0b]];
   if[($)~e 0; if[not $[(11h=type e 1) and 1=count e 1; (not (first e 1) in `,`symbol) or not (::)~.sql.i.cast[cls;e]; 0b]; :0b]];
   a:1_e; all .z.s[cls]'[$[lit; (count a)#1b; (-1_(count a)#0b),any (e 0)~/:((in);(within);(like))]; a]};
 .sql.i.bind:{[v] $[-11h=type v; $[null v; ""; v]; -10h=type v; enlist v; 10h=type v; enlist each v; v]};
@@ -532,7 +537,6 @@
 / ...); a rewritten compare is in over strings, which q runs and .sql.i.compare pushes.
 .sql.i.either:{[sc;rt]
   f:{[sc;e]
-    if[99h=type e; :.z.s[sc] each e];
     if[(0h<>.Q.c.lty e) or 2>count e; :e];
     e:@[e;where 101h<>type each e;.z.s[sc]]; h:e 0; a:1_e; col:{[sc;x] $[-11h=type x; x in sc; 0b]}[sc];
     if[(1=count a) and (string)~h; :$[col a 0; a 0; e]];
@@ -544,4 +548,4 @@
     if[(in)~h; s:sy a 1; if[col[a 0] and 0<count s; :(in;a 0;(enlist),s)]];
     e};
   rt:@[rt;1;{[f;w] f each w}[f sc]];
-  @[rt;2 3 inter til count rt;f sc]};
+  @[rt;2 3 inter til count rt;{[f;x] $[99h=type x; f each x; f x]}[f sc]]};
