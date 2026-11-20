@@ -280,7 +280,7 @@
 / (basics/precision.md), so the exact comparison keeps every row q's does.  Under <, q keeps the null and the SQL its arm.
 / The number rides as the float q compares with, so DuckDB cannot round it to a real column's narrower type.
 / like with a pattern GLOB cannot answer (.sql.i.glob): whatever matches begins with the bytes ahead of the pattern's first
-/ wildcard.
+/ wildcard.  A pattern q refuses moves nothing: q must meet it on a row to refuse it.
 / A time, minute or second column q wrote, an INTERVAL, against a value of its own type: DuckDB orders the INTERVALs q can
 / read (no months, days of 24 hours) as q orders their counts.  One q cannot read fails the pull, so no answer differs.
 .sql.i.loose:{[cls;fr;e]
@@ -293,6 +293,7 @@
     :$[(r[`sql] in `$'"<>") and (type v) in -5 -6 -7 -8 -9h; .sql.i.compare[cls;fr;0b;@[r;`classes;:;enlist `float];(c;"f"$v)]; (::)]];
   if[(`pattern<>r`shape) or not .sql.i.class[cls c][`class] in r`classes; :(::)];
   p:$[-10h=type v; enlist v; v]; if[10h<>type p; :(::)]; n:(p in "?*[\000")?1b; if[0=n; :(::)];
+  if[@[{[p] "" like p; 0b};p;{[e] 1b}]; :(::)];
   if[c in key fr; c:fr[c] 0]; $[null c; (::); (`starts_with;c;.sql.i.lit n#p)]};
 / The whole-push stage, a dict: ok (the select phrase and by move whole, so q is left nothing), byrow (the select by g
 / form: the last row of each group, so the SQL keeps every column that is not a key, as q does), by (the GROUP BY
@@ -318,13 +319,15 @@
 / select distinct as the whole-push fields it changes, :: for one the SQL cannot answer as q does.  q keeps each distinct
 / row where it first occurs, so the SQL groups by every column and orders the groups by their lowest i.  The phrase is bare
 / columns (every column when empty) of a class a GROUP BY tells apart exactly as q's distinct does: not a float, where the
-/ two differ on the zeros and on what counts as one value.
+/ two differ on the zeros and on what counts as one value.  A text column is grouped by its bytes as well, so a collation
+/ the session or the column declares merges no two values q tells apart.
 .sql.i.distinct:{[schema;a]
   cl:(exec col from schema) except `i; c:$[()~a; cl!cl; 99h=type a; a; (::)];
   if[(::)~c; :(::)]; if[(0=count c) or not all -11h=type each value c; :(::)]; if[not all (value c) in cl; :(::)];
   rows:schema (schema`col)?value c; k:.sql.i.sortable[1b] each rows`logical;
   if[any (::)~/:k; :(::)]; if[any `float=k[;`class]; :(::)];
-  `ok`by`cols`rows`order!(1b;c;c;update col:key c, iskey:0b from rows;enlist (`;(`min;`i)))};
+  tx:(value c) where k[;`class] in `symbol`string;
+  `ok`by`cols`rows`order!(1b;c,(`$"bytes ",/:string tx)!{(`encode;x)} each tx;c;update col:key c, iskey:0b from rows;enlist (`;(`min;`i)))};
 / the .sql.i.CLASS row of a logical name whose values q and DuckDB order alike, :: otherwise: an unknown class, char,
 / whose null q orders below every byte, or string, which q sorts as lists (byte by byte, the shorter of two first, as
 / DuckDB orders a VARCHAR: groups is 1b for a by key, which may then be a string; a select's order may not)
@@ -435,8 +438,7 @@
     if[l`clear; q:5#q];
     if[(5>=count q) and (0=count rest) and (0b~q 3) and ()~q 4; q:(::)]];
   cl:(exec col from schema) except `i;
-  base:{[n] `$first "." vs string n} each raze .sql.i.names[0b] each 2_$[q~(::); tree; q];
-  need:$[()~tree 4; cl; cl where cl in base,exec col from schema where iskey];
+  need:cl where cl in (.pq.i.reads[cl;1_$[q~(::); tree; q]]),exec col from schema where iskey;
   c:$[count c:(need!need),$[l`moved; rn; ()!()]; c; ()!()];
   s:(`sql;tree 1;w`terms;0b;c;l`limit;l`order);
   if[count l`inner; s:(`sql;(`sql;tree 1;w`terms;0b;u!u:distinct need,l[`order][;1];neg l`limit;l`inner);();0b;c;::;l`order)];
