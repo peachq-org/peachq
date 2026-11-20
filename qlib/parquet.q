@@ -146,6 +146,14 @@
 / @eg .parquet.hidden[`:t.parquet;()]
 .parquet.hidden:{[file;opts] .parquet.i.with[file;opts;{[c;v] v`hidden}]}
 
+/ Where a file does not read into q exactly, as .duckdb.inspect answers for a table: one row per column and issue,
+/ counted by DuckDB in one statement over the file.  A column q wrote (the file's q_schema describes it) is not inspected,
+/ so a file written from a q table answers no row.
+/ @param opts the read_parquet options, as .parquet.read takes them
+/ @return a table ([] col; dtype; qtype; issue; rows)
+/ @eg .parquet.inspect[`:t.parquet;()]
+.parquet.inspect:{[file;opts] .parquet.i.with[file;opts;.duckdb.i.finspect]}
+
 / Read a parquet file (or files) as a table, optionally through a select pushed down to DuckDB.
 / @param file `:x.parquet, a glob as `$":data/*.parquet", a URL, or a list of them
 / @param opts a dict of read_parquet options passed verbatim (hive_partitioning, union_by_name, filename ...); () for none

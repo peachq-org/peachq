@@ -34,8 +34,8 @@
 .duckdb.info:{[c;t] .duckdb.i.info[c;t]}
 / A table of the handle's catalog as a q table.  A table q wrote reads back as written.  Any other table reads by one q type
 / per DuckDB type, with no companion columns: NULL, INT_MIN and NaN are the q null, a NULL VARCHAR is "", a NULL BOOLEAN 0b,
-/ a NULL list empty; VARCHAR is a string, DECIMAL a float, TIME a timespan, TIMESTAMPTZ its UTC instant; a date or timestamp
-/ outside q's range is 'duckdb; a column whose type q does not hold is left out (.duckdb.hidden names them).  Rows come in
+/ a NULL list empty; VARCHAR is a string, DECIMAL a float, TIME a timespan, TIMESTAMPTZ its UTC instant; a timestamp past
+/ q's range is 0Wp, one before it -0Wp, a date outside it 'duckdb; .duckdb.inspect counts all of these; a column whose type q does not hold is left out (.duckdb.hidden names them).  Rows come in
 / rowid order where the table has one.  .duckdb.getx and SQL read every column exactly.
 .duckdb.get:{[c;t] $[.duckdb.i.foreign[c;t];.duckdb.i.fread[c;t;.duckdb.i.fpull];.duckdb.i.get[c;t]]}
 / Create or replace a table of the handle's catalog from a q table, or from the pair .duckdb.getx answers.
@@ -55,6 +55,22 @@
 / .duckdb.exec[.duckdb.main[];"CREATE OR REPLACE TABLE u AS SELECT 1 AS a, 1::HUGEINT AS h"]
 / .duckdb.hidden[.duckdb.main[];`u]
 .duckdb.hidden:{[c;t] $[.duckdb.i.foreign[c;t];.duckdb.i.ftable[c;t]`hidden;([] col:0#`; dtype:())]}
+/ Where a table of the handle's catalog does not read into q exactly: one row per column and issue, counted by DuckDB in
+/ one statement over the table, so no row of it reaches q.  A table q wrote answers no row.  The issues: hidden (no q
+/ type; qtype " ", rows null), range (a timestamp outside q's range, read as 0Wp or -0Wp), minimum (an integer type's
+/ lowest value, read as null), merged (NULL beside NaN, the zero UUID, '' or an empty BLOB, which read as one value),
+/ zero (a NULL BOOLEAN or UTINYINT, read as 0b or 0x00), digits (a DECIMAL wider than 15 digits whose value a float does
+/ not hold) and offset (a TIMESTAMPTZ, read as its UTC instant).  A list column's elements are not inspected.
+/ @param c the handle whose catalog holds the table, as .duckdb.hidden takes it
+/ @param t the table's name, a symbol
+/ @return a table ([] col; dtype; qtype; issue; rows): dtype as DuckDB declares it, qtype the meta char q reads it as,
+/ rows how many rows the issue touches
+/ @eg
+/ .duckdb.exec[.duckdb.main[];"CREATE OR REPLACE TABLE u AS SELECT * FROM (VALUES (1, TIMESTAMP '9999-12-31'), (NULL, NULL)) t(a, p)"]
+/ .duckdb.inspect[.duckdb.main[];`u]
+.duckdb.inspect:{[c;t] $[.duckdb.i.foreign[c;t];.duckdb.i.fread[c;t;.duckdb.i.finspect];.duckdb.i.NOISSUE]}
+/ @ignore
+.duckdb.i.NOISSUE:([] col:0#`; dtype:(); qtype:""; issue:0#`; rows:0#0N)
 
 / Run SQL on a handle and answer the result as a table; a statement without a result answers ::.  sql is a string, or the
 / pair (string;dict) binding each $name by name or (string;list) binding $1, $2 ... by position; values are atoms or strings
@@ -130,6 +146,12 @@
 .duckdb.i.FBARE:`int8`int16`int32`int64`uint16`uint32`float32`float64`utf8`date`timestamp`timestampsec`timestampms`timestampus
 / @ignore
 .duckdb.i.quote:{[s] "\"",ssr[s;"\"";"\"\""],"\""}
+/ A timestamp outside q's range reads as the infinity on its side, so q orders it as DuckDB orders the stored value
+/ against any literal q holds: a where term DuckDB runs on the stored column keeps the rows q's would.
+/ @ignore
+.duckdb.i.fclamp:{[x;dt;b]
+  e:{[dt;v] "'",v,"'::",dt}[dt];
+  "CASE WHEN ",x," > ",e[b 1]," THEN ",e["infinity"]," WHEN ",x," < ",e[b 0]," THEN ",e["-infinity"]," ELSE ",x," END"}
 / @ignore
 .duckdb.i.fguard:{[nm;x;ok]
   "CASE WHEN ",x," IS NULL OR NOT isfinite(",x,") OR ",ok," THEN ",x,
@@ -146,8 +168,7 @@
     lg in key .duckdb.i.FCAST;"CAST(",x," AS ",.duckdb.i.FCAST[lg],")";
     lg=`date;.duckdb.i.fguard[nm;x;"date_diff('day', DATE '2000-01-01', ",x,") >= -2147483646"];
     lg=`timestamptz;.z.s[nm;`timestampus;"TIMESTAMP";"timezone('UTC', ",x,")"];
-    lg in key .duckdb.i.FSPAN;
-      .duckdb.i.fguard[nm;x;x," BETWEEN ",(" AND " sv {[dt;b] "'",b,"'::",dt}[dt] each .duckdb.i.FSPAN lg)];
+    lg in key .duckdb.i.FSPAN;.duckdb.i.fclamp[x;dt;.duckdb.i.FSPAN lg];
     lg in `int8`uint16`uint32`timens;x;
     ()]}
 / One column, or one level of a list, x the SQL naming it: (sql;meta char;dtype;logical), the last two the schema row the read
@@ -195,7 +216,8 @@
 / THE foreign view of a source, for a pull and for a push: rel its FROM text, sch its columns ([] col; dtype) as DuckDB declares
 / them, order the expressions its rows sort by (() for none).  Answers sel, the SELECT list; cols and t, what q shows and its
 / meta chars; schema, the rows .duckdb.exec's triple needs beside the statement; hidden, the columns left out; text, the
-/ string columns a literal compares with as text; push, the schema .sql.translate reads (empty when a shown name is one the
+/ string columns a literal compares with as text; shown, each shown column's DuckDB type and foreign logical (` for one q
+/ wrote, or a list); push, the schema .sql.translate reads (empty when a shown name is one the
 / pushed statement uses itself) and src, the SELECT items of the relation that statement reads, by name: each shown column,
 / and each stored column a where term compares as it stands under its raw name.
 / sch may say what q wrote (a parquet file's q_schema) in one more column, logical: a column whose logical q writes over
@@ -210,9 +232,10 @@
     string sch`col;sch`dtype;qn;kt;lg];
   j:where 0=count each r; i:where 0<count each r; s:i where 0<count each r[i;2];
   sel:{[e;q] e[0]," AS ",q}'[r i;qn i];
-  (`rel`order`sel`cols`t`schema`hidden`text!(rel;order;sel;sch[`col] i;"c"$r[i;1];
+  (`rel`order`sel`cols`t`schema`hidden`text`shown!(rel;order;sel;sch[`col] i;"c"$r[i;1];
     ([] col:sch[`col] s; dtype:r[s;2]; logical:r[s;3]);([] col:sch[`col] j; dtype:sch[`dtype] j);
-    sch[`col] i where ("C"=r[i;1]) and not own i)),
+    sch[`col] i where ("C"=r[i;1]) and not own i;
+    ([] col:sch[`col] i; dtype:sch[`dtype] i; logical:{[x;o] $[o or 7>count x;`;x 5]}'[r i;own i]))),
     .duckdb.i.fpush[exec ktype!logical from tt where needs<>`dtype;sel;sch[`col] i;qn i;r i;order]}
 / The push half of a foreign view (.duckdb.i.fview): a column's logical is the one q writes for the type q shows (ql), so the
 / translator classes it as q's own column of that type; its sentinel is the stored value that reads as the q null.
@@ -281,6 +304,35 @@
 / @ignore
 .duckdb.i.fresidue:{[c;v;rt] q:.duckdb.i.ftext[v;rt]; (?) . (enlist .duckdb.i.fpull[c;.duckdb.i.fnarrow[v;.pq.i.reads[v`cols;q]]]),1_q}
 
+/ The checks of one foreign column, quoted x, of logical lg and DuckDB type dt: each (issue;tests), the issue counted where
+/ its one test holds, or, for two tests, on the rows of both once each holds somewhere (two values that read as one).
+/ @ignore
+.duckdb.i.fchecks:{[x;lg;dt]
+  two:{[x;v] (x," IS NULL";x," = ",v)};
+  $[lg in key .duckdb.i.FMIN;enlist (`minimum;enlist x," = (",.duckdb.i.FMIN[lg],")::",dt);
+    lg in key .duckdb.i.FNULL;enlist (`merged;two[x;.duckdb.i.FNULL[lg],"::",dt]);
+    lg in `utf8`bytes;enlist (`merged;two[x;.duckdb.i.FZERO lg]);
+    lg in `bool`uint8;enlist (`zero;enlist x," IS NULL");
+    lg in key .duckdb.i.FSPAN;enlist (`range;enlist "isfinite(",x,") AND NOT ",x," BETWEEN ",
+      " AND " sv {[dt;b] "'",b,"'::",dt}[dt] each .duckdb.i.FSPAN lg);
+    lg=`timestamptz;.z.s["timezone('UTC', ",x,")";`timestampus;"TIMESTAMP"],enlist (`offset;enlist x," IS NOT NULL");
+    (lg=`decimal) and 15<"J"$first "," vs -1_8_dt;enlist (`digits;enlist "TRY_CAST(CAST(",x," AS DOUBLE) AS ",dt,") IS DISTINCT FROM ",x);
+    ()]}
+/ What does not read exactly in a foreign view v, by one statement over its relation that answers counts alone.
+/ @ignore
+.duckdb.i.finspect:{[c;v]
+  h:v`hidden; n:count h;
+  r:.duckdb.i.NOISSUE,([] col:h`col; dtype:h`dtype; qtype:n#" "; issue:n#`hidden; rows:n#0N);
+  s:select from v[`shown] where not null logical;
+  ck:raze {[x;cl;dt;lg] {[cl;dt;k] (cl;dt;k 0;k 1)}[cl;dt] each .duckdb.i.fchecks[x;lg;dt]}'[
+    .duckdb.i.quote each string s`col;s`col;s`dtype;s`logical];
+  if[0=count ck; :r];
+  ts:raze ck[;3]; nt:count each ck[;3]; at:sums 0,-1_nt;
+  q:"SELECT ",(", " sv {[i;t] "count(*) FILTER (WHERE ",t,") AS \"_q_",string[i],"\""}'[til count ts;ts])," FROM ",v`rel;
+  m:"j"$value first .duckdb.exec[c;q];
+  k:{[m;a;n] x:m a+til n; $[1=n;first x;all 0<x;sum x;0]}[m]'[at;nt];
+  if[0=count w:where 0<k; :r]; qt:(v[`cols]!v`t) ck[w;0];
+  r,([] col:ck[w;0]; dtype:ck[w;1]; qtype:qt; issue:ck[w;2]; rows:k w)}
 / A select tree over a foreign view, its string columns compared as text (.sql.i.either).
 / @ignore
 .duckdb.i.ftext:{[v;rt] $[count v`text;.sql.i.either[v`text;rt];rt]}
@@ -363,10 +415,10 @@
 
 / Whether a qSQL select on a table of the handle runs what .sql.translate can move (where terms, limit, order; the select
 / phrase and by whole when every item translates) inside DuckDB before q runs the rest, read on every select; off, every select pulls
-/ its table (of one q did not write, the columns it names).  A statement DuckDB refuses stays in .duckdb.sqllog and the select pulls
+/ the columns it names (a keyed table q wrote whole).  A statement DuckDB refuses stays in .duckdb.sqllog and the select pulls
 / instead.  Set it with .duckdb.set_pushdown.
 .duckdb.pushdown:1b
-/ Set .duckdb.pushdown: 1b moves what a select can into DuckDB, 0b pulls every select whole.
+/ Set .duckdb.pushdown: 1b moves what a select can into DuckDB, 0b pulls the columns every select names.
 .duckdb.set_pushdown:{[on] .duckdb.pushdown::on;}
 
 / The row count above which a qSQL select on a q-origin table of a handle needs a where term .sql.translate moves into DuckDB: without
@@ -426,8 +478,19 @@
       @[.duckdb.i.pushed[c];rt;.duckdb.i.refused]}[c;rt]];
     if[not (::)~r; :r]];
   if[.duckdb.i.big[c;rt 0]; .duckdb.i.maxrows[c;rt 0;"j"$.duckdb.maxrows]];
-  if[not .duckdb.i.foreign[c;rt 0]; :(?) . (enlist .duckdb.get[c;rt 0]),1_rt];
+  if[not .duckdb.i.foreign[c;rt 0]; :.[.duckdb.i.qresidue;(c;rt);{[c;rt;e]
+    if[not (e~"duckdb") and .duckdb.i.unbound c; 'e]; .duckdb.i.unbind[c;rt 0]; (?) . (enlist .duckdb.get[c;rt 0]),1_rt}[c;rt]]];
   .duckdb.i.fread[c;rt 0;.duckdb.i.fresidue[;;rt]]}
+/ A select over a table q wrote, run by q on the rows pulled of the columns it reads (.pq.i.reads), in q's row order, as
+/ .duckdb.i.fresidue runs one over a foreign view.  A keyed table is pulled whole: a select keeps its key.
+/ @ignore
+.duckdb.i.qresidue:{[c;rt]
+  sc:.duckdb.i.schema[c;rt 0]; k:select from sc where col<>`i;
+  if[any k`iskey; :(?) . (enlist .duckdb.get[c;rt 0]),1_rt];
+  k:select from k where col in .pq.i.reads[k`col;rt];
+  sel:$[count k;.duckdb.i.quote each string k`col;enlist "1 AS \"_q_1\""];
+  sql:"SELECT ",(", " sv sel)," FROM ",(.duckdb.i.qname rt 0),$[`i in sc`col;" ORDER BY i";""];
+  (?) . (enlist .duckdb.exec[c;(sql;();k)]),1_rt}
 / @ignore
 .duckdb.qsql:{[c;cl;tree] rt:@[.pq.i.resolveSeam[cl];tree;{[e] ::}]; $[rt~(::);::;.duckdb.i.push[c;rt]]}
 
