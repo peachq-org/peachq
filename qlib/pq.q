@@ -227,7 +227,7 @@
 / local included (the select seam hands it over, q_funsql.c ques_env); :: when the tree came as data and its names are
 / globals.  A one-item list is a constant already and is left alone.
 / 'unpush leaves the select to q, in the frame it was written in: a name with no value, an assignment, a nested select
-/ whose table cannot be read here or that names a column of the enclosing one.
+/ whose table cannot be read here (it reads a column, or is no table) or that names a column of the enclosing one.
 / @ignore
 .pq.i.lit:{[v] $[(type v) in -11 11 0h;enlist v;v]}
 / a name: a column, or a dotted name under one, stays; any other is its value.  dep are the columns of the enclosing
@@ -259,7 +259,8 @@
 / A nested select's table is read first, once, so its names are resolved against its own columns.
 / @ignore
 .pq.i.rsub:{[cl;dep;env;x]
-  t:@[eval;.pq.i.rs[cl;dep;env] x 1;{[e] '`unpush}]; if[not .Q.qt t; '`unpush];
+  src:.pq.i.rs[cl;dep;env] x 1; if[not .pq.i.free src; '`unpush];
+  t:@[eval;src;{[e] '`unpush}]; if[not .Q.qt t; '`unpush];
   ic:(cols t),`i; f:.pq.i.rs[ic;(cl,dep) except ic;env]; g:{[f;p] $[99h=type p;(key p)!f each value p;(0h=type p) and 1=count p;enlist f first p;p]};
   w:x 2; w:$[(0h=type w) and (1=count w) and 0h=type first w;enlist f each first w;w];
   (x 0;t;w;g[f] x 3;g[f] x 4),.pq.i.rs[cl;dep;env] each 5_x}
