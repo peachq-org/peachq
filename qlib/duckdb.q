@@ -211,13 +211,14 @@
 .duckdb.i.fraw:{[ty;dt;lg]
   cl:$[(b:`$dt) in key ty;ty[b] 0;`];
   $[cl in `int16`int32`int64`float32`float64;$[lg in cl,`timespan;cl;`];(cl=`utf8) and lg in `symbol`char`utf8;cl;`]}
-/ The meta char of a column q wrote as logical lg over the DuckDB type dt, level by level through a list; " " when q writes
-/ no such pair (tt is .duckdb.types[]), and the column then reads by its DuckDB type alone.
+/ Whether logical lg over the DuckDB type dt is a pair q writes, and its meta char, level by level through a list: (0b;" ")
+/ for no such pair (tt is .duckdb.types[]), and the column then reads by its DuckDB type alone.  A kind q holds as a
+/ general list (a struct, a map) is q's own with the meta char " ", so the codec decodes it as q wrote it.
 / @ignore
 .duckdb.i.fown:{[tt;dt;lg]
-  if[null lg; :" "];
-  if["]"=last dt; :$[(s:string lg) like "list(*)";upper .z.s[tt;(last where dt="[")#dt;`$5_-1_s];" "]];
-  k:exec ktype from tt where dtype=`$first "(" vs dt, logical=lg; $[count k;first k;" "]}
+  if[null lg; :(0b;" ")];
+  if["]"=last dt; :$[(s:string lg) like "list(*)";@[.z.s[tt;(last where dt="[")#dt;`$5_-1_s];1;upper];(0b;" ")]];
+  k:exec ktype from tt where dtype=`$first "(" vs dt, logical=lg; $[count k;(1b;first k);(0b;" ")]}
 / THE foreign view of a source, for a pull and for a push: rel its FROM text, sch its columns ([] col; dtype) as DuckDB declares
 / them, order the expressions its rows sort by (() for none).  Answers sel, the SELECT list; cols and t, what q shows and its
 / meta chars; schema, the rows .duckdb.exec's triple needs beside the statement; hidden, the columns left out; text, the
@@ -232,9 +233,9 @@
 .duckdb.i.fview:{[rel;sch;order]
   tt:.duckdb.types[]; ty:exec dtype!flip (logical;ktype) from tt where canon; n:count sch;
   qn:.duckdb.i.quote each string sch`col; lg:$[`logical in cols sch;sch`logical;n#`];
-  kt:.duckdb.i.fown[tt]'[sch`dtype;lg]; own:kt<>" ";
-  r:{[ty;nm;dt;x;k;l] $[k=" ";.duckdb.i.fcol[ty;nm;dt;x;0];(.duckdb.i.fmerge[ty;dt;l;x;0];k;dt;l;dt;.duckdb.i.fraw[ty;dt;l];1b)]}[ty]'[
-    string sch`col;sch`dtype;qn;kt;lg];
+  ok:.duckdb.i.fown[tt]'[sch`dtype;lg]; own:ok[;0];
+  r:{[ty;nm;dt;x;o;k;l] $[o;(.duckdb.i.fmerge[ty;dt;l;x;0];k;dt;l;dt;.duckdb.i.fraw[ty;dt;l];1b);.duckdb.i.fcol[ty;nm;dt;x;0]]}[ty]'[
+    string sch`col;sch`dtype;qn;own;ok[;1];lg];
   j:where 0=count each r; i:where 0<count each r; s:i where 0<count each r[i;2];
   sel:{[e;q] e[0]," AS ",q}'[r i;qn i];
   (`rel`order`sel`cols`t`schema`hidden`text`shown!(rel;order;sel;sch[`col] i;"c"$r[i;1];
