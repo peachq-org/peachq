@@ -286,7 +286,7 @@ ray_t* q_ws_client_open(ray_t* hsym, ray_t* request) {
     ray_sock_t fd = q_http_client_connect(u.host, u.port, Q_WS_CONNECT_MS, &err);
     if (fd == RAY_INVALID_SOCK) { free(req); ray_release(accept); return ray_error(err, NULL); }
     int64_t deadline = ws_now_ms() + Q_WS_HS_MS;
-    if (q_http_client_send_all(fd, req, reqlen, deadline) != 0) {
+    if (q_http_client_send_all(fd, req, reqlen, Q_WS_HS_MS) != 0) {
         free(req); ray_release(accept); ray_sock_close(fd); return q_err(QE_CONN);
     }
     free(req);

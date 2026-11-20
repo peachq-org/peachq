@@ -72,9 +72,6 @@ static uint8_t* gz_deflate(const uint8_t* src, size_t n, int level, int wbits,
     return out;
 }
 
-/* One stream from src into out[0..cap): 0 once it ends cleanly (zlib checks the
- * adler32 of a wbits-15 stream), with *out_len produced and *used consumed.  The
- * loop ends because zlib answers Z_BUF_ERROR once neither side can move. */
 typedef struct { uint8_t* base; size_t len, at; } gz_arena_t;
 
 /* zlib's allocator over a caller's arena: a bump, freed all at once when the stream ends. */
@@ -89,6 +86,9 @@ static voidpf gz_arena_alloc(voidpf opaque, uInt items, uInt size) {
 
 static void gz_arena_free(voidpf opaque, voidpf p) { (void)opaque; (void)p; }
 
+/* One stream from src into out[0..cap): 0 once it ends cleanly (zlib checks the
+ * adler32 of a wbits-15 stream), with *out_len produced and *used consumed.  The
+ * loop ends because zlib answers Z_BUF_ERROR once neither side can move. */
 static int gz_inflate(const uint8_t* src, size_t n, int wbits, uint8_t* out, size_t cap,
                       size_t* out_len, size_t* used, const char** err, gz_arena_t* arena) {
     z_stream zs;
@@ -242,6 +242,36 @@ void q_gz_raw_free(q_gz_raw_t* s) {
     if (!s) return;
     inflateEnd(&s->zs);
     free(s);
+}
+
+uint8_t* q_gz_inflate_coding(const uint8_t* src, size_t src_len, int coding, size_t cap,
+                             size_t* out_len, const char** err) {
+    int zlib = src_len >= 2 && (src[0] & 0x0f) == 8 && ((src[0] << 8) | src[1]) % 31 == 0;   /* RFC 1950 header */
+    q_gz_raw_t* z = coding == Q_GZ_GZIP ? q_gz_member_new() : gz_stream_new(zlib ? 15 : -15);
+    size_t room = src_len < cap / 4 ? src_len * 4 + 64 : cap, at = 0, done = 0;
+    if (room > cap) room = cap;
+    uint8_t* out = z ? (uint8_t*)malloc(room ? room : 1) : NULL;
+    *err = out ? "domain" : "wsfull";
+    while (out) {
+        if (done == room) {
+            if (room == cap) { *err = "limit"; break; }
+            size_t grown = room > cap / 2 ? cap : room * 2;
+            uint8_t* bigger = (uint8_t*)realloc(out, grown);
+            if (!bigger) { *err = "wsfull"; break; }
+            out = bigger; room = grown;
+        }
+        size_t used = 0, made = 0;
+        int rc = q_gz_raw_step(z, src + at, src_len - at, &used, out + done, room - done, &made);
+        at += used; done += made;
+        if (rc < 0) break;
+        if (rc == 1) {
+            if (at == src_len) { q_gz_raw_free(z); *out_len = done; *err = NULL; return out; }
+            if (coding != Q_GZ_GZIP || q_gz_raw_reset(z) != 0) break;
+        } else if (!used && !made && done < room) break;            /* the input ended inside a stream */
+    }
+    free(out);
+    q_gz_raw_free(z);
+    return NULL;
 }
 
 uint32_t q_gz_crc32(uint32_t crc, const uint8_t* p, size_t n) { return (uint32_t)crc32_z(crc, p, n); }
