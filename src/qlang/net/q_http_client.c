@@ -11,7 +11,6 @@
 #include "qlang/net/q_gz.h"           /* transparent gzip/deflate inflate (Content-Encoding) */
 #include "qlang/net/q_tls.h"          /* https — the TLS overlay on the socket */
 #include "qlang/io/q_io.h"            /* q_io_clamp — ONE range/EOF law across transports */
-#include "lang/eval.h"            /* ray_eval_get_restricted — outbound gate */
 #include "table/sym.h"           /* ray_sym_str — hsym text */
 #include "picohttpparser.h"
 #include <ctype.h>
@@ -546,7 +545,6 @@ void q_http_client_host(const q_http_url_t* u, char* out, size_t cap) {
 
 ray_t* q_http_client_fetch(const q_http_url_t* u, const char* method, const char* headers, q_http_resp_t* r) {
     memset(r, 0, sizeof *r);
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     if (!scan_ok(method, strlen(method))) return q_err(QE_DOMAIN);
     char req[4096];
     int rl = snprintf(req, sizeof req, "%s %s HTTP/1.1\r\nConnection: close\r\n%s\r\n", method, u->path, headers);
@@ -761,7 +759,6 @@ static ray_t* http_status_body(ray_t* b, int status) {
 }
 
 ray_t* q_http_client_size(ray_t* url) {
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     int st = 0;
     int64_t total = -1;
     http_req_t hr = { .head = 1, .roff = -1, .status = &st, .clen = &total };
@@ -781,7 +778,6 @@ ray_t* q_http_client_size(ray_t* url) {
  * Content-Length), the read falls back to clamping the
  * GET's own answer — which is the whole body when the server ignores `Range:`. */
 ray_t* q_http_client_read_slice(ray_t* url, int64_t off, int64_t want) {
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     int st = 0;
     if (off <= 0 && want < 0) {                            /* whole object: one GET */
         http_req_t r = { .roff = -1, .as_bytes = 1, .status = &st };
@@ -820,7 +816,6 @@ ray_t* q_http_client_read_slice(ray_t* url, int64_t off, int64_t want) {
  * method-agnostic, inherited from #223) — an accepted limitation for this
  * escape hatch. */
 ray_t* q_http_client_raw(ray_t* hsym, ray_t* request) {
-    if (ray_eval_get_restricted()) return q_err(QE_ACCESS);
     const char* reqp; int64_t reqn;                 /* charv or legacy STR text */
     if (!request || !q_str_text_bytes(request, &reqp, &reqn)) return q_err(QE_TYPE);
     if (!hsym || hsym->type != -RAY_SYM) return q_err(QE_TYPE);
