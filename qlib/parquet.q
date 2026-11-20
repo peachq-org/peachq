@@ -100,30 +100,31 @@
   b:.fs.i.stamp each $[(1=count ps) and all key[o] in .parquet.i.FIRST;1 sublist fl;fl];
   if[(0=count b) or any null raze b; :()];
   `files`stamp!(fl;$[all b[;1]<("j"$.z.p)-2000000000;(fl;b);()])}
-/ how many sources keep their view; one more takes the place of the oldest
+/ the kept views, each (source;stamp;view) in a place of its own, and how many sources have taken one: a source past
+/ the last place takes the oldest's
 / @ignore
-.parquet.i.SLOTS:16
-/ the kept views, each (source;stamp;view), and how many sources have taken a place
-/ @ignore
-.parquet.i.cache:()
+.parquet.i.cache:16#enlist (::;();::)
 / @ignore
 .parquet.i.turn:0
-/ THE view of a source, every parquet door's one way in.  A local source keeps its view while its stamp is unchanged
-/ (.parquet.i.stat), so a later read asks DuckDB for the stamp alone.  Several files are read as the list the stamp was
-/ taken of, held in a DuckDB variable: the statement neither expands the glob again nor reads a file the view was not
-/ built from.  A URL has no stamp and is asked afresh on every read, its q_schema entry the first any of its files has.
+/ THE view of a source, every parquet door's one way in.  A local source, named by its files, options and the working
+/ directory, keeps its view while its stamp is unchanged (.parquet.i.stat), so a later read asks DuckDB for no metadata.
+/ Several files are read as the list the stamp was taken of, held in the DuckDB variable of the source's place: the
+/ statement neither expands the glob again nor reads a file the view was not built from.  A place is emptied before
+/ its variable changes, so a build that fails leaves no view over another's files.  A URL has no stamp and is asked
+/ afresh on every read, its q_schema entry the first any of its files has.
 / @ignore
 .parquet.i.view:{[c;file;opts]
   s:.parquet.i.file file; o:$[.duckdb.i.none opts;()!();opts];
   st:@[.parquet.i.stat[c;file];o;{[e] ()}];
   if[0=count st; :.parquet.i.build[c;s;s;0b;opts]];
-  k:(file;o); i:first where k~/:{[x] x 0} each .parquet.i.cache;
+  k:(file;o;system "cd"); i:first where k~/:.parquet.i.cache[;0];
   if[not null i; if[(count st`stamp) and st[`stamp]~.parquet.i.cache[i;1]; :.parquet.i.cache[i;2]]];
-  if[null i; i:.parquet.i.turn mod .parquet.i.SLOTS; .parquet.i.turn+:1];
+  if[null i; i:.parquet.i.turn mod count .parquet.i.cache; .parquet.i.turn+:1];
+  .parquet.i.cache[i]:(::;();::);
   fl:st`files; nm:"_q_pf",string i;
   if[1<count fl; .duckdb.exec[c;"SET VARIABLE ",nm," = [",(", " sv .duckdb.i.lit each fl),"]"]];
   v:.parquet.i.build[c;$[1<count fl;"getvariable('",nm,"')";.duckdb.i.lit first fl];.duckdb.i.lit first fl;1=count fl;opts];
-  $[i<count .parquet.i.cache;.parquet.i.cache[i]:(k;st`stamp;v);.parquet.i.cache,:enlist (k;st`stamp;v)]; v}
+  .parquet.i.cache[i]:(k;st`stamp;v); v}
 
 / The columns of a file that .parquet.read does not show because q has no type for theirs; DuckDB's SQL still reads them.
 / A file written from a q table hides none.
