@@ -396,7 +396,7 @@
   t:.duckdb.get[c;rt 0];
   (?) . (enlist t),1_$[.duckdb.i.foreign[c;rt 0];.duckdb.i.ftext[.duckdb.i.ftable[c;rt 0];rt];rt]}
 / @ignore
-.duckdb.qsql:{[c;cl;tree] rt:@[.pq.i.resolveTree[cl];tree;{[e] ::}]; $[rt~(::);::;.duckdb.i.push[c;rt]]}
+.duckdb.qsql:{[c;cl;tree] rt:@[.pq.i.resolveSeam[cl];tree;{[e] ::}]; $[rt~(::);::;.duckdb.i.push[c;rt]]}
 
 / The handle of the process's own DuckDB database, `:pq:duckdb:main: in-memory, or the file q -duckdb path names.
 / Opened on the first call; every alias is a catalog attached to it, and .parquet and s) run here.
