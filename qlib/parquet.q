@@ -50,6 +50,7 @@
 .parquet.write:{[file;table;opts]
   if[-11h<>type file; '`type];
   if[98h<>type table; '`type];
+  .parquet.refresh file;
   if[count ct:.parquet.i.coord table; sc:.duckdb.i.schema[ct 0;ct 1]; if[count sc; sc:select from sc where col<>`i];
     .parquet.i.copy[ct 0;"(SELECT ",($[count sc; ", " sv .duckdb.i.qname each sc`col; "*"])," FROM ",(.duckdb.i.qname ct 1),")";file;sc;opts]; :file];
   c:.duckdb.main[]; .duckdb.set[c;.duckdb.i.staging;$[-11h=type value flip table;select from table;table]];
@@ -69,13 +70,13 @@
   n:f[`col] each j; l:f[`logical] each j; i:where (0<count each n) and 0<count each l;
   ([col:`$n i] logical:`$l i)}
 / The view of the files src names in SQL (.duckdb.i.fview): their columns as DuckDB declares them, beside what the q_schema
-/ entry of head, the first of them, says q wrote.  Its rows are ordered by row number, after the file's place in the read
-/ where src may name more than one (a list keeps the order it was given in, a file named twice included; a glob expands
-/ in name order), through read_parquet's own columns, unless the caller's options or the file's columns already use
-/ those names.
+/ entry of the first of them that has one says q wrote.  Its rows are ordered by row number, after the file's place in the
+/ read where src may name more than one (a list keeps the order it was given in, a file named twice included; a glob
+/ expands in name order), through read_parquet's own columns, unless the caller's options or the file's columns already
+/ use those names.
 / @ignore
-.parquet.i.build:{[c;src;head;one;opts]
-  qs:.parquet.i.qschema .parquet.i.kv[c;head];
+.parquet.i.build:{[c;src;one;opts]
+  qs:.parquet.i.qschema .parquet.i.kv[c;src];
   o:$[.duckdb.i.none opts;()!();opts]; by:$[one;1_;::] ("file_index";"file_row_number");
   rel:.parquet.i.rel[src;o,(enlist `file_row_number)!enlist 1b];
   d:$[`file_row_number in key o;();@[.parquet.i.desc[c];rel;{[e] ()}]];
@@ -84,55 +85,36 @@
   rel:.parquet.i.rel[src;opts];
   .duckdb.i.fview[rel;.parquet.i.desc[c;rel] lj qs;()]}
 
-/ the read_parquet options under which DuckDB reads a source's columns from its file names and its first file alone
+/ the kept views, each (source as written;options;view): a source's columns are read once a session, as \l reads a db's
 / @ignore
-.parquet.i.FIRST:`hive_partitioning`filename`file_row_number
-/ What a local source is made of, () for a URL or a file that will not stat: files, in read order (DuckDB expands a glob),
-/ and stamp, which differs whenever the view of the source might: the file names beside what .fs.i.stamp says of each
-/ file the columns are read from (the first alone under .parquet.i.FIRST), and the working directory where a file has
-/ no number of its own to tell a relative name apart.  stamp is () for a source that keeps no view: a file under two
-/ seconds old (times may be whole seconds, so a rewrite within the one a stamp was taken in would not show).
-/ @ignore
-.parquet.i.stat:{[c;file;o]
-  ps:{[x] $[":"=first x;1_x;x]} each string (),file;
-  if[any ps like "*://*"; :()];
-  fl:raze {[c;p] $[any p in "*?[{";.duckdb.exec[c;"SELECT file AS f FROM glob(",.duckdb.i.lit[p],")"]`f;enlist p]}[c] each ps;
-  b:.fs.i.stamp each $[(1=count ps) and all key[o] in .parquet.i.FIRST;1 sublist fl;fl];
-  if[(0=count b) or any null raze b[;0 1]; :()];
-  cw:$[any null raze b;@[system;"cd";{[e] 0N}];""];
-  `files`stamp!(fl;$[(not cw~0N) and all b[;1]<("j"$.z.p)-2000000000;(fl;b;cw);()])}
-/ the kept views, each (source;stamp;view) in a place of its own, and how many sources have taken one: a source past
-/ the last place takes the oldest's
-/ @ignore
-.parquet.i.cache:16#enlist (::;();::)
-/ @ignore
-.parquet.i.turn:0
-/ THE view of a source, every parquet door's one way in.  A local source, named as written with its options, keeps its
-/ view while its stamp is unchanged, so a later read asks DuckDB for no metadata.  Several files are read as the list
-/ the stamp was taken of, held in the DuckDB variable of the source's place, so the statement expands no glob again;
-/ the place is emptied before that variable changes, or a build that fails would leave a view over another's files.
-/ A URL has no stamp and is asked afresh on every read, its q_schema entry the first any of its files has.
-/ Answers (view;kept), kept saying the view was not built by this call; anew builds it whatever is kept.
+.parquet.i.kept:()
+/ THE view of a source, every parquet door's one way in, kept for the session.  A statement names the source as written,
+/ so DuckDB expands a glob on every read and a new file is seen at once.  Answers (view;kept), kept saying the view was
+/ not built by this call; anew builds it whatever is kept.
 / @ignore
 .parquet.i.view:{[c;file;opts;anew]
-  s:.parquet.i.file file; o:$[.duckdb.i.none opts;()!();opts];
-  st:@[.parquet.i.stat[c;file];o;{[e] ()}];
-  if[0=count st; :(.parquet.i.build[c;s;s;0b;opts];0b)];
-  k:(file;o); i:first where k~/:.parquet.i.cache[;0];
-  if[not anew or null i; if[(count st`stamp) and st[`stamp]~.parquet.i.cache[i;1]; :(.parquet.i.cache[i;2];1b)]];
-  if[null i; i:.parquet.i.turn mod count .parquet.i.cache; .parquet.i.turn+:1];
-  .parquet.i.cache[i]:(::;();::);
-  fl:st`files; nm:"_q_pf",string i;
-  if[1<count fl; .duckdb.exec[c;"SET VARIABLE ",nm," = [",(", " sv .duckdb.i.lit each fl),"]"]];
-  v:.parquet.i.build[c;$[1<count fl;"getvariable('",nm,"')";.duckdb.i.lit first fl];.duckdb.i.lit first fl;1=count fl;opts];
-  .parquet.i.cache[i]:(k;st`stamp;v); (v;0b)}
-/ f[c;view] over the view of a source.  A kept view DuckDB refuses at its names or types may be stale and not the query's fault
-/ (SET binary_as_string retypes a column and moves no stamp): it is built anew and f run once more.  A read that ran and failed is not.
+  o:$[.duckdb.i.none opts;()!();opts]; i:first where (file;o)~/:.parquet.i.kept[;0 1];
+  if[not anew or null i; :(.parquet.i.kept[i;2];1b)];
+  v:.parquet.i.build[c;.parquet.i.file file;$[-11h=type file;not any (string file) in "*?[{";0b];opts];
+  $[null i;.parquet.i.kept,:enlist (file;o;v);.parquet.i.kept[i;2]:v]; (v;0b)}
+/ Forget the columns kept of a parquet source, as \l reads a changed db anew: a source's columns are read once a session,
+/ so after rewriting a file with new or retyped columns, refresh it.  A new file in a glob is seen without.
+/ @param file a file or glob as a read names it, or a directory, every source it holds going too; :: for every source
+/ @eg .parquet.refresh `:t.parquet
+/ @eg .parquet.refresh[]
+.parquet.refresh:{[file]
+  m:$[file~(::);{[f;s] 1b};{[f;s] any {[f;p] f~(count f)#p}[string f] each string (),s}] file;
+  .parquet.i.kept:.parquet.i.kept where not m each .parquet.i.kept[;0];}
+/ f[c;view] over the view of a source.  A kept view DuckDB refuses at its names or types may be stale and not the query's
+/ fault (a file rewritten by another, SET binary_as_string): it is built anew and f run once more.  A read that ran and
+/ failed is not, nor one q refused.
 / @ignore
 .parquet.i.with:{[file;opts;f]
   c:.duckdb.main[]; r:.parquet.i.view[c;file;opts;0b];
   if[not r 1; :f[c;r 0]];
-  anew:{[c;file;opts;f;e] if[not (e~"duckdb") and .duckdb.i.unbound c; 'e]; f[c;first .parquet.i.view[c;file;opts;1b]]};
+  anew:{[c;file;opts;f;e]
+    if[not (e~"duckdb") and (.duckdb.i.unbound c) or .duckdb.err[c] like "Conversion Error*"; 'e];
+    f[c;first .parquet.i.view[c;file;opts;1b]]};
   .[f;(c;r 0);anew[c;file;opts;f]]}
 
 / what cols and meta of a file answer, as (cols;meta), from its view alone: no row is read
