@@ -222,11 +222,16 @@
 / Five stages, each reading the tree and what the stages before it decided: the select phrase (.sql.i.phrase), the
 / where (.sql.i.where), the whole push of aggregates and by (.sql.i.whole), the limit and order (.sql.i.limit) and the
 / assembly of the answer (.sql.i.assemble), which numbers the literals each stage left as placeholders (.sql.i.number).
+/ A table q did not write says how its columns differ in two more schema columns, which the answer's schema drops: raw, the
+/ name a where term compares in place of the column (the stored column beside the one the select list converts; ` on i for
+/ a row number that orders the rows without being q's position), and sentinel, the stored value that reads as the q null
+/ beside NULL ("" for none, "NaN", or an integer's lowest value).
 / @eg .sql.translate[parse "select max price by sym from t where qty>100, f price";
 /   ([] col:`sym`qty`price; dtype:("VARCHAR";"BIGINT";"DOUBLE"); logical:`symbol`int64`float64; iskey:000b)]
 .sql.translate:{[tree;schema]
+  fr:.sql.i.origin schema; schema:(cols[schema] except `raw`sentinel)#schema;
   p:.sql.i.phrase tree 4;
-  w:.sql.i.where[tree;schema;p];
+  w:.sql.i.where[tree;schema;fr;p];
   g:.sql.i.whole[tree;schema;w];
   l:.sql.i.limit[tree;w;g];
   .sql.i.assemble[tree;schema;p;w;g;l]};
@@ -242,6 +247,10 @@
   if[99h<>type a; :`barrier`renames!(`i in .sql.i.names[0b] a;none)];
   b:`i~/:value a; v:(value a) where not b;
   `barrier`renames!(`i in raze .sql.i.names[0b] each v where not ((count);`i)~/:v; (key[a] where b)!(sum b)#`i)};
+/ the columns of a schema a where term reads otherwise than a table q wrote, as column!(raw;sentinel)
+.sql.i.origin:{[schema]
+  n:count schema; raw:$[`raw in cols schema; schema`raw; schema`col]; sn:$[`sentinel in cols schema; schema`sentinel; n#enlist ""];
+  j:where (raw<>schema`col) or 0<count each sn; (schema[`col] j)!flip (raw j;sn j)};
 / The where stage, a dict: cls (column to logical class), ix (the table stores i), stop (no term may move), terms (the
 / moved terms as SQL) and rest (the terms left for q, in order).  q runs term k+1 on the rows passing terms 1..k, so a
 / term that reads only its own row commutes with the others: every such term before the first that does not
@@ -250,13 +259,15 @@
 / which a later term moved ahead of it could hide by leaving it no rows.  A term on i left for
 / q would read positions the pull no longer has, so it stops every term; on a table without i, i anywhere does (the
 / virtual index).  So do the phrase's barrier, a rename onto a column, an empty schema, and a table or column name
-/ holding a dot (the SQL tree would read it as a path).
-.sql.i.where:{[tree;schema;phrase]
-  cl:exec col from schema; cls:cl!exec logical from schema; ix:`i in cl;
+/ holding a dot (the SQL tree would read it as a path).  An i that only orders the rows (fr) is no position: the SQL sorts
+/ and picks first and last by it, and i named anywhere but under count stops every term.
+.sql.i.where:{[tree;schema;fr;phrase]
+  cl:exec col from schema; cls:cl!exec logical from schema; ix:`i in cl; ord:$[`i in key fr; null first fr`i; 0b];
   wh:$[count tree 2; tree[2;0]; ()];
   stop:(phrase`barrier) or (0=count cl) or (any (key phrase`renames) in cl) or (any "." in/: string (tree 1),cl) or
-    `i in raze .sql.i.names[0b] each $[ix; enlist tree 3; 2_tree];
-  x:$[stop; (); .sql.i.term[cls;0b] each ((.sql.i.pure[cls;0b] each wh)?0b)#wh];
+    (ord and 0<count phrase`renames) or
+    `i in raze .sql.i.names[0b] each $[ord; tree (2_til count tree) except 4; ix; enlist tree 3; 2_tree];
+  x:$[stop; (); .sql.i.term[cls;fr;0b] each ((.sql.i.pure[cls;0b] each wh)?0b)#wh];
   x:(((((::)~/:x) and not .sql.i.pure[(0#`)!0#`;0b] each (count x)#wh),1b)?1b)#x;
   m:where not (::)~/:x; rest:wh (til count wh) except m;
   stop:stop or `i in raze .sql.i.names[0b] each rest;
@@ -282,8 +293,9 @@
   `ok`byrow`by`cols`rows`order!(1b;byrow;$[grouped; names[til nk]!e til nk; 0b];(names!e),vals!vals;rows;
     {[e;lg] (`;e),$[.sql.i.class[lg]`nullable; enlist `$"nulls first"; ()]}'[e til nk;x[til nk;2]])};
 / the .sql.i.CLASS row of a logical name whose values q and DuckDB order alike, :: otherwise: an unknown class, char,
-/ whose null q orders below every byte, or string, which q groups and sorts as lists
-.sql.i.sortable:{[lg] $[(null k`class) or (k:.sql.i.class lg)[`class] in `char`string; (::); k]};
+/ whose null q orders below every byte, or string, which q sorts as lists (byte by byte, the shorter of two first, as
+/ DuckDB orders a VARCHAR: groups is 1b for a by key, which may then be a string; a select's order may not)
+.sql.i.sortable:{[groups;lg] $[(null k`class) or (k:.sql.i.class lg)[`class] in `char,$[groups; `$(); `string]; (::); k]};
 / one by key named n as (expr;dtype;logical), or :: for one the SQL cannot group and sort as q does: a bare column of a
 / sortable class, a text column cast to symbol (.sql.i.cast) as the symbol q answers, or m xbar of an int column with m a
 / positive int, as the long q answers, floored as q floors (DuckDB's // truncates): c - (c % m + m) % m, m one
@@ -293,7 +305,7 @@
   if[not (::)~t; :$[`symbol=t[1]`class; (t 2;"VARCHAR";`symbol); (::)]];
   xb:$[0h=.Q.c.lty e; (3=count e) and (xbar)~e 0; 0b];
   c:$[xb; e 2; e]; if[not -11h=type c; :(::)]; if[(c=`i) or not c in schema`col; :(::)];
-  row:schema (schema`col)?c; if[(::)~.sql.i.sortable row`logical; :(::)];
+  row:schema (schema`col)?c; if[(::)~.sql.i.sortable[1b;row`logical]; :(::)];
   if[not xb; :(c;row`dtype;row`logical)];
   m:e 1; if[not ((type m) in -5 -6 -7h) and (not null m) and (m>0) and (row`logical) in `int16`int32`int64; :(::)];
   p:.sql.i.lit[m],n;
@@ -354,7 +366,7 @@
     none:(::;()); n:tree 5; o:$[6<count tree; tree 6; ()];
     if[(0h=.Q.c.lty o) and (1=count o) and 0h=.Q.c.lty first o; o:first o];
     if[count o; if[(2<>count o) or -11h<>type c:o 1; :none]; d:((<:);(>:))?o 0;
-      if[(d=2) or (::)~k:.sql.i.sortable cls c; :none];
+      if[(d=2) or (::)~k:.sql.i.sortable[0b;cls c]; :none];
       o:enlist ((`$("<:";">:") d);c),$[k`nullable; enlist `$("nulls first";"nulls last") d; ()]];
     if[(type n) in -5 -6 -7h; :$[null n; none; n=0W; $[count o; (::;o); none]; (n;o)]];
     if[((type n) in 5 6 7h) and 2=count n; if[(not any null n) and (n[0]>=0) and n[1]>0; :(n;o)]];
@@ -481,8 +493,13 @@
   if[($)~e 0; if[not $[(11h=type e 1) and 1=count e 1; (not (first e 1) in `,`symbol) or not (::)~.sql.i.cast[cls;e]; 0b]; :0b]];
   a:1_e; all .z.s[cls]'[$[lit; (count a)#1b; (-1_(count a)#0b),any (e 0)~/:((in);(within);(like))]; a]};
 .sql.i.bind:{[v] $[-11h=type v; $[null v; ""; v]; -10h=type v; enlist v; 10h=type v; enlist each v; v]};
-/ the SQL that is true exactly where the column holds a q null; :: for a class without one
-.sql.i.nullpred:{[k;c] $[k`nullable; (`$"is null";c); `symbol=k`logical; (`$"=";c;.sql.i.lit ""); (::)]};
+/ the SQL that is true exactly where the column holds a q null; :: for a class without one.  A column with a sentinel
+/ (.sql.translate) holds the q null twice, and the test stays on the column itself (no function around an integer one),
+/ so a scan still prunes by it; isnan because a file's min and max leave NaN out
+.sql.i.nullpred:{[k;c]
+  s:$[`sentinel in key k; k`sentinel; ""];
+  $[count s; (`or;(`$"is null";c);$[s~"NaN"; (`isnan;c); (`$"=";c;enlist `$s)]);
+    k`nullable; (`$"is null";c); `symbol=k`logical; (`$"=";c;.sql.i.lit ""); (::)]};
 / e over a nullable column reads NULL on its null row: keeps adds the rows q keeps there, strict makes the expression
 / false there instead (under NOT, where NULL would not flip)
 .sql.i.arm:{[k;strict;keeps;c;e]
@@ -490,32 +507,38 @@
   $[k[`nullable] and strict; (`and;e;(`$"is not null";c)); e]};
 
 / one where term as SQL, or :: for a term the map cannot push
-.sql.i.term:{[cls;strict;e]
+.sql.i.term:{[cls;fr;strict;e]
   if[0h<>.Q.c.lty e; :(::)]; if[(any 101h=type each 1_e) or not (type e 0) within 100 112h; :(::)];
   if[null i:first where .sql.i.VERBS[`verb]~\:e 0; :(::)]; r:.sql.i.VERBS i; a:1_e;
-  if[r[`shape]=`logic; if[2<>count a; :(::)]; l:.z.s[cls;strict] each a; :$[any (::)~/:l; (::); (r`sql),l]];
-  if[r[`shape]=`not; :$[(::)~t:.z.s[cls;1b;a 0]; (::); (r`sql;t)]];
-  .sql.i.compare[cls;strict;r;a]};
+  if[r[`shape]=`logic; if[2<>count a; :(::)]; l:.z.s[cls;fr;strict] each a; :$[any (::)~/:l; (::); (r`sql),l]];
+  if[r[`shape]=`not; :$[(::)~t:.z.s[cls;fr;1b;a 0]; (::); (r`sql;t)]];
+  .sql.i.compare[cls;fr;strict;r;a]};
 / the compared side, a column, a text column under a cast (.sql.i.cast) or an .sql.i.arith expression, is c; an
 / expression compares only by scalar verbs with a non-null literal inside its type's range.  A string column pushes in
-/ over strings (one string as =, which a scan prunes by) and like; it compares with no symbol, as in q.
-.sql.i.compare:{[cls;strict;r;a]
+/ over strings (one string as =, which a scan prunes by) and like; it compares with no symbol, as in q.  A bare column
+/ with a raw name (fr) compares under it, its sentinel a null beside NULL: an integer's is its lowest value, which DuckDB
+/ orders where q orders the null, so the term is exact for every literal above it and stays with q for one at or below.
+.sql.i.compare:{[cls;fr;strict;r;a]
   c:a 0; v:a 1;
   side:{[cls;x] (-11h=type x) or (not (::)~.sql.i.cast[cls;x]) or (0h=.Q.c.lty x) and any (first x)~/:.sql.i.ARITH}[cls];
   if[(not side c) and (side v) and not null r`mirror; c:v; v:a 0; r:.sql.i.VERBS first where .sql.i.VERBS[`sql]=r`mirror];
   t:.sql.i.cast[cls;c]; ar:(-11h<>type c) and t~(::);
   x:$[-11h=type c; (c;.sql.i.class cls c); ar; $[`scalar=r`shape; .sql.i.arith[cls;c]; (::)]; t 2 1];
-  if[x~(::); :(::)]; c:x 0; k:x 1; s:r`sql; h:r`shape; str:`string=k`class;
+  if[x~(::); :(::)]; k:x 1; s:r`sql; h:r`shape; str:`string=k`class; sn:"";
+  if[$[-11h=type c; c in key fr; 0b]; f:fr c; if[null f 0; :(::)]; x:@[x;0;:;f 0]; k[`sentinel]:sn:f 1];
+  c:x 0;
   if[not k[`class] in r`classes; :(::)];
   if[h=`isnull; :.sql.i.nullpred[k;c]];
   if[h=`pattern; :$[(::)~p:.sql.i.glob v; (::); .sql.i.arm[k;strict;k[`nullable] and all "*"=p;c;(s;c;.sql.i.lit p)]]];
   w:.sql.i.operand[k;h in `range`list;v]; if[w~(::); :(::)];
   if[$[ar; (null w) or (abs w)>(`int16`int32`int64!(0Wh;0Wi;0W)) k`logical; 0b]; :(::)];
+  if[$[(count sn) and not sn~"NaN"; any (not null w) and w<="J"$sn; 0b]; :(::)];
   if[h=`range; if[(2<>count w) or k[`nullable] and any null w; :(::)];
     :.sql.i.arm[k;strict;0b;c;(s;c),.sql.i.lit each .sql.i.bind each w]];
   if[h=`list; :.sql.i.arm[k;strict;$[str; any 0=count each w; any null w];c;
     $[str and 1=count w; (`$"=";c;.sql.i.lit first w); (s;.sql.i.lit .sql.i.bind w;c)]]];
-  if[k[`nullable] and null w; :$[null r`nulllit; (::); (r`nulllit;c)]];
+  if[k[`nullable] and null w;
+    :$[null r`nulllit; (::); 0=count sn; (r`nulllit;c); (`$"is null")=r`nulllit; .sql.i.nullpred[k;c]; (`not;.sql.i.nullpred[k;c])]];
   .sql.i.arm[k;strict;k[`nullable] and r`keepsnull;c;(s;c;.sql.i.lit .sql.i.bind w)]};
 / the q heads of int arithmetic, spelt by .sql.i.arith as + - * and unary -
 .sql.i.ARITH:((+);(-);(*);(neg));
