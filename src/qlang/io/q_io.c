@@ -984,8 +984,8 @@ int q_io_parquet_named(ray_t* fsym) {
     return is;
 }
 
-/* `.parquet.i.select[fsym;args;env]` by name, as io_parquet_table calls `.parquet.read`; its `::` is the door declining */
-ray_t* q_io_parquet_select(ray_t** args, int64_t n, ray_t* env) {
+/* `.parquet.i.select[fsym;tree]` by name, as io_parquet_table calls `.parquet.read`; its `::` is the door declining */
+ray_t* q_io_parquet_select(ray_t** args, int64_t n) {
     ray_t* path = q_io_file_path(args[0]);
     if (!path) return NULL;
     ray_t* refused = io_guard_duckdb(path, 0);
@@ -994,8 +994,8 @@ ray_t* q_io_parquet_select(ray_t** args, int64_t n, ray_t* env) {
     ray_t* tree = ray_list_new(n);
     for (int64_t i = 0; i < n && tree && !RAY_IS_ERR(tree); i++) tree = ray_list_append(tree, args[i]);
     if (!tree || RAY_IS_ERR(tree)) return tree ? tree : q_err(QE_WSFULL);
-    ray_t* cargs[3] = { args[0], tree, env };
-    ray_t* out = q_eval_apply_call_name(".parquet.i.select", 17, cargs, 3);
+    ray_t* cargs[2] = { args[0], tree };
+    ray_t* out = q_eval_apply_call_name(".parquet.i.select", 17, cargs, 2);
     ray_release(tree);
     if (out && RAY_IS_NULL(out)) { ray_release(out); return NULL; }
     return out;
