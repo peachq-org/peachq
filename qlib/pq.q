@@ -28,6 +28,30 @@
 / @eg .pq.info hopen (`:pq:duckdb:demo;":memory:")
 .pq.info:{[x] .pq.i.info x}
 
+/ Declare which text columns of a DuckDB table or view q did not write are symbols, as the template table's types say.
+/ The declaration is written into the database's _q_schema, so it stays with the table for every session, and replaces
+/ any earlier one; the next select reads each declared column as a symbol and every other column as before.  For now
+/ only symbols are declared: a template column of type s over a VARCHAR column.  Any other template column, and one
+/ the table lacks, is reported but not declared.
+/ @param coordinate the table, `:pq:duckdb:alias:table/
+/ @param template a q table whose column types are the declaration, rows or none; () or a table of no columns drops it
+/ @return ([] col; type; applied): each template column, its meta char, and whether it was declared
+/ @throws type coordinate is not a DuckDB table coordinate, or template is not a table
+/ @throws domain the table is one q wrote, whose own schema stands
+/ @eg h:hopen (`:pq:duckdb:d;":memory:"); h "CREATE TABLE t AS SELECT 'A' AS s, 1.5 AS px"; .pq.setschema[`:pq:duckdb:d:t/;([] s:`symbol$())]
+.pq.setschema:{[coordinate;template]
+  if[-11h<>type coordinate; '`type];
+  s:string coordinate; if[not (s like ":pq:duckdb:*/") and 3<sum s=":"; '`type];
+  h:`$(i:(where s=":") 3)#s; t:`$-1_(1+i)_s;
+  if[99h=type template; template:0!template];
+  if[not (template~()) or 98h=type template; '`type];
+  if[not .duckdb.i.foreign[h;t]; '`domain];
+  tc:$[template~();0#`;cols template]; ty:$[count tc;exec t from meta template;""];
+  sc:.duckdb.i.info[h;t]`schema; j:(lower sc`col)?lower tc;
+  ok:(0#0b),(ty="s") and {[sc;j] $[j<count sc;"VARCHAR"~sc[`dtype] j;0b]}[sc] each j;
+  d:distinct sc[`col] j where ok; .duckdb.i.declare[h;t;([] col:d; logical:(count d)#`symbol)];
+  flip `col`type`applied!(tc;ty;ok)}
+
 / The syntax tree of q source text, for tools: `nodes`errors!(nodes;errors).  It never stops at an error: every
 / statement (cut as \l cuts them) and every closing bracket starts afresh, and a statement it finds well-formed is
 / judged by the parser itself, whose refusal becomes an error row.  Offsets are bytes into src, end-exclusive.

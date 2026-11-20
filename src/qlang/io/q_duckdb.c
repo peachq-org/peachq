@@ -1312,8 +1312,8 @@ static ray_t* qd_unlink_wrap(ray_t** args, int64_t n) {
     return RAY_NULL_OBJ;
 }
 
-/* .duckdb.i.hdel[c; t] — drop the OBJECT t names (a view when that is what it is, else a table) and, with a table,
- * its sidecar rows: the one key law spells them, so nothing of a dropped table outlives it in _q_schema. */
+/* .duckdb.i.hdel[c; t] — drop the OBJECT t names (a view when that is what it is, else a table) and its
+ * sidecar rows (a view's are its declarations): the one key law spells them, so nothing dropped outlives it in _q_schema. */
 static ray_t* qd_hdel_wrap(ray_t** args, int64_t n) {
     int slot = -1;
     qd_name_t name;
@@ -1331,7 +1331,7 @@ static ray_t* qd_hdel_wrap(ray_t** args, int64_t n) {
     q_duckdb_puts(&b, is_view ? "DROP VIEW " : "DROP TABLE ");
     q_duckdb_schema_put_name(&b, &name);
     if ((e = q_duckdb_exec_buf(slot, &b))) return e;
-    if (!is_view) q_duckdb_schema_drop_desc(slot, &name);
+    q_duckdb_schema_drop_desc(slot, &name);
     qd_bound_drop(slot, name.key);
     ray_retain(args[1]);
     return args[1];
@@ -1389,13 +1389,42 @@ static ray_t* qd_meta_wrap(ray_t** args, int64_t n) {
     return b ? q_duckdb_schema_bound_meta(b) : e;
 }
 
-/* .duckdb.i.schema[h;`t] — the push's schema from the bound table, () for a table the sidecar does not name */
+/* .duckdb.i.schema[h;`t] — the push's schema from the bound table, () for a table the sidecar does not mark as q's */
 static ray_t* qd_schema_wrap(ray_t** args, int64_t n) {
     int slot = -1;
     qd_name_t name;
     ray_t* e;
     const qd_bound_t* b = qd_bound_door(args, n, &slot, &name, &e);
     return b ? q_duckdb_schema_bound_schema(b, false) : e;
+}
+
+/* .duckdb.i.decl[h;`t] — a foreign table's declared columns from the bound table, ([] col; logical) */
+static ray_t* qd_decl_wrap(ray_t** args, int64_t n) {
+    int slot = -1;
+    qd_name_t name;
+    ray_t* e;
+    const qd_bound_t* b = qd_bound_door(args, n, &slot, &name, &e);
+    return b ? q_duckdb_schema_bound_decl(b) : e;
+}
+
+/* .duckdb.i.declare[h;`t;decl] — a foreign table's declarations replaced by decl ([] col; logical), in one
+ * transaction; with none to write, a database that has no sidecar is left without one */
+static ray_t* qd_declare_wrap(ray_t** args, int64_t n) {
+    int slot = -1;
+    qd_name_t name;
+    const char *db, *sc;
+    ray_t* e = qd_door(args, n, 3, &slot);
+    if (!e) e = qd_name_arg(slot, args[1], &name);
+    if (e) return e;
+    if (args[2]->type != RAY_TABLE) return q_err(QE_TYPE);
+    q_duckdb_ctx(slot, &db, &sc);
+    if (q_count(args[2]) == 0 && !g_cons[slot].sidecar) return RAY_NULL_OBJ;
+    if ((e = q_duckdb_exec(slot, "BEGIN TRANSACTION"))) return e;
+    if (!(e = q_duckdb_schema_write_decl(slot, &name, args[2]))) e = q_duckdb_exec(slot, "COMMIT");
+    if (e) { qd_rollback(slot); return e; }
+    qd_bound_drop(slot, name.key);
+    g_cons[slot].sidecar = true;
+    return RAY_NULL_OBJ;
 }
 
 /* .duckdb.i.rows[h;`t] — the bound entry's row count: the maxrows check's whole knowledge, no statement on a hit */
@@ -2222,6 +2251,8 @@ void q_duckdb_register(void) {
     qd_bind_vary (".duckdb.i.append", 3, qd_append_wrap);
     qd_bind_vary (".duckdb.i.meta",   2, qd_meta_wrap);
     qd_bind_vary (".duckdb.i.schema", 2, qd_schema_wrap);
+    qd_bind_vary (".duckdb.i.decl",   2, qd_decl_wrap);
+    qd_bind_vary (".duckdb.i.declare", 3, qd_declare_wrap);
     qd_bind_vary (".duckdb.i.unbind", 2, qd_unbind_wrap);
     qd_bind_vary (".duckdb.i.rows",   2, qd_rows_wrap);
     qd_bind_vary (".duckdb.i.maxrows", 3, qd_maxrows_wrap);

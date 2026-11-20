@@ -236,10 +236,11 @@ ray_t*      q_duckdb_schema_batch_clear(int slot);   /* no catalog object stands
 const char* q_duckdb_schema_text_cell(ray_t* tbl, int64_t col, int64_t row, size_t* len);
 const qd_desc_t* q_duckdb_schema_desc_find(const char* name, size_t len, const qd_desc_t* desc, int64_t ndesc);
 ray_t*      q_duckdb_schema_check_names(int slot, ray_t* tbl);
-int64_t     q_duckdb_schema_fetch_desc(int slot, const qd_name_t* nm, qd_desc_t** out);
+int64_t     q_duckdb_schema_fetch_desc(int slot, const qd_name_t* nm, qd_desc_t** out, bool* marked);
 void        q_duckdb_schema_desc_free(qd_desc_t* d, int64_t n);
 ray_t*      q_duckdb_schema_write_desc(int slot, const qd_name_t* nm, ray_t* tbl, const qd_colmap_t* cms,
                                        const bool* iskey, const qd_enum_t* en, const char* const* dtypes, int64_t icol);
+ray_t*      q_duckdb_schema_write_decl(int slot, const qd_name_t* nm, ray_t* decl);
 ray_t*      q_duckdb_schema_index_backfill(int slot, const qd_name_t* nm);
 void        q_duckdb_schema_drop_desc(int slot, const qd_name_t* nm);
 ray_t*      q_duckdb_schema_rekey(ray_t* tbl, const qd_desc_t* desc, int64_t ndesc);
@@ -260,12 +261,13 @@ ray_t*      q_duckdb_schema_cast_select(int slot, qd_buf* b, ray_t* tbl, const q
 ray_t*      q_duckdb_schema_exact_check(int slot, ray_t* tbl, const qd_colmap_t* cms, const char* const* dtypes,
                                         ray_t* const* masks, ray_t* const* offs, ray_t* const* keeps);
 /* the bound table: read in one statement (an owned error on refusal, *out untouched), then what the doors answer from
- * it — kdb's meta; the push's schema `col dtype logical iskey`, () for a table the sidecar does not name; with info,
+ * it — kdb's meta; the push's schema `col dtype logical iskey`, () for a table the sidecar does not mark as q's; with info,
  * every column and its meta char beside */
 ray_t*      q_duckdb_schema_table(ray_t** cols, const char* const* names, int64_t n);   /* owned columns in, released */
 ray_t*      q_duckdb_schema_bound_read(int slot, const qd_name_t* nm, bool sidecar, qd_bound_t* out);
 void        q_duckdb_schema_bound_free(qd_bound_t* b);
 ray_t*      q_duckdb_schema_bound_meta(const qd_bound_t* b);
 ray_t*      q_duckdb_schema_bound_schema(const qd_bound_t* b, bool info);
+ray_t*      q_duckdb_schema_bound_decl(const qd_bound_t* b);
 
 #endif /* Q_DUCKDB_INTERNAL_H */

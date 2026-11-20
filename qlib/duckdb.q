@@ -226,7 +226,8 @@
 / wrote, or a list); push, the schema .sql.translate reads (empty when a shown name is one the
 / pushed statement uses itself) and src, the SELECT items of the relation that statement reads, by name: each shown column,
 / and each stored column a where term compares as it stands under its raw name.
-/ sch may say what q wrote (a parquet file's q_schema) in one more column, logical: a column whose logical q writes over
+/ sch may say what q wrote (a parquet file's q_schema) or what was declared (a table's .duckdb.i.decl) in one more
+/ column, logical: a column whose logical q writes over
 / its DuckDB type is q's own and reads as that q type, its nulls merged as a foreign column's are (.duckdb.i.fmerge);
 / any other column reads as foreign.
 / @ignore
@@ -255,6 +256,8 @@
   if[any (lower `i,al where bare) in lower cl; :`push`src!(0#p;()!())];
   w:where bare;
   `push`src!(p;(cl,al w)!sel,{[q;l;a] q,$[l=`utf8;.duckdb.i.FBYTES;""]," AS ",.duckdb.i.quote string a}'[qn w;lg w;al w])}
+/ a table is q's when its _q_schema rows carry the table row .duckdb.set writes; column rows alone declare columns
+/ of a foreign table (.duckdb.i.decl), which its view reads as declared
 / @ignore
 .duckdb.i.foreign:{[c;t] 0=count .duckdb.i.schema[c;t]}
 / @ignore
@@ -275,6 +278,7 @@
   if[t in st`table; st:st[`bound] st[`table]?t];
   i:.duckdb.i.fkept[;0]?k; if[i<count .duckdb.i.fkept; if[st~.duckdb.i.fkept[i;1]; :.duckdb.i.fkept[i;2]]];
   sch:select col, dtype from .duckdb.i.info[c;t]`schema; rel:.duckdb.i.qname t;
+  if[count d:.duckdb.i.decl[c;t]; sch:update logical:(d[`col]!d`logical) col from sch];
   ord:$[`rowid in sch`col;();@[{[c;rel] .duckdb.exec[c;"SELECT rowid FROM ",rel," LIMIT 0"]; enlist "rowid"}[c];rel;{[e] ()}]];
   if[i=count .duckdb.i.fkept; i:.duckdb.i.fturn mod count .duckdb.i.fkept; .duckdb.i.fturn+:1];
   v:.duckdb.i.fview[rel;sch;ord]; .duckdb.i.fkept[i]:(k;st;v); v}
