@@ -126,13 +126,14 @@
   if[1<count fl; .duckdb.exec[c;"SET VARIABLE ",nm," = [",(", " sv .duckdb.i.lit each fl),"]"]];
   v:.parquet.i.build[c;$[1<count fl;"getvariable('",nm,"')";.duckdb.i.lit first fl];.duckdb.i.lit first fl;1=count fl;opts];
   .parquet.i.cache[i]:(k;st`stamp;v); (v;0b)}
-/ f[c;view] over the view of a source.  DuckDB refusing a kept view may be the view's age and not the query (a setting
-/ that retypes a column, SET binary_as_string, moves no stamp), so the view is built anew and f run once more.
+/ f[c;view] over the view of a source.  A kept view DuckDB refuses at its names or types may be stale and not the query's fault
+/ (SET binary_as_string retypes a column and moves no stamp): it is built anew and f run once more.  A read that ran and failed is not.
 / @ignore
 .parquet.i.with:{[file;opts;f]
   c:.duckdb.main[]; r:.parquet.i.view[c;file;opts;0b];
   if[not r 1; :f[c;r 0]];
-  .[f;(c;r 0);{[c;file;opts;f;e] if[not e~"duckdb"; 'e]; f[c;first .parquet.i.view[c;file;opts;1b]]}[c;file;opts;f]]}
+  anew:{[c;file;opts;f;e] if[not (e~"duckdb") and .duckdb.i.unbound c; 'e]; f[c;first .parquet.i.view[c;file;opts;1b]]};
+  .[f;(c;r 0);anew[c;file;opts;f]]}
 
 / The columns of a file that .parquet.read does not show because q has no type for theirs; DuckDB's SQL still reads them.
 / A file written from a q table hides none.
@@ -158,7 +159,7 @@
 / or a restricted evaluation that may not load the translator.
 / @ignore
 .parquet.i.select:{[file;tree]
-  if[not @[{[u] .sql.translate; 1b};::;{[e] 0b}]; :(::)];
+  if[not .duckdb.i.translates[]; :(::)];
   .parquet.i.with[file;();{[tree;c;v]
     rt:@[.pq.i.resolveSeam[v`cols];tree;{[e] ::}];
     $[rt~(::);::;.duckdb.i.fselect[c;v;rt]]}[tree]]}
