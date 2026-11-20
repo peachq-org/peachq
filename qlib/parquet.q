@@ -135,6 +135,10 @@
   anew:{[c;file;opts;f;e] if[not (e~"duckdb") and .duckdb.i.unbound c; 'e]; f[c;first .parquet.i.view[c;file;opts;1b]]};
   .[f;(c;r 0);anew[c;file;opts;f]]}
 
+/ what cols and meta of a file answer, as (cols;meta), from its view alone: no row is read
+/ @ignore
+.parquet.i.shape:{[file] .parquet.i.with[file;();{[c;v] n:count v`cols; (v`cols;([c:v`cols] t:v`t; f:n#`; a:n#`))}]}
+
 / The columns of a file that .parquet.read does not show because q has no type for theirs; DuckDB's SQL still reads them.
 / A file written from a q table hides none.
 / @param opts the read_parquet options, as .parquet.read takes them

@@ -94,6 +94,9 @@ ray_t* q_io_resource_table(ray_t* fsym);
  * NULL = the door left the select to q, which then reads the resource whole (q_io_resource_table). */
 int    q_io_parquet_named(ray_t* fsym);
 ray_t* q_io_parquet_select(ray_t** args, int64_t n);
+/* The columns (meta 0) or the meta (meta 1) of a `.parquet` resource, from the view its door keeps and with no row read.
+ * NULL = not a `.parquet` resource: the caller decodes its table (q_io_resource_table). */
+ray_t* q_io_parquet_shape(ray_t* fsym, int meta);
 
 /* Does the name end `.gz` — the table doors' compression='auto' (DuckDB's)? */
 int q_io_gz_named(ray_t* pathstr);
