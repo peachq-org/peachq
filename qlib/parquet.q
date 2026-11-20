@@ -112,26 +112,34 @@
 / the stamp was taken of, held in the DuckDB variable of the source's place, so the statement expands no glob again;
 / the place is emptied before that variable changes, or a build that fails would leave a view over another's files.
 / A URL has no stamp and is asked afresh on every read, its q_schema entry the first any of its files has.
+/ Answers (view;kept), kept saying the view was not built by this call; anew builds it whatever is kept.
 / @ignore
-.parquet.i.view:{[c;file;opts]
+.parquet.i.view:{[c;file;opts;anew]
   s:.parquet.i.file file; o:$[.duckdb.i.none opts;()!();opts];
   st:@[.parquet.i.stat[c;file];o;{[e] ()}];
-  if[0=count st; :.parquet.i.build[c;s;s;0b;opts]];
+  if[0=count st; :(.parquet.i.build[c;s;s;0b;opts];0b)];
   k:(file;o); i:first where k~/:.parquet.i.cache[;0];
-  if[not null i; if[(count st`stamp) and st[`stamp]~.parquet.i.cache[i;1]; :.parquet.i.cache[i;2]]];
+  if[not anew or null i; if[(count st`stamp) and st[`stamp]~.parquet.i.cache[i;1]; :(.parquet.i.cache[i;2];1b)]];
   if[null i; i:.parquet.i.turn mod count .parquet.i.cache; .parquet.i.turn+:1];
   .parquet.i.cache[i]:(::;();::);
   fl:st`files; nm:"_q_pf",string i;
   if[1<count fl; .duckdb.exec[c;"SET VARIABLE ",nm," = [",(", " sv .duckdb.i.lit each fl),"]"]];
   v:.parquet.i.build[c;$[1<count fl;"getvariable('",nm,"')";.duckdb.i.lit first fl];.duckdb.i.lit first fl;1=count fl;opts];
-  .parquet.i.cache[i]:(k;st`stamp;v); v}
+  .parquet.i.cache[i]:(k;st`stamp;v); (v;0b)}
+/ f[c;view] over the view of a source.  DuckDB refusing a kept view may be the view's age and not the query (a setting
+/ that retypes a column, SET binary_as_string, moves no stamp), so the view is built anew and f run once more.
+/ @ignore
+.parquet.i.with:{[file;opts;f]
+  c:.duckdb.main[]; r:.parquet.i.view[c;file;opts;0b];
+  if[not r 1; :f[c;r 0]];
+  .[f;(c;r 0);{[c;file;opts;f;e] if[not e~"duckdb"; 'e]; f[c;first .parquet.i.view[c;file;opts;1b]]}[c;file;opts;f]]}
 
 / The columns of a file that .parquet.read does not show because q has no type for theirs; DuckDB's SQL still reads them.
 / A file written from a q table hides none.
 / @param opts the read_parquet options, as .parquet.read takes them
 / @return a table ([] col; dtype), dtype as DuckDB declares it
 / @eg .parquet.hidden[`:t.parquet;()]
-.parquet.hidden:{[file;opts] .parquet.i.view[.duckdb.main[];file;opts]`hidden}
+.parquet.hidden:{[file;opts] .parquet.i.with[file;opts;{[c;v] v`hidden}]}
 
 / Read a parquet file (or files) as a table, optionally through a select pushed down to DuckDB.
 / @param file `:x.parquet, a glob as `$":data/*.parquet", a URL, or a list of them
@@ -142,10 +150,9 @@
 / @eg .parquet.read[`$":t/*/*.parquet";(enlist `hive_partitioning)!enlist 1b;()]
 / @eg .parquet.read[`:t.parquet;();parse "select sum a from t where a>1"]
 .parquet.read:{[file;opts;query]
-  c:.duckdb.main[];
-  if[not .duckdb.i.none query; if[not (?)~query 0; '`type]];
-  v:.parquet.i.view[c;file;opts];
-  $[.duckdb.i.none query;.duckdb.i.fpull[c;v];.duckdb.i.fselect[c;v;.pq.i.resolveTree[v`cols;(enlist v`rel),eval each 2_query]]]}
+  if[.duckdb.i.none query; :.parquet.i.with[file;opts;.duckdb.i.fpull]];
+  if[not (?)~query 0; '`type];
+  .parquet.i.with[file;opts;{[q;c;v] .duckdb.i.fselect[c;v;.pq.i.resolveTree[v`cols;(enlist v`rel),q]]}[eval each 2_query]]}
 / The suffix door's select (select ... from `:f.parquet): tree is its arguments as ? takes them, env what each plain name
 / they mention means where the select was written, a local included.  A name that is no column is replaced by that
 / meaning (a one-item list is a literal, left alone), so the select reads the same from here.  :: leaves it to q: a
@@ -154,7 +161,6 @@
 / @ignore
 .parquet.i.select:{[file;tree;env]
   if[not @[{[u] .sql.translate; 1b};::;{[e] 0b}]; :(::)];
-  c:.duckdb.main[]; v:.parquet.i.view[c;file;()];
   f:{[cl;env;x]
     if[-11h=type x;
       if[x in cl; :x];
@@ -164,9 +170,10 @@
     if[any (x 0)~/:(:;::); '`unpush];
     if[(4<count x) and any (x 0)~/:(?;!); '`unpush];
     .z.s[cl;env] each x};
-  g:{[f;x] $[99h=type x;f each x;x]}[f[v[`cols],`i;env]];
-  rt:@[{[f;g;t] (t 0;f each t 1;g t 2;g t 3),4_t}[f[v[`cols],`i;env];g];tree;{[e] `unpush}];
-  $[`unpush~rt;::;.duckdb.i.fselect[c;v;rt]]}
+  .parquet.i.with[file;();{[f;tree;env;c;v]
+    f:f[v[`cols],`i;env]; g:{[f;x] $[99h=type x;f each x;x]}[f];
+    rt:@[{[f;g;t] (t 0;f each t 1;g t 2;g t 3),4_t}[f;g];tree;{[e] `unpush}];
+    $[`unpush~rt;::;.duckdb.i.fselect[c;v;rt]]}[f;tree;env]]}
 
 / @ignore
 .parquet.i.bytes:{[t]
