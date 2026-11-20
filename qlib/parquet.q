@@ -75,9 +75,9 @@
   rel:.parquet.i.rel[file;o,h];
   d:$[any key[h] in key o;();@[.parquet.i.desc[c];rel;{[e] ()}]];
   if[count d;
-    :.duckdb.i.fview[rel;select from d where not col in `$("_q_file";"file_row_number");"\"_q_file\", file_row_number"]];
+    :.duckdb.i.fview[rel;select from d where not col in `$("_q_file";"file_row_number");("\"_q_file\"";"file_row_number")]];
   rel:.parquet.i.rel[file;opts];
-  .duckdb.i.fview[rel;.parquet.i.desc[c;rel];""]}
+  .duckdb.i.fview[rel;.parquet.i.desc[c;rel];()]}
 
 / The columns of a file that .parquet.read does not show because q has no type for theirs; DuckDB's SQL still reads them.
 / A file written from a q table hides none.
@@ -99,8 +99,8 @@
   rel:.parquet.i.rel[file;opts]; c:.duckdb.main[];
   if[not .duckdb.i.none query; if[not (?)~query 0; '`type]];
   if[count kv:.parquet.i.kv[c;file]; :.parquet.i.restore[rel;kv;query]];
-  v:.parquet.i.fview[c;file;opts]; t:.duckdb.i.fpull[c;v];
-  $[.duckdb.i.none query;t;(?) . (enlist t),1_.duckdb.i.ftext[v;.pq.i.resolveTree[cols t;(enlist rel),eval each 2_query]]]}
+  v:.parquet.i.fview[c;file;opts];
+  $[.duckdb.i.none query;.duckdb.i.fpull[c;v];.duckdb.i.fselect[c;v;.pq.i.resolveTree[v`cols;(enlist rel),eval each 2_query]]]}
 
 / @ignore
 .parquet.i.bytes:{[t]
