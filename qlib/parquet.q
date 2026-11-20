@@ -99,11 +99,12 @@
   $[null i;.parquet.i.kept,:enlist (file;o;v);.parquet.i.kept[i;2]:v]; (v;0b)}
 / Forget the columns kept of a parquet source, as \l reads a changed db anew: a source's columns are read once a session,
 / so after rewriting a file with new or retyped columns, refresh it.  A new file in a glob is seen without.
-/ @param file a file or glob as a read names it, or a directory, every source it holds going too; :: for every source
+/ @param file a file or glob as a read names it (a glob whose text before its first wildcard the file starts with goes
+/ too), or a directory, every source under it going too; :: for every source
 / @eg .parquet.refresh `:t.parquet
 / @eg .parquet.refresh[]
 .parquet.refresh:{[file]
-  m:$[file~(::);{[f;s] 1b};{[f;s] any {[f;p] f~(count f)#p}[string f] each string (),s}] file;
+  m:$[file~(::);{[f;s] 1b};{[f;s] any {[f;p] l:(min p?"*?[{")#p; (f~(count f)#p) or l~(count l)#f}[string f] each string (),s}] file;
   .parquet.i.kept:.parquet.i.kept where not m each .parquet.i.kept[;0];}
 / f[c;view] over the view of a source.  A kept view DuckDB refuses at its names or types may be stale and not the query's
 / fault (a file rewritten by another, SET binary_as_string): it is built anew and f run once more.  A read that ran and
