@@ -1223,9 +1223,8 @@ static ray_t* ques_env(ray_t** args, int64_t n) {
     return env ? env : q_err(QE_WSFULL);
 }
 
-/* THE resolver seam: every door is handed the select with that dict as its last item.  The DuckDB and parquet doors
- * read it through one resolver (.pq.i.resolve); the q peer and kafka, whose names are globals by their own law, drop
- * it (.pq.i.resolveTree).  NULL: no door's, or the door declined. */
+/* THE resolver seam: every door is handed the select with that dict as its last item, and reads it through one
+ * resolver (.pq.i.resolve).  NULL: no door's, or the door declined. */
 static ray_t* ques_pushed(ray_t** args, int64_t n) {
     if (n < 4 || n > 6 || !ques_door(args[0])) return NULL;
     ray_t* with[7];
