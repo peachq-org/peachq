@@ -175,19 +175,19 @@
 / the relation that statement reads: sel, and each stored column a where term compares as it stands under its raw name.
 / @ignore
 .duckdb.i.fview:{[rel;sch;order]
-  ty:exec dtype!flip (logical;ktype) from .duckdb.types[] where canon;
+  tt:.duckdb.types[]; ty:exec dtype!flip (logical;ktype) from tt where canon;
   qn:.duckdb.i.quote each string sch`col;
   r:.duckdb.i.fcol[ty]'[string sch`col;sch`dtype;qn;0];
   j:where 0=count each r; i:where 0<count each r; s:i where 0<count each r[i;2];
   sel:", " sv {[e;q] e[0]," AS ",q}'[r i;qn i];
   (`rel`order`sel`cols`t`schema`hidden!(rel;order;sel;sch[`col] i;"c"$r[i;1];
     ([] col:sch[`col] s; dtype:r[s;2]; logical:r[s;3]);([] col:sch[`col] j; dtype:sch[`dtype] j))),
-    .duckdb.i.fpush[sel;sch[`col] i;qn i;r i;order]}
-/ The push half of a foreign view (.duckdb.i.fview): a column's logical is the one q writes for the type q shows, so the
+    .duckdb.i.fpush[exec ktype!logical from tt where needs<>`dtype;sel;sch[`col] i;qn i;r i;order]}
+/ The push half of a foreign view (.duckdb.i.fview): a column's logical is the one q writes for the type q shows (ql), so the
 / translator classes it as q's own column of that type; its sentinel is the stored value that reads as the q null.
 / @ignore
-.duckdb.i.fpush:{[sel;cl;qn;r;order]
-  one:7=count each r; lg:{[x;y] $[y;x 5;`]}'[r;one]; ql:exec ktype!logical from .duckdb.types[] where needs<>`dtype;
+.duckdb.i.fpush:{[ql;sel;cl;qn;r;order]
+  one:7=count each r; lg:{[x;y] $[y;x 5;`]}'[r;one];
   bare:lg in .duckdb.i.FBARE; al:`$"_q_raw_",/:string cl;
   p:([] col:cl; dtype:{[x;y] $[y;x 4;""]}'[r;one]; logical:{[ql;x;y] $[count x 2;x 3;not y;`;x 6;ql x 1;`]}[ql]'[r;one]; iskey:0b;
     raw:?[bare;al;cl]; sentinel:{[x] $[x in key .duckdb.i.FMIN;.duckdb.i.FMIN x;x in `float32`float64;"NaN";""]} each lg);
