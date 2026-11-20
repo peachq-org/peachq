@@ -864,7 +864,7 @@ ray_t* q_duckdb_query(int slot, const char* sql, int stash) {
     duck_result res;
     ray_t* e = q_duckdb_run(slot, sql, &res, stash);
     if (e) return e;
-    ray_t* t = q_duckdb_codec_result_to_table(slot, &res, NULL, 0, NULL);
+    ray_t* t = q_duckdb_codec_result_to_table(slot, &res, NULL, 0, NULL, false);
     q_duckdb_result_free(&res);
     return t ? t : q_err(QE_WSFULL);
 }
@@ -1751,7 +1751,7 @@ static ray_t* qd_read_table(int slot, const qd_name_t* nm, ray_t** schema) {
     const qd_bound_t* bd    = qd_bound_find(slot, nm->key);
     const qd_desc_t*  desc  = bd ? bd->desc : NULL;
     int64_t           ndesc = bd ? bd->ndesc : 0;
-    tbl = q_duckdb_codec_result_to_table(slot, &res, desc, ndesc, schema);
+    tbl = q_duckdb_codec_result_to_table(slot, &res, desc, ndesc, schema, false);
     q_duckdb_result_free(&res);
     tbl = q_duckdb_schema_rekey(tbl, desc, ndesc);
     if (RAY_IS_ERR(tbl) && schema && *schema) { ray_release(*schema); *schema = NULL; }
@@ -1905,21 +1905,25 @@ static ray_t* qd_run_bound(int slot, const char* sql, ray_t* params, duck_result
 
 /* The pair and triple laws (docs/duckdb-api.md § Parameters): the pair (sql;params), params a symbol-keyed dict
  * (named) or any other list (positional), an EMPTY one being no parameters (*params NULL); the triple
- * (sql;params;schema), schema the envelope's TABLE (*schema, else NULL).  Every other list is 'type; a non-list is
- * the bare string, judged by the door. */
-static ray_t* qd_sql_split(ray_t* x, ray_t** sql, ray_t** params, ray_t** schema) {
+ * (sql;params;schema), schema the envelope's TABLE (*schema, else NULL).  A fourth item, the boolean 1b, is the
+ * foreign read (*foreign): the result is one q did not write, so no column of it is another's companion.  Every
+ * other list is 'type; a non-list is the bare string, judged by the door. */
+static ray_t* qd_sql_split(ray_t* x, ray_t** sql, ray_t** params, ray_t** schema, bool* foreign) {
     *sql = x;
     *params = *schema = NULL;
+    *foreign = false;
     if (!x || x->type != RAY_LIST) return NULL;
     int64_t n = q_count(x);
-    ray_t* p = n == 2 || n == 3 ? ray_list_get(x, 1) : NULL;
+    ray_t* p = n >= 2 && n <= 4 ? ray_list_get(x, 1) : NULL;
     bool list = p && p->type >= RAY_LIST && p->type <= RAY_TIME;
     bool dict = p && p->type == RAY_DICT && (ray_dict_keys(p)->type == RAY_SYM || !q_count(p));
-    ray_t* s = n == 3 ? ray_list_get(x, 2) : NULL;
-    if ((!list && !dict) || (s && s->type != RAY_TABLE)) return q_err(QE_TYPE);
+    ray_t* s = n >= 3 ? ray_list_get(x, 2) : NULL;
+    ray_t* f = n == 4 ? ray_list_get(x, 3) : NULL;
+    if ((!list && !dict) || (s && s->type != RAY_TABLE) || (f && f->type != -RAY_BOOL)) return q_err(QE_TYPE);
     *sql = ray_list_get(x, 0);
     if (q_count(p)) *params = p;
     *schema = s;
+    *foreign = f && f->b8;
     return NULL;
 }
 
@@ -1934,7 +1938,8 @@ static ray_t* qd_sql_any(ray_t** args, int64_t n, bool pair) {
     ray_t* sql;
     ray_t* params;
     ray_t* decl;
-    if ((e = qd_sql_split(args[1], &sql, &params, &decl))) return e;
+    bool foreign;
+    if ((e = qd_sql_split(args[1], &sql, &params, &decl, &foreign))) return e;
     const char* tp; int64_t tn;
     if (!sql || !q_str_text_bytes(sql, &tp, &tn))
         return sql == args[1] ? q_duckdb_fail(slot, "sql: not a string") : q_err(QE_TYPE);
@@ -1949,7 +1954,7 @@ static ray_t* qd_sql_any(ray_t** args, int64_t n, bool pair) {
     ray_t* out = e;
     if (!e) {
         ray_t* schema = NULL;
-        out = q_duckdb_codec_result_to_table(slot, &res, desc, ndesc, pair ? &schema : NULL);
+        out = q_duckdb_codec_result_to_table(slot, &res, desc, ndesc, pair ? &schema : NULL, foreign);
         q_duckdb_result_free(&res);
         out = q_duckdb_schema_rekey(out, desc, ndesc);
         if (pair) out = qd_pair(out, schema);

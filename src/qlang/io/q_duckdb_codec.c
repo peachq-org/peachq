@@ -1689,9 +1689,10 @@ void q_duckdb_codec_refine(const char* cname, size_t n, const qd_desc_t* desc, i
 }
 
 /* duck_result -> q table (does NOT destroy the result); desc = _q_schema rows.  THE reader: with `schema` the
- * envelope's schema table is built beside the data, here where the logical types are in hand; NULL drops it. */
+ * envelope's schema table is built beside the data, here where the logical types are in hand; NULL drops it.
+ * `foreign` reads a result q did not write: a column spelled like a companion is a column of its own. */
 ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_t* desc,
-                                      int64_t ndesc, ray_t** schema) {
+                                      int64_t ndesc, ray_t** schema, bool foreign) {
     int64_t ncols = (int64_t)res->ncols;
     bool query = res->rtype == QDuckReturnQuery;
     if (schema) *schema = NULL;
@@ -1795,7 +1796,7 @@ ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_
         }
     }
 
-    if (!err) err = qd_store_companions(slot, res, ncols, cms, cols, cos, taken);
+    if (!err && !foreign) err = qd_store_companions(slot, res, ncols, cms, cols, cos, taken);
     ray_t* tbl = err ? NULL : ray_table_new(ncols);
     for (int64_t c = 0; c < ncols; c++) {
         const char* nm = res->names[c];

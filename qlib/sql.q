@@ -330,6 +330,10 @@
   result:`int64`int32up`float64`float64`float64`float64`float64`column`column`column`column`column`float64`float64`wsum`float64;
   identity:0N 0 0N 0N 0N 0N 0N -0W 0W 0N 0N 1 0N 0N 0 0N;
   nulls:`null`NaN`NaN`NaN`NaN`NaN`NaN`null`null`null`null`NaN`NaN`NaN`NaN`NaN);
+/ q averages an int column as a sum of floats, DuckDB as an exact integer sum: the two agree while every partial sum is a
+/ whole number a float holds exactly, which a sum of the magnitudes below 2 xexp 52 proves.  Past it the statement is
+/ DuckDB's error, so q answers (opposite infinities, 0W and -0W, cancel in q's sum and not in DuckDB's).
+.sql.i.EXACT:4503599627370496f;
 / the aggregate identity v (0, 1, -0W, 0W) in the type of the logical lg, as a parameter binds it: the null symbol is
 / the empty string, and a float type takes the float infinities (cast carries a long infinity to the ints and
 / temporals only); the type map is .duckdb.types[], the one owner of logical names
@@ -351,6 +355,7 @@
   m:(`T,raze (count a)#/:(`x`y;`X`Y))!(enlist `$dt),v,d;
   x:{[m;e] $[-11h=type e; $[e in key m; m e; e]; (type e) in 0 11h; .z.s[m] each e; e]}[m;r`sql];
   if[(not null r`identity) or `symbol=t; c:{(`coalesce;x;y)}[;.sql.i.lit .sql.i.identity[t;r`identity]]; x:$[`cast~first x; @[x;2;c]; c x]];
+  if[((avg)~e 0) and `int=(.sql.i.class L 0)`class; x:(`if;(`$">=";(`sum;(`abs;(`cast;`DOUBLE;v 0)));.sql.i.EXACT);(`error;enlist `$"avg: q sums these as floats");x)];
   ($[(`NaN=r`nulls) and t in `float32`float64; (`nullif;x;(`cast;`$dt;enlist `NaN)); x];dt;t)};
 / The limit and order stage, a dict: limit and order (SQL's; :: and at most the i order where they stay with q), inner,
 / moved (anything moved) and clear (the limit and order moved).  select[n] / [m n] / [-n] / [order] move only over a
@@ -487,7 +492,7 @@
 / ` and `symbol, or a char (tok), turn a char column into ONE value, so they, and string, are pure only as a .sql.i.cast
 .sql.i.pure:{[cls;lit;e]
   t:.Q.c.lty e; if[-11h=t; :not lit]; if[t<0; :1b]; if[t within 1 19h; :lit or 1=count e]; if[0h<>t; :0b];
-  if[1=count e; :.z.s[cls;lit] first e];
+  if[1=count e; :$[0h=.Q.c.lty first e; lit; .z.s[cls;lit] first e]];
   if[not any (e 0)~/:.sql.i.VERBS[`verb],((+);(-);(*);(neg);(abs);($);(enlist);(string)); :0b];
   if[(string)~e 0; if[(::)~.sql.i.cast[cls;e]; :0b]];
   if[($)~e 0; if[not $[(11h=type e 1) and 1=count e 1; (not (first e 1) in `,`symbol) or not (::)~.sql.i.cast[cls;e]; 0b]; :0b]];
@@ -499,7 +504,12 @@
 .sql.i.nullpred:{[k;c]
   s:$[`sentinel in key k; k`sentinel; ""];
   $[count s; (`or;(`$"is null";c);$[s~"NaN"; (`isnan;c); (`$"=";c;enlist `$s)]);
+    .sql.i.either_null k; (`or;(`$"is null";c);(`$"=";c;.sql.i.lit .sql.i.TEXTNULL k`logical));
     k`nullable; (`$"is null";c); `symbol=k`logical; (`$"=";c;.sql.i.lit ""); (::)]};
+/ A symbol or char column q wrote holds its null as a value; the same column in a file another tool rewrote may hold NULL
+/ beside it (raw, in .sql.translate's schema, marks such a column), and both are then the q null.
+.sql.i.TEXTNULL:`symbol`char!("";enlist " ");
+.sql.i.either_null:{[k] $[`either in key k; k`either; 0b]};
 / e over a nullable column reads NULL on its null row: keeps adds the rows q keeps there, strict makes the expression
 / false there instead (under NOT, where NULL would not flip)
 .sql.i.arm:{[k;strict;keeps;c;e]
@@ -525,7 +535,8 @@
   t:.sql.i.cast[cls;c]; ar:(-11h<>type c) and t~(::);
   x:$[-11h=type c; (c;.sql.i.class cls c); ar; $[`scalar=r`shape; .sql.i.arith[cls;c]; (::)]; t 2 1];
   if[x~(::); :(::)]; k:x 1; s:r`sql; h:r`shape; str:`string=k`class; sn:"";
-  if[$[-11h=type c; c in key fr; 0b]; f:fr c; if[null f 0; :(::)]; x:@[x;0;:;f 0]; k[`sentinel]:sn:f 1];
+  if[$[-11h=type c; c in key fr; 0b]; f:fr c; if[null f 0; :(::)]; x:@[x;0;:;f 0]; k[`sentinel]:sn:f 1;
+    if[k[`logical] in key .sql.i.TEXTNULL; k[`either`nullable]:11b]];
   c:x 0;
   if[not k[`class] in r`classes; :(::)];
   if[h=`isnull; :.sql.i.nullpred[k;c]];
@@ -538,7 +549,8 @@
   if[h=`list; :.sql.i.arm[k;strict;$[str; any 0=count each w; any null w];c;
     $[str and 1=count w; (`$"=";c;.sql.i.lit first w); (s;.sql.i.lit .sql.i.bind w;c)]]];
   if[k[`nullable] and null w;
-    :$[null r`nulllit; (::); 0=count sn; (r`nulllit;c); (`$"is null")=r`nulllit; .sql.i.nullpred[k;c]; (`not;.sql.i.nullpred[k;c])]];
+    :$[null r`nulllit; (::); (0=count sn) and not .sql.i.either_null k; (r`nulllit;c);
+      (`$"is null")=r`nulllit; .sql.i.nullpred[k;c]; (`not;.sql.i.nullpred[k;c])]];
   .sql.i.arm[k;strict;k[`nullable] and r`keepsnull;c;(s;c;.sql.i.lit .sql.i.bind w)]};
 / the q heads of int arithmetic, spelt by .sql.i.arith as + - * and unary -
 .sql.i.ARITH:((+);(-);(*);(neg));
@@ -557,7 +569,9 @@
 
 / Text is either on a table q did not write: against a string column (sc names them) a symbol or a string literal compares
 / as the whole string (c=`a, c="ab", c<>`a, c in `a`b), and string c is c.  rt is a select as (table;where terms;by;phrase;
-/ ...); a rewritten compare is in over strings, which q runs and .sql.i.compare pushes.
+/ ...), its names resolved (.pq.i.resolve), so a literal is whatever evaluates to one; a rewritten compare is in over
+/ strings, which q runs and .sql.i.compare pushes.  An order (c<`a, c within `a`b, either way round) compares the column
+/ as the symbols it holds, `$c, which q runs and .sql.i.cast pushes; a symbol pattern of like is its text.
 .sql.i.either:{[sc;rt]
   f:{[sc;e]
     if[(0h<>.Q.c.lty e) or 2>count e; :e];
@@ -569,6 +583,12 @@
     if[any h~/:((=);(<>)); if[col a 1; a:reverse a]; s:sy[a 1],st a 1;
       if[col[a 0] and 1=count s; r:(in;a 0;(enlist),s); :$[(=)~h; r; (not;r)]]];
     if[(in)~h; s:sy a 1; if[col[a 0] and 0<count s; :(in;a 0;(enlist),s)]];
+    if[(like)~h; if[col[a 0] and 1=count s:sy a 1; :(like;a 0;first s)]];
+    o:((<);(>);(<=);(>=)); i:(o~\:h)?1b;
+    if[i<4; if[col a 1; a:reverse a; i:1 0 3 2 i]; s:sy[a 1],st a 1;
+      if[col[a 0] and 1=count s; :(o i;($;enlist `;a 0);enlist `$first s)]];
+    if[(within)~h; s:sy[a 1],$[(0h=type a 1) and 1=count a 1; $[all 10h=abs type each first a 1; (),/:first a 1; ()]; ()];
+      if[col[a 0] and 2=count s; :(within;($;enlist `;a 0);enlist `$s)]];
     e};
   rt:@[rt;1;{[f;w] f each w}[f sc]];
   @[rt;2 3 inter til count rt;{[f;x] $[99h=type x; f each x; f x]}[f sc]]};

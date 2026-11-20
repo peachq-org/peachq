@@ -196,7 +196,8 @@ int    q_duckdb_codec_companions_of(const qd_colmap_t* cm, const char* out[QD_CO
 ray_t* q_duckdb_codec_stage_image(ray_t* tbl, const qd_colmap_t* cms, ray_t* const* masks, ray_t* const* offs,
                                   ray_t* const* keeps, qd_colmap_t* scms, ray_t** smasks, ray_t** skeeps);
 void   q_duckdb_codec_refine(const char* cname, size_t n, const qd_desc_t* desc, int64_t ndesc, qd_colmap_t* cm);
-ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_t* desc, int64_t ndesc, ray_t** schema);
+ray_t* q_duckdb_codec_result_to_table(int slot, duck_result* res, const qd_desc_t* desc, int64_t ndesc, ray_t** schema,
+                                      bool foreign);
 /* a q value as the value the write path stores for the one-row column ([] v:enlist v): an atom or string its type, a
  * vector or list a LIST of the codec's element type, a null a NULL of that type; *out owned (value_destroy).
  * 'type for a dict, a table or a byte vector; what the codec refuses ('duckdb, its reason) this refuses */

@@ -65,6 +65,7 @@
 / pair (string;dict) binding each $name by name or (string;list) binding $1, $2 ... by position; values are atoms or strings
 / (a null is SQL NULL), DuckDB's refusal is 'duckdb with the reason in .duckdb.err[], anything else 'type.  The triple
 / (string;params;schema), params () for none and schema the table getx answers, reads the result as .duckdb.get reads a table.
+/ A fourth item 1b reads a result q did not write: a column named like a companion (x_q_isnull beside x) is a column.
 / @eg .duckdb.exec[.duckdb.main[];("SELECT 'a' AS s";();([] col:enlist `s; dtype:enlist "VARCHAR"; logical:enlist `symbol))]
 / @eg .duckdb.exec[.duckdb.main[];"SELECT 1 AS one, 'a' AS s"]
 / @eg .duckdb.exec[.duckdb.main[];("SELECT $a + $b AS n";`a`b!1 2)]
@@ -171,6 +172,24 @@
   sym:lg=`categorical; cast:lg in key .duckdb.i.FCAST;
   (w;$[cast;ty[`$.duckdb.i.FCAST lg] 1;ty[b] 1];$[sym;"VARCHAR";""];$[sym;`symbol;`];
     $[cast;.duckdb.i.FCAST lg;sym;"VARCHAR";lg=`timestamptz;"TIMESTAMP";string b];lg;not lg in `timeus`timens)}
+/ One value x of a column q wrote as logical lg over the DuckDB type dt, as the SQL in which a value q would not have
+/ written there reads as the q null: the foreign rule of dt for a NULL or a null pattern, level by level through a list.
+/ The file's metadata says what the column is, not that q wrote its values, and on values q did write this changes none.
+/ @ignore
+.duckdb.i.fmerge:{[ty;dt;lg;x;depth]
+  if["]"=last dt;
+    v:"y",string depth; e:.z.s[ty;(last where dt="[")#dt;`$5_-1_string lg;v;depth+1];
+    :"coalesce(",$[v~e;x;"list_transform(",x,", lambda ",v,": ",e,")"],", [])"];
+  cl:$[(b:`$first "(" vs dt) in key ty;ty[b] 0;`];
+  $[lg=`char;"coalesce(",x,.duckdb.i.FBYTES,", ' ')";
+    cl in (key .duckdb.i.FMIN),(key .duckdb.i.FNULL),key .duckdb.i.FZERO;.duckdb.i.fwrap["";cl;string b;x];
+    x]}
+/ the foreign logical under which a where term compares the stored column of one q wrote (.duckdb.i.FBARE), ` for none:
+/ its q type must be one whose term takes the null arms (.sql.i.compare), any other compares the merged column
+/ @ignore
+.duckdb.i.fraw:{[ty;dt;lg]
+  cl:$[(b:`$dt) in key ty;ty[b] 0;`];
+  $[cl in `int16`int32`int64`float32`float64;$[lg in cl,`timespan;cl;`];(cl=`utf8) and lg in `symbol`char`utf8;cl;`]}
 / The meta char of a column q wrote as logical lg over the DuckDB type dt, level by level through a list; " " when q writes
 / no such pair (tt is .duckdb.types[]), and the column then reads by its DuckDB type alone.
 / @ignore
@@ -185,13 +204,15 @@
 / pushed statement uses itself) and src, the SELECT items of the relation that statement reads, by name: each shown column,
 / and each stored column a where term compares as it stands under its raw name.
 / sch may say what q wrote (a parquet file's q_schema) in one more column, logical: a column whose logical q writes over
-/ its DuckDB type is q's own, read as stored with NULL its only null; any other column reads as foreign.
+/ its DuckDB type is q's own and reads as that q type, its nulls merged as a foreign column's are (.duckdb.i.fmerge);
+/ any other column reads as foreign.
 / @ignore
 .duckdb.i.fview:{[rel;sch;order]
   tt:.duckdb.types[]; ty:exec dtype!flip (logical;ktype) from tt where canon; n:count sch;
   qn:.duckdb.i.quote each string sch`col; lg:$[`logical in cols sch;sch`logical;n#`];
   kt:.duckdb.i.fown[tt]'[sch`dtype;lg]; own:kt<>" ";
-  r:{[ty;nm;dt;x;k;l] $[k=" ";.duckdb.i.fcol[ty;nm;dt;x;0];(x;k;dt;l;dt;`;1b)]}[ty]'[string sch`col;sch`dtype;qn;kt;lg];
+  r:{[ty;nm;dt;x;k;l] $[k=" ";.duckdb.i.fcol[ty;nm;dt;x;0];(.duckdb.i.fmerge[ty;dt;l;x;0];k;dt;l;dt;.duckdb.i.fraw[ty;dt;l];1b)]}[ty]'[
+    string sch`col;sch`dtype;qn;kt;lg];
   j:where 0=count each r; i:where 0<count each r; s:i where 0<count each r[i;2];
   sel:{[e;q] e[0]," AS ",q}'[r i;qn i];
   (`rel`order`sel`cols`t`schema`hidden`text!(rel;order;", " sv sel;sch[`col] i;"c"$r[i;1];
@@ -219,11 +240,11 @@
 / A view has no rowid: DuckDB's refusal of the row number, on a read or a push, is answered by the same without it.
 / @ignore
 .duckdb.i.norowid:{[c;v] ((enlist "rowid")~v`order) and .duckdb.err[c] like "Binder Error: Referenced column \"rowid\"*"}
-/ The rows of a foreign view.
+/ The rows of a foreign view.  A view whose every column is hidden shows q nothing: the table of no columns and no rows.
 / @ignore
 .duckdb.i.fpull:{[c;v]
-  if[0=count v`cols; '`type];
-  q:{[v;o] s:"SELECT ",v[`sel]," FROM ",v[`rel],$[count o;" ORDER BY ",", " sv o;""]; $[count v`schema;(s;();v`schema);s]}[v];
+  if[0=count v`cols; :flip (0#`)!()];
+  q:{[v;o] ("SELECT ",v[`sel]," FROM ",v[`rel],$[count o;" ORDER BY ",", " sv o;""];();v`schema;1b)}[v];
   .[.duckdb.exec;(c;q v`order);{[c;v;q;e] if[.duckdb.i.norowid[c;v]; :.duckdb.exec[c;q ()]]; 'e}[c;v;q]]}
 
 / A select tree over a foreign view, its string columns compared as text (.sql.i.either).
@@ -329,13 +350,14 @@
 / @ignore
 .duckdb.i.big:{[c;t] .duckdb.maxrows<.[.duckdb.i.rows;(c;t);0N]}
 / The part of the select rt that .sql.translate moves, run over the source rt 0 names with the schema sc, q running the
-/ rest; :: when nothing moves.  with answers the text ahead of the statement that defines that source, given its SQL tree.
+/ rest; :: when nothing moves.  with answers the text ahead of the statement that defines that source, given its SQL tree;
+/ foreign says the source is a foreign view, whose result is read as one (.duckdb.exec's fourth item).
 / @ignore
-.duckdb.i.run:{[c;rt;sc;with;big]
+.duckdb.i.run:{[c;rt;sc;with;big;foreign]
   r:.sql.translate[((?);rt 0;$[count rt 1;enlist rt 1;()]),2_rt;sc];
   if[(0=count r[0;2]) and big; :(::)];
   if[(not (::)~r 3) and all ((0=count r[0;2]);(::)~r[0;5];0=count r[0;6]); :(::)];
-  t:.duckdb.exec[c;((with r 0),.sql.render r 0;r 1;select from r[2] where not null logical)]; .duckdb.lastpush::r;
+  t:.duckdb.exec[c;((with r 0),.sql.render r 0;r 1;select from r[2] where not null logical),$[foreign;enlist 1b;()]]; .duckdb.lastpush::r;
   / a by with no sort order answers a key marked s#, as q's own select does; a key s# cannot verify stays unmarked
   if[(::)~r 3; :$[(99h=type rt 2) and (6>count rt) and 99h=type t; @[`s#;t;t]; t]];
   (?) . (t;$[count r[3;2]; r[3;2;0]; ()]),3_r 3}
@@ -345,13 +367,13 @@
 / The tree is the one the pull runs (.duckdb.i.ftext).
 / @ignore
 .duckdb.i.fpushed:{[c;v;rt;big]
-  if[0=count v`push; :(::)];
+  if[(0=count v`cols) or 0=count v`push; :(::)];
   go:{[c;v;rt;big;o]
     src:v[`src],$[count o;(enlist `i)!enlist $[1=count o;first o;"ROW(",(", " sv o),")"]," AS i";()!()];
     w:{[v;src;tree]
       n:{$[99h=type x;raze .z.s each (key x;value x);0h=type x;raze .z.s each x;11h=abs type x;(),x;`$()]} tree;
       "WITH \"_q_src\" AS NOT MATERIALIZED (SELECT ",(", " sv $[count s:src (key src) inter n;s;enlist "1 AS \"_q_1\""])," FROM ",v[`rel],") "}[v;src];
-    .duckdb.i.run[c;@[.duckdb.i.ftext[v;rt];0;:;`$"_q_src"];$[count o;v`push;select from v[`push] where col<>`i];w;big]};
+    .duckdb.i.run[c;@[.duckdb.i.ftext[v;rt];0;:;`$"_q_src"];$[count o;v`push;select from v[`push] where col<>`i];w;big;1b]};
   .[go;(c;v;rt;big;v`order);{[go;c;v;rt;big;e] if[not .duckdb.i.norowid[c;v]; 'e]; go[c;v;rt;big;()]}[go;c;v;rt;big]]}
 / A select over a foreign view v that is no bound table (a parquet file): pushed, or run by q on the rows pulled.
 / @ignore
@@ -362,7 +384,7 @@
 / @ignore
 .duckdb.i.pushed:{[c;rt]
   big:.duckdb.i.big[c;rt 0];
-  $[count sc:.duckdb.i.schema[c;rt 0];.duckdb.i.run[c;rt;sc;{[tree] ""};big];.duckdb.i.fpushed[c;.duckdb.i.ftable[c;rt 0];rt;big]]}
+  $[count sc:.duckdb.i.schema[c;rt 0];.duckdb.i.run[c;rt;sc;{[tree] ""};big;0b];.duckdb.i.fpushed[c;.duckdb.i.ftable[c;rt 0];rt;big]]}
 / @ignore
 .duckdb.i.push:{[c;rt]
   .duckdb.lastpush::(::);
@@ -374,13 +396,7 @@
   t:.duckdb.get[c;rt 0];
   (?) . (enlist t),1_$[.duckdb.i.foreign[c;rt 0];.duckdb.i.ftext[.duckdb.i.ftable[c;rt 0];rt];rt]}
 / @ignore
-.duckdb.qsql:{[c;cl;tree]
-  node:{[cl;nd]
-    if[99h=type nd; :key[nd]!.z.s[cl] value nd];
-    if[0h=.Q.c.lty nd; i:where 101h<>type each nd; :@[nd;i;:;.z.s[cl] each nd i]];
-    $[-11h<>type nd; nd; (`$first "." vs string nd) in cl; nd; 100h<=type v:@[value;nd;{[e] 'unpush}]; nd; (11h=abs type v) or (type v) in 0 98h; enlist v; v]};
-  rt:.[{[node;cl;t] (enlist t 0),node[cl,`i] each 1_t}[node];(cl;tree);{[e] ::}];
-  $[rt~(::);::;.duckdb.i.push[c;rt]]}
+.duckdb.qsql:{[c;cl;tree] rt:@[.pq.i.resolveTree[cl];tree;{[e] ::}]; $[rt~(::);::;.duckdb.i.push[c;rt]]}
 
 / The handle of the process's own DuckDB database, `:pq:duckdb:main: in-memory, or the file q -duckdb path names.
 / Opened on the first call; every alias is a catalog attached to it, and .parquet and s) run here.
