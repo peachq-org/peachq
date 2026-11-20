@@ -1184,8 +1184,39 @@ static ray_t* ques_select_from(ray_t** args, int64_t n, ray_t* names) {
     return r;
 }
 
+/* A select on a parquet file is the parquet door's (q_io_parquet_select).  The door is a library function, out of sight
+ * of the caller's locals, so it is handed what each name the select mentions resolves to HERE.  NULL: it declined. */
+static ray_t* ques_parquet(ray_t** args, int64_t n) {
+    ray_t *names = ray_vec_new(RAY_SYM, 8), *keys = ray_vec_new(RAY_SYM, 8), *vals = ray_list_new(8);
+    for (int64_t i = 1; i < n; i++)
+        if (i != 4) phrase_names(args[i], &names);
+    int ok = names && keys && vals && !RAY_IS_ERR(names) && !RAY_IS_ERR(keys) && !RAY_IS_ERR(vals);
+    for (int64_t i = 0; ok && i < q_count(names); i++) {
+        int64_t id = ray_vec_get_sym_id(names, i);
+        ray_t* v = q_env_resolve(id);
+        if (!v) continue;
+        if (RAY_IS_ERR(v)) { q_err_drop(); ray_error_free(v); continue; }
+        keys = ray_vec_append(keys, &id);
+        vals = ray_list_append(vals, v);
+        ray_release(v);
+        ok = !RAY_IS_ERR(keys) && !RAY_IS_ERR(vals);
+    }
+    if (names && !RAY_IS_ERR(names)) ray_release(names);
+    else if (names) ray_error_free(names);
+    ray_t* env = ok ? ray_dict_new(keys, vals) : NULL;
+    if (!ok) {
+        if (keys) { if (RAY_IS_ERR(keys)) ray_error_free(keys); else ray_release(keys); }
+        if (vals) { if (RAY_IS_ERR(vals)) ray_error_free(vals); else ray_release(vals); }
+    }
+    if (!env || RAY_IS_ERR(env)) return env ? env : q_err(QE_WSFULL);
+    ray_t* r = q_io_parquet_select(args, n, env);
+    ray_release(env);
+    return r;
+}
+
 static ray_t* ques_select(ray_t** args, int64_t n) {
     ray_t* pushed = q_provider_qsql_push(args, n); /* NULL: not provider / no qsql hook */
+    if (!pushed && q_io_parquet_named(args[0])) pushed = ques_parquet(args, n);
     if (pushed) return pushed;
     ray_t* outer = g_unmapped;                   /* an enclosing select's: restored when this one is done */
     ray_t *outer_tbl = g_part_tbl, *outer_rows = g_part_rows;

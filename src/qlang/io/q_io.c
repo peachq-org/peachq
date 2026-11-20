@@ -976,6 +976,31 @@ static ray_t* io_parquet_table(ray_t* fsym, ray_t* path) {
     return out;
 }
 
+int q_io_parquet_named(ray_t* fsym) {
+    ray_t* path = q_io_is_fsym(fsym) ? q_io_file_path(fsym) : NULL;
+    if (!path) return 0;
+    int is = io_suffix_is(ray_str_ptr(path), io_claim_len(path), ".parquet");
+    ray_release(path);
+    return is;
+}
+
+/* `.parquet.i.select[fsym;args;env]` by name, as io_parquet_table calls `.parquet.read`; its `::` is the door declining */
+ray_t* q_io_parquet_select(ray_t** args, int64_t n, ray_t* env) {
+    ray_t* path = q_io_file_path(args[0]);
+    if (!path) return NULL;
+    ray_t* refused = io_guard_duckdb(path, 0);
+    ray_release(path);
+    if (refused) return refused;
+    ray_t* tree = ray_list_new(n);
+    for (int64_t i = 0; i < n && tree && !RAY_IS_ERR(tree); i++) tree = ray_list_append(tree, args[i]);
+    if (!tree || RAY_IS_ERR(tree)) return tree ? tree : q_err(QE_WSFULL);
+    ray_t* cargs[3] = { args[0], tree, env };
+    ray_t* out = q_eval_apply_call_name(".parquet.i.select", 17, cargs, 3);
+    ray_release(tree);
+    if (out && RAY_IS_NULL(out)) { ray_release(out); return NULL; }
+    return out;
+}
+
 /* The READ side of the on-disk-format classification q_io_set owns for writes,
  * for the formats that decode to a table by their name (format inference: explicit provider or
  * scheme, then explicit format API, then the recognised final suffix, then error — never
@@ -2065,8 +2090,45 @@ static ray_t* rmtree_fn(ray_t* x) {
     return x;
 }
 
+/* `.fs.i.stamp x` — what tells a file from a rewrite of it, as two longs: its size in bytes and its modification time in
+ * ns from 2000.01.01 UTC (whole seconds where stat tells no finer); two nulls for a path that will not stat.  x is a
+ * file symbol or a path string. */
+static ray_t* stamp_fn(ray_t* x) {
+    ray_t* s = x && x->type == RAY_CHARV ? q_str_of_charv(x) : NULL;
+    ray_t* path = s ? q_io_file_path(s) : q_io_path_operand(x);
+    if (s) ray_release(s);
+    if (!path) return q_err(QE_TYPE);
+    ray_t* refused = io_guard_resource(path, 0);
+    int64_t size = NULL_I64, when = NULL_I64, nsec = 0;
+#ifdef RAY_OS_WINDOWS
+    struct _stat64 st;
+    int ok = !refused && _stat64(ray_str_ptr(path), &st) == 0;
+#else
+    struct stat st;
+    int ok = !refused && stat(ray_str_ptr(path), &st) == 0;
+#if defined(RAY_OS_MACOS)
+    if (ok) nsec = (int64_t)st.st_mtimespec.tv_nsec;
+#else
+    if (ok) nsec = (int64_t)st.st_mtim.tv_nsec;
+#endif
+#endif
+    if (ok) {
+        size = (int64_t)st.st_size;
+        when = ((int64_t)st.st_mtime - 946684800LL) * 1000000000LL + nsec;   /* 2000.01.01 UTC in unix seconds */
+    }
+    ray_release(path);
+    if (refused) return refused;
+    ray_t* v = ray_vec_new(RAY_I64, 2);
+    if (RAY_IS_ERR(v)) return v;
+    v = ray_vec_append(v, &size);
+    return RAY_IS_ERR(v) ? v : ray_vec_append(v, &when);
+}
+
 void q_io_fs_register(void) {
     ray_t* obj = ray_fn_unary(".fs.i.rmtree", RAY_FN_NONE, rmtree_fn);
     q_env_bind_native(".fs.i.rmtree", obj, 1);
+    ray_release(obj);
+    obj = ray_fn_unary(".fs.i.stamp", RAY_FN_NONE, stamp_fn);
+    q_env_bind_native(".fs.i.stamp", obj, 1);
     ray_release(obj);
 }
