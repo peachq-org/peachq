@@ -37,12 +37,7 @@
 / a NULL list empty; VARCHAR is a string, DECIMAL a float, TIME a timespan, TIMESTAMPTZ its UTC instant; a date or timestamp
 / outside q's range is 'duckdb; a column whose type q does not hold is left out (.duckdb.hidden names them).  Rows come in
 / rowid order where the table has one.  .duckdb.getx and SQL read every column exactly.
-.duckdb.get:{[c;t]
-  if[not .duckdb.i.foreign[c;t]; :.duckdb.i.get[c;t]];
-  / the catalog no longer has what the bound entry lists (DDL from another connection): bind afresh and read once more
-  .[.duckdb.i.fpull;(c;.duckdb.i.ftable[c;t]);{[c;t;e]
-    if[not any .duckdb.err[c] like/: ("Binder Error*";"Catalog Error*"); 'e];
-    .duckdb.i.unbind[c;t]; .duckdb.i.fpull[c;.duckdb.i.ftable[c;t]]}[c;t]]}
+.duckdb.get:{[c;t] $[.duckdb.i.foreign[c;t];.duckdb.i.fread[c;t;::];.duckdb.i.get[c;t]]}
 / Create or replace a table of the handle's catalog from a q table, or from the pair .duckdb.getx answers.
 .duckdb.set:{[c;t;d] .duckdb.i.set[c;t;d]; t}
 / @ignore
@@ -215,7 +210,7 @@
     string sch`col;sch`dtype;qn;kt;lg];
   j:where 0=count each r; i:where 0<count each r; s:i where 0<count each r[i;2];
   sel:{[e;q] e[0]," AS ",q}'[r i;qn i];
-  (`rel`order`sel`cols`t`schema`hidden`text!(rel;order;", " sv sel;sch[`col] i;"c"$r[i;1];
+  (`rel`order`sel`cols`t`schema`hidden`text!(rel;order;sel;sch[`col] i;"c"$r[i;1];
     ([] col:sch[`col] s; dtype:r[s;2]; logical:r[s;3]);([] col:sch[`col] j; dtype:sch[`dtype] j);
     sch[`col] i where ("C"=r[i;1]) and not own i)),
     .duckdb.i.fpush[exec ktype!logical from tt where needs<>`dtype;sel;sch[`col] i;qn i;r i;order]}
@@ -234,18 +229,53 @@
 / @ignore
 .duckdb.i.foreign:{[c;t] 0=count .duckdb.i.schema[c;t]}
 / @ignore
-.duckdb.i.ftable:{[c;t]
-  sch:select col, dtype from .duckdb.i.info[c;t]`schema;
-  .duckdb.i.fview[.duckdb.i.qname t;sch;$[`rowid in sch`col;();enlist "rowid"]]}
-/ A view has no rowid: DuckDB's refusal of the row number, on a read or a push, is answered by the same without it.
+/ the kept foreign views of the handles' tables, each (stamp;view) under its handle and table
 / @ignore
-.duckdb.i.norowid:{[c;v] ((enlist "rowid")~v`order) and .duckdb.err[c] like "Binder Error: Referenced column \"rowid\"*"}
+.duckdb.i.fkept:(0#`)!()
+/ THE foreign view of a table of a handle, kept while the table stays bound as it was when the view was built (told by
+/ when it was bound; by the handle's whole list of bound tables for a name the list spells otherwise): whatever lets a bound
+/ table go (a write of ours, a non-SELECT through the SQL door, get, a failed reference) binds it anew, and the view is
+/ then built anew.  Whether the relation has a row number to order by is asked once, as the view is built: a
+/ DuckDB view has none, and its rows then come in no promised order.
+/ @ignore
+.duckdb.i.ftable:{[c;t]
+  .duckdb.i.rows[c;t]; k:`$(string c),"/",string t; st:.duckdb.i.info[c;::]`tables;
+  if[t in st`table; st:st[`bound] st[`table]?t];
+  if[k in key .duckdb.i.fkept; if[st~first .duckdb.i.fkept k; :last .duckdb.i.fkept k]];
+  sch:select col, dtype from .duckdb.i.info[c;t]`schema; rel:.duckdb.i.qname t;
+  ord:$[`rowid in sch`col;();@[{[c;rel] .duckdb.exec[c;"SELECT rowid FROM ",rel," LIMIT 0"]; enlist "rowid"}[c];rel;{[e] ()}]];
+  v:.duckdb.i.fview[rel;sch;ord]; .duckdb.i.fkept[k]:(st;v); v}
 / The rows of a foreign view.  A view whose every column is hidden shows q nothing: the table of no columns and no rows.
 / @ignore
 .duckdb.i.fpull:{[c;v]
   if[0=count v`cols; :flip (0#`)!()];
-  q:{[v;o] ("SELECT ",v[`sel]," FROM ",v[`rel],$[count o;" ORDER BY ",", " sv o;""];();v`schema;1b)}[v];
-  .[.duckdb.exec;(c;q v`order);{[c;v;q;e] if[.duckdb.i.norowid[c;v]; :.duckdb.exec[c;q ()]]; 'e}[c;v;q]]}
+  .duckdb.exec[c;("SELECT ",(", " sv v`sel)," FROM ",v[`rel],$[count v`order;" ORDER BY ",", " sv v`order;""];();v`schema;1b)]}
+/ A foreign view with the columns need alone, for a read of them: no other column is converted, so a value q cannot hold
+/ in a column the read does not name fails nothing.  A read that names none still counts the rows.
+/ @ignore
+.duckdb.i.fnarrow:{[v;need]
+  i:where v[`cols] in need;
+  if[(0=count i) and 0<count v`cols; :@[v;`sel`cols`t`schema;:;(enlist "1 AS \"_q_1\"";1#`$"_q_1";1#"i";0#v`schema)]];
+  @[v;`sel`cols`t`schema;:;(v[`sel] i;v[`cols] i;v[`t] i;select from v[`schema] where col in need)]}
+/ whether DuckDB refused a statement at its names or types, before running it: what a bound table or a kept view that the
+/ catalog has since left behind answers
+/ @ignore
+.duckdb.i.unbound:{[c] any .duckdb.err[c] like/: ("Binder Error*";"Catalog Error*")}
+/ The rows of a foreign table of a handle, of the view f makes of its own (:: for every column).  The catalog no longer
+/ having what the bound entry lists (DDL from another connection) binds it afresh and reads once more.
+/ @ignore
+.duckdb.i.fread:{[c;t;f]
+  g:{[c;t;f] .duckdb.i.fpull[c;f .duckdb.i.ftable[c;t]]};
+  .[g;(c;t;f);{[g;c;t;f;e] if[not .duckdb.i.unbound c; 'e]; .duckdb.i.unbind[c;t]; g[c;t;f]}[g;c;t;f]]}
+/ whether the translator is to hand: a restricted evaluation may not load it, and the select is then q's
+/ @ignore
+.duckdb.i.translates:{[] @[{[u] .sql.translate; 1b};::;{[e] 0b}]}
+/ only DuckDB's refusal of a pushed statement leaves the select to the pull: any other error is the select's own
+/ @ignore
+.duckdb.i.refused:{[e] if[not e~"duckdb"; 'e]; (::)}
+/ A select over a foreign view v, run by q on the rows pulled of the columns it reads (.pq.i.reads).
+/ @ignore
+.duckdb.i.fresidue:{[pull;v;rt] q:.duckdb.i.ftext[v;rt]; (?) . (enlist pull .duckdb.i.fnarrow[;.pq.i.reads[v`cols;q]]),1_q}
 
 / A select tree over a foreign view, its string columns compared as text (.sql.i.either).
 / @ignore
@@ -329,7 +359,8 @@
 
 / Whether a qSQL select on a table of the handle runs what .sql.translate can move (where terms, limit, order; the select
 / phrase and by whole when every item translates) inside DuckDB before q runs the rest, read on every select; off, every select pulls
-/ the whole table.  A statement DuckDB refuses stays in .duckdb.sqllog and the select pulls instead.  Set it with .duckdb.set_pushdown.
+/ its table (of one q did not write, the columns it names).  A statement DuckDB refuses stays in .duckdb.sqllog and the select pulls
+/ instead.  Set it with .duckdb.set_pushdown.
 .duckdb.pushdown:1b
 / Set .duckdb.pushdown: 1b moves what a select can into DuckDB, 0b pulls every select whole.
 .duckdb.set_pushdown:{[on] .duckdb.pushdown::on;}
@@ -363,24 +394,22 @@
   (?) . (t;$[count r[3;2]; r[3;2;0]; ()]),3_r 3}
 / A select over a foreign view v, pushed: its statement reads the view as one relation, defined ahead of it, in which a
 / where term finds each stored column, the select list each converted one, and i the row number the pull orders by.  The
-/ relation lists only what the statement names (a symbol anywhere in its tree), so no other column's conversion is bound.
+/ relation lists only what the statement names (.pq.i.syms of its tree), so no other column's conversion is bound.
 / The tree is the one the pull runs (.duckdb.i.ftext).
 / @ignore
 .duckdb.i.fpushed:{[c;v;rt;big]
   if[(0=count v`cols) or 0=count v`push; :(::)];
-  go:{[c;v;rt;big;o]
-    src:v[`src],$[count o;(enlist `i)!enlist $[1=count o;first o;"ROW(",(", " sv o),")"]," AS i";()!()];
-    w:{[v;src;tree]
-      n:{$[99h=type x;raze .z.s each (key x;value x);0h=type x;raze .z.s each x;11h=abs type x;(),x;`$()]} tree;
-      "WITH \"_q_src\" AS NOT MATERIALIZED (SELECT ",(", " sv $[count s:src (key src) inter n;s;enlist "1 AS \"_q_1\""])," FROM ",v[`rel],") "}[v;src];
-    .duckdb.i.run[c;@[.duckdb.i.ftext[v;rt];0;:;`$"_q_src"];$[count o;v`push;select from v[`push] where col<>`i];w;big;1b]};
-  .[go;(c;v;rt;big;v`order);{[go;c;v;rt;big;e] if[not .duckdb.i.norowid[c;v]; 'e]; go[c;v;rt;big;()]}[go;c;v;rt;big]]}
+  o:v`order; src:v[`src],$[count o;(enlist `i)!enlist $[1=count o;first o;"ROW(",(", " sv o),")"]," AS i";()!()];
+  w:{[v;src;tree]
+    "WITH \"_q_src\" AS NOT MATERIALIZED (SELECT ",(", " sv $[count s:src (key src) inter .pq.i.syms tree;s;enlist "1 AS \"_q_1\""]),
+      " FROM ",v[`rel],") "}[v;src];
+  .duckdb.i.run[c;@[.duckdb.i.ftext[v;rt];0;:;`$"_q_src"];v`push;w;big;1b]}
 / A select over a foreign view v that is no bound table (a parquet file): pushed, or run by q on the rows pulled.
 / @ignore
 .duckdb.i.fselect:{[c;v;rt]
   .duckdb.lastpush::(::);
-  if[.duckdb.pushdown; r:.[.duckdb.i.fpushed;(c;v;rt;0b);{[e] ::}]; if[not (::)~r; :r]];
-  (?) . (enlist .duckdb.i.fpull[c;v]),1_.duckdb.i.ftext[v;rt]}
+  if[.duckdb.pushdown; r:.[.duckdb.i.fpushed;(c;v;rt;0b);.duckdb.i.refused]; if[not (::)~r; :r]];
+  .duckdb.i.fresidue[{[c;v;f] .duckdb.i.fpull[c;f v]}[c;v];v;rt]}
 / @ignore
 .duckdb.i.pushed:{[c;rt]
   big:.duckdb.i.big[c;rt 0];
@@ -388,13 +417,13 @@
 / @ignore
 .duckdb.i.push:{[c;rt]
   .duckdb.lastpush::(::);
-  if[.duckdb.pushdown;
-    r:@[.duckdb.i.pushed[c];rt;{[c;rt;e] if[not .duckdb.i.stale c; :(::)]; .duckdb.i.unbind[c;rt 0];
-      @[.duckdb.i.pushed[c];rt;{[e] ::}]}[c;rt]];
+  if[.duckdb.pushdown and .duckdb.i.translates[];
+    r:@[.duckdb.i.pushed[c];rt;{[c;rt;e] .duckdb.i.refused e; if[not .duckdb.i.stale c; :(::)]; .duckdb.i.unbind[c;rt 0];
+      @[.duckdb.i.pushed[c];rt;.duckdb.i.refused]}[c;rt]];
     if[not (::)~r; :r]];
   if[.duckdb.i.big[c;rt 0]; .duckdb.i.maxrows[c;rt 0;"j"$.duckdb.maxrows]];
-  t:.duckdb.get[c;rt 0];
-  (?) . (enlist t),1_$[.duckdb.i.foreign[c;rt 0];.duckdb.i.ftext[.duckdb.i.ftable[c;rt 0];rt];rt]}
+  if[not .duckdb.i.foreign[c;rt 0]; :(?) . (enlist .duckdb.get[c;rt 0]),1_rt];
+  .duckdb.i.fresidue[.duckdb.i.fread[c;rt 0];.duckdb.i.ftable[c;rt 0];rt]}
 / @ignore
 .duckdb.qsql:{[c;cl;tree] rt:@[.pq.i.resolveSeam[cl];tree;{[e] ::}]; $[rt~(::);::;.duckdb.i.push[c;rt]]}
 
