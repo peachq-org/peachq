@@ -127,6 +127,9 @@
   ("1707-09-22 00:12:43.145224194";"2262-04-11 23:47:16.854775806"))
 / the logicals whose stored column a pushed where term compares as it stands: DuckDB then answers as q does on the shown
 / value once the term has its null arms (.sql.i.compare).  Any other compares the converted column.
+/ a VARCHAR compares, groups and sorts by its bytes, as q's strings do, whatever collation its column or the session declares
+/ @ignore
+.duckdb.i.FBYTES:" COLLATE \"binary\""
 / @ignore
 .duckdb.i.FBARE:`int8`int16`int32`int64`uint16`uint32`float32`float64`utf8`date`timestamp`timestampsec`timestampms`timestampus
 / @ignore
@@ -141,7 +144,7 @@
 .duckdb.i.fwrap:{[nm;lg;dt;x]
   $[lg in key .duckdb.i.FMIN;"nullif(",x,", (",.duckdb.i.FMIN[lg],")::",dt,")";
     lg in key .duckdb.i.FNULL;"nullif(",x,", ",.duckdb.i.FNULL[lg],"::",dt,")";
-    lg in key .duckdb.i.FZERO;"coalesce(",x,", ",.duckdb.i.FZERO[lg],")";
+    lg in key .duckdb.i.FZERO;"coalesce(",x,$[lg=`utf8;.duckdb.i.FBYTES;""],", ",.duckdb.i.FZERO[lg],")";
     lg=`categorical;"coalesce(CAST(",x," AS VARCHAR), '')";
     lg=`bitstring;"coalesce(CAST(string_split(CAST(",x," AS VARCHAR), '') AS BOOLEAN[]), [])";
     lg in key .duckdb.i.FCAST;"CAST(",x," AS ",.duckdb.i.FCAST[lg],")";
@@ -193,7 +196,8 @@
     raw:?[bare;al;cl]; sentinel:{[x] $[x in key .duckdb.i.FMIN;.duckdb.i.FMIN x;x in `float32`float64;"NaN";""]} each lg);
   if[count order; p,:([] col:1#`i; dtype:1#enlist "BIGINT"; logical:1#`int64; iskey:1#0b; raw:1#`; sentinel:1#enlist "")];
   if[any (lower `i,al where bare) in lower cl; :`push`src!(0#p;"")];
-  `push`src!(p;", " sv (enlist sel),{[q;a] q," AS ",.duckdb.i.quote string a}'[qn where bare;al where bare])}
+  w:where bare;
+  `push`src!(p;", " sv (enlist sel),{[q;l;a] q,$[l=`utf8;.duckdb.i.FBYTES;""]," AS ",.duckdb.i.quote string a}'[qn w;lg w;al w])}
 / @ignore
 .duckdb.i.foreign:{[c;t] 0=count .duckdb.i.schema[c;t]}
 / @ignore
