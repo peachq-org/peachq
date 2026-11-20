@@ -355,7 +355,8 @@
   m:(`T,raze (count a)#/:(`x`y;`X`Y))!(enlist `$dt),v,d;
   x:{[m;e] $[-11h=type e; $[e in key m; m e; e]; (type e) in 0 11h; .z.s[m] each e; e]}[m;r`sql];
   if[(not null r`identity) or `symbol=t; c:{(`coalesce;x;y)}[;.sql.i.lit .sql.i.identity[t;r`identity]]; x:$[`cast~first x; @[x;2;c]; c x]];
-  if[((avg)~e 0) and `int=(.sql.i.class L 0)`class; x:(`if;(`$">=";(`sum;(`abs;(`cast;`DOUBLE;v 0)));.sql.i.EXACT);(`error;enlist `$"avg: q sums these as floats");x)];
+  if[((avg)~e 0) and `int=(.sql.i.class L 0)`class;
+    x:(`if;(`$">=";(`sum;(`abs;(`cast;`DOUBLE;v 0)));.sql.i.EXACT);(`error;enlist `$"avg: q sums these as floats");x)];
   ($[(`NaN=r`nulls) and t in `float32`float64; (`nullif;x;(`cast;`$dt;enlist `NaN)); x];dt;t)};
 / The limit and order stage, a dict: limit and order (SQL's; :: and at most the i order where they stay with q), inner,
 / moved (anything moved) and clear (the limit and order moved).  select[n] / [m n] / [-n] / [order] move only over a
