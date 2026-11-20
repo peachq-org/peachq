@@ -13,8 +13,7 @@
 #include <rayforce.h>
 #include "core/sock.h"
 
-/* Decoded body/response size cap — mirrors q_http.c's 32 MiB served-file cap. */
-#define Q_HTTP_CLIENT_MAX (32ll * 1024 * 1024)
+#define Q_HTTP_CLIENT_MAX (1024ll * 1024 * 1024)   /* body cap, gzipped or not, as framed and as decoded */
 
 /* Parsed URL pieces.  host/path/userinfo are NUL-terminated copies. */
 typedef struct {
@@ -41,16 +40,14 @@ typedef struct { const char* p; size_t n; } q_http_span_t;
 
 /* Extract the body from a COMPLETE response buffer (headers + framed body).
  * On success sets status and body/body_len (body points into buf; a chunked
- * body is de-framed IN PLACE, so buf is mutated).  When `gzip` is non-NULL it is
- * set to 1 iff the response carried `Content-Encoding: gzip` (caller inflates the
- * extracted body), else 0.  `no_body` is the HEAD flag: the response is taken as
+ * body is de-framed IN PLACE, so buf is mutated).  `no_body` is the HEAD flag: the response is taken as
  * complete at its headers, whatever length they advertise.  `clen`, when
  * non-NULL, reports the advertised Content-Length (-1 = none).  `location`, when
  * non-NULL, receives the first `Location` header's value (into buf; p NULL when
  * absent) — the redirect follow in http_do reads it, nothing else.  Returns 0 ok,
  * -1 malformed, -2 decoded body exceeds Q_HTTP_CLIENT_MAX. */
 int q_http_client_extract(char* buf, size_t len, int* status,
-                          const char** body, size_t* body_len, int* gzip,
+                          const char** body, size_t* body_len, int* coding,   /* Q_GZ_* to inflate, or 0 */
                           int no_body, int64_t* clen, q_http_span_t* location);
 
 /* --- reusable blocking pipeline seams (also the WS-client hook) --- */
@@ -60,19 +57,18 @@ int q_http_client_extract(char* buf, size_t len, int* status,
 ray_sock_t q_http_client_connect(const char* host, uint16_t port,
                                  int timeout_ms, const char** err);
 
-/* Send the whole buffer within an absolute deadline (EAGAIN/EINTR-aware; does
+/* Send the whole buffer, failing after idle_ms of a stall (EAGAIN/EINTR-aware; does
  * NOT rely on ray_sock_send's unbounded EAGAIN wait).  Returns 0 ok / -1. */
-int q_http_client_send_all(ray_sock_t fd, const void* buf, size_t len,
-                           int64_t deadline_ms);
+int q_http_client_send_all(ray_sock_t fd, const void* buf, size_t len, int idle_ms);
 
 /* Read a whole HTTP response into a grown heap buffer, framing-aware (stops at
  * the Content-Length / chunked terminator; reads to EOF only when close-framed)
- * bounded by an absolute deadline + Q_HTTP_CLIENT_MAX.  `no_body` is the HEAD
+ * bounded by idle_ms of silence per read, Ctrl+C and Q_HTTP_CLIENT_MAX.  `no_body` is the HEAD
  * flag: the response is taken as complete at its headers, whatever length they
  * advertise for a body that will never arrive.  Returns malloc'd buf (caller
  * frees) with *len set, or NULL with *err set (bare class word). */
 char* q_http_client_read_response(ray_sock_t fd, size_t* len,
-                                  int64_t deadline_ms, const char** err, int no_body);
+                                  int idle_ms, const char** err, int no_body);
 
 #if defined(__EMSCRIPTEN__)
 /* A browser tab has no sockets: wasm/q_wasm_http.c answers the request (head `req` +
@@ -97,9 +93,7 @@ ray_t* q_dotq_hap_fn(ray_t* x);
  * VERBATIM (no header injection — the caller supplies the full request line +
  * headers + terminating blank line) and returns the ENTIRE response (status line
  * + headers + blank line + body) as a string atom.  Chunked bodies are
- * reassembled (V3.3); the response headers are returned unchanged.  `https://`
- * -> 'nyi (TLS tier).  Reuses the #223 connect (30s) + send/read (30s) budgets
- * and the 32 MiB cap.  PROVISIONAL pre-C3: the return is a string ATOM.  hsym +
+ * reassembled (V3.3); the response headers are returned unchanged.  hsym +
  * request are BORROWED; returns owned (or an owned bare-class ray_error). */
 ray_t* q_http_client_raw(ray_t* hsym, ray_t* request);
 

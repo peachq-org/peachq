@@ -18,6 +18,12 @@ uint8_t* q_gz_deflate(const uint8_t* src, size_t src_len, int level,
 uint8_t* q_gz_inflate(const uint8_t* src, size_t src_len,
                       size_t* out_len, const char** err);
 
+/* An HTTP content coding inflated into one malloc'd buffer of at most cap bytes ("limit" past it): Q_GZ_GZIP is one
+ * or more RFC 1952 members back to back, Q_GZ_DEFLATE one stream, zlib-wrapped or raw.  Contract as q_gz_inflate. */
+enum { Q_GZ_GZIP = 1, Q_GZ_DEFLATE = 2 };
+uint8_t* q_gz_inflate_coding(const uint8_t* src, size_t src_len, int coding, size_t cap,
+                             size_t* out_len, const char** err);
+
 /* Deflate src into ONE RFC 1950 zlib stream, kdb's kxzip block form, byte-equal
  * to kdb's at the same level.  malloc'd buffer or NULL with *err as above.
  * level 0..9. */

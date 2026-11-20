@@ -3,21 +3,18 @@
  * https-error and redirect policies are doc-unpinned peachq choices (see PR):
  * 3xx followed cross-domain and across schemes up to Q_HTTP_MAX_HOPS, credentials
  * dropped on a host change, the raw client never following. */
-#ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200809L    /* clock_gettime / CLOCK_MONOTONIC */
-#endif
 #include "qlang/q_count.h"
 #include <rayforce.h>
 #include "qlang/base/q_err.h"
 #include "qlang/q_prim.h"
 #include "qlang/net/q_http_client.h"
-#include "qlang/net/q_gz.h"           /* transparent gzip inflate (Content-Encoding) */
+#include "qlang/net/q_gz.h"           /* transparent gzip/deflate inflate (Content-Encoding) */
 #include "qlang/net/q_tls.h"          /* https — the TLS overlay on the socket */
 #include "qlang/io/q_io.h"            /* q_io_clamp — ONE range/EOF law across transports */
 #include "lang/eval.h"            /* ray_eval_get_restricted — outbound gate */
 #include "table/sym.h"           /* ray_sym_str — hsym text */
 #include "picohttpparser.h"
-#include <limits.h>
+#include <ctype.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,31 +22,19 @@
 #ifdef RAY_OS_WINDOWS
   #define WIN32_LEAN_AND_MEAN
   #include <winsock2.h>
-  #include <windows.h>
 #else
-  #include <poll.h>
   #include <errno.h>
-  #include <time.h>
   #include <sys/socket.h>
 #endif
 
 #define Q_HTTP_CONNECT_MS 30000        /* connect budget */
-#define Q_HTTP_TOTAL_MS   30000        /* whole send+read budget */
+#define Q_HTTP_IDLE_MS    30000        /* silence allowed per send or read; no whole-transfer deadline, as curl */
+#define Q_HTTP_SLICE_MS   100          /* a wait is cut this fine so Ctrl+C is seen during a stall */
 #define Q_HTTP_MAX_HDRS   64
 #define Q_HTTP_HDR_CAP    (64 * 1024)  /* response header block cap (pre-body) */
+#define Q_HTTP_RECV       8192
 #define Q_HTTP_MAX_HOPS   10           /* redirect follows (urllib's number): 11 transactions, then the 3xx stands */
 #define Q_HTTP_USER_AGENT "peachq/" RAYFORCE_VERSION   /* some APIs (Coinbase) refuse a request without one */
-
-/* ---- monotonic milliseconds (absolute-deadline arithmetic) ---- */
-static int64_t now_ms(void) {
-#ifdef RAY_OS_WINDOWS
-    return (int64_t)GetTickCount64();
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-#endif
-}
 
 /* ---- URL parse ---- */
 static int scan_ok(const char* p, size_t n) {   /* no control / CR / LF bytes */
@@ -58,11 +43,21 @@ static int scan_ok(const char* p, size_t n) {   /* no control / CR / LF bytes */
     return 1;
 }
 
+/* n bytes of s equal `lower` ignoring ASCII case: schemes, header names and tokens are all case-insensitive. */
+static int lower_eq(const char* s, const char* lower, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + 32);
+        if (c != (unsigned char)lower[i]) return 0;
+    }
+    return 1;
+}
+
 /* The two schemes this client speaks, and how far in the authority starts.
  * -1 = neither; else 0 http / 1 https with *pfx set. */
 static int scheme_of(const char* s, size_t n, size_t* pfx) {
-    if (n >= 7 && memcmp(s, "http://", 7) == 0)  { *pfx = 7; return 0; }
-    if (n >= 8 && memcmp(s, "https://", 8) == 0) { *pfx = 8; return 1; }
+    if (n >= 7 && lower_eq(s, "http://", 7))  { *pfx = 7; return 0; }
+    if (n >= 8 && lower_eq(s, "https://", 8)) { *pfx = 8; return 1; }
     return -1;
 }
 
@@ -75,7 +70,6 @@ int q_http_client_url_parse(const char* url, size_t n, q_http_url_t* out) {
     if (!url || !out) return -1;
     memset(out, 0, sizeof *out);
     if (n && url[0] == ':') { url++; n--; }        /* strip kdb handle ':' */
-    if (!scan_ok(url, n)) return -1;               /* injection guard */
 
     size_t pfx;
     int sch = scheme_of(url, n, &pfx);
@@ -87,12 +81,13 @@ int q_http_client_url_parse(const char* url, size_t n, q_http_url_t* out) {
     /* authority ends at the first '/', '?' or '#' */
     size_t a = 0;
     while (a < n && url[a] != '/' && url[a] != '?' && url[a] != '#') a++;
+    if (!scan_ok(url, a)) return -1;               /* injection guard: the target is encoded below instead */
     const char* auth = url; size_t alen = a;
     const char* rest = url + a; size_t rlen = n - a;
 
-    /* optional user:pass@ */
+    /* optional user:pass@ — the LAST '@' ends it, so a pasted password may hold one */
     size_t at = alen;
-    for (size_t i = 0; i < alen; i++) if (auth[i] == '@') { at = i; break; }
+    for (size_t i = alen; i-- > 0;) if (auth[i] == '@') { at = i; break; }
     const char* hostport = auth; size_t hplen = alen;
     if (at < alen) {
         if (at >= sizeof out->userinfo) return -1;
@@ -119,29 +114,27 @@ int q_http_client_url_parse(const char* url, size_t n, q_http_url_t* out) {
     }
 
     /* path = everything up to '#' (fragment dropped; query kept).  A query-only
-     * target (rest starts with '?') gets a leading '/' for a valid origin-form. */
-    size_t plen = 0;
+     * target (rest starts with '?') gets a leading '/' for a valid origin-form.
+     * A space, control byte or byte >= 0x80 is percent-encoded, as browsers do; '%'
+     * is not, so an existing %XX is never encoded twice. */
+    static const char hex[] = "0123456789ABCDEF";
+    size_t plen = 0, o = 0;
     while (plen < rlen && rest[plen] != '#') plen++;
-    if (plen == 0) { out->path[0] = '/'; out->path[1] = '\0'; }
-    else {
-        size_t off = (rest[0] != '/') ? 1 : 0;          /* prepend '/' for '?...' */
-        if (plen + off >= sizeof out->path) return -1;
-        if (off) out->path[0] = '/';
-        memcpy(out->path + off, rest, plen); out->path[plen + off] = '\0';
+    if (plen == 0 || rest[0] != '/') out->path[o++] = '/';
+    for (size_t i = 0; i < plen; i++) {
+        unsigned char c = (unsigned char)rest[i];
+        int enc = c <= ' ' || c >= 0x7f;
+        if (o + (enc ? 3 : 1) >= sizeof out->path) return -1;
+        if (enc) { out->path[o++] = '%'; out->path[o++] = hex[c >> 4]; out->path[o++] = hex[c & 15]; }
+        else out->path[o++] = (char)c;
     }
+    out->path[o] = '\0';
     return 0;
 }
 
 /* ---- header lookup helpers (case-insensitive) ---- */
 static int hdr_ieq(const struct phr_header* h, const char* lower) {
-    size_t tn = strlen(lower);
-    if (h->name_len != tn) return 0;
-    for (size_t i = 0; i < tn; i++) {
-        unsigned char c = (unsigned char)h->name[i];
-        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + 32);
-        if (c != (unsigned char)lower[i]) return 0;
-    }
-    return 1;
+    return h->name_len == strlen(lower) && lower_eq(h->name, lower, h->name_len);
 }
 /* A header value's trimmed body is exactly one token (case-insensitive) — the
  * `Content-Encoding` shapes that matter: `gzip` is the only coding peachq
@@ -149,14 +142,7 @@ static int hdr_ieq(const struct phr_header* h, const char* lower) {
 static int val_is(const char* v, size_t n, const char* tok) {
     size_t s = 0; while (s < n && (v[s] == ' ' || v[s] == '\t')) s++;
     size_t e = n; while (e > s && (v[e-1] == ' ' || v[e-1] == '\t')) e--;
-    size_t tn = strlen(tok);
-    if (e - s != tn) return 0;
-    for (size_t k = 0; k < tn; k++) {
-        unsigned char c = (unsigned char)v[s + k];
-        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + 32);
-        if (c != (unsigned char)tok[k]) return 0;
-    }
-    return 1;
+    return e - s == strlen(tok) && lower_eq(v + s, tok, e - s);
 }
 
 /* Terminal transfer coding is exactly `chunked` (case-insensitive).  A TE header
@@ -165,14 +151,7 @@ static int te_terminal_chunked(const char* v, size_t n) {
     size_t e = n; while (e > 0 && (v[e-1] == ' ' || v[e-1] == '\t' || v[e-1] == ',')) e--;
     size_t s = e; while (s > 0 && v[s-1] != ',') s--;               /* last token */
     while (s < e && (v[s] == ' ' || v[s] == '\t')) s++;
-    if (e - s != 7) return 0;
-    static const char* t = "chunked";
-    for (size_t k = 0; k < 7; k++) {
-        unsigned char c = (unsigned char)v[s + k];
-        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + 32);
-        if (c != (unsigned char)t[k]) return 0;
-    }
-    return 1;
+    return e - s == 7 && lower_eq(v + s, "chunked", 7);
 }
 
 /* Strict Content-Length: leading/trailing OWS only, all-digit body, within cap.
@@ -198,7 +177,7 @@ static int response_framing(int status, const struct phr_header* h, size_t nh,
 {
     *chunked = 0; *have_cl = 0; *cl = 0;
     *bodyless = (status >= 100 && status < 200) || status == 204 || status == 304;
-    int te = 0; int cl_seen = 0; int64_t clv = 0;
+    int te = 0, cl_seen = 0, cl_bad = 0; int64_t clv = 0;
     for (size_t i = 0; i < nh; i++) {
         if (!h[i].name) continue;
         if (hdr_ieq(&h[i], "transfer-encoding")) {
@@ -206,39 +185,50 @@ static int response_framing(int status, const struct phr_header* h, size_t nh,
             te = 1;
         } else if (hdr_ieq(&h[i], "content-length")) {
             int64_t v = 0;
-            if (parse_content_length(h[i].value, h[i].value_len, Q_HTTP_CLIENT_MAX, &v) != 0)
-                return -1;
-            if (cl_seen && v != clv) return -1;         /* conflicting duplicate */
+            if (parse_content_length(h[i].value, h[i].value_len, Q_HTTP_CLIENT_MAX, &v) != 0 ||
+                (cl_seen && v != clv)) cl_bad = 1;      /* malformed, or a conflicting duplicate */
             cl_seen = 1; clv = v;
         }
     }
-    if (te && cl_seen) return -1;                        /* TE+CL smuggling */
-    if (te) { *chunked = 1; return 0; }
+    if (te) { *chunked = 1; return 0; }                  /* Transfer-Encoding overrides it (RFC 9112 §6.3) */
+    if (cl_bad) return -1;
     if (cl_seen) { *have_cl = 1; *cl = clv; return 0; }
     return 0;                                            /* close-framed (or bodyless) */
 }
 
-/* Non-mutating chunked-completion probe over a COPY of the body region.
- * 1 complete, 0 incomplete, -1 malformed. */
-static int chunked_complete(const char* body, size_t blen) {
-    if (blen == 0) return 0;
-    char* tmp = (char*)malloc(blen);
-    if (!tmp) return -1;
-    memcpy(tmp, body, blen);
-    struct phr_chunked_decoder dec; memset(&dec, 0, sizeof dec);
-    size_t sz = blen;
-    ssize_t r = phr_decode_chunked(&dec, tmp, &sz);
-    free(tmp);
-    if (r == -1) return -1;
-    if (r == -2) return 0;
-    return 1;                                            /* >= 0: terminal chunk seen */
+/* Walk a chunked body from *pos (the next chunk-size line, kept between reads), so each chunk is stepped over once:
+ * re-decoding the whole body per recv was quadratic (182 s for a 294 MB answer).  With out set it also de-frames,
+ * moving each chunk's data to out + *olen (in place when out is b).  As tolerant as RFC 9112 lets a recipient be: a
+ * line may end in a bare LF, an extension after BWS or ';' is skipped, trailers are ignored.  picohttpparser's decoder is stricter on
+ * the LF, and refuses part-way a body whose framing is mostly overhead (100k one-byte chunks).
+ * 1 complete, 0 incomplete, -1 malformed, -2 a chunk past the cap. */
+static int chunked_walk(char* b, size_t blen, size_t* pos, char* out, size_t* olen) {
+    for (;;) {
+        size_t p = *pos, n = 0, i = p;
+        const char* nl = p < blen ? memchr(b + p, '\n', blen - p) : NULL;
+        if (!nl) return 0;
+        for (; isxdigit((unsigned char)b[i]); i++) {
+            if (n >> 60) return -1;
+            n = n * 16 + (size_t)(isdigit((unsigned char)b[i]) ? b[i] - '0' : tolower((unsigned char)b[i]) - 'a' + 10);
+        }
+        if (i == p || !memchr(" \t;\r\n", b[i], 5)) return -1;    /* `0x10` is junk, not the last chunk */
+        if (n == 0) return 1;
+        if (n > (size_t)Q_HTTP_CLIENT_MAX) return -2;
+        size_t d = (size_t)(nl - b) + 1, end = d + n;
+        if (end >= blen) return 0;
+        size_t lf = end + (b[end] == '\r');
+        if (lf >= blen) return 0;
+        if (b[lf] != '\n') return -1;
+        if (out) { memmove(out + *olen, b + d, n); *olen += n; }
+        *pos = lf + 1;
+    }
 }
 
 int q_http_client_extract(char* buf, size_t len, int* status,
-                          const char** body, size_t* body_len, int* gzip,
+                          const char** body, size_t* body_len, int* coding,
                           int no_body, int64_t* clen, q_http_span_t* location)
 {
-    if (gzip) *gzip = 0;
+    if (coding) *coding = 0;
     if (clen) *clen = -1;
     if (location) { location->p = NULL; location->n = 0; }
     int minor, st; const char* msg; size_t msg_len, nh = Q_HTTP_MAX_HDRS;
@@ -246,17 +236,18 @@ int q_http_client_extract(char* buf, size_t len, int* status,
     int hl = phr_parse_response(buf, len, &minor, &st, &msg, &msg_len, h, &nh, 0);
     if (hl <= 0) return -1;
     if (status) *status = st;
-    /* Content-Encoding: gzip -> caller inflates (headers read intact, before the
+    /* Content-Encoding gzip or deflate -> caller inflates (headers read intact, before the
      * chunked in-place de-frame below; TE is the outer coding, dechunked first). */
-    int gz = 0, coded = 0;
+    int cod = 0, coded = 0;
     for (size_t i = 0; i < nh; i++)
         if (h[i].name && hdr_ieq(&h[i], "content-encoding") &&
             !val_is(h[i].value, h[i].value_len, "identity")) {
             coded = 1;                                     /* br/deflate/gzip alike */
-            gz = val_is(h[i].value, h[i].value_len, "gzip");
+            cod = val_is(h[i].value, h[i].value_len, "gzip") ? Q_GZ_GZIP
+                : val_is(h[i].value, h[i].value_len, "deflate") ? Q_GZ_DEFLATE : 0;
             break;
         }
-    if (gzip) *gzip = gz;
+    if (coding) *coding = cod;
     for (size_t i = 0; location && i < nh; i++)
         if (h[i].name && hdr_ieq(&h[i], "location")) {
             location->p = h[i].value; location->n = h[i].value_len;
@@ -273,10 +264,9 @@ int q_http_client_extract(char* buf, size_t len, int* status,
     size_t blen = len - (size_t)hl;
     if (bodyless) { *body = b; *body_len = 0; return 0; }
     if (chunked) {
-        size_t sz = blen;
-        struct phr_chunked_decoder dec; memset(&dec, 0, sizeof dec);
-        ssize_t r = phr_decode_chunked(&dec, b, &sz);   /* de-frames IN PLACE */
-        if (r == -1 || r == -2) return -1;
+        size_t pos = 0, sz = 0;
+        int r = chunked_walk(b, blen, &pos, b, &sz);    /* de-frames IN PLACE */
+        if (r != 1) return r == -2 ? -2 : -1;
         if (sz > (size_t)Q_HTTP_CLIENT_MAX) return -2;
         *body = b; *body_len = sz; return 0;
     }
@@ -298,17 +288,26 @@ ray_sock_t q_http_client_connect(const char* host, uint16_t port,
     return fd;
 }
 
-int q_http_client_send_all(ray_sock_t fd, const void* buf, size_t len,
-                           int64_t deadline_ms)
+/* Wait until fd can be written (`out`) or read, through idle_ms of silence cut into slices so Ctrl+C is seen while a
+ * server stalls.  1 ready, 0 silent too long, -1 error, -2 interrupted. */
+static int wait_io(ray_sock_t fd, int out, int idle_ms) {
+    for (int left = idle_ms; left > 0; left -= Q_HTTP_SLICE_MS) {
+        if (ray_interrupted()) return -2;
+        int w = left < Q_HTTP_SLICE_MS ? left : Q_HTTP_SLICE_MS;
+        int r = out ? ray_sock_wait_writable(fd, w) : ray_sock_wait_readable(fd, w);
+        if (r != 0) return r;
+    }
+    return 0;
+}
+
+int q_http_client_send_all(ray_sock_t fd, const void* buf, size_t len, int idle_ms)
 {
     /* A TLS record cannot be split by a raw send(): the overlay owns framing, so
-     * the whole write goes through it — under THIS call's deadline, which the
+     * the whole write goes through it — under THIS call's budget, which the
      * overlay reads back from ray_sock_set_timeout.  SO_SNDTIMEO alone does not
      * reach the overlay's own poll waits. */
     if (ray_sock_io_active(fd)) {
-        int64_t left = deadline_ms - now_ms();
-        if (left <= 0) return -1;
-        ray_sock_set_timeout(fd, left > INT_MAX ? INT_MAX : (int)left);
+        ray_sock_set_timeout(fd, idle_ms);
         int64_t n = ray_sock_send(fd, buf, len);
         ray_sock_set_timeout(fd, 0);
         return n == (int64_t)len ? 0 : -1;
@@ -316,19 +315,11 @@ int q_http_client_send_all(ray_sock_t fd, const void* buf, size_t len,
 
     const uint8_t* p = (const uint8_t*)buf; size_t rem = len;
     while (rem > 0) {
-        int64_t budget = deadline_ms - now_ms();
-        if (budget <= 0) return -1;
-        int wait = budget > 2000000000LL ? 2000000000 : (int)budget;
+        if (wait_io(fd, 1, idle_ms) <= 0) return -1;
 #ifdef RAY_OS_WINDOWS
-        WSAPOLLFD pfd = { fd, POLLOUT, 0 };
-        int pr = WSAPoll(&pfd, 1, wait);
-        if (pr <= 0) return -1;
         int n = send(fd, (const char*)p, (int)rem, 0);
         if (n <= 0) { if (WSAGetLastError() == WSAEWOULDBLOCK || WSAGetLastError() == WSAEINTR) continue; return -1; }
 #else
-        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
-        int pr = poll(&pfd, 1, wait);
-        if (pr <= 0) { if (pr < 0 && errno == EINTR) continue; return -1; }
         ssize_t n = send(fd, p, rem,
   #ifdef MSG_NOSIGNAL
                          MSG_NOSIGNAL
@@ -343,34 +334,35 @@ int q_http_client_send_all(ray_sock_t fd, const void* buf, size_t len,
     return 0;
 }
 
-/* Grow *buf to at least need bytes.  0 ok / -1 OOM. */
+/* Grow *buf to at least need bytes, never past what a capped response can fill.  0 ok / -1 too big or OOM. */
 static int grow(char** buf, size_t* cap, size_t need) {
+    const size_t lim = (size_t)Q_HTTP_CLIENT_MAX + Q_HTTP_HDR_CAP + Q_HTTP_RECV;
     if (need <= *cap) return 0;
+    if (need > lim) return -1;
     size_t nc = *cap ? *cap : 4096;
-    while (nc < need) { if (nc > (size_t)Q_HTTP_CLIENT_MAX + Q_HTTP_HDR_CAP) return -1; nc *= 2; }
+    while (nc < need) nc *= 2;
+    if (nc > lim) nc = lim;
     char* nb = (char*)realloc(*buf, nc);
     if (!nb) return -1;
     *buf = nb; *cap = nc; return 0;
 }
 
 char* q_http_client_read_response(ray_sock_t fd, size_t* out_len,
-                                  int64_t deadline_ms, const char** err, int no_body)
+                                  int idle_ms, const char** err, int no_body)
 {
     char*  buf = NULL; size_t cap = 0, len = 0;
     int    hdr_len = 0;          /* >0 once headers parsed */
     int    chunked = 0, have_cl = 0, bodyless = 0; int64_t cl = 0;
+    size_t cpos = 0;             /* the chunked walk's place in the body */
     const char* e = "conn";
 
     for (;;) {
-        int64_t budget = deadline_ms - now_ms();
-        if (budget <= 0) { e = "conn"; goto fail; }
-        int wait = budget > 2000000000LL ? 2000000000 : (int)budget;
         /* Decrypted bytes already buffered in the overlay are invisible to
          * poll(), so a readability wait would stall on the last record. */
-        int rr = ray_sock_io_pending(fd) ? 1 : ray_sock_wait_readable(fd, wait);
-        if (rr == 0) { e = "conn"; goto fail; }          /* timeout */
-        if (rr < 0)  { e = "conn"; goto fail; }
-        if (grow(&buf, &cap, len + 8192) != 0) { e = "wsfull"; goto fail; }
+        int rr = ray_sock_io_pending(fd) ? 1 : wait_io(fd, 0, idle_ms);
+        if (rr == -2) { e = "stop"; goto fail; }
+        if (rr <= 0)  { e = "conn"; goto fail; }
+        if (grow(&buf, &cap, len + Q_HTTP_RECV) != 0) { e = "wsfull"; goto fail; }
         int64_t n = ray_sock_recv(fd, buf + len, cap - len);
         if (n < 0) { e = "conn"; goto fail; }
         if (n == 0) {                                    /* peer closed */
@@ -410,8 +402,8 @@ char* q_http_client_read_response(ray_sock_t fd, size_t* out_len,
                 if (blen >= (size_t)cl) break;
             } else if (chunked) {
                 if (blen > (size_t)Q_HTTP_CLIENT_MAX) { e = "wsfull"; goto fail; }
-                int c = chunked_complete(body, blen);
-                if (c == -1) { e = "conn"; goto fail; }
+                int c = chunked_walk(body, blen, &cpos, NULL, NULL);
+                if (c < 0) { e = c == -2 ? "wsfull" : "conn"; goto fail; }
                 if (c == 1) break;
             } else if (blen > (size_t)Q_HTTP_CLIENT_MAX) { e = "wsfull"; goto fail; }
         }
@@ -527,20 +519,19 @@ static int redirect_resolve(const q_http_url_t* cur, const char* loc, size_t n,
 /* THE one network exchange: request head + body out, the whole raw response back
  * (q_http_client_read_response's contract).  http_do and the raw client both ride it. */
 static char* http_exchange(const q_http_url_t* u, const char* req, size_t req_len,
-                           const char* body, size_t body_len, int64_t deadline,
+                           const char* body, size_t body_len,
                            int no_body, size_t* len, const char** err)
 {
 #if defined(__EMSCRIPTEN__)
-    (void)deadline;
     return q_http_client_host_exchange(u, req, req_len, body, body_len, no_body, len, err);
 #else
     ray_sock_t fd = q_http_client_connect(u->host, u->port, Q_HTTP_CONNECT_MS, err);
     if (fd == RAY_INVALID_SOCK) return NULL;
     char* resp = NULL;
     if (u->scheme == 1 && q_tls_client_start(fd, u->host, false, err) != 0) goto done;
-    if (q_http_client_send_all(fd, req, req_len, deadline) != 0) { *err = "conn"; goto done; }
-    if (body_len && q_http_client_send_all(fd, body, body_len, deadline) != 0) { *err = "conn"; goto done; }
-    resp = q_http_client_read_response(fd, len, deadline, err, no_body);
+    if (q_http_client_send_all(fd, req, req_len, Q_HTTP_IDLE_MS) != 0) { *err = "conn"; goto done; }
+    if (body_len && q_http_client_send_all(fd, body, body_len, Q_HTTP_IDLE_MS) != 0) { *err = "conn"; goto done; }
+    resp = q_http_client_read_response(fd, len, Q_HTTP_IDLE_MS, err, no_body);
 done:
     ray_sock_close(fd);
     return resp;
@@ -562,7 +553,7 @@ ray_t* q_http_client_fetch(const q_http_url_t* u, const char* method, const char
     if (rl < 0 || (size_t)rl >= sizeof req) return q_err(QE_LIMIT);
     const char* err = "conn";
     int head = strcmp(method, "HEAD") == 0;
-    r->buf = http_exchange(u, req, (size_t)rl, NULL, 0, now_ms() + Q_HTTP_TOTAL_MS, head, &r->len, &err);
+    r->buf = http_exchange(u, req, (size_t)rl, NULL, 0, head, &r->len, &err);
     if (!r->buf) return q_err_from_text(err, strlen(err));
     int ex = q_http_client_extract(r->buf, r->len, &r->status, &r->body, &r->body_len, NULL, head, NULL, NULL);
     if (ex == 0) return NULL;
@@ -616,8 +607,7 @@ static ray_t* http_do(ray_t* urlv, const http_req_t* r)
     }
     const char* accept_enc = (rangehdr[0] || r->head) ? "" : "Accept-Encoding: gzip\r\n";
 
-    int64_t deadline = now_ms() + Q_HTTP_TOTAL_MS;     /* ONE send+read budget across every hop */
-    for (int hops = 0;; hops++) {
+    for (int hops = 0;; hops++) {      /* each hop is a fresh exchange with its own budgets; the count bounds the chain */
         /* Authorization header (optional) — rebuilt per hop from the hop's own userinfo */
         char authhdr[512]; authhdr[0] = '\0';
         if (u.userinfo[0]) {
@@ -645,10 +635,10 @@ static ray_t* http_do(ray_t* urlv, const http_req_t* r)
         const char* err = "conn";
         ray_t* result = NULL;
         size_t rlen = 0;
-        char* resp = http_exchange(&u, req, (size_t)rl, body, mime ? body_len : 0, deadline, r->head, &rlen, &err);
+        char* resp = http_exchange(&u, req, (size_t)rl, body, mime ? body_len : 0, r->head, &rlen, &err);
         if (!resp) return q_err_from_text(err, strlen(err));
-        int st; const char* rbody; size_t rbl; int gz = 0; q_http_span_t loc;
-        int ex = q_http_client_extract(resp, rlen, &st, &rbody, &rbl, &gz, r->head, r->clen, &loc);
+        int st; const char* rbody; size_t rbl; int coding = 0; q_http_span_t loc;
+        int ex = q_http_client_extract(resp, rlen, &st, &rbody, &rbl, &coding, r->head, r->clen, &loc);
         if (ex == 0 && r->status) *r->status = st;
         if (ex == 0 && loc.p && hops < Q_HTTP_MAX_HOPS &&
             (st == 301 || st == 302 || st == 303 || st == 307 || st == 308)) {
@@ -668,11 +658,12 @@ static ray_t* http_do(ray_t* urlv, const http_req_t* r)
                 continue;
             }
         }
-        if (ex == 0 && gz && rbl) {
-            /* transparent inflate — q_gz_inflate bounds output at 32 MiB (bomb guard).
+        if (ex == 0 && coding && rbl) {
+            /* transparent inflate, to the same cap a plain body has.
              * An empty body (HEAD, or a coded 0-length answer) codes nothing to inflate. */
             size_t ilen = 0; const char* ierr = NULL;
-            uint8_t* infl = q_gz_inflate((const uint8_t*)rbody, rbl, &ilen, &ierr);
+            uint8_t* infl = q_gz_inflate_coding((const uint8_t*)rbody, rbl, coding, (size_t)Q_HTTP_CLIENT_MAX,
+                                                &ilen, &ierr);
             if (infl) { result = http_body(r, (const char*)infl, ilen); free(infl); }
             else err = ierr ? ierr : "domain";
         }
@@ -846,7 +837,7 @@ ray_t* q_http_client_raw(ray_t* hsym, ray_t* request) {
 
     const char* err = "conn";
     size_t rlen = 0;
-    char* resp = http_exchange(&u, reqp, (size_t)reqn, NULL, 0, now_ms() + Q_HTTP_TOTAL_MS, 0, &rlen, &err);
+    char* resp = http_exchange(&u, reqp, (size_t)reqn, NULL, 0, 0, &rlen, &err);
     if (!resp) return q_err_from_text(err, strlen(err));
     ray_t* result = NULL;
     int st; const char* body; size_t body_len;

@@ -20,7 +20,7 @@
 #include <string.h>
 #include <time.h>
 
-#define S3_CHUNK  (8ll << 20)         /* one GET's slice: well inside the client's 32 MiB response cap */
+#define S3_CHUNK  (8ll << 20)         /* one GET's slice: well inside the client's response cap */
 #define S3_EMPTY_SHA256 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 enum { K_ID, K_SECRET, K_TOKEN, K_REGION, K_PROFILE, K_CREDFILE, K_CONFFILE, K_ENDPOINT, K_PATHSTYLE, S3_NKEYS };
