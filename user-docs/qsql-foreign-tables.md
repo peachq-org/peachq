@@ -127,7 +127,8 @@ Types and values
   `select from inst where valid_to>.z.p` finds the current rows and `max valid_to` is `0Wp`. The order is kept,
   so a filter DuckDB runs keeps exactly the rows q would. q's timestamp infinities are not IEEE infinities: on such
   a row `valid_to-valid_from` is a huge, meaningless timespan, not an infinity, so check a table with
-  `.duckdb.inspect` before doing arithmetic on its timestamps. A comparison with `0Wp` itself is run by q.
+  `.duckdb.inspect` before doing arithmetic on its timestamps. A comparison with `0Wp`, or with a timestamp past
+  2262, is run by q.
 - **Out-of-range dates raise an error.** Only DuckDB's very earliest dates are past what a q date holds. A select
   that reads one fails with `'duckdb` (`.duckdb.err[]` names the column); a select that does not read that column
   answers.
