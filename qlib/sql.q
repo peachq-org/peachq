@@ -247,10 +247,10 @@
   if[99h<>type a; :`barrier`renames!(`i in .sql.i.names[0b] a;none)];
   b:`i~/:value a; v:(value a) where not b;
   `barrier`renames!(`i in raze .sql.i.names[0b] each v where not ((count);`i)~/:v; (key[a] where b)!(sum b)#`i)};
-/ the columns of a schema a where term reads otherwise than a table q wrote, as column!(raw;sentinel)
+/ the columns of a schema a where term reads otherwise than a table q wrote, as column!(raw;sentinel;the stored type)
 .sql.i.origin:{[schema]
   n:count schema; raw:$[`raw in cols schema; schema`raw; schema`col]; sn:$[`sentinel in cols schema; schema`sentinel; n#enlist ""];
-  j:where (raw<>schema`col) or 0<count each sn; (schema[`col] j)!flip (raw j;sn j)};
+  j:where (raw<>schema`col) or 0<count each sn; (schema[`col] j)!flip (raw j;sn j;schema[`dtype] j)};
 / The where stage, a dict: cls (column to logical class), ix (the table stores i), stop (no term may move), terms (the
 / moved terms as SQL) and rest (the terms left for q, in order).  q runs term k+1 on the rows passing terms 1..k, so a
 / term that reads only its own row commutes with the others: every such term before the first that does not
@@ -271,7 +271,28 @@
   x:(((((::)~/:x) and not .sql.i.pure[(0#`)!0#`;0b] each (count x)#wh),1b)?1b)#x;
   m:where not (::)~/:x; rest:wh (til count wh) except m;
   stop:stop or `i in raze .sql.i.names[0b] each rest;
-  `cls`ix`stop`terms`rest!(cls;ix;stop;$[stop; (); x m];$[stop; wh; rest])};
+  lo:.sql.i.loose[cls;fr] each wh (til count x) except m;
+  `cls`ix`stop`terms`rest!(cls;ix;stop;$[stop; (); x[m],lo where not (::)~/:lo];$[stop; wh; rest])};
+/ A where term of the region that the map cannot spell exactly, as SQL true on every row the term keeps and maybe on more,
+/ :: for none.  It moves beside the exact terms and the term itself stays with q, which then runs it on the fewer rows
+/ DuckDB returns: the answer is q's own, and the scan still skips what the looser test rules out.
+/ A float column under < or > against a number: q's comparison is the exact one less the pairs within tolerance
+/ (basics/precision.md), so the exact comparison keeps every row q's does.  Under <, q keeps the null and the SQL its arm.
+/ like with a pattern GLOB cannot answer (.sql.i.glob): whatever matches begins with the bytes ahead of the pattern's first
+/ wildcard.
+/ A time, minute or second column q wrote, an INTERVAL, against a value of its own type: DuckDB orders the INTERVALs q can
+/ read (no months, days of 24 hours) as q orders their counts.  One q cannot read fails the pull, so no answer differs.
+.sql.i.loose:{[cls;fr;e]
+  if[(0h<>.Q.c.lty e) or 3<>count e; :(::)]; if[any 101h=type each 1_e; :(::)];
+  if[null i:first where .sql.i.VERBS[`verb]~\:e 0; :(::)]; r:.sql.i.VERBS i; c:e 1; v:e 2; if[-11h<>type c; :(::)];
+  if[`scalar=r`shape;
+    if[not null t:(`time`minute`second!-19 -17 -18h) cls c;
+      :$[(c in key fr) or t<>type v; (::); null v; (::);
+        .sql.i.arm[(enlist `nullable)!enlist 1b;0b;r`keepsnull;c;(r`sql;c;.sql.i.lit v)]]];
+    :$[r[`sql] in `$'"<>"; .sql.i.compare[cls;fr;0b;@[r;`classes;:;enlist `float];1_e]; (::)]];
+  if[(`pattern<>r`shape) or not .sql.i.class[cls c][`class] in r`classes; :(::)];
+  p:$[-10h=type v; enlist v; v]; if[10h<>type p; :(::)]; n:(p in "?*[\000")?1b; if[0=n; :(::)];
+  if[c in key fr; c:fr[c] 0]; $[null c; (::); (`starts_with;c;.sql.i.lit n#p)]};
 / The whole-push stage, a dict: ok (the select phrase and by move whole, so q is left nothing), byrow (the select by g
 / form: the last row of each group, so the SQL keeps every column that is not a key, as q does), by (the GROUP BY
 / expressions, 0b for none), cols (the SQL columns, keys first), rows (their schema rows: q's result type of each
@@ -282,8 +303,9 @@
 .sql.i.whole:{[tree;schema;w]
   off:`ok`byrow`by`cols`rows`order!(0b;0b;0b;()!();0#schema;());
   a:tree 4; by:tree 3; grouped:99h=type by; byrow:()~a;
-  shape:$[99h=type a; grouped or 0b~by; byrow and grouped and w`ix];
+  shape:$[1b~by; w`ix; 99h=type a; grouped or 0b~by; byrow and grouped and w`ix];
   if[(5<count tree) or w[`stop] or (0<count w`rest) or not shape; :off];
+  if[1b~by; :$[(::)~d:.sql.i.distinct[schema;a]; off; off,d]];
   x:$[grouped; .sql.i.key[schema]'[key by;value by]; ()],$[byrow; (); .sql.i.agg[w`ix;schema] each value a];
   names:$[grouped; key by; `$()],$[byrow; `$(); key a]; nk:$[grouped; count by; 0];
   if[(any (::)~/:x) or count[names]<>count distinct names; :off];
@@ -292,6 +314,16 @@
     update iskey:0b from select from schema where col in vals;
   `ok`byrow`by`cols`rows`order!(1b;byrow;$[grouped; names[til nk]!e til nk; 0b];(names!e),vals!vals;rows;
     {[e;lg] (`;e),$[.sql.i.class[lg]`nullable; enlist `$"nulls first"; ()]}'[e til nk;x[til nk;2]])};
+/ select distinct as the whole-push fields it changes, :: for one the SQL cannot answer as q does.  q keeps each distinct
+/ row where it first occurs, so the SQL groups by every column and orders the groups by their lowest i.  The phrase is bare
+/ columns (every column when empty) of a class a GROUP BY tells apart exactly as q's distinct does: not a float, where the
+/ two differ on the zeros and on what counts as one value.
+.sql.i.distinct:{[schema;a]
+  cl:(exec col from schema) except `i; c:$[()~a; cl!cl; 99h=type a; a; (::)];
+  if[(::)~c; :(::)]; if[(0=count c) or not all -11h=type each value c; :(::)]; if[not all (value c) in cl; :(::)];
+  rows:schema (schema`col)?value c; k:.sql.i.sortable[1b] each rows`logical;
+  if[any (::)~/:k; :(::)]; if[any `float=k[;`class]; :(::)];
+  `ok`by`cols`rows`order!(1b;c;c;update col:key c, iskey:0b from rows;enlist (`;(`min;`i)))};
 / the .sql.i.CLASS row of a logical name whose values q and DuckDB order alike, :: otherwise: an unknown class, char,
 / whose null q orders below every byte, or string, which q sorts as lists (byte by byte, the shorter of two first, as
 / DuckDB orders a VARCHAR: groups is 1b for a by key, which may then be a string; a select's order may not)
@@ -365,7 +397,7 @@
 / byte), nulls first ascending and last descending as q sorts them, and i after it since q's sort is stable; a limit q
 / refuses (a null, a negative count in a pair) stays with q, which raises.  On a table with i, a statement that moves
 / anything orders its rows by i, except a whole push, which has no limit and orders by its keys.  select[-n] is the
-/ LAST n rows: inner is the reversed order an inner query cuts them by, () for any other limit.
+/ LAST n rows: inner is the reversed order an inner query cuts them by, () for any other limit.  Without i, .sql.i.anyrows.
 .sql.i.limit:{[tree;w;g]
   if[g`ok; :`limit`order`inner`moved`clear!(::;g`order;();1b;0b)];
   pick:{[cls;tree]
@@ -377,13 +409,17 @@
     if[(type n) in -5 -6 -7h; :$[null n; none; n=0W; $[count o; (::;o); none]; (n;o)]];
     if[((type n) in 5 6 7h) and 2=count n; if[(not any null n) and (n[0]>=0) and n[1]>0; :(n;o)]];
     none};
-  ok:w[`ix] and (not w`stop) and (0=count w`rest) and (0b~tree 3) and 5<count tree;
-  lim:$[ok; pick[w`cls;tree]; (::;())];
+  ok:(not w`stop) and (0=count w`rest) and (0b~tree 3) and 5<count tree;
+  lim:$[not ok; (::;()); w`ix; pick[w`cls;tree]; .sql.i.anyrows tree];
   clear:not lim~(::;()); moved:clear or 0<count w`terms;
   o:lim[1],$[moved and w`ix; enlist (`;`i); ()];
   rev:(`;`$"<:";`$">:";`$"nulls first";`$"nulls last")!(`$">:";`$">:";`$"<:";`$"nulls last";`$"nulls first");
   inner:$[$[(type lim 0) in -5 -6 -7h; (lim 0)<0; 0b]; {[f;o] @[o;$[3=count o; 0 2; 0];f]}[rev] each o; ()];
   `limit`order`inner`moved`clear!(lim 0;o;inner;moved;clear)};
+/ select[n] over a source that stores no i, so promises no order: (limit;order) as the limit stage picks them.  The first
+/ n rows are then whichever n the source hands over first, to a pull as to this LIMIT; an order, or the last n, would
+/ need the row order q sorts within, and stays with q.
+.sql.i.anyrows:{[tree] n:tree 5; $[6<count tree; (::;()); not (type n) in -5 -6 -7h; (::;()); (null n) or (n<0) or n=0W; (::;()); (n;())]};
 / The assembly.  A whole push groups under the where (the select by g form keeps the rows holding each group's last i,
 / WHERE i IN a grouped subquery) and leaves q nothing.  Otherwise q's tree keeps the terms left, a bare i under the
 / name the phrase gives it, and the limit and order where they stay (:: when nothing is left); the SQL selects the
@@ -536,7 +572,8 @@
   t:.sql.i.cast[cls;c]; ar:(-11h<>type c) and t~(::);
   x:$[-11h=type c; (c;.sql.i.class cls c); ar; $[`scalar=r`shape; .sql.i.arith[cls;c]; (::)]; t 2 1];
   if[x~(::); :(::)]; k:x 1; s:r`sql; h:r`shape; str:`string=k`class; sn:"";
-  if[$[-11h=type c; c in key fr; 0b]; f:fr c; if[null f 0; :(::)]; x:@[x;0;:;f 0]; k[`sentinel]:sn:f 1;
+  dt:`;
+  if[$[-11h=type c; c in key fr; 0b]; f:fr c; if[null f 0; :(::)]; x:@[x;0;:;f 0]; k[`sentinel]:sn:f 1; dt:`$f 2;
     if[k[`logical] in key .sql.i.TEXTNULL; k[`either`nullable]:11b]];
   c:x 0;
   if[not k[`class] in r`classes; :(::)];
@@ -545,14 +582,28 @@
   w:.sql.i.operand[k;h in `range`list;v]; if[w~(::); :(::)];
   if[$[ar; (null w) or (abs w)>(`int16`int32`int64!(0Wh;0Wi;0W)) k`logical; 0b]; :(::)];
   if[$[(count sn) and not sn~"NaN"; any (not null w) and w<="J"$sn; 0b]; :(::)];
+  L:.sql.i.stored[dt;w];
   if[h=`range; if[(2<>count w) or k[`nullable] and any null w; :(::)];
-    :.sql.i.arm[k;strict;0b;c;(s;c),.sql.i.lit each .sql.i.bind each w]];
+    :.sql.i.arm[k;strict;0b;c;(s;c),(L 0b) each .sql.i.bind each w]];
   if[h=`list; :.sql.i.arm[k;strict;$[str; any 0=count each w; any null w];c;
-    $[str and 1=count w; (`$"=";c;.sql.i.lit first w); (s;.sql.i.lit .sql.i.bind w;c)]]];
+    $[str and 1=count w; (`$"=";c;.sql.i.lit first w); (s;L[1b] .sql.i.bind w;c)]]];
   if[k[`nullable] and null w;
     :$[null r`nulllit; (::); (0=count sn) and not 1b~k`either; (r`nulllit;c);
       (`$"is null")=r`nulllit; .sql.i.nullpred[k;c]; (`not;.sql.i.nullpred[k;c])]];
-  .sql.i.arm[k;strict;k[`nullable] and r`keepsnull;c;(s;c;.sql.i.lit .sql.i.bind w)]};
+  .sql.i.arm[k;strict;k[`nullable] and r`keepsnull;c;(s;c;L[0b] .sql.i.bind w)]};
+/ The grain of the DuckDB timestamp types coarser than q's, in nanoseconds.  A term compares such a column as stored
+/ (.sql.translate's raw), so a literal bound as q's own nanoseconds would have DuckDB widen every stored value to meet it:
+/ no row group is pruned, and one value outside q's range fails the whole statement.
+.sql.i.GRAIN:`TIMESTAMP_S`TIMESTAMP_MS`TIMESTAMP!1000000000 1000000 1000;
+/ how a term's literals w ride against a column stored as dt: a function of (list;value), which casts the placeholder to
+/ dt (dt[] for a list) when every one of w is a whole number of dt's grains, the same instant in both types, and leaves it
+/ as it is otherwise, so a literal between two grains compares at nanoseconds as before.  The cast goes by way of
+/ microseconds: DuckDB has none from nanoseconds straight to seconds.
+.sql.i.stored:{[dt;w]
+  g:.sql.i.GRAIN dt; exact:$[null g; 0b; 12h<>abs type w; 0b; all (not null w) and 0=("j"$w) mod g];
+  {[exact;dt;list;v]
+    if[not exact; :.sql.i.lit v]; of:{[list;x] $[list; `$string[x],"[]"; x]}[list];
+    x:(`cast;of `TIMESTAMP;.sql.i.lit v); $[dt=`TIMESTAMP; x; (`cast;of dt;x)]}[exact;dt]};
 / the q heads of int arithmetic, spelt by .sql.i.arith as + - * and unary -
 .sql.i.ARITH:((+);(-);(*);(neg));
 / an int expression as (sql;class row): ONE +, - or * over int columns and non-null int literals, or neg of one,
