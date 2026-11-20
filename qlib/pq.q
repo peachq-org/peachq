@@ -227,65 +227,70 @@
 / (the select seam hands it over, q_funsql.c ques_env); :: when the tree came as data and its names are globals.  A
 / value rides as parse writes a constant (.pq.i.lit).  A one-item list is a constant already and is left alone.
 / A part that reads no column is run here where q itself would run it once: in a where term, a by key, and the phrase
-/ of a select with no by.  q runs a grouped select's phrase once a group, so there only a lookup in data is run early.
+/ of a select with no by, in q's own order (terms left to right, arguments right to left).  q runs a grouped select's
+/ phrase once a group, so there only a lookup in data is run early.
 / 'unpush leaves the select to q, in the frame it was written in: a name with no value, an assignment, a nested select
 / whose table cannot be read here.
+/ Each part is walked to (state;node).  State 2: it reads no column and was run, or is a constant.  1: it reads columns
+/ of its own select's table alone (a nested select's), so it runs only with that select.  0: it reads a column of an
+/ enclosing select, or was left for q.
 / @ignore
 .pq.i.lit:{[v] $[(type v) in -11 11 0h;enlist v;v]}
-/ a name as (constant;node): a column, or a dotted name under one, stays; dep are the columns of the select itself, cl
-/ beyond them the columns of a nested select's own table, which make no part of the outer select vary by row
+/ a name: a column, or a dotted name under one, stays (dep are the columns of the enclosing selects, cl beyond them the
+/ select's own); any other is its value
 / @ignore
 .pq.i.rname:{[cl;dep;env;x]
-  if[null x; :(1b;x)];
+  if[null x; :(2;x)];
   s:"." vs string x; h:`$first s;
-  if[(x in cl) or (h in cl) and not null h; :(not any (x,h) in dep;x)];
+  if[(x in cl) or (h in cl) and not null h; :("j"$not any (x,h) in dep;x)];
   v:$[(null h) or env~(::);@[get;x;{[e] '`unpush}];
     not h in key env;'`unpush;
     1=count s;env h;
     .[{[d;k] d . k};(env h;`$1_s);{[e] '`unpush}]];
-  (1b;.pq.i.lit v)}
-/ A part that reads no column, run: (1b;its value as a literal), or (0b;the part) left for q.  once says q would run it
+  (2;.pq.i.lit v)}
+/ A part that reads no column, run: (2;its value as a literal), or (0;the part) left for q.  once says q would run it
 / once; without it only data applied to literals is run (a dict or a list indexed), which no repeat can tell apart.
 / value, eval and get of text or of a name read the select's columns where q runs them, so they always stay.
 / @ignore
 .pq.i.rfold:{[once;n]
   plain:{[v] t:.Q.c.lty v; $[-11h=t;0b;t in 0 11h;2>count v;1b]};
   a:$[1<count n;n 1;()]; a:$[(0h=type a) and 1=count a;first a;a];
-  if[(any (n 0)~/:(value;eval;get;parse)) and (type a) in -11 -10 0 10 11h; :(0b;n)];
-  if[not once; if[not (all plain each n) and 100h>type first n; :(0b;n)]];
-  .[{[n] (1b;.pq.i.lit eval n)};enlist n;{[n;e] (0b;n)}[n]]}
-/ one expression as (constant;node); a projection's elided argument is no expression, and the branches of a cond are
-/ run only with the whole of it
+  if[(any (n 0)~/:(value;eval;get;parse)) and (type a) in -11 -10 0 10 11h; :(0;n)];
+  if[not once; if[not (all plain each n) and 100h>type first n; :(0;n)]];
+  .[{[n] (2;.pq.i.lit eval n)};enlist n;{[n;e] (0;n)}[n]]}
+/ one expression; a projection's elided argument is no expression, and the branches of a cond are run only with the
+/ whole of it
 / @ignore
 .pq.i.rs:{[cl;dep;env;once;x]
   t:.Q.c.lty x;
   if[-11h=t; :.pq.i.rname[cl;dep;env;x]];
-  if[(not t in 0 11h) or 2>count x; :(1b;x)];
+  if[(not t in 0 11h) or 2>count x; :(2;x)];
   if[any (x 0)~/:(:;::); '`unpush];
   if[(any (x 0)~/:(?;!)) and (count x) in 5 6 7; :.pq.i.rsub[cl;dep;env;once;x]];
-  i:where 101h<>type each x; r:.z.s[cl;dep;env;once and not (($)~x 0) and 3<count x] each x i;
+  i:where 101h<>type each x; r:reverse .z.s[cl;dep;env;once and not (($)~x 0) and 3<count x] each reverse x i;
   n:$[11h=t;r[;1];@[x;i;:;r[;1]]];
   if[not (.Q.c.lty n) in 0 11h; '`unpush];
-  $[all r[;0];.pq.i.rfold[once;n];(0b;n)]}
-/ A select inside the select, (?;table;where;by;phrase;...) as parse writes its slots: its own table's columns are read
-/ before the outer ones, and when it reads none of the outer ones it is run as any other such part.
+  $[2=min r[;0];.pq.i.rfold[once;n];(min r[;0];n)]}
+/ A select inside the select, (?;table;where;by;phrase;...) as parse writes its slots.  Its table is read first, so its
+/ own columns are known and are read before the enclosing ones; a select that reads none of the enclosing ones is run
+/ whole, its own columns in sight, where q would run it once.
 / @ignore
 .pq.i.rsub:{[cl;dep;env;once;x]
-  src:.pq.i.rs[cl;dep;env;once] x 1; if[not src 0; '`unpush];
+  o:reverse .pq.i.rs[cl;dep;env;once] each reverse 5_x;
+  src:.pq.i.rs[cl;dep;env;once] x 1; if[2>src 0; '`unpush];
   t:@[eval;src 1;{[e] '`unpush}]; if[not .Q.qt t; '`unpush];
-  ic:(cols t),`i; b:x 3; f:.pq.i.rs[ic,cl;dep except ic;env]; g:f once and 99h<>type b;
-  each_:{[f;v] r:f each v; (all r[;0];r[;1])};
+  ic:(cols t),`i; b:x 3; f:.pq.i.rs[ic,cl;cl except ic;env]; g:f once and 99h<>type b;
+  each_:{[f;v] r:f each v; ($[count v;min r[;0];2];r[;1])};
   w:x 2; a:x 4;
-  w:$[()~w;(1b;w);(0h=type w) and (1=count w) and 0h=type first w;{[r] (r 0;enlist r 1)} each_[f once] first w;'`unpush];
-  b:$[99h=type b;{[b;r] (r 0;(key b)!r 1)}[b] each_[f once] value b;(b~()) or -1h=type b;(1b;b);'`unpush];
+  w:$[()~w;(2;w);(0h=type w) and (1=count w) and 0h=type first w;{[r] (r 0;enlist r 1)} each_[f once] first w;'`unpush];
+  b:$[99h=type b;{[b;r] (r 0;(key b)!r 1)}[b] each_[f once] value b;(b~()) or -1h=type b;(2;b);'`unpush];
   a:$[99h=type a;{[a;r] (r 0;(key a)!r 1)}[a] each_[g] value a;
-    ()~a;(1b;a);
-    11h=type a;$[all a in ic;(1b;a);'`unpush];
+    ()~a;(2;a);
+    11h=type a;$[all a in ic;(1;a);'`unpush];
     (0h=type a) and 1=count a;{[r] (r 0;enlist r 1)} g first a;
     '`unpush];
-  o:.pq.i.rs[cl;dep;env;once] each 5_x;
   n:(x 0;src 1;w 1;b 1;a 1),o[;1];
-  $[once and all (w 0;b 0;a 0),o[;0];.pq.i.rfold[1b;n];(0b;n)]}
+  $[once and 0<min (w 0;b 0;a 0),o[;0];.pq.i.rfold[1b;n];(0;n)]}
 / @ignore
 .pq.i.resolve:{[cl;env;tree]
   cl:cl,`i; f:{[cl;env;once;x] last .pq.i.rs[cl;cl;env;once;x]}[cl;env];
