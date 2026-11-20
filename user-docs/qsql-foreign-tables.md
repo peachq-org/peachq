@@ -14,11 +14,13 @@ same table always reads in the same shape, whatever its rows hold.
 q)select from `:pq:duckdb:main:trades/ where date=2024.01.02            / a DuckDB table or view
 q)select px, sym from `:data/day.parquet where sz>100                    / one parquet file
 q)select from `$":data/depth/**/*.parquet" where region like "EU"       / a glob; DuckDB finds hive partitions
+q).parquet.read[`:data/a.parquet`:data/b.parquet;();()]                  / an explicit list, read in the order given
 q).parquet.read[`$":data/depth/**/*.parquet"; (enlist `hive_partitioning)!enlist 1b;
     parse "select last px by sym from t where sym=`A, date within 2024.01.01 2024.01.31"]
 ```
 
-To query the same files many times, make a DuckDB view once. Its schema is read once and kept:
+peachq keeps what it learns about a local file (its columns and types) while the file is unchanged, so a repeated
+query sends DuckDB one statement. To give a set of files a name, make a DuckDB view once:
 
 ```q
 q)c:.duckdb.main[]
@@ -47,7 +49,7 @@ q)select max px by sym from depth where date=2024.01.02
 | BLOB | `X` | |
 | BIT | `B` | |
 | LIST of any of these | a list column | |
-| HUGEINT, UBIGINT, UHUGEINT, BIGNUM, INTERVAL, TIME WITH TIME ZONE, STRUCT, MAP, UNION, JSON, GEOMETRY | hidden | not in `cols`, `meta` or `select from` |
+| HUGEINT, UBIGINT, UHUGEINT, BIGNUM, INTERVAL, TIME WITH TIME ZONE, STRUCT, MAP, UNION, JSON, GEOMETRY, untyped NULL | hidden | not in `cols`, `meta` or `select from` |
 
 `.duckdb.hidden[c;`t]` and `.parquet.hidden[file;opts]` list the hidden columns. SQL still reaches them, so cast
 one into a type q holds when you need it:
@@ -66,12 +68,14 @@ q).duckdb.exec[c;"SELECT sym, CAST(notional AS DOUBLE) AS notional FROM trades"]
 4. **Text is a string that also answers to symbols.** On a foreign table, `sym=`A`, `sym in `A`B`, `sym="A"` and
    `sym like "A*"` all work on a string column, and `` `$sym `` gives you symbols in the result.
 5. **Row order is not promised.** `i`, `first`, `last` and `select[n]` answer from whatever order the rows arrive
-   in, as a partitioned kdb database does. peachq uses a row number when DuckDB has one, but do not rely on it.
-6. **A query answers as if the whole table were read into q first and the qSQL run there.** peachq runs as much of
-   it inside DuckDB as gives the same answer, so only the rows you need come back. A part DuckDB cannot run the same
-   way is run by q, on the rows DuckDB returned.
+   in, as a partitioned kdb database does. peachq uses a row number when DuckDB has one (a table's `rowid`, a file's
+   row number, the order of an explicit file list), but do not rely on it; a view has none.
+6. **A query answers as if the columns it reads were read into q first and the qSQL run there.** peachq runs as much
+   of it inside DuckDB as gives the same answer, so only the columns and rows you need come back. A part DuckDB cannot
+   run the same way is run by q, on the rows DuckDB returned.
 7. **Round trips are exact through the pair.** `.duckdb.getx` answers `(data;schema)`, and `.duckdb.set` of that
-   pair writes every column back exactly, hidden types and decimals included.
+   pair writes every column and value back exactly, hidden types and decimals included. The copy is a q table, so it
+   also carries q's row index, a column `i`.
 
 ## Gotchas
 
@@ -87,19 +91,20 @@ Types and values
   DECIMAL; use the `.duckdb.getx` pair for an exact copy.
 - **TIME is a timespan, not a `t`.** It shows as `0D09:30:00.123456000`; `date+time` gives a timestamp.
 - **A NULL boolean is `0b`.** q booleans have no null, so `where not flag` also matches rows whose flag was NULL.
-- **Out-of-range dates and timestamps raise an error.** q timestamps run from 1707 to 2262. A row outside that range
-  makes the read fail with `'duckdb` (`.duckdb.err[]` names the column) rather than come back as a null.
+- **Out-of-range dates and timestamps raise an error.** q timestamps run from 1707 to 2262. A select that reads a
+  value outside that range fails with `'duckdb` (`.duckdb.err[]` names the column) rather than return a null. A select
+  that does not read that column answers, and a filter DuckDB runs can drop the row before it is read.
 - **Time zones are dropped.** TIMESTAMP WITH TIME ZONE reads as its UTC instant, whatever the DuckDB session's
   `TimeZone` setting is.
 
 Columns
 
 - **Hidden columns are silent.** A HUGEINT or STRUCT column simply is not there. Check `.duckdb.hidden` or
-  `.parquet.hidden` when a column you expected is missing.
+  `.parquet.hidden` when a column you expected is missing. A table whose every column is hidden reads as a table with
+  no columns. DuckDB itself writes a HUGEINT to parquet as a DOUBLE, so in a file it reads as a float.
 - **Hive partition columns come last** in `cols` and `meta`, after the file's own columns, and DuckDB guesses their
   type from the directory names (`date=2024-01-02` is a DATE, `region=EU` a VARCHAR).
 - **A column named `i`** cannot be written to DuckDB: `i` is q's row index.
-- **A foreign column named like an internal companion** (`v_q_isnull` next to a column `v`) is refused.
 
 Queries
 
@@ -107,27 +112,34 @@ Queries
   ``count select from `:pq:duckdb:main:t/`` or bind the table to a global first.
 - **Order-dependent answers can change.** `first`, `last`, `i`, `deltas` and `select[n]` depend on row order, which a
   foreign table does not promise. Sort or group on a real column when the order matters.
-- **Filter on columns DuckDB can use first.** Equality, `in` and `within` on dates, symbols/strings and integers run
-  inside DuckDB and let it skip whole files and row groups. Float comparisons (`px>100`, `px within 1 2`) are run by
-  q after the read, because q compares floats with a tolerance.
-- **`like` patterns with `?` or `[..]`** may run in q rather than DuckDB. Patterns made of plain characters and `*`
-  always run in DuckDB.
-- **The string leniency is for foreign tables only.** On a q table, `sym=`A` against a string column is a `'type`
-  error, as in kdb.
-- **Large tables need a filter.** Above `.duckdb.maxrows` rows, a select with no filter DuckDB can run is `'limit`
-  before anything is read.
+- **Filter on columns DuckDB can use first.** Equality, `in` and `within` on dates, timestamps, symbols/strings and
+  integers run inside DuckDB and let it skip whole files and row groups. A float comparison (`px>100`) narrows the
+  rows in DuckDB and is finished by q, because q compares floats with a tolerance; `px within 1 2` is run by q.
+- **`like` patterns.** Plain characters with a leading and/or trailing `*` run in DuckDB. Any other pattern (`?`,
+  `[..]`, a `*` in the middle) is narrowed in DuckDB by its literal prefix and finished by q.
+- **Grouping by an expression** (`by a mod 2`) is run by q on the two columns DuckDB returns, so it reads every row;
+  grouping by a column runs in DuckDB.
+- **The string leniency covers comparisons, not every verb.** `=`, `<>`, `<`, `>`, `<=`, `>=`, `in`, `within` and
+  `like` accept a symbol on a string column, from a literal, a variable or an expression. `update` and `delete` do
+  not. On a q table, `sym=`A` against a string column is a `'type` error, as in kdb.
+- **`.duckdb.maxrows`** guards only q tables stored in DuckDB. A foreign table or a parquet file is never refused for
+  its size, so a select with no filter DuckDB can run reads every row it names.
 - **See what ran.** `.duckdb.sqllog` lists every statement sent to DuckDB, and `.duckdb.lastpush` the translation of
-  the last select. A `SELECT *` there means q did the work.
+  the last select (`::` when nothing moved into DuckDB, so q did the work).
+- **Session settings change answers.** `SET default_collation='nocase'` on the DuckDB connection makes some pushed
+  text comparisons and groupings ignore case where q does not. Leave the collation alone.
 
 SQL and writing
 
 - **SQL answers keep DuckDB's own view.** `.duckdb.exec` and `s)` lines can show extra columns such as
   `qty_q_notnull` or `name_q_isnull`, which mark exactly where a NULL and a q null differ. qSQL never shows them.
-- **Keyed tables.** `.parquet.write` refuses a keyed table; write `0!t`. An `upsert` into a keyed DuckDB table
-  appends rows rather than replacing them.
+- **Keyed tables.** `.parquet.write` refuses a keyed table; write `0!t`. `upsert` into a keyed table stored in
+  DuckDB does not replace rows by key: a keyed table q stored gains duplicate keys, and a table with a DuckDB
+  PRIMARY KEY refuses the upsert.
 - **An empty table with a general-list column** (`0#([] s:("ab";"cd"))`) cannot be written, because it has no type.
   q has no empty string column to give it one, so create the table with SQL (`CREATE TABLE t (s VARCHAR)`) instead.
-- **A parquet file peachq wrote and another tool rewrote** keeps the `q_schema` entry that says how to read it, and
-  that entry may no longer match the file's columns.
+- **A parquet file peachq wrote and another tool rewrote** keeps the `q_schema` entry that says how to read it. peachq
+  uses it for column types only, never trusts its values, and reads a column the entry does not describe, or an entry
+  it cannot understand, as it would read a foreign file.
 
 See also [Storing tables in DuckDB](sql-duckdb-storage.md) and [Parquet](lib/parquet.md).
