@@ -539,7 +539,7 @@
 .kafka.get:{[token;topic] .kafka.read[token;topic]};
 / @ignore
 .kafka.qsql:{[token;columns;tree]
-  resolved:@[.pq.i.resolveTree[columns];tree;{[err] ::}];
+  resolved:@[.pq.i.resolveSeam[columns];tree;{[err] ::}];
   if[resolved~(::); :(::)];
   rows:.kafka.read[token;(resolved 0;.kafka.i.bounds resolved 1)];
   (?) . (enlist rows),1_resolved};
