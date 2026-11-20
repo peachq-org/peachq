@@ -174,16 +174,17 @@
 / THE foreign view of a source, for a pull and for a push: rel its FROM text, sch its columns ([] col; dtype) as DuckDB declares
 / them, order the expressions its rows sort by (() for none).  Answers sel, the SELECT list; cols and t, what q shows and its
 / meta chars; schema, the rows .duckdb.exec's triple needs beside the statement; hidden, the columns left out; push, the
-/ schema .sql.translate reads (empty when a shown name is one the pushed statement uses itself) and src, the SELECT list of
-/ the relation that statement reads: sel, and each stored column a where term compares as it stands under its raw name.
+/ schema .sql.translate reads (empty when a shown name is one the pushed statement uses itself) and src, the SELECT items
+/ of the relation that statement reads, by name: each shown column, and each stored column a where term compares as it
+/ stands under its raw name.
 / @ignore
 .duckdb.i.fview:{[rel;sch;order]
   tt:.duckdb.types[]; ty:exec dtype!flip (logical;ktype) from tt where canon;
   qn:.duckdb.i.quote each string sch`col;
   r:.duckdb.i.fcol[ty]'[string sch`col;sch`dtype;qn;0];
   j:where 0=count each r; i:where 0<count each r; s:i where 0<count each r[i;2];
-  sel:", " sv {[e;q] e[0]," AS ",q}'[r i;qn i];
-  (`rel`order`sel`cols`t`schema`hidden!(rel;order;sel;sch[`col] i;"c"$r[i;1];
+  sel:{[e;q] e[0]," AS ",q}'[r i;qn i];
+  (`rel`order`sel`cols`t`schema`hidden!(rel;order;", " sv sel;sch[`col] i;"c"$r[i;1];
     ([] col:sch[`col] s; dtype:r[s;2]; logical:r[s;3]);([] col:sch[`col] j; dtype:sch[`dtype] j))),
     .duckdb.i.fpush[exec ktype!logical from tt where needs<>`dtype;sel;sch[`col] i;qn i;r i;order]}
 / The push half of a foreign view (.duckdb.i.fview): a column's logical is the one q writes for the type q shows (ql), so the
@@ -195,9 +196,9 @@
   p:([] col:cl; dtype:{[x;y] $[y;x 4;""]}'[r;one]; logical:{[ql;x;y] $[count x 2;x 3;not y;`;x 6;ql x 1;`]}[ql]'[r;one]; iskey:0b;
     raw:?[bare;al;cl]; sentinel:{[x] $[x in key .duckdb.i.FMIN;.duckdb.i.FMIN x;x in `float32`float64;"NaN";""]} each lg);
   if[count order; p,:([] col:1#`i; dtype:1#enlist "BIGINT"; logical:1#`int64; iskey:1#0b; raw:1#`; sentinel:1#enlist "")];
-  if[any (lower `i,al where bare) in lower cl; :`push`src!(0#p;"")];
+  if[any (lower `i,al where bare) in lower cl; :`push`src!(0#p;()!())];
   w:where bare;
-  `push`src!(p;", " sv (enlist sel),{[q;l;a] q,$[l=`utf8;.duckdb.i.FBYTES;""]," AS ",.duckdb.i.quote string a}'[qn w;lg w;al w])}
+  `push`src!(p;(cl,al w)!sel,{[q;l;a] q,$[l=`utf8;.duckdb.i.FBYTES;""]," AS ",.duckdb.i.quote string a}'[qn w;lg w;al w])}
 / @ignore
 .duckdb.i.foreign:{[c;t] 0=count .duckdb.i.schema[c;t]}
 / @ignore
@@ -317,25 +318,28 @@
 / @ignore
 .duckdb.i.big:{[c;t] .duckdb.maxrows<.[.duckdb.i.rows;(c;t);0N]}
 / The part of the select rt that .sql.translate moves, run over the source rt 0 names with the schema sc, q running the
-/ rest; :: when nothing moves.  with is the text ahead of the statement that defines that source ("" for a table).
+/ rest; :: when nothing moves.  with answers the text ahead of the statement that defines that source, given its SQL tree.
 / @ignore
 .duckdb.i.run:{[c;rt;sc;with;big]
   r:.sql.translate[((?);rt 0;$[count rt 1;enlist rt 1;()]),2_rt;sc];
   if[(0=count r[0;2]) and big; :(::)];
   if[(not (::)~r 3) and all ((0=count r[0;2]);(::)~r[0;5];0=count r[0;6]); :(::)];
-  t:.duckdb.exec[c;(with,.sql.render r 0;r 1;select from r[2] where not null logical)]; .duckdb.lastpush::r;
+  t:.duckdb.exec[c;((with r 0),.sql.render r 0;r 1;select from r[2] where not null logical)]; .duckdb.lastpush::r;
   / a by with no sort order answers a key marked s#, as q's own select does; a key s# cannot verify stays unmarked
   if[(::)~r 3; :$[(99h=type rt 2) and (6>count rt) and 99h=type t; @[`s#;t;t]; t]];
   (?) . (t;$[count r[3;2]; r[3;2;0]; ()]),3_r 3}
 / A select over a foreign view v, pushed: its statement reads the view as one relation, defined ahead of it, in which a
 / where term finds each stored column, the select list each converted one, and i the row number the pull orders by.  The
-/ tree is the one the pull runs (.duckdb.i.ftext).
+/ relation lists only what the statement names (a symbol anywhere in its tree), so no other column's conversion is bound.
+/ The tree is the one the pull runs (.duckdb.i.ftext).
 / @ignore
 .duckdb.i.fpushed:{[c;v;rt;big]
   if[0=count v`push; :(::)];
   go:{[c;v;rt;big;o]
-    i:$[0=count o;"";", ",$[1=count o;first o;"ROW(",(", " sv o),")"]," AS i"];
-    w:"WITH \"_q_src\" AS NOT MATERIALIZED (SELECT ",v[`src],i," FROM ",v[`rel],") ";
+    src:v[`src],$[count o;(enlist `i)!enlist $[1=count o;first o;"ROW(",(", " sv o),")"]," AS i";()!()];
+    w:{[v;src;tree]
+      n:{$[99h=type x;raze .z.s each (key x;value x);0h=type x;raze .z.s each x;11h=abs type x;(),x;`$()]} tree;
+      "WITH \"_q_src\" AS NOT MATERIALIZED (SELECT ",(", " sv $[count s:src (key src) inter n;s;enlist "1 AS \"_q_1\""])," FROM ",v[`rel],") "}[v;src];
     .duckdb.i.run[c;@[.duckdb.i.ftext[v;rt];0;:;`$"_q_src"];$[count o;v`push;select from v[`push] where col<>`i];w;big]};
   .[go;(c;v;rt;big;v`order);{[go;c;v;rt;big;e] if[not .duckdb.i.norowid[c;v]; 'e]; go[c;v;rt;big;()]}[go;c;v;rt;big]]}
 / A select over a foreign view v that is no bound table (a parquet file): pushed, or run by q on the rows pulled.
@@ -347,7 +351,7 @@
 / @ignore
 .duckdb.i.pushed:{[c;rt]
   big:.duckdb.i.big[c;rt 0];
-  $[count sc:.duckdb.i.schema[c;rt 0];.duckdb.i.run[c;rt;sc;"";big];.duckdb.i.fpushed[c;.duckdb.i.ftable[c;rt 0];rt;big]]}
+  $[count sc:.duckdb.i.schema[c;rt 0];.duckdb.i.run[c;rt;sc;{[tree] ""};big];.duckdb.i.fpushed[c;.duckdb.i.ftable[c;rt 0];rt;big]]}
 / @ignore
 .duckdb.i.push:{[c;rt]
   .duckdb.lastpush::(::);
