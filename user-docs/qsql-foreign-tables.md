@@ -45,7 +45,7 @@ rows you want first, `ref:select from depth where ...`, then key or join the q t
 | VARCHAR | string (`C`) | never a symbol; see below |
 | DECIMAL | `f` | a float: up to about 15 significant digits are exact |
 | DATE | `d` | |
-| TIMESTAMP, `_S`, `_MS`, `_NS` | `p` | |
+| TIMESTAMP, `_S`, `_MS`, `_NS` | `p` | outside q's range reads as `0Wp` / `-0Wp` |
 | TIMESTAMP WITH TIME ZONE | `p` | the UTC instant; the offset is not kept |
 | TIME, TIME_NS | `n` | a timespan since midnight, so microseconds are kept |
 | UUID | `g` | |
@@ -64,13 +64,36 @@ one into a type q holds when you need it:
 q).duckdb.exec[c;"SELECT sym, CAST(notional AS DOUBLE) AS notional FROM trades"]
 ```
 
+To see everything that does not read exactly, ask the inspector. `.duckdb.inspect[h;`t]` and
+`.parquet.inspect[file;opts]` answer one row per column and issue, counted by DuckDB in one statement, so no row
+comes back to q:
+
+```q
+q).duckdb.inspect[c;`inst]
+col      dtype       qtype issue   rows
+---------------------------------------
+notional "HUGEINT"         hidden
+sym      "VARCHAR"   C     merged  2
+qty      "INTEGER"   i     minimum 1
+valid_to "TIMESTAMP" p     range   2
+```
+
+The issues are `hidden` (no q type), `range` (a timestamp outside q's range, read as `0Wp` or `-0Wp`), `minimum`
+(an integer type's lowest value, read as null), `merged` (NULL beside `''`, NaN, the zero UUID or an empty BLOB,
+which read as one value), `zero` (a NULL boolean or byte, read as `0b` or `0x00`), `digits` (a DECIMAL wider than
+15 digits whose value a float does not hold) and `offset` (a TIMESTAMP WITH TIME ZONE). `rows` counts the rows each
+issue touches. A table or file q wrote answers an empty table.
+
 ## The rules
 
 1. **One q type per DuckDB type**, as in the table above, applied the same way on every path.
 2. **Nulls merge.** A SQL NULL and a value that is a q null in that type (the integer minimum, NaN) both read as the
    q null. A NULL string reads as `""`, a NULL boolean as `0b`, a NULL byte as `0x00`, a NULL list as an empty list.
-   There are no extra columns. When you need to tell a NULL from a real minimum, ask DuckDB in SQL.
-3. **Columns q cannot hold are hidden**, so `cols`, `meta` and `select from` always work.
+   There are no extra columns. When you need to tell a NULL from a real minimum, ask DuckDB in SQL, or count where
+   it happens with the inspector.
+3. **Columns q cannot hold are hidden**, so `cols`, `meta` and `select from` always work. A timestamp q cannot hold
+   reads as the infinity on its side, so a select over it answers, and a filter DuckDB runs keeps the rows q would.
+   `.duckdb.inspect` and `.parquet.inspect` say where any of this happens.
 4. **Text is a string that also answers to symbols.** On a foreign table, `` sym=`A ``, `` sym in `A`B `` and
    `sym like "A*"` work on a string column, where q itself would signal `'type` for the symbol, and `` `$sym ``
    gives you symbols in the result. A string literal means what it means in q: `sym="A"` compares character by
@@ -99,9 +122,16 @@ Types and values
   DECIMAL; use the `.duckdb.getx` pair for an exact copy.
 - **TIME is a timespan, not a `t`.** It shows as `0D09:30:00.123456000`; `date+time` gives a timestamp.
 - **A NULL boolean is `0b`.** q booleans have no null, so `where not flag` also matches rows whose flag was NULL.
-- **Out-of-range dates and timestamps raise an error.** q timestamps run from 1707 to 2262. A select that reads a
-  value outside that range fails with `'duckdb` (`.duckdb.err[]` names the column) rather than return a null. A select
-  that does not read that column answers, and a filter DuckDB runs can drop the row before it is read.
+- **Out-of-range timestamps are infinities.** q timestamps read from DuckDB run from 1707 to 2262. A later one, such
+  as the `9999-12-31` that marks a current row, reads as `0Wp`, an earlier one as `-0Wp`, so
+  `select from inst where valid_to>.z.p` finds the current rows and `max valid_to` is `0Wp`. The order is kept,
+  so a filter DuckDB runs keeps exactly the rows q would. q's timestamp infinities are not IEEE infinities: on such
+  a row `valid_to-valid_from` is a huge, meaningless timespan, not an infinity, so check a table with
+  `.duckdb.inspect` before doing arithmetic on its timestamps. A comparison with `0Wp`, or with a timestamp past
+  2262, is run by q.
+- **Out-of-range dates raise an error.** Only DuckDB's very earliest dates are past what a q date holds. A select
+  that reads one fails with `'duckdb` (`.duckdb.err[]` names the column); a select that does not read that column
+  answers.
 - **Time zones are dropped.** TIMESTAMP WITH TIME ZONE reads as its UTC instant, whatever the DuckDB session's
   `TimeZone` setting is.
 
