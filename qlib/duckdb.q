@@ -171,21 +171,32 @@
   sym:lg=`categorical; cast:lg in key .duckdb.i.FCAST;
   (w;$[cast;ty[`$.duckdb.i.FCAST lg] 1;ty[b] 1];$[sym;"VARCHAR";""];$[sym;`symbol;`];
     $[cast;.duckdb.i.FCAST lg;sym;"VARCHAR";lg=`timestamptz;"TIMESTAMP";string b];lg;not lg in `timeus`timens)}
+/ The meta char of a column q wrote as logical lg over the DuckDB type dt, level by level through a list; " " when q writes
+/ no such pair (tt is .duckdb.types[]), and the column then reads by its DuckDB type alone.
+/ @ignore
+.duckdb.i.fown:{[tt;dt;lg]
+  if[null lg; :" "];
+  if["]"=last dt; :$[(s:string lg) like "list(*)";upper .z.s[tt;(last where dt="[")#dt;`$5_-1_s];" "]];
+  k:exec ktype from tt where dtype=`$first "(" vs dt, logical=lg; $[count k;first k;" "]}
 / THE foreign view of a source, for a pull and for a push: rel its FROM text, sch its columns ([] col; dtype) as DuckDB declares
 / them, order the expressions its rows sort by (() for none).  Answers sel, the SELECT list; cols and t, what q shows and its
-/ meta chars; schema, the rows .duckdb.exec's triple needs beside the statement; hidden, the columns left out; push, the
-/ schema .sql.translate reads (empty when a shown name is one the pushed statement uses itself) and src, the SELECT items
-/ of the relation that statement reads, by name: each shown column, and each stored column a where term compares as it
-/ stands under its raw name.
+/ meta chars; schema, the rows .duckdb.exec's triple needs beside the statement; hidden, the columns left out; text, the
+/ string columns a literal compares with as text; push, the schema .sql.translate reads (empty when a shown name is one the
+/ pushed statement uses itself) and src, the SELECT items of the relation that statement reads, by name: each shown column,
+/ and each stored column a where term compares as it stands under its raw name.
+/ sch may say what q wrote (a parquet file's q_schema) in one more column, logical: a column whose logical q writes over
+/ its DuckDB type is q's own, read as stored with NULL its only null; any other column reads as foreign.
 / @ignore
 .duckdb.i.fview:{[rel;sch;order]
-  tt:.duckdb.types[]; ty:exec dtype!flip (logical;ktype) from tt where canon;
-  qn:.duckdb.i.quote each string sch`col;
-  r:.duckdb.i.fcol[ty]'[string sch`col;sch`dtype;qn;0];
+  tt:.duckdb.types[]; ty:exec dtype!flip (logical;ktype) from tt where canon; n:count sch;
+  qn:.duckdb.i.quote each string sch`col; lg:$[`logical in cols sch;sch`logical;n#`];
+  kt:.duckdb.i.fown[tt]'[sch`dtype;lg]; own:kt<>" ";
+  r:{[ty;nm;dt;x;k;l] $[k=" ";.duckdb.i.fcol[ty;nm;dt;x;0];(x;k;dt;l;dt;`;1b)]}[ty]'[string sch`col;sch`dtype;qn;kt;lg];
   j:where 0=count each r; i:where 0<count each r; s:i where 0<count each r[i;2];
   sel:{[e;q] e[0]," AS ",q}'[r i;qn i];
-  (`rel`order`sel`cols`t`schema`hidden!(rel;order;", " sv sel;sch[`col] i;"c"$r[i;1];
-    ([] col:sch[`col] s; dtype:r[s;2]; logical:r[s;3]);([] col:sch[`col] j; dtype:sch[`dtype] j))),
+  (`rel`order`sel`cols`t`schema`hidden`text!(rel;order;", " sv sel;sch[`col] i;"c"$r[i;1];
+    ([] col:sch[`col] s; dtype:r[s;2]; logical:r[s;3]);([] col:sch[`col] j; dtype:sch[`dtype] j);
+    sch[`col] i where ("C"=r[i;1]) and not own i)),
     .duckdb.i.fpush[exec ktype!logical from tt where needs<>`dtype;sel;sch[`col] i;qn i;r i;order]}
 / The push half of a foreign view (.duckdb.i.fview): a column's logical is the one q writes for the type q shows (ql), so the
 / translator classes it as q's own column of that type; its sentinel is the stored value that reads as the q null.
@@ -217,7 +228,7 @@
 
 / A select tree over a foreign view, its string columns compared as text (.sql.i.either).
 / @ignore
-.duckdb.i.ftext:{[v;rt] .sql.i.either[v[`cols] where "C"=v`t;rt]}
+.duckdb.i.ftext:{[v;rt] $[count v`text;.sql.i.either[v`text;rt];rt]}
 
 / @ignore
 .duckdb.i.read1:{[url]
