@@ -30,10 +30,12 @@
  * same statement as the column rows and read by the same SELECT; no column of
  * its own yet, so when it was written and by whom are not recorded. */
 #define QD_SCHEMA_TABLE_ROW "table"
+#define QD_SCHEMA_MARKED " AND col = '' AND logical = '" QD_SCHEMA_TABLE_ROW "'"
 
 #define QD_SCHEMA_REF "\"main\".\"" QD_SCHEMA_TBL "\""   /* pinned to DuckDB's default schema, whatever the session's */
 
 static void qd_spell_canon(const qd_colmap_t* cm, qd_buf* b);
+static bool qd_schema_text(ray_t* colv, int64_t i, const char** p, int64_t* n);
 
 /* ---- THE table-name grammar (docs/duckdb-api.md, Table names): a symbol with NO double quote is one exact
  * name, dots and all; a symbol with one is SQL identifier syntax.  Every spelling a door needs — the SQL text,
@@ -198,8 +200,9 @@ const char* q_duckdb_schema_text_cell(ray_t* tbl, int64_t col, int64_t row, size
 }
 
 /* Fetch a table's descriptor rows into *out (owned, q_duckdb_schema_desc_free); ANY sidecar trouble degrades to 0 rows. */
-int64_t q_duckdb_schema_fetch_desc(int slot, const qd_name_t* nm, qd_desc_t** out) {
+int64_t q_duckdb_schema_fetch_desc(int slot, const qd_name_t* nm, qd_desc_t** out, bool* marked) {
     *out = NULL;
+    *marked = false;
     qd_buf b = {0};
     q_duckdb_puts(&b, "SELECT col, logical, iskey FROM " QD_SCHEMA_REF " WHERE tbl = ");
     q_duckdb_put_strlit(&b, nm->key, strlen(nm->key));
@@ -219,7 +222,10 @@ int64_t q_duckdb_schema_fetch_desc(int slot, const qd_name_t* nm, qd_desc_t** ou
         size_t cl = 0, ll = 0;
         const char* cn = q_duckdb_schema_text_cell(rows, 0, i, &cl);
         const char* ln = q_duckdb_schema_text_cell(rows, 1, i, &ll);
-        if (!cl) continue;   /* the table's own row; no column has that name (DuckDB refuses a zero-length identifier) */
+        if (!cl) {   /* the table's own row; no column has that name (DuckDB refuses a zero-length identifier) */
+            *marked = *marked || (ln && ll == strlen(QD_SCHEMA_TABLE_ROW) && memcmp(ln, QD_SCHEMA_TABLE_ROW, ll) == 0);
+            continue;
+        }
         if (!qd_desc_set(&d[k], cn ? cn : "", cl, "", 0)) {
             q_duckdb_schema_desc_free(d, k);
             d = NULL;
@@ -246,8 +252,9 @@ static int64_t qd_i64_cell(ray_t* tbl, int64_t col, int64_t row) {
 }
 
 /* The bound table's ONE statement: every column in catalog order with its sidecar row beside it when the sidecar
- * stands — the cells coalesced, since a NULL would grow a companion column — whether the sidecar names the table at
- * all, and its row count, scanned only when it does (the false EXISTS spares a Duck-origin view its scan).  The
+ * stands — the cells coalesced, since a NULL would grow a companion column — whether the sidecar marks the table as
+ * q's (its table row; column rows alone declare a foreign table's columns), and its row count, scanned only when it
+ * is (the false EXISTS spares a Duck-origin view its scan).  The
  * sidecar's rows become the read path's descriptors; each column's map is the catalog type refined by its row, the
  * get law, so meta and the push read the same type. */
 ray_t* q_duckdb_schema_bound_read(int slot, const qd_name_t* nm, bool sidecar, qd_bound_t* out) {
@@ -259,11 +266,11 @@ ray_t* q_duckdb_schema_bound_read(int slot, const qd_name_t* nm, bool sidecar, q
                           "coalesce(s.iskey, false) AS iskey, s.col IS NOT NULL AS has, EXISTS (SELECT 1 FROM "
                           QD_SCHEMA_REF " WHERE tbl = ");
         q_duckdb_put_strlit(&b, nm->key, strlen(nm->key));
-        q_duckdb_puts(&b, ") AS q, (SELECT count(*) FROM ");
+        q_duckdb_puts(&b, QD_SCHEMA_MARKED ") AS q, (SELECT count(*) FROM ");
         q_duckdb_putn(&b, QD_TEXT(name.p), name.len);
         q_duckdb_puts(&b, " WHERE EXISTS (SELECT 1 FROM " QD_SCHEMA_REF " WHERE tbl = ");
         q_duckdb_put_strlit(&b, nm->key, strlen(nm->key));
-        q_duckdb_puts(&b, ")) AS n FROM pragma_table_info(");
+        q_duckdb_puts(&b, QD_SCHEMA_MARKED ")) AS n FROM pragma_table_info(");
         q_duckdb_put_strlit(&b, QD_TEXT(name.p), name.len);
         q_duckdb_puts(&b, ") c LEFT JOIN " QD_SCHEMA_REF " s ON s.tbl = ");
         q_duckdb_put_strlit(&b, nm->key, strlen(nm->key));
@@ -389,7 +396,7 @@ ray_t* q_duckdb_schema_bound_meta(const qd_bound_t* b) {
 }
 
 /* the push's schema (col dtype logical iskey), the index column among them as the int64 it reads as, () for a table
- * the sidecar does not name — nothing to push on; with info, every table's rows and the meta char beside them */
+ * the sidecar does not mark as q's — nothing to push on; with info, every table's rows and the meta char beside them */
 ray_t* q_duckdb_schema_bound_schema(const qd_bound_t* b, bool info) {
     if (!info && !b->q) return ray_list_new(0);
     static const char* const NAMES[] = { "col", "dtype", "logical", "iskey", "t" };
@@ -406,6 +413,23 @@ ray_t* q_duckdb_schema_bound_schema(const qd_bound_t* b, bool info) {
     ray_t* cols[5] = { qd_bound_syms(b, QD_BC_NAME, true), d, qd_bound_syms(b, info ? QD_BC_MARKED : QD_BC_LOGICAL, true), k,
                        info ? qd_bound_tchars(b, true) : NULL };
     return q_duckdb_schema_table(cols, NAMES, info ? 5 : 4);
+}
+
+/* a foreign table's declared columns ([] col; logical), as the catalog spells them; none for a q table */
+ray_t* q_duckdb_schema_bound_decl(const qd_bound_t* b) {
+    static const char* const NAMES[] = { "col", "logical" };
+    int64_t cap = b->ncol > 0 ? b->ncol : 1;
+    ray_t* cols[2] = { ray_sym_vec_new(RAY_SYM_W64, cap), ray_sym_vec_new(RAY_SYM_W64, cap) };
+    for (int64_t i = 0; !b->q && i < b->ncol; i++) {
+        const qd_bcol_t* c = &b->col[i];
+        const qd_desc_t* d = c->has ? q_duckdb_schema_desc_find(c->col, strlen(c->col), b->desc, b->ndesc) : NULL;
+        if (!d || !cols[0] || RAY_IS_ERR(cols[0]) || !cols[1] || RAY_IS_ERR(cols[1])) continue;
+        int64_t cn = ray_sym_intern_runtime(c->col, strlen(c->col));
+        int64_t ln = ray_sym_intern_runtime(d->logical, strlen(d->logical));
+        cols[0] = ray_vec_append(cols[0], &cn);
+        cols[1] = ray_vec_append(cols[1], &ln);
+    }
+    return q_duckdb_schema_table(cols, NAMES, 2);
 }
 
 /* One descriptor row to write (name and enumdom are NOT NUL-terminated: ptr+len). */
@@ -440,8 +464,7 @@ void q_duckdb_schema_drop_desc(int slot, const qd_name_t* nm) {
 }
 
 /* Replace a table's descriptor rows (runs INSIDE the caller's transaction). */
-static ray_t* qd_write_desc_rows(int slot, const char* tname,
-                                 const qd_descrow_t* rows, int64_t n) {
+static ray_t* qd_write_desc_rows(int slot, const char* tname, const qd_descrow_t* rows, int64_t n, bool mark) {
     ray_t* e = q_duckdb_exec(slot,
         "CREATE TABLE IF NOT EXISTS " QD_SCHEMA_REF "("
         "tbl VARCHAR, col VARCHAR, logical VARCHAR, "
@@ -450,15 +473,17 @@ static ray_t* qd_write_desc_rows(int slot, const char* tname,
     if (!e) e = q_duckdb_exec(slot, "ALTER TABLE " QD_SCHEMA_REF " ADD COLUMN IF NOT EXISTS attr VARCHAR");
     if (!e) e = q_duckdb_exec(slot, "ALTER TABLE " QD_SCHEMA_REF " ADD COLUMN IF NOT EXISTS enumdom VARCHAR");
     if (!e) e = qd_desc_rows_delete(slot, tname, 1);
-    if (e) return e;
+    if (e || (!mark && n == 0)) return e;
 
     qd_buf ins = {0};
-    q_duckdb_puts(&ins, "INSERT INTO " QD_SCHEMA_REF
-                  "(tbl, col, logical, iskey, valid, v, dtype, attr, enumdom) VALUES (");
-    q_duckdb_put_strlit(&ins, tname, strlen(tname));
-    q_duckdb_puts(&ins, ", '', '" QD_SCHEMA_TABLE_ROW "', FALSE, '', 1, '', '', '')");
+    q_duckdb_puts(&ins, "INSERT INTO " QD_SCHEMA_REF "(tbl, col, logical, iskey, valid, v, dtype, attr, enumdom) VALUES ");
+    if (mark) {
+        q_duckdb_puts(&ins, "(");
+        q_duckdb_put_strlit(&ins, tname, strlen(tname));
+        q_duckdb_puts(&ins, ", '', '" QD_SCHEMA_TABLE_ROW "', FALSE, '', 1, '', '', '')");
+    }
     for (int64_t i = 0; i < n; i++) {
-        q_duckdb_puts(&ins, ", (");
+        q_duckdb_puts(&ins, mark || i ? ", (" : "(");
         q_duckdb_put_strlit(&ins, tname, strlen(tname));
         q_duckdb_puts(&ins, ", ");
         q_duckdb_put_strlit(&ins, rows[i].name, rows[i].namelen);
@@ -502,8 +527,38 @@ ray_t* q_duckdb_schema_write_desc(int slot, const qd_name_t* nm, ray_t* tbl, con
         q_duckdb_codec_logical_name(&cms[c], rows[c].logical, sizeof rows[c].logical);
         if (c == icol) snprintf(rows[c].logical, sizeof rows[c].logical, "%s", QD_INDEX_LOGICAL);
     }
-    ray_t* e = qd_write_desc_rows(slot, nm->key, rows, ncols);
+    ray_t* e = qd_write_desc_rows(slot, nm->key, rows, ncols, true);
     for (int64_t c = 0; c < ncols; c++) free((char*)rows[c].name);
+    free(rows);
+    return e;
+}
+
+/* A foreign table's declarations, replacing its earlier ones (runs INSIDE the caller's transaction): decl is
+ * ([] col; logical), each a column row; no table row is written, so the table stays foreign. */
+ray_t* q_duckdb_schema_write_decl(int slot, const qd_name_t* nm, ray_t* decl) {
+    ray_t* cv = decl && decl->type == RAY_TABLE ? ray_table_get_col(decl, ray_sym_intern_runtime("col", 3)) : NULL;
+    ray_t* lv = cv ? ray_table_get_col(decl, ray_sym_intern_runtime("logical", 7)) : NULL;   /* borrowed */
+    if (!lv) return q_err(QE_TYPE);
+    int64_t n = q_count(decl);
+    qd_descrow_t* rows = q_duckdb_cols(n, sizeof *rows);
+    if (!rows) return q_err(QE_WSFULL);
+    ray_t* e = NULL;
+    for (int64_t i = 0; !e && i < n; i++) {
+        const char *cp = "", *lp = "";
+        int64_t     cl = 0,   ll = 0;
+        if (!qd_schema_text(cv, i, &cp, &cl) || cl == 0 || !qd_schema_text(lv, i, &lp, &ll) ||
+            ll >= (int64_t)sizeof rows[i].logical) { e = q_err(QE_TYPE); break; }
+        char* fold = q_duckdb_text(cp, (size_t)cl);
+        if (!fold) { e = q_err(QE_WSFULL); break; }
+        qd_fold(fold);
+        rows[i].name    = fold;
+        rows[i].namelen = strlen(fold);
+        rows[i].dtype   = "";
+        rows[i].enumdom = "";
+        snprintf(rows[i].logical, sizeof rows[i].logical, "%.*s", (int)ll, lp);
+    }
+    if (!e) e = qd_write_desc_rows(slot, nm->key, rows, n, false);
+    for (int64_t i = 0; i < n; i++) free((char*)rows[i].name);
     free(rows);
     return e;
 }
@@ -663,7 +718,8 @@ ray_t* q_duckdb_schema_check(int slot, const qd_name_t* nm, ray_t* tbl,
     ray_t* cat = q_duckdb_schema_catalog_cols(slot, nm);
     if (RAY_IS_ERR(cat)) return cat;
     qd_desc_t* desc  = NULL;
-    int64_t    ndesc = q_duckdb_schema_fetch_desc(slot, nm, &desc);
+    bool       marked;
+    int64_t    ndesc = q_duckdb_schema_fetch_desc(slot, nm, &desc, &marked);
     int64_t    nrows = q_count(cat);
     int64_t    ncols = ray_table_ncols(tbl);
     /* the index stands last and outside the comparison: the batch never carries it */
@@ -684,7 +740,7 @@ ray_t* q_duckdb_schema_check(int slot, const qd_name_t* nm, ray_t* tbl,
         if (missing) { *missing = true; return NULL; }
         return q_err(QE_DUCKDB);
     }
-    *index = has ? QD_IDX_HAS : ndesc ? QD_IDX_BACKFILL : QD_IDX_NONE;
+    *index = has ? QD_IDX_HAS : marked ? QD_IDX_BACKFILL : QD_IDX_NONE;   /* a foreign table's declarations lay none */
     ray_t* e = NULL;
     /* a user column spelled rowid hides the row identity the backfill numbers by: refused, a set lays the index afresh */
     for (int64_t c = 0; !e && *index == QD_IDX_BACKFILL && c < nrows; c++) {
