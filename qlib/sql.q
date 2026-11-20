@@ -585,7 +585,7 @@
   w:.sql.i.operand[k;h in `range`list;v]; if[w~(::); :(::)];
   if[$[ar; (null w) or (abs w)>(`int16`int32`int64!(0Wh;0Wi;0W)) k`logical; 0b]; :(::)];
   if[$[(count sn) and not sn~"NaN"; any (not null w) and w<="J"$sn; 0b]; :(::)];
-  if[$[(dt in .sql.i.STAMPS) and 12h=abs type w; any 0W=abs "j"$w; 0b]; :(::)];
+  if[$[(dt in .sql.i.STAMPS) and 12h=abs type w; any (not null w) and not w within .sql.i.WINDOW; 0b]; :(::)];
   if[$[null g:.sql.i.GRAIN dt; 0b; 12h=abs type w]; w:.sql.i.ongrain[g;s;h;w]];
   L:.sql.i.stored[dt;w];
   if[h=`range; if[(2<>count w) or k[`nullable] and any null w; :(::)];
@@ -600,9 +600,11 @@
 / (.sql.translate's raw), so a literal bound as q's own nanoseconds would have DuckDB widen every stored value to meet it:
 / no row group is pruned, and one value outside q's range fails the whole statement.
 .sql.i.GRAIN:`TIMESTAMP_S`TIMESTAMP_MS`TIMESTAMP!1000000000 1000000 1000;
-/ A stored timestamp outside q's range reads as an infinity, which DuckDB orders apart from the stored value: a term
-/ whose literal is an infinity stays with q.
+/ A stored timestamp outside the range a DuckDB timestamp reads into q (WINDOW, the widest grain's of .duckdb.i.FSPAN)
+/ reads as the infinity on its side, which orders as the stored value does only against a literal inside it: a term
+/ with any other literal stays with q.
 .sql.i.STAMPS:`TIMESTAMP_S`TIMESTAMP_MS`TIMESTAMP`TIMESTAMP_NS;
+.sql.i.WINDOW:1707.09.22D00:12:43.145224194 2262.04.11D23:47:16.854775806;
 / A literal w between two grains g of the stored column, moved onto one where the answer stays the same: every stored value
 / is a whole number of grains, so c>w is c>w rounded down, c<w is c<w rounded up (and alike for <= and >=), and c within w
 / is c within w rounded inward.  = and in are left as they are, and compare at nanoseconds.
