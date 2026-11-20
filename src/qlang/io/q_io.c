@@ -919,10 +919,10 @@ static int io_is_remote(ray_t* pathstr) {
 
 static int io_is_url(ray_t* pathstr) { return io_is_http(pathstr) || io_is_remote(pathstr); }
 
-/* a URL has no place in the current directory, so restricted mode refuses one outright, as blocked mode refuses a
- * write to one */
+/* reading a URL is network traffic, not file access, so restricted mode lets it through as it does .Q.hg (Dyougu);
+ * blocked mode still refuses a write to one */
 static ray_t* io_guard_resource(ray_t* pathstr, int write) {
-    if (io_is_url(pathstr)) return ray_eval_get_restricted() || (write && ray_eval_get_blocked()) ? q_err(QE_ACCESS) : NULL;
+    if (io_is_url(pathstr)) return write && ray_eval_get_blocked() ? q_err(QE_ACCESS) : NULL;
     return write ? q_io_guard_write(ray_str_ptr(pathstr), ray_str_len(pathstr)) : io_guard_str(pathstr);
 }
 
