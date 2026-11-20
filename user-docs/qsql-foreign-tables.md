@@ -29,6 +29,10 @@ q)depth:get `:pq:duckdb:main:depth/        / a q global bound to the view
 q)select max px by sym from depth where date=2024.01.02
 ```
 
+A bound global like `depth` is a pointer to the DuckDB table, not its rows. qSQL runs on it, but q verbs that need
+the rows themselves (`` `sym xkey depth ``, `1!depth`, `t lj depth`) answer `'type`. That is deliberate: say which
+rows you want first, `ref:select from depth where ...`, then key or join the q table that select returns.
+
 ## How each column reads
 
 | DuckDB type | q type | notes |
@@ -51,7 +55,9 @@ q)select max px by sym from depth where date=2024.01.02
 | LIST of any of these | a list column | |
 | HUGEINT, UBIGINT, UHUGEINT, BIGNUM, INTERVAL, TIME WITH TIME ZONE, STRUCT, MAP, UNION, JSON, GEOMETRY, untyped NULL | hidden | not in `cols`, `meta` or `select from` |
 
-`.duckdb.hidden[c;`t]` and `.parquet.hidden[file;opts]` list the hidden columns. SQL still reaches them, so cast
+`.duckdb.hidden[h;`t]` and `.parquet.hidden[file;opts]` list the hidden columns. `h` is the handle of the database
+that holds the table: `.duckdb.main[]` for a table in the main database, or the handle `.pq.hopen_duckdb` gave you
+for an attached file (`h:.pq.hopen_duckdb[`ref;"ref.duckdb"]; .duckdb.hidden[h;`instruments]`). SQL still reaches them, so cast
 one into a type q holds when you need it:
 
 ```q
@@ -133,7 +139,12 @@ SQL and writing
 
 - **SQL answers keep DuckDB's own view.** `.duckdb.exec` and `s)` lines can show extra columns such as
   `qty_q_notnull` or `name_q_isnull`, which mark exactly where a NULL and a q null differ. qSQL never shows them.
-- **Keyed tables.** `.parquet.write` refuses a keyed table; write `0!t`. `upsert` into a keyed table stored in
+- **A DECIMAL in a SQL answer is its unscaled integer.** `SELECT price FROM t` on a DECIMAL(10,2) column answers
+  `10037` for 100.37, and `sum(price*size)` comes back 100 times too large. qSQL reads the same column as the
+  float 100.37. In SQL, cast it yourself: `SELECT CAST(price AS DOUBLE) AS price FROM t`. `.duckdb.getx` answers the
+  unscaled values together with the schema that holds their scale, which is how the exact round trip works.
+- **Keyed tables.** `.parquet.write` refuses a keyed table with `'type`; write `0!t`. Remember a `select … by` result
+  is keyed, so `0!` it before writing. `upsert` into a keyed table stored in
   DuckDB does not replace rows by key: a keyed table q stored gains duplicate keys, and a table with a DuckDB
   PRIMARY KEY refuses the upsert.
 - **An empty table with a general-list column** (`0#([] s:("ab";"cd"))`) cannot be written, because it has no type.
