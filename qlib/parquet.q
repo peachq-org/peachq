@@ -88,36 +88,36 @@
 / @ignore
 .parquet.i.FIRST:`hive_partitioning`filename`file_row_number
 / What a local source is made of, () for a URL or a file that will not stat: files, in read order (DuckDB expands a glob),
-/ and stamp, which differs whenever the view of the source might: the file names with the size and time (.fs.i.stamp) of
-/ each file the columns are read from, the first alone for one file or glob under .parquet.i.FIRST.  stamp is () while
-/ such a file is under two seconds old: a file system may keep times in whole seconds, and a rewrite within the one a
-/ stamp was taken in would not show.
+/ and stamp, which differs whenever the view of the source might: the file names beside what .fs.i.stamp says of each
+/ file the columns are read from (the first alone under .parquet.i.FIRST), and the working directory where a file has
+/ no number of its own to tell a relative name apart.  stamp is () for a source that keeps no view: a file under two
+/ seconds old (times may be whole seconds, so a rewrite within the one a stamp was taken in would not show).
 / @ignore
 .parquet.i.stat:{[c;file;o]
   ps:{[x] $[":"=first x;1_x;x]} each string (),file;
   if[any ps like "*://*"; :()];
   fl:raze {[c;p] $[any p in "*?[{";.duckdb.exec[c;"SELECT file AS f FROM glob(",.duckdb.i.lit[p],")"]`f;enlist p]}[c] each ps;
   b:.fs.i.stamp each $[(1=count ps) and all key[o] in .parquet.i.FIRST;1 sublist fl;fl];
-  if[(0=count b) or any null raze b; :()];
-  `files`stamp!(fl;$[all b[;1]<("j"$.z.p)-2000000000;(fl;b);()])}
+  if[(0=count b) or any null raze b[;0 1]; :()];
+  cw:$[any null raze b;@[system;"cd";{[e] 0N}];""];
+  `files`stamp!(fl;$[(not cw~0N) and all b[;1]<("j"$.z.p)-2000000000;(fl;b;cw);()])}
 / the kept views, each (source;stamp;view) in a place of its own, and how many sources have taken one: a source past
 / the last place takes the oldest's
 / @ignore
 .parquet.i.cache:16#enlist (::;();::)
 / @ignore
 .parquet.i.turn:0
-/ THE view of a source, every parquet door's one way in.  A local source, named by its files, options and the working
-/ directory, keeps its view while its stamp is unchanged (.parquet.i.stat), so a later read asks DuckDB for no metadata.
-/ Several files are read as the list the stamp was taken of, held in the DuckDB variable of the source's place: the
-/ statement neither expands the glob again nor reads a file the view was not built from.  A place is emptied before
-/ its variable changes, so a build that fails leaves no view over another's files.  A URL has no stamp and is asked
-/ afresh on every read, its q_schema entry the first any of its files has.
+/ THE view of a source, every parquet door's one way in.  A local source, named as written with its options, keeps its
+/ view while its stamp is unchanged, so a later read asks DuckDB for no metadata.  Several files are read as the list
+/ the stamp was taken of, held in the DuckDB variable of the source's place, so the statement expands no glob again;
+/ the place is emptied before that variable changes, or a build that fails would leave a view over another's files.
+/ A URL has no stamp and is asked afresh on every read, its q_schema entry the first any of its files has.
 / @ignore
 .parquet.i.view:{[c;file;opts]
   s:.parquet.i.file file; o:$[.duckdb.i.none opts;()!();opts];
   st:@[.parquet.i.stat[c;file];o;{[e] ()}];
   if[0=count st; :.parquet.i.build[c;s;s;0b;opts]];
-  k:(file;o;system "cd"); i:first where k~/:.parquet.i.cache[;0];
+  k:(file;o); i:first where k~/:.parquet.i.cache[;0];
   if[not null i; if[(count st`stamp) and st[`stamp]~.parquet.i.cache[i;1]; :.parquet.i.cache[i;2]]];
   if[null i; i:.parquet.i.turn mod count .parquet.i.cache; .parquet.i.turn+:1];
   .parquet.i.cache[i]:(::;();::);
@@ -147,18 +147,25 @@
   v:.parquet.i.view[c;file;opts];
   $[.duckdb.i.none query;.duckdb.i.fpull[c;v];.duckdb.i.fselect[c;v;.pq.i.resolveTree[v`cols;(enlist v`rel),eval each 2_query]]]}
 / The suffix door's select (select ... from `:f.parquet): tree is its arguments as ? takes them, env what each plain name
-/ they mention means where the select was written, a local included.  A name that is no column takes that meaning; one
-/ with none leaves the select to q (::), as does a restricted evaluation that may not load the translator.
+/ they mention means where the select was written, a local included.  A name that is no column is replaced by that
+/ meaning (a one-item list is a literal, left alone), so the select reads the same from here.  :: leaves it to q: a
+/ name env lacks, a select or an assignment inside it (whose names are not this table's to read), or a restricted
+/ evaluation that may not load the translator.
 / @ignore
 .parquet.i.select:{[file;tree;env]
   if[not @[{[u] .sql.translate; 1b};::;{[e] 0b}]; :(::)];
   c:.duckdb.main[]; v:.parquet.i.view[c;file;()];
   f:{[cl;env;x]
-    if[(type x) in 0 99h; :.z.s[cl;env] each x];
-    if[-11h<>type x; :x]; if[x in cl; :x];
-    e:$[x in key env;env x;"."=first string x;value x;'`unpush];
-    $[(11h=abs type e) or (type e) in 0 98 99h;enlist e;e]};
-  rt:.[{[f;cl;env;t] (enlist t 0),f[cl;env] each 1_t}[f];(v[`cols],`i;env;tree);{[e] `unpush}];
+    if[-11h=type x;
+      if[x in cl; :x];
+      e:$[x in key env;env x;"."=first string x;value x;'`unpush];
+      :$[(11h=abs type e) or (type e) in 0 98 99h;enlist e;e]];
+    if[(0h<>type x) or 1=count x; :x];
+    if[any (x 0)~/:(:;::); '`unpush];
+    if[(4<count x) and any (x 0)~/:(?;!); '`unpush];
+    .z.s[cl;env] each x};
+  g:{[f;x] $[99h=type x;f each x;x]}[f[v[`cols],`i;env]];
+  rt:@[{[f;g;t] (t 0;f each t 1;g t 2;g t 3),4_t}[f[v[`cols],`i;env];g];tree;{[e] `unpush}];
   $[`unpush~rt;::;.duckdb.i.fselect[c;v;rt]]}
 
 / @ignore
