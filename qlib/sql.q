@@ -278,6 +278,7 @@
 / DuckDB returns: the answer is q's own, and the scan still skips what the looser test rules out.
 / A float column under < or > against a number: q's comparison is the exact one less the pairs within tolerance
 / (basics/precision.md), so the exact comparison keeps every row q's does.  Under <, q keeps the null and the SQL its arm.
+/ The number rides as the float q compares with, so DuckDB cannot round it to a real column's narrower type.
 / like with a pattern GLOB cannot answer (.sql.i.glob): whatever matches begins with the bytes ahead of the pattern's first
 / wildcard.
 / A time, minute or second column q wrote, an INTERVAL, against a value of its own type: DuckDB orders the INTERVALs q can
@@ -289,7 +290,7 @@
     if[not null t:(`time`minute`second!-19 -17 -18h) cls c;
       :$[(c in key fr) or t<>type v; (::); null v; (::);
         .sql.i.arm[(enlist `nullable)!enlist 1b;0b;r`keepsnull;c;(r`sql;c;.sql.i.lit v)]]];
-    :$[r[`sql] in `$'"<>"; .sql.i.compare[cls;fr;0b;@[r;`classes;:;enlist `float];1_e]; (::)]];
+    :$[(r[`sql] in `$'"<>") and (type v) in -5 -6 -7 -8 -9h; .sql.i.compare[cls;fr;0b;@[r;`classes;:;enlist `float];(c;"f"$v)]; (::)]];
   if[(`pattern<>r`shape) or not .sql.i.class[cls c][`class] in r`classes; :(::)];
   p:$[-10h=type v; enlist v; v]; if[10h<>type p; :(::)]; n:(p in "?*[\000")?1b; if[0=n; :(::)];
   if[c in key fr; c:fr[c] 0]; $[null c; (::); (`starts_with;c;.sql.i.lit n#p)]};
