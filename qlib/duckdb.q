@@ -270,7 +270,7 @@
 / @ignore
 .duckdb.i.fread:{[c;t;f]
   g:{[c;t;f] f[c;.duckdb.i.ftable[c;t]]};
-  .[g;(c;t;f);{[g;c;t;f;e] if[not .duckdb.i.unbound c; 'e]; .duckdb.i.unbind[c;t]; g[c;t;f]}[g;c;t;f]]}
+  .[g;(c;t;f);{[g;c;t;f;e] if[not (e~"duckdb") and .duckdb.i.unbound c; 'e]; .duckdb.i.unbind[c;t]; g[c;t;f]}[g;c;t;f]]}
 / whether the translator is to hand: a restricted evaluation may not load it, and the select is then q's
 / @ignore
 .duckdb.i.translates:{[] @[{[u] .sql.translate; 1b};::;{[e] 0b}]}
