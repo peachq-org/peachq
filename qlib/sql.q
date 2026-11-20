@@ -257,16 +257,16 @@
 / (.sql.i.pure) moves when .sql.i.VERBS can spell it and stays for q, in order, when it cannot.  A term that reads its
 / own row only through a text cast (.sql.i.cast) ends the region when it cannot move: left for q it may be an error,
 / which a later term moved ahead of it could hide by leaving it no rows.  A term on i left for
-/ q would read positions the pull no longer has, so it stops every term; on a table without i, i anywhere does (the
-/ virtual index).  So do the phrase's barrier, a rename onto a column, an empty schema, and a table or column name
-/ holding a dot (the SQL tree would read it as a path).  An i that only orders the rows (fr) is no position: the SQL sorts
-/ and picks first and last by it, and i named anywhere but under count stops every term.
+/ q would read positions the pull no longer has, so it stops every term.  So do the phrase's barrier, a rename onto a
+/ column, an empty schema, and a table or column name holding a dot (the SQL tree would read it as a path).  Where the
+/ table stores no position (no i, the virtual index; or an i that only orders the rows, fr, by which the SQL sorts and
+/ picks first and last), i named anywhere but under count stops every term: count i reads only how many rows there are.
 .sql.i.where:{[tree;schema;fr;phrase]
-  cl:exec col from schema; cls:cl!exec logical from schema; ix:`i in cl; ord:$[`i in key fr; null first fr`i; 0b];
+  cl:exec col from schema; cls:cl!exec logical from schema; ix:`i in cl; pos:ix and not $[`i in key fr; null first fr`i; 0b];
   wh:$[count tree 2; tree[2;0]; ()];
   stop:(phrase`barrier) or (0=count cl) or (any (key phrase`renames) in cl) or (any "." in/: string (tree 1),cl) or
-    (ord and 0<count phrase`renames) or
-    `i in raze .sql.i.names[0b] each $[ord; tree (2_til count tree) except 4; ix; enlist tree 3; 2_tree];
+    ((not pos) and 0<count phrase`renames) or
+    `i in raze .sql.i.names[0b] each $[pos; enlist tree 3; tree (2_til count tree) except 4];
   x:$[stop; (); .sql.i.term[cls;fr;0b] each ((.sql.i.pure[cls;0b] each wh)?0b)#wh];
   x:(((((::)~/:x) and not .sql.i.pure[(0#`)!0#`;0b] each (count x)#wh),1b)?1b)#x;
   m:where not (::)~/:x; rest:wh (til count wh) except m;
