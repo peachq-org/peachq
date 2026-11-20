@@ -227,15 +227,17 @@
 / local included (the select seam hands it over, q_funsql.c ques_env); :: when the tree came as data and its names are
 / globals.  A one-item list is a constant already and is left alone.
 / 'unpush leaves the select to q, in the frame it was written in: a name with no value, an assignment, a nested select
-/ whose table cannot be read here or that reads a column of the enclosing one.
+/ whose table cannot be read here or that names a column of the enclosing one.
 / @ignore
 .pq.i.lit:{[v] $[(type v) in -11 11 0h;enlist v;v]}
-/ a name: a column, or a dotted name under one, stays; any other is its value
+/ a name: a column, or a dotted name under one, stays; any other is its value.  dep are the columns of the enclosing
+/ selects that a nested one's table does not have.
 / @ignore
-.pq.i.rname:{[cl;env;x]
+.pq.i.rname:{[cl;dep;env;x]
   if[null x; :x];
   s:"." vs string x; h:`$first s;
   if[(x in cl) or (h in cl) and not null h; :x];
+  if[any (x,h) in dep; '`unpush];
   .pq.i.lit $[(null h) or env~(::);@[get;x;{[e] '`unpush}];
     not h in key env;'`unpush;
     1=count s;env h;
@@ -245,23 +247,22 @@
 .pq.i.sel:{[x] (any (x 0)~/:(?;!)) and (count x) in 5 6 7}
 / one expression; a projection's elided argument is no expression
 / @ignore
-.pq.i.rs:{[cl;env;x]
+.pq.i.rs:{[cl;dep;env;x]
   t:.Q.c.lty x;
-  if[-11h=t; :.pq.i.rname[cl;env;x]];
+  if[-11h=t; :.pq.i.rname[cl;dep;env;x]];
   if[(not t in 0 11h) or 2>count x; :x];
   if[any (x 0)~/:(:;::); '`unpush];
-  if[.pq.i.sel x; :.pq.i.rsub[cl;env;x]];
-  n:$[11h=t;.z.s[cl;env] each x;@[x;where 101h<>type each x;.z.s[cl;env]]];
+  if[.pq.i.sel x; :.pq.i.rsub[cl;dep;env;x]];
+  n:$[11h=t;.z.s[cl;dep;env] each x;@[x;where 101h<>type each x;.z.s[cl;dep;env]]];
   if[not (.Q.c.lty n) in 0 11h; '`unpush];
   n}
-/ A nested select's table is read first, so its names are resolved against its own columns.
+/ A nested select's table is read first, once, so its names are resolved against its own columns.
 / @ignore
-.pq.i.rsub:{[cl;env;x]
-  src:.pq.i.rs[cl;env] x 1; t:@[eval;src;{[e] '`unpush}]; if[not .Q.qt t; '`unpush];
-  ic:(cols t),`i; if[any (.pq.i.syms 2_x) in cl except ic; '`unpush];
-  f:.pq.i.rs[ic;env]; g:{[f;p] $[99h=type p;(key p)!f each value p;(0h=type p) and 1=count p;enlist f first p;p]};
+.pq.i.rsub:{[cl;dep;env;x]
+  t:@[eval;.pq.i.rs[cl;dep;env] x 1;{[e] '`unpush}]; if[not .Q.qt t; '`unpush];
+  ic:(cols t),`i; f:.pq.i.rs[ic;(cl,dep) except ic;env]; g:{[f;p] $[99h=type p;(key p)!f each value p;(0h=type p) and 1=count p;enlist f first p;p]};
   w:x 2; w:$[(0h=type w) and (1=count w) and 0h=type first w;enlist f each first w;w];
-  (x 0;src;w;g[f] x 3;g[f] x 4),.pq.i.rs[cl;env] each 5_x}
+  (x 0;t;w;g[f] x 3;g[f] x 4),.pq.i.rs[cl;dep;env] each 5_x}
 / Whether a resolved part reads no column.  value, eval, get and parse of text or of a name read the select's columns
 / where q runs them, so they count as reading one.
 / @ignore
@@ -280,7 +281,7 @@
   @[x;where f and {[y] ((.Q.c.lty y) in 0 11h) and 1<count y} each x;{[y] @[{[y] .pq.i.lit eval y};y;{[y;e] y}[y]]}]}
 / @ignore
 .pq.i.resolve:{[cl;env;tree]
-  f:.pq.i.rs[cl,`i;env]; g:{[f;x] $[99h=type x;(key x)!f each value x;(0h=type x) and 0<count x;f x;x]};
+  f:.pq.i.rs[cl,`i;();env]; g:{[f;x] $[99h=type x;(key x)!f each value x;(0h=type x) and 0<count x;f x;x]};
   (tree 0;{[f;x] .pq.i.rfold f x}[f] each tree 1;g[f] tree 2;g[f] tree 3),4_tree}
 / The tree a provider's qsql hook is handed ends with the dict of what its names mean to the caller (the select seam,
 / q_funsql.c ques_pushed): (env;the tree without it), env :: for a tree that carries none.
