@@ -143,6 +143,10 @@ Columns
 - **Hive partition columns come last** in `cols` and `meta`, after the file's own columns, and DuckDB guesses their
   type from the directory names (`date=2024-01-02` is a DATE, `region=EU` a VARCHAR).
 - **A column named `i`** cannot be written to DuckDB: `i` is q's row index.
+- **A parquet source's columns are read once per session.** After another program rewrites a file with new or
+  retyped columns, run `` .parquet.refresh `:t.parquet `` (or `.parquet.refresh[]` for every source), as you would
+  `\l` after changing a kdb database. New files in a glob appear by themselves, and a file you write with
+  `.parquet.write`, `set` or `save` is read afresh.
 
 Queries
 

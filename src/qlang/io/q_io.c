@@ -2105,46 +2105,8 @@ static ray_t* rmtree_fn(ray_t* x) {
     return x;
 }
 
-/* `.fs.i.stamp x` — what tells a file from a rewrite of it and from another of its name, as four longs: its size in
- * bytes, its modification time in ns from 2000.01.01 UTC (whole seconds where stat tells no finer), its device and its
- * file number (both null where stat names no file: the Windows CRT).  Four nulls for a path that will not stat.  x is
- * a file symbol or a path string. */
-static ray_t* stamp_fn(ray_t* x) {
-    ray_t* s = x && x->type == RAY_CHARV ? q_str_of_charv(x) : NULL;
-    ray_t* path = s ? q_io_file_path(s) : q_io_path_operand(x);
-    if (s) ray_release(s);
-    if (!path) return q_err(QE_TYPE);
-    ray_t* refused = io_guard_resource(path, 0);
-    int64_t v[4] = { NULL_I64, NULL_I64, NULL_I64, NULL_I64 }, nsec = 0;
-#ifdef RAY_OS_WINDOWS
-    struct _stat64 st;
-    int ok = !refused && _stat64(ray_str_ptr(path), &st) == 0;
-#else
-    struct stat st;
-    int ok = !refused && stat(ray_str_ptr(path), &st) == 0;
-    if (ok) { v[2] = (int64_t)st.st_dev; v[3] = (int64_t)st.st_ino; }
-#if defined(RAY_OS_MACOS)
-    if (ok) nsec = (int64_t)st.st_mtimespec.tv_nsec;
-#else
-    if (ok) nsec = (int64_t)st.st_mtim.tv_nsec;
-#endif
-#endif
-    if (ok) {
-        v[0] = (int64_t)st.st_size;
-        v[1] = ((int64_t)st.st_mtime - 946684800LL) * 1000000000LL + nsec;   /* 2000.01.01 UTC in unix seconds */
-    }
-    ray_release(path);
-    if (refused) return refused;
-    ray_t* out = ray_vec_new(RAY_I64, 4);
-    for (int i = 0; i < 4 && !RAY_IS_ERR(out); i++) out = ray_vec_append(out, &v[i]);
-    return out;
-}
-
 void q_io_fs_register(void) {
     ray_t* obj = ray_fn_unary(".fs.i.rmtree", RAY_FN_NONE, rmtree_fn);
     q_env_bind_native(".fs.i.rmtree", obj, 1);
-    ray_release(obj);
-    obj = ray_fn_unary(".fs.i.stamp", RAY_FN_NONE, stamp_fn);
-    q_env_bind_native(".fs.i.stamp", obj, 1);
     ray_release(obj);
 }
