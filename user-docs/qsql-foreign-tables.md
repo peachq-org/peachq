@@ -84,6 +84,40 @@ which read as one value), `zero` (a NULL boolean or byte, read as `0b` or `0x00`
 15 digits whose value a float does not hold) and `offset` (a TIMESTAMP WITH TIME ZONE). `rows` counts the rows each
 issue touches. A table or file q wrote answers an empty table.
 
+## Declaring symbol columns
+
+A text column reads as a string because peachq cannot know which text is a kdb symbol. When you do know, declare it
+with `.pq.setschema`, giving the table and a q table whose types say what each column is, empty or with rows:
+
+```q
+q).pq.setschema[`:pq:duckdb:main:trades/; ([] sym:`symbol$(); exch:`symbol$())]
+col  type applied
+-----------------
+sym  s    1
+exch s    1
+q)meta `:pq:duckdb:main:trades/
+c   | t f a
+----| -----
+sym | s
+exch| s
+px  | f
+oid | C
+```
+
+Each template column of type `s` over a VARCHAR column now reads as a symbol, a NULL as `` ` ``, and a select on it
+runs inside DuckDB as on any column. Every other column reads as before. Only symbols are declared for now: any other
+template column, a column that is not VARCHAR, and a column the table lacks show `applied` 0. The declaration is
+stored in the database's `_q_schema`, so it outlives the session; a new one replaces the last, and `()` drops it. A
+table q wrote has its own schema and refuses a declaration, and `.duckdb.set` over a declared table makes it a q
+table.
+
+For parquet files, declare a view over them, for instance with the tick schema's empty `trade` table:
+
+```q
+q).duckdb.exec[c;"CREATE VIEW trades AS SELECT * FROM read_parquet('data/trades/*.parquet')"]
+q).pq.setschema[`:pq:duckdb:main:trades/; 0#trade]
+```
+
 ## The rules
 
 1. **One q type per DuckDB type**, as in the table above, applied the same way on every path.
@@ -114,7 +148,7 @@ Types and values
 
 - **Strings, not symbols.** A text column is a string column because peachq cannot know in advance how many distinct
   values it holds, and interning a column of order ids would fill the symbol table. Cast in the select when you want
-  symbols: ``select `$sym, px from t``.
+  symbols: ``select `$sym, px from t``, or declare the column once (see Declaring symbol columns).
 - **`""` and NULL are the same string.** `where sym like ""` matches both. So are the integer minimum and NULL, and
   NaN and NULL. Use SQL to separate them: `.duckdb.exec[c;"SELECT count(*) FROM t WHERE qty = -2147483648"]`.
 - **Decimals are floats.** A DECIMAL(38,10) notional loses digits past about 15 significant figures, and a `sum` can
