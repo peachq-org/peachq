@@ -1184,9 +1184,21 @@ static ray_t* ques_select_from(ray_t** args, int64_t n, ray_t* names) {
     return r;
 }
 
-/* A select on a parquet file is the parquet door's (q_io_parquet_select).  The door is a library function, out of sight
- * of the caller's locals, so it is handed what each name the select mentions resolves to HERE.  NULL: it declined. */
-static ray_t* ques_parquet(ray_t** args, int64_t n) {
+/* A select a door answers somewhere else: a parquet file, or a provider's table (bound, by coordinate, or by the name
+ * of a global bound to one). */
+static int ques_door(ray_t* t) {
+    if (q_io_parquet_named(t) || q_provider_carrier_is(t) || q_provider_coord_sym_form(t)) return 1;
+    if (!t || t->type != -RAY_SYM) return 0;
+    ray_t* v = q_env_handle_resolve(t->i64);
+    int is = v && !RAY_IS_ERR(v) && q_provider_carrier_is(v);
+    if (v && RAY_IS_ERR(v)) ray_error_free(v);
+    else if (v) ray_release(v);
+    return is;
+}
+
+/* What each name the select mentions resolves to HERE, a dict: a door is a library function, out of sight of the
+ * caller's locals, and a name it resolved itself would be a global's. */
+static ray_t* ques_env(ray_t** args, int64_t n) {
     ray_t *names = ray_vec_new(RAY_SYM, 8), *keys = ray_vec_new(RAY_SYM, 8), *vals = ray_list_new(8);
     for (int64_t i = 1; i < n; i++)
         if (i != 4) phrase_names(args[i], &names);
@@ -1208,15 +1220,25 @@ static ray_t* ques_parquet(ray_t** args, int64_t n) {
         if (keys) { if (RAY_IS_ERR(keys)) ray_error_free(keys); else ray_release(keys); }
         if (vals) { if (RAY_IS_ERR(vals)) ray_error_free(vals); else ray_release(vals); }
     }
-    if (!env || RAY_IS_ERR(env)) return env ? env : q_err(QE_WSFULL);
-    ray_t* r = q_io_parquet_select(args, n, env);
-    ray_release(env);
+    return env ? env : q_err(QE_WSFULL);
+}
+
+/* THE resolver seam: every door is handed the select with that dict as its last item, and one resolver
+ * (.pq.i.resolve) reads it for all of them.  NULL: no door's, or the door declined. */
+static ray_t* ques_pushed(ray_t** args, int64_t n) {
+    if (n < 4 || n > 6 || !ques_door(args[0])) return NULL;
+    ray_t* with[7];
+    memcpy(with, args, (size_t)n * sizeof *with);
+    with[n] = ques_env(args, n);
+    if (RAY_IS_ERR(with[n])) return with[n];
+    ray_t* r = q_provider_qsql_push(with, n + 1);
+    if (!r && q_io_parquet_named(args[0])) r = q_io_parquet_select(with, n + 1);
+    ray_release(with[n]);
     return r;
 }
 
 static ray_t* ques_select(ray_t** args, int64_t n) {
-    ray_t* pushed = q_provider_qsql_push(args, n); /* NULL: not provider / no qsql hook */
-    if (!pushed && q_io_parquet_named(args[0])) pushed = ques_parquet(args, n);
+    ray_t* pushed = ques_pushed(args, n);
     if (pushed) return pushed;
     ray_t* outer = g_unmapped;                   /* an enclosing select's: restored when this one is done */
     ray_t *outer_tbl = g_part_tbl, *outer_rows = g_part_rows;

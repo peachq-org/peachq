@@ -90,10 +90,10 @@ int q_io_resource_chunkable(ray_t* pathstr);
 ray_t* q_io_resource_table(ray_t* fsym);
 
 /* A select whose source is a `.parquet` resource (q_io_parquet_named) belongs to the parquet door, which runs what it
- * can inside DuckDB: `args` are the select's own, `env` (borrowed) a dict of what its names mean to the caller.
+ * can inside DuckDB: `args` are the select's own and, last, a dict of what its names mean to the caller.
  * NULL = the door left the select to q, which then reads the resource whole (q_io_resource_table). */
 int    q_io_parquet_named(ray_t* fsym);
-ray_t* q_io_parquet_select(ray_t** args, int64_t n, ray_t* env);
+ray_t* q_io_parquet_select(ray_t** args, int64_t n);
 
 /* Does the name end `.gz` — the table doors' compression='auto' (DuckDB's)? */
 int q_io_gz_named(ray_t* pathstr);

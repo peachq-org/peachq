@@ -69,18 +69,18 @@
   n:f[`col] each j; l:f[`logical] each j; i:where (0<count each n) and 0<count each l;
   ([col:`$n i] logical:`$l i)}
 / The view of the files src names in SQL (.duckdb.i.fview): their columns as DuckDB declares them, beside what the q_schema
-/ entry of head, the first of them, says q wrote.  Its rows are ordered by row number, after the file where src may name
-/ more than one, through read_parquet's helper columns, unless the caller's options or the file's own columns already use
+/ entry of head, the first of them, says q wrote.  Its rows are ordered by row number, after the file's place in the read
+/ where src may name more than one (a list keeps the order it was given in, a file named twice included; a glob expands
+/ in name order), through read_parquet's own columns, unless the caller's options or the file's columns already use
 / those names.
 / @ignore
 .parquet.i.build:{[c;src;head;one;opts]
   qs:.parquet.i.qschema .parquet.i.kv[c;head];
-  o:$[.duckdb.i.none opts;()!();opts]; h:$[one;1_;::] `filename`file_row_number!("_q_file";1b);
-  rel:.parquet.i.rel[src;o,h];
-  d:$[any `filename`file_row_number in key o;();@[.parquet.i.desc[c];rel;{[e] ()}]];
-  if[count d;
-    :.duckdb.i.fview[rel;(select from d where not col in `$$[one;1_;::] ("_q_file";"file_row_number")) lj qs;
-      $[one;1_;::] ("\"_q_file\"";"file_row_number")]];
+  o:$[.duckdb.i.none opts;()!();opts]; by:$[one;1_;::] ("file_index";"file_row_number");
+  rel:.parquet.i.rel[src;o,(enlist `file_row_number)!enlist 1b];
+  d:$[`file_row_number in key o;();@[.parquet.i.desc[c];rel;{[e] ()}]];
+  if[$[count d;not `file_index in d`col;0b];
+    :.duckdb.i.fview[rel;(select from d where col<>`file_row_number) lj qs;by]];
   rel:.parquet.i.rel[src;opts];
   .duckdb.i.fview[rel;.parquet.i.desc[c;rel] lj qs;()]}
 
@@ -152,28 +152,16 @@
 .parquet.read:{[file;opts;query]
   if[.duckdb.i.none query; :.parquet.i.with[file;opts;.duckdb.i.fpull]];
   if[not (?)~query 0; '`type];
-  .parquet.i.with[file;opts;{[q;c;v] .duckdb.i.fselect[c;v;.pq.i.resolveTree[v`cols;(enlist v`rel),q]]}[eval each 2_query]]}
-/ The suffix door's select (select ... from `:f.parquet): tree is its arguments as ? takes them, env what each plain name
-/ they mention means where the select was written, a local included.  A name that is no column is replaced by that
-/ meaning (a one-item list is a literal, left alone), so the select reads the same from here.  :: leaves it to q: a
-/ name env lacks, a select or an assignment inside it (whose names are not this table's to read), or a restricted
-/ evaluation that may not load the translator.
+  .parquet.i.with[file;opts;{[q;c;v] .duckdb.i.fselect[c;v;.pq.i.resolve[v`cols;::;(enlist v`rel),q]]}[eval each 2_query]]}
+/ The suffix door's select (select ... from `:f.parquet): tree is its arguments as ? takes them and, last, what each name
+/ they mention means where the select was written (.pq.i.resolveTree).  :: leaves the select to q: the resolver's refusal,
+/ or a restricted evaluation that may not load the translator.
 / @ignore
-.parquet.i.select:{[file;tree;env]
+.parquet.i.select:{[file;tree]
   if[not @[{[u] .sql.translate; 1b};::;{[e] 0b}]; :(::)];
-  f:{[cl;env;x]
-    if[-11h=type x;
-      if[x in cl; :x];
-      e:$[x in key env;env x;"."=first string x;value x;'`unpush];
-      :$[(11h=abs type e) or (type e) in 0 98 99h;enlist e;e]];
-    if[(0h<>type x) or 1=count x; :x];
-    if[any (x 0)~/:(:;::); '`unpush];
-    if[(4<count x) and any (x 0)~/:(?;!); '`unpush];
-    .z.s[cl;env] each x};
-  .parquet.i.with[file;();{[f;tree;env;c;v]
-    f:f[v[`cols],`i;env]; g:{[f;x] $[99h=type x;f each x;x]}[f];
-    rt:@[{[f;g;t] (t 0;f each t 1;g t 2;g t 3),4_t}[f;g];tree;{[e] `unpush}];
-    $[`unpush~rt;::;.duckdb.i.fselect[c;v;rt]]}[f;tree;env]]}
+  .parquet.i.with[file;();{[tree;c;v]
+    rt:@[.pq.i.resolveTree[v`cols];tree;{[e] ::}];
+    $[rt~(::);::;.duckdb.i.fselect[c;v;rt]]}[tree]]}
 
 / @ignore
 .parquet.i.bytes:{[t]
