@@ -229,9 +229,12 @@
 / @ignore
 .duckdb.i.foreign:{[c;t] 0=count .duckdb.i.schema[c;t]}
 / @ignore
-/ the kept foreign views of the handles' tables, each (stamp;view) under its handle and table
+/ the kept foreign views, each (handle and table;stamp;view) in a place of its own, and how many have taken one: a table
+/ past the last place takes the oldest's, so what closed handles and dropped tables leave behind is bounded
 / @ignore
-.duckdb.i.fkept:(0#`)!()
+.duckdb.i.fkept:64#enlist (`;();::)
+/ @ignore
+.duckdb.i.fturn:0
 / THE foreign view of a table of a handle, kept while the table stays bound as it was when the view was built (told by
 / when it was bound; by the handle's whole list of bound tables for a name the list spells otherwise): whatever lets a bound
 / table go (a write of ours, a non-SELECT through the SQL door, get, a failed reference) binds it anew, and the view is
@@ -241,10 +244,11 @@
 .duckdb.i.ftable:{[c;t]
   .duckdb.i.rows[c;t]; k:`$(string c),"/",string t; st:.duckdb.i.info[c;::]`tables;
   if[t in st`table; st:st[`bound] st[`table]?t];
-  if[k in key .duckdb.i.fkept; if[st~first .duckdb.i.fkept k; :last .duckdb.i.fkept k]];
+  i:.duckdb.i.fkept[;0]?k; if[i<count .duckdb.i.fkept; if[st~.duckdb.i.fkept[i;1]; :.duckdb.i.fkept[i;2]]];
   sch:select col, dtype from .duckdb.i.info[c;t]`schema; rel:.duckdb.i.qname t;
   ord:$[`rowid in sch`col;();@[{[c;rel] .duckdb.exec[c;"SELECT rowid FROM ",rel," LIMIT 0"]; enlist "rowid"}[c];rel;{[e] ()}]];
-  v:.duckdb.i.fview[rel;sch;ord]; .duckdb.i.fkept[k]:(st;v); v}
+  if[i=count .duckdb.i.fkept; i:.duckdb.i.fturn mod count .duckdb.i.fkept; .duckdb.i.fturn+:1];
+  v:.duckdb.i.fview[rel;sch;ord]; .duckdb.i.fkept[i]:(k;st;v); v}
 / The rows of a foreign view.  A view whose every column is hidden shows q nothing: the table of no columns and no rows.
 / @ignore
 .duckdb.i.fpull:{[c;v]
