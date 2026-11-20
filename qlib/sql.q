@@ -622,11 +622,11 @@
   wide:max {[ints;cls;x] $[-11h=type x; ints?cls x; -5h-type x]}[ints;cls] each a;
   ((`$("+";"-";"*";"-") i),@[a;where not col;.sql.i.lit]; .sql.i.class ints wide)};
 
-/ Text is either on a table q did not write: against a string column (sc names them) a symbol or a string literal compares
-/ as the whole string (c=`a, c="ab", c<>`a, c in `a`b), and string c is c.  rt is a select as (table;where terms;by;phrase;
-/ ...), its names resolved (.pq.i.resolve), so a literal is whatever evaluates to one; a rewritten compare is in over
-/ strings, which q runs and .sql.i.compare pushes.  An order (c<`a, c within `a`b, either way round) compares the column
-/ as the symbols it holds, `$c, which q runs and .sql.i.cast pushes; a symbol pattern of like is its text.
+/ Leniency answers only what q refuses.  Against a string column (sc names them) of a table q did not write a SYMBOL
+/ compares as its text, where q signals 'type: c=`a, c<>`a and c in `a`b compare whole strings, a symbol pattern of like is
+/ its text, and an order (c<`a, c within `a`b, either way round) compares the column as the symbols it holds, `$c.  A string
+/ literal keeps q's meaning (c="ab" is char-wise), and string c is c.  rt is a select as (table;where terms;by;phrase;...),
+/ its names resolved (.pq.i.resolve); a rewritten compare is in over strings, which q runs and .sql.i.compare pushes.
 .sql.i.either:{[sc;rt]
   f:{[sc;e]
     if[(0h<>.Q.c.lty e) or 2>count e; :e];
@@ -634,16 +634,14 @@
     if[(1=count a) and (string)~h; :$[col a 0; a 0; e]];
     if[2<>count a; :e];
     sy:{[x] $[11h=type x; $[1=count x; enlist string first x; ()]; (0h=type x) and 1=count x; $[11h=type first x; string first x; ()]; ()]};
-    st:{[x] $[10h=type x; enlist x; -10h=type x; enlist enlist x; ()]};
-    if[any h~/:((=);(<>)); if[col a 1; a:reverse a]; s:sy[a 1],st a 1;
-      if[col[a 0] and 1=count s; r:(in;a 0;(enlist),s); :$[(=)~h; r; (not;r)]]];
+    if[any h~/:((=);(<>)); if[col a 1; a:reverse a];
+      if[col[a 0] and 1=count s:sy a 1; r:(in;a 0;(enlist),s); :$[(=)~h; r; (not;r)]]];
     if[(in)~h; s:sy a 1; if[col[a 0] and 0<count s; :(in;a 0;(enlist),s)]];
     if[(like)~h; if[col[a 0] and 1=count s:sy a 1; :(like;a 0;first s)]];
     o:((<);(>);(<=);(>=)); i:(o~\:h)?1b;
-    if[i<4; if[col a 1; a:reverse a; i:1 0 3 2 i]; s:sy[a 1],st a 1;
-      if[col[a 0] and 1=count s; :(o i;($;enlist `;a 0);enlist `$first s)]];
-    if[(within)~h; s:sy[a 1],$[(0h=type a 1) and 1=count a 1; $[all 10h=abs type each first a 1; (),/:first a 1; ()]; ()];
-      if[col[a 0] and 2=count s; :(within;($;enlist `;a 0);enlist `$s)]];
+    if[i<4; if[col a 1; a:reverse a; i:1 0 3 2 i];
+      if[col[a 0] and 1=count s:sy a 1; :(o i;($;enlist `;a 0);enlist `$first s)]];
+    if[(within)~h; if[col[a 0] and 2=count s:sy a 1; :(within;($;enlist `;a 0);enlist `$s)]];
     e};
   rt:@[rt;1;{[f;w] f each w}[f sc]];
   @[rt;2 3 inter til count rt;{[f;x] $[99h=type x; f each x; f x]}[f sc]]};
