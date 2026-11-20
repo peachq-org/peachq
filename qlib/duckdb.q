@@ -37,7 +37,7 @@
 / a NULL list empty; VARCHAR is a string, DECIMAL a float, TIME a timespan, TIMESTAMPTZ its UTC instant; a date or timestamp
 / outside q's range is 'duckdb; a column whose type q does not hold is left out (.duckdb.hidden names them).  Rows come in
 / rowid order where the table has one.  .duckdb.getx and SQL read every column exactly.
-.duckdb.get:{[c;t] $[.duckdb.i.foreign[c;t];.duckdb.i.fread[c;t;::];.duckdb.i.get[c;t]]}
+.duckdb.get:{[c;t] $[.duckdb.i.foreign[c;t];.duckdb.i.fread[c;t;.duckdb.i.fpull];.duckdb.i.get[c;t]]}
 / Create or replace a table of the handle's catalog from a q table, or from the pair .duckdb.getx answers.
 .duckdb.set:{[c;t;d] .duckdb.i.set[c;t;d]; t}
 / @ignore
@@ -261,11 +261,11 @@
 / catalog has since left behind answers
 / @ignore
 .duckdb.i.unbound:{[c] any .duckdb.err[c] like/: ("Binder Error*";"Catalog Error*")}
-/ The rows of a foreign table of a handle, of the view f makes of its own (:: for every column).  The catalog no longer
-/ having what the bound entry lists (DDL from another connection) binds it afresh and reads once more.
+/ f[c;view] over the foreign view of a table of a handle.  The catalog no longer having what the bound entry lists (DDL
+/ from another connection) binds it afresh, and f is run once more over the view built of that.
 / @ignore
 .duckdb.i.fread:{[c;t;f]
-  g:{[c;t;f] .duckdb.i.fpull[c;f .duckdb.i.ftable[c;t]]};
+  g:{[c;t;f] f[c;.duckdb.i.ftable[c;t]]};
   .[g;(c;t;f);{[g;c;t;f;e] if[not .duckdb.i.unbound c; 'e]; .duckdb.i.unbind[c;t]; g[c;t;f]}[g;c;t;f]]}
 / whether the translator is to hand: a restricted evaluation may not load it, and the select is then q's
 / @ignore
@@ -275,7 +275,7 @@
 .duckdb.i.refused:{[e] if[not e~"duckdb"; 'e]; (::)}
 / A select over a foreign view v, run by q on the rows pulled of the columns it reads (.pq.i.reads).
 / @ignore
-.duckdb.i.fresidue:{[pull;v;rt] q:.duckdb.i.ftext[v;rt]; (?) . (enlist pull .duckdb.i.fnarrow[;.pq.i.reads[v`cols;q]]),1_q}
+.duckdb.i.fresidue:{[c;v;rt] q:.duckdb.i.ftext[v;rt]; (?) . (enlist .duckdb.i.fpull[c;.duckdb.i.fnarrow[v;.pq.i.reads[v`cols;q]]]),1_q}
 
 / A select tree over a foreign view, its string columns compared as text (.sql.i.either).
 / @ignore
@@ -409,7 +409,7 @@
 .duckdb.i.fselect:{[c;v;rt]
   .duckdb.lastpush::(::);
   if[.duckdb.pushdown; r:.[.duckdb.i.fpushed;(c;v;rt;0b);.duckdb.i.refused]; if[not (::)~r; :r]];
-  .duckdb.i.fresidue[{[c;v;f] .duckdb.i.fpull[c;f v]}[c;v];v;rt]}
+  .duckdb.i.fresidue[c;v;rt]}
 / @ignore
 .duckdb.i.pushed:{[c;rt]
   big:.duckdb.i.big[c;rt 0];
@@ -423,7 +423,7 @@
     if[not (::)~r; :r]];
   if[.duckdb.i.big[c;rt 0]; .duckdb.i.maxrows[c;rt 0;"j"$.duckdb.maxrows]];
   if[not .duckdb.i.foreign[c;rt 0]; :(?) . (enlist .duckdb.get[c;rt 0]),1_rt];
-  .duckdb.i.fresidue[.duckdb.i.fread[c;rt 0];.duckdb.i.ftable[c;rt 0];rt]}
+  .duckdb.i.fread[c;rt 0;.duckdb.i.fresidue[;;rt]]}
 / @ignore
 .duckdb.qsql:{[c;cl;tree] rt:@[.pq.i.resolveSeam[cl];tree;{[e] ::}]; $[rt~(::);::;.duckdb.i.push[c;rt]]}
 
