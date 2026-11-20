@@ -71,8 +71,10 @@ q).duckdb.exec[c;"SELECT sym, CAST(notional AS DOUBLE) AS notional FROM trades"]
    q null. A NULL string reads as `""`, a NULL boolean as `0b`, a NULL byte as `0x00`, a NULL list as an empty list.
    There are no extra columns. When you need to tell a NULL from a real minimum, ask DuckDB in SQL.
 3. **Columns q cannot hold are hidden**, so `cols`, `meta` and `select from` always work.
-4. **Text is a string that also answers to symbols.** On a foreign table, `sym=`A`, `sym in `A`B`, `sym="A"` and
-   `sym like "A*"` all work on a string column, and `` `$sym `` gives you symbols in the result.
+4. **Text is a string that also answers to symbols.** On a foreign table, `` sym=`A ``, `` sym in `A`B `` and
+   `sym like "A*"` work on a string column, where q itself would signal `'type` for the symbol, and `` `$sym ``
+   gives you symbols in the result. A string literal means what it means in q: `sym="A"` compares character by
+   character, so write `` sym=`A ``, `sym like "A"` or `sym~\:"A"` for the whole string.
 5. **Row order is not promised.** `i`, `first`, `last` and `select[n]` answer from whatever order the rows arrive
    in, as a partitioned kdb database does. peachq uses a row number when DuckDB has one (a table's `rowid`, a file's
    row number, the order of an explicit file list), but do not rely on it; a view has none.
@@ -125,9 +127,17 @@ Queries
   `[..]`, a `*` in the middle) is narrowed in DuckDB by its literal prefix and finished by q.
 - **Grouping by an expression** (`by a mod 2`) is run by q on the two columns DuckDB returns, so it reads every row;
   grouping by a column runs in DuckDB.
-- **The string leniency covers comparisons, not every verb.** `=`, `<>`, `<`, `>`, `<=`, `>=`, `in`, `within` and
-  `like` accept a symbol on a string column, from a literal, a variable or an expression. `update` and `delete` do
-  not. On a q table, `sym=`A` against a string column is a `'type` error, as in kdb.
+- **The string leniency covers symbols in comparisons, nothing else.** `=`, `<>`, `<`, `>`, `<=`, `>=`, `in`,
+  `within` and `like` accept a symbol on a string column: a literal, a variable holding one, or (in a `where`) an
+  expression that reads no column. A string literal is never reinterpreted: `sym="AB"` is q's character-wise compare,
+  an error or a list per row exactly as on the in-memory table. `update` and `delete` have no leniency. On a q table,
+  `` sym=`A `` against a string column is a `'type` error, as in kdb.
+- **A value is computed up front only as a `where` operand.** In `` where qty>cfg`lim ``, ``where sym in key d`` or
+  ``where sym in exec sym from ref`` the part that reads no column is evaluated once, where the select is written
+  (so a function's locals count), and DuckDB is handed its value. The same kind of expression in a `by` or in the
+  select phrase (`` select big:px>2*cfg`lim from t ``) is left to q: the answer is the same, but that select may run
+  in q on the columns DuckDB returns instead of inside DuckDB. Assign the value to a variable first when you want it
+  pushed.
 - **`.duckdb.maxrows`** guards only q tables stored in DuckDB. A foreign table or a parquet file is never refused for
   its size, so a select with no filter DuckDB can run reads every row it names.
 - **See what ran.** `.duckdb.sqllog` lists every statement sent to DuckDB, and `.duckdb.lastpush` the translation of

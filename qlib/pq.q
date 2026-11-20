@@ -220,82 +220,70 @@
 / @eg .pq.dr "+"
 .pq.dr:{[verb] t:.Q.ops[]; i:(t`name)?$[-11h=type verb;verb;`$$[-10h=type verb;enlist verb;verb]]; $[i>=count t`name;"not in .Q.ops[]";t[`dyadic]i;.pq.drform[verb;`dyadic];.pq.drform[verb;`monadic]]}
 
-/ THE name resolver of every door that answers a select in DuckDB (a table of a handle, a linked global, a parquet file):
-/ one walk, so a name means the same through each.  .pq.i.resolve[cl;env;tree] answers the select's arguments as ? takes them
-/ (table;where terms;by;phrase;...) with every name that is no column (cl) replaced by its value, so what a rewrite or a
-/ translator sees after it is a literal.  env is what each name means where the select was written, a local included
-/ (the select seam hands it over, q_funsql.c ques_env); :: when the tree came as data and its names are globals.  A
-/ value rides as parse writes a constant (.pq.i.lit).  A one-item list is a constant already and is left alone.
-/ A part that reads no column is run here where q itself would run it once: in a where term, a by key, and the phrase
-/ of a select with no by, in q's own order (terms left to right, arguments right to left).  q runs a grouped select's
-/ phrase once a group, so there only a lookup in data is run early.
+/ THE name resolver of every door that answers a select somewhere else (a DuckDB table, a parquet file, a q peer's table,
+/ a kafka topic): one walk, so a name means the same through each.  .pq.i.resolve[cl;env;tree] answers the select's
+/ arguments as ? takes them (table;where terms;by;phrase;...) with every name that is no column (cl) replaced by its
+/ value, written as parse writes a constant (.pq.i.lit).  env is what each name means where the select was written, a
+/ local included (the select seam hands it over, q_funsql.c ques_env); :: when the tree came as data and its names are
+/ globals.  A one-item list is a constant already and is left alone.
 / 'unpush leaves the select to q, in the frame it was written in: a name with no value, an assignment, a nested select
-/ whose table cannot be read here.
-/ Each part is walked to (state;node).  State 2: it reads no column and was run, or is a constant.  1: it reads columns
-/ of its own select's table alone (a nested select's), so it runs only with that select.  0: it reads a column of an
-/ enclosing select, or was left for q.
+/ whose table cannot be read here (it reads a column, or is no table) or that names a column of the enclosing one.
 / @ignore
 .pq.i.lit:{[v] $[(type v) in -11 11 0h;enlist v;v]}
-/ a name: a column, or a dotted name under one, stays (dep are the columns of the enclosing selects, cl beyond them the
-/ select's own); any other is its value
+/ a name: a column, or a dotted name under one, stays; any other is its value.  dep are the columns of the enclosing
+/ selects that a nested one's table does not have.
 / @ignore
 .pq.i.rname:{[cl;dep;env;x]
-  if[null x; :(2;x)];
+  if[null x; :x];
   s:"." vs string x; h:`$first s;
-  if[(x in cl) or (h in cl) and not null h; :("j"$not any (x,h) in dep;x)];
-  v:$[(null h) or env~(::);@[get;x;{[e] '`unpush}];
+  if[(x in cl) or (h in cl) and not null h; :x];
+  if[any (x,h) in dep; '`unpush];
+  .pq.i.lit $[(null h) or env~(::);@[get;x;{[e] '`unpush}];
     not h in key env;'`unpush;
     1=count s;env h;
-    .[{[d;k] d . k};(env h;`$1_s);{[e] '`unpush}]];
-  (2;.pq.i.lit v)}
-/ A part that reads no column, run: (2;its value as a literal), or (0;the part) left for q.  once says q would run it
-/ once; without it only data applied to literals is run (a dict or a list indexed), which no repeat can tell apart.
-/ value, eval and get of text or of a name read the select's columns where q runs them, so they always stay.
+    .[{[d;k] d . k};(env h;`$1_s);{[e] '`unpush}]]}
+/ a select inside the select, (?;table;where;by;phrase;...) as parse writes its slots
 / @ignore
-.pq.i.rfold:{[once;n]
-  plain:{[v] t:.Q.c.lty v; $[-11h=t;0b;t in 0 11h;2>count v;1b]};
-  a:$[1<count n;n 1;()]; a:$[(0h=type a) and 1=count a;first a;a];
-  if[(any (n 0)~/:(value;eval;get;parse)) and (type a) in -11 -10 0 10 11h; :(0;n)];
-  if[not once; if[not (all plain each n) and 100h>type first n; :(0;n)]];
-  .[{[n] (2;.pq.i.lit eval n)};enlist n;{[n;e] (0;n)}[n]]}
-/ one expression; a projection's elided argument is no expression, and the branches of a cond are run only with the
-/ whole of it
+.pq.i.sel:{[x] (any (x 0)~/:(?;!)) and (count x) in 5 6 7}
+/ one expression; a projection's elided argument is no expression
 / @ignore
-.pq.i.rs:{[cl;dep;env;once;x]
+.pq.i.rs:{[cl;dep;env;x]
   t:.Q.c.lty x;
   if[-11h=t; :.pq.i.rname[cl;dep;env;x]];
-  if[(not t in 0 11h) or 2>count x; :(2;x)];
+  if[(not t in 0 11h) or 2>count x; :x];
   if[any (x 0)~/:(:;::); '`unpush];
-  if[(any (x 0)~/:(?;!)) and (count x) in 5 6 7; :.pq.i.rsub[cl;dep;env;once;x]];
-  i:where 101h<>type each x; r:reverse .z.s[cl;dep;env;once and not (($)~x 0) and 3<count x] each reverse x i;
-  n:$[11h=t;r[;1];@[x;i;:;r[;1]]];
+  if[.pq.i.sel x; :.pq.i.rsub[cl;dep;env;x]];
+  n:$[11h=t;.z.s[cl;dep;env] each x;@[x;where 101h<>type each x;.z.s[cl;dep;env]]];
   if[not (.Q.c.lty n) in 0 11h; '`unpush];
-  $[2=min r[;0];.pq.i.rfold[once;n];(min r[;0];n)]}
-/ A select inside the select, (?;table;where;by;phrase;...) as parse writes its slots.  Its table is read first, so its
-/ own columns are known and are read before the enclosing ones; a select that reads none of the enclosing ones is run
-/ whole, its own columns in sight, where q would run it once.
+  n}
+/ A nested select's table is read first, once, so its names are resolved against its own columns.
 / @ignore
-.pq.i.rsub:{[cl;dep;env;once;x]
-  o:reverse .pq.i.rs[cl;dep;env;once] each reverse 5_x;
-  src:.pq.i.rs[cl;dep;env;once] x 1; if[2>src 0; '`unpush];
-  t:@[eval;src 1;{[e] '`unpush}]; if[not .Q.qt t; '`unpush];
-  ic:(cols t),`i; b:x 3; f:.pq.i.rs[ic,cl;cl except ic;env]; g:f once and 99h<>type b;
-  each_:{[f;v] r:f each v; ($[count v;min r[;0];2];r[;1])};
-  w:x 2; a:x 4;
-  w:$[()~w;(2;w);(0h=type w) and (1=count w) and 0h=type first w;{[r] (r 0;enlist r 1)} each_[f once] first w;'`unpush];
-  b:$[99h=type b;{[b;r] (r 0;(key b)!r 1)}[b] each_[f once] value b;(b~()) or -1h=type b;(2;b);'`unpush];
-  a:$[99h=type a;{[a;r] (r 0;(key a)!r 1)}[a] each_[g] value a;
-    ()~a;(2;a);
-    11h=type a;$[all a in ic;(1;a);'`unpush];
-    (0h=type a) and 1=count a;{[r] (r 0;enlist r 1)} g first a;
-    '`unpush];
-  n:(x 0;src 1;w 1;b 1;a 1),o[;1];
-  $[once and 0<min (w 0;b 0;a 0),o[;0];.pq.i.rfold[1b;n];(0;n)]}
+.pq.i.rsub:{[cl;dep;env;x]
+  src:.pq.i.rs[cl;dep;env] x 1; if[not .pq.i.free src; '`unpush];
+  t:@[eval;src;{[e] '`unpush}]; if[not .Q.qt t; '`unpush];
+  ic:(cols t),`i; f:.pq.i.rs[ic;(cl,dep) except ic;env]; g:{[f;p] $[99h=type p;(key p)!f each value p;(0h=type p) and 1=count p;enlist f first p;p]};
+  w:x 2; w:$[(0h=type w) and (1=count w) and 0h=type first w;enlist f each first w;w];
+  (x 0;t;w;g[f] x 3;g[f] x 4),.pq.i.rs[cl;dep;env] each 5_x}
+/ Whether a resolved part reads no column.  value, eval, get and parse of text or of a name read the select's columns
+/ where q runs them, so they count as reading one.
+/ @ignore
+.pq.i.free:{[x]
+  t:.Q.c.lty x; if[-11h=t; :null x]; if[(not t in 0 11h) or 2>count x; :1b]; if[.pq.i.sel x; :1b];
+  a:x 1; a:$[(0h=type a) and 1=count a;first a;a];
+  $[(any (x 0)~/:(value;eval;get;parse)) and (type a) in -11 -10 0 10 11h;0b;all .z.s each x]}
+/ A resolved where term with each operand that reads no column, beside one that reads one, run here and its value in
+/ its place (col<verb>expr, either way round); an operand that fails is left for q.  The branches of a cond are run
+/ only with the whole of it.
+/ @ignore
+.pq.i.rfold:{[x]
+  if[(0h<>.Q.c.lty x) or 2>count x; :x]; if[.pq.i.sel[x] or (($)~x 0) and 3<count x; :x];
+  x:@[x;where 101h<>type each x;.z.s]; f:.pq.i.free each x;
+  if[all f; :x];
+  @[x;where f and {[y] ((.Q.c.lty y) in 0 11h) and 1<count y} each x;{[y] @[{[y] .pq.i.lit eval y};y;{[y;e] y}[y]]}]}
 / @ignore
 .pq.i.resolve:{[cl;env;tree]
-  cl:cl,`i; f:{[cl;env;once;x] last .pq.i.rs[cl;cl;env;once;x]}[cl;env];
-  g:{[f;x] $[99h=type x;(key x)!f each value x;(0h=type x) and 0<count x;f x;x]};
-  (tree 0;f[1b] each tree 1;g[f 1b] tree 2;g[f 99h<>type tree 2] tree 3),4_tree}
+  f:.pq.i.rs[cl,`i;();env]; g:{[f;x] $[99h=type x;(key x)!f each value x;(0h=type x) and 0<count x;f x;x]};
+  (tree 0;{[f;x] .pq.i.rfold f x}[f] each tree 1;g[f] tree 2;g[f] tree 3),4_tree}
 / The tree a provider's qsql hook is handed ends with the dict of what its names mean to the caller (the select seam,
 / q_funsql.c ques_pushed): (env;the tree without it), env :: for a tree that carries none.
 / @ignore
@@ -312,22 +300,12 @@
   if[()~rt 3; :cl];
   n:.pq.i.syms 1_rt; cl where cl in n,`$first each "." vs/: string n}
 
-/ The q peer's and kafka's walk, kept as it was: a name is a GLOBAL of this process and a function is 'unpush, the q
-/ peer's law (docs/providers-architecture.md: an unpushable query is 'unpush).  It reads no caller's frame and no scope
-/ of the select's own (defects.tsv Djubfy).
-/ @ignore
-.pq.i.rval:{[x] v:@[value;x;{[e] 'unpush}]; $[100h<=type v;'unpush;((11h=abs type v)or(type v) in 0 98 99h);enlist v;v]}
-/ @ignore
-.pq.i.rnode:{[cl;x] $[(type x) in 0 99h;.z.s[cl] each x;-11h=type x;$[x in cl;x;.pq.i.rval x];x]}
-/ @ignore
-.pq.i.resolveTree:{[cl;tree] t:last .pq.i.seam tree; (enlist t 0),.pq.i.rnode[cl,`i] each 1_t}
-
 .pq.i.q.bind:{[c;t] c ({[t] cols get t};t)};
 .pq.i.q.get:{[c;t] c (get;t)};
 .pq.i.q.set:{[c;t;d] c (set;t;d); t};
 .pq.i.q.upsert:{[c;t;d] c (upsert;t;d); t};
 .pq.i.q.hdel:{[c;t] c (!;`.;();0b;enlist t); t};
-.pq.i.q.qsql:{[c;cl;tree] c (?),.pq.i.resolveTree[cl;tree]};
+.pq.i.q.qsql:{[c;cl;tree] c (?),.pq.i.resolveSeam[cl;tree]};
 
 / One line of facts about a table, one per column in column order: numeric columns as a range, booleans as the
 / share true, everything else as a distinct count (`all distinct` when every row differs; a temporal column that
