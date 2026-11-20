@@ -303,14 +303,14 @@
 / the same over a seam tree, for a door's hook
 / @ignore
 .pq.i.resolveSeam:{[cl;tree] .pq.i.resolve[cl] . .pq.i.seam tree}
-/ every symbol in a tree, whatever it stands for there, but a dict's keys: the names a select gives its outputs
+/ Every symbol in a tree but a dict's keys, the names a select gives its outputs; and by them the columns of cl a resolved
+/ select rt reads, in cl's order: all under an empty phrase, and p for p.date.  A literal symbol counts: one column too many is harmless.
 / @ignore
 .pq.i.syms:{[x] $[99h=type x;raze .z.s each value x;0h=type x;raze .z.s each x;11h=abs type x;(),x;`$()]}
-/ The columns of cl that a resolved select rt reads, in cl's order: every one under an empty phrase (select from), else each
-/ one a symbol in it spells, or heads a dotted name of (p.date).  A symbol that is a literal counts as well: a column read
-/ for nothing costs little, one not read is an error.
 / @ignore
-.pq.i.reads:{[cl;rt] $[()~rt 3;cl;cl where cl in n,`$first each "." vs/: string n:.pq.i.syms 1_rt]}
+.pq.i.reads:{[cl;rt]
+  if[()~rt 3; :cl];
+  n:.pq.i.syms 1_rt; cl where cl in n,`$first each "." vs/: string n}
 
 / The q peer's and kafka's walk, kept as it was: a name is a GLOBAL of this process and a function is 'unpush, the q
 / peer's law (docs/providers-architecture.md: an unpushable query is 'unpush).  It reads no caller's frame and no scope
