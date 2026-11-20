@@ -125,6 +125,10 @@
 .duckdb.i.FSPAN:`timestampsec`timestampms`timestampus`timestamp!(("1707-09-22 00:12:44";"2262-04-11 23:47:16");
   ("1707-09-22 00:12:43.146";"2262-04-11 23:47:16.854");("1707-09-22 00:12:43.145225";"2262-04-11 23:47:16.854775");
   ("1707-09-22 00:12:43.145224194";"2262-04-11 23:47:16.854775806"))
+/ the logicals whose stored column a pushed where term compares as it stands: DuckDB then answers as q does on the shown
+/ value once the term has its null arms (.sql.i.compare).  Any other compares the converted column.
+/ @ignore
+.duckdb.i.FBARE:`int8`int16`int32`int64`uint16`uint32`float32`float64`utf8`date`timestamp`timestampsec`timestampms`timestampus
 / @ignore
 .duckdb.i.quote:{[s] "\"",ssr[s;"\"";"\"\""],"\""}
 / @ignore
@@ -148,7 +152,9 @@
     lg in `int8`uint16`uint32`timens;x;
     ()]}
 / One column, or one level of a list, x the SQL naming it: (sql;meta char;dtype;logical), the last two the schema row the read
-/ needs ("" for none); () when the type is hidden.  ty is .duckdb.types[]'s canon rows, dtype!(logical;ktype).
+/ needs ("" for none); () when the type is hidden.  ty is .duckdb.types[]'s canon rows, dtype!(logical;ktype).  A column that
+/ is no list adds what a push needs: the DuckDB type the SQL answers, the canon logical, and whether q compares a literal
+/ with it as DuckDB does (a timespan is a BIGINT to q's parameters and a TIME to DuckDB, so no term or aggregate reads one).
 / @ignore
 .duckdb.i.fcol:{[ty;nm;dt;x;depth]
   if["]"=last dt;
@@ -159,32 +165,50 @@
       $[count e 2;e[2],"[]";""];$[count e 2;`$"list(",string[e 3],")";`])];
   if[not (b:`$first "(" vs dt) in key ty; :()];
   if[()~w:.duckdb.i.fwrap[nm;lg:ty[b] 0;string b;x]; :()];
-  sym:lg=`categorical;
-  (w;$[lg in key .duckdb.i.FCAST;ty[`$.duckdb.i.FCAST lg] 1;ty[b] 1];$[sym;"VARCHAR";""];$[sym;`symbol;`])}
+  sym:lg=`categorical; cast:lg in key .duckdb.i.FCAST;
+  (w;$[cast;ty[`$.duckdb.i.FCAST lg] 1;ty[b] 1];$[sym;"VARCHAR";""];$[sym;`symbol;`];
+    $[cast;.duckdb.i.FCAST lg;sym;"VARCHAR";lg=`timestamptz;"TIMESTAMP";string b];lg;not lg in `timeus`timens)}
 / THE foreign view of a source, for a pull and for a push: rel its FROM text, sch its columns ([] col; dtype) as DuckDB declares
-/ them, order its row-number expression ("" for none).  Answers sel, the SELECT list; cols and t, what q shows and its meta
-/ chars; schema, the rows .duckdb.exec's triple needs beside the statement; hidden, the columns left out.
+/ them, order the expressions its rows sort by (() for none).  Answers sel, the SELECT list; cols and t, what q shows and its
+/ meta chars; schema, the rows .duckdb.exec's triple needs beside the statement; hidden, the columns left out; push, the
+/ schema .sql.translate reads (empty when a shown name is one the pushed statement uses itself) and src, the SELECT list of
+/ the relation that statement reads: sel, and each stored column a where term compares as it stands under its raw name.
 / @ignore
 .duckdb.i.fview:{[rel;sch;order]
   ty:exec dtype!flip (logical;ktype) from .duckdb.types[] where canon;
   qn:.duckdb.i.quote each string sch`col;
   r:.duckdb.i.fcol[ty]'[string sch`col;sch`dtype;qn;0];
   j:where 0=count each r; i:where 0<count each r; s:i where 0<count each r[i;2];
-  `rel`order`sel`cols`t`schema`hidden!(rel;order;", " sv {[e;q] e[0]," AS ",q}'[r i;qn i];sch[`col] i;"c"$r[i;1];
-    ([] col:sch[`col] s; dtype:r[s;2]; logical:r[s;3]);([] col:sch[`col] j; dtype:sch[`dtype] j))}
+  sel:", " sv {[e;q] e[0]," AS ",q}'[r i;qn i];
+  (`rel`order`sel`cols`t`schema`hidden!(rel;order;sel;sch[`col] i;"c"$r[i;1];
+    ([] col:sch[`col] s; dtype:r[s;2]; logical:r[s;3]);([] col:sch[`col] j; dtype:sch[`dtype] j))),
+    .duckdb.i.fpush[sel;sch[`col] i;qn i;r i;order]}
+/ The push half of a foreign view (.duckdb.i.fview): a column's logical is the one q writes for the type q shows, so the
+/ translator classes it as q's own column of that type; its sentinel is the stored value that reads as the q null.
+/ @ignore
+.duckdb.i.fpush:{[sel;cl;qn;r;order]
+  one:7=count each r; lg:{[x;y] $[y;x 5;`]}'[r;one]; ql:exec ktype!logical from .duckdb.types[] where needs<>`dtype;
+  bare:lg in .duckdb.i.FBARE; al:`$"_q_raw_",/:string cl;
+  p:([] col:cl; dtype:{[x;y] $[y;x 4;""]}'[r;one]; logical:{[ql;x;y] $[count x 2;x 3;not y;`;x 6;ql x 1;`]}[ql]'[r;one]; iskey:0b;
+    raw:?[bare;al;cl]; sentinel:{[x] $[x in key .duckdb.i.FMIN;.duckdb.i.FMIN x;x in `float32`float64;"NaN";""]} each lg);
+  if[count order; p,:([] col:1#`i; dtype:1#enlist "BIGINT"; logical:1#`int64; iskey:1#0b; raw:1#`; sentinel:1#enlist "")];
+  if[any (lower `i,al where bare) in lower cl; :`push`src!(0#p;"")];
+  `push`src!(p;", " sv (enlist sel),{[q;a] q," AS ",.duckdb.i.quote string a}'[qn where bare;al where bare])}
 / @ignore
 .duckdb.i.foreign:{[c;t] 0=count .duckdb.i.schema[c;t]}
 / @ignore
 .duckdb.i.ftable:{[c;t]
   sch:select col, dtype from .duckdb.i.info[c;t]`schema;
-  .duckdb.i.fview[.duckdb.i.qname t;sch;$[`rowid in sch`col;"";"rowid"]]}
-/ The rows of a foreign view.  A view has no rowid: DuckDB's refusal of the order is answered by the same read without it.
+  .duckdb.i.fview[.duckdb.i.qname t;sch;$[`rowid in sch`col;();enlist "rowid"]]}
+/ A view has no rowid: DuckDB's refusal of the row number, on a read or a push, is answered by the same without it.
+/ @ignore
+.duckdb.i.norowid:{[c;v] ((enlist "rowid")~v`order) and .duckdb.err[c] like "Binder Error: Referenced column \"rowid\"*"}
+/ The rows of a foreign view.
 / @ignore
 .duckdb.i.fpull:{[c;v]
   if[0=count v`cols; '`type];
-  q:{[v;o] s:"SELECT ",v[`sel]," FROM ",v[`rel],$[count o;" ORDER BY ",o;""]; $[count v`schema;(s;();v`schema);s]}[v];
-  .[.duckdb.exec;(c;q v`order);{[c;v;q;e]
-    if[("rowid"~v`order) and .duckdb.err[c] like "Binder Error: Referenced column \"rowid\"*"; :.duckdb.exec[c;q ""]]; 'e}[c;v;q]]}
+  q:{[v;o] s:"SELECT ",v[`sel]," FROM ",v[`rel],$[count o;" ORDER BY ",", " sv o;""]; $[count v`schema;(s;();v`schema);s]}[v];
+  .[.duckdb.exec;(c;q v`order);{[c;v;q;e] if[.duckdb.i.norowid[c;v]; :.duckdb.exec[c;q ()]]; 'e}[c;v;q]]}
 
 / A select tree over a foreign view, its string columns compared as text (.sql.i.either).
 / @ignore
@@ -266,7 +290,7 @@
 / The row count of a table of the handle's catalog, counted by DuckDB.
 .duckdb.count:{[c;t] first .duckdb.i.exec[c; "SELECT COUNT(*) AS n FROM ",.duckdb.i.qname t]`n}
 
-/ Whether a qSQL select on a q-origin table of the handle runs what .sql.translate can move (where terms, limit, order; the select
+/ Whether a qSQL select on a table of the handle runs what .sql.translate can move (where terms, limit, order; the select
 / phrase and by whole when every item translates) inside DuckDB before q runs the rest, read on every select; off, every select pulls
 / the whole table.  A statement DuckDB refuses stays in .duckdb.sqllog and the select pulls instead.  Set it with .duckdb.set_pushdown.
 .duckdb.pushdown:1b
@@ -288,16 +312,38 @@
 .duckdb.i.stale:{[c] any (first "\n" vs .duckdb.err c) like/: ("Binder Error: Referenced column*";"Catalog Error: Table with name*")}
 / @ignore
 .duckdb.i.big:{[c;t] .duckdb.maxrows<.[.duckdb.i.rows;(c;t);0N]}
+/ The part of the select rt that .sql.translate moves, run over the source rt 0 names with the schema sc, q running the
+/ rest; :: when nothing moves.  with is the text ahead of the statement that defines that source ("" for a table).
 / @ignore
-.duckdb.i.pushed:{[c;rt]
-  if[0=count sc:.duckdb.i.schema[c;rt 0]; :(::)];
+.duckdb.i.run:{[c;rt;sc;with;big]
   r:.sql.translate[((?);rt 0;$[count rt 1;enlist rt 1;()]),2_rt;sc];
-  if[(0=count r[0;2]) and .duckdb.i.big[c;rt 0]; :(::)];
+  if[(0=count r[0;2]) and big; :(::)];
   if[(not (::)~r 3) and all ((0=count r[0;2]);(::)~r[0;5];0=count r[0;6]); :(::)];
-  t:.duckdb.exec[c;(.sql.render r 0;r 1;r 2)]; .duckdb.lastpush::r;
+  t:.duckdb.exec[c;(with,.sql.render r 0;r 1;select from r[2] where not null logical)]; .duckdb.lastpush::r;
   / a by with no sort order answers a key marked s#, as q's own select does; a key s# cannot verify stays unmarked
   if[(::)~r 3; :$[(99h=type rt 2) and (6>count rt) and 99h=type t; @[`s#;t;t]; t]];
   (?) . (t;$[count r[3;2]; r[3;2;0]; ()]),3_r 3}
+/ A select over a foreign view v, pushed: its statement reads the view as one relation, defined ahead of it, in which a
+/ where term finds each stored column, the select list each converted one, and i the row number the pull orders by.  The
+/ tree is the one the pull runs (.duckdb.i.ftext).
+/ @ignore
+.duckdb.i.fpushed:{[c;v;rt;big]
+  if[0=count v`push; :(::)];
+  go:{[c;v;rt;big;o]
+    i:$[0=count o;"";", ",$[1=count o;first o;"ROW(",(", " sv o),")"]," AS i"];
+    w:"WITH \"_q_src\" AS NOT MATERIALIZED (SELECT ",v[`src],i," FROM ",v[`rel],") ";
+    .duckdb.i.run[c;@[.duckdb.i.ftext[v;rt];0;:;`$"_q_src"];$[count o;v`push;select from v[`push] where col<>`i];w;big]};
+  .[go;(c;v;rt;big;v`order);{[go;c;v;rt;big;e] if[not .duckdb.i.norowid[c;v]; 'e]; go[c;v;rt;big;()]}[go;c;v;rt;big]]}
+/ A select over a foreign view v that is no bound table (a parquet file): pushed, or run by q on the rows pulled.
+/ @ignore
+.duckdb.i.fselect:{[c;v;rt]
+  .duckdb.lastpush::(::);
+  if[.duckdb.pushdown; r:.[.duckdb.i.fpushed;(c;v;rt;0b);{[e] ::}]; if[not (::)~r; :r]];
+  (?) . (enlist .duckdb.i.fpull[c;v]),1_.duckdb.i.ftext[v;rt]}
+/ @ignore
+.duckdb.i.pushed:{[c;rt]
+  big:.duckdb.i.big[c;rt 0];
+  $[count sc:.duckdb.i.schema[c;rt 0];.duckdb.i.run[c;rt;sc;"";big];.duckdb.i.fpushed[c;.duckdb.i.ftable[c;rt 0];rt;big]]}
 / @ignore
 .duckdb.i.push:{[c;rt]
   .duckdb.lastpush::(::);
