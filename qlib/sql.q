@@ -505,12 +505,12 @@
 .sql.i.nullpred:{[k;c]
   s:$[`sentinel in key k; k`sentinel; ""];
   $[count s; (`or;(`$"is null";c);$[s~"NaN"; (`isnan;c); (`$"=";c;enlist `$s)]);
-    .sql.i.either_null k; (`or;(`$"is null";c);(`$"=";c;.sql.i.lit .sql.i.TEXTNULL k`logical));
+    1b~k`either; (`or;(`$"is null";c);(`$"=";c;.sql.i.lit .sql.i.TEXTNULL k`logical));
     k`nullable; (`$"is null";c); `symbol=k`logical; (`$"=";c;.sql.i.lit ""); (::)]};
 / A symbol or char column q wrote holds its null as a value; the same column in a file another tool rewrote may hold NULL
-/ beside it (raw, in .sql.translate's schema, marks such a column), and both are then the q null.
+/ beside it (raw, in .sql.translate's schema, marks such a column: .sql.i.compare flags its class row either), and both
+/ are then the q null.
 .sql.i.TEXTNULL:`symbol`char!("";enlist " ");
-.sql.i.either_null:{[k] $[`either in key k; k`either; 0b]};
 / e over a nullable column reads NULL on its null row: keeps adds the rows q keeps there, strict makes the expression
 / false there instead (under NOT, where NULL would not flip)
 .sql.i.arm:{[k;strict;keeps;c;e]
@@ -550,7 +550,7 @@
   if[h=`list; :.sql.i.arm[k;strict;$[str; any 0=count each w; any null w];c;
     $[str and 1=count w; (`$"=";c;.sql.i.lit first w); (s;.sql.i.lit .sql.i.bind w;c)]]];
   if[k[`nullable] and null w;
-    :$[null r`nulllit; (::); (0=count sn) and not .sql.i.either_null k; (r`nulllit;c);
+    :$[null r`nulllit; (::); (0=count sn) and not 1b~k`either; (r`nulllit;c);
       (`$"is null")=r`nulllit; .sql.i.nullpred[k;c]; (`not;.sql.i.nullpred[k;c])]];
   .sql.i.arm[k;strict;k[`nullable] and r`keepsnull;c;(s;c;.sql.i.lit .sql.i.bind w)]};
 / the q heads of int arithmetic, spelt by .sql.i.arith as + - * and unary -
