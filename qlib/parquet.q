@@ -4,7 +4,8 @@
 / A file written from a q table carries its q types in the key-value metadata, so it reads back as written.  Any other
 / file reads as .duckdb.get reads a table q did not write: one q type per DuckDB type, nulls as q nulls, text as strings
 / (never symbols), no companion columns, and a column whose type q does not hold left out (.parquet.hidden names them).
-/ A URL (s3:// ...) passes straight through.
+/ A select on either kind, a glob included, runs what it can inside DuckDB, so a where or a by reads only the columns and
+/ row groups it needs.  A URL (s3:// ...) passes straight through.
 / .
 / @eg
 / .parquet.write[`:trade.parquet;([] sym:`a`b; px:1.5 2.5);()]
@@ -21,10 +22,10 @@
     99h=type v;"{",(", " sv {[k;x] .duckdb.i.ident[k],": ",.parquet.i.copyval x}'[key v;value v]),"}";
     .duckdb.i.lit v]}
 / @ignore
-.parquet.i.rel:{[file;opts] "read_parquet(",(", " sv (enlist .parquet.i.file file),.duckdb.i.opts[.parquet.i.opt;opts]),")"}
+.parquet.i.rel:{[src;opts] "read_parquet(",(", " sv (enlist src),.duckdb.i.opts[.parquet.i.opt;opts]),")"}
 / @ignore
-.parquet.i.kv:{[c;file]
-  r:.duckdb.exec[c;"SELECT decode(value) AS v FROM parquet_kv_metadata(",(.parquet.i.file file),") WHERE decode(key) = 'q_schema' LIMIT 1"];
+.parquet.i.kv:{[c;src]
+  r:.duckdb.exec[c;"SELECT decode(value) AS v FROM parquet_kv_metadata(",src,") WHERE decode(key) = 'q_schema' LIMIT 1"];
   $[count r;first r`v;""]}
 / @ignore
 .parquet.i.coord:{[t]
@@ -58,34 +59,78 @@
 / @ignore
 .parquet.i.desc:{[c;rel]
   update col:`$col from .duckdb.exec[c;"SELECT column_name AS col, column_type AS dtype FROM (DESCRIBE SELECT * FROM ",rel,")"]}
+/ What a q_schema entry says q wrote, ([col] logical): the two fields a read needs, as text.  A row without them is left
+/ out, any other field is unread (a file has no key, so iskey says nothing), and an entry that is no JSON list of rows
+/ says nothing at all.
 / @ignore
-.parquet.i.restore:{[rel;kv;query]
-  c:.duckdb.main[];
-  env:.parquet.i.desc[c;rel] lj `col xkey select col:`$col, logical:`$logical, iskey from .j.k kv;
-  .duckdb.set[c;.duckdb.i.staging;(flip (env`col)!(count env)#enlist ();env)];
-  .duckdb.exec[c;"INSERT INTO ",(.duckdb.i.qname .duckdb.i.staging)," SELECT * FROM ",rel];
-  r:$[.duckdb.i.none query;.duckdb.get[c;.duckdb.i.staging];.duckdb.i.push[c;.pq.i.resolveTree[env`col;(enlist .duckdb.i.staging),eval each 2_query]]];
-  .duckdb.hdel[c;.duckdb.i.staging]; r}
-
-/ The foreign view of a file without q_schema (.duckdb.i.fview).  Its rows are ordered by file and row number through two
-/ read_parquet helper columns, unless the caller's options or the file's own columns already use those names.
+.parquet.i.qschema:{[kv]
+  j:@[.j.k;kv;{[e] ()}]; if[not (type j) in 0 98h; j:()];
+  f:{[k;x] $[99h<>type x;"";not k in key x;"";10h=type x k;x k;""]};
+  n:f[`col] each j; l:f[`logical] each j; i:where (0<count each n) and 0<count each l;
+  ([col:`$n i] logical:`$l i)}
+/ The view of the files src names in SQL (.duckdb.i.fview): their columns as DuckDB declares them, beside what the q_schema
+/ entry of head, the first of them, says q wrote.  Its rows are ordered by row number, after the file where src may name
+/ more than one, through read_parquet's helper columns, unless the caller's options or the file's own columns already use
+/ those names.
 / @ignore
-.parquet.i.fview:{[c;file;opts]
-  o:$[.duckdb.i.none opts;()!();opts]; h:`filename`file_row_number!("_q_file";1b);
-  rel:.parquet.i.rel[file;o,h];
-  d:$[any key[h] in key o;();@[.parquet.i.desc[c];rel;{[e] ()}]];
+.parquet.i.build:{[c;src;head;one;opts]
+  qs:.parquet.i.qschema .parquet.i.kv[c;head];
+  o:$[.duckdb.i.none opts;()!();opts]; h:$[one;1_;::] `filename`file_row_number!("_q_file";1b);
+  rel:.parquet.i.rel[src;o,h];
+  d:$[any `filename`file_row_number in key o;();@[.parquet.i.desc[c];rel;{[e] ()}]];
   if[count d;
-    :.duckdb.i.fview[rel;select from d where not col in `$("_q_file";"file_row_number");("\"_q_file\"";"file_row_number")]];
-  rel:.parquet.i.rel[file;opts];
-  .duckdb.i.fview[rel;.parquet.i.desc[c;rel];()]}
+    :.duckdb.i.fview[rel;(select from d where not col in `$$[one;1_;::] ("_q_file";"file_row_number")) lj qs;
+      $[one;1_;::] ("\"_q_file\"";"file_row_number")]];
+  rel:.parquet.i.rel[src;opts];
+  .duckdb.i.fview[rel;.parquet.i.desc[c;rel] lj qs;()]}
+
+/ the read_parquet options under which DuckDB reads a source's columns from its file names and its first file alone
+/ @ignore
+.parquet.i.FIRST:`hive_partitioning`filename`file_row_number
+/ What a local source is made of, () for a URL or a file that will not stat: files, in read order (DuckDB expands a glob),
+/ and stamp, which differs whenever the view of the source might: the file names with the size and time (.fs.i.stamp) of
+/ each file the columns are read from, the first alone for one file or glob under .parquet.i.FIRST.  stamp is () while
+/ such a file is under two seconds old: a file system may keep times in whole seconds, and a rewrite within the one a
+/ stamp was taken in would not show.
+/ @ignore
+.parquet.i.stat:{[c;file;o]
+  ps:{[x] $[":"=first x;1_x;x]} each string (),file;
+  if[any ps like "*://*"; :()];
+  fl:raze {[c;p] $[any p in "*?[{";.duckdb.exec[c;"SELECT file AS f FROM glob(",.duckdb.i.lit[p],")"]`f;enlist p]}[c] each ps;
+  b:.fs.i.stamp each $[(1=count ps) and all key[o] in .parquet.i.FIRST;1 sublist fl;fl];
+  if[(0=count b) or any null raze b; :()];
+  `files`stamp!(fl;$[all b[;1]<("j"$.z.p)-2000000000;(fl;b);()])}
+/ how many sources keep their view; one more takes the place of the oldest
+/ @ignore
+.parquet.i.SLOTS:16
+/ the kept views, each (source;stamp;view), and how many sources have taken a place
+/ @ignore
+.parquet.i.cache:()
+/ @ignore
+.parquet.i.turn:0
+/ THE view of a source, every parquet door's one way in.  A local source keeps its view while its stamp is unchanged
+/ (.parquet.i.stat), so a later read asks DuckDB for the stamp alone.  Several files are read as the list the stamp was
+/ taken of, held in a DuckDB variable: the statement neither expands the glob again nor reads a file the view was not
+/ built from.  A URL has no stamp and is asked afresh on every read, its q_schema entry the first any of its files has.
+/ @ignore
+.parquet.i.view:{[c;file;opts]
+  s:.parquet.i.file file; o:$[.duckdb.i.none opts;()!();opts];
+  st:@[.parquet.i.stat[c;file];o;{[e] ()}];
+  if[0=count st; :.parquet.i.build[c;s;s;0b;opts]];
+  k:(file;o); i:first where k~/:{[x] x 0} each .parquet.i.cache;
+  if[not null i; if[(count st`stamp) and st[`stamp]~.parquet.i.cache[i;1]; :.parquet.i.cache[i;2]]];
+  if[null i; i:.parquet.i.turn mod .parquet.i.SLOTS; .parquet.i.turn+:1];
+  fl:st`files; nm:"_q_pf",string i;
+  if[1<count fl; .duckdb.exec[c;"SET VARIABLE ",nm," = [",(", " sv .duckdb.i.lit each fl),"]"]];
+  v:.parquet.i.build[c;$[1<count fl;"getvariable('",nm,"')";.duckdb.i.lit first fl];.duckdb.i.lit first fl;1=count fl;opts];
+  $[i<count .parquet.i.cache;.parquet.i.cache[i]:(k;st`stamp;v);.parquet.i.cache,:enlist (k;st`stamp;v)]; v}
 
 / The columns of a file that .parquet.read does not show because q has no type for theirs; DuckDB's SQL still reads them.
 / A file written from a q table hides none.
 / @param opts the read_parquet options, as .parquet.read takes them
 / @return a table ([] col; dtype), dtype as DuckDB declares it
 / @eg .parquet.hidden[`:t.parquet;()]
-.parquet.hidden:{[file;opts]
-  c:.duckdb.main[]; $[count .parquet.i.kv[c;file];([] col:0#`; dtype:());.parquet.i.fview[c;file;opts]`hidden]}
+.parquet.hidden:{[file;opts] .parquet.i.view[.duckdb.main[];file;opts]`hidden}
 
 / Read a parquet file (or files) as a table, optionally through a select pushed down to DuckDB.
 / @param file `:x.parquet, a glob as `$":data/*.parquet", a URL, or a list of them
@@ -96,11 +141,24 @@
 / @eg .parquet.read[`$":t/*/*.parquet";(enlist `hive_partitioning)!enlist 1b;()]
 / @eg .parquet.read[`:t.parquet;();parse "select sum a from t where a>1"]
 .parquet.read:{[file;opts;query]
-  rel:.parquet.i.rel[file;opts]; c:.duckdb.main[];
+  c:.duckdb.main[];
   if[not .duckdb.i.none query; if[not (?)~query 0; '`type]];
-  if[count kv:.parquet.i.kv[c;file]; :.parquet.i.restore[rel;kv;query]];
-  v:.parquet.i.fview[c;file;opts];
-  $[.duckdb.i.none query;.duckdb.i.fpull[c;v];.duckdb.i.fselect[c;v;.pq.i.resolveTree[v`cols;(enlist rel),eval each 2_query]]]}
+  v:.parquet.i.view[c;file;opts];
+  $[.duckdb.i.none query;.duckdb.i.fpull[c;v];.duckdb.i.fselect[c;v;.pq.i.resolveTree[v`cols;(enlist v`rel),eval each 2_query]]]}
+/ The suffix door's select (select ... from `:f.parquet): tree is its arguments as ? takes them, env what each plain name
+/ they mention means where the select was written, a local included.  A name that is no column takes that meaning; one
+/ with none leaves the select to q (::), as does a restricted evaluation that may not load the translator.
+/ @ignore
+.parquet.i.select:{[file;tree;env]
+  if[not @[{[u] .sql.translate; 1b};::;{[e] 0b}]; :(::)];
+  c:.duckdb.main[]; v:.parquet.i.view[c;file;()];
+  f:{[cl;env;x]
+    if[(type x) in 0 99h; :.z.s[cl;env] each x];
+    if[-11h<>type x; :x]; if[x in cl; :x];
+    e:$[x in key env;env x;"."=first string x;value x;'`unpush];
+    $[(11h=abs type e) or (type e) in 0 98 99h;enlist e;e]};
+  rt:.[{[f;cl;env;t] (enlist t 0),f[cl;env] each 1_t}[f];(v[`cols],`i;env;tree);{[e] `unpush}];
+  $[`unpush~rt;::;.duckdb.i.fselect[c;v;rt]]}
 
 / @ignore
 .parquet.i.bytes:{[t]
