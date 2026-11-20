@@ -154,13 +154,13 @@
   if[not (?)~query 0; '`type];
   .parquet.i.with[file;opts;{[q;c;v] .duckdb.i.fselect[c;v;.pq.i.resolve[v`cols;::;(enlist v`rel),q]]}[eval each 2_query]]}
 / The suffix door's select (select ... from `:f.parquet): tree is its arguments as ? takes them and, last, what each name
-/ they mention means where the select was written (.pq.i.resolveTree).  :: leaves the select to q: the resolver's refusal,
+/ they mention means where the select was written (.pq.i.resolveSeam).  :: leaves the select to q: the resolver's refusal,
 / or a restricted evaluation that may not load the translator.
 / @ignore
 .parquet.i.select:{[file;tree]
   if[not @[{[u] .sql.translate; 1b};::;{[e] 0b}]; :(::)];
   .parquet.i.with[file;();{[tree;c;v]
-    rt:@[.pq.i.resolveTree[v`cols];tree;{[e] ::}];
+    rt:@[.pq.i.resolveSeam[v`cols];tree;{[e] ::}];
     $[rt~(::);::;.duckdb.i.fselect[c;v;rt]]}[tree]]}
 
 / @ignore

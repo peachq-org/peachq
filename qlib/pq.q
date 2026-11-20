@@ -220,8 +220,8 @@
 / @eg .pq.dr "+"
 .pq.dr:{[verb] t:.Q.ops[]; i:(t`name)?$[-11h=type verb;verb;`$$[-10h=type verb;enlist verb;verb]]; $[i>=count t`name;"not in .Q.ops[]";t[`dyadic]i;.pq.drform[verb;`dyadic];.pq.drform[verb;`monadic]]}
 
-/ THE name resolver of every door that answers a select somewhere else (DuckDB, a parquet file, a q peer, kafka): one walk,
-/ so a name means the same through each.  .pq.i.resolve[cl;env;tree] answers the select's arguments as ? takes them
+/ THE name resolver of every door that answers a select in DuckDB (a table of a handle, a linked global, a parquet file):
+/ one walk, so a name means the same through each.  .pq.i.resolve[cl;env;tree] answers the select's arguments as ? takes them
 / (table;where terms;by;phrase;...) with every name that is no column (cl) replaced by its value, and every part that
 / reads no column run here, so what a rewrite or a translator sees after it is a literal.  env is what each name means
 / where the select was written, a local included (the select seam hands it over, q_funsql.c ques_env); :: when the tree
@@ -283,11 +283,23 @@
   cl:cl,`i; f:{[cl;env;x] last .pq.i.rs[cl;cl;env;x]}[cl;env];
   g:{[f;x] $[99h=type x;(key x)!f each value x;(0h=type x) and 0<count x;f x;x]}[f];
   (tree 0;f each tree 1;g tree 2;g tree 3),4_tree}
-/ the tree a provider's qsql hook is handed: the select seam ends it with the dict of what its names mean to the caller
+/ The tree a provider's qsql hook is handed ends with the dict of what its names mean to the caller (the select seam,
+/ q_funsql.c ques_pushed): (env;the tree without it), env :: for a tree that carries none.
 / @ignore
-.pq.i.resolveTree:{[cl;tree]
-  e:(4<count tree) and 99h=type last tree;
-  .pq.i.resolve[cl;$[e;last tree;::];$[e;-1_tree;tree]]}
+.pq.i.seam:{[tree] e:(4<count tree) and 99h=type last tree; ($[e;last tree;::];$[e;-1_tree;tree])}
+/ the same over a seam tree, for a door's hook
+/ @ignore
+.pq.i.resolveSeam:{[cl;tree] .pq.i.resolve[cl] . .pq.i.seam tree}
+
+/ The q peer's and kafka's walk, kept as it was: a name is a GLOBAL of this process and a function is 'unpush, the q
+/ peer's law (docs/providers-architecture.md: an unpushable query is 'unpush).  It reads no caller's frame and no scope
+/ of the select's own (defects.tsv Djubfy).
+/ @ignore
+.pq.i.rval:{[x] v:@[value;x;{[e] 'unpush}]; $[100h<=type v;'unpush;((11h=abs type v)or(type v) in 0 98 99h);enlist v;v]}
+/ @ignore
+.pq.i.rnode:{[cl;x] $[(type x) in 0 99h;.z.s[cl] each x;-11h=type x;$[x in cl;x;.pq.i.rval x];x]}
+/ @ignore
+.pq.i.resolveTree:{[cl;tree] t:last .pq.i.seam tree; (enlist t 0),.pq.i.rnode[cl,`i] each 1_t}
 
 .pq.i.q.bind:{[c;t] c ({[t] cols get t};t)};
 .pq.i.q.get:{[c;t] c (get;t)};
