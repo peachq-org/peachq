@@ -1001,6 +1001,21 @@ ray_t* q_io_parquet_select(ray_t** args, int64_t n) {
     return out;
 }
 
+/* `.parquet.i.shape[fsym]` by name, as io_parquet_table calls `.parquet.read`: (cols;meta), of which one is answered */
+ray_t* q_io_parquet_shape(ray_t* fsym, int meta) {
+    if (!q_io_parquet_named(fsym)) return NULL;
+    ray_t* path = q_io_file_path(fsym);
+    ray_t* refused = io_guard_duckdb(path, 0);
+    ray_release(path);
+    if (refused) return refused;
+    ray_t* both = q_eval_apply_call_name(".parquet.i.shape", 16, &fsym, 1);
+    if (!both || RAY_IS_ERR(both)) return both;
+    ray_t* one = ray_list_get(both, meta);   /* borrowed */
+    ray_retain(one);
+    ray_release(both);
+    return one;
+}
+
 /* The READ side of the on-disk-format classification q_io_set owns for writes,
  * for the formats that decode to a table by their name (format inference: explicit provider or
  * scheme, then explicit format API, then the recognised final suffix, then error — never

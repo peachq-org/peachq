@@ -1206,6 +1206,8 @@ ray_t* q_cols_fn(ray_t* x) {
         ray_release(car);
         return k;
     }
+    ray_t* shape = q_io_is_fsym(x) ? q_io_parquet_shape(x, 0) : NULL;
+    if (shape) return shape;
     ray_t* dec = q_io_is_fsym(x) ? q_io_resource_table(x) : NULL;
     if (dec) {                                /* a resource that decodes to a table
                                                * answers with the decoded columns */
@@ -1242,6 +1244,8 @@ ray_t* q_meta_fn(ray_t* x) {
         ray_release(car);
         return r;
     }
+    ray_t* shape = x && q_io_is_fsym(x) ? q_io_parquet_shape(x, 1) : NULL;
+    if (shape) return shape;
     ray_t* dec = x && q_io_is_fsym(x) ? q_io_resource_table(x) : NULL;
     if (dec) {                                /* a resource that decodes to a table, as in q_cols_fn */
         if (RAY_IS_ERR(dec)) return dec;
