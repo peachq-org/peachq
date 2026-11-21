@@ -13,9 +13,9 @@
 #include "qlang/base/q_err.h"
 #include "qlang/q_ops.h"       /* q_ops_find + manifest columns + the identity-table accessors */
 #include "qlang/q_registry.h"  /* q_registry_row_of, q_registry_row_kernel */
-#include "qlang/q_registry_internal.h" /* q_flip_wrap, q_join_wrap — tables Join Each column-wise */
+#include "qlang/q_registry_internal.h" /* q_flip_wrap, q_join_wrap (tables Join Each column-wise); xprev/drop (Each Prior predecessors) */
 #include "qlang/base/q_type.h"
-#include "qlang/ops/q_index.h" /* q_index_elem_at — the one element accessor */
+#include "qlang/ops/q_index.h" /* q_index_elem_at — the one element accessor; q_index_amend_at */
 #include "qlang/io/q_splay.h"  /* q_splay_contained — a result entering the list a map or scan assembles */
 #include "qlang/ops/q_dollar.h"
 #include "table/dict.h"
@@ -514,6 +514,42 @@ static ray_t* case_apply(ray_t* sel, ray_t** args, int64_t n) {
     return RAY_IS_ERR(l) ? l : q_eval_apply_collapse(l);
 }
 
+/* Each Prior of an atomic dyad over a typed vector IS the dyad applied once to x and its predecessors
+ * (prev , -1_x) — one vector op where the item loop boxed every pair.  `~` reads two same-typed atoms as `=`
+ * does, so it takes `=`'s kernel; an unseeded lead is a miss whatever it reads (ref/differ.md:19), so its
+ * predecessors are xprev's plain shift.  NULL: not this shape. */
+static ray_t* prior_vector(ray_t* fv, const q_op_t* frow, ray_t* prev, ray_t* x, bool lead_miss) {
+    if (x->type < RAY_BOOL || x->type > RAY_TIME || q_count(x) < 1 || !ray_is_atom(prev) || prev->type != -x->type)
+        return NULL;
+    if (frow && strcmp(frow->name, "~") == 0) {
+        frow = q_ops_find("=", 1);
+        fv = q_registry_row_value(frow, Q_DYADIC);
+    }
+    if (!q_eval_apply_lifts_atomic(fv, 2)) return NULL;
+    ray_t* one = ray_i64(lead_miss ? 1 : -1);
+    ray_t* pred = lead_miss ? q_xprev_wrap(one, x) : q_drop_wrap(one, x);
+    ray_release(one);
+    if (!lead_miss && !RAY_IS_ERR(pred)) {
+        ray_t* head = pred;
+        pred = q_join_wrap(prev, head);
+        ray_release(head);
+    }
+    if (RAY_IS_ERR(pred)) return pred;
+    ray_t* av[2] = { x, pred };
+    ray_t* r = q_eval_apply(fv, frow, av, 2);
+    ray_release(pred);
+    if (!lead_miss || RAY_IS_ERR(r)) return r;
+    r = q_eval_apply_concrete(r);
+    if (RAY_IS_ERR(r)) return r;
+    ray_t* lead = ray_i64(0);
+    ray_t* miss = ray_bool(false);
+    ray_t* a = q_index_amend_at(r, lead, NULL, miss);
+    ray_release(lead);
+    ray_release(miss);
+    if (!a || RAY_IS_ERR(a)) ray_release(r);          /* amend consumes r on success */
+    return a ? a : q_err(QE_TYPE);
+}
+
 /* Each Prior: fv between each item and the one before it.  Applied as a
  * binary the left argument IS the seed; applied as a unary the seed is the
  * value's identity element when q knows one, else `first 0#x` (ref/maps.md:274). */
@@ -522,7 +558,7 @@ static ray_t* prior_each(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
     if (dv) return dict_rekey(x, prior_each(fv, frow, seed, dv));
     ray_retain(x);
     x = q_eval_apply_concrete(x);
-    /* unseeded `%':` on a typed vector IS ratios (ref/ratios.md:87), the one Each Prior with a kernel — the
+    /* unseeded `%':` on a typed vector IS ratios (ref/ratios.md:87), a verb kernel of its own — the
      * pairing is detected by name at this site, never a manifest column (owner 2026-10-21); the kernel owns the
      * vector domain (a char vector is 'type, Dazlln) */
     if (!seed && frow && strcmp(frow->name, "%") == 0 && ray_is_vec(x)) {
@@ -564,14 +600,14 @@ static ray_t* prior_each(ray_t* fv, const q_op_t* frow, ray_t* seed, ray_t* x) {
         }
         if (!prev) { prev = RAY_NULL_OBJ; ray_retain(prev); }
     }
-    ray_t* r;
-    if (!q_type_is_iter(x)) {
+    /* unseeded `~':` never matches its first item (ref/differ.md:19); the typed-null seed would match a leading 0b or null */
+    bool lead_miss = !seed && frow && strcmp(frow->name, "~") == 0;
+    ray_t* r = prior_vector(fv, frow, prev, x, lead_miss);
+    if (!r && !q_type_is_iter(x)) {
         ray_t* av[2] = { x, prev };
         r = q_eval_apply(fv, frow, av, 2);
-    } else {
+    } else if (!r) {
         int64_t len = q_count(x);
-        /* unseeded `~':` never matches its first item (ref/differ.md:19); the typed-null seed would match a leading 0b or null */
-        bool lead_miss = !seed && frow && strcmp(frow->name, "~") == 0;
         ray_t* l = ray_list_new(len);
         for (int64_t i = 0; i < len; i++) {
             ray_t* cur = q_index_elem_at(x, i);
