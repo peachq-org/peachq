@@ -207,11 +207,16 @@ static ray_t* acc_reduce(ray_t* fv, const q_op_t* frow, ray_t* seed,
         if (seed) { ray_retain(seed); cur = seed; }
         else      { cur = acc_item(iv[0], 0); i0 = 1; err = acc_push(&a, cur); }
         for (int64_t i = i0; !err && i < len; i++) {
+            /* Over's copy of the running result would make the amend below copy it every step */
+            if (!keep && a.last) { ray_release(a.last); a.last = NULL; }
             av[0] = cur;
             for (int64_t p = 0; p < nit; p++) av[p + 1] = acc_item(iv[p], i);
-            ray_t* nx = q_eval_apply(fv, frow, av, nit + 1);
+            ray_t* nx = q_eval_apply_amend_owned(fv, av, nit + 1);
+            if (!nx) {
+                nx = q_eval_apply(fv, frow, av, nit + 1);
+                ray_release(cur);
+            }
             for (int64_t p = 0; p < nit; p++) ray_release(av[p + 1]);
-            ray_release(cur);
             if (RAY_IS_ERR(nx)) { cur = NULL; err = nx; break; }
             cur = nx;
             err = acc_push(&a, cur);
