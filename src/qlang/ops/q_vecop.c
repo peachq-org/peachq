@@ -24,9 +24,11 @@
  * ops/cmp.c's cmp_pick compares with tolerance OFF, so & and | never tolerate.
  *
  * + - * div mod ride INT on the integer tags (div and mod on every int-backed
- * count).  Their result tag is not the operands' — ops/arith.c promotes (`5h+3h`
- * is an int) — so the lane computes in i64 and CONSTRUCTS the promoted tag, read
- * off lang/internal.h's arith_int_type / div_type / mod_type, never a table.
+ * count, + - * on a temporal pair that counts in one unit).  Their result tag is
+ * not the operands' — ops/arith.c promotes (`5h+3h` is an int) — so the lane
+ * computes in i64 and CONSTRUCTS the promoted tag, read off lang/internal.h's
+ * arith_int_type / div_type / mod_type, or for a temporal off the kernel itself
+ * (temporal_rt), never a table.
  * Overflow is left alone: two's-complement wrap in unsigned space, whose
  * landing on a sentinel (`0W+1` is 0N) is incidental and stays so.
  *
@@ -167,6 +169,7 @@ static void widen_j(int64_t* o, const void* s, int8_t t, int64_t n) {
 }
 
 static double atom_f(ray_t* v) { return RAY_ATOM_IS_NULL(v) ? NULL_F64 : as_f64(v); }
+static int64_t atom_j(ray_t* v) { return atom_is_oob_null(v) ? NULL_I64 : as_i64(v); }
 
 /* One operand as a lane-width array plus a stride (0 = an atom broadcasts).
  * `own` takes the widening buffer when one was needed, for the caller to free. */
@@ -183,7 +186,7 @@ static int band_make(band_t* o, ray_t* v, int8_t tag, int vec, lane_t ln, int64_
         o->step = 0;
         switch (ln) {
             case LN_BYTE: o->scalar.b = tag == RAY_BOOL ? (v->b8 ? 1 : 0) : v->u8; break;
-            case LN_INT: o->scalar.j = tag == RAY_SYM ? v->i64 : atom_is_oob_null(v) ? NULL_I64 : as_i64(v); break;
+            case LN_INT: o->scalar.j = tag == RAY_SYM ? v->i64 : atom_j(v); break;
             default: o->scalar.d = atom_f(v); break;
         }
         o->p = &o->scalar;
@@ -367,10 +370,10 @@ static void pick_dbl(ray_t* out, int8_t rt, vop_t op, band_t xb, band_t yb, int6
 }
 
 /* ===== the arithmetic lane ===============================================
- * The tags + - * read on INT: plain integers only.  A char is out (its 0x20 null
- * is in-band, and the byte lane's own reading of it is not arithmetic's), a
- * temporal is out (it has a payload law of its own); a float goes to DBL.
- * ray_is_byte_only keeps a byte, which widens like any other operand.
+ * The plain integer tags + - * read on INT.  A char is out (its 0x20 null is
+ * in-band, and the byte lane's own reading of it is not arithmetic's); a float
+ * goes to DBL; a temporal is temporal_rt's.  ray_is_byte_only keeps a byte,
+ * which widens like any other operand.
  * div and mod read every int-backed count, a char's code point included. */
 static int arith_tag(int8_t t) {
     return t == RAY_BOOL || t == RAY_I16 || t == RAY_I32 || t == RAY_I64 || ray_is_byte_only(t);
@@ -398,40 +401,61 @@ static int8_t arith_rt(vop_t op, int8_t xt, int8_t yt) {
     return rt >= w ? rt : 0;
 }
 
+/* + - * beside a temporal ride INT on the payloads where both operands count in one unit: a plain integer beside a
+ * temporal (an offset or a scale), two of one kind, or a timestamp beside a timespan, both nanoseconds.  A minute or
+ * second pair is out: the kernel sums it in nanoseconds (duration_pair), which wraps where its payloads do not.  The
+ * tag is the kernel's own answer for the pair, asked once of two zeros; a pair it refuses, or answers off the integer
+ * lane, declines.  A char or real offset stays the kernel's.  0 = not this lane's. */
+static int8_t temporal_rt(ray_t* (*f)(ray_t*, ray_t*), int8_t xt, int8_t yt) {
+    int tx = RAY_IS_TEMPORAL(xt), ty = RAY_IS_TEMPORAL(yt);
+    int via_ns = xt == RAY_MINUTE || xt == RAY_SECOND;
+    int one_unit = tx && ty ? (xt == yt && !via_ns) || (RAY_IS_TEMPORAL64(xt) && RAY_IS_TEMPORAL64(yt))
+                            : arith_tag(tx ? yt : xt);
+    if (!one_unit) return 0;
+    ray_t* a = make_typed_int((int8_t)-xt, 0);
+    ray_t* b = make_typed_int((int8_t)-yt, 0);
+    ray_t* r = f(a, b);
+    int8_t rt = RAY_IS_ERR(r) ? 0 : (int8_t)-r->type;
+    if (RAY_IS_ERR(r)) ray_error_free(r);
+    else ray_release(r);
+    ray_release(a);
+    ray_release(b);
+    return rt == RAY_I32 || RAY_IS_TEMPORAL(rt) ? rt : 0;
+}
+
 /* One loop per (verb, result width).  The width is loop-invariant, so hoisting
- * it out is what leaves a plain typed loop behind.  A lane null narrows to the
- * result's own sentinel; a WRAPPED value that lands on that sentinel is a null
- * too, which is how `0Wi+1i` is 0Ni — so the test is on the narrowed value. */
-#define ARI_W(T, NUL, EXPR)                                                        \
+ * it out is what leaves a plain typed loop behind.  A null operand, or a zero
+ * divisor (ZERO), answers the result's own sentinel; a WRAPPED value that
+ * narrows onto that sentinel is a null too, which is how `0Wi+1i` is 0Ni — so
+ * the test is on the narrowed value (`2000.01.02+0W` wraps to the long null
+ * and narrows to 2000.01.01). */
+#define ARI_W(T, NUL, EXPR, ZERO)                                                  \
     do {                                                                           \
         T* d = o;                                                                  \
         SHAPED(int64_t, xb.p, yb.p, xb.step, yb.step, n, {                         \
-            int64_t v = (x == NULL_I64 || y == NULL_I64) ? NULL_I64 : (EXPR);      \
-            T r = v == NULL_I64 ? (NUL) : (T)v;                                    \
+            T r = (x == NULL_I64 || y == NULL_I64 || (ZERO)) ? (NUL) : (T)(EXPR);  \
             d[i] = r;                                                              \
             any |= r == (NUL);                                                     \
         });                                                                        \
     } while (0)
 
-#define ARI_OP(EXPR)                                                               \
+#define ARI_OP(EXPR, ZERO)                                                         \
     do {                                                                           \
-        if (w == 8) ARI_W(int64_t, NULL_I64, EXPR);                                \
-        else if (w == 4) ARI_W(int32_t, NULL_I32, EXPR);                           \
-        else ARI_W(int16_t, NULL_I16, EXPR);                                       \
+        if (w == 8) ARI_W(int64_t, NULL_I64, EXPR, ZERO);                          \
+        else if (w == 4) ARI_W(int32_t, NULL_I32, EXPR, ZERO);                     \
+        else ARI_W(int16_t, NULL_I16, EXPR, ZERO);                                 \
     } while (0)
 
-static void arith_into(ray_t* out, int8_t rt, vop_t op, band_t xb, band_t yb, int64_t n) {
-    void* o = ray_data(out);
-    int w = ray_type_sizes[rt];
+static int arith_into(void* o, int w, vop_t op, band_t xb, band_t yb, int64_t n) {
     int any = 0;
     switch (op) {
-        case VO_ADD: ARI_OP((int64_t)((uint64_t)x + (uint64_t)y)); break;
-        case VO_SUB: ARI_OP((int64_t)((uint64_t)x - (uint64_t)y)); break;
-        case VO_MUL: ARI_OP((int64_t)((uint64_t)x * (uint64_t)y)); break;
-        case VO_IDIV: ARI_OP(floor_div64(x, y)); break;
-        default: ARI_OP(floor_mod64(x, y)); break;
+        case VO_ADD: ARI_OP((int64_t)((uint64_t)x + (uint64_t)y), 0); break;
+        case VO_SUB: ARI_OP((int64_t)((uint64_t)x - (uint64_t)y), 0); break;
+        case VO_MUL: ARI_OP((int64_t)((uint64_t)x * (uint64_t)y), 0); break;
+        case VO_IDIV: ARI_OP(floor_div64(x, y), y == 0); break;
+        default: ARI_OP(floor_mod64(x, y), y == 0); break;
     }
-    mark_nulls(out, any);
+    return any;
 }
 
 /* The double lane's tag: % xexp xlog answer make_f64 for every pair, + - * div mod need a float side, mod answers
@@ -450,14 +474,21 @@ static inline double xexp_f(double x, double y) {
     return x != x || y != y || (x < 0 && (!isfinite(y) || y != floor(y))) ? NAN : pow(x, y);
 }
 
-/* Widened in cache-sized runs, not whole: a real or int operand of a big vector would otherwise cost a heap buffer
- * the size of the answer, which outweighs the arithmetic. */
-enum { FLT_RUN = 1024 };
+/* Widened in cache-sized runs, not whole: a narrow operand of a big vector would otherwise cost a heap buffer the
+ * size of the answer, which outweighs the arithmetic. */
+enum { LANE_RUN = 1024 };
 
 static const double* flt_run(double* buf, ray_t* v, int8_t t, int vec, const double* atom, int64_t i, int64_t m) {
     if (!vec) return atom;
     if (t == RAY_F64) return (const double*)ray_data(v) + i;
     widen_f(buf, (const char*)ray_data(v) + i * ray_type_sizes[t], t, m);
+    return buf;
+}
+
+static const int64_t* int_run(int64_t* buf, ray_t* v, int8_t t, int vec, const int64_t* atom, int64_t i, int64_t m) {
+    if (!vec) return atom;
+    if (t == RAY_I64 || RAY_IS_TEMPORAL64(t)) return (const int64_t*)ray_data(v) + i;
+    widen_j(buf, (const char*)ray_data(v) + i * ray_type_sizes[t], t, m);
     return buf;
 }
 
@@ -467,10 +498,10 @@ static ray_t* float_binary(vop_t op, int8_t rt, ray_t* x, ray_t* y, int8_t xt, i
     ray_t* out = ray_vec_new(rt, n);
     if (!out || RAY_IS_ERR(out)) return out;
     out->len = n;
-    double xa = xv ? 0 : atom_f(x), ya = yv ? 0 : atom_f(y), xbuf[FLT_RUN], ybuf[FLT_RUN];
+    double xa = xv ? 0 : atom_f(x), ya = yv ? 0 : atom_f(y), xbuf[LANE_RUN], ybuf[LANE_RUN];
     int any = 0;
-    for (int64_t i0 = 0; i0 < n; i0 += FLT_RUN) {
-        int64_t m = n - i0 < FLT_RUN ? n - i0 : FLT_RUN;
+    for (int64_t i0 = 0; i0 < n; i0 += LANE_RUN) {
+        int64_t m = n - i0 < LANE_RUN ? n - i0 : LANE_RUN;
         const double* px = flt_run(xbuf, x, xt, xv, &xa, i0, m);
         const double* py = flt_run(ybuf, y, yt, yv, &ya, i0, m);
         switch (op) {
@@ -488,23 +519,28 @@ static ray_t* float_binary(vop_t op, int8_t rt, ray_t* x, ray_t* y, int8_t xt, i
     return out;
 }
 
-static ray_t* arith_binary(vop_t op, ray_t* x, ray_t* y, int8_t xt, int8_t yt, int xv, int yv, int64_t n) {
+static ray_t* arith_binary(ray_t* (*f)(ray_t*, ray_t*), vop_t op, ray_t* x, ray_t* y, int8_t xt, int8_t yt, int xv,
+                           int yv, int64_t n) {
     int8_t rt = float_rt(op, xt, yt);
     if (rt) return float_binary(op, rt, x, y, xt, yt, xv, yv, n);
-    if (op >= VO_DIV || !counts_tag(op, xt) || !counts_tag(op, yt)) return NULL;
-    rt = arith_rt(op, xt, yt);
+    if (op >= VO_DIV) return NULL;
+    if (op <= VO_MUL && (RAY_IS_TEMPORAL(xt) || RAY_IS_TEMPORAL(yt))) rt = temporal_rt(f, xt, yt);
+    else if (counts_tag(op, xt) && counts_tag(op, yt)) rt = arith_rt(op, xt, yt);
     if (!rt) return NULL;
 
-    band_t xb, yb;
-    if (!band_make(&xb, x, xt, xv, LN_INT, n)) return NULL;
-    if (!band_make(&yb, y, yt, yv, LN_INT, n)) { free(xb.own); return NULL; }
     ray_t* out = ray_vec_new(rt, n);
-    if (out && !RAY_IS_ERR(out)) {
-        out->len = n;
-        arith_into(out, rt, op, xb, yb, n);
+    if (!out || RAY_IS_ERR(out)) return out;
+    out->len = n;
+    int w = ray_type_sizes[rt];
+    int64_t xa = xv ? 0 : atom_j(x), ya = yv ? 0 : atom_j(y), xbuf[LANE_RUN], ybuf[LANE_RUN];
+    int any = 0;
+    for (int64_t i0 = 0; i0 < n; i0 += LANE_RUN) {
+        int64_t m = n - i0 < LANE_RUN ? n - i0 : LANE_RUN;
+        band_t xb = {int_run(xbuf, x, xt, xv, &xa, i0, m), xv, NULL, {0}};
+        band_t yb = {int_run(ybuf, y, yt, yv, &ya, i0, m), yv, NULL, {0}};
+        any |= arith_into((char*)ray_data(out) + i0 * w, w, op, xb, yb, m);
     }
-    free(xb.own);
-    free(yb.own);
+    mark_nulls(out, any);
     return out;
 }
 
@@ -531,9 +567,8 @@ static ray_t* xbar_kernel(ray_t* bucket, ray_t* col, int8_t bt, int8_t ct) {
 }
 
 /* q_xbar_wrap's own composition, `x*y div x`, each step on this file's div and * lanes; a step they decline
- * leaves the pair to the atom law.  A temporal column is out up front: the * lane never takes one. */
-static ray_t* xbar_composed(ray_t* bucket, ray_t* col, int8_t ct) {
-    if (RAY_IS_TEMPORAL(ct)) return NULL;
+ * leaves the pair to the atom law. */
+static ray_t* xbar_composed(ray_t* bucket, ray_t* col) {
     int span = bucket->type == RAY_TIMESPAN || bucket->type == -RAY_TIMESPAN;
     ray_t* b = span ? q_dollar_cast(RAY_I64, bucket) : bucket;
     if (RAY_IS_ERR(b)) {
@@ -549,7 +584,7 @@ static ray_t* xbar_composed(ray_t* bucket, ray_t* col, int8_t ct) {
 
 static ray_t* xbar_binary(ray_t* bucket, ray_t* col, int8_t bt, int8_t ct) {
     ray_t* r = xbar_kernel(bucket, col, bt, ct);
-    return r ? r : xbar_composed(bucket, col, ct);
+    return r ? r : xbar_composed(bucket, col);
 }
 
 /* ===== the binary seam =================================================== */
@@ -567,7 +602,7 @@ ray_t* q_vecop_binary(ray_t* (*f)(ray_t*, ray_t*), ray_t* x, ray_t* y) {
     int64_t n = xv ? x->len : y->len;
     if (n <= 0) return NULL;                           /* so does the empty's carried type */
     if (op == VO_XBAR) return xbar_binary(x, y, xt, yt);
-    if (is_arith(op)) return arith_binary(op, x, y, xt, yt, xv, yv, n);
+    if (is_arith(op)) return arith_binary(f, op, x, y, xt, yt, xv, yv, n);
     if (!(lane_tag(xt) || sym_lane(op, x, xt, xv)) || !(lane_tag(yt) || sym_lane(op, y, yt, yv))) return NULL;
     /* Across a type difference the lanes take the plain numerics only.  A
      * cross-type temporal pair keeps the kernel's own reading (the pairs
