@@ -124,6 +124,41 @@ static ray_t* sorted_distinct(ray_t* x) {
     return q_attr_stamp_trusted(r, 's');
 }
 
+/* Does `~` meet these items exactly and transitively?  A float leaf's tolerance is neither, and a dict, table,
+ * function or enumeration hashes too coarsely to be worth the walk; each keeps the scan. */
+static int items_exact(ray_t* l, int depth) {
+    ray_t** e = (ray_t**)ray_data(l);
+    for (int64_t i = 0, n = q_count(l); i < n; i++) {
+        if (!e[i] || RAY_IS_NULL(e[i])) return 0;
+        int8_t t = e[i]->type < 0 ? (int8_t)-e[i]->type : e[i]->type;
+        if (t == RAY_LIST ? depth >= 64 || !items_exact(e[i], depth + 1)
+                          : !(ray_is_vec(e[i]) || e[i]->type < 0) || t == RAY_F64 || t == RAY_F32 ||
+                            RAY_IS_TEMPORALF(t) || t == RAY_ENUM || t > RAY_STR)
+            return 0;
+    }
+    return 1;
+}
+
+/* Under an exact `~` the uniques are the items a self-Find answers with their own index: one hashed pass. */
+static ray_t* first_items(ray_t* x, int64_t n) {
+    ray_t* f = ray_find_rows_fn(&x, &x, 1, n, q_match_rec);
+    if (!f || RAY_IS_ERR(f)) return f ? f : q_err(QE_WSFULL);
+    const int64_t* fd = (const int64_t*)ray_data(f);
+    ray_t* out = ray_list_new(n);
+    for (int64_t i = 0; i < n && !RAY_IS_ERR(out); i++) {
+        if (fd[i] != i) continue;
+        ray_t* e = q_join_item(x, i);
+        if (!e || RAY_IS_ERR(e)) { ray_release(out); out = e ? e : q_err(QE_TYPE); break; }
+        out = ray_list_append(out, e);
+        ray_release(e);
+    }
+    ray_release(f);
+    if (RAY_IS_ERR(out)) return out;
+    ray_t* c = q_list_collapse(out);
+    ray_release(out);
+    return c;
+}
+
 /* q `distinct x` / monadic `?` — unique items in FIRST-OCCURRENCE order
  * (kdb), item equality being `~`: type-strict, nulls equal.
  * A TYPED VECTOR's items share one type, so `~` and the group kernel's atom
@@ -161,6 +196,7 @@ ray_t* q_distinct_wrap(ray_t* x) {
     if (x->type != RAY_LIST)
         return q_err(QE_TYPE);
     int64_t n = q_count(x);
+    if (n > FIND_SCAN_NEEDLES && items_exact(x, 0)) return first_items(x, n);
     ray_t* out = ray_list_new(n > 0 ? n : 1);
     for (int64_t i = 0; i < n; i++) {
         ray_t* e = q_join_item(x, i);

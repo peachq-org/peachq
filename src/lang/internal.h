@@ -606,6 +606,7 @@ double ray_median_dbl_inplace(double* a, int64_t n);
 
 /* Collection helpers (formerly static in eval.c, now in collection.c) */
 int    atom_eq(ray_t* a, ray_t* b);
+uint64_t ray_item_hash(ray_t* e);
 ray_t* list_to_typed_vec(ray_t* list, int8_t orig_vec_type);
 
 /* Collection builtins (formerly static in eval.c, now in collection.c) */

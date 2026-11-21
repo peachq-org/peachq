@@ -345,6 +345,10 @@ ray_t* ray_find_fn(ray_t* vec, ray_t* val);
  * every such row per probe row in row order (a list of m I64 vectors).  Columns borrowed; owned result or error.
  * eq decides a pair of cells where either column is boxed: the caller's sameness for a nested value. */
 typedef int (*ray_cell_eq_t)(ray_t* a, ray_t* b);
+/* Needle count up to which a same-type vector probe is one typed scan per needle rather than a hashset over the
+ * whole domain.  Measured on a 1M sym domain: the build ~30ns/slot, a scan ~0.2ns/slot, so the crossover is
+ * ~140 needles when every needle sits at the END; 64 keeps the scan side under half the build even then. */
+#define FIND_SCAN_NEEDLES 64
 ray_t* ray_find_rows_fn(ray_t* const* dom, ray_t* const* probe, int64_t k, int64_t m, ray_cell_eq_t eq);
 ray_t* ray_find_rows_class_fn(ray_t* const* dom, ray_t* const* probe, int64_t k, int64_t m, ray_cell_eq_t eq);
 ray_t* ray_til_fn(ray_t* x);

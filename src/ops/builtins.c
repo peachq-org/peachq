@@ -2198,50 +2198,6 @@ static inline uint64_t hash_i64(int64_t v) {
     return mix64((uint64_t)v);
 }
 
-/* Hash a generic atom or list, mirroring atom_eq's structural compare.
- * Used by the ray_group_fn LIST path to replace the historical O(N²)
- * linear scan with an open-addressed hash table.  Cross-type numeric
- * coercion goes through f64 so an I64 atom and an F64 atom holding the
- * same value collide (matches atom_eq's `is_numeric → as_f64`).
- *
- * Mirrors the type dispatch in collection.c::hs_hash_row's RAY_LIST
- * branch but recurses into nested lists — hs_hash_row's default tag-
- * only fallback collapses every nested-list row to the same hash, so
- * the existing path is degenerate for composite multi-key composites.
- * Uses the canonical wyhash helpers from ops/hash.h, same as the
- * pivot / join hashers. */
-static uint64_t atom_hash(ray_t* a) {
-    /* List-element position: elements may be a bare C NULL (ray_list_set stores
-     * NULL unretained; ray_list_get is out-of-range), mirroring atom_eq's
-     * C-NULL-tolerant element handling — so keep the !a guard, not RAY_ASSERT_VALUE. */
-    if (!a || RAY_ATOM_IS_NULL(a)) return 0;
-    if (is_numeric(a)) return ray_hash_f64(as_f64(a));
-    switch (a->type) {
-        case -RAY_SYM:       return ray_hash_i64(a->i64);
-        case -RAY_DATE:
-        case -RAY_TIME:      return ray_hash_i64((int64_t)a->i32);
-        case -RAY_TIMESTAMP: return ray_hash_i64(a->i64);
-        case -RAY_GUID:      return ray_hash_bytes(ray_guid_bytes((ray_t*)a), 16);
-        case -RAY_STR:
-            return ray_hash_bytes(ray_str_ptr(a), ray_str_len(a));
-        case RAY_LIST: {
-            int64_t n = a->len;
-            ray_t** elems = (ray_t**)ray_data(a);
-            /* Seed with len so [] and a list of zeros differ. */
-            uint64_t h = ray_hash_i64(n);
-            for (int64_t i = 0; i < n; i++)
-                h = ray_hash_combine(h, atom_hash(elems[i]));
-            return h;
-        }
-        default:
-            /* Vec or unknown atom kind: fold type tag and length.  Two
-             * structurally-equal lists never reach here (RAY_LIST branch
-             * above) so we can't accidentally produce different hashes
-             * for atom_eq-equal pairs. */
-            return ray_hash_i64(((int64_t)a->type << 32) ^ (int64_t)a->len);
-    }
-}
-
 /* Context for GUID rehash: the 16-byte source base and, indirectly,
  * gvals — which stores the row_idx of the first occurrence per group. */
 typedef struct {
@@ -2261,11 +2217,11 @@ static uint64_t ght_i64_hash_gi(uint32_t gi, void* ctx) {
 }
 
 /* Context for the LIST-path rehash: gkeys holds atom pointers for each
- * unique group (one slot per gi), recomputed on grow via atom_hash. */
+ * unique group (one slot per gi), recomputed on grow via ray_item_hash. */
 typedef struct { ray_t** gkeys; } ght_list_ctx_t;
 static uint64_t ght_list_hash_gi(uint32_t gi, void* ctx) {
     ght_list_ctx_t* c = (ght_list_ctx_t*)ctx;
-    return atom_hash(c->gkeys[gi]);
+    return ray_item_hash(c->gkeys[gi]);
 }
 
 /* Grow the per-group bookkeeping arrays used by ray_group_fn.
@@ -2355,7 +2311,7 @@ ray_t* ray_group_fn(ray_t* x) {
     int64_t ngroups = 0;
 
     /* For LIST type, use atom_eq-based grouping with stored keys.
-     * Open-address hash table on atom_hash replaces the historical
+     * Open-address hash table on ray_item_hash replaces the historical
      * O(N²) linear scan over gkeys — multi-key non-agg select-by on
      * H2O-scale tables (10M rows × 10k unique keys) is now linear. */
     if (x->type == RAY_LIST) {
@@ -2374,7 +2330,7 @@ ray_t* ray_group_fn(ray_t* x) {
 
         for (int64_t i = 0; i < n; i++) {
             ray_t* elem = elems[i];
-            uint64_t h = atom_hash(elem);
+            uint64_t h = ray_item_hash(elem);
             uint32_t slot = (uint32_t)(h & ht.mask);
             uint32_t gi_found = GHT_EMPTY;
             while (ht.slots[slot] != GHT_EMPTY) {

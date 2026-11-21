@@ -422,9 +422,17 @@ int q_search_admits(ray_t* x, ray_t* y) {
  * Over a typed x the leaf is Find itself, right-atomic as the older editions print `w?(10 5 -1;-8;3 17)` ->
  * (0 3 4;1;2 7) (docs-v1 search.md:132; list/find.qcmd records the divergence).  The answer keeps y's shape, a run
  * of atoms collapsing to the index vector.  Borrows both. */
+static int has_hole(ray_t* l) {
+    ray_t** e = (ray_t**)ray_data(l);
+    for (int64_t i = 0, n = q_count(l); i < n; i++) if (!e[i]) return 1;
+    return 0;
+}
+
 static ray_t* find_items(ray_t* x, ray_t* y, int whole, int64_t cnt) {
     int64_t ny = q_count(y);
     if (ny == 0) return q_type_empty(RAY_I64);    /* no items sought: the long empty, so `x in ()` stays boolean */
+    if (whole && ny > FIND_SCAN_NEEDLES && x->type == RAY_LIST && y->type == RAY_LIST && !has_hole(x) && !has_hole(y))
+        return miss_is_count(ray_find_rows_fn(&x, &y, 1, ny, q_match_exact), cnt);   /* one column of rows: hashed */
     ray_t* out = ray_list_new(ny);
     if (RAY_IS_ERR(out)) return out;
     for (int64_t j = 0; j < ny; j++) {
