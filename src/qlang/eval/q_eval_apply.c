@@ -654,10 +654,14 @@ static int dag_pays(ray_t* l, ray_t* r, int lc, int rc) {
 }
 
 static ray_t* map_binary(ray_binary_fn fn, const q_op_t* row, ray_t* l, ray_t* r) {
-    int8_t lt = (int8_t)-q_type_elem_tag(l), rt = (int8_t)-q_type_elem_tag(r);
-    if (q_type_cmp_refuses(lt, rt) && q_vecop_is_ordering(fn)) return q_err(QE_TYPE);
-    int8_t to_l = q_type_cmp_as(lt, rt), to_r = to_l ? 0 : q_type_cmp_as(rt, lt);
-    if ((to_l || to_r) && q_vecop_is_compare(fn)) {
+    int8_t to_l = 0, to_r = 0;
+    if (l->type != r->type && q_vecop_is_compare(fn)) {   /* only unlike types pair, and only under a comparison */
+        int8_t lt = (int8_t)-q_type_elem_tag(l), rt = (int8_t)-q_type_elem_tag(r);
+        if (q_type_cmp_refuses(lt, rt) && q_vecop_is_ordering(fn)) return q_err(QE_TYPE);
+        to_l = q_type_cmp_as(lt, rt);
+        to_r = to_l ? 0 : q_type_cmp_as(rt, lt);
+    }
+    if (to_l || to_r) {
         /* the date-bearing side is cast whole, never per element (basics/comparison.md:132) */
         ray_t* c = to_l ? q_dollar_cast(to_l, l) : q_dollar_cast(to_r, r);
         if (!c || RAY_IS_ERR(c)) return c ? c : q_err(QE_TYPE);
@@ -1374,28 +1378,23 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
      * the body sees its params/locals and globals, never a caller frame */
     if (RAY_UNLIKELY(q_eval_stack_low())) { ray_release(binds); return q_err(QE_STACK); }
     if (q_env_frame_push(1) != RAY_OK) { ray_release(binds); return q_err(QE_STACK); }
-    for (int64_t i = 0; i < n; i++) {
-        ray_t* p = q_index_elem_at(params, i);          /* sym atom */
-        if (p && !RAY_IS_ERR(p)) {
-            q_env_local_set(p->i64, args[i]);              /* retains */
-            ray_release(p);
-        }
-    }
+    for (int64_t i = 0; i < n; i++)
+        q_env_local_set(ray_read_sym(ray_data(params), i, RAY_SYM, params->attrs), args[i]);   /* retains */
     /* every parse-time local starts as () (function-notation.md:155); the builder excluded the params, so none is
      * re-seeded.  All-or-nothing: a half-seeded frame would let a local fall through to the global */
     ray_t* locals = c[LAM_LOCALS];
-    for (int64_t i = 0, nl = locals ? q_count(locals) : 0; i < nl; i++) {
-        ray_t* e = ray_list_new(0);
-        ray_err_t se = e ? q_env_local_set(ray_read_sym(ray_data(locals), i, RAY_SYM, locals->attrs), e)
-                         : RAY_ERR_OOM;                                              /* retains */
-        if (e) ray_release(e);
-        if (se != RAY_OK) { q_env_frame_pop(); ray_release(binds); return q_err(QE_WSFULL); }
-    }
+    int64_t nl = locals ? q_count(locals) : 0;
+    ray_t* empty = nl ? ray_list_new(0) : NULL;
+    ray_err_t se = nl && !empty ? RAY_ERR_OOM : RAY_OK;
+    for (int64_t i = 0; i < nl && se == RAY_OK; i++)
+        se = q_env_local_set(ray_read_sym(ray_data(locals), i, RAY_SYM, locals->attrs), empty);   /* retains */
+    if (empty) ray_release(empty);
+    if (se != RAY_OK) { q_env_frame_pop(); ray_release(binds); return q_err(QE_WSFULL); }
     for (int64_t i = 0, nb = binds ? q_count(binds) : 0; i < nb; i += 2) {
         ray_t** b = (ray_t**)ray_data(binds);
         if (q_env_local_set(b[i]->i64, b[i + 1]) != RAY_OK) { q_env_frame_pop(); ray_release(binds); return q_err(QE_WSFULL); }
     }
-    ray_release(binds);
+    if (binds) ray_release(binds);
     g_frame_depth++;
     q_dbg_frame_push(lam);
     /* the body resolves in the namespace the lambda was DEFINED in (q_eval_apply_lambda_new); the session `\d`
@@ -1997,6 +1996,104 @@ int q_eval_apply_lifts_atomic(ray_t* fv, int64_t n) {
            lifts_atomic(fv, q_registry_row_of(fv, n == 1 ? Q_MONADIC : Q_DYADIC), n);
 }
 
+/* A builtin applied to all its arguments: the enum boundary, then its family's lift, then the kernel. */
+static ray_t* verb_apply(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
+    /* enum args at a verb boundary: aware arm, preserve set, or decay */
+    if (row && n >= 1 && n <= 2) {
+        int has = 0;
+        for (int64_t i = 0; i < n && !has; i++) has = q_enum_is(args[i]);
+        if (has) {
+            ray_t* er = enum_route(fv, row, args, n);
+            if (er) return er;
+        }
+    }
+
+    if (lifts_atomic(fv, row, n))
+        return n == 1 ? atomic1((ray_unary_fn)(uintptr_t)fv->i64, args[0])
+                      : atomic2((ray_binary_fn)(uintptr_t)fv->i64, row, args[0], args[1]);
+
+    const char* fam = row ? row->family : NULL;
+    if (fam) {
+        if (strcmp(fam, "aggregate") == 0) {
+            /* the fold group folds `()` to `()`: a list with no type has no identity (owner ruling 2026-11-05,
+             * #87); avg keeps `avg 0#0`, its SQL-compat 0n */
+            if (n == 1 && row->nested == QNEST_FOLD && q_type_is_empty_list(args[0])) return ray_list_new(0);
+            if (n == 1 && row->nested == QNEST_MEAN && q_type_is_empty_list(args[0])) {
+                ray_t* e = q_type_empty(RAY_I64);
+                ray_t* r = q_eval_apply(fv, row, &e, 1);
+                ray_release(e);
+                return r;
+            }
+            if (n == 1 && (is_container(args[0]) ||
+                           (row->nested && q_index_any_nested_item(args[0]))))
+                return agg1(fv, row, args[0]);
+            if (n == 2 && (is_container(args[0]) || is_container(args[1]) ||
+                           (row->nested && (q_index_any_nested_item(args[0]) || q_index_any_nested_item(args[1])))))
+                return agg2(fv, row, args[0], args[1]);
+        } else if (strcmp(fam, "map") == 0) {
+            /* a map is uniform (maps.md:390): `sums ()` is `()` */
+            if (n == 1 && q_type_is_empty_list(args[0])) return ray_list_new(0);
+            if (n == 1 && (is_container(args[0]) ||
+                           q_index_any_nested_item(args[0])))
+                return map1(fv, row, NULL, args[0]);
+            /* the dyadic m-window rows are window-then-data: lift on the DATA
+             * with the window/decay ATOM held (`2 mmax d`, ref/max.md) */
+            if (n == 2 && args[0]->type < 0 &&
+                (is_container(args[1]) || q_index_any_nested_item(args[1])))
+                return map1(fv, row, args[0], args[1]);
+        } else if (strcmp(fam, "index") == 0) {
+            /* as for `atomic`, a two-valence row's family describes the DYAD —
+             * the monadic sibling (`#:` count, `_:` floor) derives no index */
+            if (n == 1 && row->dyad.kind == QK_NONE && is_container(args[0]))
+                return index_lift(fv, args, 1);
+            if (n == 2 && is_container(args[1]) && q_type_is_int_atom(args[0]))
+                return index_lift(fv, args, 2);
+        }
+    } else if (fv->attrs & RAY_FN_ATOMIC) {
+        /* row-less atomic value (e.g. an each-operand): attr-driven lift */
+        if (n == 1 && fv->type == RAY_UNARY &&
+            (is_coll(args[0]) || is_container(args[0])))
+            return atomic1((ray_unary_fn)(uintptr_t)fv->i64, args[0]);
+        if (n == 2 && fv->type == RAY_BINARY &&
+            (is_coll(args[0]) || is_coll(args[1]) ||
+             is_container(args[0]) || is_container(args[1])))
+            return atomic2((ray_binary_fn)(uintptr_t)fv->i64, row,
+                           args[0], args[1]);
+    }
+    return call_kernel(fv, args, n);
+}
+
+static int all_given(ray_t** args, int64_t n) {
+    for (int64_t i = 0; i < n; i++)
+        if (!args[i] || Q_IS_HOLE(args[i])) return 0;
+    return 1;
+}
+
+static int any_table(ray_t** args, int64_t n) {
+    for (int64_t i = 0; i < n; i++)
+        if (args[i]->type == RAY_TABLE) return 1;
+    return 0;
+}
+
+/* a unary or binary builtin at its own rank, the iterator keywords' rows apart */
+static int fixed_verb(ray_t* fv, const q_op_t* row, int64_t n) {
+    return (fv->type == RAY_UNARY && n == 1) || (fv->type == RAY_BINARY && n == 2 && !(row && row->adverb_hof));
+}
+
+/* The keyword-HOF row a binary application routes to the native adverb arms by (finding 3): the row's and not its
+ * q.q lambda value's, however the lambda was reached (infix, `.`, a variable).  NULL for any other application. */
+static const q_op_t* hof_row(ray_t* fv, const q_op_t* row, q_car_kind_t kind, int64_t n) {
+    if (n != 2) return NULL;
+    if (!row && kind == Q_EVAL_CAR_LAMBDA) row = q_registry_row_of(fv, Q_DYADIC);
+    return row && row->adverb_hof && row->lex == QLEX_KW ? row : NULL;
+}
+
+/* two scalar atoms under an atomic dyad: no enum to route, no container to lift over */
+static int atomic_scalars(const ray_t* fv, const q_op_t* row, ray_t** a, int64_t n) {
+    return n == 2 && lifts_atomic(fv, row, 2) && a[0]->type < 0 && a[1]->type < 0 && a[0]->type != -RAY_ENUM &&
+           a[1]->type != -RAY_ENUM;
+}
+
 static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     if (!fv || RAY_IS_ERR(fv)) return q_err(QE_TYPE);
     if (q_eval_interrupt_take()) {
@@ -2004,10 +2101,21 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
         if (stop) return stop;
     }
     if (n < 0 || n > APPLY_MAX_ARGS) return q_err(QE_RANK);
+    q_car_kind_t kind = q_eval_apply_carrier_kind(fv);
+    /* The commonest applications meet none of the laws below, so they leave here.  A lambda given exactly its
+     * parameters, none elided, neither projects nor maps (an iterator keyword keeps the long way to its row); a
+     * unary or binary builtin given every argument, no table among them, has no hole, projection or deferred
+     * table to answer for and goes to its family's lift, or past it for two scalars. */
+    if (kind == Q_EVAL_CAR_LAMBDA && n == rank_of(fv) && all_given(args, n) && !hof_row(fv, row, kind, n))
+        return lambda_call(fv, args, n);
+    if (fixed_verb(fv, row, n) && all_given(args, n) && !any_table(args, n)) {
+        if (atomic_scalars(fv, row, args, n))
+            return map_binary((ray_binary_fn)(uintptr_t)fv->i64, row, args[0], args[1]);
+        return verb_apply(fv, row, args, n);
+    }
     ray_t* elided[APPLY_MAX_ARGS];
     if (hole_args(fv, args, n, elided)) args = elided;
 
-    q_car_kind_t kind = q_eval_apply_carrier_kind(fv);
     /* a keyword whose value is a composition or projection runs its row's kernel: recognised by the value, one index
      * probe (a derived function's is the adverb engine's own, by its operand's mono/mono_scan) */
     if ((kind == Q_EVAL_CAR_COMP || kind == Q_EVAL_CAR_PROJ) &&
@@ -2074,11 +2182,8 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
         return q_eval_apply_proj_new(fv, vrow, args, n, 2);
     }
 
-    /* keyword-HOF rows route to the native adverb arms (finding 3), the row's and not its q.q lambda value's,
-     * however the lambda was reached (infix, `.`, a variable) */
-    const q_op_t* hof = row;
-    if (!hof && n == 2 && kind == Q_EVAL_CAR_LAMBDA) hof = q_registry_row_of(fv, Q_DYADIC);
-    if (hof && hof->adverb_hof && hof->lex == QLEX_KW && n == 2) {
+    const q_op_t* hof = hof_row(fv, row, kind, n);
+    if (hof) {
         int adv = q_adverb_hof_id(hof->adverb_hof);
         if (adv >= 0) {
             /* a list under the keyword is a unary value indexed item by item, never Case, which is the glyph's
@@ -2105,69 +2210,7 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
     case Q_EVAL_CAR_FOREIGN: break;   /* foreign answered 'type at the head */
     }
 
-    /* enum args at a verb boundary: aware arm, preserve set, or decay */
-    if (row && n >= 1 && n <= 2) {
-        int has = 0;
-        for (int64_t i = 0; i < n && !has; i++) has = q_enum_is(args[i]);
-        if (has) {
-            ray_t* er = enum_route(fv, row, args, n);
-            if (er) return er;
-        }
-    }
-
-    if (lifts_atomic(fv, row, n))
-        return n == 1 ? atomic1((ray_unary_fn)(uintptr_t)fv->i64, args[0])
-                      : atomic2((ray_binary_fn)(uintptr_t)fv->i64, row, args[0], args[1]);
-
-    const char* fam = row ? row->family : NULL;
-    if (fam) {
-        if (strcmp(fam, "aggregate") == 0) {
-            /* the fold group folds `()` to `()`: a list with no type has no identity (owner ruling 2026-11-05,
-             * #87); avg keeps `avg 0#0`, its SQL-compat 0n */
-            if (n == 1 && row->nested == QNEST_FOLD && q_type_is_empty_list(args[0])) return ray_list_new(0);
-            if (n == 1 && row->nested == QNEST_MEAN && q_type_is_empty_list(args[0])) {
-                ray_t* e = q_type_empty(RAY_I64);
-                ray_t* r = q_eval_apply(fv, row, &e, 1);
-                ray_release(e);
-                return r;
-            }
-            if (n == 1 && (is_container(args[0]) ||
-                           (row->nested && q_index_any_nested_item(args[0]))))
-                return agg1(fv, row, args[0]);
-            if (n == 2 && (is_container(args[0]) || is_container(args[1]) ||
-                           (row->nested && (q_index_any_nested_item(args[0]) || q_index_any_nested_item(args[1])))))
-                return agg2(fv, row, args[0], args[1]);
-        } else if (strcmp(fam, "map") == 0) {
-            /* a map is uniform (maps.md:390): `sums ()` is `()` */
-            if (n == 1 && q_type_is_empty_list(args[0])) return ray_list_new(0);
-            if (n == 1 && (is_container(args[0]) ||
-                           q_index_any_nested_item(args[0])))
-                return map1(fv, row, NULL, args[0]);
-            /* the dyadic m-window rows are window-then-data: lift on the DATA
-             * with the window/decay ATOM held (`2 mmax d`, ref/max.md) */
-            if (n == 2 && args[0]->type < 0 &&
-                (is_container(args[1]) || q_index_any_nested_item(args[1])))
-                return map1(fv, row, args[0], args[1]);
-        } else if (strcmp(fam, "index") == 0) {
-            /* as for `atomic`, a two-valence row's family describes the DYAD —
-             * the monadic sibling (`#:` count, `_:` floor) derives no index */
-            if (n == 1 && row->dyad.kind == QK_NONE && is_container(args[0]))
-                return index_lift(fv, args, 1);
-            if (n == 2 && is_container(args[1]) && q_type_is_int_atom(args[0]))
-                return index_lift(fv, args, 2);
-        }
-    } else if (fv->attrs & RAY_FN_ATOMIC) {
-        /* row-less atomic value (e.g. an each-operand): attr-driven lift */
-        if (n == 1 && fv->type == RAY_UNARY &&
-            (is_coll(args[0]) || is_container(args[0])))
-            return atomic1((ray_unary_fn)(uintptr_t)fv->i64, args[0]);
-        if (n == 2 && fv->type == RAY_BINARY &&
-            (is_coll(args[0]) || is_coll(args[1]) ||
-             is_container(args[0]) || is_container(args[1])))
-            return atomic2((ray_binary_fn)(uintptr_t)fv->i64, row,
-                           args[0], args[1]);
-    }
-    return call_kernel(fv, args, n);
+    return verb_apply(fv, row, args, n);
 }
 
 /* THE materialization dial (Future A default, materialization phase 1): every
@@ -2513,6 +2556,11 @@ int q_eval_apply_truthy(ray_t* v, ray_t** err) {
     if (!v) { *err = q_err(QE_TYPE); return 0; }
     v = q_eval_apply_concrete(v);                     /* boundary seam: truthiness */
     if (RAY_IS_ERR(v)) { *err = v; return 0; }
+    if (v->type == -RAY_BOOL) {                       /* what a comparison answers: the cast would return it */
+        int go = v->b8 != 0;
+        ray_release(v);
+        return go;
+    }
     int8_t t = v->type < 0 ? (int8_t)-v->type : v->type;
     if (t == RAY_F64 || t == RAY_F32) {
         ray_release(v);

@@ -21,6 +21,33 @@
 
 /* ---- collapse: homogeneous atom list -> typed vector (q_prim.h) ---- */
 
+/* Atom e into slot i of the vector its run collapses to, null mark included.  The switch is on the POSITIVE tag,
+ * exhaustive over ray_type_e (no default) so a future member demands a lane (#209 guard): only the non-i64 reads have
+ * an arm, and the i64/temporal/sym tags, enum positions and any out-of-enum tag are read as the i64. */
+static void run_put(ray_t* vec, int64_t i, ray_t* e) {
+    float f;
+    const void* src = &e->i64;
+    switch ((ray_type_e)vec->type) {
+    case RAY_BOOL: src = &e->b8;  break;
+    case RAY_I16:  src = &e->i16; break;
+    case RAY_I32:  src = &e->i32; break;
+    case RAY_F32:  f = (float)e->f64; src = &f; break;        /* F32 atom stores f64 */
+    case RAY_F64:
+    case RAY_DATETIME: src = &e->f64; break;
+    case RAY_GUID: src = ray_guid_bytes(e); break;
+    RAY_BYTE_CASES: src = &e->u8; break;                      /* byte + char atoms store the payload in u8 */
+    case RAY_I64:  case RAY_TIMESTAMP: case RAY_MONTH:
+    case RAY_DATE: case RAY_TIMESPAN: case RAY_MINUTE:    case RAY_SECOND:
+    case RAY_TIME: case RAY_LIST: case RAY_STR: case RAY_SYM:
+    case RAY_ENUM:
+                   break;
+    }
+    uint8_t esz = ray_sym_elem_size(vec->type, vec->attrs);
+    if (esz == 8) memcpy((char*)ray_data(vec) + i * 8, src, 8);
+    else memcpy((char*)ray_data(vec) + i * esz, src, esz);
+    if (RAY_ATOM_IS_NULL(e)) ray_vec_set_null(vec, i, true);
+}
+
 ray_t* q_list_collapse_atoms(ray_t* l) {
     if (!l || RAY_IS_ERR(l) || l->type != RAY_LIST || q_count(l) == 0) {
         if (l) ray_retain(l);
@@ -32,55 +59,39 @@ ray_t* q_list_collapse_atoms(ray_t* l) {
     if (t >= 0 || t == -RAY_STR) { ray_retain(l); return l; }   /* not a scalar-atom run */
     for (int64_t i = 1; i < n; i++)
         if (!e[i] || e[i]->type != t) { ray_retain(l); return l; }
-
-    if (t == -RAY_SYM) {
-        ray_t* vec = ray_sym_vec_new(RAY_SYM_W64, n);
-        if (RAY_IS_ERR(vec)) return vec;
-        for (int64_t i = 0; i < n; i++) vec = ray_vec_append(vec, &e[i]->i64);
-        return vec;
-    }
     /* enum atoms collapse only within ONE domain (a mixed-domain run has no
      * single 20h vector to become — it stays boxed) */
     if (t == -RAY_ENUM)
         for (int64_t i = 1; i < n; i++)
             if (q_enum_domain(e[i]) != q_enum_domain(e[0])) { ray_retain(l); return l; }
 
-    ray_t* vec = ray_vec_new(-t, n);
+    ray_t* vec = ray_vec_new((int8_t)-t, n);
     if (RAY_IS_ERR(vec)) return vec;
-    int64_t nulls = 0;
-    for (int64_t i = 0; i < n; i++) {
-        /* Switch the recovered POSITIVE tag, exhaustive over ray_type_e (no
-         * default) so a future member demands a lane (#209 guard).  Only the
-         * non-i64 reads live here; i64/temporal tags AND any out-of-enum tag
-         * fall to the shared i64 append below — byte-identical to the old
-         * default (U8 LE-aliased).  LIST/STR/SYM are dead arms (filtered above). */
-        bool appended = false;
-        switch ((ray_type_e)-t) {
-        case RAY_BOOL: vec = ray_vec_append(vec, &e[i]->b8);  appended = true; break;
-        case RAY_I16:  vec = ray_vec_append(vec, &e[i]->i16); appended = true; break;
-        case RAY_I32:  vec = ray_vec_append(vec, &e[i]->i32); appended = true; break;
-        case RAY_F32: { float f = (float)e[i]->f64;           /* F32 atom stores f64 */
-                        vec = ray_vec_append(vec, &f); appended = true; } break;
-        case RAY_F64:
-        case RAY_DATETIME:
-                       vec = ray_vec_append(vec, &e[i]->f64); appended = true; break;
-        case RAY_GUID: vec = ray_vec_append(vec, ray_guid_bytes(e[i])); appended = true; break;
-        RAY_BYTE_CASES: /* explicit u8 read — byte + char atoms store the payload
-                         * in u8; no LE-aliasing through the shared i64 append */
-                       vec = ray_vec_append(vec, &e[i]->u8); appended = true; break;
-        case RAY_I64:  case RAY_TIMESTAMP: case RAY_MONTH:
-        case RAY_DATE: case RAY_TIMESPAN: case RAY_MINUTE:    case RAY_SECOND:
-        case RAY_TIME: case RAY_LIST: case RAY_STR: case RAY_SYM:
-        case RAY_ENUM:                                        /* i64 positions */
-                       break;
-        }
-        if (!appended) vec = ray_vec_append(vec, &e[i]->i64);   /* i64/temporal + out-of-enum */
-        if (RAY_IS_ERR(vec)) return vec;
-        if (RAY_ATOM_IS_NULL(e[i])) { ray_vec_set_null(vec, i, true); nulls++; }
-    }
-    (void)nulls;
+    vec->len = n;
+    for (int64_t i = 0; i < n; i++) run_put(vec, i, e[i]);
     if (t == -RAY_ENUM) return q_enum_stamp(vec, q_enum_domain(e[0]));
     return vec;
+}
+
+/* The run is a vector while every item is a plain atom of its type, and the boxed list from the first item that is
+ * not: an unlike one, or an atom the element read would not hand back as it is (marked, a real's f64, a guid, an
+ * enum). */
+ray_t* q_list_run_push(ray_t* run, ray_t* e, int64_t cap) {
+    int8_t t = e->type;
+    int plain = t < 0 && !e->attrs && t != -RAY_STR && t != -RAY_ENUM && t != -RAY_F32 && t != -RAY_GUID;
+    if (!run) run = plain ? ray_vec_new((int8_t)-t, cap) : ray_list_new(cap);
+    if (RAY_IS_ERR(run)) return run;
+    if (run->type != RAY_LIST && plain && t == -run->type && run->len < cap) {
+        run_put(run, run->len++, e);
+        return run;
+    }
+    if (run->type != RAY_LIST) {
+        ray_t* l = q_list_uncollapse(run);
+        ray_release(run);
+        if (RAY_IS_ERR(l)) return l;
+        run = l;
+    }
+    return ray_list_append(run, e);
 }
 
 /* THE dict-rows builder: n plain sym-keyed dicts with MATCHING keys are the
