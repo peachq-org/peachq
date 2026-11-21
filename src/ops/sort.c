@@ -678,6 +678,13 @@ static void packed_detect_fn(void* arg, uint32_t wid,
     c->pw_not_reverse[wid] += not_rev;
 }
 
+/* A reverse-sorted run reverses to its grade only without equal neighbours: reversing equals breaks stability. */
+static bool packed_no_ties(const uint64_t* k, int64_t n, uint64_t km) {
+    for (int64_t i = 1; i < n; i++)
+        if ((k[i] & km) == (k[i - 1] & km)) return false;
+    return true;
+}
+
 /* Parallel unpack: extract indices (and optionally sorted keys) from
  * packed values after packed radix sort. */
 typedef struct {
@@ -985,6 +992,7 @@ void radix_encode_fn(void* arg, uint32_t wid, int64_t start, int64_t end) {
                     (bits & 0x000FFFFFFFFFFFFFULL)) {
                     c->keys[i] = desc ? ~nan_e : nan_e;
                 } else {
+                    if (bits == 0x8000000000000000ULL) bits = 0;   /* -0 = 0: one key, so the grade keeps them stable */
                     uint64_t mask = -(bits >> 63) | ((uint64_t)1 << 63);
                     uint64_t e = bits ^ mask;
                     c->keys[i] = desc ? ~e : e;
@@ -1145,7 +1153,8 @@ void radix_encode_fn(void* arg, uint32_t wid, int64_t start, int64_t end) {
  *      nothing in this file branches on "we know the bench is str8".
  *   3. Single-run short-circuit — if the probe reports one monotone
  *      run across the entire non-null range, we're done: copy (or
- *      reverse, for DESC × ASC mismatch) and skip sorting entirely.
+ *      reverse, for DESC × ASC mismatch, when the run has no equals
+ *      to reverse) and skip sorting entirely.
  *      This is the vergesort trivial case; the general multi-run
  *      merge path is scoped for a follow-up.
  *   4. Key materialization — pack each non-null string into a record
@@ -1348,9 +1357,11 @@ static inline int strkey_cmp_packed(const ray_strkey_t* a,
  * longer than the packed window, we CANNOT declare a sorted run —
  * the tail bytes may impose ordering we haven't examined.  The
  * shortcut is safe only when every pair is either strictly ordered
- * by the packed key or both sides fit entirely inside the window. */
+ * by the packed key or both sides fit entirely inside the window.
+ * `*ties` reports an equal pair: reversing such a run would reverse its equals. */
 static int strsort_detect_runs(const ray_strkey_t* keys, int64_t n,
-                                int parts, int parts_bytes) {
+                                int parts, int parts_bytes, bool* ties) {
+    *ties = false;
     if (n < 2) return 0;
     bool asc = true, desc = true;
     for (int64_t i = 1; i < n; i++) {
@@ -1361,6 +1372,7 @@ static int strsort_detect_runs(const ray_strkey_t* keys, int64_t n,
                 /* Tail bytes unresolved — fall through to the real sort. */
                 return 0;
             }
+            *ties = true;
             /* Both fully fit in the packed prefix and their parts tie
              * → the strings are equal in the sorted order, which is
              * compatible with both ascending and descending runs. */
@@ -1722,7 +1734,8 @@ static bool sort_str_msd_inplace(int64_t* sorted_idx, int64_t nrows,
          * Early-aborts on the first inversion (so random input pays O(1)).
          * When the entire non-null range is a single monotone run we
          * skip the sort proper and emit row indices directly. */
-        int run_dir = strsort_detect_runs(keys, n_live, parts, parts_bytes);
+        bool run_ties;
+        int run_dir = strsort_detect_runs(keys, n_live, parts, parts_bytes, &run_ties);
         bool want_asc = !desc;
         if (run_dir == 1 && want_asc) {
             /* Already ascending — emit as-is. */
@@ -1738,7 +1751,7 @@ static bool sort_str_msd_inplace(int64_t* sorted_idx, int64_t nrows,
                 ray_pool_dispatch(pool_p, strsort_emit_fn, &ectx, n_live);
             else
                 strsort_emit_fn(&ectx, 0, 0, n_live);
-        } else if (run_dir != 0) {
+        } else if (run_dir != 0 && !run_ties) {
             /* Single run but wrong direction — emit row-indices reversed. */
             for (int64_t i = 0, j = n_live - 1; i < j; i++, j--) {
                 ray_strkey_t t = keys[i]; keys[i] = keys[j]; keys[j] = t;
@@ -2440,8 +2453,9 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
                                     /* Already sorted - identity permutation */
                                     sorted_idx = indices;
                                     radix_done = true;
-                                } else if (total_not_rev == 0 && nrows > 1) {
-                                    /* Reverse-sorted - reverse indices in O(n) */
+                                } else if (total_not_rev == 0 && nrows > 1 &&
+                                           packed_no_ties(keys, nrows, key_mask_s)) {
+                                    /* Strictly reverse-sorted - reverse indices in O(n) */
                                     for (int64_t i = 0; i < nrows; i++)
                                         indices[i] = nrows - 1 - i;
                                     sorted_idx = indices;
@@ -3312,7 +3326,8 @@ ray_t* ray_sort(ray_t** cols, uint8_t* descs, uint8_t* nulls_first,
                           (cols[0]->type == RAY_BOOL ||
                            ray_is_bytelike(cols[0]->type) ||
                            cols[0]->type == RAY_I16);
-        if (sorted_keys && !RAY_IS_SYM(cols[0]->type) && !c0_shifted) {
+        bool c0_float = cols[0]->type == RAY_F64 || RAY_IS_TEMPORALF(cols[0]->type);   /* its key folds -0 into 0 */
+        if (sorted_keys && !RAY_IS_SYM(cols[0]->type) && !c0_shifted && !c0_float) {
             /* Decode path: sequential writes, no random access */
             ray_t* result = ray_vec_new(cols[0]->type, nrows);
             if (!result || RAY_IS_ERR(result)) {

@@ -230,6 +230,12 @@ ray_t* q_table_at(ray_t* t, ray_t* idx) {
     if (!w) return NULL;
     int64_t n = q_count(idx);
     int64_t nr = q_count(t);
+    if (w == 8) {               /* an 8-byte null is NULL_I64 < 0: an all-in-range vector is its own gather map */
+        const int64_t* lp = (const int64_t*)ray_data(idx);
+        int64_t i = 0;
+        while (i < n && lp[i] >= 0 && lp[i] < nr) i++;
+        if (i == n) return qj_table_gather_idx(t, lp, n);
+    }
     int64_t* ids = (int64_t*)malloc((size_t)(n > 0 ? n : 1) * sizeof(int64_t));
     if (!ids) return q_err(QE_WSFULL);
     for (int64_t i = 0; i < n; i++) {
