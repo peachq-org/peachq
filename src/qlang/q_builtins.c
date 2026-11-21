@@ -2,8 +2,8 @@
  * is a bootstrap-only kernel catalogue: capture_base and the registry snapshot
  * it here, then q never consults it. */
 #define _POSIX_C_SOURCE 200809L
-#include "qlang/io/q_io.h"      /* q_io_member_fn — .Q.c.member */
 #include "qlang/q_count.h"
+#include "qlang/io/q_io.h"      /* q_io_member_fn — .Q.c.member */
 #include "qlang/q_builtins.h"
 #include "qlang/base/q_err.h"
 #include "qlang/eval/q_eval.h" /* q_eval_value_wrap / the carrier predicates */

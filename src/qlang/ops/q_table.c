@@ -1078,7 +1078,7 @@ static ray_t* group_list(ray_t* x) {
     int64_t n = q_count(x);
     int64_t* gid = malloc(sizeof(int64_t) * (size_t)(n > 0 ? n : 1));
     int64_t* cnt = malloc(sizeof(int64_t) * (size_t)(n > 0 ? n : 1));
-    ray_t* u = !gid || !cnt ? q_err(QE_WSFULL) : q_list_uniques(x, gid);
+    ray_t* u = !gid || !cnt ? q_err(QE_WSFULL) : q_setops_uniques(x, gid);
     int64_t ng = RAY_IS_ERR(u) ? 0 : q_count(u);
     ray_t* k = RAY_IS_ERR(u) ? u : q_list_collapse(u);
     if (!RAY_IS_ERR(u)) ray_release(u);

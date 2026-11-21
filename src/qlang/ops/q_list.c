@@ -73,6 +73,12 @@ ray_t* q_list_collapse_atoms(ray_t* l) {
     return vec;
 }
 
+int q_list_has_hole(ray_t* l) {
+    ray_t** e = (ray_t**)ray_data(l);
+    for (int64_t i = 0, n = q_count(l); i < n; i++) if (!e[i]) return 1;
+    return 0;
+}
+
 /* The run is a vector while every item is a plain atom of its type, and the boxed list from the first item that is
  * not: an unlike one, or an atom the element read would not hand back as it is (marked, a real's f64, a guid, an
  * enum). */
@@ -91,7 +97,9 @@ ray_t* q_list_run_push(ray_t* run, ray_t* e, int64_t cap) {
         if (RAY_IS_ERR(l)) return l;
         run = l;
     }
-    return ray_list_append(run, e);
+    ray_t* out = ray_list_append(run, e);
+    if (RAY_IS_ERR(out)) ray_release(run);   /* a failed append leaves a sole-owned list in place, unreleased */
+    return out;
 }
 
 /* THE dict-rows builder: n plain sym-keyed dicts with MATCHING keys are the
