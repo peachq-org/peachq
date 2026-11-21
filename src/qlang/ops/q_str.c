@@ -6,10 +6,10 @@
 #include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* wrap decls + the string-C3 boundary decls */
 #include "qlang/base/q_err.h"
-#include "qlang/base/q_type.h"         /* q_type_empty — like's empty answer is still boolean */
+#include "qlang/base/q_type.h"         /* q_type_empty (like's empty answer), q_type_is_inf + q_type_char (string's tokens) */
 #include "qlang/eval/q_eval.h"         /* q_eval_apply_is_fn / q_eval_apply_value — ssr fn replacement */
 #include "qlang/q_builtins.h"          /* the env-fn decls (q_string_fn, ...) */
-#include "qlang/q_fmt.h"               /* q_fmt_float, q_fmt — string's float and month leaves */
+#include "qlang/q_fmt.h"               /* q_fmt_float, q_fmt — string's float and temporal-token leaves */
 #include "lang/internal.h"             /* ray_str_vec_get — RAY_STR column reads */
 #include "lang/format.h"               /* ray_fmt — base formatter fallback */
 #include "ops/ops.h"                   /* ray_is_lazy — DAG guard in q_str_charv_out */
@@ -217,12 +217,14 @@ ray_t* q_string_fn(ray_t* x) {
     }
     /* Not ray_fmt: rayfall would write "true"/"false", a rayfall literal q has no reader for. */
     if (x->type == -RAY_BOOL) { char c = x->b8 ? '1' : '0'; return ray_charv(&c, 1); }
-    /* q's month value form minus the `m` that only display carries, so `"M"$string` round-trips (qutils/longstring.q). */
-    if (x->type == -RAY_MONTH) {
+    /* A month, or a temporal infinity (owner ruling 2026-11-21: 0Wd is "0W", -0wz "-0w"), is its value form minus the
+     * letter only display carries, so `"X"$string` round-trips (qutils/longstring.q). */
+    int8_t t = (int8_t)-x->type;
+    if ((RAY_IS_TEMPORAL(t) || RAY_IS_TEMPORALF(t)) && (t == RAY_MONTH || q_type_is_inf(x))) {
         char tok[32];
         q_fmt(x, tok, sizeof tok);
         size_t l = strlen(tok);
-        return ray_charv(tok, (int64_t)(l && tok[l - 1] == 'm' ? l - 1 : l));
+        return ray_charv(tok, (int64_t)(l && tok[l - 1] == q_type_char(t) ? l - 1 : l));
     }
     if (q_type_is_fn(x)) {                                       /* ref/string.md: `string {x*x}` is "{x*x}" */
         ray_t* src = q_eval_apply_lambda_src(x);

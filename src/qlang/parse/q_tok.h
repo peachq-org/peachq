@@ -69,5 +69,7 @@ int q_tok_timespan_ns(const char* p, size_t len, int64_t* ns);
 int q_tok_ts(const char* p, size_t len, int64_t* out);
 int q_tok_uuid(const char* p, size_t len, uint8_t out[16]);
 int q_tok_ipv4(const char* p, size_t len, uint32_t* out);   /* dotted-quad -> BE int */
+/* "0W"/"-0W" -> +1/-1, else 0: the infinity text (owner ruling 2026-11-21); w = 'w' spells z's float-backed 0w */
+int q_tok_inf_sign(const char* p, size_t len, char w);
 
 #endif /* Q_TOK_H */

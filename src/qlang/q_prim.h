@@ -170,9 +170,9 @@ ray_t*  q_enum_null_col(int64_t dom, int64_t n);   /* n null positions as a 20h 
 /* TWO ordered runs are load-bearing: BOOL < I64 < F64 (numeric promotion) and
  * MINUTE < SECOND < TIME < TIMESPAN (the widest WRITTEN form wins, never truncation).
  * GUID and BYTE join NEITHER run — they promote with nothing but themselves — and sit
- * after TIMESPAN so both runs and CT_STR's dominance are untouched. */
+ * after TIMESPAN so both runs and CT_STR's dominance are untouched.  INF (0W) joins DATE..TIMESPAN, else text. */
 typedef enum { CT_UNKNOWN = 0, CT_BOOL, CT_I64, CT_F64, CT_DATE, CT_MONTH, CT_TS,
-               CT_MINUTE, CT_SECOND, CT_TIME, CT_TIMESPAN, CT_GUID, CT_BYTE, CT_STR } ct_t;
+               CT_MINUTE, CT_SECOND, CT_TIME, CT_TIMESPAN, CT_GUID, CT_BYTE, CT_INF, CT_STR } ct_t;
 
 #define Q_CSV_FMT_MAX 64
 

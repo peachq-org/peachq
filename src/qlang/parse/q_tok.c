@@ -5,10 +5,10 @@
 #include "qlang/q_ops.h"
 #include "qlang/parse/q_tok.h"
 #include "qlang/base/q_err.h"
-#include "qlang/base/q_type.h"      /* q_type_char — THE tag<->type-letter map */
+#include "qlang/base/q_type.h"      /* q_type_char — THE tag<->type-letter map; q_type_as_i64 — a signed duration's payload */
 #include "qlang/base/q_calendar.h"  /* q_calendar_days_from_civil, q_calendar_date_valid, q_calendar_ts_compose(_checked) */
 #include "core/numparse.h"     /* ray_parse_f64/i64 — float twin + numeric Tok */
-#include "lang/internal.h"      /* ray_typed_null, ray_guid — q_tok() values */
+#include "lang/internal.h"      /* ray_typed_null, ray_guid, make_typed_int — q_tok() values */
 #include "lang/cal.h"           /* THE datetime and timestamp splits — a clocked point's time of day */
 #include <ctype.h>
 #include <math.h>
@@ -722,6 +722,17 @@ static int g_date_order;
 void q_tok_date_order_set(int v) { g_date_order = v ? 1 : 0; }
 int q_tok_date_order(void) { return g_date_order; }
 
+/* yyyy<sep>mm<sep>dd over one of `.-/`, each of month and day minw..2 digits wide */
+static int tok_date_ymd(const char* p, size_t len, size_t minw, int64_t* y, int64_t* m, int64_t* d) {
+    if (len < 6 + 2 * minw || !tok_all_digits(p, 4) || (p[4] != '.' && p[4] != '-' && p[4] != '/')) return 0;
+    size_t mn = tok_dig_run_n(p, len, 5), dn = tok_dig_run_n(p, len, 6 + mn);
+    if (mn < minw || mn > 2 || p[5 + mn] != p[4] || dn < minw || dn > 2 || 6 + mn + dn != len) return 0;
+    ray_parse_i64(p, 4, y);
+    ray_parse_i64(p + 5, mn, m);
+    ray_parse_i64(p + 6 + mn, dn, d);
+    return 1;
+}
+
 /* "D"$ date-string scan (ref/tok.md date formats).  Supported subset:
  * yyyymmdd (8 digits, the doc's [yy]yymmdd with an unambiguous 4-digit year)
  * and yyyy.mm.dd / yyyy-mm-dd / yyyy/mm/dd (the doc's separator variants;
@@ -741,16 +752,7 @@ int q_tok_date(const char* p, size_t len,
         *d = (p[6]-'0')*10 + (p[7]-'0');
         return 1;
     }
-    if (len == 10 && (p[4] == '.' || p[4] == '-' || p[4] == '/') && p[7] == p[4]) {
-        for (int i = 0; i < 10; i++) {
-            if (i == 4 || i == 7) continue;
-            if (p[i] < '0' || p[i] > '9') return 0;
-        }
-        *y = (p[0]-'0')*1000 + (p[1]-'0')*100 + (p[2]-'0')*10 + (p[3]-'0');
-        *m = (p[5]-'0')*10 + (p[6]-'0');
-        *d = (p[8]-'0')*10 + (p[9]-'0');
-        return 1;
-    }
+    if (len == 10 && tok_date_ymd(p, len, 2, y, m, d)) return 1;
     if (len == 10 && p[2] == '/' && p[5] == '/') {
         for (int i = 0; i < 10; i++) {
             if (i == 2 || i == 5) continue;
@@ -884,31 +886,32 @@ static int tok_ip_guid(const char* p, size_t len, uint8_t out[16]) {
 /* "T"$ time-string scan (ref/tok.md).  Two forms, both -> i32 ms of day:
  *   - PACKED digits HHMMSSmmm (doc-pinned): "T"$"123456789" -> 12:34:56.789,
  *     "T"$"123456123987654" -> 12:34:56.123 (>=6 digits: HH MM SS then up to 3
- *     fractional; extra fractional digits ignored).
+ *     fractional; extra fractional digits ignored), or exactly HHMM.
  *   - COLON: the shared clock grammar (derived — the natural literal
- *     spelling), with this Tok's policy: seconds are required, and the
- *     fraction may be a bare dot or any number of digits, of which only the
- *     first 3 (millis) are used.  The hour field is UNCAPPED
+ *     spelling) from hh:mm up, and only after the seconds a fraction, a bare
+ *     dot or any number of digits, of which only the first 3 (millis) are
+ *     used.  The hour field is UNCAPPED
  *     (derived: time is a duration and q's own display writes 596:31:23.647 for
  *     0Wt) — past the i32 ms domain is out-of-domain.
+ * hh:mm and hhmm read as U/V/N read them (KxSystems/ml nlp/tests/nlptest.t:82).
  * mm/ss must be < 60, else out-of-domain.  Returns 1 and fills *ms on success,
  * 0 on any shape/range mismatch (caller -> typed null 0Nt). */
 int q_tok_time(const char* p, size_t len, int32_t* ms) {
     if (memchr(p, ':', len)) {
         tok_clock c;
         int64_t total;
-        if (tok_clock_scan(p, len, 0, &c) != len || !c.ok || c.fields != 3 ||
+        if (tok_clock_scan(p, len, 0, &c) != len || !c.ok || c.fields < 2 || (c.dot && c.fields < 3) ||
             __builtin_mul_overflow(c.secs, (int64_t)1000, &total) ||
             __builtin_add_overflow(total, c.frac / 1000000, &total) || total > INT32_MAX) return 0;
         *ms = (int32_t)total;
         return 1;
     }
-    /* packed HHMMSSmmm: >=6 digits, first 6 = HHMMSS, next up to 3 = millis */
-    if (len >= 6 && tok_all_digits(p, len)) {
+    /* packed HHMM[SS[mmm]]: first 4 = HHMM, then SS, then up to 3 = millis */
+    if ((len == 4 || len >= 6) && tok_all_digits(p, len)) {
         int64_t h  = (p[0] - '0') * 10 + (p[1] - '0');
         int64_t mi = (p[2] - '0') * 10 + (p[3] - '0');
-        int64_t s  = (p[4] - '0') * 10 + (p[5] - '0');
-        int64_t frac = tok_frac_ns(p, 6, len < 9 ? len - 6 : 3) / 1000000;
+        int64_t s  = len == 4 ? 0 : (p[4] - '0') * 10 + (p[5] - '0');
+        int64_t frac = len == 4 ? 0 : tok_frac_ns(p, 6, len < 9 ? len - 6 : 3) / 1000000;
         if (mi >= 60 || s >= 60) return 0;
         *ms = (int32_t)(h * 3600000 + mi * 60000 + s * 1000 + frac);
         return 1;
@@ -961,8 +964,8 @@ int q_tok_clock_ns(const char* p, size_t len, int64_t* ns) {
 
 /* "N"$ timespan scan: an optional `<days>D` prefix (1D02:03:04.005006007)
  * then the q_tok_clock_ns clock/packed form; days*86400e9 + tod via the
- * checked compose home.  Bare clock = 0 days (tok.md:200).  Sign/`dD…` forms
- * deferred like the clock scan -> caller yields 0Nn.  Returns 1 + *ns else 0. */
+ * checked compose home.  Bare clock = 0 days (tok.md:200).  Unsigned: the
+ * sign is the caller's (Tok's entry, the loader's cell).  Returns 1 + *ns else 0. */
 int q_tok_timespan_ns(const char* p, size_t len, int64_t* ns) {
     size_t i = 0;
     while (i < len && p[i] >= '0' && p[i] <= '9') i++;
@@ -1053,6 +1056,11 @@ int q_tok_month(const char* p, size_t len, int64_t* months) {
     return 1;
 }
 
+int q_tok_inf_sign(const char* p, size_t len, char w) {
+    int neg = len && p[0] == '-';
+    return len == 2u + (size_t)neg && p[neg] == '0' && p[neg + 1] == w ? 1 - 2 * neg : 0;
+}
+
 /* Tok-only (qYaml's kx run): the loaders' cell grammar keeps a bare D as text (csvKdbTest near-miss). */
 static int tok_ts_bare_d(const char* p, size_t len, int64_t* ns) {
     int64_t y, mo, d;
@@ -1060,10 +1068,7 @@ static int tok_ts_bare_d(const char* p, size_t len, int64_t* ns) {
     return q_tok_ts(p, len, ns);
 }
 
-/* ===== 3. the Tok entry — contract in q_tok.h, stated once ===== */
-ray_t* q_tok(int8_t tag, const char* p, size_t len) {
-    while (len && *p == ' ') { p++; len--; }
-    while (len && p[len - 1] == ' ') len--;
+static ray_t* tok_value(int8_t tag, const char* p, size_t len) {
     switch (tag) {
     case RAY_SYM:
         return ray_sym(ray_sym_intern(len ? p : "", len));
@@ -1096,7 +1101,9 @@ ray_t* q_tok(int8_t tag, const char* p, size_t len) {
     case RAY_DATE: {
         /* invalid civil date included (tok.md pins "D"$"2147483648" -> 0Nd) */
         int64_t y, mo, d;
-        if (!q_tok_date(p, len, &y, &mo, &d) || !q_calendar_date_valid(y, mo, d))
+        /* Tok alone takes an unpadded month or day (SO 53120280); the loaders' sniff keeps q_tok_date's written form */
+        if ((!q_tok_date(p, len, &y, &mo, &d) && !tok_date_ymd(p, len, 1, &y, &mo, &d)) ||
+            !q_calendar_date_valid(y, mo, d))
             return ray_typed_null(-RAY_DATE);
         return ray_date(q_calendar_days_from_civil(y, mo, d));
     }
@@ -1176,12 +1183,32 @@ ray_t* q_tok(int8_t tag, const char* p, size_t len) {
         return ray_second(secs);
     }
     case RAY_TIMESPAN: {
-        int64_t ns;
-        if (!q_tok_timespan_ns(p, len, &ns))
+        int64_t ns, days;
+        int bare_days = len > 1 && p[len - 1] == 'D' && tok_all_digits(p, len - 1);
+        if (bare_days ? ray_parse_i64(p, len - 1, &days) != len - 1 || !q_calendar_ts_compose_checked(days, 0, &ns)
+                      : !q_tok_timespan_ns(p, len, &ns))
             return ray_typed_null(-RAY_TIMESPAN);
         return ray_timespan(ns);
     }
     default:
         return q_err(QE_NYI);
     }
+}
+
+/* ===== 3. the Tok entry — contract in q_tok.h, stated once ===== */
+ray_t* q_tok(int8_t tag, const char* p, size_t len) {
+    while (len && *p == ' ') { p++; len--; }
+    while (len && p[len - 1] == ' ') len--;
+    int64_t inf;
+    int inf_sign = q_tok_inf_sign(p, len, tag == RAY_DATETIME ? 'w' : 'W');
+    if (inf_sign && tag == RAY_DATETIME) return ray_datetime(inf_sign * INFINITY);
+    if (inf_sign && ray_type_inf(tag, inf_sign > 0, &inf)) return make_typed_int((int8_t)-tag, inf);
+    /* a duration reads one leading sign over any unsigned form (the loader's csv_timespan_cell does the same) */
+    int dur = tag == RAY_TIMESPAN || tag == RAY_TIME || tag == RAY_MINUTE || tag == RAY_SECOND;
+    if (!dur || !len || (p[0] != '-' && p[0] != '+')) return tok_value(tag, p, len);
+    ray_t* r = tok_value(tag, p + 1, len - 1);
+    if (p[0] == '+' || RAY_IS_ERR(r) || RAY_ATOM_IS_NULL(r)) return r;
+    int64_t v = q_type_as_i64(r);
+    ray_release(r);
+    return make_typed_int((int8_t)-tag, -v);
 }

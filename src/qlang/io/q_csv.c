@@ -134,7 +134,7 @@ static int csv_null_tok(const char* f, size_t n) {
  * type its parser refuses ------------------------------------------------------ */
 
 /* q_tok's date/ts/month/clock scanners cover the payloads; csv owns only what
- * the writer adds on top: the duration SIGN (Tok defers signs), the month `m`
+ * the writer adds on top: the duration SIGN (the scanners are unsigned), the month `m`
  * suffix, the float 0w/-0w specials, and the trailing tz offset. */
 
 /* true/false in any case (the `B` domain is case-insensitive; DuckDB agrees):
@@ -412,6 +412,8 @@ ct_t q_csv_detect(const q_csv_fmt_t* fmt, const char* f, size_t n) {
         if (fmt->datefmt[0] && csv_fmt_cell(fmt->datefmt, f, n, &dd, &nn)) return CT_DATE;
         if (fmt->tsfmt[0] && csv_fmt_cell(fmt->tsfmt, f, n, &dd, &nn)) return CT_TS;
     }
+    if (q_tok_inf_sign(f, n, 'W')) return CT_INF;
+    if (f[n - 1] == 'm' && q_tok_inf_sign(f, n - 1, 'W')) return CT_MONTH;   /* the month writer keeps its letter */
     if (n == 3 && ((f[0] == 'n' || f[0] == 'N') ? ((f[1] == 'a' || f[1] == 'A') && (f[2] == 'n' || f[2] == 'N'))
                                                 : ((f[0] == 'i' || f[0] == 'I') && (f[1] == 'n' || f[1] == 'N') &&
                                                    (f[2] == 'f' || f[2] == 'F'))))
@@ -501,6 +503,10 @@ ct_t q_csv_detect(const q_csv_fmt_t* fmt, const char* f, size_t n) {
 ct_t q_csv_promote(ct_t cur, ct_t obs) {
     if (cur == CT_UNKNOWN) return obs;
     if (obs == CT_UNKNOWN || cur == obs) return cur;
+    if (cur == CT_INF || obs == CT_INF) {
+        ct_t o = cur == CT_INF ? obs : cur;
+        return o >= CT_DATE && o <= CT_TIMESPAN ? o : CT_STR;
+    }
     if (cur == CT_STR || obs == CT_STR) return CT_STR;
     if ((cur == CT_DATE && obs == CT_TS) || (cur == CT_TS && obs == CT_DATE)) return CT_TS;
     if (cur <= CT_F64 && obs <= CT_F64) return cur > obs ? cur : obs;
@@ -591,6 +597,10 @@ ray_t* q_csv_cell_atom(const q_csv_fmt_t* fmt, char c, const char* f, size_t n) 
     while (n && f[0] == ' ') { f++; n--; }         /* the same blank tolerance the sniffer applies */
     while (n && f[n - 1] == ' ') n--;
     if (n == 0) return q_err(QE_CSV);              /* quoted blanks are content, which no number or instant reads */
+    /* the writer's temporal infinity (`string 0Wd` is "0W", owner 2026-11-21) under a temporal type; the sniff's CT_INF
+     * leaves a column of nothing else text.  Tok owns the spelling; a month keeps its `m`. */
+    size_t ni = c == 'm' && f[n - 1] == 'm' ? n - 1 : n;
+    if (c && strchr("dmpntuvz", c) && q_tok_inf_sign(f, ni, c == 'z' ? 'w' : 'W')) return q_tok((int8_t)q_type_of_char(c), f, ni);
     switch (c) {
         case 'b': {
             int v = csv_bool_tok(f, n);
