@@ -269,6 +269,17 @@ static inline int64_t floor_div64(int64_t a, int64_t b) {
 static inline int64_t floor_mod64(int64_t a, int64_t b) {
     return b == 0 ? NULL_I64 : (int64_t)((uint64_t)a - (uint64_t)floor_div64(a, b) * (uint64_t)b);
 }
+/* The float lane's remainder for a nonzero b, one within 1e-12 of 0 or |b| snapped to a zero of b's sign.  The snap
+ * is a bitwise select: as a branch it made the vector loop three times slower. */
+static inline double floor_mod_f64(double a, double b) {
+    double r = a - b * floor(a / b), z = b > 0 ? 0.0 : -0.0;
+    uint64_t rb, zb, m = -(uint64_t)((fabs(r) < 1e-12) | (fabs(r - fabs(b)) < 1e-12));
+    memcpy(&rb, &r, sizeof r);
+    memcpy(&zb, &z, sizeof z);
+    rb = (rb & ~m) | (zb & m);
+    memcpy(&r, &rb, sizeof r);
+    return r;
+}
 
 static inline int8_t promote_int_type(ray_t* a, ray_t* b) {
     return (int8_t)-arith_int_type((int8_t)-a->type, (int8_t)-b->type);

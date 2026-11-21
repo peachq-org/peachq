@@ -402,11 +402,8 @@ ray_t* ray_mod_fn(ray_t* a, ray_t* b) {
         return ray_error("type", "cannot mod %s by %s", ray_type_name(a->type), ray_type_name(b->type));
     if (atom_is_oob_null(a) || atom_is_oob_null(b)) return ray_typed_null(rt);
     if (float_lane(a, b)) {
-        double av = as_f64(a), bv = as_f64(b);
-        if (bv == 0.0) return ray_typed_null(rt);
-        double r = av - bv * floor(av / bv);
-        if (fabs(r) < 1e-12 || fabs(r - fabs(bv)) < 1e-12) r = bv > 0 ? 0.0 : -0.0;
-        return float_lane_atom(rt, r);
+        double bv = as_f64(b);
+        return bv == 0.0 ? ray_typed_null(rt) : float_lane_atom(rt, floor_mod_f64(as_f64(a), bv));
     }
     return as_i64(b) == 0 ? ray_typed_null(rt) : make_typed_int(rt, floor_mod64(as_i64(a), as_i64(b)));
 }
