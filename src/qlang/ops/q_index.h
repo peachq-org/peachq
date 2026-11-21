@@ -36,6 +36,10 @@
  * q layer (the apply module, wrappers, codecs). */
 ray_t* q_index_elem_at(ray_t* v, int64_t i);
 
+/* q_index_elem_at for a walk over v: consumes `prev`, the item the walk read last (NULL: none), and may answer in
+ * it when the caller's was its only reference.  OWNED. */
+ray_t* q_index_elem_next(ray_t* v, int64_t i, ray_t* prev);
+
 /* The rank axis, homed here because both read items through q_index_elem_at.
  * is_nested: are v's ITEMS collections (a STR atom counts — kdb strings are
  * char LISTS)?  any_nested_item: the same axis read for CONFORMABILITY — does

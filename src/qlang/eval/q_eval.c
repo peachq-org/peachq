@@ -39,6 +39,7 @@
 #include "qlang/io/q_io.h"         /* q_io_resource_table — `get `:f.csv reads the format the ending names */
 #include "qlang/io/q_handles.h"    /* q_handles_pq_of — a `:pq: coordinate is no path in parts */
 #include "qlang/q_ctx.h"           /* q_ctx_eval_src — multi-line text under the value law */
+#include "mem/cow.h"              /* ray_retain_inline / ray_release_inline — the per-node counts */
 #include "ops/ops.h"
 #include "lang/eval.h"             /* ray_eval_set_restricted / _blocked — reval's two modes */
 #include "table/sym.h"             /* ray_read_sym — sym vectors are width-adaptive */
@@ -209,7 +210,8 @@ static ray_t* name_error(int64_t id) {
 static ray_t* resolve(ray_t* sym) {
     ray_t* v = q_env_resolve(sym->i64);      /* owned (or an owned error) */
     if (v) {
-        if (q_view_is(v)) q_eval_node = sym;  /* a recalc walks the view's own tree: its caret stays on the name */
+        if (!q_view_is(v)) return v;
+        q_eval_node = sym;                   /* a recalc walks the view's own tree: its caret stays on the name */
         return q_view_deref(v);
     }
     return q_dotz_resolve(sym->i64);         /* owned */
@@ -279,13 +281,30 @@ static ray_t* operand_value(ray_t* F, const q_op_t** row_out) {
     return v;
 }
 
+/* q_eval of an argument.  A name or a constant under the depth cap, no stop pending, is answered here at the level
+ * the walker would have given it, so the commonest arguments cost no call; everything else is the walker's. */
+static inline ray_t* eval_arg(ray_t* x) {
+    if (!x || RAY_IS_ERR(x) || g_depth >= g_depth_cap || q_eval_stop_pending || x->type == RAY_LIST ||
+        x->type == RAY_SYM)
+        return q_eval(x);
+    if (x->type != -RAY_SYM) {
+        ray_retain_inline(x);
+        return x;
+    }
+    g_depth++;
+    ray_t* v = name_value(x);
+    g_depth--;
+    if (RAY_IS_ERR(v)) q_eval_node = x;
+    return v;
+}
+
 /* args RIGHT-to-left into argv (owned).  On error the already-evaluated tail (indices > i) is released.  A
  * `;`-elided slot stays C NULL — open — for the index home and the postfix seam; a lone hole is a value like any
  * other, judged by the apply module's hole law. */
 static ray_t* eval_args_rtl(ray_t** e, int64_t argc, ray_t** argv) {
     for (int64_t i = argc - 1; i >= 0; i--) {
         if (e[i] == Q_HOLE_OBJ && argc > 1) { argv[i] = NULL; continue; }
-        argv[i] = q_eval(e[i]);
+        argv[i] = eval_arg(e[i]);
         if (RAY_IS_ERR(argv[i])) {
             ray_t* err = argv[i];
             for (int64_t j = i + 1; j < argc; j++)
@@ -298,7 +317,7 @@ static ray_t* eval_args_rtl(ray_t** e, int64_t argc, ray_t** argv) {
 
 static void release_args(ray_t** argv, int64_t argc) {
     for (int64_t i = 0; i < argc; i++)
-        if (argv[i]) ray_release(argv[i]);
+        if (argv[i]) ray_release_inline(argv[i]);
 }
 
 /* `;` statement sequence: LEFT-to-right; the sequence's value is its LAST
@@ -327,17 +346,18 @@ static int sym_compound(int64_t id) {
  * global; a compound name is relative to the K-tree, never local (basics/syntax.md:623).  The depth gate keeps a
  * script load (floor raised) and a view recalc global. */
 static int write_is_local(int64_t sym) {
-    return !sym_compound(sym) && q_eval_apply_frame_depth() > 0 && q_env_local_get(sym) != NULL;
+    return q_eval_apply_frame_depth() > 0 && q_env_local_get(sym) != NULL && !sym_compound(sym);
 }
 
 /* A colon assignment is judged by its SPELLING, a `set` by its target (owner rulings 2026-09-23) — q_env_set sees
  * only the re-rooted name.  A syntax word is the one spelling a non-root `\d` may take as a context MEMBER: it
  * carries no value, so nothing is overwritten; a lambda local of that spelling stays refused. */
-int q_eval_assign_locked(int64_t sym) {
-    int global = !write_is_local(sym);
-    if (global && q_env_scope_ctx() && q_registry_is_syntax_word(sym)) return 0;
-    return q_registry_is_reserved(sym) || (global && q_registry_dotq_ext(sym));
+static int assign_locked(int64_t sym, int local) {
+    if (!local && q_env_scope_ctx() && q_registry_is_syntax_word(sym)) return 0;
+    return q_registry_is_reserved(sym) || (!local && q_registry_dotq_ext(sym));
 }
+
+int q_eval_assign_locked(int64_t sym) { return assign_locked(sym, write_is_local(sym)); }
 
 /* `name::v` at the root binds a reserved name's root slot as `set` does; bare `name` still parses to the keyword */
 int q_eval_global_assign_locked(int64_t sym) {
@@ -445,11 +465,13 @@ static ray_t* assign_eval(ray_t* target, ray_t* rhs, int global) {
     /* the patterns outside the list slice, and `::` onto one, stay refused */
     if (k == Q_TARGET_PATTERN) return !global && q_pattern_supported(target) ? pattern_assign(target, rhs) : q_err(QE_NYI);
     if (k == Q_TARGET_INDEX) return indexed_assign(target, NULL, rhs);
-    if (global ? q_eval_global_assign_locked(target->i64) : q_eval_assign_locked(target->i64)) return q_err(QE_ASSIGN);
+    /* locality is the name's in the running lambda, so it is read once: nothing the right side does moves it */
+    int local = write_is_local(target->i64);
+    if ((!global || q_env_scope_ctx()) && assign_locked(target->i64, local)) return q_err(QE_ASSIGN);
     ray_t* v = q_eval_apply_concrete(q_eval(rhs));    /* boundary seam: assignment */
     if (RAY_IS_ERR(v)) return v;
     Q_ASSERT_CONCRETE(v);                  /* env-set tripwire */
-    ray_err_t err = name_set(target->i64, v);
+    ray_err_t err = local ? q_env_local_set(target->i64, v) : q_env_set(target->i64, v);
     if (err != RAY_OK) { ray_release(v); return q_env_err(err); }
     return v;
 }
@@ -1210,17 +1232,24 @@ ray_t* q_eval(ray_t* node) {
         ray_t* h = e[0];
         q_eval_node = node;
 
+        /* a unary or binary builtin at the head is none of the forms below that are told by a spelling, a char or
+         * a carrier, so the commonest node skips those tests */
+        int verb = h && (h->type == RAY_UNARY || h->type == RAY_BINARY);
+
         /* literal-ctor interception seam (header note).  One item is `enlist x` (a paren of one is grouping), which
          * applies as any monad does: whether a hole VALUE there projects is unwitnessed (parse-tree programme) */
-        if (h == q_registry_list_value() && n != 2) { ret = list_lit(e + 1, n - 1); goto out; }
+        if (!verb && h == q_registry_list_value() && n != 2) { ret = list_lit(e + 1, n - 1); goto out; }
 
         /* the `;` statement sequence — a CHAR head, like `:` return and `'`
          * signal below (q_parse.h: q_parse_is_seq_head is the one test) */
-        if (q_parse_is_seq_head(h)) { ret = seq_eval(e + 1, n - 1); goto out; }
+        if (!verb && q_parse_is_seq_head(h)) { ret = seq_eval(e + 1, n - 1); goto out; }
 
         /* an assignment is its head VALUE, however it was written (`-:[a;1]` assigns as `a-:1` does, ref/assign.md:103
-         * `op:[x;y]`); over anything that is no target the head applies as the value it is */
-        if (n == 3) {
+         * `op:[x;y]`); over anything that is no target the head applies as the value it is.  A binary builtin's
+         * dyadic row answers both questions a three-item node asks of its head: whether it is Assign (kdb op 0),
+         * and the family the application below lifts by */
+        const q_op_t* hrow = n == 3 && h && h->type == RAY_BINARY ? q_registry_row_of(h, Q_DYADIC) : NULL;
+        if (n == 3 && !(hrow && q_ops_kdb_op(hrow))) {
             ray_t* opv = NULL;
             const q_op_t* row = NULL;
             q_assign_head_t asg = q_parse_assign_head(h, &opv, &row);
@@ -1230,7 +1259,7 @@ ray_t* q_eval(ray_t* node) {
                 goto out;
             }
         }
-        if (nameref(h)) {
+        if (!verb && nameref(h)) {
             const eval_syms_t* S = syms();
             if (h->i64 == S->kif)    { ret = if_eval(e + 1, n - 1, 0); goto out; }
             if (h->i64 == S->kwhile) { ret = if_eval(e + 1, n - 1, 1); goto out; }
@@ -1239,16 +1268,16 @@ ray_t* q_eval(ray_t* node) {
 
         /* trees are DATA: the char-atom heads match by CONTENT, so an
          * eval'd `("'";`e)` signals exactly like parsed source */
-        if (h && h->type == -RAY_CHARV && n == 2 &&
+        if (!verb && h && h->type == -RAY_CHARV && n == 2 &&
             (h->u8 == '\'' || h->u8 == ':')) {
             ret = h->u8 == '\'' ? signal_eval(node, e[1]) : return_eval(e[1]);
             goto out;
         }
 
-        {   /* bare (iterator;F) — the derived value; F resolves as the
+        if (!verb && n == 2) {   /* bare (iterator;F) — the derived value; F resolves as the
              * OPERAND (dyadic-preferring), never as a plain argument */
             int adv = adv_id(h);
-            if (adv >= 0 && n == 2) {
+            if (adv >= 0) {
                 const q_op_t* frow = NULL;
                 ray_t* F = operand_value(e[1], &frow);
                 if (RAY_IS_ERR(F)) { ret = F; goto out; }
@@ -1283,7 +1312,7 @@ ray_t* q_eval(ray_t* node) {
         ray_t* err = eval_args_rtl(e + 1, argc, argv);
         if (err) { ret = err; goto out; }
 
-        const q_op_t* row = NULL;
+        const q_op_t* row = hrow;
         ray_t* fv;
         if (!h) {
             fv = q_err(QE_TYPE);
@@ -1292,7 +1321,7 @@ ray_t* q_eval(ray_t* node) {
         } else if (h->type == RAY_LIST || sym_const(h)) {
             fv = q_eval(h);
         } else {
-            ray_retain(h);                          /* embedded value / noun */
+            ray_retain_inline(h);                   /* embedded value / noun */
             fv = h;
         }
         q_eval_node = node;                         /* the arguments' and a list head's applications moved it */
@@ -1314,7 +1343,7 @@ ray_t* q_eval(ray_t* node) {
             ret = q_eval_apply(fv, row, argv, nap);
         }
         release_args(argv, argc);
-        ray_release(fv);
+        ray_release_inline(fv);
     }
 
 out:

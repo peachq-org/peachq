@@ -1,6 +1,7 @@
 /* q_index — the one-code-path index/amend family (contract in q_index.h). */
 #include "qlang/q_count.h"
 #include "qlang/ops/q_index.h"
+#include "mem/cow.h"            /* ray_rc_sole — an item read into the atom the caller alone holds */
 #include "qlang/ops/q_bang.h"   /* q_bang — the `!` verb, which rebuilds a selection */
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — the int/long miss cast to its domain */
 #include "qlang/ops/q_table.h"  /* the keyed write's shape law and row-append home */
@@ -74,6 +75,17 @@ ray_t* q_index_elem_at(ray_t* v, int64_t i) {
     ray_t* e  = ray_at_fn(v, ia);   /* owned */
     ray_release(ia);
     return e;
+}
+
+ray_t* q_index_elem_next(ray_t* v, int64_t i, ray_t* prev) {
+    if (prev && v && (v->type == RAY_I64 || v->type == RAY_F64) && prev->type == -v->type && !prev->attrs &&
+        ray_rc_sole(prev) && !RAY_ATOM_IS_NULL(prev) && i >= 0 && i < q_count(v) && !ray_vec_is_null(v, i)) {
+        if (v->type == RAY_F64) prev->f64 = ((const double*)ray_data(v))[i];
+        else prev->i64 = ((const int64_t*)ray_data(v))[i];
+        return prev;
+    }
+    if (prev) ray_release(prev);
+    return q_index_elem_at(v, i);
 }
 
 /* The rank axis (contract: q_index.h) — both probes read items through

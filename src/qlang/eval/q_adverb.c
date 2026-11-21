@@ -461,18 +461,19 @@ static ray_t* map_zip(ray_t* fv, const q_op_t* frow, ray_t** args, int64_t n,
         r = join_each_tables(av[0], av[1], len);
     if (!r && len == 0) r = ray_list_new(0);
     if (!r) {
-        ray_t* l = ray_list_new(len);
-        ray_t* ev[APPLY_MAX_ARGS];
+        ray_t* l = NULL;
+        ray_t* ev[APPLY_MAX_ARGS] = {0};
         for (int64_t i = 0; i < len; i++) {
             for (int64_t p = 0; p < n; p++)
-                ev[p] = (iter >> p & 1) ? q_index_elem_at(av[p], i) : av[p];
+                ev[p] = (iter >> p & 1) ? q_index_elem_next(av[p], i, ev[p]) : av[p];
             ray_t* e = q_splay_contained(q_eval_apply_concrete(q_eval_apply(fv, frow, ev, n)));
-            for (int64_t p = 0; p < n; p++)
-                if (iter >> p & 1) ray_release(ev[p]);
-            if (RAY_IS_ERR(e)) { ray_release(l); l = e; break; }
-            l = ray_list_append(l, e);
+            if (RAY_IS_ERR(e)) { if (l) ray_release(l); l = e; break; }
+            l = q_list_run_push(l, e, len);
             ray_release(e);
+            if (RAY_IS_ERR(l)) break;
         }
+        for (int64_t p = 0; p < n; p++)
+            if (iter >> p & 1) ray_release(ev[p]);
         r = RAY_IS_ERR(l) ? l : q_eval_apply_collapse(l);
     }
     for (int64_t p = 0; p < n; p++) ray_release(av[p]);

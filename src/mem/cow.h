@@ -34,6 +34,7 @@
 
 #include <rayforce.h>
 #include "core/platform.h"
+#include "mem/heap.h"   /* RAY_ATTR_ARENA */
 
 /* Thread-local flag: plain (false) vs atomic (true) refcount ops.
  * Default is false (fast single-threaded path).
@@ -43,6 +44,28 @@ extern RAY_TLS bool ray_rc_sync;
 /* sole owner — what ray_cow tests before it mutates in place, without the consume */
 static inline bool ray_rc_sole(ray_t* v) {
     return (RAY_LIKELY(!ray_rc_sync) ? v->rc : ray_atomic_load(&v->rc)) == 1;
+}
+
+/* ray_retain and ray_release for a caller that runs them once per evaluated node: the single-threaded count is
+ * written in line, and every other case — a count other threads share, the last reference, a null or error
+ * pointer, the debug build's stale-pointer check — is the function's. */
+static inline bool ray_rc_plain(const ray_t* v) {
+#ifdef DEBUG
+    (void)v;
+    return false;
+#else
+    return (uintptr_t)v > 31 && v->type != RAY_ERROR && !(v->attrs & RAY_ATTR_ARENA) && !ray_rc_sync;
+#endif
+}
+
+static inline void ray_retain_inline(ray_t* v) {
+    if (RAY_LIKELY(ray_rc_plain(v))) v->rc++;
+    else ray_retain(v);
+}
+
+static inline void ray_release_inline(ray_t* v) {
+    if (RAY_LIKELY(ray_rc_plain(v) && v->rc > 1)) v->rc--;
+    else ray_release(v);
 }
 
 #endif /* RAY_COW_H */

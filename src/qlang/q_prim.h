@@ -25,6 +25,10 @@ ray_t* q_list_collapse(ray_t* l);
 /* its two halves, same contract: an amend collapses atoms only (ref/assign.md:57); Join also makes like rows a table */
 ray_t* q_list_collapse_atoms(ray_t* l);
 ray_t* q_list_collapse_rows(ray_t* l);
+/* A result list collapsing as it grows: q_list_collapse of the last run is q_list_collapse of the list of every item
+ * pushed.  `run` is NULL at first, then the caller's ALONE (written in place) and consumed; `e` is borrowed; `cap` is
+ * the most items it will be pushed.  OWNED run or owned error. */
+ray_t* q_list_run_push(ray_t* run, ray_t* e, int64_t cap);
 
 /* Its inverse: a typed vector re-shaped into a boxed RAY_LIST of its atoms (each read through the element-read
  * home), so a walker can dispatch on the items.  Borrows `v`; OWNED list, or an owned error.  DEFINED in ops/q_list.c. */

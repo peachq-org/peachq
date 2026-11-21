@@ -56,7 +56,9 @@ static int        g_scoped;
 static int64_t g_pq_seg;                /* `pq`: the one namespace that loads itself */
 static int64_t g_q_seg;                 /* `q`: the namespace whose builtin entries are locked */
 
-static int64_t env_marker(void) { return ray_sym_intern_runtime("", 0); }
+static int64_t g_marker;                /* ``: read on every global lookup, so interned once per runtime */
+
+static int64_t env_marker(void) { return env_root ? g_marker : ray_sym_intern_runtime("", 0); }
 
 /* q_env_marker_sym — see q_env.h. */
 int64_t q_env_marker_sym(void) { return env_marker(); }
@@ -888,7 +890,7 @@ void q_env_frame_pop(void) {
     frame_t* f = &g_frames[--g_fdepth];
     g_fview = f->saved_view;
     for (int32_t i = 0; i < f->n; i++)
-        if (f->vals[i]) ray_release(f->vals[i]);
+        if (f->vals[i]) ray_release_inline(f->vals[i]);
     if (f->keys != f->keys_in) ray_sys_free(f->keys);
     if (f->vals != f->vals_in) ray_sys_free(f->vals);
 }
@@ -925,7 +927,7 @@ ray_err_t q_env_local_set(int64_t sym, ray_t* val) {
         f->keys = nk; f->vals = nv; f->cap = nc;
     }
     f->keys[f->n] = sym;
-    ray_retain(val);
+    ray_retain_inline(val);
     f->vals[f->n] = val;
     f->n++;
     return RAY_OK;
@@ -1018,7 +1020,7 @@ static ray_t* walk_segs(ray_t* v, const env_name_t* e, int pos) {
 
 static ray_t* env_resolve(int64_t sym, int lib) {
     ray_t* v = frames_lookup(sym);
-    if (v) { ray_retain(v); return v; }
+    if (v) { ray_retain_inline(v); return v; }
     env_name_t e;
     if (!env_name(sym, &e)) return NULL;
     if (e.kind == EN_ROOT) {
@@ -1218,6 +1220,7 @@ int64_t q_env_scope_ctx(void) { return ENV_CTX; }
 
 ray_err_t q_env_init(void) {
     if (env_root) return RAY_OK;
+    g_marker = ray_sym_intern_runtime("", 0);
     env_root = env_dict(0);
     env_ns   = env_marker_dict();
     env_boot = env_marker_dict();
