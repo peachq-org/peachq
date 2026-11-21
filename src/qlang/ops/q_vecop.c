@@ -30,12 +30,12 @@
  * Overflow is left alone: two's-complement wrap in unsigned space, whose
  * landing on a sentinel (`0W+1` is 0N) is incidental and stays so.
  *
- * + - * beside a float or real, and % on every plain number, ride DBL instead:
- * ops/arith.c answers a null for either null operand, else reads each through
- * as_f64 (`0W` a large finite), applies one IEEE op and answers
- * promote_float_type's tag (% always a float).  The lane reads nulls as NaN,
- * which every op propagates, narrows a real through `float` and writes every
- * NaN as the null.  A char and a temporal stay out.
+ * + - * div mod beside a float or real, and % xexp xlog on every plain number,
+ * ride DBL instead: ops/arith.c answers a null for either null operand, else
+ * reads each through as_f64 (`0W` a large finite), applies one IEEE op and
+ * answers promote_float_type's tag (mod its grid's, % xexp xlog a float).  The
+ * lane reads nulls as NaN, which every op propagates, narrows a real through
+ * `float` and writes every NaN as the null.  A char and a temporal stay out.
  */
 #include "qlang/q_count.h"
 #include "qlang/ops/q_vecop.h"
@@ -51,7 +51,7 @@
 
 typedef enum {
     VO_NONE = 0, VO_LT, VO_LE, VO_GT, VO_GE, VO_EQ, VO_NE, VO_MIN, VO_MAX, VO_FILL,
-    VO_ADD, VO_SUB, VO_MUL, VO_IDIV, VO_MOD, VO_DIV, VO_XBAR
+    VO_ADD, VO_SUB, VO_MUL, VO_IDIV, VO_MOD, VO_DIV, VO_XEXP, VO_XLOG, VO_XBAR
 } vop_t;
 typedef enum { LN_BYTE = 1, LN_INT, LN_DBL } lane_t;
 
@@ -72,11 +72,13 @@ static vop_t op_of(ray_t* (*f)(ray_t*, ray_t*)) {
     if (p == (uintptr_t)ray_idiv_fn) return VO_IDIV;
     if (p == (uintptr_t)ray_mod_fn) return VO_MOD;
     if (p == (uintptr_t)ray_div_fn) return VO_DIV;
+    if (p == (uintptr_t)q_xexp_wrap) return VO_XEXP;
+    if (p == (uintptr_t)q_xlog_wrap) return VO_XLOG;
     if (p == (uintptr_t)q_xbar_wrap) return VO_XBAR;
     return VO_NONE;
 }
 
-static int is_arith(vop_t op) { return op >= VO_ADD && op <= VO_DIV; }
+static int is_arith(vop_t op) { return op >= VO_ADD && op <= VO_XLOG; }
 
 /* the lane memberships ops/cmp.c turns on and the type axis does not name: the
  * 1-byte payloads, and int_cmp_lane's own set (which excludes bool) */
@@ -431,12 +433,20 @@ static void arith_into(ray_t* out, int8_t rt, vop_t op, band_t xb, band_t yb, in
     mark_nulls(out, any);
 }
 
-/* The double lane's tag: % answers make_f64 for every pair, + - * need a float side.  0 = not this lane's. */
+/* The double lane's tag: % xexp xlog answer make_f64 for every pair, + - * div mod need a float side, mod answers
+ * its grid and div only a float x's float (an int x floors to an int, the per-element road's).  0 = not this lane's. */
 static int8_t float_rt(vop_t op, int8_t xt, int8_t yt) {
-    if (op == VO_IDIV || op == VO_MOD || !q_type_is_num_tag(xt) || !q_type_is_num_tag(yt)) return 0;
-    if (op == VO_DIV) return RAY_F64;
+    if (!q_type_is_num_tag(xt) || !q_type_is_num_tag(yt)) return 0;
+    if (op >= VO_DIV) return RAY_F64;
     if (!q_type_is_float_tag(xt) && !q_type_is_float_tag(yt)) return 0;
+    if (op == VO_MOD) return mod_type(xt, yt);
+    if (op == VO_IDIV) return q_type_is_float_tag(xt) ? RAY_F64 : 0;
     return (int8_t)-promote_float_type((int8_t)-xt, (int8_t)-yt);
+}
+
+/* q_xexp_wrap: a null either side, or a negative base under a fractional or infinite power, is the null */
+static inline double xexp_f(double x, double y) {
+    return x != x || y != y || (x < 0 && (!isfinite(y) || y != floor(y))) ? NAN : pow(x, y);
 }
 
 /* Widened in cache-sized runs, not whole: a real or int operand of a big vector would otherwise cost a heap buffer
@@ -466,6 +476,10 @@ static ray_t* float_binary(vop_t op, int8_t rt, ray_t* x, ray_t* y, int8_t xt, i
             case VO_ADD: FLT_OP(x + y); break;
             case VO_SUB: FLT_OP(x - y == 0.0 ? 0.0 : x - y); break;   /* ray_sub_fn's -0.0 normalization */
             case VO_MUL: FLT_OP(x * y); break;
+            case VO_IDIV: FLT_OP(y == 0.0 ? NAN : floor(x / y)); break;
+            case VO_MOD: FLT_OP(y == 0.0 ? NAN : floor_mod_f64(x, y)); break;
+            case VO_XEXP: FLT_OP(xexp_f(x, y)); break;
+            case VO_XLOG: FLT_OP(x != x || y != y ? NAN : log(y) / log(x)); break;
             default: FLT_OP(x / y); break;
         }
     }
@@ -476,7 +490,7 @@ static ray_t* float_binary(vop_t op, int8_t rt, ray_t* x, ray_t* y, int8_t xt, i
 static ray_t* arith_binary(vop_t op, ray_t* x, ray_t* y, int8_t xt, int8_t yt, int xv, int yv, int64_t n) {
     int8_t rt = float_rt(op, xt, yt);
     if (rt) return float_binary(op, rt, x, y, xt, yt, xv, yv, n);
-    if (op == VO_DIV || !counts_tag(op, xt) || !counts_tag(op, yt)) return NULL;
+    if (op >= VO_DIV || !counts_tag(op, xt) || !counts_tag(op, yt)) return NULL;
     rt = arith_rt(op, xt, yt);
     if (!rt) return NULL;
 
@@ -584,7 +598,7 @@ ray_t* q_vecop_binary(ray_t* (*f)(ray_t*, ray_t*), ray_t* x, ray_t* y) {
 int q_vecop_is_compare(ray_t* (*f)(ray_t*, ray_t*)) { return answers_bool(op_of(f)); }
 int q_vecop_is_ordering(ray_t* (*f)(ray_t*, ray_t*)) { vop_t op = op_of(f); return op >= VO_LT && op <= VO_GE; }
 
-/* ===== the monadic seam: `null x`, `not x`, the sign and libm verbs ====== */
+/* ===== the monadic seam: `null x`, `not x`, signum, reciprocal, the sign and libm verbs ====== */
 
 /* `not x` is `x=0` (ref/not.md), asked of the binary seam: a zero of x's own int-backed type, a long beside a float,
  * and every pair the seam refuses goes the per-element road. */
@@ -707,6 +721,49 @@ static ray_t* math_vec(ray_t* (*f)(ray_t*), ray_t* x) {
 #undef FLT_MAP
 #undef FLT_LONG
 
+/* q_signum_wrap's signum_atom over every lane it reads: a null is negative (-1i), and an int-backed null, being its
+ * lane's least value, already is. */
+#define SIGN_SCAN(T, NEG)                                                          \
+    do {                                                                           \
+        const T* p = s;                                                            \
+        for (int64_t i = 0; i < n; i++) d[i] = (NEG) ? -1 : p[i] > 0;              \
+    } while (0)
+
+static ray_t* signum_vec(ray_t* x) {
+    int8_t t = x->type;
+    int64_t n = x->len;
+    switch (t) {
+        case RAY_BOOL: case RAY_BYTE_ONLY: case RAY_I16: case RAY_I32: case RAY_I64: case RAY_F32: case RAY_F64:
+        RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: RAY_TEMPORALF_CASES: break;
+        default: return NULL;
+    }
+    if (n <= 0) return NULL;
+    ray_t* out = ray_vec_new(RAY_I32, n);
+    if (!out || RAY_IS_ERR(out)) return out;
+    out->len = n;
+    int32_t* d = ray_data(out);
+    const void* s = ray_data(x);
+    switch (t) {
+        case RAY_I16: SIGN_SCAN(int16_t, p[i] < 0); break;
+        case RAY_I32: RAY_TEMPORAL32_CASES: SIGN_SCAN(int32_t, p[i] < 0); break;
+        case RAY_I64: RAY_TEMPORAL64_CASES: SIGN_SCAN(int64_t, p[i] < 0); break;
+        case RAY_F32: SIGN_SCAN(float, !(p[i] >= 0)); break;
+        case RAY_F64: RAY_TEMPORALF_CASES: SIGN_SCAN(double, !(p[i] >= 0)); break;
+        default: SIGN_SCAN(uint8_t, 0); break;
+    }
+    return out;
+}
+#undef SIGN_SCAN
+
+/* reciprocal is 1%x (q_reciprocal_wrap), asked of the binary seam; a temporal is ltime's */
+static ray_t* reciprocal_vec(ray_t* x) {
+    if (!q_type_is_num_tag(x->type)) return NULL;
+    ray_t* one = ray_i64(1);
+    ray_t* r = q_vecop_binary(ray_div_fn, one, x);
+    ray_release(one);
+    return r;
+}
+
 #define NULL_SCAN(T, ISNULL)                                                       \
     do {                                                                           \
         const T* p = s;                                                            \
@@ -717,6 +774,8 @@ ray_t* q_vecop_unary(ray_t* (*f)(ray_t*), ray_t* x) {
     if ((uintptr_t)f == (uintptr_t)q_string_fn && x && x->type == RAY_BYTE_ONLY && x->len > 0) return q_string_fn(x);
     if (!x || RAY_IS_ERR(x) || !ray_is_vec(x)) return NULL;
     if ((uintptr_t)f == (uintptr_t)q_not_wrap) return not_vec(x);
+    if ((uintptr_t)f == (uintptr_t)q_signum_wrap) return signum_vec(x);
+    if ((uintptr_t)f == (uintptr_t)q_reciprocal_wrap) return reciprocal_vec(x);
     if ((uintptr_t)f != (uintptr_t)q_null_wrap) return math_vec(f, x);
     int64_t n = x->len;
     if (n <= 0) return NULL;
