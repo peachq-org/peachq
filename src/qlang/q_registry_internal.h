@@ -150,6 +150,8 @@ ray_t* q_upsert_wrap(ray_t* x, ray_t* y);
 
 /* ---- defined in ops/q_setops.c ---- */
 ray_t* q_distinct_wrap(ray_t* x);
+/* distinct's uniques of a list x, uncollapsed, with gid[count x] each item's unique: `group`'s keys (group.md:10) */
+ray_t* q_list_uniques(ray_t* x, int64_t* gid);
 ray_t* q_union_wrap(ray_t* x, ray_t* y);
 ray_t* q_inter_wrap(ray_t* x, ray_t* y);
 ray_t* q_except_wrap(ray_t* x, ray_t* y);

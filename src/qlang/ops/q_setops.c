@@ -124,47 +124,35 @@ static ray_t* sorted_distinct(ray_t* x) {
     return q_attr_stamp_trusted(r, 's');
 }
 
-/* Does `~` meet these items exactly and transitively?  A float leaf's tolerance is neither, and a dict, table,
- * function or enumeration hashes too coarsely to be worth the walk; each keeps the scan. */
-static int items_exact(ray_t* l, int depth) {
-    ray_t** e = (ray_t**)ray_data(l);
-    for (int64_t i = 0, n = q_count(l); i < n; i++) {
-        if (!e[i] || RAY_IS_NULL(e[i])) return 0;
-        int8_t t = e[i]->type < 0 ? (int8_t)-e[i]->type : e[i]->type;
-        if (t == RAY_LIST ? depth >= 64 || !items_exact(e[i], depth + 1)
-                          : !(ray_is_vec(e[i]) || e[i]->type < 0) || t == RAY_F64 || t == RAY_F32 ||
-                            RAY_IS_TEMPORALF(t) || t == RAY_ENUM || t > RAY_STR)
-            return 0;
-    }
-    return 1;
-}
-
-/* Under an exact `~` the uniques are the items a self-Find answers with their own index: one hashed pass. */
-static ray_t* first_items(ray_t* x, int64_t n) {
-    ray_t* f = ray_find_rows_fn(&x, &x, 1, n, q_match_rec);
-    if (!f || RAY_IS_ERR(f)) return f ? f : q_err(QE_WSFULL);
-    const int64_t* fd = (const int64_t*)ray_data(f);
-    ray_t* out = ray_list_new(n);
+/* The uniques are the items a self-Find answers with their own index, one hashed pass, under q_match_item, whose
+ * exact floats make it an equivalence; a short list scans its uniques so far. */
+ray_t* q_list_uniques(ray_t* x, int64_t* gid) {
+    int64_t n = q_count(x);
+    ray_t* f = n > FIND_SCAN_NEEDLES && !q_list_has_hole(x) ? ray_find_rows_fn(&x, &x, 1, n, q_match_item) : NULL;
+    if (f && RAY_IS_ERR(f)) return f;
+    const int64_t* fd = f ? (const int64_t*)ray_data(f) : NULL;
+    ray_t* out = ray_list_new(n > 0 ? n : 1);
     for (int64_t i = 0; i < n && !RAY_IS_ERR(out); i++) {
-        if (fd[i] != i) continue;
+        int64_t m = q_count(out), j = 0;
+        if (fd && fd[i] != i) { gid[i] = gid[fd[i]]; continue; }
         ray_t* e = q_join_item(x, i);
         if (!e || RAY_IS_ERR(e)) { ray_release(out); out = e ? e : q_err(QE_TYPE); break; }
-        out = ray_list_append(out, e);
+        ray_t** oe = (ray_t**)ray_data(out);
+        while (!fd && j < m && !q_match_item(oe[j], e)) j++;
+        gid[i] = fd ? m : j;
+        if (fd || j == m) out = ray_list_append(out, e);
         ray_release(e);
     }
-    ray_release(f);
-    if (RAY_IS_ERR(out)) return out;
-    ray_t* c = q_list_collapse(out);
-    ray_release(out);
-    return c;
+    if (f) ray_release(f);
+    return out;
 }
 
 /* q `distinct x` / monadic `?` — unique items in FIRST-OCCURRENCE order
- * (kdb), item equality being `~`: type-strict, nulls equal.
+ * (kdb), item equality being `~` without its tolerance (distinct.md:32): type-strict, nulls equal.
  * A TYPED VECTOR's items share one type, so `~` and the group kernel's atom
  * equality cannot disagree: its uniques are the KEYS OF ITS GROUPING, one hash
- * pass, where the scan below is O(n*distinct).  A LIST is not safe there —
- * group equates `1` with `1f`, `0n` with `0N`; `~` does not.  rayfall's own
+ * pass.  A LIST is not safe there — the base kernel equates `1` with `1f`,
+ * `0n` with `0N`; `~` does not — so its uniques are q_list_uniques'.  rayfall's own
  * ray_distinct_fn is no use either: it SORTS.  String operands are a deferred
  * cell (string model); atoms are kdb 'type.
  * An ATTRIBUTED vector reads its index (set-attribute.md:128): `u#` is a copy
@@ -196,21 +184,11 @@ ray_t* q_distinct_wrap(ray_t* x) {
     if (x->type != RAY_LIST)
         return q_err(QE_TYPE);
     int64_t n = q_count(x);
-    if (n > FIND_SCAN_NEEDLES && items_exact(x, 0)) return first_items(x, n);
-    ray_t* out = ray_list_new(n > 0 ? n : 1);
-    for (int64_t i = 0; i < n; i++) {
-        ray_t* e = q_join_item(x, i);
-        if (!e || RAY_IS_ERR(e)) { ray_release(out); return e; }
-        int dup = 0;
-        int64_t m = q_count(out);
-        ray_t** oe = (ray_t**)ray_data(out);
-        for (int64_t j = 0; j < m && !dup; j++) dup = q_match_rec(oe[j], e);
-        if (!dup) {
-            out = ray_list_append(out, e);
-            if (RAY_IS_ERR(out)) { ray_release(e); return out; }
-        }
-        ray_release(e);
-    }
+    int64_t* gid = malloc(sizeof(int64_t) * (size_t)(n > 0 ? n : 1));
+    if (!gid) return q_err(QE_WSFULL);
+    ray_t* out = q_list_uniques(x, gid);
+    free(gid);
+    if (RAY_IS_ERR(out)) return out;
     ray_t* c = q_list_collapse(out);
     ray_release(out);
     return c;

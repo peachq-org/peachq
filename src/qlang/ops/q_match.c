@@ -212,6 +212,8 @@ int q_match_value(ray_t* a, ray_t* b) { return match_go(MATCH_TOL, a, b); }
 
 int q_match_exact(ray_t* a, ray_t* b) { return match_go(0, a, b); }
 
+int q_match_item(ray_t* a, ray_t* b) { return match_go(MATCH_ENUM, a, b); }
+
 ray_t* q_match_wrap(ray_t* a, ray_t* b) {
     match_deep = 0;
     int r = q_match_rec(a, b);
