@@ -67,6 +67,77 @@ typedef struct hashset_t {
     void*    src_data;     /* pointer to typed data (or RAY_LIST elements) */
 } hashset_t;
 
+#define ITEM_HASH_DEPTH 64
+
+/* -0.0 is 0.0 and every NaN the one null to each equality here, so a float lane never hashes its bytes */
+static uint64_t item_hash_float(double v) { return v != v ? 0 : ray_hash_f64(v); }
+
+static uint64_t item_hash_at(ray_t* e, int depth, int blank) {
+    if (!e || atom_is_oob_null(e) || (depth < blank && RAY_ATOM_IS_NULL(e))) return 0;
+    if (is_numeric(e)) return ray_hash_f64(as_f64(e));
+    if (e->type < 0)
+        switch (e->type) {
+            case -RAY_SYM:       return ray_hash_i64(e->i64);
+            case -RAY_DATE:
+            case -RAY_TIME:
+            case -RAY_MONTH:
+            case -RAY_MINUTE:
+            case -RAY_SECOND:    return ray_hash_i64((int64_t)e->i32);
+            case -RAY_TIMESTAMP:
+            case -RAY_TIMESPAN:  return ray_hash_i64(e->i64);
+            case -RAY_DATETIME:  return ray_hash_f64(e->f64);
+            case -RAY_GUID:      return ray_hash_bytes(ray_guid_bytes((ray_t*)e), 16);
+            case -RAY_STR:       return ray_hash_bytes(ray_str_ptr(e), ray_str_len(e));
+            default:             return ray_hash_i64((int64_t)e->type);
+        }
+    int64_t n = e->len;
+    uint64_t h = ray_hash_i64(((int64_t)e->type << 40) ^ n);
+    const void* d = ray_data(e);
+    switch (e->type) {
+        case RAY_CHARV:     return ray_hash_bytes(d, (size_t)n);   /* a STR cell's hash: both spell one string */
+        case RAY_BOOL: case RAY_BYTE_ONLY: case RAY_I16: case RAY_I32: case RAY_I64: case RAY_GUID: case RAY_ENUM:
+        RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES:
+            return ray_hash_combine(h, ray_hash_bytes(d, (size_t)n * ray_elem_size(e->type)));
+        case RAY_F64: RAY_TEMPORALF_CASES:
+            for (int64_t i = 0; i < n; i++) h = ray_hash_combine(h, item_hash_float(((const double*)d)[i]));
+            return h;
+        case RAY_F32:
+            for (int64_t i = 0; i < n; i++) h = ray_hash_combine(h, item_hash_float(((const float*)d)[i]));
+            return h;
+        case RAY_SYM:
+            for (int64_t i = 0; i < n; i++) h = ray_hash_combine(h, ray_hash_i64(sym_cell_runtime_id(e, i)));
+            return h;
+        case RAY_STR:
+            for (int64_t i = 0; i < n; i++) {
+                size_t l = 0;
+                const char* p = ray_str_vec_get(e, i, &l);
+                h = ray_hash_combine(h, ray_hash_bytes(p ? p : "", p ? l : 0));
+            }
+            return h;
+        case RAY_LIST:
+            if (depth >= ITEM_HASH_DEPTH) return h;
+            for (int64_t i = 0; i < n; i++) h = ray_hash_combine(h, item_hash_at(((ray_t**)d)[i], depth + 1, blank));
+            return h;
+        default:            return ray_hash_i64((int64_t)e->type);   /* a dict, table or function: by its tag alone */
+    }
+}
+
+/* A boxed list's item by its content, so whatever atom_eq or q's Find calls equal shares a hash: an atom of any
+ * numeric type through f64, a vector (type-strict to both) by tag, count and payload.  One exception, kept for the
+ * answers it gives: above depth `blank` the blank char buckets as a null, apart from the 32 atom_eq meets it with —
+ * every depth for group (its old hash), the top item for the hashset (which tagged a nested one), none for the row
+ * hash, new to boxed cells. */
+uint64_t ray_item_hash(ray_t* e) { return item_hash_at(e, 0, ITEM_HASH_DEPTH + 1); }
+
+/* q's Find meets an enumeration with its symbols, which no hash here can see */
+static int item_has_enum(ray_t* e, int depth) {
+    if (!e) return 0;
+    if (e->type == RAY_ENUM || e->type == -RAY_ENUM) return 1;
+    if (e->type != RAY_LIST || depth >= ITEM_HASH_DEPTH) return 0;
+    for (int64_t i = 0; i < e->len; i++) if (item_has_enum(((ray_t**)ray_data(e))[i], depth + 1)) return 1;
+    return 0;
+}
+
 /* Hash a single row at index i in src.  Mirrors atom_eq's coercion
  * rules: numeric types normalize through f64 so an I64 atom and an
  * F64 atom holding the same value collide (boxed-list path only — a
@@ -105,31 +176,7 @@ static uint64_t hs_hash_row(ray_t* src, int64_t i, int8_t t, void* data) {
             const char* p = ray_str_vec_get(src, i, &l);
             return p ? ray_hash_bytes(p, l) : 0;
         }
-        case RAY_LIST: {
-            ray_t** elems = (ray_t**)data;
-            ray_t* e = elems[i];
-            if (!e || RAY_ATOM_IS_NULL(e)) return 0;
-            /* Numeric coercion: hash as f64 so distinct numeric types
-             * holding the same value collide (atom_eq does the same). */
-            if (is_numeric(e)) return ray_hash_f64(as_f64(e));
-            switch (e->type) {
-                case -RAY_SYM:       return ray_hash_i64(e->i64);
-                case -RAY_DATE:
-                case -RAY_TIME:
-                case -RAY_MONTH:
-                case -RAY_MINUTE:
-                case -RAY_SECOND:    return ray_hash_i64((int64_t)e->i32);
-                case -RAY_TIMESTAMP:
-                case -RAY_TIMESPAN:  return ray_hash_i64(e->i64);
-                case -RAY_DATETIME:  return ray_hash_f64(e->f64);
-                case -RAY_GUID:      return ray_hash_bytes(ray_guid_bytes((ray_t*)e), 16);
-                case -RAY_STR:
-                    return ray_hash_bytes(ray_str_ptr(e), ray_str_len(e));
-                default:
-                    /* Unknown / unsupported atom kind: hash by type tag. */
-                    return ray_hash_i64((int64_t)e->type);
-            }
-        }
+        case RAY_LIST:      return item_hash_at(((ray_t**)data)[i], 0, 1);
         default:
             return ray_hash_i64(i);
     }
@@ -1934,10 +1981,6 @@ ray_t* ray_at_fn(ray_t* vec, ray_t* idx) {
     return elem;
 }
 
-/* Needle count up to which a same-type vector probe is one typed scan per needle rather than a hashset over the
- * whole domain.  Measured on a 1M sym domain: the build ~30ns/slot, a scan ~0.2ns/slot, so the crossover is
- * ~140 needles when every needle sits at the END; 64 keeps the scan side under half the build even then. */
-#define FIND_SCAN_NEEDLES 64
 
 /* The one bucket every null row cell hashes to (join.c's JOIN_NULL_HASH); equality decides. */
 #define ROW_NULL_HASH 0x9E3779B97F4A7C15ULL
@@ -2180,8 +2223,8 @@ ray_t* ray_find_fn(ray_t* vec, ray_t* val) {
  * k domain columns searched as ONE row key, m probe rows given as k columns (a 1-item column broadcasts).  Rows
  * meet cell by cell under Find's own compare law — the typed scan's for a single needle, the hashset's for many —
  * and a null is an ordinary key value (`0N~0N`), meeting only another null.  A boxed cell meets its partner under
- * the caller's `eq`, which owns what a nested value is; a boxed column never hashes.  Nothing is materialised per
- * call. */
+ * the caller's `eq`, which owns what a nested value is, and hashes by its content (ray_item_hash) only where both
+ * sides of its column are boxed (rows_typed).  Nothing is materialised per call. */
 
 static inline int64_t row_idx(ray_t* col, int64_t j) { return ray_len(col) == 1 ? 0 : j; }
 
@@ -2220,6 +2263,7 @@ static uint64_t row_hash(ray_t* const* c, int64_t k, int64_t j) {
         int64_t i = row_idx(v, j);
         uint64_t hc = row_cell_null(v, i)  ? ROW_NULL_HASH
                     : v->type == RAY_SYM   ? ray_hash_i64(sym_cell_runtime_id(v, i))
+                    : v->type == RAY_LIST  ? item_hash_at(((ray_t**)ray_data(v))[i], 0, 0)
                                            : hs_hash_row(v, i, v->type, ray_data(v));
         h = t ? ray_hash_combine(h, hc) : hc;
     }
@@ -2271,10 +2315,26 @@ static ray_t* row_slots(int64_t rows, uint64_t* mask) {
     return b;
 }
 
-/* Every column typed on both sides — the precondition of hashing rows (a boxed column only scans). */
+static int col_has_enum(ray_t* c) {
+    for (int64_t i = 0; i < c->len; i++) if (item_has_enum(((ray_t**)ray_data(c))[i], 0)) return 1;
+    return 0;
+}
+
+/* The precondition of hashing rows: each column typed on both sides, or boxed on both and free of enumerations (a
+ * boxed cell hashes by content, a typed one by its lane, and the two would not meet). */
 static int rows_typed(ray_t* const* dom, ray_t* const* probe, int64_t k) {
-    for (int64_t t = 0; t < k; t++) if (!ray_is_vec(dom[t]) || !ray_is_vec(probe[t])) return 0;
+    for (int64_t t = 0; t < k; t++) {
+        if (dom[t]->type == RAY_LIST && probe[t]->type == RAY_LIST) {
+            if (col_has_enum(dom[t]) || col_has_enum(probe[t])) return 0;
+        } else if (!ray_is_vec(dom[t]) || !ray_is_vec(probe[t])) return 0;
+    }
     return 1;
+}
+
+/* rows_typed, answered once and only when a scan needs it: over a boxed column it is a pass of the domain */
+static int rows_hashable(int* typed, ray_t* const* dom, ray_t* const* probe, int64_t k) {
+    if (*typed < 0) *typed = rows_typed(dom, probe, k);
+    return *typed;
 }
 
 /* A few rows scan and many hash, at FIND_SCAN_NEEDLES as for a vector needle (a row's scan costs a needle's, the
@@ -2283,15 +2343,15 @@ static int rows_typed(ray_t* const* dom, ray_t* const* probe, int64_t k) {
  * within a few rows. */
 ray_t* ray_find_rows_fn(ray_t* const* dom, ray_t* const* probe, int64_t k, int64_t m, ray_cell_eq_t eq) {
     int64_t n = ray_len(dom[0]), j = 0, checks = 0;
-    int typed = rows_typed(dom, probe, k);
+    int typed = m > FIND_SCAN_NEEDLES ? rows_typed(dom, probe, k) : -1;
     ray_t* result = ray_vec_new(RAY_I64, m > 0 ? m : 1);
     if (RAY_IS_ERR(result)) return result;
     result->len = m;
     int64_t* out = (int64_t*)ray_data(result);
     bool any_null = false;
     ray_t* err = NULL;
-    if (!typed || m <= FIND_SCAN_NEEDLES)
-        for (; j < m && (!typed || checks <= n); j++) {
+    if (typed != 1)
+        for (; j < m && !(checks > n && rows_hashable(&typed, dom, probe, k)); j++) {
             int64_t r = row_scan(dom, probe, k, j, 0, &checks, eq, &err);
             if (err) { ray_release(result); return err; }
             if (r < 0) { out[j] = NULL_I64; any_null = true; } else out[j] = r;
@@ -2316,17 +2376,17 @@ ray_t* ray_find_rows_fn(ray_t* const* dom, ray_t* const* probe, int64_t k, int64
 }
 
 /* The equivalence classes bin over a table searches within: for each probe row every domain row equal to it on
- * the k columns, in row order, a LIST of m I64 vectors.  A few rows, or any boxed column, walk the scan twice
+ * the k columns, in row order, a LIST of m I64 vectors.  A few rows, or columns rows_typed refuses, walk the scan twice
  * (count, fill) under the same threshold and budget as above; the rest hash the PROBE rows and pass over the
  * domain once (count, fill), so m typed rows cost O(n + m).  Equal probe rows among the hashed share one class. */
 ray_t* ray_find_rows_class_fn(ray_t* const* dom, ray_t* const* probe, int64_t k, int64_t m, ray_cell_eq_t eq) {
     int64_t n = ray_len(dom[0]), j = 0, checks = 0;
-    int typed = rows_typed(dom, probe, k);
+    int typed = m > FIND_SCAN_NEEDLES ? rows_typed(dom, probe, k) : -1;
     ray_t* out = ray_list_new(m > 0 ? m : 1);
     if (RAY_IS_ERR(out)) return out;
     ray_t* err = NULL;
-    if (!typed || m <= FIND_SCAN_NEEDLES)
-        for (; j < m && (!typed || checks <= n); j++) {
+    if (typed != 1)
+        for (; j < m && !(checks > n && rows_hashable(&typed, dom, probe, k)); j++) {
             int64_t cn = 0, t = 0;
             for (int64_t r = row_scan(dom, probe, k, j, 0, &checks, eq, &err); r >= 0; r = row_scan(dom, probe, k, j, r + 1, &checks, eq, &err)) cn++;
             ray_t* c = err ? err : ray_vec_new(RAY_I64, cn > 0 ? cn : 1);
