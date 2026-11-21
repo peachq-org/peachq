@@ -237,6 +237,19 @@ size_t q_io_zipmap_maxblock(const q_io_zipmap_t* zm);
 int    q_io_zip_block_fd(int fd, const q_io_zipmap_t* zm, int64_t k,
                          uint8_t* scratch, uint8_t* dst, size_t cap);
 
+/* A container's plaintext read through an open fd, the last block kept.  open: NULL, 'type when the file is no
+ * container, else as q_io_zip_open; close is safe on a zeroed or failed one.  pread: up to n bytes at off — the
+ * count, short only at the end — or -1 'corrupt, -2 'io. */
+typedef struct {
+    q_io_zipmap_t zm;
+    uint8_t*      scratch;
+    uint8_t*      blk;
+    int64_t       blk_k;
+} q_io_zipfd_t;
+ray_t*  q_io_zipfd_open(q_io_zipfd_t* r, ray_t* pathstr);
+void    q_io_zipfd_close(q_io_zipfd_t* r);
+int64_t q_io_zipfd_pread(q_io_zipfd_t* r, int fd, uint8_t* dst, size_t n, int64_t off);
+
 /* Write `img` as a container of 2^lbs blocks: a compressed IPC message (alg 1), a zlib stream (alg 2) or a raw lz4hc
  * block (alg 4) each; others 'nyi.  A block compression does not pay for is stored (alg 0).  NULL or an owned error. */
 ray_t* q_io_zip_write(ray_t* pathstr, const uint8_t* img, size_t n,

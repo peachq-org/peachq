@@ -1,18 +1,15 @@
-/* q_log — `-11!` streaming execute (see q_log.h).  A log is a plain shape-A
- * general list — ff 01 00 attr count:int32, then one -8! body per chunk
- * (kb/file-compression.md:39: never a compressed one).  The cursor holds ONE
- * window of the file plus at most the chunk straddling its end: pread from a
- * file, forward reads from a fifo (releases/ChangesIn4.0.md:318).  The
- * header count is advisory (EOF terminates, as the (-2;x) length answer
- * needs).  The decoder answers one 'domain for "short" and "invalid" alike,
- * so a failure before EOF refills and one at EOF is 'badtail: a chunk that is
- * garbage mid-file costs the window growing to LOG_MAX before it is named. */
+/* q_log — `-11!` streaming execute (see q_log.h).  A log is a shape-A general list — ff 01 00 attr count:int32, then
+ * one -8! body per chunk — plain or in a kxzip container, whose plaintext the byte core reads through our fd.  The
+ * cursor holds ONE window of the plaintext plus at most the chunk straddling its end: pread from a file, forward reads
+ * from a fifo (releases/ChangesIn4.0.md:318).  The header count is advisory (EOF terminates, as the (-2;x) length
+ * answer needs).  The decoder answers one 'domain for "short" and "invalid" alike, so a failure before EOF refills and
+ * one at EOF is 'badtail: a chunk that is garbage mid-file costs the window growing to LOG_MAX before it is named. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_count.h"
 #include "qlang/io/q_log.h"
-#include "qlang/io/q_io.h"        /* q_io_file_path, q_io_pread, q_io_read_fd */
+#include "qlang/io/q_io.h"        /* q_io_file_path, q_io_pread, q_io_read_fd, q_io_zipfd_* */
 #include "qlang/io/q_handles.h"   /* q_handles_console_eval — the handle-0 door */
-#include "qlang/net/q_wire.h"     /* q_wire_read_obj — one chunk, bytes consumed */
+#include "qlang/net/q_wire.h"     /* q_wire_read_obj_ex — one chunk, bytes consumed */
 #include "qlang/base/q_err.h"
 #include "qlang/base/q_type.h"    /* q_type_is_int_atom / q_type_iatom_val — the (n;x) form */
 #include "qlang/ops/q_index.h"    /* q_index_elem_at — the (n;x) pair's items */
@@ -38,11 +35,13 @@ typedef struct {
     size_t   cap, len;
     int      whole;                         /* buf is the caller's whole file: nothing to refill, nothing to free */
     int      stream;                        /* a fifo: forward reads only */
+    q_io_zipfd_t zip;                       /* a kxzip container (zm.ends NULL: a plain file) */
 } log_cur_t;
 
 static void log_close(log_cur_t* c) {
     if (c->fd >= 0) close(c->fd);
     if (!c->whole) free(c->buf);
+    q_io_zipfd_close(&c->zip);
 }
 
 static ray_t* log_open(log_cur_t* c, ray_t* path) {
@@ -61,10 +60,14 @@ static ray_t* log_open(log_cur_t* c, ray_t* path) {
     c->size = c->stream ? INT64_MAX : (int64_t)st.st_size;
     c->cap = LOG_WINDOW;
     c->buf = (uint8_t*)malloc(c->cap);
-    return c->buf ? NULL : q_err(QE_OOM);
+    if (!c->buf) return q_err(QE_OOM);
+    ray_t* bad = c->stream ? NULL : q_io_zipfd_open(&c->zip, path);
+    if (bad && q_err_is(bad, QE_TYPE)) { ray_release(bad); return NULL; }
+    if (!bad && c->zip.zm.ends) c->size = c->zip.zm.uncompressed;
+    return bad;
 }
 
-enum { LOG_F_IO = -1, LOG_F_TOOBIG = -2, LOG_F_OOM = -3, LOG_F_STOP = -4 };
+enum { LOG_F_IO = -1, LOG_F_TOOBIG = -2, LOG_F_OOM = -3, LOG_F_STOP = -4, LOG_F_CORRUPT = -5 };
 
 /* Bytes added after buf[len] — one window — 0 at EOF, else a LOG_F_ code. */
 static int64_t log_fill(log_cur_t* c) {
@@ -76,8 +79,11 @@ static int64_t log_fill(log_cur_t* c) {
         c->buf = nb;
         c->cap *= 2;
     }
-    ssize_t r;
-    if (c->stream) {
+    int64_t r;
+    if (c->zip.zm.ends) {
+        r = q_io_zipfd_pread(&c->zip, c->fd, c->buf + c->len, c->cap - c->len, c->pos + (int64_t)c->len);
+        if (r < 0) return r == -2 ? LOG_F_IO : LOG_F_CORRUPT;
+    } else if (c->stream) {
         r = q_io_read_fd(c->fd, c->buf + c->len, c->cap - c->len);
         if (r < 0 && errno == EINTR) return LOG_F_STOP;
     } else {
@@ -91,7 +97,8 @@ static int64_t log_fill(log_cur_t* c) {
 }
 
 static ray_t* log_fill_err(int64_t r) {
-    return q_err(r == LOG_F_IO ? QE_IO : r == LOG_F_OOM ? QE_OOM : r == LOG_F_STOP ? QE_STOP : QE_BADTAIL);
+    return q_err(r == LOG_F_IO ? QE_IO : r == LOG_F_OOM ? QE_OOM : r == LOG_F_STOP ? QE_STOP
+               : r == LOG_F_CORRUPT ? QE_CORRUPT : QE_BADTAIL);
 }
 
 static ray_t* log_pair(int64_t chunks, int64_t valid) {
