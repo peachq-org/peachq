@@ -30,6 +30,7 @@
 #include "ops/idxop.h"          /* ray_index_group_rows — group's per-key rows off the attribute index */
 #include "ops/ops.h"            /* agg_group_keys — the one dense group core */
 #include "table/sym.h"          /* ray_sym_intern_runtime, ray_sym_vec_cell, RAY_SYM_W64 */
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -250,19 +251,6 @@ ray_t* q_table_at(ray_t* t, ray_t* idx) {
     return r;
 }
 
-/* Row equality over the FIRST ncmp columns of two tables (boxed compare). */
-int q_table_row_eq(ray_t* ta, int64_t ra, ray_t* tb, int64_t rb, int64_t ncmp) {
-    for (int64_t c = 0; c < ncmp; c++) {
-        ray_t* av = q_join_item(ray_table_get_col_idx(ta, c), ra);
-        ray_t* bv = q_join_item(ray_table_get_col_idx(tb, c), rb);
-        int eq = (av && bv && !RAY_IS_ERR(av) && !RAY_IS_ERR(bv)) ? q_match_value(av, bv) : 0;
-        if (av) ray_release(av);
-        if (bv) ray_release(bv);
-        if (!eq) return 0;
-    }
-    return 1;
-}
-
 /* The row-append's column from a run of record cells: an atom run types the column (`meta u` after the first
  * insert into `()`), but a run of DICTS stays the general list it is — the list->table collapse belongs to
  * enlist/literal construction, never to insert/upsert (owner ruling 2026-09-18; TorQ stpmeta.q:38 upserts a
@@ -306,9 +294,10 @@ ray_t* q_table_cols_from_accs(const int64_t* names, ray_t** accs, int64_t nc, ra
 
 /* First-occurrence row grouping over the FIRST ncmp columns: fills gid[nr] with
  * each row's group id, rep[ng] with each group's first row; returns the group
- * count, -1 on allocation failure.  Dense-hashed through the one group core
- * (agg_group_keys) when every compared column qualifies, boxed row-compare
- * otherwise — THE grouping home for `group`, `xgroup` and row dedup alike. */
+ * count, -1 on failure.  Dense-hashed through the one group core
+ * (agg_group_keys) when every compared column qualifies, else each row's group is
+ * its first occurrence, the key columns' self-Find — THE grouping home for `group`,
+ * `xgroup` and row dedup alike. */
 int64_t q_table_row_groups(ray_t* t, int64_t ncmp, int64_t* gid, int64_t* rep) {
     int64_t nr = q_count(t);
     int64_t ng = 0;
@@ -349,13 +338,22 @@ int64_t q_table_row_groups(ray_t* t, int64_t ncmp, int64_t* gid, int64_t* rep) {
     }
     for (int64_t c = 0; c < nsub; c++)
         if (sub[c]) ray_release(sub[c]);
-    for (int64_t r = 0; r < nr; r++) {
-        int64_t g = -1;
-        for (int64_t j = 0; j < ng && g < 0; j++)
-            if (q_table_row_eq(t, r, t, rep[j], ncmp)) g = j;
-        if (g < 0) { rep[ng] = r; g = ng++; }
-        gid[r] = g;
+    if (nr == 0) return 0;
+    ray_t* keys = ray_table_new(ncmp > 0 ? ncmp : 1);
+    for (int64_t c = 0; c < ncmp && !RAY_IS_ERR(keys); c++) {
+        char nm[24];                                   /* Find pairs columns by name: a duplicate name must not alias */
+        int len = snprintf(nm, sizeof nm, "c%lld", (long long)c);
+        keys = ray_table_add_col(keys, ray_sym_intern_runtime(nm, (size_t)len), ray_table_get_col_idx(t, c));
     }
+    ray_t* f = RAY_IS_ERR(keys) || ncmp < 1 ? NULL : q_search_find(keys, keys);
+    if (!RAY_IS_ERR(keys)) ray_release(keys);
+    if (!f || RAY_IS_ERR(f) || f->type != RAY_I64 || q_count(f) != nr) { if (f) ray_release(f); return -1; }
+    const int64_t* fi = (const int64_t*)ray_data(f);
+    for (int64_t r = 0; r < nr; r++) {
+        if (fi[r] >= 0 && fi[r] < r) gid[r] = gid[fi[r]];
+        else { rep[ng] = r; gid[r] = ng++; }
+    }
+    ray_release(f);
     return ng;
 }
 
@@ -1005,7 +1003,7 @@ ray_t* q_xgroup_wrap(ray_t* x, ray_t* y) {
  * vector/list -> base hash kernel; dict -> `(key d) group value d` (each index
  * list maps through the keys); table -> `(distinct t)!(row-index lists)`,
  * first-occurrence order — dense-hashed via agg_group_keys when every column
- * is int64/sym/str-readable, boxed row-compare fallback otherwise. */
+ * is int64/sym/str-readable, the self-Find fallback otherwise (q_table_row_groups). */
 static ray_t* group_table(ray_t* t) {
     int64_t nc = ray_table_ncols(t);
     int64_t nr = q_count(t);

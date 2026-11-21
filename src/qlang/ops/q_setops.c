@@ -16,26 +16,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Indices of x-rows [not] present in y (whole-row membership). */
-static ray_t* table_member_idx(ray_t* x, ray_t* y, int keep_present) {
-    int64_t nrx = q_count(x), nry = q_count(y);
-    int64_t ncx = ray_table_ncols(x);
-    if (ncx != ray_table_ncols(y)) return q_err(QE_MISMATCH);
-    ray_t* idx = ray_vec_new(RAY_I64, nrx > 0 ? nrx : 1);
-    if (RAY_IS_ERR(idx)) return idx;
-    idx->len = 0;
-    for (int64_t r = 0; r < nrx; r++) {
-        int found = 0;
-        for (int64_t e = 0; e < nry && !found; e++)
-            found = q_table_row_eq(x, r, y, e, ncx);
-        if (found == keep_present) {
-            idx = ray_vec_append(idx, &r);
-            if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
-        }
-    }
-    return idx;
-}
-
 /* q `distinct t` — FIRST-OCCURRENCE row dedup.  The base DAG table-distinct
  * (ray_table_distinct_fn) sorts, so it is NOT reused — the same reason the q
  * vector distinct is a wrapper. */
@@ -50,7 +30,7 @@ static ray_t* table_distinct(ray_t* t) {
     return out;
 }
 
-/* `x where [not] x in y` for every non-table shape (ref/except.md:30, ref/inter.md:18).  `in` and `not` go through
+/* `x where [not] x in y` (ref/except.md:30, ref/inter.md:18), a table's rows included.  `in` and `not` go through
  * the registry door so an enum operand meets the same arm the q expression does.  Borrowed in, owned out. */
 static ray_t* setop_compose(ray_t* x, ray_t* y, int negate) {
     ray_t* av[2] = { x, y };
@@ -72,17 +52,10 @@ static ray_t* setop_compose(ray_t* x, ray_t* y, int negate) {
     return r ? r : q_err(QE_TYPE);
 }
 
-/* q `x except y` (ref/except.md); a lone dict/table is a deferred cell — a wrapper builds no container. */
+/* q `x except y` (ref/except.md); a dict, or a table against a non-table, is a deferred cell. */
 ray_t* q_except_wrap(ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);
-    if (q_type_is_table(x) && q_type_is_table(y)) {
-        ray_t* idx = table_member_idx(x, y, 0);
-        if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
-        ray_t* r = qj_table_gather_idx(x, (int64_t*)ray_data(idx), q_count(idx));
-        ray_release(idx);
-        return r;
-    }
-    if (q_type_is_dict(x) || q_type_is_dict(y) || q_type_is_table(x) || q_type_is_table(y))
+    if (q_type_is_dict(x) || q_type_is_dict(y) || q_type_is_table(x) != q_type_is_table(y))
         return q_err(QE_NYI);
     return setop_compose(x, y, 1);
 }
@@ -226,16 +199,9 @@ ray_t* q_union_wrap(ray_t* x, ray_t* y) {
 /* q `x inter y` (ref/inter.md); two dicts answer their common VALUES as a list, so the dict arm recurses on them. */
 ray_t* q_inter_wrap(ray_t* x, ray_t* y) {
     if (!x || !y) return q_err(QE_TYPE);
-    if (q_type_is_table(x) && q_type_is_table(y)) {
-        ray_t* idx = table_member_idx(x, y, 1);
-        if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
-        ray_t* r = qj_table_gather_idx(x, (int64_t*)ray_data(idx), q_count(idx));
-        ray_release(idx);
-        return r;
-    }
     if (q_type_is_plain_dict(x) && q_type_is_plain_dict(y))
         return q_inter_wrap(ray_dict_vals(x), ray_dict_vals(y));
-    if (q_type_is_dict(x) || q_type_is_dict(y) || q_type_is_table(x) || q_type_is_table(y))
+    if (q_type_is_dict(x) || q_type_is_dict(y) || q_type_is_table(x) != q_type_is_table(y))
         return q_err(QE_NYI);
     return setop_compose(x, y, 0);
 }

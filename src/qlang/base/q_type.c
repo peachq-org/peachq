@@ -340,7 +340,7 @@ int q_type_is_dict(ray_t* x) {
 }
 
 /* Column readable by the dense group core (agg_group_keys' int64/sym/str key
- * lanes, src/ops/agg_engine.c) — anything else takes a boxed row-compare. */
+ * lanes, src/ops/agg_engine.c) — anything else groups by self-Find. */
 int q_type_is_dense_group_col(ray_t* c) {
     switch (c ? c->type : RAY_LIST) {
         case RAY_I64: RAY_TEMPORAL64_CASES:
