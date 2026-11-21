@@ -2397,7 +2397,28 @@ static ray_t* amend_value(ray_t** args, int64_t n, int dot) {
     return r;
 }
 
+/* `@[;;:;]`: Amend projected with its first slot open, so the accumulator still lands in d.  A keyword whose value
+ * is such a projection (`upsert`) answers through its own kernel, so it is not this shape. */
+static ray_t* amend_proj_head(ray_t* proj, ray_t** args, int64_t* n, ray_t** merged) {
+    ray_t** c = car_slots(proj);
+    int64_t rank = ray_block_len(proj) - 2, ai = 0;
+    const q_op_t* row = q_registry_operand_row(proj);
+    if (!row) row = row_unbox(c[1]);
+    if ((rank != 3 && rank != 4) || !slot_open(c[2]) || (row && row != q_ops_find("@", 1) && row != q_ops_find(".", 1)))
+        return NULL;
+    for (int64_t i = 0; i < rank; i++) merged[i] = slot_open(c[2 + i]) && ai < *n ? args[ai++] : c[2 + i];
+    if (ai != *n) return NULL;
+    *n = rank;
+    return c[0];
+}
+
 ray_t* q_eval_apply_amend_owned(ray_t* fv, ray_t** args, int64_t n) {
+    ray_t* merged[4];
+    if (q_eval_apply_carrier_kind(fv) == Q_EVAL_CAR_PROJ) {
+        fv = amend_proj_head(fv, args, &n, merged);
+        if (!fv) return NULL;
+        args = merged;
+    }
     if (fv->type != RAY_VARY || !q_eval_apply_is_fnval(fv) || (n != 3 && n != 4) || q_eval_stop_pending) return NULL;
     ray_vary_fn f = (ray_vary_fn)(uintptr_t)fv->i64;
     if (f != q_eval_at_wrap && f != q_eval_dot_wrap) return NULL;
