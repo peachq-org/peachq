@@ -40,6 +40,7 @@
 #include "qlang/q_count.h"
 #include "qlang/ops/q_vecop.h"
 #include "qlang/q_registry_internal.h" /* the compare/min2/max2/fill/null/xbar wrapper roster */
+#include "qlang/ops/q_dollar.h"        /* q_dollar_cast — a timespan bucket counts as its long */
 #include "qlang/base/q_type.h"         /* q_type_common + the numeric/float tag memberships */
 #include "qlang/q_builtins.h"         /* q_string_fn — a byte vector strings whole */
 #include "lang/eval.h"                 /* ray_lt_fn/ray_gt_fn/..., ray_cmp_tol_eq, ray_xbar_fn */
@@ -509,8 +510,8 @@ static ray_t* arith_binary(vop_t op, ray_t* x, ray_t* y, int8_t xt, int8_t yt, i
 
 /* xbar over a column, on the base kernel: taken only where the kernel's answer (the column's own type, floor
  * division by an integer count) is the law's — q_xbar_wrap on the bucket and a null of the column's type names
- * that type.  A zero or null bucket, a float one, and every other pair are the atom law's. */
-static ray_t* xbar_binary(ray_t* bucket, ray_t* col, int8_t bt, int8_t ct) {
+ * that type.  A zero or null bucket, a float one, and every other pair are the composition's. */
+static ray_t* xbar_kernel(ray_t* bucket, ray_t* col, int8_t bt, int8_t ct) {
     if (!ray_is_atom(bucket) || !ray_is_vec(col) || !int_tag(ct) || q_type_is_float_tag(bt) || q_type_is_bool(bucket)
         || RAY_ATOM_IS_NULL(bucket))
         return NULL;
@@ -527,6 +528,28 @@ static ray_t* xbar_binary(ray_t* bucket, ray_t* col, int8_t bt, int8_t ct) {
     ray_t* r = ray_xbar_fn(col, b);
     ray_release(b);
     return r;
+}
+
+/* q_xbar_wrap's own composition, `x*y div x`, each step on this file's div and * lanes; a step they decline
+ * leaves the pair to the atom law.  A temporal column is out up front: the * lane never takes one. */
+static ray_t* xbar_composed(ray_t* bucket, ray_t* col, int8_t ct) {
+    if (RAY_IS_TEMPORAL(ct)) return NULL;
+    int span = bucket->type == RAY_TIMESPAN || bucket->type == -RAY_TIMESPAN;
+    ray_t* b = span ? q_dollar_cast(RAY_I64, bucket) : bucket;
+    if (RAY_IS_ERR(b)) {
+        ray_error_free(b);
+        return NULL;
+    }
+    ray_t* d = q_vecop_binary(ray_idiv_fn, col, b);
+    ray_t* r = d && !RAY_IS_ERR(d) ? q_vecop_binary(ray_mul_fn, b, d) : d;
+    if (r != d) ray_release(d);
+    if (span) ray_release(b);
+    return r;
+}
+
+static ray_t* xbar_binary(ray_t* bucket, ray_t* col, int8_t bt, int8_t ct) {
+    ray_t* r = xbar_kernel(bucket, col, bt, ct);
+    return r ? r : xbar_composed(bucket, col, ct);
 }
 
 /* ===== the binary seam =================================================== */
