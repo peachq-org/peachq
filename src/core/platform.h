@@ -160,6 +160,15 @@ void ray_parallel_begin(void);
 void ray_parallel_end(void);
 extern _Atomic(uint32_t) ray_parallel_flag;
 
+#if defined(RAY_OS_WINDOWS)
+/* The bytes one repeat of a console input record yields: its char as UTF-8 (`low` = the low surrogate paired
+ * with a high one, else 0), or the xterm sequence a special key sends in VT input mode; 0 = the record is
+ * inert.  The REPL reader and the reactor's console watcher both judge records by it, so they cannot disagree. */
+#define RAY_CONSOLE_KEY_MAX 8
+struct _INPUT_RECORD;
+int32_t ray_console_key_bytes(const struct _INPUT_RECORD* r, uint16_t low, char out[RAY_CONSOLE_KEY_MAX]);
+#endif
+
 /* --------------------------------------------------------------------------
  * Semaphore (platform-specific, not in the public header)
  * -------------------------------------------------------------------------- */

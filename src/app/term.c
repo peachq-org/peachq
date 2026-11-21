@@ -424,10 +424,11 @@ ray_term_t* ray_term_create_console(int hist_file) {
     SetConsoleCP(CP_UTF8);
     SetConsoleOutputCP(CP_UTF8);
 
-    GetConsoleMode(term->h_stdin, &term->old_stdin_mode);
+    /* Never VT input: a terminal (ConEmu) treats a VT-input app as Unix-like and rewrites a pasted D:\ path
+     * to /mnt/d/.  Special keys reach the editor as the sequences ray_console_key_bytes synthesises. */
+    term->key_console = GetConsoleMode(term->h_stdin, &term->old_stdin_mode) != 0;
     DWORD mode = term->old_stdin_mode;
-    mode &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT);
-    mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+    mode &= ~(DWORD)(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT);
     SetConsoleMode(term->h_stdin, mode);
 
     GetConsoleMode(term->h_stdout, &term->old_stdout_mode);
@@ -462,16 +463,69 @@ void ray_term_destroy(ray_term_t* term) {
     ray_free(term->_block);
 }
 
+#if defined(RAY_OS_WINDOWS)
+/* The next byte-producing record at the head of the console, translated; inert records are dropped.  A high
+ * surrogate looks past the key-ups queued behind it for its low half, briefly, since both are queued together. */
+static int win_key_next(ray_term_t* term) {
+    for (;;) {
+        INPUT_RECORD rec[16];
+        DWORD got = 0;
+        if (WaitForSingleObject(term->h_stdin, INFINITE) != WAIT_OBJECT_0) return 0;
+        if (!PeekConsoleInputW(term->h_stdin, rec, 16, &got)) return 0;
+        if (got == 0) continue;
+        WCHAR c = rec[0].Event.KeyEvent.uChar.UnicodeChar, low = 0;
+        DWORD span = 1;
+        if (rec[0].EventType == KEY_EVENT && rec[0].Event.KeyEvent.bKeyDown && c >= 0xD800 && c < 0xDC00) {
+            int found = 0;
+            for (int tries = 0; tries < 5; tries++) {
+                char skip[RAY_CONSOLE_KEY_MAX];
+                for (DWORD i = 1; i < got && !found; i++) {
+                    if (ray_console_key_bytes(&rec[i], 0, skip) == 0) continue;
+                    WCHAR d = rec[i].Event.KeyEvent.uChar.UnicodeChar;
+                    if (rec[i].Event.KeyEvent.bKeyDown && d >= 0xDC00 && d < 0xE000) { low = d; span = i + 1; }
+                    found = 1;
+                }
+                if (found || got == 16) break;
+                Sleep(10);
+                if (!PeekConsoleInputW(term->h_stdin, rec, 16, &got)) return 0;
+            }
+        }
+        int32_t n = ray_console_key_bytes(&rec[0], low, term->key_buf);
+        if (n == 0) {
+            ReadConsoleInputW(term->h_stdin, rec, 1, &got);
+            continue;
+        }
+        WORD reps = rec[0].Event.KeyEvent.wRepeatCount;
+        term->key_len = n;
+        term->key_pos = 0;
+        term->key_total = n * (reps ? reps : 1);
+        term->key_recs = span;
+        return 1;
+    }
+}
+#endif
+
 /* The OS adapter's input pump: blocking read into term->input[0]; the
  * engine itself only ever consumes that byte via ray_term_feed. */
 #if defined(RAY_OS_WINDOWS)
 int64_t ray_term_getc(ray_term_t* term) {
-    char c;
-    DWORD n;
-    if (!ReadFile(term->h_stdin, &c, 1, &n, NULL))
-        return -1;
-    term->input[0] = c;
-    return (int64_t)n;
+    if (!term->key_console) {
+        char c;
+        DWORD n;
+        if (!ReadFile(term->h_stdin, &c, 1, &n, NULL))
+            return -1;
+        term->input[0] = c;
+        return (int64_t)n;
+    }
+    if (term->key_len == 0 && !win_key_next(term)) return -1;
+    term->input[0] = term->key_buf[term->key_pos++ % term->key_len];
+    if (term->key_pos == term->key_total) {
+        INPUT_RECORD rec[16];
+        DWORD got = 0;
+        ReadConsoleInputW(term->h_stdin, rec, term->key_recs, &got);
+        term->key_len = 0;
+    }
+    return 1;
 }
 #else
 int64_t ray_term_getc(ray_term_t* term) {

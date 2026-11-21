@@ -28,6 +28,7 @@
 
 #if defined(RAY_OS_WINDOWS)
 #include <windows.h>
+#include "core/platform.h"
 #define KEYCODE_RETURN '\r'
 #else
 #include <termios.h>
@@ -110,6 +111,12 @@ typedef struct ray_term {
     DWORD    old_stdin_mode;
     DWORD    old_stdout_mode;
     UINT     old_in_cp, old_out_cp;
+    /* the key record being handed out byte by byte; it leaves the console only once spent, so the handle stays
+     * signalled for the reactor while bytes remain */
+    int      key_console;
+    char     key_buf[RAY_CONSOLE_KEY_MAX];
+    int32_t  key_len, key_pos, key_total;
+    DWORD    key_recs;
 #else
     struct termios oldattr;
     struct termios newattr;
