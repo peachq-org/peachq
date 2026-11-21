@@ -13,6 +13,7 @@
 #include "qlang/eval/q_eval.h" /* carrier kind / iter id / lambda source */
 #include "qlang/ops/q_index.h" /* q_index_elem_at — THE element read */
 #include "qlang/ops/q_dollar.h" /* q_dollar_cast — THE conversion home */
+#include "qlang/ops/q_vecop.h"  /* q_vecop_binary — the vector lanes xbar steps on */
 #include "lang/eval.h"     /* ray_at_fn, ray_idiv_fn, ray_mul_fn */
 #include "lang/internal.h" /* ray_iasc_fn / ray_idesc_fn, as_f64 */
 #include <assert.h>
@@ -352,12 +353,19 @@ ray_t* q_idesc_wrap(ray_t* x) {
 }
 
 /* q `x xbar y` is `x*y div x`, a timespan bucket counting as its long: xbar.md:115-134 is the div.md grid composed
- * with multiply.md's, and its errors and nulls are theirs.  Atoms reach here; a vector's fast path is q_vecop's. */
+ * with multiply.md's, and its errors and nulls are theirs.  The family lift hands it atoms; q_vecop hands it a vector
+ * pair, whose steps ride q_vecop's div and * lanes, and NULL means a lane declined it (the lift keeps the pair). */
 ray_t* q_xbar_wrap(ray_t* bucket, ray_t* col) {
-    ray_t* b = bucket->type == -RAY_TIMESPAN ? q_dollar_cast(RAY_I64, bucket) : (ray_retain(bucket), bucket);
-    if (RAY_IS_ERR(b)) return b;
-    ray_t* d = ray_idiv_fn(col, b);
-    ray_t* r = RAY_IS_ERR(d) ? d : ray_mul_fn(b, d);
+    int vec = ray_is_vec(bucket) || ray_is_vec(col);
+    int span = bucket->type == -RAY_TIMESPAN || bucket->type == RAY_TIMESPAN;
+    ray_t* b = span ? q_dollar_cast(RAY_I64, bucket) : (ray_retain(bucket), bucket);
+    if (RAY_IS_ERR(b)) {
+        if (!vec) return b;
+        ray_error_free(b);
+        return NULL;
+    }
+    ray_t* d = vec ? q_vecop_binary(ray_idiv_fn, col, b) : ray_idiv_fn(col, b);
+    ray_t* r = !d || RAY_IS_ERR(d) ? d : vec ? q_vecop_binary(ray_mul_fn, b, d) : ray_mul_fn(b, d);
     if (r != d) ray_release(d);
     ray_release(b);
     return r;

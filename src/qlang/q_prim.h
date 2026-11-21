@@ -58,7 +58,7 @@ int q_match_exact(ray_t* a, ray_t* b);
 /* `~` with no float tolerance and an enum held to its type: distinct's and group's sameness of two list items
  * (distinct.md:32 "It does not use comparison tolerance") */
 int q_match_item(ray_t* a, ray_t* b);
-/* a C NULL item in list l, which the row kernel reads as an error (DEFINED in ops/q_search.c) */
+/* a C NULL item in list l, which the row kernel reads as an error (DEFINED in ops/q_list.c) */
 int q_list_has_hole(ray_t* l);
 /* `~`'s walk with an enum met by its value: the sameness of two table rows, which the meeting law decides */
 int q_match_value(ray_t* a, ray_t* b);

@@ -126,7 +126,7 @@ static ray_t* sorted_distinct(ray_t* x) {
 
 /* The uniques are the items a self-Find answers with their own index, one hashed pass, under q_match_item, whose
  * exact floats make it an equivalence; a short list scans its uniques so far. */
-ray_t* q_list_uniques(ray_t* x, int64_t* gid) {
+ray_t* q_setops_uniques(ray_t* x, int64_t* gid) {
     int64_t n = q_count(x);
     ray_t* f = n > FIND_SCAN_NEEDLES && !q_list_has_hole(x) ? ray_find_rows_fn(&x, &x, 1, n, q_match_item) : NULL;
     if (f && RAY_IS_ERR(f)) return f;
@@ -152,7 +152,7 @@ ray_t* q_list_uniques(ray_t* x, int64_t* gid) {
  * A TYPED VECTOR's items share one type, so `~` and the group kernel's atom
  * equality cannot disagree: its uniques are the KEYS OF ITS GROUPING, one hash
  * pass.  A LIST is not safe there — the base kernel equates `1` with `1f`,
- * `0n` with `0N`; `~` does not — so its uniques are q_list_uniques'.  rayfall's own
+ * `0n` with `0N`; `~` does not — so its uniques are q_setops_uniques'.  rayfall's own
  * ray_distinct_fn is no use either: it SORTS.  String operands are a deferred
  * cell (string model); atoms are kdb 'type.
  * An ATTRIBUTED vector reads its index (set-attribute.md:128): `u#` is a copy
@@ -186,7 +186,7 @@ ray_t* q_distinct_wrap(ray_t* x) {
     int64_t n = q_count(x);
     int64_t* gid = malloc(sizeof(int64_t) * (size_t)(n > 0 ? n : 1));
     if (!gid) return q_err(QE_WSFULL);
-    ray_t* out = q_list_uniques(x, gid);
+    ray_t* out = q_setops_uniques(x, gid);
     free(gid);
     if (RAY_IS_ERR(out)) return out;
     ray_t* c = q_list_collapse(out);

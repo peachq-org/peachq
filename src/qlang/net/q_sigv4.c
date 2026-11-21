@@ -1,4 +1,5 @@
 /* q_sigv4 — see q_sigv4.h. */
+#include "qlang/q_count.h"
 #include "qlang/net/q_sigv4.h"
 #include "qlang/io/q_crypto.h"   /* SHA-256 and HMAC-SHA-256 from the platform's libcrypto */
 #include <stdio.h>

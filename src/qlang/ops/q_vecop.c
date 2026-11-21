@@ -42,7 +42,6 @@
 #include "qlang/q_count.h"
 #include "qlang/ops/q_vecop.h"
 #include "qlang/q_registry_internal.h" /* the compare/min2/max2/fill/null/xbar wrapper roster */
-#include "qlang/ops/q_dollar.h"        /* q_dollar_cast — a timespan bucket counts as its long */
 #include "qlang/base/q_type.h"         /* q_type_common + the numeric/float tag memberships */
 #include "qlang/q_builtins.h"         /* q_string_fn — a byte vector strings whole */
 #include "lang/eval.h"                 /* ray_lt_fn/ray_gt_fn/..., ray_cmp_tol_eq, ray_xbar_fn */
@@ -566,25 +565,9 @@ static ray_t* xbar_kernel(ray_t* bucket, ray_t* col, int8_t bt, int8_t ct) {
     return r;
 }
 
-/* q_xbar_wrap's own composition, `x*y div x`, each step on this file's div and * lanes; a step they decline
- * leaves the pair to the atom law. */
-static ray_t* xbar_composed(ray_t* bucket, ray_t* col) {
-    int span = bucket->type == RAY_TIMESPAN || bucket->type == -RAY_TIMESPAN;
-    ray_t* b = span ? q_dollar_cast(RAY_I64, bucket) : bucket;
-    if (RAY_IS_ERR(b)) {
-        ray_error_free(b);
-        return NULL;
-    }
-    ray_t* d = q_vecop_binary(ray_idiv_fn, col, b);
-    ray_t* r = d && !RAY_IS_ERR(d) ? q_vecop_binary(ray_mul_fn, b, d) : d;
-    if (r != d) ray_release(d);
-    if (span) ray_release(b);
-    return r;
-}
-
 static ray_t* xbar_binary(ray_t* bucket, ray_t* col, int8_t bt, int8_t ct) {
     ray_t* r = xbar_kernel(bucket, col, bt, ct);
-    return r ? r : xbar_composed(bucket, col);
+    return r ? r : q_xbar_wrap(bucket, col);
 }
 
 /* ===== the binary seam =================================================== */
