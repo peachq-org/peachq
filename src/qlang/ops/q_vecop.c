@@ -45,6 +45,7 @@
 #include "lang/eval.h"                 /* ray_lt_fn/ray_gt_fn/..., ray_cmp_tol_eq, ray_xbar_fn */
 #include "lang/internal.h"             /* as_f64 / as_i64 / arith_int_type — the atom lane reads */
 #include "table/sym.h"
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -583,7 +584,7 @@ ray_t* q_vecop_binary(ray_t* (*f)(ray_t*, ray_t*), ray_t* x, ray_t* y) {
 int q_vecop_is_compare(ray_t* (*f)(ray_t*, ray_t*)) { return answers_bool(op_of(f)); }
 int q_vecop_is_ordering(ray_t* (*f)(ray_t*, ray_t*)) { vop_t op = op_of(f); return op >= VO_LT && op <= VO_GE; }
 
-/* ===== the monadic seam: `null x`, `not x` ================================ */
+/* ===== the monadic seam: `null x`, `not x`, the sign and libm verbs ====== */
 
 /* `not x` is `x=0` (ref/not.md), asked of the binary seam: a zero of x's own int-backed type, a long beside a float,
  * and every pair the seam refuses goes the per-element road. */
@@ -595,6 +596,117 @@ static ray_t* not_vec(ray_t* x) {
     return r;
 }
 
+/* abs/neg keep the tag; floor/ceiling take a float to a long; the libm verbs take a number to a float.  Each lane
+ * is the atom kernel's own reading (ops/arith.c ray_abs_fn/ray_neg_fn, ops/q_math.c): a null answers the null of
+ * the result tag, the int MIN being that null, and every NaN result is the float null. */
+typedef enum { VU_NONE = 0, VU_ABS, VU_NEG, VU_FLOOR, VU_CEIL, VU_FLT } vuop_t;
+
+static double (*libm_of(ray_t* (*f)(ray_t*)))(double) {
+    uintptr_t p = (uintptr_t)f;
+    if (p == (uintptr_t)ray_sqrt_fn) return sqrt;
+    if (p == (uintptr_t)ray_exp_fn) return exp;
+    if (p == (uintptr_t)ray_log_fn) return log;
+    if (p == (uintptr_t)q_sin_wrap) return sin;
+    if (p == (uintptr_t)q_cos_wrap) return cos;
+    if (p == (uintptr_t)q_tan_wrap) return tan;
+    if (p == (uintptr_t)q_asin_wrap) return asin;
+    if (p == (uintptr_t)q_acos_wrap) return acos;
+    if (p == (uintptr_t)q_atan_wrap) return atan;
+    return NULL;
+}
+
+static vuop_t uop_of(ray_t* (*f)(ray_t*)) {
+    uintptr_t p = (uintptr_t)f;
+    if (p == (uintptr_t)q_abs_wrap) return VU_ABS;
+    if (p == (uintptr_t)q_neg_wrap) return VU_NEG;
+    if (p == (uintptr_t)q_floor_wrap) return VU_FLOOR;
+    if (p == (uintptr_t)q_ceiling_wrap) return VU_CEIL;
+    return libm_of(f) ? VU_FLT : VU_NONE;
+}
+
+#define INT_SIGN(T, NUL, EXPR)                                                     \
+    do {                                                                           \
+        const T* p = s;                                                            \
+        T* d = ray_data(out);                                                      \
+        for (int64_t i = 0; i < n; i++) {                                          \
+            T x = p[i];                                                            \
+            int z = x == (NUL);                                                    \
+            d[i] = z ? (NUL) : (T)(EXPR);                                          \
+            any |= z;                                                              \
+        }                                                                          \
+    } while (0)
+#define FLT_MAP(TI, TO, NUL, EXPR)                                                 \
+    do {                                                                           \
+        const TI* p = s;                                                           \
+        TO* d = ray_data(out);                                                     \
+        for (int64_t i = 0; i < n; i++) {                                          \
+            TI x = p[i];                                                           \
+            TO v = (EXPR);                                                         \
+            int z = x != x || v != v;                                              \
+            d[i] = z ? (NUL) : v;                                                  \
+            any |= z;                                                              \
+        }                                                                          \
+    } while (0)
+#define FLT_LONG(TI, EXPR)                                                         \
+    do {                                                                           \
+        const TI* p = s;                                                           \
+        int64_t* d = ray_data(out);                                                \
+        for (int64_t i = 0; i < n; i++) {                                          \
+            TI x = p[i];                                                           \
+            int64_t v = x != x ? NULL_I64 : (int64_t)(EXPR);                       \
+            d[i] = v;                                                              \
+            any |= v == NULL_I64;                                                  \
+        }                                                                          \
+    } while (0)
+
+static ray_t* math_vec(ray_t* (*f)(ray_t*), ray_t* x) {
+    vuop_t op = uop_of(f);
+    int8_t t = x->type;
+    int64_t n = x->len;
+    if (!op || n <= 0) return NULL;
+    if (t != RAY_I16 && t != RAY_I32 && t != RAY_I64 && t != RAY_F32 && t != RAY_F64) return NULL;
+    int flt = t == RAY_F32 || t == RAY_F64;
+    if ((op == VU_FLOOR || op == VU_CEIL) && !flt) return NULL;
+    int8_t rt = op == VU_FLT ? RAY_F64 : (op == VU_FLOOR || op == VU_CEIL) ? RAY_I64 : t;
+    ray_t* out = ray_vec_new(rt, n);
+    if (!out || RAY_IS_ERR(out)) return out;
+    out->len = n;
+    const void* s = ray_data(x);
+    int any = 0;
+    if (op == VU_FLT) {
+        double (*fn)(double) = libm_of(f);
+        double* d = ray_data(out);
+        if (t == RAY_F64) memcpy(d, s, (size_t)n * sizeof(double));
+        else widen_f(d, s, t, n);
+        for (int64_t i = 0; i < n; i++) {
+            double v = d[i] != d[i] ? d[i] : fn(d[i]);
+            int z = v != v;
+            d[i] = z ? NULL_F64 : v;
+            any |= z;
+        }
+    } else if (op == VU_ABS || op == VU_NEG) {
+        int neg = op == VU_NEG;
+        switch (t) {
+            case RAY_I16: INT_SIGN(int16_t, NULL_I16, neg ? -x : (x < 0 ? -x : x)); break;
+            case RAY_I32: INT_SIGN(int32_t, NULL_I32, neg ? -x : (x < 0 ? -x : x)); break;
+            case RAY_I64: INT_SIGN(int64_t, NULL_I64, neg ? -x : (x < 0 ? -x : x)); break;
+            case RAY_F32: FLT_MAP(float, float, NULL_F32, neg ? -x : fabsf(x)); break;
+            default: FLT_MAP(double, double, NULL_F64, neg ? -x : fabs(x)); break;
+        }
+    } else if (t == RAY_F32) {
+        if (op == VU_FLOOR) FLT_LONG(float, floorf(x));
+        else FLT_LONG(float, ceilf(x));
+    } else {
+        if (op == VU_FLOOR) FLT_LONG(double, floor(x));
+        else FLT_LONG(double, ceil(x));
+    }
+    mark_nulls(out, any);
+    return out;
+}
+#undef INT_SIGN
+#undef FLT_MAP
+#undef FLT_LONG
+
 #define NULL_SCAN(T, ISNULL)                                                       \
     do {                                                                           \
         const T* p = s;                                                            \
@@ -605,7 +717,7 @@ ray_t* q_vecop_unary(ray_t* (*f)(ray_t*), ray_t* x) {
     if ((uintptr_t)f == (uintptr_t)q_string_fn && x && x->type == RAY_BYTE_ONLY && x->len > 0) return q_string_fn(x);
     if (!x || RAY_IS_ERR(x) || !ray_is_vec(x)) return NULL;
     if ((uintptr_t)f == (uintptr_t)q_not_wrap) return not_vec(x);
-    if ((uintptr_t)f != (uintptr_t)q_null_wrap) return NULL;
+    if ((uintptr_t)f != (uintptr_t)q_null_wrap) return math_vec(f, x);
     int64_t n = x->len;
     if (n <= 0) return NULL;
     int8_t t = x->type;
