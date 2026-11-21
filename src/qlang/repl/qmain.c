@@ -13,7 +13,7 @@
 #include "qlang/q_prim.h"     /* q_str_text_bytes — a message -lsp sends */
 #include "qlang/eval/q_eval.h" /* q_eval_apply_value — .lsp.on, once per message */
 #include "qlang/ops/q_sys.h"     /* q_sys_listen_spec_parse / q_sys_listen — the `-p` spec, shared with `\p` */
-#include "qlang/q_console.h"  /* q_console_clip_set; q_console_color */
+#include "qlang/q_console.h"  /* q_console_clip_set; q_console_color; q_console_isatty */
 #include "qlang/base/q_classic.h"
 #include "qlang/net/q_tls.h"  /* q_tls_server_mode_set — the `-E` TLS server mode */
 #include "qlang/io/q_duckdb.h" /* q_duckdb_main_path_set — the `-duckdb` main database file */
@@ -110,7 +110,7 @@ static int conn_main(int argc, char** argv) {
         else { fprintf(stderr, "q: unexpected argument '%s' with -conn\n", a); return 2; }
     }
     if (target[0] == '`') target++;               /* the rest is hopen's, exactly as written (owner ruling) */
-    int stdin_tty = isatty(STDIN_FILENO);
+    int stdin_tty = q_console_isatty(STDIN_FILENO);
     if (!script && !n_eval && !ls && stdin_tty) { fprintf(stderr, "q: -conn needs a file, -eval, -ls or piped stdin\n"); return 2; }
 
     /* The texts in the local process's order — the file, each -eval, then each stdin line — gathered
@@ -163,7 +163,7 @@ static int conn_main(int argc, char** argv) {
     ray_poll_t* poll = ray_poll_create();
     if (poll) ray_runtime_set_poll(poll);
     q_classic_set(false);                     /* the local console's display and syntax, as `q` itself has them */
-    q_console_clip_set(25, isatty(STDOUT_FILENO) ? NULL_I64 : 2000);   /* a pipe gets every column */
+    q_console_clip_set(25, q_console_isatty(STDOUT_FILENO) ? NULL_I64 : 2000);   /* a pipe gets every column */
     const char* qh = getenv("PEACHQ_QHIST");  /* set-but-empty is the off switch q cannot see through getenv */
     if (q_ctx_run_src("\\l pq", stdout, stderr, NULL) ||
         (qh && !*qh && q_ctx_run_src(".pq.i.QHIST:\"\"", stdout, stderr, NULL))) { rc = 1; goto done; }
@@ -454,8 +454,7 @@ int main(int argc, char** argv) {
         poll->blocked = blocked;
     }
 
-    /* a worker is never a console, even where its NUL stdin reads as a character device (Windows) */
-    int stdin_tty = link < 0 && isatty(STDIN_FILENO);
+    int stdin_tty = link < 0 && q_console_isatty(STDIN_FILENO);
     /* `QINIT` names a file loaded after init, before any script (basics/by-topic.md): a startup load like the script —
      * batch ahead of `-eval-before` on a non-tty, the console's first `\l` on a tty.  Empty is unset; there is no
      * `$QHOME/q.q` default (#60). */
@@ -536,7 +535,7 @@ int main(int argc, char** argv) {
          * byte-identical output — so the doors are advertised only in modern.
          * The commands are peach (256-color 215) when the colour law allows. */
         if (!classic) {
-            bool color = q_console_color(isatty(STDOUT_FILENO));
+            bool color = q_console_color(q_console_isatty(STDOUT_FILENO));
             const char* peach = color ? "\033[38;5;215m" : "";
             const char* grey  = color ? "\033[90m" : "";
             const char* off   = color ? "\033[0m" : "";

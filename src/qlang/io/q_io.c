@@ -12,6 +12,7 @@
 #include "qlang/q_registry_internal.h" /* q_str_split_lines, q_type_strict_i64 */
 #include "qlang/base/q_err.h"
 #include "qlang/io/q_handles.h" /* q_handles_read1 — the fifo-handle read form */
+#include "qlang/q_console.h"     /* q_console_isatty — a terminal `read0 0` reads one line */
 #include "qlang/io/q_provider.h"  /* q_io_set: a table coordinate routes to .X.set; hdel: to .X.hdel */
 #include "qlang/io/q_csv.h"     /* the CSV/TSV decoder behind a recognised tabular suffix */
 #include "qlang/io/q_json.h"    /* the JSON decoder, and the framing a suffix declares to it */
@@ -39,7 +40,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>         /* read, isatty — `read0 0` is a raw read of fd 0; ftruncate */
+#include <unistd.h>         /* read — `read0 0` is a raw read of fd 0; ftruncate */
 #include <fcntl.h>          /* open — the kxzip block reader's descriptor */
 #include <errno.h>
 #include <stdatomic.h>
@@ -1701,7 +1702,7 @@ static ray_t* read1_wrap_impl(ray_t* x) {
 static ray_t* io_stdin_read(void) {
     char*   buf = NULL;
     size_t  n = 0, cap = 0;
-    int     tty = isatty(0);
+    int     tty = q_console_isatty(0);
     char    rbuf[4096];
     ssize_t got;
     ray_term_mode_t prev;
