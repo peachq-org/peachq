@@ -503,6 +503,19 @@ ray_t* ray_max_fn(ray_t* x) {
     return has_float ? make_f64(fmax) : make_i64(imax);
 }
 
+/* f — one of the four aggregates above — of each RUN of the vector x (run j is the lens[j] items after run j-1), as
+ * an owned LIST of n atoms.  NULL: f, or a type f does not answer by exec_reduction's serial scan alone. */
+ray_t* ray_agg_runs(ray_unary_fn f, ray_t* x, const int64_t* lens, int64_t n) {
+    uint16_t op = f == ray_sum_fn ? OP_SUM : f == ray_avg_fn ? OP_AVG : f == ray_min_fn ? OP_MIN : f == ray_max_fn ? OP_MAX : 0;
+    int extreme = op == OP_MIN || op == OP_MAX;
+    if (!op || !x || !ray_is_vec(x) || ray_is_lazy(x)) return NULL;
+    if (x->attrs & RAY_ATTR_SLICE) return NULL;         /* a slice does not carry its own null flag */
+    if (x->type != RAY_I64 && x->type != RAY_F64 &&
+        !(extreme && (x->type == RAY_I32 || x->type == RAY_I16 || RAY_IS_TEMPORAL(x->type))))
+        return NULL;
+    return exec_reduction_runs(&(ray_op_t){ .opcode = op }, x, lens, n);
+}
+
 ray_t* ray_first_fn(ray_t* x) {
     if (ray_is_lazy(x)) return ray_lazy_append(x, OP_FIRST);
     /* String first: return first char */

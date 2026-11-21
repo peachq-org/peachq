@@ -1969,6 +1969,37 @@ static ray_t* reduction_sum_result(int64_t sum, int8_t in_type) {
     return agg_sum_overflows(t, sum) ? ray_typed_null(-RAY_I32) : reduction_i64_result(sum, t, NULL);
 }
 
+/* what a reduction of `input` answers from the scan's accumulators; n = the rows scanned */
+static ray_t* reduction_result(ray_op_t* op, ray_t* input, const reduce_acc_t* acc, int64_t n) {
+    int8_t in_type = input->type;
+    bool isf = in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type);
+    switch (op->opcode) {
+        case OP_SUM:   return in_type == RAY_F64 ? ray_f64(acc->sum_f) : reduction_sum_result(acc->sum_i, in_type);
+        case OP_PROD:  return in_type == RAY_F64 ? ray_f64(acc->prod_f) : reduction_i64_result(acc->prod_i, agg_sum_type(in_type), NULL);
+        case OP_MIN:   return reduction_extreme_result(op, in_type, acc->cnt > 0, acc->min_f, acc->min_i, input);
+        case OP_MAX:   return reduction_extreme_result(op, in_type, acc->cnt > 0, acc->max_f, acc->max_i, input);
+        /* COUNT returns total length including nulls — matches ray_count_fn's
+         * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
+        case OP_COUNT: return ray_i64(n);
+        case OP_AVG:   return acc->cnt > 0 ? ray_f64((isf ? acc->sum_f : acc->sum_d) / acc->cnt) : ray_typed_null(-RAY_F64);
+        case OP_VAR: case OP_VAR_POP:
+        case OP_STDDEV: case OP_STDDEV_POP: {
+            bool insufficient = (op->opcode == OP_VAR || op->opcode == OP_STDDEV) ? acc->cnt <= 1 : acc->cnt <= 0;
+            if (insufficient) return ray_typed_null(-RAY_F64);
+            double mean = (isf ? acc->sum_f : acc->sum_d) / acc->cnt;
+            double var_pop = (isf ? acc->sum_sq_f : (double)acc->sum_sq_i) / acc->cnt - mean * mean;
+            if (var_pop < 0) var_pop = 0;
+            double val;
+            if (op->opcode == OP_VAR_POP) val = var_pop;
+            else if (op->opcode == OP_VAR) val = var_pop * acc->cnt / (acc->cnt - 1);
+            else if (op->opcode == OP_STDDEV_POP) val = sqrt(var_pop);
+            else val = sqrt(var_pop * acc->cnt / (acc->cnt - 1));
+            return ray_f64(val);
+        }
+        default:       return ray_error("nyi", NULL);
+    }
+}
+
 ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     if (!input || RAY_IS_ERR(input)) return input;
 
@@ -2086,34 +2117,7 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
             reduce_merge(&merged, &accs[i], in_type, ray_sym_vec_domain(input));
         }
 
-        ray_t* result;
-        switch (op->opcode) {
-            case OP_SUM:   result = in_type == RAY_F64 ? ray_f64(merged.sum_f) : reduction_sum_result(merged.sum_i, in_type); break;
-            case OP_PROD:  result = in_type == RAY_F64 ? ray_f64(merged.prod_f) : reduction_i64_result(merged.prod_i, agg_sum_type(in_type), NULL); break;
-            case OP_MIN:   result = reduction_extreme_result(op, in_type, merged.cnt > 0, merged.min_f, merged.min_i, input); break;
-            case OP_MAX:   result = reduction_extreme_result(op, in_type, merged.cnt > 0, merged.max_f, merged.max_i, input); break;
-            /* COUNT returns total length including nulls — matches ray_count_fn's
-             * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
-            case OP_COUNT: result = ray_i64(scan_n); break;
-            case OP_AVG:   result = merged.cnt > 0 ? ray_f64((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? merged.sum_f / merged.cnt : merged.sum_d / merged.cnt) : ray_typed_null(-RAY_F64); break;
-            case OP_VAR: case OP_VAR_POP:
-            case OP_STDDEV: case OP_STDDEV_POP: {
-                bool insufficient = (op->opcode == OP_VAR || op->opcode == OP_STDDEV) ? merged.cnt <= 1 : merged.cnt <= 0;
-                if (insufficient) { result = ray_typed_null(-RAY_F64); break; }
-                double mean, var_pop;
-                if (in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) { mean = merged.sum_f / merged.cnt; var_pop = merged.sum_sq_f / merged.cnt - mean * mean; }
-                else { mean = merged.sum_d / merged.cnt; var_pop = (double)merged.sum_sq_i / merged.cnt - mean * mean; }
-                if (var_pop < 0) var_pop = 0;
-                double val;
-                if (op->opcode == OP_VAR_POP) val = var_pop;
-                else if (op->opcode == OP_VAR) val = var_pop * merged.cnt / (merged.cnt - 1);
-                else if (op->opcode == OP_STDDEV_POP) val = sqrt(var_pop);
-                else val = sqrt(var_pop * merged.cnt / (merged.cnt - 1));
-                result = ray_f64(val);
-                break;
-            }
-            default:       result = ray_error("nyi", NULL); break;
-        }
+        ray_t* result = reduction_result(op, input, &merged, scan_n);
         scratch_free(accs_hdr);
         if (sel_idx_block) ray_release(sel_idx_block);
         return result;
@@ -2124,32 +2128,27 @@ ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input) {
     reduce_range(input, 0, scan_n, &acc, has_nulls, sel_idx);
     if (sel_idx_block) ray_release(sel_idx_block);
 
-    switch (op->opcode) {
-        case OP_SUM:   return in_type == RAY_F64 ? ray_f64(acc.sum_f) : reduction_sum_result(acc.sum_i, in_type);
-        case OP_PROD:  return in_type == RAY_F64 ? ray_f64(acc.prod_f) : reduction_i64_result(acc.prod_i, agg_sum_type(in_type), NULL);
-        case OP_MIN:   return reduction_extreme_result(op, in_type, acc.cnt > 0, acc.min_f, acc.min_i, input);
-        case OP_MAX:   return reduction_extreme_result(op, in_type, acc.cnt > 0, acc.max_f, acc.max_i, input);
-        /* COUNT returns total length including nulls — matches ray_count_fn's
-         * "count all elements" semantics, not SQL's COUNT(col) non-null count. */
-        case OP_COUNT: return ray_i64(scan_n);
-        case OP_AVG:   return acc.cnt > 0 ? ray_f64((in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) ? acc.sum_f / acc.cnt : acc.sum_d / acc.cnt) : ray_typed_null(-RAY_F64);
-        case OP_VAR: case OP_VAR_POP:
-        case OP_STDDEV: case OP_STDDEV_POP: {
-            bool insufficient = (op->opcode == OP_VAR || op->opcode == OP_STDDEV) ? acc.cnt <= 1 : acc.cnt <= 0;
-            if (insufficient) return ray_typed_null(-RAY_F64);
-            double mean, var_pop;
-            if (in_type == RAY_F64 || RAY_IS_TEMPORALF(in_type)) { mean = acc.sum_f / acc.cnt; var_pop = acc.sum_sq_f / acc.cnt - mean * mean; }
-            else { mean = acc.sum_d / acc.cnt; var_pop = (double)acc.sum_sq_i / acc.cnt - mean * mean; }
-            if (var_pop < 0) var_pop = 0;
-            double val;
-            if (op->opcode == OP_VAR_POP) val = var_pop;
-            else if (op->opcode == OP_VAR) val = var_pop * acc.cnt / (acc.cnt - 1);
-            else if (op->opcode == OP_STDDEV_POP) val = sqrt(var_pop);
-            else val = sqrt(var_pop * acc.cnt / (acc.cnt - 1));
-            return ray_f64(val);
-        }
-        default:       return ray_error("nyi", NULL);
+    return reduction_result(op, input, &acc, scan_n);
+}
+
+/* exec_reduction's serial scan once per RUN of input — run j is the lens[j] rows after run j-1 — as an owned LIST of
+ * the atom exec_reduction answers for that run standing alone as a vector.  NULL: a run long enough that
+ * exec_reduction would split it across the pool, whose merge is not this scan. */
+ray_t* exec_reduction_runs(ray_op_t* op, ray_t* input, const int64_t* lens, int64_t n) {
+    bool has_nulls = (input->attrs & RAY_ATTR_HAS_NULLS) != 0;
+    bool pooled = ray_pool_get() != NULL;
+    ray_t* out = ray_list_new(n > 0 ? n : 1);
+    for (int64_t j = 0, off = 0; j < n && !RAY_IS_ERR(out); off += lens[j], j++) {
+        if (pooled && lens[j] >= RAY_PARALLEL_THRESHOLD) { ray_release(out); return NULL; }
+        reduce_acc_t acc;
+        reduce_acc_init(&acc);
+        reduce_range(input, off, off + lens[j], &acc, has_nulls, NULL);
+        ray_t* v = reduction_result(op, input, &acc, lens[j]);
+        if (!v || RAY_IS_ERR(v)) { ray_release(out); return v ? v : ray_error("oom", NULL); }
+        out = ray_list_append(out, v);
+        ray_release(v);
     }
+    return out;
 }
 
 /* ============================================================================

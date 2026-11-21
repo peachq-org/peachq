@@ -895,6 +895,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
 
 /* ── group.c ── */
 ray_t* exec_reduction(ray_graph_t* g, ray_op_t* op, ray_t* input);
+ray_t* exec_reduction_runs(ray_op_t* op, ray_t* input, const int64_t* lens, int64_t n);
 ray_t* exec_count_distinct(ray_graph_t* g, ray_op_t* op, ray_t* input);
 
 /* Single-pass per-group count(distinct).  Returns I64 vec of length

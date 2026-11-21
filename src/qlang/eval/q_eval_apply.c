@@ -1981,6 +1981,22 @@ static int64_t map_deferred(ray_t* fv, const q_op_t* row, q_car_kind_t kind, ray
     return k;
 }
 
+/* Does fv at n arguments take the atomic lift?  On a TWO-VALENCE row `family` describes the DYAD (q_ops.c FAMILY
+ * AUDIT, the `+` row note): a monad atomic in its own right (`-:` neg, `~:` not under Match's aggregate row) says
+ * so on ITS recipe (QR_FN1A), and the monadic sibling of an atomic dyad (`+:` flip, `<:` iasc) reaches the kernel
+ * whole — only a one-valence row lifts by family. */
+static int lifts_atomic(const ray_t* fv, const q_op_t* row, int64_t n) {
+    if (!row) return 0;
+    int fam = row->family && strcmp(row->family, "atomic") == 0;
+    if (n == 1) return fv->type == RAY_UNARY && (row->mon.atomic || (fam && row->dyad.kind == QK_NONE));
+    return n == 2 && fv->type == RAY_BINARY && fam;
+}
+
+int q_eval_apply_lifts_atomic(ray_t* fv, int64_t n) {
+    return fv && q_eval_apply_is_fnval(fv) && (n == 1 || n == 2) &&
+           lifts_atomic(fv, q_registry_row_of(fv, n == 1 ? Q_MONADIC : Q_DYADIC), n);
+}
+
 static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n) {
     if (!fv || RAY_IS_ERR(fv)) return q_err(QE_TYPE);
     if (q_eval_interrupt_take()) {
@@ -2099,24 +2115,13 @@ static ray_t* apply_inner(ray_t* fv, const q_op_t* row, ray_t** args, int64_t n)
         }
     }
 
-    /* on a TWO-VALENCE row `family` describes the DYAD (q_ops.c FAMILY AUDIT,
-     * the `+` row note), so a monad that is atomic in its own right (`-:` neg,
-     * `~:` not under Match's aggregate row) says so on ITS recipe (QR_FN1A)
-     * and lifts whatever family the dyad claims. */
-    if (row && n == 1 && row->mon.atomic && fv->type == RAY_UNARY)
-        return atomic1((ray_unary_fn)(uintptr_t)fv->i64, args[0]);
+    if (lifts_atomic(fv, row, n))
+        return n == 1 ? atomic1((ray_unary_fn)(uintptr_t)fv->i64, args[0])
+                      : atomic2((ray_binary_fn)(uintptr_t)fv->i64, row, args[0], args[1]);
 
     const char* fam = row ? row->family : NULL;
     if (fam) {
-        if (strcmp(fam, "atomic") == 0) {
-            /* the monadic sibling of an atomic dyad (`+:` flip, `<:` iasc)
-             * reaches the kernel whole — only a one-valence row lifts here */
-            if (n == 1 && fv->type == RAY_UNARY && row->dyad.kind == QK_NONE)
-                return atomic1((ray_unary_fn)(uintptr_t)fv->i64, args[0]);
-            if (n == 2 && fv->type == RAY_BINARY)
-                return atomic2((ray_binary_fn)(uintptr_t)fv->i64, row,
-                               args[0], args[1]);
-        } else if (strcmp(fam, "aggregate") == 0) {
+        if (strcmp(fam, "aggregate") == 0) {
             /* the fold group folds `()` to `()`: a list with no type has no identity (owner ruling 2026-11-05,
              * #87); avg keeps `avg 0#0`, its SQL-compat 0n */
             if (n == 1 && row->nested == QNEST_FOLD && q_type_is_empty_list(args[0])) return ray_list_new(0);

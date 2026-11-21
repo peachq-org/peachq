@@ -338,8 +338,9 @@ static ray_t* from_rows(ray_t* t, ray_t* idx) {
 
 /* Law 4: THE evaluator runs the phrase inside one NON-barrier scope (qsql.md
  * name order: column -> enclosing locals -> global in the SESSION `\d`, not the
- * lambda's defining one); virtual `i` = idx. */
-static ray_t* phrase_eval(ray_t* tree, ray_t* t, ray_t* idx) {
+ * lambda's defining one); virtual `i` = idx.  `only` (NULL = every column) names the columns a phrase known to read
+ * no other is bound. */
+static ray_t* phrase_eval_cols(ray_t* tree, ray_t* t, ray_t* idx, ray_t* only) {
     if (q_env_frame_push(0) != RAY_OK) return q_err(QE_STACK);
     ray_t* err = NULL;
     int ident = idx_is_identity(idx, src_count(t));
@@ -349,10 +350,11 @@ static ray_t* phrase_eval(ray_t* tree, ray_t* t, ray_t* idx) {
          * `select c1 from m` by the table's WIDTH (PLAN.md 2026-08-04) */
         int64_t nc = src_ncols(t);
         for (int64_t c = 0; c < nc && !err; c++) {
+            int64_t nm = src_name(t, c);
+            if (only && !q_eval_symvec_has(only, nm)) continue;
             ray_t* col = src_col(t, c);
             ray_t* g = ident ? col : entry_at(col, idx);
             if (!g || RAY_IS_ERR(g)) { err = g ? g : q_err(QE_TYPE); break; }
-            int64_t nm = src_name(t, c);
             if (nm >= 0) q_env_local_set(nm, g);            /* retains */
             ray_release(g);
         }
@@ -370,6 +372,8 @@ static ray_t* phrase_eval(ray_t* tree, ray_t* t, ray_t* idx) {
     q_env_frame_pop();
     return r;
 }
+
+static ray_t* phrase_eval(ray_t* tree, ray_t* t, ray_t* idx) { return phrase_eval_cols(tree, t, idx, NULL); }
 
 /* idx[where r] — the one refinement step every constraint ends in.  Consumes r. */
 static ray_t* where_refine(ray_t* idx, ray_t* r) {
@@ -789,9 +793,186 @@ static ray_t* by_empty_probe(ray_t* tree, ray_t* t) {
     return v ? v : q_err(QE_TYPE);
 }
 
+/* A phrase that reads each row alone — a column, `i`, an atom, an atomic verb of those — answers over all the rows
+ * at once what it answers one group at a time.  Not a dotted name (it walks a link from its head column), and not an
+ * atomic MONAD of a char column: a group of chars is one string, and `getenv` reads a string whole. */
+static int by_rowwise(ray_t* x, ray_t* t) {
+    if (!x) return 0;
+    if (x->type == -RAY_SYM) {
+        const int64_t* segs;
+        return !ray_sym_segs(x->i64, &segs) &&
+               (x->i64 == ray_sym_intern_runtime("i", 1) || ray_table_get_col(t, x->i64));
+    }
+    if (x->type < 0 || (x->type == RAY_SYM && q_count(x) == 1)) return 1;
+    int64_t n = q_count(x);
+    ray_t** e = (ray_t**)ray_data(x);
+    if (x->type != RAY_LIST || n < 2 || !q_eval_apply_lifts_atomic(e[0], n - 1)) return 0;
+    ray_t* col = n == 2 && e[1] && e[1]->type == -RAY_SYM ? ray_table_get_col(t, e[1]->i64) : NULL;
+    if (col && col->type == RAY_CHARV) return 0;
+    for (int64_t k = 1; k < n; k++)
+        if (!by_rowwise(e[k], t)) return 0;
+    return 1;
+}
+
+/* `f x` or `f[x;y]` over row-wise arguments, f an aggregate or `count`; or (where the caller takes one) a lambda of
+ * one COLUMN — its argument is read before its first call, so nothing a call changes may be what the argument reads */
+static int by_is_agg(ray_t* x, ray_t* t, int lambda) {
+    int64_t n = x && x->type == RAY_LIST ? q_count(x) : 0;
+    ray_t** e = n ? (ray_t**)ray_data(x) : NULL;
+    if (n < 2 || n > 3 || !e[0]) return 0;
+    const q_op_t* row = e[0]->type == (n == 2 ? RAY_UNARY : RAY_BINARY)
+                            ? q_registry_row_of(e[0], n == 2 ? Q_MONADIC : Q_DYADIC) : NULL;
+    if (!(row && row->family && strcmp(row->family, "aggregate") == 0) &&
+        !(n == 2 && e[0] == q_registry_lookup_name("count", 5, Q_MONADIC)) &&
+        !(n == 2 && lambda && q_eval_apply_carrier_kind(e[0]) == Q_EVAL_CAR_LAMBDA && e[1] && e[1]->type == -RAY_SYM))
+        return 0;
+    for (int64_t k = 1; k < n; k++)
+        if (!by_rowwise(e[k], t)) return 0;
+    return 1;
+}
+
+/* atomic verbs over aggregates and atoms: `(sum x)%count i` */
+static int by_is_agg_expr(ray_t* x, ray_t* t) {
+    if (by_is_agg(x, t, 0)) return 1;
+    int64_t n = x && x->type == RAY_LIST ? q_count(x) : 0;
+    ray_t** e = n ? (ray_t**)ray_data(x) : NULL;
+    if (n < 2 || !q_eval_apply_lifts_atomic(e[0], n - 1)) return 0;
+    int aggs = 0;
+    for (int64_t k = 1; k < n; k++) {
+        if (e[k] && by_is_agg_expr(e[k], t)) aggs++;
+        else if (!e[k] || e[k]->type >= 0 || e[k]->type == -RAY_SYM) return 0;
+    }
+    return aggs > 0;
+}
+
+/* every group's rows end to end (`raze`), so each group is one run of them; NULL where that is not row numbers */
+static ray_t* by_rows(ray_t* gidxs) {
+    ray_t* rows = q_raze_wrap(gidxs);
+    if (rows && !RAY_IS_ERR(rows) && rows->type == RAY_I64) return rows;
+    if (rows) ray_release(rows);
+    return NULL;
+}
+
+/* f of one run [lo, hi) of its arguments; no f, the run itself */
+static ray_t* by_run(ray_t* f, ray_t** arg, int64_t n, int64_t lo, int64_t hi) {
+    ray_t* run = rows_span(lo, hi);
+    if (RAY_IS_ERR(run)) return run;
+    ray_t* a[2] = { NULL, NULL };
+    ray_t* v = NULL;
+    for (int64_t k = 0; k < n && !v; k++) {
+        a[k] = gather(arg[k], run);
+        if (!a[k] || RAY_IS_ERR(a[k])) { v = a[k] ? a[k] : q_err(QE_TYPE); a[k] = NULL; }
+    }
+    if (!v && f) v = q_eval_apply_concrete(q_eval_apply_value(f, a, n));
+    else if (!v) v = a[0], a[0] = NULL;
+    for (int64_t k = 0; k < n; k++)
+        if (a[k]) ray_release(a[k]);
+    ray_release(run);
+    return v ? v : q_err(QE_TYPE);
+}
+
+/* f over n row-wise argument phrases for every group: each argument evaluated ONCE over `rows`, then f of each
+ * group's run of it — the list the per-group phrase hands f, without the phrase — by f's run kernel where it has
+ * one.  No f: the one argument's runs themselves.  NULL declines: an argument that is not one list over the rows. */
+static ray_t* by_runs(ray_t* f, ray_t** phrase, int64_t n, ray_t* t, ray_t* gidxs, ray_t* rows) {
+    int64_t ng = q_count(gidxs);
+    ray_t* lens = rows_new(ng);
+    if (RAY_IS_ERR(lens)) return lens;
+    int64_t* len = (int64_t*)ray_data(lens);
+    for (int64_t j = 0; j < ng; j++) len[j] = q_count(((ray_t**)ray_data(gidxs))[j]);
+    if (f && phrase[0]->type == -RAY_SYM && f == q_registry_lookup_name("count", 5, Q_MONADIC)) return lens;
+    ray_t* arg[2] = { NULL, NULL };
+    ray_t* names = ray_vec_new(RAY_SYM, 4);
+    for (int64_t k = 0; k < n; k++) phrase_names(phrase[k], &names);
+    int ok = !RAY_IS_ERR(names);
+    for (int64_t k = 0; k < n && ok; k++) {
+        arg[k] = phrase_eval_cols(phrase[k], t, rows, names);
+        ok = arg[k] && !RAY_IS_ERR(arg[k]) && (ray_is_vec(arg[k]) || arg[k]->type == RAY_LIST) &&
+             q_count(arg[k]) == q_count(rows);
+    }
+    ray_release(names);
+    ray_t* out = ok && f && n == 1 ? q_agg_runs(f, arg[0], lens) : NULL;
+    if (ok && !out) {
+        out = ray_list_new(ng);
+        q_dbg_hold_t hold = q_dbg_hold();
+        int64_t scope = q_env_scope(Q_ENV_SCOPE_SESSION);
+        for (int64_t j = 0, lo = 0; j < ng && !RAY_IS_ERR(out); lo += len[j], j++) {
+            ray_t* v = by_run(f, arg, n, lo, lo + len[j]);
+            if (RAY_IS_ERR(v)) { ray_release(out); out = v; break; }
+            out = ray_list_append(out, v);
+            ray_release(v);
+        }
+        q_env_scope(scope);
+        q_dbg_release(hold);
+    }
+    ray_release(lens);
+    for (int64_t k = 0; k < n; k++)
+        if (arg[k]) ray_release(arg[k]);
+    if (!out || RAY_IS_ERR(out)) return out;
+    ray_t* c = q_list_collapse(out);
+    ray_release(out);
+    return c;
+}
+
+/* x with each aggregate node replaced by its per-group vector — a constant the atomic verbs above it take whole.
+ * NULL declines: an aggregate that did not answer one plain vector, or answered symbols (in a tree, names) or chars
+ * (to a string verb, one string). */
+static ray_t* by_agg_subst(ray_t* x, ray_t* t, ray_t* gidxs, ray_t* rows) {
+    ray_t** e = x->type == RAY_LIST ? (ray_t**)ray_data(x) : NULL;
+    int64_t n = e ? q_count(x) : 0;
+    if (by_is_agg(x, t, 0)) {
+        ray_t* v = by_runs(e[0], e + 1, n - 1, t, gidxs, rows);
+        if (v && !RAY_IS_ERR(v) && ray_is_vec(v) && v->type != RAY_SYM && v->type != RAY_CHARV &&
+            q_count(v) == q_count(gidxs))
+            return v;
+        if (v) ray_release(v);
+        return NULL;
+    }
+    if (!e) { ray_retain(x); return x; }
+    ray_t* out = ray_list_new(n);
+    for (int64_t k = 0; k < n && out && !RAY_IS_ERR(out); k++) {
+        ray_t* s = by_agg_subst(e[k], t, gidxs, rows);
+        if (!s) { ray_release(out); return NULL; }
+        out = ray_list_append(out, s);
+        ray_release(s);
+    }
+    if (out && !RAY_IS_ERR(out)) return out;
+    if (out) ray_release(out);
+    return NULL;
+}
+
+/* THE grouped pass.  A by-phrase that is row-wise, one aggregate (or lambda) of row-wise arguments, or atomic verbs
+ * over such aggregates evaluates its row-wise parts once for all groups.  NULL declines to the per-group phrase,
+ * which also owns every error a pure step raises here; a lambda runs once per group either way, so its error is the
+ * answer.  `*rows` caches by_rows across one query's phrases. */
+static ray_t* by_col_grouped(ray_t* tree, ray_t* t, ray_t* gidxs, ray_t** rows) {
+    int64_t ng = q_count(gidxs);
+    if (!ng || q_type_is_dict(t) || t == g_part_tbl) return NULL;
+    int one = by_is_agg(tree, t, 1);
+    int row = !one && tree && (tree->type == -RAY_SYM || tree->type == RAY_LIST) && by_rowwise(tree, t);
+    if (!one && !row && !by_is_agg_expr(tree, t)) return NULL;
+    if (!*rows) *rows = by_rows(gidxs);
+    if (!*rows) return NULL;
+    ray_t** e = one ? (ray_t**)ray_data(tree) : NULL;
+    ray_t* r;
+    if (one || row) {
+        r = one ? by_runs(e[0], e + 1, q_count(tree) - 1, t, gidxs, *rows) : by_runs(NULL, &tree, 1, t, gidxs, *rows);
+        if (!r || !RAY_IS_ERR(r) || (one && q_eval_apply_carrier_kind(e[0]) == Q_EVAL_CAR_LAMBDA)) return r;
+    } else {
+        ray_t* sub = by_agg_subst(tree, t, gidxs, *rows);
+        r = sub ? q_eval_apply_concrete(q_eval(sub)) : NULL;
+        if (sub) ray_release(sub);
+        if (r && !RAY_IS_ERR(r) && ray_is_vec(r) && q_count(r) == ng) return r;
+    }
+    if (r) ray_release(r);
+    return NULL;
+}
+
 /* one a-phrase per group over its original rows; collapse (aggregates ->
  * vector, uniforms -> nested column) */
-static ray_t* by_col(ray_t* tree, ray_t* t, ray_t* gidxs) {
+static ray_t* by_col(ray_t* tree, ray_t* t, ray_t* gidxs, ray_t** rows) {
+    ray_t* grouped = by_col_grouped(tree, t, gidxs, rows);
+    if (grouped) return grouped;
     int64_t ng = q_count(gidxs);
     ray_t** gi = (ray_t**)ray_data(gidxs);
     ray_t* out = ray_list_new(ng > 0 ? ng : 1);
@@ -821,14 +1002,16 @@ static ray_t* by_col(ray_t* tree, ray_t* t, ray_t* gidxs) {
 static ray_t* by_cols(ray_t* rng, ray_t* t, ray_t* gidxs) {
     int64_t nc = q_count(rng);
     ray_t* vals = ray_list_new(nc > 0 ? nc : 1);
+    ray_t* rows = NULL;
     for (int64_t j = 0; j < nc && !RAY_IS_ERR(vals); j++) {
         ray_t* tree = q_index_elem_at(rng, j);
-        ray_t* v = (tree && !RAY_IS_ERR(tree)) ? by_col(tree, t, gidxs) : tree;
+        ray_t* v = (tree && !RAY_IS_ERR(tree)) ? by_col(tree, t, gidxs, &rows) : tree;
         if (tree && v != tree) ray_release(tree);
-        if (!v || RAY_IS_ERR(v)) { ray_release(vals); return v ? v : q_err(QE_TYPE); }
+        if (!v || RAY_IS_ERR(v)) { ray_release(vals); vals = v ? v : q_err(QE_TYPE); break; }
         vals = ray_list_append(vals, v);
         ray_release(v);
     }
+    if (rows) ray_release(rows);
     return vals;
 }
 
@@ -931,6 +1114,10 @@ static ray_t* by_group(ray_t* names, ray_t* trees, ray_t* t, ray_t* idx,
                        ray_t** gidxs_out) {
     *gidxs_out = NULL;
     ray_t* g = by_group_idx(names, trees, t, idx);
+    if (q_splay_fault_pending()) {                      /* the key's p# index, denied by its cells: no phrase need apply to say so */
+        if (g) ray_release(g);
+        return q_err(QE_CORRUPT);
+    }
     int rows_are_original = g != NULL;
     if (!rows_are_original) {
         ray_t* bt = cols_table(names, trees, t, idx, 1);
@@ -987,7 +1174,9 @@ static ray_t* by_select(ray_t* names, ray_t* trees, ray_t* a, ray_t* t,
         if (!vt || RAY_IS_ERR(vt)) r = vt ? vt : q_err(QE_TYPE);
         else r = q_bang(kt, vt), ray_release(vt);
     } else {                                            /* a sym/tree -> dict */
-        ray_t* vl = by_col(a, t, gidxs);
+        ray_t* rows = NULL;
+        ray_t* vl = by_col(a, t, gidxs, &rows);
+        if (rows) ray_release(rows);
         if (!vl || RAY_IS_ERR(vl)) r = vl ? vl : q_err(QE_TYPE);
         else r = q_bang(kt, vl), ray_release(vl);
     }
@@ -1033,7 +1222,9 @@ static ray_t* by_exec_atom(ray_t* names, ray_t* trees, ray_t* a, ray_t* t,
             ray_release(vt);
         }
     } else {
-        ray_t* vl = by_col(a, t, gidxs);
+        ray_t* rows = NULL;
+        ray_t* vl = by_col(a, t, gidxs, &rows);
+        if (rows) ray_release(rows);
         if (!vl || RAY_IS_ERR(vl)) r = vl ? vl : q_err(QE_TYPE);
         else {
             r = q_bang(ray_table_get_col_idx(kt, 0), vl);
