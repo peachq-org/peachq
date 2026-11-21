@@ -250,6 +250,7 @@ void ray_sem_signal(ray_sem_t* s) {
   #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <string.h>
 
 /* --------------------------------------------------------------------------
  * Virtual memory
@@ -353,6 +354,73 @@ void ray_sem_wait(ray_sem_t* s) {
 
 void ray_sem_signal(ray_sem_t* s) {
     ReleaseSemaphore(*s, 1, NULL);
+}
+
+/* --------------------------------------------------------------------------
+ * Console key records
+ * -------------------------------------------------------------------------- */
+static int32_t console_utf8(uint32_t cp, char* out) {
+    if (cp < 0x80) { out[0] = (char)cp; return 1; }
+    static const unsigned char lead[] = { 0, 0, 0xC0, 0xE0, 0xF0 };
+    int32_t n = cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+    for (int32_t i = n - 1; i > 0; i--, cp >>= 6) out[i] = (char)(0x80 | (cp & 0x3F));
+    out[0] = (char)(lead[n] | cp);
+    return n;
+}
+
+static int32_t console_csi_num(char* out, int32_t n, int v) {
+    if (v >= 10) out[n++] = (char)('0' + v / 10);
+    out[n++] = (char)('0' + v % 10);
+    return n;
+}
+
+int32_t ray_console_key_bytes(const struct _INPUT_RECORD* r, uint16_t low, char out[RAY_CONSOLE_KEY_MAX]) {
+    if (r->EventType != KEY_EVENT) return 0;
+    const KEY_EVENT_RECORD* k = &r->Event.KeyEvent;
+    uint32_t ch = k->uChar.UnicodeChar;
+    DWORD st = k->dwControlKeyState;
+    int shift = (st & SHIFT_PRESSED) != 0;
+    int alt   = (st & (LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED)) != 0;
+    int ctrl  = (st & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
+    /* an Alt+numpad char arrives on the Alt key-UP */
+    if (!k->bKeyDown && !(ch && k->wVirtualKeyCode == VK_MENU)) return 0;
+    if (ch) {
+        if (ch == '\t' && shift) { memcpy(out, "\033[Z", 3); return 3; }
+        int32_t n = 0;
+        if (alt && !ctrl && k->bKeyDown) out[n++] = '\033';   /* AltGr is Ctrl+Alt, and its char is plain */
+        if (ch >= 0xD800 && ch < 0xDC00 && low >= 0xDC00 && low < 0xE000)
+            ch = 0x10000 + ((ch - 0xD800) << 10) + (low - 0xDC00u);
+        else if (ch >= 0xD800 && ch < 0xE000)
+            ch = 0xFFFD;
+        return n + console_utf8(ch, out + n);
+    }
+    char fin = '~';
+    int num = 0;
+    switch (k->wVirtualKeyCode) {
+    case VK_UP:     fin = 'A'; break;
+    case VK_DOWN:   fin = 'B'; break;
+    case VK_RIGHT:  fin = 'C'; break;
+    case VK_LEFT:   fin = 'D'; break;
+    case VK_HOME:   fin = 'H'; break;
+    case VK_END:    fin = 'F'; break;
+    case VK_F1: case VK_F2: case VK_F3: case VK_F4: fin = (char)('P' + (k->wVirtualKeyCode - VK_F1)); break;
+    case VK_INSERT: num = 2;  break;
+    case VK_DELETE: num = 3;  break;
+    case VK_PRIOR:  num = 5;  break;
+    case VK_NEXT:   num = 6;  break;
+    case VK_F5:     num = 15; break;
+    case VK_F6: case VK_F7: case VK_F8: case VK_F9: case VK_F10: num = 17 + (k->wVirtualKeyCode - VK_F6); break;
+    case VK_F11: case VK_F12: num = 23 + (k->wVirtualKeyCode - VK_F11); break;
+    default:        return 0;
+    }
+    int mod = 1 + shift + 2 * alt + 4 * ctrl;
+    int32_t n = 0;
+    out[n++] = '\033';
+    out[n++] = fin >= 'P' && fin <= 'S' && mod == 1 ? 'O' : '[';
+    if (num || mod > 1) n = console_csi_num(out, n, num ? num : 1);
+    if (mod > 1) { out[n++] = ';'; n = console_csi_num(out, n, mod); }
+    out[n++] = fin;
+    return n;
 }
 
 #endif /* RAY_OS_WINDOWS */

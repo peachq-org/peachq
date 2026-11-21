@@ -74,6 +74,7 @@
 
 #if defined(RAY_OS_WINDOWS)
 
+#include "core/platform.h"
 #include "core/poll.h"
 #include "core/timer.h"
 #include "mem/sys.h"
@@ -429,35 +430,13 @@ static iocp_stdin_kind_t iocp_stdin_classify(HANDLE h) {
     return IOCP_STDIN_ALWAYS;
 }
 
-/* A record is inert when it can never produce a byte for a raw-mode
- * ReadFile: non-key events (mouse/focus/resize), key-UPs, and key-DOWNs of
- * pure modifier/lock keys (Shift alone, Ctrl alone, …).  Everything else —
- * any key-down with a char, and char-less key-downs like arrows/F-keys that
- * the VT input mode translates into ESC sequences — counts as byte-producing
- * and must NOT be discarded (eating an arrow key would break line editing).
- * Modifier state lives in each record's own dwControlKeyState/uChar, already
- * baked in at input time, so discarding a bare Ctrl-down record cannot
- * corrupt a later Ctrl+C record. */
-static bool iocp_key_record_inert(const INPUT_RECORD* r) {
-    if (r->EventType != KEY_EVENT) return true;
-    if (!r->Event.KeyEvent.bKeyDown) return true;
-    if (r->Event.KeyEvent.uChar.UnicodeChar != 0) return false;
-    switch (r->Event.KeyEvent.wVirtualKeyCode) {
-    case VK_SHIFT: case VK_CONTROL: case VK_MENU:      /* Alt */
-    case VK_CAPITAL: case VK_NUMLOCK: case VK_SCROLL:
-    case VK_LWIN: case VK_RWIN:
-        return true;    /* pure modifier / lock keys never yield bytes */
-    default:
-        return false;   /* arrows, F-keys, Home/End… → VT escape bytes */
-    }
-}
-
-/* A signaled console handle does NOT mean ReadFile won't block: inert
- * INPUT_RECORDs (see above) signal the handle but produce no bytes, and a
- * raw-mode ReadFile skips them and then BLOCKS waiting for a real keystroke —
- * which would stall the whole reactor.  Before waking the main loop, discard
- * leading inert records (ReadFile ignores them anyway) and report whether
- * byte-producing input remains.
+/* A signaled console handle does NOT mean the reader won't block: inert
+ * INPUT_RECORDs (key-ups, mouse, focus, a bare Shift) signal the handle but
+ * produce no bytes, and the reader skips them and then BLOCKS waiting for a
+ * real keystroke — which would stall the whole reactor.  Before waking the
+ * main loop, discard leading inert records (the reader would drop them too)
+ * and report whether byte-producing input remains.  A record carries its own
+ * modifier state, so dropping a bare Ctrl-down cannot corrupt a later Ctrl+C.
  * Concurrency: the watcher only touches the console BETWEEN an ack and the
  * next wake post, and the main loop only reads BETWEEN a post and the ack —
  * the protocol serializes all console access. */
@@ -471,14 +450,15 @@ static bool iocp_console_has_bytes(HANDLE h) {
         INPUT_RECORD recs[32];
         DWORD want = pending < 32 ? pending : 32;
         DWORD got  = 0;
-        if (!PeekConsoleInput(h, recs, want, &got) || got == 0)
+        if (!PeekConsoleInputW(h, recs, want, &got) || got == 0)
             return true;
+        char bytes[RAY_CONSOLE_KEY_MAX];
         for (DWORD i = 0; i < got; i++) {
-            if (!iocp_key_record_inert(&recs[i]))
+            if (ray_console_key_bytes(&recs[i], 0, bytes) > 0)
                 return true;
         }
         /* Every peeked record is inert — consume and re-check. */
-        if (!ReadConsoleInput(h, recs, got, &got))
+        if (!ReadConsoleInputW(h, recs, got, &got))
             return true;
     }
 }
