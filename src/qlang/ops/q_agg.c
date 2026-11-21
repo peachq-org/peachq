@@ -447,6 +447,27 @@ ray_t* q_avg_wrap(ray_t* x) {
     return ray_avg_fn(x);
 }
 
+/* sum and avg hand a vector to the base aggregate (their wrappers above); min and max ARE the base ones; first and
+ * last of a run are the items at its two ends — one index.  A string column's items are not atoms: declined. */
+ray_t* q_agg_runs(ray_t* f, ray_t* x, ray_t* lens) {
+    if (f->type != RAY_UNARY) return NULL;
+    ray_unary_fn k = (ray_unary_fn)(uintptr_t)f->i64;
+    const int64_t* len = (const int64_t*)ray_data(lens);
+    int64_t n = q_count(lens);
+    if (k == q_first_wrap || k == q_last_wrap) {
+        ray_t* at = !ray_is_vec(x) || x->type == RAY_STR ? NULL : agg_vec_out(RAY_I64, n);
+        if (!at || RAY_IS_ERR(at)) return at;
+        for (int64_t j = 0, lo = 0; j < n; lo += len[j], j++)
+            ((int64_t*)ray_data(at))[j] = k == q_first_wrap ? lo : lo + len[j] - 1;
+        ray_t* r = q_index_at(x, &at, 1);
+        ray_release(at);
+        return r;
+    }
+    if (k == q_sum_wrap) k = ray_sum_fn;
+    else if (k == q_avg_wrap) k = ray_avg_fn;
+    return ray_agg_runs(k, x, len, n);
+}
+
 /* `all x` is `min "b"$x` and `any x` is `max "b"$x` (docs-v1 ref/logic.md:15,43): every container, empty and type
  * rule is the one min, max and the boolean cast already have. */
 static ray_t* bool_extreme(ray_t* x, const char* name) {

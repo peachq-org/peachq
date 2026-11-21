@@ -314,6 +314,7 @@ ray_t* ray_count_fn(ray_t* x);
 ray_t* ray_avg_fn(ray_t* x);
 ray_t* ray_min_fn(ray_t* x);
 ray_t* ray_max_fn(ray_t* x);
+ray_t* ray_agg_runs(ray_unary_fn f, ray_t* x, const int64_t* lens, int64_t n);   /* sum/avg/min/max per run of x */
 ray_t* ray_first_fn(ray_t* x);
 ray_t* ray_last_fn(ray_t* x);
 ray_t* ray_med_fn(ray_t* x);

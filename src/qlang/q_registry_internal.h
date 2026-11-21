@@ -44,6 +44,10 @@ ray_t* q_mdev_wrap(ray_t* n, ray_t* x);
 ray_t* q_ema_wrap(ray_t* a, ray_t* x);
 ray_t* q_sum_wrap(ray_t* x);
 ray_t* q_avg_wrap(ray_t* x);
+/* the aggregate value f of each run of the vector x (lens: i64 run lengths) -> the owned per-run answers, a LIST of
+ * atoms or the typed vector they collapse to; NULL where f has no run kernel for x, and the caller applies f run by
+ * run */
+ray_t* q_agg_runs(ray_t* f, ray_t* x, ray_t* lens);
 ray_t* q_all_wrap(ray_t* x);
 ray_t* q_any_wrap(ray_t* x);
 

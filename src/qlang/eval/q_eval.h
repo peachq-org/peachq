@@ -128,6 +128,9 @@ int q_eval_apply_is_fn(ray_t* v);
  * which also admits carriers and engine lambdas */
 int q_eval_apply_is_fnval(ray_t* v);
 
+/* fv applied to n arguments answers item by item — the atomic lift, as dispatch itself decides it */
+int q_eval_apply_lifts_atomic(ray_t* fv, int64_t n);
+
 /* RAY_QFN carriers (lambda/projection/derived verb/composition): child
  * slots in ray_data, kind in aux[0]; serde/wire refuse them via totality
  * fallbacks.  NAMED so -Wswitch fails the build on a switch missing an arm. */
