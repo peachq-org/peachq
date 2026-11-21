@@ -10,14 +10,11 @@
 
 #include "rayforce.h"
 
-/* Row equality over the FIRST ncmp columns of two tables (boxed q-match). */
-int q_table_row_eq(ray_t* ta, int64_t ra, ray_t* tb, int64_t rb, int64_t ncmp);
-
 /* THE grouping home: first-occurrence row grouping over the FIRST ncmp
  * columns.  Fills gid[nrows] with each row's group id and rep[ngroups] with
- * each group's first row; returns the group count, -1 on allocation failure.
+ * each group's first row; returns the group count, -1 on failure.
  * Dense-hashed through agg_group_keys when every compared column qualifies,
- * boxed row-compare otherwise — `group`, `xgroup` and row dedup share it. */
+ * the key columns' self-Find otherwise — `group`, `xgroup` and row dedup share it. */
 int64_t q_table_row_groups(ray_t* t, int64_t ncmp, int64_t* gid, int64_t* rep);
 
 /* The distinct keys of an attributed vector read off its index (set-attribute.md:128-130): typed as v, in
