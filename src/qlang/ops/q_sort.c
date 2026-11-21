@@ -24,15 +24,17 @@
  * GRADE IS THE PRIMITIVE: iasc/idesc own ordering for every structure (vector →
  * ray_iasc_fn; general list → ord_grade; dict → keys by the value grade;
  * table/keyed → grade_table), and asc/desc/rank/xrank/xasc/xdesc are q.q
- * derivations over them (index once, ONE
- * gather).  xbar is `x*y div x`.  DEFERRED (error, never a
- * wrong answer): the `s#` attribute on asc results — the attr-take arm accepts
- * long vectors only, so setting it would regress symbol/nested sorts (PLAN.md). */
+ * derivations over them (index once, ONE gather).  xbar is `x*y div x`. */
 
-/* Reorder a keys-or-vals vector by a grade-index vector (owned grade), then
- * collapse the boxed result back to a typed vector.  Releases `grade`. */
+/* Reorder a keys-or-vals vector by a grade-index vector (owned grade).  A grade never misses, so a typed vector is
+ * ONE gather; anything else is indexed boxed and collapsed back to a typed vector.  Releases `grade`. */
 static ray_t* reindex_collapse(ray_t* vec, ray_t* grade) {
     if (!grade || RAY_IS_ERR(grade)) return grade;
+    if (ray_is_vec(vec) && vec->type != RAY_LIST && vec->type != RAY_ENUM) {
+        ray_t* r = gather_by_idx(vec, (int64_t*)ray_data(grade), q_count(grade));
+        ray_release(grade);
+        return r;
+    }
     ray_t* boxed = ray_at_fn(vec, grade);
     ray_release(grade);
     if (!boxed || RAY_IS_ERR(boxed)) return boxed;
@@ -217,8 +219,8 @@ static ray_t* ord_grade(ray_t* x, int desc) {
     return g;
 }
 
-/* A column the radix kernel cannot key must not TIE — a tie leaves the position
- * tiebreaker to win and hands the caller a plausible identity permutation, which
+/* A column the radix kernel cannot key must not TIE — a tie leaves the running
+ * order to win and hands the caller a plausible identity permutation, which
  * is how a missing ordering law became a wrong answer.  Order it by the law and
  * give the kernel the DENSE rank, which carries the order AND the ties. */
 static ray_t* ord_dense_rank(ray_t* col) {
@@ -238,19 +240,35 @@ static ray_t* ord_dense_rank(ray_t* col) {
     return r;
 }
 
-#define Q_GRADE_CHUNK 15    /* data keys per kernel call: 15 + the position
-                             * tiebreaker = ray_sort_indices' 16-key cap */
+/* One table column as a key the single-key grade can order: an enum by its resolved values (or position, for a
+ * reference domain), a general list by its dense rank — the one type the kernel ignores.  Owned. */
+static ray_t* grade_key(ray_t* col) {
+    if (!col) return q_err(QE_TYPE);
+    if (col->type == RAY_ENUM) return q_enum_val_image(col);
+    if (col->type == RAY_LIST) return ord_dense_rank(col);
+    ray_retain(col);
+    return col;
+}
 
-/* q `iasc`/`idesc` on a TABLE — the lexicographic row grade.  Rides the engine's
- * multi-column composite-radix grade (ray_sort_indices), the entry qSQL order-by
- * already uses, so table order and query order cannot decohere.
- *
- * Stable by construction: the kernel leaves stability to its caller (sort.c:1212
- * "stability via row is handled by the caller"), so position rides as a final,
- * ALWAYS-ascending key — unique values make the composite key a total order, which
- * the kernel's unstable small-array path cannot then reorder.  Columns are graded
- * in right-to-left chunks and the chunk grades composed (minor-first, the LSD-radix
- * argument), lifting the kernel's 16-key cap. */
+/* The single-key grade, stable for every key type.  A physical string column's MSD radix swaps equals in place and
+ * reverses them for idesc (src/ops/sort.c sort_str_msd_inplace), so position breaks its ties as an ascending key. */
+static ray_t* stable_grade(ray_t* key, uint8_t d, int64_t nr) {
+    if (key->type != RAY_STR) return ray_sort_indices(&key, &d, NULL, 1, nr);
+    ray_t* n = ray_i64(nr);
+    ray_t* pos = ray_til_fn(n);
+    ray_release(n);
+    if (!pos || RAY_IS_ERR(pos)) return pos ? pos : q_err(QE_OOM);
+    ray_t* ks[2] = { key, pos };
+    uint8_t ds[2] = { d, 0 };
+    ray_t* g = ray_sort_indices(ks, ds, NULL, 2, nr);
+    ray_release(pos);
+    return g;
+}
+
+/* q `iasc`/`idesc` on a TABLE — the lexicographic row grade, as an LSD composition of single-key grades: grade the
+ * last column, then each column to its left in the running order, folding perm = perm[g].  Correct because each
+ * grade is stable (stable_grade): ties keep the running order, which is the minor columns' order and, under it all,
+ * row position, so idesc keeps equal rows in input order too. */
 static ray_t* grade_table(ray_t* t, int desc) {
     int64_t nc = ray_table_ncols(t);
     int64_t nr = q_count(t);
@@ -260,77 +278,23 @@ static ray_t* grade_table(ray_t* t, int desc) {
         if (g && !RAY_IS_ERR(g)) g->len = 0;
         return g;
     }
-    ray_t* idx = ray_vec_new(RAY_I64, nr);           /* til nr — the tiebreaker key */
-    if (!idx || RAY_IS_ERR(idx)) return idx ? idx : q_err(QE_OOM);
-    idx->len = nr;
-    int64_t* ip = (int64_t*)ray_data(idx);
-    for (int64_t i = 0; i < nr; i++) ip[i] = i;
-    ray_t* perm = NULL;                              /* identity until the first chunk */
-    for (int64_t hi = nc; hi > 0; hi -= Q_GRADE_CHUNK) {
-        int64_t lo = hi > Q_GRADE_CHUNK ? hi - Q_GRADE_CHUNK : 0;
-        int64_t k = hi - lo;
-        ray_t* cols[Q_GRADE_CHUNK + 1];
-        uint8_t descs[Q_GRADE_CHUNK + 1];
-        uint8_t owns[Q_GRADE_CHUNK + 1];             /* per-column: needs release */
-        int64_t filled = 0;
-        ray_t* g = NULL;
-        for (int64_t c = lo; c < hi; c++) {
-            ray_t* col = ray_table_get_col_idx(t, c);         /* borrowed */
-            int own = 0;
-            if (col && perm) {
-                ray_retain(perm);
-                col = reindex_collapse(col, perm);          /* owned copy */
-                own = 1;
-            }
-            if (col && !RAY_IS_ERR(col) && col->type == RAY_ENUM) {
-                ray_t* dc = q_enum_val_image(col); /* rows order by the resolved
-                                                    * values, or by position for
-                                                    * a reference domain */
-                if (own) ray_release(col);
-                col = dc;
-                own = 1;
-            }
-            if (col && !RAY_IS_ERR(col) && col->type == RAY_LIST) {
-                ray_t* rk = ord_dense_rank(col);   /* the one type the kernel ignores */
-                if (own) ray_release(col);
-                col = rk;
-                own = 1;
-            }
-            if (!col || RAY_IS_ERR(col)) {
-                g = col ? col : q_err(QE_TYPE);
-                break;
-            }
-            cols[filled] = col;
-            descs[filled] = (uint8_t)desc;
-            owns[filled++] = (uint8_t)own;
+    uint8_t d = (uint8_t)desc;
+    ray_t* perm = NULL;
+    for (int64_t c = nc - 1; c >= 0; c--) {
+        ray_t* key = grade_key(ray_table_get_col_idx(t, c));
+        if (key && !RAY_IS_ERR(key) && perm) {
+            ray_retain(perm);
+            ray_t* k2 = reindex_collapse(key, perm);
+            ray_release(key);
+            key = k2;
         }
-        if (!g) {
-            cols[k] = idx;             /* position: original on the first chunk, the
-                                        * running minor order on later ones — either
-                                        * way it is what must be preserved */
-            descs[k] = 0;              /* ALWAYS ascending, even for idesc */
-            g = ray_sort_indices(cols, descs, NULL, (uint8_t)(k + 1), nr);
-        }
-        for (int64_t c = 0; c < filled; c++) if (owns[c]) ray_release(cols[c]);
-        if (!g || RAY_IS_ERR(g)) {
-            if (perm) ray_release(perm);
-            ray_release(idx);
-            return g ? g : q_err(QE_OOM);
-        }
-        /* Fold the chunk grade into the running permutation: perm = perm[g] */
-        if (perm) {
-            ray_t* np = reindex_collapse(perm, g);          /* releases g */
-            ray_release(perm);
-            perm = np;
-        } else {
-            perm = g;
-        }
-        if (!perm || RAY_IS_ERR(perm)) {
-            ray_release(idx);
-            return perm ? perm : q_err(QE_OOM);
-        }
+        ray_t* g = !key || RAY_IS_ERR(key) ? key : stable_grade(key, d, nr);
+        if (key && !RAY_IS_ERR(key)) ray_release(key);
+        if (g && !RAY_IS_ERR(g) && perm) g = reindex_collapse(perm, g);
+        if (perm) ray_release(perm);
+        if (!g || RAY_IS_ERR(g)) return g ? g : q_err(QE_OOM);
+        perm = g;
     }
-    ray_release(idx);
     return perm;
 }
 
