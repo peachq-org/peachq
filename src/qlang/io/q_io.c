@@ -1406,6 +1406,43 @@ int q_io_zip_block_fd(int fd, const q_io_zipmap_t* zm, int64_t k,
     return zip_block_decode(zm->algs[k], scratch, (size_t)clen, dst, (size_t)plain, work);
 }
 
+ray_t* q_io_zipfd_open(q_io_zipfd_t* r, ray_t* pathstr) {
+    memset(r, 0, sizeof *r);
+    ray_t* bad = q_io_zip_open(pathstr, &r->zm);
+    if (bad) return bad;
+    size_t sc = q_io_zipmap_maxblock(&r->zm);
+    r->scratch = (uint8_t*)malloc(sc ? sc : 1);
+    r->blk = (uint8_t*)malloc((size_t)r->zm.block_size);
+    r->blk_k = -1;
+    return r->scratch && r->blk ? NULL : q_err(QE_OOM);
+}
+
+void q_io_zipfd_close(q_io_zipfd_t* r) {
+    q_io_zipmap_free(&r->zm);
+    free(r->scratch);
+    free(r->blk);
+    r->scratch = r->blk = NULL;
+}
+
+int64_t q_io_zipfd_pread(q_io_zipfd_t* r, int fd, uint8_t* dst, size_t n, int64_t off) {
+    int64_t bs = r->zm.block_size, size = r->zm.uncompressed;
+    size_t got = 0;
+    while (got < n && off < size) {
+        int64_t k = off / bs;
+        if (k != r->blk_k) {
+            int rc = q_io_zip_block_fd(fd, &r->zm, k, r->scratch, r->blk, (size_t)bs);
+            if (rc) return rc;
+            r->blk_k = k;
+        }
+        int64_t end = (k + 1) * bs < size ? (k + 1) * bs : size;
+        size_t take = (size_t)(end - off) < n - got ? (size_t)(end - off) : n - got;
+        memcpy(dst + got, r->blk + (off - k * bs), take);
+        got += take;
+        off += (int64_t)take;
+    }
+    return (int64_t)got;
+}
+
 /* blocks k0..k1 inflated into dst, their compressed bytes fetched in ONE read */
 static ray_t* io_zip_blocks(const io_src_t* s, ray_t* pathstr, const q_io_zipmap_t* zm, int64_t k0, int64_t k1,
                             uint8_t* dst) {
