@@ -41,6 +41,8 @@ void q_console_clip_setting(int64_t* rows, int64_t* cols);
 /* THE colour on/off law every colour emitter consults: PEACHQ_COLORS=1/0 outright, then a non-empty NO_COLOR (off)
  * or FORCE_COLOR (on), else colour iff the emitter's output is a terminal (`tty`) whose TERM is not dumb. */
 bool q_console_color(bool tty);
+/* Is fd a terminal — what the OS calls a console, never merely a character device (Windows NUL is one). */
+bool q_console_isatty(int fd);
 
 /* `.pq`'s natives `.pq.i.termsize` and `.pq.i.cancolor`; and termsize again as `.help.i.termsize`, bound at boot. */
 void q_console_pq_register(void);

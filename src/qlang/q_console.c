@@ -14,6 +14,7 @@
 #include <string.h>
 #if defined(RAY_OS_WINDOWS)
 #include <windows.h>
+#include <io.h>                        /* _get_osfhandle */
 #else
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -159,6 +160,15 @@ bool q_console_color(bool tty) {
     return tty && !(t && !strcmp(t, "dumb"));
 }
 
+bool q_console_isatty(int fd) {
+#if defined(RAY_OS_WINDOWS)
+    DWORD mode;
+    return GetConsoleMode((HANDLE)_get_osfhandle(fd), &mode) != 0;
+#else
+    return isatty(fd) == 1;
+#endif
+}
+
 /* `.pq.i.termsize[]` — the LIVE terminal (rows;cols), same query + 25/80 fallback + [10,2000] coercion as the `\c 0N`
  * auto axes; the q side (help preview, .pq.termsize) cannot reach ioctl any other way. */
 static ray_t* termsize_fn(ray_t* x) {
@@ -176,12 +186,7 @@ static ray_t* termsize_fn(ray_t* x) {
 /* `.pq.i.cancolor[]` — the colour law for stdout, which q cannot ask isatty about. */
 static ray_t* cancolor_fn(ray_t* x) {
     (void)x;
-#if defined(RAY_OS_WINDOWS)
-    bool tty = GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) == FILE_TYPE_CHAR;
-#else
-    bool tty = isatty(STDOUT_FILENO) == 1;
-#endif
-    return ray_bool(q_console_color(tty));
+    return ray_bool(q_console_color(q_console_isatty(1)));
 }
 
 static void console_bind(const char* nm, ray_unary_fn fn) {
