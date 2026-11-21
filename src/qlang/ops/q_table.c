@@ -770,6 +770,32 @@ ray_t* q_table_to_dict(ray_t* x) {
 
 static ray_t* table_colnames(ray_t* x);
 
+/* flip of n same-typed fixed-width vectors of length L: each row gathered straight into its vector, the answer the
+ * boxed cell-by-cell walk collapses to.  NULL = not that shape. */
+static ray_t* flip_vecs(ray_t** e, int64_t n, int64_t L) {
+    int8_t t = e[0]->type;
+    size_t esz = ray_is_vec(e[0]) ? ray_type_sizes[(uint8_t)t] : 0;
+    if (!esz || t == RAY_SYM || t == RAY_STR || t == RAY_ENUM || L < 1) return NULL;
+    for (int64_t i = 0; i < n; i++)
+        if (e[i]->type != t) return NULL;
+    ray_t* out = ray_list_new(L);
+    for (int64_t r = 0; r < L && !RAY_IS_ERR(out); r++) {
+        ray_t* row = ray_vec_new(t, n);
+        if (!row || RAY_IS_ERR(row)) { ray_release(out); return row ? row : q_err(QE_OOM); }
+        row->len = n;
+        uint8_t* dst = (uint8_t*)ray_data(row);
+        for (int64_t i = 0; i < n; i++)
+            memcpy(dst + (size_t)i * esz, (const uint8_t*)ray_data(e[i]) + (size_t)r * esz, esz);
+        row->attrs |= RAY_ATTR_HAS_NULLS;          /* probe with the gate open: payload truth decides the bit */
+        int any = 0;
+        for (int64_t i = 0; i < n && !any; i++) any = ray_vec_is_null(row, i);
+        if (!any) row->attrs &= (uint8_t)~RAY_ATTR_HAS_NULLS;
+        out = ray_list_append(out, row);
+        ray_release(row);
+    }
+    return out;
+}
+
 /* q `flip x` / monadic `+` — transpose.
  *   table         -> dict (colnames ! list-of-columns)      [flip flip t ~ t]
  *                    a MAPPED splay -> `cols!`:dir/` (ref/flip-splayed.md: the table IS the flip of that dict)
@@ -862,6 +888,8 @@ ray_t* q_flip_wrap(ray_t* x) {
             }
         }
         if (L < 0) return q_err(QE_RANK);
+        ray_t* fast = flip_vecs(e, n, L);
+        if (fast) return fast;
         ray_t* out = ray_list_new(L > 0 ? L : 1);
         if (RAY_IS_ERR(out)) return out;
         for (int64_t r = 0; r < L; r++) {

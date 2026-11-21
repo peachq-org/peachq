@@ -68,6 +68,9 @@ ray_t* q_adverb_apply(int adv, ray_t* fv, const struct q_op* frow,
  * `@`/`.` dyadic and every C-side "call this q value" site.  Args BORROWED,
  * result OWNED. */
 ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n);
+/* Amend (`@`/`.` at rank 3-4 on a data head) with args[0] OWNED: the store writes in place when that ref is the only
+ * one, so an accumulator amends without a copy per step.  Consumes args[0] unless it answers NULL (not that shape). */
+ray_t* q_eval_apply_amend_owned(ray_t* fv, ray_t** args, int64_t n);
 /* the codec's seam: a projection of head over args (C NULL = hole) built directly, never applied */
 ray_t* q_eval_apply_proj_value(ray_t* head, ray_t** args, int64_t n);
 

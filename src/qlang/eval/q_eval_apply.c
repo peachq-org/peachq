@@ -2378,17 +2378,42 @@ static ray_t* name_lift(const q_op_t* row, ray_t** args, int64_t n, int dot) {
     return args[0];                                  /* the handle comes back */
 }
 
+/* args[0] is the store's: consumed on success, left to the caller on error */
+static ray_t* amend_store(ray_t** args, int64_t n, int dot) {
+    ray_t* y = n == 4 ? args[3] : NULL;
+    ray_t* r = dot ? q_index_amend_dot(args[0], args[1], args[2], y)
+                   : q_index_amend_at(args[0], args[1], args[2], y);
+    return r ? r : q_err(QE_TYPE);
+}
+
 /* value-form amend: PURE — the retain forces the store to path-copy, so the
  * caller's d is atomically intact even on error */
 static ray_t* amend_value(ray_t** args, int64_t n, int dot) {
     ray_t* l = name_lift(q_ops_find(dot ? "." : "@", 1), args, n, dot);
     if (l) return l;
-    ray_t* y = n == 4 ? args[3] : NULL;
     ray_retain(args[0]);
-    ray_t* r = dot ? q_index_amend_dot(args[0], args[1], args[2], y)
-                   : q_index_amend_at(args[0], args[1], args[2], y);
-    if (!r || RAY_IS_ERR(r)) ray_release(args[0]);   /* amend kept our ref */
-    return r ? r : q_err(QE_TYPE);
+    ray_t* r = amend_store(args, n, dot);
+    if (RAY_IS_ERR(r)) ray_release(args[0]);
+    return r;
+}
+
+ray_t* q_eval_apply_amend_owned(ray_t* fv, ray_t** args, int64_t n) {
+    if (fv->type != RAY_VARY || !q_eval_apply_is_fnval(fv) || (n != 3 && n != 4) || q_eval_stop_pending) return NULL;
+    ray_vary_fn f = (ray_vary_fn)(uintptr_t)fv->i64;
+    if (f != q_eval_at_wrap && f != q_eval_dot_wrap) return NULL;
+    for (int64_t i = 0; i < n; i++)
+        if (!args[i] || Q_IS_HOLE(args[i]) || (args[i]->type == RAY_TABLE && q_splay_table_deferred(args[i]))) return NULL;
+    if (ray_is_atom(args[0])) return NULL;                 /* Trap, or a handle the name lift owns */
+    ray_t* r = amend_store(args, n, f == q_eval_dot_wrap);
+    if (RAY_IS_ERR(r)) {
+        r = q_dbg_filter(r, fv, args, n);
+        ray_release(args[0]);
+        return r;
+    }
+    r = q_eval_apply_concrete(r);
+    if (!q_splay_fault_pending() || RAY_IS_ERR(r)) return r;
+    ray_release(r);
+    return q_err(QE_CORRUPT);
 }
 
 /* ref/apply.md Amend: d is a list or dictionary, or a handle to one; any other head (an atom, a function, a
