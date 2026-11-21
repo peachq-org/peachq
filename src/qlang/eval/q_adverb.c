@@ -13,7 +13,7 @@
 #include "qlang/base/q_err.h"
 #include "qlang/q_ops.h"       /* q_ops_find + manifest columns + the identity-table accessors */
 #include "qlang/q_registry.h"  /* q_registry_row_of, q_registry_row_kernel */
-#include "qlang/q_registry_internal.h" /* q_flip_wrap, q_join_wrap — Join Each of two empty tables */
+#include "qlang/q_registry_internal.h" /* q_flip_wrap, q_join_wrap — tables Join Each column-wise */
 #include "qlang/base/q_type.h"
 #include "qlang/ops/q_index.h" /* q_index_elem_at — the one element accessor */
 #include "qlang/io/q_splay.h"  /* q_splay_contained — a result entering the list a map or scan assembles */
@@ -385,8 +385,19 @@ static ray_t* map_zip_pair(void* c, ray_t* x, ray_t* y) {
     return map_zip(((map_zip_t*)c)->fv, ((map_zip_t*)c)->frow, av, 2, 3);
 }
 
-/* Tables Join Each column-wise (ref/join.md:128), so two empty ones keep both column sets: flip (flip x),flip y */
-static ray_t* join_each_empty(ray_t* x, ray_t* y) {
+/* A column as the row-by-row Join Each rebuilt it: cells collapsed, no attribute */
+static ray_t* join_each_col(void* ctx, ray_t* col) {
+    if (col->type == RAY_LIST) return q_list_collapse_atoms(col);
+    if (col->type != RAY_STR) return q_attr_set_letter(0, col);
+    ray_t* l = q_list_uncollapse(col);
+    if (!l || RAY_IS_ERR(l)) return l ? l : q_err(QE_OOM);
+    ray_t* c = q_list_collapse_atoms(l);
+    ray_release(l);
+    return c;
+}
+
+/* Tables Join Each column-wise (ref/join.md:128): flip (flip x),flip y, so two empty ones keep both column sets */
+static ray_t* join_each_tables(ray_t* x, ray_t* y, int64_t len) {
     ray_t* fx = q_flip_wrap(x);
     if (!fx || RAY_IS_ERR(fx)) return fx ? fx : q_err(QE_OOM);
     ray_t* fy = q_flip_wrap(y);
@@ -396,7 +407,10 @@ static ray_t* join_each_empty(ray_t* x, ray_t* y) {
     if (!d || RAY_IS_ERR(d)) return d ? d : q_err(QE_OOM);
     ray_t* r = q_flip_wrap(d);
     ray_release(d);
-    return r;
+    if (!len || !r || RAY_IS_ERR(r)) return r;
+    ray_t* c = q_table_map_cols(join_each_col, NULL, r);
+    ray_release(r);
+    return c;
 }
 
 /* Each, Each Left and Each Right are ONE law (ref/maps.md: `x f\:y` is
@@ -441,9 +455,11 @@ static ray_t* map_zip(ray_t* fv, const q_op_t* frow, ray_t** args, int64_t n,
     /* a map is uniform: an empty iterated side returns the GENERIC empty list
      * without an evaluation — `type (2*')til 0` is 0h, not 7h (ref/maps.md) — save that tables Join Each
      * column-wise (uqf test_superbook.q:236; SO 73139865) */
-    int tables = n == 2 && iter == 3 && q_type_is_table(av[0]) && q_type_is_table(av[1]);
-    if (!r && len == 0)
-        r = tables && frow && !strcmp(frow->name, ",") ? join_each_empty(av[0], av[1]) : ray_list_new(0);
+    int tables = n == 2 && iter == 3 && q_type_is_table(av[0]) && q_type_is_table(av[1])
+                 && (len == 0 || (!q_splay_table_path(av[0]) && !q_splay_table_path(av[1])));
+    if (!r && tables && frow && !strcmp(frow->name, ","))
+        r = join_each_tables(av[0], av[1], len);
+    if (!r && len == 0) r = ray_list_new(0);
     if (!r) {
         ray_t* l = ray_list_new(len);
         ray_t* ev[APPLY_MAX_ARGS];
