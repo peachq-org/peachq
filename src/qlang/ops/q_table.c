@@ -999,8 +999,29 @@ ray_t* q_xgroup_wrap(ray_t* x, ray_t* y) {
     return ray_dict_new(kt, vt);                          /* consumes both */
 }
 
+/* keys (consumed) and each of the nr items' group in gid: the dict of ascending index lists; cnt is ng scratch */
+static ray_t* group_dict(ray_t* keys, const int64_t* gid, int64_t* cnt, int64_t ng, int64_t nr) {
+    memset(cnt, 0, sizeof(int64_t) * (size_t)(ng > 0 ? ng : 1));
+    for (int64_t r = 0; r < nr; r++) cnt[gid[r]]++;
+    ray_t* vals = ray_list_new(ng > 0 ? ng : 1);
+    for (int64_t j = 0; j < ng && !RAY_IS_ERR(vals); j++) {
+        ray_t* iv = ray_vec_new(RAY_I64, cnt[j] > 0 ? cnt[j] : 1);
+        if (RAY_IS_ERR(iv)) { ray_release(vals); vals = iv; break; }
+        iv->len = 0;
+        vals = ray_list_append(vals, iv);
+        ray_release(iv);
+    }
+    if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
+    ray_t** vs = (ray_t**)ray_data(vals);
+    for (int64_t r = 0; r < nr; r++) {
+        ray_t* iv = vs[gid[r]];
+        ((int64_t*)ray_data(iv))[iv->len++] = r;
+    }
+    return ray_dict_new(keys, vals);
+}
+
 /* q `group x` — one law for every shape (ref/group.md; funsql waves 1-2):
- * vector/list -> base hash kernel; dict -> `(key d) group value d` (each index
+ * vector -> base hash kernel; list -> distinct's keys (group_list); dict -> `(key d) group value d` (each index
  * list maps through the keys); table -> `(distinct t)!(row-index lists)`,
  * first-occurrence order — dense-hashed via agg_group_keys when every column
  * is int64/sym/str-readable, the self-Find fallback otherwise (q_table_row_groups). */
@@ -1013,27 +1034,23 @@ static ray_t* group_table(ray_t* t) {
     int64_t ng = q_table_row_groups(t, nc, gid, rep);
     if (ng < 0) { free(gid); free(rep); return q_err(QE_WSFULL); }
     ray_t* kt = qj_table_gather_idx(t, rep, ng);          /* ≡ distinct t */
-    if (!kt || RAY_IS_ERR(kt)) { free(gid); free(rep); return kt ? kt : q_err(QE_OOM); }
-    int64_t* cnt = rep;                       /* rep is done — reuse as counts */
-    memset(cnt, 0, sizeof(int64_t) * (size_t)(ng > 0 ? ng : 1));
-    for (int64_t r = 0; r < nr; r++) cnt[gid[r]]++;
-    ray_t* vals = ray_list_new(ng > 0 ? ng : 1);
-    ray_t** vs = (ray_t**)ray_data(vals);
-    for (int64_t j = 0; j < ng && !RAY_IS_ERR(vals); j++) {
-        ray_t* iv = ray_vec_new(RAY_I64, cnt[j] > 0 ? cnt[j] : 1);
-        if (RAY_IS_ERR(iv)) { ray_release(vals); vals = iv; break; }
-        iv->len = 0;
-        vals = ray_list_append(vals, iv);
-        ray_release(iv);
-    }
-    if (RAY_IS_ERR(vals)) { free(gid); free(rep); ray_release(kt); return vals; }
-    vs = (ray_t**)ray_data(vals);
-    for (int64_t r = 0; r < nr; r++) {
-        ray_t* iv = vs[gid[r]];
-        ((int64_t*)ray_data(iv))[iv->len++] = r;
-    }
+    ray_t* g = !kt || RAY_IS_ERR(kt) ? kt : group_dict(kt, gid, rep, ng, nr);
     free(gid); free(rep);
-    return ray_dict_new(kt, vals);
+    return g ? g : q_err(QE_OOM);
+}
+
+/* a list's keys are distinct's own (group.md:10-11), so they never meet where `~` keeps them apart */
+static ray_t* group_list(ray_t* x) {
+    int64_t n = q_count(x);
+    int64_t* gid = malloc(sizeof(int64_t) * (size_t)(n > 0 ? n : 1));
+    int64_t* cnt = malloc(sizeof(int64_t) * (size_t)(n > 0 ? n : 1));
+    ray_t* u = !gid || !cnt ? q_err(QE_WSFULL) : q_list_uniques(x, gid);
+    int64_t ng = RAY_IS_ERR(u) ? 0 : q_count(u);
+    ray_t* k = RAY_IS_ERR(u) ? u : q_list_collapse(u);
+    if (!RAY_IS_ERR(u)) ray_release(u);
+    ray_t* g = !k || RAY_IS_ERR(k) ? k : group_dict(k, gid, cnt, ng, n);
+    free(gid); free(cnt);
+    return g ? g : q_err(QE_OOM);
 }
 
 /* `group` off the attribute index (set-attribute.md:130): the key set gathered as the scan would build it, each
@@ -1086,6 +1103,7 @@ ray_t* q_group_wrap(ray_t* x) {
         ray_release(g);
         return ray_dict_new(gk, nv);
     }
+    if (x->type == RAY_LIST) return group_list(x);
     return ray_group_fn(x);
 }
 
