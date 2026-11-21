@@ -9,7 +9,7 @@
 #include "qlang/base/q_type.h"  /* int/float admission + the tag/letter/name vocabulary */
 #include "qlang/base/q_err.h"
 #include "qlang/parse/q_tok.h"   /* q_tok — THE Tok entry */
-#include "qlang/base/q_calendar.h" /* q_calendar_ts_compose — date->timestamp cast */
+#include "qlang/base/q_calendar.h" /* q_calendar_ts_compose (date->timestamp), q_calendar_month_from_days */
 #include "qlang/ops/q_index.h"  /* q_index_any_nested_item — the "c"$ pack/distribute boundary */
 #include "qlang/ops/q_sys.h"    /* q_sys_week_offset — the live `\W` start day */
 #include "ops/temporal.h"  /* ray_temporal_extract — base calendar decomposition */
@@ -407,9 +407,101 @@ static ray_t* cast_timestamp(ray_t* x) {
     return cast_delegate(RAY_TIMESTAMP, x);
 }
 
+static int64_t clock_unit_ns(int8_t t) {
+    switch (t) {
+    case RAY_TIMESPAN: return 1;
+    case RAY_TIME:     return 1000000LL;
+    case RAY_SECOND:   return 1000000000LL;
+    case RAY_MINUTE:   return 60000000000LL;
+    default:           return 0;
+    }
+}
+
+typedef enum { TL_NONE, TL_RESCALE, TL_TS_CLOCK, TL_DAYS_MONTH, TL_TS_MONTH, TL_MONTH_DATE, TL_DT_DATE, TL_DT_TIME } tlane_e;
+
+static tlane_e temporal_lane(int8_t st, int8_t tt) {
+    if (st == tt) return TL_NONE;
+    if (clock_unit_ns(st) && clock_unit_ns(tt)) return TL_RESCALE;
+    if (st == RAY_TIMESTAMP) return clock_unit_ns(tt) ? TL_TS_CLOCK : tt == RAY_MONTH ? TL_TS_MONTH : TL_NONE;
+    if (st == RAY_DATE && tt == RAY_MONTH) return TL_DAYS_MONTH;
+    if (st == RAY_MONTH && tt == RAY_DATE) return TL_MONTH_DATE;
+    if (st == RAY_DATETIME) return tt == RAY_DATE ? TL_DT_DATE : tt == RAY_TIME ? TL_DT_TIME : TL_NONE;
+    return TL_NONE;
+}
+
+/* Base's atom arm reads date_to_ymd; q_calendar_month_from_days agrees with it on every day in
+ * (-730150, 2146753520), checked exhaustively, and past those bounds base's own wrap is the answer. */
+static int64_t days_as_month(int64_t days) {
+    int64_t p;
+    if (days > -730150 && days < 2146753520) {
+        q_calendar_month_from_days(days, &p);
+        return p;
+    }
+    int y, m, d;
+    date_to_ymd((int32_t)days, &y, &m, &d);
+    return (int64_t)(y - 2000) * 12 + (m - 1);
+}
+
+/* A temporal vector cast to another temporal type in one pass over the payload, by base's atom arms' own laws
+ * (builtins.c ray_cast_fn): a clock unit rescales by its ns ratio, floored when it narrows; an infinity is raw
+ * two's-complement (basics/datatypes.md "To infinity and beyond").  NULL = not a lane, base answers. */
+static ray_t* cast_temporal_vec(int8_t tag, ray_t* x) {
+    if (!x || x->type <= 0 || !ray_is_vec(x)) return NULL;
+    int8_t st = x->type;
+    tlane_e k = temporal_lane(st, tag);
+    if (k == TL_NONE) return NULL;
+    int64_t n = q_count(x);
+    ray_t* out = ray_vec_new(tag, n > 0 ? n : 1);
+    if (RAY_IS_ERR(out)) return out;
+    out->len = n;
+    int64_t su = clock_unit_ns(st), du = clock_unit_ns(tag);
+    int wide_in = RAY_IS_TEMPORAL64(st), wide_out = RAY_IS_TEMPORAL64(tag);
+    const void* src = ray_data(x);
+    void* dst = ray_data(out);
+    int any = 0;
+    for (int64_t i = 0; i < n; i++) {
+        int64_t v = 0, r = 0;
+        double f = 0.0;
+        int null;
+        if (st == RAY_DATETIME) { f = ((const double*)src)[i]; null = isnan(f); }
+        else if (wide_in) { v = ((const int64_t*)src)[i]; null = v == NULL_I64; }
+        else { v = ((const int32_t*)src)[i]; null = v == NULL_I32; }
+        if (!null) {
+            int64_t day, tod;
+            switch (k) {
+            case TL_RESCALE:
+                r = du == 1 ? (int64_t)((uint64_t)v * (uint64_t)su)
+                  : su < du ? (v / (du / su)) - (v < 0 && v % (du / su) != 0)
+                            : v * (su / du);
+                break;
+            case TL_TS_CLOCK:   r = ts_ns_in_day(v) / du; break;
+            case TL_TS_MONTH:   r = days_as_month(ts_days_floor(v)); break;
+            case TL_DAYS_MONTH: r = days_as_month(v); break;
+            case TL_MONTH_DATE: r = month_payload_as_days(v); break;
+            case TL_DT_DATE:    datetime_to_day_ns(f, &day, &tod); r = day; break;
+            case TL_DT_TIME:    datetime_to_day_ns(f, &day, &tod); r = tod / 1000000LL; break;
+            case TL_NONE:       break;
+            }
+        }
+        if (wide_out) {
+            if (null) r = NULL_I64;
+            ((int64_t*)dst)[i] = r;
+            any |= r == NULL_I64;
+        } else {
+            int32_t r32 = null ? NULL_I32 : (int32_t)r;
+            ((int32_t*)dst)[i] = r32;
+            any |= r32 == NULL_I32;
+        }
+    }
+    if (any) out->attrs |= RAY_ATTR_HAS_NULLS;
+    return out;
+}
+
 /* A long reaches a 32-bit temporal through the int lane, so its infinities saturate as `int$ does ("u"$0W -> 0Wu,
  * qcheck t/types.q:14); finite values truncate there exactly as base's own arm does. */
 static ray_t* cast_temporal32(int8_t tag, ray_t* x) {
+    ray_t* lane = cast_temporal_vec(tag, x);
+    if (lane) return lane;
     if (q_type_elem_tag(x) != -RAY_I64) return cast_delegate(tag, x);
     ray_t* i = cast_int(RAY_I32, x);
     if (!i || RAY_IS_ERR(i)) return i;
@@ -502,6 +594,8 @@ ray_t* q_dollar_cast(int8_t tag, ray_t* x) {
     case RAY_TIMESTAMP: return cast_timestamp(x);
     case RAY_SYM:  return cast_sym(x);
     case RAY_TIMESPAN: case RAY_MINUTE: case RAY_SECOND: {
+        ray_t* lane = cast_temporal_vec(tag, x);
+        if (lane) return lane;
         int8_t st = (int8_t)-q_type_elem_tag(x);
         if (st == RAY_TIMESTAMP || st == RAY_DATETIME) return cast_tod(tag, x);
         return tag == RAY_TIMESPAN ? cast_delegate(tag, x) : cast_temporal32(tag, x);
@@ -740,6 +834,24 @@ static int64_t temporal_raw_vec(int8_t at, const void* base, int64_t i) {
                                  : (int64_t)((const int32_t*)base)[i];
 }
 
+/* year/mm/dd of a date or timestamp vector through ray_temporal_extract whole: the decomposition component_value
+ * applies one atom at a time, and its floored microsecond step lands every timestamp on ts_days_floor's day. */
+static ray_t* calendar_vec(ray_t* x, q_comp_e c) {
+    int64_t n = q_count(x);
+    int field = c == QCOMP_YEAR ? RAY_EXTRACT_YEAR : c == QCOMP_MM ? RAY_EXTRACT_MONTH : RAY_EXTRACT_DAY;
+    ray_t* got = ray_temporal_extract(x, field);
+    if (!got || RAY_IS_ERR(got)) return got ? got : q_err(QE_TYPE);
+    ray_t* out = ray_vec_new(RAY_I32, n > 0 ? n : 1);
+    if (RAY_IS_ERR(out)) { ray_release(got); return out; }
+    out->len = n;
+    const int64_t* g = (const int64_t*)ray_data(got);
+    int32_t* o = (int32_t*)ray_data(out);
+    for (int64_t i = 0; i < n; i++) o[i] = g[i] == NULL_I64 ? NULL_I32 : (int32_t)g[i];
+    if (got->attrs & RAY_ATTR_HAS_NULLS) out->attrs |= RAY_ATTR_HAS_NULLS;
+    ray_release(got);
+    return out;
+}
+
 /* Temporal component over an atom or simple vector; an
  * invalid (component, temporal-type) pair per the matrix is a 'type error
  * (the doc pins the valid set, not the invalid-pair result — honest refusal
@@ -784,6 +896,8 @@ static ray_t* component_leaf(ray_t* x, int64_t comp) {
         int64_t v = component_value(c, days, tod, &rtag);
         return rtag == RAY_DATE ? ray_date(v) : rtag == RAY_I64 ? ray_i64(v) : ray_i32((int32_t)v);
     }
+    if ((c == QCOMP_YEAR || c == QCOMP_MM || c == QCOMP_DD) && (at == RAY_DATE || at == RAY_TIMESTAMP))
+        return calendar_vec(x, c);
     int8_t rtag = component_tag(c);
     int64_t n = q_count(x);
     ray_t* out = ray_vec_new(rtag, n > 0 ? n : 1);
@@ -813,7 +927,7 @@ static ray_t* cast_tod(int8_t tag, ray_t* x) {
     ray_t* span = cast_delegate(RAY_TIMESPAN, ns);
     ray_release(ns);
     if (tag == RAY_TIMESPAN || !span || RAY_IS_ERR(span)) return span ? span : q_err(QE_TYPE);
-    ray_t* r = cast_delegate(tag, span);
+    ray_t* r = cast_temporal32(tag, span);
     ray_release(span);
     return r;
 }
