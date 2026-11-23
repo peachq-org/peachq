@@ -2241,6 +2241,103 @@ int64_t ray_sorted_bound(ray_t* vec, int64_t lo, int64_t hi, ray_t* key, int64_t
 #undef SORTED_BOUND
 }
 
+/* Same-type flat vectors, with 0 <= first <= vec->len and upper in {0,1}.
+ * The caller provides keys->len output slots and ascending domain order.
+ * Returns 1 on success, 0 to use scalar search, and -1 on interruption. */
+int ray_sorted_bounds_vec(ray_t* vec, ray_t* keys, int64_t first, int upper, int64_t* out) {
+    int64_t n = vec->len - first, m = keys->len;
+    if (n < 64 || m < 1024) return 0;
+    if (ray_interrupted()) return -1;
+    int64_t offset = first - upper;
+#define BEFORE(v, k) (upper ? (v) <= (k) : (v) < (k))
+#define ADVANCE(r, k) do {                                                              \
+        uint64_t at = (uint64_t)((r) + 1) + (uint64_t)step - 1;                         \
+        if (at < (uint64_t)n && BEFORE(p[at], (k))) (r) = (int64_t)at;                  \
+    } while (0)
+/* A four-key block can begin at any offset after the gap search. */
+#define POLL(j) do {                                                                    \
+        if (((j) & 0xFFFFF) < 4 && ray_interrupted()) return -1;                        \
+    } while (0)
+#define SORTED_BATCH(T, FLOAT) do {                                                     \
+        const T* p = (const T*)ray_data(vec) + first;                                   \
+        const T* q = (const T*)ray_data(keys);                                          \
+        bool ordered = !(FLOAT && isnan((double)q[0]));                                 \
+        for (int64_t j = 1; ordered && j < 32; j++)                                     \
+            ordered = q[j] >= q[j - 1];                                                 \
+        /* Sample the rank span of sparse probes before reusing bounds. */              \
+        bool nearby = ordered;                                                          \
+        if (nearby && n / m > 256) {                                                    \
+            int64_t lo = ray_sorted_bound(vec, first, vec->len, keys, 0, upper);        \
+            int64_t hi = ray_sorted_bound(vec, first, vec->len, keys, 31, upper);       \
+            nearby = hi - lo <= 1024;                                                   \
+        }                                                                               \
+        int64_t j = 0;                                                                  \
+        if (nearby) {                                                                   \
+            int64_t lo = ray_sorted_bound(vec, first, vec->len, keys, 0, upper) - first;\
+            out[0] = lo + offset;                                                       \
+            for (j = 1; j < m; j++) {                                                   \
+                POLL(j);                                                                \
+                T k = q[j];                                                             \
+                if (!(k >= q[j - 1])) break;                                            \
+                if (lo == n || !BEFORE(p[lo], k)) {                                     \
+                    out[j] = lo + offset;                                               \
+                    continue;                                                           \
+                }                                                                       \
+                int64_t stride = 1;                                                     \
+                while (stride < n - lo && BEFORE(p[lo + stride], k)) {                  \
+                    lo += stride;                                                       \
+                    stride *= 2;                                                        \
+                    if (stride > 1024) break;                                           \
+                }                                                                       \
+                if (stride > 1024) break;                                               \
+                int64_t hi = lo + (stride < n - lo ? stride : n - lo);                  \
+                lo++;                                                                   \
+                while (lo < hi) {                                                       \
+                    int64_t mid = lo + (hi - lo) / 2;                                   \
+                    if (BEFORE(p[mid], k)) lo = mid + 1; else hi = mid;                 \
+                }                                                                       \
+                out[j] = lo + offset;                                                   \
+            }                                                                           \
+            if (j == m) return 1;                                                       \
+        }                                                                               \
+        if (FLOAT && sizeof(T) == sizeof(double) && !ordered) return 0;                 \
+        int64_t stride = 1;                                                             \
+        while (stride <= n / 2) stride *= 2;                                            \
+        for (; j <= m - 4; j += 4) {                                                    \
+            POLL(j);                                                                    \
+            int64_t a = -1, b = -1, c = -1, d = -1;                                     \
+            T ka = q[j], kb = q[j + 1], kc = q[j + 2], kd = q[j + 3];                   \
+            for (int64_t step = stride; step > 0; step /= 2) {                          \
+                ADVANCE(a, ka); ADVANCE(b, kb); ADVANCE(c, kc); ADVANCE(d, kd);         \
+            }                                                                           \
+            out[j]     = FLOAT && !upper && isnan((double)ka) ? 0 : a + 1 + offset;     \
+            out[j + 1] = FLOAT && !upper && isnan((double)kb) ? 0 : b + 1 + offset;     \
+            out[j + 2] = FLOAT && !upper && isnan((double)kc) ? 0 : c + 1 + offset;     \
+            out[j + 3] = FLOAT && !upper && isnan((double)kd) ? 0 : d + 1 + offset;     \
+        }                                                                               \
+        for (; j < m; j++) {                                                            \
+            POLL(j);                                                                    \
+            out[j] = FLOAT && isnan((double)q[j]) ? (upper ? first - 1 : 0)             \
+                   : ray_sorted_bound(vec, first, vec->len, keys, j, upper) - upper;    \
+        }                                                                               \
+        return 1;                                                                       \
+    } while (0)
+    switch (vec->type) {
+    case RAY_I64: RAY_TEMPORAL64_CASES: SORTED_BATCH(int64_t, 0);
+    case RAY_I32: RAY_TEMPORAL32_CASES: SORTED_BATCH(int32_t, 0);
+    case RAY_I16: SORTED_BATCH(int16_t, 0);
+    case RAY_BOOL: SORTED_BATCH(bool, 0);
+    RAY_BYTE_CASES: SORTED_BATCH(uint8_t, 0);
+    case RAY_F32: SORTED_BATCH(float, 1);
+    case RAY_F64: RAY_TEMPORALF_CASES: SORTED_BATCH(double, 1);
+    default: return 0;
+    }
+#undef SORTED_BATCH
+#undef POLL
+#undef ADVANCE
+#undef BEFORE
+}
+
 bool ray_sorted_span(ray_t* vec, ray_t* a, ray_t* b, int64_t* lo, int64_t* hi) {
     if (!ray_attr_is_sorted(vec)) return false;
     /* Integer and temporal integer sentinels already sort below every non-null
