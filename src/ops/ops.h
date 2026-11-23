@@ -46,6 +46,14 @@ typedef struct {
  * agg_groups_free()), -1 on allocation failure. */
 int agg_group_keys(ray_t** key_cols, uint8_t n_keys, int64_t nrows, agg_groups_t* out);
 
+/* The same grouping by DIRECT INDEX, no hash, when the keys are
+ * integer/temporal/SYM columns (a flagged null takes a slot of its own) and
+ * the groups seen so far times the next key's value range always fit a table
+ * no larger than the hash's: returns 1 with `out` filled as agg_group_keys
+ * fills it, 0 when the keys do not qualify (out holds nothing — the caller
+ * hashes), -1 on allocation failure.  agg_group_keys tries it first. */
+int agg_group_keys_direct(ray_t** key_cols, uint8_t n_keys, int64_t nrows, agg_groups_t* out);
+
 /* Release the buffers an agg_groups_t holds (buddy-backed, NOT libc malloc — so
  * callers must use this, not free()).  Idempotent; NULLs the pointers. */
 void agg_groups_free(agg_groups_t* out);
@@ -762,6 +770,7 @@ void ray_graph_dump(ray_graph_t* g, ray_op_t* root, void* out);
  * descs/nulls_first may be NULL (all-asc / nulls-last default). */
 ray_t* ray_sort_indices(ray_t** cols, uint8_t* descs, uint8_t* nulls_first,
                         uint8_t n_cols, int64_t nrows);
+ray_t* ray_sort_values(ray_t* x, bool desc);
 
 /* Top-K bounded-heap path: returns a new K-row table of `tbl` ordered by
  * `col` in the requested direction.  Returns NULL when the input doesn't

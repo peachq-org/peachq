@@ -24,7 +24,8 @@
  * ops/cmp.c's cmp_pick compares with tolerance OFF, so & and | never tolerate.
  *
  * + - * div mod ride INT on the integer tags (div and mod on every int-backed
- * count, + - * on a temporal pair that counts in one unit).  Their result tag is
+ * count, + - * on a temporal pair that counts in one unit, + - on any other
+ * clock or instant pair through the kernel's nanosecond law).  Their result tag is
  * not the operands' — ops/arith.c promotes (`5h+3h` is an int) — so the lane
  * computes in i64 and CONSTRUCTS the promoted tag, read off lang/internal.h's
  * arith_int_type / div_type / mod_type, or for a temporal off the kernel itself
@@ -35,7 +36,7 @@
  * + - * div mod beside a float or real, and % xexp xlog on every plain number,
  * ride DBL instead: ops/arith.c answers a null for either null operand, else
  * reads each through as_f64 (`0W` a large finite), applies one IEEE op and
- * answers promote_float_type's tag (mod its grid's, % xexp xlog a float).  The
+ * answers promote_float_type's tag (mod its grid's, div x's, % xexp xlog a float).  The
  * lane reads nulls as NaN, which every op propagates, narrows a real through
  * `float` and writes every NaN as the null.  A char and a temporal stay out.
  */
@@ -46,6 +47,7 @@
 #include "qlang/q_builtins.h"         /* q_string_fn — a byte vector strings whole */
 #include "lang/eval.h"                 /* ray_lt_fn/ray_gt_fn/..., ray_cmp_tol_eq, ray_xbar_fn */
 #include "lang/internal.h"             /* as_f64 / as_i64 / arith_int_type — the atom lane reads */
+#include "lang/cal.h"                  /* NS_PER_DAY */
 #include "table/sym.h"
 #include <math.h>
 #include <stdlib.h>
@@ -401,16 +403,23 @@ static int8_t arith_rt(vop_t op, int8_t xt, int8_t yt) {
 }
 
 /* + - * beside a temporal ride INT on the payloads where both operands count in one unit: a plain integer beside a
- * temporal (an offset or a scale), two of one kind, or a timestamp beside a timespan, both nanoseconds.  A minute or
- * second pair is out: the kernel sums it in nanoseconds (duration_pair), which wraps where its payloads do not.  The
- * tag is the kernel's own answer for the pair, asked once of two zeros; a pair it refuses, or answers off the integer
- * lane, declines.  A char or real offset stays the kernel's.  0 = not this lane's. */
-static int8_t temporal_rt(ray_t* (*f)(ray_t*, ray_t*), int8_t xt, int8_t yt) {
+ * temporal (an offset or a scale), two of one kind, or a timestamp beside a timespan, both nanoseconds.  The tag is
+ * the kernel's own answer for the pair, asked once of two zeros; a pair it refuses, or answers off the integer lane,
+ * declines.  A char or real offset stays the kernel's.  0 = not this lane's.
+ * Any other + or - of two clock or instant kinds (a minute pair, `d+t`, `p-u`) is the kernel's nanosecond law
+ * instead: both read through temporal_as_ns, wrapped, then cut to the answer's unit as duration_pair does.  *sx and
+ * *sy come back as those ns factors, y's negated for -, and 0 when the payloads combine as they stand.  A month
+ * counts civil months and a datetime is a float, so neither has a factor. */
+static int64_t ns_per(int8_t t) {
+    return t == RAY_TIMESTAMP ? 1 : t == RAY_DATE ? NS_PER_DAY : duration_unit_ns((int8_t)-t);
+}
+static int8_t temporal_rt(ray_t* (*f)(ray_t*, ray_t*), vop_t op, int8_t xt, int8_t yt, int64_t* sx, int64_t* sy) {
     int tx = RAY_IS_TEMPORAL(xt), ty = RAY_IS_TEMPORAL(yt);
     int via_ns = xt == RAY_MINUTE || xt == RAY_SECOND;
     int one_unit = tx && ty ? (xt == yt && !via_ns) || (RAY_IS_TEMPORAL64(xt) && RAY_IS_TEMPORAL64(yt))
                             : arith_tag(tx ? yt : xt);
-    if (!one_unit) return 0;
+    int by_ns = !one_unit && tx && ty && op != VO_MUL && ns_per(xt) && ns_per(yt);
+    if (!one_unit && !by_ns) return 0;
     ray_t* a = make_typed_int((int8_t)-xt, 0);
     ray_t* b = make_typed_int((int8_t)-yt, 0);
     ray_t* r = f(a, b);
@@ -419,7 +428,11 @@ static int8_t temporal_rt(ray_t* (*f)(ray_t*, ray_t*), int8_t xt, int8_t yt) {
     else ray_release(r);
     ray_release(a);
     ray_release(b);
-    return rt == RAY_I32 || RAY_IS_TEMPORAL(rt) ? rt : 0;
+    if (!by_ns) return rt == RAY_I32 || RAY_IS_TEMPORAL(rt) ? rt : 0;
+    if (rt != RAY_TIMESTAMP && !duration_unit_ns((int8_t)-rt)) return 0;
+    *sx = ns_per(xt);
+    *sy = op == VO_SUB ? -ns_per(yt) : ns_per(yt);
+    return rt;
 }
 
 /* One loop per (verb, result width).  The width is loop-invariant, so hoisting
@@ -457,14 +470,39 @@ static int arith_into(void* o, int w, vop_t op, band_t xb, band_t yb, int64_t n)
     return any;
 }
 
+/* temporal_rt's nanosecond law: the scaled sum wraps in unsigned space and truncates to the answer's unit, one case
+ * per unit so the divisor folds to a constant. */
+#define NS_W(T, NUL, UR)                                                                                    \
+    do {                                                                                                    \
+        T* d = o;                                                                                           \
+        SHAPED(int64_t, xb.p, yb.p, xb.step, yb.step, n, {                                                  \
+            T r = x == NULL_I64 || y == NULL_I64                                                            \
+                      ? (NUL)                                                                               \
+                      : (T)((int64_t)((uint64_t)x * (uint64_t)sx + (uint64_t)y * (uint64_t)sy) / (UR));    \
+            d[i] = r;                                                                                       \
+            any |= r == (NUL);                                                                              \
+        });                                                                                                 \
+    } while (0)
+
+static int ns_into(void* o, int8_t rt, int64_t sx, int64_t sy, band_t xb, band_t yb, int64_t n) {
+    int any = 0;
+    switch (rt) {
+        case RAY_MINUTE: NS_W(int32_t, NULL_I32, duration_unit_ns(-RAY_MINUTE)); break;
+        case RAY_SECOND: NS_W(int32_t, NULL_I32, duration_unit_ns(-RAY_SECOND)); break;
+        case RAY_TIME: NS_W(int32_t, NULL_I32, duration_unit_ns(-RAY_TIME)); break;
+        default: NS_W(int64_t, NULL_I64, 1); break;
+    }
+    return any;
+}
+
 /* The double lane's tag: % xexp xlog answer make_f64 for every pair, + - * div mod need a float side, mod answers
- * its grid and div only a float x's float (an int x floors to an int, the per-element road's).  0 = not this lane's. */
+ * its grid and div x's (div_type: an int x floors to its int).  0 = not this lane's. */
 static int8_t float_rt(vop_t op, int8_t xt, int8_t yt) {
     if (!q_type_is_num_tag(xt) || !q_type_is_num_tag(yt)) return 0;
     if (op >= VO_DIV) return RAY_F64;
     if (!q_type_is_float_tag(xt) && !q_type_is_float_tag(yt)) return 0;
     if (op == VO_MOD) return mod_type(xt, yt);
-    if (op == VO_IDIV) return q_type_is_float_tag(xt) ? RAY_F64 : 0;
+    if (op == VO_IDIV) return div_type(xt, yt);
     return (int8_t)-promote_float_type((int8_t)-xt, (int8_t)-yt);
 }
 
@@ -493,6 +531,19 @@ static const int64_t* int_run(int64_t* buf, ray_t* v, int8_t t, int vec, const i
 
 #define FLT_OP(EXPR) DBL_STORE(i0, px, py, xv, yv, m, EXPR, v != v)
 
+/* An int x div a float y floors in double and lands on x's int tag as float_lane_atom does: a zero divisor, a NaN or
+ * a quotient off the int64 range is the null. */
+#define FLR_W(T, NUL)                                                                  \
+    do {                                                                               \
+        T* d = (T*)ray_data(out) + i0;                                                 \
+        SHAPED(double, px, py, xv, yv, m, {                                            \
+            double v = y == 0.0 ? NAN : floor(x / y);                                  \
+            T r = v >= -0x1p63 && v < 0x1p63 ? (T)(int64_t)v : (NUL);                  \
+            d[i] = r;                                                                  \
+            any |= r == (NUL);                                                         \
+        });                                                                            \
+    } while (0)
+
 static ray_t* float_binary(vop_t op, int8_t rt, ray_t* x, ray_t* y, int8_t xt, int8_t yt, int xv, int yv, int64_t n) {
     ray_t* out = ray_vec_new(rt, n);
     if (!out || RAY_IS_ERR(out)) return out;
@@ -503,6 +554,8 @@ static ray_t* float_binary(vop_t op, int8_t rt, ray_t* x, ray_t* y, int8_t xt, i
         int64_t m = n - i0 < LANE_RUN ? n - i0 : LANE_RUN;
         const double* px = flt_run(xbuf, x, xt, xv, &xa, i0, m);
         const double* py = flt_run(ybuf, y, yt, yv, &ya, i0, m);
+        if (rt == RAY_I64) { FLR_W(int64_t, NULL_I64); continue; }
+        if (rt == RAY_I32) { FLR_W(int32_t, NULL_I32); continue; }
         switch (op) {
             case VO_ADD: FLT_OP(x + y); break;
             case VO_SUB: FLT_OP(x - y == 0.0 ? 0.0 : x - y); break;   /* ray_sub_fn's -0.0 normalization */
@@ -523,7 +576,8 @@ static ray_t* arith_binary(ray_t* (*f)(ray_t*, ray_t*), vop_t op, ray_t* x, ray_
     int8_t rt = float_rt(op, xt, yt);
     if (rt) return float_binary(op, rt, x, y, xt, yt, xv, yv, n);
     if (op >= VO_DIV) return NULL;
-    if (op <= VO_MUL && (RAY_IS_TEMPORAL(xt) || RAY_IS_TEMPORAL(yt))) rt = temporal_rt(f, xt, yt);
+    int64_t sx = 0, sy = 0;
+    if (op <= VO_MUL && (RAY_IS_TEMPORAL(xt) || RAY_IS_TEMPORAL(yt))) rt = temporal_rt(f, op, xt, yt, &sx, &sy);
     else if (counts_tag(op, xt) && counts_tag(op, yt)) rt = arith_rt(op, xt, yt);
     if (!rt) return NULL;
 
@@ -537,7 +591,8 @@ static ray_t* arith_binary(ray_t* (*f)(ray_t*, ray_t*), vop_t op, ray_t* x, ray_
         int64_t m = n - i0 < LANE_RUN ? n - i0 : LANE_RUN;
         band_t xb = {int_run(xbuf, x, xt, xv, &xa, i0, m), xv, NULL, {0}};
         band_t yb = {int_run(ybuf, y, yt, yv, &ya, i0, m), yv, NULL, {0}};
-        any |= arith_into((char*)ray_data(out) + i0 * w, w, op, xb, yb, m);
+        void* o = (char*)ray_data(out) + i0 * w;
+        any |= sx ? ns_into(o, rt, sx, sy, xb, yb, m) : arith_into(o, w, op, xb, yb, m);
     }
     mark_nulls(out, any);
     return out;

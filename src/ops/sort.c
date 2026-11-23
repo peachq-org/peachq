@@ -927,6 +927,144 @@ int64_t* msd_radix_sort_run(ray_pool_t* pool,
     return idx_tmp;
 }
 
+/* ============================================================================
+ * Serial packed grade
+ *
+ * One worker gains nothing from per-task histograms, and moving a key and its
+ * row as two arrays doubles every pass.  Here each row is ONE word: its key's
+ * rank (the distance from the least key) above its row number, so equal keys
+ * stay in row order.  When the rank does not fit beside the row number, the
+ * word keeps its top bits, the passes sort enough of that prefix to leave short
+ * runs, and each run is finished on its full keys.
+ * ============================================================================ */
+
+/* One stable pass on the 8-bit digit at `shift`.  Bucket heads that share a cache set evict each other on every
+ * write (a shuffled `til n` fills each bucket to the same power of two), so those passes go write-combined. */
+static void packed_pass(const uint64_t* src, uint64_t* dst, int64_t n,
+                        uint8_t shift, uint64_t keep) {
+    int64_t off[256] = {0};
+    for (int64_t i = 0; i < n; i++) off[(src[i] >> shift) & 0xFF]++;
+    uint8_t heads[64] = {0};
+    bool clash = false;
+    int64_t at = 0;
+    for (int b = 0; b < 256; b++) {
+        int64_t c = off[b];
+        off[b] = at;
+        at += c;
+        if (c && ++heads[(off[b] >> 3) & 63] > 12) clash = true;
+    }
+    if (clash) {
+        radix_pass_ctx_t ctx = { .keys = (uint64_t*)src, .keys_out = dst, .n = n, .shift = shift,
+                                 .n_tasks = 1, .offsets = off };
+        packed_scatter_fn(&ctx, 0, 0, 1);
+        if (~keep) for (int64_t i = 0; i < n; i++) dst[i] &= keep;
+        return;
+    }
+    for (int64_t i = 0; i < n; i++) {
+        uint64_t v = src[i];
+        dst[off[(v >> shift) & 0xFF]++] = v & keep;
+    }
+}
+
+/* True when one worker sorts n rows: the pool is skipped below its dispatch threshold, or has no second worker. */
+static bool sort_is_serial(int64_t n) {
+    ray_pool_t* pool = n >= SMALL_POOL_THRESHOLD ? ray_pool_get() : NULL;
+    return !pool || ray_pool_total_workers(pool) < 2;
+}
+
+/* idx receives the stable ascending grade of keys[0..n).  False = out of memory, idx undefined. */
+static bool packed_grade(const uint64_t* keys, int64_t* idx, int64_t n) {
+    uint64_t lo = keys[0], hi = keys[0];
+    int64_t falls = 0;
+    for (int64_t i = 1; i < n; i++) {
+        uint64_t k = keys[i];
+        falls += k < keys[i - 1];
+        lo = k < lo ? k : lo;
+        hi = k > hi ? k : hi;
+    }
+    /* Ascending is its own grade; strictly descending has no ties, so it reverses. */
+    if (!falls || falls == n - 1) {
+        for (int64_t i = 0; i < n; i++) idx[i] = falls ? n - 1 - i : i;
+        return true;
+    }
+    uint8_t idx_bits = 0;
+    for (int64_t nn = n; nn; nn >>= 1) idx_bits++;
+    uint8_t room = 64 - idx_bits;
+    /* Each key packs as its rank in [0, top_rank], its distance from the least.  When that is too wide for the
+     * word, the least and the greatest key take the ranks either side of the span the keys between them cover:
+     * a null or an infinity would otherwise spend the word's bits on its distance from the real values. */
+    uint64_t in_lo = lo + 1, top_rank = hi - lo;
+    if (top_rank >> room) {
+        uint64_t in_hi = lo;
+        in_lo = hi;
+        for (int64_t i = 0; i < n; i++) {
+            uint64_t k = keys[i];
+            bool between = k != lo && k != hi;
+            in_lo = between && k < in_lo ? k : in_lo;
+            in_hi = between && k > in_hi ? k : in_hi;
+        }
+        top_rank = in_lo <= in_hi ? in_hi - in_lo + 2 : 1;
+    }
+    uint8_t key_bits = 0;
+    for (uint64_t r = top_rank; r; r >>= 1) key_bits++;
+    uint8_t drop = key_bits > room ? key_bits - room : 0;
+    uint8_t low = 0;
+    if (drop) {
+        uint8_t sorted_bits = (idx_bits + 8 + 7) & ~7;
+        if (sorted_bits > room) sorted_bits = room & ~7;
+        low = key_bits - sorted_bits;
+    }
+    int passes = (key_bits - low + 7) / 8;
+
+    ray_t* tmp_hdr;
+    uint64_t* tmp = (uint64_t*)scratch_alloc(&tmp_hdr, (size_t)n * sizeof(uint64_t));
+    if (!tmp) return false;
+    /* The last pass must land in idx. */
+    uint64_t* src = (passes & 1) ? tmp : (uint64_t*)idx;
+    uint64_t* dst = (passes & 1) ? (uint64_t*)idx : tmp;
+    for (int64_t i = 0; i < n; i++) {
+        uint64_t k = keys[i];
+        uint64_t rank = k == lo ? 0 : k == hi ? top_rank : k - in_lo + 1;
+        src[i] = ((rank >> drop) << idx_bits) | (uint64_t)i;
+    }
+
+    uint64_t idx_mask = ((uint64_t)1 << idx_bits) - 1;
+    for (uint8_t pos = low; pos < key_bits; pos += 8) {
+        bool unpack = !drop && pos + 8 >= key_bits;
+        packed_pass(src, dst, n, (uint8_t)(idx_bits + pos - drop), unpack ? idx_mask : ~(uint64_t)0);
+        uint64_t* t = src; src = dst; dst = t;
+    }
+
+    bool ok = true;
+    if (drop) {
+        uint8_t run_shift = (uint8_t)(idx_bits + low - drop);
+        for (int64_t i = 0, j; ok && i < n; i = j) {
+            uint64_t top = src[i] >> run_shift;
+            for (j = i; j < n && (src[j] >> run_shift) == top; j++)
+                idx[j] = (int64_t)(src[j] & idx_mask);
+            int64_t len = j - i;
+            if (len == 1) continue;
+            int64_t* run = idx + i;
+            uint64_t* run_keys = tmp + i;
+            for (int64_t x = 0; x < len; x++) run_keys[x] = keys[run[x]];
+            if (len <= RADIX_SORT_THRESHOLD) { key_introsort(run_keys, run, len); continue; }
+            /* A long run shares the sorted prefix, so its own grade starts below it. */
+            ray_t *local_hdr, *rows_hdr;
+            int64_t* local = (int64_t*)scratch_alloc(&local_hdr, (size_t)len * sizeof(int64_t));
+            int64_t* rows  = (int64_t*)scratch_alloc(&rows_hdr,  (size_t)len * sizeof(int64_t));
+            ok = local && rows && packed_grade(run_keys, local, len);
+            if (ok) {
+                memcpy(rows, run, (size_t)len * sizeof(int64_t));
+                for (int64_t x = 0; x < len; x++) run[x] = rows[local[x]];
+            }
+            scratch_free(local_hdr);
+            scratch_free(rows_hdr);
+        }
+    }
+    scratch_free(tmp_hdr);
+    return ok;
+}
+
 /* radix_encode_ctx_t defined in exec_internal.h */
 
 void radix_encode_fn(void* arg, uint32_t wid, int64_t start, int64_t end) {
@@ -2274,11 +2412,10 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
     if (n_cols > 16)
         return ray_error("nyi", NULL);
 
-    /* Allocate index array */
-    ray_t* indices_hdr;
-    int64_t* indices = (int64_t*)scratch_alloc(&indices_hdr,
-                            (size_t)nrows * sizeof(int64_t));
-    if (!indices) return ray_error("oom", NULL);
+    /* The grade is built in the vector it is returned in. */
+    ray_t* result = ray_vec_new(RAY_I64, nrows);
+    if (!result || RAY_IS_ERR(result)) return result ? result : ray_error("oom", NULL);
+    int64_t* indices = (int64_t*)ray_data(result);
     bool iota_done = false;
 
     /* --- Radix sort fast path ------------------------------------------------
@@ -2371,8 +2508,9 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
                     /* Null = minimum value.
                      * ASC → nulls first, DESC → nulls last. */
                     bool nf = nulls_first ? nulls_first[0] : !desc;
+                    bool serial = nrows > RADIX_SORT_THRESHOLD && sort_is_serial(nrows);
                     radix_encode_ctx_t enc = {
-                        .keys = keys, .indices = indices,
+                        .keys = keys, .indices = serial ? NULL : indices,
                         .data = ray_data(cols[0]),
                         .col = cols[0],
                         .type = cols[0]->type,
@@ -2385,9 +2523,11 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
                         ray_pool_dispatch(sk_pool, radix_encode_fn, &enc, nrows);
                     else
                         radix_encode_fn(&enc, 0, 0, nrows);
-                    iota_done = true;
+                    iota_done = !serial;
 
-                    if (nrows <= RADIX_SORT_THRESHOLD) {
+                    if (serial) {
+                        radix_done = packed_grade(keys, indices, nrows);
+                    } else if (nrows <= RADIX_SORT_THRESHOLD) {
                         /* Introsort on encoded keys - faster than multi-pass
                          * radix for small arrays (avoids scatter overhead). */
                         key_introsort(keys, indices, nrows);
@@ -2878,7 +3018,7 @@ static ray_t* sort_indices_ex(ray_t** cols, uint8_t* descs, uint8_t* nulls_first
             if (!tmp) {
                 for (uint8_t k = 0; k < n_cols; k++)
                     scratch_free(enum_rank_hdrs[k]);
-                scratch_free(indices_hdr);
+                ray_release(result);
                 return ray_error("oom", NULL);
             }
 
@@ -2930,28 +3070,13 @@ str_msd_done:;
         if (keys_hdr_out) *keys_hdr_out = NULL;
     }
 
-    /* Build result I64 vector containing sorted indices */
-    ray_t* result = ray_vec_new(RAY_I64, nrows);
-    if (!result || RAY_IS_ERR(result)) {
-        if (sorted_keys_out && *sorted_keys_out && keys_hdr_out)
-            scratch_free(*keys_hdr_out);
-        for (uint8_t k = 0; k < n_cols; k++)
-            scratch_free(enum_rank_hdrs[k]);
-        scratch_free(radix_itmp_hdr);
-        scratch_free(indices_hdr);
-        return result ? result : ray_error("oom", NULL);
-    }
+    if (sorted_idx != indices)
+        memcpy(indices, sorted_idx, (size_t)nrows * sizeof(int64_t));
     result->len = nrows;
 
-    /* Copy final sorted indices into the result vector.
-     * sorted_idx may point to indices or itmp - either way, copy out. */
-    memcpy(ray_data(result), sorted_idx, (size_t)nrows * sizeof(int64_t));
-
-    /* Free all scratch allocations */
     for (uint8_t k = 0; k < n_cols; k++)
         scratch_free(enum_rank_hdrs[k]);
     scratch_free(radix_itmp_hdr);
-    scratch_free(indices_hdr);
     return result;
 }
 
@@ -3363,6 +3488,103 @@ ray_t* ray_sort(ray_t** cols, uint8_t* descs, uint8_t* nulls_first,
     ray_t* result = gather_by_idx(cols[0], (int64_t*)ray_data(idx), nrows);
     ray_release(idx);
     return result;
+}
+
+/* x sorted by VALUE, with no grade and no gather: equal integers cannot be told apart, so there is no row order
+ * to keep (a float has one: -0.0 beside 0.0, and NaN payloads).  Nulls, the lane's minimum, stand aside so they
+ * do not widen the range; a narrow range is counted, a wider one takes the packed passes on the values alone
+ * when one worker runs them.  An ascending x already in order comes back as itself.  NULL = no value sort for
+ * x, and the caller grades it. */
+ray_t* ray_sort_values(ray_t* x, bool desc) {
+    int8_t t = x->type;
+    int64_t n = x->len;
+    uint8_t esz = (t == RAY_I64 || RAY_IS_TEMPORAL64(t)) ? 8
+                : (t == RAY_I32 || RAY_IS_TEMPORAL32(t)) ? 4
+                : t == RAY_I16 ? 2 : 0;
+    if (!esz || n <= RADIX_SORT_THRESHOLD) return NULL;
+
+    ray_t *a_hdr, *b_hdr = NULL, *counts_hdr = NULL;
+    uint64_t* a = (uint64_t*)scratch_alloc(&a_hdr, (size_t)n * sizeof(uint64_t));
+    if (!a) return NULL;
+    int64_t* v = (int64_t*)a;
+    const void* d = ray_data(x);
+    switch (esz) {
+    case 8:  memcpy(v, d, (size_t)n * sizeof(int64_t)); break;
+    case 4:  for (int64_t i = 0; i < n; i++) v[i] = ((const int32_t*)d)[i]; break;
+    default: for (int64_t i = 0; i < n; i++) v[i] = ((const int16_t*)d)[i]; break;
+    }
+    int64_t null = esz == 8 ? NULL_I64 : esz == 4 ? NULL_I32 : NULL_I16;
+    int64_t lo = INT64_MAX, hi = INT64_MIN, nulls = 0, falls = 0;
+    for (int64_t i = 0; i < n; i++) {
+        nulls += v[i] == null;
+        if (v[i] < lo && v[i] != null) lo = v[i];
+        if (v[i] > hi) hi = v[i];
+    }
+    for (int64_t i = 1; i < n; i++) falls += v[i] < v[i - 1];
+    int64_t m = n - nulls;
+    uint64_t range = m ? (uint64_t)hi - (uint64_t)lo : 0;
+    ray_t* out = NULL;
+    if (!falls && !desc) {
+        ray_retain(x);
+        out = x;
+        goto done;
+    }
+
+    /* Words ascend in output order: the distance from lo ascending, from hi descending. */
+    int64_t at = 0;
+    uint64_t* sorted = a;
+    if (range < 65536) {
+        size_t counts_sz = (size_t)(range + 1) * sizeof(int64_t);
+        int64_t* counts = (int64_t*)scratch_alloc(&counts_hdr, counts_sz);
+        if (!counts) goto done;
+        memset(counts, 0, counts_sz);
+        for (int64_t i = 0; i < n; i++)
+            if (v[i] != null) counts[desc ? (uint64_t)hi - (uint64_t)v[i] : (uint64_t)v[i] - (uint64_t)lo]++;
+        for (uint64_t w = 0; w <= range; w++)
+            for (int64_t c = counts[w]; c; c--) a[at++] = w;
+    } else {
+        /* With workers the pooled grade and a gather are faster than these passes on one. */
+        if (!sort_is_serial(n)) goto done;
+        uint64_t* b = (uint64_t*)scratch_alloc(&b_hdr, (size_t)m * sizeof(uint64_t));
+        if (!b) goto done;
+        for (int64_t i = 0; i < n; i++)
+            if (v[i] != null) a[at++] = desc ? (uint64_t)hi - (uint64_t)v[i] : (uint64_t)v[i] - (uint64_t)lo;
+        for (uint8_t pos = 0; pos < 64 && range >> pos; pos += 8) {
+            packed_pass(sorted, sorted == a ? b : a, m, pos, ~(uint64_t)0);
+            sorted = sorted == a ? b : a;
+        }
+    }
+
+    out = ray_vec_new(t, n);
+    if (!out || RAY_IS_ERR(out)) goto done;
+    out->len = n;
+    /* Nulls sort lowest: ahead of the values ascending, behind them descending. */
+    int64_t first = desc ? 0 : nulls;
+    void* o = ray_data(out);
+    uint64_t base = desc ? (uint64_t)hi : (uint64_t)lo;
+    switch (esz) {
+    case 8:
+        for (int64_t i = 0; i < m; i++) ((int64_t*)o)[first + i] = (int64_t)(desc ? base - sorted[i] : base + sorted[i]);
+        for (int64_t i = 0; i < nulls; i++) ((int64_t*)o)[(desc ? m : 0) + i] = NULL_I64;
+        break;
+    case 4:
+        for (int64_t i = 0; i < m; i++) ((int32_t*)o)[first + i] = (int32_t)(desc ? base - sorted[i] : base + sorted[i]);
+        for (int64_t i = 0; i < nulls; i++) ((int32_t*)o)[(desc ? m : 0) + i] = NULL_I32;
+        break;
+    default:
+        for (int64_t i = 0; i < m; i++) ((int16_t*)o)[first + i] = (int16_t)(desc ? base - sorted[i] : base + sorted[i]);
+        for (int64_t i = 0; i < nulls; i++) ((int16_t*)o)[(desc ? m : 0) + i] = NULL_I16;
+        break;
+    }
+    /* The flag follows the source's, as a gather's does. */
+    bool flagged = (x->attrs & RAY_ATTR_HAS_NULLS) ||
+                   ((x->attrs & RAY_ATTR_SLICE) && x->slice_parent && (x->slice_parent->attrs & RAY_ATTR_HAS_NULLS));
+    if (nulls && flagged) out->attrs |= RAY_ATTR_HAS_NULLS;
+done:
+    scratch_free(a_hdr);
+    scratch_free(b_hdr);
+    scratch_free(counts_hdr);
+    return out;
 }
 
 ray_t* exec_sort(ray_graph_t* g, ray_op_t* op, ray_t* tbl, int64_t limit) {

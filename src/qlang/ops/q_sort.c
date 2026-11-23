@@ -4,7 +4,8 @@
  *
  * Split from q_list.c (2026-07-27) — pure function moves, no behaviour change.
  * asc/desc/rank/xrank/xasc/xdesc are q.q derivations over these (QR_QSRC), not
- * C.  See q_registry.h for the registry contract. */
+ * C; asc and desc ask `.Q.c.asc`/`.Q.c.desc` here for a value sort first.  See
+ * q_registry.h for the registry contract. */
 #define _POSIX_C_SOURCE 200809L
 #include "qlang/q_count.h"
 #include "qlang/q_registry_internal.h" /* the split's shared surface — brings qlang/q_registry.h + qlang/q_ops.h */
@@ -351,6 +352,14 @@ ray_t* q_idesc_wrap(ray_t* x) {
     if (x && x->type == RAY_LIST)  return grade_general(x, 1);
     return ray_idesc_fn(x);
 }
+
+/* `.Q.c.asc` / `.Q.c.desc` — q.q's asc and desc ask for a vector sorted by value; `::` hands it back to the grade. */
+static ray_t* sort_by_value(ray_t* x, bool desc) {
+    ray_t* r = x && ray_is_vec(x) ? ray_sort_values(x, desc) : NULL;
+    return r ? r : RAY_NULL_OBJ;
+}
+ray_t* q_sort_asc_values(ray_t* x)  { return sort_by_value(x, false); }
+ray_t* q_sort_desc_values(ray_t* x) { return sort_by_value(x, true); }
 
 /* q `x xbar y` is `x*y div x`, a timespan bucket counting as its long: xbar.md:115-134 is the div.md grid composed
  * with multiply.md's, and its errors and nulls are theirs.  The family lift hands it atoms; q_vecop hands it a vector

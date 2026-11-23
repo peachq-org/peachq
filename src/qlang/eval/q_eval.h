@@ -70,8 +70,14 @@ ray_t* q_adverb_apply(int adv, ray_t* fv, const struct q_op* frow,
 ray_t* q_eval_apply_value(ray_t* head, ray_t** args, int64_t n);
 /* Amend (`@`/`.` at rank 3-4 on a data head, or projected with d open) with args[0] OWNED: the store writes in place
  * when that ref is the only one, so an accumulator amends without a copy per step.  Consumes args[0] unless it answers
- * NULL (not that shape). */
-ray_t* q_eval_apply_amend_owned(ray_t* fv, ray_t** args, int64_t n);
+ * NULL (not that shape).  local >= 0 names the frame local args[0] was read from at its last use: under Assign its
+ * binding is given up for the store, and put back if the store fails. */
+ray_t* q_eval_apply_amend_owned(ray_t* fv, ray_t** args, int64_t n, int64_t local);
+/* Is node the last statement of the lambda now running?  No local is read after it. */
+int q_eval_apply_last_statement(const ray_t* node);
+/* A lambda given exactly its parameters, args[0] OWNED: its first parameter is bound with no second reference.
+ * Consumes args[0] unless it answers NULL (not that shape). */
+ray_t* q_eval_apply_lambda_owned(ray_t* fv, ray_t** args, int64_t n);
 /* the codec's seam: a projection of head over args (C NULL = hole) built directly, never applied */
 ray_t* q_eval_apply_proj_value(ray_t* head, ray_t** args, int64_t n);
 

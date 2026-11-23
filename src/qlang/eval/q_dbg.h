@@ -11,6 +11,7 @@
 #include <stdio.h>
 
 void q_dbg_frame_push(ray_t* lam);   /* borrowed; lambda application entry */
+ray_t* q_dbg_frame_top(void);        /* borrowed: what the innermost live frame runs; NULL at top level or past the window */
 void q_dbg_frame_pop(void);
 void q_dbg_text_push(ray_t* text, ray_t* pos);   /* a `value`d text is its own frame (ref/dotq.md trp); both borrowed */
 /* The live frames a statement REPORTS: an error's snapshot (the trace, .Q.sbt) starts at this base, 0 = every frame.

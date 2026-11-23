@@ -781,6 +781,44 @@ ray_t* ray_var_pop_fn(ray_t* x)    { return var_stddev_core(x, 0, 0); }
  * planner's expr_refs_row_column sees x and y as column refs, the
  * non-agg full-table eval collapses the call to a scalar, and the
  * non-row-aligned fallback re-runs the call on each group's slice. */
+/* a typed numeric item as the boxed read below sees it: as_f64's double and the atom's own null */
+static inline double corr_item(const void* d, int8_t t, int64_t i, int* nu) {
+    switch (t) {
+    case RAY_F64: { double v = ((const double*)d)[i]; *nu = v != v; return v; }
+    case RAY_F32: { float v = ((const float*)d)[i]; *nu = v != v; return (double)v; }
+    case RAY_I64: { int64_t v = ((const int64_t*)d)[i]; *nu = v == NULL_I64; return (double)v; }
+    case RAY_I32: { int32_t v = ((const int32_t*)d)[i]; *nu = v == NULL_I32; return (double)v; }
+    case RAY_I16: { int16_t v = ((const int16_t*)d)[i]; *nu = v == NULL_I16; return (double)v; }
+    case RAY_CHARV: { uint8_t v = ((const uint8_t*)d)[i]; *nu = v == 0x20; return (double)v; }
+    default: *nu = 0; return (double)((const uint8_t*)d)[i];
+    }
+}
+
+static ray_t* corr_typed(ray_t* x, ray_t* y, int64_t n) {
+    const void* xd = ray_data(x); const void* yd = ray_data(y);
+    int8_t xt = x->type, yt = y->type;
+    int64_t cnt = 0;
+    double sx = 0.0, sy = 0.0, sxy = 0.0, sxx = 0.0, syy = 0.0;
+    for (int64_t i = 0; i < n; i++) {
+        int xn, yn;
+        double xv = corr_item(xd, xt, i, &xn), yv = corr_item(yd, yt, i, &yn);
+        if (xn || yn) continue;
+        sx  += xv;
+        sy  += yv;
+        sxy += xv * yv;
+        sxx += xv * xv;
+        syy += yv * yv;
+        cnt++;
+    }
+    if (cnt < 2) return make_f64(NAN);
+    double dn = (double)cnt;
+    double num = dn * sxy - sx * sy;
+    double dx  = dn * sxx - sx * sx;
+    double dy  = dn * syy - sy * sy;
+    if (dx <= 0.0 || dy <= 0.0) return make_f64(NAN);
+    return make_f64(num / sqrt(dx * dy));
+}
+
 ray_t* ray_pearson_corr_fn(ray_t* x, ray_t* y) {
     if (!x || RAY_IS_ERR(x) || !y || RAY_IS_ERR(y))
         return ray_error("type", "pearson_corr: both arguments must be valid (non-error) values");
@@ -790,10 +828,10 @@ ray_t* ray_pearson_corr_fn(ray_t* x, ray_t* y) {
         return ray_error("length", "pearson_corr: vectors must have equal length, got %lld and %lld", (long long)ray_len(x), (long long)ray_len(y));
 
     int64_t n = ray_len(x);
-    /* Boxed read covers every numeric/temporal type at the cost of an
-     * atom alloc per row.  First-pass simplicity matters more than
-     * peak throughput; type-specialised loops are a perf follow-up.
-     * We bail with type error on the first non-numeric cell. */
+    if (x->type != RAY_LIST && y->type != RAY_LIST && numeric_tag(x->type) && numeric_tag(y->type))
+        return corr_typed(x, y, n);
+    /* The boxed read: general lists and non-numeric vectors, failing 'type
+     * on the first non-null pair holding a non-numeric cell. */
     int64_t cnt = 0;
     double sx = 0.0, sy = 0.0, sxy = 0.0, sxx = 0.0, syy = 0.0;
     for (int64_t i = 0; i < n; i++) {
@@ -859,6 +897,8 @@ static inline int agg_key_eq_at(ray_t* col, const void* data, int64_t a, int64_t
 }
 
 int agg_group_keys(ray_t** key_cols, uint8_t n_keys, int64_t nrows, agg_groups_t* out) {
+    int direct = agg_group_keys_direct(key_cols, n_keys, nrows, out);
+    if (direct) return direct < 0 ? -1 : 0;
     const void* data[16];
     for (uint8_t k = 0; k < n_keys; k++) data[k] = ray_data(key_cols[k]);
 

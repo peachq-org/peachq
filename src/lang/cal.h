@@ -26,6 +26,7 @@
 
 #include <math.h>
 #include <stdint.h>
+#include <string.h>
 
 /* ===== Calendar and temporal-split primitives ===== */
 
@@ -114,14 +115,21 @@ static inline void datetime_to_day_ns(double val, int64_t* day, int64_t* tod_ns)
         return;
     }
     int64_t d = (int64_t)floor(val);
-    __int128 tod = (__int128)round(val * (double)NS_PER_DAY) - (__int128)d * NS_PER_DAY;
-    double ulp_ns = (nextafter(fabs(val), INFINITY) - fabs(val)) * (double)NS_PER_DAY;
-    __int128 ms = (tod < 0 ? tod - 500000 : tod + 500000) / 1000000 * 1000000;
+    double ns = round(val * (double)NS_PER_DAY), a = fabs(val), next;
+    /* the rounded ns stays within a day or two of d's, so only the subtraction needs 128 bits, and only past
+     * the i64 range; next is nextafter(a, INFINITY), a being finite and non-negative */
+    int64_t tod = a < 1e5 ? (int64_t)ns - d * NS_PER_DAY : (int64_t)((__int128)ns - (__int128)d * NS_PER_DAY);
+    uint64_t bits;
+    memcpy(&bits, &a, sizeof bits);
+    bits++;
+    memcpy(&next, &bits, sizeof next);
+    double ulp_ns = (next - a) * (double)NS_PER_DAY;
+    int64_t ms = (tod < 0 ? tod - 500000 : tod + 500000) / 1000000 * 1000000;
     if ((double)(tod > ms ? tod - ms : ms - tod) <= ulp_ns) tod = ms;
     if (tod < 0) { d -= 1; tod += NS_PER_DAY; }                 /* rounded back a day */
     else if (tod >= NS_PER_DAY) { d += 1; tod -= NS_PER_DAY; }  /* rounded on a day */
     *day = d;
-    *tod_ns = (int64_t)tod;
+    *tod_ns = tod;
 }
 
 /* A timestamp's datetime: the f64 day count, unrounded. */

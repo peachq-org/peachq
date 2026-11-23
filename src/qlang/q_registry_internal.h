@@ -48,6 +48,7 @@ ray_t* q_avg_wrap(ray_t* x);
  * atoms or the typed vector they collapse to; NULL where f has no run kernel for x, and the caller applies f run by
  * run */
 ray_t* q_agg_runs(ray_t* f, ray_t* x, ray_t* lens);
+ray_t* q_agg_mid(ray_t* x);                                   /* used by: builtins (.Q.c.mid, q.q's med) */
 ray_t* q_all_wrap(ray_t* x);
 ray_t* q_any_wrap(ray_t* x);
 
@@ -211,6 +212,8 @@ ray_t* q_attr_set_dispatch(ray_t* n, ray_t* vec);               /* used by: take
 bool   q_attr_set_admits(ray_t* x, ray_t* y);                   /* `#`'s classifier: is x#y the set-attribute form? */
 ray_t* q_attr_stamp_sorted(ray_t* x);                         /* used by: builtins (.Q.c.sorted) */
 ray_t* q_attr_stamp_parted(ray_t* x);                         /* used by: builtins (.Q.c.parted) */
+ray_t* q_sort_asc_values(ray_t* x);                           /* used by: builtins (.Q.c.asc) */
+ray_t* q_sort_desc_values(ray_t* x);                          /* used by: builtins (.Q.c.desc) */
 ray_t* q_attr_append_keep(char lx, int64_t nx, ray_t* idx, ray_t* r); /* used by: join, table, index; x's letter + length +
                                                                  OWNED detached block (or NULL); CONSUMES idx and r */
 ray_t* q_attr_index_clone(ray_t* x);                          /* used by: join, table — the copy path's owned block for the law */

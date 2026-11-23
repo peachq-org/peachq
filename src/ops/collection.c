@@ -1069,6 +1069,38 @@ ray_t* ray_distinct_fn(ray_t* x) {
 
 static int attr_contains(ray_t* vec, ray_t* val);
 
+/* sym val in sym vec over one domain: an id IS its symbol, so a bitmap of vec's ids answers each cell with one load
+ * where the hashset hashes and compares.  0 declines: two domains, or a domain too wide for the sizes. */
+static int sym_in_dense(ray_t* val, ray_t* vec, bool* out) {
+    struct ray_sym_domain_s* dom = ray_sym_vec_domain(vec);
+    if (ray_sym_vec_domain(val) != dom) return 0;
+    int64_t nd = ray_sym_domain_count(dom), n = val->len;
+    if (nd <= 0 || nd > 64 * (n + vec->len)) return 0;
+    ray_t* hdr = NULL;
+    uint64_t* bits = (uint64_t*)scratch_calloc(&hdr, (size_t)((nd + 63) / 64) * 8);
+    if (!bits) return 0;
+    const void* yd = ray_data(vec);
+    for (int64_t j = 0; j < vec->len; j++) {
+        uint64_t id = (uint64_t)ray_read_sym(yd, j, RAY_SYM, vec->attrs);
+        if (id < (uint64_t)nd) bits[id >> 6] |= 1ull << (id & 63);
+    }
+#define SYM_IN_PROBE(T) do {                                                         \
+        const T* xd = (const T*)ray_data(val);                                       \
+        for (int64_t i = 0; i < n; i++) {                                            \
+            uint64_t id = (uint64_t)xd[i];                                           \
+            out[i] = id < (uint64_t)nd && (bits[id >> 6] >> (id & 63) & 1);         \
+        } } while (0)
+    switch (val->attrs & RAY_SYM_W_MASK) {
+        case RAY_SYM_W8:  SYM_IN_PROBE(uint8_t);  break;
+        case RAY_SYM_W16: SYM_IN_PROBE(uint16_t); break;
+        case RAY_SYM_W32: SYM_IN_PROBE(uint32_t); break;
+        default:          SYM_IN_PROBE(int64_t);  break;
+    }
+#undef SYM_IN_PROBE
+    scratch_free(hdr);
+    return 1;
+}
+
 /* (in val vec) — check membership */
 ray_t* ray_in_fn(ray_t* val, ray_t* vec) {
     if (ray_is_lazy(val)) val = ray_lazy_materialize(val);
@@ -1145,6 +1177,7 @@ ray_t* ray_in_fn(ray_t* val, ray_t* vec) {
                 }
                 if (i == vlen) return result;
             }
+            if (val->type == RAY_SYM && vec->type == RAY_SYM && sym_in_dense(val, vec, out)) return result;
             hashset_t hs;
             if (!hashset_init(&hs, vec, vec->len)) {
                 ray_release(result);
@@ -2174,6 +2207,14 @@ ray_t* ray_find_fn(ray_t* vec, ray_t* val) {
                 if (row < 0) { out[j] = NULL_I64; any_null = true; }
                 else out[j] = row;
             }
+        } else if (val->type == vec->type && (vec->type == RAY_BOOL || ray_is_bytelike(vec->type)) &&
+                   !((vec->attrs | val->attrs) & RAY_ATTR_HAS_NULLS)) {
+            int64_t first[256];
+            for (int b = 0; b < 256; b++) first[b] = NULL_I64;
+            const uint8_t* xd = (const uint8_t*)ray_data(vec);
+            const uint8_t* yd = (const uint8_t*)ray_data(val);
+            for (int64_t j = ray_len(vec) - 1; j >= 0; j--) first[xd[j]] = j;
+            for (int64_t i = 0; i < vlen; i++) any_null |= (out[i] = first[yd[i]]) == NULL_I64;
         } else if (ray_is_vec(val) && ray_is_vec(vec)) {
             /* Hash fast path: both sides typed vecs — O(n+m), mirrors ray_in_fn. */
             hashset_t hs;
@@ -2325,7 +2366,7 @@ static int col_has_enum(ray_t* c) {
 static int rows_typed(ray_t* const* dom, ray_t* const* probe, int64_t k) {
     for (int64_t t = 0; t < k; t++) {
         if (dom[t]->type == RAY_LIST && probe[t]->type == RAY_LIST) {
-            if (col_has_enum(dom[t]) || col_has_enum(probe[t])) return 0;
+            if (col_has_enum(dom[t]) || (probe[t] != dom[t] && col_has_enum(probe[t]))) return 0;
         } else if (!ray_is_vec(dom[t]) || !ray_is_vec(probe[t])) return 0;
     }
     return 1;
@@ -2335,6 +2376,38 @@ static int rows_typed(ray_t* const* dom, ray_t* const* probe, int64_t k) {
 static int rows_hashable(int* typed, ray_t* const* dom, ray_t* const* probe, int64_t k) {
     if (*typed < 0) *typed = rows_typed(dom, probe, k);
     return *typed;
+}
+
+/* A boxed column's answers by item OBJECT: one object is one content, so a list whose items are a few shared objects
+ * (a dictionary's range indexed by a long vector) hashes each object once. */
+#define ROW_MEMO 256
+typedef struct { ray_t* p; int64_t r; } row_memo_t;
+static inline row_memo_t* memo_at(row_memo_t* memo, ray_t* p) {
+    return &memo[((uintptr_t)p >> 4) * UINT64_C(0x9E3779B97F4A7C15) >> 56];
+}
+
+/* The hashed Find of one boxed column d, probe rows j..m of p into out; true when one missed */
+static bool find_boxed_hashed(ray_t* d, ray_t* p, int64_t* slots, uint64_t mask, int64_t j, int64_t m, int64_t* out,
+                              ray_cell_eq_t eq) {
+    ray_t* const* de = (ray_t* const*)ray_data(d);
+    ray_t* const* pe = (ray_t* const*)ray_data(p);
+    row_memo_t memo[ROW_MEMO] = {{0}};
+    bool any_null = false;
+    for (int64_t i = 0, n = ray_len(d); i < n; i++) {   /* the first of equal rows keeps its slot: Find's answer */
+        row_memo_t* c = de[i] ? memo_at(memo, de[i]) : NULL;
+        if (c && c->p == de[i]) continue;
+        uint64_t s = class_slot(slots, mask, &d, 1, &d, i, eq);
+        if (slots[s] == HS_EMPTY) slots[s] = i;
+        if (c) *c = (row_memo_t){ de[i], slots[s] };
+    }
+    for (; j < m; j++) {
+        ray_t* e = pe[row_idx(p, j)];
+        row_memo_t* c = e ? memo_at(memo, e) : NULL;
+        int64_t r = c && c->p == e ? c->r : slots[class_slot(slots, mask, &d, 1, &p, j, eq)];
+        if (c) *c = (row_memo_t){ e, r };
+        if (r == HS_EMPTY) { out[j] = NULL_I64; any_null = true; } else out[j] = r;
+    }
+    return any_null;
 }
 
 /* A few rows scan and many hash, at FIND_SCAN_NEEDLES as for a vector needle (a row's scan costs a needle's, the
@@ -2361,13 +2434,17 @@ ray_t* ray_find_rows_fn(ray_t* const* dom, ray_t* const* probe, int64_t k, int64
         ray_t* block = row_slots(n, &mask);
         if (RAY_IS_ERR(block)) { ray_release(result); return block; }
         int64_t* slots = (int64_t*)ray_data(block);
-        for (int64_t i = 0; i < n; i++) {                 /* the first of equal rows keeps its slot: Find's answer */
-            uint64_t s = class_slot(slots, mask, dom, k, dom, i, eq);
-            if (slots[s] == HS_EMPTY) slots[s] = i;
-        }
-        for (; j < m; j++) {
-            int64_t r = slots[class_slot(slots, mask, dom, k, probe, j, eq)];
-            if (r == HS_EMPTY) { out[j] = NULL_I64; any_null = true; } else out[j] = r;
+        if (k == 1 && dom[0]->type == RAY_LIST && probe[0]->type == RAY_LIST)
+            any_null |= find_boxed_hashed(dom[0], probe[0], slots, mask, j, m, out, eq);
+        else {
+            for (int64_t i = 0; i < n; i++) {             /* the first of equal rows keeps its slot: Find's answer */
+                uint64_t s = class_slot(slots, mask, dom, k, dom, i, eq);
+                if (slots[s] == HS_EMPTY) slots[s] = i;
+            }
+            for (; j < m; j++) {
+                int64_t r = slots[class_slot(slots, mask, dom, k, probe, j, eq)];
+                if (r == HS_EMPTY) { out[j] = NULL_I64; any_null = true; } else out[j] = r;
+            }
         }
         ray_release(block);
     }

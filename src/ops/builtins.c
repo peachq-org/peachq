@@ -2538,6 +2538,35 @@ ray_t* ray_group_fn(ray_t* x) {
         return ray_dict_new(keys_vec, vals_lst);
     }
 
+    /* An integer-backed or SYM vector of small value range: the group core numbers the rows by direct index and
+     * one count pass sizes each index list. */
+    agg_groups_t dg;
+    ray_t* key = x;                 /* x's own address stays private: the hash loop below keeps it in a register */
+    int direct = agg_group_keys_direct(&key, 1, n, &dg);
+    if (direct < 0) goto gfail;
+    if (direct) {
+        const uint32_t* gids = dg.gids;
+        while (max_groups < dg.ngroups)
+            if (!group_grow(&val_block, &ivblock, &gvals, &idx_vecs, 0, &max_groups)) { agg_groups_free(&dg); goto gfail; }
+        memset(gvals, 0, (size_t)dg.ngroups * sizeof(int64_t));
+        for (int64_t i = 0; i < n; i++) gvals[gids[i]]++;
+        for (; ngroups < dg.ngroups; ngroups++) {
+            idx_vecs[ngroups] = ray_vec_new(RAY_I64, gvals[ngroups]);
+            if (RAY_IS_ERR(idx_vecs[ngroups])) { agg_groups_free(&dg); goto gfail; }
+            idx_vecs[ngroups]->len = gvals[ngroups];
+            gvals[ngroups] = 0;
+        }
+        /* gvals is each list's write offset here: a length bumped in the list's own header stalls the fill */
+        for (int64_t i = 0; i < n; i++) {
+            uint32_t g = gids[i];
+            ((int64_t*)ray_data(idx_vecs[g]))[gvals[g]++] = i;
+        }
+        const void* xd = ray_data(x);
+        for (int64_t g = 0; g < ngroups; g++) gvals[g] = agg_read_key_i64(x, xd, dg.first_row[g]);
+        agg_groups_free(&dg);
+        goto build_keys;
+    }
+
     /* Scalar fast path: every primitive-typed vector packs its group
      * key into an int64 (sym id, raw integer, date/time/timestamp, bool).
      * Use an open-address hash set so high-cardinality group-by stays
@@ -2669,6 +2698,7 @@ ray_t* ray_group_fn(ray_t* x) {
     }
     group_ht_free(&ht);
 
+build_keys:;
     /* Build dict: keys vec mirrors x's element type; vals LIST of idx vecs. */
     int8_t key_type = x->type;
     ray_t* keys_vec;
