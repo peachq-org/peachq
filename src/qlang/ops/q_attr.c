@@ -232,9 +232,9 @@ void q_attr_store_keep(ray_t* r, const int64_t* pos, int64_t m) {
  * kdb's null policy, p contiguous, g nothing), build the index on the block,
  * set the identity marker.  A SYMBOL vector is already id-coded, so its index
  * is the direct-addressed CODES kind (its build is the verify; the domain
- * pointer stays in place beside it).  Every other numeric vector — the float
- * family and an enum's positions included — takes the hash, probed by the
- * builder's canonical word.
+ * pointer stays in place beside it). Sparse resident integer partitions
+ * can use a run directory. The remaining numeric vectors and enum
+ * positions use the hash with the builder's canonical key.
  * `trusted` is the disk door's: the layout is the writer's word and the scan is skipped (a symbol vector's build
  * still refuses what it cannot hold).  The engine attach contract: *vp is
  * the caller's owned live vector, cow'd when shared; NULL on success, else an
@@ -250,10 +250,14 @@ static ray_t* attr_build(ray_t** vp, char letter, bool trusted) {
         return NULL;
     }
     if ((!ray_is_vec(v) && v->type != RAY_ENUM) || ray_attr_numeric_class(v->type) < 0) return q_err(QE_TYPE);
-    bool ok = trusted || (letter == 'u' ? (ray_attr_verify_distinct(v) && attr_no_dup_nulls(v))
+    if (letter == 'p' && !trusted) {
+        ray_t* part = ray_index_try_part_runs(vp);
+        if (part) return RAY_IS_ERR(part) ? part : NULL;
+    }
+    bool ok = trusted || (letter == 'u' ? attr_no_dup_nulls(v)
                         : letter == 'p' ? ray_attr_verify_contiguous(v) : true);
     if (!ok) return q_err(QE_DOMAIN);
-    ray_t* e = letter == 'u' ? ray_index_attach_hash_unique(vp) : ray_index_attach_hash(vp);
+    ray_t* e = letter == 'u' ? ray_index_attach_hash_unique(vp, !trusted) : ray_index_attach_hash(vp);
     if (RAY_IS_ERR(e)) return e;
     if (letter != 'g') ray_index_payload((*vp)->index)->markers |= mark;   /* the attach's own block: no clone */
     return NULL;
@@ -285,17 +289,10 @@ ray_t* q_attr_parted_pending(ray_t* v) {
     return ray_attr_mark_attach(v, RAY_MARK_PARTED);
 }
 
-typedef struct { int64_t key, start, len; } attr_part;
-
-static int attr_part_cmp(const void* a, const void* b) {
-    int64_t x = ((const attr_part*)a)->key, y = ((const attr_part*)b)->key;
-    return (x > y) - (x < y);
-}
-
 /* THE trusted sibling of attr_build: v's pending block (q_attr_parted_pending) filled from kx's own index — the n
  * distinct values (width w, first-occurrence order) and the n+1 group starts the file carries after the data.
- * A sort of the groups, and the column is never read; a 32-bit position widens as the reader widens the column's.  Checked on the bytes the build reads anyway: the starts begin at 0,
- * ascend strictly and end on the row count, and no value is listed twice.  A trailer that fails drops the letter
+ * The column is never read. A 32-bit position widens as the reader widens the column. The starts begin at 0,
+ * ascend strictly and end on the row count. The directory builder rejects repeated keys. A trailer failure drops the letter
  * and the column scans. */
 void q_attr_parted_adopt(ray_t* v, const uint8_t* vals, int w, int64_t n, const uint8_t* starts) {
     if (!ray_index_has(v)) return;
@@ -304,7 +301,7 @@ void q_attr_parted_adopt(ray_t* v, const uint8_t* vals, int w, int64_t n, const 
     int8_t kt = v->type == RAY_ENUM ? RAY_I64 : v->type;
     int kw = (int)ray_type_sizes[(uint8_t)kt];
     int64_t rows = q_count(v), at = 0;
-    attr_part* parts = (attr_part*)malloc((size_t)(n > 0 ? n : 1) * sizeof *parts);
+    ray_part_run_t* parts = (ray_part_run_t*)malloc((size_t)(n > 0 ? n : 1) * sizeof *parts);
     bool ok = parts && n >= 0 && (w == 1 || w == 2 || w == 4 || w == 8) && w <= kw;
     for (int64_t i = 0; ok && i <= n; i++) {
         int64_t s;
@@ -320,28 +317,8 @@ void q_attr_parted_adopt(ray_t* v, const uint8_t* vals, int w, int64_t n, const 
         }
         at = s;
     }
-    ok = ok && at == rows;
-    if (ok) qsort(parts, (size_t)n, sizeof *parts, attr_part_cmp);
-    for (int64_t i = 1; ok && i < n; i++) ok = parts[i].key != parts[i - 1].key;
-    ray_t* keys = ok ? ray_vec_new(kt, n > 0 ? n : 1) : NULL;
-    ray_t* st   = ok ? ray_vec_new(RAY_I64, n > 0 ? n : 1) : NULL;
-    ray_t* ln   = ok ? ray_vec_new(RAY_I64, n > 0 ? n : 1) : NULL;
-    ok = keys && st && ln && !RAY_IS_ERR(keys) && !RAY_IS_ERR(st) && !RAY_IS_ERR(ln);
-    if (ok) {
-        keys->len = st->len = ln->len = n;
-        for (int64_t i = 0; i < n; i++) {
-            memcpy((uint8_t*)ray_data(keys) + (size_t)i * (size_t)kw, &parts[i].key, (size_t)kw);
-            ((int64_t*)ray_data(st))[i] = parts[i].start;
-            ((int64_t*)ray_data(ln))[i] = parts[i].len;
-        }
-        ok = ray_index_part_fill(v, keys, st, ln);
-    }
-    if (!ok) {
-        if (keys && !RAY_IS_ERR(keys)) ray_release(keys);
-        if (st && !RAY_IS_ERR(st)) ray_release(st);
-        if (ln && !RAY_IS_ERR(ln)) ray_release(ln);
+    if (!ok || at != rows || !ray_index_part_fill(v, parts, n))
         ix->markers &= (uint8_t)~RAY_MARK_PARTED;
-    }
     free(parts);
 }
 

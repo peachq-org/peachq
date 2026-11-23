@@ -637,27 +637,11 @@ static int bin_isnan(ray_t* v, int64_t i) {
     return v->type == RAY_F32 ? isnan(((const float*)ray_data(v))[i]) : isnan(((const double*)ray_data(v))[i]);
 }
 
-/* Symbols order by their strings, never their ids (interning order is not alphabetic). */
-static int64_t bin_sym_bound(ray_t* x, int64_t n, ray_t* y, int64_t j, int upper, int* err) {
-    ray_t* k = ray_is_atom(y) ? ray_sym_str(y->i64) : ray_sym_vec_cell(y, j);
-    int64_t lo = 0, hi = n;
-    while (lo < hi && k) {
-        int64_t mid = lo + (hi - lo) / 2;
-        ray_t* s = ray_sym_vec_cell(x, mid);
-        if (!s) { k = NULL; break; }
-        int c = ray_str_cmp(s, k);
-        if (upper ? c <= 0 : c < 0) lo = mid + 1; else hi = mid;
-    }
-    if (!k) *err = 1;
-    return lo;
-}
-
 /* bin = (first index > y) - 1, binr = first index >= y.  Nulls sort first: a float lane's NaN prefix (nn items) is
  * below every number and equal to a NaN probe, while an int lane's null sentinel is already its lane minimum. */
 static int64_t bin_lane_probe(ray_t* x, int64_t n, int64_t nn, ray_t* y, int64_t j, int right, int* err) {
     int64_t b;
-    if (x->type == RAY_SYM) b = bin_sym_bound(x, n, y, j, !right, err);
-    else if (nn >= 0 && bin_isnan(y, j)) b = right ? 0 : nn;
+    if (nn >= 0 && bin_isnan(y, j)) b = right ? 0 : nn;
     else b = ray_sorted_bound(x, nn > 0 ? nn : 0, n, y, j, !right);
     if (b < 0) *err = 1;
     return right ? b : b - 1;

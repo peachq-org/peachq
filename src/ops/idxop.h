@@ -115,6 +115,7 @@ typedef struct {
     uint8_t  saved_attrs;     /* parent attrs & HAS_NULLS at attach */
     int8_t   parent_type;     /* parent->type (recorded for diagnostics) */
     uint8_t  markers;         /* RAY_MARK_* bits (block-resident attr flags) */
+    bool     part_verified;   /* PART built and verified from resident cells */
     int64_t  built_for_len;   /* parent->len at attach (mismatch -> stale) */
 
     /* Raw 16-byte snapshot of parent->aux union at attach time,
@@ -232,9 +233,12 @@ void ray_idx_stats_init(void);   /* atexit dump when RAY_IDX_STATS set */
  * On failure, *vp is unchanged and a RAY_ERROR is returned. */
 ray_t* ray_index_attach_zone (ray_t** vp);
 ray_t* ray_index_attach_hash (ray_t** vp);
-/* The hash for a vector its caller has VERIFIED distinct (`u#`): no first list — every row is its own key, which
- * the UNIQUE marker says — so the build never probes and an append never pushes. */
-ray_t* ray_index_attach_hash_unique(ray_t** vp);
+/* Unique hash without a first-row list. Verify rejects duplicate non-null
+ * keys during construction. The q caller owns the null policy. */
+ray_t* ray_index_attach_hash_unique(ray_t** vp, bool verify);
+/* Try a verified PART directory for sparse integer runs. NULL declines, an
+ * error fails, and a live result is the owned indexed column in *vp. */
+ray_t* ray_index_try_part_runs(ray_t** vp);
 ray_t* ray_index_attach_sort (ray_t** vp);
 ray_t* ray_index_attach_bloom(ray_t** vp);
 /* Build per-chunk min/max + null bit at chunk_size = 1 << chunk_log2.
@@ -256,10 +260,17 @@ ray_t* ray_index_attach_dict(ray_t** vp);
 ray_t* ray_index_attach_built(ray_t** vp, ray_t* idx);
 
 /* A PARTED marker-only block (kind NONE) is an index not built yet: the first consult (wake: the kind a probe will
- * meet) hands the column to the maker, which fills the block IN PLACE on its own word (no verify, no cow; keys
- * ascending and distinct, all three consumed on true) or clears the marker.  A filled block is trusted, so a lookup
- * whose run the column's cells deny at its edges declines to the scan and is reported by torn, once. */
-bool ray_index_part_fill(ray_t* col, ray_t* keys, ray_t* starts, ray_t* lens);
+ * meet) hands the column to the maker, which fills the block IN PLACE on its own word (no parent verify or COW)
+ * or clears the marker. A run whose edges the column's cells deny declines and reports torn. */
+typedef struct {
+    int64_t key;
+    int64_t start;
+    int64_t len;
+} ray_part_run_t;
+
+/* Install a directory from decoded runs. Geometry is the caller's proof.
+ * May reorder runs by key and rejects duplicates. The caller owns runs. */
+bool ray_index_part_fill(ray_t* col, ray_part_run_t* runs, int64_t nr);
 void ray_index_set_maker(void (*fn)(ray_t* col));
 ray_idx_kind_t ray_index_wake(ray_t* col);
 int ray_index_torn(void);
@@ -415,6 +426,11 @@ bool   ray_index_atom_key(const ray_t* col, const ray_t* atom, int64_t* key);
 ray_t* ray_index_eq_rowsel(ray_t* col, int64_t key);
 int    ray_index_has_key(ray_t* col, int64_t key);
 
+/* Probe a same-type vector through an attached index. The caller owns a
+ * result vector of keys->len rows, I64 for first match (NULL_I64 on miss)
+ * or BOOL for membership. False declines and may leave partial data. */
+bool ray_index_probe_vec(ray_t* col, ray_t* keys, ray_t* result);
+
 /* The key-set fronts for distinct / group (set-attribute.md:128-130).  keys_rows: an owned ref to an I64 vector of
  * the first row of every distinct key, in first-occurrence order — READ-ONLY, a HASH hands out its own first list
  * (a UNIQUE marker answers til n; CODES sorts its heads).  group_rows: an OWNED ascending I64 vector of every row
@@ -503,7 +519,6 @@ ray_t* ray_attr_drop_fn(ray_t* v);              /* (.attr.drop v) -> v cleared *
  * mechanism — no policy. */
 ray_t* ray_attr_stamp_marker(ray_t* v, uint8_t mark); /* borrow v -> owned; stamp marker bit */
 ray_t* ray_attr_mark_attach (ray_t* v, uint8_t mark); /* no cow — mutates v in place (see impl) */
-bool   ray_attr_verify_distinct(const ray_t* v);      /* all rows distinct? */
 bool   ray_attr_verify_contiguous(const ray_t* v);    /* each value one contiguous run? */
 int    ray_attr_numeric_class(int8_t t);              /* 1=numeric (int and float families), -1=non-numeric */
 

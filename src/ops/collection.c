@@ -1101,6 +1101,104 @@ static int sym_in_dense(ray_t* val, ray_t* vec, bool* out) {
     return 1;
 }
 
+/* Comparing short symbol columns by stored id is cheaper than resolving
+ * strings for each midpoint of a lexical search. */
+static bool use_sorted_lookup(ray_t* col) {
+    return ray_attr_is_sorted(col) && (col->type != RAY_SYM || col->len >= 512);
+}
+
+/* A sorted batch is worth probing while the number of searches is small
+ * relative to a full pass. Keep the scalar span's exact eligibility rules. */
+static bool sorted_probe_vec(ray_t* col, ray_t* keys, ray_t* result) {
+    if (!use_sorted_lookup(col) || col->type != keys->type ||
+        keys->len > col->len / 32 || (keys->attrs & RAY_ATTR_HAS_NULLS))
+        return false;
+
+    /* Float append can retain the marker across a tolerant inversion. Keep
+     * large exact Find batches on their existing hash path for these types. */
+    if (result->type == RAY_I64 && keys->len > FIND_SCAN_NEEDLES &&
+        (col->type == RAY_F32 || col->type == RAY_F64 || col->type == RAY_DATETIME))
+        return false;
+
+    int64_t* out = result->type == RAY_I64 ? (int64_t*)ray_data(result) : NULL;
+    bool* members = out ? NULL : (bool*)ray_data(result);
+    bool missing = false;
+    for (int64_t i = 0; i < keys->len; i++) {
+        int alloc = 0;
+        ray_t* key = collection_elem(keys, i, &alloc);
+        if (RAY_IS_ERR(key)) {
+            if (alloc) ray_error_free(key);
+            return false;
+        }
+        int64_t lo, hi;
+        bool ok = ray_sorted_span(col, key, NULL, &lo, &hi);
+        if (alloc) ray_release(key);
+        if (!ok) return false;
+        if (out) {
+            out[i] = hi > lo ? lo : NULL_I64;
+            missing |= hi == lo;
+        } else {
+            members[i] = hi > lo;
+        }
+    }
+    if (missing) result->attrs |= RAY_ATTR_HAS_NULLS;
+    return true;
+}
+
+static bool attr_probe_vec(ray_t* col, ray_t* keys, ray_t* result) {
+    if (!ray_index_has(col) && !use_sorted_lookup(col)) return false;
+    idx_site_t site = result->type == RAY_I64 ? IDX_SITE_FIND : IDX_SITE_IN;
+    ray_idx_consults[site]++;
+    if (!ray_index_probe_vec(col, keys, result) && !sorted_probe_vec(col, keys, result))
+        return false;
+    ray_idx_hits[site]++;
+    return true;
+}
+
+/* The plain-vector strategy is calibrated for same-type, null-free heap
+ * values. Preserve the existing routes for views, attributes and type
+ * promotion. Symbol scans were measured in the runtime domain. */
+static bool plain_probe_pair(ray_t* col, ray_t* keys) {
+    uint8_t special = RAY_ATTR_HAS_NULLS | RAY_ATTR_SLICE | RAY_ATTR_ARENA |
+                      RAY_ATTR_SORTED | RAY_ATTR_HAS_INDEX;
+    if (col->type != keys->type || col->type == RAY_STR || col->len == 0 ||
+        col->mmod || keys->mmod || ((col->attrs | keys->attrs) & special))
+        return false;
+    if (col->type == RAY_SYM &&
+        (ray_sym_vec_domain(col) != ray_sym_runtime_domain() ||
+         ray_sym_vec_domain(keys) != ray_sym_runtime_domain()))
+        return false;
+    return true;
+}
+
+static int64_t find_atom(ray_t* vec, ray_t* val);
+
+/* Fill either Find's position vector or membership's mask from the same
+ * first-occurrence scan. Consumes result, returns it or an owned error. */
+static ray_t* scan_probe_vec(ray_t* col, ray_t* keys, ray_t* result) {
+    int64_t* positions = result->type == RAY_I64 ? ray_data(result) : NULL;
+    bool* members = positions ? NULL : ray_data(result);
+    bool missing = false;
+    for (int64_t i = 0; i < keys->len; i++) {
+        int alloc = 0;
+        ray_t* key = collection_elem(keys, i, &alloc);
+        if (!key || RAY_IS_ERR(key)) {
+            ray_release(result);
+            return key ? key : ray_error("oom", NULL);
+        }
+        int64_t row = find_atom(col, key);
+        if (alloc) ray_release(key);
+        if (positions) {
+            positions[i] = row >= 0 ? row : NULL_I64;
+            missing |= row < 0;
+        } else {
+            members[i] = row >= 0;
+        }
+    }
+    if (missing) result->attrs |= RAY_ATTR_HAS_NULLS;
+    return result;
+}
+
 /* (in val vec) — check membership */
 ray_t* ray_in_fn(ray_t* val, ray_t* vec) {
     if (ray_is_lazy(val)) val = ray_lazy_materialize(val);
@@ -1162,10 +1260,14 @@ ray_t* ray_in_fn(ray_t* val, ray_t* vec) {
             if (RAY_IS_ERR(result)) return result;
             result->len = vlen;
             bool* out = (bool*)ray_data(result);
-            /* an attributed domain answers each needle in O(1) / O(log n) instead of an O(n) hashset build; the
-             * sorted lane is only worth it while m log n stays under n, hence the m*32 guard */
-            if (!(val->attrs & RAY_ATTR_HAS_NULLS) &&
-                (ray_index_has(vec) || (ray_attr_is_sorted(vec) && vlen <= vec->len / 32))) {
+            if (attr_probe_vec(vec, val, result)) return result;
+            /* Membership used to build a hash for every batch. Choose scans
+             * only well inside the measured Find crossover. */
+            int in_scan_limit = vec->len <= 64 ? 4 : 8;
+            if (vlen <= in_scan_limit && plain_probe_pair(vec, val))
+                return scan_probe_vec(vec, val, result);
+            /* Preserve the scalar index's widening rules for mixed probes. */
+            if (val->type != vec->type && !(val->attrs & RAY_ATTR_HAS_NULLS) && ray_index_has(vec)) {
                 int64_t i = 0;
                 for (; i < vlen; i++) {
                     int alloc = 0;
@@ -1244,7 +1346,7 @@ ray_t* ray_in_fn(ray_t* val, ray_t* vec) {
         int64_t len = vec->len;
         bool has_nulls = (vec->attrs & RAY_ATTR_HAS_NULLS) != 0;
         bool val_null = atom_is_oob_null(val);
-        int lane = has_nulls || val_null ? -1 : attr_contains(vec, val);
+        int lane = !val_null && (!has_nulls || ray_attr_is_sorted(vec)) ? attr_contains(vec, val) : -1;
         if (lane >= 0) return make_bool(lane);
         if (has_nulls) {
             for (int64_t i = 0; i < len; i++) {
@@ -2099,6 +2201,21 @@ static int64_t find_scan(ray_t* vec, ray_t* val, int64_t start) {
 #undef FIND_SCAN
 }
 
+/* Symbol ids are not in lexical order, and the two vectors may use
+ * different domains or id widths. Resolve each cell in its own domain. */
+static int64_t sorted_sym_bound(ray_t* col, int64_t lo, int64_t hi, ray_t* key, int64_t j, int upper) {
+    ray_t* k = ray_is_atom(key) ? ray_sym_str(key->i64) : ray_sym_vec_cell(key, j);
+    if (!k) return -1;
+    while (lo < hi) {
+        int64_t mid = lo + (hi - lo) / 2;
+        ray_t* value = ray_sym_vec_cell(col, mid);
+        if (!value) return -1;
+        int c = ray_str_cmp(value, k);
+        if (upper ? c <= 0 : c < 0) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+}
+
 int64_t ray_sorted_bound(ray_t* vec, int64_t lo, int64_t hi, ray_t* key, int64_t j, int upper) {
     const void* a = ray_data(vec);
 #define SORTED_BOUND(T, F) do {                                                          \
@@ -2118,13 +2235,25 @@ int64_t ray_sorted_bound(ray_t* vec, int64_t lo, int64_t hi, ray_t* key, int64_t
     RAY_BYTE_CASES:                     SORTED_BOUND(uint8_t, u8);
     case RAY_F64: RAY_TEMPORALF_CASES:  SORTED_BOUND(double,  f64);
     case RAY_F32:                       SORTED_BOUND(float,   f64);
+    case RAY_SYM: return sorted_sym_bound(vec, lo, hi, key, j, upper);
     default:                            return -1;
     }
 #undef SORTED_BOUND
 }
 
 bool ray_sorted_span(ray_t* vec, ray_t* a, ray_t* b, int64_t* lo, int64_t* hi) {
-    if (!ray_attr_is_sorted(vec) || (vec->attrs & RAY_ATTR_HAS_NULLS)) return false;
+    if (!ray_attr_is_sorted(vec)) return false;
+    /* Integer and temporal integer sentinels already sort below every non-null
+     * key. A pessimistic mapped null flag does not invalidate those bounds. */
+    if (vec->attrs & RAY_ATTR_HAS_NULLS) {
+        switch (vec->type) {
+        case RAY_I16: case RAY_I32: case RAY_I64:
+        RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES:
+            break;
+        default:
+            return false;
+        }
+    }
     if (!a || !ray_is_atom(a) || a->type != -vec->type || atom_is_oob_null(a)) return false;
     if (b && (!ray_is_atom(b) || b->type != -vec->type || atom_is_oob_null(b))) return false;
     *lo = ray_sorted_bound(vec, 0, vec->len, a, 0, 0);
@@ -2142,7 +2271,7 @@ static int attr_contains(ray_t* vec, ray_t* val) {
         int r = ray_index_has_key(vec, key);
         if (r >= 0) { ray_idx_hits[IDX_SITE_IN]++; return r; }
     }
-    if (ray_attr_is_sorted(vec)) {
+    if (use_sorted_lookup(vec)) {
         ray_idx_consults[IDX_SITE_IN]++;
         if (ray_sorted_span(vec, val, NULL, &lo, &hi)) { ray_idx_hits[IDX_SITE_IN]++; return hi > lo; }
     }
@@ -2166,7 +2295,7 @@ static int64_t find_atom(ray_t* vec, ray_t* val) {
             }
         }
     }
-    if (ray_attr_is_sorted(vec)) {
+    if (use_sorted_lookup(vec)) {
         ray_idx_consults[IDX_SITE_FIND]++;
         int64_t lo, hi;
         if (ray_sorted_span(vec, val, NULL, &lo, &hi)) { ray_idx_hits[IDX_SITE_FIND]++; return hi > lo ? lo : -1; }
@@ -2198,24 +2327,27 @@ ray_t* ray_find_fn(ray_t* vec, ray_t* val) {
         int64_t* out = (int64_t*)ray_data(result);
         bool any_null = false;
 
-        if (ray_is_vec(val) && ray_is_vec(vec) && val->type == vec->type && vlen <= FIND_SCAN_NEEDLES) {
-            for (int64_t j = 0; j < vlen; j++) {
-                int alloc = 0;
-                ray_t* e = collection_elem(val, j, &alloc);
-                int64_t row = find_atom(vec, e);
-                if (alloc) ray_release(e);
-                if (row < 0) { out[j] = NULL_I64; any_null = true; }
-                else out[j] = row;
+        if (ray_is_vec(val) && ray_is_vec(vec)) {
+            if (attr_probe_vec(vec, val, result)) return result;
+            if (val->type == vec->type && vlen <= FIND_SCAN_NEEDLES) {
+                /* Hash setup is cheap in small domains. For larger ones,
+                 * the crossover depends heavily on first-hit position. */
+                int scan_limit = vec->len <= 64 ? 16 : vec->len <= 256 ? 32 : FIND_SCAN_NEEDLES;
+                if (vlen <= scan_limit || vec->type == RAY_BOOL || ray_is_bytelike(vec->type) ||
+                    !plain_probe_pair(vec, val))
+                    return scan_probe_vec(vec, val, result);
             }
-        } else if (val->type == vec->type && (vec->type == RAY_BOOL || ray_is_bytelike(vec->type)) &&
-                   !((vec->attrs | val->attrs) & RAY_ATTR_HAS_NULLS)) {
-            int64_t first[256];
-            for (int b = 0; b < 256; b++) first[b] = NULL_I64;
-            const uint8_t* xd = (const uint8_t*)ray_data(vec);
-            const uint8_t* yd = (const uint8_t*)ray_data(val);
-            for (int64_t j = ray_len(vec) - 1; j >= 0; j--) first[xd[j]] = j;
-            for (int64_t i = 0; i < vlen; i++) any_null |= (out[i] = first[yd[i]]) == NULL_I64;
-        } else if (ray_is_vec(val) && ray_is_vec(vec)) {
+            if (val->type == vec->type && (vec->type == RAY_BOOL || ray_is_bytelike(vec->type)) &&
+                !((vec->attrs | val->attrs) & RAY_ATTR_HAS_NULLS)) {
+                int64_t first[256];
+                for (int b = 0; b < 256; b++) first[b] = NULL_I64;
+                const uint8_t* xd = ray_data(vec);
+                const uint8_t* yd = ray_data(val);
+                for (int64_t j = ray_len(vec) - 1; j >= 0; j--) first[xd[j]] = j;
+                for (int64_t i = 0; i < vlen; i++) any_null |= (out[i] = first[yd[i]]) == NULL_I64;
+                if (any_null) result->attrs |= RAY_ATTR_HAS_NULLS;
+                return result;
+            }
             /* Hash fast path: both sides typed vecs — O(n+m), mirrors ray_in_fn. */
             hashset_t hs;
             if (!hashset_init(&hs, vec, vec->len)) { ray_release(result); return ray_error("oom", NULL); }
