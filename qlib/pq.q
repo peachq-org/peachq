@@ -147,6 +147,15 @@
 / @eg .pq.valence (@)
 .pq.valence:{[x] .pq.i.valence x}
 
+/ Measure elapsed time by q statement during .[f;args].
+/ @param f (any) The callable or value to apply.
+/ @param args (any) List, vector or table. Enlist a single argument.
+/ @return (table;result) Statement timings in nanoseconds and the result of Apply.
+/ @throws access Under restricted evaluation, including reval.
+/ @throws nyi When profiling is already active.
+/ @eg .pq.profile[+;2 3]
+.pq.profile:{[f;args] .pq.i.profile[f;args]}
+
 / Open (or re-point) `:pq:q:alias on another q process, the same call as hopen (`:pq:q:alias;arg); answers that symbol.
 / @param arg (any) what hopen takes (port, `::5000, `:host:port:user:pass, (conn;timeout) ...), or a `conn`timeout dict
 .pq.hopen_q:{[alias;arg] hopen (`$":pq:q:",string alias;arg)};

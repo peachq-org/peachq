@@ -6,6 +6,7 @@
  * (every other), resolved through the parser's caret table at snapshot time. */
 #include "qlang/q_count.h"
 #include "qlang/eval/q_dbg.h"
+#include "qlang/eval/q_profile.h"
 #include "qlang/eval/q_eval.h"
 #include "qlang/eval/q_eval_internal.h"   /* q_eval_node */
 #include "qlang/base/q_err.h"
@@ -880,6 +881,7 @@ static int64_t frame_ctx(int idx, int64_t session) {
 static _Thread_local int g_resume_bare;   /* the last suspension ended with a bare `:` */
 
 static ray_t* dbg_suspend(ray_t* err) {
+    q_profile_pause_t pause = q_profile_pause();
     g_dbg_depth++;
     q_eval_reserve_t depth_cap = q_eval_depth_reserve();   /* at 'stack too, the prompt's lines run */
     int bare = 0;
@@ -964,6 +966,7 @@ static ray_t* dbg_suspend(ray_t* err) {
     q_env_frame_floor(env_floor);
     q_dbg_release(hold);
     if (!--g_dbg_depth && g_reader) g_reader(NULL, NULL, 0);   /* a callback's suspension: the console prompt comes back */
+    q_profile_resume(pause);
     return out;
 }
 

@@ -14,6 +14,7 @@
 #include "qlang/q_count.h"
 #include "qlang/eval/q_eval.h"
 #include "qlang/q_ctx.h"          /* q_ctx_callback_begin — a callback's entry: no stale SIGINT, Ctrl-C live */
+#include "qlang/eval/q_profile.h"
 #include "qlang/eval/q_dbg.h"  /* frame list + the error seams (basics/debug.md) */
 #include "qlang/q_prim.h"
 #include "qlang/q_builtins.h"  /* q_dotq_s_fn — `.Q.s` passes a partitioned table on to the display */
@@ -108,7 +109,7 @@ static ray_t* car_put(ray_t* c, int64_t i, ray_t* child) {
  * globals belong to the namespace it was written in, not the one it is called
  * from (ref/value.md: the globals list of `.test.f` reads `` `test`d`e ``).
  * NULL slot = root. */
-enum { LAM_NAME = 5, LAM_FILE = 6, LAM_LINE = 7, LAM_LOCALS = 8, LAM_POS = 9, LAM_PATS = 10, LAM_BOOT = 11, LAM_SLOTS = 12 };
+enum { LAM_NAME = 5, LAM_FILE = 6, LAM_LINE = 7, LAM_LOCALS = 8, LAM_POS = 9, LAM_PATS = 10, LAM_BOOT = 11, LAM_SPANS = 12, LAM_SLOTS = 13 };
 
 static void lam_local_add(int64_t sym, void* ctx) {
     ray_t** locals = ctx;
@@ -116,7 +117,7 @@ static void lam_local_add(int64_t sym, void* ctx) {
 }
 
 ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
-                               ray_t* src, ray_t* types, ray_t* pats, ray_t* pos) {
+                               ray_t* src, ray_t* types, ray_t* pats, ray_t* pos, ray_t* spans) {
     ray_t* b = ray_list_new(nbody > 0 ? nbody : 1);
     for (int64_t i = 0; i < nbody; i++)
         b = ray_list_append(b, body[i]);
@@ -136,6 +137,10 @@ ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
     if (pos) {
         ray_retain(pos);
         s[LAM_POS] = pos;
+    }
+    if (spans) {
+        ray_retain(spans);
+        s[LAM_SPANS] = spans;
     }
     if (pats) {
         ray_retain(pats);
@@ -204,6 +209,16 @@ void q_eval_apply_lambda_origin(ray_t* v, int64_t file_sym, int64_t line) {
 
 ray_t* q_eval_apply_lambda_pos(ray_t* v) {
     return q_eval_apply_carrier_kind(v) == Q_EVAL_CAR_LAMBDA ? car_slots(v)[LAM_POS] : NULL;
+}
+
+void q_eval_apply_lambda_span(ray_t* v, int64_t index, int64_t* col, int64_t* start, int64_t* end) {
+    if (q_eval_apply_carrier_kind(v) != Q_EVAL_CAR_LAMBDA) return;
+    ray_t* spans = car_slots(v)[LAM_SPANS];
+    if (!spans || index < 0 || index >= (q_count(spans) - 1) / 2) return;
+    const int64_t* offsets = ray_data(spans);
+    *col = offsets[0];
+    *start = offsets[2 * index + 1];
+    *end = offsets[2 * index + 2];
 }
 
 void q_eval_apply_lambda_boot(ray_t* v) {
@@ -1408,8 +1423,13 @@ RAY_INLINE ray_t* lambda_run(ray_t* lam, ray_t** args, int64_t n, int own) {
     ray_t* r = RAY_NULL_OBJ;
     int64_t nb = q_count(body);
     ray_t** bs = (ray_t**)ray_data(body);
+    q_profile_call_t call;
+    bool profiling = RAY_UNLIKELY(q_profile_active != NULL);
+    if (profiling) q_profile_call_begin(&call, lam, nb);
     for (int64_t i = 0; i < nb; i++) {
+        if (profiling) q_profile_stmt_begin(&call);
         ray_t* nr = q_eval(bs[i]);
+        if (profiling) q_profile_stmt_end(&call, i);
         /* the lambda-boundary error seam: locals still live; a `:r` resume
          * substitutes the statement's result and the body continues */
         if (RAY_IS_ERR(nr)) nr = q_dbg_lambda_filter(nr);
@@ -1424,6 +1444,7 @@ RAY_INLINE ray_t* lambda_run(ray_t* lam, ray_t** args, int64_t n, int own) {
         r = q_err_take();
         if (!r) { ray_retain(RAY_NULL_OBJ); r = RAY_NULL_OBJ; }
     }
+    if (profiling) q_profile_call_end(&call);
     q_env_scope(caller_scope);
     q_dbg_frame_pop();
     g_frame_depth--;

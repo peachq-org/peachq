@@ -42,6 +42,7 @@
 #include "qlang/lib_gen.h"     /* PEACHQ_LIB_FILES — the codegen'd bundle, one entry per file */
 #include "qlang/helpdb_gen.h"  /* PEACHQ_HELPDB_BOOTSTRAP — the codegen'd builtin help data */
 #include "qlang/q_env.h"       /* q_env_bind_native / q_env_ident_ok — the native bindings, a namespace name */
+#include "qlang/eval/q_profile.h"
 #include "qlang/eval/q_eval.h" /* q_eval_apply_ranks — the .pq.i.valence native */
 #include "lang/env.h"          /* ray_fn_unary — the native values */
 #include "lang/eval.h"         /* RAY_FN_NONE — no dispatch attrs on those values; the restricted and blocked modes */
@@ -130,7 +131,7 @@ static ray_t* pq_loaded_fn(ray_t* x) {
  * beep.  Re-binding is idempotent, so a reload costs nothing but the bind. */
 static void pq_set_pq(void)      { q_conn_pq_register(); q_provider_pq_register(); q_console_pq_register(); q_fmt_pq_register();
                                    q_ctx_pq_register(); q_tls_pq_register(); q_syntax_pq_register();
-                                   q_outline_pq_register();
+                                   q_outline_pq_register(); q_profile_pq_register();
                                    pq_bind(".pq.i.loaded", pq_loaded_fn); pq_bind(".pq.i.valence", q_eval_apply_ranks); }
 static void pq_set_str(void)     { q_strfmt_register(); q_strns_register(); }
 static void pq_set_termbox(void) { q_termbox_register(); q_beep_register(); }

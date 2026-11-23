@@ -160,7 +160,7 @@ int    q_eval_apply_foreign_parts(ray_t* v, void** obj);
  * tree (q_pattern.h) or the generic null, NULL when no slot destructures; pos: the parser's caret table, i64 (node
  * pointer; head-token offset) pairs */
 ray_t* q_eval_apply_lambda_new(ray_t* params, ray_t** body, int64_t nbody,
-                               ray_t* src, ray_t* types, ray_t* pats, ray_t* pos);
+                               ray_t* src, ray_t* types, ray_t* pats, ray_t* pos, ray_t* spans);
 ray_t* q_eval_apply_deriv_new(int adv, ray_t* fv, const struct q_op* frow);
 /* An iterator IS a value (103h, basics/datatypes.md); a derived function is
  * that value applied to its ONE operand.  `_iter_id` reads the adverb id
@@ -198,6 +198,9 @@ void q_eval_apply_lambda_name(ray_t* v, const char* name, int64_t nn);
 int  q_eval_apply_lambda_prov(ray_t* v, ray_t** name, int64_t* file_sym,
                               int64_t* line);
 ray_t* q_eval_apply_lambda_pos(ray_t* v);           /* BORROWED caret table, NULL when none */
+/* The opening-brace column and the indexed statement's byte range within the lambda source.
+ * If the statement has no span, the outputs stay as supplied. */
+void q_eval_apply_lambda_span(ray_t* v, int64_t index, int64_t* col, int64_t* start, int64_t* end);
 /* peachq's q.k: a lambda parsed by the always-on bootstrap (q_runtime_create's core list) */
 void q_eval_apply_lambda_boot(ray_t* v);
 int  q_eval_apply_lambda_is_boot(ray_t* v);

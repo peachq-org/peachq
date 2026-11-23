@@ -20,6 +20,7 @@
 #include "qlang/q_count.h"
 #include "qlang/ops/q_sys.h"
 #include "qlang/base/q_err.h"
+#include "qlang/eval/q_profile.h"
 #include "qlang/eval/q_eval.h" /* q_eval / q_eval_dot_wrap — timing + .Q.ts */
 #include "qlang/q_fmt.h"      /* q_fmt_set_prec/q_fmt_prec (`\P`) */
 #include "qlang/q_console.h"  /* q_console_flush (the exit path) */
@@ -683,12 +684,23 @@ static void ts_end(const tsmeas_t* m, double* ms, int64_t* bytes) {
     *bytes = d < 0 ? 0 : d;
 }
 
-static ray_t* time_expr(const char* expr, size_t len, int64_t reps,
-                          double* ms, int64_t* bytes) {
-    if (reps < 0) reps = 0;                              /* `\t:0` → do[0;e] = no runs */
+/* A timed or profiled expression runs at the session scope, like `value` of text:
+ * the caller's locals stay out of name resolution (#99), and a new lambda
+ * records the session `\d` because it is built at parse time (#120). */
+typedef struct {
+    q_eval_frames_t frames;
+    int64_t scope;
+} expr_scope_t;
+
+static void close_expr_scope(expr_scope_t scope) {
+    q_env_scope(scope.scope);
+    q_eval_frames_resume(scope.frames);
+}
+
+static ray_t* parse_session_expr(const char* expr, size_t len, expr_scope_t* scope) {
     /* q_parse wants a NUL-terminated C string; expr is a slice of the line. */
-    char   stackbuf[1024];
-    char*  s   = stackbuf;
+    char stackbuf[1024];
+    char* s = stackbuf;
     ray_t* blk = NULL;
     if (len + 1 > sizeof stackbuf) {
         blk = ray_alloc(len + 1);
@@ -698,34 +710,48 @@ static ray_t* time_expr(const char* expr, size_t len, int64_t reps,
     memcpy(s, expr, len);
     s[len] = '\0';
 
-    /* the text runs at top level, as `value` of a string does: a caller's locals are never its target (#99), and a
-     * lambda literal takes the session `\d` because it is built at parse (#120) */
-    q_eval_frames_t frames = q_eval_frames_suspend();
-    int64_t         scope  = q_env_scope(Q_ENV_SCOPE_SESSION);
-    ray_t* ast = q_parse(s);                             /* strips a trailing /comment */
+    scope->frames = q_eval_frames_suspend();
+    scope->scope = q_env_scope(Q_ENV_SCOPE_SESSION);
+    ray_t* ast = q_parse(s);
     if (blk) ray_free(blk);
-    if (RAY_IS_ERR(ast)) {
-        q_env_scope(scope);
-        q_eval_frames_resume(frames);
-        return ast;
-    }
+    if (RAY_IS_ERR(ast)) close_expr_scope(*scope);
+    return ast;
+}
+
+static ray_t* time_expr(const char* expr, size_t len, int64_t reps,
+                          double* ms, int64_t* bytes) {
+    if (reps < 0) reps = 0;                              /* `\t:0` → do[0;e] = no runs */
+    expr_scope_t scope;
+    ray_t* ast = parse_session_expr(expr, len, &scope);
+    if (RAY_IS_ERR(ast)) return ast;
     tsmeas_t m;
     ts_begin(&m);
     ray_t*  r   = NULL;
     ray_t*  err = NULL;
     for (int64_t k = 0; k < reps; k++) {
         if (r) { ray_release(r); r = NULL; }             /* keep only the last result */
-        r = q_eval(ast);
-        if (ray_is_lazy(r)) r = ray_lazy_materialize(r);
+        r = q_eval_apply_concrete(q_eval(ast));
         if (r && RAY_IS_ERR(r)) { err = r; r = NULL; break; }
     }
     ts_end(&m, ms, bytes);                               /* last result still live */
-    q_env_scope(scope);
-    q_eval_frames_resume(frames);
+    close_expr_scope(scope);
     ray_release(ast);
     if (r) ray_release(r);
     if (err) return err;                                 /* propagate the eval error */
     return NULL;
+}
+
+static ray_t* profile_expr(const char* expr, size_t len) {
+    expr_scope_t scope;
+    ray_t* ast = parse_session_expr(expr, len, &scope);
+    if (RAY_IS_ERR(ast)) return ast;
+    ray_t* table = q_profile_expr(ast);
+    close_expr_scope(scope);
+    ray_release(ast);
+    if (RAY_IS_ERR(table)) return table;
+    int err = q_console_show(table);
+    ray_release(table);
+    return err ? q_err(QE_WSFULL) : NULL;
 }
 
 /* See q_sys.h.  `.Q.ts[f;args]` / `-34!(f;args)` (ref/dotq.md#ts-time-and-space):
@@ -1300,7 +1326,8 @@ ray_t* q_sys_run(const char* line, size_t n) {
      * and the WHOLE argument region (rest/restlen, first token through EOL,
      * trailing `/ comment` included — parsed by the multi-token commands). */
     int64_t rep = -1;
-    if (i < n && line[i] == ':') {
+    bool has_suffix = i < n && line[i] == ':';
+    if (has_suffix) {
         i++;                                         /* skip the ':' */
         size_t d0 = i;
         while (i < n && line[i] != ' ' && line[i] != '\t') i++;
@@ -1366,6 +1393,9 @@ ray_t* q_sys_run(const char* line, size_t n) {
                 q_sys_exit(0);
                 return NULL;
         }
+    } else if (cmd_len == 7 && !memcmp(cmd, "profile", 7)) {
+        if (!alen || has_suffix) return q_err(QE_OPTION);
+        return profile_expr(rest, restlen);
     } else if (cmd_len == 2 && cmd[0] == 't' && cmd[1] == 's') {
         return h_ts(alen, rest, restlen, rep);                   /* time and space      */
     } else if (cmd_len == 2 && cmd[0] == 'c' && cmd[1] == 'd') {
