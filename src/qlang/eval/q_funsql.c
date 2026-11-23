@@ -175,7 +175,7 @@ static void part_rows_set(ray_t* tbl, ray_t* rows) {
     g_part_rows = rows;
 }
 
-static ray_t* where_fold(ray_t* c, ray_t* t, ray_t* idx0);
+static ray_t* where_fold(ray_t* c, ray_t* t);
 static ray_t* fby_subst(ray_t* tree, ray_t* t);
 
 /* does a constraint name the partition column, and neither a column of t's own nor the row index? */
@@ -223,7 +223,7 @@ static ray_t* ques_partitioned(ray_t* t, ray_t* names, ray_t** q, int64_t qn, in
         if (tree && RAY_IS_ERR(tree)) ray_error_free(tree);
         else if (tree) ray_release(tree);
     }
-    ray_t* parts = RAY_IS_ERR(head) ? head : k ? where_fold(head, values, til_count(values)) : NULL;
+    ray_t* parts = RAY_IS_ERR(head) ? head : k ? where_fold(head, values) : NULL;
     ray_t* m = parts && RAY_IS_ERR(parts) ? parts : q_splay_named_map(t, names, parts);
     int ok = m && !RAY_IS_ERR(m) && lead;
     ray_t* rows = ok && (g_part_every || ques_names_row(q, qn)) ? q_splay_named_rows(t, parts) : NULL;
@@ -342,10 +342,10 @@ static ray_t* from_rows(ray_t* t, ray_t* idx) {
  * name order: column -> enclosing locals -> global in the SESSION `\d`, not the
  * lambda's defining one); virtual `i` = idx.  `only` (NULL = every column) names the columns a phrase known to read
  * no other is bound. */
-static ray_t* phrase_eval_cols(ray_t* tree, ray_t* t, ray_t* idx, ray_t* only) {
+static ray_t* phrase_eval_cols(ray_t* tree, ray_t* t, ray_t* idx, ray_t* only, bool full) {
     if (q_env_frame_push(0) != RAY_OK) return q_err(QE_STACK);
     ray_t* err = NULL;
-    int ident = idx_is_identity(idx, src_count(t));
+    int ident = full || idx_is_identity(idx, src_count(t));
     {
         /* the narrowing law: an identity idx binds the column ITSELF — the
          * per-element gather here was the projection cliff that priced
@@ -380,14 +380,18 @@ static ray_t* phrase_eval_cols(ray_t* tree, ray_t* t, ray_t* idx, ray_t* only) {
 /* A phrase binds only the columns it names, as by_runs binds them, so narrowed rows never pay for the table's width:
  * a name read at run time (`eval cn`) resolves outside this frame either way.  A deferred source binds every column
  * it mapped, as its run-time watch (g_unmapped) expects. */
-static ray_t* phrase_eval(ray_t* tree, ray_t* t, ray_t* idx) {
-    if (g_unmapped) return phrase_eval_cols(tree, t, idx, NULL);
+static ray_t* phrase_eval_rows(ray_t* tree, ray_t* t, ray_t* idx, bool full) {
+    if (g_unmapped) return phrase_eval_cols(tree, t, idx, NULL, full);
     ray_t* names = ray_vec_new(RAY_SYM, 4);
     phrase_names(tree, &names);
-    if (RAY_IS_ERR(names)) { ray_error_free(names); return phrase_eval_cols(tree, t, idx, NULL); }
-    ray_t* r = phrase_eval_cols(tree, t, idx, names);
+    if (RAY_IS_ERR(names)) { ray_error_free(names); return phrase_eval_cols(tree, t, idx, NULL, full); }
+    ray_t* r = phrase_eval_cols(tree, t, idx, names, full);
     ray_release(names);
     return r;
+}
+
+static ray_t* phrase_eval(ray_t* tree, ray_t* t, ray_t* idx) {
+    return phrase_eval_rows(tree, t, idx, false);
 }
 
 /* idx[where r] — the one refinement step every constraint ends in.  Consumes r. */
@@ -399,11 +403,13 @@ static ray_t* where_refine(ray_t* idx, ray_t* r) {
     return nidx ? nidx : q_err(QE_TYPE);
 }
 
-static int idx_is_ascending(ray_t* idx) {
+static int idx_is_ascending(ray_t* idx, bool* distinct) {
     int64_t n = q_count(idx);
     const int64_t* p = (const int64_t*)ray_data(idx);
-    for (int64_t j = 1; j < n; j++)
+    for (int64_t j = 1; j < n; j++) {
         if (p[j] < p[j - 1]) return 0;
+        *distinct &= p[j] != p[j - 1];
+    }
     return 1;
 }
 
@@ -440,20 +446,28 @@ static ray_t* rows_sorted_in(ray_t* col, ray_t* set) {
     if (set->type != col->type || (set->attrs & RAY_ATTR_HAS_NULLS) || m > n / 32) return NULL;
     int64_t* sp = (int64_t*)malloc(sizeof(int64_t) * 2 * (size_t)(m > 0 ? m : 1));
     if (!sp) return NULL;
+    int64_t spans = 0;
     int64_t total = 0;
     for (int64_t i = 0; i < m; i++) {
         ray_t* e = q_index_elem_at(set, i);
-        int ok = e && !RAY_IS_ERR(e) && ray_sorted_span(col, e, NULL, &sp[2 * i], &sp[2 * i + 1]);
+        int64_t lo, hi;
+        int ok = e && !RAY_IS_ERR(e) && ray_sorted_span(col, e, NULL, &lo, &hi);
         if (e) ray_release(e);
         if (!ok) { free(sp); return NULL; }
+        /* A miss can have the same lower bound as a hit. Only hits participate in deduplication. */
+        if (lo < hi) {
+            sp[2 * spans] = lo;
+            sp[2 * spans + 1] = hi;
+            spans++;
+        }
     }
-    qsort(sp, (size_t)m, 2 * sizeof(int64_t), cmp_i64_pair);
-    for (int64_t i = 0; i < m; i++)
+    qsort(sp, (size_t)spans, 2 * sizeof(int64_t), cmp_i64_pair);
+    for (int64_t i = 0; i < spans; i++)
         if (i == 0 || sp[2 * i] != sp[2 * i - 2]) total += sp[2 * i + 1] - sp[2 * i];
     ray_t* r = rows_new(total);
     if (!RAY_IS_ERR(r)) {
         int64_t* d = (int64_t*)ray_data(r);
-        for (int64_t i = 0, k = 0; i < m; i++)
+        for (int64_t i = 0, k = 0; i < spans; i++)
             if (i == 0 || sp[2 * i] != sp[2 * i - 2])
                 for (int64_t j = sp[2 * i]; j < sp[2 * i + 1]; j++) d[k++] = j;
     }
@@ -476,25 +490,26 @@ static ray_t* attr_rows(ray_t* col, ray_t* v, where_attr_op op) {
         if (r) ray_idx_hits[IDX_SITE_FILTER_HASH]++;
         return r;
     }
-    /* a PART index keys every row, nulls among them; every other lane leaves a nullable column to the verb */
-    int nulls = (col->attrs & RAY_ATTR_HAS_NULLS) != 0;
-    if (nulls && ray_index_wake(col) != RAY_IDX_PART) return NULL;
+    /* A PART index keys every row, nulls among them. Sorted bounds check
+     * nullable columns under their own type rules. */
+    bool indexed = ray_index_has(col) &&
+                   (!(col->attrs & RAY_ATTR_HAS_NULLS) || ray_index_wake(col) == RAY_IDX_PART);
     int64_t key, lo, hi;
     if (op == WA_IN) {
         if (!ray_is_vec(v)) return NULL;
-        if (ray_index_has(col)) {
+        if (indexed) {
             ray_idx_consults[IDX_SITE_FILTER_HASH]++;
             ray_t* r = rows_of_rowsel(ray_index_in_rowsel(col, v));
             if (r) { ray_idx_hits[IDX_SITE_FILTER_HASH]++; return r; }
         }
-        if (nulls || !ray_attr_is_sorted(col)) return NULL;
+        if (!ray_attr_is_sorted(col)) return NULL;
         ray_idx_consults[IDX_SITE_FILTER_RANGE]++;
         ray_t* r = rows_sorted_in(col, v);
         if (r) ray_idx_hits[IDX_SITE_FILTER_RANGE]++;
         return r;
     }
     if (op == WA_WITHIN) {
-        if (nulls || !ray_is_vec(v) || q_count(v) != 2 || !ray_attr_is_sorted(col)) return NULL;
+        if (!ray_is_vec(v) || q_count(v) != 2 || !ray_attr_is_sorted(col)) return NULL;
         ray_t* a = q_index_elem_at(v, 0);
         ray_t* b = q_index_elem_at(v, 1);
         ray_idx_consults[IDX_SITE_FILTER_RANGE]++;
@@ -506,7 +521,7 @@ static ray_t* attr_rows(ray_t* col, ray_t* v, where_attr_op op) {
         return rows_span(lo, hi);
     }
     if (!ray_is_atom(v) || v->type != -col->type || atom_is_oob_null(v)) return NULL;
-    if (ray_index_has(col) && ray_index_atom_key(col, v, &key)) {
+    if (indexed && ray_index_atom_key(col, v, &key)) {
         ray_idx_consults[IDX_SITE_FILTER_HASH]++;
         ray_t* r = rows_of_rowsel(ray_index_eq_rowsel(col, key));
         if (r) { ray_idx_hits[IDX_SITE_FILTER_HASH]++; return r; }
@@ -520,12 +535,12 @@ static ray_t* attr_rows(ray_t* col, ray_t* v, where_attr_op op) {
 
 /* Law 6 over index rows: rows are over the FULL column, so the entries of idx among them are kept, in idx's order
  * (both ascending, idx's duplicates kept).  Consumes rows. */
-static ray_t* idx_restrict(ray_t* idx, int ident, ray_t* rows) {
+static ray_t* idx_restrict(ray_t* idx, bool ident, bool distinct, ray_t* rows) {
     if (ident) return rows;
     int64_t ni = q_count(idx), nr = q_count(rows), k = 0;
     const int64_t* d = (const int64_t*)ray_data(idx);
     const int64_t* r = (const int64_t*)ray_data(rows);
-    ray_t* out = rows_new(ni < nr ? ni : nr);
+    ray_t* out = rows_new(distinct && nr < ni ? nr : ni);
     if (RAY_IS_ERR(out)) { ray_release(rows); return out; }
     int64_t* o = (int64_t*)ray_data(out);
     for (int64_t i = 0, j = 0; i < ni; i++) {
@@ -543,7 +558,7 @@ static ray_t* idx_restrict(ray_t* idx, int ident, ray_t* rows) {
  * applies the verb runs on that value — so nothing evaluates twice.  NULL = not this shape, or idx is not an
  * ascending subsequence: the phrase evaluates as before.  A mapped column answers like any other: its lookup reads
  * the index and the cells at the edges of the runs it keeps, never the column. */
-static ray_t* where_attr(ray_t* tree, ray_t* t, ray_t* idx) {
+static ray_t* where_attr(ray_t* tree, ray_t* t, ray_t** current) {
     if (!tree || tree->type != RAY_LIST || q_count(tree) != 3 || q_type_is_dict(t)) return NULL;
     ray_t** e = (ray_t**)ray_data(tree);
     if (!e[0] || !e[1] || !e[2]) return NULL;
@@ -556,16 +571,28 @@ static ray_t* where_attr(ray_t* tree, ray_t* t, ray_t* idx) {
     ray_t* cn = swapped ? e[2] : e[1];
     ray_t* col = cn->type == -RAY_SYM ? ray_table_get_col(t, cn->i64) : NULL;       /* borrowed */
     if (!col || !(ray_index_has(col) || ray_attr_is_sorted(col))) return NULL;
-    int64_t n = src_count(t);
-    int ident = idx_is_identity(idx, n);
-    if (!ident && !idx_is_ascending(idx)) return NULL;
+    ray_t* idx = *current;
+    bool ident = !idx || idx_is_identity(idx, src_count(t));
+    bool distinct = true;
+    if (!ident && !idx_is_ascending(idx, &distinct)) return NULL;
     ray_t* x = swapped ? e[1] : e[2];
+    bool expression = x->type == -RAY_SYM || x->type == RAY_LIST;
+    /* A literal lookup on the whole table can return row ids directly.
+     * Expressions still get the materialized virtual i in their scope. */
+    if (expression && !idx) {
+        idx = *current = til_count(t);
+        if (RAY_IS_ERR(idx)) return idx;
+    }
     q_dbg_hold_t hold = q_dbg_hold();
-    ray_t* v = x->type == -RAY_SYM || x->type == RAY_LIST ? phrase_eval(x, t, idx) : q_eval(x);
+    ray_t* v = expression ? phrase_eval_rows(x, t, idx, ident) : q_eval(x);
     q_dbg_release(hold);
     if (!v || RAY_IS_ERR(v)) return v ? v : q_err(QE_TYPE);
     ray_t* rows = attr_rows(col, v, op);
-    if (rows) { ray_release(v); return RAY_IS_ERR(rows) ? rows : idx_restrict(idx, ident, rows); }
+    if (rows) { ray_release(v); return RAY_IS_ERR(rows) ? rows : idx_restrict(idx, ident, distinct, rows); }
+    if (!idx) {
+        idx = *current = til_count(t);
+        if (RAY_IS_ERR(idx)) { ray_release(v); return idx; }
+    }
     ray_t* cv = ident ? (ray_retain(col), col) : gather(col, idx);
     ray_t* av[2] = { swapped ? v : cv, swapped ? cv : v };
     ray_t* r = (cv && !RAY_IS_ERR(cv)) ? q_eval_apply_value(e[0], av, 2) : cv;
@@ -576,20 +603,24 @@ static ray_t* where_attr(ray_t* tree, ray_t* t, ray_t* idx) {
 
 /* Law 6: SUCCESSIVE refinement — each constraint sees only the rows the
  * previous ones kept; idx:=idx[where result].  A symbol vector (a collapsed
- * enlist) is that many bare-column constraints.  Consumes idx0. */
-static ray_t* where_fold(ray_t* c, ray_t* t, ray_t* idx0) {
-    if (RAY_IS_ERR(idx0)) return idx0;
+ * enlist) is that many bare-column constraints. NULL idx is the whole
+ * source, materialized only if a predicate or the result needs it. */
+static ray_t* where_fold(ray_t* c, ray_t* t) {
     if (!c || is_empty_gen(c) || (ray_is_vec(c) && q_count(c) == 0))
-        return idx0;
-    if (c->type != RAY_LIST && c->type != RAY_SYM) { ray_release(idx0); return q_err(QE_TYPE); }
-    ray_t* idx = idx0;
+        return til_count(t);
+    if (c->type != RAY_LIST && c->type != RAY_SYM) return q_err(QE_TYPE);
+    ray_t* idx = NULL;
     int64_t n = q_count(c);
     for (int64_t j = 0; j < n; j++) {
         ray_t* tree = q_index_elem_at(c, j);
-        ray_t* nidx = (tree && !RAY_IS_ERR(tree)) ? where_attr(tree, t, idx) : tree;
-        if (!nidx) nidx = where_refine(idx, phrase_eval(tree, t, idx));
+        ray_t* nidx = (tree && !RAY_IS_ERR(tree)) ? where_attr(tree, t, &idx) : tree;
+        if (!nidx) {
+            bool full = !idx;
+            if (full) idx = til_count(t);
+            nidx = RAY_IS_ERR(idx) ? idx : where_refine(idx, phrase_eval_rows(tree, t, idx, full));
+        }
         if (tree && nidx != tree) ray_release(tree);
-        ray_release(idx);
+        if (idx && idx != nidx) ray_release(idx);
         if (!nidx || RAY_IS_ERR(nidx)) return nidx ? nidx : q_err(QE_TYPE);
         idx = nidx;
     }
@@ -932,7 +963,7 @@ static ray_t* by_runs(ray_t* f, ray_t** phrase, int64_t n, ray_t* t, ray_t* gidx
     for (int64_t k = 0; k < n; k++) phrase_names(phrase[k], &names);
     int ok = !RAY_IS_ERR(names);
     for (int64_t k = 0; k < n && ok; k++) {
-        arg[k] = phrase_eval_cols(phrase[k], t, rows, names);
+        arg[k] = phrase_eval_cols(phrase[k], t, rows, names, false);
         ok = arg[k] && !RAY_IS_ERR(arg[k]) && (ray_is_vec(arg[k]) || arg[k]->type == RAY_LIST) &&
              q_count(arg[k]) == q_count(rows);
     }
@@ -1519,7 +1550,7 @@ static ray_t* ques_select_over(ray_t** args, int64_t n, ray_t* t, int64_t nk) {
     }
     ray_t* empty = q_type_is_dict(args[3]) && q_count(args[3]) == 0 ? ray_list_new(0) : NULL;
     ray_t* a = empty ? empty : args[3];         /* any empty dict phrase is () (owner 2026-11-09, btick2 qtx.q:28) */
-    ray_t* idx = where_fold(args[1], t, til_count(t));
+    ray_t* idx = where_fold(args[1], t);
     int on_result = n == 6 && !q_type_is_dict(t) && orders_result(args[5], args[2], a);   /* a dict answers a dict */
     if (n == 6 && !on_result && !RAY_IS_ERR(idx)) idx = sort_idx(args[5], t, idx);
     if (n >= 5 && !on_result && !RAY_IS_ERR(idx)) idx = limit_apply(args[4], idx);
@@ -2035,7 +2066,7 @@ static ray_t* upd_by_whole(ray_t* tree, ray_t* t, int64_t nm, ray_t* idx, ray_t*
         ray_t* sub = row ? (ray_retain(tree), tree) : by_agg_subst(tree, t, gidxs, *rows, gpos);
         ray_t* names = sub ? ray_vec_new(RAY_SYM, 4) : NULL;
         if (names) phrase_names(tree, &names);
-        if (names && !RAY_IS_ERR(names)) v = phrase_eval_cols(sub, t, idx, names);
+        if (names && !RAY_IS_ERR(names)) v = phrase_eval_cols(sub, t, idx, names, false);
         if (names) ray_release(names);
         if (sub) ray_release(sub);
     }
@@ -2276,7 +2307,7 @@ static ray_t* bang_qsql(ray_t** args) {
                 if (q_eval_symvec_has(a, ray_table_col_name(t, i))) nk = 0;
             if (r && !RAY_IS_ERR(r) && ray_table_ncols(r) <= nk) nk = 0;
         } else {
-            ray_t* idx = where_fold(c, t, til_count(t));
+            ray_t* idx = where_fold(c, t);
             if (RAY_IS_ERR(idx)) r = idx;
             else if (q_type_is_dict(a)) {           /* UPDATE */
                 r = update_table(a, b, t, idx);

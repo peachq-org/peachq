@@ -670,14 +670,25 @@ static ray_t* attach_finalize(ray_t* parent, ray_t* idx) {
 /* Validate + COW + drop existing index.  Returns the (possibly new) parent
  * pointer and updates *vp.  On error returns a RAY_ERROR; caller must
  * propagate without further modifying *vp. */
-static ray_t* prepare_attach_ex(ray_t** vp, const char* what, int8_t extra_type) {
-    if (!vp || !*vp || RAY_IS_ERR(*vp))
+static ray_t* check_attach_type(ray_t* v, const char* what, int8_t extra_type) {
+    if (!v || RAY_IS_ERR(v))
         return ray_error("type", "%s: null/error vector", what);
-    ray_t* v = *vp;
     if (!ray_is_vec(v) && v->type != RAY_ENUM)
         return ray_error("type", "%s: index can only attach to a vector", what);
     if (v->attrs & RAY_ATTR_SLICE)
         return ray_error("type", "%s: cannot index a slice; materialize first", what);
+    /* Numeric vectors carry any index kind. The caller names the one extra
+     * type its representation admits (e.g. STR for DICT, SYM for CODES). */
+    if (numeric_elem_size(v->type) == 0 && !(extra_type && v->type == extra_type))
+        return ray_error("nyi", "%s: only numeric vectors supported (got type %d)",
+                         what, (int)v->type);
+    return NULL;
+}
+
+static ray_t* prepare_attach_ex(ray_t** vp, const char* what, int8_t extra_type) {
+    ray_t* v = vp ? *vp : NULL;
+    ray_t* invalid = check_attach_type(v, what, extra_type);
+    if (invalid) return invalid;
     if (v->attrs & RAY_ATTR_HAS_INDEX) {
         ray_index_drop(&v);
         if (RAY_IS_ERR(v)) return v;
@@ -686,13 +697,6 @@ static ray_t* prepare_attach_ex(ray_t** vp, const char* what, int8_t extra_type)
     v = ray_cow(v);
     if (!v || RAY_IS_ERR(v)) return v;
     *vp = v;
-    /* Numeric vectors carry any index kind; STR carries only RAY_IDX_DICT (the
-     * codes live alongside the descriptors) and SYM only RAY_IDX_CODES — each
-     * caller names the one non-numeric type its kind admits. */
-    if (numeric_elem_size(v->type) == 0 && !(extra_type && v->type == extra_type)) {
-        return ray_error("nyi", "%s: only numeric vectors supported (got type %d)",
-                         what, (int)v->type);
-    }
     return v;
 }
 static ray_t* prepare_attach(ray_t** vp, const char* what) {
@@ -886,7 +890,7 @@ ray_t* ray_index_attach_built(ray_t** vp, ray_t* idx) {
     uint8_t kind = ray_index_payload(idx)->kind;
     int8_t extra = kind == RAY_IDX_DICT ? RAY_STR : kind == RAY_IDX_CODES ? RAY_SYM : 0;
     ray_t* v = prepare_attach_ex(vp, "index", extra);   /* rc=1 → ray_cow no-op */
-    if (RAY_IS_ERR(v)) return v;
+    if (!v || RAY_IS_ERR(v)) return v;
     return attach_finalize(v, idx);
 }
 
@@ -912,9 +916,11 @@ ray_t* ray_index_attach_dict(ray_t** vp) {
 
 /* The table + chain over rows [0, upto) of v, sized for `sized_for` rows, written into ix's hash arm: the attach
  * builds over everything; an extension past HASH_LOAD_MAX_PCT rebuilds over what it has indexed so far, then
- * continues.  `keyset` also probes each row for its first list; a UNIQUE build skips that — its verify already
- * proved every row a key, and the fronts read the marker as til n.  NULL on success, else an owned error. */
-static ray_t* hash_build(ray_t* v, int64_t upto, int64_t sized_for, ray_index_t* ix, bool keyset) {
+ * continues. A grouped build probes each row for its first list. A unique
+ * build can use that same probe to reject duplicates without a scratch hash.
+ * NULL on success, else an owned error. */
+static ray_t* hash_build(ray_t* v, int64_t upto, int64_t sized_for, ray_index_t* ix, bool keyset,
+                         bool verify_unique) {
     /* Capacity: at least 8, at most 2*n.  Power of two for cheap masking. */
     uint64_t cap = next_pow2((uint64_t)(sized_for < 4 ? 8 : 2 * sized_for));
     if (cap < 8) cap = 8;
@@ -934,10 +940,15 @@ static ray_t* hash_build(ray_t* v, int64_t upto, int64_t sized_for, ray_index_t*
         if (ray_vec_is_null(v, i)) continue;
         uint64_t kw = numeric_key_word(base, v->type, i);
         uint64_t slot = mix64(kw) & mask;
-        if (keyset) {
+        if (keyset || verify_unique) {
             int64_t r = tbl[slot] - 1;
             while (r >= 0 && numeric_key_word(base, v->type, r) != kw) r = chn[r] - 1;
-            if (r < 0) fb[nfirst++] = i;
+            if (verify_unique && r >= 0) {
+                ray_release(table);
+                ray_release(chain);
+                return ray_error("domain", "unique: duplicate value");
+            }
+            if (keyset && r < 0) fb[nfirst++] = i;
         }
         chn[i] = tbl[slot];     /* link previous head into chain */
         tbl[slot] = i + 1;      /* this row becomes new head */
@@ -957,19 +968,23 @@ static ray_t* hash_build(ray_t* v, int64_t upto, int64_t sized_for, ray_index_t*
     return NULL;
 }
 
-static ray_t* attach_hash(ray_t** vp, bool keyset) {
-    ray_t* v = prepare_attach(vp, "hash");
-    if (RAY_IS_ERR(v)) return v;
+static ray_t* attach_hash(ray_t** vp, bool keyset, bool verify_unique) {
+    ray_t* v = vp ? *vp : NULL;
+    ray_t* invalid = check_attach_type(v, "hash", 0);
+    if (invalid) return invalid;
 
     int64_t n = v->len;
     ray_t* idx = ray_index_alloc(RAY_IDX_HASH, v->type, n);
     if (!idx || RAY_IS_ERR(idx)) return idx ? idx : ray_error("oom", NULL);
-    ray_t* e = hash_build(v, n, n, ray_index_payload(idx), keyset);
+    ray_t* e = hash_build(v, n, n, ray_index_payload(idx), keyset, verify_unique);
     if (e) { ray_release(idx); return e; }
-    return attach_finalize(v, idx);
+    /* Verify and allocate before replacing the parent's current index. */
+    ray_t* out = ray_index_attach_built(vp, idx);
+    if (!out || RAY_IS_ERR(out)) ray_release(idx);
+    return out ? out : ray_error("oom", NULL);
 }
-ray_t* ray_index_attach_hash(ray_t** vp)        { return attach_hash(vp, true);  }
-ray_t* ray_index_attach_hash_unique(ray_t** vp) { return attach_hash(vp, false); }
+ray_t* ray_index_attach_hash(ray_t** vp) { return attach_hash(vp, true, false); }
+ray_t* ray_index_attach_hash_unique(ray_t** vp, bool verify) { return attach_hash(vp, false, verify); }
 
 /* Chains stay short up to this load; the rebuild sizes for the whole vector, so a run of appends amortises to O(1). */
 #define HASH_LOAD_MAX_PCT 70
@@ -982,7 +997,7 @@ static int hash_extend(ray_index_t* ix, ray_t* v, int64_t from) {
     for (int64_t i = from; i < v->len; i++) {
         if ((uint64_t)(ix->u.hash.n_keys + 1) * 100 > (ray_index_hash_mask(ix) + 1) * HASH_LOAD_MAX_PCT) {
             ray_index_t nb = *ix;
-            ray_t* e = hash_build(v, i, v->len, &nb, ix->u.hash.first != NULL);
+            ray_t* e = hash_build(v, i, v->len, &nb, ix->u.hash.first != NULL, false);
             if (e) { ray_error_free(e); return -1; }
             ray_index_release_payload(ix);
             ix->u.hash = nb.u.hash;
@@ -1300,15 +1315,69 @@ ray_idx_kind_t ray_index_wake(ray_t* col) {
     return (ray_idx_kind_t)ray_atomic_load(&ix->kind);
 }
 
-bool ray_index_part_fill(ray_t* col, ray_t* keys, ray_t* starts, ray_t* lens) {
+static int part_run_cmp(const void* a, const void* b) {
+    int64_t x = ((const ray_part_run_t*)a)->key;
+    int64_t y = ((const ray_part_run_t*)b)->key;
+    return (x > y) - (x < y);
+}
+
+/* Resident and decoded runs have the same directory. Build into unshared
+ * storage, leaving the parent's existing index untouched on failure. */
+static ray_t* part_fill_runs(ray_index_t* ix, int8_t kt, ray_part_run_t* runs, int64_t nr) {
+    bool ascending = true, descending = true;
+    for (int64_t i = 1; i < nr; i++) {
+        ascending &= runs[i - 1].key < runs[i].key;
+        descending &= runs[i - 1].key > runs[i].key;
+    }
+    if (!ascending && !descending) {
+        qsort(runs, (size_t)nr, sizeof(*runs), part_run_cmp);
+        for (int64_t i = 1; i < nr; i++)
+            if (runs[i - 1].key == runs[i].key)
+                return ray_error("domain", "parted: key occurs in separate runs");
+    }
+
+    ray_t* keys = ray_vec_new(kt, nr > 0 ? nr : 1);
+    ray_t* starts = ray_vec_new(RAY_I64, nr > 0 ? nr : 1);
+    ray_t* lens = ray_vec_new(RAY_I64, nr > 0 ? nr : 1);
+    if (!keys || !starts || !lens || RAY_IS_ERR(keys) || RAY_IS_ERR(starts) || RAY_IS_ERR(lens)) {
+        ray_t* children[] = {keys, starts, lens};
+        for (size_t i = 0; i < sizeof(children) / sizeof(children[0]); i++) {
+            if (children[i] && RAY_IS_ERR(children[i])) ray_error_free(children[i]);
+            else ray_release(children[i]);
+        }
+        return ray_error("oom", NULL);
+    }
+
+    keys->len = starts->len = lens->len = nr;
+    uint8_t* kb = (uint8_t*)ray_data(keys);
+    int64_t* st = (int64_t*)ray_data(starts);
+    int64_t* ln = (int64_t*)ray_data(lens);
+    int es = ray_type_sizes[(uint8_t)kt];
+    for (int64_t i = 0; i < nr; i++) {
+        const ray_part_run_t* part = &runs[descending ? nr - 1 - i : i];
+        st[i] = part->start;
+        ln[i] = part->len;
+        switch (es) {
+        case 1: { uint8_t k = (uint8_t)part->key; memcpy(kb + i, &k, 1); break; }
+        case 2: { int16_t k = (int16_t)part->key; memcpy(kb + 2 * i, &k, 2); break; }
+        case 4: { int32_t k = (int32_t)part->key; memcpy(kb + 4 * i, &k, 4); break; }
+        case 8: memcpy(kb + 8 * i, &part->key, 8); break;
+        }
+    }
+    ix->u.part.keys = keys;
+    ix->u.part.starts = starts;
+    ix->u.part.lens = lens;
+    ix->u.part.n_parts = nr;
+    return NULL;
+}
+
+bool ray_index_part_fill(ray_t* col, ray_part_run_t* runs, int64_t nr) {
     if (!ray_index_has(col)) return false;
     ray_index_t* ix = ray_index_payload(col->index);
     if (ix->kind != RAY_IDX_NONE) return false;
-    ix->u.part.keys    = keys;
-    ix->u.part.starts  = starts;
-    ix->u.part.lens    = lens;
-    ix->u.part.n_parts = keys->len;
-    ix->built_for_len  = col->len;
+    ray_t* e = part_fill_runs(ix, col->type == RAY_ENUM ? RAY_I64 : col->type, runs, nr);
+    if (e) { ray_error_free(e); return false; }
+    ix->built_for_len = col->len;
     ray_atomic_store(&ix->kind, RAY_IDX_PART);        /* published last: a reader that sees PART sees its parts */
     return true;
 }
@@ -1332,10 +1401,11 @@ static int part_run(ray_t* col, const ray_index_t* ix, int64_t key, int64_t* lo,
     int64_t s = ((const int64_t*)ray_data(ix->u.part.starts))[a];
     int64_t e = s + ((const int64_t*)ray_data(ix->u.part.lens))[a];
     const uint8_t* base = (const uint8_t*)ray_data(col);
-    if (s < 0 || e <= s || e > col->len ||
-        hash_col_read_i64(base, t, s) != key || hash_col_read_i64(base, t, e - 1) != key ||
-        (s > 0 && hash_col_read_i64(base, t, s - 1) == key) ||
-        (e < col->len && hash_col_read_i64(base, t, e) == key)) {
+    if (!ix->part_verified &&
+        (s < 0 || e <= s || e > col->len ||
+         hash_col_read_i64(base, t, s) != key || hash_col_read_i64(base, t, e - 1) != key ||
+         (s > 0 && hash_col_read_i64(base, t, s - 1) == key) ||
+         (e < col->len && hash_col_read_i64(base, t, e) == key))) {
         ray_atomic_store(&g_index_torn, 1);
         return -1;
     }
@@ -2040,6 +2110,53 @@ static ray_t* ray_index_attach_part(ray_t** vp) {
     return attach_finalize(v, idx);
 }
 
+/* A q parted column holds one contiguous run per key, in any order. When
+ * runs are sparse, verify the run starts and retain only the run directory.
+ * Dense and unsupported inputs decline to q's regular verification and hash. */
+ray_t* ray_index_try_part_runs(ray_t** vp) {
+    ray_t* v = *vp;
+    int8_t t = v->type;
+    int64_t n = v->len;
+    if (!int_elem_size(t) || t == RAY_ENUM || n < 256 || v->mmod == 3 ||
+        (v->attrs & (RAY_ATTR_SLICE | RAY_ATTR_ARENA))) return NULL;
+
+    const uint8_t* base = (const uint8_t*)ray_data(v);
+    int64_t key = hash_col_read_i64(base, t, 0);
+    int64_t nr = 1;
+    for (int64_t i = 1; i < n; i++) {
+        int64_t next = hash_col_read_i64(base, t, i);
+        if (next != key && ++nr > n / 64) return NULL;
+        key = next;
+    }
+
+    ray_part_run_t* parts = (ray_part_run_t*)ray_alloc_raw((size_t)nr * sizeof(*parts));
+    if (!parts) return ray_error("oom", NULL);
+    key = hash_col_read_i64(base, t, 0);
+    int64_t start = 0, run = 0;
+    for (int64_t i = 1; i < n; i++) {
+        int64_t next = hash_col_read_i64(base, t, i);
+        if (next == key) continue;
+        parts[run++] = (ray_part_run_t){key, start, i - start};
+        key = next;
+        start = i;
+    }
+    parts[run] = (ray_part_run_t){key, start, n - start};
+    ray_t* idx = ray_index_alloc(RAY_IDX_PART, t, n);
+    if (!idx || RAY_IS_ERR(idx)) {
+        ray_free_raw(parts);
+        return idx ? idx : ray_error("oom", NULL);
+    }
+    ray_index_t* ix = ray_index_payload(idx);
+    ray_t* e = part_fill_runs(ix, t, parts, nr);
+    ray_free_raw(parts);
+    if (e) { ray_release(idx); return e; }
+    ix->markers = RAY_MARK_PARTED;
+    ix->part_verified = true;
+    ray_t* out = ray_index_attach_built(vp, idx);
+    if (!out || RAY_IS_ERR(out)) ray_release(idx);
+    return out ? out : ray_error("oom", NULL);
+}
+
 /* --------------------------------------------------------------------------
  * Codes index — row lists direct-addressed by the parent's own ids
  *
@@ -2554,7 +2671,6 @@ ray_t* ray_attr_mark_attach(ray_t* v, uint8_t mark) {
 /* Neutral verification/classification wrappers exposed for the q layer to
  * compose kdb attribute policy without baking attribute-name or error-text
  * choices into the engine.  They carry NO policy — pure mechanism. */
-bool ray_attr_verify_distinct(const ray_t* v) { return vec_all_distinct(v); }
 bool ray_attr_verify_contiguous(const ray_t* v) { return vec_is_parted_contiguous(v); }
 int ray_attr_numeric_class(int8_t t) { return numeric_elem_size(t) > 0 ? 1 : -1; }
 
@@ -2693,6 +2809,20 @@ ray_t* ray_attr_set_fn(ray_t* name, ray_t* v) {
  * Hash-index find — minimum row id whose value equals key, or -1 / -2.
  * -------------------------------------------------------------------------- */
 
+/* A short key set already holds the first rows. For a high-duplication
+ * column, walking those representatives caps work independently of run size. */
+static bool hash_small_keyset(const ray_index_t* ix) {
+    return ix->u.hash.first && ix->u.hash.first->len <= 64 &&
+           ix->u.hash.first->len <= ix->built_for_len / 64;
+}
+
+static int64_t hash_keyset_find(const ray_index_t* ix, const uint8_t* base, int8_t t, uint64_t key) {
+    const int64_t* first = (const int64_t*)ray_data(ix->u.hash.first);
+    for (int64_t i = 0; i < ix->u.hash.first->len; i++)
+        if (numeric_key_word(base, t, first[i]) == key) return first[i];
+    return -1;
+}
+
 int64_t ray_index_find_row(ray_t* col, int64_t key) {
     if (!col || RAY_IS_ERR(col)) return -2;
     ray_index_t* px = part_block(col);
@@ -2720,6 +2850,7 @@ int64_t ray_index_find_row(ray_t* col, int64_t key) {
 
     const int64_t* chn  = (const int64_t*)ray_data(ix->u.hash.chain);
     const uint8_t* base = (const uint8_t*)ray_data(col);
+    if (start_rid >= 0 && hash_small_keyset(ix)) return hash_keyset_find(ix, base, t, kw);
 
     int64_t min_rid = -1;
     int64_t rid = start_rid;
@@ -2788,6 +2919,75 @@ int ray_index_has_key(ray_t* col, int64_t key) {
     for (; rid >= 0; rid = chn[rid] - 1)
         if (numeric_key_word(base, col->type, rid) == kw) return 1;
     return 0;
+}
+
+/* Typed batch probes share the attached index. Cap collision/duplicate work
+ * so a grouped column with a hot key can fall back to a single build. */
+bool ray_index_probe_vec(ray_t* col, ray_t* keys, ray_t* result) {
+    if (keys->type != col->type) return false;
+    ray_index_t* ix = part_block(col);
+    if (!ix) {
+        if (keys->attrs & (RAY_ATTR_HAS_NULLS | RAY_ATTR_SLICE)) return false;
+        /* A hash omits null rows; a non-null probe can still use it. */
+        if (!idx_fresh_nonull(col, RAY_IDX_CODES) && !idx_fresh(col, RAY_IDX_HASH))
+            return false;
+        ix = ray_index_payload(col->index);
+    }
+    if (ix->kind == RAY_IDX_HASH) {
+        if (!ix->u.hash.table || !ix->u.hash.chain) return false;
+        /* On a tiny domain the temporary hash set wins when loosely
+         * distributed probes outnumber rows. Keep membership's index lane. */
+        if (result->type == RAY_I64 && col->len <= 512 &&
+            keys->len > FIND_SCAN_NEEDLES && keys->len > col->len)
+            return false;
+    }
+
+    int64_t* out = result->type == RAY_I64 ? (int64_t*)ray_data(result) : NULL;
+    bool* members = out ? NULL : (bool*)ray_data(result);
+    const uint8_t* kb = (const uint8_t*)ray_data(keys);
+    int8_t t = col->type;
+    int64_t budget = 2 * keys->len + col->len / 64;
+    bool small_keyset = out && ix->kind == RAY_IDX_HASH && hash_small_keyset(ix);
+    bool missing = false;
+    for (int64_t i = 0; i < keys->len; i++) {
+        int64_t first = -1;
+        if (ix->kind == RAY_IDX_PART) {
+            int64_t lo, hi;
+            int r = part_run(col, ix, hash_col_read_i64(kb, t, i), &lo, &hi);
+            if (r < 0) return false;
+            if (r) first = lo;
+        } else if (ix->kind == RAY_IDX_CODES) {
+            const int64_t* slot = codes_slots(ix, codes_set_key(col, keys, i));
+            if (slot) first = slot[0] - 1;
+        } else {
+            uint64_t word;
+            if (!set_elem_word(kb, t, i, t, &word)) return false;
+            const int64_t* table = (const int64_t*)ray_data(ix->u.hash.table);
+            const int64_t* chain = (const int64_t*)ray_data(ix->u.hash.chain);
+            const uint8_t* data = (const uint8_t*)ray_data(col);
+            int64_t row = table[mix64(word) & ray_index_hash_mask(ix)] - 1;
+            if (row >= 0 && small_keyset) {
+                budget -= ix->u.hash.first->len;
+                if (budget < 0) return false;
+                first = hash_keyset_find(ix, data, t, word);
+            } else {
+                for (; row >= 0; row = chain[row] - 1) {
+                    if (--budget < 0) return false;
+                    if (numeric_key_word(data, t, row) != word) continue;
+                    first = row;
+                    if (members) break;
+                }
+            }
+        }
+        if (out) {
+            out[i] = first < 0 ? NULL_I64 : first;
+            missing |= first < 0;
+        } else {
+            members[i] = first >= 0;
+        }
+    }
+    if (missing) result->attrs |= RAY_ATTR_HAS_NULLS;
+    return true;
 }
 
 /* The block behind col when a key-set read may trust it: fresh HASH or CODES, no nulls, at least one row — or a
