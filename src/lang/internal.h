@@ -642,6 +642,9 @@ bool   ray_sorted_span(ray_t* vec, ray_t* a, ray_t* b, int64_t* lo, int64_t* hi)
  * it does not serve.  key is an atom of the item type or a vector of vec's own type read at j; one storage width is
  * compared, so float NaNs and every promotion are the caller's. */
 int64_t ray_sorted_bound(ray_t* vec, int64_t lo, int64_t hi, ray_t* key, int64_t j, int upper);
+/* Typed vector bounds in probe order. The caller skips a floating null prefix
+ * with first. Returns 1 on success, 0 for small/unsupported inputs, -1 on stop. */
+int ray_sorted_bounds_vec(ray_t* vec, ray_t* keys, int64_t first, int upper, int64_t* out);
 ray_t* ray_til_fn(ray_t* x);
 ray_t* ray_reverse_fn(ray_t* x);
 ray_t* ray_rand_fn(ray_t* a, ray_t* b);

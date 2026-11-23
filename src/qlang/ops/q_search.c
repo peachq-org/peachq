@@ -662,6 +662,11 @@ static ray_t* bin_lane_search(ray_t* x, ray_t* y, int right) {
     if (RAY_IS_ERR(out)) return out;
     out->len = y->len;
     int64_t* o = (int64_t*)ray_data(out);
+    if (y->len >= 1024) {
+        int batch = ray_sorted_bounds_vec(x, y, nn > 0 ? nn : 0, !right, o);
+        if (batch > 0) return out;
+        if (batch < 0) { ray_release(out); return q_err(QE_STOP); }
+    }
     for (int64_t j = 0; j < y->len && !err; j++) {
         if ((j & 0xFFFFF) == 0 && ray_interrupted()) { ray_release(out); return q_err(QE_STOP); }
         o[j] = bin_lane_probe(x, n, nn, y, j, right, &err);
