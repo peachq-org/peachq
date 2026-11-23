@@ -204,6 +204,7 @@ static ray_t* acc_reduce(ray_t* fv, const q_op_t* frow, ray_t* seed,
         ray_t* err = NULL;
         ray_t* cur;
         int64_t i0 = 0;
+        int lam = q_eval_apply_carrier_kind(fv) == Q_EVAL_CAR_LAMBDA;
         if (seed) { ray_retain(seed); cur = seed; }
         else      { cur = acc_item(iv[0], 0); i0 = 1; err = acc_push(&a, cur); }
         for (int64_t i = i0; !err && i < len; i++) {
@@ -211,7 +212,7 @@ static ray_t* acc_reduce(ray_t* fv, const q_op_t* frow, ray_t* seed,
             if (!keep && a.last) { ray_release(a.last); a.last = NULL; }
             av[0] = cur;
             for (int64_t p = 0; p < nit; p++) av[p + 1] = acc_item(iv[p], i);
-            ray_t* nx = q_eval_apply_amend_owned(fv, av, nit + 1);
+            ray_t* nx = lam ? q_eval_apply_lambda_owned(fv, av, nit + 1) : q_eval_apply_amend_owned(fv, av, nit + 1, -1);
             if (!nx) {
                 nx = q_eval_apply(fv, frow, av, nit + 1);
                 ray_release(cur);

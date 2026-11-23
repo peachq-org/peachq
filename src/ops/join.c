@@ -23,7 +23,6 @@
 
 #include "ops/internal.h"
 #include "ops/hash.h"
-#include "ops/idxop.h"
 #include "lang/internal.h"  /* sym_id_runtime, sym_domain_rep (sym-domain Phase 2) */
 #include "ops/ops.h"         /* ray_graph_new / ray_join / ray_asof_join / ray_execute */
 
@@ -1703,36 +1702,24 @@ ray_t* exec_antijoin(ray_graph_t* g, ray_op_t* op,
 }
 
 /* ============================================================================
- * OP_WINDOW_JOIN: ASOF join (sort-merge)
+ * OP_WINDOW_JOIN: ASOF join
  * For each left row, find the most recent right row where right.time <= left.time,
- * optionally partitioned by equality keys. O(N+M) after sorting.
+ * optionally partitioned by equality keys: the right rows are classed by their
+ * equality keys and each left row binary-searches its class's times.
  * ============================================================================ */
 
-/* True iff `tvals` (a side's time values, already expanded to int64) is
- * non-descending within every part described by keycol's RAY_IDX_PART index.
- * The part index guarantees rows are already grouped into contiguous,
- * ascending key value-blocks; if time is also non-descending inside each
- * block, the natural row order already equals the (key, time) order the
- * merge expects, so that side's sort can be skipped.  Caller must have
- * checked ray_index_kind(keycol)==RAY_IDX_PART, and must separately ensure
- * the time column has no nulls (null-keyed rows must sort last, which the
- * identity order would not do).  Caller must also confirm the index's
- * built_for_len matches the current column length, so the part ranges
- * (starts/lens) are in-bounds for the time array indexed here. */
-/* Left-side eq-key reader for the asof sort-merge.  Eq keys are MATCHED
+/* Left-side eq-key reader for the asof match.  Eq keys are MATCHED
  * across the two tables, and raw SYM ids only order/compare within ONE
  * domain (sym-domain Phase 2): when a SYM eq-key pair spans two domains,
  * re-express the LEFT cell in the RIGHT side's id space (absent symbol →
- * -1: sorts first, matches nothing — right ids are ≥ 0).  Every left-side
- * eq read below goes through this reader, so the left sort, the partition
- * rewind and the merge walk all order by the right side's id space, while
- * right-side reads stay raw (which is also why the per-domain RUNTIME-id
- * LUT doesn't fit here: the target space is the RIGHT domain, not the
- * global table).  `xlut` is the per-key left-position → right-position
+ * -1: matches nothing — right ids are ≥ 0).  Every left-side
+ * eq read goes through this reader, so a left key meets the right classes
+ * in the right side's id space, while right-side reads stay raw (which is
+ * also why the per-domain RUNTIME-id LUT doesn't fit here: the target space
+ * is the RIGHT domain, not the global table).  `xlut` is the per-key left-position → right-position
  * table built ONCE at setup (NULL for same-domain / non-SYM keys —
  * pre-flip always, byte-identical raw read); `xn` is its entry count.
- * No per-read hash lookups: the old str+find per read degenerated the
- * absent-key rewind into O(L·R) hash probes. */
+ * No per-read hash lookups by symbol text. */
 static inline int64_t asof_eq_lread(ray_t* lc, const int64_t* xlut, int64_t xn,
                                     int64_t row) {
     int64_t v = read_col_i64(ray_data(lc), row, lc->type, lc->attrs);
@@ -1745,7 +1732,7 @@ static inline int64_t asof_eq_lread(ray_t* lc, const int64_t* xlut, int64_t xn,
  * ids never leak into the right id space. */
 static const int64_t g_asof_empty_xlut[1] = { -1 };
 
-/* The merge only orders and compares times, so a float lane becomes the
+/* The match only orders and compares times, so a float lane becomes the
  * order-preserving image of its double bits (sign-magnitude flipped to two's
  * complement).  A numeric integer lane against a float one reaches here from
  * rayfall only: peachq's aj/asof reject that pair first (q_join.c qj_aj_map). */
@@ -1762,16 +1749,194 @@ static inline int64_t asof_time_key(ray_t* v, int64_t row, bool as_float) {
     return b < 0 ? b ^ INT64_MAX : b;
 }
 
-static bool asof_time_sorted_within_parts(const ray_t* keycol, const int64_t* tvals) {
-    ray_index_t* ix = ray_index_payload(((ray_t*)keycol)->index);
-    const int64_t* st = (const int64_t*)ray_data(ix->u.part.starts);
-    const int64_t* ln = (const int64_t*)ray_data(ix->u.part.lens);
-    for (int64_t p = 0; p < ix->u.part.n_parts; p++) {
-        int64_t s = st[p], e = st[p] + ln[p];
-        for (int64_t i = s + 1; i < e; i++)
-            if (tvals[i] < tvals[i - 1]) return false;
+typedef struct { int64_t t, row; } asof_ent_t;
+
+static int asof_ent_cmp(const void* a, const void* b) {
+    const asof_ent_t* x = (const asof_ent_t*)a;
+    const asof_ent_t* y = (const asof_ent_t*)b;
+    if (x->t != y->t) return x->t < y->t ? -1 : 1;
+    return x->row < y->row ? -1 : x->row > y->row;
+}
+
+/* One eq-key cell as the words that are equal exactly when two cells are: a float lane its double's bits (-0 as 0),
+ * a guid its two halves, any other lane read_col_i64's value.  The count written. */
+static inline int asof_cell(ray_t* c, int64_t row, int64_t* w) {
+    const void* d = ray_data(c);
+    switch (c->type) {
+        case RAY_GUID: memcpy(w, (const uint8_t*)d + 16 * row, 16); return 2;
+        case RAY_F32: case RAY_F64: RAY_TEMPORALF_CASES: {
+            double x = clear_neg_zero(c->type == RAY_F32 ? (double)((const float*)d)[row] : ((const double*)d)[row]);
+            memcpy(w, &x, sizeof x);
+            return 1;
+        }
+        default: w[0] = read_col_i64(d, row, c->type, c->attrs); return 1;
+    }
+}
+
+#define ASOF_KEY_WORDS 512   /* 255 eq keys of at most two words */
+
+static inline int asof_right_key(ray_t* const* eq, uint8_t n_eq, int64_t row, int64_t* v) {
+    int nw = 0;
+    for (uint8_t k = 0; k < n_eq; k++) nw += asof_cell(eq[k], row, v + nw);
+    return nw;
+}
+
+static inline bool asof_key_eq(const int64_t* a, const int64_t* b, int nw) {
+    for (int k = 0; k < nw; k++) if (a[k] != b[k]) return false;
+    return true;
+}
+
+/* An open-addressing table of right classes (-1 empty), each class keyed by its first row's eq cells. */
+typedef struct { int64_t* s; ray_t* hdr; uint64_t cap; } asof_tab_t;
+
+static bool asof_tab_init(asof_tab_t* t, int64_t classes) {
+    if (t->hdr) scratch_free(t->hdr);
+    for (t->cap = 64; t->cap < (uint64_t)classes * 2; t->cap *= 2) {}
+    t->s = (int64_t*)scratch_alloc(&t->hdr, t->cap * sizeof(int64_t));
+    if (t->s) memset(t->s, 0xff, t->cap * sizeof(int64_t));
+    return t->s != NULL;
+}
+
+/* The slot of the nw-word eq key v: its class's, or the empty one v would take. */
+static uint64_t asof_slot(const asof_tab_t* t, ray_t* const* eq, uint8_t n_eq, const int64_t* first,
+                          const int64_t* v, int nw) {
+    uint64_t h = 0, mask = t->cap - 1;
+    for (int k = 0; k < nw; k++) h = k ? ray_hash_combine(h, ray_hash_i64(v[k])) : ray_hash_i64(v[k]);
+    int64_t w[ASOF_KEY_WORDS];
+    for (h &= mask; t->s[h] >= 0; h = (h + 1) & mask)
+        if (asof_right_key(eq, n_eq, first[t->s[h]], w) == nw && asof_key_eq(v, w, nw)) break;
+    return h;
+}
+
+static bool asof_tab_index(asof_tab_t* t, ray_t* const* eq, uint8_t n_eq, const int64_t* first, int64_t classes) {
+    if (!asof_tab_init(t, classes)) return false;
+    int64_t v[ASOF_KEY_WORDS];
+    for (int64_t c = 0; c < classes; c++) {
+        int nw = asof_right_key(eq, n_eq, first[c], v);
+        t->s[asof_slot(t, eq, n_eq, first, v, nw)] = c;
     }
     return true;
+}
+
+/* The right rows' classes by hashing their eq cells, for the keys direct grouping does not take (floats, guids,
+ * wide ranges); a null-keyed row joins none (UINT32_MAX).  Leaves t indexing the classes. */
+static bool asof_class_hash(ray_t* const* eq, uint8_t n_eq, const uint8_t* r_null, int64_t n, agg_groups_t* g,
+                            asof_tab_t* t) {
+    g->gids = (uint32_t*)ray_alloc_raw((size_t)(n > 0 ? n : 1) * sizeof(uint32_t));
+    g->first_row = (int64_t*)ray_alloc_raw((size_t)(n > 0 ? n : 1) * sizeof(int64_t));
+    if (!g->gids || !g->first_row || !asof_tab_init(t, 0)) return false;
+    int64_t key[2][ASOF_KEY_WORDS], ng = 0;
+    int64_t* v = key[0], *prev = key[1];
+    for (int64_t r = 0; r < n; r++) {
+        g->gids[r] = UINT32_MAX;
+        if (r_null[r]) continue;
+        int nw = asof_right_key(eq, n_eq, r, v);
+        if (r > 0 && g->gids[r - 1] != UINT32_MAX && asof_key_eq(v, prev, nw)) g->gids[r] = g->gids[r - 1];
+        else {
+            uint64_t s = asof_slot(t, eq, n_eq, g->first_row, v, nw);
+            int64_t c = t->s[s];
+            if (c < 0) {
+                g->first_row[ng] = r;
+                if ((uint64_t)(ng + 1) * 2 <= t->cap) t->s[s] = ng;
+                else if (!asof_tab_index(t, eq, n_eq, g->first_row, ng + 1)) return false;
+                c = ng++;
+            }
+            g->gids[r] = (uint32_t)c;
+        }
+        int64_t* tmp = prev; prev = v; v = tmp;
+    }
+    g->ngroups = ng;
+    return true;
+}
+
+/* match[l] = the right row left row l joins: of the right rows whose eq keys equal its own, the last in
+ * (time, row) order whose time is <= its time; -1 for none, and for a null key on either side (SQL's nulls never
+ * match).  The right rows are classed by eq key (direct index where the keys allow, else hashed); only the classes
+ * some left row asks for are laid out, in row order — already time order for a right table sorted on time within
+ * its keys, sorted here otherwise — and each left row binary-searches its class.  False on OOM. */
+static bool asof_match(ray_t* const* l_eq, ray_t* const* r_eq, uint8_t n_eq,
+                       const int64_t* const* xlut, const int64_t* xn,
+                       const int64_t* l_time, const uint8_t* l_null, int64_t left_n,
+                       ray_t* r_time, bool time_as_float, const uint8_t* r_null, int64_t right_n, int64_t* match) {
+    agg_groups_t g = {0};
+    asof_tab_t t = {0};
+    ray_t* lo_hdr = NULL, *ent_hdr = NULL, *need_hdr = NULL;
+    int direct = agg_group_keys_direct((ray_t**)r_eq, n_eq, right_n, &g);
+    bool ok = direct > 0 ? asof_tab_index(&t, r_eq, n_eq, g.first_row, g.ngroups)
+            : direct == 0 && asof_class_hash(r_eq, n_eq, r_null, right_n, &g, &t);
+    int64_t ng = g.ngroups;
+    int64_t* lo = ok ? (int64_t*)scratch_calloc(&lo_hdr, (size_t)(ng + 2) * 3 * sizeof(int64_t)) : NULL;
+    uint8_t* need = ok ? (uint8_t*)scratch_calloc(&need_hdr, (size_t)(ng + 1)) : NULL;
+    ok = ok && lo && need;
+    int64_t* at = ok ? lo + ng + 2 : NULL, *at_t = ok ? at + ng + 2 : NULL;  /* per class: its last probe's landing and time */
+    int64_t key[2][ASOF_KEY_WORDS], pc = -1;
+    int64_t* v = key[0], *prev = key[1];
+    int nw = right_n > 0 ? asof_right_key(r_eq, n_eq, 0, prev) : 0;
+    bool seen = false;
+    for (int64_t l = 0; ok && l < left_n; l++) {
+        match[l] = -1;
+        if (l_null[l]) continue;
+        int lw = 0;
+        for (uint8_t k = 0; k < n_eq; k++) {
+            if (xlut[k]) v[lw++] = asof_eq_lread(l_eq[k], xlut[k], xn[k], l);
+            else lw += asof_cell(l_eq[k], l, v + lw);
+        }
+        if (lw != nw) continue;                    /* a guid against another lane: no cell of one equals one of the other */
+        if (!seen || !asof_key_eq(v, prev, nw)) {
+            pc = t.s[asof_slot(&t, r_eq, n_eq, g.first_row, v, nw)];
+            seen = true;
+            int64_t* tmp = prev; prev = v; v = tmp;
+        }
+        match[l] = pc;
+        if (pc >= 0) need[pc] = 1;
+    }
+    /* Branch-free layout: a null-keyed row goes to class ng, and a class no left row needs writes to one spare entry. */
+    for (int64_t r = 0; ok && r < right_n; r++) {
+        uint32_t c = r_null[r] ? (uint32_t)ng : g.gids[r];
+        g.gids[r] = c;
+        lo[c + 1] += need[c];
+    }
+    for (int64_t c = 0; ok && c < ng; c++) lo[c + 1] += lo[c];
+    int64_t ne = ok ? lo[ng] : 0;
+    asof_ent_t* ent = ok ? (asof_ent_t*)scratch_alloc(&ent_hdr, (size_t)(ne + 1) * sizeof(asof_ent_t)) : NULL;
+    if (ent) {
+        for (int64_t c = 0; c <= ng; c++) at[c] = c < ng && need[c] ? lo[c] : ne;
+        for (int64_t r = 0; r < right_n; r++) {
+            uint32_t c = g.gids[r];
+            ent[at[c]] = (asof_ent_t){ asof_time_key(r_time, r, time_as_float), r };
+            at[c] += need[c];
+        }
+        for (int64_t c = 0; c < ng; c++) {
+            asof_ent_t* e = ent + lo[c];
+            int64_t m = lo[c + 1] - lo[c];
+            for (int64_t i = 1; i < m; i++)
+                if (e[i].t < e[i - 1].t) { qsort(e, (size_t)m, sizeof *e, asof_ent_cmp); break; }
+            at[c] = lo[c];
+            at_t[c] = INT64_MIN;
+        }
+        for (int64_t l = 0; l < left_n; l++) {
+            int64_t c = match[l];
+            if (c < 0) continue;
+            /* a left table sorted on time walks each class forward: gallop from its last landing, then bisect */
+            int64_t a = l_time[l] >= at_t[c] ? at[c] : lo[c], b = lo[c + 1];
+            int64_t step = 1;
+            for (; a + step <= b && ent[a + step - 1].t <= l_time[l]; step *= 2) a += step;
+            if (a + step <= b) b = a + step - 1;
+            while (a < b) {
+                int64_t mid = a + (b - a) / 2;
+                if (ent[mid].t <= l_time[l]) a = mid + 1; else b = mid;
+            }
+            match[l] = a > lo[c] ? ent[a - 1].row : -1;
+            at[c] = a;
+            at_t[c] = l_time[l];
+        }
+    }
+    agg_groups_free(&g);
+    if (t.hdr) scratch_free(t.hdr);
+    scratch_free(lo_hdr);
+    scratch_free(need_hdr);
+    scratch_free(ent_hdr);
+    return ent != NULL;
 }
 
 ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
@@ -1802,7 +1967,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
 
     /* Get time vectors — use int64 representation for comparison.
      * TIME uses 4-byte i32 (ms), TIMESTAMP uses 8-byte i64 (ns).
-     * We expand to a temporary i64 array for uniform comparison. */
+     * The left side expands to an i64 array; a right row is read as it is laid out. */
     ray_t* lt_time_vec = ray_table_get_col(left_table, time_sym);
     ray_t* rt_time_vec = ray_table_get_col(right_table, time_sym);
     if (!lt_time_vec || !rt_time_vec) return ray_error("schema", NULL);
@@ -1811,17 +1976,10 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
     bool time_as_float = float_family(lt_time_vec->type)
                       || float_family(rt_time_vec->type);
 
-    /* Build i64 time arrays for efficient comparison */
-    ray_t* lt_time_hdr = NULL, *rt_time_hdr = NULL;
+    ray_t* lt_time_hdr = NULL;
     int64_t* lt_time = (int64_t*)scratch_alloc(&lt_time_hdr, (size_t)left_n * sizeof(int64_t));
-    int64_t* rt_time = (int64_t*)scratch_alloc(&rt_time_hdr, (size_t)right_n * sizeof(int64_t));
-    if ((!lt_time && left_n > 0) || (!rt_time && right_n > 0)) {
-        if (lt_time_hdr) scratch_free(lt_time_hdr);
-        if (rt_time_hdr) scratch_free(rt_time_hdr);
-        return ray_error("oom", NULL);
-    }
+    if (!lt_time && left_n > 0) return ray_error("oom", NULL);
     for (int64_t i = 0; i < left_n; i++) lt_time[i] = asof_time_key(lt_time_vec, i, time_as_float);
-    for (int64_t i = 0; i < right_n; i++) rt_time[i] = asof_time_key(rt_time_vec, i, time_as_float);
 
     /* Get eq key vectors — stored as ray_t* for type-safe access */
     ray_t* lt_eq[256], *rt_eq[256];
@@ -1830,7 +1988,6 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         ray_t* rv = ray_table_get_col(right_table, eq_syms[k]);
         if (!lv || !rv) {
             if (lt_time_hdr) scratch_free(lt_time_hdr);
-            if (rt_time_hdr) scratch_free(rt_time_hdr);
             return ray_error("schema", NULL);
         }
         lt_eq[k] = lv;
@@ -1867,7 +2024,6 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
             blk = (int64_t*)scratch_alloc(&eq_xl_hdr, xtotal * sizeof(int64_t));
             if (!blk) {
                 if (lt_time_hdr) scratch_free(lt_time_hdr);
-                if (rt_time_hdr) scratch_free(rt_time_hdr);
                 return ray_error("oom", NULL);
             }
         }
@@ -1895,7 +2051,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
 
     /* Precompute per-row "any key is null" bitsets.  Null-keyed rows must
      * not match — left rows fall through to the left-outer null fill,
-     * right rows are skipped entirely during the merge walk.  SQL-style
+     * right rows join no class (asof_match).  SQL-style
      * NULLs-never-match semantics. */
     ray_t* lt_null_hdr = NULL, *rt_null_hdr = NULL;
     uint8_t* lt_null = left_n > 0
@@ -1908,7 +2064,6 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         if (lt_null_hdr) scratch_free(lt_null_hdr);
         if (rt_null_hdr) scratch_free(rt_null_hdr);
         if (lt_time_hdr) scratch_free(lt_time_hdr);
-        if (rt_time_hdr) scratch_free(rt_time_hdr);
         if (eq_xl_hdr) scratch_free(eq_xl_hdr);
         return ray_error("oom", NULL);
     }
@@ -1929,245 +2084,17 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
                 if (ray_vec_is_null(rt_eq[k], i)) rt_null[i] = 1;
     }
 
-    /* Sort both tables by (eq_keys, time_key) using index arrays.  Rows
-     * with any null key sort LAST (NULLS LAST) so the merge walk reaches
-     * them once all real candidates are consumed and can skip them
-     * cheaply. */
-    ray_t* li_hdr = NULL, *ri_hdr = NULL;
-    int64_t* li_idx = (int64_t*)scratch_alloc(&li_hdr, (size_t)left_n * sizeof(int64_t));
-    int64_t* ri_idx = (int64_t*)scratch_alloc(&ri_hdr, (size_t)right_n * sizeof(int64_t));
-    if ((!li_idx && left_n > 0) || (!ri_idx && right_n > 0)) {
-        if (li_hdr) scratch_free(li_hdr);
-        if (ri_hdr) scratch_free(ri_hdr);
-        if (lt_null_hdr) scratch_free(lt_null_hdr);
-        if (rt_null_hdr) scratch_free(rt_null_hdr);
-        if (lt_time_hdr) scratch_free(lt_time_hdr);
-        if (rt_time_hdr) scratch_free(rt_time_hdr);
-        if (eq_xl_hdr) scratch_free(eq_xl_hdr);
-        return ray_error("oom", NULL);
-    }
-    for (int64_t i = 0; i < left_n; i++) li_idx[i] = i;
-    for (int64_t i = 0; i < right_n; i++) ri_idx[i] = i;
-
-    /* asof fast-path: a side can skip its mergesort when its rows already sit
-     * in the (eq-key, time) order the merge expects.  Two cases:
-     *   - un-partitioned (n_eq==0): the time column carries the verified
-     *     `sorted` marker (non-descending, no nulls), so identity order == sorted.
-     *   - partitioned (n_eq==1): the single equality key is `parted` (rows
-     *     grouped into contiguous, ascending value-blocks) AND the time column
-     *     has no nulls AND is non-descending within each part — so identity
-     *     order already equals (key, time) order.
-     * Either way we fill the index array with the identity permutation and skip
-     * the O(n log n) sort.  Falls back to sort-merge otherwise; never wrong. */
-    /* Cross-domain SYM eq key?  The left side then sorts/merges in the
-     * RIGHT side's id space (asof_eq_lread), so left identity order in
-     * its OWN id space is not usable — disable the left presort shortcut.
-     * Right-side reads stay raw: its shortcut is unaffected. */
-    bool eq_xdomain = false;
-    for (uint8_t k = 0; k < n_eq; k++)
-        if (eq_xlut[k]) eq_xdomain = true;
-
-    bool l_presorted = !eq_xdomain
-        && ((n_eq == 0 && ray_attr_is_sorted(lt_time_vec))
-        || (n_eq == 1
-            && !(lt_time_vec->attrs & RAY_ATTR_HAS_NULLS)
-            && ray_index_kind(lt_eq[0]) == RAY_IDX_PART
-            /* reject a stale part index (parent length changed since build) */
-            && ray_index_payload(lt_eq[0]->index)->built_for_len == lt_eq[0]->len
-            && asof_time_sorted_within_parts(lt_eq[0], lt_time)));
-    bool r_presorted = (n_eq == 0 && ray_attr_is_sorted(rt_time_vec))
-        || (n_eq == 1
-            && !(rt_time_vec->attrs & RAY_ATTR_HAS_NULLS)
-            && ray_index_kind(rt_eq[0]) == RAY_IDX_PART
-            /* reject a stale part index (parent length changed since build) */
-            && ray_index_payload(rt_eq[0]->index)->built_for_len == rt_eq[0]->len
-            && asof_time_sorted_within_parts(rt_eq[0], rt_time));
-
-    /* Bottom-up mergesort on index arrays — O(N log N) */
-    {
-        int64_t max_n = left_n > right_n ? left_n : right_n;
-        bool need_tmp = (!l_presorted || !r_presorted) && max_n > 0;
-        ray_t* tmp_hdr = NULL;
-        int64_t* tmp = need_tmp
-            ? (int64_t*)scratch_alloc(&tmp_hdr, (size_t)max_n * sizeof(int64_t))
-            : NULL;
-        if (!tmp && need_tmp) {
-            scratch_free(li_hdr); scratch_free(ri_hdr);
-            if (lt_null_hdr) scratch_free(lt_null_hdr);
-            if (rt_null_hdr) scratch_free(rt_null_hdr);
-            if (lt_time_hdr) scratch_free(lt_time_hdr);
-            if (rt_time_hdr) scratch_free(rt_time_hdr);
-            if (eq_xl_hdr) scratch_free(eq_xl_hdr);
-            return ray_error("oom", NULL);
-        }
-
-        /* Sort left indices by (nulls-last, eq_keys, time) */
-        if (!l_presorted) {
-            for (int64_t width = 1; width < left_n; width *= 2) {
-            for (int64_t lo = 0; lo < left_n; lo += 2 * width) {
-                int64_t mid = lo + width;
-                int64_t hi = lo + 2 * width;
-                if (mid > left_n) mid = left_n;
-                if (hi > left_n) hi = left_n;
-                int64_t a = lo, b = mid, t = lo;
-                while (a < mid && b < hi) {
-                    int64_t ai = li_idx[a], bi = li_idx[b];
-                    int cmp = 0;
-                    if (lt_null[ai] != lt_null[bi])
-                        cmp = lt_null[ai] - lt_null[bi]; /* 1 > 0 → nulls last */
-                    for (uint8_t k2 = 0; k2 < n_eq && cmp == 0; k2++) {
-                        /* asof_eq_lread: left sorts in the RIGHT side's
-                         * id space when a SYM key pair spans domains. */
-                        int64_t va = asof_eq_lread(lt_eq[k2], eq_xlut[k2], eq_xn[k2], ai);
-                        int64_t vb = asof_eq_lread(lt_eq[k2], eq_xlut[k2], eq_xn[k2], bi);
-                        if (va < vb) cmp = -1;
-                        else if (va > vb) cmp = 1;
-                    }
-                    if (cmp == 0) {
-                        if (lt_time[ai] < lt_time[bi]) cmp = -1;
-                        else if (lt_time[ai] > lt_time[bi]) cmp = 1;
-                    }
-                    tmp[t++] = (cmp <= 0) ? li_idx[a++] : li_idx[b++];
-                }
-                while (a < mid) tmp[t++] = li_idx[a++];
-                while (b < hi) tmp[t++] = li_idx[b++];
-                for (int64_t c = lo; c < hi; c++) li_idx[c] = tmp[c];
-            }
-            }
-        }
-
-        /* Sort right indices by (nulls-last, eq_keys, time) */
-        if (!r_presorted) {
-            for (int64_t width = 1; width < right_n; width *= 2) {
-            for (int64_t lo = 0; lo < right_n; lo += 2 * width) {
-                int64_t mid = lo + width;
-                int64_t hi = lo + 2 * width;
-                if (mid > right_n) mid = right_n;
-                if (hi > right_n) hi = right_n;
-                int64_t a = lo, b = mid, t = lo;
-                while (a < mid && b < hi) {
-                    int64_t ai = ri_idx[a], bi = ri_idx[b];
-                    int cmp = 0;
-                    if (rt_null[ai] != rt_null[bi])
-                        cmp = rt_null[ai] - rt_null[bi];
-                    for (uint8_t k2 = 0; k2 < n_eq && cmp == 0; k2++) {
-                        int64_t va = read_col_i64(ray_data(rt_eq[k2]), ai, rt_eq[k2]->type, rt_eq[k2]->attrs);
-                        int64_t vb = read_col_i64(ray_data(rt_eq[k2]), bi, rt_eq[k2]->type, rt_eq[k2]->attrs);
-                        if (va < vb) cmp = -1;
-                        else if (va > vb) cmp = 1;
-                    }
-                    if (cmp == 0) {
-                        if (rt_time[ai] < rt_time[bi]) cmp = -1;
-                        else if (rt_time[ai] > rt_time[bi]) cmp = 1;
-                    }
-                    tmp[t++] = (cmp <= 0) ? ri_idx[a++] : ri_idx[b++];
-                }
-                while (a < mid) tmp[t++] = ri_idx[a++];
-                while (b < hi) tmp[t++] = ri_idx[b++];
-                for (int64_t c = lo; c < hi; c++) ri_idx[c] = tmp[c];
-            }
-            }
-        }
-
-        if (tmp_hdr) scratch_free(tmp_hdr);
-    }
-
-    /* Build match array: for each left row (sorted), find best right match */
-    ray_t* match_hdr = NULL;
-    int64_t* match = (int64_t*)scratch_alloc(&match_hdr, (size_t)left_n * sizeof(int64_t));
-    if (!match && left_n > 0) {
-        scratch_free(li_hdr); scratch_free(ri_hdr);
-        if (lt_null_hdr) scratch_free(lt_null_hdr);
-        if (rt_null_hdr) scratch_free(rt_null_hdr);
-        if (lt_time_hdr) scratch_free(lt_time_hdr);
-        if (rt_time_hdr) scratch_free(rt_time_hdr);
-        if (eq_xl_hdr) scratch_free(eq_xl_hdr);
-        return ray_error("oom", NULL);
-    }
-
-    /* Two-pointer merge with best-match carry-forward.  Because the sort
-     * pins null-keyed rows to the end, skipping them is just an early
-     * "no match" for left and a plain `rp++` for right. */
-    int64_t rp = 0;        /* right pointer (only advances) */
-    int64_t best_ri = -1;  /* best right match in current partition */
-    /* Track the previous *non-null* left row for partition-change detection
-     * so a null-keyed left row doesn't force an incorrect partition reset
-     * (and so its own null keys aren't read through read_col_i64). */
-    int64_t prev_non_null_li = -1;
-    for (int64_t lp = 0; lp < left_n; lp++) {
-        int64_t li = li_idx[lp];
-
-        if (lt_null[li]) {
-            /* Null-keyed left row cannot match; in left-outer mode it
-             * still appears in the result with all right cols null. */
-            match[lp] = -1;
-            continue;
-        }
-
-        /* Detect partition change — reset best match and rewind rp.
-         * Within-column equality of two LEFT rows: raw ids compare
-         * correctly in any single domain — no translation needed. */
-        if (prev_non_null_li >= 0) {
-            int changed = 0;
-            for (uint8_t k = 0; k < n_eq; k++) {
-                int64_t cv = read_col_i64(ray_data(lt_eq[k]), li, lt_eq[k]->type, lt_eq[k]->attrs);
-                int64_t pv = read_col_i64(ray_data(lt_eq[k]), prev_non_null_li, lt_eq[k]->type, lt_eq[k]->attrs);
-                if (cv != pv) { changed = 1; break; }
-            }
-            if (changed) {
-                best_ri = -1;
-                /* Rewind rp to find start of new partition in right table */
-                while (rp > 0) {
-                    int64_t ri_prev = ri_idx[rp - 1];
-                    if (rt_null[ri_prev]) break;
-                    int eq_match = 1;
-                    for (uint8_t k = 0; k < n_eq; k++) {
-                        int64_t rv = read_col_i64(ray_data(rt_eq[k]), ri_prev, rt_eq[k]->type, rt_eq[k]->attrs);
-                        int64_t lv = asof_eq_lread(lt_eq[k], eq_xlut[k], eq_xn[k], li);
-                        if (rv < lv) { eq_match = 0; break; }
-                    }
-                    if (!eq_match) break;
-                    rp--;
-                }
-            }
-        }
-
-        /* Advance right pointer, accumulating best match */
-        while (rp < right_n) {
-            int64_t ri = ri_idx[rp];
-            if (rt_null[ri]) { rp++; continue; }  /* null keys never match */
-            int eq_cmp = 0;
-            for (uint8_t k = 0; k < n_eq && eq_cmp == 0; k++) {
-                int64_t rv = read_col_i64(ray_data(rt_eq[k]), ri, rt_eq[k]->type, rt_eq[k]->attrs);
-                int64_t lv = asof_eq_lread(lt_eq[k], eq_xlut[k], eq_xn[k], li);
-                if (rv < lv) eq_cmp = -1;
-                else if (rv > lv) eq_cmp = 1;
-            }
-            if (eq_cmp > 0) break;  /* right partition past left */
-            if (eq_cmp == 0) {
-                if (rt_time[ri] <= lt_time[li])
-                    best_ri = ri;  /* valid candidate */
-                else
-                    break;  /* right time past left time */
-            }
-            rp++;
-        }
-        match[lp] = best_ri;
-        prev_non_null_li = li;
-    }
-
-    /* Remap match[] from sorted order to original left-row order.
-     * match[lp] gives the best right row for sorted left position lp.
-     * We need match_orig[li] = best right row for original left row li. */
     ray_t* mo_hdr = NULL;
-    int64_t* match_orig = (int64_t*)scratch_alloc(&mo_hdr, (size_t)left_n * sizeof(int64_t));
-    if (!match_orig && left_n > 0) {
-        scratch_free(match_hdr); scratch_free(li_hdr); scratch_free(ri_hdr);
+    int64_t* match_orig = (int64_t*)scratch_alloc(&mo_hdr, (size_t)(left_n + 1) * sizeof(int64_t));
+    if (!match_orig || !asof_match(lt_eq, rt_eq, n_eq, eq_xlut, eq_xn, lt_time, lt_null, left_n,
+                                   rt_time_vec, time_as_float, rt_null, right_n, match_orig)) {
+        scratch_free(mo_hdr);
+        if (lt_null_hdr) scratch_free(lt_null_hdr);
+        if (rt_null_hdr) scratch_free(rt_null_hdr);
+        if (lt_time_hdr) scratch_free(lt_time_hdr);
         if (eq_xl_hdr) scratch_free(eq_xl_hdr);
         return ray_error("oom", NULL);
     }
-    for (int64_t lp = 0; lp < left_n; lp++)
-        match_orig[li_idx[lp]] = match[lp];
 
     /* Count output rows */
     int64_t out_n = 0;
@@ -2210,13 +2137,9 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         if (lidx_hdr) scratch_free(lidx_hdr);
         if (ridx_hdr) scratch_free(ridx_hdr);
         scratch_free(mo_hdr);
-        scratch_free(match_hdr);
-        scratch_free(li_hdr);
-        scratch_free(ri_hdr);
         if (lt_null_hdr) scratch_free(lt_null_hdr);
         if (rt_null_hdr) scratch_free(rt_null_hdr);
         if (lt_time_hdr) scratch_free(lt_time_hdr);
-        if (rt_time_hdr) scratch_free(rt_time_hdr);
         if (eq_xl_hdr) scratch_free(eq_xl_hdr);
         return ray_error("oom", NULL);
     }
@@ -2243,6 +2166,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         ray_t* dst_col = (ctype == RAY_SYM)
             ? ray_sym_vec_new((uint8_t)(src_col->attrs & RAY_SYM_W_MASK), out_n)
             : ray_vec_new(ctype, out_n);
+        if (RAY_IS_ERR(dst_col)) { ray_release(out); out = dst_col; break; }   /* a general column: no vector to fill */
         char* src = (char*)ray_data(src_col);
         char* dst = (char*)ray_data(dst_col);
         for (int64_t wi = 0; wi < out_n; wi++)
@@ -2263,7 +2187,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
      * rely on col_propagate_nulls_gather to set the null bit; the zero
      * bytes keep the vector well-formed when consumers ignore the null
      * bit. */
-    for (int64_t rc = 0; rc < right_out_count; rc++) {
+    for (int64_t rc = 0; rc < right_out_count && !RAY_IS_ERR(out); rc++) {
         int64_t cidx = right_out_idx[rc];
         int64_t col_name = ray_table_col_name(right_table, cidx);
         ray_t* src_col = ray_table_get_col_idx(right_table, cidx);
@@ -2273,6 +2197,7 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
         ray_t* dst_col = (ctype == RAY_SYM)
             ? ray_sym_vec_new((uint8_t)(src_col->attrs & RAY_SYM_W_MASK), out_n)
             : ray_vec_new(ctype, out_n);
+        if (RAY_IS_ERR(dst_col)) { ray_release(out); out = dst_col; break; }   /* a general column: no vector to fill */
         char* src = (char*)ray_data(src_col);
         char* dst = (char*)ray_data(dst_col);
         for (int64_t wi = 0; wi < out_n; wi++) {
@@ -2292,13 +2217,9 @@ ray_t* exec_window_join(ray_graph_t* g, ray_op_t* op,
     if (lidx_hdr) scratch_free(lidx_hdr);
     if (ridx_hdr) scratch_free(ridx_hdr);
     scratch_free(mo_hdr);
-    scratch_free(match_hdr);
-    scratch_free(li_hdr);
-    scratch_free(ri_hdr);
     if (lt_null_hdr) scratch_free(lt_null_hdr);
     if (rt_null_hdr) scratch_free(rt_null_hdr);
     if (lt_time_hdr) scratch_free(lt_time_hdr);
-    if (rt_time_hdr) scratch_free(rt_time_hdr);
     if (eq_xl_hdr) scratch_free(eq_xl_hdr);
     return out;
 }

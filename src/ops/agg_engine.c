@@ -97,6 +97,51 @@ bool agg_v2_can_handle(ray_graph_t* g, ray_op_t* op, ray_t* tbl) {
     return true;
 }
 
+/* One key column's observed range by a typed scan: *mn its least value, *range
+ * the count of values from there to its greatest.  With `nul` the width's null
+ * sentinel (its minimum) stays out of the least value and takes the offset
+ * below it, so *mn is one lower and *range one more.  False when the range
+ * reaches DENSE_MAX_SLOTS, which also keeps the subtraction inside int64. */
+static bool dense_key_span(ray_t* kc, int64_t nrows, bool nul, int64_t* mn_out, int64_t* range) {
+    const void* data = ray_data(kc);
+    int64_t mn, mx;
+    #define DENSE_MINMAX(T, NUL)                                              \
+        do { const T* p = (const T*)data; mn = mx = (int64_t)p[0];            \
+             if (nul) {                                                       \
+                 mn = INT64_MAX;                                              \
+                 for (int64_t r = 0; r < nrows; r++) {                        \
+                     int64_t v = (int64_t)p[r];                               \
+                     if (v != (NUL) && v < mn) mn = v;                        \
+                     if (v > mx) mx = v;                                      \
+                 }                                                            \
+             } else for (int64_t r = 1; r < nrows; r++) {                     \
+                 int64_t v = (int64_t)p[r];                                   \
+                 if (v < mn) mn = v;                                          \
+                 if (v > mx) mx = v;                                          \
+             } } while (0)
+    switch (kc->type) {
+        case RAY_I64: RAY_TEMPORAL64_CASES: DENSE_MINMAX(int64_t, NULL_I64); break;
+        case RAY_I32: RAY_TEMPORAL32_CASES: DENSE_MINMAX(int32_t, NULL_I32); break;
+        case RAY_I16: DENSE_MINMAX(int16_t, NULL_I16); break;
+        RAY_BYTE_CASES: case RAY_BOOL: DENSE_MINMAX(uint8_t, -1); break;
+        case RAY_SYM:
+            switch (kc->attrs & RAY_SYM_W_MASK) {
+                case RAY_SYM_W8:  DENSE_MINMAX(uint8_t, -1);  break;
+                case RAY_SYM_W16: DENSE_MINMAX(uint16_t, -1); break;
+                case RAY_SYM_W32: DENSE_MINMAX(uint32_t, -1); break;
+                default:          DENSE_MINMAX(int64_t, -1);  break; /* W64 */
+            }
+            break;
+        default: return false;
+    }
+    #undef DENSE_MINMAX
+    if (mx < mn) mn = mx = 0;        /* every row null */
+    if ((uint64_t)mx - (uint64_t)mn >= DENSE_MAX_SLOTS) return false;
+    *mn_out = mn - nul;
+    *range  = mx - mn + 1 + nul;
+    return true;
+}
+
 /* ── Dense grouping eligibility selector (mirrors group.c DA path) ────────
  * Decides whether the key tuple packs into a bounded direct-index slot space
  * (gid = sum_k (key_k - min_k)*strides[k]) so grouping can skip hashing.
@@ -148,42 +193,7 @@ bool agg_dense_plan(ray_t** key_cols, uint8_t n_keys,
             }
         }
 
-        const void* data = ray_data(kc);
-        int64_t mn, mx;
-        /* Type/width-specialized min/max — hoist agg_read_key_i64's per-row
-         * switch out of the prescan (same reason as the phaseA slot loop). */
-        #define DENSE_MINMAX(T)                                         \
-            do { const T* p = (const T*)data; mn = mx = (int64_t)p[0];  \
-                 for (int64_t r = 1; r < nrows; r++) {                  \
-                     int64_t v = (int64_t)p[r];                         \
-                     if (v < mn) mn = v;                                \
-                     if (v > mx) mx = v;                                \
-                 } } while (0)
-        switch (kc->type) {
-            case RAY_I64: RAY_TEMPORAL64_CASES: DENSE_MINMAX(int64_t); break;
-            case RAY_I32: RAY_TEMPORAL32_CASES: DENSE_MINMAX(int32_t); break;
-            case RAY_I16: DENSE_MINMAX(int16_t); break;
-            RAY_BYTE_CASES: case RAY_BOOL: DENSE_MINMAX(uint8_t); break;
-            case RAY_SYM:
-                switch (kc->attrs & RAY_SYM_W_MASK) {
-                    case RAY_SYM_W8:  DENSE_MINMAX(uint8_t);  break;
-                    case RAY_SYM_W16: DENSE_MINMAX(uint16_t); break;
-                    case RAY_SYM_W32: DENSE_MINMAX(uint32_t); break;
-                    default:          DENSE_MINMAX(int64_t);  break; /* W64 */
-                }
-                break;
-            default:
-                mn = mx = agg_read_key_i64(kc, data, 0);
-                for (int64_t r = 1; r < nrows; r++) {
-                    int64_t v = agg_read_key_i64(kc, data, r);
-                    if (v < mn) mn = v;
-                    if (v > mx) mx = v;
-                }
-        }
-        #undef DENSE_MINMAX
-        if (mx < mn) return false;       /* no live values */
-        out->mins[k]   = mn;
-        out->ranges[k] = mx - mn + 1;
+        if (!dense_key_span(kc, nrows, false, &out->mins[k], &out->ranges[k])) return false;
     }
 
     /* Composite packing; bail if a range is non-positive or the product would
@@ -2808,6 +2818,31 @@ static int agg_group_keys_dense(ray_t** key_cols, int64_t nrows,
     }
     for (int64_t s = 0; s < dp->total_slots; s++) slot2gid[s] = -1;
     int64_t ngroups = 0;
+    /* one key: the cell width is hoisted out of the row loop (agg_read_key_i64 would switch on it per row) */
+    #define DENSE_ONE(T)                                                \
+        do { const T* p = (const T*)data[0]; int64_t mn = dp->mins[0];  \
+             uint32_t* gids = out->gids;                                \
+             for (int64_t r = 0; r < nrows; r++) {                      \
+                 int32_t* sp = &slot2gid[(int64_t)p[r] - mn];           \
+                 if (*sp < 0) { *sp = (int32_t)ngroups; out->first_row[ngroups++] = r; } \
+                 gids[r] = (uint32_t)*sp;                               \
+             }                                                          \
+             out->ngroups = ngroups; ray_free_raw(slot2gid); return 0; } while (0)
+    if (dp->n_keys == 1) switch (key_cols[0]->type) {
+        case RAY_I64: RAY_TEMPORAL64_CASES: DENSE_ONE(int64_t);
+        case RAY_I32: RAY_TEMPORAL32_CASES: DENSE_ONE(int32_t);
+        case RAY_I16: DENSE_ONE(int16_t);
+        RAY_BYTE_CASES: case RAY_BOOL: DENSE_ONE(uint8_t);
+        case RAY_SYM:
+            switch (key_cols[0]->attrs & RAY_SYM_W_MASK) {
+                case RAY_SYM_W8:  DENSE_ONE(uint8_t);
+                case RAY_SYM_W16: DENSE_ONE(uint16_t);
+                case RAY_SYM_W32: DENSE_ONE(uint32_t);
+                default:          DENSE_ONE(int64_t);
+            }
+        default: break;
+    }
+    #undef DENSE_ONE
     for (int64_t r = 0; r < nrows; r++) {
         int64_t slot = 0;
         for (uint8_t k = 0; k < dp->n_keys; k++)
@@ -2827,6 +2862,118 @@ static int agg_group_keys_dense(ray_t** key_cols, int64_t nrows,
     out->ngroups = ngroups;
     ray_free_raw(slot2gid);
     return 0;
+}
+
+/* gids[r] += (key[r] - mn) * stride, in the column's own width; with `nul` the null sentinel adds nothing. */
+static void dense_add_key(ray_t* kc, int64_t nrows, int64_t mn, bool nul, uint32_t stride, uint32_t* gids) {
+    const void* data = ray_data(kc);
+    #define DENSE_ADD(T, NUL)                                                              \
+        do { const T* p = (const T*)data;                                                  \
+             for (int64_t r = 0; r < nrows; r++) {                                         \
+                 int64_t v = (int64_t)p[r];                                                \
+                 gids[r] += (nul & (v == (NUL))) ? 0 : (uint32_t)(v - mn) * stride;        \
+             } } while (0)
+    switch (kc->type) {
+        case RAY_I64: RAY_TEMPORAL64_CASES: DENSE_ADD(int64_t, NULL_I64); break;
+        case RAY_I32: RAY_TEMPORAL32_CASES: DENSE_ADD(int32_t, NULL_I32); break;
+        case RAY_I16: DENSE_ADD(int16_t, NULL_I16); break;
+        RAY_BYTE_CASES: case RAY_BOOL: DENSE_ADD(uint8_t, -1); break;
+        default:
+            switch (kc->attrs & RAY_SYM_W_MASK) {
+                case RAY_SYM_W8:  DENSE_ADD(uint8_t, -1);  break;
+                case RAY_SYM_W16: DENSE_ADD(uint16_t, -1); break;
+                case RAY_SYM_W32: DENSE_ADD(uint32_t, -1); break;
+                default:          DENSE_ADD(int64_t, -1);  break;
+            }
+    }
+    #undef DENSE_ADD
+}
+
+/* Rewrites each packed slot in gids (all below n_slots) as its group id, numbered on first sight; -1 as soon as
+ * there are more than max_groups, with gids left half rewritten. */
+static int64_t dense_renumber(uint32_t* gids, int64_t nrows, int64_t n_slots, int64_t max_groups,
+                              int32_t* slot2gid, int64_t* first_row) {
+    for (int64_t s = 0; s < n_slots; s++) slot2gid[s] = -1;
+    int64_t ngroups = 0;
+    for (int64_t r = 0; r < nrows; r++) {
+        int32_t* sp = &slot2gid[gids[r]];
+        if (*sp < 0) {
+            if (ngroups == max_groups) return -1;
+            *sp = (int32_t)ngroups; first_row[ngroups++] = r;
+        }
+        gids[r] = (uint32_t)*sp;
+    }
+    return ngroups;
+}
+
+/* Direct-index grouping a stage at a time.  Keys pack into one slot while their
+ * ranges multiply within `budget`; the slots are then renumbered to the groups
+ * seen so far and the next key packs on top of those.  So what must fit is
+ * (groups so far) x (the next key's range), never the product of every range,
+ * and a symbol key's sparse ids cost nothing once renumbered.  Returns as
+ * agg_group_keys_direct does. */
+static int agg_group_keys_staged(ray_t** key_cols, uint8_t n_keys, int64_t nrows, int64_t budget, agg_groups_t* out) {
+    int64_t mins[16], ranges[16];
+    bool nul[16], unscanned[16];
+    if (n_keys < 1 || n_keys > 16 || nrows <= 0) return 0;
+    for (uint8_t k = 0; k < n_keys; k++) {
+        ray_t* kc = key_cols[k];
+        bool flagged = (kc->attrs & RAY_ATTR_HAS_NULLS) != 0;
+        nul[k] = unscanned[k] = false;
+        switch (kc->type) {
+            case RAY_I64: case RAY_I32: case RAY_I16: RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: nul[k] = flagged; break;
+            RAY_BYTE_CASES: case RAY_BOOL: break;
+            case RAY_SYM: {
+                /* a narrow width or a small domain bounds the ids without a scan */
+                int64_t w = kc->attrs & RAY_SYM_W_MASK;
+                int64_t dc = w == RAY_SYM_W8 ? 256 : w == RAY_SYM_W16 ? 65536 : ray_sym_domain_count(ray_sym_vec_domain(kc));
+                if (dc > 0 && dc <= 65536) { mins[k] = 0; ranges[k] = dc; unscanned[k] = true; continue; }
+                break;
+            }
+            default: return 0;
+        }
+        if (!dense_key_span(kc, nrows, nul[k], &mins[k], &ranges[k]) || ranges[k] > budget) return 0;
+    }
+    int32_t* slot2gid = ray_alloc_raw((size_t)budget * sizeof(int32_t));
+    out->gids      = ray_alloc_raw((size_t)nrows * sizeof(uint32_t));
+    out->first_row = ray_alloc_raw((size_t)nrows * sizeof(int64_t));
+    int rc = -1;
+    if (!slot2gid || !out->gids || !out->first_row) goto fail;
+    rc = 0;
+    memset(out->gids, 0, (size_t)nrows * sizeof(uint32_t));
+    int64_t ngroups = 1, n_slots = 1;
+    for (uint8_t k = 0; k < n_keys; k++) {
+        if (n_slots > budget / ranges[k] && unscanned[k] &&
+            !dense_key_span(key_cols[k], nrows, false, &mins[k], &ranges[k])) goto fail;
+        int64_t fit = budget / ranges[k];
+        if (n_slots > fit) {
+            /* a prefix with too many groups for this key stops the renumbering at once: the caller hashes */
+            if (n_slots == ngroups) goto fail;
+            ngroups = dense_renumber(out->gids, nrows, n_slots, fit, slot2gid, out->first_row);
+            if (ngroups < 0) goto fail;
+            n_slots = ngroups;
+        }
+        dense_add_key(key_cols[k], nrows, mins[k], nul[k], (uint32_t)n_slots, out->gids);
+        n_slots *= ranges[k];
+    }
+    out->ngroups = dense_renumber(out->gids, nrows, n_slots, nrows, slot2gid, out->first_row);
+    ray_free_raw(slot2gid);
+    return 1;
+fail:
+    ray_free_raw(slot2gid); ray_free_raw(out->gids); ray_free_raw(out->first_row);
+    out->gids = NULL; out->first_row = NULL;
+    return rc;
+}
+
+int agg_group_keys_direct(ray_t** key_cols, uint8_t n_keys, int64_t nrows, agg_groups_t* out) {
+    /* the slot table must cost no more than the hash table it replaces (2-4 slots a row) */
+    int64_t budget = 4 * nrows + 1024 < DENSE_MAX_SLOTS ? 4 * nrows + 1024 : DENSE_MAX_SLOTS;
+    if (n_keys == 1 && !(key_cols[0]->attrs & RAY_ATTR_HAS_NULLS)) {
+        dense_plan_t dp;
+        if (!agg_dense_plan(key_cols, n_keys, NULL, 0, nrows, &dp) || dp.total_slots > budget) return 0;
+        return agg_group_keys_dense(key_cols, nrows, &dp, out) == 0 ? 1 : -1;
+    }
+    return agg_group_keys_staged(key_cols, n_keys, nrows, budget, out);
 }
 
 /* Gather one column's first-of-group values (first_row[gi]) by type: STR via the

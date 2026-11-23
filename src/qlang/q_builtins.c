@@ -350,9 +350,11 @@ void q_builtins_register(void) {
         { ".Q.c.hap",  q_dotq_hap_fn  },
         { ".Q.c.ld",   q_ctx_ld_fn    },
         { ".Q.c.member", q_io_member_fn }, /* an archive member: .Q.fsn streams it forward */
-        /* No public `.Q` twins — producer seams for q.q's asc/xasc, not keywords. */
+        /* No public `.Q` twins — producer seams for q.q's asc/xasc/med, not keywords. */
         { ".Q.c.sorted", q_attr_stamp_sorted },
         { ".Q.c.parted", q_attr_stamp_parted },
+        { ".Q.c.asc", q_sort_asc_values }, { ".Q.c.desc", q_sort_desc_values },
+        { ".Q.c.mid", q_agg_mid },
     };
     for (size_t i = 0; i < sizeof dotq_c_unary / sizeof *dotq_c_unary; i++)
         bind_unary(dotq_c_unary[i].name, dotq_c_unary[i].fn);

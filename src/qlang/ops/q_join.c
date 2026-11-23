@@ -26,8 +26,9 @@
  * PR #56's q_join.c (algorithms twice-reviewed there; the parallel-file
  * placement was the failure mode).  THE core rule: the hash/asof MATCHING is
  * ALWAYS the engine's (ray_left_join_fn / ray_asof_join_fn / window-join,
- * src/ops/join.c machinery), but a nested key, which that hash reads by its
- * pointer, matches through row Find (qj_find_pairs); this section only prepares rowid-augmented key
+ * src/ops/join.c machinery) or row Find's (qj_find_pairs: a nested key, which
+ * that hash reads by its pointer, and the typed keys of qj_keys_find_lane);
+ * this section only prepares rowid-augmented key
  * tables, reorders the engine's match relation to kdb row order, and
  * assembles result columns by vector gather.  Keyed-table primitives are the
  * single-home helpers (q_type_is_keyed in ops/q_table.c, q_bang_enkey in q_bang.c,
@@ -53,17 +54,27 @@ static int qj_same_schema(ray_t* a, ray_t* b) {
     return 1;
 }
 
+/* The largest index of a gather map, INT64_MAX when it holds a miss (< 0): every index hits a column of len > it. */
+static int64_t qj_idx_max(const int64_t* idx, int64_t n) {
+    int64_t hi = -1;
+    for (int64_t i = 0; i < n; i++) {
+        if (idx[i] < 0) return INT64_MAX;
+        hi = idx[i] > hi ? idx[i] : hi;
+    }
+    return hi;
+}
+
 /* Gather one column by an index map (idx[i] < 0 => null cell).  A char
  * column is a -RAY_STR atom (string model) — gathered char-by-char with a
  * blank for null; everything else goes through ray_at + collapse.  Owned. */
-static ray_t* qj_col_gather(ray_t* col, const int64_t* idx, int64_t n) {
+static ray_t* qj_col_gather_max(ray_t* col, const int64_t* idx, int64_t n, int64_t hi) {
     if (col && col->type == RAY_ENUM) {          /* strip -> gather -> stamp:
                                                   * the base paths are enum-blind
                                                   * and 20h must survive a
                                                   * group/distinct/merge gather */
         ray_t* p = q_enum_positions_view(col);
         if (!p || RAY_IS_ERR(p)) return p ? p : q_err(QE_OOM);
-        ray_t* g = qj_col_gather(p, idx, n);
+        ray_t* g = qj_col_gather_max(p, idx, n, hi);
         ray_release(p);
         return q_enum_stamp(g, q_enum_domain(col));
     }
@@ -74,24 +85,22 @@ static ray_t* qj_col_gather(ray_t* col, const int64_t* idx, int64_t n) {
         char stackb[1024];
         char* b = (n < (int64_t)sizeof stackb) ? stackb : malloc((size_t)n + 1);
         if (!b) return q_err(QE_WSFULL);
-        for (int64_t i = 0; i < n; i++)
-            b[i] = (idx[i] < 0 || idx[i] >= sl) ? ' ' : sp[idx[i]];
+        if (hi < sl)
+            for (int64_t i = 0; i < n; i++) b[i] = sp[idx[i]];
+        else
+            for (int64_t i = 0; i < n; i++) b[i] = (idx[i] < 0 || idx[i] >= sl) ? ' ' : sp[idx[i]];
         ray_t* r = ray_str(b, (size_t)n);
         if (b != stackb) free(b);
         return r;
     }
     /* Dense fast path for typed vectors: every index a hit -> ONE engine
-     * gather (vectorized memcpy loops).  Any miss falls to the boxed
-     * ray_at path below, whose per-cell null-fill is the miss law; LIST
-     * columns stay boxed too (that path collapses homogeneous results).
+     * gather (vectorized memcpy loops).  Any miss falls to the index home
+     * below, whose null-fill is the miss law; LIST columns go there too
+     * (a homogeneous result collapses after).
      * gather_by_idx never mutates idx — the cast only drops the const
      * this wrapper adds. */
-    if (col && ray_is_vec(col) && col->type != RAY_LIST) {
-        int64_t len = q_count(col);
-        int64_t hits = 0;
-        while (hits < n && idx[hits] >= 0 && idx[hits] < len) hits++;
-        if (hits == n) return gather_by_idx(col, (int64_t*)idx, n);
-    }
+    if (col && ray_is_vec(col) && col->type != RAY_LIST && hi < q_count(col))
+        return gather_by_idx(col, (int64_t*)idx, n);
     ray_t* iv = ray_vec_new(RAY_I64, n > 0 ? n : 1);
     if (RAY_IS_ERR(iv)) return iv;
     iv->len = n;
@@ -99,8 +108,9 @@ static ray_t* qj_col_gather(ray_t* col, const int64_t* idx, int64_t n) {
         ((int64_t*)ray_data(iv))[i] = (idx[i] < 0) ? 0 : idx[i];
         if (idx[i] < 0) ray_vec_set_null(iv, i, true);
     }
-    /* a general list's miss is q's, shaped by its first item; base indexing answers 0N */
-    ray_t* g = col && col->type == RAY_LIST ? q_index_at(col, &iv, 1) : ray_at_fn(col, iv);
+    /* a miss is q's: the vector's own null, a general list's shaped by its first item; base indexing answers a boxed 0N */
+    int q_miss = col && (col->type == RAY_LIST || (ray_is_vec(col) && col->type != RAY_STR));
+    ray_t* g = q_miss ? q_index_at(col, &iv, 1) : ray_at_fn(col, iv);
     ray_release(iv);
     if (!g || RAY_IS_ERR(g)) return g ? g : q_err(QE_TYPE);
     /* a selected general column stays general when its cells are dicts (TorQ pubsub.q:15,64,97 upserts a () after) */
@@ -110,14 +120,19 @@ static ray_t* qj_col_gather(ray_t* col, const int64_t* idx, int64_t n) {
     return cg;
 }
 
+static ray_t* qj_col_gather(ray_t* col, const int64_t* idx, int64_t n) {
+    return qj_col_gather_max(col, idx, n, qj_idx_max(idx, n));
+}
+
 /* Gather rows of table `t` by index map (idx[i] < 0 => null row cells). */
 ray_t* qj_table_gather_idx(ray_t* t, const int64_t* idx, int64_t n) {
+    int64_t hi = qj_idx_max(idx, n);
     int64_t nc = ray_table_ncols(t);
     ray_t* out = ray_table_new(nc > 0 ? nc : 1);
     if (RAY_IS_ERR(out)) return out;
     for (int64_t c = 0; c < nc && !RAY_IS_ERR(out); c++) {
         ray_t* col = ray_table_get_col_idx(t, c);          /* borrowed */
-        ray_t* cg = qj_col_gather(col, idx, n);
+        ray_t* cg = qj_col_gather_max(col, idx, n, hi);
         if (!cg || RAY_IS_ERR(cg)) { ray_release(out); return cg ? cg : q_err(QE_TYPE); }
         out = ray_table_add_col(out, ray_table_col_name(t, c), cg);
         ray_release(cg);
@@ -248,6 +263,26 @@ static ray_t* qj_keys_from(ray_t* t, ray_t* from, ray_t* keys, int64_t lead) {
     return out;
 }
 
+/* Typed keys row Find serves better than the hash join, each one lane on both sides: a first-match relation (one
+ * probe pass, answered in row order; the two compare such cells alike, a null equal to a null only), and any
+ * relation over a lane the hash join reads ONE BYTE of (join.c read_col_i64: real, datetime, guid). */
+static int qj_keys_find_lane(ray_t* x, ray_t* y, ray_t* keys, int all) {
+    ray_t** ke = (ray_t**)ray_data(keys);
+    int narrow = 0;
+    for (int64_t i = 0, nk = q_count(keys); i < nk; i++) {
+        ray_t* xc = ray_table_get_col(x, ke[i]->i64);
+        ray_t* yc = ray_table_get_col(y, ke[i]->i64);
+        if (!xc || !yc || xc->type != yc->type) return 0;
+        switch (xc->type) {
+            case RAY_F32: case RAY_GUID: RAY_TEMPORALF_CASES: narrow = 1; break;
+            case RAY_BOOL: RAY_BYTE_CASES: case RAY_I16: case RAY_I32: case RAY_I64: case RAY_F64: case RAY_SYM:
+            RAY_TEMPORAL32_CASES: RAY_TEMPORAL64_CASES: break;
+            default: return 0;
+        }
+    }
+    return !all || narrow;
+}
+
 /* A key column that is not a typed vector: the hash join reads a nested cell by its pointer (join.c hash_row_keys). */
 static int qj_keys_nested(ray_t* t, ray_t* keys) {
     ray_t** ke = (ray_t**)ray_data(keys);
@@ -258,7 +293,7 @@ static int qj_keys_nested(ray_t* t, ray_t* keys) {
     return 0;
 }
 
-/* The relation for nested keys, matched by row Find (`~` without tolerance): x row l's first y match is (yk?xk)[l], and `all` adds
+/* The relation matched by row Find (`~` without tolerance): x row l's first y match is (yk?xk)[l], and `all` adds
  * the rest of its class, the y rows whose own first match (yk?yk) is the same row.  qj_join_pairs' contract. */
 static int64_t qj_find_pairs(ray_t* x, ray_t* y, ray_t* keys, int all, qj_pair_t** out, ray_t** err) {
     ray_t* o[4] = { NULL, NULL, NULL, NULL };                                /* xk, yk, yk?xk, yk?yk */
@@ -303,7 +338,8 @@ static int64_t qj_find_pairs(ray_t* x, ray_t* y, ray_t* keys, int all, qj_pair_t
 static int64_t qj_join_pairs(ray_t* x, ray_t* y, ray_t* keys, int all,
                              qj_pair_t** out, ray_t** err) {
     *out = NULL; *err = NULL;
-    if (qj_keys_nested(x, keys) || qj_keys_nested(y, keys)) return qj_find_pairs(x, y, keys, all, out, err);
+    if (qj_keys_nested(x, keys) || qj_keys_nested(y, keys) || qj_keys_find_lane(x, y, keys, all))
+        return qj_find_pairs(x, y, keys, all, out, err);
     int64_t lrid = qj_tmp_colname("qjl", x, y);
     int64_t rrid = qj_tmp_colname("qjr", x, y);
     ray_t* kt[2];

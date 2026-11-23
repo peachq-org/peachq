@@ -130,6 +130,10 @@ void q_dbg_frame_push(ray_t* lam) {
     g_live_depth++;
 }
 
+ray_t* q_dbg_frame_top(void) {
+    return g_live_depth > 0 && g_live_depth <= DBG_LIVE_MAX ? g_live[g_live_depth - 1] : NULL;
+}
+
 static int is_text(const ray_t* v) { return v->type == RAY_CHARV; }
 static int is_view(const ray_t* v) { return v->type == RAY_LIST; }   /* a view recalculation: (text;pos;file;line) */
 static ray_t* live_lam(int i);

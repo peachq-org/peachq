@@ -1085,11 +1085,22 @@ ray_t* gather_by_idx(ray_t* vec, int64_t* idx, int64_t n) {
     case 16: for (int64_t i = 0; i < n; i++) memcpy(dst + i*16, src + idx[i]*16, 16); break;
     }
 
-    /* Propagate null bitmap */
+    /* the copy carried every null sentinel: a NaN is re-canonicalised as ray_vec_set_null writes it, and only the
+     * HAS_NULLS flag is left to set */
     if (has_nulls) {
-        for (int64_t i = 0; i < n; i++)
-            if (ray_vec_is_null(vec, idx[i]))
-                ray_vec_set_null(result, i, true);
+        bool any = false;
+        if (type == RAY_F64 || type == RAY_DATETIME) {
+            double* d = (double*)dst;
+            for (int64_t i = 0; i < n; i++)
+                if (d[i] != d[i]) { d[i] = NULL_F64; any = true; }
+        } else if (type == RAY_F32) {
+            float* f = (float*)dst;
+            for (int64_t i = 0; i < n; i++)
+                if (f[i] != f[i]) { f[i] = NULL_F32; any = true; }
+        } else {
+            for (int64_t i = 0; i < n && !any; i++) any = ray_vec_is_null(vec, idx[i]);
+        }
+        if (any) result->attrs |= RAY_ATTR_HAS_NULLS;
     }
 
     return result;

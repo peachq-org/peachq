@@ -417,7 +417,8 @@ static int64_t clock_unit_ns(int8_t t) {
     }
 }
 
-typedef enum { TL_NONE, TL_RESCALE, TL_TS_CLOCK, TL_DAYS_MONTH, TL_TS_MONTH, TL_MONTH_DATE, TL_DT_DATE, TL_DT_TIME } tlane_e;
+typedef enum { TL_NONE, TL_RESCALE, TL_TS_CLOCK, TL_DAYS_MONTH, TL_TS_MONTH, TL_MONTH_DATE, TL_DT_DATE, TL_DT_TIME,
+               TL_DT_CLOCK } tlane_e;
 
 static tlane_e temporal_lane(int8_t st, int8_t tt) {
     if (st == tt) return TL_NONE;
@@ -425,7 +426,8 @@ static tlane_e temporal_lane(int8_t st, int8_t tt) {
     if (st == RAY_TIMESTAMP) return clock_unit_ns(tt) ? TL_TS_CLOCK : tt == RAY_MONTH ? TL_TS_MONTH : TL_NONE;
     if (st == RAY_DATE && tt == RAY_MONTH) return TL_DAYS_MONTH;
     if (st == RAY_MONTH && tt == RAY_DATE) return TL_MONTH_DATE;
-    if (st == RAY_DATETIME) return tt == RAY_DATE ? TL_DT_DATE : tt == RAY_TIME ? TL_DT_TIME : TL_NONE;
+    if (st == RAY_DATETIME)
+        return tt == RAY_DATE ? TL_DT_DATE : tt == RAY_TIME ? TL_DT_TIME : clock_unit_ns(tt) ? TL_DT_CLOCK : TL_NONE;
     return TL_NONE;
 }
 
@@ -463,7 +465,7 @@ static ray_t* cast_temporal_vec(int8_t tag, ray_t* x) {
         int64_t v = 0, r = 0;
         double f = 0.0;
         int null;
-        if (st == RAY_DATETIME) { f = ((const double*)src)[i]; null = isnan(f); }
+        if (st == RAY_DATETIME) { f = ((const double*)src)[i]; null = k == TL_DT_CLOCK ? !isfinite(f) : isnan(f); }
         else if (wide_in) { v = ((const int64_t*)src)[i]; null = v == NULL_I64; }
         else { v = ((const int32_t*)src)[i]; null = v == NULL_I32; }
         if (!null) {
@@ -480,6 +482,7 @@ static ray_t* cast_temporal_vec(int8_t tag, ray_t* x) {
             case TL_MONTH_DATE: r = month_payload_as_days(v); break;
             case TL_DT_DATE:    datetime_to_day_ns(f, &day, &tod); r = day; break;
             case TL_DT_TIME:    datetime_to_day_ns(f, &day, &tod); r = tod / 1000000LL; break;
+            case TL_DT_CLOCK:   datetime_to_day_ns(f, &day, &tod); r = tod / du; break;
             case TL_NONE:       break;
             }
         }

@@ -304,15 +304,31 @@ ray_t* q_table_cols_from_accs(const int64_t* names, ray_t** accs, int64_t nc, ra
  * (agg_group_keys) when every compared column qualifies, else each row's group is
  * its first occurrence, the key columns' self-Find — THE grouping home for `group`,
  * `xgroup` and row dedup alike. */
+/* A boxed key column as each row's first equal row, under the cell law the self-Find below applies to it, so the
+ * dense core groups it as that Find would.  NULL (the Find answers) for a hole, or a cell that misses itself. */
+static ray_t* boxed_first_rows(ray_t* col) {
+    int64_t n = q_count(col);
+    if (q_list_has_hole(col)) return NULL;
+    ray_t* f = ray_find_rows_fn(&col, &col, 1, n, q_match_exact);
+    if (f && !RAY_IS_ERR(f) && !(f->attrs & RAY_ATTR_HAS_NULLS)) return f;
+    if (f && RAY_IS_ERR(f)) ray_error_free(f);
+    else if (f) ray_release(f);
+    return NULL;
+}
+
 int64_t q_table_row_groups(ray_t* t, int64_t ncmp, int64_t* gid, int64_t* rep) {
     int64_t nr = q_count(t);
     int64_t ng = 0;
     int dense = ncmp >= 1 && ncmp <= 16 && nr > 0;
     /* an ENUM key column groups by its POSITIONS (owner amendment 2026-08-22:
      * no decay through the domain) — the i64 lane the dense core already
-     * hashes; sub[] holds the position views to release. */
+     * hashes; a boxed one by its first equal rows; sub[] holds those columns to release. */
     ray_t* sub[16] = { 0 };
     int64_t nsub = ncmp <= 16 ? ncmp : 0;   /* sub[] never fills past dense's cap */
+    for (int64_t c = 0; c < ncmp && dense; c++) {        /* a lone boxed key: the self-Find below IS its answer */
+        ray_t* col = ray_table_get_col_idx(t, c);
+        dense = col && (col->type == RAY_ENUM || (col->type == RAY_LIST && ncmp > 1) || q_type_is_dense_group_col(col));
+    }
     for (int64_t c = 0; c < ncmp && dense; c++) {
         ray_t* col = ray_table_get_col_idx(t, c);
         if (col && col->type == RAY_ENUM) {
@@ -323,6 +339,9 @@ int64_t q_table_row_groups(ray_t* t, int64_t ncmp, int64_t* gid, int64_t* rep) {
                 dense = 0;
                 break;
             }
+            col = sub[c];
+        } else if (col && col->type == RAY_LIST) {
+            sub[c] = boxed_first_rows(col);
             col = sub[c];
         }
         dense = q_type_is_dense_group_col(col);
@@ -1041,15 +1060,17 @@ static ray_t* group_dict(ray_t* keys, const int64_t* gid, int64_t* cnt, int64_t 
     for (int64_t j = 0; j < ng && !RAY_IS_ERR(vals); j++) {
         ray_t* iv = ray_vec_new(RAY_I64, cnt[j] > 0 ? cnt[j] : 1);
         if (RAY_IS_ERR(iv)) { ray_release(vals); vals = iv; break; }
-        iv->len = 0;
+        iv->len = cnt[j];
         vals = ray_list_append(vals, iv);
         ray_release(iv);
     }
     if (RAY_IS_ERR(vals)) { ray_release(keys); return vals; }
     ray_t** vs = (ray_t**)ray_data(vals);
+    /* cnt turns into each list's write offset: a length bumped in the list's own header stalls the fill */
+    memset(cnt, 0, sizeof(int64_t) * (size_t)(ng > 0 ? ng : 1));
     for (int64_t r = 0; r < nr; r++) {
-        ray_t* iv = vs[gid[r]];
-        ((int64_t*)ray_data(iv))[iv->len++] = r;
+        int64_t g = gid[r];
+        ((int64_t*)ray_data(vs[g]))[cnt[g]++] = r;
     }
     return ray_dict_new(keys, vals);
 }
@@ -1141,8 +1162,60 @@ ray_t* q_group_wrap(ray_t* x) {
     return ray_group_fn(x);
 }
 
-/* q `ungroup x` — inverse of xgroup: explode nested list columns, repeating
- * simple cells; ragged nested rows -> 'length.  Keyed tables flatten first. */
+/* Item count of row r: the nested cells' common count (1 when none is nested), else 'length; a row dict is one
+ * cell and votes for no count. */
+static ray_t* ungroup_counts(ray_t* flat, int64_t nc, int64_t nr, int64_t* cnt) {
+    for (int64_t r = 0; r < nr; r++) {
+        cnt[r] = -1;
+        for (int64_t c = 0; c < nc; c++) {
+            ray_t* col = ray_table_get_col_idx(flat, c);
+            if (!col || col->type != RAY_LIST) continue;
+            ray_t* cell = q_join_item(col, r);
+            if (!cell || RAY_IS_ERR(cell)) return cell ? cell : q_err(QE_OOM);
+            int nested = (q_type_is_iter(cell) && cell->type != RAY_TABLE) || cell->type == RAY_STR || cell->type == -RAY_STR;
+            int64_t l = nested ? q_count(cell) : 1;
+            int row = cell->type == RAY_DICT;
+            ray_release(cell);
+            if (row) continue;
+            if (cnt[r] < 0) cnt[r] = l;
+            else if (l != cnt[r]) return q_err(QE_LENGTH);
+        }
+        if (cnt[r] < 0) cnt[r] = 1;
+    }
+    return NULL;
+}
+
+/* A nested column whose cells are all simple vectors of one type is the raze of its cells. */
+static ray_t* ungroup_raze(ray_t* col) {
+    int64_t n = q_count(col);
+    ray_t** cells = (ray_t**)ray_data(col);
+    int8_t t = cells[0] ? cells[0]->type : 0;
+    if (t <= 0 || t == RAY_LIST || t == RAY_STR || t == RAY_TABLE || t == RAY_DICT || q_enum_is(cells[0])) return NULL;
+    for (int64_t r = 0; r < n; r++)
+        if (!cells[r] || cells[r]->type != t || !ray_is_vec(cells[r])) return NULL;
+    return q_raze_wrap(col);
+}
+
+/* A column's ungrouped cells one by one: a nested cell explodes into its items, any other repeats. */
+static ray_t* ungroup_cells(ray_t* col, int64_t nr, const int64_t* cnt, int64_t total) {
+    ray_t* acc = ray_list_new(total > 0 ? total : 1);
+    for (int64_t r = 0; r < nr && !RAY_IS_ERR(acc); r++) {
+        ray_t* cell = q_join_item(col, r);
+        if (!cell || RAY_IS_ERR(cell)) { ray_release(acc); return cell ? cell : q_err(QE_OOM); }
+        int explode = col->type == RAY_LIST && cell->type != RAY_DICT;
+        for (int64_t i = 0; i < cnt[r] && !RAY_IS_ERR(acc); i++) {
+            ray_t* e = explode ? q_join_item(cell, i) : cell;
+            if (!e || RAY_IS_ERR(e)) { ray_release(cell); ray_release(acc); return e ? e : q_err(QE_OOM); }
+            acc = ray_list_append(acc, e);
+            if (explode) ray_release(e);
+        }
+        ray_release(cell);
+    }
+    return acc;
+}
+
+/* q `ungroup x` — inverse of xgroup, column by column: a nested column razes, every other column is gathered by
+ * the rows' item counts (`where count each`); ragged nested rows -> 'length.  Keyed tables flatten first. */
 ray_t* q_ungroup_wrap(ray_t* x) {
     int64_t sym;
     ray_t* t = q_table_operand(x, &sym);
@@ -1151,66 +1224,28 @@ ray_t* q_ungroup_wrap(ray_t* x) {
     if (!flat || RAY_IS_ERR(flat)) return flat;
     int64_t nc = ray_table_ncols(flat);
     int64_t nr = q_count(flat);
+    int64_t* cnt = malloc((size_t)(nr > 0 ? nr : 1) * sizeof *cnt);
     ray_t** acc = malloc((size_t)(nc > 0 ? nc : 1) * sizeof *acc);
-    if (!acc) { ray_release(flat); return q_err(QE_OOM); }
+    ray_t* err = cnt && acc ? ungroup_counts(flat, nc, nr, cnt) : q_err(QE_OOM);
+    int64_t total = 0;
+    for (int64_t r = 0; r < nr && !err; r++) total += cnt[r];
+    int64_t* ids = err ? NULL : malloc((size_t)(total > 0 ? total : 1) * sizeof *ids);
+    if (!err && !ids) err = q_err(QE_OOM);
+    if (err) { free(cnt); free(acc); free(ids); ray_release(flat); return err; }
+    for (int64_t r = 0, k = 0; r < nr; r++)
+        for (int64_t i = 0; i < cnt[r]; i++) ids[k++] = r;
+    /* an empty result keeps today's general-list columns, so only a non-empty one takes the vector routes */
     for (int64_t c = 0; c < nc; c++) {
-        acc[c] = ray_list_new(nr > 0 ? nr : 1);
-        if (RAY_IS_ERR(acc[c])) {
-            ray_t* err = acc[c];
-            for (int64_t j = 0; j < c; j++) ray_release(acc[j]);
-            free(acc);
-            ray_release(flat);
-            return err;
-        }
-    }
-    ray_t* err = NULL;
-    for (int64_t r = 0; r < nr && !err; r++) {
-        int64_t cnt = -1;
-        for (int64_t c = 0; c < nc && !err; c++) {
-            ray_t* col = ray_table_get_col_idx(flat, c);
-            if (col && col->type == RAY_LIST) {
-                ray_t* cell = q_join_item(col, r);
-                if (!cell || RAY_IS_ERR(cell)) { err = cell ? cell : q_err(QE_OOM); break; }
-                int nested = (q_type_is_iter(cell) && cell->type != RAY_TABLE) || cell->type == RAY_STR || cell->type == -RAY_STR;
-                int64_t l = nested ? q_count(cell) : 1;
-                int row = cell->type == RAY_DICT;
-                ray_release(cell);
-                if (row) continue;
-                if (cnt < 0) cnt = l;
-                else if (l != cnt) err = q_err(QE_LENGTH);
-            }
-        }
-        if (err) break;
-        if (cnt < 0) cnt = 1;                             /* no nested column */
-        for (int64_t c = 0; c < nc && !err; c++) {
-            ray_t* col = ray_table_get_col_idx(flat, c);
-            ray_t* cell = q_join_item(col, r);
-            if (!cell || RAY_IS_ERR(cell)) { err = cell ? cell : q_err(QE_OOM); break; }
-            if (col && col->type == RAY_LIST && cell->type != RAY_DICT) {   /* explode nested cell; a row dict is one */
-                for (int64_t i = 0; i < cnt && !err; i++) {
-                    ray_t* e = q_join_item(cell, i);
-                    if (!e || RAY_IS_ERR(e)) { err = e ? e : q_err(QE_OOM); break; }
-                    acc[c] = ray_list_append(acc[c], e);
-                    ray_release(e);
-                    if (RAY_IS_ERR(acc[c])) err = acc[c];
-                }
-            } else {                                      /* repeat simple cell */
-                for (int64_t i = 0; i < cnt && !err; i++) {
-                    acc[c] = ray_list_append(acc[c], cell);
-                    if (RAY_IS_ERR(acc[c])) err = acc[c];
-                }
-            }
-            ray_release(cell);
-        }
-    }
-    if (err) {
-        for (int64_t c = 0; c < nc; c++)
-            if (acc[c] && !RAY_IS_ERR(acc[c])) ray_release(acc[c]);
-        free(acc);
-        ray_release(flat);
-        return err;
+        ray_t* col = ray_table_get_col_idx(flat, c);
+        ray_t* v = NULL;
+        if (total > 0 && col && col->type == RAY_LIST) v = ungroup_raze(col);
+        else if (total > 0 && col && ray_is_vec(col) && col->type != RAY_STR && col->type != RAY_TABLE && !q_enum_is(col))
+            v = gather_by_idx(col, ids, total);
+        acc[c] = v ? v : col ? ungroup_cells(col, nr, cnt, total) : q_err(QE_OOM);
     }
     ray_t* out = q_table_cols_from_accs((const int64_t*)ray_data(ray_table_schema(flat)), acc, nc, rows_col);
+    free(ids);
+    free(cnt);
     free(acc);
     ray_release(flat);
     return out;

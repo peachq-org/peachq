@@ -1349,7 +1349,10 @@ int q_eval_apply_lambda_parts(ray_t* v, ray_t** params, ray_t** body,
     return 1;
 }
 
-static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
+/* own: args[0] is the call's, so the frame's reference to the first parameter is the only one this call adds.  A
+ * call that fails hands back what the frame still holds of it, or `::` once the body has let it go.  Inlined per
+ * caller so the borrowed call carries none of it. */
+RAY_INLINE ray_t* lambda_run(ray_t* lam, ray_t** args, int64_t n, int own) {
     ray_t** c = car_slots(lam);
     ray_t* params = c[0];
     ray_t* body = c[1];
@@ -1395,6 +1398,8 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
         if (q_env_local_set(b[i]->i64, b[i + 1]) != RAY_OK) { q_env_frame_pop(); ray_release(binds); return q_err(QE_WSFULL); }
     }
     if (binds) ray_release(binds);
+    int64_t first = own ? ray_read_sym(ray_data(params), 0, RAY_SYM, params->attrs) : 0;
+    if (own) ray_release(args[0]);
     g_frame_depth++;
     q_dbg_frame_push(lam);
     /* the body resolves in the namespace the lambda was DEFINED in (q_eval_apply_lambda_new); the session `\d`
@@ -1422,9 +1427,15 @@ static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) {
     q_env_scope(caller_scope);
     q_dbg_frame_pop();
     g_frame_depth--;
+    if (own && RAY_IS_ERR(r)) {
+        if (q_env_local_get(first) == args[0]) ray_retain(args[0]);
+        else args[0] = RAY_NULL_OBJ;
+    }
     q_env_frame_pop();
     return r;
 }
+
+static ray_t* lambda_call(ray_t* lam, ray_t** args, int64_t n) { return lambda_run(lam, args, n, 0); }
 
 /* ===== projections ======================================================= */
 
@@ -2460,7 +2471,25 @@ static ray_t* amend_proj_head(ray_t* proj, ray_t** args, int64_t* n, ray_t** mer
     return c[0];
 }
 
-ray_t* q_eval_apply_amend_owned(ray_t* fv, ray_t** args, int64_t n) {
+/* what an application given its own args[0] answers: the error seen while that argument is alive, then released */
+static ray_t* owned_result(ray_t* r, ray_t* fv, ray_t** args, int64_t n) {
+    if (RAY_IS_ERR(r)) {
+        r = q_dbg_filter(r, fv, args, n);
+        ray_release(args[0]);
+        return r;
+    }
+    r = q_eval_apply_concrete(r);
+    if (!q_splay_fault_pending() || RAY_IS_ERR(r)) return r;
+    ray_release(r);
+    return q_err(QE_CORRUPT);
+}
+
+/* Assign applies nothing, so the store can neither run q code nor stop in the debugger while a binding is given up */
+static int amend_assigns(ray_t** args, int64_t n) {
+    return n == 4 && q_registry_row_of(args[2], Q_DYADIC) == q_ops_find(":", 1);
+}
+
+ray_t* q_eval_apply_amend_owned(ray_t* fv, ray_t** args, int64_t n, int64_t local) {
     ray_t* merged[4];
     if (q_eval_apply_carrier_kind(fv) == Q_EVAL_CAR_PROJ) {
         fv = amend_proj_head(fv, args, &n, merged);
@@ -2473,16 +2502,25 @@ ray_t* q_eval_apply_amend_owned(ray_t* fv, ray_t** args, int64_t n) {
     for (int64_t i = 0; i < n; i++)
         if (!args[i] || Q_IS_HOLE(args[i]) || (args[i]->type == RAY_TABLE && q_splay_table_deferred(args[i]))) return NULL;
     if (ray_is_atom(args[0])) return NULL;                 /* Trap, or a handle the name lift owns */
+    int parked = local >= 0 && amend_assigns(args, n) && q_env_local_take(local, args[0]);
     ray_t* r = amend_store(args, n, f == q_eval_dot_wrap);
-    if (RAY_IS_ERR(r)) {
-        r = q_dbg_filter(r, fv, args, n);
-        ray_release(args[0]);
-        return r;
-    }
-    r = q_eval_apply_concrete(r);
-    if (!q_splay_fault_pending() || RAY_IS_ERR(r)) return r;
-    ray_release(r);
-    return q_err(QE_CORRUPT);
+    if (parked && RAY_IS_ERR(r)) q_env_local_set(local, args[0]);
+    return owned_result(r, fv, args, n);
+}
+
+int q_eval_apply_last_statement(const ray_t* node) {
+    ray_t* lam = q_dbg_frame_top();
+    if (q_eval_apply_carrier_kind(lam) != Q_EVAL_CAR_LAMBDA) return 0;
+    ray_t* body = car_slots(lam)[1];
+    int64_t nb = q_count(body);
+    return nb > 0 && ((ray_t**)ray_data(body))[nb - 1] == node;
+}
+
+ray_t* q_eval_apply_lambda_owned(ray_t* fv, ray_t** args, int64_t n) {
+    if (q_eval_apply_carrier_kind(fv) != Q_EVAL_CAR_LAMBDA || n < 1 || n != rank_of(fv) || !all_given(args, n) ||
+        hof_row(fv, NULL, Q_EVAL_CAR_LAMBDA, n) || car_slots(fv)[LAM_PATS] || q_eval_stop_pending)
+        return NULL;
+    return owned_result(lambda_run(fv, args, n, 1), fv, args, n);
 }
 
 /* ref/apply.md Amend: d is a list or dictionary, or a handle to one; any other head (an atom, a function, a

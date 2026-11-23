@@ -47,8 +47,8 @@
 / ref/file-text.md: csv is the comma
 .q.csv:","
 / ref/med.md "equivalent to {avg x (iasc x)@floor .5*-1 0+count x,:()}";
-/ the atom-listify is spelled 1#x (`,:()` amend unsupported; `(),x` boxes)
-.q.med:{x:$[0h>type x;1#x;x];avg x (iasc x)@floor .5*-1 0+count x}
+/ the atom-listify is spelled 1#x (`,:()` amend unsupported; `(),x` boxes); .Q.c.mid x is (iasc x)@floor .5*-1 0+count x
+.q.med:{x:$[0h>type x;1#x;x];avg x .Q.c.mid x}
 / infix keywords (lexer row stays; registry cell rebound from these post-load)
 / the iterator keywords: ref/parse.md:72 shows each as k){x'y}, learn/views.md:264 peach as k){x':y}; over scan prior
 / take the same shape undocumented.  q spells a derived function applied prefix bracketed (ref/iterators.md:94-100)
@@ -76,9 +76,10 @@
 / keyed table by its KEY cols).  asc.md:18-28 - s stamps the attribute via the producer
 / seams .Q.c.sorted/.Q.c.parted: a lone table column takes `s#, several take `p# on the
 / FIRST (asc.md's meta rows); a keyed table stamps its VALUE table only (`::` covers the
-/ plain-dict value).  desc.md:110 - desc sets NO attribute.
-.q.asc:{s:{$[98h<>type x;.Q.c.sorted x;0=count c:cols x;x;1=count c;@[x;first c;.Q.c.sorted];@[x;first c;.Q.c.parted]]};$[99h=type x;(key x)[g]!$[98h=type value x;s;::](value x)g:iasc value x;s $[(g:iasc x)~til count x;x;x g]]}
-.q.desc:{$[99h=type x;(key x)[g]!(value x)g:idesc value x;x idesc x]}
+/ plain-dict value).  desc.md:110 - desc sets NO attribute.  A vector goes first to .Q.c.asc/.Q.c.desc, which sort
+/ an integer-backed one by value; `::` is their "grade it" (floats, symbols, strings and lists need their rows).
+.q.asc:{s:{$[98h<>type x;.Q.c.sorted x;0=count c:cols x;x;1=count c;@[x;first c;.Q.c.sorted];@[x;first c;.Q.c.parted]]};$[99h=type x;(key x)[g]!$[98h=type value x;s;::](value x)g:iasc value x;s $[(::)~r:.Q.c.asc x;$[(g:iasc x)~til count x;x;x g];r]]}
+.q.desc:{$[99h=type x;(key x)[g]!(value x)g:idesc value x;(::)~r:.Q.c.desc x;x idesc x;r]}
 / ref/rank.md: "the same as calling iasc twice on the list"
 .q.rank:{iasc iasc x}
 / ref/xrank.md prints no source; bucket = floor(x*rank y % count y) reproduces all 5

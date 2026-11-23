@@ -513,12 +513,29 @@ static ray_t* gather_at(ray_t* x, ray_t* i, ray_t* const* rest) {
     return r;
 }
 
+/* The terminal general-list-by-long-vector step: each item is the boxed walk's own answer, the slot retained (the
+ * base gather's pointer arm).  NULL when an index misses or meets a hole — the boxed walk owns both. */
+static ray_t* list_gather(ray_t* x, ray_t* i) {
+    int64_t xn = q_count(x), n = q_count(i);
+    int64_t* ix = (int64_t*)ray_data(i);
+    ray_t* const* xe = (ray_t* const*)ray_data(x);
+    if (n <= 0) return NULL;
+    for (int64_t j = 0; j < n; j++)
+        if (ix[j] < 0 || ix[j] >= xn || !xe[ix[j]]) return NULL;
+    ray_t* r = gather_by_idx(x, ix, n);
+    return !r || RAY_IS_ERR(r) ? r : collapse(r);
+}
+
 /* one result item per j — over the items of i (a collection index maps its
  * structure) or, when i is NULL (`::`), over the items of x themselves */
 
 static ray_t* index_map(ray_t* x, ray_t* i, ray_t* const* rest, int64_t k) {
     if (i && k == 0 && x && ray_is_vec(x) && i->type == RAY_I64) {
         ray_t* r = gather_at(x, i, rest);
+        if (r) return r;
+    }
+    if (i && k == 0 && x && x->type == RAY_LIST && i->type == RAY_I64) {
+        ray_t* r = list_gather(x, i);
         if (r) return r;
     }
     ray_t* src = i ? i : x;

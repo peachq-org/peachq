@@ -349,6 +349,14 @@ static int write_is_local(int64_t sym) {
     return q_eval_apply_frame_depth() > 0 && q_env_local_get(sym) != NULL && !sym_compound(sym);
 }
 
+/* An Amend whose d is a bare local, standing as the running lambda's last statement: nothing reads the local after
+ * it, so the store is told which binding argv[0] came from.  NULL: not that, and argv[0] is still the walker's. */
+static ray_t* amend_last(ray_t* node, ray_t* fv, ray_t** argv, int64_t n) {
+    int64_t local = ((ray_t**)ray_data(node))[1]->i64;
+    if (!q_eval_apply_last_statement(node) || !write_is_local(local)) return NULL;
+    return q_eval_apply_amend_owned(fv, argv, n, local);
+}
+
 /* A colon assignment is judged by its SPELLING, a `set` by its target (owner rulings 2026-09-23) — q_env_set sees
  * only the re-rooted name.  A syntax word is the one spelling a non-root `\d` may take as a context MEMBER: it
  * carries no value, so nothing is overwritten; a lambda local of that spelling stays refused. */
@@ -1333,6 +1341,10 @@ ray_t* q_eval(ray_t* node) {
             q_valence_t val = (argc == 1) ? Q_MONADIC
                             : (argc == 2) ? Q_DYADIC : 0;
             if (val) row = q_registry_row_of(fv, val);
+            else if (fv->type == RAY_VARY && nameref(e[1]) && (ret = amend_last(node, fv, argv, argc))) {
+                argv[0] = NULL;
+                goto applied;
+            }
         }
         int64_t nap = (node->attrs & Q_ATTR_POSTFIX) && !argv[argc - 1] ? argc - 1 : argc;
         /* the train tail `g::` of a function g is the composition '[::;g] (owner 2026-11-07, Daxwzj); data passes */
@@ -1342,6 +1354,7 @@ ray_t* q_eval(ray_t* node) {
         } else {
             ret = q_eval_apply(fv, row, argv, nap);
         }
+applied:
         release_args(argv, argc);
         ray_release_inline(fv);
     }
