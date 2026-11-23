@@ -12,6 +12,7 @@
 #include "qlang/q_console.h"
 #include "qlang/q_dotz.h"
 #include "qlang/q_env.h"
+#include "qlang/eval/q_profile.h"
 #include "qlang/eval/q_dbg.h"
 #include "qlang/eval/q_eval.h"
 #include "qlang/base/q_err.h"
@@ -168,6 +169,7 @@ static _Noreturn void child(int link, pid_t parent, const char* const log[2]) {
     q_provider_forget();
     q_dotz_doors_restore();
     q_dbg_reset();
+    q_profile_forked();
     (void)q_eval_frames_suspend();
     q_env_scope(Q_ENV_SCOPE_SESSION);
     if (__VM) { __VM->ipc_handle = -1; __VM->ipc_poll = NULL; }

@@ -751,6 +751,33 @@ q)\ts:10000 log til 1000           /same as \ts do[10000; log til 1000]
 329 24672
 ```
 
+## `\profile` (statement timings)
+
+`\profile f x` runs the expression once and prints a statement timing table
+ranked by elapsed time. It follows the usual console display settings. Output
+written by the expression appears as usual.
+Repeat suffixes such as `\profile:10` are unsupported.
+
+Use the q API to keep the timing table and the result of Apply:
+
+```q
+(t;r):.pq.profile[f;enlist x]
+10#`selfNs xdesc t
+```
+
+The table includes the function, file, one-based line and byte column, hit count,
+elapsed timing in nanoseconds, and statement text. For console definitions,
+the location is relative to the input containing the definition. `totalNs` sums
+elapsed time over every hit, including nested work. Inclusive totals can overlap,
+for instance when a statement recurses. `selfNs` subtracts time attributed to
+nested profiled statements. Work on secondary threads contributes through its
+elapsed time in the calling statement. Callbacks serviced on the calling thread
+during the run are included.
+
+Call `.pq.profile` or run `\l pq/pq.q`, then use `\?.pq.profile` for the argument documentation.
+Time at a `q))` debugger prompt is excluded. Nested profiling is unsupported,
+and both entry points are unavailable under restricted evaluation.
+
 ## `\u` (reload user password file)
 
 ```syntax

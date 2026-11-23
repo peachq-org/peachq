@@ -712,7 +712,7 @@ static int qtok_query_verb(const Token *tk);                 /* select/exec/upda
 static int qtok_is_clause_kw(const Token *tk);               /* by/from/where */
 static int qtok_is_join_comma(const Token *tk);              /* dyadic bare `,` only */
 
-static ray_t *parse_E(Parser *p, QCtx ctx);
+static ray_t *parse_E(Parser *p, ray_t **spans);
 static P       parse_e(Parser *p, QCtx ctx);
 static P       parse_e_body(Parser *p, QCtx ctx);
 static P       parse_e_from(Parser *p, P t, QCtx ctx);
@@ -1159,7 +1159,7 @@ static void park(ray_t *v) { *pend_push() = v; }
 /* A `;` list up to its closer, parked until the closer is there: a missing one dies with the list released. */
 static ray_t *parse_E_closed(Parser *p, TKind close, const char *msg) {
     ray_t **l = pend_push();
-    *l = parse_E(p, Q_NONE);
+    *l = parse_E(p, NULL);
     expect(p, close, msg);
     ray_t *e = *l;
     pend_pop();
@@ -1361,6 +1361,12 @@ static ray_t *parse_lambda(Parser *p) {
     int mine[3] = { 0, 0, 0 };
     int *saved = p->xyz;
     ray_t **saved_globals = p->globals, *saved_params = p->params, **globals = pend_push();
+    ray_t **spans = pend_push();
+    *spans = ray_vec_new(RAY_I64, 8);
+    int64_t column = 1;
+    for (int i = lb_start; i > 0 && p->src[i - 1] != '\n'; i--) column++;
+    *spans = ray_vec_append(*spans, &column);
+    if (!*spans || RAY_IS_ERR(*spans)) q_die(DIE_OOM);
     *globals = ray_sym_vec_new(RAY_SYM_W64, 4);
     for (int64_t i = 0, n = *pats ? q_count(*pats) : 0; i < n; i++)
         q_pattern_names(ray_list_get(*pats, i), sig_local, globals);
@@ -1368,7 +1374,7 @@ static ray_t *parse_lambda(Parser *p) {
     p->globals = globals;
     p->params = *params;
     p->lambda_depth++;
-    *body = parse_E(p, Q_NONE);
+    *body = parse_E(p, spans);
     p->lambda_depth--;
     p->xyz = saved;
     p->globals = saved_globals;
@@ -1389,8 +1395,10 @@ static ray_t *parse_lambda(Parser *p) {
      * retains every body expr, so a C NULL here would be fatal */
     for (int64_t i = 0; i < bn; i++)
         if (!bs[i]) bs[i] = RAY_NULL_OBJ;
+    int64_t *span = (int64_t *)ray_data(*spans);
+    for (int64_t i = 1; i < q_count(*spans); i++) span[i] -= lb_start;
     ray_t *pos = pos_take(mark, lb_start);
-    ray_t *fn = q_eval_apply_lambda_new(*params, bs, bn, src, *ptypes, *pats, pos);
+    ray_t *fn = q_eval_apply_lambda_new(*params, bs, bn, src, *ptypes, *pats, pos, *spans);
     ray_release(pos);
     /* ref/value.md `f`/`l`: the lambda's origin is where it is PARSED — the loading script's
      * file, and the line its `{` sits on (a multi-line statement's inner lambda has its own) */
@@ -1401,6 +1409,8 @@ static ray_t *parse_lambda(Parser *p) {
     }
     if (q_dbg_booting()) q_eval_apply_lambda_boot(fn);
     ray_release(src);
+    ray_release(*spans);
+    pend_pop();
     ray_release(*globals);
     ray_release(*body);
     ray_release(*pats);
@@ -2414,7 +2424,7 @@ ray_t *q_qsql_normalize_probe(const char *src, int ctx, int verb) {
     return slot;
 }
 
-static ray_t *parse_E(Parser *p, QCtx ctx) {
+static ray_t *parse_E(Parser *p, ray_t **spans) {
     /* Appended one at a time, so a `;` list has no length cap.  ray_list_append stores a C
      * NULL without retaining, so the list PRESERVES the C-NULL slots (unlike
      * q_list, which normalises them to the generic null).  An empty statement — a
@@ -2425,9 +2435,17 @@ static ray_t *parse_E(Parser *p, QCtx ctx) {
     ray_t **l = pend_push();
     *l = ray_list_new(1);
     for (;;) {
+        int start = p->pos;
         ray_t *v = parse_e(p, Q_NONE).v;
         *l = ray_list_append(*l, v);
         ray_release(v);
+        if (spans) {
+            int64_t from = p->t.t[start].start;
+            int64_t to = p->pos > start ? p->t.t[p->pos - 1].start + p->t.t[p->pos - 1].len : from;
+            *spans = ray_vec_append(*spans, &from);
+            if (*spans && !RAY_IS_ERR(*spans)) *spans = ray_vec_append(*spans, &to);
+            if (!*spans || RAY_IS_ERR(*spans)) q_die(DIE_OOM);
+        }
         if (!at(p, T_SEMI)) break;
         adv(p);
     }
@@ -2590,7 +2608,7 @@ static ray_t *parse_text(const char *src, ray_t **pos, int shift) {
     }
     Parser p = { .src = src, .t = scan(src) };
     g_parser = &p;
-    ray_t *e = parse_E(&p, Q_NONE);
+    ray_t *e = parse_E(&p, NULL);
     g_parser = NULL;
     int whole = at(&p, T_EOF);
     int stop = !whole && p.pos < p.t.n ? p.t.t[p.pos].start : -1;   /* the token after the whole expression */
