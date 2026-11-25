@@ -509,13 +509,13 @@
    "hdel `:pq:duckdb:mkt:trade/";".pq.conns[]";"hclose h");
   ("";"";"";"";"`trade";"";"";"";"\"+`sym`px`sz!`:pq:duckdb:mkt:trade/\"";"1000";"";"";"";"`:pq:duckdb:main";
    "";"";"5";"`:pq:duckdb:mkt:trade/";"";"");
-  ("DuckDB as a q data source: a database is a handle, its tables are q tables, qsql pushes down · page";
+  ("DuckDB as a q data source: a database is a handle, its tables are q tables, qsql runs on them · page";
    "the .duckdb namespace and the :pq:duckdb: kind arrive with the standard library";
    "open (or create) a database file under the alias mkt: the opener answers `:pq:duckdb:mkt, the alias as a handle";
    "";
    "set writes a q table as a DuckDB table: symbols, floats and longs map to their SQL types";
    "the handle takes SQL text, and the answer comes back as a q table";
-   "qsql on the resource path: the where, by and aggregate are pushed to DuckDB, only the result crosses";
+   "qsql on the resource path: only the columns the select names are read";
    "get answers a VIRTUAL table - nothing is read until a query needs it";
    "the virtual table shows what it is: a flipped dict whose values are the resource";
    "count, meta and select all work on it; .duckdb.types is the type map, \\?.duckdb the surface";

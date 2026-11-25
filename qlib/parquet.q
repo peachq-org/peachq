@@ -140,7 +140,7 @@
 / @eg .parquet.inspect[`:t.parquet;()]
 .parquet.inspect:{[file;opts] .parquet.i.with[file;opts;.duckdb.i.finspect]}
 
-/ Read a parquet file (or files) as a table, optionally through a select pushed down to DuckDB.
+/ Read a parquet file (or files) as a table, optionally through a select run on the columns it names.
 / @param file `:x.parquet, a glob as `$":data/*.parquet", a URL, or a list of them
 / @param opts a dict of read_parquet options passed verbatim (hive_partitioning, union_by_name, filename ...); () for none
 / @param query () or :: for every row, else a parsed select tree (parse "select ... from t") whose table is ignored
@@ -153,11 +153,9 @@
   if[not (?)~query 0; '`type];
   .parquet.i.with[file;opts;{[q;c;v] .duckdb.i.fselect[c;v;.pq.i.resolve[v`cols;::;(enlist v`rel),q]]}[eval each 2_query]]}
 / The suffix door's select (select ... from `:f.parquet): tree is its arguments as ? takes them and, last, what each name
-/ they mention means where the select was written (.pq.i.resolveSeam).  :: leaves the select to q: the resolver's refusal,
-/ or a restricted evaluation that may not load the translator.
+/ they mention means where the select was written (.pq.i.resolveSeam).  :: leaves the select to q: the resolver's refusal.
 / @ignore
 .parquet.i.select:{[file;tree]
-  if[not .duckdb.i.translates[]; :(::)];
   .parquet.i.with[file;();{[tree;c;v]
     rt:@[.pq.i.resolveSeam[v`cols];tree;{[e] ::}];
     $[rt~(::);::;.duckdb.i.fselect[c;v;rt]]}[tree]]}

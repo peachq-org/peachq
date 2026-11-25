@@ -1445,7 +1445,7 @@ static ray_t* qd_maxrows_wrap(ray_t** args, int64_t n) {
     const qd_bound_t* b = qd_bound_door(args, 2, &slot, &name, &e);
     if (!b) return e;
     if (args[2]->type != -RAY_I64) return q_err(QE_TYPE);
-    q_duckdb_err_stash(slot, "%s: %lld rows exceed .duckdb.maxrows %lld; a where term the translator can push is required",
+    q_duckdb_err_stash(slot, "%s: %lld rows exceed .duckdb.maxrows %lld",
                        b->key, (long long)b->rows, (long long)args[2]->i64);
     return q_err(QE_LIMIT);
 }
